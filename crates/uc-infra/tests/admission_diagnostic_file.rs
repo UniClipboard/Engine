@@ -197,7 +197,7 @@ async fn missing_stored_credential_produces_diagnosable_client_and_server_record
         .await;
     assert!(matches!(
         exchange,
-        Err(SpaceAdmissionTransportError::AuthenticationRejected)
+        Err(SpaceAdmissionTransportError::AuthenticationRejected { .. })
     ));
     observation.finish(SpaceAdmissionObservationOutcome::Deferred);
     let mut captured = Vec::new();

@@ -235,7 +235,7 @@ impl HistorySynchronizer {
             Err(ExchangeFailure::Transport(error)) => PeerExchange::Finished(match error {
                 MembershipHistoryExchangeError::Offline
                 | MembershipHistoryExchangeError::PairingInProgress
-                | MembershipHistoryExchangeError::Transport => PeerSyncResult::Deferred,
+                | MembershipHistoryExchangeError::Transport { .. } => PeerSyncResult::Deferred,
                 MembershipHistoryExchangeError::Rejected => PeerSyncResult::Rejected,
             }),
             // 对端回复不符合协议：保留同步欠账并按退避重试，不把一次异常回复当作稳定结论。

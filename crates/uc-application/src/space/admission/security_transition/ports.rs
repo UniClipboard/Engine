@@ -27,7 +27,10 @@ impl std::fmt::Debug for PreparedMemberSecurityDelivery {
 #[derive(Debug, thiserror::Error)]
 pub enum AdmissionSecurityTransitionError {
     #[error("admission security state is invalid")]
-    InvalidState,
+    InvalidState {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("admission security commitment does not match")]
     CommitmentMismatch,
     #[error("admission security state could not be installed")]
@@ -35,6 +38,19 @@ pub enum AdmissionSecurityTransitionError {
         #[source]
         source: anyhow::Error,
     },
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl AdmissionSecurityTransitionError {
+    pub fn invalid_state() -> Self {
+        Self::InvalidState { source: None }
+    }
+
+    pub fn invalid_state_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::InvalidState {
+            source: Some(source.into()),
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]

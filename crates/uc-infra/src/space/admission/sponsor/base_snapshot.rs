@@ -20,12 +20,12 @@ pub(super) fn decode_sponsor_base_snapshot(
     snapshot: &AdmissionBaseSnapshot,
 ) -> Result<PersistedSponsorBaseSnapshotV1, SpaceAdmissionStateStoreError> {
     let decoded: PersistedSponsorBaseSnapshotV1 = postcard::from_bytes(snapshot.as_bytes())
-        .map_err(|_| SpaceAdmissionStateStoreError::Corrupt)?;
+        .map_err(SpaceAdmissionStateStoreError::corrupt_from)?;
     if decoded.format_version != SPONSOR_BASE_SNAPSHOT_FORMAT_V1
         || decoded.lineage_id.is_empty()
         || decoded.membership_history.is_empty()
     {
-        return Err(SpaceAdmissionStateStoreError::Corrupt);
+        return Err(SpaceAdmissionStateStoreError::corrupt());
     }
     Ok(decoded)
 }
@@ -37,16 +37,16 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
         let loaded = self.membership.load().await.map_err(map_membership_error)?;
         let ledger_revision = loaded.revision();
         let MembershipRecord::Space(space) = loaded else {
-            return Err(SpaceAdmissionStateStoreError::Corrupt);
+            return Err(SpaceAdmissionStateStoreError::corrupt());
         };
         let lineage_id = space.ledger.history.lineage_id().to_owned();
         let membership_history = space
             .ledger
             .history
             .encode_persisted_v2()
-            .map_err(|_| SpaceAdmissionStateStoreError::Corrupt)?;
+            .map_err(SpaceAdmissionStateStoreError::corrupt_from)?;
         if lineage_id.is_empty() || membership_history.is_empty() {
-            return Err(SpaceAdmissionStateStoreError::Corrupt);
+            return Err(SpaceAdmissionStateStoreError::corrupt());
         }
         let encoded = postcard::to_stdvec(&PersistedSponsorBaseSnapshotV1 {
             format_version: SPONSOR_BASE_SNAPSHOT_FORMAT_V1,
@@ -54,9 +54,9 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
             lineage_id,
             membership_history,
         })
-        .map_err(|_| SpaceAdmissionStateStoreError::Corrupt)?;
+        .map_err(SpaceAdmissionStateStoreError::corrupt_from)?;
         AdmissionBaseSnapshot::from_bytes(encoded)
-            .map_err(|_| SpaceAdmissionStateStoreError::Corrupt)
+            .map_err(SpaceAdmissionStateStoreError::corrupt_from)
     }
 }
 
@@ -64,10 +64,10 @@ fn map_membership_error(error: MembershipLedgerError) -> SpaceAdmissionStateStor
     match error {
         MembershipLedgerError::Locked => SpaceAdmissionStateStoreError::Locked,
         MembershipLedgerError::Corrupt | MembershipLedgerError::RecoveryRequired => {
-            SpaceAdmissionStateStoreError::Corrupt
+            SpaceAdmissionStateStoreError::corrupt()
         }
         MembershipLedgerError::Conflict | MembershipLedgerError::Unavailable => {
-            SpaceAdmissionStateStoreError::Unavailable
+            SpaceAdmissionStateStoreError::unavailable()
         }
     }
 }

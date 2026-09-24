@@ -59,21 +59,50 @@ impl<E> SqliteSpaceAdmissionState<E> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub(super) enum SpaceAdmissionStateStoreError {
     #[error("space admission state is locked")]
     Locked,
     #[error("space admission state is corrupt")]
-    Corrupt,
+    Corrupt {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("space admission state changed")]
     Conflict,
     #[error("space admission state storage is unavailable")]
-    Unavailable,
+    Unavailable {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl SpaceAdmissionStateStoreError {
+    pub fn corrupt() -> Self {
+        Self::Corrupt { source: None }
+    }
+
+    pub fn corrupt_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Corrupt {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn unavailable() -> Self {
+        Self::Unavailable { source: None }
+    }
+
+    pub fn unavailable_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Unavailable {
+            source: Some(source.into()),
+        }
+    }
 }
 
 impl From<diesel::result::Error> for SpaceAdmissionStateStoreError {
-    fn from(_error: diesel::result::Error) -> Self {
-        Self::Unavailable
+    fn from(error: diesel::result::Error) -> Self {
+        Self::unavailable_from(error)
     }
 }
 
@@ -106,15 +135,14 @@ impl CredentialLoadError {
             Self::RecordMissing => CredentialFailure::RecordMissing,
             Self::CredentialMissing => CredentialFailure::CredentialMissing,
             Self::State(SpaceAdmissionStateStoreError::Locked) => CredentialFailure::Locked,
-            Self::State(SpaceAdmissionStateStoreError::Corrupt) | Self::Invalid { .. } => {
+            Self::State(SpaceAdmissionStateStoreError::Corrupt { .. }) | Self::Invalid { .. } => {
                 CredentialFailure::Corrupt
             }
             Self::State(SpaceAdmissionStateStoreError::Conflict) => {
                 CredentialFailure::RecoveryRequired
             }
-            Self::State(SpaceAdmissionStateStoreError::Unavailable) | Self::Storage { .. } => {
-                CredentialFailure::Unavailable
-            }
+            Self::State(SpaceAdmissionStateStoreError::Unavailable { .. })
+            | Self::Storage { .. } => CredentialFailure::Unavailable,
         }
     }
 

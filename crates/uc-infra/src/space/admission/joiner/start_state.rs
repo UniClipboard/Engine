@@ -31,10 +31,10 @@ impl<E: DbExecutor + Send + Sync> JoinerStartStatePort for SqliteSpaceAdmissionS
                             let stored = state
                                 .records
                                 .get(&id)
-                                .ok_or(SpaceAdmissionStateStoreError::Corrupt)?;
+                                .ok_or_else(SpaceAdmissionStateStoreError::corrupt)?;
                             let record = self.open_record(id, stored)?;
                             JoinerAdmission::try_from_record(record)
-                                .ok_or(SpaceAdmissionStateStoreError::Corrupt)
+                                .ok_or_else(SpaceAdmissionStateStoreError::corrupt)
                         })
                         .transpose()?;
                     let token = SpaceAdmissionCommitToken::from_bytes(joiner_start_token(
@@ -42,7 +42,7 @@ impl<E: DbExecutor + Send + Sync> JoinerStartStatePort for SqliteSpaceAdmissionS
                         current_join.as_ref(),
                         &source_bytes,
                     ))
-                    .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                    .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
                     Ok(LoadedJoinerStartState::new(
                         state.next_local_join_ordinal,
                         source_snapshot,
@@ -83,10 +83,10 @@ impl<E: DbExecutor + Send + Sync> JoinerStartStatePort for SqliteSpaceAdmissionS
                                 let stored = state
                                     .records
                                     .get(&id)
-                                    .ok_or(SpaceAdmissionStateStoreError::Corrupt)?;
+                                    .ok_or_else(SpaceAdmissionStateStoreError::corrupt)?;
                                 let record = self.open_record(id, stored)?;
                                 JoinerAdmission::try_from_record(record)
-                                    .ok_or(SpaceAdmissionStateStoreError::Corrupt)
+                                    .ok_or_else(SpaceAdmissionStateStoreError::corrupt)
                             })
                             .transpose()?;
                         let expected = joiner_start_token(&state, current.as_ref(), &source_bytes);
@@ -104,7 +104,7 @@ impl<E: DbExecutor + Send + Sync> JoinerStartStatePort for SqliteSpaceAdmissionS
                                 .records
                                 .contains_key(created.admission_id().as_bytes())
                         {
-                            return Err(into_anyhow(SpaceAdmissionStateStoreError::Corrupt));
+                            return Err(into_anyhow(SpaceAdmissionStateStoreError::corrupt()));
                         }
 
                         match (current_id, current.as_ref(), superseded.as_ref()) {
@@ -112,21 +112,21 @@ impl<E: DbExecutor + Send + Sync> JoinerStartStatePort for SqliteSpaceAdmissionS
                             (Some(id), Some(current), Some(next)) => {
                                 let expected_version =
                                     current.record_version().checked_add(1).ok_or_else(|| {
-                                        into_anyhow(SpaceAdmissionStateStoreError::Corrupt)
+                                        into_anyhow(SpaceAdmissionStateStoreError::corrupt())
                                     })?;
                                 if next.admission_id().as_bytes() != &id
                                     || next.record_version() != expected_version
                                     || !next.is_terminal()
                                 {
                                     return Err(into_anyhow(
-                                        SpaceAdmissionStateStoreError::Corrupt,
+                                        SpaceAdmissionStateStoreError::corrupt(),
                                     ));
                                 }
                                 let wrapped = state
                                     .records
                                     .get(&id)
                                     .ok_or_else(|| {
-                                        into_anyhow(SpaceAdmissionStateStoreError::Corrupt)
+                                        into_anyhow(SpaceAdmissionStateStoreError::corrupt())
                                     })?
                                     .wrapped_data_key
                                     .clone();
@@ -145,7 +145,7 @@ impl<E: DbExecutor + Send + Sync> JoinerStartStatePort for SqliteSpaceAdmissionS
                         state.next_local_join_ordinal = state
                             .next_local_join_ordinal
                             .checked_add(1)
-                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
                         self.save_state_on(conn, &state).map_err(into_anyhow)
                     })
                 })
@@ -160,7 +160,7 @@ fn map_joiner_error(error: SpaceAdmissionStateStoreError) -> JoinerStartStateErr
     match error {
         SpaceAdmissionStateStoreError::Locked => JoinerStartStateError::Locked,
         SpaceAdmissionStateStoreError::Conflict => JoinerStartStateError::StateChanged,
-        SpaceAdmissionStateStoreError::Corrupt => JoinerStartStateError::RecoveryRequired,
-        SpaceAdmissionStateStoreError::Unavailable => JoinerStartStateError::Unavailable,
+        SpaceAdmissionStateStoreError::Corrupt { .. } => JoinerStartStateError::RecoveryRequired,
+        SpaceAdmissionStateStoreError::Unavailable { .. } => JoinerStartStateError::Unavailable,
     }
 }

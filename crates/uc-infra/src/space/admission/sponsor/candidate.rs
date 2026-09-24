@@ -431,7 +431,7 @@ mod tests {
                 .existing_recipients
                 .first()
                 .cloned()
-                .ok_or(AdmissionSecurityTransitionError::InvalidState)?;
+                .ok_or_else(AdmissionSecurityTransitionError::invalid_state)?;
             let commitment = uc_core::membership::AdmissionSecurityCommitmentV1::new(
                 ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
                 request.space_id.as_ref().to_owned(),
@@ -448,18 +448,18 @@ mod tests {
                 [0x84; 32],
                 [0x85; 32],
             )
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
             let catalog = AdmissionContentKeyCatalogV1::new(
                 "content-key",
                 1,
                 vec![
                     AdmissionContentKeyEntryV1::new("legacy-v1", 0, vec![0x80; 32])
-                        .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?,
+                        .map_err(AdmissionSecurityTransitionError::invalid_state_from)?,
                     AdmissionContentKeyEntryV1::new("content-key", 1, vec![0x86; 32])
-                        .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?,
+                        .map_err(AdmissionSecurityTransitionError::invalid_state_from)?,
                 ],
             )
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
             Ok(SponsorPreparedAdmissionSecurity {
                 staged_state: vec![0x87; 128],
                 commit: vec![0x88; 64],

@@ -169,7 +169,7 @@ fn history_failure_detail(
             MembershipHistoryFailurePhase::ExchangeHistory,
             MembershipHistoryFailureReason::PeerRejected,
         ),
-        MembershipHistoryExchangeError::Transport => (
+        MembershipHistoryExchangeError::Transport { .. } => (
             MembershipHistoryFailurePhase::ExchangeHistory,
             MembershipHistoryFailureReason::Transport,
         ),
@@ -184,7 +184,7 @@ fn history_exchange_completion(error: &MembershipHistoryExchangeError) -> Member
             MembershipCompletionKind::Failed(DiagnosticErrorType::Unavailable)
         }
         MembershipHistoryExchangeError::Rejected => MembershipCompletionKind::Rejected,
-        MembershipHistoryExchangeError::Transport => {
+        MembershipHistoryExchangeError::Transport { .. } => {
             MembershipCompletionKind::Failed(DiagnosticErrorType::StreamFailed)
         }
     }
@@ -288,7 +288,7 @@ mod tests {
             MembershipCompletionKind::Rejected
         ));
         assert!(matches!(
-            history_exchange_completion(&MembershipHistoryExchangeError::Transport),
+            history_exchange_completion(&MembershipHistoryExchangeError::transport()),
             MembershipCompletionKind::Failed(DiagnosticErrorType::StreamFailed)
         ));
     }
@@ -296,7 +296,7 @@ mod tests {
     #[test]
     fn history_exchange_diagnostics_keep_a_safe_stage_and_call_path() {
         let detail = LocalCompletionDetail::MembershipHistory(history_failure_detail(
-            &MembershipHistoryExchangeError::Transport,
+            &MembershipHistoryExchangeError::transport(),
         ));
 
         assert_eq!(detail.local_fields(), ("exchange_history", "transport"));

@@ -36,13 +36,15 @@ pub(super) fn client_completion(
             DiagnosticRole::Joiner,
             elapsed,
         ),
-        Some(SpaceAdmissionTransportError::AuthenticationRejected) => OperationCompletion::failed(
-            DiagnosticDomain::SpaceAdmission,
-            operation,
-            DiagnosticRole::Joiner,
-            DiagnosticErrorType::AuthenticationFailed,
-            elapsed,
-        ),
+        Some(SpaceAdmissionTransportError::AuthenticationRejected { .. }) => {
+            OperationCompletion::failed(
+                DiagnosticDomain::SpaceAdmission,
+                operation,
+                DiagnosticRole::Joiner,
+                DiagnosticErrorType::AuthenticationFailed,
+                elapsed,
+            )
+        }
         Some(SpaceAdmissionTransportError::PeerUpgradeRequired) => OperationCompletion::failed(
             DiagnosticDomain::SpaceAdmission,
             operation,
@@ -50,14 +52,14 @@ pub(super) fn client_completion(
             DiagnosticErrorType::PeerIncompatible,
             elapsed,
         ),
-        Some(SpaceAdmissionTransportError::ProtocolRejected) => OperationCompletion::failed(
+        Some(SpaceAdmissionTransportError::ProtocolRejected { .. }) => OperationCompletion::failed(
             DiagnosticDomain::SpaceAdmission,
             operation,
             DiagnosticRole::Joiner,
             DiagnosticErrorType::DecodeFailed,
             elapsed,
         ),
-        Some(SpaceAdmissionTransportError::Deferred) => OperationCompletion::deferred(
+        Some(SpaceAdmissionTransportError::Deferred { .. }) => OperationCompletion::deferred(
             DiagnosticDomain::SpaceAdmission,
             operation,
             DiagnosticRole::Joiner,
@@ -65,7 +67,7 @@ pub(super) fn client_completion(
         ),
         Some(
             SpaceAdmissionTransportError::InvitationUnavailable
-            | SpaceAdmissionTransportError::Unavailable,
+            | SpaceAdmissionTransportError::Unavailable { .. },
         ) => OperationCompletion::failed(
             DiagnosticDomain::SpaceAdmission,
             operation,

@@ -56,6 +56,24 @@ fn decode_response_status(status: u8) -> Result<(), MembershipHistoryExchangeErr
     Ok(())
 }
 
+/// 服务端处理失败：诊断分类加下层来源。请求处理没有向上传递的调用方，来源只随这次失败一起结束。
+#[derive(Debug, thiserror::Error)]
+#[error("membership history server exchange failed")]
+struct ServerExchangeFailure {
+    kind: DiagnosticErrorType,
+    #[source]
+    source: anyhow::Error,
+}
+
+impl ServerExchangeFailure {
+    fn new(kind: DiagnosticErrorType, source: impl Into<anyhow::Error>) -> Self {
+        Self {
+            kind,
+            source: source.into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ServerExchangeOutcome {
     Completed,
@@ -144,8 +162,8 @@ impl MembershipHistoryExchangePort for IrohMembershipHistoryExchangeAdapter {
         })?;
         let (mut send, mut receive) = tokio::time::timeout(IO_TIMEOUT, connection.open_bi())
             .await
-            .map_err(|_| transport_failure(DiagnosticErrorType::Timeout))?
-            .map_err(|_| transport_failure(DiagnosticErrorType::StreamFailed))?;
+            .map_err(|error| transport_failure_from(DiagnosticErrorType::Timeout, error))?
+            .map_err(|error| transport_failure_from(DiagnosticErrorType::StreamFailed, error))?;
         write_message(&mut send, &payload).await?;
         decode_response_status(read_byte(&mut receive).await?)?;
         let response = decode_message(&read_message(&mut receive).await?)?;
@@ -211,7 +229,7 @@ impl RestrictedMembershipDeliveryPort for IrohMembershipHistoryExchangeAdapter {
             }
             Err(MembershipHistoryExchangeError::Offline)
             | Err(MembershipHistoryExchangeError::PairingInProgress)
-            | Err(MembershipHistoryExchangeError::Transport) => {
+            | Err(MembershipHistoryExchangeError::Transport { .. }) => {
                 Err(RestrictedMembershipDeliveryError::Deferred)
             }
             Err(MembershipHistoryExchangeError::Rejected) => {
@@ -303,16 +321,22 @@ impl ProtocolHandler for IrohMembershipHistoryExchangeHandler {
                         busy(&mut send).await;
                         return Ok(ServerExchangeOutcome::PairingInProgress);
                     }
-                    Err(error) => return Err(history_endpoint_error_type(&error)),
+                    Err(error) => {
+                        return Err(ServerExchangeFailure::new(
+                            history_endpoint_error_type(&error),
+                            error,
+                        ))
+                    }
                 };
-                let payload =
-                    encode_message(&response).map_err(|_| DiagnosticErrorType::DecodeFailed)?;
-                send.write_all(&[ACCEPTED])
-                    .await
-                    .map_err(|_| DiagnosticErrorType::StreamFailed)?;
-                write_message(&mut send, &payload)
-                    .await
-                    .map_err(|_| DiagnosticErrorType::StreamFailed)?;
+                let payload = encode_message(&response).map_err(|error| {
+                    ServerExchangeFailure::new(DiagnosticErrorType::DecodeFailed, error)
+                })?;
+                send.write_all(&[ACCEPTED]).await.map_err(|error| {
+                    ServerExchangeFailure::new(DiagnosticErrorType::StreamFailed, error)
+                })?;
+                write_message(&mut send, &payload).await.map_err(|error| {
+                    ServerExchangeFailure::new(DiagnosticErrorType::StreamFailed, error)
+                })?;
                 Ok(ServerExchangeOutcome::Completed)
             }
             .instrument(span.clone())
@@ -328,7 +352,7 @@ impl ProtocolHandler for IrohMembershipHistoryExchangeHandler {
                 Ok(ServerExchangeOutcome::Completed) => {
                     record_server_completion(started.elapsed(), None)
                 }
-                Err(error) => record_server_completion(started.elapsed(), Some(error)),
+                Err(failure) => record_server_completion(started.elapsed(), Some(&failure.kind)),
             });
         })
         .await;
@@ -343,13 +367,21 @@ fn history_endpoint_error_type(error: &MembershipHistoryExchangeError) -> Diagno
         MembershipHistoryExchangeError::Offline
         | MembershipHistoryExchangeError::PairingInProgress => DiagnosticErrorType::Unavailable,
         MembershipHistoryExchangeError::Rejected => DiagnosticErrorType::PeerRejected,
-        MembershipHistoryExchangeError::Transport => DiagnosticErrorType::StreamFailed,
+        MembershipHistoryExchangeError::Transport { .. } => DiagnosticErrorType::StreamFailed,
     }
 }
 
 fn transport_failure(error: DiagnosticErrorType) -> MembershipHistoryExchangeError {
     describe_operation_failure(error);
-    MembershipHistoryExchangeError::Transport
+    MembershipHistoryExchangeError::transport()
+}
+
+fn transport_failure_from(
+    error: DiagnosticErrorType,
+    source: impl std::error::Error + Send + Sync + 'static,
+) -> MembershipHistoryExchangeError {
+    describe_operation_failure(error);
+    MembershipHistoryExchangeError::transport_from(source)
 }
 
 pub(crate) fn request_purpose(message: &MembershipHistoryMessage) -> MembershipExchangePurpose {
@@ -379,7 +411,7 @@ fn encode_message(
     let mut payload = vec![WIRE_VERSION];
     payload.extend(
         postcard::to_stdvec(message)
-            .map_err(|_| transport_failure(DiagnosticErrorType::Internal))?,
+            .map_err(|error| transport_failure_from(DiagnosticErrorType::Internal, error))?,
     );
     if payload.len() > MAX_MEMBERSHIP_HISTORY_FRAME_SIZE {
         return Err(transport_failure(DiagnosticErrorType::LocalPolicyExceeded));
@@ -397,7 +429,7 @@ fn encode_request(
             trace_context: inject_current(),
             message,
         })
-        .map_err(|_| transport_failure(DiagnosticErrorType::Internal))?,
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::Internal, error))?,
     );
     if payload.len() > MAX_MEMBERSHIP_HISTORY_FRAME_SIZE {
         return Err(transport_failure(DiagnosticErrorType::LocalPolicyExceeded));
@@ -420,7 +452,8 @@ fn decode_request(
     {
         return Err(transport_failure(DiagnosticErrorType::DecodeFailed));
     }
-    postcard::from_bytes(body).map_err(|_| transport_failure(DiagnosticErrorType::DecodeFailed))
+    postcard::from_bytes(body)
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::DecodeFailed, error))
 }
 
 fn record_server_completion(elapsed: Duration, error: Option<&DiagnosticErrorType>) {
@@ -455,7 +488,7 @@ fn decode_message(
         return Err(transport_failure(DiagnosticErrorType::DecodeFailed));
     }
     let message: MembershipHistoryMessage = postcard::from_bytes(body)
-        .map_err(|_| transport_failure(DiagnosticErrorType::DecodeFailed))?;
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::DecodeFailed, error))?;
     if matches!(
         message,
         MembershipHistoryMessage::SummaryV3(_)
@@ -503,15 +536,15 @@ async fn write_message(
     payload: &[u8],
 ) -> Result<(), MembershipHistoryExchangeError> {
     let length = u32::try_from(payload.len())
-        .map_err(|_| transport_failure(DiagnosticErrorType::StreamFailed))?;
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::StreamFailed, error))?;
     send.write_all(&length.to_be_bytes())
         .await
-        .map_err(|_| transport_failure(DiagnosticErrorType::StreamFailed))?;
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::StreamFailed, error))?;
     send.write_all(payload)
         .await
-        .map_err(|_| transport_failure(DiagnosticErrorType::StreamFailed))?;
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::StreamFailed, error))?;
     send.finish()
-        .map_err(|_| transport_failure(DiagnosticErrorType::StreamFailed))
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::StreamFailed, error))
 }
 
 async fn read_byte(
@@ -520,8 +553,8 @@ async fn read_byte(
     let mut value = [0; 1];
     tokio::time::timeout(IO_TIMEOUT, receive.read_exact(&mut value))
         .await
-        .map_err(|_| transport_failure(DiagnosticErrorType::Timeout))?
-        .map_err(|_| transport_failure(DiagnosticErrorType::StreamFailed))?;
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::Timeout, error))?
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::StreamFailed, error))?;
     Ok(value[0])
 }
 
@@ -531,14 +564,14 @@ async fn read_message(
     let mut length = [0; 4];
     tokio::time::timeout(IO_TIMEOUT, receive.read_exact(&mut length))
         .await
-        .map_err(|_| transport_failure(DiagnosticErrorType::Timeout))?
-        .map_err(|_| transport_failure(DiagnosticErrorType::StreamFailed))?;
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::Timeout, error))?
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::StreamFailed, error))?;
     let length = checked_message_length(u32::from_be_bytes(length) as usize)?;
     let mut payload = vec![0; length];
     tokio::time::timeout(IO_TIMEOUT, receive.read_exact(&mut payload))
         .await
-        .map_err(|_| transport_failure(DiagnosticErrorType::Timeout))?
-        .map_err(|_| transport_failure(DiagnosticErrorType::StreamFailed))?;
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::Timeout, error))?
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::StreamFailed, error))?;
     Ok(payload)
 }
 
@@ -634,19 +667,19 @@ mod tests {
 
     #[test]
     fn history_busy_status_is_retryable_for_new_clients() {
-        assert_eq!(
+        assert!(matches!(
             decode_response_status(BUSY),
             Err(uc_core::membership::MembershipHistoryExchangeError::PairingInProgress)
-        );
+        ));
     }
 
     #[test]
     fn history_frame_length_accepts_the_boundary_and_rejects_oversize_before_allocation() {
-        assert_eq!(checked_message_length(1), Ok(1));
-        assert_eq!(
+        assert!(matches!(checked_message_length(1), Ok(1)));
+        assert!(matches!(
             checked_message_length(MAX_MEMBERSHIP_HISTORY_FRAME_SIZE),
             Ok(MAX_MEMBERSHIP_HISTORY_FRAME_SIZE)
-        );
+        ));
         assert!(checked_message_length(0).is_err());
         assert!(checked_message_length(MAX_MEMBERSHIP_HISTORY_FRAME_SIZE + 1).is_err());
     }

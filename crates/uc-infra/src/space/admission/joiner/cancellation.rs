@@ -47,12 +47,12 @@ impl<E: DbExecutor + Send + Sync> CurrentJoinAdmissionStatePort for SqliteSpaceA
                 let stored = state
                     .records
                     .get(&admission_id)
-                    .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                    .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
                 let record = self
                     .open_record(admission_id, stored)
                     .map_err(into_anyhow)?;
                 let admission = JoinerAdmission::try_from_record(record)
-                    .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                    .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
                 if admission.join_id() != join_id {
                     return Ok(None);
                 }
@@ -60,7 +60,7 @@ impl<E: DbExecutor + Send + Sync> CurrentJoinAdmissionStatePort for SqliteSpaceA
                     state.profile_generation,
                     &admission,
                 ))
-                .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
                 Ok(Some(LoadedCurrentJoin::new(admission, token)))
             })
             .map_err(map_executor_error)
@@ -97,12 +97,12 @@ impl<E: DbExecutor + Send + Sync> CurrentJoinAdmissionStatePort for SqliteSpaceA
                         .open_record(admission_id, &stored)
                         .map_err(into_anyhow)?;
                     let current = JoinerAdmission::try_from_record(current)
-                        .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                        .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
                     let expected_token = recovery_token(state.profile_generation, &current);
                     let expected_version = current
                         .record_version()
                         .checked_add(1)
-                        .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                        .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
                     if token.as_bytes() != &expected_token
                         || replacement.record_version() != expected_version
                     {
@@ -139,10 +139,10 @@ fn map_state_error(error: SpaceAdmissionStateStoreError) -> JoinerCancellationSt
         SpaceAdmissionStateStoreError::Conflict => {
             JoinerCancellationStateError::state_changed(error)
         }
-        SpaceAdmissionStateStoreError::Corrupt => {
+        SpaceAdmissionStateStoreError::Corrupt { .. } => {
             JoinerCancellationStateError::recovery_required(error)
         }
-        SpaceAdmissionStateStoreError::Unavailable => {
+        SpaceAdmissionStateStoreError::Unavailable { .. } => {
             JoinerCancellationStateError::unavailable(error)
         }
     }

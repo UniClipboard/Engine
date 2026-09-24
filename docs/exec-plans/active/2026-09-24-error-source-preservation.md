@@ -256,3 +256,19 @@ E1 的检查会拒绝只删标识、仍保留 `{error}` 的改法，所以 E4 �
 - 后续事项：投递失败时 `reason_detail` 把 `ClipboardDispatchError` 的来源文本写入 `EntryDeliveryRecord` 持久化字段，
   行为保持不变；持久字段是否应保存错误文本需要按持久化与隐私规则单独评估。
 
+
+
+### E6 S4 F 类：Infra 能力来源（进行中）
+
+约定（已确认）：同一错误类型既有纯校验失败、又有下层失败时，变体改为 `Variant { source: Option<..> }`，并提供
+`variant()`（无来源）与 `variant_from(source)`（有来源）两个构造函数；模式匹配写 `Variant { .. }`。Infra 与 Application
+自有类型用 `Option<anyhow::Error>`；Core 类型用 `Option<Box<dyn Error + Send + Sync>>`，其 `_from` 只接受 std 错误，
+`anyhow` 来源必须先加 context 才能传入。本身不含信息的密码学错误（如 `aead::Error`）同样作为来源保留，不新增例外类别。
+为此去掉的 `Copy`/`Clone`/`PartialEq`/`Eq`，测试改为 `matches!`，借用处改为传引用。
+
+- 第一批（已完成）：`MlsGroupError`（openmls `SignerError` 未实现 `Error`，以私有 `SignerFailure` 包装保留原值）、
+  `AdmissionSecurityTransitionError::InvalidState`、`SpaceAdmissionTransportError`（`connection_decision` 与
+  `exchange_failure` 改为借用）、`SpaceAdmissionStateStoreError`（含 diesel `From` 与执行器错误还原）、
+  Core 的 `MembershipHistoryExchangeError::Transport`。成员历史交换的服务端处理路径改用 `ServerExchangeFailure`
+  同时携带诊断分类与来源。连接超时（`Elapsed`）仍按例外丢弃并注释。
+- 暂缓：`EncryptionError` 与 `SecureStorageError` 的变体被 049 未提交的 `profile_key_recovery.rs` 模式匹配，等 049 提交后处理。

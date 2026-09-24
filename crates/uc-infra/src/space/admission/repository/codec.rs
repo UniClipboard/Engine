@@ -113,10 +113,11 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
             return Ok(Some(metadata));
         }
         self.load_state_on(conn)?;
-        let migrated = load_repository_row(conn)?.ok_or(SpaceAdmissionStateStoreError::Corrupt)?;
+        let migrated =
+            load_repository_row(conn)?.ok_or_else(SpaceAdmissionStateStoreError::corrupt)?;
         self.try_open_metadata(&migrated.encrypted_payload)?
             .map(Some)
-            .ok_or(SpaceAdmissionStateStoreError::Corrupt)
+            .ok_or_else(SpaceAdmissionStateStoreError::corrupt)
     }
 
     // rust-style: allow-qualified-path -- 可见性必须覆盖 repository 的相邻准入角色模块
@@ -154,7 +155,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
             ) => return Ok(None),
         };
         let metadata = postcard::from_bytes::<PersistedSpaceAdmissionMetadataV3>(&plaintext)
-            .map_err(|_| SpaceAdmissionStateStoreError::Corrupt)?;
+            .map_err(SpaceAdmissionStateStoreError::corrupt_from)?;
         self.validate_metadata(&metadata)?;
         Ok(Some(metadata))
     }
@@ -166,7 +167,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
         if metadata.format_version != SPACE_ADMISSION_REPOSITORY_FORMAT_V3
             || metadata.profile_generation != self.keys.profile_generation()
         {
-            return Err(SpaceAdmissionStateStoreError::Corrupt);
+            return Err(SpaceAdmissionStateStoreError::corrupt());
         }
         Ok(())
     }
@@ -197,7 +198,8 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
         }
         *cache = None;
         let plaintext = reader.open(encrypted).map_err(map_key_error)?;
-        let state = decode_repository(&plaintext).ok_or(SpaceAdmissionStateStoreError::Corrupt)?;
+        let state =
+            decode_repository(&plaintext).ok_or_else(SpaceAdmissionStateStoreError::corrupt)?;
         if state.format_version != SPACE_ADMISSION_REPOSITORY_FORMAT_V2
             || state.profile_generation != self.keys.profile_generation()
             || state
@@ -207,7 +209,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                 .latest_local_join_id
                 .is_some_and(|id| !state.records.contains_key(&id))
         {
-            return Err(SpaceAdmissionStateStoreError::Corrupt);
+            return Err(SpaceAdmissionStateStoreError::corrupt());
         }
         let estimated_bytes = encrypted
             .len()
@@ -235,12 +237,12 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
              FROM admission_repository_record ORDER BY lookup_token",
         )
         .load::<EncryptedRecordRow>(conn)
-        .map_err(|_| SpaceAdmissionStateStoreError::Unavailable)?;
+        .map_err(SpaceAdmissionStateStoreError::unavailable_from)?;
         let mut records = BTreeMap::new();
         for row in rows {
             let record = self.open_v3_record_row(row)?;
             if records.insert(record.admission_id, record.stored).is_some() {
-                return Err(SpaceAdmissionStateStoreError::Corrupt);
+                return Err(SpaceAdmissionStateStoreError::corrupt());
             }
         }
         if metadata
@@ -250,7 +252,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                 .latest_local_join_id
                 .is_some_and(|id| !records.contains_key(&id))
         {
-            return Err(SpaceAdmissionStateStoreError::Corrupt);
+            return Err(SpaceAdmissionStateStoreError::corrupt());
         }
         Ok(PersistedSpaceAdmissionRepositoryV2 {
             format_version: SPACE_ADMISSION_REPOSITORY_FORMAT_V2,
@@ -276,11 +278,11 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
         .bind::<Binary, _>(lookup_token.to_vec())
         .get_result::<EncryptedRecordRow>(conn)
         .optional()
-        .map_err(|_| SpaceAdmissionStateStoreError::Unavailable)?
-        .ok_or(SpaceAdmissionStateStoreError::Corrupt)?;
+        .map_err(SpaceAdmissionStateStoreError::unavailable_from)?
+        .ok_or_else(SpaceAdmissionStateStoreError::corrupt)?;
         let record = self.open_v3_record_row(row)?;
         if record.admission_id != admission_id {
-            return Err(SpaceAdmissionStateStoreError::Corrupt);
+            return Err(SpaceAdmissionStateStoreError::corrupt());
         }
         Ok(record.stored)
     }
@@ -300,11 +302,11 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
             .open_compact(&row.encrypted_payload)
             .map_err(map_key_error)?;
         let record = postcard::from_bytes::<PersistedSpaceAdmissionRecordV3>(&plaintext)
-            .map_err(|_| SpaceAdmissionStateStoreError::Corrupt)?;
+            .map_err(SpaceAdmissionStateStoreError::corrupt_from)?;
         let lookup_token = self.record_lookup_token(record.admission_id)?;
         let content_token = self.record_content_token(&plaintext)?;
         if row.lookup_token != lookup_token || row.content_token != content_token {
-            return Err(SpaceAdmissionStateStoreError::Corrupt);
+            return Err(SpaceAdmissionStateStoreError::corrupt());
         }
         Ok(record)
     }
@@ -323,13 +325,13 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                 .latest_local_join_id
                 .is_some_and(|id| !state.records.contains_key(&id))
         {
-            return Err(SpaceAdmissionStateStoreError::Corrupt);
+            return Err(SpaceAdmissionStateStoreError::corrupt());
         }
         let existing = sql_query(
             "SELECT lookup_token, content_token FROM admission_repository_record ORDER BY lookup_token",
         )
         .load::<RecordTokenRow>(conn)
-        .map_err(|_| SpaceAdmissionStateStoreError::Unavailable)?
+        .map_err(SpaceAdmissionStateStoreError::unavailable_from)?
         .into_iter()
         .map(|row| (row.lookup_token, row.content_token))
         .collect::<BTreeMap<_, _>>();
@@ -339,8 +341,8 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                 admission_id,
                 stored: stored.clone(),
             };
-            let plaintext =
-                postcard::to_stdvec(&record).map_err(|_| SpaceAdmissionStateStoreError::Corrupt)?;
+            let plaintext = postcard::to_stdvec(&record)
+                .map_err(SpaceAdmissionStateStoreError::corrupt_from)?;
             let lookup_token = self.record_lookup_token(admission_id)?;
             let content_token = self.record_content_token(&plaintext)?;
             retained.insert(lookup_token.to_vec());
@@ -364,19 +366,19 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
             .bind::<Binary, _>(content_token.to_vec())
             .bind::<Binary, _>(encrypted)
             .execute(conn)
-            .map_err(|_| SpaceAdmissionStateStoreError::Unavailable)?;
+            .map_err(SpaceAdmissionStateStoreError::unavailable_from)?;
         }
         for lookup_token in existing.keys() {
             if !retained.contains(lookup_token) {
                 sql_query("DELETE FROM admission_repository_record WHERE lookup_token = ?")
                     .bind::<Binary, _>(lookup_token)
                     .execute(conn)
-                    .map_err(|_| SpaceAdmissionStateStoreError::Unavailable)?;
+                    .map_err(SpaceAdmissionStateStoreError::unavailable_from)?;
             }
         }
         let metadata = PersistedSpaceAdmissionMetadataV3::from(state);
         let plaintext =
-            postcard::to_stdvec(&metadata).map_err(|_| SpaceAdmissionStateStoreError::Corrupt)?;
+            postcard::to_stdvec(&metadata).map_err(SpaceAdmissionStateStoreError::corrupt_from)?;
         let encrypted = self
             .keys
             .seal_profile_payload_compact(METADATA_PAYLOAD_PURPOSE, &plaintext)
@@ -387,7 +389,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
         )
         .bind::<Binary, _>(encrypted)
         .execute(conn)
-        .map_err(|_| SpaceAdmissionStateStoreError::Unavailable)?;
+        .map_err(SpaceAdmissionStateStoreError::unavailable_from)?;
         Ok(())
     }
 
@@ -431,9 +433,9 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
             )
             .map_err(map_key_error)?;
         let aggregate = SpaceAdmissionAggregate::decode_persisted(&plaintext)
-            .map_err(|_| SpaceAdmissionStateStoreError::Corrupt)?;
+            .map_err(SpaceAdmissionStateStoreError::corrupt_from)?;
         if aggregate.admission_id().as_bytes() != &admission_id {
-            return Err(SpaceAdmissionStateStoreError::Corrupt);
+            return Err(SpaceAdmissionStateStoreError::corrupt());
         }
         Ok(aggregate)
     }
@@ -458,7 +460,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
         let admission_id = *aggregate.admission_id().as_bytes();
         let plaintext = aggregate
             .encode_persisted()
-            .map_err(|_| SpaceAdmissionStateStoreError::Corrupt)?;
+            .map_err(SpaceAdmissionStateStoreError::corrupt_from)?;
         let encrypted_payload = self
             .keys
             .seal_attempt_payload(admission_id, &wrapped_data_key, &plaintext)
@@ -476,16 +478,16 @@ fn load_repository_row(
     sql_query("SELECT encrypted_payload FROM admission_repository_state WHERE singleton_id = 1")
         .get_result::<EncryptedRepositoryRow>(conn)
         .optional()
-        .map_err(|_| SpaceAdmissionStateStoreError::Unavailable)
+        .map_err(SpaceAdmissionStateStoreError::unavailable_from)
 }
 
 pub(in crate::space::admission) fn map_executor_error(
     error: anyhow::Error,
 ) -> SpaceAdmissionStateStoreError {
-    error
-        .downcast_ref::<SpaceAdmissionStateStoreError>()
-        .copied()
-        .unwrap_or(SpaceAdmissionStateStoreError::Unavailable)
+    match error.downcast::<SpaceAdmissionStateStoreError>() {
+        Ok(error) => error,
+        Err(error) => SpaceAdmissionStateStoreError::unavailable_from(error),
+    }
 }
 
 pub(in crate::space::admission) fn into_anyhow(
@@ -501,6 +503,6 @@ pub(super) fn map_key_error(error: AdmissionKeyError) -> SpaceAdmissionStateStor
         }
         AdmissionKeyError::Corrupt { .. }
         | AdmissionKeyError::InvalidLayout
-        | AdmissionKeyError::OpenFailed { .. } => SpaceAdmissionStateStoreError::Corrupt,
+        | AdmissionKeyError::OpenFailed { .. } => SpaceAdmissionStateStoreError::corrupt(),
     }
 }

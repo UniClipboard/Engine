@@ -55,9 +55,9 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                 active_manifest: None,
             }),
         }
-        .map_err(|_| SpaceAdmissionStateStoreError::Corrupt)?;
+        .map_err(SpaceAdmissionStateStoreError::corrupt_from)?;
         let snapshot = AdmissionSourceSnapshot::from_bytes(encoded)
-            .map_err(|_| SpaceAdmissionStateStoreError::Corrupt)?;
+            .map_err(SpaceAdmissionStateStoreError::corrupt_from)?;
         Ok((snapshot, requires_session_transition))
     }
 }
@@ -67,11 +67,11 @@ fn map_manifest_error(
 ) -> SpaceAdmissionStateStoreError {
     match error {
         ActiveSpaceGenerationManifestStoreError::Storage { .. } => {
-            SpaceAdmissionStateStoreError::Unavailable
+            SpaceAdmissionStateStoreError::unavailable()
         }
         ActiveSpaceGenerationManifestStoreError::Corrupt
         | ActiveSpaceGenerationManifestStoreError::UnsupportedVersion => {
-            SpaceAdmissionStateStoreError::Corrupt
+            SpaceAdmissionStateStoreError::corrupt()
         }
     }
 }

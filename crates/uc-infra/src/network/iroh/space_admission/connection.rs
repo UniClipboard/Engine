@@ -83,6 +83,7 @@ pub(super) async fn open_stream(
 ) -> Result<(SendStream, RecvStream), uc_application::deps::SpaceAdmissionTransportError> {
     tokio::time::timeout(IO_DEADLINE, connection.open_bi())
         .await
-        .map_err(|_| uc_application::deps::SpaceAdmissionTransportError::Deferred)?
-        .map_err(|_| uc_application::deps::SpaceAdmissionTransportError::Deferred)
+        // 超时本身就是分类。
+        .map_err(|_| uc_application::deps::SpaceAdmissionTransportError::deferred())?
+        .map_err(uc_application::deps::SpaceAdmissionTransportError::deferred_from)
 }

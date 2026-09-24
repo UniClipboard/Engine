@@ -65,7 +65,7 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
             let local = peer_id(self.endpoint.id().as_bytes())?;
             let remote = peer_id(route.endpoint_addr.id.as_bytes())?;
             let binding = AdmissionPeerBinding::new(local, remote)
-                .ok_or(SpaceAdmissionTransportError::AuthenticationRejected)?;
+                .ok_or_else(SpaceAdmissionTransportError::authentication_rejected)?;
             let attempt_contract = AdmissionAttemptContractV2::new(
                 admission_id,
                 invitation_id,
@@ -74,7 +74,7 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
                 attempt_timeline.started_at_ms(),
                 attempt_timeline.expires_at_ms(),
             )
-            .map_err(|_| SpaceAdmissionTransportError::AuthenticationRejected)?;
+            .map_err(SpaceAdmissionTransportError::authentication_rejected_from)?;
             let context = SpaceAdmissionAuthContext::with_attempt_contract(
                 admission_id,
                 invitation_id,
@@ -82,16 +82,16 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
                 remote,
                 attempt_contract.digest(),
             )
-            .ok_or(SpaceAdmissionTransportError::AuthenticationRejected)?;
+            .ok_or_else(SpaceAdmissionTransportError::authentication_rejected)?;
             let (client, ke1) =
                 SpaceAdmissionAuth::start_client_with_password_equivalent(password, &context)
-                    .map_err(|_| SpaceAdmissionTransportError::AuthenticationRejected)?;
+                    .map_err(SpaceAdmissionTransportError::authentication_rejected_from)?;
             let connection =
                 connect(&self.endpoint, route.endpoint_addr)
                     .await
                     .map_err(|error| {
                         connection_failure = Some(error.category());
-                        SpaceAdmissionTransportError::Deferred
+                        SpaceAdmissionTransportError::deferred()
                     })?;
             let (mut send, mut receive) = open_stream(&connection).await?;
             write_typed(
@@ -109,27 +109,27 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
                 AUTH_FRAME_LIMIT,
             )
             .await
-            .map_err(|_| SpaceAdmissionTransportError::Unavailable)?;
+            .map_err(SpaceAdmissionTransportError::unavailable_from)?;
             let response: OpaqueResponseV1 =
                 match read_typed(&mut receive, FrameKind::OpaqueResponse, AUTH_FRAME_LIMIT).await {
                     Ok(response) => response,
                     Err(_) => {
                         return Err(application_close_error(&connection)
                             .await
-                            .unwrap_or(SpaceAdmissionTransportError::AuthenticationRejected));
+                            .unwrap_or(SpaceAdmissionTransportError::authentication_rejected()));
                     }
                 };
             if response.sponsor_peer_id != *remote.as_bytes() {
-                return Err(SpaceAdmissionTransportError::AuthenticationRejected);
+                return Err(SpaceAdmissionTransportError::authentication_rejected());
             }
             let ke2 = SpaceAdmissionKe2::decode_from_transport(&response.ke2)
-                .map_err(|_| SpaceAdmissionTransportError::AuthenticationRejected)?;
+                .map_err(SpaceAdmissionTransportError::authentication_rejected_from)?;
             let (credential, ke3) = client
                 .finish(&context, ke2)
-                .map_err(|_| SpaceAdmissionTransportError::AuthenticationRejected)?;
+                .map_err(SpaceAdmissionTransportError::authentication_rejected_from)?;
             let credential = credential
                 .into_core()
-                .map_err(|_| SpaceAdmissionTransportError::AuthenticationRejected)?;
+                .map_err(SpaceAdmissionTransportError::authentication_rejected_from)?;
             write_typed(
                 &mut send,
                 FrameKind::OpaqueFinish,
@@ -139,7 +139,7 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
                 AUTH_FRAME_LIMIT,
             )
             .await
-            .map_err(|_| SpaceAdmissionTransportError::Unavailable)?;
+            .map_err(SpaceAdmissionTransportError::unavailable_from)?;
             let newly_established = copy_credential(&credential)?;
             Ok(Box::new(EstablishedExchange::new(
                 connection,
@@ -189,14 +189,14 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
             let local = peer_id(self.endpoint.id().as_bytes())?;
             let remote = peer_id(route.endpoint_addr.id.as_bytes())?;
             if binding.local_peer_id() != local || binding.remote_peer_id() != remote {
-                return Err(SpaceAdmissionTransportError::AuthenticationRejected);
+                return Err(SpaceAdmissionTransportError::authentication_rejected());
             }
             let connection =
                 connect(&self.endpoint, route.endpoint_addr)
                     .await
                     .map_err(|error| {
                         connection_failure = Some(error.category());
-                        SpaceAdmissionTransportError::Deferred
+                        SpaceAdmissionTransportError::deferred()
                     })?;
             let (mut send, receive) = open_stream(&connection).await?;
             let nonce = random_nonce();
@@ -211,7 +211,7 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
                 &request_digest,
                 None,
             )
-            .map_err(|_| SpaceAdmissionTransportError::AuthenticationRejected)?;
+            .map_err(SpaceAdmissionTransportError::authentication_rejected_from)?;
             write_typed(
                 &mut send,
                 FrameKind::ContinuationHello,
@@ -226,7 +226,7 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
                 AUTH_FRAME_LIMIT,
             )
             .await
-            .map_err(|_| SpaceAdmissionTransportError::Unavailable)?;
+            .map_err(SpaceAdmissionTransportError::unavailable_from)?;
             Ok(Box::new(EstablishedExchange::new(
                 connection,
                 send,

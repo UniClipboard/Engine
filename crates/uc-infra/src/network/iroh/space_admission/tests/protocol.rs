@@ -16,11 +16,11 @@ fn old_layout_and_close_codes_keep_upgrade_authentication_and_protocol_distinct(
     ));
     assert!(matches!(
         map_application_close_code(u64::from(CLOSE_AUTHENTICATION)),
-        Some(SpaceAdmissionTransportError::AuthenticationRejected)
+        Some(SpaceAdmissionTransportError::AuthenticationRejected { .. })
     ));
     assert!(matches!(
         map_application_close_code(u64::from(CLOSE_BUSY)),
-        Some(SpaceAdmissionTransportError::Deferred)
+        Some(SpaceAdmissionTransportError::Deferred { .. })
     ));
     assert!(map_application_close_code(u64::from(CLOSE_PROTOCOL)).is_none());
     assert!(matches!(

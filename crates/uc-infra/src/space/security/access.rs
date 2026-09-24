@@ -2924,10 +2924,10 @@ impl PrepareSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
         let current = repository
             .load_space_material(&request.space_id)
             .await
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?
-            .ok_or(AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?
+            .ok_or_else(AdmissionSecurityTransitionError::invalid_state)?;
         if current.state().mode() != SpaceSecurityMode::Ready || current.group_state().is_empty() {
-            return Err(AdmissionSecurityTransitionError::InvalidState);
+            return Err(AdmissionSecurityTransitionError::invalid_state());
         }
 
         request.existing_recipients.sort_by(|left, right| {
@@ -2938,7 +2938,7 @@ impl PrepareSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
         if request.existing_recipients.windows(2).any(|pair| {
             pair[0].credential_id == pair[1].credential_id || pair[0].device_id == pair[1].device_id
         }) {
-            return Err(AdmissionSecurityTransitionError::InvalidState);
+            return Err(AdmissionSecurityTransitionError::invalid_state());
         }
 
         let admission = MlsGroupEngine::admit_or_replace_member(
@@ -2946,7 +2946,7 @@ impl PrepareSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
             &request.candidate_identity,
             &request.candidate_key_package,
         )
-        .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         let target_epoch = GroupEpoch::new(admission.epoch);
         let mut next = self
             .session
@@ -2956,11 +2956,11 @@ impl PrepareSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
                 target_epoch,
                 chrono::Utc::now().timestamp_millis(),
             )
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         let target_key_catalog = super::export_admission_content_key_catalog(&next)
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         let encrypted_key_catalog = seal_group_catalog(&admission.wrapping_key, &next)
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         let group_update = GroupEpochUpdate {
             version: 1,
             group_epoch: admission.epoch,
@@ -2968,7 +2968,7 @@ impl PrepareSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
             encrypted_key_catalog,
         };
         let update_payload = serde_json::to_vec(&group_update)
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         let existing_member_deliveries = request
             .existing_recipients
             .iter()
@@ -2979,14 +2979,14 @@ impl PrepareSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
             })
             .collect::<Vec<_>>();
         let sponsor_device_id = MlsGroupEngine::local_device_id(&admission.sponsor_state)
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         let sponsor_recipient_count = request
             .existing_recipients
             .iter()
             .filter(|recipient| recipient.device_id == sponsor_device_id)
             .count();
         if sponsor_recipient_count != 1 {
-            return Err(AdmissionSecurityTransitionError::InvalidState);
+            return Err(AdmissionSecurityTransitionError::invalid_state());
         }
         next.add_pending_group_updates(
             request
@@ -3003,7 +3003,7 @@ impl PrepareSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
         );
         let target_key_catalog_bytes = target_key_catalog
             .encode()
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         let admission_bundle_digest = admission_bundle_digest(
             request.candidate_core_digest,
             &admission.welcome,
@@ -3026,17 +3026,17 @@ impl PrepareSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
             transition_input.key_catalog_digest,
             transition_input.admission_bundle_digest,
         )
-        .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         let target_protection_group_id = next
             .state()
             .protection_group_id()
-            .ok_or(AdmissionSecurityTransitionError::InvalidState)?
+            .ok_or_else(AdmissionSecurityTransitionError::invalid_state)?
             .as_str()
             .to_owned();
 
         Ok(SponsorPreparedAdmissionSecurity {
             staged_state: postcard::to_stdvec(&next)
-                .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?,
+                .map_err(AdmissionSecurityTransitionError::invalid_state_from)?,
             commit: admission.commit,
             welcome: admission.welcome,
             public_commitment,
@@ -3055,14 +3055,14 @@ impl ActivateSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
     ) -> Result<(), AdmissionSecurityTransitionError> {
         let repository = self.key_epoch_repository.as_ref();
         let staged: SpaceKeyMaterial = postcard::from_bytes(&request.staged_state)
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         if staged.state().space_id() != &request.space_id
             || staged.state().epoch().value() != request.expected_commitment.target_epoch
         {
-            return Err(AdmissionSecurityTransitionError::InvalidState);
+            return Err(AdmissionSecurityTransitionError::invalid_state());
         }
         let catalog = super::export_admission_content_key_catalog(&staged)
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         let expected = &request.expected_commitment;
         let rederived = MlsGroupEngine::derive_public_admission_commitment(
             &MlsClientState::from_bytes(staged.group_state().to_vec()),
@@ -3073,14 +3073,14 @@ impl ActivateSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
             catalog.digest(),
             expected.admission_bundle_digest,
         )
-        .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         if &rederived != expected {
             return Err(AdmissionSecurityTransitionError::CommitmentMismatch);
         }
         if repository
             .load_space_material(&request.space_id)
             .await
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?
             .as_ref()
             .is_some_and(|current| current == &staged)
         {
@@ -3098,7 +3098,7 @@ impl ActivateSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
         repository
             .save_space_material(&staged)
             .await
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         info!(
             group_epoch = staged.state().epoch().value(),
             pending_group_update_count = staged.pending_group_updates().len(),
@@ -3132,7 +3132,7 @@ impl ActivateCompletionHelperAdmissionSecurityPort for RuntimeSpaceAccessAdapter
             })
             .collect::<Vec<_>>();
         if delivery.len() != 1 {
-            return Err(AdmissionSecurityTransitionError::InvalidState);
+            return Err(AdmissionSecurityTransitionError::invalid_state());
         }
         let expected = &request.expected_commitment;
         let bundle_digest = admission_bundle_digest(
@@ -3149,7 +3149,7 @@ impl ActivateCompletionHelperAdmissionSecurityPort for RuntimeSpaceAccessAdapter
         }
 
         let update: GroupEpochUpdate = serde_json::from_slice(&delivery[0].payload)
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         if update.version != 1
             || update.group_epoch != expected.target_epoch
             || update.commit != request.security_commit
@@ -3159,8 +3159,8 @@ impl ActivateCompletionHelperAdmissionSecurityPort for RuntimeSpaceAccessAdapter
         let current = repository
             .load_space_material(&request.space_id)
             .await
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?
-            .ok_or(AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?
+            .ok_or_else(AdmissionSecurityTransitionError::invalid_state)?;
         let target_epoch = GroupEpoch::new(expected.target_epoch);
         let material = if current.state().epoch() == target_epoch {
             current
@@ -3169,18 +3169,18 @@ impl ActivateCompletionHelperAdmissionSecurityPort for RuntimeSpaceAccessAdapter
                 .state()
                 .epoch()
                 .next()
-                .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?
+                .map_err(AdmissionSecurityTransitionError::invalid_state_from)?
                 != target_epoch
                 || current.group_state().is_empty()
             {
-                return Err(AdmissionSecurityTransitionError::InvalidState);
+                return Err(AdmissionSecurityTransitionError::invalid_state());
             }
             let completed = MlsGroupEngine::apply_commit(
                 &MlsClientState::from_bytes(current.group_state().to_vec()),
                 request.space_id.as_ref().as_bytes(),
                 &update.commit,
             )
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
             if completed.epoch != expected.target_epoch {
                 return Err(AdmissionSecurityTransitionError::CommitmentMismatch);
             }
@@ -3190,7 +3190,7 @@ impl ActivateCompletionHelperAdmissionSecurityPort for RuntimeSpaceAccessAdapter
                 update.group_epoch,
                 &update.encrypted_key_catalog,
             )
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
             SpaceKeyMaterial::new(
                 portable.state,
                 completed.client_state.into_bytes(),
@@ -3201,10 +3201,10 @@ impl ActivateCompletionHelperAdmissionSecurityPort for RuntimeSpaceAccessAdapter
         };
 
         let catalog = super::export_admission_content_key_catalog(&material)
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         if catalog
             .encode()
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?
             != request.target_key_catalog
         {
             return Err(AdmissionSecurityTransitionError::CommitmentMismatch);
@@ -3218,7 +3218,7 @@ impl ActivateCompletionHelperAdmissionSecurityPort for RuntimeSpaceAccessAdapter
             catalog.digest(),
             bundle_digest,
         )
-        .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         if &rederived != expected {
             return Err(AdmissionSecurityTransitionError::CommitmentMismatch);
         }
@@ -3228,15 +3228,15 @@ impl ActivateCompletionHelperAdmissionSecurityPort for RuntimeSpaceAccessAdapter
             request.space_id.clone(),
             self.session
                 .get_master_key()
-                .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?,
+                .map_err(AdmissionSecurityTransitionError::invalid_state_from)?,
         );
         validator
             .install_space_material(&material)
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         repository
             .save_space_material(&material)
             .await
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         self.active_security_session
             .install_current_material(&material)
             .await

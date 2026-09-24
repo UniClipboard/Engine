@@ -95,7 +95,7 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
                         let expected_version = current
                             .record_version()
                             .checked_add(1)
-                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
                         if token.as_bytes() != &expected_token
                             || replacement.record_version() != expected_version
                         {
@@ -115,7 +115,7 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
                             state.profile_generation,
                             &replacement,
                         ))
-                        .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                        .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
                         Ok(LoadedPendingAdmission::new(replacement, next_token))
                     })
                 })
@@ -148,7 +148,7 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
                         let expected_version = current
                             .record_version()
                             .checked_add(1)
-                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
                         if token.as_bytes() != &expected_token
                             || replacement.record_version() != expected_version
                         {
@@ -163,7 +163,7 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
                             state.profile_generation,
                             &replacement,
                         ))
-                        .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                        .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
                         Ok(LoadedSponsorDeadline::new(replacement, next_token))
                     })
                 })
@@ -196,7 +196,7 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
                         let expected_version = current
                             .record_version()
                             .checked_add(1)
-                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
                         if token.as_bytes() != &expected_token
                             || replacement.record_version() != expected_version
                         {
@@ -211,7 +211,7 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
                             state.profile_generation,
                             &replacement,
                         ))
-                        .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                        .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
                         Ok(LoadedSponsorAbandonment::new(replacement, next_token))
                     })
                 })
@@ -227,17 +227,17 @@ fn recovery_commit_token(
     aggregate: &impl AdmissionRecordPersistence,
 ) -> Result<AdmissionRecoveryCommitToken, anyhow::Error> {
     AdmissionRecoveryCommitToken::from_bytes(recovery_token(profile_generation, aggregate))
-        .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))
+        .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))
 }
 
 fn map_recovery_error(error: SpaceAdmissionStateStoreError) -> PendingAdmissionRecoveryStateError {
     match error {
         SpaceAdmissionStateStoreError::Locked => PendingAdmissionRecoveryStateError::Locked,
         SpaceAdmissionStateStoreError::Conflict => PendingAdmissionRecoveryStateError::StateChanged,
-        SpaceAdmissionStateStoreError::Corrupt => {
+        SpaceAdmissionStateStoreError::Corrupt { .. } => {
             PendingAdmissionRecoveryStateError::RecoveryRequired
         }
-        SpaceAdmissionStateStoreError::Unavailable => {
+        SpaceAdmissionStateStoreError::Unavailable { .. } => {
             PendingAdmissionRecoveryStateError::Unavailable
         }
     }

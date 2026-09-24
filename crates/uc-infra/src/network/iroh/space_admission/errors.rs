@@ -61,7 +61,7 @@ pub(super) fn map_server_wire_error(error: WireError) -> HandlerError {
 pub(super) fn map_reply_wire_error(error: WireError) -> SpaceAdmissionTransportError {
     match error {
         WireError::UnsupportedLayout => SpaceAdmissionTransportError::PeerUpgradeRequired,
-        _ => SpaceAdmissionTransportError::ProtocolRejected,
+        _ => SpaceAdmissionTransportError::protocol_rejected(),
     }
 }
 
@@ -79,9 +79,9 @@ pub(super) fn map_application_close_code(code: u64) -> Option<SpaceAdmissionTran
             Some(SpaceAdmissionTransportError::PeerUpgradeRequired)
         }
         code if code == u64::from(CLOSE_AUTHENTICATION) => {
-            Some(SpaceAdmissionTransportError::AuthenticationRejected)
+            Some(SpaceAdmissionTransportError::authentication_rejected())
         }
-        code if code == u64::from(CLOSE_BUSY) => Some(SpaceAdmissionTransportError::Deferred),
+        code if code == u64::from(CLOSE_BUSY) => Some(SpaceAdmissionTransportError::deferred()),
         _ => None,
     }
 }

@@ -305,7 +305,7 @@ impl SpaceAdmissionTransportPort for ControlledSpaceAdmissionTransport {
     ) -> Result<Box<dyn AuthenticatedAdmissionExchangePort>, SpaceAdmissionTransportError> {
         let action = self.control.begin_continuation_connection();
         if action == ContinuationTestAction::Fail {
-            return Err(SpaceAdmissionTransportError::Deferred);
+            return Err(SpaceAdmissionTransportError::deferred());
         }
         let exchange = self
             .inner
@@ -367,7 +367,7 @@ impl AuthenticatedAdmissionExchangePort for TrackedAdmissionExchange {
         if action == ContinuationTestAction::DropSuccessReply
             && control.drop_success_reply(kind, result.is_ok())
         {
-            return Err(SpaceAdmissionTransportError::Deferred);
+            return Err(SpaceAdmissionTransportError::deferred());
         }
         if action == ContinuationTestAction::TrackRetry {
             control.retry_exchange_finished(kind, result.is_ok());

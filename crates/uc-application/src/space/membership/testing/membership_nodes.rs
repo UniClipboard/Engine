@@ -75,7 +75,7 @@ impl NodeTransport {
                 | VirtualMembershipNetworkError::DuplicateIdentity
                 | VirtualMembershipNetworkError::Transport
                 | VirtualMembershipNetworkError::FrameBudgetExceeded => {
-                    MembershipHistoryExchangeError::Transport
+                    MembershipHistoryExchangeError::transport()
                 }
             })
     }
@@ -118,7 +118,7 @@ impl RestrictedMembershipDeliveryPort for NodeTransport {
             Err(
                 MembershipHistoryExchangeError::Offline
                 | MembershipHistoryExchangeError::PairingInProgress
-                | MembershipHistoryExchangeError::Transport,
+                | MembershipHistoryExchangeError::Transport { .. },
             ) => Err(RestrictedMembershipDeliveryError::Deferred),
         }
     }

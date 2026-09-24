@@ -424,7 +424,7 @@ impl SpaceAdmissionTransportPort for PassivePorts {
         _route: &SpaceAdmissionRoute,
         _encrypted_password_equivalent: &AdmissionEncryptedPasswordEquivalent,
     ) -> Result<Box<dyn AuthenticatedAdmissionExchangePort>, SpaceAdmissionTransportError> {
-        Err(SpaceAdmissionTransportError::Deferred)
+        Err(SpaceAdmissionTransportError::deferred())
     }
 
     async fn resume(
@@ -434,7 +434,7 @@ impl SpaceAdmissionTransportPort for PassivePorts {
         _peer_binding: AdmissionPeerBinding,
         _continuation_credential: &AdmissionContinuationCredential,
     ) -> Result<Box<dyn AuthenticatedAdmissionExchangePort>, SpaceAdmissionTransportError> {
-        Err(SpaceAdmissionTransportError::Deferred)
+        Err(SpaceAdmissionTransportError::deferred())
     }
 }
 

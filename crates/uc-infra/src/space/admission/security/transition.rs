@@ -22,7 +22,7 @@ impl AdmissionSecurityTransitionAdapter {
             candidate_identity,
             key_package,
         )
-        .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         let public_commitment = Self::derive_public_commitment(
             admission.sponsor_state.as_bytes(),
             &admission.commit,
@@ -49,7 +49,7 @@ impl AdmissionSecurityTransitionAdapter {
             MlsClientState::from_bytes(pending_state.to_vec()),
         );
         let joined = MlsGroupEngine::complete_join(pending, expected_space_id, welcome)
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         let public_commitment =
             Self::derive_public_commitment(joined.client_state.as_bytes(), commit, input)?;
         Ok(JoinerStagedSecurityTransition {
@@ -72,14 +72,14 @@ impl AdmissionSecurityTransitionAdapter {
             input.key_catalog_digest,
             input.admission_bundle_digest,
         )
-        .map_err(|_| AdmissionSecurityTransitionError::InvalidState)
+        .map_err(AdmissionSecurityTransitionError::invalid_state_from)
     }
 
     pub fn signing_public_key(
         staged_state: &[u8],
     ) -> Result<Vec<u8>, AdmissionSecurityTransitionError> {
         MlsGroupEngine::signing_public_key(&MlsClientState::from_bytes(staged_state.to_vec()))
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)
     }
 
     pub fn activate(
@@ -96,7 +96,7 @@ impl AdmissionSecurityTransitionAdapter {
             &MlsClientState::from_bytes(staged_state.clone()),
             expected.lineage_id.as_bytes(),
         )
-        .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         Ok(staged_state)
     }
 

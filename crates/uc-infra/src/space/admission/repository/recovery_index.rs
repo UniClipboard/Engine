@@ -91,7 +91,7 @@ impl RecoverySummary {
     ) -> Result<Self, SpaceAdmissionStateStoreError> {
         let content_token: [u8; 32] = content_token
             .try_into()
-            .map_err(|_| SpaceAdmissionStateStoreError::Corrupt)?;
+            .map_err(SpaceAdmissionStateStoreError::corrupt_from)?;
         let role = match aggregate.record_role() {
             Some(AdmissionRole::Joiner) => RecoveryRecordRole::Joiner,
             Some(AdmissionRole::Sponsor) => RecoveryRecordRole::Sponsor,
@@ -192,7 +192,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                         || self.record_lookup_token(summary.admission_id)?.as_slice()
                             != row.lookup_token.as_slice()
                     {
-                        return Err(SpaceAdmissionStateStoreError::Corrupt);
+                        return Err(SpaceAdmissionStateStoreError::corrupt());
                     }
                     needs_attention |= summary.legacy_no_deadline;
                     if let Some(deadline) =
@@ -221,17 +221,17 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                         RecoveryAction::JoinerNetwork | RecoveryAction::JoinerExpiry => joiners
                             .push(
                                 JoinerAdmission::try_from_record(aggregate)
-                                    .ok_or(SpaceAdmissionStateStoreError::Corrupt)?,
+                                    .ok_or_else(SpaceAdmissionStateStoreError::corrupt)?,
                             ),
                         RecoveryAction::SponsorConfirmation | RecoveryAction::SponsorDeadline => {
                             sponsor_deadlines.push(
                                 SponsorAdmission::try_from_record(aggregate)
-                                    .ok_or(SpaceAdmissionStateStoreError::Corrupt)?,
+                                    .ok_or_else(SpaceAdmissionStateStoreError::corrupt)?,
                             )
                         }
                         RecoveryAction::SponsorAbandonment => sponsor_abandonments.push(
                             SponsorAdmission::try_from_record(aggregate)
-                                .ok_or(SpaceAdmissionStateStoreError::Corrupt)?,
+                                .ok_or_else(SpaceAdmissionStateStoreError::corrupt)?,
                         ),
                         // 旧实验 Helper 没有双方认可的共同期限，只保留记录，不臆造到期动作。
                         RecoveryAction::CompletionHelper | RecoveryAction::None => {}
@@ -292,7 +292,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
         summary: &RecoverySummary,
     ) -> Result<(), SpaceAdmissionStateStoreError> {
         let plaintext =
-            postcard::to_stdvec(summary).map_err(|_| SpaceAdmissionStateStoreError::Corrupt)?;
+            postcard::to_stdvec(summary).map_err(SpaceAdmissionStateStoreError::corrupt_from)?;
         let encrypted = self
             .keys
             .seal_profile_payload_compact(&row.purpose(), &plaintext)
@@ -325,11 +325,11 @@ fn decode_recovery_summary(
         {
             return Ok(None);
         }
-        return Err(SpaceAdmissionStateStoreError::Corrupt);
+        return Err(SpaceAdmissionStateStoreError::corrupt());
     }
     postcard::from_bytes::<LegacyRecoverySummaryV1>(plaintext)
         .map(|_| None)
-        .map_err(|_| SpaceAdmissionStateStoreError::Corrupt)
+        .map_err(SpaceAdmissionStateStoreError::corrupt_from)
 }
 
 #[cfg(test)]

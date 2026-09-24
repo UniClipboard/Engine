@@ -34,12 +34,12 @@ impl<E: DbExecutor + Send + Sync> LoadCurrentJoinStatusPort for SqliteSpaceAdmis
                 let stored = state
                     .records
                     .get(&admission_id)
-                    .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                    .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
                 let record = self
                     .open_record(admission_id, stored)
                     .map_err(into_anyhow)?;
                 let admission = JoinerAdmission::try_from_record(record)
-                    .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                    .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
                 Ok(Some(admission))
             })
             .map_err(map_executor_error)
@@ -66,12 +66,12 @@ impl<E: DbExecutor + Send + Sync> LoadCurrentJoinStatusPort for SqliteSpaceAdmis
                         let stored = state
                             .records
                             .get(&admission_id)
-                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
                         let record = self
                             .open_record(admission_id, stored)
                             .map_err(into_anyhow)?;
                         JoinerAdmission::try_from_record(record)
-                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))
+                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))
                     })
                     .transpose()?;
                 let mut confirmations = Vec::new();
@@ -88,12 +88,14 @@ impl<E: DbExecutor + Send + Sync> LoadCurrentJoinStatusPort for SqliteSpaceAdmis
                             preparation.committed_history().as_bytes(),
                             &OpenMlsHistoricalSignatureVerifier,
                         )
-                        .map_err(|_| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                        .map_err(|error| {
+                            into_anyhow(SpaceAdmissionStateStoreError::corrupt_from(error))
+                        })?;
                         let facts = history
                             .admission_facts_for(
                                 preparation.activation_receipt().joiner_member_instance_id,
                             )
-                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
                         let status = if sponsor.expires_at_ms().is_none() {
                             InboundPairingStatus::NeedsAttention
                         } else {
@@ -109,7 +111,7 @@ impl<E: DbExecutor + Send + Sync> LoadCurrentJoinStatusPort for SqliteSpaceAdmis
                                 }
                                 Some(SponsorPairingConfirmationStatus::Confirmed) | None => {
                                     return Err(into_anyhow(
-                                        SpaceAdmissionStateStoreError::Corrupt,
+                                        SpaceAdmissionStateStoreError::corrupt(),
                                     ));
                                 }
                             }

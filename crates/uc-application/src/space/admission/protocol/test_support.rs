@@ -917,7 +917,7 @@ impl SpaceAdmissionTransportPort for RecordingSpaceAdmissionTransport {
             .expect("event recorder is available")
             .push(ProtocolEvent::JoinerInitialChannelRequested);
         if matches!(self.mode, TransportMode::DeferInitial) {
-            return Err(SpaceAdmissionTransportError::Deferred);
+            return Err(SpaceAdmissionTransportError::deferred());
         }
         Ok(Box::new(ExchangeThenDeferred {
             events: Arc::clone(&self.events),
@@ -958,7 +958,7 @@ impl SpaceAdmissionTransportPort for RecordingSpaceAdmissionTransport {
                 | TransportMode::AuthenticateThenCandidateCommitInvalidActivationAndLoseAbandonmentOnce
         ) && self.mode.upgrade_on().is_none()
         {
-            return Err(SpaceAdmissionTransportError::Deferred);
+            return Err(SpaceAdmissionTransportError::deferred());
         }
         self.events
             .lock()
@@ -1005,13 +1005,13 @@ impl AuthenticatedAdmissionExchangePort for ExchangeThenDeferred {
                 .expect("event recorder is available")
                 .push(ProtocolEvent::JoinerJoinRequestExchanged);
             if self.authentication_rejected {
-                return Err(SpaceAdmissionTransportError::AuthenticationRejected);
+                return Err(SpaceAdmissionTransportError::authentication_rejected());
             }
             if self.take_upgrade_failure(request.kind()) {
                 return Err(SpaceAdmissionTransportError::PeerUpgradeRequired);
             }
             if !self.candidate_reply {
-                return Err(SpaceAdmissionTransportError::Deferred);
+                return Err(SpaceAdmissionTransportError::deferred());
             }
             let candidate = SpaceAdmissionEnvelopeV1::new(
                 request.header().admission_id(),
@@ -1060,7 +1060,7 @@ impl AuthenticatedAdmissionExchangePort for ExchangeThenDeferred {
                 return Err(SpaceAdmissionTransportError::PeerUpgradeRequired);
             }
             let SpaceAdmissionBodyV1::Applied(applied_body) = request.body() else {
-                return Err(SpaceAdmissionTransportError::ProtocolRejected);
+                return Err(SpaceAdmissionTransportError::protocol_rejected());
             };
             let receipt = applied_body.activation_receipt();
             let completion = AdmissionCompletionV1::new(
@@ -1139,7 +1139,7 @@ impl AuthenticatedAdmissionExchangePort for ExchangeThenDeferred {
                 .abandonment_failure_pending
                 .swap(false, Ordering::SeqCst)
             {
-                return Err(SpaceAdmissionTransportError::Deferred);
+                return Err(SpaceAdmissionTransportError::deferred());
             }
             if self.take_upgrade_failure(request.kind()) {
                 return Err(SpaceAdmissionTransportError::PeerUpgradeRequired);
@@ -1172,7 +1172,7 @@ impl AuthenticatedAdmissionExchangePort for ExchangeThenDeferred {
                     .expect("valid authenticated abandonment reply"),
             );
         }
-        Err(SpaceAdmissionTransportError::Deferred)
+        Err(SpaceAdmissionTransportError::deferred())
     }
 }
 

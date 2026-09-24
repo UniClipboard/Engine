@@ -104,7 +104,7 @@ pub enum GroupUpdateDispatchError {
     Transport,
 }
 
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum MembershipHistoryExchangeError {
     #[error("membership history recipient is offline")]
     Offline,
@@ -113,7 +113,23 @@ pub enum MembershipHistoryExchangeError {
     #[error("membership history exchange was rejected")]
     Rejected,
     #[error("membership history exchange transport failed")]
-    Transport,
+    Transport {
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl MembershipHistoryExchangeError {
+    pub fn transport() -> Self {
+        Self::Transport { source: None }
+    }
+
+    pub fn transport_from(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Transport {
+            source: Some(Box::new(source)),
+        }
+    }
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]

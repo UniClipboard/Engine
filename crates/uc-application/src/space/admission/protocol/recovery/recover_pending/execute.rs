@@ -329,7 +329,10 @@ impl AdmissionRecoveryService {
                 )
                 .await;
             }
-            (RecoveryChannel::Initial, SpaceAdmissionTransportError::AuthenticationRejected) => {
+            (
+                RecoveryChannel::Initial,
+                SpaceAdmissionTransportError::AuthenticationRejected { .. },
+            ) => {
                 self.save_initial_rejection(
                     report,
                     aggregate,
@@ -342,7 +345,7 @@ impl AdmissionRecoveryService {
                 self.save_peer_upgrade_result(report, aggregate, token)
                     .await;
             }
-            (_, SpaceAdmissionTransportError::ProtocolRejected) => {
+            (_, SpaceAdmissionTransportError::ProtocolRejected { .. }) => {
                 self.save_recovery_required(
                     report,
                     aggregate,
@@ -353,7 +356,7 @@ impl AdmissionRecoveryService {
             }
             (
                 RecoveryChannel::Continuation,
-                SpaceAdmissionTransportError::AuthenticationRejected,
+                SpaceAdmissionTransportError::AuthenticationRejected { .. },
             ) => {
                 self.save_recovery_required(
                     report,
@@ -365,7 +368,8 @@ impl AdmissionRecoveryService {
             }
             (
                 _,
-                SpaceAdmissionTransportError::Deferred | SpaceAdmissionTransportError::Unavailable,
+                SpaceAdmissionTransportError::Deferred { .. }
+                | SpaceAdmissionTransportError::Unavailable { .. },
             ) => {
                 self.save_deferred_retry(report, aggregate, token).await;
             }
@@ -772,26 +776,26 @@ fn diagnostic_trigger(trigger: AdmissionRecoveryTrigger) -> RecoveryTrigger {
         AdmissionRecoveryTrigger::StateChanged => RecoveryTrigger::StateChanged,
     }
 }
-fn exchange_failure(error: SpaceAdmissionTransportError) -> ExchangeFailure {
+fn exchange_failure(error: &SpaceAdmissionTransportError) -> ExchangeFailure {
     match error {
-        SpaceAdmissionTransportError::AuthenticationRejected => {
+        SpaceAdmissionTransportError::AuthenticationRejected { .. } => {
             ExchangeFailure::AuthenticationRejected
         }
-        SpaceAdmissionTransportError::ProtocolRejected => ExchangeFailure::ProtocolRejected,
+        SpaceAdmissionTransportError::ProtocolRejected { .. } => ExchangeFailure::ProtocolRejected,
         SpaceAdmissionTransportError::InvitationUnavailable => {
             ExchangeFailure::InvitationUnavailable
         }
-        SpaceAdmissionTransportError::Unavailable => ExchangeFailure::Unavailable,
-        SpaceAdmissionTransportError::Deferred => ExchangeFailure::Deferred,
+        SpaceAdmissionTransportError::Unavailable { .. } => ExchangeFailure::Unavailable,
+        SpaceAdmissionTransportError::Deferred { .. } => ExchangeFailure::Deferred,
         SpaceAdmissionTransportError::PeerUpgradeRequired => ExchangeFailure::PeerUpgradeRequired,
     }
 }
 fn connection_decision(
     channel: RecoveryChannel,
-    error: SpaceAdmissionTransportError,
+    error: &SpaceAdmissionTransportError,
 ) -> RecoveryDecision {
     match (channel, error) {
-        (RecoveryChannel::Initial, SpaceAdmissionTransportError::AuthenticationRejected) => {
+        (RecoveryChannel::Initial, SpaceAdmissionTransportError::AuthenticationRejected { .. }) => {
             RecoveryDecision::Rejected(Some(RejectionCause::AuthenticationRejected))
         }
         (RecoveryChannel::Initial, SpaceAdmissionTransportError::InvitationUnavailable) => {
@@ -800,12 +804,13 @@ fn connection_decision(
         (RecoveryChannel::Initial, SpaceAdmissionTransportError::PeerUpgradeRequired) => {
             RecoveryDecision::Rejected(Some(RejectionCause::PeerUpgradeRequired))
         }
-        (_, SpaceAdmissionTransportError::ProtocolRejected) => {
+        (_, SpaceAdmissionTransportError::ProtocolRejected { .. }) => {
             RecoveryDecision::RequiresRecovery(Some(RecoveryProblem::ProtocolConflict))
         }
-        (RecoveryChannel::Continuation, SpaceAdmissionTransportError::AuthenticationRejected) => {
-            RecoveryDecision::RequiresRecovery(Some(RecoveryProblem::MissingCredential))
-        }
+        (
+            RecoveryChannel::Continuation,
+            SpaceAdmissionTransportError::AuthenticationRejected { .. },
+        ) => RecoveryDecision::RequiresRecovery(Some(RecoveryProblem::MissingCredential)),
         (_, error) => {
             RecoveryDecision::Deferred(Some(RecoveryDeferral::Connect(exchange_failure(error))))
         }

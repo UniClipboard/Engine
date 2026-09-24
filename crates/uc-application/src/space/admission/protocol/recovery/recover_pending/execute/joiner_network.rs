@@ -156,7 +156,7 @@ impl AdmissionRecoveryService {
         let mut exchange = match established {
             Ok(exchange) => exchange,
             Err(error) => {
-                let decision = connection_decision(channel, error);
+                let decision = connection_decision(channel, &error);
                 self.record_connection_failure(report, channel, aggregate, commit_token, error)
                     .await;
                 return (JoinerReplyHandlingOutcome::NoImmediateWork, Some(decision));
@@ -312,7 +312,7 @@ impl AdmissionRecoveryService {
                 (
                     JoinerReplyHandlingOutcome::NoImmediateWork,
                     Some(RecoveryDecision::Deferred(Some(
-                        RecoveryDeferral::Exchange(exchange_failure(error)),
+                        RecoveryDeferral::Exchange(exchange_failure(&error)),
                     ))),
                 )
             }

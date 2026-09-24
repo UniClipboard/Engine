@@ -169,7 +169,7 @@ impl VirtualMembershipNetwork {
             Err(MembershipHistoryExchangeError::Offline) => VirtualFrameOutcome::Unavailable,
             Err(MembershipHistoryExchangeError::Rejected) => VirtualFrameOutcome::Rejected,
             Err(MembershipHistoryExchangeError::PairingInProgress) => VirtualFrameOutcome::Rejected,
-            Err(MembershipHistoryExchangeError::Transport) => VirtualFrameOutcome::Invalid,
+            Err(MembershipHistoryExchangeError::Transport { .. }) => VirtualFrameOutcome::Invalid,
         };
         self.state
             .lock()
@@ -187,7 +187,9 @@ impl VirtualMembershipNetwork {
             MembershipHistoryExchangeError::PairingInProgress => {
                 VirtualMembershipNetworkError::PairingInProgress
             }
-            MembershipHistoryExchangeError::Transport => VirtualMembershipNetworkError::Transport,
+            MembershipHistoryExchangeError::Transport { .. } => {
+                VirtualMembershipNetworkError::Transport
+            }
         })
     }
 

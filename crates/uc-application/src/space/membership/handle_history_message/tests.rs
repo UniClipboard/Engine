@@ -83,10 +83,10 @@ async fn pairing_rejects_inbound_history_as_retryable_before_ledger_access() {
     )
     .await;
 
-    assert_eq!(
+    assert!(matches!(
         result,
         Err(uc_core::membership::MembershipHistoryExchangeError::PairingInProgress)
-    );
+    ));
     assert_eq!(fixture.records.load_count(), 0);
     assert_eq!(fixture.records.commit_count(), 0);
 }
