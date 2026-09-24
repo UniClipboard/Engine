@@ -73,6 +73,6 @@ pub(super) async fn execute(&self, trigger: &MaintenanceTrigger) -> StepOutcome 
 
 先运行直接受影响的测试，再执行根 `AGENTS.md` 中的交付检查。任何失败都要区分为本次回归、已有基线或环境阻塞；本次回归必须修复后重跑。
 
-`scripts/architecture/check-rust-style.mjs` 检查相对基线新增的 Rust 行，也检查尚未纳入版本管理的新 Rust 文件。它不会要求一次性清理全部历史代码。CI 通过 `RUST_STYLE_BASE_SHA` 指定比较起点，本地默认比较当前 `HEAD` 与工作区。
+`scripts/architecture/check-rust-style.mjs` 检查相对基线新增的 Rust 行，也检查尚未纳入版本管理的新 Rust 文件。它不会要求一次性清理全部历史代码。除名称引入与纯转调方法外，它还拒绝新增的错误字符串化与丢弃来源写法，规则与允许例外见[错误处理与转换](error-handling.md#字符串化的常见形式)。CI 通过 `RUST_STYLE_BASE_SHA` 指定比较起点，本地默认比较当前 `HEAD` 与工作区。
 
 自动检查只负责可以稳定判断的规则。模块责任、实现完整性和验证充分性仍需按本规范及相关设计文档审查。
