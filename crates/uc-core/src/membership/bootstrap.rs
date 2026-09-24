@@ -17,7 +17,7 @@ impl BootstrapId {
     pub fn from_string(value: impl Into<String>) -> Result<Self, BootstrapError> {
         let value = value.into();
         if value.is_empty() || value.len() > 128 || !value.is_ascii() {
-            return Err(BootstrapError::InvalidBootstrapId);
+            return Err(BootstrapError::invalid_bootstrap_id());
         }
         Ok(Self(value))
     }
@@ -404,7 +404,10 @@ pub trait GroupBootstrapPort: Send + Sync {
 #[derive(Debug, Error)]
 pub enum BootstrapError {
     #[error("invalid legacy bootstrap id")]
-    InvalidBootstrapId,
+    InvalidBootstrapId {
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     #[error("invalid persisted legacy bootstrap record")]
     InvalidRecord,
@@ -425,7 +428,10 @@ pub enum BootstrapError {
     ReadmissionPending,
 
     #[error("legacy bootstrap could not create cryptographic material")]
-    CryptographicState,
+    CryptographicState {
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     #[error("legacy bootstrap security state could not be installed")]
     SecurityState {
@@ -435,6 +441,33 @@ pub enum BootstrapError {
 
     #[error("legacy bootstrap repository failure")]
     Repository(#[source] Box<dyn std::error::Error + Send + Sync>),
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl BootstrapError {
+    pub fn cryptographic_state() -> Self {
+        Self::CryptographicState { source: None }
+    }
+
+    pub fn cryptographic_state_from(
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::CryptographicState {
+            source: Some(Box::new(source)),
+        }
+    }
+
+    pub fn invalid_bootstrap_id() -> Self {
+        Self::InvalidBootstrapId { source: None }
+    }
+
+    pub fn invalid_bootstrap_id_from(
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::InvalidBootstrapId {
+            source: Some(Box::new(source)),
+        }
+    }
 }
 
 #[cfg(test)]

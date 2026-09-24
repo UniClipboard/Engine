@@ -44,7 +44,10 @@ pub enum SpaceAccessError {
 
     /// 持久化的密钥物料损坏或版本不支持——属于数据层故障，不可恢复。
     #[error("space key material corrupted or unsupported")]
-    CorruptedKeyMaterial,
+    CorruptedKeyMaterial {
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     /// 已验证的 Space 安全状态无法完成耐久 catalog 与活动会话安装。
     #[error("space security state could not be activated")]
@@ -56,6 +59,21 @@ pub enum SpaceAccessError {
     /// 其它内部故障（底层 IO / 算法实现异常等）。
     #[error("space access internal error")]
     Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl SpaceAccessError {
+    pub fn corrupted_key_material() -> Self {
+        Self::CorruptedKeyMaterial { source: None }
+    }
+
+    pub fn corrupted_key_material_from(
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::CorruptedKeyMaterial {
+            source: Some(Box::new(source)),
+        }
+    }
 }
 
 /// Inner aggregate surface for space access.

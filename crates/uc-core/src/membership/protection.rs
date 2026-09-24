@@ -55,11 +55,40 @@ pub trait SpaceProtectionStatusPort: Send + Sync {
 #[derive(Debug, Error)]
 pub enum SpaceProtectionError {
     #[error("space security state is unavailable")]
-    Unavailable,
+    Unavailable {
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     #[error("space security state is corrupted")]
-    Corrupted,
+    Corrupted {
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     #[error("failed to query space security state")]
     Repository(#[source] Box<dyn std::error::Error + Send + Sync>),
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl SpaceProtectionError {
+    pub fn corrupted() -> Self {
+        Self::Corrupted { source: None }
+    }
+
+    pub fn corrupted_from(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Corrupted {
+            source: Some(Box::new(source)),
+        }
+    }
+
+    pub fn unavailable() -> Self {
+        Self::Unavailable { source: None }
+    }
+
+    pub fn unavailable_from(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Unavailable {
+            source: Some(Box::new(source)),
+        }
+    }
 }

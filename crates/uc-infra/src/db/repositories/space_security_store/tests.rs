@@ -1512,7 +1512,7 @@ async fn activation_reports_a_tampered_revocation_as_an_integrity_failure() {
     assert!(
         matches!(
             error,
-            uc_core::membership::KeyEpochError::PersistedStateIntegrityFailed
+            uc_core::membership::KeyEpochError::PersistedStateIntegrityFailed { .. }
         ),
         "unexpected classification: {error:?}"
     );

@@ -26,13 +26,25 @@ pub(crate) enum PublishLogCipherError {
     #[error("unsupported directory publish log envelope version")]
     UnsupportedVersion,
     #[error("directory publish log encryption failed")]
-    EncryptFailed,
+    EncryptFailed {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("directory publish log verification failed")]
-    DecryptFailed,
+    DecryptFailed {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("directory publish log root map serialization failed")]
-    Serialize,
+    Serialize {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("directory publish log root map deserialization failed")]
-    Deserialize,
+    Deserialize {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("V3 directory publish log protection failed")]
     V3 {
         #[source]
@@ -41,6 +53,49 @@ pub(crate) enum PublishLogCipherError {
     #[cfg(windows)]
     #[error("directory publish log path encoding is invalid for this platform")]
     InvalidPathEncoding,
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl PublishLogCipherError {
+    pub fn decrypt_failed() -> Self {
+        Self::DecryptFailed { source: None }
+    }
+
+    pub fn decrypt_failed_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::DecryptFailed {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn deserialize() -> Self {
+        Self::Deserialize { source: None }
+    }
+
+    pub fn deserialize_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Deserialize {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn encrypt_failed() -> Self {
+        Self::EncryptFailed { source: None }
+    }
+
+    pub fn encrypt_failed_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::EncryptFailed {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn serialize() -> Self {
+        Self::Serialize { source: None }
+    }
+
+    pub fn serialize_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Serialize {
+            source: Some(source.into()),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -80,7 +135,7 @@ impl V3DirectoryPublishLogCipher {
                 .collect::<Result<Vec<_>, PublishLogCipherError>>()?,
         };
         let plaintext =
-            postcard::to_stdvec(&payload).map_err(|_| PublishLogCipherError::Serialize)?;
+            postcard::to_stdvec(&payload).map_err(PublishLogCipherError::serialize_from)?;
         self.protection
             .seal_for_active(
                 &Plaintext::new(plaintext),
@@ -110,7 +165,7 @@ impl V3DirectoryPublishLogCipher {
                 source: anyhow::Error::new(source).context("open V3 directory publish log"),
             })?;
         let payload: EncodedRootMap = postcard::from_bytes(plaintext.as_bytes())
-            .map_err(|_| PublishLogCipherError::Deserialize)?;
+            .map_err(PublishLogCipherError::deserialize_from)?;
         payload
             .roots
             .into_iter()
@@ -149,10 +204,10 @@ impl DirectoryPublishLogCipher {
                 .collect::<Result<Vec<_>, PublishLogCipherError>>()?,
         };
         let plaintext =
-            postcard::to_stdvec(&payload).map_err(|_| PublishLogCipherError::Serialize)?;
+            postcard::to_stdvec(&payload).map_err(PublishLogCipherError::serialize_from)?;
         let ad = aad::for_directory_publish_log(entry_id, attempt_id);
         let (nonce, ciphertext) = encrypt_xchacha_raw(&self.key, &plaintext, &ad)
-            .map_err(|_| PublishLogCipherError::EncryptFailed)?;
+            .map_err(PublishLogCipherError::encrypt_failed_from)?;
 
         let mut envelope = Vec::with_capacity(HEADER_LEN + ciphertext.len());
         envelope.extend_from_slice(&MAGIC);
@@ -186,9 +241,9 @@ impl DirectoryPublishLogCipher {
             &envelope[nonce_end..],
             &ad,
         )
-        .map_err(|_| PublishLogCipherError::DecryptFailed)?;
+        .map_err(PublishLogCipherError::decrypt_failed_from)?;
         let payload: EncodedRootMap =
-            postcard::from_bytes(&plaintext).map_err(|_| PublishLogCipherError::Deserialize)?;
+            postcard::from_bytes(&plaintext).map_err(PublishLogCipherError::deserialize_from)?;
         payload
             .roots
             .into_iter()

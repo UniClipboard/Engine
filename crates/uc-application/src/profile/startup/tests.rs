@@ -137,7 +137,7 @@ impl ProfileLifecycleRepositoryPort for Fixture {
     fn load(&self) -> Result<Option<ProfileLifecycle>, ProfileLifecycleRepositoryError> {
         self.event("read lifecycle");
         if self.mode == BackupMode::Denied {
-            return Err(ProfileLifecycleRepositoryError::Unavailable);
+            return Err(ProfileLifecycleRepositoryError::unavailable());
         }
         Ok(self.lifecycle.lock().unwrap().clone())
     }

@@ -158,12 +158,41 @@ pub enum MembershipAttestationEndpointError {
     Persistence,
 }
 
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum CurrentMembershipIdentityError {
     #[error("current membership identity is unavailable")]
-    Unavailable,
+    Unavailable {
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
     #[error("current membership identity could not be loaded")]
-    LoadFailed,
+    LoadFailed {
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl CurrentMembershipIdentityError {
+    pub fn load_failed() -> Self {
+        Self::LoadFailed { source: None }
+    }
+
+    pub fn load_failed_from(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::LoadFailed {
+            source: Some(Box::new(source)),
+        }
+    }
+
+    pub fn unavailable() -> Self {
+        Self::Unavailable { source: None }
+    }
+
+    pub fn unavailable_from(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Unavailable {
+            source: Some(Box::new(source)),
+        }
+    }
 }
 
 #[derive(Debug, Error)]

@@ -73,21 +73,23 @@ impl CurrentMembershipIdentityPort for IrohMembershipIdentityAdapter {
         let space_id = self
             .session
             .current_space_id()
-            .map_err(|_| CurrentMembershipIdentityError::Unavailable)?;
-        let settings = self
-            .settings
-            .load()
-            .await
-            .map_err(|_| CurrentMembershipIdentityError::LoadFailed)?;
+            .map_err(CurrentMembershipIdentityError::unavailable_from)?;
+        let settings = self.settings.load().await.map_err(|error| {
+            CurrentMembershipIdentityError::LoadFailed {
+                source: Some(error.context("load settings").into()),
+            }
+        })?;
         let device_name = settings
             .general
             .device_name
             .filter(|name| !name.trim().is_empty())
-            .ok_or(CurrentMembershipIdentityError::Unavailable)?;
+            .ok_or_else(CurrentMembershipIdentityError::unavailable)?;
         let identity_fingerprint = self
             .fingerprint_factory
             .from_public_key(self.endpoint.id().as_bytes())
-            .map_err(|_| CurrentMembershipIdentityError::LoadFailed)?;
+            .map_err(|error| CurrentMembershipIdentityError::LoadFailed {
+                source: Some(error.context("derive local fingerprint").into()),
+            })?;
 
         Ok(CurrentMembershipIdentity {
             space_id,
@@ -220,7 +222,7 @@ impl CurrentMembershipAnnouncementPort for IrohMembershipGossipTransportAdapter 
         let identity = self.identity.current_membership_identity().await?;
         let transport_address_blob =
             postcard::to_stdvec(&to_persistable_addr(self.endpoint.addr()))
-                .map_err(|_| CurrentMembershipIdentityError::LoadFailed)?;
+                .map_err(CurrentMembershipIdentityError::load_failed_from)?;
         Ok(CurrentMembershipAnnouncementMaterial {
             space_id: identity.space_id,
             device_id: identity.device_id,
@@ -237,7 +239,7 @@ impl CurrentMembershipAnnouncementPort for IrohMembershipGossipTransportAdapter 
             .updated()
             .await
             .map(|_| ())
-            .map_err(|_| CurrentMembershipIdentityError::LoadFailed)
+            .map_err(CurrentMembershipIdentityError::load_failed_from)
     }
 }
 
@@ -1192,7 +1194,10 @@ mod tests {
 
         let result = adapter.current_membership_identity().await;
 
-        assert_eq!(result, Err(CurrentMembershipIdentityError::Unavailable));
+        assert!(matches!(
+            result,
+            Err(CurrentMembershipIdentityError::Unavailable { .. })
+        ));
         endpoint.close().await;
     }
 
@@ -1208,7 +1213,10 @@ mod tests {
 
         let result = adapter.current_membership_identity().await;
 
-        assert_eq!(result, Err(CurrentMembershipIdentityError::Unavailable));
+        assert!(matches!(
+            result,
+            Err(CurrentMembershipIdentityError::Unavailable { .. })
+        ));
         endpoint.close().await;
     }
 

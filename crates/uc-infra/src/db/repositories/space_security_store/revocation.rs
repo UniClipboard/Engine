@@ -91,7 +91,7 @@ pub(super) fn decode_record(
         || record.created_at_ms() != row.created_at_ms
         || record.updated_at_ms() != row.updated_at_ms
     {
-        return Err(KeyEpochError::PersistedStateIntegrityFailed);
+        return Err(KeyEpochError::persisted_state_integrity_failed());
     }
     Ok(record)
 }

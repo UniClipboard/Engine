@@ -45,7 +45,7 @@ impl RecoverSpaceSessionUseCase {
         let resumed = match self.resume_session.try_resume_session(&space_id).await {
             Ok(Some(_)) => true,
             Ok(None) => false,
-            Err(SpaceAccessError::CorruptedKeyMaterial) => {
+            Err(SpaceAccessError::CorruptedKeyMaterial { .. }) => {
                 return Err(RecoverSpaceSessionError::CorruptedKeyMaterial);
             }
             Err(SpaceAccessError::NotInitialized) | Err(SpaceAccessError::WrongPassphrase) => {

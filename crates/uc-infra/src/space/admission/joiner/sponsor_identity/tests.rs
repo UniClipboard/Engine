@@ -23,14 +23,14 @@ fn fingerprint_of(key: &SecretKey) -> IdentityFingerprint {
 #[test]
 fn matching_sponsor_identity_is_accepted() {
     let sponsor = SecretKey::generate();
-    assert_eq!(
+    assert!(matches!(
         verify_sponsor_route_identity(
             &route_for(&sponsor),
             &fingerprint_of(&sponsor),
             &Sha256IdentityFingerprintFactory,
         ),
         Ok(())
-    );
+    ));
 }
 
 #[test]
@@ -38,14 +38,14 @@ fn history_identity_of_another_key_is_a_mismatch() {
     // 现场假设的形态：成员历史保存旧身份，邀请方实际以新身份提供续连端点。
     let recorded = SecretKey::generate();
     let current = SecretKey::generate();
-    assert_eq!(
+    assert!(matches!(
         verify_sponsor_route_identity(
             &route_for(&current),
             &fingerprint_of(&recorded),
             &Sha256IdentityFingerprintFactory,
         ),
         Err(SponsorRouteIdentityError::Mismatch)
-    );
+    ));
 }
 
 #[test]
@@ -58,37 +58,38 @@ fn a_continuation_route_with_an_invitation_is_still_checked() {
     )
     .unwrap();
     let route = AdmissionContinuationRoute::from_bytes(bytes).unwrap();
-    assert_eq!(
+    assert!(matches!(
         verify_sponsor_route_identity(
             &route,
             &fingerprint_of(&other),
             &Sha256IdentityFingerprintFactory
         ),
         Err(SponsorRouteIdentityError::Mismatch)
-    );
+    ));
 }
 
 #[test]
 fn an_undecodable_route_is_rejected_not_skipped() {
     let sponsor = SecretKey::generate();
     let route = AdmissionContinuationRoute::from_bytes(b"continuation-route".to_vec()).unwrap();
-    assert_eq!(
+    assert!(matches!(
         verify_sponsor_route_identity(
             &route,
             &fingerprint_of(&sponsor),
             &Sha256IdentityFingerprintFactory
         ),
-        Err(SponsorRouteIdentityError::RouteUndecodable)
-    );
+        Err(SponsorRouteIdentityError::RouteUndecodable { .. })
+    ));
 }
 
 #[test]
 fn every_failure_is_a_terminal_identity_conflict() {
     for error in [
         SponsorRouteIdentityError::Mismatch,
-        SponsorRouteIdentityError::RouteUndecodable,
-        SponsorRouteIdentityError::FingerprintUnavailable,
+        SponsorRouteIdentityError::route_undecodable(),
+        SponsorRouteIdentityError::fingerprint_unavailable(),
     ] {
+        let rendered = format!("{error:?}");
         match sponsor_identity_rejection(error) {
             PrepareJoinerActivationError::Invalid { reason, source } => {
                 assert_eq!(reason, SpaceAdmissionRejectionReason::IdentityConflict);
@@ -97,7 +98,7 @@ fn every_failure_is_a_terminal_identity_conflict() {
                     "the typed cause must stay in the source chain"
                 );
             }
-            other => panic!("{error:?} must not become retryable: {other:?}"),
+            other => panic!("{rendered} must not become retryable: {other:?}"),
         }
     }
 }

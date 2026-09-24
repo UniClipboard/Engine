@@ -16,11 +16,40 @@ pub(super) enum RecoveryMaterialError {
     #[error("admission recovery public key is invalid")]
     InvalidPublicKey,
     #[error("admission recovery key derivation failed")]
-    KeyDerivation,
+    KeyDerivation {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("admission recovery material encryption failed")]
-    Encryption,
+    Encryption {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("admission recovery material encoding failed")]
     Encoding(#[source] postcard::Error),
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl RecoveryMaterialError {
+    pub fn encryption() -> Self {
+        Self::Encryption { source: None }
+    }
+
+    pub fn encryption_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Encryption {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn key_derivation() -> Self {
+        Self::KeyDerivation { source: None }
+    }
+
+    pub fn key_derivation_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::KeyDerivation {
+            source: Some(source.into()),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -58,7 +87,7 @@ pub(super) fn seal_recovery_material(
     let mut nonce = [0u8; 24];
     rand::rng().fill_bytes(&mut nonce);
     let cipher = XChaCha20Poly1305::new_from_slice(key.as_ref())
-        .map_err(|_| RecoveryMaterialError::KeyDerivation)?;
+        .map_err(RecoveryMaterialError::key_derivation_from)?;
     let ciphertext = cipher
         .encrypt(
             XNonce::from_slice(&nonce),
@@ -67,7 +96,7 @@ pub(super) fn seal_recovery_material(
                 aad: &aad,
             },
         )
-        .map_err(|_| RecoveryMaterialError::Encryption)?;
+        .map_err(RecoveryMaterialError::encryption_from)?;
     postcard::to_stdvec(&SealedRecoveryMaterialV1 {
         format_version: SEALED_RECOVERY_FORMAT_V1,
         ephemeral_public_key: ephemeral_public,
@@ -90,7 +119,8 @@ fn derive_key(
     let mut key = Zeroizing::new([0u8; 32]);
     Hkdf::<Sha256>::new(Some(&salt), shared)
         .expand(RECOVERY_KEY_INFO, key.as_mut())
-        .map_err(|_| RecoveryMaterialError::KeyDerivation)?;
+        // hkdf::InvalidLength 未实现 Error，且只表示输出长度超限（这里长度是常量）。
+        .map_err(|_| RecoveryMaterialError::key_derivation())?;
     Ok(key)
 }
 
@@ -135,7 +165,7 @@ pub(super) fn open_recovery_material(
         &recipient_public,
     );
     let cipher = XChaCha20Poly1305::new_from_slice(key.as_ref())
-        .map_err(|_| RecoveryMaterialError::KeyDerivation)?;
+        .map_err(RecoveryMaterialError::key_derivation_from)?;
     cipher
         .decrypt(
             XNonce::from_slice(&sealed.nonce),
@@ -144,7 +174,7 @@ pub(super) fn open_recovery_material(
                 aad: &aad,
             },
         )
-        .map_err(|_| RecoveryMaterialError::Encryption)
+        .map_err(RecoveryMaterialError::encryption_from)
 }
 
 #[cfg(test)]

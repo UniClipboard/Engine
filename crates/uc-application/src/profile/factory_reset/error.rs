@@ -27,14 +27,43 @@ pub enum ProfileLifecycleError {
     InvalidTransition,
 }
 
-#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+#[derive(Debug, thiserror::Error)]
 pub enum ProfileLifecycleRepositoryError {
     #[error("profile lifecycle storage is unavailable")]
-    Unavailable,
+    Unavailable {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("profile lifecycle record is corrupt")]
-    Corrupt,
+    Corrupt {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("profile lifecycle record changed before it could be saved")]
     Conflict,
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl ProfileLifecycleRepositoryError {
+    pub fn corrupt() -> Self {
+        Self::Corrupt { source: None }
+    }
+
+    pub fn corrupt_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Corrupt {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn unavailable() -> Self {
+        Self::Unavailable { source: None }
+    }
+
+    pub fn unavailable_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Unavailable {
+            source: Some(source.into()),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]

@@ -67,18 +67,60 @@ pub enum FileSetCipherError {
     #[error("unsupported file-set path envelope version: {0:#x}")]
     UnsupportedVersion(u8),
     #[error("file-set path AEAD encryption failed")]
-    EncryptFailed,
+    EncryptFailed {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("file-set path AEAD verification failed")]
-    DecryptFailed,
+    DecryptFailed {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     // Deliberately content-free: the decrypted plaintext is a device-local path,
     // so the underlying utf-8 error must not carry it into logs.
     #[error("file-set path plaintext is not valid UTF-8")]
-    InvalidUtf8,
+    InvalidUtf8 {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("V3 file-set path protection failed")]
     V3 {
         #[source]
         source: anyhow::Error,
     },
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl FileSetCipherError {
+    pub fn decrypt_failed() -> Self {
+        Self::DecryptFailed { source: None }
+    }
+
+    pub fn decrypt_failed_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::DecryptFailed {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn encrypt_failed() -> Self {
+        Self::EncryptFailed { source: None }
+    }
+
+    pub fn encrypt_failed_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::EncryptFailed {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn invalid_utf8() -> Self {
+        Self::InvalidUtf8 { source: None }
+    }
+
+    pub fn invalid_utf8_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::InvalidUtf8 {
+            source: Some(source.into()),
+        }
+    }
 }
 
 pub(crate) struct V3EntryFileSetPathCipher {
@@ -186,7 +228,7 @@ impl V3EntryFileSetPathCipher {
             .map_err(|source| FileSetCipherError::V3 {
                 source: anyhow::Error::new(source).context("open V3 file-set path"),
             })?;
-        String::from_utf8(plaintext.into_bytes()).map_err(|_| FileSetCipherError::InvalidUtf8)
+        String::from_utf8(plaintext.into_bytes()).map_err(FileSetCipherError::invalid_utf8_from)
     }
 }
 
@@ -256,7 +298,7 @@ impl EntryFileSetPathCipher {
 
     fn seal_with_aad(&self, plaintext: &str, ad: &[u8]) -> Result<Vec<u8>, FileSetCipherError> {
         let (nonce, ciphertext) = encrypt_xchacha_raw(&self.key, plaintext.as_bytes(), ad)
-            .map_err(|_| FileSetCipherError::EncryptFailed)?;
+            .map_err(FileSetCipherError::encrypt_failed_from)?;
 
         let mut buf = Vec::with_capacity(HEADER_LEN + ciphertext.len());
         buf.extend_from_slice(&FILE_SET_MAGIC);
@@ -319,8 +361,8 @@ impl EntryFileSetPathCipher {
         let nonce = &bytes[5..HEADER_LEN];
         let ciphertext = &bytes[HEADER_LEN..];
         let plaintext = decrypt_xchacha_raw(&self.key, nonce, ciphertext, ad)
-            .map_err(|_| FileSetCipherError::DecryptFailed)?;
-        String::from_utf8(plaintext).map_err(|_| FileSetCipherError::InvalidUtf8)
+            .map_err(FileSetCipherError::decrypt_failed_from)?;
+        String::from_utf8(plaintext).map_err(FileSetCipherError::invalid_utf8_from)
     }
 }
 
@@ -368,7 +410,7 @@ mod tests {
         assert!(matches!(
             c.open_original_text(&EntryId::from("entry-b"), 0, &env)
                 .unwrap_err(),
-            FileSetCipherError::DecryptFailed
+            FileSetCipherError::DecryptFailed { .. }
         ));
     }
 
@@ -379,7 +421,7 @@ mod tests {
         let env = c.seal_original_text(&id, 0, "/tmp/a").unwrap();
         assert!(matches!(
             c.open_original_text(&id, 1, &env).unwrap_err(),
-            FileSetCipherError::DecryptFailed
+            FileSetCipherError::DecryptFailed { .. }
         ));
     }
 
@@ -412,28 +454,28 @@ mod tests {
         assert!(matches!(
             c.open_relative_path(&id, 0, &original_text_env)
                 .unwrap_err(),
-            FileSetCipherError::DecryptFailed
+            FileSetCipherError::DecryptFailed { .. }
         ));
         assert!(matches!(
             c.open_root_name(&id, 0, &original_text_env).unwrap_err(),
-            FileSetCipherError::DecryptFailed
+            FileSetCipherError::DecryptFailed { .. }
         ));
         assert!(matches!(
             c.open_original_text(&id, 0, &relative_path_env)
                 .unwrap_err(),
-            FileSetCipherError::DecryptFailed
+            FileSetCipherError::DecryptFailed { .. }
         ));
         assert!(matches!(
             c.open_root_name(&id, 0, &relative_path_env).unwrap_err(),
-            FileSetCipherError::DecryptFailed
+            FileSetCipherError::DecryptFailed { .. }
         ));
         assert!(matches!(
             c.open_original_text(&id, 0, &root_name_env).unwrap_err(),
-            FileSetCipherError::DecryptFailed
+            FileSetCipherError::DecryptFailed { .. }
         ));
         assert!(matches!(
             c.open_relative_path(&id, 0, &root_name_env).unwrap_err(),
-            FileSetCipherError::DecryptFailed
+            FileSetCipherError::DecryptFailed { .. }
         ));
     }
 
@@ -445,7 +487,7 @@ mod tests {
         let env = a.seal_original_text(&id, 0, "/tmp/a").unwrap();
         assert!(matches!(
             b.open_original_text(&id, 0, &env).unwrap_err(),
-            FileSetCipherError::DecryptFailed
+            FileSetCipherError::DecryptFailed { .. }
         ));
     }
 
@@ -494,7 +536,7 @@ mod tests {
         env[last] ^= 0x01;
         assert!(matches!(
             c.open_original_text(&id, 0, &env).unwrap_err(),
-            FileSetCipherError::DecryptFailed
+            FileSetCipherError::DecryptFailed { .. }
         ));
     }
 }

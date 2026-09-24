@@ -36,9 +36,9 @@ pub fn open<T: DeserializeOwned>(
     aad: &[u8],
 ) -> Result<T, KeyEpochError> {
     let encrypted: EncryptedBlob =
-        serde_json::from_slice(ciphertext).map_err(|_| KeyEpochError::DecryptionFailed)?;
+        serde_json::from_slice(ciphertext).map_err(KeyEpochError::decryption_failed_from)?;
     let plaintext =
         v1_aead::decrypt_blob_xchacha(master_key, &encrypted.nonce, &encrypted.ciphertext, aad)
-            .map_err(|_| KeyEpochError::DecryptionFailed)?;
-    serde_json::from_slice(&plaintext).map_err(|_| KeyEpochError::PersistedStateIntegrityFailed)
+            .map_err(KeyEpochError::decryption_failed_from)?;
+    serde_json::from_slice(&plaintext).map_err(KeyEpochError::persisted_state_integrity_failed_from)
 }

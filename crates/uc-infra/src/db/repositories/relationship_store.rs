@@ -35,7 +35,10 @@ pub enum RelationshipStoreError {
     #[error("relationship store is locked")]
     Locked,
     #[error("relationship ciphertext is invalid")]
-    InvalidCiphertext,
+    InvalidCiphertext {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("relationship storage failed")]
     Storage(#[source] anyhow::Error),
     #[error("relationship operation failed ({category})")]
@@ -46,6 +49,19 @@ pub enum RelationshipStoreError {
         #[source]
         source: anyhow::Error,
     },
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl RelationshipStoreError {
+    pub fn invalid_ciphertext() -> Self {
+        Self::InvalidCiphertext { source: None }
+    }
+
+    pub fn invalid_ciphertext_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::InvalidCiphertext {
+            source: Some(source.into()),
+        }
+    }
 }
 
 impl RelationshipStoreError {
@@ -548,7 +564,7 @@ where
         })?;
         let verified = cipher.open(kind, &lookup_key, &stored)?;
         if verified != payload {
-            return Err(RelationshipStoreError::InvalidCiphertext);
+            return Err(RelationshipStoreError::invalid_ciphertext());
         }
         Ok(())
     }
@@ -604,7 +620,7 @@ where
         rows.into_iter()
             .map(|row| {
                 if row.kind != kind.as_str() {
-                    return Err(RelationshipStoreError::InvalidCiphertext);
+                    return Err(RelationshipStoreError::invalid_ciphertext());
                 }
                 cipher.open(kind, &row.lookup_key, &row.payload_ciphertext)
             })
@@ -792,9 +808,9 @@ fn encode_member(member: &SpaceMember) -> Result<Vec<u8>, RelationshipStoreError
 
 fn decode_member(payload: &[u8]) -> Result<SpaceMember, RelationshipStoreError> {
     let decoded: MemberPayloadV1 =
-        serde_json::from_slice(payload).map_err(|_| RelationshipStoreError::InvalidCiphertext)?;
+        serde_json::from_slice(payload).map_err(RelationshipStoreError::invalid_ciphertext_from)?;
     if decoded.version != 1 {
-        return Err(RelationshipStoreError::InvalidCiphertext);
+        return Err(RelationshipStoreError::invalid_ciphertext());
     }
     Ok(decoded.member)
 }
@@ -809,9 +825,9 @@ fn encode_trusted_peer(peer: &TrustedPeer) -> Result<Vec<u8>, RelationshipStoreE
 
 fn decode_trusted_peer(payload: &[u8]) -> Result<TrustedPeer, RelationshipStoreError> {
     let decoded: TrustedPeerPayloadV1 =
-        serde_json::from_slice(payload).map_err(|_| RelationshipStoreError::InvalidCiphertext)?;
+        serde_json::from_slice(payload).map_err(RelationshipStoreError::invalid_ciphertext_from)?;
     if decoded.version != 1 {
-        return Err(RelationshipStoreError::InvalidCiphertext);
+        return Err(RelationshipStoreError::invalid_ciphertext());
     }
     Ok(decoded.peer)
 }
@@ -858,11 +874,11 @@ fn legacy_member_to_domain(row: LegacyMemberRow) -> Result<SpaceMember, Relation
     let joined_at = Utc
         .timestamp_opt(row.joined_at, 0)
         .single()
-        .ok_or(RelationshipStoreError::InvalidCiphertext)?;
+        .ok_or_else(RelationshipStoreError::invalid_ciphertext)?;
     let sync_preferences = serde_json::from_str::<MemberSyncPreferences>(&row.sync_preferences)
-        .map_err(|_| RelationshipStoreError::InvalidCiphertext)?;
+        .map_err(RelationshipStoreError::invalid_ciphertext_from)?;
     let identity_fingerprint = IdentityFingerprint::from_display_string(row.identity_fingerprint)
-        .map_err(|_| RelationshipStoreError::InvalidCiphertext)?;
+        .map_err(RelationshipStoreError::invalid_ciphertext_from)?;
     Ok(SpaceMember {
         device_id: DeviceId::new(row.device_id),
         device_name: row.device_name,
@@ -878,9 +894,9 @@ fn legacy_trusted_peer_to_domain(
     let trusted_at = Utc
         .timestamp_opt(row.trusted_at, 0)
         .single()
-        .ok_or(RelationshipStoreError::InvalidCiphertext)?;
+        .ok_or_else(RelationshipStoreError::invalid_ciphertext)?;
     let peer_fingerprint = IdentityFingerprint::from_display_string(row.peer_fingerprint)
-        .map_err(|_| RelationshipStoreError::InvalidCiphertext)?;
+        .map_err(RelationshipStoreError::invalid_ciphertext_from)?;
     Ok(TrustedPeer {
         local_device_id: DeviceId::new(row.local_device_id),
         peer_device_id: DeviceId::new(row.peer_device_id),
@@ -895,7 +911,7 @@ fn legacy_peer_address_to_domain(
     let observed_at = Utc
         .timestamp_opt(row.observed_at, 0)
         .single()
-        .ok_or(RelationshipStoreError::InvalidCiphertext)?;
+        .ok_or_else(RelationshipStoreError::invalid_ciphertext)?;
     Ok(PeerAddressRecord {
         device_id: DeviceId::new(row.device_id),
         addr_blob: row.addr_blob,

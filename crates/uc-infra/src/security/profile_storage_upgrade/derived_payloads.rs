@@ -278,7 +278,7 @@ impl DerivedPayloadConverter {
             })();
             let (original, relative, root) = match opened {
                 Ok(values) => values,
-                Err(FileSetCipherError::DecryptFailed) => {
+                Err(FileSetCipherError::DecryptFailed { .. }) => {
                     unreadable_file_sets.insert(row.entry_id);
                     processed += 1;
                     warnings += 1;
@@ -382,7 +382,7 @@ impl DerivedPayloadConverter {
             let entry_id = EntryId::from(row.entry_id.as_str());
             let fields = match legacy.decrypt(&entry_id, &row.ciphertext) {
                 Ok(fields) => fields,
-                Err(RenderDecodeError::DecryptFailed) => {
+                Err(RenderDecodeError::DecryptFailed { .. }) => {
                     unreadable_search.push((row.profile_id, row.entry_id));
                     processed += 1;
                     warnings += 1;

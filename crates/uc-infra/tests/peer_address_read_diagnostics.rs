@@ -51,7 +51,7 @@ impl DeriveSpaceSubkeyPort for Subkey {
         match self.0 {
             SubkeyMode::Ready => Ok(KEY),
             SubkeyMode::Locked => Err(SpaceAccessError::NotUnlocked),
-            SubkeyMode::Unknown => Err(SpaceAccessError::CorruptedKeyMaterial),
+            SubkeyMode::Unknown => Err(SpaceAccessError::corrupted_key_material()),
         }
     }
 }

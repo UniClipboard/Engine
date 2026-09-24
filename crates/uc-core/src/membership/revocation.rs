@@ -1376,10 +1376,16 @@ pub enum KeyEpochError {
     InvalidRevocationRecord,
 
     #[error("persisted security state could not be decrypted")]
-    DecryptionFailed,
+    DecryptionFailed {
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     #[error("persisted security state failed integrity validation")]
-    PersistedStateIntegrityFailed,
+    PersistedStateIntegrityFailed {
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     #[error("current space security state could not be installed")]
     SecurityState {
@@ -1410,6 +1416,31 @@ pub enum KeyEpochError {
 
     #[error("key epoch state rejected: {0:?}")]
     StateIssue(KeyEpochStateIssue),
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl KeyEpochError {
+    pub fn decryption_failed() -> Self {
+        Self::DecryptionFailed { source: None }
+    }
+
+    pub fn decryption_failed_from(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::DecryptionFailed {
+            source: Some(Box::new(source)),
+        }
+    }
+
+    pub fn persisted_state_integrity_failed() -> Self {
+        Self::PersistedStateIntegrityFailed { source: None }
+    }
+
+    pub fn persisted_state_integrity_failed_from(
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::PersistedStateIntegrityFailed {
+            source: Some(Box::new(source)),
+        }
+    }
 }
 
 impl std::fmt::Debug for KeyEpochError {

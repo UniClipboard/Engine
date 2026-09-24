@@ -100,7 +100,7 @@ fn unlock_failure_reason(error: &SpaceAccessError) -> UnlockFailureReason {
     match error {
         SpaceAccessError::WrongPassphrase => UnlockFailureReason::PassphraseMismatch,
         SpaceAccessError::NotInitialized => UnlockFailureReason::SpaceNotFound,
-        SpaceAccessError::CorruptedKeyMaterial => UnlockFailureReason::KeyslotCorrupted,
+        SpaceAccessError::CorruptedKeyMaterial { .. } => UnlockFailureReason::KeyslotCorrupted,
         _ => UnlockFailureReason::Internal,
     }
 }
@@ -109,7 +109,7 @@ fn map_unlock_error(error: SpaceAccessError) -> UnlockSpaceError {
     match error {
         SpaceAccessError::NotInitialized => UnlockSpaceError::SpaceNotInitialized,
         SpaceAccessError::WrongPassphrase => UnlockSpaceError::WrongPassphrase,
-        SpaceAccessError::CorruptedKeyMaterial => UnlockSpaceError::CorruptedKeyMaterial,
+        SpaceAccessError::CorruptedKeyMaterial { .. } => UnlockSpaceError::CorruptedKeyMaterial,
         error @ SpaceAccessError::Internal(_) => UnlockSpaceError::internal(error),
         other => {
             warn!(error = %other, "unexpected space access error during unlock");

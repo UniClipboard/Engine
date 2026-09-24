@@ -263,8 +263,8 @@ fn group_update_apply_error_type(error: &KeyEpochError) -> DiagnosticErrorType {
     match error {
         KeyEpochError::Repository(_) | KeyEpochError::StateIssue(_) => DiagnosticErrorType::Storage,
         KeyEpochError::SecurityState { .. }
-        | KeyEpochError::DecryptionFailed
-        | KeyEpochError::PersistedStateIntegrityFailed => DiagnosticErrorType::Security,
+        | KeyEpochError::DecryptionFailed { .. }
+        | KeyEpochError::PersistedStateIntegrityFailed { .. } => DiagnosticErrorType::Security,
         KeyEpochError::SpaceNotReady => DiagnosticErrorType::Unavailable,
         KeyEpochError::EpochOverflow => DiagnosticErrorType::Internal,
         KeyEpochError::InvalidContentKeyId

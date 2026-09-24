@@ -41,7 +41,7 @@ mod tests {
         let key_material = map_profile_factory_reset_error(ProfileFactoryResetError::WipeKeys);
         let storage = map_profile_factory_reset_error(ProfileFactoryResetError::ClearState);
         let internal = map_profile_factory_reset_error(ProfileFactoryResetError::Repository(
-            uc_application::deps::ProfileLifecycleRepositoryError::Corrupt,
+            uc_application::deps::ProfileLifecycleRepositoryError::corrupt(),
         ));
 
         assert_ne!(key_material.code(), storage.code());

@@ -140,7 +140,7 @@ impl JoinerAdmissionService {
                         report.deferred_count += 1;
                         return;
                     }
-                    Err(JoinerStartMaterialError::InvalidInvitation) => {
+                    Err(JoinerStartMaterialError::InvalidInvitation { .. }) => {
                         report.recovery_required_count += 1;
                         return;
                     }

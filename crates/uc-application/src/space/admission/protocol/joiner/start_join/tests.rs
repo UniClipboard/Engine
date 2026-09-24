@@ -68,7 +68,7 @@ fn joiner_start_state_errors_keep_distinct_join_space_categories() {
 #[test]
 fn joiner_start_material_errors_keep_distinct_join_space_categories() {
     assert!(matches!(
-        JoinSpaceError::from(JoinerStartMaterialError::InvalidInvitation),
+        JoinSpaceError::from(JoinerStartMaterialError::invalid_invitation()),
         JoinSpaceError::InvalidInvitation
     ));
     assert!(matches!(

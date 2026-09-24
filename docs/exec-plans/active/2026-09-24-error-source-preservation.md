@@ -282,4 +282,12 @@ E1 的检查会拒绝只删标识、仍保留 `{error}` 的改法，所以 E4 �
   - 测试：损坏的 MLS 客户端状态可取回 `serde_json::Error`；截断的分块头可取回 `UnexpectedEof`。
   - 修正脚本缺陷：按类型名前缀匹配时曾把 `MobileFileStagingError::Io` 误当作 `StagingError::Io` 改动文档注释，已还原并加词边界；
     文档注释中被改成构造函数调用的链接已还原为变体名。
+- 第三批（已完成）：仓储密码适配器 `ReceiveArtifactCipherError`、`PublishLogCipherError`、`ActiveRegisterCipherError`、`FileSetCipherError`；
+  Core 的 `SpaceAccessError::CorruptedKeyMaterial`、`CurrentMembershipIdentityError`、`BootstrapError::{CryptographicState, InvalidBootstrapId}`、
+  `LegacyMigrationRecoveryError::RecoveryRequired`、`KeyEpochError::{DecryptionFailed, PersistedStateIntegrityFailed}`、`SpaceProtectionError`；
+  以及 `RelationshipStoreError::InvalidCiphertext`、`RecoveryMaterialError`、`ProfileLifecycleRepositoryError`、`FullInvitationCodecError`、
+  `SpaceRebuildProgressError`、`SponsorRouteIdentityError`、`RenderDecodeError`、`JoinerStartMaterialError::InvalidInvitation`。
+  - `hkdf::InvalidLength` 未实现 `Error`，且只表示常量输出长度超限，按长度类例外注释。
+  - 测试 `invalid_full_invitation_is_rejected_without_a_dependency_error` 原先断言无来源；现在断言来源是邀请解码错误，
+    仍能区分“无效输入”与“依赖故障”。
 - 暂缓：`EncryptionError` 与 `SecureStorageError` 以及 `AeadError::DecryptFailed` 的变体被 049 未提交的 `profile_key_recovery.rs` 模式匹配，等 049 提交后处理。

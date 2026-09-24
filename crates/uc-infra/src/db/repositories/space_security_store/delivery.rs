@@ -262,7 +262,7 @@ impl<E: DbExecutor> DieselSpaceSecurityStore<E> {
                 let encrypted = match load_source_summary(conn, "space_material", &row.source_id)? {
                     Some(summary) => summary,
                     None => {
-                        let updates = load_space_material_on(conn, key, space_id)?.ok_or(KeyEpochError::PersistedStateIntegrityFailed)?.pending_group_updates().to_vec();
+                        let updates = load_space_material_on(conn, key, space_id)?.ok_or_else(KeyEpochError::persisted_state_integrity_failed)?.pending_group_updates().to_vec();
                         let summary = reconcile_source(conn, key, space_id, &source, updates)?;
                         save_source_summary(conn, "space_material", &row.source_id, &summary)?;
                         summary
@@ -279,10 +279,10 @@ impl<E: DbExecutor> DieselSpaceSecurityStore<E> {
                 let encrypted = match load_source_summary(conn, "revocation", &row.source_id)? {
                     Some(summary) => summary,
                     None => {
-                        let record_row = load_revocation_row(conn, &row.source_id).map_err(backend)?.ok_or(KeyEpochError::PersistedStateIntegrityFailed)?;
+                        let record_row = load_revocation_row(conn, &row.source_id).map_err(backend)?.ok_or_else(KeyEpochError::persisted_state_integrity_failed)?;
                         let record = decode_record(key, &record_row)?;
                         let updates = if matches!(record.status(), RevocationStatus::Activated | RevocationStatus::Distributing) {
-                            let bytes = record_row.encrypted_stage.as_ref().ok_or(KeyEpochError::PersistedStateIntegrityFailed)?;
+                            let bytes = record_row.encrypted_stage.as_ref().ok_or_else(KeyEpochError::persisted_state_integrity_failed)?;
                             let stage: RevocationStage = open(key, bytes, &stage_aad(&row.source_id))?;
                             stage.outbox().iter().filter(|m| !m.is_confirmed()).map(|m| PendingGroupUpdate::for_generation(record.revocation_id().clone(), GroupEpoch::new(m.generation()), *m.recipient(), m.payload().to_vec())).collect()
                         } else { Vec::new() };
@@ -303,12 +303,12 @@ impl<E: DbExecutor> DieselSpaceSecurityStore<E> {
                     continue;
                 }
                 if !expected_tokens.remove(&token) {
-                    return Err(KeyEpochError::PersistedStateIntegrityFailed.into());
+                    return Err(KeyEpochError::persisted_state_integrity_failed().into());
                 }
                 states.push((token, state));
             }
             if !expected_tokens.is_empty() {
-                return Err(KeyEpochError::PersistedStateIntegrityFailed.into());
+                return Err(KeyEpochError::persisted_state_integrity_failed().into());
             }
             states.sort_by_key(|(_, state)| (state.epoch, state.next_attempt_ms));
             let mut held_peers = HashSet::new();
@@ -324,7 +324,7 @@ impl<E: DbExecutor> DieselSpaceSecurityStore<E> {
                     .bind::<Binary, _>(&token).get_result::<PayloadRow>(conn).map_err(backend)?;
                 let update: PendingGroupUpdate = open(key, &row.encrypted_payload, &aad("payload", &token))?;
                 if update.update_id() != state.update_id || update.recipient() != &state.recipient || Sha256::digest(update.payload()).as_slice() != state.payload_digest {
-                    return Err(KeyEpochError::PersistedStateIntegrityFailed.into());
+                    return Err(KeyEpochError::persisted_state_integrity_failed().into());
                 }
                 due.push(update);
                 if due.len() == 8 { break; }

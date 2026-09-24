@@ -104,11 +104,27 @@ pub enum SpaceSessionRebindError {
     Inconsistent,
 }
 
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum SpaceRebuildProgressError {
     #[error("space rebuild progress storage is unavailable")]
-    Unavailable,
+    Unavailable {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
 
     #[error("space rebuild progress is inconsistent")]
     Inconsistent,
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl SpaceRebuildProgressError {
+    pub fn unavailable() -> Self {
+        Self::Unavailable { source: None }
+    }
+
+    pub fn unavailable_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Unavailable {
+            source: Some(source.into()),
+        }
+    }
 }
