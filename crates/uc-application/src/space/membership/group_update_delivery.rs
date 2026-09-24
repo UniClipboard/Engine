@@ -173,9 +173,10 @@ impl DeliverPendingGroupUpdatesPort for DeliverPendingGroupUpdatesUseCase {
             let dispatched = self.dispatch.dispatch_group_update(update).await;
             observation.finish(match &dispatched {
                 Ok(()) => LocalWorkOutcome::Ok,
-                Err(GroupUpdateDispatchError::Offline | GroupUpdateDispatchError::Transport) => {
-                    LocalWorkOutcome::Deferred
-                }
+                Err(
+                    GroupUpdateDispatchError::Offline { .. }
+                    | GroupUpdateDispatchError::Transport { .. },
+                ) => LocalWorkOutcome::Deferred,
                 Err(GroupUpdateDispatchError::Rejected) => LocalWorkOutcome::Rejected,
             });
             match dispatched {
@@ -189,8 +190,8 @@ impl DeliverPendingGroupUpdatesPort for DeliverPendingGroupUpdatesUseCase {
                     Err(error) => return classify_store_error(&error),
                 },
                 Err(
-                    error @ (GroupUpdateDispatchError::Offline
-                    | GroupUpdateDispatchError::Transport),
+                    error @ (GroupUpdateDispatchError::Offline { .. }
+                    | GroupUpdateDispatchError::Transport { .. }),
                 ) => {
                     failures.push((update.update_id().to_owned(), error));
                     unavailable_peers.insert(*update.recipient());
@@ -618,7 +619,7 @@ mod tests {
         });
         let use_case = DeliverPendingGroupUpdatesUseCase::new(
             store.clone(),
-            dispatch_with([Err(GroupUpdateDispatchError::Offline)]),
+            dispatch_with([Err(GroupUpdateDispatchError::offline())]),
             retaining_all(&store),
             refresh_events().0,
             Arc::new(FixedClock),
@@ -646,7 +647,7 @@ mod tests {
             acknowledged: Mutex::new(Vec::new()),
             deferred_batches: Mutex::new(Vec::new()),
         });
-        let dispatch = dispatch_with(std::iter::repeat_n(Ok(()), 10));
+        let dispatch = dispatch_with((0..10).map(|_| Ok(())));
         let use_case = DeliverPendingGroupUpdatesUseCase::new(
             store.clone(),
             dispatch.clone(),
@@ -687,10 +688,9 @@ mod tests {
             acknowledged: Mutex::new(Vec::new()),
             deferred_batches: Mutex::new(Vec::new()),
         });
-        let dispatch = dispatch_with(std::iter::repeat_n(
-            Err(GroupUpdateDispatchError::Offline),
-            MAX_UPDATES_PER_ROUND,
-        ));
+        let dispatch = dispatch_with(
+            (0..MAX_UPDATES_PER_ROUND).map(|_| Err(GroupUpdateDispatchError::offline())),
+        );
         let use_case = DeliverPendingGroupUpdatesUseCase::new(
             store.clone(),
             dispatch,

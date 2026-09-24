@@ -73,7 +73,7 @@ pub(crate) async fn execute_preview_config_import(
                         ConfigImportPreviewOutcome::InvalidPasswordOrCorrupt,
                     ))
                 }
-                Err(ConfigMigrationError::IncompatibleBundle { reason }) => {
+                Err(ConfigMigrationError::IncompatibleBundle { reason, .. }) => {
                     Ok(OperationResult::ConfigImportPreview(
                         ConfigImportPreviewOutcome::Incompatible { reason },
                     ))
@@ -112,7 +112,7 @@ pub(crate) async fn execute_stage_config_import(
                         ConfigImportStageOutcome::InvalidPasswordOrCorrupt,
                     ))
                 }
-                Err(ConfigMigrationError::IncompatibleBundle { reason }) => {
+                Err(ConfigMigrationError::IncompatibleBundle { reason, .. }) => {
                     Ok(OperationResult::ConfigImportStaged(
                         ConfigImportStageOutcome::Incompatible { reason },
                     ))

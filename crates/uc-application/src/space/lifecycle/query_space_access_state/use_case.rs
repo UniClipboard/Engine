@@ -53,7 +53,15 @@ mod tests {
     #[async_trait]
     impl CurrentSpaceIdentityPort for StubCurrentSpace {
         async fn current_space_id(&self) -> Result<Option<SpaceId>, CurrentSpaceIdentityError> {
-            self.result.clone()
+            match &self.result {
+                Ok(space_id) => Ok(space_id.clone()),
+                Err(CurrentSpaceIdentityError::Unavailable { .. }) => {
+                    Err(CurrentSpaceIdentityError::unavailable())
+                }
+                Err(CurrentSpaceIdentityError::Inconsistent { .. }) => {
+                    Err(CurrentSpaceIdentityError::inconsistent())
+                }
+            }
         }
     }
 
@@ -124,13 +132,13 @@ mod tests {
 
     #[tokio::test]
     async fn current_space_failure_is_preserved() {
-        let (query, session) = use_case(Err(CurrentSpaceIdentityError::Unavailable), true);
+        let (query, session) = use_case(Err(CurrentSpaceIdentityError::unavailable()), true);
 
         let error = query.execute().await.unwrap_err();
 
         assert!(matches!(
             error,
-            QuerySpaceAccessStateError::CurrentSpace(CurrentSpaceIdentityError::Unavailable)
+            QuerySpaceAccessStateError::CurrentSpace(CurrentSpaceIdentityError::Unavailable { .. })
         ));
         assert!(session.requested_spaces.lock().unwrap().is_empty());
     }

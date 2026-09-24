@@ -303,13 +303,13 @@ impl IssueMembershipBranchRecoveryUseCase {
 
 fn map_ledger_error(error: MembershipLedgerError) -> IssueMembershipBranchRecoveryError {
     match error {
-        MembershipLedgerError::Locked | MembershipLedgerError::Unavailable => {
+        MembershipLedgerError::Locked | MembershipLedgerError::Unavailable { .. } => {
             IssueMembershipBranchRecoveryError::Unavailable {
                 source: anyhow::Error::new(error),
             }
         }
         MembershipLedgerError::Conflict => rejected_with(error),
-        MembershipLedgerError::Corrupt | MembershipLedgerError::RecoveryRequired => {
+        MembershipLedgerError::Corrupt { .. } | MembershipLedgerError::RecoveryRequired => {
             IssueMembershipBranchRecoveryError::Corrupt {
                 source: anyhow::Error::new(error),
             }
@@ -351,7 +351,7 @@ fn rejected_with(error: MembershipLedgerError) -> IssueMembershipBranchRecoveryE
 
 fn corrupt() -> IssueMembershipBranchRecoveryError {
     IssueMembershipBranchRecoveryError::Corrupt {
-        source: anyhow::Error::new(MembershipLedgerError::Corrupt),
+        source: anyhow::Error::new(MembershipLedgerError::corrupt()),
     }
 }
 

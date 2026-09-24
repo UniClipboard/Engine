@@ -839,7 +839,7 @@ mod tests {
                 .current_member_signatures
                 .current_member_epoch()
                 .await,
-            Err(CurrentMemberSignatureError::Unavailable)
+            Err(CurrentMemberSignatureError::Unavailable { .. })
         ));
         assert!(!wiring.wired.sync_engine.membership_session.is_ready());
     }

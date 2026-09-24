@@ -38,6 +38,9 @@ pub enum ConfigMigrationError {
     IncompatibleBundle {
         /// Non-secret, operator-facing explanation of the incompatibility.
         reason: String,
+        /// 下层错误；纯校验失败时为空。
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
 
     /// An input/output failure occurred while reading the source, writing the
@@ -48,6 +51,9 @@ pub enum ConfigMigrationError {
     Io {
         /// Non-secret description of the I/O failure.
         details: String,
+        /// 下层错误；纯校验失败时为空。
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
 
     /// Any other internal failure not covered by the variants above.
@@ -57,5 +63,8 @@ pub enum ConfigMigrationError {
     Internal {
         /// Non-secret description of the internal failure.
         details: String,
+        /// 下层错误；纯校验失败时为空。
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
 }

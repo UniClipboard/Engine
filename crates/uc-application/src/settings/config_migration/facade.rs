@@ -86,6 +86,7 @@ impl ConfigMigrationFacade {
             .await
             .map_err(|error| ConfigMigrationError::Internal {
                 details: format!("preparing portable current Space identity failed: {error}"),
+                source: None,
             })?;
 
         self.deps.export_bundle.export_bundle(destination).await
@@ -137,6 +138,7 @@ impl ConfigMigrationFacade {
             .await
             .map_err(|err| ConfigMigrationError::Internal {
                 details: format!("failed to read current Space identity: {err}"),
+                source: None,
             })?
             .ok_or(ConfigMigrationError::NotInitialized)
     }
@@ -186,7 +188,7 @@ mod tests {
     #[async_trait]
     impl CurrentSpaceIdentityPort for FailingCurrentSpace {
         async fn current_space_id(&self) -> Result<Option<SpaceId>, CurrentSpaceIdentityError> {
-            Err(CurrentSpaceIdentityError::Unavailable)
+            Err(CurrentSpaceIdentityError::unavailable())
         }
     }
 

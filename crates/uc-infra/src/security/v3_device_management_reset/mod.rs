@@ -375,7 +375,7 @@ fn map_manifest_error(
         ActiveSpaceGenerationManifestStoreError::Storage { .. } => {
             AdmissionSpaceTransitionError::storage(error)
         }
-        ActiveSpaceGenerationManifestStoreError::Corrupt
+        ActiveSpaceGenerationManifestStoreError::Corrupt { .. }
         | ActiveSpaceGenerationManifestStoreError::UnsupportedVersion => {
             AdmissionSpaceTransitionError::inconsistent(error)
         }

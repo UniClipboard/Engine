@@ -258,9 +258,9 @@ impl HandleMembershipHistoryMessageUseCase {
                     }
                     Some(Ok(proven_sender)) => {
                         let same_branch = MembershipConflictPolicy::branch_id(&candidate)
-                            .map_err(|_| MembershipLedgerError::Corrupt)?
+                            .map_err(MembershipLedgerError::corrupt_from)?
                             == MembershipConflictPolicy::branch_id(&proven_sender)
-                                .map_err(|_| MembershipLedgerError::Corrupt)?
+                                .map_err(MembershipLedgerError::corrupt_from)?
                             && candidate.active_members() == proven_sender.active_members();
                         let confirmed = if same_branch {
                             &proven_sender
@@ -269,7 +269,7 @@ impl HandleMembershipHistoryMessageUseCase {
                         };
                         let confirmed_position = confirmed
                             .current_position()
-                            .map_err(|_| MembershipLedgerError::Corrupt)?;
+                            .map_err(MembershipLedgerError::corrupt_from)?;
                         (
                             MembershipHistoryAckV3::Confirmed {
                                 transfer_id,
@@ -548,10 +548,10 @@ pub(super) fn remember_completed_inbound_transfer(
 fn map_ledger_error(error: MembershipLedgerError) -> HandleMembershipHistoryMessageError {
     match error {
         MembershipLedgerError::Locked => HandleMembershipHistoryMessageError::Locked,
-        MembershipLedgerError::Corrupt | MembershipLedgerError::RecoveryRequired => {
+        MembershipLedgerError::Corrupt { .. } | MembershipLedgerError::RecoveryRequired => {
             HandleMembershipHistoryMessageError::RecoveryRequired
         }
-        MembershipLedgerError::Conflict | MembershipLedgerError::Unavailable => {
+        MembershipLedgerError::Conflict | MembershipLedgerError::Unavailable { .. } => {
             HandleMembershipHistoryMessageError::Unavailable
         }
     }

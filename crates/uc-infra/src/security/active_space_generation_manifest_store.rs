@@ -94,21 +94,21 @@ fn decode_v3_manifest(
     plaintext: &[u8],
 ) -> Result<ActiveRuntimeManifestV3, ActiveSpaceGenerationManifestStoreError> {
     let persisted: PersistedActiveRuntimeManifestV3 = postcard::from_bytes(plaintext)
-        .map_err(|_| ActiveSpaceGenerationManifestStoreError::Corrupt)?;
+        .map_err(ActiveSpaceGenerationManifestStoreError::corrupt_from)?;
     if persisted.format_version != ACTIVE_RUNTIME_MANIFEST_FORMAT_V3
         || persisted.keyslot_generation == [0; 16]
         || persisted.manifest_digest != persisted.expected_digest()
     {
-        return Err(ActiveSpaceGenerationManifestStoreError::Corrupt);
+        return Err(ActiveSpaceGenerationManifestStoreError::corrupt());
     }
     let layout = ActiveRuntimeLayout::new(
         SpaceId::from_string(persisted.space_id),
         persisted.profile_data_generation,
         persisted.space_control_generation,
     )
-    .map_err(|_| ActiveSpaceGenerationManifestStoreError::Corrupt)?;
+    .map_err(ActiveSpaceGenerationManifestStoreError::corrupt_from)?;
     ActiveRuntimeManifestV3::new(layout, persisted.keyslot_generation)
-        .ok_or(ActiveSpaceGenerationManifestStoreError::Corrupt)
+        .ok_or_else(ActiveSpaceGenerationManifestStoreError::corrupt)
 }
 
 fn manifest_format_version(
@@ -116,7 +116,7 @@ fn manifest_format_version(
 ) -> Result<u16, ActiveSpaceGenerationManifestStoreError> {
     postcard::take_from_bytes::<u16>(plaintext)
         .map(|(format_version, _)| format_version)
-        .map_err(|_| ActiveSpaceGenerationManifestStoreError::Corrupt)
+        .map_err(ActiveSpaceGenerationManifestStoreError::corrupt_from)
 }
 
 /// 已验证的 V3 活动运行布局及其 MasterKey keyslot generation。
@@ -273,9 +273,25 @@ pub enum ActiveSpaceGenerationManifestStoreError {
         source: anyhow::Error,
     },
     #[error("active space generation manifest is corrupt")]
-    Corrupt,
+    Corrupt {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("active space generation manifest version is not active yet")]
     UnsupportedVersion,
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl ActiveSpaceGenerationManifestStoreError {
+    pub fn corrupt() -> Self {
+        Self::Corrupt { source: None }
+    }
+
+    pub fn corrupt_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Corrupt {
+            source: Some(source.into()),
+        }
+    }
 }
 
 impl ActiveSpaceGenerationManifestStoreError {
@@ -339,11 +355,11 @@ impl ActiveSpaceGenerationManifestStore {
                 .map_err(map_key_error)?,
         );
         let journal: EncryptionPassphraseChangeJournal = serde_json::from_slice(&plaintext)
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Corrupt)?;
+            .map_err(ActiveSpaceGenerationManifestStoreError::corrupt_from)?;
         journal
             .validate()
             .then_some(Some(journal))
-            .ok_or(ActiveSpaceGenerationManifestStoreError::Corrupt)
+            .ok_or_else(ActiveSpaceGenerationManifestStoreError::corrupt)
     }
 
     pub(crate) async fn save_encryption_passphrase_change_journal(
@@ -351,7 +367,7 @@ impl ActiveSpaceGenerationManifestStore {
         journal: &EncryptionPassphraseChangeJournal,
     ) -> Result<(), ActiveSpaceGenerationManifestStoreError> {
         if !journal.validate() {
-            return Err(ActiveSpaceGenerationManifestStoreError::Corrupt);
+            return Err(ActiveSpaceGenerationManifestStoreError::corrupt());
         }
         let _guard = self.write_lock.lock().await;
         let parent = self
@@ -363,7 +379,7 @@ impl ActiveSpaceGenerationManifestStore {
             .map_err(ActiveSpaceGenerationManifestStoreError::storage)?;
         let plaintext = zeroize::Zeroizing::new(
             serde_json::to_vec(journal)
-                .map_err(|_| ActiveSpaceGenerationManifestStoreError::Corrupt)?,
+                .map_err(ActiveSpaceGenerationManifestStoreError::corrupt_from)?,
         );
         let ciphertext = self
             .keys
@@ -491,16 +507,16 @@ impl ActiveSpaceGenerationManifestStore {
         match format_version {
             uc_core::membership::ACTIVE_SPACE_GENERATION_MANIFEST_FORMAT_V2 => {
                 let manifest: ActiveSpaceGenerationManifestV2 = postcard::from_bytes(&plaintext)
-                    .map_err(|_| ActiveSpaceGenerationManifestStoreError::Corrupt)?;
+                    .map_err(ActiveSpaceGenerationManifestStoreError::corrupt_from)?;
                 manifest
                     .validate()
                     .then_some(ActiveRuntimeManifest::V2(manifest))
-                    .ok_or(ActiveSpaceGenerationManifestStoreError::Corrupt)
+                    .ok_or_else(ActiveSpaceGenerationManifestStoreError::corrupt)
             }
             ACTIVE_RUNTIME_MANIFEST_FORMAT_V3 => {
                 decode_v3_manifest(&plaintext).map(ActiveRuntimeManifest::V3)
             }
-            _ => Err(ActiveSpaceGenerationManifestStoreError::Corrupt),
+            _ => Err(ActiveSpaceGenerationManifestStoreError::corrupt()),
         }
     }
 
@@ -509,11 +525,11 @@ impl ActiveSpaceGenerationManifestStore {
         manifest: &ActiveSpaceGenerationManifestV2,
     ) -> Result<(), ActiveSpaceGenerationManifestStoreError> {
         if !manifest.validate() {
-            return Err(ActiveSpaceGenerationManifestStoreError::Corrupt);
+            return Err(ActiveSpaceGenerationManifestStoreError::corrupt());
         }
         let _guard = self.write_lock.lock().await;
         let plaintext = postcard::to_stdvec(manifest)
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Corrupt)?;
+            .map_err(ActiveSpaceGenerationManifestStoreError::corrupt_from)?;
         self.persist_manifest(&plaintext).await
     }
 
@@ -530,7 +546,7 @@ impl ActiveSpaceGenerationManifestStore {
             || target.layout.space_id().as_ref() != expected_source.space_id
             || target.keyslot_generation != expected_source.keyslot_generation
         {
-            return Err(ActiveSpaceGenerationManifestStoreError::Corrupt);
+            return Err(ActiveSpaceGenerationManifestStoreError::corrupt());
         }
         let _guard = self.write_lock.lock().await;
         let ciphertext = match tokio::fs::read(&self.path).await {
@@ -544,9 +560,9 @@ impl ActiveSpaceGenerationManifestStore {
         match manifest_format_version(&plaintext)? {
             uc_core::membership::ACTIVE_SPACE_GENERATION_MANIFEST_FORMAT_V2 => {
                 let current: ActiveSpaceGenerationManifestV2 = postcard::from_bytes(&plaintext)
-                    .map_err(|_| ActiveSpaceGenerationManifestStoreError::Corrupt)?;
+                    .map_err(ActiveSpaceGenerationManifestStoreError::corrupt_from)?;
                 if !current.validate() {
-                    return Err(ActiveSpaceGenerationManifestStoreError::Corrupt);
+                    return Err(ActiveSpaceGenerationManifestStoreError::corrupt());
                 }
                 if current != *expected_source {
                     return Ok(V3ManifestPromotionOutcome::SourceChanged);
@@ -560,11 +576,11 @@ impl ActiveSpaceGenerationManifestStore {
                     V3ManifestPromotionOutcome::SourceChanged
                 });
             }
-            _ => return Err(ActiveSpaceGenerationManifestStoreError::Corrupt),
+            _ => return Err(ActiveSpaceGenerationManifestStoreError::corrupt()),
         }
         let persisted = PersistedActiveRuntimeManifestV3::from_manifest(target);
         let plaintext = postcard::to_stdvec(&persisted)
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Corrupt)?;
+            .map_err(ActiveSpaceGenerationManifestStoreError::corrupt_from)?;
         self.persist_manifest(&plaintext).await?;
         Ok(V3ManifestPromotionOutcome::Promoted)
     }
@@ -584,7 +600,7 @@ impl ActiveSpaceGenerationManifestStore {
                 == target.layout.space_control_generation()
             || expected_source == target
         {
-            return Err(ActiveSpaceGenerationManifestStoreError::Corrupt);
+            return Err(ActiveSpaceGenerationManifestStoreError::corrupt());
         }
         let _guard = self.write_lock.lock().await;
         let ciphertext = match tokio::fs::read(&self.path).await {
@@ -607,7 +623,7 @@ impl ActiveSpaceGenerationManifestStore {
         }
         let persisted = PersistedActiveRuntimeManifestV3::from_manifest(target);
         let plaintext = postcard::to_stdvec(&persisted)
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Corrupt)?;
+            .map_err(ActiveSpaceGenerationManifestStoreError::corrupt_from)?;
         self.persist_manifest(&plaintext).await?;
         Ok(V3ManifestPromotionOutcome::Promoted)
     }
@@ -638,7 +654,7 @@ impl ActiveSpaceGenerationManifestStore {
         }
         let persisted = PersistedActiveRuntimeManifestV3::from_manifest(target);
         let plaintext = postcard::to_stdvec(&persisted)
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Corrupt)?;
+            .map_err(ActiveSpaceGenerationManifestStoreError::corrupt_from)?;
         self.persist_manifest(&plaintext).await?;
         Ok(V3ManifestPromotionOutcome::Promoted)
     }
@@ -689,11 +705,11 @@ impl ActiveSpaceGenerationManifestStore {
         target: &ActiveRuntimeManifestV3,
     ) -> Result<(), ActiveSpaceGenerationManifestStoreError> {
         if admission_id == [0; 32] {
-            return Err(ActiveSpaceGenerationManifestStoreError::Corrupt);
+            return Err(ActiveSpaceGenerationManifestStoreError::corrupt());
         }
         let stopped = PersistedStoppedAdmissionTargetV1::new(admission_id, target);
         let plaintext = postcard::to_stdvec(&stopped)
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Corrupt)?;
+            .map_err(ActiveSpaceGenerationManifestStoreError::corrupt_from)?;
         let ciphertext = self
             .keys
             .seal_profile_payload(STOPPED_ADMISSION_TARGET_PURPOSE, &plaintext)
@@ -736,9 +752,9 @@ impl ActiveSpaceGenerationManifestStore {
             .open_profile_payload(STOPPED_ADMISSION_TARGET_PURPOSE, &ciphertext)
             .map_err(map_key_error)?;
         let stopped: PersistedStoppedAdmissionTargetV1 = postcard::from_bytes(&plaintext)
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Corrupt)?;
+            .map_err(ActiveSpaceGenerationManifestStoreError::corrupt_from)?;
         if stopped.format_version != 1 || stopped.admission_id == [0; 32] {
-            return Err(ActiveSpaceGenerationManifestStoreError::Corrupt);
+            return Err(ActiveSpaceGenerationManifestStoreError::corrupt());
         }
         Ok(stopped.matches(target))
     }
@@ -773,11 +789,11 @@ impl ActiveSpaceGenerationManifestStore {
             .open_profile_payload(DEVICE_RESET_JOURNAL_PURPOSE, &ciphertext)
             .map_err(map_key_error)?;
         let journal: DeviceManagementResetJournalV3 = postcard::from_bytes(&plaintext)
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Corrupt)?;
+            .map_err(ActiveSpaceGenerationManifestStoreError::corrupt_from)?;
         journal
             .validate()
             .then_some(Some(journal))
-            .ok_or(ActiveSpaceGenerationManifestStoreError::Corrupt)
+            .ok_or_else(ActiveSpaceGenerationManifestStoreError::corrupt)
     }
 
     pub(crate) async fn save_device_reset_journal_v3(
@@ -785,7 +801,7 @@ impl ActiveSpaceGenerationManifestStore {
         journal: &DeviceManagementResetJournalV3,
     ) -> Result<(), ActiveSpaceGenerationManifestStoreError> {
         if !journal.validate() {
-            return Err(ActiveSpaceGenerationManifestStoreError::Corrupt);
+            return Err(ActiveSpaceGenerationManifestStoreError::corrupt());
         }
         let _guard = self.write_lock.lock().await;
         let parent = self
@@ -796,7 +812,7 @@ impl ActiveSpaceGenerationManifestStore {
             .await
             .map_err(ActiveSpaceGenerationManifestStoreError::storage)?;
         let plaintext = postcard::to_stdvec(journal)
-            .map_err(|_| ActiveSpaceGenerationManifestStoreError::Corrupt)?;
+            .map_err(ActiveSpaceGenerationManifestStoreError::corrupt_from)?;
         let ciphertext = self
             .keys
             .seal_profile_payload(DEVICE_RESET_JOURNAL_PURPOSE, &plaintext)
@@ -888,7 +904,9 @@ fn map_key_error(error: AdmissionKeyError) -> ActiveSpaceGenerationManifestStore
     match error {
         AdmissionKeyError::Corrupt { .. }
         | AdmissionKeyError::InvalidLayout
-        | AdmissionKeyError::OpenFailed { .. } => ActiveSpaceGenerationManifestStoreError::Corrupt,
+        | AdmissionKeyError::OpenFailed { .. } => {
+            ActiveSpaceGenerationManifestStoreError::corrupt()
+        }
         AdmissionKeyError::SecureStorage { .. } | AdmissionKeyError::StorageNotPersisted => {
             ActiveSpaceGenerationManifestStoreError::storage(error)
         }
@@ -1176,7 +1194,7 @@ mod tests {
 
         assert!(matches!(
             store.promote_v3_control_generation(&source, &target).await,
-            Err(ActiveSpaceGenerationManifestStoreError::Corrupt)
+            Err(ActiveSpaceGenerationManifestStoreError::Corrupt { .. })
         ));
         assert_eq!(store.load_runtime().await.unwrap(), None);
     }
@@ -1253,11 +1271,11 @@ mod tests {
 
         assert!(matches!(
             store.promote_v3_from_v2(&source, &wrong_space).await,
-            Err(ActiveSpaceGenerationManifestStoreError::Corrupt)
+            Err(ActiveSpaceGenerationManifestStoreError::Corrupt { .. })
         ));
         assert!(matches!(
             store.promote_v3_from_v2(&source, &wrong_keyslot).await,
-            Err(ActiveSpaceGenerationManifestStoreError::Corrupt)
+            Err(ActiveSpaceGenerationManifestStoreError::Corrupt { .. })
         ));
         assert_eq!(store.load_sync().unwrap(), Some(source));
     }
@@ -1294,7 +1312,7 @@ mod tests {
             let encoded = postcard::to_stdvec(&candidate).unwrap();
             assert!(matches!(
                 decode_v3_manifest(&encoded),
-                Err(ActiveSpaceGenerationManifestStoreError::Corrupt)
+                Err(ActiveSpaceGenerationManifestStoreError::Corrupt { .. })
             ));
         }
     }

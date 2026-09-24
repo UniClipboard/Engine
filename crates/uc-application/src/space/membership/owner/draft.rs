@@ -125,9 +125,9 @@ impl MembershipDraft {
         let revision = self
             .revision
             .checked_add(1)
-            .ok_or(MembershipLedgerError::Corrupt)?;
+            .ok_or_else(MembershipLedgerError::corrupt)?;
         let ledger = MembershipLedger::start(history, local_device_id, local_member, revision)
-            .map_err(|_| MembershipLedgerError::Corrupt)?;
+            .map_err(MembershipLedgerError::corrupt_from)?;
         self.space = Some(SpaceMembershipView {
             ledger,
             history_exchange: MembershipHistoryExchangeRecord::default(),
@@ -151,7 +151,7 @@ impl MembershipDraft {
         self.revision = self
             .revision
             .checked_add(1)
-            .ok_or(MembershipLedgerError::Corrupt)?;
+            .ok_or_else(MembershipLedgerError::corrupt)?;
         self.revised = true;
         push_unique(
             &mut self.follow_ups,
@@ -173,7 +173,7 @@ impl MembershipDraft {
             self.apply(LedgerInput::CompanionDataChanged {
                 presentation_changed: branch_changed,
             })
-            .map_err(|_| MembershipLedgerError::Corrupt)?;
+            .map_err(MembershipLedgerError::corrupt_from)?;
         } else if branch_changed {
             push_unique(
                 &mut self.follow_ups,

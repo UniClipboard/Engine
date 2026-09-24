@@ -169,11 +169,11 @@ pub(super) fn record_network_snapshot(
 pub(super) fn handler_failure(error: &HandlerError) -> AdmissionExchangeFailure {
     match error {
         HandlerError::Timeout => AdmissionExchangeFailure::TimedOut,
-        HandlerError::Protocol => AdmissionExchangeFailure::InvalidMessage,
+        HandlerError::Protocol { .. } => AdmissionExchangeFailure::InvalidMessage,
         HandlerError::Acknowledgement => AdmissionExchangeFailure::ConnectionClosed,
         HandlerError::Transport { .. } => AdmissionExchangeFailure::IoFailed,
         HandlerError::PeerUpgradeRequired => AdmissionExchangeFailure::PeerUpgradeRequired,
-        HandlerError::Application => AdmissionExchangeFailure::Internal,
+        HandlerError::Application { .. } => AdmissionExchangeFailure::Internal,
         _ => AdmissionExchangeFailure::AuthenticationRejected,
     }
 }
@@ -216,7 +216,7 @@ impl AuthenticationStep {
         };
         let proof = if matches!(
             error,
-            HandlerError::Authentication | HandlerError::AuthenticationProof { .. }
+            HandlerError::Authentication { .. } | HandlerError::AuthenticationProof { .. }
         ) {
             ProofFailure::Rejected
         } else {
@@ -256,13 +256,13 @@ impl AuthenticationStep {
 
 pub(super) fn server_error_type(error: &HandlerError) -> DiagnosticErrorType {
     match error {
-        HandlerError::Authentication
+        HandlerError::Authentication { .. }
         | HandlerError::Credential(_)
         | HandlerError::AuthenticationProof { .. } => DiagnosticErrorType::AuthenticationFailed,
-        HandlerError::Protocol => DiagnosticErrorType::DecodeFailed,
+        HandlerError::Protocol { .. } => DiagnosticErrorType::DecodeFailed,
         HandlerError::Transport { .. } => DiagnosticErrorType::StreamFailed,
         HandlerError::PeerUpgradeRequired => DiagnosticErrorType::PeerIncompatible,
-        HandlerError::Application => DiagnosticErrorType::Internal,
+        HandlerError::Application { .. } => DiagnosticErrorType::Internal,
         HandlerError::Acknowledgement => DiagnosticErrorType::ChannelClosed,
         HandlerError::Timeout => DiagnosticErrorType::Timeout,
     }

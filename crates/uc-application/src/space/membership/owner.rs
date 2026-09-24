@@ -192,7 +192,8 @@ impl MembershipOwner {
         Ok(self
             .published
             .lock()
-            .map_err(|_| MembershipLedgerError::Unavailable)?
+            // 锁中毒：PoisonError 持有 guard，不能作为来源保存。
+            .map_err(|_| MembershipLedgerError::unavailable())?
             .clone())
     }
 
@@ -200,7 +201,8 @@ impl MembershipOwner {
         *self
             .published
             .lock()
-            .map_err(|_| MembershipLedgerError::Unavailable)? = Some(view);
+            // 锁中毒：PoisonError 持有 guard，不能作为来源保存。
+            .map_err(|_| MembershipLedgerError::unavailable())? = Some(view);
         Ok(())
     }
 
@@ -208,7 +210,8 @@ impl MembershipOwner {
         *self
             .published
             .lock()
-            .map_err(|_| MembershipLedgerError::Unavailable)? = None;
+            // 锁中毒：PoisonError 持有 guard，不能作为来源保存。
+            .map_err(|_| MembershipLedgerError::unavailable())? = None;
         Ok(())
     }
 }
@@ -217,7 +220,7 @@ impl MembershipOwner {
 pub(crate) fn ledger_error(error: LedgerTransitionError) -> MembershipLedgerError {
     match error.category() {
         LedgerTransitionErrorCategory::Rejected => MembershipLedgerError::Conflict,
-        LedgerTransitionErrorCategory::RecoveryRequired => MembershipLedgerError::Corrupt,
+        LedgerTransitionErrorCategory::RecoveryRequired => MembershipLedgerError::corrupt(),
     }
 }
 
@@ -257,13 +260,13 @@ impl SpaceMembershipResetPort for MembershipOwner {
     async fn reset(&self) -> Result<(), SpaceMembershipRebuildError> {
         match self.commit(|draft| draft.clear_space()).await {
             Ok(_) => Ok(()),
-            Err(MembershipLedgerError::Corrupt | MembershipLedgerError::RecoveryRequired) => {
-                Err(SpaceMembershipRebuildError::Inconsistent)
-            }
+            Err(
+                MembershipLedgerError::Corrupt { .. } | MembershipLedgerError::RecoveryRequired,
+            ) => Err(SpaceMembershipRebuildError::Inconsistent),
             Err(
                 MembershipLedgerError::Locked
                 | MembershipLedgerError::Conflict
-                | MembershipLedgerError::Unavailable,
+                | MembershipLedgerError::Unavailable { .. },
             ) => Err(SpaceMembershipRebuildError::Unavailable),
         }
     }

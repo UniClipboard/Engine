@@ -404,7 +404,7 @@ async fn delivery_failures_survive_restart_without_rewriting_space_material() {
             &space_id,
             &[(
                 first.update_id().to_owned(),
-                GroupUpdateDispatchError::Offline,
+                GroupUpdateDispatchError::offline(),
             )],
             100,
         )
@@ -458,7 +458,7 @@ async fn delivery_status_exposes_the_persisted_retry_deadline() {
         &space_id,
         &[(
             pending.update_id().to_owned(),
-            GroupUpdateDispatchError::Offline,
+            GroupUpdateDispatchError::offline(),
         )],
         100,
     )

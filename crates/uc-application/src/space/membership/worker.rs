@@ -144,7 +144,7 @@ impl MembershipWorker {
         let work = space
             .ledger()
             .outstanding_work(now_ms)
-            .map_err(|_| MembershipLedgerError::Corrupt)?;
+            .map_err(MembershipLedgerError::corrupt_from)?;
         let due: Vec<ScheduledLedgerWork> = work
             .iter()
             .filter(|item| item.due_at_ms <= now_ms)
@@ -385,9 +385,9 @@ impl RecoverMembershipEffectsPort for MembershipWorker {
                 }
                 Some(_) | None => MembershipMaintenanceStepOutcome::Completed,
             },
-            Err(MembershipLedgerError::Corrupt | MembershipLedgerError::RecoveryRequired) => {
-                MembershipMaintenanceStepOutcome::Corrupt
-            }
+            Err(
+                MembershipLedgerError::Corrupt { .. } | MembershipLedgerError::RecoveryRequired,
+            ) => MembershipMaintenanceStepOutcome::Corrupt,
             Err(_) => MembershipMaintenanceStepOutcome::Deferred,
         }
     }
@@ -416,13 +416,13 @@ struct Tally {
 impl Tally {
     fn record_ledger_error(&mut self, error: MembershipLedgerError) {
         match error {
-            MembershipLedgerError::Corrupt | MembershipLedgerError::RecoveryRequired => {
+            MembershipLedgerError::Corrupt { .. } | MembershipLedgerError::RecoveryRequired => {
                 tracing::warn!("成员待办无法读取或提交已验证成员状态");
                 self.corrupt += 1;
             }
             MembershipLedgerError::Locked
             | MembershipLedgerError::Conflict
-            | MembershipLedgerError::Unavailable => self.deferred += 1,
+            | MembershipLedgerError::Unavailable { .. } => self.deferred += 1,
         }
     }
 

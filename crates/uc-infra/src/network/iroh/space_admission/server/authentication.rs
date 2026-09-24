@@ -49,6 +49,7 @@ impl IrohSpaceAdmissionHandler {
             })?;
             let (mut send, mut receive) = tokio::time::timeout(IO_DEADLINE, connection.accept_bi())
                 .await
+                // 超时本身就是分类。
                 .map_err(|_| HandlerError::Timeout)?
                 .map_err(|source| HandlerError::Transport {
                     source: anyhow::Error::new(source),
@@ -59,20 +60,20 @@ impl IrohSpaceAdmissionHandler {
             let (admission_id, credential, is_initial, attempt_contract) = match kind {
                 FrameKind::InitialHello => {
                     let (protocol_version, _) = postcard::take_from_bytes::<u16>(&payload)
-                        .map_err(|_| HandlerError::Protocol)?;
+                        .map_err(HandlerError::protocol_from)?;
                     diagnostic_stage = AuthenticationStep::InitialVersion;
                     if protocol_version != SpaceAdmissionProtocolVersion::CURRENT.as_u16() {
                         return Err(HandlerError::PeerUpgradeRequired);
                     }
                     let hello: InitialHelloV2 =
-                        postcard::from_bytes(&payload).map_err(|_| HandlerError::Protocol)?;
+                        postcard::from_bytes(&payload).map_err(HandlerError::protocol_from)?;
                     let admission_id = SpaceAdmissionId::from_bytes(hello.admission_id)
-                        .ok_or(HandlerError::Protocol)?;
+                        .ok_or_else(HandlerError::protocol)?;
                     let invitation_id = InvitationId::from_bytes(hello.invitation_id)
-                        .ok_or(HandlerError::Protocol)?;
+                        .ok_or_else(HandlerError::protocol)?;
                     diagnostic_stage = AuthenticationStep::InitialIdentity;
                     if hello.joiner_peer_id != *remote_peer_id.as_bytes() {
-                        return Err(HandlerError::Authentication);
+                        return Err(HandlerError::authentication());
                     }
                     diagnostic_stage = AuthenticationStep::InitialCredential;
                     let material = self
@@ -89,7 +90,7 @@ impl IrohSpaceAdmissionHandler {
                         hello.attempt_started_at_ms,
                         hello.attempt_expires_at_ms,
                     )
-                    .map_err(|_| HandlerError::Authentication)?;
+                    .map_err(HandlerError::authentication_from)?;
                     let context = SpaceAdmissionAuthContext::with_attempt_contract(
                         admission_id,
                         invitation_id,
@@ -97,7 +98,7 @@ impl IrohSpaceAdmissionHandler {
                         self.local_peer_id,
                         attempt_contract.digest(),
                     )
-                    .ok_or(HandlerError::Authentication)?;
+                    .ok_or_else(HandlerError::authentication)?;
                     let ke1 =
                         SpaceAdmissionKe1::decode_from_transport(&hello.ke1).map_err(|source| {
                             HandlerError::AuthenticationProof {
@@ -143,14 +144,14 @@ impl IrohSpaceAdmissionHandler {
                 }
                 FrameKind::ContinuationHello => {
                     let hello: ContinuationHelloV1 =
-                        postcard::from_bytes(&payload).map_err(|_| HandlerError::Protocol)?;
+                        postcard::from_bytes(&payload).map_err(HandlerError::protocol_from)?;
                     let admission_id = SpaceAdmissionId::from_bytes(hello.admission_id)
-                        .ok_or(HandlerError::Protocol)?;
+                        .ok_or_else(HandlerError::protocol)?;
                     diagnostic_stage = AuthenticationStep::ContinuationIdentity;
                     if hello.local_peer_id != *remote_peer_id.as_bytes()
                         || hello.remote_peer_id != *self.local_peer_id.as_bytes()
                     {
-                        return Err(HandlerError::Authentication);
+                        return Err(HandlerError::authentication());
                     }
                     diagnostic_stage = AuthenticationStep::ContinuationCredential;
                     let credential = self
@@ -172,7 +173,7 @@ impl IrohSpaceAdmissionHandler {
                     )?;
                     (admission_id, credential, false, None)
                 }
-                _ => return Err(HandlerError::Protocol),
+                _ => return Err(HandlerError::protocol()),
             };
 
             diagnostic_stage = AuthenticationStep::ReceiveRequest;
@@ -185,7 +186,7 @@ impl IrohSpaceAdmissionHandler {
             }
             diagnostic_stage = AuthenticationStep::RequestIdentity;
             if envelope.header().admission_id() != admission_id {
-                return Err(HandlerError::Authentication);
+                return Err(HandlerError::authentication());
             }
             diagnostic_stage = AuthenticationStep::RequestProof;
             verify_mac(

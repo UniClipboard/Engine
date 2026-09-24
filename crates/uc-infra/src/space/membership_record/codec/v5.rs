@@ -134,7 +134,7 @@ pub(super) fn encode(
         revision: record.revision(),
         space,
     })
-    .map_err(|_| MembershipLedgerError::Corrupt)
+    .map_err(MembershipLedgerError::corrupt_from)
 }
 
 pub(super) fn decode(
@@ -144,7 +144,7 @@ pub(super) fn decode(
 ) -> Result<MembershipRecord, MembershipLedgerError> {
     let value: MembershipLedgerRecordV5 = parse(bytes)?;
     if value.format_version != FORMAT_V5 || value.profile_generation != generation {
-        return Err(MembershipLedgerError::Corrupt);
+        return Err(MembershipLedgerError::corrupt());
     }
     match value.space {
         None => Ok(MembershipRecord::NoSpace {
@@ -163,7 +163,7 @@ impl SpaceRecordV5 {
             history: ledger
                 .history
                 .encode_persisted_v2()
-                .map_err(|_| MembershipLedgerError::Corrupt)?,
+                .map_err(MembershipLedgerError::corrupt_from)?,
             local_device_id: ledger.local_device_id,
             local_member: ledger.local_member,
             peers: ledger
@@ -197,7 +197,7 @@ impl SpaceRecordV5 {
         verifier: &dyn HistoricalMembershipSignatureVerifier,
     ) -> Result<SpaceMembershipRecord, MembershipLedgerError> {
         let history = VersionedMembershipHistory::decode_persisted_v2(&self.history, verifier)
-            .map_err(|_| MembershipLedgerError::Corrupt)?;
+            .map_err(MembershipLedgerError::corrupt_from)?;
         let snapshot = MembershipLedgerSnapshot {
             revision,
             history,
@@ -217,7 +217,7 @@ impl SpaceRecordV5 {
         };
         // 不满足聚合不变量的记录视为损坏，不在读取时修复。
         let ledger = MembershipLedger::restore(snapshot)
-            .map_err(|_| MembershipLedgerError::Corrupt)?
+            .map_err(MembershipLedgerError::corrupt_from)?
             .snapshot();
         Ok(SpaceMembershipRecord {
             ledger,

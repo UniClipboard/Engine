@@ -166,10 +166,10 @@ impl DecideDeviceTrustChangeUseCase {
                 }
                 if history
                     .apply_signed_local_removal_decision(decision, local_member, verifier.as_ref())
-                    .map_err(|_| MembershipLedgerError::Corrupt)?
+                    .map_err(MembershipLedgerError::corrupt_from)?
                     != MembershipDecisionStoreOutcome::Stored
                 {
-                    return Err(MembershipLedgerError::Corrupt);
+                    return Err(MembershipLedgerError::corrupt());
                 }
                 // 拒绝后本机已记录的选择就是保留当前分支；对应分叉不再等待用户选择。
                 let kept_conflicts = if decision_choice == RemovalDecision::Reject {
@@ -231,20 +231,21 @@ impl DecideDeviceTrustChangeUseCase {
 
 fn map_signature_error(error: CurrentMemberSignatureError) -> DecideDeviceTrustChangeError {
     match error {
-        CurrentMemberSignatureError::InvalidState => DecideDeviceTrustChangeError::RecoveryRequired,
-        CurrentMemberSignatureError::Unavailable | CurrentMemberSignatureError::Repository(_) => {
-            DecideDeviceTrustChangeError::Unavailable
+        CurrentMemberSignatureError::InvalidState { .. } => {
+            DecideDeviceTrustChangeError::RecoveryRequired
         }
+        CurrentMemberSignatureError::Unavailable { .. }
+        | CurrentMemberSignatureError::Repository(_) => DecideDeviceTrustChangeError::Unavailable,
     }
 }
 
 fn map_ledger_error(error: MembershipLedgerError) -> DecideDeviceTrustChangeError {
     match error {
         MembershipLedgerError::Locked => DecideDeviceTrustChangeError::Locked,
-        MembershipLedgerError::Corrupt | MembershipLedgerError::RecoveryRequired => {
+        MembershipLedgerError::Corrupt { .. } | MembershipLedgerError::RecoveryRequired => {
             DecideDeviceTrustChangeError::RecoveryRequired
         }
         MembershipLedgerError::Conflict => DecideDeviceTrustChangeError::StateChanged,
-        MembershipLedgerError::Unavailable => DecideDeviceTrustChangeError::Unavailable,
+        MembershipLedgerError::Unavailable { .. } => DecideDeviceTrustChangeError::Unavailable,
     }
 }

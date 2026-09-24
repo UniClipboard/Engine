@@ -271,4 +271,15 @@ E1 的检查会拒绝只删标识、仍保留 `{error}` 的改法，所以 E4 �
   `exchange_failure` 改为借用）、`SpaceAdmissionStateStoreError`（含 diesel `From` 与执行器错误还原）、
   Core 的 `MembershipHistoryExchangeError::Transport`。成员历史交换的服务端处理路径改用 `ServerExchangeFailure`
   同时携带诊断分类与来源。连接超时（`Elapsed`）仍按例外丢弃并注释。
-- 暂缓：`EncryptionError` 与 `SecureStorageError` 的变体被 049 未提交的 `profile_key_recovery.rs` 模式匹配，等 049 提交后处理。
+- 第二批（已完成）：`ChunkedTransferError`（读流失败与切片转换携带来源；`DecryptFailed` 保存 AEAD 错误；`InvalidHeader`
+  增加可选来源，不再把 `EncryptionError` 文本写入 `reason`）；Core 的 `ConfigMigrationError::{Io, Internal, IncompatibleBundle}`
+  增加可选来源，`config_migration/` 下 `BundleError`、`ArchiveError`、`StagingError`、`PendingImportError` 改为可选来源，映射函数把它们
+  整体作为来源上传（口令错误与数据损坏仍刻意不可区分，不上传细节）；Core 的 `MembershipAttestationError`、`GroupUpdateDispatchError`、
+  `MembershipGossipTransportError`；`ActiveSpaceGenerationManifestStoreError::Corrupt`、`MembershipLedgerError::{Corrupt, Unavailable}`、
+  `CurrentSpaceIdentityError`、`CurrentMemberSignatureError`、`RePairingStateError`、`TransferPersistenceCipherError`、
+  `AeadError::{InvalidKey, EncryptFailed}`、`WireError::{InvalidHeader, InvalidPayload}`、`HandlerError::{Protocol, Authentication, Application}`。
+  锁中毒与 `Elapsed` 超时按例外丢弃并注释。
+  - 测试：损坏的 MLS 客户端状态可取回 `serde_json::Error`；截断的分块头可取回 `UnexpectedEof`。
+  - 修正脚本缺陷：按类型名前缀匹配时曾把 `MobileFileStagingError::Io` 误当作 `StagingError::Io` 改动文档注释，已还原并加词边界；
+    文档注释中被改成构造函数调用的链接已还原为变体名。
+- 暂缓：`EncryptionError` 与 `SecureStorageError` 以及 `AeadError::DecryptFailed` 的变体被 049 未提交的 `profile_key_recovery.rs` 模式匹配，等 049 提交后处理。

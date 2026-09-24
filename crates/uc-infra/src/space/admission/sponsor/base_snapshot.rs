@@ -63,10 +63,10 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
 fn map_membership_error(error: MembershipLedgerError) -> SpaceAdmissionStateStoreError {
     match error {
         MembershipLedgerError::Locked => SpaceAdmissionStateStoreError::Locked,
-        MembershipLedgerError::Corrupt | MembershipLedgerError::RecoveryRequired => {
+        MembershipLedgerError::Corrupt { .. } | MembershipLedgerError::RecoveryRequired => {
             SpaceAdmissionStateStoreError::corrupt()
         }
-        MembershipLedgerError::Conflict | MembershipLedgerError::Unavailable => {
+        MembershipLedgerError::Conflict | MembershipLedgerError::Unavailable { .. } => {
             SpaceAdmissionStateStoreError::unavailable()
         }
     }

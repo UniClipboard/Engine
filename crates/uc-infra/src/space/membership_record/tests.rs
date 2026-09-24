@@ -206,22 +206,28 @@ fn damaged_or_unknown_records_fail_with_a_stable_error() {
     };
     let mut unknown = TWO_MEMBER_ACTIVE.to_vec();
     unknown[0] = 6;
-    assert_eq!(decode(&unknown), MembershipLedgerError::Corrupt);
-    assert_eq!(
+    assert!(matches!(
+        decode(&unknown),
+        MembershipLedgerError::Corrupt { .. }
+    ));
+    assert!(matches!(
         decode(&TWO_MEMBER_ACTIVE[..TWO_MEMBER_ACTIVE.len() - 1]),
-        MembershipLedgerError::Corrupt
-    );
+        MembershipLedgerError::Corrupt { .. }
+    ));
     let mut trailing = TWO_MEMBER_ACTIVE.to_vec();
     trailing.push(0);
-    assert_eq!(decode(&trailing), MembershipLedgerError::Corrupt);
-    assert_eq!(decode(&[]), MembershipLedgerError::Corrupt);
-    assert_eq!(
+    assert!(matches!(
+        decode(&trailing),
+        MembershipLedgerError::Corrupt { .. }
+    ));
+    assert!(matches!(decode(&[]), MembershipLedgerError::Corrupt { .. }));
+    assert!(matches!(
         codec::decode(TWO_MEMBER_ACTIVE, [0x50; 16], &AcceptingVerifier, NOW)
             .err()
             .expect("wrong generation must be rejected"),
-        MembershipLedgerError::Corrupt
-    );
-    assert_eq!(
+        MembershipLedgerError::Corrupt { .. }
+    ));
+    assert!(matches!(
         codec::decode(
             TWO_MEMBER_ACTIVE,
             FIXTURE_GENERATION,
@@ -230,8 +236,8 @@ fn damaged_or_unknown_records_fail_with_a_stable_error() {
         )
         .err()
         .expect("unverifiable history must be rejected"),
-        MembershipLedgerError::Corrupt
-    );
+        MembershipLedgerError::Corrupt { .. }
+    ));
 
     let current = codec::encode(
         &MembershipRecord::Space(Box::new(migrate("two_member_active", TWO_MEMBER_ACTIVE))),
@@ -240,11 +246,14 @@ fn damaged_or_unknown_records_fail_with_a_stable_error() {
     .unwrap();
     let mut trailing = current.clone();
     trailing.push(0);
-    assert_eq!(decode(&trailing), MembershipLedgerError::Corrupt);
-    assert_eq!(
+    assert!(matches!(
+        decode(&trailing),
+        MembershipLedgerError::Corrupt { .. }
+    ));
+    assert!(matches!(
         decode(&current[..current.len() - 1]),
-        MembershipLedgerError::Corrupt
-    );
+        MembershipLedgerError::Corrupt { .. }
+    ));
 }
 
 struct Profile {
@@ -352,10 +361,10 @@ fn failed_migration_leaves_the_original_row_untouched() {
     profile.write_plaintext(TWO_MEMBER_ACTIVE);
     let before = profile.encrypted_row();
 
-    assert_eq!(
+    assert!(matches!(
         profile.store(RejectingVerifier, NOW).load().unwrap_err(),
-        MembershipLedgerError::Corrupt
-    );
+        MembershipLedgerError::Corrupt { .. }
+    ));
     assert_eq!(profile.encrypted_row(), before);
     assert_eq!(profile.stored_version(), 4);
 }
@@ -394,22 +403,22 @@ fn commit_requires_the_expected_revision_and_a_larger_replacement() {
         MembershipRecord::NoSpace { revision: 0 }
     );
 
-    assert_eq!(
+    assert!(matches!(
         store
             .commit_record(0, &MembershipRecord::NoSpace { revision: 0 }, None)
             .unwrap_err(),
         MembershipLedgerError::Conflict
-    );
+    ));
     // 一次提交可以包含多项账本转换，修订号只要求增大。
     store
         .commit_record(0, &MembershipRecord::NoSpace { revision: 2 }, None)
         .unwrap();
-    assert_eq!(
+    assert!(matches!(
         store
             .commit_record(0, &MembershipRecord::NoSpace { revision: 3 }, None)
             .unwrap_err(),
         MembershipLedgerError::Conflict
-    );
+    ));
 
     let mut space = migrate("two_member_active", TWO_MEMBER_ACTIVE);
     space.ledger.revision = 3;
@@ -459,7 +468,7 @@ async fn the_read_model_is_written_in_the_record_transaction() {
         },
     )
     .await;
-    assert_eq!(conflicting, Err(MembershipLedgerError::Conflict));
+    assert!(matches!(conflicting, Err(MembershipLedgerError::Conflict)));
     assert!(relationships.list_members().await.unwrap().is_empty());
 
     MembershipRecordStorePort::commit(
@@ -515,7 +524,10 @@ async fn a_read_model_plan_without_a_read_model_store_writes_nothing() {
     )
     .await;
 
-    assert_eq!(result, Err(MembershipLedgerError::Unavailable));
+    assert!(matches!(
+        result,
+        Err(MembershipLedgerError::Unavailable { .. })
+    ));
     assert_eq!(
         store.load().unwrap(),
         MembershipRecord::NoSpace { revision: 0 }

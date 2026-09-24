@@ -109,7 +109,7 @@ impl MembershipRecordStorePort for MemoryMembershipRecords {
             return Err(MembershipLedgerError::Conflict);
         }
         if take_one(&self.remaining_failures) {
-            return Err(MembershipLedgerError::Unavailable);
+            return Err(MembershipLedgerError::unavailable());
         }
         let mut record = self.record.lock().unwrap();
         if record.revision() != commit.expected_revision

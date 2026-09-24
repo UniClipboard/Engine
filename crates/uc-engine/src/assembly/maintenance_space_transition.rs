@@ -94,7 +94,7 @@ impl InitialSpaceActivationPort for MaintenanceOnlySpaceTransitionPorts {
         &self,
         _space_id: &SpaceId,
     ) -> Result<(), CurrentSpaceIdentityError> {
-        Err(CurrentSpaceIdentityError::Unavailable)
+        Err(CurrentSpaceIdentityError::unavailable())
     }
 }
 
@@ -182,12 +182,12 @@ mod tests {
     async fn maintenance_profile_rejects_initial_activation_before_io() {
         let ports = MaintenanceOnlySpaceTransitionPorts;
 
-        assert_eq!(
+        assert!(matches!(
             ports
                 .activate_initial_space(&SpaceId::from_str("maintenance-target"))
                 .await,
-            Err(CurrentSpaceIdentityError::Unavailable)
-        );
+            Err(CurrentSpaceIdentityError::Unavailable { .. })
+        ));
     }
 
     #[tokio::test]

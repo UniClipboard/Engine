@@ -61,9 +61,9 @@ impl InitialSpaceActivationPort for V3InitialSpaceActivation {
             self.profile_data_generation,
             self.space_control_generation,
         )
-        .map_err(|_| CurrentSpaceIdentityError::Inconsistent)?;
+        .map_err(CurrentSpaceIdentityError::inconsistent_from)?;
         let target = ActiveRuntimeManifestV3::new(layout, self.keyslot_generation(space_id))
-            .ok_or(CurrentSpaceIdentityError::Inconsistent)?;
+            .ok_or_else(CurrentSpaceIdentityError::inconsistent)?;
         match self
             .manifests
             .promote_initial_v3(&target)
@@ -74,7 +74,7 @@ impl InitialSpaceActivationPort for V3InitialSpaceActivation {
                 Ok(())
             }
             V3ManifestPromotionOutcome::SourceChanged => {
-                Err(CurrentSpaceIdentityError::Inconsistent)
+                Err(CurrentSpaceIdentityError::inconsistent())
             }
         }
     }
@@ -83,11 +83,11 @@ impl InitialSpaceActivationPort for V3InitialSpaceActivation {
 fn map_manifest_error(error: ActiveSpaceGenerationManifestStoreError) -> CurrentSpaceIdentityError {
     match error {
         ActiveSpaceGenerationManifestStoreError::Storage { .. } => {
-            CurrentSpaceIdentityError::Unavailable
+            CurrentSpaceIdentityError::unavailable()
         }
-        ActiveSpaceGenerationManifestStoreError::Corrupt
+        ActiveSpaceGenerationManifestStoreError::Corrupt { .. }
         | ActiveSpaceGenerationManifestStoreError::UnsupportedVersion => {
-            CurrentSpaceIdentityError::Inconsistent
+            CurrentSpaceIdentityError::inconsistent()
         }
     }
 }

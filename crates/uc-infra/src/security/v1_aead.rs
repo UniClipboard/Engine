@@ -34,11 +34,40 @@ const ENCRYPTION_FORMAT_V1: &str = "V1";
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum AeadError {
     #[error("invalid key length")]
-    InvalidKey,
+    InvalidKey {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("AEAD encryption failed")]
-    EncryptFailed,
+    EncryptFailed {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("AEAD decryption failed (key mismatch / corrupted ciphertext)")]
     DecryptFailed,
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl AeadError {
+    pub fn invalid_key() -> Self {
+        Self::InvalidKey { source: None }
+    }
+
+    pub fn invalid_key_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::InvalidKey {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn encrypt_failed() -> Self {
+        Self::EncryptFailed { source: None }
+    }
+
+    pub fn encrypt_failed_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::EncryptFailed {
+            source: Some(source.into()),
+        }
+    }
 }
 
 /// KEK 派生失败的分类；算法名等输入值不进入错误文本。
@@ -92,10 +121,10 @@ pub(crate) fn wrap_master_key_xchacha(
     rand::rng().fill_bytes(&mut nonce);
 
     let cipher =
-        XChaCha20Poly1305::new_from_slice(kek.as_bytes()).map_err(|_| AeadError::InvalidKey)?;
+        XChaCha20Poly1305::new_from_slice(kek.as_bytes()).map_err(AeadError::invalid_key_from)?;
     let ciphertext = cipher
         .encrypt(XNonce::from_slice(&nonce), master_key.as_bytes())
-        .map_err(|_| AeadError::EncryptFailed)?;
+        .map_err(AeadError::encrypt_failed_from)?;
 
     Ok(EncryptedBlob {
         version: ENCRYPTION_FORMAT_V1.to_string(),
@@ -112,7 +141,7 @@ pub(crate) fn unwrap_master_key_xchacha(
     wrapped: &EncryptedBlob,
 ) -> Result<MasterKey, AeadError> {
     let cipher =
-        XChaCha20Poly1305::new_from_slice(kek.as_bytes()).map_err(|_| AeadError::InvalidKey)?;
+        XChaCha20Poly1305::new_from_slice(kek.as_bytes()).map_err(AeadError::invalid_key_from)?;
     let plaintext = cipher
         .decrypt(
             XNonce::from_slice(&wrapped.nonce),
@@ -137,7 +166,7 @@ pub(crate) fn encrypt_xchacha_raw(
     let mut nonce = vec![0u8; 24];
     rand::rng().fill_bytes(&mut nonce);
 
-    let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(|_| AeadError::InvalidKey)?;
+    let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(AeadError::invalid_key_from)?;
     let ciphertext = cipher
         .encrypt(
             XNonce::from_slice(&nonce),
@@ -146,7 +175,7 @@ pub(crate) fn encrypt_xchacha_raw(
                 aad,
             },
         )
-        .map_err(|_| AeadError::EncryptFailed)?;
+        .map_err(AeadError::encrypt_failed_from)?;
 
     Ok((nonce, ciphertext))
 }
@@ -163,7 +192,7 @@ pub(crate) fn decrypt_xchacha_raw(
     if nonce.len() != 24 {
         return Err(AeadError::DecryptFailed);
     }
-    let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(|_| AeadError::InvalidKey)?;
+    let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(AeadError::invalid_key_from)?;
     cipher
         .decrypt(
             XNonce::from_slice(nonce),

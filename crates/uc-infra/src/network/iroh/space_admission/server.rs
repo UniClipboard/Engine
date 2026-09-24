@@ -106,7 +106,7 @@ impl IrohSpaceAdmissionHandler {
                 None
             };
             let binding = AdmissionPeerBinding::new(self.local_peer_id, remote_peer_id)
-                .ok_or(HandlerError::Authentication)?;
+                .ok_or_else(HandlerError::authentication)?;
             let message = AuthenticatedSpaceAdmissionMessage::new(
                 binding,
                 envelope,
@@ -114,17 +114,17 @@ impl IrohSpaceAdmissionHandler {
                 endpoint_credential,
                 attempt_contract,
             )
-            .ok_or(HandlerError::Protocol)?;
+            .ok_or_else(HandlerError::protocol)?;
             let reply = self
                 .endpoint
                 .handle(message)
                 .await
-                .map_err(|_| HandlerError::Application)?;
+                .map_err(HandlerError::application_from)?;
             progress.start_step(AdmissionExchangeStep::PrepareReply);
-            let reply = reply.envelope().ok_or(HandlerError::Application)?;
+            let reply = reply.envelope().ok_or_else(HandlerError::application)?;
             let canonical = reply
                 .encode_canonical_v1()
-                .map_err(|_| HandlerError::Application)?;
+                .map_err(HandlerError::application_from)?;
             let digest: [u8; 32] = Sha256::digest(&canonical).into();
             let nonce = random_nonce();
             let mac = calculate_mac(
@@ -163,6 +163,7 @@ impl IrohSpaceAdmissionHandler {
         })
         .instrument(span.clone())
         .await
+        // 超时本身就是分类。
         .map_err(|_| HandlerError::Timeout)
         .and_then(|result| result);
         if let Err(error) = &result {
@@ -211,7 +212,7 @@ where
 {
     let ack: u8 = read_typed(receive, FrameKind::Ack, AUTH_FRAME_LIMIT).await?;
     if ack != 1 {
-        return Err(WireError::InvalidPayload);
+        return Err(WireError::invalid_payload());
     }
     Ok(())
 }
@@ -220,11 +221,11 @@ fn map_ack_wire_error(error: WireError) -> HandlerError {
     match error {
         WireError::Timeout => HandlerError::Timeout,
         WireError::Io(_) => HandlerError::Acknowledgement,
-        WireError::InvalidHeader
+        WireError::InvalidHeader { .. }
         | WireError::UnknownFrame
         | WireError::InvalidLength
-        | WireError::InvalidPayload
-        | WireError::UnsupportedLayout => HandlerError::Protocol,
+        | WireError::InvalidPayload { .. }
+        | WireError::UnsupportedLayout => HandlerError::protocol(),
     }
 }
 
@@ -249,7 +250,7 @@ impl ProtocolHandler for IrohSpaceAdmissionHandler {
         match self.run(&connection).await {
             Ok(()) => {}
             Err(
-                error @ (HandlerError::Authentication
+                error @ (HandlerError::Authentication { .. }
                 | HandlerError::Credential(_)
                 | HandlerError::AuthenticationProof { .. }),
             ) => {

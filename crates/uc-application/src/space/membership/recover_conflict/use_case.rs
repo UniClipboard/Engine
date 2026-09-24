@@ -468,11 +468,11 @@ fn map_recipient_error(
 
 fn map_ledger_error(error: MembershipLedgerError) -> RecoverMembershipConflictOutcome {
     match error {
-        MembershipLedgerError::Locked | MembershipLedgerError::Unavailable => {
+        MembershipLedgerError::Locked | MembershipLedgerError::Unavailable { .. } => {
             RecoverMembershipConflictOutcome::Deferred
         }
         MembershipLedgerError::Conflict => RecoverMembershipConflictOutcome::StableFailure,
-        MembershipLedgerError::Corrupt | MembershipLedgerError::RecoveryRequired => {
+        MembershipLedgerError::Corrupt { .. } | MembershipLedgerError::RecoveryRequired => {
             RecoverMembershipConflictOutcome::Corrupt
         }
     }

@@ -239,7 +239,7 @@ pub(super) fn decode(
             let value: PersistedV1 = parse(bytes)?;
             Ok((value.profile_generation, upgrade_v1(value.ledger)))
         }
-        _ => Err(MembershipLedgerError::Corrupt),
+        _ => Err(MembershipLedgerError::corrupt()),
     }
 }
 

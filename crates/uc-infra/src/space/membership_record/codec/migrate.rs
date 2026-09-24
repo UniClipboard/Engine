@@ -36,7 +36,7 @@ pub(super) fn migrate(
     let revision = legacy
         .revision
         .checked_add(1)
-        .ok_or(MembershipLedgerError::Corrupt)?;
+        .ok_or_else(MembershipLedgerError::corrupt)?;
     let Some(lineage_id) = legacy.lineage_id else {
         if legacy.membership_history.is_some()
             || legacy.local_device_id.is_some()
@@ -44,26 +44,26 @@ pub(super) fn migrate(
             || legacy.local_join_active
             || !legacy.branch_recovery.recovery_sessions.is_empty()
         {
-            return Err(MembershipLedgerError::Corrupt);
+            return Err(MembershipLedgerError::corrupt());
         }
         return Ok(MembershipRecord::NoSpace { revision });
     };
     // 旧账本只在没有当前 Space 时关闭加入门禁；有 Space 而门禁关闭的记录无法解释。
     if !legacy.local_join_active {
-        return Err(MembershipLedgerError::Corrupt);
+        return Err(MembershipLedgerError::corrupt());
     }
     let history_bytes = legacy
         .membership_history
         .ok_or(MembershipLedgerError::RecoveryRequired)?;
     let history = VersionedMembershipHistory::decode_persisted_v2(&history_bytes, verifier)
-        .map_err(|_| MembershipLedgerError::Corrupt)?;
+        .map_err(MembershipLedgerError::corrupt_from)?;
     let (Some(local_device_id), Some(local_member)) =
         (legacy.local_device_id, legacy.local_member_instance)
     else {
-        return Err(MembershipLedgerError::Corrupt);
+        return Err(MembershipLedgerError::corrupt());
     };
     if history.lineage_id() != lineage_id {
-        return Err(MembershipLedgerError::Corrupt);
+        return Err(MembershipLedgerError::corrupt());
     }
     let awaiting_local_decision = history.pending_removal_decision(local_member).is_some();
     let peers = legacy
@@ -90,7 +90,7 @@ pub(super) fn migrate(
         sync_cursor: legacy.history_sync_cursor,
     };
     let ledger = MembershipLedger::restore_normalized(snapshot)
-        .map_err(|_| MembershipLedgerError::Corrupt)?
+        .map_err(MembershipLedgerError::corrupt_from)?
         .snapshot();
     Ok(MembershipRecord::Space(Box::new(SpaceMembershipRecord {
         ledger,
@@ -194,7 +194,7 @@ fn migrate_effect(
         LegacyEffectPhase::Prepared => MemberEffectPhase::Prepared,
         LegacyEffectPhase::MemberFactsApplied => MemberEffectPhase::MemberFactsApplied,
         LegacyEffectPhase::SecurityApplied => MemberEffectPhase::SecurityApplied,
-        LegacyEffectPhase::Activated => return Err(MembershipLedgerError::Corrupt),
+        LegacyEffectPhase::Activated => return Err(MembershipLedgerError::corrupt()),
     };
     let kind = match effect.kind {
         LegacyEffectKind::AddDevice => MemberEffectKind::AddDevice,
@@ -219,7 +219,7 @@ pub(super) fn effect_material(
     if kind == MemberEffectKind::AddDevice {
         return event
             .map(MemberEffectMaterial::Event)
-            .ok_or(MembershipLedgerError::Corrupt);
+            .ok_or_else(MembershipLedgerError::corrupt);
     }
     let initiated = parse::<LegacyInitiatedRemoval>(payload).ok();
     let decision = parse::<MembershipDecisionV2>(payload).ok();
@@ -230,6 +230,6 @@ pub(super) fn effect_material(
             retained_device_ids: initiated.retained_device_ids,
         }),
         (None, None, Some(decision)) => Ok(MemberEffectMaterial::Decision(decision)),
-        _ => Err(MembershipLedgerError::Corrupt),
+        _ => Err(MembershipLedgerError::corrupt()),
     }
 }

@@ -252,11 +252,11 @@ impl GroupUpdateDispatchPort for ObservedGroupUpdateDispatch {
                     MembershipOperation::GroupUpdateDispatch,
                     started.elapsed(),
                     result.as_ref().copied().map_err(|error| match error {
-                        GroupUpdateDispatchError::Offline => {
+                        GroupUpdateDispatchError::Offline { .. } => {
                             MembershipCompletionKind::Failed(DiagnosticErrorType::Unavailable)
                         }
                         GroupUpdateDispatchError::Rejected => MembershipCompletionKind::Rejected,
-                        GroupUpdateDispatchError::Transport => {
+                        GroupUpdateDispatchError::Transport { .. } => {
                             MembershipCompletionKind::Failed(DiagnosticErrorType::StreamFailed)
                         }
                     }),

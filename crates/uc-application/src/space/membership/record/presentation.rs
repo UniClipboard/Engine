@@ -30,13 +30,13 @@ impl MembershipConflictPresentation {
     ) -> Result<Self, MembershipLedgerError> {
         Ok(Self {
             local_branch_id: MembershipConflictPolicy::branch_id(local)
-                .map_err(|_| MembershipLedgerError::Corrupt)?,
+                .map_err(MembershipLedgerError::corrupt_from)?,
             remote_branch_id: MembershipConflictPolicy::branch_id(remote)
-                .map_err(|_| MembershipLedgerError::Corrupt)?,
+                .map_err(MembershipLedgerError::corrupt_from)?,
             local_members: Self::members(local)?,
             remote_members: Self::members(remote)?,
             explanation: MembershipConflictPolicy::explain(local, remote, local_member)
-                .map_err(|_| MembershipLedgerError::Corrupt)?,
+                .map_err(MembershipLedgerError::corrupt_from)?,
         })
     }
 
@@ -50,7 +50,7 @@ impl MembershipConflictPresentation {
             .map(|member| {
                 let facts = history
                     .admission_facts_for(member)
-                    .ok_or(MembershipLedgerError::Corrupt)?;
+                    .ok_or_else(MembershipLedgerError::corrupt)?;
                 Ok(MembershipConflictMember {
                     device: MembershipConflictDevice {
                         device_id: facts.device_id.clone(),

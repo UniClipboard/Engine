@@ -30,16 +30,58 @@ pub enum MembershipSecurityUpdateError {
     Repository(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum MembershipGossipTransportError {
     #[error("membership gossip recipient is offline")]
-    Offline,
+    Offline {
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
     #[error("membership gossip was rejected")]
-    Rejected,
+    Rejected {
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
     #[error("membership gossip protocol version is incompatible")]
     VersionIncompatible,
     #[error("membership gossip transport failed")]
-    Transport,
+    Transport {
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl MembershipGossipTransportError {
+    pub fn offline() -> Self {
+        Self::Offline { source: None }
+    }
+
+    pub fn offline_from(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Offline {
+            source: Some(Box::new(source)),
+        }
+    }
+
+    pub fn rejected() -> Self {
+        Self::Rejected { source: None }
+    }
+
+    pub fn rejected_from(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Rejected {
+            source: Some(Box::new(source)),
+        }
+    }
+
+    pub fn transport() -> Self {
+        Self::Transport { source: None }
+    }
+
+    pub fn transport_from(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Transport {
+            source: Some(Box::new(source)),
+        }
+    }
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -50,18 +92,60 @@ pub enum MembershipGossipEndpointError {
     Persistence,
 }
 
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum MembershipAttestationError {
     #[error("membership peer is offline")]
-    Offline,
+    Offline {
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
     #[error("membership transport failed")]
-    Transport,
+    Transport {
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
     #[error("membership peer needs a security update")]
     MissingSecurityUpdate,
     #[error("membership protocol version is incompatible")]
     VersionIncompatible,
     #[error("membership proof was rejected")]
-    Rejected,
+    Rejected {
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl MembershipAttestationError {
+    pub fn offline() -> Self {
+        Self::Offline { source: None }
+    }
+
+    pub fn offline_from(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Offline {
+            source: Some(Box::new(source)),
+        }
+    }
+
+    pub fn rejected() -> Self {
+        Self::Rejected { source: None }
+    }
+
+    pub fn rejected_from(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Rejected {
+            source: Some(Box::new(source)),
+        }
+    }
+
+    pub fn transport() -> Self {
+        Self::Transport { source: None }
+    }
+
+    pub fn transport_from(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Transport {
+            source: Some(Box::new(source)),
+        }
+    }
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -94,14 +178,43 @@ pub enum RelationshipStateResetError {
     Repository(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum GroupUpdateDispatchError {
     #[error("group update recipient is offline")]
-    Offline,
+    Offline {
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
     #[error("group update was rejected")]
     Rejected,
     #[error("group update transport failed")]
-    Transport,
+    Transport {
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl GroupUpdateDispatchError {
+    pub fn offline() -> Self {
+        Self::Offline { source: None }
+    }
+
+    pub fn offline_from(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Offline {
+            source: Some(Box::new(source)),
+        }
+    }
+
+    pub fn transport() -> Self {
+        Self::Transport { source: None }
+    }
+
+    pub fn transport_from(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Transport {
+            source: Some(Box::new(source)),
+        }
+    }
 }
 
 #[derive(Debug, Error)]

@@ -40,11 +40,14 @@ struct WireGroupUpdateRequest {
 async fn run_outbound_io_phase<T, E>(
     timeout: Duration,
     future: impl Future<Output = Result<T, E>>,
-) -> Result<T, GroupUpdateDispatchError> {
+) -> Result<T, GroupUpdateDispatchError>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
     tokio::time::timeout(timeout, future)
         .await
-        .map_err(|_| GroupUpdateDispatchError::Transport)?
-        .map_err(|_| GroupUpdateDispatchError::Transport)
+        .map_err(GroupUpdateDispatchError::transport_from)?
+        .map_err(GroupUpdateDispatchError::transport_from)
 }
 
 pub struct IrohGroupUpdateAdapter {
@@ -105,13 +108,13 @@ impl GroupUpdateDispatchPort for IrohGroupUpdateAdapter {
         update: &PendingGroupUpdate,
     ) -> Result<(), GroupUpdateDispatchError> {
         if update.payload().len() > MAX_UPDATE_SIZE {
-            return Err(GroupUpdateDispatchError::Transport);
+            return Err(GroupUpdateDispatchError::transport());
         }
         let request = encode_request(update.payload())?;
         let addr = self
             .resolve_addr(update)
             .await
-            .ok_or(GroupUpdateDispatchError::Offline)?;
+            .ok_or_else(GroupUpdateDispatchError::offline)?;
         let connection = connect_with_staggered_retry(
             Arc::clone(&self.endpoint),
             addr,
@@ -120,11 +123,11 @@ impl GroupUpdateDispatchPort for IrohGroupUpdateAdapter {
             uc_observability_contract::diagnostics::connectivity::AddressInputSource::Stored,
         )
         .await
-        .map_err(|_| GroupUpdateDispatchError::Offline)?;
+        .map_err(GroupUpdateDispatchError::offline_from)?;
         let (mut send, mut recv) =
             run_outbound_io_phase(GROUP_UPDATE_IO_TIMEOUT, connection.open_bi()).await?;
         let length =
-            u32::try_from(request.len()).map_err(|_| GroupUpdateDispatchError::Transport)?;
+            u32::try_from(request.len()).map_err(GroupUpdateDispatchError::transport_from)?;
         run_outbound_io_phase(
             GROUP_UPDATE_IO_TIMEOUT,
             send.write_all(&length.to_be_bytes()),
@@ -132,13 +135,13 @@ impl GroupUpdateDispatchPort for IrohGroupUpdateAdapter {
         .await?;
         run_outbound_io_phase(GROUP_UPDATE_IO_TIMEOUT, send.write_all(&request)).await?;
         send.finish()
-            .map_err(|_| GroupUpdateDispatchError::Transport)?;
+            .map_err(GroupUpdateDispatchError::transport_from)?;
         let mut ack = [0u8; 1];
         run_outbound_io_phase(GROUP_UPDATE_IO_TIMEOUT, recv.read_exact(&mut ack)).await?;
         match ack[0] {
             ACK_ACCEPTED => Ok(()),
             ACK_REJECTED => Err(GroupUpdateDispatchError::Rejected),
-            _ => Err(GroupUpdateDispatchError::Transport),
+            _ => Err(GroupUpdateDispatchError::transport()),
         }
     }
 }
@@ -282,7 +285,7 @@ fn group_update_apply_error_type(error: &KeyEpochError) -> DiagnosticErrorType {
 
 fn encode_request(payload: &[u8]) -> Result<Vec<u8>, GroupUpdateDispatchError> {
     if payload.is_empty() || payload.len() > MAX_UPDATE_SIZE {
-        return Err(GroupUpdateDispatchError::Transport);
+        return Err(GroupUpdateDispatchError::transport());
     }
     let mut encoded = WIRE_LAYOUT_MARKER.to_vec();
     encoded.extend(
@@ -290,10 +293,10 @@ fn encode_request(payload: &[u8]) -> Result<Vec<u8>, GroupUpdateDispatchError> {
             trace_context: inject_current(),
             payload: payload.to_vec(),
         })
-        .map_err(|_| GroupUpdateDispatchError::Transport)?,
+        .map_err(GroupUpdateDispatchError::transport_from)?,
     );
     if encoded.len() > MAX_WIRE_SIZE {
-        return Err(GroupUpdateDispatchError::Transport);
+        return Err(GroupUpdateDispatchError::transport());
     }
     Ok(encoded)
 }
@@ -301,11 +304,11 @@ fn encode_request(payload: &[u8]) -> Result<Vec<u8>, GroupUpdateDispatchError> {
 fn decode_request(encoded: &[u8]) -> Result<WireGroupUpdateRequest, GroupUpdateDispatchError> {
     let body = encoded
         .strip_prefix(WIRE_LAYOUT_MARKER)
-        .ok_or(GroupUpdateDispatchError::Transport)?;
+        .ok_or_else(GroupUpdateDispatchError::transport)?;
     let request: WireGroupUpdateRequest =
-        postcard::from_bytes(body).map_err(|_| GroupUpdateDispatchError::Transport)?;
+        postcard::from_bytes(body).map_err(GroupUpdateDispatchError::transport_from)?;
     if request.payload.is_empty() || request.payload.len() > MAX_UPDATE_SIZE {
-        return Err(GroupUpdateDispatchError::Transport);
+        return Err(GroupUpdateDispatchError::transport());
     }
     Ok(request)
 }
@@ -409,7 +412,7 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert_eq!(error, GroupUpdateDispatchError::Transport);
+        assert!(matches!(error, GroupUpdateDispatchError::Transport { .. }));
     }
 
     #[test]

@@ -6,18 +6,47 @@ use uc_core::membership::{MembershipDecisionV2, MembershipEventV2, UnfinishedMem
 
 use super::{MembershipProjectionPlan, MembershipRecord};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum MembershipLedgerError {
     #[error("space is locked")]
     Locked,
     #[error("membership ledger changed")]
     Conflict,
     #[error("membership ledger is corrupt")]
-    Corrupt,
+    Corrupt {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("membership ledger is unavailable")]
-    Unavailable,
+    Unavailable {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("membership recovery is required")]
     RecoveryRequired,
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl MembershipLedgerError {
+    pub fn corrupt() -> Self {
+        Self::Corrupt { source: None }
+    }
+
+    pub fn corrupt_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Corrupt {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn unavailable() -> Self {
+        Self::Unavailable { source: None }
+    }
+
+    pub fn unavailable_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Unavailable {
+            source: Some(source.into()),
+        }
+    }
 }
 
 /// 一次成员记录提交：记录本身与由它推导出的成员读模型必须同时成立。

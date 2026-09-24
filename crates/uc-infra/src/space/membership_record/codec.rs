@@ -24,13 +24,13 @@ pub(super) fn decode(
     now_ms: i64,
 ) -> Result<Decoded, MembershipLedgerError> {
     let (version, _) =
-        postcard::take_from_bytes::<u16>(bytes).map_err(|_| MembershipLedgerError::Corrupt)?;
+        postcard::take_from_bytes::<u16>(bytes).map_err(MembershipLedgerError::corrupt_from)?;
     if version == v5::FORMAT_V5 {
         return v5::decode(bytes, generation, verifier).map(Decoded::Current);
     }
     let (profile_generation, ledger) = legacy::decode(version, bytes)?;
     if profile_generation != generation {
-        return Err(MembershipLedgerError::Corrupt);
+        return Err(MembershipLedgerError::corrupt());
     }
     migrate::migrate(ledger, verifier, now_ms).map(Decoded::Migrated)
 }
@@ -45,9 +45,9 @@ pub(super) fn encode(
 /// 按完整长度解析；有尾随字节视为损坏。
 fn parse<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Result<T, MembershipLedgerError> {
     let (value, tail) =
-        postcard::take_from_bytes(bytes).map_err(|_| MembershipLedgerError::Corrupt)?;
+        postcard::take_from_bytes(bytes).map_err(MembershipLedgerError::corrupt_from)?;
     if !tail.is_empty() {
-        return Err(MembershipLedgerError::Corrupt);
+        return Err(MembershipLedgerError::corrupt());
     }
     Ok(value)
 }

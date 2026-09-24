@@ -1732,21 +1732,21 @@ mod tests {
     #[async_trait]
     impl CurrentMemberSignaturePort for UnavailableMemberSignatures {
         async fn current_member_epoch(&self) -> Result<u64, CurrentMemberSignatureError> {
-            Err(CurrentMemberSignatureError::Unavailable)
+            Err(CurrentMemberSignatureError::unavailable())
         }
 
         async fn current_member_instance(
             &self,
             _device_id: &DeviceId,
         ) -> Result<uc_core::membership::MemberInstanceId, CurrentMemberSignatureError> {
-            Err(CurrentMemberSignatureError::Unavailable)
+            Err(CurrentMemberSignatureError::unavailable())
         }
 
         async fn sign_current_member_payload(
             &self,
             _payload: &[u8],
         ) -> Result<Vec<u8>, CurrentMemberSignatureError> {
-            Err(CurrentMemberSignatureError::Unavailable)
+            Err(CurrentMemberSignatureError::unavailable())
         }
 
         async fn verify_current_member_payload(
@@ -1755,7 +1755,7 @@ mod tests {
             _payload: &[u8],
             _signature: &[u8],
         ) -> Result<bool, CurrentMemberSignatureError> {
-            Err(CurrentMemberSignatureError::Unavailable)
+            Err(CurrentMemberSignatureError::unavailable())
         }
     }
 

@@ -34,7 +34,7 @@ pub(super) fn branch_view(
         }),
         None if is_local
             && MembershipConflictPolicy::matches_persisted_branch(history, branch_id)
-                .map_err(|_| MembershipLedgerError::Corrupt)? =>
+                .map_err(MembershipLedgerError::corrupt_from)? =>
         {
             Some(MembershipConflictPresentation::members(history)?)
         }
@@ -74,7 +74,7 @@ fn impact(
             history
                 .admission_facts_for(member)
                 .map(|facts| facts.device_id.clone())
-                .ok_or(MembershipLedgerError::Corrupt)
+                .ok_or_else(MembershipLedgerError::corrupt)
         })
         .collect::<Result<BTreeSet<_>, _>>()?;
     known_peers.remove(local_id);

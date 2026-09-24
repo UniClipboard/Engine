@@ -58,11 +58,11 @@ struct UnusedMembership;
 #[async_trait]
 impl MembershipRecordStorePort for UnusedMembership {
     async fn load(&self) -> Result<MembershipRecord, MembershipLedgerError> {
-        Err(MembershipLedgerError::Unavailable)
+        Err(MembershipLedgerError::unavailable())
     }
 
     async fn commit(&self, _commit: MembershipRecordCommit) -> Result<(), MembershipLedgerError> {
-        Err(MembershipLedgerError::Unavailable)
+        Err(MembershipLedgerError::unavailable())
     }
 }
 

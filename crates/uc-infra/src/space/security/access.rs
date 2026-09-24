@@ -559,7 +559,7 @@ fn open_membership_branch_recovery_confirmation(
 fn map_group_aead_error(error: v1_aead::AeadError) -> EncryptionError {
     match error {
         v1_aead::AeadError::DecryptFailed => EncryptionError::KeyMaterialCorrupt,
-        v1_aead::AeadError::InvalidKey | v1_aead::AeadError::EncryptFailed => {
+        v1_aead::AeadError::InvalidKey { .. } | v1_aead::AeadError::EncryptFailed { .. } => {
             EncryptionError::CryptoFailure
         }
     }
@@ -2838,7 +2838,8 @@ impl SpaceProtectionStatusPort for RuntimeSpaceAccessAdapter {
 impl CurrentMemberSignaturePort for RuntimeSpaceAccessAdapter {
     async fn current_member_epoch(&self) -> Result<u64, CurrentMemberSignatureError> {
         let group = self.current_member_group_state().await?;
-        MlsGroupEngine::current_epoch(&group).map_err(|_| CurrentMemberSignatureError::InvalidState)
+        MlsGroupEngine::current_epoch(&group)
+            .map_err(CurrentMemberSignatureError::invalid_state_from)
     }
 
     async fn current_membership_credential(
@@ -2847,16 +2848,16 @@ impl CurrentMemberSignaturePort for RuntimeSpaceAccessAdapter {
     ) -> Result<MembershipCredential, CurrentMemberSignatureError> {
         let group = self.current_member_group_state().await?;
         let public_key = MlsGroupEngine::signing_public_key(&group)
-            .map_err(|_| CurrentMemberSignatureError::InvalidState)?;
+            .map_err(CurrentMemberSignatureError::invalid_state_from)?;
         let credential = MembershipCredential::new(
             uc_core::membership::ED25519_SIGNATURE_ALGORITHM_V1,
             public_key,
         );
         let current_instance =
             MlsGroupEngine::current_member_instance(&group, device_id.as_str().as_bytes())
-                .map_err(|_| CurrentMemberSignatureError::InvalidState)?;
+                .map_err(CurrentMemberSignatureError::invalid_state_from)?;
         if credential.member_instance_id(device_id) != current_instance {
-            return Err(CurrentMemberSignatureError::InvalidState);
+            return Err(CurrentMemberSignatureError::invalid_state());
         }
         Ok(credential)
     }
@@ -2867,7 +2868,7 @@ impl CurrentMemberSignaturePort for RuntimeSpaceAccessAdapter {
     ) -> Result<uc_core::membership::MemberInstanceId, CurrentMemberSignatureError> {
         let group = self.current_member_group_state().await?;
         MlsGroupEngine::current_member_instance(&group, device_id.as_str().as_bytes())
-            .map_err(|_| CurrentMemberSignatureError::InvalidState)
+            .map_err(CurrentMemberSignatureError::invalid_state_from)
     }
 
     async fn sign_current_member_payload(
@@ -2876,7 +2877,7 @@ impl CurrentMemberSignaturePort for RuntimeSpaceAccessAdapter {
     ) -> Result<Vec<u8>, CurrentMemberSignatureError> {
         let group = self.current_member_group_state().await?;
         MlsGroupEngine::sign_member_payload(&group, payload)
-            .map_err(|_| CurrentMemberSignatureError::InvalidState)
+            .map_err(CurrentMemberSignatureError::invalid_state_from)
     }
 
     async fn verify_current_member_payload(
@@ -2892,7 +2893,7 @@ impl CurrentMemberSignaturePort for RuntimeSpaceAccessAdapter {
             payload,
             signature,
         )
-        .map_err(|_| CurrentMemberSignatureError::InvalidState)
+        .map_err(CurrentMemberSignatureError::invalid_state_from)
     }
 
     async fn verify_member_instance_payload(
@@ -2910,7 +2911,7 @@ impl CurrentMemberSignaturePort for RuntimeSpaceAccessAdapter {
             payload,
             signature,
         )
-        .map_err(|_| CurrentMemberSignatureError::InvalidState)
+        .map_err(CurrentMemberSignatureError::invalid_state_from)
     }
 }
 
@@ -3595,16 +3596,16 @@ impl RuntimeSpaceAccessAdapter {
         let space_id = self
             .session
             .current_space_id()
-            .map_err(|_| CurrentMemberSignatureError::Unavailable)?;
+            .map_err(CurrentMemberSignatureError::unavailable_from)?;
         let repository = self.key_epoch_repository.as_ref();
         let material = repository
             .load_space_material(&space_id)
             .await
             .map_err(|error| CurrentMemberSignatureError::Repository(error.into()))?
-            .ok_or(CurrentMemberSignatureError::Unavailable)?;
+            .ok_or_else(CurrentMemberSignatureError::unavailable)?;
         if material.state().mode() != SpaceSecurityMode::Ready || material.group_state().is_empty()
         {
-            return Err(CurrentMemberSignatureError::InvalidState);
+            return Err(CurrentMemberSignatureError::invalid_state());
         }
         Ok(MlsClientState::from_bytes(material.group_state().to_vec()))
     }
@@ -4264,7 +4265,12 @@ mod admission_tests {
             MasterKey::from_bytes(&[0x62; 32]).unwrap(),
         );
         let failures = (0..8)
-            .map(|index| (format!("update-{index}"), GroupUpdateDispatchError::Offline))
+            .map(|index| {
+                (
+                    format!("update-{index}"),
+                    GroupUpdateDispatchError::offline(),
+                )
+            })
             .collect::<Vec<_>>();
 
         let mut repository = MockRevocationRepository::new();

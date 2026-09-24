@@ -111,7 +111,10 @@ pub enum BundleError {
     /// Wrong magic, wrong password, or tampered/corrupt ciphertext. These are
     /// deliberately one bucket to avoid a password oracle.
     #[error("invalid password or corrupt bundle")]
-    InvalidOrCorrupt,
+    InvalidOrCorrupt {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     /// Structurally recognizable but unsupported (newer format version, oversize
     /// payload, unknown KDF tag).
     #[error("incompatible bundle: {0}")]
@@ -119,7 +122,33 @@ pub enum BundleError {
     /// Key derivation or AEAD setup failed for a reason that is not attacker
     /// controlled (e.g. bad Argon2 parameters, RNG failure).
     #[error("crypto failure")]
-    Crypto,
+    Crypto {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl BundleError {
+    pub fn crypto() -> Self {
+        Self::Crypto { source: None }
+    }
+
+    pub fn crypto_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Crypto {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn invalid_or_corrupt() -> Self {
+        Self::InvalidOrCorrupt { source: None }
+    }
+
+    pub fn invalid_or_corrupt_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::InvalidOrCorrupt {
+            source: Some(source.into()),
+        }
+    }
 }
 
 /// Serialize a header to its fixed-size byte form (also used as AEAD AAD).
@@ -149,10 +178,10 @@ fn encode_header(header: &BundleHeader) -> [u8; HEADER_LEN] {
 /// Returns the header plus the byte offset where the ciphertext begins.
 pub fn parse_header(bytes: &[u8]) -> Result<(BundleHeader, usize), BundleError> {
     if bytes.len() < HEADER_LEN {
-        return Err(BundleError::InvalidOrCorrupt);
+        return Err(BundleError::invalid_or_corrupt());
     }
     if &bytes[0..8] != MAGIC {
-        return Err(BundleError::InvalidOrCorrupt);
+        return Err(BundleError::invalid_or_corrupt());
     }
     let mut o = 8;
     let format_ver = u16::from_le_bytes([bytes[o], bytes[o + 1]]);
@@ -220,12 +249,12 @@ fn derive_key(
     kdf: &Argon2Params,
 ) -> Result<[u8; KEY_LEN], BundleError> {
     let params = argon2::Params::new(kdf.mem_kib, kdf.iters, kdf.parallelism, Some(KEY_LEN))
-        .map_err(|_| BundleError::Crypto)?;
+        .map_err(BundleError::crypto_from)?;
     let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
     let mut key = [0u8; KEY_LEN];
     argon2
         .hash_password_into(password.expose().as_bytes(), salt, &mut key)
-        .map_err(|_| BundleError::Crypto)?;
+        .map_err(BundleError::crypto_from)?;
     Ok(key)
 }
 
@@ -248,11 +277,11 @@ pub fn seal(
     let mut salt = [0u8; SALT_LEN];
     OsRng
         .try_fill_bytes(&mut salt)
-        .map_err(|_| BundleError::Crypto)?;
+        .map_err(BundleError::crypto_from)?;
     let mut nonce = [0u8; NONCE_LEN];
     OsRng
         .try_fill_bytes(&mut nonce)
-        .map_err(|_| BundleError::Crypto)?;
+        .map_err(BundleError::crypto_from)?;
 
     let mut key = derive_key(password, &salt, &kdf)?;
     let out = finish_seal(&key, salt, kdf, nonce, archive);
@@ -281,7 +310,7 @@ pub fn seal_with_key(
     let mut nonce = [0u8; NONCE_LEN];
     OsRng
         .try_fill_bytes(&mut nonce)
-        .map_err(|_| BundleError::Crypto)?;
+        .map_err(BundleError::crypto_from)?;
     finish_seal(key, *salt, kdf, nonce, archive)
 }
 
@@ -302,7 +331,7 @@ fn finish_seal(
     };
     let aad = encode_header(&header);
 
-    let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(|_| BundleError::Crypto)?;
+    let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(BundleError::crypto_from)?;
     let ciphertext = cipher
         .encrypt(
             XNonce::from_slice(&nonce),
@@ -311,7 +340,7 @@ fn finish_seal(
                 aad: &aad,
             },
         )
-        .map_err(|_| BundleError::Crypto)?;
+        .map_err(BundleError::crypto_from)?;
 
     let mut out = Vec::with_capacity(HEADER_LEN + ciphertext.len());
     out.extend_from_slice(&aad);
@@ -335,7 +364,7 @@ pub fn open(password: &Passphrase, bytes: &[u8]) -> Result<Vec<u8>, BundleError>
     let aad = encode_header(&header);
 
     let mut key = derive_key(password, &header.salt, &header.kdf)?;
-    let cipher = XChaCha20Poly1305::new_from_slice(&key).map_err(|_| BundleError::Crypto)?;
+    let cipher = XChaCha20Poly1305::new_from_slice(&key).map_err(BundleError::crypto_from)?;
     key.zeroize();
 
     cipher
@@ -346,7 +375,7 @@ pub fn open(password: &Passphrase, bytes: &[u8]) -> Result<Vec<u8>, BundleError>
                 aad: &aad,
             },
         )
-        .map_err(|_| BundleError::InvalidOrCorrupt)
+        .map_err(BundleError::invalid_or_corrupt_from)
 }
 
 #[cfg(test)]
@@ -399,14 +428,14 @@ mod tests {
         let bundle = seal_with_key(&key, &salt, kdf, b"payload").unwrap();
 
         let err = open(&Passphrase::from("wrong"), &bundle).unwrap_err();
-        assert!(matches!(err, BundleError::InvalidOrCorrupt));
+        assert!(matches!(err, BundleError::InvalidOrCorrupt { .. }));
     }
 
     #[test]
     fn wrong_password_is_invalid_or_corrupt() {
         let bundle = seal(&Passphrase::from("right"), cheap(), b"payload").unwrap();
         let err = open(&Passphrase::from("wrong"), &bundle).unwrap_err();
-        assert!(matches!(err, BundleError::InvalidOrCorrupt));
+        assert!(matches!(err, BundleError::InvalidOrCorrupt { .. }));
     }
 
     #[test]
@@ -416,7 +445,7 @@ mod tests {
         let last = bundle.len() - 1;
         bundle[last] ^= 0xFF;
         let err = open(&pw, &bundle).unwrap_err();
-        assert!(matches!(err, BundleError::InvalidOrCorrupt));
+        assert!(matches!(err, BundleError::InvalidOrCorrupt { .. }));
     }
 
     #[test]
@@ -427,13 +456,13 @@ mod tests {
         bundle[8 + 2 + 1 + 12] ^= 0x01;
         let err = open(&pw, &bundle).unwrap_err();
         // Header still parses, but AAD mismatch + altered salt → decrypt fails.
-        assert!(matches!(err, BundleError::InvalidOrCorrupt));
+        assert!(matches!(err, BundleError::InvalidOrCorrupt { .. }));
     }
 
     #[test]
     fn bad_magic_is_invalid_or_corrupt() {
         let err = open(&Passphrase::from("pw"), b"NOTAUCBUNDLExxxxxxxxxxxxxxxxxxxx").unwrap_err();
-        assert!(matches!(err, BundleError::InvalidOrCorrupt));
+        assert!(matches!(err, BundleError::InvalidOrCorrupt { .. }));
     }
 
     #[test]
@@ -455,7 +484,7 @@ mod tests {
     #[test]
     fn truncated_header_is_invalid_or_corrupt() {
         let err = open(&Passphrase::from("pw"), b"UCBUNDLE").unwrap_err();
-        assert!(matches!(err, BundleError::InvalidOrCorrupt));
+        assert!(matches!(err, BundleError::InvalidOrCorrupt { .. }));
     }
 
     #[test]

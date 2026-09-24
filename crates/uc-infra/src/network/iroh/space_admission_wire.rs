@@ -95,15 +95,44 @@ pub(super) enum WireError {
     #[error("space admission wire operation timed out")]
     Timeout,
     #[error("space admission wire header is invalid")]
-    InvalidHeader,
+    InvalidHeader {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("space admission wire frame kind is unknown")]
     UnknownFrame,
     #[error("space admission wire frame length is invalid")]
     InvalidLength,
     #[error("space admission wire payload is invalid")]
-    InvalidPayload,
+    InvalidPayload {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("space admission authenticated message layout requires a peer upgrade")]
     UnsupportedLayout,
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl WireError {
+    pub fn invalid_header() -> Self {
+        Self::InvalidHeader { source: None }
+    }
+
+    pub fn invalid_header_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::InvalidHeader {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn invalid_payload() -> Self {
+        Self::InvalidPayload { source: None }
+    }
+
+    pub fn invalid_payload_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::InvalidPayload {
+            source: Some(source.into()),
+        }
+    }
 }
 
 pub(super) async fn write_typed<W, T>(
@@ -116,7 +145,7 @@ where
     W: AsyncWrite + Unpin,
     T: Serialize,
 {
-    let payload = postcard::to_stdvec(value).map_err(|_| WireError::InvalidPayload)?;
+    let payload = postcard::to_stdvec(value).map_err(WireError::invalid_payload_from)?;
     write_raw(writer, kind, &payload, limit).await
 }
 
@@ -139,7 +168,7 @@ pub(super) async fn write_envelope<W: AsyncWrite + Unpin>(
     envelope: &AuthenticatedEnvelopeV1,
 ) -> Result<(), WireError> {
     let domain = SpaceAdmissionEnvelopeV1::decode_canonical_v1(&envelope.canonical_envelope)
-        .map_err(|_| WireError::InvalidPayload)?;
+        .map_err(WireError::invalid_payload_from)?;
     write_typed(writer, kind, envelope, envelope_limit(domain.kind())).await
 }
 
@@ -159,7 +188,7 @@ pub(super) async fn read_envelope<R: AsyncRead + Unpin>(
     }
     let wire: AuthenticatedEnvelopeV1 = decode_exact(&payload)?;
     let envelope = SpaceAdmissionEnvelopeV1::decode_canonical_v1(&wire.canonical_envelope)
-        .map_err(|_| WireError::InvalidPayload)?;
+        .map_err(WireError::invalid_payload_from)?;
     if payload.len() > envelope_limit(envelope.kind()) {
         return Err(WireError::InvalidLength);
     }
@@ -204,13 +233,13 @@ pub(super) async fn read_raw_with_limit<R: AsyncRead + Unpin>(
     let mut header = [0u8; HEADER_LEN];
     run_io(reader.read_exact(&mut header)).await?;
     if header[..4] != WIRE_MAGIC || header[4] != WIRE_VERSION {
-        return Err(WireError::InvalidHeader);
+        return Err(WireError::invalid_header());
     }
     let kind = FrameKind::from_u8(header[5])?;
     let length = u32::from_be_bytes(
         header[6..]
             .try_into()
-            .map_err(|_| WireError::InvalidHeader)?,
+            .map_err(WireError::invalid_header_from)?,
     ) as usize;
     if length == 0 || length > limit {
         return Err(WireError::InvalidLength);
@@ -223,15 +252,16 @@ pub(super) async fn read_raw_with_limit<R: AsyncRead + Unpin>(
 async fn run_io<T>(future: impl Future<Output = io::Result<T>>) -> Result<T, WireError> {
     tokio::time::timeout(IO_DEADLINE, future)
         .await
+        // 超时本身就是分类。
         .map_err(|_| WireError::Timeout)?
         .map_err(WireError::Io)
 }
 
 fn decode_exact<T: DeserializeOwned>(payload: &[u8]) -> Result<T, WireError> {
     let (value, remaining) =
-        postcard::take_from_bytes(payload).map_err(|_| WireError::InvalidPayload)?;
+        postcard::take_from_bytes(payload).map_err(WireError::invalid_payload_from)?;
     if !remaining.is_empty() {
-        return Err(WireError::InvalidPayload);
+        return Err(WireError::invalid_payload());
     }
     Ok(value)
 }

@@ -678,7 +678,7 @@ fn map_manifest_error(
         ActiveSpaceGenerationManifestStoreError::Storage { .. } => {
             storage(anyhow::Error::new(source))
         }
-        ActiveSpaceGenerationManifestStoreError::Corrupt
+        ActiveSpaceGenerationManifestStoreError::Corrupt { .. }
         | ActiveSpaceGenerationManifestStoreError::UnsupportedVersion => {
             inconsistent(anyhow::Error::new(source))
         }

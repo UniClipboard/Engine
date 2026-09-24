@@ -48,7 +48,7 @@ impl MembershipRecordStorePort for EmptyLedger {
         Ok(MembershipRecord::NoSpace { revision: 0 })
     }
     async fn commit(&self, _: MembershipRecordCommit) -> Result<(), MembershipLedgerError> {
-        Err(MembershipLedgerError::Unavailable)
+        Err(MembershipLedgerError::unavailable())
     }
 }
 struct MustNotHandle;

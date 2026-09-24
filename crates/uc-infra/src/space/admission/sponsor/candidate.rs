@@ -374,7 +374,7 @@ mod tests {
         ) -> Result<MembershipCredential, CurrentMemberSignatureError> {
             (device_id == &self.device_id)
                 .then(|| self.credential.clone())
-                .ok_or(CurrentMemberSignatureError::InvalidState)
+                .ok_or_else(CurrentMemberSignatureError::invalid_state)
         }
 
         async fn current_member_instance(

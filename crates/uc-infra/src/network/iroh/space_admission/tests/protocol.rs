@@ -48,7 +48,7 @@ async fn server_rejects_missing_and_invalid_peer_acknowledgements() {
         .expect("invalid acknowledgement frame");
     assert!(matches!(
         read_peer_acknowledgement(&mut reader).await,
-        Err(HandlerError::Protocol)
+        Err(HandlerError::Protocol { .. })
     ));
     assert_eq!(
         server_error_type(&HandlerError::Acknowledgement),

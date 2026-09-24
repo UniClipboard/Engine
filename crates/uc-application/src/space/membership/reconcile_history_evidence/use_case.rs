@@ -56,11 +56,11 @@ impl ReconcileMembershipEvidenceUseCase {
             .cloned()
             .ok_or(MembershipLedgerError::RecoveryRequired)?;
         let Ok(response_pages) = local.export_conflict_evidence_pages_v2(local_sender) else {
-            return Err(MembershipLedgerError::Corrupt);
+            return Err(MembershipLedgerError::corrupt());
         };
         let response_position = local
             .current_position()
-            .map_err(|_| MembershipLedgerError::Corrupt)?;
+            .map_err(MembershipLedgerError::corrupt_from)?;
         let response = |relationship| {
             Some(MembershipEvidenceExchange {
                 response: MembershipConflictEvidenceV3 {
@@ -70,9 +70,10 @@ impl ReconcileMembershipEvidenceUseCase {
                 relationship,
             })
         };
-        if MembershipConflictPolicy::branch_id(local).map_err(|_| MembershipLedgerError::Corrupt)?
+        if MembershipConflictPolicy::branch_id(local)
+            .map_err(MembershipLedgerError::corrupt_from)?
             == MembershipConflictPolicy::branch_id(&remote)
-                .map_err(|_| MembershipLedgerError::Corrupt)?
+                .map_err(MembershipLedgerError::corrupt_from)?
             && local.active_members() == remote.active_members()
         {
             if relation != Some(PeerRelation::Consistent) {
@@ -86,10 +87,10 @@ impl ReconcileMembershipEvidenceUseCase {
         };
         let local_choice = conflict
             .choice_for(conflict.local_branch_id)
-            .ok_or(MembershipLedgerError::Corrupt)?;
+            .ok_or_else(MembershipLedgerError::corrupt)?;
         let remote_choice = conflict
             .choice_for(conflict.remote_branch_id)
-            .ok_or(MembershipLedgerError::Corrupt)?;
+            .ok_or_else(MembershipLedgerError::corrupt)?;
         let presentation =
             MembershipConflictPresentation::from_verified_histories(local, &remote, local_member)?;
         let legacy =

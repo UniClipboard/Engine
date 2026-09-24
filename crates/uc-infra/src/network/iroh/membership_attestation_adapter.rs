@@ -207,8 +207,8 @@ impl IrohMembershipGossipTransportAdapter {
         self.peer_address_resolver
             .resolve(recipient)
             .await
-            .map_err(|_| MembershipGossipTransportError::Transport)?
-            .ok_or(MembershipGossipTransportError::Offline)
+            .map_err(MembershipGossipTransportError::transport_from)?
+            .ok_or_else(MembershipGossipTransportError::offline)
     }
 }
 
@@ -251,14 +251,14 @@ impl MembershipGossipTransportPort for IrohMembershipGossipTransportAdapter {
     ) -> Result<MembershipGossipMessage, MembershipGossipTransportError> {
         message
             .validate_transfer_bounds()
-            .map_err(|_| MembershipGossipTransportError::Rejected)?;
+            .map_err(MembershipGossipTransportError::rejected_from)?;
         let identity = self
             .identity
             .current_membership_identity()
             .await
-            .map_err(|_| MembershipGossipTransportError::Rejected)?;
+            .map_err(MembershipGossipTransportError::rejected_from)?;
         if &identity.device_id == recipient {
-            return Err(MembershipGossipTransportError::Rejected);
+            return Err(MembershipGossipTransportError::rejected());
         }
         let remote_addr = self.resolve_addr(recipient).await?;
         let connection = connect_with_staggered_retry(
@@ -269,11 +269,11 @@ impl MembershipGossipTransportPort for IrohMembershipGossipTransportAdapter {
             uc_observability_contract::diagnostics::connectivity::AddressInputSource::Stored,
         )
         .await;
-        let connection = connection.map_err(|_| MembershipGossipTransportError::Offline)?;
+        let connection = connection.map_err(MembershipGossipTransportError::offline_from)?;
         let (mut send, mut recv) = tokio::time::timeout(IO_TIMEOUT, connection.open_bi())
             .await
-            .map_err(|_| MembershipGossipTransportError::Transport)?
-            .map_err(|_| MembershipGossipTransportError::Transport)?;
+            .map_err(MembershipGossipTransportError::transport_from)?
+            .map_err(MembershipGossipTransportError::transport_from)?;
         write_message(
             &mut send,
             &WireMessage::GossipRequest(WireGossipRequest {
@@ -284,7 +284,7 @@ impl MembershipGossipTransportPort for IrohMembershipGossipTransportAdapter {
         .await
         .map_err(map_attestation_transport_error)?;
         send.finish()
-            .map_err(|_| MembershipGossipTransportError::Transport)?;
+            .map_err(MembershipGossipTransportError::transport_from)?;
         match read_message(&mut recv)
             .await
             .map_err(map_attestation_transport_error)?
@@ -292,14 +292,14 @@ impl MembershipGossipTransportPort for IrohMembershipGossipTransportAdapter {
             WireMessage::GossipResponse(response) => {
                 response
                     .validate_transfer_bounds()
-                    .map_err(|_| MembershipGossipTransportError::Rejected)?;
+                    .map_err(MembershipGossipTransportError::rejected_from)?;
                 Ok(response)
             }
             WireMessage::Reject(WireReject::Version) => {
                 Err(MembershipGossipTransportError::VersionIncompatible)
             }
-            WireMessage::Reject(_) => Err(MembershipGossipTransportError::Rejected),
-            _ => Err(MembershipGossipTransportError::Transport),
+            WireMessage::Reject(_) => Err(MembershipGossipTransportError::rejected()),
+            _ => Err(MembershipGossipTransportError::transport()),
         }
     }
 }
@@ -311,12 +311,13 @@ fn map_attestation_transport_error(
         MembershipAttestationError::VersionIncompatible => {
             MembershipGossipTransportError::VersionIncompatible
         }
-        MembershipAttestationError::Rejected
+        MembershipAttestationError::Rejected { .. }
         | MembershipAttestationError::MissingSecurityUpdate => {
-            MembershipGossipTransportError::Rejected
+            MembershipGossipTransportError::rejected()
         }
-        MembershipAttestationError::Offline | MembershipAttestationError::Transport => {
-            MembershipGossipTransportError::Transport
+        MembershipAttestationError::Offline { .. }
+        | MembershipAttestationError::Transport { .. } => {
+            MembershipGossipTransportError::transport()
         }
     }
 }
@@ -370,7 +371,7 @@ impl IrohMembershipAttestationAdapter {
 
     async fn local_address(&self) -> Result<Vec<u8>, MembershipAttestationError> {
         postcard::to_stdvec(&to_persistable_addr(self.endpoint.addr()))
-            .map_err(|_| MembershipAttestationError::Transport)
+            .map_err(MembershipAttestationError::transport_from)
     }
 }
 
@@ -382,7 +383,7 @@ impl MembershipAttestationPort for IrohMembershipAttestationAdapter {
         candidate: &SpaceMembershipCandidate,
     ) -> Result<VerifiedMembershipPeer, MembershipAttestationError> {
         let remote_addr: EndpointAddr = postcard::from_bytes(candidate.transport_address_blob())
-            .map_err(|_| MembershipAttestationError::Transport)?;
+            .map_err(MembershipAttestationError::transport_from)?;
         let connection = connect_with_staggered_retry(
             Arc::clone(&self.endpoint),
             remote_addr.clone(),
@@ -391,21 +392,21 @@ impl MembershipAttestationPort for IrohMembershipAttestationAdapter {
             uc_observability_contract::diagnostics::connectivity::AddressInputSource::Provided,
         )
         .await;
-        let connection = connection.map_err(|_| MembershipAttestationError::Offline)?;
+        let connection = connection.map_err(MembershipAttestationError::offline_from)?;
         let remote_key = *connection.remote_id().as_bytes();
         let local = self
             .identity
             .current_membership_identity()
             .await
-            .map_err(|_| MembershipAttestationError::Rejected)?;
+            .map_err(MembershipAttestationError::rejected_from)?;
         if &local.space_id != candidate.space_id() || local.device_id == *candidate.device_id() {
-            return Err(MembershipAttestationError::Rejected);
+            return Err(MembershipAttestationError::rejected());
         }
         let group_epoch = self
             .signatures
             .current_member_epoch()
             .await
-            .map_err(|_| MembershipAttestationError::Rejected)?;
+            .map_err(MembershipAttestationError::rejected_from)?;
         let initiator_nonce = rand::random::<[u8; 32]>();
         let hello = WireHello {
             space_id: local.space_id.as_ref().to_owned(),
@@ -424,25 +425,27 @@ impl MembershipAttestationPort for IrohMembershipAttestationAdapter {
         let challenge = match read_message(&mut recv).await? {
             WireMessage::Challenge(challenge) => challenge,
             WireMessage::Reject(reason) => return Err(map_rejection(reason)),
-            _ => return Err(MembershipAttestationError::Transport),
+            _ => return Err(MembershipAttestationError::transport()),
         };
         let responder_id = DeviceId::try_new(&challenge.responder_device_id)
-            .ok_or(MembershipAttestationError::Rejected)?;
+            .ok_or_else(MembershipAttestationError::rejected)?;
         if responder_id != *candidate.device_id() || challenge.responder_transport_key != remote_key
         {
-            return Err(MembershipAttestationError::Rejected);
+            return Err(MembershipAttestationError::rejected());
         }
         let responder_fingerprint =
             IdentityFingerprint::from_display_string(&challenge.responder_identity_fingerprint)
-                .map_err(|_| MembershipAttestationError::Rejected)?;
+                .map_err(MembershipAttestationError::rejected_from)?;
         let connected_fingerprint = self
             .fingerprint_factory
             .from_public_key(&remote_key)
-            .map_err(|_| MembershipAttestationError::Rejected)?;
+            .map_err(|error| MembershipAttestationError::Rejected {
+                source: Some(error.context("derive connected fingerprint").into()),
+            })?;
         if responder_fingerprint != connected_fingerprint
             || &responder_fingerprint != candidate.identity_fingerprint_hint()
         {
-            return Err(MembershipAttestationError::Rejected);
+            return Err(MembershipAttestationError::rejected());
         }
         let transcript = build_transcript(
             &local,
@@ -467,18 +470,18 @@ impl MembershipAttestationPort for IrohMembershipAttestationAdapter {
             .signatures
             .verify_current_member_payload(&responder_id, &transcript_bytes, &challenge.signature)
             .await
-            .map_err(|_| MembershipAttestationError::Rejected)?
+            .map_err(MembershipAttestationError::rejected_from)?
         {
-            return Err(MembershipAttestationError::Rejected);
+            return Err(MembershipAttestationError::rejected());
         }
         let proof = self
             .signatures
             .sign_current_member_payload(&transcript_bytes)
             .await
-            .map_err(|_| MembershipAttestationError::Rejected)?;
+            .map_err(MembershipAttestationError::rejected_from)?;
         write_message(&mut send, &WireMessage::Proof(proof)).await?;
         send.finish()
-            .map_err(|_| MembershipAttestationError::Transport)?;
+            .map_err(MembershipAttestationError::transport_from)?;
         match read_message(&mut recv).await? {
             WireMessage::Ack => Ok(VerifiedMembershipPeer {
                 space_id: local.space_id,
@@ -489,7 +492,7 @@ impl MembershipAttestationPort for IrohMembershipAttestationAdapter {
                 transport_address_blob: challenge.responder_address,
             }),
             WireMessage::Reject(reason) => Err(map_rejection(reason)),
-            _ => Err(MembershipAttestationError::Transport),
+            _ => Err(MembershipAttestationError::transport()),
         }
     }
 }
@@ -917,11 +920,14 @@ fn security_updates_digest(updates: &[RelayedSecurityUpdate]) -> [u8; 32] {
 
 async fn run_io<T, E>(
     future: impl Future<Output = Result<T, E>>,
-) -> Result<T, MembershipAttestationError> {
+) -> Result<T, MembershipAttestationError>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
     tokio::time::timeout(IO_TIMEOUT, future)
         .await
-        .map_err(|_| MembershipAttestationError::Transport)?
-        .map_err(|_| MembershipAttestationError::Transport)
+        .map_err(MembershipAttestationError::transport_from)?
+        .map_err(MembershipAttestationError::transport_from)
 }
 
 async fn write_message(
@@ -932,11 +938,12 @@ async fn write_message(
         version: WIRE_VERSION,
         message: message.clone(),
     })
-    .map_err(|_| MembershipAttestationError::Transport)?;
+    .map_err(MembershipAttestationError::transport_from)?;
     if payload.is_empty() || payload.len() > MAX_MESSAGE_SIZE {
-        return Err(MembershipAttestationError::Transport);
+        return Err(MembershipAttestationError::transport());
     }
-    let length = u32::try_from(payload.len()).map_err(|_| MembershipAttestationError::Transport)?;
+    let length =
+        u32::try_from(payload.len()).map_err(MembershipAttestationError::transport_from)?;
     run_io(send.write_all(&length.to_be_bytes())).await?;
     run_io(send.write_all(&payload)).await
 }
@@ -948,12 +955,12 @@ async fn read_message(
     run_io(recv.read_exact(&mut length)).await?;
     let length = u32::from_be_bytes(length) as usize;
     if length == 0 || length > MAX_MESSAGE_SIZE {
-        return Err(MembershipAttestationError::Transport);
+        return Err(MembershipAttestationError::transport());
     }
     let mut payload = vec![0u8; length];
     run_io(recv.read_exact(&mut payload)).await?;
     let envelope: WireEnvelope =
-        postcard::from_bytes(&payload).map_err(|_| MembershipAttestationError::Transport)?;
+        postcard::from_bytes(&payload).map_err(MembershipAttestationError::transport_from)?;
     if envelope.version != WIRE_VERSION {
         return Err(MembershipAttestationError::VersionIncompatible);
     }
@@ -974,7 +981,7 @@ fn map_rejection(reason: WireReject) -> MembershipAttestationError {
         WireReject::EpochMismatch => MembershipAttestationError::MissingSecurityUpdate,
         WireReject::Version => MembershipAttestationError::VersionIncompatible,
         WireReject::Invalid | WireReject::WrongSpace | WireReject::Persistence => {
-            MembershipAttestationError::Rejected
+            MembershipAttestationError::rejected()
         }
     }
 }
@@ -1084,7 +1091,7 @@ mod tests {
             let secret = self
                 .secrets
                 .get(device_id)
-                .ok_or(CurrentMemberSignatureError::Unavailable)?;
+                .ok_or_else(CurrentMemberSignatureError::unavailable)?;
             Ok(uc_core::membership::MemberInstanceId::derive(
                 device_id.as_str(),
                 secret,
@@ -1098,7 +1105,7 @@ mod tests {
             let secret = self
                 .secrets
                 .get(&self.device_id)
-                .ok_or(CurrentMemberSignatureError::Unavailable)?;
+                .ok_or_else(CurrentMemberSignatureError::unavailable)?;
             Ok(blake3::keyed_hash(secret, payload).as_bytes().to_vec())
         }
 
@@ -2105,7 +2112,10 @@ mod tests {
             ))
             .await;
 
-        assert_eq!(result, Err(MembershipAttestationError::Rejected));
+        assert!(matches!(
+            result,
+            Err(MembershipAttestationError::Rejected { .. })
+        ));
         assert!(c_inbound.0.lock().unwrap().is_empty());
         c_router.shutdown().await.ok();
         a_endpoint.close().await;
@@ -2156,7 +2166,10 @@ mod tests {
             ))
             .await;
 
-        assert_eq!(result, Err(MembershipAttestationError::Rejected));
+        assert!(matches!(
+            result,
+            Err(MembershipAttestationError::Rejected { .. })
+        ));
         assert!(c_inbound.0.lock().unwrap().is_empty());
         c_router.shutdown().await.ok();
         a_endpoint.close().await;
@@ -2357,7 +2370,10 @@ mod tests {
             ))
             .await;
 
-        assert_eq!(result, Err(MembershipAttestationError::Rejected));
+        assert!(matches!(
+            result,
+            Err(MembershipAttestationError::Rejected { .. })
+        ));
         assert!(c_inbound.0.lock().unwrap().is_empty());
         c_router.shutdown().await.ok();
         a_endpoint.close().await;

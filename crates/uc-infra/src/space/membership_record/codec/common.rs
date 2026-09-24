@@ -264,7 +264,7 @@ impl BranchRecoveryDto {
                 .map(|(id, session)| {
                     let session = session.into_session()?;
                     if *session.transition_id() != id {
-                        return Err(MembershipLedgerError::Corrupt);
+                        return Err(MembershipLedgerError::corrupt());
                     }
                     Ok((id, session))
                 })
@@ -579,6 +579,6 @@ impl RecoverySessionDto {
             self.recipient_member,
             state,
         )
-        .ok_or(MembershipLedgerError::Corrupt)
+        .ok_or_else(MembershipLedgerError::corrupt)
     }
 }

@@ -197,10 +197,10 @@ impl RemoveSpaceMemberUseCase {
                 }
                 if history
                     .verify_and_receive_event(event, verifier.as_ref())
-                    .map_err(|_| MembershipLedgerError::Corrupt)?
+                    .map_err(MembershipLedgerError::corrupt_from)?
                     != MembershipHistoryV2ReceiveOutcome::Applied
                 {
-                    return Err(MembershipLedgerError::Corrupt);
+                    return Err(MembershipLedgerError::corrupt());
                 }
                 let retained_device_ids = history
                     .effective_members()
@@ -365,18 +365,19 @@ fn map_ledger_error(error: MembershipLedgerError) -> RemoveSpaceMemberError {
     match error {
         MembershipLedgerError::Locked => RemoveSpaceMemberError::Locked,
         MembershipLedgerError::Conflict => RemoveSpaceMemberError::StateChanged,
-        MembershipLedgerError::Corrupt | MembershipLedgerError::RecoveryRequired => {
+        MembershipLedgerError::Corrupt { .. } | MembershipLedgerError::RecoveryRequired => {
             RemoveSpaceMemberError::RecoveryRequired
         }
-        MembershipLedgerError::Unavailable => RemoveSpaceMemberError::Unavailable,
+        MembershipLedgerError::Unavailable { .. } => RemoveSpaceMemberError::Unavailable,
     }
 }
 
 fn map_signature_error(error: CurrentMemberSignatureError) -> RemoveSpaceMemberError {
     match error {
-        CurrentMemberSignatureError::InvalidState => RemoveSpaceMemberError::RecoveryRequired,
-        CurrentMemberSignatureError::Unavailable | CurrentMemberSignatureError::Repository(_) => {
-            RemoveSpaceMemberError::Unavailable
+        CurrentMemberSignatureError::InvalidState { .. } => {
+            RemoveSpaceMemberError::RecoveryRequired
         }
+        CurrentMemberSignatureError::Unavailable { .. }
+        | CurrentMemberSignatureError::Repository(_) => RemoveSpaceMemberError::Unavailable,
     }
 }

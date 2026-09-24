@@ -165,7 +165,7 @@ impl crate::space::membership::CurrentMemberSignaturePort for RecoverySigner {
         uc_core::membership::MemberInstanceId,
         crate::space::membership::CurrentMemberSignatureError,
     > {
-        Err(crate::space::membership::CurrentMemberSignatureError::InvalidState)
+        Err(crate::space::membership::CurrentMemberSignatureError::invalid_state())
     }
 
     async fn sign_current_member_payload(

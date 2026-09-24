@@ -89,9 +89,9 @@ impl<E: DbExecutor> SqliteMembershipRecordStore<E> {
                     self.save_on(conn, replacement)
                         .map_err(anyhow::Error::new)?;
                     if let Some((writer, plan)) = projection {
-                        writer
-                            .apply(conn, plan)
-                            .map_err(|_| anyhow::Error::new(MembershipLedgerError::Unavailable))?;
+                        writer.apply(conn, plan).map_err(|error| {
+                            anyhow::Error::new(MembershipLedgerError::unavailable_from(error))
+                        })?;
                     }
                     Ok(())
                 })
@@ -108,7 +108,7 @@ impl<E: DbExecutor> SqliteMembershipRecordStore<E> {
         )
         .get_result::<EncryptedRecordRow>(conn)
         .optional()
-        .map_err(|_| MembershipLedgerError::Unavailable)?;
+        .map_err(MembershipLedgerError::unavailable_from)?;
         let Some(row) = row else {
             return Ok(MembershipRecord::NoSpace { revision: 0 });
         };
@@ -147,7 +147,7 @@ impl<E: DbExecutor> SqliteMembershipRecordStore<E> {
         )
         .bind::<Binary, _>(encrypted)
         .execute(conn)
-        .map_err(|_| MembershipLedgerError::Unavailable)?;
+        .map_err(MembershipLedgerError::unavailable_from)?;
         Ok(())
     }
 }
@@ -165,10 +165,10 @@ impl<E: DbExecutor + Send + Sync> MembershipRecordStorePort for SqliteMembership
                 relationships
                     .membership_projection_writer()
                     .await
-                    .map_err(|_| MembershipLedgerError::Unavailable)?,
+                    .map_err(MembershipLedgerError::unavailable_from)?,
             ),
             // 读模型计划无处落实时不写记录，避免两者分离。
-            (Some(_), None) => return Err(MembershipLedgerError::Unavailable),
+            (Some(_), None) => return Err(MembershipLedgerError::unavailable()),
         };
         self.commit_record(
             commit.expected_revision,
@@ -183,15 +183,15 @@ fn map_key_error(error: AdmissionKeyError) -> MembershipLedgerError {
         AdmissionKeyError::SecureStorage { .. } | AdmissionKeyError::StorageNotPersisted => {
             MembershipLedgerError::Locked
         }
-        AdmissionKeyError::Corrupt { .. }
+        error @ (AdmissionKeyError::Corrupt { .. }
         | AdmissionKeyError::InvalidLayout
-        | AdmissionKeyError::OpenFailed { .. } => MembershipLedgerError::Corrupt,
+        | AdmissionKeyError::OpenFailed { .. }) => MembershipLedgerError::corrupt_from(error),
     }
 }
 
 fn map_executor_error(error: anyhow::Error) -> MembershipLedgerError {
-    error
-        .downcast_ref::<MembershipLedgerError>()
-        .copied()
-        .unwrap_or(MembershipLedgerError::Unavailable)
+    match error.downcast::<MembershipLedgerError>() {
+        Ok(error) => error,
+        Err(error) => MembershipLedgerError::unavailable_from(error),
+    }
 }

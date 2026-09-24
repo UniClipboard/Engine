@@ -122,12 +122,12 @@ impl ResolveMembershipConflictUseCase {
             MembershipLedgerError::Locked => QueryMembershipConflictsError::Locked {
                 source: anyhow::Error::new(error),
             },
-            MembershipLedgerError::Corrupt | MembershipLedgerError::RecoveryRequired => {
+            MembershipLedgerError::Corrupt { .. } | MembershipLedgerError::RecoveryRequired => {
                 QueryMembershipConflictsError::RecoveryRequired {
                     source: anyhow::Error::new(error),
                 }
             }
-            MembershipLedgerError::Conflict | MembershipLedgerError::Unavailable => {
+            MembershipLedgerError::Conflict | MembershipLedgerError::Unavailable { .. } => {
                 QueryMembershipConflictsError::Unavailable {
                     source: anyhow::Error::new(error),
                 }
@@ -271,14 +271,16 @@ fn map_ledger_error(error: MembershipLedgerError) -> ResolveMembershipConflictEr
         MembershipLedgerError::Conflict => ResolveMembershipConflictError::TargetUnavailable {
             source: anyhow::Error::new(error),
         },
-        MembershipLedgerError::Corrupt | MembershipLedgerError::RecoveryRequired => {
+        MembershipLedgerError::Corrupt { .. } | MembershipLedgerError::RecoveryRequired => {
             ResolveMembershipConflictError::RecoveryRequired {
                 source: anyhow::Error::new(error),
             }
         }
-        MembershipLedgerError::Unavailable => ResolveMembershipConflictError::TargetUnavailable {
-            source: anyhow::Error::new(error),
-        },
+        MembershipLedgerError::Unavailable { .. } => {
+            ResolveMembershipConflictError::TargetUnavailable {
+                source: anyhow::Error::new(error),
+            }
+        }
     }
 }
 

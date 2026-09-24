@@ -16,9 +16,15 @@ impl From<ProofError> for HandlerError {
 #[derive(Debug, thiserror::Error)]
 pub(super) enum HandlerError {
     #[error("admission message is invalid")]
-    Protocol,
+    Protocol {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("admission authentication was rejected")]
-    Authentication,
+    Authentication {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("admission credential could not be used")]
     Credential(#[source] SpaceAdmissionChannelCredentialError),
     #[error("admission proof was rejected")]
@@ -34,11 +40,47 @@ pub(super) enum HandlerError {
     #[error("admission peer upgrade required")]
     PeerUpgradeRequired,
     #[error("admission handling failed")]
-    Application,
+    Application {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("admission acknowledgement missing")]
     Acknowledgement,
     #[error("admission deadline elapsed")]
     Timeout,
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl HandlerError {
+    pub fn protocol() -> Self {
+        Self::Protocol { source: None }
+    }
+
+    pub fn protocol_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Protocol {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn authentication() -> Self {
+        Self::Authentication { source: None }
+    }
+
+    pub fn authentication_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Authentication {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn application() -> Self {
+        Self::Application { source: None }
+    }
+
+    pub fn application_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Application {
+            source: Some(source.into()),
+        }
+    }
 }
 
 pub(super) fn map_request_wire_error(error: WireError) -> HandlerError {
@@ -54,7 +96,7 @@ pub(super) fn map_server_wire_error(error: WireError) -> HandlerError {
         WireError::Io(source) => HandlerError::Transport {
             source: anyhow::Error::new(source),
         },
-        _ => HandlerError::Protocol,
+        _ => HandlerError::protocol(),
     }
 }
 

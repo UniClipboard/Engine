@@ -217,7 +217,7 @@ fn decrypt(
         v1_aead::AeadError::DecryptFailed => BlobCipherError::invalid_ciphertext(
             anyhow::Error::new(error).context("V1/V2 inline authentication failed"),
         ),
-        v1_aead::AeadError::InvalidKey | v1_aead::AeadError::EncryptFailed => {
+        v1_aead::AeadError::InvalidKey { .. } | v1_aead::AeadError::EncryptFailed { .. } => {
             BlobCipherError::internal(
                 anyhow::Error::new(error).context("V1/V2 inline cryptography failed"),
             )

@@ -27,7 +27,7 @@ impl MembershipRecordStorePort for FixedMembershipRecords {
     }
 
     async fn commit(&self, _commit: MembershipRecordCommit) -> Result<(), MembershipLedgerError> {
-        Err(MembershipLedgerError::Unavailable)
+        Err(MembershipLedgerError::unavailable())
     }
 }
 
@@ -62,11 +62,11 @@ pub(crate) struct UnavailableMembershipRecords;
 #[async_trait]
 impl MembershipRecordStorePort for UnavailableMembershipRecords {
     async fn load(&self) -> Result<MembershipRecord, MembershipLedgerError> {
-        Err(MembershipLedgerError::Unavailable)
+        Err(MembershipLedgerError::unavailable())
     }
 
     async fn commit(&self, _commit: MembershipRecordCommit) -> Result<(), MembershipLedgerError> {
-        Err(MembershipLedgerError::Unavailable)
+        Err(MembershipLedgerError::unavailable())
     }
 }
 

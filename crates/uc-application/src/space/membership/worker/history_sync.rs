@@ -98,9 +98,9 @@ impl HistorySynchronizer {
             Ok(report) if report.deferred_peer_count > 0 => MembershipRecoveryOutcome::Deferred,
             Ok(report) if report.completed_peer_count > 0 => MembershipRecoveryOutcome::Completed,
             Ok(_) => MembershipRecoveryOutcome::NoWork,
-            Err(MembershipLedgerError::Corrupt | MembershipLedgerError::RecoveryRequired) => {
-                MembershipRecoveryOutcome::Corrupt
-            }
+            Err(
+                MembershipLedgerError::Corrupt { .. } | MembershipLedgerError::RecoveryRequired,
+            ) => MembershipRecoveryOutcome::Corrupt,
             Err(_) => MembershipRecoveryOutcome::Deferred,
         });
         result
@@ -132,10 +132,10 @@ impl HistorySynchronizer {
         let sender = history
             .admission_facts_for(space.local_member())
             .cloned()
-            .ok_or(MembershipLedgerError::Corrupt)?;
+            .ok_or_else(MembershipLedgerError::corrupt)?;
         let position = history
             .current_position()
-            .map_err(|_| MembershipLedgerError::Corrupt)?;
+            .map_err(MembershipLedgerError::corrupt_from)?;
         let proofs: Vec<(DeviceId, HistoryProofRequirement)> = peers
             .into_iter()
             .map(|peer| {

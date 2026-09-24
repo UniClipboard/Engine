@@ -225,7 +225,7 @@ async fn a_stale_commit_is_rejected() {
 
     let stale = commit(&fixture.store, 0, MembershipRecord::NoSpace { revision: 2 }).await;
 
-    assert_eq!(stale, Err(MembershipLedgerError::Conflict));
+    assert!(matches!(stale, Err(MembershipLedgerError::Conflict)));
     assert_eq!(fixture.reopen().load().unwrap(), record);
 }
 
@@ -243,7 +243,10 @@ async fn a_failed_write_keeps_the_previous_record_whole() {
 
     let failed = commit(&fixture.store, 1, replacement.clone()).await;
 
-    assert_eq!(failed, Err(MembershipLedgerError::Unavailable));
+    assert!(matches!(
+        failed,
+        Err(MembershipLedgerError::Unavailable { .. })
+    ));
     assert_eq!(fixture.reopen().load().unwrap(), initial);
 
     fixture.execute_sql("DROP TRIGGER fail_membership_record_update");

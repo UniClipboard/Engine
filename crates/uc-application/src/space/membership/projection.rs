@@ -25,7 +25,7 @@ impl MembershipProjectionPlan {
         for member in history.active_members() {
             let facts = history
                 .admission_facts_for(member)
-                .ok_or(MembershipLedgerError::Corrupt)?;
+                .ok_or_else(MembershipLedgerError::corrupt)?;
             required.insert(facts.device_id);
             if facts.device_id != local_device_id {
                 trusted_device_ids.insert(facts.device_id);
@@ -48,11 +48,11 @@ impl MembershipProjectionPlan {
             .map(|id| {
                 let member = history
                     .member_for_device(id, &ids)
-                    .ok_or(MembershipLedgerError::Corrupt)?;
+                    .ok_or_else(MembershipLedgerError::corrupt)?;
                 history
                     .admission_facts_for(member)
                     .cloned()
-                    .ok_or(MembershipLedgerError::Corrupt)
+                    .ok_or_else(MembershipLedgerError::corrupt)
             })
             .collect::<Result<_, _>>()?;
         Ok(Self {

@@ -70,10 +70,10 @@ impl QueryMembershipAdmissionPort for QueryMembershipAdmissionUseCase {
 fn map_ledger_error(error: MembershipLedgerError) -> QueryMembershipAdmissionError {
     match error {
         MembershipLedgerError::Locked => QueryMembershipAdmissionError::Locked,
-        MembershipLedgerError::Corrupt | MembershipLedgerError::RecoveryRequired => {
+        MembershipLedgerError::Corrupt { .. } | MembershipLedgerError::RecoveryRequired => {
             QueryMembershipAdmissionError::RecoveryRequired
         }
-        MembershipLedgerError::Conflict | MembershipLedgerError::Unavailable => {
+        MembershipLedgerError::Conflict | MembershipLedgerError::Unavailable { .. } => {
             QueryMembershipAdmissionError::Unavailable
         }
     }

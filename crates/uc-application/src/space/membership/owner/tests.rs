@@ -66,7 +66,7 @@ async fn a_failed_commit_keeps_the_stored_state_and_reloads_it() {
         .err()
         .unwrap();
 
-    assert_eq!(error, MembershipLedgerError::Unavailable);
+    assert!(matches!(error, MembershipLedgerError::Unavailable { .. }));
     assert_eq!(fixture.records.record().revision(), 4);
     let view = fixture.owner.load().await.unwrap();
     assert_eq!(view.revision(), 4);
@@ -86,7 +86,7 @@ async fn a_revision_conflict_is_reported_to_the_caller() {
         .err()
         .unwrap();
 
-    assert_eq!(error, MembershipLedgerError::Conflict);
+    assert!(matches!(error, MembershipLedgerError::Conflict));
     let retried = fixture
         .owner
         .commit(remember_completed_transfer)
@@ -147,17 +147,17 @@ async fn a_confirmed_history_exchange_offers_the_peer_to_group_update_delivery_o
                 .require_space()?
                 .history()
                 .current_position()
-                .map_err(|_| MembershipLedgerError::Corrupt)?;
+                .map_err(MembershipLedgerError::corrupt_from)?;
             draft
                 .apply(LedgerInput::HistorySyncSelected { peers: vec![peer] })
-                .map_err(|_| MembershipLedgerError::Corrupt)?;
+                .map_err(MembershipLedgerError::corrupt_from)?;
             draft
                 .apply(LedgerInput::HistorySyncFinished {
                     peer,
                     synced_position: position,
                     result: PeerSyncResult::Confirmed,
                 })
-                .map_err(|_| MembershipLedgerError::Corrupt)
+                .map_err(MembershipLedgerError::corrupt_from)
         })
         .await
         .unwrap();

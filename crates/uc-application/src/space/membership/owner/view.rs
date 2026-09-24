@@ -41,7 +41,7 @@ impl MembershipView {
                     branch_recovery,
                 } = *space;
                 let ledger = MembershipLedger::restore(ledger)
-                    .map_err(|_| MembershipLedgerError::Corrupt)?;
+                    .map_err(MembershipLedgerError::corrupt_from)?;
                 if branch_recovery
                     .conflict_presentations
                     .iter()
@@ -56,7 +56,7 @@ impl MembershipView {
                         .iter()
                         .any(|(key, session)| key != session.transition_id() || !session.validate())
                 {
-                    return Err(MembershipLedgerError::Corrupt);
+                    return Err(MembershipLedgerError::corrupt());
                 }
                 Ok(Self::new(
                     ledger.revision(),
@@ -160,7 +160,7 @@ impl SpaceMembershipView {
         let bytes = self
             .history()
             .encode_persisted_v2()
-            .map_err(|_| MembershipLedgerError::Corrupt)?;
+            .map_err(MembershipLedgerError::corrupt_from)?;
         Ok(Sha256::digest(bytes).into())
     }
 }

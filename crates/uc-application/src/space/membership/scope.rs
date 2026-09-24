@@ -53,10 +53,10 @@ impl From<MembershipLedgerError> for CurrentSpaceMemberScopeError {
     fn from(error: MembershipLedgerError) -> Self {
         match error {
             MembershipLedgerError::Locked => Self::Locked,
-            MembershipLedgerError::Corrupt | MembershipLedgerError::RecoveryRequired => {
+            MembershipLedgerError::Corrupt { .. } | MembershipLedgerError::RecoveryRequired => {
                 Self::RecoveryRequired
             }
-            MembershipLedgerError::Conflict | MembershipLedgerError::Unavailable => {
+            MembershipLedgerError::Conflict | MembershipLedgerError::Unavailable { .. } => {
                 Self::Unavailable
             }
         }

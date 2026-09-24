@@ -58,8 +58,8 @@ fn admission_error(error: MembershipLedgerError) -> PeerAdmissionError {
     match error {
         MembershipLedgerError::Locked
         | MembershipLedgerError::Conflict
-        | MembershipLedgerError::Unavailable => PeerAdmissionError::Unavailable,
-        MembershipLedgerError::Corrupt | MembershipLedgerError::RecoveryRequired => {
+        | MembershipLedgerError::Unavailable { .. } => PeerAdmissionError::Unavailable,
+        MembershipLedgerError::Corrupt { .. } | MembershipLedgerError::RecoveryRequired => {
             PeerAdmissionError::InvalidState
         }
     }

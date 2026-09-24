@@ -13,7 +13,7 @@ pub trait CurrentMemberSignaturePort: Send + Sync {
         &self,
         _device_id: &DeviceId,
     ) -> Result<MembershipCredential, CurrentMemberSignatureError> {
-        Err(CurrentMemberSignatureError::Unavailable)
+        Err(CurrentMemberSignatureError::unavailable())
     }
 
     /// Stable local member instance derived from the active signing identity.

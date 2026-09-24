@@ -129,7 +129,7 @@ impl MembershipRecordStorePort for EmptyLedger {
     }
 
     async fn commit(&self, _: MembershipRecordCommit) -> Result<(), MembershipLedgerError> {
-        Err(MembershipLedgerError::Unavailable)
+        Err(MembershipLedgerError::unavailable())
     }
 }
 
