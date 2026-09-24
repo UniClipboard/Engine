@@ -2517,6 +2517,15 @@ impl GroupRevocationPort for RuntimeSpaceAccessAdapter {
         self.key_epoch_repository
             .group_update_delivery_status(&space_id)
             .await
+            .inspect_err(|error| {
+                let detail = super::group_update_failure_detail(error);
+                warn!(
+                    phase = detail.phase.as_str(),
+                    reason = detail.reason.as_str(),
+                    source = detail.source.as_str(),
+                    "组密钥投递状态读取失败"
+                );
+            })
     }
 
     async fn acknowledge_space_group_update(

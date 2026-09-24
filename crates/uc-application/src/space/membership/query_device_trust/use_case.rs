@@ -15,6 +15,7 @@ use crate::space::membership::{
     pause_reason, MembershipOwner, MembershipView, SpaceMemberPauseReason,
 };
 
+use super::dependency::TrustDependency;
 use super::{
     DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership, DeviceTrustObservation,
     DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, LoadCurrentJoinStatusPort,
@@ -97,7 +98,8 @@ impl QueryDeviceTrustUseCase {
             status.current_join = self
                 .current_join
                 .load_admission_display(&[])
-                .await?
+                .await
+                .map_err(|error| TrustDependency::AdmissionDisplay.diagnose(error))?
                 .current_join;
             return Ok((status, None));
         };
@@ -121,7 +123,8 @@ impl QueryDeviceTrustUseCase {
         let admission_display = self
             .current_join
             .load_admission_display(&confirmation_targets)
-            .await?;
+            .await
+            .map_err(|error| TrustDependency::AdmissionDisplay.diagnose(error))?;
         let current_join = admission_display.current_join;
         let inbound_pairings = admission_display.inbound_pairings;
         let pending_inbound_member = admission_display.pending_inbound_member;
@@ -138,7 +141,8 @@ impl QueryDeviceTrustUseCase {
         let security_updates = self
             .security_updates
             .load_security_device_update_status()
-            .await?;
+            .await
+            .map_err(|error| TrustDependency::SecurityUpdateStatus.diagnose(error))?;
         let presented = ledger
             .present(security_delivery(security_updates))
             .map_err(|_| QueryDeviceTrustError::RecoveryRequired)?;
@@ -147,7 +151,11 @@ impl QueryDeviceTrustUseCase {
             .iter()
             .map(|device| device.device_id)
             .collect();
-        let observations = self.observations.load(&device_ids).await?;
+        let observations = self
+            .observations
+            .load(&device_ids)
+            .await
+            .map_err(|error| TrustDependency::DeviceObservations.diagnose(error))?;
         let mut observations_by_device = BTreeMap::new();
         for observation in observations {
             if !device_ids.contains(&observation.device_id)
@@ -239,8 +247,10 @@ impl QueryDeviceTrustUseCase {
                 .local_identity
                 .get_current_fingerprint()
                 .await
-                .map_err(|source| QueryDeviceTrustError::Dependency {
-                    source: anyhow::Error::new(source),
+                .map_err(|source| {
+                    TrustDependency::LocalIdentity.diagnose(QueryDeviceTrustError::Dependency {
+                        source: anyhow::Error::new(source),
+                    })
                 })?
             {
                 let expected = history
