@@ -12,7 +12,10 @@ use uc_core::membership::{
 use uc_core::ports::PeerAddressRecord;
 use uc_core::trusted_peer::TrustedPeer;
 
-use super::{inconsistent, ActiveRuntimeManifestV3, SpaceControlGenerationError};
+use super::{
+    inconsistent, inconsistent_input, ActiveRuntimeManifestV3, AdmissionInputIssue,
+    SpaceControlGenerationError,
+};
 use crate::space::import_admission_content_key_catalog;
 
 pub(super) struct PreparedAdmissionControl {
@@ -35,7 +38,9 @@ impl PreparedAdmissionControl {
         input
             .target_security_commitment
             .validate()
-            .map_err(|source| inconsistent(anyhow::Error::new(source)))?;
+            .map_err(|source| {
+                inconsistent_input(AdmissionInputIssue::SecurityMaterial, source.into())
+            })?;
         let space_id = uc_core::ids::SpaceId::from_str(&input.target_space_id);
         if manifest.layout().space_id() != &space_id
             || input.target_security_commitment.attempt_id != *input.attempt_id.as_bytes()
@@ -48,28 +53,38 @@ impl PreparedAdmissionControl {
                 "admission control material is incomplete"
             )));
         }
-        let catalog = AdmissionContentKeyCatalogV1::decode(&input.target_key_catalog)
-            .map_err(|source| inconsistent(anyhow::Error::new(source)))?;
+        let catalog =
+            AdmissionContentKeyCatalogV1::decode(&input.target_key_catalog).map_err(|source| {
+                inconsistent_input(AdmissionInputIssue::SecurityMaterial, source.into())
+            })?;
         if catalog.target_epoch != input.target_security_commitment.target_epoch
             || catalog.digest() != input.target_security_commitment.key_catalog_digest
         {
-            return Err(inconsistent(anyhow::anyhow!(
-                "admission content catalog does not match commitment"
-            )));
+            return Err(inconsistent_input(
+                AdmissionInputIssue::SecurityMaterial,
+                anyhow::anyhow!("admission content catalog does not match commitment"),
+            ));
         }
         let current_content_key_id = ContentKeyId::from_string(&catalog.current_content_key_id)
-            .map_err(|source| inconsistent(anyhow::Error::new(source)))?;
+            .map_err(|source| {
+                inconsistent_input(AdmissionInputIssue::SecurityMaterial, source.into())
+            })?;
         let protection_group_id = ProtectionGroupId::from_string(&input.target_protection_group_id)
-            .map_err(|source| inconsistent(anyhow::Error::new(source)))?;
+            .map_err(|source| {
+                inconsistent_input(AdmissionInputIssue::SecurityMaterial, source.into())
+            })?;
         let state = SpaceKeyState::ready_for_admission(
             space_id.clone(),
             GroupEpoch::new(catalog.target_epoch),
             current_content_key_id,
             protection_group_id,
         )
-        .map_err(|source| inconsistent(anyhow::Error::new(source)))?;
-        let key_catalog = import_admission_content_key_catalog(&catalog)
-            .map_err(|source| inconsistent(anyhow::Error::new(source)))?;
+        .map_err(|source| {
+            inconsistent_input(AdmissionInputIssue::SecurityMaterial, source.into())
+        })?;
+        let key_catalog = import_admission_content_key_catalog(&catalog).map_err(|source| {
+            inconsistent_input(AdmissionInputIssue::SecurityMaterial, source.into())
+        })?;
         let mut security_material =
             SpaceKeyMaterial::new(state, input.target_security_state.clone(), key_catalog, 0);
         validate_updates(input)?;
@@ -96,9 +111,10 @@ impl PreparedAdmissionControl {
                     .replace(facts.member_instance)
                     .is_some()
                 {
-                    return Err(inconsistent(anyhow::anyhow!(
-                        "local relationship is duplicated"
-                    )));
+                    return Err(inconsistent_input(
+                        AdmissionInputIssue::Relationships,
+                        anyhow::anyhow!("local relationship is duplicated"),
+                    ));
                 }
             } else {
                 trusted_peers.push(TrustedPeer {
@@ -114,8 +130,12 @@ impl PreparedAdmissionControl {
                 });
             }
         }
-        let local_member_instance = local_member_instance
-            .ok_or_else(|| inconsistent(anyhow::anyhow!("local relationship is missing")))?;
+        let local_member_instance = local_member_instance.ok_or_else(|| {
+            inconsistent_input(
+                AdmissionInputIssue::Relationships,
+                anyhow::anyhow!("local relationship is missing"),
+            )
+        })?;
         members.sort_by(|left, right| left.device_id.cmp(&right.device_id));
         trusted_peers.sort_by(|left, right| left.peer_device_id.cmp(&right.peer_device_id));
         peer_addresses.sort_by(|left, right| left.device_id.cmp(&right.device_id));
@@ -141,11 +161,14 @@ impl PreparedAdmissionControl {
     ) -> Result<MembershipRecord, SpaceControlGenerationError> {
         let history =
             VersionedMembershipHistory::decode_persisted_v2(&self.membership_history, verifier)
-                .map_err(|source| inconsistent(anyhow::Error::new(source)))?;
+                .map_err(|source| {
+                    inconsistent_input(AdmissionInputIssue::MembershipHistory, source.into())
+                })?;
         if history.lineage_id() != self.space_id.as_ref() {
-            return Err(inconsistent(anyhow::anyhow!(
-                "control membership history has a different lineage"
-            )));
+            return Err(inconsistent_input(
+                AdmissionInputIssue::MembershipHistory,
+                anyhow::anyhow!("control membership history has a different lineage"),
+            ));
         }
         let revision = current_revision
             .checked_add(1)
@@ -156,7 +179,9 @@ impl PreparedAdmissionControl {
             self.local_member_instance,
             revision,
         )
-        .map_err(|source| inconsistent(anyhow::Error::new(source)))?;
+        .map_err(|source| {
+            inconsistent_input(AdmissionInputIssue::MembershipHistory, source.into())
+        })?;
         Ok(MembershipRecord::Space(Box::new(SpaceMembershipRecord {
             ledger: ledger.snapshot(),
             history_exchange: Default::default(),
@@ -195,9 +220,10 @@ fn validate_updates(
     let mut relationship_devices = BTreeSet::new();
     for facts in &input.target_relationships {
         if !relationship_devices.insert(facts.device_id.clone()) {
-            return Err(inconsistent(anyhow::anyhow!(
-                "control relationship is duplicated"
-            )));
+            return Err(inconsistent_input(
+                AdmissionInputIssue::Relationships,
+                anyhow::anyhow!("control relationship is duplicated"),
+            ));
         }
     }
     let mut update_ids = BTreeSet::new();
@@ -210,9 +236,10 @@ fn validate_updates(
             || !update_ids.insert(update.update_id())
             || !recipients.insert(update.recipient().clone())
     }) {
-        return Err(inconsistent(anyhow::anyhow!(
-            "control group updates are inconsistent"
-        )));
+        return Err(inconsistent_input(
+            AdmissionInputIssue::SecurityMaterial,
+            anyhow::anyhow!("control group updates are inconsistent"),
+        ));
     }
     Ok(())
 }

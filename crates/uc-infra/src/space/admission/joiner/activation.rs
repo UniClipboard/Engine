@@ -3,6 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use rand::RngCore;
 use serde::Deserialize;
+use tracing::warn;
 use uc_application::deps::{
     AdmissionSpaceTransitionError, AdmissionSpaceTransitionPort,
     AdmissionSpaceTransitionPreparationV2, AdmissionSpaceTransitionStepV2,
@@ -22,6 +23,7 @@ use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_observability_contract::diagnostics::connectivity::{observe_local_result, LocalWorkStep};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+use crate::security::{AdmissionInputInconsistency, AdmissionInputIssue};
 use crate::space::admission::digest::completion_digest;
 use crate::space::admission::recovery_material::open_recovery_material;
 use crate::space::security::mls_group::{MlsClientState, MlsGroupEngine};
@@ -506,13 +508,40 @@ fn map_activation_preparation_error(
 ) -> PrepareJoinerActivationError {
     match error {
         AdmissionSpaceTransitionError::Inconsistent { .. } => {
-            PrepareJoinerActivationError::invalid_for(
-                SpaceAdmissionRejectionReason::RelationshipConflict,
-                anyhow::Error::new(error),
-            )
+            // 不一致按其所属领域拒绝；未标注领域的不一致属于激活状态本身，不能笼统归为关系冲突。
+            let issue = inconsistency_issue(&error);
+            let reason = match issue {
+                Some(AdmissionInputIssue::SecurityMaterial) => {
+                    SpaceAdmissionRejectionReason::SecurityMaterialInvalid
+                }
+                Some(AdmissionInputIssue::MembershipHistory) => {
+                    SpaceAdmissionRejectionReason::MembershipHistoryInvalid
+                }
+                Some(AdmissionInputIssue::Relationships) => {
+                    SpaceAdmissionRejectionReason::RelationshipConflict
+                }
+                None => SpaceAdmissionRejectionReason::ActivationStateInvalid,
+            };
+            warn!(
+                stage = "prepare_space_transition",
+                issue = issue.map_or("unclassified", AdmissionInputIssue::as_str),
+                "加入方激活准备发现目标资料不一致"
+            );
+            PrepareJoinerActivationError::invalid_for(reason, anyhow::Error::new(error))
         }
         _ => PrepareJoinerActivationError::unavailable(anyhow::Error::new(error)),
     }
+}
+
+fn inconsistency_issue(error: &AdmissionSpaceTransitionError) -> Option<AdmissionInputIssue> {
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(error) = current {
+        if let Some(marker) = error.downcast_ref::<AdmissionInputInconsistency>() {
+            return Some(marker.issue);
+        }
+        current = error.source();
+    }
+    None
 }
 
 #[cfg(test)]
@@ -520,18 +549,55 @@ mod tests {
     use super::*;
 
     #[test]
-    fn inconsistent_transition_preparation_is_not_retryable() {
+    fn unclassified_transition_inconsistency_is_an_invalid_activation_state() {
         let error = map_activation_preparation_error(AdmissionSpaceTransitionError::inconsistent(
-            anyhow::anyhow!("inconsistent target relationships"),
+            anyhow::anyhow!("inconsistent target layout"),
         ));
 
         assert!(matches!(
             error,
             PrepareJoinerActivationError::Invalid {
-                reason: SpaceAdmissionRejectionReason::RelationshipConflict,
+                reason: SpaceAdmissionRejectionReason::ActivationStateInvalid,
                 ..
             }
         ));
+    }
+
+    // 控制世代标注的不一致领域必须穿过各层 source chain 决定拒绝原因。
+    #[test]
+    fn classified_transition_inconsistency_keeps_its_domain_and_source() {
+        use crate::security::SpaceControlGenerationError;
+
+        for (issue, expected) in [
+            (
+                AdmissionInputIssue::SecurityMaterial,
+                SpaceAdmissionRejectionReason::SecurityMaterialInvalid,
+            ),
+            (
+                AdmissionInputIssue::MembershipHistory,
+                SpaceAdmissionRejectionReason::MembershipHistoryInvalid,
+            ),
+            (
+                AdmissionInputIssue::Relationships,
+                SpaceAdmissionRejectionReason::RelationshipConflict,
+            ),
+        ] {
+            let generation = SpaceControlGenerationError::Inconsistent {
+                source: anyhow::Error::new(AdmissionInputInconsistency::new(
+                    issue,
+                    anyhow::anyhow!("private detail"),
+                )),
+            };
+            let error = map_activation_preparation_error(
+                AdmissionSpaceTransitionError::inconsistent(anyhow::Error::new(generation)),
+            );
+
+            let PrepareJoinerActivationError::Invalid { reason, .. } = &error else {
+                panic!("classified inconsistency must be rejected");
+            };
+            assert_eq!(*reason, expected);
+            assert!(std::error::Error::source(&error).is_some());
+        }
     }
 
     #[test]

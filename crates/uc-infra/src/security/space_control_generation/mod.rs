@@ -137,10 +137,14 @@ impl SpaceControlGeneration {
             .space_access
             .prepared_target_session(prepared.space_id(), &input.target_access_state)
             .await
-            .map_err(|source| inconsistent(anyhow::Error::new(source)))?;
+            .map_err(|source| {
+                inconsistent_input(AdmissionInputIssue::SecurityMaterial, source.into())
+            })?;
         target_session
             .install_space_material(prepared.security_material())
-            .map_err(|source| inconsistent(anyhow::Error::new(source)))?;
+            .map_err(|source| {
+                inconsistent_input(AdmissionInputIssue::SecurityMaterial, source.into())
+            })?;
 
         self.prepare_with_session(&prepared, manifest, target_session.as_ref())
             .await
@@ -1016,6 +1020,48 @@ fn branch_relationships(
 
 pub(super) fn inconsistent(source: anyhow::Error) -> SpaceControlGenerationError {
     SpaceControlGenerationError::Inconsistent { source }
+}
+
+/// 加入资料不一致所属的领域；加入方据此选择拒绝原因并记录固定分类诊断。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionInputIssue {
+    SecurityMaterial,
+    MembershipHistory,
+    Relationships,
+}
+
+impl AdmissionInputIssue {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SecurityMaterial => "security_material",
+            Self::MembershipHistory => "membership_history",
+            Self::Relationships => "relationships",
+        }
+    }
+}
+
+/// source chain 中的不一致分类标记；显示文本只含固定分类。
+#[derive(Debug, thiserror::Error)]
+#[error("admission input is inconsistent: {}", issue.as_str())]
+pub struct AdmissionInputInconsistency {
+    pub issue: AdmissionInputIssue,
+    #[source]
+    source: anyhow::Error,
+}
+
+impl AdmissionInputInconsistency {
+    pub(crate) fn new(issue: AdmissionInputIssue, source: anyhow::Error) -> Self {
+        Self { issue, source }
+    }
+}
+
+pub(super) fn inconsistent_input(
+    issue: AdmissionInputIssue,
+    source: anyhow::Error,
+) -> SpaceControlGenerationError {
+    inconsistent(anyhow::Error::new(AdmissionInputInconsistency::new(
+        issue, source,
+    )))
 }
 
 pub(super) fn storage(source: anyhow::Error) -> SpaceControlGenerationError {
