@@ -63,7 +63,7 @@ reliable feedback.
 - [x] S3 testkit Scenario in harness — guard line in 62 tests; full group 47/51, 51 artifacts, all cleaned.
 - [x] S4 CI (pr-check `membership-e2e-smoke`; engine-real-environment `membership-e2e` job) — remote runs skipped until pushed.
 - [x] S5 docs (testing-guide, test-adoption-inventory, plan 034 step 6, tests/observability/README.md).
-- [ ] Commit plan 050 work — **needs user confirmation**.
+- [x] Committed plan 050 work (user approved): c6a39348 test, 35125fcd ci, 6c6d154e docs, d06c0ef4 notes.
 - **Status:** in_progress
 
 ### Phase D — Later (separate plan, after 049)

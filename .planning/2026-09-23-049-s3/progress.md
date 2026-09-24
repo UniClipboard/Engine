@@ -71,3 +71,15 @@
 | membership-e2e full after S1 | 45/51 (4 baseline, pending_join flaky, F6 race) |
 | membership-e2e full after S1+S2+equivalence fix | 47/51 (only 4 baseline) |
 | membership-e2e full after S3 | 47/51, 51 artifacts, cleanup completed |
+
+### offline_member fix (2026-09-24)
+- `cargo test -p uc-engine --locked`: all pass (before the fix).
+- Root cause: group update backoff after the returning member converged (see findings). User chose business
+  evidence over restoring PeerOnline: Owner draft records peers newly confirming our position; worker hands them to
+  group update delivery, which uses `due_space_group_updates(now, Some(peer))`.
+- Tests: new group_update_delivery and owner tests; offline_member solo 45 s (was 58 s); full group 46/51
+  (4 baseline + pending_join baseline flaky), offline_member passes under load.
+- nextest units (core/application/infra): 2557 run, 2553 pass; joiner_pairing baseline; node_lifecycle port race
+  (passes alone); two slow tests exceed repo default 20 s (pass with relaxed timeout: 31 s / 56 s). 34 s of test time
+  versus several minutes with cargo test.
+- Delivery checks pass. Docs: space-application, pairing-lifecycle, 2026-09-20 plan note, 049 S3 record.

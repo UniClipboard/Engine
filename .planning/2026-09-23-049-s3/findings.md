@@ -81,3 +81,17 @@
   product_invariant; not panicking but finish fails (e.g. cleanup) → panic. Harness timeouts record
   product_timeout with a condition before panicking; topology actions record events; main waits are stages;
   DeviceHarness root becomes a `TempDirLease`. Risk: harnesses held by detached spawned tasks at test end.
+
+## offline_member root cause (2026-09-24)
+- `cargo test -p uc-engine --locked`: all pass (lib 242 + 2 ignored, host_contract 23 + 1 ignored incl. others' WIP,
+  public_contract 50, others). The membership e2e binary compiles to 0 tests without dev-tools.
+- offline_member: B offline while A removes C and D; A's group update deliveries to B fail and back off
+  (`space_security_store/delivery.rs`: 30 s doubling, max 1 h). After B returns and history converges, B only
+  gets the update when A's backoff expires (solo run: failures at 05:29:14/15, first success 05:29:48). Under load
+  a second failure pushes it to 60 s+, beyond the test's 60 s epoch wait. Not changed by S3.
+- Infra already supports bypass: `due_space_group_updates(now, online_peer)` ignores backoff for `online_peer`
+  (non-rejected). The Application use case passes `None` since `3bb57184` (2026-09-20 single space work owner),
+  which removed `MembershipMaintenanceTrigger::PeerOnline/PeerContact` deliberately
+  (`docs/exec-plans/active/2026-09-20-single-space-work-owner.md:217`: external online/contact are business-neutral
+  wakeups; no step selection or backoff bypass). That also dropped the 2026-09-17 targeted history-sync bypass.
+- The offline_member test lacked `init_test_tracing()`; added (logs are needed for diagnosis).
