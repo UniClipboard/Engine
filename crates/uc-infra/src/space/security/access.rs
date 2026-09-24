@@ -42,7 +42,9 @@ use uc_core::crypto::model::{EncryptionError, Passphrase as LegacyPassphrase};
 use crate::security::crypto_model::{
     validate_kdf, EncryptedBlob, KeyScope, KeySlot, WrappedMasterKey,
 };
-use crate::security::{v1_aead, Kek, MasterKey, ProfileContentKeyVault};
+use crate::security::{
+    v1_aead, Kek, MasterKey, ProfileContentKeyVault, ProfilePassphraseRecoveryPort,
+};
 use uc_core::ids::{DeviceId, ProfileId, SpaceId};
 #[cfg(test)]
 use uc_core::membership::{AdmissionReplayId, ProtectionGroupAdmission};
@@ -697,6 +699,7 @@ impl RuntimeSpaceAccessAdapter {
         &self,
         target_space_id: &SpaceId,
         encoded: &[u8],
+        profile_vault: &dyn ProfilePassphraseRecoveryPort,
     ) -> Result<(), SpaceAccessError> {
         let profile = self
             .current_profile
@@ -706,6 +709,12 @@ impl RuntimeSpaceAccessAdapter {
         let scope = key_scope_from_profile(&profile);
         let (keyslot, kek, master_key) =
             Self::decode_prepared_target_access(target_space_id, &scope, encoded)?;
+        // 目标 KEK 取代当前 KEK 前后，资料 vault 根密钥必须完成重新包裹，否则挂起或重启后无法打开。
+        profile_vault
+            .prepare_kek_replacement(kek.as_bytes())
+            .map_err(|error| SpaceAccessError::SecurityState {
+                source: anyhow::Error::new(error),
+            })?;
         self.key_material
             .store_kek(&scope, &kek)
             .await
@@ -714,6 +723,11 @@ impl RuntimeSpaceAccessAdapter {
             .store_keyslot(&keyslot)
             .await
             .map_err(map_encryption_error)?;
+        profile_vault
+            .finish_kek_replacement(kek.as_bytes())
+            .map_err(|error| SpaceAccessError::SecurityState {
+                source: anyhow::Error::new(error),
+            })?;
 
         let repository = self.key_epoch_repository.as_ref();
         let active_security_session = &self.active_security_session;

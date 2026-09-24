@@ -203,6 +203,20 @@ mod tests {
         ) -> Result<(), crate::security::ProfileKeyRecoveryError> {
             Ok(())
         }
+
+        fn prepare_kek_replacement(
+            &self,
+            _kek: &[u8],
+        ) -> Result<(), crate::security::ProfileKeyRecoveryError> {
+            Ok(())
+        }
+
+        fn finish_kek_replacement(
+            &self,
+            _kek: &[u8],
+        ) -> Result<(), crate::security::ProfileKeyRecoveryError> {
+            Ok(())
+        }
     }
 
     struct FailFinishOnce(AtomicBool);
@@ -222,6 +236,20 @@ mod tests {
             if self.0.swap(false, Ordering::AcqRel) {
                 return Err(crate::security::ProfileKeyRecoveryError::Corrupt);
             }
+            Ok(())
+        }
+
+        fn prepare_kek_replacement(
+            &self,
+            _kek: &[u8],
+        ) -> Result<(), crate::security::ProfileKeyRecoveryError> {
+            Ok(())
+        }
+
+        fn finish_kek_replacement(
+            &self,
+            _kek: &[u8],
+        ) -> Result<(), crate::security::ProfileKeyRecoveryError> {
             Ok(())
         }
     }

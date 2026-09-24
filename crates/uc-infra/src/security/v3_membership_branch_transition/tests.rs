@@ -1,3 +1,4 @@
+use crate::security::space_transition_activation::WithoutProfileVault;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -299,6 +300,7 @@ async fn v3_membership_branch_replays_every_control_phase_after_crash() {
         Arc::clone(&manifests),
         Arc::clone(&generations),
         recipient_access,
+        Arc::new(WithoutProfileVault),
     ));
     let mut current = transition;
     for expected_phase in [

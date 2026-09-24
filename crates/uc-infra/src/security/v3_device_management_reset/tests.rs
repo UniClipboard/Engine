@@ -1,3 +1,4 @@
+use crate::security::space_transition_activation::WithoutProfileVault;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -134,6 +135,7 @@ async fn v3_device_reset_replaces_only_the_control_generation() {
         Arc::clone(&manifests),
         Arc::clone(&generations),
         access,
+        Arc::new(WithoutProfileVault),
     ));
     let reset = V3DeviceManagementReset::new(
         root.clone(),

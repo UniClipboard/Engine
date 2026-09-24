@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 use uc_core::app_dirs::AppPaths;
 use uc_core::crypto::domain::Passphrase;
 use uc_core::crypto::model::EncryptionError;
@@ -73,6 +74,18 @@ pub enum ProfileKeyRecoveryError {
     Unsupported,
     #[error("profile recovery storage is unavailable")]
     Storage(#[source] anyhow::Error),
+}
+
+impl ProfileKeyRecoveryError {
+    /// 诊断用固定分类；不包含下层错误正文。
+    pub(crate) fn diagnostic_reason(&self) -> &'static str {
+        match self {
+            Self::WrongPassphrase => "key_mismatch",
+            Self::Corrupt => "corrupt",
+            Self::Unsupported => "unsupported_version",
+            Self::Storage(_) => "storage_unavailable",
+        }
+    }
 }
 
 impl From<SecureStorageError> for ProfileKeyRecoveryError {
@@ -166,6 +179,10 @@ pub struct ProfileKeyRecoveryStore {
 pub trait ProfilePassphraseRecoveryPort: Send + Sync {
     fn prepare_passphrase_change(&self, kek: &[u8]) -> Result<(), ProfileKeyRecoveryError>;
     fn finish_passphrase_change(&self, kek: &[u8]) -> Result<(), ProfileKeyRecoveryError>;
+    /// 资料 KEK 被切换目标的访问材料替换前调用；vault 可能尚未创建或已随运行期挂起。
+    fn prepare_kek_replacement(&self, kek: &[u8]) -> Result<(), ProfileKeyRecoveryError>;
+    /// 新 KEK 写入安全存储后调用。
+    fn finish_kek_replacement(&self, kek: &[u8]) -> Result<(), ProfileKeyRecoveryError>;
 }
 
 impl ProfilePassphraseRecoveryPort for ProfileKeyRecoveryStore {
@@ -177,6 +194,16 @@ impl ProfilePassphraseRecoveryPort for ProfileKeyRecoveryStore {
     fn finish_passphrase_change(&self, kek: &[u8]) -> Result<(), ProfileKeyRecoveryError> {
         let kek = Kek::from_bytes(kek)?;
         self.finish_passphrase_change(&kek)
+    }
+
+    fn prepare_kek_replacement(&self, kek: &[u8]) -> Result<(), ProfileKeyRecoveryError> {
+        let kek = Kek::from_bytes(kek)?;
+        self.prepare_kek_replacement(&kek)
+    }
+
+    fn finish_kek_replacement(&self, kek: &[u8]) -> Result<(), ProfileKeyRecoveryError> {
+        let kek = Kek::from_bytes(kek)?;
+        self.finish_kek_replacement(&kek)
     }
 }
 
@@ -362,6 +389,43 @@ impl ProfileKeyRecoveryStore {
         active.wrapped_root = pending;
         active.pending_wrapped_root = None;
         Ok(())
+    }
+
+    /// 切换 Space 会以目标访问材料替换资料 KEK；vault 根密钥必须随之改由新 KEK 包裹，
+    /// 否则挂起或重启后 vault 无法打开。沿用口令修改的两阶段协议：替换中途崩溃时新旧 KEK
+    /// 都能打开 vault，前向重试以同一 KEK 幂等完成。
+    ///
+    /// 尚无 vault 文件时无需处理，下次启动以当时的 KEK 创建；vault 已随运行期挂起时，
+    /// 先用安全存储中仍有效的 KEK 重新打开。
+    pub(crate) fn prepare_kek_replacement(
+        &self,
+        kek: &super::Kek,
+    ) -> Result<(), ProfileKeyRecoveryError> {
+        if !self.open_vault_for_kek_replacement()? {
+            return Ok(());
+        }
+        self.prepare_passphrase_change(kek)
+    }
+
+    pub(crate) fn finish_kek_replacement(
+        &self,
+        kek: &super::Kek,
+    ) -> Result<(), ProfileKeyRecoveryError> {
+        if !self.open_vault_for_kek_replacement()? {
+            return Ok(());
+        }
+        self.finish_passphrase_change(kek)
+    }
+
+    /// 返回 `false` 表示没有需要重新包裹的 vault；vault 存在却无法打开时属于损坏。
+    fn open_vault_for_kek_replacement(&self) -> Result<bool, ProfileKeyRecoveryError> {
+        if !self.file.exists() {
+            return Ok(false);
+        }
+        if !self.activate_from_backing_if_available()? {
+            return Err(ProfileKeyRecoveryError::Corrupt);
+        }
+        Ok(true)
     }
 
     fn activate_or_migrate(&self, kek: &super::Kek) -> Result<(), ProfileKeyRecoveryError> {
@@ -742,13 +806,25 @@ impl ProfileKeyRecoveryStore {
         };
         let kek = match super::Kek::from_bytes(&bytes) {
             Ok(kek) => kek,
-            Err(_) => {
+            Err(error) => {
+                // 安全存储端口只能携带固定文本，真实原因只以固定分类记录。
+                let error = ProfileKeyRecoveryError::from(error);
+                warn!(
+                    stage = "decode_automatic_unlock_key",
+                    reason = error.diagnostic_reason(),
+                    "资料 vault 自动打开失败"
+                );
                 return Err(SecureStorageError::Corrupt(
                     "automatic unlock material is invalid".to_owned(),
-                ))
+                ));
             }
         };
-        if self.activate_existing(&kek).is_err() {
+        if let Err(error) = self.activate_existing(&kek) {
+            warn!(
+                stage = "open_vault",
+                reason = error.diagnostic_reason(),
+                "资料 vault 自动打开失败"
+            );
             return Err(SecureStorageError::Corrupt(
                 "profile recovery data cannot be opened".to_owned(),
             ));
@@ -1018,6 +1094,69 @@ mod tests {
             ProfileKeyRecoveryError::from(v1_aead::AeadError::DecryptFailed),
             ProfileKeyRecoveryError::Storage(_)
         ));
+    }
+
+    // 切换 Space 以目标访问材料替换资料 KEK 后，vault 挂起和重启都必须仍能打开。
+    #[tokio::test]
+    async fn kek_replacement_keeps_the_vault_openable_after_suspend_and_restart() {
+        let (_directory, storage, paths, profile_id, recovery) = active_recovery_fixture().await;
+        let backing: Arc<dyn SecureStoragePort> = storage.clone();
+        let material = KeyMaterialStore::new(
+            Arc::clone(&backing),
+            Arc::new(JsonKeySlotStore::new(paths.vault_dir.clone())),
+        );
+        let scope = KeyScope {
+            profile_id: profile_id.clone(),
+        };
+        let target_kek = Kek::from_bytes(&[0x52; 32]).unwrap();
+
+        // 运行期挂起后 vault 已不在内存中，替换流程必须自行重新打开。
+        recovery.suspend();
+        recovery.prepare_kek_replacement(&target_kek).unwrap();
+        let target_root = MasterKey::generate().unwrap();
+        let target_keyslot = KeySlot::draft_v1(scope.clone())
+            .unwrap()
+            .finalize(WrappedMasterKey {
+                blob: v1_aead::wrap_master_key_xchacha(&target_kek, &target_root).unwrap(),
+            });
+        material.store_kek(&scope, &target_kek).await.unwrap();
+        material.store_keyslot(&target_keyslot).await.unwrap();
+        recovery.finish_kek_replacement(&target_kek).unwrap();
+        // 前向重试以同一 KEK 幂等完成。
+        recovery.prepare_kek_replacement(&target_kek).unwrap();
+        recovery.finish_kek_replacement(&target_kek).unwrap();
+
+        recovery.suspend();
+        assert_eq!(
+            recovery.get(PROFILE_ADMISSION_KEY_NAME).unwrap(),
+            Some(vec![0x41; 32])
+        );
+        let restarted = ProfileKeyRecoveryStore::new(paths, profile_id, backing);
+        assert_eq!(
+            restarted.prepare_startup().await.unwrap(),
+            ProfileRecoveryPreparation::Ready
+        );
+        assert_eq!(
+            restarted.get(PROFILE_ADMISSION_KEY_NAME).unwrap(),
+            Some(vec![0x41; 32])
+        );
+    }
+
+    // 尚未创建 vault 的资料没有需要重新包裹的根密钥，替换不得失败。
+    #[test]
+    fn kek_replacement_without_a_vault_is_a_no_op() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = test_paths(&directory);
+        let recovery = ProfileKeyRecoveryStore::new(
+            paths,
+            uc_core::ids::ProfileId::new().into_inner(),
+            Arc::new(MemoryStorage::default()),
+        );
+        let target_kek = Kek::from_bytes(&[0x52; 32]).unwrap();
+
+        recovery.prepare_kek_replacement(&target_kek).unwrap();
+        recovery.finish_kek_replacement(&target_kek).unwrap();
+        assert!(!recovery.vault_file().exists());
     }
 
     #[tokio::test]

@@ -1,3 +1,4 @@
+use crate::security::space_transition_activation::WithoutProfileVault;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -180,6 +181,7 @@ async fn v3_cross_space_switches_only_the_control_generation() {
         Arc::clone(&manifests),
         Arc::clone(&generations),
         access.clone(),
+        Arc::new(WithoutProfileVault),
     ));
     let activation_intents = Arc::new(ToggleActivationIntent(AtomicBool::new(true)));
     let transitions = V3AdmissionSpaceTransition::new(
@@ -495,6 +497,7 @@ async fn v3_same_space_retains_profile_data_and_keyslot() {
         Arc::clone(&manifests),
         Arc::clone(&generations),
         access,
+        Arc::new(WithoutProfileVault),
     ));
     let transitions = V3AdmissionSpaceTransition::new(
         b"same-profile-salt".to_vec(),
@@ -610,6 +613,7 @@ async fn v3_fresh_promotes_the_first_manifest_without_a_source() {
         Arc::clone(&manifests),
         Arc::clone(&generations),
         Arc::clone(&access),
+        Arc::new(WithoutProfileVault),
     ));
     let transitions = V3AdmissionSpaceTransition::new_with_fresh_profile_generation(
         b"fresh-profile-salt".to_vec(),

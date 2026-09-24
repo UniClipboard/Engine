@@ -494,7 +494,7 @@ pub async fn wire_dependencies_from_inputs(
         Arc::clone(&space_access_adapter),
         Arc::clone(&admission_credentials),
         Arc::clone(&active_generation_manifest_store),
-        profile_key_recovery,
+        Arc::clone(&profile_key_recovery),
     ));
     encryption_passphrase_change
         .recover_pending()
@@ -523,6 +523,7 @@ pub async fn wire_dependencies_from_inputs(
             Arc::clone(&active_generation_manifest_store),
             Arc::clone(&control_generations),
             Arc::clone(&space_access_adapter),
+            Arc::clone(&profile_key_recovery),
         ));
         let admission_transition = Arc::new(match storage.fresh_generations() {
             Some((profile_data_generation, _)) => {
