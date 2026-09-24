@@ -147,7 +147,7 @@ function isTestPath(path) {
   return (
     path.startsWith('tests/') ||
     path.includes('/tests/') ||
-    path.includes('/src/testing/') ||
+    path.includes('/testing/') ||
     path.endsWith('/tests.rs') ||
     path.endsWith('/test_support.rs') ||
     path.endsWith('_test.rs')

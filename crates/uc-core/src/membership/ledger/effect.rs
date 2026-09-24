@@ -67,7 +67,8 @@ impl UnfinishedMemberEffect {
         }
     }
 
-    pub(super) fn from_parts(
+    /// 从持久快照或已提交资料还原一项效果；效果只有经账本恢复或推进才具备执行资格。
+    pub fn from_parts(
         event_id: MembershipEventId,
         kind: MemberEffectKind,
         phase: MemberEffectPhase,

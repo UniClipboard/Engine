@@ -33,12 +33,7 @@ async fn failed_round_is_retained_by_pause_resume_shutdown_and_application_repor
         let maintain = Arc::new(MaintainSpaceMembershipUseCase::new(
             MaintainSpaceMembershipDeps {
                 admissions: Arc::new(PanickingAdmission),
-                effects: step("effects"),
-                conflicts: step("conflicts"),
-                group_update_delivery: step("group_updates"),
-                restricted_delivery: step("restricted"),
-                synchronization: step("synchronize"),
-                cleanup: step("cleanup"),
+                work: step("work"),
             },
         ));
         let (_presence_tx, presence_rx) = tokio::sync::broadcast::channel(4);
@@ -108,57 +103,24 @@ impl RecoverSpaceAdmissionsPort for RecordingStep {
 }
 
 #[async_trait]
-impl RecoverMembershipEffectsPort for RecordingStep {
-    async fn recover_membership_effects(&self) -> MembershipMaintenanceStepOutcome {
-        self.record()
-    }
-}
-
-#[async_trait]
-impl RecoverMembershipConflictsPort for RecordingStep {
-    async fn recover_membership_conflicts(&self) -> MembershipMaintenanceStepOutcome {
-        self.record()
-    }
-}
-
-#[async_trait]
-impl DeliverRestrictedMembershipPort for RecordingStep {
-    async fn deliver_restricted_membership(&self) -> MembershipMaintenanceStepOutcome {
-        self.record()
-    }
-}
-
-#[async_trait]
-impl DeliverPendingGroupUpdatesPort for RecordingStep {
-    async fn deliver_pending_group_updates(
-        &self,
-        _: &MembershipMaintenanceTrigger,
-    ) -> MembershipMaintenanceStepOutcome {
-        self.record()
-    }
-}
-
-#[async_trait]
-impl SynchronizeMembershipMaintenancePort for RecordingStep {
-    async fn periodic_synchronization_required(
-        &self,
-    ) -> Result<bool, MembershipMaintenanceStepOutcome> {
-        Ok(true)
-    }
-
-    async fn synchronize_membership(
+impl RunMembershipWorkPort for RecordingStep {
+    async fn run_membership_work(
         &self,
         _trigger: &MembershipMaintenanceTrigger,
-    ) -> MembershipMaintenanceStepOutcome {
-        self.record()
+    ) -> MembershipMaintenanceReport {
+        report_of(self.record())
     }
 }
 
-#[async_trait]
-impl ReconcileMembershipProjectionPort for RecordingStep {
-    async fn reconcile_membership_projection(&self) -> MembershipMaintenanceStepOutcome {
-        self.record()
+fn report_of(outcome: MembershipMaintenanceStepOutcome) -> MembershipMaintenanceReport {
+    let mut report = MembershipMaintenanceReport::default();
+    match outcome {
+        MembershipMaintenanceStepOutcome::Completed => report.completed_count = 1,
+        MembershipMaintenanceStepOutcome::Deferred => report.deferred_count = 1,
+        MembershipMaintenanceStepOutcome::StableFailure => report.stable_failure_count = 1,
+        MembershipMaintenanceStepOutcome::Corrupt => report.corrupt_count = 1,
     }
+    report
 }
 
 pub(super) struct NoopNetworkActivity;
@@ -269,7 +231,7 @@ struct BlockingFirstRecordingAdmission {
     first: std::sync::atomic::AtomicBool,
 }
 
-struct BlockingFirstChangeSynchronization {
+struct BlockingFirstChangeWork {
     started: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
     triggers: Arc<Mutex<Vec<MembershipMaintenanceTrigger>>>,
@@ -277,17 +239,11 @@ struct BlockingFirstChangeSynchronization {
 }
 
 #[async_trait]
-impl SynchronizeMembershipMaintenancePort for BlockingFirstChangeSynchronization {
-    async fn periodic_synchronization_required(
-        &self,
-    ) -> Result<bool, MembershipMaintenanceStepOutcome> {
-        Ok(true)
-    }
-
-    async fn synchronize_membership(
+impl RunMembershipWorkPort for BlockingFirstChangeWork {
+    async fn run_membership_work(
         &self,
         trigger: &MembershipMaintenanceTrigger,
-    ) -> MembershipMaintenanceStepOutcome {
+    ) -> MembershipMaintenanceReport {
         self.triggers.lock().unwrap().push(trigger.clone());
         if matches!(trigger, MembershipMaintenanceTrigger::StateChanged)
             && self.first_change.swap(false, Ordering::SeqCst)
@@ -295,7 +251,7 @@ impl SynchronizeMembershipMaintenancePort for BlockingFirstChangeSynchronization
             self.started.notify_one();
             self.release.notified().await;
         }
-        MembershipMaintenanceStepOutcome::Completed
+        report_of(MembershipMaintenanceStepOutcome::Completed)
     }
 }
 
@@ -347,7 +303,7 @@ impl MembershipNetworkActivityPort for PausingNetworkActivity {
 }
 
 #[tokio::test]
-async fn startup_runs_the_fixed_sequence_and_continues_after_deferred_work() {
+async fn startup_runs_admissions_then_all_due_membership_work() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let step = |name, outcome| {
         Arc::new(RecordingStep {
@@ -358,31 +314,15 @@ async fn startup_runs_the_fixed_sequence_and_continues_after_deferred_work() {
     };
     let maintain = MaintainSpaceMembershipUseCase::new(MaintainSpaceMembershipDeps {
         admissions: step("admissions", MembershipMaintenanceStepOutcome::Completed),
-        effects: step("effects", MembershipMaintenanceStepOutcome::Deferred),
-        conflicts: step("conflicts", MembershipMaintenanceStepOutcome::Completed),
-        group_update_delivery: step("group_updates", MembershipMaintenanceStepOutcome::Completed),
-        restricted_delivery: step("restricted", MembershipMaintenanceStepOutcome::Completed),
-        synchronization: step("synchronize", MembershipMaintenanceStepOutcome::Completed),
-        cleanup: step("cleanup", MembershipMaintenanceStepOutcome::Completed),
+        work: step("work", MembershipMaintenanceStepOutcome::Deferred),
     });
 
     let report = maintain
         .execute(MembershipMaintenanceTrigger::Startup)
         .await;
 
-    assert_eq!(
-        calls.lock().unwrap().as_slice(),
-        &[
-            "admissions",
-            "restricted",
-            "effects",
-            "conflicts",
-            "group_updates",
-            "synchronize",
-            "cleanup"
-        ]
-    );
-    assert_eq!(report.completed_count, 6);
+    assert_eq!(calls.lock().unwrap().as_slice(), &["admissions", "work"]);
+    assert_eq!(report.completed_count, 1);
     assert_eq!(report.deferred_count, 1);
     assert_eq!(report.stable_failure_count, 0);
 }
@@ -401,12 +341,7 @@ async fn session_transition_stops_the_current_maintenance_round_after_admission(
         admissions: Arc::new(YieldingAdmission {
             calls: Arc::clone(&calls),
         }),
-        effects: step("effects"),
-        conflicts: step("conflicts"),
-        group_update_delivery: step("group_updates"),
-        restricted_delivery: step("restricted"),
-        synchronization: step("synchronize"),
-        cleanup: step("cleanup"),
+        work: step("work"),
     });
 
     let report = maintain
@@ -432,12 +367,7 @@ async fn unfinished_pairing_with_transient_network_failure_excludes_ordinary_mai
         admissions: Arc::new(DeferredPairingAdmission {
             calls: Arc::clone(&calls),
         }),
-        effects: step("effects"),
-        conflicts: step("conflicts"),
-        group_update_delivery: step("group_updates"),
-        restricted_delivery: step("restricted"),
-        synchronization: step("synchronize"),
-        cleanup: step("cleanup"),
+        work: step("work"),
     });
 
     let report = maintain
@@ -468,12 +398,7 @@ async fn local_admission_actions_can_interrupt_pairing_recovery_before_ordinary_
                 started: Arc::clone(&started),
                 release: Arc::clone(&release),
             }),
-            effects: step("effects"),
-            conflicts: step("conflicts"),
-            group_update_delivery: step("group_updates"),
-            restricted_delivery: step("restricted"),
-            synchronization: step("synchronize"),
-            cleanup: step("cleanup"),
+            work: step("work"),
         },
         Arc::new(SharedWorkPermit {
             lock: Arc::clone(&work_lock),
@@ -515,12 +440,7 @@ async fn ordinary_maintenance_resumes_after_pairing_reaches_its_terminal_state()
             calls: Arc::clone(&calls),
             pairing: std::sync::atomic::AtomicBool::new(true),
         }),
-        effects: step("effects"),
-        conflicts: step("conflicts"),
-        group_update_delivery: step("group_updates"),
-        restricted_delivery: step("restricted"),
-        synchronization: step("synchronize"),
-        cleanup: step("cleanup"),
+        work: step("work"),
     });
 
     let pairing = maintain
@@ -534,22 +454,13 @@ async fn ordinary_maintenance_resumes_after_pairing_reaches_its_terminal_state()
         .await;
     assert_eq!(
         calls.lock().unwrap().as_slice(),
-        &[
-            "admissions",
-            "admissions",
-            "restricted",
-            "effects",
-            "conflicts",
-            "group_updates",
-            "synchronize",
-            "cleanup"
-        ]
+        &["admissions", "admissions", "work"]
     );
-    assert_eq!(active.completed_count, 7);
+    assert_eq!(active.completed_count, 2);
 }
 
 #[tokio::test]
-async fn deferred_projection_is_revisited_by_periodic_maintenance() {
+async fn corrupt_admission_recovery_does_not_block_ordinary_membership_work() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let step = |name, outcome| {
         Arc::new(RecordingStep {
@@ -559,59 +470,16 @@ async fn deferred_projection_is_revisited_by_periodic_maintenance() {
         })
     };
     let maintain = MaintainSpaceMembershipUseCase::new(MaintainSpaceMembershipDeps {
-        admissions: step("admissions", MembershipMaintenanceStepOutcome::Completed),
-        effects: step("effects", MembershipMaintenanceStepOutcome::Completed),
-        conflicts: step("conflicts", MembershipMaintenanceStepOutcome::Completed),
-        group_update_delivery: step("group_updates", MembershipMaintenanceStepOutcome::Completed),
-        restricted_delivery: step("restricted", MembershipMaintenanceStepOutcome::Completed),
-        synchronization: step("synchronize", MembershipMaintenanceStepOutcome::Completed),
-        cleanup: step("projection", MembershipMaintenanceStepOutcome::Deferred),
-    });
-    assert_eq!(
-        maintain
-            .execute(MembershipMaintenanceTrigger::Startup)
-            .await
-            .deferred_count,
-        1
-    );
-    let retry = maintain
-        .execute(MembershipMaintenanceTrigger::Periodic)
-        .await;
-    assert_eq!(
-        retry.deferred_count, 1,
-        "暂时失败的成员资料维护必须在定期恢复中再次执行"
-    );
-}
-
-#[tokio::test]
-async fn corrupt_step_stops_later_permission_expanding_work() {
-    let calls = Arc::new(Mutex::new(Vec::new()));
-    let step = |name, outcome| {
-        Arc::new(RecordingStep {
-            name,
-            calls: Arc::clone(&calls),
-            outcome,
-        })
-    };
-    let maintain = MaintainSpaceMembershipUseCase::new(MaintainSpaceMembershipDeps {
-        admissions: step("admissions", MembershipMaintenanceStepOutcome::Completed),
-        effects: step("effects", MembershipMaintenanceStepOutcome::Corrupt),
-        conflicts: step("conflicts", MembershipMaintenanceStepOutcome::Completed),
-        group_update_delivery: step("group_updates", MembershipMaintenanceStepOutcome::Completed),
-        restricted_delivery: step("restricted", MembershipMaintenanceStepOutcome::Completed),
-        synchronization: step("synchronize", MembershipMaintenanceStepOutcome::Completed),
-        cleanup: step("cleanup", MembershipMaintenanceStepOutcome::Completed),
+        admissions: step("admissions", MembershipMaintenanceStepOutcome::Corrupt),
+        work: step("work", MembershipMaintenanceStepOutcome::Completed),
     });
 
     let report = maintain
         .execute(MembershipMaintenanceTrigger::StateChanged)
         .await;
 
-    assert_eq!(
-        calls.lock().unwrap().as_slice(),
-        &["admissions", "restricted", "effects"]
-    );
-    assert_eq!(report.completed_count, 2);
+    assert_eq!(calls.lock().unwrap().as_slice(), &["admissions", "work"]);
+    assert_eq!(report.completed_count, 1);
     assert_eq!(report.corrupt_count, 1);
 }
 
@@ -627,31 +495,15 @@ async fn state_change_runs_complete_ordinary_maintenance() {
     };
     let maintain = MaintainSpaceMembershipUseCase::new(MaintainSpaceMembershipDeps {
         admissions: step("admissions"),
-        effects: step("effects"),
-        conflicts: step("conflicts"),
-        group_update_delivery: step("group_updates"),
-        restricted_delivery: step("restricted"),
-        synchronization: step("synchronize"),
-        cleanup: step("cleanup"),
+        work: step("work"),
     });
 
     let report = maintain
         .execute(MembershipMaintenanceTrigger::StateChanged)
         .await;
 
-    assert_eq!(
-        calls.lock().unwrap().as_slice(),
-        &[
-            "admissions",
-            "restricted",
-            "effects",
-            "conflicts",
-            "group_updates",
-            "synchronize",
-            "cleanup"
-        ]
-    );
-    assert_eq!(report.completed_count, 7);
+    assert_eq!(calls.lock().unwrap().as_slice(), &["admissions", "work"]);
+    assert_eq!(report.completed_count, 2);
 }
 
 #[tokio::test]
@@ -666,31 +518,15 @@ async fn periodic_retries_history_when_synchronization_is_still_required() {
     };
     let maintain = MaintainSpaceMembershipUseCase::new(MaintainSpaceMembershipDeps {
         admissions: step("admissions"),
-        effects: step("effects"),
-        conflicts: step("conflicts"),
-        group_update_delivery: step("group_updates"),
-        restricted_delivery: step("restricted"),
-        synchronization: step("synchronize"),
-        cleanup: step("cleanup"),
+        work: step("work"),
     });
 
     let report = maintain
         .execute(MembershipMaintenanceTrigger::Periodic)
         .await;
 
-    assert_eq!(
-        calls.lock().unwrap().as_slice(),
-        &[
-            "admissions",
-            "restricted",
-            "effects",
-            "conflicts",
-            "group_updates",
-            "synchronize",
-            "cleanup"
-        ]
-    );
-    assert_eq!(report.completed_count, 7);
+    assert_eq!(calls.lock().unwrap().as_slice(), &["admissions", "work"]);
+    assert_eq!(report.completed_count, 2);
 }
 
 async fn wait_for_call_count(calls: &Arc<Mutex<Vec<&'static str>>>, expected: usize) {
@@ -720,12 +556,7 @@ async fn known_peer_contact_wakes_one_complete_maintenance_round() {
     let maintain = Arc::new(MaintainSpaceMembershipUseCase::new(
         MaintainSpaceMembershipDeps {
             admissions: step("admissions"),
-            effects: step("effects"),
-            conflicts: step("conflicts"),
-            group_update_delivery: step("group_updates"),
-            restricted_delivery: step("restricted"),
-            synchronization: step("synchronize"),
-            cleanup: step("cleanup"),
+            work: step("work"),
         },
     ));
     let (_peer_reachability_tx, peer_reachability_rx) = tokio::sync::broadcast::channel(4);
@@ -737,24 +568,16 @@ async fn known_peer_contact_wakes_one_complete_maintenance_round() {
         std::time::Duration::from_secs(3600),
         Arc::new(NoopNetworkActivity),
     );
-    wait_for_call_count(&calls, 7).await;
+    wait_for_call_count(&calls, 2).await;
 
     let _ = known_peer_contact_tx.send(KnownPeerContact {
         device_id: uc_core::ids::DeviceId::new("device-b"),
     });
 
-    wait_for_call_count(&calls, 14).await;
+    wait_for_call_count(&calls, 4).await;
     assert_eq!(
-        &calls.lock().unwrap().as_slice()[7..],
-        &[
-            "admissions",
-            "restricted",
-            "effects",
-            "conflicts",
-            "group_updates",
-            "synchronize",
-            "cleanup"
-        ]
+        &calls.lock().unwrap().as_slice()[2..],
+        &["admissions", "work"]
     );
     runtime.shutdown().await.unwrap();
 }
@@ -775,17 +598,12 @@ async fn peer_contacts_submit_one_generic_change_wake_and_coalesce_while_running
     let maintain = Arc::new(MaintainSpaceMembershipUseCase::new(
         MaintainSpaceMembershipDeps {
             admissions: step("admissions"),
-            effects: step("effects"),
-            conflicts: step("conflicts"),
-            group_update_delivery: step("group_updates"),
-            restricted_delivery: step("restricted"),
-            synchronization: Arc::new(BlockingFirstChangeSynchronization {
+            work: Arc::new(BlockingFirstChangeWork {
                 started: Arc::clone(&started),
                 release: Arc::clone(&release),
                 triggers: Arc::clone(&triggers),
                 first_change: std::sync::atomic::AtomicBool::new(true),
             }),
-            cleanup: step("cleanup"),
         },
     ));
     let (_peer_reachability_tx, peer_reachability_rx) = tokio::sync::broadcast::channel(4);
@@ -797,7 +615,13 @@ async fn peer_contacts_submit_one_generic_change_wake_and_coalesce_while_running
         std::time::Duration::from_secs(3600),
         Arc::new(NoopNetworkActivity),
     );
-    wait_for_call_count(&calls, 6).await;
+    wait_for_call_count(&calls, 1).await;
+    for _ in 0..100 {
+        if !triggers.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
 
     let activity = runtime.activity();
     activity.request_state_changed().unwrap();
@@ -839,12 +663,7 @@ async fn runtime_pause_resume_peer_reachability_and_shutdown_share_one_lifecycle
     let maintain = Arc::new(MaintainSpaceMembershipUseCase::new(
         MaintainSpaceMembershipDeps {
             admissions: step("admissions"),
-            effects: step("effects"),
-            conflicts: step("conflicts"),
-            group_update_delivery: step("group_updates"),
-            restricted_delivery: step("restricted"),
-            synchronization: step("synchronize"),
-            cleanup: step("cleanup"),
+            work: step("work"),
         },
     ));
     let (peer_reachability_tx, peer_reachability_rx) = tokio::sync::broadcast::channel(8);
@@ -856,7 +675,7 @@ async fn runtime_pause_resume_peer_reachability_and_shutdown_share_one_lifecycle
         Arc::new(NoopNetworkActivity),
     );
     let activity = runtime.activity();
-    wait_for_call_count(&calls, 7).await;
+    wait_for_call_count(&calls, 2).await;
 
     activity.pause().await.unwrap();
     let _ = peer_reachability_tx.send(uc_core::ports::PeerReachabilityChanged {
@@ -865,16 +684,16 @@ async fn runtime_pause_resume_peer_reachability_and_shutdown_share_one_lifecycle
         at: chrono::Utc::now(),
     });
     tokio::task::yield_now().await;
-    assert_eq!(calls.lock().unwrap().len(), 7);
+    assert_eq!(calls.lock().unwrap().len(), 2);
 
     activity.resume().await.unwrap();
-    wait_for_call_count(&calls, 14).await;
+    wait_for_call_count(&calls, 4).await;
     let _ = peer_reachability_tx.send(uc_core::ports::PeerReachabilityChanged {
         device_id: uc_core::ids::DeviceId::new("device-b"),
         state: uc_core::ports::ReachabilityState::Online,
         at: chrono::Utc::now(),
     });
-    wait_for_call_count(&calls, 19).await;
+    wait_for_call_count(&calls, 6).await;
 
     runtime.shutdown().await.unwrap();
 }
@@ -897,12 +716,7 @@ async fn pause_cancels_network_work_and_waits_for_the_current_commit_boundary() 
                 started: Arc::clone(&started),
                 release: Arc::clone(&release),
             }),
-            effects: step("effects"),
-            conflicts: step("conflicts"),
-            group_update_delivery: step("group_updates"),
-            restricted_delivery: step("restricted"),
-            synchronization: step("synchronize"),
-            cleanup: step("cleanup"),
+            work: step("work"),
         },
     ));
     let network = Arc::new(PausingNetworkActivity {
@@ -928,17 +742,7 @@ async fn pause_cancels_network_work_and_waits_for_the_current_commit_boundary() 
     .unwrap();
 
     assert_eq!(network.pauses.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        calls.lock().unwrap().as_slice(),
-        &[
-            "restricted",
-            "effects",
-            "conflicts",
-            "group_updates",
-            "synchronize",
-            "cleanup"
-        ]
-    );
+    assert_eq!(calls.lock().unwrap().as_slice(), &["work"]);
     runtime.shutdown().await.unwrap();
 }
 
@@ -955,12 +759,7 @@ async fn admission_deadline_wakes_maintenance_at_the_exact_boundary() {
     let maintain = Arc::new(MaintainSpaceMembershipUseCase::new(
         MaintainSpaceMembershipDeps {
             admissions: step("admissions"),
-            effects: step("effects"),
-            conflicts: step("conflicts"),
-            group_update_delivery: step("group_updates"),
-            restricted_delivery: step("restricted"),
-            synchronization: step("synchronize"),
-            cleanup: step("cleanup"),
+            work: step("work"),
         },
     ));
     let (_peer_reachability_tx, peer_reachability_rx) = tokio::sync::broadcast::channel(4);
@@ -971,7 +770,7 @@ async fn admission_deadline_wakes_maintenance_at_the_exact_boundary() {
         std::time::Duration::from_secs(3600),
         Arc::new(NoopNetworkActivity),
     );
-    wait_for_call_count(&calls, 7).await;
+    wait_for_call_count(&calls, 2).await;
     calls.lock().unwrap().clear();
 
     runtime.activity().schedule_at(301_000, 1_000);
@@ -981,7 +780,7 @@ async fn admission_deadline_wakes_maintenance_at_the_exact_boundary() {
     assert!(calls.lock().unwrap().is_empty());
 
     tokio::time::advance(std::time::Duration::from_millis(1)).await;
-    wait_for_call_count(&calls, 7).await;
+    wait_for_call_count(&calls, 2).await;
     assert_eq!(calls.lock().unwrap().first(), Some(&"admissions"));
     runtime.shutdown().await.unwrap();
 }
@@ -999,12 +798,7 @@ async fn a_later_admission_deadline_cannot_postpone_the_nearest_wake() {
     let maintain = Arc::new(MaintainSpaceMembershipUseCase::new(
         MaintainSpaceMembershipDeps {
             admissions: step("admissions"),
-            effects: step("effects"),
-            conflicts: step("conflicts"),
-            group_update_delivery: step("group_updates"),
-            restricted_delivery: step("restricted"),
-            synchronization: step("synchronize"),
-            cleanup: step("cleanup"),
+            work: step("work"),
         },
     ));
     let (_peer_reachability_tx, peer_reachability_rx) = tokio::sync::broadcast::channel(4);
@@ -1015,7 +809,7 @@ async fn a_later_admission_deadline_cannot_postpone_the_nearest_wake() {
         std::time::Duration::from_secs(3600),
         Arc::new(NoopNetworkActivity),
     );
-    wait_for_call_count(&calls, 7).await;
+    wait_for_call_count(&calls, 2).await;
     calls.lock().unwrap().clear();
 
     runtime.activity().schedule_at(2_000, 1_000);
@@ -1023,7 +817,7 @@ async fn a_later_admission_deadline_cannot_postpone_the_nearest_wake() {
     tokio::task::yield_now().await;
     tokio::time::advance(std::time::Duration::from_millis(1_000)).await;
 
-    wait_for_call_count(&calls, 7).await;
+    wait_for_call_count(&calls, 2).await;
     assert_eq!(calls.lock().unwrap().first(), Some(&"admissions"));
     runtime.shutdown().await.unwrap();
 }
@@ -1046,12 +840,7 @@ async fn shutdown_waits_beyond_the_old_timeout_until_the_active_round_finishes()
                 started: Arc::clone(&started),
                 release: Arc::clone(&release),
             }),
-            effects: step("effects"),
-            conflicts: step("conflicts"),
-            group_update_delivery: step("group_updates"),
-            restricted_delivery: step("restricted"),
-            synchronization: step("synchronize"),
-            cleanup: step("cleanup"),
+            work: step("work"),
         },
     ));
     let (_peer_reachability_tx, peer_reachability_rx) = tokio::sync::broadcast::channel(4);
@@ -1073,7 +862,7 @@ async fn shutdown_waits_beyond_the_old_timeout_until_the_active_round_finishes()
     assert!(calls.lock().unwrap().is_empty());
     release.notify_one();
     shutdown.await.unwrap().unwrap();
-    assert_eq!(calls.lock().unwrap().len(), 6);
+    assert_eq!(calls.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -1095,12 +884,7 @@ async fn dropping_the_owner_or_shutdown_waiter_keeps_the_round_owned_until_compl
                     started: Arc::clone(&started),
                     release: Arc::clone(&release),
                 }),
-                effects: step("effects"),
-                conflicts: step("conflicts"),
-                group_update_delivery: step("group_updates"),
-                restricted_delivery: step("restricted"),
-                synchronization: step("synchronize"),
-                cleanup: step("cleanup"),
+                work: step("work"),
             },
         ));
         let (_presence_tx, presence_rx) = tokio::sync::broadcast::channel(4);
@@ -1134,7 +918,7 @@ async fn dropping_the_owner_or_shutdown_waiter_keeps_the_round_owned_until_compl
             result,
             Err(SpaceMembershipMaintenanceRuntimeError::Closed)
         ));
-        assert_eq!(calls.lock().unwrap().len(), 6);
+        assert_eq!(calls.lock().unwrap().len(), 1);
     }
 }
 
@@ -1158,12 +942,7 @@ async fn online_events_for_different_peers_coalesce_into_one_change_wake() {
                 calls: Arc::clone(&calls),
                 first: std::sync::atomic::AtomicBool::new(true),
             }),
-            effects: step("effects"),
-            conflicts: step("conflicts"),
-            group_update_delivery: step("group_updates"),
-            restricted_delivery: step("restricted"),
-            synchronization: step("synchronize"),
-            cleanup: step("cleanup"),
+            work: step("work"),
         },
     ));
     let (peer_reachability_tx, peer_reachability_rx) = tokio::sync::broadcast::channel(4);
@@ -1184,26 +963,11 @@ async fn online_events_for_different_peers_coalesce_into_one_change_wake() {
     }
     release.notify_one();
 
-    wait_for_call_count(&calls, 14).await;
+    wait_for_call_count(&calls, 4).await;
 
     assert_eq!(
         calls.lock().unwrap().as_slice(),
-        &[
-            "admissions",
-            "restricted",
-            "effects",
-            "conflicts",
-            "group_updates",
-            "synchronize",
-            "cleanup",
-            "admissions",
-            "restricted",
-            "effects",
-            "conflicts",
-            "group_updates",
-            "synchronize",
-            "cleanup",
-        ]
+        &["admissions", "work", "admissions", "work"]
     );
     runtime.shutdown().await.unwrap();
 }

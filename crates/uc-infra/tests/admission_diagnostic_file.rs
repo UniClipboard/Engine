@@ -43,9 +43,12 @@ impl SecureStoragePort for MemoryKeys {
 }
 struct EmptyLedger;
 #[async_trait]
-impl LoadMembershipLedgerPort for EmptyLedger {
-    async fn load(&self) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
-        Ok(LoadedMembershipLedger::no_current_space())
+impl MembershipRecordStorePort for EmptyLedger {
+    async fn load(&self) -> Result<MembershipRecord, MembershipLedgerError> {
+        Ok(MembershipRecord::NoSpace { revision: 0 })
+    }
+    async fn commit(&self, _: MembershipRecordCommit) -> Result<(), MembershipLedgerError> {
+        Err(MembershipLedgerError::Unavailable)
     }
 }
 struct MustNotHandle;

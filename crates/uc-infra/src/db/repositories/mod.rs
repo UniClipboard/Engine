@@ -24,6 +24,7 @@ mod receive_artifact_log_repo;
 mod relationship_store;
 #[cfg(test)]
 pub(crate) use relationship_store::test_relationship_store;
+pub(crate) use relationship_store::MembershipProjectionWriter;
 mod history_file_references;
 mod representation_repo;
 mod space_member_repo;

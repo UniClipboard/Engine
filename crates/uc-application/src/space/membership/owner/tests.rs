@@ -1,0 +1,136 @@
+use uc_core::ids::DeviceId;
+use uc_core::membership::MembershipHistoryAckV3;
+
+use crate::space::lifecycle::SpaceMembershipResetPort;
+use crate::space::membership::testing::{EstablishedSpace, OwnerFixture};
+use crate::space::membership::{MembershipLedgerError, MembershipRecord};
+
+fn active_space() -> OwnerFixture {
+    OwnerFixture::new(EstablishedSpace::new(&["device-a", "device-b"]).record("device-a", 4))
+}
+
+fn remember_completed_transfer(
+    draft: &mut super::MembershipDraft,
+) -> Result<(), MembershipLedgerError> {
+    draft
+        .history_exchange_mut()?
+        .completed_inbound_transfers
+        .insert(
+            (DeviceId::new("device-b"), [7; 32]),
+            MembershipHistoryAckV3::Invalid,
+        );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_change_without_differences_writes_nothing() {
+    let fixture = active_space();
+
+    let committed = fixture.owner.commit(|_| Ok(())).await.unwrap();
+
+    assert_eq!(committed.view.revision(), 4);
+    assert_eq!(fixture.records.commit_count(), 0);
+    assert!(fixture.events.committed_revisions().is_empty());
+    assert_eq!(fixture.wake.wake_count(), 0);
+}
+
+#[tokio::test]
+async fn companion_data_advances_the_revision_without_announcing_a_trust_change() {
+    let fixture = active_space();
+
+    let committed = fixture
+        .owner
+        .commit(remember_completed_transfer)
+        .await
+        .unwrap();
+
+    assert_eq!(committed.view.revision(), 5);
+    assert_eq!(fixture.records.record().revision(), 5);
+    assert_eq!(fixture.records.commit_count(), 1);
+    assert!(fixture.events.committed_revisions().is_empty());
+    // 读模型与记录在同一次提交中写入。
+    assert!(fixture.records.last_projection().is_some());
+}
+
+#[tokio::test]
+async fn a_failed_commit_keeps_the_stored_state_and_reloads_it() {
+    let fixture = active_space();
+    fixture.owner.load().await.unwrap();
+    let loads_before = fixture.records.load_count();
+    fixture.records.fail_next_commits(1);
+
+    let error = fixture
+        .owner
+        .commit(remember_completed_transfer)
+        .await
+        .err()
+        .unwrap();
+
+    assert_eq!(error, MembershipLedgerError::Unavailable);
+    assert_eq!(fixture.records.record().revision(), 4);
+    let view = fixture.owner.load().await.unwrap();
+    assert_eq!(view.revision(), 4);
+    assert_eq!(fixture.records.load_count(), loads_before + 1);
+    assert!(fixture.events.committed_revisions().is_empty());
+}
+
+#[tokio::test]
+async fn a_revision_conflict_is_reported_to_the_caller() {
+    let fixture = active_space();
+    fixture.records.conflict_next_commits(1);
+
+    let error = fixture
+        .owner
+        .commit(remember_completed_transfer)
+        .await
+        .err()
+        .unwrap();
+
+    assert_eq!(error, MembershipLedgerError::Conflict);
+    let retried = fixture
+        .owner
+        .commit(remember_completed_transfer)
+        .await
+        .unwrap();
+    assert_eq!(retried.view.revision(), 5);
+}
+
+#[tokio::test]
+async fn a_reopened_owner_reads_the_committed_state() {
+    let fixture = active_space();
+    fixture
+        .owner
+        .commit(remember_completed_transfer)
+        .await
+        .unwrap();
+
+    let reopened = fixture.reopen();
+    let view = reopened.load().await.unwrap();
+
+    assert_eq!(view.revision(), 5);
+    assert_eq!(
+        view.require_space()
+            .unwrap()
+            .history_exchange()
+            .completed_inbound_transfers
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn reset_ends_the_space_and_keeps_the_revision_increasing() {
+    let fixture = active_space();
+
+    fixture.owner.reset().await.unwrap();
+
+    assert!(matches!(
+        fixture.records.record(),
+        MembershipRecord::NoSpace { revision: 5 }
+    ));
+    assert_eq!(fixture.events.committed_revisions(), vec![5]);
+    assert!(fixture.owner.load().await.unwrap().space().is_none());
+    // 已无 Space 时重置不再写入。
+    fixture.owner.reset().await.unwrap();
+    assert_eq!(fixture.records.commit_count(), 1);
+}

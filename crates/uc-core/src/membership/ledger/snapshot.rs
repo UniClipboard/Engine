@@ -111,6 +111,27 @@ impl MembershipLedger {
 
     /// 从持久快照恢复，并重新校验全部不变量；不一致的快照被拒绝，不做修复。
     pub fn restore(snapshot: MembershipLedgerSnapshot) -> Result<Self, LedgerTransitionError> {
+        let membership = Self::from_snapshot(snapshot)?;
+        membership.validate()?;
+        Ok(membership)
+    }
+
+    /// 从旧格式整理出的快照建立账本：先按每次转换后的同一规则规范化——有效对端补齐为成员、
+    /// 已不在历史中的成员记录与本机记录删除、以本机为目标的决定投递删除、非当前路径效果删除——
+    /// 再校验不变量。修订号不变。只供持久层一次性迁移旧格式使用。
+    pub fn restore_normalized(
+        snapshot: MembershipLedgerSnapshot,
+    ) -> Result<Self, LedgerTransitionError> {
+        let mut membership = Self::from_snapshot(snapshot)?;
+        membership.peers.remove(&membership.local_device_id);
+        membership
+            .normalize()
+            .map_err(|_| LedgerTransitionError::InvalidSnapshot)?;
+        membership.validate()?;
+        Ok(membership)
+    }
+
+    fn from_snapshot(snapshot: MembershipLedgerSnapshot) -> Result<Self, LedgerTransitionError> {
         let mut effects = BTreeMap::new();
         for effect in snapshot.effects {
             let event_id = effect.event_id;
@@ -125,7 +146,7 @@ impl MembershipLedger {
                 return Err(LedgerTransitionError::InvalidSnapshot);
             }
         }
-        let membership = Self {
+        Ok(Self {
             revision: snapshot.revision,
             history: snapshot.history,
             local_device_id: snapshot.local_device_id,
@@ -157,8 +178,6 @@ impl MembershipLedger {
                 .collect(),
             effects,
             sync_cursor: snapshot.sync_cursor,
-        };
-        membership.validate()?;
-        Ok(membership)
+        })
     }
 }

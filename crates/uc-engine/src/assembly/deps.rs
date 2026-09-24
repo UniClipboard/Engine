@@ -97,11 +97,12 @@ pub struct SyncEngineDeps {
     pub membership_session: Arc<uc_infra::space::InMemorySession>,
     /// 完整后台安全生命周期；关闭时封口，普通 GUI 授权不影响它。
     pub security_lifecycle: Arc<uc_infra::space::RuntimeSpaceAccessAdapter>,
-    /// MasterKey-encrypted single membership ledger used by the new Space application.
+    /// MasterKey-encrypted single membership record, committed together with its read model.
     pub membership_ledger: Arc<
-        uc_infra::space::SqliteMembershipLedger<Arc<uc_infra::db::executor::DieselSqliteExecutor>>,
+        uc_infra::space::SqliteMembershipRecordStore<
+            Arc<uc_infra::db::executor::DieselSqliteExecutor>,
+        >,
     >,
-    pub membership_projection: Arc<dyn uc_application::deps::ApplyMembershipProjectionPort>,
     /// MasterKey-encrypted aggregate repository shared by all admission roles.
     pub admission_state: Arc<
         uc_infra::space::SqliteSpaceAdmissionState<

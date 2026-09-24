@@ -14,9 +14,7 @@ use tracing::{
 use tracing_subscriber::{layer::Context, prelude::*, Layer, Registry};
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    AdmissionChangeFacts, HistoricalMembershipSignatureError,
-    HistoricalMembershipSignatureVerifier, MembershipActivationBaselineV2, MembershipCredential,
-    MembershipEventId, MembershipHistoryRelationship, VersionedMembershipHistory,
+    AdmissionChangeFacts, LedgerInput, MembershipCredential, MembershipLedger, RemovalDecision,
     ED25519_SIGNATURE_ALGORITHM_V1,
 };
 use uc_core::ports::{LocalIdentityError, LocalIdentityPort, ReachabilityState};
@@ -24,47 +22,14 @@ use uc_core::security::IdentityFingerprint;
 use uc_observability_contract::diagnostics::connectivity::decode_local_record;
 
 use super::*;
-use crate::space::membership::{
-    CommitMembershipLedgerPort, LoadMembershipLedgerPort, LoadedMembershipLedger, MembershipLedger,
-    MembershipLedgerError, MembershipLedgerMutation, PeerReconciliationRecord,
+use crate::space::membership::testing::{
+    established_history, record_of, started_record, AcceptingVerifier, OwnerFixture,
 };
+use crate::space::membership::MembershipRecord;
 
 const RECORDED: &str = "ABCD-EFGH-IJKL-MNOP";
 const ROTATED: &str = "QRST-UVWX-YZ23-4567";
 const EVENT: &str = "space.local_identity.changed";
-
-struct AcceptingVerifier;
-
-impl HistoricalMembershipSignatureVerifier for AcceptingVerifier {
-    fn verify(
-        &self,
-        _: u16,
-        _: &[u8],
-        _: &[u8],
-        _: &[u8],
-    ) -> Result<bool, HistoricalMembershipSignatureError> {
-        Ok(true)
-    }
-}
-
-struct Repository(LoadedMembershipLedger);
-
-#[async_trait]
-impl LoadMembershipLedgerPort for Repository {
-    async fn load(&self) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
-        Ok(self.0.clone())
-    }
-}
-
-#[async_trait]
-impl CommitMembershipLedgerPort for Repository {
-    async fn compare_and_commit(
-        &self,
-        _: MembershipLedgerMutation,
-    ) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
-        panic!("query is read-only")
-    }
-}
 
 struct Offline;
 
@@ -77,7 +42,7 @@ impl LoadDeviceTrustObservationsPort for Offline {
         Ok(device_ids
             .iter()
             .map(|device_id| DeviceTrustObservation {
-                device_id: device_id.clone(),
+                device_id: *device_id,
                 display_name: None,
                 reachability: ReachabilityState::Offline,
             })
@@ -204,51 +169,90 @@ fn facts(device: &str, byte: u8) -> (AdmissionChangeFacts, MembershipCredential)
     )
 }
 
-fn ledger(local_join_active: bool) -> LoadedMembershipLedger {
+/// 本机有效时为两台成员；否则本机已接受以自身为目标的移除并完成本地效果。
+fn ledger(local_active: bool) -> MembershipRecord {
     let (local, local_credential) = facts("device-a", 0x41);
     let (peer, peer_credential) = facts("device-b", 0x42);
-    let history = VersionedMembershipHistory::from_activation_baseline(
-        MembershipActivationBaselineV2::Established {
-            lineage_id: "space-a".to_owned(),
-            head_event_id: MembershipEventId::from_hex(&"11".repeat(32)).unwrap(),
-            head_depth: 0,
-            current_members: vec![(local.clone(), local_credential), (peer, peer_credential)],
-        },
-    )
-    .unwrap();
-    let mut loaded = LoadedMembershipLedger::no_current_space();
-    loaded.revision = 3;
-    loaded.lineage_id = Some("space-a".to_owned());
-    loaded.membership_history = Some(history.encode_persisted_v2().unwrap());
-    loaded.local_device_id = Some(local.device_id);
-    loaded.local_member_instance = Some(local.member_instance);
-    loaded.local_join_active = local_join_active;
-    loaded.peer_reconciliation.insert(
-        DeviceId::new("device-b"),
-        PeerReconciliationRecord {
-            peer_device_id: DeviceId::new("device-b"),
-            relationship: MembershipHistoryRelationship::Consistent,
-            confirmed_position: None,
-            sync_state: Default::default(),
-            restricted_delivery: Vec::new(),
-            updated_at_ms: 1,
-        },
-    );
-    loaded
+    let history = established_history(&[
+        (local.clone(), local_credential.clone()),
+        (peer.clone(), peer_credential.clone()),
+    ]);
+    let record = started_record(history.clone(), local.device_id, local.member_instance, 3);
+    if local_active {
+        return record;
+    }
+    let mut removal = history
+        .create_unsigned_local_removal_event(
+            peer.member_instance,
+            &peer_credential,
+            local.member_instance,
+            [0x31; 16],
+            [0x32; 32],
+        )
+        .unwrap();
+    removal.signature = vec![0x33];
+    let removal_id = removal.event_id();
+    let mut decided = history.clone();
+    decided
+        .verify_and_receive_remote_event_for_local_member(
+            removal,
+            local.member_instance,
+            &AcceptingVerifier,
+        )
+        .unwrap();
+    let mut decision = decided
+        .create_unsigned_local_removal_decision(
+            removal_id,
+            local.member_instance,
+            &local_credential,
+            RemovalDecision::Accept,
+            [0x34; 16],
+        )
+        .unwrap();
+    decision.signature = vec![0x35];
+    decided
+        .apply_signed_local_removal_decision(decision, local.member_instance, &AcceptingVerifier)
+        .unwrap();
+    let MembershipRecord::Space(space) = record else {
+        unreachable!("started record has a space");
+    };
+    let (mut membership, _, _) = MembershipLedger::restore(space.ledger)
+        .unwrap()
+        .apply(
+            LedgerInput::LocalDecisionSigned {
+                history: decided,
+                removal_event_id: removal_id,
+            },
+            1_000,
+        )
+        .unwrap()
+        .into_parts();
+    loop {
+        let Some(effect) = membership.unfinished_effects().next().cloned() else {
+            break;
+        };
+        membership = membership
+            .apply(
+                LedgerInput::EffectStepFinished {
+                    event_id: effect.event_id(),
+                    from: effect.phase(),
+                },
+                1_000,
+            )
+            .unwrap()
+            .into_parts()
+            .0;
+    }
+    record_of(membership.snapshot())
 }
 
 fn query(
-    loaded: LoadedMembershipLedger,
+    loaded: MembershipRecord,
     security: SpaceDeviceUpdateStatus,
     identity: Arc<LocalIdentity>,
 ) -> QueryDeviceTrustUseCase {
-    let repository = Arc::new(Repository(loaded));
     QueryDeviceTrustUseCase::new(
-        Arc::new(MembershipLedger::new(
-            Arc::clone(&repository) as Arc<dyn LoadMembershipLedgerPort>,
-            repository,
-            Arc::new(AcceptingVerifier),
-        )),
+        OwnerFixture::new(loaded).owner,
         Arc::new(Offline),
         Arc::new(NoCurrentJoinStatus),
         Arc::new(SecurityUpdates(security)),

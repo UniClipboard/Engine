@@ -82,7 +82,13 @@ impl MembershipLedger {
             | LedgerInput::DeliveryFinished { .. }
             | LedgerInput::DepartureWindowElapsed { .. }
             | LedgerInput::EffectStepFinished { .. } => &[LedgerFollowUp::PublishDeviceTrustChange],
-            LedgerInput::HistorySyncSelected { .. } => &[],
+            LedgerInput::HistorySyncSelected { .. }
+            | LedgerInput::CompanionDataChanged {
+                presentation_changed: false,
+            } => &[],
+            LedgerInput::CompanionDataChanged {
+                presentation_changed: true,
+            } => &[LedgerFollowUp::PublishDeviceTrustChange],
         };
         let outcome = match input {
             LedgerInput::LocalRemovalSigned {
@@ -115,6 +121,7 @@ impl MembershipLedger {
                 next.on_effect_step(event_id, from)
             }
             LedgerInput::BranchRecovered { history } => next.on_branch_recovered(history)?,
+            LedgerInput::CompanionDataChanged { .. } => LedgerOutcome::Applied,
         };
         if outcome != LedgerOutcome::Applied {
             return Ok(LedgerTransition::new(self, outcome, Vec::new()));
@@ -351,18 +358,27 @@ impl MembershipLedger {
             .history
             .pending_removal_decision(self.local_member)
             .is_some();
+        let consistent = if awaiting_decision {
+            PeerRelation::AwaitingLocalDecision
+        } else {
+            PeerRelation::Consistent
+        };
+        // 已不是当前成员的来源（例如已被移除的设备送来的决定）只贡献已验证历史。
         let Some(PeerLink::Member(link)) = self.peers.get_mut(&source) else {
-            return Err(LedgerTransitionError::InputMismatch);
+            return Ok(if *self == before {
+                LedgerOutcome::Unchanged
+            } else {
+                LedgerOutcome::Applied
+            });
         };
         match evidence {
             PeerEvidence::Confirmed => {
-                let relation = if awaiting_decision {
-                    PeerRelation::AwaitingLocalDecision
-                } else {
-                    PeerRelation::Consistent
-                };
-                link.record_relation(relation, Some(current));
+                link.record_relation(consistent, Some(current));
                 link.sync_mut().settle(PeerSyncOutcome::Acked);
+            }
+            PeerEvidence::Consistent => {
+                let confirmed = link.confirmed_position().cloned();
+                link.record_relation(consistent, confirmed);
             }
             PeerEvidence::Diverged | PeerEvidence::Invalid => {
                 let relation = if evidence == PeerEvidence::Diverged {
@@ -394,9 +410,10 @@ impl MembershipLedger {
         let mut recorded = BTreeSet::new();
         let mut cursor = history.current_head();
         while let Some(event_id) = cursor {
-            let event = history
-                .event(event_id)
-                .ok_or(LedgerTransitionError::InputMismatch)?;
+            // 从激活基线开始的历史不保存基线之前的事件；回溯到基线即结束。
+            let Some(event) = history.event(event_id) else {
+                break;
+            };
             let (kind, member) = match &event.operation {
                 MembershipOperationV2::AddDevice { admission } => {
                     (MemberEffectKind::AddDevice, admission.facts.member_instance)
@@ -619,7 +636,7 @@ impl MembershipLedger {
 
     /// 让对端记录与历史保持一致：每个有效对端恰有一个 `Member`，离开中的设备不在历史成员中，
     /// 其余记录删除；本机为目标的移除决定不投递；效果只保留当前历史路径上的事件。
-    fn normalize(&mut self) -> Result<(), LedgerTransitionError> {
+    pub(super) fn normalize(&mut self) -> Result<(), LedgerTransitionError> {
         let path = current_path(&self.history);
         self.effects.retain(|event_id, _| path.contains(event_id));
         let pending_revision = self.pending_revision();

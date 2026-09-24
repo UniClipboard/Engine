@@ -154,7 +154,6 @@ pub(crate) struct PreparedSpaceMembershipMaintenanceRuntime {
     network_activity: Arc<dyn MembershipNetworkActivityPort>,
     activity: SpaceMembershipMaintenanceActivity,
     command_rx: mpsc::UnboundedReceiver<RuntimeCommand>,
-    history_changes: tokio::sync::watch::Receiver<()>,
 }
 
 impl PreparedSpaceMembershipMaintenanceRuntime {
@@ -170,7 +169,6 @@ impl SpaceMembershipMaintenanceRuntime {
         known_peer_contacts: broadcast::Receiver<super::KnownPeerContact>,
         periodic_interval: Duration,
         network_activity: Arc<dyn MembershipNetworkActivityPort>,
-        history_changes: tokio::sync::watch::Receiver<()>,
     ) -> PreparedSpaceMembershipMaintenanceRuntime {
         let (commands, command_rx) = mpsc::unbounded_channel();
         let activity = SpaceMembershipMaintenanceActivity {
@@ -186,7 +184,6 @@ impl SpaceMembershipMaintenanceRuntime {
             network_activity,
             activity,
             command_rx,
-            history_changes,
         }
     }
 
@@ -204,7 +201,6 @@ impl SpaceMembershipMaintenanceRuntime {
             known_peer_contacts,
             periodic_interval,
             network_activity,
-            tokio::sync::watch::channel(()).1,
         ))
     }
 
@@ -217,7 +213,6 @@ impl SpaceMembershipMaintenanceRuntime {
             network_activity,
             activity,
             mut command_rx,
-            mut history_changes,
         } = prepared;
         let task_cancel = activity.cancel.clone();
         let failure = Arc::clone(&activity.failure);
@@ -225,7 +220,6 @@ impl SpaceMembershipMaintenanceRuntime {
             let mut paused = false;
             let mut peer_reachability_open = true;
             let mut peer_contacts_open = true;
-            let mut history_open = true;
             let mut active_round = (!task_cancel.is_cancelled()).then(|| {
                 spawn_round(
                     Arc::clone(&maintain),
@@ -305,12 +299,6 @@ impl SpaceMembershipMaintenanceRuntime {
                             }
                         }
                         None => break,
-                    },
-                    changed = history_changes.changed(), if !paused && history_open => {
-                        if changed.is_err() { history_open = false; }
-                        else {
-                            schedule_round(&maintain, &mut active_round, &mut queued_triggers, ScheduledRound::new(MembershipMaintenanceTrigger::StateChanged));
-                        }
                     },
                     event = reachability_changes.recv(), if !paused && peer_reachability_open => match event {
                         Ok(event) if event.state == ReachabilityState::Online => {

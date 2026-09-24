@@ -1,7 +1,7 @@
 //! 计划 049 S0：移除相关的双端收敛行为固定。
 //!
-//! 场景只使用公开操作和查询，重写内部实现后原样保留。标注 `#[ignore]` 的场景是当前实现
-//! 已知无法收敛的行为，由注明的切片取消标注；断言语义不得为通过而修改。
+//! 场景只使用公开操作和查询，重写内部实现后原样保留；断言语义不得为通过而修改。R1–R3 在 S0 时
+//! 标注为已知无法收敛，S3 切换到单一成员状态负责人后取消标注。
 
 use super::*;
 
@@ -20,7 +20,6 @@ const LATE_DECISION_DELAY: Duration = Duration::from_secs(3);
 
 // R1：A 移除 B，移除通知送达后 A 的设备列表不再包含 B，且设备更新完成。
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[ignore = "049 S3：移除通知送达后移除方仍永久保留被移除设备"]
 async fn r1_sponsor_drops_removed_device_after_notice_is_delivered() {
     uc_engine::init_test_tracing();
     let rendezvous = mount_rendezvous().await;
@@ -37,7 +36,6 @@ async fn r1_sponsor_drops_removed_device_after_notice_is_delivered() {
 // R2：B 在 A 撤销其身份之后才接受移除（2026-09-23 双 Desktop 现场）。
 // B 进入本机已移除终态且设备更新完成；A 不残留 B。
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[ignore = "049 S3：被移除方晚于身份撤销接受后永久停留在更新中"]
 async fn r2_late_local_removal_acceptance_reaches_removed_terminal_state() {
     uc_engine::init_test_tracing();
     let rendezvous = mount_rendezvous().await;
@@ -57,7 +55,6 @@ async fn r2_late_local_removal_acceptance_reaches_removed_terminal_state() {
 
 // R3：B 拒绝移除。B 保留本机分支并把 A 标为分叉，稳定停在需要处理而不是更新中；A 不残留 B。
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[ignore = "049 S3：被移除方拒绝后移除方永久保留被移除设备"]
 async fn r3_rejected_removal_settles_both_sides() {
     uc_engine::init_test_tracing();
     let rendezvous = mount_rendezvous().await;

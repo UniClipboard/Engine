@@ -21,7 +21,8 @@ pub enum LedgerInput {
     },
     /// 邀请方在准入唯一提交点写入新成员；新历史的当前头就是该加入。
     AdmissionCommitted { history: VersionedMembershipHistory },
-    /// 已认证对端的历史证据已按历史规则核对；`history` 为本机因此采用的新历史。
+    /// 已认证对端的历史证据已按历史规则核对；`history` 为本机因此采用的新历史。来源不是本机当前
+    /// 成员时只采用已验证历史，不记录关系。
     PeerEvidenceReconciled {
         source: DeviceId,
         history: Option<VersionedMembershipHistory>,
@@ -50,6 +51,9 @@ pub enum LedgerInput {
     },
     /// 分叉恢复已选定并准备好目标分支。
     BranchRecovered { history: VersionedMembershipHistory },
+    /// 与账本同存的非聚合资料（历史交换暂存、分叉恢复资料）已改变；只推进修订号。
+    /// `presentation_changed` 表示这些资料会改变设备分组展示。
+    CompanionDataChanged { presentation_changed: bool },
 }
 
 /// 对端历史证据的核对结论。
@@ -57,6 +61,8 @@ pub enum LedgerInput {
 pub enum PeerEvidence {
     /// 对端确认了本机采用证据后的当前位置。
     Confirmed,
+    /// 双方分支一致，但证据不能证明对端拥有本机当前位置；已确认位置保持不变。
+    Consistent,
     Diverged,
     Invalid,
     /// 证据不足，关系保持原状。

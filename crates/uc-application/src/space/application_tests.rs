@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use uc_core::ids::DeviceId;
@@ -10,8 +10,6 @@ use super::adapters::{SpaceAdmissionAdapters, SpaceMembershipAdapters, SpaceRunt
 use super::admission::*;
 use super::application::SpaceApplication;
 use super::membership::*;
-
-struct MemoryLedger(Mutex<LoadedMembershipLedger>);
 
 fn join_request_identity_facts(
     device_id: DeviceId,
@@ -27,28 +25,6 @@ fn join_request_identity_facts(
         transport_public_key: vec![0x88; 32],
         transport_address_blob: vec![0x89; 32],
         identity_signature: signature,
-    }
-}
-
-#[async_trait]
-impl LoadMembershipLedgerPort for MemoryLedger {
-    async fn load(&self) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
-        Ok(self.0.lock().unwrap().clone())
-    }
-}
-
-#[async_trait]
-impl CommitMembershipLedgerPort for MemoryLedger {
-    async fn compare_and_commit(
-        &self,
-        mutation: MembershipLedgerMutation,
-    ) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
-        let mut loaded = self.0.lock().unwrap();
-        if loaded.revision != mutation.expected_revision {
-            return Err(MembershipLedgerError::Conflict);
-        }
-        *loaded = mutation.replacement;
-        Ok(loaded.clone())
     }
 }
 
@@ -651,7 +627,7 @@ impl AdmissionSpaceTransitionPort for PassivePorts {
 impl ApplyMembershipMemberFactsPort for PassivePorts {
     async fn apply_member_facts(
         &self,
-        _effect: &PendingMembershipEffect,
+        _effect: &UnfinishedMemberEffect,
     ) -> Result<(), MembershipEffectExecutionError> {
         unreachable!()
     }
@@ -661,7 +637,7 @@ impl ApplyMembershipMemberFactsPort for PassivePorts {
 impl ApplyMembershipSecurityPort for PassivePorts {
     async fn apply_membership_security(
         &self,
-        _effect: &PendingMembershipEffect,
+        _effect: &UnfinishedMemberEffect,
     ) -> Result<(), MembershipEffectExecutionError> {
         unreachable!()
     }
@@ -671,7 +647,7 @@ impl ApplyMembershipSecurityPort for PassivePorts {
 impl ActivateMembershipEffectPort for PassivePorts {
     async fn activate_membership_effect(
         &self,
-        _effect: &PendingMembershipEffect,
+        _effect: &UnfinishedMemberEffect,
     ) -> Result<(), MembershipEffectExecutionError> {
         unreachable!()
     }
@@ -685,16 +661,6 @@ impl RestrictedMembershipDeliveryPort for PassivePorts {
         _delivery: &RestrictedMembershipDelivery,
     ) -> Result<(), RestrictedMembershipDeliveryError> {
         unreachable!()
-    }
-}
-
-#[async_trait]
-impl ApplyMembershipProjectionPort for PassivePorts {
-    async fn apply_membership_projection(
-        &self,
-        _plan: MembershipProjectionPlan,
-    ) -> Result<(), ApplyMembershipProjectionError> {
-        Ok(())
     }
 }
 
@@ -809,8 +775,10 @@ impl ActivateSponsorAdmissionPort for PassivePorts {
     async fn activate(
         &self,
         _activated_security: &uc_core::membership::AdmissionActivatedSecurityState,
-    ) -> Result<(), ActivateSponsorAdmissionError> {
-        Ok(())
+    ) -> Result<VersionedMembershipHistory, ActivateSponsorAdmissionError> {
+        Err(ActivateSponsorAdmissionError::new(anyhow::anyhow!(
+            "passive sponsor activation"
+        )))
     }
 }
 
@@ -834,9 +802,7 @@ impl crate::space::membership::RePairingStateStorePort for PassivePorts {
 
 #[tokio::test]
 async fn complete_application_exposes_endpoints_before_runtime_starts() {
-    let repository = Arc::new(MemoryLedger(Mutex::new(
-        LoadedMembershipLedger::no_current_space(),
-    )));
+    let records = MemoryMembershipRecords::empty();
     let passive = Arc::new(PassivePorts::default());
     let (_peer_reachability_tx, peer_reachability_rx) = tokio::sync::broadcast::channel(4);
     let (_known_peer_contact_tx, known_peer_contact_rx) = tokio::sync::broadcast::channel(4);
@@ -866,8 +832,7 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
                 current_join_status: passive.clone(),
             },
             membership: SpaceMembershipAdapters {
-                load_membership_ledger: repository.clone(),
-                commit_membership_ledger: repository,
+                membership_records: records,
                 historical_membership_signatures: passive.clone(),
                 current_member_signatures: passive.clone(),
                 membership_identity: passive.clone(),
@@ -886,7 +851,6 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
                 restricted_membership_delivery: passive.clone(),
                 group_update_store: passive.clone(),
                 group_update_dispatch: passive.clone(),
-                apply_membership_projection: passive.clone(),
                 membership_network_activity: passive.clone(),
             },
         },

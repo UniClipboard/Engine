@@ -28,6 +28,8 @@ const NONCE_LEN: usize = 24;
 const HEADER_LEN: usize = 4 + 1 + NONCE_LEN;
 mod projection;
 
+pub(crate) use projection::MembershipProjectionWriter;
+
 #[derive(Debug, thiserror::Error)]
 pub enum RelationshipStoreError {
     #[error("relationship store is locked")]

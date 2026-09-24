@@ -45,30 +45,33 @@ async fn legacy_candidates_converge_by_evidence() {
         scenario.record_event("legacy-candidate-provably-incomplete");
 
         let insufficient = Fixture::new();
-        let response = HandleMembershipHistoryMessageUseCase::new(insufficient.ledger.clone())
-            .execute(
-                &AuthenticatedMember::new(insufficient.peer.device_id.clone()),
-                MembershipHistoryMessage::ConflictEvidenceV3(MembershipConflictEvidenceV3 {
-                    transfer_id: [0; 32],
-                    pages: insufficient
-                        .remote
-                        .export_conflict_evidence_pages_v2(insufficient.peer.clone())
-                        .map_err(|_| fixture("invalid-evidence-fixture"))?,
-                }),
-            )
-            .await
-            .map_err(|_| fixture("deliver-insufficient"))?;
+        let response = HandleMembershipHistoryMessageUseCase::new(
+            insufficient.ledger.clone(),
+            FixedSpaceWorkMode::active(),
+        )
+        .execute(
+            &AuthenticatedMember::new(insufficient.peer.device_id),
+            MembershipHistoryMessage::ConflictEvidenceV3(MembershipConflictEvidenceV3 {
+                transfer_id: [0; 32],
+                pages: insufficient
+                    .remote
+                    .export_conflict_evidence_pages_v2(insufficient.peer.clone())
+                    .map_err(|_| fixture("invalid-evidence-fixture"))?,
+            }),
+        )
+        .await
+        .map_err(|_| fixture("deliver-insufficient"))?;
         require(
             response == MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Invalid),
             "insufficient-evidence-was-promoted",
         )?;
         require(
             insufficient
-                .repository
-                .load()
-                .await
-                .map_err(|_| fixture("load-insufficient"))?
-                .membership_conflicts
+                .owner_fixture
+                .records
+                .space()
+                .branch_recovery
+                .conflicts
                 .is_empty(),
             "insufficient-evidence-created-a-candidate",
         )?;

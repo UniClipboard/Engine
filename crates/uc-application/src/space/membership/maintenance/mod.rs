@@ -8,11 +8,10 @@ pub use model::{
     MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger, QuerySpaceWorkModeError,
     SpaceWorkMode, SpaceWorkPermit,
 };
+pub(crate) use ports::RunMembershipWorkPort;
 pub use ports::{
-    AcquireSpaceWorkPermitPort, DeliverPendingGroupUpdatesPort, DeliverRestrictedMembershipPort,
-    ReconcileMembershipProjectionPort, RecoverMembershipConflictsPort,
-    RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort, SynchronizeMembershipMaintenancePort,
-    WakeSpaceMembershipMaintenancePort,
+    AcquireSpaceWorkPermitPort, DeliverPendingGroupUpdatesPort, RecoverMembershipConflictsPort,
+    RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort, WakeSpaceMembershipMaintenancePort,
 };
 pub use runtime::MembershipNetworkActivityPort;
 pub(crate) use runtime::{

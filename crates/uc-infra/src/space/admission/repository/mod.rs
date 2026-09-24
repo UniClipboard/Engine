@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::db::ports::DbExecutor;
 use crate::security::{ActiveSpaceGenerationManifestStore, AdmissionKeyManager};
-use uc_application::deps::LoadMembershipLedgerPort;
+use uc_application::deps::MembershipRecordStorePort;
 use uc_core::membership::{AdmissionContinuationCredential, SpaceAdmissionId};
 
 use codec::RepositoryReadCache;
@@ -34,7 +34,7 @@ pub struct SqliteSpaceAdmissionState<E> {
     pub(super) executor: E,
     pub(super) keys: Arc<AdmissionKeyManager>,
     pub(super) manifests: Arc<ActiveSpaceGenerationManifestStore>,
-    pub(super) membership: Arc<dyn LoadMembershipLedgerPort>,
+    pub(super) membership: Arc<dyn MembershipRecordStorePort>,
     read_cache: Mutex<Option<RepositoryReadCache>>,
     #[cfg(test)]
     record_reads: std::sync::atomic::AtomicUsize,
@@ -45,7 +45,7 @@ impl<E> SqliteSpaceAdmissionState<E> {
         executor: E,
         keys: Arc<AdmissionKeyManager>,
         manifests: Arc<ActiveSpaceGenerationManifestStore>,
-        membership: Arc<dyn LoadMembershipLedgerPort>,
+        membership: Arc<dyn MembershipRecordStorePort>,
     ) -> Self {
         Self {
             executor,

@@ -1,17 +1,14 @@
 use std::sync::Arc;
 
 use uc_core::membership::{
-    MembershipDecisionStoreOutcome, MembershipHistoryRelationship, MembershipOperationV2,
+    LedgerInput, MembershipConflictPolicy, MembershipDecisionStoreOutcome, MembershipOperationV2,
     RemovalDecision,
 };
 
-use crate::space::membership::QueryDeviceTrustUseCase;
-use crate::space::membership::RecoverMembershipEffectsPort;
-use crate::space::membership::WakeSpaceMembershipMaintenancePort;
-use crate::space::membership::{CurrentMemberSignatureError, CurrentMemberSignaturePort};
 use crate::space::membership::{
-    MembershipEffectKind, MembershipEffectPhase, MembershipLedger, MembershipLedgerError,
-    PendingMembershipEffect, RestrictedMembershipDelivery,
+    ledger_error, CurrentMemberSignatureError, CurrentMemberSignaturePort,
+    MembershipConflictStatus, MembershipLedgerError, MembershipOwner, QueryDeviceTrustUseCase,
+    RecoverMembershipEffectsPort,
 };
 
 use super::{
@@ -20,28 +17,25 @@ use super::{
 };
 
 pub(crate) struct DecideDeviceTrustChangeUseCase {
-    ledger: Arc<MembershipLedger>,
+    owner: Arc<MembershipOwner>,
     signer: Arc<dyn CurrentMemberSignaturePort>,
     query: Arc<QueryDeviceTrustUseCase>,
     effects: Arc<dyn RecoverMembershipEffectsPort>,
-    maintenance: Arc<dyn WakeSpaceMembershipMaintenancePort>,
     execution_lock: tokio::sync::Mutex<()>,
 }
 
 impl DecideDeviceTrustChangeUseCase {
     pub(crate) fn new(
-        ledger: Arc<MembershipLedger>,
+        owner: Arc<MembershipOwner>,
         signer: Arc<dyn CurrentMemberSignaturePort>,
         query: Arc<QueryDeviceTrustUseCase>,
         effects: Arc<dyn RecoverMembershipEffectsPort>,
-        maintenance: Arc<dyn WakeSpaceMembershipMaintenancePort>,
     ) -> Self {
         Self {
-            ledger,
+            owner,
             signer,
             query,
             effects,
-            maintenance,
             execution_lock: tokio::sync::Mutex::new(()),
         }
     }
@@ -79,25 +73,16 @@ impl DecideDeviceTrustChangeUseCase {
         &self,
         input: DecideDeviceTrustChange,
     ) -> Result<DecideDeviceTrustChangeResult, DecideDeviceTrustChangeError> {
-        let snapshot = self
-            .ledger
-            .load_verified()
-            .await
-            .map_err(map_ledger_error)?;
-        let history = snapshot
-            .history()
-            .ok_or(DecideDeviceTrustChangeError::RecoveryRequired)?;
-        let local_member = snapshot
-            .record()
-            .local_member_instance
-            .ok_or(DecideDeviceTrustChangeError::RecoveryRequired)?;
+        let view = self.owner.load().await.map_err(map_ledger_error)?;
+        let space = view.require_space().map_err(map_ledger_error)?;
+        let history = space.history();
+        let local_member = space.local_member();
         if let Some(completed) = history.decision_for(input.change_id, local_member) {
             let choice = match completed.decision {
                 RemovalDecision::Accept => DeviceTrustChangeChoice::ApplyChange,
                 RemovalDecision::Reject => DeviceTrustChangeChoice::KeepCurrentDeviceGroup,
             };
             let _ = self.effects.recover_membership_effects().await;
-            self.maintenance.wake();
             let status = self
                 .query
                 .execute()
@@ -144,17 +129,13 @@ impl DecideDeviceTrustChangeUseCase {
                 status,
             });
         }
-        let local_device_id = snapshot
-            .record()
-            .local_device_id
-            .as_ref()
-            .ok_or(DecideDeviceTrustChangeError::RecoveryRequired)?;
+        let local_device_id = *space.local_device_id();
         let credential = self
             .signer
-            .current_membership_credential(local_device_id)
+            .current_membership_credential(&local_device_id)
             .await
             .map_err(map_signature_error)?;
-        if credential.member_instance_id(local_device_id) != local_member {
+        if credential.member_instance_id(&local_device_id) != local_member {
             return Err(DecideDeviceTrustChangeError::RecoveryRequired);
         }
         let decision_choice = match input.choice {
@@ -175,94 +156,59 @@ impl DecideDeviceTrustChangeUseCase {
             .sign_current_member_payload(&decision.signing_payload())
             .await
             .map_err(map_signature_error)?;
-        let proposed_by_device_id = history
-            .admission_facts_for(event.author_member_instance_id)
-            .map(|facts| facts.device_id.clone())
-            .ok_or(DecideDeviceTrustChangeError::RecoveryRequired)?;
-        let target_member = match &event.operation {
-            MembershipOperationV2::RemoveDevice { member } => *member,
-            MembershipOperationV2::AddDevice { .. } => {
-                return Err(DecideDeviceTrustChangeError::RecoveryRequired);
-            }
-        };
-        let target_device_id = history
-            .admission_facts_for(target_member)
-            .map(|facts| facts.device_id.clone())
-            .ok_or(DecideDeviceTrustChangeError::RecoveryRequired)?;
-        let decision_payload = postcard::to_stdvec(&decision)
-            .map_err(|_| DecideDeviceTrustChangeError::RecoveryRequired)?;
-        let expected_revision = snapshot.record().revision;
-        let expected_history_digest = snapshot.history_digest();
-        let decision_for_commit = decision.clone();
-        self.ledger
-            .compare_and_commit_history(
-                expected_revision,
-                expected_history_digest,
-                move |record, history, verifier| {
-                    if history
-                        .apply_signed_local_removal_decision(
-                            decision_for_commit.clone(),
-                            local_member,
-                            verifier,
-                        )
-                        .map_err(|_| MembershipLedgerError::Corrupt)?
-                        != MembershipDecisionStoreOutcome::Stored
-                    {
-                        return Err(MembershipLedgerError::Corrupt);
-                    }
-                    let next_relationship = match decision_choice {
-                        RemovalDecision::Accept => MembershipHistoryRelationship::Consistent,
-                        RemovalDecision::Reject => MembershipHistoryRelationship::Diverged,
-                    };
-                    record
-                        .peer_reconciliation
-                        .entry(proposed_by_device_id.clone())
-                        .and_modify(|relationship| {
-                            relationship.relationship = next_relationship;
-                            relationship.restricted_delivery =
-                                vec![RestrictedMembershipDelivery::Decision(
-                                    decision_for_commit.clone(),
-                                )];
-                            // 由受限投递在首次处理时记录窗口起点。
-                            relationship.updated_at_ms = 0;
+        let change_id = input.change_id;
+        let verifier = self.owner.verifier_handle();
+        self.owner
+            .commit(move |draft| {
+                let mut history = draft.require_space()?.history().clone();
+                if history.pending_removal_decision(local_member) != Some(change_id) {
+                    return Err(MembershipLedgerError::Conflict);
+                }
+                if history
+                    .apply_signed_local_removal_decision(decision, local_member, verifier.as_ref())
+                    .map_err(|_| MembershipLedgerError::Corrupt)?
+                    != MembershipDecisionStoreOutcome::Stored
+                {
+                    return Err(MembershipLedgerError::Corrupt);
+                }
+                // 拒绝后本机已记录的选择就是保留当前分支；对应分叉不再等待用户选择。
+                let kept_conflicts = if decision_choice == RemovalDecision::Reject {
+                    draft
+                        .require_space()?
+                        .branch_recovery()
+                        .conflicts
+                        .values()
+                        .filter(|conflict| {
+                            conflict.selected_branch_id.is_none()
+                                && MembershipConflictPolicy::has_recorded_local_choice(
+                                    &history,
+                                    local_member,
+                                    conflict.remote_branch_id,
+                                )
                         })
-                        .or_insert(crate::space::membership::PeerReconciliationRecord {
-                            peer_device_id: proposed_by_device_id,
-                            relationship: next_relationship,
-                            confirmed_position: None,
-                            sync_state: Default::default(),
-                            restricted_delivery: vec![RestrictedMembershipDelivery::Decision(
-                                decision_for_commit,
-                            )],
-                            updated_at_ms: 0,
-                        });
-                    if decision_choice == RemovalDecision::Accept {
-                        record.effect_journal.insert(
-                            *input.change_id.as_bytes(),
-                            PendingMembershipEffect {
-                                event_id: *input.change_id.as_bytes(),
-                                kind: MembershipEffectKind::RemoveDevice,
-                                phase: MembershipEffectPhase::Prepared,
-                                affected_device_ids: vec![target_device_id],
-                                payload: decision_payload,
-                            },
-                        );
-                    } else {
-                        for conflict in record.membership_conflicts.values_mut() {
-                            if conflict.selected_branch_id.is_none()
-                                && uc_core::membership::MembershipConflictPolicy::has_recorded_local_choice(history, local_member, conflict.remote_branch_id) {
-                                conflict.status = crate::space::membership::MembershipConflictStatus::Completed;
-                                conflict.selected_branch_id = Some(conflict.local_branch_id);
-                            }
-                        }
+                        .map(|conflict| conflict.conflict_id)
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                draft
+                    .apply(LedgerInput::LocalDecisionSigned {
+                        history,
+                        removal_event_id: change_id,
+                    })
+                    .map_err(ledger_error)?;
+                let branch_recovery = draft.branch_recovery_mut()?;
+                for conflict_id in kept_conflicts {
+                    if let Some(conflict) = branch_recovery.conflicts.get_mut(&conflict_id) {
+                        conflict.status = MembershipConflictStatus::Completed;
+                        conflict.selected_branch_id = Some(conflict.local_branch_id);
                     }
-                    Ok(())
-                },
-            )
+                }
+                Ok(())
+            })
             .await
             .map_err(map_ledger_error)?;
         let _ = self.effects.recover_membership_effects().await;
-        self.maintenance.wake();
         let status = self
             .query
             .execute()

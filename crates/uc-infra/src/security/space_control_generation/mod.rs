@@ -5,17 +5,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::{TimeZone as _, Utc};
-use sha2::Digest as _;
 use uc_application::deps::{
     AdmissionSpaceTransitionPreparationV2, AdvanceMembershipBranchTransitionInput,
-    CommitMembershipLedgerPort, LoadMembershipLedgerPort, MembershipLedgerMutation,
+    MembershipRecord, SpaceMembershipRecord,
 };
 use uc_core::membership::{
-    MembershipBranchTransitionPhaseV1, RelationshipStateResetPort, RevocationRepositoryPort,
+    LedgerInput, LedgerOutcome, MembershipBranchTransitionPhaseV1, MembershipLedger,
+    RelationshipStateResetPort, RevocationRepositoryPort,
 };
 use uc_core::ports::atomic_publish::AtomicPublishPort;
 use uc_core::ports::security::current_profile::CurrentProfilePort;
-use uc_core::ports::PeerAddressRecord;
+use uc_core::ports::{ClockPort, PeerAddressRecord};
 use uc_core::{MemberSyncPreferences, SpaceMember, TrustedPeer};
 
 use self::material::PreparedAdmissionControl;
@@ -31,8 +31,10 @@ use crate::fs::FsAtomicPublisher;
 use crate::space::{
     install_prepared_registration_for_control_generation,
     rebind_registration_to_control_generation, verify_prepared_registration_for_control_generation,
-    InMemorySession, RuntimeSpaceAccessAdapter, SqliteMembershipLedger,
+    InMemorySession, OpenMlsHistoricalSignatureVerifier, RuntimeSpaceAccessAdapter,
+    SqliteMembershipRecordStore,
 };
+use crate::time::SystemClock;
 
 /// 已完整写入、由 production repository 回读且原子发布的控制世代证明。
 ///
@@ -109,6 +111,19 @@ impl SpaceControlGeneration {
             admission_keys,
             prepare_lock: tokio::sync::Mutex::new(()),
         }
+    }
+
+    /// 暂存控制世代中的成员记录仓储；世代数据库的成员读模型由构建流程直接写入。
+    fn record_store(
+        &self,
+        executor: Arc<DieselSqliteExecutor>,
+    ) -> SqliteMembershipRecordStore<Arc<DieselSqliteExecutor>> {
+        SqliteMembershipRecordStore::new(
+            executor,
+            Arc::clone(&self.admission_keys),
+            Arc::new(OpenMlsHistoricalSignatureVerifier),
+            Arc::new(SystemClock),
+        )
     }
 
     pub async fn prepare_admission(
@@ -553,36 +568,57 @@ impl SpaceControlGeneration {
                     .map_err(|source| storage(anyhow::Error::new(source)))?;
             }
 
-            let ledger = SqliteMembershipLedger::new(executor, Arc::clone(&self.admission_keys));
-            let current = ledger
+            let records = self.record_store(executor);
+            let current = records
                 .load()
-                .await
                 .map_err(|source| storage(anyhow::Error::new(source)))?;
-            let mut replacement = current
-                .recovered_branch(&input.target_history, local_member)
+            let expected_revision = current.revision();
+            let MembershipRecord::Space(space) = current else {
+                return Err(inconsistent(anyhow::anyhow!(
+                    "branch target has no membership record"
+                )));
+            };
+            let SpaceMembershipRecord {
+                ledger,
+                history_exchange: _,
+                mut branch_recovery,
+            } = *space;
+            let ledger = MembershipLedger::restore(ledger)
                 .map_err(|source| inconsistent(anyhow::Error::new(source)))?;
-            let stored = replacement
-                .membership_branch_transitions
+            if ledger.local_member() != local_member {
+                return Err(inconsistent(anyhow::anyhow!(
+                    "branch target recipient differs from the local member"
+                )));
+            }
+            // 目标分支的效果已随恢复资料安装；旧分支的传输暂存与调度状态不跨分支继承。
+            let (recovered, outcome, _) = ledger
+                .apply(
+                    LedgerInput::BranchRecovered {
+                        history: input.target_history.clone(),
+                    },
+                    SystemClock.now_ms(),
+                )
+                .map_err(|source| inconsistent(anyhow::Error::new(source)))?
+                .into_parts();
+            if outcome != LedgerOutcome::Applied {
+                return Err(inconsistent(anyhow::anyhow!(
+                    "branch target membership did not change"
+                )));
+            }
+            let stored = branch_recovery
+                .branch_transitions
                 .get_mut(input.transition.transition_id())
                 .ok_or_else(|| {
                     inconsistent(anyhow::anyhow!("branch target checkpoint is missing"))
                 })?;
             advance_branch_checkpoint_to_staged(stored, &input.transition)?;
-            replacement.revision = current
-                .revision
-                .checked_add(1)
-                .ok_or_else(|| inconsistent(anyhow::anyhow!("branch ledger revision overflow")))?;
-            ledger
-                .compare_and_commit(MembershipLedgerMutation {
-                    device_trust_changed: true,
-                    expected_revision: current.revision,
-                    expected_history_digest: current
-                        .membership_history
-                        .as_deref()
-                        .map(|bytes| sha2::Sha256::digest(bytes).into()),
-                    replacement,
-                })
-                .await
+            let replacement = MembershipRecord::Space(Box::new(SpaceMembershipRecord {
+                ledger: recovered.snapshot(),
+                history_exchange: Default::default(),
+                branch_recovery,
+            }));
+            records
+                .commit_record(expected_revision, &replacement, None)
                 .map_err(|source| storage(anyhow::Error::new(source)))?;
         }
         verify_sqlite(database)
@@ -671,22 +707,23 @@ impl SpaceControlGeneration {
                     "branch target relationships do not match"
                 )));
             }
-            let ledger = SqliteMembershipLedger::new(executor, Arc::clone(&self.admission_keys));
-            let actual = ledger
+            let actual = self
+                .record_store(executor)
                 .load()
-                .await
                 .map_err(|source| storage(anyhow::Error::new(source)))?;
-            let expected_history = input
-                .target_history
-                .encode_persisted_v2()
-                .map_err(|source| inconsistent(anyhow::Error::new(source)))?;
-            if actual.membership_history.as_deref() != Some(expected_history.as_slice())
-                || actual.local_member_instance != Some(input.recovery_package.recipient_member())
-                || actual
-                    .membership_branch_transitions
-                    .get(input.transition.transition_id())
-                    != Some(&input.transition)
-            {
+            let matches = match &actual {
+                MembershipRecord::Space(space) => {
+                    space.ledger.history == input.target_history
+                        && space.ledger.local_member == input.recovery_package.recipient_member()
+                        && space
+                            .branch_recovery
+                            .branch_transitions
+                            .get(input.transition.transition_id())
+                            == Some(&input.transition)
+                }
+                MembershipRecord::NoSpace { .. } => false,
+            };
+            if !matches {
                 return Err(inconsistent(anyhow::anyhow!(
                     "branch target ledger does not match"
                 )));
@@ -805,22 +842,14 @@ impl SpaceControlGeneration {
             prepared.credentials(),
         )
         .map_err(storage)?;
-        let ledger = SqliteMembershipLedger::new(executor, Arc::clone(&self.admission_keys));
-        let current = ledger
+        let records = self.record_store(executor);
+        let current = records
             .load()
-            .await
             .map_err(|source| storage(anyhow::Error::new(source)))?;
-        ledger
-            .compare_and_commit(MembershipLedgerMutation {
-                expected_revision: current.revision,
-                expected_history_digest: current.membership_history.as_deref().map(|history| {
-                    use sha2::Digest as _;
-                    sha2::Sha256::digest(history).into()
-                }),
-                device_trust_changed: true,
-                replacement: prepared.ledger(current.revision)?,
-            })
-            .await
+        let replacement =
+            prepared.record(current.revision(), &OpenMlsHistoricalSignatureVerifier)?;
+        records
+            .commit_record(current.revision(), &replacement, None)
             .map_err(|source| storage(anyhow::Error::new(source)))?;
         Ok(())
     }
@@ -876,12 +905,11 @@ impl SpaceControlGeneration {
             )));
         }
 
-        let ledger = SqliteMembershipLedger::new(executor, Arc::clone(&self.admission_keys));
-        let actual_ledger = ledger
+        let actual_record = self
+            .record_store(executor)
             .load()
-            .await
             .map_err(|source| storage(anyhow::Error::new(source)))?;
-        if actual_ledger != prepared.ledger(0)? {
+        if actual_record != prepared.record(0, &OpenMlsHistoricalSignatureVerifier)? {
             return Err(inconsistent(anyhow::anyhow!(
                 "control membership ledger does not match"
             )));

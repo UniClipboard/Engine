@@ -2,9 +2,10 @@ use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use tracing::Instrument;
 use uc_application::deps::{
-    AuthenticatedSpaceAdmissionMessage, LoadMembershipLedgerPort, LoadedMembershipLedger,
-    MembershipLedgerError, SponsorAdmissionMutation, SponsorAdmissionState,
-    SponsorAdmissionStateError, SponsorAdmissionStatePort,
+    AuthenticatedSpaceAdmissionMessage, MembershipLedgerError, MembershipRecord,
+    MembershipRecordCommit, MembershipRecordStorePort, SpaceMembershipRecord,
+    SponsorAdmissionMutation, SponsorAdmissionState, SponsorAdmissionStateError,
+    SponsorAdmissionStatePort,
 };
 use uc_observability_contract::diagnostics::{
     operation_span, DiagnosticDomain, DiagnosticOperation, DiagnosticRole, DiagnosticSpanKind,
@@ -19,7 +20,7 @@ use super::*;
 
 #[derive(Clone)]
 struct FixedMembershipLedger {
-    loaded: LoadedMembershipLedger,
+    loaded: MembershipRecord,
 }
 
 #[tokio::test]
@@ -84,9 +85,13 @@ async fn sponsor_state_load_is_correlated_in_standard_log_file() {
 }
 
 #[async_trait]
-impl LoadMembershipLedgerPort for FixedMembershipLedger {
-    async fn load(&self) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
+impl MembershipRecordStorePort for FixedMembershipLedger {
+    async fn load(&self) -> Result<MembershipRecord, MembershipLedgerError> {
         Ok(self.loaded.clone())
+    }
+
+    async fn commit(&self, _: MembershipRecordCommit) -> Result<(), MembershipLedgerError> {
+        Err(MembershipLedgerError::Unavailable)
     }
 }
 
@@ -442,12 +447,21 @@ fn sponsor_store(fixture: &Fixture) -> SqliteSpaceAdmissionState<Arc<DieselSqlit
     )
 }
 
-fn membership_ledger() -> LoadedMembershipLedger {
-    let mut loaded = LoadedMembershipLedger::no_current_space();
-    loaded.revision = 7;
-    loaded.lineage_id = Some("space-a".to_owned());
-    loaded.membership_history = Some(vec![0x44; 128]);
-    loaded
+/// 只有沿革的成员记录：发起方读取的只是 Space 沿革。
+fn membership_ledger() -> MembershipRecord {
+    MembershipRecord::Space(Box::new(SpaceMembershipRecord {
+        ledger: uc_core::membership::MembershipLedgerSnapshot {
+            revision: 7,
+            history: uc_core::membership::VersionedMembershipHistory::new("space-a".to_owned()),
+            local_device_id: DeviceId::new("sponsor-device"),
+            local_member: uc_core::membership::MemberInstanceId::from_bytes([0; 32]),
+            peers: Default::default(),
+            effects: Vec::new(),
+            sync_cursor: None,
+        },
+        history_exchange: Default::default(),
+        branch_recovery: Default::default(),
+    }))
 }
 
 fn authenticated_join_request(

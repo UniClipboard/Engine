@@ -5,14 +5,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use async_trait::async_trait;
 use diesel::prelude::*;
 use diesel::sql_query;
 use diesel::sql_types::Binary;
-use uc_application::deps::{
-    JoinerActivationStatePort, LoadMembershipLedgerPort, LoadedMembershipLedger,
-    MembershipLedgerError,
-};
+use uc_application::deps::JoinerActivationStatePort;
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
 use super::persisted::{PersistedSpaceAdmissionRepositoryV2, StoredSpaceAdmissionV1};
@@ -20,6 +16,7 @@ use super::{SpaceAdmissionStateStoreError, SqliteSpaceAdmissionState};
 use crate::db::executor::DieselSqliteExecutor;
 use crate::db::pool::init_db_pool;
 use crate::security::{ActiveSpaceGenerationManifestStore, AdmissionKeyManager};
+use crate::space::membership_record::test_support::UnavailableMembershipRecords;
 
 #[derive(Default)]
 struct MemoryStorage(Mutex<HashMap<String, Vec<u8>>>, AtomicBool);
@@ -109,15 +106,6 @@ impl SecureStoragePort for ConcurrentWriterStorage {
     }
 }
 
-struct UnusedMembership;
-
-#[async_trait]
-impl LoadMembershipLedgerPort for UnusedMembership {
-    async fn load(&self) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
-        Err(MembershipLedgerError::Unavailable)
-    }
-}
-
 struct Fixture {
     _directory: tempfile::TempDir,
     connection: SqliteConnection,
@@ -154,7 +142,7 @@ impl Fixture {
             DieselSqliteExecutor::new(pool),
             keys.clone(),
             manifests,
-            Arc::new(UnusedMembership),
+            Arc::new(UnavailableMembershipRecords),
         );
         Self {
             _directory: directory,
@@ -225,7 +213,7 @@ async fn concurrent_database_write_does_not_abort_legacy_activation_query() {
         DieselSqliteExecutor::new(pool),
         keys.clone(),
         manifests,
-        Arc::new(UnusedMembership),
+        Arc::new(UnavailableMembershipRecords),
     );
     let state = PersistedSpaceAdmissionRepositoryV2::fresh([0x31; 16]);
     let bytes = postcard::to_stdvec(&state).unwrap();

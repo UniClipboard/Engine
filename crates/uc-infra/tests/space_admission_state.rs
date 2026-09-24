@@ -8,8 +8,9 @@ use diesel::sql_types::Binary;
 use tempfile::TempDir;
 use uc_application::deps::{
     AdmissionRecoveryTrigger, JoinerStartMutation, JoinerStartStateError, JoinerStartStatePort,
-    LoadCurrentJoinStatusPort, LoadMembershipLedgerPort, LoadedMembershipLedger,
-    MembershipLedgerError, PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
+    LoadCurrentJoinStatusPort, MembershipLedgerError, MembershipRecord, MembershipRecordCommit,
+    MembershipRecordStorePort, PendingAdmissionRecoveryStateError,
+    PendingAdmissionRecoveryStatePort,
 };
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
@@ -63,8 +64,12 @@ impl SecureStoragePort for MemorySecureStorage {
 struct UnusedMembershipLedger;
 
 #[async_trait::async_trait]
-impl LoadMembershipLedgerPort for UnusedMembershipLedger {
-    async fn load(&self) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
+impl MembershipRecordStorePort for UnusedMembershipLedger {
+    async fn load(&self) -> Result<MembershipRecord, MembershipLedgerError> {
+        Err(MembershipLedgerError::Unavailable)
+    }
+
+    async fn commit(&self, _: MembershipRecordCommit) -> Result<(), MembershipLedgerError> {
         Err(MembershipLedgerError::Unavailable)
     }
 }

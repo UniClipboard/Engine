@@ -81,10 +81,6 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 
-    use async_trait::async_trait;
-    use uc_application::deps::{
-        LoadMembershipLedgerPort, LoadedMembershipLedger, MembershipLedgerError,
-    };
     use uc_core::ids::SpaceId;
     use uc_core::membership::{ActiveRuntimeLayout, ActiveSpaceGenerationManifestV2};
     use uc_core::ports::{SecureStorageError, SecureStoragePort};
@@ -125,15 +121,6 @@ mod tests {
         }
     }
 
-    struct UnusedMembershipLedger;
-
-    #[async_trait]
-    impl LoadMembershipLedgerPort for UnusedMembershipLedger {
-        async fn load(&self) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
-            Err(MembershipLedgerError::Unavailable)
-        }
-    }
-
     #[tokio::test]
     async fn v2_runtime_manifest_retains_the_v1_source_snapshot_encoding() {
         let temp = tempfile::tempdir().expect("temp directory");
@@ -163,7 +150,7 @@ mod tests {
             executor,
             keys,
             manifests,
-            Arc::new(UnusedMembershipLedger),
+            Arc::new(crate::space::membership_record::test_support::UnavailableMembershipRecords),
         );
 
         let (snapshot, requires_transition) = state
@@ -209,7 +196,7 @@ mod tests {
             executor,
             keys,
             manifests,
-            Arc::new(UnusedMembershipLedger),
+            Arc::new(crate::space::membership_record::test_support::UnavailableMembershipRecords),
         );
 
         let (snapshot, requires_transition) = state

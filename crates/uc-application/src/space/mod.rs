@@ -80,6 +80,10 @@ pub use membership::{
     PendingDeviceTrustChange, QueryDeviceTrustError, SpaceDeviceUpdatePhase,
     SpaceDeviceUpdateProblem, SpaceDeviceUpdateRecovery, SpaceDeviceUpdateStatus,
 };
+pub use membership::{
+    MembershipBranchRecoveryRecord, MembershipHistoryExchangeRecord, MembershipRecord,
+    SpaceMembershipRecord,
+};
 
 // Assembly contract re-exported by `crate::deps`.
 pub use admission::{
@@ -142,13 +146,11 @@ pub use lifecycle::{
 };
 pub use membership::{
     ActivateMembershipEffectPort, ApplyMembershipMemberFactsPort, ApplyMembershipSecurityPort,
-    CommitMembershipLedgerPort, CurrentSpaceMemberScope, CurrentSpaceMemberScopeError,
-    CurrentSpaceMemberScopePort, InboundMembershipTransfer, InitiatedMembershipRemovalEffect,
-    LoadMembershipLedgerPort, LoadedMembershipLedger, MembershipBranchRecoverySession,
+    CurrentSpaceMemberScope, CurrentSpaceMemberScopeError, CurrentSpaceMemberScopePort,
+    InboundMembershipTransfer, MembershipBranchRecoverySession,
     MembershipBranchRecoverySessionState, MembershipConflictMember, MembershipConflictPresentation,
-    MembershipConflictRecord, MembershipEffectExecutionError, MembershipEffectKind,
-    MembershipEffectPhase, MembershipLedgerError, MembershipLedgerMutation, PausedSpaceMember,
-    PeerHistorySyncState, PeerReconciliationRecord, PendingMembershipEffect,
+    MembershipConflictRecord, MembershipEffectExecutionError, MembershipLedgerError,
+    MembershipRecordCommit, MembershipRecordStorePort, PausedSpaceMember,
     RestrictedMembershipDelivery, RestrictedMembershipDeliveryError,
     RestrictedMembershipDeliveryPort, SpaceMemberPauseReason,
 };
@@ -158,23 +160,20 @@ pub use membership::{
 };
 pub use membership::{
     AdmissionMaintenanceOutcome, BeginMembershipBranchRecoveryInput,
-    DeliverRestrictedMembershipPort, IssueMembershipBranchRecoveryError,
-    IssueMembershipBranchRecoveryInput, IssueMembershipBranchRecoveryPort, KnownPeerContact,
-    MembershipBranchRecoveryChannelError, MembershipBranchRecoveryChannelPort,
-    MembershipBranchRecoveryCommit, MembershipBranchRecoveryRequest,
-    MembershipMaintenanceStepOutcome, MembershipNetworkActivityPort,
-    PrepareMembershipBranchRecoveryMaterialError, PrepareMembershipBranchRecoveryMaterialInput,
-    PrepareMembershipBranchRecoveryMaterialPort, PrepareMembershipBranchRecoveryRecipientError,
-    PrepareMembershipBranchRecoveryRecipientPort, PrepareMembershipBranchTransitionError,
-    PrepareMembershipBranchTransitionInput, PrepareMembershipBranchTransitionPort,
-    PreparedMembershipBranchRecoveryMaterial, PreparedMembershipBranchRecoveryRecipient,
-    ReconcileMembershipProjectionPort, RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort,
-    SpaceWorkMode,
+    IssueMembershipBranchRecoveryError, IssueMembershipBranchRecoveryInput,
+    IssueMembershipBranchRecoveryPort, KnownPeerContact, MembershipBranchRecoveryChannelError,
+    MembershipBranchRecoveryChannelPort, MembershipBranchRecoveryCommit,
+    MembershipBranchRecoveryRequest, MembershipMaintenanceStepOutcome,
+    MembershipNetworkActivityPort, PrepareMembershipBranchRecoveryMaterialError,
+    PrepareMembershipBranchRecoveryMaterialInput, PrepareMembershipBranchRecoveryMaterialPort,
+    PrepareMembershipBranchRecoveryRecipientError, PrepareMembershipBranchRecoveryRecipientPort,
+    PrepareMembershipBranchTransitionError, PrepareMembershipBranchTransitionInput,
+    PrepareMembershipBranchTransitionPort, PreparedMembershipBranchRecoveryMaterial,
+    PreparedMembershipBranchRecoveryRecipient, RecoverMembershipEffectsPort,
+    RecoverSpaceAdmissionsPort, SpaceWorkMode,
 };
 pub use membership::{CurrentMemberSignatureError, CurrentMemberSignaturePort};
 
 #[cfg(test)]
 mod application_tests;
-pub use membership::{
-    ApplyMembershipProjectionError, ApplyMembershipProjectionPort, MembershipProjectionPlan,
-};
+pub use membership::MembershipProjectionPlan;

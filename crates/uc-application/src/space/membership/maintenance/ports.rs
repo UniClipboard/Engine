@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 
 use super::{
-    AdmissionMaintenanceOutcome, MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger,
-    QuerySpaceWorkModeError, SpaceWorkPermit,
+    AdmissionMaintenanceOutcome, MembershipMaintenanceReport, MembershipMaintenanceStepOutcome,
+    MembershipMaintenanceTrigger, QuerySpaceWorkModeError, SpaceWorkPermit,
 };
 
 pub trait WakeSpaceMembershipMaintenancePort: Send + Sync {
@@ -46,11 +46,6 @@ pub trait RecoverMembershipConflictsPort: Send + Sync {
 }
 
 #[async_trait]
-pub trait DeliverRestrictedMembershipPort: Send + Sync {
-    async fn deliver_restricted_membership(&self) -> MembershipMaintenanceStepOutcome;
-}
-
-#[async_trait]
 pub trait DeliverPendingGroupUpdatesPort: Send + Sync {
     async fn deliver_pending_group_updates(
         &self,
@@ -58,19 +53,11 @@ pub trait DeliverPendingGroupUpdatesPort: Send + Sync {
     ) -> MembershipMaintenanceStepOutcome;
 }
 
+/// 执行一轮已到期的普通成员待办；由成员待办执行器实现，维护运行期只负责何时调用。
 #[async_trait]
-pub trait SynchronizeMembershipMaintenancePort: Send + Sync {
-    async fn periodic_synchronization_required(
-        &self,
-    ) -> Result<bool, MembershipMaintenanceStepOutcome>;
-
-    async fn synchronize_membership(
+pub(crate) trait RunMembershipWorkPort: Send + Sync {
+    async fn run_membership_work(
         &self,
         trigger: &MembershipMaintenanceTrigger,
-    ) -> MembershipMaintenanceStepOutcome;
-}
-
-#[async_trait]
-pub trait ReconcileMembershipProjectionPort: Send + Sync {
-    async fn reconcile_membership_projection(&self) -> MembershipMaintenanceStepOutcome;
+    ) -> MembershipMaintenanceReport;
 }

@@ -89,7 +89,7 @@ use super::{
 };
 use crate::space::membership::{
     AdmissionAbandonmentRevocationTarget, AdmissionRevocationPort, AdmissionRevocationResult,
-    AdmissionRevocationTarget, RemoveSpaceMemberError,
+    AdmissionRevocationTarget, OwnerFixture, RemoveSpaceMemberError,
 };
 use crate::space::SpaceAdmissionObservationRegistry;
 
@@ -247,6 +247,40 @@ struct FixedSponsorCommit;
 struct FixedSponsorComplete {
     events: Arc<Mutex<Vec<ProtocolEvent>>>,
     activation_completed: AtomicBool,
+    committed_history: uc_core::membership::VersionedMembershipHistory,
+}
+
+/// 邀请方的成员状态负责人：单成员起点，激活时提交的历史只多出新成员的加入。
+fn sponsor_membership() -> (
+    OwnerFixture,
+    uc_core::membership::VersionedMembershipHistory,
+) {
+    use crate::space::membership::{append_active_peer_to_history, member_facts, started_record};
+
+    let (sponsor, credential) = member_facts("sponsor-device", 0x31);
+    let history = uc_core::membership::VersionedMembershipHistory::new_single_member_root(
+        "space-a".to_owned(),
+        sponsor.clone(),
+        credential,
+    )
+    .expect("valid sponsor history");
+    let mut committed = history.clone();
+    append_active_peer_to_history(
+        &mut committed,
+        sponsor.member_instance,
+        "joining-device",
+        0x32,
+        0x33,
+    );
+    (
+        OwnerFixture::new(started_record(
+            history,
+            sponsor.device_id,
+            sponsor.member_instance,
+            1,
+        )),
+        committed,
+    )
 }
 
 struct FixedSponsorSettled;
@@ -434,7 +468,8 @@ impl ActivateSponsorAdmissionPort for UnusedSponsorPorts {
     async fn activate(
         &self,
         _activated_security: &AdmissionActivatedSecurityState,
-    ) -> Result<(), ActivateSponsorAdmissionError> {
+    ) -> Result<uc_core::membership::VersionedMembershipHistory, ActivateSponsorAdmissionError>
+    {
         unreachable!()
     }
 }
@@ -444,14 +479,15 @@ impl ActivateSponsorAdmissionPort for FixedSponsorComplete {
     async fn activate(
         &self,
         _activated_security: &AdmissionActivatedSecurityState,
-    ) -> Result<(), ActivateSponsorAdmissionError> {
+    ) -> Result<uc_core::membership::VersionedMembershipHistory, ActivateSponsorAdmissionError>
+    {
         if !self.activation_completed.swap(true, Ordering::SeqCst) {
             self.events
                 .lock()
                 .expect("event recorder is available")
                 .push(ProtocolEvent::SponsorMembershipActivated);
         }
-        Ok(())
+        Ok(self.committed_history.clone())
     }
 }
 
@@ -1904,9 +1940,12 @@ impl SpaceAdmissionProtocolTestPair {
                 .then_some(uc_core::membership::SpaceAdmissionRejectionReason::RelationshipConflict),
             ),
         });
+        let (sponsor_members, committed_history) = sponsor_membership();
+        let (joiner_members, _) = sponsor_membership();
         let sponsor_complete = Arc::new(FixedSponsorComplete {
             events: Arc::clone(&events),
             activation_completed: AtomicBool::new(false),
+            committed_history,
         });
         Self {
             joiner: SpaceAdmissionProtocol::new(
@@ -1947,6 +1986,7 @@ impl SpaceAdmissionProtocolTestPair {
                     Arc::new(UnusedSponsorPorts),
                     Arc::new(UnusedSponsorPorts),
                     Arc::new(UnusedSponsorPorts),
+                    joiner_members.owner.clone(),
                 ),
                 AdmissionRecoveryService::new(
                     state.clone(),
@@ -1999,6 +2039,7 @@ impl SpaceAdmissionProtocolTestPair {
                     sponsor_complete,
                     Arc::new(FixedSponsorSettled),
                     Arc::new(UnusedSponsorPorts),
+                    sponsor_members.owner.clone(),
                 ),
                 AdmissionRecoveryService::new(
                     sponsor_state.clone(),

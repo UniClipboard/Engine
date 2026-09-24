@@ -16,6 +16,8 @@ use uc_observability_contract::diagnostics::connectivity::decode_local_record;
 
 use super::tests::{NoopNetworkActivity, RecordingStep};
 use super::*;
+use crate::space::membership::testing::{OwnerFixture, WorkerFixture, WorkerPorts};
+use crate::space::membership::MembershipRecord;
 
 #[derive(Clone, Default)]
 struct Capture(Arc<Mutex<Vec<Value>>>);
@@ -106,19 +108,23 @@ async fn blocked_updates_explain_queue_wait_and_coalesced_wakes_without_changing
     };
     let started = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
-    let maintain = Arc::new(MaintainSpaceMembershipUseCase::new(
-        MaintainSpaceMembershipDeps {
-            admissions: step("admissions"),
-            effects: step("effects"),
-            conflicts: step("conflicts"),
-            restricted_delivery: step("restricted"),
-            synchronization: step("synchronization"),
-            cleanup: step("cleanup"),
-            group_update_delivery: Arc::new(BlockFirstUpdate {
+    // 真实执行器在没有当前 Space 时只剩组密钥投递，阻塞它即可观察运行期排队。
+    let owner = OwnerFixture::new(MembershipRecord::NoSpace { revision: 0 });
+    let worker = WorkerFixture::new(
+        owner.owner.clone(),
+        WorkerPorts {
+            group_updates: Arc::new(BlockFirstUpdate {
                 started: started.clone(),
                 release: release.clone(),
                 first: AtomicBool::new(true),
             }),
+            ..WorkerPorts::default()
+        },
+    );
+    let maintain = Arc::new(MaintainSpaceMembershipUseCase::new(
+        MaintainSpaceMembershipDeps {
+            admissions: step("admissions"),
+            work: worker.worker.clone(),
         },
     ));
     let (_presence, receiver) = tokio::sync::broadcast::channel(4);

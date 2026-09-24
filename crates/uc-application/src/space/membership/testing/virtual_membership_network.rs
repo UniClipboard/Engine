@@ -222,27 +222,20 @@ fn valid_label(label: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::time::Duration;
 
-    use async_trait::async_trait;
-    use sha2::{Digest, Sha256};
     use uc_core::membership::{
-        AdmissionChangeFacts, HistoricalMembershipSignatureError,
-        HistoricalMembershipSignatureVerifier, MembershipActivationBaselineV2,
-        MembershipCredential, MembershipEventId, MembershipHistoryAckV3,
-        MembershipHistoryExchangeEndpointPort, MembershipHistoryMessage,
-        MembershipHistorySummaryV3, VersionedMembershipHistory,
+        AdmissionChangeFacts, MembershipActivationBaselineV2, MembershipCredential,
+        MembershipEventId, MembershipHistoryAckV3, MembershipHistoryExchangeEndpointPort,
+        MembershipHistoryMessage, MembershipHistorySummaryV3, VersionedMembershipHistory,
     };
     use uc_core::security::IdentityFingerprint;
     use uc_core::DeviceId;
 
     use super::{VirtualFrameOutcome, VirtualMembershipNetwork, VirtualMembershipNetworkError};
-    use crate::space::membership::{
-        CommitMembershipLedgerPort, HandleMembershipHistoryMessageUseCase,
-        LoadMembershipLedgerPort, LoadedMembershipLedger, MembershipLedger, MembershipLedgerError,
-        MembershipLedgerMutation,
-    };
+    use crate::space::membership::testing::{started_record, FixedSpaceWorkMode, OwnerFixture};
+    use crate::space::membership::HandleMembershipHistoryMessageUseCase;
     use crate::test_support::membership_scenario::{finish, require, scenario};
 
     const REPRODUCE: &str =
@@ -435,9 +428,9 @@ mod tests {
             Self {
                 device_a: sender.device_id.clone(),
                 device_b: receiver.device_id.clone(),
+                endpoint_a: endpoint(history.clone(), &sender),
+                endpoint_b: endpoint(history.clone(), &receiver),
                 sender,
-                endpoint_a: endpoint(history.clone(), DeviceId::new("device-a")),
-                endpoint_b: endpoint(history.clone(), DeviceId::new("device-b")),
                 history,
             }
         }
@@ -455,21 +448,18 @@ mod tests {
 
     fn endpoint(
         history: VersionedMembershipHistory,
-        local_device_id: DeviceId,
+        local: &AdmissionChangeFacts,
     ) -> Arc<dyn MembershipHistoryExchangeEndpointPort> {
-        let mut loaded = LoadedMembershipLedger::no_current_space();
-        loaded.revision = 1;
-        loaded.lineage_id = Some(history.lineage_id().to_owned());
-        loaded.membership_history = Some(history.encode_persisted_v2().expect("history encodes"));
-        loaded.local_device_id = Some(local_device_id);
-        loaded.local_join_active = true;
-        let repository = Arc::new(MemoryLedgerRepository(Mutex::new(loaded)));
-        let ledger = Arc::new(MembershipLedger::new(
-            repository.clone(),
-            repository,
-            Arc::new(AcceptingVerifier),
+        let fixture = OwnerFixture::new(started_record(
+            history,
+            local.device_id,
+            local.member_instance,
+            1,
         ));
-        Arc::new(HandleMembershipHistoryMessageUseCase::new(ledger))
+        Arc::new(HandleMembershipHistoryMessageUseCase::new(
+            fixture.owner,
+            FixedSpaceWorkMode::active(),
+        ))
     }
 
     fn member_facts(
@@ -489,49 +479,5 @@ mod tests {
             identity_signature: vec![0x55; 64],
         };
         (facts, credential)
-    }
-
-    struct MemoryLedgerRepository(Mutex<LoadedMembershipLedger>);
-
-    #[async_trait]
-    impl LoadMembershipLedgerPort for MemoryLedgerRepository {
-        async fn load(&self) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
-            Ok(self.0.lock().expect("ledger available").clone())
-        }
-    }
-
-    #[async_trait]
-    impl CommitMembershipLedgerPort for MemoryLedgerRepository {
-        async fn compare_and_commit(
-            &self,
-            mutation: MembershipLedgerMutation,
-        ) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
-            let mut loaded = self.0.lock().expect("ledger available");
-            let digest = loaded
-                .membership_history
-                .as_deref()
-                .map(|bytes| <[u8; 32]>::from(Sha256::digest(bytes)));
-            if loaded.revision != mutation.expected_revision
-                || digest != mutation.expected_history_digest
-            {
-                return Err(MembershipLedgerError::Conflict);
-            }
-            *loaded = mutation.replacement;
-            Ok(loaded.clone())
-        }
-    }
-
-    struct AcceptingVerifier;
-
-    impl HistoricalMembershipSignatureVerifier for AcceptingVerifier {
-        fn verify(
-            &self,
-            _signature_algorithm_version: u16,
-            _public_key: &[u8],
-            _payload: &[u8],
-            _signature: &[u8],
-        ) -> Result<bool, HistoricalMembershipSignatureError> {
-            Ok(true)
-        }
     }
 }

@@ -106,32 +106,34 @@ pub use crate::space::{
 pub use crate::space::{
     AdmissionDisplayStatus, AdvanceMembershipBranchTransitionError,
     AdvanceMembershipBranchTransitionInput, AdvanceMembershipBranchTransitionPort,
-    BeginMembershipBranchRecoveryInput, CommitMembershipLedgerPort, CurrentMemberSignatureError,
-    CurrentMemberSignaturePort, CurrentSpaceIdentityError, CurrentSpaceIdentityPort,
-    CurrentSpaceMemberScope, CurrentSpaceMemberScopeError, CurrentSpaceMemberScopePort,
-    DeliverRestrictedMembershipPort, DeviceManagementResetDataPort, InboundMembershipTransfer,
-    InitialSpaceActivationPort, InitializeSpacePort, InitiatedMembershipRemovalEffect,
+    BeginMembershipBranchRecoveryInput, CurrentMemberSignatureError, CurrentMemberSignaturePort,
+    CurrentSpaceIdentityError, CurrentSpaceIdentityPort, CurrentSpaceMemberScope,
+    CurrentSpaceMemberScopeError, CurrentSpaceMemberScopePort, DeviceManagementResetDataPort,
+    InboundMembershipTransfer, InitialSpaceActivationPort, InitializeSpacePort,
     IsSpaceUnlockedPort, IssueMembershipBranchRecoveryError, IssueMembershipBranchRecoveryInput,
     IssueMembershipBranchRecoveryPort, JoinerStagedSecurityTransition, KnownPeerContact,
-    LoadCurrentJoinStatusPort, LoadDeviceTrustObservationsPort, LoadMembershipLedgerPort,
-    LoadedMembershipLedger, LockSpacePort, MembershipBranchRecoveryChannelError,
-    MembershipBranchRecoveryChannelPort, MembershipBranchRecoveryCommit,
-    MembershipBranchRecoveryRequest, MembershipBranchRecoverySession,
-    MembershipBranchRecoverySessionState, MembershipConflictMember, MembershipConflictPresentation,
-    MembershipConflictRecord, MembershipConflictStatus, MembershipEffectExecutionError,
-    MembershipEffectKind, MembershipEffectPhase, MembershipLedgerError, MembershipLedgerMutation,
-    MembershipMaintenanceStepOutcome, MembershipNetworkActivityPort,
-    PairingConfirmationObservation, PairingConfirmationStatus, PairingConfirmationTarget,
-    PausedSpaceMember, PeerHistorySyncState, PeerReconciliationRecord, PendingMembershipEffect,
-    PortableCurrentSpaceIdentityPort, PrepareMembershipBranchRecoveryMaterialError,
-    PrepareMembershipBranchRecoveryMaterialInput, PrepareMembershipBranchRecoveryMaterialPort,
-    PrepareMembershipBranchRecoveryRecipientError, PrepareMembershipBranchRecoveryRecipientPort,
-    PrepareMembershipBranchTransitionError, PrepareMembershipBranchTransitionInput,
-    PrepareMembershipBranchTransitionPort, PrepareSpaceAdmissionCredentialsPort,
-    PreparedMembershipBranchRecoveryMaterial, PreparedMembershipBranchRecoveryRecipient,
-    QueryDeviceTrustError, ReconcileMembershipProjectionPort, RefreshVerifiedPeerAddressPort,
-    SpaceAdmissionCredentialPreparationError, SpaceRebuildProgressError, SpaceRebuildProgressPort,
-    SpaceSessionRebindError, SpaceWorkMode, UnlockSpacePort,
+    LoadCurrentJoinStatusPort, LoadDeviceTrustObservationsPort, LockSpacePort,
+    MembershipBranchRecoveryChannelError, MembershipBranchRecoveryChannelPort,
+    MembershipBranchRecoveryCommit, MembershipBranchRecoveryRequest,
+    MembershipBranchRecoverySession, MembershipBranchRecoverySessionState,
+    MembershipConflictMember, MembershipConflictPresentation, MembershipConflictRecord,
+    MembershipConflictStatus, MembershipEffectExecutionError, MembershipLedgerError,
+    MembershipMaintenanceStepOutcome, MembershipNetworkActivityPort, MembershipRecordCommit,
+    MembershipRecordStorePort, PairingConfirmationObservation, PairingConfirmationStatus,
+    PairingConfirmationTarget, PausedSpaceMember, PortableCurrentSpaceIdentityPort,
+    PrepareMembershipBranchRecoveryMaterialError, PrepareMembershipBranchRecoveryMaterialInput,
+    PrepareMembershipBranchRecoveryMaterialPort, PrepareMembershipBranchRecoveryRecipientError,
+    PrepareMembershipBranchRecoveryRecipientPort, PrepareMembershipBranchTransitionError,
+    PrepareMembershipBranchTransitionInput, PrepareMembershipBranchTransitionPort,
+    PrepareSpaceAdmissionCredentialsPort, PreparedMembershipBranchRecoveryMaterial,
+    PreparedMembershipBranchRecoveryRecipient, QueryDeviceTrustError,
+    RefreshVerifiedPeerAddressPort, SpaceAdmissionCredentialPreparationError,
+    SpaceRebuildProgressError, SpaceRebuildProgressPort, SpaceSessionRebindError, SpaceWorkMode,
+    UnlockSpacePort,
+};
+pub use crate::space::{
+    MembershipBranchRecoveryRecord, MembershipHistoryExchangeRecord, MembershipRecord,
+    SpaceMembershipRecord,
 };
 pub use crate::space::{SpaceAdmissionAdapters, SpaceMembershipAdapters, SpaceRuntimeAdapters};
 pub use crate::transfer::file::assembly::ReceiveCancellationDeps;
@@ -549,6 +551,4 @@ pub struct ApplicationDeps {
     /// 不需重复查询 `usage_analytics_enabled`。
     pub analytics: Arc<dyn AnalyticsPort>,
 }
-pub use crate::space::{
-    ApplyMembershipProjectionError, ApplyMembershipProjectionPort, MembershipProjectionPlan,
-};
+pub use crate::space::MembershipProjectionPlan;

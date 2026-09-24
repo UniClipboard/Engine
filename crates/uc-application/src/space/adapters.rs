@@ -17,12 +17,12 @@ use super::admission::{
 use super::membership::RePairingStateStorePort;
 use super::membership::{
     ActivateMembershipEffectPort, AdvanceMembershipBranchTransitionPort,
-    ApplyMembershipMemberFactsPort, ApplyMembershipProjectionPort, ApplyMembershipSecurityPort,
-    CommitMembershipLedgerPort, CurrentMemberSignaturePort, LoadCurrentJoinStatusPort,
-    LoadDeviceTrustObservationsPort, LoadMembershipLedgerPort, MembershipBranchRecoveryChannelPort,
-    MembershipNetworkActivityPort, PrepareMembershipBranchRecoveryMaterialPort,
-    PrepareMembershipBranchRecoveryRecipientPort, PrepareMembershipBranchTransitionPort,
-    RefreshVerifiedPeerAddressPort, RestrictedMembershipDeliveryPort,
+    ApplyMembershipMemberFactsPort, ApplyMembershipSecurityPort, CurrentMemberSignaturePort,
+    LoadCurrentJoinStatusPort, LoadDeviceTrustObservationsPort,
+    MembershipBranchRecoveryChannelPort, MembershipNetworkActivityPort, MembershipRecordStorePort,
+    PrepareMembershipBranchRecoveryMaterialPort, PrepareMembershipBranchRecoveryRecipientPort,
+    PrepareMembershipBranchTransitionPort, RefreshVerifiedPeerAddressPort,
+    RestrictedMembershipDeliveryPort,
 };
 
 /// Engine 一次提交给 Space admission owner 的完整 adapter 集合。
@@ -56,8 +56,7 @@ pub struct SpaceAdmissionAdapters {
 ///
 /// admission 与 membership 共用但只由一侧持有的能力不得在两个 bundle 中重复。
 pub struct SpaceMembershipAdapters {
-    pub load_membership_ledger: Arc<dyn LoadMembershipLedgerPort>,
-    pub commit_membership_ledger: Arc<dyn CommitMembershipLedgerPort>,
+    pub membership_records: Arc<dyn MembershipRecordStorePort>,
     pub historical_membership_signatures: Arc<dyn HistoricalMembershipSignatureVerifier>,
     pub current_member_signatures: Arc<dyn CurrentMemberSignaturePort>,
     pub membership_identity: Arc<dyn CurrentMembershipIdentityPort>,
@@ -76,7 +75,6 @@ pub struct SpaceMembershipAdapters {
     pub restricted_membership_delivery: Arc<dyn RestrictedMembershipDeliveryPort>,
     pub group_update_store: Arc<dyn GroupRevocationPort>,
     pub group_update_dispatch: Arc<dyn GroupUpdateDispatchPort>,
-    pub apply_membership_projection: Arc<dyn ApplyMembershipProjectionPort>,
     pub membership_network_activity: Arc<dyn MembershipNetworkActivityPort>,
 }
 

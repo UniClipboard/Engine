@@ -1,13 +1,11 @@
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use sha2::{Digest, Sha256};
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    AdmissionChangeFacts, HistoricalMembershipSignatureError,
-    HistoricalMembershipSignatureVerifier, MembershipBranchRecoveryPackageV1,
+    AdmissionChangeFacts, HistoricalMembershipSignatureVerifier, MembershipBranchRecoveryPackageV1,
     MembershipBranchTransitionV1, MembershipConflictChoice, MembershipConflictId,
     MembershipConflictPolicy, MembershipCredential, VersionedMembershipHistory,
     ED25519_SIGNATURE_ALGORITHM_V1,
@@ -15,25 +13,13 @@ use uc_core::membership::{
 use uc_core::ports::ClockPort;
 
 use super::*;
-use crate::space::membership::{
-    CommitMembershipLedgerPort, LoadMembershipLedgerPort, LoadedMembershipLedger,
-    MembershipBranchRecoverySession, MembershipConflictRecord, MembershipConflictStatus,
-    MembershipLedger, MembershipLedgerError, MembershipLedgerMutation, PeerReconciliationRecord,
+use crate::space::membership::testing::{
+    started_record, AcceptingVerifier, MemoryMembershipRecords, OwnerFixture,
 };
-
-struct AcceptingVerifier;
-
-impl HistoricalMembershipSignatureVerifier for AcceptingVerifier {
-    fn verify(
-        &self,
-        _signature_algorithm_version: u16,
-        _public_key: &[u8],
-        _payload: &[u8],
-        _signature: &[u8],
-    ) -> Result<bool, HistoricalMembershipSignatureError> {
-        Ok(true)
-    }
-}
+use crate::space::membership::{
+    MembershipBranchRecoverySession, MembershipConflictRecord, MembershipConflictStatus,
+    MembershipOwner, MembershipRecord, SpaceMembershipRecord,
+};
 
 struct FixedClock;
 
@@ -43,43 +29,27 @@ impl ClockPort for FixedClock {
     }
 }
 
-struct MemoryLedger {
-    record: Mutex<LoadedMembershipLedger>,
-    commits: AtomicUsize,
+/// 成员记录与其负责人；测试直接改写记录时同步丢弃已发布状态。
+struct Repository {
+    records: Arc<MemoryMembershipRecords>,
+    owner: Arc<MembershipOwner>,
 }
 
-#[async_trait]
-impl LoadMembershipLedgerPort for MemoryLedger {
-    async fn load(&self) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
-        self.record
-            .lock()
-            .map(|record| record.clone())
-            .map_err(|_| MembershipLedgerError::Unavailable)
+impl Repository {
+    fn space(&self) -> SpaceMembershipRecord {
+        self.records.space()
     }
-}
 
-#[async_trait]
-impl CommitMembershipLedgerPort for MemoryLedger {
-    async fn compare_and_commit(
-        &self,
-        mutation: MembershipLedgerMutation,
-    ) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
-        let mut current = self
-            .record
-            .lock()
-            .map_err(|_| MembershipLedgerError::Unavailable)?;
-        let digest = current
-            .membership_history
-            .as_deref()
-            .map(|bytes| <[u8; 32]>::from(Sha256::digest(bytes)));
-        if current.revision != mutation.expected_revision
-            || digest != mutation.expected_history_digest
-        {
-            return Err(MembershipLedgerError::Conflict);
-        }
-        *current = mutation.replacement;
-        self.commits.fetch_add(1, Ordering::SeqCst);
-        Ok(current.clone())
+    fn commits(&self) -> usize {
+        self.records.commit_count()
+    }
+
+    fn edit(&self, change: impl FnOnce(&mut SpaceMembershipRecord)) {
+        let mut space = self.records.space();
+        change(&mut space);
+        self.records
+            .replace(MembershipRecord::Space(Box::new(space)));
+        self.owner.reload_for_test();
     }
 }
 
@@ -275,7 +245,7 @@ impl AdvanceMembershipBranchTransitionPort for TransitionPreparer {
 }
 
 struct Fixture {
-    repository: Arc<MemoryLedger>,
+    repository: Repository,
     recovery: Arc<RecoverySource>,
     recipient: Arc<RecipientPreparer>,
     transition: Arc<TransitionPreparer>,
@@ -293,7 +263,7 @@ fn fixture() -> Fixture {
         "space-a".to_owned(),
         AdmissionChangeFacts {
             member_instance: member,
-            device_id: device_id.clone(),
+            device_id,
             device_name: "Local".to_owned(),
             identity_fingerprint: uc_core::security::IdentityFingerprint::from_display_string(
                 "ABCD-EFGH-IJKL-MNOP",
@@ -318,20 +288,16 @@ fn fixture() -> Fixture {
         member,
         1_000,
         nonce,
-        history_bytes.clone(),
+        history_bytes,
         vec![4],
         vec![5],
     )
     .unwrap()
     .with_authorization_signature(vec![6]);
-    let mut record = LoadedMembershipLedger::no_current_space();
-    record.revision = 7;
-    record.lineage_id = Some("space-a".to_owned());
-    record.membership_history = Some(history_bytes);
-    record.local_device_id = Some(device_id);
-    record.local_member_instance = Some(member);
-    record.local_join_active = true;
-    record.membership_conflicts.insert(
+    let MembershipRecord::Space(mut record) = started_record(history, device_id, member, 7) else {
+        unreachable!("started record has a space");
+    };
+    record.branch_recovery.conflicts.insert(
         conflict_id,
         MembershipConflictRecord {
             conflict_id,
@@ -346,16 +312,8 @@ fn fixture() -> Fixture {
             transition_id: Some(transition_id),
         },
     );
-    let repository = Arc::new(MemoryLedger {
-        record: Mutex::new(record),
-        commits: AtomicUsize::new(0),
-    });
+    let owner_fixture = OwnerFixture::new(MembershipRecord::Space(record));
     let verifier: Arc<dyn HistoricalMembershipSignatureVerifier> = Arc::new(AcceptingVerifier);
-    let ledger = Arc::new(MembershipLedger::new(
-        repository.clone(),
-        repository.clone(),
-        Arc::clone(&verifier),
-    ));
     let recovery = Arc::new(RecoverySource {
         package,
         group_info_calls: AtomicUsize::new(0),
@@ -368,7 +326,7 @@ fn fixture() -> Fixture {
         calls: AtomicUsize::new(0),
     });
     let use_case = RecoverMembershipConflictUseCase::new(
-        ledger,
+        owner_fixture.owner.clone(),
         recovery.clone(),
         recipient.clone(),
         transition.clone(),
@@ -377,7 +335,10 @@ fn fixture() -> Fixture {
         Arc::new(FixedClock),
     );
     Fixture {
-        repository,
+        repository: Repository {
+            records: owner_fixture.records.clone(),
+            owner: owner_fixture.owner.clone(),
+        },
         recovery,
         recipient,
         transition,
@@ -388,6 +349,51 @@ fn fixture() -> Fixture {
     }
 }
 
+/// 让本机分支成为分叉中的本地分支，供恢复包签发方测试使用。
+fn issuer_fixture(
+    fixture: &Fixture,
+    fail_first_commit: bool,
+) -> (
+    IssueMembershipBranchRecoveryUseCase,
+    Arc<RecoveryMaterialSource>,
+    DeviceId,
+    uc_core::membership::MemberInstanceId,
+    uc_core::membership::MembershipBranchId,
+) {
+    let space = fixture.repository.space();
+    let local_device_id = space.ledger.local_device_id;
+    let recipient_member = space.ledger.local_member;
+    let target_branch_id = MembershipConflictPolicy::branch_id(&space.ledger.history).unwrap();
+    let conflict_id = fixture.conflict_id;
+    fixture.repository.edit(|space| {
+        space
+            .branch_recovery
+            .conflicts
+            .get_mut(&conflict_id)
+            .unwrap()
+            .local_branch_id = target_branch_id;
+    });
+    let material = Arc::new(RecoveryMaterialSource {
+        calls: AtomicUsize::new(0),
+        group_info_calls: AtomicUsize::new(0),
+        commit_calls: AtomicUsize::new(0),
+        fail_first_commit: AtomicBool::new(fail_first_commit),
+    });
+    let issuer = IssueMembershipBranchRecoveryUseCase::new(
+        fixture.repository.owner.clone(),
+        material.clone(),
+        Arc::new(RecoverySigner),
+        Arc::new(FixedClock),
+    );
+    (
+        issuer,
+        material,
+        local_device_id,
+        recipient_member,
+        target_branch_id,
+    )
+}
+
 #[tokio::test]
 async fn valid_package_consumes_nonce_and_saves_prepared_transition_atomically() {
     let fixture = fixture();
@@ -396,18 +402,18 @@ async fn valid_package_consumes_nonce_and_saves_prepared_transition_atomically()
         fixture.use_case.execute().await,
         RecoverMembershipConflictOutcome::Completed
     );
-    let persisted = fixture.repository.load().await.unwrap();
-    assert_eq!(fixture.repository.commits.load(Ordering::SeqCst), 3);
+    let persisted = fixture.repository.space().branch_recovery;
+    assert_eq!(fixture.repository.commits(), 3);
     assert_eq!(
-        persisted.consumed_membership_recovery_nonces[&fixture.nonce],
+        persisted.consumed_recovery_nonces[&fixture.nonce],
         fixture.conflict_id
     );
     assert_eq!(
-        persisted.membership_conflicts[&fixture.conflict_id].status,
+        persisted.conflicts[&fixture.conflict_id].status,
         MembershipConflictStatus::Transitioning
     );
     assert!(persisted
-        .membership_branch_transitions
+        .branch_transitions
         .contains_key(&fixture.transition_id));
 }
 
@@ -423,7 +429,7 @@ async fn retry_after_commit_advances_without_fetching_or_preparing_again() {
         RecoverMembershipConflictOutcome::Completed
     );
 
-    assert_eq!(fixture.repository.commits.load(Ordering::SeqCst), 9);
+    assert_eq!(fixture.repository.commits(), 9);
     assert_eq!(fixture.recovery.group_info_calls.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.recovery.submit_calls.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.recipient.calls.load(Ordering::SeqCst), 1);
@@ -433,59 +439,45 @@ async fn retry_after_commit_advances_without_fetching_or_preparing_again() {
 #[tokio::test]
 async fn nonce_consumed_by_another_conflict_never_creates_a_transition() {
     let fixture = fixture();
-    let before = fixture.repository.load().await.unwrap();
-    fixture
-        .repository
-        .record
-        .lock()
-        .unwrap()
-        .consumed_membership_recovery_nonces
-        .insert(fixture.nonce, MembershipConflictId::from_bytes([0x61; 32]));
-    let expected = fixture.repository.load().await.unwrap();
+    let before = fixture.repository.space();
+    let nonce = fixture.nonce;
+    fixture.repository.edit(|space| {
+        space
+            .branch_recovery
+            .consumed_recovery_nonces
+            .insert(nonce, MembershipConflictId::from_bytes([0x61; 32]));
+    });
+    let expected = fixture.repository.space();
 
     assert_eq!(
         fixture.use_case.execute().await,
         RecoverMembershipConflictOutcome::StableFailure
     );
-    let persisted = fixture.repository.load().await.unwrap();
-    assert_eq!(fixture.repository.commits.load(Ordering::SeqCst), 2);
+    let persisted = fixture.repository.space();
+    assert_eq!(fixture.repository.commits(), 2);
     assert_eq!(
-        persisted.consumed_membership_recovery_nonces,
-        expected.consumed_membership_recovery_nonces
+        persisted.branch_recovery.consumed_recovery_nonces,
+        expected.branch_recovery.consumed_recovery_nonces
     );
-    assert!(persisted.membership_branch_transitions.is_empty());
-    assert_eq!(before.revision, expected.revision);
+    assert!(persisted.branch_recovery.branch_transitions.is_empty());
+    assert_eq!(before.ledger.revision, expected.ledger.revision);
 }
 
 #[tokio::test]
 async fn retry_from_recipient_prepared_reuses_staged_state_without_group_info() {
     let fixture = fixture();
-    let recipient_member = fixture
-        .repository
-        .record
-        .lock()
-        .unwrap()
-        .local_member_instance
-        .unwrap();
-    let target_branch_id = fixture
-        .repository
-        .record
-        .lock()
-        .unwrap()
-        .membership_conflicts[&fixture.conflict_id]
+    let space = fixture.repository.space();
+    let recipient_member = space.ledger.local_member;
+    let target_branch_id = space.branch_recovery.conflicts[&fixture.conflict_id]
         .selected_branch_id
         .unwrap();
-    fixture
-        .repository
-        .record
-        .lock()
-        .unwrap()
-        .membership_branch_recovery_sessions
-        .insert(
-            fixture.transition_id,
+    let (transition_id, conflict_id) = (fixture.transition_id, fixture.conflict_id);
+    fixture.repository.edit(|space| {
+        space.branch_recovery.recovery_sessions.insert(
+            transition_id,
             MembershipBranchRecoverySession::new_recipient_prepared(
-                fixture.transition_id,
-                fixture.conflict_id,
+                transition_id,
+                conflict_id,
                 target_branch_id,
                 recipient_member,
                 vec![0x61],
@@ -493,6 +485,7 @@ async fn retry_from_recipient_prepared_reuses_staged_state_without_group_info() 
             )
             .unwrap(),
         );
+    });
 
     assert_eq!(
         fixture.use_case.execute().await,
@@ -501,47 +494,15 @@ async fn retry_from_recipient_prepared_reuses_staged_state_without_group_info() 
     assert_eq!(fixture.recovery.group_info_calls.load(Ordering::SeqCst), 0);
     assert_eq!(fixture.recipient.calls.load(Ordering::SeqCst), 0);
     assert_eq!(fixture.recovery.submit_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(fixture.repository.commits.load(Ordering::SeqCst), 2);
+    assert_eq!(fixture.repository.commits(), 2);
 }
 
 #[tokio::test]
 async fn issuer_authenticates_recipient_before_preparing_and_signing_material() {
     let fixture = fixture();
-    let (local_device_id, recipient_member, target_branch_id) = {
-        let mut record = fixture.repository.record.lock().unwrap();
-        let local_device_id = record.local_device_id.clone().unwrap();
-        let recipient_member = record.local_member_instance.unwrap();
-        let history = VersionedMembershipHistory::decode_persisted_v2(
-            record.membership_history.as_deref().unwrap(),
-            &AcceptingVerifier,
-        )
-        .unwrap();
-        let target_branch_id = MembershipConflictPolicy::branch_id(&history).unwrap();
-        record
-            .membership_conflicts
-            .get_mut(&fixture.conflict_id)
-            .unwrap()
-            .local_branch_id = target_branch_id;
-        (local_device_id, recipient_member, target_branch_id)
-    };
     let verifier: Arc<dyn HistoricalMembershipSignatureVerifier> = Arc::new(AcceptingVerifier);
-    let ledger = Arc::new(MembershipLedger::new(
-        fixture.repository.clone(),
-        fixture.repository.clone(),
-        verifier.clone(),
-    ));
-    let material = Arc::new(RecoveryMaterialSource {
-        calls: AtomicUsize::new(0),
-        group_info_calls: AtomicUsize::new(0),
-        commit_calls: AtomicUsize::new(0),
-        fail_first_commit: AtomicBool::new(false),
-    });
-    let issuer = IssueMembershipBranchRecoveryUseCase::new(
-        ledger,
-        material.clone(),
-        Arc::new(RecoverySigner),
-        Arc::new(FixedClock),
-    );
+    let (issuer, material, local_device_id, recipient_member, target_branch_id) =
+        issuer_fixture(&fixture, false);
     let request = IssueMembershipBranchRecoveryInput {
         source_device_id: DeviceId::new("wrong-device"),
         conflict_id: fixture.conflict_id,
@@ -609,51 +570,8 @@ async fn issuer_authenticates_recipient_before_preparing_and_signing_material() 
 #[tokio::test]
 async fn target_recovery_commits_only_after_caching_an_idempotent_package() {
     let fixture = fixture();
-    let (local_device_id, recipient_member, target_branch_id) = {
-        let mut record = fixture.repository.record.lock().unwrap();
-        let local_device_id = record.local_device_id.clone().unwrap();
-        let recipient_member = record.local_member_instance.unwrap();
-        let history = VersionedMembershipHistory::decode_persisted_v2(
-            record.membership_history.as_deref().unwrap(),
-            &AcceptingVerifier,
-        )
-        .unwrap();
-        let target_branch_id = MembershipConflictPolicy::branch_id(&history).unwrap();
-        record
-            .membership_conflicts
-            .get_mut(&fixture.conflict_id)
-            .unwrap()
-            .local_branch_id = target_branch_id;
-        record.peer_reconciliation.insert(
-            local_device_id.clone(),
-            PeerReconciliationRecord {
-                peer_device_id: local_device_id.clone(),
-                relationship: uc_core::membership::MembershipHistoryRelationship::Diverged,
-                confirmed_position: None,
-                sync_state: Default::default(),
-                restricted_delivery: Vec::new(),
-                updated_at_ms: 0,
-            },
-        );
-        (local_device_id, recipient_member, target_branch_id)
-    };
-    let ledger = Arc::new(MembershipLedger::new(
-        fixture.repository.clone(),
-        fixture.repository.clone(),
-        Arc::new(AcceptingVerifier),
-    ));
-    let material = Arc::new(RecoveryMaterialSource {
-        calls: AtomicUsize::new(0),
-        group_info_calls: AtomicUsize::new(0),
-        commit_calls: AtomicUsize::new(0),
-        fail_first_commit: AtomicBool::new(false),
-    });
-    let issuer = IssueMembershipBranchRecoveryUseCase::new(
-        ledger,
-        material.clone(),
-        Arc::new(RecoverySigner),
-        Arc::new(FixedClock),
-    );
+    let (issuer, material, local_device_id, recipient_member, target_branch_id) =
+        issuer_fixture(&fixture, false);
 
     let package = issuer
         .issue_membership_branch_recovery(IssueMembershipBranchRecoveryInput {
@@ -668,62 +586,23 @@ async fn target_recovery_commits_only_after_caching_an_idempotent_package() {
 
     let transition_id =
         MembershipBranchTransitionV1::derive_id(fixture.conflict_id, target_branch_id);
-    let persisted = fixture.repository.load().await.unwrap();
-    let session = persisted
-        .membership_branch_recovery_sessions
-        .get(&transition_id)
-        .unwrap();
+    let persisted = fixture.repository.space().branch_recovery;
+    let session = persisted.recovery_sessions.get(&transition_id).unwrap();
     assert_eq!(material.commit_calls.load(Ordering::SeqCst), 1);
     assert!(format!("{session:?}").contains("TargetCommitted"));
     assert_eq!(session.recipient_completion().map(|(_, value)| value), None);
     assert_eq!(package.conflict_id(), fixture.conflict_id);
     assert_eq!(
-        persisted.membership_conflicts[&fixture.conflict_id].status,
+        persisted.conflicts[&fixture.conflict_id].status,
         MembershipConflictStatus::Completed
-    );
-    assert_eq!(
-        persisted.peer_reconciliation[&local_device_id].relationship,
-        uc_core::membership::MembershipHistoryRelationship::Consistent
     );
 }
 
 #[tokio::test]
 async fn target_recovery_resumes_from_prepared_after_commit_interruption() {
     let fixture = fixture();
-    let (local_device_id, recipient_member, target_branch_id) = {
-        let mut record = fixture.repository.record.lock().unwrap();
-        let local_device_id = record.local_device_id.clone().unwrap();
-        let recipient_member = record.local_member_instance.unwrap();
-        let history = VersionedMembershipHistory::decode_persisted_v2(
-            record.membership_history.as_deref().unwrap(),
-            &AcceptingVerifier,
-        )
-        .unwrap();
-        let target_branch_id = MembershipConflictPolicy::branch_id(&history).unwrap();
-        record
-            .membership_conflicts
-            .get_mut(&fixture.conflict_id)
-            .unwrap()
-            .local_branch_id = target_branch_id;
-        (local_device_id, recipient_member, target_branch_id)
-    };
-    let ledger = Arc::new(MembershipLedger::new(
-        fixture.repository.clone(),
-        fixture.repository.clone(),
-        Arc::new(AcceptingVerifier),
-    ));
-    let material = Arc::new(RecoveryMaterialSource {
-        calls: AtomicUsize::new(0),
-        group_info_calls: AtomicUsize::new(0),
-        commit_calls: AtomicUsize::new(0),
-        fail_first_commit: AtomicBool::new(true),
-    });
-    let issuer = IssueMembershipBranchRecoveryUseCase::new(
-        ledger,
-        material.clone(),
-        Arc::new(RecoverySigner),
-        Arc::new(FixedClock),
-    );
+    let (issuer, material, local_device_id, recipient_member, target_branch_id) =
+        issuer_fixture(&fixture, true);
     let request = IssueMembershipBranchRecoveryInput {
         source_device_id: local_device_id,
         conflict_id: fixture.conflict_id,
@@ -740,12 +619,7 @@ async fn target_recovery_resumes_from_prepared_after_commit_interruption() {
     ));
     let transition_id =
         MembershipBranchTransitionV1::derive_id(fixture.conflict_id, target_branch_id);
-    let cached = fixture
-        .repository
-        .load()
-        .await
-        .unwrap()
-        .membership_branch_recovery_sessions[&transition_id]
+    let cached = fixture.repository.space().branch_recovery.recovery_sessions[&transition_id]
         .target_preparation()
         .map(|(_, _, package)| package.clone())
         .unwrap();
@@ -773,19 +647,19 @@ async fn prepared_transition_resumes_all_durable_phases_in_one_round() {
         RecoverMembershipConflictOutcome::Completed
     );
 
-    let persisted = fixture.repository.load().await.unwrap();
+    let persisted = fixture.repository.space().branch_recovery;
     assert_eq!(
         persisted
-            .membership_conflicts
+            .conflicts
             .get(&fixture.conflict_id)
             .unwrap()
             .status,
         MembershipConflictStatus::Completed
     );
-    assert!(persisted.membership_branch_recovery_sessions.is_empty());
+    assert!(persisted.recovery_sessions.is_empty());
     assert_eq!(
         persisted
-            .membership_branch_transitions
+            .branch_transitions
             .get(&fixture.transition_id)
             .unwrap()
             .phase(),
@@ -796,40 +670,8 @@ async fn prepared_transition_resumes_all_durable_phases_in_one_round() {
 #[tokio::test]
 async fn target_recovery_retry_returns_the_cached_package_without_reapplying_commit() {
     let fixture = fixture();
-    let (local_device_id, recipient_member, target_branch_id) = {
-        let mut record = fixture.repository.record.lock().unwrap();
-        let local_device_id = record.local_device_id.clone().unwrap();
-        let recipient_member = record.local_member_instance.unwrap();
-        let history = VersionedMembershipHistory::decode_persisted_v2(
-            record.membership_history.as_deref().unwrap(),
-            &AcceptingVerifier,
-        )
-        .unwrap();
-        let target_branch_id = MembershipConflictPolicy::branch_id(&history).unwrap();
-        record
-            .membership_conflicts
-            .get_mut(&fixture.conflict_id)
-            .unwrap()
-            .local_branch_id = target_branch_id;
-        (local_device_id, recipient_member, target_branch_id)
-    };
-    let ledger = Arc::new(MembershipLedger::new(
-        fixture.repository.clone(),
-        fixture.repository.clone(),
-        Arc::new(AcceptingVerifier),
-    ));
-    let material = Arc::new(RecoveryMaterialSource {
-        calls: AtomicUsize::new(0),
-        group_info_calls: AtomicUsize::new(0),
-        commit_calls: AtomicUsize::new(0),
-        fail_first_commit: AtomicBool::new(false),
-    });
-    let issuer = IssueMembershipBranchRecoveryUseCase::new(
-        ledger,
-        material.clone(),
-        Arc::new(RecoverySigner),
-        Arc::new(FixedClock),
-    );
+    let (issuer, material, local_device_id, recipient_member, target_branch_id) =
+        issuer_fixture(&fixture, false);
     let request = IssueMembershipBranchRecoveryInput {
         source_device_id: local_device_id,
         conflict_id: fixture.conflict_id,

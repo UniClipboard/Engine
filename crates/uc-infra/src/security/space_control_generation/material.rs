@@ -1,13 +1,13 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use chrono::{TimeZone as _, Utc};
 use uc_application::deps::{
-    AdmissionSpaceTransitionPreparationV2, LoadedMembershipLedger, PeerHistorySyncState,
-    PeerReconciliationRecord,
+    AdmissionSpaceTransitionPreparationV2, MembershipRecord, SpaceMembershipRecord,
 };
 use uc_core::membership::{
-    AdmissionContentKeyCatalogV1, ContentKeyId, GroupEpoch, MembershipHistoryRelationship,
-    ProtectionGroupId, SpaceKeyMaterial, SpaceKeyState, SpaceMember,
+    AdmissionContentKeyCatalogV1, ContentKeyId, GroupEpoch, HistoricalMembershipSignatureVerifier,
+    MembershipLedger, ProtectionGroupId, SpaceKeyMaterial, SpaceKeyState, SpaceMember,
+    VersionedMembershipHistory,
 };
 use uc_core::ports::PeerAddressRecord;
 use uc_core::trusted_peer::TrustedPeer;
@@ -21,7 +21,6 @@ pub(super) struct PreparedAdmissionControl {
     membership_history: Vec<u8>,
     local_device_id: uc_core::ids::DeviceId,
     local_member_instance: uc_core::membership::MemberInstanceId,
-    peer_reconciliation: BTreeMap<uc_core::ids::DeviceId, PeerReconciliationRecord>,
     members: Vec<SpaceMember>,
     trusted_peers: Vec<TrustedPeer>,
     peer_addresses: Vec<PeerAddressRecord>,
@@ -84,7 +83,6 @@ impl PreparedAdmissionControl {
         let mut trusted_peers = Vec::new();
         let mut peer_addresses = Vec::new();
         let mut local_member_instance = None;
-        let mut peer_reconciliation = BTreeMap::new();
         for facts in &input.target_relationships {
             members.push(SpaceMember {
                 device_id: facts.device_id.clone(),
@@ -114,17 +112,6 @@ impl PreparedAdmissionControl {
                     addr_blob: facts.transport_address_blob.clone(),
                     observed_at: timestamp,
                 });
-                peer_reconciliation.insert(
-                    facts.device_id.clone(),
-                    PeerReconciliationRecord {
-                        peer_device_id: facts.device_id.clone(),
-                        relationship: MembershipHistoryRelationship::Consistent,
-                        confirmed_position: None,
-                        sync_state: PeerHistorySyncState::default(),
-                        restricted_delivery: Vec::new(),
-                        updated_at_ms: 0,
-                    },
-                );
             }
         }
         let local_member_instance = local_member_instance
@@ -138,7 +125,6 @@ impl PreparedAdmissionControl {
             membership_history: input.target_membership_history.clone(),
             local_device_id: input.local_device_id.clone(),
             local_member_instance,
-            peer_reconciliation,
             members,
             trusted_peers,
             peer_addresses,
@@ -146,30 +132,36 @@ impl PreparedAdmissionControl {
         })
     }
 
-    pub(super) fn ledger(
+    /// 加入方在目标控制世代中的起始成员记录：按 Core 起点规则建立，历史中的其他成员视为一致、
+    /// 尚待确认本机位置。
+    pub(super) fn record(
         &self,
         current_revision: u64,
-    ) -> Result<LoadedMembershipLedger, SpaceControlGenerationError> {
-        Ok(LoadedMembershipLedger {
-            revision: current_revision
-                .checked_add(1)
-                .ok_or_else(|| inconsistent(anyhow::anyhow!("ledger revision overflow")))?,
-            lineage_id: Some(self.space_id.as_ref().to_owned()),
-            membership_history: Some(self.membership_history.clone()),
-            local_device_id: Some(self.local_device_id.clone()),
-            local_member_instance: Some(self.local_member_instance),
-            local_join_active: true,
-            peer_reconciliation: self.peer_reconciliation.clone(),
-            history_sync_cursor: None,
-            inbound_transfers: Default::default(),
-            completed_inbound_transfers: Default::default(),
-            effect_journal: Default::default(),
-            membership_conflicts: Default::default(),
-            membership_conflict_presentations: Default::default(),
-            membership_branch_transitions: Default::default(),
-            consumed_membership_recovery_nonces: Default::default(),
-            membership_branch_recovery_sessions: Default::default(),
-        })
+        verifier: &dyn HistoricalMembershipSignatureVerifier,
+    ) -> Result<MembershipRecord, SpaceControlGenerationError> {
+        let history =
+            VersionedMembershipHistory::decode_persisted_v2(&self.membership_history, verifier)
+                .map_err(|source| inconsistent(anyhow::Error::new(source)))?;
+        if history.lineage_id() != self.space_id.as_ref() {
+            return Err(inconsistent(anyhow::anyhow!(
+                "control membership history has a different lineage"
+            )));
+        }
+        let revision = current_revision
+            .checked_add(1)
+            .ok_or_else(|| inconsistent(anyhow::anyhow!("ledger revision overflow")))?;
+        let ledger = MembershipLedger::start(
+            history,
+            self.local_device_id,
+            self.local_member_instance,
+            revision,
+        )
+        .map_err(|source| inconsistent(anyhow::Error::new(source)))?;
+        Ok(MembershipRecord::Space(Box::new(SpaceMembershipRecord {
+            ledger: ledger.snapshot(),
+            history_exchange: Default::default(),
+            branch_recovery: Default::default(),
+        })))
     }
 
     pub(super) fn space_id(&self) -> &uc_core::ids::SpaceId {

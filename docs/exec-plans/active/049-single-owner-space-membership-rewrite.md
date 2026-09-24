@@ -2,7 +2,7 @@
 
 ## 状态与完整责任
 
-- **状态**：实施中；S0、S1 已完成（见“实施记录”），S2 未开始。
+- **状态**：实施中；S0–S2 已完成（见“实施记录”），S3 进行中。
 - **日期**：2026-09-23。
 - **依据**：[ADR-027](../../design-docs/decisions/027-single-owner-space-membership-state.md)；2026-09-23 双 Desktop
   profile 配对后移除，移除方设备不消失、被移除方永久“正在更新空间设备状态”的诊断（结论见 ADR-027 背景）。
@@ -72,8 +72,15 @@ crates/uc-application/src/space/membership/
   access.rs       PeerAccess：入站访问判定
   ports.rs        Owner/Worker 需要的存储、传输、安全能力
   queries/        设备信任、名单、就绪与诊断查询，只调用 present
+  record.rs       MembershipRecord：成员账本快照与同存的交换、分叉资料（纯数据）
+crates/uc-infra/src/space/membership_record.rs   成员记录仓储入口
 crates/uc-infra/src/space/membership_record/
-  codec.rs        V5 DTO 与 V1–V4 迁移
+  store.rs        加密读写、解锁读取时迁移写回、条件提交
+  codec.rs        版本分派
+  codec/v5.rs     MembershipLedgerRecordV5
+  codec/common.rs V4 与 V5 共用的冻结布局（分叉、交换、位置）
+  codec/legacy.rs V1–V4 布局
+  codec/migrate.rs V4 形状到成员记录的映射
 ```
 
 `mod.rs` 只保留模块声明和必要导出；拆分文件不扩大公开接口。
@@ -142,12 +149,13 @@ Application 查询负责。与现有推导相比只有三处有意变化：`Depa
 | 旧记录内容 | V5 结果 |
 | --- | --- |
 | 当前有效成员 | `PeerLink::Member`，沿用确认位置与兼容性 |
-| 已移除、仍有待投递通知 | `PeerLink::Departing`，窗口从迁移后首次处理重新计时 |
+| 已移除、仍有待投递通知 | `PeerLink::Departing`，窗口从迁移时刻重新计时 |
 | 已移除、无待投递通知 | 删除该对端记录 |
 | 关系为分叉或无效 | 对应 `Diverged` / `Invalid` |
-| 本机不在有效成员中且无待决定移除 | `LocalStanding::Removed` |
-| 存在待本机决定的移除 | `LocalStanding::AwaitingDecision` |
-| 效果日志 | 安全游标 = 最早未激活事件之前的位置；已激活效果不再保存 |
+| 关系为“等待移除决定” | 本机确有待决定的移除时为 `AwaitingLocalDecision`，否则为 `Unconfirmed`（重新核对） |
+| 待投递决定以本机为移除目标 | 删除 |
+| 本机地位 | 不单独保存：由历史与未完成效果得出（S1），本机不在有效成员中且无影响本机的效果即为已移除 |
+| 效果日志 | 只迁移未激活且位于当前历史路径上的效果，载荷按完整布局还原为类型化材料；已激活效果不再保存 |
 | 分叉、分支恢复会话与换组记录 | 原样搬入分叉记录，由 Owner 继续推进 |
 | 历史分页暂存、完成 ACK | 原样保留 |
 
@@ -164,6 +172,23 @@ Application 查询负责。与现有推导相比只有三处有意变化：`Depa
 - `recover_conflict` 作为一项 Worker 待办接入，内部阶段与 Infra 换组能力不改。
 - **验证**：S0 中 R1–R3、W1–W2 取消 `#[ignore]` 并通过；`uc-application` Space 测试全部通过；
   全仓库只有 Owner 调用成员记录提交能力。
+
+**实施拆分**（开工前核实后确定）：旧 V4 账本的读写方分布在 Application 用例、Infra 准入与代际构建、Engine
+装配共二十余处，而 V5 仓储在解锁读取时即改写整行，新旧读写方无法并存，因此 S3 一次切换全部读写方，
+工作树在切换期间允许暂时不能编译，切片结束时恢复全部检查。顺序：
+
+1. 固定旧类型编码的富状态 V4 向量（`membership_record/fixtures/rich_state.v4.bin`），Infra 测试不再依赖
+   Application 旧类型。
+2. Core 补充 Owner 接入所需的输入语义：一致但未确认位置的证据、非成员来源只贡献已验证历史、伴随资料
+   变化只推进修订号。
+3. Application：`ports.rs`（成员记录存储 port，提交携带成员读模型计划）、`owner.rs`、`worker.rs`、
+   `access.rs`；各用例改为经 Owner 读取与提交；删除旧账本、效果执行器、受限投递、固定步骤链与投影清理步骤。
+4. Infra：V5 仓储实现存储 port，并在同一事务中落实成员读模型；效果 port 改收类型化效果；邀请方激活
+   只做安全激活并返回已验证历史，由 Application 交给 Owner（S4 在此基础上补齐准入 `BeforeCommit`
+   与故障注入验证）；加入方与分叉换组写入暂存代际数据库的记录暂按 Core 规则生成 V5 记录，S4 再上移；
+   删除 `SqliteMembershipLedger` 与旧编解码。
+5. Engine 装配与观测装饰改接新 port；设备分组变化事件由 Owner 按聚合效果发出。
+6. 测试：Application 测试改用内存成员记录存储；R1–R3 取消忽略；新增 W1、W2。
 
 ### S4 准入交接
 
@@ -279,3 +304,41 @@ git diff --check
 | `cargo test -p uc-core --locked` | 全部通过 |
 | `cargo clippy -p uc-core --all-targets --locked`（仅新模块） | 无告警 |
 | `cargo check --workspace --all-targets --locked`、`cargo fmt --all -- --check`、`check-rust-style.mjs`、`check-engine-repository.mjs`、`git diff --check` | 通过 |
+
+### S2（2026-09-23，分支 `hp/uni/t-0010-android`）
+
+完成内容：
+
+- Infra 成员记录仓储 `crates/uc-infra/src/space/membership_record/`：唯一最终格式 `MembershipLedgerRecordV5`；
+  V1–V4 旧布局改由 Infra 独立声明（`codec/legacy.rs`、`codec/common.rs`），不再依赖 Application 类型解码；
+  `SqliteMembershipRecordStore` 在解锁读取时于同一事务内迁移并写回 V5，迁移失败原行不变；提交按修订号
+  条件写入。仓储尚未接入组装，旧 `SqliteMembershipLedger` 仍在使用，S3 切换。
+- Application 新增纯数据 `MembershipRecord`（`space/membership/record.rs`），为 S3 Owner 的存储 port 预留
+  数据形状；`MembershipBranchRecoverySession` 增加 `restore` 与只读访问，供 Infra 独立 DTO 往返。
+- Core 新增 `MembershipLedger::restore_normalized`：迁移用，按每次转换后的同一规范化规则整理后再校验；
+  普通读取仍用拒绝修复的 `restore`。
+- S0 固定向量移到 `crates/uc-infra/src/space/membership_record/fixtures/`，生成器与旧解码测试同步路径。
+
+实现中确定、与设计概要相比需要说明的细节：
+
+- V5 只直接嵌入标识值与带自身版本的已签名协议对象（事件、决定、回执、分页、换组、恢复包）；其余状态全部由
+  Infra 结构声明。成员历史保存为 `encode_persisted_v2` 归档，读取时重新验签，因此仓储持有历史签名验证器；
+  迁移时刻来自注入的时钟。
+- 迁移本身是一次写入，修订号前进一步；没有当前 Space 的旧记录迁移为只含修订号的 V5 记录，保证下一个 Space
+  的修订继续递增。旧记录有 Space 而加入门禁关闭时无法解释，按损坏处理。
+- 旧效果载荷不带类型标记：按事件、本机发起的移除、决定三种布局完整长度严格解析，恰好一种成立才采用。
+- 旧读取时对分叉展示资料与冲突记录的一致性检查（`matches_record`）未在 V5 读取中重复，S3 由 Owner 加载时
+  保留该检查。
+- S3 删除 Application 旧账本类型前，须把 `codec/tests.rs` 中以旧类型编码的富状态 V4 字节固定为向量文件。
+
+验证结果：
+
+| 检查 | 结果 |
+| --- | --- |
+| `cargo test -p uc-infra --lib --locked space::membership_record` | 8 通过：6 个 V4 固定向量按映射表迁移且 V5 往返不变；损坏、截断、尾随字节、未知版本、错误 generation、验签失败返回 `Corrupt`；解锁读取迁移一次并以 V5 重读不变（离开窗口起点保持首次迁移时刻）；迁移失败原行字节不变；V1–V4 无 Space 记录迁移；条件提交；以 Application 类型编码的含全部状态种类 V4 与 Infra 独立布局逐字节一致；三种效果载荷判别 |
+| `cargo test -p uc-core --locked` | 全部通过（成员账本 18 项，新增规范化恢复用例） |
+| `cargo test -p uc-infra --locked` | 全部通过 |
+| `cargo test -p uc-application --lib space --locked -- --test-threads=1` | 361 通过，1 失败：基线问题 `admission_recovery_scenarios::joiner_pairing_fixture_reaches_active_settled`，未处理 |
+| `cargo clippy -p uc-core -p uc-application -p uc-infra --all-targets --locked`（仅本次改动文件） | 无告警 |
+| `cargo metadata --locked`、`cargo check --workspace --all-targets --locked`、`cargo fmt --all -- --check`、`check-rust-style.mjs`、`check-engine-repository.mjs`、`git diff --check` | 通过（`uc-ohos-napi` 测试既有未使用导入告警，非本次改动） |
+| `cargo test -p uc-engine --locked` 与 R1–R4 真实场景 | 跳过（新仓储尚未接入运行时，Engine 路径无变化） |

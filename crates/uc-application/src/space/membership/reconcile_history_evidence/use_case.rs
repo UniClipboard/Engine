@@ -1,22 +1,24 @@
 use std::sync::Arc;
 
 use uc_core::membership::{
-    MembershipConflictEvidenceV3, MembershipConflictPolicy, MembershipHistoryRelationship,
+    LedgerInput, MembershipConflictEvidenceV3, MembershipConflictPolicy,
+    MembershipHistoryRelationship, PeerEvidence, PeerLink, PeerRelation,
+    VersionedMembershipHistory,
 };
 
 use super::MembershipEvidenceExchange;
 use crate::space::membership::{
-    MembershipBranchRecoverySession, MembershipConflictPresentation, MembershipConflictRecord,
-    MembershipConflictStatus, MembershipLedger, MembershipLedgerError,
+    ledger_error, MembershipBranchRecoverySession, MembershipConflictPresentation,
+    MembershipConflictRecord, MembershipConflictStatus, MembershipLedgerError, MembershipOwner,
 };
 
 pub(crate) struct ReconcileMembershipEvidenceUseCase {
-    ledger: Arc<MembershipLedger>,
+    owner: Arc<MembershipOwner>,
 }
 
 impl ReconcileMembershipEvidenceUseCase {
-    pub(crate) fn new(ledger: Arc<MembershipLedger>) -> Self {
-        Self { ledger }
+    pub(crate) fn new(owner: Arc<MembershipOwner>) -> Self {
+        Self { owner }
     }
 
     pub(crate) async fn execute(
@@ -24,11 +26,13 @@ impl ReconcileMembershipEvidenceUseCase {
         source_device_id: &uc_core::ids::DeviceId,
         evidence: &MembershipConflictEvidenceV3,
     ) -> Result<Option<MembershipEvidenceExchange>, MembershipLedgerError> {
-        let snapshot = self.ledger.load_verified().await?;
-        let local = snapshot
-            .history()
-            .ok_or(MembershipLedgerError::RecoveryRequired)?;
-        let Ok(remote) = self.ledger.verify_exchange_pages(&evidence.pages) else {
+        let view = self.owner.load().await?;
+        let space = view.require_space()?;
+        let local = space.history();
+        let Ok(remote) = VersionedMembershipHistory::import_exchange_pages_v2(
+            &evidence.pages,
+            self.owner.verifier(),
+        ) else {
             return Ok(None);
         };
         let Ok(remote_position) = remote.current_position() else {
@@ -42,10 +46,11 @@ impl ReconcileMembershipEvidenceUseCase {
         {
             return Ok(None);
         }
-        let local_member = snapshot
-            .record()
-            .local_member_instance
-            .ok_or(MembershipLedgerError::RecoveryRequired)?;
+        let local_member = space.local_member();
+        let relation = match space.ledger().peer(source_device_id) {
+            Some(PeerLink::Member(link)) => Some(link.relation()),
+            Some(PeerLink::Departing(_)) | None => None,
+        };
         let local_sender = local
             .admission_facts_for(local_member)
             .cloned()
@@ -70,26 +75,8 @@ impl ReconcileMembershipEvidenceUseCase {
                 .map_err(|_| MembershipLedgerError::Corrupt)?
             && local.active_members() == remote.active_members()
         {
-            if !snapshot
-                .record()
-                .peer_reconciliation
-                .get(source_device_id)
-                .is_some_and(|peer| peer.relationship == MembershipHistoryRelationship::Consistent)
-            {
-                self.ledger
-                    .compare_and_commit(|record| {
-                        if record.revision != snapshot.record().revision {
-                            return Err(MembershipLedgerError::Conflict);
-                        }
-                        let peer = record
-                            .peer_reconciliation
-                            .get_mut(source_device_id)
-                            .ok_or(MembershipLedgerError::RecoveryRequired)?;
-                        peer.relationship = MembershipHistoryRelationship::Consistent;
-                        // 只确认已应用分支一致，不能伪造完整已知历史的 ACK 水位。
-                        peer.confirmed_position = None;
-                        Ok(())
-                    })
+            if relation != Some(PeerRelation::Consistent) {
+                self.commit_consistent(view.revision(), *source_device_id)
                     .await?;
             }
             return Ok(response(MembershipHistoryRelationship::Consistent));
@@ -111,19 +98,14 @@ impl ReconcileMembershipEvidenceUseCase {
             MembershipConflictPolicy::local_choice_already_recorded(local, &remote, local_member)
                 || legacy
                     .as_ref()
-                    .and_then(|legacy| {
-                        snapshot
-                            .record()
-                            .membership_conflicts
-                            .get(&legacy.conflict_id)
-                    })
+                    .and_then(|legacy| space.branch_recovery().conflicts.get(&legacy.conflict_id))
                     .is_some_and(|record| {
                         record.status == MembershipConflictStatus::Completed
                             && record.selected_branch_id == Some(record.local_branch_id)
                     });
-        let target_recovery_completed = snapshot
-            .record()
-            .membership_branch_recovery_sessions
+        let target_recovery_completed = space
+            .branch_recovery()
+            .recovery_sessions
             .values()
             .filter_map(MembershipBranchRecoverySession::target_completion)
             .any(|(_, package)| {
@@ -138,77 +120,51 @@ impl ReconcileMembershipEvidenceUseCase {
                         .is_some_and(|facts| &facts.device_id == source_device_id)
             });
         if target_recovery_completed {
-            if snapshot
-                .record()
-                .peer_reconciliation
-                .get(source_device_id)
-                .is_some_and(|peer| peer.relationship == MembershipHistoryRelationship::Consistent)
-            {
-                return Ok(response(MembershipHistoryRelationship::Consistent));
+            if relation != Some(PeerRelation::Consistent) {
+                self.commit_consistent(view.revision(), *source_device_id)
+                    .await?;
             }
-            let source_device_id = source_device_id.clone();
-            self.ledger
-                .compare_and_commit(|record| {
-                    if record.revision != snapshot.record().revision {
-                        return Err(MembershipLedgerError::Conflict);
-                    }
-                    let peer = record
-                        .peer_reconciliation
-                        .get_mut(&source_device_id)
-                        .ok_or(MembershipLedgerError::RecoveryRequired)?;
-                    peer.relationship = MembershipHistoryRelationship::Consistent;
-                    Ok(())
-                })
-                .await?;
             return Ok(response(MembershipHistoryRelationship::Consistent));
         }
-        let evidence_already_recorded = snapshot
-            .record()
-            .membership_conflicts
+        let branch_recovery = space.branch_recovery();
+        let evidence_already_recorded = branch_recovery
+            .conflicts
             .get(&conflict.conflict_id)
             .is_some_and(|current| {
                 current.evidence_peer_device_ids.contains(source_device_id)
                     && !(keep_local && current.selected_branch_id.is_none())
             })
-            && snapshot
-                .record()
-                .membership_conflict_presentations
+            && branch_recovery
+                .conflict_presentations
                 .get(&conflict.conflict_id)
                 == Some(&presentation)
-            && snapshot
-                .record()
-                .peer_reconciliation
-                .get(source_device_id)
-                .is_some_and(|peer| {
-                    peer.relationship == MembershipHistoryRelationship::Diverged
-                        && peer.confirmed_position.is_none()
-                });
+            && relation == Some(PeerRelation::Diverged);
         if evidence_already_recorded {
             return Ok(response(MembershipHistoryRelationship::Diverged));
         }
-        let source_device_id = source_device_id.clone();
-        let expected_revision = snapshot.record().revision;
-        self.ledger
-            .compare_and_commit(|record| {
-                if record.revision != expected_revision {
+        let source_device_id = *source_device_id;
+        let expected_revision = view.revision();
+        self.owner
+            .commit(move |draft| {
+                if draft.require_space()?.ledger().revision() != expected_revision {
                     return Err(MembershipLedgerError::Conflict);
                 }
-                let peer = record
-                    .peer_reconciliation
-                    .get_mut(&source_device_id)
-                    .ok_or(MembershipLedgerError::RecoveryRequired)?;
-                peer.relationship = MembershipHistoryRelationship::Diverged;
-                peer.confirmed_position = None;
-                record
-                    .membership_conflict_presentations
+                draft
+                    .apply(LedgerInput::PeerEvidenceReconciled {
+                        source: source_device_id,
+                        history: None,
+                        evidence: PeerEvidence::Diverged,
+                    })
+                    .map_err(ledger_error)?;
+                let branch_recovery = draft.branch_recovery_mut()?;
+                branch_recovery
+                    .conflict_presentations
                     .insert(conflict.conflict_id, presentation);
-                record
-                    .membership_conflicts
+                branch_recovery
+                    .conflicts
                     .entry(conflict.conflict_id)
                     .and_modify(|current| {
-                        current
-                            .evidence_peer_device_ids
-                            .insert(source_device_id.clone());
+                        current.evidence_peer_device_ids.insert(source_device_id);
                         if keep_local && current.selected_branch_id.is_none() {
                             current.status = MembershipConflictStatus::Completed;
                             current.selected_branch_id = Some(current.local_branch_id);
@@ -220,8 +176,8 @@ impl ReconcileMembershipEvidenceUseCase {
                         remote_branch_id: conflict.remote_branch_id,
                         local_choice,
                         remote_choice,
-                        evidence_peer_device_ids: [source_device_id.clone()].into(),
-                        detected_at_revision: record.revision,
+                        evidence_peer_device_ids: [source_device_id].into(),
+                        detected_at_revision: expected_revision,
                         status: if keep_local {
                             MembershipConflictStatus::Completed
                         } else {
@@ -234,5 +190,31 @@ impl ReconcileMembershipEvidenceUseCase {
             })
             .await?;
         Ok(response(MembershipHistoryRelationship::Diverged))
+    }
+}
+
+impl ReconcileMembershipEvidenceUseCase {
+    /// 双方分支一致但证据不能证明对端拥有本机当前位置：只修复关系，不伪造确认水位。
+    async fn commit_consistent(
+        &self,
+        expected_revision: u64,
+        source_device_id: uc_core::ids::DeviceId,
+    ) -> Result<(), MembershipLedgerError> {
+        self.owner
+            .commit(move |draft| {
+                if draft.require_space()?.ledger().revision() != expected_revision {
+                    return Err(MembershipLedgerError::Conflict);
+                }
+                draft
+                    .apply(LedgerInput::PeerEvidenceReconciled {
+                        source: source_device_id,
+                        history: None,
+                        evidence: PeerEvidence::Consistent,
+                    })
+                    .map_err(ledger_error)?;
+                Ok(())
+            })
+            .await?;
+        Ok(())
     }
 }

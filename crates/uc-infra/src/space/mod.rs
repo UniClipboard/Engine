@@ -1,7 +1,7 @@
 mod adapters;
 mod admission;
 mod membership_branch_transition;
-mod membership_ledger;
+pub(crate) mod membership_record;
 mod security;
 pub(crate) use security::group_update_failure_detail;
 
@@ -9,7 +9,6 @@ pub use adapters::{
     CurrentSpaceResolver, DeviceTrustObservationsAdapter, EncryptedRePairingStateStore,
     FileSpaceRebuildProgress, GatedMembershipHistoryExchange, GatedSpaceAdmissionTransport,
     MembershipActivationAdapter, MembershipMemberFactsAdapter, MembershipNetworkGate,
-    MembershipProjectionAdapter,
 };
 #[cfg(test)]
 pub(crate) use admission::decode_full_invitation;
@@ -33,7 +32,7 @@ pub use admission::{
     SqliteSpaceAdmissionCredentials, SqliteSpaceAdmissionState,
 };
 pub use membership_branch_transition::DefaultMembershipBranchTransitionPreparation;
-pub use membership_ledger::SqliteMembershipLedger;
+pub use membership_record::SqliteMembershipRecordStore;
 pub(crate) use security::export_admission_content_key_catalog;
 pub(crate) use security::import_admission_content_key_catalog;
 pub use security::{

@@ -124,8 +124,8 @@ fn network_admission_rule_lives_only_in_the_membership_ledger() {
             "{relative} still references MlsPeerAdmissionAdapter"
         );
     }
-    let ledger = production("crates/uc-application/src/space/membership/ledger/peer_admission.rs");
-    assert!(ledger.contains("impl PeerAdmissionPort for MembershipLedger"));
+    let access = production("crates/uc-application/src/space/membership/access.rs");
+    assert!(access.contains("impl PeerAdmissionPort for PeerAccess"));
 }
 
 #[test]

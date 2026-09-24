@@ -1,8 +1,9 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use uc_core::membership::{
-    MemberInstanceId, MembershipHistoryRelationship, MembershipOperationV2,
+    LedgerMemberStatus, LedgerUpdateProblem, LedgerUpdateView, MemberInstanceId, MembershipLedger,
+    MembershipOperationV2, PeerLink, PeerRelationView, PeerSyncView, SecurityDeliveryStatus,
     VersionedMembershipHistory,
 };
 use uc_core::ports::{LocalIdentityPort, ReachabilityState};
@@ -11,8 +12,7 @@ use uc_observability_contract::diagnostics::connectivity::{
 };
 
 use crate::space::membership::{
-    LoadedMembershipLedger, MembershipEffectPhase, MembershipLedger, PeerHistorySyncOutcome,
-    SpaceMemberPauseReason, VerifiedMembershipLedger,
+    pause_reason, MembershipOwner, MembershipView, SpaceMemberPauseReason,
 };
 
 use super::{
@@ -23,8 +23,9 @@ use super::{
     SpaceDeviceUpdateProblem, SpaceDeviceUpdateRecovery, SpaceDeviceUpdateStatus,
 };
 
+/// 设备信任状态只从成员账本的 `present` 得出；本查询只叠加展示资料、组密钥投递观察和本机身份核对。
 pub(crate) struct QueryDeviceTrustUseCase {
-    ledger: Arc<MembershipLedger>,
+    owner: Arc<MembershipOwner>,
     observations: Arc<dyn LoadDeviceTrustObservationsPort>,
     current_join: Arc<dyn LoadCurrentJoinStatusPort>,
     security_updates: Arc<dyn LoadSecurityDeviceUpdateStatusPort>,
@@ -34,14 +35,14 @@ pub(crate) struct QueryDeviceTrustUseCase {
 
 impl QueryDeviceTrustUseCase {
     pub(crate) fn new(
-        ledger: Arc<MembershipLedger>,
+        owner: Arc<MembershipOwner>,
         observations: Arc<dyn LoadDeviceTrustObservationsPort>,
         current_join: Arc<dyn LoadCurrentJoinStatusPort>,
         security_updates: Arc<dyn LoadSecurityDeviceUpdateStatusPort>,
         local_identity: Arc<dyn LocalIdentityPort>,
     ) -> Self {
         Self {
-            ledger,
+            owner,
             observations,
             current_join,
             security_updates,
@@ -52,12 +53,12 @@ impl QueryDeviceTrustUseCase {
 
     #[cfg(test)]
     pub(crate) fn new_for_tests(
-        ledger: Arc<MembershipLedger>,
+        owner: Arc<MembershipOwner>,
         observations: Arc<dyn LoadDeviceTrustObservationsPort>,
         current_join: Arc<dyn LoadCurrentJoinStatusPort>,
     ) -> Self {
         Self::new(
-            ledger,
+            owner,
             observations,
             current_join,
             Arc::new(CompletedSecurityUpdates),
@@ -66,55 +67,44 @@ impl QueryDeviceTrustUseCase {
     }
 
     pub(crate) async fn execute(&self) -> Result<DeviceTrustStatus, QueryDeviceTrustError> {
-        let snapshot = self.ledger.load_verified().await?;
-        let (status, mismatch) = self.query_snapshot_with_identity(&snapshot).await?;
-        let latest = self.ledger.load_verified().await?;
-        if latest.record().revision == snapshot.record().revision {
+        let view = self.owner.load().await?;
+        let (status, mismatch) = self.query_view_with_identity(&view).await?;
+        let latest = self.owner.load().await?;
+        if latest.revision() == view.revision() {
             self.record_identity_change(mismatch);
             return Ok(status);
         }
-        let (status, mismatch) = self.query_snapshot_with_identity(&latest).await?;
+        let (status, mismatch) = self.query_view_with_identity(&latest).await?;
         self.record_identity_change(mismatch);
         Ok(status)
     }
 
-    pub(crate) async fn query_snapshot(
+    pub(crate) async fn query_view(
         &self,
-        snapshot: &VerifiedMembershipLedger,
+        view: &MembershipView,
     ) -> Result<DeviceTrustStatus, QueryDeviceTrustError> {
-        let (status, mismatch) = self.query_snapshot_with_identity(snapshot).await?;
+        let (status, mismatch) = self.query_view_with_identity(view).await?;
         self.record_identity_change(mismatch);
         Ok(status)
     }
 
-    async fn query_snapshot_with_identity(
+    async fn query_view_with_identity(
         &self,
-        snapshot: &VerifiedMembershipLedger,
+        view: &MembershipView,
     ) -> Result<(DeviceTrustStatus, Option<bool>), QueryDeviceTrustError> {
-        if snapshot.history().is_none() {
-            let mut status = DeviceTrustStatus::no_current_space(snapshot.record().revision);
+        let Some(space) = view.space() else {
+            let mut status = DeviceTrustStatus::no_current_space(view.revision());
             status.current_join = self
                 .current_join
                 .load_admission_display(&[])
                 .await?
                 .current_join;
             return Ok((status, None));
-        }
-        let history = snapshot
-            .history()
-            .ok_or(QueryDeviceTrustError::RecoveryRequired)?;
-        let scope = snapshot
-            .current_scope()
-            .map_err(|_| QueryDeviceTrustError::RecoveryRequired)?;
-        let local_device_id = snapshot
-            .record()
-            .local_device_id
-            .clone()
-            .ok_or(QueryDeviceTrustError::RecoveryRequired)?;
-        let local_member_instance = snapshot
-            .record()
-            .local_member_instance
-            .ok_or(QueryDeviceTrustError::RecoveryRequired)?;
+        };
+        let ledger = space.ledger();
+        let history = space.history();
+        let local_device_id = *space.local_device_id();
+        let local_member_instance = space.local_member();
         let confirmation_targets = history
             .active_members()
             .into_iter()
@@ -145,144 +135,62 @@ impl QueryDeviceTrustUseCase {
                 return Err(QueryDeviceTrustError::RecoveryRequired);
             }
         }
-        let current_position = history
-            .current_position()
+        let security_updates = self
+            .security_updates
+            .load_security_device_update_status()
+            .await?;
+        let presented = ledger
+            .present(security_delivery(security_updates))
             .map_err(|_| QueryDeviceTrustError::RecoveryRequired)?;
-        let pending_effect_device_ids = snapshot
-            .record()
-            .current_effects(history)
-            .into_iter()
-            .filter(|(_, effect)| effect.phase < MembershipEffectPhase::Activated)
-            .flat_map(|(_, effect)| effect.affected_device_ids.iter().cloned())
-            .collect::<BTreeSet<_>>();
-
-        let mut device_ids = history
-            .active_members()
-            .into_iter()
-            .map(|member| {
-                history
-                    .admission_facts_for(member)
-                    .map(|facts| facts.device_id.clone())
-                    .ok_or(QueryDeviceTrustError::RecoveryRequired)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        if !device_ids.contains(&local_device_id) {
-            device_ids.push(local_device_id.clone());
-        }
-        device_ids.extend(snapshot.record().peer_reconciliation.keys().cloned());
-        device_ids.sort();
-        device_ids.dedup();
-
+        let device_ids: Vec<_> = presented
+            .devices
+            .iter()
+            .map(|device| device.device_id)
+            .collect();
         let observations = self.observations.load(&device_ids).await?;
         let mut observations_by_device = BTreeMap::new();
         for observation in observations {
             if !device_ids.contains(&observation.device_id)
                 || observations_by_device
-                    .insert(observation.device_id.clone(), observation)
+                    .insert(observation.device_id, observation)
                     .is_some()
             {
                 return Err(QueryDeviceTrustError::RecoveryRequired);
             }
         }
-        let mut paused_by_device = scope
-            .paused_peer_devices
-            .iter()
-            .map(|paused| (paused.device_id.clone(), paused.reason))
-            .collect::<BTreeMap<_, _>>();
-        let mut devices = Vec::with_capacity(device_ids.len());
-        for device_id in &device_ids {
-            let is_local = device_id == &local_device_id;
-            let member = if is_local {
-                Some(local_member_instance)
-            } else {
-                history.member_for_device(device_id, &device_ids)
-            };
-            let facts = member.and_then(|member| history.admission_facts_for(member));
-            let observation = match observations_by_device.remove(device_id) {
+        let mut devices = Vec::with_capacity(presented.devices.len());
+        for device in &presented.devices {
+            let facts = device
+                .member
+                .and_then(|member| history.admission_facts_for(member));
+            let membership = membership_of(device.status);
+            let observation = match observations_by_device.remove(&device.device_id) {
                 Some(observation) => observation,
-                None if member.is_none_or(|member| !history.active_members().contains(&member)) => {
-                    DeviceTrustObservation {
-                        device_id: device_id.clone(),
-                        display_name: None,
-                        reachability: ReachabilityState::Offline,
-                    }
-                }
+                None if membership != DeviceTrustMembership::Active => DeviceTrustObservation {
+                    device_id: device.device_id,
+                    display_name: None,
+                    reachability: ReachabilityState::Offline,
+                },
                 None => return Err(QueryDeviceTrustError::Unavailable),
             };
-            let membership = if is_local {
-                if scope.local_member_active {
-                    DeviceTrustMembership::Active
-                } else if history.active_members().contains(&local_member_instance) {
-                    DeviceTrustMembership::PendingActivation
-                } else if pending_effect_device_ids.contains(device_id) {
-                    DeviceTrustMembership::PendingActivation
-                } else {
-                    DeviceTrustMembership::Removed
-                }
-            } else if member.is_some_and(|member| history.active_members().contains(&member)) {
-                DeviceTrustMembership::Active
-            } else if pending_effect_device_ids.contains(device_id) {
-                DeviceTrustMembership::PendingActivation
-            } else {
-                DeviceTrustMembership::Removed
-            };
-            let removed_from_history = !is_local
-                && !member.is_some_and(|member| history.active_members().contains(&member));
-            let relationship = if is_local {
-                DeviceTrustRelationship::Local
-            } else {
-                snapshot
-                    .record()
-                    .peer_reconciliation
-                    .get(device_id)
-                    .map(|record| {
-                        if membership == DeviceTrustMembership::Active
-                            && record.awaits_confirmation(&current_position)
-                        {
-                            DeviceTrustRelationship::ConfirmationPending
-                        } else if removed_from_history
-                            && record.relationship
-                                == MembershipHistoryRelationship::PendingRemovalDecision
-                        {
-                            DeviceTrustRelationship::AwaitingRemovalAcknowledgement
-                        } else {
-                            map_relationship(record.relationship)
-                        }
-                    })
-                    .unwrap_or(DeviceTrustRelationship::Unknown)
-            };
-            let sync_state = if membership == DeviceTrustMembership::Removed
-                || relationship == DeviceTrustRelationship::AwaitingRemovalAcknowledgement
-            {
-                DeviceTrustSyncState::Paused(SpaceMemberPauseReason::LocalMemberInactive)
-            } else if is_local || scope.usable_peer_device_ids.contains(device_id) {
-                DeviceTrustSyncState::Usable
-            } else {
-                DeviceTrustSyncState::Paused(
-                    paused_by_device
-                        .remove(device_id)
-                        .or_else(|| {
-                            snapshot
-                                .record()
-                                .peer_reconciliation
-                                .get(device_id)
-                                .and_then(|record| pause_reason(record.relationship))
-                        })
-                        .ok_or(QueryDeviceTrustError::RecoveryRequired)?,
-                )
-            };
             devices.push(DeviceTrustDevice {
-                device_id: device_id.clone(),
+                device_id: device.device_id,
                 display_name: observation
                     .display_name
                     .or_else(|| facts.map(|facts| facts.device_name.clone()))
-                    .unwrap_or_else(|| device_id.as_str().to_owned()),
-                is_local,
+                    .unwrap_or_else(|| device.device_id.as_str().to_owned()),
+                is_local: device.is_local,
                 reachability: observation.reachability,
                 membership,
-                relationship,
-                sync_state,
-                pairing_confirmation: member
+                relationship: relationship_of(device.relation),
+                sync_state: match device.sync {
+                    PeerSyncView::Usable => DeviceTrustSyncState::Usable,
+                    PeerSyncView::Paused(reason) => {
+                        DeviceTrustSyncState::Paused(pause_reason(reason))
+                    }
+                },
+                pairing_confirmation: device
+                    .member
                     .and_then(|member_instance_id| {
                         history
                             .admission_event_id_for(member_instance_id)
@@ -295,21 +203,38 @@ impl QueryDeviceTrustUseCase {
             });
         }
 
-        let current_change =
-            pending_change(history, local_member_instance, &devices, snapshot.record())?;
-        let security_updates = self
-            .security_updates
-            .load_security_device_update_status()
-            .await?;
-        let mut space_device_update = space_device_update_status(
-            history,
-            local_member_instance,
-            snapshot.record(),
-            &devices,
-            !pending_effect_device_ids.is_empty(),
-            security_updates,
-        )?;
-        let mismatch = if scope.local_member_active {
+        let current_change = pending_change(history, local_member_instance, &devices, ledger)?;
+        let local_membership = membership_of(presented.local_status);
+        let mut space_device_update = match presented.device_update {
+            LedgerUpdateView::Updating => SpaceDeviceUpdateStatus::updating(),
+            LedgerUpdateView::Completed => SpaceDeviceUpdateStatus::completed(),
+            LedgerUpdateView::RetryableFailure { next_retry_at_ms } => {
+                SpaceDeviceUpdateStatus::retryable_failure(next_retry_at_ms)
+            }
+            LedgerUpdateView::NeedsAttention(problem) => match problem {
+                LedgerUpdateProblem::DeviceStateRejected => {
+                    SpaceDeviceUpdateStatus::needs_attention(
+                        SpaceDeviceUpdateProblem::DeviceStateRejected,
+                        SpaceDeviceUpdateRecovery::ReviewDevices,
+                    )
+                }
+                LedgerUpdateProblem::DeviceRelationshipConflict => {
+                    SpaceDeviceUpdateStatus::needs_attention(
+                        SpaceDeviceUpdateProblem::DeviceRelationshipConflict,
+                        SpaceDeviceUpdateRecovery::ReviewDevices,
+                    )
+                }
+                LedgerUpdateProblem::DeviceUpgradeRequired => {
+                    SpaceDeviceUpdateStatus::needs_attention(
+                        SpaceDeviceUpdateProblem::DeviceUpgradeRequired,
+                        SpaceDeviceUpdateRecovery::UpdateApp,
+                    )
+                }
+                // 组密钥投递给出的需要处理状态原样保留其原因与恢复动作。
+                LedgerUpdateProblem::DeviceSecurityUpdateRejected => security_updates,
+            },
+        };
+        let mismatch = if presented.local_status == LedgerMemberStatus::Active {
             if let Some(current) = self
                 .local_identity
                 .get_current_fingerprint()
@@ -336,17 +261,9 @@ impl QueryDeviceTrustUseCase {
         };
         Ok((
             DeviceTrustStatus {
-                revision: snapshot.record().revision,
+                revision: view.revision(),
                 local_device_id: Some(local_device_id),
-                local_membership: if scope.local_member_active {
-                    DeviceTrustMembership::Active
-                } else if history.active_members().contains(&local_member_instance) {
-                    DeviceTrustMembership::PendingActivation
-                } else if pending_effect_device_ids.contains(&local_device_id) {
-                    DeviceTrustMembership::PendingActivation
-                } else {
-                    DeviceTrustMembership::Removed
-                },
+                local_membership,
                 current_change,
                 current_join,
                 inbound_pairings,
@@ -409,103 +326,6 @@ impl LocalIdentityPort for MissingLocalIdentity {
     }
 }
 
-fn space_device_update_status(
-    history: &VersionedMembershipHistory,
-    local_member: MemberInstanceId,
-    record: &LoadedMembershipLedger,
-    devices: &[DeviceTrustDevice],
-    has_pending_effects: bool,
-    security_updates: SpaceDeviceUpdateStatus,
-) -> Result<SpaceDeviceUpdateStatus, QueryDeviceTrustError> {
-    if security_updates.phase == SpaceDeviceUpdatePhase::NeedsAttention {
-        return Ok(security_updates);
-    }
-    let active_peer_device_ids = history
-        .active_members()
-        .into_iter()
-        .filter(|member| *member != local_member)
-        .map(|member| {
-            history
-                .admission_facts_for(member)
-                .map(|facts| facts.device_id.clone())
-                .ok_or(QueryDeviceTrustError::RecoveryRequired)
-        })
-        .collect::<Result<BTreeSet<_>, _>>()?;
-    let mut next_retry_at_ms = None;
-    let mut history_update_pending = false;
-    for peer_device_id in &active_peer_device_ids {
-        let Some(peer) = record.peer_reconciliation.get(peer_device_id) else {
-            history_update_pending = true;
-            continue;
-        };
-        history_update_pending |= !peer.restricted_delivery.is_empty();
-        match peer.sync_state.last_attempt_outcome {
-            PeerHistorySyncOutcome::StableRejected => {
-                return Ok(SpaceDeviceUpdateStatus::needs_attention(
-                    SpaceDeviceUpdateProblem::DeviceStateRejected,
-                    SpaceDeviceUpdateRecovery::ReviewDevices,
-                ));
-            }
-            PeerHistorySyncOutcome::Deferred => {
-                let candidate = peer.sync_state.next_attempt_at_ms;
-                next_retry_at_ms =
-                    Some(next_retry_at_ms.map_or(candidate, |current: i64| current.min(candidate)));
-            }
-            PeerHistorySyncOutcome::Never => history_update_pending = true,
-            PeerHistorySyncOutcome::Acked => {}
-        }
-    }
-    for device in devices
-        .iter()
-        .filter(|device| device.membership != DeviceTrustMembership::Removed)
-    {
-        match device.relationship {
-            DeviceTrustRelationship::PendingLocalDecision
-            | DeviceTrustRelationship::Diverged
-            | DeviceTrustRelationship::Invalid => {
-                return Ok(SpaceDeviceUpdateStatus::needs_attention(
-                    SpaceDeviceUpdateProblem::DeviceRelationshipConflict,
-                    SpaceDeviceUpdateRecovery::ReviewDevices,
-                ));
-            }
-            DeviceTrustRelationship::UpgradeRequired => {
-                return Ok(SpaceDeviceUpdateStatus::needs_attention(
-                    SpaceDeviceUpdateProblem::DeviceUpgradeRequired,
-                    SpaceDeviceUpdateRecovery::UpdateApp,
-                ));
-            }
-            DeviceTrustRelationship::Local
-            | DeviceTrustRelationship::Consistent
-            | DeviceTrustRelationship::ConfirmationPending
-            | DeviceTrustRelationship::AwaitingRemovalAcknowledgement
-            | DeviceTrustRelationship::Unknown => {}
-        }
-    }
-    if let Some(next_retry_at_ms) = next_retry_at_ms {
-        return Ok(SpaceDeviceUpdateStatus::retryable_failure(next_retry_at_ms));
-    }
-    if security_updates.phase == SpaceDeviceUpdatePhase::RetryableFailure {
-        return Ok(security_updates);
-    }
-    let relationship_update_pending = devices.iter().any(|device| {
-        device.membership == DeviceTrustMembership::PendingActivation
-            || (device.membership != DeviceTrustMembership::Removed
-                && matches!(
-                    device.relationship,
-                    DeviceTrustRelationship::ConfirmationPending | DeviceTrustRelationship::Unknown
-                ))
-    });
-    if has_pending_effects
-        || history_update_pending
-        || relationship_update_pending
-        || security_updates.phase == SpaceDeviceUpdatePhase::Updating
-    {
-        Ok(SpaceDeviceUpdateStatus::updating())
-    } else {
-        Ok(SpaceDeviceUpdateStatus::completed())
-    }
-}
-
 #[cfg(test)]
 struct CompletedSecurityUpdates;
 
@@ -523,7 +343,7 @@ fn pending_change(
     history: &VersionedMembershipHistory,
     local_member: MemberInstanceId,
     devices: &[DeviceTrustDevice],
-    record: &crate::space::membership::LoadedMembershipLedger,
+    ledger: &MembershipLedger,
 ) -> Result<Option<PendingDeviceTrustChange>, QueryDeviceTrustError> {
     let Some(change_id) = history.pending_removal_decision(local_member) else {
         return Ok(None);
@@ -608,14 +428,14 @@ fn pending_change(
             .iter()
             .filter(|id| {
                 let id = *id;
-                record.local_device_id.as_ref() != Some(id)
+                ledger.local_device_id() != id
                     && !(apply && id == &proposed_by_device_id)
-                    && record
-                        .peer_reconciliation
-                        .get(id)
-                        .and_then(|peer| peer.confirmed_position.as_ref())
-                        .and_then(|position| position.event_id)
-                        != desired_head
+                    && match ledger.peer(id) {
+                        Some(PeerLink::Member(link)) => link
+                            .confirmed_position()
+                            .and_then(|position| position.event_id),
+                        Some(PeerLink::Departing(_)) | None => None,
+                    } != desired_head
             })
             .cloned()
             .collect();
@@ -657,36 +477,38 @@ fn pending_change(
     }))
 }
 
-fn map_relationship(relationship: MembershipHistoryRelationship) -> DeviceTrustRelationship {
-    match relationship {
-        MembershipHistoryRelationship::Unknown => DeviceTrustRelationship::Unknown,
-        MembershipHistoryRelationship::Consistent => DeviceTrustRelationship::Consistent,
-        MembershipHistoryRelationship::UpgradeRequired => DeviceTrustRelationship::UpgradeRequired,
-        MembershipHistoryRelationship::PendingRemovalDecision => {
-            DeviceTrustRelationship::PendingLocalDecision
-        }
-        MembershipHistoryRelationship::Diverged => DeviceTrustRelationship::Diverged,
-        MembershipHistoryRelationship::Invalid => DeviceTrustRelationship::Invalid,
+fn membership_of(status: LedgerMemberStatus) -> DeviceTrustMembership {
+    match status {
+        LedgerMemberStatus::Active => DeviceTrustMembership::Active,
+        LedgerMemberStatus::PendingActivation => DeviceTrustMembership::PendingActivation,
+        LedgerMemberStatus::Removed => DeviceTrustMembership::Removed,
     }
 }
 
-fn pause_reason(
-    relationship: MembershipHistoryRelationship,
-) -> Option<crate::space::membership::SpaceMemberPauseReason> {
-    use crate::space::membership::SpaceMemberPauseReason;
+fn relationship_of(relation: PeerRelationView) -> DeviceTrustRelationship {
+    match relation {
+        PeerRelationView::Local => DeviceTrustRelationship::Local,
+        PeerRelationView::Consistent => DeviceTrustRelationship::Consistent,
+        PeerRelationView::ConfirmationPending => DeviceTrustRelationship::ConfirmationPending,
+        PeerRelationView::PendingLocalDecision => DeviceTrustRelationship::PendingLocalDecision,
+        PeerRelationView::AwaitingRemovalAcknowledgement => {
+            DeviceTrustRelationship::AwaitingRemovalAcknowledgement
+        }
+        PeerRelationView::UpgradeRequired => DeviceTrustRelationship::UpgradeRequired,
+        PeerRelationView::Diverged => DeviceTrustRelationship::Diverged,
+        PeerRelationView::Invalid => DeviceTrustRelationship::Invalid,
+        PeerRelationView::Unknown => DeviceTrustRelationship::Unknown,
+    }
+}
 
-    match relationship {
-        MembershipHistoryRelationship::PendingRemovalDecision => {
-            Some(SpaceMemberPauseReason::PendingLocalDecision)
-        }
-        MembershipHistoryRelationship::Diverged => Some(SpaceMemberPauseReason::Diverged),
-        MembershipHistoryRelationship::Invalid => Some(SpaceMemberPauseReason::Invalid),
-        MembershipHistoryRelationship::UpgradeRequired => {
-            Some(SpaceMemberPauseReason::UpgradeRequired)
-        }
-        MembershipHistoryRelationship::Unknown => {
-            Some(SpaceMemberPauseReason::RelationshipUnconfirmed)
-        }
-        MembershipHistoryRelationship::Consistent => None,
+/// 组密钥投递的观察结果；需要处理的投递一律视为被拒绝。
+fn security_delivery(status: SpaceDeviceUpdateStatus) -> SecurityDeliveryStatus {
+    match status.phase {
+        SpaceDeviceUpdatePhase::Completed => SecurityDeliveryStatus::Completed,
+        SpaceDeviceUpdatePhase::Updating => SecurityDeliveryStatus::Updating,
+        SpaceDeviceUpdatePhase::RetryableFailure => SecurityDeliveryStatus::RetryableFailure {
+            next_retry_at_ms: status.next_retry_at_ms.unwrap_or_default(),
+        },
+        SpaceDeviceUpdatePhase::NeedsAttention => SecurityDeliveryStatus::Rejected,
     }
 }

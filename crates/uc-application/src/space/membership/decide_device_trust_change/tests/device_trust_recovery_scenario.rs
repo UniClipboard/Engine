@@ -14,29 +14,9 @@ async fn device_state_update_retries_requires_attention_and_recovers() {
         REPRODUCE,
     );
     let result = async {
-        let (loaded, signer, change_id) = pending_local_removal_ledger();
-        let repository = Arc::new(MemoryLedgerRepository {
-            loaded: Mutex::new(loaded),
-            commits: AtomicUsize::new(0),
-            remaining_conflicts: AtomicUsize::new(1),
-        });
-        let ledger = Arc::new(MembershipLedger::new(
-            repository.clone(),
-            repository.clone(),
-            Arc::new(AcceptingVerifier),
-        ));
-        let query = Arc::new(QueryDeviceTrustUseCase::new_for_tests(
-            Arc::clone(&ledger),
-            Arc::new(OfflineObservations),
-            Arc::new(crate::space::membership::query_device_trust::NoCurrentJoinStatus),
-        ));
-        let decide = DecideDeviceTrustChangeUseCase::new(
-            ledger,
-            Arc::new(signer),
-            Arc::clone(&query),
-            Arc::new(NoopEffects),
-            Arc::new(WakeCounter(AtomicUsize::new(0))),
-        );
+        let (owner, signer, change_id) = pending_local_removal();
+        owner.records.conflict_next_commits(1);
+        let (decide, query) = decide_case(&owner, signer, Arc::new(NoopEffects));
 
         let attention = decide
             .execute(DecideDeviceTrustChange {
@@ -71,7 +51,7 @@ async fn device_state_update_retries_requires_attention_and_recovers() {
             "retryable-device-state-update-did-not-recover",
         )?;
         require(
-            repository.commits.load(Ordering::SeqCst) == 1,
+            owner.records.commit_count() == 1,
             "device-state-retry-did-not-commit-once",
         )?;
         require(

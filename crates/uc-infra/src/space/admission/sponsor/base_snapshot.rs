@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use uc_application::deps::MembershipLedgerError;
+use uc_application::deps::{MembershipLedgerError, MembershipRecord};
 use uc_core::membership::AdmissionBaseSnapshot;
 
 use crate::db::ports::DbExecutor;
@@ -35,17 +35,22 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
         &self,
     ) -> Result<AdmissionBaseSnapshot, SpaceAdmissionStateStoreError> {
         let loaded = self.membership.load().await.map_err(map_membership_error)?;
-        let lineage_id = loaded
-            .lineage_id
-            .filter(|value| !value.is_empty())
-            .ok_or(SpaceAdmissionStateStoreError::Corrupt)?;
-        let membership_history = loaded
-            .membership_history
-            .filter(|value| !value.is_empty())
-            .ok_or(SpaceAdmissionStateStoreError::Corrupt)?;
+        let ledger_revision = loaded.revision();
+        let MembershipRecord::Space(space) = loaded else {
+            return Err(SpaceAdmissionStateStoreError::Corrupt);
+        };
+        let lineage_id = space.ledger.history.lineage_id().to_owned();
+        let membership_history = space
+            .ledger
+            .history
+            .encode_persisted_v2()
+            .map_err(|_| SpaceAdmissionStateStoreError::Corrupt)?;
+        if lineage_id.is_empty() || membership_history.is_empty() {
+            return Err(SpaceAdmissionStateStoreError::Corrupt);
+        }
         let encoded = postcard::to_stdvec(&PersistedSponsorBaseSnapshotV1 {
             format_version: SPONSOR_BASE_SNAPSHOT_FORMAT_V1,
-            ledger_revision: loaded.revision,
+            ledger_revision,
             lineage_id,
             membership_history,
         })

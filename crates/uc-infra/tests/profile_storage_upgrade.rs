@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use diesel::RunQueryDsl;
 use uc_application::deps::{
-    CurrentSpaceIdentityPort, LoadMembershipLedgerPort, LoadedMembershipLedger,
-    MembershipLedgerError,
+    CurrentSpaceIdentityPort, MembershipLedgerError, MembershipRecord, MembershipRecordCommit,
+    MembershipRecordStorePort,
 };
 use uc_core::crypto::domain::Passphrase;
 use uc_core::ids::{ProfileId, SpaceId};
@@ -123,9 +123,13 @@ async fn alpha5_runtime_fixture_reaches_legacy_ready() {
 }
 
 #[async_trait::async_trait]
-impl LoadMembershipLedgerPort for EmptyLedger {
-    async fn load(&self) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
-        Ok(LoadedMembershipLedger::no_current_space())
+impl MembershipRecordStorePort for EmptyLedger {
+    async fn load(&self) -> Result<MembershipRecord, MembershipLedgerError> {
+        Ok(MembershipRecord::NoSpace { revision: 0 })
+    }
+
+    async fn commit(&self, _: MembershipRecordCommit) -> Result<(), MembershipLedgerError> {
+        Err(MembershipLedgerError::Unavailable)
     }
 }
 

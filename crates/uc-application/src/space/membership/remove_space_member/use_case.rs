@@ -5,17 +5,14 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
-    AdmissionMemberBindingV2, MemberInstanceId, MembershipEventId, MembershipHistoryRelationship,
+    AdmissionMemberBindingV2, LedgerInput, LedgerMemberStatus, MemberInstanceId, MembershipEventId,
     MembershipHistoryV2ReceiveOutcome, VersionedMembershipHistory,
 };
 
 use crate::space::membership::{
-    CurrentMemberSignatureError, CurrentMemberSignaturePort, DeviceTrustStatus,
-    InitiatedMembershipRemovalEffect, LoadedMembershipLedger, MembershipEffectKind,
-    MembershipEffectPhase, MembershipLedger, MembershipLedgerError,
-    MembershipMaintenanceStepOutcome, PeerReconciliationRecord, PendingMembershipEffect,
-    QueryDeviceTrustUseCase, RecoverMembershipEffectsPort, RestrictedMembershipDelivery,
-    WakeSpaceMembershipMaintenancePort,
+    ledger_error, CurrentMemberSignatureError, CurrentMemberSignaturePort, DeviceTrustStatus,
+    MembershipLedgerError, MembershipMaintenanceStepOutcome, MembershipOwner, MembershipView,
+    QueryDeviceTrustUseCase, RecoverMembershipEffectsPort,
 };
 
 use super::{
@@ -28,11 +25,10 @@ const COMMITTED_STATUS_QUERY_ATTEMPTS: usize = 3;
 const COMMITTED_STATUS_QUERY_BACKOFF: Duration = Duration::from_millis(100);
 
 pub(crate) struct RemoveSpaceMemberUseCase {
-    ledger: Arc<MembershipLedger>,
+    owner: Arc<MembershipOwner>,
     signer: Arc<dyn CurrentMemberSignaturePort>,
     query: Arc<QueryDeviceTrustUseCase>,
     effects: Arc<dyn RecoverMembershipEffectsPort>,
-    maintenance: Arc<dyn WakeSpaceMembershipMaintenancePort>,
     execution_lock: tokio::sync::Mutex<()>,
 }
 
@@ -59,23 +55,21 @@ enum ExactRemovalKind {
 struct ExactRemovalCommit {
     kind: ExactRemovalKind,
     change_id: MembershipEventId,
-    committed: LoadedMembershipLedger,
+    receipt: MembershipCommitReceipt,
 }
 
 impl RemoveSpaceMemberUseCase {
     pub(crate) fn new(
-        ledger: Arc<MembershipLedger>,
+        owner: Arc<MembershipOwner>,
         signer: Arc<dyn CurrentMemberSignaturePort>,
         query: Arc<QueryDeviceTrustUseCase>,
         effects: Arc<dyn RecoverMembershipEffectsPort>,
-        maintenance: Arc<dyn WakeSpaceMembershipMaintenancePort>,
     ) -> Self {
         Self {
-            ledger,
+            owner,
             signer,
             query,
             effects,
-            maintenance,
             execution_lock: tokio::sync::Mutex::new(()),
         }
     }
@@ -87,8 +81,8 @@ impl RemoveSpaceMemberUseCase {
         let _guard = self.execution_lock.lock().await;
         let target = self.resolve_device_target(target_device_id).await?;
         let committed = self.execute_exact_with_retry(target).await?;
+        // 移除已提交；本地效果能完成多少就先完成多少，其余由执行器按持久待办继续。
         let _ = self.effects.recover_membership_effects().await;
-        self.maintenance.wake();
         self.public_result(committed).await
     }
 
@@ -96,20 +90,10 @@ impl RemoveSpaceMemberUseCase {
         &self,
         target_device_id: &DeviceId,
     ) -> Result<ExactRemovalTarget, RemoveSpaceMemberError> {
-        let snapshot = self
-            .ledger
-            .load_verified()
-            .await
-            .map_err(map_ledger_error)?;
-        let record = snapshot.record();
-        let history = snapshot
-            .history()
-            .ok_or(RemoveSpaceMemberError::RecoveryRequired)?;
-        let local_device_id = record
-            .local_device_id
-            .as_ref()
-            .ok_or(RemoveSpaceMemberError::RecoveryRequired)?;
-        if target_device_id == local_device_id {
+        let view = self.owner.load().await.map_err(map_ledger_error)?;
+        let space = view.require_space().map_err(map_ledger_error)?;
+        let history = space.history();
+        if target_device_id == space.local_device_id() {
             return Err(RemoveSpaceMemberError::SelfTarget);
         }
         // 重复请求可能落在上一次已提交的移除之后；已被本历史移除的设备按已不存在处理，
@@ -147,23 +131,12 @@ impl RemoveSpaceMemberUseCase {
         &self,
         target: ExactRemovalTarget,
     ) -> Result<ExactRemovalCommit, RemoveSpaceMemberError> {
-        let snapshot = self
-            .ledger
-            .load_verified()
-            .await
-            .map_err(map_ledger_error)?;
-        let record = snapshot.record();
-        let history = snapshot
-            .history()
-            .ok_or(RemoveSpaceMemberError::RecoveryRequired)?;
-        let local_device_id = record
-            .local_device_id
-            .as_ref()
-            .ok_or(RemoveSpaceMemberError::RecoveryRequired)?;
-        let local_member = record
-            .local_member_instance
-            .ok_or(RemoveSpaceMemberError::RecoveryRequired)?;
-        if !record.local_join_active || !history.active_members().contains(&local_member) {
+        let view = self.owner.load().await.map_err(map_ledger_error)?;
+        let space = view.require_space().map_err(map_ledger_error)?;
+        let history = space.history();
+        let local_device_id = *space.local_device_id();
+        let local_member = space.local_member();
+        if space.ledger().local_status() != LedgerMemberStatus::Active {
             return Err(RemoveSpaceMemberError::LocalMemberRemoved);
         }
         if local_member == target.member_instance_id {
@@ -182,19 +155,15 @@ impl RemoveSpaceMemberUseCase {
             return Ok(ExactRemovalCommit {
                 kind: ExactRemovalKind::AlreadyAbsent,
                 change_id,
-                committed: record.clone(),
+                receipt: receipt(&view)?,
             });
         }
-        let target_device_id = history
-            .admission_facts_for(target.member_instance_id)
-            .map(|facts| facts.device_id.clone())
-            .ok_or(RemoveSpaceMemberError::TargetNotFound)?;
         let credential = self
             .signer
-            .current_membership_credential(local_device_id)
+            .current_membership_credential(&local_device_id)
             .await
             .map_err(map_signature_error)?;
-        if credential.member_instance_id(local_device_id) != local_member {
+        if credential.member_instance_id(&local_device_id) != local_member {
             return Err(RemoveSpaceMemberError::RecoveryRequired);
         }
         let history_digest = history
@@ -216,83 +185,45 @@ impl RemoveSpaceMemberUseCase {
             .await
             .map_err(map_signature_error)?;
         let change_id = event.event_id();
-        let event_for_commit = event.clone();
-        let target_for_commit = target;
-        let target_device_for_commit = target_device_id.clone();
-        let expected_revision = record.revision;
-        let expected_history_digest = snapshot.history_digest();
-        let (committed, ()) = self
-            .ledger
-            .compare_and_commit_history(
-                expected_revision,
-                expected_history_digest,
-                move |record, history, verifier| {
-                    if !target_for_commit.matches(history)
-                        || history
-                            .verify_and_receive_event(event_for_commit.clone(), verifier)
-                            .map_err(|_| MembershipLedgerError::Corrupt)?
-                            != MembershipHistoryV2ReceiveOutcome::Applied
-                    {
-                        return Err(MembershipLedgerError::Corrupt);
-                    }
-                    let retained_device_ids = history
-                        .effective_members()
-                        .into_iter()
-                        .filter(|member| {
-                            *member != target_for_commit.member_instance_id
-                                && *member != local_member
-                        })
-                        .filter_map(|member| history.admission_facts_for(member))
-                        .map(|facts| facts.device_id.clone())
-                        .collect::<Vec<_>>();
-                    let effect_payload = postcard::to_stdvec(&InitiatedMembershipRemovalEffect {
-                        event: event_for_commit.clone(),
+        let verifier = self.owner.verifier_handle();
+        let committed = self
+            .owner
+            .commit(move |draft| {
+                let space = draft.require_space()?;
+                let mut history = space.history().clone();
+                // 签名期间历史已前进：按状态变化重新判定，而不是把新历史当作损坏。
+                if !target.matches(&history) || history.current_head() != event.parent_event_id {
+                    return Err(MembershipLedgerError::Conflict);
+                }
+                if history
+                    .verify_and_receive_event(event, verifier.as_ref())
+                    .map_err(|_| MembershipLedgerError::Corrupt)?
+                    != MembershipHistoryV2ReceiveOutcome::Applied
+                {
+                    return Err(MembershipLedgerError::Corrupt);
+                }
+                let retained_device_ids = history
+                    .effective_members()
+                    .into_iter()
+                    .filter(|member| {
+                        *member != target.member_instance_id && *member != local_member
+                    })
+                    .filter_map(|member| history.admission_facts_for(member))
+                    .map(|facts| facts.device_id)
+                    .collect::<Vec<_>>();
+                draft
+                    .apply(LedgerInput::LocalRemovalSigned {
+                        history,
                         retained_device_ids,
                     })
-                    .map_err(|_| MembershipLedgerError::Corrupt)?;
-                    record.effect_journal.insert(
-                        *change_id.as_bytes(),
-                        PendingMembershipEffect {
-                            event_id: *change_id.as_bytes(),
-                            kind: MembershipEffectKind::RemoveDevice,
-                            phase: MembershipEffectPhase::Prepared,
-                            affected_device_ids: vec![target_device_for_commit.clone()],
-                            payload: effect_payload,
-                        },
-                    );
-                    record
-                        .peer_reconciliation
-                        .entry(target_device_for_commit.clone())
-                        .and_modify(|relationship| {
-                            relationship.relationship =
-                                MembershipHistoryRelationship::PendingRemovalDecision;
-                            relationship.restricted_delivery =
-                                vec![RestrictedMembershipDelivery::Event(
-                                    event_for_commit.clone(),
-                                )];
-                            // 由受限投递在首次处理时记录窗口起点。
-                            relationship.updated_at_ms = 0;
-                        })
-                        .or_insert(PeerReconciliationRecord {
-                            peer_device_id: target_device_for_commit,
-                            relationship: MembershipHistoryRelationship::PendingRemovalDecision,
-                            confirmed_position: None,
-                            sync_state: Default::default(),
-                            restricted_delivery: vec![RestrictedMembershipDelivery::Event(
-                                event_for_commit,
-                            )],
-                            updated_at_ms: 0,
-                        });
-                    Ok(())
-                },
-            )
+                    .map_err(ledger_error)
+            })
             .await
             .map_err(map_ledger_error)?;
-
         Ok(ExactRemovalCommit {
             kind: ExactRemovalKind::Removed,
             change_id,
-            committed,
+            receipt: receipt(&committed.view)?,
         })
     }
 
@@ -305,18 +236,9 @@ impl RemoveSpaceMemberUseCase {
             .query_committed_status()
             .await
             .ok_or(RemoveSpaceMemberError::CommittedButPending { change_id })?;
-        let committed_history = committed
-            .committed
-            .membership_history
-            .as_deref()
-            .ok_or(RemoveSpaceMemberError::CommittedButPending { change_id })?;
-        let history_digest = <[u8; 32]>::from(Sha256::digest(committed_history));
         Ok(RemoveSpaceMemberResult {
             change_id,
-            commit: MembershipCommitReceipt {
-                revision: committed.committed.revision,
-                history_digest,
-            },
+            commit: committed.receipt,
             status,
         })
     }
@@ -347,7 +269,6 @@ impl RemoveSpaceMemberUseCase {
         };
         let committed = self.execute_exact_with_retry(exact).await?;
         let effects = self.effects.recover_membership_effects().await;
-        self.maintenance.wake();
         if effects != MembershipMaintenanceStepOutcome::Completed {
             return Ok(AdmissionRevocationResult::LocalEffectsPending {
                 change_id: committed.change_id,
@@ -379,14 +300,8 @@ impl AdmissionRevocationPort for RemoveSpaceMemberUseCase {
         target: AdmissionAbandonmentRevocationTarget,
     ) -> Result<AdmissionRevocationResult, RemoveSpaceMemberError> {
         let _guard = self.execution_lock.lock().await;
-        let snapshot = self
-            .ledger
-            .load_verified()
-            .await
-            .map_err(map_ledger_error)?;
-        let history = snapshot
-            .history()
-            .ok_or(RemoveSpaceMemberError::RecoveryRequired)?;
+        let view = self.owner.load().await.map_err(map_ledger_error)?;
+        let history = view.require_space().map_err(map_ledger_error)?.history();
         let binding = AdmissionMemberBindingV2::new(
             target.attempt_digest(),
             SpaceId::from_str(history.lineage_id()),
@@ -420,6 +335,19 @@ impl ExactRemovalTarget {
             }
         }
     }
+}
+
+/// 提交回执只来自已提交状态；摘要无法计算说明记录已损坏。
+fn receipt(view: &MembershipView) -> Result<MembershipCommitReceipt, RemoveSpaceMemberError> {
+    let space = view
+        .require_space()
+        .map_err(|_| RemoveSpaceMemberError::RecoveryRequired)?;
+    Ok(MembershipCommitReceipt {
+        revision: view.revision(),
+        history_digest: space
+            .history_digest()
+            .map_err(|_| RemoveSpaceMemberError::RecoveryRequired)?,
+    })
 }
 
 fn admission_revocation_operation_id(target: &AdmissionRevocationTarget) -> [u8; 16] {

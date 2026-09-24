@@ -260,18 +260,12 @@ impl<E: DbExecutor + Send + Sync> SqliteSpaceAdmissionState<E> {
             });
         }
 
-        let ledger = self.membership.load().await?;
-        let history = VersionedMembershipHistory::decode_persisted_v2(
-            ledger
-                .membership_history
-                .as_deref()
-                .ok_or(QueryDeviceTrustError::RecoveryRequired)?,
-            &OpenMlsHistoricalSignatureVerifier,
-        )
-        .map_err(|_| QueryDeviceTrustError::RecoveryRequired)?;
-        let local_member = ledger
-            .local_member_instance
-            .ok_or(QueryDeviceTrustError::RecoveryRequired)?;
+        let record = self.membership.load().await?;
+        let uc_application::deps::MembershipRecord::Space(space) = record else {
+            return Err(QueryDeviceTrustError::RecoveryRequired);
+        };
+        let history = &space.ledger.history;
+        let local_member = space.ledger.local_member;
         let local_facts = history
             .admission_facts_for(local_member)
             .ok_or(QueryDeviceTrustError::RecoveryRequired)?;
@@ -327,12 +321,10 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
-    use async_trait::async_trait;
     use sha2::{Digest as _, Sha256};
     use uc_application::deps::{
-        AdmissionRecoveryTrigger, AdmissionSecurityTransitionInput, LoadMembershipLedgerPort,
-        LoadedMembershipLedger, MembershipLedgerError, PendingAdmissionRecoveryStatePort,
-        SpaceWorkMode,
+        AdmissionRecoveryTrigger, AdmissionSecurityTransitionInput,
+        PendingAdmissionRecoveryStatePort, SpaceWorkMode,
     };
     use uc_core::ids::DeviceId;
     use uc_core::membership::{
@@ -383,15 +375,6 @@ mod tests {
         }
     }
 
-    struct UnusedMembership;
-
-    #[async_trait]
-    impl LoadMembershipLedgerPort for UnusedMembership {
-        async fn load(&self) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
-            Err(MembershipLedgerError::Unavailable)
-        }
-    }
-
     struct Fixture {
         _directory: tempfile::TempDir,
         database: std::path::PathBuf,
@@ -430,7 +413,9 @@ mod tests {
                     directory.path().join("vault"),
                     keys,
                 )),
-                Arc::new(UnusedMembership),
+                Arc::new(
+                    crate::space::membership_record::test_support::UnavailableMembershipRecords,
+                ),
             )
         }
 

@@ -5,17 +5,19 @@ use uc_core::membership::{
 };
 
 use super::{DeviceGroupChoiceImpact, MembershipConflictBranchView};
+use uc_core::ids::DeviceId;
+
 use crate::space::membership::{
-    CurrentSpaceMemberScope, DeviceTrustMembership, LoadedMembershipLedger,
-    MembershipConflictMember, MembershipConflictPresentation, MembershipConflictRecord,
-    MembershipLedgerError, SpaceMemberPauseReason,
+    CurrentSpaceMemberScope, DeviceTrustMembership, MembershipConflictMember,
+    MembershipConflictPresentation, MembershipConflictRecord, MembershipLedgerError,
+    SpaceMemberPauseReason,
 };
 
 pub(super) fn branch_view(
     conflict: &MembershipConflictRecord,
     is_local: bool,
     stored: Option<&MembershipConflictPresentation>,
-    record: &LoadedMembershipLedger,
+    local_device_id: &DeviceId,
     history: &VersionedMembershipHistory,
     scope: &CurrentSpaceMemberScope,
 ) -> Result<MembershipConflictBranchView, MembershipLedgerError> {
@@ -39,13 +41,13 @@ pub(super) fn branch_view(
         None => None,
     };
     let source_device_ids = if is_local {
-        record.local_device_id.clone().into_iter().collect()
+        vec![*local_device_id]
     } else {
         conflict.evidence_peer_device_ids.iter().cloned().collect()
     };
     let impact = members
         .as_ref()
-        .map(|members| impact(members, is_local, choice, record, history, scope))
+        .map(|members| impact(members, is_local, choice, local_device_id, history, scope))
         .transpose()?;
     Ok(MembershipConflictBranchView {
         branch_id,
@@ -61,14 +63,10 @@ fn impact(
     members: &[MembershipConflictMember],
     is_local: bool,
     choice: MembershipConflictChoice,
-    record: &LoadedMembershipLedger,
+    local_id: &DeviceId,
     history: &VersionedMembershipHistory,
     scope: &CurrentSpaceMemberScope,
 ) -> Result<DeviceGroupChoiceImpact, MembershipLedgerError> {
-    let local_id = record
-        .local_device_id
-        .as_ref()
-        .ok_or(MembershipLedgerError::Corrupt)?;
     let mut known_peers = history
         .effective_members()
         .into_iter()

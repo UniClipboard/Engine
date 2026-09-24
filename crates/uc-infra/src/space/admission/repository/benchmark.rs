@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use diesel::RunQueryDsl;
 use uc_application::deps::{
-    JoinerActivationStatePort, LoadMembershipLedgerPort, LoadedMembershipLedger,
-    MembershipLedgerError,
+    JoinerActivationStatePort, MembershipLedgerError, MembershipRecord, MembershipRecordCommit,
+    MembershipRecordStorePort,
 };
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
@@ -56,8 +56,12 @@ impl SecureStoragePort for MemoryStorage {
 struct UnusedMembership;
 
 #[async_trait]
-impl LoadMembershipLedgerPort for UnusedMembership {
-    async fn load(&self) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
+impl MembershipRecordStorePort for UnusedMembership {
+    async fn load(&self) -> Result<MembershipRecord, MembershipLedgerError> {
+        Err(MembershipLedgerError::Unavailable)
+    }
+
+    async fn commit(&self, _commit: MembershipRecordCommit) -> Result<(), MembershipLedgerError> {
         Err(MembershipLedgerError::Unavailable)
     }
 }
@@ -68,7 +72,7 @@ pub struct AdmissionRepositoryBenchmark {
     pool: DbPool,
     keys: Arc<AdmissionKeyManager>,
     manifests: Arc<ActiveSpaceGenerationManifestStore>,
-    membership: Arc<dyn LoadMembershipLedgerPort>,
+    membership: Arc<dyn MembershipRecordStorePort>,
 }
 
 impl AdmissionRepositoryBenchmark {
@@ -87,7 +91,7 @@ impl AdmissionRepositoryBenchmark {
             directory.path().join("vault"),
             Arc::clone(&keys),
         ));
-        let membership: Arc<dyn LoadMembershipLedgerPort> = Arc::new(UnusedMembership);
+        let membership: Arc<dyn MembershipRecordStorePort> = Arc::new(UnusedMembership);
         let mut state = PersistedSpaceAdmissionRepositoryV2::fresh([0x31; 16]);
         if unrelated_record_bytes > 0 {
             state.records.insert(

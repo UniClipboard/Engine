@@ -828,6 +828,58 @@ fn snapshot_round_trips_and_rejects_broken_invariants() {
     );
 }
 
+#[test]
+fn normalized_restore_repairs_legacy_shapes_that_plain_restore_rejects() {
+    let group = Group::new(&["device-a", "device-b", "device-c"]);
+    let membership = run_due_work(group.start("device-a"), NOW);
+    let (history, _) = group.removal(membership.history(), "device-a", "device-b", 0x38);
+    let removed = apply(
+        membership,
+        LedgerInput::LocalRemovalSigned {
+            history,
+            retained_device_ids: vec![device("device-c")],
+        },
+        NOW,
+    )
+    .0;
+    let departing = removed.snapshot().peers[&device("device-b")].clone();
+    let PeerLinkSnapshot::Member(member) = removed.snapshot().peers[&device("device-c")].clone()
+    else {
+        panic!("device-c is a member");
+    };
+
+    let mut legacy = removed.snapshot();
+    // 有效成员只剩离开记录、已不在历史中的设备仍是成员、本机出现在对端表中。
+    legacy.peers.insert(device("device-c"), departing.clone());
+    legacy
+        .peers
+        .insert(device("device-z"), PeerLinkSnapshot::Member(member.clone()));
+    legacy
+        .peers
+        .insert(device("device-a"), PeerLinkSnapshot::Member(member));
+    assert_eq!(
+        MembershipLedger::restore(legacy.clone()).unwrap_err(),
+        LedgerTransitionError::InvalidSnapshot
+    );
+
+    let normalized = MembershipLedger::restore_normalized(legacy).unwrap();
+    assert_eq!(normalized.revision(), removed.revision());
+    assert_eq!(
+        normalized.peer(&device("device-b")),
+        removed.peer(&device("device-b"))
+    );
+    assert!(matches!(
+        normalized.peer(&device("device-c")),
+        Some(PeerLink::Member(link)) if link.relation() == PeerRelation::Unconfirmed
+    ));
+    assert!(normalized.peer(&device("device-z")).is_none());
+    assert!(normalized.peer(&device("device-a")).is_none());
+    assert_eq!(
+        MembershipLedger::restore(normalized.snapshot()).unwrap(),
+        normalized
+    );
+}
+
 /// 可复现的伪随机序列，不依赖外部随机源。
 struct Seeded(u64);
 
@@ -1120,4 +1172,198 @@ fn recovered_branch_rebuilds_peers_and_drops_old_branch_work() {
         ));
     }
     recovered.validate().unwrap();
+}
+
+// 已被本机移除的设备送来的决定只贡献已验证历史，不恢复它的成员关系。
+#[test]
+fn evidence_from_a_departing_device_only_contributes_history() {
+    let group = Group::new(&["device-a", "device-b", "device-c"]);
+    let proposer = run_due_work(group.start("device-a"), NOW);
+    let (removed_history, removal) =
+        group.removal(proposer.history(), "device-a", "device-b", 0x51);
+    let (proposer, _, _) = apply(
+        proposer,
+        LedgerInput::LocalRemovalSigned {
+            history: removed_history.clone(),
+            retained_device_ids: vec![device("device-c")],
+        },
+        NOW,
+    );
+    let target_history = group.received(&group.history, &removed_history, "device-b");
+    let decided = group.decided(
+        &target_history,
+        removal.event_id(),
+        "device-b",
+        RemovalDecision::Accept,
+    );
+    let merged = group.received(proposer.history(), &decided, "device-a");
+    assert_ne!(&merged, proposer.history());
+    let revision = proposer.revision();
+
+    let (adopted, outcome, _) = apply(
+        proposer,
+        LedgerInput::PeerEvidenceReconciled {
+            source: device("device-b"),
+            history: Some(merged.clone()),
+            evidence: PeerEvidence::Consistent,
+        },
+        NOW,
+    );
+
+    assert_eq!(outcome, LedgerOutcome::Applied);
+    assert_eq!(adopted.revision(), revision + 1);
+    assert_eq!(adopted.history(), &merged);
+    assert!(matches!(
+        adopted.peer(&device("device-b")),
+        Some(PeerLink::Departing(_))
+    ));
+
+    let (repeated, outcome, effects) = apply(
+        adopted,
+        LedgerInput::PeerEvidenceReconciled {
+            source: device("device-b"),
+            history: Some(merged),
+            evidence: PeerEvidence::Consistent,
+        },
+        NOW,
+    );
+    assert_eq!(outcome, LedgerOutcome::Unchanged);
+    assert!(effects.is_empty());
+    assert_eq!(repeated.revision(), revision + 1);
+}
+
+// 一致但未确认位置的证据只修复关系，不伪造也不丢弃已认证的确认位置。
+#[test]
+fn consistent_evidence_keeps_the_confirmed_position() {
+    let group = Group::new(&["device-a", "device-b"]);
+    let membership = run_due_work(group.start("device-a"), NOW);
+    let confirmed = membership.history().current_position().unwrap();
+    let (invalid, outcome, _) = apply(
+        membership,
+        LedgerInput::PeerEvidenceReconciled {
+            source: device("device-b"),
+            history: None,
+            evidence: PeerEvidence::Invalid,
+        },
+        NOW,
+    );
+    assert_eq!(outcome, LedgerOutcome::Applied);
+
+    let (repaired, outcome, _) = apply(
+        invalid,
+        LedgerInput::PeerEvidenceReconciled {
+            source: device("device-b"),
+            history: None,
+            evidence: PeerEvidence::Consistent,
+        },
+        NOW,
+    );
+
+    assert_eq!(outcome, LedgerOutcome::Applied);
+    let Some(PeerLink::Member(link)) = repaired.peer(&device("device-b")) else {
+        panic!("device-b stays a member");
+    };
+    assert_eq!(link.relation(), PeerRelation::Consistent);
+    assert_eq!(link.confirmed_position(), Some(&confirmed));
+    assert_eq!(
+        view_of(&repaired).device_update,
+        LedgerUpdateView::Completed
+    );
+}
+
+#[test]
+fn companion_data_changes_only_advance_the_revision() {
+    let group = Group::new(&["device-a", "device-b"]);
+    let membership = run_due_work(group.start("device-a"), NOW);
+    let revision = membership.revision();
+
+    let (quiet, outcome, effects) = apply(
+        membership.clone(),
+        LedgerInput::CompanionDataChanged {
+            presentation_changed: false,
+        },
+        NOW,
+    );
+    assert_eq!(outcome, LedgerOutcome::Applied);
+    assert!(effects.is_empty());
+    assert_eq!(quiet.revision(), revision + 1);
+    assert_eq!(quiet.snapshot().peers, membership.snapshot().peers);
+
+    let (_, _, effects) = apply(
+        membership,
+        LedgerInput::CompanionDataChanged {
+            presentation_changed: true,
+        },
+        NOW,
+    );
+    assert_eq!(
+        effects,
+        vec![LedgerEffect::AfterCommit(
+            LedgerFollowUp::PublishDeviceTrustChange
+        )]
+    );
+}
+
+// 从激活基线开始的历史不保存基线之前的事件；采用对端追加的加入时回溯到基线即停止。
+#[test]
+fn adopting_history_on_top_of_an_activation_baseline_registers_the_new_member() {
+    use crate::membership::MembershipActivationBaselineV2;
+
+    let members = [admission("device-a", 0x41), admission("device-b", 0x42)];
+    let baseline = VersionedMembershipHistory::from_activation_baseline(
+        MembershipActivationBaselineV2::Established {
+            lineage_id: LINEAGE.to_owned(),
+            head_event_id: MembershipEventId::from_bytes([0x11; 32]),
+            head_depth: 0,
+            current_members: members
+                .iter()
+                .map(|member| (member.facts.clone(), member.membership_credential.clone()))
+                .collect(),
+        },
+    )
+    .unwrap();
+    let membership = run_due_work(
+        MembershipLedger::start(
+            baseline.clone(),
+            device("device-a"),
+            members[0].facts.member_instance,
+            10,
+        )
+        .unwrap(),
+        NOW,
+    );
+    let joined = admission("device-c", 0x43);
+    let mut remote = baseline;
+    remote
+        .verify_and_receive_event(
+            signed_event(
+                &remote,
+                &members[1],
+                MembershipOperationV2::AddDevice {
+                    admission: joined.clone(),
+                },
+                0x61,
+            ),
+            &TestVerifier,
+        )
+        .unwrap();
+
+    let (adopted, outcome, _) = apply(
+        membership,
+        LedgerInput::PeerEvidenceReconciled {
+            source: device("device-b"),
+            history: Some(remote),
+            evidence: PeerEvidence::Confirmed,
+        },
+        NOW,
+    );
+
+    assert_eq!(outcome, LedgerOutcome::Applied);
+    assert!(adopted
+        .unfinished_effects()
+        .any(|effect| effect.affected_device_ids() == [device("device-c")]));
+    assert!(matches!(
+        adopted.peer(&device("device-c")),
+        Some(PeerLink::Member(_))
+    ));
 }

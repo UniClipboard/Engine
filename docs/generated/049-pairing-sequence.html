@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>配对时序：正式提交与最终确认</title>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{--paper:#f5f5f5;--ink:#2d3142;--muted:#4f5d75;--accent:#eb6c36;--rule:rgba(45,49,66,.12)}
+  *{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font-family:Geist,"PingFang SC","Microsoft YaHei",sans-serif}
+  main{width:min(1040px,calc(100% - 32px));margin:auto;padding:36px 0}.eyebrow{font:500 12px "Geist Mono",monospace;color:var(--muted);letter-spacing:.08em}
+  h1{font:400 32px "Instrument Serif","Songti SC",serif;margin:8px 0 12px}.intro{font-size:14px;line-height:1.7;color:var(--muted);margin:0 0 20px}
+  .canvas{overflow-x:auto}svg{display:block;width:100%;min-width:900px;height:auto}.actor{fill:#fff;stroke:var(--ink)}.actor-name{fill:var(--ink);font:600 16px Geist,"PingFang SC",sans-serif}
+  .life{stroke:rgba(45,49,66,.3);stroke-width:1;stroke-dasharray:4 4}.msg{stroke:var(--muted);stroke-width:1.2}.reply{stroke-dasharray:4 4}.success{stroke:var(--accent);stroke-width:1.5}
+  .message{fill:var(--ink);font:12px Geist,"PingFang SC",sans-serif}.stage{fill:var(--muted);font:500 8px "Geist Mono",monospace}.aside{fill:var(--muted);font:12px Geist,"PingFang SC",sans-serif}
+  .callout{border-top:1px solid var(--rule);padding-top:16px;margin-top:16px;display:grid;grid-template-columns:1fr 1fr;gap:20px;font-size:14px;line-height:1.7}.callout strong{display:block;margin-bottom:4px}
+  footer{color:var(--muted);font-size:12px;line-height:1.6;border-top:1px solid var(--rule);padding-top:12px;margin-top:20px}
+  @media(max-width:700px){.callout{grid-template-columns:1fr}h1{font-size:28px}}
+</style>
+</head>
+<body><main>
+<p class="eyebrow">01 / SEQUENCE / CURRENT PROTOCOL</p><h1>配对何时真正完成</h1>
+<p class="intro">时间向下。左边是加入方 Joiner，右边是邀请方 Sponsor；箭头是设备间消息，不等于成员记录提交。</p>
+<div class="canvas"><svg viewBox="0 0 960 784" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="pairing-sequence-title pairing-sequence-desc">
+<title id="pairing-sequence-title">配对时序：正式提交与最终确认</title>
+<desc id="pairing-sequence-desc">Joiner 与 Sponsor 依次交换 JoinRequest、Candidate、Prepared、Commit、Applied、Complete、CompleteAck 和 Settled；Sponsor 验证 CompleteAck 后正式提交成员，Joiner 保存 Settled 后才报告配对成功。</desc>
+<defs><marker id="seq-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#4f5d75"/></marker><marker id="seq-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#eb6c36"/></marker><marker id="seq-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#2e5aa8"/></marker></defs>
+<rect width="960" height="784" fill="#f5f5f5"/>
+<line class="life" x1="240" y1="100" x2="240" y2="720"/><line class="life" x1="720" y1="100" x2="720" y2="720"/>
+<line class="msg" x1="240" y1="136" x2="720" y2="136" marker-end="url(#seq-arrow)"/>
+<line class="msg reply" x1="720" y1="192" x2="240" y2="192" marker-end="url(#seq-arrow)"/>
+<line class="msg" x1="240" y1="248" x2="720" y2="248" marker-end="url(#seq-arrow)"/>
+<line class="msg reply" x1="720" y1="304" x2="240" y2="304" marker-end="url(#seq-arrow)"/>
+<line class="msg" x1="240" y1="360" x2="720" y2="360" marker-end="url(#seq-arrow)"/>
+<line class="msg reply" x1="720" y1="416" x2="240" y2="416" marker-end="url(#seq-arrow)"/>
+<line class="msg success" x1="240" y1="520" x2="720" y2="520" marker-end="url(#seq-accent)"/>
+<line class="msg reply" x1="720" y1="656" x2="240" y2="656" marker-end="url(#seq-arrow)"/>
+<rect class="actor" x="144" y="36" width="192" height="64" rx="6"/><rect class="actor" x="624" y="36" width="192" height="64" rx="6"/>
+<text class="actor-name" x="240" y="76" text-anchor="middle">Joiner / 加入方</text><text class="actor-name" x="720" y="76" text-anchor="middle">Sponsor / 邀请方</text>
+<text class="message" x="480" y="124" text-anchor="middle">JoinRequest · 认证后的加入请求</text>
+<text class="message" x="480" y="180" text-anchor="middle">Candidate · 保存可重放候选</text>
+<text class="message" x="480" y="236" text-anchor="middle">Prepared · 验证历史，准备目标资料</text>
+<text class="message" x="480" y="292" text-anchor="middle">Commit · 保存可重放提交消息</text>
+<text class="message" x="480" y="348" text-anchor="middle">Applied · 加入方已应用准备结果</text>
+<text class="message" x="480" y="404" text-anchor="middle">Complete · 邀请方仅保存待确认材料</text>
+<text class="stage" x="272" y="464">JOINER: LOCAL ACTIVATION</text>
+<text class="aside" x="272" y="488">本机切换目标 Space，保存 CompleteAck；仍待最终确认。</text>
+<text class="message" x="480" y="508" text-anchor="middle">CompleteAck · 最终确认</text>
+<rect x="548" y="548" width="344" height="72" rx="6" fill="#fdf1eb" stroke="#eb6c36" stroke-width="1"/>
+<text class="stage" x="564" y="568">FORMAL COMMIT POINT</text>
+<text class="aside" x="564" y="592">Sponsor 验证 ACK，正式提交成员并保存 Completed。</text>
+<text class="message" x="480" y="644" text-anchor="middle">Settled · Sponsor 返回最终确认</text>
+<text class="stage" x="272" y="700">JOINER: ACTIVE / SETTLED</text>
+<text class="aside" x="272" y="724">验证并保存 Settled 后，Joiner 才报告配对完成。</text>
+</svg></div>
+<div class="callout"><div><strong>当前实现</strong>`Applied` 和本机激活都不等于双端正式完成；正式 Add 在 Sponsor 验证 `CompleteAck` 后发生。</div><div><strong>049 目标交接</strong>保留这些设备间消息；正式成员提交及 Joiner 激活的成员事实改经 `MembershipOwner`，尚未接入。</div></div>
+<footer>来源：docs/design-docs/pairing-lifecycle.md、ADR-027、计划 049。图为正常 Sponsor 路径；Helper 补全与异常终止未混入时序。</footer>
+</main></body></html>
