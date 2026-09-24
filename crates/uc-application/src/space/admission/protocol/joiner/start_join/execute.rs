@@ -199,7 +199,7 @@ async fn persist_device_name(
     let mut current = settings
         .load()
         .await
-        .map_err(|error| JoinSpaceError::Settings(error.to_string()))?;
+        .map_err(|error| JoinSpaceError::Settings(anyhow::Error::from(error)))?;
     if current.general.device_name.as_deref() == Some(device_name) {
         return Ok(());
     }
@@ -207,5 +207,5 @@ async fn persist_device_name(
     settings
         .save(&current)
         .await
-        .map_err(|error| JoinSpaceError::Settings(error.to_string()))
+        .map_err(|error| JoinSpaceError::Settings(anyhow::Error::from(error)))
 }

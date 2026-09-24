@@ -192,10 +192,9 @@ impl ProtocolHandler for IrohActiveClipboardPullServeHandler {
                     );
                     PullResponse::Locked
                 }
-                Err(ActiveClipboardPullServeError::Internal(reason)) => {
+                Err(ActiveClipboardPullServeError::Internal(_)) => {
                     warn!(
                         peer = %peer_device_id.as_str(),
-                        reason,
                         "active-clipboard pull serve: internal failure; responding Internal"
                     );
                     PullResponse::Internal

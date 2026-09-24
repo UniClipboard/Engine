@@ -62,8 +62,8 @@ pub(crate) enum ListProjectionsError {
     #[error("Invalid limit: {0}")]
     InvalidLimit(String),
 
-    #[error("Repository error: {0}")]
-    RepositoryError(String),
+    #[error("Repository error")]
+    RepositoryError(#[source] anyhow::Error),
 }
 
 pub(crate) struct ListClipboardEntryProjectionsUseCase {
@@ -290,7 +290,7 @@ impl ListClipboardEntryProjectionsUseCase {
             .entry_repo
             .list_entries(limit, offset)
             .await
-            .map_err(|e| ListProjectionsError::RepositoryError(e.to_string()))?;
+            .map_err(|e| ListProjectionsError::RepositoryError(anyhow::Error::from(e)))?;
 
         let mut projections = Vec::with_capacity(entries.len());
 

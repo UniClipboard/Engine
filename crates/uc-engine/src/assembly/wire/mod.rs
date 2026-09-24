@@ -568,9 +568,9 @@ pub async fn wire_dependencies_from_inputs(
                         Arc::clone(&active_generation_manifest_store),
                     )
                     .ok_or_else(|| {
-                        WiringError::DatabaseInit(
-                            "fresh V3 runtime generations are invalid".to_string(),
-                        )
+                        WiringError::DatabaseInit(anyhow::anyhow!(
+                            "fresh V3 runtime generations are invalid"
+                        ))
                     })?,
                 ),
                 None => current_space_resolver.clone(),

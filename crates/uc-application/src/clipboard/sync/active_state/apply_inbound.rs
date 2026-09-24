@@ -81,11 +81,11 @@ pub(crate) struct ActiveClipboardConvergedEvent {
 pub(crate) enum InboundPulledContentStoreError {
     /// The envelope could not be decrypted (e.g. the session locked between
     /// the pull and the store, or the bytes were malformed / tampered).
-    #[error("pulled content decrypt failed: {0}")]
-    Decrypt(String),
+    #[error("pulled content decrypt failed")]
+    Decrypt(#[source] anyhow::Error),
     /// The decrypted envelope could not be decoded / persisted.
-    #[error("pulled content store failed: {0}")]
-    Store(String),
+    #[error("pulled content store failed")]
+    Store(#[source] anyhow::Error),
 }
 
 /// Result of checking and storing a pulled transfer envelope.

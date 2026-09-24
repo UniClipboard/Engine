@@ -82,7 +82,7 @@ impl HistoryMaintenance for FakeHistoryMaintenance {
             self.reconcile_release.notified().await;
         }
         if self.consume_reconcile_failure() {
-            Err(ClipboardHistoryError::Internal("probe".into()))
+            Err(ClipboardHistoryError::Internal(anyhow::anyhow!("probe")))
         } else {
             Ok(ReconcileResultView::default())
         }
@@ -95,7 +95,7 @@ impl HistoryMaintenance for FakeHistoryMaintenance {
             self.cleanup_release.notified().await;
         }
         if self.cleanup_fails.load(Ordering::SeqCst) {
-            Err(ClipboardHistoryError::Internal("probe".into()))
+            Err(ClipboardHistoryError::Internal(anyhow::anyhow!("probe")))
         } else {
             Ok(CleanupResultView::default())
         }
@@ -106,7 +106,7 @@ impl HistoryMaintenance for FakeHistoryMaintenance {
     ) -> Result<RetentionEnforcementResultView, ClipboardHistoryError> {
         self.record("retention");
         if self.retention_fails.load(Ordering::SeqCst) {
-            Err(ClipboardHistoryError::Internal("probe".into()))
+            Err(ClipboardHistoryError::Internal(anyhow::anyhow!("probe")))
         } else {
             Ok(RetentionEnforcementResultView::default())
         }

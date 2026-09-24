@@ -211,18 +211,18 @@ pub struct FetchBlobToPathResult {
 
 #[derive(Debug, thiserror::Error)]
 pub enum BlobTransferError {
-    #[error("publish blob failed: {0}")]
-    Publish(String),
-    #[error("fetch blob failed: {0}")]
-    Fetch(String),
+    #[error("publish blob failed")]
+    Publish(#[source] anyhow::Error),
+    #[error("fetch blob failed")]
+    Fetch(#[source] anyhow::Error),
     /// fetch_blob / fetch_blob_to_path 在进行中被外部 cancel(用户点取消、
     /// timeout sweep、删除流程)。目标文件可能是 partial,调用方应当把
     /// `target_path` 视为不可用并交由 cleanup 删除。与 `Fetch` 不同:
     /// Fetch 表达"传输本身失败",Cancelled 表达"传输被主动撤回"。
     #[error("fetch blob cancelled")]
     Cancelled,
-    #[error("record blob transfer failed: {0}")]
-    Persistence(String),
+    #[error("record blob transfer failed")]
+    Persistence(#[source] anyhow::Error),
 }
 
 /// Result of attempting to cancel an inbound transfer.
@@ -328,7 +328,7 @@ impl BlobTransferFacade {
             })
             .await
             .map(Some)
-            .map_err(|error| BlobTransferError::Persistence(error.to_string()))
+            .map_err(|error| BlobTransferError::Persistence(anyhow::Error::from(error)))
     }
 
     async fn existing_lifecycle(
@@ -343,7 +343,9 @@ impl BlobTransferFacade {
             .await
             .map(Some)
             .ok_or_else(|| {
-                BlobTransferError::Persistence("active file transfer session is missing".into())
+                BlobTransferError::Persistence(anyhow::anyhow!(
+                    "active file transfer session is missing"
+                ))
             })
     }
 
@@ -398,7 +400,10 @@ impl BlobTransferFacade {
         let entry = self
             .inflight_fetches
             .lock()
-            .map_err(|_| BlobTransferError::Fetch("in-flight fetch registry is poisoned".into()))?
+            // 锁中毒：PoisonError 持有 guard，不能作为来源保存。
+            .map_err(|_| {
+                BlobTransferError::Fetch(anyhow::anyhow!("in-flight fetch registry is poisoned"))
+            })?
             .remove(transfer_id);
         let Some(entry) = entry else {
             info!(
@@ -472,7 +477,10 @@ impl BlobTransferFacade {
         let transfer_ids = self
             .inflight_fetches
             .lock()
-            .map_err(|_| BlobTransferError::Fetch("in-flight fetch registry is poisoned".into()))?
+            // 锁中毒：PoisonError 持有 guard，不能作为来源保存。
+            .map_err(|_| {
+                BlobTransferError::Fetch(anyhow::anyhow!("in-flight fetch registry is poisoned"))
+            })?
             .iter()
             .filter(|(_, fetch)| fetch.attempt_id.as_deref() == Some(attempt_id))
             .map(|(transfer_id, _)| transfer_id.clone())
@@ -509,7 +517,7 @@ impl BlobTransferFacade {
                 entry_id: command.entry_id.unwrap_or_default(),
             })
             .await
-            .map_err(|e| BlobTransferError::Publish(e.to_string()))?;
+            .map_err(|e| BlobTransferError::Publish(anyhow::Error::from(e)))?;
         Ok(PublishBlobResult {
             ticket: outcome.ticket,
             entry_id: outcome.entry_id,
@@ -531,7 +539,7 @@ impl BlobTransferFacade {
                 entry_id: command.entry_id.unwrap_or_default(),
             })
             .await
-            .map_err(|e| BlobTransferError::Publish(e.to_string()))?;
+            .map_err(|e| BlobTransferError::Publish(anyhow::Error::from(e)))?;
         Ok(PublishBlobResult {
             ticket: outcome.ticket,
             entry_id: outcome.entry_id,
@@ -573,7 +581,9 @@ impl BlobTransferFacade {
             self.inflight_fetches
                 .lock()
                 .map_err(|_| {
-                    BlobTransferError::Fetch("in-flight fetch registry is poisoned".into())
+                    BlobTransferError::Fetch(anyhow::anyhow!(
+                        "in-flight fetch registry is poisoned"
+                    ))
                 })?
                 .insert(
                     ctx.transfer_id.clone(),
@@ -594,14 +604,16 @@ impl BlobTransferFacade {
                 ticket: command.ticket,
                 entry_id: iroh_tag_entry_id,
                 progress: progress_sink.clone(),
-            }) => result.map_err(|error| BlobTransferError::Fetch(error.to_string())),
+            }) => result.map_err(|error| BlobTransferError::Fetch(anyhow::Error::from(error))),
         };
 
         if let Some(ctx) = command.transfer_context.as_ref() {
             self.inflight_fetches
                 .lock()
                 .map_err(|_| {
-                    BlobTransferError::Fetch("in-flight fetch registry is poisoned".into())
+                    BlobTransferError::Fetch(anyhow::anyhow!(
+                        "in-flight fetch registry is poisoned"
+                    ))
                 })?
                 .remove(&ctx.transfer_id);
         }
@@ -653,7 +665,7 @@ impl BlobTransferFacade {
                 if let Some(ctx) = command.transfer_context.as_ref() {
                     if let Some(session) = lifecycle_session.as_ref() {
                         if let Err(error) = session
-                            .fail(FileTransferFailureReason::Unknown, Some(msg.clone()))
+                            .fail(FileTransferFailureReason::Unknown, Some(msg.to_string()))
                             .await
                         {
                             warn!(transfer_id = %ctx.transfer_id, error = %error, "blob fetch: session failure settlement failed");
@@ -721,7 +733,9 @@ impl BlobTransferFacade {
             self.inflight_fetches
                 .lock()
                 .map_err(|_| {
-                    BlobTransferError::Fetch("in-flight fetch registry is poisoned".into())
+                    BlobTransferError::Fetch(anyhow::anyhow!(
+                        "in-flight fetch registry is poisoned"
+                    ))
                 })?
                 .insert(
                     ctx.transfer_id.clone(),
@@ -749,7 +763,7 @@ impl BlobTransferFacade {
                 target_path: command.target_path,
                 progress: progress_sink.clone(),
             }) => {
-                res.map_err(|e| BlobTransferError::Fetch(e.to_string()))
+                res.map_err(|e| BlobTransferError::Fetch(anyhow::Error::from(e)))
             }
         };
 
@@ -759,7 +773,9 @@ impl BlobTransferFacade {
             self.inflight_fetches
                 .lock()
                 .map_err(|_| {
-                    BlobTransferError::Fetch("in-flight fetch registry is poisoned".into())
+                    BlobTransferError::Fetch(anyhow::anyhow!(
+                        "in-flight fetch registry is poisoned"
+                    ))
                 })?
                 .remove(&ctx.transfer_id);
         }
@@ -816,7 +832,7 @@ impl BlobTransferFacade {
                 if let Some(ctx) = command.transfer_context.as_ref() {
                     if let Some(session) = lifecycle_session.as_ref() {
                         if let Err(error) = session
-                            .fail(FileTransferFailureReason::Unknown, Some(msg.clone()))
+                            .fail(FileTransferFailureReason::Unknown, Some(msg))
                             .await
                         {
                             warn!(transfer_id = %ctx.transfer_id, error = %error, "blob fetch: session failure settlement failed");
@@ -830,7 +846,7 @@ impl BlobTransferFacade {
                     )
                     .await;
                 }
-                Err(BlobTransferError::Fetch(msg))
+                Err(BlobTransferError::Fetch(anyhow::Error::from(e)))
             }
         }
     }

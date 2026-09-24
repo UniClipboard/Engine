@@ -31,10 +31,10 @@ pub struct ClearCacheResultView {
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageFacadeError {
-    #[error("failed to compute storage stats: {0}")]
-    Stats(String),
-    #[error("failed to clear cache: {0}")]
-    ClearCache(String),
+    #[error("failed to compute storage stats")]
+    Stats(#[source] anyhow::Error),
+    #[error("failed to clear cache")]
+    ClearCache(#[source] anyhow::Error),
 }
 
 pub struct StorageFacade {
@@ -57,7 +57,7 @@ impl StorageFacade {
         )
         .map_err(|err| {
             tracing::error!(error = %err, "storage facade: failed to compute storage stats");
-            StorageFacadeError::Stats(err.to_string())
+            StorageFacadeError::Stats(anyhow::Error::from(err))
         })?;
 
         let total_bytes = database_bytes + vault_bytes + cache_bytes + logs_bytes;
@@ -87,7 +87,7 @@ impl StorageFacade {
             .cache_fs
             .dir_size(&deps.cache_dir)
             .await
-            .map_err(|err| StorageFacadeError::ClearCache(err.to_string()))?;
+            .map_err(|err| StorageFacadeError::ClearCache(anyhow::Error::from(err)))?;
 
         if deps.cache_fs.exists(&deps.cache_dir).await {
             let entries = deps
@@ -95,7 +95,9 @@ impl StorageFacade {
                 .read_dir(&deps.cache_dir)
                 .await
                 .map_err(|err| {
-                    StorageFacadeError::ClearCache(format!("failed to read cache dir: {err}"))
+                    StorageFacadeError::ClearCache(
+                        anyhow::Error::from(err).context("failed to read cache dir"),
+                    )
                 })?;
 
             for entry in entries {
@@ -119,7 +121,7 @@ impl StorageFacade {
             .cache_fs
             .dir_size(&deps.cache_dir)
             .await
-            .map_err(|err| StorageFacadeError::ClearCache(err.to_string()))?;
+            .map_err(|err| StorageFacadeError::ClearCache(anyhow::Error::from(err)))?;
         let freed_bytes = size_before.saturating_sub(size_after);
 
         tracing::info!(freed_bytes, "storage facade: cache cleared");

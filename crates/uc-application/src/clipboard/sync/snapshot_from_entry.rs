@@ -82,8 +82,12 @@ pub(crate) enum BuildSnapshotError {
     /// Blob fetch failed for the paste representation. Distinct from
     /// `PasteRepUnavailable`: the resolver succeeded with a `BlobRef` but the
     /// downstream blob store could not deliver the bytes.
-    #[error("Failed to fetch paste representation blob {blob_id}: {reason}")]
-    PasteRepBlobFetchFailed { blob_id: BlobId, reason: String },
+    #[error("Failed to fetch paste representation blob {blob_id}")]
+    PasteRepBlobFetchFailed {
+        blob_id: BlobId,
+        #[source]
+        source: anyhow::Error,
+    },
 
     /// Defensive guard: every candidate rep was skipped. The paste-rep
     /// failure paths above should normally cover this, but a fully empty
@@ -198,7 +202,7 @@ pub(crate) async fn reconstruct_snapshot_from_entry(
                     Err(err) if is_paste_rep => {
                         return Err(BuildSnapshotError::PasteRepBlobFetchFailed {
                             blob_id,
-                            reason: err.to_string(),
+                            source: err,
                         });
                     }
                     Err(err) => {

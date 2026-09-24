@@ -18,10 +18,10 @@ use crate::settings::models::{SettingsPatch, SettingsView};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SettingsFacadeError {
-    #[error("failed to load settings: {0}")]
-    Load(String),
-    #[error("failed to save settings: {0}")]
-    Save(String),
+    #[error("failed to load settings")]
+    Load(#[source] anyhow::Error),
+    #[error("failed to save settings")]
+    Save(#[source] anyhow::Error),
     #[error("invalid settings: {0}")]
     Invalid(String),
     /// Relay 探测能力未在本进程装配。常见于 webserver / 单元测试场景。
@@ -138,7 +138,7 @@ impl SettingsFacade {
         self.settings
             .load()
             .await
-            .map_err(|error| SettingsFacadeError::Load(error.to_string()))
+            .map_err(|error| SettingsFacadeError::Load(anyhow::Error::from(error)))
     }
 
     /// 注入中继诊断端口。Production daemon 会通过 bootstrap 调用,
@@ -216,7 +216,7 @@ impl SettingsFacade {
             .load()
             .await
             .map(SettingsView::from)
-            .map_err(|err| SettingsFacadeError::Load(err.to_string()))
+            .map_err(|err| SettingsFacadeError::Load(anyhow::Error::from(err)))
     }
 
     #[instrument(skip_all)]

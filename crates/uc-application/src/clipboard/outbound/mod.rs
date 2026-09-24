@@ -121,8 +121,8 @@ pub enum ClipboardOutboundOutcome {
 
 #[derive(Debug, Error)]
 pub enum ClipboardOutboundError {
-    #[error("clipboard outbound dispatch failed: {0}")]
-    Internal(String),
+    #[error("clipboard outbound dispatch failed")]
+    Internal(#[source] anyhow::Error),
 }
 
 #[async_trait]
@@ -411,7 +411,7 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
             clipboard_intent.snapshot.file_content_digests.clear();
             clipboard_intent.snapshot.file_set_v1_component = Some(
                 compute_file_set_component(manifest, &digests)
-                    .map_err(|err| ClipboardOutboundError::Internal(err.to_string()))?,
+                    .map_err(|err| ClipboardOutboundError::Internal(anyhow::Error::from(err)))?,
             );
         } else if !file_content_digests.is_empty() {
             clipboard_intent.snapshot.file_content_digests = file_content_digests;
@@ -451,7 +451,7 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
                 )
                 .await
         }
-        .map_err(|err| ClipboardOutboundError::Internal(err.to_string()))?;
+        .map_err(|err| ClipboardOutboundError::Internal(anyhow::Error::from(err)))?;
         info!(
             entry_id = %entry_id_str,
             blob_ref_count,
@@ -855,7 +855,7 @@ pub(crate) fn build_transfer_manifest(
         .enumerate()
         .map(|(index, file)| {
             let index = u32::try_from(index).map_err(|_| {
-                ClipboardOutboundError::Internal("file-set index cannot fit u32".to_string())
+                ClipboardOutboundError::Internal(anyhow::anyhow!("file-set index cannot fit u32"))
             })?;
             Ok((file.path.as_path(), index))
         })
@@ -865,16 +865,17 @@ pub(crate) fn build_transfer_manifest(
         .map(|member| {
             let blob_ref_index = match &member.path {
                 Some(path) => Some(*indexes.get(path.as_path()).ok_or_else(|| {
-                    ClipboardOutboundError::Internal(format!(
-                        "directory member was not published: {}",
-                        path.display()
+                    ClipboardOutboundError::Internal(anyhow::anyhow!(
+                        "directory member was not published"
                     ))
                 })?),
                 None => None,
             };
             Ok(InboundFileSetMember {
                 root_index: u32::try_from(member.location.root_index).map_err(|_| {
-                    ClipboardOutboundError::Internal("negative directory root index".to_string())
+                    ClipboardOutboundError::Internal(anyhow::anyhow!(
+                        "negative directory root index"
+                    ))
                 })?,
                 root_name: member.location.root_name.clone(),
                 root_is_file: member.root_is_file,
@@ -974,8 +975,8 @@ pub(crate) async fn publish_oversized_inline_blob_refs(
         } else {
             LocalWorkOutcome::Error
         });
-        let plaintext =
-            plaintext_result.map_err(|err| ClipboardOutboundError::Internal(err.to_string()))?;
+        let plaintext = plaintext_result
+            .map_err(|err| ClipboardOutboundError::Internal(anyhow::Error::from(err)))?;
 
         let result = blob_transfer
             .publish_blob(PublishBlobCommand {
@@ -983,7 +984,7 @@ pub(crate) async fn publish_oversized_inline_blob_refs(
                 entry_id: Some(entry_id.clone()),
             })
             .await
-            .map_err(|err| ClipboardOutboundError::Internal(err.to_string()))?;
+            .map_err(|err| ClipboardOutboundError::Internal(anyhow::Error::from(err)))?;
         info!(
             entry_id = %entry_id.as_str(),
             representation_index = idx,
@@ -994,7 +995,9 @@ pub(crate) async fn publish_oversized_inline_blob_refs(
         );
 
         let representation_index = u32::try_from(idx).map_err(|_| {
-            ClipboardOutboundError::Internal(format!("representation index {idx} cannot fit u32"))
+            ClipboardOutboundError::Internal(anyhow::anyhow!(
+                "representation index {idx} cannot fit u32"
+            ))
         })?;
 
         blob_refs.push(V3BlobRef {
@@ -1029,7 +1032,7 @@ pub(crate) async fn publish_file_blob_refs(
                 entry_id: Some(entry_id.clone()),
             })
             .await
-            .map_err(|err| ClipboardOutboundError::Internal(err.to_string()))?;
+            .map_err(|err| ClipboardOutboundError::Internal(anyhow::Error::from(err)))?;
         info!(
             entry_id = %entry_id.as_str(),
             size_bytes = file.size,

@@ -29,7 +29,7 @@ impl LockSpaceSessionUseCase {
             .current_space_identity
             .current_space_id()
             .await
-            .map_err(|error| LockSpaceSessionError::CurrentSpace(error.to_string()))?
+            .map_err(|error| LockSpaceSessionError::CurrentSpace(anyhow::Error::from(error)))?
             .ok_or(LockSpaceSessionError::NotInitialized)?;
 
         let lock_generation = self.recovery.pause_for_lock().await?;

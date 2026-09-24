@@ -95,12 +95,12 @@ pub struct RetentionEnforcementResultView {
     pub errors: u32,
 }
 
-#[derive(Debug, Clone, Error, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum ClipboardHistoryError {
     #[error("entry not found")]
     NotFound,
     #[error("unsupported clipboard content")]
     UnsupportedContent,
-    #[error("clipboard history operation failed: {0}")]
-    Internal(String),
+    #[error("clipboard history operation failed")]
+    Internal(#[source] anyhow::Error),
 }

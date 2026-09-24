@@ -498,20 +498,24 @@ pub(crate) async fn wire_host_capabilities_with_emitter(
     .map_err(|source| WiringError::StorageUpgradePrerequisite {
         source: source.into(),
     })?;
-    let clipboard_changes = clipboard.take_change_stream().map_err(|_| {
-        WiringError::ClipboardInit("failed to open host clipboard change stream".into())
+    let clipboard_changes = clipboard.take_change_stream().map_err(|error| {
+        WiringError::ClipboardInit(
+            anyhow::Error::from(error).context("failed to open host clipboard change stream"),
+        )
     })?;
     let temporary_dir = directories.temporary().to_path_buf();
     let clipboard_import_root = temporary_dir.join("clipboard-imports");
     if let Err(error) = std::fs::remove_dir_all(&clipboard_import_root) {
         if error.kind() != std::io::ErrorKind::NotFound {
             return Err(WiringError::ClipboardInit(
-                "failed to clear stale host clipboard imports".into(),
+                anyhow::Error::from(error).context("failed to clear stale host clipboard imports"),
             ));
         }
     }
-    std::fs::create_dir_all(&clipboard_import_root).map_err(|_| {
-        WiringError::ClipboardInit("failed to create host clipboard import directory".into())
+    std::fs::create_dir_all(&clipboard_import_root).map_err(|error| {
+        WiringError::ClipboardInit(
+            anyhow::Error::from(error).context("failed to create host clipboard import directory"),
+        )
     })?;
     let files: Arc<dyn HostFileAccess> = Arc::from(files);
     let wired = wire_dependencies_from_inputs(CoreWiringInputs {

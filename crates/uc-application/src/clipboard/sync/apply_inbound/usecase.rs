@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use anyhow::{anyhow, Error as SourceError};
 use moka::sync::Cache;
 use tracing::{debug, error, info, instrument, warn};
 use uc_observability_contract::diagnostics::{DiagnosticTaskKind, ObservationContext};
@@ -563,13 +564,21 @@ impl ApplyInboundClipboardUseCase {
             .get
             .get_entry_attempt(entry_id.as_ref())
             .await
-            .map_err(|error| ApplyInboundError::Internal(error.to_string()))?;
+            .map_err(|error| {
+                ApplyInboundError::Internal(
+                    SourceError::from(error).context("read receive attempt"),
+                )
+            })?;
         let outcome = match current {
             None => ports
                 .begin
                 .begin_first_receive(entry_id.as_ref(), &attempt_id, now_ms)
                 .await
-                .map_err(|error| ApplyInboundError::Internal(error.to_string()))?,
+                .map_err(|error| {
+                    ApplyInboundError::Internal(
+                        SourceError::from(error).context("begin first receive"),
+                    )
+                })?,
             Some(current) if current.state.is_terminal() => ports
                 .begin
                 .begin_redelivery(
@@ -579,9 +588,13 @@ impl ApplyInboundClipboardUseCase {
                     now_ms,
                 )
                 .await
-                .map_err(|error| ApplyInboundError::Internal(error.to_string()))?,
+                .map_err(|error| {
+                    ApplyInboundError::Internal(
+                        SourceError::from(error).context("begin receive redelivery"),
+                    )
+                })?,
             Some(current) => {
-                return Err(ApplyInboundError::Internal(format!(
+                return Err(ApplyInboundError::Internal(anyhow!(
                     "remote receive already has an authoritative {} attempt",
                     current.state
                 )))
@@ -589,11 +602,9 @@ impl ApplyInboundClipboardUseCase {
         };
         match outcome {
             BeginReceiveOutcome::Begun => Ok(Some(attempt_id)),
-            BeginReceiveOutcome::AlreadyReceiving | BeginReceiveOutcome::Superseded => {
-                Err(ApplyInboundError::Internal(
-                    "remote receive attempt could not be started".to_owned(),
-                ))
-            }
+            BeginReceiveOutcome::AlreadyReceiving | BeginReceiveOutcome::Superseded => Err(
+                ApplyInboundError::Internal(anyhow!("remote receive attempt could not be started")),
+            ),
         }
     }
 
@@ -609,7 +620,11 @@ impl ApplyInboundClipboardUseCase {
             .claim_commit
             .claim_receive_commit(entry_id.as_ref(), attempt_id, ports.clock.now_ms())
             .await
-            .map_err(|error| ApplyInboundError::Internal(error.to_string()))?
+            .map_err(|error| {
+                ApplyInboundError::Internal(
+                    SourceError::from(error).context("claim receive commit"),
+                )
+            })?
         {
             return Ok(());
         }
@@ -617,15 +632,19 @@ impl ApplyInboundClipboardUseCase {
             .get
             .get_entry_attempt(entry_id.as_ref())
             .await
-            .map_err(|error| ApplyInboundError::Internal(error.to_string()))?;
+            .map_err(|error| {
+                ApplyInboundError::Internal(
+                    SourceError::from(error).context("read receive attempt"),
+                )
+            })?;
         if current.as_ref().is_some_and(|current| {
             current.current_attempt_id == attempt_id && current.state == AttemptState::Committing
         }) {
             Ok(())
         } else {
-            Err(ApplyInboundError::Internal(
-                "remote receive lost commit authority".to_owned(),
-            ))
+            Err(ApplyInboundError::Internal(anyhow!(
+                "remote receive lost commit authority"
+            )))
         }
     }
 
@@ -641,14 +660,17 @@ impl ApplyInboundClipboardUseCase {
             .begin_failure
             .begin_receive_failure(entry_id.as_ref(), attempt_id, ports.clock.now_ms())
             .await
-            .map_err(|error| ApplyInboundError::Internal(error.to_string()))?
-        {
+            .map_err(|error| {
+                ApplyInboundError::Internal(
+                    SourceError::from(error).context("begin receive failure"),
+                )
+            })? {
             BeginReceiveFailureOutcome::Begun => Ok(()),
             BeginReceiveFailureOutcome::CancellationWon => Err(ApplyInboundError::Internal(
-                "remote receive was cancelled while failing".to_owned(),
+                anyhow!("remote receive was cancelled while failing"),
             )),
             BeginReceiveFailureOutcome::Terminal | BeginReceiveFailureOutcome::Superseded => Err(
-                ApplyInboundError::Internal("remote receive lost failure authority".to_owned()),
+                ApplyInboundError::Internal(anyhow!("remote receive lost failure authority")),
             ),
         }
     }
@@ -665,14 +687,17 @@ impl ApplyInboundClipboardUseCase {
             .request_cancel
             .request_receive_cancellation(entry_id.as_ref(), attempt_id, ports.clock.now_ms())
             .await
-            .map_err(|error| ApplyInboundError::Internal(error.to_string()))?
-        {
+            .map_err(|error| {
+                ApplyInboundError::Internal(
+                    SourceError::from(error).context("request receive cancellation"),
+                )
+            })? {
             RequestReceiveCancellationOutcome::Requested
             | RequestReceiveCancellationOutcome::AlreadyCancelling => Ok(()),
             RequestReceiveCancellationOutcome::TooLate
             | RequestReceiveCancellationOutcome::Terminal
             | RequestReceiveCancellationOutcome::Superseded => Err(ApplyInboundError::Internal(
-                "remote receive lost cancellation authority".to_owned(),
+                anyhow!("remote receive lost cancellation authority"),
             )),
         }
     }
@@ -691,12 +716,16 @@ impl ApplyInboundClipboardUseCase {
 
         let artifact_resolution = if has_artifact_journal {
             let cleanup = self.receive_artifact_cleanup.as_ref().ok_or_else(|| {
-                ApplyInboundError::Internal("receive artifact cleanup port is not wired".to_owned())
+                ApplyInboundError::Internal(anyhow!("receive artifact cleanup port is not wired"))
             })?;
             cleanup
                 .cleanup_receive_artifacts(artifacts)
                 .await
-                .map_err(|error| ApplyInboundError::Internal(error.to_string()))?;
+                .map_err(|error| {
+                    ApplyInboundError::Internal(
+                        SourceError::from(error).context("clean up receive artifacts"),
+                    )
+                })?;
             NoEntryReceiveArtifacts::RolledBack
         } else {
             NoEntryReceiveArtifacts::None
@@ -712,7 +741,11 @@ impl ApplyInboundClipboardUseCase {
                 now_ms: ports.clock.now_ms(),
             })
             .await
-            .map_err(|error| ApplyInboundError::Internal(error.to_string()))?;
+            .map_err(|error| {
+                ApplyInboundError::Internal(
+                    SourceError::from(error).context("commit receive settlement"),
+                )
+            })?;
 
         self.emit_receive_state(
             entry_id,
@@ -731,20 +764,24 @@ impl ApplyInboundClipboardUseCase {
         action: ProvisionalReceiveAction,
     ) -> Result<(), ApplyInboundError> {
         let port = self.provisional_receive.as_ref().ok_or_else(|| {
-            ApplyInboundError::Internal(
-                "mobile provisional receive finalizer is not wired".to_owned(),
-            )
+            ApplyInboundError::Internal(anyhow!(
+                "mobile provisional receive finalizer is not wired"
+            ))
         })?;
         let now_ms = self
             .receive_attempts
             .as_ref()
             .map(|ports| ports.clock.now_ms())
             .ok_or_else(|| {
-                ApplyInboundError::Internal("receive attempt clock is not wired".to_owned())
+                ApplyInboundError::Internal(anyhow!("receive attempt clock is not wired"))
             })?;
         port.finalize_provisional_receive(transfer_id, action, now_ms)
             .await
-            .map_err(|error| ApplyInboundError::Internal(error.to_string()))
+            .map_err(|error| {
+                ApplyInboundError::Internal(
+                    SourceError::from(error).context("finalize provisional receive"),
+                )
+            })
     }
 
     /// Re-activate an entry whose content this device already holds in full.
@@ -1043,9 +1080,9 @@ impl ApplyInboundClipboardUseCase {
         );
         if let Some((transfer_id, role)) = provisional.as_ref() {
             let attempt_id = receive_attempt_id.as_ref().ok_or_else(|| {
-                ApplyInboundError::Internal(
-                    "mobile provisional receive cannot be adopted without an attempt".to_owned(),
-                )
+                ApplyInboundError::Internal(anyhow!(
+                    "mobile provisional receive cannot be adopted without an attempt"
+                ))
             })?;
             if let Err(error) = self
                 .finalize_provisional(
@@ -1155,9 +1192,9 @@ impl ApplyInboundClipboardUseCase {
                                 },
                             },
                         ));
-                        return Err(ApplyInboundError::Internal(format!(
-                            "blob materialize: {error}"
-                        )));
+                        return Err(ApplyInboundError::Internal(
+                            SourceError::from(error).context("materialize inbound blobs"),
+                        ));
                     }
                 };
                 publication = result.take_publication();
@@ -1195,7 +1232,9 @@ impl ApplyInboundClipboardUseCase {
                                 reason: Some(err.to_string()),
                             },
                         ));
-                        return Err(ApplyInboundError::Internal(err.to_string()));
+                        return Err(ApplyInboundError::Internal(
+                            SourceError::from(err).context("verify received file set identity"),
+                        ));
                     }
                 }
                 info!(
@@ -1456,7 +1495,7 @@ impl ApplyInboundClipboardUseCase {
                 )
                 .await?;
                 let action = if replacing { "replace" } else { "capture" };
-                return Err(ApplyInboundError::Internal(format!(
+                return Err(ApplyInboundError::Internal(anyhow!(
                     "{action} returned None for RemotePush origin (unexpected)"
                 )));
             }

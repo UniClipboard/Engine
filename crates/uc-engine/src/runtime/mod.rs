@@ -745,8 +745,10 @@ mod tests {
 
     #[test]
     fn storage_failures_use_distinct_stable_codes() {
-        let stats = map_storage_error(StorageFacadeError::Stats("private detail".into()));
-        let clear = map_storage_error(StorageFacadeError::ClearCache("private detail".into()));
+        let stats = map_storage_error(StorageFacadeError::Stats(anyhow::anyhow!("private detail")));
+        let clear = map_storage_error(StorageFacadeError::ClearCache(anyhow::anyhow!(
+            "private detail"
+        )));
 
         assert_eq!(stats.code(), QUERY_STORAGE_STATS_FAILED_CODE);
         assert_eq!(clear.code(), CLEAR_STORAGE_CACHE_FAILED_CODE);

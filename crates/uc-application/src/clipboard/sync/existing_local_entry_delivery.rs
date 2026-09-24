@@ -195,10 +195,7 @@ fn map_outbound_payload_error(err: OutboundPayloadError, entry_id: &EntryId) -> 
             reason: NotResendableReason::PayloadLost,
         },
         OutboundPayloadError::Publish(err) => ResendEntryError::Dispatch(anyhow::Error::new(err)),
-        // Internal 仍是字符串变体，来源在 OutboundPayloadError 中已丢失，由其所在切片修复。
-        OutboundPayloadError::Internal(message) => {
-            ResendEntryError::Dispatch(anyhow::anyhow!(message))
-        }
+        OutboundPayloadError::Internal(source) => ResendEntryError::Dispatch(source),
     }
 }
 

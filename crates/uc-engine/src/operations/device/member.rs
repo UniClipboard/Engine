@@ -732,7 +732,7 @@ fn map_remove_space_member_error(error: RemoveSpaceMemberError) -> EngineError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uc_core::membership::{WorkspaceFailureCategory, WorkspacePhase};
+    use uc_core::membership::{MembershipError, WorkspaceFailureCategory, WorkspacePhase};
 
     fn handoff_pending_removal(includes_local_device: bool) -> DeviceTrustStatus {
         use uc_application::deps::SpaceMemberPauseReason;
@@ -1006,7 +1006,9 @@ mod tests {
     fn roster_failures_keep_stable_categories_and_distinct_codes() {
         let missing = map_roster_error(RosterError::NotFound("private id".into()));
         let unavailable = map_roster_error(RosterError::Unavailable);
-        let repository = map_roster_error(RosterError::MemberRepository("private detail".into()));
+        let repository = map_roster_error(RosterError::MemberRepository(
+            MembershipError::Repository("private detail".into()),
+        ));
 
         assert_eq!(missing.category(), EngineErrorCategory::NotFound);
         assert_eq!(unavailable.category(), EngineErrorCategory::Unavailable);
@@ -1019,7 +1021,9 @@ mod tests {
     fn workspace_convergence_errors_have_a_stable_public_mapping() {
         let unavailable = map_roster_error(RosterError::MembershipReconciliationUnavailable);
         let corrupt = map_roster_error(RosterError::MembershipReconciliationCorrupt);
-        let failed = map_roster_error(RosterError::MemberRemoval("internal detail".into()));
+        let failed = map_roster_error(RosterError::MemberRemoval(anyhow::anyhow!(
+            "internal detail"
+        )));
         let invalid_input = map_roster_error(RosterError::MemberRemovalInvalidInput);
         let target_not_found = map_roster_error(RosterError::MemberRemovalTargetNotFound);
 

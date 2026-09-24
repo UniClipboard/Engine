@@ -1346,7 +1346,8 @@ async fn capture_returning_none_maps_to_internal_error() {
         .await
         .expect_err("Ok(None) from capture must surface as error");
     match err {
-        ApplyInboundError::Internal(msg) => {
+        ApplyInboundError::Internal(source) => {
+            let msg = source.to_string();
             assert!(
                 msg.contains("RemotePush"),
                 "internal message should reference origin, got: {msg}"
@@ -4585,7 +4586,10 @@ async fn apply_inbound_does_not_replace_an_existing_nonterminal_attempt() {
         .await
         .expect_err("a nonterminal attempt cannot be replaced");
 
-    assert!(error
+    let ApplyInboundError::Internal(source) = &error else {
+        panic!("expected Internal, got {error:?}");
+    };
+    assert!(source
         .to_string()
         .contains("authoritative receiving attempt"));
     assert_eq!(gate.begin_calls.load(Ordering::SeqCst), 0);

@@ -2,8 +2,8 @@ use crate::space::lifecycle::SpaceActivityError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LockSpaceSessionError {
-    #[error("failed to load current Space identity: {0}")]
-    CurrentSpace(String),
+    #[error("failed to load current Space identity")]
+    CurrentSpace(#[source] anyhow::Error),
     #[error("current Space is not initialized")]
     NotInitialized,
     #[error(transparent)]

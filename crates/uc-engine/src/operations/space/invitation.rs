@@ -284,7 +284,7 @@ mod tests {
     fn unexpected_internal_failure_records_one_terminal_failure() {
         let (sink, analytics) = recording_analytics();
         let error = map_issue_invitation_error(IssuePairingInvitationError::Internal(
-            "private internal detail".into(),
+            anyhow::anyhow!("private internal detail"),
         ));
 
         capture_invitation_failure(&analytics, &error);

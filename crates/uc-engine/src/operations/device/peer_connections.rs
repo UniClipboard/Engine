@@ -114,6 +114,7 @@ mod tests {
     use tracing_subscriber::fmt::MakeWriter;
 
     use super::*;
+    use uc_core::membership::MembershipError;
 
     fn relay_peer(device_id: &str, relay_url: Option<&str>) -> PeerSnapshotView {
         PeerSnapshotView {
@@ -150,9 +151,9 @@ mod tests {
 
     #[test]
     fn query_errors_do_not_expose_internal_details() {
-        let error = map_query_error(RosterError::MemberRepository(
-            "private database path".to_string(),
-        ));
+        let error = map_query_error(RosterError::MemberRepository(MembershipError::Repository(
+            "private database path".into(),
+        )));
 
         assert_eq!(error.code(), QUERY_PEER_CONNECTIONS_FAILED_CODE);
         assert_eq!(error.category(), EngineErrorCategory::Internal);

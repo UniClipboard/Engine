@@ -33,8 +33,8 @@ pub enum ClipboardLiveIndexOutcome {
 
 #[derive(Debug, Error)]
 pub enum ClipboardLiveIndexError {
-    #[error("clipboard live index failed: {0}")]
-    Internal(String),
+    #[error("clipboard live index failed")]
+    Internal(#[source] anyhow::Error),
 }
 
 #[async_trait]
@@ -81,7 +81,7 @@ impl ClipboardLiveIndexPort for ClipboardLiveIndexer {
             .clipboard_entry_repo
             .get_entry(&entry_id)
             .await
-            .map_err(|err| ClipboardLiveIndexError::Internal(err.to_string()))?
+            .map_err(|err| ClipboardLiveIndexError::Internal(anyhow::Error::from(err)))?
         {
             Some(entry) => entry,
             None => {
@@ -95,7 +95,7 @@ impl ClipboardLiveIndexPort for ClipboardLiveIndexer {
             .deps
             .representation_policy
             .select(input.snapshot.as_ref())
-            .map_err(|err| ClipboardLiveIndexError::Internal(err.to_string()))?;
+            .map_err(|err| ClipboardLiveIndexError::Internal(anyhow::Error::from(err)))?;
 
         // Resolve the originating device from the event store, mirroring the
         // rebuild path. A missing event or lookup error degrades to "unknown
@@ -164,7 +164,7 @@ impl ClipboardLiveIndexPort for ClipboardLiveIndexer {
             .deps
             .search_pipeline
             .build(&pipeline_input, &search_key)
-            .map_err(|err| ClipboardLiveIndexError::Internal(err.to_string()))?;
+            .map_err(|err| ClipboardLiveIndexError::Internal(anyhow::Error::from(err)))?;
 
         // An entry with no postings (e.g. an image with no searchable text) is
         // still indexed: the search index must hold every browsable entry, not
@@ -174,7 +174,7 @@ impl ClipboardLiveIndexPort for ClipboardLiveIndexer {
             .search_index
             .index_entry(document, postings)
             .await
-            .map_err(|err| ClipboardLiveIndexError::Internal(err.to_string()))?;
+            .map_err(|err| ClipboardLiveIndexError::Internal(anyhow::Error::from(err)))?;
 
         Ok(ClipboardLiveIndexOutcome::Indexed)
     }

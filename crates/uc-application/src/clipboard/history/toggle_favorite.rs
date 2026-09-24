@@ -16,8 +16,8 @@ pub(crate) struct ToggleFavoriteClipboardEntryUseCase {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ToggleFavoriteError {
-    #[error("Repository error: {0}")]
-    RepositoryError(String),
+    #[error("Repository error")]
+    RepositoryError(#[source] anyhow::Error),
 }
 
 impl ToggleFavoriteClipboardEntryUseCase {
@@ -48,7 +48,7 @@ impl ToggleFavoriteClipboardEntryUseCase {
             .entry_repo
             .set_favorite(entry_id, is_favorited)
             .await
-            .map_err(|e| ToggleFavoriteError::RepositoryError(e.to_string()))?;
+            .map_err(|e| ToggleFavoriteError::RepositoryError(anyhow::Error::from(e)))?;
 
         if updated {
             // Mirror the user-state into the derived `favorited` tag so search

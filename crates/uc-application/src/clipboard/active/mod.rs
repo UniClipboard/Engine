@@ -384,9 +384,10 @@ impl InboundPulledContentStore for PulledContentStore {
             .cipher
             .decrypt(&transfer_envelope)
             .await
-            .map_err(|err| InboundPulledContentStoreError::Decrypt(err.to_string()))?;
-        let snapshot = decode_v3_bytes_to_snapshot(&plaintext)
-            .map_err(|err| InboundPulledContentStoreError::Store(format!("decode: {err}")))?;
+            .map_err(|err| InboundPulledContentStoreError::Decrypt(anyhow::Error::from(err)))?;
+        let snapshot = decode_v3_bytes_to_snapshot(&plaintext).map_err(|err| {
+            InboundPulledContentStoreError::Store(anyhow::Error::from(err).context("decode"))
+        })?;
         let categories = ClipboardContentCategorySet::from_snapshot(&snapshot);
         if !self
             .receive_gate
@@ -412,7 +413,7 @@ impl InboundPulledContentStore for PulledContentStore {
                 resurface_intent: ClipboardWriteIntent::RemotePush,
             })
             .await
-            .map_err(|err| InboundPulledContentStoreError::Store(err.to_string()))?;
+            .map_err(|err| InboundPulledContentStoreError::Store(anyhow::Error::from(err)))?;
 
         match outcome {
             InboundClipboardApplyOutcome::Applied { entry_id } => Ok(
@@ -431,8 +432,8 @@ impl InboundPulledContentStore for PulledContentStore {
             ))),
             InboundClipboardApplyOutcome::DecodeFailed { reason } => {
                 warn!(reason, "pulled content store: envelope decode failed");
-                Err(InboundPulledContentStoreError::Store(format!(
-                    "decode: {reason}"
+                Err(InboundPulledContentStoreError::Store(anyhow::anyhow!(
+                    "pulled envelope decode failed"
                 )))
             }
         }

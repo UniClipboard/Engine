@@ -279,7 +279,11 @@ impl ClipboardSyncFacade {
         progress
             .get_entry_receive_progress(entry_id.as_ref())
             .await
-            .map_err(|error| CancelEntryReceiveError::Attempt(error.to_string()))
+            .map_err(|error| {
+                CancelEntryReceiveError::Attempt(
+                    anyhow::Error::from(error).context("read entry receive progress"),
+                )
+            })
     }
 
     pub async fn list_entry_receive_progress(
@@ -291,7 +295,11 @@ impl ClipboardSyncFacade {
             .ok_or(CancelEntryReceiveError::Unavailable)?
             .list_non_terminal_attempts()
             .await
-            .map_err(|error| CancelEntryReceiveError::Attempt(error.to_string()))?;
+            .map_err(|error| {
+                CancelEntryReceiveError::Attempt(
+                    anyhow::Error::from(error).context("list receive attempts"),
+                )
+            })?;
         let progress = self
             .receive_progress
             .as_ref()
@@ -301,7 +309,11 @@ impl ClipboardSyncFacade {
             if let Some(current) = progress
                 .get_entry_receive_progress(&attempt.entry_id)
                 .await
-                .map_err(|error| CancelEntryReceiveError::Attempt(error.to_string()))?
+                .map_err(|error| {
+                    CancelEntryReceiveError::Attempt(
+                        anyhow::Error::from(error).context("read entry receive progress"),
+                    )
+                })?
             {
                 result.push(current);
             }

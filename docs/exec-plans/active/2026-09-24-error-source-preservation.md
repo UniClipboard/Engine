@@ -160,7 +160,7 @@ E1 的检查会拒绝只删标识、仍保留 `{error}` 的改法，所以 E4 �
 - 转入 E11：`mobile_sync/file_staging.rs` 文本中的路径与 URI。其端口 `MobileFileStagingPort` 只服务兼容线，
   而兼容线 `get_file.rs` 自己也把 URI 与错误文本写入日志和 `Staging(String)`；只改 Infra 端堵不住泄露。
 - 遗留：`OutboundPayloadError::Internal(String)` 仍是字符串变体，`ResendEntryError` 暂以 `anyhow!(message)` 承接，
-  由 E5 修复。
+  由 E5 修复（已在 E5 Application 批次修复）。
 
 ### E5 字符串错误变体改为携带 source（进行中）
 
@@ -187,6 +187,26 @@ E1 的检查会拒绝只删标识、仍保留 `{error}` 的改法，所以 E4 �
     错误码、不用文本，对外行为不变。
   - 发现并修正：`anyhow::Error` 不带 context 直接 `.into()` 成盒装来源时，根错误无法 `downcast`。用临时类型让编译器列出
     全部此类位置（19 处，均在 `uc-infra`），逐个补上固定动作 context；规则已写入错误处理规范。
+- Application 门面与用例（已完成）：`DiagnosticsFacadeError`、`ApplyInboundError`、`RosterError`、`ClipboardHistoryError`、
+  `ResourceFacadeError`、`CancelEntryReceiveError`、`ClipboardOutboundError`、`OutboundPayloadError`、`ClipboardCaptureFacadeError`、
+  `ClipboardLiveIndexError`、`SettingsFacadeError::{Load, Save}`、`RelayConfigurationError::{Load, Save}`、`StorageFacadeError`、
+  升级检测与确认错误、`IssuePairingInvitationError::Internal`、`JoinSpaceError::Settings`、各 Space 生命周期用例错误、
+  `SpaceActivityError::Receive`、`BlobTransferError`、`InboundPulledContentStoreError`、`ListProjectionsError`、
+  `ToggleFavoriteError`、`BuildSnapshotError::PasteRepBlobFetchFailed`；Core 的 `ActiveClipboardPullServeError::Internal`；
+  Engine 的 `WiringError` 初始化变体。
+  - 有具体类型时直接保存：`RosterError` 保存 `MembershipError`、`LocalIdentityError`、`SpaceProtectionError`；
+    `CancelEntryReceiveError` 保存 `PublishLogError`、`DirectoryStagingCleanupError`；版本号解析失败保存 `semver::Error`；
+    `IssuePairingInvitationError::Internal` 保存整个 `InvitationError`（Core 的 `InvitationError::Internal(String)` 留待 Core 批次）。
+  - `CancelEntryReceiveError::Transfer` 原先把多个取消失败的文本用 `; ` 拼接，改为保存第一个来源并记录失败数量。
+  - `LocalSessionReadiness` 原先以 `Result<(), String>` 返回，改为 `anyhow::Result`；两个只转调同一私有方法的入口合并为 `prepare_data`。
+  - 隐私修复：出站目录成员未发布时的错误原先带出成员路径，改为固定文本；拉取服务的 Infra 适配器不再把内部错误文本写入日志字段；
+    主动拉取解码失败不再把原因文本拼进存储错误。
+  - `ClipboardHistoryError` 去掉 `Clone`/`PartialEq`/`Eq`；`ApplyInboundError::WriteCoordinator(String)` 无构造点，删除。
+  - 宿主可见行为不变：Engine 对上述错误只映射固定错误码与分类。
+  - 测试：拉取服务加密失败可沿链取回 `TransferCipherError`；取消接收时两个传输取消失败保留首个来源（可取回 `io::Error`）
+    与失败数，显示文本不含下层文本。
+  - 剩余 S3 集中在 Infra（`SpaceAccessError`、legacy bootstrap、`EntryFileSetError` 等）与兼容线，以及 Core 的
+    `InvitationError::Internal`、`FileTransferProjectionError::Backend`、`MembershipSecurityUpdateError::Repository`。
 - 待决策：`RelayProbeError` 的文本经 `RelayProbeOutcome::{Dns, Tls, Handshake, Other} { message }` 原样交给宿主显示，
   属于宿主可见文本。改为 source 需要先确定宿主诊断文本的契约，暂不处理。
 - 后续事项：投递失败时 `reason_detail` 把 `ClipboardDispatchError` 的来源文本写入 `EntryDeliveryRecord` 持久化字段，

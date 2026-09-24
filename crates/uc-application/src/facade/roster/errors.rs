@@ -1,6 +1,8 @@
 //! Application-layer errors for `MemberRosterFacade`.
 
 use thiserror::Error;
+use uc_core::membership::{MembershipError, SpaceProtectionError};
+use uc_core::ports::LocalIdentityError;
 
 /// Failure modes of [`crate::facade::roster::MemberRosterFacade::list_with_peer_reachability`].
 ///
@@ -23,8 +25,8 @@ pub enum RosterError {
     MembershipReconciliationCorrupt,
 
     /// 分布式成员移除流程失败。
-    #[error("distributed member removal failed: {0}")]
-    MemberRemoval(String),
+    #[error("distributed member removal failed")]
+    MemberRemoval(#[source] anyhow::Error),
 
     /// 成员移除请求的目标不合法，例如移除本机成员实例。
     #[error("member removal input is invalid")]
@@ -34,26 +36,25 @@ pub enum RosterError {
     #[error("member removal target was not found")]
     MemberRemovalTargetNotFound,
 
-    /// `MemberRepositoryPort::list` 故障。消息面向日志;UI 上层一般
-    /// 展示一句"无法加载成员列表"+ 原样 error 字符串调试。
-    #[error("failed to list members: {0}")]
-    MemberRepository(String),
+    /// `MemberRepositoryPort` 读写故障。来源只供诊断沿链分类，不直接展示给 UI。
+    #[error("member repository failed")]
+    MemberRepository(#[source] MembershipError),
 
     /// `LocalIdentityPort::get_current_fingerprint` 故障——adapter 在读
     /// 身份存储(keychain / 文件)时出错。区别于"还没创建身份"
     /// (那返回 `Ok(None)`,不是 error),此 variant 表示存储本身故障。
-    #[error("failed to read local identity: {0}")]
-    LocalIdentity(String),
+    #[error("failed to read local identity")]
+    LocalIdentity(#[source] LocalIdentityError),
 
     /// 目标成员不存在。
     #[error("member `{0}` not found")]
     NotFound(String),
 
-    #[error("failed to bootstrap legacy space security: {0}")]
-    GroupBootstrap(String),
+    #[error("failed to bootstrap legacy space security")]
+    GroupBootstrap(#[source] anyhow::Error),
 
-    #[error("failed to query space protection: {0}")]
-    SpaceProtection(String),
+    #[error("failed to query space protection")]
+    SpaceProtection(#[source] SpaceProtectionError),
 
     /// 成员 roster 入口尚未接入。通常表示 daemon/CLI 组合阶段没有注入该能力。
     #[error("member roster facade unavailable")]

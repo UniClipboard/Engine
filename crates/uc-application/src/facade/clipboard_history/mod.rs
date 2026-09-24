@@ -339,12 +339,18 @@ impl ClipboardHistoryFacade {
             PayloadAvailability::Inline,
             None,
         )
-        .map_err(|e| ClipboardHistoryError::Internal(format!("build representation: {e}")))?;
+        .map_err(|e| {
+            ClipboardHistoryError::Internal(
+                anyhow::Error::from(e).context("build seed representation"),
+            )
+        })?;
 
         self.seed_event_writer
             .insert_event(&event, &vec![rep])
             .await
-            .map_err(|e| ClipboardHistoryError::Internal(format!("insert_event: {e}")))?;
+            .map_err(|e| {
+                ClipboardHistoryError::Internal(anyhow::Error::from(e).context("insert seed event"))
+            })?;
 
         // ClipboardEntry 与 ClipboardSelection 是搭配的——entry_repo 的
         // save_entry_and_selection 会同时写两张表。selection 里只有一个
@@ -365,7 +371,9 @@ impl ClipboardHistoryFacade {
             .save_entry_and_selection(&entry, &selection)
             .await
             .map_err(|e| {
-                ClipboardHistoryError::Internal(format!("save_entry_and_selection: {e}"))
+                ClipboardHistoryError::Internal(
+                    anyhow::Error::from(e).context("save seed entry and selection"),
+                )
             })?;
 
         Ok(entry_id.to_string())
@@ -413,7 +421,9 @@ impl ClipboardHistoryFacade {
         self.toggle_favorite_uc
             .execute(&parsed_id, is_favorited)
             .await
-            .map_err(|err| ClipboardHistoryError::Internal(err.to_string()))
+            .map_err(|err| {
+                ClipboardHistoryError::Internal(anyhow::Error::from(err).context("toggle favorite"))
+            })
     }
 
     pub async fn stats(&self) -> Result<ClipboardStatsView, ClipboardHistoryError> {
@@ -469,10 +479,11 @@ impl ClipboardHistoryFacade {
         let Some(uc) = self.cleanup_uc.as_ref() else {
             return Ok(CleanupResultView::default());
         };
-        let result = uc
-            .execute()
-            .await
-            .map_err(|e| ClipboardHistoryError::Internal(e.to_string()))?;
+        let result = uc.execute().await.map_err(|e| {
+            ClipboardHistoryError::Internal(
+                anyhow::Error::from(e).context("clean up expired files"),
+            )
+        })?;
         Ok(cleanup_to_view(result))
     }
 
@@ -490,10 +501,11 @@ impl ClipboardHistoryFacade {
         let Some(uc) = self.reconcile_uc.as_ref() else {
             return Ok(ReconcileResultView::default());
         };
-        let result = uc
-            .execute()
-            .await
-            .map_err(|e| ClipboardHistoryError::Internal(e.to_string()))?;
+        let result = uc.execute().await.map_err(|e| {
+            ClipboardHistoryError::Internal(
+                anyhow::Error::from(e).context("reconcile missing files"),
+            )
+        })?;
         Ok(reconcile_to_view(result))
     }
 
@@ -506,20 +518,18 @@ impl ClipboardHistoryFacade {
     pub(crate) async fn enforce_retention_policy(
         &self,
     ) -> Result<RetentionEnforcementResultView, ClipboardHistoryError> {
-        let result = self
-            .retention_uc
-            .execute()
-            .await
-            .map_err(|e| ClipboardHistoryError::Internal(e.to_string()))?;
+        let result = self.retention_uc.execute().await.map_err(|e| {
+            ClipboardHistoryError::Internal(
+                anyhow::Error::from(e).context("enforce retention policy"),
+            )
+        })?;
         Ok(retention_to_view(result))
     }
 
     pub async fn clear_history(&self) -> Result<ClearHistoryResultView, ClipboardHistoryError> {
-        let result = self
-            .clear_uc
-            .execute()
-            .await
-            .map_err(|err| ClipboardHistoryError::Internal(err.to_string()))?;
+        let result = self.clear_uc.execute().await.map_err(|err| {
+            ClipboardHistoryError::Internal(anyhow::Error::from(err).context("clear history"))
+        })?;
         Ok(ClearHistoryResultView {
             deleted_count: result.deleted_count,
             failed_entries: result.failed_entries,
@@ -611,10 +621,10 @@ fn map_history_error(err: anyhow::Error) -> ClipboardHistoryError {
     } else if lower.contains("not text content") || lower.contains("not text") {
         ClipboardHistoryError::UnsupportedContent
     } else {
-        ClipboardHistoryError::Internal(message)
+        ClipboardHistoryError::Internal(err)
     }
 }
 
 fn map_list_error(err: ListProjectionsError) -> ClipboardHistoryError {
-    ClipboardHistoryError::Internal(err.to_string())
+    ClipboardHistoryError::Internal(anyhow::Error::from(err).context("list entry projections"))
 }

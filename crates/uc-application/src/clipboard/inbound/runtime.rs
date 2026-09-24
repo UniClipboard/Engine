@@ -884,7 +884,7 @@ mod tests {
                 }),
                 Err(InboundClipboardApplyError::Internal(
                     crate::clipboard::sync::apply_inbound::ApplyInboundError::Internal(
-                        "storage unavailable".to_owned(),
+                        anyhow::anyhow!("storage unavailable"),
                     ),
                 )),
             ])),

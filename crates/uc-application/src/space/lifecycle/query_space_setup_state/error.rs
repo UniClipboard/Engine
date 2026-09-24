@@ -1,8 +1,8 @@
 #[derive(Debug, thiserror::Error)]
 pub enum QuerySetupStateError {
-    #[error("failed to read setup state: {0}")]
-    StorageFailed(String),
+    #[error("failed to read setup state")]
+    StorageFailed(#[source] anyhow::Error),
 
-    #[error("internal error: {0}")]
-    Internal(String),
+    #[error("internal error")]
+    Internal(#[source] anyhow::Error),
 }

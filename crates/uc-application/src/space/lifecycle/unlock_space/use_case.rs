@@ -54,9 +54,9 @@ impl UnlockSpaceUseCase {
             .map_err(UnlockSpaceError::internal)?;
 
         self.readiness
-            .complete_after_unlock()
+            .prepare_data()
             .await
-            .map_err(|message| UnlockSpaceError::internal(anyhow::anyhow!(message)))?;
+            .map_err(UnlockSpaceError::internal)?;
         self.recovery
             .request_activation()
             .await

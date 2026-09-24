@@ -113,9 +113,11 @@ impl ActiveClipboardPullServeUseCase {
             }
             Err(err) => {
                 warn!(error = %err, "pull serve: entry lookup failed");
-                return Err(ActiveClipboardPullServeError::Internal(format!(
-                    "entry lookup: {err}"
-                )));
+                return Err(ActiveClipboardPullServeError::Internal(
+                    anyhow::Error::from(err)
+                        .context("look up entry by snapshot hash")
+                        .into(),
+                ));
             }
         };
 
@@ -154,13 +156,17 @@ impl ActiveClipboardPullServeUseCase {
             }
             Err(OutboundPayloadError::Publish(err)) => {
                 warn!(error = %err, "pull serve: blob publish failed");
-                return Err(ActiveClipboardPullServeError::Internal(format!(
-                    "publish blobs: {err}"
-                )));
+                return Err(ActiveClipboardPullServeError::Internal(
+                    anyhow::Error::from(err)
+                        .context("publish pull blobs")
+                        .into(),
+                ));
             }
-            Err(OutboundPayloadError::Internal(msg)) => {
-                warn!(error = %msg, "pull serve: payload assembly failed");
-                return Err(ActiveClipboardPullServeError::Internal(msg));
+            Err(OutboundPayloadError::Internal(source)) => {
+                warn!(error = %source, "pull serve: payload assembly failed");
+                return Err(ActiveClipboardPullServeError::Internal(
+                    source.context("assemble pull payload").into(),
+                ));
             }
         };
 
@@ -180,9 +186,11 @@ impl ActiveClipboardPullServeUseCase {
             Ok(encoded) => encoded,
             Err(err) => {
                 warn!(error = %err, "pull serve: V3 envelope encode failed");
-                return Err(ActiveClipboardPullServeError::Internal(format!(
-                    "encode envelope: {err}"
-                )));
+                return Err(ActiveClipboardPullServeError::Internal(
+                    anyhow::Error::from(err)
+                        .context("encode pull envelope")
+                        .into(),
+                ));
             }
         };
 
@@ -203,9 +211,11 @@ impl ActiveClipboardPullServeUseCase {
             }
             Err(err) => {
                 warn!(error = %err, "pull serve: transfer cipher failed");
-                Err(ActiveClipboardPullServeError::Internal(format!(
-                    "encrypt: {err}"
-                )))
+                Err(ActiveClipboardPullServeError::Internal(
+                    anyhow::Error::from(err)
+                        .context("encrypt pull envelope")
+                        .into(),
+                ))
             }
         }
     }
@@ -228,7 +238,9 @@ fn map_reconstruct_error(
     match err {
         BuildSnapshotError::Repository(inner) => {
             warn!(error = %inner, entry_id = %entry_id, "pull serve: snapshot reconstruct repository error");
-            ActiveClipboardPullServeError::Internal(inner.to_string())
+            ActiveClipboardPullServeError::Internal(
+                inner.context("reconstruct pull snapshot").into(),
+            )
         }
         other => {
             debug!(error = %other, entry_id = %entry_id, "pull serve: content not materializable");
@@ -766,6 +778,33 @@ mod tests {
             .await
             .expect_err("locked session must not serve");
         assert!(matches!(err, ActiveClipboardPullServeError::NotUnlocked));
+    }
+
+    /// 加密失败归入 Internal，且下层 `TransferCipherError` 仍可沿 source chain 取回。
+    #[tokio::test]
+    async fn cipher_failure_keeps_its_source() {
+        let cipher = StubCipher::new(Err(TransferCipherError::EncryptionFailed));
+        let uc = build_uc(
+            Some(EntryId::from("entry-1")),
+            ResolveBehavior::Inline(b"hello pull".to_vec()),
+            Arc::clone(&cipher) as _,
+        );
+
+        let err = uc
+            .serve("blake3v1:whatever")
+            .await
+            .expect_err("cipher failure must not serve");
+        assert!(matches!(err, ActiveClipboardPullServeError::Internal(_)));
+        let mut source = std::error::Error::source(&err);
+        let mut found = false;
+        while let Some(current) = source {
+            found |= matches!(
+                current.downcast_ref::<TransferCipherError>(),
+                Some(TransferCipherError::EncryptionFailed)
+            );
+            source = current.source();
+        }
+        assert!(found, "TransferCipherError must stay in the source chain");
     }
 
     /// V4 — payload lost (resolver returns Lost): reconstruct fails → the use

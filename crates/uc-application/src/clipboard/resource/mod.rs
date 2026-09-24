@@ -45,8 +45,8 @@ pub enum ResourceFacadeError {
     NotFound,
     #[error("resource mismatch: {0}")]
     Mismatch(String),
-    #[error("failed to resolve resource: {0}")]
-    Internal(String),
+    #[error("failed to resolve resource")]
+    Internal(#[source] anyhow::Error),
 }
 
 pub struct ResourceFacade {
@@ -66,7 +66,11 @@ impl ResourceFacade {
             .representation_by_blob_id
             .get_representation_by_blob_id(&blob_id)
             .await
-            .map_err(|err| ResourceFacadeError::Internal(err.to_string()))?
+            .map_err(|err| {
+                ResourceFacadeError::Internal(
+                    anyhow::Error::from(err).context("look up representation by blob"),
+                )
+            })?
             .ok_or(ResourceFacadeError::NotFound)?;
 
         if representation.blob_id.as_ref() != Some(&blob_id) {
@@ -76,12 +80,9 @@ impl ResourceFacade {
         }
 
         let mime_type = representation.mime_type.as_ref().map(mime_to_string);
-        let bytes = self
-            .deps
-            .blob_store
-            .get(&blob_id)
-            .await
-            .map_err(|err| ResourceFacadeError::Internal(err.to_string()))?;
+        let bytes = self.deps.blob_store.get(&blob_id).await.map_err(|err| {
+            ResourceFacadeError::Internal(anyhow::Error::from(err).context("read blob"))
+        })?;
 
         Ok(BinaryResourceView { mime_type, bytes })
     }
@@ -97,7 +98,9 @@ impl ResourceFacade {
             .thumbnail_repo
             .get_by_representation_id(&representation_id)
             .await
-            .map_err(|err| ResourceFacadeError::Internal(err.to_string()))?
+            .map_err(|err| {
+                ResourceFacadeError::Internal(anyhow::Error::from(err).context("look up thumbnail"))
+            })?
             .ok_or(ResourceFacadeError::NotFound)?;
 
         if metadata.representation_id != representation_id {
@@ -112,7 +115,11 @@ impl ResourceFacade {
             .blob_store
             .get(&metadata.thumbnail_blob_id)
             .await
-            .map_err(|err| ResourceFacadeError::Internal(err.to_string()))?;
+            .map_err(|err| {
+                ResourceFacadeError::Internal(
+                    anyhow::Error::from(err).context("read thumbnail blob"),
+                )
+            })?;
 
         Ok(BinaryResourceView { mime_type, bytes })
     }
@@ -148,7 +155,9 @@ impl ResourceFacade {
             .entry_repo
             .get_entry(&entry_id)
             .await
-            .map_err(|err| ResourceFacadeError::Internal(err.to_string()))?
+            .map_err(|err| {
+                ResourceFacadeError::Internal(anyhow::Error::from(err).context("read entry"))
+            })?
             .ok_or(ResourceFacadeError::NotFound)?;
 
         let representations = self
@@ -156,7 +165,11 @@ impl ResourceFacade {
             .representations_for_event
             .get_representations_for_event(&entry.event_id)
             .await
-            .map_err(|err| ResourceFacadeError::Internal(err.to_string()))?;
+            .map_err(|err| {
+                ResourceFacadeError::Internal(
+                    anyhow::Error::from(err).context("read entry representations"),
+                )
+            })?;
 
         let file_rep = representations
             .iter()
@@ -167,8 +180,9 @@ impl ResourceFacade {
             .inline_data
             .as_deref()
             .ok_or(ResourceFacadeError::NotFound)?;
-        let uri_list = std::str::from_utf8(uri_list)
-            .map_err(|err| ResourceFacadeError::Internal(format!("uri-list not utf-8: {err}")))?;
+        let uri_list = std::str::from_utf8(uri_list).map_err(|err| {
+            ResourceFacadeError::Internal(anyhow::Error::from(err).context("decode file uri list"))
+        })?;
 
         let path = first_local_file_path(uri_list).ok_or(ResourceFacadeError::NotFound)?;
 
@@ -193,9 +207,9 @@ impl ResourceFacade {
 
         let mime = file_rep.mime_type.as_ref().map(mime_to_string);
 
-        let bytes = tokio::fs::read(&path)
-            .await
-            .map_err(|err| ResourceFacadeError::Internal(format!("failed to read file: {err}")))?;
+        let bytes = tokio::fs::read(&path).await.map_err(|err| {
+            ResourceFacadeError::Internal(anyhow::Error::from(err).context("read cached file"))
+        })?;
 
         Ok(FileResourceView {
             filename,

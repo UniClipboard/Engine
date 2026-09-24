@@ -3,8 +3,8 @@ pub enum JoinSpaceError {
     #[error("device name is required")]
     DeviceNameRequired,
 
-    #[error("failed to save device name: {0}")]
-    Settings(String),
+    #[error("failed to save device name")]
+    Settings(#[source] anyhow::Error),
 
     #[error("space admission is locked")]
     Locked,

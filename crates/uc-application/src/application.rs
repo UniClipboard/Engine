@@ -753,9 +753,9 @@ mod tests {
     fn runtime_error_keeps_typed_source_and_redacts_public_text() {
         let error = ApplicationRuntimeError::LocalClipboard {
             source: LocalClipboardProcessError::Capture {
-                source: crate::facade::ClipboardCaptureFacadeError::Internal(
-                    "/private/clipboard.txt".to_owned(),
-                ),
+                source: crate::facade::ClipboardCaptureFacadeError::Internal(anyhow::anyhow!(
+                    "/private/clipboard.txt"
+                )),
             },
         };
 

@@ -229,9 +229,9 @@ mod tests {
     fn history_failures_have_stable_categories_without_exposing_details() {
         let missing = map_history_error(ClipboardHistoryError::NotFound);
         let unsupported = map_history_error(ClipboardHistoryError::UnsupportedContent);
-        let internal = map_history_error(ClipboardHistoryError::Internal(
-            "/private/path/secret.txt".into(),
-        ));
+        let internal = map_history_error(ClipboardHistoryError::Internal(anyhow::anyhow!(
+            "/private/path/secret.txt"
+        )));
 
         assert_eq!(missing.category(), EngineErrorCategory::NotFound);
         assert_eq!(unsupported.category(), EngineErrorCategory::Conflict);

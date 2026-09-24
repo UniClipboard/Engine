@@ -36,21 +36,21 @@ pub type UpgradeStatus = InnerUpgradeStatus;
 /// 解耦，未来 use case 内部错误演化不会破坏对外 API。
 #[derive(Debug, Error)]
 pub enum DetectUpgradeError {
-    #[error("current build version is malformed: {0}")]
-    CurrentVersionMalformed(String),
+    #[error("current build version is malformed")]
+    CurrentVersionMalformed(#[source] semver::Error),
 
-    #[error("read app version cursor failed: {0}")]
-    ReadCursor(String),
+    #[error("read app version cursor failed")]
+    ReadCursor(#[source] anyhow::Error),
 
-    #[error("read setup status failed: {0}")]
-    ReadCurrentSpace(String),
+    #[error("read setup status failed")]
+    ReadCurrentSpace(#[source] anyhow::Error),
 }
 
 impl From<InnerDetectUpgradeError> for DetectUpgradeError {
     fn from(value: InnerDetectUpgradeError) -> Self {
         match value {
             InnerDetectUpgradeError::CurrentVersionMalformed(s) => Self::CurrentVersionMalformed(s),
-            InnerDetectUpgradeError::ReadCursor(e) => Self::ReadCursor(e.to_string()),
+            InnerDetectUpgradeError::ReadCursor(e) => Self::ReadCursor(e.into()),
             InnerDetectUpgradeError::ReadCurrentSpace(s) => Self::ReadCurrentSpace(s),
         }
     }
@@ -59,18 +59,18 @@ impl From<InnerDetectUpgradeError> for DetectUpgradeError {
 /// `UpgradeFacade::acknowledge` 的错误。
 #[derive(Debug, Error)]
 pub enum AcknowledgeUpgradeError {
-    #[error("current build version is malformed: {0}")]
-    CurrentVersionMalformed(String),
+    #[error("current build version is malformed")]
+    CurrentVersionMalformed(#[source] semver::Error),
 
-    #[error("write app version cursor failed: {0}")]
-    WriteCursor(String),
+    #[error("write app version cursor failed")]
+    WriteCursor(#[source] anyhow::Error),
 }
 
 impl From<InnerAcknowledgeError> for AcknowledgeUpgradeError {
     fn from(value: InnerAcknowledgeError) -> Self {
         match value {
             InnerAcknowledgeError::CurrentVersionMalformed(s) => Self::CurrentVersionMalformed(s),
-            InnerAcknowledgeError::WriteCursor(e) => Self::WriteCursor(e.to_string()),
+            InnerAcknowledgeError::WriteCursor(e) => Self::WriteCursor(e.into()),
         }
     }
 }

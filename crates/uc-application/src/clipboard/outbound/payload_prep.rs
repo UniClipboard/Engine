@@ -53,7 +53,7 @@ pub(crate) enum OutboundPayloadError {
     /// A blob publish step failed.
     Publish(ClipboardOutboundError),
     /// Manifest construction or identity-component computation failed.
-    Internal(String),
+    Internal(anyhow::Error),
 }
 
 /// Assemble the outbound payload for a user/peer-initiated send of `entry_id`.
@@ -192,8 +192,11 @@ pub(crate) async fn assemble_outbound_payload(
     //    guaranteed by the all-or-nothing guard above).
     let file_set_manifest = match directory_members {
         Some(members) => Some(
-            build_transfer_manifest(&members, &plan.files)
-                .map_err(|err| OutboundPayloadError::Internal(err.to_string()))?,
+            build_transfer_manifest(&members, &plan.files).map_err(|err| {
+                OutboundPayloadError::Internal(
+                    anyhow::Error::from(err).context("build transfer manifest"),
+                )
+            })?,
         ),
         None => None,
     };
@@ -205,8 +208,11 @@ pub(crate) async fn assemble_outbound_payload(
             .collect();
         clipboard_intent.snapshot.file_content_digests.clear();
         clipboard_intent.snapshot.file_set_v1_component = Some(
-            compute_file_set_component(manifest, &digests)
-                .map_err(|err| OutboundPayloadError::Internal(err.to_string()))?,
+            compute_file_set_component(manifest, &digests).map_err(|err| {
+                OutboundPayloadError::Internal(
+                    anyhow::Error::from(err).context("compute file set identity"),
+                )
+            })?,
         );
     } else if !file_content_digests.is_empty() {
         clipboard_intent.snapshot.file_content_digests = file_content_digests;

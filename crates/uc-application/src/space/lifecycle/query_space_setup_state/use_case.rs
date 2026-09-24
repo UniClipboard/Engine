@@ -35,7 +35,7 @@ impl QuerySpaceSetupStateUseCase {
             .current_space_identity
             .current_space_id()
             .await
-            .map_err(|error| QuerySetupStateError::StorageFailed(error.to_string()))?;
+            .map_err(|error| QuerySetupStateError::StorageFailed(anyhow::Error::from(error)))?;
         let current_invitation = self.invitation_holder.snapshot_earliest().await.map(
             |(code, full_invitation, expires_at)| CurrentInvitation {
                 code,
@@ -47,12 +47,12 @@ impl QuerySpaceSetupStateUseCase {
             .settings
             .load()
             .await
-            .map_err(|error| QuerySetupStateError::StorageFailed(error.to_string()))?;
+            .map_err(|error| QuerySetupStateError::StorageFailed(anyhow::Error::from(error)))?;
         let re_pairing_required = self
             .re_pairing_state
             .is_required()
             .await
-            .map_err(|error| QuerySetupStateError::StorageFailed(error.to_string()))?;
+            .map_err(|error| QuerySetupStateError::StorageFailed(anyhow::Error::from(error)))?;
 
         Ok(SetupStateView {
             has_completed: current_space_id.is_some(),

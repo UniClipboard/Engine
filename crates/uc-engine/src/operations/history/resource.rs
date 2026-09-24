@@ -85,7 +85,7 @@ mod tests {
         let thumbnail = map_resource_error(ResourceFacadeError::NotFound, THUMBNAIL_NOT_FOUND_CODE);
         let file = map_resource_error(ResourceFacadeError::NotFound, ENTRY_FILE_NOT_FOUND_CODE);
         let internal = map_resource_error(
-            ResourceFacadeError::Internal("/private/cache/file.bin".into()),
+            ResourceFacadeError::Internal(anyhow::anyhow!("/private/cache/file.bin")),
             BLOB_NOT_FOUND_CODE,
         );
 

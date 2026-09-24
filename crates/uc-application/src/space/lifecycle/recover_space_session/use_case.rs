@@ -37,7 +37,7 @@ impl RecoverSpaceSessionUseCase {
             .current_space_identity
             .current_space_id()
             .await
-            .map_err(|error| RecoverSpaceSessionError::CurrentSpace(error.to_string()))?
+            .map_err(|error| RecoverSpaceSessionError::CurrentSpace(anyhow::Error::from(error)))?
         else {
             return Ok(not_recovered());
         };
@@ -51,14 +51,18 @@ impl RecoverSpaceSessionUseCase {
             Err(SpaceAccessError::NotInitialized) | Err(SpaceAccessError::WrongPassphrase) => {
                 return Err(RecoverSpaceSessionError::KeyringMiss);
             }
-            Err(error) => return Err(RecoverSpaceSessionError::Internal(error.to_string())),
+            Err(error) => {
+                return Err(RecoverSpaceSessionError::Internal(anyhow::Error::from(
+                    error,
+                )))
+            }
         };
         if !resumed {
             return Ok(not_recovered());
         }
 
         self.readiness
-            .complete_after_resume()
+            .prepare_data()
             .await
             .map_err(RecoverSpaceSessionError::Internal)?;
         self.recovery.request_activation().await?;

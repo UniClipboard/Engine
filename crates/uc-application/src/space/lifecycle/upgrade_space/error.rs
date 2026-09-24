@@ -12,8 +12,8 @@ pub(crate) enum UpgradeSpaceError {
     #[error("stored Engine version is invalid")]
     InvalidVersion(#[source] semver::Error),
 
-    #[error("failed to read Space setup state during Engine upgrade: {0}")]
-    ReadSetupState(String),
+    #[error("failed to read Space setup state during Engine upgrade")]
+    ReadSetupState(#[source] anyhow::Error),
 
     #[error("failed to rebuild space during Engine upgrade")]
     Rebuild(#[source] RebuildSpaceError),

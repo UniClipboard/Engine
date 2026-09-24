@@ -36,8 +36,8 @@ pub enum ActiveClipboardPullServeError {
     NotUnlocked,
     /// Any other unrecoverable failure while building the transfer envelope
     /// (storage error, encode failure, transfer-cipher failure).
-    #[error("internal pull-serve failure: {0}")]
-    Internal(String),
+    #[error("internal pull-serve failure")]
+    Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// Produce a transfer-encrypted envelope for content held locally, addressed

@@ -134,7 +134,9 @@ pub fn create_platform_layer(
     payload_mode: ProfilePayloadMode,
 ) -> WiringResult<PlatformLayer> {
     let device_identity = LocalDeviceIdentity::load_or_create(config_dir.clone()).map_err(|e| {
-        WiringError::SettingsInit(format!("Failed to create device identity: {}", e))
+        WiringError::SettingsInit(
+            anyhow::Error::from(e).context("Failed to create device identity"),
+        )
     })?;
     let device_identity: Arc<dyn DeviceIdentityPort> = Arc::new(device_identity);
 

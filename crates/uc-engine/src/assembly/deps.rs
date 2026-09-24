@@ -25,20 +25,20 @@ pub type WiringResult<T> = Result<T, WiringError>;
 /// Errors during dependency injection
 #[derive(Debug, thiserror::Error)]
 pub enum WiringError {
-    #[error("Database initialization failed: {0}")]
-    DatabaseInit(String),
+    #[error("Database initialization failed")]
+    DatabaseInit(#[source] anyhow::Error),
 
-    #[error("Clipboard initialization failed: {0}")]
-    ClipboardInit(String),
+    #[error("Clipboard initialization failed")]
+    ClipboardInit(#[source] anyhow::Error),
 
-    #[error("Blob storage initialization failed: {0}")]
-    BlobStorageInit(String),
+    #[error("Blob storage initialization failed")]
+    BlobStorageInit(#[source] anyhow::Error),
 
-    #[error("Settings repository initialization failed: {0}")]
-    SettingsInit(String),
+    #[error("Settings repository initialization failed")]
+    SettingsInit(#[source] anyhow::Error),
 
-    #[error("Thumbnail generator initialization failed: {0}")]
-    ThumbnailInit(String),
+    #[error("Thumbnail generator initialization failed")]
+    ThumbnailInit(#[source] anyhow::Error),
 
     #[error("profile storage upgrade did not reach a runnable state")]
     StorageUpgradePending,

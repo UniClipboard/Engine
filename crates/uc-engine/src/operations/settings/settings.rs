@@ -720,9 +720,9 @@ mod tests {
 
     #[test]
     fn relay_settings_persistence_failure_uses_the_relay_save_error_code() {
-        let error = map_save_relay_error(app::SettingsFacadeError::Save(
-            "settings storage unavailable".to_string(),
-        ));
+        let error = map_save_relay_error(app::SettingsFacadeError::Save(anyhow::anyhow!(
+            "settings storage unavailable"
+        )));
 
         assert_eq!(error.code(), SAVE_RELAY_FAILED_CODE);
         assert_eq!(error.category(), EngineErrorCategory::Internal);
