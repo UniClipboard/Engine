@@ -26,22 +26,22 @@ pub struct RelayProbeReport {
 }
 
 /// 应用层归类后的中继诊断错误。每个变体承诺一个稳定语义,上层据此挑选
-/// 用户文案;具体实现内部的错误细节(例如 iroh-relay 的 `ConnectError`)
-/// 不允许通过此类型泄漏到 application 之上的层。
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+/// 用户文案;具体实现内部的错误类型(例如 iroh-relay 的 `ConnectError`)
+/// 只以不透明 source 保留。source 的显示文本即宿主诊断文本,由 Engine 契约层原样交给宿主。
+#[derive(Debug, thiserror::Error)]
 pub enum RelayProbeError {
-    #[error("invalid relay URL: {0}")]
-    InvalidUrl(String),
-    #[error("dns lookup failed: {0}")]
-    Dns(String),
-    #[error("tls handshake failed: {0}")]
-    Tls(String),
-    #[error("relay handshake failed: {0}")]
-    Handshake(String),
+    #[error("invalid relay URL")]
+    InvalidUrl(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error("dns lookup failed")]
+    Dns(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error("tls handshake failed")]
+    Tls(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error("relay handshake failed")]
+    Handshake(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("relay probe timed out")]
     Timeout,
-    #[error("relay probe failed: {0}")]
-    Other(String),
+    #[error("relay probe failed")]
+    Other(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// "对一个候选中继 URL 做一次可达性探测"的能力抽象。

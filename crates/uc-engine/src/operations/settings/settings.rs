@@ -1,5 +1,6 @@
 use crate::error_codes::*;
 
+use std::error::Error;
 use std::time::Duration;
 
 use uc_application::facade::settings as app;
@@ -126,6 +127,12 @@ pub(crate) async fn execute_update_settings(
     }
 }
 
+/// 中继探测诊断文本按宿主契约原样透传（已确认的例外）：取下层来源的显示文本，
+/// 与探测错误改为携带 source 之前交给宿主的文本逐字一致。
+fn relay_probe_host_message(source: &(dyn Error + Send + Sync)) -> String {
+    source.to_string()
+}
+
 pub(crate) async fn execute_probe_relay(
     facade: &AppFacade,
     input: RelayProbeInput,
@@ -148,18 +155,26 @@ pub(crate) async fn execute_probe_relay(
         Ok(report) => RelayProbeOutcome::Success {
             latency_ms: report.latency_ms,
         },
-        Err(app::SettingsFacadeError::RelayProbeInvalidUrl(message)) => {
-            RelayProbeOutcome::InvalidUrl { message }
+        Err(app::SettingsFacadeError::RelayProbeInvalidUrl(source)) => {
+            RelayProbeOutcome::InvalidUrl {
+                message: relay_probe_host_message(source.as_ref()),
+            }
         }
-        Err(app::SettingsFacadeError::RelayProbeDns(message)) => RelayProbeOutcome::Dns { message },
-        Err(app::SettingsFacadeError::RelayProbeTls(message)) => RelayProbeOutcome::Tls { message },
-        Err(app::SettingsFacadeError::RelayProbeHandshake(message)) => {
-            RelayProbeOutcome::Handshake { message }
+        Err(app::SettingsFacadeError::RelayProbeDns(source)) => RelayProbeOutcome::Dns {
+            message: relay_probe_host_message(source.as_ref()),
+        },
+        Err(app::SettingsFacadeError::RelayProbeTls(source)) => RelayProbeOutcome::Tls {
+            message: relay_probe_host_message(source.as_ref()),
+        },
+        Err(app::SettingsFacadeError::RelayProbeHandshake(source)) => {
+            RelayProbeOutcome::Handshake {
+                message: relay_probe_host_message(source.as_ref()),
+            }
         }
         Err(app::SettingsFacadeError::RelayProbeTimeout) => RelayProbeOutcome::Timeout,
-        Err(app::SettingsFacadeError::RelayProbeOther(message)) => {
-            RelayProbeOutcome::Other { message }
-        }
+        Err(app::SettingsFacadeError::RelayProbeOther(source)) => RelayProbeOutcome::Other {
+            message: relay_probe_host_message(source.as_ref()),
+        },
         Err(app::SettingsFacadeError::RelayProbeUnavailable) => {
             return Err(EngineError::new(
                 PROBE_RELAY_UNAVAILABLE_CODE,

@@ -234,9 +234,11 @@ E1 的检查会拒绝只删标识、仍保留 `{error}` 的改法，所以 E4 �
   - 邀请适配器：设置读取、Sponsor 地址解码、准入路由与完整邀请编码失败改为携带来源（原先后三处直接丢弃来源）；
     消费邀请收到意外状态或响应解析失败时保存 `RendezvousHttpError`，不再把状态码与服务端 slug 拼进文本。
   - 用临时 `audit_std` 恒等函数审查本批盒装来源，9 处 `anyhow` 来源补上固定动作 context。
-  - 剩余 S3：兼容线与 `file_staging.rs`（E11）、`relay_probe.rs`（待决策）、`SecureStorageError::Other`（等 049 提交）。
-- 待决策：`RelayProbeError` 的文本经 `RelayProbeOutcome::{Dns, Tls, Handshake, Other} { message }` 原样交给宿主显示，
-  属于宿主可见文本。改为 source 需要先确定宿主诊断文本的契约，暂不处理。
+  - 剩余 S3：兼容线与 `file_staging.rs`（E11）、`SecureStorageError::Other`（等 049 提交）。
+- `RelayProbeError`（已决策并完成）：宿主诊断文本保持原文透传。Infra 新增 `RelayProbeDetail`，其显示文本与原先交给
+  宿主的文本逐字一致，同时以 source 保留下层错误；Application 的 `RelayProbeError` 与 `SettingsFacadeError::RelayProbe*`
+  改为携带不透明 source，外层显示文本只给分类。唯一的文本化位于 Engine 契约层 `relay_probe_host_message`，
+  用于生成 `RelayProbeOutcome { message }`，属于已确认的例外；隐私风险维持现状。测试确认细节文本与原格式一致且 source 可取回。
 - 后续事项：投递失败时 `reason_detail` 把 `ClipboardDispatchError` 的来源文本写入 `EntryDeliveryRecord` 持久化字段，
   行为保持不变；持久字段是否应保存错误文本需要按持久化与隐私规则单独评估。
 
