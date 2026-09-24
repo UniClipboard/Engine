@@ -98,13 +98,13 @@ impl RemoveSpaceMemberUseCase {
         }
         // 重复请求可能落在上一次已提交的移除之后；已被本历史移除的设备按已不存在处理，
         // 让调用方得到同一结果，而不是把已完成的移除误报为目标不存在。
-        let member_instance_id = match history.effective_member_for_device(target_device_id) {
-            Some(member) => member,
-            None => history
-                .member_for_device(target_device_id, slice::from_ref(target_device_id))
-                .filter(|member| history.removal_event_id_for(*member).is_some())
-                .ok_or(RemoveSpaceMemberError::TargetNotFound)?,
-        };
+        let member_instance_id = history
+            .member_for_device(target_device_id, slice::from_ref(target_device_id))
+            .filter(|member| {
+                history.effective_members().contains(member)
+                    || history.removal_event_id_for(*member).is_some()
+            })
+            .ok_or(RemoveSpaceMemberError::TargetNotFound)?;
         let origin = match history.admission_event_id_for(member_instance_id) {
             Some(event_id) => RemovalTargetOrigin::Admission(event_id),
             None => RemovalTargetOrigin::ActivationBaseline,

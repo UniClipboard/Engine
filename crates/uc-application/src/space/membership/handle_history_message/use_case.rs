@@ -429,12 +429,14 @@ impl HandleMembershipHistoryMessageUseCase {
         let _guard = self.execution_lock.lock().await;
         let view = self.owner.load().await.map_err(map_ledger_error)?;
         let source_device_id = *source.device_id();
-        let source_member = view.space().and_then(|space| {
-            space
-                .history()
-                .member_for_device(&source_device_id, std::slice::from_ref(&source_device_id))
+        // 决定必须由来源设备自己的成员实例签署；同一设备重新加入后有多个实例，直接核对签署实例所属设备。
+        let signer_device = view.space().and_then(|space| {
+            space.history().device_for_member(
+                &decision.decided_by_member_instance_id,
+                std::slice::from_ref(&source_device_id),
+            )
         });
-        if source_member != Some(decision.decided_by_member_instance_id) {
+        if signer_device != Some(source_device_id) {
             return Ok(MembershipHistoryMessage::AckV3(
                 MembershipHistoryAckV3::Invalid,
             ));

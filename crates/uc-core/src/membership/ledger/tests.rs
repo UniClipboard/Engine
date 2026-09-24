@@ -953,6 +953,55 @@ fn admission_invalidates_earlier_confirmations() {
 }
 
 #[test]
+fn a_device_that_rejoins_is_presented_by_its_current_member_instance() {
+    let mut group = Group::new(&["device-a", "device-b"]);
+    let membership = run_due_work(group.start("device-a"), NOW);
+    let (history, _) = group.removal(membership.history(), "device-a", "device-b", 0x31);
+    let (removed, _, _) = apply(
+        membership,
+        LedgerInput::LocalRemovalSigned {
+            history,
+            retained_device_ids: Vec::new(),
+        },
+        NOW,
+    );
+    let (departed, _, _) = apply(
+        run_effects_only(removed),
+        LedgerInput::DeliveryFinished {
+            peer: device("device-b"),
+            delivery: LedgerDeliveryKind::RemovalNotice,
+            result: LedgerDeliveryResult::Delivered,
+        },
+        NOW,
+    );
+    let previous = group.member("device-b").facts.member_instance;
+    let rejoined = admission("device-b", 0x6b);
+    let event = signed_event(
+        departed.history(),
+        group.member("device-a"),
+        MembershipOperationV2::AddDevice {
+            admission: rejoined.clone(),
+        },
+        0x37,
+    );
+    let mut history = departed.history().clone();
+    history
+        .verify_and_receive_event(event.clone(), &TestVerifier)
+        .unwrap();
+    activate(&mut history, &event, &rejoined);
+    group.members.push(rejoined.clone());
+
+    let (admitted, outcome, _) = apply(departed, LedgerInput::AdmissionCommitted { history }, NOW);
+
+    assert_eq!(outcome, LedgerOutcome::Applied);
+    assert_ne!(previous, rejoined.facts.member_instance);
+    let view = view_of(&admitted);
+    let presented = device_view(&view, "device-b").unwrap();
+    assert_eq!(presented.status, LedgerMemberStatus::Active);
+    assert_eq!(presented.member, Some(rejoined.facts.member_instance));
+}
+
+#[test]
 fn history_from_another_lineage_is_rejected() {
     let group = Group::new(&["device-a", "device-b"]);
     let membership = group.start("device-a");
