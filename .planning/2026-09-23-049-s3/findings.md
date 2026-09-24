@@ -42,3 +42,42 @@
 ## Code facts
 - Only `owner.rs` constructs `MembershipRecordCommit` in production; Infra admission repo/credentials only `load()`.
 - `uc-application` has a pre-existing clippy deny (`async_yields_async`) at `application/shutdown.rs:70`.
+
+## Migration survey: membership e2e onto the nextest/testkit architecture (2026-09-24)
+- Architecture split (`docs/design-docs/testing-architecture.md`, plan 048): nextest owns process discovery,
+  filtering, groups, concurrency, timeouts, retries, JUnit; `uc-testkit::Scenario` (at `tests/uc-testkit/`) owns
+  per-scenario identity, budget, stage timing, event waits, temp-dir/port leases, failure classification,
+  `result.json`/`summary.txt` artifacts. Scenario budget must be shorter than the nextest timeout.
+- Existing adopters of uc-testkit: `uc-application/tests/file_transfer.rs`,
+  `uc-infra/tests/peer_admission_identity_resolution.rs`, `uc-infra/tests/profile_storage_upgrade_crash.rs`.
+- The e2e file is 6281 lines + 3 submodules (automatic_connections 620, removal_convergence 253,
+  six_digit_pairing 108); 51 tests run under nextest (62 listed incl. submodule tests / skipped).
+  Ad-hoc timeouts: WAIT_TIMEOUT 60s, ADMISSION_WAIT_TIMEOUT 120s, SPACE_DEVICE_UPDATE_WAIT_TIMEOUT 30s,
+  SHUTDOWN_TIMEOUT 15s; waits are sleep/yield polling loops; no artifacts on failure beyond stdout.
+- Plan 034 step 6 already intends: F0–F7 as explicit slow lane run by a script, scheduled/workflow_dispatch job;
+  protocol matrix later moves to the Application virtual suite. `test-adoption-inventory.md:72` says keep a
+  minimal real-link matrix and only push down deterministic rules.
+- CI: `pr-check.yml` installs nextest 0.9.145 and runs `run-test-group.sh evidence`; the membership binary is only
+  run via `cargo test ... -- automatic_connections::` (line 137). `engine-real-environment.yml` has a nightly cron
+  and workflow_dispatch for the Linux netns real runner, not for this binary.
+- `AGENTS.md` has an uncommitted user edit (planning-with-files location rule) — do not commit it.
+
+## S1/S2 results and S3 design (2026-09-24)
+- S1 full group: 45/51; failures = 4 baseline + pending_join (baseline flaky) + F6 (epoch race like F7,
+  passes alone in 132 s). User approved fixing at harness level: `wait_for_equivalent_branch_named` now also
+  requires `pending_effect_count == 0`; F7's separate settled wait removed.
+- S2: `.config/nextest.toml` group `membership-topology` (max-threads 2) for `test(/^topology::/)`, listed
+  before the binary-wide override (first match wins); verified with `nextest show-config test-groups`.
+- testkit facts: `Scenario::finish(self, result)` is sync and consumes; artifacts are only written by finish,
+  so a panic before finish leaves none. Names: lowercase/digits/single hyphens, <= 64 chars. `TempDirLease`
+  records cleanup on drop; a lease alive at finish marks cleanup Pending → CleanupFailed. Budget is only used
+  by `wait_for_event` / child processes. Existing adopters use
+  `CARGO_MANIFEST_DIR/../../target/test-artifacts/<name>` or `UC_TEST_ARTIFACTS_DIR`.
+- Tests do not share a common first line (mount_rendezvous / init_test_tracing are not universal), so the
+  scenario is started by an explicit guard line per test: `let _scenario = TestScenario::start();`.
+- S3 design: `harness/scenario.rs` keeps the current Scenario in a process-level Mutex (nextest runs one test
+  per process; cargo test defaults to one test thread). Name from the test thread name, sanitised; seed = FNV
+  hash of the full name. Drop of the guard finishes: panicking → recorded failure or generic
+  product_invariant; not panicking but finish fails (e.g. cleanup) → panic. Harness timeouts record
+  product_timeout with a condition before panicking; topology actions record events; main waits are stages;
+  DeviceHarness root becomes a `TempDirLease`. Risk: harnesses held by detached spawned tasks at test end.
