@@ -598,7 +598,7 @@ where
                     .filter(encrypted_relationship::kind.eq(kind_value))
                     .select(EncryptedRelationshipRow::as_select())
                     .load::<EncryptedRelationshipRow>(conn)
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))
+                    .map_err(anyhow::Error::new)
             })
             .map_err(|error| RelationshipStoreError::Storage(error.to_string()))?;
         rows.into_iter()
@@ -638,7 +638,7 @@ where
                         .filter(encrypted_relationship::lookup_key.eq(lookup_value)),
                 )
                 .execute(conn)
-                .map_err(|error| anyhow::anyhow!(error.to_string()))
+                .map_err(anyhow::Error::new)
             })
             .map_err(|error| RelationshipStoreError::Storage(error.to_string()))?;
         Ok(affected > 0)
@@ -772,7 +772,7 @@ where
                 diesel::delete(encrypted_relationship::table)
                     .execute(conn)
                     .map(|_| ())
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))
+                    .map_err(anyhow::Error::new)
             })
             .map_err(|error| RelationshipStateResetError::Repository(error.to_string()))
     }

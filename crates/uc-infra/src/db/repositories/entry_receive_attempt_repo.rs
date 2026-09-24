@@ -109,8 +109,7 @@ impl<E: DbExecutor> BeginReceiveAttemptPort for DieselEntryReceiveAttemptReposit
                         .first::<EntryReceiveAttemptRow>(conn)
                         .optional()?;
                     if let Some(existing) = existing {
-                        let state = AttemptState::from_str(&existing.attempt_state)
-                            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                        let state = AttemptState::from_str(&existing.attempt_state)?;
                         return Ok(if state.is_terminal() {
                             BeginReceiveOutcome::Superseded
                         } else {
@@ -180,8 +179,7 @@ impl<E: DbExecutor> BeginReceiveAttemptPort for DieselEntryReceiveAttemptReposit
                             Ok(BeginReceiveOutcome::Superseded)
                         }
                         Some((_, state)) => {
-                            let state = AttemptState::from_str(&state)
-                                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                            let state = AttemptState::from_str(&state)?;
                             if state.is_terminal() {
                                 Ok(BeginReceiveOutcome::Superseded)
                             } else {

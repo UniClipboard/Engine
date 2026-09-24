@@ -102,15 +102,14 @@ where
                         let id_taken: i64 = mobile_device
                             .filter(device_id.eq(&row.device_id))
                             .count()
-                            .get_result(conn)
-                            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                            .get_result(conn)?;
                         if id_taken > 0 {
                             Ok(SaveOutcome::DuplicateDeviceId)
                         } else {
                             Ok(SaveOutcome::DuplicateUsername)
                         }
                     }
-                    Err(e) => Err(anyhow::anyhow!(e.to_string())),
+                    Err(e) => Err(anyhow::Error::new(e)),
                 }
             })
             .map_err(|e| MobileDeviceError::Storage(e.to_string()))?;
@@ -134,14 +133,13 @@ where
                 let row = mobile_device
                     .filter(username.eq(&needle))
                     .first::<MobileDeviceRow>(conn)
-                    .optional()
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                    .optional()?;
                 match row {
                     Some(r) => self
                         .mapper
                         .to_domain(&r)
                         .map(Some)
-                        .map_err(|e| anyhow::anyhow!(e.to_string())),
+                        .map_err(anyhow::Error::new),
                     None => Ok(None),
                 }
             })
@@ -158,14 +156,13 @@ where
                 let row = mobile_device
                     .filter(device_id.eq(&needle))
                     .first::<MobileDeviceRow>(conn)
-                    .optional()
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                    .optional()?;
                 match row {
                     Some(r) => self
                         .mapper
                         .to_domain(&r)
                         .map(Some)
-                        .map_err(|e| anyhow::anyhow!(e.to_string())),
+                        .map_err(anyhow::Error::new),
                     None => Ok(None),
                 }
             })
@@ -175,15 +172,10 @@ where
     async fn list_all(&self) -> Result<Vec<MobileDevice>, MobileDeviceError> {
         self.executor
             .run(|conn| {
-                let rows = mobile_device
-                    .load::<MobileDeviceRow>(conn)
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                let rows = mobile_device.load::<MobileDeviceRow>(conn)?;
                 let mut out = Vec::with_capacity(rows.len());
                 for r in &rows {
-                    let d = self
-                        .mapper
-                        .to_domain(r)
-                        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                    let d = self.mapper.to_domain(r)?;
                     out.push(d);
                 }
                 Ok(out)
@@ -198,7 +190,7 @@ where
             .run(move |conn| {
                 diesel::delete(mobile_device.filter(device_id.eq(&needle)))
                     .execute(conn)
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))
+                    .map_err(anyhow::Error::new)
             })
             .map_err(|e| MobileDeviceError::Storage(e.to_string()))?;
         Ok(affected > 0)
@@ -239,7 +231,7 @@ where
                         // username collision.
                         Ok(Err(MobileDeviceError::UsernameCollision))
                     }
-                    Err(e) => Err(anyhow::anyhow!(e.to_string())),
+                    Err(e) => Err(anyhow::Error::new(e)),
                 }
             })
             .map_err(|e| MobileDeviceError::Storage(e.to_string()))?

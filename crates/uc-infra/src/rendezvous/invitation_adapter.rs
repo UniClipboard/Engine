@@ -280,10 +280,10 @@ impl RendezvousPairingInvitationAdapter {
         endpoint_id: &str,
         full_invitation: &str,
         expires_at: DateTime<Utc>,
-    ) -> Result<(), String> {
+    ) -> anyhow::Result<()> {
         #[cfg(test)]
         if self.force_local_publication_failure {
-            return Err("injected local publication failure".to_owned());
+            return Err(anyhow::anyhow!("injected local publication failure"));
         }
 
         // Sweep stale handles before inserting; a sponsor that has
@@ -305,8 +305,7 @@ impl RendezvousPairingInvitationAdapter {
             &ticket_hex,
             expires_at.timestamp_millis(),
             port,
-        )
-        .map_err(|err| err.to_string())?;
+        )?;
         self.publishers
             .lock()
             .await
@@ -394,9 +393,9 @@ fn mint_invitation_id() -> uc_core::membership::InvitationId {
 }
 
 /// Encode the same full invitation used by cloud discovery for bounded mDNS publishing.
-fn encode_mdns_ticket(full_invitation: &str) -> Result<String, String> {
+fn encode_mdns_ticket(full_invitation: &str) -> anyhow::Result<String> {
     if full_invitation.is_empty() {
-        return Err("full invitation is empty".to_owned());
+        return Err(anyhow::anyhow!("full invitation is empty"));
     }
     Ok(hex::encode(full_invitation.as_bytes()))
 }
@@ -419,14 +418,14 @@ fn is_cloud_recoverable(err: &RendezvousHttpError) -> bool {
 /// Real iroh endpoints always have at least one IP `TransportAddr`
 /// online by the time we're issuing invitations, so the `None` case is
 /// a defensive guard for tests / very early init.
-fn pick_endpoint_port(addr: &EndpointAddr) -> Result<u16, String> {
+fn pick_endpoint_port(addr: &EndpointAddr) -> anyhow::Result<u16> {
     addr.addrs
         .iter()
         .find_map(|a| match a {
             TransportAddr::Ip(sa) => Some(sa.port()),
             _ => None,
         })
-        .ok_or_else(|| "endpoint exposes no IP transport addresses".to_string())
+        .ok_or_else(|| anyhow::anyhow!("endpoint exposes no IP transport addresses"))
 }
 
 fn serialize_filtered_endpoint_ticket(
@@ -586,7 +585,7 @@ fn map_create_err(err: RendezvousHttpError) -> InvitationError {
 }
 
 fn map_local_publication_failure(
-    local_error: String,
+    local_error: anyhow::Error,
     directory_failure: Option<anyhow::Error>,
 ) -> InvitationError {
     match directory_failure {
@@ -594,7 +593,7 @@ fn map_local_publication_failure(
             source: source.context("local invitation publication also failed"),
         },
         None => InvitationError::LocalPublicationFailed {
-            source: anyhow::Error::msg(local_error),
+            source: local_error,
         },
     }
 }
@@ -627,6 +626,7 @@ fn map_consume_err(err: RendezvousHttpError) -> ConsumeInvitationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pairing::MdnsPublisherError;
     use std::io::Write;
     use std::net::SocketAddr;
     use std::sync::Mutex as StdMutex;
@@ -1109,8 +1109,12 @@ mod tests {
 
     #[test]
     fn local_publication_failure_has_its_own_stage() {
-        let error =
-            map_local_publication_failure("private socket and interface detail".to_owned(), None);
+        let error = map_local_publication_failure(
+            anyhow::Error::new(MdnsPublisherError::SocketBind(
+                "private socket and interface detail".to_owned(),
+            )),
+            None,
+        );
 
         assert!(matches!(
             error,
@@ -1118,6 +1122,11 @@ mod tests {
         ));
         assert_eq!(error.to_string(), "local invitation publication failed");
         assert_eq!(format!("{error:?}"), "LocalPublicationFailed");
+        let source = std::error::Error::source(&error).expect("local publication source");
+        assert!(matches!(
+            source.downcast_ref::<MdnsPublisherError>(),
+            Some(MdnsPublisherError::SocketBind(_))
+        ));
     }
 
     #[test]

@@ -47,7 +47,7 @@ where
                     .filter(plaintext_hash.eq(&hash_hex))
                     .first::<BlobReferenceRow>(conn)
                     .optional()
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))
+                    .map_err(anyhow::Error::new)
             })
             .map_err(|e| BlobReferenceError::Repository(e.to_string()))?;
 
@@ -72,8 +72,7 @@ where
                     .on_conflict(plaintext_hash)
                     .do_update()
                     .set((digest.eq(row.digest.clone()), created_at.eq(row.created_at)))
-                    .execute(conn)
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                    .execute(conn)?;
                 Ok(())
             })
             .map_err(|e| BlobReferenceError::Repository(e.to_string()))
@@ -84,8 +83,7 @@ where
         self.executor
             .run(move |conn| {
                 diesel::delete(blob_reference.filter(plaintext_hash.eq(&hash_hex)))
-                    .execute(conn)
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                    .execute(conn)?;
                 Ok(())
             })
             .map_err(|e| BlobReferenceError::Repository(e.to_string()))
