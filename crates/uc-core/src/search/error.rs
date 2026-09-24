@@ -30,7 +30,7 @@ pub enum SearchError {
     IndexUnavailable,
 
     /// Catch-all for internal failures that cross the port boundary.
-    /// Infra adapters should map anyhow::Error into this when necessary.
-    #[error("internal search error: {0}")]
-    Internal(String),
+    /// 来源由适配器保留；Core 无法命名 Infra 错误类型，按盒装错误保存。
+    #[error("internal search error")]
+    Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
 }

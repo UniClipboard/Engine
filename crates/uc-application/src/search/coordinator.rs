@@ -768,10 +768,13 @@ async fn project_browse_page(
     limit: usize,
     offset: usize,
 ) -> Result<SearchResultsPage, SearchError> {
-    let entries = entry_repo
-        .list_entries(limit, offset)
-        .await
-        .map_err(|e| SearchError::Internal(format!("degraded browse: list entries failed: {e}")))?;
+    let entries = entry_repo.list_entries(limit, offset).await.map_err(|e| {
+        SearchError::Internal(
+            anyhow::Error::new(e)
+                .context("degraded browse: list entries failed")
+                .into(),
+        )
+    })?;
     // `has_more` tracks entry-page bounds (entries skipped for missing content
     // still consumed an offset slot, so paginate on entries, not projections).
     let has_more = entries.len() == limit;
@@ -1585,12 +1588,11 @@ mod tests {
             rebuild_dropped.load(Ordering::SeqCst),
             "runtime returned before its rebuild task stopped"
         );
-        assert_eq!(
+        assert!(matches!(
             facade.request_rebuild().await,
-            Err(crate::search::SearchFacadeError::ServiceUnavailable(
-                "search coordinator stopped".to_string()
-            ))
-        );
+            Err(crate::search::SearchFacadeError::ServiceUnavailable(message))
+                if message == "search coordinator stopped"
+        ));
     }
 
     #[tokio::test]
@@ -1655,12 +1657,11 @@ mod tests {
             rebuild_dropped.load(Ordering::SeqCst),
             "session pause returned before the active rebuild stopped"
         );
-        assert_eq!(
+        assert!(matches!(
             facade.request_rebuild().await,
-            Err(crate::search::SearchFacadeError::ServiceUnavailable(
-                "search coordinator stopped".to_string()
-            ))
-        );
+            Err(crate::search::SearchFacadeError::ServiceUnavailable(message))
+                if message == "search coordinator stopped"
+        ));
 
         rebuild_dropped.store(false, Ordering::SeqCst);
         facade.on_session_ready().await.unwrap();

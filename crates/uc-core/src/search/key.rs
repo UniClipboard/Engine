@@ -7,6 +7,8 @@ use std::fmt;
 
 use zeroize::Zeroize;
 
+use crate::search::error::SearchError;
+
 /// 搜索 posting 所属保护组的 32-byte 不透明引用。
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SearchProtectionRef([u8; 32]);
@@ -14,11 +16,9 @@ pub struct SearchProtectionRef([u8; 32]);
 impl SearchProtectionRef {
     pub const LEN: usize = 32;
 
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, crate::search::error::SearchError> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, SearchError> {
         let value = bytes.try_into().map_err(|_| {
-            crate::search::error::SearchError::Internal(
-                "invalid search protection reference length".to_owned(),
-            )
+            SearchError::Internal("invalid search protection reference length".into())
         })?;
         Ok(Self(value))
     }
@@ -53,13 +53,16 @@ impl SearchKey {
     }
 
     /// Construct a SearchKey from a byte slice, validating length.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, crate::search::error::SearchError> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, SearchError> {
         if bytes.len() != Self::LEN {
-            return Err(crate::search::error::SearchError::Internal(format!(
-                "invalid SearchKey length: expected {}, got {}",
-                Self::LEN,
-                bytes.len()
-            )));
+            return Err(SearchError::Internal(
+                format!(
+                    "invalid SearchKey length: expected {}, got {}",
+                    Self::LEN,
+                    bytes.len()
+                )
+                .into(),
+            ));
         }
         let mut buf = [0u8; Self::LEN];
         buf.copy_from_slice(bytes);
@@ -133,13 +136,16 @@ impl RenderKey {
     }
 
     /// Construct a RenderKey from a byte slice, validating length.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, crate::search::error::SearchError> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, SearchError> {
         if bytes.len() != Self::LEN {
-            return Err(crate::search::error::SearchError::Internal(format!(
-                "invalid RenderKey length: expected {}, got {}",
-                Self::LEN,
-                bytes.len()
-            )));
+            return Err(SearchError::Internal(
+                format!(
+                    "invalid RenderKey length: expected {}, got {}",
+                    Self::LEN,
+                    bytes.len()
+                )
+                .into(),
+            ));
         }
         let mut buf = [0u8; Self::LEN];
         buf.copy_from_slice(bytes);

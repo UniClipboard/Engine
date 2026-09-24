@@ -8,6 +8,7 @@
 //! It is NOT added to `uc-core` search domain structs.
 
 pub mod constants;
+pub(crate) mod error;
 pub mod pipeline;
 pub mod render_payload;
 pub mod rows;

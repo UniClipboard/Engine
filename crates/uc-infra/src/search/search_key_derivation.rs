@@ -21,6 +21,7 @@ use uc_core::search::error::SearchError;
 use uc_core::search::key::{RenderKey, SearchKey, SearchKeyContext};
 
 use super::{V3SearchProtection, V3SearchProtectionError};
+use crate::search::error::internal;
 
 const SEARCH_KEY_INFO: &[u8] = b"uniclipboard-search-index/v1";
 
@@ -57,10 +58,11 @@ impl HkdfSearchKeyDerivation {
 #[async_trait]
 impl SearchKeyDerivationPort for HkdfSearchKeyDerivation {
     async fn derive_search_key(&self) -> Result<SearchKeyContext, SearchError> {
-        let profile =
-            self.current_profile.current_profile().await.map_err(|e| {
-                SearchError::Internal(format!("failed to get current profile: {e}"))
-            })?;
+        let profile = self
+            .current_profile
+            .current_profile()
+            .await
+            .map_err(internal("failed to get current profile"))?;
 
         let okm = self
             .space_access
@@ -68,17 +70,18 @@ impl SearchKeyDerivationPort for HkdfSearchKeyDerivation {
             .await
             .map_err(|e| match e {
                 SpaceAccessError::NotUnlocked => SearchError::SessionLocked,
-                other => SearchError::Internal(format!("derive_subkey: {other}")),
+                other => internal("derive_subkey")(other),
             })?;
 
         SearchKey::from_bytes(&okm).map(SearchKeyContext::legacy)
     }
 
     async fn derive_render_key(&self) -> Result<RenderKey, SearchError> {
-        let profile =
-            self.current_profile.current_profile().await.map_err(|e| {
-                SearchError::Internal(format!("failed to get current profile: {e}"))
-            })?;
+        let profile = self
+            .current_profile
+            .current_profile()
+            .await
+            .map_err(internal("failed to get current profile"))?;
 
         let okm = self
             .space_access
@@ -86,7 +89,7 @@ impl SearchKeyDerivationPort for HkdfSearchKeyDerivation {
             .await
             .map_err(|e| match e {
                 SpaceAccessError::NotUnlocked => SearchError::SessionLocked,
-                other => SearchError::Internal(format!("derive_subkey: {other}")),
+                other => internal("derive_subkey")(other),
             })?;
 
         RenderKey::from_bytes(&okm)
@@ -115,7 +118,7 @@ impl SearchKeyDerivationPort for V3SearchKeyDerivation {
 
     async fn derive_render_key(&self) -> Result<RenderKey, SearchError> {
         Err(SearchError::Internal(
-            "V3 search render protection is repository-owned".to_owned(),
+            "V3 search render protection is repository-owned".into(),
         ))
     }
 }
@@ -123,7 +126,7 @@ impl SearchKeyDerivationPort for V3SearchKeyDerivation {
 fn map_v3_search_error(error: V3SearchProtectionError) -> SearchError {
     match error {
         V3SearchProtectionError::NotActive { .. } => SearchError::SessionLocked,
-        _ => SearchError::Internal("V3 search protection unavailable".to_owned()),
+        _ => SearchError::Internal("V3 search protection unavailable".into()),
     }
 }
 

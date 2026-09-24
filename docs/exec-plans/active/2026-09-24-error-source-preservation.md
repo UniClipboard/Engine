@@ -2,7 +2,7 @@
 
 ## 状态与完整责任
 
-- **状态**：实施中。E0–E3 已完成，E4 进行中。
+- **状态**：实施中。E0–E4 已完成，其余切片未开始。
 - **日期**：2026-09-24。
 - **依据**：[错误处理与转换](../../design-docs/error-handling.md)要求保留完整 source chain；[运行期观测](../../design-docs/observability.md#错误来源与日志字段)要求日志只记录从 source chain 提取的固定分类。
 - **完整负责人**：每处转换由目标错误类型所在模块负责（与错误处理规范的“转换所有权”一致）；整体顺序、清单复核与验收由本计划负责。
@@ -140,7 +140,7 @@ L1 日志字段不在本切片检查范围，待 E10 确定固定分类字段的
 - `db/pool.rs` 迁移失败来源是 `Box<dyn Error + Send + Sync>`，用 `anyhow!(error)` 保留原对象后再加 context。
 - 测试：payload 字段截断时，可从错误链取回 `io::ErrorKind::UnexpectedEof`。
 
-### E4 含路径或标识的文本（进行中）
+### E4 含路径或标识的文本（2026-09-24）
 
 E1 的检查会拒绝只删标识、仍保留 `{error}` 的改法，所以 E4 按错误类型整体改为携带 source。
 
@@ -153,7 +153,10 @@ E1 的检查会拒绝只删标识、仍保留 `{error}` 的改法，所以 E4 �
     `current peer scope: {error:?}` 的 Debug 文本。Engine 的公开错误码与分类不变。
   - 测试：游标读取失败可取回 `io::Error`、解析失败可取回 `serde_json::Error` 且显示文本不含路径；投递视图与分发目标
     查询失败可取回 `CurrentSpaceMemberScopeError`、`PeerAddressError`。
-- 剩余：`SearchError::Internal(String)`（`sqlite_index.rs` 解码失败文本带条目 ID；该变体约 87 处引用）。
+- `SearchError::Internal` 改为 `#[source] Box<dyn Error + Send + Sync>`；Infra 搜索适配器统一经
+  `search/error.rs` 的 `internal("固定动作")` 转换，去掉解码失败文本中的条目 ID。`SearchFacadeError::Internal` 改为携带
+  `SearchError`，为此去掉 `Clone`/`PartialEq`/`Eq` 派生，两处测试改为模式匹配。Engine 搜索错误码不变。
+  测试：`internal` 转换后可沿错误链取回原始 `io::Error`。
 - 转入 E11：`mobile_sync/file_staging.rs` 文本中的路径与 URI。其端口 `MobileFileStagingPort` 只服务兼容线，
   而兼容线 `get_file.rs` 自己也把 URI 与错误文本写入日志和 `Staging(String)`；只改 Infra 端堵不住泄露。
 - 遗留：`OutboundPayloadError::Internal(String)` 仍是字符串变体，`ResendEntryError` 暂以 `anyhow!(message)` 承接，

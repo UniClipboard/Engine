@@ -34,6 +34,7 @@ use uc_core::search::SearchProtectionRef;
 use crate::db::pool::DbPool;
 use crate::db::schema::{search_document, search_entry_tag, search_index_meta, search_posting};
 use crate::search::constants::{CURRENT_INDEX_VERSION, V3_INDEX_VERSION};
+use crate::search::error::internal;
 use crate::search::render_payload::{RenderFields, RenderPayloadCodec};
 use crate::search::rows::{
     NewSearchDocumentRow, NewSearchEntryTagRow, NewSearchIndexMetaRow, NewSearchPostingRow,
@@ -200,7 +201,7 @@ impl SqliteSearchIndex {
         self.current_profile
             .current_profile()
             .await
-            .map_err(|e| SearchError::Internal(format!("failed to get current profile: {e}")))
+            .map_err(internal("failed to get current profile"))
     }
 
     /// 在进入同步 SQLite 边界前完成密钥解析、上下文校验与 render 加密。
@@ -218,7 +219,7 @@ impl SqliteSearchIndex {
             .any(|posting| posting.entry_id != document.entry_id)
         {
             return Err(SearchError::Internal(
-                "search postings do not belong to the document".to_owned(),
+                "search postings do not belong to the document".into(),
             ));
         }
 
@@ -229,7 +230,7 @@ impl SqliteSearchIndex {
                     .any(|posting| posting.protection_ref.is_some())
                 {
                     return Err(SearchError::Internal(
-                        "legacy search write contains a protection reference".to_owned(),
+                        "legacy search write contains a protection reference".into(),
                     ));
                 }
                 let render_key = derivation.derive_render_key().await?;
@@ -238,24 +239,23 @@ impl SqliteSearchIndex {
                     profile_id,
                     document,
                 )
-                .map_err(|e| SearchError::Internal(format!("prepare search row failed: {e}")))?
+                .map_err(internal("prepare search row failed"))?
             }
             SearchProtectionStrategy::V3(protection) => {
                 let posting_ref = Self::posting_protection_ref(postings)?;
-                let active = protection.active_key_context().await.map_err(|e| {
-                    SearchError::Internal(format!("resolve V3 search context failed: {e}"))
-                })?;
+                let active = protection
+                    .active_key_context()
+                    .await
+                    .map_err(internal("resolve V3 search context failed"))?;
                 let active_ref = active.protection_ref().ok_or_else(|| {
-                    SearchError::Internal(
-                        "V3 search context has no protection reference".to_owned(),
-                    )
+                    SearchError::Internal("V3 search context has no protection reference".into())
                 })?;
                 if posting_ref
                     .as_ref()
                     .is_some_and(|value| value != active_ref)
                 {
                     return Err(SearchError::Internal(
-                        "search protection context changed before persistence".to_owned(),
+                        "search protection context changed before persistence".into(),
                     ));
                 }
                 let fields = RenderFields::new(
@@ -268,15 +268,14 @@ impl SqliteSearchIndex {
                 let render_payload = protection
                     .seal_render(&document.entry_id, &fields)
                     .await
-                    .map_err(|e| {
-                        SearchError::Internal(format!("seal V3 search render failed: {e}"))
-                    })?;
-                let sealed_context = protection.active_key_context().await.map_err(|e| {
-                    SearchError::Internal(format!("recheck V3 search context failed: {e}"))
-                })?;
+                    .map_err(internal("seal V3 search render failed"))?;
+                let sealed_context = protection
+                    .active_key_context()
+                    .await
+                    .map_err(internal("recheck V3 search context failed"))?;
                 if sealed_context.protection_ref() != Some(active_ref) {
                     return Err(SearchError::Internal(
-                        "search protection context changed while sealing".to_owned(),
+                        "search protection context changed while sealing".into(),
                     ));
                 }
                 NewSearchDocumentRow::from_domain_with_render(
@@ -286,7 +285,7 @@ impl SqliteSearchIndex {
                     Some(active_ref.as_bytes().to_vec()),
                     V3_INDEX_VERSION,
                 )
-                .map_err(|e| SearchError::Internal(format!("prepare V3 search row failed: {e}")))?
+                .map_err(internal("prepare V3 search row failed"))?
             }
         };
 
@@ -306,12 +305,12 @@ impl SqliteSearchIndex {
         let mut protection_ref = None;
         for posting in postings {
             let current = posting.protection_ref.as_ref().ok_or_else(|| {
-                SearchError::Internal("V3 search posting has no protection reference".to_owned())
+                SearchError::Internal("V3 search posting has no protection reference".into())
             })?;
             match &protection_ref {
                 Some(expected) if expected != current => {
                     return Err(SearchError::Internal(
-                        "search postings contain mixed protection references".to_owned(),
+                        "search postings contain mixed protection references".into(),
                     ));
                 }
                 None => protection_ref = Some(current.clone()),
@@ -355,7 +354,7 @@ impl SqliteSearchIndex {
             .on_conflict(search_index_meta::profile_id)
             .do_nothing()
             .execute(conn)
-            .map_err(|e| SearchError::Internal(format!("meta row seed failed: {e}")))?;
+            .map_err(internal("meta row seed failed"))?;
 
         if inserted > 0 {
             debug!(profile_id, "search_index_meta row seeded");
@@ -376,7 +375,7 @@ impl SqliteSearchIndex {
         let row = dsl::search_index_meta
             .filter(dsl::profile_id.eq(profile_id))
             .first::<SearchIndexMetaRow>(conn)
-            .map_err(|e| SearchError::Internal(format!("load_meta query failed: {e}")))?;
+            .map_err(internal("load_meta query failed"))?;
 
         Ok(row.to_domain())
     }
@@ -417,9 +416,7 @@ impl SqliteSearchIndex {
             .select(dsl::protection_group_ref)
             .distinct()
             .load::<Option<Vec<u8>>>(conn)
-            .map_err(|e| {
-                SearchError::Internal(format!("load search protection refs failed: {e}"))
-            })?;
+            .map_err(internal("load search protection refs failed"))?;
         refs.into_iter()
             .map(|value| {
                 let value = value.ok_or(SearchError::IndexNotReady)?;
@@ -478,7 +475,7 @@ impl SqliteSearchIndex {
 
             Ok(())
         })
-        .map_err(|e| SearchError::Internal(format!("upsert_active_entry failed: {e}")))
+        .map_err(internal("upsert_active_entry failed"))
     }
 
     /// Hard-delete `search_document` and all `search_posting` rows for `entry_id`.
@@ -519,7 +516,7 @@ impl SqliteSearchIndex {
 
             Ok(())
         })
-        .map_err(|e| SearchError::Internal(format!("delete_active_entry failed: {e}")))
+        .map_err(internal("delete_active_entry failed"))
     }
 
     /// Add or remove only the favorited tag membership row for `entry_id` in the
@@ -541,9 +538,7 @@ impl SqliteSearchIndex {
                     tag_id: favorited_tag,
                 })
                 .execute(conn)
-                .map_err(|e| {
-                    SearchError::Internal(format!("set_active_favorite_tag insert failed: {e}"))
-                })?;
+                .map_err(internal("set_active_favorite_tag insert failed"))?;
         } else {
             diesel::delete(
                 search_entry_tag::table
@@ -552,9 +547,7 @@ impl SqliteSearchIndex {
                     .filter(search_entry_tag::tag_id.eq(&favorited_tag)),
             )
             .execute(conn)
-            .map_err(|e| {
-                SearchError::Internal(format!("set_active_favorite_tag delete failed: {e}"))
-            })?;
+            .map_err(internal("set_active_favorite_tag delete failed"))?;
         }
         Ok(())
     }
@@ -581,9 +574,7 @@ impl SqliteSearchIndex {
                 .bind::<diesel::sql_types::Text, _>(&entry_id_str)
                 .bind::<diesel::sql_types::Text, _>(&favorited_tag)
                 .execute(conn)
-                .map_err(|e| {
-                    SearchError::Internal(format!("set_temp_favorite_tag insert failed: {e}"))
-                })?;
+                .map_err(internal("set_temp_favorite_tag insert failed"))?;
         } else {
             let del_tag = format!(
                 "DELETE FROM {tag_table} WHERE profile_id = ? AND entry_id = ? AND tag_id = ?",
@@ -594,9 +585,7 @@ impl SqliteSearchIndex {
                 .bind::<diesel::sql_types::Text, _>(&entry_id_str)
                 .bind::<diesel::sql_types::Text, _>(&favorited_tag)
                 .execute(conn)
-                .map_err(|e| {
-                    SearchError::Internal(format!("set_temp_favorite_tag delete failed: {e}"))
-                })?;
+                .map_err(internal("set_temp_favorite_tag delete failed"))?;
         }
         Ok(())
     }
@@ -610,7 +599,7 @@ impl SqliteSearchIndex {
         diesel::update(dsl::search_index_meta.filter(dsl::profile_id.eq(profile_id)))
             .set(dsl::search_blocked.eq(true))
             .execute(conn)
-            .map_err(|e| SearchError::Internal(format!("mark_blocked failed: {e}")))?;
+            .map_err(internal("mark_blocked failed"))?;
 
         Ok(())
     }
@@ -692,7 +681,7 @@ impl SqliteSearchIndex {
             .filter(sp::term_tag.eq_any(term_tags))
             .select((sp::entry_id, sp::term_tag))
             .load::<(String, Vec<u8>)>(conn)
-            .map_err(|e| SearchError::Internal(format!("posting query failed: {e}")))?;
+            .map_err(internal("posting query failed"))?;
 
         if matching_rows.is_empty() {
             return Ok(HashMap::new());
@@ -741,7 +730,7 @@ impl SqliteSearchIndex {
             .filter(dsl::profile_id.eq(profile_id))
             .filter(dsl::entry_id.eq_any(entry_ids))
             .load::<SearchDocumentRow>(conn)
-            .map_err(|e| SearchError::Internal(format!("load_candidate_documents failed: {e}")))?;
+            .map_err(internal("load_candidate_documents failed"))?;
 
         Ok(rows)
     }
@@ -780,7 +769,7 @@ impl SqliteSearchIndex {
         } else {
             Some(
                 serde_json::to_string(&filters.extensions)
-                    .map_err(|e| SearchError::Internal(format!("extension encode failed: {e}")))?,
+                    .map_err(internal("extension encode failed"))?,
             )
         };
 
@@ -833,7 +822,7 @@ impl SqliteSearchIndex {
             .select(count_star())
             .into_boxed::<Sqlite>())
         .first(conn)
-        .map_err(|e| SearchError::Internal(format!("filter-only count failed: {e}")))?;
+        .map_err(internal("filter-only count failed"))?;
 
         // Page window — index-ordered, bounded by LIMIT/OFFSET.
         let page_rows: Vec<SearchDocumentRow> = apply_filters!(search_document::table
@@ -844,7 +833,7 @@ impl SqliteSearchIndex {
         .limit(limit as i64)
         .offset(offset as i64)
         .load(conn)
-        .map_err(|e| SearchError::Internal(format!("filter-only page load failed: {e}")))?;
+        .map_err(internal("filter-only page load failed"))?;
 
         let total = total as u32;
         let has_more = total > (offset as u32) + (page_rows.len() as u32);
@@ -1021,9 +1010,7 @@ impl SqliteSearchIndex {
                     doc.to_domain_with_render_fields(fields, render_corrupted)
                 }
             }
-            .map_err(|e| {
-                SearchError::Internal(format!("failed to decode search row {}: {e}", doc.entry_id))
-            })?;
+            .map_err(internal("failed to decode search row"))?;
             if decoded.render_corrupted {
                 corrupted.push(decoded.document.entry_id.clone());
             }
@@ -1068,7 +1055,7 @@ impl SqliteSearchIndex {
             .filter(dsl::entry_id.eq_any(entry_ids))
             .select((dsl::entry_id, dsl::tag_id))
             .load::<(String, String)>(conn)
-            .map_err(|e| SearchError::Internal(format!("load_tags_for_entries failed: {e}")))?;
+            .map_err(internal("load_tags_for_entries failed"))?;
 
         let mut map: HashMap<String, Vec<TagId>> = HashMap::new();
         for (entry_id, tag_id) in rows {
@@ -1091,7 +1078,7 @@ impl SqliteSearchIndex {
             .filter(dsl::tag_id.eq_any(tag_ids))
             .select(dsl::entry_id)
             .load::<String>(conn)
-            .map_err(|e| SearchError::Internal(format!("load_entry_ids_for_tags failed: {e}")))?;
+            .map_err(internal("load_entry_ids_for_tags failed"))?;
 
         Ok(rows.into_iter().collect())
     }
@@ -1162,11 +1149,11 @@ impl SqliteSearchIndex {
 
         diesel::sql_query(&create_doc)
             .execute(conn)
-            .map_err(|e| SearchError::Internal(format!("create temp doc table failed: {e}")))?;
+            .map_err(internal("create temp doc table failed"))?;
 
         diesel::sql_query(&create_posting)
             .execute(conn)
-            .map_err(|e| SearchError::Internal(format!("create temp posting table failed: {e}")))?;
+            .map_err(internal("create temp posting table failed"))?;
 
         // 替换单条记录时按条目定位，避免逐条扫描整个重建暂存表。
         diesel::sql_query(format!(
@@ -1174,13 +1161,11 @@ impl SqliteSearchIndex {
             state.temp_posting_table, state.temp_posting_table
         ))
         .execute(conn)
-        .map_err(|e| {
-            SearchError::Internal(format!("create temp posting entry index failed: {e}"))
-        })?;
+        .map_err(internal("create temp posting entry index failed"))?;
 
         diesel::sql_query(&create_entry_tag)
             .execute(conn)
-            .map_err(|e| SearchError::Internal(format!("create temp tag table failed: {e}")))?;
+            .map_err(internal("create temp tag table failed"))?;
 
         debug!(
             profile_id = %state.profile_id,
@@ -1308,7 +1293,7 @@ impl SqliteSearchIndex {
             }
             Ok(())
         })
-        .map_err(|e| SearchError::Internal(format!("insert temp entry transaction failed: {e}")))
+        .map_err(internal("insert temp entry transaction failed"))
     }
 
     /// Delete an entry from the rebuild temp tables.
@@ -1331,9 +1316,7 @@ impl SqliteSearchIndex {
             .bind::<diesel::sql_types::Text, _>(profile_id)
             .bind::<diesel::sql_types::Text, _>(&entry_id_str)
             .execute(conn)
-            .map_err(|e| {
-                SearchError::Internal(format!("delete_temp_entry postings failed: {e}"))
-            })?;
+            .map_err(internal("delete_temp_entry postings failed"))?;
 
         let del_doc = format!(
             "DELETE FROM {doc_table} WHERE profile_id = ? AND entry_id = ?",
@@ -1343,7 +1326,7 @@ impl SqliteSearchIndex {
             .bind::<diesel::sql_types::Text, _>(profile_id)
             .bind::<diesel::sql_types::Text, _>(&entry_id_str)
             .execute(conn)
-            .map_err(|e| SearchError::Internal(format!("delete_temp_entry doc failed: {e}")))?;
+            .map_err(internal("delete_temp_entry doc failed"))?;
 
         let del_tags = format!(
             "DELETE FROM {tag_table} WHERE profile_id = ? AND entry_id = ?",
@@ -1353,7 +1336,7 @@ impl SqliteSearchIndex {
             .bind::<diesel::sql_types::Text, _>(profile_id)
             .bind::<diesel::sql_types::Text, _>(&entry_id_str)
             .execute(conn)
-            .map_err(|e| SearchError::Internal(format!("delete_temp_entry tags failed: {e}")))?;
+            .map_err(internal("delete_temp_entry tags failed"))?;
 
         Ok(())
     }
@@ -1441,7 +1424,7 @@ impl SqliteSearchIndex {
 
             Ok(())
         })
-        .map_err(|e| SearchError::Internal(format!("finalize_rebuild transaction failed: {e}")))
+        .map_err(internal("finalize_rebuild transaction failed"))
     }
 }
 
@@ -1479,7 +1462,7 @@ impl SearchIndexPort for SqliteSearchIndex {
         tokio::task::spawn_blocking(move || {
             let mut conn = pool
                 .get()
-                .map_err(|e| SearchError::Internal(format!("pool error: {e}")))?;
+                .map_err(internal("pool error"))?;
 
             Self::ensure_meta_row(&mut conn, &profile_id, index_version)?;
 
@@ -1498,7 +1481,7 @@ impl SearchIndexPort for SqliteSearchIndex {
             Ok(())
         })
         .await
-        .map_err(|e| SearchError::Internal(format!("spawn_blocking error: {e}")))?
+        .map_err(internal("spawn_blocking error"))?
     }
 
     #[instrument(name = "search_index.remove_entry", level = "debug", skip(self), fields(entry_id = %entry_id))]
@@ -1513,7 +1496,7 @@ impl SearchIndexPort for SqliteSearchIndex {
         tokio::task::spawn_blocking(move || {
             let mut conn = pool
                 .get()
-                .map_err(|e| SearchError::Internal(format!("pool error: {e}")))?;
+                .map_err(internal("pool error"))?;
 
             Self::ensure_meta_row(&mut conn, &profile_id, index_version)?;
 
@@ -1530,7 +1513,7 @@ impl SearchIndexPort for SqliteSearchIndex {
             Ok(())
         })
         .await
-        .map_err(|e| SearchError::Internal(format!("spawn_blocking error: {e}")))?
+        .map_err(internal("spawn_blocking error"))?
     }
 
     #[instrument(
@@ -1558,9 +1541,7 @@ impl SearchIndexPort for SqliteSearchIndex {
                         .iter()
                         .map(|term| term_tag(search_key.key(), term))
                         .collect::<Result<_, _>>()
-                        .map_err(|e| {
-                            SearchError::Internal(format!("term_tag computation failed: {e}"))
-                        })?
+                        .map_err(internal("term_tag computation failed"))?
                 };
                 let render_key = derivation.derive_render_key().await?;
                 (
@@ -1576,14 +1557,12 @@ impl SearchIndexPort for SqliteSearchIndex {
                     let pool = pool.clone();
                     let profile_id = profile_id.clone();
                     tokio::task::spawn_blocking(move || {
-                        let mut conn = pool
-                            .get()
-                            .map_err(|e| SearchError::Internal(format!("pool error: {e}")))?;
+                        let mut conn = pool.get().map_err(internal("pool error"))?;
                         Self::require_ready_version(&mut conn, &profile_id, V3_INDEX_VERSION)?;
                         Self::load_v3_group_refs(&mut conn, &profile_id)
                     })
                     .await
-                    .map_err(|e| SearchError::Internal(format!("spawn_blocking error: {e}")))??
+                    .map_err(internal("spawn_blocking error"))??
                 };
                 let query_tags = protection
                     .query_terms(&refs, &terms)
@@ -1593,9 +1572,7 @@ impl SearchIndexPort for SqliteSearchIndex {
                             ..
                         } => SearchError::IndexNotReady,
                         other if other.runtime_closed() => SearchError::SessionLocked,
-                        other => SearchError::Internal(format!(
-                            "prepare V3 search query failed: {other}"
-                        )),
+                        other => internal("prepare V3 search query failed")(other),
                     })?;
                 let tags = query_tags
                     .alternatives_by_term()
@@ -1620,7 +1597,7 @@ impl SearchIndexPort for SqliteSearchIndex {
             .iter()
             .map(|ct| serde_json::to_string(ct).map(|s| s.trim_matches('"').to_string()))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| SearchError::Internal(format!("content_type encode failed: {e}")))?;
+            .map_err(internal("content_type encode failed"))?;
         let filters = FilterParams {
             content_types,
             tags: query.tags.iter().map(|t| t.as_str().to_string()).collect(),
@@ -1637,9 +1614,7 @@ impl SearchIndexPort for SqliteSearchIndex {
 
         let query_profile_id = profile_id.clone();
         let (page_rows, tags_by_entry, total, has_more) = tokio::task::spawn_blocking(move || {
-            let mut conn = pool
-                .get()
-                .map_err(|e| SearchError::Internal(format!("pool error: {e}")))?;
+            let mut conn = pool.get().map_err(internal("pool error"))?;
 
             Self::require_ready_version(&mut conn, &query_profile_id, index_version)?;
 
@@ -1672,7 +1647,7 @@ impl SearchIndexPort for SqliteSearchIndex {
             Ok((page_rows, tags_by_entry, total, has_more))
         })
         .await
-        .map_err(|e| SearchError::Internal(format!("spawn_blocking error: {e}")))??;
+        .map_err(internal("spawn_blocking error"))??;
 
         let (items, corrupted_entry_ids) =
             Self::hydrate_results(renderer, page_rows, tags_by_entry).await?;
@@ -1727,9 +1702,7 @@ impl SearchIndexPort for SqliteSearchIndex {
             let p = pool.clone();
             let now_ms = chrono::Utc::now().timestamp_millis();
             tokio::task::spawn_blocking(move || {
-                let mut conn = p
-                    .get()
-                    .map_err(|e| SearchError::Internal(format!("pool error: {e}")))?;
+                let mut conn = p.get().map_err(internal("pool error"))?;
                 Self::ensure_meta_row(&mut conn, &pid, index_version)?;
                 use crate::db::schema::search_index_meta::dsl;
                 diesel::update(dsl::search_index_meta.filter(dsl::profile_id.eq(&pid)))
@@ -1738,11 +1711,11 @@ impl SearchIndexPort for SqliteSearchIndex {
                         dsl::last_rebuild_started_at_ms.eq(now_ms),
                     ))
                     .execute(&mut conn)
-                    .map_err(|e| SearchError::Internal(format!("set blocked failed: {e}")))?;
+                    .map_err(internal("set blocked failed"))?;
                 Ok(())
             })
             .await
-            .map_err(|e| SearchError::Internal(format!("spawn_blocking error: {e}")))??;
+            .map_err(internal("spawn_blocking error"))??;
         }
 
         // ─── Step 2: emit Started ─────────────────────────────────────────────
@@ -1760,13 +1733,11 @@ impl SearchIndexPort for SqliteSearchIndex {
             let rid = rebuild_info.clone();
             let p = pool.clone();
             if let Err(e) = tokio::task::spawn_blocking(move || {
-                let mut conn = p
-                    .get()
-                    .map_err(|e| SearchError::Internal(format!("pool error: {e}")))?;
+                let mut conn = p.get().map_err(internal("pool error"))?;
                 Self::create_rebuild_tables(&mut conn, &rid)
             })
             .await
-            .map_err(|e| SearchError::Internal(format!("spawn_blocking error: {e}")))
+            .map_err(internal("spawn_blocking error"))
             .and_then(|r| r)
             {
                 let _ = progress_tx
@@ -1812,13 +1783,11 @@ impl SearchIndexPort for SqliteSearchIndex {
                 let rid = rebuild_info.clone();
                 let p = pool.clone();
                 tokio::task::spawn_blocking(move || {
-                    let mut conn = p
-                        .get()
-                        .map_err(|e| SearchError::Internal(format!("pool error: {e}")))?;
+                    let mut conn = p.get().map_err(internal("pool error"))?;
                     Self::insert_temp_entries(&mut conn, &rid, &prepared)
                 })
                 .await
-                .map_err(|e| SearchError::Internal(format!("spawn_blocking error: {e}")))
+                .map_err(internal("spawn_blocking error"))
                 .and_then(|result| result)
             }
             .await;
@@ -1873,7 +1842,7 @@ impl SearchIndexPort for SqliteSearchIndex {
                         })
                         .await;
                     return Err(SearchError::Internal(
-                        "fault injection: rebuild failed after N entries".to_string(),
+                        "fault injection: rebuild failed after N entries".into(),
                     ));
                 }
             }
@@ -1903,13 +1872,11 @@ impl SearchIndexPort for SqliteSearchIndex {
             let rid = rebuild_info.clone();
             let p = pool.clone();
             if let Err(e) = tokio::task::spawn_blocking(move || {
-                let mut conn = p
-                    .get()
-                    .map_err(|e| SearchError::Internal(format!("pool error: {e}")))?;
+                let mut conn = p.get().map_err(internal("pool error"))?;
                 Self::finalize_rebuild(&mut conn, &rid, completed_at_ms)
             })
             .await
-            .map_err(|e| SearchError::Internal(format!("spawn_blocking error: {e}")))
+            .map_err(internal("spawn_blocking error"))
             .and_then(|r| r)
             {
                 // Finalize failed: clear state, drop tables, leave blocked.
@@ -1971,15 +1938,13 @@ impl SearchIndexPort for SqliteSearchIndex {
         let index_version = self.protection.index_version();
 
         tokio::task::spawn_blocking(move || {
-            let mut conn = pool
-                .get()
-                .map_err(|e| SearchError::Internal(format!("pool error: {e}")))?;
+            let mut conn = pool.get().map_err(internal("pool error"))?;
 
             Self::ensure_meta_row(&mut conn, &profile_id, index_version)?;
             Self::load_meta(&mut conn, &profile_id)
         })
         .await
-        .map_err(|e| SearchError::Internal(format!("spawn_blocking error: {e}")))?
+        .map_err(internal("spawn_blocking error"))?
     }
 
     #[instrument(
@@ -2002,7 +1967,7 @@ impl SearchIndexPort for SqliteSearchIndex {
         tokio::task::spawn_blocking(move || {
             let mut conn = pool
                 .get()
-                .map_err(|e| SearchError::Internal(format!("pool error: {e}")))?;
+                .map_err(internal("pool error"))?;
 
             Self::ensure_meta_row(&mut conn, &profile_id, index_version)?;
 
@@ -2023,7 +1988,7 @@ impl SearchIndexPort for SqliteSearchIndex {
             Ok(())
         })
         .await
-        .map_err(|e| SearchError::Internal(format!("spawn_blocking error: {e}")))?
+        .map_err(internal("spawn_blocking error"))?
     }
 
     #[instrument(name = "search_index.list_tags", level = "debug", skip(self))]
@@ -2033,16 +1998,14 @@ impl SearchIndexPort for SqliteSearchIndex {
 
         tokio::task::spawn_blocking(move || {
             use crate::db::schema::search_entry_tag::dsl;
-            let mut conn = pool
-                .get()
-                .map_err(|e| SearchError::Internal(format!("pool error: {e}")))?;
+            let mut conn = pool.get().map_err(internal("pool error"))?;
 
             let rows: Vec<(String, i64)> = dsl::search_entry_tag
                 .filter(dsl::profile_id.eq(&profile_id))
                 .group_by(dsl::tag_id)
                 .select((dsl::tag_id, diesel::dsl::count_star()))
                 .load::<(String, i64)>(&mut conn)
-                .map_err(|e| SearchError::Internal(format!("list_tags failed: {e}")))?;
+                .map_err(internal("list_tags failed"))?;
 
             Ok(rows
                 .into_iter()
@@ -2053,7 +2016,7 @@ impl SearchIndexPort for SqliteSearchIndex {
                 .collect())
         })
         .await
-        .map_err(|e| SearchError::Internal(format!("spawn_blocking error: {e}")))?
+        .map_err(internal("spawn_blocking error"))?
     }
 }
 
@@ -2072,9 +2035,7 @@ impl SearchIndexMaintenancePort for SqliteSearchIndex {
         let pool = self.pool.clone();
 
         tokio::task::spawn_blocking(move || {
-            let mut conn = pool
-                .get()
-                .map_err(|e| SearchError::Internal(format!("pool error: {e}")))?;
+            let mut conn = pool.get().map_err(internal("pool error"))?;
 
             // Sweep any leftover rebuild scratch tables from interrupted rebuilds
             // (persistent, profile-named `tmp_search_*_rebuild_*` tables) before
@@ -2103,7 +2064,7 @@ impl SearchIndexMaintenancePort for SqliteSearchIndex {
             Ok(())
         })
         .await
-        .map_err(|e| SearchError::Internal(format!("spawn_blocking error: {e}")))?
+        .map_err(internal("spawn_blocking error"))?
     }
 
     #[instrument(
@@ -2118,19 +2079,17 @@ impl SearchIndexMaintenancePort for SqliteSearchIndex {
         let index_version = self.protection.index_version();
 
         tokio::task::spawn_blocking(move || {
-            let mut conn = pool
-                .get()
-                .map_err(|e| SearchError::Internal(format!("pool error: {e}")))?;
+            let mut conn = pool.get().map_err(internal("pool error"))?;
             Self::ensure_meta_row(&mut conn, &profile_id, index_version)?;
             use crate::db::schema::search_index_meta::dsl;
             diesel::update(dsl::search_index_meta.filter(dsl::profile_id.eq(&profile_id)))
                 .set(dsl::plaintext_purge_done_ms.eq(ts_ms))
                 .execute(&mut conn)
-                .map_err(|e| SearchError::Internal(format!("mark purge done failed: {e}")))?;
+                .map_err(internal("mark purge done failed"))?;
             Ok(())
         })
         .await
-        .map_err(|e| SearchError::Internal(format!("spawn_blocking error: {e}")))?
+        .map_err(internal("spawn_blocking error"))?
     }
 }
 
@@ -2163,9 +2122,11 @@ impl SqliteSearchIndex {
                     std::thread::sleep(std::time::Duration::from_millis(50 * attempt as u64));
                 }
                 Err(e) => {
-                    return Err(SearchError::Internal(format!(
-                        "maintenance statement `{sql}` failed: {e}"
-                    )))
+                    return Err(SearchError::Internal(
+                        anyhow::Error::new(e)
+                            .context(format!("maintenance statement `{sql}` failed"))
+                            .into(),
+                    ))
                 }
             }
         }
