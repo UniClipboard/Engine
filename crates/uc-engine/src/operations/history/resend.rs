@@ -139,13 +139,13 @@ mod tests {
 
     #[test]
     fn resend_internal_failures_keep_distinct_codes_without_details() {
-        let storage = map_resend_result(Err(ResendEntryError::Storage(
-            "/private/path/uniclipboard.db".into(),
-        )))
+        let storage = map_resend_result(Err(ResendEntryError::Storage(anyhow::anyhow!(
+            "/private/path/uniclipboard.db"
+        ))))
         .unwrap_err();
-        let dispatch = map_resend_result(Err(ResendEntryError::Dispatch(
-            "private session detail".into(),
-        )))
+        let dispatch = map_resend_result(Err(ResendEntryError::Dispatch(anyhow::anyhow!(
+            "private session detail"
+        ))))
         .unwrap_err();
 
         assert_eq!(storage.code(), RESEND_STORAGE_FAILED_CODE);

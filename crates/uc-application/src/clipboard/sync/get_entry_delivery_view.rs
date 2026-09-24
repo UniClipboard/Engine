@@ -81,8 +81,8 @@ pub enum EntryDeliveryStatusView {
 pub enum GetEntryDeliveryViewError {
     #[error("entry not found: {0}")]
     EntryNotFound(String),
-    #[error("storage failure: {0}")]
-    Storage(String),
+    #[error("storage failure")]
+    Storage(#[source] anyhow::Error),
 }
 
 /// `mobile_sync:` 前缀——移动端入站在 `apply_incoming.rs` 里
@@ -134,14 +134,20 @@ impl GetEntryDeliveryViewUseCase {
             .entry_repo
             .get_entry(entry_id)
             .await
-            .map_err(|e| GetEntryDeliveryViewError::Storage(e.to_string()))?
+            .map_err(|e| {
+                GetEntryDeliveryViewError::Storage(anyhow::Error::new(e).context("get entry"))
+            })?
             .ok_or_else(|| GetEntryDeliveryViewError::EntryNotFound(entry_id.to_string()))?;
 
         let current_peers: HashSet<DeviceId> = self
             .peer_scope
             .snapshot()
             .await
-            .map_err(|e| GetEntryDeliveryViewError::Storage(format!("current peer scope: {e:?}")))?
+            .map_err(|e| {
+                GetEntryDeliveryViewError::Storage(
+                    anyhow::Error::new(e).context("read current peer scope"),
+                )
+            })?
             .usable_peer_device_ids
             .into_iter()
             .collect();
@@ -164,7 +170,7 @@ impl GetEntryDeliveryViewUseCase {
             .event_repo
             .get_source_device(&entry.event_id)
             .await
-            .map_err(|e| GetEntryDeliveryViewError::Storage(e.to_string()))?;
+            .map_err(|e| GetEntryDeliveryViewError::Storage(e.context("get source device")))?;
 
         let Some(source_device) = source_device else {
             return Ok(EntryDeliveryView {
@@ -220,17 +226,19 @@ impl GetEntryDeliveryViewUseCase {
 
         // 5. 本机 entry:当前成员范围与 trusted_peer 取交集后 LEFT JOIN
         //    delivery 表。可信关系和投递事实为历史验证保留,不能单独恢复当前资格。
-        let trusted = self
-            .trusted_peer_repo
-            .list()
-            .await
-            .map_err(|e| GetEntryDeliveryViewError::Storage(e.to_string()))?;
+        let trusted = self.trusted_peer_repo.list().await.map_err(|e| {
+            GetEntryDeliveryViewError::Storage(anyhow::Error::new(e).context("list trusted peers"))
+        })?;
 
         let deliveries = self
             .entry_delivery_repo
             .list_by_entry(entry_id)
             .await
-            .map_err(|e| GetEntryDeliveryViewError::Storage(e.to_string()))?;
+            .map_err(|e| {
+                GetEntryDeliveryViewError::Storage(
+                    anyhow::Error::new(e).context("list entry deliveries"),
+                )
+            })?;
 
         let mut delivery_index: HashMap<&str, &EntryDeliveryRecord> =
             HashMap::with_capacity(deliveries.len());
@@ -796,7 +804,13 @@ mod tests {
 
         let err = uc.execute(&entry_id("e1")).await.unwrap_err();
 
-        assert!(matches!(err, GetEntryDeliveryViewError::Storage(_)));
+        let GetEntryDeliveryViewError::Storage(source) = err else {
+            panic!("expected storage failure");
+        };
+        assert!(matches!(
+            source.downcast_ref::<CurrentSpaceMemberScopeError>(),
+            Some(CurrentSpaceMemberScopeError::Unavailable)
+        ));
     }
 
     // ── 分支 4: 远端 entry → Remote, deliveries 空 ─────────────────────

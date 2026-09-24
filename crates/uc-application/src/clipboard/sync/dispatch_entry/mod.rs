@@ -255,11 +255,11 @@ pub(crate) enum DispatchSyncError {
     #[error("encryption session not unlocked")]
     LockedSpace,
     /// Encryption failed for any other reason.
-    #[error("transfer cipher failure: {0}")]
-    CipherFailure(String),
-    /// Listing the peer address repository failed.
-    #[error("peer_addr_repo.list: {0}")]
-    Repository(String),
+    #[error("transfer cipher failure")]
+    CipherFailure(#[source] uc_core::ports::security::TransferCipherError),
+    /// Reading the peer address repository or current peer scope failed.
+    #[error("dispatch target lookup failed")]
+    Repository(#[source] anyhow::Error),
 }
 
 /// Crate-internal abstraction over [`DispatchClipboardEntryUseCase::execute`].
@@ -465,7 +465,7 @@ impl DispatchClipboardEntryUseCase {
                     uc_core::ports::security::TransferCipherError::NotUnlocked => {
                         DispatchSyncError::LockedSpace
                     }
-                    other => DispatchSyncError::CipherFailure(other.to_string()),
+                    other => DispatchSyncError::CipherFailure(other),
                 });
             }
         };

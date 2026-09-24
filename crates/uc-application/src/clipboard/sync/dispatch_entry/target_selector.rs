@@ -67,12 +67,13 @@ impl TargetSelector {
         input: &DispatchClipboardEntryInput,
         local_device: &DeviceId,
     ) -> Result<Vec<DeviceId>, DispatchSyncError> {
-        let records =
-            self.peer_addr_repo.list().await.map_err(|err| {
-                DispatchSyncError::Repository(format!("peer_addr_repo.list: {err}"))
-            })?;
+        let records = self.peer_addr_repo.list().await.map_err(|err| {
+            DispatchSyncError::Repository(anyhow::Error::new(err).context("list peer addresses"))
+        })?;
         let scope = self.peer_scope.snapshot().await.map_err(|error| {
-            DispatchSyncError::Repository(format!("current peer scope: {error:?}"))
+            DispatchSyncError::Repository(
+                anyhow::Error::new(error).context("read current peer scope"),
+            )
         })?;
 
         let mut candidates: Vec<DeviceId> = Vec::with_capacity(records.len());
@@ -418,6 +419,12 @@ mod tests {
             .await
             .expect_err("list failure must surface");
 
-        assert!(matches!(err, DispatchSyncError::Repository(_)));
+        let DispatchSyncError::Repository(source) = err else {
+            panic!("expected repository failure");
+        };
+        assert!(matches!(
+            source.downcast_ref::<uc_core::ports::PeerAddressError>(),
+            Some(uc_core::ports::PeerAddressError::Internal(_))
+        ));
     }
 }

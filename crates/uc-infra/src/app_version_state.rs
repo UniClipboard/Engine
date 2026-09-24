@@ -83,7 +83,7 @@ impl FileAppVersionStateRepository {
         if let Some(parent) = self.parent_dir() {
             fs::create_dir_all(parent)
                 .await
-                .map_err(|e| AppVersionStateError::Write(format!("mkdir {parent:?}: {e}")))?;
+                .map_err(|e| AppVersionStateError::Write(Box::new(e)))?;
         }
         Ok(())
     }
@@ -95,31 +95,21 @@ impl AppVersionStatePort for FileAppVersionStateRepository {
         let raw = match fs::read_to_string(&self.file_path).await {
             Ok(content) => content,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => {
-                return Err(AppVersionStateError::Read(format!(
-                    "read {:?}: {e}",
-                    self.file_path
-                )))
-            }
+            Err(e) => return Err(AppVersionStateError::Read(Box::new(e))),
         };
 
         if raw.trim().is_empty() {
-            return Err(AppVersionStateError::Corrupt(format!(
-                "{:?} is empty",
-                self.file_path
-            )));
+            return Err(AppVersionStateError::Corrupt("state file is empty".into()));
         }
 
-        let parsed: UpgradeCursorFile = serde_json::from_str(&raw).map_err(|e| {
-            AppVersionStateError::Corrupt(format!("parse {:?}: {e}", self.file_path))
-        })?;
+        let parsed: UpgradeCursorFile =
+            serde_json::from_str(&raw).map_err(|e| AppVersionStateError::Corrupt(Box::new(e)))?;
 
         if parsed.schema_version != CURRENT_SCHEMA_VERSION {
             // 未来扩 schema 时这里会变成 migrate 分支；当前只接受 v1。
-            return Err(AppVersionStateError::Corrupt(format!(
-                "{:?} has unsupported schema_version {}",
-                self.file_path, parsed.schema_version
-            )));
+            return Err(AppVersionStateError::Corrupt(
+                "state file schema version is unsupported".into(),
+            ));
         }
 
         Ok(Some(parsed.last_seen_version))
@@ -133,7 +123,7 @@ impl AppVersionStatePort for FileAppVersionStateRepository {
             last_seen_version: version.to_string(),
         };
         let body = serde_json::to_vec_pretty(&payload)
-            .map_err(|e| AppVersionStateError::Write(format!("serialize cursor: {e}")))?;
+            .map_err(|e| AppVersionStateError::Write(Box::new(e)))?;
 
         // 写临时文件 + 原子 rename，避免崩溃后留下损坏的游标。
         let tmp_path = self.file_path.with_extension("json.tmp");
@@ -143,18 +133,18 @@ impl AppVersionStatePort for FileAppVersionStateRepository {
         {
             let mut file = fs::File::create(&tmp_path)
                 .await
-                .map_err(|e| AppVersionStateError::Write(format!("create {tmp_path:?}: {e}")))?;
+                .map_err(|e| AppVersionStateError::Write(Box::new(e)))?;
             file.write_all(&body)
                 .await
-                .map_err(|e| AppVersionStateError::Write(format!("write {tmp_path:?}: {e}")))?;
+                .map_err(|e| AppVersionStateError::Write(Box::new(e)))?;
             file.sync_all()
                 .await
-                .map_err(|e| AppVersionStateError::Write(format!("fsync {tmp_path:?}: {e}")))?;
+                .map_err(|e| AppVersionStateError::Write(Box::new(e)))?;
         }
 
-        fs::rename(&tmp_path, &self.file_path).await.map_err(|e| {
-            AppVersionStateError::Write(format!("rename {tmp_path:?} -> {:?}: {e}", self.file_path))
-        })?;
+        fs::rename(&tmp_path, &self.file_path)
+            .await
+            .map_err(|e| AppVersionStateError::Write(Box::new(e)))?;
 
         Ok(())
     }
@@ -199,6 +189,33 @@ mod tests {
         fs::write(&path, b"{not valid json").await.unwrap();
         let err = repo.read().await.unwrap_err();
         assert!(matches!(err, AppVersionStateError::Corrupt(_)));
+    }
+
+    #[tokio::test]
+    async fn corrupt_json_keeps_parse_error_without_path_text() {
+        let (tmp, repo) = repo();
+        let path = tmp.path().join(DEFAULT_FILE_NAME);
+        fs::write(&path, b"{not valid json").await.unwrap();
+
+        let err = repo.read().await.unwrap_err();
+
+        let source = std::error::Error::source(&err).expect("parse error source");
+        assert!(source.downcast_ref::<serde_json::Error>().is_some());
+        assert!(!err.to_string().contains(&*tmp.path().to_string_lossy()));
+    }
+
+    #[tokio::test]
+    async fn unreadable_cursor_keeps_io_error_as_source() {
+        let (tmp, repo) = repo();
+        fs::create_dir(tmp.path().join(DEFAULT_FILE_NAME))
+            .await
+            .unwrap();
+
+        let err = repo.read().await.unwrap_err();
+
+        assert!(matches!(err, AppVersionStateError::Read(_)));
+        let source = std::error::Error::source(&err).expect("io error source");
+        assert!(source.downcast_ref::<std::io::Error>().is_some());
     }
 
     #[tokio::test]

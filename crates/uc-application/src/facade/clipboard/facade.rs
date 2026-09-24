@@ -136,10 +136,10 @@ pub enum ClipboardSyncError {
     Stopped,
     #[error("encryption session not unlocked")]
     LockedSpace,
-    #[error("transfer cipher failure: {0}")]
-    CipherFailure(String),
-    #[error("peer address repository: {0}")]
-    Repository(String),
+    #[error("transfer cipher failure")]
+    CipherFailure(#[source] anyhow::Error),
+    #[error("peer address repository failure")]
+    Repository(#[source] anyhow::Error),
 }
 
 impl From<DispatchSyncError> for ClipboardSyncError {
@@ -147,8 +147,10 @@ impl From<DispatchSyncError> for ClipboardSyncError {
         match err {
             DispatchSyncError::Stopped => ClipboardSyncError::Stopped,
             DispatchSyncError::LockedSpace => ClipboardSyncError::LockedSpace,
-            DispatchSyncError::CipherFailure(msg) => ClipboardSyncError::CipherFailure(msg),
-            DispatchSyncError::Repository(msg) => ClipboardSyncError::Repository(msg),
+            DispatchSyncError::CipherFailure(source) => {
+                ClipboardSyncError::CipherFailure(anyhow::Error::new(source))
+            }
+            DispatchSyncError::Repository(source) => ClipboardSyncError::Repository(source),
         }
     }
 }
@@ -477,7 +479,7 @@ impl ClipboardSyncDispatch<'_> {
         let _ = origin; // span metadata only (see facade documentation)
         let categories = ClipboardContentCategorySet::from_snapshot(&snapshot);
         let (plaintext, snapshot_hash) = encode_snapshot_to_v3_bytes(&snapshot)
-            .map_err(|e| ClipboardSyncError::CipherFailure(format!("payload encode: {e}")))?;
+            .map_err(|e| ClipboardSyncError::CipherFailure(e.context("payload encode")))?;
         self.facade
             .dispatch_internal(
                 plaintext,
@@ -505,7 +507,7 @@ impl ClipboardSyncDispatch<'_> {
         let categories = ClipboardContentCategorySet::from_snapshot(&snapshot);
         let (plaintext, snapshot_hash) =
             encode_snapshot_with_blob_refs_to_v3_bytes(&snapshot, &blob_refs)
-                .map_err(|e| ClipboardSyncError::CipherFailure(format!("payload encode: {e}")))?;
+                .map_err(|e| ClipboardSyncError::CipherFailure(e.context("payload encode")))?;
         self.facade
             .dispatch_internal(
                 plaintext,
@@ -538,7 +540,7 @@ impl ClipboardSyncDispatch<'_> {
                 &blob_refs,
                 &manifest,
             )
-            .map_err(|e| ClipboardSyncError::CipherFailure(format!("payload encode: {e}")))?;
+            .map_err(|e| ClipboardSyncError::CipherFailure(e.context("payload encode")))?;
         self.facade
             .dispatch_internal(
                 plaintext,

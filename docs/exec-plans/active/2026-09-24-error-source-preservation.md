@@ -2,7 +2,7 @@
 
 ## 状态与完整责任
 
-- **状态**：实施中。E0–E3 已完成，其余切片未开始。
+- **状态**：实施中。E0–E3 已完成，E4 进行中。
 - **日期**：2026-09-24。
 - **依据**：[错误处理与转换](../../design-docs/error-handling.md)要求保留完整 source chain；[运行期观测](../../design-docs/observability.md#错误来源与日志字段)要求日志只记录从 source chain 提取的固定分类。
 - **完整负责人**：每处转换由目标错误类型所在模块负责（与错误处理规范的“转换所有权”一致）；整体顺序、清单复核与验收由本计划负责。
@@ -139,4 +139,23 @@ L1 日志字段不在本切片检查范围，待 E10 确定固定分类字段的
 - 同时移除文本中的非固定值：配额基线原文（`cleanup.rs`）、表示 ID（`durable_spool_queue.rs`）。
 - `db/pool.rs` 迁移失败来源是 `Box<dyn Error + Send + Sync>`，用 `anyhow!(error)` 保留原对象后再加 context。
 - 测试：payload 字段截断时，可从错误链取回 `io::ErrorKind::UnexpectedEof`。
+
+### E4 含路径或标识的文本（进行中）
+
+E1 的检查会拒绝只删标识、仍保留 `{error}` 的改法，所以 E4 按错误类型整体改为携带 source。
+
+- 已完成：
+  - `uc-core` 端口错误 `AppVersionStateError`、`FirstSyncStateError`、`EngineVersionStateError`：元组变体改为
+    `#[source] Box<dyn Error + Send + Sync>`（沿用 `PeerReachabilityError` 的写法；Core 无法命名 Infra 类型，也不新增
+    `anyhow`），显示文本不再含文件路径。空文件、schema 不识别等没有下层错误的损坏情形使用固定文本。
+  - `uc-application` 的 `DispatchSyncError`、`ClipboardSyncError`、`ResendEntryError`、`GetEntryDeliveryViewError`：
+    字符串变体改为 `#[source]`（`TransferCipherError` 或带固定动作 context 的 `anyhow::Error`），去掉
+    `current peer scope: {error:?}` 的 Debug 文本。Engine 的公开错误码与分类不变。
+  - 测试：游标读取失败可取回 `io::Error`、解析失败可取回 `serde_json::Error` 且显示文本不含路径；投递视图与分发目标
+    查询失败可取回 `CurrentSpaceMemberScopeError`、`PeerAddressError`。
+- 剩余：`SearchError::Internal(String)`（`sqlite_index.rs` 解码失败文本带条目 ID；该变体约 87 处引用）。
+- 转入 E11：`mobile_sync/file_staging.rs` 文本中的路径与 URI。其端口 `MobileFileStagingPort` 只服务兼容线，
+  而兼容线 `get_file.rs` 自己也把 URI 与错误文本写入日志和 `Staging(String)`；只改 Infra 端堵不住泄露。
+- 遗留：`OutboundPayloadError::Internal(String)` 仍是字符串变体，`ResendEntryError` 暂以 `anyhow!(message)` 承接，
+  由 E5 修复。
 

@@ -66,13 +66,13 @@ impl ExistingLocalEntryDeliveryRunner for ExistingLocalEntryDelivery {
             .entry_repo
             .get_entry(&entry_id)
             .await
-            .map_err(|err| ResendEntryError::Storage(format!("get_entry: {err}")))?
+            .map_err(|err| ResendEntryError::Storage(anyhow::Error::new(err).context("get entry")))?
             .ok_or_else(|| ResendEntryError::EntryNotFound(entry_id.clone()))?;
         let source_device = self
             .event_repo
             .get_source_device(&entry.event_id)
             .await
-            .map_err(|err| ResendEntryError::Storage(format!("get_source_device: {err}")))?
+            .map_err(|err| ResendEntryError::Storage(err.context("get source device")))?
             .ok_or_else(|| ResendEntryError::EntryNotResendable {
                 entry_id: entry_id.clone(),
                 reason: NotResendableReason::RemoteOrigin,
@@ -116,7 +116,7 @@ impl ExistingLocalEntryDeliveryRunner for ExistingLocalEntryDelivery {
                     encode_snapshot_with_blob_refs_and_file_set_to_v3_bytes(
                         &snapshot, &blob_refs, &manifest,
                     )
-                    .map_err(|err| ResendEntryError::Dispatch(format!("payload encode: {err}")))?;
+                    .map_err(|err| ResendEntryError::Dispatch(err.context("payload encode")))?;
                 (
                     plaintext,
                     snapshot_hash,
@@ -124,10 +124,9 @@ impl ExistingLocalEntryDeliveryRunner for ExistingLocalEntryDelivery {
                 )
             }
             None => {
-                let (plaintext, snapshot_hash) = encode_snapshot_with_blob_refs_to_v3_bytes(
-                    &snapshot, &blob_refs,
-                )
-                .map_err(|err| ResendEntryError::Dispatch(format!("payload encode: {err}")))?;
+                let (plaintext, snapshot_hash) =
+                    encode_snapshot_with_blob_refs_to_v3_bytes(&snapshot, &blob_refs)
+                        .map_err(|err| ResendEntryError::Dispatch(err.context("payload encode")))?;
                 (
                     plaintext,
                     snapshot_hash,
@@ -183,7 +182,9 @@ fn map_build_snapshot_error(err: BuildSnapshotError, entry_id: &EntryId) -> Rese
                 reason: NotResendableReason::PayloadLost,
             }
         }
-        BuildSnapshotError::Repository(inner) => ResendEntryError::Storage(inner.to_string()),
+        BuildSnapshotError::Repository(inner) => {
+            ResendEntryError::Storage(inner.context("build entry snapshot"))
+        }
     }
 }
 
@@ -193,22 +194,22 @@ fn map_outbound_payload_error(err: OutboundPayloadError, entry_id: &EntryId) -> 
             entry_id: entry_id.clone(),
             reason: NotResendableReason::PayloadLost,
         },
-        OutboundPayloadError::Publish(err) => ResendEntryError::Dispatch(err.to_string()),
-        OutboundPayloadError::Internal(message) => ResendEntryError::Dispatch(message),
+        OutboundPayloadError::Publish(err) => ResendEntryError::Dispatch(anyhow::Error::new(err)),
+        // Internal 仍是字符串变体，来源在 OutboundPayloadError 中已丢失，由其所在切片修复。
+        OutboundPayloadError::Internal(message) => {
+            ResendEntryError::Dispatch(anyhow::anyhow!(message))
+        }
     }
 }
 
 fn map_dispatch_sync_error(err: DispatchSyncError) -> ResendEntryError {
     match err {
-        DispatchSyncError::Stopped => {
-            ResendEntryError::Dispatch("clipboard dispatch stopped".into())
+        DispatchSyncError::Stopped | DispatchSyncError::LockedSpace => {
+            ResendEntryError::Dispatch(anyhow::Error::new(err))
         }
-        DispatchSyncError::LockedSpace => {
-            ResendEntryError::Dispatch("encryption session locked".to_string())
+        DispatchSyncError::CipherFailure(source) => {
+            ResendEntryError::Dispatch(anyhow::Error::new(source).context("encrypt entry payload"))
         }
-        DispatchSyncError::CipherFailure(message) => {
-            ResendEntryError::Dispatch(format!("cipher: {message}"))
-        }
-        DispatchSyncError::Repository(message) => ResendEntryError::Storage(message),
+        DispatchSyncError::Repository(source) => ResendEntryError::Storage(source),
     }
 }

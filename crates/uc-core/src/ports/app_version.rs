@@ -19,15 +19,15 @@ use thiserror::Error;
 pub enum AppVersionStateError {
     /// 读取失败（IO、权限、文件系统）。语义上等价于"无可信来源"，
     /// 调用方一般可以保守地视作 `None` 继续推进，但仍要打日志。
-    #[error("read app version cursor failed: {0}")]
-    Read(String),
+    #[error("read app version cursor failed")]
+    Read(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// 写入失败。调用方应记录日志；下次启动时游标维持不变。
-    #[error("write app version cursor failed: {0}")]
-    Write(String),
+    #[error("write app version cursor failed")]
+    Write(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// 文件存在但内容损坏（非 UTF-8、JSON 不合法等）。
     /// 与 `Read` 区分开是为了让 use case 可以选择"清理后重写"或仅日志告警。
-    #[error("app version cursor content is corrupt: {0}")]
-    Corrupt(String),
+    #[error("app version cursor content is corrupt")]
+    Corrupt(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// 游标读写端口。"上次运行的应用版本"是 profile 范围内的事实，

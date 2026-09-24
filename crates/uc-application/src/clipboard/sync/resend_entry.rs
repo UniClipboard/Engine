@@ -101,13 +101,13 @@ pub enum ResendEntryError {
 
     /// 仓储读写失败(entry / event / selection / representation / delivery /
     /// trusted_peer 任一)。
-    #[error("storage failure: {0}")]
-    Storage(String),
+    #[error("storage failure")]
+    Storage(#[source] anyhow::Error),
 
     /// 下游 dispatch / publish / encode 路径失败(加密会话锁定、blob 发布失
     /// 败、V3 envelope 编码失败等)。
-    #[error("dispatch failure: {0}")]
-    Dispatch(String),
+    #[error("dispatch failure")]
+    Dispatch(#[source] anyhow::Error),
 }
 
 /// resend 失败时的细分原因。UI 据此选不同的英文文案 / i18n key。
@@ -224,7 +224,9 @@ impl ResendEntryUseCase {
             .trusted_peer_repo
             .list()
             .await
-            .map_err(|err| ResendEntryError::Storage(format!("trusted_peer.list: {err}")))?
+            .map_err(|err| {
+                ResendEntryError::Storage(anyhow::Error::new(err).context("list trusted peers"))
+            })?
             .into_iter()
             .map(|tp| tp.peer_device_id)
             .collect();
@@ -232,7 +234,11 @@ impl ResendEntryUseCase {
             .peer_scope
             .snapshot()
             .await
-            .map_err(|err| ResendEntryError::Storage(format!("current peer scope: {err:?}")))?
+            .map_err(|err| {
+                ResendEntryError::Storage(
+                    anyhow::Error::new(err).context("read current peer scope"),
+                )
+            })?
             .usable_peer_device_ids
             .into_iter()
             .collect::<HashSet<_>>();
@@ -260,7 +266,11 @@ impl ResendEntryUseCase {
                     .entry_delivery_repo
                     .list_by_entry(&cmd.entry_id)
                     .await
-                    .map_err(|err| ResendEntryError::Storage(format!("list_by_entry: {err}")))?;
+                    .map_err(|err| {
+                        ResendEntryError::Storage(
+                            anyhow::Error::new(err).context("list entry deliveries"),
+                        )
+                    })?;
                 let covered: HashSet<DeviceId> = records
                     .into_iter()
                     .filter(|r| {
