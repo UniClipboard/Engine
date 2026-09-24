@@ -94,11 +94,11 @@ pub struct UpdateMobileSyncSettingsOutput {
 
 #[derive(Debug, thiserror::Error)]
 pub enum UpdateMobileSyncSettingsError {
-    #[error("settings load failed: {0}")]
-    SettingsLoadFailed(String),
+    #[error("settings load failed")]
+    SettingsLoadFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
 
-    #[error("settings save failed: {0}")]
-    SettingsSaveFailed(String),
+    #[error("settings save failed")]
+    SettingsSaveFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     /// `lan_advertise_ip` 不是合法 IPv4 字面量 / `lan_port=0`。
     #[error("invalid LAN listener parameter: {0}")]
@@ -148,10 +148,9 @@ impl UpdateMobileSyncSettingsUseCase {
                 None => None,
             };
 
-        let mut current =
-            self.settings.load().await.map_err(|err| {
-                UpdateMobileSyncSettingsError::SettingsLoadFailed(err.to_string())
-            })?;
+        let mut current = self.settings.load().await.map_err(|err| {
+            UpdateMobileSyncSettingsError::SettingsLoadFailed(err.context("load settings").into())
+        })?;
 
         // 1. 计算每个字段的"目标值",并一字段一字段对比是否变化。restart_required
         //    在任一字段实际变化时置 true。
@@ -180,7 +179,9 @@ impl UpdateMobileSyncSettingsUseCase {
             current.mobile_sync.lan_advertise_base_url = target_lan_advertise_base_url.clone();
             current.mobile_sync.lan_port = target_lan_port;
             self.settings.save(&current).await.map_err(|err| {
-                UpdateMobileSyncSettingsError::SettingsSaveFailed(err.to_string())
+                UpdateMobileSyncSettingsError::SettingsSaveFailed(
+                    err.context("save settings").into(),
+                )
             })?;
         }
         // 同值时跳过 save —— 避免 mtime / 文件系统副作用,也避免上层 watcher
@@ -366,7 +367,12 @@ mod tests {
         assert!(
             matches!(
                 err,
-                UpdateMobileSyncSettingsError::SettingsLoadFailed(ref s) if s.contains("disk unreadable")
+                UpdateMobileSyncSettingsError::SettingsLoadFailed(ref source)
+                    if std::iter::successors(
+                        Some(source.as_ref() as &(dyn std::error::Error + 'static)),
+                        |cause| cause.source(),
+                    )
+                    .any(|cause| cause.to_string().contains("disk unreadable"))
             ),
             "expected SettingsLoadFailed(disk unreadable), got {err:?}"
         );
@@ -396,7 +402,12 @@ mod tests {
         assert!(
             matches!(
                 err,
-                UpdateMobileSyncSettingsError::SettingsSaveFailed(ref s) if s.contains("disk full")
+                UpdateMobileSyncSettingsError::SettingsSaveFailed(ref source)
+                    if std::iter::successors(
+                        Some(source.as_ref() as &(dyn std::error::Error + 'static)),
+                        |cause| cause.source(),
+                    )
+                    .any(|cause| cause.to_string().contains("disk full"))
             ),
             "expected SettingsSaveFailed(disk full), got {err:?}"
         );

@@ -156,13 +156,13 @@ pub enum RegisterMobileShortcutDeviceError {
 
     /// 二维码渲染失败(URL 过长 / qrcode 库内部错误)。install_url 是已知常量,
     /// 实际只有 PNG 编码失败时才会触发。
-    #[error("qr code rendering failed: {0}")]
-    QrRenderFailed(String),
+    #[error("qr code rendering failed")]
+    QrRenderFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     /// 读取 settings 失败 —— 用于 base_url 推导。错误是真正的失败,
     /// 应当告知用户并支持重试。
-    #[error("settings load failed: {0}")]
-    SettingsLoadFailed(String),
+    #[error("settings load failed")]
+    SettingsLoadFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     /// 没有任何可进码的候选地址:无公网入口、无钉死 IP,且本机检测不到
     /// 任何合格网卡(RFC1918 / Tailscale CGNAT)—— iPhone 没有可达的
@@ -365,7 +365,9 @@ impl RegisterMobileShortcutDeviceUseCase {
         // 1. 读 settings 决定 base_url —— 没开 LAN 监听就直接拒绝, 避免
         //    颁发了凭据却没 base_url 给用户的尴尬中间态。
         let settings = self.settings.load().await.map_err(|err| {
-            RegisterMobileShortcutDeviceError::SettingsLoadFailed(err.to_string())
+            RegisterMobileShortcutDeviceError::SettingsLoadFailed(
+                err.context("load settings").into(),
+            )
         })?;
         if !settings.mobile_sync.lan_listen_enabled {
             return Err(RegisterMobileShortcutDeviceError::LanListenerDisabled);
@@ -596,13 +598,13 @@ fn render_qr_code(content: &str) -> Result<(Vec<u8>, String), RegisterMobileShor
     use qrcode::QrCode;
 
     let code = QrCode::new(content.as_bytes())
-        .map_err(|e| RegisterMobileShortcutDeviceError::QrRenderFailed(e.to_string()))?;
+        .map_err(|e| RegisterMobileShortcutDeviceError::QrRenderFailed(Box::new(e)))?;
 
     let png_image = code.render::<Luma<u8>>().min_dimensions(256, 256).build();
     let mut png_bytes: Vec<u8> = Vec::new();
     png_image
         .write_to(&mut std::io::Cursor::new(&mut png_bytes), ImageFormat::Png)
-        .map_err(|e| RegisterMobileShortcutDeviceError::QrRenderFailed(e.to_string()))?;
+        .map_err(|e| RegisterMobileShortcutDeviceError::QrRenderFailed(Box::new(e)))?;
 
     let ascii = code
         .render::<Dense1x2>()
@@ -657,16 +659,8 @@ fn translate_device_error(err: MobileDeviceError) -> RegisterMobileShortcutDevic
 /// 仍翻译为 `QrRenderFailed` 让 UI 给用户可见的失败 + 日志保留原因, 而
 /// 不是 panic 把整个进程拖垮。
 fn translate_connect_uri_error(err: ConnectUriError) -> RegisterMobileShortcutDeviceError {
-    match err {
-        ConnectUriError::UriTooLong { len, max } => {
-            RegisterMobileShortcutDeviceError::QrRenderFailed(format!(
-                "connect uri too long ({len} chars, max {max}); shorten device label"
-            ))
-        }
-        other => RegisterMobileShortcutDeviceError::QrRenderFailed(format!(
-            "connect uri build failed (unexpected): {other}"
-        )),
-    }
+    // 超长时来源本身即说明原因（设备标签过长）；其余变体按契约不应出现，同样保留来源供排障。
+    RegisterMobileShortcutDeviceError::QrRenderFailed(Box::new(err))
 }
 
 fn translate_hasher_error(err: PasswordHasherError) -> RegisterMobileShortcutDeviceError {
@@ -1569,13 +1563,14 @@ mod tests {
             max: 800,
         });
         match err {
-            RegisterMobileShortcutDeviceError::QrRenderFailed(msg) => {
-                assert!(
-                    msg.contains("connect uri too long"),
-                    "expected uri-too-long phrasing, got: {msg}"
-                );
-                assert!(msg.contains("1200"));
-                assert!(msg.contains("800"));
+            RegisterMobileShortcutDeviceError::QrRenderFailed(source) => {
+                assert!(matches!(
+                    source.downcast_ref::<ConnectUriError>(),
+                    Some(ConnectUriError::UriTooLong {
+                        len: 1200,
+                        max: 800
+                    })
+                ));
             }
             other => panic!("expected QrRenderFailed, got {other:?}"),
         }
@@ -1596,15 +1591,11 @@ mod tests {
             let original = err.to_string();
             let translated = translate_connect_uri_error(err);
             match translated {
-                RegisterMobileShortcutDeviceError::QrRenderFailed(msg) => {
-                    assert!(
-                        msg.contains("unexpected"),
-                        "translation should mark unexpected variant: {msg}"
-                    );
-                    assert!(
-                        msg.contains(&original),
-                        "translation should retain original error text: {msg}"
-                    );
+                RegisterMobileShortcutDeviceError::QrRenderFailed(source) => {
+                    let kept = source
+                        .downcast_ref::<ConnectUriError>()
+                        .expect("translation keeps the connect URI error as source");
+                    assert_eq!(kept.to_string(), original);
                 }
                 other => panic!("expected QrRenderFailed for {original:?}, got {other:?}"),
             }

@@ -234,7 +234,19 @@ E1 的检查会拒绝只删标识、仍保留 `{error}` 的改法，所以 E4 �
   - 邀请适配器：设置读取、Sponsor 地址解码、准入路由与完整邀请编码失败改为携带来源（原先后三处直接丢弃来源）；
     消费邀请收到意外状态或响应解析失败时保存 `RendezvousHttpError`，不再把状态码与服务端 slug 拼进文本。
   - 用临时 `audit_std` 恒等函数审查本批盒装来源，9 处 `anyhow` 来源补上固定动作 context。
-  - 剩余 S3：兼容线与 `file_staging.rs`（E11）、`SecureStorageError::Other`（等 049 提交）。
+- 兼容线与移动端文件暂存（E11 的 S3 部分，已完成）：Core 的 `MobileFileStagingError::Io`、`LatestClipboardSnapshotError::Resolution`；
+  兼容线 `GetMobileSyncFileError::Staging`（保存整个 `MobileFileStagingError`）、`ApplyIncomingMobileClipError::{EncodeFailed, Internal}`、
+  设置读写失败、二维码渲染失败（保存 `ConnectUriError` 等具体错误）。
+  - 隐私修复：`file_staging.rs` 的错误文本不再包含暂存路径、URI 与句柄；`apply_incoming.rs` 不再把镜像文件名拼进错误；
+    `get_file.rs` 不再把下层错误文本写入日志字段。
+  - 兼容线只把 `anyhow` 作为开发依赖，改为正式依赖会改动 `Cargo.lock`；因此兼容线用 `Box<dyn Error>` 与私有的
+    `ActionFailed`（固定动作 + 来源）承接，来自 Application 的 `anyhow` 错误先加 context 再装箱。
+  - 测试：URI 解析失败可沿链取回 `url::ParseError`，显示与调试文本都不含 URI；二维码构造失败可取回 `ConnectUriError`。
+  - 转入 E10：`file_staging.rs` 与 `get_file.rs` 的日志字段仍记录路径与 URI。
+- 剩余 S3（均需单独决定）：
+  - `uc-mobile` 的 `SyncError::Network { reason }` 与 `uc-mobile-proto` 的 `ConnectUriError::PayloadDecodeFailed`：文本经 UniFFI
+    交给手机宿主，属于宿主可见契约，待确认是否按 relay 的做法（内部保留来源、只在 FFI 边界生成原文）。
+  - `SecureStorageError::Other`：等 049 提交 `profile_key_recovery.rs` 后处理。
 - `RelayProbeError`（已决策并完成）：宿主诊断文本保持原文透传。Infra 新增 `RelayProbeDetail`，其显示文本与原先交给
   宿主的文本逐字一致，同时以 source 保留下层错误；Application 的 `RelayProbeError` 与 `SettingsFacadeError::RelayProbe*`
   改为携带不透明 source，外层显示文本只给分类。唯一的文本化位于 Engine 契约层 `relay_probe_host_message`，

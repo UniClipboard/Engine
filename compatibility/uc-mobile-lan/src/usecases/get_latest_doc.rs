@@ -406,7 +406,7 @@ mod tests {
 
     #[tokio::test]
     async fn port_error_propagates_as_port_variant() {
-        let err = LatestClipboardSnapshotError::Resolution("simulated sqlite failure".to_string());
+        let err = LatestClipboardSnapshotError::Resolution("simulated sqlite failure".into());
         let uc = build_uc_returning(Err(err));
         let outcome = uc.execute().await.unwrap_err();
         assert!(matches!(outcome, GetLatestMobileSyncDocError::Port(_)));

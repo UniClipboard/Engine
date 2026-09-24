@@ -120,7 +120,7 @@ impl LatestClipboardSnapshotAdapter {
                 return Ok(None);
             }
             Err(err) => {
-                return Err(LatestClipboardSnapshotError::Resolution(err.to_string()));
+                return Err(LatestClipboardSnapshotError::Resolution(err.into()));
             }
         };
         let Some(reference) = reference else {
@@ -132,7 +132,7 @@ impl LatestClipboardSnapshotAdapter {
             .entry_repo
             .get_entry(&reference.entry_id)
             .await
-            .map_err(|e| LatestClipboardSnapshotError::Resolution(e.to_string()))?;
+            .map_err(|e| LatestClipboardSnapshotError::Resolution(e.into()))?;
         let Some(entry) = entry else {
             return Ok(None);
         };
@@ -142,7 +142,11 @@ impl LatestClipboardSnapshotAdapter {
             .selection_repo
             .get_selection(&entry.entry_id)
             .await
-            .map_err(|e| LatestClipboardSnapshotError::Resolution(e.to_string()))?;
+            .map_err(|e| {
+                LatestClipboardSnapshotError::Resolution(
+                    e.context("load clipboard selection").into(),
+                )
+            })?;
         let Some(decision) = selection else {
             return Ok(None);
         };
@@ -162,7 +166,7 @@ impl LatestClipboardSnapshotAdapter {
             .representation_repo
             .get_representation(event_id, rep_id)
             .await
-            .map_err(|e| LatestClipboardSnapshotError::Resolution(e.to_string()))
+            .map_err(|e| LatestClipboardSnapshotError::Resolution(e.into()))
     }
 
     /// Step 4-6:把 representation 解析成 `LatestPasteRepresentation`(物化
@@ -183,16 +187,15 @@ impl LatestClipboardSnapshotAdapter {
             .payload_resolver
             .resolve(&rep)
             .await
-            .map_err(|e| LatestClipboardSnapshotError::Resolution(e.to_string()))?;
+            .map_err(|e| LatestClipboardSnapshotError::Resolution(e.into()))?;
         let (mime_string, bytes) = match resolved {
             ResolvedClipboardPayload::Inline { mime, bytes } => (mime, bytes),
             ResolvedClipboardPayload::BlobRef { mime, blob_id } => {
-                let bytes = self
-                    .ports
-                    .blob_reader
-                    .get(&blob_id)
-                    .await
-                    .map_err(|e| LatestClipboardSnapshotError::Resolution(e.to_string()))?;
+                let bytes = self.ports.blob_reader.get(&blob_id).await.map_err(|e| {
+                    LatestClipboardSnapshotError::Resolution(
+                        e.context("read clipboard blob").into(),
+                    )
+                })?;
                 (mime, bytes)
             }
         };
