@@ -226,9 +226,15 @@ E1 的检查会拒绝只删标识、仍保留 `{error}` 的改法，所以 E4 �
     `anyhow` 未加 context 直接装箱。已修复；并用临时的“仅接受 std 错误”恒等函数包裹全部 `Error::X(e.into())`，
     在默认与 `lan-compat` 配置下编译，确认全仓已无同类位置。
   - 测试：KDF 参数错误保留 `argon2::Error`；PHC 解析失败保留 `password_hash::Error`，显示文本不含输入。
-  - 暂缓：`space_security_store/legacy_bootstrap.rs` 与 `BootstrapError::Repository`（049 仍在同一工作树活动，
-    该目录在其范围内）；`SecureStorageError::Other`（其另一处构造在 049 未提交的 `profile_key_recovery.rs` 中）；
-    `InvitationError`/`ConsumeInvitationError::Internal` 及其 Application 映射，另起一批处理。
+  - `SecureStorageError::Other` 暂缓：其另一处构造在 049 未提交的 `profile_key_recovery.rs` 中。
+- 成员安全存储与邀请（已完成；049 暂停期间处理 `space_security_store/`）：Core 的 `BootstrapError::Repository`、
+  `SpaceSecurityStateResetError::Repository`（去掉 `Clone`/`PartialEq`/`Eq`）、`InvitationError::Internal`、
+  `ConsumeInvitationError::Internal`；Application 的 `QueryPairingInvitationAddressesError::Internal` 保存整个 `InvitationError`。
+  - `revocation.rs` 中最后一处 S1（`anyhow!(error.to_string())`）改为 `anyhow::Error::new`。至此 S1 为零。
+  - 邀请适配器：设置读取、Sponsor 地址解码、准入路由与完整邀请编码失败改为携带来源（原先后三处直接丢弃来源）；
+    消费邀请收到意外状态或响应解析失败时保存 `RendezvousHttpError`，不再把状态码与服务端 slug 拼进文本。
+  - 用临时 `audit_std` 恒等函数审查本批盒装来源，9 处 `anyhow` 来源补上固定动作 context。
+  - 剩余 S3：兼容线与 `file_staging.rs`（E11）、`relay_probe.rs`（待决策）、`SecureStorageError::Other`（等 049 提交）。
 - 待决策：`RelayProbeError` 的文本经 `RelayProbeOutcome::{Dns, Tls, Handshake, Other} { message }` 原样交给宿主显示，
   属于宿主可见文本。改为 source 需要先确定宿主诊断文本的契约，暂不处理。
 - 后续事项：投递失败时 `reason_detail` 把 `ClipboardDispatchError` 的来源文本写入 `EntryDeliveryRecord` 持久化字段，

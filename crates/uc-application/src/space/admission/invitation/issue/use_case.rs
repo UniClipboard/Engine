@@ -536,7 +536,7 @@ mod tests {
         match err {
             IssuePairingInvitationError::Internal(source) => assert!(matches!(
                 source.downcast_ref::<InvitationError>(),
-                Some(InvitationError::Internal(message)) if message == "boom"
+                Some(InvitationError::Internal(message)) if message.to_string() == "boom"
             )),
             other => panic!("expected Internal, got {other:?}"),
         }

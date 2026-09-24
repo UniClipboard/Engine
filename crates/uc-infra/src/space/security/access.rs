@@ -2706,7 +2706,7 @@ impl GroupBootstrapPort for RuntimeSpaceAccessAdapter {
             .key_epoch_repository
             .load_space_material(&active_space_id)
             .await
-            .map_err(|error| BootstrapError::Repository(error.to_string()))?;
+            .map_err(|error| BootstrapError::Repository(error.into()))?;
         let mut results = Vec::with_capacity(records.len());
         for record in records {
             if active_material.as_ref().is_some_and(|material| {

@@ -433,8 +433,8 @@ pub enum BootstrapError {
         source: anyhow::Error,
     },
 
-    #[error("legacy bootstrap repository failure: {0}")]
-    Repository(String),
+    #[error("legacy bootstrap repository failure")]
+    Repository(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 #[cfg(test)]

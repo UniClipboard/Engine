@@ -101,7 +101,7 @@ impl RendezvousPairingInvitationAdapter {
         self.settings
             .load()
             .await
-            .map_err(|err| InvitationError::Internal(format!("settings load failed: {err}")))
+            .map_err(|err| InvitationError::Internal(err.context("load settings").into()))
     }
 
     fn resolve_device_name(settings: &Settings) -> Result<String, InvitationError> {
@@ -113,8 +113,7 @@ impl RendezvousPairingInvitationAdapter {
             .cloned()
             .ok_or_else(|| {
                 InvitationError::Internal(
-                    "device_name missing from settings; user must set it before pairing"
-                        .to_string(),
+                    "device_name missing from settings; user must set it before pairing".into(),
                 )
             })
     }
@@ -141,20 +140,34 @@ impl RendezvousPairingInvitationAdapter {
         let device_id = self.device_identity.current_device_id();
         let invitation_id = mint_invitation_id();
         let expires_at = Utc::now() + LOCAL_MINT_TTL;
-        let endpoint_addr: EndpointAddr = serde_json::from_str(&ticket).map_err(|_| {
-            InvitationError::Internal("failed to decode Sponsor endpoint address".to_owned())
+        let endpoint_addr: EndpointAddr = serde_json::from_str(&ticket).map_err(|error| {
+            InvitationError::Internal(
+                anyhow::Error::from(error)
+                    .context("decode Sponsor endpoint address")
+                    .into(),
+            )
         })?;
         let admission_route =
             crate::network::iroh::encode_space_admission_route(&endpoint_addr, Some(invitation_id))
-                .map_err(|_| {
-                    InvitationError::Internal("failed to encode Space admission route".to_owned())
+                .map_err(|error| {
+                    InvitationError::Internal(
+                        anyhow::Error::from(error)
+                            .context("encode Space admission route")
+                            .into(),
+                    )
                 })?;
         let full_invitation = crate::space::encode_full_invitation(
             invitation_id,
             &admission_route,
             expires_at.timestamp_millis(),
         )
-        .map_err(|_| InvitationError::Internal("failed to encode full invitation".to_owned()))?;
+        .map_err(|error| {
+            InvitationError::Internal(
+                anyhow::Error::from(error)
+                    .context("encode full invitation")
+                    .into(),
+            )
+        })?;
 
         let req = CreatePairingRequest {
             sponsor_device_id: device_id.as_str().to_string(),
@@ -491,8 +504,8 @@ fn list_invitation_address_candidates(
 
 fn serialize_endpoint_addr(addr: EndpointAddr) -> Result<(String, String), InvitationError> {
     let endpoint_id = addr.id.to_string();
-    let ticket = serde_json::to_string(&addr)
-        .map_err(|err| InvitationError::Internal(format!("endpoint addr serialize: {err}")))?;
+    let ticket =
+        serde_json::to_string(&addr).map_err(|err| InvitationError::Internal(Box::new(err)))?;
     Ok((endpoint_id, ticket))
 }
 
@@ -610,11 +623,8 @@ fn map_consume_err(err: RendezvousHttpError) -> ConsumeInvitationError {
         RendezvousHttpError::Transport { .. } | RendezvousHttpError::ServiceUnavailable(_) => {
             ConsumeInvitationError::ServiceUnavailable
         }
-        RendezvousHttpError::Unexpected { status, slug } => ConsumeInvitationError::Internal(
-            format!("rendezvous rejected consume ({status}, slug={slug})"),
-        ),
-        RendezvousHttpError::Parse { .. } => {
-            ConsumeInvitationError::Internal("rendezvous response parse failed".to_owned())
+        err @ (RendezvousHttpError::Unexpected { .. } | RendezvousHttpError::Parse { .. }) => {
+            ConsumeInvitationError::Internal(Box::new(err))
         }
     }
 }
@@ -1158,7 +1168,7 @@ mod tests {
         let adapter = make_adapter(ep, InMemorySettings::with_device_name(None), server.uri());
         let err = adapter.issue_invitation().await.unwrap_err();
         let msg = match err {
-            InvitationError::Internal(m) => m,
+            InvitationError::Internal(source) => source.to_string(),
             other => panic!("expected Internal, got {other:?}"),
         };
         assert!(msg.contains("device_name"), "msg was {msg}");
@@ -1378,11 +1388,13 @@ mod tests {
             .consume_invitation(&InvitationCode::new("WEIRD"))
             .await
             .unwrap_err();
-        let msg = match err {
-            ConsumeInvitationError::Internal(m) => m,
-            other => panic!("expected Internal, got {other:?}"),
+        let ConsumeInvitationError::Internal(source) = &err else {
+            panic!("expected Internal, got {err:?}");
         };
-        assert!(msg.contains("malformed_code"), "msg was {msg}");
-        assert!(msg.contains("400"));
+        assert!(matches!(
+            source.downcast_ref::<RendezvousHttpError>(),
+            Some(RendezvousHttpError::Unexpected { status, slug })
+                if status.as_u16() == 400 && slug.contains("malformed_code")
+        ));
     }
 }

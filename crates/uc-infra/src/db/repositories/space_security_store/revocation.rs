@@ -420,9 +420,7 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                                 || staged_record.previous_epoch()
                                     != verified_material.state().epoch()
                                 || staged_record.next_epoch()
-                                    != verified_material.state().epoch().next().map_err(
-                                        |error| anyhow::anyhow!(error.to_string()),
-                                    )?
+                                    != verified_material.state().epoch().next().map_err(anyhow::Error::new)?
                                 || stage.next_space_state().space_id() != record.space_id()
                                 || stage.next_space_state().epoch() != staged_record.next_epoch()
                             {
@@ -890,9 +888,9 @@ impl<E: DbExecutor> SpaceSecurityStateResetPort for DieselSpaceSecurityStore<E> 
         let master_key = self
             .session
             .get_master_key()
-            .map_err(|error| SpaceSecurityStateResetError::Repository(error.to_string()))?;
+            .map_err(|error| SpaceSecurityStateResetError::Repository(error.into()))?;
         let active_space_lookup_token = space_lookup_token(&master_key, active_space_id)
-            .map_err(|error| SpaceSecurityStateResetError::Repository(error.to_string()))?;
+            .map_err(|error| SpaceSecurityStateResetError::Repository(error.into()))?;
         self.executor
             .run(move |conn| {
                 conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
@@ -914,6 +912,10 @@ impl<E: DbExecutor> SpaceSecurityStateResetPort for DieselSpaceSecurityStore<E> 
                     Ok(())
                 })
             })
-            .map_err(|error| SpaceSecurityStateResetError::Repository(error.to_string()))
+            .map_err(|error| {
+                SpaceSecurityStateResetError::Repository(
+                    error.context("reset space security state").into(),
+                )
+            })
     }
 }

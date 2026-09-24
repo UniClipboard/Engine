@@ -82,10 +82,10 @@ pub enum CurrentMembershipIdentityError {
     LoadFailed,
 }
 
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum SpaceSecurityStateResetError {
-    #[error("space security state reset failed: {0}")]
-    Repository(String),
+    #[error("space security state reset failed")]
+    Repository(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 #[derive(Debug, Error)]
