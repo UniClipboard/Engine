@@ -22,7 +22,7 @@
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 use uc_observability_contract::analytics::{
     AnalyticsPort, CaptureOrigin, Event, PayloadSizeBucket, PayloadType,
@@ -488,13 +488,9 @@ impl CaptureClipboardUseCase {
                                 .ingest_path(path)
                                 .await
                                 .map(|ingested| ingested.blob_id)
-                                .map_err(|err| {
-                                    // No path in the message: a clipboard file
-                                    // path is user content.
-                                    anyhow::anyhow!(
-                                        "LocalFile rep ingest into blob store failed: {err}"
-                                    )
-                                })?;
+                                // No path in the message: a clipboard file
+                                // path is user content.
+                                .context("LocalFile rep ingest into blob store failed")?;
                             info!(
                                 rep_id = %observed.id,
                                 blob_id = %blob_id,
@@ -654,7 +650,7 @@ impl CaptureClipboardUseCase {
                 let content_category = ClipboardEntryContentCategory::from_snapshot(&snapshot);
                 let now_ms = SystemTime::now()
                     .duration_since(SystemTime::UNIX_EPOCH)
-                    .map_err(|e| anyhow::anyhow!("Failed to get system time: {}", e))?
+                    .context("Failed to get system time")?
                     .as_millis() as i64;
                 if let Some(commit_context) = commit_context {
                     let record = match commit_mode {

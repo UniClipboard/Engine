@@ -8,6 +8,7 @@
 //! - Identity fingerprint: `Base32( SHA-256("uc-identity-fp-v1" || pub_key)[0..10] )`
 //!   → 16 chars grouped as `ABCD-EFGH-IJKL-MNOP`
 
+use anyhow::Context;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
@@ -56,8 +57,7 @@ pub struct Sha256IdentityFingerprintFactory;
 
 impl IdentityFingerprintFactoryPort for Sha256IdentityFingerprintFactory {
     fn from_public_key(&self, public_key: &[u8]) -> anyhow::Result<IdentityFingerprint> {
-        derive_identity_fingerprint(public_key)
-            .map_err(|err| anyhow::anyhow!("identity fingerprint derivation failed: {err}"))
+        derive_identity_fingerprint(public_key).context("identity fingerprint derivation failed")
     }
 }
 

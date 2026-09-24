@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use tracing::{debug, info, warn};
 use url::Url;
@@ -932,7 +932,7 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
             })?;
             let fetched_len = fetched.plaintext.len();
             rep.set_inline_bytes(fetched.plaintext.to_vec())
-                .map_err(|err| anyhow!("materialize: failed to set inline bytes: {err}"))?;
+                .context("materialize: failed to set inline bytes")?;
             info!(
                 entry_id = %entry_id,
                 representation_index = idx,
@@ -1245,7 +1245,7 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
         for rep in &mut snapshot.representations {
             if is_file_list_representation(rep) {
                 rep.set_inline_bytes(uri_list.as_bytes().to_vec())
-                    .map_err(|err| anyhow!("materialize: failed to rewrite files rep: {err}"))?;
+                    .context("materialize: failed to rewrite files rep")?;
                 rewritten_rep_count += 1;
             }
         }
@@ -1350,7 +1350,7 @@ fn rewrite_file_display_metadata(
         .collect::<Result<Vec<_>>>()?;
     let encoded = FileDisplayMetadata { files }
         .encode()
-        .map_err(|error| anyhow!("materialize: failed to encode file display metadata: {error}"))?;
+        .context("materialize: failed to encode file display metadata")?;
 
     let mut rewritten = 0usize;
     for representation in &mut snapshot.representations {
@@ -1364,9 +1364,7 @@ fn rewrite_file_display_metadata(
         }
         representation
             .set_inline_bytes(encoded.clone())
-            .map_err(|error| {
-                anyhow!("materialize: failed to rewrite file display metadata: {error}")
-            })?;
+            .context("materialize: failed to rewrite file display metadata")?;
         rewritten += 1;
     }
 
@@ -1963,7 +1961,7 @@ async fn publish_gated_root(
                     .map_err(anyhow::Error::new)?;
             }
             Err(error) => {
-                return Err(anyhow!("directory root publication failed: {error}"));
+                return Err(anyhow::Error::new(error).context("directory root publication failed"));
             }
         }
     }
@@ -1995,7 +1993,9 @@ async fn publish_root(
                 candidate =
                     resolve_nonconflicting_root_path(dest_parent, sanitized_name, claimed).await?;
             }
-            Err(err) => return Err(anyhow!("directory root publication failed: {err}")),
+            Err(err) => {
+                return Err(anyhow::Error::new(err).context("directory root publication failed"))
+            }
         }
     }
     Err(anyhow!(
@@ -2299,7 +2299,7 @@ fn rewrite_file_list(
     for rep in &mut snapshot.representations {
         if is_file_list_representation(rep) {
             rep.set_inline_bytes(uri_list.as_bytes().to_vec())
-                .map_err(|err| anyhow!("materialize: failed to rewrite files rep: {err}"))?;
+                .context("materialize: failed to rewrite files rep")?;
             rewritten += 1;
         }
     }

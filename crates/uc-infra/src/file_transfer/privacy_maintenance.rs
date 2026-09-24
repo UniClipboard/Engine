@@ -95,7 +95,10 @@ fn run_with_busy_retry(
                 );
                 std::thread::sleep(std::time::Duration::from_millis(50 * attempt as u64));
             }
-            Err(error) => anyhow::bail!("maintenance statement `{sql}` failed: {error}"),
+            Err(error) => {
+                return Err(anyhow::Error::new(error)
+                    .context(format!("maintenance statement `{sql}` failed")))
+            }
         }
     }
     anyhow::bail!("maintenance statement `{sql}` exhausted its retry budget")

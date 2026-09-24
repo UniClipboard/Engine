@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use diesel::r2d2::{ConnectionManager, CustomizeConnection, Pool, PooledConnection};
 use diesel::sqlite::SqliteConnection;
 use diesel::{connection::SimpleConnection, Connection, RunQueryDsl};
@@ -46,7 +46,7 @@ impl DbPool {
             .max_size(1)
             .connection_customizer(Box::new(SqlitePragmaCustomizer))
             .build(manager)
-            .map_err(|error| anyhow::anyhow!("Failed to create ephemeral database: {error}"))?;
+            .context("Failed to create ephemeral database")?;
         run_migrations_raw(&replacement)?;
         install_revision_triggers_raw(&replacement)?;
         *self
@@ -132,12 +132,12 @@ impl CustomizeConnection<SqliteConnection, diesel::r2d2::Error> for SqlitePragma
 ///
 /// Returns an error if the connection cannot be established or the WAL pragma fails.
 fn enable_wal_mode(database_url: &str) -> Result<()> {
-    let mut conn = SqliteConnection::establish(database_url)
-        .map_err(|e| anyhow::anyhow!("Failed to connect for WAL setup: {}", e))?;
+    let mut conn =
+        SqliteConnection::establish(database_url).context("Failed to connect for WAL setup")?;
 
     diesel::sql_query("PRAGMA journal_mode = WAL")
         .execute(&mut conn)
-        .map_err(|e| anyhow::anyhow!("Failed to set journal_mode=WAL: {}", e))?;
+        .context("Failed to set journal_mode=WAL")?;
 
     info!("WAL journal mode enabled");
     Ok(())
@@ -182,7 +182,7 @@ pub(crate) fn open_existing_db_pool(database_url: &str) -> Result<DbPool> {
     let pool = Pool::builder()
         .connection_customizer(Box::new(SqlitePragmaCustomizer))
         .build(manager)
-        .map_err(|error| anyhow::anyhow!("Failed to open existing database pool: {error}"))?;
+        .context("Failed to open existing database pool")?;
     Ok(DbPool {
         inner: Arc::new(RwLock::new(pool)),
     })
@@ -236,7 +236,7 @@ fn build_raw_pool(database_url: &str) -> Result<RawDbPool> {
     Pool::builder()
         .connection_customizer(Box::new(SqlitePragmaCustomizer))
         .build(manager)
-        .map_err(|e| anyhow::anyhow!("Failed to create database pool: {}", e))
+        .context("Failed to create database pool")
 }
 
 #[cfg(test)]
@@ -404,7 +404,7 @@ fn run_migrations_raw(pool: &RawDbPool) -> Result<()> {
 
     info!("Running database migrations...");
     conn.run_pending_migrations(MIGRATIONS)
-        .map_err(|e| anyhow::anyhow!("Migration failed: {}", e))?;
+        .map_err(|error| anyhow::anyhow!(error).context("Migration failed"))?;
     info!("Database migrations completed");
 
     Ok(())

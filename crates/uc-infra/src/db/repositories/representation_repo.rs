@@ -30,7 +30,7 @@ use crate::db::mappers::snapshot_representation_mapper::RepresentationRowMapper;
 use crate::db::models::snapshot_representation::SnapshotRepresentationRow;
 use crate::db::ports::{DbExecutor, RowMapper};
 use crate::db::schema::clipboard_snapshot_representation;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use diesel::{BoolExpressionMethods, ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl};
 use uc_core::clipboard::{MimeType, PayloadAvailability, PersistedClipboardRepresentation};
 use uc_core::ids::{EventId, RepresentationId};
@@ -76,7 +76,7 @@ where
                     )
                     .first::<SnapshotRepresentationRow>(conn)
                     .optional();
-            result.map_err(|e| anyhow::anyhow!("Database error: {}", e))
+            result.context("Database error")
         })?;
 
         match row {
@@ -101,7 +101,7 @@ where
                     .filter(clipboard_snapshot_representation::id.eq(&rep_id_str))
                     .first::<SnapshotRepresentationRow>(conn)
                     .optional();
-            result.map_err(|e| anyhow::anyhow!("Database error: {}", e))
+            result.context("Database error")
         })?;
 
         match row {
@@ -126,7 +126,7 @@ where
                     .filter(clipboard_snapshot_representation::blob_id.eq(&blob_id_str))
                     .first::<SnapshotRepresentationRow>(conn)
                     .optional();
-            result.map_err(|e| anyhow::anyhow!("Database error: {}", e))
+            result.context("Database error")
         })?;
 
         match row {
@@ -176,7 +176,7 @@ where
             )
             .set(clipboard_snapshot_representation::blob_id.eq(&blob_id_str))
             .execute(conn);
-            result.map_err(|e| anyhow::anyhow!("Database error: {}", e))
+            result.context("Database error")
         })?;
 
         Ok(updated_rows > 0)
@@ -204,7 +204,7 @@ where
                     .select(clipboard_snapshot_representation::event_id)
                     .first::<String>(conn)
                     .optional();
-            result.map_err(|e| anyhow::anyhow!("Database error: {}", e))
+            result.context("Database error")
         })?;
 
         if event_id_str.is_none() {
@@ -239,7 +239,7 @@ where
                     .execute(conn)
             };
 
-            update_result.map_err(|e| anyhow::anyhow!("Database error: {}", e))
+            update_result.context("Database error")
         })?;
 
         if updated_rows == 0 {
@@ -253,7 +253,7 @@ where
                     .filter(clipboard_snapshot_representation::id.eq(&rep_id_str))
                     .first::<SnapshotRepresentationRow>(conn)
                     .optional();
-            result.map_err(|e| anyhow::anyhow!("Database error: {}", e))
+            result.context("Database error")
         })?;
 
         let row = updated.ok_or_else(|| {
@@ -276,7 +276,7 @@ where
                 clipboard_snapshot_representation::table
                     .filter(clipboard_snapshot_representation::event_id.eq(&event_id_str))
                     .load::<SnapshotRepresentationRow>(conn);
-            result.map_err(|e| anyhow::anyhow!("Database error: {}", e))
+            result.context("Database error")
         })?;
 
         let mapper = RepresentationRowMapper;
@@ -313,7 +313,7 @@ where
                     .filter(clipboard_snapshot_representation::payload_state.eq_any(&state_strs))
                     .select(clipboard_snapshot_representation::id)
                     .load::<String>(conn);
-            result.map_err(|e| anyhow::anyhow!("Database error: {}", e))
+            result.context("Database error")
         })?;
 
         Ok(id_strings.into_iter().map(RepresentationId::from).collect())

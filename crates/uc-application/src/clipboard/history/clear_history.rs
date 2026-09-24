@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{info, info_span, warn, Instrument};
@@ -156,7 +156,7 @@ impl ClearClipboardHistoryUseCase {
                     offset = offset
                 ))
                 .await
-                .map_err(|e| anyhow::anyhow!("Failed to list entries for bulk delete: {}", e))?;
+                .context("Failed to list entries for bulk delete")?;
 
             if batch.is_empty() {
                 break;

@@ -37,7 +37,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tracing::{info, info_span, warn, Instrument};
 
 use uc_core::clipboard::PayloadAvailability;
@@ -474,7 +474,7 @@ impl CleanupExpiredFilesUseCase {
                 .list_entries
                 .list_entries(ENTRY_LIST_BATCH_SIZE, offset)
                 .await
-                .map_err(|e| anyhow::anyhow!("list entries for quota: {e}"))?;
+                .context("list entries for quota")?;
 
             if batch.is_empty() {
                 break;
@@ -548,7 +548,7 @@ impl CleanupExpiredFilesUseCase {
                     offset = offset
                 ))
                 .await
-                .map_err(|e| anyhow::anyhow!("list entries for cleanup index: {e}"))?;
+                .context("list entries for cleanup index")?;
 
             if batch.is_empty() {
                 break;
@@ -678,11 +678,8 @@ fn now_millis() -> i64 {
 /// Parse a quota-baseline marker's raw contents into epoch milliseconds.
 /// Kept separate from I/O so the parse/validation stays unit-testable.
 fn parse_quota_baseline(contents: &[u8]) -> Result<i64> {
-    let text = std::str::from_utf8(contents)
-        .map_err(|e| anyhow::anyhow!("quota baseline is not valid UTF-8: {e}"))?;
-    text.trim()
-        .parse::<i64>()
-        .map_err(|e| anyhow::anyhow!("parse quota baseline {:?}: {e}", text.trim()))
+    let text = std::str::from_utf8(contents).context("quota baseline is not valid UTF-8")?;
+    text.trim().parse::<i64>().context("parse quota baseline")
 }
 
 /// Read the persisted quota baseline (epoch milliseconds) through the cache-fs

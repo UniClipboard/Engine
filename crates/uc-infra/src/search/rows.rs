@@ -14,7 +14,7 @@ use crate::db::schema::{search_document, search_entry_tag, search_index_meta, se
 #[cfg(test)]
 use crate::search::constants::CURRENT_INDEX_VERSION;
 use crate::search::render_payload::{RenderFields, RenderPayloadCodec};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use diesel::prelude::*;
 use tracing::warn;
 use uc_core::ids::EntryId;
@@ -109,7 +109,7 @@ impl NewSearchDocumentRow {
         );
         let render_payload = codec
             .encrypt(&document.entry_id, &fields)
-            .map_err(|e| anyhow::anyhow!("encrypt render payload: {e}"))?;
+            .context("encrypt render payload")?;
 
         Ok(Self::from_domain_with_render(
             profile_id,

@@ -435,7 +435,7 @@ impl SpoolManager {
             };
             let modified_ms = modified
                 .duration_since(UNIX_EPOCH)
-                .map_err(|err| anyhow::anyhow!("invalid mtime: {err}"))?
+                .context("invalid mtime")?
                 .as_millis() as i64;
             entries.push(SpoolEntryMeta {
                 representation_id: RepresentationId::from_str(name),

@@ -5,6 +5,7 @@
 //! logged and never block startup — a clean invariant is nice-to-have, not
 //! load-bearing.
 
+use anyhow::Context;
 use std::sync::Arc;
 use uc_core::ids::DeviceId;
 use uc_core::membership::MemberRepositoryPort;
@@ -28,18 +29,12 @@ pub async fn reconcile_peer_addresses(
     member_repo: Arc<dyn MemberRepositoryPort>,
     peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
 ) -> anyhow::Result<()> {
-    let members = member_repo
-        .list()
-        .await
-        .map_err(|e| anyhow::anyhow!("list members: {e}"))?;
+    let members = member_repo.list().await.context("list members")?;
     // 成员数通常 1–10 量级,linear search 比引入 HashSet 更直接
     // (`DeviceId` 也未实现 Hash)。
     let member_ids: Vec<DeviceId> = members.into_iter().map(|m| m.device_id).collect();
 
-    let peer_addrs = peer_addr_repo
-        .list()
-        .await
-        .map_err(|e| anyhow::anyhow!("list peer addresses: {e}"))?;
+    let peer_addrs = peer_addr_repo.list().await.context("list peer addresses")?;
 
     let orphans: Vec<DeviceId> = peer_addrs
         .into_iter()
@@ -98,16 +93,13 @@ pub async fn reconcile_trusted_peers(
     member_repo: Arc<dyn MemberRepositoryPort>,
     trusted_peer_repo: Arc<dyn TrustedPeerRepositoryPort>,
 ) -> anyhow::Result<()> {
-    let members = member_repo
-        .list()
-        .await
-        .map_err(|e| anyhow::anyhow!("list members: {e}"))?;
+    let members = member_repo.list().await.context("list members")?;
     let member_ids: Vec<DeviceId> = members.into_iter().map(|m| m.device_id).collect();
 
     let trusted = trusted_peer_repo
         .list()
         .await
-        .map_err(|e| anyhow::anyhow!("list trusted peers: {e}"))?;
+        .context("list trusted peers")?;
 
     let orphans: Vec<DeviceId> = trusted
         .into_iter()

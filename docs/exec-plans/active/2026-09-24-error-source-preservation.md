@@ -2,7 +2,7 @@
 
 ## 状态与完整责任
 
-- **状态**：实施中。E0–E2 已完成，其余切片未开始。
+- **状态**：实施中。E0–E3 已完成，其余切片未开始。
 - **日期**：2026-09-24。
 - **依据**：[错误处理与转换](../../design-docs/error-handling.md)要求保留完整 source chain；[运行期观测](../../design-docs/observability.md#错误来源与日志字段)要求日志只记录从 source chain 提取的固定分类。
 - **完整负责人**：每处转换由目标错误类型所在模块负责（与错误处理规范的“转换所有权”一致）；整体顺序、清单复核与验收由本计划负责。
@@ -130,4 +130,13 @@ L1 日志字段不在本切片检查范围，待 E10 确定固定分类字段的
 - 转入 E5：`network/iroh/membership_branch_recovery_adapter.rs` 中的 `anyhow::Error::msg(source)`，上游
   `connect_with_staggered_retry` 把多次拨号失败汇总为 `String`，需要随网络错误类型一起重新设计。
 - 不处理：`space_security_store/revocation.rs` 剩余 1 处，属于 049 处理范围。
+
+### E3 S2 替换（2026-09-24）
+
+- 78 处 `anyhow!("动作: {error}")` 全部改为 `.context("固定动作")`、`.with_context(|| format!(..))`（只含固定字段标签）
+  或 `anyhow::Error::new(error).context(..)`；涉及 `uc-application` 剪贴板、`uc-infra` 数据库/文件系统/搜索/安全与
+  `uc-engine` 宿主适配、启动对账。
+- 同时移除文本中的非固定值：配额基线原文（`cleanup.rs`）、表示 ID（`durable_spool_queue.rs`）。
+- `db/pool.rs` 迁移失败来源是 `Box<dyn Error + Send + Sync>`，用 `anyhow!(error)` 保留原对象后再加 context。
+- 测试：payload 字段截断时，可从错误链取回 `io::ErrorKind::UnexpectedEof`。
 

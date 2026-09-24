@@ -27,6 +27,7 @@
 //! A failed `try_send` (channel full) is logged but not treated as an error;
 //! the spool scanner will recover the entry on next startup.
 
+use anyhow::Context;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
@@ -62,9 +63,7 @@ impl SpoolQueuePort for DurableSpoolQueue {
         self.spool_manager
             .write(&request.rep_id, &request.bytes)
             .await
-            .map_err(|err| {
-                anyhow::anyhow!("failed to write spool file for {}: {}", request.rep_id, err)
-            })?;
+            .context("failed to write spool file")?;
 
         // Notify the background worker to immediately process this entry.
         // A failure here is non-fatal: the spool file is on disk and will be

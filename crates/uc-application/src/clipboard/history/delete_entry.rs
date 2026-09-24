@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{info, info_span, warn, Instrument};
@@ -100,7 +100,7 @@ impl DeleteClipboardEntryUseCase {
             delete
                 .delete_entry_with_receive_state(entry_id, &event_id)
                 .await
-                .map_err(|error| anyhow::anyhow!("Failed to delete entry: {error}"))?;
+                .context("Failed to delete entry")?;
         } else {
             self.selection_repo
                 .delete_selection(entry_id)
@@ -109,7 +109,7 @@ impl DeleteClipboardEntryUseCase {
                     entry_id = %entry_id
                 ))
                 .await
-                .map_err(|e| anyhow::anyhow!("Failed to delete selection: {}", e))?;
+                .context("Failed to delete selection")?;
 
             self.delete_entry
                 .delete_entry(entry_id)
@@ -118,7 +118,7 @@ impl DeleteClipboardEntryUseCase {
                     entry_id = %entry_id
                 ))
                 .await
-                .map_err(|e| anyhow::anyhow!("Failed to delete entry: {}", e))?;
+                .context("Failed to delete entry")?;
 
             self.event_writer
                 .delete_event_and_representations(&event_id)
@@ -127,7 +127,7 @@ impl DeleteClipboardEntryUseCase {
                     event_id = %event_id
                 ))
                 .await
-                .map_err(|e| anyhow::anyhow!("Failed to delete event: {}", e))?;
+                .context("Failed to delete event")?;
         }
 
         if let Some(blob_transfer) = self.blob_transfer.as_ref() {

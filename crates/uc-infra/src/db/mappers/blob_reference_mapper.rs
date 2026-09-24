@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 
 use uc_core::ports::blob::{BlobDigest, PlaintextHash};
 
@@ -27,7 +27,7 @@ impl BlobReferenceRowMapper {
 }
 
 fn decode_32_byte_hex(value: &str) -> Result<[u8; 32]> {
-    let decoded = hex::decode(value).map_err(|e| anyhow!("invalid hex value: {e}"))?;
+    let decoded = hex::decode(value).context("invalid hex value")?;
     decoded
         .try_into()
         .map_err(|bytes: Vec<u8>| anyhow!("expected 32 bytes, got {}", bytes.len()))

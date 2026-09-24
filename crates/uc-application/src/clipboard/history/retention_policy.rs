@@ -17,7 +17,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tracing::{info, info_span, warn, Instrument};
 
 use uc_core::clipboard::ClipboardEntry;
@@ -145,7 +145,7 @@ impl EnforceRetentionPolicyUseCase {
                     offset = offset
                 ))
                 .await
-                .map_err(|e| anyhow::anyhow!("list entries for retention: {e}"))?;
+                .context("list entries for retention")?;
 
             if batch.is_empty() {
                 break;

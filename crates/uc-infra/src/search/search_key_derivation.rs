@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -135,8 +135,7 @@ fn map_v3_search_error(error: V3SearchProtectionError) -> SearchError {
 /// enforce that HMAC tagging is always done with the derived search key, never
 /// raw master key bytes.
 pub(crate) fn term_tag(search_key: &SearchKey, normalized_token: &str) -> Result<Vec<u8>> {
-    let mut mac = HmacSha256::new_from_slice(search_key.as_bytes())
-        .map_err(|e| anyhow!("HMAC init failed: {e}"))?;
+    let mut mac = HmacSha256::new_from_slice(search_key.as_bytes()).context("HMAC init failed")?;
     mac.update(normalized_token.as_bytes());
     Ok(mac.finalize().into_bytes().to_vec())
 }

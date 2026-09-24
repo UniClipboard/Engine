@@ -116,7 +116,7 @@ fn deserialize_and_migrate_settings(content: &str) -> Result<(Settings, u32)> {
     let migrator = SettingsMigrator::new();
     let migrated = migrator
         .migrate_to_latest(settings)
-        .map_err(|e| anyhow::anyhow!("settings migration failed: {}", e))?;
+        .context("settings migration failed")?;
 
     Ok((migrated, original_version))
 }

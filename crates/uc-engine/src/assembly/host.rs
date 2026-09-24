@@ -3,6 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use anyhow::Context;
 use tracing::warn;
 use uc_application::deps::{
     PrepareProfileStartupUseCase, ProfileUpgradeBackupPort, ProfileUpgradeVersions,
@@ -96,7 +97,7 @@ impl SystemClipboardPort for HostClipboardAdapter {
                 &mut representations,
                 &mut file_metadata,
             )
-            .map_err(|error| anyhow::anyhow!("host clipboard file import failed: {error}"))?;
+            .context("host clipboard file import failed")?;
 
         if !file_metadata.is_empty() {
             let encoded = FileDisplayMetadata {

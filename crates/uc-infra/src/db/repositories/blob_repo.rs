@@ -4,7 +4,7 @@ use crate::db::models::BlobRow;
 use crate::db::ports::DbExecutor;
 use crate::db::ports::{InsertMapper, RowMapper};
 use crate::db::schema::blob;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use diesel::{ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl};
 use tracing::debug_span;
 use uc_core::ContentHash;
@@ -72,7 +72,7 @@ where
                     .filter(blob::content_hash.eq(content_hash.to_string()))
                     .first::<BlobRow>(conn)
                     .optional();
-                result.map_err(|e| anyhow::anyhow!("Database error: {}", e))
+                result.context("Database error")
             })?;
 
             match blob_row {

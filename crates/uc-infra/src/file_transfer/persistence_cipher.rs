@@ -1,3 +1,4 @@
+use anyhow::Context;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -324,7 +325,7 @@ pub(crate) async fn derive_transfer_persistence_cipher(
     let profile = current_profile
         .current_profile()
         .await
-        .map_err(|error| anyhow::anyhow!("current profile unavailable: {error}"))?;
+        .context("current profile unavailable")?;
     let metadata_key = derive_subkey
         .derive_subkey(profile.as_ref().as_bytes(), METADATA_KEY_INFO)
         .await
