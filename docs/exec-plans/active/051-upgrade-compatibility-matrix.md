@@ -4,6 +4,7 @@
 
 - **状态**：已确认，待实施（下一步 S0）；待决问题已于 2026-09-25 由用户确认，见“已确认的决定”。
 - **日期**：2026-09-25。
+- **跟踪**：[Issue #119](https://github.com/UniClipboard/Engine/issues/119)。
 - **依据**：[Engine 测试架构](../../design-docs/testing-architecture.md)（nextest 负责进程调度、分组与超时，
   `uc-testkit::Scenario` 负责单场景预算、阶段、事件、资源与工件）；独立进程测试宿主 `uc-connectivity-host`；
   `scripts/testing/run-connection-recovery-e2e.sh` 已验证的做法：取旧版本源码、覆盖当前测试宿主、以小补丁适配后
