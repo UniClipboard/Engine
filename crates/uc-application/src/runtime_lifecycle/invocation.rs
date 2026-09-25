@@ -24,6 +24,7 @@ pub(super) async fn invoke(
         match deadline {
             Some(deadline) => timeout_at(deadline, invocation)
                 .await
+                // 超时本身就是分类。
                 .map_err(|_| deadline_elapsed())?,
             None => invocation.await,
         }

@@ -212,7 +212,7 @@ impl MembershipWorker {
                     tally.corrupt += 1;
                 }
                 Err(
-                    MembershipEffectExecutionError::Deferred
+                    MembershipEffectExecutionError::Deferred { .. }
                     | MembershipEffectExecutionError::Dependency { .. },
                 ) => {
                     tracing::debug!("成员效果执行延后");

@@ -1300,6 +1300,7 @@ async fn expand_directory(
     let mut pending = Vec::new();
     let mut queue = VecDeque::from([(root.path.clone(), String::new())]);
     while let Some((directory, relative_directory)) = queue.pop_front() {
+        // 展开失败落为文件集中的排除行（业务结果），不是向上传递的错误；排除原因已完整表达。
         let mut read_dir = tokio::fs::read_dir(&directory).await.map_err(|_| {
             (
                 ExpansionFailure::IngestFailed,
@@ -1307,6 +1308,7 @@ async fn expand_directory(
             )
         })?;
         let mut entries = Vec::new();
+        // 展开失败落为文件集中的排除行（业务结果），不是向上传递的错误；排除原因已完整表达。
         while let Some(entry) = read_dir.next_entry().await.map_err(|_| {
             (
                 ExpansionFailure::IngestFailed,
@@ -1356,6 +1358,7 @@ async fn expand_directory(
                 format!("{relative_directory}/{name}")
             };
             let path = entry.path();
+            // 展开失败落为文件集中的排除行（业务结果），不是向上传递的错误；排除原因已完整表达。
             let metadata = tokio::fs::symlink_metadata(&path).await.map_err(|_| {
                 (
                     ExpansionFailure::IngestFailed,

@@ -239,7 +239,9 @@ impl HistorySynchronizer {
                 MembershipHistoryExchangeError::Rejected => PeerSyncResult::Rejected,
             }),
             // 对端回复不符合协议：保留同步欠账并按退避重试，不把一次异常回复当作稳定结论。
-            Err(ExchangeFailure::Unexpected) => PeerExchange::Finished(PeerSyncResult::Deferred),
+            Err(ExchangeFailure::HistoryExport(_) | ExchangeFailure::Unexpected) => {
+                PeerExchange::Finished(PeerSyncResult::Deferred)
+            }
         };
         if matches!(exchange, PeerExchange::Finished(PeerSyncResult::Confirmed)) {
             self.address_refresh
@@ -297,7 +299,7 @@ impl HistorySynchronizer {
                 let pages = context
                     .history
                     .export_suffix_pages_v4(context.sender.clone(), known_position)
-                    .map_err(|_| ExchangeFailure::Unexpected)?;
+                    .map_err(|error| ExchangeFailure::HistoryExport(error.into()))?;
                 tracing::debug!(page_count = pages.len(), "成员历史后缀已导出");
                 self.send_suffix_pages(peer, pages, context).await
             }
@@ -321,7 +323,7 @@ impl HistorySynchronizer {
         let pages = context
             .history
             .export_conflict_evidence_pages_v2(context.sender.clone())
-            .map_err(|_| ExchangeFailure::Unexpected)?;
+            .map_err(|error| ExchangeFailure::HistoryExport(error.into()))?;
         let reply = self
             .transport
             .exchange_membership_history(
@@ -446,6 +448,8 @@ fn confirms_an_ancestor(context: &SyncContext, confirmed: &BaseMembershipHistory
 enum ExchangeFailure {
     Transport(MembershipHistoryExchangeError),
     Ledger(MembershipLedgerError),
+    /// 本地历史导出失败；来源随这次交换结果一起结束。
+    HistoryExport(anyhow::Error),
     Unexpected,
 }
 

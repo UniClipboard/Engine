@@ -30,7 +30,7 @@ fn map_mobile_upload_error(error: MobileFileUploadError) -> EngineError {
         MobileFileUploadError::CompletionFailed(error) => map_apply_error(error),
         MobileFileUploadError::Closed
         | MobileFileUploadError::Unavailable
-        | MobileFileUploadError::UploadFailed => EngineError::new(
+        | MobileFileUploadError::upload_failed() => EngineError::new(
             MOBILE_UPLOAD_FAILED_CODE,
             EngineErrorCategory::Internal,
             true,

@@ -385,6 +385,7 @@ fn write_bytes_u32<W: Write>(writer: &mut W, value: &[u8], label: &str) -> std::
             ),
         ));
     }
+    // TryFromIntError：目标分类完整表达数值范围不符。
     let len = u32::try_from(value.len()).map_err(|_| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -407,6 +408,7 @@ fn write_string_u16<W: Write>(writer: &mut W, value: &str, label: &str) -> std::
             ),
         ));
     }
+    // TryFromIntError：目标分类完整表达数值范围不符。
     let len = u16::try_from(bytes.len()).map_err(|_| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,

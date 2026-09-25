@@ -499,7 +499,7 @@ mod tests {
             let has_completed = self.profile_readiness.get_status().await.has_completed;
             self.observed_completed.lock().unwrap().push(has_completed);
             if *self.fail.lock().unwrap() {
-                return Err(MembershipInitializationError::Unavailable);
+                return Err(MembershipInitializationError::unavailable());
             }
             Ok(())
         }

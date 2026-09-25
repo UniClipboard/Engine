@@ -78,7 +78,7 @@ impl ChangeEncryptionPassphraseUseCase {
                 | CurrentSpaceMemberScopeError::NoCurrentSpace => {
                     ChangeEncryptionPassphraseError::Locked
                 }
-                CurrentSpaceMemberScopeError::RecoveryRequired => {
+                CurrentSpaceMemberScopeError::RecoveryRequired { .. } => {
                     ChangeEncryptionPassphraseError::MembershipRecoveryRequired
                 }
                 CurrentSpaceMemberScopeError::Unavailable => {
@@ -112,7 +112,10 @@ mod tests {
     #[async_trait]
     impl CurrentSpaceMemberScopePort for MemberScope {
         async fn snapshot(&self) -> Result<CurrentSpaceMemberScope, CurrentSpaceMemberScopeError> {
-            self.0.clone()
+            self.0
+                .as_ref()
+                .map(Clone::clone)
+                .map_err(CurrentSpaceMemberScopeError::same_kind)
         }
     }
 
@@ -284,7 +287,7 @@ mod tests {
             ChangeEncryptionPassphraseError::Locked
         ));
 
-        let (recovering, _, _) = use_case(Err(CurrentSpaceMemberScopeError::RecoveryRequired));
+        let (recovering, _, _) = use_case(Err(CurrentSpaceMemberScopeError::recovery_required()));
         assert!(matches!(
             recovering
                 .execute(

@@ -601,7 +601,7 @@ fn member_preferences_result(preferences: MemberSyncPreferencesView) -> Operatio
 
 fn map_roster_error(error: RosterError) -> EngineError {
     let (code, category, retryable, variant) = match error {
-        RosterError::MembershipReconciliationUnavailable => (
+        RosterError::MembershipReconciliationUnavailable { .. } => (
             QUERY_WORKSPACE_CONVERGENCE_UNAVAILABLE_CODE,
             EngineErrorCategory::Unavailable,
             false,
@@ -698,7 +698,7 @@ fn map_remove_space_member_error(error: RemoveSpaceMemberError) -> EngineError {
             EngineErrorCategory::Unavailable,
             true,
         ),
-        RemoveSpaceMemberError::RecoveryRequired => EngineError::new(
+        RemoveSpaceMemberError::RecoveryRequired { .. } => EngineError::new(
             QUERY_WORKSPACE_CONVERGENCE_CORRUPT_CODE,
             EngineErrorCategory::InvalidState,
             false,
@@ -1019,7 +1019,7 @@ mod tests {
 
     #[test]
     fn workspace_convergence_errors_have_a_stable_public_mapping() {
-        let unavailable = map_roster_error(RosterError::MembershipReconciliationUnavailable);
+        let unavailable = map_roster_error(RosterError::membership_reconciliation_unavailable());
         let corrupt = map_roster_error(RosterError::MembershipReconciliationCorrupt);
         let failed = map_roster_error(RosterError::MemberRemoval(anyhow::anyhow!(
             "internal detail"

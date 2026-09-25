@@ -38,7 +38,7 @@ impl QueryMembershipReadinessUseCase {
             Err(CurrentSpaceMemberScopeError::Locked) => Ok(MembershipReadiness::Locked),
             Err(
                 CurrentSpaceMemberScopeError::NoCurrentSpace
-                | CurrentSpaceMemberScopeError::RecoveryRequired,
+                | CurrentSpaceMemberScopeError::RecoveryRequired { .. },
             ) => Ok(MembershipReadiness::Recovering),
             Err(source @ CurrentSpaceMemberScopeError::Unavailable) => {
                 Err(QueryMembershipReadinessError::Unavailable { source })
@@ -59,7 +59,10 @@ mod tests {
     #[async_trait]
     impl CurrentSpaceMemberScopePort for FixedScope {
         async fn snapshot(&self) -> Result<CurrentSpaceMemberScope, CurrentSpaceMemberScopeError> {
-            self.0.clone()
+            self.0
+                .as_ref()
+                .map(Clone::clone)
+                .map_err(CurrentSpaceMemberScopeError::same_kind)
         }
     }
 

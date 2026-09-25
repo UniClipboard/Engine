@@ -14,9 +14,38 @@ pub enum ProfileFactoryResetError {
         source: LifecycleError,
     },
     #[error("profile keys could not be wiped")]
-    WipeKeys,
+    WipeKeys {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("profile state could not be cleared")]
-    ClearState,
+    ClearState {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl ProfileFactoryResetError {
+    pub fn wipe_keys() -> Self {
+        Self::WipeKeys { source: None }
+    }
+
+    pub fn wipe_keys_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::WipeKeys {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn clear_state() -> Self {
+        Self::ClearState { source: None }
+    }
+
+    pub fn clear_state_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::ClearState {
+            source: Some(source.into()),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]

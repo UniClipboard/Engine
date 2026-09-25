@@ -332,7 +332,10 @@ async fn exact_revocation_without_the_current_member_credential_never_reports_re
         .await
         .unwrap_err();
 
-    assert!(matches!(error, RemoveSpaceMemberError::RecoveryRequired));
+    assert!(matches!(
+        error,
+        RemoveSpaceMemberError::RecoveryRequired { .. }
+    ));
     assert_eq!(fixture.records.commit_count(), 0);
 }
 

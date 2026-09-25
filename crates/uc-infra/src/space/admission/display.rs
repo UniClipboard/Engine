@@ -264,19 +264,19 @@ impl<E: DbExecutor + Send + Sync> SqliteSpaceAdmissionState<E> {
 
         let record = self.membership.load().await?;
         let uc_application::deps::MembershipRecord::Space(space) = record else {
-            return Err(QueryDeviceTrustError::RecoveryRequired);
+            return Err(QueryDeviceTrustError::recovery_required());
         };
         let history = &space.ledger.history;
         let local_member = space.ledger.local_member;
         let local_facts = history
             .admission_facts_for(local_member)
-            .ok_or(QueryDeviceTrustError::RecoveryRequired)?;
+            .ok_or_else(QueryDeviceTrustError::recovery_required)?;
         let sponsor_member = history
             .admission_author_for(local_member)
-            .ok_or(QueryDeviceTrustError::RecoveryRequired)?;
+            .ok_or_else(QueryDeviceTrustError::recovery_required)?;
         let sponsor_facts = history
             .admission_facts_for(sponsor_member)
-            .ok_or(QueryDeviceTrustError::RecoveryRequired)?;
+            .ok_or_else(QueryDeviceTrustError::recovery_required)?;
         if !admission.is_active_settled() {
             return Ok(CurrentJoinStatus::Processing {
                 join_id,

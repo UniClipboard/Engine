@@ -53,7 +53,7 @@ impl DecideDeviceTrustChangeUseCase {
                             .query
                             .execute()
                             .await
-                            .map_err(|_| DecideDeviceTrustChangeError::Unavailable)?;
+                            .map_err(DecideDeviceTrustChangeError::unavailable_from)?;
                         Ok(DecideDeviceTrustChangeResult::StateChanged {
                             current_change_id: status
                                 .current_change
@@ -87,7 +87,7 @@ impl DecideDeviceTrustChangeUseCase {
                 .query
                 .execute()
                 .await
-                .map_err(|_| DecideDeviceTrustChangeError::CommittedButPending)?;
+                .map_err(DecideDeviceTrustChangeError::committed_but_pending_from)?;
             return Ok(DecideDeviceTrustChangeResult::AlreadyCompleted {
                 change_id: input.change_id,
                 choice,
@@ -99,7 +99,7 @@ impl DecideDeviceTrustChangeUseCase {
                 .query
                 .execute()
                 .await
-                .map_err(|_| DecideDeviceTrustChangeError::Unavailable)?;
+                .map_err(DecideDeviceTrustChangeError::unavailable_from)?;
             return Ok(DecideDeviceTrustChangeResult::StateChanged {
                 current_change_id: status
                     .current_change
@@ -110,7 +110,7 @@ impl DecideDeviceTrustChangeUseCase {
         }
         let event = history
             .event(input.change_id)
-            .ok_or(DecideDeviceTrustChangeError::RecoveryRequired)?;
+            .ok_or_else(DecideDeviceTrustChangeError::recovery_required)?;
         let removes_local = matches!(
             &event.operation,
             MembershipOperationV2::RemoveDevice { member } if *member == local_member
@@ -123,7 +123,7 @@ impl DecideDeviceTrustChangeUseCase {
                 .query
                 .execute()
                 .await
-                .map_err(|_| DecideDeviceTrustChangeError::Unavailable)?;
+                .map_err(DecideDeviceTrustChangeError::unavailable_from)?;
             return Ok(DecideDeviceTrustChangeResult::LocalConfirmationRequired {
                 change_id: input.change_id,
                 status,
@@ -136,7 +136,7 @@ impl DecideDeviceTrustChangeUseCase {
             .await
             .map_err(map_signature_error)?;
         if credential.member_instance_id(&local_device_id) != local_member {
-            return Err(DecideDeviceTrustChangeError::RecoveryRequired);
+            return Err(DecideDeviceTrustChangeError::recovery_required());
         }
         let decision_choice = match input.choice {
             DeviceTrustChangeChoice::ApplyChange => RemovalDecision::Accept,
@@ -150,7 +150,7 @@ impl DecideDeviceTrustChangeUseCase {
                 decision_choice,
                 uuid::Uuid::new_v4().into_bytes(),
             )
-            .map_err(|_| DecideDeviceTrustChangeError::RecoveryRequired)?;
+            .map_err(DecideDeviceTrustChangeError::recovery_required_from)?;
         decision.signature = self
             .signer
             .sign_current_member_payload(&decision.signing_payload())
@@ -213,7 +213,7 @@ impl DecideDeviceTrustChangeUseCase {
             .query
             .execute()
             .await
-            .map_err(|_| DecideDeviceTrustChangeError::CommittedButPending)?;
+            .map_err(DecideDeviceTrustChangeError::committed_but_pending_from)?;
         Ok(match input.choice {
             DeviceTrustChangeChoice::ApplyChange => DecideDeviceTrustChangeResult::Applied {
                 change_id: input.change_id,
@@ -232,10 +232,10 @@ impl DecideDeviceTrustChangeUseCase {
 fn map_signature_error(error: CurrentMemberSignatureError) -> DecideDeviceTrustChangeError {
     match error {
         CurrentMemberSignatureError::InvalidState { .. } => {
-            DecideDeviceTrustChangeError::RecoveryRequired
+            DecideDeviceTrustChangeError::recovery_required()
         }
         CurrentMemberSignatureError::Unavailable { .. }
-        | CurrentMemberSignatureError::Repository(_) => DecideDeviceTrustChangeError::Unavailable,
+        | CurrentMemberSignatureError::Repository(_) => DecideDeviceTrustChangeError::unavailable(),
     }
 }
 
@@ -243,9 +243,9 @@ fn map_ledger_error(error: MembershipLedgerError) -> DecideDeviceTrustChangeErro
     match error {
         MembershipLedgerError::Locked => DecideDeviceTrustChangeError::Locked,
         MembershipLedgerError::Corrupt { .. } | MembershipLedgerError::RecoveryRequired => {
-            DecideDeviceTrustChangeError::RecoveryRequired
+            DecideDeviceTrustChangeError::recovery_required()
         }
         MembershipLedgerError::Conflict => DecideDeviceTrustChangeError::StateChanged,
-        MembershipLedgerError::Unavailable { .. } => DecideDeviceTrustChangeError::Unavailable,
+        MembershipLedgerError::Unavailable { .. } => DecideDeviceTrustChangeError::unavailable(),
     }
 }

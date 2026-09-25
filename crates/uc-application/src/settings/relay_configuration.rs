@@ -348,6 +348,7 @@ impl RelayConfiguration {
 }
 
 fn canonical_url(raw: &str) -> Result<String, RelayConfigurationRejection> {
+    // 用户输入的 URL 解析失败只作输入校验，拒绝原因已完整表达。
     let url = url::Url::parse(raw.trim()).map_err(|_| RelayConfigurationRejection::InvalidUrl)?;
     if !matches!(url.scheme(), "http" | "https")
         || url.host_str().is_none()
@@ -375,6 +376,7 @@ fn canonical_entries(
     credentials: &RelayCredentials,
 ) -> Result<Vec<RelayConfigurationEntry>, RelayConfigurationError> {
     let urls = canonical_urls(urls)
+        // 用户输入的 URL 解析失败只作输入校验，拒绝原因已完整表达。
         .map_err(|_| RelayConfigurationError::Invalid("invalid custom relay URL".to_string()))?;
     urls.into_iter()
         .map(|url| {

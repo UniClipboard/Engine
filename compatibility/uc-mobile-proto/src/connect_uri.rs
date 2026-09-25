@@ -350,6 +350,7 @@ pub fn build_mobile_sync_connect_uri(
 pub fn parse_mobile_sync_connect_uri(qr_text: &str) -> Result<ConnectPayload, ConnectUriError> {
     let raw = qr_text.trim();
 
+    // 二维码文本的输入校验，拒绝原因按规范错误码完整表达。
     let uri = Url::parse(raw).map_err(|_| ConnectUriError::InvalidScheme)?;
     if uri.scheme() != SCHEME {
         return Err(ConnectUriError::InvalidScheme);
@@ -374,6 +375,7 @@ pub fn parse_mobile_sync_connect_uri(qr_text: &str) -> Result<ConnectPayload, Co
     let envelope_v: u32 = q_v
         .ok_or(ConnectUriError::UnsupportedVersion)?
         .parse()
+        // 二维码文本的输入校验，拒绝原因按规范错误码完整表达。
         .map_err(|_| ConnectUriError::UnsupportedVersion)?;
     if envelope_v != ENVELOPE_VERSION {
         return Err(ConnectUriError::UnsupportedVersion);

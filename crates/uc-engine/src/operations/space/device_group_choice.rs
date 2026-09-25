@@ -201,7 +201,7 @@ fn query_error(error: &uc_application::facade::QueryDeviceGroupChoicesError) -> 
             source: uc_application::facade::QueryMembershipConflictsError::Locked { .. },
         } => EngineError::new(1212, EngineErrorCategory::InvalidState, false),
         QueryDeviceGroupChoicesError::DeviceTrust {
-            source: QueryDeviceTrustError::RecoveryRequired,
+            source: QueryDeviceTrustError::RecoveryRequired { .. },
         }
         | QueryDeviceGroupChoicesError::MembershipConflict {
             source: uc_application::facade::QueryMembershipConflictsError::RecoveryRequired { .. },
@@ -221,7 +221,7 @@ fn query_error_kind(error: &uc_application::facade::QueryDeviceGroupChoicesError
     match error {
         QueryDeviceGroupChoicesError::DeviceTrust { source } => match source {
             uc_application::facade::QueryDeviceTrustError::Locked => "device_trust_locked",
-            uc_application::facade::QueryDeviceTrustError::RecoveryRequired => {
+            uc_application::facade::QueryDeviceTrustError::RecoveryRequired { .. } => {
                 "device_trust_recovery_required"
             }
             uc_application::facade::QueryDeviceTrustError::Unavailable => {
@@ -243,10 +243,12 @@ fn choose_error_kind(error: &uc_application::facade::ChooseDeviceGroupError) -> 
     match error {
         ChooseDeviceGroupError::PendingChange { source } => match source {
             DecideDeviceTrustChangeError::Locked => "pending_change_locked",
-            DecideDeviceTrustChangeError::RecoveryRequired => "pending_change_recovery_required",
-            DecideDeviceTrustChangeError::Unavailable => "pending_change_unavailable",
+            DecideDeviceTrustChangeError::RecoveryRequired { .. } => {
+                "pending_change_recovery_required"
+            }
+            DecideDeviceTrustChangeError::Unavailable { .. } => "pending_change_unavailable",
             DecideDeviceTrustChangeError::StateChanged => "pending_change_state_changed",
-            DecideDeviceTrustChangeError::CommittedButPending => {
+            DecideDeviceTrustChangeError::CommittedButPending { .. } => {
                 "pending_change_committed_but_pending"
             }
         },
@@ -278,7 +280,7 @@ mod tests {
             source: QueryDeviceTrustError::Unavailable,
         };
         let recovery = QueryDeviceGroupChoicesError::DeviceTrust {
-            source: QueryDeviceTrustError::RecoveryRequired,
+            source: QueryDeviceTrustError::recovery_required(),
         };
         let locked = QueryDeviceGroupChoicesError::DeviceTrust {
             source: QueryDeviceTrustError::Locked,

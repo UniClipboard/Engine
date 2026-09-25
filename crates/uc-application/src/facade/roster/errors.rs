@@ -14,7 +14,10 @@ use uc_core::ports::LocalIdentityError;
 pub enum RosterError {
     /// 分布式成员移除在当前宿主上不可用(未组装)。
     #[error("distributed member removal is unavailable on this host")]
-    MembershipReconciliationUnavailable,
+    MembershipReconciliationUnavailable {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
 
     /// 成员状态存在，但当前加密会话尚未解锁。
     #[error("membership reconciliation is locked")]
@@ -59,4 +62,17 @@ pub enum RosterError {
     /// 成员 roster 入口尚未接入。通常表示 daemon/CLI 组合阶段没有注入该能力。
     #[error("member roster facade unavailable")]
     Unavailable,
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl RosterError {
+    pub fn membership_reconciliation_unavailable() -> Self {
+        Self::MembershipReconciliationUnavailable { source: None }
+    }
+
+    pub fn membership_reconciliation_unavailable_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::MembershipReconciliationUnavailable {
+            source: Some(source.into()),
+        }
+    }
 }

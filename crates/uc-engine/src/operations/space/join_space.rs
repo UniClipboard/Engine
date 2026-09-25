@@ -47,7 +47,7 @@ fn map_join_space_error(error: AppJoinSpaceError) -> EngineError {
             EngineErrorCategory::NotFound,
             false,
         ),
-        AppJoinSpaceError::PreviousJoinCannotBeSuperseded => error_with(
+        AppJoinSpaceError::PreviousJoinCannotBeSuperseded { .. } => error_with(
             JOIN_SPACE_PREVIOUS_JOIN_CANNOT_BE_SUPERSEDED_CODE,
             EngineErrorCategory::Conflict,
             false,
@@ -66,7 +66,7 @@ fn map_join_space_error(error: AppJoinSpaceError) -> EngineError {
             false,
         ),
         AppJoinSpaceError::Unavailable => unavailable_error(JOIN_SPACE_STORAGE_CODE),
-        AppJoinSpaceError::Settings(_) | AppJoinSpaceError::InvalidStartMaterial => {
+        AppJoinSpaceError::Settings(_) | AppJoinSpaceError::InvalidStartMaterial { .. } => {
             join_internal_error("join space", error)
         }
     }
@@ -115,7 +115,7 @@ mod tests {
 
     #[test]
     fn previous_join_cannot_be_superseded_is_a_stable_conflict() {
-        let error = map_join_space_error(AppJoinSpaceError::PreviousJoinCannotBeSuperseded);
+        let error = map_join_space_error(AppJoinSpaceError::previous_join_cannot_be_superseded());
 
         assert_eq!(
             error.code(),

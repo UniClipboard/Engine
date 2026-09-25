@@ -48,33 +48,33 @@ impl InitializeSpaceMembershipUseCase {
             .group_bootstrap
             .bootstrap_legacy_space(&local_device_id, &[], self.clock.now_ms())
             .await
-            .map_err(|_| MembershipInitializationError::Unavailable)?;
+            .map_err(MembershipInitializationError::unavailable_from)?;
         if !matches!(bootstrap, GroupBootstrapResult::Complete { .. }) {
-            return Err(MembershipInitializationError::Inconsistent);
+            return Err(MembershipInitializationError::inconsistent());
         }
         let identity = self
             .membership_identity
             .current_membership_identity()
             .await
-            .map_err(|_| MembershipInitializationError::Unavailable)?;
+            .map_err(MembershipInitializationError::unavailable_from)?;
         let material = self
             .announcement
             .current_announcement_material()
             .await
-            .map_err(|_| MembershipInitializationError::Unavailable)?;
+            .map_err(MembershipInitializationError::unavailable_from)?;
         if material.device_id != local_device_id {
-            return Err(MembershipInitializationError::Inconsistent);
+            return Err(MembershipInitializationError::inconsistent());
         }
         let member_instance = self
             .signatures
             .current_member_instance(&local_device_id)
             .await
-            .map_err(|_| MembershipInitializationError::Unavailable)?;
+            .map_err(MembershipInitializationError::unavailable_from)?;
         let credential = self
             .signatures
             .current_membership_credential(&local_device_id)
             .await
-            .map_err(|_| MembershipInitializationError::Unavailable)?;
+            .map_err(MembershipInitializationError::unavailable_from)?;
         let mut facts = uc_core::membership::AdmissionChangeFacts {
             member_instance,
             device_id: material.device_id,
@@ -88,7 +88,7 @@ impl InitializeSpaceMembershipUseCase {
             .signatures
             .sign_current_member_payload(&facts.signing_payload())
             .await
-            .map_err(|_| MembershipInitializationError::Unavailable)?;
+            .map_err(MembershipInitializationError::unavailable_from)?;
         let local_device_id = facts.device_id;
         let local_member = facts.member_instance;
         let history = VersionedMembershipHistory::new_single_member_root(
@@ -96,7 +96,7 @@ impl InitializeSpaceMembershipUseCase {
             facts,
             credential,
         )
-        .map_err(|_| MembershipInitializationError::Inconsistent)?;
+        .map_err(MembershipInitializationError::inconsistent_from)?;
         self.owner
             .commit(move |draft| {
                 if draft.space().is_some() {
@@ -106,7 +106,7 @@ impl InitializeSpaceMembershipUseCase {
             })
             .await
             .map(|_| ())
-            .map_err(|_| MembershipInitializationError::Inconsistent)
+            .map_err(MembershipInitializationError::inconsistent_from)
     }
 }
 

@@ -121,7 +121,7 @@ async fn a_deferred_effect_step_stays_at_its_phase_until_a_later_run() {
     let case = removed_peer().await;
     case.worker
         .effects
-        .fail_next(MembershipEffectExecutionError::Deferred);
+        .fail_next(MembershipEffectExecutionError::deferred());
 
     let report = case
         .worker
@@ -243,7 +243,7 @@ async fn recovering_effects_reports_deferred_while_an_effect_remains() {
     let case = removed_peer().await;
     case.worker
         .effects
-        .fail_next(MembershipEffectExecutionError::Deferred);
+        .fail_next(MembershipEffectExecutionError::deferred());
 
     let deferred = case.worker.worker.recover_membership_effects().await;
     let completed = case.worker.worker.recover_membership_effects().await;

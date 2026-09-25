@@ -248,7 +248,8 @@ impl AdmissionRecoveryService {
                     | RemoveSpaceMemberError::Unavailable,
                 ) => report.deferred_count += 1,
                 Err(
-                    RemoveSpaceMemberError::RecoveryRequired | RemoveSpaceMemberError::SelfTarget,
+                    RemoveSpaceMemberError::RecoveryRequired { .. }
+                    | RemoveSpaceMemberError::SelfTarget,
                 ) => report.recovery_required_count += 1,
             }
         }

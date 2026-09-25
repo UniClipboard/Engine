@@ -55,7 +55,7 @@ impl HandleMembershipHistoryMessageUseCase {
                     HandleMembershipHistoryMessageError::Unavailable
                 }
                 QuerySpaceWorkModeError::NeedsAttention => {
-                    HandleMembershipHistoryMessageError::RecoveryRequired
+                    HandleMembershipHistoryMessageError::recovery_required()
                 }
             })?;
         match work_permit.mode() {
@@ -64,7 +64,7 @@ impl HandleMembershipHistoryMessageUseCase {
                 return Err(HandleMembershipHistoryMessageError::PairingInProgress)
             }
             SpaceWorkMode::NeedsAttention => {
-                return Err(HandleMembershipHistoryMessageError::RecoveryRequired)
+                return Err(HandleMembershipHistoryMessageError::recovery_required())
             }
         }
         let page = match message {
@@ -84,7 +84,7 @@ impl HandleMembershipHistoryMessageUseCase {
                 }
                 let current_position = history
                     .current_position()
-                    .map_err(|_| HandleMembershipHistoryMessageError::RecoveryRequired)?;
+                    .map_err(HandleMembershipHistoryMessageError::recovery_required_from)?;
                 let plan = plan_membership_history_reconciliation(
                     history.lineage_id(),
                     &current_position,
@@ -145,7 +145,7 @@ impl HandleMembershipHistoryMessageUseCase {
             MembershipHistoryMessage::RequestSuffixV3(_)
             | MembershipHistoryMessage::RequestConflictEvidenceV3(_)
             | MembershipHistoryMessage::AckV3(_) => {
-                return Err(HandleMembershipHistoryMessageError::Rejected);
+                return Err(HandleMembershipHistoryMessageError::rejected());
             }
         };
         if page.validate_envelope().is_err()
@@ -549,7 +549,7 @@ fn map_ledger_error(error: MembershipLedgerError) -> HandleMembershipHistoryMess
     match error {
         MembershipLedgerError::Locked => HandleMembershipHistoryMessageError::Locked,
         MembershipLedgerError::Corrupt { .. } | MembershipLedgerError::RecoveryRequired => {
-            HandleMembershipHistoryMessageError::RecoveryRequired
+            HandleMembershipHistoryMessageError::recovery_required()
         }
         MembershipLedgerError::Conflict | MembershipLedgerError::Unavailable { .. } => {
             HandleMembershipHistoryMessageError::Unavailable

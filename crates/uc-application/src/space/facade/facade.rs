@@ -57,6 +57,7 @@ use crate::space::lifecycle::{
     RecoverSpaceSessionError, RecoverSpaceSessionResult, RecoverSpaceSessionUseCase,
 };
 use crate::space::membership::{
+    DecideDeviceTrustChange, DecideDeviceTrustChangeError, DecideDeviceTrustChangeResult,
     MembershipReadiness, QueryMembershipReadinessError, QueryMembershipReadinessUseCase,
     RePairingState,
 };
@@ -557,18 +558,15 @@ impl SpaceFacade {
 
     pub async fn decide_device_trust_change(
         &self,
-        input: crate::space::membership::DecideDeviceTrustChange,
-    ) -> Result<
-        crate::space::membership::DecideDeviceTrustChangeResult,
-        crate::space::membership::DecideDeviceTrustChangeError,
-    > {
+        input: DecideDeviceTrustChange,
+    ) -> Result<DecideDeviceTrustChangeResult, DecideDeviceTrustChangeError> {
         let decide = self
             .application
             .lock()
             .await
             .as_ref()
             .map(SpaceApplication::decide_device_trust_change)
-            .ok_or(crate::space::membership::DecideDeviceTrustChangeError::Unavailable)?;
+            .ok_or_else(DecideDeviceTrustChangeError::unavailable)?;
         decide.execute(input).await
     }
 

@@ -258,7 +258,7 @@ E1 的检查会拒绝只删标识、仍保留 `{error}` 的改法，所以 E4 �
 
 
 
-### E6 S4 F 类：Infra 能力来源（进行中）
+### E6 S4 F 类：Infra 能力来源（已完成，除等待 049 的项）
 
 约定（已确认）：同一错误类型既有纯校验失败、又有下层失败时，变体改为 `Variant { source: Option<..> }`，并提供
 `variant()`（无来源）与 `variant_from(source)`（有来源）两个构造函数；模式匹配写 `Variant { .. }`。Infra 与 Application
@@ -299,3 +299,21 @@ E1 的检查会拒绝只删标识、仍保留 `{error}` 的改法，所以 E4 �
   - 按例外注释：锁中毒（内存事件库、节点运行锁等）、整数与切片长度转换、`Vec` 转定长数组（错误值是明文密钥字节）、
     `SelectionPolicyVersion` 的 `String` 解析错误（同时去掉错误文本中的持久值与条目标识）、索引引用长度校验改归“索引未就绪”。
 - 暂缓：`EncryptionError` 与 `SecureStorageError` 以及 `AeadError::DecryptFailed` 的变体被 049 未提交的 `profile_key_recovery.rs` 模式匹配，等 049 提交后处理。
+
+
+### E7 S4 F 类：Application、Engine 与绑定（进行中）
+
+- Application（已完成，S4 清零）：`RosterError::MembershipReconciliationUnavailable`、`ProfileFactoryResetError::{WipeKeys, ClearState}`、
+  `RelayCredentialsError::Corrupt`、`JoinSpaceError::{PreviousJoinCannotBeSuperseded, InvalidStartMaterial}`、
+  `DecideDeviceTrustChangeError`、`HandleMembershipHistoryMessageError`、Core 的 `MembershipInitializationError`、
+  `CurrentSpaceMemberScopeError::RecoveryRequired`（原先 `Copy`；测试替身改为按分类重建）、`QueryDeviceTrustError`、
+  `RemoveSpaceMemberError`、`MembershipEffectExecutionError::Deferred`；成员历史同步的导出失败新增 `ExchangeFailure::HistoryExport`。
+  `MembershipLedgerError` 到 `QueryDeviceTrustError`/`CurrentSpaceMemberScopeError` 的 `From` 转换保留来源。
+  - 按例外注释：整数转换、`Url::from_file_path` 的 `()` 错误、超时、锁中毒、通道发送与 oneshot 接收、用户输入的 relay URL 校验、
+    文件集展开失败落为排除行（业务结果）。
+- 观测运行时（已完成）：宿主配置输入校验、全局状态已安装、panic 载荷按例外注释；导出器与本地文件初始化失败只降级为
+  `Unavailable`，此时日志通道尚未建立，按例外注释。
+- 兼容线（已完成）：`MobileFileUploadError::UploadFailed` 改为可选来源；二维码输入校验、ISO 时间文本格式校验、mpsc 接收、
+  `()` 错误与整数转换按例外注释。
+- 公开契约边界（已决策，待实施）：`EngineError` / `BindingError` 保持现有公开形态；边界处的 `map_err(|_| code)` 改为经由命名的
+  映射函数，先按观测规范从 source chain 提取固定分类记录诊断，再产出错误码；规范中把“公开契约边界映射”列为允许例外。

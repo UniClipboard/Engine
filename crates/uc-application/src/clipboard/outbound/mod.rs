@@ -854,6 +854,7 @@ pub(crate) fn build_transfer_manifest(
         .iter()
         .enumerate()
         .map(|(index, file)| {
+            // TryFromIntError：目标分类完整表达数值范围不符。
             let index = u32::try_from(index).map_err(|_| {
                 ClipboardOutboundError::Internal(anyhow::anyhow!("file-set index cannot fit u32"))
             })?;
@@ -872,6 +873,7 @@ pub(crate) fn build_transfer_manifest(
                 None => None,
             };
             Ok(InboundFileSetMember {
+                // TryFromIntError：目标分类完整表达数值范围不符。
                 root_index: u32::try_from(member.location.root_index).map_err(|_| {
                     ClipboardOutboundError::Internal(anyhow::anyhow!(
                         "negative directory root index"
@@ -994,6 +996,7 @@ pub(crate) async fn publish_oversized_inline_blob_refs(
             "outbound: oversized inline rep published as blob"
         );
 
+        // TryFromIntError：目标分类完整表达数值范围不符。
         let representation_index = u32::try_from(idx).map_err(|_| {
             ClipboardOutboundError::Internal(anyhow::anyhow!(
                 "representation index {idx} cannot fit u32"

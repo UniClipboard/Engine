@@ -164,11 +164,11 @@ impl RemoveSpaceMemberUseCase {
             .await
             .map_err(map_signature_error)?;
         if credential.member_instance_id(&local_device_id) != local_member {
-            return Err(RemoveSpaceMemberError::RecoveryRequired);
+            return Err(RemoveSpaceMemberError::recovery_required());
         }
         let history_digest = history
             .current_position()
-            .map_err(|_| RemoveSpaceMemberError::RecoveryRequired)?
+            .map_err(RemoveSpaceMemberError::recovery_required_from)?
             .history_digest;
         let mut event = history
             .create_unsigned_local_removal_event(
@@ -178,7 +178,7 @@ impl RemoveSpaceMemberUseCase {
                 target.operation_id,
                 history_digest,
             )
-            .map_err(|_| RemoveSpaceMemberError::RecoveryRequired)?;
+            .map_err(RemoveSpaceMemberError::recovery_required_from)?;
         event.signature = self
             .signer
             .sign_current_member_payload(&event.signing_payload())
@@ -308,7 +308,7 @@ impl AdmissionRevocationPort for RemoveSpaceMemberUseCase {
             target.member_instance_id(),
             target.add_event_id(),
         )
-        .map_err(|_| RemoveSpaceMemberError::RecoveryRequired)?;
+        .map_err(RemoveSpaceMemberError::recovery_required_from)?;
         self.execute_admission_revocation(AdmissionRevocationTarget::new(
             target.admission_id(),
             binding,
@@ -341,12 +341,12 @@ impl ExactRemovalTarget {
 fn receipt(view: &MembershipView) -> Result<MembershipCommitReceipt, RemoveSpaceMemberError> {
     let space = view
         .require_space()
-        .map_err(|_| RemoveSpaceMemberError::RecoveryRequired)?;
+        .map_err(RemoveSpaceMemberError::recovery_required_from)?;
     Ok(MembershipCommitReceipt {
         revision: view.revision(),
         history_digest: space
             .history_digest()
-            .map_err(|_| RemoveSpaceMemberError::RecoveryRequired)?,
+            .map_err(RemoveSpaceMemberError::recovery_required_from)?,
     })
 }
 
@@ -366,7 +366,7 @@ fn map_ledger_error(error: MembershipLedgerError) -> RemoveSpaceMemberError {
         MembershipLedgerError::Locked => RemoveSpaceMemberError::Locked,
         MembershipLedgerError::Conflict => RemoveSpaceMemberError::StateChanged,
         MembershipLedgerError::Corrupt { .. } | MembershipLedgerError::RecoveryRequired => {
-            RemoveSpaceMemberError::RecoveryRequired
+            RemoveSpaceMemberError::recovery_required()
         }
         MembershipLedgerError::Unavailable { .. } => RemoveSpaceMemberError::Unavailable,
     }
@@ -375,7 +375,7 @@ fn map_ledger_error(error: MembershipLedgerError) -> RemoveSpaceMemberError {
 fn map_signature_error(error: CurrentMemberSignatureError) -> RemoveSpaceMemberError {
     match error {
         CurrentMemberSignatureError::InvalidState { .. } => {
-            RemoveSpaceMemberError::RecoveryRequired
+            RemoveSpaceMemberError::recovery_required()
         }
         CurrentMemberSignatureError::Unavailable { .. }
         | CurrentMemberSignatureError::Repository(_) => RemoveSpaceMemberError::Unavailable,

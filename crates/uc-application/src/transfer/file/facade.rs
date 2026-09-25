@@ -170,6 +170,7 @@ impl FileTransferFacade {
             .file_size
             .map(i64::try_from)
             .transpose()
+            // TryFromIntError：目标分类完整表达数值范围不符。
             .map_err(|_| {
                 FileTransferApplicationError::Repository(anyhow::anyhow!(
                     "inbound file size exceeds the receiver projection range"

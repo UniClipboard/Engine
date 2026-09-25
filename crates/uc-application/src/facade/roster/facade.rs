@@ -98,7 +98,7 @@ impl MemberRosterFacade {
                     RosterError::MemberRepository(source)
                 }
                 QueryMemberRosterError::MemberScope { .. } => {
-                    RosterError::MembershipReconciliationUnavailable
+                    RosterError::membership_reconciliation_unavailable()
                 }
                 QueryMemberRosterError::LocalIdentity { source } => {
                     RosterError::LocalIdentity(source)
@@ -118,7 +118,7 @@ impl MemberRosterFacade {
             .peer_scope
             .snapshot()
             .await
-            .map_err(|_| RosterError::MembershipReconciliationUnavailable)?;
+            .map_err(RosterError::membership_reconciliation_unavailable_from)?;
         let local_fp = self
             .local_identity
             .get_current_fingerprint()

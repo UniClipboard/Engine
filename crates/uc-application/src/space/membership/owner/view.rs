@@ -109,7 +109,7 @@ impl MembershipView {
         let scope = space
             .ledger
             .scope()
-            .map_err(|_| CurrentSpaceMemberScopeError::RecoveryRequired)?;
+            .map_err(CurrentSpaceMemberScopeError::recovery_required_from)?;
         let mut usable_peer_device_ids = scope.usable_peer_device_ids;
         usable_peer_device_ids.sort();
         let mut paused_peer_devices: Vec<PausedSpaceMember> = scope

@@ -73,7 +73,10 @@ pub trait MembershipRecordStorePort: Send + Sync {
 #[derive(Debug, thiserror::Error)]
 pub enum MembershipEffectExecutionError {
     #[error("membership effect is temporarily unavailable")]
-    Deferred,
+    Deferred {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("membership effect state is corrupt")]
     Corrupt,
     #[error("membership effect dependency failed")]
@@ -81,6 +84,19 @@ pub enum MembershipEffectExecutionError {
         #[source]
         source: anyhow::Error,
     },
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl MembershipEffectExecutionError {
+    pub fn deferred() -> Self {
+        Self::Deferred { source: None }
+    }
+
+    pub fn deferred_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Deferred {
+            source: Some(source.into()),
+        }
+    }
 }
 
 /// 成员效果的第一步：维护成员资料。实现必须按事件幂等。

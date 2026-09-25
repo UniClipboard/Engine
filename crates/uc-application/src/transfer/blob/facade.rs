@@ -580,6 +580,7 @@ impl BlobTransferFacade {
         if let Some(ctx) = command.transfer_context.as_ref() {
             self.inflight_fetches
                 .lock()
+                // 锁中毒：PoisonError 持有 guard，不能作为来源保存。
                 .map_err(|_| {
                     BlobTransferError::Fetch(anyhow::anyhow!(
                         "in-flight fetch registry is poisoned"
@@ -610,6 +611,7 @@ impl BlobTransferFacade {
         if let Some(ctx) = command.transfer_context.as_ref() {
             self.inflight_fetches
                 .lock()
+                // 锁中毒：PoisonError 持有 guard，不能作为来源保存。
                 .map_err(|_| {
                     BlobTransferError::Fetch(anyhow::anyhow!(
                         "in-flight fetch registry is poisoned"
@@ -732,6 +734,7 @@ impl BlobTransferFacade {
         if let Some(ctx) = command.transfer_context.as_ref() {
             self.inflight_fetches
                 .lock()
+                // 锁中毒：PoisonError 持有 guard，不能作为来源保存。
                 .map_err(|_| {
                     BlobTransferError::Fetch(anyhow::anyhow!(
                         "in-flight fetch registry is poisoned"
@@ -772,6 +775,7 @@ impl BlobTransferFacade {
         if let Some(ctx) = command.transfer_context.as_ref() {
             self.inflight_fetches
                 .lock()
+                // 锁中毒：PoisonError 持有 guard，不能作为来源保存。
                 .map_err(|_| {
                     BlobTransferError::Fetch(anyhow::anyhow!(
                         "in-flight fetch registry is poisoned"

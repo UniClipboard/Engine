@@ -102,7 +102,11 @@ fn map_membership_initialization_error(
     error: MembershipInitializationError,
 ) -> SpaceMembershipRebuildError {
     match error {
-        MembershipInitializationError::Unavailable => SpaceMembershipRebuildError::Unavailable,
-        MembershipInitializationError::Inconsistent => SpaceMembershipRebuildError::Inconsistent,
+        MembershipInitializationError::Unavailable { .. } => {
+            SpaceMembershipRebuildError::Unavailable
+        }
+        MembershipInitializationError::Inconsistent { .. } => {
+            SpaceMembershipRebuildError::Inconsistent
+        }
     }
 }

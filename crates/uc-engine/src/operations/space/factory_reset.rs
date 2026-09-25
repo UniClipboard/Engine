@@ -22,8 +22,8 @@ pub async fn execute_factory_reset_space(
 pub(crate) fn map_profile_factory_reset_error(error: ProfileFactoryResetError) -> EngineError {
     let code = match error {
         ProfileFactoryResetError::StopRuntime { .. } => FACTORY_RESET_UNAVAILABLE_CODE,
-        ProfileFactoryResetError::WipeKeys => FACTORY_RESET_KEY_MATERIAL_FAILED_CODE,
-        ProfileFactoryResetError::ClearState => FACTORY_RESET_STORAGE_FAILED_CODE,
+        ProfileFactoryResetError::WipeKeys { .. } => FACTORY_RESET_KEY_MATERIAL_FAILED_CODE,
+        ProfileFactoryResetError::ClearState { .. } => FACTORY_RESET_STORAGE_FAILED_CODE,
         ProfileFactoryResetError::Lifecycle(_)
         | ProfileFactoryResetError::Repository(_)
         | ProfileFactoryResetError::LifecycleMissing => FACTORY_RESET_FAILED_CODE,
@@ -38,8 +38,8 @@ mod tests {
 
     #[test]
     fn factory_reset_failures_keep_distinct_stable_codes() {
-        let key_material = map_profile_factory_reset_error(ProfileFactoryResetError::WipeKeys);
-        let storage = map_profile_factory_reset_error(ProfileFactoryResetError::ClearState);
+        let key_material = map_profile_factory_reset_error(ProfileFactoryResetError::wipe_keys());
+        let storage = map_profile_factory_reset_error(ProfileFactoryResetError::clear_state());
         let internal = map_profile_factory_reset_error(ProfileFactoryResetError::Repository(
             uc_application::deps::ProfileLifecycleRepositoryError::corrupt(),
         ));

@@ -83,6 +83,7 @@ impl SpaceMembershipMaintenanceActivity {
             .send(RuntimeCommand::Deadline(
                 tokio::time::Instant::now() + remaining,
             ))
+            // 通道发送失败携带待发负载，不作为来源保存。
             .map_err(|_| self.closed_error())
     }
 
@@ -94,7 +95,9 @@ impl SpaceMembershipMaintenanceActivity {
         let (completed, receiver) = oneshot::channel();
         self.commands
             .send(command(completed))
+            // 通道发送失败携带待发负载，不作为来源保存。
             .map_err(|_| self.closed_error())?;
+        // oneshot RecvError 只表示发送端已丢弃，没有其他诊断信息。
         receiver.await.map_err(|_| self.closed_error())
     }
 

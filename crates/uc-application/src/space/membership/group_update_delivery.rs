@@ -75,7 +75,7 @@ fn map_query_error(error: KeyEpochError) -> QueryDeviceTrustError {
         | KeyEpochError::SpaceNotReady => QueryDeviceTrustError::Dependency {
             source: anyhow::Error::new(error),
         },
-        _ => QueryDeviceTrustError::RecoveryRequired,
+        _ => QueryDeviceTrustError::recovery_required(),
     }
 }
 

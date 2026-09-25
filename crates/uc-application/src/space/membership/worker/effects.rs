@@ -36,7 +36,7 @@ impl ActivateMembershipEffectPort for RePairingAwareMembershipActivation {
             self.re_pairing
                 .resolve_after_successful_pairing()
                 .await
-                .map_err(|_| MembershipEffectExecutionError::Deferred)?;
+                .map_err(MembershipEffectExecutionError::deferred_from)?;
         }
         Ok(())
     }

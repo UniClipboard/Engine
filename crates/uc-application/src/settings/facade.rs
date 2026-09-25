@@ -101,7 +101,7 @@ impl From<RelayCredentialsError> for SettingsFacadeError {
             RelayCredentialsError::InvalidToken => Self::RelayCredentialInvalidToken,
             RelayCredentialsError::InvalidTarget => Self::RelayCredentialInvalidTarget,
             RelayCredentialsError::Storage(_) => Self::RelayCredentialStorage,
-            RelayCredentialsError::Corrupt => Self::RelayCredentialCorrupt,
+            RelayCredentialsError::Corrupt { .. } => Self::RelayCredentialCorrupt,
         }
     }
 }

@@ -22,8 +22,37 @@ pub enum JoinSpaceError {
     InvalidInvitation,
 
     #[error("the previous local join cannot be superseded")]
-    PreviousJoinCannotBeSuperseded,
+    PreviousJoinCannotBeSuperseded {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
 
     #[error("the generated join material is invalid")]
-    InvalidStartMaterial,
+    InvalidStartMaterial {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl JoinSpaceError {
+    pub fn previous_join_cannot_be_superseded() -> Self {
+        Self::PreviousJoinCannotBeSuperseded { source: None }
+    }
+
+    pub fn previous_join_cannot_be_superseded_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::PreviousJoinCannotBeSuperseded {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn invalid_start_material() -> Self {
+        Self::InvalidStartMaterial { source: None }
+    }
+
+    pub fn invalid_start_material_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::InvalidStartMaterial {
+            source: Some(source.into()),
+        }
+    }
 }

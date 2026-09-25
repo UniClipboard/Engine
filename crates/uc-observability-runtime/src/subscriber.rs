@@ -17,6 +17,7 @@ pub(crate) fn local_health_layer(
     directory: &Path,
     health_accepting: Arc<AtomicBool>,
 ) -> Result<(RuntimeLayer, Arc<LocalFileRuntime>), ()> {
+    // 观测运行时自身初始化失败只降级为 Unavailable 状态；此时日志通道尚未建立，来源无处记录。
     let local_file = Arc::new(LocalFileRuntime::new(directory).map_err(|_| ())?);
     let layer = tracing_subscriber::fmt::layer()
         .json()

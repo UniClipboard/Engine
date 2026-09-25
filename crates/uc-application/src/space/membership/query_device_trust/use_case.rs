@@ -135,7 +135,7 @@ impl QueryDeviceTrustUseCase {
                     .insert(observation.target, observation.status)
                     .is_some()
             {
-                return Err(QueryDeviceTrustError::RecoveryRequired);
+                return Err(QueryDeviceTrustError::recovery_required());
             }
         }
         let security_updates = self
@@ -145,7 +145,7 @@ impl QueryDeviceTrustUseCase {
             .map_err(|error| TrustDependency::SecurityUpdateStatus.diagnose(error))?;
         let presented = ledger
             .present(security_delivery(security_updates))
-            .map_err(|_| QueryDeviceTrustError::RecoveryRequired)?;
+            .map_err(QueryDeviceTrustError::recovery_required_from)?;
         let device_ids: Vec<_> = presented
             .devices
             .iter()
@@ -163,7 +163,7 @@ impl QueryDeviceTrustUseCase {
                     .insert(observation.device_id, observation)
                     .is_some()
             {
-                return Err(QueryDeviceTrustError::RecoveryRequired);
+                return Err(QueryDeviceTrustError::recovery_required());
             }
         }
         let mut devices = Vec::with_capacity(presented.devices.len());
@@ -255,7 +255,7 @@ impl QueryDeviceTrustUseCase {
             {
                 let expected = history
                     .admission_facts_for(local_member_instance)
-                    .ok_or(QueryDeviceTrustError::RecoveryRequired)?;
+                    .ok_or_else(QueryDeviceTrustError::recovery_required)?;
                 let mismatch = current != expected.identity_fingerprint;
                 if mismatch {
                     space_device_update = SpaceDeviceUpdateStatus::needs_attention_without_recovery(
@@ -360,21 +360,21 @@ fn pending_change(
     };
     let event = history
         .event(change_id)
-        .ok_or(QueryDeviceTrustError::RecoveryRequired)?;
+        .ok_or_else(QueryDeviceTrustError::recovery_required)?;
     let target = match &event.operation {
         MembershipOperationV2::RemoveDevice { member } => *member,
         MembershipOperationV2::AddDevice { .. } => {
-            return Err(QueryDeviceTrustError::RecoveryRequired);
+            return Err(QueryDeviceTrustError::recovery_required());
         }
     };
     let proposed_by_device_id = history
         .admission_facts_for(event.author_member_instance_id)
         .map(|facts| facts.device_id.clone())
-        .ok_or(QueryDeviceTrustError::RecoveryRequired)?;
+        .ok_or_else(QueryDeviceTrustError::recovery_required)?;
     let target_device_id = history
         .admission_facts_for(target)
         .map(|facts| facts.device_id.clone())
-        .ok_or(QueryDeviceTrustError::RecoveryRequired)?;
+        .ok_or_else(QueryDeviceTrustError::recovery_required)?;
     let impact = |apply: bool| -> Result<DeviceTrustImpact, QueryDeviceTrustError> {
         let members = if apply {
             history.effective_members_at(change_id)
@@ -395,7 +395,7 @@ fn pending_change(
                         },
                         active: active_members.contains(&member),
                     })
-                    .ok_or(QueryDeviceTrustError::RecoveryRequired)
+                    .ok_or_else(QueryDeviceTrustError::recovery_required)
             })
             .collect::<Result<Vec<_>, _>>()?;
         member_devices.sort_by(|a, b| a.device.device_id.cmp(&b.device.device_id));
@@ -461,7 +461,7 @@ fn pending_change(
                     .iter()
                     .find(|device| device.is_local)
                     .map(|device| device.membership)
-                    .ok_or(QueryDeviceTrustError::RecoveryRequired)?
+                    .ok_or_else(QueryDeviceTrustError::recovery_required)?
             },
             requires_rejoin_device_ids: if apply {
                 vec![target_device_id.clone()]
@@ -483,7 +483,7 @@ fn pending_change(
         explanation: uc_core::membership::MembershipConflictExplanation::pending_removal(
             history, change_id,
         )
-        .map_err(|_| QueryDeviceTrustError::RecoveryRequired)?,
+        .map_err(QueryDeviceTrustError::recovery_required_from)?,
     }))
 }
 
