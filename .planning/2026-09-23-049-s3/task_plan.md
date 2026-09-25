@@ -113,6 +113,24 @@ Steps:
   normal ~56 s), run 2 51/51; delivery checks pass. Nothing committed yet.
 - **Status:** complete (awaiting commit approval)
 
+### Phase H — Plan 049 S5 inbound access  ← CURRENT (2026-09-25)
+Findings/decisions (user confirmed):
+- "Departing peer only receives the exact removal notice" is the OUTBOUND direction (done in S3). Inbound stays:
+  ledger-gated protocols reject departing peers; identity-only protocols (history exchange, branch recovery) still
+  identify them (removed devices' decisions must still be recorded).
+- Identity candidates = option A: effective members + departing peers + local device (exactly the projected
+  member table), so rejection classification is unchanged.
+- Five control DB swap paths (joiner, branch, device reset, fresh-join terminate, factory reset); only the first two
+  reload the Owner. Replace explicit reload with a pool generation counter checked on every Owner read.
+Steps:
+- [x] H1 DbPool generation + DbExecutor::database_generation
+- [x] H2 MembershipRecordStorePort::generation; Owner auto-reload; drop reload()
+- [x] H3 PeerAccess (kept the ADR name; A3 asserts it) (deferred owner binding) + PeerIdentityDirectoryPort
+- [x] H4 Infra resolver/gate read the directory; Engine wiring
+- [x] H5 Tests (owner generation, access/directory, removal consistency), e2e group, docs
+- Results: units 3025/3025; A2/A3 include-ignored 1/1, 5/5; membership-e2e 51/51; delivery checks pass.
+- **Status:** complete (awaiting commit approval)
+
 ## Decisions Made
 | Decision | Rationale |
 |----------|-----------|

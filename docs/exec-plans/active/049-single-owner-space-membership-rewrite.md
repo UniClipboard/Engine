@@ -2,7 +2,7 @@
 
 ## 状态与完整责任
 
-- **状态**：实施中；S0–S4 与 S3.a 已完成（见“实施记录”），下一步 S5。
+- **状态**：实施中；S0–S5 与 S3.a 已完成（见“实施记录”），下一步 S6。
 - **日期**：2026-09-23。
 - **依据**：[ADR-027](../../design-docs/decisions/027-single-owner-space-membership-state.md)；2026-09-23 双 Desktop
   profile 配对后移除，移除方设备不消失、被移除方永久“正在更新空间设备状态”的诊断（结论见 ADR-027 背景）。
@@ -221,7 +221,9 @@ S3 完成时仍有以下失败，均在 S3 之前的基线（`cd9537b6`）上同
 ### S5 入站访问
 
 - `InboundPeerGate` 的身份解析与授权改读 `PeerAccess` 快照；`PeerIdentityResolver` 不再依赖成员表。
-- 正在离开的对端只允许接收精确移除通知。
+  解析候选与成员读模型相同，拒绝分类不变。
+- 正在离开的对端只接收精确移除通知：指出站方向，S3 已实现；入站方向保持查账本协议拒绝、只核对身份的
+  协议照常识别（核实结论见“实施记录”S5）。
 - **验证**：入站准入计划的全部测试不改断言通过；新增用例证明移除提交后、投影更新前，入站判定已与账本一致。
 
 ### S6 删除与文档
@@ -510,6 +512,48 @@ S3 已完成（2026-09-24 用户确认）；剩余失败的诊断转入 S3.a。S
 | `cargo nextest run -p uc-core -p uc-application -p uc-infra --locked` | 2591 项全部通过 |
 | `cargo nextest run -p uc-engine --locked`（含 `public_contract`、宿主契约） | 358 项全部通过 |
 | `bash scripts/testing/run-test-group.sh membership-e2e` | 第一次 50/51：`f2_concurrent_leaf_removals_resolve_to_selected_branch` 在负载下 73.7 秒未清除分叉待选（快照断言超时）；单独运行 3/3 通过，耗时 56.2/56.2/57.6 秒，与改动前保留产物中的 55.7/58.6 秒一致。第二次全组 51/51 |
+| `cargo check -p uc-infra --features lan-compat --all-targets --locked` | 通过 |
+| `cargo metadata --locked`、`cargo check --workspace --all-targets --locked`、`cargo fmt --all -- --check`、`check-rust-style.mjs`、`check-engine-repository.mjs`、`git diff --check` | 通过（`uc-ohos-napi` 测试既有未使用导入告警，非本次改动） |
+| 实体双 Desktop 复现场景 | 跳过（需另行授权） |
+
+### S5（2026-09-25，分支 `hp/uni/t-0010-android`）
+
+开工前核实（用户确认）：
+
+- 移除通知由移除方经成员历史协议主动出站投递（`RestrictedEventV3`，同一流上收 Ack），正在离开的对端
+  不在普通成员范围内，只收到这一条通知；这部分 S3 已实现。入站方向无需新增放行规则：查账本的协议
+  （在线确认、剪贴板、成员证明、拉取、传输进度）已拒绝它；只核对身份的成员历史交换与分支恢复照常
+  识别它，历史分页一律 `Invalid`，被移除设备送来的决定仍只贡献已验证历史，不能收紧。
+- 身份解析候选取与成员读模型相同的一组设备（方案 A），不扩大到历史中全部有准入事实的设备，入站准入计划
+  的拒绝分类不变。
+
+完成内容：
+
+- Application：`PeerAccess` 读取 Owner 发布的状态，同时实现 `PeerAdmissionPort` 与新增的
+  `PeerIdentityDirectoryPort`（候选由成员读模型计划得出）。网络入口先于 Space 应用组装，因此 Engine 先构造
+  未绑定的 `PeerAccess`，`SpaceApplication` 建立 Owner 后绑定；未绑定时按暂不可用拒绝。此前 `PeerAccess`
+  每次入站都从数据库加载、解码并校验整条记录。
+- Owner 数据库代号：替换控制库的路径共五条（加入方激活、分叉换组、设备管理重置、取消加入改用临时库、
+  恢复出厂改用临时库），S4 只为前两条显式重新加载。改为连接池每次替换数据库时推进代号，成员记录存储端口
+  暴露代号，Owner 的已发布状态带代号、代号变化即重新加载并通知读取方；删除 S4 的 `reload`。否则入站判定
+  改读 Owner 后，恢复出厂等路径会在重启前继续放行旧成员。
+- Infra：`PeerIdentityResolver` 与九个入站入口、mDNS 连接提示改读身份目录，不再依赖 `MemberRepositoryPort`。
+  测试以内存成员表充当身份目录（`member_table_directory`、`member_table_identity_directory!`），种子数据与断言
+  不变。
+- 测试：Owner 在数据库替换后重新加载并通知、同代号不重复加载；身份目录覆盖本机与当前成员、正在离开的
+  对端在离开窗口结束后才移出；未绑定时拒绝；移除提交后入站判定立即拒绝而身份仍可识别（不依赖读模型）；
+  连接池代号在替换与改用临时库时改变、替换失败时不变。A3 新增“入站身份不读取成员读模型”的结构检查。
+- 入站准入测试的一处签名细节调整：B1 `resolution_failures_keep_their_typed_source` 的读取失败来源由
+  `MembershipError` 变为身份目录的 `MembershipLedgerError`，原始 `MembershipError` 保留在其来源链中；断言改为
+  沿来源链查找，语义不变。A3 的 `PeerAccess` 断言因类型沿用该名称无需修改。
+
+验证结果：
+
+| 检查 | 结果 |
+| --- | --- |
+| `cargo nextest run -p uc-core -p uc-application -p uc-infra -p uc-observability-contract -p uc-engine --locked` | 3025 项全部通过 |
+| `cargo test -p uc-infra --locked --test inbound_peer_rejection_diagnostics --test inbound_peer_single_owner -- --include-ignored` | 1/1、5/5，无 ignored 项 |
+| `bash scripts/testing/run-test-group.sh membership-e2e` | 51/51 |
 | `cargo check -p uc-infra --features lan-compat --all-targets --locked` | 通过 |
 | `cargo metadata --locked`、`cargo check --workspace --all-targets --locked`、`cargo fmt --all -- --check`、`check-rust-style.mjs`、`check-engine-repository.mjs`、`git diff --check` | 通过（`uc-ohos-napi` 测试既有未使用导入告警，非本次改动） |
 | 实体双 Desktop 复现场景 | 跳过（需另行授权） |
