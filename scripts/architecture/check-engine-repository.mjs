@@ -2064,6 +2064,22 @@ function checkMembershipRecordCommitOwnership(sources) {
       'only MembershipOwner may construct a membership record commit'
     )
   }
+  // 暂存控制世代的成员记录同样只由 Owner 形成，持久层只能原样写入。
+  if (/StagedMembershipRecord\s*\{/.test(sources.membershipRecordNonOwnerProduction)) {
+    addProblem(
+      problems,
+      'membership record commit ownership',
+      'only MembershipOwner may form a staged membership record'
+    )
+  }
+  // Infra 只编解码成员记录，不建立或推进成员账本，也不拼装成员记录。
+  if (/MembershipLedger::(?:start|apply)\b|LedgerInput::|SpaceMembershipRecord\s*\{/.test(sources.membershipRecordInfraOutsideCodec)) {
+    addProblem(
+      problems,
+      'membership record commit ownership',
+      'Infra must not build or advance membership records outside the record codec'
+    )
+  }
   return problems
 }
 
@@ -2107,6 +2123,13 @@ function repositorySources() {
       productionSources('crates/uc-engine/src'),
       readSourceTree('bindings'),
     ].join('\n'),
+    membershipRecordInfraOutsideCodec: productionSources('crates/uc-infra/src', [
+      'crates/uc-infra/src/space/membership_record/codec.rs',
+      ...readdirSync(join(REPOSITORY_ROOT, 'crates/uc-infra/src/space/membership_record/codec')).map(
+        name => `crates/uc-infra/src/space/membership_record/codec/${name}`
+      ),
+      'crates/uc-infra/src/space/membership_record/test_support.rs',
+    ]),
     membershipEvidenceOwner: read('crates/uc-application/src/space/membership/reconcile_history_evidence/use_case.rs'),
     retiredMembershipPersistencePathPresent: [
       'crates/uc-infra/src/db/repositories/membership_candidate_repo.rs',
@@ -2336,6 +2359,14 @@ function runNegativeFixtures(metadata, sources) {
   expectRejected('membership record commit outside the owner', (_changed, changedSources) => {
     changedSources.membershipRecordNonOwnerProduction +=
       '\nasync fn bypass(store: &dyn MembershipRecordStorePort, replacement: MembershipRecord) { store.commit(MembershipRecordCommit { expected_revision: 0, replacement, projection: None }).await; }\n'
+  }, metadata, sources)
+  expectRejected('staged membership record outside the owner', (_changed, changedSources) => {
+    changedSources.membershipRecordNonOwnerProduction +=
+      '\nfn forge(replacement: MembershipRecord, projection: MembershipProjectionPlan) -> StagedMembershipRecord { StagedMembershipRecord { replacement, projection } }\n'
+  }, metadata, sources)
+  expectRejected('membership ledger advanced in Infra', (_changed, changedSources) => {
+    changedSources.membershipRecordInfraOutsideCodec +=
+      '\nfn rewrite(ledger: MembershipLedger, history: VersionedMembershipHistory) { let _ = ledger.apply(LedgerInput::BranchRecovered { history }, 0); }\n'
   }, metadata, sources)
   expectRejected('observability mirror bundle', (_changed, changedSources) => {
     changedSources.engineObservability += '\nstruct ObservedAdmissionPorts;\n'
