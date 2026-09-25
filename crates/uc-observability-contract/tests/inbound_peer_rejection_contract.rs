@@ -6,10 +6,9 @@ use uc_observability_contract::diagnostics::connectivity::decode_local_record;
 
 const EVENT: &str = "peer.inbound.rejected";
 
-const PROTOCOLS: [&str; 8] = [
+const PROTOCOLS: [&str; 7] = [
     "presence",
     "membership_history",
-    "membership_attestation",
     "membership_branch_recovery",
     "clipboard",
     "active_clipboard",

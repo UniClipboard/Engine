@@ -198,10 +198,6 @@ impl CurrentMembershipAnnouncementPort for PassivePorts {
     ) -> Result<CurrentMembershipAnnouncementMaterial, CurrentMembershipIdentityError> {
         unreachable!()
     }
-
-    async fn wait_for_announcement_change(&self) -> Result<(), CurrentMembershipIdentityError> {
-        unreachable!()
-    }
 }
 
 impl uc_core::ports::DeviceIdentityPort for PassivePorts {

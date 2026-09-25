@@ -2151,7 +2151,6 @@ function repositorySources() {
       'clipboard_dispatch_adapter.rs',
       'connection_channel_adapter.rs',
       'group_update_adapter.rs',
-      'membership_attestation_adapter.rs',
       'membership_branch_recovery_adapter.rs',
       'membership_history_exchange_adapter.rs',
       'peer_reachability_adapter.rs',

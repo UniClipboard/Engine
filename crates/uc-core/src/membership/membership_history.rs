@@ -1,17 +1,14 @@
 //! Shared identifiers and messages for the current membership history.
 
-use std::collections::BTreeSet;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
-
-use crate::ids::DeviceId;
 
 use super::versioned_membership_history::{
     BaseMembershipHistoryPosition, MembershipDecisionV2, MembershipEventV2,
     MembershipHistoryPageV2, MembershipHistorySuffixPageV4,
 };
-use super::{AdmissionChangeFacts, MemberInstanceId};
+use super::AdmissionChangeFacts;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct MembershipEventId([u8; 32]);
@@ -81,34 +78,6 @@ pub enum MembershipHistoryRelationship {
     PendingRemovalDecision,
     Diverged,
     Invalid,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingRemovalFacts {
-    pub removal_event_id: MembershipEventId,
-    pub proposed_by_device_id: DeviceId,
-    pub target_device_ids: Vec<DeviceId>,
-    target_members: BTreeSet<MemberInstanceId>,
-}
-
-impl PendingRemovalFacts {
-    pub fn new(
-        removal_event_id: MembershipEventId,
-        proposed_by_device_id: DeviceId,
-        target_device_ids: Vec<DeviceId>,
-        target_members: BTreeSet<MemberInstanceId>,
-    ) -> Self {
-        Self {
-            removal_event_id,
-            proposed_by_device_id,
-            target_device_ids,
-            target_members,
-        }
-    }
-
-    pub fn includes_member(&self, member: MemberInstanceId) -> bool {
-        self.target_members.contains(&member)
-    }
 }
 
 /// Versioned reconciliation messages carried on the authenticated member channel.

@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 pub enum InboundPeerProtocol {
     Presence,
     MembershipHistory,
-    MembershipAttestation,
     MembershipBranchRecovery,
     Clipboard,
     ActiveClipboard,

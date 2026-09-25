@@ -55,13 +55,12 @@ fn matching_brace(text: &str, open: usize) -> usize {
     text.len() - 1
 }
 
-const INBOUND_HANDLERS: [&str; 9] = [
+const INBOUND_HANDLERS: [&str; 8] = [
     "crates/uc-infra/src/network/iroh/peer_reachability_adapter.rs",
     "crates/uc-infra/src/network/iroh/clipboard_receiver_adapter.rs",
     "crates/uc-infra/src/network/iroh/active_clipboard/receiver_adapter.rs",
     "crates/uc-infra/src/network/iroh/active_clipboard/pull_serve_adapter.rs",
     "crates/uc-infra/src/network/iroh/transfer_progress_adapter.rs",
-    "crates/uc-infra/src/network/iroh/membership_attestation_adapter.rs",
     "crates/uc-infra/src/network/iroh/membership_branch_recovery_adapter.rs",
     "crates/uc-infra/src/network/iroh/membership_history_exchange_adapter.rs",
     "crates/uc-infra/src/network/iroh/node.rs",

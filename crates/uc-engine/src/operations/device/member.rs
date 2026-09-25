@@ -12,8 +12,6 @@ use uc_application::facade::{
     PairingConfirmationStatus, RemoveSpaceMemberError, RosterError, SpaceProtectionModeView,
     SpaceProtectionView,
 };
-#[cfg(test)]
-use uc_core::membership::WorkspaceSnapshot;
 use uc_core::ports::ReachabilityState;
 
 use crate::{
@@ -29,11 +27,6 @@ use crate::{
     OperationResult, PairingConfirmationSummary, PendingInboundMemberSummary,
     QueryMemberSyncPreferencesInput, RemoveMemberInput, SpaceProtectionModeSummary,
     SpaceProtectionSummary, UpdateMemberSyncPreferencesInput,
-};
-#[cfg(test)]
-use crate::{
-    WorkspaceConvergenceFailureCategorySummary, WorkspaceConvergencePhaseSummary,
-    WorkspaceConvergenceSummary,
 };
 
 pub async fn execute_list_devices(facade: &AppFacade) -> Result<OperationResult, EngineError> {
@@ -160,78 +153,6 @@ fn space_protection_summary(result: SpaceProtectionView) -> SpaceProtectionSumma
         })
         .collect();
     SpaceProtectionSummary { mode, members }
-}
-
-#[cfg(test)]
-pub(crate) fn workspace_convergence_summary(
-    snapshot: WorkspaceSnapshot,
-) -> WorkspaceConvergenceSummary {
-    WorkspaceConvergenceSummary {
-        phase: match snapshot.phase {
-            uc_core::membership::WorkspacePhase::LocallyApplied => {
-                WorkspaceConvergencePhaseSummary::LocallyApplied
-            }
-            uc_core::membership::WorkspacePhase::Converging => {
-                WorkspaceConvergencePhaseSummary::Converging
-            }
-            uc_core::membership::WorkspacePhase::Complete => {
-                WorkspaceConvergencePhaseSummary::Complete
-            }
-            uc_core::membership::WorkspacePhase::RecoveryRequired => {
-                WorkspaceConvergencePhaseSummary::RecoveryRequired
-            }
-        },
-        revision: snapshot.revision,
-        history_event_count: u64::try_from(snapshot.history_event_count).unwrap_or(u64::MAX),
-        effective_member_count: u64::try_from(snapshot.effective_member_count).unwrap_or(u64::MAX),
-        pending_removal_decision_device_ids: snapshot
-            .pending_removal_decision_device_ids
-            .into_iter()
-            .map(|device_id| device_id.to_string())
-            .collect(),
-        pending_removal_decision_event_id: snapshot
-            .pending_removal_decision_event_id
-            .map(|event_id| event_id.to_hex()),
-        diverged_peer_device_ids: snapshot
-            .diverged_peer_device_ids
-            .into_iter()
-            .map(|device_id| device_id.to_string())
-            .collect(),
-        upgrade_required_peer_device_ids: snapshot
-            .upgrade_required_peer_device_ids
-            .into_iter()
-            .map(|device_id| device_id.to_string())
-            .collect(),
-        convergence_digest: snapshot.convergence_digest.map(|digest| digest.to_string()),
-        removed: snapshot.removed,
-        updated_at_ms: snapshot.updated_at_ms,
-        failure_category: snapshot.failure_category.map(|category| match category {
-            uc_core::membership::WorkspaceFailureCategory::SpaceMismatch => {
-                WorkspaceConvergenceFailureCategorySummary::SpaceMismatch
-            }
-            uc_core::membership::WorkspaceFailureCategory::ContinuityGap => {
-                WorkspaceConvergenceFailureCategorySummary::ContinuityGap
-            }
-            uc_core::membership::WorkspaceFailureCategory::IdentityMismatch => {
-                WorkspaceConvergenceFailureCategorySummary::IdentityMismatch
-            }
-            uc_core::membership::WorkspaceFailureCategory::DigestConflict => {
-                WorkspaceConvergenceFailureCategorySummary::DigestConflict
-            }
-            uc_core::membership::WorkspaceFailureCategory::Unauthorized => {
-                WorkspaceConvergenceFailureCategorySummary::Unauthorized
-            }
-            uc_core::membership::WorkspaceFailureCategory::VersionIncompatible => {
-                WorkspaceConvergenceFailureCategorySummary::VersionIncompatible
-            }
-            uc_core::membership::WorkspaceFailureCategory::NoEffectiveMembers => {
-                WorkspaceConvergenceFailureCategorySummary::NoEffectiveMembers
-            }
-            uc_core::membership::WorkspaceFailureCategory::Storage => {
-                WorkspaceConvergenceFailureCategorySummary::Storage
-            }
-        }),
-    }
 }
 
 pub(crate) fn device_trust_snapshot(snapshot: DeviceTrustStatus) -> DeviceTrustSnapshotSummary {
@@ -733,7 +654,7 @@ fn map_remove_space_member_error(error: RemoveSpaceMemberError) -> EngineError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uc_core::membership::{MembershipError, WorkspaceFailureCategory, WorkspacePhase};
+    use uc_core::membership::MembershipError;
 
     fn handoff_pending_removal(includes_local_device: bool) -> DeviceTrustStatus {
         use uc_application::deps::SpaceMemberPauseReason;
@@ -1061,48 +982,5 @@ mod tests {
         assert_eq!(error.code(), QUERY_WORKSPACE_CONVERGENCE_FAILED_CODE);
         assert_eq!(error.category(), EngineErrorCategory::InvalidState);
         assert!(error.is_retryable());
-    }
-
-    #[test]
-    fn workspace_convergence_snapshot_is_preserved_in_the_stable_result() {
-        let summary = workspace_convergence_summary(WorkspaceSnapshot {
-            phase: WorkspacePhase::LocallyApplied,
-            revision: 3,
-            history_event_count: 1,
-            effective_member_count: 2,
-            pending_removal_decision_device_ids: vec![uc_core::ids::DeviceId::new("device-c")],
-            pending_removal_decision_event_id: Some(
-                uc_core::membership::MembershipEventId::from_hex(
-                    "0101010101010101010101010101010101010101010101010101010101010101",
-                )
-                .unwrap(),
-            ),
-            diverged_peer_device_ids: vec![uc_core::ids::DeviceId::new("device-d")],
-            upgrade_required_peer_device_ids: vec![uc_core::ids::DeviceId::new("device-e")],
-            convergence_digest: None,
-            removed: false,
-            updated_at_ms: 123,
-            failure_category: Some(WorkspaceFailureCategory::Storage),
-        });
-
-        assert_eq!(
-            summary,
-            WorkspaceConvergenceSummary {
-                phase: WorkspaceConvergencePhaseSummary::LocallyApplied,
-                revision: 3,
-                history_event_count: 1,
-                effective_member_count: 2,
-                pending_removal_decision_device_ids: vec!["device-c".to_owned()],
-                pending_removal_decision_event_id: Some(
-                    "0101010101010101010101010101010101010101010101010101010101010101".to_owned(),
-                ),
-                diverged_peer_device_ids: vec!["device-d".to_owned()],
-                upgrade_required_peer_device_ids: vec!["device-e".to_owned()],
-                convergence_digest: None,
-                removed: false,
-                updated_at_ms: 123,
-                failure_category: Some(WorkspaceConvergenceFailureCategorySummary::Storage),
-            }
-        );
     }
 }

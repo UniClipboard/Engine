@@ -1,70 +1,24 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use uc_application::deps::{
-    ApplyMembershipSecurityPort, CurrentMemberSignaturePort, MembershipEffectExecutionError,
-};
+use uc_application::deps::{ApplyMembershipSecurityPort, MembershipEffectExecutionError};
 use uc_core::membership::{
     GroupRevocationPort, MemberEffectKind, MemberEffectMaterial, MembershipEventV2,
-    MembershipOperationV2, MembershipSecurityState, MembershipSecurityUpdateError,
-    MembershipSecurityUpdatePort, UnfinishedMemberEffect,
+    MembershipOperationV2, UnfinishedMemberEffect,
 };
 use uc_core::ports::ClockPort;
 
-use super::session::InMemorySession;
-
 pub struct DefaultMembershipSecurityUpdateAdapter {
-    session: Arc<InMemorySession>,
-    signatures: Arc<dyn CurrentMemberSignaturePort>,
     group_updates: Arc<dyn GroupRevocationPort>,
     clock: Arc<dyn ClockPort>,
 }
 
 impl DefaultMembershipSecurityUpdateAdapter {
-    pub fn new(
-        session: Arc<InMemorySession>,
-        signatures: Arc<dyn CurrentMemberSignaturePort>,
-        group_updates: Arc<dyn GroupRevocationPort>,
-        clock: Arc<dyn ClockPort>,
-    ) -> Self {
+    pub fn new(group_updates: Arc<dyn GroupRevocationPort>, clock: Arc<dyn ClockPort>) -> Self {
         Self {
-            session,
-            signatures,
             group_updates,
             clock,
         }
-    }
-}
-
-#[async_trait]
-impl MembershipSecurityUpdatePort for DefaultMembershipSecurityUpdateAdapter {
-    async fn current_state(
-        &self,
-    ) -> Result<MembershipSecurityState, MembershipSecurityUpdateError> {
-        let space_id = self
-            .session
-            .current_space_id()
-            .map_err(MembershipSecurityUpdateError::unavailable_from)?;
-        let group_epoch = self
-            .signatures
-            .current_member_epoch()
-            .await
-            .map_err(|error| MembershipSecurityUpdateError::Repository(Box::new(error)))?;
-        Ok(MembershipSecurityState {
-            space_id,
-            group_epoch,
-        })
-    }
-
-    async fn apply_group_epoch_update(
-        &self,
-        payload: &[u8],
-    ) -> Result<u64, MembershipSecurityUpdateError> {
-        self.group_updates
-            .apply_group_epoch_update(payload)
-            .await
-            .map(|epoch| epoch.value())
-            .map_err(|error| MembershipSecurityUpdateError::Repository(Box::new(error)))
     }
 }
 

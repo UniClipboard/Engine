@@ -1,11 +1,11 @@
 mod active_runtime_layout;
 mod active_space_generation_manifest;
 mod admission;
+mod admission_change_facts;
 mod admission_content_key_catalog;
 mod bootstrap;
 mod cross_space_transition;
 mod error;
-mod gossip;
 mod ledger;
 mod member;
 mod member_instance;
@@ -20,13 +20,13 @@ mod revocation;
 mod settlement_window;
 mod space_admission;
 mod versioned_membership_history;
-mod workspace_convergence;
 
 pub use active_runtime_layout::{ActiveRuntimeLayout, ActiveRuntimeLayoutError};
 pub use active_space_generation_manifest::{
     ActiveSpaceGenerationManifestV2, ACTIVE_SPACE_GENERATION_MANIFEST_FORMAT_V2,
 };
 pub use admission::{PeerAdmissionError, PeerAdmissionPort};
+pub use admission_change_facts::AdmissionChangeFacts;
 pub use admission_content_key_catalog::{
     AdmissionContentKeyCatalogV1, AdmissionContentKeyEntryV1,
     ADMISSION_CONTENT_KEY_CATALOG_FORMAT_V1,
@@ -49,19 +49,9 @@ pub use cross_space_transition::{
     SAME_SPACE_TRANSITION_FORMAT_V1,
 };
 pub use error::{
-    CurrentMembershipIdentityError, GroupUpdateDispatchError, MembershipAttestationEndpointError,
-    MembershipAttestationError, MembershipError, MembershipGossipEndpointError,
-    MembershipGossipTransportError, MembershipHistoryExchangeError, MembershipInitializationError,
-    MembershipSecurityUpdateError, RelationshipStateResetError, SpaceSecurityStateResetError,
-};
-pub use gossip::{
-    CandidateEffect, CandidateEvent, CandidateFailure, CandidateMergeError, CandidateMergeOutcome,
-    CandidateSource, CandidateStatus, DeviceAnnouncement, MembershipAck,
-    MembershipAnnouncementVersion, MembershipDigest, MembershipEventBatch,
-    MembershipGossipBoundsError, MembershipGossipEvent, MembershipGossipMessage,
-    MembershipRequestMissing, MembershipSharedDevicePage, MembershipSharedDevicePageRequest,
-    PendingMembershipBatch, RelayedSecurityUpdate, SpaceMembershipCandidate, SponsorCandidateSeed,
-    VerifiedMembershipPeer,
+    CurrentMembershipIdentityError, GroupUpdateDispatchError, MembershipError,
+    MembershipHistoryExchangeError, MembershipInitializationError, RelationshipStateResetError,
+    SpaceSecurityStateResetError,
 };
 pub use ledger::{
     DepartingLink, DepartingLinkSnapshot, LedgerDeliveryKind, LedgerDeliveryResult,
@@ -95,19 +85,14 @@ pub use membership_history::{
     MembershipConflictEvidenceRequestV3, MembershipConflictEvidenceV3, MembershipDecisionId,
     MembershipEventId, MembershipHistoryAckV3, MembershipHistoryMessage,
     MembershipHistoryReconciliationPlan, MembershipHistoryRelationship,
-    MembershipHistorySuffixRequestV3, MembershipHistorySummaryV3, PendingRemovalFacts,
-    RemovalDecision,
+    MembershipHistorySuffixRequestV3, MembershipHistorySummaryV3, RemovalDecision,
 };
 pub use ports::{
     BeginRevocationOutcome, ContentExchangeGatePort, CurrentMembershipAnnouncementMaterial,
     CurrentMembershipAnnouncementPort, CurrentMembershipIdentity, CurrentMembershipIdentityPort,
-    CurrentWorkspaceLocalMembership, CurrentWorkspacePeerScopeError, CurrentWorkspacePeerScopePort,
-    CurrentWorkspacePeerScopeSource, CurrentWorkspacePeerSnapshot, GroupRevocationPort,
-    GroupUpdateDispatchPort, MemberRepositoryPort, MembershipAdmissionDecision,
-    MembershipAdmissionGatePort, MembershipAttestationEndpointPort, MembershipAttestationPort,
-    MembershipGossipEndpointPort, MembershipGossipTransportPort,
-    MembershipHistoryExchangeEndpointPort, MembershipHistoryExchangePort, MembershipSecurityState,
-    MembershipSecurityUpdatePort, RelationshipStateResetPort, RevocationRepositoryPort,
+    GroupRevocationPort, GroupUpdateDispatchPort, MemberRepositoryPort,
+    MembershipAdmissionDecision, MembershipHistoryExchangeEndpointPort,
+    MembershipHistoryExchangePort, RelationshipStateResetPort, RevocationRepositoryPort,
     SpaceMembershipInitializerPort, SpaceSecurityStateResetPort,
 };
 pub use preferences::MemberSyncPreferences;
@@ -174,9 +159,4 @@ pub use versioned_membership_history::{
     MAX_MEMBERSHIP_HISTORY_RECORDS_PER_PAGE, MAX_MEMBERSHIP_HISTORY_SUFFIX_PAGES,
     MEMBERSHIP_CREDENTIAL_FORMAT_V1, MEMBERSHIP_DECISION_FORMAT_V2, MEMBERSHIP_EVENT_FORMAT_V2,
     MEMBERSHIP_HISTORY_EXCHANGE_FORMAT_V2, PREPARED_ADMISSION_PROOF_FORMAT_V1,
-};
-pub use workspace_convergence::{
-    AdmissionChangeFacts, PendingMembershipHistoryTransferV2, SpaceMembershipState,
-    WorkspaceConvergenceError, WorkspaceConvergenceEvent, WorkspaceDigest, WorkspaceEffect,
-    WorkspaceFailureCategory, WorkspaceMergeOutcome, WorkspacePhase, WorkspaceSnapshot,
 };

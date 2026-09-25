@@ -247,8 +247,6 @@ fn connection_purpose(purpose: &str) -> ConnectionPurpose {
         "active-clipboard-pull" => ConnectionPurpose::ClipboardPull,
         "transfer-progress" => ConnectionPurpose::TransferProgress,
         "group-update" => ConnectionPurpose::GroupUpdate,
-        "membership-attestation" => ConnectionPurpose::MembershipAttestation,
-        "membership-gossip" => ConnectionPurpose::MembershipGossip,
         "membership-history" => ConnectionPurpose::MembershipHistory,
         "membership-branch-recovery" => ConnectionPurpose::MembershipRecovery,
         _ => ConnectionPurpose::Other,

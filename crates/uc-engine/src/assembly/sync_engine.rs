@@ -171,7 +171,7 @@ pub async fn prepare_sync_session(
         Arc::clone(&space_setup.device_identity),
         Arc::clone(&space_setup.settings),
     );
-    let removal_identity = builder.build_membership_identity_adapter(
+    let membership_identity = builder.build_membership_identity_adapter(
         Arc::clone(&space_setup.membership_session),
         Arc::clone(&space_setup.device_identity),
         Arc::clone(&space_setup.settings),
@@ -183,15 +183,6 @@ pub async fn prepare_sync_session(
     );
     let membership_branch_recovery_channel =
         builder.build_membership_branch_recovery_channel(Arc::clone(&space_setup.peer_addr_repo));
-    let membership_transport = builder.build_membership_gossip_transport(
-        Arc::clone(&space_setup.membership_session),
-        Arc::clone(&space_setup.device_identity),
-        Arc::clone(&space_setup.settings),
-        Arc::clone(&space_setup.peer_addr_repo),
-        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerIdentityDirectoryPort>,
-        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerAdmissionPort>,
-        Arc::clone(&space_setup.fingerprint),
-    );
     let (known_peer_contact_tx, known_peer_contacts) = broadcast::channel(64);
     // Presence is installed before the convergence owner is assembled so the
     // owner can expose reachability as an independent product fact.
@@ -309,8 +300,6 @@ pub async fn prepare_sync_session(
     #[cfg(not(feature = "dev-tools"))]
     let membership_history_synchronization_transport = membership_history_transport.clone();
     let membership_security = Arc::new(DefaultMembershipSecurityUpdateAdapter::new(
-        Arc::clone(&space_setup.membership_session),
-        Arc::clone(&space_setup.current_member_signatures),
         Arc::clone(&space_setup.space_access.group_revocation),
         Arc::clone(&space_setup.clock),
     ));
@@ -394,8 +383,8 @@ pub async fn prepare_sync_session(
         peer_access: Arc::clone(&space_setup.peer_access),
         historical_membership_signatures: historical_signatures.clone(),
         current_member_signatures: Arc::clone(&space_setup.current_member_signatures),
-        membership_identity: removal_identity,
-        membership_announcement: membership_transport,
+        membership_identity: membership_identity.clone(),
+        membership_announcement: membership_identity,
         device_trust_observations: Arc::new(DeviceTrustObservationsAdapter::new(
             Arc::clone(&space_setup.member_repo),
             Arc::clone(&peer_reachability),
