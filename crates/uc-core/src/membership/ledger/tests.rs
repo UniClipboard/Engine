@@ -569,6 +569,93 @@ fn accepted_local_removal_is_a_terminal_state_without_outstanding_work() {
         .is_empty());
 }
 
+#[test]
+fn inbound_admission_follows_the_local_status_and_the_peer_relation() {
+    let group = Group::new(&["device-a", "device-b"]);
+    let sponsor = run_due_work(group.start("device-a"), NOW);
+    assert!(sponsor.admits_inbound_peer(&device("device-b")));
+    assert!(!sponsor.admits_inbound_peer(&device("device-c")));
+
+    // 被移除的对端进入离开窗口后立即拒绝，不等通知送达。
+    let (history, _) = group.removal(sponsor.history(), "device-a", "device-b", 0x35);
+    let (removed, _, _) = apply(
+        sponsor,
+        LedgerInput::LocalRemovalSigned {
+            history,
+            retained_device_ids: Vec::new(),
+        },
+        NOW,
+    );
+    assert!(matches!(
+        removed.peer(&device("device-b")),
+        Some(PeerLink::Departing(_))
+    ));
+    assert!(!removed.admits_inbound_peer(&device("device-b")));
+
+    // 等待本机决定移除时仍放行发起方，接受后本机已移除即全部拒绝。
+    let (awaiting, removal) = removed_device_awaiting_decision(&group);
+    assert!(awaiting.admits_inbound_peer(&device("device-a")));
+    let history = group.decided(
+        awaiting.history(),
+        removal,
+        "device-b",
+        RemovalDecision::Accept,
+    );
+    let (accepted, _, _) = apply(
+        awaiting,
+        LedgerInput::LocalDecisionSigned {
+            history,
+            removal_event_id: removal,
+        },
+        NOW,
+    );
+    let settled = run_due_work(accepted, NOW);
+    assert_eq!(settled.local_status(), LedgerMemberStatus::Removed);
+    assert!(!settled.admits_inbound_peer(&device("device-a")));
+}
+
+#[test]
+fn read_model_keeps_a_departing_device_until_its_departure_ends() {
+    let group = Group::new(&["device-a", "device-b", "device-c"]);
+    let membership = run_due_work(group.start("device-a"), NOW);
+    let devices = |model: &super::LedgerReadModel| -> Vec<DeviceId> {
+        model.members.iter().map(|facts| facts.device_id).collect()
+    };
+
+    let model = membership.read_model().unwrap();
+    assert_eq!(
+        devices(&model),
+        vec![device("device-a"), device("device-b"), device("device-c")]
+    );
+    assert_eq!(
+        model.trusted_device_ids.into_iter().collect::<Vec<_>>(),
+        vec![device("device-b"), device("device-c")]
+    );
+
+    let (history, _) = group.removal(membership.history(), "device-a", "device-b", 0x36);
+    let (removed, _, _) = apply(
+        membership,
+        LedgerInput::LocalRemovalSigned {
+            history,
+            retained_device_ids: vec![device("device-c")],
+        },
+        NOW,
+    );
+    let model = removed.read_model().unwrap();
+    assert!(devices(&model).contains(&device("device-b")));
+    assert_eq!(
+        model.trusted_device_ids.into_iter().collect::<Vec<_>>(),
+        vec![device("device-c")]
+    );
+
+    let settled = run_due_work(removed, NOW);
+    assert!(settled.peer(&device("device-b")).is_none());
+    assert_eq!(
+        devices(&settled.read_model().unwrap()),
+        vec![device("device-a"), device("device-c")]
+    );
+}
+
 // R3：被移除方拒绝后把发起方标为分叉，稳定停在需要处理且没有无法完成的投递。
 #[test]
 fn rejected_local_removal_diverges_without_an_undeliverable_decision() {

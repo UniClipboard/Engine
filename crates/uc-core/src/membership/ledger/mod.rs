@@ -54,8 +54,9 @@ pub use peer_link::{
     DEPARTURE_WINDOW_MS,
 };
 pub use present::{
-    LedgerDeviceView, LedgerMemberStatus, LedgerScope, LedgerUpdateProblem, LedgerUpdateView,
-    LedgerView, PeerPauseReason, PeerRelationView, PeerSyncView, SecurityDeliveryStatus,
+    LedgerDeviceView, LedgerMemberStatus, LedgerReadModel, LedgerScope, LedgerUpdateProblem,
+    LedgerUpdateView, LedgerView, PeerPauseReason, PeerRelationView, PeerSyncView,
+    SecurityDeliveryStatus,
 };
 pub use snapshot::{
     DepartingLinkSnapshot, MemberLinkSnapshot, MembershipLedgerSnapshot, PeerLinkSnapshot,

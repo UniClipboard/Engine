@@ -56,12 +56,12 @@ pub use error::{
 pub use ledger::{
     DepartingLink, DepartingLinkSnapshot, LedgerDeliveryKind, LedgerDeliveryResult,
     LedgerDeviceView, LedgerEffect, LedgerFollowUp, LedgerInput, LedgerMemberStatus, LedgerOutcome,
-    LedgerScope, LedgerTransition, LedgerTransitionError, LedgerTransitionErrorCategory,
-    LedgerUpdateProblem, LedgerUpdateView, LedgerView, LedgerWork, MemberEffectKind,
-    MemberEffectMaterial, MemberEffectPhase, MemberLink, MemberLinkSnapshot, MembershipLedger,
-    MembershipLedgerSnapshot, PeerEvidence, PeerLink, PeerLinkSnapshot, PeerPauseReason,
-    PeerRelation, PeerRelationView, PeerSyncBackoff, PeerSyncBackoffSnapshot, PeerSyncOutcome,
-    PeerSyncResult, PeerSyncView, ScheduledLedgerWork, SecurityDeliveryStatus,
+    LedgerReadModel, LedgerScope, LedgerTransition, LedgerTransitionError,
+    LedgerTransitionErrorCategory, LedgerUpdateProblem, LedgerUpdateView, LedgerView, LedgerWork,
+    MemberEffectKind, MemberEffectMaterial, MemberEffectPhase, MemberLink, MemberLinkSnapshot,
+    MembershipLedger, MembershipLedgerSnapshot, PeerEvidence, PeerLink, PeerLinkSnapshot,
+    PeerPauseReason, PeerRelation, PeerRelationView, PeerSyncBackoff, PeerSyncBackoffSnapshot,
+    PeerSyncOutcome, PeerSyncResult, PeerSyncView, ScheduledLedgerWork, SecurityDeliveryStatus,
     UnfinishedMemberEffect, UnfinishedMemberEffectSnapshot, DEPARTURE_WINDOW_MS,
 };
 pub use member::SpaceMember;

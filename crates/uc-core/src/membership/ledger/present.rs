@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use crate::ids::DeviceId;
-use crate::membership::MemberInstanceId;
+use crate::membership::{AdmissionChangeFacts, MemberInstanceId};
 
 use super::{LedgerTransitionError, MembershipLedger, PeerLink, PeerRelation, PeerSyncOutcome};
 
@@ -95,7 +95,85 @@ pub struct LedgerView {
     pub device_update: LedgerUpdateView,
 }
 
+/// 成员读模型：仍需要资料的设备各自的准入事实，以及可信身份。
+///
+/// 需要资料的设备是本机、当前已激活成员、正在离开的对端与未完成效果影响的设备；可信身份只授予当前
+/// 已激活的对端。读模型不授予资格，历史记录不直接拥有读模型删除资格。
+#[derive(Clone, PartialEq, Eq)]
+pub struct LedgerReadModel {
+    pub members: Vec<AdmissionChangeFacts>,
+    pub trusted_device_ids: BTreeSet<DeviceId>,
+}
+
+impl std::fmt::Debug for LedgerReadModel {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LedgerReadModel")
+            .field("member_count", &self.members.len())
+            .field("trusted_device_count", &self.trusted_device_ids.len())
+            .finish()
+    }
+}
+
 impl MembershipLedger {
+    /// 入站连接是否放行该设备：本机为有效成员，对端为当前成员且与本机历史一致。一方正在等待决定一项
+    /// 移除时仍放行，以便交换完成决定所需的受限历史与决定本身（ADR-020）；普通内容由可用范围另行暂停。
+    /// 正在离开或已不在成员中的设备一律拒绝。
+    pub fn admits_inbound_peer(&self, device_id: &DeviceId) -> bool {
+        self.local_status() == LedgerMemberStatus::Active
+            && matches!(
+                self.peers.get(device_id),
+                Some(PeerLink::Member(link)) if matches!(
+                    link.relation(),
+                    PeerRelation::Consistent
+                        | PeerRelation::AwaitingLocalDecision
+                        | PeerRelation::AwaitingPeerDecision
+                )
+            )
+    }
+
+    /// 由当前状态推导成员读模型；历史缺少所需准入事实时记录已不一致。
+    pub fn read_model(&self) -> Result<LedgerReadModel, LedgerTransitionError> {
+        let mut required = BTreeSet::from([self.local_device_id]);
+        let mut trusted_device_ids = BTreeSet::new();
+        for member in self.history.active_members() {
+            let facts = self
+                .history
+                .admission_facts_for(member)
+                .ok_or(LedgerTransitionError::InvalidSnapshot)?;
+            required.insert(facts.device_id);
+            if facts.device_id != self.local_device_id {
+                trusted_device_ids.insert(facts.device_id);
+            }
+        }
+        required.extend(
+            self.peers
+                .iter()
+                .filter(|(_, link)| matches!(link, PeerLink::Departing(_)))
+                .map(|(device_id, _)| *device_id),
+        );
+        required.extend(
+            self.effects
+                .values()
+                .flat_map(|effect| effect.affected_device_ids().iter().copied()),
+        );
+        let ids: Vec<DeviceId> = required.into_iter().collect();
+        let members = ids
+            .iter()
+            .map(|id| {
+                self.history
+                    .member_for_device(id, &ids)
+                    .and_then(|member| self.history.admission_facts_for(member))
+                    .cloned()
+                    .ok_or(LedgerTransitionError::InvalidSnapshot)
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(LedgerReadModel {
+            members,
+            trusted_device_ids,
+        })
+    }
+
     pub fn present(
         &self,
         security: SecurityDeliveryStatus,

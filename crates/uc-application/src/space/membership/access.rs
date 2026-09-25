@@ -1,8 +1,7 @@
 //! 入站对端访问判定与身份目录。
 //!
-//! 只有本机为有效成员、对端为当前成员且与本机历史一致时放行；正在离开或已不在成员中的设备一律拒绝。
-//! 一方正在等待决定一项移除时仍放行连接，以便交换完成决定所需的受限历史与决定本身（ADR-020）；
-//! 普通内容由当前成员范围暂停，不经此处放行。
+//! 放行规则由 Core 成员账本 `admits_inbound_peer` 给出：只有本机为有效成员、对端为当前成员且与本机历史
+//! 一致时放行，正在离开或已不在成员中的设备一律拒绝。普通内容由当前成员范围暂停，不经此处放行。
 //!
 //! 放行判定与身份目录都读取成员状态负责人发布的同一状态，不读取成员读模型；负责人按数据库代号在
 //! 控制世代切换、恢复出厂后重新加载，因此判定始终与当前世代的成员记录一致。
@@ -11,9 +10,7 @@ use std::sync::{Arc, PoisonError, RwLock};
 
 use async_trait::async_trait;
 use uc_core::ids::DeviceId;
-use uc_core::membership::{
-    LedgerMemberStatus, PeerAdmissionError, PeerAdmissionPort, PeerLink, PeerRelation,
-};
+use uc_core::membership::{PeerAdmissionError, PeerAdmissionPort};
 use uc_core::security::IdentityFingerprint;
 
 use super::{MembershipLedgerError, MembershipOwner, MembershipProjectionPlan, MembershipView};
@@ -94,20 +91,8 @@ pub(crate) fn known_peer_identities(
 }
 
 pub(crate) fn admits_peer(view: &MembershipView, device_id: &DeviceId) -> bool {
-    let Some(space) = view.space() else {
-        return false;
-    };
-    let ledger = space.ledger();
-    ledger.local_status() == LedgerMemberStatus::Active
-        && matches!(
-            ledger.peer(device_id),
-            Some(PeerLink::Member(link)) if matches!(
-                link.relation(),
-                PeerRelation::Consistent
-                    | PeerRelation::AwaitingLocalDecision
-                    | PeerRelation::AwaitingPeerDecision
-            )
-        )
+    view.space()
+        .is_some_and(|space| space.ledger().admits_inbound_peer(device_id))
 }
 
 #[cfg(test)]
