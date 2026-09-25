@@ -4,6 +4,7 @@
 //! `peer.inbound.rejected`，对端看到的拒绝字节保持不变，导出不含设备标识或名称。
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use uc_application::deps::{KnownPeerIdentity, MembershipLedgerError, PeerIdentityDirectoryPort};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -58,6 +59,22 @@ impl MemberRepositoryPort for Members {
     }
     async fn remove(&self, _: &DeviceId) -> Result<bool, MembershipError> {
         panic!("read-only fixture")
+    }
+}
+
+#[async_trait]
+impl PeerIdentityDirectoryPort for Members {
+    async fn known_peer_identities(&self) -> Result<Vec<KnownPeerIdentity>, MembershipLedgerError> {
+        Ok(self
+            .list()
+            .await
+            .map_err(MembershipLedgerError::unavailable_from)?
+            .into_iter()
+            .map(|member| KnownPeerIdentity {
+                device_id: member.device_id,
+                identity_fingerprint: member.identity_fingerprint,
+            })
+            .collect())
     }
 }
 

@@ -91,6 +91,22 @@ fn identity_resolution_has_a_single_implementation() {
     }
 }
 
+/// 执行计划 049 S5：入站身份只来自成员状态负责人发布的身份目录，不读取成员读模型。
+#[test]
+fn identity_resolution_reads_the_membership_owner_directory() {
+    let gate = production("crates/uc-infra/src/network/iroh/inbound_peer.rs");
+    assert!(gate.contains("PeerIdentityDirectoryPort"));
+    for handler in INBOUND_HANDLERS
+        .into_iter()
+        .chain(["crates/uc-infra/src/network/iroh/inbound_peer.rs"])
+    {
+        assert!(
+            !production(handler).contains("MemberRepositoryPort"),
+            "{handler} resolves inbound identities through the member read model"
+        );
+    }
+}
+
 #[test]
 fn inbound_paths_do_not_log_peer_identifiers() {
     for handler in INBOUND_HANDLERS {

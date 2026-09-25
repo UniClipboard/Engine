@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use uc_application::deps::{KnownPeerIdentity, MembershipLedgerError, PeerIdentityDirectoryPort};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -50,6 +51,22 @@ impl MemberRepositoryPort for OrderedMemberRepository {
 
     async fn remove(&self, _device_id: &DeviceId) -> Result<bool, MembershipError> {
         Ok(false)
+    }
+}
+
+#[async_trait]
+impl PeerIdentityDirectoryPort for OrderedMemberRepository {
+    async fn known_peer_identities(&self) -> Result<Vec<KnownPeerIdentity>, MembershipLedgerError> {
+        Ok(self
+            .list()
+            .await
+            .map_err(MembershipLedgerError::unavailable_from)?
+            .into_iter()
+            .map(|member| KnownPeerIdentity {
+                device_id: member.device_id,
+                identity_fingerprint: member.identity_fingerprint,
+            })
+            .collect())
     }
 }
 
@@ -154,7 +171,7 @@ fn member_for(endpoint: &Endpoint, device_id: &str) -> SpaceMember {
 
 async fn admission_result(
     dialer: &Endpoint,
-    members: Arc<dyn MemberRepositoryPort>,
+    members: Arc<dyn PeerIdentityDirectoryPort>,
     admission: Arc<RecordingAdmission>,
 ) -> u8 {
     let receiver = endpoint().await;

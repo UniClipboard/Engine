@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use uc_application::deps::PeerIdentityDirectoryPort;
 
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
@@ -13,7 +14,6 @@ use uc_application::deps::{
     MembershipBranchRecoveryRequest,
 };
 use uc_core::ids::DeviceId;
-use uc_core::membership::MemberRepositoryPort;
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::PeerAddressRepositoryPort;
 use uc_observability_contract::diagnostics::connectivity::InboundPeerProtocol;
@@ -181,12 +181,12 @@ pub(crate) struct IrohMembershipBranchRecoveryHandler {
 
 impl IrohMembershipBranchRecoveryHandler {
     pub(crate) fn new(
-        member_repo: Arc<dyn MemberRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         endpoint: Arc<dyn IssueMembershipBranchRecoveryPort>,
     ) -> Self {
         Self {
-            identity: Arc::new(PeerIdentityResolver::new(member_repo, fingerprint_factory)),
+            identity: Arc::new(PeerIdentityResolver::new(identities, fingerprint_factory)),
             endpoint,
         }
     }

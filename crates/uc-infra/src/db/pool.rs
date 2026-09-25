@@ -3,6 +3,7 @@ use diesel::r2d2::{ConnectionManager, CustomizeConnection, Pool, PooledConnectio
 use diesel::sqlite::SqliteConnection;
 use diesel::{connection::SimpleConnection, Connection, RunQueryDsl};
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use tracing::info;
 
@@ -14,6 +15,8 @@ type RawDbPool = Pool<ConnectionManager<SqliteConnection>>;
 #[derive(Clone)]
 pub struct DbPool {
     inner: Arc<RwLock<RawDbPool>>,
+    /// 底层数据库每替换一次加一；读取方据此判断此前读到的资料是否仍属于当前数据库。
+    generation: Arc<AtomicU64>,
 }
 
 impl DbPool {
@@ -33,11 +36,23 @@ impl DbPool {
         let replacement = build_raw_pool(database_url)?;
         run_migrations_raw(&replacement)?;
         install_revision_triggers_raw(&replacement)?;
-        *self
+        self.swap(replacement);
+        Ok(())
+    }
+
+    /// 当前底层数据库的代号；替换数据库后必然改变。
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    fn swap(&self, replacement: RawDbPool) {
+        let mut inner = self
             .inner
             .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = replacement;
-        Ok(())
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *inner = replacement;
+        // 在持有写锁时推进代号：读到新代号的读取方必然访问新数据库。
+        self.generation.fetch_add(1, Ordering::AcqRel);
     }
 
     pub fn detach_to_ephemeral_database(&self) -> Result<()> {
@@ -49,10 +64,7 @@ impl DbPool {
             .context("Failed to create ephemeral database")?;
         run_migrations_raw(&replacement)?;
         install_revision_triggers_raw(&replacement)?;
-        *self
-            .inner
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = replacement;
+        self.swap(replacement);
         Ok(())
     }
 
@@ -162,6 +174,7 @@ pub fn init_db_pool(database_url: &str) -> Result<DbPool> {
     install_revision_triggers_raw(&pool)?;
     Ok(DbPool {
         inner: Arc::new(RwLock::new(pool)),
+        generation: Arc::new(AtomicU64::new(0)),
     })
 }
 
@@ -177,6 +190,7 @@ pub(crate) fn open_existing_db_pool(database_url: &str) -> Result<DbPool> {
         .context("Failed to open existing database pool")?;
     Ok(DbPool {
         inner: Arc::new(RwLock::new(pool)),
+        generation: Arc::new(AtomicU64::new(0)),
     })
 }
 
@@ -292,6 +306,7 @@ mod switch_tests {
             .get_result::<ValueRow>(&mut repository_pool.get().unwrap())
             .unwrap();
         assert_eq!(before.value, "source");
+        let generation = repository_pool.generation();
 
         pool.replace_database(target.to_str().unwrap()).unwrap();
 
@@ -299,6 +314,10 @@ mod switch_tests {
             .get_result::<ValueRow>(&mut repository_pool.get().unwrap())
             .unwrap();
         assert_eq!(after.value, "target");
+        assert_ne!(repository_pool.generation(), generation);
+        let replaced = repository_pool.generation();
+        pool.detach_to_ephemeral_database().unwrap();
+        assert_ne!(repository_pool.generation(), replaced);
     }
 
     #[test]
@@ -310,10 +329,12 @@ mod switch_tests {
         std::fs::create_dir(&invalid_target).unwrap();
         let pool = init_db_pool(source.to_str().unwrap()).unwrap();
         let repository_pool = pool.clone();
+        let generation = repository_pool.generation();
 
         assert!(pool
             .replace_database(invalid_target.to_str().unwrap())
             .is_err());
+        assert_eq!(repository_pool.generation(), generation);
 
         let current = diesel::sql_query("SELECT value FROM generation_probe")
             .get_result::<ValueRow>(&mut repository_pool.get().unwrap())

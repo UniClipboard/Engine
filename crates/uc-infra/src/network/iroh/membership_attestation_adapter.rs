@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
+use uc_application::deps::PeerIdentityDirectoryPort;
 
 use async_trait::async_trait;
 use iroh::endpoint::Connection;
@@ -13,10 +14,10 @@ use uc_core::ids::DeviceId;
 use uc_core::membership::{
     CurrentMembershipAnnouncementMaterial, CurrentMembershipAnnouncementPort,
     CurrentMembershipIdentity, CurrentMembershipIdentityError, CurrentMembershipIdentityPort,
-    MemberRepositoryPort, MembershipAttestationEndpointPort, MembershipAttestationError,
-    MembershipAttestationPort, MembershipGossipEndpointError, MembershipGossipEndpointPort,
-    MembershipGossipMessage, MembershipGossipTransportError, MembershipGossipTransportPort,
-    PeerAdmissionPort, RelayedSecurityUpdate, SpaceMembershipCandidate, VerifiedMembershipPeer,
+    MembershipAttestationEndpointPort, MembershipAttestationError, MembershipAttestationPort,
+    MembershipGossipEndpointError, MembershipGossipEndpointPort, MembershipGossipMessage,
+    MembershipGossipTransportError, MembershipGossipTransportPort, PeerAdmissionPort,
+    RelayedSecurityUpdate, SpaceMembershipCandidate, VerifiedMembershipPeer,
 };
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::{DeviceIdentityPort, PeerAddressRepositoryPort, SettingsPort};
@@ -182,7 +183,7 @@ impl IrohMembershipGossipTransportAdapter {
         session: Arc<InMemorySession>,
         identity: Arc<dyn CurrentMembershipIdentityPort>,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-        member_repo: Arc<dyn MemberRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
     ) -> Self {
@@ -194,7 +195,7 @@ impl IrohMembershipGossipTransportAdapter {
                 session,
                 gate: InboundPeerGate::new(
                     InboundPeerProtocol::MembershipAttestation,
-                    member_repo,
+                    identities,
                     peer_admission,
                     fingerprint_factory,
                 ),
@@ -1383,6 +1384,7 @@ mod tests {
 
     struct StaticMemberRepository(Vec<SpaceMember>);
 
+    crate::network::iroh::inbound_peer::member_table_identity_directory!(StaticMemberRepository);
     #[async_trait]
     impl MemberRepositoryPort for StaticMemberRepository {
         async fn get(&self, device_id: &DeviceId) -> Result<Option<SpaceMember>, MembershipError> {

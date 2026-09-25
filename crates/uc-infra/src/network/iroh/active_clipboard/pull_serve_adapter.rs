@@ -13,7 +13,7 @@
 //!
 //! Admission is **member-fingerprint only** (issue #1017 D2): the inbound
 //! connection's `remote_id()` is resolved to a `SpaceMember` via the shared
-//! [`IdentityFingerprintFactoryPort`] + [`MemberRepositoryPort`], and unknown
+//! [`IdentityFingerprintFactoryPort`] + [`PeerIdentityDirectoryPort`], and unknown
 //! peers are dropped. There is **no** send-preference gate here — a member
 //! whose `send_enabled` is off can still pull. This is the accepted asymmetry
 //! with the active push path: the served content is still the
@@ -30,6 +30,7 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use uc_application::deps::PeerIdentityDirectoryPort;
 
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
@@ -37,7 +38,7 @@ use tracing::{debug, warn};
 
 #[cfg(test)]
 use uc_core::ids::DeviceId;
-use uc_core::membership::{ContentExchangeGatePort, MemberRepositoryPort, PeerAdmissionPort};
+use uc_core::membership::{ContentExchangeGatePort, PeerAdmissionPort};
 use uc_core::ports::clipboard::{ActiveClipboardPullServeError, ActiveClipboardPullServePort};
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_observability_contract::diagnostics::connectivity::InboundPeerProtocol;
@@ -71,7 +72,7 @@ struct HandlerState {
 
 impl IrohActiveClipboardPullServeAdapter {
     pub fn new(
-        member_repo: Arc<dyn MemberRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         serve: Arc<dyn ActiveClipboardPullServePort>,
@@ -81,7 +82,7 @@ impl IrohActiveClipboardPullServeAdapter {
             state: Arc::new(HandlerState {
                 gate: InboundPeerGate::new(
                     InboundPeerProtocol::ActiveClipboardPull,
-                    member_repo,
+                    identities,
                     peer_admission,
                     fingerprint_factory,
                 ),
@@ -238,6 +239,7 @@ impl ProtocolHandler for IrohActiveClipboardPullServeHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uc_core::membership::MemberRepositoryPort;
 
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -262,6 +264,7 @@ mod tests {
     struct MemMemberRepo {
         inner: Mutex<HashMap<String, SpaceMember>>,
     }
+    crate::network::iroh::inbound_peer::member_table_identity_directory!(MemMemberRepo);
     #[async_trait]
     impl MemberRepositoryPort for MemMemberRepo {
         async fn get(&self, device_id: &DeviceId) -> Result<Option<SpaceMember>, MembershipError> {
@@ -398,7 +401,7 @@ mod tests {
         let endpoint = bind_endpoint_with(seed).await;
         wait_for_direct_addrs(&endpoint).await;
         let adapter = IrohActiveClipboardPullServeAdapter::new(
-            member_repo,
+            crate::network::iroh::inbound_peer::member_table_directory(member_repo),
             Arc::new(crate::network::iroh::StaticPeerAdmission(admitted)),
             Arc::new(Sha256IdentityFingerprintFactory),
             serve,

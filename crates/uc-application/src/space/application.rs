@@ -250,6 +250,7 @@ impl SpaceApplication {
         } = admission;
         let SpaceMembershipAdapters {
             membership_records,
+            peer_access,
             historical_membership_signatures,
             current_member_signatures,
             membership_identity,
@@ -280,6 +281,7 @@ impl SpaceApplication {
             Arc::clone(&host_event_bus) as Arc<dyn uc_core::ports::HostEventEmitterPort>,
             deferred_maintenance_wake.clone(),
         ));
+        peer_access.bind(Arc::clone(&owner));
         let deliver_group_updates = Arc::new(DeliverPendingGroupUpdatesUseCase::new(
             group_update_store,
             group_update_dispatch,

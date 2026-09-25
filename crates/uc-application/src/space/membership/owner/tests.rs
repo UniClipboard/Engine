@@ -3,7 +3,9 @@ use uc_core::membership::{LedgerInput, LedgerOutcome, MembershipHistoryAckV3, Pe
 
 use crate::space::lifecycle::SpaceMembershipResetPort;
 use crate::space::membership::testing::{EstablishedSpace, OwnerFixture};
-use crate::space::membership::{MembershipLedgerError, MembershipRecord};
+use crate::space::membership::{
+    CurrentSpaceMemberScopePort, MembershipLedgerError, MembershipRecord,
+};
 
 fn active_space() -> OwnerFixture {
     OwnerFixture::new(EstablishedSpace::new(&["device-a", "device-b"]).record("device-a", 4))
@@ -166,4 +168,48 @@ async fn a_confirmed_history_exchange_offers_the_peer_to_group_update_delivery_o
     assert!(fixture.wake.wake_count() > 0);
     assert_eq!(fixture.owner.take_reachable_peers(), vec![peer]);
     assert!(fixture.owner.take_reachable_peers().is_empty());
+}
+
+#[tokio::test]
+async fn a_replaced_database_is_reloaded_and_announced_before_the_next_read() {
+    let fixture = active_space();
+    fixture.owner.load().await.unwrap();
+    let mut changes = fixture.owner.subscribe_changes();
+    changes.mark_unchanged();
+    let loads_before = fixture.records.load_count();
+
+    // 同一数据库上重复读取只使用已发布状态。
+    fixture.owner.load().await.unwrap();
+    assert_eq!(fixture.records.load_count(), loads_before);
+    assert!(!changes.has_changed().unwrap());
+
+    fixture
+        .records
+        .replace_database(MembershipRecord::NoSpace { revision: 0 });
+    let view = fixture.owner.load().await.unwrap();
+
+    assert!(view.space().is_none());
+    assert_eq!(fixture.records.load_count(), loads_before + 1);
+    assert!(changes.has_changed().unwrap());
+}
+
+#[tokio::test]
+async fn a_commit_after_a_database_replacement_starts_from_the_new_record() {
+    let fixture = active_space();
+    fixture.owner.load().await.unwrap();
+    fixture
+        .records
+        .replace_database(MembershipRecord::NoSpace { revision: 9 });
+
+    let committed = fixture
+        .owner
+        .commit(|draft| {
+            assert!(draft.space().is_none());
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(committed.view.revision(), 9);
+    assert_eq!(fixture.records.commit_count(), 0);
 }

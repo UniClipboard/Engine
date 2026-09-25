@@ -14,8 +14,8 @@
 //! `EndpointId` (a newtype over the 32-byte Ed25519 public key). The receiver
 //! feeds those bytes into the same [`IdentityFingerprintFactoryPort`] used
 //! when persisting the local fingerprint, recovers the remote's
-//! `IdentityFingerprint`, and looks it up in [`MemberRepositoryPort`].
-//! Unknown peers (fingerprint not in `member_repo`) are dropped without
+//! `IdentityFingerprint`, and looks it up in [`PeerIdentityDirectoryPort`].
+//! Unknown peers (fingerprint not in the identity directory) are dropped without
 //! reaching the broadcast stream.
 //!
 //! ## Why no ack
@@ -27,6 +27,7 @@
 //! responsibility of the LWW register, not of per-frame acknowledgement.
 
 use std::sync::Arc;
+use uc_application::deps::PeerIdentityDirectoryPort;
 
 use async_trait::async_trait;
 use iroh::endpoint::Connection;
@@ -35,7 +36,7 @@ use tokio::sync::broadcast;
 use tracing::{debug, warn};
 
 use uc_core::ids::DeviceId;
-use uc_core::membership::{MemberRepositoryPort, PeerAdmissionPort};
+use uc_core::membership::PeerAdmissionPort;
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::{ActiveClipboardReceiverPort, InboundActiveClipboardState};
 use uc_observability_contract::diagnostics::connectivity::InboundPeerProtocol;
@@ -72,7 +73,7 @@ struct HandlerState {
 
 impl IrohActiveClipboardReceiverAdapter {
     pub fn new(
-        member_repo: Arc<dyn MemberRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
     ) -> Self {
@@ -80,7 +81,7 @@ impl IrohActiveClipboardReceiverAdapter {
         let handler_state = Arc::new(HandlerState {
             gate: InboundPeerGate::new(
                 InboundPeerProtocol::ActiveClipboard,
-                member_repo,
+                identities,
                 peer_admission,
                 fingerprint_factory,
             ),
@@ -210,6 +211,7 @@ impl ProtocolHandler for IrohActiveClipboardReceiverHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uc_core::membership::MemberRepositoryPort;
 
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -233,6 +235,7 @@ mod tests {
     struct MemMemberRepo {
         inner: Mutex<HashMap<String, SpaceMember>>,
     }
+    crate::network::iroh::inbound_peer::member_table_identity_directory!(MemMemberRepo);
     #[async_trait]
     impl MemberRepositoryPort for MemMemberRepo {
         async fn get(&self, device_id: &DeviceId) -> Result<Option<SpaceMember>, MembershipError> {
@@ -323,7 +326,7 @@ mod tests {
         wait_for_direct_addrs(&receiver_endpoint).await;
 
         let adapter = IrohActiveClipboardReceiverAdapter::new(
-            member_repo,
+            crate::network::iroh::inbound_peer::member_table_directory(member_repo),
             Arc::new(crate::network::iroh::StaticPeerAdmission(admitted)),
             Arc::new(Sha256IdentityFingerprintFactory),
         );

@@ -590,9 +590,8 @@ pub async fn wire_dependencies_from_inputs(
             transition,
         )
     };
-    let peer_admission =
-        build_peer_admission_port(Arc::clone(&membership_ledger)
-            as Arc<dyn uc_application::deps::MembershipRecordStorePort>);
+    // 网络入口先于 Space 应用组装，访问判定在成员状态负责人建立后才绑定；绑定前一律拒绝。
+    let peer_access = uc_application::deps::PeerAccess::unbound();
 
     let member_repo: Arc<dyn uc_core::MemberRepositoryPort> = Arc::new(
         DieselSpaceMemberRepository::new(Arc::clone(&relationship_store)),
@@ -1021,7 +1020,7 @@ pub async fn wire_dependencies_from_inputs(
             #[cfg(test)]
             analytics: sync_analytics,
             iroh_identity_storage,
-            peer_admission,
+            peer_access,
             peer_addr_repo: Arc::clone(&peer_addr_repo),
             relationship_reset,
             space_security_reset,

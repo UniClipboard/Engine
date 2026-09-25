@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
+use uc_application::deps::PeerIdentityDirectoryPort;
 
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
@@ -19,7 +20,7 @@ use tracing::{debug, info, instrument, warn};
 
 use uc_application::deps::KnownPeerContact;
 use uc_core::ids::DeviceId;
-use uc_core::membership::{MemberRepositoryPort, PeerAdmissionPort};
+use uc_core::membership::PeerAdmissionPort;
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::{
     ClockPort, PeerAddressRepositoryPort, PeerReachabilityChanged, PeerReachabilityError,
@@ -448,13 +449,13 @@ impl IrohPeerReachabilityAdapter {
     /// publishing it as `Arc<dyn PeerReachabilityPort>` so shutdown semantics match
     /// the rest of the iroh adapter family.
     ///
-    /// `member_repo` and `fingerprint_factory` are needed by the inbound
+    /// `identities` and `fingerprint_factory` are needed by the inbound
     /// handler to reverse-resolve a remote `EndpointId` into a known
     /// `DeviceId`; the same pair is consumed by `IrohClipboardReceiverAdapter`.
     pub fn new(
         endpoint: Arc<Endpoint>,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-        member_repo: Arc<dyn MemberRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         clock: Arc<dyn ClockPort>,
@@ -463,7 +464,7 @@ impl IrohPeerReachabilityAdapter {
         Self::build(
             endpoint,
             peer_addr_repo,
-            member_repo,
+            identities,
             peer_admission,
             fingerprint_factory,
             clock,
@@ -476,7 +477,7 @@ impl IrohPeerReachabilityAdapter {
     pub(crate) fn new_with_recovery(
         endpoint: Arc<Endpoint>,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-        member_repo: Arc<dyn MemberRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         clock: Arc<dyn ClockPort>,
@@ -487,7 +488,7 @@ impl IrohPeerReachabilityAdapter {
         Self::build(
             endpoint,
             peer_addr_repo,
-            member_repo,
+            identities,
             peer_admission,
             fingerprint_factory,
             clock,
@@ -500,7 +501,7 @@ impl IrohPeerReachabilityAdapter {
     fn build(
         endpoint: Arc<Endpoint>,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-        member_repo: Arc<dyn MemberRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         clock: Arc<dyn ClockPort>,
@@ -518,7 +519,7 @@ impl IrohPeerReachabilityAdapter {
             peers: Arc::clone(&peers),
             gate: InboundPeerGate::new(
                 InboundPeerProtocol::Presence,
-                member_repo,
+                identities,
                 Arc::clone(&peer_admission),
                 fingerprint_factory,
             ),
@@ -1097,6 +1098,7 @@ mod tests {
         }
     }
 
+    crate::network::iroh::inbound_peer::member_table_identity_directory!(MemMemberRepo);
     #[async_trait]
     impl MemberRepositoryPort for MemMemberRepo {
         async fn get(&self, device: &DeviceId) -> Result<Option<SpaceMember>, MembershipError> {
@@ -1259,7 +1261,7 @@ mod tests {
         IrohPeerReachabilityAdapter::new(
             endpoint,
             repo,
-            member_repo,
+            crate::network::iroh::inbound_peer::member_table_directory(member_repo),
             Arc::new(crate::network::iroh::StaticPeerAdmission(admitted)),
             Arc::new(Sha256IdentityFingerprintFactory),
             Arc::new(FixedClock),

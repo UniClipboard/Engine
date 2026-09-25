@@ -1,6 +1,6 @@
 //! 成员状态负责人测试台：内存成员记录、可控时钟、事件与唤醒记录。
 
-use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -26,6 +26,7 @@ pub(crate) struct MemoryMembershipRecords {
     remaining_conflicts: AtomicUsize,
     remaining_failures: AtomicUsize,
     projections: Mutex<Vec<MembershipProjectionPlan>>,
+    generation: AtomicU64,
 }
 
 impl MemoryMembershipRecords {
@@ -37,6 +38,7 @@ impl MemoryMembershipRecords {
             remaining_conflicts: AtomicUsize::new(0),
             remaining_failures: AtomicUsize::new(0),
             projections: Mutex::new(Vec::new()),
+            generation: AtomicU64::new(0),
         })
     }
 
@@ -50,6 +52,12 @@ impl MemoryMembershipRecords {
 
     pub(crate) fn replace(&self, record: MembershipRecord) {
         *self.record.lock().unwrap() = record;
+    }
+
+    /// 模拟控制世代切换、恢复出厂等替换数据库：记录换成 `record`，数据库代号改变。
+    pub(crate) fn replace_database(&self, record: MembershipRecord) {
+        *self.record.lock().unwrap() = record;
+        self.generation.fetch_add(1, Ordering::SeqCst);
     }
 
     pub(crate) fn load_count(&self) -> usize {
@@ -123,6 +131,10 @@ impl MembershipRecordStorePort for MemoryMembershipRecords {
         *record = commit.replacement;
         self.commits.fetch_add(1, Ordering::SeqCst);
         Ok(())
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
     }
 }
 

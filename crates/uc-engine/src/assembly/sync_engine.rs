@@ -24,11 +24,12 @@ use crate::dev::{
 use uc_application::deps::{
     ApplicationClipboardAdapters, ApplicationNetworkAdapters, ApplicationNetworkBinding,
     ApplicationSpaceAdapters, ClipboardReceiverPort, CurrentSpaceMemberScopePort, LifecycleError,
-    SpaceAdmissionAdapters, SpaceMembershipAdapters, SpaceRuntimeAdapters,
+    PeerIdentityDirectoryPort, SpaceAdmissionAdapters, SpaceMembershipAdapters,
+    SpaceRuntimeAdapters,
 };
 use uc_application::facade::ApplicationAssembly;
 use uc_core::file_transfer::FileTransferCancellationReason;
-use uc_core::membership::ContentExchangeGatePort;
+use uc_core::membership::{ContentExchangeGatePort, PeerAdmissionPort};
 use uc_core::ports::{
     ActiveClipboardDispatchPort, ActiveClipboardReceiverPort, ClipboardDispatchPort,
     ConnectionChannelPort, LocalIdentityPort, PeerReachabilityPort,
@@ -187,8 +188,8 @@ pub async fn prepare_sync_session(
         Arc::clone(&space_setup.device_identity),
         Arc::clone(&space_setup.settings),
         Arc::clone(&space_setup.peer_addr_repo),
-        Arc::clone(&space_setup.member_repo),
-        Arc::clone(&space_setup.peer_admission),
+        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerIdentityDirectoryPort>,
+        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerAdmissionPort>,
         Arc::clone(&space_setup.fingerprint),
     );
     let (known_peer_contact_tx, known_peer_contacts) = broadcast::channel(64);
@@ -196,8 +197,8 @@ pub async fn prepare_sync_session(
     // owner can expose reachability as an independent product fact.
     let peer_reachability: Arc<dyn PeerReachabilityPort> = builder.install_peer_reachability(
         Arc::clone(&space_setup.peer_addr_repo),
-        Arc::clone(&space_setup.member_repo),
-        Arc::clone(&space_setup.peer_admission),
+        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerIdentityDirectoryPort>,
+        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerAdmissionPort>,
         Arc::clone(&space_setup.fingerprint),
         Arc::clone(&space_setup.clock),
         known_peer_contact_tx,
@@ -214,15 +215,15 @@ pub async fn prepare_sync_session(
     )?;
     // Slice 2 Phase 2 · T10:同一节点装第三个 ALPN(剪切板同步)。dispatch
     // 复用 endpoint + peer_addr_repo,与 peer_reachability 共享 NAT/relay 映射;
-    // receiver handler 通过 `member_repo` 把 `Connection::remote_id()` 反查
+    // receiver handler 通过身份目录把 `Connection::remote_id()` 反查
     // 成 DeviceId 再喂给应用层 broadcast。同样必须在 `spawn` 前装。
     let ClipboardHandlers {
         dispatch: clipboard_dispatch,
         receiver: clipboard_receiver,
     } = builder.install_clipboard(
         Arc::clone(&space_setup.peer_addr_repo),
-        Arc::clone(&space_setup.member_repo),
-        Arc::clone(&space_setup.peer_admission),
+        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerIdentityDirectoryPort>,
+        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerAdmissionPort>,
         Arc::clone(&space_setup.fingerprint),
         Arc::clone(&peer_reachability),
     )?;
@@ -240,8 +241,8 @@ pub async fn prepare_sync_session(
         receiver: active_clipboard_receiver,
     } = builder.install_active_clipboard(
         Arc::clone(&space_setup.peer_addr_repo),
-        Arc::clone(&space_setup.member_repo),
-        Arc::clone(&space_setup.peer_admission),
+        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerIdentityDirectoryPort>,
+        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerAdmissionPort>,
         Arc::clone(&space_setup.fingerprint),
     )?;
     let active_clipboard_dispatch: Arc<dyn ActiveClipboardDispatchPort> = active_clipboard_dispatch;
@@ -255,8 +256,8 @@ pub async fn prepare_sync_session(
         inbound_events: outbound_progress_events,
     } = builder.install_transfer_progress(
         Arc::clone(&space_setup.peer_addr_repo),
-        Arc::clone(&space_setup.member_repo),
-        Arc::clone(&space_setup.peer_admission),
+        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerIdentityDirectoryPort>,
+        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerAdmissionPort>,
         Arc::clone(&space_setup.fingerprint),
     )?;
 
@@ -390,6 +391,7 @@ pub async fn prepare_sync_session(
     let membership = crate::assembly::observability::observe_membership(SpaceMembershipAdapters {
         membership_records: space_setup.membership_ledger.clone()
             as Arc<dyn uc_application::deps::MembershipRecordStorePort>,
+        peer_access: Arc::clone(&space_setup.peer_access),
         historical_membership_signatures: historical_signatures.clone(),
         current_member_signatures: Arc::clone(&space_setup.current_member_signatures),
         membership_identity: removal_identity,
@@ -476,7 +478,7 @@ pub async fn prepare_sync_session(
         space: ApplicationSpaceAdapters {
             connection_hints: builder
                 .connection_hints(
-                    Arc::clone(&space_setup.member_repo),
+                    Arc::clone(&space_setup.peer_access) as Arc<dyn PeerIdentityDirectoryPort>,
                     Arc::clone(&space_setup.fingerprint),
                 )
                 .await,
@@ -510,12 +512,12 @@ pub async fn prepare_sync_session(
     )?;
     builder.install_membership_history_exchange(
         &membership_history_exchange_adapter,
-        Arc::clone(&space_setup.member_repo),
+        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerIdentityDirectoryPort>,
         Arc::clone(&space_setup.fingerprint),
         application_network.membership_history_endpoint(),
     )?;
     builder.install_membership_branch_recovery(
-        Arc::clone(&space_setup.member_repo),
+        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerIdentityDirectoryPort>,
         Arc::clone(&space_setup.fingerprint),
         application_network.membership_branch_recovery_endpoint(),
     )?;
@@ -532,8 +534,8 @@ pub async fn prepare_sync_session(
         client: active_clipboard_pull_client,
     } = builder.install_active_clipboard_pull(
         Arc::clone(&space_setup.peer_addr_repo),
-        Arc::clone(&space_setup.member_repo),
-        Arc::clone(&space_setup.peer_admission),
+        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerIdentityDirectoryPort>,
+        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerAdmissionPort>,
         Arc::clone(&space_setup.fingerprint),
         application_network.active_clipboard_pull_serve(),
         content_gate,

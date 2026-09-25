@@ -1,8 +1,9 @@
 //! 入站对端身份与准入的共同判定；协议出口负责记录实际拒绝。
 use std::sync::Arc;
 
+use uc_application::deps::{MembershipLedgerError, PeerIdentityDirectoryPort};
 use uc_core::ids::DeviceId;
-use uc_core::membership::{MemberRepositoryPort, MembershipError, PeerAdmissionPort};
+use uc_core::membership::PeerAdmissionPort;
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::security::IdentityFingerprint;
 use uc_observability_contract::diagnostics::connectivity::{
@@ -51,8 +52,8 @@ pub(crate) enum PeerIdentityError {
     Unresolved,
     #[error("peer identity matches more than one member")]
     Ambiguous,
-    #[error("member projection read failed")]
-    MemberRead(#[source] MembershipError),
+    #[error("member identities are unavailable")]
+    MemberRead(#[source] MembershipLedgerError),
     #[error("identity fingerprint derivation failed")]
     Fingerprint(#[source] anyhow::Error),
 }
@@ -68,18 +69,19 @@ impl PeerIdentityError {
     }
 }
 
+/// 把远端公钥解析为设备：候选只来自成员状态负责人发布的身份目录，不读取成员读模型。
 pub(crate) struct PeerIdentityResolver {
-    member_repo: Arc<dyn MemberRepositoryPort>,
+    identities: Arc<dyn PeerIdentityDirectoryPort>,
     fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
 }
 
 impl PeerIdentityResolver {
     pub(crate) fn new(
-        member_repo: Arc<dyn MemberRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
     ) -> Self {
         Self {
-            member_repo,
+            identities,
             fingerprint_factory,
         }
     }
@@ -101,19 +103,19 @@ impl PeerIdentityResolver {
             .fingerprint_factory
             .from_public_key(remote_public_key)
             .map_err(PeerIdentityError::Fingerprint)?;
-        let members = self
-            .member_repo
-            .list()
+        let identities = self
+            .identities
+            .known_peer_identities()
             .await
             .map_err(PeerIdentityError::MemberRead)?;
         let mut found = None;
-        for member in members {
-            if member.identity_fingerprint == fingerprint {
+        for identity in identities {
+            if identity.identity_fingerprint == fingerprint {
                 match &found {
-                    Some(device) if device != &member.device_id => {
+                    Some(device) if device != &identity.device_id => {
                         return Err(PeerIdentityError::Ambiguous);
                     }
-                    None => found = Some(member.device_id),
+                    None => found = Some(identity.device_id),
                     _ => {}
                 }
             }
@@ -141,13 +143,13 @@ pub(crate) struct InboundPeerGate {
 impl InboundPeerGate {
     pub(crate) fn new(
         protocol: InboundPeerProtocol,
-        member_repo: Arc<dyn MemberRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
     ) -> Self {
         Self {
             protocol,
-            identity: PeerIdentityResolver::new(member_repo, fingerprint_factory),
+            identity: PeerIdentityResolver::new(identities, fingerprint_factory),
             peer_admission,
         }
     }
@@ -187,6 +189,62 @@ pub(crate) fn record_inbound_rejection(
 ) {
     record_inbound_peer_rejection(protocol, rejection.diagnostic());
 }
+
+/// 测试以内存成员表充当身份目录：候选与成员表中的成员一一对应，读取失败按目录不可用处理。
+#[cfg(test)]
+pub(crate) async fn identities_from_member_table(
+    members: &dyn uc_core::membership::MemberRepositoryPort,
+) -> Result<Vec<uc_application::deps::KnownPeerIdentity>, MembershipLedgerError> {
+    Ok(members
+        .list()
+        .await
+        .map_err(MembershipLedgerError::unavailable_from)?
+        .into_iter()
+        .map(|member| uc_application::deps::KnownPeerIdentity {
+            device_id: member.device_id,
+            identity_fingerprint: member.identity_fingerprint,
+        })
+        .collect())
+}
+
+#[cfg(test)]
+pub(crate) fn member_table_directory(
+    members: Arc<dyn uc_core::membership::MemberRepositoryPort>,
+) -> Arc<dyn PeerIdentityDirectoryPort> {
+    struct MemberTableDirectory(Arc<dyn uc_core::membership::MemberRepositoryPort>);
+
+    #[async_trait::async_trait]
+    impl PeerIdentityDirectoryPort for MemberTableDirectory {
+        async fn known_peer_identities(
+            &self,
+        ) -> Result<Vec<uc_application::deps::KnownPeerIdentity>, MembershipLedgerError> {
+            identities_from_member_table(self.0.as_ref()).await
+        }
+    }
+
+    Arc::new(MemberTableDirectory(members))
+}
+
+/// 让测试用的内存成员表同时充当身份目录。
+#[cfg(test)]
+macro_rules! member_table_identity_directory {
+    ($members:ty) => {
+        #[async_trait::async_trait]
+        impl uc_application::deps::PeerIdentityDirectoryPort for $members {
+            async fn known_peer_identities(
+                &self,
+            ) -> Result<
+                Vec<uc_application::deps::KnownPeerIdentity>,
+                uc_application::deps::MembershipLedgerError,
+            > {
+                // rust-style: allow-qualified-path -- 宏在调用方模块展开，只能以完整路径定位辅助函数。
+                crate::network::iroh::inbound_peer::identities_from_member_table(self).await
+            }
+        }
+    };
+}
+#[cfg(test)]
+pub(crate) use member_table_identity_directory;
 
 #[cfg(test)]
 mod tests;

@@ -360,13 +360,8 @@ impl RecoverMembershipConflictUseCase {
             if transition.advance(next.phase()).as_ref() != Some(&next) {
                 return RecoverMembershipConflictOutcome::StableFailure;
             }
-            // 提升后当前控制世代已换成目标世代，Owner 以其中已暂存的成员记录重新加载。
-            let loaded = if next.phase() == MembershipBranchTransitionPhaseV1::Promoted {
-                self.owner.reload().await
-            } else {
-                self.owner.load().await
-            };
-            if let Err(error) = loaded {
+            // 提升后当前控制世代已换成目标世代，Owner 按数据库代号的变化读取其中已暂存的成员记录。
+            if let Err(error) = self.owner.load().await {
                 return map_ledger_error(error);
             }
             let completed = next.phase() == MembershipBranchTransitionPhaseV1::Completed;

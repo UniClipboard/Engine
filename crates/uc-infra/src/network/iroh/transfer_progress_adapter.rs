@@ -13,7 +13,7 @@
 //! 与 [`super::clipboard_receiver_adapter`] 一致:sender 端 handler 用
 //! `Connection::remote_id()` 拿到对端 Ed25519 公钥,经
 //! `IdentityFingerprintFactoryPort` 派生出 fingerprint,在
-//! `MemberRepositoryPort` 中查匹配的 `SpaceMember`。陌生 peer 的连接被
+//! 成员状态负责人发布的身份目录中查匹配的设备。陌生 peer 的连接被
 //! 直接丢弃,不进入广播,避免被伪造进度污染 UI。
 //!
 //! ## 失败语义
@@ -25,6 +25,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use uc_application::deps::PeerIdentityDirectoryPort;
 
 use async_trait::async_trait;
 use iroh::endpoint::Connection;
@@ -35,7 +36,7 @@ use tracing::{debug, instrument, trace, warn};
 
 use uc_core::file_transfer::{OutboundProgressReporterPort, OutboundProgressStatus};
 use uc_core::ids::DeviceId;
-use uc_core::membership::{MemberRepositoryPort, PeerAdmissionPort};
+use uc_core::membership::PeerAdmissionPort;
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::PeerAddressRepositoryPort;
 use uc_observability_contract::diagnostics::connectivity::InboundPeerProtocol;
@@ -61,7 +62,7 @@ const PROGRESS_BROADCAST_CAPACITY: usize = 256;
 
 /// 一帧从 receiver 推回来的进度,身份验证已完成,wire 字段已映射到领域类型。
 ///
-/// `from_device` 是已通过 `MemberRepositoryPort` 验证过的对端 DeviceId。
+/// `from_device` 是已通过成员身份目录验证过的对端 DeviceId。
 /// `transfer_id` 是 sender 端的 EntryId(UUID v4 字符串),sender 用它
 /// 索引本地 entry 把进度送到对应的 UI 行。
 #[derive(Debug, Clone)]
@@ -97,7 +98,7 @@ impl IrohTransferProgressAdapter {
     pub fn new(
         endpoint: Arc<Endpoint>,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-        member_repo: Arc<dyn MemberRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
     ) -> Self {
@@ -107,7 +108,7 @@ impl IrohTransferProgressAdapter {
             handler_state: Arc::new(HandlerState {
                 gate: InboundPeerGate::new(
                     InboundPeerProtocol::TransferProgress,
-                    member_repo,
+                    identities,
                     peer_admission,
                     fingerprint_factory,
                 ),
@@ -378,6 +379,7 @@ enum ReporterError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uc_core::membership::MemberRepositoryPort;
 
     use std::collections::HashMap as StdHashMap;
     use std::sync::Mutex as StdMutex;
@@ -399,6 +401,7 @@ mod tests {
     struct MemMemberRepo {
         inner: StdMutex<StdHashMap<String, SpaceMember>>,
     }
+    crate::network::iroh::inbound_peer::member_table_identity_directory!(MemMemberRepo);
     #[async_trait]
     impl MemberRepositoryPort for MemMemberRepo {
         async fn get(&self, device_id: &DeviceId) -> Result<Option<SpaceMember>, MembershipError> {
@@ -518,7 +521,7 @@ mod tests {
             // Sender side doesn't use peer_addr_repo (no reporter calls
             // happen here in this test), so any impl is fine.
             Arc::new(MemPeerAddrRepo::default()),
-            member_repo,
+            crate::network::iroh::inbound_peer::member_table_directory(member_repo),
             Arc::new(crate::network::iroh::StaticPeerAdmission(admitted)),
             Arc::new(Sha256IdentityFingerprintFactory),
         );

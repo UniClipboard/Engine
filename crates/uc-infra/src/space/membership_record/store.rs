@@ -193,6 +193,10 @@ impl<E: DbExecutor + Send + Sync> MembershipRecordStorePort for SqliteMembership
         SqliteMembershipRecordStore::load(self)
     }
 
+    fn generation(&self) -> u64 {
+        self.executor.database_generation()
+    }
+
     async fn commit(&self, commit: MembershipRecordCommit) -> Result<(), MembershipLedgerError> {
         let writer = match (&commit.projection, &self.relationships) {
             (None, _) => None,

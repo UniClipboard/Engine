@@ -25,7 +25,7 @@ mod signing;
 mod testing;
 mod worker;
 
-pub use access::build_membership_peer_admission;
+pub use access::{KnownPeerIdentity, PeerAccess, PeerIdentityDirectoryPort};
 pub use decide_device_trust_change::{
     DecideDeviceTrustChange, DecideDeviceTrustChangeError, DecideDeviceTrustChangeResult,
     DeviceTrustChangeChoice,

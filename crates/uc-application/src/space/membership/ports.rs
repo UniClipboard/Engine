@@ -78,6 +78,12 @@ pub trait MembershipRecordStorePort: Send + Sync {
     /// 仅当当前修订号等于 `expected_revision` 且替换记录的修订号更大时，在同一事务中写入记录并
     /// 落实成员读模型；任一部分失败时两者都不改变。
     async fn commit(&self, commit: MembershipRecordCommit) -> Result<(), MembershipLedgerError>;
+
+    /// 记录所在数据库的代号：控制世代切换、恢复出厂等替换数据库后必然改变。代号不同时，此前读到的
+    /// 记录不再代表当前成员状态。不会替换数据库的实现保持为 0。
+    fn generation(&self) -> u64 {
+        0
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

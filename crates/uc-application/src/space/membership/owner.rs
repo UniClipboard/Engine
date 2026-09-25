@@ -37,12 +37,18 @@ pub(crate) struct MembershipOwner {
     clock: Arc<dyn ClockPort>,
     host_events: Arc<dyn HostEventEmitterPort>,
     worker_wake: Arc<dyn WakeSpaceMembershipMaintenancePort>,
-    published: Mutex<Option<Arc<MembershipView>>>,
+    /// 已发布状态及其所属数据库代号；代号与存储当前代号不同即视为失效。
+    published: Mutex<Option<Published>>,
     /// 新近确认了本机位置、尚未交给组密钥投递的对端。只用于提前投递；持久退避仍保证最终送达，
     /// 重启后丢失不影响正确性。
     reachable_peers: Mutex<BTreeSet<DeviceId>>,
     operation: tokio::sync::Mutex<()>,
     changes: tokio::sync::watch::Sender<()>,
+}
+
+struct Published {
+    generation: u64,
+    view: Arc<MembershipView>,
 }
 
 /// 一次提交的结果：提交后（或未变化时的当前）状态与调用方闭包的输出。
@@ -84,13 +90,13 @@ impl MembershipOwner {
         self.clock.now_ms()
     }
 
-    /// 当前已发布的成员状态。首次读取或提交失败后从持久记录重新加载并校验。
+    /// 当前已发布的成员状态。首次读取、提交失败后或记录所在数据库被替换后，从持久记录重新加载并校验。
     pub(crate) async fn load(&self) -> Result<Arc<MembershipView>, MembershipLedgerError> {
-        if let Some(view) = self.published()? {
+        if let Some(view) = self.published_at(self.store.generation())? {
             return Ok(view);
         }
         let _operation = self.operation.lock().await;
-        self.load_exclusive().await
+        Ok(self.load_exclusive().await?.1)
     }
 
     /// 在最新状态上执行 `change` 并条件提交；`change` 不产生变化时不写入。
@@ -99,7 +105,7 @@ impl MembershipOwner {
         change: impl FnOnce(&mut MembershipDraft) -> Result<T, MembershipLedgerError>,
     ) -> Result<MembershipCommitted<T>, MembershipLedgerError> {
         let _operation = self.operation.lock().await;
-        let current = self.load_exclusive().await?;
+        let (generation, current) = self.load_exclusive().await?;
         let mut draft = MembershipDraft::new(Arc::clone(&current), self.clock.now_ms());
         let output = change(&mut draft)?;
         let Some(finished) = draft.finish()? else {
@@ -126,7 +132,7 @@ impl MembershipOwner {
             return Err(error);
         }
         let view = Arc::new(finished.view);
-        self.publish(Arc::clone(&view))?;
+        self.publish(generation, Arc::clone(&view))?;
         self.changes.send_replace(());
         for follow_up in finished.follow_ups {
             match follow_up {
@@ -156,24 +162,15 @@ impl MembershipOwner {
         Ok(MembershipCommitted { view, output })
     }
 
-    /// 控制世代切换后，当前成员记录已换成新世代中的记录：丢弃已发布状态，重新加载校验并通知读取方。
-    pub(crate) async fn reload(&self) -> Result<Arc<MembershipView>, MembershipLedgerError> {
-        let _operation = self.operation.lock().await;
-        self.forget()?;
-        let view = self.load_exclusive().await?;
-        self.changes.send_replace(());
-        Ok(view)
-    }
-
     /// 在最新状态上执行 `change`，为尚未生效的暂存控制世代形成成员记录与读模型计划。
     ///
-    /// 不在当前世代提交，也不发布；暂存世代提升后由 [`Self::reload`] 采用。`change` 必须产生变化。
+    /// 不在当前世代提交，也不发布；暂存世代提升后，Owner 按数据库代号的变化重新加载并采用它。`change` 必须产生变化。
     pub(crate) async fn stage(
         &self,
         change: impl FnOnce(&mut MembershipDraft) -> Result<(), MembershipLedgerError>,
     ) -> Result<StagedMembershipRecord, MembershipLedgerError> {
         let _operation = self.operation.lock().await;
-        let current = self.load_exclusive().await?;
+        let (_, current) = self.load_exclusive().await?;
         let mut draft = MembershipDraft::new(current, self.clock.now_ms());
         change(&mut draft)?;
         let finished = draft.finish()?.ok_or(MembershipLedgerError::Conflict)?;
@@ -209,40 +206,54 @@ impl MembershipOwner {
         self.worker_wake.schedule_at(due_at_ms, self.clock.now_ms());
     }
 
-    async fn load_exclusive(&self) -> Result<Arc<MembershipView>, MembershipLedgerError> {
-        if let Some(view) = self.published()? {
-            return Ok(view);
+    /// 返回状态及其所属数据库代号。代号读在加载之前：加载期间数据库被替换时，下一次读取会再次加载。
+    async fn load_exclusive(&self) -> Result<(u64, Arc<MembershipView>), MembershipLedgerError> {
+        let generation = self.store.generation();
+        if let Some(view) = self.published_at(generation)? {
+            return Ok((generation, view));
         }
+        let replaced = self.lock_published()?.is_some();
         let record = self.store.load().await?;
         let view = Arc::new(MembershipView::from_record(record)?);
-        self.publish(Arc::clone(&view))?;
-        Ok(view)
+        self.publish(generation, Arc::clone(&view))?;
+        if replaced {
+            // 记录所在数据库已被替换，读取方看到的成员状态随之改变。
+            self.changes.send_replace(());
+        }
+        Ok((generation, view))
     }
 
-    fn published(&self) -> Result<Option<Arc<MembershipView>>, MembershipLedgerError> {
+    fn published_at(
+        &self,
+        generation: u64,
+    ) -> Result<Option<Arc<MembershipView>>, MembershipLedgerError> {
         Ok(self
-            .published
-            .lock()
-            // 锁中毒：PoisonError 持有 guard，不能作为来源保存。
-            .map_err(|_| MembershipLedgerError::unavailable())?
-            .clone())
+            .lock_published()?
+            .as_ref()
+            .filter(|published| published.generation == generation)
+            .map(|published| Arc::clone(&published.view)))
     }
 
-    fn publish(&self, view: Arc<MembershipView>) -> Result<(), MembershipLedgerError> {
-        *self
-            .published
-            .lock()
-            // 锁中毒：PoisonError 持有 guard，不能作为来源保存。
-            .map_err(|_| MembershipLedgerError::unavailable())? = Some(view);
+    fn publish(
+        &self,
+        generation: u64,
+        view: Arc<MembershipView>,
+    ) -> Result<(), MembershipLedgerError> {
+        *self.lock_published()? = Some(Published { generation, view });
         Ok(())
     }
 
-    fn forget(&self) -> Result<(), MembershipLedgerError> {
-        *self
-            .published
+    fn lock_published(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, Option<Published>>, MembershipLedgerError> {
+        self.published
             .lock()
             // 锁中毒：PoisonError 持有 guard，不能作为来源保存。
-            .map_err(|_| MembershipLedgerError::unavailable())? = None;
+            .map_err(|_| MembershipLedgerError::unavailable())
+    }
+
+    fn forget(&self) -> Result<(), MembershipLedgerError> {
+        *self.lock_published()? = None;
         Ok(())
     }
 }

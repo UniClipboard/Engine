@@ -94,12 +94,11 @@ impl JoinerAdmissionService {
 }
 
 impl JoinerAdmissionService {
-    /// 目标控制世代已生效：以新世代的成员记录重新加载 Owner，再建立本机成员状态。
+    /// 目标控制世代已生效：Owner 按数据库代号的变化读取新世代的记录，再建立本机成员状态。
     async fn establish_membership(
         &self,
         membership: JoinerMembershipStart,
     ) -> Result<(), MembershipLedgerError> {
-        self.members.reload().await?;
         let JoinerMembershipStart {
             space_id,
             local_device_id,

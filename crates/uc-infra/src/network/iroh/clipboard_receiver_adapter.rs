@@ -15,12 +15,12 @@
 //! 32-byte Ed25519 public key. The receiver feeds those bytes into the
 //! same [`IdentityFingerprintFactoryPort`] that `IrohIdentityStore` uses
 //! when persisting the local fingerprint, recovers the remote's
-//! `IdentityFingerprint`, and looks it up in [`MemberRepositoryPort`].
+//! `IdentityFingerprint`, and looks it up in [`PeerIdentityDirectoryPort`].
 //! This invariant was established by the T2 probe
 //! (`tests/iroh_clipboard_identity_probe.rs`) — no new port method is
 //! needed and no `EndpointId` type leaks above the adapter.
 //!
-//! Unknown peers (fingerprint not in `member_repo`) receive
+//! Unknown peers (fingerprint not in the identity directory) receive
 //! [`AckCode::Rejected`] and the connection is closed. They never make it
 //! to the broadcast stream, so the application runtime does not need a
 //! second identity rejection path.
@@ -35,6 +35,7 @@
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use uc_application::deps::PeerIdentityDirectoryPort;
 use uc_application::deps::{ClipboardDelivery, ClipboardReceiverPort};
 use uc_observability_contract::error_source::io_error_kind;
 
@@ -47,7 +48,7 @@ use tracing::{debug, instrument, warn, Instrument};
 
 #[cfg(test)]
 use uc_core::ids::DeviceId;
-use uc_core::membership::{MemberRepositoryPort, PeerAdmissionPort};
+use uc_core::membership::PeerAdmissionPort;
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::{InboundClipboard, InboundClipboardDisposition, InboundClipboardReceipt};
 use uc_observability_contract::diagnostics::connectivity::{
@@ -89,7 +90,7 @@ struct HandlerState {
 impl IrohClipboardReceiverAdapter {
     pub fn new(
         endpoint: Arc<Endpoint>,
-        member_repo: Arc<dyn MemberRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
     ) -> Self {
@@ -98,7 +99,7 @@ impl IrohClipboardReceiverAdapter {
             endpoint,
             gate: InboundPeerGate::new(
                 InboundPeerProtocol::Clipboard,
-                member_repo,
+                identities,
                 peer_admission,
                 fingerprint_factory,
             ),
@@ -358,6 +359,7 @@ async fn emit_ack(send: &mut iroh::endpoint::SendStream, ack: AckCode) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uc_core::membership::MemberRepositoryPort;
 
     use std::collections::HashMap;
     use std::sync::{Arc, OnceLock};
@@ -474,6 +476,7 @@ mod tests {
     struct MemMemberRepo {
         inner: Mutex<HashMap<String, SpaceMember>>,
     }
+    crate::network::iroh::inbound_peer::member_table_identity_directory!(MemMemberRepo);
     #[async_trait]
     impl MemberRepositoryPort for MemMemberRepo {
         async fn get(&self, device_id: &DeviceId) -> Result<Option<SpaceMember>, MembershipError> {
@@ -599,7 +602,7 @@ mod tests {
 
         let adapter = IrohClipboardReceiverAdapter::new(
             Arc::clone(&receiver_endpoint),
-            member_repo,
+            crate::network::iroh::inbound_peer::member_table_directory(member_repo),
             Arc::new(crate::network::iroh::StaticPeerAdmission(admitted)),
             Arc::new(Sha256IdentityFingerprintFactory),
         );

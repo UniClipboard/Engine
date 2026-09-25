@@ -19,6 +19,7 @@ const OTHER_KEY: [u8; 32] = [0x22; 32];
 
 struct Members(Result<Vec<SpaceMember>, ()>);
 
+crate::network::iroh::inbound_peer::member_table_identity_directory!(Members);
 #[async_trait]
 impl MemberRepositoryPort for Members {
     async fn get(&self, _: &DeviceId) -> Result<Option<SpaceMember>, MembershipError> {
@@ -148,11 +149,17 @@ async fn a_fingerprint_derivation_failure_is_its_own_reason() {
 async fn resolution_failures_keep_their_typed_source() {
     let read = resolver(Err(())).resolve(&KEY).await.unwrap_err();
     assert_eq!(read.rejection(), InboundPeerRejection::MemberReadFailed);
-    let source = std::error::Error::source(&read).expect("member read failure keeps its source");
-    assert!(matches!(
-        source.downcast_ref::<MembershipError>(),
-        Some(MembershipError::Repository(_))
-    ));
+    // 身份目录（049 S5）把读取失败包成 `MembershipLedgerError`，原始失败保留在其来源链中。
+    let mut source = std::error::Error::source(&read);
+    let mut original = None;
+    while let Some(error) = source {
+        original = original.or(error.downcast_ref::<MembershipError>());
+        source = error.source();
+    }
+    assert!(
+        matches!(original, Some(MembershipError::Repository(_))),
+        "member read failure keeps its source"
+    );
 
     let derivation = PeerIdentityResolver::new(
         Arc::new(Members(Ok(vec![member("a", &KEY)]))),

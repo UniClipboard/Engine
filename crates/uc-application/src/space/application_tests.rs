@@ -833,6 +833,7 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
             },
             membership: SpaceMembershipAdapters {
                 membership_records: records,
+                peer_access: PeerAccess::unbound(),
                 historical_membership_signatures: passive.clone(),
                 current_member_signatures: passive.clone(),
                 membership_identity: passive.clone(),

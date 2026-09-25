@@ -81,9 +81,9 @@ pub struct SyncEngineDeps {
     pub analytics: Arc<dyn uc_observability_contract::analytics::AnalyticsPort>,
     /// Dedicated file-backed storage for the long-lived iroh network identity.
     pub iroh_identity_storage: Arc<dyn uc_core::ports::SecureStoragePort>,
-    /// Authoritative authorization check used by every inbound Iroh handler
-    /// after it resolves an endpoint identity to a known device.
-    pub peer_admission: Arc<dyn uc_core::membership::PeerAdmissionPort>,
+    /// 入站 Iroh 入口的身份目录与访问判定：读取成员状态负责人发布的状态，
+    /// Space 应用组装时绑定负责人。
+    pub peer_access: Arc<uc_application::deps::PeerAccess>,
     /// peer address repo — best-effort transport-address writes after pairing,
     /// dialed by F1 `ensure_reachable_all`.
     pub peer_addr_repo: Arc<dyn uc_core::ports::PeerAddressRepositoryPort>,

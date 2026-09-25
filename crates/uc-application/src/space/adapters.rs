@@ -20,9 +20,9 @@ use super::membership::{
     ApplyMembershipMemberFactsPort, ApplyMembershipSecurityPort, CurrentMemberSignaturePort,
     LoadCurrentJoinStatusPort, LoadDeviceTrustObservationsPort,
     MembershipBranchRecoveryChannelPort, MembershipNetworkActivityPort, MembershipRecordStorePort,
-    PrepareMembershipBranchRecoveryMaterialPort, PrepareMembershipBranchRecoveryRecipientPort,
-    PrepareMembershipBranchTransitionPort, RefreshVerifiedPeerAddressPort,
-    RestrictedMembershipDeliveryPort,
+    PeerAccess, PrepareMembershipBranchRecoveryMaterialPort,
+    PrepareMembershipBranchRecoveryRecipientPort, PrepareMembershipBranchTransitionPort,
+    RefreshVerifiedPeerAddressPort, RestrictedMembershipDeliveryPort,
 };
 
 /// Engine 一次提交给 Space admission owner 的完整 adapter 集合。
@@ -57,6 +57,8 @@ pub struct SpaceAdmissionAdapters {
 /// admission 与 membership 共用但只由一侧持有的能力不得在两个 bundle 中重复。
 pub struct SpaceMembershipAdapters {
     pub membership_records: Arc<dyn MembershipRecordStorePort>,
+    /// 网络入口已持有的对端访问判定与身份目录；组装时绑定成员状态负责人。
+    pub peer_access: Arc<PeerAccess>,
     pub historical_membership_signatures: Arc<dyn HistoricalMembershipSignatureVerifier>,
     pub current_member_signatures: Arc<dyn CurrentMemberSignaturePort>,
     pub membership_identity: Arc<dyn CurrentMembershipIdentityPort>,

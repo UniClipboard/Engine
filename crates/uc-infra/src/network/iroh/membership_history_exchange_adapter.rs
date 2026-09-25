@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use uc_application::deps::PeerIdentityDirectoryPort;
 
 use async_trait::async_trait;
 use iroh::endpoint::Connection;
@@ -15,9 +16,8 @@ use uc_application::deps::{
 };
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    MemberRepositoryPort, MembershipHistoryAckV3, MembershipHistoryExchangeEndpointPort,
-    MembershipHistoryExchangeError, MembershipHistoryExchangePort, MembershipHistoryMessage,
-    MAX_MEMBERSHIP_HISTORY_FRAME_SIZE,
+    MembershipHistoryAckV3, MembershipHistoryExchangeEndpointPort, MembershipHistoryExchangeError,
+    MembershipHistoryExchangePort, MembershipHistoryMessage, MAX_MEMBERSHIP_HISTORY_FRAME_SIZE,
 };
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::{ClockPort, PeerAddressRepositoryPort};
@@ -109,13 +109,13 @@ impl IrohMembershipHistoryExchangeAdapter {
 
     pub(crate) fn handler(
         &self,
-        member_repo: Arc<dyn MemberRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         endpoint: Arc<dyn MembershipHistoryExchangeEndpointPort>,
     ) -> IrohMembershipHistoryExchangeHandler {
         IrohMembershipHistoryExchangeHandler {
             state: Arc::new(HandlerState {
-                identity: PeerIdentityResolver::new(member_repo, fingerprint_factory),
+                identity: PeerIdentityResolver::new(identities, fingerprint_factory),
                 endpoint,
             }),
         }
@@ -808,6 +808,7 @@ mod tests {
 
     struct UnusedMembers;
 
+    crate::network::iroh::inbound_peer::member_table_identity_directory!(UnusedMembers);
     #[async_trait::async_trait]
     impl uc_core::membership::MemberRepositoryPort for UnusedMembers {
         async fn get(

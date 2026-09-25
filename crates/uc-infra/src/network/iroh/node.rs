@@ -24,6 +24,7 @@ use std::str::FromStr;
 use std::sync::Mutex;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use uc_application::deps::ClipboardReceiverPort;
+use uc_application::deps::PeerIdentityDirectoryPort;
 use uc_observability_contract::error_source::io_error_kind;
 
 use super::protocol_router::ProtocolRouterBuilder;
@@ -53,7 +54,7 @@ use uc_application::deps::{
 use uc_core::file_transfer::OutboundProgressReporterPort;
 use uc_core::membership::{
     ContentExchangeGatePort, CurrentMembershipIdentityPort, GroupRevocationPort,
-    GroupUpdateDispatchPort, MemberRepositoryPort, MembershipAttestationEndpointPort,
+    GroupUpdateDispatchPort, MembershipAttestationEndpointPort,
     MembershipHistoryExchangeEndpointPort, PeerAdmissionPort,
 };
 use uc_core::ports::blob::BlobTransferPort;
@@ -660,7 +661,7 @@ impl IrohSessionBuilder {
     /// 复用同一个本机地址 watcher 和 mDNS 实例，不创建额外后台任务。
     pub async fn connection_hints(
         &self,
-        members: Arc<dyn MemberRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
         fingerprints: Arc<dyn IdentityFingerprintFactoryPort>,
     ) -> futures_util::stream::BoxStream<
         'static,
@@ -675,7 +676,7 @@ impl IrohSessionBuilder {
             .stream()
             .skip(1)
             .map(|_| Ok(uc_application::deps::ConnectionHint::NetworkChanged));
-        let identity = Arc::new(PeerIdentityResolver::new(members, fingerprints));
+        let identity = Arc::new(PeerIdentityResolver::new(identities, fingerprints));
         let discovered = self
             .context
             .mdns
@@ -1076,7 +1077,7 @@ impl IrohSessionBuilder {
     pub fn install_peer_reachability(
         &mut self,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-        member_repo: Arc<dyn MemberRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         clock: Arc<dyn ClockPort>,
@@ -1089,7 +1090,7 @@ impl IrohSessionBuilder {
         let adapter = IrohPeerReachabilityAdapter::new_with_recovery(
             Arc::clone(&self.context.endpoint),
             peer_addr_repo,
-            member_repo,
+            identities,
             peer_admission,
             fingerprint_factory,
             clock,
@@ -1148,14 +1149,14 @@ impl IrohSessionBuilder {
     pub fn install_clipboard(
         &mut self,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-        member_repo: Arc<dyn MemberRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         peer_reachability: Arc<dyn PeerReachabilityPort>,
     ) -> Result<ClipboardHandlers, IrohNodeError> {
         let receiver = IrohClipboardReceiverAdapter::new(
             Arc::clone(&self.context.endpoint),
-            member_repo,
+            identities,
             peer_admission,
             fingerprint_factory,
         );
@@ -1196,25 +1197,25 @@ impl IrohSessionBuilder {
     pub fn install_membership_history_exchange(
         &mut self,
         adapter: &IrohMembershipHistoryExchangeAdapter,
-        member_repo: Arc<dyn MemberRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         endpoint: Arc<dyn MembershipHistoryExchangeEndpointPort>,
     ) -> Result<(), IrohNodeError> {
         self.install_session_handler(
             [MEMBERSHIP_HISTORY_EXCHANGE_ALPN],
-            adapter.handler(member_repo, fingerprint_factory, endpoint),
+            adapter.handler(identities, fingerprint_factory, endpoint),
         )
     }
 
     pub fn install_membership_branch_recovery(
         &mut self,
-        member_repo: Arc<dyn MemberRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         endpoint: Arc<dyn IssueMembershipBranchRecoveryPort>,
     ) -> Result<(), IrohNodeError> {
         self.install_session_handler(
             [MEMBERSHIP_BRANCH_RECOVERY_ALPN],
-            IrohMembershipBranchRecoveryHandler::new(member_repo, fingerprint_factory, endpoint),
+            IrohMembershipBranchRecoveryHandler::new(identities, fingerprint_factory, endpoint),
         )
     }
 
@@ -1284,7 +1285,7 @@ impl IrohSessionBuilder {
         device_identity: Arc<dyn DeviceIdentityPort>,
         settings: Arc<dyn SettingsPort>,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-        member_repo: Arc<dyn MemberRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
     ) -> Arc<IrohMembershipGossipTransportAdapter> {
@@ -1300,7 +1301,7 @@ impl IrohSessionBuilder {
             Arc::clone(&session),
             identity,
             peer_addr_repo,
-            member_repo,
+            identities,
             peer_admission,
             fingerprint_factory,
         ))
@@ -1348,12 +1349,12 @@ impl IrohSessionBuilder {
     pub fn install_active_clipboard(
         &mut self,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-        member_repo: Arc<dyn MemberRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
     ) -> Result<ActiveClipboardHandlers, IrohNodeError> {
         let receiver = IrohActiveClipboardReceiverAdapter::new(
-            member_repo,
+            identities,
             peer_admission,
             fingerprint_factory,
         );
@@ -1392,14 +1393,14 @@ impl IrohSessionBuilder {
     pub fn install_active_clipboard_pull(
         &mut self,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-        member_repo: Arc<dyn MemberRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         serve: Arc<dyn ActiveClipboardPullServePort>,
         content_gate: Arc<dyn ContentExchangeGatePort>,
     ) -> Result<ActiveClipboardPullHandlers, IrohNodeError> {
         let serve_adapter = IrohActiveClipboardPullServeAdapter::new(
-            member_repo,
+            identities,
             peer_admission,
             fingerprint_factory,
             serve,
@@ -1426,19 +1427,19 @@ impl IrohSessionBuilder {
     ///   application 层 worker 订阅以翻译成 host event。
     ///
     /// 必须在 [`spawn`](Self::spawn) 之前调用。和 install_clipboard 复用
-    /// member_repo / fingerprint_factory 做对端身份验证,陌生 peer 推上
+    /// identities / fingerprint_factory 做对端身份验证,陌生 peer 推上
     /// 来的进度直接被丢弃。
     pub fn install_transfer_progress(
         &mut self,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-        member_repo: Arc<dyn MemberRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
     ) -> Result<TransferProgressHandlers, IrohNodeError> {
         let adapter = IrohTransferProgressAdapter::new(
             Arc::clone(&self.context.endpoint),
             peer_addr_repo,
-            member_repo,
+            identities,
             peer_admission,
             fingerprint_factory,
         );
@@ -2202,6 +2203,7 @@ mod tests {
 
     #[derive(Default)]
     struct EmptyMemberRepo;
+    crate::network::iroh::inbound_peer::member_table_identity_directory!(EmptyMemberRepo);
     #[async_trait]
     impl uc_core::membership::MemberRepositoryPort for EmptyMemberRepo {
         async fn get(

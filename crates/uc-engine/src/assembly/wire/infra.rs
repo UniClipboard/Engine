@@ -99,12 +99,6 @@ pub(super) fn build_space_access_ports(
         space_security_reset,
     )
 }
-pub(super) fn build_peer_admission_port(
-    membership_records: Arc<dyn uc_application::deps::MembershipRecordStorePort>,
-) -> Arc<dyn uc_core::membership::PeerAdmissionPort> {
-    uc_application::deps::build_membership_peer_admission(membership_records)
-}
-
 pub(super) fn build_search_assembly(
     db_pool_for_search: DbPool,
     space_access_ports: &SpaceAccessPorts,
