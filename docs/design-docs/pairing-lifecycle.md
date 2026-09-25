@@ -162,46 +162,48 @@ stateDiagram-v2
     Prepared --> MemberFactsApplied : 成员事实效果完成
     MemberFactsApplied --> SecurityApplied : 安全效果完成
     SecurityApplied --> Activated : 激活及发布完成
-    Activated --> [*] : 完成本条效果
+    Activated --> [*] : 激活即从账本删除
 ```
 
-效果按 `event_id` 幂等恢复。中断从已保存阶段继续，不删除正式 Add/Remove 来回退。
+效果是 Core 成员账本的未完成效果，由 `MembershipWorker` 按因果深度每次推进一步、Owner 在提交中推进阶段；能力按 `event_id` 幂等。
+中断从已保存阶段继续，不删除正式 Add/Remove 来回退；已激活的效果不再保存。
 安全效果可能生成设备组更新；效果已完成不代表这些更新已经送达每个保留成员。
 
 ### 移除通知与密钥投递是两条不同的尾部
 
 ```mermaid
 flowchart TD
-    R[正式 Remove 与安全效果] -->|给被移除设备的受限历史通知| N[peer_reconciliation.restricted_delivery]
+    R[正式 Remove 与安全效果] -->|被移除设备成为 PeerLink::Departing| N[移除通知待办]
     R -->|给保留成员的密钥更新| K[group update store]
-    N -->|投递成功并持久确认| C[删除已确认投递项]
-    N -->|窗口内延期或被拒绝| W[保留投递项，本轮记延期或稳定失败]
+    N -->|送达并持久确认| C[删除该对端]
+    N -->|延期或被拒绝| W[保留待办，本轮记延期或稳定失败]
     W -->|下一轮维护| N
-    N -->|非当前成员对端窗口到期，CAS 核对记录未变| X[结束该设备核对记录]
+    N -->|提交起 5 分钟到期| X[删除该对端，结束通知责任]
     K -->|认证投递并持久确认| A[结清对应更新]
     K -->|离线或传输失败| B[保存失败与下次重试时间]
     B -->|到达重试时间| K
     K -->|稳定拒绝| U[需要处理]
 ```
 
-受限通知不能重新授予同步资格，也不向被移除设备投递保留成员的新密钥。窗口到期表示本机结束通知责任，
-不表示移除目标已经获知。窗口按对端是否仍是当前生效成员判断，不区分投递类型：发给已非成员对端的 `Decision` 投递同样按该窗口结束；
-仍是当前成员的受限投递不使用该窗口丢弃。
+移除通知不能重新授予同步资格，也不向被移除设备投递保留成员的新密钥。离开窗口到期表示本机结束通知责任，
+不表示移除目标已经获知。`Departing` 只属于已不在有效成员中的设备，入站判定一律拒绝它；移除通知与离开到期不阻塞
+设备更新完成。仍是当前成员的对端的决定投递属于 `PeerLink::Member`，不使用离开窗口；本机为移除目标时不产生决定投递
+（被移除方接受后不回复决定，见 [ADR-027](decisions/027-single-owner-space-membership-state.md#协议语义澄清)）。
 
 ## 时钟、恢复与展示的边界
 
-本机收尾期限统一由 `SettlementWindow` 表达：或沿用既有截止时间（`until`），或从首次处理时起算固定时长
-（`from_stored_start`）。配对尝试契约 `AdmissionAttemptTimeline` 是双方协商的固定五分钟边界，不属于该类型。
+准入的本机收尾期限由 `SettlementWindow` 表达：或沿用既有截止时间（`until`），或从首次处理时起算固定时长
+（`from_stored_start`）。成员移除的离开窗口由成员账本保存（`DEPARTURE_WINDOW_MS`）。配对尝试契约 `AdmissionAttemptTimeline` 是双方协商的固定五分钟边界，不属于该类型。
 
 | 工作 | 当前时间模型 | 到期或失败后 |
 | --- | --- | --- |
 | 配对尝试 | `AdmissionAttemptTimeline`（协议契约，非本机收尾期限）：开始时间加 300 秒；解析、认证、重连和重启不续期 | 可终止阶段先本机保存终态，再处理网络；已正式完成不回滚 |
 | Joiner 放弃通知 | `SettlementWindow::until(attempt 截止时间)`，不另开窗口 | 无本机切换待办时，到期、缺少期限或通知协议不是当前版本可结束待发送项，保留围栏 |
-| 已非当前成员对端的受限通知 | `SettlementWindow::from_stored_start(300 秒, updated_at_ms)`：提交时不计时（写为 0），首次维护处理该投递时保存起点 | 到期先核对观察到的整条记录未变化，再条件删除；不宣称对端确认 |
+| 被移除对端的移除通知 | 账本 `PeerLink::Departing`：窗口起点为移除提交时刻，300 秒到期（旧记录迁移时从迁移时刻重新计时） | 到期由 Worker 以“离开窗口到期”输入交回 Owner 删除该对端；不宣称对端确认 |
 | 设备组密钥更新 | store 的持久 `next_attempt_at_ms` 与失败分类 | 离线/传输失败延期，稳定拒绝需处理；对端刚与本机成功交换成员历史时，发给它的未拒绝更新不等延期到期即投递；没有共用配对五分钟终止规则 |
 
-`recover_pending` 负责准入续跑与准入清理；成员维护按准入、受限通知、成员效果、冲突恢复、密钥投递、条件历史同步、清理的顺序触发。
-受限通知先于成员效果执行，因此移除刚提交的那一轮可能先尝试通知，再推进成员效果。
+`recover_pending` 负责准入续跑与准入清理；成员维护先恢复准入，再由 `MembershipWorker` 按账本待办依次推进成员效果、冲突恢复、
+密钥投递，最后执行移除通知、决定投递、离开到期与历史同步。成员效果先于移除通知执行。
 恢复报告中的 `advanced_count` 只表示某阶段推进，单轮 `Completed` 也不能替代跨记录核实。
 `holds_pairing_open`、恢复待办和设备更新汇总回答不同问题；终止记录仍可有后台待办，却不应仅因其存在就被解释成配对仍在进行。
 
@@ -212,5 +214,5 @@ flowchart TD
 - [状态分类与副作用](../../crates/uc-core/src/membership/space_admission/state/aggregate.rs)、[终态数据](../../crates/uc-core/src/membership/space_admission/state/terminal.rs)。
 - [Joiner 转换](../../crates/uc-core/src/membership/space_admission/state/transition/joiner.rs)、[Sponsor 转换](../../crates/uc-core/src/membership/space_admission/state/transition/sponsor.rs)、[Helper 转换](../../crates/uc-core/src/membership/space_admission/state/transition/helper.rs)、[本机终止与通知收尾](../../crates/uc-core/src/membership/space_admission/state/transition/terminal.rs)。
 - [最终确认处理](../../crates/uc-application/src/space/admission/protocol/sponsor/handle_complete_ack/execute.rs)、[准入恢复](../../crates/uc-application/src/space/admission/protocol/recovery/recover_pending/execute.rs)。
-- [成员效果模型](../../crates/uc-application/src/space/membership/ledger/model.rs)、[受限投递](../../crates/uc-application/src/space/membership/ledger/restricted_delivery.rs)、[密钥投递](../../crates/uc-application/src/space/membership/group_update_delivery.rs)、[设备状态查询](../../crates/uc-application/src/space/membership/query_device_trust/use_case.rs)。
+- [成员账本](../../crates/uc-core/src/membership/ledger/mod.rs)、[待办执行器](../../crates/uc-application/src/space/membership/worker.rs)、[密钥投递](../../crates/uc-application/src/space/membership/group_update_delivery.rs)、[设备状态查询](../../crates/uc-application/src/space/membership/query_device_trust/use_case.rs)。
 - [Space Application 负责人和恢复地图](space-application.md)、[有界配对决策](decisions/026-bounded-admission-lifecycle.md)、[设备信任与核对规格](../product-specs/021-device-trust-reconciliation.md)。

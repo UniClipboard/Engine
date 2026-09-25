@@ -2,7 +2,7 @@
 
 ## 状态与完整责任
 
-- **状态**：实施中；S0–S5 与 S3.a 已完成（见“实施记录”），下一步 S6。
+- **状态**：已完成。S0–S6 与 S3.a 完成（见“实施记录”）；验收第 8 项（实体双 Desktop）跳过，需另行授权。
 - **日期**：2026-09-23。
 - **依据**：[ADR-027](../../design-docs/decisions/027-single-owner-space-membership-state.md)；2026-09-23 双 Desktop
   profile 配对后移除，移除方设备不消失、被移除方永久“正在更新空间设备状态”的诊断（结论见 ADR-027 背景）。
@@ -48,10 +48,10 @@
 
 | 计划 | 关系 | 处理 |
 | --- | --- | --- |
-| [Core 边界收口](2026-09-23-core-boundary-remediation.md) | A1、A3、A7 由本计划的聚合与 Owner 直接消除；A4 的判定式改由 Core 聚合提供 | 本计划完成时在该计划中标注这四项已由 049 关闭，其余项不在本计划范围 |
-| [入站对端身份与网络准入](../completed/2026-09-23-inbound-peer-admission.md) | 其 Infra `InboundPeerGate` 与拒绝分类保留为入口；身份与授权来源改为 `PeerAccess` 快照 | 该计划已于 2026-09-25 收尾，S5 可开始；不改其拒绝原因与诊断事件 |
-| [单一空间工作负责人](2026-09-20-single-space-work-owner.md) | 配对与普通成员工作互斥的运行资格保留 | `MembershipWorker` 执行待办前沿用同一工作许可，不新增第二套模式事实 |
-| [034 确定性虚拟 Peer Network](034-deterministic-virtual-peer-network-test-suite.md) | S3 的应用层多节点场景复用并扩展其虚拟网络 | 扩展只加节点数与待办驱动，不在网络中复制业务规则 |
+| [Core 边界收口](../active/2026-09-23-core-boundary-remediation.md) | A1、A3、A7 由本计划的聚合与 Owner 直接消除；A4 的判定式改由 Core 聚合提供 | 本计划完成时在该计划中标注这四项已由 049 关闭，其余项不在本计划范围 |
+| [入站对端身份与网络准入](2026-09-23-inbound-peer-admission.md) | 其 Infra `InboundPeerGate` 与拒绝分类保留为入口；身份与授权来源改为 `PeerAccess` 快照 | 该计划已于 2026-09-25 收尾，S5 可开始；不改其拒绝原因与诊断事件 |
+| [单一空间工作负责人](../active/2026-09-20-single-space-work-owner.md) | 配对与普通成员工作互斥的运行资格保留 | `MembershipWorker` 执行待办前沿用同一工作许可，不新增第二套模式事实 |
+| [034 确定性虚拟 Peer Network](../active/034-deterministic-virtual-peer-network-test-suite.md) | S3 的应用层多节点场景复用并扩展其虚拟网络 | 扩展只加节点数与待办驱动，不在网络中复制业务规则 |
 
 ## 目标结构
 
@@ -556,4 +556,42 @@ S3 已完成（2026-09-24 用户确认）；剩余失败的诊断转入 S3.a。S
 | `bash scripts/testing/run-test-group.sh membership-e2e` | 51/51 |
 | `cargo check -p uc-infra --features lan-compat --all-targets --locked` | 通过 |
 | `cargo metadata --locked`、`cargo check --workspace --all-targets --locked`、`cargo fmt --all -- --check`、`check-rust-style.mjs`、`check-engine-repository.mjs`、`git diff --check` | 通过（`uc-ohos-napi` 测试既有未使用导入告警，非本次改动） |
+| 实体双 Desktop 复现场景 | 跳过（需另行授权） |
+
+### S6（2026-09-25，分支 `hp/uni/t-0010-android`）
+
+开工前核实：ADR-027“删除”一节中 Application 侧的旧代码（闭包提交、效果执行器与效果日志、受限投递与
+反熵拆分、投影清理步骤、维护固定步骤链、设备信任查询的独立推导、`PeerIdentityResolver` 对成员表的依赖）
+已在 S3–S5 删除。本切片处理只剩遗留引用的 Core 成员模块（用户确认范围）：
+
+- 删除 Core `workspace_convergence`（旧成员状态机 `SpaceMembershipState` 及其快照、事件、效果与错误）；仍在用的
+  `AdmissionChangeFacts` 移到 `admission_change_facts.rs`。Engine 中仅测试使用的 `workspace_convergence_summary`
+  映射一并删除；公开契约 `WorkspaceConvergenceSummary` 不变。
+- 删除 `PendingRemovalFacts`、`CurrentWorkspacePeerScope*`、`MembershipAdmissionGatePort`，以及
+  `CurrentMembershipAnnouncementPort::wait_for_announcement_change`（均无生产调用方）。
+- 删除成员证明/gossip 协议（用户决定整个协议一起删）：Core `gossip.rs`、证明与 gossip 的 port 和错误、
+  `MembershipSecurityUpdatePort`（只服务中继组密钥更新）；Infra `membership_attestation_adapter.rs`、节点上的构造与
+  安装函数和路由中的 `uniclipboard/membership-gossip/1`；观测契约中的 `MembershipAttestation`/`MembershipGossip`
+  连接用途与入站协议取值。核实结论：Engine 从未安装该协议的处理器，出站方也无生产调用方，协议在生产中不可达，
+  删除不改变设备间行为；旧版本对端拨号该 ALPN 此前就会失败。本机身份与公告资料改由新的
+  `membership_identity_adapter.rs`（`IrohMembershipIdentityAdapter`）同时提供，迁入原有三项身份测试并新增公告资料测试。
+- `settlement_window` 经核实仍被准入状态使用，保留。
+- 核实 Core 边界计划 A1/A3/A4/A7 时发现 A3、A4 的规则只是从 Infra 移到了 Application（`projection.rs`、
+  `access.rs`），未达到“由 Core 提供”的目标。改为 Core `MembershipLedger::read_model` 与
+  `admits_inbound_peer`，逻辑逐项不变，Application 只委托；新增两项 Core 测试。A7 只部分关闭：
+  `MembershipConflictStatus`、`MembershipBranchRecoverySessionState` 仍在 Application，分叉恢复内部阶段不在本计划范围。
+- 文档：`space-application.md` 按 Owner/Worker/`PeerAccess` 重写成员相关章节；`pairing-lifecycle.md` 的移除通知与
+  维护顺序；`membership-history-ownership.md` 的负责人与 V5 格式；Core 边界计划标注 A1、A3、A4、C4、C7 已修复、
+  A7 部分修复；规格 022 与产品规格 021 加注当前结构入口；重新生成 `docs/generated/observability-inventory.md`
+  （上次生成于 2026-09-18，差异包含此后其他改动造成的行号漂移）。
+
+验证结果：
+
+| 检查 | 结果 |
+| --- | --- |
+| `cargo nextest run -p uc-core -p uc-application -p uc-infra -p uc-observability-contract -p uc-engine --locked` | 2993 项全部通过（比 S5 少 32 项：删除的协议适配器、节点安装与 Engine 映射测试，另新增 3 项） |
+| `cargo test -p uc-infra --locked --test inbound_peer_rejection_diagnostics --test inbound_peer_single_owner -- --include-ignored` | 1/1、5/5 |
+| `bash scripts/testing/run-test-group.sh membership-e2e` | 51/51 |
+| `cargo check -p uc-infra --features lan-compat --all-targets --locked`、`cargo check -p uc-engine --features dev-tools --all-targets --locked` | 通过 |
+| `cargo metadata --locked`、`cargo check --workspace --all-targets --locked`、`cargo fmt --all -- --check`、`check-rust-style.mjs`、`check-engine-repository.mjs`、`check-observability-privacy.mjs`、`git diff --check` | 通过（`uc-ohos-napi` 测试既有未使用导入告警，非本次改动） |
 | 实体双 Desktop 复现场景 | 跳过（需另行授权） |

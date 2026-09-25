@@ -21,7 +21,7 @@
    [`space_security_store/revocation.rs`](../../../crates/uc-infra/src/db/repositories/space_security_store/revocation.rs)
    与 [`legacy_bootstrap.rs`](../../../crates/uc-infra/src/db/repositories/space_security_store/legacy_bootstrap.rs)
    中的 `anyhow!(error.to_string())` 让 SQLite `BUSY` 无法被识别，结论只能停在推断
-   （见 [049 计划](../active/049-single-owner-space-membership-rewrite.md)失败诊断表）。
+   （见 [049 计划](049-single-owner-space-membership-rewrite.md)失败诊断表）。
 2. **流程判断失效。** 生产代码依据 source chain 做分支，例如
    [`is_cancel_error`](../../../crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs) 查找
    `BlobTransferError::Cancelled`，[`session_supervisor/lifecycle.rs`](../../../crates/uc-engine/src/runtime/session_supervisor/lifecycle.rs)

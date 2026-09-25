@@ -2,7 +2,7 @@
 
 ## 状态与完整责任
 
-- **状态**：提议。违规清单已完成第一轮盘点，尚未开始修复。
+- **状态**：提议。违规清单已完成第一轮盘点；A1、A3、A4、C4、C7 已由[执行计划 049](../completed/049-single-owner-space-membership-rewrite.md)修复，A7 部分修复，其余尚未开始。
 - **日期**：2026-09-23。
 - **依据**：[Core 设计规范](../../design-docs/layers/core.md)已重写。旧版本自身有冲突：§9.1 称“配对状态机不属于 core”，§4.5 又要求有生命周期的状态机在 Core 用 `apply` 建模；§2.2、§6.3 禁止序列化格式进入 Core，§4.5.3 又要求 Core 保证序列化布局稳定。本计划列出现有代码与新规范之间的全部已知差距。
 - **完整负责人**：每一项由表中“目标负责人”列出的模块负责；整体顺序与验收由本计划负责。
@@ -25,13 +25,13 @@
 
 | # | 违规 | 证据 | 目标负责人 |
 | --- | --- | --- | --- |
-| A1 | 新成员历史 head 产生后，旧 ACK 失效、重建逐设备传播义务的规则写在 Infra | [`sponsor/complete.rs`](../../../crates/uc-infra/src/space/admission/sponsor/complete.rs) `activate_inner` 重建 `peer_reconciliation`：清空 `confirmed_position`，登记 `pending_since_revision` | Core membership 给出新 head 下每个设备的传播义务；Application ledger 保存 |
+| A1 | **已修复（049 S4）**：Infra 激活不再重建对端核对记录，新 head 下的确认失效由 Core 成员账本处理。原违规：新成员历史 head 产生后，旧 ACK 失效、重建逐设备传播义务的规则写在 Infra | [`sponsor/complete.rs`](../../../crates/uc-infra/src/space/admission/sponsor/complete.rs) `activate_inner` 重建 `peer_reconciliation`：清空 `confirmed_position`，登记 `pending_since_revision` | Core membership 给出新 head 下每个设备的传播义务；Application ledger 保存 |
 | A2 | “哪些成员接收安全更新”的规则在 Infra 实现了至少三份 | [`sponsor/candidate.rs:159`](../../../crates/uc-infra/src/space/admission/sponsor/candidate.rs)、[`space_control_generation/mod.rs:960`](../../../crates/uc-infra/src/security/space_control_generation/mod.rs)、[`space/security/access.rs:3358`](../../../crates/uc-infra/src/space/security/access.rs)，各自从 `active_members()` 排除本机、重新加入设备或本机签名密钥 | Core 提供唯一的接收者集合函数 |
-| A3 | 由成员历史投影出 `SpaceMember`、`TrustedPeer` 的规则在 Infra | [`space_control_generation/mod.rs:940`](../../../crates/uc-infra/src/security/space_control_generation/mod.rs)、[`membership_member_facts.rs:79`](../../../crates/uc-infra/src/space/adapters/membership_member_facts.rs) | Core 提供“历史 → 当前成员与可信设备集合”的投影 |
-| A4 | 网络准入判定写在 Infra | [`space/security/peer_admission.rs:32`](../../../crates/uc-infra/src/space/security/peer_admission.rs)：`local_join_active`、有 lineage、关系为 `Consistent` 才放行 | 已由[入站对端准入计划](../completed/2026-09-23-inbound-peer-admission.md)迁往 Application ledger。按新规范，判定式本身应由 Core 提供，Application 只负责读取；实施该计划时一并处理 |
+| A3 | **已修复（049 S4–S6）**：Infra 中的投影已删除，成员读模型由 Core `MembershipLedger::read_model` 推导、`MembershipOwner` 随记录同一事务落实。原违规：由成员历史投影出 `SpaceMember`、`TrustedPeer` 的规则在 Infra | [`space_control_generation/mod.rs:940`](../../../crates/uc-infra/src/security/space_control_generation/mod.rs)、[`membership_member_facts.rs:79`](../../../crates/uc-infra/src/space/adapters/membership_member_facts.rs) | Core 提供“历史 → 当前成员与可信设备集合”的投影 |
+| A4 | **已修复（049 S5–S6）**：判定式为 Core `MembershipLedger::admits_inbound_peer`，Application `PeerAccess` 只读取 Owner 发布的状态。原违规：网络准入判定写在 Infra | [`space/security/peer_admission.rs:32`](../../../crates/uc-infra/src/space/security/peer_admission.rs)：`local_join_active`、有 lineage、关系为 `Consistent` 才放行 | 已由[入站对端准入计划](../completed/2026-09-23-inbound-peer-admission.md)迁往 Application ledger。按新规范，判定式本身应由 Core 提供，Application 只负责读取；实施该计划时一并处理 |
 | A5 | 空间切换的下一阶段由 Infra 选择，并直接写入 Core 的 `phase` 字段 | [`v3_admission_space_transition.rs:333`](../../../crates/uc-infra/src/security/v3_admission_space_transition.rs) 的 `next.phase = phase`，以及 `match transition.phase` 选择下一步；Core 只提供 `can_advance_to` 守卫 | Core `cross_space_transition` 用 `apply` 决定下一阶段；Infra 只执行对应能力 |
 | A6 | 邀请只能被领取一次的判定写在 Infra | [`sponsor/state.rs`](../../../crates/uc-infra/src/space/admission/sponsor/state.rs) 的 `claimed_invitations`；Core 的 `PairingInvitation::consume` 在生产代码中没有调用方 | Core 给出跨记录判定；Infra 在事务中执行 |
-| A7 | 持久生命周期定义在 Application，且可被直接改写 | [`ledger/model.rs`](../../../crates/uc-application/src/space/membership/ledger/model.rs) 中的 `MembershipConflictStatus`、`MembershipEffectPhase`、`PeerHistorySyncState`、`MembershipBranchRecoverySessionState` 都是公开字段，被 7 个文件直接改写（如 `ledger/effects.rs:88`、`recover_conflict/use_case.rs`） | 状态与转换迁入 Core；Application 保存并推进 |
+| A7 | **部分修复（049）**：`MembershipEffectPhase`、`PeerHistorySyncState` 已由 Core 成员账本的效果阶段与 `PeerLink` 取代；`MembershipConflictStatus`、`MembershipBranchRecoverySessionState` 仍在 Application（[`record/branch_recovery.rs`](../../../crates/uc-application/src/space/membership/record/branch_recovery.rs)），分叉恢复内部阶段不在 049 范围，仍待处理。原违规：持久生命周期定义在 Application，且可被直接改写 | [`ledger/model.rs`](../../../crates/uc-application/src/space/membership/ledger/model.rs) 中的 `MembershipConflictStatus`、`MembershipEffectPhase`、`PeerHistorySyncState`、`MembershipBranchRecoverySessionState` 都是公开字段，被 7 个文件直接改写（如 `ledger/effects.rs:88`、`recover_conflict/use_case.rs`） | 状态与转换迁入 Core；Application 保存并推进 |
 
 ### B. 效果义务没有约束力（P0）
 
@@ -48,10 +48,10 @@
 | C1 | 准入聚合有 44 个 `pub(crate)` 转换方法，以及角色包装上的 65 个公开方法 | [`state/transition/`](../../../crates/uc-core/src/membership/space_admission/state/transition/)、[`state/capability.rs`](../../../crates/uc-core/src/membership/space_admission/state/capability.rs) |
 | C2 | 撤销记录通过 `mark_migrating`、`mark_ready`、`transition_to`、`acknowledge_*`、`settle_obsolete_recipients` 等多个入口推进 | [`membership/revocation.rs`](../../../crates/uc-core/src/membership/revocation.rs) |
 | C3 | 空间切换类型公开 `phase` 字段，可被任意改写 | [`cross_space_transition.rs`](../../../crates/uc-core/src/membership/cross_space_transition.rs) 中 6 个 `pub phase` |
-| C4 | `SpaceMembershipState` 已有 `apply`，但 `phase` 等字段仍然公开，可以绕过 | [`workspace_convergence.rs:130`](../../../crates/uc-core/src/membership/workspace_convergence.rs) |
+| C4 | **已修复（049 S6）**：旧状态机 `workspace_convergence` 已删除。原违规：`SpaceMembershipState` 已有 `apply`，但 `phase` 等字段仍然公开，可以绕过 | [`workspace_convergence.rs:130`](../../../crates/uc-core/src/membership/workspace_convergence.rs) |
 | C5 | `MembershipBranchTransitionV1::advance(phase)` 接受任意目标阶段 | [`membership_branch_transition.rs:98`](../../../crates/uc-core/src/membership/membership_branch_transition.rs) |
 | C6 | 投递状态公开 `status` 字段 | [`clipboard/delivery.rs:71`](../../../crates/uc-core/src/clipboard/delivery.rs) |
-| C7 | `PendingMembershipBatch::mark_retry` 在 `apply` 之外修改状态 | [`gossip.rs:412`](../../../crates/uc-core/src/membership/gossip.rs) |
+| C7 | **已修复（049 S6）**：gossip 模块与成员证明协议已整体删除。原违规：`PendingMembershipBatch::mark_retry` 在 `apply` 之外修改状态 | [`gossip.rs:412`](../../../crates/uc-core/src/membership/gossip.rs) |
 | C8 | `PairingInvitation` 的生命周期在生产流程中被绕过：只用作数据容器，`consume`、`try_expire` 没有调用方 | [`pairing/invitation/invitation.rs`](../../../crates/uc-core/src/pairing/invitation/invitation.rs)、[`invitation/holder.rs`](../../../crates/uc-application/src/space/admission/invitation/holder.rs) |
 
 ### D. 存储格式与编码在 Core（P1）

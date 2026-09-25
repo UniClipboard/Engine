@@ -5,7 +5,7 @@
 - **状态**：实施中；S1–S3、S5 已完成，S4 本地完成、远程运行待合并后登记。
 - **日期**：2026-09-24。
 - **依据**：[Engine 测试架构](../../design-docs/testing-architecture.md)（nextest 负责进程调度、分组、超时与 JUnit，
-  `uc-testkit::Scenario` 负责单场景预算、阶段、事件、资源与工件）；[049](049-single-owner-space-membership-rewrite.md)
+  `uc-testkit::Scenario` 负责单场景预算、阶段、事件、资源与工件）；[049](../completed/049-single-owner-space-membership-rewrite.md)
   S3 验证中发现该套件长期游离于上述架构之外：只在 `dev-tools` 下编译，`cargo test -p uc-engine` 不运行它；
   CI 只运行其中 `automatic_connections::`；超时是分散常量，失败只留 stdout。
 - **完整负责人**：

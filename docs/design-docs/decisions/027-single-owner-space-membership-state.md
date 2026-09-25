@@ -7,7 +7,7 @@
 - **澄清**：ADR-020“用户接受移除”第 5 步在本机即为移除目标时的行为
 - **保留**：ADR-020 的产品语义（签名成员历史、移除需本机决定、拒绝后分叉隔离、1.1 兼容）、
   ADR-026 的五分钟配对期限与精确成员绑定、规格 021 与 023 的对外结果、全部设备间协议格式
-- **相关文档**：`docs/exec-plans/active/049-single-owner-space-membership-rewrite.md`、
+- **相关文档**：`docs/exec-plans/completed/049-single-owner-space-membership-rewrite.md`、
   `docs/design-docs/space-application.md`、`docs/design-docs/pairing-lifecycle.md`、
   `docs/design-docs/membership-history-ownership.md`、`docs/product-specs/021-device-trust-reconciliation.md`、
   `docs/design-docs/uc-engine-interface.md`

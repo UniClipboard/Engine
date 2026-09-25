@@ -57,6 +57,10 @@
 
 # 4. Current Architecture Context
 
+> 本节记录规格编写时的基线结构，其中 `WorkspaceConvergence` 与 workspace convergence store 已由
+> [ADR-027](../design-docs/decisions/027-single-owner-space-membership-state.md) 的成员账本、`MembershipOwner` 与成员记录仓储取代；
+> 当前结构见 [Space Application 设计与代码地图](../design-docs/space-application.md)。
+
 ```text
 Module: WorkspaceConvergence
 Path: crates/uc-application/src/space/convergence/
