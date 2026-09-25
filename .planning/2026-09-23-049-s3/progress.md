@@ -106,3 +106,10 @@
 - Docs: plan 049 S3.a fix record; membership-history-ownership.md peer-by-device sentence.
 - Nothing committed. Commit must exclude: AGENTS.md, other WIP files (profile_recovery.rs, key_loss.rs,
   uc-engine-interface.md, inbound-peer-admission.md), peer docs, and the WIP hunks of profile_key_recovery.rs.
+
+### S4 session (2026-09-25)
+- Decisions (user): joiner via Owner input after promotion; receipt carried in staged target V3 (V2 frozen since
+  rc.16); branch recovery via Owner-staged record written verbatim by Infra (checkpoint must precede promotion).
+- Implemented Owner reload/stage/join_space, joiner/sponsor/branch handoffs, arch checks, fault tests, ADR-027 and
+  plan 049 S4 record. Verification in plan 049 S4 table. Nothing committed.
+

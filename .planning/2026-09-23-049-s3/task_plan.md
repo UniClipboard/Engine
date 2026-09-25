@@ -66,7 +66,7 @@ reliable feedback.
 - [x] Committed plan 050 work (user approved): c6a39348 test, 35125fcd ci, 6c6d154e docs, d06c0ef4 notes.
 - **Status:** in_progress
 
-### Phase F — S3.a remaining failure diagnosis  ← CURRENT
+### Phase F — S3.a remaining failure diagnosis
 - [x] nextest overrides for slow tests + node_lifecycle exclusive (commit e77b7a4e4); units 2556/2557.
 - [x] S3 marked complete; S3.a added to plan 049 (commit 3f23a3278).
 - [x] joiner_pairing_fixture_reaches_active_settled — TEST, fixed (fixture status timing)
@@ -87,6 +87,31 @@ reliable feedback.
       S3 regression baseline.
 - [ ] Consider running the membership-e2e group in CI (today CI only runs `automatic_connections::`).
 - **Status:** pending
+
+### Phase G — Plan 049 S4 admission handoff  ← CURRENT (2026-09-25)
+Decisions (user, 2026-09-25):
+- Joiner: staged generation no longer holds membership record/read model (NoSpace). After `execute`
+  promotes, Application reloads the Owner and commits a joiner-start Owner input (BeforeCommit), then saves the
+  admission record. Replays after restart are Unchanged. Receipt-bearing history comes from the Infra staged
+  target, bumped V2→V3 (V2 frozen since v1.1.0-rc.16) to carry the joiner's own activation receipt; Core
+  `accept_complete` takes the updated staged target. In-flight V2 activations: staged DB already holds a record
+  written by the old version; Owner only checks it matches.
+- Branch recovery: checkpoint lives in the membership record, so post-promotion Owner input would break crash
+  recovery. Owner precomputes the staged target record (BranchRecovered + checkpoint TargetStaged + projection)
+  and Infra writes it verbatim into the staged DB.
+- Owner reloads its published view after any control generation switch (latent stale-cache bug: first commit
+  after branch promotion conflicts and only recovers next round).
+Steps:
+- [x] G1 Owner `reload()` + joiner-start draft method (idempotent) + staged-commit builder
+- [x] G2 Joiner: staged target V3 with receipt; Core accept_complete takes staged target; execute returns start
+      input; Application commits via Owner after promotion; drop record/relationship writes in material.rs/build
+- [x] G3 Sponsor: drop Infra `apply_member_facts` if projection covers it; fault-injection tests
+- [x] G4 Branch: Owner-built staged record into Infra stage/finalize; delete Infra ledger apply
+- [x] G5 Architecture check: Infra must not call MembershipLedger::start/apply or build SpaceMembershipRecord
+- [x] G6 Docs: ADR-027 handoff section, plan 049 S4 record; verification
+- Results: units 2591/2591; uc-engine 358/358; membership-e2e run 1 50/51 (F2 load timeout, alone 3/3 at
+  normal ~56 s), run 2 51/51; delivery checks pass. Nothing committed yet.
+- **Status:** complete (awaiting commit approval)
 
 ## Decisions Made
 | Decision | Rationale |
