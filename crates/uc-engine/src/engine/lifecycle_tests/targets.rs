@@ -8,6 +8,7 @@ use std::time::Duration;
 use tokio::time::timeout;
 
 use super::{Engine, EngineErrorCategory, EngineEvent, EngineState, HeldRuntime};
+use crate::testing::TaskJoinFailures;
 use crate::Operation;
 
 async fn accept<F: Future>(mut request: Pin<&mut F>) {
@@ -198,6 +199,8 @@ async fn duplicate_resume_requests_share_the_running_result_without_another_star
 
 #[tokio::test]
 async fn a_panicked_transition_does_not_abandon_the_following_accepted_pause() {
+    let failures = TaskJoinFailures::default();
+    let _capture = failures.install();
     let runtime = Arc::new(HeldRuntime::default());
     let (engine, _events) = Engine::from_runtime(runtime.clone(), 32);
     let engine = Arc::new(engine);
@@ -216,6 +219,7 @@ async fn a_panicked_transition_does_not_abandon_the_following_accepted_pause() {
         resuming.await.unwrap().unwrap_err().category(),
         EngineErrorCategory::Internal
     );
+    assert_eq!(failures.kinds(), ["engine_lifecycle_transition"]);
     timeout(Duration::from_secs(1), pause)
         .await
         .unwrap()

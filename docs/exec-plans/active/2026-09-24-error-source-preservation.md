@@ -2,7 +2,7 @@
 
 ## 状态与完整责任
 
-- **状态**：实施中。E0–E4 已完成，E5 进行中。
+- **状态**：实施中。E0–E7 已完成（暂缓项见各节），E8 部分完成，E10 已完成（除等待 049 的一处）；E9 尚未单独逐项核对。
 - **日期**：2026-09-24。
 - **依据**：[错误处理与转换](../../design-docs/error-handling.md)要求保留完整 source chain；[运行期观测](../../design-docs/observability.md#错误来源与日志字段)要求日志只记录从 source chain 提取的固定分类。
 - **完整负责人**：每处转换由目标错误类型所在模块负责（与错误处理规范的“转换所有权”一致）；整体顺序、清单复核与验收由本计划负责。
@@ -117,7 +117,7 @@ UTF-8、文本解析和系统时间（清单中的 R 类）需逐项判断：纯
 `scripts/architecture/check-rust-style.mjs` 对新增的非测试行执行 S1/S2/S3 检查，并拒绝同一行与前一行都没有中文注释的
 `map_err(|_| ..)`；跨行写法与前一行拼接后判断。在当前全仓按文件模式试跑，命中 S1 33、S2 78、S3 520、S4 891 处，
 与清单口径一致（S1 差额来自 049 已修复的 `space_security_store/`）。S3 额外覆盖 `map_err(|e| e.to_string())`。
-L1 日志字段不在本切片检查范围，待 E10 确定固定分类字段的替换写法后再加入。
+L1 日志字段由 E10 加入同一检查（见 E10 实施记录）。
 
 ### E2 S1 替换（2026-09-24）
 
@@ -361,3 +361,34 @@ E1 的检查会拒绝只删标识、仍保留 `{error}` 的改法，所以 E4 �
   `versioned_membership_history/`（成员历史持久化与交换编码）以及 `admission_content_key_catalog.rs` 的编码，共 90 处，包含全部
   postcard 解码点。这些代码将迁往 Infra，迁移时按 E6 约定保留来源（Infra 自有错误可直接用 `anyhow`），避免现在修改
   `SpaceAdmissionPersistenceError`、`MembershipHistoryV2Error`（均为 `Copy`，引用 185 与 149 处）后又随迁移重写。
+
+### E10 L1：日志改为固定分类字段（已完成，除等待 049 的一处）
+
+- 发现：323 处 L1 全部位于普通 target。运行时 `local_sink_enabled` 只接收合同 target，宿主层过滤又排除核心模块，
+  因此这些日志在产品中不输出，只在测试与开发订阅者中可见；仍按隐私规则处理。
+- 写法（已决策）：`uc-observability-contract` 新增 `error_source` 模块（`find_source`、`io_error_kind`，只依赖 std）。
+  记录点写固定 `error_kind` 字面量，并附 `io_error_kind(..)`；已有 `error_kind` 的记录只去掉正文字段。
+  无字段固定枚举（uniffi 分析回调错误）直接以变体名作为 `error_kind`；`impl Display` 参数的 Engine 错误辅助函数
+  改为接收 `impl Into<Box<dyn Error + Send + Sync>>`，以便提取 IO 分类。
+- 删除“记录后原样返回”的重复日志：返回值保留来源时删除（`serve_pull`、存储统计、启动对账、`db/pool.rs`、
+  `payload_resolver`、`background_blob_worker`、网络关闭、`space/security/access.rs` 中 20 处、兼容线 `get_file` 等）；
+  返回值丢弃来源或错误被吞掉时保留并改为分类。`access.rs` 中邀请 keyslot 解码失败改为 `corrupted_key_material_from` 携带来源。
+- 顺带的隐私修复：`file_staging.rs` 与 `get_file.rs` 日志不再记录 URI、路径、句柄与文件名（E5 转入项）；另移除
+  `cleanup.rs`、`blob_writer.rs`（span）、`spool_manager.rs`、`spool_scanner.rs`、`inbound_target.rs`、`blobs.rs`（span）、
+  `node.rs`、`platform.rs` 的路径字段，`network.rs` 的公网地址环境变量值，`detect.rs` 的持久游标原文；
+  兼容线 `BuildSnapshotFailure::Decode` 文本不再拼入文件名；`startup_error` 写 stderr 时不再输出错误正文。
+- 检查：`check-rust-style.mjs` 新增 L1 规则与 2 条测试；按文件模式全仓试跑只剩 049 未提交的
+  `runtime/profile_recovery.rs:167`，待 049 提交后处理。`reason = ?reason`（固定枚举）、`error_category = %error`
+  （仅固定分类的 Display）不在规则范围。
+- 留存：`PayloadResolveError::Integrity { reason: format!("spool read failed: {err}") }` 仍把下层错误拼进文本
+  （扫描规则未覆盖结构体字段中的 `format!`），属 S3，另行处理。
+- 负责人完成记录核对（E7 转入，84 处边界注释）：
+  - 已覆盖：配对/加入、剪贴板发送与复制同步、会话恢复、成员恢复、资料升级等业务动作，由既有合同操作词表记录；
+    绑定层对这些操作的包装只转运结果。
+  - 按业务记录组织标准不需要独立记录：普通查询与设置读写、诊断与升级备份列表、宿主目录准备、固定结构序列化、
+    观测运行时自身的刷新与关闭。
+  - 缺口（已决策并补齐）：Engine 操作任务、生命周期转换任务与会话挂起交接任务 panic 或被中止时只返回 1108，
+    `JoinError` 此前没有任何记录。现由等待这些任务的负责人（`engine/operation.rs`、`engine/lifecycle/queue.rs`、
+    `session_supervisor/lifecycle.rs::join_owned`）调用既有的 `record_task_join_failure`，新增任务分类
+    `engine_operation`、`engine_lifecycle_transition`、`session_suspend`；`engine/lifecycle.rs`、`engine/mod.rs`、
+    `engine/shutdown.rs` 等待的是转换队列的完成通道，由队列处的记录覆盖。三条既有 panic 测试补充断言对应分类。

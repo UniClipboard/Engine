@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tokio::sync::{oneshot, Notify};
 use tokio_util::sync::CancellationToken;
+use uc_observability_contract::diagnostics::{record_task_join_failure, DiagnosticTaskKind};
 
 use super::super::event_stream::EventSender;
 use super::super::in_flight::{InFlightOperations, RegisteredOperation};
@@ -256,6 +257,8 @@ impl TransitionQueue {
                 )
                 .await
                 .unwrap_or_else(|_| {
+                    // JoinError 只区分 panic 与中止，任务类别即完整分类；宿主只收到稳定错误码。
+                    record_task_join_failure(DiagnosticTaskKind::EngineLifecycleTransition);
                     Err(EngineError::new(1108, EngineErrorCategory::Internal, true))
                 });
             let _ = response.send(result);
