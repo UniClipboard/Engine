@@ -8,6 +8,8 @@
 
 - [资料密钥丢失恢复与旧设备迁移](2026-09-19-profile-key-recovery.md)（Engine 实现与本地验收完成；Desktop、实体平台和旧版本程序回退验收跳过）
 
+- [错误来源保留：清除字符串化与丢弃来源](2026-09-24-error-source-preservation.md)（S1–S3 与 L1 清零、自动检查覆盖；Core 持久化编解码 90 处移交 Core 边界收口 D1/D3）
+
 - [会话恢复后的成员资料立即就绪](2026-09-18-session-membership-readiness-recovery.md)（本机正式版冷启动中，会话恢复约 0.12 秒完成，成员列表约 0.66 秒可读）
 
 - [Space 可用性启动门槛](2026-09-17-space-readiness-startup-gate.md)（本机正式版启动与设备名单验收完成；多设备全离线的独立进程场景未构造）

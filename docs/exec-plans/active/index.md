@@ -24,7 +24,6 @@
 - [Peer Address 读取失败的准确诊断](2026-09-22-peer-address-read-diagnostics.md)（实施完成，等待下游现场诊断）
 - [入站对端身份与网络准入的唯一负责人](2026-09-23-inbound-peer-admission.md)（实施中：S1–S5a 已实现，收尾测试与生产路径检查待执行，S5b 待现场核实；来源 t-0028）
 - [Core 边界收口](2026-09-23-core-boundary-remediation.md)（提议：违规清单已完成第一轮盘点，修复未开始）
-- [错误来源保留：清除字符串化与丢弃来源](2026-09-24-error-source-preservation.md)（实施中：E0–E4 已完成；[逐行清单](2026-09-24-error-source-preservation-inventory.md)）
 - [大图发送前本地准备性能与诊断](2026-09-18-large-image-publish-latency.md)（实施中）
 - [统一暂停、恢复与中断恢复](2026-09-12-unified-runtime-lifecycle.md)（实施中，剩余设备与产品宿主验收未完成；包含已有后台问题修复记录入口）
 

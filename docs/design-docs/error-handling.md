@@ -51,8 +51,8 @@ Application 对依赖、存储、网络、系统或密码能力失败进行稳�
   [运行期观测](observability.md#错误来源与日志字段)以固定分类记录一次；
 - 公开契约边界映射：`uc-engine` 的 `EngineError` 与绑定层 `BindingError`、FFI 错误只含稳定错误码、分类与可重试标记，
   不携带来源。失败分类由完整负责人的完成记录（含组装层端口装饰器）从 source chain 提取，边界映射点不再单独记录。
-  缺少负责人记录的操作按[错误来源保留执行计划](../exec-plans/active/2026-09-24-error-source-preservation.md)补齐，
-  不在边界映射点补日志。
+  缺少负责人记录的操作在负责人处补齐（做法见[错误来源保留执行计划](../exec-plans/completed/2026-09-24-error-source-preservation.md)
+  E10 记录），不在边界映射点补日志。
 
 同一错误类型既有纯校验失败、又有下层失败时，变体使用 `Variant { source: Option<..> }`，并提供无来源与带来源两个构造函数；
 本身不含信息的密码学错误（如 `aead::Error`）同样作为来源保留，不按例外丢弃。
@@ -62,7 +62,7 @@ Application 对依赖、存储、网络、系统或密码能力失败进行稳�
 `scripts/architecture/check-rust-style.mjs` 对新增的非测试代码行执行上表检查：拒绝前三种写法，以及同一行和前一行都没有中文注释的
 `map_err(|_| ..)`。检查基于文本规则，错误变量按 `e`、`err`、`error`、`source`、`cause` 及 `*_err`、`*_error` 命名识别；
 经其他变量名转手的写法仍需审查发现。
-现有代码的逐项清理见[错误来源保留执行计划](../exec-plans/active/2026-09-24-error-source-preservation.md)。
+现有代码的逐项清理见[错误来源保留执行计划](../exec-plans/completed/2026-09-24-error-source-preservation.md)。
 
 ## 安全上下文
 

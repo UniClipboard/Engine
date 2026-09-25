@@ -65,6 +65,10 @@
 | D5 | 文件展示元数据用 JSON 编解码 | [`clipboard/file_display_metadata.rs:15`](../../../crates/uc-core/src/clipboard/file_display_metadata.rs)，迁往 Infra |
 | D6 | 设置模型承担旧设置文件的兼容解析 | [`settings/`](../../../crates/uc-core/src/settings/)，把文件格式兼容迁往 Infra，Core 只保留设置的语义 |
 
+D1 与 D3 同时接手[错误来源保留](../completed/2026-09-24-error-source-preservation.md)移交的 90 处 `map_err(|_| ..)`
+（准入记录、成员历史与内容密钥目录的持久化编解码，含全部 postcard 解码点）。迁往 Infra 时保留下层来源
+（Infra 自有错误可直接使用 `anyhow`），不再按例外丢弃；完成后按文件模式复扫 `check-rust-style.mjs` 确认清零。
+
 ### E. 不属于 Core 的模块或依赖（P1）
 
 | # | 内容 | 证据 | 目标 |

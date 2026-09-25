@@ -2,7 +2,7 @@
 
 ## 状态与完整责任
 
-- **状态**：实施中。E0–E7、E9、E10 已完成，E8 部分完成。剩余只有交给 Core 边界收口 D1/D3 的 90 处 Core 持久化编解码。
+- **状态**：已完成（2026-09-25）。E0–E11 按各节记录完成；E8 中 Core 持久化编解码的 90 处 `map_err(|_| ..)` 移交 [Core 边界收口](../active/2026-09-23-core-boundary-remediation.md) D1/D3，随编解码迁往 Infra 时保留来源。
 - **日期**：2026-09-24。
 - **依据**：[错误处理与转换](../../design-docs/error-handling.md)要求保留完整 source chain；[运行期观测](../../design-docs/observability.md#错误来源与日志字段)要求日志只记录从 source chain 提取的固定分类。
 - **完整负责人**：每处转换由目标错误类型所在模块负责（与错误处理规范的“转换所有权”一致）；整体顺序、清单复核与验收由本计划负责。
@@ -21,7 +21,7 @@
    [`space_security_store/revocation.rs`](../../../crates/uc-infra/src/db/repositories/space_security_store/revocation.rs)
    与 [`legacy_bootstrap.rs`](../../../crates/uc-infra/src/db/repositories/space_security_store/legacy_bootstrap.rs)
    中的 `anyhow!(error.to_string())` 让 SQLite `BUSY` 无法被识别，结论只能停在推断
-   （见 [049 计划](049-single-owner-space-membership-rewrite.md)失败诊断表）。
+   （见 [049 计划](../active/049-single-owner-space-membership-rewrite.md)失败诊断表）。
 2. **流程判断失效。** 生产代码依据 source chain 做分支，例如
    [`is_cancel_error`](../../../crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs) 查找
    `BlobTransferError::Cancelled`，[`session_supervisor/lifecycle.rs`](../../../crates/uc-engine/src/runtime/session_supervisor/lifecycle.rs)
@@ -57,7 +57,7 @@ UTF-8、文本解析和系统时间（清单中的 R 类）需逐项判断：纯
 
 ### 与其他计划的约束
 
-- [Core 边界收口](2026-09-23-core-boundary-remediation.md) E8 计划从 `uc-core` 移除 `anyhow`。Core 错误类型保留来源时
+- [Core 边界收口](../active/2026-09-23-core-boundary-remediation.md) E8 计划从 `uc-core` 移除 `anyhow`。Core 错误类型保留来源时
   使用具体错误类型，不新增 `anyhow::Error` 字段。
 - `compatibility/` 是独立版本的 LAN 兼容线，其修改点单独成切片，随兼容线自己的版本发布。
 - 049 成员重写会话已在修复以下位置，本计划不重复排期，合入后复核并从清单中移除：
@@ -357,7 +357,7 @@ E1 的检查会拒绝只删标识、仍保留 `{error}` 的改法，所以 E4 �
 - 已完成：准入状态转换、准入尝试、成员账本、冲突与分支恢复、剪贴板 V3 负载、设备标识、搜索引用等处——下层为 Core 领域校验的
   按“Core 内部纯校验改分类”注释，整数与切片转换、外部标识超长按例外注释；`AdmissionMemberBindingError::InvalidEncoding`
   改为可选来源，成员绑定解码的 UTF-8 失败携带来源。
-- 暂缓并交由 [Core 边界收口](2026-09-23-core-boundary-remediation.md) D1/D3：`space_admission/state/persistence/`（准入记录持久化编解码）、
+- 暂缓并交由 [Core 边界收口](../active/2026-09-23-core-boundary-remediation.md) D1/D3：`space_admission/state/persistence/`（准入记录持久化编解码）、
   `versioned_membership_history/`（成员历史持久化与交换编码）以及 `admission_content_key_catalog.rs` 的编码，共 90 处，包含全部
   postcard 解码点。这些代码将迁往 Infra，迁移时按 E6 约定保留来源（Infra 自有错误可直接用 `anyhow`），避免现在修改
   `SpaceAdmissionPersistenceError`、`MembershipHistoryV2Error`（均为 `Copy`，引用 185 与 149 处）后又随迁移重写。
@@ -426,3 +426,14 @@ E1 的检查会拒绝只删标识、仍保留 `{error}` 的改法，所以 E4 �
 - 049 未提交文件中的改动只涉及 HEAD 已有的行；049 新增代码中的模式匹配随本次一并调整，留在工作区由 049 提交。
 - 测试：安全存储读取失败保留 `io::Error` 且各层文本不含路径；`StorageFailed` 转换后可取回 `io::ErrorKind`；
   keyslot 读取失败与 JSON 损坏分别保留 `io::Error` 与 `serde_json::Error`。
+
+## 结算（2026-09-25）
+
+- 全仓按文件模式复扫：生产代码 S1、S2、S3、L1 为零；未注释的 `map_err(|_| ..)` 只剩 Core 持久化编解码 90 处
+  （`space_admission/state/persistence/`、`versioned_membership_history/`、`admission_content_key_catalog.rs`），
+  已移交 Core 边界收口 D1/D3；其余 210 处按允许清单注释。
+- 自动检查覆盖 S1–S3、无注释 S4、L1 日志正文、结构体字段内插错误与错误文本中的路径，新增代码按同一规则拒绝。
+- 附录[修改点清单](2026-09-24-error-source-preservation-inventory.md)是 `48a2e95c` 的开工快照，行号已过期，只作历史追溯。
+- 049 未提交文件中与本计划相关的调整（新代码中的 `KeyMaterialCorrupt` 模式）留在工作区，随 049 提交。
+- 验证：交付检查通过；各切片的 crate 测试与 `uc-infra --features lan-compat` lib 测试通过；设备矩阵与产品宿主
+  验收跳过（本计划不改变公开接口、错误码与宿主可见行为，兼容线 `Decode` 文本去掉文件名除外）。
