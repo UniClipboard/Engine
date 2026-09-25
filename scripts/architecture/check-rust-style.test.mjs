@@ -298,6 +298,38 @@ fn run() {
   assert.equal(result.status, 0, result.stderr)
 })
 
+test('拒绝结构体字段内插错误与错误文本中的路径', () => {
+  const result = check(`
+fn run(path: &Path) -> anyhow::Result<()> {
+    read().map_err(|err| StoreError::Integrity {
+        reason: format!("read failed: {err}"),
+    })?;
+    std::fs::read(path).with_context(|| format!("read failed: {}", path.display()))?;
+    std::fs::write(path, b"").with_context(|| {
+        format!(
+            "write failed: {}",
+            path.display()
+        )
+    })?;
+    Ok(())
+}
+`)
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /fixture\.rs:4 .*#\[source\]/)
+  for (const line of [6, 10]) assert.match(result.stderr, new RegExp(`fixture\\.rs:${line} .*路径`))
+})
+
+test('接受不含路径的错误文本与普通路径格式化', () => {
+  const result = check(`
+fn run(path: &Path) -> anyhow::Result<String> {
+    std::fs::read(path).context("read spool file")?;
+    let uri = format!("file://{}", path.display());
+    Ok(uri)
+}
+`)
+  assert.equal(result.status, 0, result.stderr)
+})
+
 test('测试代码不检查错误来源写法', () => {
   const result = check(`
 fn run() {}

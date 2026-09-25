@@ -2,7 +2,7 @@
 
 ## 状态与完整责任
 
-- **状态**：实施中。E0–E7 已完成（暂缓项见各节），E8 部分完成，E10 已完成（除等待 049 的一处）；E9 尚未单独逐项核对。
+- **状态**：实施中。E0–E7、E9、E10 已完成（暂缓项见各节），E8 部分完成。剩余工作全部等待 049 提交或 Core 边界收口 D1/D3。
 - **日期**：2026-09-24。
 - **依据**：[错误处理与转换](../../design-docs/error-handling.md)要求保留完整 source chain；[运行期观测](../../design-docs/observability.md#错误来源与日志字段)要求日志只记录从 source chain 提取的固定分类。
 - **完整负责人**：每处转换由目标错误类型所在模块负责（与错误处理规范的“转换所有权”一致）；整体顺序、清单复核与验收由本计划负责。
@@ -392,3 +392,23 @@ E1 的检查会拒绝只删标识、仍保留 `{error}` 的改法，所以 E4 �
     `session_supervisor/lifecycle.rs::join_owned`）调用既有的 `record_task_join_failure`，新增任务分类
     `engine_operation`、`engine_lifecycle_transition`、`session_suspend`；`engine/lifecycle.rs`、`engine/mod.rs`、
     `engine/shutdown.rs` 等待的是转换队列的完成通道，由队列处的记录覆盖。三条既有 panic 测试补充断言对应分类。
+
+### E9 例外复核与补漏（已完成，除暂缓项）
+
+- 复核：按文件模式全仓扫描，生产代码中带中文注释的 `map_err(|_| ..)` 共 210 处，按注释归类逐项对照允许清单。
+  公开契约边界 82、Core 纯校验 33、整数/切片转换 29、锁中毒 12、输入校验约 20、超时 5、通道与 `RecvError` 4、
+  `()` 错误与 panic 载荷 6；零散项（`FromStr` 回显原值、`CapacityError`、`hkdf::InvalidLength`、全局状态已设置）
+  归入“错误值不含信息或只回显原值”。规范补充两类此前只在切片记录中出现的例外：观测运行时自身初始化失败、
+  失败落为业务结果（后者要求在吞错处记录分类）。
+- 未注释的 131 处全部属于暂缓清单：Core D1/D3 共 90 处，049 阻塞的 `EncryptionError` 38 处与 `AeadError` 3 处。
+- 文件集展开读取目录失败（3 处）此前被吞掉且无任何记录，现在吞错处记录 `error_kind="file_set_expand"` 与
+  `io_error_kind`；测试用权限为 000 的目录构造真实 `PermissionDenied` 并断言日志不含路径。
+- 补漏（E2–E4 扫描规则未覆盖的写法）：
+  - 结构体字段内插错误：`PayloadResolveError::Integrity` 新增可选 `source`，spool 读取失败携带来源（测试断言
+    链上可取回 `io::Error`、各层文本不含路径）；`ConfigMigrationError::Internal` 两处改为固定文本并携带来源；
+    uc-mobile `SyncError` 的 6 处宿主文本统一经 `ffi_reason` 生成，运行时线程改为跨线程传递 `io::Error` 本身。
+  - 错误文本中的路径：Infra 的 spool、缓存文件系统、设备标识、设置仓储、blob 存储共 29 处错误文本（`with_context` 与 `anyhow!`）
+    改为固定动作；`device/storage.rs` 不再把改名错误拼进文本；Core `ObservedClipboardRepresentation` 的 panic、
+    serde 错误与 `Debug` 输出不再包含用户文件路径；物化器 URL 转换错误不再带缓存路径。
+  - 检查：`check-rust-style.mjs` 新增结构体字段 `format!` 内插错误变量与错误/panic 文本中 `.display()` 两条规则
+    （2 条测试），并把 `test_support/` 目录识别为测试代码。

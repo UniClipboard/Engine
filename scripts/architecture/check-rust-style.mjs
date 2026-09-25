@@ -34,7 +34,10 @@ const ERROR_SOURCE_RULES = [
         String.raw`|\b(?:message|detail|details|reason|description|cause|error)\s*:\s*${TO_STRING_ERROR}` +
         String.raw`|\bmap_err\s*\(\s*\|\s*(\w+)\s*\|\s*\1\s*\.\s*to_string\s*\(\s*\)\s*\)`
     ),
-    raw: new RegExp(String.raw`::\s*[A-Z]\w*\s*\(\s*format!\s*\(\s*(?:${INTERPOLATED_ERROR}|${POSITIONAL_ERROR})`),
+    raw: new RegExp(
+      String.raw`::\s*[A-Z]\w*\s*\(\s*format!\s*\(\s*(?:${INTERPOLATED_ERROR}|${POSITIONAL_ERROR})` +
+        String.raw`|\b[a-z_]+\s*:\s*format!\s*\(\s*${INTERPOLATED_ERROR}`
+    ),
     message: '错误变体不得只保存下层错误文本；改为 #[source] 携带具体错误',
   },
   {
@@ -47,6 +50,9 @@ const ERROR_SOURCE_RULES = [
     message: '日志不得输出错误正文；写固定 error_kind，并用 io_error_kind(..) 从来源链提取分类',
   },
 ]
+// 错误文本与 panic 文本不得包含路径：`.display()` 出现在错误构造的同一行或其后三行内。
+const ERROR_TEXT_START = /\b(?:with_context|anyhow!|bail!|panic!|custom)\s*\(|\bcontext\s*\(\s*format!/
+const PATH_DISPLAY = /\.\s*display\s*\(\s*\)/
 const DISCARDED_SOURCE = /\bmap_err\s*\(\s*(?:move\s*)?\|\s*_\w*\s*(?::[^|]*)?\|/
 const CHINESE_COMMENT = /\/\/.*[\u4e00-\u9fff]/
 const FUNCTION_START = /(^|\n)\s*(pub(?:\s*\([^)]*\))?\s+)?(?:const\s+)?(?:unsafe\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\b/g
@@ -188,6 +194,7 @@ function isTestPath(path) {
     path.includes('/testing/') ||
     path.endsWith('/tests.rs') ||
     path.endsWith('/test_support.rs') ||
+    path.includes('/test_support/') ||
     path.endsWith('_test.rs')
   )
 }
@@ -221,6 +228,18 @@ function errorSourceViolations(path, lines, codeLines, lineNumber) {
     const matchesRaw = matches(rule.raw, rawLine, joinedRaw, previousRaw)
     if (!matchesCode && !matchesRaw) continue
     violations.push({ path, line: lineNumber, source: lines[lineNumber - 1].trim(), type: 'error-source', message: rule.message })
+  }
+  if (PATH_DISPLAY.test(code)) {
+    const window = codeLines.slice(Math.max(0, lineNumber - 4), lineNumber).join('\n')
+    if (ERROR_TEXT_START.test(window)) {
+      violations.push({
+        path,
+        line: lineNumber,
+        source: lines[lineNumber - 1].trim(),
+        type: 'error-source',
+        message: '错误与 panic 文本不得包含路径；改用固定动作文本，路径不进入错误链',
+      })
+    }
   }
   if (DISCARDED_SOURCE.test(code)) {
     const commented = [lines[lineNumber - 1], lines[lineNumber - 2]].filter(Boolean).some(line => CHINESE_COMMENT.test(line))
