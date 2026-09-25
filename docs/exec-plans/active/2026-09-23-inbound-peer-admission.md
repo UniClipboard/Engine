@@ -9,7 +9,7 @@
   - 网络准入不是快照，每次入站都实时读取成员账本。
   - 拒绝方是加入方。
   - 现场证据排除了“账本不放行”分支和“连接开关关闭”分支。
-- **未证实（本计划不以其为前提）**：邀请方成员历史中的身份和 `dev` 当前网络身份不一致。本计划的 S4、S5a 能在今后把这类不一致直接暴露出来，但不据此宣称已找到现场根因。
+- **已由 S5a 现场证实（2026-09-23）**：`dev` 当前网络身份与成员历史中的本机身份不一致。替换机制已查明：身份文件缺失时，启动流程静默生成新身份（见“实施记录”身份替换防护）。文件在两次运行之间消失的原因仍未查明。
 - **完整负责人**：
   - 入站身份解析与拒绝分类：Infra `crates/uc-infra/src/network/iroh/inbound_peer.rs`（新增），负责“远端公钥 → 设备 → 是否放行”，所有入站协议共用。
   - 准入规则：Application `MembershipLedger`，网络准入与公开“可用”从同一判定得出。
@@ -227,6 +227,8 @@ S5b 的前提是先在现场核实问题是否真实存在。进入条件：
 
 在 S5b 决定之前，A4 中 `no_re_pair_recovery_is_published_before_s5b` 必须保持通过。
 
+“防止替换”方向已先落地一部分：已有空间的设备不再静默补发身份，而是进入资料恢复受限实例并允许恢复出厂（见“实施记录”）。“身份更新事件”仍待决定。
+
 ## 统一门禁（每个切片提交前）
 
 ```bash
@@ -264,3 +266,4 @@ Cargo 验证由一个负责人通过共享 `target` 串行执行。
 - 2026-09-23 S4：加入方激活前比较已验证邀请方历史指纹与续连端点指纹，三类失败以类型化来源终止为 `IdentityConflict`。原 `reject_activation(IdentityConflict)` 返回 `InvalidTransition`，本计划 S4 规格遗漏了这一点；因此 Core 新增本地终止原因 `IdentityRejected`，在准入记录 V2 的本地终止原因取值表中编码为 9，重启后公开拒绝原因仍为 `IdentityConflict`。**格式决定**（经用户确认）：该取值表的 3–8 由本分支 `8df9d5e1` 新增，main 与 `v1.1.0-rc.18` 只有 0–2，尚未越过冻结边界；编码 9 补全同一未发布目标格式，不新增格式版本，是本计划唯一的持久化取值新增；只有本分支的早期构建读取编码 9 会得到 `InvalidState`，不涉及受支持发布。测试：Core `activation_rejection_categories_round_trip_through_persistence` 补 `IdentityConflict` 往返；Application 恢复既有 `RelationshipConflict` 断言，另增 `sponsor_identity_conflict_is_saved_as_a_terminal_rejection_without_retry`（激活夹具改为可指定拒绝原因，默认仍为 `RelationshipConflict`）。验证：B3 5/5；A2 1/1、A3 4/4，`--include-ignored` 无忽略项；Core space admission 108/108、Core 持久化 14/14；Infra `space::admission` 与 `network::iroh` 314 通过、4 项既有忽略；Application `space::admission` 93 通过、1 项失败 `joiner_pairing_fixture_reaches_active_settled`，该项在计划提交 `6cc76b45` 已失败，与本计划无关。Engine `space_membership_auto_pairing_e2e`（`dev-tools`）完整运行 40 通过、7 失败、11 忽略。对这 7 项分别在 S3 提交 `d5980541` 与当前工作树以同一组合各运行一次，结果一致：`completed_admission_survives_restart_and_allows_transfer`、`handoff_four_device_removal_preview_matches_executed_choice`、`offline_member_catches_multiple_removals_without_blocking_new_invitations` 两边都通过，完整运行中的失败属并发负载下的不稳定；`f2_concurrent_leaf_removals_resolve_to_selected_branch`、`f6_deep_chain_recovers_selected_branch_without_online_sponsors`、`same_device_returns_to_a_previous_space_after_switch_and_restart`（重启 `Engine::start` 返回 1216）、`suspend_during_space_switch_recovery_does_not_resurrect_the_network`（恢复返回 1103）两边都失败，属 S4 之前的既有问题，另行跟踪。完整运行日志中没有任何 `IdentityConflict` 拒绝。统一门禁通过，仅有既存 OHOS 测试未使用导入警告。未执行设备检查。
 - 2026-09-23 S2 补正：mDNS 连接提示改用 `PeerIdentityResolver::resolve`，成员读取与指纹派生失败经新增的 `PeerIdentityError` 保留原始 source，入站路径仍使用 `Copy` 的 `InboundPeerRejection`；B1 增加来源链测试，10/10。删除 `peer_reachability_adapter` 残留的 `is_admitted` 包装，三个调用点直接使用 `gate.authorize(..).is_ok()`。已落地的 B1–B3 暂存副本已删除，B4 随 S5a 提交删除（暂存目录随之清空）。遗留：S4 的 `SponsorRouteIdentityError` 按 B3 规格为 `Copy`，指纹派生失败的 `anyhow` 来源没有保留；路由解码器本身也不带来源。
 - 2026-09-23 S5a：本机查询只读取当前身份，比较已验证历史；不一致优先公开 `needs_attention/local_identity_mismatch`，不提供恢复动作。绑定未镜像该原因枚举，通过 Engine JSON 透传。B4 6/6、A4 3/3、A5 3/3、Application `query_device_trust` 21/21、设备组查询 1/1、Engine `public_contract` 50/50；统一门禁通过，仅有既存 OHOS 测试未使用导入警告。当前 Desktop 与 Mobile 源码未找到 `spaceDeviceUpdate` 或新原因的显式消费点；实际宿主版本对未知原因线值的解码兼容性仍须在发布前分别验证。
+- 2026-09-23 身份替换防护：S5a 在 `dev` 现场报出 `mismatch`。日志与文件时间显示，`dev` 于本地 04:11:19 正常关闭、04:19:04 以新版本启动，身份文件恰在启动时新建，Engine 在两次运行之间没有任何重置记录；对照 `a` 重启未改写身份。机制为节点绑定时 `ensure_secret_key` 在文件缺失时静默生成新身份。修复：`ProfileKeyRecoveryStore` 启动检查在已有空间（`.active-space-manifest-v2`）而身份文件缺失时报告 `device_identity` 损失，旧版身份目录待改名或存在待导入标记时不判定；Engine 因此进入既有资料恢复受限实例，不绑定网络、不补发身份。受限实例新增接受 `FactoryResetSpace`：资料密钥可自动打开时只装配重置依赖并执行，完成后要求重启。验证：Infra `profile_key_recovery` 17/17，Engine `host_contract` 23 通过（1 项既有忽略，新增 `lost_network_identity_of_a_space_member_is_reported_instead_of_replaced`），`config_migration_round_trip_e2e` 2/2，`completed_admission_survives_restart_and_allows_transfer` 通过；统一门禁通过。Desktop 恢复页尚无恢复出厂入口，另交 Desktop 处理。文件消失原因未查明，可疑方向之一是开发构建下未设 `UC_PROFILE` 的进程默认落到 `dev` 资料目录。

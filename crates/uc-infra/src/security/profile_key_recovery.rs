@@ -19,6 +19,7 @@ use super::profile_content_key_vault::PROFILE_CONTENT_VAULT_KEY_NAME;
 use super::profile_lifecycle::PROFILE_LIFECYCLE_MARKER_NAME;
 use super::profile_upgrade_backup::PROFILE_UPGRADE_BACKUP_RECORD_KEY;
 use super::{v1_aead, Kek, MasterKey};
+use crate::config_migration::staging::PENDING_IMPORT_MARKER;
 use crate::fs::durability::{replace_file, sync_directory};
 use crate::fs::key_slot_store::JsonKeySlotStore;
 use crate::migration_state::{decode_legacy_migration_run_id, DEFAULT_MIGRATION_STATE_FILE};
@@ -251,7 +252,7 @@ impl ProfileKeyRecoveryStore {
             return Ok(ProfileRecoveryPreparation::Ready);
         }
         let keyslot = self.material.load_keyslot(&self.scope).await?;
-        let losses = self.legacy_material_losses()?;
+        let losses = self.startup_material_losses()?;
         if !losses.is_empty() {
             return Ok(ProfileRecoveryPreparation::AwaitingPassphrase { losses });
         }
@@ -273,6 +274,33 @@ impl ProfileKeyRecoveryStore {
         }
     }
 
+    /// 恢复模式下的恢复出厂需要读取受管条目。只有资料密钥完好时才能不经口令打开；
+    /// 返回 `false` 表示必须先经口令恢复，调用方不得继续重置。
+    pub async fn open_for_factory_reset(&self) -> Result<bool, ProfileKeyRecoveryError> {
+        if !self.material.keyslot_exists().await? {
+            return Ok(true);
+        }
+        if !self.file.exists() || !self.legacy_material_losses()?.is_empty() {
+            return Ok(false);
+        }
+        let keyslot = self.material.load_keyslot(&self.scope).await?;
+        let kek = match self.material.load_kek(&self.scope).await {
+            Ok(kek) => kek,
+            Err(EncryptionError::KeyNotFound | EncryptionError::KeyMaterialCorrupt { .. }) => {
+                return Ok(false)
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let Some(wrapped) = keyslot.wrapped_master_key.as_ref() else {
+            return Err(ProfileKeyRecoveryError::Corrupt);
+        };
+        if v1_aead::unwrap_master_key_xchacha(&kek, &wrapped.blob).is_err() {
+            return Ok(false);
+        }
+        self.activate_existing(&kek)?;
+        Ok(true)
+    }
+
     pub async fn recover(
         &self,
         passphrase: &Passphrase,
@@ -281,7 +309,7 @@ impl ProfileKeyRecoveryStore {
             .material
             .authenticate_kek(&self.scope, passphrase)
             .await?;
-        let losses = self.legacy_material_losses()?;
+        let losses = self.startup_material_losses()?;
         if !losses.is_empty() {
             return Ok(ProfileRecoveryOutcome::PartiallyRecoverable(losses));
         }
@@ -607,15 +635,58 @@ impl ProfileKeyRecoveryStore {
         Ok(secrets)
     }
 
+    /// 已有空间的网络身份只能沿用：身份文件缺失即视为设备身份丢失，启动流程不得补发新身份。
+    fn startup_material_losses(&self) -> Result<ProfileRecoveryLosses, ProfileKeyRecoveryError> {
+        let mut losses = self.legacy_material_losses()?;
+        losses.device_identity |= self.space_identity_lost()?;
+        Ok(losses)
+    }
+
+    fn space_identity_lost(&self) -> Result<bool, ProfileKeyRecoveryError> {
+        if !self.has_active_space()? || self.current_identity()?.is_some() {
+            return Ok(false);
+        }
+        // 旧版身份目录改名与待应用的配置导入都在装配阶段才写入身份，此时不能判定丢失。
+        Ok(!self.identity_adoption_pending()?)
+    }
+
+    fn identity_adoption_pending(&self) -> Result<bool, ProfileKeyRecoveryError> {
+        let root = &self.paths.app_data_root_dir;
+        if root.join(PENDING_IMPORT_MARKER).try_exists()? {
+            return Ok(true);
+        }
+        for entry in fs::read_dir(root)? {
+            if entry?
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("iroh-identity_"))
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn has_active_space(&self) -> Result<bool, ProfileKeyRecoveryError> {
+        Ok(self
+            .paths
+            .vault_dir
+            .join(".active-space-manifest-v2")
+            .try_exists()?)
+    }
+
+    fn current_identity(&self) -> Result<Option<Vec<u8>>, ProfileKeyRecoveryError> {
+        Ok(
+            FileSecureStorage::with_base_dir(self.paths.iroh_identity_dir())
+                .get(IDENTITY_STORE_KEY)?,
+        )
+    }
+
     fn legacy_material_losses(&self) -> Result<ProfileRecoveryLosses, ProfileKeyRecoveryError> {
         if self.file.exists() {
             return Ok(ProfileRecoveryLosses::default());
         }
-        let protected_profile = self
-            .paths
-            .vault_dir
-            .join(".active-space-manifest-v2")
-            .try_exists()?;
+        let protected_profile = self.has_active_space()?;
         let protected_history = self
             .paths
             .vault_dir
@@ -627,11 +698,9 @@ impl ProfileKeyRecoveryStore {
             && (lifecycle_missing || self.backing.get(PROFILE_ADMISSION_KEY_NAME)?.is_none());
         let local_history = protected_history
             && (lifecycle_missing || self.backing.get(PROFILE_CONTENT_VAULT_KEY_NAME)?.is_none());
-        let current_identity = FileSecureStorage::with_base_dir(self.paths.iroh_identity_dir())
-            .get(IDENTITY_STORE_KEY)?;
         let device_identity = (protected_profile || protected_history)
             && self.backing.get(IDENTITY_STORE_KEY)?.is_none()
-            && current_identity.is_none();
+            && self.current_identity()?.is_none();
         Ok(ProfileRecoveryLosses {
             local_history,
             local_control_state,
@@ -1498,6 +1567,136 @@ mod tests {
         );
         assert_eq!(final_restart.get(PROFILE_ADMISSION_KEY_NAME).unwrap(), None);
         assert_eq!(storage.get(PROFILE_ADMISSION_KEY_NAME).unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn space_member_without_its_network_identity_waits_for_recovery() {
+        let (_directory, storage, paths, profile_id, _recovery) = active_recovery_fixture().await;
+        std::fs::write(
+            paths.vault_dir.join(".active-space-manifest-v2"),
+            b"active space marker",
+        )
+        .unwrap();
+        let backing: Arc<dyn SecureStoragePort> = storage;
+
+        let restarted = ProfileKeyRecoveryStore::new(paths, profile_id, backing);
+
+        assert_eq!(
+            restarted.prepare_startup().await.unwrap(),
+            ProfileRecoveryPreparation::AwaitingPassphrase {
+                losses: ProfileRecoveryLosses {
+                    local_history: false,
+                    local_control_state: false,
+                    device_identity: true,
+                },
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn space_member_with_its_network_identity_starts_normally() {
+        let (_directory, storage, paths, profile_id, _recovery) = active_recovery_fixture().await;
+        std::fs::write(
+            paths.vault_dir.join(".active-space-manifest-v2"),
+            b"active space marker",
+        )
+        .unwrap();
+        FileSecureStorage::with_base_dir(paths.iroh_identity_dir())
+            .set(IDENTITY_STORE_KEY, &[0x34; 32])
+            .unwrap();
+        let backing: Arc<dyn SecureStoragePort> = storage;
+
+        let restarted = ProfileKeyRecoveryStore::new(paths, profile_id, backing);
+
+        assert_eq!(
+            restarted.prepare_startup().await.unwrap(),
+            ProfileRecoveryPreparation::Ready
+        );
+    }
+
+    #[tokio::test]
+    async fn passphrase_recovery_does_not_hide_a_lost_network_identity() {
+        let (_directory, storage, paths, profile_id, _recovery) = active_recovery_fixture().await;
+        std::fs::write(
+            paths.vault_dir.join(".active-space-manifest-v2"),
+            b"active space marker",
+        )
+        .unwrap();
+        let backing: Arc<dyn SecureStoragePort> = storage;
+        let restarted = ProfileKeyRecoveryStore::new(paths, profile_id, backing);
+
+        assert!(matches!(
+            restarted
+                .recover(&Passphrase::new("migration passphrase"))
+                .await
+                .unwrap(),
+            ProfileRecoveryOutcome::PartiallyRecoverable(ProfileRecoveryLosses {
+                device_identity: true,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn identity_written_later_during_startup_is_not_reported_as_lost() {
+        for pending in ["iroh-identity_mobile_primary", PENDING_IMPORT_MARKER] {
+            let (_directory, storage, paths, profile_id, _recovery) =
+                active_recovery_fixture().await;
+            std::fs::write(
+                paths.vault_dir.join(".active-space-manifest-v2"),
+                b"active space marker",
+            )
+            .unwrap();
+            let pending = paths.app_data_root_dir.join(pending);
+            if pending.extension().is_some() {
+                std::fs::write(pending, b"{}").unwrap();
+            } else {
+                std::fs::create_dir_all(pending).unwrap();
+            }
+            let backing: Arc<dyn SecureStoragePort> = storage;
+            let restarted = ProfileKeyRecoveryStore::new(paths, profile_id, backing);
+
+            assert_eq!(
+                restarted.prepare_startup().await.unwrap(),
+                ProfileRecoveryPreparation::Ready
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn identity_loss_still_opens_profile_secrets_for_factory_reset() {
+        let (_directory, storage, paths, profile_id, _recovery) = active_recovery_fixture().await;
+        std::fs::write(
+            paths.vault_dir.join(".active-space-manifest-v2"),
+            b"active space marker",
+        )
+        .unwrap();
+        let backing: Arc<dyn SecureStoragePort> = storage;
+        let restarted = ProfileKeyRecoveryStore::new(paths, profile_id, backing);
+        assert!(matches!(
+            restarted.prepare_startup().await.unwrap(),
+            ProfileRecoveryPreparation::AwaitingPassphrase { .. }
+        ));
+
+        assert!(restarted.open_for_factory_reset().await.unwrap());
+        assert_eq!(
+            restarted.get(PROFILE_ADMISSION_KEY_NAME).unwrap(),
+            Some(vec![0x41; 32])
+        );
+    }
+
+    #[tokio::test]
+    async fn factory_reset_does_not_open_profile_secrets_without_the_unlock_key() {
+        let (_directory, storage, paths, profile_id, _recovery) = active_recovery_fixture().await;
+        storage
+            .values
+            .lock()
+            .unwrap()
+            .remove(&format!("kek:v1:profile:{profile_id}"));
+        let backing: Arc<dyn SecureStoragePort> = storage;
+        let restarted = ProfileKeyRecoveryStore::new(paths, profile_id, backing);
+
+        assert!(!restarted.open_for_factory_reset().await.unwrap());
     }
 
     #[tokio::test]

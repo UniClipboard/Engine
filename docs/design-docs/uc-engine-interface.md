@@ -196,6 +196,8 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 
 当资料和 keyslot 仍在，但自动解锁材料缺失或错误时，`Engine::start` 返回可用的受限实例，启动进度为 `RecoveryAvailable`。此时 `QueryProfileRecovery`、`QueryEncryptionState`、`UnlockSpace` 和生命周期关闭可用，业务数据库、网络、搜索、收发与历史操作返回 `PROFILE_RECOVERY_REQUIRED`；`session_ready` 必须为 `false`。宿主继续用 `UnlockSpace` 提交原口令。错误口令返回 `UNLOCK_SPACE_UNAUTHORIZED_CODE` 且不写入；正确口令恢复原密钥、启动完整后台并报告 `Recovered`。缺少旧独立密钥副本时报告 `PartiallyRecoverable` 及稳定影响类别，不返回已经解锁。损坏、不支持格式和保存失败分别使用原损坏分类、`PROFILE_RECOVERY_UNSUPPORTED_CODE` 和 `PROFILE_RECOVERY_PERSISTENCE_FAILED_CODE`，其他启动错误保持原分类。恢复口令通过后若完整后台启动或后续解锁失败，状态必须进入 `Failed`，`can_submit_passphrase=false`、`restart_required=true`；同一进程不得复用已经消费的宿主能力，宿主重启 Engine 后继续。旧升级备份存在但其保护材料在 userdata 与系统安全存储中都永久缺失时返回稳定的 `PROFILE_UPGRADE_BACKUP_KEY_MISSING_CODE`，不得生成替代材料或绕过备份门槛。
 
+本机已有空间、网络身份文件却缺失时，`Engine::start` 同样返回受限实例：状态为 `PartiallyRecoverable`，损失类别为 `DeviceIdentity`，`can_submit_passphrase=false`。此时不绑定网络，也不生成替代身份；成员历史只认原身份，补发新身份会让其他设备永久拒绝本机。旧版身份目录待改名或存在待应用的配置导入时，身份将在装配阶段写入，不作此判定。受限实例在资料密钥仍可自动打开时接受 `FactoryResetSpace`：只装配重置所需依赖，不启动后台，完成后报告 `restart_required=true`，宿主重启 Engine 后以全新资料启动；资料密钥无法自动打开时该操作返回 `PROFILE_RECOVERY_REQUIRED`。
+
 正常启动和恢复完成后的系统安全存储只保留当前资料的一条自动解锁材料；独立随机密钥位于 userdata 的加密文件中。完整 userdata 加当前口令可以在空安全存储环境恢复，导出与导入会携带该密文文件。`FactoryResetSpace` 同时清除两处副本。宿主不得把 GUI 内容锁定解释为此处的真实密钥恢复状态。
 
 单设备修改加密口令采用一个产品动作。产品收集用户自定义的新口令和再次输入值，一并交给 `ChangeEncryptionPassphrase`；两次输入不一致时不修改任何资料。成功后旧口令不能解锁或通过新配对认证，此前签发的邀请失效，新口令在重启后继续有效。该能力不要求 `re_pairing_required`，只允许 Space 已解锁、本机成员有效且当前设备列表范围只含本机；存在正常或暂停的其他设备、成员恢复中或成员资料不可确认时均拒绝。它保留现有 MasterKey 和历史内容，不触发批量重加密；已有的重新配对提示仍由新设备实际加入结束。iOS、Android 和 HarmonyOS 绑定公开相同的修改动作，不承担资格判断或恢复。
