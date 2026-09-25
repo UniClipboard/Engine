@@ -220,12 +220,28 @@ impl std::fmt::Debug for AdmissionAttemptContractV2 {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum AdmissionMemberBindingError {
     #[error("the admission member binding encoding is invalid")]
-    InvalidEncoding,
+    InvalidEncoding {
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
     #[error("the admission member binding attempt digest is invalid")]
     InvalidAttemptDigest,
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl AdmissionMemberBindingError {
+    pub fn invalid_encoding() -> Self {
+        Self::InvalidEncoding { source: None }
+    }
+
+    pub fn invalid_encoding_from(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::InvalidEncoding {
+            source: Some(Box::new(source)),
+        }
+    }
 }
 
 /// 正式 Add 生成后，把成员实例精确绑定到最初的五分钟尝试。
@@ -288,28 +304,28 @@ impl AdmissionMemberBindingV2 {
         let values = bytes
             .strip_prefix(MEMBER_BINDING_DOMAIN_V2)
             .filter(|values| values.len() >= FIXED_BYTES)
-            .ok_or(AdmissionMemberBindingError::InvalidEncoding)?;
+            .ok_or_else(AdmissionMemberBindingError::invalid_encoding)?;
         let attempt_digest = copy_array::<32>(&values[0..32])
-            .map_err(|_| AdmissionMemberBindingError::InvalidEncoding)?;
+            .map_err(AdmissionMemberBindingError::invalid_encoding_from)?;
         let space_id_len = u64::from_be_bytes(
             copy_array::<8>(&values[32..40])
-                .map_err(|_| AdmissionMemberBindingError::InvalidEncoding)?,
+                .map_err(AdmissionMemberBindingError::invalid_encoding_from)?,
         );
         let space_id_len = usize::try_from(space_id_len)
-            .map_err(|_| AdmissionMemberBindingError::InvalidEncoding)?;
+            .map_err(AdmissionMemberBindingError::invalid_encoding_from)?;
         let expected = FIXED_BYTES
             .checked_add(space_id_len)
-            .ok_or(AdmissionMemberBindingError::InvalidEncoding)?;
+            .ok_or_else(AdmissionMemberBindingError::invalid_encoding)?;
         if values.len() != expected {
-            return Err(AdmissionMemberBindingError::InvalidEncoding);
+            return Err(AdmissionMemberBindingError::invalid_encoding());
         }
         let space_id_end = 40 + space_id_len;
         let space_id = std::str::from_utf8(&values[40..space_id_end])
-            .map_err(|_| AdmissionMemberBindingError::InvalidEncoding)?;
+            .map_err(AdmissionMemberBindingError::invalid_encoding_from)?;
         let member_instance = copy_array::<32>(&values[space_id_end..space_id_end + 32])
-            .map_err(|_| AdmissionMemberBindingError::InvalidEncoding)?;
+            .map_err(AdmissionMemberBindingError::invalid_encoding_from)?;
         let add_event = copy_array::<32>(&values[space_id_end + 32..space_id_end + 64])
-            .map_err(|_| AdmissionMemberBindingError::InvalidEncoding)?;
+            .map_err(AdmissionMemberBindingError::invalid_encoding_from)?;
         Self::new(
             attempt_digest,
             SpaceId::from_str(space_id),
@@ -326,6 +342,7 @@ impl AdmissionMemberBindingV2 {
 fn copy_array<const N: usize>(bytes: &[u8]) -> Result<[u8; N], AdmissionAttemptContractError> {
     bytes
         .try_into()
+        // TryFromSliceError：切片范围已固定，目标分类完整表达长度不符。
         .map_err(|_| AdmissionAttemptContractError::InvalidEncoding)
 }
 

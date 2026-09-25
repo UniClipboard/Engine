@@ -221,6 +221,7 @@ fn branch_id_at(
         &mut hasher,
         &history
             .activation_baseline_identity()
+            // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
             .map_err(|_| MembershipConflictPolicyError::InvalidConflict)?,
     );
     hasher.update(head.as_bytes());
@@ -232,6 +233,7 @@ fn legacy_branch_id(
 ) -> Result<MembershipBranchId, MembershipConflictPolicyError> {
     let position = history
         .current_position()
+        // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
         .map_err(|_| MembershipConflictPolicyError::InvalidConflict)?;
     let head = position
         .event_id

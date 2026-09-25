@@ -297,6 +297,7 @@ impl AdmissionJoinRequestV1 {
     ) -> Result<Self, AdmissionJoinRequestError> {
         membership_credential
             .validate()
+            // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
             .map_err(|_| AdmissionJoinRequestError::InvalidMembershipCredential)?;
         if identity_facts.device_id != device_id
             || identity_facts.member_instance
@@ -405,6 +406,7 @@ impl AdmissionCandidateV1 {
         }
         security_commitment
             .validate()
+            // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
             .map_err(|_| AdmissionCandidateError::InvalidSecurityCommitment)?;
         if candidate_event.lineage_id != security_commitment.lineage_id {
             return Err(AdmissionCandidateError::LineageMismatch);

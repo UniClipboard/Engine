@@ -348,3 +348,16 @@ E1 的检查会拒绝只删标识、仍保留 `{error}` 的改法，所以 E4 �
     - `crates/uc-engine/src/runtime/lan_compatibility.rs`：1 处
     - `crates/uc-engine/src/runtime/session_supervisor/lifecycle.rs`：1 处
 - 清理：前几批脚本为 crate 私有错误类型生成的、从未被调用的无来源构造函数已删除（曾产生 dead-code warning）。
+
+
+### E8 S4 `uc-core`（部分完成）
+
+- 用编译器探测每处 `map_err(|_| ..)` 的下层类型（临时把 `|_|` 改成 `|__probe: ()|`，从类型不匹配报错读出真实错误类型，随后还原）。
+  共 135 处：Core 领域校验错误约 100 处、`postcard::Error` 21 处、`TryFromIntError` 9 处、其余为 `Utf8Error`、`CapacityError` 与切片转换。
+- 已完成：准入状态转换、准入尝试、成员账本、冲突与分支恢复、剪贴板 V3 负载、设备标识、搜索引用等处——下层为 Core 领域校验的
+  按“Core 内部纯校验改分类”注释，整数与切片转换、外部标识超长按例外注释；`AdmissionMemberBindingError::InvalidEncoding`
+  改为可选来源，成员绑定解码的 UTF-8 失败携带来源。
+- 暂缓并交由 [Core 边界收口](2026-09-23-core-boundary-remediation.md) D1/D3：`space_admission/state/persistence/`（准入记录持久化编解码）、
+  `versioned_membership_history/`（成员历史持久化与交换编码）以及 `admission_content_key_catalog.rs` 的编码，共 90 处，包含全部
+  postcard 解码点。这些代码将迁往 Infra，迁移时按 E6 约定保留来源（Infra 自有错误可直接用 `anyhow`），避免现在修改
+  `SpaceAdmissionPersistenceError`、`MembershipHistoryV2Error`（均为 `Copy`，引用 185 与 149 处）后又随迁移重写。

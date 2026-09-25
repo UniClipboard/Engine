@@ -361,6 +361,7 @@ impl SpaceAdmissionAggregate {
                     timeline.expires_at_ms(),
                 )
                 .map(|contract| contract.digest())
+                // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
                 .map_err(|_| SpaceAdmissionAggregateError::InvalidAttemptTimeline)
             })
             .transpose()?;
@@ -782,6 +783,7 @@ impl SpaceAdmissionAggregate {
                     SpaceAdmissionRoute::from_bytes(
                         candidate.continuation_route().as_bytes().to_vec(),
                     )
+                    // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
                     .map_err(|_| SpaceAdmissionAggregateError::InvalidCancellationRequest)?,
                     state.candidate_evidence.message_id(),
                     1,
@@ -789,6 +791,7 @@ impl SpaceAdmissionAggregate {
             }
             SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Prepared(state)) => (
                 SpaceAdmissionRoute::from_bytes(state.pending_exchange.route().as_bytes().to_vec())
+                    // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
                     .map_err(|_| SpaceAdmissionAggregateError::InvalidCancellationRequest)?,
                 state.candidate_evidence.message_id(),
                 2,
@@ -811,6 +814,7 @@ impl SpaceAdmissionAggregate {
             Some(predecessor),
             SpaceAdmissionBodyV1::CancelRequested,
         )
+        // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
         .map_err(|_| SpaceAdmissionAggregateError::InvalidCancellationRequest)?;
         let mut pending_exchange = PendingAdmissionExchange::new(
             route,
@@ -818,6 +822,7 @@ impl SpaceAdmissionAggregate {
             SpaceAdmissionMessageKind::Rejected,
             retry_state,
         )
+        // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
         .map_err(|_| SpaceAdmissionAggregateError::InvalidCancellationRequest)?;
         if peer_upgrade_required {
             pending_exchange.mark_peer_upgrade_required();

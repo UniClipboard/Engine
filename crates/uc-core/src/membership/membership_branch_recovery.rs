@@ -155,8 +155,10 @@ impl MembershipBranchRecoveryPackageV1 {
             &self.target_membership_history,
             verifier,
         )
+        // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
         .map_err(|_| MembershipBranchRecoveryError::InvalidHistory)?;
         if !MembershipConflictPolicy::matches_persisted_branch(&history, self.target_branch_id)
+            // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
             .map_err(|_| MembershipBranchRecoveryError::InvalidHistory)?
         {
             return Err(MembershipBranchRecoveryError::WrongBranch);

@@ -734,6 +734,7 @@ impl MembershipLedger {
     /// 校验全部不变量；`restore` 与 `start` 使用，拒绝任何需要规范化才能成立的状态。
     pub(super) fn validate(&self) -> Result<(), LedgerTransitionError> {
         if device_of(&self.history, self.local_member)
+            // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
             .map_err(|_| LedgerTransitionError::InvalidSnapshot)?
             != self.local_device_id
             || self.peers.contains_key(&self.local_device_id)
@@ -742,6 +743,7 @@ impl MembershipLedger {
         }
         let effective = self
             .effective_peer_devices()
+            // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
             .map_err(|_| LedgerTransitionError::InvalidSnapshot)?;
         for device in &effective {
             if !matches!(self.peers.get(device), Some(PeerLink::Member(_))) {

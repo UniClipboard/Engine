@@ -23,6 +23,7 @@ impl SpaceAdmissionAggregate {
             state.join_request_evidence,
             candidate_reply,
         )
+        // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
         .map_err(|_| SpaceAdmissionAggregateError::InvalidCandidateReply)?;
         self.record_version = record_version;
         self.state = SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Candidate(
@@ -90,6 +91,7 @@ impl SpaceAdmissionAggregate {
         }
         let saved_reply =
             SavedAdmissionReply::new(self.admission_id, prepared_evidence, commit_reply)
+                // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
                 .map_err(|_| SpaceAdmissionAggregateError::InvalidCommitReply)?;
 
         self.record_version = record_version;
@@ -169,6 +171,7 @@ impl SpaceAdmissionAggregate {
         }
         let saved_reply =
             SavedAdmissionReply::new(self.admission_id, applied_evidence, complete_reply)
+                // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
                 .map_err(|_| SpaceAdmissionAggregateError::InvalidCompleteReply)?;
         let confirmation = self
             .attempt_timeline
@@ -263,6 +266,7 @@ impl SpaceAdmissionAggregate {
             return Err(SpaceAdmissionAggregateError::InvalidSettledReply);
         }
         let saved_reply = SavedAdmissionReply::new(self.admission_id, ack_evidence, settled_reply)
+            // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
             .map_err(|_| SpaceAdmissionAggregateError::InvalidSettledReply)?;
 
         self.record_version = record_version;
@@ -407,6 +411,7 @@ impl SpaceAdmissionAggregate {
         let reason = *reason;
         let saved_reply =
             SavedAdmissionReply::new(self.admission_id, cancel_evidence, rejected_reply)
+                // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
                 .map_err(|_| SpaceAdmissionAggregateError::InvalidRejectedReply)?;
 
         self.record_version = record_version;
@@ -559,6 +564,7 @@ impl SpaceAdmissionAggregate {
             return Err(SpaceAdmissionAggregateError::InvalidAbandonmentRequest);
         }
         let saved_reply = SavedAdmissionReply::new(self.admission_id, evidence, abandoned_reply)
+            // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
             .map_err(|_| SpaceAdmissionAggregateError::InvalidAbandonmentRequest)?;
         self.format_version = SPACE_ADMISSION_RECORD_FORMAT_V2;
         self.record_version = record_version;
@@ -618,6 +624,7 @@ fn sponsor_commit_member_binding(
         admission.facts.member_instance,
         event.event_id(),
     )
+    // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
     .map_err(|_| SpaceAdmissionAggregateError::InvalidAbandonmentRequest)
 }
 
