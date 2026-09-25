@@ -8,14 +8,13 @@ use openmls_basic_credential::SignatureKeyPair;
 use openmls_traits::signatures::Signer;
 use openmls_traits::types::SignatureScheme;
 use uc_application::deps::{
-    MembershipLedgerError, MembershipRecord, MembershipRecordCommit, MembershipRecordStorePort,
-    SpaceMembershipRecord,
+    MembershipLedgerError, MembershipProjectionPlan, MembershipRecord, MembershipRecordCommit,
+    MembershipRecordStorePort, SpaceMembershipRecord,
 };
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    AdmissionChangeFacts, MemberInstanceId, MembershipActivationBaselineV2, MembershipCredential,
-    MembershipEventId, MembershipLedgerSnapshot, VersionedMembershipHistory,
-    ED25519_SIGNATURE_ALGORITHM_V1,
+    AdmissionChangeFacts, MemberInstanceId, MembershipCredential, MembershipLedger,
+    MembershipLedgerSnapshot, VersionedMembershipHistory, ED25519_SIGNATURE_ALGORITHM_V1,
 };
 
 pub(crate) struct FixedMembershipRecords(MembershipRecord);
@@ -104,17 +103,21 @@ pub(crate) fn signed_target_members() -> &'static [(AdmissionChangeFacts, Member
     })
 }
 
-/// 以激活基线列出 [`signed_target_members`] 的已建立历史的持久编码。
-pub(crate) fn signed_target_history(lineage_id: &str) -> Vec<u8> {
-    VersionedMembershipHistory::from_activation_baseline(
-        MembershipActivationBaselineV2::Established {
-            lineage_id: lineage_id.to_owned(),
-            head_event_id: MembershipEventId::from_hex(&"11".repeat(32)).unwrap(),
-            head_depth: 0,
-            current_members: signed_target_members().to_vec(),
-        },
-    )
-    .unwrap()
-    .encode_persisted_v2()
-    .unwrap()
+/// 按账本当前成员形成的读模型计划：全部有效成员，本机以外的都可信。
+pub(crate) fn projection_of_ledger(ledger: &MembershipLedger) -> MembershipProjectionPlan {
+    let history = ledger.history();
+    let members: Vec<_> = history
+        .effective_members()
+        .into_iter()
+        .map(|member| history.admission_facts_for(member).unwrap().clone())
+        .collect();
+    MembershipProjectionPlan {
+        local_device_id: *ledger.local_device_id(),
+        trusted_device_ids: members
+            .iter()
+            .map(|facts| facts.device_id)
+            .filter(|device| device != ledger.local_device_id())
+            .collect(),
+        members,
+    }
 }

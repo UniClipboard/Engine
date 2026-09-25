@@ -232,7 +232,6 @@ mod tests {
                 [0x19; 32],
             )
             .unwrap(),
-            target_membership_history: vec![0x1a],
             target_security_state: vec![0x1b],
             target_protection_group_id: "maintenance-group".to_owned(),
             target_key_catalog: vec![0x1c],
@@ -308,6 +307,7 @@ mod tests {
             recipient_staged_mls_state: vec![0x3c],
             recovery_package,
             target_history: history,
+            staged_membership: None,
         }
     }
 }

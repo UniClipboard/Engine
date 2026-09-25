@@ -354,13 +354,6 @@ pub async fn prepare_sync_session(
         activate_sponsor_admission: Arc::new(DefaultSponsorAdmissionActivation::new(
             Arc::clone(&space_setup.space_access.activate_sponsor_admission_security),
             historical_signatures.clone(),
-            Arc::new(MembershipMemberFactsAdapter::new(
-                Arc::clone(&space_setup.member_repo),
-                Arc::clone(&space_setup.trusted_peer_repo),
-                Arc::clone(&space_setup.peer_addr_repo),
-                Arc::clone(&space_setup.device_identity),
-                Arc::clone(&space_setup.clock),
-            )),
         )),
         prepare_sponsor_settled: Arc::new(DefaultSponsorSettledPreparation),
         prepare_joiner_candidate: Arc::new(DefaultJoinerCandidatePreparation::new(

@@ -24,7 +24,7 @@ use crate::security::{
     ActiveRuntimeManifestV3, AdmissionKeyManager, DefaultCurrentProfile, ProfileContentKeyVault,
     ProfileRuntimeLayout,
 };
-use crate::space::membership_record::test_support::{signed_target_history, signed_target_members};
+use crate::space::membership_record::test_support::signed_target_members;
 use crate::space::{
     prepare_registration, InMemorySession, KeyMaterialStore, RuntimeSpaceAccessAdapter,
 };
@@ -216,7 +216,6 @@ fn preparation(
             [0x4d; 32],
         )
         .unwrap(),
-        target_membership_history: target_membership_history(space),
         target_security_state: b"verified MLS security state".to_vec(),
         target_protection_group_id: "target-protection-group".to_owned(),
         target_key_catalog: catalog.encode().unwrap(),
@@ -231,10 +230,6 @@ fn preparation(
             .unwrap(),
         preserve_unreadable_history: false,
     }
-}
-
-fn target_membership_history(space: &SpaceId) -> Vec<u8> {
-    signed_target_history(space.as_ref())
 }
 
 fn relationships() -> Vec<AdmissionChangeFacts> {

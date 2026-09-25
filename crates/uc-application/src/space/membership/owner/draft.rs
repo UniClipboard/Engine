@@ -143,6 +143,34 @@ impl MembershipDraft {
         Ok(())
     }
 
+    /// 加入方激活后建立本机成员状态。`history` 为已记入本机激活回执的加入后历史，其当前头就是本机
+    /// 的加入。同一加入已经建立时不产生变化；当前是其他 Space 或其他成员实例时按冲突拒绝。
+    ///
+    /// `history` 为空表示该激活由旧版本准备，目标控制世代已带有同一加入的成员记录，只核对一致。
+    pub(crate) fn join_space(
+        &mut self,
+        lineage_id: &str,
+        history: Option<VersionedMembershipHistory>,
+        local_device_id: DeviceId,
+        local_member: MemberInstanceId,
+    ) -> Result<(), MembershipLedgerError> {
+        if let Some(space) = &self.space {
+            let joined = space.history().lineage_id() == lineage_id
+                && space.local_member() == local_member
+                && space.local_device_id() == &local_device_id
+                && history
+                    .as_ref()
+                    .and_then(VersionedMembershipHistory::current_head)
+                    .is_none_or(|head| space.history().event(head).is_some());
+            return joined.then_some(()).ok_or(MembershipLedgerError::Conflict);
+        }
+        let history = history.ok_or(MembershipLedgerError::RecoveryRequired)?;
+        if history.lineage_id() != lineage_id {
+            return Err(MembershipLedgerError::Conflict);
+        }
+        self.start_space(history, local_device_id, local_member)
+    }
+
     /// 结束当前 Space 的全部成员事实；修订号继续递增。
     pub(crate) fn clear_space(&mut self) -> Result<(), MembershipLedgerError> {
         if self.space.take().is_none() {

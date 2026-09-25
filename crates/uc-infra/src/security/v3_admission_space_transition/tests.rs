@@ -37,7 +37,7 @@ use crate::security::{
     ProfileContentKeyVault, ProfileRuntimeLayout, SpaceControlGeneration,
     SpaceControlGenerationError, SpaceTransitionActivation, SpaceTransitionActivationError,
 };
-use crate::space::membership_record::test_support::{signed_target_history, signed_target_members};
+use crate::space::membership_record::test_support::signed_target_members;
 use crate::space::{
     prepare_registration, CurrentSpaceResolver, InMemorySession, KeyMaterialStore,
     RuntimeSpaceAccessAdapter,
@@ -767,7 +767,6 @@ fn preparation_with_seed(
             [0x48; 32],
         )
         .unwrap(),
-        target_membership_history: target_membership_history(space),
         target_security_state: b"verified MLS security state".to_vec(),
         target_protection_group_id: format!("target-protection-group-{seed:02x}"),
         target_key_catalog: catalog.encode().unwrap(),
@@ -782,10 +781,6 @@ fn preparation_with_seed(
             .unwrap(),
         preserve_unreadable_history: false,
     }
-}
-
-fn target_membership_history(space: &SpaceId) -> Vec<u8> {
-    signed_target_history(space.as_ref())
 }
 
 fn relationships() -> Vec<AdmissionChangeFacts> {

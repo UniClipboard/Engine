@@ -659,9 +659,10 @@ impl JoinerAdmission {
         complete: SpaceAdmissionEnvelopeV1,
         canonical_digest: [u8; 32],
         space_transition: AdmissionSpaceTransition,
+        staged_target: AdmissionStagedTarget,
     ) -> Result<JoinerAdmissionTransition, SpaceAdmissionAggregateError> {
         self.record
-            .accept_complete(complete, canonical_digest, space_transition)
+            .accept_complete(complete, canonical_digest, space_transition, staged_target)
             .map(JoinerAdmissionTransition::from_transition)
     }
 

@@ -10,6 +10,7 @@ use crate::space::membership::{
     MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger, RecoverSpaceAdmissionsPort,
     SpaceWorkMode,
 };
+use uc_core::ids::DeviceId;
 use uc_core::membership::AdmissionRecordPersistence;
 
 #[tokio::test]
@@ -861,12 +862,60 @@ async fn activation_is_retried_from_the_saved_plan_after_commit_conflict() {
     pair.fail_next_activation_commit();
 
     let conflicted = pair.joiner().complete_pending_space_transition().await;
+    // 成员事实先于准入记录提交：准入记录保存失败时成员状态已经建立。
+    let records = &pair.joiner_membership().records;
+    assert_eq!(records.commit_count(), 1);
+    assert_eq!(
+        records.ledger().local_device_id(),
+        &DeviceId::new("joining-device")
+    );
     let recovered = pair.joiner().complete_pending_space_transition().await;
 
     assert!(conflicted.is_err());
     assert!(recovered.is_ok());
+    // 重放同一激活不产生第二次加入。
+    assert_eq!(records.commit_count(), 1);
     assert!(pair.events().ends_with(&[
         ProtocolEvent::JoinerActivationExecuted,
+        ProtocolEvent::JoinerActivationExecuted,
+        ProtocolEvent::JoinerSavedActivePendingSettlement,
+        ProtocolEvent::AdmissionRecoveryWoken,
+    ]));
+}
+
+#[tokio::test]
+async fn activation_keeps_the_admission_record_when_membership_commit_fails() {
+    let pair = SpaceAdmissionProtocolTestPair::receiving_complete().await;
+    pair.joiner()
+        .start_join_at(join_input("membership-failure"), 1_000)
+        .await
+        .expect("the join request should be saved before recovery");
+    for _ in 0..3 {
+        pair.joiner()
+            .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+            .await;
+    }
+    let records = &pair.joiner_membership().records;
+    records.fail_next_commits(1);
+
+    let failed = pair.joiner().complete_pending_space_transition().await;
+
+    assert!(failed.is_err());
+    assert_eq!(records.commit_count(), 0);
+    assert!(!pair
+        .events()
+        .contains(&ProtocolEvent::JoinerSavedActivePendingSettlement));
+    assert!(pair
+        .joiner()
+        .has_pending_space_transition()
+        .await
+        .expect("the activation should remain pending"));
+
+    let recovered = pair.joiner().complete_pending_space_transition().await;
+
+    assert!(recovered.is_ok());
+    assert_eq!(records.commit_count(), 1);
+    assert!(pair.events().ends_with(&[
         ProtocolEvent::JoinerActivationExecuted,
         ProtocolEvent::JoinerSavedActivePendingSettlement,
         ProtocolEvent::AdmissionRecoveryWoken,

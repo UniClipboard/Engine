@@ -17,6 +17,7 @@ use uc_core::ports::{ClockPort, SecureStorageError, SecureStoragePort};
 
 use super::codec::{self, Decoded};
 use super::store::{EncryptedRecordRow, MEMBERSHIP_RECORD_PURPOSE};
+use super::test_support::projection_of_ledger;
 use super::SqliteMembershipRecordStore;
 use crate::db::executor::DieselSqliteExecutor;
 use crate::db::pool::{init_db_pool, DbPool};
@@ -427,24 +428,8 @@ fn commit_requires_the_expected_revision_and_a_larger_replacement() {
     assert_eq!(store.load().unwrap(), record);
 }
 
-/// 按账本当前成员形成的读模型计划：全部有效成员，本机以外的都可信。
 fn projection_of(record: &SpaceMembershipRecord) -> MembershipProjectionPlan {
-    let ledger = restored(record);
-    let history = ledger.history();
-    let members: Vec<_> = history
-        .effective_members()
-        .into_iter()
-        .map(|member| history.admission_facts_for(member).unwrap().clone())
-        .collect();
-    MembershipProjectionPlan {
-        local_device_id: *ledger.local_device_id(),
-        trusted_device_ids: members
-            .iter()
-            .map(|facts| facts.device_id)
-            .filter(|device| device != ledger.local_device_id())
-            .collect(),
-        members,
-    }
+    projection_of_ledger(&restored(record))
 }
 
 #[tokio::test]

@@ -617,11 +617,13 @@ impl SpaceAdmissionAggregate {
         ))
     }
 
+    /// `staged_target` 是激活准备补全后的暂存目标，替换 Applied 阶段保存的版本。
     pub(crate) fn accept_complete(
         mut self,
         complete: SpaceAdmissionEnvelopeV1,
         canonical_digest: [u8; 32],
         space_transition: AdmissionSpaceTransition,
+        staged_target: AdmissionStagedTarget,
     ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
         let record_version = self
             .record_version
@@ -670,7 +672,7 @@ impl SpaceAdmissionAggregate {
                 peer_binding: state.peer_binding,
                 continuation_credential: state.continuation_credential,
                 exact_commit: state.exact_commit,
-                staged_target: state.staged_target,
+                staged_target,
                 completion: complete,
                 completion_evidence,
                 space_transition,

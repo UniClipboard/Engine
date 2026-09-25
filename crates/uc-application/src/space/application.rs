@@ -359,6 +359,7 @@ impl SpaceApplication {
             space_transition_changes,
             Arc::clone(&re_pairing),
             admission_observations,
+            Arc::clone(&owner),
         );
         let sponsor_admission = SponsorAdmissionService::new(
             sponsor_admission_state,

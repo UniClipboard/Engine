@@ -1,13 +1,15 @@
 use std::sync::Arc;
 
 use uc_core::membership::{
-    HistoricalMembershipSignatureVerifier, MembershipBranchTransitionPhaseV1,
+    HistoricalMembershipSignatureVerifier, LedgerInput, LedgerOutcome, MemberInstanceId,
+    MembershipBranchTransitionPhaseV1, MembershipBranchTransitionV1, VersionedMembershipHistory,
 };
 use uc_core::ports::ClockPort;
 
 use crate::space::membership::{
-    MembershipBranchRecoverySession, MembershipConflictStatus, MembershipLedgerError,
+    ledger_error, MembershipBranchRecoverySession, MembershipConflictStatus, MembershipLedgerError,
     MembershipMaintenanceStepOutcome, MembershipOwner, RecoverMembershipConflictsPort,
+    StagedMembershipRecord,
 };
 
 use super::{
@@ -313,6 +315,26 @@ impl RecoverMembershipConflictUseCase {
                     Ok(history) => history,
                     Err(_) => return RecoverMembershipConflictOutcome::StableFailure,
                 };
+            let staged_membership =
+                if transition.phase() == MembershipBranchTransitionPhaseV1::TargetVerified {
+                    match self
+                        .stage_target_membership(
+                            transition_id,
+                            &transition,
+                            recovery_package.recipient_member(),
+                            &target_history,
+                        )
+                        .await
+                    {
+                        Ok(staged) => Some(staged),
+                        Err(MembershipLedgerError::Conflict) => {
+                            return RecoverMembershipConflictOutcome::StableFailure;
+                        }
+                        Err(error) => return map_ledger_error(error),
+                    }
+                } else {
+                    None
+                };
             let next = match self
                 .transition_executor
                 .advance_membership_branch_transition(AdvanceMembershipBranchTransitionInput {
@@ -320,6 +342,7 @@ impl RecoverMembershipConflictUseCase {
                     recipient_staged_mls_state: recipient_staged_mls_state.clone(),
                     recovery_package: recovery_package.clone(),
                     target_history,
+                    staged_membership,
                 })
                 .await
             {
@@ -337,7 +360,13 @@ impl RecoverMembershipConflictUseCase {
             if transition.advance(next.phase()).as_ref() != Some(&next) {
                 return RecoverMembershipConflictOutcome::StableFailure;
             }
-            if let Err(error) = self.owner.load().await {
+            // 提升后当前控制世代已换成目标世代，Owner 以其中已暂存的成员记录重新加载。
+            let loaded = if next.phase() == MembershipBranchTransitionPhaseV1::Promoted {
+                self.owner.reload().await
+            } else {
+                self.owner.load().await
+            };
+            if let Err(error) = loaded {
                 return map_ledger_error(error);
             }
             let completed = next.phase() == MembershipBranchTransitionPhaseV1::Completed;
@@ -389,6 +418,48 @@ impl RecoverMembershipConflictUseCase {
                 Err(error) => return map_ledger_error(error),
             }
         }
+    }
+
+    /// 目标控制世代的成员记录：在当前状态上采用目标分支历史，并把本次转换的检查点推进到
+    /// `TargetStaged`，使目标世代提升后即可从该检查点继续。
+    async fn stage_target_membership(
+        &self,
+        transition_id: [u8; 32],
+        transition: &MembershipBranchTransitionV1,
+        recipient_member: MemberInstanceId,
+        target_history: &VersionedMembershipHistory,
+    ) -> Result<StagedMembershipRecord, MembershipLedgerError> {
+        let staged_transition = transition
+            .advance(MembershipBranchTransitionPhaseV1::TargetStaged)
+            .ok_or(MembershipLedgerError::Conflict)?;
+        let history = target_history.clone();
+        self.owner
+            .stage(move |draft| {
+                if draft.require_space()?.local_member() != recipient_member {
+                    return Err(MembershipLedgerError::Conflict);
+                }
+                let checkpoint = draft
+                    .branch_recovery_mut()?
+                    .branch_transitions
+                    .get_mut(&transition_id)
+                    .ok_or(MembershipLedgerError::Conflict)?;
+                if checkpoint != transition {
+                    return Err(MembershipLedgerError::Conflict);
+                }
+                *checkpoint = staged_transition;
+                // 旧分支的历史交换暂存不跨分支继承。
+                *draft.history_exchange_mut()? = Default::default();
+                match draft
+                    .apply(LedgerInput::BranchRecovered { history })
+                    .map_err(ledger_error)?
+                {
+                    LedgerOutcome::Applied => Ok(()),
+                    LedgerOutcome::Unchanged | LedgerOutcome::Stale => {
+                        Err(MembershipLedgerError::Conflict)
+                    }
+                }
+            })
+            .await
     }
 
     async fn submit_and_persist_package(

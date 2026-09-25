@@ -6,7 +6,7 @@ use diesel::sql_query;
 use diesel::sql_types::Binary;
 use uc_application::deps::{
     MembershipLedgerError, MembershipProjectionPlan, MembershipRecord, MembershipRecordCommit,
-    MembershipRecordStorePort,
+    MembershipRecordStorePort, StagedMembershipRecord,
 };
 use uc_core::membership::HistoricalMembershipSignatureVerifier;
 use uc_core::ports::ClockPort;
@@ -30,7 +30,7 @@ pub struct SqliteMembershipRecordStore<E> {
     keys: Arc<AdmissionKeyManager>,
     verifier: Arc<dyn HistoricalMembershipSignatureVerifier>,
     clock: Arc<dyn ClockPort>,
-    /// 与记录同库的成员读模型。只构建暂存代际数据库的调用方不维护读模型，传入 `None`。
+    /// 与记录同库的成员读模型。只读取记录的调用方不维护读模型，传入 `None`。
     relationships: Option<Arc<EncryptedRelationshipStore<E>>>,
 }
 
@@ -149,6 +149,41 @@ impl<E: DbExecutor> SqliteMembershipRecordStore<E> {
         .execute(conn)
         .map_err(MembershipLedgerError::unavailable_from)?;
         Ok(())
+    }
+}
+
+impl<E: DbExecutor + Send + Sync> SqliteMembershipRecordStore<E> {
+    /// 把成员状态负责人为暂存控制世代形成的记录与读模型计划原样写入同一事务。
+    ///
+    /// 暂存世代尚未生效，没有其他写入方；替换记录的修订号不得小于其中已有记录，中断后重复写入同一记录
+    /// 结果不变。不得用于当前控制世代。
+    pub async fn stage(
+        &self,
+        staged: &StagedMembershipRecord,
+    ) -> Result<(), MembershipLedgerError> {
+        let writer = self
+            .relationships
+            .as_ref()
+            .ok_or_else(MembershipLedgerError::unavailable)?
+            .membership_projection_writer()
+            .await
+            .map_err(MembershipLedgerError::unavailable_from)?;
+        self.executor
+            .run(|conn| {
+                conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
+                    let current = self.load_on(conn).map_err(anyhow::Error::new)?;
+                    if staged.replacement.revision() < current.revision() {
+                        return Err(anyhow::Error::new(MembershipLedgerError::Conflict));
+                    }
+                    self.save_on(conn, &staged.replacement)
+                        .map_err(anyhow::Error::new)?;
+                    writer.apply(conn, &staged.projection).map_err(|error| {
+                        anyhow::Error::new(MembershipLedgerError::unavailable_from(error))
+                    })?;
+                    Ok(())
+                })
+            })
+            .map_err(map_executor_error)
     }
 }
 

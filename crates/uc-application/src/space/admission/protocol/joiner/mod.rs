@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::space::membership::WakeSpaceMembershipMaintenancePort;
+use crate::space::membership::{MembershipOwner, WakeSpaceMembershipMaintenancePort};
 use uc_core::ports::{ClockPort, SettingsPort};
 
 mod activate_complete;
@@ -19,7 +19,7 @@ pub use activate_complete::{
     CompletedJoinerActivation, ExecuteJoinerActivationError, ExecuteJoinerActivationPort,
     JoinerActivationCommitToken, JoinerActivationIntent, JoinerActivationMutation,
     JoinerActivationOutcome, JoinerActivationStateError, JoinerActivationStatePort,
-    LoadedJoinerActivation, ValidateJoinerActivationIntentPort,
+    JoinerMembershipStart, LoadedJoinerActivation, ValidateJoinerActivationIntentPort,
 };
 pub use cancel_join::{
     CurrentJoinAdmissionStatePort, JoinerCancellationCommitToken, JoinerCancellationMaterial,
@@ -61,6 +61,7 @@ pub(crate) struct JoinerAdmissionService {
     pub(super) space_transition_changes: tokio::sync::watch::Sender<()>,
     pub(super) re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,
     pub(super) observations: Arc<SpaceAdmissionObservationRegistry>,
+    pub(super) members: Arc<MembershipOwner>,
 }
 
 pub(crate) enum JoinerReplyHandlingOutcome {
@@ -89,6 +90,7 @@ impl JoinerAdmissionService {
         space_transition_changes: tokio::sync::watch::Sender<()>,
         re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,
         observations: Arc<SpaceAdmissionObservationRegistry>,
+        members: Arc<MembershipOwner>,
     ) -> Self {
         Self {
             settings,
@@ -108,6 +110,7 @@ impl JoinerAdmissionService {
             space_transition_changes,
             re_pairing,
             observations,
+            members,
         }
     }
 }

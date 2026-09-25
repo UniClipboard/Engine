@@ -5,6 +5,8 @@ use uc_core::membership::{
     MembershipBranchTransitionV1, MembershipConflictId, VersionedMembershipHistory,
 };
 
+use crate::space::membership::StagedMembershipRecord;
+
 #[derive(Clone)]
 pub struct MembershipBranchRecoveryRequest {
     pub peer_device_id: DeviceId,
@@ -141,6 +143,9 @@ pub struct AdvanceMembershipBranchTransitionInput {
     pub recipient_staged_mls_state: Vec<u8>,
     pub recovery_package: uc_core::membership::MembershipBranchRecoveryPackageV1,
     pub target_history: VersionedMembershipHistory,
+    /// 目标控制世代的成员记录，只在从 `TargetVerified` 暂存目标时提供：采用目标分支历史、检查点已推进
+    /// 到 `TargetStaged`。实现只能原样写入目标世代。
+    pub staged_membership: Option<StagedMembershipRecord>,
 }
 
 #[derive(thiserror::Error)]

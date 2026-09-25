@@ -11,13 +11,13 @@ use uc_application::deps::{
     MembershipRecord, PrepareMembershipBranchRecoveryMaterialInput,
     PrepareMembershipBranchRecoveryMaterialPort, PrepareMembershipBranchRecoveryRecipientPort,
     PrepareMembershipBranchTransitionInput, PrepareMembershipBranchTransitionPort,
-    SpaceMembershipRecord,
+    SpaceMembershipRecord, StagedMembershipRecord,
 };
 use uc_core::crypto::domain::Passphrase;
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
-    ActiveRuntimeLayout, ActiveSpaceGenerationManifestV2, AdmissionChangeFacts, MembershipBranchId,
-    MembershipBranchRecoveryPackageV1, MembershipBranchTransitionPhaseV1,
+    ActiveRuntimeLayout, ActiveSpaceGenerationManifestV2, AdmissionChangeFacts, LedgerInput,
+    MembershipBranchId, MembershipBranchRecoveryPackageV1, MembershipBranchTransitionPhaseV1,
     MembershipBranchTransitionV1, MembershipConflictId, MembershipCredential, MembershipLedger,
     RevocationRepositoryPort, VersionedMembershipHistory, ED25519_SIGNATURE_ALGORITHM_V1,
 };
@@ -36,6 +36,7 @@ use crate::security::{
     AdmissionKeyManager, DefaultCurrentProfile, ProfileContentKeyVault, ProfileRuntimeLayout,
     SpaceControlGeneration, SpaceTransitionActivation,
 };
+use crate::space::membership_record::test_support::projection_of_ledger;
 use crate::space::{
     DefaultMembershipBranchTransitionPreparation, InMemorySession, KeyMaterialStore,
     OpenMlsHistoricalSignatureVerifier, RuntimeSpaceAccessAdapter, SqliteMembershipRecordStore,
@@ -311,6 +312,10 @@ async fn v3_membership_branch_replays_every_control_phase_after_crash() {
         MembershipBranchTransitionPhaseV1::RuntimeRestored,
         MembershipBranchTransitionPhaseV1::Completed,
     ] {
+        // 成员状态负责人只在暂存目标时提供目标世代的成员记录。
+        let staged_membership = (current.phase()
+            == MembershipBranchTransitionPhaseV1::TargetVerified)
+            .then(|| staged_branch_membership(&records.load().unwrap(), &current, &history));
         let first_transitioner = V3MembershipBranchTransition::new(
             control_pool.clone(),
             Arc::clone(&manifests),
@@ -323,6 +328,7 @@ async fn v3_membership_branch_replays_every_control_phase_after_crash() {
                 recipient_staged_mls_state: recipient_recovery.staged_mls_state.clone(),
                 recovery_package: package.clone(),
                 target_history: history.clone(),
+                staged_membership: staged_membership.clone(),
             })
             .await
             .expect("first phase execution succeeds before the simulated crash");
@@ -342,6 +348,7 @@ async fn v3_membership_branch_replays_every_control_phase_after_crash() {
                 recipient_staged_mls_state: recipient_recovery.staged_mls_state.clone(),
                 recovery_package: package.clone(),
                 target_history: history.clone(),
+                staged_membership: staged_membership.clone(),
             })
             .await
             .expect("restarted owner replays the same durable phase");
@@ -411,6 +418,46 @@ async fn v3_membership_branch_replays_every_control_phase_after_crash() {
             "target.sqlite",
         ],
     );
+}
+
+/// 模拟成员状态负责人为暂存目标形成的成员记录：采用目标分支历史，检查点推进到 `TargetStaged`。
+fn staged_branch_membership(
+    current: &MembershipRecord,
+    transition: &MembershipBranchTransitionV1,
+    target_history: &VersionedMembershipHistory,
+) -> StagedMembershipRecord {
+    let MembershipRecord::Space(space) = current.clone() else {
+        panic!("the recipient has no current space");
+    };
+    let SpaceMembershipRecord {
+        ledger,
+        mut branch_recovery,
+        ..
+    } = *space;
+    let (ledger, _, _) = MembershipLedger::restore(ledger)
+        .unwrap()
+        .apply(
+            LedgerInput::BranchRecovered {
+                history: target_history.clone(),
+            },
+            0,
+        )
+        .unwrap()
+        .into_parts();
+    branch_recovery.branch_transitions.insert(
+        *transition.transition_id(),
+        transition
+            .advance(MembershipBranchTransitionPhaseV1::TargetStaged)
+            .unwrap(),
+    );
+    StagedMembershipRecord {
+        projection: projection_of_ledger(&ledger),
+        replacement: MembershipRecord::Space(Box::new(SpaceMembershipRecord {
+            ledger: ledger.snapshot(),
+            history_exchange: Default::default(),
+            branch_recovery,
+        })),
+    }
 }
 
 fn assert_no_forbidden_paths(root: &std::path::Path, forbidden: &[&str]) {

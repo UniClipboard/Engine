@@ -49,10 +49,12 @@ impl JoinerAdmissionService {
                 return JoinerReplyHandlingOutcome::NoImmediateWork;
             }
         };
+        let (space_transition, staged_target) = activation.into_parts();
         let transition = match aggregate.accept_complete(
             reply,
             canonical_digest,
-            activation.into_transition(),
+            space_transition,
+            staged_target,
         ) {
             Ok(transition) => transition,
             Err(_) => {

@@ -23,7 +23,7 @@ use uc_core::ports::{ClockPort, HostEvent, HostEventEmitterPort, MembershipHostE
 use super::{
     CurrentSpaceMemberScope, CurrentSpaceMemberScopeError, CurrentSpaceMemberScopePort,
     MembershipLedgerError, MembershipProjectionPlan, MembershipRecordCommit,
-    MembershipRecordStorePort, RetainedGroupUpdateRecipientsPort,
+    MembershipRecordStorePort, RetainedGroupUpdateRecipientsPort, StagedMembershipRecord,
     WakeSpaceMembershipMaintenancePort,
 };
 use crate::space::lifecycle::{SpaceMembershipRebuildError, SpaceMembershipResetPort};
@@ -154,6 +154,37 @@ impl MembershipOwner {
             self.worker_wake.wake();
         }
         Ok(MembershipCommitted { view, output })
+    }
+
+    /// 控制世代切换后，当前成员记录已换成新世代中的记录：丢弃已发布状态，重新加载校验并通知读取方。
+    pub(crate) async fn reload(&self) -> Result<Arc<MembershipView>, MembershipLedgerError> {
+        let _operation = self.operation.lock().await;
+        self.forget()?;
+        let view = self.load_exclusive().await?;
+        self.changes.send_replace(());
+        Ok(view)
+    }
+
+    /// 在最新状态上执行 `change`，为尚未生效的暂存控制世代形成成员记录与读模型计划。
+    ///
+    /// 不在当前世代提交，也不发布；暂存世代提升后由 [`Self::reload`] 采用。`change` 必须产生变化。
+    pub(crate) async fn stage(
+        &self,
+        change: impl FnOnce(&mut MembershipDraft) -> Result<(), MembershipLedgerError>,
+    ) -> Result<StagedMembershipRecord, MembershipLedgerError> {
+        let _operation = self.operation.lock().await;
+        let current = self.load_exclusive().await?;
+        let mut draft = MembershipDraft::new(current, self.clock.now_ms());
+        change(&mut draft)?;
+        let finished = draft.finish()?.ok_or(MembershipLedgerError::Conflict)?;
+        let space = finished
+            .view
+            .space()
+            .ok_or(MembershipLedgerError::RecoveryRequired)?;
+        Ok(StagedMembershipRecord {
+            projection: MembershipProjectionPlan::from_ledger(space.ledger())?,
+            replacement: finished.view.to_record(),
+        })
     }
 
     /// 取出新近确认了本机位置的对端，交给组密钥投递提前处理。

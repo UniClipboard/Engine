@@ -58,6 +58,16 @@ pub struct MembershipRecordCommit {
     pub projection: Option<MembershipProjectionPlan>,
 }
 
+/// 为尚未生效的暂存控制世代预先形成的成员记录与读模型计划，提升后即成为当前成员状态。
+///
+/// 只由成员状态负责人按 Core 规则从当前状态推导；持久层只能把它原样写入暂存世代，不得在当前世代
+/// 提交，也不得修改其中任何字段。
+#[derive(Clone)]
+pub struct StagedMembershipRecord {
+    pub replacement: MembershipRecord,
+    pub projection: MembershipProjectionPlan,
+}
+
 /// 成员记录的加密持久能力。
 ///
 /// 实现必须以 profile 或 Space MasterKey 加密记录的全部字段，不得保留明文镜像。

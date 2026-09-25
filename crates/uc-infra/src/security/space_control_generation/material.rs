@@ -1,16 +1,10 @@
 use std::collections::BTreeSet;
 
-use chrono::{TimeZone as _, Utc};
-use uc_application::deps::{
-    AdmissionSpaceTransitionPreparationV2, MembershipRecord, SpaceMembershipRecord,
-};
+use uc_application::deps::AdmissionSpaceTransitionPreparationV2;
 use uc_core::membership::{
-    AdmissionContentKeyCatalogV1, ContentKeyId, GroupEpoch, HistoricalMembershipSignatureVerifier,
-    MembershipLedger, ProtectionGroupId, SpaceKeyMaterial, SpaceKeyState, SpaceMember,
-    VersionedMembershipHistory,
+    AdmissionContentKeyCatalogV1, ContentKeyId, GroupEpoch, ProtectionGroupId, SpaceKeyMaterial,
+    SpaceKeyState,
 };
-use uc_core::ports::PeerAddressRecord;
-use uc_core::trusted_peer::TrustedPeer;
 
 use super::{
     inconsistent, inconsistent_input, ActiveRuntimeManifestV3, AdmissionInputIssue,
@@ -18,15 +12,11 @@ use super::{
 };
 use crate::space::import_admission_content_key_catalog;
 
+/// 加入方目标控制世代的安全材料与准入凭据。成员记录与成员读模型不在此写入：目标世代生效后由
+/// 成员状态负责人按加入后历史建立。
 pub(super) struct PreparedAdmissionControl {
     space_id: uc_core::ids::SpaceId,
     security_material: SpaceKeyMaterial,
-    membership_history: Vec<u8>,
-    local_device_id: uc_core::ids::DeviceId,
-    local_member_instance: uc_core::membership::MemberInstanceId,
-    members: Vec<SpaceMember>,
-    trusted_peers: Vec<TrustedPeer>,
-    peer_addresses: Vec<PeerAddressRecord>,
     credentials: Vec<u8>,
 }
 
@@ -45,7 +35,6 @@ impl PreparedAdmissionControl {
         if manifest.layout().space_id() != &space_id
             || input.target_security_commitment.attempt_id != *input.attempt_id.as_bytes()
             || input.target_security_commitment.lineage_id != input.target_space_id
-            || input.target_membership_history.is_empty()
             || input.target_security_state.is_empty()
             || input.target_admission_credentials.is_empty()
         {
@@ -90,103 +79,21 @@ impl PreparedAdmissionControl {
         validate_updates(input)?;
         security_material.add_pending_group_updates(input.relayed_group_updates.clone(), 0);
 
-        let timestamp = Utc
-            .timestamp_millis_opt(0)
-            .single()
-            .ok_or_else(|| inconsistent(anyhow::anyhow!("control timestamp is invalid")))?;
-        let mut members = Vec::with_capacity(input.target_relationships.len());
-        let mut trusted_peers = Vec::new();
-        let mut peer_addresses = Vec::new();
-        let mut local_member_instance = None;
-        for facts in &input.target_relationships {
-            members.push(SpaceMember {
-                device_id: facts.device_id.clone(),
-                device_name: facts.device_name.clone(),
-                identity_fingerprint: facts.identity_fingerprint.clone(),
-                joined_at: timestamp,
-                sync_preferences: Default::default(),
-            });
-            if facts.device_id == input.local_device_id {
-                if local_member_instance
-                    .replace(facts.member_instance)
-                    .is_some()
-                {
-                    return Err(inconsistent_input(
-                        AdmissionInputIssue::Relationships,
-                        anyhow::anyhow!("local relationship is duplicated"),
-                    ));
-                }
-            } else {
-                trusted_peers.push(TrustedPeer {
-                    local_device_id: input.local_device_id.clone(),
-                    peer_device_id: facts.device_id.clone(),
-                    peer_fingerprint: facts.identity_fingerprint.clone(),
-                    trusted_at: timestamp,
-                });
-                peer_addresses.push(PeerAddressRecord {
-                    device_id: facts.device_id.clone(),
-                    addr_blob: facts.transport_address_blob.clone(),
-                    observed_at: timestamp,
-                });
-            }
-        }
-        let local_member_instance = local_member_instance.ok_or_else(|| {
-            inconsistent_input(
+        if !input
+            .target_relationships
+            .iter()
+            .any(|facts| facts.device_id == input.local_device_id)
+        {
+            return Err(inconsistent_input(
                 AdmissionInputIssue::Relationships,
                 anyhow::anyhow!("local relationship is missing"),
-            )
-        })?;
-        members.sort_by(|left, right| left.device_id.cmp(&right.device_id));
-        trusted_peers.sort_by(|left, right| left.peer_device_id.cmp(&right.peer_device_id));
-        peer_addresses.sort_by(|left, right| left.device_id.cmp(&right.device_id));
+            ));
+        }
         Ok(Self {
             space_id,
             security_material,
-            membership_history: input.target_membership_history.clone(),
-            local_device_id: input.local_device_id.clone(),
-            local_member_instance,
-            members,
-            trusted_peers,
-            peer_addresses,
             credentials: input.target_admission_credentials.clone(),
         })
-    }
-
-    /// 加入方在目标控制世代中的起始成员记录：按 Core 起点规则建立，历史中的其他成员视为一致、
-    /// 尚待确认本机位置。
-    pub(super) fn record(
-        &self,
-        current_revision: u64,
-        verifier: &dyn HistoricalMembershipSignatureVerifier,
-    ) -> Result<MembershipRecord, SpaceControlGenerationError> {
-        let history =
-            VersionedMembershipHistory::decode_persisted_v2(&self.membership_history, verifier)
-                .map_err(|source| {
-                    inconsistent_input(AdmissionInputIssue::MembershipHistory, source.into())
-                })?;
-        if history.lineage_id() != self.space_id.as_ref() {
-            return Err(inconsistent_input(
-                AdmissionInputIssue::MembershipHistory,
-                anyhow::anyhow!("control membership history has a different lineage"),
-            ));
-        }
-        let revision = current_revision
-            .checked_add(1)
-            .ok_or_else(|| inconsistent(anyhow::anyhow!("ledger revision overflow")))?;
-        let ledger = MembershipLedger::start(
-            history,
-            self.local_device_id,
-            self.local_member_instance,
-            revision,
-        )
-        .map_err(|source| {
-            inconsistent_input(AdmissionInputIssue::MembershipHistory, source.into())
-        })?;
-        Ok(MembershipRecord::Space(Box::new(SpaceMembershipRecord {
-            ledger: ledger.snapshot(),
-            history_exchange: Default::default(),
-            branch_recovery: Default::default(),
-        })))
     }
 
     pub(super) fn space_id(&self) -> &uc_core::ids::SpaceId {
@@ -195,18 +102,6 @@ impl PreparedAdmissionControl {
 
     pub(super) fn security_material(&self) -> &SpaceKeyMaterial {
         &self.security_material
-    }
-
-    pub(super) fn members(&self) -> &[SpaceMember] {
-        &self.members
-    }
-
-    pub(super) fn trusted_peers(&self) -> &[TrustedPeer] {
-        &self.trusted_peers
-    }
-
-    pub(super) fn peer_addresses(&self) -> &[PeerAddressRecord] {
-        &self.peer_addresses
     }
 
     pub(super) fn credentials(&self) -> &[u8] {

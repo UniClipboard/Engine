@@ -2,22 +2,22 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use rand::RngCore;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::warn;
 use uc_application::deps::{
     AdmissionSpaceTransitionError, AdmissionSpaceTransitionPort,
     AdmissionSpaceTransitionPreparationV2, AdmissionSpaceTransitionStepV2,
     CompletedJoinerActivation, ExecuteJoinerActivationError, ExecuteJoinerActivationPort,
-    JoinerActivationIntent, JoinerActivationOutcome, PrepareJoinerActivationError,
-    PrepareJoinerActivationPort, PreparedJoinerActivation,
+    JoinerActivationIntent, JoinerActivationOutcome, JoinerMembershipStart,
+    PrepareJoinerActivationError, PrepareJoinerActivationPort, PreparedJoinerActivation,
 };
 use uc_core::membership::{
-    AdmissionCompleteAckV1, AdmissionCompletionV1, AdmissionRetryState, AdmissionSpaceTransition,
-    AdmissionSpaceTransitionResult, AdmissionSpaceTransitionV2,
-    HistoricalMembershipSignatureVerifier, MembershipOperationV2, PendingAdmissionExchange,
-    PendingGroupUpdate, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId,
-    SpaceAdmissionMessageKind, SpaceAdmissionRejectionReason, SpaceAdmissionRoute,
-    VersionedMembershipHistory,
+    AdmissionActivationReceipt, AdmissionCompleteAckV1, AdmissionCompletionV1, AdmissionRetryState,
+    AdmissionSpaceTransition, AdmissionSpaceTransitionResult, AdmissionSpaceTransitionV2,
+    AdmissionStagedTarget, HistoricalMembershipSignatureVerifier, MembershipOperationV2,
+    PendingAdmissionExchange, PendingGroupUpdate, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1,
+    SpaceAdmissionId, SpaceAdmissionMessageKind, SpaceAdmissionRejectionReason,
+    SpaceAdmissionRoute, VersionedMembershipHistory,
 };
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_observability_contract::diagnostics::connectivity::{observe_local_result, LocalWorkStep};
@@ -32,6 +32,8 @@ use super::super::sponsor::{activation_receipt_digest, SponsorCandidateStagedV1}
 use super::sponsor_identity::{sponsor_identity_rejection, verify_sponsor_route_identity};
 
 const JOINER_STAGED_TARGET_FORMAT_V2: u16 = 2;
+/// V3 在 V2 之后追加本机激活回执：目标控制世代生效后，本机成员状态由它与已保存的 Commit 重建。
+const JOINER_STAGED_TARGET_FORMAT_V3: u16 = 3;
 const MAX_TRANSITION_ADVANCES: usize = 16;
 
 pub struct DefaultJoinerActivationPreparation {
@@ -69,6 +71,36 @@ impl DefaultJoinerActivationExecutor {
             history_verifier,
         }
     }
+}
+
+#[derive(Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+struct JoinerStagedTargetVersion {
+    format_version: u16,
+}
+
+#[derive(Serialize)]
+struct JoinerStagedTargetV3<'a> {
+    format_version: u16,
+    mls_state: &'a [u8],
+    recovery_secret: &'a [u8; 32],
+    target_access: &'a [u8],
+    target_admission_credentials: &'a [u8],
+    preserve_unreadable_history: bool,
+    activation_receipt: &'a AdmissionActivationReceipt,
+}
+
+/// 激活执行只需要暂存目标中的本机激活回执。
+#[derive(Deserialize, Zeroize, ZeroizeOnDrop)]
+struct OwnedJoinerStagedTargetV3 {
+    format_version: u16,
+    mls_state: Vec<u8>,
+    recovery_secret: [u8; 32],
+    target_access: Vec<u8>,
+    target_admission_credentials: Vec<u8>,
+    preserve_unreadable_history: bool,
+    #[zeroize(skip)]
+    activation_receipt: AdmissionActivationReceipt,
 }
 
 #[derive(Deserialize, Zeroize, ZeroizeOnDrop)]
@@ -176,6 +208,21 @@ impl PrepareJoinerActivationPort for DefaultJoinerActivationPreparation {
                     "the staged Joiner target format is unsupported",
                 ));
             }
+            let staged_target = AdmissionStagedTarget::from_bytes(
+                postcard::to_stdvec(&JoinerStagedTargetV3 {
+                    format_version: JOINER_STAGED_TARGET_FORMAT_V3,
+                    mls_state: &staged.mls_state,
+                    recovery_secret: &staged.recovery_secret,
+                    target_access: &staged.target_access,
+                    target_admission_credentials: &staged.target_admission_credentials,
+                    preserve_unreadable_history: staged.preserve_unreadable_history,
+                    activation_receipt: receipt,
+                })
+                .map_err(|error| {
+                    PrepareJoinerActivationError::unavailable(anyhow::Error::new(error))
+                })?,
+            )
+            .map_err(invalid_security)?;
             MlsGroupEngine::validate_state(
                 &MlsClientState::from_bytes(staged.mls_state.clone()),
                 commit
@@ -236,9 +283,6 @@ impl PrepareJoinerActivationPort for DefaultJoinerActivationPreparation {
                     attempt_id: admission_id,
                     target_space_id: candidate.security_commitment().lineage_id.clone(),
                     target_security_commitment: candidate.security_commitment().clone(),
-                    target_membership_history: history.encode_persisted_v2().map_err(|error| {
-                        PrepareJoinerActivationError::unavailable(anyhow::Error::new(error))
-                    })?,
                     target_security_state: std::mem::take(&mut staged.mls_state),
                     target_protection_group_id: sponsor.target_protection_group_id,
                     target_key_catalog: target_catalog,
@@ -266,7 +310,7 @@ impl PrepareJoinerActivationPort for DefaultJoinerActivationPreparation {
                 .ok_or_else(|| invalid_state("the prepared Space transition cannot be encoded"))?;
             let transition = AdmissionSpaceTransition::from_bytes(encoded)
                 .map_err(|error| invalid_state_error(error))?;
-            Ok(PreparedJoinerActivation::new(transition))
+            Ok(PreparedJoinerActivation::new(transition, staged_target))
         })
         .await
     }
@@ -293,6 +337,8 @@ impl ExecuteJoinerActivationPort for DefaultJoinerActivationExecutor {
                     "the Space transition belongs to another admission",
                 ));
             }
+            // 切换前先重建并核对本机成员起点，暂存资料无效时不改变当前控制世代。
+            let membership = joiner_membership_start(&preparation, self.history_verifier.as_ref())?;
             let result = {
                 let mut completed = None;
                 for _ in 0..MAX_TRANSITION_ADVANCES {
@@ -356,7 +402,8 @@ impl ExecuteJoinerActivationPort for DefaultJoinerActivationExecutor {
                 })?,
             )
             .map_err(|error| ExecuteJoinerActivationError::invalid(anyhow::Error::new(error)))?;
-            let completed = CompletedJoinerActivation::new(transition_result, pending, outcome);
+            let completed =
+                CompletedJoinerActivation::new(transition_result, pending, outcome, membership);
             Ok(completed)
         })
         .await
@@ -429,6 +476,84 @@ fn activation_outcome(
         migrated_records,
         preserved_unreadable_records,
     })
+}
+
+/// 由已保存的 Commit 与暂存目标中的本机激活回执重建加入后历史，并核对它与 Complete 一致。
+fn joiner_membership_start(
+    preparation: &uc_core::membership::JoinerActivationPreparation<'_>,
+    history_verifier: &dyn HistoricalMembershipSignatureVerifier,
+) -> Result<JoinerMembershipStart, ExecuteJoinerActivationError> {
+    let commit = match preparation.exact_commit().body() {
+        SpaceAdmissionBodyV1::Commit(commit) => commit,
+        _ => return Err(invalid_execution("the saved Commit is invalid")),
+    };
+    let candidate = commit.exact_candidate();
+    let local_facts = match &candidate.candidate_event().operation {
+        MembershipOperationV2::AddDevice { admission } => &admission.facts,
+        _ => return Err(invalid_execution("the Candidate event is not AddDevice")),
+    };
+    // 旧版本准备的激活没有回执：其目标控制世代已带有成员记录。
+    let history = match staged_activation_receipt(preparation.staged_target().as_bytes())? {
+        None => None,
+        Some(receipt) => {
+            let completion = match preparation.completion().body() {
+                SpaceAdmissionBodyV1::Complete(complete) => complete.completion(),
+                _ => return Err(invalid_execution("the saved completion is invalid")),
+            };
+            if activation_receipt_digest(&receipt) != completion.activation_receipt_digest {
+                return Err(invalid_execution(
+                    "the staged activation receipt differs from Complete",
+                ));
+            }
+            let mut history = VersionedMembershipHistory::decode_persisted_v2(
+                commit.target_membership_history().as_bytes(),
+                history_verifier,
+            )
+            .map_err(|error| ExecuteJoinerActivationError::invalid(anyhow::Error::new(error)))?;
+            history
+                .verify_and_record_activation_receipt(receipt, history_verifier)
+                .map_err(|error| {
+                    ExecuteJoinerActivationError::invalid(anyhow::Error::new(error))
+                })?;
+            if history
+                .current_position()
+                .map_err(|error| ExecuteJoinerActivationError::invalid(anyhow::Error::new(error)))?
+                != completion.completed_history_position
+            {
+                return Err(invalid_execution(
+                    "the rebuilt history position differs from Complete",
+                ));
+            }
+            Some(history)
+        }
+    };
+    Ok(JoinerMembershipStart {
+        space_id: candidate.security_commitment().lineage_id.clone(),
+        local_device_id: local_facts.device_id,
+        local_member: local_facts.member_instance,
+        history,
+    })
+}
+
+/// 暂存目标中的本机激活回执：V3 带有回执；V2 由旧版本在激活准备前写入，没有回执。
+fn staged_activation_receipt(
+    staged_target: &[u8],
+) -> Result<Option<AdmissionActivationReceipt>, ExecuteJoinerActivationError> {
+    let (version, _) = postcard::take_from_bytes::<JoinerStagedTargetVersion>(staged_target)
+        .map_err(|error| ExecuteJoinerActivationError::invalid(anyhow::Error::new(error)))?;
+    match version.format_version {
+        JOINER_STAGED_TARGET_FORMAT_V2 => Ok(None),
+        JOINER_STAGED_TARGET_FORMAT_V3 => {
+            let staged: OwnedJoinerStagedTargetV3 =
+                postcard::from_bytes(staged_target).map_err(|error| {
+                    ExecuteJoinerActivationError::invalid(anyhow::Error::new(error))
+                })?;
+            Ok(Some(staged.activation_receipt.clone()))
+        }
+        _ => Err(invalid_execution(
+            "the staged Joiner target format is unsupported",
+        )),
+    }
 }
 
 fn validate_completion(
@@ -547,6 +672,92 @@ fn inconsistency_issue(error: &AdmissionSpaceTransitionError) -> Option<Admissio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 旧版本写入、已冻结的 V2 暂存目标布局。
+    #[derive(Serialize)]
+    struct JoinerStagedTargetV2 {
+        format_version: u16,
+        mls_state: Vec<u8>,
+        recovery_secret: [u8; 32],
+        target_access: Vec<u8>,
+        target_admission_credentials: Vec<u8>,
+        preserve_unreadable_history: bool,
+    }
+
+    fn receipt() -> AdmissionActivationReceipt {
+        AdmissionActivationReceipt::new(
+            1,
+            [0x21; 32],
+            uc_core::membership::MembershipEventId::from_hex(&"22".repeat(32)).unwrap(),
+            [0x23; 32],
+            [0x24; 32],
+            uc_core::membership::MemberInstanceId::from_bytes([0x25; 32]),
+            vec![0x26; 64],
+        )
+    }
+
+    #[test]
+    fn a_v2_staged_target_prepared_by_an_older_version_carries_no_receipt() {
+        let staged = postcard::to_stdvec(&JoinerStagedTargetV2 {
+            format_version: JOINER_STAGED_TARGET_FORMAT_V2,
+            mls_state: vec![0x11; 8],
+            recovery_secret: [0x12; 32],
+            target_access: vec![0x13; 8],
+            target_admission_credentials: vec![0x14; 8],
+            preserve_unreadable_history: true,
+        })
+        .unwrap();
+
+        assert!(staged_activation_receipt(&staged).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_v3_staged_target_keeps_the_v2_fields_and_the_activation_receipt() {
+        let receipt = receipt();
+        let staged = postcard::to_stdvec(&JoinerStagedTargetV3 {
+            format_version: JOINER_STAGED_TARGET_FORMAT_V3,
+            mls_state: &[0x11; 8],
+            recovery_secret: &[0x12; 32],
+            target_access: &[0x13; 8],
+            target_admission_credentials: &[0x14; 8],
+            preserve_unreadable_history: true,
+            activation_receipt: &receipt,
+        })
+        .unwrap();
+
+        assert_eq!(staged_activation_receipt(&staged).unwrap(), Some(receipt));
+        let decoded: OwnedJoinerStagedTargetV3 = postcard::from_bytes(&staged).unwrap();
+        assert_eq!(decoded.mls_state, vec![0x11; 8]);
+        assert_eq!(decoded.recovery_secret, [0x12; 32]);
+        assert_eq!(decoded.target_access, vec![0x13; 8]);
+        assert_eq!(decoded.target_admission_credentials, vec![0x14; 8]);
+        assert!(decoded.preserve_unreadable_history);
+    }
+
+    #[test]
+    fn unknown_or_truncated_staged_targets_are_invalid() {
+        let receipt = receipt();
+        let mut truncated = postcard::to_stdvec(&JoinerStagedTargetV3 {
+            format_version: JOINER_STAGED_TARGET_FORMAT_V3,
+            mls_state: &[0x11; 8],
+            recovery_secret: &[0x12; 32],
+            target_access: &[0x13; 8],
+            target_admission_credentials: &[0x14; 8],
+            preserve_unreadable_history: false,
+            activation_receipt: &receipt,
+        })
+        .unwrap();
+        truncated.truncate(truncated.len() - 8);
+        let unknown =
+            postcard::to_stdvec(&JoinerStagedTargetVersion { format_version: 4 }).unwrap();
+
+        for staged in [truncated, unknown, Vec::new()] {
+            assert!(matches!(
+                staged_activation_receipt(&staged),
+                Err(ExecuteJoinerActivationError::Invalid { .. })
+            ));
+        }
+    }
 
     #[test]
     fn unclassified_transition_inconsistency_is_an_invalid_activation_state() {

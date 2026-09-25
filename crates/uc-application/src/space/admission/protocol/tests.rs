@@ -1,3 +1,4 @@
+use uc_core::ids::DeviceId;
 use uc_core::membership::{
     AdmissionRecordPersistence, SpaceAdmissionMessageKind, SponsorAbandonmentCleanup,
 };
@@ -11,7 +12,8 @@ use super::test_support::{
 };
 use crate::space::membership::{
     AcquireSpaceWorkPermitPort, AdmissionMaintenanceOutcome, MembershipMaintenanceStepOutcome,
-    MembershipMaintenanceTrigger, RecoverSpaceAdmissionsPort, SpaceWorkMode,
+    MembershipMaintenanceTrigger, MemoryMembershipRecords, RecoverSpaceAdmissionsPort,
+    SpaceWorkMode,
 };
 
 mod admission_recovery_scenarios;
@@ -638,6 +640,9 @@ async fn complete_ack_retry_finishes_after_the_member_commit_won_a_state_race() 
     pair.fail_next_sponsor_settlement_commit();
 
     assert!(pair.sponsor().handle(first_ack).await.is_err());
+    // 成员事实先于准入终态提交：准入记录保存失败时新成员已经写入。
+    let records = &pair.sponsor_membership().records;
+    assert_eq!(records.commit_count(), 1);
     let settled = pair
         .sponsor()
         .handle(retry_ack)
@@ -658,6 +663,82 @@ async fn complete_ack_retry_finishes_after_the_member_commit_won_a_state_race() 
             .count(),
         1
     );
+    // 重试同一 CompleteAck 不产生第二次加入。
+    assert_eq!(records.commit_count(), 1);
+    assert_eq!(joined_device_count(records), 1);
+}
+
+#[tokio::test]
+async fn failed_member_commit_leaves_the_sponsor_admission_record_unchanged() {
+    let pair = SpaceAdmissionProtocolTestPair::fresh().await;
+    let candidate = pair
+        .sponsor()
+        .handle(authenticated_join_request())
+        .await
+        .expect("JoinRequest should produce Candidate");
+    let prepared = authenticated_prepared(
+        candidate
+            .envelope()
+            .expect("Candidate reply must be available"),
+    );
+    pair.seed_sponsor(candidate.into_admission());
+    let commit = pair
+        .sponsor()
+        .handle(prepared)
+        .await
+        .expect("Prepared should produce Commit");
+    let applied = authenticated_applied(commit.envelope().expect("Commit reply must be available"));
+    pair.seed_sponsor(commit.into_admission());
+    let complete = pair
+        .sponsor()
+        .handle(applied)
+        .await
+        .expect("Applied should produce Complete");
+    let first_ack = authenticated_complete_ack(
+        complete
+            .envelope()
+            .expect("Complete reply must be available"),
+    );
+    let retry_ack = authenticated_complete_ack(
+        complete
+            .envelope()
+            .expect("Complete reply must be available"),
+    );
+    pair.seed_sponsor(complete.into_admission());
+    let records = &pair.sponsor_membership().records;
+    records.fail_next_commits(1);
+
+    assert!(pair.sponsor().handle(first_ack).await.is_err());
+    assert_eq!(records.commit_count(), 0);
+    assert!(!pair
+        .events()
+        .contains(&ProtocolEvent::SponsorSavedCompleted));
+
+    pair.sponsor()
+        .handle(retry_ack)
+        .await
+        .expect("the same CompleteAck should finish once the member commit succeeds");
+
+    assert_eq!(records.commit_count(), 1);
+    assert_eq!(joined_device_count(records), 1);
+    assert!(pair
+        .events()
+        .contains(&ProtocolEvent::SponsorSavedCompleted));
+}
+
+/// 邀请方成员历史中加入方设备的有效成员实例数。
+fn joined_device_count(records: &MemoryMembershipRecords) -> usize {
+    let ledger = records.ledger();
+    let history = ledger.history();
+    history
+        .effective_members()
+        .into_iter()
+        .filter(|member| {
+            history
+                .admission_facts_for(*member)
+                .is_some_and(|facts| facts.device_id == DeviceId::new("joining-device"))
+        })
+        .count()
 }
 
 #[tokio::test]

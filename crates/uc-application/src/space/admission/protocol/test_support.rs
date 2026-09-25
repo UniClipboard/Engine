@@ -68,28 +68,29 @@ use super::{
     JoinerActivationCommitToken, JoinerActivationMutation, JoinerActivationOutcome,
     JoinerActivationStateError, JoinerActivationStatePort, JoinerAdmissionService,
     JoinerCancellationCommitToken, JoinerCancellationMaterial, JoinerCancellationMaterialError,
-    JoinerCancellationMutation, JoinerCancellationStateError, JoinerStartMaterial,
-    JoinerStartMaterialError, JoinerStartMaterialPort, JoinerStartMutation, JoinerStartStateError,
-    JoinerStartStatePort, LoadedAdmissionRecovery, LoadedCurrentJoin, LoadedJoinerActivation,
-    LoadedJoinerStartState, LoadedPendingAdmission, LoadedSponsorAbandonment,
-    LoadedSponsorAdmission, LoadedSponsorDeadline, PendingAdmissionRecoveryStateError,
-    PendingAdmissionRecoveryStatePort, PrepareJoinerActivationError, PrepareJoinerActivationPort,
-    PrepareJoinerAppliedError, PrepareJoinerAppliedPort, PrepareJoinerCancellationPort,
-    PrepareJoinerCandidateError, PrepareJoinerCandidatePort, PrepareJoinerInvitationError,
-    PrepareJoinerInvitationPort, PrepareSponsorCandidateError, PrepareSponsorCandidatePort,
-    PrepareSponsorCommitError, PrepareSponsorCommitPort, PrepareSponsorCompleteError,
-    PrepareSponsorCompletePort, PrepareSponsorSettledError, PrepareSponsorSettledPort,
-    PreparedJoinerActivation, PreparedJoinerAppliedMaterial, PreparedJoinerCandidateMaterial,
-    PreparedJoinerInvitation, PreparedSponsorCandidate, PreparedSponsorCommit,
-    PreparedSponsorComplete, PreparedSponsorSettled, ResolveJoinerInvitationError,
-    ResolveJoinerInvitationPort, SpaceAdmissionCommitToken, SpaceAdmissionProtocol,
-    SpaceAdmissionTransportError, SpaceAdmissionTransportPort, SponsorAdmissionCommitToken,
-    SponsorAdmissionMutation, SponsorAdmissionService, SponsorAdmissionState,
-    SponsorAdmissionStateError, SponsorAdmissionStatePort,
+    JoinerCancellationMutation, JoinerCancellationStateError, JoinerMembershipStart,
+    JoinerStartMaterial, JoinerStartMaterialError, JoinerStartMaterialPort, JoinerStartMutation,
+    JoinerStartStateError, JoinerStartStatePort, LoadedAdmissionRecovery, LoadedCurrentJoin,
+    LoadedJoinerActivation, LoadedJoinerStartState, LoadedPendingAdmission,
+    LoadedSponsorAbandonment, LoadedSponsorAdmission, LoadedSponsorDeadline,
+    PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
+    PrepareJoinerActivationError, PrepareJoinerActivationPort, PrepareJoinerAppliedError,
+    PrepareJoinerAppliedPort, PrepareJoinerCancellationPort, PrepareJoinerCandidateError,
+    PrepareJoinerCandidatePort, PrepareJoinerInvitationError, PrepareJoinerInvitationPort,
+    PrepareSponsorCandidateError, PrepareSponsorCandidatePort, PrepareSponsorCommitError,
+    PrepareSponsorCommitPort, PrepareSponsorCompleteError, PrepareSponsorCompletePort,
+    PrepareSponsorSettledError, PrepareSponsorSettledPort, PreparedJoinerActivation,
+    PreparedJoinerAppliedMaterial, PreparedJoinerCandidateMaterial, PreparedJoinerInvitation,
+    PreparedSponsorCandidate, PreparedSponsorCommit, PreparedSponsorComplete,
+    PreparedSponsorSettled, ResolveJoinerInvitationError, ResolveJoinerInvitationPort,
+    SpaceAdmissionCommitToken, SpaceAdmissionProtocol, SpaceAdmissionTransportError,
+    SpaceAdmissionTransportPort, SponsorAdmissionCommitToken, SponsorAdmissionMutation,
+    SponsorAdmissionService, SponsorAdmissionState, SponsorAdmissionStateError,
+    SponsorAdmissionStatePort,
 };
 use crate::space::membership::{
     AdmissionAbandonmentRevocationTarget, AdmissionRevocationPort, AdmissionRevocationResult,
-    AdmissionRevocationTarget, OwnerFixture, RemoveSpaceMemberError,
+    AdmissionRevocationTarget, MembershipRecord, OwnerFixture, RemoveSpaceMemberError,
 };
 use crate::space::SpaceAdmissionObservationRegistry;
 
@@ -147,6 +148,8 @@ pub(super) struct SpaceAdmissionProtocolTestPair {
     space_transition_changes: Mutex<tokio::sync::watch::Receiver<()>>,
     clock: Arc<FixedAdmissionClock>,
     joiner_activation: Arc<FixedJoinerActivation>,
+    joiner_membership: OwnerFixture,
+    sponsor_membership: OwnerFixture,
 }
 
 struct AdmissionStatusEventRecorder(Arc<AtomicUsize>);
@@ -294,6 +297,8 @@ struct FixedJoinerCancellation;
 struct FixedJoinerActivation {
     events: Arc<Mutex<Vec<ProtocolEvent>>>,
     rejection: Mutex<Option<uc_core::membership::SpaceAdmissionRejectionReason>>,
+    /// 邀请方正式提交后的历史，其中包含加入方设备。
+    joined_history: uc_core::membership::VersionedMembershipHistory,
 }
 
 #[derive(Clone, Copy)]
@@ -1702,6 +1707,8 @@ impl PrepareJoinerActivationPort for FixedJoinerActivation {
         Ok(PreparedJoinerActivation::new(
             uc_core::membership::AdmissionSpaceTransition::from_bytes(vec![0xb8; 128])
                 .expect("valid activation plan"),
+            uc_core::membership::AdmissionStagedTarget::from_bytes(vec![0xb9; 128])
+                .expect("valid activation staged target"),
         ))
     }
 }
@@ -1714,7 +1721,8 @@ impl ExecuteJoinerActivationPort for FixedJoinerActivation {
         preparation: uc_core::membership::JoinerActivationPreparation<'_>,
     ) -> Result<CompletedJoinerActivation, ExecuteJoinerActivationError> {
         assert!(!preparation.space_transition().as_bytes().is_empty());
-        assert!(!preparation.staged_target().as_bytes().is_empty());
+        assert_eq!(preparation.staged_target().as_bytes(), &[0xb9; 128]);
+        let joining_device = DeviceId::new("joining-device");
         assert_eq!(
             preparation.exact_commit().kind(),
             SpaceAdmissionMessageKind::Commit
@@ -1763,6 +1771,15 @@ impl ExecuteJoinerActivationPort for FixedJoinerActivation {
                 .expect("valid joiner fingerprint"),
                 migrated_records: None,
                 preserved_unreadable_records: None,
+            },
+            JoinerMembershipStart {
+                space_id: self.joined_history.lineage_id().to_owned(),
+                local_device_id: joining_device,
+                local_member: self
+                    .joined_history
+                    .effective_member_for_device(&joining_device)
+                    .expect("the committed history contains the joining device"),
+                history: Some(self.joined_history.clone()),
             },
         ))
     }
@@ -1928,7 +1945,11 @@ impl SpaceAdmissionProtocolTestPair {
             fail_next_settlement_commit: AtomicBool::new(false),
             needs_attention: AtomicBool::new(false),
         });
+        let (sponsor_members, committed_history) = sponsor_membership();
+        let (joiner_members, _) = sponsor_membership();
+        let joiner_membership = OwnerFixture::new(MembershipRecord::NoSpace { revision: 0 });
         let joiner_activation = Arc::new(FixedJoinerActivation {
+            joined_history: committed_history.clone(),
             events: Arc::clone(&events),
             rejection: Mutex::new(
                 matches!(
@@ -1940,8 +1961,6 @@ impl SpaceAdmissionProtocolTestPair {
                 .then_some(uc_core::membership::SpaceAdmissionRejectionReason::RelationshipConflict),
             ),
         });
-        let (sponsor_members, committed_history) = sponsor_membership();
-        let (joiner_members, _) = sponsor_membership();
         let sponsor_complete = Arc::new(FixedSponsorComplete {
             events: Arc::clone(&events),
             activation_completed: AtomicBool::new(false),
@@ -1977,6 +1996,7 @@ impl SpaceAdmissionProtocolTestPair {
                     space_transition_wake.clone(),
                     Arc::new(UnusedSponsorPorts),
                     Arc::new(SpaceAdmissionObservationRegistry::default()),
+                    joiner_membership.owner.clone(),
                 ),
                 SponsorAdmissionService::new(
                     Arc::new(UnusedSponsorPorts),
@@ -2030,6 +2050,7 @@ impl SpaceAdmissionProtocolTestPair {
                     space_transition_wake,
                     Arc::new(UnusedSponsorPorts),
                     Arc::new(SpaceAdmissionObservationRegistry::default()),
+                    sponsor_members.owner.clone(),
                 ),
                 SponsorAdmissionService::new(
                     sponsor_state.clone(),
@@ -2063,6 +2084,8 @@ impl SpaceAdmissionProtocolTestPair {
             space_transition_changes: Mutex::new(space_transition_changes),
             clock,
             joiner_activation,
+            joiner_membership,
+            sponsor_membership: sponsor_members,
         }
     }
 
@@ -2201,6 +2224,16 @@ impl SpaceAdmissionProtocolTestPair {
             .encode_persisted()
             .expect("saved join can be persisted");
         JoinerAdmission::decode_persisted(&persisted).expect("saved join can be reopened")
+    }
+
+    /// 加入方的成员状态负责人测试台；初始没有当前 Space。
+    pub(super) fn joiner_membership(&self) -> &OwnerFixture {
+        &self.joiner_membership
+    }
+
+    /// 邀请方的成员状态负责人测试台；初始只有邀请方一个成员。
+    pub(super) fn sponsor_membership(&self) -> &OwnerFixture {
+        &self.sponsor_membership
     }
 
     pub(super) fn fail_next_activation_commit(&self) {

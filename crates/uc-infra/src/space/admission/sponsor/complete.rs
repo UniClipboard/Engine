@@ -7,15 +7,14 @@ use sha2::{Digest, Sha256};
 use uc_application::deps::{
     ActivateSponsorAdmissionError, ActivateSponsorAdmissionPort,
     ActivateSponsorAdmissionSecurityPort, ActivateSponsorAdmissionSecurityRequest,
-    ApplyMembershipMemberFactsPort, CurrentMemberSignaturePort, PrepareSponsorCompleteError,
-    PrepareSponsorCompletePort, PreparedSponsorComplete,
+    CurrentMemberSignaturePort, PrepareSponsorCompleteError, PrepareSponsorCompletePort,
+    PreparedSponsorComplete,
 };
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
     AdmissionActivatedSecurityState, AdmissionActivationReceipt, AdmissionCompleteV1,
-    AdmissionCompletionV1, HistoricalMembershipSignatureVerifier, MemberEffectKind,
-    MemberEffectMaterial, MemberEffectPhase, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1,
-    SpaceAdmissionId, SponsorCompletePreparation, UnfinishedMemberEffect,
+    AdmissionCompletionV1, HistoricalMembershipSignatureVerifier, SpaceAdmissionBodyV1,
+    SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SponsorCompletePreparation,
     VersionedMembershipHistory,
 };
 use uc_observability_contract::diagnostics::connectivity::{observe_local_result, LocalWorkStep};
@@ -66,24 +65,19 @@ struct OwnedSponsorActivatedSecurityV1 {
     security_commitment_id: [u8; 32],
 }
 
-/// 激活邀请方已准备的安全状态并维护新成员资料；成员记录由 Application 的成员状态负责人提交。
+/// 激活邀请方已准备的安全状态并返回已验证的加入后历史；成员记录与成员读模型由 Application 的成员
+/// 状态负责人按该历史提交。
 pub struct DefaultSponsorAdmissionActivation {
     security: Arc<dyn ActivateSponsorAdmissionSecurityPort>,
     verifier: Arc<dyn HistoricalMembershipSignatureVerifier>,
-    member_facts: Arc<dyn ApplyMembershipMemberFactsPort>,
 }
 
 impl DefaultSponsorAdmissionActivation {
     pub fn new(
         security: Arc<dyn ActivateSponsorAdmissionSecurityPort>,
         verifier: Arc<dyn HistoricalMembershipSignatureVerifier>,
-        member_facts: Arc<dyn ApplyMembershipMemberFactsPort>,
     ) -> Self {
-        Self {
-            security,
-            verifier,
-            member_facts,
-        }
+        Self { security, verifier }
     }
 }
 
@@ -138,33 +132,6 @@ impl DefaultSponsorAdmissionActivation {
             .await
             .map_err(anyhow::Error::new)?;
         tracing::info!("Sponsor admission 安全状态激活完成");
-
-        let event_id = history
-            .current_position()?
-            .event_id
-            .ok_or_else(|| anyhow::anyhow!("the Sponsor activation history has no head"))?;
-        let event = history
-            .event(event_id)
-            .ok_or_else(|| anyhow::anyhow!("the Sponsor activation event is unavailable"))?;
-        let affected_device_ids = match &event.operation {
-            uc_core::membership::MembershipOperationV2::AddDevice { admission } => {
-                vec![admission.facts.device_id]
-            }
-            uc_core::membership::MembershipOperationV2::RemoveDevice { .. } => {
-                anyhow::bail!("the Sponsor activation event is not an admission")
-            }
-        };
-        self.member_facts
-            .apply_member_facts(&UnfinishedMemberEffect::from_parts(
-                event_id,
-                MemberEffectKind::AddDevice,
-                MemberEffectPhase::Prepared,
-                affected_device_ids,
-                MemberEffectMaterial::Event(event.clone()),
-            ))
-            .await
-            .map_err(anyhow::Error::new)?;
-        tracing::info!("Sponsor admission 成员资料维护完成");
         Ok(history)
     }
 }

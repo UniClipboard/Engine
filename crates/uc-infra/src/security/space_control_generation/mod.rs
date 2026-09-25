@@ -4,19 +4,14 @@ mod persistence;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use chrono::{TimeZone as _, Utc};
 use uc_application::deps::{
-    AdmissionSpaceTransitionPreparationV2, AdvanceMembershipBranchTransitionInput,
-    MembershipRecord, SpaceMembershipRecord,
+    AdmissionSpaceTransitionPreparationV2, AdvanceMembershipBranchTransitionInput, MembershipRecord,
 };
 use uc_core::membership::{
-    LedgerInput, LedgerOutcome, MembershipBranchTransitionPhaseV1, MembershipLedger,
-    RelationshipStateResetPort, RevocationRepositoryPort,
+    MembershipBranchTransitionPhaseV1, MembershipBranchTransitionV1, RevocationRepositoryPort,
 };
 use uc_core::ports::atomic_publish::AtomicPublishPort;
 use uc_core::ports::security::current_profile::CurrentProfilePort;
-use uc_core::ports::{ClockPort, PeerAddressRecord};
-use uc_core::{MemberSyncPreferences, SpaceMember, TrustedPeer};
 
 use self::material::PreparedAdmissionControl;
 use self::persistence::{
@@ -526,9 +521,19 @@ impl SpaceControlGeneration {
         target_session
             .install_space_material(&material)
             .map_err(|source| inconsistent(anyhow::Error::new(source)))?;
-        let (members, trusted_peers, peer_addresses) =
-            branch_relationships(input, target.layout().space_id())?;
-        let local_member = input.recovery_package.recipient_member();
+        let staged = input
+            .staged_membership
+            .as_ref()
+            .ok_or_else(|| inconsistent(anyhow::anyhow!("branch target membership is missing")))?;
+        let staged_transition = input
+            .transition
+            .advance(MembershipBranchTransitionPhaseV1::TargetStaged)
+            .ok_or_else(|| inconsistent(anyhow::anyhow!("branch target phase is invalid")))?;
+        if !branch_record_matches(&staged.replacement, input, &staged_transition) {
+            return Err(inconsistent(anyhow::anyhow!(
+                "branch target membership does not match the transition"
+            )));
+        }
 
         {
             let pool = open_existing_pool(database)?;
@@ -541,88 +546,18 @@ impl SpaceControlGeneration {
                 .save_space_material(&material)
                 .await
                 .map_err(|source| storage(anyhow::Error::new(source)))?;
-
-            let relationships = EncryptedRelationshipStore::new(
+            let relationships = Arc::new(EncryptedRelationshipStore::new(
                 Arc::clone(&executor),
                 Arc::new(TargetSessionSubkeyDeriver::new(
                     target_session.as_ref().clone(),
                 )),
                 Arc::clone(&self.current_profile),
-            );
-            relationships
-                .clear_all_relationships()
+            ));
+            // 成员记录与读模型由成员状态负责人形成，这里只原样写入目标世代。
+            self.record_store(executor)
+                .with_projection(relationships)
+                .stage(staged)
                 .await
-                .map_err(|source| storage(anyhow::Error::new(source)))?;
-            for member in &members {
-                relationships
-                    .save_member(member)
-                    .await
-                    .map_err(|source| storage(anyhow::Error::new(source)))?;
-            }
-            for peer in &trusted_peers {
-                relationships
-                    .save_trusted_peer(peer)
-                    .await
-                    .map_err(|source| storage(anyhow::Error::new(source)))?;
-            }
-            for address in &peer_addresses {
-                relationships
-                    .save_peer_address(address)
-                    .await
-                    .map_err(|source| storage(anyhow::Error::new(source)))?;
-            }
-
-            let records = self.record_store(executor);
-            let current = records
-                .load()
-                .map_err(|source| storage(anyhow::Error::new(source)))?;
-            let expected_revision = current.revision();
-            let MembershipRecord::Space(space) = current else {
-                return Err(inconsistent(anyhow::anyhow!(
-                    "branch target has no membership record"
-                )));
-            };
-            let SpaceMembershipRecord {
-                ledger,
-                history_exchange: _,
-                mut branch_recovery,
-            } = *space;
-            let ledger = MembershipLedger::restore(ledger)
-                .map_err(|source| inconsistent(anyhow::Error::new(source)))?;
-            if ledger.local_member() != local_member {
-                return Err(inconsistent(anyhow::anyhow!(
-                    "branch target recipient differs from the local member"
-                )));
-            }
-            // 目标分支的效果已随恢复资料安装；旧分支的传输暂存与调度状态不跨分支继承。
-            let (recovered, outcome, _) = ledger
-                .apply(
-                    LedgerInput::BranchRecovered {
-                        history: input.target_history.clone(),
-                    },
-                    SystemClock.now_ms(),
-                )
-                .map_err(|source| inconsistent(anyhow::Error::new(source)))?
-                .into_parts();
-            if outcome != LedgerOutcome::Applied {
-                return Err(inconsistent(anyhow::anyhow!(
-                    "branch target membership did not change"
-                )));
-            }
-            let stored = branch_recovery
-                .branch_transitions
-                .get_mut(input.transition.transition_id())
-                .ok_or_else(|| {
-                    inconsistent(anyhow::anyhow!("branch target checkpoint is missing"))
-                })?;
-            advance_branch_checkpoint_to_staged(stored, &input.transition)?;
-            let replacement = MembershipRecord::Space(Box::new(SpaceMembershipRecord {
-                ledger: recovered.snapshot(),
-                history_exchange: Default::default(),
-                branch_recovery,
-            }));
-            records
-                .commit_record(expected_revision, &replacement, None)
                 .map_err(|source| storage(anyhow::Error::new(source)))?;
         }
         verify_sqlite(database)
@@ -655,8 +590,6 @@ impl SpaceControlGeneration {
         target_session
             .install_space_material(&expected_material)
             .map_err(|source| inconsistent(anyhow::Error::new(source)))?;
-        let (mut expected_members, mut expected_peers, mut expected_addresses) =
-            branch_relationships(input, target.layout().space_id())?;
         {
             let pool = open_existing_pool(database)?;
             let executor = Arc::new(DieselSqliteExecutor::new(pool));
@@ -678,55 +611,11 @@ impl SpaceControlGeneration {
                     "branch target security material does not match"
                 )));
             }
-            let relationships = EncryptedRelationshipStore::new(
-                Arc::clone(&executor),
-                Arc::new(TargetSessionSubkeyDeriver::new(
-                    target_session.as_ref().clone(),
-                )),
-                Arc::clone(&self.current_profile),
-            );
-            let mut actual_members = relationships
-                .list_members()
-                .await
-                .map_err(|source| storage(anyhow::Error::new(source)))?;
-            let mut actual_peers = relationships
-                .list_trusted_peers()
-                .await
-                .map_err(|source| storage(anyhow::Error::new(source)))?;
-            let mut actual_addresses = relationships
-                .list_peer_addresses()
-                .await
-                .map_err(|source| storage(anyhow::Error::new(source)))?;
-            actual_members.sort_by(|left, right| left.device_id.cmp(&right.device_id));
-            actual_peers.sort_by(|left, right| left.peer_device_id.cmp(&right.peer_device_id));
-            actual_addresses.sort_by(|left, right| left.device_id.cmp(&right.device_id));
-            expected_members.sort_by(|left, right| left.device_id.cmp(&right.device_id));
-            expected_peers.sort_by(|left, right| left.peer_device_id.cmp(&right.peer_device_id));
-            expected_addresses.sort_by(|left, right| left.device_id.cmp(&right.device_id));
-            if actual_members != expected_members
-                || actual_peers != expected_peers
-                || actual_addresses != expected_addresses
-            {
-                return Err(inconsistent(anyhow::anyhow!(
-                    "branch target relationships do not match"
-                )));
-            }
             let actual = self
                 .record_store(executor)
                 .load()
                 .map_err(|source| storage(anyhow::Error::new(source)))?;
-            let matches = match &actual {
-                MembershipRecord::Space(space) => {
-                    space.ledger.history == input.target_history
-                        && space.ledger.local_member == input.recovery_package.recipient_member()
-                        && space
-                            .branch_recovery
-                            .branch_transitions
-                            .get(input.transition.transition_id())
-                            == Some(&input.transition)
-                }
-                MembershipRecord::NoSpace { .. } => false,
-            };
+            let matches = branch_record_matches(&actual, input, &input.transition);
             if !matches {
                 return Err(inconsistent(anyhow::anyhow!(
                     "branch target ledger does not match"
@@ -815,30 +704,6 @@ impl SpaceControlGeneration {
             .await
             .map_err(|source| storage(anyhow::Error::new(source)))?;
 
-        let relationships = EncryptedRelationshipStore::new(
-            Arc::clone(&executor),
-            Arc::new(TargetSessionSubkeyDeriver::new(target_session.clone())),
-            Arc::clone(&self.current_profile),
-        );
-        for member in prepared.members() {
-            relationships
-                .save_member(member)
-                .await
-                .map_err(|source| storage(anyhow::Error::new(source)))?;
-        }
-        for peer in prepared.trusted_peers() {
-            relationships
-                .save_trusted_peer(peer)
-                .await
-                .map_err(|source| storage(anyhow::Error::new(source)))?;
-        }
-        for address in prepared.peer_addresses() {
-            relationships
-                .save_peer_address(address)
-                .await
-                .map_err(|source| storage(anyhow::Error::new(source)))?;
-        }
-
         install_prepared_registration_for_control_generation(
             &pool,
             self.admission_keys.as_ref(),
@@ -846,15 +711,6 @@ impl SpaceControlGeneration {
             prepared.credentials(),
         )
         .map_err(storage)?;
-        let records = self.record_store(executor);
-        let current = records
-            .load()
-            .map_err(|source| storage(anyhow::Error::new(source)))?;
-        let replacement =
-            prepared.record(current.revision(), &OpenMlsHistoricalSignatureVerifier)?;
-        records
-            .commit_record(current.revision(), &replacement, None)
-            .map_err(|source| storage(anyhow::Error::new(source)))?;
         Ok(())
     }
 
@@ -880,44 +736,6 @@ impl SpaceControlGeneration {
             )));
         }
 
-        let relationships = EncryptedRelationshipStore::new(
-            Arc::clone(&executor),
-            Arc::new(TargetSessionSubkeyDeriver::new(target_session.clone())),
-            Arc::clone(&self.current_profile),
-        );
-        let mut members = relationships
-            .list_members()
-            .await
-            .map_err(|source| storage(anyhow::Error::new(source)))?;
-        let mut trusted_peers = relationships
-            .list_trusted_peers()
-            .await
-            .map_err(|source| storage(anyhow::Error::new(source)))?;
-        let mut peer_addresses = relationships
-            .list_peer_addresses()
-            .await
-            .map_err(|source| storage(anyhow::Error::new(source)))?;
-        members.sort_by(|left, right| left.device_id.cmp(&right.device_id));
-        trusted_peers.sort_by(|left, right| left.peer_device_id.cmp(&right.peer_device_id));
-        peer_addresses.sort_by(|left, right| left.device_id.cmp(&right.device_id));
-        if members != prepared.members()
-            || trusted_peers != prepared.trusted_peers()
-            || peer_addresses != prepared.peer_addresses()
-        {
-            return Err(inconsistent(anyhow::anyhow!(
-                "control relationships do not match"
-            )));
-        }
-
-        let actual_record = self
-            .record_store(executor)
-            .load()
-            .map_err(|source| storage(anyhow::Error::new(source)))?;
-        if actual_record != prepared.record(0, &OpenMlsHistoricalSignatureVerifier)? {
-            return Err(inconsistent(anyhow::anyhow!(
-                "control membership ledger does not match"
-            )));
-        }
         verify_prepared_registration_for_control_generation(
             database,
             self.admission_keys.as_ref(),
@@ -928,94 +746,24 @@ impl SpaceControlGeneration {
     }
 }
 
-fn advance_branch_checkpoint_to_staged(
-    stored: &mut uc_core::membership::MembershipBranchTransitionV1,
-    expected_verified: &uc_core::membership::MembershipBranchTransitionV1,
-) -> Result<(), SpaceControlGenerationError> {
-    let expected_staged = expected_verified
-        .advance(MembershipBranchTransitionPhaseV1::TargetStaged)
-        .ok_or_else(|| inconsistent(anyhow::anyhow!("branch target phase is invalid")))?;
-    while stored.phase() != MembershipBranchTransitionPhaseV1::TargetStaged {
-        let next = match stored.phase() {
-            MembershipBranchTransitionPhaseV1::Prepared => {
-                MembershipBranchTransitionPhaseV1::SourceBackedUp
-            }
-            MembershipBranchTransitionPhaseV1::SourceBackedUp => {
-                MembershipBranchTransitionPhaseV1::TargetVerified
-            }
-            MembershipBranchTransitionPhaseV1::TargetVerified => {
-                MembershipBranchTransitionPhaseV1::TargetStaged
-            }
-            MembershipBranchTransitionPhaseV1::TargetStaged
-            | MembershipBranchTransitionPhaseV1::Promoted
-            | MembershipBranchTransitionPhaseV1::RuntimeRestored
-            | MembershipBranchTransitionPhaseV1::Completed => {
-                return Err(inconsistent(anyhow::anyhow!(
-                    "branch target checkpoint cannot be staged"
-                )))
-            }
-        };
-        *stored = stored
-            .advance(next)
-            .ok_or_else(|| inconsistent(anyhow::anyhow!("branch target checkpoint is invalid")))?;
-    }
-    if stored != &expected_staged {
-        return Err(inconsistent(anyhow::anyhow!(
-            "branch target checkpoint does not match"
-        )));
-    }
-    Ok(())
-}
-
-fn branch_relationships(
+/// 目标世代的成员记录采用目标分支历史，本机仍是恢复包的接收成员，并带有 `checkpoint` 检查点。
+fn branch_record_matches(
+    record: &MembershipRecord,
     input: &AdvanceMembershipBranchTransitionInput,
-    space_id: &uc_core::ids::SpaceId,
-) -> Result<(Vec<SpaceMember>, Vec<TrustedPeer>, Vec<PeerAddressRecord>), SpaceControlGenerationError>
-{
-    if input.target_history.lineage_id() != space_id.as_ref() {
-        return Err(inconsistent(anyhow::anyhow!(
-            "branch target lineage does not match"
-        )));
-    }
-    let local_member = input.recovery_package.recipient_member();
-    let local_facts = input
-        .target_history
-        .admission_facts_for(local_member)
-        .ok_or_else(|| inconsistent(anyhow::anyhow!("branch recipient facts are missing")))?;
-    let timestamp = Utc
-        .timestamp_millis_opt(0)
-        .single()
-        .ok_or_else(|| inconsistent(anyhow::anyhow!("branch relationship timestamp is invalid")))?;
-    let mut members = Vec::new();
-    let mut trusted_peers = Vec::new();
-    let mut peer_addresses = Vec::new();
-    for member in input.target_history.active_members() {
-        let facts = input
-            .target_history
-            .admission_facts_for(member)
-            .ok_or_else(|| inconsistent(anyhow::anyhow!("branch member facts are missing")))?;
-        members.push(SpaceMember {
-            device_id: facts.device_id.clone(),
-            device_name: facts.device_name.clone(),
-            identity_fingerprint: facts.identity_fingerprint.clone(),
-            joined_at: timestamp,
-            sync_preferences: MemberSyncPreferences::default(),
-        });
-        if member != local_member {
-            trusted_peers.push(TrustedPeer {
-                local_device_id: local_facts.device_id.clone(),
-                peer_device_id: facts.device_id.clone(),
-                peer_fingerprint: facts.identity_fingerprint.clone(),
-                trusted_at: timestamp,
-            });
-            peer_addresses.push(PeerAddressRecord {
-                device_id: facts.device_id.clone(),
-                addr_blob: facts.transport_address_blob.clone(),
-                observed_at: timestamp,
-            });
+    checkpoint: &MembershipBranchTransitionV1,
+) -> bool {
+    match record {
+        MembershipRecord::Space(space) => {
+            space.ledger.history == input.target_history
+                && space.ledger.local_member == input.recovery_package.recipient_member()
+                && space
+                    .branch_recovery
+                    .branch_transitions
+                    .get(input.transition.transition_id())
+                    == Some(checkpoint)
         }
+        MembershipRecord::NoSpace { .. } => false,
     }
-    Ok((members, trusted_peers, peer_addresses))
 }
 
 pub(super) fn inconsistent(source: anyhow::Error) -> SpaceControlGenerationError {
