@@ -604,6 +604,7 @@ mod tests {
                 .ok_or_else(|| PayloadResolveError::Integrity {
                     rep_id: rep.id.clone(),
                     reason: "test resolver requires inline_data".to_string(),
+                    source: None,
                 })?;
             Ok(ResolvedClipboardPayload::Inline {
                 mime: rep

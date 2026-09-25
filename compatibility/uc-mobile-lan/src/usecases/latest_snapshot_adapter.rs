@@ -453,6 +453,7 @@ mod tests {
                 next: Mutex::new(Some(Err(PayloadResolveError::Integrity {
                     rep_id: RepresentationId::from("test"),
                     reason: msg.to_string(),
+                    source: None,
                 }))),
             }
         }
@@ -818,6 +819,7 @@ mod tests {
                 .ok_or_else(|| PayloadResolveError::Integrity {
                     rep_id: representation.id.clone(),
                     reason: "no payload registered for rep".into(),
+                    source: None,
                 })
         }
     }

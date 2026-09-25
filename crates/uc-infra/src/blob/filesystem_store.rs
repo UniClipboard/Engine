@@ -190,9 +190,7 @@ impl BlobStorePort for FilesystemBlobStore {
             }
             // Idempotent: an already-absent blob is a no-op, not an error.
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(err) => {
-                Err(err).with_context(|| format!("failed to delete blob {}", path.display()))
-            }
+            Err(err) => Err(err).context("failed to delete blob"),
         }
     }
 }

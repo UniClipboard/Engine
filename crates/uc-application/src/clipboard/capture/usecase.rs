@@ -1307,16 +1307,16 @@ async fn expand_directory(
     let mut pending = Vec::new();
     let mut queue = VecDeque::from([(root.path.clone(), String::new())]);
     while let Some((directory, relative_directory)) = queue.pop_front() {
-        // 展开失败落为文件集中的排除行（业务结果），不是向上传递的错误；排除原因已完整表达。
-        let mut read_dir = tokio::fs::read_dir(&directory).await.map_err(|_| {
+        let mut read_dir = tokio::fs::read_dir(&directory).await.map_err(|error| {
+            expansion_io_failed(&error);
             (
                 ExpansionFailure::IngestFailed,
                 directory_marker(root, next_line_index, &relative_directory),
             )
         })?;
         let mut entries = Vec::new();
-        // 展开失败落为文件集中的排除行（业务结果），不是向上传递的错误；排除原因已完整表达。
-        while let Some(entry) = read_dir.next_entry().await.map_err(|_| {
+        while let Some(entry) = read_dir.next_entry().await.map_err(|error| {
+            expansion_io_failed(&error);
             (
                 ExpansionFailure::IngestFailed,
                 directory_marker(root, next_line_index, &relative_directory),
@@ -1365,8 +1365,8 @@ async fn expand_directory(
                 format!("{relative_directory}/{name}")
             };
             let path = entry.path();
-            // 展开失败落为文件集中的排除行（业务结果），不是向上传递的错误；排除原因已完整表达。
-            let metadata = tokio::fs::symlink_metadata(&path).await.map_err(|_| {
+            let metadata = tokio::fs::symlink_metadata(&path).await.map_err(|error| {
+                expansion_io_failed(&error);
                 (
                     ExpansionFailure::IngestFailed,
                     directory_marker(root, next_line_index, &relative_path),
@@ -1407,6 +1407,15 @@ async fn expand_directory(
         }
     }
     Ok(pending)
+}
+
+/// 展开失败落为文件集中的排除行（业务结果），错误不向上传递；在此记录一次 IO 分类，不记录路径。
+fn expansion_io_failed(error: &std::io::Error) {
+    warn!(
+        error_kind = "file_set_expand",
+        io_error_kind = io_error_kind(error),
+        "capture: file-set expansion could not read a member; excluding the set"
+    );
 }
 
 fn directory_marker(
@@ -1664,6 +1673,80 @@ mod tests {
             )));
             assert_eq!(set.file_lines().count(), 0);
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unreadable_directory_member_logs_io_classification_without_path() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::{Arc, Mutex};
+        use tracing::instrument::WithSubscriber;
+
+        #[derive(Clone, Default)]
+        struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+        struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
+        impl Write for CapturedLogWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedLogs {
+            type Writer = CapturedLogWriter;
+            fn make_writer(&'writer self) -> Self::Writer {
+                CapturedLogWriter(Arc::clone(&self.0))
+            }
+        }
+
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("root");
+        let locked = root.join("private-locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&locked).is_ok() {
+            // 以 root 运行时权限位不生效，无法构造真实的读取失败。
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+            return;
+        }
+        let uri_list = format!("file://{}", root.display());
+        let snapshot = snapshot_with(vec![rep(
+            "public.file-url",
+            Some("text/uri-list"),
+            uri_list.as_bytes(),
+        )]);
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(logs.clone())
+            .finish();
+
+        let set = build_entry_file_set(&snapshot, &PanicOnHash, FileSetCaps::unbounded())
+            .with_subscriber(subscriber)
+            .await
+            .expect("ineligible directory should still produce a manifest");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(set.lines.iter().any(|line| matches!(
+            line.kind,
+            EntryFileSetLineKind::Excluded {
+                reason: EntryFileSetExcludeReason::IngestFailed
+            }
+        )));
+        let output = String::from_utf8_lossy(&logs.0.lock().unwrap()).into_owned();
+        assert!(
+            output.contains("error_kind=\"file_set_expand\""),
+            "{output}"
+        );
+        assert!(
+            output.contains("io_error_kind=PermissionDenied"),
+            "{output}"
+        );
+        assert!(!output.contains("private-locked"), "{output}");
     }
 
     #[tokio::test]

@@ -85,8 +85,8 @@ impl ConfigMigrationFacade {
             .prepare_portable_identity()
             .await
             .map_err(|error| ConfigMigrationError::Internal {
-                details: format!("preparing portable current Space identity failed: {error}"),
-                source: None,
+                details: "preparing portable current Space identity failed".into(),
+                source: Some(error.into()),
             })?;
 
         self.deps.export_bundle.export_bundle(destination).await
@@ -137,8 +137,8 @@ impl ConfigMigrationFacade {
             .current_space_id()
             .await
             .map_err(|err| ConfigMigrationError::Internal {
-                details: format!("failed to read current Space identity: {err}"),
-                source: None,
+                details: "failed to read current Space identity".into(),
+                source: Some(err.into()),
             })?
             .ok_or(ConfigMigrationError::NotInitialized)
     }
@@ -339,6 +339,9 @@ mod tests {
             .expect_err("export should fail");
 
         assert!(matches!(err, ConfigMigrationError::Internal { .. }));
+        let source =
+            std::error::Error::source(&err).expect("status read failure is kept as source");
+        assert!(source.downcast_ref::<CurrentSpaceIdentityError>().is_some());
         assert_eq!(*ports.export_calls.lock().expect("export calls"), 0);
     }
 

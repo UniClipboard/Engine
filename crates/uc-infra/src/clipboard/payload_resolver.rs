@@ -59,6 +59,7 @@ impl ClipboardPayloadResolverPort for ClipboardPayloadResolver {
                             let err = PayloadResolveError::Integrity {
                                 rep_id: representation.id.clone(),
                                 reason: "payload_state Inline but inline_data is None".to_string(),
+                                source: None,
                             };
                             return Err(err);
                         }
@@ -76,6 +77,7 @@ impl ClipboardPayloadResolverPort for ClipboardPayloadResolver {
                             let err = PayloadResolveError::Integrity {
                                 rep_id: representation.id.clone(),
                                 reason: "payload_state BlobReady but blob_id is None".to_string(),
+                                source: None,
                             };
                             return Err(err);
                         }
@@ -121,7 +123,8 @@ impl ClipboardPayloadResolverPort for ClipboardPayloadResolver {
                             );
                             Err(PayloadResolveError::Integrity {
                                 rep_id: representation.id.clone(),
-                                reason: format!("spool read failed: {err}"),
+                                reason: "spool read failed".into(),
+                                source: Some(err.into()),
                             })
                         }
                     }
@@ -171,6 +174,7 @@ mod tests {
     use uc_core::clipboard::MimeType;
     use uc_core::ids::FormatId;
     use uc_core::BlobId;
+    use uc_observability_contract::error_source::find_source;
 
     fn make_resolver() -> (
         ClipboardPayloadResolver,
@@ -242,7 +246,7 @@ mod tests {
 
         let err = resolver.resolve(&rep).await.expect_err("must error");
         match err {
-            PayloadResolveError::Integrity { rep_id, reason } => {
+            PayloadResolveError::Integrity { rep_id, reason, .. } => {
                 assert_eq!(rep_id, RepresentationId::from("rep-broken-inline"));
                 assert!(reason.contains("Inline but inline_data is None"));
             }
@@ -290,7 +294,7 @@ mod tests {
 
         let err = resolver.resolve(&rep).await.expect_err("must error");
         match err {
-            PayloadResolveError::Integrity { rep_id, reason } => {
+            PayloadResolveError::Integrity { rep_id, reason, .. } => {
                 assert_eq!(rep_id, RepresentationId::from("rep-broken-blob"));
                 assert!(reason.contains("BlobReady but blob_id is None"));
             }
@@ -337,6 +341,36 @@ mod tests {
             other => panic!("expected Inline, got {:?}", other),
         }
         assert_eq!(rx.try_recv().expect("requeued"), id);
+    }
+
+    #[tokio::test]
+    async fn spool_read_failure_keeps_io_source_without_path_text() {
+        let (resolver, _cache, _spool, _rx, dir) = make_resolver();
+        // 在 spool 条目位置放一个目录，让读取返回真实的 IO 错误（而非 NotFound）。
+        std::fs::create_dir(dir.path().join("rep-unreadable")).expect("create dir");
+        let rep = rep_with_state(
+            "rep-unreadable",
+            PayloadAvailability::Staged,
+            None,
+            None,
+            None,
+        );
+
+        let err = resolver.resolve(&rep).await.expect_err("must error");
+
+        assert!(matches!(err, PayloadResolveError::Integrity { .. }));
+        assert!(find_source::<std::io::Error>(&err).is_some());
+        let dir_text = dir.path().display().to_string();
+        let chain = std::iter::successors(
+            Some(&err as &(dyn std::error::Error + 'static)),
+            |current| current.source(),
+        )
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+        assert!(
+            chain.iter().all(|text| !text.contains(&dir_text)),
+            "{chain:?}"
+        );
     }
 
     #[tokio::test]

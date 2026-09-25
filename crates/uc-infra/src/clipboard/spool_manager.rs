@@ -123,36 +123,23 @@ impl SpoolManager {
     pub fn new(spool_dir: impl Into<PathBuf>, max_bytes: usize) -> Result<Self> {
         let spool_dir = spool_dir.into();
 
-        std::fs::create_dir_all(&spool_dir)
-            .with_context(|| format!("Failed to create spool dir: {}", spool_dir.display()))?;
+        std::fs::create_dir_all(&spool_dir).context("Failed to create spool dir")?;
 
-        let metadata = std::fs::metadata(&spool_dir).with_context(|| {
-            format!("Failed to read spool dir metadata: {}", spool_dir.display())
-        })?;
+        let metadata =
+            std::fs::metadata(&spool_dir).context("Failed to read spool dir metadata")?;
         if !metadata.is_dir() {
-            return Err(anyhow::anyhow!(
-                "Spool path is not a directory: {}",
-                spool_dir.display()
-            ));
+            return Err(anyhow::anyhow!("Spool path is not a directory"));
         }
 
         #[cfg(unix)]
         {
             let perms = std::fs::Permissions::from_mode(0o700);
-            std::fs::set_permissions(&spool_dir, perms).with_context(|| {
-                format!(
-                    "Failed to set spool dir permissions: {}",
-                    spool_dir.display()
-                )
-            })?;
+            std::fs::set_permissions(&spool_dir, perms)
+                .context("Failed to set spool dir permissions")?;
         }
 
-        let initial_state = Self::rebuild_state_from_dir(&spool_dir).with_context(|| {
-            format!(
-                "Failed to rebuild spool state from dir: {}",
-                spool_dir.display()
-            )
-        })?;
+        let initial_state = Self::rebuild_state_from_dir(&spool_dir)
+            .context("Failed to rebuild spool state from dir")?;
 
         Ok(Self {
             spool_dir,
@@ -271,19 +258,14 @@ impl SpoolManager {
         let file_path = self.spool_dir.join(rep_id.to_string());
         fs::write(&file_path, bytes)
             .await
-            .with_context(|| format!("Failed to write spool file: {}", file_path.display()))?;
+            .context("Failed to write spool file")?;
 
         #[cfg(unix)]
         {
             let perms = std::fs::Permissions::from_mode(0o600);
             fs::set_permissions(&file_path, perms)
                 .await
-                .with_context(|| {
-                    format!(
-                        "Failed to set spool file permissions: {}",
-                        file_path.display()
-                    )
-                })?;
+                .context("Failed to set spool file permissions")?;
         }
 
         // 文件已在磁盘上，登记到内存账本。
@@ -345,8 +327,7 @@ impl SpoolManager {
         match fs::read(&file_path).await {
             Ok(bytes) => Ok(Some(bytes)),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(err)
-                .with_context(|| format!("Failed to read spool file: {}", file_path.display())),
+            Err(err) => Err(err).context("Failed to read spool file"),
         }
     }
 
@@ -356,8 +337,7 @@ impl SpoolManager {
         match fs::metadata(&file_path).await {
             Ok(meta) => Ok(meta.is_file()),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
-            Err(err) => Err(err)
-                .with_context(|| format!("Failed to stat spool file: {}", file_path.display())),
+            Err(err) => Err(err).context("Failed to stat spool file"),
         }
     }
 
@@ -376,8 +356,7 @@ impl SpoolManager {
         match remove_result {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(err)
-                .with_context(|| format!("Failed to delete spool file: {}", file_path.display())),
+            Err(err) => Err(err).context("Failed to delete spool file"),
         }
     }
 

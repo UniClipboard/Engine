@@ -52,6 +52,9 @@ pub enum PayloadResolveError {
     Integrity {
         rep_id: RepresentationId,
         reason: String,
+        /// 下层错误；元数据不变量校验失败时为空。
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
 }
 

@@ -431,7 +431,7 @@ impl RuntimeHost {
                 {
                     Ok(rt) => rt,
                     Err(e) => {
-                        let _ = handle_tx.send(Err(e.to_string()));
+                        let _ = handle_tx.send(Err(e));
                         return;
                     }
                 };
@@ -443,7 +443,7 @@ impl RuntimeHost {
                 let _ = rt.block_on(shutdown_rx);
             })
             .map_err(|e| SyncError::Internal {
-                reason: format!("spawn runtime thread: {e}"),
+                reason: format!("spawn runtime thread: {}", ffi_reason(&e)),
             })?;
         let handle = handle_rx
             .recv()
@@ -452,7 +452,7 @@ impl RuntimeHost {
                 reason: "runtime thread exited before handing back a handle".into(),
             })?
             .map_err(|e| SyncError::Internal {
-                reason: format!("build current_thread runtime: {e}"),
+                reason: format!("build current_thread runtime: {}", ffi_reason(&e)),
             })?;
         Ok(Self {
             handle,
@@ -577,7 +577,7 @@ impl MobileSyncClient {
         let client =
             build_http_client(HttpTimeouts::production(), trust_insecure_cert).map_err(|e| {
                 SyncError::Internal {
-                    reason: format!("rebuild http client: {e}"),
+                    reason: format!("rebuild http client: {}", ffi_reason(&e)),
                 }
             })?;
         // The lock guards only a clone/replace (no panics inside), so poisoning
@@ -932,7 +932,7 @@ impl MobileSyncClient {
         ensure_initialized()?;
         let http =
             build_http_client(timeouts, trust_insecure_cert).map_err(|e| SyncError::Internal {
-                reason: format!("build http client: {e}"),
+                reason: format!("build http client: {}", ffi_reason(&e)),
             })?;
         Ok(Arc::new(Self {
             bridge,
@@ -978,7 +978,7 @@ impl MobileSyncClient {
             Ok(result) => result,
             Err(e) if e.is_cancelled() => Err(SyncError::Cancelled),
             Err(e) => Err(SyncError::Internal {
-                reason: format!("request task failed: {e}"),
+                reason: format!("request task failed: {}", ffi_reason(&e)),
             }),
         }
     }
@@ -1279,7 +1279,7 @@ fn network(e: reqwest::Error) -> SyncError {
 /// Build a [`SyncError::DecodingFailed`] mapper for a labeled response body.
 fn decoding(what: &'static str) -> impl Fn(reqwest::Error) -> SyncError {
     move |e| SyncError::DecodingFailed {
-        reason: format!("decode {what}: {e}"),
+        reason: format!("decode {what}: {}", ffi_reason(&e)),
     }
 }
 

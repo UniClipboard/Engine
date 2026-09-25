@@ -2648,13 +2648,9 @@ fn sanitize_path_segment(value: &str) -> String {
 fn local_file_uri_list(paths: &[PathBuf]) -> Result<String> {
     let mut out = String::new();
     for path in paths {
-        // 下层错误类型是 ()，没有可保存的来源。
-        let url = Url::from_file_path(path).map_err(|_| {
-            anyhow!(
-                "failed to convert cache path to file URL: {}",
-                path.display()
-            )
-        })?;
+        let url = Url::from_file_path(path)
+            // 下层错误类型是 ()，没有可保存的来源。
+            .map_err(|_| anyhow!("failed to convert cache path to file URL"))?;
         out.push_str(url.as_str());
         out.push('\n');
     }

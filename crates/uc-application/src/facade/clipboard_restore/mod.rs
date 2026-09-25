@@ -334,6 +334,7 @@ mod tests {
         let err = anyhow::Error::new(PayloadResolveError::Integrity {
             rep_id: RepresentationId::from("rep-bad"),
             reason: "corrupt header".to_string(),
+            source: None,
         });
 
         let mapped = map_restore_error(err, "entry-3");

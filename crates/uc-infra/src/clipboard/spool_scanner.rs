@@ -45,7 +45,7 @@ impl SpoolScanner {
     async fn scan_and_recover_dir(&self, spool_dir: &PathBuf) -> Result<usize> {
         let mut entries = fs::read_dir(spool_dir)
             .await
-            .with_context(|| format!("Failed to read spool dir: {}", spool_dir.display()))?;
+            .context("Failed to read spool dir")?;
 
         let mut recovered = 0usize;
 
