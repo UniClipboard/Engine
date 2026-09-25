@@ -58,6 +58,13 @@ pub enum SecureStorageError {
     #[error("secure storage failed: {0}")]
     Other(String),
 
+    /// 具体存储的读写或编码失败，保留下层错误。
+    #[error("secure storage failed")]
+    StorageFailed {
+        #[source]
+        source: Error,
+    },
+
     /// 调用在到达具体存储前失败。
     #[error(transparent)]
     AccessFailed(#[from] SecureStorageAccessFailure),

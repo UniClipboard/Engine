@@ -48,7 +48,7 @@ impl KeyMaterialStore {
             .await?;
         match Kek::from_bytes(&secret) {
             Ok(kek) => Ok(kek),
-            Err(_) => Err(EncryptionError::KeyMaterialCorrupt),
+            Err(_) => Err(EncryptionError::key_material_corrupt()),
         }
     }
 
@@ -103,14 +103,15 @@ impl KeyMaterialStore {
         // Never trust a process-local observation after explicit authentication.
         match self.load_kek(scope).await {
             Ok(existing) if existing.as_bytes() == kek.as_bytes() => {}
-            Ok(_) | Err(EncryptionError::KeyNotFound | EncryptionError::KeyMaterialCorrupt) => {
+            Ok(_)
+            | Err(EncryptionError::KeyNotFound | EncryptionError::KeyMaterialCorrupt { .. }) => {
                 self.store_kek(scope, &kek).await?
             }
             Err(error) => return Err(error),
         }
         let persisted = self.load_kek(scope).await?;
         if persisted.as_bytes() != kek.as_bytes() {
-            return Err(EncryptionError::KeyMaterialCorrupt);
+            return Err(EncryptionError::key_material_corrupt());
         }
         Ok(())
     }
@@ -128,7 +129,7 @@ impl KeyMaterialStore {
     pub async fn load_keyslot(&self, scope: &KeyScope) -> Result<KeySlot, EncryptionError> {
         let file = self.keyslot_store.load().await?;
         if &file.scope != scope {
-            return Err(EncryptionError::KeyMaterialCorrupt);
+            return Err(EncryptionError::key_material_corrupt());
         }
         if file.version != "V1" {
             return Err(EncryptionError::UnsupportedKeySlotVersion);
@@ -163,7 +164,7 @@ impl KeyMaterialStore {
     pub async fn delete_keyslot(&self, scope: &KeyScope) -> Result<(), EncryptionError> {
         let file = self.keyslot_store.load().await?;
         if &file.scope != scope {
-            return Err(EncryptionError::KeyMaterialCorrupt);
+            return Err(EncryptionError::key_material_corrupt());
         }
         self.keyslot_store.delete().await
     }

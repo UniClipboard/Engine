@@ -214,7 +214,7 @@ fn decrypt(
     aad: &[u8],
 ) -> Result<Vec<u8>, BlobCipherError> {
     v1_aead::decrypt_blob_xchacha(key, nonce, ciphertext, aad).map_err(|error| match error {
-        v1_aead::AeadError::DecryptFailed => BlobCipherError::invalid_ciphertext(
+        v1_aead::AeadError::DecryptFailed { .. } => BlobCipherError::invalid_ciphertext(
             anyhow::Error::new(error).context("V1/V2 inline authentication failed"),
         ),
         v1_aead::AeadError::InvalidKey { .. } | v1_aead::AeadError::EncryptFailed { .. } => {

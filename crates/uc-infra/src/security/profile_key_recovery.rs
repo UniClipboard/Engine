@@ -110,7 +110,7 @@ impl From<EncryptionError> for ProfileKeyRecoveryError {
             | EncryptionError::UnsupportedKdfAlgorithm => Self::Unsupported,
             EncryptionError::CorruptedKeySlot
             | EncryptionError::CorruptedBlob
-            | EncryptionError::KeyMaterialCorrupt
+            | EncryptionError::KeyMaterialCorrupt { .. }
             | EncryptionError::InvalidKey => Self::Corrupt,
             other => Self::Storage(other.into()),
         }
@@ -266,7 +266,7 @@ impl ProfileKeyRecoveryStore {
                 self.activate_or_migrate(&kek)?;
                 Ok(ProfileRecoveryPreparation::Ready)
             }
-            Err(EncryptionError::KeyNotFound | EncryptionError::KeyMaterialCorrupt) => {
+            Err(EncryptionError::KeyNotFound | EncryptionError::KeyMaterialCorrupt { .. }) => {
                 Ok(ProfileRecoveryPreparation::AwaitingPassphrase { losses })
             }
             Err(error) => Err(error.into()),
@@ -700,11 +700,17 @@ impl ProfileKeyRecoveryStore {
             &active.secrets,
         ) {
             Ok(file) => file,
-            Err(error) => return Err(SecureStorageError::Other(error.to_string())),
+            Err(error) => {
+                return Err(SecureStorageError::StorageFailed {
+                    source: anyhow::Error::new(error).context("encode profile secret file"),
+                })
+            }
         };
         match self.write_file(&file) {
             Ok(()) => Ok(()),
-            Err(error) => Err(SecureStorageError::Other(error.to_string())),
+            Err(error) => Err(SecureStorageError::StorageFailed {
+                source: anyhow::Error::new(error).context("write profile secret file"),
+            }),
         }
     }
 
@@ -1091,7 +1097,7 @@ mod tests {
             ProfileKeyRecoveryError::Storage(_)
         ));
         assert!(matches!(
-            ProfileKeyRecoveryError::from(v1_aead::AeadError::DecryptFailed),
+            ProfileKeyRecoveryError::from(v1_aead::AeadError::decrypt_failed()),
             ProfileKeyRecoveryError::Storage(_)
         ));
     }

@@ -418,7 +418,7 @@ fn map_encryption_error(err: EncryptionError) -> SpaceAccessError {
 
 fn map_aead_error_for_unwrap(err: v1_aead::AeadError) -> SpaceAccessError {
     match err {
-        v1_aead::AeadError::DecryptFailed => SpaceAccessError::WrongPassphrase,
+        v1_aead::AeadError::DecryptFailed { .. } => SpaceAccessError::WrongPassphrase,
         other => SpaceAccessError::Internal(Box::new(other)),
     }
 }
@@ -441,7 +441,7 @@ fn map_aead_error_for_unwrap(err: v1_aead::AeadError) -> SpaceAccessError {
 /// 不该发生的故障,保留 `error!` 让 Sentry 抓到。
 fn map_and_log_unwrap_aead_error(err: v1_aead::AeadError, path: &'static str) -> SpaceAccessError {
     match &err {
-        v1_aead::AeadError::DecryptFailed => {
+        v1_aead::AeadError::DecryptFailed { .. } => {
             warn!(
                 path,
                 "unwrap_master_key rejected: KEK does not match wrapped master key (passphrase mismatch or keyring/keyslot drift)"
@@ -535,14 +535,14 @@ fn seal_membership_branch_recovery_confirmation(
     confirmation: &MembershipBranchRecoveryConfirmationV1,
 ) -> Result<Vec<u8>, EncryptionError> {
     let plaintext =
-        postcard::to_stdvec(confirmation).map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+        postcard::to_stdvec(confirmation).map_err(EncryptionError::key_material_corrupt_from)?;
     let encrypted = v1_aead::encrypt_blob_xchacha(
         wrapping_key,
         &plaintext,
         &membership_branch_recovery_confirmation_aad(space_id, confirmation.epoch),
     )
     .map_err(map_group_aead_error)?;
-    postcard::to_stdvec(&encrypted).map_err(|_| EncryptionError::KeyMaterialCorrupt)
+    postcard::to_stdvec(&encrypted).map_err(EncryptionError::key_material_corrupt_from)
 }
 
 fn open_membership_branch_recovery_confirmation(
@@ -552,7 +552,7 @@ fn open_membership_branch_recovery_confirmation(
     ciphertext: &[u8],
 ) -> Result<MembershipBranchRecoveryConfirmationV1, EncryptionError> {
     let encrypted: EncryptedBlob =
-        postcard::from_bytes(ciphertext).map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+        postcard::from_bytes(ciphertext).map_err(EncryptionError::key_material_corrupt_from)?;
     let plaintext = v1_aead::decrypt_blob_xchacha(
         wrapping_key,
         &encrypted.nonce,
@@ -561,19 +561,20 @@ fn open_membership_branch_recovery_confirmation(
     )
     .map_err(map_group_aead_error)?;
     let confirmation: MembershipBranchRecoveryConfirmationV1 =
-        postcard::from_bytes(&plaintext).map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+        postcard::from_bytes(&plaintext).map_err(EncryptionError::key_material_corrupt_from)?;
     if confirmation.version != 1 || confirmation.epoch != epoch {
-        return Err(EncryptionError::KeyMaterialCorrupt);
+        return Err(EncryptionError::key_material_corrupt());
     }
     Ok(confirmation)
 }
 
 fn map_group_aead_error(error: v1_aead::AeadError) -> EncryptionError {
     match error {
-        v1_aead::AeadError::DecryptFailed => EncryptionError::KeyMaterialCorrupt,
-        v1_aead::AeadError::InvalidKey { .. } | v1_aead::AeadError::EncryptFailed { .. } => {
-            EncryptionError::CryptoFailure
+        error @ v1_aead::AeadError::DecryptFailed { .. } => {
+            EncryptionError::key_material_corrupt_from(error)
         }
+        error @ (v1_aead::AeadError::InvalidKey { .. }
+        | v1_aead::AeadError::EncryptFailed { .. }) => EncryptionError::crypto_failure_from(error),
     }
 }
 
@@ -587,7 +588,7 @@ pub(super) fn seal_group_catalog(
         key_catalog: material.key_catalog().to_vec(),
     };
     let plaintext =
-        serde_json::to_vec(&portable).map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+        serde_json::to_vec(&portable).map_err(EncryptionError::key_material_corrupt_from)?;
     let encrypted = v1_aead::encrypt_blob_xchacha(
         wrapping_key,
         &plaintext,
@@ -597,7 +598,7 @@ pub(super) fn seal_group_catalog(
         ),
     )
     .map_err(map_group_aead_error)?;
-    serde_json::to_vec(&encrypted).map_err(|_| EncryptionError::KeyMaterialCorrupt)
+    serde_json::to_vec(&encrypted).map_err(EncryptionError::key_material_corrupt_from)
 }
 
 pub(super) fn open_group_catalog(
@@ -607,7 +608,7 @@ pub(super) fn open_group_catalog(
     ciphertext: &[u8],
 ) -> Result<PortableKeyCatalog, EncryptionError> {
     let encrypted: EncryptedBlob =
-        serde_json::from_slice(ciphertext).map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+        serde_json::from_slice(ciphertext).map_err(EncryptionError::key_material_corrupt_from)?;
     let plaintext = v1_aead::decrypt_blob_xchacha(
         wrapping_key,
         &encrypted.nonce,
@@ -616,12 +617,12 @@ pub(super) fn open_group_catalog(
     )
     .map_err(map_group_aead_error)?;
     let portable: PortableKeyCatalog =
-        serde_json::from_slice(&plaintext).map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+        serde_json::from_slice(&plaintext).map_err(EncryptionError::key_material_corrupt_from)?;
     if portable.version != 1
         || portable.state.space_id() != space_id
         || portable.state.epoch() != GroupEpoch::new(epoch)
     {
-        return Err(EncryptionError::KeyMaterialCorrupt);
+        return Err(EncryptionError::key_material_corrupt());
     }
     Ok(portable)
 }
@@ -3542,9 +3543,9 @@ impl RuntimeSpaceAccessAdapter {
     ) -> Result<SpaceKeyMaterial, EncryptionError> {
         let staged: StagedMembershipBranchRecoveryRecipientV1 =
             postcard::from_bytes(recipient_staged_mls_state)
-                .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+                .map_err(EncryptionError::key_material_corrupt_from)?;
         if staged.version != 1 || staged.epoch == 0 {
-            return Err(EncryptionError::KeyMaterialCorrupt);
+            return Err(EncryptionError::key_material_corrupt());
         }
         let space_id = self.session.current_space_id()?;
         let wrapping_key = MasterKey::from_bytes(&staged.wrapping_key)?;
@@ -3571,7 +3572,7 @@ impl RuntimeSpaceAccessAdapter {
             &MlsClientState::from_bytes(material.group_state().to_vec()),
             space_id.as_ref().as_bytes(),
         )
-        .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+        .map_err(EncryptionError::key_material_corrupt_from)?;
         super::export_admission_content_key_catalog(&material)?;
         Ok(material)
     }

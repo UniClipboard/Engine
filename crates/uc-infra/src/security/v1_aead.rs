@@ -44,7 +44,23 @@ pub(crate) enum AeadError {
         source: Option<anyhow::Error>,
     },
     #[error("AEAD decryption failed (key mismatch / corrupted ciphertext)")]
-    DecryptFailed,
+    DecryptFailed {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl AeadError {
+    pub fn decrypt_failed() -> Self {
+        Self::DecryptFailed { source: None }
+    }
+
+    pub fn decrypt_failed_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::DecryptFailed {
+            source: Some(source.into()),
+        }
+    }
 }
 
 /// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
@@ -147,8 +163,8 @@ pub(crate) fn unwrap_master_key_xchacha(
             XNonce::from_slice(&wrapped.nonce),
             wrapped.ciphertext.as_ref(),
         )
-        .map_err(|_| AeadError::DecryptFailed)?;
-    MasterKey::from_bytes(&plaintext).map_err(|_| AeadError::DecryptFailed)
+        .map_err(AeadError::decrypt_failed_from)?;
+    MasterKey::from_bytes(&plaintext).map_err(AeadError::decrypt_failed_from)
 }
 
 /// XChaCha20-Poly1305 底层加密原语,以裸 32 字节 key 为参。
@@ -190,7 +206,7 @@ pub(crate) fn decrypt_xchacha_raw(
     aad: &[u8],
 ) -> Result<Vec<u8>, AeadError> {
     if nonce.len() != 24 {
-        return Err(AeadError::DecryptFailed);
+        return Err(AeadError::decrypt_failed());
     }
     let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(AeadError::invalid_key_from)?;
     cipher
@@ -201,7 +217,7 @@ pub(crate) fn decrypt_xchacha_raw(
                 aad,
             },
         )
-        .map_err(|_| AeadError::DecryptFailed)
+        .map_err(AeadError::decrypt_failed_from)
 }
 
 /// XChaCha20-Poly1305 加密业务 blob,返回完整的 `EncryptedBlob`。
@@ -337,7 +353,7 @@ mod tests {
     fn unwrap_master_key_with_wrong_kek_fails() {
         let wrapped = wrap_master_key_xchacha(&kek(0x01), &master_key(0x02)).unwrap();
         let err = unwrap_master_key_xchacha(&kek(0x09), &wrapped).unwrap_err();
-        assert!(matches!(err, AeadError::DecryptFailed));
+        assert!(matches!(err, AeadError::DecryptFailed { .. }));
     }
 
     #[test]
@@ -346,7 +362,7 @@ mod tests {
         let mut wrapped = wrap_master_key_xchacha(&kek, &master_key(0x06)).unwrap();
         wrapped.ciphertext[0] ^= 0xFF;
         let err = unwrap_master_key_xchacha(&kek, &wrapped).unwrap_err();
-        assert!(matches!(err, AeadError::DecryptFailed));
+        assert!(matches!(err, AeadError::DecryptFailed { .. }));
     }
 
     #[test]
@@ -392,7 +408,7 @@ mod tests {
         let mk = master_key(0x55);
         let blob = encrypt_blob_xchacha(&mk, b"secret", b"good-aad").unwrap();
         let err = decrypt_blob_xchacha(&mk, &blob.nonce, &blob.ciphertext, b"bad-aad").unwrap_err();
-        assert!(matches!(err, AeadError::DecryptFailed));
+        assert!(matches!(err, AeadError::DecryptFailed { .. }));
     }
 
     #[test]
@@ -400,7 +416,7 @@ mod tests {
         let blob = encrypt_blob_xchacha(&master_key(0x01), b"secret", b"aad").unwrap();
         let err = decrypt_blob_xchacha(&master_key(0x02), &blob.nonce, &blob.ciphertext, b"aad")
             .unwrap_err();
-        assert!(matches!(err, AeadError::DecryptFailed));
+        assert!(matches!(err, AeadError::DecryptFailed { .. }));
     }
 
     #[test]
@@ -410,7 +426,7 @@ mod tests {
         let mut ct = blob.ciphertext.clone();
         ct[0] ^= 0x01;
         let err = decrypt_blob_xchacha(&mk, &blob.nonce, &ct, b"aad").unwrap_err();
-        assert!(matches!(err, AeadError::DecryptFailed));
+        assert!(matches!(err, AeadError::DecryptFailed { .. }));
     }
 
     #[test]
@@ -419,7 +435,7 @@ mod tests {
         let blob = encrypt_blob_xchacha(&mk, b"secret", b"aad").unwrap();
         let short_nonce = vec![0u8; 12];
         let err = decrypt_blob_xchacha(&mk, &short_nonce, &blob.ciphertext, b"aad").unwrap_err();
-        assert!(matches!(err, AeadError::DecryptFailed));
+        assert!(matches!(err, AeadError::DecryptFailed { .. }));
     }
 
     #[test]

@@ -11,6 +11,7 @@ use uc_infra::security::{
     ProfileKeyRecoveryError, ProfileKeyRecoveryStore, ProfileRecoveryLosses,
     ProfileRecoveryOutcome, ProfileRecoveryPreparation,
 };
+use uc_observability_contract::error_source::io_error_kind;
 
 use super::ProductionRuntime;
 use crate::assembly::host::{derive_app_paths, profile_key_recovery_store};
@@ -158,7 +159,8 @@ impl RecoverableRuntime {
                 }
                 Err(error) => {
                     warn!(
-                        error = %error,
+                        error_kind = "profile_recovery_refresh",
+                        io_error_kind = io_error_kind(&error),
                         "profile recovery refresh failed after committed operation"
                     );
                     let summary = ProfileRecoverySummary {

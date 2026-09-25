@@ -50,10 +50,10 @@ impl KeySlotStore for JsonKeySlotStore {
 
         let content = tokio::fs::read_to_string(&path)
             .await
-            .map_err(|_| EncryptionError::IoFailure)?;
+            .map_err(EncryptionError::io_failure_from)?;
 
         let slot: KeySlotFile =
-            serde_json::from_str(&content).map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+            serde_json::from_str(&content).map_err(EncryptionError::key_material_corrupt_from)?;
 
         Ok(slot)
     }
@@ -62,7 +62,7 @@ impl KeySlotStore for JsonKeySlotStore {
         if self.path.is_dir() {
             tokio::fs::remove_dir_all(&self.path)
                 .await
-                .map_err(|_| EncryptionError::IoFailure)?;
+                .map_err(EncryptionError::io_failure_from)?;
         }
 
         let path = self.effective_path();
@@ -71,21 +71,21 @@ impl KeySlotStore for JsonKeySlotStore {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
-                .map_err(|_| EncryptionError::IoFailure)?;
+                .map_err(EncryptionError::io_failure_from)?;
         }
 
         let tmp = path.with_extension("json.tmp");
 
-        let json =
-            serde_json::to_string_pretty(slot).map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+        let json = serde_json::to_string_pretty(slot)
+            .map_err(EncryptionError::key_material_corrupt_from)?;
 
         tokio::fs::write(&tmp, json)
             .await
-            .map_err(|_| EncryptionError::IoFailure)?;
+            .map_err(EncryptionError::io_failure_from)?;
 
         tokio::fs::rename(&tmp, &path)
             .await
-            .map_err(|_| EncryptionError::IoFailure)?;
+            .map_err(EncryptionError::io_failure_from)?;
 
         Ok(())
     }
@@ -96,15 +96,47 @@ impl KeySlotStore for JsonKeySlotStore {
         if path.exists() {
             tokio::fs::remove_file(&path)
                 .await
-                .map_err(|_| EncryptionError::IoFailure)?;
+                .map_err(EncryptionError::io_failure_from)?;
         }
 
         if self.path.is_dir() {
             tokio::fs::remove_dir_all(&self.path)
                 .await
-                .map_err(|_| EncryptionError::IoFailure)?;
+                .map_err(EncryptionError::io_failure_from)?;
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use uc_observability_contract::error_source::find_source;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn unreadable_keyslot_keeps_io_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JsonKeySlotStore::new(dir.path().to_path_buf());
+        // keyslot.json 位置放一个目录：路径存在，但读取返回真实的 IO 错误。
+        std::fs::create_dir_all(dir.path().join("keyslot.json").join("keyslot.json")).unwrap();
+
+        let error = store.load().await.unwrap_err();
+
+        assert!(matches!(error, EncryptionError::IoFailure { .. }));
+        assert!(find_source::<std::io::Error>(&error).is_some());
+    }
+
+    #[tokio::test]
+    async fn malformed_keyslot_keeps_decode_source() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("keyslot.json"), b"{ not json").unwrap();
+        let store = JsonKeySlotStore::new(dir.path().to_path_buf());
+
+        let error = store.load().await.unwrap_err();
+
+        assert!(matches!(error, EncryptionError::KeyMaterialCorrupt { .. }));
+        assert!(find_source::<serde_json::Error>(&error).is_some());
     }
 }

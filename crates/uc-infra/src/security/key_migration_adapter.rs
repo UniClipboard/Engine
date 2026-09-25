@@ -148,7 +148,9 @@ impl KeyMigrationPort for DefaultKeyMigrationAdapter {
         let plain =
             v1_aead::decrypt_blob_xchacha(&key, &blob.nonce, &blob.ciphertext, aad.as_bytes())
                 .map_err(|e| match e {
-                    v1_aead::AeadError::DecryptFailed => KeyMigrationError::invalid_ciphertext(),
+                    v1_aead::AeadError::DecryptFailed { .. } => {
+                        KeyMigrationError::invalid_ciphertext()
+                    }
                     other => KeyMigrationError::Internal(Box::new(other)),
                 })?;
         Ok(Plaintext::new(plain))

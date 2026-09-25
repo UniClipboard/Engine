@@ -64,7 +64,9 @@ fn classify_error(error: &(dyn std::error::Error + 'static)) -> &'static str {
             SecureStorageError::Unavailable(_) => "protection_unavailable",
             SecureStorageError::PermissionDenied(_) => "permission_denied",
             SecureStorageError::Corrupt(_) => "invalid_protection_record",
-            SecureStorageError::Other(_) => "protection_storage",
+            SecureStorageError::Other(_) | SecureStorageError::StorageFailed { .. } => {
+                "protection_storage"
+            }
             SecureStorageError::AccessFailed(_) => "protection_storage",
         };
     }

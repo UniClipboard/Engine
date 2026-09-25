@@ -19,11 +19,11 @@ pub(super) struct PersistedContentKeyEntry {
 }
 
 pub(super) fn decode(encoded: &[u8]) -> Result<PersistedContentKeyCatalog, EncryptionError> {
-    serde_json::from_slice(encoded).map_err(|_| EncryptionError::KeyMaterialCorrupt)
+    serde_json::from_slice(encoded).map_err(EncryptionError::key_material_corrupt_from)
 }
 
 pub(super) fn encode(catalog: &PersistedContentKeyCatalog) -> Result<Vec<u8>, EncryptionError> {
-    serde_json::to_vec(catalog).map_err(|_| EncryptionError::KeyMaterialCorrupt)
+    serde_json::to_vec(catalog).map_err(EncryptionError::key_material_corrupt_from)
 }
 
 pub(crate) fn export_admission_content_key_catalog(
@@ -42,7 +42,7 @@ pub(crate) fn export_admission_content_key_catalog(
                 entry.epoch,
                 entry.key.clone(),
             )
-            .map_err(|_| EncryptionError::KeyMaterialCorrupt)
+            .map_err(EncryptionError::key_material_corrupt_from)
         })
         .collect::<Result<Vec<_>, _>>()?;
     AdmissionContentKeyCatalogV1::new(
@@ -50,7 +50,7 @@ pub(crate) fn export_admission_content_key_catalog(
         material.state().epoch().value(),
         entries,
     )
-    .map_err(|_| EncryptionError::KeyMaterialCorrupt)
+    .map_err(EncryptionError::key_material_corrupt_from)
 }
 
 /// 把已经通过 admission commitment 验证的目录转换为 session/repository
@@ -60,7 +60,7 @@ pub(crate) fn import_admission_content_key_catalog(
 ) -> Result<Vec<u8>, EncryptionError> {
     catalog
         .validate()
-        .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+        .map_err(EncryptionError::key_material_corrupt_from)?;
     encode(&PersistedContentKeyCatalog {
         version: 2,
         entries: catalog

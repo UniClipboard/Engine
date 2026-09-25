@@ -433,13 +433,13 @@ impl InMemorySession {
         let mut key_state = uc_core::membership::SpaceKeyState::legacy(space_id.clone());
         key_state
             .mark_migrating()
-            .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+            .map_err(EncryptionError::key_material_corrupt_from)?;
         key_state
             .mark_ready(
                 content_key_id,
                 protection_group_id.unwrap_or_else(ProtectionGroupId::generate),
             )
-            .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+            .map_err(EncryptionError::key_material_corrupt_from)?;
         Ok(SpaceKeyMaterial::new(
             key_state,
             group_state,
@@ -468,13 +468,14 @@ impl InMemorySession {
         drop(state);
 
         let content_key_id = ContentKeyId::from_string(CONTENT_KEY_ID)
-            .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+            .map_err(EncryptionError::key_material_corrupt_from)?;
         let protection_group_id = ProtectionGroupId::from_string(PROTECTION_GROUP_ID)
-            .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+            .map_err(EncryptionError::key_material_corrupt_from)?;
         let hkdf = Hkdf::<Sha256>::new(Some(space_id.as_ref().as_bytes()), legacy_key.as_bytes());
         let mut content_key_bytes = Zeroizing::new([0_u8; MasterKey::LEN]);
         hkdf.expand(CONTENT_KEY_INFO, content_key_bytes.as_mut())
-            .map_err(|_| EncryptionError::CryptoFailure)?;
+            // hkdf::InvalidLength 未实现 Error，且只表示输出长度超限（这里长度是常量）。
+            .map_err(|_| EncryptionError::crypto_failure())?;
         let content_key = MasterKey::from_bytes(content_key_bytes.as_ref())?;
         let catalog = PersistedContentKeyCatalog {
             version: 2,
@@ -494,10 +495,10 @@ impl InMemorySession {
         let mut key_state = uc_core::membership::SpaceKeyState::legacy(space_id.clone());
         key_state
             .mark_migrating()
-            .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+            .map_err(EncryptionError::key_material_corrupt_from)?;
         key_state
             .mark_ready(content_key_id, protection_group_id)
-            .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+            .map_err(EncryptionError::key_material_corrupt_from)?;
         Ok(SpaceKeyMaterial::new(
             key_state,
             CONTENT_KEY_INFO.to_vec(),
@@ -514,7 +515,7 @@ impl InMemorySession {
         updated_at_ms: i64,
     ) -> Result<SpaceKeyMaterial, EncryptionError> {
         if group_state.is_empty() {
-            return Err(EncryptionError::KeyMaterialCorrupt);
+            return Err(EncryptionError::key_material_corrupt());
         }
         self.create_ready_space_material(space_id, None, group_state, updated_at_ms)
     }
@@ -527,7 +528,7 @@ impl InMemorySession {
         updated_at_ms: i64,
     ) -> Result<SpaceKeyMaterial, EncryptionError> {
         if group_state.is_empty() {
-            return Err(EncryptionError::KeyMaterialCorrupt);
+            return Err(EncryptionError::key_material_corrupt());
         }
         self.create_ready_space_material(
             space_id,
@@ -557,7 +558,7 @@ impl InMemorySession {
     ) -> Result<(), EncryptionError> {
         if material.state().mode() != SpaceSecurityMode::Ready || material.group_state().is_empty()
         {
-            return Err(EncryptionError::KeyMaterialCorrupt);
+            return Err(EncryptionError::key_material_corrupt());
         }
         let protection_group_id = material.state().protection_group_id().cloned();
         let catalog = decode_content_key_catalog(material.key_catalog())?;
@@ -592,15 +593,15 @@ impl InMemorySession {
         }
         for persisted in &catalog.entries {
             let content_key_id = ContentKeyId::from_string(persisted.content_key_id.clone())
-                .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+                .map_err(EncryptionError::key_material_corrupt_from)?;
             if keys.contains_key(&content_key_id)
                 || (content_key_id == ContentKeyId::legacy_v1()
                     && (catalog.version != 2 || persisted.epoch != 0))
             {
-                return Err(EncryptionError::KeyMaterialCorrupt);
+                return Err(EncryptionError::key_material_corrupt());
             }
             let key = MasterKey::from_bytes(&persisted.key)
-                .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+                .map_err(EncryptionError::key_material_corrupt_from)?;
             keys.insert(
                 content_key_id,
                 ContentKeyEntry {
@@ -610,14 +611,14 @@ impl InMemorySession {
             );
         }
         if !keys.contains_key(&ContentKeyId::legacy_v1()) {
-            return Err(EncryptionError::KeyMaterialCorrupt);
+            return Err(EncryptionError::key_material_corrupt());
         }
         let current_id = material.state().current_content_key_id();
         let current = keys
             .get(current_id)
-            .ok_or(EncryptionError::KeyMaterialCorrupt)?;
+            .ok_or_else(EncryptionError::key_material_corrupt)?;
         if current.epoch != material.state().epoch() {
-            return Err(EncryptionError::KeyMaterialCorrupt);
+            return Err(EncryptionError::key_material_corrupt());
         }
         state.content_keys = keys;
         state.protection_group_id = protection_group_id;
@@ -635,16 +636,16 @@ impl InMemorySession {
     ) -> Result<SpaceKeyMaterial, EncryptionError> {
         let mut catalog = decode_content_key_catalog(material.key_catalog())?;
         if catalog.version != 2 || material.state().mode() != SpaceSecurityMode::Ready {
-            return Err(EncryptionError::KeyMaterialCorrupt);
+            return Err(EncryptionError::key_material_corrupt());
         }
         let content_key_id = ContentKeyId::generate();
         let content_key = MasterKey::generate()?;
         let mut state = material.state().clone();
         state
             .rotate(content_key_id.clone())
-            .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+            .map_err(EncryptionError::key_material_corrupt_from)?;
         if state.epoch() != expected_epoch {
-            return Err(EncryptionError::KeyMaterialCorrupt);
+            return Err(EncryptionError::key_material_corrupt());
         }
         catalog.entries.push(PersistedContentKeyEntry {
             content_key_id: content_key_id.as_str().to_owned(),
@@ -719,7 +720,7 @@ impl InMemorySession {
             .get(&content_key_id)
             .ok_or(EncryptionError::KeyNotFound)?;
         if entry.epoch != state.current_epoch.ok_or(EncryptionError::NotInitialized)? {
-            return Err(EncryptionError::KeyMaterialCorrupt);
+            return Err(EncryptionError::key_material_corrupt());
         }
         Ok(ActiveContentProtectionKey {
             protection_group_id,
@@ -784,7 +785,8 @@ impl InMemorySession {
         let hkdf = Hkdf::<Sha256>::new(Some(salt), legacy_key.key.as_bytes());
         let mut output = [0u8; 32];
         hkdf.expand(info, &mut output)
-            .map_err(|_| EncryptionError::CryptoFailure)?;
+            // hkdf::InvalidLength 未实现 Error，且只表示输出长度超限（这里长度是常量）。
+            .map_err(|_| EncryptionError::crypto_failure())?;
         Ok(output)
     }
 
@@ -805,7 +807,8 @@ impl InMemorySession {
         let mut output = [0u8; MasterKey::LEN];
         let info = format!("uniclipboard-content-key/v1/{}", purpose.as_str());
         hkdf.expand(info.as_bytes(), &mut output)
-            .map_err(|_| EncryptionError::CryptoFailure)?;
+            // hkdf::InvalidLength 未实现 Error，且只表示输出长度超限（这里长度是常量）。
+            .map_err(|_| EncryptionError::crypto_failure())?;
         Ok(ResolvedContentKey {
             content_key_id: content_key_id.clone(),
             epoch: entry.epoch,

@@ -2,7 +2,7 @@
 
 ## 状态与完整责任
 
-- **状态**：实施中。E0–E7、E9、E10 已完成（暂缓项见各节），E8 部分完成。剩余工作全部等待 049 提交或 Core 边界收口 D1/D3。
+- **状态**：实施中。E0–E7、E9、E10 已完成，E8 部分完成。剩余只有交给 Core 边界收口 D1/D3 的 90 处 Core 持久化编解码。
 - **日期**：2026-09-24。
 - **依据**：[错误处理与转换](../../design-docs/error-handling.md)要求保留完整 source chain；[运行期观测](../../design-docs/observability.md#错误来源与日志字段)要求日志只记录从 source chain 提取的固定分类。
 - **完整负责人**：每处转换由目标错误类型所在模块负责（与错误处理规范的“转换所有权”一致）；整体顺序、清单复核与验收由本计划负责。
@@ -362,7 +362,7 @@ E1 的检查会拒绝只删标识、仍保留 `{error}` 的改法，所以 E4 �
   postcard 解码点。这些代码将迁往 Infra，迁移时按 E6 约定保留来源（Infra 自有错误可直接用 `anyhow`），避免现在修改
   `SpaceAdmissionPersistenceError`、`MembershipHistoryV2Error`（均为 `Copy`，引用 185 与 149 处）后又随迁移重写。
 
-### E10 L1：日志改为固定分类字段（已完成，除等待 049 的一处）
+### E10 L1：日志改为固定分类字段（已完成）
 
 - 发现：323 处 L1 全部位于普通 target。运行时 `local_sink_enabled` 只接收合同 target，宿主层过滤又排除核心模块，
   因此这些日志在产品中不输出，只在测试与开发订阅者中可见；仍按隐私规则处理。
@@ -412,3 +412,17 @@ E1 的检查会拒绝只删标识、仍保留 `{error}` 的改法，所以 E4 �
     serde 错误与 `Debug` 输出不再包含用户文件路径；物化器 URL 转换错误不再带缓存路径。
   - 检查：`check-rust-style.mjs` 新增结构体字段 `format!` 内插错误变量与错误/panic 文本中 `.display()` 两条规则
     （2 条测试），并把 `test_support/` 目录识别为测试代码。
+
+### 原 049 阻塞项（2026-09-25，按用户决定先于 049 完成）
+
+- `EncryptionError` 的 `IoFailure`、`KeyMaterialCorrupt`、`CryptoFailure` 改为可选来源（Core 使用
+  `Option<Box<dyn Error + Send + Sync>>`），Infra 38 处 `map_err(|_| ..)` 保留 IO、serde、postcard、AEAD 来源；
+  `hkdf::InvalidLength` 未实现 `Error`，3 处按例外注释。`AeadError::DecryptFailed` 改为可选来源，3 处保留来源；
+  成员组 AEAD 失败映射到 `EncryptionError` 时携带原 `AeadError`。
+- `SecureStorageError` 新增 `StorageFailed { source }`，承接具体存储读写与编码失败（`file_secure_storage.rs` 与
+  `profile_key_recovery.rs` 的 3 处 S3）；`Other(String)` 只保留给宿主传来的文本。转换为 `EncryptionError` 时
+  `StorageFailed` 映射到 `KeyMaterialAccessFailed { source }`，`Corrupt` 携带原错误。
+- E10 最后一处：`runtime/profile_recovery.rs` 的刷新失败日志改为 `error_kind` 与 `io_error_kind`。
+- 049 未提交文件中的改动只涉及 HEAD 已有的行；049 新增代码中的模式匹配随本次一并调整，留在工作区由 049 提交。
+- 测试：安全存储读取失败保留 `io::Error` 且各层文本不含路径；`StorageFailed` 转换后可取回 `io::ErrorKind`；
+  keyslot 读取失败与 JSON 损坏分别保留 `io::Error` 与 `serde_json::Error`。
