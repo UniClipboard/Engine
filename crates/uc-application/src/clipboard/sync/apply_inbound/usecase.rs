@@ -7,6 +7,7 @@ use anyhow::{anyhow, Error as SourceError};
 use moka::sync::Cache;
 use tracing::{debug, error, info, instrument, warn};
 use uc_observability_contract::diagnostics::{DiagnosticTaskKind, ObservationContext};
+use uc_observability_contract::error_source::io_error_kind;
 
 use uc_core::clipboard::ActiveClipboardState;
 use uc_core::file_transfer::{OutboundProgressReporterPort, OutboundProgressStatus};
@@ -453,7 +454,7 @@ impl ApplyInboundClipboardUseCase {
                 debug!(entry_id = %entry_id, reason, "inbound: search live index skipped")
             }
             Err(e) => {
-                warn!(error = %e, entry_id = %entry_id, "inbound: search live index failed (best-effort, ignored)")
+                warn!(error_kind = "search_live_index", io_error_kind = io_error_kind(&e), entry_id = %entry_id, "inbound: search live index failed (best-effort, ignored)")
             }
         }
     }
@@ -480,7 +481,8 @@ impl ApplyInboundClipboardUseCase {
             .await;
         if let Err(e) = register.advance(&state, mobile_consumable).await {
             warn!(
-                error = %e,
+                error_kind = "register_advance",
+                io_error_kind = io_error_kind(&e),
                 snapshot_hash = %state.snapshot_hash,
                 "active register: inbound advance failed (best-effort, ignored)"
             );
@@ -850,7 +852,8 @@ impl ApplyInboundClipboardUseCase {
             Ok(snapshot) => snapshot,
             Err(err) => {
                 warn!(
-                    error = %err,
+                    error_kind = "held_entry_rebuild",
+                    io_error_kind = io_error_kind(err.as_ref()),
                     existing_entry_id = %existing_id,
                     "inbound: held entry could not be rebuilt; skipping re-activation"
                 );
@@ -871,7 +874,7 @@ impl ApplyInboundClipboardUseCase {
             warn!(
                 event = "inbound_os_write_failed",
                 error_kind = "inbound_os_write_failed",
-                error = %err,
+                io_error_kind = io_error_kind(err.as_ref()),
                 existing_entry_id = %existing_id,
                 "inbound: OS clipboard write failed while re-activating held entry; \
                  not advancing the active register"
@@ -910,7 +913,8 @@ impl ApplyInboundClipboardUseCase {
                 "inbound: resurface target vanished before history bump"
             ),
             Err(err) => warn!(
-                error = %err,
+                error_kind = "history_bump",
+                io_error_kind = io_error_kind(&err),
                 existing_entry_id = %existing_id,
                 "inbound: history bump failed (best-effort, ignored)"
             ),
@@ -1133,150 +1137,158 @@ impl ApplyInboundClipboardUseCase {
         // commit them or take them back.
         let mut publication: Option<DirectoryPublication> = None;
         let mut directory_file_set = None;
-        let (snapshot, materialize_outcome, has_receive_artifacts, receive_artifacts) = match (
-            requires_materialize,
-            &self.blob_materializer,
-        ) {
-            (false, _) => (snapshot, MaterializeOutcome::Complete, false, Vec::new()),
-            (true, Some(materializer)) => {
-                let count = blob_refs.len();
-                let mut result = match materializer
-                    .materialize_plan(ReceiveWorkPlan::new(
-                        input.from_device,
-                        receiver_entry_id.clone(),
-                        snapshot,
-                        blob_refs,
-                        file_set_manifest,
-                        receive_attempt_id.clone(),
-                        Some(input.snapshot_hash.clone()),
-                    ))
-                    .await
-                {
-                    Ok(result) => result,
-                    Err(error) => {
-                        let cancelled = is_directory_cancel_error(&error);
-                        let terminal = if cancelled {
-                            self.request_receive_cancellation(
+        let (snapshot, materialize_outcome, has_receive_artifacts, receive_artifacts) =
+            match (requires_materialize, &self.blob_materializer) {
+                (false, _) => (snapshot, MaterializeOutcome::Complete, false, Vec::new()),
+                (true, Some(materializer)) => {
+                    let count = blob_refs.len();
+                    let mut result = match materializer
+                        .materialize_plan(ReceiveWorkPlan::new(
+                            input.from_device,
+                            receiver_entry_id.clone(),
+                            snapshot,
+                            blob_refs,
+                            file_set_manifest,
+                            receive_attempt_id.clone(),
+                            Some(input.snapshot_hash.clone()),
+                        ))
+                        .await
+                    {
+                        Ok(result) => result,
+                        Err(error) => {
+                            let cancelled = is_directory_cancel_error(&error);
+                            let terminal = if cancelled {
+                                self.request_receive_cancellation(
+                                    &receiver_entry_id,
+                                    receive_attempt_id.as_deref(),
+                                )
+                                .await?;
+                                PartialReceiveTerminal::Cancelled
+                            } else {
+                                self.begin_receive_failure(
+                                    &receiver_entry_id,
+                                    receive_attempt_id.as_deref(),
+                                )
+                                .await?;
+                                PartialReceiveTerminal::Failed
+                            };
+                            self.settle_receive_without_entry(
                                 &receiver_entry_id,
                                 receive_attempt_id.as_deref(),
+                                terminal,
+                                &[],
+                                false,
                             )
                             .await?;
-                            PartialReceiveTerminal::Cancelled
-                        } else {
+                            warn!(
+                                error_kind = "blob_materialize",
+                                io_error_kind = io_error_kind(error.as_ref()),
+                                blob_ref_count = count,
+                                cancelled,
+                                "inbound: blob materialize stopped"
+                            );
+                            self.emit_host_event(HostEvent::Transfer(
+                                TransferHostEvent::StatusChanged {
+                                    transfer_id: receiver_entry_id.as_ref().to_string(),
+                                    entry_id: Some(receiver_entry_id.as_ref().to_string()),
+                                    attempt_id: receive_attempt_id.clone(),
+                                    status: if cancelled { "cancelled" } else { "failed" }
+                                        .to_string(),
+                                    reason: if cancelled {
+                                        Some("local_user".to_string())
+                                    } else {
+                                        Some(error.to_string())
+                                    },
+                                },
+                            ));
+                            return Err(ApplyInboundError::Internal(
+                                SourceError::from(error).context("materialize inbound blobs"),
+                            ));
+                        }
+                    };
+                    publication = result.take_publication();
+                    directory_file_set = result.directory_file_set.take();
+                    let partial = result.is_partial();
+                    let outcome = result.outcome();
+                    let has_receive_artifacts = result.has_receive_artifacts;
+                    if verify_directory_identity {
+                        if let Err(err) =
+                            verify_file_set_identity(&result.snapshot, &input.snapshot_hash)
+                        {
+                            // What landed is not what the sender advertised, so no
+                            // entry will exist for it — the roots must go.
                             self.begin_receive_failure(
                                 &receiver_entry_id,
                                 receive_attempt_id.as_deref(),
                             )
                             .await?;
-                            PartialReceiveTerminal::Failed
-                        };
-                        self.settle_receive_without_entry(
-                            &receiver_entry_id,
-                            receive_attempt_id.as_deref(),
-                            terminal,
-                            &[],
-                            false,
-                        )
-                        .await?;
-                        warn!(error = %error, blob_ref_count = count, cancelled, "inbound: blob materialize stopped");
-                        self.emit_host_event(HostEvent::Transfer(
-                            TransferHostEvent::StatusChanged {
-                                transfer_id: receiver_entry_id.as_ref().to_string(),
-                                entry_id: Some(receiver_entry_id.as_ref().to_string()),
-                                attempt_id: receive_attempt_id.clone(),
-                                status: if cancelled { "cancelled" } else { "failed" }.to_string(),
-                                reason: if cancelled {
-                                    Some("local_user".to_string())
-                                } else {
-                                    Some(error.to_string())
-                                },
-                            },
-                        ));
-                        return Err(ApplyInboundError::Internal(
-                            SourceError::from(error).context("materialize inbound blobs"),
-                        ));
-                    }
-                };
-                publication = result.take_publication();
-                directory_file_set = result.directory_file_set.take();
-                let partial = result.is_partial();
-                let outcome = result.outcome();
-                let has_receive_artifacts = result.has_receive_artifacts;
-                if verify_directory_identity {
-                    if let Err(err) =
-                        verify_file_set_identity(&result.snapshot, &input.snapshot_hash)
-                    {
-                        // What landed is not what the sender advertised, so no
-                        // entry will exist for it — the roots must go.
-                        self.begin_receive_failure(
-                            &receiver_entry_id,
-                            receive_attempt_id.as_deref(),
-                        )
-                        .await?;
-                        withdraw_publication(publication, "content failed identity verification")
+                            withdraw_publication(
+                                publication,
+                                "content failed identity verification",
+                            )
                             .await;
-                        self.settle_receive_without_entry(
-                            &receiver_entry_id,
-                            receive_attempt_id.as_deref(),
-                            PartialReceiveTerminal::Failed,
-                            &result.receive_artifacts,
-                            result.has_receive_artifacts,
-                        )
-                        .await?;
-                        self.emit_host_event(HostEvent::Transfer(
-                            TransferHostEvent::StatusChanged {
-                                transfer_id: receiver_entry_id.as_ref().to_string(),
-                                entry_id: Some(receiver_entry_id.as_ref().to_string()),
-                                attempt_id: receive_attempt_id.clone(),
-                                status: "failed".to_string(),
-                                reason: Some(err.to_string()),
-                            },
-                        ));
-                        return Err(ApplyInboundError::Internal(
-                            SourceError::from(err).context("verify received file set identity"),
-                        ));
+                            self.settle_receive_without_entry(
+                                &receiver_entry_id,
+                                receive_attempt_id.as_deref(),
+                                PartialReceiveTerminal::Failed,
+                                &result.receive_artifacts,
+                                result.has_receive_artifacts,
+                            )
+                            .await?;
+                            self.emit_host_event(HostEvent::Transfer(
+                                TransferHostEvent::StatusChanged {
+                                    transfer_id: receiver_entry_id.as_ref().to_string(),
+                                    entry_id: Some(receiver_entry_id.as_ref().to_string()),
+                                    attempt_id: receive_attempt_id.clone(),
+                                    status: "failed".to_string(),
+                                    reason: Some(err.to_string()),
+                                },
+                            ));
+                            return Err(ApplyInboundError::Internal(
+                                SourceError::from(err).context("verify received file set identity"),
+                            ));
+                        }
                     }
+                    info!(
+                        blob_ref_count = count,
+                        rep_count = result.snapshot.representations.len(),
+                        rep_formats = %format_rep_summary(&result.snapshot),
+                        missing_count = result.missing.len(),
+                        partial,
+                        "inbound: blob refs materialized into local cache"
+                    );
+                    let receive_artifacts = result.take_receive_artifacts();
+                    (
+                        result.snapshot,
+                        outcome,
+                        has_receive_artifacts,
+                        receive_artifacts,
+                    )
                 }
-                info!(
-                    blob_ref_count = count,
-                    rep_count = result.snapshot.representations.len(),
-                    rep_formats = %format_rep_summary(&result.snapshot),
-                    missing_count = result.missing.len(),
-                    partial,
-                    "inbound: blob refs materialized into local cache"
-                );
-                let receive_artifacts = result.take_receive_artifacts();
-                (
-                    result.snapshot,
-                    outcome,
-                    has_receive_artifacts,
-                    receive_artifacts,
-                )
-            }
-            (true, None) => {
-                let reason =
-                    "payload contains blob refs but no blob materializer is wired".to_string();
-                warn!(reason, "inbound dropped: blob materializer missing");
-                self.emit_host_event(HostEvent::Transfer(TransferHostEvent::StatusChanged {
-                    transfer_id: receiver_entry_id.as_ref().to_string(),
-                    entry_id: Some(receiver_entry_id.as_ref().to_string()),
-                    attempt_id: receive_attempt_id.clone(),
-                    status: "failed".to_string(),
-                    reason: Some(reason.clone()),
-                }));
-                self.begin_receive_failure(&receiver_entry_id, receive_attempt_id.as_deref())
+                (true, None) => {
+                    let reason =
+                        "payload contains blob refs but no blob materializer is wired".to_string();
+                    warn!(reason, "inbound dropped: blob materializer missing");
+                    self.emit_host_event(HostEvent::Transfer(TransferHostEvent::StatusChanged {
+                        transfer_id: receiver_entry_id.as_ref().to_string(),
+                        entry_id: Some(receiver_entry_id.as_ref().to_string()),
+                        attempt_id: receive_attempt_id.clone(),
+                        status: "failed".to_string(),
+                        reason: Some(reason.clone()),
+                    }));
+                    self.begin_receive_failure(&receiver_entry_id, receive_attempt_id.as_deref())
+                        .await?;
+                    self.settle_receive_without_entry(
+                        &receiver_entry_id,
+                        receive_attempt_id.as_deref(),
+                        PartialReceiveTerminal::Failed,
+                        &[],
+                        false,
+                    )
                     .await?;
-                self.settle_receive_without_entry(
-                    &receiver_entry_id,
-                    receive_attempt_id.as_deref(),
-                    PartialReceiveTerminal::Failed,
-                    &[],
-                    false,
-                )
-                .await?;
-                return Ok(ApplyOutcome::DecodeFailed { reason });
-            }
-        };
+                    return Ok(ApplyOutcome::DecodeFailed { reason });
+                }
+            };
         let is_partial = materialize_outcome != MaterializeOutcome::Complete;
 
         // 6. Rapid in-memory dedup of a recently-completed re-push. Only
@@ -1601,7 +1613,7 @@ impl ApplyInboundClipboardUseCase {
                             error!(
                                 event = "inbound_os_write_failed",
                                 error_kind = "inbound_os_write_failed",
-                                error = %e,
+                                io_error_kind = io_error_kind(e.as_ref()),
                                 entry_id = %entry_id_for_write,
                                 snapshot_hash = %snapshot_hash_for_write,
                                 origin_guard_key = %origin_guard_key_for_write,

@@ -37,6 +37,7 @@ use uc_core::ports::{
     ClockPort, DeviceIdentityPort, PeerAddressRepositoryPort, PeerReachabilityPort, SettingsPort,
 };
 use uc_core::{blob::ports::BlobReaderPort, MemberRepositoryPort};
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::deps::CurrentSpaceMemberScopePort;
 
@@ -353,7 +354,11 @@ async fn resurface_entry(
             debug!("touch_entry found no row (entry deleted?)");
         }
         Err(err) => {
-            warn!(error = %err, "touch_entry failed (best-effort, ignored)");
+            warn!(
+                error_kind = "entry_touch",
+                io_error_kind = io_error_kind(&err),
+                "touch_entry failed (best-effort, ignored)"
+            );
         }
     }
 }

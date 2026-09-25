@@ -37,6 +37,15 @@ const ERROR_SOURCE_RULES = [
     raw: new RegExp(String.raw`::\s*[A-Z]\w*\s*\(\s*format!\s*\(\s*(?:${INTERPOLATED_ERROR}|${POSITIONAL_ERROR})`),
     message: '错误变体不得只保存下层错误文本；改为 #[source] 携带具体错误',
   },
+  {
+    kind: 'L1',
+    code: new RegExp(
+      String.raw`\b(?:error|err|cause|source)\s*=\s*[%?]\s*&?${ERROR_VARIABLE}\b` +
+        String.raw`|[(,]\s*[%?]\s*${ERROR_VARIABLE}\s*[,)]`
+    ),
+    raw: new RegExp(String.raw`\b(?:error|warn|info|debug|trace)!\s*\([^;]*${INTERPOLATED_ERROR}`),
+    message: '日志不得输出错误正文；写固定 error_kind，并用 io_error_kind(..) 从来源链提取分类',
+  },
 ]
 const DISCARDED_SOURCE = /\bmap_err\s*\(\s*(?:move\s*)?\|\s*_\w*\s*(?::[^|]*)?\|/
 const CHINESE_COMMENT = /\/\/.*[\u4e00-\u9fff]/

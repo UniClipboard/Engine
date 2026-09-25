@@ -11,6 +11,7 @@ use uc_core::ports::clipboard::{
 use uc_core::ports::search::SearchPipelinePort;
 use uc_core::ports::{SearchIndexPort, SearchKeyDerivationPort, SelectRepresentationPolicyPort};
 use uc_core::SystemClipboardSnapshot;
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::clipboard::file_set_query::load_has_directory_structure;
 use crate::facade::SearchProjectionBuilder;
@@ -109,7 +110,8 @@ impl ClipboardLiveIndexPort for ClipboardLiveIndexer {
             Ok(device) => device.map(|d| d.to_string()),
             Err(err) => {
                 debug!(
-                    error = %err,
+                    error_kind = "source_device_lookup",
+                    io_error_kind = io_error_kind(err.as_ref()),
                     entry_id = %entry_id,
                     "search: failed to resolve source device, indexing without it"
                 );
@@ -124,7 +126,8 @@ impl ClipboardLiveIndexPort for ClipboardLiveIndexer {
                 .await
                 .unwrap_or_else(|err| {
                     debug!(
-                        error = %err,
+                        error_kind = "file_set_load",
+                        io_error_kind = io_error_kind(&err),
                         entry_id = %entry_id,
                         "search: failed to load file set, indexing without directory tag"
                     );
@@ -150,7 +153,8 @@ impl ClipboardLiveIndexPort for ClipboardLiveIndexer {
             Ok(search_key) => search_key,
             Err(err) => {
                 debug!(
-                    error = %err,
+                    error_kind = "search_key_derive",
+                    io_error_kind = io_error_kind(&err),
                     entry_id = %entry_id,
                     "search: key derivation failed, skipping live index"
                 );

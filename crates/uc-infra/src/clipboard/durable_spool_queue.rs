@@ -34,6 +34,7 @@ use tokio::sync::mpsc;
 use tracing::warn;
 use uc_core::ids::RepresentationId;
 use uc_core::ports::clipboard::{SpoolQueuePort, SpoolRequest};
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::clipboard::SpoolManager;
 
@@ -71,7 +72,8 @@ impl SpoolQueuePort for DurableSpoolQueue {
         if let Err(err) = self.worker_tx.try_send(request.rep_id.clone()) {
             warn!(
                 representation_id = %request.rep_id,
-                error = %err,
+                error_kind = "worker_notify",
+                io_error_kind = io_error_kind(&err),
                 "Failed to notify worker after spool write; will be recovered on next startup"
             );
         }

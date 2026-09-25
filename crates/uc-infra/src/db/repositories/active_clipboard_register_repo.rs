@@ -21,6 +21,7 @@ use uc_core::ports::clipboard::{
 };
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::space::{DeriveSpaceSubkeyPort, SpaceAccessError};
+use uc_observability_contract::error_source::io_error_kind;
 
 mod storage;
 
@@ -260,7 +261,8 @@ impl<E: DbExecutor + 'static> LoadMobileConsumableClipboardPort
                 // so the warning does not repeat on every poll; the next
                 // consumable advance or unlock backfill rewrites the column.
                 warn!(
-                    error = %err,
+                    error_kind = "reference_ciphertext_unreadable",
+                    io_error_kind = io_error_kind(&err),
                     "mobile-consumable reference ciphertext is unreadable; discarding it"
                 );
                 // CAS on the exact unreadable bytes: a concurrent advance or
@@ -287,7 +289,8 @@ impl<E: DbExecutor + 'static> LoadMobileConsumableClipboardPort
                     .await
                 {
                     warn!(
-                        error = %clear_err,
+                        error_kind = "reference_ciphertext_discard",
+                        io_error_kind = io_error_kind(&clear_err),
                         "failed to discard unreadable mobile-consumable ciphertext"
                     );
                 }

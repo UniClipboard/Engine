@@ -30,6 +30,7 @@ use tracing::{debug, instrument, warn};
 use uc_core::ids::DeviceId;
 use uc_core::ports::clipboard::{ActiveClipboardPullClientError, ActiveClipboardPullClientPort};
 use uc_core::ports::PeerAddressRepositoryPort;
+use uc_observability_contract::error_source::io_error_kind;
 
 use super::super::connect::connect_with_staggered_retry;
 use super::super::peer_address_resolver::PeerAddressResolver;
@@ -125,7 +126,8 @@ impl IrohActiveClipboardPullClientAdapter {
             Ok(connection) => connection,
             Err(err) => {
                 debug!(
-                    error = %err,
+                    error_kind = "dial_failed",
+                    io_error_kind = io_error_kind(&err),
                     "active-clipboard pull: dial failed, treating as Unreachable"
                 );
                 return Err(ActiveClipboardPullClientError::Unreachable);

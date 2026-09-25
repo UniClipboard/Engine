@@ -31,6 +31,7 @@ use uc_observability_contract::analytics::{
     AnalyticsPort, Direction, Event, PayloadSizeBucket, PayloadType, SyncDeferReason,
     SyncDeferredProps, SyncEventProps, TransportType,
 };
+use uc_observability_contract::error_source::io_error_kind;
 
 use super::{
     dispatch_failure_stage, map_dispatch_error_to_failure_reason, transport_type_from_channel,
@@ -85,7 +86,8 @@ impl PerPeerDispatcher {
             }),
             Ok(false) => {}
             Err(err) => warn!(
-                error = %err,
+                error_kind = "first_sync_state",
+                io_error_kind = io_error_kind(&err),
                 "first_sync_state.mark_first_sync_attempted failed; skipping fire",
             ),
         }
@@ -172,7 +174,8 @@ impl PerPeerDispatcher {
                 }),
                 Ok(false) => {}
                 Err(err) => warn!(
-                    error = %err,
+                    error_kind = "first_sync_state",
+                    io_error_kind = io_error_kind(&err),
                     "first_sync_state.mark_first_sync_succeeded failed; skipping fire",
                 ),
             }
@@ -185,7 +188,8 @@ impl PerPeerDispatcher {
                     }),
                     Ok(false) => {}
                     Err(err) => warn!(
-                        error = %err,
+                        error_kind = "first_sync_state",
+                        io_error_kind = io_error_kind(&err),
                         "first_sync_state.mark_first_file_sync_succeeded failed; skipping fire",
                     ),
                 }

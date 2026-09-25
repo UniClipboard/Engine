@@ -31,6 +31,8 @@ use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
+use crate::error_source::io_error_kind;
+
 use super::events::Event;
 use super::identity::{hash_space_id_for_telemetry, AnalyticsIdentityError, AnalyticsIdentityPort};
 use super::port::{AnalyticsPort, GroupIdentifyPayload, IdentifyPayload};
@@ -178,7 +180,8 @@ impl AnalyticsFacade for DefaultAnalyticsFacade {
             }
             Err(err) => {
                 tracing::warn!(
-                    error = %err,
+                    error_kind = "identity_release",
+                    io_error_kind = io_error_kind(&err),
                     "release_to_solo: identity release failed; identity left in old state"
                 );
             }
@@ -205,7 +208,8 @@ impl AnalyticsFacade for DefaultAnalyticsFacade {
 fn warn_adopt(scope: &str, err: &AnalyticsIdentityError) {
     tracing::warn!(
         scope,
-        error = %err,
+        error_kind = "identity_adopt",
+        io_error_kind = io_error_kind(err),
         "analytics identity adopt failed; person aggregation deferred"
     );
 }

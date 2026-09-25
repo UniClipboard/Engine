@@ -50,6 +50,7 @@ use uc_core::ports::clipboard::{ActiveClipboardDispatchPort, LoadActiveClipboard
 use uc_core::ports::peer_reachability::{PeerReachabilityChanged, ReachabilityState};
 use uc_core::ports::PeerReachabilityPort;
 use uc_core::MemberRepositoryPort;
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::deps::CurrentSpaceMemberScopePort;
 
@@ -189,7 +190,11 @@ impl PeerOnlineResyncWorker {
                 return;
             }
             Err(err) => {
-                warn!(error = %err, "peer-online resync skipped: register load failed");
+                warn!(
+                    error_kind = "register_load",
+                    io_error_kind = io_error_kind(&err),
+                    "peer-online resync skipped: register load failed"
+                );
                 return;
             }
         };
@@ -202,7 +207,8 @@ impl PeerOnlineResyncWorker {
             Ok(snapshot) => ClipboardContentCategorySet::from_snapshot(&snapshot),
             Err(err) => {
                 warn!(
-                    error = %err,
+                    error_kind = "snapshot_reconstruct",
+                    io_error_kind = io_error_kind(&err),
                     entry_id = %state.entry_id,
                     "peer-online resync skipped: snapshot reconstruct failed"
                 );

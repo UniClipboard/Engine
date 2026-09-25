@@ -27,6 +27,7 @@ use tracing::{debug, info, warn};
 use uc_observability_contract::analytics::{
     AnalyticsPort, CaptureOrigin, Event, PayloadSizeBucket, PayloadType,
 };
+use uc_observability_contract::error_source::io_error_kind;
 use unicode_normalization::UnicodeNormalization;
 
 use uc_core::blob::ports::BlobContentIngestPort;
@@ -388,7 +389,7 @@ impl CaptureClipboardUseCase {
                         max_member_count: s.file_sync.max_file_set_member_count,
                     },
                     Err(err) => {
-                        warn!(error = %err, "capture: settings load failed; using fallback file-set caps for this capture");
+                        warn!(error_kind = "settings_load", io_error_kind = io_error_kind(err.as_ref()), "capture: settings load failed; using fallback file-set caps for this capture");
                         FileSetCaps::fallback()
                     }
                 };
@@ -764,7 +765,8 @@ impl CaptureClipboardUseCase {
                     if let Err(err) = self.entry_file_set_repo.save(&entry_id, file_set).await {
                         warn!(
                             entry_id = %entry_id,
-                            error = %err,
+                            error_kind = "file_set_manifest_save",
+                            io_error_kind = io_error_kind(&err),
                             "capture: failed to persist entry file-set manifest"
                         );
                     }
@@ -875,7 +877,11 @@ async fn resurface_existing_entry(
         Ok(Some(existing)) => existing,
         Ok(None) => return None,
         Err(e) => {
-            warn!(error = %e, "Local-capture dedup lookup failed; proceeding to create entry");
+            warn!(
+                error_kind = "dedup_lookup",
+                io_error_kind = io_error_kind(&e),
+                "Local-capture dedup lookup failed; proceeding to create entry"
+            );
             return None;
         }
     };
@@ -892,7 +898,8 @@ async fn resurface_existing_entry(
         Err(e) => {
             warn!(
                 entry_id = %existing,
-                error = %e,
+                error_kind = "entry_resurface",
+                io_error_kind = io_error_kind(&e),
                 "Failed to resurface existing entry; creating new entry"
             );
             None
@@ -1477,7 +1484,11 @@ async fn classify_file_path(
         },
         Err(err) => {
             // No path in the field: a clipboard file path is user content.
-            warn!(error = %err, "capture: could not derive file-set line content hash");
+            warn!(
+                error_kind = "file_content_hash",
+                io_error_kind = io_error_kind(err.as_ref()),
+                "capture: could not derive file-set line content hash"
+            );
             EntryFileSetLineKind::Excluded {
                 reason: EntryFileSetExcludeReason::IngestFailed,
             }

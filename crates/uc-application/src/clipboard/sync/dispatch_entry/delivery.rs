@@ -18,6 +18,7 @@ use uc_core::clipboard::{DeliveryFailureReason, EntryDeliveryRecord, EntryDelive
 use uc_core::ids::{DeviceId, EntryId};
 use uc_core::ports::{ClipboardDispatchError, ClockPort, DispatchAck, EntryDeliveryRepositoryPort};
 use uc_observability_contract::diagnostics::{DiagnosticTaskKind, ObservationContext};
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::facade::blob_transfer::SharedHostEventEmitter;
 use crate::facade::host_event::{DeliveryHostEvent, HostEvent};
@@ -120,7 +121,11 @@ pub(crate) fn classify_dispatch_result(
             }
         }
         Ok((device_id, Err(err))) => {
-            warn!(error = %err, "dispatch failed");
+            warn!(
+                error_kind = "dispatch_failed",
+                io_error_kind = io_error_kind(&err),
+                "dispatch failed"
+            );
             let (failure_reason, reason_detail) = match &err {
                 // Offline is handled in the previous arm (Unreachable); this
                 // arm only fires for the non-Offline error variants.
@@ -163,7 +168,11 @@ pub(crate) fn classify_dispatch_result(
             }
         }
         Err(err) => {
-            warn!(error = %err, "dispatch task panicked or cancelled");
+            warn!(
+                error_kind = "dispatch_task_join",
+                io_error_kind = io_error_kind(&err),
+                "dispatch task panicked or cancelled"
+            );
             ProcessedDispatchResult {
                 per_target: None,
                 delivery_record: None,
@@ -241,7 +250,8 @@ impl DeliveryRecorder {
         for record in records {
             if let Err(err) = self.entry_delivery_repo.record_attempt(record).await {
                 warn!(
-                    error = %err,
+                    error_kind = "delivery_record",
+                    io_error_kind = io_error_kind(&err),
                     entry_id = %record.entry_id,
                     "failed to record entry delivery"
                 );

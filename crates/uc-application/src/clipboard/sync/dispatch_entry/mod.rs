@@ -103,6 +103,7 @@ use uc_core::MemberRepositoryPort;
 use uc_observability_contract::analytics::{
     AnalyticsPort, FailureReason, PayloadSizeBucket, PayloadType, SyncFailureStage, TransportType,
 };
+use uc_observability_contract::error_source::io_error_kind;
 
 /// One fanned-out peer's settled result: the device plus the wire outcome.
 pub(crate) type PeerDispatchResult = (DeviceId, Result<DispatchAck, ClipboardDispatchError>);
@@ -513,7 +514,8 @@ impl DispatchClipboardEntryUseCase {
                     .await
                 {
                     warn!(
-                        error = %error,
+                        error_kind = "delivery_intent_record",
+                        io_error_kind = io_error_kind(&error),
                         "dispatch: delivery intent persistence failed"
                     );
                     intent_failures.push(*device_id);

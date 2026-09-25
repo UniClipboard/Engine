@@ -39,6 +39,7 @@ use uc_core::membership::{MemberRepositoryPort, PeerAdmissionPort};
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::{ActiveClipboardReceiverPort, InboundActiveClipboardState};
 use uc_observability_contract::diagnostics::connectivity::InboundPeerProtocol;
+use uc_observability_contract::error_source::io_error_kind;
 
 use super::super::inbound_peer::InboundPeerGate;
 use super::wire;
@@ -145,7 +146,8 @@ impl ProtocolHandler for IrohActiveClipboardReceiverHandler {
             Ok(pair) => pair,
             Err(err) => {
                 warn!(
-                    error = %err,
+                    error_kind = "accept_bi",
+                    io_error_kind = io_error_kind(&err),
                     peer = %peer_device_id.as_str(),
                     "active-clipboard receiver: accept_bi failed; dropping connection"
                 );
@@ -159,7 +161,8 @@ impl ProtocolHandler for IrohActiveClipboardReceiverHandler {
             Ok(m) => m,
             Err(err) => {
                 warn!(
-                    error = %err,
+                    error_kind = "frame_decode",
+                    io_error_kind = io_error_kind(&err),
                     peer = %peer_device_id.as_str(),
                     "active-clipboard receiver: frame decode failed; dropping connection"
                 );

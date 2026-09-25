@@ -27,6 +27,7 @@ use uc_core::clipboard::SystemClipboardSnapshot;
 use uc_core::ports::clipboard::{
     SelfWriteAttribution, SelfWriteLedgerPort, SelfWriteMatch, SystemClipboardPort,
 };
+use uc_observability_contract::error_source::io_error_kind;
 
 use super::timing::{LOCAL_ECHO_RTT_MAX, REMOTE_ECHO_RTT_MAX};
 
@@ -339,7 +340,7 @@ impl ClipboardWriteCoordinator {
                 error!(
                     event = "os_write_failed",
                     error_kind = "os_write_failed",
-                    error = %err,
+                    io_error_kind = io_error_kind(err.as_ref()),
                     intent = ?intent,
                     origin_guard_key = %origin_guard_key,
                     consecutive_failures,

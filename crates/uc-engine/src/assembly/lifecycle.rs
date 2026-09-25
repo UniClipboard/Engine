@@ -15,6 +15,7 @@ use crate::subsystems::reconcile::{reconcile_peer_addresses, reconcile_trusted_p
 use uc_application::facade::ApplicationAssembly;
 use uc_infra::network::iroh::{IrohIdentityStore, IrohNode, IrohNodeBuilder, IrohSessionBuilder};
 use uc_infra::security::Sha256IdentityFingerprintFactory;
+use uc_observability_contract::error_source::io_error_kind;
 
 /// 建立一次 Engine 活跃期内唯一的长期网络节点。
 pub async fn build_network_runtime(
@@ -97,7 +98,8 @@ pub async fn prepare_daemon_session(
     .await
     {
         tracing::warn!(
-            error = %err,
+            error_kind = "peer_addr_reconcile",
+            io_error_kind = io_error_kind(err.as_ref()),
             "peer_addr reconcile failed at boot; daemon continues with whatever orphans remain"
         );
     }
@@ -108,7 +110,8 @@ pub async fn prepare_daemon_session(
     .await
     {
         tracing::warn!(
-            error = %err,
+            error_kind = "trusted_peer_reconcile",
+            io_error_kind = io_error_kind(err.as_ref()),
             "trusted_peer reconcile failed at boot; daemon continues with whatever orphans remain"
         );
     }

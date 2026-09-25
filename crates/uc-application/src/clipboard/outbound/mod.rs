@@ -26,6 +26,7 @@ use uc_core::{ClipboardChangeOrigin, SystemClipboardSnapshot};
 use uc_observability_contract::diagnostics::connectivity::{
     LocalWorkObservation, LocalWorkOutcome, LocalWorkStep,
 };
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::clipboard::sync::apply_inbound::{
     compute_file_set_component, InboundFileSetManifest, InboundFileSetMember,
@@ -304,7 +305,8 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
                     // Same all-or-nothing rule as above: never sync a subset of
                     // a set whose identity covers all members.
                     warn!(
-                        error = %err,
+                        error_kind = "file_set_member_unreadable",
+                        io_error_kind = io_error_kind(&err),
                         entry_id = %entry_id_str,
                         "outbound: file-set member unreadable at dispatch; skipping dispatch (all-or-nothing)"
                     );
@@ -316,7 +318,8 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
                     });
                 }
                 Err(err) => warn!(
-                    error = %err,
+                    error_kind = "file_metadata_unreadable",
+                    io_error_kind = io_error_kind(&err),
                     "排除无法读取元数据的剪贴板文件"
                 ),
             }
@@ -707,7 +710,8 @@ pub(crate) async fn resolve_outbound_file_set(
         Err(err) => {
             warn!(
                 entry_id = %entry_id.as_str(),
-                error = %err,
+                error_kind = "file_set_manifest_load",
+                io_error_kind = io_error_kind(&err),
                 "outbound: file-set manifest load failed; falling back to rep parsing"
             );
             return OutboundFileSetResolution::Fallback {

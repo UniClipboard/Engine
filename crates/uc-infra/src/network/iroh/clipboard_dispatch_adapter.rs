@@ -46,6 +46,7 @@ use uc_observability_contract::diagnostics::{
     complete_operation, operation_span, DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation,
     DiagnosticRole, DiagnosticSpanKind, OperationCompletion, OperationContext,
 };
+use uc_observability_contract::error_source::io_error_kind;
 
 use super::clipboard_wire::{self, AckCode, WireEncodeError};
 use super::conn_path::{path_for, OnMissing};
@@ -171,7 +172,8 @@ impl IrohClipboardDispatchAdapter {
                 // failure return.
                 if let Err(ref err) = result {
                     debug!(
-                        error = %err,
+                        error_kind = "dial_failed",
+                        io_error_kind = io_error_kind(err),
                         "clipboard dispatch: single-flight dial failed; marking offline"
                     );
                     self.peer_reachability
@@ -343,7 +345,8 @@ impl ClipboardDispatchPort for IrohClipboardDispatchAdapter {
             Ok(connection) => connection,
             Err(err) => {
                 debug!(
-                    error = %err,
+                    error_kind = "dial_failed",
+                    io_error_kind = io_error_kind(&err),
                     "clipboard dispatch: dial failed (single-flight), treating as Offline"
                 );
                 return DispatchReport {

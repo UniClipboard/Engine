@@ -9,6 +9,7 @@ use uc_core::ports::clipboard::{
     ListRepresentationsForEventPort,
 };
 use uc_core::ports::{ClipboardEventWriterPort, ClipboardSelectionRepositoryPort, SearchIndexPort};
+use uc_observability_contract::error_source::io_error_kind;
 
 /// Use case for deleting clipboard entries with all associated data.
 pub(crate) struct DeleteClipboardEntryUseCase {
@@ -138,7 +139,8 @@ impl DeleteClipboardEntryUseCase {
                 {
                     warn!(
                         entry_id = %entry_id,
-                        error = %e,
+                        error_kind = "blob_untag",
+                        io_error_kind = io_error_kind(&e),
                         "blob untag failed during entry delete; iroh-blobs GC will reclaim metadata on its next sweep"
                     );
                 }
@@ -183,7 +185,8 @@ impl DeleteClipboardEntryUseCase {
 
                             if let Err(e) = tokio::fs::remove_file(&path).await {
                                 warn!(
-                                    error = %e,
+                                    error_kind = "cache_file_remove",
+                                    io_error_kind = io_error_kind(&e),
                                     "Failed to delete cache file during entry cleanup"
                                 );
                             } else {
@@ -207,7 +210,8 @@ impl DeleteClipboardEntryUseCase {
             async {
                 if let Err(e) = search_index.remove_entry(entry_id).await {
                     warn!(
-                        error = %e,
+                        error_kind = "search_index_remove",
+                        io_error_kind = io_error_kind(&e),
                         entry_id = %entry_id,
                         "search index cleanup failed, continuing delete"
                     );

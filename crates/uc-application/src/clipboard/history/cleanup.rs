@@ -51,6 +51,7 @@ use uc_core::ports::search::search_index::SearchIndexPort;
 use uc_core::ports::{
     CacheFsPort, ClipboardEventWriterPort, ClipboardSelectionRepositoryPort, SettingsPort,
 };
+use uc_observability_contract::error_source::io_error_kind;
 
 use super::delete_entry::DeleteClipboardEntryUseCase;
 
@@ -174,7 +175,11 @@ impl CleanupExpiredFilesUseCase {
             .run_file_cache_ttl(retention_hours, &delete_uc, &mut result)
             .await
         {
-            warn!(error = %e, "File-cache TTL sweep failed; continuing to quota pass");
+            warn!(
+                error_kind = "file_cache_ttl_sweep",
+                io_error_kind = io_error_kind(e.as_ref()),
+                "File-cache TTL sweep failed; continuing to quota pass"
+            );
             result.errors += 1;
         }
 
@@ -266,7 +271,8 @@ impl CleanupExpiredFilesUseCase {
                         Err(e) => {
                             warn!(
                                 entry_id = %entry_id,
-                                error = %e,
+                                error_kind = "entry_delete",
+                                io_error_kind = io_error_kind(e.as_ref()),
                                 "delete_entry failed for expired cache file"
                             );
                             result.errors += 1;
@@ -291,7 +297,8 @@ impl CleanupExpiredFilesUseCase {
                             }
                             Err(e) => {
                                 warn!(
-                                    error = %e,
+                                    error_kind = "orphan_cache_file_remove",
+                                    io_error_kind = io_error_kind(e.as_ref()),
                                     "Failed to remove orphan cache file"
                                 );
                                 result.errors += 1;
@@ -352,7 +359,6 @@ impl CleanupExpiredFilesUseCase {
 
         let Some(baseline_path) = self.quota_baseline_path() else {
             warn!(
-                file_cache_dir = %self.file_cache_dir.display(),
                 "Cannot locate app-data root for the quota baseline; skipping quota enforcement (fail-safe)"
             );
             return;
@@ -371,7 +377,8 @@ impl CleanupExpiredFilesUseCase {
                         "Established cache-quota baseline; existing payloads grandfathered (exempt from quota)"
                     ),
                     Err(e) => warn!(
-                        error = %e,
+                        error_kind = "quota_baseline_save",
+                        io_error_kind = io_error_kind(e.as_ref()),
                         "Failed to persist cache-quota baseline; skipping quota enforcement (fail-safe)"
                     ),
                 }
@@ -379,7 +386,8 @@ impl CleanupExpiredFilesUseCase {
             }
             Err(e) => {
                 warn!(
-                    error = %e,
+                    error_kind = "quota_baseline_load",
+                    io_error_kind = io_error_kind(e.as_ref()),
                     "Cache-quota baseline unreadable; skipping quota enforcement (fail-safe, baseline left intact)"
                 );
                 return;
@@ -389,7 +397,11 @@ impl CleanupExpiredFilesUseCase {
         let entries = match self.collect_disk_backed_entries().await {
             Ok(e) => e,
             Err(e) => {
-                warn!(error = %e, "Failed to enumerate disk-backed entries for quota; skipping");
+                warn!(
+                    error_kind = "disk_backed_entry_list",
+                    io_error_kind = io_error_kind(e.as_ref()),
+                    "Failed to enumerate disk-backed entries for quota; skipping"
+                );
                 return;
             }
         };
@@ -430,7 +442,8 @@ impl CleanupExpiredFilesUseCase {
                 Err(e) => {
                     warn!(
                         entry_id = %entry_id,
-                        error = %e,
+                        error_kind = "entry_delete",
+                        io_error_kind = io_error_kind(e.as_ref()),
                         "Quota delete failed for disk-backed entry"
                     );
                     result.errors += 1;
@@ -491,7 +504,8 @@ impl CleanupExpiredFilesUseCase {
                     Err(e) => {
                         warn!(
                             event_id = %entry.event_id,
-                            error = %e,
+                            error_kind = "representation_load",
+                            io_error_kind = io_error_kind(&e),
                             "Failed to load representations for quota — skipping entry"
                         );
                         continue;
@@ -565,7 +579,8 @@ impl CleanupExpiredFilesUseCase {
                     Err(e) => {
                         warn!(
                             event_id = %entry.event_id,
-                            error = %e,
+                            error_kind = "representation_load",
+                            io_error_kind = io_error_kind(&e),
                             "Failed to load representations while building reverse index — skipping entry"
                         );
                         continue;
@@ -723,7 +738,8 @@ async fn collect_expired_recursive(
         Ok(entries) => entries,
         Err(e) => {
             warn!(
-                error = %e,
+                error_kind = "cache_dir_read",
+                io_error_kind = io_error_kind(e.as_ref()),
                 "Failed to read cache directory"
             );
             return Ok(());
@@ -752,7 +768,8 @@ async fn collect_expired_recursive(
             Ok(None) => continue,
             Err(e) => {
                 warn!(
-                    error = %e,
+                    error_kind = "cache_file_metadata",
+                    io_error_kind = io_error_kind(e.as_ref()),
                     "Failed to read file metadata"
                 );
                 continue;
@@ -787,7 +804,8 @@ async fn cleanup_empty_dirs(cache_fs: &dyn CacheFsPort, cache_dir: &Path) {
             Ok(contents) if contents.is_empty() => {
                 if let Err(e) = cache_fs.remove_dir(&entry.path).await {
                     warn!(
-                        error = %e,
+                        error_kind = "cache_dir_remove",
+                        io_error_kind = io_error_kind(e.as_ref()),
                         "Failed to remove empty cache directory"
                     );
                 }

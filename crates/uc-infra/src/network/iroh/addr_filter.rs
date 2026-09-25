@@ -15,6 +15,7 @@
 
 use std::borrow::Cow;
 use std::net::{IpAddr, Ipv4Addr};
+use uc_observability_contract::error_source::io_error_kind;
 
 use iroh::{EndpointAddr, TransportAddr};
 use tracing::{debug, info, warn};
@@ -133,7 +134,8 @@ pub(crate) fn enumerate_local_lan_v4() -> Vec<LocalLanV4> {
         Err(e) => {
             warn!(
                 target: "iroh.addr_filter",
-                error = %e,
+                error_kind = "interface_list",
+                io_error_kind = io_error_kind(&e),
                 "if_addrs::get_if_addrs failed; hairpin filter degrades to off"
             );
             return Vec::new();

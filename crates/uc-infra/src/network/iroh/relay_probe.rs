@@ -286,7 +286,10 @@ fn map_connect_error(err: ConnectError) -> RelayProbeError {
         // 兜底分支:把陌生 ConnectError 变体压成 Other,同时 warn 保留源头便
         // 于排查(iroh-relay 升级新增变体时是这里第一时间发现)。
         other => {
-            warn!(error = ?other, "relay probe: unmapped ConnectError variant");
+            warn!(
+                error_kind = "unmapped_connect_error",
+                "relay probe: unmapped ConnectError variant"
+            );
             RelayProbeError::Other(RelayProbeDetail::source(other))
         }
     }
@@ -323,7 +326,10 @@ fn map_dial_error(err: DialError) -> RelayProbeError {
         // 与 map_connect_error 同理:陌生 DialError 变体走 Other,源信息进
         // tracing 便于跨版本对账。
         other => {
-            warn!(error = ?other, "relay probe: unmapped DialError variant");
+            warn!(
+                error_kind = "unmapped_dial_error",
+                "relay probe: unmapped DialError variant"
+            );
             RelayProbeError::Other(RelayProbeDetail::source(other))
         }
     }

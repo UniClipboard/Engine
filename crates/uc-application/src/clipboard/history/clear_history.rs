@@ -8,6 +8,7 @@ use uc_core::ports::clipboard::{
     ListRepresentationsForEventPort,
 };
 use uc_core::ports::{ClipboardEventWriterPort, ClipboardSelectionRepositoryPort, SearchIndexPort};
+use uc_observability_contract::error_source::io_error_kind;
 
 use super::delete_entry::DeleteClipboardEntryUseCase;
 
@@ -114,7 +115,8 @@ impl ClearClipboardHistoryUseCase {
                 Err(e) => {
                     warn!(
                         entry_id = %entry.entry_id,
-                        error = %e,
+                        error_kind = "entry_delete",
+                        io_error_kind = io_error_kind(e.as_ref()),
                         "Failed to delete entry during bulk clear"
                     );
                     failed_entries.push((entry_id_str, e.to_string()));

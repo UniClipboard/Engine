@@ -16,6 +16,7 @@ use uc_core::ports::clipboard::{
     ProcessingUpdateOutcome, ThumbnailGeneratorPort, ThumbnailRepositoryPort,
 };
 use uc_core::ports::{ClipboardRepresentationStore, ClockPort, ContentHashPort};
+use uc_observability_contract::error_source::io_error_kind;
 
 use super::background_activity::BackgroundActivity;
 use crate::blob::BlobWriterPort;
@@ -164,7 +165,11 @@ impl BackgroundBlobWorker {
             // cache hit because removal only happens after the loop exits.
             self.cache.remove(&rep_id).await;
             if let Err(err) = result {
-                error!(error = %err, "Failed to process representation");
+                error!(
+                    error_kind = "representation_process",
+                    io_error_kind = io_error_kind(err.as_ref()),
+                    "Failed to process representation"
+                );
             }
         }
     }
@@ -185,7 +190,8 @@ impl BackgroundBlobWorker {
                     warn!(
                         attempt,
                         max_attempts = self.retry_max_attempts,
-                        error = %err,
+                        error_kind = "representation_process_retry",
+                        io_error_kind = io_error_kind(err.as_ref()),
                         "Processing failed; retrying"
                     );
                     let backoff = self.retry_backoff.mul_f32(attempt as f32);
@@ -269,7 +275,8 @@ impl BackgroundBlobWorker {
                         Err(err) => {
                             warn!(
                                 representation_id = %rep_id,
-                                error = %err,
+                                error_kind = "representation_revert",
+                                io_error_kind = io_error_kind(err.as_ref()),
                                 "Failed to revert representation to Staged after cache/spool miss"
                             );
                         }
@@ -309,7 +316,8 @@ impl BackgroundBlobWorker {
                     warn!(
                         representation_id = %rep_id,
                         original_mime = %original_mime,
-                        error = %err,
+                        error_kind = "image_png_convert",
+                        io_error_kind = io_error_kind(err.as_ref()),
                         "Failed to convert image to PNG; storing original bytes"
                     );
                     (raw_bytes, false)
@@ -340,7 +348,8 @@ impl BackgroundBlobWorker {
             {
                 warn!(
                     representation_id = %rep_id,
-                    error = %err,
+                    error_kind = "mime_update",
+                    io_error_kind = io_error_kind(err.as_ref()),
                     "Failed to update MIME type to image/png after conversion"
                 );
             }
@@ -362,7 +371,8 @@ impl BackgroundBlobWorker {
                 if let Err(err) = self.spool.delete(rep_id).await {
                     warn!(
                         representation_id = %rep_id,
-                        error = %err,
+                        error_kind = "spool_entry_delete",
+                        io_error_kind = io_error_kind(err.as_ref()),
                         "Failed to delete spool entry after blob materialization"
                     );
                 }
@@ -381,14 +391,7 @@ impl BackgroundBlobWorker {
                 debug!(representation_id = %rep_id, "Representation missing");
                 Ok(ProcessResult::Completed)
             }
-            Err(err) => {
-                warn!(
-                    representation_id = %rep_id,
-                    error = %err,
-                    "Failed to update representation state after blob write"
-                );
-                Err(err)
-            }
+            Err(err) => Err(err),
         }
     }
 
@@ -419,7 +422,8 @@ impl BackgroundBlobWorker {
             Err(err) => {
                 error!(
                     representation_id = %rep_id,
-                    error = %err,
+                    error_kind = "representation_mark_failed",
+                    io_error_kind = io_error_kind(err.as_ref()),
                     "Failed to mark representation as Failed"
                 );
             }
@@ -439,7 +443,8 @@ impl BackgroundBlobWorker {
         {
             error!(
                 representation_id = %rep_id,
-                error = %err,
+                error_kind = "thumbnail_generate",
+                io_error_kind = io_error_kind(err.as_ref()),
                 "Failed to generate thumbnail"
             );
         }

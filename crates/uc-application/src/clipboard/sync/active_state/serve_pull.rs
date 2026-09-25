@@ -36,7 +36,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info, instrument};
 
 use uc_core::ids::EntryId;
 use uc_core::ports::clipboard::{
@@ -45,6 +45,7 @@ use uc_core::ports::clipboard::{
 };
 use uc_core::ports::security::{TransferCipherError, TransferCipherPort};
 use uc_core::ports::SettingsPort;
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::clipboard::outbound::{
     assemble_outbound_payload, OutboundBlobPublishGateway, OutboundPayload, OutboundPayloadError,
@@ -112,7 +113,6 @@ impl ActiveClipboardPullServeUseCase {
                 return Err(ActiveClipboardPullServeError::NotAvailable);
             }
             Err(err) => {
-                warn!(error = %err, "pull serve: entry lookup failed");
                 return Err(ActiveClipboardPullServeError::Internal(
                     anyhow::Error::from(err)
                         .context("look up entry by snapshot hash")
@@ -155,7 +155,6 @@ impl ActiveClipboardPullServeUseCase {
                 return Err(ActiveClipboardPullServeError::NotAvailable);
             }
             Err(OutboundPayloadError::Publish(err)) => {
-                warn!(error = %err, "pull serve: blob publish failed");
                 return Err(ActiveClipboardPullServeError::Internal(
                     anyhow::Error::from(err)
                         .context("publish pull blobs")
@@ -163,7 +162,6 @@ impl ActiveClipboardPullServeUseCase {
                 ));
             }
             Err(OutboundPayloadError::Internal(source)) => {
-                warn!(error = %source, "pull serve: payload assembly failed");
                 return Err(ActiveClipboardPullServeError::Internal(
                     source.context("assemble pull payload").into(),
                 ));
@@ -185,7 +183,6 @@ impl ActiveClipboardPullServeUseCase {
         let (plaintext, _snapshot_hash) = match encoded {
             Ok(encoded) => encoded,
             Err(err) => {
-                warn!(error = %err, "pull serve: V3 envelope encode failed");
                 return Err(ActiveClipboardPullServeError::Internal(
                     anyhow::Error::from(err)
                         .context("encode pull envelope")
@@ -209,14 +206,11 @@ impl ActiveClipboardPullServeUseCase {
                 debug!("pull serve: session locked; cannot encrypt");
                 Err(ActiveClipboardPullServeError::NotUnlocked)
             }
-            Err(err) => {
-                warn!(error = %err, "pull serve: transfer cipher failed");
-                Err(ActiveClipboardPullServeError::Internal(
-                    anyhow::Error::from(err)
-                        .context("encrypt pull envelope")
-                        .into(),
-                ))
-            }
+            Err(err) => Err(ActiveClipboardPullServeError::Internal(
+                anyhow::Error::from(err)
+                    .context("encrypt pull envelope")
+                    .into(),
+            )),
         }
     }
 }
@@ -236,14 +230,16 @@ fn map_reconstruct_error(
     entry_id: &EntryId,
 ) -> ActiveClipboardPullServeError {
     match err {
-        BuildSnapshotError::Repository(inner) => {
-            warn!(error = %inner, entry_id = %entry_id, "pull serve: snapshot reconstruct repository error");
-            ActiveClipboardPullServeError::Internal(
-                inner.context("reconstruct pull snapshot").into(),
-            )
-        }
+        BuildSnapshotError::Repository(inner) => ActiveClipboardPullServeError::Internal(
+            inner.context("reconstruct pull snapshot").into(),
+        ),
         other => {
-            debug!(error = %other, entry_id = %entry_id, "pull serve: content not materializable");
+            debug!(
+                error_kind = "content_not_materializable",
+                io_error_kind = io_error_kind(&other),
+                entry_id = %entry_id,
+                "pull serve: content not materializable"
+            );
             ActiveClipboardPullServeError::NotAvailable
         }
     }

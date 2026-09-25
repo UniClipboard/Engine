@@ -34,6 +34,7 @@ use uc_core::ports::{
 };
 use uc_core::settings::model::MobileSyncSettings;
 use uc_observability_contract::analytics::{AnalyticsPort, Event};
+use uc_observability_contract::error_source::io_error_kind;
 
 use super::list_lan_interfaces::may_advertise_interface;
 use uc_mobile_proto::{build_mobile_sync_connect_uri, ConnectUriError, ConnectUriOther};
@@ -290,7 +291,8 @@ impl RegisterMobileShortcutDeviceUseCase {
             }
             Err(err) if !candidates.is_empty() => {
                 warn!(
-                    error = %err,
+                    error_kind = "lan_interface_probe",
+                    io_error_kind = io_error_kind(&err),
                     "lan interface probe failed; QR will only carry configured advertise entries"
                 );
             }

@@ -39,6 +39,7 @@ use uc_core::membership::{MemberRepositoryPort, PeerAdmissionPort};
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::PeerAddressRepositoryPort;
 use uc_observability_contract::diagnostics::connectivity::InboundPeerProtocol;
+use uc_observability_contract::error_source::io_error_kind;
 
 use super::connect::{connect_with_staggered_retry, StaggeredDialError};
 use super::inbound_peer::InboundPeerGate;
@@ -187,7 +188,8 @@ impl ProtocolHandler for IrohTransferProgressHandler {
                 Err(err) => {
                     debug!(
                         from_device = %from_device.as_str(),
-                        error = %err,
+                        error_kind = "connection_closed",
+                        io_error_kind = io_error_kind(&err),
                         "transfer progress: connection closed",
                     );
                     break;
@@ -216,7 +218,8 @@ impl ProtocolHandler for IrohTransferProgressHandler {
                 Err(err) => {
                     warn!(
                         from_device = %from_device.as_str(),
-                        error = %err,
+                        error_kind = "frame_decode",
+                        io_error_kind = io_error_kind(&err),
                         "transfer progress: frame decode failed",
                     );
                     // Bad frame doesn't tear down the whole connection;
@@ -271,7 +274,11 @@ impl OutboundProgressReporterPort for ReporterImpl {
             status,
         };
         if let Err(err) = self.send_frame(target, &frame).await {
-            warn!(error = %err, "progress reporter: send failed");
+            warn!(
+                error_kind = "frame_send",
+                io_error_kind = io_error_kind(&err),
+                "progress reporter: send failed"
+            );
         }
     }
 }

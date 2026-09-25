@@ -23,6 +23,7 @@ use uc_core::clipboard::ClipboardContentCategorySet;
 use uc_core::ids::DeviceId;
 use uc_core::ports::PeerAddressRepositoryPort;
 use uc_core::MemberRepositoryPort;
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::deps::CurrentSpaceMemberScopePort;
 
@@ -144,7 +145,8 @@ impl TargetSelector {
             }
             Err(err) => {
                 warn!(
-                    error = %err,
+                    error_kind = "member_lookup",
+                    io_error_kind = io_error_kind(&err),
                     "dispatch: member repo lookup failed; failing open"
                 );
                 true

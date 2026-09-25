@@ -19,6 +19,7 @@ use diesel::prelude::*;
 use tracing::warn;
 use uc_core::ids::EntryId;
 use uc_core::search::document::{ContentType, SearchDocument, SearchIndexMeta, SearchPosting};
+use uc_observability_contract::error_source::io_error_kind;
 
 // ──────────────────────────────────────────────
 // search_document
@@ -165,7 +166,8 @@ impl SearchDocumentRow {
                 Err(err) => {
                     warn!(
                         entry_id = %self.entry_id,
-                        error = %err,
+                        error_kind = "render_payload_decode",
+                        io_error_kind = io_error_kind(&err),
                         "search: render payload decode failed, blanking render fields"
                     );
                     (RenderFields::default(), true)

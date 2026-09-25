@@ -34,6 +34,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info};
 use uc_core::ports::SecureStoragePort;
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::security::PROFILE_SECRET_FILE_NAME;
 
@@ -308,7 +309,8 @@ pub fn apply_pending_import(
         if let Err(error) = secure_storage.set(key, &bytes) {
             error!(
                 key_class = classify_secret_key(key),
-                error = %error,
+                error_kind = "staged_secret_write",
+                io_error_kind = io_error_kind(&error),
                 "writing staged secret into secure storage failed; aborting import apply, staging preserved"
             );
             return Ok(());

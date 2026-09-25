@@ -50,6 +50,7 @@ use std::sync::Arc;
 
 use tracing::{info, warn};
 use uc_observability_contract::diagnostics::{record_task_join_failure, DiagnosticTaskKind};
+use uc_observability_contract::error_source::io_error_kind;
 
 use uc_core::ids::EntryId;
 use uc_core::mobile_sync::MobileDeviceId;
@@ -124,7 +125,8 @@ impl MobileInboundFanOutPort for ClipboardOutboundFanOutAdapter {
                 Err(err) => warn!(
                     entry_id = %entry_id_log,
                     source = %source_log,
-                    error = %err,
+                    error_kind = "dispatch_capture",
+                    io_error_kind = io_error_kind(&err),
                     "mobile_sync fan-out: dispatch_capture failed — mobile-inbound NOT relayed to other paired devices"
                 ),
             }

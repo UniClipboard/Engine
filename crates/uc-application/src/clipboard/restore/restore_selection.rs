@@ -26,6 +26,7 @@ use uc_core::{
         ClipboardSelectionRepositoryPort,
     },
 };
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::clipboard::sync::snapshot_from_entry::{
     reconstruct_snapshot_from_entry, BuildSnapshotError,
@@ -172,7 +173,8 @@ impl RestoreClipboardSelectionUseCase {
                 Err(err) => {
                     tracing::warn!(
                         entry_id = %entry_id,
-                        error = %err,
+                        error_kind = "snapshot_hash_lookup",
+                        io_error_kind = io_error_kind(&err),
                         "restore: snapshot_hash lookup failed; skipping active-register advance"
                     );
                 }

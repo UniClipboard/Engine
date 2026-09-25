@@ -3,6 +3,7 @@ use std::sync::Arc;
 use uc_core::ids::EntryId;
 use uc_core::ports::clipboard::SetClipboardEntryFavoritePort;
 use uc_core::ports::search::search_index::SearchIndexPort;
+use uc_observability_contract::error_source::io_error_kind;
 
 /// Set the favorite state of a clipboard entry.
 ///
@@ -60,7 +61,8 @@ impl ToggleFavoriteClipboardEntryUseCase {
                     tracing::warn!(
                         entry_id = %entry_id,
                         is_favorited,
-                        error = %e,
+                        error_kind = "search_favorite_tag",
+                        io_error_kind = io_error_kind(&e),
                         "favorite persisted but search tag mirror failed; rebuild will reconcile"
                     );
                 }

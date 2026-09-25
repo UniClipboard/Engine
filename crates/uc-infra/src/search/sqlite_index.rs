@@ -30,6 +30,7 @@ use uc_core::search::query::{QueryOperator, SearchQuery, TimeRangeFilter};
 use uc_core::search::result::{RebuildProgress, RebuildStage, SearchResult, SearchResultsPage};
 use uc_core::search::tag::{SearchTagCount, TagId};
 use uc_core::search::SearchProtectionRef;
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::db::pool::DbPool;
 use crate::db::schema::{search_document, search_entry_tag, search_index_meta, search_posting};
@@ -928,7 +929,8 @@ impl SqliteSearchIndex {
                                 // repair (a rebuild reserializes it).
                                 tracing::warn!(
                                     entry_id = %doc.entry_id,
-                                    error = %e,
+                                    error_kind = "file_extensions_parse",
+                                    io_error_kind = io_error_kind(&e),
                                     "search row has unparseable file_extensions; treating as empty"
                                 );
                                 Vec::new()
@@ -1000,7 +1002,8 @@ impl SqliteSearchIndex {
                             Err(error) => {
                                 warn!(
                                     entry_id = %doc.entry_id,
-                                    error = %error,
+                                    error_kind = "render_payload_decode",
+                                    io_error_kind = io_error_kind(&error),
                                     "V3 search render payload decode failed"
                                 );
                                 (RenderFields::default(), true)
@@ -1185,13 +1188,13 @@ impl SqliteSearchIndex {
         let drop_entry_tag = format!("DROP TABLE IF EXISTS {}", state.temp_entry_tag_table);
 
         if let Err(e) = diesel::sql_query(&drop_doc).execute(conn) {
-            warn!(table = %state.temp_document_table, error = %e, "failed to drop temp doc table");
+            warn!(table = %state.temp_document_table, error_kind = "temp_table_drop", io_error_kind = io_error_kind(&e), "failed to drop temp doc table");
         }
         if let Err(e) = diesel::sql_query(&drop_posting).execute(conn) {
-            warn!(table = %state.temp_posting_table, error = %e, "failed to drop temp posting table");
+            warn!(table = %state.temp_posting_table, error_kind = "temp_table_drop", io_error_kind = io_error_kind(&e), "failed to drop temp posting table");
         }
         if let Err(e) = diesel::sql_query(&drop_entry_tag).execute(conn) {
-            warn!(table = %state.temp_entry_tag_table, error = %e, "failed to drop temp tag table");
+            warn!(table = %state.temp_entry_tag_table, error_kind = "temp_table_drop", io_error_kind = io_error_kind(&e), "failed to drop temp tag table");
         }
     }
 
@@ -1461,9 +1464,7 @@ impl SearchIndexPort for SqliteSearchIndex {
         let maybe_rebuild = self.active_rebuild_for_profile(&profile_id).await;
 
         tokio::task::spawn_blocking(move || {
-            let mut conn = pool
-                .get()
-                .map_err(internal("pool error"))?;
+            let mut conn = pool.get().map_err(internal("pool error"))?;
 
             Self::ensure_meta_row(&mut conn, &profile_id, index_version)?;
 
@@ -1474,8 +1475,16 @@ impl SearchIndexPort for SqliteSearchIndex {
             if let Some(rebuild_state) = maybe_rebuild {
                 // Best-effort: if temp table was already dropped (rebuild completed
                 // between our check and this write), log and continue.
-                if let Err(e) = Self::insert_temp_entries(&mut conn, &rebuild_state, std::slice::from_ref(&prepared)) {
-                    warn!(error = %e, "failed to mirror index_entry into rebuild temp tables (best-effort)");
+                if let Err(e) = Self::insert_temp_entries(
+                    &mut conn,
+                    &rebuild_state,
+                    std::slice::from_ref(&prepared),
+                ) {
+                    warn!(
+                        error_kind = "rebuild_mirror",
+                        io_error_kind = io_error_kind(&e),
+                        "failed to mirror index_entry into rebuild temp tables (best-effort)"
+                    );
                 }
             }
 
@@ -1495,9 +1504,7 @@ impl SearchIndexPort for SqliteSearchIndex {
         let maybe_rebuild = self.active_rebuild_for_profile(&profile_id).await;
 
         tokio::task::spawn_blocking(move || {
-            let mut conn = pool
-                .get()
-                .map_err(internal("pool error"))?;
+            let mut conn = pool.get().map_err(internal("pool error"))?;
 
             Self::ensure_meta_row(&mut conn, &profile_id, index_version)?;
 
@@ -1507,7 +1514,11 @@ impl SearchIndexPort for SqliteSearchIndex {
             // 2. If a rebuild is active, mirror the delete into temp tables.
             if let Some(rebuild_state) = maybe_rebuild {
                 if let Err(e) = Self::delete_temp_entry(&mut conn, &rebuild_state, &entry_id) {
-                    warn!(error = %e, "failed to mirror remove_entry into rebuild temp tables (best-effort)");
+                    warn!(
+                        error_kind = "rebuild_mirror",
+                        io_error_kind = io_error_kind(&e),
+                        "failed to mirror remove_entry into rebuild temp tables (best-effort)"
+                    );
                 }
             }
 
@@ -1966,9 +1977,7 @@ impl SearchIndexPort for SqliteSearchIndex {
         let index_version = self.protection.index_version();
 
         tokio::task::spawn_blocking(move || {
-            let mut conn = pool
-                .get()
-                .map_err(internal("pool error"))?;
+            let mut conn = pool.get().map_err(internal("pool error"))?;
 
             Self::ensure_meta_row(&mut conn, &profile_id, index_version)?;
 
@@ -1982,7 +1991,11 @@ impl SearchIndexPort for SqliteSearchIndex {
                 if let Err(e) =
                     Self::set_temp_favorite_tag(&mut conn, &rebuild_state, &entry_id, favorited)
                 {
-                    warn!(error = %e, "failed to mirror favorite tag into rebuild temp tables (best-effort)");
+                    warn!(
+                        error_kind = "rebuild_mirror",
+                        io_error_kind = io_error_kind(&e),
+                        "failed to mirror favorite tag into rebuild temp tables (best-effort)"
+                    );
                 }
             }
 
@@ -2151,11 +2164,15 @@ impl SqliteSearchIndex {
                 for t in tables {
                     let drop_sql = format!("DROP TABLE IF EXISTS {}", t.name);
                     if let Err(e) = diesel::sql_query(&drop_sql).execute(conn) {
-                        warn!(table = %t.name, error = %e, "failed to drop stray rebuild table");
+                        warn!(table = %t.name, error_kind = "stray_table_drop", io_error_kind = io_error_kind(&e), "failed to drop stray rebuild table");
                     }
                 }
             }
-            Err(e) => warn!(error = %e, "failed to list stray rebuild tables"),
+            Err(e) => warn!(
+                error_kind = "stray_table_list",
+                io_error_kind = io_error_kind(&e),
+                "failed to list stray rebuild tables"
+            ),
         }
     }
 }

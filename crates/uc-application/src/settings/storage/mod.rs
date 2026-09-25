@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use tracing::instrument;
 use uc_core::ports::CacheFsPort;
+use uc_observability_contract::error_source::io_error_kind;
 
 #[derive(Clone)]
 pub struct StorageFacadeDeps {
@@ -55,10 +56,7 @@ impl StorageFacade {
             deps.cache_fs.dir_size(&deps.cache_dir),
             deps.cache_fs.dir_size(&deps.logs_dir),
         )
-        .map_err(|err| {
-            tracing::error!(error = %err, "storage facade: failed to compute storage stats");
-            StorageFacadeError::Stats(anyhow::Error::from(err))
-        })?;
+        .map_err(|err| StorageFacadeError::Stats(anyhow::Error::from(err)))?;
 
         let total_bytes = database_bytes + vault_bytes + cache_bytes + logs_bytes;
         tracing::info!(
@@ -104,13 +102,15 @@ impl StorageFacade {
                 if entry.is_dir {
                     if let Err(err) = deps.cache_fs.remove_dir_all(&entry.path).await {
                         tracing::warn!(
-                            error = %err,
+                            error_kind = "cache_dir_remove",
+                            io_error_kind = io_error_kind(err.as_ref()),
                             "storage facade: failed to remove cache subdirectory"
                         );
                     }
                 } else if let Err(err) = deps.cache_fs.remove_file(&entry.path).await {
                     tracing::warn!(
-                        error = %err,
+                        error_kind = "cache_file_remove",
+                        io_error_kind = io_error_kind(err.as_ref()),
                         "storage facade: failed to remove cache file"
                     );
                 }

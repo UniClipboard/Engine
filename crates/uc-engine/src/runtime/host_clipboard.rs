@@ -1,3 +1,4 @@
+use std::error::Error;
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
@@ -7,6 +8,7 @@ use uc_application::facade::{
 };
 use uc_core::ports::{SelfWriteLedgerPort, SystemClipboardPort};
 use uc_core::{ClipboardChangeOrigin, TaskRegistry};
+use uc_observability_contract::error_source::io_error_kind;
 
 use super::host_operations::send_report_summary;
 use super::operation_error_with_code;
@@ -35,7 +37,11 @@ pub(super) async fn spawn_host_clipboard_change_task(
             loop {
                 let Some(change) = next_change_or_stop(changes.as_mut(), &cancel).await else {
                     if let Err(error) = changes.shutdown().await {
-                        warn!(error = %error, "host clipboard change stream shutdown failed");
+                        warn!(
+                            error_kind = "change_stream_shutdown",
+                            io_error_kind = io_error_kind(&error),
+                            "host clipboard change stream shutdown failed"
+                        );
                     }
                     return;
                 };
@@ -45,12 +51,20 @@ pub(super) async fn spawn_host_clipboard_change_task(
                             .process_change(HostClipboardDispatch::Background)
                             .await
                         {
-                            warn!(error = %error, "host clipboard change processing failed");
+                            warn!(
+                                error_kind = "change_processing",
+                                io_error_kind = io_error_kind(&error),
+                                "host clipboard change processing failed"
+                            );
                         }
                     }
                     Ok(HostClipboardChange::Closed) => return,
                     Err(error) => {
-                        warn!(error = %error, "host clipboard change stream failed");
+                        warn!(
+                            error_kind = "change_stream",
+                            io_error_kind = io_error_kind(&error),
+                            "host clipboard change stream failed"
+                        );
                         return;
                     }
                 }
@@ -171,7 +185,10 @@ impl HostClipboardChangeRuntime {
     }
 }
 
-fn observe_error(context: &'static str, error: impl std::fmt::Display) -> EngineError {
+fn observe_error(
+    context: &'static str,
+    error: impl Into<Box<dyn Error + Send + Sync>>,
+) -> EngineError {
     operation_error_with_code(OBSERVE_CLIPBOARD_FAILED_CODE, context, error)
 }
 

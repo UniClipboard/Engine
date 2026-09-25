@@ -8,6 +8,7 @@ use uc_core::ports::clipboard::{
     ActiveClipboardRegisterError, BackfillMobileConsumableClipboardPort,
     EntryFileSetRepositoryPort, LoadActiveClipboardPort,
 };
+use uc_observability_contract::error_source::io_error_kind;
 
 /// Applies the domain file-set rule to mobile clipboard consumption.
 #[derive(Clone)]
@@ -28,7 +29,8 @@ impl MobileConsumabilityProbe {
             Ok(Some(file_set)) => !file_set.has_directory_structure(),
             Err(err) => {
                 warn!(
-                    error = %err,
+                    error_kind = "file_set_load",
+                    io_error_kind = io_error_kind(&err),
                     entry_id = %entry_id,
                     "mobile consumability probe failed; treating entry as non-consumable"
                 );
@@ -56,7 +58,11 @@ pub trait MobileConsumableBackfill: Send + Sync {
     /// never blocks the unlock itself.
     async fn backfill_best_effort(&self) {
         if let Err(err) = self.backfill().await {
-            warn!(error = %err, "mobile-consumable reference backfill failed");
+            warn!(
+                error_kind = "reference_backfill",
+                io_error_kind = io_error_kind(&err),
+                "mobile-consumable reference backfill failed"
+            );
         }
     }
 }

@@ -48,6 +48,7 @@ use uc_core::{
     },
     BlobId,
 };
+use uc_observability_contract::error_source::io_error_kind;
 
 /// Typed errors returned by [`reconstruct_snapshot_from_entry`].
 ///
@@ -210,7 +211,8 @@ pub(crate) async fn reconstruct_snapshot_from_entry(
                             entry_id = %entry_id,
                             rep_id = %rep.id,
                             blob_id = %blob_id,
-                            error = %err,
+                            error_kind = "blob_fetch",
+                            io_error_kind = io_error_kind(err.as_ref()),
                             "snapshot_from_entry.reconstruct: skipping rep, blob fetch failed"
                         );
                         continue;
@@ -233,7 +235,8 @@ pub(crate) async fn reconstruct_snapshot_from_entry(
                     rep_id = %rep.id,
                     format_id = %rep.format_id,
                     payload_state = ?rep.payload_state,
-                    error = %err,
+                    error_kind = "representation_resolve",
+                    io_error_kind = io_error_kind(&err),
                     "snapshot_from_entry.reconstruct: skipping rep, resolver failed (likely Staged without cache/spool bytes)"
                 );
                 continue;
@@ -342,7 +345,8 @@ pub(crate) async fn demote_orphaned_to_lost(
         Err(err) => {
             warn!(
                 representation_id = %rep_id,
-                error = %err,
+                error_kind = "representation_demote",
+                io_error_kind = io_error_kind(&err),
                 "Failed to demote orphaned representation to Lost"
             );
         }

@@ -51,6 +51,7 @@ use uc_core::ports::mobile_sync::{MobileFileStagingError, MobileFileStagingPort}
 use uc_core::ports::{ClockPort, ReceiveItemRole};
 use uc_core::{MimeType, ObservedClipboardRepresentation, SystemClipboardSnapshot};
 use uc_observability_contract::analytics::{AnalyticsPort, Direction, Event, PayloadSizeBucket};
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::usecases::clipboard_doc::SyncClipboardItemType;
 #[cfg(test)]
@@ -512,7 +513,7 @@ impl ApplyIncomingMobileClipUseCase {
                     Err(BuildSnapshotFailure::Decode(reason)) => {
                         warn!(
                             item_type = ?item_type,
-                            reason = %reason,
+                            error_kind = "decode_failed",
                             "mobile_sync apply_incoming: decode failed"
                         );
                         // decode 失败时 transfer 已经被 handler 起过 lifecycle,
@@ -787,7 +788,8 @@ impl ApplyIncomingMobileClipUseCase {
         if let Err(err) = session.complete().await {
             warn!(
                 transfer_id = session.transfer_id(),
-                error = %err,
+                error_kind = "lifecycle_complete",
+                io_error_kind = io_error_kind(&err),
                 "mobile_sync apply_incoming: complete lifecycle failed"
             );
         }
@@ -800,7 +802,8 @@ impl ApplyIncomingMobileClipUseCase {
         {
             warn!(
                 transfer_id = session.transfer_id(),
-                error = %err,
+                error_kind = "lifecycle_fail",
+                io_error_kind = io_error_kind(&err),
                 "mobile_sync apply_incoming: fail lifecycle failed"
             );
         }
@@ -839,10 +842,10 @@ impl ApplyIncomingMobileClipUseCase {
         let name = data_name
             .ok_or_else(|| BuildSnapshotFailure::Decode("Image item without dataName".into()))?;
         let buffered = self.buffer.take(&name).ok_or_else(|| {
-            BuildSnapshotFailure::Decode(format!(
-                "file buffer miss for `{}` (PUT /file may have arrived late or never)",
-                name
-            ))
+            // 结果文本会写入日志并返回调用方，不携带文件名。
+            BuildSnapshotFailure::Decode(
+                "file buffer miss (PUT /file may have arrived late or never)".into(),
+            )
         })?;
         let transfer_id = buffered.transfer_id.clone();
         let staged_file = buffered.staged.clone();
@@ -894,10 +897,10 @@ impl ApplyIncomingMobileClipUseCase {
         let name = data_name
             .ok_or_else(|| BuildSnapshotFailure::Decode("File item without dataName".into()))?;
         let buffered = self.buffer.take(&name).ok_or_else(|| {
-            BuildSnapshotFailure::Decode(format!(
-                "file buffer miss for `{}` (PUT /file may have arrived late or never)",
-                name
-            ))
+            // 结果文本会写入日志并返回调用方，不携带文件名。
+            BuildSnapshotFailure::Decode(
+                "file buffer miss (PUT /file may have arrived late or never)".into(),
+            )
         })?;
         let transfer_id = buffered.transfer_id.clone();
         let staged_file = buffered.staged.clone();
@@ -1007,7 +1010,7 @@ impl ApplyIncomingMobileClipUseCase {
                 // 我们刚 encode 出来的 envelope 又被 inbound decode 失败 ——
                 // 几乎不可能, 但为了类型完备保留这条路径 + warn 日志。
                 warn!(
-                    reason = %reason,
+                    error_kind = "inbound_decode_failed",
                     "mobile_sync apply_incoming: inbound decode failed (unexpected — we just encoded it)"
                 );
                 ApplyIncomingMobileClipOutcome::DecodeFailed { reason }

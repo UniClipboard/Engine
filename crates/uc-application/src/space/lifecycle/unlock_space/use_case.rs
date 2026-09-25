@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info, instrument};
 use uc_core::crypto::domain::Passphrase;
 use uc_core::ids::SpaceId;
 use uc_core::ports::space::SpaceAccessError;
@@ -111,9 +111,6 @@ fn map_unlock_error(error: SpaceAccessError) -> UnlockSpaceError {
         SpaceAccessError::WrongPassphrase => UnlockSpaceError::WrongPassphrase,
         SpaceAccessError::CorruptedKeyMaterial { .. } => UnlockSpaceError::CorruptedKeyMaterial,
         error @ SpaceAccessError::Internal(_) => UnlockSpaceError::internal(error),
-        other => {
-            warn!(error = %other, "unexpected space access error during unlock");
-            UnlockSpaceError::internal(other)
-        }
+        other => UnlockSpaceError::internal(other),
     }
 }

@@ -36,6 +36,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use uc_application::deps::{ClipboardDelivery, ClipboardReceiverPort};
+use uc_observability_contract::error_source::io_error_kind;
 
 use async_trait::async_trait;
 use iroh::endpoint::Connection;
@@ -157,7 +158,11 @@ impl ProtocolHandler for IrohClipboardReceiverHandler {
         let (mut send, mut recv) = match connection.accept_bi().await {
             Ok(pair) => pair,
             Err(err) => {
-                warn!(error = %err, "clipboard receiver: accept_bi failed; dropping connection");
+                warn!(
+                    error_kind = "accept_bi",
+                    io_error_kind = io_error_kind(&err),
+                    "clipboard receiver: accept_bi failed; dropping connection"
+                );
                 return Ok(());
             }
         };
@@ -187,7 +192,8 @@ impl ProtocolHandler for IrohClipboardReceiverHandler {
             Ok(decoded) => decoded,
             Err(err) => {
                 warn!(
-                    error = %err,
+                    error_kind = "frame_decode",
+                    io_error_kind = io_error_kind(&err),
                     peer = %peer_device_id.as_str(),
                     "clipboard receiver: frame decode failed; sending Rejected ack"
                 );
@@ -214,89 +220,106 @@ impl ProtocolHandler for IrohClipboardReceiverHandler {
         let operation_observation = receive_observation.clone();
         let result = async move {
             let started = Instant::now();
-            let ciphertext = match clipboard_wire::read_frame_payload(&mut recv, decoded.payload_len()).await {
-                Ok(ciphertext) => ciphertext,
-                Err(error) => {
-                    complete_operation(OperationCompletion::failed(
+            let ciphertext =
+                match clipboard_wire::read_frame_payload(&mut recv, decoded.payload_len()).await {
+                    Ok(ciphertext) => ciphertext,
+                    Err(error) => {
+                        complete_operation(OperationCompletion::failed(
+                            DiagnosticDomain::Clipboard,
+                            DiagnosticOperation::ClipboardReceive,
+                            DiagnosticRole::Server,
+                            DiagnosticErrorType::StreamFailed,
+                            started.elapsed(),
+                        ));
+                        warn!(
+                            error_kind = "payload_read",
+                            io_error_kind = io_error_kind(&error),
+                            "clipboard receiver: payload read failed; sending Rejected ack"
+                        );
+                        emit_ack(&mut send, AckCode::Rejected).await;
+                        return Ok(());
+                    }
+                };
+
+            // 认证后的任务通过原有广播交接；没有消费者时拒绝，绝不伪报保存成功。
+            let (receipt, result) = InboundClipboardReceipt::pending();
+            let transport = path_for(&self.state.endpoint, remote, OnMissing::Unknown)
+                .await
+                .channel;
+            let inbound = InboundClipboard {
+                peer_device_id,
+                header: decoded.header,
+                ciphertext,
+                transport,
+                receipt,
+            };
+            if self
+                .state
+                .event_tx
+                .send(ClipboardDelivery::new(inbound))
+                .is_err()
+            {
+                debug!(
+                    peer = %peer_device_id.as_str(),
+                    "clipboard receiver: no subscribers attached; inbound frame dropped"
+                );
+                emit_ack(&mut send, AckCode::Rejected).await;
+                complete_clipboard_receive_failure(
+                    ClipboardReceiveFailure::NoConsumer,
+                    OperationCompletion::failed(
                         DiagnosticDomain::Clipboard,
                         DiagnosticOperation::ClipboardReceive,
                         DiagnosticRole::Server,
-                        DiagnosticErrorType::StreamFailed,
+                        DiagnosticErrorType::Unavailable,
                         started.elapsed(),
-                    ));
-                    warn!(error = %error, "clipboard receiver: payload read failed; sending Rejected ack");
-                    emit_ack(&mut send, AckCode::Rejected).await;
-                    return Ok(());
-                }
+                    ),
+                );
+                return Ok(());
+            }
+
+            let settlement =
+                tokio::time::timeout(APPLICATION_SETTLEMENT_TIMEOUT, result.wait()).await;
+            let (disposition, failure) = match settlement {
+                Ok(Some(disposition)) => (
+                    Some(disposition),
+                    ClipboardReceiveFailure::ApplicationRejected,
+                ),
+                Ok(None) => (None, ClipboardReceiveFailure::ReceiptDropped),
+                Err(_) => (None, ClipboardReceiveFailure::SettlementTimeout),
+            };
+            let ack = match disposition {
+                Some(InboundClipboardDisposition::Applied) => AckCode::Accepted,
+                Some(InboundClipboardDisposition::Duplicate) => AckCode::DuplicateIgnored,
+                Some(InboundClipboardDisposition::Rejected) | None => AckCode::Rejected,
             };
 
-        // 认证后的任务通过原有广播交接；没有消费者时拒绝，绝不伪报保存成功。
-        let (receipt, result) = InboundClipboardReceipt::pending();
-        let transport = path_for(&self.state.endpoint, remote, OnMissing::Unknown)
-            .await
-            .channel;
-        let inbound = InboundClipboard {
-            peer_device_id,
-            header: decoded.header,
-            ciphertext,
-            transport,
-            receipt,
-        };
-        if self.state.event_tx.send(ClipboardDelivery::new(inbound)).is_err() {
-            debug!(
-                peer = %peer_device_id.as_str(),
-                "clipboard receiver: no subscribers attached; inbound frame dropped"
-            );
-            emit_ack(&mut send, AckCode::Rejected).await;
-            complete_clipboard_receive_failure(ClipboardReceiveFailure::NoConsumer, OperationCompletion::failed(
-                DiagnosticDomain::Clipboard,
-                DiagnosticOperation::ClipboardReceive,
-                DiagnosticRole::Server,
-                DiagnosticErrorType::Unavailable,
-                started.elapsed(),
-            ));
-            return Ok(());
-        }
+            let completion = match ack {
+                AckCode::Accepted | AckCode::DuplicateIgnored => OperationCompletion::succeeded(
+                    DiagnosticDomain::Clipboard,
+                    DiagnosticOperation::ClipboardReceive,
+                    DiagnosticRole::Server,
+                    started.elapsed(),
+                ),
+                AckCode::Rejected | AckCode::Incompatible => OperationCompletion::failed(
+                    DiagnosticDomain::Clipboard,
+                    DiagnosticOperation::ClipboardReceive,
+                    DiagnosticRole::Server,
+                    DiagnosticErrorType::Unavailable,
+                    started.elapsed(),
+                ),
+            };
+            if matches!(ack, AckCode::Rejected | AckCode::Incompatible) {
+                operation_observation.finish_failure(failure, completion);
+            } else {
+                complete_operation(completion);
+            }
 
-        let settlement = tokio::time::timeout(APPLICATION_SETTLEMENT_TIMEOUT, result.wait()).await;
-        let (disposition, failure) = match settlement {
-            Ok(Some(disposition)) => (Some(disposition), ClipboardReceiveFailure::ApplicationRejected),
-            Ok(None) => (None, ClipboardReceiveFailure::ReceiptDropped),
-            Err(_) => (None, ClipboardReceiveFailure::SettlementTimeout),
-        };
-        let ack = match disposition {
-            Some(InboundClipboardDisposition::Applied) => AckCode::Accepted,
-            Some(InboundClipboardDisposition::Duplicate) => AckCode::DuplicateIgnored,
-            Some(InboundClipboardDisposition::Rejected) | None => AckCode::Rejected,
-        };
-
-        let completion = match ack {
-            AckCode::Accepted | AckCode::DuplicateIgnored => OperationCompletion::succeeded(
-                DiagnosticDomain::Clipboard,
-                DiagnosticOperation::ClipboardReceive,
-                DiagnosticRole::Server,
-                started.elapsed(),
-            ),
-            AckCode::Rejected | AckCode::Incompatible => OperationCompletion::failed(
-                DiagnosticDomain::Clipboard,
-                DiagnosticOperation::ClipboardReceive,
-                DiagnosticRole::Server,
-                DiagnosticErrorType::Unavailable,
-                started.elapsed(),
-            ),
-        };
-        if matches!(ack, AckCode::Rejected | AckCode::Incompatible) {
-            operation_observation.finish_failure(failure, completion);
-        } else {
-            complete_operation(completion);
-        }
-
-        // 5. Ack the application result; hold the connection open until the peer closes
-        //    it so the ack byte has time to flush. The sender side drops
-        //    the connection after reading the ack, which resolves
-        //    `Connection::closed()` here and lets the handler return.
-        emit_ack(&mut send, ack).await;
-        Ok(())
+            // 5. Ack the application result; hold the connection open until the peer closes
+            //    it so the ack byte has time to flush. The sender side drops
+            //    the connection after reading the ack, which resolves
+            //    `Connection::closed()` here and lets the handler return.
+            emit_ack(&mut send, ack).await;
+            Ok(())
         }
         .instrument(span);
         let result = receive_observation.scope(result).await;
@@ -312,11 +335,19 @@ impl ProtocolHandler for IrohClipboardReceiverHandler {
 #[instrument(skip(send))]
 async fn emit_ack(send: &mut iroh::endpoint::SendStream, ack: AckCode) {
     if let Err(err) = send.write_all(&[ack.as_byte()]).await {
-        debug!(error = %err, "clipboard receiver: ack write failed");
+        debug!(
+            error_kind = "ack_write",
+            io_error_kind = io_error_kind(&err),
+            "clipboard receiver: ack write failed"
+        );
         return;
     }
     if let Err(err) = send.finish() {
-        debug!(error = %err, "clipboard receiver: send.finish failed");
+        debug!(
+            error_kind = "send_finish",
+            io_error_kind = io_error_kind(&err),
+            "clipboard receiver: send.finish failed"
+        );
     }
 }
 

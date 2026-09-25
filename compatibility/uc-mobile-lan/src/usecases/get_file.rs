@@ -164,25 +164,16 @@ impl GetMobileSyncFileUseCase {
                     MobileFileStagingError::NotFound => {
                         debug!(
                             entry_id = %rep.entry_id,
-                            uri = %uri,
                             "mobile_sync get_file: staging read_by_uri NotFound"
                         );
                         GetMobileSyncFileError::NotFound
                     }
-                    error @ MobileFileStagingError::Io(_) => {
-                        warn!(
-                            entry_id = %rep.entry_id,
-                            uri = %uri,
-                            "mobile_sync get_file: staging read_by_uri IO failure"
-                        );
-                        GetMobileSyncFileError::Staging(error)
-                    }
+                    error @ MobileFileStagingError::Io(_) => GetMobileSyncFileError::Staging(error),
                     // adapter 不应在 read_by_uri 路径返这个变体, 防御式翻成
                     // Staging IO 错误便于排障。
                     error @ MobileFileStagingError::InvalidDataName(_) => {
                         warn!(
                             entry_id = %rep.entry_id,
-                            uri = %uri,
                             "mobile_sync get_file: unexpected InvalidDataName from read_by_uri"
                         );
                         GetMobileSyncFileError::Staging(error)
@@ -191,7 +182,6 @@ impl GetMobileSyncFileUseCase {
 
             debug!(
                 entry_id = %rep.entry_id,
-                uri = %uri,
                 bytes_len = bytes.len(),
                 "mobile_sync get_file: served staged file bytes"
             );

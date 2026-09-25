@@ -22,6 +22,7 @@ use uc_core::ids::EntryId;
 use uc_core::ports::clipboard::EntryFileSetRepositoryPort;
 use uc_core::ports::SettingsPort;
 use uc_core::{ClipboardChangeOrigin, SystemClipboardSnapshot};
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::clipboard::sync::apply_inbound::{compute_file_set_component, InboundFileSetManifest};
 use crate::clipboard::sync::V3BlobRef;
@@ -114,14 +115,16 @@ pub(crate) async fn assemble_outbound_payload(
             }),
             Err(err) if from_manifest => {
                 warn!(
-                    error = %err,
+                    error_kind = "file_set_member_unreadable",
+                    io_error_kind = io_error_kind(&err),
                     entry_id = %entry_id,
                     "outbound payload: file-set member unreadable; not reproducible (all-or-nothing)"
                 );
                 return Err(OutboundPayloadError::Unavailable);
             }
             Err(err) => warn!(
-                error = %err,
+                error_kind = "file_metadata_unreadable",
+                io_error_kind = io_error_kind(&err),
                 entry_id = %entry_id,
                 "outbound payload: excluding clipboard file whose metadata could not be read"
             ),

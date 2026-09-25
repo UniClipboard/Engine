@@ -261,6 +261,43 @@ fn run(bytes: &[u8]) -> Result<[u8; 32], KeyError> {
   assert.equal(result.status, 0, result.stderr)
 })
 
+test('拒绝日志输出错误正文', () => {
+  const result = check(`
+fn run() {
+    if let Err(err) = load() {
+        warn!(error = %err, "load failed");
+    }
+    if let Err(error) = save() {
+        tracing::error!(
+            entry = 1,
+            error = ?error,
+            "save failed"
+        );
+    }
+    if let Err(error) = sync() {
+        warn!(%error, "sync failed");
+    }
+    if let Err(e) = flush() {
+        debug!("flush failed: {e:#}");
+    }
+}
+`)
+  assert.equal(result.status, 1)
+  for (const line of [4, 9, 14, 17]) assert.match(result.stderr, new RegExp(`fixture\\.rs:${line} .*error_kind`))
+})
+
+test('接受固定分类的日志字段', () => {
+  const result = check(`
+fn run() {
+    if let Err(err) = load() {
+        warn!(error_kind = "load", io_error_kind = io_error_kind(&err), "load failed");
+    }
+    warn!(source = %source_label, reason = ?reason, error_kind = ?callback_error, "skipped");
+}
+`)
+  assert.equal(result.status, 0, result.stderr)
+})
+
 test('测试代码不检查错误来源写法', () => {
   const result = check(`
 fn run() {}

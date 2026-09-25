@@ -21,6 +21,7 @@ use uc_core::clipboard::{ActiveClipboardState, ClipboardContentCategorySet};
 use uc_core::ids::DeviceId;
 use uc_core::ports::clipboard::ActiveClipboardDispatchPort;
 use uc_core::ports::{PeerAddressRepositoryPort, PeerReachabilityPort, ReachabilityState};
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::deps::{CurrentSpaceMemberScope, CurrentSpaceMemberScopePort};
 
@@ -42,7 +43,8 @@ pub(crate) async fn send_active_state_to_with_scope(
     }
     if let Err(err) = dispatch.dispatch(target, state).await {
         debug!(
-            error = %err,
+            error_kind = "peer_dispatch",
+            io_error_kind = io_error_kind(&err),
             "active state send: per-peer dispatch failed (isolated)"
         );
     }
@@ -71,14 +73,22 @@ pub(crate) async fn fan_out_active_state(
     let scope = match peer_scope.snapshot().await {
         Ok(snapshot) => snapshot,
         Err(err) => {
-            warn!(error = ?err, "active state fan-out skipped: current peer scope unavailable");
+            warn!(
+                error_kind = "peer_scope_unavailable",
+                io_error_kind = io_error_kind(&err),
+                "active state fan-out skipped: current peer scope unavailable"
+            );
             return;
         }
     };
     let records = match peer_addr_repo.list().await {
         Ok(r) => r,
         Err(err) => {
-            warn!(error = %err, "active state fan-out skipped: peer_addr_repo.list failed");
+            warn!(
+                error_kind = "peer_address_list",
+                io_error_kind = io_error_kind(&err),
+                "active state fan-out skipped: peer_addr_repo.list failed"
+            );
             return;
         }
     };

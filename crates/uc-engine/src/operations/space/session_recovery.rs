@@ -3,10 +3,13 @@
 //! The daemon uses this internal seam only while its remaining callers migrate
 //! to `Engine`. Do not re-export it from the crate root.
 
+use std::error::Error;
+
 use crate::error_codes::*;
 
 use tracing::error;
 use uc_application::facade::{AppFacade, RecoverSpaceSessionError, SpaceActivityError};
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::{EngineError, EngineErrorCategory, OperationResult, RecoverSessionInput};
 
@@ -53,9 +56,14 @@ fn map_recover_session_error(error: RecoverSpaceSessionError) -> EngineError {
 fn recover_session_error(
     code: u32,
     context: &'static str,
-    error: impl std::fmt::Display,
+    error: impl Into<Box<dyn Error + Send + Sync>>,
 ) -> EngineError {
-    error!(context, error = %error, "engine session recovery failed");
+    let error = error.into();
+    error!(
+        context,
+        io_error_kind = io_error_kind(error.as_ref()),
+        "engine session recovery failed"
+    );
     EngineError::new(code, EngineErrorCategory::Unavailable, true)
 }
 

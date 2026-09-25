@@ -1,5 +1,7 @@
 //! Shared join-space implementation.
 
+use std::error::Error;
+
 use crate::error_codes::*;
 
 use tracing::error;
@@ -8,6 +10,7 @@ use uc_application::facade::{
 };
 use uc_core::crypto::domain::Passphrase;
 use uc_core::pairing::InvitationCode;
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::operations::device::member::join_space_status;
 
@@ -88,8 +91,16 @@ fn error_with(code: u32, category: EngineErrorCategory, retryable: bool) -> Engi
     EngineError::new(code, category, retryable)
 }
 
-fn join_internal_error(context: &'static str, error: impl std::fmt::Display) -> EngineError {
-    error!(context, error = %error, "join-space operation failed");
+fn join_internal_error(
+    context: &'static str,
+    error: impl Into<Box<dyn Error + Send + Sync>>,
+) -> EngineError {
+    let error = error.into();
+    error!(
+        context,
+        io_error_kind = io_error_kind(error.as_ref()),
+        "join-space operation failed"
+    );
     error_with(JOIN_SPACE_FAILED_CODE, EngineErrorCategory::Internal, false)
 }
 

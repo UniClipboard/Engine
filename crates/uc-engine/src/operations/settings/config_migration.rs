@@ -6,6 +6,7 @@ use uc_application::facade::AppFacade;
 use uc_core::crypto::domain::Passphrase;
 use uc_core::ids::RepresentationId;
 use uc_core::ports::config_migration::{ConfigMigrationError, ConfigSourceMode};
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::runtime::host_file::{copy_host_to_path, copy_path_to_host, HostFileCopyError};
 use crate::{
@@ -139,7 +140,11 @@ fn create_operation_dir(
 
 fn cleanup_operation_dir(directory: &Path) {
     if let Err(error) = std::fs::remove_dir_all(directory) {
-        tracing::warn!(error = %error, "failed to remove config migration temporary directory");
+        tracing::warn!(
+            error_kind = "temp_dir_remove",
+            io_error_kind = io_error_kind(&error),
+            "failed to remove config migration temporary directory"
+        );
     }
 }
 

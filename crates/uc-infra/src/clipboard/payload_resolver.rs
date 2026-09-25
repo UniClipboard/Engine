@@ -12,6 +12,7 @@ use uc_core::clipboard::{PayloadAvailability, PersistedClipboardRepresentation};
 use uc_core::ids::RepresentationId;
 use uc_core::ports::clipboard::{PayloadResolveError, ResolvedClipboardPayload};
 use uc_core::ports::ClipboardPayloadResolverPort;
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::clipboard::{RepresentationCache, SpoolManager};
 
@@ -59,11 +60,6 @@ impl ClipboardPayloadResolverPort for ClipboardPayloadResolver {
                                 rep_id: representation.id.clone(),
                                 reason: "payload_state Inline but inline_data is None".to_string(),
                             };
-                            error!(
-                                representation_id = %representation.id,
-                                error = %err,
-                                "Inline payload is missing inline_data"
-                            );
                             return Err(err);
                         }
                     };
@@ -81,11 +77,6 @@ impl ClipboardPayloadResolverPort for ClipboardPayloadResolver {
                                 rep_id: representation.id.clone(),
                                 reason: "payload_state BlobReady but blob_id is None".to_string(),
                             };
-                            error!(
-                                representation_id = %representation.id,
-                                error = %err,
-                                "BlobReady payload is missing blob_id"
-                            );
                             return Err(err);
                         }
                     };
@@ -124,7 +115,8 @@ impl ClipboardPayloadResolverPort for ClipboardPayloadResolver {
                         Err(err) => {
                             error!(
                                 representation_id = %representation.id,
-                                error = %err,
+                                error_kind = "spool_read",
+                                io_error_kind = io_error_kind(err.as_ref()),
                                 "Failed to read bytes from spool"
                             );
                             Err(PayloadResolveError::Integrity {
@@ -164,7 +156,8 @@ impl ClipboardPayloadResolver {
         if let Err(err) = self.worker_tx.try_send(rep_id.clone()) {
             warn!(
                 representation_id = %rep_id,
-                error = %err,
+                error_kind = "worker_requeue",
+                io_error_kind = io_error_kind(&err),
                 "Failed to re-queue representation for background processing"
             );
         }

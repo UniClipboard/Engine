@@ -19,6 +19,7 @@ use uc_core::search::{
     RebuildProgress, RebuildStage, SearchError, SearchPipelineInput, SearchResult,
     SearchResultsPage,
 };
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::clipboard::file_set_query::load_has_directory_structure;
 use crate::search::mutation_gate::SearchMutationGate;
@@ -289,7 +290,11 @@ impl SearchCoordinator {
         let meta = match self.deps.search_index.get_index_meta().await {
             Ok(m) => m,
             Err(e) => {
-                warn!(error = %e, "search coordinator: failed to get index meta at startup");
+                warn!(
+                    error_kind = "index_meta_read",
+                    io_error_kind = io_error_kind(&e),
+                    "search coordinator: failed to get index meta at startup"
+                );
                 self.set_state(STATUS_UNAVAILABLE, Some(REASON_REBUILD_FAILED_WAITING))
                     .await;
                 return;
@@ -314,7 +319,11 @@ impl SearchCoordinator {
             let has_entries = match self.deps.clipboard_entry_repo.list_entries(1, 0).await {
                 Ok(entries) => !entries.is_empty(),
                 Err(e) => {
-                    warn!(error = %e, "search coordinator: failed to list entries at startup");
+                    warn!(
+                        error_kind = "entry_list",
+                        io_error_kind = io_error_kind(&e),
+                        "search coordinator: failed to list entries at startup"
+                    );
                     false
                 }
             };
@@ -496,7 +505,12 @@ impl SearchCoordinator {
         let search_key = match deps.search_key_derivation.derive_search_key().await {
             Ok(k) => k,
             Err(e) => {
-                warn!(error = %e, reason, "search coordinator: key derivation failed during rebuild");
+                warn!(
+                    error_kind = "search_key_derive",
+                    io_error_kind = io_error_kind(&e),
+                    reason,
+                    "search coordinator: key derivation failed during rebuild"
+                );
                 set_failed_state(&event_tx, &state).await;
                 return;
             }
@@ -513,7 +527,12 @@ impl SearchCoordinator {
             {
                 Ok(b) => b,
                 Err(e) => {
-                    warn!(error = %e, reason, "search coordinator: failed to list entries during rebuild");
+                    warn!(
+                        error_kind = "entry_list",
+                        io_error_kind = io_error_kind(&e),
+                        reason,
+                        "search coordinator: failed to list entries during rebuild"
+                    );
                     break;
                 }
             };
@@ -546,7 +565,8 @@ impl SearchCoordinator {
                     }
                     Err(e) => {
                         warn!(
-                            error = %e,
+                            error_kind = "pipeline_build",
+                            io_error_kind = io_error_kind(e.as_ref()),
                             entry_id = %entry.entry_id,
                             "search coordinator: pipeline build failed for entry, skipping"
                         );
@@ -589,7 +609,12 @@ impl SearchCoordinator {
                 purge_plaintext_residue_if_needed(&deps, cancel).await;
             }
             Err(e) => {
-                warn!(error = %e, reason, "search coordinator: rebuild failed");
+                warn!(
+                    error_kind = "rebuild",
+                    io_error_kind = io_error_kind(&e),
+                    reason,
+                    "search coordinator: rebuild failed"
+                );
                 set_failed_state(&event_tx, &state).await;
             }
         }
@@ -689,7 +714,8 @@ async fn project_persisted_entry(
         Ok(r) => r,
         Err(e) => {
             debug!(
-                error = %e,
+                error_kind = "representation_load",
+                io_error_kind = io_error_kind(&e),
                 entry_id = %entry.entry_id,
                 "search projection: failed to load reps for entry, skipping"
             );
@@ -708,7 +734,8 @@ async fn project_persisted_entry(
         }
         Err(e) => {
             debug!(
-                error = %e,
+                error_kind = "selection_lookup",
+                io_error_kind = io_error_kind(e.as_ref()),
                 entry_id = %entry.entry_id,
                 "search projection: failed to get selection for entry, skipping"
             );
@@ -722,7 +749,8 @@ async fn project_persisted_entry(
         Ok(device) => device.map(|d| d.to_string()),
         Err(e) => {
             debug!(
-                error = %e,
+                error_kind = "source_device_lookup",
+                io_error_kind = io_error_kind(e.as_ref()),
                 entry_id = %entry.entry_id,
                 "search projection: failed to resolve source device, projecting without it"
             );
@@ -737,7 +765,8 @@ async fn project_persisted_entry(
             .await
             .unwrap_or_else(|e| {
                 debug!(
-                    error = %e,
+                    error_kind = "file_set_load",
+                    io_error_kind = io_error_kind(&e),
                     entry_id = %entry.entry_id,
                     "search projection: failed to load file set, projecting without directory tag"
                 );
@@ -817,7 +846,11 @@ async fn purge_plaintext_residue_if_needed(
     let meta = match deps.search_index.get_index_meta().await {
         Ok(m) => m,
         Err(e) => {
-            warn!(error = %e, "search coordinator: purge check failed to read index meta");
+            warn!(
+                error_kind = "index_meta_read",
+                io_error_kind = io_error_kind(&e),
+                "search coordinator: purge check failed to read index meta"
+            );
             return;
         }
     };
@@ -833,12 +866,16 @@ async fn purge_plaintext_residue_if_needed(
     }
     info!("search coordinator: running one-shot plaintext-residue purge");
     if let Err(e) = deps.search_maintenance.purge_plaintext_residue().await {
-        warn!(error = %e, "search coordinator: plaintext-residue purge failed; will retry on next startup");
+        warn!(
+            error_kind = "plaintext_residue_purge",
+            io_error_kind = io_error_kind(&e),
+            "search coordinator: plaintext-residue purge failed; will retry on next startup"
+        );
         return;
     }
     let ts = chrono::Utc::now().timestamp_millis();
     if let Err(e) = deps.search_maintenance.mark_plaintext_purge_done(ts).await {
-        warn!(error = %e, "search coordinator: purge ran but recording completion failed; will re-run next startup");
+        warn!(error_kind = "purge_completion_record", io_error_kind = io_error_kind(&e), "search coordinator: purge ran but recording completion failed; will re-run next startup");
     } else {
         info!("search coordinator: plaintext-residue purge complete");
     }
@@ -855,7 +892,7 @@ async fn repair_entry(deps: &SearchCoordinatorDeps, entry_id: &EntryId) {
             return;
         }
         Err(e) => {
-            warn!(entry_id = %entry_id, error = %e, "search repair: failed to load entry");
+            warn!(entry_id = %entry_id, error_kind = "entry_load", io_error_kind = io_error_kind(&e), "search repair: failed to load entry");
             return;
         }
     };
@@ -879,7 +916,7 @@ async fn repair_entry(deps: &SearchCoordinatorDeps, entry_id: &EntryId) {
     let search_key = match deps.search_key_derivation.derive_search_key().await {
         Ok(k) => k,
         Err(e) => {
-            warn!(entry_id = %entry_id, error = %e, "search repair: key derivation failed");
+            warn!(entry_id = %entry_id, error_kind = "search_key_derive", io_error_kind = io_error_kind(&e), "search repair: key derivation failed");
             return;
         }
     };
@@ -887,7 +924,7 @@ async fn repair_entry(deps: &SearchCoordinatorDeps, entry_id: &EntryId) {
     let (doc, postings) = match deps.search_pipeline.build(&input, &search_key) {
         Ok(v) => v,
         Err(e) => {
-            warn!(entry_id = %entry_id, error = %e, "search repair: pipeline build failed");
+            warn!(entry_id = %entry_id, error_kind = "pipeline_build", io_error_kind = io_error_kind(e.as_ref()), "search repair: pipeline build failed");
             return;
         }
     };
@@ -897,7 +934,7 @@ async fn repair_entry(deps: &SearchCoordinatorDeps, entry_id: &EntryId) {
             info!(entry_id = %entry_id, "search repair: re-projected corrupted render payload")
         }
         Err(e) => {
-            warn!(entry_id = %entry_id, error = %e, "search repair: index_entry failed; not retrying")
+            warn!(entry_id = %entry_id, error_kind = "index_entry", io_error_kind = io_error_kind(&e), "search repair: index_entry failed; not retrying")
         }
     }
 }

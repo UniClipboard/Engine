@@ -41,6 +41,7 @@ use uc_core::membership::{ContentExchangeGatePort, MemberRepositoryPort, PeerAdm
 use uc_core::ports::clipboard::{ActiveClipboardPullServeError, ActiveClipboardPullServePort};
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_observability_contract::diagnostics::connectivity::InboundPeerProtocol;
+use uc_observability_contract::error_source::io_error_kind;
 
 use super::super::inbound_peer::InboundPeerGate;
 use super::pull_wire::{self, PullResponse};
@@ -135,7 +136,8 @@ impl ProtocolHandler for IrohActiveClipboardPullServeHandler {
             Ok(pair) => pair,
             Err(err) => {
                 warn!(
-                    error = %err,
+                    error_kind = "accept_bi",
+                    io_error_kind = io_error_kind(&err),
                     peer = %peer_device_id.as_str(),
                     "active-clipboard pull serve: accept_bi failed; dropping connection"
                 );
@@ -150,7 +152,8 @@ impl ProtocolHandler for IrohActiveClipboardPullServeHandler {
             Ok(h) => h,
             Err(err) => {
                 warn!(
-                    error = %err,
+                    error_kind = "request_decode",
+                    io_error_kind = io_error_kind(&err),
                     peer = %peer_device_id.as_str(),
                     "active-clipboard pull serve: request decode failed; dropping connection"
                 );
@@ -205,7 +208,8 @@ impl ProtocolHandler for IrohActiveClipboardPullServeHandler {
         // 6. Write the response frame, then close the send half.
         if let Err(err) = pull_wire::write_response(&mut send, &response).await {
             warn!(
-                error = %err,
+                error_kind = "response_write",
+                io_error_kind = io_error_kind(&err),
                 peer = %peer_device_id.as_str(),
                 "active-clipboard pull serve: response write failed; dropping connection"
             );
@@ -213,7 +217,8 @@ impl ProtocolHandler for IrohActiveClipboardPullServeHandler {
         }
         if let Err(err) = send.finish() {
             debug!(
-                error = %err,
+                error_kind = "send_finish",
+                io_error_kind = io_error_kind(&err),
                 peer = %peer_device_id.as_str(),
                 "active-clipboard pull serve: send.finish failed"
             );

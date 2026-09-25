@@ -24,6 +24,7 @@ use std::net::SocketAddr;
 
 use uc_application::facade::settings::RelayCredentials;
 use uc_core::settings::model::CongestionController;
+use uc_observability_contract::error_source::io_error_kind;
 
 use uc_infra::network::iroh::{IrohNodeConfig, IrohRelayAccessToken};
 
@@ -79,7 +80,8 @@ pub fn load_relay_access_tokens(config: &mut IrohNodeConfig, credentials: &Relay
             Ok(None) => continue,
             Err(error) => {
                 tracing::warn!(
-                    error = %error,
+                    error_kind = "relay_credential_unavailable",
+                    io_error_kind = io_error_kind(&error),
                     "relay credential unavailable during startup; continuing without it"
                 );
                 continue;
@@ -89,7 +91,8 @@ pub fn load_relay_access_tokens(config: &mut IrohNodeConfig, credentials: &Relay
             Ok(token) => token,
             Err(error) => {
                 tracing::warn!(
-                    error = %error,
+                    error_kind = "relay_credential_unusable",
+                    io_error_kind = io_error_kind(&error),
                     "stored relay credential cannot be used; continuing without it"
                 );
                 continue;
@@ -135,7 +138,8 @@ pub(crate) fn parse_iroh_direct_reachability(
             Err(err) => {
                 tracing::warn!(
                     uc_iroh_bind_port = %raw,
-                    error = %err,
+                    error_kind = "invalid_bind_port",
+                    io_error_kind = io_error_kind(&err),
                     "invalid UC_IROH_BIND_PORT; ignoring (expected an integer 1..=65535)",
                 );
                 None
@@ -149,8 +153,8 @@ pub(crate) fn parse_iroh_direct_reachability(
             Ok(addr) => Some(addr),
             Err(err) => {
                 tracing::warn!(
-                    uc_iroh_public_addr = %raw,
-                    error = %err,
+                    error_kind = "invalid_public_addr",
+                    io_error_kind = io_error_kind(&err),
                     "invalid UC_IROH_PUBLIC_ADDR; ignoring (expected ip:port, e.g. 203.0.113.7:51820)",
                 );
                 None
@@ -202,10 +206,10 @@ pub fn apply_congestion_controller_from_env(cfg: &mut IrohNodeConfig) {
                 );
                 cfg.congestion_controller = cc;
             }
-            Err(err) => {
+            Err(_) => {
                 tracing::warn!(
                     uc_congestion_controller = %raw,
-                    error = %err,
+                    error_kind = "invalid_congestion_controller",
                     "invalid UC_CONGESTION_CONTROLLER; ignoring (expected cubic or bbr3)",
                 );
             }

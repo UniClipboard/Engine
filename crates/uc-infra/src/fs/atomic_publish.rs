@@ -20,6 +20,7 @@ use std::path::Path;
 use async_trait::async_trait;
 use tracing::{debug, warn};
 use uc_core::ports::atomic_publish::{AtomicPublishPort, PublishError};
+use uc_observability_contract::error_source::io_error_kind;
 
 pub struct FsAtomicPublisher;
 
@@ -78,7 +79,11 @@ impl AtomicPublishPort for FsAtomicPublisher {
         match tokio::task::spawn_blocking(move || probe_no_replace(&probe_dir)).await {
             Ok(supported) => supported,
             Err(err) => {
-                warn!(error = %err, "no-replace probe task did not run; assuming unsupported");
+                warn!(
+                    error_kind = "probe_task_join",
+                    io_error_kind = io_error_kind(&err),
+                    "no-replace probe task did not run; assuming unsupported"
+                );
                 false
             }
         }
@@ -112,7 +117,11 @@ fn probe_no_replace(probe_dir: &Path) -> bool {
     for path in &created {
         if let Err(err) = std::fs::remove_dir_all(path) {
             if err.kind() != std::io::ErrorKind::NotFound {
-                warn!(error = %err, "failed to clean up a no-replace probe entry");
+                warn!(
+                    error_kind = "probe_entry_cleanup",
+                    io_error_kind = io_error_kind(&err),
+                    "failed to clean up a no-replace probe entry"
+                );
             }
         }
     }
@@ -136,7 +145,11 @@ fn probe_no_replace(probe_dir: &Path) -> bool {
             false
         }
         Err(err) => {
-            debug!(error = %err, "could not stage a no-replace probe; assuming unsupported");
+            debug!(
+                error_kind = "probe_stage",
+                io_error_kind = io_error_kind(&err),
+                "could not stage a no-replace probe; assuming unsupported"
+            );
             false
         }
     }

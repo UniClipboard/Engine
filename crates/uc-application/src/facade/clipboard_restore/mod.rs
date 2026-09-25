@@ -8,6 +8,7 @@ use uc_core::ports::{
     clipboard::{AdvanceActiveClipboardPort, ClipboardPayloadResolverPort, PayloadResolveError},
     ClipboardSelectionRepositoryPort, ClockPort, DeviceIdentityPort,
 };
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::deps::{ClipboardEntryPorts, ClipboardRepresentationPorts};
 
@@ -245,7 +246,8 @@ impl ClipboardRestoreFacade {
     async fn touch_after_restore(&self, parsed_id: &EntryId, entry_id: &str) {
         if let Err(err) = self.touch_uc.execute(parsed_id).await {
             tracing::warn!(
-                error = %err,
+                error_kind = "entry_touch",
+                io_error_kind = io_error_kind(err.as_ref()),
                 entry_id = %entry_id,
                 "touch_clipboard_entry failed after restore"
             );

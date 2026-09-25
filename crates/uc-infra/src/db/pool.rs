@@ -4,7 +4,7 @@ use diesel::sqlite::SqliteConnection;
 use diesel::{connection::SimpleConnection, Connection, RunQueryDsl};
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use std::sync::{Arc, RwLock};
-use tracing::{info, warn};
+use tracing::info;
 
 /// Embed all diesel migrations at compile time
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
@@ -99,24 +99,15 @@ impl CustomizeConnection<SqliteConnection, diesel::r2d2::Error> for SqlitePragma
 
         diesel::sql_query("PRAGMA busy_timeout = 5000")
             .execute(conn)
-            .map_err(|e| {
-                warn!(error = %e, "Failed to set busy_timeout");
-                QueryError(e)
-            })?;
+            .map_err(|e| QueryError(e))?;
 
         diesel::sql_query("PRAGMA foreign_keys = ON")
             .execute(conn)
-            .map_err(|e| {
-                warn!(error = %e, "Failed to set foreign_keys=ON");
-                QueryError(e)
-            })?;
+            .map_err(|e| QueryError(e))?;
 
         diesel::sql_query("PRAGMA secure_delete = ON")
             .execute(conn)
-            .map_err(|e| {
-                warn!(error = %e, "Failed to set secure_delete=ON");
-                QueryError(e)
-            })?;
+            .map_err(|e| QueryError(e))?;
 
         Ok(())
     }

@@ -17,6 +17,7 @@ use uc_core::ports::clipboard::{
 };
 use uc_core::ports::{ClockPort, ContentHashPort};
 use uc_core::TaskRegistry;
+use uc_observability_contract::error_source::io_error_kind;
 
 use super::background_activity::BackgroundActivity;
 use crate::blob::BlobWriterPort;
@@ -170,7 +171,7 @@ impl ClipboardBackgroundPort for ClipboardBackgroundRuntime {
                             match janitor.run_once().await {
                             Ok(removed) if removed > 0 => info!(removed, "removed expired spool entries"),
                             Ok(_) => {}
-                            Err(error) => warn!(error = %error, "spool janitor sweep failed"),
+                            Err(error) => warn!(error_kind = "spool_janitor_sweep", io_error_kind = io_error_kind(error.as_ref()), "spool janitor sweep failed"),
                             }
                         }
                     }

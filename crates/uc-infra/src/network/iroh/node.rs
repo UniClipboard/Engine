@@ -24,6 +24,7 @@ use std::str::FromStr;
 use std::sync::Mutex;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use uc_application::deps::ClipboardReceiverPort;
+use uc_observability_contract::error_source::io_error_kind;
 
 use super::protocol_router::ProtocolRouterBuilder;
 use super::session_generation::{
@@ -1519,7 +1520,11 @@ impl IrohSessionBuilder {
                 }
             }
             Err(err) => {
-                warn!(error = %err, "iroh blobs: failed to sweep stale auto-* tags (non-fatal)");
+                warn!(
+                    error_kind = "stale_tag_sweep",
+                    io_error_kind = io_error_kind(&err),
+                    "iroh blobs: failed to sweep stale auto-* tags (non-fatal)"
+                );
             }
         }
 
@@ -1533,7 +1538,6 @@ impl IrohSessionBuilder {
         ));
 
         info!(
-            store_dir = %store_dir.display(),
             alpn = %String::from_utf8_lossy(BLOBS_ALPN),
             endpoint_id = %self.context.endpoint.id().fmt_short(),
             gc_interval_secs = crate::network::iroh::blobs::BLOBS_GC_INTERVAL.as_secs(),

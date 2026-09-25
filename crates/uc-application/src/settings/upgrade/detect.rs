@@ -21,6 +21,7 @@ use thiserror::Error;
 use tracing::{debug, warn};
 
 use uc_core::ports::{AppVersionStateError, AppVersionStatePort};
+use uc_observability_contract::error_source::io_error_kind;
 
 #[cfg(test)]
 use crate::space::CurrentSpaceIdentityError;
@@ -133,8 +134,8 @@ impl DetectUpgradeUseCase {
                 Err(e) => {
                     warn!(
                         target: "upgrade",
-                        raw = %raw,
-                        error = %e,
+                        error_kind = "cursor_version_parse",
+                        io_error_kind = io_error_kind(&e),
                         "cursor content failed to parse as semver; treating as upgrade from unknown"
                     );
                     Ok(UpgradeStatus::Upgraded {

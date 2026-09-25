@@ -23,6 +23,7 @@ use uc_core::file_transfer::{
     FileTransferEvent, FileTransferEventPublisherPort, FileTransferFailureReason,
 };
 use uc_core::ports::{FindAttemptIdForTransferPort, FindEntryIdForTransferPort};
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::facade::host_event::HostEventBus;
 use crate::support::outbound_entry_cache::OutboundEntryIdCache;
@@ -65,7 +66,12 @@ impl FileTransferHostEventPublisher {
             Ok(Some(entry_id)) => Some(entry_id),
             Ok(None) => None,
             Err(err) => {
-                warn!(error = %err, transfer_id, "failed to resolve entry_id from projection");
+                warn!(
+                    error_kind = "entry_id_resolve",
+                    io_error_kind = io_error_kind(&err),
+                    transfer_id,
+                    "failed to resolve entry_id from projection"
+                );
                 None
             }
         };
@@ -81,7 +87,12 @@ impl FileTransferHostEventPublisher {
         {
             Ok(attempt_id) => attempt_id,
             Err(error) => {
-                warn!(error = %error, transfer_id, "failed to resolve attempt_id from projection");
+                warn!(
+                    error_kind = "attempt_id_resolve",
+                    io_error_kind = io_error_kind(&error),
+                    transfer_id,
+                    "failed to resolve attempt_id from projection"
+                );
                 None
             }
         }

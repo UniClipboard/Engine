@@ -30,6 +30,7 @@ use uc_core::ports::clipboard::{
 };
 use uc_core::ports::search::search_index::SearchIndexPort;
 use uc_core::ports::{CacheFsPort, ClipboardEventWriterPort, ClipboardSelectionRepositoryPort};
+use uc_observability_contract::error_source::io_error_kind;
 
 use super::delete_entry::DeleteClipboardEntryUseCase;
 use super::file_references::HistoryFileReferencePort;
@@ -170,7 +171,8 @@ impl ReconcileMissingFilesUseCase {
                 Err(e) => {
                     warn!(
                         entry_id = %entry_id,
-                        error = %e,
+                        error_kind = "entry_delete",
+                        io_error_kind = io_error_kind(e.as_ref()),
                         "Reconcile: delete_entry failed for stale entry"
                     );
                     result.errors += 1;

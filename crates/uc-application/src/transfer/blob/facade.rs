@@ -18,6 +18,7 @@ use uc_core::ports::blob::{
 };
 use uc_core::ports::security::TransferCipherPort;
 use uc_core::ports::ContentHashPort;
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::facade::host_event::{HostEvent, HostEventBus, TransferHostEvent};
 use crate::transfer::blob::{
@@ -356,12 +357,12 @@ impl BlobTransferFacade {
                     .fail(FileTransferFailureReason::Unknown, Some(detail))
                     .await
                 {
-                    warn!(error = %error, transfer_id = %ctx.transfer_id, "could not finish unfetched transfer failure");
+                    warn!(error_kind = "unfetched_failure_finish", io_error_kind = io_error_kind(&error), transfer_id = %ctx.transfer_id, "could not finish unfetched transfer failure");
                 }
             }
             Ok(None) => {}
             Err(error) => {
-                warn!(error = %error, transfer_id = %ctx.transfer_id, "could not begin unfetched transfer failure");
+                warn!(error_kind = "unfetched_failure_begin", io_error_kind = io_error_kind(&error), transfer_id = %ctx.transfer_id, "could not begin unfetched transfer failure");
             }
         }
     }
@@ -453,7 +454,8 @@ impl BlobTransferFacade {
         {
             warn!(
                 transfer_id,
-                error = %err,
+                error_kind = "inflight_fetch_shutdown",
+                io_error_kind = io_error_kind(&err),
                 "cancel_inbound_transfer: shutdown_inflight_fetch failed (treated as already gone)"
             );
         }
@@ -462,7 +464,12 @@ impl BlobTransferFacade {
         // registry,这里取出来直接发,避免编一个污染事件流。
         if let Some(session) = entry.session {
             if let Err(error) = session.cancel(reason).await {
-                warn!(transfer_id, error = %error, "cancel_inbound_transfer: session cancel failed");
+                warn!(
+                    transfer_id,
+                    error_kind = "session_cancel",
+                    io_error_kind = io_error_kind(&error),
+                    "cancel_inbound_transfer: session cancel failed"
+                );
             }
         }
 
@@ -493,7 +500,7 @@ impl BlobTransferFacade {
                 Ok(InboundCancelOutcome::Cancelled) => cancelled += 1,
                 Ok(InboundCancelOutcome::NotInflight) => {}
                 Err(error) => {
-                    warn!(%transfer_id, %error, "failed to cancel directory member transfer");
+                    warn!(%transfer_id, error_kind = "member_transfer_cancel", io_error_kind = io_error_kind(&error), "failed to cancel directory member transfer");
                     if first_error.is_none() {
                         first_error = Some(error);
                     }
@@ -634,7 +641,7 @@ impl BlobTransferFacade {
                     if ctx.individual_lifecycle {
                         if let Some(session) = lifecycle_session.as_ref() {
                             if let Err(error) = session.complete().await {
-                                warn!(transfer_id = %ctx.transfer_id, error = %error, "blob fetch: session completion failed");
+                                warn!(transfer_id = %ctx.transfer_id, error_kind = "session_complete", io_error_kind = io_error_kind(&error), "blob fetch: session completion failed");
                             }
                         }
                     }
@@ -642,7 +649,7 @@ impl BlobTransferFacade {
                         if !ctx.individual_lifecycle {
                             if let Some(session) = lifecycle_session.as_ref() {
                                 if let Err(error) = session.complete().await {
-                                    warn!(transfer_id = %ctx.transfer_id, error = %error, "blob fetch: batch session completion failed");
+                                    warn!(transfer_id = %ctx.transfer_id, error_kind = "batch_session_complete", io_error_kind = io_error_kind(&error), "blob fetch: batch session completion failed");
                                 }
                             }
                         }
@@ -670,7 +677,7 @@ impl BlobTransferFacade {
                             .fail(FileTransferFailureReason::Unknown, Some(msg.to_string()))
                             .await
                         {
-                            warn!(transfer_id = %ctx.transfer_id, error = %error, "blob fetch: session failure settlement failed");
+                            warn!(transfer_id = %ctx.transfer_id, error_kind = "session_failure_settle", io_error_kind = io_error_kind(&error), "blob fetch: session failure settlement failed");
                         }
                     }
                     self.report_outbound_terminal(
@@ -795,7 +802,7 @@ impl BlobTransferFacade {
                     if ctx.individual_lifecycle {
                         if let Some(session) = lifecycle_session.as_ref() {
                             if let Err(error) = session.complete().await {
-                                warn!(transfer_id = %ctx.transfer_id, error = %error, "blob fetch: session completion failed");
+                                warn!(transfer_id = %ctx.transfer_id, error_kind = "session_complete", io_error_kind = io_error_kind(&error), "blob fetch: session completion failed");
                             }
                         }
                     }
@@ -803,7 +810,7 @@ impl BlobTransferFacade {
                         if !ctx.individual_lifecycle {
                             if let Some(session) = lifecycle_session.as_ref() {
                                 if let Err(error) = session.complete().await {
-                                    warn!(transfer_id = %ctx.transfer_id, error = %error, "blob fetch: batch session completion failed");
+                                    warn!(transfer_id = %ctx.transfer_id, error_kind = "batch_session_complete", io_error_kind = io_error_kind(&error), "blob fetch: batch session completion failed");
                                 }
                             }
                         }
@@ -839,7 +846,7 @@ impl BlobTransferFacade {
                             .fail(FileTransferFailureReason::Unknown, Some(msg))
                             .await
                         {
-                            warn!(transfer_id = %ctx.transfer_id, error = %error, "blob fetch: session failure settlement failed");
+                            warn!(transfer_id = %ctx.transfer_id, error_kind = "session_failure_settle", io_error_kind = io_error_kind(&error), "blob fetch: session failure settlement failed");
                         }
                     }
                     self.report_outbound_terminal(
@@ -975,7 +982,8 @@ impl BlobProgressSink for FileTransferProgressSink {
             {
                 warn!(
                     transfer_id = %self.transfer_id,
-                    error = %error,
+                    error_kind = "progress_settle",
+                    io_error_kind = io_error_kind(&error),
                     "blob fetch: progress settlement failed"
                 );
             }

@@ -675,7 +675,8 @@ impl BindingAnalyticsAdapter {
     }
 
     fn warn_callback(scope: &'static str, error: &crate::BindingAnalyticsHostError) {
-        tracing::warn!(scope, error = %error, "mobile analytics callback failed");
+        // 宿主回调错误是无字段的固定枚举，变体名即完整分类。
+        tracing::warn!(scope, error_kind = ?error, "mobile analytics callback failed");
     }
 }
 

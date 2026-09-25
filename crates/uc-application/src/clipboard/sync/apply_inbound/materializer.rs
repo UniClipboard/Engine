@@ -36,6 +36,7 @@ use uc_core::ports::{
     DIRECTORY_RECEIVE_STAGING_PREFIX,
 };
 use uc_core::{MimeType, ObservedClipboardRepresentation, SystemClipboardSnapshot};
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::clipboard::sync::payload_codec::V3BlobRef;
 use crate::facade::blob_transfer::{
@@ -390,13 +391,21 @@ pub async fn sweep_inbound_staging(dirs: &[PathBuf]) -> usize {
                     match tokio::fs::remove_dir_all(entry.path()).await {
                         Ok(()) => swept += 1,
                         Err(err) => {
-                            warn!(error = %err, "failed to sweep an inbound staging area")
+                            warn!(
+                                error_kind = "staging_area_sweep",
+                                io_error_kind = io_error_kind(&err),
+                                "failed to sweep an inbound staging area"
+                            )
                         }
                     }
                 }
                 Ok(None) => break,
                 Err(err) => {
-                    warn!(error = %err, "failed to enumerate a directory while sweeping");
+                    warn!(
+                        error_kind = "staging_dir_list",
+                        io_error_kind = io_error_kind(&err),
+                        "failed to enumerate a directory while sweeping"
+                    );
                     break;
                 }
             }
@@ -519,7 +528,11 @@ impl DirectoryPublication {
             if let Err(err) =
                 publish_via(self.publisher.as_ref(), self.mode, final_path, staged_from).await
             {
-                warn!(error = %err, "failed to withdraw a published directory root");
+                warn!(
+                    error_kind = "directory_root_withdraw",
+                    io_error_kind = io_error_kind(&err),
+                    "failed to withdraw a published directory root"
+                );
                 stuck += 1;
             }
         }
@@ -562,7 +575,11 @@ async fn discard_staging(staging: &std::path::Path) {
     match tokio::fs::remove_dir_all(staging).await {
         Ok(()) => {}
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-        Err(err) => warn!(error = %err, "failed to discard an inbound staging area"),
+        Err(err) => warn!(
+            error_kind = "staging_area_discard",
+            io_error_kind = io_error_kind(&err),
+            "failed to discard an inbound staging area"
+        ),
     }
 }
 
@@ -914,7 +931,8 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                         entry_id = %entry_id,
                         size_bytes = advertised_size,
                         representation_index = idx,
-                        error = %e,
+                        error_kind = "blob_fetch",
+                        io_error_kind = io_error_kind(e.as_ref()),
                         "materialize: representation-bound blob fetch failed, marking partial"
                     );
                     incomplete_rep_idxs.extend(pending_rep_idxs[loop_idx..].iter().copied());
@@ -1192,7 +1210,8 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                             total = blob_ref_total,
                             entry_id = %entry_id,
                             size_bytes = advertised_size,
-                            error = %e,
+                            error_kind = "blob_fetch",
+                            io_error_kind = io_error_kind(e.as_ref()),
                             "materialize: blob fetch failed, marking partial"
                         );
                         for remaining in &file_refs[idx..] {
@@ -1504,7 +1523,8 @@ impl FileCacheBlobMaterializer {
                     }
                     Err(err) => {
                         warn!(
-                            error = %err,
+                            error_kind = "auto_save_staging_open",
+                            io_error_kind = io_error_kind(err.as_ref()),
                             "could not open a staging area in the auto-save dir; \
                              using managed storage for this directory"
                         );
@@ -1892,11 +1912,19 @@ impl FileCacheBlobMaterializer {
                                             )
                                             .await
                                         {
-                                            warn!(error = %record_error, "failed to record partial directory publication");
+                                            warn!(
+                                                error_kind = "partial_publication_record",
+                                                io_error_kind = io_error_kind(&record_error),
+                                                "failed to record partial directory publication"
+                                            );
                                         }
                                     }
                                     Err(error) => {
-                                        warn!(error = %error, "partial directory root count exceeds u32");
+                                        warn!(
+                                            error_kind = "root_count_overflow",
+                                            io_error_kind = io_error_kind(&error),
+                                            "partial directory root count exceeds u32"
+                                        );
                                     }
                                 }
                             }
@@ -2595,7 +2623,8 @@ async fn remove_reserved_placeholder(path: &std::path::Path) {
     if let Err(err) = tokio::fs::remove_file(path).await {
         if err.kind() != std::io::ErrorKind::NotFound {
             warn!(
-                error = %err,
+                error_kind = "reserved_placeholder_remove",
+                io_error_kind = io_error_kind(&err),
                 "materialize: failed to remove reserved placeholder after fetch failure"
             );
         }

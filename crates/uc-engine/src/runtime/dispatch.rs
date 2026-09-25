@@ -84,6 +84,7 @@ use crate::{
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use uc_application::facade::NetworkRecoveryRequestError;
+use uc_observability_contract::error_source::io_error_kind;
 
 #[async_trait]
 impl EngineRuntime for ProductionRuntime {
@@ -574,7 +575,8 @@ impl EngineRuntime for ProductionRuntime {
                     }
                     Err(error) => {
                         tracing::warn!(
-                            error = %error,
+                            error_kind = "repairing_notification_deferred",
+                            io_error_kind = io_error_kind(&error),
                             "re-pairing notification deferred to setup-state recovery query"
                         );
                         self.events.send(crate::EngineEvent::RefreshRequired {
@@ -584,7 +586,8 @@ impl EngineRuntime for ProductionRuntime {
                 },
                 Err(error) => {
                     tracing::warn!(
-                        error = %error,
+                        error_kind = "facade_unavailable",
+                        io_error_kind = io_error_kind(&error),
                         "re-pairing notification deferred because the facade is unavailable"
                     );
                     self.events.send(crate::EngineEvent::RefreshRequired {

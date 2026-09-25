@@ -21,6 +21,7 @@ use uc_infra::device::LocalDeviceIdentity;
 use uc_infra::search::V3SearchProtection;
 use uc_infra::security::{ContentProtection, ProfileContentKeyVault, ProfilePayloadAdapters};
 use uc_infra::space::InMemorySession;
+use uc_observability_contract::error_source::io_error_kind;
 
 /// 已由启动 manifest/gate 选择的 profile primary payload 格式。
 ///
@@ -152,7 +153,11 @@ pub fn create_platform_layer(
                     let entry = match entry_result {
                         Ok(e) => e,
                         Err(e) => {
-                            tracing::warn!(error = %e, "Failed to read directory entry during V2 migration");
+                            tracing::warn!(
+                                error_kind = "dir_entry_read",
+                                io_error_kind = io_error_kind(&e),
+                                "Failed to read directory entry during V2 migration"
+                            );
                             errors += 1;
                             continue;
                         }
@@ -167,8 +172,8 @@ pub fn create_platform_layer(
                         }
                         if let Err(e) = std::fs::remove_file(&path) {
                             tracing::warn!(
-                                path = %path.display(),
-                                error = %e,
+                                error_kind = "old_blob_purge",
+                                io_error_kind = io_error_kind(&e),
                                 "Failed to purge old blob file"
                             );
                             errors += 1;
@@ -186,7 +191,11 @@ pub fn create_platform_layer(
 
                 if errors == 0 {
                     if let Err(e) = std::fs::File::create(&sentinel) {
-                        tracing::warn!(error = %e, "Failed to create V2 migration sentinel");
+                        tracing::warn!(
+                            error_kind = "sentinel_create",
+                            io_error_kind = io_error_kind(&e),
+                            "Failed to create V2 migration sentinel"
+                        );
                     }
                 } else {
                     tracing::warn!(
@@ -197,7 +206,11 @@ pub fn create_platform_layer(
                 }
             }
             Err(e) => {
-                tracing::warn!(error = %e, "Failed to read blob directory for cleanup");
+                tracing::warn!(
+                    error_kind = "blob_dir_read",
+                    io_error_kind = io_error_kind(&e),
+                    "Failed to read blob directory for cleanup"
+                );
             }
         }
     }

@@ -28,6 +28,7 @@ use uc_core::ids::DeviceId;
 use uc_core::ports::{
     ActiveClipboardDispatchError, ActiveClipboardDispatchPort, PeerAddressRepositoryPort,
 };
+use uc_observability_contract::error_source::io_error_kind;
 
 use super::super::connect::connect_with_staggered_retry;
 use super::super::peer_address_resolver::PeerAddressResolver;
@@ -102,7 +103,8 @@ impl ActiveClipboardDispatchPort for IrohActiveClipboardDispatchAdapter {
             Ok(connection) => connection,
             Err(err) => {
                 debug!(
-                    error = %err,
+                    error_kind = "dial_failed",
+                    io_error_kind = io_error_kind(&err),
                     "active-clipboard dispatch: dial failed, treating as Offline"
                 );
                 return Err(ActiveClipboardDispatchError::Offline);

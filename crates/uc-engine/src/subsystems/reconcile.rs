@@ -11,6 +11,7 @@ use uc_core::ids::DeviceId;
 use uc_core::membership::MemberRepositoryPort;
 use uc_core::ports::peer_address::PeerAddressRepositoryPort;
 use uc_core::trusted_peer::TrustedPeerRepositoryPort;
+use uc_observability_contract::error_source::io_error_kind;
 
 /// 启动期清理:删除所有"在 `peer_addr_repo` 但不在 `member_repo`"的孤儿
 /// 条目。
@@ -69,7 +70,8 @@ pub async fn reconcile_peer_addresses(
                 // 单条失败不阻断其余清理,reconcile 是治理性,不是关键路径。
                 tracing::warn!(
                     device_id = %device_id.as_str(),
-                    error = %err,
+                    error_kind = "orphan_remove",
+                    io_error_kind = io_error_kind(&err),
                     "peer_addr reconcile: failed to remove orphan; will retry next boot"
                 );
             }
@@ -134,7 +136,8 @@ pub async fn reconcile_trusted_peers(
             Err(err) => {
                 tracing::warn!(
                     device_id = %device_id.as_str(),
-                    error = %err,
+                    error_kind = "orphan_remove",
+                    io_error_kind = io_error_kind(&err),
                     "trusted_peer reconcile: failed to remove orphan; will retry next boot"
                 );
             }

@@ -27,6 +27,7 @@ use uc_core::ports::blob::{
 use uc_observability_contract::diagnostics::connectivity::{
     LocalWorkObservation, LocalWorkOutcome, LocalWorkStep,
 };
+use uc_observability_contract::error_source::io_error_kind;
 
 /// Minimum wall-clock interval between two `BlobProgressSink::report` calls.
 ///
@@ -332,7 +333,7 @@ impl BlobTransferPort for IrohBlobTransferAdapter {
             .map_err(|e| BlobError::Unavailable(e.into()))
     }
 
-    #[instrument(skip_all, fields(target = %target_path.display()))]
+    #[instrument(skip_all)]
     async fn fetch_to_path(
         &self,
         ticket: &BlobTicket,
@@ -433,7 +434,8 @@ impl BlobTransferPort for IrohBlobTransferAdapter {
                 warn!(
                     hash = %hash_prefix,
                     endpoint = %endpoint_id.fmt_short(),
-                    error = %err,
+                    error_kind = "endpoint_shutdown",
+                    io_error_kind = io_error_kind(&err),
                     "blob fetch: shutdown_endpoint failed (pool already gone)"
                 );
                 Err(BlobError::Internal(err.into()))
@@ -538,7 +540,8 @@ impl IrohBlobTransferAdapter {
                     hash = %hash_prefix,
                     elapsed_ms = connect_start.elapsed().as_millis() as u64,
                     conn = %conn,
-                    error = %e,
+                    error_kind = "endpoint_connect",
+                    io_error_kind = io_error_kind(&e),
                     "blob fetch: endpoint.connect failed"
                 );
                 return Err(BlobError::Unavailable(e.into()));
@@ -589,7 +592,8 @@ impl IrohBlobTransferAdapter {
                         elapsed_ms = download_start.elapsed().as_millis() as u64,
                         attempt,
                         conn = %conn,
-                        error = %e,
+                        error_kind = "download_stream_open",
+                        io_error_kind = io_error_kind(&e),
                         "blob fetch: downloader.stream() open failed"
                     );
                     return Err(BlobError::Unavailable(e.into()));
@@ -705,7 +709,8 @@ impl IrohBlobTransferAdapter {
                             tried_providers,
                             attempt,
                             conn = %conn,
-                            error = ?e,
+                            error_kind = "download_stream",
+                            io_error_kind = io_error_kind(&e),
                             "blob fetch: downloader Error event (root cause from anyhow chain)"
                         );
                         break Err(BlobError::Unavailable(e.into()));
@@ -728,7 +733,8 @@ impl IrohBlobTransferAdapter {
                         attempt,
                         max_attempts = BLOB_FETCH_MAX_ATTEMPTS,
                         backoff_ms = backoff.as_millis() as u64,
-                        cause = %msg,
+                        error_kind = "blob_unavailable_retry",
+                        io_error_kind = io_error_kind(msg.as_ref()),
                         "blob fetch: retrying after Unavailable"
                     );
                     tokio::time::sleep(backoff).await;
