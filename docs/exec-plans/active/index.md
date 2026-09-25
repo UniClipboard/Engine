@@ -11,6 +11,7 @@
 - [047 测试框架 PR 与远程 CI 观察](047-testkit-pr-and-ci-observation.md)（实施中：首轮 PR/CI 验证后继续累计 10 个工作日自然样本）
 - [048 testkit 采用指南与进程韧性](048-testkit-adoption-and-process-resilience.md)（实施中：补齐并行工件隔离、进程超时回收、首次使用指南与采用清单）
 - [050 成员多设备真实场景迁入 nextest 与 testkit 架构](050-membership-e2e-nextest-migration.md)（实施中：S1–S3、S5 已完成，CI 远程运行待登记）
+- [051 升级兼容性测试矩阵](051-upgrade-compatibility-matrix.md)（已确认，待实施：以 Desktop 1.0.0 各发布锁定的 Engine rev 为锚点，覆盖升级、先后升级、新旧互通与降级）
 - [历史可读时的邀请失败](2026-09-12-invitation-admission-recovery.md)
 - [本地产物准备](local-artifacts-preparation.md)
 - [配对通信等待诊断](2026-09-12-admission-exchange-diagnostics.md)
