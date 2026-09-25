@@ -2,7 +2,7 @@
 
 ## 状态与完整责任
 
-- **状态**：实施中；S0–S3 已完成（见“实施记录”），S3.a 进行中。
+- **状态**：实施中；S0–S4 与 S3.a 已完成（见“实施记录”），下一步 S5。
 - **日期**：2026-09-23。
 - **依据**：[ADR-027](../../design-docs/decisions/027-single-owner-space-membership-state.md)；2026-09-23 双 Desktop
   profile 配对后移除，移除方设备不消失、被移除方永久“正在更新空间设备状态”的诊断（结论见 ADR-027 背景）。
@@ -209,7 +209,9 @@ S3 完成时仍有以下失败，均在 S3 之前的基线（`cd9537b6`）上同
 ### S4 准入交接
 
 - Sponsor 最终确认与 Joiner 激活改为提交 Owner 输入，作为准入转换的 `BeforeCommit` 效果：Owner 先提交成员
-  事实，成功后才保存准入终态；同一准入事件的重复输入返回 `Duplicate`。
+  事实，成功后才保存准入终态；同一准入事件的重复输入不改变状态（聚合结果 `Unchanged`）。
+- 加入方的目标控制世代不带成员记录与读模型，提升后由 Owner 输入建立；分叉换组的目标世代由 Owner 预先形成
+  成员记录、Infra 原样写入（两种交接的原因见 ADR-027“准入交接”“分叉恢复”）。
 - 删除 `crates/uc-infra/src/space/admission/sponsor/complete.rs` 与
   `crates/uc-infra/src/security/space_control_generation/material.rs` 中的成员记录构造与改写；Infra 只保留
   安全材料、签名和存储能力。
@@ -474,3 +476,40 @@ S3 已完成（2026-09-24 用户确认）；剩余失败的诊断转入 S3.a。S
 验证：`cargo nextest run -p uc-core -p uc-application -p uc-infra` 全部通过；`membership-e2e` 全组 51/51（此前一次全组运行中
 `f1_remove_and_add_from_parent_head_preserve_branch_membership` 在负载下等待组密钥纪元超时，单独运行 3/3 通过，复跑全组通过）；
 交付检查通过。其余同类吞错由错误来源保留计划统一清点。
+
+### S4（2026-09-25，分支 `hp/uni/t-0010-android`）
+
+交接方式（用户确认，写入 [ADR-027](../../design-docs/decisions/027-single-owner-space-membership-state.md#准入交接)）：
+
+- **邀请方**：S3 已先提交成员事实再保存准入终态。S4 删除 Infra 激活中另写成员资料的一步
+  （`apply_member_facts`），成员读模型只由 Owner 提交在同一事务中维护。
+- **加入方**：目标控制世代只写安全材料与准入凭据，删除 `material.rs` 的成员记录构造与读模型写入，以及
+  准入切换输入中不再使用的 `target_membership_history`。激活执行提升目标世代后，Application 让 Owner 重新
+  加载并以 `join_space` 建立本机成员状态，成功后才保存准入记录；重放时识别同一加入不产生变化。
+- 加入后历史需要本机激活回执（参与历史位置摘要），而进入激活中后准入记录不再保存 Applied 消息。加入方
+  暂存目标新增 V3，在激活准备时写入回执；Core `accept_complete` 接收补全后的暂存目标。V2 自
+  `v1.1.0-rc.16` 起已冻结，V3 是本分支对该格式唯一的新版本；旧版本准备、目标世代已带成员记录的 V2
+  激活只核对一致。
+- **分叉换组**：检查点保存在成员记录中，提升后再由 Owner 输入会让崩溃后的恢复读到旧检查点，因此改为
+  Owner 以 `stage` 在当前状态上形成目标世代的记录（采用目标分支历史、检查点推进到 `TargetStaged`）与读模型
+  计划，Infra 在同一事务中原样写入目标世代；删除 Infra 中的 `BranchRecovered` 推进、检查点补推与关系表
+  改写。
+- **Owner 重新加载**：Owner 此前在控制世代切换后仍使用旧世代的已发布状态，换组提升后的第一次提交因修订号
+  冲突失败，下一轮才恢复。新增 `reload`，加入方激活与换组提升后都先重新加载。
+- 架构检查：`StagedMembershipRecord` 只由 Owner 构造；Infra 在成员记录编解码之外不得调用
+  `MembershipLedger::start`/`apply`、`LedgerInput` 或拼装 `SpaceMembershipRecord`；两项均有反例。
+
+新增测试：加入方“成员已提交、准入记录保存失败”后重放只提交一次；成员提交失败时准入记录不变、重试后
+完成；邀请方两种故障注入同样核对只有一次加入；暂存目标 V2 无回执、V3 保留 V2 字段与回执、未知或截断
+格式无效。故障注入以同一持久记录上的重试模拟重启（Owner 测试台的记录跨调用保留）。
+
+验证结果：
+
+| 检查 | 结果 |
+| --- | --- |
+| `cargo nextest run -p uc-core -p uc-application -p uc-infra --locked` | 2591 项全部通过 |
+| `cargo nextest run -p uc-engine --locked`（含 `public_contract`、宿主契约） | 358 项全部通过 |
+| `bash scripts/testing/run-test-group.sh membership-e2e` | 第一次 50/51：`f2_concurrent_leaf_removals_resolve_to_selected_branch` 在负载下 73.7 秒未清除分叉待选（快照断言超时）；单独运行 3/3 通过，耗时 56.2/56.2/57.6 秒，与改动前保留产物中的 55.7/58.6 秒一致。第二次全组 51/51 |
+| `cargo check -p uc-infra --features lan-compat --all-targets --locked` | 通过 |
+| `cargo metadata --locked`、`cargo check --workspace --all-targets --locked`、`cargo fmt --all -- --check`、`check-rust-style.mjs`、`check-engine-repository.mjs`、`git diff --check` | 通过（`uc-ohos-napi` 测试既有未使用导入告警，非本次改动） |
+| 实体双 Desktop 复现场景 | 跳过（需另行授权） |
