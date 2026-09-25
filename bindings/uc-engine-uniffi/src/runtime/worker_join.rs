@@ -39,6 +39,7 @@ impl WorkerJoin {
                 .spawn(move || {
                     let result = worker
                         .join()
+                        // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
                         .map_err(|_| BindingError::RuntimeUnavailable)
                         .and_then(|result| result);
                     lock(&shared.0).result = Some(result);

@@ -86,8 +86,8 @@ fn an_undecodable_route_is_rejected_not_skipped() {
 fn every_failure_is_a_terminal_identity_conflict() {
     for error in [
         SponsorRouteIdentityError::Mismatch,
-        SponsorRouteIdentityError::route_undecodable(),
-        SponsorRouteIdentityError::fingerprint_unavailable(),
+        SponsorRouteIdentityError::RouteUndecodable { source: None },
+        SponsorRouteIdentityError::FingerprintUnavailable { source: None },
     ] {
         let rendered = format!("{error:?}");
         match sponsor_identity_rejection(error) {

@@ -62,6 +62,7 @@ fn map_custom_relay_mutation(
             access_token: access_token
                 .map(|token| app::RelayAccessToken::new(token.expose().to_string()))
                 .transpose()
+                // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
                 .map_err(|_| invalid_relay_token_error())?,
         },
         CustomRelayMutation::Edit {
@@ -74,6 +75,7 @@ fn map_custom_relay_mutation(
             access_token: access_token
                 .map(|token| app::RelayAccessToken::new(token.expose().to_string()))
                 .transpose()
+                // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
                 .map_err(|_| invalid_relay_token_error())?,
         },
         CustomRelayMutation::Delete { url } => app::RelayConfigurationMutation::Delete { url },
@@ -100,6 +102,7 @@ pub(crate) async fn execute_query_settings(
     let settings = facade
         .settings()
         .await
+        // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
         .map_err(|_| internal_error(QUERY_SETTINGS_FAILED_CODE))?;
     Ok(OperationResult::Settings(Box::new(map_settings(settings))))
 }
@@ -592,6 +595,7 @@ fn unmap_retention_rule(value: RetentionRulePatch) -> Result<app::RetentionRuleP
         },
         RetentionRulePatch::ByCount { max_items } => app::RetentionRulePatchValue::ByCount {
             max_items: usize::try_from(max_items)
+                // TryFromIntError：目标分类完整表达数值范围不符。
                 .map_err(|_| "retention count exceeds this platform's limit".to_string())?,
         },
         RetentionRulePatch::ByContentType {

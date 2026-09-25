@@ -10,7 +10,9 @@ pub async fn execute_cancel_join_space(
 ) -> Result<OperationResult, EngineError> {
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(input.join_id)
+        // 宿主输入校验：无法解码的加入标识按不存在处理，拒绝原因已完整表达。
         .map_err(|_| not_found())?;
+    // 宿主输入校验：长度不符的加入标识按不存在处理（错误值只是原字节）。
     let join_id: [u8; 16] = bytes.try_into().map_err(|_| not_found())?;
     facade
         .cancel_space_join(join_id)

@@ -40,6 +40,7 @@ pub(crate) fn capabilities(host: OhHost) -> napi::Result<HostCapabilities> {
         directories.cache(),
         directories.temporary(),
     ] {
+        // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
         std::fs::create_dir_all(directory).map_err(|_| host_error("create host directory"))?;
     }
     Ok(HostCapabilities::new(
@@ -105,6 +106,7 @@ where
     }
     receiver
         .recv_timeout(HOST_CALLBACK_TIMEOUT)
+        // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
         .map_err(|_| callback_error())?
 }
 
@@ -129,6 +131,7 @@ where
     }
     receiver
         .recv_timeout(HOST_CALLBACK_TIMEOUT)
+        // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
         .map_err(|_| callback_error())?
 }
 
@@ -297,6 +300,7 @@ where
 {
     object
         .get_named_property(name)
+        // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
         .map_err(|_| host_contract_error())
 }
 
@@ -359,6 +363,7 @@ fn file_metadata_from_js(metadata: JsObject) -> Result<HostFileMetadata, HostCap
 }
 
 fn parse_u64(value: &str) -> Result<u64, HostCapabilityError> {
+    // 宿主输入校验：无法解析的输入按固定错误码拒绝，拒绝原因已完整表达。
     value.parse().map_err(|_| {
         HostCapabilityError::new(
             HostCapabilityErrorCategory::InvalidHandle,

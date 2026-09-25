@@ -301,7 +301,7 @@ E1 的检查会拒绝只删标识、仍保留 `{error}` 的改法，所以 E4 �
 - 暂缓：`EncryptionError` 与 `SecureStorageError` 以及 `AeadError::DecryptFailed` 的变体被 049 未提交的 `profile_key_recovery.rs` 模式匹配，等 049 提交后处理。
 
 
-### E7 S4 F 类：Application、Engine 与绑定（进行中）
+### E7 S4 F 类：Application、Engine 与绑定（已完成）
 
 - Application（已完成，S4 清零）：`RosterError::MembershipReconciliationUnavailable`、`ProfileFactoryResetError::{WipeKeys, ClearState}`、
   `RelayCredentialsError::Corrupt`、`JoinSpaceError::{PreviousJoinCannotBeSuperseded, InvalidStartMaterial}`、
@@ -315,5 +315,36 @@ E1 的检查会拒绝只删标识、仍保留 `{error}` 的改法，所以 E4 �
   `Unavailable`，此时日志通道尚未建立，按例外注释。
 - 兼容线（已完成）：`MobileFileUploadError::UploadFailed` 改为可选来源；二维码输入校验、ISO 时间文本格式校验、mpsc 接收、
   `()` 错误与整数转换按例外注释。
-- 公开契约边界（已决策，待实施）：`EngineError` / `BindingError` 保持现有公开形态；边界处的 `map_err(|_| code)` 改为经由命名的
-  映射函数，先按观测规范从 source chain 提取固定分类记录诊断，再产出错误码；规范中把“公开契约边界映射”列为允许例外。
+- 公开契约边界（已决策并完成注释）：最初选定“边界映射前记录分类”，但与观测规范“分类只在完整负责人已有的完成记录处提取一次、
+  Engine 不为观测新增记录点”冲突，改为：`EngineError` / `BindingError` 保持现有公开形态，边界映射列为允许例外并逐处注释
+  （84 处），规范已更新；宿主输入校验、整数转换、panic 载荷与 oneshot 接收同样按例外注释。Engine 与绑定层 S4 清零。
+  - `HostFileCopyError::SourceIo` 与成员历史同步的导出失败曾尝试携带来源，但来源无人读取（编译器提示字段未使用），已还原为例外注释。
+  - 转入 E10：逐项核对以下边界位置对应的能力是否已有负责人完成记录（组装层端口装饰器或业务完成事件）；缺失的按
+    [业务记录组织标准](../../design-docs/observability.md#业务记录组织标准)在负责人处补齐，不在边界点加日志。
+    - `bindings/uc-engine-uniffi/src/runtime.rs`：40 处
+    - `bindings/uc-engine-uniffi/src/runtime/lifecycle.rs`：1 处
+    - `bindings/uc-engine-uniffi/src/runtime/shutdown.rs`：1 处
+    - `bindings/uc-engine-uniffi/src/runtime/startup_lifecycle.rs`：1 处
+    - `bindings/uc-engine-uniffi/src/runtime/worker_join.rs`：1 处
+    - `bindings/uc-engine-uniffi/src/runtime/worker_shutdown.rs`：1 处
+    - `bindings/uc-ohos-napi/src/host.rs`：4 处
+    - `bindings/uc-ohos-napi/src/lib.rs`：2 处
+    - `bindings/uc-ohos-napi/src/local_diagnostics.rs`：1 处
+    - `bindings/uc-ohos-napi/src/runtime.rs`：3 处
+    - `crates/uc-engine/src/engine/lifecycle.rs`：2 处
+    - `crates/uc-engine/src/engine/mod.rs`：1 处
+    - `crates/uc-engine/src/engine/operation.rs`：1 处
+    - `crates/uc-engine/src/engine/shutdown.rs`：3 处
+    - `crates/uc-engine/src/operations/clipboard/query_active.rs`：1 处
+    - `crates/uc-engine/src/operations/device/member.rs`：1 处
+    - `crates/uc-engine/src/operations/device/peer_connections.rs`：1 处
+    - `crates/uc-engine/src/operations/settings/config_migration.rs`：1 处
+    - `crates/uc-engine/src/operations/settings/diagnostics.rs`：3 处
+    - `crates/uc-engine/src/operations/settings/settings.rs`：3 处
+    - `crates/uc-engine/src/operations/settings/upgrade_backups.rs`：2 处
+    - `crates/uc-engine/src/operations/settings/upgrade.rs`：2 处
+    - `crates/uc-engine/src/runtime/dispatch.rs`：1 处
+    - `crates/uc-engine/src/runtime/host_file.rs`：5 处
+    - `crates/uc-engine/src/runtime/lan_compatibility.rs`：1 处
+    - `crates/uc-engine/src/runtime/session_supervisor/lifecycle.rs`：1 处
+- 清理：前几批脚本为 crate 私有错误类型生成的、从未被调用的无来源构造函数已删除（曾产生 dead-code warning）。

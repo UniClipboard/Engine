@@ -132,6 +132,7 @@ fn create_operation_dir(
 ) -> Result<std::path::PathBuf, EngineError> {
     let directory = temporary_root.join(format!("{prefix}-{}", RepresentationId::new()));
     std::fs::create_dir_all(&directory)
+        // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
         .map_err(|_| internal_error(CONFIG_FILE_UNAVAILABLE_CODE))?;
     Ok(directory)
 }

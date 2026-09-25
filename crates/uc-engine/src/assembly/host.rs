@@ -104,7 +104,7 @@ impl SystemClipboardPort for HostClipboardAdapter {
                 files: file_metadata,
             }
             .encode()
-            .map_err(|_| anyhow::anyhow!("host clipboard metadata encoding failed"));
+            .map_err(|error| anyhow::Error::new(error).context("encode host clipboard metadata"));
             match encoded {
                 Ok(bytes) => representations.push(ObservedClipboardRepresentation::new(
                     RepresentationId::new(),

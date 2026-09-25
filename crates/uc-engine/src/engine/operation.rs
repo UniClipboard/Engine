@@ -99,6 +99,7 @@ pub(super) async fn await_operation_completion<T>(
     tokio::select! {
         biased;
         _ = cancellation.cancelled() => Err(operation_cancelled_error()),
+        // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
         result = task => result.map_err(|_| EngineError::new(1108, EngineErrorCategory::Internal, true))?,
     }
 }

@@ -255,6 +255,7 @@ impl EngineRuntime for ProductionRuntime {
                     self.current_facade()
                         .await?
                         .notify_connectivity_opportunity(reason)
+                        // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
                         .map_err(|_| super::operation_unavailable_error())?;
                     Ok(OperationResult::ConnectivityOpportunityAccepted)
                 }

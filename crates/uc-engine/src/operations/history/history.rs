@@ -23,6 +23,7 @@ pub async fn execute_list_history_entries(
     if input.limit == 0 || input.limit > MAX_HISTORY_LIST_SIZE {
         return Err(invalid_input_error());
     }
+    // TryFromIntError：目标分类完整表达数值范围不符。
     let offset = usize::try_from(input.offset).map_err(|_| invalid_input_error())?;
     let entries = facade
         .list_history_entries(ClipboardListInput {

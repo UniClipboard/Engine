@@ -92,28 +92,16 @@ pub enum FileSetCipherError {
 
 /// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
 impl FileSetCipherError {
-    pub fn decrypt_failed() -> Self {
-        Self::DecryptFailed { source: None }
-    }
-
     pub fn decrypt_failed_from(source: impl Into<anyhow::Error>) -> Self {
         Self::DecryptFailed {
             source: Some(source.into()),
         }
     }
 
-    pub fn encrypt_failed() -> Self {
-        Self::EncryptFailed { source: None }
-    }
-
     pub fn encrypt_failed_from(source: impl Into<anyhow::Error>) -> Self {
         Self::EncryptFailed {
             source: Some(source.into()),
         }
-    }
-
-    pub fn invalid_utf8() -> Self {
-        Self::InvalidUtf8 { source: None }
     }
 
     pub fn invalid_utf8_from(source: impl Into<anyhow::Error>) -> Self {

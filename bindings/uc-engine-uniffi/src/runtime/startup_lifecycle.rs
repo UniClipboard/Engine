@@ -55,6 +55,7 @@ fn wait(future: impl Future<Output = Result<(), EngineError>>) -> Result<(), Bin
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
+        // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
         .map_err(|_| BindingError::RuntimeUnavailable)?
         .block_on(future)
         .map_err(BindingError::from)

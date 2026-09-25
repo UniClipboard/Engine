@@ -19,6 +19,7 @@ pub(crate) async fn execute_query_diagnostics(
     let status = facade
         .diagnostics_status()
         .await
+        // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
         .map_err(|_| internal_error(QUERY_DIAGNOSTICS_FAILED_CODE))?;
     Ok(OperationResult::DiagnosticsStatus(
         DiagnosticsStatusSummary {
@@ -36,6 +37,7 @@ pub(crate) async fn execute_update_debug_mode(
     let result = facade
         .update_debug_mode(input.enabled)
         .await
+        // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
         .map_err(|_| internal_error(UPDATE_DEBUG_MODE_FAILED_CODE))?;
     Ok(OperationResult::DebugModeUpdated(DebugModeUpdateSummary {
         debug_mode: result.debug_mode,
@@ -57,6 +59,7 @@ pub(crate) async fn execute_export_diagnostic_logs(
     }
     let export_dir = temporary_root.join(format!("diagnostic-export-{}", RepresentationId::new()));
     std::fs::create_dir_all(&export_dir)
+        // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
         .map_err(|_| internal_error(EXPORT_DIAGNOSTIC_LOGS_FAILED_CODE))?;
 
     let exported = facade

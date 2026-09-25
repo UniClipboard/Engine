@@ -31,10 +31,6 @@ pub(super) enum RecoveryMaterialError {
 
 /// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
 impl RecoveryMaterialError {
-    pub fn encryption() -> Self {
-        Self::Encryption { source: None }
-    }
-
     pub fn encryption_from(source: impl Into<anyhow::Error>) -> Self {
         Self::Encryption {
             source: Some(source.into()),

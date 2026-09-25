@@ -15,12 +15,14 @@ pub(crate) async fn copy_path_to_host(
     destination: &HostFileHandle,
     source: &Path,
 ) -> Result<(), HostFileCopyError> {
+    // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
     let mut input = std::fs::File::open(source).map_err(|_| HostFileCopyError::SourceIo)?;
     let mut buffer = vec![0_u8; COPY_CHUNK_SIZE];
     let mut offset = 0_u64;
     loop {
         let read = input
             .read(&mut buffer)
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| HostFileCopyError::SourceIo)?;
         if read == 0 {
             break;
@@ -42,6 +44,7 @@ pub(crate) async fn copy_host_to_path(
     destination: &Path,
 ) -> Result<(), HostFileCopyError> {
     let metadata = files.metadata(source).map_err(HostFileCopyError::Host)?;
+    // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
     let mut output = std::fs::File::create(destination).map_err(|_| HostFileCopyError::SourceIo)?;
     let mut offset = 0_u64;
     while offset < metadata.size_bytes {
@@ -55,10 +58,12 @@ pub(crate) async fn copy_host_to_path(
         }
         output
             .write_all(&chunk)
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| HostFileCopyError::SourceIo)?;
         offset += chunk.len() as u64;
         tokio::task::yield_now().await;
     }
+    // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
     output.flush().map_err(|_| HostFileCopyError::SourceIo)
 }
 

@@ -71,18 +71,10 @@ pub enum ActiveRegisterCipherError {
 
 /// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
 impl ActiveRegisterCipherError {
-    pub fn decrypt() -> Self {
-        Self::Decrypt { source: None }
-    }
-
     pub fn decrypt_from(source: impl Into<anyhow::Error>) -> Self {
         Self::Decrypt {
             source: Some(source.into()),
         }
-    }
-
-    pub fn deserialize() -> Self {
-        Self::Deserialize { source: None }
     }
 
     pub fn deserialize_from(source: impl Into<anyhow::Error>) -> Self {
@@ -91,18 +83,10 @@ impl ActiveRegisterCipherError {
         }
     }
 
-    pub fn encrypt() -> Self {
-        Self::Encrypt { source: None }
-    }
-
     pub fn encrypt_from(source: impl Into<anyhow::Error>) -> Self {
         Self::Encrypt {
             source: Some(source.into()),
         }
-    }
-
-    pub fn serialize() -> Self {
-        Self::Serialize { source: None }
     }
 
     pub fn serialize_from(source: impl Into<anyhow::Error>) -> Self {

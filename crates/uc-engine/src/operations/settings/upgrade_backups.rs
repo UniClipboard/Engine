@@ -28,6 +28,7 @@ pub async fn execute_list_upgrade_backups(
                     .collect(),
             )
         })
+        // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
         .map_err(|_| {
             EngineError::new(
                 LIST_UPGRADE_BACKUPS_FAILED_CODE,
@@ -48,6 +49,7 @@ pub async fn execute_delete_upgrade_backup(
             false,
         ));
     }
+    // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
     backups.delete_backup(&input.id).await.map_err(|_| {
         EngineError::new(
             DELETE_UPGRADE_BACKUP_FAILED_CODE,

@@ -37,6 +37,7 @@ use crate::{
 };
 
 pub async fn execute_list_devices(facade: &AppFacade) -> Result<OperationResult, EngineError> {
+    // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
     let encryption = facade.encryption_state().await.map_err(|_| {
         error!(
             operation = "list_devices",

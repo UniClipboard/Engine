@@ -29,6 +29,7 @@ impl Engine {
             // 发送成功也可能尚未被接收；交接守卫持续持有关闭责任直到调用方实际取走。
             let _ = sender.send(result);
         });
+        // oneshot RecvError 只表示发送端已丢弃，没有其他诊断信息。
         receiver.await.map_err(|_| startup_task_failed())??.claim()
     }
 }

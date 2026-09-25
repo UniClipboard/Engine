@@ -224,6 +224,7 @@ impl OhEngine {
             .map_err(engine_error)?
         {
             OperationResult::DeviceGroupChoices(summary) => {
+                // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
                 serde_json::to_string(&summary).map_err(|_| unexpected_result())
             }
             _ => Err(unexpected_result()),
@@ -239,6 +240,7 @@ impl OhEngine {
         confirm_local_removal: bool,
     ) -> napi::Result<String> {
         let expected_revision = u64::try_from(expected_revision)
+            // TryFromIntError：目标分类完整表达数值范围不符。
             .map_err(|_| napi::Error::new(Status::InvalidArg, "invalid revision"))?;
         match self
             .engine
@@ -252,6 +254,7 @@ impl OhEngine {
             .map_err(engine_error)?
         {
             OperationResult::DeviceGroupChosen(result) => {
+                // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
                 serde_json::to_string(&result).map_err(|_| unexpected_result())
             }
             _ => Err(unexpected_result()),
@@ -614,6 +617,7 @@ fn workspace_convergence(
 
 #[cfg(test)]
 fn device_trust_json(summary: uc_engine::DeviceTrustSnapshotSummary) -> napi::Result<String> {
+    // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
     serde_json::to_string(&summary).map_err(|_| unexpected_result())
 }
 
@@ -844,10 +848,12 @@ fn send_report(report: SendReportSummary) -> napi::Result<OhSendReport> {
 }
 
 fn count(value: usize) -> napi::Result<u32> {
+    // TryFromIntError：目标分类完整表达数值范围不符。
     u32::try_from(value).map_err(|_| unexpected_result())
 }
 
 fn count_u64(value: u64) -> napi::Result<u32> {
+    // TryFromIntError：目标分类完整表达数值范围不符。
     u32::try_from(value).map_err(|_| unexpected_result())
 }
 

@@ -24,18 +24,10 @@ pub(super) enum SponsorRouteIdentityError {
 
 /// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
 impl SponsorRouteIdentityError {
-    pub fn fingerprint_unavailable() -> Self {
-        Self::FingerprintUnavailable { source: None }
-    }
-
     pub fn fingerprint_unavailable_from(source: impl Into<anyhow::Error>) -> Self {
         Self::FingerprintUnavailable {
             source: Some(source.into()),
         }
-    }
-
-    pub fn route_undecodable() -> Self {
-        Self::RouteUndecodable { source: None }
     }
 
     pub fn route_undecodable_from(source: impl Into<anyhow::Error>) -> Self {
