@@ -59,7 +59,7 @@ crate 根只保留稳定名称的统一导出，内部按职责分为七层：
 
 当底层变化事件不包含完整条目摘要时，核心只发送 `RefreshRequired(StateInvalidated)`，不得猜测内容类型、时间或预览。
 
-要求重新查询的事件（`DeviceTrustChanged`、`RefreshRequired`）只在对应状态可查询时送达。Space 切换从拆除旧会话到新会话可读之间，核心暂存这类事件，只保留最大 revision 与各类刷新原因各一次，切换结束后补发，其余事件照常发送。宿主因此不会在收到通知后立即查询却得到切换窗口内的不可用错误。
+要求重新查询的事件（`DeviceTrustChanged`、`RefreshRequired`，包括消费者积压产生的 `RefreshRequired(ConsumerLagged)`）只在对应状态可查询时送达。Space 切换从拆除旧会话到替换会话安装完成之间，核心暂存这类事件，只保留最大 revision 与各类刷新原因各一次，安装完成后补发；替换会话安装失败时继续暂存，直到后续安装成功。其余事件照常发送。宿主因此不会在收到通知后立即查询却得到切换窗口内的不可用错误。
 
 旧资料独立化完成后，核心发送 `RePairingRequired { scope: AllDevices }`。产品收到后立即展示完整重新配对引导；若启动时错过事件，则通过 `QuerySetupState.re_pairing_required` 恢复同一提示。该值为 `true` 表示仍须重新配对，为 `false` 表示无需重新配对；成功创建或加入新空间后由 Engine 清除。仅关闭提示不能清除该值。产品不得从设备列表自行推断范围，也不负责清理旧关系。
 

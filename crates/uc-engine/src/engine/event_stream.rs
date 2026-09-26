@@ -1,28 +1,66 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Notify};
 
 use crate::{EngineEvent, RefreshReason};
 
 pub struct EventStream {
     receiver: broadcast::Receiver<EngineEvent>,
+    refresh: Arc<RefreshGate>,
+    lag_pending: bool,
 }
 
 impl EventStream {
     pub async fn next(&mut self) -> Option<EngineEvent> {
-        match self.receiver.recv().await {
-            Ok(event) => Some(event),
-            Err(broadcast::error::RecvError::Lagged(_)) => Some(EngineEvent::RefreshRequired {
-                reason: RefreshReason::ConsumerLagged,
-            }),
-            Err(broadcast::error::RecvError::Closed) => None,
+        loop {
+            let released = self.refresh.released.notified();
+            tokio::pin!(released);
+            released.as_mut().enable();
+            if self.lag_pending && !self.refresh.is_held() {
+                self.lag_pending = false;
+                return Some(lagged());
+            }
+            tokio::select! {
+                biased;
+                _ = released, if self.lag_pending => {}
+                received = self.receiver.recv() => match received {
+                    Ok(event) => return Some(event),
+                    // 积压同样要求宿主重新查询：暂存期间先记下，照常交出其他事件，释放后再补交。
+                    Err(broadcast::error::RecvError::Lagged(_)) if self.refresh.is_held() => {
+                        self.lag_pending = true;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => return Some(lagged()),
+                    Err(broadcast::error::RecvError::Closed) => return None,
+                },
+            }
         }
+    }
+}
+
+fn lagged() -> EngineEvent {
+    EngineEvent::RefreshRequired {
+        reason: RefreshReason::ConsumerLagged,
+    }
+}
+
+/// 接收端只需知道暂存是否进行中；不持有发送端，最后一个 `EventSender` 丢弃时通道照常关闭。
+#[derive(Default)]
+struct RefreshGate {
+    held: AtomicBool,
+    released: Notify,
+}
+
+impl RefreshGate {
+    fn is_held(&self) -> bool {
+        self.held.load(Ordering::SeqCst)
     }
 }
 
 #[derive(Clone)]
 pub(crate) struct EventSender {
     state: Arc<Mutex<EventSenderState>>,
+    refresh: Arc<RefreshGate>,
 }
 
 struct EventSenderState {
@@ -67,34 +105,44 @@ impl EventSender {
     /// 会话切换期间当前会话已拆除，宿主此时重新查询只会得到不可用错误；
     /// 切换负责人在新会话可读之前持有守卫，保证通知送达时查询能读到对应状态。
     pub(crate) fn hold_refresh(&self) -> RefreshHold {
-        self.lock_state().refresh_holds += 1;
+        let mut state = self.lock_state();
+        state.refresh_holds += 1;
+        self.refresh.held.store(true, Ordering::SeqCst);
+        drop(state);
         RefreshHold {
             events: self.clone(),
         }
     }
 
     pub(crate) fn close(&self) {
-        let mut state = self.lock_state();
-        state.sender.take();
-        state.held = HeldRefresh::default();
+        {
+            let mut state = self.lock_state();
+            state.sender.take();
+            state.held = HeldRefresh::default();
+            self.refresh.held.store(false, Ordering::SeqCst);
+        }
+        self.refresh.released.notify_waiters();
     }
 
     fn release_refresh_hold(&self) {
-        let mut state = self.lock_state();
-        state.refresh_holds = state.refresh_holds.saturating_sub(1);
-        if state.refresh_holds > 0 {
-            return;
+        {
+            let mut state = self.lock_state();
+            state.refresh_holds = state.refresh_holds.saturating_sub(1);
+            if state.refresh_holds > 0 {
+                return;
+            }
+            let held = std::mem::take(&mut state.held);
+            if let Some(sender) = state.sender.as_ref() {
+                if let Some(revision) = held.device_trust_revision {
+                    let _ = sender.send(EngineEvent::DeviceTrustChanged { revision });
+                }
+                for reason in held.refresh_reasons {
+                    let _ = sender.send(EngineEvent::RefreshRequired { reason });
+                }
+            }
+            self.refresh.held.store(false, Ordering::SeqCst);
         }
-        let held = std::mem::take(&mut state.held);
-        let Some(sender) = state.sender.as_ref() else {
-            return;
-        };
-        if let Some(revision) = held.device_trust_revision {
-            let _ = sender.send(EngineEvent::DeviceTrustChanged { revision });
-        }
-        for reason in held.refresh_reasons {
-            let _ = sender.send(EngineEvent::RefreshRequired { reason });
-        }
+        self.refresh.released.notify_waiters();
     }
 
     fn lock_state(&self) -> MutexGuard<'_, EventSenderState> {
@@ -115,6 +163,7 @@ impl Drop for RefreshHold {
 
 pub(crate) fn event_channel(capacity: usize) -> (EventSender, EventStream) {
     let (sender, receiver) = broadcast::channel(capacity);
+    let refresh = Arc::new(RefreshGate::default());
     (
         EventSender {
             state: Arc::new(Mutex::new(EventSenderState {
@@ -122,8 +171,13 @@ pub(crate) fn event_channel(capacity: usize) -> (EventSender, EventStream) {
                 refresh_holds: 0,
                 held: HeldRefresh::default(),
             })),
+            refresh: Arc::clone(&refresh),
         },
-        EventStream { receiver },
+        EventStream {
+            receiver,
+            refresh,
+            lag_pending: false,
+        },
     )
 }
 
@@ -213,5 +267,58 @@ mod tests {
             stream.next().await,
             Some(EngineEvent::DeviceTrustChanged { revision: 4 })
         );
+    }
+
+    #[tokio::test]
+    async fn consumer_lag_during_a_refresh_hold_is_reported_after_release() {
+        let (events, mut stream) = event_channel(2);
+        let hold = events.hold_refresh();
+        for state in [
+            EngineState::Quiescing,
+            EngineState::Quiesced,
+            EngineState::Suspended,
+        ] {
+            events.send(EngineEvent::StateChanged { state });
+        }
+
+        // 暂存期间其他事件照常交出，积压通知不提前出现。
+        for state in [EngineState::Quiesced, EngineState::Suspended] {
+            assert_eq!(
+                stream.next().await,
+                Some(EngineEvent::StateChanged { state })
+            );
+        }
+        let lagged = tokio::spawn(async move {
+            let next = stream.next().await;
+            (next, stream)
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!lagged.is_finished());
+
+        drop(hold);
+        let (next, _stream) = lagged.await.expect("lagged consumer task");
+        assert_eq!(
+            next,
+            Some(EngineEvent::RefreshRequired {
+                reason: RefreshReason::ConsumerLagged,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_the_last_sender_ends_the_stream() {
+        let (events, mut stream) = event_channel(2);
+        events.send(EngineEvent::StateChanged {
+            state: EngineState::Quiesced,
+        });
+        drop(events);
+
+        assert_eq!(
+            stream.next().await,
+            Some(EngineEvent::StateChanged {
+                state: EngineState::Quiesced,
+            })
+        );
+        assert_eq!(stream.next().await, None);
     }
 }
