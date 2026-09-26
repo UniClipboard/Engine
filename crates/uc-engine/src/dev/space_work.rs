@@ -122,13 +122,6 @@ impl SpaceWorkTestControl {
         };
     }
 
-    fn reply_drop_connection_failed(&self) {
-        let mut state = self.lock_state();
-        if state.final_confirmation == FinalConfirmationFailureState::DropNextSuccessReply {
-            state.final_confirmation = FinalConfirmationFailureState::AwaitingRetry;
-        }
-    }
-
     pub(crate) fn begin_continuation_connection(&self) -> ContinuationTestAction {
         let mut state = self.lock_state();
         match state.final_confirmation {
@@ -159,15 +152,17 @@ impl SpaceWorkTestControl {
         }
     }
 
+    /// 只有邀请方确实提交了最终确认，才丢弃其成功回复并用掉这次安排；连接或交换失败时保持安排，
+    /// 由下一次连接继续执行。
     fn drop_success_reply(&self, kind: SpaceAdmissionMessageKind, succeeded: bool) -> bool {
         let mut state = self.lock_state();
-        if state.final_confirmation != FinalConfirmationFailureState::DropNextSuccessReply {
+        if state.final_confirmation != FinalConfirmationFailureState::DropNextSuccessReply
+            || kind != SpaceAdmissionMessageKind::CompleteAck
+            || !succeeded
+        {
             return false;
         }
         state.final_confirmation = FinalConfirmationFailureState::AwaitingRetry;
-        if kind != SpaceAdmissionMessageKind::CompleteAck || !succeeded {
-            return false;
-        }
         push_event(
             &mut state,
             DevSpaceWorkEventKind::FinalConfirmationSponsorCommitted,
@@ -328,8 +323,6 @@ impl SpaceAdmissionTransportPort for ControlledSpaceAdmissionTransport {
             Err(error) => {
                 if action == ContinuationTestAction::TrackRetry {
                     self.control.retry_connection_failed();
-                } else if action == ContinuationTestAction::DropSuccessReply {
-                    self.control.reply_drop_connection_failed();
                 }
                 Err(error)
             }
@@ -499,6 +492,35 @@ mod tests {
                 )
                 .await,
             events[2]
+        );
+    }
+
+    #[test]
+    fn failed_attempts_keep_the_success_reply_drop_armed() {
+        let control = SpaceWorkTestControl::default();
+        control
+            .arm_final_confirmation_success_reply_drop()
+            .expect("test reply drop can be armed");
+        control.final_confirmation_ready();
+
+        // 连接被拒时交换从未发生，安排留给下一次连接。
+        assert_eq!(
+            control.begin_continuation_connection(),
+            ContinuationTestAction::DropSuccessReply
+        );
+        assert_eq!(
+            control.begin_continuation_connection(),
+            ContinuationTestAction::DropSuccessReply
+        );
+        assert!(!control.drop_success_reply(SpaceAdmissionMessageKind::CompleteAck, false));
+        assert_eq!(
+            control.begin_continuation_connection(),
+            ContinuationTestAction::DropSuccessReply
+        );
+        assert!(control.drop_success_reply(SpaceAdmissionMessageKind::CompleteAck, true));
+        assert_eq!(
+            control.begin_continuation_connection(),
+            ContinuationTestAction::TrackRetry
         );
     }
 
