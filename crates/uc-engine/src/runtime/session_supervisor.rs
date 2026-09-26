@@ -560,6 +560,10 @@ impl SessionSupervisor {
                 }
             }
 
+            // 拆除会话到新会话可读之前，成员变化通知只能暂存，否则宿主重新查询会得到不可用错误。
+            let _refresh_hold = self
+                .configured_factory()
+                .map(|factory| factory.events.hold_refresh());
             self.quiesce_network_session().await?;
             let session = self
                 .runtime
@@ -896,6 +900,8 @@ impl SessionSupervisor {
                 return Err(self.shutdown_after_failure(primary).await);
             }
         };
+        // 未完成的切换在本函数内完成并重建会话；守卫持续到函数返回。
+        let _refresh_hold = pending_transition.then(|| factory.events.hold_refresh());
         if pending_transition {
             self.quiesce_network_session().await?;
             let session = self
