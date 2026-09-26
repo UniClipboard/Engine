@@ -5,13 +5,13 @@ mod use_case;
 
 pub use model::{
     AdmissionMaintenanceOutcome, KnownPeerContact, MembershipMaintenanceReport,
-    MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger,
+    MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger, QuerySpaceWorkModeError,
+    SpaceWorkMode, SpaceWorkPermit,
 };
+pub(crate) use ports::RunMembershipWorkPort;
 pub use ports::{
-    DeliverPendingGroupUpdatesPort, DeliverRestrictedMembershipPort,
-    ReconcileMembershipProjectionPort, RecoverMembershipConflictsPort,
-    RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort, SynchronizeMembershipMaintenancePort,
-    WakeSpaceMembershipMaintenancePort,
+    AcquireSpaceWorkPermitPort, DeliverPendingGroupUpdatesPort, RecoverMembershipConflictsPort,
+    RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort, WakeSpaceMembershipMaintenancePort,
 };
 pub use runtime::MembershipNetworkActivityPort;
 pub(crate) use runtime::{

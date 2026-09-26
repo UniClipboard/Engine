@@ -398,9 +398,26 @@ pub enum JoinSpaceRejectionReasonSummary {
     BaseHistoryChanged,
     JoinerHistoryAhead,
     HistoryConflict,
+    CompletionInvalid,
+    MembershipHistoryInvalid,
+    SecurityMaterialInvalid,
+    RelationshipConflict,
+    ActivationStateInvalid,
     PeerUpgradeRequired,
     Cancelled,
     RemovedBeforeActivation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JoinSpaceAttentionReasonSummary {
+    OutcomeCannotBeProven,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JoinSpaceAttentionRecoverySummary {
+    PreserveDataAndContactSupport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -418,6 +435,19 @@ pub enum JoinSpaceStatusSummary {
         sponsor_identity_fingerprint: Option<String>,
         cancel_requested: bool,
         peer_upgrade_required: bool,
+    },
+    Processing {
+        join_id: String,
+        target_space_id: String,
+        sponsor_device_id: String,
+        sponsor_identity_fingerprint: String,
+        peer_upgrade_required: bool,
+    },
+    NeedsAttention {
+        join_id: String,
+        reason: JoinSpaceAttentionReasonSummary,
+        recovery: JoinSpaceAttentionRecoverySummary,
+        next_retry_at_ms: Option<i64>,
     },
     Rejected {
         join_id: String,
@@ -1134,6 +1164,8 @@ pub enum DeviceGroupRelationshipSummary {
     Consistent,
     ConfirmationPending,
     PendingLocalDecision,
+    /// 设备已被移除，等待该设备确认收到移除；不需要本机决策。
+    AwaitingRemovalAcknowledgement,
     Diverged,
     Unverifiable,
     Unknown,
@@ -1239,6 +1271,93 @@ pub struct PendingInboundMemberSummary {
     pub display_name: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundPairingStatusSummary {
+    AwaitingConfirmation,
+    ConfirmationMissed,
+    NeedsAttention,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboundPairingSummary {
+    pub pairing_id: String,
+    pub device_id: Option<String>,
+    pub display_name: Option<String>,
+    pub status: InboundPairingStatusSummary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MembershipMaintenanceHealthPhaseSummary {
+    #[default]
+    Healthy,
+    Retrying,
+    NeedsAttention,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MembershipMaintenanceProblemSummary {
+    MembershipHistoryRejected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MembershipMaintenanceRecoverySummary {
+    ResolveDeviceTrust,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct MembershipMaintenanceHealthSummary {
+    pub phase: MembershipMaintenanceHealthPhaseSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<MembershipMaintenanceProblemSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<MembershipMaintenanceRecoverySummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_retry_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SpaceDeviceUpdatePhaseSummary {
+    #[default]
+    Updating,
+    Completed,
+    RetryableFailure,
+    NeedsAttention,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpaceDeviceUpdateProblemSummary {
+    DeviceStateRejected,
+    DeviceRelationshipConflict,
+    DeviceSecurityUpdateRejected,
+    DeviceUpgradeRequired,
+    LocalIdentityMismatch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpaceDeviceUpdateRecoverySummary {
+    ReviewDevices,
+    UpdateApp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SpaceDeviceUpdateStatusSummary {
+    pub phase: SpaceDeviceUpdatePhaseSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<SpaceDeviceUpdateProblemSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<SpaceDeviceUpdateRecoverySummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_retry_at_ms: Option<i64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceTrustSnapshotSummary {
     pub revision: u64,
@@ -1246,7 +1365,14 @@ pub struct DeviceTrustSnapshotSummary {
     pub local_membership: DeviceMembershipSummary,
     pub current_change: Option<DeviceTrustChangeSummary>,
     pub current_join: Option<JoinSpaceStatusSummary>,
+    #[serde(default)]
+    pub inbound_pairings: Vec<InboundPairingSummary>,
     pub pending_inbound_member: Option<PendingInboundMemberSummary>,
+    #[serde(default)]
+    pub space_device_update: SpaceDeviceUpdateStatusSummary,
+    /// Desktop/Mobile 迁移期兼容字段；只由 `space_device_update` 投影。
+    #[serde(default)]
+    pub maintenance_health: MembershipMaintenanceHealthSummary,
     pub devices: Vec<DeviceTrustRelationshipSummary>,
     pub recovery: DeviceTrustRecoverySummary,
     pub allowed_actions: Vec<DeviceTrustActionSummary>,
@@ -1262,7 +1388,10 @@ impl DeviceTrustSnapshotSummary {
             local_membership: DeviceMembershipSummary::Unavailable,
             current_change: None,
             current_join: None,
+            inbound_pairings: Vec::new(),
             pending_inbound_member: None,
+            space_device_update: SpaceDeviceUpdateStatusSummary::default(),
+            maintenance_health: MembershipMaintenanceHealthSummary::default(),
             devices: Vec::new(),
             recovery: DeviceTrustRecoverySummary::NotAvailableInThisVersion,
             allowed_actions: Vec::new(),

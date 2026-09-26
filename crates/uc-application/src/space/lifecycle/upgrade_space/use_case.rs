@@ -79,7 +79,7 @@ impl UpgradeSpaceUseCase {
             .current_space_identity
             .requires_legacy_profile_isolation()
             .await
-            .map_err(|error| UpgradeSpaceError::ReadSetupState(error.to_string()))?;
+            .map_err(|error| UpgradeSpaceError::ReadSetupState(anyhow::Error::from(error)))?;
 
         if requires_legacy_profile_isolation
             && transition.crosses(&legacy_profile_isolation_version)

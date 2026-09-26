@@ -39,18 +39,18 @@ use super::discovery_constants::{
 pub enum MdnsResolverError {
     /// `swarm-discovery` couldn't bind a multicast socket on any local
     /// interface. Joiner UI: "LAN resolution unavailable".
-    #[error("mDNS socket bind failed: {0}")]
-    SocketBind(String),
+    #[error("mDNS socket bind failed")]
+    SocketBind(#[source] anyhow::Error),
 
     /// Internal task plumbing failure. Should not normally happen — kept
     /// for defence in depth.
-    #[error("internal resolver error: {0}")]
-    Internal(String),
+    #[error("internal resolver error")]
+    Internal(#[source] anyhow::Error),
 }
 
 impl From<SpawnError> for MdnsResolverError {
     fn from(err: SpawnError) -> Self {
-        Self::SocketBind(err.to_string())
+        Self::SocketBind(err.into())
     }
 }
 

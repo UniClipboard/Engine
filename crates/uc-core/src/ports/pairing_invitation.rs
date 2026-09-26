@@ -142,8 +142,8 @@ pub enum InvitationError {
     AddressNotAvailable(IpAddr),
 
     /// Unexpected adapter-side failure; message is for logs only.
-    #[error("internal invitation error: {0}")]
-    Internal(String),
+    #[error("internal invitation error")]
+    Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl fmt::Debug for InvitationError {
@@ -196,8 +196,8 @@ pub enum ConsumeInvitationError {
     ServiceUnavailable,
 
     /// Adapter-side failure; message is for logs only.
-    #[error("internal consume error: {0}")]
-    Internal(String),
+    #[error("internal consume error")]
+    Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// Sponsor-side invitation lifecycle.

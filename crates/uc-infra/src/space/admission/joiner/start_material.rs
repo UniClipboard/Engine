@@ -75,8 +75,8 @@ impl DefaultJoinerStartMaterial {
                 input.invitation_code.as_str(),
                 chrono::Utc::now().timestamp_millis(),
             )
-            .map_err(|_| JoinerStartMaterialError::InvalidInvitation)?
-            .ok_or(JoinerStartMaterialError::InvalidInvitation)?;
+            .map_err(JoinerStartMaterialError::invalid_invitation_from)?
+            .ok_or_else(JoinerStartMaterialError::invalid_invitation)?;
 
             let settings = self.settings.load().await.map_err(|error| {
                 JoinerStartMaterialError::unavailable(
@@ -151,7 +151,7 @@ impl DefaultJoinerStartMaterial {
             )
             .map_err(|error| JoinerStartMaterialError::unavailable(anyhow::Error::new(error)))?;
             let join_request = SpaceAdmissionEnvelopeV1::new_with_version(
-                SpaceAdmissionProtocolVersion::V2,
+                SpaceAdmissionProtocolVersion::CURRENT,
                 admission_id,
                 AdmissionRole::Joiner,
                 0,
@@ -222,7 +222,7 @@ impl JoinerStartMaterialPort for DefaultJoinerStartMaterial {
         let context: OwnedJoinerStartContextV1 = postcard::from_bytes(start_context.as_bytes())
             .map_err(|error| JoinerStartMaterialError::unavailable(anyhow::Error::new(error)))?;
         if context.format_version != 1 {
-            return Err(JoinerStartMaterialError::InvalidInvitation);
+            return Err(JoinerStartMaterialError::invalid_invitation());
         }
         let passphrase = String::from_utf8(context.passphrase)
             .map_err(|error| JoinerStartMaterialError::unavailable(anyhow::Error::new(error)))?;
@@ -240,7 +240,7 @@ fn preserve_admission_route(
     encoded_route: &[u8],
 ) -> Result<SpaceAdmissionRoute, JoinerStartMaterialError> {
     SpaceAdmissionRoute::from_bytes(encoded_route.to_vec())
-        .map_err(|_| JoinerStartMaterialError::InvalidInvitation)
+        .map_err(JoinerStartMaterialError::invalid_invitation_from)
 }
 
 fn mint_admission_id() -> SpaceAdmissionId {
@@ -275,7 +275,6 @@ fn mint_message_id() -> AdmissionMessageId {
 
 #[cfg(test)]
 mod tests {
-    use std::error::Error;
 
     use async_trait::async_trait;
     use uc_core::crypto::domain::Passphrase;
@@ -322,8 +321,16 @@ mod tests {
             .err()
             .expect("invalid full invitation must fail");
 
-        assert!(matches!(error, JoinerStartMaterialError::InvalidInvitation));
-        assert!(error.source().is_none());
+        // 无效输入归为 InvalidInvitation，来源只是解码错误本身，而不是依赖故障。
+        let JoinerStartMaterialError::InvalidInvitation {
+            source: Some(source),
+        } = &error
+        else {
+            panic!("expected InvalidInvitation with its decode source, got {error:?}");
+        };
+        assert!(source
+            .downcast_ref::<crate::space::admission::full_invitation::FullInvitationCodecError>()
+            .is_some());
     }
 
     fn adapter() -> DefaultJoinerStartMaterial {

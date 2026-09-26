@@ -349,9 +349,9 @@ mod tests {
             &self,
             _input: ClipboardLiveIndexInput,
         ) -> Result<ClipboardLiveIndexOutcome, ClipboardLiveIndexError> {
-            Err(ClipboardLiveIndexError::Internal(
-                "sensitive index detail".to_owned(),
-            ))
+            Err(ClipboardLiveIndexError::Internal(anyhow::anyhow!(
+                "sensitive index detail"
+            )))
         }
     }
 
@@ -394,7 +394,9 @@ mod tests {
             _input: ClipboardOutboundInput,
             _targets: Option<Vec<DeviceId>>,
         ) -> Result<ClipboardOutboundOutcome, ClipboardOutboundError> {
-            Err(ClipboardOutboundError::Internal("test failure".to_owned()))
+            Err(ClipboardOutboundError::Internal(anyhow::anyhow!(
+                "test failure"
+            )))
         }
     }
 

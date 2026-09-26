@@ -63,11 +63,26 @@ pub struct SponsorCompletePreparation<'a> {
 
 pub struct SponsorSettlementPreparation<'a> {
     complete_reply: &'a SpaceAdmissionEnvelopeV1,
+    committed_history: &'a AdmissionSignedMembershipHistory,
+    activation_receipt: &'a AdmissionActivationReceipt,
+    activated_security: &'a AdmissionActivatedSecurityState,
 }
 
 impl SponsorSettlementPreparation<'_> {
     pub const fn complete_reply(&self) -> &SpaceAdmissionEnvelopeV1 {
         self.complete_reply
+    }
+
+    pub const fn committed_history(&self) -> &AdmissionSignedMembershipHistory {
+        self.committed_history
+    }
+
+    pub const fn activation_receipt(&self) -> &AdmissionActivationReceipt {
+        self.activation_receipt
+    }
+
+    pub const fn activated_security(&self) -> &AdmissionActivatedSecurityState {
+        self.activated_security
     }
 }
 
@@ -240,7 +255,25 @@ impl SpaceAdmissionAggregate {
         }
     }
 
-    pub const fn has_expirable_local_join(&self) -> bool {
+    /// 旧记录越过了本机可安全放弃的阶段，却没有双方认可的期限，也没有尝试摘要。
+    ///
+    /// 这类记录无法凭时钟自动收尾：取代时只能按本机取消结束，展示上需要用户处理。
+    pub(super) const fn is_unbounded_late_join(&self) -> bool {
+        self.attempt_timeline.is_none()
+            && self.attempt_digest.is_none()
+            && matches!(
+                &self.state,
+                SpaceAdmissionRecordState::Joiner(
+                    SpaceAdmissionJoinerState::Prepared(_)
+                        | SpaceAdmissionJoinerState::Committed(_)
+                        | SpaceAdmissionJoinerState::Applied(_)
+                        | SpaceAdmissionJoinerState::Activating(_)
+                        | SpaceAdmissionJoinerState::Cancelling(_)
+                )
+            )
+    }
+
+    pub(super) const fn has_expirable_local_join(&self) -> bool {
         self.attempt_timeline.is_some()
             && (matches!(
                 &self.state,
@@ -259,7 +292,7 @@ impl SpaceAdmissionAggregate {
             ))
     }
 
-    pub const fn has_expirable_sponsor(&self) -> bool {
+    pub(super) const fn has_expirable_sponsor(&self) -> bool {
         self.attempt_timeline.is_some()
             && self.attempt_digest.is_some()
             && matches!(
@@ -268,6 +301,7 @@ impl SpaceAdmissionAggregate {
                     SpaceAdmissionSponsorState::Accepted(_)
                         | SpaceAdmissionSponsorState::Candidate(_)
                         | SpaceAdmissionSponsorState::Committed(_)
+                        | SpaceAdmissionSponsorState::Applied(_)
                 )
             )
     }
@@ -375,7 +409,7 @@ impl SpaceAdmissionAggregate {
         }
     }
 
-    pub const fn has_pending_local_termination(&self) -> bool {
+    pub(super) const fn has_pending_local_termination(&self) -> bool {
         matches!(
             &self.state,
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(state))
@@ -383,7 +417,7 @@ impl SpaceAdmissionAggregate {
         )
     }
 
-    pub const fn has_pending_sponsor_abandonment(&self) -> bool {
+    pub(super) const fn has_pending_sponsor_abandonment(&self) -> bool {
         match &self.state {
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
                 SpaceAdmissionRejectedState::Sponsor(state),
@@ -511,6 +545,9 @@ impl SpaceAdmissionAggregate {
         };
         Some(SponsorSettlementPreparation {
             complete_reply: state.saved_reply.exact_reply_envelope(),
+            committed_history: &state.committed_history,
+            activation_receipt: &state.activation_receipt,
+            activated_security: &state.activated_security,
         })
     }
 

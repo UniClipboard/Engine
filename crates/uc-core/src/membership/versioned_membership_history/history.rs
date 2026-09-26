@@ -291,14 +291,21 @@ impl VersionedMembershipHistory {
         })
     }
 
+    /// 设备对应的成员实例。同一设备被移除后重新加入时历史中有多个实例，当前有效的实例优先；
+    /// 设备已不是有效成员时返回其历史实例。
     pub fn member_for_device(
         &self,
         device_id: &DeviceId,
         candidate_devices: &[DeviceId],
     ) -> Option<MemberInstanceId> {
-        self.credentials.keys().copied().find(|member| {
-            self.device_for_member(member, candidate_devices).as_ref() == Some(device_id)
-        })
+        let effective = self.effective_members();
+        self.credentials
+            .keys()
+            .copied()
+            .filter(|member| {
+                self.device_for_member(member, candidate_devices).as_ref() == Some(device_id)
+            })
+            .max_by_key(|member| effective.contains(member))
     }
 
     pub fn is_restricted_removed_member_extension_of(

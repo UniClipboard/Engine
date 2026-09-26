@@ -136,10 +136,10 @@ pub enum ClipboardSyncError {
     Stopped,
     #[error("encryption session not unlocked")]
     LockedSpace,
-    #[error("transfer cipher failure: {0}")]
-    CipherFailure(String),
-    #[error("peer address repository: {0}")]
-    Repository(String),
+    #[error("transfer cipher failure")]
+    CipherFailure(#[source] anyhow::Error),
+    #[error("peer address repository failure")]
+    Repository(#[source] anyhow::Error),
 }
 
 impl From<DispatchSyncError> for ClipboardSyncError {
@@ -147,8 +147,10 @@ impl From<DispatchSyncError> for ClipboardSyncError {
         match err {
             DispatchSyncError::Stopped => ClipboardSyncError::Stopped,
             DispatchSyncError::LockedSpace => ClipboardSyncError::LockedSpace,
-            DispatchSyncError::CipherFailure(msg) => ClipboardSyncError::CipherFailure(msg),
-            DispatchSyncError::Repository(msg) => ClipboardSyncError::Repository(msg),
+            DispatchSyncError::CipherFailure(source) => {
+                ClipboardSyncError::CipherFailure(anyhow::Error::new(source))
+            }
+            DispatchSyncError::Repository(source) => ClipboardSyncError::Repository(source),
         }
     }
 }
@@ -277,7 +279,11 @@ impl ClipboardSyncFacade {
         progress
             .get_entry_receive_progress(entry_id.as_ref())
             .await
-            .map_err(|error| CancelEntryReceiveError::Attempt(error.to_string()))
+            .map_err(|error| {
+                CancelEntryReceiveError::Attempt(
+                    anyhow::Error::from(error).context("read entry receive progress"),
+                )
+            })
     }
 
     pub async fn list_entry_receive_progress(
@@ -289,7 +295,11 @@ impl ClipboardSyncFacade {
             .ok_or(CancelEntryReceiveError::Unavailable)?
             .list_non_terminal_attempts()
             .await
-            .map_err(|error| CancelEntryReceiveError::Attempt(error.to_string()))?;
+            .map_err(|error| {
+                CancelEntryReceiveError::Attempt(
+                    anyhow::Error::from(error).context("list receive attempts"),
+                )
+            })?;
         let progress = self
             .receive_progress
             .as_ref()
@@ -299,7 +309,11 @@ impl ClipboardSyncFacade {
             if let Some(current) = progress
                 .get_entry_receive_progress(&attempt.entry_id)
                 .await
-                .map_err(|error| CancelEntryReceiveError::Attempt(error.to_string()))?
+                .map_err(|error| {
+                    CancelEntryReceiveError::Attempt(
+                        anyhow::Error::from(error).context("read entry receive progress"),
+                    )
+                })?
             {
                 result.push(current);
             }
@@ -477,7 +491,7 @@ impl ClipboardSyncDispatch<'_> {
         let _ = origin; // span metadata only (see facade documentation)
         let categories = ClipboardContentCategorySet::from_snapshot(&snapshot);
         let (plaintext, snapshot_hash) = encode_snapshot_to_v3_bytes(&snapshot)
-            .map_err(|e| ClipboardSyncError::CipherFailure(format!("payload encode: {e}")))?;
+            .map_err(|e| ClipboardSyncError::CipherFailure(e.context("payload encode")))?;
         self.facade
             .dispatch_internal(
                 plaintext,
@@ -505,7 +519,7 @@ impl ClipboardSyncDispatch<'_> {
         let categories = ClipboardContentCategorySet::from_snapshot(&snapshot);
         let (plaintext, snapshot_hash) =
             encode_snapshot_with_blob_refs_to_v3_bytes(&snapshot, &blob_refs)
-                .map_err(|e| ClipboardSyncError::CipherFailure(format!("payload encode: {e}")))?;
+                .map_err(|e| ClipboardSyncError::CipherFailure(e.context("payload encode")))?;
         self.facade
             .dispatch_internal(
                 plaintext,
@@ -538,7 +552,7 @@ impl ClipboardSyncDispatch<'_> {
                 &blob_refs,
                 &manifest,
             )
-            .map_err(|e| ClipboardSyncError::CipherFailure(format!("payload encode: {e}")))?;
+            .map_err(|e| ClipboardSyncError::CipherFailure(e.context("payload encode")))?;
         self.facade
             .dispatch_internal(
                 plaintext,
@@ -599,6 +613,8 @@ fn lift_per_target(internal: DispatchPerTarget) -> DispatchEntryPerTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod text_transfer_scenario;
 
     use async_trait::async_trait;
     use mockall::predicate::*;
@@ -1009,86 +1025,6 @@ mod tests {
         assert_eq!(outcome.total_accepted, 1);
         assert_eq!(outcome.per_target.len(), 1);
         assert_eq!(outcome.per_target[0].device_id.as_str(), "peer-a");
-    }
-
-    /// Verdict 3 — `dispatch_snapshot` encodes the snapshot into the V3
-    /// envelope + derives the canonical snapshot_hash from
-    /// `snapshot_hash()`, then calls the same underlying dispatch path
-    /// as `dispatch_entry`. mockall asserts encrypt is invoked with the
-    /// encoded envelope bytes (not raw plaintext), and that the target
-    /// dispatch fires with `payload_version=3`.
-    #[tokio::test]
-    async fn dispatch_snapshot_encodes_envelope_and_fans_out() {
-        use uc_core::ids::{FormatId, RepresentationId};
-        use uc_core::{MimeType, ObservedClipboardRepresentation, SystemClipboardSnapshot};
-
-        let mut repo = MockPeerAddrRepo::new();
-        repo.expect_list()
-            .times(1)
-            .returning(|| Ok(vec![record("peer-a")]));
-
-        let peer_reachability = make_peer_reachability_unknown();
-
-        let mut cipher = MockCipher::new();
-        // Encrypt gets the V3 envelope bytes, not the raw text. We just
-        // assert it's called once and round-trip the bytes unchanged
-        // (the test cipher is a passthrough for assertion purposes).
-        cipher
-            .expect_encrypt()
-            .times(1)
-            .withf(|plaintext| {
-                // The V3 envelope starts with 8B ts_ms (LE) + 2B rep_count (LE).
-                // For our fixture: ts_ms=7 → [0x07, 0, 0, 0, 0, 0, 0, 0],
-                // rep_count=1 → [0x01, 0x00]. Anchor on rep_count to keep the
-                // assertion resilient to ts_ms choice.
-                plaintext.len() > 10 && plaintext[8..10] == [0x01, 0x00]
-            })
-            .returning(|p| Ok(p.to_vec()));
-
-        let mut dispatch = MockDispatch::new();
-        dispatch
-            .expect_dispatch()
-            .with(eq(DeviceId::new("peer-a")), always(), always())
-            .times(1)
-            .withf(|_target, header, _payload| header.payload_version == 3)
-            .returning(|_, _, _| dispatch_report(Ok(DispatchAck::Accepted)));
-
-        let facade = build_facade(
-            repo,
-            peer_reachability,
-            cipher,
-            dispatch,
-            make_device_identity("self"),
-            make_local_identity(),
-            make_settings(),
-        );
-
-        let snapshot = SystemClipboardSnapshot {
-            ts_ms: 7,
-            representations: vec![ObservedClipboardRepresentation::new(
-                RepresentationId::new(),
-                FormatId::from("text"),
-                Some(MimeType("text/plain".to_string())),
-                b"hello phase3".to_vec(),
-            )],
-            file_content_digests: Vec::new(),
-            file_set_v1_component: None,
-        };
-        let outcome = facade
-            .dispatch_snapshot(
-                snapshot,
-                uc_core::ClipboardChangeOrigin::LocalCapture,
-                None,
-                None,
-            )
-            .await
-            .expect("dispatch_snapshot ok");
-        assert_eq!(outcome.total_accepted, 1);
-        assert!(
-            outcome.snapshot_hash.starts_with("blake3v1:"),
-            "outcome carries the canonical snapshot_hash, got {}",
-            outcome.snapshot_hash
-        );
     }
 
     /// Verdict 5 — `DispatchEntryInput.target_filter = Some([peer-b])` threads

@@ -6,6 +6,7 @@ use uc_core::blob::ports::{BlobContentIngestPort, BlobWriterPort, IngestedBlob};
 use uc_core::ports::ClockPort;
 use uc_core::BlobId;
 use uc_core::ContentHash;
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::blob::hashing::stream_hash_file;
 use crate::blob::{Blob, BlobRepositoryPort, BlobStorageLocator, BlobStorePort, StoredPathBlob};
@@ -120,7 +121,8 @@ where
                 // concurrent ingest; reuse the winner's record if it is present.
                 if let Ok(Some(existing)) = self.blob_repo.find_by_hash(&content_hash).await {
                     debug!(
-                        error = %insert_err,
+                        error_kind = "insert_race",
+                        io_error_kind = io_error_kind(insert_err.as_ref()),
                         content_hash = %content_hash,
                         "Path ingest insert raced with existing blob; dropping freshly written blob and returning existing record",
                     );
@@ -153,7 +155,8 @@ where
     async fn discard_blob(&self, blob_id: &BlobId, reason: &str) {
         if let Err(err) = self.blob_store.delete(blob_id).await {
             warn!(
-                error = %err,
+                error_kind = "redundant_blob_remove",
+                io_error_kind = io_error_kind(err.as_ref()),
                 blob_id = %blob_id,
                 reason,
                 "Failed to remove redundant blob during path ingest cleanup"
@@ -204,7 +207,8 @@ where
             if let Err(err) = self.blob_repo.insert_blob(&record).await {
                 if let Some(existing) = self.blob_repo.find_by_hash(content_id).await? {
                     debug!(
-                        error = %err,
+                        error_kind = "insert_race",
+                        io_error_kind = io_error_kind(err.as_ref()),
                         content_hash = %content_id,
                         "Insert raced with existing blob; returning existing record",
                     );
@@ -235,10 +239,7 @@ where
     }
 
     async fn hash_path(&self, source_path: &Path) -> Result<ContentHash> {
-        let span = debug_span!(
-            "infra.blob.hash_path",
-            source_path = %source_path.display(),
-        );
+        let span = debug_span!("infra.blob.hash_path");
         let source = source_path.to_path_buf();
         async move {
             // Stream the file to compute its ContentHash without loading it into

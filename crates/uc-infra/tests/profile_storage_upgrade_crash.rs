@@ -12,6 +12,22 @@ use uc_infra::security::{
     ProfileRuntimeLayout, ProfileStorageUpgrade, ProfileStorageUpgradeOutcome,
 };
 use uc_infra::space::InMemorySession;
+use uc_testkit::{Scenario, ScenarioBudget, ScenarioConfig};
+
+const REPRODUCE: &str =
+    "cargo test -p uc-infra --test profile_storage_upgrade_crash --locked unfinished_separation_recovers_after_process_exit";
+
+fn process_scenario() -> Scenario {
+    let artifact_root = PathBuf::from("../../target/test-artifacts/real-dependencies");
+    Scenario::start(ScenarioConfig::new(
+        "profile-upgrade-process-recovery",
+        0x0040_0304,
+        ScenarioBudget::new(std::time::Duration::from_secs(20)),
+        REPRODUCE,
+        artifact_root,
+    ))
+    .expect("process recovery scenario starts")
+}
 
 #[derive(Default)]
 struct TestStorage(Mutex<BTreeMap<String, Vec<u8>>>);
@@ -107,6 +123,7 @@ fn history_count(path: &Path) -> i64 {
 
 #[tokio::test]
 async fn unfinished_separation_recovers_after_process_exit() {
+    let mut scenario = process_scenario();
     for boundary in [
         "profile_partial",
         "both_partial",
@@ -114,7 +131,7 @@ async fn unfinished_separation_recovers_after_process_exit() {
         "restart_plan_saved",
         "separation_saved",
     ] {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = scenario.temp_dir("profile-root").unwrap();
         let fixture = Fixture::open(directory.path());
         fixture
             .manifests
@@ -142,18 +159,28 @@ async fn unfinished_separation_recovers_after_process_exit() {
         drop(upgrade);
         drop(fixture);
 
-        let child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--ignored", "--exact", "crash_child", "--nocapture"])
-            .env("UC_UPGRADE_CRASH_ROOT", directory.path())
-            .env("UC_UPGRADE_CRASH_BOUNDARY", boundary)
-            .output()
-            .unwrap();
+        let child_status = {
+            let _stage = scenario.stage("child-process");
+            let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args(["--ignored", "--exact", "crash_child", "--nocapture"])
+                .env("UC_UPGRADE_CRASH_ROOT", directory.path())
+                .env("UC_UPGRADE_CRASH_BOUNDARY", boundary);
+            scenario
+                .run_child_process(
+                    "upgrade-crash-probe",
+                    &mut command,
+                    std::time::Duration::from_secs(5),
+                )
+                .await
+                .unwrap_or_else(|failure| panic!("{boundary}: {failure}"))
+        };
         assert_eq!(
-            child.status.code(),
+            child_status.code(),
             Some(73),
-            "{boundary}: {}",
-            String::from_utf8_lossy(&child.stderr)
+            "{boundary}: crash child must stop at the requested boundary"
         );
+        scenario.record_event("child-process-reaped");
 
         let reopened = Fixture::open(directory.path());
         assert_eq!(reopened.pool.persistent_revision().unwrap(), revision);
@@ -193,7 +220,12 @@ async fn unfinished_separation_recovers_after_process_exit() {
             ProfileStorageUpgradeOutcome::UpToDate
         );
         assert_eq!(history_count(layout.profile_database()), 1, "{boundary}");
+        drop(resumed);
+        drop(reopened);
+        drop(directory);
     }
+    scenario.record_event("persistent-recovery-complete");
+    scenario.finish(Ok(())).expect("process recovery report");
 }
 
 #[tokio::test]

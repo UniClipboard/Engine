@@ -1,0 +1,279 @@
+name: Engine real environment
+
+on:
+  schedule:
+    - cron: "30 2 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Real network mode to run
+        required: true
+        default: direct
+        type: choice
+        options:
+          - direct
+          - known-peer
+          - relay
+          - legacy
+          - profile-upgrade
+          - membership-e2e
+      case_prefix:
+        description: Optional single scenario prefix such as E01, E02, or E03
+        required: false
+        type: string
+      repeat:
+        description: Number of scenario repetitions
+        required: true
+        default: "1"
+        type: choice
+        options:
+          - "1"
+          - "2"
+          - "3"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: engine-real-environment-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  nightly:
+    name: Nightly real Engine (${{ matrix.mode }})
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [direct, known-peer, relay, legacy]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - name: Install network test tools
+        run: sudo apt-get update && sudo apt-get install -y iproute2 nftables iputils-ping file clang libclang-dev cmake
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          workspaces: . -> target
+          shared-key: engine-real-environment-${{ matrix.mode }}
+      - name: Build real Engine hosts
+        id: build
+        shell: bash
+        run: |
+          started_at=$(date +%s)
+          cargo build -p uc-connectivity-host -p uc-connectivity-relay --locked
+          echo "seconds=$(( $(date +%s) - started_at ))" >> "$GITHUB_OUTPUT"
+      - name: Run real Engine scenario
+        shell: bash
+        run: |
+          started_at=$(date +%s)
+          set +e
+          timeout --signal=TERM --kill-after=30s 30m \
+            bash scripts/testing/run-connection-recovery-e2e.sh \
+            --suite network \
+            --repeat 1 \
+            --mode "${{ matrix.mode }}"
+          result=$?
+          set -e
+          elapsed=$(( $(date +%s) - started_at ))
+          {
+            echo "## Real Engine nightly"
+            echo "- mode: ${{ matrix.mode }}"
+            echo "- repetitions: 1"
+            echo "- compile wall time: ${{ steps.build.outputs.seconds }}s"
+            echo "- scenario and cleanup wall time: ${elapsed}s"
+            echo "- total measured wall time: $(( ${{ steps.build.outputs.seconds }} + elapsed ))s"
+            echo "- result: $([ "$result" -eq 0 ] && echo passed || echo failed)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$result"
+      - name: Retain real environment evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: engine-real-environment-${{ matrix.mode }}
+          path: target/connection-recovery-evidence
+          if-no-files-found: warn
+          retention-days: 14
+
+  manual:
+    name: Manual real Engine scenario
+    if: github.event_name == 'workflow_dispatch' && inputs.mode != 'profile-upgrade' && inputs.mode != 'membership-e2e'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - name: Install network test tools
+        run: sudo apt-get update && sudo apt-get install -y iproute2 nftables iputils-ping file clang libclang-dev cmake
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          workspaces: . -> target
+          shared-key: engine-real-environment-${{ inputs.mode }}
+      - name: Build real Engine hosts
+        id: build
+        shell: bash
+        run: |
+          started_at=$(date +%s)
+          cargo build -p uc-connectivity-host -p uc-connectivity-relay --locked
+          echo "seconds=$(( $(date +%s) - started_at ))" >> "$GITHUB_OUTPUT"
+      - name: Run selected real Engine scenario
+        shell: bash
+        env:
+          MODE: ${{ inputs.mode }}
+          CASE_PREFIX: ${{ inputs.case_prefix }}
+          REPEAT: ${{ inputs.repeat }}
+        run: |
+          args=(--suite network --repeat "$REPEAT" --mode "$MODE")
+          if [[ -n "$CASE_PREFIX" ]]; then
+            args+=(--case "$CASE_PREFIX")
+          fi
+          started_at=$(date +%s)
+          set +e
+          timeout --signal=TERM --kill-after=30s 30m \
+            bash scripts/testing/run-connection-recovery-e2e.sh "${args[@]}"
+          result=$?
+          set -e
+          elapsed=$(( $(date +%s) - started_at ))
+          {
+            echo "## Real Engine manual scenario"
+            echo "- mode: $MODE"
+            echo "- case: ${CASE_PREFIX:-all cases in mode}"
+            echo "- repetitions: $REPEAT"
+            echo "- compile wall time: ${{ steps.build.outputs.seconds }}s"
+            echo "- scenario and cleanup wall time: ${elapsed}s"
+            echo "- total measured wall time: $(( ${{ steps.build.outputs.seconds }} + elapsed ))s"
+            echo "- result: $([ "$result" -eq 0 ] && echo passed || echo failed)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$result"
+      - name: Retain real environment evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: engine-real-environment-${{ inputs.mode }}-${{ github.run_attempt }}
+          path: target/connection-recovery-evidence
+          if-no-files-found: warn
+          retention-days: 14
+
+  profile-upgrade:
+    name: Nightly profile upgrade evidence
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'profile-upgrade')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          workspaces: . -> target
+          shared-key: engine-real-environment-profile-upgrade
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
+        with:
+          tool: cargo-nextest@0.9.145
+      - name: Build profile upgrade tests
+        id: build
+        shell: bash
+        run: |
+          started_at=$(date +%s)
+          cargo nextest run --profile ci --no-run -p uc-infra \
+            --test profile_storage_upgrade \
+            --test profile_storage_upgrade_crash
+          echo "seconds=$(( $(date +%s) - started_at ))" >> "$GITHUB_OUTPUT"
+      - name: Run profile upgrade evidence
+        shell: bash
+        run: |
+          started_at=$(date +%s)
+          set +e
+          timeout --signal=TERM --kill-after=30s 30m \
+            cargo nextest run --profile ci -p uc-infra \
+              --test profile_storage_upgrade \
+              --test profile_storage_upgrade_crash
+          result=$?
+          set -e
+          elapsed=$(( $(date +%s) - started_at ))
+          {
+            echo "## Profile upgrade nightly"
+            echo "- coverage: synthetic profile migration and five process-exit recovery boundaries"
+            echo "- alpha.5 external fixture: skipped"
+            echo "- compile wall time: ${{ steps.build.outputs.seconds }}s"
+            echo "- scenario and cleanup wall time: ${elapsed}s"
+            echo "- total measured wall time: $(( ${{ steps.build.outputs.seconds }} + elapsed ))s"
+            echo "- result: $([ "$result" -eq 0 ] && echo passed || echo failed)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$result"
+      - name: Retain profile upgrade evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: engine-profile-upgrade-${{ github.run_attempt }}
+          path: |
+            target/nextest/ci/junit.xml
+            target/test-artifacts/real-dependencies
+          if-no-files-found: error
+          retention-days: 14
+
+  membership-e2e:
+    name: Membership multi-device scenarios
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'membership-e2e')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          workspaces: . -> target
+          shared-key: engine-real-environment-membership-e2e
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
+        with:
+          tool: cargo-nextest@0.9.145
+      - name: Build membership scenarios
+        id: build
+        shell: bash
+        run: |
+          started_at=$(date +%s)
+          cargo nextest run --profile ci --locked --no-run -p uc-engine --features dev-tools \
+            --test space_membership_auto_pairing_e2e
+          echo "seconds=$(( $(date +%s) - started_at ))" >> "$GITHUB_OUTPUT"
+      - name: Run membership scenarios
+        shell: bash
+        env:
+          UC_TEST_ARTIFACTS_DIR: target/test-artifacts/ci
+        run: |
+          started_at=$(date +%s)
+          set +e
+          bash scripts/testing/run-test-group.sh membership-e2e
+          result=$?
+          set -e
+          elapsed=$(( $(date +%s) - started_at ))
+          {
+            echo "## Membership multi-device scenarios"
+            echo "- compile wall time: ${{ steps.build.outputs.seconds }}s"
+            echo "- scenario and cleanup wall time: ${elapsed}s"
+            echo "- result: $([ "$result" -eq 0 ] && echo passed || echo failed)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$result"
+      - name: Retain membership scenario evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: engine-membership-e2e-${{ github.run_attempt }}
+          path: |
+            target/nextest/ci/junit.xml
+            target/test-artifacts/ci/membership-e2e
+          if-no-files-found: error
+          retention-days: 14

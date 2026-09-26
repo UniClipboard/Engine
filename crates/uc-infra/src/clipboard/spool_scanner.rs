@@ -11,6 +11,7 @@ use tracing::{debug, info, warn};
 use uc_core::clipboard::PayloadAvailability;
 use uc_core::ids::RepresentationId;
 use uc_core::ports::ClipboardRepresentationStore;
+use uc_observability_contract::error_source::io_error_kind;
 
 /// Scans spool directory and re-queues recoverable representations.
 /// 扫描磁盘缓存目录并重新入队可恢复的表示。
@@ -44,7 +45,7 @@ impl SpoolScanner {
     async fn scan_and_recover_dir(&self, spool_dir: &PathBuf) -> Result<usize> {
         let mut entries = fs::read_dir(spool_dir)
             .await
-            .with_context(|| format!("Failed to read spool dir: {}", spool_dir.display()))?;
+            .context("Failed to read spool dir")?;
 
         let mut recovered = 0usize;
 
@@ -77,7 +78,8 @@ impl SpoolScanner {
                             Err(err) => {
                                 warn!(
                                     representation_id = %rep_id,
-                                    error = %err,
+                                    error_kind = "worker_requeue",
+                                    io_error_kind = io_error_kind(&err),
                                     "Failed to re-queue representation during recovery"
                                 );
                             }
@@ -88,7 +90,8 @@ impl SpoolScanner {
                         if let Err(err) = fs::remove_file(&path).await {
                             warn!(
                                 representation_id = %rep_id,
-                                error = %err,
+                                error_kind = "spool_file_delete",
+                                io_error_kind = io_error_kind(&err),
                                 "Failed to delete stale spool file"
                             );
                         }
@@ -103,7 +106,8 @@ impl SpoolScanner {
                     if let Err(err) = fs::remove_file(&path).await {
                         warn!(
                             representation_id = %rep_id,
-                            error = %err,
+                            error_kind = "spool_file_delete",
+                            io_error_kind = io_error_kind(&err),
                             "Failed to delete orphaned spool file"
                         );
                     }
@@ -111,10 +115,7 @@ impl SpoolScanner {
             }
         }
 
-        info!(
-            spool_dir = %spool_dir.display(),
-            "Spool scan completed; recovered {recovered} items"
-        );
+        info!(recovered, "Spool scan completed");
         Ok(recovered)
     }
 }

@@ -6,6 +6,7 @@ use uc_application::facade::AppFacade;
 use uc_core::crypto::domain::Passphrase;
 use uc_core::ids::RepresentationId;
 use uc_core::ports::config_migration::{ConfigMigrationError, ConfigSourceMode};
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::runtime::host_file::{copy_host_to_path, copy_path_to_host, HostFileCopyError};
 use crate::{
@@ -73,7 +74,7 @@ pub(crate) async fn execute_preview_config_import(
                         ConfigImportPreviewOutcome::InvalidPasswordOrCorrupt,
                     ))
                 }
-                Err(ConfigMigrationError::IncompatibleBundle { reason }) => {
+                Err(ConfigMigrationError::IncompatibleBundle { reason, .. }) => {
                     Ok(OperationResult::ConfigImportPreview(
                         ConfigImportPreviewOutcome::Incompatible { reason },
                     ))
@@ -112,7 +113,7 @@ pub(crate) async fn execute_stage_config_import(
                         ConfigImportStageOutcome::InvalidPasswordOrCorrupt,
                     ))
                 }
-                Err(ConfigMigrationError::IncompatibleBundle { reason }) => {
+                Err(ConfigMigrationError::IncompatibleBundle { reason, .. }) => {
                     Ok(OperationResult::ConfigImportStaged(
                         ConfigImportStageOutcome::Incompatible { reason },
                     ))
@@ -132,13 +133,18 @@ fn create_operation_dir(
 ) -> Result<std::path::PathBuf, EngineError> {
     let directory = temporary_root.join(format!("{prefix}-{}", RepresentationId::new()));
     std::fs::create_dir_all(&directory)
+        // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
         .map_err(|_| internal_error(CONFIG_FILE_UNAVAILABLE_CODE))?;
     Ok(directory)
 }
 
 fn cleanup_operation_dir(directory: &Path) {
     if let Err(error) = std::fs::remove_dir_all(directory) {
-        tracing::warn!(error = %error, "failed to remove config migration temporary directory");
+        tracing::warn!(
+            error_kind = "temp_dir_remove",
+            io_error_kind = io_error_kind(&error),
+            "failed to remove config migration temporary directory"
+        );
     }
 }
 

@@ -230,7 +230,7 @@ fn map_manifest_error(
         ActiveSpaceGenerationManifestStoreError::Storage { .. } => {
             unavailable(anyhow::Error::new(source))
         }
-        ActiveSpaceGenerationManifestStoreError::Corrupt
+        ActiveSpaceGenerationManifestStoreError::Corrupt { .. }
         | ActiveSpaceGenerationManifestStoreError::UnsupportedVersion => {
             invalid(anyhow::Error::new(source))
         }

@@ -539,6 +539,12 @@ pub enum DiagnosticTaskKind {
     ClipboardDeferredDrain,
     PairingMdnsForward,
     MobileOutboundDispatch,
+    /// Engine 公开操作的执行任务异常退出；调用方只收到稳定错误码 1108。
+    EngineOperation,
+    /// Engine 生命周期转换的执行任务异常退出。
+    EngineLifecycleTransition,
+    /// 会话挂起交接给独立任务后，该任务异常退出。
+    SessionSuspend,
 }
 
 impl DiagnosticTaskKind {
@@ -550,6 +556,9 @@ impl DiagnosticTaskKind {
             Self::ClipboardDeferredDrain => "clipboard_deferred_drain",
             Self::PairingMdnsForward => "pairing_mdns_forward",
             Self::MobileOutboundDispatch => "mobile_outbound_dispatch",
+            Self::EngineOperation => "engine_operation",
+            Self::EngineLifecycleTransition => "engine_lifecycle_transition",
+            Self::SessionSuspend => "session_suspend",
         }
     }
 }

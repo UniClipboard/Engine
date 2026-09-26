@@ -41,16 +41,16 @@ fn map_error(error: InvitationError) -> QueryPairingInvitationAddressesError {
         InvitationError::AddressNotAvailable(ip) => {
             QueryPairingInvitationAddressesError::AddressNotAvailable(ip)
         }
-        InvitationError::Internal(message) => {
-            QueryPairingInvitationAddressesError::Internal(message)
+        error @ InvitationError::Internal(_) => {
+            QueryPairingInvitationAddressesError::Internal(error.into())
         }
         InvitationError::LocalPublicationFailed { .. }
         | InvitationError::DirectoryTransportFailed { .. }
         | InvitationError::DirectoryRejected { .. }
         | InvitationError::DirectoryInvalidResponse { .. } => {
-            QueryPairingInvitationAddressesError::Internal(
-                "unexpected invitation issuance failure while listing addresses".to_owned(),
-            )
+            QueryPairingInvitationAddressesError::Internal(anyhow::anyhow!(
+                "unexpected invitation issuance failure while listing addresses"
+            ))
         }
     }
 }
@@ -79,8 +79,8 @@ mod tests {
                 Err(InvitationError::AddressNotAvailable(ip)) => {
                     Err(InvitationError::AddressNotAvailable(*ip))
                 }
-                Err(InvitationError::Internal(message)) => {
-                    Err(InvitationError::Internal(message.clone()))
+                Err(InvitationError::Internal(source)) => {
+                    Err(InvitationError::Internal(source.to_string().into()))
                 }
                 Err(_) => unreachable!("this fake only supports cloneable error variants"),
             }

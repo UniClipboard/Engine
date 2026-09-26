@@ -101,7 +101,7 @@ impl RendezvousPairingInvitationAdapter {
         self.settings
             .load()
             .await
-            .map_err(|err| InvitationError::Internal(format!("settings load failed: {err}")))
+            .map_err(|err| InvitationError::Internal(err.context("load settings").into()))
     }
 
     fn resolve_device_name(settings: &Settings) -> Result<String, InvitationError> {
@@ -113,8 +113,7 @@ impl RendezvousPairingInvitationAdapter {
             .cloned()
             .ok_or_else(|| {
                 InvitationError::Internal(
-                    "device_name missing from settings; user must set it before pairing"
-                        .to_string(),
+                    "device_name missing from settings; user must set it before pairing".into(),
                 )
             })
     }
@@ -141,20 +140,34 @@ impl RendezvousPairingInvitationAdapter {
         let device_id = self.device_identity.current_device_id();
         let invitation_id = mint_invitation_id();
         let expires_at = Utc::now() + LOCAL_MINT_TTL;
-        let endpoint_addr: EndpointAddr = serde_json::from_str(&ticket).map_err(|_| {
-            InvitationError::Internal("failed to decode Sponsor endpoint address".to_owned())
+        let endpoint_addr: EndpointAddr = serde_json::from_str(&ticket).map_err(|error| {
+            InvitationError::Internal(
+                anyhow::Error::from(error)
+                    .context("decode Sponsor endpoint address")
+                    .into(),
+            )
         })?;
         let admission_route =
             crate::network::iroh::encode_space_admission_route(&endpoint_addr, Some(invitation_id))
-                .map_err(|_| {
-                    InvitationError::Internal("failed to encode Space admission route".to_owned())
+                .map_err(|error| {
+                    InvitationError::Internal(
+                        anyhow::Error::from(error)
+                            .context("encode Space admission route")
+                            .into(),
+                    )
                 })?;
         let full_invitation = crate::space::encode_full_invitation(
             invitation_id,
             &admission_route,
             expires_at.timestamp_millis(),
         )
-        .map_err(|_| InvitationError::Internal("failed to encode full invitation".to_owned()))?;
+        .map_err(|error| {
+            InvitationError::Internal(
+                anyhow::Error::from(error)
+                    .context("encode full invitation")
+                    .into(),
+            )
+        })?;
 
         let req = CreatePairingRequest {
             sponsor_device_id: device_id.as_str().to_string(),
@@ -280,10 +293,10 @@ impl RendezvousPairingInvitationAdapter {
         endpoint_id: &str,
         full_invitation: &str,
         expires_at: DateTime<Utc>,
-    ) -> Result<(), String> {
+    ) -> anyhow::Result<()> {
         #[cfg(test)]
         if self.force_local_publication_failure {
-            return Err("injected local publication failure".to_owned());
+            return Err(anyhow::anyhow!("injected local publication failure"));
         }
 
         // Sweep stale handles before inserting; a sponsor that has
@@ -305,8 +318,7 @@ impl RendezvousPairingInvitationAdapter {
             &ticket_hex,
             expires_at.timestamp_millis(),
             port,
-        )
-        .map_err(|err| err.to_string())?;
+        )?;
         self.publishers
             .lock()
             .await
@@ -394,9 +406,9 @@ fn mint_invitation_id() -> uc_core::membership::InvitationId {
 }
 
 /// Encode the same full invitation used by cloud discovery for bounded mDNS publishing.
-fn encode_mdns_ticket(full_invitation: &str) -> Result<String, String> {
+fn encode_mdns_ticket(full_invitation: &str) -> anyhow::Result<String> {
     if full_invitation.is_empty() {
-        return Err("full invitation is empty".to_owned());
+        return Err(anyhow::anyhow!("full invitation is empty"));
     }
     Ok(hex::encode(full_invitation.as_bytes()))
 }
@@ -419,14 +431,14 @@ fn is_cloud_recoverable(err: &RendezvousHttpError) -> bool {
 /// Real iroh endpoints always have at least one IP `TransportAddr`
 /// online by the time we're issuing invitations, so the `None` case is
 /// a defensive guard for tests / very early init.
-fn pick_endpoint_port(addr: &EndpointAddr) -> Result<u16, String> {
+fn pick_endpoint_port(addr: &EndpointAddr) -> anyhow::Result<u16> {
     addr.addrs
         .iter()
         .find_map(|a| match a {
             TransportAddr::Ip(sa) => Some(sa.port()),
             _ => None,
         })
-        .ok_or_else(|| "endpoint exposes no IP transport addresses".to_string())
+        .ok_or_else(|| anyhow::anyhow!("endpoint exposes no IP transport addresses"))
 }
 
 fn serialize_filtered_endpoint_ticket(
@@ -492,8 +504,8 @@ fn list_invitation_address_candidates(
 
 fn serialize_endpoint_addr(addr: EndpointAddr) -> Result<(String, String), InvitationError> {
     let endpoint_id = addr.id.to_string();
-    let ticket = serde_json::to_string(&addr)
-        .map_err(|err| InvitationError::Internal(format!("endpoint addr serialize: {err}")))?;
+    let ticket =
+        serde_json::to_string(&addr).map_err(|err| InvitationError::Internal(Box::new(err)))?;
     Ok((endpoint_id, ticket))
 }
 
@@ -586,7 +598,7 @@ fn map_create_err(err: RendezvousHttpError) -> InvitationError {
 }
 
 fn map_local_publication_failure(
-    local_error: String,
+    local_error: anyhow::Error,
     directory_failure: Option<anyhow::Error>,
 ) -> InvitationError {
     match directory_failure {
@@ -594,7 +606,7 @@ fn map_local_publication_failure(
             source: source.context("local invitation publication also failed"),
         },
         None => InvitationError::LocalPublicationFailed {
-            source: anyhow::Error::msg(local_error),
+            source: local_error,
         },
     }
 }
@@ -611,11 +623,8 @@ fn map_consume_err(err: RendezvousHttpError) -> ConsumeInvitationError {
         RendezvousHttpError::Transport { .. } | RendezvousHttpError::ServiceUnavailable(_) => {
             ConsumeInvitationError::ServiceUnavailable
         }
-        RendezvousHttpError::Unexpected { status, slug } => ConsumeInvitationError::Internal(
-            format!("rendezvous rejected consume ({status}, slug={slug})"),
-        ),
-        RendezvousHttpError::Parse { .. } => {
-            ConsumeInvitationError::Internal("rendezvous response parse failed".to_owned())
+        err @ (RendezvousHttpError::Unexpected { .. } | RendezvousHttpError::Parse { .. }) => {
+            ConsumeInvitationError::Internal(Box::new(err))
         }
     }
 }
@@ -627,6 +636,7 @@ fn map_consume_err(err: RendezvousHttpError) -> ConsumeInvitationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pairing::MdnsPublisherError;
     use std::io::Write;
     use std::net::SocketAddr;
     use std::sync::Mutex as StdMutex;
@@ -640,6 +650,8 @@ mod tests {
     use uc_core::settings::model::Settings;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    mod provider_dependency_evidence;
 
     #[derive(Clone, Default)]
     struct CapturedWriter(Arc<StdMutex<Vec<u8>>>);
@@ -1107,8 +1119,12 @@ mod tests {
 
     #[test]
     fn local_publication_failure_has_its_own_stage() {
-        let error =
-            map_local_publication_failure("private socket and interface detail".to_owned(), None);
+        let error = map_local_publication_failure(
+            anyhow::Error::new(MdnsPublisherError::SocketBind(anyhow::anyhow!(
+                "private socket and interface detail"
+            ))),
+            None,
+        );
 
         assert!(matches!(
             error,
@@ -1116,6 +1132,11 @@ mod tests {
         ));
         assert_eq!(error.to_string(), "local invitation publication failed");
         assert_eq!(format!("{error:?}"), "LocalPublicationFailed");
+        let source = std::error::Error::source(&error).expect("local publication source");
+        assert!(matches!(
+            source.downcast_ref::<MdnsPublisherError>(),
+            Some(MdnsPublisherError::SocketBind(_))
+        ));
     }
 
     #[test]
@@ -1147,7 +1168,7 @@ mod tests {
         let adapter = make_adapter(ep, InMemorySettings::with_device_name(None), server.uri());
         let err = adapter.issue_invitation().await.unwrap_err();
         let msg = match err {
-            InvitationError::Internal(m) => m,
+            InvitationError::Internal(source) => source.to_string(),
             other => panic!("expected Internal, got {other:?}"),
         };
         assert!(msg.contains("device_name"), "msg was {msg}");
@@ -1367,11 +1388,13 @@ mod tests {
             .consume_invitation(&InvitationCode::new("WEIRD"))
             .await
             .unwrap_err();
-        let msg = match err {
-            ConsumeInvitationError::Internal(m) => m,
-            other => panic!("expected Internal, got {other:?}"),
+        let ConsumeInvitationError::Internal(source) = &err else {
+            panic!("expected Internal, got {err:?}");
         };
-        assert!(msg.contains("malformed_code"), "msg was {msg}");
-        assert!(msg.contains("400"));
+        assert!(matches!(
+            source.downcast_ref::<RendezvousHttpError>(),
+            Some(RendezvousHttpError::Unexpected { status, slug })
+                if status.as_u16() == 400 && slug.contains("malformed_code")
+        ));
     }
 }

@@ -69,7 +69,7 @@ impl SpaceAdmissionTransportPort for GatedSpaceAdmissionTransport {
         encrypted_password_equivalent: &AdmissionEncryptedPasswordEquivalent,
     ) -> Result<Box<dyn AuthenticatedAdmissionExchangePort>, SpaceAdmissionTransportError> {
         if !self.gate.permits_network_work() {
-            return Err(SpaceAdmissionTransportError::Deferred);
+            return Err(SpaceAdmissionTransportError::deferred());
         }
         self.inner
             .establish_initial(
@@ -89,7 +89,7 @@ impl SpaceAdmissionTransportPort for GatedSpaceAdmissionTransport {
         continuation_credential: &AdmissionContinuationCredential,
     ) -> Result<Box<dyn AuthenticatedAdmissionExchangePort>, SpaceAdmissionTransportError> {
         if !self.gate.permits_network_work() {
-            return Err(SpaceAdmissionTransportError::Deferred);
+            return Err(SpaceAdmissionTransportError::deferred());
         }
         self.inner
             .resume(admission_id, route, peer_binding, continuation_credential)
@@ -131,7 +131,7 @@ impl MembershipHistoryExchangePort for GatedMembershipHistoryExchange {
                 false,
             );
             describe_operation_failure(DiagnosticErrorType::NetworkPaused);
-            return Err(MembershipHistoryExchangeError::Offline);
+            return Err(MembershipHistoryExchangeError::offline());
         }
         self.inner
             .exchange_membership_history(recipient, message)
@@ -214,12 +214,12 @@ mod tests {
         let message = MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Invalid);
 
         gate.pause_network_work();
-        assert_eq!(
+        assert!(matches!(
             transport
                 .exchange_membership_history(&peer, message.clone())
                 .await,
-            Err(MembershipHistoryExchangeError::Offline)
-        );
+            Err(MembershipHistoryExchangeError::Offline { .. })
+        ));
         assert_eq!(inner.calls.load(Ordering::SeqCst), 0);
 
         gate.resume_network_work();

@@ -18,7 +18,7 @@ impl PrepareSponsorSettledPort for DefaultSponsorSettledPreparation {
     async fn prepare(
         &self,
         admission_id: SpaceAdmissionId,
-        preparation: uc_core::membership::SponsorSettlementPreparation<'_>,
+        preparation: &uc_core::membership::SponsorSettlementPreparation<'_>,
         complete_ack: &SpaceAdmissionEnvelopeV1,
     ) -> Result<PreparedSponsorSettled, PrepareSponsorSettledError> {
         observe_local_result(LocalWorkStep::SponsorPrepareSettled, async {

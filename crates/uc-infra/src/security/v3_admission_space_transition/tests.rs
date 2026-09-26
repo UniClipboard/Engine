@@ -1,3 +1,4 @@
+use crate::security::space_transition_activation::WithoutProfileVault;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -17,8 +18,7 @@ use uc_core::membership::{
     AdmissionContentKeyCatalogV1, AdmissionContentKeyEntryV1, AdmissionSecurityCommitmentV1,
     AdmissionSpaceTransitionResultV2, AdmissionSpaceTransitionV2, BaseMembershipHistoryPosition,
     CrossSpaceControlTransitionPhaseV3, FreshSpaceTransitionPhaseV1, FreshSpaceTransitionV1,
-    MembershipCredential, PendingGroupUpdate, SpaceAdmissionId,
-    ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
+    PendingGroupUpdate, SpaceAdmissionId, ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
     FRESH_SPACE_TRANSITION_FORMAT_V1,
 };
 use uc_core::ports::security::current_profile::CurrentProfilePort;
@@ -37,6 +37,7 @@ use crate::security::{
     ProfileContentKeyVault, ProfileRuntimeLayout, SpaceControlGeneration,
     SpaceControlGenerationError, SpaceTransitionActivation, SpaceTransitionActivationError,
 };
+use crate::space::membership_record::test_support::signed_target_members;
 use crate::space::{
     prepare_registration, CurrentSpaceResolver, InMemorySession, KeyMaterialStore,
     RuntimeSpaceAccessAdapter,
@@ -180,6 +181,7 @@ async fn v3_cross_space_switches_only_the_control_generation() {
         Arc::clone(&manifests),
         Arc::clone(&generations),
         access.clone(),
+        Arc::new(WithoutProfileVault),
     ));
     let activation_intents = Arc::new(ToggleActivationIntent(AtomicBool::new(true)));
     let transitions = V3AdmissionSpaceTransition::new(
@@ -495,6 +497,7 @@ async fn v3_same_space_retains_profile_data_and_keyslot() {
         Arc::clone(&manifests),
         Arc::clone(&generations),
         access,
+        Arc::new(WithoutProfileVault),
     ));
     let transitions = V3AdmissionSpaceTransition::new(
         b"same-profile-salt".to_vec(),
@@ -610,6 +613,7 @@ async fn v3_fresh_promotes_the_first_manifest_without_a_source() {
         Arc::clone(&manifests),
         Arc::clone(&generations),
         Arc::clone(&access),
+        Arc::new(WithoutProfileVault),
     ));
     let transitions = V3AdmissionSpaceTransition::new_with_fresh_profile_generation(
         b"fresh-profile-salt".to_vec(),
@@ -763,7 +767,6 @@ fn preparation_with_seed(
             [0x48; 32],
         )
         .unwrap(),
-        target_membership_history: b"verified membership history".to_vec(),
         target_security_state: b"verified MLS security state".to_vec(),
         target_protection_group_id: format!("target-protection-group-{seed:02x}"),
         target_key_catalog: catalog.encode().unwrap(),
@@ -781,28 +784,10 @@ fn preparation_with_seed(
 }
 
 fn relationships() -> Vec<AdmissionChangeFacts> {
-    [
-        ("target-local", "target local", 0x51),
-        ("target-peer", "target peer", 0x52),
-    ]
-    .into_iter()
-    .map(|(device, name, key)| {
-        let device_id = DeviceId::new(device);
-        let credential = MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![key; 32]);
-        AdmissionChangeFacts {
-            member_instance: credential.member_instance_id(&device_id),
-            device_id,
-            device_name: name.to_owned(),
-            identity_fingerprint: uc_core::security::IdentityFingerprint::from_display_string(
-                "ABCD-EFGH-IJKL-MNOP",
-            )
-            .unwrap(),
-            transport_public_key: vec![key],
-            transport_address_blob: vec![key, key],
-            identity_signature: vec![key, key, key],
-        }
-    })
-    .collect()
+    signed_target_members()
+        .iter()
+        .map(|(facts, _)| facts.clone())
+        .collect()
 }
 
 /// A failed dependency or storage capability must keep its cause when it is

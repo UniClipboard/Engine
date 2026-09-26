@@ -410,9 +410,13 @@ async fn sqlite_v12_rejects_postings_from_a_stale_active_group() {
         .index_entry(document("stale-entry", "must not persist"), stale)
         .await
         .unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("protection context changed before persistence"));
+    let uc_core::search::SearchError::Internal(source) = &error else {
+        panic!("expected internal search error");
+    };
+    assert_eq!(
+        source.to_string(),
+        "search protection context changed before persistence"
+    );
     let mut conn = pool.get().unwrap();
     let count = search_document::table
         .filter(search_document::profile_id.eq(PROFILE_ID))

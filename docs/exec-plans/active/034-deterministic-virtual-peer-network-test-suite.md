@@ -2,7 +2,7 @@
 
 ## 状态
 
-- **状态**：设计完成，待实施
+- **状态**：实施中；最小两节点成员历史切片已完成，F0-F7 完整矩阵尚未实施
 - **日期**：2026-09-03
 - **前置规格**：[029 持久化成员历史反熵](../completed/029-durable-membership-history-anti-entropy.md)、[030 成员分叉选择与复杂拓扑验证](../completed/030-membership-conflict-resolution-and-chaos-validation.md)、[031 Application 依赖表面深化](../completed/031-application-dependency-surface-deepening.md)
 - **完整负责人**：`uc-application` 的 test-only `VirtualMembershipTopology`
@@ -10,6 +10,369 @@
 - **成功结果**：在给定 round/frame 预算内得到满足断言的 `VirtualTopologySnapshot` 和可复现脱敏 trace
 - **失败结果**：返回稳定的测试失败分类，并附最后一段脱敏 trace；不得依赖 wall-clock 超时推断原因
 - **重试与重启责任**：Application 生产负责人继续拥有持久欠账和恢复；virtual topology 只驱动逻辑时间、maintenance round 与节点重建，不复制重试规则
+- **长期路线关系**：本计划是 [Engine 测试架构](../../design-docs/testing-architecture.md) 中快速确定性线的多节点实现专项；首个切片从配对、传输、断线重连、重启恢复、旧资料升级五类中选择一个最慢或最不稳定代表场景，不另建并行路线图
+
+## 当前实施切片（2026-09-22）
+
+本轮只实现配对类别中的“已完成准入后，两个成员节点交换成员历史”的最小多节点基础，以及真实 Engine nightly
+的运行入口。它不实现完整邀请/准入，也不把这一切片记作五类业务覆盖完成。
+
+### 完整负责人和唯一动作
+
+- `VirtualMembershipNetwork` 只负责测试节点注册、有向链路状态、frame 预算和脱敏 trace；它把 typed
+  `MembershipHistoryMessage` 交给目标节点真实 `MembershipHistoryExchangeEndpointPort`。
+- 每个节点使用真实 `MembershipLedger` 和 `HandleMembershipHistoryMessageUseCase`；网络不读取 ledger，不生成 ACK，
+  不判断成员关系。
+- 场景只准备两个合法节点，执行 `send`、`partition`、`heal`，并断言公开的历史交换结果和网络 trace。
+- 成功结果：开放链路调用真实 endpoint 并得到业务 ACK；分区时得到 `Offline`；恢复后再次成功，trace 顺序和
+  frame 数稳定。
+- 失败结果：未知节点、重复节点、frame 预算耗尽或 endpoint 拒绝返回稳定 test-only 错误，并由 testkit 工件记录。
+- 重试责任：virtual network 不重试；场景显式恢复链路并再次调用。生产业务欠账与重试仍由 Application 负责人拥有。
+
+### 失败方式（先于实现固定）
+
+| 失败方式 | 预期 |
+| --- | --- |
+| 重复节点键或重复业务身份 | 构造/注册立即失败，不覆盖原节点 |
+| source/target 未注册 | 返回稳定 fixture/unavailable 失败，不调用 endpoint |
+| 单向分区 | 只阻断指定方向，反向链路不受影响 |
+| endpoint 业务拒绝 | 保留 endpoint 错误分类，trace 记录 rejected，不包含 payload/身份 |
+| frame 预算耗尽 | 下一次发送立即失败，不回绕、不提高预算 |
+| endpoint 嵌套或异步执行 | 网络锁在 `await` 前释放，不能死锁 |
+| trace 泄露 | 记录只含节点测试标签、协议、序号和结果，不含 DeviceId、消息、路径或地址 |
+
+### 本轮目录与验收
+
+- `crates/uc-application/src/space/membership/testing/virtual_membership_network.rs`：最小有向网络和两节点真实 endpoint 场景。
+- `crates/uc-application/src/space/membership/mod.rs`：只在 `cfg(test)` 注册 testing 模块，不扩大 crate 或产品公开接口。
+- `.github/workflows/engine-real-environment.yml`：scheduled 四种真实环境模式和 `workflow_dispatch` 单 mode/单 case；
+  复用 `run-connection-recovery-e2e.sh`，不复制 host 或网络脚本。
+- 快速场景预算 1 秒，不使用固定 sleep；连续运行至少 20 次无随机失败。
+- nightly 每个 mode 独立 job 和工件，编译、环境准备、场景、清理与总耗时可从 job/summary 区分；单 mode 目标
+  30 分钟内。首次实际 scheduled 运行仍待合并后自然触发，PR 中只验证 workflow 语法和现有真实脚本门禁。
+- 回退点：virtual 模块和 nightly workflow 可独立回退；旧测试、PR 网络门禁和脚本均不删除。
+
+### 当前切片完成记录
+
+- `VirtualMembershipNetwork` 已在 `cfg(test)` 下实现节点注册、有向分区、恢复、frame 预算和脱敏 trace；消息交给
+  目标节点真实 `HandleMembershipHistoryMessageUseCase`，网络本身不读取或解释成员账本。
+- 场景 `two_member_nodes_partition_and_heal` 覆盖开放链路确认、单向阻断、恢复后再次确认和预算耗尽；固定 seed 为
+  `0x0040_3401`，预算 1 秒，不使用固定 sleep。
+- nextest 单场景 20 轮全部通过，总墙钟 11 秒；统一 evidence 入口 15/15 通过，测试累计 2.077 秒，场景工件记录
+  `cleanup=completed` 和精确复现命令。
+- 相关旧成员历史测试 21/21 通过；`uc-application` 完整库测试 960 通过、1 项既有忽略。
+- 新增真实 Engine nightly/手工入口，复用既有 connectivity host、relay、network namespace 与证据脚本。四种 mode
+  独立运行，手工入口可选择单个 case；编译、场景与清理、总耗时分别记录，场景设置 30 分钟硬超时。
+- nightly workflow 只有进入默认分支后才能自然 scheduled 运行；当前只完成本地语法、现有脚本参数和 PR 门禁兼容
+  验证，不把该基础登记为真实外网、真实 relay 或设备通过。
+- 本切片只证明“已完成准入后的两节点成员历史传递基础”，不等于完整配对，更不等于首批五类业务覆盖完成。
+
+### 当前作者体验收尾（2026-09-22）
+
+代表场景继续使用 `two_member_nodes_partition_and_heal`，不新增同义用例。当前 case 作者仍需了解 endpoint、ledger、
+DeviceId 和逐节点注册，说明领域 fixture 虽已存在，基础设施复杂度仍泄露到场景正文。
+
+本切片在同一 test-only 模块内增加窄的 `TwoMemberHistoryScenario`：`prepare` 统一构造两个真实 Application endpoint、
+注册节点和 frame 预算；case 作者只调用 history exchange、partition、heal，并断言 ACK、Unavailable、trace 顺序和预算。
+通用 `Scenario` 继续负责固定 seed、时间预算、阶段、事件、清理结果与报告。它不支持任意节点拓扑，不解释业务消息，
+也不负责 invitation、内容或真实连接生命周期。
+
+失败方式：节点构造或注册失败归 fixture invalid；开放/恢复链路未确认、分区未阻断、trace/预算不符归 product invariant；
+超时由 1 秒 Scenario 预算失败。验收为场景正文不再出现 endpoint/ledger/逐节点 register，命令可单独运行，20 轮无随机
+失败，JSON/摘要包含操作事件、cleanup 和复现命令。回退只还原 test-only fixture，不改变产品代码或原业务断言。
+
+完成结果：`TwoMemberHistoryScenario` 已隐藏 endpoint、ledger、身份、逐节点注册和 frame 预算，场景正文只保留
+exchange、partition、heal 与公开结果断言。单次 nextest 1/1 通过、测试耗时 `0.039s`；连续 20 轮全部通过、总墙钟
+12 秒。最新 schema v2 工件总耗时 3 ms，最终事件为 `frame-budget-enforced`，`cleanup=completed`，摘要包含精确复现命令。
+预算耗尽作为预期断言单独记录，不误报为泛化框架失败。
+
+同一 draft PR 的隔离 Linux network job 已按 mode、`repeat=3` 取得分段工件：direct 总计 `656.807s`、known-peer
+`85.748s`、relay `137.663s`、legacy `4.674s`，均包含 prepare、scenario、cleanup，且 `failed=false`、
+`cleaned=true`、`plaintext_clean=true`。这证明现有 runner 的单 mode 30 分钟预算；新增 workflow 的 schedule 与
+profile-upgrade 远程样本仍只能在定义进入默认分支后取得。
+
+## 当前真实进程切片：完整配对与文字传输（2026-09-22）
+
+本切片复用现有 `uc-connectivity-host`、Linux network namespace 和
+`connection-recovery-network.mjs`。现有 runner 已经执行真实 Engine 完整配对和双向 exact text，但两步此前只是后续
+恢复场景的隐式 setup，不能按业务场景单独选择、计时和出具证据。本轮只把既有动作登记为稳定场景，不新增业务
+状态机，不改生产接口，也不把文字覆盖冒充文件传输覆盖。
+
+### 场景、负责人和复用边界
+
+| 场景 | 开发者描述 | kit/runner 责任 | 最终公开断言 |
+| --- | --- | --- | --- |
+| `E01-complete-pairing` | 准备两个或三个 Engine 节点并完成配对 | 独立 profile/身份/端口、rendezvous、进程生命周期、事件等待、预算、清理和证据 | 加入方 setup 完成且 Space 一致；各节点普通通信资格为 usable；真实 peer connection online |
+| `E02-text-transfer` | 已配对节点之间双向发送指定文字 | 复用 E01 setup、发送、历史轮询、耗时和失败证据 | 每个方向只接受一个目标，接收端按公开 history/entry 读取到 exact text |
+
+完整配对和传输继续由真实 Engine `Operation` 与 Application 负责人执行。runner 只调用公开测试宿主命令并等待公开
+结果；不得解释准入阶段、成员 ACK 或内容传输状态。为支持后续 `E03` 等场景，E01/E02 在未被选择时仍作为必需
+setup 执行，但不登记为本次所选证据；全量运行和显式选择时才写入对应 scenario record。
+
+### 失败方式和诊断要求
+
+| 失败方式 | 失败证据 |
+| --- | --- |
+| 加入未完成或 Space 不一致 | `E01` 失败，保留最后事件、节点状态、阶段耗时和复现命令 |
+| 对端身份不可查询 | `E01` 失败为 `paired identity unavailable`，不得继续伪造 peer id |
+| usable 或 online 未收敛 | `E01` 失败并保留节点连接事实 |
+| 发送被拒绝、离线、待定或重复 | `E02` 记录公开发送汇总和脱敏原因分类 |
+| exact text 未到达 | `E02` 失败为未满足条件，不用固定 sleep 或放宽内容断言 |
+| 进程或 namespace 清理失败 | 场景结果与 cleanup 结果分别记录；成功场景不能覆盖清理失败 |
+| 证据包含正文、设备身份、地址或路径 | 隐私检查失败，工件不得作为通过证据 |
+
+### 预算、验证范围和回退
+
+- 聚焦 `E01` 或 `E02` 的真实进程运行目标为场景及清理合计 60 秒内，编译单独计时；nightly 单 mode 的环境准备、
+  场景和清理实测目标仍为 30 分钟内。超时是失败，不通过自动重试、删断言或提高预算掩盖。
+- 本轮本地验证运行脚本语法、受影响的静态检查和旧入口兼容。Linux 真实网络必须由受影响的远程 network job 或
+  等价隔离 Linux 环境实际执行，并读取该 job 上传的 JSON/文本证据。
+- 远程验收只等待本轮相关的 repository 检查和真实网络 runner job/step。相关步骤通过且工件可读取后即可继续；
+  其他慢作业仍运行时明确记录“未等待”，不把整条 workflow 写成全绿。相关 job 失败必须定位修复。
+- 文件传输当前不是本切片：现有 connectivity host 的 `HostFileAccess` 明确返回 unavailable，必须在后续切片增加
+  受管测试文件能力和真实 `SendFiles`/接收证据后才能登记覆盖。
+- 回退只删除 E01/E02 场景登记和对应文档；既有 setup、E03-E13、旧 PR 门禁和 nightly 入口保持不变。
+
+### 验收标准
+
+- `--mode direct --case E01` 和 `--mode direct --case E02` 可独立运行，并分别产生准确场景、耗时、清理和复现证据。
+- 不带 `--case` 的旧 direct/relay 流程继续先完成配对和基线文字传输，随后执行原恢复场景。
+- 证据明确区分场景失败与 cleanup 失败，且不包含 exact text、真实身份、地址或本机路径。
+- 报告更新五类覆盖映射：完整配对和文字传输记为已实现；文件传输、旧资料升级的真实 nightly 仍保持未完成；
+  重连和重启只引用现有 E03/E04/E06/E10/E11/E12/E13，不重复重写。
+
+## 当前真实文件与旧资料升级切片（2026-09-22）
+
+本切片补齐两个已确认缺口，不扩建通用模拟层：connectivity host 提供一个进程内受管文件表，使真实 Engine 可通过
+公开 `SendFiles` 读取固定测试字节；接收端继续通过公开 history 和 `ReadEntryFile` 验证文件名、媒体类型与完整字节。
+旧资料升级不另写场景，nightly 直接复用现有 `profile_storage_upgrade` 和独立进程 crash recovery 测试。
+
+### 完整负责人和唯一动作
+
+- 文件内容的导入、加密历史、网络发送、接收 blob 和读取仍由 Engine/Application/Infra 原负责人完成。测试宿主只按
+  opaque `HostFileHandle` 保存输入 bytes 和 metadata，不读取产品状态，也不实现传输状态机。
+- 开发者场景只描述“在节点 A/B 准备固定文件并双向发送，接收端读取同一 entry”；runner 继续负责节点、profile、
+  namespace、等待、预算、清理和脱敏证据。
+- 旧资料升级 nightly 只调用既有测试 binary；升级、崩溃恢复、重启和清理由原测试负责人及 testkit 完成。
+
+### 实现前失败清单
+
+| 失败方式 | 预期诊断 |
+| --- | --- |
+| 未登记或空文件句柄 | host 返回稳定 invalid handle/unavailable，场景失败 |
+| offset 溢出或越界读取 | host 返回稳定 IO/空尾块，不 panic |
+| Engine 拒绝、离线或未接受文件发送 | E02 file 子步骤记录发送汇总 |
+| 接收历史没有 file entry | 事件驱动等待耗尽并报告最后节点状态 |
+| 文件名、media type 或 bytes 不一致 | product assertion 失败，不只检查“有记录” |
+| cleanup 或 plaintext scan 失败 | 与业务结果分开记录，整体不通过 |
+| 升级测试或 crash recovery 失败 | nightly upgrade job 失败并上传 testkit 工件 |
+| alpha.5 外部 fixture 不存在 | 明确保持未执行，不用环境变量或本机路径伪造通过 |
+
+### 预算、验收与回退
+
+- `E02-file-transfer` 聚焦运行目标为环境准备、双向发送、接收读取和清理合计 60 秒内；nightly upgrade job 的测试与
+  清理目标 30 分钟内，编译和总耗时分别显示。
+- 文件场景必须使用真实多进程 Engine 和真实隔离网络；本地 macOS 只做 host 编译与静态检查，远程 network job 或
+  等价 Linux 隔离环境才构成运行证据。
+- nightly upgrade 必须实际运行现有 synthetic profile migration 与五个 crash boundary；alpha.5 完整 fixture 因依赖
+  外部合成资料继续列为未验证，不能用普通 migration 测试冒充。
+- 回退可独立删除 host 受管文件命令、E02 file 子场景和 upgrade job；旧测试、旧门禁、存储格式与生产接口不变。
+
+### 当前完成记录
+
+- `E02-file-transfer` 已实现双向真实 Engine 文件发送：测试宿主只保存 opaque 受管输入，发送端调用公开
+  `SendFiles`，接收端从公开 history 定位 file entry，再以 `ReadEntryFile` 核对文件名和完整 bytes。没有新增产品状态机、
+  生产公开接口、协议或持久格式。
+- 旧资料升级 nightly 已接入既有 `profile_storage_upgrade` 与 `profile_storage_upgrade_crash` 测试 binary；本地 nextest
+  18/18 通过、2 项外部 fixture 保持 ignored，测试累计 5.546 秒。crash recovery 工件为 passed、固定 seed
+  `0x00400304`、cleanup completed。
+- connectivity host check、workspace all-target check、metadata、fmt、脚本语法、Rust style、repository、privacy 与 diff
+  check 均通过；旧本地入口 89 项通过。alpha.5 外部完整 fixture、真实外网和设备没有执行。
+- 当前提交的受影响远程验收限定为 repository checks、真实网络 runner 的场景步骤和同 job 清理工件，均已通过。
+  direct 与 relay 的 E01、exact text 和双向 exact bytes 均通过；四种模式工件均为 `failed=false`、`cleaned=true`、
+  `plaintext_clean=true`，并包含准确复现命令。其他无关慢 job 不作为本切片等待条件。
+- `profile-upgrade` workflow 尚未进入默认分支，GitHub 不允许从当前 PR 分支触发新增的 workflow definition；本轮只登记
+  等价本地隔离证据，不把 schedule 或 workflow_dispatch 写成已生效。
+
+### 首批五类双线验收状态
+
+| 类别 | 快速确定性线 | 真实 nightly / 手工线 |
+| --- | --- | --- |
+| 配对 | 部分完成：成员恢复五场景和已准入成员历史网络；无完整快速 invitation -> settled | E01 当前提交 direct/relay 已验证 |
+| 文字与文件传输 | 部分完成：文件接收生命周期进入 fast；无快速网络或 exact bytes | E02 text/file 当前提交 direct/relay 已验证 exact value/bytes |
+| 断线重连 | 部分完成：成员消息在 partition/heal 后恢复；不等于 Engine transport 重连 | E03/E04/E06/E10/E13 当前 runner 回归通过 |
+| 重启恢复 | 部分完成：Application 持久准入重建，不是 Engine 进程重启 | E11/E12 当前 runner 回归通过 |
+| 旧资料升级 | focused migration/process 18 项本地通过 | workflow 已接入但默认分支未生效；alpha.5 fixture 未验证 |
+
+当前真正可复用的“准备/操作/预期”入口只有三类：Application `Scenario` + 领域 fixture、只覆盖已准入成员历史的
+`VirtualMembershipNetwork`，以及真实 runner 的 `--mode`/`--case`/`--repeat`。不能把真实 runner 的 E01/E02 命名算作
+快速多节点五类已经实现。
+
+## 当前快速配对作者入口与真实环境计时切片（2026-09-22）
+
+### 本 PR 测试目录收敛
+
+在继续扩展快速线前，先解决测试与业务文件混排。迁移只覆盖本 PR 新增或扩展的场景，不做全仓重排：
+
+| 调整前 | 调整后 | 原因 |
+| --- | --- | --- |
+| `space/admission/protocol/admission_recovery_scenarios.rs` | `space/admission/protocol/tests/admission_recovery_scenarios.rs` | 场景需访问 admission 私有装配，但文件名与业务实现并排，无法一眼识别为测试 |
+| `space/admission/protocol/pairing_scenario_fixture.rs` | `space/admission/protocol/tests/support/pairing_scenario_fixture.rs` | 这是 admission 专用作者 fixture，不属于生产 protocol，也不应进入通用 testkit |
+| `rendezvous/invitation_adapter.rs` 内的 `provider_dependency_evidence_reports_all_outcomes` | `rendezvous/invitation_adapter/tests/provider_dependency_evidence.rs` | 场景必须访问 adapter 私有 helper，保留私有访问但从业务实现文件移出 |
+
+以下路径保持不动：`membership/**/tests/` 已符合私有场景规则；`membership/testing/` 是明确命名的领域虚拟网络；
+crate `tests/` 下的升级/进程场景只使用公开接口；既有 `protocol/test_support.rs` 虽然仍与业务并排，但属于历史大型
+支撑，本轮移动会造成大量无关引用变化，登记为后续自然收敛项。
+
+验收标准：普通 `cargo check` 不依赖 `uc-testkit` 或上述 test-only 模块；nextest 现有名称选择器继续选中相同场景；
+旧 `cargo test` 入口继续通过；文档与采用清单不再引用调整前路径。回退只还原模块声明和文件位置，不改变生产行为、
+公开接口、协议或持久格式。
+
+### 最小交付与复用点
+
+本切片只补两个已证实缺口，不建设统一多节点 DSL：
+
+1. admission 测试作者目前需要知道恢复轮次、激活入口和最终确认顺序。新增 test-only
+   `PairingScenarioFixture`，作者只准备加入输入、执行一次 `complete_joiner_pairing`，并断言返回的稳定快照。
+   fixture 调用真实 `SpaceAdmissionProtocol`、成员维护入口和激活入口，不生成协议回复、不解释内部阶段；已有
+   `SpaceAdmissionProtocolTestPair` 继续提供可控 transport、clock 和持久状态。
+2. 真实 runner 工件只有逐场景耗时和 job 总墙钟，不能区分环境准备与清理。runner 在同一 JSON envelope 增加
+   `timings.prepare_ms`、`timings.scenario_ms`、`timings.cleanup_ms` 和 `timings.total_ms`；计时只观察 runner 自己的
+   生命周期，不改变场景、预算或重试。
+
+快速场景选择加入方完整收敛，因为它复用现有真实负责人、补齐 invitation -> active settled 的作者入口，并能在
+1 秒预算内完成。Sponsor 最终确认唯一性继续由既有三设备场景证明，双方真实 Engine 的 same-space、usable 和 online
+继续由 E01 证明；本切片不机械复制真实链路。
+
+### 完整负责人、唯一动作与结果
+
+- 完整负责人仍是 `SpaceAdmissionProtocol`。fixture 只把已有完整动作组合成一次测试调用，不保存自己的业务阶段。
+- 作者唯一动作：构造 `JoinSpaceInput` 后调用 `complete_joiner_pairing`；成功返回 `CurrentJoinStatus::Active` 与
+  `final_confirmation_complete=true` 的脱敏快照。
+- 失败结果：开始加入、成员维护、激活或最终确认任一步失败，返回稳定 fixture/product condition；testkit 记录阶段、
+  最后事件、固定 seed、复现命令和工件位置。
+- 重试和重启仍由生产 admission 负责人决定；fixture 不自动重试。既有 retry/restart 场景继续单独验证相应规则。
+- 真实 runner 只记录 prepare/scenario/cleanup/total；cleanup 失败仍使场景失败，不能被 timing 覆盖。
+
+### 实现前失败清单
+
+| 失败方式 | 预期 |
+| --- | --- |
+| 加入输入无法保存 | fixture 返回 `join-start`，不进入恢复 |
+| maintenance 在激活前 deferred/stable failure/corrupt | fixture 返回准确 condition，不猜测阶段、不增加循环次数掩盖 |
+| 激活失败 | 保留原失败，场景工件标出 activation stage |
+| final confirmation 未完成 | 快照不得写成 settled，场景以 product invariant 失败 |
+| fixture 复制消息或持久状态机 | 架构审查失败；只允许调用现有完整负责人和读取测试仓储结果 |
+| runner 在首场景前失败 | `prepare_ms` 保留，`scenario_ms` 为 0，cleanup 仍执行并计时 |
+| 场景失败后 cleanup 失败 | 业务失败保持 primary，envelope 同时记录 `cleaned=false` 与 cleanup 时间 |
+| 时间字段不满足总量关系 | 工件检查失败；允许毫秒取整误差，不允许负值或缺字段 |
+
+### 预算、验收与回退
+
+- 新快速场景预算 1 秒；单次 nextest 目标小于 1 秒，连续 20 轮无随机失败，加入现有 fast/evidence 选择器。
+- 作者示例必须只出现准备输入、执行一次场景动作和断言最终快照，不暴露消息、恢复轮次或内部阶段。
+- 与既有 `settled_is_saved_and_finishes_joiner_recovery` 双轨 20 轮，比较最终 joiner settled 结果；旧测试不删除。
+- 真实 runner 修改后，本轮相关 Linux network step 必须通过并读回四种 mode 工件；每份 timing 字段和 cleanup 均核对。
+- 30 分钟目标按 mode 的 `prepare + scenario + cleanup` 实测。PR 全矩阵仍可作为当前样本，但默认分支 nightly
+  尚未生效时，不把 scheduled 入口记为通过。
+- 回退可独立删除 test-only fixture/场景和 timing 字段；旧测试、真实场景、门禁、生产接口、协议与持久格式保持。
+
+### 当前完成记录
+
+- 本 PR 新增/扩展的测试已按职责收敛：admission 场景位于 `protocol/tests/`，专用配对 fixture 位于
+  `protocol/tests/support/`，provider 证据位于 `invitation_adapter/tests/`。业务目录不再出现无测试标识的新增场景文件，
+  `invitation_adapter.rs` 不再内嵌 testkit 长场景；没有扩大生产可见性或新增生产测试开关。
+- 新增 test-only `PairingScenarioFixture`。作者示范只准备 `JoinSpaceInput`、调用一次 `complete_joiner_pairing` 并断言
+  Active + final confirmation；实现调用真实 admission maintenance、激活和最终确认负责人，没有生成消息或保存平行阶段。
+- 测试先于实现落下，初次按预期因 fixture 模块不存在而编译失败；最小实现后场景通过，单次 nextest `0.040s`。
+- 新场景与既有 `settled_is_saved_and_finishes_joiner_recovery` 双轨 20 轮全部通过，总墙钟 11 秒。工件包含固定 seed
+  `0x00403402`、`complete-joiner-pairing` 阶段、最后事件、复现命令和 cleanup completed。
+- evidence 16/16 通过、测试累计 1.944 秒；fast 基础组 7/7 通过；`uc-application` 全库 961 通过、1 项既有忽略。
+- 真实 runner JSON 已增加 prepare/scenario/cleanup/total 四项计时，脚本语法通过；Linux 实际值与 cleanup 工件仍须由
+  本轮相关远程 network step 读回后才能登记。
+- 快速配对仍标为“部分”：它证明 joiner 确定性收敛；Sponsor 唯一性沿用三设备场景，双方真实链路沿用 E01。
+
+## 当前快速文件传输生命周期切片（2026-09-22）
+
+### 最小交付与真实边界
+
+快速线不模拟文件字节网络，也不复制 E02。它复用 `uc-application` 现有公开 `FileTransferFacade` integration fixture，
+新增一个作者场景：准备一个接收传输，执行 progress 与 complete，断言最终公开事件只有一个 `Completed` 且进度保持
+单调。testkit 只提供 1 秒预算、阶段、固定 seed、失败分类和工件。真实文件内容、双向发送、history entry 和
+`ReadEntryFile` exact bytes 继续只由真实 E02 证明。
+
+完整负责人仍为 `FileTransferFacade`；作者唯一动作是开始一个已登记的 receiver session 并完成它。失败结果分别为
+fixture 调用失败或最终公开事件不满足 product invariant；不增加自动重试。场景位于 crate `tests/file_transfer.rs`，
+因为它只使用公开 Application/Core 接口和该 integration test 自有 ports。
+
+### 实现前失败清单
+
+| 失败方式 | 预期 |
+| --- | --- |
+| receiver registration 被拒绝 | `fixture_invalid`，最后阶段为 begin |
+| progress 被拒绝或倒退 | `product_invariant`，不放宽为只检查终态 |
+| complete 失败 | `product_invariant`，保留最后事件和 complete 阶段 |
+| 公开 history 缺少或出现多个 terminal event | `product_invariant`，报告准确 condition |
+| 测试自行传输 bytes 或解释网络状态 | 架构验收失败；真实内容只由 E02 验证 |
+| 超过 1 秒预算 | 场景失败，不增加 sleep、重试或扩大预算 |
+
+### 验收与回退
+
+- 新场景单次 nextest 小于 1 秒，连续 20 轮稳定；加入 fast/evidence 选择器并生成 JSON/文本/JUnit。
+- 统一脚本传给各 crate 的工件根必须是仓库绝对路径；不得因 integration test 工作目录不同把报告写进 crate 内的
+  `target/`，脚本打印位置必须与实际文件一致。
+- 与既有 `repeating_same_terminal_call_is_idempotent` 双轨 20 轮，二者都断言完成终态且旧测试保持权威。
+- `cargo test -p uc-application --test file_transfer` 旧入口继续通过；普通 Application 构建不依赖 testkit。
+- 回退只删除新场景和选择器；不改变 facade、ports、生产行为、协议或持久格式。
+
+### 当前完成记录
+
+- 新场景 `file_transfer_completion_scenario_reports_final_state` 只使用公开 `FileTransferFacade`，按 begin、progress、
+  complete 三个阶段断言唯一 `Completed` 终态；固定 seed 为 `0x00403403`，单次 nextest `0.033s`。
+- 与既有 `repeating_same_terminal_call_is_idempotent` 双轨 20 轮全部通过，总墙钟 11 秒；完整旧
+  `file_transfer` test binary 15/15 通过、`0.07s`。
+- fast 统一入口现在包含 testkit 与 Application 快速场景，15/15 通过、测试累计 `0.472s`；evidence 17/17 通过、
+  测试累计 `2.019s`。JSON/摘要记录三个阶段、最后事件、cleanup completed 和准确复现命令。
+- 实际接入发现相对 `UC_TEST_ARTIFACTS_DIR` 会受 integration test 工作目录影响；统一脚本现传递仓库绝对工件根，
+  实际文件位置与打印位置一致。未新增 testkit API 或配置层。
+- 已有 `two_member_nodes_partition_and_heal` 明确登记为快速重连规则的部分证据：链路阻断时返回 unavailable，heal 后
+  同一真实 Application endpoint 接受消息；它不证明 Iroh/Engine transport 重建，后者继续由 E03/E04/E06/E10/E13 负责。
+
+## 当前快速文字传输切片（2026-09-22）
+
+快速文字场景复用既有 `ClipboardSyncFacade` 完整负责人和测试 ports：作者准备一个 `text/plain` 快照，执行一次
+`dispatch_snapshot`，断言 V3 envelope 被编码、canonical snapshot hash 产生、目标 peer 得到 accepted 结果。最终 transport
+ACK 由既有 mock 固定，真实网络 exact text 仍只由 E02 证明。
+
+原场景较长且内嵌在 `facade.rs`，本轮按新目录规范移到 `facade/tests/text_transfer_scenario.rs`，作为私有实现测试子模块；
+不扩大 facade 或 port 可见性。testkit 增加 1 秒预算、encode/dispatch 阶段、固定 seed 和结构化报告，不改变业务调用。
+
+失败方式：快照未编码为 V3、加密入口未收到 envelope、目标 fan-out 未发生、accepted 数量或 canonical hash 错误时均为
+product invariant；fixture 装配失败为 fixture invalid；超时直接失败，不自动重试。验收为单次小于 1 秒，与原
+`dispatch_entry_returns_public_outcome_for_online_peer` 双轨 20 轮，进入 fast/evidence，旧 facade 测试入口继续通过。
+
+### 当前完成记录
+
+- `text_transfer_scenario_encodes_and_dispatches_snapshot` 已移入明确的私有测试子目录，复用真实
+  `ClipboardSyncFacade`、固定 seed `0x00403404` 和 1 秒预算；单次 nextest `0.043s`。
+- 与既有 `dispatch_entry_returns_public_outcome_for_online_peer` 双轨 20 轮全部通过，总墙钟 12 秒；完整
+  `uc-application` lib 入口 `961 passed, 1 ignored`，测试耗时 `21.96s`。
+- fast 统一入口现在 16/16 通过、测试累计 `0.268s`；evidence 18/18 通过、测试累计 `2.122s`。
+  结构化工件记录 `passed`、最后事件 `text-dispatch-accepted`、encode/dispatch 阶段、cleanup completed、固定 seed
+  和准确复现命令。
+- 快速场景只证明 V3 envelope、canonical hash 和 accepted fan-out；transport ACK 仍由测试 port 控制，真实网络
+  exact text 继续由 E02 负责。普通构建不依赖 testkit，回退只需移除测试子模块与选择器。
+
+## 当前远程工件完整性切片（2026-09-22）
+
+`d66cb46f` 的远程 JUnit 证明文字与文件场景均执行通过，但下载的 `engine-testkit-evidence` 缺少两者 JSON/摘要。
+文件场景虽然读取 `UC_TEST_ARTIFACTS_DIR`，CI 传入的相对路径会被 integration test 工作目录重新解释；文字场景则仍使用
+固定 fallback 目录。测试通过但诊断工件不可下载，不满足首版验收。
+
+本切片只修正工件路由：统一入口把环境变量规范为仓库绝对路径，文字与文件场景均优先使用该路径。失败方式为场景
+通过但 JSON/摘要不在上传目录、复现命令或 cleanup 字段缺失、统一入口影响既有分组。验收要求本地 evidence 入口执行后
+两份场景工件都出现在同一根目录，JUnit 仍包含两场景；远程 repository/testkit jobs 通过并下载核验两份工件。回退只
+还原路径选择，不改变测试断言、产品代码、公开接口、协议或持久格式。
 
 # 1. Overview
 
@@ -58,6 +421,8 @@ nightly/release slow lane。
 - 不用 in-memory repository 替代真实 SQLite 原子性、密文持久化或 control-generation 崩溃恢复证据。
 - 不用授权矩阵替代 exact text、密文和错误密钥的真实数据面验证。
 - 不顺便迁移现有 port 所有权，不清理与本规格无关的单元测试 fake。
+- 不承担真实网络、真实 relay 或设备通过；这些由 nightly/手工真实环境线保留。
+- 不要求所有真实环境场景与 virtual fixture 共用同一套场景实现，只要求覆盖映射和最终业务结果可对照。
 
 # 4. Current Architecture Context
 
@@ -396,8 +761,9 @@ Risk: 只测成功 round trip 会漏掉认证来源和已有连接关闭，这�
 
 ```text
 Step 6
-Files: crates/uc-engine/tests/space_membership_auto_pairing_e2e.rs, scripts/testing/run-real-iroh-membership-topologies.sh, .github/workflows/membership-topology.yml
+Files: crates/uc-engine/tests/space_membership_auto_pairing_e2e.rs, scripts/testing/run-test-group.sh, .github/workflows/engine-real-environment.yml
 Change: F0-F7 标为明确 slow lane；脚本逐项串行运行；新增 scheduled/workflow_dispatch job。保留现有快速 admission/restart/content smoke 非 ignored。
+Status: 已由 050 落实为 `membership-e2e` 分组（拓扑类单独测试组）、`engine-real-environment.yml` 的 nightly/workflow_dispatch 全组任务与 PR 冒烟，未另建专用脚本与 workflow。
 Risk: `cargo test` 的 ignored 计数不能记为通过；release/nightly 记录必须绑定当前 commit。
 ```
 

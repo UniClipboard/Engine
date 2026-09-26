@@ -123,8 +123,8 @@ pub enum MobileDeviceError {
     UsernameCollision,
 
     /// 持久化技术失败 —— 文案仅用于日志 / tracing。
-    #[error("mobile device storage failure: {0}")]
-    Storage(String),
+    #[error("mobile device storage failure")]
+    Storage(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 #[cfg(test)]

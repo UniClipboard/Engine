@@ -1,46 +1,47 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use async_trait::async_trait;
-use sha2::{Digest, Sha256};
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    AdmissionChangeFacts, HistoricalMembershipSignatureError,
-    HistoricalMembershipSignatureVerifier, MembershipActivationBaselineV2, MembershipAdmissionV2,
-    MembershipConflictEvidenceV3, MembershipCredential, MembershipEventId, MembershipEventV2,
-    MembershipHistoryAckV3, MembershipHistoryMessage, MembershipHistoryRelationship,
-    MembershipHistorySummaryV3, MembershipOperationV2, VersionedMembershipHistory,
-    ED25519_SIGNATURE_ALGORITHM_V1, MEMBERSHIP_EVENT_FORMAT_V2,
+    AdmissionChangeFacts, MemberEffectKind, MemberEffectPhase, MembershipAdmissionV2,
+    MembershipConflictEvidenceV3, MembershipCredential, MembershipEventV2, MembershipHistoryAckV3,
+    MembershipHistoryMessage, MembershipHistorySummaryV3, MembershipOperationV2, PeerLink,
+    PeerRelation, VersionedMembershipHistory, ED25519_SIGNATURE_ALGORITHM_V1,
+    MEMBERSHIP_EVENT_FORMAT_V2,
 };
 
 use super::use_case::{remember_completed_inbound_transfer, MAX_COMPLETED_INBOUND_TRANSFERS};
 use super::*;
 mod handoff_reproduction;
-use crate::space::membership::{
-    CommitMembershipLedgerPort, LoadMembershipLedgerPort, LoadedMembershipLedger,
-    MembershipEffectKind, MembershipEffectPhase, MembershipLedger, MembershipLedgerError,
-    MembershipLedgerMutation, PeerReconciliationRecord, WakeSpaceMembershipMaintenancePort,
+use crate::space::membership::testing::{
+    established_history, started_record, with_peer_relation, AcceptingVerifier, FixedSpaceWorkMode,
+    OwnerFixture,
 };
+use crate::space::membership::{MembershipHistoryExchangeRecord, MembershipRecord, SpaceWorkMode};
 
-struct MemoryLedgerRepository {
-    loaded: Mutex<LoadedMembershipLedger>,
-    commits: AtomicUsize,
-    fail_on_commit: Option<usize>,
+fn handler(fixture: &OwnerFixture) -> HandleMembershipHistoryMessageUseCase {
+    HandleMembershipHistoryMessageUseCase::new(fixture.owner.clone(), FixedSpaceWorkMode::active())
 }
 
-struct WakeCounter(AtomicUsize);
-
-impl WakeSpaceMembershipMaintenancePort for WakeCounter {
-    fn wake(&self) {
-        self.0.fetch_add(1, Ordering::SeqCst);
+fn relation(fixture: &OwnerFixture, peer: &DeviceId) -> Option<PeerRelation> {
+    match fixture.records.ledger().peer(peer) {
+        Some(PeerLink::Member(member)) => Some(member.relation()),
+        _ => None,
     }
+}
 
-    fn schedule_at(&self, _expires_at_ms: i64, _now_ms: i64) {}
+fn confirmed_position(
+    fixture: &OwnerFixture,
+    peer: &DeviceId,
+) -> Option<uc_core::membership::BaseMembershipHistoryPosition> {
+    match fixture.records.ledger().peer(peer) {
+        Some(PeerLink::Member(member)) => member.confirmed_position().cloned(),
+        _ => None,
+    }
 }
 
 #[test]
 fn completed_inbound_transfer_retention_is_bounded_and_keeps_the_latest_ack() {
-    let mut record = LoadedMembershipLedger::no_current_space();
+    let mut record = MembershipHistoryExchangeRecord::default();
     let source = DeviceId::new("device-b");
 
     for marker in 0..=MAX_COMPLETED_INBOUND_TRANSFERS {
@@ -48,7 +49,7 @@ fn completed_inbound_transfer_retention_is_bounded_and_keeps_the_latest_ack() {
         transfer_id[..8].copy_from_slice(&(marker as u64).to_be_bytes());
         remember_completed_inbound_transfer(
             &mut record,
-            source.clone(),
+            source,
             transfer_id,
             MembershipHistoryAckV3::Invalid,
         );
@@ -67,23 +68,39 @@ fn completed_inbound_transfer_retention_is_bounded_and_keeps_the_latest_ack() {
 }
 
 #[tokio::test]
+async fn pairing_rejects_inbound_history_as_retryable_before_ledger_access() {
+    let (loaded, peer_device_id, pages) = two_page_extension();
+    let fixture = OwnerFixture::new(loaded);
+    let handler = HandleMembershipHistoryMessageUseCase::new(
+        fixture.owner.clone(),
+        Arc::new(FixedSpaceWorkMode(SpaceWorkMode::Pairing)),
+    );
+
+    let result = uc_core::membership::MembershipHistoryExchangeEndpointPort::handle_membership_history_exchange(
+        &handler,
+        &peer_device_id,
+        pages[0].clone(),
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(uc_core::membership::MembershipHistoryExchangeError::PairingInProgress)
+    ));
+    assert_eq!(fixture.records.load_count(), 0);
+    assert_eq!(fixture.records.commit_count(), 0);
+}
+
+#[tokio::test]
 async fn sibling_summary_requests_verified_evidence_and_records_one_conflict() {
     let (local, local_credential) = member_facts("device-a", 0x41);
     let (peer, peer_credential) = member_facts("device-b", 0x42);
     let (removed, removed_credential) = member_facts("device-c", 0x43);
-    let base = VersionedMembershipHistory::from_activation_baseline(
-        MembershipActivationBaselineV2::Established {
-            lineage_id: "space-a".to_owned(),
-            head_event_id: MembershipEventId::from_hex(&"11".repeat(32)).unwrap(),
-            head_depth: 0,
-            current_members: vec![
-                (local.clone(), local_credential.clone()),
-                (peer.clone(), peer_credential.clone()),
-                (removed.clone(), removed_credential),
-            ],
-        },
-    )
-    .unwrap();
+    let base = established_history(&[
+        (local.clone(), local_credential.clone()),
+        (peer.clone(), peer_credential.clone()),
+        (removed.clone(), removed_credential),
+    ]);
     let local_author = MembershipAdmissionV2 {
         facts: local.clone(),
         membership_credential: local_credential,
@@ -119,36 +136,14 @@ async fn sibling_summary_requests_verified_evidence_and_records_one_conflict() {
     let pages = remote_history
         .export_conflict_evidence_pages_v2(peer.clone())
         .unwrap();
-    let mut loaded = LoadedMembershipLedger::no_current_space();
-    loaded.revision = 5;
-    loaded.lineage_id = Some("space-a".to_owned());
-    loaded.membership_history = Some(local_history.encode_persisted_v2().unwrap());
-    loaded.local_device_id = Some(local.device_id);
-    loaded.local_member_instance = Some(local.member_instance);
-    loaded.local_join_active = true;
-    loaded.peer_reconciliation.insert(
-        peer.device_id.clone(),
-        PeerReconciliationRecord {
-            peer_device_id: peer.device_id.clone(),
-            relationship: MembershipHistoryRelationship::Consistent,
-            confirmed_position: None,
-            sync_state: Default::default(),
-            restricted_delivery: Vec::new(),
-            updated_at_ms: 1,
-        },
-    );
-    let repository = Arc::new(MemoryLedgerRepository {
-        loaded: Mutex::new(loaded),
-        commits: AtomicUsize::new(0),
-        fail_on_commit: None,
-    });
-    let ledger = Arc::new(MembershipLedger::new(
-        repository.clone(),
-        repository.clone(),
-        Arc::new(AcceptingVerifier),
+    let fixture = OwnerFixture::new(started_record(
+        local_history,
+        local.device_id,
+        local.member_instance,
+        5,
     ));
-    let handler = HandleMembershipHistoryMessageUseCase::new(ledger);
-    let source = AuthenticatedMember::new(peer.device_id.clone());
+    let handler = handler(&fixture);
+    let source = AuthenticatedMember::new(peer.device_id);
 
     let request = handler
         .execute(
@@ -166,7 +161,7 @@ async fn sibling_summary_requests_verified_evidence_and_records_one_conflict() {
         request,
         MembershipHistoryMessage::RequestConflictEvidenceV3(_)
     ));
-    assert_eq!(repository.commits.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.records.commit_count(), 0);
 
     let response = handler
         .execute(
@@ -183,15 +178,11 @@ async fn sibling_summary_requests_verified_evidence_and_records_one_conflict() {
         response,
         MembershipHistoryMessage::ConflictEvidenceV3(_)
     ));
-    assert_eq!(repository.commits.load(Ordering::SeqCst), 1);
-    let persisted = repository.load().await.unwrap();
-    assert_eq!(persisted.membership_conflicts.len(), 1);
+    assert_eq!(fixture.records.commit_count(), 1);
+    assert_eq!(fixture.records.space().branch_recovery.conflicts.len(), 1);
     assert_eq!(
-        persisted
-            .peer_reconciliation
-            .get(&peer.device_id)
-            .map(|record| record.relationship),
-        Some(MembershipHistoryRelationship::Diverged)
+        relation(&fixture, &peer.device_id),
+        Some(PeerRelation::Diverged)
     );
 
     let repeated = handler
@@ -210,57 +201,7 @@ async fn sibling_summary_requests_verified_evidence_and_records_one_conflict() {
         repeated,
         MembershipHistoryMessage::ConflictEvidenceV3(_)
     ));
-    assert_eq!(repository.commits.load(Ordering::SeqCst), 1);
-}
-
-#[async_trait]
-impl LoadMembershipLedgerPort for MemoryLedgerRepository {
-    async fn load(&self) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
-        Ok(self.loaded.lock().unwrap().clone())
-    }
-
-    fn current_revision(&self) -> Option<u64> {
-        self.loaded.lock().ok().map(|loaded| loaded.revision)
-    }
-}
-
-#[async_trait]
-impl CommitMembershipLedgerPort for MemoryLedgerRepository {
-    async fn compare_and_commit(
-        &self,
-        mutation: MembershipLedgerMutation,
-    ) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
-        let mut loaded = self.loaded.lock().unwrap();
-        let digest = loaded
-            .membership_history
-            .as_deref()
-            .map(|bytes| <[u8; 32]>::from(Sha256::digest(bytes)));
-        if loaded.revision != mutation.expected_revision
-            || digest != mutation.expected_history_digest
-        {
-            return Err(MembershipLedgerError::Conflict);
-        }
-        if self.fail_on_commit == Some(self.commits.load(Ordering::SeqCst) + 1) {
-            return Err(MembershipLedgerError::Unavailable);
-        }
-        self.commits.fetch_add(1, Ordering::SeqCst);
-        *loaded = mutation.replacement;
-        Ok(loaded.clone())
-    }
-}
-
-struct AcceptingVerifier;
-
-impl HistoricalMembershipSignatureVerifier for AcceptingVerifier {
-    fn verify(
-        &self,
-        _signature_algorithm_version: u16,
-        _public_key: &[u8],
-        _payload: &[u8],
-        _signature: &[u8],
-    ) -> Result<bool, HistoricalMembershipSignatureError> {
-        Ok(true)
-    }
+    assert_eq!(fixture.records.commit_count(), 1);
 }
 
 fn member_facts(device: &str, credential_byte: u8) -> (AdmissionChangeFacts, MembershipCredential) {
@@ -361,27 +302,15 @@ fn remove_event(
     event
 }
 
-fn two_page_extension() -> (
-    LoadedMembershipLedger,
-    DeviceId,
-    Vec<MembershipHistoryMessage>,
-) {
+fn two_page_extension() -> (MembershipRecord, DeviceId, Vec<MembershipHistoryMessage>) {
     let (local, local_credential) = member_facts("device-a", 0x41);
     let (peer, peer_credential) = member_facts("device-b", 0x42);
     let (observer, observer_credential) = member_facts("device-observer", 0x45);
-    let base = VersionedMembershipHistory::from_activation_baseline(
-        MembershipActivationBaselineV2::Established {
-            lineage_id: "space-a".to_owned(),
-            head_event_id: MembershipEventId::from_hex(&"11".repeat(32)).unwrap(),
-            head_depth: 0,
-            current_members: vec![
-                (local.clone(), local_credential),
-                (peer.clone(), peer_credential.clone()),
-                (observer.clone(), observer_credential),
-            ],
-        },
-    )
-    .unwrap();
+    let base = established_history(&[
+        (local.clone(), local_credential),
+        (peer.clone(), peer_credential.clone()),
+        (observer.clone(), observer_credential),
+    ]);
     let author = MembershipAdmissionV2 {
         facts: peer.clone(),
         membership_credential: peer_credential,
@@ -417,35 +346,12 @@ fn two_page_extension() -> (
         .export_suffix_pages_v4(peer.clone(), base.current_position().unwrap())
         .unwrap();
     assert_eq!(pages.len(), 2);
-    let peer_device_id = peer.device_id.clone();
-    let mut loaded = LoadedMembershipLedger::no_current_space();
-    loaded.revision = 10;
-    loaded.lineage_id = Some("space-a".to_owned());
-    loaded.membership_history = Some(base.encode_persisted_v2().unwrap());
-    loaded.local_device_id = Some(local.device_id);
-    loaded.local_member_instance = Some(local.member_instance);
-    loaded.local_join_active = true;
-    loaded.peer_reconciliation.insert(
-        peer_device_id.clone(),
-        PeerReconciliationRecord {
-            peer_device_id: peer_device_id.clone(),
-            relationship: MembershipHistoryRelationship::Consistent,
-            confirmed_position: None,
-            sync_state: Default::default(),
-            restricted_delivery: Vec::new(),
-            updated_at_ms: 1,
-        },
-    );
-    loaded.peer_reconciliation.insert(
-        observer.device_id.clone(),
-        PeerReconciliationRecord {
-            peer_device_id: observer.device_id,
-            relationship: MembershipHistoryRelationship::Consistent,
-            confirmed_position: base.current_position().ok(),
-            sync_state: Default::default(),
-            restricted_delivery: Vec::new(),
-            updated_at_ms: 1,
-        },
+    let peer_device_id = peer.device_id;
+    let loaded = with_peer_relation(
+        started_record(base.clone(), local.device_id, local.member_instance, 10),
+        &observer.device_id,
+        PeerRelation::Consistent,
+        base.current_position().ok(),
     );
     (
         loaded,
@@ -461,18 +367,10 @@ fn two_page_extension() -> (
 async fn restricted_event_applies_only_the_authenticated_signed_event() {
     let (local, local_credential) = member_facts("device-a", 0x41);
     let (peer, peer_credential) = member_facts("device-b", 0x42);
-    let base = VersionedMembershipHistory::from_activation_baseline(
-        MembershipActivationBaselineV2::Established {
-            lineage_id: "space-a".to_owned(),
-            head_event_id: MembershipEventId::from_hex(&"11".repeat(32)).unwrap(),
-            head_depth: 0,
-            current_members: vec![
-                (local.clone(), local_credential),
-                (peer.clone(), peer_credential.clone()),
-            ],
-        },
-    )
-    .unwrap();
+    let base = established_history(&[
+        (local.clone(), local_credential),
+        (peer.clone(), peer_credential.clone()),
+    ]);
     let author = MembershipAdmissionV2 {
         facts: peer.clone(),
         membership_credential: peer_credential,
@@ -488,40 +386,17 @@ async fn restricted_event_applies_only_the_authenticated_signed_event() {
         ),
         0x51,
     );
-    let event_id = *event.event_id().as_bytes();
-    let mut loaded = LoadedMembershipLedger::no_current_space();
-    loaded.revision = 3;
-    loaded.lineage_id = Some("space-a".to_owned());
-    loaded.membership_history = Some(base.encode_persisted_v2().unwrap());
-    loaded.local_device_id = Some(local.device_id);
-    loaded.local_member_instance = Some(local.member_instance);
-    loaded.local_join_active = true;
-    loaded.peer_reconciliation.insert(
-        peer.device_id.clone(),
-        PeerReconciliationRecord {
-            peer_device_id: peer.device_id.clone(),
-            relationship: MembershipHistoryRelationship::Consistent,
-            confirmed_position: None,
-            sync_state: Default::default(),
-            restricted_delivery: Vec::new(),
-            updated_at_ms: 1,
-        },
-    );
-    let repository = Arc::new(MemoryLedgerRepository {
-        loaded: Mutex::new(loaded),
-        commits: AtomicUsize::new(0),
-        fail_on_commit: None,
-    });
-    let ledger = Arc::new(MembershipLedger::new(
-        repository.clone(),
-        repository.clone(),
-        Arc::new(AcceptingVerifier),
+    let event_id = event.event_id();
+    let fixture = OwnerFixture::new(started_record(
+        base,
+        local.device_id,
+        local.member_instance,
+        3,
     ));
-    let handler = HandleMembershipHistoryMessageUseCase::new(ledger);
 
-    let response = handler
+    let response = handler(&fixture)
         .execute(
-            &AuthenticatedMember::new(peer.device_id.clone()),
+            &AuthenticatedMember::new(peer.device_id),
             MembershipHistoryMessage::RestrictedEventV3(event),
         )
         .await
@@ -531,13 +406,13 @@ async fn restricted_event_applies_only_the_authenticated_signed_event() {
         response,
         MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::RestrictedApplied)
     );
-    let persisted = repository.load().await.unwrap();
-    assert!(persisted.effect_journal.contains_key(&event_id));
+    assert!(fixture
+        .records
+        .ledger()
+        .unfinished_effects()
+        .any(|effect| effect.event_id() == event_id));
     assert_eq!(
-        persisted
-            .peer_reconciliation
-            .get(&peer.device_id)
-            .and_then(|record| record.confirmed_position.as_ref()),
+        confirmed_position(&fixture, &peer.device_id),
         None,
         "受限事件 ACK 不能伪造完整历史确认水位"
     );
@@ -548,19 +423,11 @@ async fn restricted_remote_removal_is_persisted_without_advancing_the_local_bran
     let (local, local_credential) = member_facts("device-a", 0x41);
     let (peer, peer_credential) = member_facts("device-b", 0x42);
     let (removed, removed_credential) = member_facts("device-c", 0x43);
-    let base = VersionedMembershipHistory::from_activation_baseline(
-        MembershipActivationBaselineV2::Established {
-            lineage_id: "space-a".to_owned(),
-            head_event_id: MembershipEventId::from_hex(&"11".repeat(32)).unwrap(),
-            head_depth: 0,
-            current_members: vec![
-                (local.clone(), local_credential),
-                (peer.clone(), peer_credential.clone()),
-                (removed.clone(), removed_credential),
-            ],
-        },
-    )
-    .unwrap();
+    let base = established_history(&[
+        (local.clone(), local_credential),
+        (peer.clone(), peer_credential.clone()),
+        (removed.clone(), removed_credential),
+    ]);
     let peer_author = MembershipAdmissionV2 {
         facts: peer.clone(),
         membership_credential: peer_credential,
@@ -570,37 +437,14 @@ async fn restricted_remote_removal_is_persisted_without_advancing_the_local_bran
     let removal = remove_event(&base, &peer_author, removed.member_instance, 0x51);
     let removal_id = removal.event_id();
     let common_position = base.current_position().unwrap();
-    let mut loaded = LoadedMembershipLedger::no_current_space();
-    loaded.revision = 3;
-    loaded.lineage_id = Some("space-a".to_owned());
-    loaded.membership_history = Some(base.encode_persisted_v2().unwrap());
-    loaded.local_device_id = Some(local.device_id);
-    loaded.local_member_instance = Some(local.member_instance);
-    loaded.local_join_active = true;
-    loaded.peer_reconciliation.insert(
-        peer.device_id.clone(),
-        PeerReconciliationRecord {
-            peer_device_id: peer.device_id.clone(),
-            relationship: MembershipHistoryRelationship::Consistent,
-            confirmed_position: None,
-            sync_state: Default::default(),
-            restricted_delivery: Vec::new(),
-            updated_at_ms: 1,
-        },
-    );
-    let repository = Arc::new(MemoryLedgerRepository {
-        loaded: Mutex::new(loaded),
-        commits: AtomicUsize::new(0),
-        fail_on_commit: None,
-    });
-    let ledger = Arc::new(MembershipLedger::new(
-        repository.clone(),
-        repository.clone(),
-        Arc::new(AcceptingVerifier),
+    let fixture = OwnerFixture::new(started_record(
+        base,
+        local.device_id,
+        local.member_instance,
+        3,
     ));
-    let handler = HandleMembershipHistoryMessageUseCase::new(ledger);
 
-    let response = handler
+    let response = handler(&fixture)
         .execute(
             &AuthenticatedMember::new(peer.device_id),
             MembershipHistoryMessage::RestrictedEventV3(removal),
@@ -612,12 +456,8 @@ async fn restricted_remote_removal_is_persisted_without_advancing_the_local_bran
         response,
         MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::RestrictedApplied)
     );
-    let persisted = repository.load().await.unwrap();
-    let history = VersionedMembershipHistory::decode_persisted_v2(
-        persisted.membership_history.as_ref().unwrap(),
-        &AcceptingVerifier,
-    )
-    .unwrap();
+    let persisted = fixture.records.ledger();
+    let history = persisted.history();
     let persisted_position = history.current_position().unwrap();
     assert_eq!(persisted_position.event_id, common_position.event_id);
     assert_eq!(persisted_position.depth, common_position.depth);
@@ -630,28 +470,19 @@ async fn restricted_remote_removal_is_persisted_without_advancing_the_local_bran
         history.pending_removal_decision(local.member_instance),
         Some(removal_id)
     );
-    assert!(persisted.effect_journal.is_empty());
+    assert!(persisted.unfinished_effects().next().is_none());
 }
 
 #[tokio::test]
 async fn two_page_transfer_persists_each_page_and_applies_only_when_complete() {
     let (loaded, peer_device_id, pages) = two_page_extension();
-    let repository = Arc::new(MemoryLedgerRepository {
-        loaded: Mutex::new(loaded),
-        commits: AtomicUsize::new(0),
-        fail_on_commit: None,
-    });
-    let ledger = Arc::new(MembershipLedger::new(
-        repository.clone(),
-        repository.clone(),
-        Arc::new(AcceptingVerifier),
-    ));
-    let handler = HandleMembershipHistoryMessageUseCase::new(ledger);
-    let source = AuthenticatedMember::new(peer_device_id.clone());
+    let fixture = OwnerFixture::new(loaded);
+    let handler = handler(&fixture);
+    let source = AuthenticatedMember::new(peer_device_id);
 
     let first = handler.execute(&source, pages[0].clone()).await.unwrap();
     let repeated = handler.execute(&source, pages[0].clone()).await.unwrap();
-    let after_first = repository.load().await.unwrap();
+    let after_first = fixture.records.space();
 
     assert!(matches!(
         first,
@@ -661,9 +492,10 @@ async fn two_page_transfer_persists_each_page_and_applies_only_when_complete() {
         })
     ));
     assert_eq!(repeated, first);
-    assert_eq!(repository.commits.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.records.commit_count(), 1);
     assert_eq!(
         after_first
+            .history_exchange
             .inbound_transfers
             .get(&peer_device_id)
             .unwrap()
@@ -671,7 +503,7 @@ async fn two_page_transfer_persists_each_page_and_applies_only_when_complete() {
             .len(),
         1
     );
-    let base_history = after_first.membership_history.clone();
+    let base_history = after_first.ledger.history.clone();
 
     let final_ack = handler.execute(&source, pages[1].clone()).await.unwrap();
 
@@ -679,39 +511,28 @@ async fn two_page_transfer_persists_each_page_and_applies_only_when_complete() {
         final_ack,
         MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Confirmed { .. })
     ));
-    assert_eq!(repository.commits.load(Ordering::SeqCst), 2);
-    let persisted = repository.load().await.unwrap();
-    assert!(persisted.inbound_transfers.is_empty());
-    assert_ne!(persisted.membership_history, base_history);
-    let current_position = VersionedMembershipHistory::decode_persisted_v2(
-        persisted.membership_history.as_deref().unwrap(),
-        &AcceptingVerifier,
-    )
-    .unwrap()
-    .current_position()
-    .unwrap();
+    assert_eq!(fixture.records.commit_count(), 2);
+    let persisted = fixture.records.space();
+    assert!(persisted.history_exchange.inbound_transfers.is_empty());
+    assert_ne!(persisted.ledger.history, base_history);
+    let current_position = persisted.ledger.history.current_position().unwrap();
     assert_eq!(
-        persisted
-            .peer_reconciliation
-            .get(&peer_device_id)
-            .and_then(|peer| peer.confirmed_position.as_ref()),
-        Some(&current_position)
+        confirmed_position(&fixture, &peer_device_id),
+        Some(current_position.clone())
     );
     assert_ne!(
-        persisted
-            .peer_reconciliation
-            .get(&DeviceId::new("device-observer"))
-            .and_then(|peer| peer.confirmed_position.as_ref()),
-        Some(&current_position)
+        confirmed_position(&fixture, &DeviceId::new("device-observer")),
+        Some(current_position)
     );
-    let prepared_add_devices = persisted
-        .effect_journal
-        .values()
+    let prepared_add_devices = fixture
+        .records
+        .ledger()
+        .unfinished_effects()
         .filter(|effect| {
-            effect.kind == MembershipEffectKind::AddDevice
-                && effect.phase == MembershipEffectPhase::Prepared
+            effect.kind() == MemberEffectKind::AddDevice
+                && effect.phase() == MemberEffectPhase::Prepared
         })
-        .flat_map(|effect| effect.affected_device_ids.clone())
+        .flat_map(|effect| effect.affected_device_ids().to_vec())
         .collect::<Vec<_>>();
     assert!(prepared_add_devices.contains(&DeviceId::new("device-large-c")));
     assert!(prepared_add_devices.contains(&DeviceId::new("device-large-d")));
@@ -720,22 +541,13 @@ async fn two_page_transfer_persists_each_page_and_applies_only_when_complete() {
 #[tokio::test]
 async fn final_page_commit_failure_preserves_staged_state_and_does_not_wake_maintenance() {
     let (loaded, peer_device_id, pages) = two_page_extension();
-    let repository = Arc::new(MemoryLedgerRepository {
-        loaded: Mutex::new(loaded),
-        commits: AtomicUsize::new(0),
-        fail_on_commit: Some(2),
-    });
-    let ledger = Arc::new(MembershipLedger::new(
-        repository.clone(),
-        repository.clone(),
-        Arc::new(AcceptingVerifier),
-    ));
-    let wake = Arc::new(WakeCounter(AtomicUsize::new(0)));
-    let handler = HandleMembershipHistoryMessageUseCase::new_with_wake(ledger, wake.clone());
-    let source = AuthenticatedMember::new(peer_device_id.clone());
+    let fixture = OwnerFixture::new(loaded);
+    let handler = handler(&fixture);
+    let source = AuthenticatedMember::new(peer_device_id);
 
     handler.execute(&source, pages[0].clone()).await.unwrap();
-    let staged = repository.load().await.unwrap();
+    let staged = fixture.records.record();
+    fixture.records.fail_next_commits(1);
     let error = handler
         .execute(&source, pages[1].clone())
         .await
@@ -745,25 +557,16 @@ async fn final_page_commit_failure_preserves_staged_state_and_does_not_wake_main
         error,
         HandleMembershipHistoryMessageError::Unavailable
     ));
-    assert_eq!(repository.commits.load(Ordering::SeqCst), 1);
-    assert_eq!(wake.0.load(Ordering::SeqCst), 0);
-    assert_eq!(repository.load().await.unwrap(), staged);
+    assert_eq!(fixture.records.commit_count(), 1);
+    assert_eq!(fixture.wake.wake_count(), 0);
+    assert_eq!(fixture.records.record(), staged);
 }
 
 #[tokio::test]
 async fn out_of_order_page_requests_the_missing_page_without_persisting() {
     let (loaded, peer_device_id, pages) = two_page_extension();
-    let repository = Arc::new(MemoryLedgerRepository {
-        loaded: Mutex::new(loaded),
-        commits: AtomicUsize::new(0),
-        fail_on_commit: None,
-    });
-    let ledger = Arc::new(MembershipLedger::new(
-        repository.clone(),
-        repository.clone(),
-        Arc::new(AcceptingVerifier),
-    ));
-    let handler = HandleMembershipHistoryMessageUseCase::new(ledger);
+    let fixture = OwnerFixture::new(loaded);
+    let handler = handler(&fixture);
     let source = AuthenticatedMember::new(peer_device_id);
 
     let response = handler.execute(&source, pages[1].clone()).await.unwrap();
@@ -775,45 +578,33 @@ async fn out_of_order_page_requests_the_missing_page_without_persisting() {
             ..
         })
     ));
-    assert_eq!(repository.commits.load(Ordering::SeqCst), 0);
-    assert!(repository
-        .load()
-        .await
-        .unwrap()
+    assert_eq!(fixture.records.commit_count(), 0);
+    assert!(fixture
+        .records
+        .space()
+        .history_exchange
         .inbound_transfers
         .is_empty());
 }
 
 #[tokio::test]
 async fn unknown_sender_requires_complete_evidence_without_committing_unrelated_history() {
-    let (mut loaded, peer_device_id, pages) = two_page_extension();
+    let (_, peer_device_id, pages) = two_page_extension();
     let (local, local_credential) = member_facts("device-a", 0x41);
-    loaded.membership_history = Some(
+    let fixture = OwnerFixture::new(started_record(
         VersionedMembershipHistory::new_single_member_root(
             "space-a".to_owned(),
             local.clone(),
             local_credential,
         )
-        .unwrap()
-        .encode_persisted_v2()
         .unwrap(),
-    );
-    loaded.local_device_id = Some(local.device_id);
-    loaded.local_member_instance = Some(local.member_instance);
-    loaded.peer_reconciliation.remove(&peer_device_id);
-    let repository = Arc::new(MemoryLedgerRepository {
-        loaded: Mutex::new(loaded),
-        commits: AtomicUsize::new(0),
-        fail_on_commit: None,
-    });
-    let ledger = Arc::new(MembershipLedger::new(
-        repository.clone(),
-        repository.clone(),
-        Arc::new(AcceptingVerifier),
+        local.device_id,
+        local.member_instance,
+        10,
     ));
-    let handler = HandleMembershipHistoryMessageUseCase::new(ledger);
+    let handler = handler(&fixture);
 
-    let source = AuthenticatedMember::new(peer_device_id.clone());
+    let source = AuthenticatedMember::new(peer_device_id);
     let first = handler.execute(&source, pages[0].clone()).await.unwrap();
 
     assert!(matches!(
@@ -825,28 +616,20 @@ async fn unknown_sender_requires_complete_evidence_without_committing_unrelated_
         final_ack,
         MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::NeedsEvidence)
     );
-    let persisted = repository.load().await.unwrap();
-    assert!(persisted.inbound_transfers.is_empty());
-    let history = VersionedMembershipHistory::decode_persisted_v2(
-        persisted.membership_history.as_deref().unwrap(),
-        &AcceptingVerifier,
-    )
-    .unwrap();
-    assert_eq!(history.effective_members().len(), 1);
-    assert_ne!(
-        persisted.peer_reconciliation[&peer_device_id].relationship,
-        MembershipHistoryRelationship::Consistent
-    );
+    let persisted = fixture.records.space();
+    assert!(persisted.history_exchange.inbound_transfers.is_empty());
+    assert_eq!(persisted.ledger.history.effective_members().len(), 1);
+    assert_eq!(relation(&fixture, &peer_device_id), None);
 }
 
 #[tokio::test]
 async fn changed_transfer_replaces_staged_pages_without_quarantining_the_member() {
     let (loaded, peer, old_pages) = two_page_extension();
-    let mut base = VersionedMembershipHistory::decode_persisted_v2(
-        loaded.membership_history.as_ref().unwrap(),
-        &AcceptingVerifier,
-    )
-    .unwrap();
+    let MembershipRecord::Space(space) = &loaded else {
+        unreachable!("extension record has a space");
+    };
+    let mut base = space.ledger.history.clone();
+    let local_member = space.ledger.local_member;
     let base_position = base.current_position().unwrap();
     let old_frames = old_pages
         .iter()
@@ -856,11 +639,7 @@ async fn changed_transfer_replaces_staged_pages_without_quarantining_the_member(
         })
         .collect::<Vec<_>>();
     let mut sender = base
-        .apply_suffix_pages_v4(
-            &old_frames,
-            loaded.local_member_instance.unwrap(),
-            &AcceptingVerifier,
-        )
+        .apply_suffix_pages_v4(&old_frames, local_member, &AcceptingVerifier)
         .unwrap();
     let author = sender.effective_member_for_device(&peer).unwrap();
     let removed = sender
@@ -885,18 +664,9 @@ async fn changed_transfer_replaces_staged_pages_without_quarantining_the_member(
             base_position,
         )
         .unwrap();
-    let repository = Arc::new(MemoryLedgerRepository {
-        loaded: Mutex::new(loaded),
-        commits: AtomicUsize::new(0),
-        fail_on_commit: None,
-    });
-    let ledger = Arc::new(MembershipLedger::new(
-        repository.clone(),
-        repository.clone(),
-        Arc::new(AcceptingVerifier),
-    ));
-    let handler = HandleMembershipHistoryMessageUseCase::new(ledger);
-    let source = AuthenticatedMember::new(peer.clone());
+    let fixture = OwnerFixture::new(loaded);
+    let handler = handler(&fixture);
+    let source = AuthenticatedMember::new(peer);
     handler
         .execute(&source, old_pages[0].clone())
         .await
@@ -929,13 +699,10 @@ async fn changed_transfer_replaces_staged_pages_without_quarantining_the_member(
             ..
         })
     ));
-    let state = repository.load().await.unwrap();
+    let state = fixture.records.space();
     assert_eq!(
-        state.inbound_transfers[&peer].transfer_id,
+        state.history_exchange.inbound_transfers[&peer].transfer_id,
         next[0].transfer_id()
     );
-    assert_ne!(
-        state.peer_reconciliation[&peer].relationship,
-        MembershipHistoryRelationship::Invalid
-    );
+    assert_ne!(relation(&fixture, &peer), Some(PeerRelation::Invalid));
 }

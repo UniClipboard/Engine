@@ -11,8 +11,6 @@ pub enum MembershipMaintenanceTrigger {
     Resume,
     Periodic,
     StateChanged,
-    PeerContact(DeviceId),
-    PeerOnline(DeviceId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,23 +21,65 @@ pub enum MembershipMaintenanceStepOutcome {
     Corrupt,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AdmissionMaintenanceOutcome {
-    /// 准入工作结束，本轮可以继续普通成员维护
-    Continue(MembershipMaintenanceStepOutcome),
-    /// 准入流程仍需独占本轮，普通成员维护留到后续执行
-    Yield(MembershipMaintenanceStepOutcome),
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SpaceWorkMode {
+    Pairing,
+    #[default]
+    Active,
+    NeedsAttention,
 }
 
-impl AdmissionMaintenanceOutcome {
-    pub const fn step(self) -> MembershipMaintenanceStepOutcome {
-        match self {
-            Self::Continue(step) | Self::Yield(step) => step,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum QuerySpaceWorkModeError {
+    #[error("space work state is temporarily unavailable")]
+    Unavailable,
+    #[error("space work state requires recovery")]
+    NeedsAttention,
+}
+
+pub struct SpaceWorkPermit {
+    mode: SpaceWorkMode,
+    _guard: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
+}
+
+impl SpaceWorkPermit {
+    pub(crate) fn guarded(
+        mode: SpaceWorkMode,
+        guard: tokio::sync::OwnedRwLockReadGuard<()>,
+    ) -> Self {
+        Self {
+            mode,
+            _guard: Some(guard),
         }
     }
 
-    pub const fn should_continue(self) -> bool {
-        matches!(self, Self::Continue(_))
+    #[cfg(test)]
+    pub(crate) fn unlocked(mode: SpaceWorkMode) -> Self {
+        Self { mode, _guard: None }
+    }
+
+    pub const fn mode(&self) -> SpaceWorkMode {
+        self.mode
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdmissionMaintenanceOutcome {
+    mode: SpaceWorkMode,
+    step: MembershipMaintenanceStepOutcome,
+}
+
+impl AdmissionMaintenanceOutcome {
+    pub const fn new(mode: SpaceWorkMode, step: MembershipMaintenanceStepOutcome) -> Self {
+        Self { mode, step }
+    }
+
+    pub const fn step(self) -> MembershipMaintenanceStepOutcome {
+        self.step
+    }
+
+    pub const fn allows_ordinary_membership(self) -> bool {
+        matches!(self.mode, SpaceWorkMode::Active)
     }
 }
 

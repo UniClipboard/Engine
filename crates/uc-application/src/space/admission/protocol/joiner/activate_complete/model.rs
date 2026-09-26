@@ -1,6 +1,6 @@
 use uc_core::membership::{
-    AdmissionSpaceTransitionResult, JoinerAdmission, JoinerAdmissionTransition,
-    PendingAdmissionExchange, SpaceAdmissionId,
+    AdmissionSpaceTransitionResult, JoinerAdmission, JoinerAdmissionTransition, MemberInstanceId,
+    PendingAdmissionExchange, SpaceAdmissionId, VersionedMembershipHistory,
 };
 use uc_core::security::IdentityFingerprint;
 use uc_core::DeviceId;
@@ -81,6 +81,7 @@ pub struct CompletedJoinerActivation {
     transition_result: AdmissionSpaceTransitionResult,
     pending_exchange: PendingAdmissionExchange,
     outcome: JoinerActivationOutcome,
+    membership: JoinerMembershipStart,
 }
 
 impl CompletedJoinerActivation {
@@ -88,11 +89,13 @@ impl CompletedJoinerActivation {
         transition_result: AdmissionSpaceTransitionResult,
         pending_exchange: PendingAdmissionExchange,
         outcome: JoinerActivationOutcome,
+        membership: JoinerMembershipStart,
     ) -> Self {
         Self {
             transition_result,
             pending_exchange,
             outcome,
+            membership,
         }
     }
 
@@ -102,8 +105,35 @@ impl CompletedJoinerActivation {
         AdmissionSpaceTransitionResult,
         PendingAdmissionExchange,
         JoinerActivationOutcome,
+        JoinerMembershipStart,
     ) {
-        (self.transition_result, self.pending_exchange, self.outcome)
+        (
+            self.transition_result,
+            self.pending_exchange,
+            self.outcome,
+            self.membership,
+        )
+    }
+}
+
+/// 加入方本机成员状态的起点，由激活执行从已保存的准入资料重建并校验。
+///
+/// 目标控制世代生效后交给成员状态负责人建立本机成员状态，先于准入终态保存。
+pub struct JoinerMembershipStart {
+    pub space_id: String,
+    pub local_device_id: DeviceId,
+    pub local_member: MemberInstanceId,
+    /// 已记入本机激活回执的加入后历史。为空表示该激活由旧版本准备，目标控制世代已带有同一加入的
+    /// 成员记录，只需核对一致。
+    pub history: Option<VersionedMembershipHistory>,
+}
+
+impl std::fmt::Debug for JoinerMembershipStart {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("JoinerMembershipStart")
+            .field("has_history", &self.history.is_some())
+            .finish_non_exhaustive()
     }
 }
 

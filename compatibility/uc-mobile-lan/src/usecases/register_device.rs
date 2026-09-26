@@ -34,6 +34,7 @@ use uc_core::ports::{
 };
 use uc_core::settings::model::MobileSyncSettings;
 use uc_observability_contract::analytics::{AnalyticsPort, Event};
+use uc_observability_contract::error_source::io_error_kind;
 
 use super::list_lan_interfaces::may_advertise_interface;
 use uc_mobile_proto::{build_mobile_sync_connect_uri, ConnectUriError, ConnectUriOther};
@@ -147,22 +148,22 @@ pub enum RegisterMobileShortcutDeviceError {
     PasswordTooLong { max: usize },
 
     /// 自定义 password 哈希失败(算法库内部错误)。
-    #[error("password hashing failed: {0}")]
-    PasswordHashFailed(String),
+    #[error("password hashing failed")]
+    PasswordHashFailed(#[source] PasswordHasherError),
 
     /// 持久化失败(重复 device id / username 碰撞 / 底层存储错误)。
-    #[error("device persistence failed: {0}")]
-    PersistenceFailed(String),
+    #[error("device persistence failed")]
+    PersistenceFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     /// 二维码渲染失败(URL 过长 / qrcode 库内部错误)。install_url 是已知常量,
     /// 实际只有 PNG 编码失败时才会触发。
-    #[error("qr code rendering failed: {0}")]
-    QrRenderFailed(String),
+    #[error("qr code rendering failed")]
+    QrRenderFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     /// 读取 settings 失败 —— 用于 base_url 推导。错误是真正的失败,
     /// 应当告知用户并支持重试。
-    #[error("settings load failed: {0}")]
-    SettingsLoadFailed(String),
+    #[error("settings load failed")]
+    SettingsLoadFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     /// 没有任何可进码的候选地址:无公网入口、无钉死 IP,且本机检测不到
     /// 任何合格网卡(RFC1918 / Tailscale CGNAT)—— iPhone 没有可达的
@@ -171,8 +172,8 @@ pub enum RegisterMobileShortcutDeviceError {
     NoLanInterfaceAvailable,
 
     /// 探测 LAN 接口失败(底层 syscall 错误)。
-    #[error("lan interface probe failed: {0}")]
-    LanInterfaceProbeFailed(String),
+    #[error("lan interface probe failed")]
+    LanInterfaceProbeFailed(#[source] LanInterfaceProbeError),
 }
 
 // ─── use case ───────────────────────────────────────────────────────────
@@ -290,7 +291,8 @@ impl RegisterMobileShortcutDeviceUseCase {
             }
             Err(err) if !candidates.is_empty() => {
                 warn!(
-                    error = %err,
+                    error_kind = "lan_interface_probe",
+                    io_error_kind = io_error_kind(&err),
                     "lan interface probe failed; QR will only carry configured advertise entries"
                 );
             }
@@ -365,7 +367,9 @@ impl RegisterMobileShortcutDeviceUseCase {
         // 1. 读 settings 决定 base_url —— 没开 LAN 监听就直接拒绝, 避免
         //    颁发了凭据却没 base_url 给用户的尴尬中间态。
         let settings = self.settings.load().await.map_err(|err| {
-            RegisterMobileShortcutDeviceError::SettingsLoadFailed(err.to_string())
+            RegisterMobileShortcutDeviceError::SettingsLoadFailed(
+                err.context("load settings").into(),
+            )
         })?;
         if !settings.mobile_sync.lan_listen_enabled {
             return Err(RegisterMobileShortcutDeviceError::LanListenerDisabled);
@@ -576,8 +580,8 @@ fn advertise_bucket(octets: &[u8; 4]) -> u8 {
 
 fn translate_probe_error(err: LanInterfaceProbeError) -> RegisterMobileShortcutDeviceError {
     match err {
-        LanInterfaceProbeError::Probe(msg) => {
-            RegisterMobileShortcutDeviceError::LanInterfaceProbeFailed(msg)
+        error @ LanInterfaceProbeError::Probe(_) => {
+            RegisterMobileShortcutDeviceError::LanInterfaceProbeFailed(error)
         }
     }
 }
@@ -596,13 +600,13 @@ fn render_qr_code(content: &str) -> Result<(Vec<u8>, String), RegisterMobileShor
     use qrcode::QrCode;
 
     let code = QrCode::new(content.as_bytes())
-        .map_err(|e| RegisterMobileShortcutDeviceError::QrRenderFailed(e.to_string()))?;
+        .map_err(|e| RegisterMobileShortcutDeviceError::QrRenderFailed(Box::new(e)))?;
 
     let png_image = code.render::<Luma<u8>>().min_dimensions(256, 256).build();
     let mut png_bytes: Vec<u8> = Vec::new();
     png_image
         .write_to(&mut std::io::Cursor::new(&mut png_bytes), ImageFormat::Png)
-        .map_err(|e| RegisterMobileShortcutDeviceError::QrRenderFailed(e.to_string()))?;
+        .map_err(|e| RegisterMobileShortcutDeviceError::QrRenderFailed(Box::new(e)))?;
 
     let ascii = code
         .render::<Dense1x2>()
@@ -623,7 +627,7 @@ fn translate_device_error(err: MobileDeviceError) -> RegisterMobileShortcutDevic
                 "minter produced colliding device id; this should not happen"
             );
             RegisterMobileShortcutDeviceError::PersistenceFailed(
-                "device id collision (minter contract violated)".to_string(),
+                "device id collision (minter contract violated)".into(),
             )
         }
         MobileDeviceError::UsernameCollision => {
@@ -657,29 +661,14 @@ fn translate_device_error(err: MobileDeviceError) -> RegisterMobileShortcutDevic
 /// 仍翻译为 `QrRenderFailed` 让 UI 给用户可见的失败 + 日志保留原因, 而
 /// 不是 panic 把整个进程拖垮。
 fn translate_connect_uri_error(err: ConnectUriError) -> RegisterMobileShortcutDeviceError {
-    match err {
-        ConnectUriError::UriTooLong { len, max } => {
-            RegisterMobileShortcutDeviceError::QrRenderFailed(format!(
-                "connect uri too long ({len} chars, max {max}); shorten device label"
-            ))
-        }
-        other => RegisterMobileShortcutDeviceError::QrRenderFailed(format!(
-            "connect uri build failed (unexpected): {other}"
-        )),
-    }
+    // 超长时来源本身即说明原因（设备标签过长）；其余变体按契约不应出现，同样保留来源供排障。
+    RegisterMobileShortcutDeviceError::QrRenderFailed(Box::new(err))
 }
 
 fn translate_hasher_error(err: PasswordHasherError) -> RegisterMobileShortcutDeviceError {
-    match err {
-        PasswordHasherError::InvalidPhc(msg) => {
-            // hash() 不应产生 InvalidPhc(那是 verify 路径才会有), 但 trait
-            // 把两个变体合并; 走到这里说明 adapter 实现异常, 翻译为内部错误。
-            RegisterMobileShortcutDeviceError::PasswordHashFailed(format!("invalid phc: {msg}"))
-        }
-        PasswordHasherError::Internal(msg) => {
-            RegisterMobileShortcutDeviceError::PasswordHashFailed(msg)
-        }
-    }
+    // hash() 不应产生 InvalidPhc(那是 verify 路径才会有), 但 trait 把两个变体合并;
+    // 走到这里说明 adapter 实现异常, 与 Internal 一样翻译为内部错误并保留来源。
+    RegisterMobileShortcutDeviceError::PasswordHashFailed(err)
 }
 
 // ─── tests ──────────────────────────────────────────────────────────────
@@ -1409,7 +1398,8 @@ mod tests {
         let err = uc.execute(label_only("iPhone")).await.unwrap_err();
         assert!(matches!(
             err,
-            RegisterMobileShortcutDeviceError::LanInterfaceProbeFailed(ref s) if s.contains("ifaddr crashed")
+            RegisterMobileShortcutDeviceError::LanInterfaceProbeFailed(LanInterfaceProbeError::Probe(ref source))
+                if source.to_string().contains("ifaddr crashed")
         ));
     }
 
@@ -1575,13 +1565,14 @@ mod tests {
             max: 800,
         });
         match err {
-            RegisterMobileShortcutDeviceError::QrRenderFailed(msg) => {
-                assert!(
-                    msg.contains("connect uri too long"),
-                    "expected uri-too-long phrasing, got: {msg}"
-                );
-                assert!(msg.contains("1200"));
-                assert!(msg.contains("800"));
+            RegisterMobileShortcutDeviceError::QrRenderFailed(source) => {
+                assert!(matches!(
+                    source.downcast_ref::<ConnectUriError>(),
+                    Some(ConnectUriError::UriTooLong {
+                        len: 1200,
+                        max: 800
+                    })
+                ));
             }
             other => panic!("expected QrRenderFailed, got {other:?}"),
         }
@@ -1595,22 +1586,18 @@ mod tests {
             ConnectUriError::InvalidScheme,
             ConnectUriError::UnsupportedVersion,
             ConnectUriError::UnsupportedService,
-            ConnectUriError::PayloadDecodeFailed("simulated".into()),
+            ConnectUriError::PayloadDecodeFailed(uc_mobile_proto::PayloadDecodeDetail::Missing),
             ConnectUriError::MissingField("url"),
             ConnectUriError::InvalidUrl,
         ] {
             let original = err.to_string();
             let translated = translate_connect_uri_error(err);
             match translated {
-                RegisterMobileShortcutDeviceError::QrRenderFailed(msg) => {
-                    assert!(
-                        msg.contains("unexpected"),
-                        "translation should mark unexpected variant: {msg}"
-                    );
-                    assert!(
-                        msg.contains(&original),
-                        "translation should retain original error text: {msg}"
-                    );
+                RegisterMobileShortcutDeviceError::QrRenderFailed(source) => {
+                    let kept = source
+                        .downcast_ref::<ConnectUriError>()
+                        .expect("translation keeps the connect URI error as source");
+                    assert_eq!(kept.to_string(), original);
                 }
                 other => panic!("expected QrRenderFailed for {original:?}, got {other:?}"),
             }

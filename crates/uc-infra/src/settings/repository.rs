@@ -59,7 +59,7 @@ impl FileSettingsRepository {
         if let Some(dir) = self.dir() {
             fs::create_dir_all(dir)
                 .await
-                .with_context(|| format!("create settings dir failed: {}", dir.display()))?;
+                .context("create settings dir failed")?;
         }
         Ok(())
     }
@@ -80,7 +80,7 @@ impl FileSettingsRepository {
         let tmp_path = self.path.with_extension("json.tmp");
         fs::write(&tmp_path, content)
             .await
-            .with_context(|| format!("write temp settings failed: {}", tmp_path.display()))?;
+            .context("write temp settings failed")?;
 
         #[cfg(windows)]
         {
@@ -88,23 +88,15 @@ impl FileSettingsRepository {
             if self.path.exists() {
                 fs::remove_file(&self.path).await.ok(); // Ignore error if file doesn't exist
             }
-            fs::rename(&tmp_path, &self.path).await.with_context(|| {
-                format!(
-                    "rename temp settings to target failed: {} -> {}",
-                    tmp_path.display(),
-                    self.path.display()
-                )
-            })?;
+            fs::rename(&tmp_path, &self.path)
+                .await
+                .context("rename temp settings to target failed")?;
         }
         #[cfg(not(windows))]
         {
-            fs::rename(&tmp_path, &self.path).await.with_context(|| {
-                format!(
-                    "rename temp settings to target failed: {} -> {}",
-                    tmp_path.display(),
-                    self.path.display()
-                )
-            })?;
+            fs::rename(&tmp_path, &self.path)
+                .await
+                .context("rename temp settings to target failed")?;
         }
         Ok(())
     }
@@ -116,7 +108,7 @@ fn deserialize_and_migrate_settings(content: &str) -> Result<(Settings, u32)> {
     let migrator = SettingsMigrator::new();
     let migrated = migrator
         .migrate_to_latest(settings)
-        .map_err(|e| anyhow::anyhow!("settings migration failed: {}", e))?;
+        .context("settings migration failed")?;
 
     Ok((migrated, original_version))
 }
@@ -133,9 +125,7 @@ pub fn load_settings_snapshot(path: &Path) -> Result<Settings> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Ok(Settings::default());
         }
-        Err(e) => {
-            return Err(e).with_context(|| format!("read settings failed: {}", path.display()))
-        }
+        Err(e) => return Err(e).context("read settings failed"),
     };
 
     let (settings, _) = deserialize_and_migrate_settings(&content)?;
@@ -166,10 +156,7 @@ impl SettingsPort for FileSettingsRepository {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Settings::default());
             }
-            Err(e) => {
-                return Err(e)
-                    .with_context(|| format!("read settings failed: {}", self.path.display()))
-            }
+            Err(e) => return Err(e).context("read settings failed"),
         };
 
         let (migrated, original_version) = deserialize_and_migrate_settings(&content)?;

@@ -11,6 +11,41 @@ use uc_observability_contract::diagnostics::{
     complete_operation, DiagnosticDomain, DiagnosticOperation, DiagnosticRole, OperationCompletion,
 };
 
+mod admission_settlement;
+mod space_work;
+
+pub(crate) use admission_settlement::{GatedJoinerActivation, JoinerFinalConfirmationGate};
+pub(crate) use space_work::{
+    ControlledSpaceAdmissionTransport, RecordedGroupUpdateDispatch,
+    RecordedMembershipHistoryExchange, SpaceWorkTestControl,
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DevMembershipHistoryFailure {
+    Retryable,
+    NeedsAttention,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DevSpaceWorkEventKind {
+    FinalConfirmationConnectionFailed,
+    FinalConfirmationSponsorCommitted,
+    FinalConfirmationSuccessReplyDropped,
+    FinalConfirmationRetryStarted,
+    FinalConfirmationReplyReceived,
+    OrdinaryMemberUpdateStarted,
+    MembershipHistorySyncStarted,
+    MembershipHistorySyncRetryableFailure,
+    MembershipHistorySyncNeedsAttention,
+    MembershipHistorySyncReplyReceived,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DevSpaceWorkEvent {
+    pub sequence: u64,
+    pub kind: DevSpaceWorkEventKind,
+}
+
 static TEST_TRACING_INIT: Once = Once::new();
 static TEST_OBSERVABILITY: OnceLock<ProcessObservabilityHandle> = OnceLock::new();
 
@@ -91,6 +126,7 @@ fn install_test_observability(remote: Option<OtlpHttpConfig>) -> bool {
         .and_then(|worker| {
             worker
                 .join()
+                // panic 载荷不是 Error，结果只用于判定任务是否正常结束。
                 .map_err(|_| std::io::Error::other("observability install panicked"))
         })
     else {
@@ -175,6 +211,28 @@ pub enum DevOperation {
         entry_id: String,
     },
     QueryNetworkEndpointId,
+    SeedLegacyDuplicateGroupMembers {
+        device_id: String,
+        additional_members: usize,
+    },
+    QueryGroupMemberCount {
+        device_id: String,
+    },
+    ArmJoinerFinalConfirmationPause,
+    WaitForJoinerFinalConfirmationPause,
+    ReleaseJoinerFinalConfirmationPause,
+    ArmFinalConfirmationConnectionFailure,
+    ArmFinalConfirmationSuccessReplyDrop,
+    ArmMembershipHistoryFailures {
+        failure: DevMembershipHistoryFailure,
+        count: usize,
+    },
+    ClearMembershipHistoryFailures,
+    WaitForSpaceWorkEvent {
+        after_sequence: u64,
+        kind: DevSpaceWorkEventKind,
+    },
+    QuerySpaceWorkEvents,
     FailNextSessionHandover {
         point: SessionHandoverFailurePoint,
     },
@@ -204,6 +262,21 @@ impl fmt::Debug for DevOperation {
             Self::PublishBlob { .. } => "publish_blob",
             Self::FetchBlob { .. } => "fetch_blob",
             Self::QueryNetworkEndpointId => "query_network_endpoint_id",
+            Self::SeedLegacyDuplicateGroupMembers { .. } => "seed_legacy_duplicate_group_members",
+            Self::QueryGroupMemberCount { .. } => "query_group_member_count",
+            Self::ArmJoinerFinalConfirmationPause => "arm_joiner_final_confirmation_pause",
+            Self::WaitForJoinerFinalConfirmationPause => "wait_for_joiner_final_confirmation_pause",
+            Self::ReleaseJoinerFinalConfirmationPause => "release_joiner_final_confirmation_pause",
+            Self::ArmFinalConfirmationConnectionFailure => {
+                "arm_final_confirmation_connection_failure"
+            }
+            Self::ArmFinalConfirmationSuccessReplyDrop => {
+                "arm_final_confirmation_success_reply_drop"
+            }
+            Self::ArmMembershipHistoryFailures { .. } => "arm_membership_history_failures",
+            Self::ClearMembershipHistoryFailures => "clear_membership_history_failures",
+            Self::WaitForSpaceWorkEvent { .. } => "wait_for_space_work_event",
+            Self::QuerySpaceWorkEvents => "query_space_work_events",
             Self::FailNextSessionHandover { .. } => "fail_next_session_handover",
             Self::QuerySessionHandoverDiagnostics => "query_session_handover_diagnostics",
             Self::SetNetworkPartition { .. } => "set_network_partition",
@@ -335,6 +408,27 @@ pub enum DevOperationResult {
         digest: Vec<u8>,
     },
     NetworkEndpointId([u8; 32]),
+    LegacyDuplicateGroupMembersSeeded,
+    GroupMemberCount {
+        count: usize,
+    },
+    JoinerFinalConfirmationPauseArmed,
+    JoinerFinalConfirmationPauseEntered,
+    JoinerFinalConfirmationPauseReleased,
+    FinalConfirmationConnectionFailureArmed {
+        after_sequence: u64,
+    },
+    FinalConfirmationSuccessReplyDropArmed {
+        after_sequence: u64,
+    },
+    MembershipHistoryFailuresArmed {
+        after_sequence: u64,
+    },
+    MembershipHistoryFailuresCleared {
+        remaining: usize,
+    },
+    SpaceWorkEvent(DevSpaceWorkEvent),
+    SpaceWorkEvents(Vec<DevSpaceWorkEvent>),
     SessionHandoverFailureArmed,
     SessionHandoverDiagnostics {
         network_build_count: usize,
@@ -368,6 +462,23 @@ impl fmt::Debug for DevOperationResult {
             Self::BlobPublished(_) => "blob_published",
             Self::BlobFetched { .. } => "blob_fetched",
             Self::NetworkEndpointId(_) => "network_endpoint_id",
+            Self::LegacyDuplicateGroupMembersSeeded => "legacy_duplicate_group_members_seeded",
+            Self::GroupMemberCount { .. } => "group_member_count",
+            Self::JoinerFinalConfirmationPauseArmed => "joiner_final_confirmation_pause_armed",
+            Self::JoinerFinalConfirmationPauseEntered => "joiner_final_confirmation_pause_entered",
+            Self::JoinerFinalConfirmationPauseReleased => {
+                "joiner_final_confirmation_pause_released"
+            }
+            Self::FinalConfirmationConnectionFailureArmed { .. } => {
+                "final_confirmation_connection_failure_armed"
+            }
+            Self::FinalConfirmationSuccessReplyDropArmed { .. } => {
+                "final_confirmation_success_reply_drop_armed"
+            }
+            Self::MembershipHistoryFailuresArmed { .. } => "membership_history_failures_armed",
+            Self::MembershipHistoryFailuresCleared { .. } => "membership_history_failures_cleared",
+            Self::SpaceWorkEvent(_) => "space_work_event",
+            Self::SpaceWorkEvents(_) => "space_work_events",
             Self::SessionHandoverFailureArmed => "session_handover_failure_armed",
             Self::SessionHandoverDiagnostics { .. } => "session_handover_diagnostics",
             Self::RejectedConnectionCount { .. } => "rejected_connection_count",

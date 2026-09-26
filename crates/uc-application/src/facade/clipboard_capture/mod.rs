@@ -54,8 +54,8 @@ pub struct CapturedFileSetView {
 
 #[derive(Debug, Error)]
 pub enum ClipboardCaptureFacadeError {
-    #[error("clipboard capture failed: {0}")]
-    Internal(String),
+    #[error("clipboard capture failed")]
+    Internal(#[source] anyhow::Error),
 }
 
 #[async_trait]
@@ -88,7 +88,7 @@ impl ClipboardCapturePort for CaptureClipboardUseCase {
                 crate::clipboard::capture::CommitMode::Create,
             )
             .await
-            .map_err(|err| ClipboardCaptureFacadeError::Internal(err.to_string()))?;
+            .map_err(|err| ClipboardCaptureFacadeError::Internal(anyhow::Error::from(err)))?;
         Ok(outcome.map(|outcome| CapturedClipboardEntryView {
             entry_id: outcome.entry_id.to_string(),
             deduplicated: outcome.deduplicated,
@@ -143,7 +143,7 @@ impl ClipboardCaptureFacade {
         let snapshot = self
             .current_clipboard
             .read_snapshot()
-            .map_err(|err| ClipboardCaptureFacadeError::Internal(err.to_string()))?;
+            .map_err(|err| ClipboardCaptureFacadeError::Internal(anyhow::Error::from(err)))?;
         self.capture(snapshot, ClipboardChangeOrigin::LocalCapture, None)
             .await
     }
@@ -156,13 +156,13 @@ impl ClipboardCaptureFacade {
         paths: Vec<PathBuf>,
     ) -> Result<CapturedFileSetView, ClipboardCaptureFacadeError> {
         if paths.is_empty() {
-            return Err(ClipboardCaptureFacadeError::Internal(
-                "at least one file path is required".to_string(),
-            ));
+            return Err(ClipboardCaptureFacadeError::Internal(anyhow::anyhow!(
+                "at least one file path is required"
+            )));
         }
 
         let current_dir = std::env::current_dir()
-            .map_err(|err| ClipboardCaptureFacadeError::Internal(err.to_string()))?;
+            .map_err(|err| ClipboardCaptureFacadeError::Internal(anyhow::Error::from(err)))?;
         let mut uris = Vec::with_capacity(paths.len());
         for path in paths {
             let absolute = if path.is_absolute() {
@@ -171,9 +171,9 @@ impl ClipboardCaptureFacade {
                 current_dir.join(path)
             };
             let uri = url::Url::from_file_path(absolute).map_err(|()| {
-                ClipboardCaptureFacadeError::Internal(
-                    "a path could not be represented as a file URL".to_string(),
-                )
+                ClipboardCaptureFacadeError::Internal(anyhow::anyhow!(
+                    "a path could not be represented as a file URL"
+                ))
             })?;
             uris.push(uri.to_string());
         }
@@ -193,23 +193,23 @@ impl ClipboardCaptureFacade {
             .capture(snapshot, ClipboardChangeOrigin::LocalCapture, None)
             .await?
             .ok_or_else(|| {
-                ClipboardCaptureFacadeError::Internal(
-                    "file capture did not produce an entry".to_string(),
-                )
+                ClipboardCaptureFacadeError::Internal(anyhow::anyhow!(
+                    "file capture did not produce an entry"
+                ))
             })?;
         let repository = self.entry_file_set_repo.as_ref().ok_or_else(|| {
-            ClipboardCaptureFacadeError::Internal(
-                "file-set diagnostics are unavailable in this runtime".to_string(),
-            )
+            ClipboardCaptureFacadeError::Internal(anyhow::anyhow!(
+                "file-set diagnostics are unavailable in this runtime"
+            ))
         })?;
         let file_set = repository
             .load(&EntryId::from(entry.entry_id.as_str()))
             .await
-            .map_err(|err| ClipboardCaptureFacadeError::Internal(err.to_string()))?
+            .map_err(|err| ClipboardCaptureFacadeError::Internal(anyhow::Error::from(err)))?
             .ok_or_else(|| {
-                ClipboardCaptureFacadeError::Internal(
-                    "captured entry has no file-set manifest".to_string(),
-                )
+                ClipboardCaptureFacadeError::Internal(anyhow::anyhow!(
+                    "captured entry has no file-set manifest"
+                ))
             })?;
 
         let directory_structure = file_set.has_directory_structure();

@@ -29,28 +29,28 @@ where
         self.store
             .get_trusted_peer(peer_device_id_value)
             .await
-            .map_err(|error| TrustedPeerError::Repository(error.to_string()))
+            .map_err(|error| TrustedPeerError::Repository(error.into()))
     }
 
     async fn list(&self) -> Result<Vec<TrustedPeer>, TrustedPeerError> {
         self.store
             .list_trusted_peers()
             .await
-            .map_err(|error| TrustedPeerError::Repository(error.to_string()))
+            .map_err(|error| TrustedPeerError::Repository(error.into()))
     }
 
     async fn save(&self, peer: &TrustedPeer) -> Result<(), TrustedPeerError> {
         self.store
             .save_trusted_peer(peer)
             .await
-            .map_err(|error| TrustedPeerError::Repository(error.to_string()))
+            .map_err(|error| TrustedPeerError::Repository(error.into()))
     }
 
     async fn remove(&self, peer_device_id_value: &DeviceId) -> Result<bool, TrustedPeerError> {
         self.store
             .remove_trusted_peer(peer_device_id_value)
             .await
-            .map_err(|error| TrustedPeerError::Repository(error.to_string()))
+            .map_err(|error| TrustedPeerError::Repository(error.into()))
     }
 }
 

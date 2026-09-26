@@ -1,3 +1,4 @@
+use std::error::Error;
 use std::future::Future;
 use std::sync::atomic::AtomicBool;
 #[cfg(feature = "dev-tools")]
@@ -29,6 +30,7 @@ use uc_observability_contract::diagnostics::{
     complete_operation, operation_span, DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation,
     DiagnosticRole, DiagnosticSpanKind, OperationCompletion, OperationContext,
 };
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::assembly::deps::WiredDependencies;
 #[cfg(feature = "lan-compat")]
@@ -37,6 +39,8 @@ use crate::assembly::lifecycle::{
     build_network_runtime, prepare_daemon_session, reconcile_session_peers,
 };
 use crate::assembly::sync_engine::SyncSessionAssembly;
+#[cfg(feature = "dev-tools")]
+use crate::dev::JoinerFinalConfirmationGate;
 use crate::engine::event_stream::EventSender;
 use crate::operations::space::reset_space::execute_reset_space;
 use crate::subsystems::peer_keepalive::spawn_peer_reachability_event_task;
@@ -115,8 +119,16 @@ pub(super) struct SessionHandoverDiagnostics {
     pub(super) session_activation_failure_count: usize,
 }
 
-fn session_runtime_error(context: &'static str, error: impl std::fmt::Display) -> EngineError {
-    error!(context, error = %error, "engine session lifecycle failed");
+fn session_runtime_error(
+    context: &'static str,
+    error: impl Into<Box<dyn Error + Send + Sync>>,
+) -> EngineError {
+    let error = error.into();
+    error!(
+        context,
+        io_error_kind = io_error_kind(error.as_ref()),
+        "engine session lifecycle failed"
+    );
     EngineError::new(
         SESSION_RUNTIME_FAILED_CODE,
         EngineErrorCategory::Unavailable,
@@ -127,9 +139,14 @@ fn session_runtime_error(context: &'static str, error: impl std::fmt::Display) -
 #[cfg(any(test, feature = "dev-tools"))]
 fn retryable_space_transition_runtime_error(
     context: &'static str,
-    error: impl std::fmt::Display,
+    error: impl Into<Box<dyn Error + Send + Sync>>,
 ) -> EngineError {
-    error!(context, error = %error, "engine Space transition failed");
+    let error = error.into();
+    error!(
+        context,
+        io_error_kind = io_error_kind(error.as_ref()),
+        "engine Space transition failed"
+    );
     EngineError::new(1103, EngineErrorCategory::Unavailable, true)
 }
 
@@ -137,7 +154,12 @@ fn space_transition_error(
     context: &'static str,
     error: CompletePendingSpaceTransitionError,
 ) -> EngineError {
-    error!(context, error = %error, "engine Space transition failed");
+    error!(
+        context,
+        error_kind = "space_transition",
+        io_error_kind = io_error_kind(&error),
+        "engine Space transition failed"
+    );
     match error {
         CompletePendingSpaceTransitionError::State { .. } => {
             EngineError::new(1103, EngineErrorCategory::Unavailable, true)
@@ -165,6 +187,8 @@ struct ProductionSessionFactory {
     iroh_bind_port_override: Option<u16>,
     #[cfg(feature = "dev-tools")]
     network_partition_gate: uc_infra::network::iroh::IrohNetworkPartitionGate,
+    #[cfg(feature = "dev-tools")]
+    joiner_final_confirmation_gate: Arc<JoinerFinalConfirmationGate>,
     #[cfg(feature = "dev-tools")]
     test_control: Arc<SessionHandoverTestControl>,
     network_recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
@@ -356,6 +380,9 @@ impl SessionSupervisor {
         iroh_bind_port_override: Option<u16>,
         #[cfg(feature = "dev-tools")]
         network_partition_gate: uc_infra::network::iroh::IrohNetworkPartitionGate,
+        #[cfg(feature = "dev-tools")] joiner_final_confirmation_gate: Arc<
+            JoinerFinalConfirmationGate,
+        >,
         network_recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
     ) {
         let factory = Arc::new(ProductionSessionFactory {
@@ -369,6 +396,8 @@ impl SessionSupervisor {
             iroh_bind_port_override,
             #[cfg(feature = "dev-tools")]
             network_partition_gate,
+            #[cfg(feature = "dev-tools")]
+            joiner_final_confirmation_gate,
             #[cfg(feature = "dev-tools")]
             test_control: Arc::clone(&self.test_control),
             network_recovery,
@@ -941,6 +970,8 @@ impl ProductionSessionFactory {
             &self.app_version,
             #[cfg(feature = "lan-compat")]
             wired.mobile_sync_ports.clone(),
+            #[cfg(feature = "dev-tools")]
+            Arc::clone(&self.joiner_final_confirmation_gate),
             session_builder,
         )
         .await

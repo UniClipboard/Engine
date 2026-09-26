@@ -153,7 +153,7 @@ async fn peer_restart_does_not_block_local_work_and_recovers_an_offline_file() {
     };
     match status {
         JoinSpaceStatusSummary::Active { .. } => {}
-        JoinSpaceStatusSummary::Pending { .. } => {
+        JoinSpaceStatusSummary::Pending { .. } | JoinSpaceStatusSummary::Processing { .. } => {
             next_engine_event_matching(&mut local_events, |event| {
                 matches!(
                     event,
@@ -167,25 +167,28 @@ async fn peer_restart_does_not_block_local_work_and_recovers_an_offline_file() {
         JoinSpaceStatusSummary::Rejected { reason, .. } => {
             panic!("join was rejected: {reason:?}");
         }
+        JoinSpaceStatusSummary::NeedsAttention { .. } => {
+            panic!("join requires explicit recovery");
+        }
         JoinSpaceStatusSummary::Terminated { reason, .. } => {
             panic!("join was terminated: {reason:?}");
         }
     }
     let peer_id = timeout(Duration::from_secs(20), async {
         loop {
-            let OperationResult::DeviceGroupChoices(summary) = local
-                .execute(Operation::QueryDeviceGroupChoices)
-                .await
-                .unwrap()
-            else {
-                panic!("expected membership");
-            };
-            if summary.device_trust.local_membership == DeviceMembershipSummary::Active {
-                if let Some(peer) = summary.device_trust.devices.iter().find(|device| {
-                    !device.is_local && device.reachability == DeviceReachabilitySummary::Online
-                }) {
-                    break peer.device_id.clone();
+            match local.execute(Operation::QueryDeviceGroupChoices).await {
+                Ok(OperationResult::DeviceGroupChoices(summary)) => {
+                    if summary.device_trust.local_membership == DeviceMembershipSummary::Active {
+                        if let Some(peer) = summary.device_trust.devices.iter().find(|device| {
+                            !device.is_local
+                                && device.reachability == DeviceReachabilitySummary::Online
+                        }) {
+                            break peer.device_id.clone();
+                        }
+                    }
                 }
+                Err(_) => {}
+                Ok(_) => panic!("expected membership"),
             }
             sleep(Duration::from_millis(20)).await;
         }

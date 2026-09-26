@@ -49,6 +49,7 @@ tokio = { version = "1", features = ["full"] }
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uc-infra = { path = "../uc-infra", features = ["test-util"] }
+uc-testkit = { path = "../../tests/uc-testkit" }
 wiremock = "0.6"
 
 [lints]

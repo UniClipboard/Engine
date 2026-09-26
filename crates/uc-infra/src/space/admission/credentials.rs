@@ -7,7 +7,7 @@ use diesel::sql_query;
 use diesel::sql_types::Binary;
 use serde::{Deserialize, Serialize};
 use uc_application::deps::{
-    LoadMembershipLedgerPort, PrepareSpaceAdmissionCredentialsPort,
+    MembershipRecordStorePort, PrepareSpaceAdmissionCredentialsPort,
     SpaceAdmissionCredentialPreparationError,
 };
 use uc_core::crypto::domain::Passphrase;
@@ -94,7 +94,7 @@ pub struct SqliteSpaceAdmissionCredentials<E> {
     executor: E,
     keys: Arc<AdmissionKeyManager>,
     manifests: Arc<ActiveSpaceGenerationManifestStore>,
-    membership_ledger: Arc<dyn LoadMembershipLedgerPort>,
+    membership_ledger: Arc<dyn MembershipRecordStorePort>,
     admissions: Arc<SqliteSpaceAdmissionState<E>>,
 }
 
@@ -451,7 +451,7 @@ impl<E> SqliteSpaceAdmissionCredentials<E> {
         executor: E,
         keys: Arc<AdmissionKeyManager>,
         manifests: Arc<ActiveSpaceGenerationManifestStore>,
-        membership_ledger: Arc<dyn LoadMembershipLedgerPort>,
+        membership_ledger: Arc<dyn MembershipRecordStorePort>,
         admissions: Arc<SqliteSpaceAdmissionState<E>>,
     ) -> Self {
         Self {
@@ -576,15 +576,20 @@ impl<E: DbExecutor> SqliteSpaceAdmissionCredentials<E> {
         {
             return Ok(CredentialScope::from(manifest));
         }
-        let ledger = self
+        let record = self
             .membership_ledger
             .load()
             .await
             .map_err(anyhow::Error::new)?;
-        let space_id = ledger
-            .lineage_id
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("current legacy Space identity is missing"))?;
+        let space_id = match record {
+            uc_application::deps::MembershipRecord::Space(space) => {
+                space.ledger.history.lineage_id().to_owned()
+            }
+            uc_application::deps::MembershipRecord::NoSpace { .. } => String::new(),
+        };
+        if space_id.is_empty() {
+            anyhow::bail!("current legacy Space identity is missing");
+        }
         Ok(CredentialScope::Legacy {
             space_id,
             keyslot_generation: [0; 16],
@@ -667,7 +672,7 @@ impl<E: DbExecutor + Send + Sync> PrepareSpaceAdmissionCredentialsPort
 fn map_store_error(error: anyhow::Error) -> SpaceAdmissionCredentialStoreError {
     if matches!(
         error.downcast_ref::<AdmissionKeyError>(),
-        Some(AdmissionKeyError::SecureStorage)
+        Some(AdmissionKeyError::SecureStorage { .. } | AdmissionKeyError::StorageNotPersisted)
     ) {
         SpaceAdmissionCredentialStoreError::Locked { source: error }
     } else if error.downcast_ref::<AdmissionKeyError>().is_some() {
@@ -743,12 +748,10 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
+    use crate::space::membership_record::test_support::{lineage_only_records, no_space_records};
     use diesel::sql_query;
     use diesel::sql_types::Binary;
     use diesel::{QueryableByName, RunQueryDsl};
-    use uc_application::deps::{
-        LoadMembershipLedgerPort, LoadedMembershipLedger, MembershipLedgerError,
-    };
     use uc_core::ids::SpaceId;
     use uc_core::membership::{
         ActiveRuntimeLayout, AdmissionChannelPeerId, SpaceAdmissionProtocolVersion,
@@ -824,26 +827,6 @@ mod tests {
         }
     }
 
-    struct EmptyLedger;
-
-    #[async_trait::async_trait]
-    impl LoadMembershipLedgerPort for EmptyLedger {
-        async fn load(&self) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
-            Ok(LoadedMembershipLedger::no_current_space())
-        }
-    }
-
-    struct LegacyLedger;
-
-    #[async_trait::async_trait]
-    impl LoadMembershipLedgerPort for LegacyLedger {
-        async fn load(&self) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
-            let mut ledger = LoadedMembershipLedger::no_current_space();
-            ledger.lineage_id = Some("legacy-space".to_owned());
-            Ok(ledger)
-        }
-    }
-
     #[tokio::test]
     async fn legacy_layout_binds_registration_to_membership_lineage() {
         let temp = tempfile::tempdir().unwrap();
@@ -861,13 +844,13 @@ mod tests {
             Arc::clone(&executor),
             Arc::clone(&keys),
             Arc::clone(&manifests),
-            Arc::new(LegacyLedger),
+            lineage_only_records("legacy-space"),
         ));
         let credentials = SqliteSpaceAdmissionCredentials::new(
             executor,
             keys,
             manifests,
-            Arc::new(LegacyLedger),
+            lineage_only_records("legacy-space"),
             admissions,
         );
 
@@ -915,13 +898,13 @@ mod tests {
                 executor.clone(),
                 keys.clone(),
                 manifests.clone(),
-                Arc::new(EmptyLedger),
+                no_space_records(),
             ));
             SqliteSpaceAdmissionCredentials::new(
                 executor,
                 keys,
                 manifests.clone(),
-                Arc::new(EmptyLedger),
+                no_space_records(),
                 admissions,
             )
         };
@@ -1049,13 +1032,13 @@ mod tests {
             Arc::clone(&executor),
             Arc::clone(&keys),
             Arc::clone(&manifests),
-            Arc::new(EmptyLedger),
+            no_space_records(),
         ));
         let credentials = SqliteSpaceAdmissionCredentials::new(
             executor,
             keys,
             manifests,
-            Arc::new(EmptyLedger),
+            no_space_records(),
             admissions,
         );
 

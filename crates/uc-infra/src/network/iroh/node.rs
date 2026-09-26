@@ -19,10 +19,13 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::str::FromStr;
 #[cfg(not(any(test, feature = "test-util")))]
 use std::sync::Mutex;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use uc_application::deps::ClipboardReceiverPort;
+use uc_application::deps::PeerIdentityDirectoryPort;
+use uc_observability_contract::error_source::io_error_kind;
 
 use super::protocol_router::ProtocolRouterBuilder;
 use super::session_generation::{
@@ -37,9 +40,7 @@ use iroh_mdns_address_lookup::MdnsAddressLookup;
 use noq_proto::congestion::{Bbr3Config, CubicConfig};
 use tracing::instrument::WithSubscriber;
 use tracing::{debug, info, instrument, warn};
-use uc_application::deps::{
-    CurrentMemberSignaturePort, IssueMembershipBranchRecoveryPort, KnownPeerContact,
-};
+use uc_application::deps::{IssueMembershipBranchRecoveryPort, KnownPeerContact};
 use uc_core::settings::model::CongestionController;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -50,8 +51,7 @@ use uc_application::deps::{
 
 use uc_core::file_transfer::OutboundProgressReporterPort;
 use uc_core::membership::{
-    ContentExchangeGatePort, CurrentMembershipIdentityPort, GroupRevocationPort,
-    GroupUpdateDispatchPort, MemberRepositoryPort, MembershipAttestationEndpointPort,
+    ContentExchangeGatePort, GroupRevocationPort, GroupUpdateDispatchPort,
     MembershipHistoryExchangeEndpointPort, PeerAdmissionPort,
 };
 use uc_core::ports::blob::BlobTransferPort;
@@ -84,15 +84,13 @@ use super::clipboard_receiver_adapter::IrohClipboardReceiverAdapter;
 use super::connection_channel_adapter::IrohConnectionChannelAdapter;
 use super::group_update_adapter::{IrohGroupUpdateAdapter, GROUP_UPDATE_ALPN};
 use super::identity_store::IrohIdentityStore;
-use super::membership_attestation_adapter::{
-    IrohMembershipAttestationAdapter, IrohMembershipGossipTransportAdapter,
-    IrohMembershipIdentityAdapter, MEMBERSHIP_ATTESTATION_ALPN,
-};
+use super::inbound_peer::{PeerIdentityError, PeerIdentityResolver};
 use super::membership_branch_recovery_adapter::IrohMembershipBranchRecoveryHandler;
 use super::membership_branch_recovery_wire::MEMBERSHIP_BRANCH_RECOVERY_ALPN;
 use super::membership_history_exchange_adapter::{
     IrohMembershipHistoryExchangeAdapter, MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
 };
+use super::membership_identity_adapter::IrohMembershipIdentityAdapter;
 use super::net_recovery::DemandRecoveryCoordinator;
 use super::net_recovery::NetworkRecoveryObservationSource;
 use super::network_partition::IrohNetworkPartitionGate;
@@ -536,34 +534,21 @@ fn relay_mode_from_config(config: &IrohNodeConfig) -> Result<RelayMode, IrohNode
     for raw in &config.custom_relay_urls {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
-            return Err(IrohNodeError::InvalidRelayUrl {
-                value: raw.clone(),
-                message: "relay URL must not be empty".to_string(),
-            });
+            return Err(IrohNodeError::InvalidRelayUrl(RelayUrlProblem::Empty));
         }
         let parsed = trimmed
             .parse::<RelayUrl>()
-            .map_err(|err| IrohNodeError::InvalidRelayUrl {
-                value: raw.clone(),
-                message: err.to_string(),
-            })?;
+            .map_err(|err| IrohNodeError::InvalidRelayUrl(RelayUrlProblem::Parse(err)))?;
         if parsed.scheme() != "http" && parsed.scheme() != "https" {
-            return Err(IrohNodeError::InvalidRelayUrl {
-                value: raw.clone(),
-                message: "relay URL scheme must be http or https".to_string(),
-            });
+            return Err(IrohNodeError::InvalidRelayUrl(
+                RelayUrlProblem::UnsupportedScheme,
+            ));
         }
         if parsed.host_str().is_none() {
-            return Err(IrohNodeError::InvalidRelayUrl {
-                value: raw.clone(),
-                message: "relay URL must include a host".to_string(),
-            });
+            return Err(IrohNodeError::InvalidRelayUrl(RelayUrlProblem::MissingHost));
         }
         if !parsed.username().is_empty() || parsed.password().is_some() {
-            return Err(IrohNodeError::InvalidRelayUrl {
-                value: raw.clone(),
-                message: "relay URL must not include credentials".to_string(),
-            });
+            return Err(IrohNodeError::InvalidRelayUrl(RelayUrlProblem::Credentials));
         }
         let mut relay_config = RelayConfig::from(parsed.clone());
         if let Some(token) = config
@@ -593,6 +578,7 @@ impl NodeRunLease {
         {
             let mut active = NODE_RUN_ACTIVE
                 .lock()
+                // 锁中毒：PoisonError 持有 guard，不能作为来源保存。
                 .map_err(|_| IrohNodeError::RuntimeStatePoisoned)?;
             if *active {
                 return Err(IrohNodeError::AlreadyRunning);
@@ -669,7 +655,7 @@ impl IrohSessionBuilder {
     /// 复用同一个本机地址 watcher 和 mDNS 实例，不创建额外后台任务。
     pub async fn connection_hints(
         &self,
-        members: Arc<dyn MemberRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
         fingerprints: Arc<dyn IdentityFingerprintFactoryPort>,
     ) -> futures_util::stream::BoxStream<
         'static,
@@ -684,14 +670,14 @@ impl IrohSessionBuilder {
             .stream()
             .skip(1)
             .map(|_| Ok(uc_application::deps::ConnectionHint::NetworkChanged));
+        let identity = Arc::new(PeerIdentityResolver::new(identities, fingerprints));
         let discovered = self
             .context
             .mdns
             .subscribe()
             .await
             .filter_map(move |event| {
-                let members = Arc::clone(&members);
-                let fingerprints = Arc::clone(&fingerprints);
+                let identity = Arc::clone(&identity);
                 async move {
                     let iroh_mdns_address_lookup::DiscoveryEvent::Discovered {
                         endpoint_info, ..
@@ -699,21 +685,15 @@ impl IrohSessionBuilder {
                     else {
                         return None;
                     };
-                    let fingerprint =
-                        match fingerprints.from_public_key(endpoint_info.endpoint_id.as_bytes()) {
-                            Ok(value) => value,
-                            Err(source) => return Some(Err(source)),
-                        };
-                    match members.list().await {
-                        Ok(members) => members
-                            .into_iter()
-                            .find(|member| member.identity_fingerprint == fingerprint)
-                            .map(|member| {
-                                Ok(uc_application::deps::ConnectionHint::PeerAddressChanged(
-                                    member.device_id,
-                                ))
-                            }),
-                        Err(source) => Some(Err(anyhow::Error::new(source))),
+                    match identity.resolve(endpoint_info.endpoint_id.as_bytes()).await {
+                        Ok(device) => Some(Ok(
+                            uc_application::deps::ConnectionHint::PeerAddressChanged(device),
+                        )),
+                        Err(PeerIdentityError::Unresolved | PeerIdentityError::Ambiguous) => None,
+                        Err(
+                            error @ (PeerIdentityError::MemberRead(_)
+                            | PeerIdentityError::Fingerprint(_)),
+                        ) => Some(Err(anyhow::Error::new(error))),
                     }
                 }
             });
@@ -900,9 +880,9 @@ impl IrohNodeBuilder {
             endpoint_builder = endpoint_builder
                 .bind_addr((Ipv4Addr::UNSPECIFIED, port))
                 .map_err(|err| {
-                    IrohNodeError::Bind(format!(
-                        "pin iroh UDP port {port} (UC_IROH_BIND_PORT): {err}"
-                    ))
+                    IrohNodeError::Bind(
+                        anyhow::Error::new(err).context("pin iroh UDP port (UC_IROH_BIND_PORT)"),
+                    )
                 })?;
             info!(
                 target: "iroh.bind",
@@ -946,7 +926,7 @@ impl IrohNodeBuilder {
                 tracing::subscriber::NoSubscriber::default(),
             ))
             .await
-            .map_err(|err| IrohNodeError::Bind(err.to_string()))?;
+            .map_err(|err| IrohNodeError::Bind(anyhow::Error::new(err)))?;
         let endpoint = Arc::new(endpoint);
         // 只有 bind 完成才将来源标记为可采集；失败构造不能留下 Enabled 假象。
         {
@@ -997,7 +977,6 @@ impl IrohNodeBuilder {
             GROUP_UPDATE_ALPN,
             MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
             MEMBERSHIP_BRANCH_RECOVERY_ALPN,
-            MEMBERSHIP_ATTESTATION_ALPN,
             ACTIVE_CLIPBOARD_ALPN,
             ACTIVE_CLIPBOARD_PULL_ALPN,
             TRANSFER_PROGRESS_ALPN,
@@ -1091,7 +1070,7 @@ impl IrohSessionBuilder {
     pub fn install_peer_reachability(
         &mut self,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-        member_repo: Arc<dyn MemberRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         clock: Arc<dyn ClockPort>,
@@ -1104,7 +1083,7 @@ impl IrohSessionBuilder {
         let adapter = IrohPeerReachabilityAdapter::new_with_recovery(
             Arc::clone(&self.context.endpoint),
             peer_addr_repo,
-            member_repo,
+            identities,
             peer_admission,
             fingerprint_factory,
             clock,
@@ -1163,14 +1142,14 @@ impl IrohSessionBuilder {
     pub fn install_clipboard(
         &mut self,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-        member_repo: Arc<dyn MemberRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         peer_reachability: Arc<dyn PeerReachabilityPort>,
     ) -> Result<ClipboardHandlers, IrohNodeError> {
         let receiver = IrohClipboardReceiverAdapter::new(
             Arc::clone(&self.context.endpoint),
-            member_repo,
+            identities,
             peer_admission,
             fingerprint_factory,
         );
@@ -1211,48 +1190,26 @@ impl IrohSessionBuilder {
     pub fn install_membership_history_exchange(
         &mut self,
         adapter: &IrohMembershipHistoryExchangeAdapter,
-        member_repo: Arc<dyn MemberRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         endpoint: Arc<dyn MembershipHistoryExchangeEndpointPort>,
     ) -> Result<(), IrohNodeError> {
         self.install_session_handler(
             [MEMBERSHIP_HISTORY_EXCHANGE_ALPN],
-            adapter.handler(member_repo, fingerprint_factory, endpoint),
+            adapter.handler(identities, fingerprint_factory, endpoint),
         )
     }
 
     pub fn install_membership_branch_recovery(
         &mut self,
-        member_repo: Arc<dyn MemberRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         endpoint: Arc<dyn IssueMembershipBranchRecoveryPort>,
     ) -> Result<(), IrohNodeError> {
         self.install_session_handler(
             [MEMBERSHIP_BRANCH_RECOVERY_ALPN],
-            IrohMembershipBranchRecoveryHandler::new(member_repo, fingerprint_factory, endpoint),
+            IrohMembershipBranchRecoveryHandler::new(identities, fingerprint_factory, endpoint),
         )
-    }
-
-    pub fn build_membership_attestation_adapter(
-        &self,
-        session: Arc<InMemorySession>,
-        device_identity: Arc<dyn DeviceIdentityPort>,
-        settings: Arc<dyn SettingsPort>,
-        signatures: Arc<dyn CurrentMemberSignaturePort>,
-        fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
-    ) -> Arc<IrohMembershipAttestationAdapter> {
-        let identity = self.build_membership_identity_adapter(
-            session,
-            device_identity,
-            settings,
-            Arc::clone(&fingerprint_factory),
-        );
-        Arc::new(IrohMembershipAttestationAdapter::new(
-            Arc::clone(&self.context.endpoint),
-            identity,
-            signatures,
-            fingerprint_factory,
-        ))
     }
 
     pub fn build_membership_identity_adapter(
@@ -1261,7 +1218,7 @@ impl IrohSessionBuilder {
         device_identity: Arc<dyn DeviceIdentityPort>,
         settings: Arc<dyn SettingsPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
-    ) -> Arc<dyn CurrentMembershipIdentityPort> {
+    ) -> Arc<IrohMembershipIdentityAdapter> {
         Arc::new(IrohMembershipIdentityAdapter::new(
             Arc::clone(&self.context.endpoint),
             session,
@@ -1293,58 +1250,6 @@ impl IrohSessionBuilder {
         ))
     }
 
-    pub fn build_membership_gossip_transport(
-        &self,
-        session: Arc<InMemorySession>,
-        device_identity: Arc<dyn DeviceIdentityPort>,
-        settings: Arc<dyn SettingsPort>,
-        peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-        member_repo: Arc<dyn MemberRepositoryPort>,
-        peer_admission: Arc<dyn PeerAdmissionPort>,
-        fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
-    ) -> Arc<IrohMembershipGossipTransportAdapter> {
-        let identity = Arc::new(IrohMembershipIdentityAdapter::new(
-            Arc::clone(&self.context.endpoint),
-            Arc::clone(&session),
-            device_identity,
-            settings,
-            Arc::clone(&fingerprint_factory),
-        ));
-        Arc::new(IrohMembershipGossipTransportAdapter::new(
-            Arc::clone(&self.context.endpoint),
-            Arc::clone(&session),
-            identity,
-            peer_addr_repo,
-            member_repo,
-            peer_admission,
-            fingerprint_factory,
-        ))
-    }
-
-    pub fn install_membership_attestation_handler(
-        &mut self,
-        adapter: &IrohMembershipAttestationAdapter,
-        application_endpoint: Arc<dyn MembershipAttestationEndpointPort>,
-    ) -> Result<(), IrohNodeError> {
-        self.install_session_handler(
-            [MEMBERSHIP_ATTESTATION_ALPN],
-            adapter.handler(application_endpoint),
-        )
-    }
-
-    pub fn install_membership_handler(
-        &mut self,
-        attestation: &IrohMembershipAttestationAdapter,
-        attestation_endpoint: Arc<dyn MembershipAttestationEndpointPort>,
-        gossip: &IrohMembershipGossipTransportAdapter,
-        gossip_endpoint: Arc<dyn uc_core::membership::MembershipGossipEndpointPort>,
-    ) -> Result<(), IrohNodeError> {
-        self.install_session_handler(
-            [MEMBERSHIP_ATTESTATION_ALPN],
-            attestation.handler_with_gossip(attestation_endpoint, gossip, gossip_endpoint),
-        )
-    }
-
     /// Install the active-clipboard state transport.
     ///
     /// * Registers [`IrohActiveClipboardReceiverHandler`] as the
@@ -1363,12 +1268,12 @@ impl IrohSessionBuilder {
     pub fn install_active_clipboard(
         &mut self,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-        member_repo: Arc<dyn MemberRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
     ) -> Result<ActiveClipboardHandlers, IrohNodeError> {
         let receiver = IrohActiveClipboardReceiverAdapter::new(
-            member_repo,
+            identities,
             peer_admission,
             fingerprint_factory,
         );
@@ -1407,14 +1312,14 @@ impl IrohSessionBuilder {
     pub fn install_active_clipboard_pull(
         &mut self,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-        member_repo: Arc<dyn MemberRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         serve: Arc<dyn ActiveClipboardPullServePort>,
         content_gate: Arc<dyn ContentExchangeGatePort>,
     ) -> Result<ActiveClipboardPullHandlers, IrohNodeError> {
         let serve_adapter = IrohActiveClipboardPullServeAdapter::new(
-            member_repo,
+            identities,
             peer_admission,
             fingerprint_factory,
             serve,
@@ -1441,19 +1346,19 @@ impl IrohSessionBuilder {
     ///   application 层 worker 订阅以翻译成 host event。
     ///
     /// 必须在 [`spawn`](Self::spawn) 之前调用。和 install_clipboard 复用
-    /// member_repo / fingerprint_factory 做对端身份验证,陌生 peer 推上
+    /// identities / fingerprint_factory 做对端身份验证,陌生 peer 推上
     /// 来的进度直接被丢弃。
     pub fn install_transfer_progress(
         &mut self,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-        member_repo: Arc<dyn MemberRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
     ) -> Result<TransferProgressHandlers, IrohNodeError> {
         let adapter = IrohTransferProgressAdapter::new(
             Arc::clone(&self.context.endpoint),
             peer_addr_repo,
-            member_repo,
+            identities,
             peer_admission,
             fingerprint_factory,
         );
@@ -1505,7 +1410,7 @@ impl IrohSessionBuilder {
         let db_path = store_dir.join("blobs.db");
         let store = iroh_blobs::store::fs::FsStore::load_with_opts(db_path, options)
             .await
-            .map_err(|err| IrohNodeError::BlobStoreInit(err.to_string()))?;
+            .map_err(|err| IrohNodeError::BlobStoreInit(anyhow::Error::from(err)))?;
 
         // Phase E1 (transitional): sweep `auto-*` tags left behind by
         // pre-Phase-F daemons.
@@ -1535,7 +1440,11 @@ impl IrohSessionBuilder {
                 }
             }
             Err(err) => {
-                warn!(error = %err, "iroh blobs: failed to sweep stale auto-* tags (non-fatal)");
+                warn!(
+                    error_kind = "stale_tag_sweep",
+                    io_error_kind = io_error_kind(&err),
+                    "iroh blobs: failed to sweep stale auto-* tags (non-fatal)"
+                );
             }
         }
 
@@ -1549,7 +1458,6 @@ impl IrohSessionBuilder {
         ));
 
         info!(
-            store_dir = %store_dir.display(),
             alpn = %String::from_utf8_lossy(BLOBS_ALPN),
             endpoint_id = %self.context.endpoint.id().fmt_short(),
             gc_interval_secs = crate::network::iroh::blobs::BLOBS_GC_INTERVAL.as_secs(),
@@ -1615,11 +1523,11 @@ pub enum IrohNodeError {
     #[error("iroh node runtime state lock is poisoned")]
     RuntimeStatePoisoned,
 
-    #[error("failed to bind iroh endpoint: {0}")]
-    Bind(String),
+    #[error("failed to bind iroh endpoint")]
+    Bind(#[source] anyhow::Error),
 
-    #[error("failed to initialize iroh blob store: {0}")]
-    BlobStoreInit(String),
+    #[error("failed to initialize iroh blob store")]
+    BlobStoreInit(#[source] anyhow::Error),
 
     #[error("failed to configure iroh session protocols")]
     SessionProtocol {
@@ -1633,14 +1541,30 @@ pub enum IrohNodeError {
         source: anyhow::Error,
     },
 
-    #[error("invalid custom iroh relay URL `{value}`: {message}")]
-    InvalidRelayUrl { value: String, message: String },
+    /// 不保存原始配置值：URL 是地址，还可能带有凭据。
+    #[error("invalid custom iroh relay URL")]
+    InvalidRelayUrl(#[source] RelayUrlProblem),
 
     #[error("invalid iroh relay access token")]
     InvalidRelayAccessToken,
 
     #[error(transparent)]
     Identity(#[from] LocalIdentityError),
+}
+
+/// 自定义 relay URL 不合法的固定分类。
+#[derive(Debug, thiserror::Error)]
+pub enum RelayUrlProblem {
+    #[error("relay URL must not be empty")]
+    Empty,
+    #[error("relay URL could not be parsed")]
+    Parse(#[source] <RelayUrl as FromStr>::Err),
+    #[error("relay URL scheme must be http or https")]
+    UnsupportedScheme,
+    #[error("relay URL must include a host")]
+    MissingHost,
+    #[error("relay URL must not include credentials")]
+    Credentials,
 }
 
 impl IrohNodeError {
@@ -1660,18 +1584,11 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     use async_trait::async_trait;
-    use uc_application::deps::{CurrentMemberSignatureError, CurrentMemberSignaturePort};
-    use uc_core::ids::{DeviceId, SpaceId};
-    use uc_core::membership::{
-        MembershipAttestationEndpointError, MembershipAttestationEndpointPort,
-        MembershipAttestationPort, MembershipGossipEndpointError, MembershipGossipEndpointPort,
-        MembershipGossipMessage, MembershipGossipTransportPort, VerifiedMembershipPeer,
-    };
+    use uc_core::ids::DeviceId;
     use uc_core::ports::{SecureStorageError, SecureStoragePort};
     use uc_core::settings::model::Settings;
 
-    use crate::security::{MasterKey, Sha256IdentityFingerprintFactory};
-    use crate::space::InMemorySession;
+    use crate::security::Sha256IdentityFingerprintFactory;
 
     #[derive(Default)]
     struct InMemorySecureStorage {
@@ -1726,71 +1643,6 @@ mod tests {
             .await
             .expect("activate session");
         node
-    }
-
-    struct UnavailableMemberSignatures;
-
-    #[async_trait]
-    impl CurrentMemberSignaturePort for UnavailableMemberSignatures {
-        async fn current_member_epoch(&self) -> Result<u64, CurrentMemberSignatureError> {
-            Err(CurrentMemberSignatureError::Unavailable)
-        }
-
-        async fn current_member_instance(
-            &self,
-            _device_id: &DeviceId,
-        ) -> Result<uc_core::membership::MemberInstanceId, CurrentMemberSignatureError> {
-            Err(CurrentMemberSignatureError::Unavailable)
-        }
-
-        async fn sign_current_member_payload(
-            &self,
-            _payload: &[u8],
-        ) -> Result<Vec<u8>, CurrentMemberSignatureError> {
-            Err(CurrentMemberSignatureError::Unavailable)
-        }
-
-        async fn verify_current_member_payload(
-            &self,
-            _member: &DeviceId,
-            _payload: &[u8],
-            _signature: &[u8],
-        ) -> Result<bool, CurrentMemberSignatureError> {
-            Err(CurrentMemberSignatureError::Unavailable)
-        }
-    }
-
-    struct RejectingMembershipEndpoint;
-
-    #[async_trait]
-    impl MembershipAttestationEndpointPort for RejectingMembershipEndpoint {
-        async fn apply_relayed_security_updates(
-            &self,
-            _space_id: &uc_core::ids::SpaceId,
-            _updates: &[uc_core::membership::RelayedSecurityUpdate],
-        ) -> Result<u64, MembershipAttestationEndpointError> {
-            Err(MembershipAttestationEndpointError::Rejected)
-        }
-
-        async fn accept_verified_peer(
-            &self,
-            _peer: VerifiedMembershipPeer,
-        ) -> Result<(), MembershipAttestationEndpointError> {
-            Err(MembershipAttestationEndpointError::Rejected)
-        }
-    }
-
-    struct RejectingGossipEndpoint;
-
-    #[async_trait]
-    impl MembershipGossipEndpointPort for RejectingGossipEndpoint {
-        async fn handle_message(
-            &self,
-            _source_device_id: &DeviceId,
-            _message: MembershipGossipMessage,
-        ) -> Result<MembershipGossipMessage, MembershipGossipEndpointError> {
-            Err(MembershipGossipEndpointError::Rejected)
-        }
     }
 
     /// UniClipboard#900: `bind_port` pins the iroh UDP socket to a fixed
@@ -1964,97 +1816,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn membership_attestation_uses_two_step_installation_on_the_shared_router() {
-        let store = identity_store();
-        let network = IrohNodeBuilder::bind(&store, IrohNodeConfig::default())
-            .await
-            .expect("bind");
-        let mut builder = network.prepare_session();
-        let session = Arc::new(InMemorySession::new());
-        session.set_master_key_for_space(
-            SpaceId::from("space-a"),
-            MasterKey::from_bytes(&[0x61; 32]).unwrap(),
-        );
-        let mut settings = Settings::default();
-        settings.general.device_name = Some("Device A".to_owned());
-
-        let adapter = builder.build_membership_attestation_adapter(
-            session,
-            Arc::new(FixedDeviceIdentity(DeviceId::new("device-a"))),
-            Arc::new(InMemorySettings(StdMutex::new(settings))),
-            Arc::new(UnavailableMemberSignatures),
-            Arc::new(Sha256IdentityFingerprintFactory),
-        );
-        let _outbound: Arc<dyn MembershipAttestationPort> = adapter.clone();
-        builder
-            .install_membership_attestation_handler(&adapter, Arc::new(RejectingMembershipEndpoint))
-            .expect("install membership attestation handler");
-
-        spawn_session(network, builder)
-            .await
-            .shutdown()
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn membership_gossip_uses_the_same_identity_and_shared_router() {
-        let store = identity_store();
-        let network = IrohNodeBuilder::bind(&store, IrohNodeConfig::default())
-            .await
-            .expect("bind");
-        let mut builder = network.prepare_session();
-        let session = Arc::new(InMemorySession::new());
-        session.set_master_key_for_space(
-            SpaceId::from("space-a"),
-            MasterKey::from_bytes(&[0x61; 32]).unwrap(),
-        );
-        let device_identity: Arc<dyn DeviceIdentityPort> =
-            Arc::new(FixedDeviceIdentity(DeviceId::new("device-a")));
-        let mut settings_value = Settings::default();
-        settings_value.general.device_name = Some("Device A".to_owned());
-        let settings: Arc<dyn SettingsPort> =
-            Arc::new(InMemorySettings(StdMutex::new(settings_value)));
-        let fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort> =
-            Arc::new(Sha256IdentityFingerprintFactory);
-
-        let attestation = builder.build_membership_attestation_adapter(
-            Arc::clone(&session),
-            Arc::clone(&device_identity),
-            Arc::clone(&settings),
-            Arc::new(UnavailableMemberSignatures),
-            Arc::clone(&fingerprint_factory),
-        );
-        let gossip = builder.build_membership_gossip_transport(
-            session,
-            device_identity,
-            settings,
-            Arc::new(EmptyPeerAddressRepo),
-            Arc::new(EmptyMemberRepo),
-            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
-            fingerprint_factory,
-        );
-        let _outbound: Arc<dyn MembershipGossipTransportPort> = gossip.clone();
-        let _announcement_material: Arc<
-            dyn uc_core::membership::CurrentMembershipAnnouncementPort,
-        > = gossip.clone();
-        builder
-            .install_membership_handler(
-                &attestation,
-                Arc::new(RejectingMembershipEndpoint),
-                &gossip,
-                Arc::new(RejectingGossipEndpoint),
-            )
-            .expect("install membership handler");
-
-        spawn_session(network, builder)
-            .await
-            .shutdown()
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
     async fn bind_is_idempotent_across_builds_for_same_store() {
         // The endpoint id is derived from the Ed25519 secret, so a second
         // bind against the same store must see the same id (rotating it
@@ -2198,6 +1959,7 @@ mod tests {
 
     #[derive(Default)]
     struct EmptyMemberRepo;
+    crate::network::iroh::inbound_peer::member_table_identity_directory!(EmptyMemberRepo);
     #[async_trait]
     impl uc_core::membership::MemberRepositoryPort for EmptyMemberRepo {
         async fn get(
@@ -2775,7 +2537,25 @@ mod tests {
             ..Default::default()
         };
         let err = relay_mode_from_config(&cfg).expect_err("invalid relay url");
-        assert!(matches!(err, IrohNodeError::InvalidRelayUrl { .. }));
+        assert!(matches!(err, IrohNodeError::InvalidRelayUrl(_)));
+    }
+
+    #[test]
+    fn relay_mode_error_omits_the_configured_url_and_credentials() {
+        let cfg = IrohNodeConfig {
+            disable_relays: false,
+            custom_relay_urls: vec!["https://user:secret-pass@relay.example.com".to_string()],
+            ..Default::default()
+        };
+        let err = relay_mode_from_config(&cfg).expect_err("credentials rejected");
+
+        assert!(matches!(
+            err,
+            IrohNodeError::InvalidRelayUrl(RelayUrlProblem::Credentials)
+        ));
+        let rendered = format!("{err} {err:?}");
+        assert!(!rendered.contains("secret-pass"));
+        assert!(!rendered.contains("relay.example.com"));
     }
 
     #[test]
@@ -2786,7 +2566,7 @@ mod tests {
             ..Default::default()
         };
         let err = relay_mode_from_config(&cfg).expect_err("invalid relay scheme");
-        assert!(matches!(err, IrohNodeError::InvalidRelayUrl { .. }));
+        assert!(matches!(err, IrohNodeError::InvalidRelayUrl(_)));
     }
 
     #[tokio::test]

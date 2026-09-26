@@ -3,11 +3,12 @@ use diesel::sql_types::{BigInt, Binary, Nullable, Text};
 use tempfile::{tempdir, TempDir};
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
-    BeginRevocationOutcome, BootstrapId, ContentKeyId, GroupEpoch, GroupUpdateDispatchError,
-    LegacyBootstrapRecord, LegacyBootstrapRepositoryPort, LegacyBootstrapStage,
-    LegacyBootstrapStatus, PendingGroupUpdate, PreparedRevocationResolution, RevocationId,
-    RevocationOutboxMessage, RevocationRecord, RevocationRepositoryPort, RevocationStage,
-    RevocationStatus, SpaceKeyMaterial, SpaceKeyState, SpaceSecurityStateResetPort,
+    BeginRevocationOutcome, BootstrapId, ContentKeyId, GroupEpoch, GroupUpdateDeliveryStatus,
+    GroupUpdateDispatchError, LegacyBootstrapRecord, LegacyBootstrapRepositoryPort,
+    LegacyBootstrapStage, LegacyBootstrapStatus, PendingGroupUpdate, PreparedRevocationResolution,
+    RevocationId, RevocationOutboxMessage, RevocationRecord, RevocationRepositoryPort,
+    RevocationStage, RevocationStatus, SpaceKeyMaterial, SpaceKeyState,
+    SpaceSecurityStateResetPort,
 };
 
 use super::DieselSpaceSecurityStore;
@@ -379,6 +380,13 @@ async fn delivery_failures_survive_restart_without_rewriting_space_material() {
     material.add_pending_group_updates([first.clone(), second.clone(), available.clone()], 100);
     repo.save_space_material(&material).await.unwrap();
 
+    assert_eq!(
+        repo.group_update_delivery_status(&space_id).await.unwrap(),
+        GroupUpdateDeliveryStatus::Pending {
+            next_attempt_at_ms: 0
+        }
+    );
+
     let initial = repo.due_group_updates(&space_id, 100, None).await.unwrap();
     assert_eq!(initial.len(), 3);
 
@@ -396,7 +404,7 @@ async fn delivery_failures_survive_restart_without_rewriting_space_material() {
             &space_id,
             &[(
                 first.update_id().to_owned(),
-                GroupUpdateDispatchError::Offline,
+                GroupUpdateDispatchError::offline(),
             )],
             100,
         )
@@ -414,6 +422,12 @@ async fn delivery_failures_survive_restart_without_rewriting_space_material() {
         .encrypted_payload
     };
     assert_eq!(before_failure, after_failure);
+    assert_eq!(
+        repo.group_update_delivery_status(&space_id).await.unwrap(),
+        GroupUpdateDeliveryStatus::Pending {
+            next_attempt_at_ms: 0
+        }
+    );
 
     let reopened = reopen_repo(&pool);
     let waiting = reopened
@@ -428,6 +442,35 @@ async fn delivery_failures_survive_restart_without_rewriting_space_material() {
         .unwrap();
     assert!(peer_online.contains(&first));
     assert!(peer_online.contains(&second));
+}
+
+#[tokio::test]
+async fn delivery_status_exposes_the_persisted_retry_deadline() {
+    let (repo, _pool, _tempdir) = make_repo();
+    let space_id = SpaceId::from_str("space-sensitive");
+    let mut material = seed_current_space(&repo).await;
+    let pending = pending_update("offline-peer", 1);
+    material.add_pending_group_updates([pending.clone()], 100);
+    repo.save_space_material(&material).await.unwrap();
+    repo.due_group_updates(&space_id, 100, None).await.unwrap();
+
+    repo.record_group_update_failures(
+        &space_id,
+        &[(
+            pending.update_id().to_owned(),
+            GroupUpdateDispatchError::offline(),
+        )],
+        100,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        repo.group_update_delivery_status(&space_id).await.unwrap(),
+        GroupUpdateDeliveryStatus::Pending {
+            next_attempt_at_ms: 30_100
+        }
+    );
 }
 
 #[tokio::test]
@@ -451,6 +494,11 @@ async fn rejected_delivery_stays_out_of_the_queue_after_unrelated_changes_and_re
     )
     .await
     .unwrap();
+
+    assert_eq!(
+        repo.group_update_delivery_status(&space_id).await.unwrap(),
+        GroupUpdateDeliveryStatus::Rejected
+    );
 
     let unrelated = pending_update("another-peer", 3);
     material.add_pending_group_updates([unrelated.clone()], 200);
@@ -1288,5 +1336,184 @@ async fn permanent_loss_recovery_is_atomic_and_survives_restart() {
             .state()
             .epoch(),
         GroupEpoch::new(3)
+    );
+}
+
+/// 结清后投递索引必须同步收敛：状态查询与到期读取都不得再看到该项。
+///
+/// 只改 `space_key_epoch_state` 里的 material 不够——`group_update_source`
+/// 缓存与 `group_update_delivery` 行才是投递与界面状态的实际来源。
+#[tokio::test]
+async fn settled_update_disappears_from_the_delivery_index_and_status() {
+    let (repo, _pool, _tempdir) = make_repo();
+    let space_id = SpaceId::from_str("space-sensitive");
+    let mut material = seed_current_space(&repo).await;
+    let stale = pending_update("removed-peer", 1);
+    let stale_id = stale.update_id().to_owned();
+    material.add_pending_group_updates([stale.clone()], 100);
+    repo.save_space_material(&material).await.unwrap();
+
+    // 先让索引按当前 material 建立起来，与真实运行顺序一致。
+    assert_eq!(
+        repo.due_group_updates(&space_id, 100, None)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // 收件人已不在保留名单中：把它从 material 结清。
+    let mut settled = repo.load_space_material(&space_id).await.unwrap().unwrap();
+    assert!(settled.acknowledge_group_update(&stale_id, 200));
+    repo.save_space_material(&settled).await.unwrap();
+
+    assert!(
+        repo.due_group_updates(&space_id, 300, None)
+            .await
+            .unwrap()
+            .is_empty(),
+        "结清后仍被当作待投递项"
+    );
+    assert_eq!(
+        repo.group_update_delivery_status(&space_id).await.unwrap(),
+        GroupUpdateDeliveryStatus::Completed,
+        "结清后设备更新状态仍未完成"
+    );
+}
+
+/// 撤销 outbox 的结清必须真正落库：分发阶段的记录与暂存区一起推进，
+/// 收件人全部失去资格后撤销完成，并且跨重启保持。
+#[tokio::test]
+async fn settling_distributing_revocation_recipients_completes_it_durably() {
+    let (repo, pool, _tempdir) = make_repo();
+    seed_current_space(&repo).await;
+    let prepared = prepared("revocation-settlement");
+    repo.begin_revocation(&prepared).await.unwrap();
+    let stage = staged(prepared);
+    let revocation_id = stage.record().revocation_id().clone();
+    repo.stage_revocation(&stage).await.unwrap();
+    repo.activate_revocation(&revocation_id, 120).await.unwrap();
+    repo.start_distribution(&revocation_id, 130).await.unwrap();
+
+    // 仍保留一位收件人：只结清另一位，撤销继续分发。
+    let retained = DeviceId::new("retained-device-sensitive");
+    assert_eq!(
+        repo.settle_obsolete_revocation_recipients(
+            &revocation_id,
+            std::slice::from_ref(&retained),
+            140,
+        )
+        .await
+        .unwrap(),
+        1
+    );
+    drop(repo);
+
+    let reopened = reopen_repo(&pool);
+    let resumed = reopened
+        .load_staged_revocation(&revocation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(resumed.outbox().len(), 1);
+    assert_eq!(resumed.outbox()[0].recipient(), &retained);
+
+    // 最后一位也失去资格：撤销完成，暂存区清空，不再计入未完成撤销。
+    assert_eq!(
+        reopened
+            .settle_obsolete_revocation_recipients(&revocation_id, &[], 150)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(reopened
+        .load_staged_revocation(&revocation_id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(reopened
+        .list_incomplete_revocations()
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        reopened
+            .settle_obsolete_revocation_recipients(&revocation_id, &[], 160)
+            .await
+            .unwrap(),
+        0,
+        "已完成的撤销重复结清必须幂等"
+    );
+}
+
+// 投递状态读取会顺带维护加密索引；它必须在其他连接并发写入安全材料时仍然成功，
+// 不能因为延迟事务在读后升级写锁而失败。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn delivery_status_read_survives_concurrent_space_material_writes() {
+    let (repo, _pool, _tempdir) = make_repo();
+    let repo = std::sync::Arc::new(repo);
+    let space_id = SpaceId::from_str("space-sensitive");
+    let material = seed_current_space(&repo).await;
+
+    let writer = {
+        let repo = std::sync::Arc::clone(&repo);
+        let mut material = material;
+        tokio::spawn(async move {
+            for round in 0..200_i64 {
+                material.add_pending_group_updates(
+                    [pending_update(&format!("peer-{round}"), round as u64 + 1)],
+                    100 + round,
+                );
+                repo.save_space_material(&material).await.unwrap();
+            }
+        })
+    };
+    let reader = {
+        let repo = std::sync::Arc::clone(&repo);
+        let space_id = space_id.clone();
+        tokio::spawn(async move {
+            for _ in 0..200 {
+                repo.group_update_delivery_status(&space_id).await?;
+            }
+            Ok::<_, uc_core::membership::KeyEpochError>(())
+        })
+    };
+
+    writer.await.unwrap();
+    reader
+        .await
+        .unwrap()
+        .expect("delivery status read must not fail while material is being written");
+}
+
+// 事务内部发现的持久状态完整性失败必须保持原分类，不能被字符串化后包装成存储失败。
+#[tokio::test]
+async fn activation_reports_a_tampered_revocation_as_an_integrity_failure() {
+    let (repo, pool, _tempdir) = make_repo();
+    seed_current_space(&repo).await;
+    let prepared = prepared("revocation-tampered");
+    repo.begin_revocation(&prepared).await.unwrap();
+    let stage = staged(prepared);
+    repo.stage_revocation(&stage).await.unwrap();
+    let mut conn = pool.get().unwrap();
+    diesel::sql_query(
+        "UPDATE member_revocation_log SET next_epoch = next_epoch + 5 WHERE revocation_id = ?",
+    )
+    .bind::<Text, _>("revocation-tampered")
+    .execute(&mut conn)
+    .unwrap();
+    drop(conn);
+
+    let error = repo
+        .activate_revocation(stage.record().revocation_id(), 120)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            uc_core::membership::KeyEpochError::PersistedStateIntegrityFailed { .. }
+        ),
+        "unexpected classification: {error:?}"
     );
 }

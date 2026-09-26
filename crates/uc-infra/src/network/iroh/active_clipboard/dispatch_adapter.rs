@@ -28,6 +28,7 @@ use uc_core::ids::DeviceId;
 use uc_core::ports::{
     ActiveClipboardDispatchError, ActiveClipboardDispatchPort, PeerAddressRepositoryPort,
 };
+use uc_observability_contract::error_source::io_error_kind;
 
 use super::super::connect::connect_with_staggered_retry;
 use super::super::peer_address_resolver::PeerAddressResolver;
@@ -102,7 +103,8 @@ impl ActiveClipboardDispatchPort for IrohActiveClipboardDispatchAdapter {
             Ok(connection) => connection,
             Err(err) => {
                 debug!(
-                    error = %err,
+                    error_kind = "dial_failed",
+                    io_error_kind = io_error_kind(&err),
                     "active-clipboard dispatch: dial failed, treating as Offline"
                 );
                 return Err(ActiveClipboardDispatchError::Offline);
@@ -111,10 +113,9 @@ impl ActiveClipboardDispatchPort for IrohActiveClipboardDispatchAdapter {
 
         // 3. Open one bi-stream and write the single state frame. The
         //    receiver reads one frame and returns; we never read a reply.
-        let (mut send, _recv) = connection
-            .open_bi()
-            .await
-            .map_err(|err| ActiveClipboardDispatchError::Io(format!("open_bi: {err}")))?;
+        let (mut send, _recv) = connection.open_bi().await.map_err(|err| {
+            ActiveClipboardDispatchError::Io(anyhow::Error::from(err).context("open_bi").into())
+        })?;
 
         let msg = ActiveClipboardWireMessage {
             snapshot_hash: state.snapshot_hash.clone(),
@@ -122,11 +123,12 @@ impl ActiveClipboardDispatchPort for IrohActiveClipboardDispatchAdapter {
             activated_at_ms: state.activated_at_ms,
             activated_by: state.activated_by.as_str().to_string(),
         };
-        wire::write_frame(&mut send, &msg)
-            .await
-            .map_err(|err| ActiveClipboardDispatchError::Io(format!("frame write: {err}")))?;
-        send.finish()
-            .map_err(|err| ActiveClipboardDispatchError::Io(format!("send.finish: {err}")))?;
+        wire::write_frame(&mut send, &msg).await.map_err(|err| {
+            ActiveClipboardDispatchError::Io(anyhow::Error::from(err).context("frame write").into())
+        })?;
+        send.finish().map_err(|err| {
+            ActiveClipboardDispatchError::Io(anyhow::Error::from(err).context("send.finish").into())
+        })?;
 
         // 4. Wait for the peer to drain the stream and close before we drop
         //    the connection. The receiver reads exactly one frame then returns
@@ -219,6 +221,7 @@ mod tests {
     struct MemMemberRepo {
         inner: Mutex<HashMap<String, SpaceMember>>,
     }
+    crate::network::iroh::inbound_peer::member_table_identity_directory!(MemMemberRepo);
     #[async_trait]
     impl MemberRepositoryPort for MemMemberRepo {
         async fn get(&self, device_id: &DeviceId) -> Result<Option<SpaceMember>, MembershipError> {
@@ -314,7 +317,7 @@ mod tests {
         let receiver_endpoint = bind_endpoint_with(receiver_seed).await;
         wait_for_direct_addrs(&receiver_endpoint).await;
         let adapter = IrohActiveClipboardReceiverAdapter::new(
-            member_repo,
+            crate::network::iroh::inbound_peer::member_table_directory(member_repo),
             Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
             Arc::new(Sha256IdentityFingerprintFactory),
         );

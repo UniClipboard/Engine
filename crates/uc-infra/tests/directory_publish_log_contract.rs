@@ -134,7 +134,7 @@ async fn ciphertext_is_bound_to_attempt_and_locked_session_defers_open() {
         .unwrap();
     assert!(matches!(
         repo.get_publish_record("entry", "a2").await,
-        Err(PublishLogError::InvalidCiphertext)
+        Err(PublishLogError::InvalidCiphertext { .. })
     ));
 
     let locked = DieselDirectoryPublishLogRepository::new(

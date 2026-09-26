@@ -334,6 +334,49 @@ fn abandonment_acknowledgement_ends_delivery_without_removing_the_fence() {
 }
 
 #[test]
+fn abandonment_delivery_ends_locally_at_the_shared_attempt_deadline() {
+    let prepared = joiner_prepared_aggregate_fixture();
+    let deadline_ms = prepared
+        .expires_at_ms()
+        .expect("prepared fixture has a bounded attempt");
+    let terminated = JoinerAdmission::try_from_record(prepared)
+        .expect("prepared joiner fixture")
+        .cancel_locally()
+        .expect("prepared join terminates locally")
+        .into_replacement();
+    assert!(!terminated.outstanding_work().holds_pairing_open());
+
+    assert!(!terminated.has_undeliverable_abandonment(deadline_ms - 1));
+    assert!(terminated.has_undeliverable_abandonment(deadline_ms));
+
+    let ended = terminated
+        .end_undeliverable_abandonment(deadline_ms)
+        .expect("expired notification ends locally")
+        .into_replacement();
+    let cleanup = ended
+        .cleanup_obligation()
+        .expect("termination fence remains saved");
+    assert!(cleanup.pending_exchange().is_none());
+    assert!(!ended.has_undeliverable_abandonment(deadline_ms));
+    assert_eq!(
+        ended.termination_reason(),
+        Some(SpaceAdmissionTerminationReason::Cancelled)
+    );
+}
+
+#[test]
+fn deliverable_or_active_admissions_do_not_end_abandonment_delivery() {
+    let prepared = JoinerAdmission::try_from_record(joiner_prepared_aggregate_fixture())
+        .expect("prepared joiner fixture");
+    assert!(prepared.outstanding_work().holds_pairing_open());
+    assert!(!prepared.has_undeliverable_abandonment(i64::MAX));
+    assert!(matches!(
+        prepared.end_undeliverable_abandonment(i64::MAX),
+        Err(SpaceAdmissionAggregateError::InvalidTransition)
+    ));
+}
+
+#[test]
 fn legacy_joiner_can_still_cancel_locally_without_inventing_a_deadline() {
     let legacy = initiated_joiner_aggregate_fixture().into_legacy_persistence_fixture();
     let cancelled = JoinerAdmission::try_from_record(legacy)
@@ -357,7 +400,7 @@ fn legacy_joiner_can_still_cancel_locally_without_inventing_a_deadline() {
 }
 
 #[test]
-fn legacy_post_decision_joiners_can_be_ended_for_a_new_intent() {
+fn legacy_post_decision_joiners_require_attention_before_a_new_intent() {
     for (name, aggregate) in [
         ("prepared", joiner_prepared_aggregate_fixture()),
         ("committed", joiner_committed_aggregate_fixture()),
@@ -372,25 +415,28 @@ fn legacy_post_decision_joiners_can_be_ended_for_a_new_intent() {
                 .unwrap_or_else(|error| panic!("{name} legacy fixture encodes: {error}")),
         )
         .unwrap_or_else(|error| panic!("{name} legacy fixture decodes: {error}"));
-        assert!(legacy.can_terminate_locally(), "{name}");
-        let ended = legacy
-            .supersede()
-            .unwrap_or_else(|error| panic!("{name} legacy Joiner can end: {error}"))
-            .into_replacement();
-
-        assert!(ended.is_terminal(), "{name}");
-        assert_eq!(
-            ended.termination_reason(),
-            Some(SpaceAdmissionTerminationReason::Cancelled),
-            "{name}"
-        );
-        let encoded = ended
-            .encode_persisted()
-            .unwrap_or_else(|error| panic!("{name} terminal result encodes: {error}"));
-        let decoded = JoinerAdmission::decode_persisted(&encoded)
-            .unwrap_or_else(|error| panic!("{name} terminal result decodes: {error}"));
-        assert!(decoded.is_terminal(), "{name}");
+        assert!(legacy.needs_attention(), "{name}");
+        assert!(!legacy.can_terminate_locally(), "{name}");
+        assert!(matches!(
+            legacy.supersede(),
+            Err(SpaceAdmissionAggregateError::UnsafeCancellation)
+        ));
     }
+}
+
+#[test]
+fn legacy_active_join_keeps_its_committed_result_instead_of_entering_attention() {
+    let legacy = active_pending_settlement_aggregate_fixture().into_legacy_persistence_fixture();
+    let reopened = JoinerAdmission::decode_persisted(
+        &legacy
+            .encode_persisted()
+            .expect("legacy active result encodes"),
+    )
+    .expect("legacy active result decodes");
+
+    assert!(reopened.is_active());
+    assert!(!reopened.needs_attention());
+    assert!(!reopened.can_terminate_locally());
 }
 
 #[test]
@@ -525,3 +571,46 @@ fn cancelling_joiner_accepts_cancelled_rejection() {
     assert_eq!(state.last_received().canonical_digest(), &[0xbd; 32]);
 }
 use sha2::{Digest, Sha256};
+
+#[test]
+fn outstanding_work_follows_a_terminated_join_through_notice_cleanup() {
+    let prepared = joiner_prepared_aggregate_fixture();
+    let deadline_ms = prepared
+        .expires_at_ms()
+        .expect("prepared fixture has a bounded attempt");
+    let in_flight = prepared.outstanding_work();
+    assert_eq!(
+        in_flight.obligations(),
+        &[AdmissionObligation::ProtocolInFlight]
+    );
+    assert!(in_flight.holds_pairing_open());
+    assert!(in_flight.blocks_new_admission());
+    assert_eq!(
+        in_flight.next_step(),
+        Some(AdmissionRecoveryStep::JoinerNetwork)
+    );
+    assert_eq!(in_flight.deadline_ms(), Some(deadline_ms));
+
+    let terminated = JoinerAdmission::try_from_record(prepared)
+        .expect("prepared joiner fixture")
+        .cancel_locally()
+        .expect("prepared join terminates locally")
+        .into_replacement();
+    let notice = terminated.outstanding_work();
+    assert_eq!(
+        notice.obligations(),
+        &[AdmissionObligation::AbandonmentNotice]
+    );
+    assert!(!notice.holds_pairing_open());
+    assert!(notice.blocks_new_admission());
+
+    let ended = terminated
+        .end_undeliverable_abandonment(deadline_ms)
+        .expect("expired notification ends locally")
+        .into_replacement()
+        .outstanding_work();
+    assert!(ended.is_settled());
+    assert!(!ended.blocks_new_admission());
+    assert_eq!(ended.next_step(), None);
+    assert_eq!(ended.deadline_ms(), None);
+}

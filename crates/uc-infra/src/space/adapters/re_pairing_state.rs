@@ -41,16 +41,16 @@ impl RePairingStateStorePort for EncryptedRePairingStateStore {
         let ciphertext = match fs::read(&self.path).await {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(_) => return Err(RePairingStateError::Unavailable),
+            Err(_) => return Err(RePairingStateError::unavailable()),
         };
         let plaintext = self
             .keys
             .open_profile_payload(PURPOSE, &ciphertext)
             .map_err(map_key_error)?;
         let state: PersistedRePairingStateV1 =
-            postcard::from_bytes(&plaintext).map_err(|_| RePairingStateError::Inconsistent)?;
+            postcard::from_bytes(&plaintext).map_err(RePairingStateError::inconsistent_from)?;
         if state.format_version != FORMAT_VERSION {
-            return Err(RePairingStateError::Inconsistent);
+            return Err(RePairingStateError::inconsistent());
         }
         Ok(state.required)
     }
@@ -63,24 +63,27 @@ impl RePairingStateStorePort for EncryptedRePairingStateStore {
                 required,
             };
             let plaintext =
-                postcard::to_stdvec(&state).map_err(|_| RePairingStateError::Inconsistent)?;
+                postcard::to_stdvec(&state).map_err(RePairingStateError::inconsistent_from)?;
             let ciphertext = self
                 .keys
                 .seal_profile_payload(PURPOSE, &plaintext)
                 .map_err(map_key_error)?;
-            let parent = self.path.parent().ok_or(RePairingStateError::Unavailable)?;
+            let parent = self
+                .path
+                .parent()
+                .ok_or_else(RePairingStateError::unavailable)?;
             fs::create_dir_all(parent)
                 .await
-                .map_err(|_| RePairingStateError::Unavailable)?;
+                .map_err(RePairingStateError::unavailable_from)?;
             let mut file = fs::File::create(&self.path)
                 .await
-                .map_err(|_| RePairingStateError::Unavailable)?;
+                .map_err(RePairingStateError::unavailable_from)?;
             file.write_all(&ciphertext)
                 .await
-                .map_err(|_| RePairingStateError::Unavailable)?;
+                .map_err(RePairingStateError::unavailable_from)?;
             file.sync_all()
                 .await
-                .map_err(|_| RePairingStateError::Unavailable)
+                .map_err(RePairingStateError::unavailable_from)
         })
         .await
     }
@@ -88,10 +91,13 @@ impl RePairingStateStorePort for EncryptedRePairingStateStore {
 
 fn map_key_error(error: AdmissionKeyError) -> RePairingStateError {
     match error {
-        AdmissionKeyError::SecureStorage => RePairingStateError::Unavailable,
-        AdmissionKeyError::Missing | AdmissionKeyError::Corrupt | AdmissionKeyError::OpenFailed => {
-            RePairingStateError::Inconsistent
+        AdmissionKeyError::SecureStorage { .. } | AdmissionKeyError::StorageNotPersisted => {
+            RePairingStateError::unavailable()
         }
+        AdmissionKeyError::Missing
+        | AdmissionKeyError::Corrupt { .. }
+        | AdmissionKeyError::InvalidLayout
+        | AdmissionKeyError::OpenFailed { .. } => RePairingStateError::inconsistent(),
     }
 }
 

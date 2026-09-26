@@ -136,25 +136,80 @@ pub trait PendingAdmissionRecoveryStatePort: Send + Sync {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum SpaceAdmissionTransportError {
     #[error("space admission transport is temporarily unavailable")]
-    Deferred,
+    Deferred {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
 
     #[error("the invitation is unavailable")]
     InvitationUnavailable,
 
     #[error("space admission authentication was rejected")]
-    AuthenticationRejected,
+    AuthenticationRejected {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
 
     #[error("the remote peer must be upgraded")]
     PeerUpgradeRequired,
 
     #[error("space admission protocol was rejected")]
-    ProtocolRejected,
+    ProtocolRejected {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
 
     #[error("space admission transport is unavailable")]
-    Unavailable,
+    Unavailable {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl SpaceAdmissionTransportError {
+    pub fn authentication_rejected() -> Self {
+        Self::AuthenticationRejected { source: None }
+    }
+
+    pub fn authentication_rejected_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::AuthenticationRejected {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn unavailable() -> Self {
+        Self::Unavailable { source: None }
+    }
+
+    pub fn unavailable_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Unavailable {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn deferred() -> Self {
+        Self::Deferred { source: None }
+    }
+
+    pub fn deferred_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Deferred {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn protocol_rejected() -> Self {
+        Self::ProtocolRejected { source: None }
+    }
+
+    pub fn protocol_rejected_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::ProtocolRejected {
+            source: Some(source.into()),
+        }
+    }
 }
 
 #[async_trait]

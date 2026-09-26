@@ -14,6 +14,7 @@ impl Engine {
     pub async fn shutdown_until_complete(&self) -> Result<(), EngineError> {
         self.start_shutdown(None)
             .await
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| EngineError::new(1108, EngineErrorCategory::Internal, true))?
     }
 
@@ -23,7 +24,9 @@ impl Engine {
             .ok_or_else(|| EngineError::new(1003, EngineErrorCategory::InvalidInput, false))?;
         timeout_at(deadline_at, self.start_shutdown(Some(deadline_at)))
             .await
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| operation_cancelled_error())?
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| EngineError::new(1108, EngineErrorCategory::Internal, true))?
     }
 

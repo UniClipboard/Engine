@@ -12,6 +12,7 @@
 //! XChaCha20-Poly1305 wrap/unwrap) ironclad 保留。
 
 use std::collections::HashSet;
+use std::error::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -38,11 +39,14 @@ use uc_application::deps::{
 use uc_application::deps::{RuntimeLifecyclePort, TransitionContext};
 use uc_core::crypto::domain::{ActiveSpace, Passphrase as DomainPassphrase};
 use uc_core::crypto::model::{EncryptionError, Passphrase as LegacyPassphrase};
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::security::crypto_model::{
     validate_kdf, EncryptedBlob, KeyScope, KeySlot, WrappedMasterKey,
 };
-use crate::security::{v1_aead, Kek, MasterKey, ProfileContentKeyVault};
+use crate::security::{
+    v1_aead, Kek, MasterKey, ProfileContentKeyVault, ProfilePassphraseRecoveryPort,
+};
 use uc_core::ids::{DeviceId, ProfileId, SpaceId};
 #[cfg(test)]
 use uc_core::membership::{AdmissionReplayId, ProtectionGroupAdmission};
@@ -135,6 +139,61 @@ impl RuntimeSpaceAccessAdapter {
         self.active_security_session.close();
     }
 
+    /// 仅供完整回归构造旧版本曾允许写入的同设备重复 MLS 叶。
+    #[cfg(feature = "test-util")]
+    pub async fn seed_legacy_duplicate_group_members_for_test(
+        &self,
+        device_id: &DeviceId,
+        additional_members: usize,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            additional_members > 0,
+            "duplicate member count must be positive"
+        );
+        let space_id = self.session.current_space_id()?;
+        let mut material = self
+            .key_epoch_repository
+            .load_space_material(&space_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("space security material is missing"))?;
+        for _ in 0..additional_members {
+            let pending = MlsGroupEngine::prepare_join(device_id.as_str().as_bytes())?;
+            let admission = MlsGroupEngine::admit_member(
+                &MlsClientState::from_bytes(material.group_state().to_vec()),
+                device_id.as_str().as_bytes(),
+                &pending.key_package,
+            )?;
+            material = self.session.rotate_space_material(
+                &material,
+                admission.sponsor_state.into_bytes(),
+                GroupEpoch::new(admission.epoch),
+                chrono::Utc::now().timestamp_millis(),
+            )?;
+        }
+        self.key_epoch_repository
+            .save_space_material(&material)
+            .await?;
+        self.active_security_session
+            .install_current_material(&material)
+            .await?;
+        Ok(())
+    }
+
+    #[cfg(feature = "test-util")]
+    pub async fn group_member_count_for_test(&self, device_id: &DeviceId) -> anyhow::Result<usize> {
+        let space_id = self.session.current_space_id()?;
+        let material = self
+            .key_epoch_repository
+            .load_space_material(&space_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("space security material is missing"))?;
+        MlsGroupEngine::matching_member_count(
+            &MlsClientState::from_bytes(material.group_state().to_vec()),
+            device_id.as_str().as_bytes(),
+        )
+        .map_err(anyhow::Error::new)
+    }
+
     pub fn new(
         key_material: Arc<KeyMaterialStore>,
         current_profile: Arc<dyn CurrentProfilePort>,
@@ -171,7 +230,7 @@ impl RuntimeSpaceAccessAdapter {
             .current_profile
             .current_profile()
             .await
-            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+            .map_err(|error| SpaceAccessError::Internal(Box::new(error)))?;
         let scope = key_scope_from_profile(&profile);
         self.key_material
             .load_keyslot(&scope)
@@ -183,7 +242,7 @@ impl RuntimeSpaceAccessAdapter {
             .map_err(|error| map_and_log_kdf_error(error, "prepare_encryption_passphrase"))?;
         let wrapped = v1_aead::wrap_master_key_xchacha(&kek, &master_key).map_err(|error| {
             map_and_log_local_crypto_error(
-                error.to_string(),
+                error,
                 "prepare_encryption_passphrase",
                 "wrap_master_key",
             )
@@ -199,15 +258,15 @@ impl RuntimeSpaceAccessAdapter {
         let wrapped = keyslot
             .wrapped_master_key
             .as_ref()
-            .ok_or(SpaceAccessError::CorruptedKeyMaterial)?;
+            .ok_or_else(SpaceAccessError::corrupted_key_material)?;
         let unwrapped = v1_aead::unwrap_master_key_xchacha(kek, &wrapped.blob)
-            .map_err(|_| SpaceAccessError::CorruptedKeyMaterial)?;
+            .map_err(SpaceAccessError::corrupted_key_material_from)?;
         if self
             .session
             .get_master_key()
             .is_ok_and(|master_key| unwrapped != master_key)
         {
-            return Err(SpaceAccessError::CorruptedKeyMaterial);
+            return Err(SpaceAccessError::corrupted_key_material());
         }
         self.key_material
             .store_keyslot(keyslot)
@@ -230,11 +289,11 @@ impl RuntimeSpaceAccessAdapter {
         let stored_wrapped = stored_keyslot
             .wrapped_master_key
             .as_ref()
-            .ok_or(SpaceAccessError::CorruptedKeyMaterial)?;
+            .ok_or_else(SpaceAccessError::corrupted_key_material)?;
         let stored_master = v1_aead::unwrap_master_key_xchacha(&stored_kek, &stored_wrapped.blob)
-            .map_err(|_| SpaceAccessError::CorruptedKeyMaterial)?;
+            .map_err(SpaceAccessError::corrupted_key_material_from)?;
         if stored_master != unwrapped {
-            return Err(SpaceAccessError::CorruptedKeyMaterial);
+            return Err(SpaceAccessError::corrupted_key_material());
         }
         self.kek_observed.store(true, Ordering::Release);
         Ok(())
@@ -274,20 +333,16 @@ impl uc_application::deps::InitializeSpacePort for MigrationSpaceAccessAdapter {
             .current_profile
             .current_profile()
             .await
-            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+            .map_err(|error| SpaceAccessError::Internal(Box::new(error)))?;
         let scope = key_scope_from_profile(&profile);
         let draft = KeySlot::draft_v1(scope.clone())
-            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+            .map_err(|error| SpaceAccessError::Internal(Box::new(error)))?;
         let legacy = LegacyPassphrase(passphrase.expose().to_owned());
         let kek = v1_aead::derive_kek_argon2id(&legacy, &draft.salt, &draft.kdf)
             .map_err(|error| map_and_log_kdf_error(error, "migration_initialize"))?;
         let master_key = MasterKey::generate().map_err(map_encryption_error)?;
         let blob = v1_aead::wrap_master_key_xchacha(&kek, &master_key).map_err(|error| {
-            map_and_log_local_crypto_error(
-                error.to_string(),
-                "migration_initialize",
-                "wrap_master_key",
-            )
+            map_and_log_local_crypto_error(error, "migration_initialize", "wrap_master_key")
         })?;
         let keyslot = draft.finalize(WrappedMasterKey { blob });
 
@@ -356,15 +411,15 @@ fn map_encryption_error(err: EncryptionError) -> SpaceAccessError {
         EncryptionError::CorruptedKeySlot
         | EncryptionError::CorruptedBlob
         | EncryptionError::UnsupportedKeySlotVersion
-        | EncryptionError::UnsupportedBlobVersion => SpaceAccessError::CorruptedKeyMaterial,
-        other => SpaceAccessError::Internal(other.to_string()),
+        | EncryptionError::UnsupportedBlobVersion => SpaceAccessError::corrupted_key_material(),
+        other => SpaceAccessError::Internal(Box::new(other)),
     }
 }
 
 fn map_aead_error_for_unwrap(err: v1_aead::AeadError) -> SpaceAccessError {
     match err {
-        v1_aead::AeadError::DecryptFailed => SpaceAccessError::WrongPassphrase,
-        other => SpaceAccessError::Internal(other.to_string()),
+        v1_aead::AeadError::DecryptFailed { .. } => SpaceAccessError::WrongPassphrase,
+        other => SpaceAccessError::Internal(Box::new(other)),
     }
 }
 
@@ -386,16 +441,16 @@ fn map_aead_error_for_unwrap(err: v1_aead::AeadError) -> SpaceAccessError {
 /// 不该发生的故障,保留 `error!` 让 Sentry 抓到。
 fn map_and_log_unwrap_aead_error(err: v1_aead::AeadError, path: &'static str) -> SpaceAccessError {
     match &err {
-        v1_aead::AeadError::DecryptFailed => {
+        v1_aead::AeadError::DecryptFailed { .. } => {
             warn!(
                 path,
                 "unwrap_master_key rejected: KEK does not match wrapped master key (passphrase mismatch or keyring/keyslot drift)"
             );
         }
-        other => {
+        _ => {
             error!(
                 path,
-                error = ?other,
+                error_kind = "unwrap_aead_failed",
                 "unwrap_master_key failed: unexpected AEAD failure"
             );
         }
@@ -405,20 +460,31 @@ fn map_and_log_unwrap_aead_error(err: v1_aead::AeadError, path: &'static str) ->
 
 /// KDF (Argon2id) 失败属于密码学库底层故障——参数已由 keyslot 固定,
 /// 输入 passphrase 字节合法,这一步不该失败。走 `error!` + `Internal`。
-fn map_and_log_kdf_error(err: String, path: &'static str) -> SpaceAccessError {
-    error!(path, error = %err, "derive_kek_argon2id failed: unexpected KDF failure");
-    SpaceAccessError::Internal(err)
+fn map_and_log_kdf_error(err: v1_aead::KdfError, path: &'static str) -> SpaceAccessError {
+    error!(
+        path,
+        error_kind = "kdf_failed",
+        io_error_kind = io_error_kind(&err),
+        "derive_kek_argon2id failed: unexpected KDF failure"
+    );
+    SpaceAccessError::Internal(Box::new(err))
 }
 
 /// `wrap_master_key_xchacha` / `MasterKey::generate` 等"本地新建密钥物料"
 /// 路径上的失败同样属于密码学库底层故障。走 `error!` + `Internal`。
 fn map_and_log_local_crypto_error(
-    err: String,
+    err: impl Error + Send + Sync + 'static,
     path: &'static str,
     op: &'static str,
 ) -> SpaceAccessError {
-    error!(path, op, error = %err, "local crypto operation failed");
-    SpaceAccessError::Internal(err)
+    error!(
+        path,
+        op,
+        error_kind = "local_crypto_failed",
+        io_error_kind = io_error_kind(&err),
+        "local crypto operation failed"
+    );
+    SpaceAccessError::Internal(Box::new(err))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -469,14 +535,14 @@ fn seal_membership_branch_recovery_confirmation(
     confirmation: &MembershipBranchRecoveryConfirmationV1,
 ) -> Result<Vec<u8>, EncryptionError> {
     let plaintext =
-        postcard::to_stdvec(confirmation).map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+        postcard::to_stdvec(confirmation).map_err(EncryptionError::key_material_corrupt_from)?;
     let encrypted = v1_aead::encrypt_blob_xchacha(
         wrapping_key,
         &plaintext,
         &membership_branch_recovery_confirmation_aad(space_id, confirmation.epoch),
     )
     .map_err(map_group_aead_error)?;
-    postcard::to_stdvec(&encrypted).map_err(|_| EncryptionError::KeyMaterialCorrupt)
+    postcard::to_stdvec(&encrypted).map_err(EncryptionError::key_material_corrupt_from)
 }
 
 fn open_membership_branch_recovery_confirmation(
@@ -486,7 +552,7 @@ fn open_membership_branch_recovery_confirmation(
     ciphertext: &[u8],
 ) -> Result<MembershipBranchRecoveryConfirmationV1, EncryptionError> {
     let encrypted: EncryptedBlob =
-        postcard::from_bytes(ciphertext).map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+        postcard::from_bytes(ciphertext).map_err(EncryptionError::key_material_corrupt_from)?;
     let plaintext = v1_aead::decrypt_blob_xchacha(
         wrapping_key,
         &encrypted.nonce,
@@ -495,19 +561,20 @@ fn open_membership_branch_recovery_confirmation(
     )
     .map_err(map_group_aead_error)?;
     let confirmation: MembershipBranchRecoveryConfirmationV1 =
-        postcard::from_bytes(&plaintext).map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+        postcard::from_bytes(&plaintext).map_err(EncryptionError::key_material_corrupt_from)?;
     if confirmation.version != 1 || confirmation.epoch != epoch {
-        return Err(EncryptionError::KeyMaterialCorrupt);
+        return Err(EncryptionError::key_material_corrupt());
     }
     Ok(confirmation)
 }
 
 fn map_group_aead_error(error: v1_aead::AeadError) -> EncryptionError {
     match error {
-        v1_aead::AeadError::DecryptFailed => EncryptionError::KeyMaterialCorrupt,
-        v1_aead::AeadError::InvalidKey | v1_aead::AeadError::EncryptFailed => {
-            EncryptionError::CryptoFailure
+        error @ v1_aead::AeadError::DecryptFailed { .. } => {
+            EncryptionError::key_material_corrupt_from(error)
         }
+        error @ (v1_aead::AeadError::InvalidKey { .. }
+        | v1_aead::AeadError::EncryptFailed { .. }) => EncryptionError::crypto_failure_from(error),
     }
 }
 
@@ -521,7 +588,7 @@ pub(super) fn seal_group_catalog(
         key_catalog: material.key_catalog().to_vec(),
     };
     let plaintext =
-        serde_json::to_vec(&portable).map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+        serde_json::to_vec(&portable).map_err(EncryptionError::key_material_corrupt_from)?;
     let encrypted = v1_aead::encrypt_blob_xchacha(
         wrapping_key,
         &plaintext,
@@ -531,7 +598,7 @@ pub(super) fn seal_group_catalog(
         ),
     )
     .map_err(map_group_aead_error)?;
-    serde_json::to_vec(&encrypted).map_err(|_| EncryptionError::KeyMaterialCorrupt)
+    serde_json::to_vec(&encrypted).map_err(EncryptionError::key_material_corrupt_from)
 }
 
 pub(super) fn open_group_catalog(
@@ -541,7 +608,7 @@ pub(super) fn open_group_catalog(
     ciphertext: &[u8],
 ) -> Result<PortableKeyCatalog, EncryptionError> {
     let encrypted: EncryptedBlob =
-        serde_json::from_slice(ciphertext).map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+        serde_json::from_slice(ciphertext).map_err(EncryptionError::key_material_corrupt_from)?;
     let plaintext = v1_aead::decrypt_blob_xchacha(
         wrapping_key,
         &encrypted.nonce,
@@ -550,12 +617,12 @@ pub(super) fn open_group_catalog(
     )
     .map_err(map_group_aead_error)?;
     let portable: PortableKeyCatalog =
-        serde_json::from_slice(&plaintext).map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+        serde_json::from_slice(&plaintext).map_err(EncryptionError::key_material_corrupt_from)?;
     if portable.version != 1
         || portable.state.space_id() != space_id
         || portable.state.epoch() != GroupEpoch::new(epoch)
     {
-        return Err(EncryptionError::KeyMaterialCorrupt);
+        return Err(EncryptionError::key_material_corrupt());
     }
     Ok(portable)
 }
@@ -569,15 +636,15 @@ impl RuntimeSpaceAccessAdapter {
         scope: &KeyScope,
         encoded: &[u8],
     ) -> Result<(KeySlot, Kek, MasterKey), SpaceAccessError> {
-        let mut state: AdmissionTargetAccessV1 =
-            serde_json::from_slice(encoded).map_err(|_| SpaceAccessError::CorruptedKeyMaterial)?;
+        let mut state: AdmissionTargetAccessV1 = serde_json::from_slice(encoded)
+            .map_err(SpaceAccessError::corrupted_key_material_from)?;
         if state.version != 1
             || state.target_space_id != target_space_id.as_ref()
             || &state.keyslot.scope != scope
         {
             state.kek.zeroize();
             state.master_key.zeroize();
-            return Err(SpaceAccessError::CorruptedKeyMaterial);
+            return Err(SpaceAccessError::corrupted_key_material());
         }
 
         let result = (|| {
@@ -588,11 +655,11 @@ impl RuntimeSpaceAccessAdapter {
                 .keyslot
                 .wrapped_master_key
                 .as_ref()
-                .ok_or(SpaceAccessError::CorruptedKeyMaterial)?;
+                .ok_or_else(SpaceAccessError::corrupted_key_material)?;
             let unwrapped = v1_aead::unwrap_master_key_xchacha(&kek, &wrapped.blob)
-                .map_err(|_| SpaceAccessError::CorruptedKeyMaterial)?;
+                .map_err(SpaceAccessError::corrupted_key_material_from)?;
             if unwrapped != master_key {
-                return Err(SpaceAccessError::CorruptedKeyMaterial);
+                return Err(SpaceAccessError::corrupted_key_material());
             }
             Ok((state.keyslot.clone(), kek, master_key))
         })();
@@ -610,7 +677,7 @@ impl RuntimeSpaceAccessAdapter {
             .current_profile
             .current_profile()
             .await
-            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+            .map_err(|error| SpaceAccessError::Internal(Box::new(error)))?;
         let scope = key_scope_from_profile(&profile);
         let (_, _, master_key) =
             Self::decode_prepared_target_access(target_space_id, &scope, encoded)?;
@@ -625,7 +692,7 @@ impl RuntimeSpaceAccessAdapter {
         space_id: &SpaceId,
     ) -> Result<Arc<InMemorySession>, SpaceAccessError> {
         if self.session.current_space_id().ok().as_ref() != Some(space_id) {
-            return Err(SpaceAccessError::CorruptedKeyMaterial);
+            return Err(SpaceAccessError::corrupted_key_material());
         }
         self.session
             .get_master_key()
@@ -642,15 +709,22 @@ impl RuntimeSpaceAccessAdapter {
         &self,
         target_space_id: &SpaceId,
         encoded: &[u8],
+        profile_vault: &dyn ProfilePassphraseRecoveryPort,
     ) -> Result<(), SpaceAccessError> {
         let profile = self
             .current_profile
             .current_profile()
             .await
-            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+            .map_err(|error| SpaceAccessError::Internal(Box::new(error)))?;
         let scope = key_scope_from_profile(&profile);
         let (keyslot, kek, master_key) =
             Self::decode_prepared_target_access(target_space_id, &scope, encoded)?;
+        // 目标 KEK 取代当前 KEK 前后，资料 vault 根密钥必须完成重新包裹，否则挂起或重启后无法打开。
+        profile_vault
+            .prepare_kek_replacement(kek.as_bytes())
+            .map_err(|error| SpaceAccessError::SecurityState {
+                source: anyhow::Error::new(error),
+            })?;
         self.key_material
             .store_kek(&scope, &kek)
             .await
@@ -659,6 +733,11 @@ impl RuntimeSpaceAccessAdapter {
             .store_keyslot(&keyslot)
             .await
             .map_err(map_encryption_error)?;
+        profile_vault
+            .finish_kek_replacement(kek.as_bytes())
+            .map_err(|error| SpaceAccessError::SecurityState {
+                source: anyhow::Error::new(error),
+            })?;
 
         let repository = self.key_epoch_repository.as_ref();
         let active_security_session = &self.active_security_session;
@@ -682,7 +761,7 @@ impl RuntimeSpaceAccessAdapter {
         space_id: &SpaceId,
     ) -> Result<(), SpaceAccessError> {
         if self.session.current_space_id().ok().as_ref() != Some(space_id) {
-            return Err(SpaceAccessError::CorruptedKeyMaterial);
+            return Err(SpaceAccessError::corrupted_key_material());
         }
         let master_key = self
             .session
@@ -716,7 +795,7 @@ impl RuntimeSpaceAccessAdapter {
             .current_profile
             .current_profile()
             .await
-            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+            .map_err(|error| SpaceAccessError::Internal(Box::new(error)))?;
         let scope = key_scope_from_profile(&profile);
         let keyslot_draft = KeySlot::draft_v1(scope).map_err(map_encryption_error)?;
         let legacy = LegacyPassphrase(passphrase.expose().to_string());
@@ -724,7 +803,7 @@ impl RuntimeSpaceAccessAdapter {
             .map_err(|error| map_and_log_kdf_error(error, "prepare_target_access"))?;
         let master_key = MasterKey::generate().map_err(map_encryption_error)?;
         let wrapped = v1_aead::wrap_master_key_xchacha(&kek, &master_key)
-            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+            .map_err(|error| SpaceAccessError::Internal(Box::new(error)))?;
         let mut state = AdmissionTargetAccessV1 {
             version: 1,
             target_space_id: target_space_id.as_ref().to_owned(),
@@ -732,8 +811,8 @@ impl RuntimeSpaceAccessAdapter {
             kek: kek.as_bytes().to_vec(),
             master_key: master_key.as_bytes().to_vec(),
         };
-        let encoded = serde_json::to_vec(&state)
-            .map_err(|error| SpaceAccessError::Internal(error.to_string()));
+        let encoded =
+            serde_json::to_vec(&state).map_err(|error| SpaceAccessError::Internal(Box::new(error)));
         state.kek.zeroize();
         state.master_key.zeroize();
         encoded.map(PreparedAdmissionTargetAccess::from_bytes)
@@ -745,7 +824,7 @@ impl RuntimeSpaceAccessAdapter {
         device_id: &DeviceId,
     ) -> Result<PreparedGroupJoin, SpaceAccessError> {
         let pending = MlsGroupEngine::prepare_join(device_id.as_str().as_bytes())
-            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+            .map_err(|error| SpaceAccessError::Internal(Box::new(error)))?;
         let mut prepared =
             PreparedGroupJoin::new(pending.key_package, pending.client_state.into_bytes());
         if let Some(instance) = pending.member_instance {
@@ -768,7 +847,7 @@ impl RuntimeSpaceAccessAdapter {
         let current = match repository
             .load_space_material(space_id)
             .await
-            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?
+            .map_err(|error| SpaceAccessError::Internal(Box::new(error)))?
         {
             Some(current) => current,
             None if existing_member_ids.is_empty() => {
@@ -776,7 +855,7 @@ impl RuntimeSpaceAccessAdapter {
                     space_id.as_ref().as_bytes(),
                     sponsor_device_id.as_str().as_bytes(),
                 )
-                .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+                .map_err(|error| SpaceAccessError::Internal(Box::new(error)))?;
                 self.session
                     .create_legacy_bootstrap_material(
                         space_id,
@@ -785,10 +864,10 @@ impl RuntimeSpaceAccessAdapter {
                     )
                     .map_err(map_encryption_error)?
             }
-            None => return Err(SpaceAccessError::CorruptedKeyMaterial),
+            None => return Err(SpaceAccessError::corrupted_key_material()),
         };
         if current.group_state().is_empty() {
-            return Err(SpaceAccessError::CorruptedKeyMaterial);
+            return Err(SpaceAccessError::corrupted_key_material());
         }
         let sponsor_state = MlsClientState::from_bytes(current.group_state().to_vec());
         let admission = MlsGroupEngine::admit_member(
@@ -796,7 +875,7 @@ impl RuntimeSpaceAccessAdapter {
             joiner_device_id.as_str().as_bytes(),
             key_package,
         )
-        .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+        .map_err(|error| SpaceAccessError::Internal(Box::new(error)))?;
         let now_ms = chrono::Utc::now().timestamp_millis();
         let epoch = GroupEpoch::new(admission.epoch);
         let mut next = self
@@ -816,7 +895,7 @@ impl RuntimeSpaceAccessAdapter {
             commit: admission.commit,
             encrypted_key_catalog: encrypted_key_catalog.clone(),
         })
-        .map_err(|_| SpaceAccessError::CorruptedKeyMaterial)?;
+        .map_err(SpaceAccessError::corrupted_key_material_from)?;
         let existing_member_updates = existing_member_ids
             .iter()
             .cloned()
@@ -836,7 +915,7 @@ impl RuntimeSpaceAccessAdapter {
                 .state()
                 .protection_group_id()
                 .cloned()
-                .ok_or(SpaceAccessError::CorruptedKeyMaterial)?;
+                .ok_or_else(SpaceAccessError::corrupted_key_material)?;
             let cached = ProtectionGroupAdmission {
                 protection_group_id: protection_group_id.clone(),
                 admission: group_admission.clone(),
@@ -863,7 +942,7 @@ impl RuntimeSpaceAccessAdapter {
         repository
             .save_space_material(&next)
             .await
-            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+            .map_err(|error| SpaceAccessError::Internal(Box::new(error)))?;
         self.active_security_session
             .install_current_material(&next)
             .await
@@ -909,9 +988,9 @@ impl RuntimeSpaceAccessAdapter {
             space_id.as_ref().as_bytes(),
             welcome,
         )
-        .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+        .map_err(|error| SpaceAccessError::Internal(Box::new(error)))?;
         if completed.epoch != group_epoch {
-            return Err(SpaceAccessError::CorruptedKeyMaterial);
+            return Err(SpaceAccessError::corrupted_key_material());
         }
         let portable = open_group_catalog(
             &completed.wrapping_key,
@@ -931,7 +1010,7 @@ impl RuntimeSpaceAccessAdapter {
             .current_profile
             .current_profile()
             .await
-            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+            .map_err(|error| SpaceAccessError::Internal(Box::new(error)))?;
         let scope = key_scope_from_profile(&profile);
         let previous = if self
             .key_material
@@ -960,7 +1039,7 @@ impl RuntimeSpaceAccessAdapter {
             .map_err(|error| map_and_log_kdf_error(error, "install_group_join"))?;
         let local_root = MasterKey::generate().map_err(map_encryption_error)?;
         let wrapped = v1_aead::wrap_master_key_xchacha(&kek, &local_root)
-            .map_err(|error| SpaceAccessError::Internal(error.to_string()))?;
+            .map_err(|error| SpaceAccessError::Internal(Box::new(error)))?;
         let keyslot = keyslot_draft.finalize(WrappedMasterKey { blob: wrapped });
 
         if let Err(error) = self.key_material.store_kek(&scope, &kek).await {
@@ -1562,8 +1641,8 @@ impl RuntimeSpaceAccessAdapter {
                     Ok(Some(_)) => {}
                     Ok(None)
                     | Err(
-                        KeyEpochError::DecryptionFailed
-                        | KeyEpochError::PersistedStateIntegrityFailed,
+                        KeyEpochError::DecryptionFailed { .. }
+                        | KeyEpochError::PersistedStateIntegrityFailed { .. },
                     ) => {
                         record = repository
                             .resolve_prepared_revocation(
@@ -1626,6 +1705,51 @@ impl RuntimeSpaceAccessAdapter {
         Ok(false)
     }
 
+    async fn settle_obsolete_space_group_updates(
+        &self,
+        space_id: &SpaceId,
+        retained_recipients: &[DeviceId],
+        now_ms: i64,
+    ) -> Result<usize, KeyEpochError> {
+        let repository = self.key_epoch_repository.as_ref();
+        let Some(mut material) = repository.load_space_material(space_id).await? else {
+            return Ok(0);
+        };
+        let obsolete = material
+            .pending_group_updates()
+            .iter()
+            .filter(|update| !retained_recipients.contains(update.recipient()))
+            .map(|update| update.update_id().to_owned())
+            .collect::<Vec<_>>();
+        let mut settled = 0;
+        for update_id in obsolete {
+            if material.acknowledge_group_update(&update_id, now_ms) {
+                settled += 1;
+            }
+        }
+        if settled > 0 {
+            repository.save_space_material(&material).await?;
+        }
+        // 待投递项有两个来源：空间资料与撤销暂存区的 outbox。同一条规则必须覆盖两者，
+        // 否则一次移除产生的投递会绕过结清，永远占住设备更新状态。
+        for record in repository.list_incomplete_revocations().await? {
+            if record.space_id() != space_id {
+                continue;
+            }
+            settled += repository
+                .settle_obsolete_revocation_recipients(
+                    record.revocation_id(),
+                    retained_recipients,
+                    now_ms,
+                )
+                .await?;
+        }
+        if settled > 0 {
+            tracing::info!(settled_count = settled, "已结清无需投递的安全资料");
+        }
+        Ok(settled)
+    }
+
     async fn group_revocation_result(
         repository: &dyn RevocationRepositoryPort,
         record: &RevocationRecord,
@@ -1663,18 +1787,34 @@ impl RuntimeSpaceAccessAdapter {
         match previous {
             Some((keyslot, kek)) => {
                 if let Err(error) = self.key_material.store_kek(scope, &kek).await {
-                    error!(error = %error, "failed to restore previous KEK after join failure");
+                    error!(
+                        error_kind = "join_rollback",
+                        io_error_kind = io_error_kind(&error),
+                        "failed to restore previous KEK after join failure"
+                    );
                 }
                 if let Err(error) = self.key_material.store_keyslot(&keyslot).await {
-                    error!(error = %error, "failed to restore previous keyslot after join failure");
+                    error!(
+                        error_kind = "join_rollback",
+                        io_error_kind = io_error_kind(&error),
+                        "failed to restore previous keyslot after join failure"
+                    );
                 }
             }
             None => {
                 if let Err(error) = self.key_material.delete_keyslot(scope).await {
-                    warn!(error = %error, "failed to remove staged keyslot after join failure");
+                    warn!(
+                        error_kind = "join_rollback",
+                        io_error_kind = io_error_kind(&error),
+                        "failed to remove staged keyslot after join failure"
+                    );
                 }
                 if let Err(error) = self.key_material.delete_kek(scope).await {
-                    warn!(error = %error, "failed to remove staged KEK after join failure");
+                    warn!(
+                        error_kind = "join_rollback",
+                        io_error_kind = io_error_kind(&error),
+                        "failed to remove staged KEK after join failure"
+                    );
                 }
             }
         }
@@ -1712,7 +1852,7 @@ impl RuntimeSpaceAccessAdapter {
         const PATH: &str = "first_time_init";
 
         let keyslot_draft = KeySlot::draft_v1(scope.clone())
-            .map_err(|e| map_and_log_local_crypto_error(e.to_string(), PATH, "draft_keyslot_v1"))?;
+            .map_err(|e| map_and_log_local_crypto_error(e, PATH, "draft_keyslot_v1"))?;
         debug!("keyslot draft created");
 
         let legacy = LegacyPassphrase(passphrase.expose().to_string());
@@ -1720,30 +1860,37 @@ impl RuntimeSpaceAccessAdapter {
             .map_err(|e| map_and_log_kdf_error(e, PATH))?;
         debug!("KEK derived");
 
-        let master_key = MasterKey::generate().map_err(|e| {
-            map_and_log_local_crypto_error(e.to_string(), PATH, "generate_master_key")
-        })?;
+        let master_key = MasterKey::generate()
+            .map_err(|e| map_and_log_local_crypto_error(e, PATH, "generate_master_key"))?;
         debug!("master key generated");
 
         let blob = v1_aead::wrap_master_key_xchacha(&kek, &master_key)
-            .map_err(|e| map_and_log_local_crypto_error(e.to_string(), PATH, "wrap_master_key"))?;
+            .map_err(|e| map_and_log_local_crypto_error(e, PATH, "wrap_master_key"))?;
         debug!("master key wrapped");
 
         let keyslot = keyslot_draft.finalize(WrappedMasterKey { blob });
 
         if let Err(e) = self.key_material.store_kek(scope, &kek).await {
-            error!(path = PATH, error = %e, "store_kek failed");
             return Err(map_encryption_error(e));
         }
         self.kek_observed.store(true, Ordering::Release);
 
         if let Err(e) = self.key_material.store_keyslot(&keyslot).await {
-            error!(path = PATH, error = %e, "store_keyslot failed, rolling back KEK");
             if let Err(err) = self.key_material.delete_keyslot(scope).await {
-                warn!(path = PATH, error = %err, "rollback delete_keyslot failed");
+                warn!(
+                    path = PATH,
+                    error_kind = "key_material_rollback",
+                    io_error_kind = io_error_kind(&err),
+                    "rollback delete_keyslot failed"
+                );
             }
             if let Err(err) = self.key_material.delete_kek(scope).await {
-                warn!(path = PATH, error = %err, "rollback delete_kek failed");
+                warn!(
+                    path = PATH,
+                    error_kind = "key_material_rollback",
+                    io_error_kind = io_error_kind(&err),
+                    "rollback delete_kek failed"
+                );
             }
             self.kek_observed.store(false, Ordering::Release);
             return Err(map_encryption_error(e));
@@ -1756,10 +1903,20 @@ impl RuntimeSpaceAccessAdapter {
         if let Err(error) = self.activate_session(space_id, master_key).await {
             self.session.clear();
             if let Err(rollback_error) = self.key_material.delete_keyslot(scope).await {
-                warn!(path = PATH, error = %rollback_error, "rollback delete_keyslot failed");
+                warn!(
+                    path = PATH,
+                    error_kind = "key_material_rollback",
+                    io_error_kind = io_error_kind(&rollback_error),
+                    "rollback delete_keyslot failed"
+                );
             }
             if let Err(rollback_error) = self.key_material.delete_kek(scope).await {
-                warn!(path = PATH, error = %rollback_error, "rollback delete_kek failed");
+                warn!(
+                    path = PATH,
+                    error_kind = "key_material_rollback",
+                    io_error_kind = io_error_kind(&rollback_error),
+                    "rollback delete_kek failed"
+                );
             }
             self.kek_observed.store(false, Ordering::Release);
             return Err(error);
@@ -1781,10 +1938,12 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
         async {
             info!("initializing new space");
 
-            if self.key_material.keyslot_exists().await.map_err(|e| {
-                error!(path = PATH, error = %e, "keyslot_exists probe failed");
-                SpaceAccessError::Internal(e.to_string())
-            })? {
+            if self
+                .key_material
+                .keyslot_exists()
+                .await
+                .map_err(|e| SpaceAccessError::Internal(Box::new(e)))?
+            {
                 info!(
                     path = PATH,
                     "initialize rejected: keyslot already exists on disk"
@@ -1792,10 +1951,11 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
                 return Err(SpaceAccessError::AlreadyInitialized);
             }
 
-            let profile = self.current_profile.current_profile().await.map_err(|e| {
-                error!(path = PATH, error = %e, "current_profile resolution failed");
-                SpaceAccessError::Internal(e.to_string())
-            })?;
+            let profile = self
+                .current_profile
+                .current_profile()
+                .await
+                .map_err(|e| SpaceAccessError::Internal(Box::new(e)))?;
             let scope = key_scope_from_profile(&profile);
             debug!(path = PATH, scope = %scope_identifier(&scope), "got key scope");
 
@@ -1819,10 +1979,12 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
         async {
             info!("unlocking space with passphrase");
 
-            if !self.key_material.keyslot_exists().await.map_err(|e| {
-                error!(path = PATH, error = %e, "keyslot_exists probe failed");
-                SpaceAccessError::Internal(e.to_string())
-            })? {
+            if !self
+                .key_material
+                .keyslot_exists()
+                .await
+                .map_err(|e| SpaceAccessError::Internal(Box::new(e)))?
+            {
                 info!(
                     path = PATH,
                     "unlock rejected: no keyslot on disk (not initialized)"
@@ -1830,10 +1992,11 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
                 return Err(SpaceAccessError::NotInitialized);
             }
 
-            let profile = self.current_profile.current_profile().await.map_err(|e| {
-                error!(path = PATH, error = %e, "current_profile resolution failed");
-                SpaceAccessError::Internal(e.to_string())
-            })?;
+            let profile = self
+                .current_profile
+                .current_profile()
+                .await
+                .map_err(|e| SpaceAccessError::Internal(Box::new(e)))?;
             let scope = key_scope_from_profile(&profile);
             debug!(path = PATH, scope = %scope_identifier(&scope), "got key scope");
 
@@ -1884,45 +2047,46 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
                 return Ok(Some(ActiveSpace::new(space_id.clone())));
             }
 
-            if !self.key_material.keyslot_exists().await.map_err(|e| {
-                error!(path = PATH, error = %e, "keyslot_exists probe failed");
-                SpaceAccessError::Internal(e.to_string())
-            })? {
+            if !self
+                .key_material
+                .keyslot_exists()
+                .await
+                .map_err(|e| SpaceAccessError::Internal(Box::new(e)))?
+            {
                 info!(path = PATH, "no keyslot on disk, no session to resume");
                 return Ok(None);
             }
 
-            let profile = self.current_profile.current_profile().await.map_err(|e| {
-                error!(path = PATH, error = %e, "current_profile resolution failed");
-                SpaceAccessError::Internal(e.to_string())
-            })?;
+            let profile = self
+                .current_profile
+                .current_profile()
+                .await
+                .map_err(|e| SpaceAccessError::Internal(Box::new(e)))?;
             let scope = key_scope_from_profile(&profile);
             debug!(path = PATH, scope = %scope_identifier(&scope), "got key scope");
 
-            let keyslot = self.key_material.load_keyslot(&scope).await.map_err(|e| {
-                warn!(path = PATH, error = %e, "load_keyslot failed during resume");
-                map_encryption_error(e)
-            })?;
+            let keyslot = self
+                .key_material
+                .load_keyslot(&scope)
+                .await
+                .map_err(|e| map_encryption_error(e))?;
             let wrapped_master_key = keyslot.wrapped_master_key.as_ref().ok_or_else(|| {
                 warn!(
                     path = PATH,
                     "keyslot on disk has no wrapped_master_key (corrupted key material)"
                 );
-                SpaceAccessError::CorruptedKeyMaterial
+                SpaceAccessError::corrupted_key_material()
             })?;
 
             // 静默路径: 直接读 keyring 缓存的 KEK,不重新派生。
             // load_kek 失败通常意味着 keyring 中没有这条 KEK——首次启动 /
             // keyring 被清 / 跨设备 profile 迁移——属于业务正常路径,
             // 上层会回退到要求用户重新输入口令走 unlock。warn 级别即可。
-            let kek = self.key_material.load_kek(&scope).await.map_err(|e| {
-                info!(
-                    path = PATH,
-                    error = %e,
-                    "load_kek from keyring failed; caller will fall back to passphrase unlock"
-                );
-                map_encryption_error(e)
-            })?;
+            let kek = self
+                .key_material
+                .load_kek(&scope)
+                .await
+                .map_err(|e| map_encryption_error(e))?;
 
             let master_key = v1_aead::unwrap_master_key_xchacha(&kek, &wrapped_master_key.blob)
                 .map_err(|e| map_and_log_unwrap_aead_error(e, PATH))?;
@@ -1947,22 +2111,21 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
             warn!(path = PATH, "derive_subkey called while session not ready");
             return Err(SpaceAccessError::NotUnlocked);
         }
-        let okm = self.session.derive_stable_subkey(salt, info).map_err(|e| {
-            error!(path = PATH, error = %e, "derive stable session subkey failed");
-            map_encryption_error(e)
-        })?;
+        let okm = self
+            .session
+            .derive_stable_subkey(salt, info)
+            .map_err(|e| map_encryption_error(e))?;
         Ok(okm)
     }
 
     async fn current_session_proof_key(&self) -> Result<Option<ProofDerivedKey>, SpaceAccessError> {
-        const PATH: &str = "current_session_proof_key";
         if !self.session.is_ready() {
             return Ok(None);
         }
-        let master_key = self.session.get_master_key().map_err(|e| {
-            error!(path = PATH, error = %e, "get_master_key from session failed");
-            map_encryption_error(e)
-        })?;
+        let master_key = self
+            .session
+            .get_master_key()
+            .map_err(|e| map_encryption_error(e))?;
         Ok(Some(ProofDerivedKey::from_bytes(master_key.into_bytes())))
     }
 
@@ -1980,20 +2143,17 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
                 .key_material
                 .keyslot_exists()
                 .await
-                .map_err(|e| {
-                    error!(path = PATH, error = %e, "keyslot_exists probe failed");
-                    SpaceAccessError::Internal(e.to_string())
-                })?;
-            debug!(path = PATH, already_initialized, "checked keyslot existence");
+                .map_err(|e| SpaceAccessError::Internal(Box::new(e)))?;
+            debug!(
+                path = PATH,
+                already_initialized, "checked keyslot existence"
+            );
 
             let profile = self
                 .current_profile
                 .current_profile()
                 .await
-                .map_err(|e| {
-                    error!(path = PATH, error = %e, "current_profile resolution failed");
-                    SpaceAccessError::Internal(e.to_string())
-                })?;
+                .map_err(|e| SpaceAccessError::Internal(Box::new(e)))?;
             let scope = key_scope_from_profile(&profile);
             debug!(path = PATH, scope = %scope_identifier(&scope), "got key scope");
 
@@ -2005,18 +2165,11 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
                     .key_material
                     .load_keyslot(&scope)
                     .await
-                    .map_err(|e| {
-                        warn!(path = PATH, branch = "already_initialized", error = %e, "load_keyslot failed");
-                        map_encryption_error(e)
-                    })?;
+                    .map_err(|e| map_encryption_error(e))?;
                 let keyslot_blob = serde_json::to_vec(&keyslot).map_err(|e| {
-                    error!(
-                        path = PATH,
-                        branch = "already_initialized",
-                        error = %e,
-                        "serialize keyslot to wire blob failed"
-                    );
-                    SpaceAccessError::Internal(format!("serialize keyslot: {e}"))
+                    SpaceAccessError::Internal(
+                        anyhow::Error::from(e).context("serialize keyslot").into(),
+                    )
                 })?;
                 let mut challenge_nonce = [0u8; 32];
                 rand::rng().fill_bytes(&mut challenge_nonce);
@@ -2034,13 +2187,9 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
                 .do_first_time_init(space_id, &scope, passphrase)
                 .await?;
             let keyslot_blob = serde_json::to_vec(&keyslot).map_err(|e| {
-                error!(
-                    path = PATH,
-                    branch = "first_time_init",
-                    error = %e,
-                    "serialize freshly-initialized keyslot to wire blob failed"
-                );
-                SpaceAccessError::Internal(format!("serialize keyslot: {e}"))
+                SpaceAccessError::Internal(
+                    anyhow::Error::from(e).context("serialize keyslot").into(),
+                )
             })?;
             let mut challenge_nonce = [0u8; 32];
             rand::rng().fill_bytes(&mut challenge_nonce);
@@ -2066,18 +2215,11 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
         async {
             info!("deriving master key from pairing offer");
 
-            let keyslot: KeySlot = serde_json::from_slice(&offer.keyslot_blob).map_err(|e| {
-                warn!(
-                    path = PATH,
-                    error = %e,
-                    offer_blob_len = offer.keyslot_blob.len(),
-                    "failed to deserialize keyslot from offer blob (corrupted wire data)"
-                );
-                SpaceAccessError::CorruptedKeyMaterial
-            })?;
+            let keyslot: KeySlot = serde_json::from_slice(&offer.keyslot_blob)
+                .map_err(SpaceAccessError::corrupted_key_material_from)?;
             if validate_kdf(&keyslot.kdf).is_err() {
                 warn!(path = PATH, "offer keyslot KDF parameters are unsupported or excessive");
-                return Err(SpaceAccessError::CorruptedKeyMaterial);
+                return Err(SpaceAccessError::corrupted_key_material());
             }
             let scope = keyslot.scope.clone();
             debug!(path = PATH, scope = %scope_identifier(&scope), "parsed keyslot from offer blob");
@@ -2087,7 +2229,7 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
                     path = PATH,
                     "offer keyslot has no wrapped_master_key (corrupted offer)"
                 );
-                SpaceAccessError::CorruptedKeyMaterial
+                SpaceAccessError::corrupted_key_material()
             })?;
 
             let legacy = LegacyPassphrase(passphrase.expose().to_string());
@@ -2112,18 +2254,16 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
             // 原 KEK 一并删掉"的窄窗口(需要 keyring/磁盘真实 IO 失败),
             // 影响远小于 unwrap 失败这条常见路径, 留作后续单独修复。
             if let Err(e) = self.key_material.store_kek(&scope, &kek).await {
-                error!(path = PATH, error = %e, "store_kek failed");
                 return Err(map_encryption_error(e));
             }
             self.kek_observed.store(true, Ordering::Release);
 
             if let Err(e) = self.key_material.store_keyslot(&keyslot).await {
-                error!(path = PATH, error = %e, "store_keyslot failed, rolling back KEK");
                 if let Err(err) = self.key_material.delete_keyslot(&scope).await {
-                    warn!(path = PATH, error = %err, "rollback delete_keyslot failed");
+                    warn!(path = PATH, error_kind = "key_material_rollback", io_error_kind = io_error_kind(&err), "rollback delete_keyslot failed");
                 }
                 if let Err(err) = self.key_material.delete_kek(&scope).await {
-                    warn!(path = PATH, error = %err, "rollback delete_kek failed");
+                    warn!(path = PATH, error_kind = "key_material_rollback", io_error_kind = io_error_kind(&err), "rollback delete_kek failed");
                 }
                 self.kek_observed.store(false, Ordering::Release);
                 return Err(map_encryption_error(e));
@@ -2156,10 +2296,19 @@ impl RuntimeSpaceAccessAdapter {
                 return Ok(ProfileKeyAccessProbe::Available);
             }
 
-            let profile = self.current_profile.current_profile().await.map_err(|error| {
-                error!(path = PATH, error = %error, "current_profile resolution failed");
-                ProfileKeyAccessProbePortError
-            })?;
+            let profile = self
+                .current_profile
+                .current_profile()
+                .await
+                .map_err(|error| {
+                    error!(
+                        path = PATH,
+                        error_kind = "current_profile_resolve",
+                        io_error_kind = io_error_kind(&error),
+                        "current_profile resolution failed"
+                    );
+                    ProfileKeyAccessProbePortError
+                })?;
             let scope = key_scope_from_profile(&profile);
 
             match self.key_material.load_kek(&scope).await {
@@ -2172,8 +2321,12 @@ impl RuntimeSpaceAccessAdapter {
                     info!(path = PATH, "profile key access denied");
                     Ok(ProfileKeyAccessProbe::PermissionDenied)
                 }
-                Err(EncryptionError::KeyringError(message)) => {
-                    warn!(path = PATH, error = %message, "profile key store temporarily unavailable");
+                Err(EncryptionError::KeyringError(_)) => {
+                    warn!(
+                        path = PATH,
+                        error_kind = "keyring_unavailable",
+                        "profile key store temporarily unavailable"
+                    );
                     Ok(ProfileKeyAccessProbe::TemporarilyUnavailable)
                 }
                 Err(EncryptionError::KeyNotFound) => {
@@ -2181,7 +2334,12 @@ impl RuntimeSpaceAccessAdapter {
                     Ok(ProfileKeyAccessProbe::Missing)
                 }
                 Err(error) => {
-                    error!(path = PATH, error = %error, "unexpected profile key access failure");
+                    error!(
+                        path = PATH,
+                        error_kind = "profile_key_access",
+                        io_error_kind = io_error_kind(&error),
+                        "unexpected profile key access failure"
+                    );
                     Err(ProfileKeyAccessProbePortError)
                 }
             }
@@ -2407,12 +2565,51 @@ impl GroupRevocationPort for RuntimeSpaceAccessAdapter {
             .await
     }
 
+    async fn space_group_update_delivery_status(
+        &self,
+    ) -> Result<uc_core::membership::GroupUpdateDeliveryStatus, KeyEpochError> {
+        let space_id = self
+            .session
+            .current_space_id()
+            .map_err(|source| KeyEpochError::Repository(source.into()))?;
+        self.key_epoch_repository
+            .group_update_delivery_status(&space_id)
+            .await
+            .inspect_err(|error| {
+                let detail = super::group_update_failure_detail(error);
+                warn!(
+                    phase = detail.phase.as_str(),
+                    reason = detail.reason.as_str(),
+                    source = detail.source.as_str(),
+                    "组密钥投递状态读取失败"
+                );
+            })
+    }
+
     async fn acknowledge_space_group_update(
         &self,
         update_id: &str,
         now_ms: i64,
     ) -> Result<bool, KeyEpochError> {
         RuntimeSpaceAccessAdapter::acknowledge_space_group_update(self, update_id, now_ms).await
+    }
+
+    async fn settle_obsolete_space_group_updates(
+        &self,
+        retained_recipients: &[DeviceId],
+        now_ms: i64,
+    ) -> Result<usize, KeyEpochError> {
+        let space_id = self
+            .session
+            .current_space_id()
+            .map_err(|source| KeyEpochError::Repository(source.into()))?;
+        RuntimeSpaceAccessAdapter::settle_obsolete_space_group_updates(
+            self,
+            &space_id,
+            retained_recipients,
+            now_ms,
+        )
+        .await
     }
 }
 
@@ -2448,7 +2645,7 @@ impl GroupBootstrapPort for RuntimeSpaceAccessAdapter {
         let space_id = self
             .session
             .current_space_id()
-            .map_err(|_| BootstrapError::CryptographicState)?;
+            .map_err(BootstrapError::cryptographic_state_from)?;
         let prepared = LegacyBootstrapRecord::prepare(
             BootstrapId::generate(),
             space_id.clone(),
@@ -2464,17 +2661,17 @@ impl GroupBootstrapPort for RuntimeSpaceAccessAdapter {
                     space_id.as_ref().as_bytes(),
                     record.sponsor_device_id().as_str().as_bytes(),
                 )
-                .map_err(|_| BootstrapError::CryptographicState)?;
+                .map_err(BootstrapError::cryptographic_state_from)?;
                 let material = self
                     .session
                     .create_legacy_bootstrap_material_in_group(
                         &space_id,
                         ProtectionGroupId::from_string(record.bootstrap_id().as_str())
-                            .map_err(|_| BootstrapError::InvalidBootstrapId)?,
+                            .map_err(BootstrapError::invalid_bootstrap_id_from)?,
                         sponsor_state.into_bytes(),
                         now_ms,
                     )
-                    .map_err(|_| BootstrapError::CryptographicState)?;
+                    .map_err(BootstrapError::cryptographic_state_from)?;
                 let mut staged_record = record;
                 staged_record.transition_to(LegacyBootstrapStatus::Staged, now_ms)?;
                 let stage = LegacyBootstrapStage::new(staged_record, material.clone())?;
@@ -2549,7 +2746,7 @@ impl GroupBootstrapPort for RuntimeSpaceAccessAdapter {
         let active_space_id = self
             .session
             .current_space_id()
-            .map_err(|_| BootstrapError::CryptographicState)?;
+            .map_err(BootstrapError::cryptographic_state_from)?;
         let records = repository
             .list_incomplete_legacy_bootstraps_for_space(&active_space_id)
             .await?;
@@ -2557,7 +2754,7 @@ impl GroupBootstrapPort for RuntimeSpaceAccessAdapter {
             .key_epoch_repository
             .load_space_material(&active_space_id)
             .await
-            .map_err(|error| BootstrapError::Repository(error.to_string()))?;
+            .map_err(|error| BootstrapError::Repository(error.into()))?;
         let mut results = Vec::with_capacity(records.len());
         for record in records {
             if active_material.as_ref().is_some_and(|material| {
@@ -2601,17 +2798,17 @@ impl SpaceProtectionStatusPort for RuntimeSpaceAccessAdapter {
         let space_id = self
             .session
             .current_space_id()
-            .map_err(|_| SpaceProtectionError::Unavailable)?;
+            .map_err(SpaceProtectionError::unavailable_from)?;
         let key_epoch_repository = self.key_epoch_repository.as_ref();
         let material = key_epoch_repository
             .load_space_material(&space_id)
             .await
-            .map_err(|error| SpaceProtectionError::Repository(error.to_string()))?;
+            .map_err(|error| SpaceProtectionError::Repository(Box::new(error)))?;
         let legacy_bootstrap = self
             .legacy_bootstrap_repository
             .list_non_complete_legacy_bootstraps_for_space(&space_id)
             .await
-            .map_err(|error| SpaceProtectionError::Repository(error.to_string()))?
+            .map_err(|error| SpaceProtectionError::Repository(Box::new(error)))?
             .into_iter()
             .find(|record| {
                 material.as_ref().is_none_or(|material| {
@@ -2633,9 +2830,11 @@ impl SpaceProtectionStatusPort for RuntimeSpaceAccessAdapter {
             (None, None) => SpaceProtectionMode::Legacy,
         };
         let active_group = if mode == SpaceProtectionMode::Ready {
-            let material = material.as_ref().ok_or(SpaceProtectionError::Corrupted)?;
+            let material = material
+                .as_ref()
+                .ok_or_else(SpaceProtectionError::corrupted)?;
             if material.group_state().is_empty() {
-                return Err(SpaceProtectionError::Corrupted);
+                return Err(SpaceProtectionError::corrupted());
             }
             Some(MlsClientState::from_bytes(material.group_state().to_vec()))
         } else {
@@ -2658,12 +2857,12 @@ impl SpaceProtectionStatusPort for RuntimeSpaceAccessAdapter {
                     SpaceProtectionMode::Ready => {
                         let group = active_group
                             .as_ref()
-                            .ok_or(SpaceProtectionError::Corrupted)?;
+                            .ok_or_else(SpaceProtectionError::corrupted)?;
                         let is_active = MlsGroupEngine::contains_active_member(
                             group,
                             member.as_str().as_bytes(),
                         )
-                        .map_err(|_| SpaceProtectionError::Corrupted)?;
+                        .map_err(SpaceProtectionError::corrupted_from)?;
                         Ok(if is_active {
                             MemberProtectionStatus::Protected
                         } else {
@@ -2689,7 +2888,8 @@ impl SpaceProtectionStatusPort for RuntimeSpaceAccessAdapter {
 impl CurrentMemberSignaturePort for RuntimeSpaceAccessAdapter {
     async fn current_member_epoch(&self) -> Result<u64, CurrentMemberSignatureError> {
         let group = self.current_member_group_state().await?;
-        MlsGroupEngine::current_epoch(&group).map_err(|_| CurrentMemberSignatureError::InvalidState)
+        MlsGroupEngine::current_epoch(&group)
+            .map_err(CurrentMemberSignatureError::invalid_state_from)
     }
 
     async fn current_membership_credential(
@@ -2698,16 +2898,16 @@ impl CurrentMemberSignaturePort for RuntimeSpaceAccessAdapter {
     ) -> Result<MembershipCredential, CurrentMemberSignatureError> {
         let group = self.current_member_group_state().await?;
         let public_key = MlsGroupEngine::signing_public_key(&group)
-            .map_err(|_| CurrentMemberSignatureError::InvalidState)?;
+            .map_err(CurrentMemberSignatureError::invalid_state_from)?;
         let credential = MembershipCredential::new(
             uc_core::membership::ED25519_SIGNATURE_ALGORITHM_V1,
             public_key,
         );
         let current_instance =
             MlsGroupEngine::current_member_instance(&group, device_id.as_str().as_bytes())
-                .map_err(|_| CurrentMemberSignatureError::InvalidState)?;
+                .map_err(CurrentMemberSignatureError::invalid_state_from)?;
         if credential.member_instance_id(device_id) != current_instance {
-            return Err(CurrentMemberSignatureError::InvalidState);
+            return Err(CurrentMemberSignatureError::invalid_state());
         }
         Ok(credential)
     }
@@ -2718,7 +2918,7 @@ impl CurrentMemberSignaturePort for RuntimeSpaceAccessAdapter {
     ) -> Result<uc_core::membership::MemberInstanceId, CurrentMemberSignatureError> {
         let group = self.current_member_group_state().await?;
         MlsGroupEngine::current_member_instance(&group, device_id.as_str().as_bytes())
-            .map_err(|_| CurrentMemberSignatureError::InvalidState)
+            .map_err(CurrentMemberSignatureError::invalid_state_from)
     }
 
     async fn sign_current_member_payload(
@@ -2727,7 +2927,7 @@ impl CurrentMemberSignaturePort for RuntimeSpaceAccessAdapter {
     ) -> Result<Vec<u8>, CurrentMemberSignatureError> {
         let group = self.current_member_group_state().await?;
         MlsGroupEngine::sign_member_payload(&group, payload)
-            .map_err(|_| CurrentMemberSignatureError::InvalidState)
+            .map_err(CurrentMemberSignatureError::invalid_state_from)
     }
 
     async fn verify_current_member_payload(
@@ -2743,7 +2943,7 @@ impl CurrentMemberSignaturePort for RuntimeSpaceAccessAdapter {
             payload,
             signature,
         )
-        .map_err(|_| CurrentMemberSignatureError::InvalidState)
+        .map_err(CurrentMemberSignatureError::invalid_state_from)
     }
 
     async fn verify_member_instance_payload(
@@ -2761,7 +2961,7 @@ impl CurrentMemberSignaturePort for RuntimeSpaceAccessAdapter {
             payload,
             signature,
         )
-        .map_err(|_| CurrentMemberSignatureError::InvalidState)
+        .map_err(CurrentMemberSignatureError::invalid_state_from)
     }
 }
 
@@ -2775,10 +2975,10 @@ impl PrepareSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
         let current = repository
             .load_space_material(&request.space_id)
             .await
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?
-            .ok_or(AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?
+            .ok_or_else(AdmissionSecurityTransitionError::invalid_state)?;
         if current.state().mode() != SpaceSecurityMode::Ready || current.group_state().is_empty() {
-            return Err(AdmissionSecurityTransitionError::InvalidState);
+            return Err(AdmissionSecurityTransitionError::invalid_state());
         }
 
         request.existing_recipients.sort_by(|left, right| {
@@ -2789,15 +2989,15 @@ impl PrepareSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
         if request.existing_recipients.windows(2).any(|pair| {
             pair[0].credential_id == pair[1].credential_id || pair[0].device_id == pair[1].device_id
         }) {
-            return Err(AdmissionSecurityTransitionError::InvalidState);
+            return Err(AdmissionSecurityTransitionError::invalid_state());
         }
 
-        let admission = MlsGroupEngine::admit_member(
+        let admission = MlsGroupEngine::admit_or_replace_member(
             &MlsClientState::from_bytes(current.group_state().to_vec()),
             &request.candidate_identity,
             &request.candidate_key_package,
         )
-        .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         let target_epoch = GroupEpoch::new(admission.epoch);
         let mut next = self
             .session
@@ -2807,11 +3007,11 @@ impl PrepareSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
                 target_epoch,
                 chrono::Utc::now().timestamp_millis(),
             )
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         let target_key_catalog = super::export_admission_content_key_catalog(&next)
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         let encrypted_key_catalog = seal_group_catalog(&admission.wrapping_key, &next)
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         let group_update = GroupEpochUpdate {
             version: 1,
             group_epoch: admission.epoch,
@@ -2819,7 +3019,7 @@ impl PrepareSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
             encrypted_key_catalog,
         };
         let update_payload = serde_json::to_vec(&group_update)
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         let existing_member_deliveries = request
             .existing_recipients
             .iter()
@@ -2829,15 +3029,32 @@ impl PrepareSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
                 payload: update_payload.clone(),
             })
             .collect::<Vec<_>>();
+        let sponsor_device_id = MlsGroupEngine::local_device_id(&admission.sponsor_state)
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
+        let sponsor_recipient_count = request
+            .existing_recipients
+            .iter()
+            .filter(|recipient| recipient.device_id == sponsor_device_id)
+            .count();
+        if sponsor_recipient_count != 1 {
+            return Err(AdmissionSecurityTransitionError::invalid_state());
+        }
         next.add_pending_group_updates(
-            request.existing_recipients.iter().map(|recipient| {
-                PendingGroupUpdate::persistent(recipient.device_id.clone(), update_payload.clone())
-            }),
+            request
+                .existing_recipients
+                .iter()
+                .filter(|recipient| recipient.device_id != sponsor_device_id)
+                .map(|recipient| {
+                    PendingGroupUpdate::persistent(
+                        recipient.device_id.clone(),
+                        update_payload.clone(),
+                    )
+                }),
             chrono::Utc::now().timestamp_millis(),
         );
         let target_key_catalog_bytes = target_key_catalog
             .encode()
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         let admission_bundle_digest = admission_bundle_digest(
             request.candidate_core_digest,
             &admission.welcome,
@@ -2860,17 +3077,17 @@ impl PrepareSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
             transition_input.key_catalog_digest,
             transition_input.admission_bundle_digest,
         )
-        .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         let target_protection_group_id = next
             .state()
             .protection_group_id()
-            .ok_or(AdmissionSecurityTransitionError::InvalidState)?
+            .ok_or_else(AdmissionSecurityTransitionError::invalid_state)?
             .as_str()
             .to_owned();
 
         Ok(SponsorPreparedAdmissionSecurity {
             staged_state: postcard::to_stdvec(&next)
-                .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?,
+                .map_err(AdmissionSecurityTransitionError::invalid_state_from)?,
             commit: admission.commit,
             welcome: admission.welcome,
             public_commitment,
@@ -2889,14 +3106,14 @@ impl ActivateSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
     ) -> Result<(), AdmissionSecurityTransitionError> {
         let repository = self.key_epoch_repository.as_ref();
         let staged: SpaceKeyMaterial = postcard::from_bytes(&request.staged_state)
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         if staged.state().space_id() != &request.space_id
             || staged.state().epoch().value() != request.expected_commitment.target_epoch
         {
-            return Err(AdmissionSecurityTransitionError::InvalidState);
+            return Err(AdmissionSecurityTransitionError::invalid_state());
         }
         let catalog = super::export_admission_content_key_catalog(&staged)
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         let expected = &request.expected_commitment;
         let rederived = MlsGroupEngine::derive_public_admission_commitment(
             &MlsClientState::from_bytes(staged.group_state().to_vec()),
@@ -2907,14 +3124,14 @@ impl ActivateSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
             catalog.digest(),
             expected.admission_bundle_digest,
         )
-        .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         if &rederived != expected {
             return Err(AdmissionSecurityTransitionError::CommitmentMismatch);
         }
         if repository
             .load_space_material(&request.space_id)
             .await
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?
             .as_ref()
             .is_some_and(|current| current == &staged)
         {
@@ -2932,7 +3149,7 @@ impl ActivateSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
         repository
             .save_space_material(&staged)
             .await
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         info!(
             group_epoch = staged.state().epoch().value(),
             pending_group_update_count = staged.pending_group_updates().len(),
@@ -2966,7 +3183,7 @@ impl ActivateCompletionHelperAdmissionSecurityPort for RuntimeSpaceAccessAdapter
             })
             .collect::<Vec<_>>();
         if delivery.len() != 1 {
-            return Err(AdmissionSecurityTransitionError::InvalidState);
+            return Err(AdmissionSecurityTransitionError::invalid_state());
         }
         let expected = &request.expected_commitment;
         let bundle_digest = admission_bundle_digest(
@@ -2983,7 +3200,7 @@ impl ActivateCompletionHelperAdmissionSecurityPort for RuntimeSpaceAccessAdapter
         }
 
         let update: GroupEpochUpdate = serde_json::from_slice(&delivery[0].payload)
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         if update.version != 1
             || update.group_epoch != expected.target_epoch
             || update.commit != request.security_commit
@@ -2993,8 +3210,8 @@ impl ActivateCompletionHelperAdmissionSecurityPort for RuntimeSpaceAccessAdapter
         let current = repository
             .load_space_material(&request.space_id)
             .await
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?
-            .ok_or(AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?
+            .ok_or_else(AdmissionSecurityTransitionError::invalid_state)?;
         let target_epoch = GroupEpoch::new(expected.target_epoch);
         let material = if current.state().epoch() == target_epoch {
             current
@@ -3003,18 +3220,18 @@ impl ActivateCompletionHelperAdmissionSecurityPort for RuntimeSpaceAccessAdapter
                 .state()
                 .epoch()
                 .next()
-                .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?
+                .map_err(AdmissionSecurityTransitionError::invalid_state_from)?
                 != target_epoch
                 || current.group_state().is_empty()
             {
-                return Err(AdmissionSecurityTransitionError::InvalidState);
+                return Err(AdmissionSecurityTransitionError::invalid_state());
             }
             let completed = MlsGroupEngine::apply_commit(
                 &MlsClientState::from_bytes(current.group_state().to_vec()),
                 request.space_id.as_ref().as_bytes(),
                 &update.commit,
             )
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
             if completed.epoch != expected.target_epoch {
                 return Err(AdmissionSecurityTransitionError::CommitmentMismatch);
             }
@@ -3024,7 +3241,7 @@ impl ActivateCompletionHelperAdmissionSecurityPort for RuntimeSpaceAccessAdapter
                 update.group_epoch,
                 &update.encrypted_key_catalog,
             )
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
             SpaceKeyMaterial::new(
                 portable.state,
                 completed.client_state.into_bytes(),
@@ -3035,10 +3252,10 @@ impl ActivateCompletionHelperAdmissionSecurityPort for RuntimeSpaceAccessAdapter
         };
 
         let catalog = super::export_admission_content_key_catalog(&material)
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         if catalog
             .encode()
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?
             != request.target_key_catalog
         {
             return Err(AdmissionSecurityTransitionError::CommitmentMismatch);
@@ -3052,7 +3269,7 @@ impl ActivateCompletionHelperAdmissionSecurityPort for RuntimeSpaceAccessAdapter
             catalog.digest(),
             bundle_digest,
         )
-        .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+        .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         if &rederived != expected {
             return Err(AdmissionSecurityTransitionError::CommitmentMismatch);
         }
@@ -3062,15 +3279,15 @@ impl ActivateCompletionHelperAdmissionSecurityPort for RuntimeSpaceAccessAdapter
             request.space_id.clone(),
             self.session
                 .get_master_key()
-                .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?,
+                .map_err(AdmissionSecurityTransitionError::invalid_state_from)?,
         );
         validator
             .install_space_material(&material)
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         repository
             .save_space_material(&material)
             .await
-            .map_err(|_| AdmissionSecurityTransitionError::InvalidState)?;
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         self.active_security_session
             .install_current_material(&material)
             .await
@@ -3326,9 +3543,9 @@ impl RuntimeSpaceAccessAdapter {
     ) -> Result<SpaceKeyMaterial, EncryptionError> {
         let staged: StagedMembershipBranchRecoveryRecipientV1 =
             postcard::from_bytes(recipient_staged_mls_state)
-                .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+                .map_err(EncryptionError::key_material_corrupt_from)?;
         if staged.version != 1 || staged.epoch == 0 {
-            return Err(EncryptionError::KeyMaterialCorrupt);
+            return Err(EncryptionError::key_material_corrupt());
         }
         let space_id = self.session.current_space_id()?;
         let wrapping_key = MasterKey::from_bytes(&staged.wrapping_key)?;
@@ -3355,7 +3572,7 @@ impl RuntimeSpaceAccessAdapter {
             &MlsClientState::from_bytes(material.group_state().to_vec()),
             space_id.as_ref().as_bytes(),
         )
-        .map_err(|_| EncryptionError::KeyMaterialCorrupt)?;
+        .map_err(EncryptionError::key_material_corrupt_from)?;
         super::export_admission_content_key_catalog(&material)?;
         Ok(material)
     }
@@ -3429,16 +3646,16 @@ impl RuntimeSpaceAccessAdapter {
         let space_id = self
             .session
             .current_space_id()
-            .map_err(|_| CurrentMemberSignatureError::Unavailable)?;
+            .map_err(CurrentMemberSignatureError::unavailable_from)?;
         let repository = self.key_epoch_repository.as_ref();
         let material = repository
             .load_space_material(&space_id)
             .await
-            .map_err(|error| CurrentMemberSignatureError::Repository(error.to_string()))?
-            .ok_or(CurrentMemberSignatureError::Unavailable)?;
+            .map_err(|error| CurrentMemberSignatureError::Repository(error.into()))?
+            .ok_or_else(CurrentMemberSignatureError::unavailable)?;
         if material.state().mode() != SpaceSecurityMode::Ready || material.group_state().is_empty()
         {
-            return Err(CurrentMemberSignatureError::InvalidState);
+            return Err(CurrentMemberSignatureError::invalid_state());
         }
         Ok(MlsClientState::from_bytes(material.group_state().to_vec()))
     }
@@ -3695,6 +3912,11 @@ mod admission_tests {
                 failures: &[(String, GroupUpdateDispatchError)],
                 now_ms: i64,
             ) -> Result<usize, KeyEpochError>;
+
+            async fn group_update_delivery_status(
+                &self,
+                space_id: &SpaceId,
+            ) -> Result<uc_core::membership::GroupUpdateDeliveryStatus, KeyEpochError>;
             async fn begin_revocation(
                 &self,
                 prepared: &RevocationRecord,
@@ -3741,6 +3963,12 @@ mod admission_tests {
                 recipient: &DeviceId,
                 now_ms: i64,
             ) -> Result<RevocationRecord, KeyEpochError>;
+            async fn settle_obsolete_revocation_recipients(
+                &self,
+                revocation_id: &RevocationId,
+                retained_recipients: &[DeviceId],
+                now_ms: i64,
+            ) -> Result<usize, KeyEpochError>;
         }
     }
 
@@ -3957,6 +4185,35 @@ mod admission_tests {
                 Ok(distributing)
             });
 
+        let settle_record = Arc::clone(&record);
+        let settle_stage = Arc::clone(&stage);
+        mock.expect_settle_obsolete_revocation_recipients()
+            .returning(move |revocation_id, retained, now_ms| {
+                let mut current = settle_stage.lock().unwrap();
+                let Some(value) = current
+                    .as_mut()
+                    .filter(|value| value.record().revocation_id() == revocation_id)
+                else {
+                    return Ok(0);
+                };
+                if value.record().status() != RevocationStatus::Distributing {
+                    return Ok(0);
+                }
+                let settled = value.settle_obsolete_recipients(retained);
+                if settled == 0 {
+                    return Ok(0);
+                }
+                if value.all_recipients_confirmed() {
+                    value.transition_to(RevocationStatus::Complete, now_ms)?;
+                }
+                let updated = value.record().clone();
+                *settle_record.lock().unwrap() = Some(updated.clone());
+                if updated.status() == RevocationStatus::Complete {
+                    *current = None;
+                }
+                Ok(settled)
+            });
+
         let acknowledge_record = record;
         let acknowledge_stage = stage;
         mock.expect_acknowledge_recipient()
@@ -4058,7 +4315,12 @@ mod admission_tests {
             MasterKey::from_bytes(&[0x62; 32]).unwrap(),
         );
         let failures = (0..8)
-            .map(|index| (format!("update-{index}"), GroupUpdateDispatchError::Offline))
+            .map(|index| {
+                (
+                    format!("update-{index}"),
+                    GroupUpdateDispatchError::offline(),
+                )
+            })
             .collect::<Vec<_>>();
 
         let mut repository = MockRevocationRepository::new();
@@ -4558,7 +4820,7 @@ mod admission_tests {
         repository
             .expect_load_space_material()
             .times(1)
-            .return_once(|_| Err(KeyEpochError::DecryptionFailed));
+            .return_once(|_| Err(KeyEpochError::decryption_failed()));
         repository
             .expect_resolve_prepared_revocation()
             .times(1)
@@ -4804,6 +5066,9 @@ mod admission_tests {
         let retained = DeviceId::new("retained-device");
         let retained_credential =
             MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x61; 32]);
+        let sponsor = DeviceId::new("alice");
+        let sponsor_credential =
+            MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x62; 32]);
 
         let prepared = adapter
             .prepare_sponsor_admission_security(SponsorAdmissionSecurityRequest {
@@ -4817,16 +5082,21 @@ mod admission_tests {
                 candidate_core_digest: [0x64; 32],
                 candidate_identity: joiner.as_str().as_bytes().to_vec(),
                 candidate_key_package: pending.key_package.clone(),
-                existing_recipients: vec![SponsorAdmissionSecurityRecipient {
-                    device_id: retained.clone(),
-                    credential_id: retained_credential.credential_id,
-                }],
+                existing_recipients: vec![
+                    SponsorAdmissionSecurityRecipient {
+                        device_id: sponsor.clone(),
+                        credential_id: sponsor_credential.credential_id,
+                    },
+                    SponsorAdmissionSecurityRecipient {
+                        device_id: retained.clone(),
+                        credential_id: retained_credential.credential_id,
+                    },
+                ],
             })
             .await
             .unwrap();
 
-        assert_eq!(prepared.existing_member_deliveries.len(), 1);
-        assert_eq!(prepared.existing_member_deliveries[0].recipient, retained);
+        assert_eq!(prepared.existing_member_deliveries.len(), 2);
         assert!(!prepared.existing_member_deliveries[0].payload.is_empty());
         assert_eq!(
             prepared.public_commitment.key_catalog_digest,
@@ -4867,11 +5137,50 @@ mod admission_tests {
             .unwrap()
             .unwrap();
         assert_eq!(
+            MlsGroupEngine::local_device_id(&MlsClientState::from_bytes(
+                activated.group_state().to_vec(),
+            ))
+            .unwrap(),
+            sponsor
+        );
+        assert_eq!(
             activated.state().epoch().value(),
             prepared.public_commitment.target_epoch
         );
         assert_eq!(activated.pending_group_updates().len(), 1);
         assert_eq!(activated.pending_group_updates()[0].recipient(), &retained);
+        let retained_update_id = activated.pending_group_updates()[0].update_id().to_owned();
+        assert!(adapter
+            .acknowledge_space_group_update(&retained_update_id, 1)
+            .await
+            .unwrap());
+        let mut legacy = repository
+            .load_space_material(&space_id)
+            .await
+            .unwrap()
+            .unwrap();
+        legacy.add_pending_group_updates(
+            [PendingGroupUpdate::persistent(
+                sponsor.clone(),
+                prepared.existing_member_deliveries[0].payload.clone(),
+            )],
+            2,
+        );
+        repository.save_space_material(&legacy).await.unwrap();
+        assert_eq!(
+            adapter
+                .settle_obsolete_space_group_updates(&space_id, &[retained.clone()], 3)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(repository
+            .load_space_material(&space_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .pending_group_updates()
+            .is_empty());
         assert_eq!(
             session
                 .current_content_key(&space_id, ContentKeyPurpose::Content)
@@ -4894,6 +5203,9 @@ mod admission_tests {
         };
 
         let (adapter, session, repository, space_id, _directory) = sponsor_fixture();
+        let sponsor = DeviceId::new("alice");
+        let sponsor_credential =
+            MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x70; 32]);
         let helper = DeviceId::new("completion-helper");
         let helper_credential =
             MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x71; 32]);
@@ -4915,10 +5227,16 @@ mod admission_tests {
                 candidate_core_digest,
                 candidate_identity: b"joiner-device".to_vec(),
                 candidate_key_package: pending.key_package,
-                existing_recipients: vec![SponsorAdmissionSecurityRecipient {
-                    device_id: helper.clone(),
-                    credential_id: helper_credential.credential_id,
-                }],
+                existing_recipients: vec![
+                    SponsorAdmissionSecurityRecipient {
+                        device_id: sponsor,
+                        credential_id: sponsor_credential.credential_id,
+                    },
+                    SponsorAdmissionSecurityRecipient {
+                        device_id: helper.clone(),
+                        credential_id: helper_credential.credential_id,
+                    },
+                ],
             })
             .await
             .unwrap();
@@ -5099,7 +5417,10 @@ mod admission_tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(error, SpaceAccessError::CorruptedKeyMaterial));
+        assert!(matches!(
+            error,
+            SpaceAccessError::CorruptedKeyMaterial { .. }
+        ));
     }
 
     #[tokio::test]
@@ -5468,7 +5789,10 @@ mod admission_tests {
         .await
         .unwrap_err();
 
-        assert!(matches!(error, SpaceAccessError::CorruptedKeyMaterial));
+        assert!(matches!(
+            error,
+            SpaceAccessError::CorruptedKeyMaterial { .. }
+        ));
     }
 
     #[tokio::test]
@@ -5534,6 +5858,74 @@ mod admission_tests {
             .unwrap();
         assert_eq!(stage.outbox().len(), 1);
         assert_eq!(stage.outbox()[0].recipient(), &DeviceId::new("bob"));
+    }
+
+    /// 撤销产生的待投递项同样归结清规则管：收件人随后也被移除时，
+    /// 本机不再为它保留投递责任，撤销随即收尾。
+    #[tokio::test]
+    async fn revocation_outbox_for_a_later_removed_recipient_is_settled() {
+        let (sponsor, _session, repository, space_id, _sponsor_dir) = sponsor_fixture();
+        let bob = sponsor
+            .prepare_group_join(&DeviceId::new("bob"))
+            .await
+            .unwrap();
+        sponsor
+            .admit_group_member(
+                &space_id,
+                &DeviceId::new("alice"),
+                &DeviceId::new("bob"),
+                &[],
+                &bob.key_package,
+            )
+            .await
+            .unwrap();
+        let charlie = sponsor
+            .prepare_group_join(&DeviceId::new("charlie"))
+            .await
+            .unwrap();
+        sponsor
+            .admit_group_member(
+                &space_id,
+                &DeviceId::new("alice"),
+                &DeviceId::new("charlie"),
+                &[DeviceId::new("bob")],
+                &charlie.key_package,
+            )
+            .await
+            .unwrap();
+
+        let result = sponsor
+            .revoke_group_member(&DeviceId::new("charlie"), &[DeviceId::new("bob")], 100)
+            .await
+            .unwrap();
+        let revocation_id = result.revocation_id().unwrap().clone();
+        assert_eq!(
+            repository
+                .load_staged_revocation(&revocation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .outbox()
+                .len(),
+            1
+        );
+
+        // bob 此后也被移除：保留名单里只剩本机，这条 outbox 投递已无收件人。
+        assert_eq!(
+            sponsor
+                .settle_obsolete_space_group_updates(&space_id, &[], 200)
+                .await
+                .unwrap(),
+            1
+        );
+
+        // 与逐个确认收件人同一完成路径：撤销完成后暂存区清空，不再计入未完成撤销。
+        assert!(repository
+            .load_staged_revocation(&revocation_id)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(sponsor.current_group_revocation().await.unwrap().is_none());
     }
 
     #[tokio::test]

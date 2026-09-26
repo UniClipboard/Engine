@@ -94,9 +94,11 @@ pub(super) async fn submit(
     let result = match deadline {
         Some(deadline) => timeout_at(deadline, completion)
             .await
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| operation_cancelled_error())?,
         None => completion.await,
     };
+    // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
     result.map_err(|_| EngineError::new(1108, EngineErrorCategory::Internal, true))?
 }
 

@@ -7,17 +7,14 @@ use sha2::{Digest, Sha256};
 use uc_application::deps::{
     ActivateSponsorAdmissionError, ActivateSponsorAdmissionPort,
     ActivateSponsorAdmissionSecurityPort, ActivateSponsorAdmissionSecurityRequest,
-    ApplyMembershipMemberFactsPort, CommitMembershipLedgerPort, CurrentMemberSignaturePort,
-    LoadMembershipLedgerPort, MembershipEffectKind, MembershipEffectPhase,
-    MembershipLedgerMutation, PeerHistorySyncState, PeerReconciliationRecord,
-    PendingMembershipEffect, PrepareSponsorCompleteError, PrepareSponsorCompletePort,
+    CurrentMemberSignaturePort, PrepareSponsorCompleteError, PrepareSponsorCompletePort,
     PreparedSponsorComplete,
 };
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
     AdmissionActivatedSecurityState, AdmissionActivationReceipt, AdmissionCompleteV1,
-    AdmissionCompletionV1, HistoricalMembershipSignatureVerifier, MembershipHistoryRelationship,
-    SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SponsorCompletePreparation,
+    AdmissionCompletionV1, HistoricalMembershipSignatureVerifier, SpaceAdmissionBodyV1,
+    SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SponsorCompletePreparation,
     VersionedMembershipHistory,
 };
 use uc_observability_contract::diagnostics::connectivity::{observe_local_result, LocalWorkStep};
@@ -68,29 +65,19 @@ struct OwnedSponsorActivatedSecurityV1 {
     security_commitment_id: [u8; 32],
 }
 
+/// 激活邀请方已准备的安全状态并返回已验证的加入后历史；成员记录与成员读模型由 Application 的成员
+/// 状态负责人按该历史提交。
 pub struct DefaultSponsorAdmissionActivation {
     security: Arc<dyn ActivateSponsorAdmissionSecurityPort>,
-    loader: Arc<dyn LoadMembershipLedgerPort>,
-    committer: Arc<dyn CommitMembershipLedgerPort>,
     verifier: Arc<dyn HistoricalMembershipSignatureVerifier>,
-    member_facts: Arc<dyn ApplyMembershipMemberFactsPort>,
 }
 
 impl DefaultSponsorAdmissionActivation {
     pub fn new(
         security: Arc<dyn ActivateSponsorAdmissionSecurityPort>,
-        loader: Arc<dyn LoadMembershipLedgerPort>,
-        committer: Arc<dyn CommitMembershipLedgerPort>,
         verifier: Arc<dyn HistoricalMembershipSignatureVerifier>,
-        member_facts: Arc<dyn ApplyMembershipMemberFactsPort>,
     ) -> Self {
-        Self {
-            security,
-            loader,
-            committer,
-            verifier,
-            member_facts,
-        }
+        Self { security, verifier }
     }
 }
 
@@ -99,7 +86,7 @@ impl ActivateSponsorAdmissionPort for DefaultSponsorAdmissionActivation {
     async fn activate(
         &self,
         activated_security: &AdmissionActivatedSecurityState,
-    ) -> Result<(), ActivateSponsorAdmissionError> {
+    ) -> Result<VersionedMembershipHistory, ActivateSponsorAdmissionError> {
         observe_local_result(
             LocalWorkStep::SponsorActivate,
             self.activate_inner(activated_security),
@@ -113,7 +100,7 @@ impl DefaultSponsorAdmissionActivation {
     async fn activate_inner(
         &self,
         activated_security: &AdmissionActivatedSecurityState,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<VersionedMembershipHistory> {
         let activated: OwnedSponsorActivatedSecurityV1 =
             postcard::from_bytes(activated_security.as_bytes())?;
         if activated.format_version != SPONSOR_ACTIVATED_SECURITY_FORMAT_V1
@@ -145,121 +132,7 @@ impl DefaultSponsorAdmissionActivation {
             .await
             .map_err(anyhow::Error::new)?;
         tracing::info!("Sponsor admission 安全状态激活完成");
-
-        let event_id = history
-            .current_position()?
-            .event_id
-            .ok_or_else(|| anyhow::anyhow!("the Sponsor activation history has no head"))?;
-        let event = history
-            .event(event_id)
-            .ok_or_else(|| anyhow::anyhow!("the Sponsor activation event is unavailable"))?;
-        let affected_device_ids = match &event.operation {
-            uc_core::membership::MembershipOperationV2::AddDevice { admission } => {
-                vec![admission.facts.device_id.clone()]
-            }
-            uc_core::membership::MembershipOperationV2::RemoveDevice { .. } => {
-                anyhow::bail!("the Sponsor activation event is not an admission")
-            }
-        };
-        self.member_facts
-            .apply_member_facts(&PendingMembershipEffect {
-                event_id: *event_id.as_bytes(),
-                kind: MembershipEffectKind::AddDevice,
-                phase: MembershipEffectPhase::Prepared,
-                affected_device_ids,
-                payload: postcard::to_stdvec(event)?,
-            })
-            .await
-            .map_err(anyhow::Error::new)?;
-        tracing::info!("Sponsor admission 成员事实投影完成");
-
-        let mut ledger = self.loader.load().await.map_err(anyhow::Error::new)?;
-        if ledger.membership_history.as_deref() == Some(activated.committed_history.as_slice()) {
-            tracing::info!(
-                ledger_revision = ledger.revision,
-                peer_count = ledger.peer_reconciliation.len(),
-                "Sponsor 成员历史激活命中幂等提交"
-            );
-            return Ok(());
-        }
-        if ledger.lineage_id.as_deref() != Some(activated.space_id.as_str()) {
-            anyhow::bail!("the Sponsor membership ledger has a different lineage");
-        }
-        let local_device_id = ledger
-            .local_device_id
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("the Sponsor membership ledger has no local device"))?;
-        let mut previous_reconciliation = std::mem::take(&mut ledger.peer_reconciliation);
-        let previous_peer_count = previous_reconciliation.len();
-        ledger.peer_reconciliation = history
-            .active_members()
-            .into_iter()
-            .filter_map(|member| history.admission_facts_for(member))
-            .filter(|facts| facts.device_id != local_device_id)
-            .map(|facts| {
-                let previous = previous_reconciliation.remove(&facts.device_id);
-                (
-                    facts.device_id.clone(),
-                    PeerReconciliationRecord {
-                        peer_device_id: facts.device_id.clone(),
-                        relationship: previous
-                            .as_ref()
-                            .map_or(MembershipHistoryRelationship::Consistent, |record| {
-                                record.relationship
-                            }),
-                        // 本次提交产生了新的正式 head；旧 ACK 只证明旧目标，不能证明
-                        // 对端已经拥有新成员。清空后由认证 ACK 重新推进水位。
-                        confirmed_position: None,
-                        sync_state: previous.as_ref().map_or_else(
-                            || PeerHistorySyncState {
-                                pending_since_revision: Some(ledger.revision.saturating_add(1)),
-                                ..Default::default()
-                            },
-                            |record| record.sync_state.clone(),
-                        ),
-                        restricted_delivery: previous
-                            .as_ref()
-                            .map_or_else(Vec::new, |record| record.restricted_delivery.clone()),
-                        updated_at_ms: previous.map_or(0, |record| record.updated_at_ms),
-                    },
-                )
-            })
-            .collect();
-        let expected_revision = ledger.revision;
-        let expected_history_digest = ledger
-            .membership_history
-            .as_deref()
-            .map(|bytes| <[u8; 32]>::from(Sha256::digest(bytes)));
-        ledger.revision = expected_revision
-            .checked_add(1)
-            .ok_or_else(|| anyhow::anyhow!("the Sponsor membership revision overflowed"))?;
-        ledger.membership_history = Some(activated.committed_history);
-        tracing::debug!(
-            previous_peer_count,
-            active_peer_count = ledger.peer_reconciliation.len(),
-            "Sponsor 新历史已建立逐 peer 传播欠账"
-        );
-        tracing::info!(
-            expected_revision,
-            replacement_revision = ledger.revision,
-            previous_peer_count,
-            active_peer_count = ledger.peer_reconciliation.len(),
-            "Sponsor 成员 ledger 提交开始"
-        );
-        self.committer
-            .compare_and_commit(MembershipLedgerMutation {
-                expected_revision,
-                expected_history_digest,
-                device_trust_changed: true,
-                replacement: ledger,
-            })
-            .await
-            .map_err(anyhow::Error::new)?;
-        tracing::info!(
-            committed_revision = expected_revision.saturating_add(1),
-            "Sponsor 成员 ledger 提交完成"
-        );
-        Ok(())
+        Ok(history)
     }
 }
 

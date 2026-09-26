@@ -123,6 +123,7 @@ pub fn parse_iso8601_utc(raw: &str) -> Result<DateTime<Utc>, IsoTimestampError> 
     }
     DateTime::parse_from_rfc3339(raw)
         .map(|dt| dt.with_timezone(&Utc))
+        // 纯文本格式校验（与 Swift 行为对齐），错误已携带被拒绝的原文。
         .map_err(|_| reject())
 }
 

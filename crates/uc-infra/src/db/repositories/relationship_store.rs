@@ -28,14 +28,19 @@ const NONCE_LEN: usize = 24;
 const HEADER_LEN: usize = 4 + 1 + NONCE_LEN;
 mod projection;
 
+pub(crate) use projection::MembershipProjectionWriter;
+
 #[derive(Debug, thiserror::Error)]
 pub enum RelationshipStoreError {
     #[error("relationship store is locked")]
     Locked,
     #[error("relationship ciphertext is invalid")]
-    InvalidCiphertext,
-    #[error("relationship storage failed: {0}")]
-    Storage(String),
+    InvalidCiphertext {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
+    #[error("relationship storage failed")]
+    Storage(#[source] anyhow::Error),
     #[error("relationship operation failed ({category})")]
     Diagnostic {
         category: &'static str,
@@ -44,6 +49,19 @@ pub enum RelationshipStoreError {
         #[source]
         source: anyhow::Error,
     },
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl RelationshipStoreError {
+    pub fn invalid_ciphertext() -> Self {
+        Self::InvalidCiphertext { source: None }
+    }
+
+    pub fn invalid_ciphertext_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::InvalidCiphertext {
+            source: Some(source.into()),
+        }
+    }
 }
 
 impl RelationshipStoreError {
@@ -170,7 +188,7 @@ impl RelationshipCipher {
     ) -> Result<Vec<u8>, RelationshipStoreError> {
         let aad = relationship_aad(kind, lookup_key);
         let (nonce, ciphertext) = encrypt_xchacha_raw(&self.key, plaintext, &aad)
-            .map_err(|error| RelationshipStoreError::Storage(error.to_string()))?;
+            .map_err(|error| RelationshipStoreError::Storage(anyhow::Error::from(error)))?;
         let mut envelope = Vec::with_capacity(HEADER_LEN + ciphertext.len());
         envelope.extend_from_slice(&RELATIONSHIP_MAGIC);
         envelope.push(RELATIONSHIP_FORMAT_VERSION);
@@ -546,7 +564,7 @@ where
         })?;
         let verified = cipher.open(kind, &lookup_key, &stored)?;
         if verified != payload {
-            return Err(RelationshipStoreError::InvalidCiphertext);
+            return Err(RelationshipStoreError::invalid_ciphertext());
         }
         Ok(())
     }
@@ -596,13 +614,13 @@ where
                     .filter(encrypted_relationship::kind.eq(kind_value))
                     .select(EncryptedRelationshipRow::as_select())
                     .load::<EncryptedRelationshipRow>(conn)
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))
+                    .map_err(anyhow::Error::new)
             })
-            .map_err(|error| RelationshipStoreError::Storage(error.to_string()))?;
+            .map_err(|error| RelationshipStoreError::Storage(anyhow::Error::from(error)))?;
         rows.into_iter()
             .map(|row| {
                 if row.kind != kind.as_str() {
-                    return Err(RelationshipStoreError::InvalidCiphertext);
+                    return Err(RelationshipStoreError::invalid_ciphertext());
                 }
                 cipher.open(kind, &row.lookup_key, &row.payload_ciphertext)
             })
@@ -636,9 +654,9 @@ where
                         .filter(encrypted_relationship::lookup_key.eq(lookup_value)),
                 )
                 .execute(conn)
-                .map_err(|error| anyhow::anyhow!(error.to_string()))
+                .map_err(anyhow::Error::new)
             })
-            .map_err(|error| RelationshipStoreError::Storage(error.to_string()))?;
+            .map_err(|error| RelationshipStoreError::Storage(anyhow::Error::from(error)))?;
         Ok(affected > 0)
     }
 
@@ -770,9 +788,13 @@ where
                 diesel::delete(encrypted_relationship::table)
                     .execute(conn)
                     .map(|_| ())
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))
+                    .map_err(anyhow::Error::new)
             })
-            .map_err(|error| RelationshipStateResetError::Repository(error.to_string()))
+            .map_err(|error| {
+                RelationshipStateResetError::Repository(
+                    error.context("delete relationship state").into(),
+                )
+            })
     }
 }
 
@@ -781,14 +803,14 @@ fn encode_member(member: &SpaceMember) -> Result<Vec<u8>, RelationshipStoreError
         version: 1,
         member: member.clone(),
     })
-    .map_err(|error| RelationshipStoreError::Storage(error.to_string()))
+    .map_err(|error| RelationshipStoreError::Storage(anyhow::Error::from(error)))
 }
 
 fn decode_member(payload: &[u8]) -> Result<SpaceMember, RelationshipStoreError> {
     let decoded: MemberPayloadV1 =
-        serde_json::from_slice(payload).map_err(|_| RelationshipStoreError::InvalidCiphertext)?;
+        serde_json::from_slice(payload).map_err(RelationshipStoreError::invalid_ciphertext_from)?;
     if decoded.version != 1 {
-        return Err(RelationshipStoreError::InvalidCiphertext);
+        return Err(RelationshipStoreError::invalid_ciphertext());
     }
     Ok(decoded.member)
 }
@@ -798,14 +820,14 @@ fn encode_trusted_peer(peer: &TrustedPeer) -> Result<Vec<u8>, RelationshipStoreE
         version: 1,
         peer: peer.clone(),
     })
-    .map_err(|error| RelationshipStoreError::Storage(error.to_string()))
+    .map_err(|error| RelationshipStoreError::Storage(anyhow::Error::from(error)))
 }
 
 fn decode_trusted_peer(payload: &[u8]) -> Result<TrustedPeer, RelationshipStoreError> {
     let decoded: TrustedPeerPayloadV1 =
-        serde_json::from_slice(payload).map_err(|_| RelationshipStoreError::InvalidCiphertext)?;
+        serde_json::from_slice(payload).map_err(RelationshipStoreError::invalid_ciphertext_from)?;
     if decoded.version != 1 {
-        return Err(RelationshipStoreError::InvalidCiphertext);
+        return Err(RelationshipStoreError::invalid_ciphertext());
     }
     Ok(decoded.peer)
 }
@@ -817,7 +839,7 @@ fn encode_peer_address(record: &PeerAddressRecord) -> Result<Vec<u8>, Relationsh
         addr_blob: record.addr_blob.clone(),
         observed_at: record.observed_at.timestamp(),
     })
-    .map_err(|error| RelationshipStoreError::Storage(error.to_string()))
+    .map_err(|error| RelationshipStoreError::Storage(anyhow::Error::from(error)))
 }
 
 fn decode_peer_address(payload: &[u8]) -> Result<PeerAddressRecord, RelationshipStoreError> {
@@ -852,11 +874,11 @@ fn legacy_member_to_domain(row: LegacyMemberRow) -> Result<SpaceMember, Relation
     let joined_at = Utc
         .timestamp_opt(row.joined_at, 0)
         .single()
-        .ok_or(RelationshipStoreError::InvalidCiphertext)?;
+        .ok_or_else(RelationshipStoreError::invalid_ciphertext)?;
     let sync_preferences = serde_json::from_str::<MemberSyncPreferences>(&row.sync_preferences)
-        .map_err(|_| RelationshipStoreError::InvalidCiphertext)?;
+        .map_err(RelationshipStoreError::invalid_ciphertext_from)?;
     let identity_fingerprint = IdentityFingerprint::from_display_string(row.identity_fingerprint)
-        .map_err(|_| RelationshipStoreError::InvalidCiphertext)?;
+        .map_err(RelationshipStoreError::invalid_ciphertext_from)?;
     Ok(SpaceMember {
         device_id: DeviceId::new(row.device_id),
         device_name: row.device_name,
@@ -872,9 +894,9 @@ fn legacy_trusted_peer_to_domain(
     let trusted_at = Utc
         .timestamp_opt(row.trusted_at, 0)
         .single()
-        .ok_or(RelationshipStoreError::InvalidCiphertext)?;
+        .ok_or_else(RelationshipStoreError::invalid_ciphertext)?;
     let peer_fingerprint = IdentityFingerprint::from_display_string(row.peer_fingerprint)
-        .map_err(|_| RelationshipStoreError::InvalidCiphertext)?;
+        .map_err(RelationshipStoreError::invalid_ciphertext_from)?;
     Ok(TrustedPeer {
         local_device_id: DeviceId::new(row.local_device_id),
         peer_device_id: DeviceId::new(row.peer_device_id),
@@ -889,7 +911,7 @@ fn legacy_peer_address_to_domain(
     let observed_at = Utc
         .timestamp_opt(row.observed_at, 0)
         .single()
-        .ok_or(RelationshipStoreError::InvalidCiphertext)?;
+        .ok_or_else(RelationshipStoreError::invalid_ciphertext)?;
     Ok(PeerAddressRecord {
         device_id: DeviceId::new(row.device_id),
         addr_blob: row.addr_blob,

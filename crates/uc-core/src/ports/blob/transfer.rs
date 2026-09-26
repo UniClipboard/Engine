@@ -128,20 +128,36 @@ pub enum BlobError {
     /// already reclaimed it, transfer interrupted, etc. Distinct from
     /// [`BlobError::NotFound`], which means "not local"; this means
     /// "remote side could not deliver either".
-    #[error("blob unavailable: {0}")]
-    Unavailable(String),
+    #[error("blob unavailable")]
+    Unavailable(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     /// The credential cannot be understood by the current adapter
     /// (version drift, corruption, credential issued by a different
     /// storage backend). Normally signals a deployment / configuration
     /// mismatch between sender and receiver, not a data error.
     #[error("ticket could not be interpreted")]
-    InvalidTicket,
+    InvalidTicket {
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     /// Adapter-internal failure (IO, upstream library error, etc.).
     /// Callers usually just record and surface.
-    #[error("internal: {0}")]
-    Internal(String),
+    #[error("blob transfer internal failure")]
+    Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl BlobError {
+    pub fn invalid_ticket() -> Self {
+        Self::InvalidTicket { source: None }
+    }
+
+    pub fn invalid_ticket_from(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::InvalidTicket {
+            source: Some(Box::new(source)),
+        }
+    }
 }
 
 /// 字节级进度上报通道。

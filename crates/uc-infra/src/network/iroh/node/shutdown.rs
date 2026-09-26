@@ -70,7 +70,6 @@ impl IrohNode {
         }
 
         if let Err(source) = self.quiesce_session().await {
-            warn!(error = %source, "iroh session protocols did not quiesce cleanly");
             failures.push(anyhow::Error::new(source).context("quiesce network session"));
         }
 

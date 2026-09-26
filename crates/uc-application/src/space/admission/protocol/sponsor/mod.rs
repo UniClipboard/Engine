@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use crate::space::membership::MembershipOwner;
+
 mod handle_abandonment;
 mod handle_applied;
 mod handle_authenticated_message;
@@ -39,6 +41,7 @@ pub(crate) struct SponsorAdmissionService {
     pub(super) activate_admission: Arc<dyn ActivateSponsorAdmissionPort>,
     pub(super) prepare_settled: Arc<dyn PrepareSponsorSettledPort>,
     pub(super) re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,
+    pub(super) members: Arc<MembershipOwner>,
 }
 
 impl SponsorAdmissionService {
@@ -50,6 +53,7 @@ impl SponsorAdmissionService {
         activate_admission: Arc<dyn ActivateSponsorAdmissionPort>,
         prepare_settled: Arc<dyn PrepareSponsorSettledPort>,
         re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,
+        members: Arc<MembershipOwner>,
     ) -> Self {
         Self {
             state,
@@ -59,6 +63,7 @@ impl SponsorAdmissionService {
             activate_admission,
             prepare_settled,
             re_pairing,
+            members,
         }
     }
 }

@@ -16,6 +16,7 @@ use uc_core::ports::file_transfer::TrackedFileTransferStatus;
 use uc_core::ports::inbound_file_target::ResolveInboundSaveDirPort;
 use uc_core::ports::EnsureFileTransferPrivacyMaintenancePort;
 use uc_core::ports::{ClockPort, FailInflightTransfersPort, ListExpiredInflightTransfersPort};
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::facade::blob_transfer::{BlobTransferFacade, InboundCancelOutcome};
 use crate::facade::host_event::{HostEvent, HostEventBus, TransferHostEvent};
@@ -208,7 +209,7 @@ impl FileTransferLifecycle {
                     {
                         Ok(list) => list,
                         Err(err) => {
-                            warn!(error = %err, "Timeout sweep query failed");
+                            warn!(error_kind = "timeout_sweep_query", io_error_kind = io_error_kind(&err), "Timeout sweep query failed");
                             continue;
                         }
                     };
@@ -243,7 +244,8 @@ impl FileTransferLifecycle {
                                 }
                                 Err(err) => {
                                     warn!(
-                                        error = %err,
+                                        error_kind = "inbound_transfer_cancel",
+                                        io_error_kind = io_error_kind(&err),
                                         transfer_id = %t.transfer_id,
                                         "Timeout sweep: cancel_inbound_transfer failed, falling back to mark_failed"
                                     );
@@ -255,7 +257,8 @@ impl FileTransferLifecycle {
 
                         if let Err(err) = fail_inflight.mark_failed(&t.transfer_id, reason, now_ms).await {
                             warn!(
-                                error = %err,
+                                error_kind = "transfer_mark_failed",
+                                io_error_kind = io_error_kind(&err),
                                 transfer_id = %t.transfer_id,
                                 "Failed to mark expired transfer as failed"
                             );
@@ -295,7 +298,6 @@ impl FileTransferLifecycle {
         {
             Ok(targets) => targets,
             Err(err) => {
-                warn!(error = %err, "Startup reconciliation failed");
                 return Err(anyhow::Error::new(err));
             }
         };
@@ -422,7 +424,8 @@ async fn sweep_inbound_staging(
                 Ok(None) => break,
                 Err(err) => {
                     warn!(
-                        error = %err,
+                        error_kind = "cache_dir_list",
+                        io_error_kind = io_error_kind(&err),
                         "could not enumerate managed cache while sweeping staging areas"
                     );
                     break;
@@ -433,7 +436,8 @@ async fn sweep_inbound_staging(
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
         Err(err) => {
             warn!(
-                error = %err,
+                error_kind = "cache_dir_open",
+                io_error_kind = io_error_kind(&err),
                 "could not open managed cache while sweeping staging areas"
             );
         }
@@ -452,7 +456,11 @@ async fn cleanup_cached_path(cached_path: &str) {
 
     if path.is_file() {
         if let Err(err) = tokio::fs::remove_file(path).await {
-            warn!(error = %err, "Failed to remove cached file");
+            warn!(
+                error_kind = "cache_file_remove",
+                io_error_kind = io_error_kind(&err),
+                "Failed to remove cached file"
+            );
         }
     }
 
@@ -465,7 +473,8 @@ async fn cleanup_cached_path(cached_path: &str) {
                 if entries.next_entry().await.ok().flatten().is_none() {
                     if let Err(err) = tokio::fs::remove_dir(parent).await {
                         warn!(
-                            error = %err,
+                            error_kind = "transfer_dir_remove",
+                            io_error_kind = io_error_kind(&err),
                             "Failed to remove empty transfer directory"
                         );
                     }

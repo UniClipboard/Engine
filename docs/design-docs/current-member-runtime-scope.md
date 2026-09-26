@@ -1,6 +1,10 @@
 # 规格 022：当前成员运行范围统一派生
 
 > 旧配对自动恢复部分已由 ADR-023 和规格 026 取代；旧升级端点和旧设备探测路径不再属于当前实现。
+>
+> 当前成员范围、`CurrentWorkspacePeerScope` 与 workspace convergence 状态的实现已由
+> [ADR-027](decisions/027-single-owner-space-membership-state.md) 的 Core 成员账本（`scope`/`present`）与 `MembershipOwner` 取代，
+> 本文中的相关接口与文件路径只作历史记录；当前结构见 [Space Application 设计与代码地图](space-application.md)。
 
 ## 状态
 

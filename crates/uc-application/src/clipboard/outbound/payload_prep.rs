@@ -22,6 +22,7 @@ use uc_core::ids::EntryId;
 use uc_core::ports::clipboard::EntryFileSetRepositoryPort;
 use uc_core::ports::SettingsPort;
 use uc_core::{ClipboardChangeOrigin, SystemClipboardSnapshot};
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::clipboard::sync::apply_inbound::{compute_file_set_component, InboundFileSetManifest};
 use crate::clipboard::sync::V3BlobRef;
@@ -53,7 +54,7 @@ pub(crate) enum OutboundPayloadError {
     /// A blob publish step failed.
     Publish(ClipboardOutboundError),
     /// Manifest construction or identity-component computation failed.
-    Internal(String),
+    Internal(anyhow::Error),
 }
 
 /// Assemble the outbound payload for a user/peer-initiated send of `entry_id`.
@@ -114,14 +115,16 @@ pub(crate) async fn assemble_outbound_payload(
             }),
             Err(err) if from_manifest => {
                 warn!(
-                    error = %err,
+                    error_kind = "file_set_member_unreadable",
+                    io_error_kind = io_error_kind(&err),
                     entry_id = %entry_id,
                     "outbound payload: file-set member unreadable; not reproducible (all-or-nothing)"
                 );
                 return Err(OutboundPayloadError::Unavailable);
             }
             Err(err) => warn!(
-                error = %err,
+                error_kind = "file_metadata_unreadable",
+                io_error_kind = io_error_kind(&err),
                 entry_id = %entry_id,
                 "outbound payload: excluding clipboard file whose metadata could not be read"
             ),
@@ -192,8 +195,11 @@ pub(crate) async fn assemble_outbound_payload(
     //    guaranteed by the all-or-nothing guard above).
     let file_set_manifest = match directory_members {
         Some(members) => Some(
-            build_transfer_manifest(&members, &plan.files)
-                .map_err(|err| OutboundPayloadError::Internal(err.to_string()))?,
+            build_transfer_manifest(&members, &plan.files).map_err(|err| {
+                OutboundPayloadError::Internal(
+                    anyhow::Error::from(err).context("build transfer manifest"),
+                )
+            })?,
         ),
         None => None,
     };
@@ -205,8 +211,11 @@ pub(crate) async fn assemble_outbound_payload(
             .collect();
         clipboard_intent.snapshot.file_content_digests.clear();
         clipboard_intent.snapshot.file_set_v1_component = Some(
-            compute_file_set_component(manifest, &digests)
-                .map_err(|err| OutboundPayloadError::Internal(err.to_string()))?,
+            compute_file_set_component(manifest, &digests).map_err(|err| {
+                OutboundPayloadError::Internal(
+                    anyhow::Error::from(err).context("compute file set identity"),
+                )
+            })?,
         );
     } else if !file_content_digests.is_empty() {
         clipboard_intent.snapshot.file_content_digests = file_content_digests;

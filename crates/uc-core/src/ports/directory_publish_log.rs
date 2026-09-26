@@ -51,21 +51,37 @@ pub struct DirectoryPublishRecord {
 /// Failure while reading or recording directory publication metadata.
 #[derive(Debug, thiserror::Error)]
 pub enum PublishLogError {
-    #[error("directory publish log store error: {0}")]
-    Backend(String),
+    #[error("directory publish log store error")]
+    Backend(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("invalid persisted directory publish phase: {0}")]
     InvalidPhase(String),
-    #[error("directory publish log encryption unavailable: {0}")]
-    EncryptionUnavailable(String),
+    #[error("directory publish log encryption unavailable")]
+    EncryptionUnavailable(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("directory publish log ciphertext is invalid")]
-    InvalidCiphertext,
+    InvalidCiphertext {
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl PublishLogError {
+    pub fn invalid_ciphertext() -> Self {
+        Self::InvalidCiphertext { source: None }
+    }
+
+    pub fn invalid_ciphertext_from(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::InvalidCiphertext {
+            source: Some(Box::new(source)),
+        }
+    }
 }
 
 /// Failure while removing transient directory receive content.
 #[derive(Debug, thiserror::Error)]
 pub enum DirectoryStagingCleanupError {
-    #[error("directory staging cleanup failed: {0}")]
-    Backend(String),
+    #[error("directory staging cleanup failed")]
+    Backend(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("directory staging path is outside a receive staging area")]
     InvalidPath,
 }

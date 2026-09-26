@@ -49,12 +49,12 @@ impl<E: DbExecutor + Send + Sync> SponsorAdmissionStatePort for SqliteSpaceAdmis
                                 .map_err(into_anyhow)?;
                             let aggregate = SponsorAdmission::try_from_record(aggregate)
                                 .ok_or_else(|| {
-                                    into_anyhow(SpaceAdmissionStateStoreError::Corrupt)
+                                    into_anyhow(SpaceAdmissionStateStoreError::corrupt())
                                 })?;
                             let token = SponsorAdmissionCommitToken::from_bytes(
                                 sponsor_existing_token(state.profile_generation, &aggregate),
                             )
-                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
                             Ok(LoadedSponsorAdmission::new(
                                 SponsorAdmissionState::Existing(aggregate),
                                 token,
@@ -80,16 +80,17 @@ impl<E: DbExecutor + Send + Sync> SponsorAdmissionStatePort for SqliteSpaceAdmis
                             .open_record(admission_id, stored)
                             .map_err(into_anyhow)?;
                         let aggregate = SponsorAdmission::try_from_record(aggregate)
-                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
                         let token = SponsorAdmissionCommitToken::from_bytes(
                             sponsor_existing_token(state.profile_generation, &aggregate),
                         )
-                        .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                        .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
                         return Ok(LoadedSponsorAdmission::new(
                             SponsorAdmissionState::Existing(aggregate),
                             token,
                         ));
                     }
+                    ensure_no_unsettled_attempt(self, &state)?;
                     let invitation_id =
                         join_request_invitation_id(message.envelope()).map_err(into_anyhow)?;
                     if state.claimed_invitations.contains_key(&invitation_id) {
@@ -103,7 +104,7 @@ impl<E: DbExecutor + Send + Sync> SponsorAdmissionStatePort for SqliteSpaceAdmis
                         invitation_id,
                         base_snapshot.as_bytes(),
                     ))
-                    .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                    .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
                     Ok(LoadedSponsorAdmission::new(
                         SponsorAdmissionState::Fresh {
                             invitation_claim: claim,
@@ -141,7 +142,7 @@ impl<E: DbExecutor + Send + Sync> SponsorAdmissionStatePort for SqliteSpaceAdmis
                                 sponsor_existing_token(state.profile_generation, &current);
                             let expected_version =
                                 current.record_version().checked_add(1).ok_or_else(|| {
-                                    into_anyhow(SpaceAdmissionStateStoreError::Corrupt)
+                                    into_anyhow(SpaceAdmissionStateStoreError::corrupt())
                                 })?;
                             if token.as_bytes() != &expected
                                 || replacement.record_version() != expected_version
@@ -153,9 +154,10 @@ impl<E: DbExecutor + Send + Sync> SponsorAdmissionStatePort for SqliteSpaceAdmis
                                 .map_err(into_anyhow)?;
                             state.records.insert(admission_id, sealed);
                         } else {
+                            ensure_no_unsettled_attempt(self, &state)?;
                             let preparation =
                                 replacement.sponsor_candidate_preparation().ok_or_else(|| {
-                                    into_anyhow(SpaceAdmissionStateStoreError::Corrupt)
+                                    into_anyhow(SpaceAdmissionStateStoreError::corrupt())
                                 })?;
                             let invitation_id =
                                 join_request_invitation_id(preparation.join_request())
@@ -184,7 +186,7 @@ impl<E: DbExecutor + Send + Sync> SponsorAdmissionStatePort for SqliteSpaceAdmis
                         let next_token = SponsorAdmissionCommitToken::from_bytes(
                             sponsor_existing_token(state.profile_generation, &replacement),
                         )
-                        .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                        .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
                         Ok(CommittedSponsorAdmission::new(replacement, next_token))
                     })
                 })
@@ -195,11 +197,26 @@ impl<E: DbExecutor + Send + Sync> SponsorAdmissionStatePort for SqliteSpaceAdmis
     }
 }
 
+fn ensure_no_unsettled_attempt<E: DbExecutor>(
+    store: &SqliteSpaceAdmissionState<E>,
+    state: &super::super::repository::PersistedSpaceAdmissionRepositoryV2,
+) -> Result<(), anyhow::Error> {
+    for (admission_id, stored) in &state.records {
+        let record = store
+            .open_record(*admission_id, stored)
+            .map_err(into_anyhow)?;
+        if record.outstanding_work().blocks_new_admission() {
+            return Err(into_anyhow(SpaceAdmissionStateStoreError::Conflict));
+        }
+    }
+    Ok(())
+}
+
 fn join_request_invitation_id(
     envelope: &SpaceAdmissionEnvelopeV1,
 ) -> Result<[u8; 32], SpaceAdmissionStateStoreError> {
     let SpaceAdmissionBodyV1::JoinRequest(request) = envelope.body() else {
-        return Err(SpaceAdmissionStateStoreError::Corrupt);
+        return Err(SpaceAdmissionStateStoreError::corrupt());
     };
     Ok(*request.invitation_id().as_bytes())
 }
@@ -213,20 +230,20 @@ fn encode_invitation_claim(
         admission_id,
         invitation_id,
     })
-    .map_err(|_| SpaceAdmissionStateStoreError::Corrupt)?;
+    .map_err(SpaceAdmissionStateStoreError::corrupt_from)?;
     AdmissionInvitationClaim::from_bytes(encoded)
-        .map_err(|_| SpaceAdmissionStateStoreError::Corrupt)
+        .map_err(SpaceAdmissionStateStoreError::corrupt_from)
 }
 
 fn map_sponsor_error(error: SpaceAdmissionStateStoreError) -> SponsorAdmissionStateError {
     match &error {
         SpaceAdmissionStateStoreError::Locked => SponsorAdmissionStateError::locked(error),
         SpaceAdmissionStateStoreError::Conflict => SponsorAdmissionStateError::state_changed(error),
-        SpaceAdmissionStateStoreError::Corrupt
+        SpaceAdmissionStateStoreError::Corrupt { .. }
         | SpaceAdmissionStateStoreError::ReadInvalid { .. } => {
             SponsorAdmissionStateError::recovery_required(error)
         }
-        SpaceAdmissionStateStoreError::Unavailable => {
+        SpaceAdmissionStateStoreError::Unavailable { .. } => {
             SponsorAdmissionStateError::unavailable(error)
         }
     }

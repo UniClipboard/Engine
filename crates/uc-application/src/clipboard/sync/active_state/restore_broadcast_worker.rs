@@ -30,6 +30,7 @@ use tracing::{debug, instrument, warn};
 use uc_core::ports::clipboard::ActiveClipboardDispatchPort;
 use uc_core::ports::{PeerAddressRepositoryPort, PeerReachabilityPort, SettingsPort};
 use uc_core::MemberRepositoryPort;
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::clipboard::write::RestoreBroadcastRequest;
 use crate::deps::CurrentSpaceMemberScopePort;
@@ -131,7 +132,11 @@ impl RestoreBroadcastWorker {
                 // Fail closed: if we can't confirm the user opted in, don't
                 // announce. A restore that should have broadcast is recovered
                 // by the next restore or a peer-online resync.
-                warn!(error = %err, "restore broadcast skipped: settings load failed");
+                warn!(
+                    error_kind = "settings_load",
+                    io_error_kind = io_error_kind(err.as_ref()),
+                    "restore broadcast skipped: settings load failed"
+                );
                 return;
             }
         };

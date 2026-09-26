@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use anyhow::{anyhow, Context};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tracing::instrument;
@@ -39,14 +40,14 @@ pub struct LogExportView {
 
 #[derive(Debug, thiserror::Error)]
 pub enum DiagnosticsFacadeError {
-    #[error("failed to load settings: {0}")]
-    LoadSettings(String),
-    #[error("failed to save settings: {0}")]
-    SaveSettings(String),
+    #[error("failed to load settings")]
+    LoadSettings(#[source] anyhow::Error),
+    #[error("failed to save settings")]
+    SaveSettings(#[source] anyhow::Error),
     #[error("Downloads directory is unavailable")]
     DownloadsUnavailable,
-    #[error("failed to export logs: {0}")]
-    Export(String),
+    #[error("failed to export logs")]
+    Export(#[source] anyhow::Error),
 }
 
 pub struct DiagnosticsFacade {
@@ -65,7 +66,7 @@ impl DiagnosticsFacade {
             .settings
             .load()
             .await
-            .map_err(|err| DiagnosticsFacadeError::LoadSettings(err.to_string()))?;
+            .map_err(DiagnosticsFacadeError::LoadSettings)?;
         Ok(DebugStatusView {
             debug_mode: settings.general.debug_mode,
             effective_log_profile: current_effective_log_profile(settings.general.debug_mode),
@@ -83,13 +84,13 @@ impl DiagnosticsFacade {
             .settings
             .load()
             .await
-            .map_err(|err| DiagnosticsFacadeError::LoadSettings(err.to_string()))?;
+            .map_err(DiagnosticsFacadeError::LoadSettings)?;
         settings.general.debug_mode = enabled;
         self.deps
             .settings
             .save(&settings)
             .await
-            .map_err(|err| DiagnosticsFacadeError::SaveSettings(err.to_string()))?;
+            .map_err(DiagnosticsFacadeError::SaveSettings)?;
 
         Ok(UpdateDebugModeView {
             debug_mode: enabled,
@@ -118,7 +119,7 @@ impl DiagnosticsFacade {
             .settings
             .load()
             .await
-            .map_err(|err| DiagnosticsFacadeError::LoadSettings(err.to_string()))?;
+            .map_err(DiagnosticsFacadeError::LoadSettings)?;
         let debug_mode = settings.general.debug_mode;
         let effective_log_profile = current_effective_log_profile(debug_mode);
         let since_hours = since_hours.unwrap_or(24).max(1);
@@ -144,7 +145,8 @@ impl DiagnosticsFacade {
             )
         })
         .await
-        .map_err(|err| DiagnosticsFacadeError::Export(err.to_string()))??;
+        .context("run log export worker")
+        .map_err(DiagnosticsFacadeError::Export)??;
 
         Ok(LogExportView {
             path: output_path.to_string_lossy().to_string(),
@@ -189,33 +191,37 @@ fn export_logs_blocking(
     debug_mode: bool,
     effective_log_profile: &str,
 ) -> Result<Vec<String>, DiagnosticsFacadeError> {
-    fs::create_dir_all(
-        output_path
-            .parent()
-            .ok_or_else(|| DiagnosticsFacadeError::Export("output path has no parent".into()))?,
-    )
-    .map_err(|err| DiagnosticsFacadeError::Export(err.to_string()))?;
+    fs::create_dir_all(output_path.parent().ok_or_else(|| {
+        DiagnosticsFacadeError::Export(anyhow!("export output path has no parent"))
+    })?)
+    .context("create export directory")
+    .map_err(DiagnosticsFacadeError::Export)?;
 
     let mut files = collect_recent_log_files(logs_dir, since)?;
     files.sort_by(|a, b| a.archive_name.cmp(&b.archive_name));
 
-    let output =
-        File::create(output_path).map_err(|err| DiagnosticsFacadeError::Export(err.to_string()))?;
+    let output = File::create(output_path)
+        .context("create export archive")
+        .map_err(DiagnosticsFacadeError::Export)?;
     let mut zip = zip::ZipWriter::new(output);
     let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     let mut included = Vec::with_capacity(files.len());
 
     for file in &files {
         zip.start_file(format!("logs/{}", file.archive_name), options)
-            .map_err(|err| DiagnosticsFacadeError::Export(err.to_string()))?;
+            .context("start log archive entry")
+            .map_err(DiagnosticsFacadeError::Export)?;
         let mut input = File::open(&file.path)
-            .map_err(|err| DiagnosticsFacadeError::Export(err.to_string()))?;
+            .context("open log file")
+            .map_err(DiagnosticsFacadeError::Export)?;
         let mut buf = Vec::new();
         input
             .read_to_end(&mut buf)
-            .map_err(|err| DiagnosticsFacadeError::Export(err.to_string()))?;
+            .context("read log file")
+            .map_err(DiagnosticsFacadeError::Export)?;
         zip.write_all(&buf)
-            .map_err(|err| DiagnosticsFacadeError::Export(err.to_string()))?;
+            .context("write log archive entry")
+            .map_err(DiagnosticsFacadeError::Export)?;
         included.push(file.archive_name.clone());
     }
 
@@ -229,13 +235,17 @@ fn export_logs_blocking(
         platform: std::env::consts::OS,
     };
     let manifest_json = serde_json::to_vec_pretty(&manifest)
-        .map_err(|err| DiagnosticsFacadeError::Export(err.to_string()))?;
+        .context("serialize export manifest")
+        .map_err(DiagnosticsFacadeError::Export)?;
     zip.start_file("manifest.json", options)
-        .map_err(|err| DiagnosticsFacadeError::Export(err.to_string()))?;
+        .context("start manifest archive entry")
+        .map_err(DiagnosticsFacadeError::Export)?;
     zip.write_all(&manifest_json)
-        .map_err(|err| DiagnosticsFacadeError::Export(err.to_string()))?;
+        .context("write manifest archive entry")
+        .map_err(DiagnosticsFacadeError::Export)?;
     zip.finish()
-        .map_err(|err| DiagnosticsFacadeError::Export(err.to_string()))?;
+        .context("finish export archive")
+        .map_err(DiagnosticsFacadeError::Export)?;
 
     Ok(included)
 }
@@ -255,14 +265,18 @@ fn collect_recent_log_files(
     }
     let since_system = system_time_from_datetime(since);
     let mut out = Vec::new();
-    let entries =
-        fs::read_dir(logs_dir).map_err(|err| DiagnosticsFacadeError::Export(err.to_string()))?;
+    let entries = fs::read_dir(logs_dir)
+        .context("read logs directory")
+        .map_err(DiagnosticsFacadeError::Export)?;
     for entry in entries {
-        let entry = entry.map_err(|err| DiagnosticsFacadeError::Export(err.to_string()))?;
+        let entry = entry
+            .context("read logs directory entry")
+            .map_err(DiagnosticsFacadeError::Export)?;
         let path = entry.path();
         let file_type = entry
             .file_type()
-            .map_err(|err| DiagnosticsFacadeError::Export(err.to_string()))?;
+            .context("read log file type")
+            .map_err(DiagnosticsFacadeError::Export)?;
         if !file_type.is_file() {
             continue;
         }
@@ -278,7 +292,8 @@ fn collect_recent_log_files(
         }
         let metadata = entry
             .metadata()
-            .map_err(|err| DiagnosticsFacadeError::Export(err.to_string()))?;
+            .context("read log file metadata")
+            .map_err(DiagnosticsFacadeError::Export)?;
         let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
         if modified < since_system && !rolling_name_is_in_window(&name, since) {
             continue;

@@ -33,9 +33,9 @@ mod tests {
 
     #[test]
     fn capture_failure_does_not_expose_internal_details() {
-        let error = map_capture_error(ClipboardCaptureFacadeError::Internal(
-            "/private/path/clipboard-cache".into(),
-        ));
+        let error = map_capture_error(ClipboardCaptureFacadeError::Internal(anyhow::anyhow!(
+            "/private/path/clipboard-cache"
+        )));
 
         assert_eq!(error.category(), EngineErrorCategory::Internal);
         assert_eq!(error.code(), CAPTURE_CURRENT_CLIPBOARD_FAILED_CODE);

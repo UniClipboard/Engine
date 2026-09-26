@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use openmls::{
     group::MlsGroup,
     messages::group_info::VerifiableGroupInfo,
@@ -8,10 +10,11 @@ use openmls_basic_credential::SignatureKeyPair;
 use openmls_memory_storage::MemoryStorage;
 use openmls_rust_crypto::RustCrypto;
 use openmls_traits::{
-    crypto::OpenMlsCrypto, signatures::Signer, storage::StorageProvider, types::SignatureScheme,
-    OpenMlsProvider,
+    crypto::OpenMlsCrypto, signatures::Signer, signatures::SignerError, storage::StorageProvider,
+    types::SignatureScheme, OpenMlsProvider,
 };
 use sha2::{Digest, Sha256};
+use uc_core::ids::DeviceId;
 use uc_core::membership::{
     AdmissionSecurityCommitmentV1, BaseMembershipHistoryPosition, MembershipCredential,
     ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
@@ -23,16 +26,76 @@ const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA2
 const STATE_VERSION: u8 = 1;
 const EXPORT_LABEL: &str = "uniclipboard-key-catalog-wrap-v1";
 
+/// MLS 组操作失败。`source` 为空表示纯状态或输入校验失败；有下层错误时保留为来源。
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum MlsGroupError {
     #[error("invalid MLS state")]
-    InvalidState,
+    InvalidState {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("invalid MLS message")]
-    InvalidMessage,
+    InvalidMessage {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("MLS credential identity mismatch")]
-    IdentityMismatch,
+    IdentityMismatch {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("MLS protocol operation failed")]
-    Protocol,
+    Protocol {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
+}
+
+/// openmls 的 `SignerError` 未实现 `std::error::Error`；包装后作为来源保留原值。
+#[derive(Debug, thiserror::Error)]
+#[error("MLS signer failed")]
+struct SignerFailure(SignerError);
+
+impl MlsGroupError {
+    fn invalid_state() -> Self {
+        Self::InvalidState { source: None }
+    }
+
+    fn invalid_state_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::InvalidState {
+            source: Some(source.into()),
+        }
+    }
+
+    fn invalid_message() -> Self {
+        Self::InvalidMessage { source: None }
+    }
+
+    fn invalid_message_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::InvalidMessage {
+            source: Some(source.into()),
+        }
+    }
+
+    fn identity_mismatch() -> Self {
+        Self::IdentityMismatch { source: None }
+    }
+
+    fn identity_mismatch_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::IdentityMismatch {
+            source: Some(source.into()),
+        }
+    }
+
+    fn protocol() -> Self {
+        Self::Protocol { source: None }
+    }
+
+    fn protocol_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Protocol {
+            source: Some(source.into()),
+        }
+    }
 }
 
 #[derive(thiserror::Error)]
@@ -241,6 +304,28 @@ impl std::fmt::Debug for CompletedMlsJoin {
 pub(crate) struct MlsGroupEngine;
 
 impl MlsGroupEngine {
+    pub(crate) fn local_device_id(
+        client_state: &MlsClientState,
+    ) -> Result<DeviceId, MlsGroupError> {
+        let (provider, stored) = restore(client_state)?;
+        if stored.signer_public.is_empty() {
+            return Err(MlsGroupError::invalid_state());
+        }
+        let group_id = stored.group_id.ok_or_else(MlsGroupError::invalid_state)?;
+        let group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&group_id))
+            .map_err(MlsGroupError::protocol_from)?
+            .ok_or_else(MlsGroupError::invalid_state)?;
+        let member = group
+            .members()
+            .find(|member| member.signature_key.as_slice() == stored.signer_public)
+            .ok_or_else(MlsGroupError::invalid_state)?;
+        let credential = BasicCredential::try_from(member.credential)
+            .map_err(MlsGroupError::invalid_state_from)?;
+        let device_id = std::str::from_utf8(credential.identity())
+            .map_err(MlsGroupError::identity_mismatch_from)?;
+        Ok(DeviceId::new(device_id))
+    }
+
     /// 导出不含成员私钥的签名 GroupInfo，供已有成员从 sibling 状态发起
     /// external commit。ratchet tree 作为 GroupInfo 扩展携带。
     pub(crate) fn export_external_recovery_group_info(
@@ -331,15 +416,23 @@ impl MlsGroupEngine {
         expected_space_id: &[u8],
     ) -> Result<(), MlsGroupError> {
         let (provider, stored) = restore(client_state)?;
-        let group_id = stored.group_id.ok_or(MlsGroupError::InvalidState)?;
+        let group_id = stored.group_id.ok_or_else(MlsGroupError::invalid_state)?;
         if group_id != expected_space_id {
-            return Err(MlsGroupError::IdentityMismatch);
+            return Err(MlsGroupError::identity_mismatch());
         }
         let group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&group_id))
-            .map_err(|_| MlsGroupError::Protocol)?
-            .ok_or(MlsGroupError::InvalidState)?;
+            .map_err(MlsGroupError::protocol_from)?
+            .ok_or_else(MlsGroupError::invalid_state)?;
         if !group.is_active() {
-            return Err(MlsGroupError::InvalidState);
+            return Err(MlsGroupError::invalid_state());
+        }
+        let mut identities = BTreeSet::new();
+        for member in group.members() {
+            let credential = BasicCredential::try_from(member.credential)
+                .map_err(MlsGroupError::invalid_state_from)?;
+            if !identities.insert(credential.identity().to_vec()) {
+                return Err(MlsGroupError::invalid_state());
+            }
         }
         Ok(())
     }
@@ -358,13 +451,13 @@ impl MlsGroupEngine {
             GroupId::from_slice(space_id),
             credential,
         )
-        .map_err(|_| MlsGroupError::Protocol)?;
+        .map_err(MlsGroupError::protocol_from)?;
         group
             .self_update(&provider, &signer, LeafNodeParameters::default())
-            .map_err(|_| MlsGroupError::Protocol)?;
+            .map_err(MlsGroupError::protocol_from)?;
         group
             .merge_pending_commit(&provider)
-            .map_err(|_| MlsGroupError::Protocol)?;
+            .map_err(MlsGroupError::protocol_from)?;
         snapshot(&provider, &signer, Some(group.group_id().as_slice()))
     }
 
@@ -373,11 +466,11 @@ impl MlsGroupEngine {
         let (credential, signer) = credential(device_identity, &provider)?;
         let bundle = KeyPackage::builder()
             .build(CIPHERSUITE, &provider, &signer, credential)
-            .map_err(|_| MlsGroupError::Protocol)?;
+            .map_err(MlsGroupError::protocol_from)?;
         let key_package = bundle
             .key_package()
             .tls_serialize_detached()
-            .map_err(|_| MlsGroupError::Protocol)?;
+            .map_err(MlsGroupError::protocol_from)?;
         let client_state = snapshot(&provider, &signer, None)?;
         let member_instance = uc_core::membership::MemberInstanceId::derive(
             std::str::from_utf8(device_identity).unwrap_or_default(),
@@ -391,35 +484,82 @@ impl MlsGroupEngine {
         expected_device_identity: &[u8],
         key_package: &[u8],
     ) -> Result<MlsAdmission, MlsGroupError> {
+        Self::admit_member_inner(sponsor_state, expected_device_identity, key_package, false)
+    }
+
+    pub(crate) fn admit_or_replace_member(
+        sponsor_state: &MlsClientState,
+        expected_device_identity: &[u8],
+        key_package: &[u8],
+    ) -> Result<MlsAdmission, MlsGroupError> {
+        Self::admit_member_inner(sponsor_state, expected_device_identity, key_package, true)
+    }
+
+    fn admit_member_inner(
+        sponsor_state: &MlsClientState,
+        expected_device_identity: &[u8],
+        key_package: &[u8],
+        replace_existing: bool,
+    ) -> Result<MlsAdmission, MlsGroupError> {
         let (provider, stored) = restore(sponsor_state)?;
         let signer = restore_signer(&provider, &stored)?;
-        let group_id = stored.group_id.ok_or(MlsGroupError::InvalidState)?;
+        let group_id = stored.group_id.ok_or_else(MlsGroupError::invalid_state)?;
         let mut group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&group_id))
-            .map_err(|_| MlsGroupError::Protocol)?
-            .ok_or(MlsGroupError::InvalidState)?;
+            .map_err(MlsGroupError::protocol_from)?
+            .ok_or_else(MlsGroupError::invalid_state)?;
         let key_package = KeyPackageIn::tls_deserialize_exact(key_package.to_vec())
-            .map_err(|_| MlsGroupError::InvalidMessage)?
+            .map_err(MlsGroupError::invalid_message_from)?
             .validate(provider.crypto(), ProtocolVersion::Mls10)
-            .map_err(|_| MlsGroupError::InvalidMessage)?;
+            .map_err(MlsGroupError::invalid_message_from)?;
         let credential = BasicCredential::try_from(key_package.leaf_node().credential().clone())
-            .map_err(|_| MlsGroupError::InvalidMessage)?;
+            .map_err(MlsGroupError::invalid_message_from)?;
         if credential.identity() != expected_device_identity {
-            return Err(MlsGroupError::IdentityMismatch);
+            return Err(MlsGroupError::identity_mismatch());
         }
-        let (commit, welcome, _) = group
-            .add_members(&provider, &signer, &[key_package])
-            .map_err(|_| MlsGroupError::Protocol)?;
+        let existing = group
+            .members()
+            .filter_map(|member| {
+                let credential = BasicCredential::try_from(member.credential).ok()?;
+                (credential.identity() == expected_device_identity).then_some(member.index)
+            })
+            .collect::<Vec<_>>();
+        let (commit, welcome) = match existing.as_slice() {
+            [_, ..] if replace_existing => {
+                if existing.contains(&group.own_leaf_index()) {
+                    return Err(MlsGroupError::identity_mismatch());
+                }
+                for target in existing {
+                    group
+                        .propose_remove_member(&provider, &signer, target)
+                        .map_err(MlsGroupError::protocol_from)?;
+                }
+                group
+                    .propose_add_member(&provider, &signer, &key_package)
+                    .map_err(MlsGroupError::protocol_from)?;
+                let (commit, welcome, _) = group
+                    .commit_to_pending_proposals(&provider, &signer)
+                    .map_err(MlsGroupError::protocol_from)?;
+                let welcome = welcome.ok_or_else(MlsGroupError::protocol)?;
+                (commit, welcome)
+            }
+            _ => {
+                let (commit, welcome, _) = group
+                    .add_members(&provider, &signer, &[key_package])
+                    .map_err(MlsGroupError::protocol_from)?;
+                (commit, welcome)
+            }
+        };
         group
             .merge_pending_commit(&provider)
-            .map_err(|_| MlsGroupError::Protocol)?;
+            .map_err(MlsGroupError::protocol_from)?;
         let wrapping_key = export_wrapping_key(&group, &provider)?;
         let epoch = group.epoch().as_u64();
         let welcome = welcome
             .tls_serialize_detached()
-            .map_err(|_| MlsGroupError::Protocol)?;
+            .map_err(MlsGroupError::protocol_from)?;
         let commit = commit
             .tls_serialize_detached()
-            .map_err(|_| MlsGroupError::Protocol)?;
+            .map_err(MlsGroupError::protocol_from)?;
         let sponsor_state = snapshot(&provider, &signer, Some(group.group_id().as_slice()))?;
         Ok(MlsAdmission {
             sponsor_state,
@@ -435,9 +575,9 @@ impl MlsGroupEngine {
         expected_space_id: &[u8],
         welcome: &[u8],
     ) -> Result<CompletedMlsJoin, MlsGroupError> {
-        let message = MlsMessageIn::tls_deserialize_exact(welcome.to_vec()).map_err(|_| {
+        let message = MlsMessageIn::tls_deserialize_exact(welcome.to_vec()).map_err(|error| {
             tracing::warn!(failure = "welcome_decode_failed", "MLS welcome rejected");
-            MlsGroupError::InvalidMessage
+            MlsGroupError::invalid_message_from(error)
         })?;
         let welcome = match message.extract() {
             MlsMessageBodyIn::Welcome(welcome) => welcome,
@@ -446,7 +586,7 @@ impl MlsGroupEngine {
                     failure = "welcome_message_type_invalid",
                     "MLS welcome rejected"
                 );
-                return Err(MlsGroupError::InvalidMessage);
+                return Err(MlsGroupError::invalid_message());
             }
         };
         Self::complete_join_from_welcome(pending, expected_space_id, welcome)
@@ -461,17 +601,17 @@ impl MlsGroupEngine {
         let signer = restore_signer(&provider, &stored)?;
         let staged =
             StagedWelcome::new_from_welcome(&provider, group_config().join_config(), welcome, None)
-                .map_err(|_| {
+                .map_err(|error| {
                     tracing::warn!(failure = "welcome_staging_failed", "MLS welcome rejected");
-                    MlsGroupError::Protocol
+                    MlsGroupError::protocol_from(error)
                 })?;
-        let group = staged.into_group(&provider).map_err(|_| {
+        let group = staged.into_group(&provider).map_err(|error| {
             tracing::warn!(failure = "welcome_install_failed", "MLS welcome rejected");
-            MlsGroupError::Protocol
+            MlsGroupError::protocol_from(error)
         })?;
         if group.group_id().as_slice() != expected_space_id {
             tracing::warn!(failure = "welcome_space_mismatch", "MLS welcome rejected");
-            return Err(MlsGroupError::IdentityMismatch);
+            return Err(MlsGroupError::identity_mismatch());
         }
         let wrapping_key = export_wrapping_key(&group, &provider)?;
         let epoch = group.epoch().as_u64();
@@ -489,31 +629,31 @@ impl MlsGroupEngine {
     ) -> Result<MlsRemoval, MlsGroupError> {
         let (provider, stored) = restore(sponsor_state)?;
         let signer = restore_signer(&provider, &stored)?;
-        let group_id = stored.group_id.ok_or(MlsGroupError::InvalidState)?;
+        let group_id = stored.group_id.ok_or_else(MlsGroupError::invalid_state)?;
         let mut group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&group_id))
-            .map_err(|_| MlsGroupError::Protocol)?
-            .ok_or(MlsGroupError::InvalidState)?;
-        let target = group
+            .map_err(MlsGroupError::protocol_from)?
+            .ok_or_else(MlsGroupError::invalid_state)?;
+        let targets = group
             .members()
-            .find_map(|member| {
+            .filter_map(|member| {
                 let credential = BasicCredential::try_from(member.credential).ok()?;
                 (credential.identity() == target_device_identity).then_some(member.index)
             })
-            .ok_or(MlsGroupError::IdentityMismatch)?;
-        if target == group.own_leaf_index() {
-            return Err(MlsGroupError::IdentityMismatch);
+            .collect::<Vec<_>>();
+        if targets.is_empty() || targets.contains(&group.own_leaf_index()) {
+            return Err(MlsGroupError::identity_mismatch());
         }
         let (commit, _, _) = group
-            .remove_members(&provider, &signer, &[target])
-            .map_err(|_| MlsGroupError::Protocol)?;
+            .remove_members(&provider, &signer, &targets)
+            .map_err(MlsGroupError::protocol_from)?;
         group
             .merge_pending_commit(&provider)
-            .map_err(|_| MlsGroupError::Protocol)?;
+            .map_err(MlsGroupError::protocol_from)?;
         let wrapping_key = export_wrapping_key(&group, &provider)?;
         let epoch = group.epoch().as_u64();
         let commit = commit
             .tls_serialize_detached()
-            .map_err(|_| MlsGroupError::Protocol)?;
+            .map_err(MlsGroupError::protocol_from)?;
         let sponsor_state = snapshot(&provider, &signer, Some(group.group_id().as_slice()))?;
         Ok(MlsRemoval {
             sponsor_state,
@@ -528,10 +668,10 @@ impl MlsGroupEngine {
         expected_device_identity: &[u8],
     ) -> Result<bool, MlsGroupError> {
         let (provider, stored) = restore(client_state)?;
-        let group_id = stored.group_id.ok_or(MlsGroupError::InvalidState)?;
+        let group_id = stored.group_id.ok_or_else(MlsGroupError::invalid_state)?;
         let group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&group_id))
-            .map_err(|_| MlsGroupError::Protocol)?
-            .ok_or(MlsGroupError::InvalidState)?;
+            .map_err(MlsGroupError::protocol_from)?
+            .ok_or_else(MlsGroupError::invalid_state)?;
         if !group.is_active() {
             return Ok(false);
         }
@@ -542,20 +682,41 @@ impl MlsGroupEngine {
         Ok(contains_member)
     }
 
+    #[cfg(feature = "test-util")]
+    pub(crate) fn matching_member_count(
+        client_state: &MlsClientState,
+        expected_device_identity: &[u8],
+    ) -> Result<usize, MlsGroupError> {
+        let (provider, stored) = restore(client_state)?;
+        let group_id = stored.group_id.ok_or_else(MlsGroupError::invalid_state)?;
+        let group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&group_id))
+            .map_err(MlsGroupError::protocol_from)?
+            .ok_or_else(MlsGroupError::invalid_state)?;
+        Ok(group
+            .members()
+            .filter(|member| {
+                BasicCredential::try_from(member.credential.clone())
+                    .is_ok_and(|credential| credential.identity() == expected_device_identity)
+            })
+            .count())
+    }
+
     pub(crate) fn sign_member_payload(
         client_state: &MlsClientState,
         payload: &[u8],
     ) -> Result<Vec<u8>, MlsGroupError> {
         let (provider, stored) = restore(client_state)?;
         let signer = restore_signer(&provider, &stored)?;
-        let group_id = stored.group_id.ok_or(MlsGroupError::InvalidState)?;
+        let group_id = stored.group_id.ok_or_else(MlsGroupError::invalid_state)?;
         let group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&group_id))
-            .map_err(|_| MlsGroupError::Protocol)?
-            .ok_or(MlsGroupError::InvalidState)?;
+            .map_err(MlsGroupError::protocol_from)?
+            .ok_or_else(MlsGroupError::invalid_state)?;
         if !group.is_active() {
-            return Err(MlsGroupError::InvalidState);
+            return Err(MlsGroupError::invalid_state());
         }
-        signer.sign(payload).map_err(|_| MlsGroupError::Protocol)
+        signer
+            .sign(payload)
+            .map_err(|error| MlsGroupError::protocol_from(SignerFailure(error)))
     }
 
     pub(crate) fn signing_public_key(
@@ -563,7 +724,7 @@ impl MlsGroupEngine {
     ) -> Result<Vec<u8>, MlsGroupError> {
         let (_, stored) = restore(client_state)?;
         if stored.signer_public.is_empty() {
-            return Err(MlsGroupError::InvalidState);
+            return Err(MlsGroupError::invalid_state());
         }
         Ok(stored.signer_public)
     }
@@ -574,10 +735,12 @@ impl MlsGroupEngine {
     ) -> Result<Vec<u8>, MlsGroupError> {
         let (provider, stored) = restore(client_state)?;
         if stored.group_id.is_some() {
-            return Err(MlsGroupError::InvalidState);
+            return Err(MlsGroupError::invalid_state());
         }
         let signer = restore_signer(&provider, &stored)?;
-        signer.sign(payload).map_err(|_| MlsGroupError::Protocol)
+        signer
+            .sign(payload)
+            .map_err(|error| MlsGroupError::protocol_from(SignerFailure(error)))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -592,23 +755,23 @@ impl MlsGroupEngine {
     ) -> Result<AdmissionSecurityCommitmentV1, MlsGroupError> {
         let local_signer_public = Self::signing_public_key(client_state)?;
         let (provider, stored) = restore(client_state)?;
-        let group_id = stored.group_id.ok_or(MlsGroupError::InvalidState)?;
+        let group_id = stored.group_id.ok_or_else(MlsGroupError::invalid_state)?;
         let group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&group_id))
-            .map_err(|_| MlsGroupError::Protocol)?
-            .ok_or(MlsGroupError::InvalidState)?;
+            .map_err(MlsGroupError::protocol_from)?
+            .ok_or_else(MlsGroupError::invalid_state)?;
         if !group.is_active() {
-            return Err(MlsGroupError::InvalidState);
+            return Err(MlsGroupError::invalid_state());
         }
 
         let mut members = Vec::new();
         let mut contains_local_signer = false;
         for member in group.members() {
             let identity = BasicCredential::try_from(member.credential)
-                .map_err(|_| MlsGroupError::InvalidState)?
+                .map_err(MlsGroupError::invalid_state_from)?
                 .identity()
                 .to_vec();
             let device_id =
-                std::str::from_utf8(&identity).map_err(|_| MlsGroupError::IdentityMismatch)?;
+                std::str::from_utf8(&identity).map_err(MlsGroupError::identity_mismatch_from)?;
             let public_key = member.signature_key.as_slice();
             contains_local_signer |= public_key == local_signer_public;
             let credential =
@@ -619,7 +782,7 @@ impl MlsGroupEngine {
             ));
         }
         if !contains_local_signer {
-            return Err(MlsGroupError::InvalidState);
+            return Err(MlsGroupError::invalid_state());
         }
         members.sort_unstable();
         let mut member_bytes = Vec::with_capacity(members.len() * 64 + 8);
@@ -631,19 +794,19 @@ impl MlsGroupEngine {
         let group_context: GroupContext = provider
             .storage()
             .group_context(&GroupId::from_slice(&group_id))
-            .map_err(|_| MlsGroupError::Protocol)?
-            .ok_or(MlsGroupError::InvalidState)?;
+            .map_err(MlsGroupError::protocol_from)?
+            .ok_or_else(MlsGroupError::invalid_state)?;
         let group_context = group_context
             .tls_serialize_detached()
-            .map_err(|_| MlsGroupError::Protocol)?;
+            .map_err(MlsGroupError::protocol_from)?;
         let target_epoch = group.epoch().as_u64();
         let base_epoch = target_epoch
             .checked_sub(1)
-            .ok_or(MlsGroupError::InvalidState)?;
+            .ok_or_else(MlsGroupError::invalid_state)?;
 
         AdmissionSecurityCommitmentV1::new(
             ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
-            String::from_utf8(group_id.clone()).map_err(|_| MlsGroupError::IdentityMismatch)?,
+            String::from_utf8(group_id.clone()).map_err(MlsGroupError::identity_mismatch_from)?,
             group_id,
             attempt_id,
             base_history_position,
@@ -657,17 +820,17 @@ impl MlsGroupEngine {
             key_catalog_digest,
             admission_bundle_digest,
         )
-        .map_err(|_| MlsGroupError::InvalidState)
+        .map_err(MlsGroupError::invalid_state_from)
     }
 
     pub(crate) fn current_epoch(client_state: &MlsClientState) -> Result<u64, MlsGroupError> {
         let (provider, stored) = restore(client_state)?;
-        let group_id = stored.group_id.ok_or(MlsGroupError::InvalidState)?;
+        let group_id = stored.group_id.ok_or_else(MlsGroupError::invalid_state)?;
         let group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&group_id))
-            .map_err(|_| MlsGroupError::Protocol)?
-            .ok_or(MlsGroupError::InvalidState)?;
+            .map_err(MlsGroupError::protocol_from)?
+            .ok_or_else(MlsGroupError::invalid_state)?;
         if !group.is_active() {
-            return Err(MlsGroupError::InvalidState);
+            return Err(MlsGroupError::invalid_state());
         }
         Ok(group.epoch().as_u64())
     }
@@ -680,15 +843,15 @@ impl MlsGroupEngine {
         let group_id = stored
             .group_id
             .as_ref()
-            .ok_or(MlsGroupError::InvalidState)?;
+            .ok_or_else(MlsGroupError::invalid_state)?;
         let group = MlsGroup::load(provider.storage(), &GroupId::from_slice(group_id))
-            .map_err(|_| MlsGroupError::Protocol)?
-            .ok_or(MlsGroupError::InvalidState)?;
+            .map_err(MlsGroupError::protocol_from)?
+            .ok_or_else(MlsGroupError::invalid_state)?;
         if !group.is_active() {
-            return Err(MlsGroupError::InvalidState);
+            return Err(MlsGroupError::invalid_state());
         }
         Ok(uc_core::membership::MemberInstanceId::derive(
-            std::str::from_utf8(device_identity).map_err(|_| MlsGroupError::IdentityMismatch)?,
+            std::str::from_utf8(device_identity).map_err(MlsGroupError::identity_mismatch_from)?,
             &stored.signer_public,
         ))
     }
@@ -700,10 +863,10 @@ impl MlsGroupEngine {
         signature: &[u8],
     ) -> Result<bool, MlsGroupError> {
         let (provider, stored) = restore(client_state)?;
-        let group_id = stored.group_id.ok_or(MlsGroupError::InvalidState)?;
+        let group_id = stored.group_id.ok_or_else(MlsGroupError::invalid_state)?;
         let group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&group_id))
-            .map_err(|_| MlsGroupError::Protocol)?
-            .ok_or(MlsGroupError::InvalidState)?;
+            .map_err(MlsGroupError::protocol_from)?
+            .ok_or_else(MlsGroupError::invalid_state)?;
         if !group.is_active() {
             return Ok(false);
         }
@@ -733,15 +896,15 @@ impl MlsGroupEngine {
         signature: &[u8],
     ) -> Result<bool, MlsGroupError> {
         let (provider, stored) = restore(client_state)?;
-        let group_id = stored.group_id.ok_or(MlsGroupError::InvalidState)?;
+        let group_id = stored.group_id.ok_or_else(MlsGroupError::invalid_state)?;
         let group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&group_id))
-            .map_err(|_| MlsGroupError::Protocol)?
-            .ok_or(MlsGroupError::InvalidState)?;
+            .map_err(MlsGroupError::protocol_from)?
+            .ok_or_else(MlsGroupError::invalid_state)?;
         if !group.is_active() {
             return Ok(false);
         }
         let device_id = std::str::from_utf8(expected_device_identity)
-            .map_err(|_| MlsGroupError::IdentityMismatch)?;
+            .map_err(MlsGroupError::identity_mismatch_from)?;
         let signature_key = group.members().find_map(|member| {
             let credential = BasicCredential::try_from(member.credential).ok()?;
             let instance = uc_core::membership::MemberInstanceId::derive(
@@ -773,28 +936,28 @@ impl MlsGroupEngine {
     ) -> Result<CompletedMlsJoin, MlsGroupError> {
         let (provider, stored) = restore(client_state)?;
         let signer = restore_signer(&provider, &stored)?;
-        let group_id = stored.group_id.ok_or(MlsGroupError::InvalidState)?;
+        let group_id = stored.group_id.ok_or_else(MlsGroupError::invalid_state)?;
         if group_id != expected_space_id {
-            return Err(MlsGroupError::IdentityMismatch);
+            return Err(MlsGroupError::identity_mismatch());
         }
         let mut group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&group_id))
-            .map_err(|_| MlsGroupError::Protocol)?
-            .ok_or(MlsGroupError::InvalidState)?;
+            .map_err(MlsGroupError::protocol_from)?
+            .ok_or_else(MlsGroupError::invalid_state)?;
         let message = MlsMessageIn::tls_deserialize_exact(commit.to_vec())
-            .map_err(|_| MlsGroupError::InvalidMessage)?
+            .map_err(MlsGroupError::invalid_message_from)?
             .try_into_protocol_message()
-            .map_err(|_| MlsGroupError::InvalidMessage)?;
+            .map_err(MlsGroupError::invalid_message_from)?;
         let processed = group
             .process_message(&provider, message)
-            .map_err(|_| MlsGroupError::Protocol)?;
+            .map_err(MlsGroupError::protocol_from)?;
         let ProcessedMessageContent::StagedCommitMessage(staged) = processed.into_content() else {
-            return Err(MlsGroupError::InvalidMessage);
+            return Err(MlsGroupError::invalid_message());
         };
         group
             .merge_staged_commit(&provider, *staged)
-            .map_err(|_| MlsGroupError::Protocol)?;
+            .map_err(MlsGroupError::protocol_from)?;
         if !group.is_active() {
-            return Err(MlsGroupError::IdentityMismatch);
+            return Err(MlsGroupError::identity_mismatch());
         }
         let wrapping_key = export_wrapping_key(&group, &provider)?;
         let epoch = group.epoch().as_u64();
@@ -885,13 +1048,13 @@ fn group_config() -> MlsGroupCreateConfig {
 
 fn credential(
     identity: &[u8],
-    provider: &impl OpenMlsProvider,
+    provider: &SnapshotProvider,
 ) -> Result<(CredentialWithKey, SignatureKeyPair), MlsGroupError> {
     let signer = SignatureKeyPair::new(CIPHERSUITE.signature_algorithm())
-        .map_err(|_| MlsGroupError::Protocol)?;
+        .map_err(MlsGroupError::protocol_from)?;
     signer
         .store(provider.storage())
-        .map_err(|_| MlsGroupError::Protocol)?;
+        .map_err(MlsGroupError::protocol_from)?;
     Ok((
         CredentialWithKey {
             credential: BasicCredential::new(identity.to_vec()).into(),
@@ -910,25 +1073,25 @@ fn snapshot(
     provider
         .storage
         .serialize(&mut serialized_storage)
-        .map_err(|_| MlsGroupError::InvalidState)?;
+        .map_err(MlsGroupError::invalid_state_from)?;
     let stored = StoredClientState {
         version: STATE_VERSION,
         serialized_storage,
         signer_public: signer.to_public_vec(),
         group_id: group_id.map(ToOwned::to_owned),
     };
-    let bytes = serde_json::to_vec(&stored).map_err(|_| MlsGroupError::InvalidState)?;
+    let bytes = serde_json::to_vec(&stored).map_err(MlsGroupError::invalid_state_from)?;
     Ok(MlsClientState { bytes })
 }
 
 fn restore(state: &MlsClientState) -> Result<(SnapshotProvider, StoredClientState), MlsGroupError> {
     let stored: StoredClientState =
-        serde_json::from_slice(state.as_bytes()).map_err(|_| MlsGroupError::InvalidState)?;
+        serde_json::from_slice(state.as_bytes()).map_err(MlsGroupError::invalid_state_from)?;
     if stored.version != STATE_VERSION {
-        return Err(MlsGroupError::InvalidState);
+        return Err(MlsGroupError::invalid_state());
     }
     let storage = MemoryStorage::deserialize(&mut stored.serialized_storage.as_slice())
-        .map_err(|_| MlsGroupError::InvalidState)?;
+        .map_err(MlsGroupError::invalid_state_from)?;
     let provider = SnapshotProvider {
         crypto: RustCrypto::default(),
         storage,
@@ -945,7 +1108,7 @@ fn restore_signer(
         &stored.signer_public,
         SignatureScheme::ED25519,
     )
-    .ok_or(MlsGroupError::InvalidState)
+    .ok_or_else(MlsGroupError::invalid_state)
 }
 
 fn export_wrapping_key(
@@ -954,8 +1117,8 @@ fn export_wrapping_key(
 ) -> Result<MasterKey, MlsGroupError> {
     let bytes = group
         .export_secret(provider.crypto(), EXPORT_LABEL, b"", 32)
-        .map_err(|_| MlsGroupError::Protocol)?;
-    MasterKey::from_bytes(&bytes).map_err(|_| MlsGroupError::Protocol)
+        .map_err(MlsGroupError::protocol_from)?;
+    MasterKey::from_bytes(&bytes).map_err(MlsGroupError::protocol_from)
 }
 
 #[cfg(test)]
@@ -968,6 +1131,50 @@ mod tests {
         BaseMembershipHistoryPosition, HistoricalMembershipSignatureVerifier, MembershipEventId,
         ED25519_SIGNATURE_ALGORITHM_V1,
     };
+
+    #[test]
+    fn local_device_id_comes_from_the_active_local_leaf() {
+        let sponsor = MlsGroupEngine::create_sponsor(b"space-a", b"alice").unwrap();
+        let pending = MlsGroupEngine::prepare_join(b"bob").unwrap();
+        let admission =
+            MlsGroupEngine::admit_member(&sponsor, b"bob", &pending.key_package).unwrap();
+        let joined =
+            MlsGroupEngine::complete_join(pending, b"space-a", &admission.welcome).unwrap();
+
+        assert_eq!(
+            MlsGroupEngine::local_device_id(&admission.sponsor_state).unwrap(),
+            DeviceId::new("alice")
+        );
+        assert_eq!(
+            MlsGroupEngine::local_device_id(&joined.client_state).unwrap(),
+            DeviceId::new("bob")
+        );
+    }
+
+    #[test]
+    fn corrupt_client_state_keeps_its_decode_source() {
+        let error =
+            MlsGroupEngine::local_device_id(&MlsClientState::from_bytes(b"not json".to_vec()))
+                .unwrap_err();
+
+        let MlsGroupError::InvalidState {
+            source: Some(source),
+        } = &error
+        else {
+            panic!("expected InvalidState with a source, got {error:?}");
+        };
+        assert!(source.downcast_ref::<serde_json::Error>().is_some());
+    }
+
+    #[test]
+    fn pending_join_has_no_active_local_device_id() {
+        let pending = MlsGroupEngine::prepare_join(b"bob").unwrap();
+
+        assert!(matches!(
+            MlsGroupEngine::local_device_id(&pending.client_state),
+            Err(MlsGroupError::InvalidState { .. })
+        ));
+    }
 
     #[test]
     fn external_recovery_replaces_the_existing_leaf_without_sharing_private_state() {
@@ -1050,8 +1257,74 @@ mod tests {
 
         assert!(matches!(
             MlsGroupEngine::admit_member(&sponsor, b"mallory", &pending.key_package),
-            Err(MlsGroupError::IdentityMismatch)
+            Err(MlsGroupError::IdentityMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn readmission_replaces_the_previous_leaf_for_the_same_device() {
+        let sponsor = MlsGroupEngine::create_sponsor(b"space-a", b"alice").unwrap();
+        let first_pending = MlsGroupEngine::prepare_join(b"bob").unwrap();
+        let first =
+            MlsGroupEngine::admit_member(&sponsor, b"bob", &first_pending.key_package).unwrap();
+        let second_pending = MlsGroupEngine::prepare_join(b"bob").unwrap();
+        let duplicate =
+            MlsGroupEngine::admit_member(&first.sponsor_state, b"bob", &second_pending.key_package)
+                .unwrap();
+        assert!(MlsGroupEngine::validate_state(&duplicate.sponsor_state, b"space-a").is_err());
+
+        let returning_pending = MlsGroupEngine::prepare_join(b"bob").unwrap();
+        let repaired = MlsGroupEngine::admit_or_replace_member(
+            &duplicate.sponsor_state,
+            b"bob",
+            &returning_pending.key_package,
+        )
+        .unwrap();
+
+        MlsGroupEngine::complete_join(returning_pending, b"space-a", &repaired.welcome).unwrap();
+        let (provider, stored) = restore(&repaired.sponsor_state).unwrap();
+        let group_id = stored.group_id.unwrap();
+        let group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&group_id))
+            .unwrap()
+            .unwrap();
+        let bob_count = group
+            .members()
+            .filter(|member| {
+                BasicCredential::try_from(member.credential.clone())
+                    .is_ok_and(|credential| credential.identity() == b"bob")
+            })
+            .count();
+
+        assert_eq!(bob_count, 1);
+        assert_eq!(repaired.epoch, duplicate.epoch + 1);
+    }
+
+    #[test]
+    fn removal_clears_every_legacy_leaf_for_the_same_device() {
+        let sponsor = MlsGroupEngine::create_sponsor(b"space-a", b"alice").unwrap();
+        let first_pending = MlsGroupEngine::prepare_join(b"bob").unwrap();
+        let first =
+            MlsGroupEngine::admit_member(&sponsor, b"bob", &first_pending.key_package).unwrap();
+        let second_pending = MlsGroupEngine::prepare_join(b"bob").unwrap();
+        let duplicate =
+            MlsGroupEngine::admit_member(&first.sponsor_state, b"bob", &second_pending.key_package)
+                .unwrap();
+
+        let removed = MlsGroupEngine::remove_member(&duplicate.sponsor_state, b"bob").unwrap();
+        let (provider, stored) = restore(&removed.sponsor_state).unwrap();
+        let group_id = stored.group_id.unwrap();
+        let group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&group_id))
+            .unwrap()
+            .unwrap();
+        let bob_count = group
+            .members()
+            .filter(|member| {
+                BasicCredential::try_from(member.credential.clone())
+                    .is_ok_and(|credential| credential.identity() == b"bob")
+            })
+            .count();
+
+        assert_eq!(bob_count, 0);
     }
 
     #[test]
@@ -1104,7 +1377,7 @@ mod tests {
         assert_ne!(charlie.wrapping_key, removal.wrapping_key);
         assert!(matches!(
             MlsGroupEngine::apply_commit(&charlie.client_state, b"space-a", &removal.commit,),
-            Err(MlsGroupError::IdentityMismatch)
+            Err(MlsGroupError::IdentityMismatch { .. })
         ));
     }
 

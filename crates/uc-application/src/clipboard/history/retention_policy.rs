@@ -17,7 +17,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tracing::{info, info_span, warn, Instrument};
 
 use uc_core::clipboard::ClipboardEntry;
@@ -25,6 +25,7 @@ use uc_core::ids::EntryId;
 use uc_core::ports::clipboard::ListClipboardEntriesPort;
 use uc_core::ports::SettingsPort;
 use uc_core::settings::model::{RetentionRule, RuleEvaluation};
+use uc_observability_contract::error_source::io_error_kind;
 
 use super::delete_entry::DeleteClipboardEntryUseCase;
 
@@ -116,7 +117,7 @@ impl EnforceRetentionPolicyUseCase {
             match self.delete_uc.execute(entry_id).await {
                 Ok(()) => result.entries_deleted += 1,
                 Err(e) => {
-                    warn!(entry_id = %entry_id, error = %e, "Retention delete failed");
+                    warn!(entry_id = %entry_id, error_kind = "entry_delete", io_error_kind = io_error_kind(e.as_ref()), "Retention delete failed");
                     result.errors += 1;
                 }
             }
@@ -145,7 +146,7 @@ impl EnforceRetentionPolicyUseCase {
                     offset = offset
                 ))
                 .await
-                .map_err(|e| anyhow::anyhow!("list entries for retention: {e}"))?;
+                .context("list entries for retention")?;
 
             if batch.is_empty() {
                 break;

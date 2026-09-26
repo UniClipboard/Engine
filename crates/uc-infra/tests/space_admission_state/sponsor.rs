@@ -2,9 +2,10 @@ use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use tracing::Instrument;
 use uc_application::deps::{
-    AuthenticatedSpaceAdmissionMessage, LoadMembershipLedgerPort, LoadedMembershipLedger,
-    MembershipLedgerError, SponsorAdmissionMutation, SponsorAdmissionState,
-    SponsorAdmissionStateError, SponsorAdmissionStatePort,
+    AuthenticatedSpaceAdmissionMessage, MembershipLedgerError, MembershipRecord,
+    MembershipRecordCommit, MembershipRecordStorePort, SpaceMembershipRecord,
+    SponsorAdmissionMutation, SponsorAdmissionState, SponsorAdmissionStateError,
+    SponsorAdmissionStatePort,
 };
 use uc_observability_contract::diagnostics::{
     operation_span, DiagnosticDomain, DiagnosticOperation, DiagnosticRole, DiagnosticSpanKind,
@@ -19,7 +20,7 @@ use super::*;
 
 #[derive(Clone)]
 struct FixedMembershipLedger {
-    loaded: LoadedMembershipLedger,
+    loaded: MembershipRecord,
 }
 
 #[tokio::test]
@@ -84,9 +85,13 @@ async fn sponsor_state_load_is_correlated_in_standard_log_file() {
 }
 
 #[async_trait]
-impl LoadMembershipLedgerPort for FixedMembershipLedger {
-    async fn load(&self) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
+impl MembershipRecordStorePort for FixedMembershipLedger {
+    async fn load(&self) -> Result<MembershipRecord, MembershipLedgerError> {
         Ok(self.loaded.clone())
+    }
+
+    async fn commit(&self, _: MembershipRecordCommit) -> Result<(), MembershipLedgerError> {
+        Err(MembershipLedgerError::unavailable())
     }
 }
 
@@ -208,6 +213,26 @@ async fn one_invitation_cannot_start_two_sponsor_admissions() {
     let conflicting = authenticated_join_request(0xe9, 0xe8);
     assert!(matches!(
         SponsorAdmissionStatePort::load(&store, &conflicting).await,
+        Err(SponsorAdmissionStateError::StateChanged { .. })
+    ));
+}
+
+#[tokio::test]
+async fn unsettled_sponsor_attempt_blocks_a_new_invitation_attempt() {
+    let fixture = Fixture::new();
+    let store = sponsor_store(&fixture);
+    let first_message = authenticated_join_request(0x71, 0x72);
+    let first = SponsorAdmissionStatePort::load(&store, &first_message)
+        .await
+        .unwrap();
+    let (token, mutation) = accepted_mutation(first_message, first);
+    SponsorAdmissionStatePort::commit(&store, token, mutation)
+        .await
+        .unwrap();
+
+    let second_message = authenticated_join_request(0x73, 0x74);
+    assert!(matches!(
+        SponsorAdmissionStatePort::load(&store, &second_message).await,
         Err(SponsorAdmissionStateError::StateChanged { .. })
     ));
 }
@@ -376,7 +401,7 @@ async fn sponsor_abandonment_cleanup_survives_restart_and_commits_once() {
         PendingAdmissionRecoveryStatePort::load(&reopened, AdmissionRecoveryTrigger::Startup, 0)
             .await
             .expect("pending abandonment loads after restart");
-    let (_, _, mut pending, _, _) = recovery.into_parts();
+    let (_, _, mut pending, _, _, _) = recovery.into_parts();
     assert_eq!(pending.len(), 1);
     let (abandoned, recovery_token) = pending.pop().expect("one pending abandonment").into_parts();
     let completed = abandoned
@@ -422,12 +447,21 @@ fn sponsor_store(fixture: &Fixture) -> SqliteSpaceAdmissionState<Arc<DieselSqlit
     )
 }
 
-fn membership_ledger() -> LoadedMembershipLedger {
-    let mut loaded = LoadedMembershipLedger::no_current_space();
-    loaded.revision = 7;
-    loaded.lineage_id = Some("space-a".to_owned());
-    loaded.membership_history = Some(vec![0x44; 128]);
-    loaded
+/// 只有沿革的成员记录：发起方读取的只是 Space 沿革。
+fn membership_ledger() -> MembershipRecord {
+    MembershipRecord::Space(Box::new(SpaceMembershipRecord {
+        ledger: uc_core::membership::MembershipLedgerSnapshot {
+            revision: 7,
+            history: uc_core::membership::VersionedMembershipHistory::new("space-a".to_owned()),
+            local_device_id: DeviceId::new("sponsor-device"),
+            local_member: uc_core::membership::MemberInstanceId::from_bytes([0; 32]),
+            peers: Default::default(),
+            effects: Vec::new(),
+            sync_cursor: None,
+        },
+        history_exchange: Default::default(),
+        branch_recovery: Default::default(),
+    }))
 }
 
 fn authenticated_join_request(
@@ -439,7 +473,7 @@ fn authenticated_join_request(
     let credential = MembershipCredential::new(1, vec![admission_byte + 2; 32]);
     let signature = vec![admission_byte + 5; 64];
     let envelope = SpaceAdmissionEnvelopeV1::new_with_version(
-        SpaceAdmissionProtocolVersion::V2,
+        SpaceAdmissionProtocolVersion::CURRENT,
         admission_id,
         AdmissionRole::Joiner,
         0,

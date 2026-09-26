@@ -4,6 +4,8 @@
 //! unlock facades) need the same trivial stand-ins; keeping them here avoids
 //! re-declaring one-off fakes per module.
 
+pub(crate) mod membership_scenario;
+
 use async_trait::async_trait;
 use uc_core::clipboard::{
     ContentHash, EntryFileSet, EntryFileSetError, EntryFileSetLine, EntryFileSetLineKind,
@@ -36,7 +38,10 @@ impl EntryFileSetRepositoryPort for FixedFileSets {
     async fn load(&self, _entry_id: &EntryId) -> Result<Option<EntryFileSet>, EntryFileSetError> {
         match &self.0 {
             Ok(value) => Ok(value.clone()),
-            Err(err) => Err(EntryFileSetError::Storage(err.to_string())),
+            // 错误不可克隆；替身每次返回同类的新错误，只供调用方走失败分支。
+            Err(_) => Err(EntryFileSetError::Storage(
+                "fixed file-set load failure".into(),
+            )),
         }
     }
 }

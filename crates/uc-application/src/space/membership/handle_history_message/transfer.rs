@@ -26,7 +26,7 @@ impl InboundMembershipTransfer {
         let index = page.page_index();
         let mut transfer = match previous {
             Some(old) if old.source_device_id != source => {
-                return Err(HandleMembershipHistoryMessageError::RecoveryRequired)
+                return Err(HandleMembershipHistoryMessageError::recovery_required())
             }
             Some(old) if old.transfer_id == id && old.page_count != count => {
                 return Ok(PageAdmission::Rejected)
@@ -47,7 +47,7 @@ impl InboundMembershipTransfer {
             },
         };
         let next = u32::try_from(transfer.pages.len())
-            .map_err(|_| HandleMembershipHistoryMessageError::RecoveryRequired)?;
+            .map_err(HandleMembershipHistoryMessageError::recovery_required_from)?;
         match index.cmp(&next) {
             std::cmp::Ordering::Less => {
                 return Ok(if transfer.pages.get(&index) == Some(&page) {
@@ -68,7 +68,7 @@ impl InboundMembershipTransfer {
             std::cmp::Ordering::Equal => {}
         }
         let bytes = postcard::to_stdvec(&page)
-            .map_err(|_| HandleMembershipHistoryMessageError::Rejected)?
+            .map_err(HandleMembershipHistoryMessageError::rejected_from)?
             .len();
         let Some(total) = transfer
             .total_bytes

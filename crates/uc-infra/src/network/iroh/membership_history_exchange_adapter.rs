@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use uc_application::deps::PeerIdentityDirectoryPort;
 
 use async_trait::async_trait;
 use iroh::endpoint::Connection;
@@ -15,12 +16,12 @@ use uc_application::deps::{
 };
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    MemberRepositoryPort, MembershipHistoryAckV3, MembershipHistoryExchangeEndpointPort,
-    MembershipHistoryExchangeError, MembershipHistoryExchangePort, MembershipHistoryMessage,
-    MAX_MEMBERSHIP_HISTORY_FRAME_SIZE,
+    MembershipHistoryAckV3, MembershipHistoryExchangeEndpointPort, MembershipHistoryExchangeError,
+    MembershipHistoryExchangePort, MembershipHistoryMessage, MAX_MEMBERSHIP_HISTORY_FRAME_SIZE,
 };
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::{ClockPort, PeerAddressRepositoryPort};
+use uc_observability_contract::diagnostics::connectivity::InboundPeerProtocol;
 use uc_observability_contract::diagnostics::{
     complete_operation, describe_membership_exchange, describe_operation_failure, operation_span,
     DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation, DiagnosticRole, DiagnosticSpanKind,
@@ -28,6 +29,7 @@ use uc_observability_contract::diagnostics::{
 };
 
 use super::connect_with_staggered_retry;
+use super::inbound_peer::{record_inbound_rejection, InboundPeerRejection, PeerIdentityResolver};
 use super::peer_address_resolver::PeerAddressResolver;
 use super::persistable_addr::{observed_stable_remote_addr, persist_observed_stable_addr};
 use super::trace_context::{inject_current, set_remote_parent, WireTraceContext};
@@ -39,6 +41,44 @@ const REQUEST_LAYOUT_MARKER: &[u8; 4] = b"UCT1";
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const ACCEPTED: u8 = 1;
 const REJECTED: u8 = 2;
+const BUSY: u8 = 3;
+
+fn decode_response_status(status: u8) -> Result<(), MembershipHistoryExchangeError> {
+    if status == BUSY {
+        return Err(MembershipHistoryExchangeError::PairingInProgress);
+    }
+    if status == REJECTED {
+        return Err(MembershipHistoryExchangeError::Rejected);
+    }
+    if status != ACCEPTED {
+        return Err(transport_failure(DiagnosticErrorType::DecodeFailed));
+    }
+    Ok(())
+}
+
+/// 服务端处理失败：诊断分类加下层来源。请求处理没有向上传递的调用方，来源只随这次失败一起结束。
+#[derive(Debug, thiserror::Error)]
+#[error("membership history server exchange failed")]
+struct ServerExchangeFailure {
+    kind: DiagnosticErrorType,
+    #[source]
+    source: anyhow::Error,
+}
+
+impl ServerExchangeFailure {
+    fn new(kind: DiagnosticErrorType, source: impl Into<anyhow::Error>) -> Self {
+        Self {
+            kind,
+            source: source.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerExchangeOutcome {
+    Completed,
+    PairingInProgress,
+}
 
 #[derive(Serialize, Deserialize)]
 struct WireMembershipHistoryRequest {
@@ -69,14 +109,13 @@ impl IrohMembershipHistoryExchangeAdapter {
 
     pub(crate) fn handler(
         &self,
-        member_repo: Arc<dyn MemberRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         endpoint: Arc<dyn MembershipHistoryExchangeEndpointPort>,
     ) -> IrohMembershipHistoryExchangeHandler {
         IrohMembershipHistoryExchangeHandler {
             state: Arc::new(HandlerState {
-                member_repo,
-                fingerprint_factory,
+                identity: PeerIdentityResolver::new(identities, fingerprint_factory),
                 endpoint,
             }),
         }
@@ -107,7 +146,7 @@ impl MembershipHistoryExchangePort for IrohMembershipHistoryExchangeAdapter {
         let payload = encode_request(message)?;
         let address = self.resolve_addr(recipient).await.ok_or_else(|| {
             describe_operation_failure(DiagnosticErrorType::AddressUnavailable);
-            MembershipHistoryExchangeError::Offline
+            MembershipHistoryExchangeError::offline()
         })?;
         let connection = connect_with_staggered_retry(
             Arc::clone(&self.endpoint),
@@ -117,22 +156,16 @@ impl MembershipHistoryExchangePort for IrohMembershipHistoryExchangeAdapter {
             uc_observability_contract::diagnostics::connectivity::AddressInputSource::Stored,
         )
         .await
-        .map_err(|_| {
+        .map_err(|error| {
             describe_operation_failure(DiagnosticErrorType::ConnectFailed);
-            MembershipHistoryExchangeError::Offline
+            MembershipHistoryExchangeError::offline_from(error)
         })?;
         let (mut send, mut receive) = tokio::time::timeout(IO_TIMEOUT, connection.open_bi())
             .await
-            .map_err(|_| transport_failure(DiagnosticErrorType::Timeout))?
-            .map_err(|_| transport_failure(DiagnosticErrorType::StreamFailed))?;
+            .map_err(|error| transport_failure_from(DiagnosticErrorType::Timeout, error))?
+            .map_err(|error| transport_failure_from(DiagnosticErrorType::StreamFailed, error))?;
         write_message(&mut send, &payload).await?;
-        let accepted = read_byte(&mut receive).await?;
-        if accepted == REJECTED {
-            return Err(MembershipHistoryExchangeError::Rejected);
-        }
-        if accepted != ACCEPTED {
-            return Err(transport_failure(DiagnosticErrorType::DecodeFailed));
-        }
+        decode_response_status(read_byte(&mut receive).await?)?;
         let response = decode_message(&read_message(&mut receive).await?)?;
         Ok(response)
     }
@@ -166,10 +199,10 @@ impl RestrictedMembershipDeliveryPort for IrohMembershipHistoryExchangeAdapter {
     ) -> Result<(), RestrictedMembershipDeliveryError> {
         let message = match delivery {
             RestrictedMembershipDelivery::Event(event) => {
-                MembershipHistoryMessage::RestrictedEventV3(event.clone())
+                MembershipHistoryMessage::RestrictedEventV3(event.as_ref().clone())
             }
             RestrictedMembershipDelivery::Decision(decision) => {
-                MembershipHistoryMessage::RestrictedDecisionV3(decision.clone())
+                MembershipHistoryMessage::RestrictedDecisionV3(decision.as_ref().clone())
             }
         };
         match self.exchange_membership_history(peer, message).await {
@@ -194,8 +227,9 @@ impl RestrictedMembershipDeliveryPort for IrohMembershipHistoryExchangeAdapter {
             | Ok(MembershipHistoryMessage::RestrictedDecisionV3(_)) => {
                 Err(RestrictedMembershipDeliveryError::Rejected)
             }
-            Err(MembershipHistoryExchangeError::Offline)
-            | Err(MembershipHistoryExchangeError::Transport) => {
+            Err(MembershipHistoryExchangeError::Offline { .. })
+            | Err(MembershipHistoryExchangeError::PairingInProgress)
+            | Err(MembershipHistoryExchangeError::Transport { .. }) => {
                 Err(RestrictedMembershipDeliveryError::Deferred)
             }
             Err(MembershipHistoryExchangeError::Rejected) => {
@@ -239,12 +273,31 @@ impl ProtocolHandler for IrohMembershipHistoryExchangeHandler {
                 return Ok(());
             }
         };
-        let Some(source_device) = self
-            .resolve_source_device(connection.remote_id().as_bytes(), &request.message)
-            .await
-        else {
-            reject(&mut send).await;
-            return Ok(());
+        let remote_id = connection.remote_id();
+        let remote_key = remote_id.as_bytes();
+        let source_device = match self.state.identity.identify(remote_key).await {
+            Ok(device) => device,
+            Err(rejection)
+                if rejection.is_identity_failure()
+                    && rejection == InboundPeerRejection::IdentityUnresolved =>
+            {
+                match introduced_device(&request.message, &self.state.identity, remote_key) {
+                    Some(device) => device,
+                    None => {
+                        record_inbound_rejection(
+                            InboundPeerProtocol::MembershipHistory,
+                            InboundPeerRejection::IdentityUnresolved,
+                        );
+                        reject(&mut send).await;
+                        return Ok(());
+                    }
+                }
+            }
+            Err(rejection) => {
+                record_inbound_rejection(InboundPeerProtocol::MembershipHistory, rejection);
+                reject(&mut send).await;
+                return Ok(());
+            }
         };
         let span = operation_span(OperationContext {
             domain: DiagnosticDomain::SpaceMembership,
@@ -257,27 +310,50 @@ impl ProtocolHandler for IrohMembershipHistoryExchangeHandler {
         uc_observability_contract::diagnostics::scope_operation_diagnostics(async {
             let result = async {
                 describe_membership_exchange(request_purpose(&request.message), true);
-                let response = self
+                let response = match self
                     .state
                     .endpoint
                     .handle_membership_history_exchange(&source_device, request.message)
                     .await
-                    .map_err(|error| history_endpoint_error_type(&error))?;
-                let payload =
-                    encode_message(&response).map_err(|_| DiagnosticErrorType::DecodeFailed)?;
-                send.write_all(&[ACCEPTED])
-                    .await
-                    .map_err(|_| DiagnosticErrorType::StreamFailed)?;
-                write_message(&mut send, &payload)
-                    .await
-                    .map_err(|_| DiagnosticErrorType::StreamFailed)
+                {
+                    Ok(response) => response,
+                    Err(MembershipHistoryExchangeError::PairingInProgress) => {
+                        busy(&mut send).await;
+                        return Ok(ServerExchangeOutcome::PairingInProgress);
+                    }
+                    Err(error) => {
+                        return Err(ServerExchangeFailure::new(
+                            history_endpoint_error_type(&error),
+                            error,
+                        ))
+                    }
+                };
+                let payload = encode_message(&response).map_err(|error| {
+                    ServerExchangeFailure::new(DiagnosticErrorType::DecodeFailed, error)
+                })?;
+                send.write_all(&[ACCEPTED]).await.map_err(|error| {
+                    ServerExchangeFailure::new(DiagnosticErrorType::StreamFailed, error)
+                })?;
+                write_message(&mut send, &payload).await.map_err(|error| {
+                    ServerExchangeFailure::new(DiagnosticErrorType::StreamFailed, error)
+                })?;
+                Ok(ServerExchangeOutcome::Completed)
             }
             .instrument(span.clone())
             .await;
             if result.is_err() {
                 reject(&mut send).await;
             }
-            span.in_scope(|| record_server_completion(started.elapsed(), result.as_ref().err()));
+            span.in_scope(|| match &result {
+                Ok(ServerExchangeOutcome::PairingInProgress) => record_server_completion(
+                    started.elapsed(),
+                    Some(&DiagnosticErrorType::Unavailable),
+                ),
+                Ok(ServerExchangeOutcome::Completed) => {
+                    record_server_completion(started.elapsed(), None)
+                }
+                Err(failure) => record_server_completion(started.elapsed(), Some(&failure.kind)),
+            });
         })
         .await;
         drop(span);
@@ -288,15 +364,24 @@ impl ProtocolHandler for IrohMembershipHistoryExchangeHandler {
 
 fn history_endpoint_error_type(error: &MembershipHistoryExchangeError) -> DiagnosticErrorType {
     match error {
-        MembershipHistoryExchangeError::Offline => DiagnosticErrorType::Unavailable,
+        MembershipHistoryExchangeError::Offline { .. }
+        | MembershipHistoryExchangeError::PairingInProgress => DiagnosticErrorType::Unavailable,
         MembershipHistoryExchangeError::Rejected => DiagnosticErrorType::PeerRejected,
-        MembershipHistoryExchangeError::Transport => DiagnosticErrorType::StreamFailed,
+        MembershipHistoryExchangeError::Transport { .. } => DiagnosticErrorType::StreamFailed,
     }
 }
 
 fn transport_failure(error: DiagnosticErrorType) -> MembershipHistoryExchangeError {
     describe_operation_failure(error);
-    MembershipHistoryExchangeError::Transport
+    MembershipHistoryExchangeError::transport()
+}
+
+fn transport_failure_from(
+    error: DiagnosticErrorType,
+    source: impl std::error::Error + Send + Sync + 'static,
+) -> MembershipHistoryExchangeError {
+    describe_operation_failure(error);
+    MembershipHistoryExchangeError::transport_from(source)
 }
 
 pub(crate) fn request_purpose(message: &MembershipHistoryMessage) -> MembershipExchangePurpose {
@@ -326,7 +411,7 @@ fn encode_message(
     let mut payload = vec![WIRE_VERSION];
     payload.extend(
         postcard::to_stdvec(message)
-            .map_err(|_| transport_failure(DiagnosticErrorType::Internal))?,
+            .map_err(|error| transport_failure_from(DiagnosticErrorType::Internal, error))?,
     );
     if payload.len() > MAX_MEMBERSHIP_HISTORY_FRAME_SIZE {
         return Err(transport_failure(DiagnosticErrorType::LocalPolicyExceeded));
@@ -344,7 +429,7 @@ fn encode_request(
             trace_context: inject_current(),
             message,
         })
-        .map_err(|_| transport_failure(DiagnosticErrorType::Internal))?,
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::Internal, error))?,
     );
     if payload.len() > MAX_MEMBERSHIP_HISTORY_FRAME_SIZE {
         return Err(transport_failure(DiagnosticErrorType::LocalPolicyExceeded));
@@ -367,7 +452,8 @@ fn decode_request(
     {
         return Err(transport_failure(DiagnosticErrorType::DecodeFailed));
     }
-    postcard::from_bytes(body).map_err(|_| transport_failure(DiagnosticErrorType::DecodeFailed))
+    postcard::from_bytes(body)
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::DecodeFailed, error))
 }
 
 fn record_server_completion(elapsed: Duration, error: Option<&DiagnosticErrorType>) {
@@ -402,7 +488,7 @@ fn decode_message(
         return Err(transport_failure(DiagnosticErrorType::DecodeFailed));
     }
     let message: MembershipHistoryMessage = postcard::from_bytes(body)
-        .map_err(|_| transport_failure(DiagnosticErrorType::DecodeFailed))?;
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::DecodeFailed, error))?;
     if matches!(
         message,
         MembershipHistoryMessage::SummaryV3(_)
@@ -421,42 +507,14 @@ fn decode_message(
 }
 
 struct HandlerState {
-    member_repo: Arc<dyn MemberRepositoryPort>,
-    fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
+    identity: PeerIdentityResolver,
     endpoint: Arc<dyn MembershipHistoryExchangeEndpointPort>,
-}
-
-impl IrohMembershipHistoryExchangeHandler {
-    async fn resolve_source_device(
-        &self,
-        public_key: &[u8; 32],
-        message: &MembershipHistoryMessage,
-    ) -> Option<DeviceId> {
-        let fingerprint = self
-            .state
-            .fingerprint_factory
-            .from_public_key(public_key)
-            .ok()?;
-        let known = self
-            .state
-            .member_repo
-            .list()
-            .await
-            .ok()?
-            .into_iter()
-            .find(|member| member.identity_fingerprint == fingerprint)
-            .map(|member| member.device_id);
-        if known.is_some() {
-            return known;
-        }
-
-        introduced_device(message, &fingerprint)
-    }
 }
 
 fn introduced_device(
     message: &MembershipHistoryMessage,
-    fingerprint: &uc_core::security::IdentityFingerprint,
+    identity: &PeerIdentityResolver,
+    public_key: &[u8; 32],
 ) -> Option<DeviceId> {
     let admission = match message {
         MembershipHistoryMessage::SummaryV3(summary) => &summary.sender_admission,
@@ -468,7 +526,9 @@ fn introduced_device(
         | MembershipHistoryMessage::RestrictedEventV3(_)
         | MembershipHistoryMessage::RestrictedDecisionV3(_) => return None,
     };
-    (&admission.identity_fingerprint == fingerprint).then(|| admission.device_id.clone())
+    identity
+        .fingerprint_matches(public_key, &admission.identity_fingerprint)
+        .then(|| admission.device_id.clone())
 }
 
 async fn write_message(
@@ -476,15 +536,15 @@ async fn write_message(
     payload: &[u8],
 ) -> Result<(), MembershipHistoryExchangeError> {
     let length = u32::try_from(payload.len())
-        .map_err(|_| transport_failure(DiagnosticErrorType::StreamFailed))?;
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::StreamFailed, error))?;
     send.write_all(&length.to_be_bytes())
         .await
-        .map_err(|_| transport_failure(DiagnosticErrorType::StreamFailed))?;
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::StreamFailed, error))?;
     send.write_all(payload)
         .await
-        .map_err(|_| transport_failure(DiagnosticErrorType::StreamFailed))?;
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::StreamFailed, error))?;
     send.finish()
-        .map_err(|_| transport_failure(DiagnosticErrorType::StreamFailed))
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::StreamFailed, error))
 }
 
 async fn read_byte(
@@ -493,8 +553,8 @@ async fn read_byte(
     let mut value = [0; 1];
     tokio::time::timeout(IO_TIMEOUT, receive.read_exact(&mut value))
         .await
-        .map_err(|_| transport_failure(DiagnosticErrorType::Timeout))?
-        .map_err(|_| transport_failure(DiagnosticErrorType::StreamFailed))?;
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::Timeout, error))?
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::StreamFailed, error))?;
     Ok(value[0])
 }
 
@@ -504,14 +564,14 @@ async fn read_message(
     let mut length = [0; 4];
     tokio::time::timeout(IO_TIMEOUT, receive.read_exact(&mut length))
         .await
-        .map_err(|_| transport_failure(DiagnosticErrorType::Timeout))?
-        .map_err(|_| transport_failure(DiagnosticErrorType::StreamFailed))?;
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::Timeout, error))?
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::StreamFailed, error))?;
     let length = checked_message_length(u32::from_be_bytes(length) as usize)?;
     let mut payload = vec![0; length];
     tokio::time::timeout(IO_TIMEOUT, receive.read_exact(&mut payload))
         .await
-        .map_err(|_| transport_failure(DiagnosticErrorType::Timeout))?
-        .map_err(|_| transport_failure(DiagnosticErrorType::StreamFailed))?;
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::Timeout, error))?
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::StreamFailed, error))?;
     Ok(payload)
 }
 
@@ -524,6 +584,11 @@ fn checked_message_length(length: usize) -> Result<usize, MembershipHistoryExcha
 
 async fn reject(send: &mut iroh::endpoint::SendStream) {
     let _ = send.write_all(&[REJECTED]).await;
+    let _ = send.finish();
+}
+
+async fn busy(send: &mut iroh::endpoint::SendStream) {
+    let _ = send.write_all(&[BUSY]).await;
     let _ = send.finish();
 }
 
@@ -581,8 +646,10 @@ mod tests {
         }
     }
 
+    use super::super::inbound_peer::PeerIdentityResolver;
     use opentelemetry::trace::TracerProvider as _;
     use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+    use std::sync::Arc;
     use tracing_subscriber::layer::SubscriberExt;
     use uc_core::ids::DeviceId;
     use uc_core::membership::{
@@ -590,20 +657,29 @@ mod tests {
         MembershipHistoryMessage, ED25519_SIGNATURE_ALGORITHM_V1,
         MAX_MEMBERSHIP_HISTORY_FRAME_SIZE,
     };
+    use uc_core::ports::security::IdentityFingerprintFactoryPort;
     use uc_core::security::IdentityFingerprint;
 
     use super::{
-        checked_message_length, decode_message, decode_request, encode_message, encode_request,
-        introduced_device, MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
+        checked_message_length, decode_message, decode_request, decode_response_status,
+        encode_message, encode_request, introduced_device, BUSY, MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
     };
 
     #[test]
+    fn history_busy_status_is_retryable_for_new_clients() {
+        assert!(matches!(
+            decode_response_status(BUSY),
+            Err(uc_core::membership::MembershipHistoryExchangeError::PairingInProgress)
+        ));
+    }
+
+    #[test]
     fn history_frame_length_accepts_the_boundary_and_rejects_oversize_before_allocation() {
-        assert_eq!(checked_message_length(1), Ok(1));
-        assert_eq!(
+        assert!(matches!(checked_message_length(1), Ok(1)));
+        assert!(matches!(
             checked_message_length(MAX_MEMBERSHIP_HISTORY_FRAME_SIZE),
             Ok(MAX_MEMBERSHIP_HISTORY_FRAME_SIZE)
-        );
+        ));
         assert!(checked_message_length(0).is_err());
         assert!(checked_message_length(MAX_MEMBERSHIP_HISTORY_FRAME_SIZE + 1).is_err());
     }
@@ -722,6 +798,50 @@ mod tests {
             .unwrap_or_else(|_| panic!("test fingerprint must be valid"))
     }
 
+    struct FixedFingerprint(IdentityFingerprint);
+
+    impl IdentityFingerprintFactoryPort for FixedFingerprint {
+        fn from_public_key(&self, _: &[u8]) -> anyhow::Result<IdentityFingerprint> {
+            Ok(self.0.clone())
+        }
+    }
+
+    struct UnusedMembers;
+
+    crate::network::iroh::inbound_peer::member_table_identity_directory!(UnusedMembers);
+    #[async_trait::async_trait]
+    impl uc_core::membership::MemberRepositoryPort for UnusedMembers {
+        async fn get(
+            &self,
+            _: &DeviceId,
+        ) -> Result<Option<uc_core::membership::SpaceMember>, uc_core::membership::MembershipError>
+        {
+            panic!("unused")
+        }
+        async fn list(
+            &self,
+        ) -> Result<Vec<uc_core::membership::SpaceMember>, uc_core::membership::MembershipError>
+        {
+            panic!("unused")
+        }
+        async fn save(
+            &self,
+            _: &uc_core::membership::SpaceMember,
+        ) -> Result<(), uc_core::membership::MembershipError> {
+            panic!("unused")
+        }
+        async fn remove(&self, _: &DeviceId) -> Result<bool, uc_core::membership::MembershipError> {
+            panic!("unused")
+        }
+    }
+
+    fn resolver(fingerprint: IdentityFingerprint) -> PeerIdentityResolver {
+        PeerIdentityResolver::new(
+            Arc::new(UnusedMembers),
+            Arc::new(FixedFingerprint(fingerprint)),
+        )
+    }
+
     fn admission_facts(
         device: &str,
         identity_fingerprint: IdentityFingerprint,
@@ -743,7 +863,10 @@ mod tests {
     fn unknown_member_cannot_introduce_itself_with_a_regular_history_message() {
         let message = MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Invalid);
 
-        assert_eq!(introduced_device(&message, &fingerprint()), None);
+        assert_eq!(
+            introduced_device(&message, &resolver(fingerprint()), &[0; 32]),
+            None
+        );
     }
 
     #[test]
@@ -762,7 +885,10 @@ mod tests {
                 sender_admission: facts,
             });
 
-        assert_eq!(introduced_device(&message, &fingerprint()), Some(expected));
+        assert_eq!(
+            introduced_device(&message, &resolver(fingerprint()), &[0; 32]),
+            Some(expected)
+        );
     }
 
     #[test]
@@ -782,6 +908,9 @@ mod tests {
         let other = IdentityFingerprint::from_display_string("QRST-UVWX-YZAB-CDEF")
             .unwrap_or_else(|_| panic!("test fingerprint must be valid"));
 
-        assert_eq!(introduced_device(&message, &other), None);
+        assert_eq!(
+            introduced_device(&message, &resolver(other), &[0; 32]),
+            None
+        );
     }
 }

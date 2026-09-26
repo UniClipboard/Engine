@@ -44,14 +44,14 @@ impl ProfileLifecycleRepository {
         let Some(bytes) = self
             .secure_storage
             .get(PROFILE_LIFECYCLE_MARKER_NAME)
-            .map_err(|_| ProfileLifecycleRepositoryError::Unavailable)?
+            .map_err(ProfileLifecycleRepositoryError::unavailable_from)?
         else {
             return Ok(None);
         };
         let marker: ProfileLifecycleMarkerV1 =
-            postcard::from_bytes(&bytes).map_err(|_| ProfileLifecycleRepositoryError::Corrupt)?;
+            postcard::from_bytes(&bytes).map_err(ProfileLifecycleRepositoryError::corrupt_from)?;
         if marker.marker_format_version != PROFILE_LIFECYCLE_MARKER_FORMAT_V1 {
-            return Err(ProfileLifecycleRepositoryError::Corrupt);
+            return Err(ProfileLifecycleRepositoryError::corrupt());
         }
         Ok(Some(marker))
     }
@@ -59,15 +59,15 @@ impl ProfileLifecycleRepository {
     fn persist(&self, lifecycle: &ProfileLifecycle) -> Result<(), ProfileLifecycleRepositoryError> {
         let marker = marker_from_lifecycle(lifecycle);
         let bytes =
-            postcard::to_stdvec(&marker).map_err(|_| ProfileLifecycleRepositoryError::Corrupt)?;
+            postcard::to_stdvec(&marker).map_err(ProfileLifecycleRepositoryError::corrupt_from)?;
         self.secure_storage
             .set(PROFILE_LIFECYCLE_MARKER_NAME, &bytes)
-            .map_err(|_| ProfileLifecycleRepositoryError::Unavailable)?;
+            .map_err(ProfileLifecycleRepositoryError::unavailable_from)?;
         let reopened = self
             .load_marker()?
-            .ok_or(ProfileLifecycleRepositoryError::Unavailable)?;
+            .ok_or_else(ProfileLifecycleRepositoryError::unavailable)?;
         if reopened != marker {
-            return Err(ProfileLifecycleRepositoryError::Corrupt);
+            return Err(ProfileLifecycleRepositoryError::corrupt());
         }
         Ok(())
     }
@@ -86,7 +86,8 @@ impl ProfileLifecycleRepositoryPort for ProfileLifecycleRepository {
         let _guard = self
             .write_lock
             .lock()
-            .map_err(|_| ProfileLifecycleRepositoryError::Unavailable)?;
+            // 锁中毒：PoisonError 持有 guard，不能作为来源保存。
+            .map_err(|_| ProfileLifecycleRepositoryError::unavailable())?;
         let current = self.load()?;
         if current.as_ref() != expected {
             return Err(ProfileLifecycleRepositoryError::Conflict);
@@ -198,9 +199,9 @@ mod tests {
         repository.compare_and_swap(None, &ready).unwrap();
 
         let stale = ProfileLifecycle::new(ProfileGeneration::from_bytes([9; 16]));
-        assert_eq!(
+        assert!(matches!(
             repository.compare_and_swap(Some(&stale), &ready),
             Err(ProfileLifecycleRepositoryError::Conflict)
-        );
+        ));
     }
 }

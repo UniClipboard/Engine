@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>取消一台设备的配对：时序与收尾</title>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root { --paper:#f5f5f5; --ink:#2d3142; --muted:#4f5d75; --soft:#7a8399; --accent:#eb6c36; --rule:rgba(45,49,66,.12); }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--paper); color:var(--ink); font-family:Geist,"PingFang SC","Microsoft YaHei",sans-serif; }
+    main { width:min(1080px,calc(100% - 32px)); margin:auto; padding:36px 0; }
+    .eyebrow { color:var(--muted); font:500 12px "Geist Mono",monospace; letter-spacing:.08em; }
+    h1 { margin:8px 0 12px; font:400 32px "Instrument Serif","Songti SC",serif; }
+    .intro { margin:0 0 20px; color:var(--muted); font-size:14px; line-height:1.7; }
+    .canvas { overflow-x:auto; }
+    svg { display:block; width:100%; min-width:960px; height:auto; }
+    .actor { fill:#fff; stroke:var(--ink); stroke-width:1; }
+    .actor-name { fill:var(--ink); font:600 16px Geist,"PingFang SC",sans-serif; }
+    .life { stroke:rgba(45,49,66,.3); stroke-width:1; stroke-dasharray:4 4; }
+    .msg { stroke:var(--muted); stroke-width:1.2; fill:none; }
+    .reply { stroke-dasharray:4 4; }
+    .headline { stroke:var(--accent); stroke-width:1.5; }
+    .label { fill:var(--ink); font:12px Geist,"PingFang SC",sans-serif; }
+    .small { fill:var(--muted); font:12px Geist,"PingFang SC",sans-serif; }
+    .tag { fill:var(--muted); font:500 8px "Geist Mono",monospace; }
+    .branch { fill:rgba(45,49,66,.02); stroke:rgba(45,49,66,.22); stroke-width:1; }
+    .notes { display:grid; grid-template-columns:1fr 1fr; gap:20px; border-top:1px solid var(--rule); padding-top:16px; margin-top:16px; font-size:14px; line-height:1.7; }
+    .notes h2 { margin:0 0 8px; font-size:15px; }
+    .notes p { margin:0; }
+    footer { border-top:1px solid var(--rule); margin-top:20px; padding-top:12px; color:var(--muted); font-size:12px; line-height:1.6; }
+    @media(max-width:700px) { h1{font-size:28px} .notes{grid-template-columns:1fr} }
+  </style>
+</head>
+<body><main>
+  <p class="eyebrow">04 / SEQUENCE / CURRENT CANCELLATION</p>
+  <h1>取消一台设备的配对</h1>
+  <p class="intro">这里的“取消”是加入方撤销当前 Join 尝试，不是移除一台已经正式入组的设备。时间从上到下。</p>
+  <div class="canvas"><svg viewBox="0 0 1040 848" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="cancel-sequence-title cancel-sequence-desc">
+    <title id="cancel-sequence-title">取消一台设备的配对时序</title>
+    <desc id="cancel-sequence-desc">用户发起取消后，Joiner 按持久阶段选择本机终止或旧版 CancelRequested。正常有界尝试先保存终止，再由恢复流程进行本机隔离、Abandonment 通知和 Sponsor 精确清理。正式成员提交后不能简单回滚，而由证据驱动的撤销责任处理。</desc>
+    <defs>
+      <marker id="cancel-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#4f5d75"/></marker>
+      <marker id="cancel-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#eb6c36"/></marker>
+      <marker id="cancel-open" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polyline points="0 0,8 3,0 6" fill="none" stroke="#4f5d75" stroke-width="1.2"/></marker>
+    </defs>
+    <rect width="1040" height="848" fill="#f5f5f5"/>
+    <line class="life" x1="128" y1="112" x2="128" y2="756"/>
+    <line class="life" x1="384" y1="112" x2="384" y2="756"/>
+    <line class="life" x1="640" y1="112" x2="640" y2="756"/>
+    <line class="life" x1="896" y1="112" x2="896" y2="756"/>
+
+    <line class="msg" x1="128" y1="148" x2="384" y2="148" marker-end="url(#cancel-arrow)"/>
+    <line class="msg reply" x1="384" y1="192" x2="128" y2="192" marker-end="url(#cancel-arrow)"/>
+
+    <rect class="branch" x="256" y="224" width="768" height="480" rx="4"/>
+    <line x1="264" y1="488" x2="1016" y2="488" stroke="rgba(45,49,66,.22)" stroke-width="1" stroke-dasharray="4 4"/>
+    <line class="msg" x1="384" y1="336" x2="640" y2="336" marker-end="url(#cancel-arrow)"/>
+    <line class="msg" x1="640" y1="408" x2="896" y2="408" marker-end="url(#cancel-arrow)"/>
+    <line class="msg reply" x1="896" y1="452" x2="640" y2="452" marker-end="url(#cancel-arrow)"/>
+    <line class="msg" x1="384" y1="572" x2="896" y2="572" marker-end="url(#cancel-arrow)"/>
+    <line class="msg reply" x1="896" y1="628" x2="384" y2="628" marker-end="url(#cancel-arrow)"/>
+
+    <rect class="actor" x="32" y="48" width="192" height="64" rx="6"/>
+    <rect class="actor" x="288" y="48" width="192" height="64" rx="6"/>
+    <rect class="actor" x="544" y="48" width="192" height="64" rx="6"/>
+    <rect class="actor" x="800" y="48" width="192" height="64" rx="6"/>
+    <text class="actor-name" x="128" y="88" text-anchor="middle">用户 / 宿主</text>
+    <text class="actor-name" x="384" y="88" text-anchor="middle">Joiner</text>
+    <text class="actor-name" x="640" y="88" text-anchor="middle">恢复与清理</text>
+    <text class="actor-name" x="896" y="88" text-anchor="middle">Sponsor</text>
+
+    <text class="label" x="256" y="136" text-anchor="middle">CancelSpaceJoin(join_id)</text>
+    <text class="small" x="256" y="180" text-anchor="middle">返回本机持久状态；不承诺对端已清理</text>
+    <rect x="256" y="224" width="48" height="16" rx="2" fill="#f5f5f5" stroke="rgba(45,49,66,.22)"/>
+    <text class="tag" x="280" y="236" text-anchor="middle">ALT</text>
+    <text class="tag" x="320" y="256">[当前有界尝试：可本机终止]</text>
+    <rect x="312" y="268" width="224" height="48" rx="6" fill="#fdf1eb" stroke="#eb6c36" stroke-width="1"/>
+    <text class="label" x="424" y="288" text-anchor="middle">先保存 Terminated</text>
+    <text class="small" x="424" y="308" text-anchor="middle">保留围栏与清理义务</text>
+    <text class="label" x="512" y="324" text-anchor="middle">唤醒 recover_pending</text>
+    <text class="small" x="320" y="380">若有本机切换计划，先隔离目标 Space</text>
+    <text class="label" x="768" y="396" text-anchor="middle">Abandonment（可重试）</text>
+    <text class="label" x="768" y="440" text-anchor="middle">Abandoned（或安全停止条件）</text>
+    <text class="tag" x="320" y="512">[仅旧记录特定 Candidate / Prepared 路径]</text>
+    <text class="small" x="320" y="540">保存 Cancelling，等待对端明确拒绝</text>
+    <text class="label" x="640" y="560" text-anchor="middle">CancelRequested</text>
+    <text class="label" x="640" y="616" text-anchor="middle">Rejected(Cancelled)</text>
+    <text class="small" x="320" y="668">保存 Rejected；若重启则恢复同一交换</text>
+
+    <line x1="32" y1="776" x2="1008" y2="776" stroke="rgba(45,49,66,.12)" stroke-width=".8"/>
+    <text class="tag" x="32" y="808">COMMIT BOUNDARY</text>
+    <text class="small" x="232" y="808">正式 Add 不因取消或五分钟期限自动回滚；如有精确清理义务，核对证据后才撤销。</text>
+  </svg></div>
+  <div class="notes">
+    <div><h2>取消不等于移除成员</h2><p>对端没有正式加入时，只结算该次准入尝试。若已经存在正式 Add，清理必须核对那次成员绑定；确实已提交才追加 Remove，随后由成员维护继续执行效果。</p></div>
+    <div><h2>最晚边界与离线</h2><p>当前有界尝试的本机终止以持久状态为准；普通 <code>request_cancel</code> 对已 <code>Committed</code>、<code>Applied</code> 或 <code>Activating</code> 返回 <code>TooLateCommitted</code>。断线后可重试通知，但到期停发不等于对端确认。</p></div>
+  </div>
+  <footer>来源：docs/design-docs/pairing-lifecycle.md；Core 的 can_terminate_locally/request_cancel；Application 的 cancel_join/recover_pending。图是当前实现，不是 049 成员 Owner 目标态。</footer>
+</main></body>
+</html>

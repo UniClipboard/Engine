@@ -29,28 +29,28 @@ where
         self.store
             .get_member(device_id_value)
             .await
-            .map_err(|error| MembershipError::Repository(error.to_string()))
+            .map_err(|error| MembershipError::Repository(error.into()))
     }
 
     async fn list(&self) -> Result<Vec<SpaceMember>, MembershipError> {
         self.store
             .list_members()
             .await
-            .map_err(|error| MembershipError::Repository(error.to_string()))
+            .map_err(|error| MembershipError::Repository(error.into()))
     }
 
     async fn save(&self, member: &SpaceMember) -> Result<(), MembershipError> {
         self.store
             .save_member(member)
             .await
-            .map_err(|error| MembershipError::Repository(error.to_string()))
+            .map_err(|error| MembershipError::Repository(error.into()))
     }
 
     async fn remove(&self, device_id_value: &DeviceId) -> Result<bool, MembershipError> {
         self.store
             .remove_member(device_id_value)
             .await
-            .map_err(|error| MembershipError::Repository(error.to_string()))
+            .map_err(|error| MembershipError::Repository(error.into()))
     }
 }
 

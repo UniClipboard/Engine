@@ -7,16 +7,32 @@ use uc_core::pairing::invitation::FullInvitation;
 const FULL_INVITATION_PREFIX: &str = "ucspace1_";
 const FULL_INVITATION_FORMAT_V1: u16 = 1;
 const MAX_ROUTE_LEN: usize = 64 * 1024;
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum FullInvitationCodecError {
     #[error("the full invitation route is invalid")]
     InvalidRoute,
     #[error("the full invitation encoding is invalid")]
-    InvalidEncoding,
+    InvalidEncoding {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("the full invitation version is unsupported")]
     UnsupportedVersion,
     #[error("the full invitation has expired")]
     Expired,
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl FullInvitationCodecError {
+    pub fn invalid_encoding() -> Self {
+        Self::InvalidEncoding { source: None }
+    }
+
+    pub fn invalid_encoding_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::InvalidEncoding {
+            source: Some(source.into()),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -61,12 +77,12 @@ pub(crate) fn encode_full_invitation(
         route: route.to_vec(),
         expires_at_ms,
     })
-    .map_err(|_| FullInvitationCodecError::InvalidEncoding)?;
+    .map_err(FullInvitationCodecError::invalid_encoding_from)?;
     FullInvitation::new(format!(
         "{FULL_INVITATION_PREFIX}{}",
         URL_SAFE_NO_PAD.encode(encoded)
     ))
-    .map_err(|_| FullInvitationCodecError::InvalidEncoding)
+    .map_err(FullInvitationCodecError::invalid_encoding_from)
 }
 
 pub(crate) fn decode_full_invitation(
@@ -76,17 +92,17 @@ pub(crate) fn decode_full_invitation(
     let encoded = invitation
         .as_str()
         .strip_prefix(FULL_INVITATION_PREFIX)
-        .ok_or(FullInvitationCodecError::InvalidEncoding)?;
+        .ok_or_else(FullInvitationCodecError::invalid_encoding)?;
     let bytes = URL_SAFE_NO_PAD
         .decode(encoded)
-        .map_err(|_| FullInvitationCodecError::InvalidEncoding)?;
+        .map_err(FullInvitationCodecError::invalid_encoding_from)?;
     let decoded: FullInvitationV1 =
-        postcard::from_bytes(&bytes).map_err(|_| FullInvitationCodecError::InvalidEncoding)?;
+        postcard::from_bytes(&bytes).map_err(FullInvitationCodecError::invalid_encoding_from)?;
     if decoded.format_version != FULL_INVITATION_FORMAT_V1 {
         return Err(FullInvitationCodecError::UnsupportedVersion);
     }
     let invitation_id = InvitationId::from_bytes(decoded.invitation_id)
-        .ok_or(FullInvitationCodecError::InvalidEncoding)?;
+        .ok_or_else(FullInvitationCodecError::invalid_encoding)?;
     validate_route(&decoded.route)?;
     if now_ms >= decoded.expires_at_ms {
         return Err(FullInvitationCodecError::Expired);
@@ -107,7 +123,7 @@ pub(crate) fn decode_invitation_entry(
         return Ok(None);
     }
     let invitation = FullInvitation::new(value.to_owned())
-        .map_err(|_| FullInvitationCodecError::InvalidEncoding)?;
+        .map_err(FullInvitationCodecError::invalid_encoding_from)?;
     decode_full_invitation(&invitation, now_ms).map(Some)
 }
 
@@ -129,14 +145,14 @@ mod tests {
 
     #[test]
     fn full_invitation_rejects_invalid_route_and_expiry() {
-        assert_eq!(
+        assert!(matches!(
             encode_full_invitation(invitation_id(), &[], 100),
             Err(FullInvitationCodecError::InvalidRoute)
-        );
-        assert_eq!(
+        ));
+        assert!(matches!(
             encode_full_invitation(invitation_id(), &[0x52; MAX_ROUTE_LEN + 1], 100),
             Err(FullInvitationCodecError::InvalidRoute)
-        );
+        ));
 
         let invitation =
             encode_full_invitation(invitation_id(), b"route", 100).expect("valid full invitation");
@@ -151,7 +167,7 @@ mod tests {
         let malformed = FullInvitation::new("not-a-full-invitation").expect("bounded fixture");
         assert!(matches!(
             decode_full_invitation(&malformed, 0),
-            Err(FullInvitationCodecError::InvalidEncoding)
+            Err(FullInvitationCodecError::InvalidEncoding { .. })
         ));
 
         let encoded = postcard::to_stdvec(&FullInvitationV1 {

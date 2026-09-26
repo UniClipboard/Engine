@@ -47,14 +47,14 @@ where
                     .filter(plaintext_hash.eq(&hash_hex))
                     .first::<BlobReferenceRow>(conn)
                     .optional()
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))
+                    .map_err(anyhow::Error::new)
             })
-            .map_err(|e| BlobReferenceError::Repository(e.to_string()))?;
+            .map_err(|e| BlobReferenceError::Repository(e.context("find blob reference").into()))?;
 
         row.as_ref()
             .map(|r| self.mapper.digest_from_row(r))
             .transpose()
-            .map_err(|e| BlobReferenceError::Repository(e.to_string()))
+            .map_err(|e| BlobReferenceError::Repository(e.context("find blob reference").into()))
     }
 
     async fn save(
@@ -72,11 +72,10 @@ where
                     .on_conflict(plaintext_hash)
                     .do_update()
                     .set((digest.eq(row.digest.clone()), created_at.eq(row.created_at)))
-                    .execute(conn)
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                    .execute(conn)?;
                 Ok(())
             })
-            .map_err(|e| BlobReferenceError::Repository(e.to_string()))
+            .map_err(|e| BlobReferenceError::Repository(e.context("save blob reference").into()))
     }
 
     async fn forget(&self, hash: &PlaintextHash) -> Result<(), BlobReferenceError> {
@@ -84,11 +83,10 @@ where
         self.executor
             .run(move |conn| {
                 diesel::delete(blob_reference.filter(plaintext_hash.eq(&hash_hex)))
-                    .execute(conn)
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                    .execute(conn)?;
                 Ok(())
             })
-            .map_err(|e| BlobReferenceError::Repository(e.to_string()))
+            .map_err(|e| BlobReferenceError::Repository(e.context("forget blob reference").into()))
     }
 }
 
@@ -125,6 +123,28 @@ mod tests {
 
         let loaded = repo.find_by_plaintext_hash(&plaintext).await.unwrap();
         assert_eq!(loaded, Some(ciphertext));
+    }
+
+    #[tokio::test]
+    async fn storage_failure_keeps_the_diesel_error_in_the_source_chain() {
+        let tempdir = tempdir().unwrap();
+        let database_url = tempdir.path().join("blob-reference.sqlite");
+        let pool = init_db_pool(database_url.to_str().unwrap()).unwrap();
+        let repo = DieselBlobReferenceRepository::new(DieselSqliteExecutor::new(pool.clone()));
+        diesel::sql_query("DROP TABLE blob_reference")
+            .execute(&mut pool.get().unwrap())
+            .unwrap();
+
+        let error = repo.find_by_plaintext_hash(&hash(0x44)).await.unwrap_err();
+
+        assert!(matches!(error, BlobReferenceError::Repository(_)));
+        let mut source = std::error::Error::source(&error);
+        let mut found = false;
+        while let Some(current) = source {
+            found |= current.downcast_ref::<diesel::result::Error>().is_some();
+            source = current.source();
+        }
+        assert!(found, "diesel error must stay reachable");
     }
 
     #[tokio::test]

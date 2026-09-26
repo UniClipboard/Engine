@@ -66,6 +66,7 @@ use uuid::Uuid;
 use uc_core::mobile_sync::{StagedFile, StagedFileUri, StagingHandle};
 use uc_core::ports::inbound_file_target::ReserveInboundFileTargetPort;
 use uc_core::ports::{MobileFileStagingError, MobileFileStagingPort};
+use uc_observability_contract::error_source::io_error_kind;
 
 /// 子目录名 —— `<cache_root>/mobile_inbound/<scope_id>/<file>`。
 const STAGING_SUBDIR: &str = "mobile_inbound";
@@ -134,15 +135,12 @@ impl FilesystemMobileFileStaging {
     ) -> Arc<Self> {
         if let Err(err) = std::fs::create_dir_all(&cache_root) {
             warn!(
-                cache_root = %cache_root.display(),
-                error = %err,
+                error_kind = "cache_root_create",
+                io_error_kind = io_error_kind(&err),
                 "mobile_sync staging: failed to ensure cache_root exists at startup"
             );
         }
-        debug!(
-            cache_root = %cache_root.display(),
-            "mobile_sync staging: adapter ready"
-        );
+        debug!("mobile_sync staging: adapter ready");
         Arc::new(Self {
             cache_root,
             target_reserver,
@@ -182,10 +180,7 @@ impl FilesystemMobileFileStaging {
         let scope_segment = sanitize_scope(scope_id);
         let entry_dir = self.staging_root().join(&scope_segment);
         tokio::fs::create_dir_all(&entry_dir).await.map_err(|e| {
-            MobileFileStagingError::Io(format!(
-                "create staging dir {} failed: {e}",
-                entry_dir.display()
-            ))
+            MobileFileStagingError::Io(anyhow::Error::from(e).context("create staging dir").into())
         })?;
         let path = entry_dir.join(&sanitized);
         Ok(ResolvedWritePath {
@@ -200,14 +195,15 @@ impl FilesystemMobileFileStaging {
 impl MobileFileStagingPort for FilesystemMobileFileStaging {
     async fn discard_staged_file(&self, staged: &StagedFile) -> Result<(), MobileFileStagingError> {
         let url = url::Url::parse(staged.uri.as_str())
-            .map_err(|error| MobileFileStagingError::Io(error.to_string()))?;
+            .map_err(|error| MobileFileStagingError::Io(Box::new(error)))?;
         let path = url
             .to_file_path()
-            .map_err(|_| MobileFileStagingError::Io("staged file URI is not local".to_owned()))?;
+            // to_file_path 的错误类型是 ()，没有可保存的来源。
+            .map_err(|_| MobileFileStagingError::Io("staged file URI is not local".into()))?;
         match tokio::fs::remove_file(path).await {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(MobileFileStagingError::Io(error.to_string())),
+            Err(error) => Err(MobileFileStagingError::Io(Box::new(error))),
         }
     }
 
@@ -215,33 +211,32 @@ impl MobileFileStagingPort for FilesystemMobileFileStaging {
         // 解析 URI → path。url 的 `to_file_path` 自动 percent decode +
         // 跨平台(Windows 盘符 / Linux/macOS 普通路径都吃)。
         let parsed = url::Url::parse(uri).map_err(|e| {
-            MobileFileStagingError::Io(format!("URI parse failed for {uri:?}: {e}"))
+            MobileFileStagingError::Io(
+                anyhow::Error::from(e)
+                    .context("parse staged file URI")
+                    .into(),
+            )
         })?;
+        // to_file_path 的错误类型是 ()，没有可保存的来源；文本不带 URI。
         let path = parsed.to_file_path().map_err(|_| {
-            MobileFileStagingError::Io(format!(
-                "URI is not a file:// URL or has no usable path: {uri:?}"
-            ))
+            MobileFileStagingError::Io("URI is not a file:// URL or has no usable path".into())
         })?;
 
         let bytes = tokio::fs::read(&path).await.map_err(|err| {
             if err.kind() == std::io::ErrorKind::NotFound {
-                debug!(
-                    uri = %uri,
-                    path = %path.display(),
-                    "mobile_sync staging: read_by_uri path not found"
-                );
+                debug!("mobile_sync staging: read_by_uri path not found");
                 MobileFileStagingError::NotFound
             } else {
-                MobileFileStagingError::Io(format!("read {} failed: {err}", path.display()))
+                MobileFileStagingError::Io(
+                    anyhow::Error::from(err).context("read staged file").into(),
+                )
             }
         })?;
         let bytes_len = bytes.len();
         if matches!(bytes_len, 0) {
-            debug!(uri = %uri, "mobile_sync staging: read_by_uri served empty file");
+            debug!("mobile_sync staging: read_by_uri served empty file");
         } else {
             debug!(
-                uri = %uri,
-                path = %path.display(),
                 bytes = bytes_len,
                 "mobile_sync staging: read_by_uri served file bytes"
             );
@@ -272,25 +267,21 @@ impl MobileFileStagingPort for FilesystemMobileFileStaging {
             if let Err(rm) = tokio::fs::remove_file(&resolved.path).await {
                 if rm.kind() != std::io::ErrorKind::NotFound {
                     warn!(
-                        path = %resolved.path.display(),
-                        error = %rm,
+                        error_kind = "partial_file_remove",
+                        io_error_kind = io_error_kind(&rm),
                         "mobile_sync staging: failed to remove partial file after write error"
                     );
                 }
             }
-            return Err(MobileFileStagingError::Io(format!(
-                "write staging file {} failed: {e}",
-                resolved.path.display()
-            )));
+            return Err(MobileFileStagingError::Io(
+                anyhow::Error::from(e).context("write staging file").into(),
+            ));
         }
 
         let uri = path_to_file_uri(&resolved.path)?;
         debug!(
-            data_name = %data_name,
-            sanitized = %resolved.name,
             mime = %mime,
             bytes = bytes_len,
-            uri = %uri,
             "mobile_sync staging: file written"
         );
 
@@ -313,10 +304,7 @@ impl MobileFileStagingPort for FilesystemMobileFileStaging {
         // created by reserve_target (which already claimed a collision-free
         // name).
         let file = tokio::fs::File::create(&resolved.path).await.map_err(|e| {
-            MobileFileStagingError::Io(format!(
-                "create staging file {} failed: {e}",
-                resolved.path.display()
-            ))
+            MobileFileStagingError::Io(anyhow::Error::from(e).context("create staging file").into())
         })?;
 
         let handle = StagingHandle::new();
@@ -332,11 +320,7 @@ impl MobileFileStagingPort for FilesystemMobileFileStaging {
             },
         );
         debug!(
-            handle = %token,
-            data_name = %data_name,
-            sanitized = %resolved.name,
             mime = %mime,
-            path = %resolved.path.display(),
             "mobile_sync staging: streaming session opened"
         );
         Ok(handle)
@@ -353,16 +337,16 @@ impl MobileFileStagingPort for FilesystemMobileFileStaging {
         let token = handle.token();
         let mut sessions = self.open_sessions.lock().await;
         let session = sessions.get_mut(&token).ok_or_else(|| {
-            MobileFileStagingError::Io(format!(
-                "append_stage_chunk: unknown or already-consumed handle {token}"
-            ))
+            MobileFileStagingError::Io(
+                "append_stage_chunk: unknown or already-consumed handle".into(),
+            )
         })?;
         session.file.write_all(chunk).await.map_err(|e| {
-            MobileFileStagingError::Io(format!(
-                "append_stage_chunk write {} bytes to {} failed: {e}",
-                chunk.len(),
-                session.path.display()
-            ))
+            MobileFileStagingError::Io(
+                anyhow::Error::from(e)
+                    .context("append staging chunk")
+                    .into(),
+            )
         })?;
         Ok(())
     }
@@ -375,37 +359,25 @@ impl MobileFileStagingPort for FilesystemMobileFileStaging {
         let mut session = {
             let mut sessions = self.open_sessions.lock().await;
             sessions.remove(&token).ok_or_else(|| {
-                MobileFileStagingError::Io(format!(
-                    "finalize_stage: unknown or already-consumed handle {token}"
-                ))
+                MobileFileStagingError::Io(
+                    "finalize_stage: unknown or already-consumed handle".into(),
+                )
             })?
         };
         // flush + fsync:后续 SyncDoc 阶段会立即 add_path 给 iroh 发布,
         // 未 sync 的 page cache 在 crash 时可能丢,显式 sync_all 把这条 race
         // 关掉。代价是大文件多几十 ms,可接受。
         session.file.flush().await.map_err(|e| {
-            MobileFileStagingError::Io(format!(
-                "finalize_stage flush {} failed: {e}",
-                session.path.display()
-            ))
+            MobileFileStagingError::Io(anyhow::Error::from(e).context("flush staging file").into())
         })?;
         session.file.sync_all().await.map_err(|e| {
-            MobileFileStagingError::Io(format!(
-                "finalize_stage sync_all {} failed: {e}",
-                session.path.display()
-            ))
+            MobileFileStagingError::Io(anyhow::Error::from(e).context("sync staging file").into())
         })?;
         // 显式 drop 让 fd 释放(否则要等 session 出作用域)。
         drop(session.file);
 
         let uri = path_to_file_uri(&session.path)?;
-        debug!(
-            handle = %token,
-            sanitized = %session.sanitized_name,
-            path = %session.path.display(),
-            uri = %uri,
-            "mobile_sync staging: streaming session finalized"
-        );
+        debug!("mobile_sync staging: streaming session finalized");
         Ok(StagedFile {
             uri: StagedFileUri::new(uri),
             sanitized_name: session.sanitized_name,
@@ -433,9 +405,8 @@ impl MobileFileStagingPort for FilesystemMobileFileStaging {
             // 触发的 abort)。
             if err.kind() != std::io::ErrorKind::NotFound {
                 warn!(
-                    handle = %token,
-                    path = %session.path.display(),
-                    error = %err,
+                    error_kind = "partial_file_remove",
+                    io_error_kind = io_error_kind(&err),
                     "mobile_sync staging: abort_stage failed to remove partial file"
                 );
             }
@@ -449,18 +420,14 @@ impl MobileFileStagingPort for FilesystemMobileFileStaging {
         if let Some(scope_dir) = session.cleanup_dir.as_ref() {
             if let Err(err) = tokio::fs::remove_dir(scope_dir).await {
                 debug!(
-                    dir = %scope_dir.display(),
-                    error = %err,
+                    error_kind = "scope_dir_remove",
+                    io_error_kind = io_error_kind(&err),
                     "mobile_sync staging: scope dir not removed on abort (expected when non-empty)"
                 );
             }
         }
 
-        debug!(
-            handle = %token,
-            sanitized = %session.sanitized_name,
-            "mobile_sync staging: streaming session aborted"
-        );
+        debug!("mobile_sync staging: streaming session aborted");
     }
 }
 
@@ -470,12 +437,8 @@ impl MobileFileStagingPort for FilesystemMobileFileStaging {
 fn path_to_file_uri(path: &Path) -> Result<String, MobileFileStagingError> {
     url::Url::from_file_path(path)
         .map(|u| u.to_string())
-        .map_err(|_| {
-            MobileFileStagingError::Io(format!(
-                "failed to convert path to file URI: {}",
-                path.display()
-            ))
-        })
+        // from_file_path 的错误类型是 ()，没有可保存的来源；文本不带路径。
+        .map_err(|_| MobileFileStagingError::Io("failed to convert path to file URI".into()))
 }
 
 /// `data_name` 来自 iPhone 上传(可能含 `/` `\` `..` 等),adapter 必须取
@@ -768,10 +731,17 @@ mod tests {
         let adapter = make_adapter(tmp.path());
 
         let err = adapter.read_by_uri("not a valid uri").await.unwrap_err();
-        assert!(
-            matches!(err, MobileFileStagingError::Io(_)),
-            "expected Io for malformed URI, got {err:?}"
-        );
+        let MobileFileStagingError::Io(source) = &err else {
+            panic!("expected Io for malformed URI, got {err:?}");
+        };
+        let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(source.as_ref());
+        let mut found = false;
+        while let Some(current) = cause {
+            found |= current.downcast_ref::<url::ParseError>().is_some();
+            cause = current.source();
+        }
+        assert!(found, "url::ParseError must stay in the source chain");
+        assert!(!format!("{err} {err:?}").contains("not a valid uri"));
     }
 
     // ── streaming stage tests ──────────────────────────────────────────────

@@ -69,7 +69,9 @@ where
                     .load::<RepRow>(conn)?;
                 Ok(Some(reps))
             })
-            .map_err(|e| ClipboardRepositoryError::Storage(e.to_string()))?;
+            .map_err(|e| {
+                ClipboardRepositoryError::Storage(e.context("check entry availability").into())
+            })?;
 
         // An entry that does not exist is never "available".
         let Some(reps) = reps else {

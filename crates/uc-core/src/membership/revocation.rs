@@ -398,6 +398,14 @@ pub struct PendingGroupUpdate {
     payload: Vec<u8>,
 }
 
+/// 空间安全资料投递的持久状态摘要。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupUpdateDeliveryStatus {
+    Completed,
+    Pending { next_attempt_at_ms: i64 },
+    Rejected,
+}
+
 impl PendingGroupUpdate {
     pub fn new(revocation_id: RevocationId, recipient: DeviceId, payload: Vec<u8>) -> Self {
         Self {
@@ -660,6 +668,19 @@ impl RevocationStage {
             .ok_or(KeyEpochError::RevocationRecipientNotFound)?;
         message.confirm(now_ms);
         Ok(())
+    }
+
+    /// 结清收件人已不在保留名单中的未确认消息，返回结清数量。
+    ///
+    /// 与“永久失联设备”同一条收尾语义：收件人失去成员资格后，本机不再为它保留
+    /// 投递责任。已确认的消息保留为既成事实。是否随之完成撤销由仓储按
+    /// `all_recipients_confirmed()` 判定，与逐个确认收件人走同一条完成路径。
+    pub fn settle_obsolete_recipients(&mut self, retained_recipients: &[DeviceId]) -> usize {
+        let before = self.outbox.len();
+        self.outbox.retain(|message| {
+            message.is_confirmed() || retained_recipients.contains(message.recipient())
+        });
+        before - self.outbox.len()
     }
 
     pub fn all_recipients_confirmed(&self) -> bool {
@@ -1355,10 +1376,16 @@ pub enum KeyEpochError {
     InvalidRevocationRecord,
 
     #[error("persisted security state could not be decrypted")]
-    DecryptionFailed,
+    DecryptionFailed {
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     #[error("persisted security state failed integrity validation")]
-    PersistedStateIntegrityFailed,
+    PersistedStateIntegrityFailed {
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     #[error("current space security state could not be installed")]
     SecurityState {
@@ -1389,6 +1416,31 @@ pub enum KeyEpochError {
 
     #[error("key epoch state rejected: {0:?}")]
     StateIssue(KeyEpochStateIssue),
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl KeyEpochError {
+    pub fn decryption_failed() -> Self {
+        Self::DecryptionFailed { source: None }
+    }
+
+    pub fn decryption_failed_from(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::DecryptionFailed {
+            source: Some(Box::new(source)),
+        }
+    }
+
+    pub fn persisted_state_integrity_failed() -> Self {
+        Self::PersistedStateIntegrityFailed { source: None }
+    }
+
+    pub fn persisted_state_integrity_failed_from(
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::PersistedStateIntegrityFailed {
+            source: Some(Box::new(source)),
+        }
+    }
 }
 
 impl std::fmt::Debug for KeyEpochError {

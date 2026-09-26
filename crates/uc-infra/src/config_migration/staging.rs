@@ -34,6 +34,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info};
 use uc_core::ports::SecureStoragePort;
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::security::PROFILE_SECRET_FILE_NAME;
 
@@ -93,7 +94,7 @@ impl SecretsFile {
 
     /// Serialize to pretty JSON bytes.
     pub fn to_json_bytes(&self) -> Result<Vec<u8>, StagingError> {
-        serde_json::to_vec_pretty(self).map_err(|_| StagingError::Serialize)
+        serde_json::to_vec_pretty(self).map_err(StagingError::serialize_from)
     }
 }
 
@@ -103,10 +104,39 @@ impl SecretsFile {
 pub enum StagingError {
     /// Filesystem write/cleanup failed.
     #[error("staging io failed")]
-    Io,
+    Io {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     /// Marker or member serialization failed.
     #[error("staging serialize failed")]
-    Serialize,
+    Serialize {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl StagingError {
+    pub fn io() -> Self {
+        Self::Io { source: None }
+    }
+
+    pub fn io_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Io {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn serialize() -> Self {
+        Self::Serialize { source: None }
+    }
+
+    pub fn serialize_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Serialize {
+            source: Some(source.into()),
+        }
+    }
 }
 
 /// Filesystem layout helper for the staging area, rooted at the data root.
@@ -148,27 +178,28 @@ impl StagingLayout {
         // Clear any prior attempt: marker first (so a crash here leaves no
         // marker), then the directory.
         if marker_path.exists() {
-            std::fs::remove_file(&marker_path).map_err(|_| StagingError::Io)?;
+            std::fs::remove_file(&marker_path).map_err(StagingError::io_from)?;
         }
         if staging.exists() {
-            std::fs::remove_dir_all(&staging).map_err(|_| StagingError::Io)?;
+            std::fs::remove_dir_all(&staging).map_err(StagingError::io_from)?;
         }
-        std::fs::create_dir_all(&staging).map_err(|_| StagingError::Io)?;
+        std::fs::create_dir_all(&staging).map_err(StagingError::io_from)?;
 
         for (member, bytes) in archive.iter() {
             let dest = staging.join(member);
             if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent).map_err(|_| StagingError::Io)?;
+                std::fs::create_dir_all(parent).map_err(StagingError::io_from)?;
             }
-            std::fs::write(&dest, bytes).map_err(|_| StagingError::Io)?;
+            std::fs::write(&dest, bytes).map_err(StagingError::io_from)?;
         }
 
         // Marker written last and atomically (tmp + rename) so its presence
         // implies a fully-written staging directory.
-        let marker_json = serde_json::to_vec_pretty(marker).map_err(|_| StagingError::Serialize)?;
+        let marker_json =
+            serde_json::to_vec_pretty(marker).map_err(StagingError::serialize_from)?;
         let tmp = marker_path.with_extension("json.tmp");
-        std::fs::write(&tmp, &marker_json).map_err(|_| StagingError::Io)?;
-        std::fs::rename(&tmp, &marker_path).map_err(|_| StagingError::Io)?;
+        std::fs::write(&tmp, &marker_json).map_err(StagingError::io_from)?;
+        std::fs::rename(&tmp, &marker_path).map_err(StagingError::io_from)?;
 
         Ok(())
     }
@@ -181,7 +212,7 @@ impl StagingLayout {
 pub fn decode_secret_value(b64: &str) -> Result<Vec<u8>, StagingError> {
     base64::engine::general_purpose::STANDARD
         .decode(b64)
-        .map_err(|_| StagingError::Serialize)
+        .map_err(StagingError::serialize_from)
 }
 
 /// Member path of the keyslot inside the bundle / staging area.
@@ -241,9 +272,9 @@ pub fn apply_pending_import(
     }
 
     info!("pending config import detected; applying staged bundle on boot");
-    let marker_bytes = std::fs::read(&marker_path).map_err(|_| PendingImportError::ReadMarker)?;
+    let marker_bytes = std::fs::read(&marker_path).map_err(PendingImportError::read_marker_from)?;
     let marker: PendingImportMarker =
-        serde_json::from_slice(&marker_bytes).map_err(|_| PendingImportError::ParseMarker)?;
+        serde_json::from_slice(&marker_bytes).map_err(PendingImportError::parse_marker_from)?;
     if marker.schema_ver != PENDING_IMPORT_SCHEMA_VER {
         error!(
             found_schema_ver = marker.schema_ver,
@@ -255,9 +286,9 @@ pub fn apply_pending_import(
 
     let staging_dir = layout.staging_dir();
     let secrets_bytes = std::fs::read(staging_dir.join(SECRETS_MEMBER))
-        .map_err(|_| PendingImportError::ReadSecrets)?;
+        .map_err(PendingImportError::read_secrets_from)?;
     let secrets: SecretsFile =
-        serde_json::from_slice(&secrets_bytes).map_err(|_| PendingImportError::ParseSecrets)?;
+        serde_json::from_slice(&secrets_bytes).map_err(PendingImportError::parse_secrets_from)?;
     info!(
         secret_count = secrets.secrets.len(),
         has_kek = marker.has_kek,
@@ -278,7 +309,8 @@ pub fn apply_pending_import(
         if let Err(error) = secure_storage.set(key, &bytes) {
             error!(
                 key_class = classify_secret_key(key),
-                error = %error,
+                error_kind = "staged_secret_write",
+                io_error_kind = io_error_kind(&error),
                 "writing staged secret into secure storage failed; aborting import apply, staging preserved"
             );
             return Ok(());
@@ -316,15 +348,15 @@ pub fn apply_pending_import(
         &app_data_root.join(UI_STATE_PREFIX.trim_end_matches('/')),
     )?;
 
-    std::fs::remove_dir_all(&staging_dir).map_err(|_| PendingImportError::Cleanup)?;
-    std::fs::remove_file(&marker_path).map_err(|_| PendingImportError::Cleanup)?;
+    std::fs::remove_dir_all(&staging_dir).map_err(PendingImportError::cleanup_from)?;
+    std::fs::remove_file(&marker_path).map_err(PendingImportError::cleanup_from)?;
     info!("staged config import applied; staging cleaned up");
     Ok(())
 }
 
 fn copy_member(staging_dir: &Path, member: &str, dest: &Path) -> Result<(), PendingImportError> {
     ensure_parent(dest)?;
-    std::fs::copy(staging_dir.join(member), dest).map_err(|_| PendingImportError::CopyMember)?;
+    std::fs::copy(staging_dir.join(member), dest).map_err(PendingImportError::copy_member_from)?;
     Ok(())
 }
 
@@ -338,7 +370,7 @@ fn copy_member_if_present(
         return Ok(());
     }
     ensure_parent(dest)?;
-    std::fs::copy(source, dest).map_err(|_| PendingImportError::CopyMember)?;
+    std::fs::copy(source, dest).map_err(PendingImportError::copy_member_from)?;
     Ok(())
 }
 
@@ -352,13 +384,13 @@ fn copy_member_or_remove(
         ensure_parent(dest)?;
         return match std::fs::copy(source, dest) {
             Ok(_) => Ok(()),
-            Err(_) => Err(PendingImportError::CopyMember),
+            Err(_) => Err(PendingImportError::copy_member()),
         };
     }
     match std::fs::remove_file(dest) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err(PendingImportError::CopyMember),
+        Err(_) => Err(PendingImportError::copy_member()),
     }
 }
 
@@ -371,9 +403,9 @@ fn copy_dir_members(
     if !source_dir.is_dir() {
         return Ok(());
     }
-    std::fs::create_dir_all(dest_dir).map_err(|_| PendingImportError::CopyMember)?;
-    for entry in std::fs::read_dir(source_dir).map_err(|_| PendingImportError::CopyMember)? {
-        let entry = entry.map_err(|_| PendingImportError::CopyMember)?;
+    std::fs::create_dir_all(dest_dir).map_err(PendingImportError::copy_member_from)?;
+    for entry in std::fs::read_dir(source_dir).map_err(PendingImportError::copy_member_from)? {
+        let entry = entry.map_err(PendingImportError::copy_member_from)?;
         if !entry
             .file_type()
             .map(|kind| kind.is_file())
@@ -382,14 +414,14 @@ fn copy_dir_members(
             continue;
         }
         std::fs::copy(entry.path(), dest_dir.join(entry.file_name()))
-            .map_err(|_| PendingImportError::CopyMember)?;
+            .map_err(PendingImportError::copy_member_from)?;
     }
     Ok(())
 }
 
 fn ensure_parent(dest: &Path) -> Result<(), PendingImportError> {
     if let Some(parent) = dest.parent().filter(|path| !path.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent).map_err(|_| PendingImportError::CopyMember)?;
+        std::fs::create_dir_all(parent).map_err(PendingImportError::copy_member_from)?;
     }
     Ok(())
 }
@@ -401,7 +433,7 @@ fn remove_stale_db_sidecars(db_path: &Path) -> Result<(), PendingImportError> {
         match std::fs::remove_file(PathBuf::from(name)) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(PendingImportError::CopyMember),
+            Err(_) => return Err(PendingImportError::copy_member()),
         }
     }
     Ok(())
@@ -417,17 +449,98 @@ fn classify_secret_key(key: &str) -> &'static str {
 #[derive(Debug, thiserror::Error)]
 pub enum PendingImportError {
     #[error("failed to read pending-import marker")]
-    ReadMarker,
+    ReadMarker {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("failed to parse pending-import marker")]
-    ParseMarker,
+    ParseMarker {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("failed to read staged secrets")]
-    ReadSecrets,
+    ReadSecrets {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("failed to parse staged secrets")]
-    ParseSecrets,
+    ParseSecrets {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("failed to copy a staged member into its live location")]
-    CopyMember,
+    CopyMember {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("failed to clean up staging after applying import")]
-    Cleanup,
+    Cleanup {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl PendingImportError {
+    pub fn read_marker() -> Self {
+        Self::ReadMarker { source: None }
+    }
+
+    pub fn read_marker_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::ReadMarker {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn parse_marker() -> Self {
+        Self::ParseMarker { source: None }
+    }
+
+    pub fn parse_marker_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::ParseMarker {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn read_secrets() -> Self {
+        Self::ReadSecrets { source: None }
+    }
+
+    pub fn read_secrets_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::ReadSecrets {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn parse_secrets() -> Self {
+        Self::ParseSecrets { source: None }
+    }
+
+    pub fn parse_secrets_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::ParseSecrets {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn copy_member() -> Self {
+        Self::CopyMember { source: None }
+    }
+
+    pub fn copy_member_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::CopyMember {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn cleanup() -> Self {
+        Self::Cleanup { source: None }
+    }
+
+    pub fn cleanup_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Cleanup {
+            source: Some(source.into()),
+        }
+    }
 }
 
 #[cfg(test)]

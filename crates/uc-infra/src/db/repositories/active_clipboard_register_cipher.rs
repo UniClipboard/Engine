@@ -43,18 +43,57 @@ pub enum ActiveRegisterCipherError {
     #[error("unsupported active-register consumable envelope version: {0}")]
     UnsupportedVersion(u8),
     #[error("active-register consumable serialization failed")]
-    Serialize,
+    Serialize {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("active-register consumable encryption failed")]
-    Encrypt,
+    Encrypt {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("active-register consumable verification failed")]
-    Decrypt,
+    Decrypt {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("active-register consumable payload is invalid")]
-    Deserialize,
+    Deserialize {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("V3 active-register protection failed")]
     V3 {
         #[source]
         source: anyhow::Error,
     },
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl ActiveRegisterCipherError {
+    pub fn decrypt_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Decrypt {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn deserialize_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Deserialize {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn encrypt_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Encrypt {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn serialize_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Serialize {
+            source: Some(source.into()),
+        }
+    }
 }
 
 pub(crate) struct V3ActiveClipboardRegisterCipher {
@@ -74,7 +113,7 @@ impl V3ActiveClipboardRegisterCipher {
             snapshot_hash: reference.snapshot_hash.clone(),
             entry_id: reference.entry_id.as_ref().to_string(),
         })
-        .map_err(|_| ActiveRegisterCipherError::Serialize)?;
+        .map_err(ActiveRegisterCipherError::serialize_from)?;
         self.protection
             .seal_for_active(&Plaintext::new(plaintext), &Aad::new(AAD.to_vec()))
             .await
@@ -99,7 +138,7 @@ impl V3ActiveClipboardRegisterCipher {
                 source: anyhow::Error::new(source).context("open V3 active register"),
             })?;
         let payload: ConsumableRefPayload = postcard::from_bytes(plaintext.as_bytes())
-            .map_err(|_| ActiveRegisterCipherError::Deserialize)?;
+            .map_err(ActiveRegisterCipherError::deserialize_from)?;
         Ok(MobileConsumableRef {
             snapshot_hash: payload.snapshot_hash,
             entry_id: EntryId::from(payload.entry_id.as_str()),
@@ -136,9 +175,9 @@ impl ActiveClipboardRegisterCipher {
             snapshot_hash: reference.snapshot_hash.clone(),
             entry_id: reference.entry_id.as_ref().to_string(),
         })
-        .map_err(|_| ActiveRegisterCipherError::Serialize)?;
+        .map_err(ActiveRegisterCipherError::serialize_from)?;
         let (nonce, ciphertext) = encrypt_xchacha_raw(&self.key, &plaintext, AAD)
-            .map_err(|_| ActiveRegisterCipherError::Encrypt)?;
+            .map_err(ActiveRegisterCipherError::encrypt_from)?;
         let mut envelope = Vec::with_capacity(HEADER_LEN + ciphertext.len());
         envelope.extend_from_slice(&MAGIC);
         envelope.push(FORMAT_VERSION);
@@ -166,9 +205,9 @@ impl ActiveClipboardRegisterCipher {
             &envelope[HEADER_LEN..],
             AAD,
         )
-        .map_err(|_| ActiveRegisterCipherError::Decrypt)?;
-        let payload: ConsumableRefPayload =
-            postcard::from_bytes(&plaintext).map_err(|_| ActiveRegisterCipherError::Deserialize)?;
+        .map_err(ActiveRegisterCipherError::decrypt_from)?;
+        let payload: ConsumableRefPayload = postcard::from_bytes(&plaintext)
+            .map_err(ActiveRegisterCipherError::deserialize_from)?;
         Ok(MobileConsumableRef::new(
             payload.snapshot_hash,
             EntryId::from(payload.entry_id),
@@ -207,7 +246,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             ActiveClipboardRegisterCipher::new([2; 32]).open(&envelope),
-            Err(ActiveRegisterCipherError::Decrypt)
+            Err(ActiveRegisterCipherError::Decrypt { .. })
         ));
     }
 }

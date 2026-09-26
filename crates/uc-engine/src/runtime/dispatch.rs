@@ -84,6 +84,7 @@ use crate::{
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use uc_application::facade::NetworkRecoveryRequestError;
+use uc_observability_contract::error_source::io_error_kind;
 
 #[async_trait]
 impl EngineRuntime for ProductionRuntime {
@@ -255,6 +256,7 @@ impl EngineRuntime for ProductionRuntime {
                     self.current_facade()
                         .await?
                         .notify_connectivity_opportunity(reason)
+                        // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
                         .map_err(|_| super::operation_unavailable_error())?;
                     Ok(OperationResult::ConnectivityOpportunityAccepted)
                 }
@@ -574,7 +576,8 @@ impl EngineRuntime for ProductionRuntime {
                     }
                     Err(error) => {
                         tracing::warn!(
-                            error = %error,
+                            error_kind = "repairing_notification_deferred",
+                            io_error_kind = io_error_kind(&error),
                             "re-pairing notification deferred to setup-state recovery query"
                         );
                         self.events.send(crate::EngineEvent::RefreshRequired {
@@ -584,7 +587,8 @@ impl EngineRuntime for ProductionRuntime {
                 },
                 Err(error) => {
                     tracing::warn!(
-                        error = %error,
+                        error_kind = "facade_unavailable",
+                        io_error_kind = io_error_kind(&error),
                         "re-pairing notification deferred because the facade is unavailable"
                     );
                     self.events.send(crate::EngineEvent::RefreshRequired {
@@ -713,9 +717,98 @@ impl EngineRuntime for ProductionRuntime {
                 .network_partition_gate
                 .local_endpoint_id()
                 .map(DevOperationResult::NetworkEndpointId)
-                .ok_or_else(|| {
-                    EngineError::new(1911, crate::EngineErrorCategory::Unavailable, true)
+                .ok_or_else(|| EngineError::new(1911, EngineErrorCategory::Unavailable, true)),
+            DevOperation::SeedLegacyDuplicateGroupMembers {
+                device_id,
+                additional_members,
+            } => self
+                .security_lifecycle
+                .seed_legacy_duplicate_group_members_for_test(
+                    &uc_core::ids::DeviceId::new(device_id),
+                    additional_members,
+                )
+                .await
+                .map(|()| DevOperationResult::LegacyDuplicateGroupMembersSeeded)
+                .map_err(|error| {
+                    operation_error_with_code(1912, "seed legacy duplicate group members", error)
                 }),
+            DevOperation::QueryGroupMemberCount { device_id } => self
+                .security_lifecycle
+                .group_member_count_for_test(&uc_core::ids::DeviceId::new(device_id))
+                .await
+                .map(|count| DevOperationResult::GroupMemberCount { count })
+                .map_err(|error| {
+                    operation_error_with_code(1913, "query group member count", error)
+                }),
+            DevOperation::ArmJoinerFinalConfirmationPause => {
+                if !self.joiner_final_confirmation_gate.arm() {
+                    return Err(EngineError::new(1914, EngineErrorCategory::Conflict, false));
+                }
+                Ok(DevOperationResult::JoinerFinalConfirmationPauseArmed)
+            }
+            DevOperation::WaitForJoinerFinalConfirmationPause => {
+                self.joiner_final_confirmation_gate
+                    .wait_until_entered()
+                    .await;
+                Ok(DevOperationResult::JoinerFinalConfirmationPauseEntered)
+            }
+            DevOperation::ReleaseJoinerFinalConfirmationPause => {
+                if !self.joiner_final_confirmation_gate.release() {
+                    return Err(EngineError::new(1915, EngineErrorCategory::Conflict, false));
+                }
+                Ok(DevOperationResult::JoinerFinalConfirmationPauseReleased)
+            }
+            DevOperation::ArmFinalConfirmationConnectionFailure => self
+                .joiner_final_confirmation_gate
+                .space_work_control()
+                .arm_final_confirmation_connection_failure()
+                .map(
+                    |after_sequence| DevOperationResult::FinalConfirmationConnectionFailureArmed {
+                        after_sequence,
+                    },
+                )
+                .ok_or_else(|| EngineError::new(1916, EngineErrorCategory::Conflict, false)),
+            DevOperation::ArmFinalConfirmationSuccessReplyDrop => self
+                .joiner_final_confirmation_gate
+                .space_work_control()
+                .arm_final_confirmation_success_reply_drop()
+                .map(
+                    |after_sequence| DevOperationResult::FinalConfirmationSuccessReplyDropArmed {
+                        after_sequence,
+                    },
+                )
+                .ok_or_else(|| EngineError::new(1918, EngineErrorCategory::Conflict, false)),
+            DevOperation::ArmMembershipHistoryFailures { failure, count } => self
+                .joiner_final_confirmation_gate
+                .space_work_control()
+                .arm_membership_history_failures(failure, count)
+                .map(
+                    |after_sequence| DevOperationResult::MembershipHistoryFailuresArmed {
+                        after_sequence,
+                    },
+                )
+                .ok_or_else(|| EngineError::new(1917, EngineErrorCategory::Conflict, false)),
+            DevOperation::ClearMembershipHistoryFailures => {
+                let remaining = self
+                    .joiner_final_confirmation_gate
+                    .space_work_control()
+                    .clear_membership_history_failures();
+                Ok(DevOperationResult::MembershipHistoryFailuresCleared { remaining })
+            }
+            DevOperation::WaitForSpaceWorkEvent {
+                after_sequence,
+                kind,
+            } => Ok(DevOperationResult::SpaceWorkEvent(
+                self.joiner_final_confirmation_gate
+                    .space_work_control()
+                    .wait_for_event(after_sequence, kind)
+                    .await,
+            )),
+            DevOperation::QuerySpaceWorkEvents => Ok(DevOperationResult::SpaceWorkEvents(
+                self.joiner_final_confirmation_gate
+                    .space_work_control()
+                    .events(),
+            )),
             DevOperation::FailNextSessionHandover { point } => {
                 self.session_supervisor.fail_next_session_handover(point);
                 Ok(DevOperationResult::SessionHandoverFailureArmed)

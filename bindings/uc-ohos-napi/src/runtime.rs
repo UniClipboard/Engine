@@ -224,6 +224,7 @@ impl OhEngine {
             .map_err(engine_error)?
         {
             OperationResult::DeviceGroupChoices(summary) => {
+                // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
                 serde_json::to_string(&summary).map_err(|_| unexpected_result())
             }
             _ => Err(unexpected_result()),
@@ -239,6 +240,7 @@ impl OhEngine {
         confirm_local_removal: bool,
     ) -> napi::Result<String> {
         let expected_revision = u64::try_from(expected_revision)
+            // TryFromIntError：目标分类完整表达数值范围不符。
             .map_err(|_| napi::Error::new(Status::InvalidArg, "invalid revision"))?;
         match self
             .engine
@@ -252,6 +254,7 @@ impl OhEngine {
             .map_err(engine_error)?
         {
             OperationResult::DeviceGroupChosen(result) => {
+                // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
                 serde_json::to_string(&result).map_err(|_| unexpected_result())
             }
             _ => Err(unexpected_result()),
@@ -614,6 +617,7 @@ fn workspace_convergence(
 
 #[cfg(test)]
 fn device_trust_json(summary: uc_engine::DeviceTrustSnapshotSummary) -> napi::Result<String> {
+    // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
     serde_json::to_string(&summary).map_err(|_| unexpected_result())
 }
 
@@ -647,6 +651,9 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
             peer_upgrade_required,
             rejection_reason: None,
             termination_reason: None,
+            attention_reason: None,
+            attention_recovery: None,
+            next_retry_at_ms: None,
         },
         uc_engine::JoinSpaceStatusSummary::Pending {
             join_id,
@@ -666,6 +673,64 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
             peer_upgrade_required,
             rejection_reason: None,
             termination_reason: None,
+            attention_reason: None,
+            attention_recovery: None,
+            next_retry_at_ms: None,
+        },
+        uc_engine::JoinSpaceStatusSummary::Processing {
+            join_id,
+            target_space_id,
+            sponsor_device_id,
+            sponsor_identity_fingerprint,
+            peer_upgrade_required,
+        } => OhJoinSpaceStatus {
+            status: "processing".to_owned(),
+            join_id,
+            joined_space: None,
+            target_space_id: Some(target_space_id),
+            sponsor_device_id: Some(sponsor_device_id),
+            sponsor_identity_fingerprint: Some(sponsor_identity_fingerprint),
+            cancel_requested: None,
+            peer_upgrade_required,
+            rejection_reason: None,
+            termination_reason: None,
+            attention_reason: None,
+            attention_recovery: None,
+            next_retry_at_ms: None,
+        },
+        uc_engine::JoinSpaceStatusSummary::NeedsAttention {
+            join_id,
+            reason,
+            recovery,
+            next_retry_at_ms,
+        } => OhJoinSpaceStatus {
+            status: "needs_attention".to_owned(),
+            join_id,
+            joined_space: None,
+            target_space_id: None,
+            sponsor_device_id: None,
+            sponsor_identity_fingerprint: None,
+            cancel_requested: None,
+            peer_upgrade_required: false,
+            rejection_reason: None,
+            termination_reason: None,
+            attention_reason: Some(
+                match reason {
+                    uc_engine::JoinSpaceAttentionReasonSummary::OutcomeCannotBeProven => {
+                        "outcome_cannot_be_proven"
+                    }
+                }
+                .to_owned(),
+            ),
+            attention_recovery: Some(
+                match recovery {
+                    uc_engine::JoinSpaceAttentionRecoverySummary::PreserveDataAndContactSupport => {
+                        "preserve_data_and_contact_support"
+                    }
+                }
+                .to_owned(),
+            ),
+            next_retry_at_ms: next_retry_at_ms.map(|value| value as f64),
         },
         uc_engine::JoinSpaceStatusSummary::Rejected { join_id, reason } => OhJoinSpaceStatus {
             status: "rejected".to_owned(),
@@ -696,6 +761,21 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
                     uc_engine::JoinSpaceRejectionReasonSummary::HistoryConflict => {
                         "history_conflict"
                     }
+                    uc_engine::JoinSpaceRejectionReasonSummary::CompletionInvalid => {
+                        "completion_invalid"
+                    }
+                    uc_engine::JoinSpaceRejectionReasonSummary::MembershipHistoryInvalid => {
+                        "membership_history_invalid"
+                    }
+                    uc_engine::JoinSpaceRejectionReasonSummary::SecurityMaterialInvalid => {
+                        "security_material_invalid"
+                    }
+                    uc_engine::JoinSpaceRejectionReasonSummary::RelationshipConflict => {
+                        "relationship_conflict"
+                    }
+                    uc_engine::JoinSpaceRejectionReasonSummary::ActivationStateInvalid => {
+                        "activation_state_invalid"
+                    }
                     uc_engine::JoinSpaceRejectionReasonSummary::PeerUpgradeRequired => {
                         "peer_upgrade_required"
                     }
@@ -707,6 +787,9 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
                 .to_owned(),
             ),
             termination_reason: None,
+            attention_reason: None,
+            attention_recovery: None,
+            next_retry_at_ms: None,
         },
         uc_engine::JoinSpaceStatusSummary::Terminated { join_id, reason } => OhJoinSpaceStatus {
             status: "terminated".to_owned(),
@@ -726,6 +809,9 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
                 }
                 .to_owned(),
             ),
+            attention_reason: None,
+            attention_recovery: None,
+            next_retry_at_ms: None,
         },
     })
 }
@@ -762,10 +848,12 @@ fn send_report(report: SendReportSummary) -> napi::Result<OhSendReport> {
 }
 
 fn count(value: usize) -> napi::Result<u32> {
+    // TryFromIntError：目标分类完整表达数值范围不符。
     u32::try_from(value).map_err(|_| unexpected_result())
 }
 
 fn count_u64(value: u64) -> napi::Result<u32> {
+    // TryFromIntError：目标分类完整表达数值范围不符。
     u32::try_from(value).map_err(|_| unexpected_result())
 }
 
@@ -996,6 +1084,50 @@ mod tests {
         .expect("join status must map");
 
         assert!(status.peer_upgrade_required);
+    }
+
+    #[test]
+    fn join_status_preserves_processing_state() {
+        let status = join_space_status(OperationResult::JoinSpace(
+            uc_engine::JoinSpaceStatusSummary::Processing {
+                join_id: "join-id".to_owned(),
+                target_space_id: "space-id".to_owned(),
+                sponsor_device_id: "sponsor-id".to_owned(),
+                sponsor_identity_fingerprint: "sponsor-fingerprint".to_owned(),
+                peer_upgrade_required: false,
+            },
+        ))
+        .expect("processing join status must map");
+
+        assert_eq!(status.status, "processing");
+        assert_eq!(status.target_space_id.as_deref(), Some("space-id"));
+        assert_eq!(status.sponsor_device_id.as_deref(), Some("sponsor-id"));
+        assert!(status.cancel_requested.is_none());
+    }
+
+    #[test]
+    fn join_status_preserves_attention_recovery_contract() {
+        let status = join_space_status(OperationResult::JoinSpace(
+            uc_engine::JoinSpaceStatusSummary::NeedsAttention {
+                join_id: "join-id".to_owned(),
+                reason: uc_engine::JoinSpaceAttentionReasonSummary::OutcomeCannotBeProven,
+                recovery:
+                    uc_engine::JoinSpaceAttentionRecoverySummary::PreserveDataAndContactSupport,
+                next_retry_at_ms: None,
+            },
+        ))
+        .expect("attention join status must map");
+
+        assert_eq!(status.status, "needs_attention");
+        assert_eq!(
+            status.attention_reason.as_deref(),
+            Some("outcome_cannot_be_proven")
+        );
+        assert_eq!(
+            status.attention_recovery.as_deref(),
+            Some("preserve_data_and_contact_support")
+        );
+        assert!(status.next_retry_at_ms.is_none());
     }
 
     #[test]

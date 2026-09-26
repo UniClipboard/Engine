@@ -93,6 +93,7 @@ impl SpaceAdmissionAggregate {
         }
         let saved_reply =
             SavedAdmissionReply::new(self.admission_id, inbound_evidence, complete_reply)
+                // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
                 .map_err(|_| SpaceAdmissionAggregateError::InvalidHelperCompletion)?;
 
         self.record_version = record_version;

@@ -5,6 +5,13 @@ pub enum SpaceAdmissionTerminationReason {
     Cancelled,
     Expired,
     Superseded,
+    ActivationRejected,
+    CompletionRejected,
+    MembershipHistoryRejected,
+    SecurityMaterialRejected,
+    RelationshipRejected,
+    IdentityRejected,
+    ActivationStateRejected,
 }
 
 #[derive(PartialEq, Eq)]

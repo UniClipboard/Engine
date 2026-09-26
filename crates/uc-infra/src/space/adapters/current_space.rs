@@ -44,16 +44,16 @@ impl EncryptedLegacyCurrentSpaceIdStore {
         let ciphertext = match fs::read(&self.path).await {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(_) => return Err(CurrentSpaceIdentityError::Unavailable),
+            Err(_) => return Err(CurrentSpaceIdentityError::unavailable()),
         };
         let plaintext = self
             .keys
             .open_profile_payload(LEGACY_ID_PURPOSE, &ciphertext)
             .map_err(map_key_error)?;
         let state: PersistedLegacyCurrentSpaceIdV1 = postcard::from_bytes(&plaintext)
-            .map_err(|_| CurrentSpaceIdentityError::Inconsistent)?;
+            .map_err(CurrentSpaceIdentityError::inconsistent_from)?;
         if state.format_version != LEGACY_ID_FORMAT_VERSION || state.space_id.is_empty() {
-            return Err(CurrentSpaceIdentityError::Inconsistent);
+            return Err(CurrentSpaceIdentityError::inconsistent());
         }
         Ok(Some(SpaceId::from_str(&state.space_id)))
     }
@@ -63,14 +63,14 @@ impl EncryptedLegacyCurrentSpaceIdStore {
         if let Some(current) = self.load().await? {
             return (current == *space_id)
                 .then_some(())
-                .ok_or(CurrentSpaceIdentityError::Inconsistent);
+                .ok_or_else(CurrentSpaceIdentityError::inconsistent);
         }
         let state = PersistedLegacyCurrentSpaceIdV1 {
             format_version: LEGACY_ID_FORMAT_VERSION,
             space_id: space_id.as_str().to_owned(),
         };
         let plaintext =
-            postcard::to_stdvec(&state).map_err(|_| CurrentSpaceIdentityError::Inconsistent)?;
+            postcard::to_stdvec(&state).map_err(CurrentSpaceIdentityError::inconsistent_from)?;
         let ciphertext = self
             .keys
             .seal_profile_payload(LEGACY_ID_PURPOSE, &plaintext)
@@ -78,19 +78,19 @@ impl EncryptedLegacyCurrentSpaceIdStore {
         let parent = self
             .path
             .parent()
-            .ok_or(CurrentSpaceIdentityError::Unavailable)?;
+            .ok_or_else(CurrentSpaceIdentityError::unavailable)?;
         fs::create_dir_all(parent)
             .await
-            .map_err(|_| CurrentSpaceIdentityError::Unavailable)?;
+            .map_err(CurrentSpaceIdentityError::unavailable_from)?;
         let mut file = fs::File::create(&self.path)
             .await
-            .map_err(|_| CurrentSpaceIdentityError::Unavailable)?;
+            .map_err(CurrentSpaceIdentityError::unavailable_from)?;
         file.write_all(&ciphertext)
             .await
-            .map_err(|_| CurrentSpaceIdentityError::Unavailable)?;
+            .map_err(CurrentSpaceIdentityError::unavailable_from)?;
         file.sync_all()
             .await
-            .map_err(|_| CurrentSpaceIdentityError::Unavailable)
+            .map_err(CurrentSpaceIdentityError::unavailable_from)
     }
 
     async fn replace(&self, space_id: &SpaceId) -> Result<(), CurrentSpaceIdentityError> {
@@ -100,7 +100,7 @@ impl EncryptedLegacyCurrentSpaceIdStore {
             space_id: space_id.as_str().to_owned(),
         };
         let plaintext =
-            postcard::to_stdvec(&state).map_err(|_| CurrentSpaceIdentityError::Inconsistent)?;
+            postcard::to_stdvec(&state).map_err(CurrentSpaceIdentityError::inconsistent_from)?;
         let ciphertext = self
             .keys
             .seal_profile_payload(LEGACY_ID_PURPOSE, &plaintext)
@@ -108,19 +108,19 @@ impl EncryptedLegacyCurrentSpaceIdStore {
         let parent = self
             .path
             .parent()
-            .ok_or(CurrentSpaceIdentityError::Unavailable)?;
+            .ok_or_else(CurrentSpaceIdentityError::unavailable)?;
         fs::create_dir_all(parent)
             .await
-            .map_err(|_| CurrentSpaceIdentityError::Unavailable)?;
+            .map_err(CurrentSpaceIdentityError::unavailable_from)?;
         let mut file = fs::File::create(&self.path)
             .await
-            .map_err(|_| CurrentSpaceIdentityError::Unavailable)?;
+            .map_err(CurrentSpaceIdentityError::unavailable_from)?;
         file.write_all(&ciphertext)
             .await
-            .map_err(|_| CurrentSpaceIdentityError::Unavailable)?;
+            .map_err(CurrentSpaceIdentityError::unavailable_from)?;
         file.sync_all()
             .await
-            .map_err(|_| CurrentSpaceIdentityError::Unavailable)
+            .map_err(CurrentSpaceIdentityError::unavailable_from)
     }
 }
 
@@ -200,7 +200,7 @@ impl InitialSpaceActivationPort for CurrentSpaceResolver {
             .map_err(map_generation_manifest_error)?
             .is_some()
         {
-            return Err(CurrentSpaceIdentityError::Inconsistent);
+            return Err(CurrentSpaceIdentityError::inconsistent());
         }
         self.legacy_id.activate(space_id).await
     }
@@ -212,7 +212,7 @@ impl PortableCurrentSpaceIdentityPort for CurrentSpaceResolver {
         let space_id = self
             .current_space_id()
             .await?
-            .ok_or(CurrentSpaceIdentityError::Inconsistent)?;
+            .ok_or_else(CurrentSpaceIdentityError::inconsistent)?;
         self.legacy_id.replace(&space_id).await
     }
 }
@@ -222,21 +222,24 @@ fn map_generation_manifest_error(
 ) -> CurrentSpaceIdentityError {
     match error {
         ActiveSpaceGenerationManifestStoreError::Storage { .. } => {
-            CurrentSpaceIdentityError::Unavailable
+            CurrentSpaceIdentityError::unavailable()
         }
-        ActiveSpaceGenerationManifestStoreError::Corrupt
+        ActiveSpaceGenerationManifestStoreError::Corrupt { .. }
         | ActiveSpaceGenerationManifestStoreError::UnsupportedVersion => {
-            CurrentSpaceIdentityError::Inconsistent
+            CurrentSpaceIdentityError::inconsistent()
         }
     }
 }
 
 fn map_key_error(error: AdmissionKeyError) -> CurrentSpaceIdentityError {
     match error {
-        AdmissionKeyError::SecureStorage => CurrentSpaceIdentityError::Unavailable,
-        AdmissionKeyError::Missing | AdmissionKeyError::Corrupt | AdmissionKeyError::OpenFailed => {
-            CurrentSpaceIdentityError::Inconsistent
+        AdmissionKeyError::SecureStorage { .. } | AdmissionKeyError::StorageNotPersisted => {
+            CurrentSpaceIdentityError::unavailable()
         }
+        AdmissionKeyError::Missing
+        | AdmissionKeyError::Corrupt { .. }
+        | AdmissionKeyError::InvalidLayout
+        | AdmissionKeyError::OpenFailed { .. } => CurrentSpaceIdentityError::inconsistent(),
     }
 }
 
@@ -424,13 +427,13 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
+        assert!(matches!(
             resolver
                 .activate_initial_space(&SpaceId::from_str("replacement-space"))
                 .await
                 .unwrap_err(),
-            CurrentSpaceIdentityError::Inconsistent
-        );
+            CurrentSpaceIdentityError::Inconsistent { .. }
+        ));
         assert_eq!(
             resolver.current_space_id().await.unwrap(),
             Some(SpaceId::from_str("active-space"))
@@ -452,10 +455,10 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(
+        assert!(matches!(
             resolver.current_space_id().await.unwrap_err(),
-            CurrentSpaceIdentityError::Inconsistent
-        );
+            CurrentSpaceIdentityError::Inconsistent { .. }
+        ));
     }
 
     #[tokio::test]

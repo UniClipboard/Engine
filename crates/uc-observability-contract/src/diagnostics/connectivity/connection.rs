@@ -21,8 +21,6 @@ pub enum ConnectionPurpose {
     ClipboardPull,
     TransferProgress,
     GroupUpdate,
-    MembershipAttestation,
-    MembershipGossip,
     MembershipHistory,
     MembershipRecovery,
     Other,

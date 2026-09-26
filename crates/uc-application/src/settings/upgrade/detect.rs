@@ -21,6 +21,7 @@ use thiserror::Error;
 use tracing::{debug, warn};
 
 use uc_core::ports::{AppVersionStateError, AppVersionStatePort};
+use uc_observability_contract::error_source::io_error_kind;
 
 #[cfg(test)]
 use crate::space::CurrentSpaceIdentityError;
@@ -30,14 +31,14 @@ use super::status::UpgradeStatus;
 
 #[derive(Debug, Error)]
 pub(crate) enum DetectUpgradeError {
-    #[error("current build version is malformed: {0}")]
-    CurrentVersionMalformed(String),
+    #[error("current build version is malformed")]
+    CurrentVersionMalformed(#[source] semver::Error),
 
     #[error("read app version cursor failed: {0}")]
     ReadCursor(#[from] AppVersionStateError),
 
-    #[error("read current Space identity failed: {0}")]
-    ReadCurrentSpace(String),
+    #[error("read current Space identity failed")]
+    ReadCurrentSpace(#[source] anyhow::Error),
 }
 
 pub(crate) struct DetectUpgradeUseCase {
@@ -63,9 +64,8 @@ impl DetectUpgradeUseCase {
         &self,
         current_version_str: &str,
     ) -> Result<UpgradeStatus, DetectUpgradeError> {
-        let current = semver::Version::parse(current_version_str).map_err(|e| {
-            DetectUpgradeError::CurrentVersionMalformed(format!("{current_version_str:?}: {e}"))
-        })?;
+        let current = semver::Version::parse(current_version_str)
+            .map_err(DetectUpgradeError::CurrentVersionMalformed)?;
 
         let stored = self.app_version_state.read().await?;
 
@@ -75,7 +75,7 @@ impl DetectUpgradeUseCase {
                     .current_space_identity
                     .current_space_id()
                     .await
-                    .map_err(|e| DetectUpgradeError::ReadCurrentSpace(e.to_string()))?
+                    .map_err(|e| DetectUpgradeError::ReadCurrentSpace(anyhow::Error::from(e)))?
                     .is_some();
 
                 if has_completed {
@@ -134,8 +134,8 @@ impl DetectUpgradeUseCase {
                 Err(e) => {
                     warn!(
                         target: "upgrade",
-                        raw = %raw,
-                        error = %e,
+                        error_kind = "cursor_version_parse",
+                        io_error_kind = io_error_kind(&e),
                         "cursor content failed to parse as semver; treating as upgrade from unknown"
                     );
                     Ok(UpgradeStatus::Upgraded {

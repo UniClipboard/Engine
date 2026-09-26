@@ -33,12 +33,12 @@ impl CacheFsPort for TokioCacheFsAdapter {
         let mut entries = Vec::new();
         let mut read_dir = tokio::fs::read_dir(path)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to read directory: {}", e))?;
+            .context("Failed to read directory")?;
 
         while let Some(entry) = read_dir
             .next_entry()
             .await
-            .with_context(|| format!("Failed to read entry in directory: {}", path.display()))?
+            .context("Failed to read entry in directory")?
         {
             let entry_path = entry.path();
             let is_dir = entry_path.is_dir();
@@ -54,13 +54,13 @@ impl CacheFsPort for TokioCacheFsAdapter {
     async fn remove_dir_all(&self, path: &Path) -> Result<()> {
         tokio::fs::remove_dir_all(path)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to remove directory: {}", e))
+            .context("Failed to remove directory")
     }
 
     async fn remove_file(&self, path: &Path) -> Result<()> {
         tokio::fs::remove_file(path)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to remove file: {}", e))
+            .context("Failed to remove file")
     }
 
     async fn dir_size(&self, path: &Path) -> Result<u64> {
@@ -71,14 +71,14 @@ impl CacheFsPort for TokioCacheFsAdapter {
         match tokio::fs::read(path).await {
             Ok(bytes) => Ok(Some(bytes)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(anyhow::anyhow!("Failed to read file: {}", e)),
+            Err(e) => Err(anyhow::Error::new(e).context("Failed to read file")),
         }
     }
 
     async fn write_file(&self, path: &Path, contents: &[u8]) -> Result<()> {
         tokio::fs::write(path, contents)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to write file: {}", e))
+            .context("Failed to write file")
     }
 
     async fn metadata(&self, path: &Path) -> Result<Option<FileMetadata>> {
@@ -93,14 +93,14 @@ impl CacheFsPort for TokioCacheFsAdapter {
                     .map(|d| d.as_millis() as i64),
             })),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(anyhow::anyhow!("Failed to read metadata: {}", e)),
+            Err(e) => Err(anyhow::Error::new(e).context("Failed to read metadata")),
         }
     }
 
     async fn remove_dir(&self, path: &Path) -> Result<()> {
         tokio::fs::remove_dir(path)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to remove directory: {}", e))
+            .context("Failed to remove directory")
     }
 }
 
@@ -116,7 +116,7 @@ async fn compute_dir_size(path: &Path) -> Result<u64> {
 
     let metadata = tokio::fs::metadata(path)
         .await
-        .with_context(|| format!("Failed to read metadata for: {}", path.display()))?;
+        .context("Failed to read metadata")?;
 
     if metadata.is_file() {
         return Ok(metadata.len());
@@ -125,20 +125,20 @@ async fn compute_dir_size(path: &Path) -> Result<u64> {
     let mut total: u64 = 0;
     let mut entries = tokio::fs::read_dir(path)
         .await
-        .with_context(|| format!("Failed to read directory: {}", path.display()))?;
+        .context("Failed to read directory")?;
 
     while let Some(entry) = entries
         .next_entry()
         .await
-        .with_context(|| format!("Failed to read entry in directory: {}", path.display()))?
+        .context("Failed to read entry in directory")?
     {
         let entry_path = entry.path();
         if entry_path.is_dir() {
             total += Box::pin(compute_dir_size(&entry_path)).await?;
         } else {
-            let meta = tokio::fs::metadata(&entry_path).await.with_context(|| {
-                format!("Failed to read metadata for: {}", entry_path.display())
-            })?;
+            let meta = tokio::fs::metadata(&entry_path)
+                .await
+                .context("Failed to read metadata")?;
             total += meta.len();
         }
     }

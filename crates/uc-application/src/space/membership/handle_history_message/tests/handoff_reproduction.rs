@@ -4,6 +4,10 @@ use crate::space::membership::{
     QueryMembershipConflictStatusPort, ResolveMembershipConflictInput,
     ResolveMembershipConflictResult, ResolveMembershipConflictUseCase,
 };
+use async_trait::async_trait;
+
+#[path = "handoff_reproduction/legacy_candidate_convergence_scenario.rs"]
+mod legacy_candidate_convergence_scenario;
 
 struct QueryStatus;
 
@@ -16,15 +20,17 @@ impl QueryMembershipConflictStatusPort for QueryStatus {
             local_membership: DeviceTrustMembership::Active,
             current_change: None,
             current_join: None,
+            inbound_pairings: Vec::new(),
             pending_inbound_member: None,
+            space_device_update: crate::space::membership::SpaceDeviceUpdateStatus::completed(),
             devices: Vec::new(),
         })
     }
 }
 
 struct Fixture {
-    repository: Arc<MemoryLedgerRepository>,
-    ledger: Arc<MembershipLedger>,
+    owner_fixture: OwnerFixture,
+    ledger: Arc<crate::space::membership::MembershipOwner>,
     remote: VersionedMembershipHistory,
     peer: AdmissionChangeFacts,
     relay: AdmissionChangeFacts,
@@ -39,15 +45,7 @@ impl Fixture {
             member_facts("device-c", 0x43),
             member_facts("device-d", 0x44),
         ];
-        let base = VersionedMembershipHistory::from_activation_baseline(
-            MembershipActivationBaselineV2::Established {
-                lineage_id: "space-a".to_owned(),
-                head_event_id: MembershipEventId::from_hex(&"11".repeat(32)).unwrap(),
-                head_depth: 0,
-                current_members: members.to_vec(),
-            },
-        )
-        .unwrap();
+        let base = established_history(&members);
         let author = |index: usize| MembershipAdmissionV2 {
             facts: members[index].0.clone(),
             membership_credential: members[index].1.clone(),
@@ -64,38 +62,15 @@ impl Fixture {
         remote
             .verify_and_receive_event(remote_removal, &AcceptingVerifier)
             .unwrap();
-        let mut loaded = LoadedMembershipLedger::no_current_space();
-        loaded.revision = 30;
-        loaded.lineage_id = Some("space-a".to_owned());
-        loaded.membership_history = Some(local.encode_persisted_v2().unwrap());
-        loaded.local_device_id = Some(members[0].0.device_id.clone());
-        loaded.local_member_instance = Some(members[0].0.member_instance);
-        loaded.local_join_active = true;
-        for (facts, _) in &members[1..] {
-            loaded.peer_reconciliation.insert(
-                facts.device_id.clone(),
-                PeerReconciliationRecord {
-                    peer_device_id: facts.device_id.clone(),
-                    relationship: MembershipHistoryRelationship::Consistent,
-                    confirmed_position: None,
-                    sync_state: Default::default(),
-                    restricted_delivery: Vec::new(),
-                    updated_at_ms: 1,
-                },
-            );
-        }
-        let repository = Arc::new(MemoryLedgerRepository {
-            loaded: Mutex::new(loaded),
-            commits: AtomicUsize::new(0),
-            fail_on_commit: None,
-        });
-        let ledger = Arc::new(MembershipLedger::new(
-            repository.clone(),
-            repository.clone(),
-            Arc::new(AcceptingVerifier),
+        let owner_fixture = OwnerFixture::new(started_record(
+            local,
+            members[0].0.device_id,
+            members[0].0.member_instance,
+            30,
         ));
+        let ledger = owner_fixture.owner.clone();
         Self {
-            repository,
+            owner_fixture,
             ledger,
             remote,
             peer: members[1].0.clone(),
@@ -105,19 +80,22 @@ impl Fixture {
     }
 
     async fn deliver(&self, sender: &AdmissionChangeFacts) {
-        let response = HandleMembershipHistoryMessageUseCase::new(self.ledger.clone())
-            .execute(
-                &AuthenticatedMember::new(sender.device_id.clone()),
-                MembershipHistoryMessage::ConflictEvidenceV3(MembershipConflictEvidenceV3 {
-                    transfer_id: self.remote.current_position().unwrap().history_digest,
-                    pages: self
-                        .remote
-                        .export_conflict_evidence_pages_v2(sender.clone())
-                        .unwrap(),
-                }),
-            )
-            .await
-            .unwrap();
+        let response = HandleMembershipHistoryMessageUseCase::new(
+            self.ledger.clone(),
+            FixedSpaceWorkMode::active(),
+        )
+        .execute(
+            &AuthenticatedMember::new(sender.device_id),
+            MembershipHistoryMessage::ConflictEvidenceV3(MembershipConflictEvidenceV3 {
+                transfer_id: self.remote.current_position().unwrap().history_digest,
+                pages: self
+                    .remote
+                    .export_conflict_evidence_pages_v2(sender.clone())
+                    .unwrap(),
+            }),
+        )
+        .await
+        .unwrap();
         assert!(matches!(
             response,
             MembershipHistoryMessage::ConflictEvidenceV3(_)
@@ -166,12 +144,12 @@ async fn handoff_identical_evidence_after_choice_does_not_reopen() {
     let fixture = Fixture::new();
     fixture.deliver(&fixture.peer).await;
     fixture.keep_local().await;
-    let revision = fixture.repository.load().await.unwrap().revision;
+    let revision = fixture.owner_fixture.records.record().revision();
     for _ in 0..3 {
         fixture.deliver(&fixture.peer).await;
     }
     fixture.assert_no_prompt().await;
-    assert_eq!(fixture.repository.load().await.unwrap().revision, revision);
+    assert_eq!(fixture.owner_fixture.records.record().revision(), revision);
 }
 
 #[tokio::test]
@@ -183,11 +161,11 @@ async fn handoff_same_branch_from_another_peer_does_not_reopen() {
     fixture.assert_no_prompt().await;
     assert_eq!(
         fixture
-            .repository
-            .load()
-            .await
-            .unwrap()
-            .membership_conflicts
+            .owner_fixture
+            .records
+            .space()
+            .branch_recovery
+            .conflicts
             .len(),
         1
     );
@@ -198,11 +176,7 @@ async fn handoff_reconstructed_owner_preserves_completed_choice() {
     let mut fixture = Fixture::new();
     fixture.deliver(&fixture.peer).await;
     fixture.keep_local().await;
-    fixture.ledger = Arc::new(MembershipLedger::new(
-        fixture.repository.clone(),
-        fixture.repository.clone(),
-        Arc::new(AcceptingVerifier),
-    ));
+    fixture.ledger = fixture.owner_fixture.reopen();
     fixture.deliver(&fixture.peer).await;
     fixture.assert_no_prompt().await;
 }
@@ -213,11 +187,11 @@ async fn handoff_late_known_sibling_evidence_does_not_reopen_completed_choice() 
     fixture.deliver(&fixture.peer).await;
     fixture.keep_local().await;
     let original = fixture
-        .repository
-        .load()
-        .await
-        .unwrap()
-        .membership_conflicts
+        .owner_fixture
+        .records
+        .space()
+        .branch_recovery
+        .conflicts
         .into_values()
         .next()
         .unwrap();
@@ -233,25 +207,20 @@ async fn handoff_late_known_sibling_evidence_does_not_reopen_completed_choice() 
     assert_eq!(members, fixture.remote.effective_members());
     assert_ne!(before.history_digest, after.history_digest);
     fixture.deliver(&fixture.peer).await;
-    let persisted = fixture.repository.load().await.unwrap();
+    let persisted = fixture.owner_fixture.records.space().branch_recovery;
     assert_eq!(
-        persisted.membership_conflicts[&original.conflict_id].status,
+        persisted.conflicts[&original.conflict_id].status,
         crate::space::membership::MembershipConflictStatus::Completed
     );
-    assert_eq!(persisted.membership_conflicts.len(), 1);
+    assert_eq!(persisted.conflicts.len(), 1);
     fixture.assert_no_prompt().await;
 }
 
 #[tokio::test]
 async fn same_applied_branch_with_extra_evidence_is_consistent() {
     let mut fixture = Fixture::new();
-    let loaded = fixture.repository.load().await.unwrap();
     let old_remote = fixture.remote.clone();
-    fixture.remote = VersionedMembershipHistory::decode_persisted_v2(
-        loaded.membership_history.as_deref().unwrap(),
-        &AcceptingVerifier,
-    )
-    .unwrap();
+    fixture.remote = fixture.owner_fixture.records.space().ledger.history;
     fixture
         .remote
         .verify_and_receive_event(
@@ -262,25 +231,28 @@ async fn same_applied_branch_with_extra_evidence_is_consistent() {
             &AcceptingVerifier,
         )
         .unwrap();
-    fixture
-        .repository
-        .loaded
-        .lock()
-        .unwrap()
-        .peer_reconciliation
-        .get_mut(&fixture.peer.device_id)
-        .unwrap()
-        .relationship = MembershipHistoryRelationship::Diverged;
+    let peer = fixture.peer.device_id;
+    fixture.owner_fixture.edit(|space| {
+        let Some(uc_core::membership::PeerLinkSnapshot::Member(member)) =
+            space.ledger.peers.get_mut(&peer)
+        else {
+            panic!("the peer is a member");
+        };
+        member.relation = PeerRelation::Diverged;
+    });
     fixture.deliver(&fixture.peer).await;
-    let stored = fixture.repository.load().await.unwrap();
-    assert!(stored.membership_conflicts.is_empty());
+    assert!(fixture
+        .owner_fixture
+        .records
+        .space()
+        .branch_recovery
+        .conflicts
+        .is_empty());
     assert_eq!(
-        stored.peer_reconciliation[&fixture.peer.device_id].relationship,
-        MembershipHistoryRelationship::Consistent
+        relation(&fixture.owner_fixture, &peer),
+        Some(PeerRelation::Consistent)
     );
-    assert!(stored.peer_reconciliation[&fixture.peer.device_id]
-        .confirmed_position
-        .is_none());
+    assert!(confirmed_position(&fixture.owner_fixture, &peer).is_none());
 }
 
 #[tokio::test]
@@ -291,31 +263,31 @@ async fn verified_legacy_records_preserve_choices_without_duplicate_prompts() {
         if completed {
             fixture.keep_local().await;
         }
-        let loaded = fixture.repository.load().await.unwrap();
-        let local = VersionedMembershipHistory::decode_persisted_v2(
-            loaded.membership_history.as_deref().unwrap(),
-            &AcceptingVerifier,
-        )
-        .unwrap();
+        let loaded = fixture.owner_fixture.records.space();
         let legacy = uc_core::membership::MembershipConflictPolicy::legacy_description(
-            &local,
+            &loaded.ledger.history,
             &fixture.remote,
-            loaded.local_member_instance.unwrap(),
+            loaded.ledger.local_member,
         )
         .unwrap();
-        let mut old = loaded.membership_conflicts.into_values().next().unwrap();
+        let mut old = loaded
+            .branch_recovery
+            .conflicts
+            .into_values()
+            .next()
+            .unwrap();
         old.conflict_id = legacy.conflict_id;
         old.local_branch_id = legacy.local_branch_id;
         old.remote_branch_id = legacy.remote_branch_id;
         old.selected_branch_id = completed.then_some(legacy.local_branch_id);
-        {
-            let mut stored = fixture.repository.loaded.lock().unwrap();
-            stored.membership_conflicts.clear();
-            stored.membership_conflict_presentations.clear();
+        fixture.owner_fixture.edit(|stored| {
+            stored.branch_recovery.conflicts.clear();
+            stored.branch_recovery.conflict_presentations.clear();
             stored
-                .membership_conflicts
+                .branch_recovery
+                .conflicts
                 .insert(old.conflict_id, old.clone());
-        }
+        });
         fixture.deliver(&fixture.peer).await;
         let view = fixture.resolver().query().await.unwrap();
         assert_eq!(
@@ -327,11 +299,11 @@ async fn verified_legacy_records_preserve_choices_without_duplicate_prompts() {
         );
         assert_eq!(
             fixture
-                .repository
-                .load()
-                .await
-                .unwrap()
-                .membership_conflicts[&legacy.conflict_id],
+                .owner_fixture
+                .records
+                .space()
+                .branch_recovery
+                .conflicts[&legacy.conflict_id],
             old
         );
     }
@@ -342,11 +314,7 @@ async fn verified_candidates_explain_changes_and_keep_remote_sync_pending() {
     use uc_core::membership::{MembershipChangeSide, MembershipConflictReason};
     let mut fixture = Fixture::new();
     fixture.deliver(&fixture.peer).await;
-    fixture.ledger = Arc::new(MembershipLedger::new(
-        fixture.repository.clone(),
-        fixture.repository.clone(),
-        Arc::new(AcceptingVerifier),
-    ));
+    fixture.ledger = fixture.owner_fixture.reopen();
     let view = fixture.resolver().query().await.unwrap();
     let conflict = &view.conflicts[0];
     assert_eq!(
@@ -407,11 +375,10 @@ async fn verified_candidates_explain_changes_and_keep_remote_sync_pending() {
 async fn old_conflict_without_presentation_stays_explicitly_unknown() {
     let fixture = Fixture::new();
     fixture.deliver(&fixture.peer).await;
-    {
-        let mut loaded = fixture.repository.loaded.lock().unwrap();
-        loaded.membership_conflict_presentations.clear();
-        loaded.revision += 1;
-    }
+    fixture.owner_fixture.edit(|loaded| {
+        loaded.branch_recovery.conflict_presentations.clear();
+        loaded.ledger.revision += 1;
+    });
     let view = fixture.resolver().query().await.unwrap();
     let conflict = &view.conflicts[0];
     assert_eq!(
@@ -433,26 +400,29 @@ async fn old_conflict_without_presentation_stays_explicitly_unknown() {
 #[tokio::test]
 async fn rejected_evidence_does_not_create_display_facts() {
     let fixture = Fixture::new();
-    let response = HandleMembershipHistoryMessageUseCase::new(fixture.ledger.clone())
-        .execute(
-            &AuthenticatedMember::new(fixture.peer.device_id.clone()),
-            MembershipHistoryMessage::ConflictEvidenceV3(MembershipConflictEvidenceV3 {
-                transfer_id: [0; 32],
-                pages: fixture
-                    .remote
-                    .export_conflict_evidence_pages_v2(fixture.peer.clone())
-                    .unwrap(),
-            }),
-        )
-        .await
-        .unwrap();
+    let response = HandleMembershipHistoryMessageUseCase::new(
+        fixture.ledger.clone(),
+        FixedSpaceWorkMode::active(),
+    )
+    .execute(
+        &AuthenticatedMember::new(fixture.peer.device_id),
+        MembershipHistoryMessage::ConflictEvidenceV3(MembershipConflictEvidenceV3 {
+            transfer_id: [0; 32],
+            pages: fixture
+                .remote
+                .export_conflict_evidence_pages_v2(fixture.peer.clone())
+                .unwrap(),
+        }),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         response,
         MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Invalid)
     );
-    let stored = fixture.repository.load().await.unwrap();
-    assert!(stored.membership_conflict_presentations.is_empty());
-    assert!(stored.membership_conflicts.is_empty());
+    let stored = fixture.owner_fixture.records.space().branch_recovery;
+    assert!(stored.conflict_presentations.is_empty());
+    assert!(stored.conflicts.is_empty());
 }
 
 #[tokio::test]

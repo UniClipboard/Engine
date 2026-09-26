@@ -10,27 +10,6 @@ impl SpaceAdmissionAggregate {
             .record_version
             .checked_add(1)
             .ok_or(SpaceAdmissionAggregateError::RecordVersionOverflow)?;
-        if self.attempt_timeline.is_none() && self.attempt_digest.is_none() {
-            let legacy_cancelling_join_id = match &self.state {
-                SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Cancelling(state)) => {
-                    Some(state.join_id)
-                }
-                _ => None,
-            };
-            if let Some(join_id) = legacy_cancelling_join_id {
-                self.record_version = record_version;
-                self.state =
-                    SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
-                        SpaceAdmissionRejectedState::LocalJoiner(
-                            SpaceAdmissionLocalJoinerRejected {
-                                join_id,
-                                reason: SpaceAdmissionRejectionReason::Cancelled,
-                            },
-                        ),
-                    ));
-                return Ok(AdmissionTransition::new(self, &[]));
-            }
-        }
         let has_authenticated_attempt = self.attempt_digest.is_some();
         let (join_id, local_join_ordinal, cleanup) = match self.state {
             SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::ResolvingInvitation(
@@ -76,6 +55,7 @@ impl SpaceAdmissionAggregate {
                         SpaceAdmissionRoute::from_bytes(
                             state.pending_exchange.route().as_bytes().to_vec(),
                         )
+                        // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
                         .map_err(|_| SpaceAdmissionAggregateError::InvalidTransition)?,
                         state.candidate_evidence.message_id(),
                         reason,
@@ -120,6 +100,7 @@ impl SpaceAdmissionAggregate {
                 let local_space_transition = AdmissionSpaceTransition::from_bytes(
                     state.space_transition.as_bytes().to_vec(),
                 )
+                // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
                 .map_err(|_| SpaceAdmissionAggregateError::InvalidTransition)?;
                 let mut cleanup = known_cleanup_obligation(
                     self.attempt_digest,
@@ -131,26 +112,6 @@ impl SpaceAdmissionAggregate {
                 )?;
                 cleanup.local_space_transition = Some(local_space_transition);
                 (state.join_id, state.local_join_ordinal, Some(cleanup))
-            }
-            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Prepared(state))
-                if self.attempt_timeline.is_none() =>
-            {
-                (state.join_id, state.local_join_ordinal, None)
-            }
-            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Committed(state))
-                if self.attempt_timeline.is_none() =>
-            {
-                (state.join_id, state.local_join_ordinal, None)
-            }
-            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Applied(state))
-                if self.attempt_timeline.is_none() =>
-            {
-                (state.join_id, state.local_join_ordinal, None)
-            }
-            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Activating(state))
-                if self.attempt_timeline.is_none() =>
-            {
-                (state.join_id, state.local_join_ordinal, None)
             }
             _ => return Err(SpaceAdmissionAggregateError::UnsafeCancellation),
         };
@@ -222,6 +183,57 @@ impl SpaceAdmissionAggregate {
         Ok(AdmissionTransition::new(self, &[]))
     }
 
+    /// 判断放弃通知是否已无法被邀请方接受。
+    ///
+    /// 期限到达后邀请方会按自己的期限收尾，不再依赖这条通知；没有期限的旧记录和本机旧协议版本的
+    /// 通知同样无法再被接受。仍需本机切换空间的收尾不在此列。
+    pub(crate) fn has_undeliverable_abandonment(&self, now_ms: i64) -> bool {
+        let SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(state)) =
+            &self.state
+        else {
+            return false;
+        };
+        let Some(cleanup) = state.cleanup.as_ref() else {
+            return false;
+        };
+        let Some(pending) = cleanup.pending_exchange.as_ref() else {
+            return false;
+        };
+        if cleanup.local_space_transition.is_some() {
+            return false;
+        }
+        // 放弃通知沿用配对尝试的既定截止时间，不另开窗口；缺少期限的旧记录无法再收尾。
+        let window = self
+            .attempt_timeline
+            .map(|timeline| SettlementWindow::until(timeline.expires_at_ms()));
+        window.is_none_or(|window| window.is_expired(now_ms))
+            || pending.request_envelope().header().protocol_version()
+                != SpaceAdmissionProtocolVersion::CURRENT
+    }
+
+    /// 结束无法送达的放弃通知，保留终止围栏。
+    pub(crate) fn end_undeliverable_abandonment(
+        mut self,
+        now_ms: i64,
+    ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
+        if !self.has_undeliverable_abandonment(now_ms) {
+            return Err(SpaceAdmissionAggregateError::InvalidTransition);
+        }
+        let record_version = self
+            .record_version
+            .checked_add(1)
+            .ok_or(SpaceAdmissionAggregateError::RecordVersionOverflow)?;
+        if let SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(state)) =
+            &mut self.state
+        {
+            if let Some(cleanup) = state.cleanup.as_mut() {
+                cleanup.pending_exchange = None;
+            }
+        }
+        self.record_version = record_version;
+        Ok(AdmissionTransition::new(self, &[]))
+    }
+
     pub(crate) fn accept_abandoned(
         mut self,
         abandoned: SpaceAdmissionEnvelopeV1,
@@ -252,11 +264,12 @@ impl SpaceAdmissionAggregate {
         );
         let AdmissionInboundDecision::New(_) = expected
             .classify(&abandoned, canonical_digest, None)
+            // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
             .map_err(|_| SpaceAdmissionAggregateError::InvalidTransition)?
         else {
             return Err(SpaceAdmissionAggregateError::InvalidTransition);
         };
-        if abandoned.header().protocol_version() != SpaceAdmissionProtocolVersion::V2
+        if abandoned.header().protocol_version() != SpaceAdmissionProtocolVersion::CURRENT
             || abandoned.kind() != SpaceAdmissionMessageKind::Abandoned
             || !matches!(
                 abandoned.header().sender_role(),
@@ -272,6 +285,7 @@ impl SpaceAdmissionAggregate {
             pending
                 .request_envelope()
                 .encode_canonical_v1()
+                // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
                 .map_err(|_| SpaceAdmissionAggregateError::InvalidTransition)?,
         )
         .into();
@@ -305,6 +319,7 @@ fn known_cleanup_obligation(
         admission.facts.member_instance,
         event.event_id(),
     )
+    // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
     .map_err(|_| SpaceAdmissionAggregateError::InvalidCommitReply)?;
     let route = SpaceAdmissionRoute::from_bytes(
         commit
@@ -313,6 +328,7 @@ fn known_cleanup_obligation(
             .as_bytes()
             .to_vec(),
     )
+    // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
     .map_err(|_| SpaceAdmissionAggregateError::InvalidCommitReply)?;
     cleanup_obligation(
         exact_commit.header().admission_id(),
@@ -343,6 +359,15 @@ fn cleanup_obligation(
         SpaceAdmissionTerminationReason::Cancelled => AdmissionAbandonmentReasonV2::Cancelled,
         SpaceAdmissionTerminationReason::Expired => AdmissionAbandonmentReasonV2::Expired,
         SpaceAdmissionTerminationReason::Superseded => AdmissionAbandonmentReasonV2::Superseded,
+        SpaceAdmissionTerminationReason::ActivationRejected
+        | SpaceAdmissionTerminationReason::CompletionRejected
+        | SpaceAdmissionTerminationReason::MembershipHistoryRejected
+        | SpaceAdmissionTerminationReason::SecurityMaterialRejected
+        | SpaceAdmissionTerminationReason::RelationshipRejected
+        | SpaceAdmissionTerminationReason::IdentityRejected
+        | SpaceAdmissionTerminationReason::ActivationStateRejected => {
+            AdmissionAbandonmentReasonV2::Rejected
+        }
     };
     let body =
         AdmissionAbandonmentV2::new(attempt_digest, member_binding.clone(), abandonment_reason)
@@ -350,7 +375,7 @@ fn cleanup_obligation(
     let message_id = AdmissionMessageId::from_bytes(attempt_digest)
         .ok_or(SpaceAdmissionAggregateError::InvalidAttemptTimeline)?;
     let request = SpaceAdmissionEnvelopeV1::new_with_version(
-        SpaceAdmissionProtocolVersion::V2,
+        SpaceAdmissionProtocolVersion::CURRENT,
         admission_id,
         AdmissionRole::Joiner,
         4,
@@ -358,14 +383,17 @@ fn cleanup_obligation(
         Some(predecessor_message_id),
         SpaceAdmissionBodyV1::Abandonment(body),
     )
+    // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
     .map_err(|_| SpaceAdmissionAggregateError::InvalidTransition)?;
     let pending_exchange = PendingAdmissionExchange::new(
         route,
         request,
         SpaceAdmissionMessageKind::Abandoned,
         AdmissionRetryState::new(0, 0)
+            // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
             .map_err(|_| SpaceAdmissionAggregateError::InvalidTransition)?,
     )
+    // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
     .map_err(|_| SpaceAdmissionAggregateError::InvalidTransition)?;
     Ok(AdmissionCleanupObligation {
         commit_knowledge,

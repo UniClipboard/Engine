@@ -1,21 +1,24 @@
+use crate::security::space_transition_activation::WithoutProfileVault;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use sha2::{Digest as _, Sha256};
+use openmls_basic_credential::SignatureKeyPair;
+use openmls_traits::signatures::Signer;
+use openmls_traits::types::SignatureScheme;
 use tempfile::tempdir;
 use uc_application::deps::{
     AdvanceMembershipBranchTransitionInput, AdvanceMembershipBranchTransitionPort,
-    CommitMembershipLedgerPort, LoadMembershipLedgerPort, LoadedMembershipLedger,
-    MembershipLedgerMutation, PrepareMembershipBranchRecoveryMaterialInput,
+    MembershipRecord, PrepareMembershipBranchRecoveryMaterialInput,
     PrepareMembershipBranchRecoveryMaterialPort, PrepareMembershipBranchRecoveryRecipientPort,
     PrepareMembershipBranchTransitionInput, PrepareMembershipBranchTransitionPort,
+    SpaceMembershipRecord, StagedMembershipRecord,
 };
 use uc_core::crypto::domain::Passphrase;
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
-    ActiveRuntimeLayout, ActiveSpaceGenerationManifestV2, AdmissionChangeFacts, MembershipBranchId,
-    MembershipBranchRecoveryPackageV1, MembershipBranchTransitionPhaseV1,
-    MembershipBranchTransitionV1, MembershipConflictId, MembershipCredential,
+    ActiveRuntimeLayout, ActiveSpaceGenerationManifestV2, AdmissionChangeFacts, LedgerInput,
+    MembershipBranchId, MembershipBranchRecoveryPackageV1, MembershipBranchTransitionPhaseV1,
+    MembershipBranchTransitionV1, MembershipConflictId, MembershipCredential, MembershipLedger,
     RevocationRepositoryPort, VersionedMembershipHistory, ED25519_SIGNATURE_ALGORITHM_V1,
 };
 use uc_core::ports::security::current_profile::CurrentProfilePort;
@@ -33,10 +36,12 @@ use crate::security::{
     AdmissionKeyManager, DefaultCurrentProfile, ProfileContentKeyVault, ProfileRuntimeLayout,
     SpaceControlGeneration, SpaceTransitionActivation,
 };
+use crate::space::membership_record::test_support::projection_of_ledger;
 use crate::space::{
     DefaultMembershipBranchTransitionPreparation, InMemorySession, KeyMaterialStore,
-    RuntimeSpaceAccessAdapter, SqliteMembershipLedger,
+    OpenMlsHistoricalSignatureVerifier, RuntimeSpaceAccessAdapter, SqliteMembershipRecordStore,
 };
+use crate::time::SystemClock;
 
 #[derive(Default)]
 struct MemorySecureStorage(Mutex<HashMap<String, Vec<u8>>>);
@@ -200,9 +205,14 @@ async fn v3_membership_branch_replays_every_control_phase_after_crash() {
         .prepare_membership_branch_recovery_recipient(group_info)
         .await
         .unwrap();
-    let credential = MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x99; 32]);
+    // 分支目标历史由生产校验器检查，身份签名必须真实。
+    let signing_keys = SignatureKeyPair::new(SignatureScheme::ED25519).unwrap();
+    let credential = MembershipCredential::new(
+        ED25519_SIGNATURE_ALGORITHM_V1,
+        signing_keys.public().to_vec(),
+    );
     let recipient_member = credential.member_instance_id(&recipient_device);
-    let facts = AdmissionChangeFacts {
+    let mut facts = AdmissionChangeFacts {
         member_instance: recipient_member,
         device_id: recipient_device.clone(),
         device_name: "recipient member".to_owned(),
@@ -212,8 +222,9 @@ async fn v3_membership_branch_replays_every_control_phase_after_crash() {
         .unwrap(),
         transport_public_key: vec![0x9a],
         transport_address_blob: vec![0x9b],
-        identity_signature: vec![0x9c],
+        identity_signature: Vec::new(),
     };
+    facts.identity_signature = signing_keys.sign(&facts.signing_payload()).unwrap();
     let history = VersionedMembershipHistory::new_single_member_root(
         space.as_ref().to_owned(),
         facts,
@@ -258,34 +269,25 @@ async fn v3_membership_branch_replays_every_control_phase_after_crash() {
     assert_eq!(transition.source_generation(), &[0x93; 16]);
 
     let executor = Arc::new(DieselSqliteExecutor::new(control_pool.clone()));
-    let ledger = SqliteMembershipLedger::new(Arc::clone(&executor), Arc::clone(&admission_keys));
-    ledger
-        .compare_and_commit(MembershipLedgerMutation {
-            expected_revision: 0,
-            expected_history_digest: None,
-            device_trust_changed: true,
-            replacement: LoadedMembershipLedger {
-                revision: 1,
-                lineage_id: Some(space.as_ref().to_owned()),
-                membership_history: Some(target_history),
-                local_device_id: Some(recipient_device),
-                local_member_instance: Some(recipient_member),
-                local_join_active: true,
-                peer_reconciliation: Default::default(),
-                history_sync_cursor: None,
-                inbound_transfers: Default::default(),
-                completed_inbound_transfers: Default::default(),
-                effect_journal: Default::default(),
-                membership_conflicts: Default::default(),
-                membership_conflict_presentations: Default::default(),
-                membership_branch_transitions: [(transition_id, transition.clone())]
-                    .into_iter()
-                    .collect(),
-                consumed_membership_recovery_nonces: Default::default(),
-                membership_branch_recovery_sessions: Default::default(),
-            },
-        })
-        .await
+    let records = SqliteMembershipRecordStore::new(
+        Arc::clone(&executor),
+        Arc::clone(&admission_keys),
+        Arc::new(OpenMlsHistoricalSignatureVerifier),
+        Arc::new(SystemClock),
+    );
+    let ledger =
+        MembershipLedger::start(history.clone(), recipient_device, recipient_member, 1).unwrap();
+    let mut record = SpaceMembershipRecord {
+        ledger: ledger.snapshot(),
+        history_exchange: Default::default(),
+        branch_recovery: Default::default(),
+    };
+    record
+        .branch_recovery
+        .branch_transitions
+        .insert(transition_id, transition.clone());
+    records
+        .commit_record(0, &MembershipRecord::Space(Box::new(record)), None)
         .unwrap();
     let generations = Arc::new(SpaceControlGeneration::new(
         root.clone(),
@@ -299,6 +301,7 @@ async fn v3_membership_branch_replays_every_control_phase_after_crash() {
         Arc::clone(&manifests),
         Arc::clone(&generations),
         recipient_access,
+        Arc::new(WithoutProfileVault),
     ));
     let mut current = transition;
     for expected_phase in [
@@ -309,6 +312,10 @@ async fn v3_membership_branch_replays_every_control_phase_after_crash() {
         MembershipBranchTransitionPhaseV1::RuntimeRestored,
         MembershipBranchTransitionPhaseV1::Completed,
     ] {
+        // 成员状态负责人只在暂存目标时提供目标世代的成员记录。
+        let staged_membership = (current.phase()
+            == MembershipBranchTransitionPhaseV1::TargetVerified)
+            .then(|| staged_branch_membership(&records.load().unwrap(), &current, &history));
         let first_transitioner = V3MembershipBranchTransition::new(
             control_pool.clone(),
             Arc::clone(&manifests),
@@ -321,6 +328,7 @@ async fn v3_membership_branch_replays_every_control_phase_after_crash() {
                 recipient_staged_mls_state: recipient_recovery.staged_mls_state.clone(),
                 recovery_package: package.clone(),
                 target_history: history.clone(),
+                staged_membership: staged_membership.clone(),
             })
             .await
             .expect("first phase execution succeeds before the simulated crash");
@@ -340,6 +348,7 @@ async fn v3_membership_branch_replays_every_control_phase_after_crash() {
                 recipient_staged_mls_state: recipient_recovery.staged_mls_state.clone(),
                 recovery_package: package.clone(),
                 target_history: history.clone(),
+                staged_membership: staged_membership.clone(),
             })
             .await
             .expect("restarted owner replays the same durable phase");
@@ -363,23 +372,21 @@ async fn v3_membership_branch_replays_every_control_phase_after_crash() {
             &[0x92; 16]
         );
         assert_eq!(active_after_replay.keyslot_generation(), &[0x94; 16]);
-        let loaded = ledger.load().await.unwrap();
-        let mut replacement = loaded.clone();
-        replacement.revision += 1;
+        let loaded = records.load().unwrap();
+        let MembershipRecord::Space(mut replacement) = loaded.clone() else {
+            panic!("the recipient has no current space");
+        };
+        replacement.ledger.revision += 1;
         replacement
-            .membership_branch_transitions
+            .branch_recovery
+            .branch_transitions
             .insert(transition_id, next.clone());
-        ledger
-            .compare_and_commit(MembershipLedgerMutation {
-                device_trust_changed: true,
-                expected_revision: loaded.revision,
-                expected_history_digest: loaded
-                    .membership_history
-                    .as_deref()
-                    .map(|bytes| <[u8; 32]>::from(Sha256::digest(bytes))),
-                replacement,
-            })
-            .await
+        records
+            .commit_record(
+                loaded.revision(),
+                &MembershipRecord::Space(replacement),
+                None,
+            )
             .unwrap();
         current = next;
     }
@@ -411,6 +418,46 @@ async fn v3_membership_branch_replays_every_control_phase_after_crash() {
             "target.sqlite",
         ],
     );
+}
+
+/// 模拟成员状态负责人为暂存目标形成的成员记录：采用目标分支历史，检查点推进到 `TargetStaged`。
+fn staged_branch_membership(
+    current: &MembershipRecord,
+    transition: &MembershipBranchTransitionV1,
+    target_history: &VersionedMembershipHistory,
+) -> StagedMembershipRecord {
+    let MembershipRecord::Space(space) = current.clone() else {
+        panic!("the recipient has no current space");
+    };
+    let SpaceMembershipRecord {
+        ledger,
+        mut branch_recovery,
+        ..
+    } = *space;
+    let (ledger, _, _) = MembershipLedger::restore(ledger)
+        .unwrap()
+        .apply(
+            LedgerInput::BranchRecovered {
+                history: target_history.clone(),
+            },
+            0,
+        )
+        .unwrap()
+        .into_parts();
+    branch_recovery.branch_transitions.insert(
+        *transition.transition_id(),
+        transition
+            .advance(MembershipBranchTransitionPhaseV1::TargetStaged)
+            .unwrap(),
+    );
+    StagedMembershipRecord {
+        projection: projection_of_ledger(&ledger),
+        replacement: MembershipRecord::Space(Box::new(SpaceMembershipRecord {
+            ledger: ledger.snapshot(),
+            history_exchange: Default::default(),
+            branch_recovery,
+        })),
+    }
 }
 
 fn assert_no_forbidden_paths(root: &std::path::Path, forbidden: &[&str]) {

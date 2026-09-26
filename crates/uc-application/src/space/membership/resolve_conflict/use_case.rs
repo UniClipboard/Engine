@@ -5,7 +5,8 @@ use uc_core::membership::{
 };
 
 use crate::space::membership::{
-    MembershipConflictStatus, MembershipLedger, MembershipLedgerError, VerifiedMembershipLedger,
+    MembershipBranchRecoveryRecord, MembershipConflictStatus, MembershipLedgerError,
+    MembershipOwner, MembershipView,
 };
 
 use super::{
@@ -15,18 +16,18 @@ use super::{
 };
 
 pub(crate) struct ResolveMembershipConflictUseCase {
-    ledger: Arc<MembershipLedger>,
+    owner: Arc<MembershipOwner>,
     query: Arc<dyn QueryMembershipConflictStatusPort>,
     execution_lock: tokio::sync::Mutex<()>,
 }
 
 impl ResolveMembershipConflictUseCase {
     pub(crate) fn new(
-        ledger: Arc<MembershipLedger>,
+        owner: Arc<MembershipOwner>,
         query: Arc<dyn QueryMembershipConflictStatusPort>,
     ) -> Self {
         Self {
-            ledger,
+            owner,
             query,
             execution_lock: tokio::sync::Mutex::new(()),
         }
@@ -37,18 +38,11 @@ impl ResolveMembershipConflictUseCase {
         input: ResolveMembershipConflictInput,
     ) -> Result<ResolveMembershipConflictResult, ResolveMembershipConflictError> {
         let _guard = self.execution_lock.lock().await;
-        let snapshot = self
-            .ledger
-            .load_verified()
-            .await
-            .map_err(map_ledger_error)?;
-        let Some(conflict) = snapshot
-            .record()
-            .membership_conflicts
-            .get(&input.conflict_id)
-        else {
+        let view = self.owner.load().await.map_err(map_ledger_error)?;
+        let space = view.require_space().map_err(map_ledger_error)?;
+        let Some(conflict) = space.branch_recovery().conflicts.get(&input.conflict_id) else {
             return Ok(ResolveMembershipConflictResult::StateChanged {
-                current_conflict_id: current_conflict_id(snapshot.record()),
+                current_conflict_id: current_conflict_id(space.branch_recovery()),
             });
         };
         let Some(choice) = conflict.choice_for(input.target_branch_id) else {
@@ -57,15 +51,13 @@ impl ResolveMembershipConflictUseCase {
         if let Some(selected) = conflict.selected_branch_id {
             if selected != input.target_branch_id {
                 return Ok(ResolveMembershipConflictResult::StateChanged {
-                    current_conflict_id: current_conflict_id(snapshot.record()),
+                    current_conflict_id: current_conflict_id(space.branch_recovery()),
                 });
             }
             return self.result_for_persisted_choice(conflict.status).await;
         }
 
-        if snapshot
-            .history()
-            .and_then(|history| MembershipConflictPolicy::branch_id(history).ok())
+        if MembershipConflictPolicy::branch_id(space.history()).ok()
             != Some(conflict.local_branch_id)
         {
             return Ok(ResolveMembershipConflictResult::StateChanged {
@@ -85,10 +77,11 @@ impl ResolveMembershipConflictUseCase {
             MembershipBranchTransitionV1::derive_id(input.conflict_id, input.target_branch_id)
         });
         let commit = self
-            .ledger
-            .compare_and_commit(|record| {
-                let current = record
-                    .membership_conflicts
+            .owner
+            .commit(|draft| {
+                let current = draft
+                    .branch_recovery_mut()?
+                    .conflicts
                     .get_mut(&input.conflict_id)
                     .ok_or(MembershipLedgerError::Conflict)?;
                 if current.selected_branch_id.is_some() {
@@ -101,13 +94,11 @@ impl ResolveMembershipConflictUseCase {
             })
             .await;
         if matches!(commit, Err(MembershipLedgerError::Conflict)) {
-            let latest = self
-                .ledger
-                .load_verified()
-                .await
-                .map_err(map_ledger_error)?;
+            let latest = self.owner.load().await.map_err(map_ledger_error)?;
             return Ok(ResolveMembershipConflictResult::StateChanged {
-                current_conflict_id: current_conflict_id(latest.record()),
+                current_conflict_id: latest
+                    .space()
+                    .and_then(|space| current_conflict_id(space.branch_recovery())),
             });
         }
         commit.map_err(map_ledger_error)?;
@@ -127,55 +118,47 @@ impl ResolveMembershipConflictUseCase {
     pub(crate) async fn query(
         &self,
     ) -> Result<MembershipConflictsView, QueryMembershipConflictsError> {
-        let snapshot = self
-            .ledger
-            .load_verified()
-            .await
-            .map_err(|error| match error {
-                MembershipLedgerError::Locked => QueryMembershipConflictsError::Locked {
+        let view = self.owner.load().await.map_err(|error| match error {
+            MembershipLedgerError::Locked => QueryMembershipConflictsError::Locked {
+                source: anyhow::Error::new(error),
+            },
+            MembershipLedgerError::Corrupt { .. } | MembershipLedgerError::RecoveryRequired => {
+                QueryMembershipConflictsError::RecoveryRequired {
                     source: anyhow::Error::new(error),
-                },
-                MembershipLedgerError::Corrupt | MembershipLedgerError::RecoveryRequired => {
-                    QueryMembershipConflictsError::RecoveryRequired {
-                        source: anyhow::Error::new(error),
-                    }
                 }
-                MembershipLedgerError::Conflict | MembershipLedgerError::Unavailable => {
-                    QueryMembershipConflictsError::Unavailable {
-                        source: anyhow::Error::new(error),
-                    }
+            }
+            MembershipLedgerError::Conflict | MembershipLedgerError::Unavailable { .. } => {
+                QueryMembershipConflictsError::Unavailable {
+                    source: anyhow::Error::new(error),
                 }
-            })?;
-        self.query_snapshot(&snapshot)
+            }
+        })?;
+        self.query_view(&view)
     }
 
-    pub(crate) fn query_snapshot(
+    pub(crate) fn query_view(
         &self,
-        snapshot: &VerifiedMembershipLedger,
+        view: &MembershipView,
     ) -> Result<MembershipConflictsView, QueryMembershipConflictsError> {
-        let record = snapshot.record();
-        if record.membership_conflicts.is_empty() {
+        let Some(space) = view
+            .space()
+            .filter(|space| !space.branch_recovery().conflicts.is_empty())
+        else {
             return Ok(MembershipConflictsView {
-                revision: record.revision,
+                revision: view.revision(),
                 conflicts: Vec::new(),
             });
-        }
-        let history =
-            snapshot
-                .history()
-                .ok_or_else(|| QueryMembershipConflictsError::RecoveryRequired {
-                    source: anyhow::Error::new(MembershipLedgerError::RecoveryRequired),
-                })?;
-        let scope = snapshot.current_scope().map_err(|source| {
+        };
+        let record = space.branch_recovery();
+        let history = space.history();
+        let scope = view.current_scope().map_err(|source| {
             QueryMembershipConflictsError::RecoveryRequired {
                 source: anyhow::Error::new(source),
             }
         })?;
-        let current_branch = snapshot
-            .history()
-            .and_then(|history| MembershipConflictPolicy::branch_id(history).ok());
+        let current_branch = MembershipConflictPolicy::branch_id(history).ok();
         let conflicts = record
-            .membership_conflicts
+            .conflicts
             .values()
             // 已提交恢复继续按原授权推进；过期的未选择快照等待新证据，不再提供旧选项。
             .filter(|conflict| {
@@ -183,18 +166,14 @@ impl ResolveMembershipConflictUseCase {
                     || conflict.selected_branch_id.is_some()
             })
             .map(|conflict| {
-                let presentation = record
-                    .membership_conflict_presentations
-                    .get(&conflict.conflict_id);
+                let presentation = record.conflict_presentations.get(&conflict.conflict_id);
                 Ok(MembershipConflictView {
                     conflict_id: conflict.conflict_id,
                     status: conflict.status,
                     selected_branch_id: conflict.selected_branch_id,
                     transition_phase: conflict
                         .transition_id
-                        .and_then(|transition_id| {
-                            record.membership_branch_transitions.get(&transition_id)
-                        })
+                        .and_then(|transition_id| record.branch_transitions.get(&transition_id))
                         .map(|transition| transition.phase()),
                     detected_at_revision: conflict.detected_at_revision,
                     evidence_peer_count: conflict.evidence_peer_device_ids.len(),
@@ -203,7 +182,7 @@ impl ResolveMembershipConflictUseCase {
                             conflict,
                             true,
                             presentation,
-                            record,
+                            space.local_device_id(),
                             history,
                             &scope,
                         )?,
@@ -211,7 +190,7 @@ impl ResolveMembershipConflictUseCase {
                             conflict,
                             false,
                             presentation,
-                            record,
+                            space.local_device_id(),
                             history,
                             &scope,
                         )?,
@@ -230,7 +209,7 @@ impl ResolveMembershipConflictUseCase {
                 source: anyhow::Error::new(source),
             })?;
         Ok(MembershipConflictsView {
-            revision: record.revision,
+            revision: view.revision(),
             conflicts,
         })
     }
@@ -249,25 +228,13 @@ impl ResolveMembershipConflictUseCase {
                 Ok(ResolveMembershipConflictResult::AlreadyCompleted { status })
             }
             MembershipConflictStatus::RePairingRequired => {
-                let snapshot = self
-                    .ledger
-                    .load_verified()
-                    .await
-                    .map_err(map_ledger_error)?;
                 Ok(ResolveMembershipConflictResult::RePairingRequired {
-                    conflict_id: current_conflict_id(snapshot.record())
-                        .ok_or_else(recovery_required)?,
+                    conflict_id: self.current_conflict().await?,
                 })
             }
             MembershipConflictStatus::Selected | MembershipConflictStatus::Transitioning => {
-                let snapshot = self
-                    .ledger
-                    .load_verified()
-                    .await
-                    .map_err(map_ledger_error)?;
                 Ok(ResolveMembershipConflictResult::Pending {
-                    conflict_id: current_conflict_id(snapshot.record())
-                        .ok_or_else(recovery_required)?,
+                    conflict_id: self.current_conflict().await?,
                 })
             }
             MembershipConflictStatus::Unresolved => Err(recovery_required()),
@@ -275,11 +242,22 @@ impl ResolveMembershipConflictUseCase {
     }
 }
 
+impl ResolveMembershipConflictUseCase {
+    async fn current_conflict(
+        &self,
+    ) -> Result<uc_core::membership::MembershipConflictId, ResolveMembershipConflictError> {
+        let view = self.owner.load().await.map_err(map_ledger_error)?;
+        view.space()
+            .and_then(|space| current_conflict_id(space.branch_recovery()))
+            .ok_or_else(recovery_required)
+    }
+}
+
 fn current_conflict_id(
-    record: &crate::space::membership::LoadedMembershipLedger,
+    record: &MembershipBranchRecoveryRecord,
 ) -> Option<uc_core::membership::MembershipConflictId> {
     record
-        .membership_conflicts
+        .conflicts
         .values()
         .find(|conflict| conflict.status != MembershipConflictStatus::Completed)
         .map(|conflict| conflict.conflict_id)
@@ -293,14 +271,16 @@ fn map_ledger_error(error: MembershipLedgerError) -> ResolveMembershipConflictEr
         MembershipLedgerError::Conflict => ResolveMembershipConflictError::TargetUnavailable {
             source: anyhow::Error::new(error),
         },
-        MembershipLedgerError::Corrupt | MembershipLedgerError::RecoveryRequired => {
+        MembershipLedgerError::Corrupt { .. } | MembershipLedgerError::RecoveryRequired => {
             ResolveMembershipConflictError::RecoveryRequired {
                 source: anyhow::Error::new(error),
             }
         }
-        MembershipLedgerError::Unavailable => ResolveMembershipConflictError::TargetUnavailable {
-            source: anyhow::Error::new(error),
-        },
+        MembershipLedgerError::Unavailable { .. } => {
+            ResolveMembershipConflictError::TargetUnavailable {
+                source: anyhow::Error::new(error),
+            }
+        }
     }
 }
 

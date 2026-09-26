@@ -6,7 +6,7 @@ use crate::db::{
     ports::{DbExecutor, InsertMapper, RowMapper},
     schema::{clipboard_event, clipboard_snapshot_representation},
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use diesel::prelude::*;
 use tracing::debug_span;
 use uc_core::{
@@ -181,10 +181,10 @@ where
                         .filter(clipboard_snapshot_representation::event_id.eq(&event_id_str))
                         .filter(clipboard_snapshot_representation::id.eq(&rep_id_str))
                         .first::<SnapshotRepresentationRow>(conn)
-                        .map_err(|e| anyhow::anyhow!("Failed to fetch representation: {}", e))?;
+                        .context("Failed to fetch representation")?;
                     Ok(rep)
                 })
-                .map_err(|e| anyhow::anyhow!("Database error: {}", e))
+                .context("Database error")
         })?;
 
         // Convert from PersistedClipboardRepresentation to ObservedClipboardRepresentation.

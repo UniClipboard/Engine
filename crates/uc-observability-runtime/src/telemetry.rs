@@ -179,6 +179,7 @@ impl TelemetryRuntime {
         let client = reqwest::blocking::Client::builder()
             .timeout(config.timeout())
             .build()
+            // 观测运行时自身初始化失败只降级为 Unavailable 状态；此时日志通道尚未建立，来源无处记录。
             .map_err(|_| ())?;
         let span_exporter = opentelemetry_otlp::SpanExporter::builder()
             .with_http()
@@ -188,6 +189,7 @@ impl TelemetryRuntime {
             .with_protocol(Protocol::HttpBinary)
             .with_headers(headers.clone())
             .build()
+            // 观测运行时自身初始化失败只降级为 Unavailable 状态；此时日志通道尚未建立，来源无处记录。
             .map_err(|_| ())?;
         let log_exporter = opentelemetry_otlp::LogExporter::builder()
             .with_http()
@@ -197,6 +199,7 @@ impl TelemetryRuntime {
             .with_protocol(Protocol::HttpBinary)
             .with_headers(headers)
             .build()
+            // 观测运行时自身初始化失败只降级为 Unavailable 状态；此时日志通道尚未建立，来源无处记录。
             .map_err(|_| ())?;
         let health = RemoteHealthCounters::default();
         let submission = RemoteSubmissionControl::new(health.clone());

@@ -25,7 +25,7 @@ UC_TEST_OTLP_TRACE_ENDPOINT=http://127.0.0.1:4318/v1/traces \
 UC_TEST_OTLP_LOG_ENDPOINT=http://127.0.0.1:4318/v1/logs \
 cargo test -p uc-engine --features dev-tools \
   --test space_membership_auto_pairing_e2e \
-  topology_script_builds_a_two_node_space_through_public_operations \
+  topology::topology_script_builds_a_two_node_space_through_public_operations \
   --locked -- --exact --nocapture
 ```
 

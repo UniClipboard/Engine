@@ -5,15 +5,21 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
+use uc_application::deps::{LifecycleError, StopProfileRuntimePort};
+use uc_application::facade::ProfileFactoryResetFacade;
 use uc_core::crypto::domain::Passphrase;
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
 use uc_infra::security::{
     ProfileKeyRecoveryError, ProfileKeyRecoveryStore, ProfileRecoveryLosses,
     ProfileRecoveryOutcome, ProfileRecoveryPreparation,
 };
+use uc_observability_contract::error_source::io_error_kind;
 
-use super::ProductionRuntime;
-use crate::assembly::host::{derive_app_paths, profile_key_recovery_store};
+use super::{startup_error, ProductionRuntime};
+use crate::assembly::host::{
+    derive_app_paths, profile_key_recovery_store, wire_host_capabilities_with_emitter,
+    EngineHostEventEmitter,
+};
 use crate::engine::event_stream::EventSender;
 use crate::engine::startup::StartupProgressStore;
 use crate::engine::EngineRuntime;
@@ -22,6 +28,7 @@ use crate::error_codes::{
     PROFILE_RECOVERY_REQUIRED_CODE, PROFILE_RECOVERY_UNSUPPORTED_CODE, UNLOCK_SPACE_CORRUPTED_CODE,
     UNLOCK_SPACE_UNAUTHORIZED_CODE,
 };
+use crate::operations::space::factory_reset::execute_factory_reset_space;
 use crate::{
     AdmissionRecoverySummary, EncryptionStateSummary, EngineConfig, EngineError,
     EngineErrorCategory, EngineEvent, HostCapabilities, HostCapabilityError,
@@ -171,7 +178,8 @@ impl RecoverableRuntime {
                 }
                 Err(error) => {
                     warn!(
-                        error = %error,
+                        error_kind = "profile_recovery_refresh",
+                        io_error_kind = io_error_kind(&error),
                         "profile recovery refresh failed after committed operation"
                     );
                     let summary = ProfileRecoverySummary {
@@ -333,7 +341,75 @@ impl RecoverableRuntime {
                     }
                 }
             }
+            Operation::FactoryResetSpace => self.factory_reset_from_recovery(&bootstrap).await,
             _ => Err(recovery_unavailable()),
+        }
+    }
+
+    /// 恢复模式不启动业务运行时；资料密钥完好时只装配恢复出厂依赖并执行重置，完成后须重启 Engine。
+    async fn factory_reset_from_recovery(
+        &self,
+        bootstrap: &RecoveryBootstrap,
+    ) -> Result<OperationResult, EngineError> {
+        let _gate = bootstrap.gate.lock().await;
+        let mut input = bootstrap.input.lock().await;
+        if input.is_none() {
+            return Err(recovery_unavailable());
+        }
+        if !self.recovery.open_for_factory_reset().await? {
+            return Err(recovery_unavailable());
+        }
+        let Some((config, mut host)) = input.take() else {
+            return Err(recovery_unavailable());
+        };
+        drop(input);
+        let paths = derive_app_paths(host.directories());
+        host.replace_secure_storage(Arc::new(RecoveryHostStorage {
+            inner: Arc::clone(&self.recovery),
+        }));
+        let wiring = wire_host_capabilities_with_emitter(
+            &config,
+            host,
+            paths,
+            Arc::new(EngineHostEventEmitter::new(self.events.clone())),
+            Arc::clone(&bootstrap.progress),
+            Arc::clone(&self.recovery),
+        )
+        .await;
+        let wired = match wiring {
+            Ok(wiring) => wiring.wired,
+            Err(error) => {
+                self.publish_restart_required(bootstrap);
+                return Err(restart_required_error(startup_error(
+                    "factory reset dependency wiring",
+                    error,
+                )));
+            }
+        };
+        let reset = ProfileFactoryResetFacade::new(
+            Arc::clone(&wired.profile_reset.lifecycle_repository),
+            Arc::new(NoProfileRuntime),
+            Arc::clone(&wired.profile_reset.keys),
+            Arc::clone(&wired.profile_reset.state),
+        );
+        let result = execute_factory_reset_space(&reset).await;
+        self.recovery.forget_after_factory_reset();
+        match result {
+            Ok(result) => {
+                self.publish_summary(bootstrap, |summary| {
+                    summary.state = ProfileRecoveryState::NotRequired;
+                    summary.can_submit_passphrase = false;
+                    summary.restart_required = true;
+                    summary.background_ready = false;
+                    summary.cleanup_pending = false;
+                    summary.losses.clear();
+                });
+                Ok(result)
+            }
+            Err(error) => {
+                self.publish_restart_required(bootstrap);
+                Err(restart_required_error(error))
+            }
         }
     }
 
@@ -453,6 +529,16 @@ impl EngineRuntime for RecoverableRuntime {
             }
             RuntimeMode::Recovery(_) | RuntimeMode::AdmissionRecovery(_) => Ok(()),
         }
+    }
+}
+
+/// 恢复模式没有启动任何资料运行时，恢复出厂前无需停止。
+struct NoProfileRuntime;
+
+#[async_trait]
+impl StopProfileRuntimePort for NoProfileRuntime {
+    async fn stop_profile_runtime(&self) -> Result<(), LifecycleError> {
+        Ok(())
     }
 }
 

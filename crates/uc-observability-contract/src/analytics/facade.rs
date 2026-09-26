@@ -31,6 +31,8 @@ use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
+use crate::error_source::io_error_kind;
+
 use super::events::Event;
 use super::identity::{hash_space_id_for_telemetry, AnalyticsIdentityError, AnalyticsIdentityPort};
 use super::port::{AnalyticsPort, GroupIdentifyPayload, IdentifyPayload};
@@ -93,18 +95,24 @@ pub struct SelfMintedAdoptRequest {
 pub enum ResetIdentityError {
     /// Underlying storage operation failed; identity remains in its
     /// previous state.
-    Storage(String),
+    Storage(AnalyticsIdentityError),
 }
 
 impl std::fmt::Display for ResetIdentityError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Storage(msg) => write!(f, "reset telemetry identity failed: {msg}"),
+            Self::Storage(_) => write!(f, "reset telemetry identity failed"),
         }
     }
 }
 
-impl std::error::Error for ResetIdentityError {}
+impl std::error::Error for ResetIdentityError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Storage(error) => Some(error),
+        }
+    }
+}
 
 /// Default composition of an [`AnalyticsPort`] sink and an
 /// [`AnalyticsIdentityPort`]. The sequencing rules live here and only here.
@@ -172,7 +180,8 @@ impl AnalyticsFacade for DefaultAnalyticsFacade {
             }
             Err(err) => {
                 tracing::warn!(
-                    error = %err,
+                    error_kind = "identity_release",
+                    io_error_kind = io_error_kind(&err),
                     "release_to_solo: identity release failed; identity left in old state"
                 );
             }
@@ -183,7 +192,7 @@ impl AnalyticsFacade for DefaultAnalyticsFacade {
         let outcome = self
             .identity
             .reset_telemetry_identity()
-            .map_err(|e| ResetIdentityError::Storage(e.to_string()))?;
+            .map_err(ResetIdentityError::Storage)?;
         self.sink.identify(IdentifyPayload::switch_only(
             outcome.previous_distinct_id,
             outcome.new_distinct_id,
@@ -199,7 +208,8 @@ impl AnalyticsFacade for DefaultAnalyticsFacade {
 fn warn_adopt(scope: &str, err: &AnalyticsIdentityError) {
     tracing::warn!(
         scope,
-        error = %err,
+        error_kind = "identity_adopt",
+        io_error_kind = io_error_kind(err),
         "analytics identity adopt failed; person aggregation deferred"
     );
 }

@@ -25,14 +25,14 @@ pub(super) fn peer_id(
     bytes: &[u8; 32],
 ) -> Result<AdmissionChannelPeerId, SpaceAdmissionTransportError> {
     AdmissionChannelPeerId::from_bytes(*bytes)
-        .ok_or(SpaceAdmissionTransportError::AuthenticationRejected)
+        .ok_or_else(SpaceAdmissionTransportError::authentication_rejected)
 }
 
 pub(super) fn copy_credential(
     credential: &AdmissionContinuationCredential,
 ) -> Result<AdmissionContinuationCredential, SpaceAdmissionTransportError> {
     AdmissionContinuationCredential::from_bytes(credential.as_bytes().to_vec())
-        .map_err(|_| SpaceAdmissionTransportError::Unavailable)
+        .map_err(SpaceAdmissionTransportError::unavailable_from)
 }
 
 pub(super) fn random_nonce() -> [u8; 32] {

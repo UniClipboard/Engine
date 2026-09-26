@@ -57,10 +57,10 @@ pub enum RelayConfigurationRejection {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RelayConfigurationError {
-    #[error("failed to load settings: {0}")]
-    Load(String),
-    #[error("failed to save settings: {0}")]
-    Save(String),
+    #[error("failed to load settings")]
+    Load(#[source] anyhow::Error),
+    #[error("failed to save settings")]
+    Save(#[source] anyhow::Error),
     #[error("invalid settings: {0}")]
     Invalid(String),
     #[error("relay credentials are unavailable")]
@@ -117,7 +117,7 @@ impl RelayConfiguration {
             .settings
             .load()
             .await
-            .map_err(|error| RelayConfigurationError::Load(error.to_string()))?;
+            .map_err(|error| RelayConfigurationError::Load(anyhow::Error::from(error)))?;
         let previous_relay_urls = existing.network.custom_relay_urls.clone();
         let merged = apply_settings_patch(existing.clone(), patch);
         validate_settings(&merged).map_err(RelayConfigurationError::Invalid)?;
@@ -160,7 +160,7 @@ impl RelayConfiguration {
             if transaction_started {
                 self.recover_locked().await?;
             }
-            return Err(RelayConfigurationError::Save(error.to_string()));
+            return Err(RelayConfigurationError::Save(anyhow::Error::from(error)));
         }
 
         if transaction_started {
@@ -186,7 +186,7 @@ impl RelayConfiguration {
             .settings
             .load()
             .await
-            .map_err(|error| RelayConfigurationError::Load(error.to_string()))?;
+            .map_err(|error| RelayConfigurationError::Load(anyhow::Error::from(error)))?;
         let credentials = self
             .credentials
             .as_ref()
@@ -207,7 +207,7 @@ impl RelayConfiguration {
             .settings
             .load()
             .await
-            .map_err(|error| RelayConfigurationError::Load(error.to_string()))?;
+            .map_err(|error| RelayConfigurationError::Load(anyhow::Error::from(error)))?;
         let credentials = self
             .credentials
             .as_ref()
@@ -341,13 +341,14 @@ impl RelayConfiguration {
         self.settings
             .save(&previous_settings)
             .await
-            .map_err(|error| RelayConfigurationError::Save(error.to_string()))?;
+            .map_err(|error| RelayConfigurationError::Save(anyhow::Error::from(error)))?;
         credentials.complete_settings_transaction()?;
         Ok(())
     }
 }
 
 fn canonical_url(raw: &str) -> Result<String, RelayConfigurationRejection> {
+    // 用户输入的 URL 解析失败只作输入校验，拒绝原因已完整表达。
     let url = url::Url::parse(raw.trim()).map_err(|_| RelayConfigurationRejection::InvalidUrl)?;
     if !matches!(url.scheme(), "http" | "https")
         || url.host_str().is_none()
@@ -375,6 +376,7 @@ fn canonical_entries(
     credentials: &RelayCredentials,
 ) -> Result<Vec<RelayConfigurationEntry>, RelayConfigurationError> {
     let urls = canonical_urls(urls)
+        // 用户输入的 URL 解析失败只作输入校验，拒绝原因已完整表达。
         .map_err(|_| RelayConfigurationError::Invalid("invalid custom relay URL".to_string()))?;
     urls.into_iter()
         .map(|url| {

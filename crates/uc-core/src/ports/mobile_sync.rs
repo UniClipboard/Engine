@@ -65,12 +65,12 @@ pub enum PasswordHasherError {
     /// PHC 字符串格式不合法 / 解析失败。adapter 必须在写入 db 前自检,但
     /// 读出的 row 可能因升级 / 损坏而非法,这条让 use case 据此把记录视为
     /// "需要重新登记"。
-    #[error("invalid phc string: {0}")]
-    InvalidPhc(String),
+    #[error("invalid phc string")]
+    InvalidPhc(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     /// 哈希 / 校验调用本身失败(库内部错误 / 内存不足等)。
-    #[error("password hasher internal failure: {0}")]
-    Internal(String),
+    #[error("password hasher internal failure")]
+    Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 // ─── device store (inner aggregate) ──────────────────────────────────────
@@ -257,8 +257,8 @@ pub trait LanInterfaceProbePort: Send + Sync {
 pub enum LanInterfaceProbeError {
     /// 探测失败 —— OS 调用错误、权限不足等。adapter 层负责把底层错误的
     /// 文本带上来给排障。
-    #[error("lan interface probe failed: {0}")]
-    Probe(String),
+    #[error("lan interface probe failed")]
+    Probe(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 // ─── latest paste representation ────────────────────────────────────────
@@ -311,8 +311,8 @@ pub enum LatestClipboardSnapshotError {
     /// 底层 storage 路径失败 —— sqlite 异常 / blob 读不出 / selection 与
     /// representation 行不一致等。adapter 把具体错文本带过来给排障用,但
     /// use case 不依赖错误细节,统一翻成应用层错误后路由层 → HTTP 500。
-    #[error("latest clipboard snapshot resolution failed: {0}")]
-    Resolution(String),
+    #[error("latest clipboard snapshot resolution failed")]
+    Resolution(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 // ─── lan listener lifecycle ─────────────────────────────────────────────
@@ -510,10 +510,10 @@ pub trait MobileFileStagingPort: Send + Sync {
 
 #[derive(Debug, Error)]
 pub enum MobileFileStagingError {
-    /// 写盘 / mkdir / URI 派生 / URI 解析失败。adapter 把底层错误文本带过
-    /// 来,use case 一律翻成应用层 `Internal` 后路由 → HTTP 500。
-    #[error("mobile file staging IO failure: {0}")]
-    Io(String),
+    /// 写盘 / mkdir / URI 派生 / URI 解析失败。adapter 以 source 保留底层错误,
+    /// 文本不含路径或 URI;use case 一律翻成应用层 `Internal` 后路由 → HTTP 500。
+    #[error("mobile file staging IO failure")]
+    Io(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     /// `data_name` sanitize 后落空(全是非法字符),adapter 已 fallback 到
     /// 兜底名仍失败时返回。实际场景几乎不会触发 —— 保留此变体让 use case

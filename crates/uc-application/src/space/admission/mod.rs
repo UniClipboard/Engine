@@ -30,7 +30,10 @@ pub use invitation::{
     CancelInvitationError, PairingInvitationAddressCandidate, QueryPairingInvitationAddressesError,
 };
 pub use join_space::{JoinSpaceError, JoinSpaceInput, JoinSpaceResult};
-pub use model::{CurrentJoinStatus, JoinSpaceTerminationReason, JoinedSpace, PendingInboundMember};
+pub use model::{
+    CurrentJoinStatus, InboundPairing, InboundPairingStatus, JoinSpaceAttentionReason,
+    JoinSpaceAttentionRecovery, JoinSpaceTerminationReason, JoinedSpace, PendingInboundMember,
+};
 pub(crate) use observation::SpaceAdmissionObservationRegistry;
 pub use protocol::{
     ActivateSponsorAdmissionError, ActivateSponsorAdmissionPort, AdmissionReadFailureCategory,
@@ -43,24 +46,24 @@ pub use protocol::{
     JoinerActivationIntent, JoinerActivationMutation, JoinerActivationOutcome,
     JoinerActivationStateError, JoinerActivationStatePort, JoinerCancellationCommitToken,
     JoinerCancellationMaterial, JoinerCancellationMaterialError, JoinerCancellationMutation,
-    JoinerCancellationStateError, JoinerStartMaterial, JoinerStartMaterialError,
-    JoinerStartMaterialPort, JoinerStartMutation, JoinerStartStateError, JoinerStartStatePort,
-    LoadedAdmissionRecovery, LoadedCurrentJoin, LoadedJoinerActivation, LoadedJoinerStartState,
-    LoadedPendingAdmission, LoadedSponsorAbandonment, LoadedSponsorAdmission,
-    LoadedSponsorDeadline, PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
-    PrepareJoinerActivationError, PrepareJoinerActivationPort, PrepareJoinerAppliedError,
-    PrepareJoinerAppliedPort, PrepareJoinerCancellationPort, PrepareJoinerCandidateError,
-    PrepareJoinerCandidatePort, PrepareJoinerInvitationError, PrepareJoinerInvitationPort,
-    PrepareSponsorCandidateError, PrepareSponsorCandidatePort, PrepareSponsorCommitError,
-    PrepareSponsorCommitPort, PrepareSponsorCompleteError, PrepareSponsorCompletePort,
-    PrepareSponsorSettledError, PrepareSponsorSettledPort, PreparedJoinerActivation,
-    PreparedJoinerAppliedMaterial, PreparedJoinerCandidateMaterial, PreparedJoinerInvitation,
-    PreparedSponsorCandidate, PreparedSponsorCommit, PreparedSponsorComplete,
-    PreparedSponsorSettled, ResolveJoinerInvitationError, ResolveJoinerInvitationPort,
-    SpaceAdmissionCommitToken, SpaceAdmissionMessageReply, SpaceAdmissionTransportError,
-    SpaceAdmissionTransportPort, SponsorAdmissionCommitToken, SponsorAdmissionMutation,
-    SponsorAdmissionState, SponsorAdmissionStateError, SponsorAdmissionStatePort,
-    ValidateJoinerActivationIntentPort,
+    JoinerCancellationStateError, JoinerMembershipStart, JoinerStartMaterial,
+    JoinerStartMaterialError, JoinerStartMaterialPort, JoinerStartMutation, JoinerStartStateError,
+    JoinerStartStatePort, LoadedAdmissionRecovery, LoadedCurrentJoin, LoadedJoinerActivation,
+    LoadedJoinerStartState, LoadedPendingAdmission, LoadedSponsorAbandonment,
+    LoadedSponsorAdmission, LoadedSponsorDeadline, PendingAdmissionRecoveryStateError,
+    PendingAdmissionRecoveryStatePort, PrepareJoinerActivationError, PrepareJoinerActivationPort,
+    PrepareJoinerAppliedError, PrepareJoinerAppliedPort, PrepareJoinerCancellationPort,
+    PrepareJoinerCandidateError, PrepareJoinerCandidatePort, PrepareJoinerInvitationError,
+    PrepareJoinerInvitationPort, PrepareSponsorCandidateError, PrepareSponsorCandidatePort,
+    PrepareSponsorCommitError, PrepareSponsorCommitPort, PrepareSponsorCompleteError,
+    PrepareSponsorCompletePort, PrepareSponsorSettledError, PrepareSponsorSettledPort,
+    PreparedJoinerActivation, PreparedJoinerAppliedMaterial, PreparedJoinerCandidateMaterial,
+    PreparedJoinerInvitation, PreparedSponsorCandidate, PreparedSponsorCommit,
+    PreparedSponsorComplete, PreparedSponsorSettled, ResolveJoinerInvitationError,
+    ResolveJoinerInvitationPort, SpaceAdmissionCommitToken, SpaceAdmissionMessageReply,
+    SpaceAdmissionTransportError, SpaceAdmissionTransportPort, SponsorAdmissionCommitToken,
+    SponsorAdmissionMutation, SponsorAdmissionState, SponsorAdmissionStateError,
+    SponsorAdmissionStatePort, ValidateJoinerActivationIntentPort,
 };
 pub use query_pending_space_transition::QueryPendingSpaceTransitionError;
 pub use security_transition::{

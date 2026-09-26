@@ -83,8 +83,8 @@ pub enum GetMobileSyncFileError {
 
     /// File 出站读取 staging 文件时基础设施故障(URI 解析失败 / 读盘失败 /
     /// 权限错)。路由层翻成 HTTP 500。
-    #[error("file staging IO failure: {0}")]
-    Staging(String),
+    #[error("file staging IO failure")]
+    Staging(#[source] MobileFileStagingError),
 }
 
 impl GetMobileSyncFileUseCase {
@@ -164,37 +164,24 @@ impl GetMobileSyncFileUseCase {
                     MobileFileStagingError::NotFound => {
                         debug!(
                             entry_id = %rep.entry_id,
-                            uri = %uri,
                             "mobile_sync get_file: staging read_by_uri NotFound"
                         );
                         GetMobileSyncFileError::NotFound
                     }
-                    MobileFileStagingError::Io(msg) => {
-                        warn!(
-                            entry_id = %rep.entry_id,
-                            uri = %uri,
-                            error = %msg,
-                            "mobile_sync get_file: staging read_by_uri IO failure"
-                        );
-                        GetMobileSyncFileError::Staging(msg)
-                    }
+                    error @ MobileFileStagingError::Io(_) => GetMobileSyncFileError::Staging(error),
                     // adapter 不应在 read_by_uri 路径返这个变体, 防御式翻成
                     // Staging IO 错误便于排障。
-                    MobileFileStagingError::InvalidDataName(msg) => {
+                    error @ MobileFileStagingError::InvalidDataName(_) => {
                         warn!(
                             entry_id = %rep.entry_id,
-                            uri = %uri,
                             "mobile_sync get_file: unexpected InvalidDataName from read_by_uri"
                         );
-                        GetMobileSyncFileError::Staging(format!(
-                            "unexpected InvalidDataName: {msg}"
-                        ))
+                        GetMobileSyncFileError::Staging(error)
                     }
                 })?;
 
             debug!(
                 entry_id = %rep.entry_id,
-                uri = %uri,
                 bytes_len = bytes.len(),
                 "mobile_sync get_file: served staged file bytes"
             );
@@ -496,7 +483,7 @@ mod tests {
 
     #[tokio::test]
     async fn port_error_propagates_as_port_variant() {
-        let err = LatestClipboardSnapshotError::Resolution("simulated sqlite failure".to_string());
+        let err = LatestClipboardSnapshotError::Resolution("simulated sqlite failure".into());
         let uc = build_uc_returning(Err(err));
         let outcome = uc.execute("anything").await.unwrap_err();
         assert!(matches!(outcome, GetMobileSyncFileError::Port(_)));

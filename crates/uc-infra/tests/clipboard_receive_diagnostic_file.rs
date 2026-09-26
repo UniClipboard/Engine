@@ -1,6 +1,7 @@
 //! 真实协议拒收必须在普通采集的实际文件中保留原因。
 use std::sync::Arc;
 use std::time::Duration;
+use uc_application::deps::{KnownPeerIdentity, MembershipLedgerError, PeerIdentityDirectoryPort};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -31,6 +32,22 @@ impl MemberRepositoryPort for Member {
     }
     async fn remove(&self, _: &DeviceId) -> Result<bool, MembershipError> {
         panic!("只读测试")
+    }
+}
+
+#[async_trait]
+impl PeerIdentityDirectoryPort for Member {
+    async fn known_peer_identities(&self) -> Result<Vec<KnownPeerIdentity>, MembershipLedgerError> {
+        Ok(self
+            .list()
+            .await
+            .map_err(MembershipLedgerError::unavailable_from)?
+            .into_iter()
+            .map(|member| KnownPeerIdentity {
+                device_id: member.device_id,
+                identity_fingerprint: member.identity_fingerprint,
+            })
+            .collect())
     }
 }
 struct Admitted;

@@ -7,6 +7,7 @@ use tokio::task::JoinHandle;
 use uc_application::deps::{LifecycleError, RuntimeLifecyclePort, TransitionContext};
 use uc_application::facade::NetworkRecoveryRequestError;
 use uc_core::{FileTransferCancellationReason, TaskShutdownReport};
+use uc_observability_contract::diagnostics::{record_task_join_failure, DiagnosticTaskKind};
 
 use super::SessionSupervisor;
 use crate::runtime::operation_unavailable_error;
@@ -71,7 +72,11 @@ impl RuntimeLifecyclePort for SessionWork {
 
 async fn join_owned(task: JoinHandle<anyhow::Result<()>>) -> anyhow::Result<()> {
     task.await
-        .map_err(|_| EngineError::new(1108, EngineErrorCategory::Internal, true))?
+        // 公开契约边界：只产出稳定错误码；任务异常退出由本处的任务诊断记录。
+        .map_err(|_| {
+            record_task_join_failure(DiagnosticTaskKind::SessionSuspend);
+            EngineError::new(1108, EngineErrorCategory::Internal, true)
+        })?
 }
 
 async fn suspend_owned(
@@ -129,6 +134,8 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use uc_application::facade::RebuildNetworkSessionError;
+
+    use crate::testing::TaskJoinFailures;
     use uc_core::TaskRegistry;
 
     #[tokio::test]
@@ -225,6 +232,8 @@ mod tests {
 
     #[tokio::test]
     async fn owned_suspend_task_failure_is_a_stable_internal_error() {
+        let failures = TaskJoinFailures::default();
+        let _capture = failures.install();
         let error = super::join_owned(tokio::spawn(async {
             panic!("private session lifecycle failure");
         }))
@@ -234,5 +243,6 @@ mod tests {
         assert_eq!(error.code(), 1108);
         assert_eq!(error.category(), EngineErrorCategory::Internal);
         assert!(error.is_retryable());
+        assert_eq!(failures.kinds(), ["session_suspend"]);
     }
 }

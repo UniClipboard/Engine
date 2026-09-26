@@ -12,8 +12,8 @@ use uc_core::ports::{AppVersionStateError, AppVersionStatePort};
 
 #[derive(Debug, Error)]
 pub(crate) enum AcknowledgeError {
-    #[error("current build version is malformed: {0}")]
-    CurrentVersionMalformed(String),
+    #[error("current build version is malformed")]
+    CurrentVersionMalformed(#[source] semver::Error),
 
     #[error("write app version cursor failed: {0}")]
     WriteCursor(#[from] AppVersionStateError),
@@ -31,9 +31,8 @@ impl AcknowledgeUseCase {
     /// 把游标推进到 `current_version_str`。先用 semver 校验合法性，
     /// 避免把无效字符串写回磁盘污染游标。
     pub(crate) async fn execute(&self, current_version_str: &str) -> Result<(), AcknowledgeError> {
-        let _validated = semver::Version::parse(current_version_str).map_err(|e| {
-            AcknowledgeError::CurrentVersionMalformed(format!("{current_version_str:?}: {e}"))
-        })?;
+        let _validated = semver::Version::parse(current_version_str)
+            .map_err(AcknowledgeError::CurrentVersionMalformed)?;
 
         self.app_version_state.write(current_version_str).await?;
         info!(

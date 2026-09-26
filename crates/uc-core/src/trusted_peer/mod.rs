@@ -26,11 +26,14 @@ mod tests {
     }
 
     #[test]
-    fn error_repository_formats_underlying_message() {
+    fn error_repository_keeps_underlying_failure_as_source() {
         let err = TrustedPeerError::Repository("disk offline".into());
+        assert_eq!(err.to_string(), "trusted-peer repository failure");
         assert_eq!(
-            err.to_string(),
-            "trusted-peer repository failure: disk offline"
+            std::error::Error::source(&err)
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("disk offline")
         );
     }
 

@@ -1,7 +1,9 @@
 use async_trait::async_trait;
+use uc_core::ids::DeviceId;
 
 use super::{
-    AdmissionMaintenanceOutcome, MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger,
+    AdmissionMaintenanceOutcome, MembershipMaintenanceReport, MembershipMaintenanceStepOutcome,
+    MembershipMaintenanceTrigger, QuerySpaceWorkModeError, SpaceWorkPermit,
 };
 
 pub trait WakeSpaceMembershipMaintenancePort: Send + Sync {
@@ -30,6 +32,11 @@ pub trait RecoverSpaceAdmissionsPort: Send + Sync {
 }
 
 #[async_trait]
+pub trait AcquireSpaceWorkPermitPort: Send + Sync {
+    async fn acquire_space_work_permit(&self) -> Result<SpaceWorkPermit, QuerySpaceWorkModeError>;
+}
+
+#[async_trait]
 pub trait RecoverMembershipEffectsPort: Send + Sync {
     async fn recover_membership_effects(&self) -> MembershipMaintenanceStepOutcome;
 }
@@ -39,32 +46,22 @@ pub trait RecoverMembershipConflictsPort: Send + Sync {
     async fn recover_membership_conflicts(&self) -> MembershipMaintenanceStepOutcome;
 }
 
-#[async_trait]
-pub trait DeliverRestrictedMembershipPort: Send + Sync {
-    async fn deliver_restricted_membership(&self) -> MembershipMaintenanceStepOutcome;
-}
-
+/// 投递已到期的组密钥更新。`reachable_peers` 是刚与本机成功交换成员历史的对端，发给它们的更新不必等
+/// 投递退避到期。
 #[async_trait]
 pub trait DeliverPendingGroupUpdatesPort: Send + Sync {
     async fn deliver_pending_group_updates(
         &self,
         trigger: &MembershipMaintenanceTrigger,
+        reachable_peers: &[DeviceId],
     ) -> MembershipMaintenanceStepOutcome;
 }
 
+/// 执行一轮已到期的普通成员待办；由成员待办执行器实现，维护运行期只负责何时调用。
 #[async_trait]
-pub trait SynchronizeMembershipMaintenancePort: Send + Sync {
-    async fn periodic_synchronization_required(
-        &self,
-    ) -> Result<bool, MembershipMaintenanceStepOutcome>;
-
-    async fn synchronize_membership(
+pub(crate) trait RunMembershipWorkPort: Send + Sync {
+    async fn run_membership_work(
         &self,
         trigger: &MembershipMaintenanceTrigger,
-    ) -> MembershipMaintenanceStepOutcome;
-}
-
-#[async_trait]
-pub trait ReconcileMembershipProjectionPort: Send + Sync {
-    async fn reconcile_membership_projection(&self) -> MembershipMaintenanceStepOutcome;
+    ) -> MembershipMaintenanceReport;
 }

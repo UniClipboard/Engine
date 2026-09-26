@@ -9,6 +9,6 @@ pub enum ClipboardRepositoryError {
     #[error("clipboard record not found: {0}")]
     NotFound(String),
     /// The persistence layer failed to complete the operation.
-    #[error("storage failure: {0}")]
-    Storage(String),
+    #[error("storage failure")]
+    Storage(#[source] Box<dyn std::error::Error + Send + Sync>),
 }

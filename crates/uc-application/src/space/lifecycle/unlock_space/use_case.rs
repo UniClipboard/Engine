@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info, instrument};
 use uc_core::crypto::domain::Passphrase;
 use uc_core::ids::SpaceId;
 use uc_core::ports::space::SpaceAccessError;
@@ -54,9 +54,9 @@ impl UnlockSpaceUseCase {
             .map_err(UnlockSpaceError::internal)?;
 
         self.readiness
-            .complete_after_unlock()
+            .prepare_data()
             .await
-            .map_err(|message| UnlockSpaceError::internal(anyhow::anyhow!(message)))?;
+            .map_err(UnlockSpaceError::internal)?;
         self.recovery
             .request_activation()
             .await
@@ -100,7 +100,7 @@ fn unlock_failure_reason(error: &SpaceAccessError) -> UnlockFailureReason {
     match error {
         SpaceAccessError::WrongPassphrase => UnlockFailureReason::PassphraseMismatch,
         SpaceAccessError::NotInitialized => UnlockFailureReason::SpaceNotFound,
-        SpaceAccessError::CorruptedKeyMaterial => UnlockFailureReason::KeyslotCorrupted,
+        SpaceAccessError::CorruptedKeyMaterial { .. } => UnlockFailureReason::KeyslotCorrupted,
         _ => UnlockFailureReason::Internal,
     }
 }
@@ -109,11 +109,8 @@ fn map_unlock_error(error: SpaceAccessError) -> UnlockSpaceError {
     match error {
         SpaceAccessError::NotInitialized => UnlockSpaceError::SpaceNotInitialized,
         SpaceAccessError::WrongPassphrase => UnlockSpaceError::WrongPassphrase,
-        SpaceAccessError::CorruptedKeyMaterial => UnlockSpaceError::CorruptedKeyMaterial,
-        SpaceAccessError::Internal(message) => UnlockSpaceError::internal(anyhow::anyhow!(message)),
-        other => {
-            warn!(error = %other, "unexpected space access error during unlock");
-            UnlockSpaceError::internal(other)
-        }
+        SpaceAccessError::CorruptedKeyMaterial { .. } => UnlockSpaceError::CorruptedKeyMaterial,
+        error @ SpaceAccessError::Internal(_) => UnlockSpaceError::internal(error),
+        other => UnlockSpaceError::internal(other),
     }
 }

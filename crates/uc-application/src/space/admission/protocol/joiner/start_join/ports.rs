@@ -6,12 +6,28 @@ use super::model::{
 #[derive(Debug, thiserror::Error)]
 pub enum PrepareJoinerInvitationError {
     #[error("the invitation is invalid")]
-    Invalid,
+    Invalid {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("invitation preparation is unavailable")]
     Unavailable {
         #[source]
         source: anyhow::Error,
     },
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl PrepareJoinerInvitationError {
+    pub fn invalid() -> Self {
+        Self::Invalid { source: None }
+    }
+
+    pub fn invalid_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Invalid {
+            source: Some(source.into()),
+        }
+    }
 }
 
 impl PrepareJoinerInvitationError {
@@ -25,7 +41,7 @@ impl PrepareJoinerInvitationError {
 impl From<PrepareJoinerInvitationError> for JoinSpaceError {
     fn from(error: PrepareJoinerInvitationError) -> Self {
         match error {
-            PrepareJoinerInvitationError::Invalid => Self::InvalidInvitation,
+            PrepareJoinerInvitationError::Invalid { .. } => Self::InvalidInvitation,
             PrepareJoinerInvitationError::Unavailable { .. } => Self::Unavailable,
         }
     }
@@ -46,13 +62,29 @@ use uc_core::pairing::invitation::FullInvitation;
 #[derive(Debug, thiserror::Error)]
 pub enum JoinerStartMaterialError {
     #[error("the invitation cannot start a new admission")]
-    InvalidInvitation,
+    InvalidInvitation {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
 
     #[error("joiner start material is unavailable")]
     Unavailable {
         #[source]
         source: anyhow::Error,
     },
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl JoinerStartMaterialError {
+    pub fn invalid_invitation() -> Self {
+        Self::InvalidInvitation { source: None }
+    }
+
+    pub fn invalid_invitation_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::InvalidInvitation {
+            source: Some(source.into()),
+        }
+    }
 }
 
 impl JoinerStartMaterialError {
@@ -66,7 +98,7 @@ impl JoinerStartMaterialError {
 impl From<JoinerStartMaterialError> for JoinSpaceError {
     fn from(error: JoinerStartMaterialError) -> Self {
         match error {
-            JoinerStartMaterialError::InvalidInvitation => Self::InvalidInvitation,
+            JoinerStartMaterialError::InvalidInvitation { .. } => Self::InvalidInvitation,
             JoinerStartMaterialError::Unavailable { .. } => Self::Unavailable,
         }
     }
@@ -112,7 +144,7 @@ pub trait JoinerStartMaterialPort: Send + Sync {
         _invitation: &FullInvitation,
         _start_context: &AdmissionJoinerStartContext,
     ) -> Result<JoinerStartMaterial, JoinerStartMaterialError> {
-        Err(JoinerStartMaterialError::InvalidInvitation)
+        Err(JoinerStartMaterialError::invalid_invitation())
     }
 }
 

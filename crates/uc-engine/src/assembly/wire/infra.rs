@@ -21,17 +21,20 @@ pub(super) fn create_db_pool(db_path: &PathBuf) -> WiringResult<DbPool> {
     if db_path.as_os_str() != ":memory:" {
         if let Some(parent) = db_path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent).map_err(|e| {
-                WiringError::DatabaseInit(format!("Failed to create DB directory: {}", e))
+                WiringError::DatabaseInit(
+                    anyhow::Error::from(e).context("Failed to create DB directory"),
+                )
             })?;
         }
     }
 
     let db_url = db_path
         .to_str()
-        .ok_or_else(|| WiringError::DatabaseInit("Invalid database path".to_string()))?;
+        .ok_or_else(|| WiringError::DatabaseInit(anyhow::anyhow!("Invalid database path")))?;
 
-    init_db_pool(db_url)
-        .map_err(|e| WiringError::DatabaseInit(format!("Failed to initialize DB: {}", e)))
+    init_db_pool(db_url).map_err(|e| {
+        WiringError::DatabaseInit(anyhow::Error::from(e).context("Failed to initialize DB"))
+    })
 }
 pub(super) fn build_space_access_ports(
     key_material: &Arc<KeyMaterialStore>,
@@ -96,14 +99,6 @@ pub(super) fn build_space_access_ports(
         space_security_reset,
     )
 }
-pub(super) fn build_peer_admission_port(
-    membership_ledger: Arc<dyn uc_application::deps::LoadMembershipLedgerPort>,
-) -> Arc<dyn uc_core::membership::PeerAdmissionPort> {
-    Arc::new(uc_infra::space::MlsPeerAdmissionAdapter::new(
-        membership_ledger,
-    ))
-}
-
 pub(super) fn build_search_assembly(
     db_pool_for_search: DbPool,
     space_access_ports: &SpaceAccessPorts,
@@ -208,8 +203,9 @@ pub(super) fn build_blob_processing_assembly(
     let representation_cache_port: Arc<dyn RepresentationCachePort> = representation_cache.clone();
 
     let spool_manager = Arc::new(
-        SpoolManager::new(spool_dir, storage_config.spool_max_bytes)
-            .map_err(|e| WiringError::BlobStorageInit(format!("Failed to create spool: {}", e)))?,
+        SpoolManager::new(spool_dir, storage_config.spool_max_bytes).map_err(|e| {
+            WiringError::BlobStorageInit(anyhow::Error::from(e).context("Failed to create spool"))
+        })?,
     );
 
     let (worker_tx, worker_rx) = mpsc::channel::<RepresentationId>(100);
@@ -375,8 +371,11 @@ pub(super) fn create_infra_layer(
 
     let thumbnail_repo_impl = DieselThumbnailRepository::new(Arc::clone(&db_executor));
     let thumbnail_repo: Arc<dyn ThumbnailRepositoryPort> = Arc::new(thumbnail_repo_impl);
-    let thumbnail_generator =
-        InfraThumbnailGenerator::new(128).map_err(|e| WiringError::ThumbnailInit(e.to_string()))?;
+    let thumbnail_generator = InfraThumbnailGenerator::new(128).map_err(|e| {
+        WiringError::ThumbnailInit(
+            anyhow::Error::from(e).context("Failed to create thumbnail generator"),
+        )
+    })?;
     let thumbnail_generator: Arc<dyn ThumbnailGeneratorPort> = Arc::new(thumbnail_generator);
 
     let secure_storage_for_key_material = Arc::clone(&secure_storage);

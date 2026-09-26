@@ -84,16 +84,16 @@ fn decode_bootstrap_record(
         &row.encrypted_record,
         &bootstrap_record_aad(&row.bootstrap_id, &row.status),
     )
-    .map_err(|error| BootstrapError::Repository(error.to_string()))?;
+    .map_err(|error| BootstrapError::Repository(error.into()))?;
     if record.bootstrap_id().as_str() != row.bootstrap_id
         || space_lookup_token(master_key, record.space_id())
-            .map_err(|error| BootstrapError::Repository(error.to_string()))?
+            .map_err(|error| BootstrapError::Repository(error.into()))?
             != row.space_lookup_token
         || epoch_to_i64(record.previous_epoch().value())
-            .map_err(|error| BootstrapError::Repository(error.to_string()))?
+            .map_err(|error| BootstrapError::Repository(error.into()))?
             != row.previous_epoch
         || epoch_to_i64(record.next_epoch().value())
-            .map_err(|error| BootstrapError::Repository(error.to_string()))?
+            .map_err(|error| BootstrapError::Repository(error.into()))?
             != row.next_epoch
         || bootstrap_status_name(record.status()) != row.status
         || record.created_at_ms() != row.created_at_ms
@@ -118,10 +118,10 @@ impl<E: DbExecutor> LegacyBootstrapRepositoryPort for DieselSpaceSecurityStore<E
         let master_key = self
             .session
             .get_master_key()
-            .map_err(|error| BootstrapError::Repository(error.to_string()))?;
+            .map_err(|error| BootstrapError::Repository(error.into()))?;
         let prepared = prepared.clone();
         let lookup_token = space_lookup_token(&master_key, prepared.space_id())
-            .map_err(|error| BootstrapError::Repository(error.to_string()))?;
+            .map_err(|error| BootstrapError::Repository(error.into()))?;
         let encrypted = seal(
             &master_key,
             &prepared,
@@ -130,7 +130,7 @@ impl<E: DbExecutor> LegacyBootstrapRepositoryPort for DieselSpaceSecurityStore<E
                 bootstrap_status_name(prepared.status()),
             ),
         )
-        .map_err(|error| BootstrapError::Repository(error.to_string()))?;
+        .map_err(|error| BootstrapError::Repository(error.into()))?;
         self.executor
             .run(move |conn| {
                 conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
@@ -145,7 +145,7 @@ impl<E: DbExecutor> LegacyBootstrapRepositoryPort for DieselSpaceSecurityStore<E
                     .optional()?;
                     if let Some(row) = existing {
                         return decode_bootstrap_record(&master_key, &row)
-                            .map_err(|error| anyhow::anyhow!(error.to_string()));
+                            .map_err(anyhow::Error::new);
                     }
                     let revocation_in_progress: i64 = diesel::sql_query(
                         "SELECT COUNT(*) AS count FROM member_revocation_log \
@@ -188,7 +188,7 @@ impl<E: DbExecutor> LegacyBootstrapRepositoryPort for DieselSpaceSecurityStore<E
                     Ok(prepared)
                 })
             })
-            .map_err(|error| BootstrapError::Repository(error.to_string()))
+            .map_err(|error| BootstrapError::Repository(error.context("begin legacy bootstrap").into()))
     }
 
     async fn stage_legacy_bootstrap(
@@ -202,16 +202,16 @@ impl<E: DbExecutor> LegacyBootstrapRepositoryPort for DieselSpaceSecurityStore<E
         let master_key = self
             .session
             .get_master_key()
-            .map_err(|error| BootstrapError::Repository(error.to_string()))?;
+            .map_err(|error| BootstrapError::Repository(error.into()))?;
         let bootstrap_id = record.bootstrap_id().as_str().to_owned();
         let encrypted_record = seal(
             &master_key,
             &record,
             &bootstrap_record_aad(&bootstrap_id, bootstrap_status_name(record.status())),
         )
-        .map_err(|error| BootstrapError::Repository(error.to_string()))?;
+        .map_err(|error| BootstrapError::Repository(error.into()))?;
         let encrypted_stage = seal(&master_key, stage, &bootstrap_stage_aad(&bootstrap_id))
-            .map_err(|error| BootstrapError::Repository(error.to_string()))?;
+            .map_err(|error| BootstrapError::Repository(error.into()))?;
         self.executor
             .run(move |conn| {
                 let affected = diesel::sql_query(
@@ -230,7 +230,9 @@ impl<E: DbExecutor> LegacyBootstrapRepositoryPort for DieselSpaceSecurityStore<E
                 }
                 Ok(())
             })
-            .map_err(|error| BootstrapError::Repository(error.to_string()))
+            .map_err(|error| {
+                BootstrapError::Repository(error.context("stage legacy bootstrap").into())
+            })
     }
 
     async fn activate_legacy_bootstrap(
@@ -241,15 +243,15 @@ impl<E: DbExecutor> LegacyBootstrapRepositoryPort for DieselSpaceSecurityStore<E
         let master_key = self
             .session
             .get_master_key()
-            .map_err(|error| BootstrapError::Repository(error.to_string()))?;
+            .map_err(|error| BootstrapError::Repository(error.into()))?;
         let bootstrap_id = bootstrap_id.as_str().to_owned();
         self.executor
             .run(move |conn| {
                 conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
                     let row = load_bootstrap_row(conn, &bootstrap_id)?
                         .ok_or_else(|| anyhow::anyhow!("legacy bootstrap not found"))?;
-                    let mut record = decode_bootstrap_record(&master_key, &row)
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                    let mut record =
+                        decode_bootstrap_record(&master_key, &row).map_err(anyhow::Error::new)?;
                     if matches!(
                         record.status(),
                         LegacyBootstrapStatus::AwaitingReadmission
@@ -269,7 +271,7 @@ impl<E: DbExecutor> LegacyBootstrapRepositoryPort for DieselSpaceSecurityStore<E
                         encrypted_stage,
                         &bootstrap_stage_aad(&bootstrap_id),
                     )
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                    .map_err(anyhow::Error::new)?;
                     if stage.record().bootstrap_id() != record.bootstrap_id()
                         || stage.material().state().space_id() != record.space_id()
                     {
@@ -282,9 +284,9 @@ impl<E: DbExecutor> LegacyBootstrapRepositoryPort for DieselSpaceSecurityStore<E
                     };
                     record
                         .transition_to(next_status, now_ms)
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                        .map_err(anyhow::Error::new)?;
                     save_space_material_on(conn, &master_key, stage.material())
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                        .map_err(anyhow::Error::new)?;
                     let encrypted_record = seal(
                         &master_key,
                         &record,
@@ -293,13 +295,13 @@ impl<E: DbExecutor> LegacyBootstrapRepositoryPort for DieselSpaceSecurityStore<E
                             bootstrap_status_name(record.status()),
                         ),
                     )
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                    .map_err(anyhow::Error::new)?;
                     let encrypted_stage = if record.status().is_terminal() {
                         None
                     } else {
                         Some(
                             seal(&master_key, &stage, &bootstrap_stage_aad(&bootstrap_id))
-                                .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+                                .map_err(anyhow::Error::new)?,
                         )
                     };
                     let affected = diesel::sql_query(
@@ -319,7 +321,9 @@ impl<E: DbExecutor> LegacyBootstrapRepositoryPort for DieselSpaceSecurityStore<E
                     Ok(record)
                 })
             })
-            .map_err(|error| BootstrapError::Repository(error.to_string()))
+            .map_err(|error| {
+                BootstrapError::Repository(error.context("activate legacy bootstrap").into())
+            })
     }
 
     async fn load_legacy_bootstrap_stage(
@@ -329,7 +333,7 @@ impl<E: DbExecutor> LegacyBootstrapRepositoryPort for DieselSpaceSecurityStore<E
         let master_key = self
             .session
             .get_master_key()
-            .map_err(|error| BootstrapError::Repository(error.to_string()))?;
+            .map_err(|error| BootstrapError::Repository(error.into()))?;
         let bootstrap_id = bootstrap_id.as_str().to_owned();
         self.executor
             .run(move |conn| {
@@ -344,10 +348,12 @@ impl<E: DbExecutor> LegacyBootstrapRepositoryPort for DieselSpaceSecurityStore<E
                     &encrypted_stage,
                     &bootstrap_stage_aad(&bootstrap_id),
                 )
-                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                .map_err(anyhow::Error::new)?;
                 Ok(Some(stage))
             })
-            .map_err(|error| BootstrapError::Repository(error.to_string()))
+            .map_err(|error| {
+                BootstrapError::Repository(error.context("load legacy bootstrap stage").into())
+            })
     }
 
     async fn get_legacy_bootstrap(
@@ -357,16 +363,18 @@ impl<E: DbExecutor> LegacyBootstrapRepositoryPort for DieselSpaceSecurityStore<E
         let master_key = self
             .session
             .get_master_key()
-            .map_err(|error| BootstrapError::Repository(error.to_string()))?;
+            .map_err(|error| BootstrapError::Repository(error.into()))?;
         let bootstrap_id = bootstrap_id.as_str().to_owned();
         self.executor
             .run(move |conn| {
                 load_bootstrap_row(conn, &bootstrap_id)?
                     .map(|row| decode_bootstrap_record(&master_key, &row))
                     .transpose()
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))
+                    .map_err(anyhow::Error::new)
             })
-            .map_err(|error| BootstrapError::Repository(error.to_string()))
+            .map_err(|error| {
+                BootstrapError::Repository(error.context("get legacy bootstrap").into())
+            })
     }
 
     async fn list_incomplete_legacy_bootstraps_for_space(
@@ -376,9 +384,9 @@ impl<E: DbExecutor> LegacyBootstrapRepositoryPort for DieselSpaceSecurityStore<E
         let master_key = self
             .session
             .get_master_key()
-            .map_err(|error| BootstrapError::Repository(error.to_string()))?;
+            .map_err(|error| BootstrapError::Repository(error.into()))?;
         let lookup_token = space_lookup_token(&master_key, space_id)
-            .map_err(|error| BootstrapError::Repository(error.to_string()))?;
+            .map_err(|error| BootstrapError::Repository(error.into()))?;
         self.executor
             .run(move |conn| {
                 let rows = diesel::sql_query(
@@ -392,12 +400,15 @@ impl<E: DbExecutor> LegacyBootstrapRepositoryPort for DieselSpaceSecurityStore<E
                 .load::<LegacyBootstrapRow>(conn)?;
                 rows.iter()
                     .map(|row| {
-                        decode_bootstrap_record(&master_key, row)
-                            .map_err(|error| anyhow::anyhow!(error.to_string()))
+                        decode_bootstrap_record(&master_key, row).map_err(anyhow::Error::new)
                     })
                     .collect()
             })
-            .map_err(|error| BootstrapError::Repository(error.to_string()))
+            .map_err(|error| {
+                BootstrapError::Repository(
+                    error.context("list incomplete legacy bootstraps").into(),
+                )
+            })
     }
 
     async fn list_non_complete_legacy_bootstraps_for_space(
@@ -407,9 +418,9 @@ impl<E: DbExecutor> LegacyBootstrapRepositoryPort for DieselSpaceSecurityStore<E
         let master_key = self
             .session
             .get_master_key()
-            .map_err(|error| BootstrapError::Repository(error.to_string()))?;
+            .map_err(|error| BootstrapError::Repository(error.into()))?;
         let lookup_token = space_lookup_token(&master_key, space_id)
-            .map_err(|error| BootstrapError::Repository(error.to_string()))?;
+            .map_err(|error| BootstrapError::Repository(error.into()))?;
         self.executor
             .run(move |conn| {
                 let rows = diesel::sql_query(
@@ -423,12 +434,15 @@ impl<E: DbExecutor> LegacyBootstrapRepositoryPort for DieselSpaceSecurityStore<E
                 .load::<LegacyBootstrapRow>(conn)?;
                 rows.iter()
                     .map(|row| {
-                        decode_bootstrap_record(&master_key, row)
-                            .map_err(|error| anyhow::anyhow!(error.to_string()))
+                        decode_bootstrap_record(&master_key, row).map_err(anyhow::Error::new)
                     })
                     .collect()
             })
-            .map_err(|error| BootstrapError::Repository(error.to_string()))
+            .map_err(|error| {
+                BootstrapError::Repository(
+                    error.context("list non-complete legacy bootstraps").into(),
+                )
+            })
     }
 
     async fn acknowledge_legacy_readmission(
@@ -440,7 +454,7 @@ impl<E: DbExecutor> LegacyBootstrapRepositoryPort for DieselSpaceSecurityStore<E
         let master_key = self
             .session
             .get_master_key()
-            .map_err(|error| BootstrapError::Repository(error.to_string()))?;
+            .map_err(|error| BootstrapError::Repository(error.into()))?;
         let bootstrap_id = bootstrap_id.as_str().to_owned();
         let member = member.clone();
         self.executor
@@ -448,14 +462,14 @@ impl<E: DbExecutor> LegacyBootstrapRepositoryPort for DieselSpaceSecurityStore<E
                 conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
                     let row = load_bootstrap_row(conn, &bootstrap_id)?
                         .ok_or_else(|| anyhow::anyhow!("legacy bootstrap not found"))?;
-                    let mut record = decode_bootstrap_record(&master_key, &row)
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                    let mut record =
+                        decode_bootstrap_record(&master_key, &row).map_err(anyhow::Error::new)?;
                     if record.status() == LegacyBootstrapStatus::Complete {
                         return Ok(record);
                     }
                     record
                         .mark_readmitted(&member, now_ms)
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                        .map_err(anyhow::Error::new)?;
                     let encrypted_record = seal(
                         &master_key,
                         &record,
@@ -464,7 +478,7 @@ impl<E: DbExecutor> LegacyBootstrapRepositoryPort for DieselSpaceSecurityStore<E
                             bootstrap_status_name(record.status()),
                         ),
                     )
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                    .map_err(anyhow::Error::new)?;
                     let encrypted_stage = if record.status().is_terminal() {
                         None
                     } else {
@@ -487,6 +501,8 @@ impl<E: DbExecutor> LegacyBootstrapRepositoryPort for DieselSpaceSecurityStore<E
                     Ok(record)
                 })
             })
-            .map_err(|error| BootstrapError::Repository(error.to_string()))
+            .map_err(|error| {
+                BootstrapError::Repository(error.context("acknowledge legacy readmission").into())
+            })
     }
 }

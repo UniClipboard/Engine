@@ -52,6 +52,8 @@ fn joiner_applied_accepts_complete_before_space_activation() {
             [0x8d; 32],
             crate::membership::AdmissionSpaceTransition::from_bytes(vec![0x8e; 128])
                 .expect("bounded Space transition fixture"),
+            crate::membership::AdmissionStagedTarget::from_bytes(vec![0x8f; 128])
+                .expect("bounded staged target fixture"),
         )
         .expect("Applied Joiner accepts Complete");
 
@@ -61,6 +63,7 @@ fn joiner_applied_accepts_complete_before_space_activation() {
         SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Activating(state)) => state,
         _ => panic!("Joiner must advance to Activating"),
     };
+    assert_eq!(state.staged_target().as_bytes(), &[0x8f; 128]);
     assert_eq!(
         state.completion().kind(),
         SpaceAdmissionMessageKind::Complete
@@ -121,6 +124,8 @@ fn joiner_activating_aggregate_fixture() -> SpaceAdmissionAggregate {
             [0x95; 32],
             crate::membership::AdmissionSpaceTransition::from_bytes(vec![0x96; 128])
                 .expect("bounded Space transition fixture"),
+            crate::membership::AdmissionStagedTarget::from_bytes(vec![0x97; 128])
+                .expect("bounded staged target fixture"),
         )
         .expect("Activating Joiner fixture")
         .into_replacement()

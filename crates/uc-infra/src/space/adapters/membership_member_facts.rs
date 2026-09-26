@@ -2,11 +2,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use uc_application::deps::{
-    ApplyMembershipMemberFactsPort, MembershipEffectExecutionError, MembershipEffectKind,
-    PendingMembershipEffect,
+use uc_application::deps::{ApplyMembershipMemberFactsPort, MembershipEffectExecutionError};
+use uc_core::membership::{
+    MemberEffectKind, MemberEffectMaterial, MemberRepositoryPort, MembershipOperationV2,
+    UnfinishedMemberEffect,
 };
-use uc_core::membership::{MemberRepositoryPort, MembershipOperationV2};
 use uc_core::ports::{ClockPort, DeviceIdentityPort, PeerAddressRecord, PeerAddressRepositoryPort};
 use uc_core::trusted_peer::{TrustedPeer, TrustedPeerRepositoryPort};
 use uc_core::{MemberSyncPreferences, SpaceMember};
@@ -41,19 +41,19 @@ impl MembershipMemberFactsAdapter {
 
     async fn apply_add(
         &self,
-        effect: &PendingMembershipEffect,
+        effect: &UnfinishedMemberEffect,
     ) -> Result<(), MembershipEffectExecutionError> {
-        let event: uc_core::membership::MembershipEventV2 =
-            postcard::from_bytes(&effect.payload)
-                .map_err(|_| MembershipEffectExecutionError::Corrupt)?;
-        if event.event_id().as_bytes() != &effect.event_id {
-            return Err(MembershipEffectExecutionError::Corrupt);
-        }
-        let MembershipOperationV2::AddDevice { admission } = event.operation else {
+        let MemberEffectMaterial::Event(event) = effect.material() else {
             return Err(MembershipEffectExecutionError::Corrupt);
         };
-        let facts = admission.facts;
-        if effect.affected_device_ids.as_slice() != std::slice::from_ref(&facts.device_id) {
+        if event.event_id() != effect.event_id() {
+            return Err(MembershipEffectExecutionError::Corrupt);
+        }
+        let MembershipOperationV2::AddDevice { admission } = &event.operation else {
+            return Err(MembershipEffectExecutionError::Corrupt);
+        };
+        let facts = admission.facts.clone();
+        if effect.affected_device_ids() != std::slice::from_ref(&facts.device_id) {
             return Err(MembershipEffectExecutionError::Corrupt);
         }
         let joined_at = DateTime::<Utc>::from_timestamp_millis(self.clock.now_ms())
@@ -100,12 +100,12 @@ impl MembershipMemberFactsAdapter {
 
     async fn apply_remove(
         &self,
-        effect: &PendingMembershipEffect,
+        effect: &UnfinishedMemberEffect,
     ) -> Result<(), MembershipEffectExecutionError> {
-        if effect.affected_device_ids.is_empty() {
+        if effect.affected_device_ids().is_empty() {
             return Err(MembershipEffectExecutionError::Corrupt);
         }
-        for device_id in &effect.affected_device_ids {
+        for device_id in effect.affected_device_ids() {
             self.trusted_peers
                 .remove(device_id)
                 .await
@@ -119,11 +119,11 @@ impl MembershipMemberFactsAdapter {
 impl ApplyMembershipMemberFactsPort for MembershipMemberFactsAdapter {
     async fn apply_member_facts(
         &self,
-        effect: &PendingMembershipEffect,
+        effect: &UnfinishedMemberEffect,
     ) -> Result<(), MembershipEffectExecutionError> {
-        match effect.kind {
-            MembershipEffectKind::AddDevice => self.apply_add(effect).await,
-            MembershipEffectKind::RemoveDevice => self.apply_remove(effect).await,
+        match effect.kind() {
+            MemberEffectKind::AddDevice => self.apply_add(effect).await,
+            MemberEffectKind::RemoveDevice => self.apply_remove(effect).await,
         }
     }
 }
@@ -137,7 +137,7 @@ fn dependency(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::error::Error as _;
 
     use uc_core::ids::DeviceId;
@@ -188,7 +188,7 @@ mod tests {
         }
 
         async fn remove(&self, _peer_device_id: &DeviceId) -> Result<bool, TrustedPeerError> {
-            Err(TrustedPeerError::Repository("test failure".to_owned()))
+            Err(TrustedPeerError::Repository("test failure".into()))
         }
     }
 
@@ -232,6 +232,35 @@ mod tests {
         }
     }
 
+    /// 以一项决定为材料的移除效果；移除资料维护只依赖受影响设备。
+    pub(crate) fn removal_effect(target: DeviceId) -> UnfinishedMemberEffect {
+        use uc_core::membership::{
+            MemberEffectPhase, MemberInstanceId, MembershipCredential, MembershipDecisionV2,
+            MembershipEventId, RemovalDecision, ED25519_SIGNATURE_ALGORITHM_V1,
+        };
+        let credential = MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![7; 32]);
+        let removal_event_id: MembershipEventId = postcard::from_bytes(&[1; 32]).unwrap();
+        UnfinishedMemberEffect::from_parts(
+            removal_event_id,
+            MemberEffectKind::RemoveDevice,
+            MemberEffectPhase::Prepared,
+            vec![target],
+            MemberEffectMaterial::Decision(MembershipDecisionV2::new(
+                2,
+                "lineage".to_owned(),
+                removal_event_id,
+                MemberInstanceId::from_bytes([2; 32]),
+                credential.credential_id,
+                credential.signature_algorithm_version,
+                RemovalDecision::Accept,
+                None,
+                [0; 32],
+                [0; 16],
+                Vec::new(),
+            )),
+        )
+    }
+
     #[tokio::test]
     async fn repository_failure_keeps_classification_and_source() {
         let adapter = MembershipMemberFactsAdapter::new(
@@ -242,13 +271,7 @@ mod tests {
             Arc::new(FixedClock),
         );
         let error = adapter
-            .apply_member_facts(&PendingMembershipEffect {
-                event_id: [1; 32],
-                kind: MembershipEffectKind::RemoveDevice,
-                phase: uc_application::deps::MembershipEffectPhase::Prepared,
-                affected_device_ids: vec![DeviceId::new("remote")],
-                payload: Vec::new(),
-            })
+            .apply_member_facts(&removal_effect(DeviceId::new("remote")))
             .await
             .expect_err("repository failure must surface");
 

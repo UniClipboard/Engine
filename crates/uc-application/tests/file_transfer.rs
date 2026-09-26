@@ -1,4 +1,6 @@
 use std::error::Error as _;
+use std::path::PathBuf;
+use std::time::Duration;
 
 #[path = "file_transfer/shutdown.rs"]
 mod shutdown;
@@ -29,6 +31,10 @@ use uc_core::ports::{
     RecordReceiverTransferPort, SeedProvisionalReceivePort,
 };
 use uc_core::{FileTransferCancellationReason, FileTransferEvent, FileTransferFailureReason};
+use uc_testkit::{FailureKind, Scenario, ScenarioBudget, ScenarioConfig, ScenarioFailure};
+
+const COMPLETION_SCENARIO_REPRODUCE: &str = "cargo nextest run --profile ci --locked -p uc-application -E 'test(file_transfer_completion_scenario_reports_final_state)'";
+
 #[derive(Default)]
 struct InMemoryEventStore {
     events: std::sync::RwLock<std::collections::HashMap<String, Vec<FileTransferEvent>>>,
@@ -389,7 +395,7 @@ impl uc_core::ports::EnsureFileTransferPrivacyMaintenancePort for FailingPrivacy
         &self,
     ) -> Result<(), FileTransferPrivacyMaintenanceError> {
         Err(FileTransferPrivacyMaintenanceError::Backend(
-            "privacy database unavailable".to_owned(),
+            "privacy database unavailable".into(),
         ))
     }
 }
@@ -568,6 +574,84 @@ async fn repeating_same_terminal_call_is_idempotent() {
 }
 
 #[tokio::test]
+async fn file_transfer_completion_scenario_reports_final_state() {
+    let artifact_root = std::env::var_os("UC_TEST_ARTIFACTS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("../../target/test-artifacts/file-transfer"));
+    let scenario = Scenario::start(ScenarioConfig::new(
+        "file-transfer-completion",
+        0x0040_3403,
+        ScenarioBudget::new(Duration::from_secs(1)),
+        COMPLETION_SCENARIO_REPRODUCE,
+        artifact_root,
+    ))
+    .expect("file transfer scenario starts");
+
+    let result = async {
+        let ctx = build_context();
+        let session = {
+            let _stage = scenario.stage("begin-receiver-transfer");
+            ctx.facade
+                .begin_receiver_transfer(entry_transfer("scenario-transfer"))
+                .await
+                .map_err(|_| fixture_failure("receiver-registration"))?
+        };
+        scenario.record_event("receiver-transfer-started");
+
+        {
+            let _stage = scenario.stage("report-progress");
+            session
+                .report_progress(128, Some(128))
+                .await
+                .map_err(|_| product_failure("receiver-progress-rejected"))?;
+        }
+        scenario.record_event("receiver-progress-complete");
+
+        {
+            let _stage = scenario.stage("complete-transfer");
+            session
+                .complete()
+                .await
+                .map_err(|_| product_failure("receiver-completion-rejected"))?;
+        }
+        scenario.record_event("receiver-transfer-completed");
+
+        let events = history(&ctx, "scenario-transfer").await;
+        let terminal_count = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    FileTransferEvent::Completed { .. }
+                        | FileTransferEvent::Failed { .. }
+                        | FileTransferEvent::Cancelled { .. }
+                )
+            })
+            .count();
+        if terminal_count != 1 {
+            return Err(product_failure("terminal-event-was-not-unique"));
+        }
+        if !matches!(events.last(), Some(FileTransferEvent::Completed { .. })) {
+            return Err(product_failure("final-event-was-not-completed"));
+        }
+        Ok(())
+    }
+    .await;
+
+    scenario
+        .finish(result)
+        .expect("file transfer completion report succeeds");
+}
+
+fn fixture_failure(condition: &'static str) -> ScenarioFailure {
+    ScenarioFailure::new(FailureKind::FixtureInvalid, condition)
+}
+
+fn product_failure(condition: &'static str) -> ScenarioFailure {
+    ScenarioFailure::new(FailureKind::ProductInvariant, condition)
+}
+
+#[tokio::test]
 async fn active_batch_reuses_the_same_session() {
     let ctx = build_context();
 
@@ -720,8 +804,12 @@ async fn readiness_recovery_failure_preserves_its_source() {
 
     let error = facade.ensure_receive_ready().await.unwrap_err();
 
+    let maintenance = error
+        .source()
+        .and_then(|source| source.downcast_ref::<FileTransferPrivacyMaintenanceError>())
+        .expect("privacy maintenance error in source chain");
     assert_eq!(
-        error.source().map(ToString::to_string).as_deref(),
-        Some("file transfer privacy maintenance failed: privacy database unavailable")
+        maintenance.source().map(ToString::to_string).as_deref(),
+        Some("privacy database unavailable")
     );
 }

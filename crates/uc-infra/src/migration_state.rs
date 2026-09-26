@@ -65,13 +65,13 @@ async fn read_legacy_phase(
     let content = match fs::read_to_string(state_file_path).await {
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(LegacyMigrationRecoveryError::Internal(error.to_string())),
+        Err(error) => return Err(LegacyMigrationRecoveryError::Internal(Box::new(error))),
     };
     if content.trim().is_empty() {
         return Ok(None);
     }
     serde_json::from_str::<Option<LegacyMigrationPhaseV1>>(&content)
-        .map_err(|_| LegacyMigrationRecoveryError::RecoveryRequired)
+        .map_err(LegacyMigrationRecoveryError::recovery_required_from)
 }
 
 pub(crate) async fn legacy_migration_run_id(
@@ -123,7 +123,7 @@ impl FileLegacyMigrationRecovery {
         match fs::remove_file(&self.state_file_path).await {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(LegacyMigrationRecoveryError::Internal(error.to_string())),
+            Err(error) => Err(LegacyMigrationRecoveryError::Internal(Box::new(error))),
         }
     }
 
@@ -148,7 +148,7 @@ impl FileLegacyMigrationRecovery {
                     &aad,
                 )
                 .await
-                .map_err(|_| LegacyMigrationRecoveryError::RecoveryRequired)?;
+                .map_err(LegacyMigrationRecoveryError::recovery_required_from)?;
         }
         Ok(())
     }
@@ -183,11 +183,11 @@ impl FileLegacyMigrationRecovery {
             {
                 Ok(_) => {}
                 Err(BlobCipherError::InvalidCiphertext { .. }) => unreadable += 1,
-                Err(_) => return Err(LegacyMigrationRecoveryError::RecoveryRequired),
+                Err(_) => return Err(LegacyMigrationRecoveryError::recovery_required()),
             }
         }
         if unreadable != expected_unreadable {
-            return Err(LegacyMigrationRecoveryError::RecoveryRequired);
+            return Err(LegacyMigrationRecoveryError::recovery_required());
         }
         Ok(())
     }
@@ -214,12 +214,12 @@ impl FileLegacyMigrationRecovery {
                     &aad,
                 )
                 .await
-                .map_err(|_| LegacyMigrationRecoveryError::RecoveryRequired)?;
+                .map_err(LegacyMigrationRecoveryError::recovery_required_from)?;
             let ciphertext = self
                 .blob_cipher
                 .encrypt(&plaintext, &aad)
                 .await
-                .map_err(|_| LegacyMigrationRecoveryError::RecoveryRequired)?;
+                .map_err(LegacyMigrationRecoveryError::recovery_required_from)?;
             self.blob_migration_repo
                 .update_main_inline_data(
                     &record.event_id,
@@ -276,7 +276,7 @@ impl LegacyMigrationRecoveryPort for FileLegacyMigrationRecovery {
             .map_err(internal)?;
         let Some(phase) = phase else {
             if backup_count != 0 {
-                return Err(LegacyMigrationRecoveryError::RecoveryRequired);
+                return Err(LegacyMigrationRecoveryError::recovery_required());
             }
             return self.remove_state_file().await;
         };
@@ -322,8 +322,8 @@ impl LegacyMigrationRecoveryPort for FileLegacyMigrationRecovery {
     }
 }
 
-fn internal(error: impl std::fmt::Display) -> LegacyMigrationRecoveryError {
-    LegacyMigrationRecoveryError::Internal(error.to_string())
+fn internal(error: impl std::error::Error + Send + Sync + 'static) -> LegacyMigrationRecoveryError {
+    LegacyMigrationRecoveryError::Internal(Box::new(error))
 }
 
 #[cfg(test)]
@@ -544,7 +544,7 @@ mod tests {
 
         assert!(matches!(
             recovery.recover().await,
-            Err(LegacyMigrationRecoveryError::RecoveryRequired)
+            Err(LegacyMigrationRecoveryError::RecoveryRequired { .. })
         ));
         assert_eq!(blobs.backup.lock().unwrap().len(), 1);
         assert!(keys.discarded.lock().unwrap().is_empty());
@@ -620,7 +620,7 @@ mod tests {
 
         assert!(matches!(
             recovery.recover().await,
-            Err(LegacyMigrationRecoveryError::RecoveryRequired)
+            Err(LegacyMigrationRecoveryError::RecoveryRequired { .. })
         ));
         assert_eq!(blobs.backup.lock().unwrap().len(), 1);
         assert!(keys.discarded.lock().unwrap().is_empty());
@@ -634,7 +634,7 @@ mod tests {
         .await;
         assert!(matches!(
             recovery.recover().await,
-            Err(LegacyMigrationRecoveryError::RecoveryRequired)
+            Err(LegacyMigrationRecoveryError::RecoveryRequired { .. })
         ));
         assert_eq!(blobs.backup.lock().unwrap().len(), 1);
         assert!(keys.discarded.lock().unwrap().is_empty());

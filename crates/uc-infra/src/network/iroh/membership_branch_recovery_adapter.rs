@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use uc_application::deps::PeerIdentityDirectoryPort;
 
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
@@ -13,13 +14,14 @@ use uc_application::deps::{
     MembershipBranchRecoveryRequest,
 };
 use uc_core::ids::DeviceId;
-use uc_core::membership::MemberRepositoryPort;
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::PeerAddressRepositoryPort;
+use uc_observability_contract::diagnostics::connectivity::InboundPeerProtocol;
 
 use iroh::{Endpoint, EndpointAddr};
 
 use super::connect_with_staggered_retry;
+use super::inbound_peer::{record_inbound_rejection, PeerIdentityResolver};
 use super::membership_branch_recovery_wire::{
     decode, encode, MembershipBranchRecoveryWireMessage, MAX_RECOVERY_FRAME_SIZE,
 };
@@ -62,7 +64,7 @@ impl IrohMembershipBranchRecoveryChannel {
             uc_observability_contract::diagnostics::connectivity::AddressInputSource::Stored,
         )
         .await
-        .map_err(|source| unavailable(anyhow::Error::msg(source)))?;
+        .map_err(|source| unavailable(anyhow::Error::new(source)))?;
         let (mut send, mut receive) = tokio::time::timeout(IO_TIMEOUT, connection.open_bi())
             .await
             .map_err(|source| unavailable(anyhow::Error::new(source)))?
@@ -173,33 +175,20 @@ async fn read_response(
 
 #[derive(Clone)]
 pub(crate) struct IrohMembershipBranchRecoveryHandler {
-    member_repo: Arc<dyn MemberRepositoryPort>,
-    fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
+    identity: Arc<PeerIdentityResolver>,
     endpoint: Arc<dyn IssueMembershipBranchRecoveryPort>,
 }
 
 impl IrohMembershipBranchRecoveryHandler {
     pub(crate) fn new(
-        member_repo: Arc<dyn MemberRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         endpoint: Arc<dyn IssueMembershipBranchRecoveryPort>,
     ) -> Self {
         Self {
-            member_repo,
-            fingerprint_factory,
+            identity: Arc::new(PeerIdentityResolver::new(identities, fingerprint_factory)),
             endpoint,
         }
-    }
-
-    async fn source_device(&self, public_key: &[u8; 32]) -> Option<DeviceId> {
-        let fingerprint = self.fingerprint_factory.from_public_key(public_key).ok()?;
-        self.member_repo
-            .list()
-            .await
-            .ok()?
-            .into_iter()
-            .find(|member| member.identity_fingerprint == fingerprint)
-            .map(|member| member.device_id)
     }
 
     async fn dispatch(
@@ -266,12 +255,19 @@ impl ProtocolHandler for IrohMembershipBranchRecoveryHandler {
                 Ok(Ok(streams)) => streams,
                 _ => return Ok(()),
             };
-        let response = match self.source_device(connection.remote_id().as_bytes()).await {
-            Some(source_device_id) => match read_request(&mut receive).await {
+        let response = match self
+            .identity
+            .identify(connection.remote_id().as_bytes())
+            .await
+        {
+            Ok(source_device_id) => match read_request(&mut receive).await {
                 Some(message) => self.dispatch(source_device_id, message).await,
                 None => MembershipBranchRecoveryWireMessage::rejected(),
             },
-            None => MembershipBranchRecoveryWireMessage::rejected(),
+            Err(rejection) => {
+                record_inbound_rejection(InboundPeerProtocol::MembershipBranchRecovery, rejection);
+                MembershipBranchRecoveryWireMessage::rejected()
+            }
         };
         write_response(&mut send, &response).await;
         Ok(())

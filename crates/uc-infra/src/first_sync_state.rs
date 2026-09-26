@@ -78,7 +78,7 @@ impl FileFirstSyncStateRepository {
         if let Some(parent) = self.parent_dir() {
             fs::create_dir_all(parent)
                 .await
-                .map_err(|e| FirstSyncStateError::Write(format!("mkdir {parent:?}: {e}")))?;
+                .map_err(|e| FirstSyncStateError::Write(Box::new(e)))?;
         }
         Ok(())
     }
@@ -92,31 +92,21 @@ impl FileFirstSyncStateRepository {
                     ..Default::default()
                 });
             }
-            Err(e) => {
-                return Err(FirstSyncStateError::Read(format!(
-                    "read {:?}: {e}",
-                    self.file_path
-                )))
-            }
+            Err(e) => return Err(FirstSyncStateError::Read(Box::new(e))),
         };
 
         if raw.trim().is_empty() {
-            return Err(FirstSyncStateError::Corrupt(format!(
-                "{:?} is empty",
-                self.file_path
-            )));
+            return Err(FirstSyncStateError::Corrupt("state file is empty".into()));
         }
 
-        let parsed: FirstSyncStateFile = serde_json::from_str(&raw).map_err(|e| {
-            FirstSyncStateError::Corrupt(format!("parse {:?}: {e}", self.file_path))
-        })?;
+        let parsed: FirstSyncStateFile =
+            serde_json::from_str(&raw).map_err(|e| FirstSyncStateError::Corrupt(Box::new(e)))?;
 
         if parsed.schema_version != CURRENT_SCHEMA_VERSION {
             // 未来扩 schema 时这里会变成 migrate 分支；当前只接受 v1。
-            return Err(FirstSyncStateError::Corrupt(format!(
-                "{:?} has unsupported schema_version {}",
-                self.file_path, parsed.schema_version
-            )));
+            return Err(FirstSyncStateError::Corrupt(
+                "state file schema version is unsupported".into(),
+            ));
         }
 
         Ok(parsed)
@@ -126,25 +116,25 @@ impl FileFirstSyncStateRepository {
         self.ensure_parent().await?;
 
         let body = serde_json::to_vec_pretty(state)
-            .map_err(|e| FirstSyncStateError::Write(format!("serialize state: {e}")))?;
+            .map_err(|e| FirstSyncStateError::Write(Box::new(e)))?;
 
         let tmp_path = self.file_path.with_extension("json.tmp");
 
         {
             let mut file = fs::File::create(&tmp_path)
                 .await
-                .map_err(|e| FirstSyncStateError::Write(format!("create {tmp_path:?}: {e}")))?;
+                .map_err(|e| FirstSyncStateError::Write(Box::new(e)))?;
             file.write_all(&body)
                 .await
-                .map_err(|e| FirstSyncStateError::Write(format!("write {tmp_path:?}: {e}")))?;
+                .map_err(|e| FirstSyncStateError::Write(Box::new(e)))?;
             file.sync_all()
                 .await
-                .map_err(|e| FirstSyncStateError::Write(format!("fsync {tmp_path:?}: {e}")))?;
+                .map_err(|e| FirstSyncStateError::Write(Box::new(e)))?;
         }
 
-        fs::rename(&tmp_path, &self.file_path).await.map_err(|e| {
-            FirstSyncStateError::Write(format!("rename {tmp_path:?} -> {:?}: {e}", self.file_path))
-        })?;
+        fs::rename(&tmp_path, &self.file_path)
+            .await
+            .map_err(|e| FirstSyncStateError::Write(Box::new(e)))?;
 
         Ok(())
     }

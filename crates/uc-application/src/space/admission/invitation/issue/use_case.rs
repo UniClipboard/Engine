@@ -534,7 +534,10 @@ mod tests {
 
         let err = h.uc.execute().await.unwrap_err();
         match err {
-            IssuePairingInvitationError::Internal(m) => assert_eq!(m, "boom"),
+            IssuePairingInvitationError::Internal(source) => assert!(matches!(
+                source.downcast_ref::<InvitationError>(),
+                Some(InvitationError::Internal(message)) if message.to_string() == "boom"
+            )),
             other => panic!("expected Internal, got {other:?}"),
         }
         assert_pairing_started(&h.analytics);

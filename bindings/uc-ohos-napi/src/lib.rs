@@ -195,6 +195,9 @@ pub struct OhJoinSpaceStatus {
     pub peer_upgrade_required: bool,
     pub rejection_reason: Option<String>,
     pub termination_reason: Option<String>,
+    pub attention_reason: Option<String>,
+    pub attention_recovery: Option<String>,
+    pub next_retry_at_ms: Option<f64>,
 }
 
 #[napi(object)]
@@ -256,6 +259,7 @@ pub async fn flush_process_observability(
         observability::force_flush(std::time::Duration::from_millis(u64::from(deadline_ms)))
     })
     .await
+    // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
     .map_err(|_| observability::runtime_unavailable())?
 }
 
@@ -267,6 +271,7 @@ pub async fn shutdown_process_observability(
         observability::shutdown(std::time::Duration::from_millis(u64::from(deadline_ms)))
     })
     .await
+    // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
     .map_err(|_| observability::runtime_unavailable())?
 }
 

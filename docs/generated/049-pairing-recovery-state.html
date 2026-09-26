@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>配对失败与重启：Joiner 状态图</title>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{--paper:#f5f5f5;--ink:#2d3142;--muted:#4f5d75;--accent:#eb6c36;--rule:rgba(45,49,66,.12)}*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font-family:Geist,"PingFang SC","Microsoft YaHei",sans-serif}
+main{width:min(1040px,calc(100% - 32px));margin:auto;padding:36px 0}.eyebrow{font:500 12px "Geist Mono",monospace;color:var(--muted);letter-spacing:.08em}
+h1{font:400 32px "Instrument Serif","Songti SC",serif;margin:8px 0 12px}.intro{font-size:14px;line-height:1.7;color:var(--muted);margin:0 0 20px}
+.canvas{overflow-x:auto}svg{width:100%;min-width:900px;display:block;height:auto}.state{fill:#fff;stroke:var(--ink);stroke-width:1}.focus{fill:#fdf1eb;stroke:var(--accent);stroke-width:1.2}.terminal{fill:#e9eaed;stroke:var(--muted);stroke-width:1}
+.edge{fill:none;stroke:var(--muted);stroke-width:1.2}.secondary{stroke-dasharray:4 4}.name{fill:var(--ink);font:600 16px Geist,"PingFang SC",sans-serif}.sub{fill:var(--muted);font:12px Geist,"PingFang SC",sans-serif}.label{fill:var(--muted);font:500 8px "Geist Mono",monospace}
+.notes{display:grid;grid-template-columns:1fr 1fr;gap:20px;border-top:1px solid var(--rule);padding-top:16px;margin-top:16px;font-size:14px;line-height:1.7}.notes h2{font-size:15px;margin:0 0 8px}.notes p{margin:0}footer{font-size:12px;color:var(--muted);line-height:1.6;border-top:1px solid var(--rule);padding-top:12px;margin-top:20px}
+@media(max-width:700px){.notes{grid-template-columns:1fr}h1{font-size:28px}}
+</style></head><body><main>
+<p class="eyebrow">03 / STATE / JOINER RECOVERY</p><h1>失败、断线与重启后往哪里走</h1>
+<p class="intro">只画 Joiner 的关键边界。重启通常是恢复已保存阶段，不是自动回到起点；异常出口受阶段与证据约束。</p>
+<div class="canvas"><svg viewBox="0 0 960 640" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="pairing-state-title pairing-state-desc">
+<title id="pairing-state-title">Joiner 配对失败与恢复状态</title>
+<desc id="pairing-state-desc">Joiner 从候选准备到保存 Commit 和 Applied，再到本机激活后的 PendingSettlement，最终验证 Settled 成为 Active。PendingSettlement 重启重发同一 CompleteAck；可安全终止的阶段走 Terminated 或 Rejected，证据不足时进入 RecoveryRequired。</desc>
+<defs><marker id="state-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#4f5d75"/></marker><marker id="state-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#eb6c36"/></marker><marker id="state-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#2e5aa8"/></marker></defs>
+<rect width="960" height="640" fill="#f5f5f5"/>
+<line class="edge" x1="192" y1="160" x2="264" y2="160" marker-end="url(#state-arrow)"/>
+<line class="edge" x1="440" y1="160" x2="512" y2="160" marker-end="url(#state-arrow)"/>
+<line class="edge" x1="688" y1="160" x2="760" y2="160" marker-end="url(#state-arrow)"/>
+<rect class="state" x="32" y="116" width="160" height="88" rx="8"/><text class="name" x="112" y="152" text-anchor="middle">Candidate</text><text class="sub" x="112" y="180" text-anchor="middle">验证候选</text>
+<rect class="state" x="264" y="116" width="176" height="88" rx="8"/><text class="name" x="352" y="152" text-anchor="middle">Prepared</text><text class="sub" x="352" y="180" text-anchor="middle">准备资料</text>
+<rect class="state" x="512" y="116" width="176" height="88" rx="8"/><text class="name" x="600" y="152" text-anchor="middle">Committed</text><text class="sub" x="600" y="180" text-anchor="middle">尚未正式加入</text>
+<rect class="state" x="760" y="116" width="168" height="88" rx="8"/><text class="name" x="844" y="152" text-anchor="middle">Activating</text><text class="sub" x="844" y="180" text-anchor="middle">已保存 Applied；切换计划</text>
+<text class="label" x="220" y="144" text-anchor="middle">PREPARE</text><text class="label" x="476" y="144" text-anchor="middle">COMMIT</text><text class="label" x="724" y="144" text-anchor="middle">APPLIED → COMPLETE</text>
+<path class="edge" d="M 844,204 V 272 Q 844,280 836,280 H 616 Q 608,280 608,288 V 328" marker-end="url(#state-arrow)"/>
+<rect class="state" x="504" y="328" width="208" height="104" rx="8"/><text class="name" x="608" y="364" text-anchor="middle">PendingSettlement</text><text class="sub" x="608" y="388" text-anchor="middle">已激活；重发 CompleteAck</text><text class="sub" x="608" y="408" text-anchor="middle">仍未取得 Settled</text>
+<path class="edge" d="M 712,380 H 760" marker-end="url(#state-arrow)"/>
+<rect class="focus" x="760" y="336" width="168" height="88" rx="8"/><text class="name" x="844" y="372" text-anchor="middle">Active · Settled</text><text class="sub" x="844" y="400" text-anchor="middle">协议最终确认</text>
+<text class="label" x="736" y="364" text-anchor="middle">SETTLED</text>
+<rect class="terminal" x="40" y="336" width="176" height="88" rx="8"/><text class="name" x="128" y="372" text-anchor="middle">Terminated</text><text class="sub" x="128" y="400" text-anchor="middle">保留终止围栏</text>
+<rect class="terminal" x="264" y="336" width="176" height="88" rx="8"/><text class="name" x="352" y="372" text-anchor="middle">RecoveryRequired</text><text class="sub" x="352" y="400" text-anchor="middle">证据不足，需处理</text>
+<line x1="32" y1="472" x2="928" y2="472" stroke="rgba(45,49,66,.12)" stroke-width=".8"/>
+<text class="label" x="40" y="508">EXCEPTION RULES</text>
+<text class="sub" x="40" y="540">取消 / 到期 / 取代：仅在对应阶段与证据允许时保存终态；不能从任何状态一律回滚。</text>
+<text class="sub" x="40" y="568">重启：恢复同一记录与待办；PendingSettlement 重发同一 CompleteAck；正式 Add 不因到期回滚。</text>
+<text class="sub" x="40" y="596">连接成功、出现设备名或本机激活，都不是 Settled 的替代证明。</text>
+</svg></div>
+<div class="notes"><div><h2>当前协议</h2><p>`PendingSettlement` 重发同一 `CompleteAck`，取得并保存 `Settled` 才完成；`RecoveryRequired` 不凭超时猜测已提交或释放安全围栏。Sponsor 的 `Applied → Completed` 是独立状态机。</p></div><div><h2>049 目标</h2><p>不重写准入阶段；成员事实改由 Owner 接收输入。成员提交后的效果及待办在重启时从已保存状态恢复，Worker 只执行并交回结果。</p></div></div>
+<footer>来源：docs/design-docs/pairing-lifecycle.md、ADR-027、计划 049。异常出口是规则说明，不代表图中每个阶段都有同一种取消或超时转换。</footer>
+</main></body></html>

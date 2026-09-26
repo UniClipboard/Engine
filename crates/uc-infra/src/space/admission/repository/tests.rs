@@ -5,14 +5,12 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use async_trait::async_trait;
 use diesel::connection::SimpleConnection;
 use diesel::prelude::*;
 use diesel::sql_query;
 use diesel::sql_types::Binary;
 use uc_application::deps::{
     AdmissionReadFailureCategory, AdmissionRecoveryTrigger, JoinerActivationStatePort,
-    LoadMembershipLedgerPort, LoadedMembershipLedger, MembershipLedgerError,
     PendingAdmissionRecoveryStatePort,
 };
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
@@ -24,6 +22,7 @@ use super::{SpaceAdmissionStateStoreError, SqliteSpaceAdmissionState};
 use crate::db::executor::DieselSqliteExecutor;
 use crate::db::pool::init_db_pool;
 use crate::security::{ActiveSpaceGenerationManifestStore, AdmissionKeyManager};
+use crate::space::membership_record::test_support::UnavailableMembershipRecords;
 
 #[derive(Default)]
 struct MemoryStorage(Mutex<HashMap<String, Vec<u8>>>, AtomicBool);
@@ -113,15 +112,6 @@ impl SecureStoragePort for ConcurrentWriterStorage {
     }
 }
 
-struct UnusedMembership;
-
-#[async_trait]
-impl LoadMembershipLedgerPort for UnusedMembership {
-    async fn load(&self) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
-        Err(MembershipLedgerError::Unavailable)
-    }
-}
-
 struct Fixture {
     _directory: tempfile::TempDir,
     connection: SqliteConnection,
@@ -168,7 +158,7 @@ impl Fixture {
             DieselSqliteExecutor::new(pool),
             keys.clone(),
             manifests,
-            Arc::new(UnusedMembership),
+            Arc::new(UnavailableMembershipRecords),
         );
         Self {
             _directory: directory,
@@ -523,7 +513,7 @@ async fn concurrent_database_write_does_not_abort_legacy_activation_query() {
         DieselSqliteExecutor::new(pool),
         keys.clone(),
         manifests,
-        Arc::new(UnusedMembership),
+        Arc::new(UnavailableMembershipRecords),
     );
     let state = PersistedSpaceAdmissionRepositoryV2::fresh([0x31; 16]);
     let bytes = postcard::to_stdvec(&state).unwrap();
@@ -992,11 +982,18 @@ async fn recovery_summary_tracks_changes_and_rollbacks_without_reading_other_rec
     .unwrap();
     assert_eq!(loaded.len(), 1);
     assert_eq!(fixture.repository.record_reads.load(Ordering::SeqCst), 1);
-    let (mut pending, confirmations, abandonments, next_deadline_ms, sponsor_confirmation_pending) =
-        loaded.into_parts();
+    let (
+        mut pending,
+        confirmations,
+        abandonments,
+        next_deadline_ms,
+        sponsor_pairing_open,
+        needs_attention,
+    ) = loaded.into_parts();
     assert!(confirmations.is_empty());
     assert!(abandonments.is_empty());
-    assert!(!sponsor_confirmation_pending);
+    assert!(!sponsor_pairing_open);
+    assert!(!needs_attention);
     assert_eq!(next_deadline_ms, Some(301_000));
     let (aggregate, _) = pending.pop().unwrap().into_parts();
     let cancelled = aggregate.supersede().unwrap().into_replacement();

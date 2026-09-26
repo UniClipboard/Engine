@@ -15,6 +15,7 @@ use uc_core::{
     ObservedClipboardRepresentation, SystemClipboardSnapshot, FILE_DISPLAY_METADATA_FORMAT,
     FILE_DISPLAY_METADATA_MIME,
 };
+use uc_observability_contract::error_source::io_error_kind;
 
 use super::{operation_error_with_code, operation_unavailable_error, ProductionRuntime};
 use crate::{
@@ -114,7 +115,11 @@ impl ProductionRuntime {
         }
         .encode()
         .map_err(|error| {
-            error!(error = %error, "failed to encode file display metadata");
+            error!(
+                error_kind = "display_metadata_encode",
+                io_error_kind = io_error_kind(&error),
+                "failed to encode file display metadata"
+            );
             send_failed_error()
         })?;
         let snapshot = SystemClipboardSnapshot {
@@ -166,12 +171,20 @@ impl ProductionRuntime {
     ) -> Result<Vec<ImportedHostFile>, EngineError> {
         let import_root = self.file_cache_dir.join("engine-imports");
         std::fs::create_dir_all(&import_root).map_err(|error| {
-            error!(error = %error, "failed to create engine file import directory");
+            error!(
+                error_kind = "import_dir_create",
+                io_error_kind = io_error_kind(&error),
+                "failed to create engine file import directory"
+            );
             send_failed_error()
         })?;
         let operation_dir = import_root.join(RepresentationId::new().to_string());
         std::fs::create_dir(&operation_dir).map_err(|error| {
-            error!(error = %error, "failed to create engine file import operation directory");
+            error!(
+                error_kind = "import_operation_dir_create",
+                io_error_kind = io_error_kind(&error),
+                "failed to create engine file import operation directory"
+            );
             send_failed_error()
         })?;
 
@@ -323,7 +336,11 @@ fn copy_host_file(
         .write(true)
         .open(destination)
         .map_err(|error| {
-            error!(error = %error, "failed to create imported host file");
+            error!(
+                error_kind = "import_file_create",
+                io_error_kind = io_error_kind(&error),
+                "failed to create imported host file"
+            );
             send_failed_error()
         })?;
     let mut offset = 0_u64;
@@ -340,7 +357,11 @@ fn copy_host_file(
             return Err(send_failed_error());
         }
         output.write_all(&chunk).map_err(|error| {
-            error!(error = %error, "failed to write imported host file");
+            error!(
+                error_kind = "import_file_write",
+                io_error_kind = io_error_kind(&error),
+                "failed to write imported host file"
+            );
             send_failed_error()
         })?;
         offset = offset
@@ -348,14 +369,22 @@ fn copy_host_file(
             .ok_or_else(send_failed_error)?;
     }
     output.sync_all().map_err(|error| {
-        error!(error = %error, "failed to sync imported host file");
+        error!(
+            error_kind = "import_file_sync",
+            io_error_kind = io_error_kind(&error),
+            "failed to sync imported host file"
+        );
         send_failed_error()
     })
 }
 
 fn cleanup_failed_import(operation_dir: &Path) {
     if let Err(error) = std::fs::remove_dir_all(operation_dir) {
-        warn!(error = %error, "failed to remove incomplete engine file import");
+        warn!(
+            error_kind = "import_cleanup",
+            io_error_kind = io_error_kind(&error),
+            "failed to remove incomplete engine file import"
+        );
     }
 }
 
@@ -382,7 +411,11 @@ fn map_send_host_error(error: crate::HostCapabilityError) -> EngineError {
         crate::HostCapabilityErrorCategory::Unavailable
         | crate::HostCapabilityErrorCategory::Io => (EngineErrorCategory::Unavailable, true),
     };
-    error!(error = %error, "host file import failed");
+    error!(
+        error_kind = "host_file_import",
+        io_error_kind = io_error_kind(&error),
+        "host file import failed"
+    );
     EngineError::new(SEND_FAILED_CODE, category, retryable)
 }
 
@@ -462,7 +495,11 @@ fn map_export_host_error(error: crate::HostCapabilityError) -> EngineError {
             true,
         ),
     };
-    error!(error = %error, "host export failed");
+    error!(
+        error_kind = "host_export",
+        io_error_kind = io_error_kind(&error),
+        "host export failed"
+    );
     EngineError::new(code, category, retryable)
 }
 

@@ -56,10 +56,12 @@ where
                         clipboard_snapshot_representation::id,
                     ))
                     .load::<(String, String)>(conn)
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))
+                    .map_err(anyhow::Error::new)
             })
         });
-        let rows = rows.map_err(|e| BlobMigrationRepoError::Storage(e.to_string()))?;
+        let rows = rows.map_err(|e| {
+            BlobMigrationRepoError::Storage(e.context("list inline representations").into())
+        })?;
         Ok(rows
             .into_iter()
             .map(|(e_id, rep_id)| (EventId::from_string(e_id), RepresentationId::from(rep_id)))
@@ -87,10 +89,12 @@ where
                         .select(clipboard_snapshot_representation::inline_data)
                         .first::<Option<Vec<u8>>>(conn)
                         .optional()
-                        .map_err(|e| anyhow::anyhow!(e.to_string()))
+                        .map_err(anyhow::Error::new)
                 })
             })
-            .map_err(|e| BlobMigrationRepoError::Storage(e.to_string()))?;
+            .map_err(|e| {
+                BlobMigrationRepoError::Storage(e.context("read inline representation data").into())
+            })?;
         // `Option<Option<_>>`：外层 = 行存在与否；内层 = inline_data 非空与否。
         Ok(result.flatten())
     }
@@ -118,12 +122,13 @@ where
                     ))
                     .do_update()
                     .set(clipboard_migration_backup::migration_ciphertext.eq(new_ct))
-                    .execute(conn)
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                    .execute(conn)?;
                 Ok(())
             })
         })
-        .map_err(|e| BlobMigrationRepoError::Storage(e.to_string()))
+        .map_err(|e| {
+            BlobMigrationRepoError::Storage(e.context("upsert blob migration record").into())
+        })
     }
 
     async fn count_records(&self) -> Result<u64, BlobMigrationRepoError> {
@@ -134,10 +139,12 @@ where
                     clipboard_migration_backup::table
                         .count()
                         .get_result::<i64>(conn)
-                        .map_err(|e| anyhow::anyhow!(e.to_string()))
+                        .map_err(anyhow::Error::new)
                 })
             })
-            .map_err(|e| BlobMigrationRepoError::Storage(e.to_string()))?;
+            .map_err(|e| {
+                BlobMigrationRepoError::Storage(e.context("count blob migration records").into())
+            })?;
         Ok(count.max(0) as u64)
     }
 
@@ -148,10 +155,12 @@ where
                 self.executor.run(|conn| {
                     clipboard_migration_backup::table
                         .load::<MigrationBackupRow>(conn)
-                        .map_err(|e| anyhow::anyhow!(e.to_string()))
+                        .map_err(anyhow::Error::new)
                 })
             })
-            .map_err(|e| BlobMigrationRepoError::Storage(e.to_string()))?;
+            .map_err(|e| {
+                BlobMigrationRepoError::Storage(e.context("list blob migration records").into())
+            })?;
         Ok(rows
             .into_iter()
             .map(|r| MigrationRecord {
@@ -185,12 +194,13 @@ where
                         .filter(clipboard_snapshot_representation::id.eq(&rep_id_s)),
                 )
                 .set(clipboard_snapshot_representation::inline_data.eq(Some(bytes)))
-                .execute(conn)
-                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                .execute(conn)?;
                 Ok(())
             })
         })
-        .map_err(|e| BlobMigrationRepoError::Storage(e.to_string()))
+        .map_err(|e| {
+            BlobMigrationRepoError::Storage(e.context("update inline representation data").into())
+        })
     }
 
     async fn mark_unreadable_inline_data(
@@ -213,25 +223,30 @@ where
                     clipboard_snapshot_representation::last_error
                         .eq("unreadable encrypted payload preserved during space switch"),
                 ))
-                .execute(conn)
-                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                .execute(conn)?;
                 Ok(())
             })
         })
-        .map_err(|error| BlobMigrationRepoError::Storage(error.to_string()))
+        .map_err(|error| {
+            BlobMigrationRepoError::Storage(
+                error
+                    .context("mark inline representation unreadable")
+                    .into(),
+            )
+        })
     }
 
     async fn discard_all_records(&self) -> Result<(), BlobMigrationRepoError> {
         let span = debug_span!("infra.sqlite.discard_migration_backup");
         span.in_scope(|| {
             self.executor.run(|conn| {
-                diesel::delete(clipboard_migration_backup::table)
-                    .execute(conn)
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                diesel::delete(clipboard_migration_backup::table).execute(conn)?;
                 Ok(())
             })
         })
-        .map_err(|e| BlobMigrationRepoError::Storage(e.to_string()))
+        .map_err(|e| {
+            BlobMigrationRepoError::Storage(e.context("discard blob migration records").into())
+        })
     }
 }
 
@@ -283,8 +298,7 @@ mod tests {
                 // 测试数据语义合理）
                 sql_query("INSERT INTO clipboard_event (event_id, captured_at_ms, source_device, snapshot_hash) VALUES (?, 0, 'dev', 'h') ON CONFLICT DO NOTHING")
                     .bind::<diesel::sql_types::Text, _>(&event_id)
-                    .execute(conn)
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                    .execute(conn)?;
                 sql_query(
                     "INSERT INTO clipboard_snapshot_representation \
                      (id, event_id, format_id, mime_type, size_bytes, inline_data, blob_id, payload_state, last_error) \
@@ -293,8 +307,7 @@ mod tests {
                 .bind::<diesel::sql_types::Text, _>(&rep_id)
                 .bind::<diesel::sql_types::Text, _>(&event_id)
                 .bind::<diesel::sql_types::Binary, _>(&payload)
-                .execute(conn)
-                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                .execute(conn)?;
                 Ok(())
             })
             .unwrap();
@@ -435,7 +448,7 @@ mod tests {
                         clipboard_snapshot_representation::last_error,
                     ))
                     .first::<(Option<Vec<u8>>, String, Option<String>)>(conn)
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))
+                    .map_err(anyhow::Error::new)
             })
             .unwrap();
 

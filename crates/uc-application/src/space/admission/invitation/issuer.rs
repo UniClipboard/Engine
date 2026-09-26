@@ -49,7 +49,7 @@ impl PairingInvitationIssuer {
             .membership_admission
             .query_membership_admission(None)
             .await
-            .map_err(|error| IssuePairingInvitationError::Internal(error.to_string()))?;
+            .map_err(|error| IssuePairingInvitationError::Internal(anyhow::Error::from(error)))?;
         if snapshot.decision != MembershipAdmissionDecision::Allowed {
             return Err(map_membership_admission_decision(snapshot.decision));
         }
@@ -107,7 +107,9 @@ impl PairingInvitationIssuer {
         let ms = self.clock.now_ms();
         DateTime::<Utc>::from_timestamp_millis(ms).ok_or_else(|| {
             warn!(ms, "clock returned a timestamp outside chrono's range");
-            IssuePairingInvitationError::Internal("clock returned invalid timestamp".into())
+            IssuePairingInvitationError::Internal(anyhow::anyhow!(
+                "clock returned invalid timestamp"
+            ))
         })
     }
 }
@@ -117,7 +119,7 @@ fn map_membership_admission_decision(
 ) -> IssuePairingInvitationError {
     match decision {
         MembershipAdmissionDecision::Allowed => IssuePairingInvitationError::Internal(
-            "membership admission gate returned an incomplete allow result".into(),
+            anyhow::anyhow!("membership admission gate returned an incomplete allow result"),
         ),
         MembershipAdmissionDecision::AwaitingConvergence => {
             IssuePairingInvitationError::MembershipReconciliationInProgress
@@ -154,6 +156,6 @@ pub(crate) fn map_invitation_error(error: InvitationError) -> IssuePairingInvita
         InvitationError::AddressNotAvailable(ip) => {
             IssuePairingInvitationError::AddressNotAvailable(ip)
         }
-        InvitationError::Internal(message) => IssuePairingInvitationError::Internal(message),
+        error @ InvitationError::Internal(_) => IssuePairingInvitationError::Internal(error.into()),
     }
 }

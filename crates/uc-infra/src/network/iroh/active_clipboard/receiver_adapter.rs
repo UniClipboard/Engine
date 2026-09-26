@@ -14,8 +14,8 @@
 //! `EndpointId` (a newtype over the 32-byte Ed25519 public key). The receiver
 //! feeds those bytes into the same [`IdentityFingerprintFactoryPort`] used
 //! when persisting the local fingerprint, recovers the remote's
-//! `IdentityFingerprint`, and looks it up in [`MemberRepositoryPort`].
-//! Unknown peers (fingerprint not in `member_repo`) are dropped without
+//! `IdentityFingerprint`, and looks it up in [`PeerIdentityDirectoryPort`].
+//! Unknown peers (fingerprint not in the identity directory) are dropped without
 //! reaching the broadcast stream.
 //!
 //! ## Why no ack
@@ -27,6 +27,7 @@
 //! responsibility of the LWW register, not of per-frame acknowledgement.
 
 use std::sync::Arc;
+use uc_application::deps::PeerIdentityDirectoryPort;
 
 use async_trait::async_trait;
 use iroh::endpoint::Connection;
@@ -35,11 +36,13 @@ use tokio::sync::broadcast;
 use tracing::{debug, warn};
 
 use uc_core::ids::DeviceId;
-use uc_core::membership::{MemberRepositoryPort, PeerAdmissionPort};
+use uc_core::membership::PeerAdmissionPort;
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::{ActiveClipboardReceiverPort, InboundActiveClipboardState};
-use uc_core::security::IdentityFingerprint;
+use uc_observability_contract::diagnostics::connectivity::InboundPeerProtocol;
+use uc_observability_contract::error_source::io_error_kind;
 
+use super::super::inbound_peer::InboundPeerGate;
 use super::wire;
 
 /// ALPN identifier for the active-clipboard state protocol. An independent
@@ -64,23 +67,24 @@ pub struct IrohActiveClipboardReceiverAdapter {
 }
 
 struct HandlerState {
-    member_repo: Arc<dyn MemberRepositoryPort>,
-    peer_admission: Arc<dyn PeerAdmissionPort>,
-    fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
+    gate: InboundPeerGate,
     event_tx: broadcast::Sender<InboundActiveClipboardState>,
 }
 
 impl IrohActiveClipboardReceiverAdapter {
     pub fn new(
-        member_repo: Arc<dyn MemberRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
     ) -> Self {
         let (event_tx, _) = broadcast::channel(INBOUND_CHANNEL_CAPACITY);
         let handler_state = Arc::new(HandlerState {
-            member_repo,
-            peer_admission,
-            fingerprint_factory,
+            gate: InboundPeerGate::new(
+                InboundPeerProtocol::ActiveClipboard,
+                identities,
+                peer_admission,
+                fingerprint_factory,
+            ),
             event_tx: event_tx.clone(),
         });
         Self {
@@ -129,23 +133,13 @@ impl ProtocolHandler for IrohActiveClipboardReceiverHandler {
 
         // 1. Resolve the remote endpoint's public key back to a known
         //    SpaceMember. Unknown peers never reach the broadcast stream.
-        let Some(peer_device_id) = self.state.resolve_device(&remote_bytes).await else {
-            warn!(
-                remote = %remote,
-                "active-clipboard receiver: unknown peer fingerprint; dropping connection"
-            );
-            // Fire-and-forget protocol: no ack to send, so simply let the
-            // connection drop.
-            return Ok(());
+        let peer_device_id = match self.state.gate.admit(&remote_bytes).await {
+            Ok(device) => device,
+            Err(rejection) => {
+                self.state.gate.record_rejection(rejection);
+                return Ok(());
+            }
         };
-
-        if !self.state.is_admitted(&peer_device_id).await {
-            warn!(
-                peer = %peer_device_id.as_str(),
-                "active-clipboard receiver: peer is not admitted by current space protection"
-            );
-            return Ok(());
-        }
 
         // 2. Accept the inbound stream. The sender opens a bi-stream and
         //    finishes its send half after the frame; we only read.
@@ -153,7 +147,8 @@ impl ProtocolHandler for IrohActiveClipboardReceiverHandler {
             Ok(pair) => pair,
             Err(err) => {
                 warn!(
-                    error = %err,
+                    error_kind = "accept_bi",
+                    io_error_kind = io_error_kind(&err),
                     peer = %peer_device_id.as_str(),
                     "active-clipboard receiver: accept_bi failed; dropping connection"
                 );
@@ -167,7 +162,8 @@ impl ProtocolHandler for IrohActiveClipboardReceiverHandler {
             Ok(m) => m,
             Err(err) => {
                 warn!(
-                    error = %err,
+                    error_kind = "frame_decode",
+                    io_error_kind = io_error_kind(&err),
                     peer = %peer_device_id.as_str(),
                     "active-clipboard receiver: frame decode failed; dropping connection"
                 );
@@ -208,61 +204,6 @@ impl ProtocolHandler for IrohActiveClipboardReceiverHandler {
     }
 }
 
-impl HandlerState {
-    /// Look up a `SpaceMember` whose `identity_fingerprint` equals the one
-    /// derived from `remote_pubkey_bytes`. Returns `None` when the peer is
-    /// unknown or the repository errors (logged).
-    ///
-    /// `member_repo.list()` is used because the port does not expose
-    /// lookup-by-fingerprint and the roster size is bounded (N ≤ 10); a
-    /// dedicated index is a later concern, mirroring the bulk receiver.
-    async fn is_admitted(&self, device_id: &DeviceId) -> bool {
-        match self.peer_admission.is_admitted(device_id).await {
-            Ok(admitted) => admitted,
-            Err(error) => {
-                warn!(error = %error, peer = %device_id.as_str(), "active-clipboard receiver: peer admission check failed");
-                false
-            }
-        }
-    }
-
-    async fn resolve_device(&self, remote_pubkey_bytes: &[u8; 32]) -> Option<DeviceId> {
-        let derived = match self
-            .fingerprint_factory
-            .from_public_key(remote_pubkey_bytes)
-        {
-            Ok(fp) => fp,
-            Err(err) => {
-                warn!(
-                    error = %err,
-                    "active-clipboard receiver: fingerprint derivation failed — cannot resolve peer"
-                );
-                return None;
-            }
-        };
-
-        let members = match self.member_repo.list().await {
-            Ok(ms) => ms,
-            Err(err) => {
-                warn!(
-                    error = %err,
-                    "active-clipboard receiver: member_repo.list failed; treating peer as unknown"
-                );
-                return None;
-            }
-        };
-
-        members
-            .into_iter()
-            .find(|m| fingerprints_equal(&m.identity_fingerprint, &derived))
-            .map(|m| m.device_id)
-    }
-}
-
-fn fingerprints_equal(a: &IdentityFingerprint, b: &IdentityFingerprint) -> bool {
-    a == b
-}
-
 // ============================================================================
 // Tests
 // ============================================================================
@@ -270,6 +211,7 @@ fn fingerprints_equal(a: &IdentityFingerprint, b: &IdentityFingerprint) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uc_core::membership::MemberRepositoryPort;
 
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -293,6 +235,7 @@ mod tests {
     struct MemMemberRepo {
         inner: Mutex<HashMap<String, SpaceMember>>,
     }
+    crate::network::iroh::inbound_peer::member_table_identity_directory!(MemMemberRepo);
     #[async_trait]
     impl MemberRepositoryPort for MemMemberRepo {
         async fn get(&self, device_id: &DeviceId) -> Result<Option<SpaceMember>, MembershipError> {
@@ -383,7 +326,7 @@ mod tests {
         wait_for_direct_addrs(&receiver_endpoint).await;
 
         let adapter = IrohActiveClipboardReceiverAdapter::new(
-            member_repo,
+            crate::network::iroh::inbound_peer::member_table_directory(member_repo),
             Arc::new(crate::network::iroh::StaticPeerAdmission(admitted)),
             Arc::new(Sha256IdentityFingerprintFactory),
         );

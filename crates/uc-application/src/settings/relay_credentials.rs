@@ -114,7 +114,23 @@ pub enum RelayCredentialsError {
     #[error("relay credential storage failed")]
     Storage(#[source] SecureStorageError),
     #[error("stored relay credential is corrupt")]
-    Corrupt,
+    Corrupt {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl RelayCredentialsError {
+    pub fn corrupt() -> Self {
+        Self::Corrupt { source: None }
+    }
+
+    pub fn corrupt_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Corrupt {
+            source: Some(source.into()),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -163,12 +179,12 @@ impl RelayCredentials {
             Err(error) => {
                 let mut bytes = error.into_bytes();
                 bytes.zeroize();
-                return Err(RelayCredentialsError::Corrupt);
+                return Err(RelayCredentialsError::corrupt());
             }
         };
         RelayAccessToken::new(value)
             .map(Some)
-            .map_err(|_| RelayCredentialsError::Corrupt)
+            .map_err(RelayCredentialsError::corrupt_from)
     }
 
     pub fn is_configured(&self, relay_url: &str) -> Result<bool, RelayCredentialsError> {
@@ -363,11 +379,11 @@ impl RelayCredentials {
             return Ok(None);
         };
         let transaction = serde_json::from_slice::<RelaySettingsTransaction>(&bytes)
-            .map_err(|_| RelayCredentialsError::Corrupt);
+            .map_err(RelayCredentialsError::corrupt_from);
         bytes.zeroize();
         let transaction = transaction?;
         if transaction.version != 1 {
-            return Err(RelayCredentialsError::Corrupt);
+            return Err(RelayCredentialsError::corrupt());
         }
         let restore_point = RelayCredentialRestorePoint {
             entries: transaction
@@ -404,7 +420,7 @@ impl RelayCredentials {
                 .collect(),
         };
         let mut bytes =
-            serde_json::to_vec(&transaction).map_err(|_| RelayCredentialsError::Corrupt)?;
+            serde_json::to_vec(&transaction).map_err(RelayCredentialsError::corrupt_from)?;
         let result = self
             .storage
             .set(SETTINGS_TRANSACTION_STORAGE_KEY, &bytes)
@@ -458,6 +474,7 @@ fn storage_key(relay_url: &str) -> Result<String, RelayCredentialsError> {
 
 fn canonical_relay_url(relay_url: &str) -> Result<String, RelayCredentialsError> {
     let url =
+        // 用户输入的 URL 解析失败只作输入校验，拒绝原因已完整表达。
         url::Url::parse(relay_url.trim()).map_err(|_| RelayCredentialsError::InvalidRelayUrl)?;
     if !matches!(url.scheme(), "http" | "https")
         || url.host_str().is_none()
@@ -621,7 +638,7 @@ mod tests {
             .load("https://relay.example.com")
             .expect_err("corrupt credential must fail");
 
-        assert!(matches!(error, RelayCredentialsError::Corrupt));
+        assert!(matches!(error, RelayCredentialsError::Corrupt { .. }));
     }
 
     #[test]

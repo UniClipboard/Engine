@@ -196,6 +196,8 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 
 当资料和 keyslot 仍在，但自动解锁材料缺失或错误时，`Engine::start` 返回可用的受限实例，启动进度为 `RecoveryAvailable`。此时 `QueryProfileRecovery`、`QueryEncryptionState`、`UnlockSpace` 和生命周期关闭可用，业务数据库、网络、搜索、收发与历史操作返回 `PROFILE_RECOVERY_REQUIRED`；`session_ready` 必须为 `false`。宿主继续用 `UnlockSpace` 提交原口令。错误口令返回 `UNLOCK_SPACE_UNAUTHORIZED_CODE` 且不写入；正确口令恢复原密钥、启动完整后台并报告 `Recovered`。缺少旧独立密钥副本时报告 `PartiallyRecoverable` 及稳定影响类别，不返回已经解锁。损坏、不支持格式和保存失败分别使用原损坏分类、`PROFILE_RECOVERY_UNSUPPORTED_CODE` 和 `PROFILE_RECOVERY_PERSISTENCE_FAILED_CODE`，其他启动错误保持原分类。恢复口令通过后若完整后台启动或后续解锁失败，状态必须进入 `Failed`，`can_submit_passphrase=false`、`restart_required=true`；同一进程不得复用已经消费的宿主能力，宿主重启 Engine 后继续。旧升级备份存在但其保护材料在 userdata 与系统安全存储中都永久缺失时返回稳定的 `PROFILE_UPGRADE_BACKUP_KEY_MISSING_CODE`，不得生成替代材料或绕过备份门槛。
 
+本机已有空间、网络身份文件却缺失时，`Engine::start` 同样返回受限实例：状态为 `PartiallyRecoverable`，损失类别为 `DeviceIdentity`，`can_submit_passphrase=false`。此时不绑定网络，也不生成替代身份；成员历史只认原身份，补发新身份会让其他设备永久拒绝本机。旧版身份目录待改名或存在待应用的配置导入时，身份将在装配阶段写入，不作此判定。受限实例在资料密钥仍可自动打开时接受 `FactoryResetSpace`：只装配重置所需依赖，不启动后台，完成后报告 `restart_required=true`，宿主重启 Engine 后以全新资料启动；资料密钥无法自动打开时该操作返回 `PROFILE_RECOVERY_REQUIRED`。
+
 正常启动和恢复完成后的系统安全存储只保留当前资料的一条自动解锁材料；独立随机密钥位于 userdata 的加密文件中。完整 userdata 加当前口令可以在空安全存储环境恢复，导出与导入会携带该密文文件。`FactoryResetSpace` 同时清除两处副本。宿主不得把 GUI 内容锁定解释为此处的真实密钥恢复状态。
 
 单设备修改加密口令采用一个产品动作。产品收集用户自定义的新口令和再次输入值，一并交给 `ChangeEncryptionPassphrase`；两次输入不一致时不修改任何资料。成功后旧口令不能解锁或通过新配对认证，此前签发的邀请失效，新口令在重启后继续有效。该能力不要求 `re_pairing_required`，只允许 Space 已解锁、本机成员有效且当前设备列表范围只含本机；存在正常或暂停的其他设备、成员恢复中或成员资料不可确认时均拒绝。它保留现有 MasterKey 和历史内容，不触发批量重加密；已有的重新配对提示仍由新设备实际加入结束。iOS、Android 和 HarmonyOS 绑定公开相同的修改动作，不承担资格判断或恢复。
@@ -208,8 +210,8 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 导入暂存和受管缓存。完成后旧 Engine 会话失效，宿主必须重新创建 Engine；启动遇到未完成清理时会续完
 清理并返回可重试的 unavailable，宿主随后再次创建 Engine。`QuerySetupState` 不返回内部服务状态。
 
-规格 023 的稳定产品外形已经接入：`JoinSpace` 返回 Active、Pending、Rejected 三类结果并公开稳定
-`join_id`，Pending/Active 的 `peer_upgrade_required` 表示这次加入仍需对端升级，首次请求不兼容则以 Rejected 的稳定原因明确返回。
+规格 023 的稳定产品外形已经接入：`JoinSpace` 返回 Active、Pending、Processing、Rejected 四类结果并公开稳定
+`join_id`。Pending 表示加入已经保存但尚未完成本机准备，Processing 表示本机准备完成并等待最终确认收尾；两者跨重启和重复查询都返回同一个 `join_id`，宿主不另存加入编号或推断后台阶段。Pending、Processing 与 Active 的 `peer_upgrade_required` 表示这次加入仍需对端升级，首次请求不兼容则以 Rejected 的稳定原因明确返回。
 提示不会把已经正式提交或本机已激活的加入回滚成失败；对端升级上线后立即继续同一请求并在成功推进时清除。提示出现、清除或
 明确拒绝保存成功后发送 `RefreshRequired { StateInvalidated }`，宿主随后通过 `QueryDeviceGroupChoices` 重新读取完整事实；普通内部推进
 和重复旧端错误不发送。`CancelJoinSpace(join_id)`
@@ -221,17 +223,15 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 `WorkspaceConvergenceChanged` 事件继续只用于 dev-tools。
 对端因自己的另一项准入而暂时忙碌时，当前 JoinSpace 保持同一 Pending 并由 Engine 重试，不变成 Rejected。
 取消请求只与发起方正式提交竞争：取消先保存时返回 Rejected 且没有成员新增；正式提交先保存时取消已经
-太晚，同一请求继续保持 Pending 直到 Active，不自动生成成员移除。用户仍要退出时从另一台当前成员设备
+太晚，同一请求继续保持 Processing 直到 Active，不自动生成成员移除。用户仍要退出时从另一台当前成员设备
 另行使用现有明确移除。
-公开的旧空间迁移进度操作已经删除，空间切换只表现为同一 JoinSpace Pending。`QuerySetupState` 继续只负责
+公开的旧空间迁移进度操作已经删除，空间切换只表现为同一条 JoinSpace 从 Pending 进入 Processing 再到 Active。`QuerySetupState` 继续只负责
 设置、设备名和邀请。profile 级负责人已经在没有活动 Space 时常驻，保存和恢复加入、取消、终态、revision
 与 ordinal，并组合零或一个完整活动 Space；Engine 只路由产品动作，不保存内部阶段。同一 profile 的入站
 和本机加入共享一个准入槽，Fresh Pending 没有活动 Space 时仍能执行彻底重置。
 
-生产加入统一使用 Candidate、Prepared、Commit、Applied、Complete。加入方先验证并保存完整历史和目标
-安全状态，邀请方随后正式提交；双方保存同一应用回执后，邀请方发送 Complete，加入方完成本机激活后
-返回 CompleteAck。跨 Space 时 JoinSpace 先返回 Pending，Engine 排空来源会话、完成前向切换并重建同一
-CompleteAck；发送失败不回滚 Active，下次启动继续发送。
+生产加入统一使用 Candidate、Prepared、Commit、Applied、Complete、CompleteAck、Settled。加入方先验证并保存完整历史和目标
+安全状态；邀请方收到 Applied 后只保存待确认资料并发送 Complete，不写正式成员。加入方完成本机准备后返回 CompleteAck，邀请方验证该确认后才在唯一提交点写入正式成员并返回 Settled。跨 Space 时 JoinSpace 先返回 Pending，本机准备后为 Processing；CompleteAck 或 Settled 丢失时从 Engine 保存的同一尝试重发，收到 Settled 并保存后才返回 Active。
 
 同一 Space 重新加入时，邀请方历史可以比本机已保存历史更新，但必须完整包含本机已经确认的连续历史；
 缺少记录、倒退或分叉都返回 Rejected，不覆盖本机事实。普通成员上线只交换新版完整历史，不再发送旧版

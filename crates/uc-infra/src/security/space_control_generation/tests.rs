@@ -8,9 +8,8 @@ use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
     ActiveRuntimeLayout, AdmissionChangeFacts, AdmissionContentKeyCatalogV1,
     AdmissionContentKeyEntryV1, AdmissionSecurityCommitmentV1, BaseMembershipHistoryPosition,
-    LegacyBootstrapRepositoryPort, MembershipCredential, PendingGroupUpdate,
-    RevocationRepositoryPort, SpaceAdmissionId, ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
-    ED25519_SIGNATURE_ALGORITHM_V1,
+    LegacyBootstrapRepositoryPort, PendingGroupUpdate, RevocationRepositoryPort, SpaceAdmissionId,
+    ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
 };
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::space::PrepareAdmissionTargetAccessPort;
@@ -25,6 +24,7 @@ use crate::security::{
     ActiveRuntimeManifestV3, AdmissionKeyManager, DefaultCurrentProfile, ProfileContentKeyVault,
     ProfileRuntimeLayout,
 };
+use crate::space::membership_record::test_support::signed_target_members;
 use crate::space::{
     prepare_registration, InMemorySession, KeyMaterialStore, RuntimeSpaceAccessAdapter,
 };
@@ -216,7 +216,6 @@ fn preparation(
             [0x4d; 32],
         )
         .unwrap(),
-        target_membership_history: b"verified membership history".to_vec(),
         target_security_state: b"verified MLS security state".to_vec(),
         target_protection_group_id: "target-protection-group".to_owned(),
         target_key_catalog: catalog.encode().unwrap(),
@@ -234,26 +233,8 @@ fn preparation(
 }
 
 fn relationships() -> Vec<AdmissionChangeFacts> {
-    [
-        ("target-local", "target local", 0x51),
-        ("target-peer", "target peer", 0x52),
-    ]
-    .into_iter()
-    .map(|(device, name, key)| {
-        let device_id = DeviceId::new(device);
-        let credential = MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![key; 32]);
-        AdmissionChangeFacts {
-            member_instance: credential.member_instance_id(&device_id),
-            device_id,
-            device_name: name.to_owned(),
-            identity_fingerprint: uc_core::security::IdentityFingerprint::from_display_string(
-                "ABCD-EFGH-IJKL-MNOP",
-            )
-            .unwrap(),
-            transport_public_key: vec![key],
-            transport_address_blob: vec![key, key],
-            identity_signature: vec![key, key, key],
-        }
-    })
-    .collect()
+    signed_target_members()
+        .iter()
+        .map(|(facts, _)| facts.clone())
+        .collect()
 }

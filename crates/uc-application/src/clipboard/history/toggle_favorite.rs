@@ -3,6 +3,7 @@ use std::sync::Arc;
 use uc_core::ids::EntryId;
 use uc_core::ports::clipboard::SetClipboardEntryFavoritePort;
 use uc_core::ports::search::search_index::SearchIndexPort;
+use uc_observability_contract::error_source::io_error_kind;
 
 /// Set the favorite state of a clipboard entry.
 ///
@@ -16,8 +17,8 @@ pub(crate) struct ToggleFavoriteClipboardEntryUseCase {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ToggleFavoriteError {
-    #[error("Repository error: {0}")]
-    RepositoryError(String),
+    #[error("Repository error")]
+    RepositoryError(#[source] anyhow::Error),
 }
 
 impl ToggleFavoriteClipboardEntryUseCase {
@@ -48,7 +49,7 @@ impl ToggleFavoriteClipboardEntryUseCase {
             .entry_repo
             .set_favorite(entry_id, is_favorited)
             .await
-            .map_err(|e| ToggleFavoriteError::RepositoryError(e.to_string()))?;
+            .map_err(|e| ToggleFavoriteError::RepositoryError(anyhow::Error::from(e)))?;
 
         if updated {
             // Mirror the user-state into the derived `favorited` tag so search
@@ -60,7 +61,8 @@ impl ToggleFavoriteClipboardEntryUseCase {
                     tracing::warn!(
                         entry_id = %entry_id,
                         is_favorited,
-                        error = %e,
+                        error_kind = "search_favorite_tag",
+                        io_error_kind = io_error_kind(&e),
                         "favorite persisted but search tag mirror failed; rebuild will reconcile"
                     );
                 }

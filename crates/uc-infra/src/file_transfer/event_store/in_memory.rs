@@ -22,6 +22,7 @@ impl FileTransferEventStorePort for InMemoryEventStore {
         let events = self
             .events
             .read()
+            // 锁中毒：PoisonError 持有 guard，不能作为来源保存。
             .map_err(|_| anyhow!("in-memory file transfer event store read lock poisoned"))?;
 
         Ok(events.get(transfer_id).cloned().unwrap_or_default())
@@ -32,6 +33,7 @@ impl FileTransferEventStorePort for InMemoryEventStore {
         let mut events = self
             .events
             .write()
+            // 锁中毒：PoisonError 持有 guard，不能作为来源保存。
             .map_err(|_| anyhow!("in-memory file transfer event store write lock poisoned"))?;
 
         events.entry(transfer_id).or_default().push(event);

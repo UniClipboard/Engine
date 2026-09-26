@@ -201,6 +201,11 @@ pub enum JoinSpaceRejectionReason {
     BaseHistoryChanged,
     JoinerHistoryAhead,
     HistoryConflict,
+    CompletionInvalid,
+    MembershipHistoryInvalid,
+    SecurityMaterialInvalid,
+    RelationshipConflict,
+    ActivationStateInvalid,
     PeerUpgradeRequired,
     Cancelled,
     RemovedBeforeActivation,
@@ -211,6 +216,16 @@ pub enum JoinSpaceTerminationReason {
     Cancelled,
     Expired,
     Superseded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum JoinSpaceAttentionReason {
+    OutcomeCannotBeProven,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum JoinSpaceAttentionRecovery {
+    PreserveDataAndContactSupport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
@@ -227,6 +242,19 @@ pub enum JoinSpaceStatus {
         sponsor_identity_fingerprint: Option<String>,
         cancel_requested: bool,
         peer_upgrade_required: bool,
+    },
+    Processing {
+        join_id: String,
+        target_space_id: String,
+        sponsor_device_id: String,
+        sponsor_identity_fingerprint: String,
+        peer_upgrade_required: bool,
+    },
+    NeedsAttention {
+        join_id: String,
+        reason: JoinSpaceAttentionReason,
+        recovery: JoinSpaceAttentionRecovery,
+        next_retry_at_ms: Option<i64>,
     },
     Rejected {
         join_id: String,
@@ -610,9 +638,11 @@ impl BindingAnalyticsAdapter {
         change: crate::BindingAnalyticsIdentityChange,
         expected_new_id: uuid::Uuid,
     ) -> Result<AdoptOutcome, AnalyticsIdentityError> {
+        // 宿主输入校验：无法解析的输入按固定错误码拒绝，拒绝原因已完整表达。
         let previous_distinct_id = change.previous_distinct_id.parse().map_err(|_| {
             Self::map_identity_error(crate::BindingAnalyticsHostError::InvalidIdentity)
         })?;
+        // 宿主输入校验：无法解析的输入按固定错误码拒绝，拒绝原因已完整表达。
         let new_distinct_id = change.new_distinct_id.parse().map_err(|_| {
             Self::map_identity_error(crate::BindingAnalyticsHostError::InvalidIdentity)
         })?;
@@ -630,9 +660,11 @@ impl BindingAnalyticsAdapter {
     fn parse_release_outcome(
         change: crate::BindingAnalyticsIdentityChange,
     ) -> Result<ReleaseOutcome, AnalyticsIdentityError> {
+        // 宿主输入校验：无法解析的输入按固定错误码拒绝，拒绝原因已完整表达。
         let previous_distinct_id = change.previous_distinct_id.parse().map_err(|_| {
             Self::map_identity_error(crate::BindingAnalyticsHostError::InvalidIdentity)
         })?;
+        // 宿主输入校验：无法解析的输入按固定错误码拒绝，拒绝原因已完整表达。
         let new_distinct_id = change.new_distinct_id.parse().map_err(|_| {
             Self::map_identity_error(crate::BindingAnalyticsHostError::InvalidIdentity)
         })?;
@@ -643,7 +675,8 @@ impl BindingAnalyticsAdapter {
     }
 
     fn warn_callback(scope: &'static str, error: &crate::BindingAnalyticsHostError) {
-        tracing::warn!(scope, error = %error, "mobile analytics callback failed");
+        // 宿主回调错误是无字段的固定枚举，变体名即完整分类。
+        tracing::warn!(scope, error_kind = ?error, "mobile analytics callback failed");
     }
 }
 
@@ -824,6 +857,7 @@ impl MobileEngine {
                     startup_lifecycle,
                 )
             })
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?;
 
         match start_result.recv() {
@@ -897,9 +931,11 @@ impl MobileEngine {
                 allow_secure_storage_unlock,
                 response,
             })
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
@@ -908,9 +944,11 @@ impl MobileEngine {
         let (response, result) = mpsc::channel();
         commands
             .send(WorkerCommand::QueryLocalDevice { response })
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
@@ -926,9 +964,11 @@ impl MobileEngine {
         let (response, result) = mpsc::channel();
         commands
             .send(WorkerCommand::RefreshPeerConnections { response })
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
@@ -1048,6 +1088,7 @@ impl MobileEngine {
         let (response, result) = mpsc::channel();
         commands
             .send(LifecycleCommand::LifecycleState { response })
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         receive_lifecycle_result(result, LIFECYCLE_TRANSITION_DEADLINE)
     }
@@ -1066,9 +1107,11 @@ impl MobileEngine {
                 passphrase,
                 response,
             })
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
@@ -1077,9 +1120,11 @@ impl MobileEngine {
         let (response, result) = mpsc::channel();
         commands
             .send(WorkerCommand::IssueInvitation { response })
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
@@ -1098,9 +1143,11 @@ impl MobileEngine {
                 passphrase_confirmation,
                 response,
             })
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
@@ -1121,9 +1168,11 @@ impl MobileEngine {
                 preserve_unreadable_history,
                 response,
             })
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
@@ -1132,9 +1181,11 @@ impl MobileEngine {
         let (response, result) = mpsc::channel();
         commands
             .send(WorkerCommand::CancelJoinSpace { join_id, response })
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
@@ -1151,9 +1202,11 @@ impl MobileEngine {
                 target_devices,
                 response,
             })
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
@@ -1172,9 +1225,11 @@ impl MobileEngine {
                 target_devices,
                 response,
             })
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
@@ -1191,9 +1246,11 @@ impl MobileEngine {
                 target_devices,
                 response,
             })
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
@@ -1202,9 +1259,11 @@ impl MobileEngine {
         let (response, result) = mpsc::channel();
         commands
             .send(WorkerCommand::CaptureCurrentClipboard { response })
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
@@ -1216,9 +1275,11 @@ impl MobileEngine {
         let (response, result) = mpsc::channel();
         commands
             .send(WorkerCommand::ObserveClipboardChange { dispatch, response })
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
@@ -1235,9 +1296,11 @@ impl MobileEngine {
                 mode,
                 response,
             })
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
@@ -1258,9 +1321,11 @@ impl MobileEngine {
                 destination_handle: Zeroizing::new(destination_handle),
                 response,
             })
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
@@ -1281,6 +1346,7 @@ impl MobileEngine {
         let (response, result) = mpsc::channel();
         commands
             .send(LifecycleCommand::Resume { response })
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         receive_lifecycle_result(result, LIFECYCLE_TRANSITION_DEADLINE)?
     }
@@ -1299,9 +1365,11 @@ impl MobileEngine {
         let (response, result) = mpsc::channel();
         commands
             .send(command(response))
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
@@ -1832,6 +1900,7 @@ fn receive_lifecycle_result<T>(
 ) -> Result<T, BindingError> {
     result
         .recv_timeout(deadline)
+        // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
         .map_err(|_| BindingError::RuntimeUnavailable)
 }
 
@@ -2083,6 +2152,7 @@ fn map_workspace_convergence_summary(
 fn map_device_group_choices(result: OperationResult) -> Result<String, BindingError> {
     match result {
         OperationResult::DeviceGroupChoices(summary) => {
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             serde_json::to_string(&summary).map_err(|_| BindingError::UnexpectedResult)
         }
         _ => Err(BindingError::UnexpectedResult),
@@ -2092,6 +2162,7 @@ fn map_device_group_choices(result: OperationResult) -> Result<String, BindingEr
 fn map_device_group_choice_result(result: OperationResult) -> Result<String, BindingError> {
     match result {
         OperationResult::DeviceGroupChosen(summary) => {
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             serde_json::to_string(&summary).map_err(|_| BindingError::UnexpectedResult)
         }
         _ => Err(BindingError::UnexpectedResult),
@@ -2102,6 +2173,7 @@ fn map_device_group_choice_result(result: OperationResult) -> Result<String, Bin
 fn map_device_trust_snapshot(
     snapshot: uc_engine::DeviceTrustSnapshotSummary,
 ) -> Result<String, BindingError> {
+    // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
     serde_json::to_string(&snapshot).map_err(|_| BindingError::UnexpectedResult)
 }
 
@@ -2206,6 +2278,38 @@ fn map_join_space_status(result: OperationResult) -> Result<JoinSpaceStatus, Bin
             cancel_requested,
             peer_upgrade_required,
         },
+        uc_engine::JoinSpaceStatusSummary::Processing {
+            join_id,
+            target_space_id,
+            sponsor_device_id,
+            sponsor_identity_fingerprint,
+            peer_upgrade_required,
+        } => JoinSpaceStatus::Processing {
+            join_id,
+            target_space_id,
+            sponsor_device_id,
+            sponsor_identity_fingerprint,
+            peer_upgrade_required,
+        },
+        uc_engine::JoinSpaceStatusSummary::NeedsAttention {
+            join_id,
+            reason,
+            recovery,
+            next_retry_at_ms,
+        } => JoinSpaceStatus::NeedsAttention {
+            join_id,
+            reason: match reason {
+                uc_engine::JoinSpaceAttentionReasonSummary::OutcomeCannotBeProven => {
+                    JoinSpaceAttentionReason::OutcomeCannotBeProven
+                }
+            },
+            recovery: match recovery {
+                uc_engine::JoinSpaceAttentionRecoverySummary::PreserveDataAndContactSupport => {
+                    JoinSpaceAttentionRecovery::PreserveDataAndContactSupport
+                }
+            },
+            next_retry_at_ms,
+        },
         uc_engine::JoinSpaceStatusSummary::Rejected { join_id, reason } => {
             JoinSpaceStatus::Rejected {
                 join_id,
@@ -2227,6 +2331,21 @@ fn map_join_space_status(result: OperationResult) -> Result<JoinSpaceStatus, Bin
                     }
                     uc_engine::JoinSpaceRejectionReasonSummary::HistoryConflict => {
                         JoinSpaceRejectionReason::HistoryConflict
+                    }
+                    uc_engine::JoinSpaceRejectionReasonSummary::CompletionInvalid => {
+                        JoinSpaceRejectionReason::CompletionInvalid
+                    }
+                    uc_engine::JoinSpaceRejectionReasonSummary::MembershipHistoryInvalid => {
+                        JoinSpaceRejectionReason::MembershipHistoryInvalid
+                    }
+                    uc_engine::JoinSpaceRejectionReasonSummary::SecurityMaterialInvalid => {
+                        JoinSpaceRejectionReason::SecurityMaterialInvalid
+                    }
+                    uc_engine::JoinSpaceRejectionReasonSummary::RelationshipConflict => {
+                        JoinSpaceRejectionReason::RelationshipConflict
+                    }
+                    uc_engine::JoinSpaceRejectionReasonSummary::ActivationStateInvalid => {
+                        JoinSpaceRejectionReason::ActivationStateInvalid
                     }
                     uc_engine::JoinSpaceRejectionReasonSummary::PeerUpgradeRequired => {
                         JoinSpaceRejectionReason::PeerUpgradeRequired
@@ -2440,6 +2559,7 @@ fn map_entry_exported(result: OperationResult) -> Result<(), BindingError> {
 }
 
 fn count_to_u64(value: usize) -> Result<u64, BindingError> {
+    // TryFromIntError：目标分类完整表达数值范围不符。
     u64::try_from(value).map_err(|_| BindingError::UnexpectedResult)
 }
 
@@ -2465,6 +2585,7 @@ fn host_capabilities(
         directories.cache(),
         directories.temporary(),
     ] {
+        // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
         std::fs::create_dir_all(directory).map_err(|_| BindingError::HostIo)?;
     }
     let capabilities = HostCapabilities::new(
@@ -2839,6 +2960,55 @@ mod tests {
             JoinSpaceStatus::Terminated {
                 join_id: "join-id".into(),
                 reason: JoinSpaceTerminationReason::Expired,
+            }
+        );
+    }
+
+    #[test]
+    fn join_space_mapping_preserves_processing_state() {
+        let status = map_join_space_status(OperationResult::JoinSpace(
+            uc_engine::JoinSpaceStatusSummary::Processing {
+                join_id: "join-id".into(),
+                target_space_id: "space-id".into(),
+                sponsor_device_id: "sponsor-id".into(),
+                sponsor_identity_fingerprint: "sponsor-fingerprint".into(),
+                peer_upgrade_required: false,
+            },
+        ))
+        .expect("processing join-space result must map");
+
+        assert_eq!(
+            status,
+            JoinSpaceStatus::Processing {
+                join_id: "join-id".into(),
+                target_space_id: "space-id".into(),
+                sponsor_device_id: "sponsor-id".into(),
+                sponsor_identity_fingerprint: "sponsor-fingerprint".into(),
+                peer_upgrade_required: false,
+            }
+        );
+    }
+
+    #[test]
+    fn join_space_mapping_preserves_attention_recovery_contract() {
+        let status = map_join_space_status(OperationResult::JoinSpace(
+            uc_engine::JoinSpaceStatusSummary::NeedsAttention {
+                join_id: "join-id".into(),
+                reason: uc_engine::JoinSpaceAttentionReasonSummary::OutcomeCannotBeProven,
+                recovery:
+                    uc_engine::JoinSpaceAttentionRecoverySummary::PreserveDataAndContactSupport,
+                next_retry_at_ms: None,
+            },
+        ))
+        .expect("attention join-space result must map");
+
+        assert_eq!(
+            status,
+            JoinSpaceStatus::NeedsAttention {
+                join_id: "join-id".into(),
+                reason: JoinSpaceAttentionReason::OutcomeCannotBeProven,
+                recovery: JoinSpaceAttentionRecovery::PreserveDataAndContactSupport,
+                next_retry_at_ms: None,
             }
         );
     }

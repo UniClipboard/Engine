@@ -37,6 +37,7 @@ use tracing::{debug, info, warn};
 use uc_core::clipboard::PayloadAvailability;
 use uc_core::ports::clipboard::ProcessingUpdateOutcome;
 use uc_core::ports::ClipboardRepresentationStore;
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::clipboard::SpoolManager;
 
@@ -85,7 +86,8 @@ impl StagedReconciler {
                 Err(err) => {
                     warn!(
                         representation_id = %rep_id,
-                        error = %err,
+                        error_kind = "spool_file_stat",
+                        io_error_kind = io_error_kind(err.as_ref()),
                         "Staged reconciler: failed to stat spool file; skipping"
                     );
                     continue;
@@ -125,7 +127,8 @@ impl StagedReconciler {
                 Err(err) => {
                     warn!(
                         representation_id = %rep_id,
-                        error = %err,
+                        error_kind = "representation_demote",
+                        io_error_kind = io_error_kind(err.as_ref()),
                         "Staged reconciler: failed to demote representation"
                     );
                 }

@@ -66,18 +66,24 @@ impl DirectoryPublishProtection {
         current_profile: &dyn CurrentProfilePort,
     ) -> Result<DirectoryPublishLogCipher, PublishLogError> {
         let profile = current_profile.current_profile().await.map_err(|error| {
-            PublishLogError::EncryptionUnavailable(format!("current profile unavailable: {error}"))
+            PublishLogError::EncryptionUnavailable(
+                anyhow::Error::from(error)
+                    .context("current profile unavailable")
+                    .into(),
+            )
         })?;
         let key = derive_subkey
             .derive_subkey(profile.as_ref().as_bytes(), PUBLISH_LOG_KEY_INFO)
             .await
             .map_err(|error| match error {
                 SpaceAccessError::NotUnlocked => PublishLogError::EncryptionUnavailable(
-                    "session locked: cannot derive directory publish log key".to_owned(),
+                    "session locked: cannot derive directory publish log key".into(),
                 ),
-                other => PublishLogError::EncryptionUnavailable(format!(
-                    "derive directory publish log key: {other}"
-                )),
+                other => PublishLogError::EncryptionUnavailable(
+                    anyhow::Error::from(other)
+                        .context("derive directory publish log key")
+                        .into(),
+                ),
             })?;
         Ok(DirectoryPublishLogCipher::new(key))
     }
@@ -97,7 +103,7 @@ impl DirectoryPublishProtection {
                 .seal(entry_id, attempt_id, root_map),
             Self::V3(cipher) => cipher.seal(entry_id, attempt_id, root_map).await,
         }
-        .map_err(|error| PublishLogError::Backend(error.to_string()))
+        .map_err(|error| PublishLogError::Backend(Box::new(error)))
     }
 
     async fn open(
@@ -115,12 +121,12 @@ impl DirectoryPublishProtection {
                 .open(entry_id, attempt_id, ciphertext),
             Self::V3(cipher) => cipher.open(entry_id, attempt_id, ciphertext).await,
         }
-        .map_err(|_| PublishLogError::InvalidCiphertext)
+        .map_err(PublishLogError::invalid_ciphertext_from)
     }
 }
 
 fn backend(error: anyhow::Error) -> PublishLogError {
-    PublishLogError::Backend(error.to_string())
+    PublishLogError::Backend(error.context("access directory publish log store").into())
 }
 
 #[async_trait]
@@ -135,7 +141,7 @@ impl<E: DbExecutor> RecordDirectoryPublishPort for DieselDirectoryPublishLogRepo
     ) -> Result<(), PublishLogError> {
         if phase == PublishPhase::Landed {
             return Err(PublishLogError::Backend(
-                "landed phase requires the atomic directory receive commit".to_owned(),
+                "landed phase requires the atomic directory receive commit".into(),
             ));
         }
         let ciphertext = self
@@ -182,7 +188,8 @@ impl<E: DbExecutor> RecordDirectoryPublishPort for DieselDirectoryPublishLogRepo
         now_ms: i64,
     ) -> Result<(), PublishLogError> {
         let visible_roots = i32::try_from(visible_roots)
-            .map_err(|_| PublishLogError::Backend("visible root count exceeds i32".to_owned()))?;
+            // TryFromIntError：固定文本已完整表达范围不符。
+            .map_err(|_| PublishLogError::Backend("visible root count exceeds i32".into()))?;
         let entry_id = entry_id.to_owned();
         let attempt_id = attempt_id.to_owned();
         self.executor
@@ -245,8 +252,9 @@ impl<E: DbExecutor> GetDirectoryPublishRecordPort for DieselDirectoryPublishLogR
             None => Vec::new(),
         };
         let partial_visible_roots = if row.partial_publication {
+            // TryFromIntError：目标分类完整表达数值范围不符。
             Some(u32::try_from(row.partial_root_count).map_err(|_| {
-                PublishLogError::Backend("negative persisted visible root count".to_owned())
+                PublishLogError::Backend("negative persisted visible root count".into())
             })?)
         } else {
             None

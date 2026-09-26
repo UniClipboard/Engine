@@ -148,7 +148,7 @@ fn map_receive_error(error: CancelEntryReceiveError) -> EngineError {
         ),
         CancelEntryReceiveError::Attempt(_)
         | CancelEntryReceiveError::PublishLog(_)
-        | CancelEntryReceiveError::Transfer(_)
+        | CancelEntryReceiveError::Transfer { .. }
         | CancelEntryReceiveError::Cleanup(_) => {
             error!("entry receive operation failed");
             EngineError::new(RECEIVE_FAILED_CODE, EngineErrorCategory::Internal, false)
@@ -172,11 +172,12 @@ mod tests {
     #[test]
     fn receive_failures_keep_stable_categories_without_details() {
         let unavailable = map_receive_error(CancelEntryReceiveError::Unavailable);
-        let internal = map_receive_error(CancelEntryReceiveError::Attempt(
-            "/private/path/receive.db".into(),
-        ));
-        let transfer =
-            map_transfer_cancel_error(BlobTransferError::Fetch("/private/path/file.bin".into()));
+        let internal = map_receive_error(CancelEntryReceiveError::Attempt(anyhow::anyhow!(
+            "/private/path/receive.db"
+        )));
+        let transfer = map_transfer_cancel_error(BlobTransferError::Fetch(anyhow::anyhow!(
+            "/private/path/file.bin"
+        )));
 
         assert_eq!(unavailable.category(), EngineErrorCategory::Unavailable);
         assert_eq!(internal.category(), EngineErrorCategory::Internal);

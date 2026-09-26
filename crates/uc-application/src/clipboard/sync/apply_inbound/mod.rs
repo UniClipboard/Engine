@@ -166,10 +166,8 @@ pub enum ApplyInboundError {
     DedupQuery(#[source] SourceError),
     #[error("capture pipeline failed")]
     Capture(#[source] SourceError),
-    #[error("clipboard write failed: {0}")]
-    WriteCoordinator(String),
-    #[error("internal: {0}")]
-    Internal(String),
+    #[error("clipboard receive failed internally")]
+    Internal(#[source] SourceError),
 }
 
 impl fmt::Debug for ApplyInboundError {

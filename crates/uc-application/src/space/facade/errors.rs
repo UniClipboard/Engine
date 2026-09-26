@@ -74,8 +74,8 @@ pub enum IssuePairingInvitationError {
     AddressNotAvailable(IpAddr),
 
     /// Uncategorised adapter-side failure; message for logs only.
-    #[error("internal error: {0}")]
-    Internal(String),
+    #[error("internal error")]
+    Internal(#[source] anyhow::Error),
 }
 
 impl IssuePairingInvitationError {

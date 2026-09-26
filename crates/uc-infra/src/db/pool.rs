@@ -1,10 +1,11 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use diesel::r2d2::{ConnectionManager, CustomizeConnection, Pool, PooledConnection};
 use diesel::sqlite::SqliteConnection;
 use diesel::{connection::SimpleConnection, Connection, RunQueryDsl};
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use tracing::{info, warn};
+use tracing::info;
 
 /// Embed all diesel migrations at compile time
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
@@ -14,6 +15,8 @@ type RawDbPool = Pool<ConnectionManager<SqliteConnection>>;
 #[derive(Clone)]
 pub struct DbPool {
     inner: Arc<RwLock<RawDbPool>>,
+    /// 底层数据库每替换一次加一；读取方据此判断此前读到的资料是否仍属于当前数据库。
+    generation: Arc<AtomicU64>,
 }
 
 impl DbPool {
@@ -33,11 +36,23 @@ impl DbPool {
         let replacement = build_raw_pool(database_url)?;
         run_migrations_raw(&replacement)?;
         install_revision_triggers_raw(&replacement)?;
-        *self
+        self.swap(replacement);
+        Ok(())
+    }
+
+    /// 当前底层数据库的代号；替换数据库后必然改变。
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    fn swap(&self, replacement: RawDbPool) {
+        let mut inner = self
             .inner
             .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = replacement;
-        Ok(())
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *inner = replacement;
+        // 在持有写锁时推进代号：读到新代号的读取方必然访问新数据库。
+        self.generation.fetch_add(1, Ordering::AcqRel);
     }
 
     pub fn detach_to_ephemeral_database(&self) -> Result<()> {
@@ -46,13 +61,10 @@ impl DbPool {
             .max_size(1)
             .connection_customizer(Box::new(SqlitePragmaCustomizer))
             .build(manager)
-            .map_err(|error| anyhow::anyhow!("Failed to create ephemeral database: {error}"))?;
+            .context("Failed to create ephemeral database")?;
         run_migrations_raw(&replacement)?;
         install_revision_triggers_raw(&replacement)?;
-        *self
-            .inner
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = replacement;
+        self.swap(replacement);
         Ok(())
     }
 
@@ -60,6 +72,7 @@ impl DbPool {
         let row =
             diesel::sql_query("SELECT revision FROM uc_database_revision WHERE singleton_id = 1")
                 .get_result::<DatabaseRevisionRow>(&mut self.get()?)?;
+        // TryFromIntError：目标分类完整表达数值范围不符。
         u64::try_from(row.revision).map_err(|_| anyhow::anyhow!("database revision is invalid"))
     }
 }
@@ -98,24 +111,15 @@ impl CustomizeConnection<SqliteConnection, diesel::r2d2::Error> for SqlitePragma
 
         diesel::sql_query("PRAGMA busy_timeout = 5000")
             .execute(conn)
-            .map_err(|e| {
-                warn!(error = %e, "Failed to set busy_timeout");
-                QueryError(e)
-            })?;
+            .map_err(|e| QueryError(e))?;
 
         diesel::sql_query("PRAGMA foreign_keys = ON")
             .execute(conn)
-            .map_err(|e| {
-                warn!(error = %e, "Failed to set foreign_keys=ON");
-                QueryError(e)
-            })?;
+            .map_err(|e| QueryError(e))?;
 
         diesel::sql_query("PRAGMA secure_delete = ON")
             .execute(conn)
-            .map_err(|e| {
-                warn!(error = %e, "Failed to set secure_delete=ON");
-                QueryError(e)
-            })?;
+            .map_err(|e| QueryError(e))?;
 
         Ok(())
     }
@@ -132,12 +136,12 @@ impl CustomizeConnection<SqliteConnection, diesel::r2d2::Error> for SqlitePragma
 ///
 /// Returns an error if the connection cannot be established or the WAL pragma fails.
 fn enable_wal_mode(database_url: &str) -> Result<()> {
-    let mut conn = SqliteConnection::establish(database_url)
-        .map_err(|e| anyhow::anyhow!("Failed to connect for WAL setup: {}", e))?;
+    let mut conn =
+        SqliteConnection::establish(database_url).context("Failed to connect for WAL setup")?;
 
     diesel::sql_query("PRAGMA journal_mode = WAL")
         .execute(&mut conn)
-        .map_err(|e| anyhow::anyhow!("Failed to set journal_mode=WAL: {}", e))?;
+        .context("Failed to set journal_mode=WAL")?;
 
     info!("WAL journal mode enabled");
     Ok(())
@@ -170,6 +174,7 @@ pub fn init_db_pool(database_url: &str) -> Result<DbPool> {
     install_revision_triggers_raw(&pool)?;
     Ok(DbPool {
         inner: Arc::new(RwLock::new(pool)),
+        generation: Arc::new(AtomicU64::new(0)),
     })
 }
 
@@ -182,9 +187,10 @@ pub(crate) fn open_existing_db_pool(database_url: &str) -> Result<DbPool> {
     let pool = Pool::builder()
         .connection_customizer(Box::new(SqlitePragmaCustomizer))
         .build(manager)
-        .map_err(|error| anyhow::anyhow!("Failed to open existing database pool: {error}"))?;
+        .context("Failed to open existing database pool")?;
     Ok(DbPool {
         inner: Arc::new(RwLock::new(pool)),
+        generation: Arc::new(AtomicU64::new(0)),
     })
 }
 
@@ -236,7 +242,7 @@ fn build_raw_pool(database_url: &str) -> Result<RawDbPool> {
     Pool::builder()
         .connection_customizer(Box::new(SqlitePragmaCustomizer))
         .build(manager)
-        .map_err(|e| anyhow::anyhow!("Failed to create database pool: {}", e))
+        .context("Failed to create database pool")
 }
 
 #[cfg(test)]
@@ -300,6 +306,7 @@ mod switch_tests {
             .get_result::<ValueRow>(&mut repository_pool.get().unwrap())
             .unwrap();
         assert_eq!(before.value, "source");
+        let generation = repository_pool.generation();
 
         pool.replace_database(target.to_str().unwrap()).unwrap();
 
@@ -307,6 +314,10 @@ mod switch_tests {
             .get_result::<ValueRow>(&mut repository_pool.get().unwrap())
             .unwrap();
         assert_eq!(after.value, "target");
+        assert_ne!(repository_pool.generation(), generation);
+        let replaced = repository_pool.generation();
+        pool.detach_to_ephemeral_database().unwrap();
+        assert_ne!(repository_pool.generation(), replaced);
     }
 
     #[test]
@@ -318,10 +329,12 @@ mod switch_tests {
         std::fs::create_dir(&invalid_target).unwrap();
         let pool = init_db_pool(source.to_str().unwrap()).unwrap();
         let repository_pool = pool.clone();
+        let generation = repository_pool.generation();
 
         assert!(pool
             .replace_database(invalid_target.to_str().unwrap())
             .is_err());
+        assert_eq!(repository_pool.generation(), generation);
 
         let current = diesel::sql_query("SELECT value FROM generation_probe")
             .get_result::<ValueRow>(&mut repository_pool.get().unwrap())
@@ -404,7 +417,7 @@ fn run_migrations_raw(pool: &RawDbPool) -> Result<()> {
 
     info!("Running database migrations...");
     conn.run_pending_migrations(MIGRATIONS)
-        .map_err(|e| anyhow::anyhow!("Migration failed: {}", e))?;
+        .map_err(|error| anyhow::anyhow!(error).context("Migration failed"))?;
     info!("Database migrations completed");
 
     Ok(())

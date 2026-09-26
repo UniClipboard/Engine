@@ -22,6 +22,7 @@ mod facade;
 mod lifecycle;
 mod membership;
 pub use membership::{DeviceGroupChoicesView, QueryDeviceGroupChoicesError, RosterEntry};
+pub use membership::{KnownPeerIdentity, PeerAccess, PeerIdentityDirectoryPort};
 pub use membership::{MembershipReadiness, QueryMembershipReadinessError};
 pub(crate) use membership::{QueryMemberRosterError, QueryMemberRosterUseCase};
 
@@ -30,9 +31,10 @@ pub use adapters::{SpaceAdmissionAdapters, SpaceMembershipAdapters, SpaceRuntime
 pub(crate) use admission::SpaceAdmissionObservationRegistry;
 pub use admission::{
     CancelInvitationError, CancelSpaceJoinError, CompletePendingSpaceTransitionError,
-    CurrentJoinStatus, JoinSpaceError, JoinSpaceInput, JoinSpaceResult, JoinSpaceTerminationReason,
-    JoinedSpace, PairingInvitationAddressCandidate, PendingInboundMember,
-    QueryPairingInvitationAddressesError, QueryPendingSpaceTransitionError,
+    CurrentJoinStatus, InboundPairing, InboundPairingStatus, JoinSpaceAttentionReason,
+    JoinSpaceAttentionRecovery, JoinSpaceError, JoinSpaceInput, JoinSpaceResult,
+    JoinSpaceTerminationReason, JoinedSpace, PairingInvitationAddressCandidate,
+    PendingInboundMember, QueryPairingInvitationAddressesError, QueryPendingSpaceTransitionError,
 };
 pub use connectivity::{
     ConnectionHint, ConnectivityOpportunity, NetworkRecoveryEvent, NetworkRecoveryFacade,
@@ -75,7 +77,12 @@ pub use membership::{
     DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership, DeviceTrustObservation,
     DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState,
     PairingConfirmationObservation, PairingConfirmationStatus, PairingConfirmationTarget,
-    PendingDeviceTrustChange, QueryDeviceTrustError,
+    PendingDeviceTrustChange, QueryDeviceTrustError, SpaceDeviceUpdatePhase,
+    SpaceDeviceUpdateProblem, SpaceDeviceUpdateRecovery, SpaceDeviceUpdateStatus,
+};
+pub use membership::{
+    MembershipBranchRecoveryRecord, MembershipHistoryExchangeRecord, MembershipRecord,
+    SpaceMembershipRecord,
 };
 
 // Assembly contract re-exported by `crate::deps`.
@@ -100,24 +107,24 @@ pub use admission::{
     JoinerActivationIntent, JoinerActivationMutation, JoinerActivationOutcome,
     JoinerActivationStateError, JoinerActivationStatePort, JoinerCancellationCommitToken,
     JoinerCancellationMaterial, JoinerCancellationMaterialError, JoinerCancellationMutation,
-    JoinerCancellationStateError, JoinerStartMaterial, JoinerStartMaterialError,
-    JoinerStartMaterialPort, JoinerStartMutation, JoinerStartStateError, JoinerStartStatePort,
-    LoadedAdmissionRecovery, LoadedCurrentJoin, LoadedJoinerActivation, LoadedJoinerStartState,
-    LoadedPendingAdmission, LoadedSponsorAbandonment, LoadedSponsorAdmission,
-    LoadedSponsorDeadline, PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
-    PrepareJoinerActivationError, PrepareJoinerActivationPort, PrepareJoinerAppliedError,
-    PrepareJoinerAppliedPort, PrepareJoinerCancellationPort, PrepareJoinerCandidateError,
-    PrepareJoinerCandidatePort, PrepareJoinerInvitationError, PrepareJoinerInvitationPort,
-    PrepareSponsorCandidateError, PrepareSponsorCandidatePort, PrepareSponsorCommitError,
-    PrepareSponsorCommitPort, PrepareSponsorCompleteError, PrepareSponsorCompletePort,
-    PrepareSponsorSettledError, PrepareSponsorSettledPort, PreparedJoinerActivation,
-    PreparedJoinerAppliedMaterial, PreparedJoinerCandidateMaterial, PreparedJoinerInvitation,
-    PreparedSponsorCandidate, PreparedSponsorCommit, PreparedSponsorComplete,
-    PreparedSponsorSettled, ResolveJoinerInvitationError, ResolveJoinerInvitationPort,
-    SpaceAdmissionCommitToken, SpaceAdmissionMessageReply, SpaceAdmissionTransportError,
-    SpaceAdmissionTransportPort, SponsorAdmissionCommitToken, SponsorAdmissionMutation,
-    SponsorAdmissionState, SponsorAdmissionStateError, SponsorAdmissionStatePort,
-    ValidateJoinerActivationIntentPort,
+    JoinerCancellationStateError, JoinerMembershipStart, JoinerStartMaterial,
+    JoinerStartMaterialError, JoinerStartMaterialPort, JoinerStartMutation, JoinerStartStateError,
+    JoinerStartStatePort, LoadedAdmissionRecovery, LoadedCurrentJoin, LoadedJoinerActivation,
+    LoadedJoinerStartState, LoadedPendingAdmission, LoadedSponsorAbandonment,
+    LoadedSponsorAdmission, LoadedSponsorDeadline, PendingAdmissionRecoveryStateError,
+    PendingAdmissionRecoveryStatePort, PrepareJoinerActivationError, PrepareJoinerActivationPort,
+    PrepareJoinerAppliedError, PrepareJoinerAppliedPort, PrepareJoinerCancellationPort,
+    PrepareJoinerCandidateError, PrepareJoinerCandidatePort, PrepareJoinerInvitationError,
+    PrepareJoinerInvitationPort, PrepareSponsorCandidateError, PrepareSponsorCandidatePort,
+    PrepareSponsorCommitError, PrepareSponsorCommitPort, PrepareSponsorCompleteError,
+    PrepareSponsorCompletePort, PrepareSponsorSettledError, PrepareSponsorSettledPort,
+    PreparedJoinerActivation, PreparedJoinerAppliedMaterial, PreparedJoinerCandidateMaterial,
+    PreparedJoinerInvitation, PreparedSponsorCandidate, PreparedSponsorCommit,
+    PreparedSponsorComplete, PreparedSponsorSettled, ResolveJoinerInvitationError,
+    ResolveJoinerInvitationPort, SpaceAdmissionCommitToken, SpaceAdmissionMessageReply,
+    SpaceAdmissionTransportError, SpaceAdmissionTransportPort, SponsorAdmissionCommitToken,
+    SponsorAdmissionMutation, SponsorAdmissionState, SponsorAdmissionStateError,
+    SponsorAdmissionStatePort, ValidateJoinerActivationIntentPort,
 };
 pub use admission::{
     AdmissionSpaceTransitionError, AdmissionSpaceTransitionPort,
@@ -140,15 +147,13 @@ pub use lifecycle::{
 };
 pub use membership::{
     ActivateMembershipEffectPort, ApplyMembershipMemberFactsPort, ApplyMembershipSecurityPort,
-    CommitMembershipLedgerPort, CurrentSpaceMemberScope, CurrentSpaceMemberScopeError,
-    CurrentSpaceMemberScopePort, InboundMembershipTransfer, InitiatedMembershipRemovalEffect,
-    LoadMembershipLedgerPort, LoadedMembershipLedger, MembershipBranchRecoverySession,
+    CurrentSpaceMemberScope, CurrentSpaceMemberScopeError, CurrentSpaceMemberScopePort,
+    InboundMembershipTransfer, MembershipBranchRecoverySession,
     MembershipBranchRecoverySessionState, MembershipConflictMember, MembershipConflictPresentation,
-    MembershipConflictRecord, MembershipEffectExecutionError, MembershipEffectKind,
-    MembershipEffectPhase, MembershipLedgerError, MembershipLedgerMutation, PausedSpaceMember,
-    PeerHistorySyncState, PeerReconciliationRecord, PendingMembershipEffect,
+    MembershipConflictRecord, MembershipEffectExecutionError, MembershipLedgerError,
+    MembershipRecordCommit, MembershipRecordStorePort, PausedSpaceMember,
     RestrictedMembershipDelivery, RestrictedMembershipDeliveryError,
-    RestrictedMembershipDeliveryPort, SpaceMemberPauseReason,
+    RestrictedMembershipDeliveryPort, SpaceMemberPauseReason, StagedMembershipRecord,
 };
 pub use membership::{
     AdmissionDisplayStatus, LoadCurrentJoinStatusPort, LoadDeviceTrustObservationsPort,
@@ -156,22 +161,20 @@ pub use membership::{
 };
 pub use membership::{
     AdmissionMaintenanceOutcome, BeginMembershipBranchRecoveryInput,
-    DeliverRestrictedMembershipPort, IssueMembershipBranchRecoveryError,
-    IssueMembershipBranchRecoveryInput, IssueMembershipBranchRecoveryPort, KnownPeerContact,
-    MembershipBranchRecoveryChannelError, MembershipBranchRecoveryChannelPort,
-    MembershipBranchRecoveryCommit, MembershipBranchRecoveryRequest,
-    MembershipMaintenanceStepOutcome, MembershipNetworkActivityPort,
-    PrepareMembershipBranchRecoveryMaterialError, PrepareMembershipBranchRecoveryMaterialInput,
-    PrepareMembershipBranchRecoveryMaterialPort, PrepareMembershipBranchRecoveryRecipientError,
-    PrepareMembershipBranchRecoveryRecipientPort, PrepareMembershipBranchTransitionError,
-    PrepareMembershipBranchTransitionInput, PrepareMembershipBranchTransitionPort,
-    PreparedMembershipBranchRecoveryMaterial, PreparedMembershipBranchRecoveryRecipient,
-    ReconcileMembershipProjectionPort, RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort,
+    IssueMembershipBranchRecoveryError, IssueMembershipBranchRecoveryInput,
+    IssueMembershipBranchRecoveryPort, KnownPeerContact, MembershipBranchRecoveryChannelError,
+    MembershipBranchRecoveryChannelPort, MembershipBranchRecoveryCommit,
+    MembershipBranchRecoveryRequest, MembershipMaintenanceStepOutcome,
+    MembershipNetworkActivityPort, PrepareMembershipBranchRecoveryMaterialError,
+    PrepareMembershipBranchRecoveryMaterialInput, PrepareMembershipBranchRecoveryMaterialPort,
+    PrepareMembershipBranchRecoveryRecipientError, PrepareMembershipBranchRecoveryRecipientPort,
+    PrepareMembershipBranchTransitionError, PrepareMembershipBranchTransitionInput,
+    PrepareMembershipBranchTransitionPort, PreparedMembershipBranchRecoveryMaterial,
+    PreparedMembershipBranchRecoveryRecipient, RecoverMembershipEffectsPort,
+    RecoverSpaceAdmissionsPort, SpaceWorkMode,
 };
 pub use membership::{CurrentMemberSignatureError, CurrentMemberSignaturePort};
 
 #[cfg(test)]
 mod application_tests;
-pub use membership::{
-    ApplyMembershipProjectionError, ApplyMembershipProjectionPort, MembershipProjectionPlan,
-};
+pub use membership::MembershipProjectionPlan;

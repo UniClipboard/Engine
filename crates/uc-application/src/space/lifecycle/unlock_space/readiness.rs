@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use anyhow::Context;
+
 use uc_core::MemberRepositoryPort;
 
 use crate::clipboard::write::MobileConsumableBackfill;
@@ -24,26 +26,19 @@ impl LocalSessionReadiness {
         }
     }
 
-    pub(crate) async fn complete_after_unlock(&self) -> Result<(), String> {
-        self.prepare_data().await
-    }
-
-    pub(crate) async fn complete_after_resume(&self) -> Result<(), String> {
-        self.prepare_data().await
-    }
-
-    async fn prepare_data(&self) -> Result<(), String> {
+    /// 解锁或恢复会话后准备本地数据；两条路径的准备步骤相同。
+    pub(crate) async fn prepare_data(&self) -> anyhow::Result<()> {
         self.upgrade_space
             .execute()
             .await
-            .map_err(|error| error.to_string())?;
+            .context("upgrade space data")?;
 
         self.mobile_consumable_backfill.backfill_best_effort().await;
 
         self.member_repo
             .list()
             .await
-            .map_err(|error| error.to_string())?;
+            .context("list space members")?;
 
         Ok(())
     }

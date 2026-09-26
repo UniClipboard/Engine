@@ -22,7 +22,7 @@ pub fn encode_space_admission_route(
     invitation_id: Option<InvitationId>,
 ) -> Result<Vec<u8>, SpaceAdmissionTransportError> {
     let endpoint_addr = postcard::to_stdvec(endpoint_addr)
-        .map_err(|_| SpaceAdmissionTransportError::Unavailable)?;
+        .map_err(SpaceAdmissionTransportError::unavailable_from)?;
     encode_space_admission_route_bytes(&endpoint_addr, invitation_id)
 }
 
@@ -35,7 +35,7 @@ pub(crate) fn encode_space_admission_route_bytes(
         invitation_id: invitation_id.map(|id| *id.as_bytes()),
         endpoint_addr: endpoint_addr.to_vec(),
     })
-    .map_err(|_| SpaceAdmissionTransportError::Unavailable)
+    .map_err(SpaceAdmissionTransportError::unavailable_from)
 }
 
 pub(super) fn decode_route(
@@ -43,12 +43,12 @@ pub(super) fn decode_route(
     initial: bool,
 ) -> Result<DecodedRoute, SpaceAdmissionTransportError> {
     let wire: AdmissionDialRouteV1 = postcard::from_bytes(route.as_bytes())
-        .map_err(|_| SpaceAdmissionTransportError::ProtocolRejected)?;
+        .map_err(SpaceAdmissionTransportError::protocol_rejected_from)?;
     if wire.format_version != DIAL_ROUTE_FORMAT_V1 || (initial && wire.invitation_id.is_none()) {
-        return Err(SpaceAdmissionTransportError::ProtocolRejected);
+        return Err(SpaceAdmissionTransportError::protocol_rejected());
     }
     let endpoint_addr = postcard::from_bytes(&wire.endpoint_addr)
-        .map_err(|_| SpaceAdmissionTransportError::ProtocolRejected)?;
+        .map_err(SpaceAdmissionTransportError::protocol_rejected_from)?;
     Ok(DecodedRoute {
         invitation_id: wire.invitation_id,
         endpoint_addr,
@@ -59,10 +59,18 @@ pub(crate) fn decode_space_admission_route(
     route: &[u8],
 ) -> Result<(EndpointAddr, Option<InvitationId>), SpaceAdmissionTransportError> {
     let route = SpaceAdmissionRoute::from_bytes(route.to_vec())
-        .map_err(|_| SpaceAdmissionTransportError::ProtocolRejected)?;
+        .map_err(SpaceAdmissionTransportError::protocol_rejected_from)?;
     let decoded = decode_route(&route, true)?;
     Ok((
         decoded.endpoint_addr,
         decoded.invitation_id.and_then(InvitationId::from_bytes),
     ))
+}
+
+pub(crate) fn decode_space_admission_continuation_endpoint(
+    route: &[u8],
+) -> Result<EndpointAddr, SpaceAdmissionTransportError> {
+    let route = SpaceAdmissionRoute::from_bytes(route.to_vec())
+        .map_err(SpaceAdmissionTransportError::protocol_rejected_from)?;
+    Ok(decode_route(&route, false)?.endpoint_addr)
 }

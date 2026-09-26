@@ -45,7 +45,7 @@ impl CleanupDirectoryStagingPort for FsDirectoryStagingCleaner {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
-                    return Err(DirectoryStagingCleanupError::Backend(error.to_string()));
+                    return Err(DirectoryStagingCleanupError::Backend(error.into()));
                 }
             }
         }

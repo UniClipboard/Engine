@@ -2,7 +2,17 @@
 
 这里保留已完成、已由后续方案取代或仅供历史追溯的实施记录。它们不自动代表当前架构事实。
 
+- [049 成员状态单一负责人重写](049-single-owner-space-membership-rewrite.md)（S0–S6 完成：Core 成员账本、唯一写入者 Owner、V5 成员记录与遗留成员模块删除；实体双 Desktop 验收跳过）
+
+- [044 Engine testkit、测试分组与结构化报告基础](044-engine-testkit-foundation.md)（框架、nextest 分组、结构化工件与非破坏 CI 入口完成；真实网络、设备和远程 CI 跳过）
+- [045 确定性成员恢复高价值场景](045-deterministic-membership-recovery-scenarios.md)（五个固定 seed 场景、20 轮新旧双轨和 100 轮稳定性验收完成；远程 CI、真实网络和设备跳过）
+- [046 真实依赖与独立进程 testkit 采用](046-real-dependency-testkit-adoption.md)（provider 诊断、独立进程恢复和清理分类完成；20 轮稳定性通过，远程 CI、真实网络和设备跳过）
+
 - [资料密钥丢失恢复与旧设备迁移](2026-09-19-profile-key-recovery.md)（Engine 实现与本地验收完成；Desktop、实体平台和旧版本程序回退验收跳过）
+
+- [入站对端身份与网络准入的唯一负责人](2026-09-23-inbound-peer-admission.md)（S1–S5a 与身份替换防护完成，收尾测试通过；生产路径订阅者检查跳过，S5b 与身份文件消失原因转入技术债；来源 t-0028）
+
+- [错误来源保留：清除字符串化与丢弃来源](2026-09-24-error-source-preservation.md)（S1–S3 与 L1 清零、自动检查覆盖；Core 持久化编解码 90 处移交 Core 边界收口 D1/D3）
 
 - [会话恢复后的成员资料立即就绪](2026-09-18-session-membership-readiness-recovery.md)（本机正式版冷启动中，会话恢复约 0.12 秒完成，成员列表约 0.66 秒可读）
 

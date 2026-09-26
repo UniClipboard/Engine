@@ -24,16 +24,16 @@ use thiserror::Error;
 pub enum FirstSyncStateError {
     /// 读取失败（IO、权限、文件系统）。语义上等价于"无可信来源"，
     /// 调用方一般可以保守地 short-circuit 不 fire 事件，但仍要打日志。
-    #[error("read first-sync state failed: {0}")]
-    Read(String),
+    #[error("read first-sync state failed")]
+    Read(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// 写入失败。flag 未持久化——下次进程启动还会被认为"未首次"，
     /// 可能导致同一事件被多次上报。调用方应记录日志便于排查。
-    #[error("write first-sync state failed: {0}")]
-    Write(String),
+    #[error("write first-sync state failed")]
+    Write(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// 文件存在但内容损坏（非 UTF-8、JSON 不合法、schema 不识别等）。
     /// 与 `Read` 区分开是为了让 use case 可以选择"清理后重写"或仅日志告警。
-    #[error("first-sync state content is corrupt: {0}")]
-    Corrupt(String),
+    #[error("first-sync state content is corrupt")]
+    Corrupt(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// 首次同步事件去重端口。"是否已 fire 过 first_*"是 profile 范围内的事实，

@@ -25,20 +25,20 @@ pub type WiringResult<T> = Result<T, WiringError>;
 /// Errors during dependency injection
 #[derive(Debug, thiserror::Error)]
 pub enum WiringError {
-    #[error("Database initialization failed: {0}")]
-    DatabaseInit(String),
+    #[error("Database initialization failed")]
+    DatabaseInit(#[source] anyhow::Error),
 
-    #[error("Clipboard initialization failed: {0}")]
-    ClipboardInit(String),
+    #[error("Clipboard initialization failed")]
+    ClipboardInit(#[source] anyhow::Error),
 
-    #[error("Blob storage initialization failed: {0}")]
-    BlobStorageInit(String),
+    #[error("Blob storage initialization failed")]
+    BlobStorageInit(#[source] anyhow::Error),
 
-    #[error("Settings repository initialization failed: {0}")]
-    SettingsInit(String),
+    #[error("Settings repository initialization failed")]
+    SettingsInit(#[source] anyhow::Error),
 
-    #[error("Thumbnail generator initialization failed: {0}")]
-    ThumbnailInit(String),
+    #[error("Thumbnail generator initialization failed")]
+    ThumbnailInit(#[source] anyhow::Error),
 
     #[error("profile storage upgrade did not reach a runnable state")]
     StorageUpgradePending,
@@ -81,9 +81,9 @@ pub struct SyncEngineDeps {
     pub analytics: Arc<dyn uc_observability_contract::analytics::AnalyticsPort>,
     /// Dedicated file-backed storage for the long-lived iroh network identity.
     pub iroh_identity_storage: Arc<dyn uc_core::ports::SecureStoragePort>,
-    /// Authoritative authorization check used by every inbound Iroh handler
-    /// after it resolves an endpoint identity to a known device.
-    pub peer_admission: Arc<dyn uc_core::membership::PeerAdmissionPort>,
+    /// 入站 Iroh 入口的身份目录与访问判定：读取成员状态负责人发布的状态，
+    /// Space 应用组装时绑定负责人。
+    pub peer_access: Arc<uc_application::deps::PeerAccess>,
     /// peer address repo — best-effort transport-address writes after pairing,
     /// dialed by F1 `ensure_reachable_all`.
     pub peer_addr_repo: Arc<dyn uc_core::ports::PeerAddressRepositoryPort>,
@@ -97,11 +97,12 @@ pub struct SyncEngineDeps {
     pub membership_session: Arc<uc_infra::space::InMemorySession>,
     /// 完整后台安全生命周期；关闭时封口，普通 GUI 授权不影响它。
     pub security_lifecycle: Arc<uc_infra::space::RuntimeSpaceAccessAdapter>,
-    /// MasterKey-encrypted single membership ledger used by the new Space application.
+    /// MasterKey-encrypted single membership record, committed together with its read model.
     pub membership_ledger: Arc<
-        uc_infra::space::SqliteMembershipLedger<Arc<uc_infra::db::executor::DieselSqliteExecutor>>,
+        uc_infra::space::SqliteMembershipRecordStore<
+            Arc<uc_infra::db::executor::DieselSqliteExecutor>,
+        >,
     >,
-    pub membership_projection: Arc<dyn uc_application::deps::ApplyMembershipProjectionPort>,
     /// MasterKey-encrypted aggregate repository shared by all admission roles.
     pub admission_state: Arc<
         uc_infra::space::SqliteSpaceAdmissionState<

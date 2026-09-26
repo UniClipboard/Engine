@@ -82,8 +82,8 @@ impl MobileDeviceSummary {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ListMobileDevicesError {
-    #[error("device persistence failed: {0}")]
-    PersistenceFailed(String),
+    #[error("device persistence failed")]
+    PersistenceFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 // ─── use case ───────────────────────────────────────────────────────────
@@ -132,7 +132,7 @@ fn translate_device_error(err: MobileDeviceError) -> ListMobileDevicesError {
     match err {
         MobileDeviceError::Storage(msg) => ListMobileDevicesError::PersistenceFailed(msg),
         // list_all 不会触发其它 variant；走到这里一律按 Storage 兜底。
-        other => ListMobileDevicesError::PersistenceFailed(other.to_string()),
+        other => ListMobileDevicesError::PersistenceFailed(other.into()),
     }
 }
 
@@ -228,7 +228,7 @@ mod tests {
         let uc = ListMobileDevicesUseCase::new(Arc::new(repo));
         let err = uc.execute().await.unwrap_err();
         assert!(
-            matches!(err, ListMobileDevicesError::PersistenceFailed(ref s) if s.contains("disk gone")),
+            matches!(err, ListMobileDevicesError::PersistenceFailed(ref s) if s.to_string().contains("disk gone")),
             "expected PersistenceFailed(disk gone), got {err:?}"
         );
     }

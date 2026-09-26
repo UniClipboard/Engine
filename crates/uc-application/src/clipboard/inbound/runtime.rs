@@ -703,7 +703,7 @@ mod tests {
                     sync_preferences: preferences.clone(),
                 })),
                 MemberLookup::Missing => Ok(None),
-                MemberLookup::Failed => Err(MembershipError::Repository("test failure".to_owned())),
+                MemberLookup::Failed => Err(MembershipError::Repository("test failure".into())),
             }
         }
 
@@ -884,7 +884,7 @@ mod tests {
                 }),
                 Err(InboundClipboardApplyError::Internal(
                     crate::clipboard::sync::apply_inbound::ApplyInboundError::Internal(
-                        "storage unavailable".to_owned(),
+                        anyhow::anyhow!("storage unavailable"),
                     ),
                 )),
             ])),

@@ -339,7 +339,7 @@ where
 // translates the storage error into the typed domain error.
 
 fn to_repo_err(e: anyhow::Error) -> ClipboardRepositoryError {
-    ClipboardRepositoryError::Storage(e.to_string())
+    ClipboardRepositoryError::Storage(e.context("clipboard repository operation").into())
 }
 
 #[async_trait::async_trait]
@@ -518,7 +518,11 @@ where
                     Ok(())
                 })
             })
-            .map_err(|error| ClipboardRepositoryError::Storage(error.to_string()))
+            .map_err(|error| {
+                ClipboardRepositoryError::Storage(
+                    error.context("delete entry with receive state").into(),
+                )
+            })
     }
 }
 

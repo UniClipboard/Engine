@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use uc_core::membership::{
     AdmissionActivatedSecurityState, SpaceAdmissionEnvelopeV1, SpaceAdmissionId,
-    SponsorCompletePreparation,
+    SponsorCompletePreparation, VersionedMembershipHistory,
 };
 
 use super::{PrepareSponsorCompleteError, PreparedSponsorComplete};
@@ -31,10 +31,12 @@ impl ActivateSponsorAdmissionError {
 
 #[async_trait]
 pub trait ActivateSponsorAdmissionPort: Send + Sync {
+    /// 激活邀请方为新成员准备的安全状态，并返回随之提交的已验证成员历史；成员事实由调用方提交。
+    /// 实现必须按同一准备资料幂等。
     async fn activate(
         &self,
         activated_security: &AdmissionActivatedSecurityState,
-    ) -> Result<(), ActivateSponsorAdmissionError>;
+    ) -> Result<VersionedMembershipHistory, ActivateSponsorAdmissionError>;
 }
 
 #[cfg(test)]

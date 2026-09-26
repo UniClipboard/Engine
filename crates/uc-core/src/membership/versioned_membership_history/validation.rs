@@ -172,6 +172,12 @@ impl VersionedMembershipHistory {
                     if event.parent_event_id.is_none()
                         || self.activation_receipts.contains_key(&event.event_id())
                     {
+                        // 同一台设备重新加入时，新实例只有在激活回执已经验证后才接替旧实例。
+                        // 历史成员和旧凭据继续保留用于验证过去事实，但当前权限必须保持设备唯一。
+                        snapshot.active_members.retain(|member| {
+                            self.admission_facts_for(*member)
+                                .is_none_or(|facts| facts.device_id != admission.facts.device_id)
+                        });
                         snapshot
                             .active_members
                             .insert(admission.facts.member_instance);

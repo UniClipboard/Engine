@@ -20,6 +20,12 @@
 use std::collections::HashMap;
 
 pub mod client;
+
+/// FFI 边界的宿主诊断文本（已确认的例外）：UniFFI 错误只能携带字符串，
+/// 这里取下层来源的显示文本，与内部改为携带 source 之前交给宿主的文本逐字一致。
+pub(crate) fn ffi_reason(source: &dyn std::error::Error) -> String {
+    source.to_string()
+}
 pub mod engine;
 pub mod reducer;
 
@@ -98,7 +104,9 @@ impl From<uc_mobile_proto::ConnectUriError> for ConnectUriError {
             Proto::InvalidScheme => Self::InvalidScheme,
             Proto::UnsupportedVersion => Self::UnsupportedVersion,
             Proto::UnsupportedService => Self::UnsupportedService,
-            Proto::PayloadDecodeFailed(reason) => Self::PayloadDecodeFailed { reason },
+            Proto::PayloadDecodeFailed(detail) => Self::PayloadDecodeFailed {
+                reason: ffi_reason(&detail),
+            },
             Proto::MissingField(field) => Self::MissingField {
                 field: field.to_string(),
             },

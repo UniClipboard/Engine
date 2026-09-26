@@ -415,6 +415,7 @@ async fn commit_activating_join(fixture: &Fixture) {
             complete,
             [0xf0; 32],
             AdmissionSpaceTransition::from_bytes(vec![0xd9; 128]).unwrap(),
+            AdmissionStagedTarget::from_bytes(vec![0xda; 128]).unwrap(),
         )
         .unwrap();
     PendingAdmissionRecoveryStatePort::commit(&fixture.store, token, transition)

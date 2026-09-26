@@ -2,7 +2,7 @@ use crate::db::mappers::thumbnail_mapper::ThumbnailRowMapper;
 use crate::db::models::clipboard_representation_thumbnail::ClipboardRepresentationThumbnailRow;
 use crate::db::ports::{DbExecutor, InsertMapper, RowMapper};
 use crate::db::schema::clipboard_representation_thumbnail;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use diesel::{ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl};
 use uc_core::clipboard::ThumbnailMetadata;
 use uc_core::ids::RepresentationId;
@@ -40,7 +40,7 @@ where
                     .filter(clipboard_representation_thumbnail::representation_id.eq(&rep_id_str))
                     .first::<ClipboardRepresentationThumbnailRow>(conn)
                     .optional();
-            result.map_err(|e| anyhow::anyhow!("Database error: {}", e))
+            result.context("Database error")
         })?;
 
         match row {

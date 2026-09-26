@@ -16,15 +16,20 @@ use tracing::{info, instrument};
 use outbound_progress::OutboundProgressRuntime;
 
 use crate::assembly::deps::SyncEngineDeps;
-use crate::assembly::membership_events::MembershipLedgerAccess;
+#[cfg(feature = "dev-tools")]
+use crate::dev::{
+    ControlledSpaceAdmissionTransport, GatedJoinerActivation, JoinerFinalConfirmationGate,
+    RecordedGroupUpdateDispatch, RecordedMembershipHistoryExchange,
+};
 use uc_application::deps::{
     ApplicationClipboardAdapters, ApplicationNetworkAdapters, ApplicationNetworkBinding,
     ApplicationSpaceAdapters, ClipboardReceiverPort, CurrentSpaceMemberScopePort, LifecycleError,
-    SpaceAdmissionAdapters, SpaceMembershipAdapters, SpaceRuntimeAdapters,
+    PeerIdentityDirectoryPort, SpaceAdmissionAdapters, SpaceMembershipAdapters,
+    SpaceRuntimeAdapters,
 };
 use uc_application::facade::ApplicationAssembly;
 use uc_core::file_transfer::FileTransferCancellationReason;
-use uc_core::membership::ContentExchangeGatePort;
+use uc_core::membership::{ContentExchangeGatePort, PeerAdmissionPort};
 use uc_core::ports::{
     ActiveClipboardDispatchPort, ActiveClipboardReceiverPort, ClipboardDispatchPort,
     ConnectionChannelPort, LocalIdentityPort, PeerReachabilityPort,
@@ -151,6 +156,7 @@ pub async fn prepare_sync_session(
     space_setup: &SyncEngineDeps,
     current_app_version: &str,
     #[cfg(feature = "lan-compat")] mobile_sync_ports: uc_mobile_lan::MobileSyncPorts,
+    #[cfg(feature = "dev-tools")] joiner_final_confirmation_gate: Arc<JoinerFinalConfirmationGate>,
     mut builder: IrohSessionBuilder,
 ) -> Result<PreparedSyncSession, SyncSessionPreparationError> {
     application
@@ -165,7 +171,7 @@ pub async fn prepare_sync_session(
         Arc::clone(&space_setup.device_identity),
         Arc::clone(&space_setup.settings),
     );
-    let removal_identity = builder.build_membership_identity_adapter(
+    let membership_identity = builder.build_membership_identity_adapter(
         Arc::clone(&space_setup.membership_session),
         Arc::clone(&space_setup.device_identity),
         Arc::clone(&space_setup.settings),
@@ -177,22 +183,13 @@ pub async fn prepare_sync_session(
     );
     let membership_branch_recovery_channel =
         builder.build_membership_branch_recovery_channel(Arc::clone(&space_setup.peer_addr_repo));
-    let membership_transport = builder.build_membership_gossip_transport(
-        Arc::clone(&space_setup.membership_session),
-        Arc::clone(&space_setup.device_identity),
-        Arc::clone(&space_setup.settings),
-        Arc::clone(&space_setup.peer_addr_repo),
-        Arc::clone(&space_setup.member_repo),
-        Arc::clone(&space_setup.peer_admission),
-        Arc::clone(&space_setup.fingerprint),
-    );
     let (known_peer_contact_tx, known_peer_contacts) = broadcast::channel(64);
     // Presence is installed before the convergence owner is assembled so the
     // owner can expose reachability as an independent product fact.
     let peer_reachability: Arc<dyn PeerReachabilityPort> = builder.install_peer_reachability(
         Arc::clone(&space_setup.peer_addr_repo),
-        Arc::clone(&space_setup.member_repo),
-        Arc::clone(&space_setup.peer_admission),
+        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerIdentityDirectoryPort>,
+        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerAdmissionPort>,
         Arc::clone(&space_setup.fingerprint),
         Arc::clone(&space_setup.clock),
         known_peer_contact_tx,
@@ -209,15 +206,15 @@ pub async fn prepare_sync_session(
     )?;
     // Slice 2 Phase 2 · T10:同一节点装第三个 ALPN(剪切板同步)。dispatch
     // 复用 endpoint + peer_addr_repo,与 peer_reachability 共享 NAT/relay 映射;
-    // receiver handler 通过 `member_repo` 把 `Connection::remote_id()` 反查
+    // receiver handler 通过身份目录把 `Connection::remote_id()` 反查
     // 成 DeviceId 再喂给应用层 broadcast。同样必须在 `spawn` 前装。
     let ClipboardHandlers {
         dispatch: clipboard_dispatch,
         receiver: clipboard_receiver,
     } = builder.install_clipboard(
         Arc::clone(&space_setup.peer_addr_repo),
-        Arc::clone(&space_setup.member_repo),
-        Arc::clone(&space_setup.peer_admission),
+        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerIdentityDirectoryPort>,
+        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerAdmissionPort>,
         Arc::clone(&space_setup.fingerprint),
         Arc::clone(&peer_reachability),
     )?;
@@ -235,8 +232,8 @@ pub async fn prepare_sync_session(
         receiver: active_clipboard_receiver,
     } = builder.install_active_clipboard(
         Arc::clone(&space_setup.peer_addr_repo),
-        Arc::clone(&space_setup.member_repo),
-        Arc::clone(&space_setup.peer_admission),
+        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerIdentityDirectoryPort>,
+        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerAdmissionPort>,
         Arc::clone(&space_setup.fingerprint),
     )?;
     let active_clipboard_dispatch: Arc<dyn ActiveClipboardDispatchPort> = active_clipboard_dispatch;
@@ -250,8 +247,8 @@ pub async fn prepare_sync_session(
         inbound_events: outbound_progress_events,
     } = builder.install_transfer_progress(
         Arc::clone(&space_setup.peer_addr_repo),
-        Arc::clone(&space_setup.member_repo),
-        Arc::clone(&space_setup.peer_admission),
+        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerIdentityDirectoryPort>,
+        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerAdmissionPort>,
         Arc::clone(&space_setup.fingerprint),
     )?;
 
@@ -284,113 +281,115 @@ pub async fn prepare_sync_session(
             Arc::clone(&membership_network_gate),
             builder.space_admission_transport(),
         ));
+    #[cfg(feature = "dev-tools")]
+    let admission_transport: Arc<dyn uc_application::deps::SpaceAdmissionTransportPort> =
+        Arc::new(ControlledSpaceAdmissionTransport::new(
+            admission_transport,
+            joiner_final_confirmation_gate.space_work_control(),
+        ));
     let membership_history_transport = Arc::new(GatedMembershipHistoryExchange::new(
         Arc::clone(&membership_network_gate),
         Arc::clone(&membership_history_exchange_adapter),
     ));
+    #[cfg(feature = "dev-tools")]
+    let membership_history_synchronization_transport =
+        Arc::new(RecordedMembershipHistoryExchange::new(
+            membership_history_transport.clone(),
+            joiner_final_confirmation_gate.space_work_control(),
+        ));
+    #[cfg(not(feature = "dev-tools"))]
+    let membership_history_synchronization_transport = membership_history_transport.clone();
     let membership_security = Arc::new(DefaultMembershipSecurityUpdateAdapter::new(
-        Arc::clone(&space_setup.membership_session),
-        Arc::clone(&space_setup.current_member_signatures),
         Arc::clone(&space_setup.space_access.group_revocation),
         Arc::clone(&space_setup.clock),
     ));
     let local_device_id = space_setup.device_identity.current_device_id();
     let local_identity: Arc<dyn LocalIdentityPort> = identity_store;
-    let membership_access = Arc::new(MembershipLedgerAccess::new(
-        space_setup.membership_ledger.clone()
-            as Arc<dyn uc_application::deps::LoadMembershipLedgerPort>,
-        space_setup.membership_ledger.clone()
-            as Arc<dyn uc_application::deps::CommitMembershipLedgerPort>,
-        application.host_event_bus(),
-    ));
-    let build_admission =
-        |membership_committer: Arc<dyn uc_application::deps::CommitMembershipLedgerPort>| {
-            SpaceAdmissionAdapters {
-                re_pairing_state_store: Arc::clone(&space_setup.re_pairing_state_store),
-                prepare_joiner_invitation: Arc::new(DefaultJoinerInvitationPreparation),
-                resolve_joiner_invitation: handlers.joiner_invitation_resolver,
-                joiner_start_material: Arc::new(DefaultJoinerStartMaterial::new(
-                    local_device_id.clone(),
-                    Arc::clone(&space_setup.settings),
-                    identity_fingerprint,
-                    endpoint_addr.id.as_bytes().to_vec(),
-                    endpoint_addr_blob,
-                )),
-                joiner_start_state: space_setup.admission_state.clone()
-                    as Arc<dyn uc_application::deps::JoinerStartStatePort>,
-                current_join_admission_state: space_setup.admission_state.clone()
-                    as Arc<dyn uc_application::deps::CurrentJoinAdmissionStatePort>,
-                prepare_joiner_cancellation: Arc::new(DefaultJoinerCancellationPreparation),
-                pending_admission_recovery_state: space_setup.admission_state.clone()
-                    as Arc<dyn uc_application::deps::PendingAdmissionRecoveryStatePort>,
-                space_admission_transport: admission_transport,
-                sponsor_admission_state: space_setup.admission_state.clone()
-                    as Arc<dyn uc_application::deps::SponsorAdmissionStatePort>,
-                prepare_sponsor_candidate: Arc::new(DefaultSponsorCandidatePreparation::new(
-                    local_device_id.clone(),
-                    continuation_route,
-                    Arc::clone(&space_setup.current_member_signatures),
-                    historical_signatures.clone(),
-                    Arc::clone(&space_setup.space_access.prepare_sponsor_admission_security),
-                )),
-                prepare_sponsor_commit: Arc::new(DefaultSponsorCommitPreparation::new(
-                    historical_signatures.clone(),
-                )),
-                prepare_sponsor_complete: Arc::new(DefaultSponsorCompletePreparation::new(
-                    local_device_id,
-                    Arc::clone(&space_setup.current_member_signatures),
-                    historical_signatures.clone(),
-                )),
-                activate_sponsor_admission: Arc::new(DefaultSponsorAdmissionActivation::new(
-                    Arc::clone(&space_setup.space_access.activate_sponsor_admission_security),
-                    membership_access.clone()
-                        as Arc<dyn uc_application::deps::LoadMembershipLedgerPort>,
-                    Arc::clone(&membership_committer),
-                    historical_signatures.clone(),
-                    Arc::new(MembershipMemberFactsAdapter::new(
-                        Arc::clone(&space_setup.member_repo),
-                        Arc::clone(&space_setup.trusted_peer_repo),
-                        Arc::clone(&space_setup.peer_addr_repo),
-                        Arc::clone(&space_setup.device_identity),
-                        Arc::clone(&space_setup.clock),
-                    )),
-                )),
-                prepare_sponsor_settled: Arc::new(DefaultSponsorSettledPreparation),
-                prepare_joiner_candidate: Arc::new(DefaultJoinerCandidatePreparation::new(
-                    historical_signatures.clone(),
-                    Arc::clone(&space_setup.space_access.prepare_admission_target_access),
-                )),
-                prepare_joiner_applied: Arc::new(DefaultJoinerAppliedPreparation::new(
-                    historical_signatures.clone(),
-                )),
-                prepare_joiner_activation: Arc::new(DefaultJoinerActivationPreparation::new(
-                    historical_signatures.clone(),
-                    Arc::clone(&space_setup.admission_space_transition),
-                )),
-                joiner_activation_state: space_setup.admission_state.clone()
-                    as Arc<dyn uc_application::deps::JoinerActivationStatePort>,
-                execute_joiner_activation: Arc::new(DefaultJoinerActivationExecutor::new(
-                    Arc::clone(&space_setup.admission_space_transition),
-                    historical_signatures.clone(),
-                )),
-                current_join_status: space_setup.admission_state.clone()
-                    as Arc<dyn uc_application::deps::LoadCurrentJoinStatusPort>,
-            }
-        };
+    let build_admission = || SpaceAdmissionAdapters {
+        re_pairing_state_store: Arc::clone(&space_setup.re_pairing_state_store),
+        prepare_joiner_invitation: Arc::new(DefaultJoinerInvitationPreparation),
+        resolve_joiner_invitation: handlers.joiner_invitation_resolver,
+        joiner_start_material: Arc::new(DefaultJoinerStartMaterial::new(
+            local_device_id,
+            Arc::clone(&space_setup.settings),
+            identity_fingerprint,
+            endpoint_addr.id.as_bytes().to_vec(),
+            endpoint_addr_blob,
+        )),
+        joiner_start_state: space_setup.admission_state.clone()
+            as Arc<dyn uc_application::deps::JoinerStartStatePort>,
+        current_join_admission_state: space_setup.admission_state.clone()
+            as Arc<dyn uc_application::deps::CurrentJoinAdmissionStatePort>,
+        prepare_joiner_cancellation: Arc::new(DefaultJoinerCancellationPreparation),
+        pending_admission_recovery_state: space_setup.admission_state.clone()
+            as Arc<dyn uc_application::deps::PendingAdmissionRecoveryStatePort>,
+        space_admission_transport: admission_transport,
+        sponsor_admission_state: space_setup.admission_state.clone()
+            as Arc<dyn uc_application::deps::SponsorAdmissionStatePort>,
+        prepare_sponsor_candidate: Arc::new(DefaultSponsorCandidatePreparation::new(
+            local_device_id,
+            continuation_route,
+            Arc::clone(&space_setup.current_member_signatures),
+            historical_signatures.clone(),
+            Arc::clone(&space_setup.space_access.prepare_sponsor_admission_security),
+        )),
+        prepare_sponsor_commit: Arc::new(DefaultSponsorCommitPreparation::new(
+            historical_signatures.clone(),
+        )),
+        prepare_sponsor_complete: Arc::new(DefaultSponsorCompletePreparation::new(
+            local_device_id,
+            Arc::clone(&space_setup.current_member_signatures),
+            historical_signatures.clone(),
+        )),
+        activate_sponsor_admission: Arc::new(DefaultSponsorAdmissionActivation::new(
+            Arc::clone(&space_setup.space_access.activate_sponsor_admission_security),
+            historical_signatures.clone(),
+        )),
+        prepare_sponsor_settled: Arc::new(DefaultSponsorSettledPreparation),
+        prepare_joiner_candidate: Arc::new(DefaultJoinerCandidatePreparation::new(
+            historical_signatures.clone(),
+            Arc::clone(&space_setup.space_access.prepare_admission_target_access),
+        )),
+        prepare_joiner_applied: Arc::new(DefaultJoinerAppliedPreparation::new(
+            historical_signatures.clone(),
+        )),
+        prepare_joiner_activation: Arc::new(DefaultJoinerActivationPreparation::new(
+            historical_signatures.clone(),
+            Arc::clone(&space_setup.admission_space_transition),
+            Arc::clone(&space_setup.fingerprint),
+        )),
+        joiner_activation_state: space_setup.admission_state.clone()
+            as Arc<dyn uc_application::deps::JoinerActivationStatePort>,
+        execute_joiner_activation: {
+            let activation = Arc::new(DefaultJoinerActivationExecutor::new(
+                Arc::clone(&space_setup.admission_space_transition),
+                historical_signatures.clone(),
+            ))
+                as Arc<dyn uc_application::deps::ExecuteJoinerActivationPort>;
+            #[cfg(feature = "dev-tools")]
+            let activation = Arc::new(GatedJoinerActivation::new(
+                activation,
+                Arc::clone(&joiner_final_confirmation_gate),
+            ))
+                as Arc<dyn uc_application::deps::ExecuteJoinerActivationPort>;
+            activation
+        },
+        current_join_status: space_setup.admission_state.clone()
+            as Arc<dyn uc_application::deps::LoadCurrentJoinStatusPort>,
+    };
     let membership = crate::assembly::observability::observe_membership(SpaceMembershipAdapters {
-        load_membership_ledger: membership_access.clone()
-            as Arc<dyn uc_application::deps::LoadMembershipLedgerPort>,
-        commit_membership_ledger: membership_access.clone()
-            as Arc<dyn uc_application::deps::CommitMembershipLedgerPort>,
+        membership_records: space_setup.membership_ledger.clone()
+            as Arc<dyn uc_application::deps::MembershipRecordStorePort>,
+        peer_access: Arc::clone(&space_setup.peer_access),
         historical_membership_signatures: historical_signatures.clone(),
         current_member_signatures: Arc::clone(&space_setup.current_member_signatures),
-        membership_identity: removal_identity,
-        membership_announcement: membership_transport,
+        membership_identity: membership_identity.clone(),
+        membership_announcement: membership_identity,
         device_trust_observations: Arc::new(DeviceTrustObservationsAdapter::new(
             Arc::clone(&space_setup.member_repo),
             Arc::clone(&peer_reachability),
         )),
-        membership_history_transport: membership_history_transport.clone(),
+        membership_history_transport: membership_history_synchronization_transport,
         verified_peer_address_refresh: membership_history_exchange_adapter.clone(),
         membership_branch_recovery_channel,
         membership_branch_recovery_recipient: Arc::clone(
@@ -422,11 +421,19 @@ pub async fn prepare_sync_session(
         ))),
         restricted_membership_delivery: membership_history_transport,
         group_update_store: Arc::clone(&space_setup.space_access.group_revocation),
-        group_update_dispatch,
-        apply_membership_projection: Arc::clone(&space_setup.membership_projection),
+        group_update_dispatch: {
+            #[cfg(feature = "dev-tools")]
+            let dispatch = Arc::new(RecordedGroupUpdateDispatch::new(
+                group_update_dispatch,
+                joiner_final_confirmation_gate.space_work_control(),
+            ));
+            #[cfg(not(feature = "dev-tools"))]
+            let dispatch = group_update_dispatch;
+            dispatch
+        },
         membership_network_activity: membership_network_gate,
     });
-    let admission = build_admission(Arc::clone(&membership.commit_membership_ledger));
+    let admission = build_admission();
     let space_runtime = SpaceRuntimeAdapters {
         admission,
         membership,
@@ -460,7 +467,7 @@ pub async fn prepare_sync_session(
         space: ApplicationSpaceAdapters {
             connection_hints: builder
                 .connection_hints(
-                    Arc::clone(&space_setup.member_repo),
+                    Arc::clone(&space_setup.peer_access) as Arc<dyn PeerIdentityDirectoryPort>,
                     Arc::clone(&space_setup.fingerprint),
                 )
                 .await,
@@ -494,12 +501,12 @@ pub async fn prepare_sync_session(
     )?;
     builder.install_membership_history_exchange(
         &membership_history_exchange_adapter,
-        Arc::clone(&space_setup.member_repo),
+        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerIdentityDirectoryPort>,
         Arc::clone(&space_setup.fingerprint),
         application_network.membership_history_endpoint(),
     )?;
     builder.install_membership_branch_recovery(
-        Arc::clone(&space_setup.member_repo),
+        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerIdentityDirectoryPort>,
         Arc::clone(&space_setup.fingerprint),
         application_network.membership_branch_recovery_endpoint(),
     )?;
@@ -516,8 +523,8 @@ pub async fn prepare_sync_session(
         client: active_clipboard_pull_client,
     } = builder.install_active_clipboard_pull(
         Arc::clone(&space_setup.peer_addr_repo),
-        Arc::clone(&space_setup.member_repo),
-        Arc::clone(&space_setup.peer_admission),
+        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerIdentityDirectoryPort>,
+        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerAdmissionPort>,
         Arc::clone(&space_setup.fingerprint),
         application_network.active_clipboard_pull_serve(),
         content_gate,

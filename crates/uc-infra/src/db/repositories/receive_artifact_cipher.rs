@@ -27,13 +27,25 @@ pub(crate) enum ReceiveArtifactCipherError {
     #[error("unsupported receive artifact envelope version")]
     UnsupportedVersion,
     #[error("receive artifact encryption failed")]
-    Encrypt,
+    Encrypt {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("receive artifact verification failed")]
-    Decrypt,
+    Decrypt {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("receive artifact serialization failed")]
-    Serialize,
+    Serialize {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("receive artifact deserialization failed")]
-    Deserialize,
+    Deserialize {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("V3 receive artifact protection failed")]
     V3 {
         #[source]
@@ -42,6 +54,37 @@ pub(crate) enum ReceiveArtifactCipherError {
     #[cfg(windows)]
     #[error("receive artifact path encoding is invalid")]
     InvalidPath,
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl ReceiveArtifactCipherError {
+    pub fn decrypt_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Decrypt {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn deserialize() -> Self {
+        Self::Deserialize { source: None }
+    }
+
+    pub fn deserialize_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Deserialize {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn encrypt_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Encrypt {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn serialize_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Serialize {
+            source: Some(source.into()),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -86,7 +129,7 @@ impl V3ReceiveArtifactCipher {
             })
             .collect::<Result<Vec<_>, ReceiveArtifactCipherError>>()?;
         let plaintext =
-            postcard::to_stdvec(&encoded).map_err(|_| ReceiveArtifactCipherError::Serialize)?;
+            postcard::to_stdvec(&encoded).map_err(ReceiveArtifactCipherError::serialize_from)?;
         let aad = Aad::new(aad::for_receive_artifact_log(
             &EntryId::from(entry_id),
             attempt_id,
@@ -118,7 +161,7 @@ impl V3ReceiveArtifactCipher {
                 source: anyhow::Error::new(source).context("open V3 receive artifacts"),
             })?;
         let encoded: Vec<EncodedArtifact> = postcard::from_bytes(plaintext.as_bytes())
-            .map_err(|_| ReceiveArtifactCipherError::Deserialize)?;
+            .map_err(ReceiveArtifactCipherError::deserialize_from)?;
         encoded
             .into_iter()
             .map(|artifact| {
@@ -129,7 +172,7 @@ impl V3ReceiveArtifactCipher {
                     ownership: match artifact.ownership {
                         0 => ReceiveArtifactOwnership::ManagedStaging,
                         1 => ReceiveArtifactOwnership::UserDestination,
-                        _ => return Err(ReceiveArtifactCipherError::Deserialize),
+                        _ => return Err(ReceiveArtifactCipherError::deserialize()),
                     },
                 })
             })
@@ -175,10 +218,10 @@ impl ReceiveArtifactCipher {
             })
             .collect::<Result<Vec<_>, ReceiveArtifactCipherError>>()?;
         let plaintext =
-            postcard::to_stdvec(&encoded).map_err(|_| ReceiveArtifactCipherError::Serialize)?;
+            postcard::to_stdvec(&encoded).map_err(ReceiveArtifactCipherError::serialize_from)?;
         let ad = aad::for_receive_artifact_log(&EntryId::from(entry_id), attempt_id);
         let (nonce, ciphertext) = encrypt_xchacha_raw(&self.key, &plaintext, &ad)
-            .map_err(|_| ReceiveArtifactCipherError::Encrypt)?;
+            .map_err(ReceiveArtifactCipherError::encrypt_from)?;
         let mut envelope = Vec::with_capacity(HEADER_LEN + ciphertext.len());
         envelope.extend_from_slice(&MAGIC);
         envelope.push(FORMAT_VERSION);
@@ -211,9 +254,9 @@ impl ReceiveArtifactCipher {
             &envelope[nonce_end..],
             &ad,
         )
-        .map_err(|_| ReceiveArtifactCipherError::Decrypt)?;
+        .map_err(ReceiveArtifactCipherError::decrypt_from)?;
         let encoded: Vec<EncodedArtifact> = postcard::from_bytes(&plaintext)
-            .map_err(|_| ReceiveArtifactCipherError::Deserialize)?;
+            .map_err(ReceiveArtifactCipherError::deserialize_from)?;
         encoded
             .into_iter()
             .map(|artifact| {
@@ -224,7 +267,7 @@ impl ReceiveArtifactCipher {
                     ownership: match artifact.ownership {
                         0 => ReceiveArtifactOwnership::ManagedStaging,
                         1 => ReceiveArtifactOwnership::UserDestination,
-                        _ => return Err(ReceiveArtifactCipherError::Deserialize),
+                        _ => return Err(ReceiveArtifactCipherError::deserialize()),
                     },
                 })
             })

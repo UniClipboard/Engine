@@ -2,7 +2,7 @@ use uc_core::ids::DeviceId;
 use uc_core::membership::{MemberInstanceId, MembershipEventId};
 use uc_core::ports::ReachabilityState;
 
-use crate::space::admission::{CurrentJoinStatus, PendingInboundMember};
+use crate::space::admission::{CurrentJoinStatus, InboundPairing, PendingInboundMember};
 use crate::space::membership::SpaceMemberPauseReason;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,6 +19,8 @@ pub enum DeviceTrustRelationship {
     Consistent,
     ConfirmationPending,
     PendingLocalDecision,
+    /// 设备已被本机历史移除，等待对方确认收到移除；这不是本机需要作出的决定。
+    AwaitingRemovalAcknowledgement,
     Diverged,
     Invalid,
     UpgradeRequired,
@@ -53,7 +55,90 @@ pub struct PairingConfirmationObservation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmissionDisplayStatus {
     pub current_join: Option<CurrentJoinStatus>,
+    pub inbound_pairings: Vec<InboundPairing>,
+    pub pending_inbound_member: Option<PendingInboundMember>,
     pub pairing_confirmations: Vec<PairingConfirmationObservation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpaceDeviceUpdatePhase {
+    Updating,
+    Completed,
+    RetryableFailure,
+    NeedsAttention,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpaceDeviceUpdateProblem {
+    DeviceStateRejected,
+    DeviceRelationshipConflict,
+    DeviceSecurityUpdateRejected,
+    DeviceUpgradeRequired,
+    LocalIdentityMismatch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpaceDeviceUpdateRecovery {
+    ReviewDevices,
+    UpdateApp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpaceDeviceUpdateStatus {
+    pub phase: SpaceDeviceUpdatePhase,
+    pub reason: Option<SpaceDeviceUpdateProblem>,
+    pub recovery: Option<SpaceDeviceUpdateRecovery>,
+    pub next_retry_at_ms: Option<i64>,
+}
+
+impl SpaceDeviceUpdateStatus {
+    pub const fn updating() -> Self {
+        Self {
+            phase: SpaceDeviceUpdatePhase::Updating,
+            reason: None,
+            recovery: None,
+            next_retry_at_ms: None,
+        }
+    }
+
+    pub const fn completed() -> Self {
+        Self {
+            phase: SpaceDeviceUpdatePhase::Completed,
+            reason: None,
+            recovery: None,
+            next_retry_at_ms: None,
+        }
+    }
+
+    pub const fn retryable_failure(next_retry_at_ms: i64) -> Self {
+        Self {
+            phase: SpaceDeviceUpdatePhase::RetryableFailure,
+            reason: None,
+            recovery: None,
+            next_retry_at_ms: Some(next_retry_at_ms),
+        }
+    }
+
+    pub const fn needs_attention(
+        reason: SpaceDeviceUpdateProblem,
+        recovery: SpaceDeviceUpdateRecovery,
+    ) -> Self {
+        Self {
+            phase: SpaceDeviceUpdatePhase::NeedsAttention,
+            reason: Some(reason),
+            recovery: Some(recovery),
+            next_retry_at_ms: None,
+        }
+    }
+
+    pub const fn needs_attention_without_recovery(reason: SpaceDeviceUpdateProblem) -> Self {
+        Self {
+            phase: SpaceDeviceUpdatePhase::NeedsAttention,
+            reason: Some(reason),
+            recovery: None,
+            next_retry_at_ms: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,7 +189,9 @@ pub struct DeviceTrustStatus {
     pub local_membership: DeviceTrustMembership,
     pub current_change: Option<PendingDeviceTrustChange>,
     pub current_join: Option<CurrentJoinStatus>,
+    pub inbound_pairings: Vec<InboundPairing>,
     pub pending_inbound_member: Option<PendingInboundMember>,
+    pub space_device_update: SpaceDeviceUpdateStatus,
     pub devices: Vec<DeviceTrustDevice>,
 }
 
@@ -116,7 +203,9 @@ impl DeviceTrustStatus {
             local_membership: DeviceTrustMembership::NoCurrentSpace,
             current_change: None,
             current_join: None,
+            inbound_pairings: Vec::new(),
             pending_inbound_member: None,
+            space_device_update: SpaceDeviceUpdateStatus::completed(),
             devices: Vec::new(),
         }
     }

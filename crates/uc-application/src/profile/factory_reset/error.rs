@@ -14,9 +14,38 @@ pub enum ProfileFactoryResetError {
         source: LifecycleError,
     },
     #[error("profile keys could not be wiped")]
-    WipeKeys,
+    WipeKeys {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("profile state could not be cleared")]
-    ClearState,
+    ClearState {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl ProfileFactoryResetError {
+    pub fn wipe_keys() -> Self {
+        Self::WipeKeys { source: None }
+    }
+
+    pub fn wipe_keys_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::WipeKeys {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn clear_state() -> Self {
+        Self::ClearState { source: None }
+    }
+
+    pub fn clear_state_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::ClearState {
+            source: Some(source.into()),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
@@ -27,16 +56,67 @@ pub enum ProfileLifecycleError {
     InvalidTransition,
 }
 
-#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+#[derive(Debug, thiserror::Error)]
 pub enum ProfileLifecycleRepositoryError {
     #[error("profile lifecycle storage is unavailable")]
-    Unavailable,
+    Unavailable {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("profile lifecycle record is corrupt")]
-    Corrupt,
+    Corrupt {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("profile lifecycle record changed before it could be saved")]
     Conflict,
 }
 
-#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl ProfileLifecycleRepositoryError {
+    pub fn corrupt() -> Self {
+        Self::Corrupt { source: None }
+    }
+
+    pub fn corrupt_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Corrupt {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn unavailable() -> Self {
+        Self::Unavailable { source: None }
+    }
+
+    pub fn unavailable_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Unavailable {
+            source: Some(source.into()),
+        }
+    }
+}
+
+/// 出厂重置底层能力失败。纯状态失败时 `source` 为空；有下层错误时保留为来源。
+#[derive(Debug, thiserror::Error)]
 #[error("profile factory reset capability failed")]
-pub struct ProfileFactoryResetCapabilityError;
+pub struct ProfileFactoryResetCapabilityError {
+    #[source]
+    source: Option<anyhow::Error>,
+}
+
+impl ProfileFactoryResetCapabilityError {
+    pub fn new() -> Self {
+        Self { source: None }
+    }
+
+    pub fn from_source(source: impl Into<anyhow::Error>) -> Self {
+        Self {
+            source: Some(source.into()),
+        }
+    }
+}
+
+impl Default for ProfileFactoryResetCapabilityError {
+    fn default() -> Self {
+        Self::new()
+    }
+}

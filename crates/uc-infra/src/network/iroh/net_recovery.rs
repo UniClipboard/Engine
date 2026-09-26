@@ -50,6 +50,7 @@
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use uc_observability_contract::error_source::io_error_kind;
 
 use iroh::{Endpoint, Watcher as _};
 use tokio::sync::broadcast;
@@ -199,8 +200,9 @@ impl DemandRecoveryCoordinator {
         let relay_is_healthy = relay_healthy(&self.endpoint.home_relay_status().get());
         let claimed = match self.gate.lock() {
             Ok(mut gate) => gate.claim(self.relays_enabled, relay_is_healthy, Instant::now()),
-            Err(err) => {
-                warn!(target: "iroh.net_recovery", error = %err, "demand recovery gate lock poisoned");
+            Err(_) => {
+                // 锁中毒只表示持锁线程 panic，分类本身即完整信息。
+                warn!(target: "iroh.net_recovery", error_kind = "gate_lock_poisoned", "demand recovery gate lock poisoned");
                 false
             }
         };
@@ -240,7 +242,7 @@ fn reset_resolver(endpoint: &Endpoint) {
     match endpoint.dns_resolver() {
         Ok(resolver) => resolver.reset(),
         Err(err) => {
-            warn!(target: "iroh.net_recovery", error = %err, "cannot reset DNS resolver");
+            warn!(target: "iroh.net_recovery", error_kind = "dns_resolver_reset", io_error_kind = io_error_kind(&err), "cannot reset DNS resolver");
         }
     }
 }

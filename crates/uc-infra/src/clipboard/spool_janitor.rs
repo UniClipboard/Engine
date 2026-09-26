@@ -9,6 +9,7 @@ use tracing::{debug, warn};
 use uc_core::clipboard::PayloadAvailability;
 use uc_core::ports::clipboard::ProcessingUpdateOutcome;
 use uc_core::ports::{ClipboardRepresentationStore, ClockPort};
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::clipboard::SpoolManager;
 
@@ -82,7 +83,8 @@ impl SpoolJanitor {
                 Err(err) => {
                     warn!(
                         representation_id = %entry.representation_id,
-                        error = %err,
+                        error_kind = "representation_mark_lost",
+                        io_error_kind = io_error_kind(err.as_ref()),
                         "Failed to mark Lost during spool cleanup; leaving spool file for retry"
                     );
                     false
@@ -93,7 +95,8 @@ impl SpoolJanitor {
                 if let Err(err) = fs::remove_file(&entry.file_path).await {
                     warn!(
                         representation_id = %entry.representation_id,
-                        error = %err,
+                        error_kind = "spool_file_delete",
+                        io_error_kind = io_error_kind(&err),
                         "Failed to delete expired spool file"
                     );
                 } else {

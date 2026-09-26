@@ -17,7 +17,7 @@ use uc_engine::{
     HistoryEntryInput, HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory,
     HostClipboard, HostClipboardSnapshot, HostDirectories, HostFileAccess, HostFileHandle,
     HostFileMetadata, HostSecureStorage, JoinSpaceInput, ListHistoryEntriesInput, Operation,
-    OperationResult, RemoveMemberInput, SecretString, SendTextInput,
+    OperationResult, RemoveMemberInput, SecretString, SendFilesInput, SendTextInput,
 };
 
 #[derive(Clone, Default)]
@@ -59,18 +59,42 @@ impl HostClipboard for Clipboard {
         Ok(())
     }
 }
-struct Files;
+#[derive(Clone, Default)]
+struct Files(Arc<Mutex<HashMap<String, ManagedFile>>>);
+
+#[derive(Clone)]
+struct ManagedFile {
+    display_name: String,
+    mime_type: Option<String>,
+    bytes: Vec<u8>,
+}
+
 impl HostFileAccess for Files {
-    fn metadata(&self, _: &HostFileHandle) -> Result<HostFileMetadata, HostCapabilityError> {
-        Err(unavailable())
+    fn metadata(&self, handle: &HostFileHandle) -> Result<HostFileMetadata, HostCapabilityError> {
+        let files = self.0.lock().map_err(|_| unavailable())?;
+        let file = files.get(handle.as_str()).ok_or_else(invalid_handle)?;
+        Ok(HostFileMetadata {
+            display_name: file.display_name.clone(),
+            size_bytes: file.bytes.len() as u64,
+            mime_type: file.mime_type.clone(),
+        })
     }
     fn read_chunk(
         &self,
-        _: &HostFileHandle,
-        _: u64,
-        _: u32,
+        handle: &HostFileHandle,
+        offset: u64,
+        max_bytes: u32,
     ) -> Result<Vec<u8>, HostCapabilityError> {
-        Err(unavailable())
+        let files = self.0.lock().map_err(|_| unavailable())?;
+        let file = files.get(handle.as_str()).ok_or_else(invalid_handle)?;
+        let start = usize::try_from(offset).map_err(|_| unavailable())?;
+        if start >= file.bytes.len() {
+            return Ok(Vec::new());
+        }
+        let end = start
+            .saturating_add(max_bytes as usize)
+            .min(file.bytes.len());
+        Ok(file.bytes[start..end].to_vec())
     }
     fn write_chunk(&self, _: &HostFileHandle, _: u64, _: &[u8]) -> Result<(), HostCapabilityError> {
         Err(unavailable())
@@ -78,6 +102,13 @@ impl HostFileAccess for Files {
     fn finish_write(&self, _: &HostFileHandle) -> Result<(), HostCapabilityError> {
         Err(unavailable())
     }
+}
+
+fn invalid_handle() -> HostCapabilityError {
+    HostCapabilityError::new(
+        HostCapabilityErrorCategory::InvalidHandle,
+        "test file handle unavailable",
+    )
 }
 
 fn string<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
@@ -91,6 +122,80 @@ fn respond(mut value: Value) -> Result<()> {
     output.write_all(b"\n")?;
     output.flush()?;
     Ok(())
+}
+
+#[cfg(feature = "current-engine")]
+fn space_work_event_kind(value: &str) -> Result<uc_engine::DevSpaceWorkEventKind> {
+    match value {
+        "final_confirmation_connection_failed" => {
+            Ok(uc_engine::DevSpaceWorkEventKind::FinalConfirmationConnectionFailed)
+        }
+        "final_confirmation_sponsor_committed" => {
+            Ok(uc_engine::DevSpaceWorkEventKind::FinalConfirmationSponsorCommitted)
+        }
+        "final_confirmation_success_reply_dropped" => {
+            Ok(uc_engine::DevSpaceWorkEventKind::FinalConfirmationSuccessReplyDropped)
+        }
+        "final_confirmation_retry_started" => {
+            Ok(uc_engine::DevSpaceWorkEventKind::FinalConfirmationRetryStarted)
+        }
+        "final_confirmation_reply_received" => {
+            Ok(uc_engine::DevSpaceWorkEventKind::FinalConfirmationReplyReceived)
+        }
+        "ordinary_member_update_started" => {
+            Ok(uc_engine::DevSpaceWorkEventKind::OrdinaryMemberUpdateStarted)
+        }
+        "membership_history_sync_started" => {
+            Ok(uc_engine::DevSpaceWorkEventKind::MembershipHistorySyncStarted)
+        }
+        "membership_history_sync_retryable_failure" => {
+            Ok(uc_engine::DevSpaceWorkEventKind::MembershipHistorySyncRetryableFailure)
+        }
+        "membership_history_sync_needs_attention" => {
+            Ok(uc_engine::DevSpaceWorkEventKind::MembershipHistorySyncNeedsAttention)
+        }
+        "membership_history_sync_reply_received" => {
+            Ok(uc_engine::DevSpaceWorkEventKind::MembershipHistorySyncReplyReceived)
+        }
+        _ => bail!("unknown Space work event kind"),
+    }
+}
+
+#[cfg(feature = "current-engine")]
+fn space_work_event_json(event: uc_engine::DevSpaceWorkEvent) -> Value {
+    let kind = match event.kind {
+        uc_engine::DevSpaceWorkEventKind::FinalConfirmationConnectionFailed => {
+            "final_confirmation_connection_failed"
+        }
+        uc_engine::DevSpaceWorkEventKind::FinalConfirmationSponsorCommitted => {
+            "final_confirmation_sponsor_committed"
+        }
+        uc_engine::DevSpaceWorkEventKind::FinalConfirmationSuccessReplyDropped => {
+            "final_confirmation_success_reply_dropped"
+        }
+        uc_engine::DevSpaceWorkEventKind::FinalConfirmationRetryStarted => {
+            "final_confirmation_retry_started"
+        }
+        uc_engine::DevSpaceWorkEventKind::FinalConfirmationReplyReceived => {
+            "final_confirmation_reply_received"
+        }
+        uc_engine::DevSpaceWorkEventKind::OrdinaryMemberUpdateStarted => {
+            "ordinary_member_update_started"
+        }
+        uc_engine::DevSpaceWorkEventKind::MembershipHistorySyncStarted => {
+            "membership_history_sync_started"
+        }
+        uc_engine::DevSpaceWorkEventKind::MembershipHistorySyncRetryableFailure => {
+            "membership_history_sync_retryable_failure"
+        }
+        uc_engine::DevSpaceWorkEventKind::MembershipHistorySyncNeedsAttention => {
+            "membership_history_sync_needs_attention"
+        }
+        uc_engine::DevSpaceWorkEventKind::MembershipHistorySyncReplyReceived => {
+            "membership_history_sync_reply_received"
+        }
+    };
+    json!({ "sequence": event.sequence, "kind": kind })
 }
 
 const PASSPHRASE: &str = "connection-recovery-synthetic-passphrase";
@@ -107,7 +212,7 @@ async fn shutdown_engine(engine: &Engine) -> Result<()> {
     Ok(())
 }
 
-async fn operation(engine: &Engine, request: &Value) -> Result<Value> {
+async fn operation(engine: &Engine, files: &Files, request: &Value) -> Result<Value> {
     let command = string(request, "command")?;
     #[cfg(feature = "current-engine")]
     if command == "connections" {
@@ -136,6 +241,92 @@ async fn operation(engine: &Engine, request: &Value) -> Result<Value> {
             })
             .await?;
         return Ok(json!(true));
+    }
+    #[cfg(feature = "current-engine")]
+    if command == "arm_complete_ack_failure" {
+        let uc_engine::DevOperationResult::FinalConfirmationConnectionFailureArmed {
+            after_sequence,
+        } = engine
+            .execute_dev(uc_engine::DevOperation::ArmFinalConfirmationConnectionFailure)
+            .await?
+        else {
+            bail!("final confirmation failure arm result expected")
+        };
+        return Ok(json!({ "after_sequence": after_sequence }));
+    }
+    #[cfg(feature = "current-engine")]
+    if command == "arm_complete_ack_success_reply_drop" {
+        let uc_engine::DevOperationResult::FinalConfirmationSuccessReplyDropArmed {
+            after_sequence,
+        } = engine
+            .execute_dev(uc_engine::DevOperation::ArmFinalConfirmationSuccessReplyDrop)
+            .await?
+        else {
+            bail!("final confirmation success reply drop arm result expected")
+        };
+        return Ok(json!({ "after_sequence": after_sequence }));
+    }
+    #[cfg(feature = "current-engine")]
+    if command == "arm_membership_history_failures" {
+        let failure = match string(request, "failure")? {
+            "retryable" => uc_engine::DevMembershipHistoryFailure::Retryable,
+            "needs_attention" => uc_engine::DevMembershipHistoryFailure::NeedsAttention,
+            _ => bail!("unknown membership history failure kind"),
+        };
+        let count = request["count"]
+            .as_u64()
+            .and_then(|count| usize::try_from(count).ok())
+            .context("missing or invalid membership history failure count")?;
+        let uc_engine::DevOperationResult::MembershipHistoryFailuresArmed { after_sequence } =
+            engine
+                .execute_dev(uc_engine::DevOperation::ArmMembershipHistoryFailures {
+                    failure,
+                    count,
+                })
+                .await?
+        else {
+            bail!("membership history failures arm result expected")
+        };
+        return Ok(json!({ "after_sequence": after_sequence }));
+    }
+    #[cfg(feature = "current-engine")]
+    if command == "clear_membership_history_failures" {
+        let uc_engine::DevOperationResult::MembershipHistoryFailuresCleared { remaining } = engine
+            .execute_dev(uc_engine::DevOperation::ClearMembershipHistoryFailures)
+            .await?
+        else {
+            bail!("membership history failures clear result expected")
+        };
+        return Ok(json!({ "remaining": remaining }));
+    }
+    #[cfg(feature = "current-engine")]
+    if command == "wait_space_work_event" {
+        let after_sequence = request["after_sequence"]
+            .as_u64()
+            .context("missing Space work event sequence")?;
+        let kind = space_work_event_kind(string(request, "kind")?)?;
+        let uc_engine::DevOperationResult::SpaceWorkEvent(event) = engine
+            .execute_dev(uc_engine::DevOperation::WaitForSpaceWorkEvent {
+                after_sequence,
+                kind,
+            })
+            .await?
+        else {
+            bail!("Space work event expected")
+        };
+        return Ok(space_work_event_json(event));
+    }
+    #[cfg(feature = "current-engine")]
+    if command == "space_work_events" {
+        let uc_engine::DevOperationResult::SpaceWorkEvents(events) = engine
+            .execute_dev(uc_engine::DevOperation::QuerySpaceWorkEvents)
+            .await?
+        else {
+            bail!("Space work events expected")
+        };
+        return Ok(Value::Array(
+            events.into_iter().map(space_work_event_json).collect(),
+        ));
     }
     if command == "suspend" {
         engine.suspend().await?;
@@ -184,11 +375,29 @@ async fn operation(engine: &Engine, request: &Value) -> Result<Value> {
             text: string(request, "text")?.into(),
             target_devices: vec![string(request, "peer")?.into()],
         }),
+        "send_file" => {
+            let handle = string(request, "handle")?;
+            files.0.lock().map_err(|_| unavailable())?.insert(
+                handle.to_owned(),
+                ManagedFile {
+                    display_name: string(request, "display_name")?.to_owned(),
+                    mime_type: request["mime_type"].as_str().map(str::to_owned),
+                    bytes: string(request, "content")?.as_bytes().to_vec(),
+                },
+            );
+            Operation::SendFiles(SendFilesInput {
+                files: vec![HostFileHandle::new(handle)],
+                target_devices: vec![string(request, "peer")?.into()],
+            })
+        }
         "history" => Operation::ListHistoryEntries(ListHistoryEntriesInput {
             limit: 100,
             offset: 0,
         }),
         "entry" => Operation::GetHistoryEntry(HistoryEntryInput {
+            entry_id: string(request, "entry")?.into(),
+        }),
+        "read_file" => Operation::ReadEntryFile(HistoryEntryInput {
             entry_id: string(request, "entry")?.into(),
         }),
         _ => bail!("unknown test command"),
@@ -211,6 +420,7 @@ async fn operation(engine: &Engine, request: &Value) -> Result<Value> {
         OperationResult::EntrySent(report) => serde_json::to_value(report)?,
         OperationResult::HistoryEntries(entries) => serde_json::to_value(entries)?,
         OperationResult::HistoryEntry(entry) => serde_json::to_value(entry)?,
+        OperationResult::EntryFileRead(resource) => serde_json::to_value(resource)?,
         _ => json!(true),
     })
 }
@@ -242,6 +452,7 @@ async fn main() -> Result<()> {
             .lock()
             .map_err(|_| anyhow!("storage unavailable"))? = serde_json::from_value(value.clone())?;
     }
+    let files = Files::default();
     let host = HostCapabilities::new(
         HostDirectories::new(
             root.join("private"),
@@ -251,7 +462,7 @@ async fn main() -> Result<()> {
         ),
         Box::new(storage.clone()),
         Box::new(Clipboard),
-        Box::new(Files),
+        Box::new(files.clone()),
     );
     let config = EngineConfig::new("1.1.0")
         .with_rendezvous_base_url(string(&start, "rendezvous")?)
@@ -315,7 +526,7 @@ async fn main() -> Result<()> {
                 .lock()
                 .map(|values| json!(*values))
                 .map_err(|_| anyhow!("storage unavailable")),
-            _ => operation(&engine, &request).await,
+            _ => operation(&engine, &files, &request).await,
         };
         let response = match result {
             Ok(value) => json!({ "ok": value }),

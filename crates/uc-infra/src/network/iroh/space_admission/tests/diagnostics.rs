@@ -16,7 +16,7 @@ fn deferred_client_completion_is_not_reported_as_a_failure() {
         record_client_completion(
             DiagnosticOperation::NetworkTransport,
             Duration::from_millis(7),
-            Some(&SpaceAdmissionTransportError::Deferred),
+            Some(&SpaceAdmissionTransportError::deferred()),
         );
     });
     logs.force_flush().expect("log flush");

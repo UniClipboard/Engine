@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{info, info_span, warn, Instrument};
@@ -9,6 +9,7 @@ use uc_core::ports::clipboard::{
     ListRepresentationsForEventPort,
 };
 use uc_core::ports::{ClipboardEventWriterPort, ClipboardSelectionRepositoryPort, SearchIndexPort};
+use uc_observability_contract::error_source::io_error_kind;
 
 /// Use case for deleting clipboard entries with all associated data.
 pub(crate) struct DeleteClipboardEntryUseCase {
@@ -100,7 +101,7 @@ impl DeleteClipboardEntryUseCase {
             delete
                 .delete_entry_with_receive_state(entry_id, &event_id)
                 .await
-                .map_err(|error| anyhow::anyhow!("Failed to delete entry: {error}"))?;
+                .context("Failed to delete entry")?;
         } else {
             self.selection_repo
                 .delete_selection(entry_id)
@@ -109,7 +110,7 @@ impl DeleteClipboardEntryUseCase {
                     entry_id = %entry_id
                 ))
                 .await
-                .map_err(|e| anyhow::anyhow!("Failed to delete selection: {}", e))?;
+                .context("Failed to delete selection")?;
 
             self.delete_entry
                 .delete_entry(entry_id)
@@ -118,7 +119,7 @@ impl DeleteClipboardEntryUseCase {
                     entry_id = %entry_id
                 ))
                 .await
-                .map_err(|e| anyhow::anyhow!("Failed to delete entry: {}", e))?;
+                .context("Failed to delete entry")?;
 
             self.event_writer
                 .delete_event_and_representations(&event_id)
@@ -127,7 +128,7 @@ impl DeleteClipboardEntryUseCase {
                     event_id = %event_id
                 ))
                 .await
-                .map_err(|e| anyhow::anyhow!("Failed to delete event: {}", e))?;
+                .context("Failed to delete event")?;
         }
 
         if let Some(blob_transfer) = self.blob_transfer.as_ref() {
@@ -138,7 +139,8 @@ impl DeleteClipboardEntryUseCase {
                 {
                     warn!(
                         entry_id = %entry_id,
-                        error = %e,
+                        error_kind = "blob_untag",
+                        io_error_kind = io_error_kind(&e),
                         "blob untag failed during entry delete; iroh-blobs GC will reclaim metadata on its next sweep"
                     );
                 }
@@ -183,7 +185,8 @@ impl DeleteClipboardEntryUseCase {
 
                             if let Err(e) = tokio::fs::remove_file(&path).await {
                                 warn!(
-                                    error = %e,
+                                    error_kind = "cache_file_remove",
+                                    io_error_kind = io_error_kind(&e),
                                     "Failed to delete cache file during entry cleanup"
                                 );
                             } else {
@@ -207,7 +210,8 @@ impl DeleteClipboardEntryUseCase {
             async {
                 if let Err(e) = search_index.remove_entry(entry_id).await {
                     warn!(
-                        error = %e,
+                        error_kind = "search_index_remove",
+                        io_error_kind = io_error_kind(&e),
                         entry_id = %entry_id,
                         "search index cleanup failed, continuing delete"
                     );

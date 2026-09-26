@@ -130,6 +130,7 @@ impl Engine {
         let startup_handoff = engine.bind_lifecycle(true);
         startup_handoff
             .await
+            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
             .map_err(|_| EngineError::new(1108, EngineErrorCategory::Internal, true))?;
         Ok((engine, stream))
     }

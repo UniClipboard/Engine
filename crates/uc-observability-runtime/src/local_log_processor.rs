@@ -153,6 +153,7 @@ fn decode_record(
         fields.insert("error.reason".into(), json!(reason));
         if let Some(chain) = detail.source_chain() {
             fields.insert("error.chain".into(), json!(chain));
+            fields.insert("error.call_path".into(), json!(chain));
         }
     }
     let timestamp: DateTime<Utc> = data.timestamp().or(data.observed_timestamp())?.into();

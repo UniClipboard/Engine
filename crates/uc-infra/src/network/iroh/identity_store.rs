@@ -53,10 +53,13 @@ impl IrohIdentityStore {
             return Ok(None);
         };
         if bytes.len() != SECRET_KEY_LEN {
-            return Err(LocalIdentityError::Storage(format!(
-                "corrupt iroh identity: expected {SECRET_KEY_LEN} bytes, got {}",
-                bytes.len()
-            )));
+            return Err(LocalIdentityError::Storage(
+                format!(
+                    "corrupt iroh identity: expected {SECRET_KEY_LEN} bytes, got {}",
+                    bytes.len()
+                )
+                .into(),
+            ));
         }
         let mut arr = [0u8; SECRET_KEY_LEN];
         arr.copy_from_slice(&bytes);
@@ -82,7 +85,11 @@ impl IrohIdentityStore {
                 // here indicates an algorithm-level bug rather than bad input.
                 // Surface it through `Storage` — the only non-AlreadyExists
                 // variant — with enough context for ops.
-                LocalIdentityError::Storage(format!("fingerprint derivation failed: {err}"))
+                LocalIdentityError::Storage(
+                    anyhow::Error::from(err)
+                        .context("fingerprint derivation failed")
+                        .into(),
+                )
             })
     }
 
@@ -143,7 +150,7 @@ impl LocalIdentityPort for IrohIdentityStore {
 }
 
 fn map_storage_err(err: SecureStorageError) -> LocalIdentityError {
-    LocalIdentityError::Storage(err.to_string())
+    LocalIdentityError::Storage(err.into())
 }
 
 #[cfg(test)]
@@ -271,8 +278,11 @@ mod tests {
         let err = store.get_current_fingerprint().await.unwrap_err();
 
         match err {
-            LocalIdentityError::Storage(msg) => {
-                assert!(msg.contains("corrupt iroh identity"), "msg was {msg}");
+            LocalIdentityError::Storage(source) => {
+                assert!(
+                    source.to_string().contains("corrupt iroh identity"),
+                    "source was {source}"
+                );
             }
             other => panic!("expected Storage variant, got {other:?}"),
         }

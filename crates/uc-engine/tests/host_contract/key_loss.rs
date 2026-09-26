@@ -679,6 +679,77 @@ async fn missing_legacy_device_identity_reports_only_identity_loss() {
     engine.shutdown(Duration::from_secs(15)).await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lost_network_identity_of_a_space_member_is_reported_instead_of_replaced() {
+    let root = tempfile::tempdir().unwrap();
+    let storage = MemorySecureStorage::default();
+    let (_entry, _kek_name) = create_profile(root.path(), &storage).await;
+    let paths = uc_core::app_dirs::AppPaths::with_base_data_local_dir(root.path().join("private"));
+    std::fs::remove_dir_all(paths.iroh_identity_dir()).unwrap();
+
+    let (progress_input, progress) = StartupProgress::channel();
+    let (engine, _events) = Engine::start_with_progress(
+        EngineConfig::new("2.0.0"),
+        host(root.path(), Box::new(storage.clone())),
+        progress_input,
+    )
+    .await
+    .expect("identity loss must leave recovery accessible");
+    assert_eq!(progress.snapshot().state, StartupState::RecoveryAvailable);
+    let OperationResult::ProfileRecovery(summary) = engine
+        .execute(Operation::QueryProfileRecovery)
+        .await
+        .unwrap()
+    else {
+        panic!("expected identity loss recovery summary")
+    };
+    assert_eq!(summary.state, ProfileRecoveryState::PartiallyRecoverable);
+    assert_eq!(summary.losses, vec![ProfileRecoveryLoss::DeviceIdentity]);
+    assert!(!summary.can_submit_passphrase);
+    assert!(
+        !paths.iroh_identity_dir().exists(),
+        "a space member must not silently receive a new network identity"
+    );
+
+    assert!(matches!(
+        engine.execute(Operation::FactoryResetSpace).await,
+        Ok(OperationResult::SpaceFactoryReset)
+    ));
+    let OperationResult::ProfileRecovery(summary) = engine
+        .execute(Operation::QueryProfileRecovery)
+        .await
+        .unwrap()
+    else {
+        panic!("expected post-reset recovery summary")
+    };
+    assert!(summary.restart_required);
+    assert!(summary.losses.is_empty());
+    engine.shutdown(Duration::from_secs(15)).await.unwrap();
+    drop(engine);
+
+    let (engine, _events) = Engine::start(
+        EngineConfig::new("2.0.0"),
+        host(root.path(), Box::new(storage.clone())),
+    )
+    .await
+    .expect("a reset profile must start as a fresh installation");
+    let OperationResult::ProfileRecovery(summary) = engine
+        .execute(Operation::QueryProfileRecovery)
+        .await
+        .unwrap()
+    else {
+        panic!("expected fresh recovery summary")
+    };
+    assert_eq!(summary.state, ProfileRecoveryState::NotRequired);
+    let OperationResult::SetupState(setup) =
+        engine.execute(Operation::QuerySetupState).await.unwrap()
+    else {
+        panic!("expected setup state")
+    };
+    assert!(!setup.has_completed);
+    engine.shutdown(Duration::from_secs(15)).await.unwrap();
+}
+
 #[cfg(feature = "dev-tools")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_background_start_requires_restart_and_never_returns_to_recovering() {

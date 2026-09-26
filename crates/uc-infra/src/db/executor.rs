@@ -21,4 +21,8 @@ impl DbExecutor for DieselSqliteExecutor {
         let mut conn = self.pool.get()?;
         f(&mut conn)
     }
+
+    fn database_generation(&self) -> u64 {
+        self.pool.generation()
+    }
 }

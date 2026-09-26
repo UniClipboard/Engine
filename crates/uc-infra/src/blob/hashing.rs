@@ -44,16 +44,11 @@ pub(crate) fn stream_hash_file(path: &Path) -> Result<(ContentHash, u64)> {
 /// blob even if the source is rewritten right after this returns. The bytes are
 /// flushed and fsync'd before returning.
 pub(crate) fn copy_and_hash(source: &Path, dest: &Path) -> Result<(ContentHash, u64)> {
-    // No source path in the error context: it is user content. The dest path is
-    // our own blob-store location (a blob_id), so it is safe to surface.
+    // 错误文本不含任何路径：源路径是用户内容，目标路径也不进入错误与日志。
     let mut src =
         std::fs::File::open(source).context("failed to open source file for copy+hash")?;
-    let mut out = std::fs::File::create(dest).with_context(|| {
-        format!(
-            "failed to create blob file {} for copy+hash",
-            dest.display()
-        )
-    })?;
+    let mut out =
+        std::fs::File::create(dest).context("failed to create blob file for copy+hash")?;
     let mut hasher = blake3::Hasher::new();
     let mut buf = [0u8; STREAM_BUF_LEN];
     let mut total: u64 = 0;

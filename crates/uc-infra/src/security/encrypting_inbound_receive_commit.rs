@@ -85,9 +85,11 @@ impl EncryptingInboundReceiveCommit {
                             &Aad::from(associated_data.as_slice()),
                         )
                         .await
-                        .map_err(|_| {
+                        .map_err(|error| {
                             InboundReceiveCommitError::Backend(
-                                "failed to encrypt inbound representation".to_owned(),
+                                anyhow::Error::from(error)
+                                    .context("encrypt inbound representation")
+                                    .into(),
                             )
                         })?;
                     Some(ciphertext.into_bytes())
@@ -105,9 +107,11 @@ impl EncryptingInboundReceiveCommit {
                     representation.payload_state(),
                     representation.last_error.clone(),
                 )
-                .map_err(|_| {
+                .map_err(|error| {
                     InboundReceiveCommitError::Backend(
-                        "failed to prepare encrypted inbound representation".to_owned(),
+                        anyhow::Error::from(error)
+                            .context("prepare encrypted inbound representation")
+                            .into(),
                     )
                 })?,
             );

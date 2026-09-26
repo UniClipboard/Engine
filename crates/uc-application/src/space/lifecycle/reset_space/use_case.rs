@@ -56,12 +56,12 @@ impl QueryCommittedDeviceManagementResetUseCase {
             .progress
             .load_target()
             .await
-            .map_err(|error| ResetSpaceError::FinalizationFailed(error.to_string()))?;
+            .map_err(|error| ResetSpaceError::FinalizationFailed(anyhow::Error::from(error)))?;
         let current_space_id = self
             .current_space
             .current_space_id()
             .await
-            .map_err(|error| ResetSpaceError::FinalizationFailed(error.to_string()))?;
+            .map_err(|error| ResetSpaceError::FinalizationFailed(anyhow::Error::from(error)))?;
         Ok(pending_target
             .as_ref()
             .is_some_and(|target| current_space_id.as_ref() == Some(target)))

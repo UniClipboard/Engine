@@ -29,7 +29,7 @@ impl<E: DbExecutor + Send + Sync> JoinerActivationStatePort for SqliteSpaceAdmis
                     .open_record(admission_id, &stored)
                     .map_err(into_anyhow)?;
                 let admission = JoinerAdmission::try_from_record(record)
-                    .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                    .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
                 if admission.joiner_activation_preparation().is_none() {
                     return Ok(None);
                 }
@@ -37,7 +37,7 @@ impl<E: DbExecutor + Send + Sync> JoinerActivationStatePort for SqliteSpaceAdmis
                     profile_generation,
                     &admission,
                 ))
-                .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
                 Ok(Some(LoadedJoinerActivation::new(admission, token)))
             })
             .map_err(map_executor_error)
@@ -85,16 +85,16 @@ impl<E: DbExecutor + Send + Sync> JoinerActivationStatePort for SqliteSpaceAdmis
                             .open_record(admission_id, &stored)
                             .map_err(into_anyhow)?;
                         let current = JoinerAdmission::try_from_record(current)
-                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
                         if current.joiner_activation_preparation().is_none() {
-                            return Err(into_anyhow(SpaceAdmissionStateStoreError::Corrupt));
+                            return Err(into_anyhow(SpaceAdmissionStateStoreError::corrupt()));
                         }
                         let expected_token =
                             joiner_activation_token(state.profile_generation, &current);
                         let expected_version = current
                             .record_version()
                             .checked_add(1)
-                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
                         if token.as_bytes() != &expected_token
                             || replacement.record_version() != expected_version
                         {
@@ -132,12 +132,12 @@ impl<E: DbExecutor + Send + Sync> ValidateJoinerActivationIntentPort
                 let stored = state
                     .records
                     .get(intent.admission_id().as_bytes())
-                    .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                    .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
                 let record = self
                     .open_record(*intent.admission_id().as_bytes(), stored)
                     .map_err(into_anyhow)?;
                 let admission = JoinerAdmission::try_from_record(record)
-                    .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                    .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
                 let Some(preparation) = admission.joiner_activation_preparation() else {
                     return Ok(false);
                 };
@@ -145,7 +145,7 @@ impl<E: DbExecutor + Send + Sync> ValidateJoinerActivationIntentPort
                     intent.admission_id(),
                     preparation.space_transition().as_bytes(),
                 )
-                .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::Corrupt))?;
+                .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
                 Ok(current == intent)
             })
             .map_err(map_executor_error)
@@ -157,11 +157,11 @@ fn map_activation_error(error: SpaceAdmissionStateStoreError) -> JoinerActivatio
     match &error {
         SpaceAdmissionStateStoreError::Locked => JoinerActivationStateError::locked(error),
         SpaceAdmissionStateStoreError::Conflict => JoinerActivationStateError::state_changed(error),
-        SpaceAdmissionStateStoreError::Corrupt
+        SpaceAdmissionStateStoreError::Corrupt { .. }
         | SpaceAdmissionStateStoreError::ReadInvalid { .. } => {
             JoinerActivationStateError::recovery_required(error)
         }
-        SpaceAdmissionStateStoreError::Unavailable => {
+        SpaceAdmissionStateStoreError::Unavailable { .. } => {
             JoinerActivationStateError::unavailable(error)
         }
     }

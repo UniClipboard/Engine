@@ -170,3 +170,178 @@ diff --git a/crates/example.rs b/crates/example.rs
 
   assert.deepEqual(changes, [{ path: 'crates/example.rs', line: 12 }])
 })
+
+test('拒绝把下层错误字符串化后重新包装成 anyhow', () => {
+  const result = check(`
+fn run() -> anyhow::Result<()> {
+    load().map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    save().map_err(anyhow::Error::msg)?;
+    parse().map_err(|error| anyhow::Error::msg(error))?;
+    Ok(())
+}
+`)
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /fixture\.rs:3 .*anyhow::Error::new/)
+  assert.match(result.stderr, /fixture\.rs:5 /)
+})
+
+test('拒绝把下层错误拼进 anyhow 文本', () => {
+  const result = check(`
+fn run() -> anyhow::Result<()> {
+    load().map_err(|e| anyhow!("load failed: {e}"))?;
+    save().map_err(|err| anyhow::anyhow!("save failed: {}", err))?;
+    let error = parse().unwrap_err();
+    bail!(
+        "parse failed: {error:?}"
+    );
+}
+`)
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /fixture\.rs:3 .*context/)
+  assert.match(result.stderr, /fixture\.rs:4 /)
+  assert.match(result.stderr, /fixture\.rs:7 /)
+})
+
+test('接受固定动作文本与 context', () => {
+  const result = check(`
+fn run() -> anyhow::Result<()> {
+    load().context("load clipboard entry")?;
+    save().map_err(anyhow::Error::new)?;
+    let count = 3;
+    anyhow::ensure!(count > 0, "count {count} must be positive");
+    Err(anyhow!("unsupported version {}", version))
+}
+`)
+  assert.equal(result.status, 0, result.stderr)
+})
+
+test('拒绝错误变体只保存下层错误文本', () => {
+  const result = check(`
+fn run() -> Result<(), StoreError> {
+    load().map_err(|e| StoreError::Storage(e.to_string()))?;
+    save().map_err(|error| StoreError::Io(format!("write failed: {error}")))?;
+    read().map_err(|error| StoreError::Decode {
+        reason: error.to_string(),
+    })?;
+    open().map_err(|err| {
+        StoreError::Open(
+            err.to_string(),
+        )
+    })?;
+    close().map_err(|e| e.to_string())?;
+    Ok(())
+}
+`)
+  assert.equal(result.status, 1)
+  for (const line of [3, 4, 6, 10, 13]) assert.match(result.stderr, new RegExp(`fixture\\.rs:${line} .*#\\[source\\]`))
+})
+
+test('拒绝无理由丢弃下层错误', () => {
+  const result = check(`
+fn run() -> Result<(), StoreError> {
+    load().map_err(|_| StoreError::Storage)?;
+    save().map_err(|_error| StoreError::Storage)?;
+    Ok(())
+}
+`)
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /fixture\.rs:3 .*中文注释/)
+  assert.match(result.stderr, /fixture\.rs:4 /)
+})
+
+test('接受写明中文理由的丢弃来源例外', () => {
+  const result = check(`
+fn run(bytes: &[u8]) -> Result<[u8; 32], KeyError> {
+    // TryFromSliceError 只表示长度不符，目标分类已完整表达
+    let key = bytes.try_into().map_err(|_| KeyError::Length)?;
+    let guard = lock.lock().map_err(|_| KeyError::Poisoned)?; // 锁中毒持有 guard，不能保存
+    Ok(key)
+}
+`)
+  assert.equal(result.status, 0, result.stderr)
+})
+
+test('拒绝日志输出错误正文', () => {
+  const result = check(`
+fn run() {
+    if let Err(err) = load() {
+        warn!(error = %err, "load failed");
+    }
+    if let Err(error) = save() {
+        tracing::error!(
+            entry = 1,
+            error = ?error,
+            "save failed"
+        );
+    }
+    if let Err(error) = sync() {
+        warn!(%error, "sync failed");
+    }
+    if let Err(e) = flush() {
+        debug!("flush failed: {e:#}");
+    }
+}
+`)
+  assert.equal(result.status, 1)
+  for (const line of [4, 9, 14, 17]) assert.match(result.stderr, new RegExp(`fixture\\.rs:${line} .*error_kind`))
+})
+
+test('接受固定分类的日志字段', () => {
+  const result = check(`
+fn run() {
+    if let Err(err) = load() {
+        warn!(error_kind = "load", io_error_kind = io_error_kind(&err), "load failed");
+    }
+    warn!(source = %source_label, reason = ?reason, error_kind = ?callback_error, "skipped");
+}
+`)
+  assert.equal(result.status, 0, result.stderr)
+})
+
+test('拒绝结构体字段内插错误与错误文本中的路径', () => {
+  const result = check(`
+fn run(path: &Path) -> anyhow::Result<()> {
+    read().map_err(|err| StoreError::Integrity {
+        reason: format!("read failed: {err}"),
+    })?;
+    std::fs::read(path).with_context(|| format!("read failed: {}", path.display()))?;
+    std::fs::write(path, b"").with_context(|| {
+        format!(
+            "write failed: {}",
+            path.display()
+        )
+    })?;
+    Ok(())
+}
+`)
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /fixture\.rs:4 .*#\[source\]/)
+  for (const line of [6, 10]) assert.match(result.stderr, new RegExp(`fixture\\.rs:${line} .*路径`))
+})
+
+test('接受不含路径的错误文本与普通路径格式化', () => {
+  const result = check(`
+fn run(path: &Path) -> anyhow::Result<String> {
+    std::fs::read(path).context("read spool file")?;
+    let uri = format!("file://{}", path.display());
+    Ok(uri)
+}
+`)
+  assert.equal(result.status, 0, result.stderr)
+})
+
+test('测试代码不检查错误来源写法', () => {
+  const result = check(`
+fn run() {}
+
+#[cfg(test)]
+mod tests {
+    fn helper() -> anyhow::Result<()> {
+        load().map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        load().map_err(|_| StoreError::Storage)?;
+        Ok(())
+    }
+}
+`)
+  assert.equal(result.status, 0, result.stderr)
+})

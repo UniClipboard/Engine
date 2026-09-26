@@ -34,12 +34,12 @@ impl EngineVersionStatePort for FileEngineVersionStateRepository {
 
 fn map_read_error(error: AppVersionStateError) -> EngineVersionStateError {
     match error {
-        AppVersionStateError::Read(message) => EngineVersionStateError::Read(message),
-        AppVersionStateError::Corrupt(message) => EngineVersionStateError::Invalid(message),
-        AppVersionStateError::Write(message) => EngineVersionStateError::Read(message),
+        AppVersionStateError::Read(source) => EngineVersionStateError::Read(source),
+        AppVersionStateError::Corrupt(source) => EngineVersionStateError::Invalid(source),
+        AppVersionStateError::Write(source) => EngineVersionStateError::Read(source),
     }
 }
 
 fn map_write_error(error: AppVersionStateError) -> EngineVersionStateError {
-    EngineVersionStateError::Write(error.to_string())
+    EngineVersionStateError::Write(Box::new(error))
 }

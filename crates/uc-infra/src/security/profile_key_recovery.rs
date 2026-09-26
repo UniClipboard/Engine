@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 use uc_core::app_dirs::AppPaths;
 use uc_core::crypto::domain::Passphrase;
 use uc_core::crypto::model::EncryptionError;
@@ -18,6 +19,7 @@ use super::profile_content_key_vault::PROFILE_CONTENT_VAULT_KEY_NAME;
 use super::profile_lifecycle::PROFILE_LIFECYCLE_MARKER_NAME;
 use super::profile_upgrade_backup::PROFILE_UPGRADE_BACKUP_RECORD_KEY;
 use super::{v1_aead, Kek, MasterKey};
+use crate::config_migration::staging::PENDING_IMPORT_MARKER;
 use crate::fs::durability::{replace_file, sync_directory};
 use crate::fs::key_slot_store::JsonKeySlotStore;
 use crate::migration_state::{decode_legacy_migration_run_id, DEFAULT_MIGRATION_STATE_FILE};
@@ -75,6 +77,18 @@ pub enum ProfileKeyRecoveryError {
     Storage(#[source] anyhow::Error),
 }
 
+impl ProfileKeyRecoveryError {
+    /// 诊断用固定分类；不包含下层错误正文。
+    pub(crate) fn diagnostic_reason(&self) -> &'static str {
+        match self {
+            Self::WrongPassphrase => "key_mismatch",
+            Self::Corrupt => "corrupt",
+            Self::Unsupported => "unsupported_version",
+            Self::Storage(_) => "storage_unavailable",
+        }
+    }
+}
+
 impl From<SecureStorageError> for ProfileKeyRecoveryError {
     fn from(source: SecureStorageError) -> Self {
         Self::Storage(source.into())
@@ -97,7 +111,7 @@ impl From<EncryptionError> for ProfileKeyRecoveryError {
             | EncryptionError::UnsupportedKdfAlgorithm => Self::Unsupported,
             EncryptionError::CorruptedKeySlot
             | EncryptionError::CorruptedBlob
-            | EncryptionError::KeyMaterialCorrupt
+            | EncryptionError::KeyMaterialCorrupt { .. }
             | EncryptionError::InvalidKey => Self::Corrupt,
             other => Self::Storage(other.into()),
         }
@@ -166,6 +180,10 @@ pub struct ProfileKeyRecoveryStore {
 pub trait ProfilePassphraseRecoveryPort: Send + Sync {
     fn prepare_passphrase_change(&self, kek: &[u8]) -> Result<(), ProfileKeyRecoveryError>;
     fn finish_passphrase_change(&self, kek: &[u8]) -> Result<(), ProfileKeyRecoveryError>;
+    /// 资料 KEK 被切换目标的访问材料替换前调用；vault 可能尚未创建或已随运行期挂起。
+    fn prepare_kek_replacement(&self, kek: &[u8]) -> Result<(), ProfileKeyRecoveryError>;
+    /// 新 KEK 写入安全存储后调用。
+    fn finish_kek_replacement(&self, kek: &[u8]) -> Result<(), ProfileKeyRecoveryError>;
 }
 
 impl ProfilePassphraseRecoveryPort for ProfileKeyRecoveryStore {
@@ -177,6 +195,16 @@ impl ProfilePassphraseRecoveryPort for ProfileKeyRecoveryStore {
     fn finish_passphrase_change(&self, kek: &[u8]) -> Result<(), ProfileKeyRecoveryError> {
         let kek = Kek::from_bytes(kek)?;
         self.finish_passphrase_change(&kek)
+    }
+
+    fn prepare_kek_replacement(&self, kek: &[u8]) -> Result<(), ProfileKeyRecoveryError> {
+        let kek = Kek::from_bytes(kek)?;
+        self.prepare_kek_replacement(&kek)
+    }
+
+    fn finish_kek_replacement(&self, kek: &[u8]) -> Result<(), ProfileKeyRecoveryError> {
+        let kek = Kek::from_bytes(kek)?;
+        self.finish_kek_replacement(&kek)
     }
 }
 
@@ -224,7 +252,7 @@ impl ProfileKeyRecoveryStore {
             return Ok(ProfileRecoveryPreparation::Ready);
         }
         let keyslot = self.material.load_keyslot(&self.scope).await?;
-        let losses = self.legacy_material_losses()?;
+        let losses = self.startup_material_losses()?;
         if !losses.is_empty() {
             return Ok(ProfileRecoveryPreparation::AwaitingPassphrase { losses });
         }
@@ -239,11 +267,38 @@ impl ProfileKeyRecoveryStore {
                 self.activate_or_migrate(&kek)?;
                 Ok(ProfileRecoveryPreparation::Ready)
             }
-            Err(EncryptionError::KeyNotFound | EncryptionError::KeyMaterialCorrupt) => {
+            Err(EncryptionError::KeyNotFound | EncryptionError::KeyMaterialCorrupt { .. }) => {
                 Ok(ProfileRecoveryPreparation::AwaitingPassphrase { losses })
             }
             Err(error) => Err(error.into()),
         }
+    }
+
+    /// 恢复模式下的恢复出厂需要读取受管条目。只有资料密钥完好时才能不经口令打开；
+    /// 返回 `false` 表示必须先经口令恢复，调用方不得继续重置。
+    pub async fn open_for_factory_reset(&self) -> Result<bool, ProfileKeyRecoveryError> {
+        if !self.material.keyslot_exists().await? {
+            return Ok(true);
+        }
+        if !self.file.exists() || !self.legacy_material_losses()?.is_empty() {
+            return Ok(false);
+        }
+        let keyslot = self.material.load_keyslot(&self.scope).await?;
+        let kek = match self.material.load_kek(&self.scope).await {
+            Ok(kek) => kek,
+            Err(EncryptionError::KeyNotFound | EncryptionError::KeyMaterialCorrupt { .. }) => {
+                return Ok(false)
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let Some(wrapped) = keyslot.wrapped_master_key.as_ref() else {
+            return Err(ProfileKeyRecoveryError::Corrupt);
+        };
+        if v1_aead::unwrap_master_key_xchacha(&kek, &wrapped.blob).is_err() {
+            return Ok(false);
+        }
+        self.activate_existing(&kek)?;
+        Ok(true)
     }
 
     pub async fn recover(
@@ -254,7 +309,7 @@ impl ProfileKeyRecoveryStore {
             .material
             .authenticate_kek(&self.scope, passphrase)
             .await?;
-        let losses = self.legacy_material_losses()?;
+        let losses = self.startup_material_losses()?;
         if !losses.is_empty() {
             return Ok(ProfileRecoveryOutcome::PartiallyRecoverable(losses));
         }
@@ -362,6 +417,43 @@ impl ProfileKeyRecoveryStore {
         active.wrapped_root = pending;
         active.pending_wrapped_root = None;
         Ok(())
+    }
+
+    /// 切换 Space 会以目标访问材料替换资料 KEK；vault 根密钥必须随之改由新 KEK 包裹，
+    /// 否则挂起或重启后 vault 无法打开。沿用口令修改的两阶段协议：替换中途崩溃时新旧 KEK
+    /// 都能打开 vault，前向重试以同一 KEK 幂等完成。
+    ///
+    /// 尚无 vault 文件时无需处理，下次启动以当时的 KEK 创建；vault 已随运行期挂起时，
+    /// 先用安全存储中仍有效的 KEK 重新打开。
+    pub(crate) fn prepare_kek_replacement(
+        &self,
+        kek: &super::Kek,
+    ) -> Result<(), ProfileKeyRecoveryError> {
+        if !self.open_vault_for_kek_replacement()? {
+            return Ok(());
+        }
+        self.prepare_passphrase_change(kek)
+    }
+
+    pub(crate) fn finish_kek_replacement(
+        &self,
+        kek: &super::Kek,
+    ) -> Result<(), ProfileKeyRecoveryError> {
+        if !self.open_vault_for_kek_replacement()? {
+            return Ok(());
+        }
+        self.finish_passphrase_change(kek)
+    }
+
+    /// 返回 `false` 表示没有需要重新包裹的 vault；vault 存在却无法打开时属于损坏。
+    fn open_vault_for_kek_replacement(&self) -> Result<bool, ProfileKeyRecoveryError> {
+        if !self.file.exists() {
+            return Ok(false);
+        }
+        if !self.activate_from_backing_if_available()? {
+            return Err(ProfileKeyRecoveryError::Corrupt);
+        }
+        Ok(true)
     }
 
     fn activate_or_migrate(&self, kek: &super::Kek) -> Result<(), ProfileKeyRecoveryError> {
@@ -543,15 +635,58 @@ impl ProfileKeyRecoveryStore {
         Ok(secrets)
     }
 
+    /// 已有空间的网络身份只能沿用：身份文件缺失即视为设备身份丢失，启动流程不得补发新身份。
+    fn startup_material_losses(&self) -> Result<ProfileRecoveryLosses, ProfileKeyRecoveryError> {
+        let mut losses = self.legacy_material_losses()?;
+        losses.device_identity |= self.space_identity_lost()?;
+        Ok(losses)
+    }
+
+    fn space_identity_lost(&self) -> Result<bool, ProfileKeyRecoveryError> {
+        if !self.has_active_space()? || self.current_identity()?.is_some() {
+            return Ok(false);
+        }
+        // 旧版身份目录改名与待应用的配置导入都在装配阶段才写入身份，此时不能判定丢失。
+        Ok(!self.identity_adoption_pending()?)
+    }
+
+    fn identity_adoption_pending(&self) -> Result<bool, ProfileKeyRecoveryError> {
+        let root = &self.paths.app_data_root_dir;
+        if root.join(PENDING_IMPORT_MARKER).try_exists()? {
+            return Ok(true);
+        }
+        for entry in fs::read_dir(root)? {
+            if entry?
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("iroh-identity_"))
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn has_active_space(&self) -> Result<bool, ProfileKeyRecoveryError> {
+        Ok(self
+            .paths
+            .vault_dir
+            .join(".active-space-manifest-v2")
+            .try_exists()?)
+    }
+
+    fn current_identity(&self) -> Result<Option<Vec<u8>>, ProfileKeyRecoveryError> {
+        Ok(
+            FileSecureStorage::with_base_dir(self.paths.iroh_identity_dir())
+                .get(IDENTITY_STORE_KEY)?,
+        )
+    }
+
     fn legacy_material_losses(&self) -> Result<ProfileRecoveryLosses, ProfileKeyRecoveryError> {
         if self.file.exists() {
             return Ok(ProfileRecoveryLosses::default());
         }
-        let protected_profile = self
-            .paths
-            .vault_dir
-            .join(".active-space-manifest-v2")
-            .try_exists()?;
+        let protected_profile = self.has_active_space()?;
         let protected_history = self
             .paths
             .vault_dir
@@ -563,11 +698,9 @@ impl ProfileKeyRecoveryStore {
             && (lifecycle_missing || self.backing.get(PROFILE_ADMISSION_KEY_NAME)?.is_none());
         let local_history = protected_history
             && (lifecycle_missing || self.backing.get(PROFILE_CONTENT_VAULT_KEY_NAME)?.is_none());
-        let current_identity = FileSecureStorage::with_base_dir(self.paths.iroh_identity_dir())
-            .get(IDENTITY_STORE_KEY)?;
         let device_identity = (protected_profile || protected_history)
             && self.backing.get(IDENTITY_STORE_KEY)?.is_none()
-            && current_identity.is_none();
+            && self.current_identity()?.is_none();
         Ok(ProfileRecoveryLosses {
             local_history,
             local_control_state,
@@ -636,11 +769,17 @@ impl ProfileKeyRecoveryStore {
             &active.secrets,
         ) {
             Ok(file) => file,
-            Err(error) => return Err(SecureStorageError::Other(error.to_string())),
+            Err(error) => {
+                return Err(SecureStorageError::StorageFailed {
+                    source: anyhow::Error::new(error).context("encode profile secret file"),
+                })
+            }
         };
         match self.write_file(&file) {
             Ok(()) => Ok(()),
-            Err(error) => Err(SecureStorageError::Other(error.to_string())),
+            Err(error) => Err(SecureStorageError::StorageFailed {
+                source: anyhow::Error::new(error).context("write profile secret file"),
+            }),
         }
     }
 
@@ -742,13 +881,25 @@ impl ProfileKeyRecoveryStore {
         };
         let kek = match super::Kek::from_bytes(&bytes) {
             Ok(kek) => kek,
-            Err(_) => {
+            Err(error) => {
+                // 安全存储端口只能携带固定文本，真实原因只以固定分类记录。
+                let error = ProfileKeyRecoveryError::from(error);
+                warn!(
+                    stage = "decode_automatic_unlock_key",
+                    reason = error.diagnostic_reason(),
+                    "资料 vault 自动打开失败"
+                );
                 return Err(SecureStorageError::Corrupt(
                     "automatic unlock material is invalid".to_owned(),
-                ))
+                ));
             }
         };
-        if self.activate_existing(&kek).is_err() {
+        if let Err(error) = self.activate_existing(&kek) {
+            warn!(
+                stage = "open_vault",
+                reason = error.diagnostic_reason(),
+                "资料 vault 自动打开失败"
+            );
             return Err(SecureStorageError::Corrupt(
                 "profile recovery data cannot be opened".to_owned(),
             ));
@@ -1015,9 +1166,72 @@ mod tests {
             ProfileKeyRecoveryError::Storage(_)
         ));
         assert!(matches!(
-            ProfileKeyRecoveryError::from(v1_aead::AeadError::DecryptFailed),
+            ProfileKeyRecoveryError::from(v1_aead::AeadError::decrypt_failed()),
             ProfileKeyRecoveryError::Storage(_)
         ));
+    }
+
+    // 切换 Space 以目标访问材料替换资料 KEK 后，vault 挂起和重启都必须仍能打开。
+    #[tokio::test]
+    async fn kek_replacement_keeps_the_vault_openable_after_suspend_and_restart() {
+        let (_directory, storage, paths, profile_id, recovery) = active_recovery_fixture().await;
+        let backing: Arc<dyn SecureStoragePort> = storage.clone();
+        let material = KeyMaterialStore::new(
+            Arc::clone(&backing),
+            Arc::new(JsonKeySlotStore::new(paths.vault_dir.clone())),
+        );
+        let scope = KeyScope {
+            profile_id: profile_id.clone(),
+        };
+        let target_kek = Kek::from_bytes(&[0x52; 32]).unwrap();
+
+        // 运行期挂起后 vault 已不在内存中，替换流程必须自行重新打开。
+        recovery.suspend();
+        recovery.prepare_kek_replacement(&target_kek).unwrap();
+        let target_root = MasterKey::generate().unwrap();
+        let target_keyslot = KeySlot::draft_v1(scope.clone())
+            .unwrap()
+            .finalize(WrappedMasterKey {
+                blob: v1_aead::wrap_master_key_xchacha(&target_kek, &target_root).unwrap(),
+            });
+        material.store_kek(&scope, &target_kek).await.unwrap();
+        material.store_keyslot(&target_keyslot).await.unwrap();
+        recovery.finish_kek_replacement(&target_kek).unwrap();
+        // 前向重试以同一 KEK 幂等完成。
+        recovery.prepare_kek_replacement(&target_kek).unwrap();
+        recovery.finish_kek_replacement(&target_kek).unwrap();
+
+        recovery.suspend();
+        assert_eq!(
+            recovery.get(PROFILE_ADMISSION_KEY_NAME).unwrap(),
+            Some(vec![0x41; 32])
+        );
+        let restarted = ProfileKeyRecoveryStore::new(paths, profile_id, backing);
+        assert_eq!(
+            restarted.prepare_startup().await.unwrap(),
+            ProfileRecoveryPreparation::Ready
+        );
+        assert_eq!(
+            restarted.get(PROFILE_ADMISSION_KEY_NAME).unwrap(),
+            Some(vec![0x41; 32])
+        );
+    }
+
+    // 尚未创建 vault 的资料没有需要重新包裹的根密钥，替换不得失败。
+    #[test]
+    fn kek_replacement_without_a_vault_is_a_no_op() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = test_paths(&directory);
+        let recovery = ProfileKeyRecoveryStore::new(
+            paths,
+            uc_core::ids::ProfileId::new().into_inner(),
+            Arc::new(MemoryStorage::default()),
+        );
+        let target_kek = Kek::from_bytes(&[0x52; 32]).unwrap();
+
+        recovery.prepare_kek_replacement(&target_kek).unwrap();
+        recovery.finish_kek_replacement(&target_kek).unwrap();
+        assert!(!recovery.vault_file().exists());
     }
 
     #[tokio::test]
@@ -1353,6 +1567,136 @@ mod tests {
         );
         assert_eq!(final_restart.get(PROFILE_ADMISSION_KEY_NAME).unwrap(), None);
         assert_eq!(storage.get(PROFILE_ADMISSION_KEY_NAME).unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn space_member_without_its_network_identity_waits_for_recovery() {
+        let (_directory, storage, paths, profile_id, _recovery) = active_recovery_fixture().await;
+        std::fs::write(
+            paths.vault_dir.join(".active-space-manifest-v2"),
+            b"active space marker",
+        )
+        .unwrap();
+        let backing: Arc<dyn SecureStoragePort> = storage;
+
+        let restarted = ProfileKeyRecoveryStore::new(paths, profile_id, backing);
+
+        assert_eq!(
+            restarted.prepare_startup().await.unwrap(),
+            ProfileRecoveryPreparation::AwaitingPassphrase {
+                losses: ProfileRecoveryLosses {
+                    local_history: false,
+                    local_control_state: false,
+                    device_identity: true,
+                },
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn space_member_with_its_network_identity_starts_normally() {
+        let (_directory, storage, paths, profile_id, _recovery) = active_recovery_fixture().await;
+        std::fs::write(
+            paths.vault_dir.join(".active-space-manifest-v2"),
+            b"active space marker",
+        )
+        .unwrap();
+        FileSecureStorage::with_base_dir(paths.iroh_identity_dir())
+            .set(IDENTITY_STORE_KEY, &[0x34; 32])
+            .unwrap();
+        let backing: Arc<dyn SecureStoragePort> = storage;
+
+        let restarted = ProfileKeyRecoveryStore::new(paths, profile_id, backing);
+
+        assert_eq!(
+            restarted.prepare_startup().await.unwrap(),
+            ProfileRecoveryPreparation::Ready
+        );
+    }
+
+    #[tokio::test]
+    async fn passphrase_recovery_does_not_hide_a_lost_network_identity() {
+        let (_directory, storage, paths, profile_id, _recovery) = active_recovery_fixture().await;
+        std::fs::write(
+            paths.vault_dir.join(".active-space-manifest-v2"),
+            b"active space marker",
+        )
+        .unwrap();
+        let backing: Arc<dyn SecureStoragePort> = storage;
+        let restarted = ProfileKeyRecoveryStore::new(paths, profile_id, backing);
+
+        assert!(matches!(
+            restarted
+                .recover(&Passphrase::new("migration passphrase"))
+                .await
+                .unwrap(),
+            ProfileRecoveryOutcome::PartiallyRecoverable(ProfileRecoveryLosses {
+                device_identity: true,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn identity_written_later_during_startup_is_not_reported_as_lost() {
+        for pending in ["iroh-identity_mobile_primary", PENDING_IMPORT_MARKER] {
+            let (_directory, storage, paths, profile_id, _recovery) =
+                active_recovery_fixture().await;
+            std::fs::write(
+                paths.vault_dir.join(".active-space-manifest-v2"),
+                b"active space marker",
+            )
+            .unwrap();
+            let pending = paths.app_data_root_dir.join(pending);
+            if pending.extension().is_some() {
+                std::fs::write(pending, b"{}").unwrap();
+            } else {
+                std::fs::create_dir_all(pending).unwrap();
+            }
+            let backing: Arc<dyn SecureStoragePort> = storage;
+            let restarted = ProfileKeyRecoveryStore::new(paths, profile_id, backing);
+
+            assert_eq!(
+                restarted.prepare_startup().await.unwrap(),
+                ProfileRecoveryPreparation::Ready
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn identity_loss_still_opens_profile_secrets_for_factory_reset() {
+        let (_directory, storage, paths, profile_id, _recovery) = active_recovery_fixture().await;
+        std::fs::write(
+            paths.vault_dir.join(".active-space-manifest-v2"),
+            b"active space marker",
+        )
+        .unwrap();
+        let backing: Arc<dyn SecureStoragePort> = storage;
+        let restarted = ProfileKeyRecoveryStore::new(paths, profile_id, backing);
+        assert!(matches!(
+            restarted.prepare_startup().await.unwrap(),
+            ProfileRecoveryPreparation::AwaitingPassphrase { .. }
+        ));
+
+        assert!(restarted.open_for_factory_reset().await.unwrap());
+        assert_eq!(
+            restarted.get(PROFILE_ADMISSION_KEY_NAME).unwrap(),
+            Some(vec![0x41; 32])
+        );
+    }
+
+    #[tokio::test]
+    async fn factory_reset_does_not_open_profile_secrets_without_the_unlock_key() {
+        let (_directory, storage, paths, profile_id, _recovery) = active_recovery_fixture().await;
+        storage
+            .values
+            .lock()
+            .unwrap()
+            .remove(&format!("kek:v1:profile:{profile_id}"));
+        let backing: Arc<dyn SecureStoragePort> = storage;
+        let restarted = ProfileKeyRecoveryStore::new(paths, profile_id, backing);
+
+        assert!(!restarted.open_for_factory_reset().await.unwrap());
     }
 
     #[tokio::test]

@@ -78,7 +78,7 @@ impl FetchBlobUseCase {
         let digest = self
             .blob_transfer
             .digest_of(&input.ticket)
-            .map_err(|e| FetchBlobError::Transfer(e.to_string()))?;
+            .map_err(|e| FetchBlobError::Transfer(anyhow::Error::from(e)))?;
         let progress_ref: Option<&dyn BlobProgressSink> = input
             .progress
             .as_ref()
@@ -87,28 +87,28 @@ impl FetchBlobUseCase {
             .blob_transfer
             .fetch(&input.ticket, progress_ref)
             .await
-            .map_err(|e| FetchBlobError::Transfer(e.to_string()))?;
+            .map_err(|e| FetchBlobError::Transfer(anyhow::Error::from(e)))?;
         let plaintext_bytes = Bytes::from(
             self.transfer_cipher
                 .decrypt(&encrypted_bytes)
                 .await
-                .map_err(|e| FetchBlobError::Cipher(e.to_string()))?,
+                .map_err(|e| FetchBlobError::Cipher(anyhow::Error::from(e)))?,
         );
         let plaintext_hash = PlaintextHash::from_bytes(
             self.hash
                 .hash_bytes(&plaintext_bytes)
-                .map_err(|e| FetchBlobError::Hash(e.to_string()))?
+                .map_err(|e| FetchBlobError::Hash(anyhow::Error::from(e)))?
                 .bytes,
         );
 
         self.blob_reference
             .save(plaintext_hash, digest)
             .await
-            .map_err(|e| FetchBlobError::Reference(e.to_string()))?;
+            .map_err(|e| FetchBlobError::Reference(anyhow::Error::from(e)))?;
         self.blob_transfer
             .tag(&digest, TagReason::ClipboardEntry(input.entry_id.clone()))
             .await
-            .map_err(|e| FetchBlobError::Transfer(e.to_string()))?;
+            .map_err(|e| FetchBlobError::Transfer(anyhow::Error::from(e)))?;
 
         Ok(FetchBlobOutcome {
             plaintext: plaintext_bytes,
@@ -144,7 +144,7 @@ impl FetchBlobUseCase {
             .blob_transfer
             .fetch_to_path(&input.ticket, &input.target_path, progress_ref)
             .await
-            .map_err(|e| FetchBlobError::Transfer(e.to_string()))?;
+            .map_err(|e| FetchBlobError::Transfer(anyhow::Error::from(e)))?;
 
         // File blobs are content-addressed by blake3 of the raw plaintext;
         // since they're stored without encryption the adapter's digest IS
@@ -154,11 +154,11 @@ impl FetchBlobUseCase {
         self.blob_reference
             .save(plaintext_hash, digest)
             .await
-            .map_err(|e| FetchBlobError::Reference(e.to_string()))?;
+            .map_err(|e| FetchBlobError::Reference(anyhow::Error::from(e)))?;
         self.blob_transfer
             .tag(&digest, TagReason::ClipboardEntry(input.entry_id.clone()))
             .await
-            .map_err(|e| FetchBlobError::Transfer(e.to_string()))?;
+            .map_err(|e| FetchBlobError::Transfer(anyhow::Error::from(e)))?;
 
         let bytes_written = tokio::fs::metadata(&input.target_path)
             .await
@@ -176,12 +176,12 @@ impl FetchBlobUseCase {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum FetchBlobError {
-    #[error("hash failed: {0}")]
-    Hash(String),
-    #[error("blob transfer failed: {0}")]
-    Transfer(String),
-    #[error("blob reference failed: {0}")]
-    Reference(String),
-    #[error("blob payload decryption failed: {0}")]
-    Cipher(String),
+    #[error("hash failed")]
+    Hash(#[source] anyhow::Error),
+    #[error("blob transfer failed")]
+    Transfer(#[source] anyhow::Error),
+    #[error("blob reference failed")]
+    Reference(#[source] anyhow::Error),
+    #[error("blob payload decryption failed")]
+    Cipher(#[source] anyhow::Error),
 }

@@ -51,6 +51,7 @@ use uc_core::ports::mobile_sync::{MobileFileStagingError, MobileFileStagingPort}
 use uc_core::ports::{ClockPort, ReceiveItemRole};
 use uc_core::{MimeType, ObservedClipboardRepresentation, SystemClipboardSnapshot};
 use uc_observability_contract::analytics::{AnalyticsPort, Direction, Event, PayloadSizeBucket};
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::usecases::clipboard_doc::SyncClipboardItemType;
 #[cfg(test)]
@@ -237,11 +238,32 @@ pub enum ApplyIncomingMobileClipError {
     #[error("inbound apply failed")]
     Inbound(#[source] InboundClipboardApplyError),
     /// V3 envelope encode failed.
-    #[error("V3 envelope encode failed: {0}")]
-    EncodeFailed(String),
+    #[error("V3 envelope encode failed")]
+    EncodeFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// Catch-all for use-case-internal logic errors.
-    #[error("internal: {0}")]
-    Internal(String),
+    #[error("mobile clip apply failed internally")]
+    Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
+}
+
+/// 带固定动作说明的下层错误；动作文本不含文件名、路径或 URI。
+#[derive(Debug, Error)]
+#[error("{action}")]
+struct ActionFailed {
+    action: &'static str,
+    #[source]
+    source: Box<dyn std::error::Error + Send + Sync>,
+}
+
+impl ActionFailed {
+    fn boxed(
+        action: &'static str,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Box<dyn std::error::Error + Send + Sync> {
+        Box::new(Self {
+            action,
+            source: Box::new(source),
+        })
+    }
 }
 
 /// `build_*_snapshot` 内部错误形态:区分"协议输入不合法"(`Decode`,
@@ -249,7 +271,7 @@ pub enum ApplyIncomingMobileClipError {
 /// 上抛 application error `Internal`)。
 enum BuildSnapshotFailure {
     Decode(String),
-    Internal(String),
+    Internal(Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// `build_*_snapshot` 成功后的"快照 + transfer_id"组合。
@@ -456,8 +478,9 @@ impl ApplyIncomingMobileClipUseCase {
                         .await
                     {
                         let _ = self.file_staging.discard_staged_file(&staged).await;
-                        return Err(ApplyIncomingMobileClipError::Internal(format!(
-                            "failed to record provisional receive path: {error}"
+                        return Err(ApplyIncomingMobileClipError::Internal(ActionFailed::boxed(
+                            "record provisional receive path",
+                            error,
                         )));
                     }
                 }
@@ -490,7 +513,7 @@ impl ApplyIncomingMobileClipUseCase {
                     Err(BuildSnapshotFailure::Decode(reason)) => {
                         warn!(
                             item_type = ?item_type,
-                            reason = %reason,
+                            error_kind = "decode_failed",
                             "mobile_sync apply_incoming: decode failed"
                         );
                         // decode 失败时 transfer 已经被 handler 起过 lifecycle,
@@ -502,13 +525,12 @@ impl ApplyIncomingMobileClipUseCase {
                         // ?upload_id 反向查询是未来增强;现在先靠 sweep 兜底。
                         return Ok(ApplyIncomingMobileClipOutcome::DecodeFailed { reason });
                     }
-                    Err(BuildSnapshotFailure::Internal(msg)) => {
+                    Err(BuildSnapshotFailure::Internal(source)) => {
                         warn!(
                             item_type = ?item_type,
-                            error = %msg,
                             "mobile_sync apply_incoming: internal failure (file staging)"
                         );
-                        return Err(ApplyIncomingMobileClipError::Internal(msg));
+                        return Err(ApplyIncomingMobileClipError::Internal(source));
                     }
                 };
 
@@ -550,8 +572,9 @@ impl ApplyIncomingMobileClipUseCase {
                             .discard_staged_file(staged_file)
                             .await
                             .map_err(|error| {
-                                ApplyIncomingMobileClipError::Internal(format!(
-                                    "discard provisional mobile file failed: {error}"
+                                ApplyIncomingMobileClipError::Internal(ActionFailed::boxed(
+                                    "discard provisional mobile file",
+                                    error,
                                 ))
                             })?;
                     }
@@ -765,7 +788,8 @@ impl ApplyIncomingMobileClipUseCase {
         if let Err(err) = session.complete().await {
             warn!(
                 transfer_id = session.transfer_id(),
-                error = %err,
+                error_kind = "lifecycle_complete",
+                io_error_kind = io_error_kind(&err),
                 "mobile_sync apply_incoming: complete lifecycle failed"
             );
         }
@@ -778,7 +802,8 @@ impl ApplyIncomingMobileClipUseCase {
         {
             warn!(
                 transfer_id = session.transfer_id(),
-                error = %err,
+                error_kind = "lifecycle_fail",
+                io_error_kind = io_error_kind(&err),
                 "mobile_sync apply_incoming: fail lifecycle failed"
             );
         }
@@ -817,10 +842,10 @@ impl ApplyIncomingMobileClipUseCase {
         let name = data_name
             .ok_or_else(|| BuildSnapshotFailure::Decode("Image item without dataName".into()))?;
         let buffered = self.buffer.take(&name).ok_or_else(|| {
-            BuildSnapshotFailure::Decode(format!(
-                "file buffer miss for `{}` (PUT /file may have arrived late or never)",
-                name
-            ))
+            // 结果文本会写入日志并返回调用方，不携带文件名。
+            BuildSnapshotFailure::Decode(
+                "file buffer miss (PUT /file may have arrived late or never)".into(),
+            )
         })?;
         let transfer_id = buffered.transfer_id.clone();
         let staged_file = buffered.staged.clone();
@@ -832,15 +857,12 @@ impl ApplyIncomingMobileClipUseCase {
             .file_staging
             .read_by_uri(buffered.staged.uri.as_str())
             .await
-            .map_err(|err| match err {
-                MobileFileStagingError::NotFound => BuildSnapshotFailure::Internal(format!(
-                    "staged image file missing for `{}`: {err}",
-                    name
-                )),
-                _ => BuildSnapshotFailure::Internal(format!(
-                    "read staged image bytes for `{}` failed: {err}",
-                    name
-                )),
+            .map_err(|err| {
+                let action = match err {
+                    MobileFileStagingError::NotFound => "staged image file missing",
+                    _ => "read staged image bytes",
+                };
+                BuildSnapshotFailure::Internal(ActionFailed::boxed(action, err))
             })?;
         let rep = ObservedClipboardRepresentation::new(
             RepresentationId::new(),
@@ -875,10 +897,10 @@ impl ApplyIncomingMobileClipUseCase {
         let name = data_name
             .ok_or_else(|| BuildSnapshotFailure::Decode("File item without dataName".into()))?;
         let buffered = self.buffer.take(&name).ok_or_else(|| {
-            BuildSnapshotFailure::Decode(format!(
-                "file buffer miss for `{}` (PUT /file may have arrived late or never)",
-                name
-            ))
+            // 结果文本会写入日志并返回调用方，不携带文件名。
+            BuildSnapshotFailure::Decode(
+                "file buffer miss (PUT /file may have arrived late or never)".into(),
+            )
         })?;
         let transfer_id = buffered.transfer_id.clone();
         let staged_file = buffered.staged.clone();
@@ -910,8 +932,9 @@ impl ApplyIncomingMobileClipUseCase {
         snapshot: SystemClipboardSnapshot,
         provisional: Option<(String, ReceiveItemRole)>,
     ) -> Result<ApplyIncomingMobileClipOutcome, ApplyIncomingMobileClipError> {
-        let (plaintext, snapshot_hash) = encode_snapshot_to_v3_bytes(&snapshot)
-            .map_err(|e| ApplyIncomingMobileClipError::EncodeFailed(e.to_string()))?;
+        let (plaintext, snapshot_hash) = encode_snapshot_to_v3_bytes(&snapshot).map_err(|e| {
+            ApplyIncomingMobileClipError::EncodeFailed(e.context("encode V3 envelope").into())
+        })?;
 
         // 伪 DeviceId: `mobile_sync:<id>` 前缀让日志 / clipboard_event.from_device
         // 一眼看出"这条不是 P2P 来的", 不污染真实 P2P DeviceId 命名空间。
@@ -987,7 +1010,7 @@ impl ApplyIncomingMobileClipUseCase {
                 // 我们刚 encode 出来的 envelope 又被 inbound decode 失败 ——
                 // 几乎不可能, 但为了类型完备保留这条路径 + warn 日志。
                 warn!(
-                    reason = %reason,
+                    error_kind = "inbound_decode_failed",
                     "mobile_sync apply_incoming: inbound decode failed (unexpected — we just encoded it)"
                 );
                 ApplyIncomingMobileClipOutcome::DecodeFailed { reason }

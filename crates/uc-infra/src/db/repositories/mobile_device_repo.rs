@@ -86,7 +86,7 @@ where
         let row = self
             .mapper
             .to_row(device)
-            .map_err(|e| MobileDeviceError::Storage(e.to_string()))?;
+            .map_err(|e| MobileDeviceError::Storage(e.context("map mobile device row").into()))?;
 
         let outcome: SaveOutcome = self
             .executor
@@ -102,18 +102,17 @@ where
                         let id_taken: i64 = mobile_device
                             .filter(device_id.eq(&row.device_id))
                             .count()
-                            .get_result(conn)
-                            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                            .get_result(conn)?;
                         if id_taken > 0 {
                             Ok(SaveOutcome::DuplicateDeviceId)
                         } else {
                             Ok(SaveOutcome::DuplicateUsername)
                         }
                     }
-                    Err(e) => Err(anyhow::anyhow!(e.to_string())),
+                    Err(e) => Err(anyhow::Error::new(e)),
                 }
             })
-            .map_err(|e| MobileDeviceError::Storage(e.to_string()))?;
+            .map_err(|e| MobileDeviceError::Storage(e.context("insert mobile device").into()))?;
 
         match outcome {
             SaveOutcome::Inserted => Ok(()),
@@ -134,18 +133,15 @@ where
                 let row = mobile_device
                     .filter(username.eq(&needle))
                     .first::<MobileDeviceRow>(conn)
-                    .optional()
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                    .optional()?;
                 match row {
-                    Some(r) => self
-                        .mapper
-                        .to_domain(&r)
-                        .map(Some)
-                        .map_err(|e| anyhow::anyhow!(e.to_string())),
+                    Some(r) => self.mapper.to_domain(&r).map(Some),
                     None => Ok(None),
                 }
             })
-            .map_err(|e| MobileDeviceError::Storage(e.to_string()))
+            .map_err(|e| {
+                MobileDeviceError::Storage(e.context("find mobile device by username").into())
+            })
     }
 
     async fn find_by_device_id(
@@ -158,37 +154,29 @@ where
                 let row = mobile_device
                     .filter(device_id.eq(&needle))
                     .first::<MobileDeviceRow>(conn)
-                    .optional()
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                    .optional()?;
                 match row {
-                    Some(r) => self
-                        .mapper
-                        .to_domain(&r)
-                        .map(Some)
-                        .map_err(|e| anyhow::anyhow!(e.to_string())),
+                    Some(r) => self.mapper.to_domain(&r).map(Some),
                     None => Ok(None),
                 }
             })
-            .map_err(|e| MobileDeviceError::Storage(e.to_string()))
+            .map_err(|e| {
+                MobileDeviceError::Storage(e.context("find mobile device by device id").into())
+            })
     }
 
     async fn list_all(&self) -> Result<Vec<MobileDevice>, MobileDeviceError> {
         self.executor
             .run(|conn| {
-                let rows = mobile_device
-                    .load::<MobileDeviceRow>(conn)
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                let rows = mobile_device.load::<MobileDeviceRow>(conn)?;
                 let mut out = Vec::with_capacity(rows.len());
                 for r in &rows {
-                    let d = self
-                        .mapper
-                        .to_domain(r)
-                        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                    let d = self.mapper.to_domain(r)?;
                     out.push(d);
                 }
                 Ok(out)
             })
-            .map_err(|e| MobileDeviceError::Storage(e.to_string()))
+            .map_err(|e| MobileDeviceError::Storage(e.context("list mobile devices").into()))
     }
 
     async fn delete(&self, device_id_value: &MobileDeviceId) -> Result<bool, MobileDeviceError> {
@@ -198,9 +186,9 @@ where
             .run(move |conn| {
                 diesel::delete(mobile_device.filter(device_id.eq(&needle)))
                     .execute(conn)
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))
+                    .map_err(anyhow::Error::new)
             })
-            .map_err(|e| MobileDeviceError::Storage(e.to_string()))?;
+            .map_err(|e| MobileDeviceError::Storage(e.context("delete mobile device").into()))?;
         Ok(affected > 0)
     }
 
@@ -239,10 +227,10 @@ where
                         // username collision.
                         Ok(Err(MobileDeviceError::UsernameCollision))
                     }
-                    Err(e) => Err(anyhow::anyhow!(e.to_string())),
+                    Err(e) => Err(anyhow::Error::new(e)),
                 }
             })
-            .map_err(|e| MobileDeviceError::Storage(e.to_string()))?
+            .map_err(|e| MobileDeviceError::Storage(e.context("update mobile device").into()))?
     }
 }
 

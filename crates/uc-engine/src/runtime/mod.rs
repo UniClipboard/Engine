@@ -11,6 +11,7 @@ mod session_supervisor;
 mod shutdown;
 mod task_shutdown;
 
+use std::error::Error;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -25,12 +26,15 @@ use uc_application::facade::{
 };
 use uc_core::ports::ClockPort;
 use uc_core::TaskRegistry;
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::assembly::host::{
     wire_host_capabilities_with_emitter, EngineHostEventEmitter, HostWiring,
 };
 #[cfg(feature = "lan-compat")]
 use crate::assembly::mobile_lan::MobileLanEndpointUpdater;
+#[cfg(feature = "dev-tools")]
+use crate::dev::JoinerFinalConfirmationGate;
 use crate::engine::event_stream::EventSender;
 use crate::error_codes::PROFILE_UPGRADE_BACKUP_KEY_MISSING_CODE;
 use crate::{
@@ -63,6 +67,8 @@ pub(crate) struct ProductionRuntime {
     events: EventSender,
     #[cfg(feature = "dev-tools")]
     network_partition_gate: uc_infra::network::iroh::IrohNetworkPartitionGate,
+    #[cfg(feature = "dev-tools")]
+    joiner_final_confirmation_gate: Arc<JoinerFinalConfirmationGate>,
 }
 
 // 启动过程中还没有 ProductionRuntime；失败或取消也要封口已有安全会话。
@@ -158,6 +164,8 @@ impl ProductionRuntime {
         let iroh_bind_port_override = config.test_iroh_bind_port_override();
         #[cfg(feature = "dev-tools")]
         let network_partition_gate = uc_infra::network::iroh::IrohNetworkPartitionGate::default();
+        #[cfg(feature = "dev-tools")]
+        let joiner_final_confirmation_gate = Arc::new(JoinerFinalConfirmationGate::default());
         let emitter = Arc::new(EngineHostEventEmitter::new(events.clone()));
         let wiring = wire_host_capabilities_with_emitter(
             &config,
@@ -232,6 +240,8 @@ impl ProductionRuntime {
             iroh_bind_port_override,
             #[cfg(feature = "dev-tools")]
             network_partition_gate.clone(),
+            #[cfg(feature = "dev-tools")]
+            Arc::clone(&joiner_final_confirmation_gate),
             Arc::clone(&network_recovery),
         );
         let started = async {
@@ -304,6 +314,8 @@ impl ProductionRuntime {
             events,
             #[cfg(feature = "dev-tools")]
             network_partition_gate,
+            #[cfg(feature = "dev-tools")]
+            joiner_final_confirmation_gate,
         })
     }
 
@@ -391,11 +403,12 @@ fn startup_error(
     context: &'static str,
     error: impl std::error::Error + Send + Sync + 'static,
 ) -> EngineError {
+    let io_kind = io_error_kind(&error);
     let _ = writeln!(
         std::io::stderr().lock(),
-        "uc-engine startup failed [{context}]: {error}"
+        "uc-engine startup failed [{context}] io_error_kind={io_kind:?}"
     );
-    error!(context, error = %error, "engine startup failed");
+    error!(context, io_error_kind = io_kind, "engine startup failed");
     if error_chain_contains::<uc_infra::security::ProfileUpgradeBackupRecordKeyMissing>(&error) {
         return EngineError::new(
             PROFILE_UPGRADE_BACKUP_KEY_MISSING_CODE,
@@ -431,9 +444,14 @@ fn operation_unavailable_error() -> EngineError {
 fn operation_error_with_code(
     code: u32,
     context: &'static str,
-    error: impl std::fmt::Display,
+    error: impl Into<Box<dyn Error + Send + Sync>>,
 ) -> EngineError {
-    error!(context, error = %error, "engine operation failed");
+    let error = error.into();
+    error!(
+        context,
+        io_error_kind = io_error_kind(error.as_ref()),
+        "engine operation failed"
+    );
     EngineError::new(code, EngineErrorCategory::Internal, false)
 }
 
@@ -735,8 +753,10 @@ mod tests {
 
     #[test]
     fn storage_failures_use_distinct_stable_codes() {
-        let stats = map_storage_error(StorageFacadeError::Stats("private detail".into()));
-        let clear = map_storage_error(StorageFacadeError::ClearCache("private detail".into()));
+        let stats = map_storage_error(StorageFacadeError::Stats(anyhow::anyhow!("private detail")));
+        let clear = map_storage_error(StorageFacadeError::ClearCache(anyhow::anyhow!(
+            "private detail"
+        )));
 
         assert_eq!(stats.code(), QUERY_STORAGE_STATS_FAILED_CODE);
         assert_eq!(clear.code(), CLEAR_STORAGE_CACHE_FAILED_CODE);

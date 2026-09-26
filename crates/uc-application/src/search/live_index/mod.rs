@@ -11,6 +11,7 @@ use uc_core::ports::clipboard::{
 use uc_core::ports::search::SearchPipelinePort;
 use uc_core::ports::{SearchIndexPort, SearchKeyDerivationPort, SelectRepresentationPolicyPort};
 use uc_core::SystemClipboardSnapshot;
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::clipboard::file_set_query::load_has_directory_structure;
 use crate::facade::SearchProjectionBuilder;
@@ -33,8 +34,8 @@ pub enum ClipboardLiveIndexOutcome {
 
 #[derive(Debug, Error)]
 pub enum ClipboardLiveIndexError {
-    #[error("clipboard live index failed: {0}")]
-    Internal(String),
+    #[error("clipboard live index failed")]
+    Internal(#[source] anyhow::Error),
 }
 
 #[async_trait]
@@ -81,7 +82,7 @@ impl ClipboardLiveIndexPort for ClipboardLiveIndexer {
             .clipboard_entry_repo
             .get_entry(&entry_id)
             .await
-            .map_err(|err| ClipboardLiveIndexError::Internal(err.to_string()))?
+            .map_err(|err| ClipboardLiveIndexError::Internal(anyhow::Error::from(err)))?
         {
             Some(entry) => entry,
             None => {
@@ -95,7 +96,7 @@ impl ClipboardLiveIndexPort for ClipboardLiveIndexer {
             .deps
             .representation_policy
             .select(input.snapshot.as_ref())
-            .map_err(|err| ClipboardLiveIndexError::Internal(err.to_string()))?;
+            .map_err(|err| ClipboardLiveIndexError::Internal(anyhow::Error::from(err)))?;
 
         // Resolve the originating device from the event store, mirroring the
         // rebuild path. A missing event or lookup error degrades to "unknown
@@ -109,7 +110,8 @@ impl ClipboardLiveIndexPort for ClipboardLiveIndexer {
             Ok(device) => device.map(|d| d.to_string()),
             Err(err) => {
                 debug!(
-                    error = %err,
+                    error_kind = "source_device_lookup",
+                    io_error_kind = io_error_kind(err.as_ref()),
                     entry_id = %entry_id,
                     "search: failed to resolve source device, indexing without it"
                 );
@@ -124,7 +126,8 @@ impl ClipboardLiveIndexPort for ClipboardLiveIndexer {
                 .await
                 .unwrap_or_else(|err| {
                     debug!(
-                        error = %err,
+                        error_kind = "file_set_load",
+                        io_error_kind = io_error_kind(&err),
                         entry_id = %entry_id,
                         "search: failed to load file set, indexing without directory tag"
                     );
@@ -150,7 +153,8 @@ impl ClipboardLiveIndexPort for ClipboardLiveIndexer {
             Ok(search_key) => search_key,
             Err(err) => {
                 debug!(
-                    error = %err,
+                    error_kind = "search_key_derive",
+                    io_error_kind = io_error_kind(&err),
                     entry_id = %entry_id,
                     "search: key derivation failed, skipping live index"
                 );
@@ -164,7 +168,7 @@ impl ClipboardLiveIndexPort for ClipboardLiveIndexer {
             .deps
             .search_pipeline
             .build(&pipeline_input, &search_key)
-            .map_err(|err| ClipboardLiveIndexError::Internal(err.to_string()))?;
+            .map_err(|err| ClipboardLiveIndexError::Internal(anyhow::Error::from(err)))?;
 
         // An entry with no postings (e.g. an image with no searchable text) is
         // still indexed: the search index must hold every browsable entry, not
@@ -174,7 +178,7 @@ impl ClipboardLiveIndexPort for ClipboardLiveIndexer {
             .search_index
             .index_entry(document, postings)
             .await
-            .map_err(|err| ClipboardLiveIndexError::Internal(err.to_string()))?;
+            .map_err(|err| ClipboardLiveIndexError::Internal(anyhow::Error::from(err)))?;
 
         Ok(ClipboardLiveIndexOutcome::Indexed)
     }

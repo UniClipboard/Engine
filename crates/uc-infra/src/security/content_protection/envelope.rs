@@ -39,12 +39,12 @@ pub(super) fn encode(
         u16::try_from(key_id.len()).map_err(|source| ContentProtectionError::Cryptography {
             source: anyhow::Error::new(source).context("V3 content key id is too large"),
         })?;
-    let nonce: [u8; NONCE_BYTES] =
-        nonce
-            .try_into()
-            .map_err(|_| ContentProtectionError::Cryptography {
-                source: anyhow::anyhow!("V3 content nonce has an invalid length"),
-            })?;
+    let nonce: [u8; NONCE_BYTES] = nonce
+        .try_into()
+        // TryFromSliceError：切片范围已固定，目标分类完整表达长度不符。
+        .map_err(|_| ContentProtectionError::Cryptography {
+            source: anyhow::anyhow!("V3 content nonce has an invalid length"),
+        })?;
     if ciphertext.len() < MIN_AEAD_CIPHERTEXT_BYTES {
         return Err(ContentProtectionError::Cryptography {
             source: anyhow::anyhow!("V3 AEAD ciphertext is shorter than its tag"),

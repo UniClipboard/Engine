@@ -5,8 +5,8 @@ use diesel::sql_types::{Binary, Integer, Nullable};
 use serde::{Deserialize, Serialize};
 use uc_application::deps::AdmissionReadFailureCategory;
 use uc_core::membership::{
-    AdmissionRole, JoinerAdmission, SpaceAdmissionAggregate, SponsorAdmission,
-    SponsorPairingConfirmationStatus,
+    AdmissionRecoveryStep, AdmissionRole, JoinerAdmission, SpaceAdmissionAggregate,
+    SponsorAdmission,
 };
 
 use super::codec::{map_key_error, EncryptedRecordRow};
@@ -14,9 +14,11 @@ use super::{SpaceAdmissionStateStoreError, SqliteSpaceAdmissionState};
 use crate::db::ports::DbExecutor;
 use crate::security::AdmissionKeyError;
 
-const RECOVERY_SUMMARY_FORMAT_V2: u16 = 2;
+const RECOVERY_SUMMARY_FORMAT_V3: u16 = 3;
+const LEGACY_RECOVERY_SUMMARY_FORMAT_V2: u16 = 2;
 const RECOVERY_INDEX_BATCH_SIZE: i32 = 64;
-const RECOVERY_SUMMARY_MARKER: [u8; 8] = *b"UCARSV2\0";
+const RECOVERY_SUMMARY_MARKER: [u8; 8] = *b"UCARSV3\0";
+const LEGACY_RECOVERY_SUMMARY_MARKER_V2: [u8; 8] = *b"UCARSV2\0";
 
 #[derive(Debug, thiserror::Error)]
 enum RecoverySummaryValidationError {
@@ -78,7 +80,9 @@ pub(crate) struct LoadedRecoveryIndex {
     pub(crate) sponsor_deadlines: Vec<SponsorAdmission>,
     pub(crate) sponsor_abandonments: Vec<SponsorAdmission>,
     pub(crate) next_deadline_ms: Option<i64>,
-    pub(crate) sponsor_confirmation_pending: bool,
+    /// 存在尚未到期的邀请方配对义务；这类记录不加载记录体，只作为运行资格事实。
+    pub(crate) sponsor_pairing_open: bool,
+    pub(crate) needs_attention: bool,
 }
 
 impl RecoverySummaryRow {
@@ -97,55 +101,31 @@ impl RecoverySummary {
     ) -> Result<Self, SpaceAdmissionStateStoreError> {
         let content_token: [u8; 32] = content_token
             .try_into()
-            .map_err(|_| SpaceAdmissionStateStoreError::Corrupt)?;
+            .map_err(SpaceAdmissionStateStoreError::corrupt_from)?;
         let role = match aggregate.record_role() {
             Some(AdmissionRole::Joiner) => RecoveryRecordRole::Joiner,
             Some(AdmissionRole::Sponsor) => RecoveryRecordRole::Sponsor,
             Some(AdmissionRole::CompletionHelper) => RecoveryRecordRole::CompletionHelper,
             None => RecoveryRecordRole::Unknown,
         };
-        let sponsor_confirmation_pending =
-            aggregate
-                .sponsor_pairing_confirmation()
-                .is_some_and(|summary| {
-                    summary.status() == SponsorPairingConfirmationStatus::AwaitingPeerConfirmation
-                });
-        let action = if aggregate.has_pending_sponsor_abandonment() {
-            RecoveryAction::SponsorAbandonment
-        } else if sponsor_confirmation_pending {
-            RecoveryAction::SponsorConfirmation
-        } else if aggregate.has_expirable_sponsor() {
-            RecoveryAction::SponsorDeadline
-        } else if aggregate.pending_recovery().is_some()
-            || aggregate.invitation_resolution().is_some()
-            || aggregate.has_pending_local_termination()
-        {
-            RecoveryAction::JoinerNetwork
-        } else if aggregate.has_expirable_local_join() {
-            RecoveryAction::JoinerExpiry
-        } else if role == RecoveryRecordRole::CompletionHelper
-            && aggregate.expires_at_ms().is_some()
-        {
-            RecoveryAction::CompletionHelper
-        } else {
-            RecoveryAction::None
+        // 恢复动作、截止时间与缺少期限的判定都来自 Core 的唯一结论；本索引只做持久映射。
+        let work = aggregate.outstanding_work();
+        let action = match work.next_step() {
+            Some(AdmissionRecoveryStep::SponsorRevocation) => RecoveryAction::SponsorAbandonment,
+            Some(AdmissionRecoveryStep::SponsorConfirmation) => RecoveryAction::SponsorConfirmation,
+            Some(AdmissionRecoveryStep::SponsorDeadline) => RecoveryAction::SponsorDeadline,
+            Some(AdmissionRecoveryStep::JoinerNetwork) => RecoveryAction::JoinerNetwork,
+            Some(AdmissionRecoveryStep::JoinerExpiry) => RecoveryAction::JoinerExpiry,
+            Some(AdmissionRecoveryStep::CompletionHelperDeadline) => {
+                RecoveryAction::CompletionHelper
+            }
+            None => RecoveryAction::None,
         };
-        let expires_at_ms = match action {
-            RecoveryAction::JoinerNetwork
-            | RecoveryAction::JoinerExpiry
-            | RecoveryAction::SponsorConfirmation
-            | RecoveryAction::SponsorDeadline
-            | RecoveryAction::CompletionHelper => aggregate.expires_at_ms(),
-            RecoveryAction::None | RecoveryAction::SponsorAbandonment => None,
-        };
-        let legacy_no_deadline = !aggregate.is_terminal()
-            && (aggregate.expires_at_ms().is_none()
-                || (role == RecoveryRecordRole::Sponsor
-                    && aggregate.sponsor_pairing_confirmation().is_none()
-                    && !aggregate.has_expirable_sponsor()));
+        let expires_at_ms = work.deadline_ms();
+        let legacy_no_deadline = work.missing_deadline();
         Ok(Self {
             marker: RECOVERY_SUMMARY_MARKER,
-            format_version: RECOVERY_SUMMARY_FORMAT_V2,
+            format_version: RECOVERY_SUMMARY_FORMAT_V3,
             role,
             admission_id: *aggregate.admission_id().as_bytes(),
             expires_at_ms,
@@ -197,7 +177,8 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                     sponsor_deadlines: Vec::new(),
                     sponsor_abandonments: Vec::new(),
                     next_deadline_ms: None,
-                    sponsor_confirmation_pending: false,
+                    sponsor_pairing_open: false,
+                    needs_attention: false,
                 });
             }
             let mut cursor: Option<Vec<u8>> = None;
@@ -205,7 +186,8 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
             let mut sponsor_deadlines = Vec::new();
             let mut sponsor_abandonments = Vec::new();
             let mut next_deadline_ms: Option<i64> = None;
-            let mut sponsor_confirmation_pending = false;
+            let mut sponsor_pairing_open = false;
+            let mut needs_attention = false;
             loop {
                 let rows = load_summary_batch(conn, cursor.as_deref())?;
                 if rows.is_empty() {
@@ -233,6 +215,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                             RecoverySummaryValidationError::RecordMismatch,
                         ));
                     }
+                    needs_attention |= summary.legacy_no_deadline;
                     if let Some(deadline) =
                         summary.expires_at_ms.filter(|deadline| *deadline > now_ms)
                     {
@@ -240,10 +223,13 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                             next_deadline_ms.map_or(deadline, |current| current.min(deadline)),
                         );
                     }
-                    if summary.action == RecoveryAction::SponsorConfirmation
-                        && !summary.is_due(now_ms)
+                    // 未到期的邀请方配对仍在进行：正式提交前后都不让普通维护插队。
+                    if matches!(
+                        summary.action,
+                        RecoveryAction::SponsorConfirmation | RecoveryAction::SponsorDeadline
+                    ) && !summary.is_due(now_ms)
                     {
-                        sponsor_confirmation_pending = true;
+                        sponsor_pairing_open = true;
                     }
                     if !summary.needs_body(now_ms) {
                         continue;
@@ -256,17 +242,17 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                         RecoveryAction::JoinerNetwork | RecoveryAction::JoinerExpiry => joiners
                             .push(
                                 JoinerAdmission::try_from_record(aggregate)
-                                    .ok_or(SpaceAdmissionStateStoreError::Corrupt)?,
+                                    .ok_or_else(SpaceAdmissionStateStoreError::corrupt)?,
                             ),
                         RecoveryAction::SponsorConfirmation | RecoveryAction::SponsorDeadline => {
                             sponsor_deadlines.push(
                                 SponsorAdmission::try_from_record(aggregate)
-                                    .ok_or(SpaceAdmissionStateStoreError::Corrupt)?,
+                                    .ok_or_else(SpaceAdmissionStateStoreError::corrupt)?,
                             )
                         }
                         RecoveryAction::SponsorAbandonment => sponsor_abandonments.push(
                             SponsorAdmission::try_from_record(aggregate)
-                                .ok_or(SpaceAdmissionStateStoreError::Corrupt)?,
+                                .ok_or_else(SpaceAdmissionStateStoreError::corrupt)?,
                         ),
                         // 旧实验 Helper 没有双方认可的共同期限，只保留记录，不臆造到期动作。
                         RecoveryAction::CompletionHelper | RecoveryAction::None => {}
@@ -282,7 +268,8 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                 sponsor_deadlines,
                 sponsor_abandonments,
                 next_deadline_ms,
-                sponsor_confirmation_pending,
+                sponsor_pairing_open,
+                needs_attention,
             })
         })
     }
@@ -300,7 +287,9 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
             .map_err(map_key_error)?
             .open_compact(encrypted)
             .map_err(|error| match error {
-                error @ (AdmissionKeyError::Corrupt | AdmissionKeyError::OpenFailed) => {
+                error @ (AdmissionKeyError::Corrupt { .. }
+                | AdmissionKeyError::InvalidLayout
+                | AdmissionKeyError::OpenFailed { .. }) => {
                     SpaceAdmissionStateStoreError::read_invalid(
                         AdmissionReadFailureCategory::DerivedSummaryInvalid,
                         error,
@@ -308,25 +297,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                 }
                 other => map_key_error(other),
             })?;
-        if let Ok(summary) = postcard::from_bytes::<RecoverySummary>(&plaintext) {
-            if summary.marker == RECOVERY_SUMMARY_MARKER
-                && summary.format_version == RECOVERY_SUMMARY_FORMAT_V2
-            {
-                return Ok(Some(summary));
-            }
-            return Err(SpaceAdmissionStateStoreError::read_invalid(
-                AdmissionReadFailureCategory::DerivedSummaryInvalid,
-                RecoverySummaryValidationError::InvalidFormat,
-            ));
-        }
-        postcard::from_bytes::<LegacyRecoverySummaryV1>(&plaintext)
-            .map(|_| None)
-            .map_err(|source| {
-                SpaceAdmissionStateStoreError::read_invalid(
-                    AdmissionReadFailureCategory::DerivedSummaryInvalid,
-                    source,
-                )
-            })
+        decode_recovery_summary(&plaintext)
     }
 
     fn load_recovery_aggregate(
@@ -352,7 +323,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
         summary: &RecoverySummary,
     ) -> Result<(), SpaceAdmissionStateStoreError> {
         let plaintext =
-            postcard::to_stdvec(summary).map_err(|_| SpaceAdmissionStateStoreError::Corrupt)?;
+            postcard::to_stdvec(summary).map_err(SpaceAdmissionStateStoreError::corrupt_from)?;
         let encrypted = self
             .keys
             .seal_profile_payload_compact(&row.purpose(), &plaintext)
@@ -368,6 +339,74 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
         .bind::<Binary, _>(encrypted)
         .execute(conn)?;
         Ok(())
+    }
+}
+
+fn decode_recovery_summary(
+    plaintext: &[u8],
+) -> Result<Option<RecoverySummary>, SpaceAdmissionStateStoreError> {
+    if let Ok(summary) = postcard::from_bytes::<RecoverySummary>(plaintext) {
+        if summary.marker == RECOVERY_SUMMARY_MARKER
+            && summary.format_version == RECOVERY_SUMMARY_FORMAT_V3
+        {
+            return Ok(Some(summary));
+        }
+        if summary.marker == LEGACY_RECOVERY_SUMMARY_MARKER_V2
+            && summary.format_version == LEGACY_RECOVERY_SUMMARY_FORMAT_V2
+        {
+            return Ok(None);
+        }
+        return Err(SpaceAdmissionStateStoreError::read_invalid(
+            AdmissionReadFailureCategory::DerivedSummaryInvalid,
+            RecoverySummaryValidationError::InvalidFormat,
+        ));
+    }
+    postcard::from_bytes::<LegacyRecoverySummaryV1>(plaintext)
+        .map(|_| None)
+        .map_err(|source| {
+            SpaceAdmissionStateStoreError::read_invalid(
+                AdmissionReadFailureCategory::DerivedSummaryInvalid,
+                source,
+            )
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unindexed_in_flight_joiner_is_not_loaded_for_pairing_work() {
+        let summary = RecoverySummary {
+            marker: RECOVERY_SUMMARY_MARKER,
+            format_version: RECOVERY_SUMMARY_FORMAT_V3,
+            role: RecoveryRecordRole::Joiner,
+            admission_id: [0x41; 32],
+            expires_at_ms: None,
+            legacy_no_deadline: false,
+            action: RecoveryAction::None,
+            content_token: [0x42; 32],
+        };
+
+        assert!(!summary.needs_body(0));
+    }
+
+    #[test]
+    fn previous_recovery_summary_is_rebuilt_instead_of_treated_as_corrupt() {
+        let legacy = RecoverySummary {
+            marker: LEGACY_RECOVERY_SUMMARY_MARKER_V2,
+            format_version: LEGACY_RECOVERY_SUMMARY_FORMAT_V2,
+            role: RecoveryRecordRole::Sponsor,
+            admission_id: [0x41; 32],
+            expires_at_ms: Some(301_000),
+            legacy_no_deadline: false,
+            action: RecoveryAction::SponsorConfirmation,
+            content_token: [0x42; 32],
+        };
+        let encoded = postcard::to_stdvec(&legacy).expect("旧恢复摘要可编码");
+        assert!(decode_recovery_summary(&encoded)
+            .expect("旧恢复摘要应触发重建")
+            .is_none());
     }
 }
 

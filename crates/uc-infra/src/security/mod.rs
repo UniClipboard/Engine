@@ -88,7 +88,8 @@ pub use space_admission_auth::{
     SpaceAdmissionServerSetupEncoding, SpaceAdmissionServerState,
 };
 pub use space_control_generation::{
-    PreparedSpaceControlGeneration, SpaceControlGeneration, SpaceControlGenerationError,
+    AdmissionInputInconsistency, AdmissionInputIssue, PreparedSpaceControlGeneration,
+    SpaceControlGeneration, SpaceControlGenerationError,
 };
 pub use space_transition_activation::{
     SpaceTransitionActivation, SpaceTransitionActivationError, SpaceTransitionActivationOutcome,

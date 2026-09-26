@@ -46,10 +46,11 @@ use uc_observability_contract::diagnostics::{
     complete_operation, operation_span, DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation,
     DiagnosticRole, DiagnosticSpanKind, OperationCompletion, OperationContext,
 };
+use uc_observability_contract::error_source::io_error_kind;
 
 use super::clipboard_wire::{self, AckCode, WireEncodeError};
 use super::conn_path::{path_for, OnMissing};
-use super::connect::connect_with_staggered_retry;
+use super::connect::{connect_with_staggered_retry, StaggeredDialError};
 use super::peer_address_resolver::PeerAddressResolver;
 
 /// ALPN identifier for the Slice 2 clipboard sync protocol. Independent of
@@ -62,9 +63,18 @@ pub const LEGACY_CLIPBOARD_ALPN: &[u8] = b"uniclipboard/clipboard/0";
 /// Result a single in-flight dial broadcasts to every follower waiting
 /// on the same peer's single-flight slot. `Connection: Clone` makes
 /// fan-out cheap (each follower gets its own handle on the same QUIC
-/// connection); the failure branch carries the joined attempt errors so
-/// followers' tracing surfaces the same root cause the leader observed.
-type DialResult = Result<Connection, String>;
+/// connection); the failure branch shares the leader's typed dial error so
+/// followers keep the same root cause the leader observed.
+type DialResult = Result<Connection, Arc<StaggeredDialError>>;
+
+/// 单飞拨号的失败：领头方的拨号失败，或跟随方没有收到领头方的结果。
+#[derive(Debug, thiserror::Error)]
+enum SingleFlightDialError {
+    #[error("single-flight dial failed")]
+    Dial(#[source] Arc<StaggeredDialError>),
+    #[error("single-flight follower lost leader broadcast")]
+    LeaderLost(#[source] broadcast::error::RecvError),
+}
 
 pub struct IrohClipboardDispatchAdapter {
     endpoint: Arc<Endpoint>,
@@ -117,7 +127,11 @@ impl IrohClipboardDispatchAdapter {
     /// #886's acceptance table: N concurrent copies against an offline
     /// peer collapse from N·3 raw `iroh connect` attempts and N
     /// `report_communication_failure` calls to 3 and 1 respectively.
-    async fn dial_single_flight(&self, target: &DeviceId, addr: EndpointAddr) -> DialResult {
+    async fn dial_single_flight(
+        &self,
+        target: &DeviceId,
+        addr: EndpointAddr,
+    ) -> Result<Connection, SingleFlightDialError> {
         enum Role {
             Leader(broadcast::Sender<DialResult>),
             Follower(broadcast::Receiver<DialResult>),
@@ -148,7 +162,8 @@ impl IrohClipboardDispatchAdapter {
             "clipboard",
             uc_observability_contract::diagnostics::connectivity::AddressInputSource::Stored,
                 )
-                .await;
+                .await
+                .map_err(Arc::new);
 
                 // First-hand dial verdict — fold report_communication_failure into the
                 // leader's tail so concurrent followers piling on the
@@ -157,7 +172,8 @@ impl IrohClipboardDispatchAdapter {
                 // failure return.
                 if let Err(ref err) = result {
                     debug!(
-                        error = %err,
+                        error_kind = "dial_failed",
+                        io_error_kind = io_error_kind(err),
                         "clipboard dispatch: single-flight dial failed; marking offline"
                     );
                     self.peer_reachability
@@ -173,13 +189,11 @@ impl IrohClipboardDispatchAdapter {
                     map.remove(target);
                 }
                 let _ = tx.send(result.clone());
-                result
+                result.map_err(SingleFlightDialError::Dial)
             }
             Role::Follower(mut rx) => match rx.recv().await {
-                Ok(result) => result,
-                Err(err) => Err(format!(
-                    "single-flight follower lost leader broadcast: {err}"
-                )),
+                Ok(result) => result.map_err(SingleFlightDialError::Dial),
+                Err(err) => Err(SingleFlightDialError::LeaderLost(err)),
             },
         }
     }
@@ -212,23 +226,27 @@ impl IrohClipboardDispatchAdapter {
         payload: &SyncPayload,
     ) -> Result<DispatchAck, ClipboardDispatchError> {
         let stream = connection.open_bi().await;
-        let (mut send, mut recv) =
-            stream.map_err(|err| ClipboardDispatchError::Io(format!("open_bi: {err}")))?;
+        let (mut send, mut recv) = stream.map_err(|err| {
+            ClipboardDispatchError::Io(anyhow::Error::from(err).context("open_bi").into())
+        })?;
 
         // Write the frame + close the send half so the peer's read_exact on
         // the payload length / body reaches a terminal state.
-        let frame_write =
-            match clipboard_wire::write_frame(&mut send, header, &payload.ciphertext).await {
-                Ok(()) => send
-                    .finish()
-                    .map_err(|err| ClipboardDispatchError::Io(format!("send.finish: {err}"))),
-                Err(error) => Err(map_encode_err(error)),
-            };
+        let frame_write = match clipboard_wire::write_frame(&mut send, header, &payload.ciphertext)
+            .await
+        {
+            Ok(()) => send.finish().map_err(|err| {
+                ClipboardDispatchError::Io(anyhow::Error::from(err).context("send.finish").into())
+            }),
+            Err(error) => Err(map_encode_err(error)),
+        };
         frame_write?;
 
         let mut ack_buf = [0u8; 1];
         let ack_read = recv.read_exact(&mut ack_buf).await;
-        ack_read.map_err(|err| ClipboardDispatchError::Io(format!("ack read: {err}")))?;
+        ack_read.map_err(|err| {
+            ClipboardDispatchError::Io(anyhow::Error::from(err).context("ack read").into())
+        })?;
 
         // Any unknown code is adapter-level rejection rather than an ignored
         // success.
@@ -239,9 +257,10 @@ impl IrohClipboardDispatchAdapter {
             Ok(AckCode::Rejected) => Err(ClipboardDispatchError::PeerRejected(
                 "peer returned Rejected ack".to_string(),
             )),
-            Err(err) => Err(ClipboardDispatchError::PeerRejected(format!(
-                "peer returned unknown ack byte: {err}"
-            ))),
+            // 未知回执字节只是协议分类；PeerRejected 保存的是拒绝原因文本，不承载下层错误。
+            Err(_) => Err(ClipboardDispatchError::PeerRejected(
+                "peer returned unknown ack byte".to_string(),
+            )),
         }
     }
 }
@@ -326,7 +345,8 @@ impl ClipboardDispatchPort for IrohClipboardDispatchAdapter {
             Ok(connection) => connection,
             Err(err) => {
                 debug!(
-                    error = %err,
+                    error_kind = "dial_failed",
+                    io_error_kind = io_error_kind(&err),
                     "clipboard dispatch: dial failed (single-flight), treating as Offline"
                 );
                 return DispatchReport {
@@ -397,7 +417,9 @@ fn network_completion(
 /// though the wire type name suggests otherwise.
 fn map_encode_err(err: WireEncodeError) -> ClipboardDispatchError {
     match err {
-        WireEncodeError::Io(ioerr) => ClipboardDispatchError::Io(format!("frame write: {ioerr}")),
+        WireEncodeError::Io(ioerr) => {
+            ClipboardDispatchError::Io(anyhow::Error::new(ioerr).context("frame write").into())
+        }
         WireEncodeError::PayloadTooLarge { size, max } => {
             // wire codec also enforces MAX_PAYLOAD_SIZE; if we somehow get
             // here (the upstream early-reject in `dispatch` should have
@@ -407,15 +429,15 @@ fn map_encode_err(err: WireEncodeError) -> ClipboardDispatchError {
                 "wire codec payload {size} bytes exceeds local maximum {max}"
             ))
         }
-        WireEncodeError::HeaderTooLarge { size, max } => ClipboardDispatchError::Internal(format!(
-            "self-built header {size} bytes exceeds {max}"
-        )),
-        WireEncodeError::Postcard(err) => {
-            ClipboardDispatchError::Internal(format!("header encode: {err}"))
-        }
-        WireEncodeError::UnsupportedVersion(version) => {
-            ClipboardDispatchError::Internal(format!("unsupported outbound wire version {version}"))
-        }
+        WireEncodeError::HeaderTooLarge { size, max } => ClipboardDispatchError::Internal(
+            format!("self-built header {size} bytes exceeds {max}").into(),
+        ),
+        WireEncodeError::Postcard(err) => ClipboardDispatchError::Internal(
+            anyhow::Error::from(err).context("header encode").into(),
+        ),
+        WireEncodeError::UnsupportedVersion(version) => ClipboardDispatchError::Internal(
+            format!("unsupported outbound wire version {version}").into(),
+        ),
     }
 }
 

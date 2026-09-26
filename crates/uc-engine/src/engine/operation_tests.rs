@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::operation::await_operation_completion;
 use super::{Engine, EngineRuntime};
+use crate::testing::TaskJoinFailures;
 use crate::{
     EngineError, EngineErrorCategory, EngineEvent, EngineState, Operation, OperationResult,
     OperationTerminal,
@@ -179,11 +180,14 @@ async fn suspend_timeout_during_disk_work_still_completes_without_another_reques
 
 #[tokio::test]
 async fn operation_panic_releases_registration_and_reports_one_failure() {
+    let failures = TaskJoinFailures::default();
+    let _capture = failures.install();
     let runtime = Arc::new(BlockingRuntime::new(true));
     let (engine, mut events) = Engine::from_runtime(runtime, 16);
     let error = engine.execute(Operation::ListDevices).await.unwrap_err();
     assert_eq!(error.category(), EngineErrorCategory::Internal);
     assert!(!format!("{error:?}").contains("private-operation-panic"));
+    assert_eq!(failures.kinds(), ["engine_operation"]);
     assert!(engine.operations.wait_until_empty(Duration::ZERO).await);
     assert!(matches!(
         events.next().await,

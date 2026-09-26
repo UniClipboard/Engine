@@ -95,13 +95,13 @@ impl MemberRosterFacade {
             .await
             .map_err(|error| match error {
                 QueryMemberRosterError::MemberRepository { source } => {
-                    RosterError::MemberRepository(source.to_string())
+                    RosterError::MemberRepository(source)
                 }
                 QueryMemberRosterError::MemberScope { .. } => {
-                    RosterError::MembershipReconciliationUnavailable
+                    RosterError::membership_reconciliation_unavailable()
                 }
                 QueryMemberRosterError::LocalIdentity { source } => {
-                    RosterError::LocalIdentity(source.to_string())
+                    RosterError::LocalIdentity(source)
                 }
             })
     }
@@ -113,17 +113,17 @@ impl MemberRosterFacade {
             .member_repo
             .list()
             .await
-            .map_err(|err| RosterError::MemberRepository(err.to_string()))?;
+            .map_err(RosterError::MemberRepository)?;
         let scope = self
             .peer_scope
             .snapshot()
             .await
-            .map_err(|_| RosterError::MembershipReconciliationUnavailable)?;
+            .map_err(RosterError::membership_reconciliation_unavailable_from)?;
         let local_fp = self
             .local_identity
             .get_current_fingerprint()
             .await
-            .map_err(|err| RosterError::LocalIdentity(err.to_string()))?;
+            .map_err(RosterError::LocalIdentity)?;
 
         // roster 展示已验证历史中的全部当前成员；paused 只限制通信资格，
         // 不能让离线拓扑中由历史引入的合法成员从名单中消失。
@@ -193,7 +193,7 @@ impl MemberRosterFacade {
             .member_repo
             .get(&device_id)
             .await
-            .map_err(|err| RosterError::MemberRepository(err.to_string()))?
+            .map_err(RosterError::MemberRepository)?
             .ok_or_else(|| RosterError::NotFound(device_id.as_str().to_string()))?;
 
         Ok(member.sync_preferences.into())
@@ -211,7 +211,7 @@ impl MemberRosterFacade {
             .member_repo
             .get(&device_id)
             .await
-            .map_err(|err| RosterError::MemberRepository(err.to_string()))?
+            .map_err(RosterError::MemberRepository)?
             .ok_or_else(|| RosterError::NotFound(device_id.as_str().to_string()))?;
 
         let updated_preferences =
@@ -224,7 +224,7 @@ impl MemberRosterFacade {
         self.member_repo
             .save(&updated)
             .await
-            .map_err(|err| RosterError::MemberRepository(err.to_string()))?;
+            .map_err(RosterError::MemberRepository)?;
 
         Ok(updated.sync_preferences.into())
     }
@@ -238,7 +238,7 @@ impl MemberRosterFacade {
             .member_repo
             .list()
             .await
-            .map_err(|error| RosterError::MemberRepository(error.to_string()))?;
+            .map_err(RosterError::MemberRepository)?;
         let member_ids = members
             .into_iter()
             .map(|member| member.device_id)
@@ -247,7 +247,7 @@ impl MemberRosterFacade {
             .query_space_protection(&member_ids)
             .await
             .map(Self::space_protection_view)
-            .map_err(|error| RosterError::SpaceProtection(error.to_string()))
+            .map_err(RosterError::SpaceProtection)
     }
 
     fn space_protection_view(snapshot: SpaceProtectionSnapshot) -> SpaceProtectionView {

@@ -13,7 +13,7 @@
 //! 与 [`super::clipboard_receiver_adapter`] 一致:sender 端 handler 用
 //! `Connection::remote_id()` 拿到对端 Ed25519 公钥,经
 //! `IdentityFingerprintFactoryPort` 派生出 fingerprint,在
-//! `MemberRepositoryPort` 中查匹配的 `SpaceMember`。陌生 peer 的连接被
+//! 成员状态负责人发布的身份目录中查匹配的设备。陌生 peer 的连接被
 //! 直接丢弃,不进入广播,避免被伪造进度污染 UI。
 //!
 //! ## 失败语义
@@ -25,6 +25,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use uc_application::deps::PeerIdentityDirectoryPort;
 
 use async_trait::async_trait;
 use iroh::endpoint::Connection;
@@ -35,11 +36,14 @@ use tracing::{debug, instrument, trace, warn};
 
 use uc_core::file_transfer::{OutboundProgressReporterPort, OutboundProgressStatus};
 use uc_core::ids::DeviceId;
-use uc_core::membership::{MemberRepositoryPort, PeerAdmissionPort};
+use uc_core::membership::PeerAdmissionPort;
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::PeerAddressRepositoryPort;
+use uc_observability_contract::diagnostics::connectivity::InboundPeerProtocol;
+use uc_observability_contract::error_source::io_error_kind;
 
-use super::connect::connect_with_staggered_retry;
+use super::connect::{connect_with_staggered_retry, StaggeredDialError};
+use super::inbound_peer::InboundPeerGate;
 use super::peer_address_resolver::PeerAddressResolver;
 use super::transfer_progress_wire::{
     self, transfer_id_from_bytes, transfer_id_to_bytes, ProgressFrame,
@@ -58,7 +62,7 @@ const PROGRESS_BROADCAST_CAPACITY: usize = 256;
 
 /// 一帧从 receiver 推回来的进度,身份验证已完成,wire 字段已映射到领域类型。
 ///
-/// `from_device` 是已通过 `MemberRepositoryPort` 验证过的对端 DeviceId。
+/// `from_device` 是已通过成员身份目录验证过的对端 DeviceId。
 /// `transfer_id` 是 sender 端的 EntryId(UUID v4 字符串),sender 用它
 /// 索引本地 entry 把进度送到对应的 UI 行。
 #[derive(Debug, Clone)]
@@ -86,9 +90,7 @@ pub struct IrohTransferProgressAdapter {
 }
 
 struct HandlerState {
-    member_repo: Arc<dyn MemberRepositoryPort>,
-    peer_admission: Arc<dyn PeerAdmissionPort>,
-    fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
+    gate: InboundPeerGate,
     event_tx: broadcast::Sender<InboundProgressEvent>,
 }
 
@@ -96,7 +98,7 @@ impl IrohTransferProgressAdapter {
     pub fn new(
         endpoint: Arc<Endpoint>,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-        member_repo: Arc<dyn MemberRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
     ) -> Self {
@@ -104,9 +106,12 @@ impl IrohTransferProgressAdapter {
         Self {
             event_tx: event_tx.clone(),
             handler_state: Arc::new(HandlerState {
-                member_repo,
-                peer_admission,
-                fingerprint_factory,
+                gate: InboundPeerGate::new(
+                    InboundPeerProtocol::TransferProgress,
+                    identities,
+                    peer_admission,
+                    fingerprint_factory,
+                ),
                 event_tx,
             }),
             reporter: Arc::new(ReporterImpl {
@@ -160,21 +165,13 @@ impl ProtocolHandler for IrohTransferProgressHandler {
         // 1. Resolve remote identity. Unknown peer → drop the connection
         //    silently. We deliberately don't write any response (this is a
         //    push-only direction: receiver doesn't expect any data back).
-        let from_device = match self.state.resolve_device(&remote_bytes).await {
-            Some(d) => d,
-            None => {
-                debug!(remote = %remote, "transfer progress: unknown peer fingerprint; dropping");
+        let from_device = match self.state.gate.admit(&remote_bytes).await {
+            Ok(device) => device,
+            Err(rejection) => {
+                self.state.gate.record_rejection(rejection);
                 return Ok(());
             }
         };
-
-        if !self.state.is_admitted(&from_device).await {
-            warn!(
-                from_device = %from_device.as_str(),
-                "transfer progress: peer is not admitted by current space protection"
-            );
-            return Ok(());
-        }
 
         debug!(
             from_device = %from_device.as_str(),
@@ -192,7 +189,8 @@ impl ProtocolHandler for IrohTransferProgressHandler {
                 Err(err) => {
                     debug!(
                         from_device = %from_device.as_str(),
-                        error = %err,
+                        error_kind = "connection_closed",
+                        io_error_kind = io_error_kind(&err),
                         "transfer progress: connection closed",
                     );
                     break;
@@ -221,7 +219,8 @@ impl ProtocolHandler for IrohTransferProgressHandler {
                 Err(err) => {
                     warn!(
                         from_device = %from_device.as_str(),
-                        error = %err,
+                        error_kind = "frame_decode",
+                        io_error_kind = io_error_kind(&err),
                         "transfer progress: frame decode failed",
                     );
                     // Bad frame doesn't tear down the whole connection;
@@ -232,34 +231,6 @@ impl ProtocolHandler for IrohTransferProgressHandler {
         }
 
         Ok(())
-    }
-}
-
-impl HandlerState {
-    /// Resolve `remote_id()` bytes to a known SpaceMember's DeviceId.
-    /// Mirrors `clipboard_receiver_adapter::HandlerState::resolve_device`
-    /// but doesn't share code with it (different broadcast types,
-    /// different state struct).
-    async fn is_admitted(&self, device_id: &DeviceId) -> bool {
-        match self.peer_admission.is_admitted(device_id).await {
-            Ok(admitted) => admitted,
-            Err(error) => {
-                warn!(error = %error, peer = %device_id.as_str(), "transfer progress: peer admission check failed");
-                false
-            }
-        }
-    }
-
-    async fn resolve_device(&self, remote_pubkey_bytes: &[u8; 32]) -> Option<DeviceId> {
-        let derived = self
-            .fingerprint_factory
-            .from_public_key(remote_pubkey_bytes)
-            .ok()?;
-        let members = self.member_repo.list().await.ok()?;
-        members
-            .into_iter()
-            .find(|m| m.identity_fingerprint == derived)
-            .map(|m| m.device_id)
     }
 }
 
@@ -304,7 +275,11 @@ impl OutboundProgressReporterPort for ReporterImpl {
             status,
         };
         if let Err(err) = self.send_frame(target, &frame).await {
-            warn!(error = %err, "progress reporter: send failed");
+            warn!(
+                error_kind = "frame_send",
+                io_error_kind = io_error_kind(&err),
+                "progress reporter: send failed"
+            );
         }
     }
 }
@@ -373,14 +348,16 @@ impl ReporterImpl {
                 // intentionally — progress events are stateless ticks,
                 // skipping one is harmless.
                 self.connections.lock().await.remove(target.as_str());
-                return Err(ReporterError::Io(format!("open_uni: {err}")));
+                return Err(ReporterError::Io(
+                    anyhow::Error::from(err).context("open_uni"),
+                ));
             }
         };
         transfer_progress_wire::write_frame(&mut send, frame)
             .await
-            .map_err(|err| ReporterError::Io(format!("write_frame: {err}")))?;
+            .map_err(|err| ReporterError::Io(anyhow::Error::from(err).context("write_frame")))?;
         send.finish()
-            .map_err(|err| ReporterError::Io(format!("send.finish: {err}")))?;
+            .map_err(|err| ReporterError::Io(anyhow::Error::from(err).context("send.finish")))?;
         Ok(())
     }
 }
@@ -389,10 +366,10 @@ impl ReporterImpl {
 enum ReporterError {
     #[error("offline (no peer addr or unreachable)")]
     Offline,
-    #[error("dial failed: {0}")]
-    Dial(String),
-    #[error("io: {0}")]
-    Io(String),
+    #[error("dial failed")]
+    Dial(#[source] StaggeredDialError),
+    #[error("io")]
+    Io(#[source] anyhow::Error),
 }
 
 // ============================================================================
@@ -402,6 +379,7 @@ enum ReporterError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uc_core::membership::MemberRepositoryPort;
 
     use std::collections::HashMap as StdHashMap;
     use std::sync::Mutex as StdMutex;
@@ -423,6 +401,7 @@ mod tests {
     struct MemMemberRepo {
         inner: StdMutex<StdHashMap<String, SpaceMember>>,
     }
+    crate::network::iroh::inbound_peer::member_table_identity_directory!(MemMemberRepo);
     #[async_trait]
     impl MemberRepositoryPort for MemMemberRepo {
         async fn get(&self, device_id: &DeviceId) -> Result<Option<SpaceMember>, MembershipError> {
@@ -542,7 +521,7 @@ mod tests {
             // Sender side doesn't use peer_addr_repo (no reporter calls
             // happen here in this test), so any impl is fine.
             Arc::new(MemPeerAddrRepo::default()),
-            member_repo,
+            crate::network::iroh::inbound_peer::member_table_directory(member_repo),
             Arc::new(crate::network::iroh::StaticPeerAdmission(admitted)),
             Arc::new(Sha256IdentityFingerprintFactory),
         );

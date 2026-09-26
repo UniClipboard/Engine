@@ -43,9 +43,12 @@ impl SecureStoragePort for MemoryKeys {
 }
 struct EmptyLedger;
 #[async_trait]
-impl LoadMembershipLedgerPort for EmptyLedger {
-    async fn load(&self) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
-        Ok(LoadedMembershipLedger::no_current_space())
+impl MembershipRecordStorePort for EmptyLedger {
+    async fn load(&self) -> Result<MembershipRecord, MembershipLedgerError> {
+        Ok(MembershipRecord::NoSpace { revision: 0 })
+    }
+    async fn commit(&self, _: MembershipRecordCommit) -> Result<(), MembershipLedgerError> {
+        Err(MembershipLedgerError::unavailable())
     }
 }
 struct MustNotHandle;
@@ -180,7 +183,7 @@ async fn missing_stored_credential_produces_diagnosable_client_and_server_record
                     "the physical connection should be established before authentication fails",
                 );
             let request = SpaceAdmissionEnvelopeV1::new_with_version(
-                SpaceAdmissionProtocolVersion::V2,
+                SpaceAdmissionProtocolVersion::CURRENT,
                 admission_id,
                 AdmissionRole::Joiner,
                 1,
@@ -194,7 +197,7 @@ async fn missing_stored_credential_produces_diagnosable_client_and_server_record
         .await;
     assert!(matches!(
         exchange,
-        Err(SpaceAdmissionTransportError::AuthenticationRejected)
+        Err(SpaceAdmissionTransportError::AuthenticationRejected { .. })
     ));
     observation.finish(SpaceAdmissionObservationOutcome::Deferred);
     let mut captured = Vec::new();

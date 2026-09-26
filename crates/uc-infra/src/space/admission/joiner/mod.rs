@@ -5,6 +5,7 @@ mod cancellation;
 mod candidate;
 mod invitation_start;
 mod source_snapshot;
+mod sponsor_identity;
 mod start_material;
 mod start_state;
 

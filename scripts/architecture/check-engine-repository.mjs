@@ -36,6 +36,7 @@ const EXPECTED_PACKAGES = [
   'uc-observability-contract',
   'uc-observability-runtime',
   'uc-ohos-napi',
+  'uc-testkit',
 ]
 
 const INTERNAL_PACKAGES = new Set([
@@ -70,6 +71,30 @@ const DESKTOP_OWNED_PACKAGES = new Set([
 
 function read(relativePath) {
   return readFileSync(join(REPOSITORY_ROOT, relativePath), 'utf8')
+}
+
+/// 排除测试文件与测试台目录后的 Rust 源码；`excludedPaths` 为另需排除的仓库相对路径。
+function productionSources(relativeRoot, excludedPaths = []) {
+  const root = join(REPOSITORY_ROOT, relativeRoot)
+  const excluded = new Set(excludedPaths)
+  const sources = []
+  const pending = [root]
+  while (pending.length > 0) {
+    const current = pending.pop()
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const path = join(current, entry.name)
+      if (entry.isDirectory()) {
+        if (entry.name !== 'testing' && entry.name !== 'tests') pending.push(path)
+      } else if (
+        entry.name.endsWith('.rs') &&
+        !/(^tests\.rs|_tests?\.rs)$/.test(entry.name) &&
+        !excluded.has(relative(REPOSITORY_ROOT, path))
+      ) {
+        sources.push(readFileSync(path, 'utf8'))
+      }
+    }
+  }
+  return sources.join('\n')
 }
 
 function readSourceTree(relativeRoot) {
@@ -289,6 +314,23 @@ function checkLocalDependencies(metadata) {
         )
       }
     }
+  }
+  return problems
+}
+
+function checkTestkitBoundary(metadata) {
+  const problems = []
+  const testkit = packageByName(metadata, 'uc-testkit')
+  const productDependencies = normalDependencies(testkit)
+    .filter(dependency => dependency.name.startsWith('uc-'))
+    .map(dependency => dependency.name)
+    .sort()
+  if (productDependencies.length > 0) {
+    addProblem(
+      problems,
+      'testkit boundary',
+      `uc-testkit must not depend on product packages; found ${productDependencies.join(', ')}`
+    )
   }
   return problems
 }
@@ -565,10 +607,13 @@ function checkCurrentPeerScopeOwnership() {
     addProblem(problems, 'current peer scope', 'the superseded device visibility gate was restored')
   }
 
-  const currentScope = read('crates/uc-application/src/space/membership/ledger/repository.rs')
+  const currentScope = [
+    read('crates/uc-application/src/space/membership/owner.rs'),
+    read('crates/uc-application/src/space/membership/owner/view.rs'),
+  ].join('\n')
   if (
-    !currentScope.includes('VersionedMembershipHistory::decode_persisted_v2') ||
-    !currentScope.includes('impl CurrentSpaceMemberScopePort for MembershipLedger') ||
+    !currentScope.includes('MembershipLedger::restore') ||
+    !currentScope.includes('impl CurrentSpaceMemberScopePort for MembershipOwner') ||
     currentScope.includes('CurrentWorkspacePeerScopePort') ||
     currentScope.includes('MemberRepositoryPort')
   ) {
@@ -608,30 +653,24 @@ function checkCurrentPeerScopeOwnership() {
 
 function checkMembershipConfirmationWatermarkOwnership(sources) {
   const problems = []
+  // 已确认位置只由 Core 成员账本在已认证的交换结果上推进；Application 与 Infra 生产代码都不直接写。
   const positiveAssignment = /\.confirmed_position\s*=\s*(?!None\b)[A-Za-z_]/g
-  const applicationAssignments = sources.application.match(positiveAssignment) ?? []
-  const authenticatedExchangeOwners = [
-    read('crates/uc-application/src/space/membership/synchronize_history/use_case.rs'),
-    read('crates/uc-application/src/space/membership/handle_history_message/use_case.rs'),
-  ].join('\n')
-  const ownerAssignments = authenticatedExchangeOwners.match(positiveAssignment) ?? []
-  if (applicationAssignments.length !== 2 || ownerAssignments.length !== 2) {
+  const applicationAssignments = sources.applicationProduction.match(positiveAssignment) ?? []
+  const ledgerAssignments = read('crates/uc-core/src/membership/ledger/peer_link.rs').match(positiveAssignment) ?? []
+  if (applicationAssignments.length !== 0 || ledgerAssignments.length !== 1) {
     addProblem(
       problems,
       'membership confirmation watermark',
-      'positive confirmed_position assignment must remain exclusive to authenticated ACK/suffix owners'
+      'positive confirmed_position assignment must remain exclusive to the Core membership ledger'
     )
   }
 
   const sponsorActivation = read('crates/uc-infra/src/space/admission/sponsor/complete.rs')
-  if (
-    !sponsorActivation.includes('confirmed_position: None') ||
-    /confirmed_position\s*:\s*Some\b/.test(sponsorActivation)
-  ) {
+  if (/confirmed_position/.test(sponsorActivation)) {
     addProblem(
       problems,
       'membership confirmation watermark',
-      'Sponsor activation must create propagation debt instead of inferring peer confirmation'
+      'Sponsor activation must leave peer confirmation to the membership ledger'
     )
   }
   return problems
@@ -735,11 +774,12 @@ function checkApplicationMembershipCutover() {
     'crates/uc-application/src/space/lifecycle/mod.rs',
     'crates/uc-application/src/space/lifecycle/session/mod.rs',
     'crates/uc-application/src/space/membership/mod.rs',
-    'crates/uc-application/src/space/membership/ledger/mod.rs',
+    'crates/uc-application/src/space/membership/owner.rs',
+    'crates/uc-application/src/space/membership/worker.rs',
+    'crates/uc-application/src/space/membership/access.rs',
     'crates/uc-application/src/space/membership/query_device_trust/mod.rs',
     'crates/uc-application/src/space/membership/remove_space_member/mod.rs',
     'crates/uc-application/src/space/membership/decide_device_trust_change/mod.rs',
-    'crates/uc-application/src/space/membership/synchronize_history/mod.rs',
     'crates/uc-application/src/space/membership/handle_history_message/mod.rs',
     'crates/uc-application/src/space/membership/maintenance/runtime.rs',
     'crates/uc-application/src/space/connectivity/recovery/mod.rs',
@@ -794,7 +834,13 @@ function checkApplicationMembershipCutover() {
     'crates/uc-application/src/space/admission/cancel_space_join/use_case.rs',
     'crates/uc-application/src/space/admission/complete_pending_space_transition/use_case.rs',
     'crates/uc-application/src/space/admission/query_pending_space_transition/use_case.rs',
-    'crates/uc-application/src/space/membership/ledger/join_record.rs',
+    'crates/uc-application/src/space/membership/ledger',
+    'crates/uc-application/src/space/membership/synchronize_history',
+    'crates/uc-application/src/space/membership/anti_entropy.rs',
+    'crates/uc-infra/src/space/membership_ledger.rs',
+    'crates/uc-infra/src/space/membership_ledger',
+    'crates/uc-infra/src/space/adapters/membership_projection.rs',
+    'crates/uc-engine/src/assembly/membership_events.rs',
     'crates/uc-core/src/membership/space_join_record.rs',
   ]
   for (const path of retiredPaths) {
@@ -1019,13 +1065,29 @@ function checkSpaceAdmissionProtocolOwnership() {
     'joiner: JoinerAdmissionService',
     'sponsor: SponsorAdmissionService',
     'recovery: AdmissionRecoveryService',
-    'execution_lock: tokio::sync::Mutex<()>',
+    'execution_lock: Arc<RwLock<()>>',
   ]) {
     if (!protocol.includes(field)) {
       addProblem(
         problems,
         'space admission protocol ownership',
         `SpaceAdmissionProtocol is missing ${field}`
+      )
+    }
+  }
+
+  for (const ownershipMarker of [
+    'impl AcquireSpaceWorkPermitPort for SpaceAdmissionProtocol',
+    'acquire_space_work_permit',
+    // 普通成员工作共享许可，准入动作独占执行。
+    'read_owned()',
+    'self.execution_lock.write()',
+  ]) {
+    if (!protocol.includes(ownershipMarker)) {
+      addProblem(
+        problems,
+        'space admission protocol ownership',
+        `SpaceAdmissionProtocol is missing shared work ownership marker: ${ownershipMarker}`
       )
     }
   }
@@ -1402,7 +1464,6 @@ function checkInfraSpaceSecurityOwnership() {
     'key_material.rs',
     'membership_update.rs',
     'mls_group.rs',
-    'peer_admission.rs',
     'scope_identifier.rs',
     'session.rs',
     'session_rebind.rs',
@@ -1415,6 +1476,7 @@ function checkInfraSpaceSecurityOwnership() {
     'crates/uc-infra/src/security/membership_security_update_adapter.rs',
     'crates/uc-infra/src/security/mls_group.rs',
     'crates/uc-infra/src/security/peer_admission_adapter.rs',
+    'crates/uc-infra/src/space/security/peer_admission.rs',
     'crates/uc-infra/src/security/scope_identifier.rs',
     'crates/uc-infra/src/security/session.rs',
     'crates/uc-infra/src/security/space_access_adapter.rs',
@@ -1989,6 +2051,38 @@ function checkSpaceAccessConstructionModes(sources) {
   return problems
 }
 
+function checkMembershipRecordCommitOwnership(sources) {
+  const problems = []
+  // 成员记录只由 Application `MembershipOwner` 提交；其余生产代码只能读取，不得构造提交。
+  if (!/\.commit\(MembershipRecordCommit\s*\{/.test(sources.membershipRecordOwner)) {
+    addProblem(problems, 'membership record commit ownership', 'MembershipOwner must commit membership records')
+  }
+  if (/MembershipRecordCommit\s*\{/.test(sources.membershipRecordNonOwnerProduction)) {
+    addProblem(
+      problems,
+      'membership record commit ownership',
+      'only MembershipOwner may construct a membership record commit'
+    )
+  }
+  // 暂存控制世代的成员记录同样只由 Owner 形成，持久层只能原样写入。
+  if (/StagedMembershipRecord\s*\{/.test(sources.membershipRecordNonOwnerProduction)) {
+    addProblem(
+      problems,
+      'membership record commit ownership',
+      'only MembershipOwner may form a staged membership record'
+    )
+  }
+  // Infra 只编解码成员记录，不建立或推进成员账本，也不拼装成员记录。
+  if (/MembershipLedger::(?:start|apply)\b|LedgerInput::|SpaceMembershipRecord\s*\{/.test(sources.membershipRecordInfraOutsideCodec)) {
+    addProblem(
+      problems,
+      'membership record commit ownership',
+      'Infra must not build or advance membership records outside the record codec'
+    )
+  }
+  return problems
+}
+
 function checkMembershipHistoryOwnership(sources) {
   const problems = []
   if (sources.monolithicMembershipHistoryPresent) {
@@ -2015,7 +2109,27 @@ function repositorySources() {
     monolithicMembershipHistoryPresent: existsSync(join(REPOSITORY_ROOT, 'crates/uc-core/src/membership/versioned_membership_history.rs')),
     membershipHistoryRoot: read('crates/uc-core/src/membership/versioned_membership_history/mod.rs'),
     membershipHistoryCore: readSourceTree('crates/uc-core/src/membership/versioned_membership_history'),
-    membershipLedger: read('crates/uc-application/src/space/membership/ledger/repository.rs'),
+    membershipLedger: [
+      read('crates/uc-application/src/space/membership/owner.rs'),
+      readSourceTree('crates/uc-application/src/space/membership/owner'),
+    ].join('\n'),
+    membershipRecordOwner: read('crates/uc-application/src/space/membership/owner.rs'),
+    membershipRecordNonOwnerProduction: [
+      productionSources('crates/uc-application/src', [
+        'crates/uc-application/src/space/membership/owner.rs',
+        'crates/uc-application/src/space/membership/ports.rs',
+      ]),
+      productionSources('crates/uc-infra/src'),
+      productionSources('crates/uc-engine/src'),
+      readSourceTree('bindings'),
+    ].join('\n'),
+    membershipRecordInfraOutsideCodec: productionSources('crates/uc-infra/src', [
+      'crates/uc-infra/src/space/membership_record/codec.rs',
+      ...readdirSync(join(REPOSITORY_ROOT, 'crates/uc-infra/src/space/membership_record/codec')).map(
+        name => `crates/uc-infra/src/space/membership_record/codec/${name}`
+      ),
+      'crates/uc-infra/src/space/membership_record/test_support.rs',
+    ]),
     membershipEvidenceOwner: read('crates/uc-application/src/space/membership/reconcile_history_evidence/use_case.rs'),
     retiredMembershipPersistencePathPresent: [
       'crates/uc-infra/src/db/repositories/membership_candidate_repo.rs',
@@ -2037,7 +2151,6 @@ function repositorySources() {
       'clipboard_dispatch_adapter.rs',
       'connection_channel_adapter.rs',
       'group_update_adapter.rs',
-      'membership_attestation_adapter.rs',
       'membership_branch_recovery_adapter.rs',
       'membership_history_exchange_adapter.rs',
       'peer_reachability_adapter.rs',
@@ -2083,6 +2196,7 @@ function repositorySources() {
     engineWiring: read('crates/uc-engine/src/assembly/wire/mod.rs'),
     applicationDeps: read('crates/uc-application/src/deps.rs'),
     application: readSourceTree('crates/uc-application/src'),
+    applicationProduction: productionSources('crates/uc-application/src'),
     applicationAssembly: read('crates/uc-application/src/application.rs'),
     admissionObservation: read(
       'crates/uc-application/src/space/admission/observation.rs'
@@ -2116,6 +2230,7 @@ function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
     ...checkWorkspaceShape(metadata),
     ...checkOpenMlsValidation(metadata),
     ...checkLocalDependencies(metadata),
+    ...checkTestkitBoundary(metadata),
     ...checkPublicSurface(metadata, sources),
     ...checkApplicationDependencyInventory(sources),
     ...checkBindingProvenance(metadata, sources),
@@ -2124,6 +2239,7 @@ function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
     ...checkCurrentPeerScopeOwnership(),
     ...checkMembershipConfirmationWatermarkOwnership(sources),
     ...checkMembershipHistoryOwnership(sources),
+    ...checkMembershipRecordCommitOwnership(sources),
     ...checkApplicationMembershipCutover(),
     ...checkSpaceModuleInterface(),
     ...checkSpaceAdmissionProtocolOwnership(),
@@ -2236,8 +2352,20 @@ function runNegativeFixtures(metadata, sources) {
     changedSources.network += '\nfn authorize_from_history(_: ProfileContentKeyVault) {}\n'
   }, metadata, sources)
   expectRejected('forged membership confirmation watermark', (_changed, changedSources) => {
-    changedSources.application +=
-      '\nfn infer_peer_confirmation(peer: &mut PeerReconciliationRecord, position: BaseMembershipHistoryPosition) { peer.confirmed_position = Some(position); }\n'
+    changedSources.applicationProduction +=
+      '\nfn infer_peer_confirmation(peer: &mut PeerLinkSnapshot, position: BaseMembershipHistoryPosition) { peer.confirmed_position = Some(position); }\n'
+  }, metadata, sources)
+  expectRejected('membership record commit outside the owner', (_changed, changedSources) => {
+    changedSources.membershipRecordNonOwnerProduction +=
+      '\nasync fn bypass(store: &dyn MembershipRecordStorePort, replacement: MembershipRecord) { store.commit(MembershipRecordCommit { expected_revision: 0, replacement, projection: None }).await; }\n'
+  }, metadata, sources)
+  expectRejected('staged membership record outside the owner', (_changed, changedSources) => {
+    changedSources.membershipRecordNonOwnerProduction +=
+      '\nfn forge(replacement: MembershipRecord, projection: MembershipProjectionPlan) -> StagedMembershipRecord { StagedMembershipRecord { replacement, projection } }\n'
+  }, metadata, sources)
+  expectRejected('membership ledger advanced in Infra', (_changed, changedSources) => {
+    changedSources.membershipRecordInfraOutsideCodec +=
+      '\nfn rewrite(ledger: MembershipLedger, history: VersionedMembershipHistory) { let _ = ledger.apply(LedgerInput::BranchRecovered { history }, 0); }\n'
   }, metadata, sources)
   expectRejected('observability mirror bundle', (_changed, changedSources) => {
     changedSources.engineObservability += '\nstruct ObservedAdmissionPorts;\n'

@@ -89,10 +89,10 @@ pub enum UpdateMobileDeviceError {
     PasswordTooShort { min: usize },
     #[error("password too long (max {max} chars)")]
     PasswordTooLong { max: usize },
-    #[error("password hashing failed: {0}")]
-    PasswordHashFailed(String),
-    #[error("device persistence failed: {0}")]
-    PersistenceFailed(String),
+    #[error("password hashing failed")]
+    PasswordHashFailed(#[source] PasswordHasherError),
+    #[error("device persistence failed")]
+    PersistenceFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 pub(crate) struct UpdateMobileDeviceUseCase {
@@ -273,7 +273,7 @@ fn map_register_validation(err: RegisterMobileShortcutDeviceError) -> UpdateMobi
         | RegisterMobileShortcutDeviceError::SettingsLoadFailed(_)
         | RegisterMobileShortcutDeviceError::NoLanInterfaceAvailable
         | RegisterMobileShortcutDeviceError::LanInterfaceProbeFailed(_)) => {
-            UpdateMobileDeviceError::PersistenceFailed(err.to_string())
+            UpdateMobileDeviceError::PersistenceFailed(err.into())
         }
     }
 }
@@ -285,7 +285,7 @@ fn translate_device_error(err: MobileDeviceError) -> UpdateMobileDeviceError {
         }
         MobileDeviceError::Storage(msg) => UpdateMobileDeviceError::PersistenceFailed(msg),
         MobileDeviceError::AlreadyExists(id) => {
-            UpdateMobileDeviceError::PersistenceFailed(format!("device id collision: {id}"))
+            UpdateMobileDeviceError::PersistenceFailed(format!("device id collision: {id}").into())
         }
     }
 }
@@ -300,12 +300,7 @@ fn translate_update_error(err: MobileDeviceError, username: &str) -> UpdateMobil
 }
 
 fn translate_hasher_error(err: PasswordHasherError) -> UpdateMobileDeviceError {
-    match err {
-        PasswordHasherError::InvalidPhc(msg) => {
-            UpdateMobileDeviceError::PasswordHashFailed(format!("invalid phc: {msg}"))
-        }
-        PasswordHasherError::Internal(msg) => UpdateMobileDeviceError::PasswordHashFailed(msg),
-    }
+    UpdateMobileDeviceError::PasswordHashFailed(err)
 }
 
 #[cfg(test)]

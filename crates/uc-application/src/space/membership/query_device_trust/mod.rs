@@ -1,3 +1,4 @@
+mod dependency;
 mod error;
 mod model;
 mod ports;
@@ -8,8 +9,10 @@ pub use model::{
     AdmissionDisplayStatus, DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership,
     DeviceTrustObservation, DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState,
     PairingConfirmationObservation, PairingConfirmationStatus, PairingConfirmationTarget,
-    PendingDeviceTrustChange,
+    PendingDeviceTrustChange, SpaceDeviceUpdatePhase, SpaceDeviceUpdateProblem,
+    SpaceDeviceUpdateRecovery, SpaceDeviceUpdateStatus,
 };
+pub(crate) use ports::LoadSecurityDeviceUpdateStatusPort;
 pub use ports::{LoadCurrentJoinStatusPort, LoadDeviceTrustObservationsPort};
 pub(crate) use use_case::QueryDeviceTrustUseCase;
 
@@ -26,5 +29,7 @@ impl LoadCurrentJoinStatusPort for NoCurrentJoinStatus {
     }
 }
 
+#[cfg(test)]
+mod local_identity_tests;
 #[cfg(test)]
 mod tests;

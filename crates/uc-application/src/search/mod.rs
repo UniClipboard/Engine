@@ -120,7 +120,7 @@ pub struct SearchTagView {
     pub is_builtin: bool,
 }
 
-#[derive(Debug, Clone, Error, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum SearchFacadeError {
     #[error("invalid query: {0}")]
     InvalidQuery(String),
@@ -141,8 +141,8 @@ pub enum SearchFacadeError {
     ServiceUnavailable(String),
     #[error("search rebuild is already running")]
     RebuildAlreadyRunning,
-    #[error("search failed: {0}")]
-    Internal(String),
+    #[error("search failed")]
+    Internal(#[source] SearchError),
 }
 
 pub struct SearchFacade {
@@ -470,7 +470,7 @@ pub fn map_search_error(error: SearchError) -> SearchFacadeError {
         SearchError::SessionLocked => SearchFacadeError::SessionLocked,
         SearchError::IndexNotReady => SearchFacadeError::IndexNotReady,
         SearchError::IndexUnavailable => SearchFacadeError::IndexUnavailable,
-        SearchError::Internal(message) => SearchFacadeError::Internal(message),
+        error @ SearchError::Internal(_) => SearchFacadeError::Internal(error),
     }
 }
 

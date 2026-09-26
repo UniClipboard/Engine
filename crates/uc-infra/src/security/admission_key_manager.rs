@@ -4,7 +4,7 @@ use std::sync::Arc;
 use hmac::{Hmac, Mac};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
-use uc_core::ports::SecureStoragePort;
+use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
 use super::crypto_model::EncryptedBlob;
 use super::{v1_aead, MasterKey};
@@ -13,14 +13,54 @@ pub(super) const PROFILE_ADMISSION_KEY_NAME: &str = "profile_admission_master_ke
 
 #[derive(Debug, thiserror::Error)]
 pub enum AdmissionKeyError {
+    /// 安全存储暂不可用或拒绝访问；资料 vault 损坏不属于此类。
     #[error("profile admission key storage is unavailable")]
-    SecureStorage,
+    SecureStorage {
+        #[source]
+        source: SecureStorageError,
+    },
+    /// 安全存储接受了写入或删除，但回读结果不一致。
+    #[error("profile admission key storage did not keep the change")]
+    StorageNotPersisted,
     #[error("profile admission key is missing")]
     Missing,
     #[error("profile admission key is corrupt")]
-    Corrupt,
+    Corrupt {
+        #[source]
+        source: anyhow::Error,
+    },
+    /// 本地保存的格式版本或长度不符合约定，没有下层异常。
+    #[error("profile admission data has an invalid layout")]
+    InvalidLayout,
     #[error("attempt data key could not be opened")]
-    OpenFailed,
+    OpenFailed {
+        #[source]
+        source: anyhow::Error,
+    },
+}
+
+impl AdmissionKeyError {
+    fn corrupt(source: impl Into<anyhow::Error>) -> Self {
+        Self::Corrupt {
+            source: source.into(),
+        }
+    }
+
+    fn open_failed(source: impl Into<anyhow::Error>) -> Self {
+        Self::OpenFailed {
+            source: source.into(),
+        }
+    }
+}
+
+impl From<SecureStorageError> for AdmissionKeyError {
+    /// 安全存储报告数据损坏时（例如资料 vault 无法打开）按损坏分类，不能伪装成暂不可用。
+    fn from(source: SecureStorageError) -> Self {
+        match source {
+            SecureStorageError::Corrupt(_) => Self::corrupt(source),
+            source => Self::SecureStorage { source },
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -82,7 +122,7 @@ impl ProfilePayloadReader {
             &encrypted.ciphertext,
             &self.aad,
         )
-        .map_err(|_| AdmissionKeyError::OpenFailed)
+        .map_err(AdmissionKeyError::open_failed)
     }
 }
 
@@ -98,31 +138,31 @@ impl AdmissionKeyManager {
         if let Some(bytes) = self
             .secure_storage
             .get(PROFILE_ADMISSION_KEY_NAME)
-            .map_err(|_| AdmissionKeyError::SecureStorage)?
+            .map_err(AdmissionKeyError::from)?
         {
-            return MasterKey::from_bytes(&bytes).map_err(|_| AdmissionKeyError::Corrupt);
+            return MasterKey::from_bytes(&bytes).map_err(AdmissionKeyError::corrupt);
         }
 
         let mut generated = [0u8; 32];
         rand::rng().fill_bytes(&mut generated);
         self.secure_storage
             .set(PROFILE_ADMISSION_KEY_NAME, &generated)
-            .map_err(|_| AdmissionKeyError::SecureStorage)?;
+            .map_err(AdmissionKeyError::from)?;
         let persisted = self
             .secure_storage
             .get(PROFILE_ADMISSION_KEY_NAME)
-            .map_err(|_| AdmissionKeyError::SecureStorage)?
-            .ok_or(AdmissionKeyError::SecureStorage)?;
-        MasterKey::from_bytes(&persisted).map_err(|_| AdmissionKeyError::Corrupt)
+            .map_err(AdmissionKeyError::from)?
+            .ok_or(AdmissionKeyError::StorageNotPersisted)?;
+        MasterKey::from_bytes(&persisted).map_err(AdmissionKeyError::corrupt)
     }
 
     fn existing_profile_key(&self) -> Result<MasterKey, AdmissionKeyError> {
         let bytes = self
             .secure_storage
             .get(PROFILE_ADMISSION_KEY_NAME)
-            .map_err(|_| AdmissionKeyError::SecureStorage)?
+            .map_err(AdmissionKeyError::from)?
             .ok_or(AdmissionKeyError::Missing)?;
-        MasterKey::from_bytes(&bytes).map_err(|_| AdmissionKeyError::Corrupt)
+        MasterKey::from_bytes(&bytes).map_err(AdmissionKeyError::corrupt)
     }
 
     pub(crate) const fn profile_generation(&self) -> [u8; 16] {
@@ -133,15 +173,15 @@ impl AdmissionKeyManager {
         self.secure_storage
             .get(PROFILE_ADMISSION_KEY_NAME)
             .map(|value| value.is_some())
-            .map_err(|_| AdmissionKeyError::SecureStorage)
+            .map_err(AdmissionKeyError::from)
     }
 
     pub fn delete_profile_key(&self) -> Result<(), AdmissionKeyError> {
         self.secure_storage
             .delete(PROFILE_ADMISSION_KEY_NAME)
-            .map_err(|_| AdmissionKeyError::SecureStorage)?;
+            .map_err(AdmissionKeyError::from)?;
         if self.profile_key_exists()? {
-            return Err(AdmissionKeyError::SecureStorage);
+            return Err(AdmissionKeyError::StorageNotPersisted);
         }
         Ok(())
     }
@@ -165,8 +205,8 @@ impl AdmissionKeyManager {
             plaintext,
             &self.profile_payload_aad(purpose),
         )
-        .map_err(|_| AdmissionKeyError::OpenFailed)?;
-        serde_json::to_vec(&encrypted).map_err(|_| AdmissionKeyError::Corrupt)
+        .map_err(AdmissionKeyError::open_failed)?;
+        serde_json::to_vec(&encrypted).map_err(AdmissionKeyError::corrupt)
     }
 
     pub(crate) fn seal_profile_payload_compact(
@@ -179,8 +219,8 @@ impl AdmissionKeyManager {
             plaintext,
             &self.profile_payload_aad(purpose),
         )
-        .map_err(|_| AdmissionKeyError::OpenFailed)?;
-        postcard::to_stdvec(&encrypted).map_err(|_| AdmissionKeyError::Corrupt)
+        .map_err(AdmissionKeyError::open_failed)?;
+        postcard::to_stdvec(&encrypted).map_err(AdmissionKeyError::corrupt)
     }
 
     pub(crate) fn open_profile_payload(
@@ -189,14 +229,14 @@ impl AdmissionKeyManager {
         ciphertext: &[u8],
     ) -> Result<Vec<u8>, AdmissionKeyError> {
         let encrypted: EncryptedBlob =
-            serde_json::from_slice(ciphertext).map_err(|_| AdmissionKeyError::Corrupt)?;
+            serde_json::from_slice(ciphertext).map_err(AdmissionKeyError::corrupt)?;
         v1_aead::decrypt_blob_xchacha(
             &self.profile_key()?,
             &encrypted.nonce,
             &encrypted.ciphertext,
             &self.profile_payload_aad(purpose),
         )
-        .map_err(|_| AdmissionKeyError::OpenFailed)
+        .map_err(AdmissionKeyError::open_failed)
     }
 
     pub(crate) fn profile_payload_reader(
@@ -215,8 +255,8 @@ impl AdmissionKeyManager {
         value: &[u8],
     ) -> Result<[u8; 32], AdmissionKeyError> {
         let key = self.profile_key()?;
-        let mut mac = Hmac::<Sha256>::new_from_slice(key.as_bytes())
-            .map_err(|_| AdmissionKeyError::Corrupt)?;
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(key.as_bytes()).map_err(AdmissionKeyError::corrupt)?;
         mac.update(b"uniclipboard/admission-repository-token/v1\0");
         mac.update(&self.profile_generation);
         mac.update(&(purpose.len() as u64).to_be_bytes());
@@ -246,7 +286,7 @@ impl AdmissionKeyManager {
             &attempt_key,
             &self.attempt_key_aad(attempt_id),
         )
-        .map_err(|_| AdmissionKeyError::OpenFailed)?;
+        .map_err(AdmissionKeyError::open_failed)?;
         Ok(WrappedSpaceAdmissionDataKey {
             format_version: 1,
             encrypted_key,
@@ -259,7 +299,7 @@ impl AdmissionKeyManager {
         wrapped: &WrappedSpaceAdmissionDataKey,
     ) -> Result<SpaceAdmissionDataKey, AdmissionKeyError> {
         if wrapped.format_version != 1 {
-            return Err(AdmissionKeyError::Corrupt);
+            return Err(AdmissionKeyError::InvalidLayout);
         }
         let profile_key = self.profile_key()?;
         let plaintext = v1_aead::decrypt_blob_xchacha(
@@ -268,10 +308,11 @@ impl AdmissionKeyManager {
             &wrapped.encrypted_key.ciphertext,
             &self.attempt_key_aad(attempt_id),
         )
-        .map_err(|_| AdmissionKeyError::OpenFailed)?;
+        .map_err(AdmissionKeyError::open_failed)?;
         let bytes: [u8; 32] = plaintext
             .try_into()
-            .map_err(|_| AdmissionKeyError::Corrupt)?;
+            // 长度不符时错误值是原明文密钥字节，不能作为来源保存；布局错误已完整表达原因。
+            .map_err(|_| AdmissionKeyError::InvalidLayout)?;
         Ok(SpaceAdmissionDataKey(bytes))
     }
 
@@ -290,12 +331,12 @@ impl AdmissionKeyManager {
         plaintext: &[u8],
     ) -> Result<Vec<u8>, AdmissionKeyError> {
         let attempt_key = self.unwrap_attempt_key(attempt_id, wrapped)?;
-        let key = MasterKey::from_bytes(attempt_key.as_bytes())
-            .map_err(|_| AdmissionKeyError::Corrupt)?;
+        let key =
+            MasterKey::from_bytes(attempt_key.as_bytes()).map_err(AdmissionKeyError::corrupt)?;
         let encrypted =
             v1_aead::encrypt_blob_xchacha(&key, plaintext, &self.attempt_payload_aad(attempt_id))
-                .map_err(|_| AdmissionKeyError::OpenFailed)?;
-        postcard::to_stdvec(&encrypted).map_err(|_| AdmissionKeyError::Corrupt)
+                .map_err(AdmissionKeyError::open_failed)?;
+        postcard::to_stdvec(&encrypted).map_err(AdmissionKeyError::corrupt)
     }
 
     pub(crate) fn open_attempt_payload(
@@ -305,8 +346,8 @@ impl AdmissionKeyManager {
         ciphertext: &[u8],
     ) -> Result<Vec<u8>, AdmissionKeyError> {
         let attempt_key = self.unwrap_attempt_key(attempt_id, wrapped)?;
-        let key = MasterKey::from_bytes(attempt_key.as_bytes())
-            .map_err(|_| AdmissionKeyError::Corrupt)?;
+        let key =
+            MasterKey::from_bytes(attempt_key.as_bytes()).map_err(AdmissionKeyError::corrupt)?;
         let encrypted = decode_compatible_blob(ciphertext)?;
         v1_aead::decrypt_blob_xchacha(
             &key,
@@ -314,16 +355,16 @@ impl AdmissionKeyManager {
             &encrypted.ciphertext,
             &self.attempt_payload_aad(attempt_id),
         )
-        .map_err(|_| AdmissionKeyError::OpenFailed)
+        .map_err(AdmissionKeyError::open_failed)
     }
 }
 
 fn decode_json_blob(bytes: &[u8]) -> Result<EncryptedBlob, AdmissionKeyError> {
-    serde_json::from_slice(bytes).map_err(|_| AdmissionKeyError::Corrupt)
+    serde_json::from_slice(bytes).map_err(AdmissionKeyError::corrupt)
 }
 
 fn decode_compact_blob(bytes: &[u8]) -> Result<EncryptedBlob, AdmissionKeyError> {
-    postcard::from_bytes(bytes).map_err(|_| AdmissionKeyError::Corrupt)
+    postcard::from_bytes(bytes).map_err(AdmissionKeyError::corrupt)
 }
 
 fn decode_compatible_blob(bytes: &[u8]) -> Result<EncryptedBlob, AdmissionKeyError> {
@@ -337,7 +378,7 @@ mod tests {
 
     use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
-    use super::{v1_aead, AdmissionKeyManager, MasterKey};
+    use super::{v1_aead, AdmissionKeyError, AdmissionKeyManager, MasterKey};
 
     #[derive(Default)]
     struct MemorySecureStorage {
@@ -439,5 +480,61 @@ mod tests {
                 .repository_token(b"lookup", b"value")
                 .unwrap()
         );
+    }
+
+    struct FailingSecureStorage(fn() -> SecureStorageError);
+
+    impl SecureStoragePort for FailingSecureStorage {
+        fn get(&self, _key: &str) -> Result<Option<Vec<u8>>, SecureStorageError> {
+            Err((self.0)())
+        }
+
+        fn set(&self, _key: &str, _value: &[u8]) -> Result<(), SecureStorageError> {
+            Err((self.0)())
+        }
+
+        fn delete(&self, _key: &str) -> Result<(), SecureStorageError> {
+            Err((self.0)())
+        }
+    }
+
+    // 资料 vault 无法打开时安全存储报告损坏；准入密钥必须按损坏分类并保留原始失败，不能显示为暂不可用。
+    #[test]
+    fn corrupt_secure_storage_is_classified_as_corrupt_with_its_source() {
+        let manager = AdmissionKeyManager::new(
+            Arc::new(FailingSecureStorage(|| {
+                SecureStorageError::Corrupt("profile recovery data cannot be opened".to_owned())
+            })),
+            [1; 16],
+        );
+
+        let error = manager.create_wrapped_attempt_key([2; 32]).unwrap_err();
+
+        assert!(matches!(error, AdmissionKeyError::Corrupt { .. }));
+        let source = std::error::Error::source(&error).expect("corrupt error keeps its source");
+        assert!(matches!(
+            source.downcast_ref::<SecureStorageError>(),
+            Some(SecureStorageError::Corrupt(_))
+        ));
+    }
+
+    #[test]
+    fn unavailable_secure_storage_keeps_the_storage_failure() {
+        let manager = AdmissionKeyManager::new(
+            Arc::new(FailingSecureStorage(|| {
+                SecureStorageError::Unavailable("keychain locked".to_owned())
+            })),
+            [1; 16],
+        );
+
+        let error = manager.profile_key_exists().unwrap_err();
+
+        assert!(matches!(
+            error,
+            AdmissionKeyError::SecureStorage {
+                source: SecureStorageError::Unavailable(_)
+            }
+        ));
+        assert!(std::error::Error::source(&error).is_some());
     }
 }

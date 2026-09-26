@@ -74,8 +74,8 @@ pub enum SpaceActivityError {
     Unavailable,
     #[error("search session activity failed")]
     Search(#[source] anyhow::Error),
-    #[error("receive activation failed: {0}")]
-    Receive(String),
+    #[error("receive activation failed")]
+    Receive(#[source] anyhow::Error),
     #[error("membership activation failed")]
     Membership(#[source] anyhow::Error),
     #[error("space session activity task failed")]
@@ -130,7 +130,7 @@ impl SpaceSessionActivity {
         self.receive
             .ensure_receive_ready()
             .await
-            .map_err(|error| SpaceActivityError::Receive(error.to_string()))?;
+            .map_err(|error| SpaceActivityError::Receive(anyhow::Error::from(error)))?;
         self.connections.resume().await?;
         Ok(())
     }

@@ -1,22 +1,23 @@
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    AdmissionBaseSnapshot, AdmissionCandidateV1, AdmissionChangeFacts, AdmissionChannelPeerId,
+    AdmissionActivationReceipt, AdmissionAppliedV1, AdmissionBaseSnapshot, AdmissionCandidateV1,
+    AdmissionChangeFacts, AdmissionChannelPeerId, AdmissionCommitV1,
     AdmissionContinuationCredential, AdmissionContinuationRoute,
     AdmissionEncryptedPasswordEquivalent, AdmissionIdentitySignature, AdmissionInvitationClaim,
     AdmissionJoinRequestV1, AdmissionJoinerPrivateState, AdmissionJoinerStartContext,
     AdmissionKeyPackage, AdmissionMessageId, AdmissionMlsCommit, AdmissionMlsWelcome,
     AdmissionPeerBinding, AdmissionPendingRecovery, AdmissionPreparedV1,
     AdmissionRecordPersistence, AdmissionRecoveryPublicKey, AdmissionRetryState, AdmissionRole,
-    AdmissionSecurityCommitmentV1, AdmissionShortInvitationCode, AdmissionSignedMembershipHistory,
-    AdmissionSourceSnapshot, AdmissionStagedSecurityState, AdmissionStagedTarget,
-    AdmissionStagedTargetInput, BaseMembershipHistoryPosition, InvitationId, JoinId,
-    JoinerAdmission, JoinerInvitationResolution, MemberInstanceId, MembershipAdmissionV2,
+    AdmissionSealedRecoveryMaterial, AdmissionSecurityCommitmentV1, AdmissionShortInvitationCode,
+    AdmissionSignedMembershipHistory, AdmissionSourceSnapshot, AdmissionStagedSecurityState,
+    AdmissionStagedTarget, AdmissionStagedTargetInput, BaseMembershipHistoryPosition, InvitationId,
+    JoinId, JoinerAdmission, JoinerInvitationResolution, MemberInstanceId, MembershipAdmissionV2,
     MembershipCredential, MembershipEventV2, MembershipOperationV2, PendingAdmissionExchange,
     PreparedAdmissionProofV1, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId,
-    SpaceAdmissionMessageKind, SpaceAdmissionPersistenceError, SpaceAdmissionRoute,
-    SpaceAdmissionTerminationReason, SponsorAdmission, UnreadableHistoryPolicy,
-    ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
-    MEMBERSHIP_EVENT_FORMAT_V2,
+    SpaceAdmissionMessageKind, SpaceAdmissionPersistenceError, SpaceAdmissionRejectionReason,
+    SpaceAdmissionRoute, SpaceAdmissionTerminationReason, SponsorAdmission,
+    UnreadableHistoryPolicy, ADMISSION_SECURITY_COMMITMENT_FORMAT_V1,
+    ED25519_SIGNATURE_ALGORITHM_V1, MEMBERSHIP_EVENT_FORMAT_V2,
 };
 use uc_core::pairing::invitation::FullInvitation;
 use uc_core::security::IdentityFingerprint;
@@ -135,6 +136,53 @@ fn initiated_joiner_awaiting_authentication_round_trips_through_persistence() {
         decoded.pending_recovery(),
         Some(AdmissionPendingRecovery::Initial { .. })
     ));
+}
+
+#[test]
+fn current_joiner_record_decodes_with_mobile_worker_stack_budget() {
+    let encoded = joiner_applied_fixture()
+        .encode_persisted()
+        .expect("applied Joiner state should encode");
+
+    std::thread::Builder::new()
+        .name("mobile-stack-budget".to_owned())
+        .stack_size(512 * 1024)
+        .spawn(move || {
+            let applied = JoinerAdmission::decode_persisted(&encoded)
+                .expect("applied Joiner state should decode within the mobile stack budget");
+            let rejected = applied
+                .reject_activation(SpaceAdmissionRejectionReason::HistoryConflict)
+                .expect("invalid activation should produce a terminal result")
+                .into_replacement();
+            let encoded = rejected
+                .encode_persisted()
+                .expect("terminal result should encode");
+            JoinerAdmission::decode_persisted(&encoded)
+                .expect("terminal result should remain readable")
+        })
+        .expect("bounded-stack test thread should start")
+        .join()
+        .expect("bounded-stack decode should complete");
+}
+
+#[test]
+fn activation_rejection_categories_round_trip_through_persistence() {
+    for reason in [
+        SpaceAdmissionRejectionReason::CompletionInvalid,
+        SpaceAdmissionRejectionReason::MembershipHistoryInvalid,
+        SpaceAdmissionRejectionReason::SecurityMaterialInvalid,
+        SpaceAdmissionRejectionReason::RelationshipConflict,
+        SpaceAdmissionRejectionReason::IdentityConflict,
+        SpaceAdmissionRejectionReason::ActivationStateInvalid,
+    ] {
+        let rejected = joiner_applied_fixture()
+            .reject_activation(reason)
+            .expect("activation rejection should produce a terminal result")
+            .into_replacement();
+        let recovered = round_trip_joiner(rejected);
+
+        assert_eq!(recovered.rejection_reason(), Some(reason));
+    }
 }
 
 #[test]
@@ -302,6 +350,67 @@ fn joiner_prepared_fixture() -> JoinerAdmission {
             pending_exchange,
         )
         .expect("valid Joiner Prepared fixture")
+        .into_replacement()
+}
+
+fn joiner_applied_fixture() -> JoinerAdmission {
+    let prepared = joiner_prepared_fixture();
+    let candidate = candidate_body_fixture();
+    let commit = SpaceAdmissionEnvelopeV1::new(
+        prepared.admission_id(),
+        AdmissionRole::Sponsor,
+        1,
+        AdmissionMessageId::from_bytes([0xd0; 32]).expect("non-zero Commit id fixture"),
+        Some(AdmissionMessageId::from_bytes([0x96; 32]).expect("non-zero Prepared id fixture")),
+        SpaceAdmissionBodyV1::Commit(AdmissionCommitV1::new(
+            candidate,
+            AdmissionSignedMembershipHistory::from_bytes(vec![0x98; 128])
+                .expect("bounded target history fixture"),
+            AdmissionSealedRecoveryMaterial::from_bytes(vec![0xd1; 128])
+                .expect("bounded recovery material fixture"),
+        )),
+    )
+    .expect("valid Commit reply fixture");
+    let SpaceAdmissionBodyV1::Commit(commit_body) = commit.body() else {
+        unreachable!("fixture body is Commit")
+    };
+    let candidate = commit_body.exact_candidate();
+    let receipt = AdmissionActivationReceipt::new(
+        1,
+        *commit.header().admission_id().as_bytes(),
+        candidate.candidate_event().event_id(),
+        [0xd4; 32],
+        candidate.security_commitment().security_commitment_id,
+        MemberInstanceId::from_bytes([0xd5; 32]),
+        vec![0xd6; 64],
+    );
+    let committed = prepared
+        .accept_commit(commit, [0xd2; 32])
+        .expect("valid Joiner Commit fixture")
+        .into_replacement();
+    let exact_commit = committed
+        .joiner_applied_preparation()
+        .expect("committed Joiner retains Commit");
+    let applied = SpaceAdmissionEnvelopeV1::reply_to(
+        exact_commit.exact_commit(),
+        AdmissionRole::Joiner,
+        2,
+        AdmissionMessageId::from_bytes([0xd3; 32]).expect("non-zero Applied id fixture"),
+        SpaceAdmissionBodyV1::Applied(AdmissionAppliedV1::new(receipt)),
+    )
+    .expect("valid Applied request fixture");
+    committed
+        .apply_commit(
+            PendingAdmissionExchange::new(
+                SpaceAdmissionRoute::from_bytes(vec![0xd7; 32])
+                    .expect("bounded Applied route fixture"),
+                applied,
+                SpaceAdmissionMessageKind::Complete,
+                AdmissionRetryState::new(0, 0).expect("valid Applied retry fixture"),
+            )
+            .expect("Applied expects Complete"),
+        )
+        .expect("valid Joiner Applied fixture")
         .into_replacement()
 }
 

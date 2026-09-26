@@ -1,4 +1,4 @@
-use super::model::{AdmissionRecoveryDisposition, AdmissionRecoveryReport};
+use super::model::AdmissionRecoveryReport;
 use super::{
     AdmissionRecoveryCommitToken, AdmissionRecoveryTrigger, AuthenticatedAdmissionReply,
     LoadedPendingAdmission, PendingAdmissionRecoveryStateError, SpaceAdmissionTransportError,
@@ -10,11 +10,11 @@ use crate::space::admission::protocol::{
 use crate::space::membership::{
     AdmissionAbandonmentRevocationTarget, AdmissionMaintenanceOutcome, AdmissionRevocationTarget,
     MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger, RecoverSpaceAdmissionsPort,
-    RemoveSpaceMemberError,
+    RemoveSpaceMemberError, SpaceWorkMode,
 };
 use uc_core::membership::{
     AdmissionRecoveryCategory, JoinerAdmission, SpaceAdmissionMessageKind,
-    SpaceAdmissionRejectionReason, SponsorAbandonmentCleanup, SponsorPairingConfirmationStatus,
+    SpaceAdmissionRejectionReason, SponsorAbandonmentCleanup,
 };
 use uc_observability_contract::diagnostics::connectivity::{
     record_admission_recovery_decision, ExchangeFailure, LocalWorkObservation, LocalWorkOutcome,
@@ -158,32 +158,25 @@ impl AdmissionRecoveryService {
             Err(error) => {
                 record_recovery_load_error(joiner, trigger, &error);
                 self.record_state_error(&mut report, error);
+                report.work_mode = SpaceWorkMode::NeedsAttention;
                 return report;
             }
         };
+        report.work_mode = recovery.work_mode();
         let (
             loaded,
             sponsor_deadlines,
             sponsor_abandonments,
             next_deadline_ms,
-            sponsor_confirmation_pending,
+            _sponsor_pairing_open,
+            _needs_attention,
         ) = recovery.into_parts();
-        if sponsor_confirmation_pending {
-            report.disposition = AdmissionRecoveryDisposition::YieldMaintenance;
-        }
         if let Some(deadline_ms) = next_deadline_ms {
             joiner.maintenance_wake.schedule_at(deadline_ms, now_ms);
         }
         for loaded in sponsor_deadlines {
             let (aggregate, token) = loaded.into_parts();
-            let awaiting_confirmation = aggregate.pairing_confirmation().is_some_and(|summary| {
-                summary.status() == SponsorPairingConfirmationStatus::AwaitingPeerConfirmation
-            });
-            let transition = if awaiting_confirmation {
-                aggregate.mark_confirmation_unconfirmed(now_ms)
-            } else {
-                aggregate.terminate_if_expired(now_ms)
-            };
+            let transition = aggregate.terminate_if_expired(now_ms);
             match transition {
                 Ok(Some(transition)) => {
                     match self
@@ -204,7 +197,18 @@ impl AdmissionRecoveryService {
                 .recover_joiner_local_work(joiner, loaded, &mut report)
                 .await
             {
-                joiner_network.push(loaded);
+                let next_attempt_at_ms = loaded
+                    .aggregate()
+                    .pending_exchange()
+                    .map(|exchange| exchange.retry_state().next_attempt_at_ms())
+                    .filter(|next_attempt_at_ms| *next_attempt_at_ms > now_ms);
+                if let Some(next_attempt_at_ms) = next_attempt_at_ms {
+                    joiner
+                        .maintenance_wake
+                        .schedule_at(next_attempt_at_ms, now_ms);
+                } else {
+                    joiner_network.push(loaded);
+                }
             }
         }
         for loaded in sponsor_abandonments {
@@ -258,7 +262,8 @@ impl AdmissionRecoveryService {
                     | RemoveSpaceMemberError::Unavailable,
                 ) => report.deferred_count += 1,
                 Err(
-                    RemoveSpaceMemberError::RecoveryRequired | RemoveSpaceMemberError::SelfTarget,
+                    RemoveSpaceMemberError::RecoveryRequired { .. }
+                    | RemoveSpaceMemberError::SelfTarget,
                 ) => report.recovery_required_count += 1,
             }
         }
@@ -279,6 +284,18 @@ impl AdmissionRecoveryService {
         let loaded =
             recover_local_termination(self, joiner, aggregate, commit_token, report).await?;
         let (aggregate, commit_token) = loaded.into_parts();
+        let (aggregate, commit_token) = match end_undeliverable_abandonment(
+            self,
+            aggregate,
+            commit_token,
+            now_ms,
+            report,
+        )
+        .await
+        {
+            Some(loaded) => loaded.into_parts(),
+            None => return None,
+        };
         if aggregate.is_expired_at(now_ms) != Some(true) || !aggregate.can_terminate_locally() {
             return Some(LoadedPendingAdmission::new(aggregate, commit_token));
         }
@@ -327,7 +344,10 @@ impl AdmissionRecoveryService {
                 )
                 .await;
             }
-            (RecoveryChannel::Initial, SpaceAdmissionTransportError::AuthenticationRejected) => {
+            (
+                RecoveryChannel::Initial,
+                SpaceAdmissionTransportError::AuthenticationRejected { .. },
+            ) => {
                 self.save_initial_rejection(
                     report,
                     aggregate,
@@ -340,7 +360,7 @@ impl AdmissionRecoveryService {
                 self.save_peer_upgrade_result(report, aggregate, token)
                     .await;
             }
-            (_, SpaceAdmissionTransportError::ProtocolRejected) => {
+            (_, SpaceAdmissionTransportError::ProtocolRejected { .. }) => {
                 self.save_recovery_required(
                     report,
                     aggregate,
@@ -351,7 +371,7 @@ impl AdmissionRecoveryService {
             }
             (
                 RecoveryChannel::Continuation,
-                SpaceAdmissionTransportError::AuthenticationRejected,
+                SpaceAdmissionTransportError::AuthenticationRejected { .. },
             ) => {
                 self.save_recovery_required(
                     report,
@@ -361,7 +381,47 @@ impl AdmissionRecoveryService {
                 )
                 .await;
             }
+            (
+                _,
+                SpaceAdmissionTransportError::Deferred { .. }
+                | SpaceAdmissionTransportError::Unavailable { .. },
+            ) => {
+                self.save_deferred_retry(report, aggregate, token).await;
+            }
             _ => report.deferred_count += 1,
+        }
+    }
+
+    async fn save_deferred_retry(
+        &self,
+        report: &mut AdmissionRecoveryReport,
+        aggregate: JoinerAdmission,
+        token: AdmissionRecoveryCommitToken,
+    ) {
+        let now_ms = self.clock.now_ms();
+        let Some(retry_state) = aggregate
+            .pending_exchange()
+            .map(|exchange| *exchange.retry_state())
+        else {
+            report.recovery_required_count += 1;
+            return;
+        };
+        let shift = retry_state.attempt_count().min(5);
+        let delay_ms = 1_000_i64 << shift;
+        let mut next_attempt_at_ms = now_ms.saturating_add(delay_ms);
+        if let Some(expires_at_ms) = aggregate.expires_at_ms() {
+            next_attempt_at_ms = next_attempt_at_ms.min(expires_at_ms);
+        }
+        let transition = match aggregate.defer_pending_exchange(next_attempt_at_ms) {
+            Ok(transition) => transition,
+            Err(_) => {
+                report.recovery_required_count += 1;
+                return;
+            }
+        };
+        match self.commit_recovery_and_notify(token, transition).await {
+            Ok(_) => report.deferred_count += 1,
+            Err(error) => self.record_state_error(report, error),
         }
     }
 
@@ -391,6 +451,11 @@ impl AdmissionRecoveryService {
         aggregate: JoinerAdmission,
         token: AdmissionRecoveryCommitToken,
     ) {
+        // 已终止加入的放弃通知只在共同期限内投递；期内被拒按普通延期重试，期满由本机结束。
+        if aggregate.cleanup_obligation().is_some() {
+            self.save_deferred_retry(report, aggregate, token).await;
+            return;
+        }
         if aggregate.peer_upgrade_required() {
             report.peer_upgrade_required_count += 1;
             return;
@@ -436,6 +501,26 @@ impl AdmissionRecoveryService {
         };
         match self.commit_recovery(token, transition).await {
             Ok(_) => report.recovery_required_count += 1,
+            Err(error) => self.record_state_error(report, error),
+        }
+    }
+
+    pub(in super::super::super) async fn save_joiner_activation_rejection(
+        &self,
+        report: &mut AdmissionRecoveryReport,
+        aggregate: JoinerAdmission,
+        token: AdmissionRecoveryCommitToken,
+        reason: SpaceAdmissionRejectionReason,
+    ) {
+        let transition = match aggregate.reject_activation(reason) {
+            Ok(transition) => transition,
+            Err(_) => {
+                report.recovery_required_count += 1;
+                return;
+            }
+        };
+        match self.commit_recovery_and_notify(token, transition).await {
+            Ok(_) => report.rejected_count += 1,
             Err(error) => self.record_state_error(report, error),
         }
     }
@@ -631,6 +716,31 @@ async fn recover_local_termination(
     }
 }
 
+// 期满或无法再被接受的放弃通知在联网前结束，不再为它建立连接。
+async fn end_undeliverable_abandonment(
+    recovery: &AdmissionRecoveryService,
+    aggregate: JoinerAdmission,
+    token: AdmissionRecoveryCommitToken,
+    now_ms: i64,
+    report: &mut AdmissionRecoveryReport,
+) -> Option<LoadedPendingAdmission> {
+    if !aggregate.has_undeliverable_abandonment(now_ms) {
+        return Some(LoadedPendingAdmission::new(aggregate, token));
+    }
+    let transition = match aggregate.end_undeliverable_abandonment(now_ms) {
+        Ok(transition) => transition,
+        Err(_) => {
+            report.recovery_required_count += 1;
+            return None;
+        }
+    };
+    match recovery.commit_recovery_and_notify(token, transition).await {
+        Ok(_) => report.advanced_count += 1,
+        Err(error) => recovery.record_state_error(report, error),
+    }
+    None
+}
+
 fn finish_observation_after_recovery(
     joiner: &JoinerAdmissionService,
     material: [u8; 32],
@@ -685,29 +795,28 @@ fn diagnostic_trigger(trigger: AdmissionRecoveryTrigger) -> RecoveryTrigger {
         AdmissionRecoveryTrigger::Resume => RecoveryTrigger::Resume,
         AdmissionRecoveryTrigger::Periodic => RecoveryTrigger::Periodic,
         AdmissionRecoveryTrigger::StateChanged => RecoveryTrigger::StateChanged,
-        AdmissionRecoveryTrigger::PeerOnline(_) => RecoveryTrigger::PeerOnline,
     }
 }
-fn exchange_failure(error: SpaceAdmissionTransportError) -> ExchangeFailure {
+fn exchange_failure(error: &SpaceAdmissionTransportError) -> ExchangeFailure {
     match error {
-        SpaceAdmissionTransportError::AuthenticationRejected => {
+        SpaceAdmissionTransportError::AuthenticationRejected { .. } => {
             ExchangeFailure::AuthenticationRejected
         }
-        SpaceAdmissionTransportError::ProtocolRejected => ExchangeFailure::ProtocolRejected,
+        SpaceAdmissionTransportError::ProtocolRejected { .. } => ExchangeFailure::ProtocolRejected,
         SpaceAdmissionTransportError::InvitationUnavailable => {
             ExchangeFailure::InvitationUnavailable
         }
-        SpaceAdmissionTransportError::Unavailable => ExchangeFailure::Unavailable,
-        SpaceAdmissionTransportError::Deferred => ExchangeFailure::Deferred,
+        SpaceAdmissionTransportError::Unavailable { .. } => ExchangeFailure::Unavailable,
+        SpaceAdmissionTransportError::Deferred { .. } => ExchangeFailure::Deferred,
         SpaceAdmissionTransportError::PeerUpgradeRequired => ExchangeFailure::PeerUpgradeRequired,
     }
 }
 fn connection_decision(
     channel: RecoveryChannel,
-    error: SpaceAdmissionTransportError,
+    error: &SpaceAdmissionTransportError,
 ) -> RecoveryDecision {
     match (channel, error) {
-        (RecoveryChannel::Initial, SpaceAdmissionTransportError::AuthenticationRejected) => {
+        (RecoveryChannel::Initial, SpaceAdmissionTransportError::AuthenticationRejected { .. }) => {
             RecoveryDecision::Rejected(Some(RejectionCause::AuthenticationRejected))
         }
         (RecoveryChannel::Initial, SpaceAdmissionTransportError::InvitationUnavailable) => {
@@ -716,12 +825,13 @@ fn connection_decision(
         (RecoveryChannel::Initial, SpaceAdmissionTransportError::PeerUpgradeRequired) => {
             RecoveryDecision::Rejected(Some(RejectionCause::PeerUpgradeRequired))
         }
-        (_, SpaceAdmissionTransportError::ProtocolRejected) => {
+        (_, SpaceAdmissionTransportError::ProtocolRejected { .. }) => {
             RecoveryDecision::RequiresRecovery(Some(RecoveryProblem::ProtocolConflict))
         }
-        (RecoveryChannel::Continuation, SpaceAdmissionTransportError::AuthenticationRejected) => {
-            RecoveryDecision::RequiresRecovery(Some(RecoveryProblem::MissingCredential))
-        }
+        (
+            RecoveryChannel::Continuation,
+            SpaceAdmissionTransportError::AuthenticationRejected { .. },
+        ) => RecoveryDecision::RequiresRecovery(Some(RecoveryProblem::MissingCredential)),
         (_, error) => {
             RecoveryDecision::Deferred(Some(RecoveryDeferral::Connect(exchange_failure(error))))
         }
@@ -771,18 +881,10 @@ impl RecoverSpaceAdmissionsPort for SpaceAdmissionProtocol {
         trigger: &MembershipMaintenanceTrigger,
     ) -> AdmissionMaintenanceOutcome {
         let trigger = match trigger {
-            MembershipMaintenanceTrigger::PeerContact(_) => {
-                return AdmissionMaintenanceOutcome::Continue(
-                    MembershipMaintenanceStepOutcome::Completed,
-                );
-            }
             MembershipMaintenanceTrigger::Startup => AdmissionRecoveryTrigger::Startup,
             MembershipMaintenanceTrigger::Resume => AdmissionRecoveryTrigger::Resume,
             MembershipMaintenanceTrigger::Periodic => AdmissionRecoveryTrigger::Periodic,
             MembershipMaintenanceTrigger::StateChanged => AdmissionRecoveryTrigger::StateChanged,
-            MembershipMaintenanceTrigger::PeerOnline(device_id) => {
-                AdmissionRecoveryTrigger::PeerOnline(*device_id)
-            }
         };
         let report = self.recover_pending(trigger).await;
         let outcome = if report.recovery_required_count > 0 {
@@ -794,14 +896,12 @@ impl RecoverSpaceAdmissionsPort for SpaceAdmissionProtocol {
         } else {
             MembershipMaintenanceStepOutcome::Completed
         };
-        match report.disposition {
-            AdmissionRecoveryDisposition::ContinueMaintenance => {
-                AdmissionMaintenanceOutcome::Continue(outcome)
-            }
-            AdmissionRecoveryDisposition::YieldMaintenance => {
-                AdmissionMaintenanceOutcome::Yield(outcome)
-            }
-        }
+        let mode = if report.recovery_required_count > 0 {
+            SpaceWorkMode::NeedsAttention
+        } else {
+            report.work_mode
+        };
+        AdmissionMaintenanceOutcome::new(mode, outcome)
     }
 }
 

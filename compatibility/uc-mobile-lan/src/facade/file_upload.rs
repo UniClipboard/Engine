@@ -70,9 +70,25 @@ pub enum MobileFileUploadError {
     #[error("mobile file upload is unavailable")]
     Unavailable,
     #[error("mobile file upload failed")]
-    UploadFailed,
+    UploadFailed {
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
     #[error("mobile file upload completion failed")]
     CompletionFailed(#[source] ApplyIncomingMobileClipError),
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl MobileFileUploadError {
+    pub fn upload_failed() -> Self {
+        Self::UploadFailed { source: None }
+    }
+
+    pub fn upload_failed_from(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::UploadFailed {
+            source: Some(Box::new(source)),
+        }
+    }
 }
 
 pub(crate) struct CompleteMobileFileUpload {
@@ -199,10 +215,10 @@ impl MobileFileUploadCoordinator {
                 registration: ReceiverTransferRegistration::Provisional,
             })
             .await
-            .map_err(|_| MobileFileUploadError::UploadFailed)?;
+            .map_err(MobileFileUploadError::upload_failed_from)?;
         if session.report_progress(0, input.total_bytes).await.is_err() {
             Self::fail_session(&session, "mobile upload progress failed").await;
-            return Err(MobileFileUploadError::UploadFailed);
+            return Err(MobileFileUploadError::upload_failed());
         }
 
         let scope_id = streaming_scope_nonce();
@@ -214,7 +230,7 @@ impl MobileFileUploadCoordinator {
             Ok(staging) => staging,
             Err(_) => {
                 Self::fail_session(&session, "mobile upload staging failed").await;
-                return Err(MobileFileUploadError::UploadFailed);
+                return Err(MobileFileUploadError::upload_failed());
             }
         };
 
@@ -247,6 +263,7 @@ impl MobileFileUploadCoordinator {
     ) -> Result<(), MobileFileUploadError> {
         let _operation = self.lifecycle_gate.read().await;
         let appended_bytes =
+            // TryFromIntError：目标分类完整表达数值范围不符。
             u64::try_from(chunk.len()).map_err(|_| MobileFileUploadError::InvalidInput)?;
         let upload = self
             .registry
@@ -275,7 +292,7 @@ impl MobileFileUploadCoordinator {
                 self.cleanup_failed_upload(failed, "mobile upload append failed")
                     .await;
             }
-            return Err(MobileFileUploadError::UploadFailed);
+            return Err(MobileFileUploadError::upload_failed());
         }
 
         let progress = state.as_mut().and_then(|active| {
@@ -301,7 +318,7 @@ impl MobileFileUploadCoordinator {
                     self.cleanup_failed_upload(failed, "mobile upload progress failed")
                         .await;
                 }
-                return Err(MobileFileUploadError::UploadFailed);
+                return Err(MobileFileUploadError::upload_failed());
             }
             if let Some(active) = state.as_mut() {
                 active.last_progress_at = Instant::now();
@@ -331,7 +348,7 @@ impl MobileFileUploadCoordinator {
         {
             self.cleanup_failed_upload(upload, "mobile upload progress failed")
                 .await;
-            return Err(MobileFileUploadError::UploadFailed);
+            return Err(MobileFileUploadError::upload_failed());
         }
 
         let staged = match self.staging.finalize_stage(upload.staging).await {
@@ -377,7 +394,7 @@ impl MobileFileUploadCoordinator {
             .session
             .cancel(FileTransferCancellationReason::LocalUser)
             .await
-            .map_err(|_| MobileFileUploadError::UploadFailed)?;
+            .map_err(MobileFileUploadError::upload_failed_from)?;
         Ok(true)
     }
 
@@ -405,7 +422,7 @@ impl MobileFileUploadCoordinator {
             }
         }
         if failed {
-            Err(MobileFileUploadError::UploadFailed)
+            Err(MobileFileUploadError::upload_failed())
         } else {
             Ok(())
         }
@@ -981,7 +998,7 @@ mod tests {
 
         assert!(matches!(
             context.coordinator.append_chunk(&handle, b"broken").await,
-            Err(MobileFileUploadError::UploadFailed)
+            Err(MobileFileUploadError::UploadFailed { .. })
         ));
         assert_eq!(context.staging.abort_count(), 1);
         assert_eq!(context.staging.active_count(), 0);
@@ -1008,7 +1025,7 @@ mod tests {
                 .coordinator
                 .begin_upload(begin_input("transfer-begin-failure"))
                 .await,
-            Err(MobileFileUploadError::UploadFailed)
+            Err(MobileFileUploadError::UploadFailed { .. })
         ));
         assert_eq!(context.staging.active_count(), 0);
         assert!(matches!(

@@ -103,6 +103,7 @@ use uc_core::MemberRepositoryPort;
 use uc_observability_contract::analytics::{
     AnalyticsPort, FailureReason, PayloadSizeBucket, PayloadType, SyncFailureStage, TransportType,
 };
+use uc_observability_contract::error_source::io_error_kind;
 
 /// One fanned-out peer's settled result: the device plus the wire outcome.
 pub(crate) type PeerDispatchResult = (DeviceId, Result<DispatchAck, ClipboardDispatchError>);
@@ -255,11 +256,11 @@ pub(crate) enum DispatchSyncError {
     #[error("encryption session not unlocked")]
     LockedSpace,
     /// Encryption failed for any other reason.
-    #[error("transfer cipher failure: {0}")]
-    CipherFailure(String),
-    /// Listing the peer address repository failed.
-    #[error("peer_addr_repo.list: {0}")]
-    Repository(String),
+    #[error("transfer cipher failure")]
+    CipherFailure(#[source] uc_core::ports::security::TransferCipherError),
+    /// Reading the peer address repository or current peer scope failed.
+    #[error("dispatch target lookup failed")]
+    Repository(#[source] anyhow::Error),
 }
 
 /// Crate-internal abstraction over [`DispatchClipboardEntryUseCase::execute`].
@@ -465,7 +466,7 @@ impl DispatchClipboardEntryUseCase {
                     uc_core::ports::security::TransferCipherError::NotUnlocked => {
                         DispatchSyncError::LockedSpace
                     }
-                    other => DispatchSyncError::CipherFailure(other.to_string()),
+                    other => DispatchSyncError::CipherFailure(other),
                 });
             }
         };
@@ -513,7 +514,8 @@ impl DispatchClipboardEntryUseCase {
                     .await
                 {
                     warn!(
-                        error = %error,
+                        error_kind = "delivery_intent_record",
+                        io_error_kind = io_error_kind(&error),
                         "dispatch: delivery intent persistence failed"
                     );
                     intent_failures.push(*device_id);
@@ -2142,7 +2144,7 @@ mod tests {
             .with(eq(DeviceId::new("peer-io")), always(), always())
             .times(1)
             .returning(|_, _, _| {
-                dispatch_report(Err(ClipboardDispatchError::Io("broken pipe".to_string())))
+                dispatch_report(Err(ClipboardDispatchError::Io("broken pipe".into())))
             });
 
         let spy = Arc::new(SpyEntryDeliveryRepo::default());

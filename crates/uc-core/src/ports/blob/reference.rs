@@ -51,8 +51,8 @@ pub enum BlobReferenceError {
     /// Callers usually only record this — a dedup miss simply falls
     /// through to "encrypt and publish as usual", so correctness is not
     /// affected.
-    #[error("repository error: {0}")]
-    Repository(String),
+    #[error("repository error")]
+    Repository(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// Plaintext-fingerprint ↔ ciphertext-identity dedup cache.

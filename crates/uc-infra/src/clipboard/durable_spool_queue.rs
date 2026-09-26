@@ -27,12 +27,14 @@
 //! A failed `try_send` (channel full) is logged but not treated as an error;
 //! the spool scanner will recover the entry on next startup.
 
+use anyhow::Context;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
 use tracing::warn;
 use uc_core::ids::RepresentationId;
 use uc_core::ports::clipboard::{SpoolQueuePort, SpoolRequest};
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::clipboard::SpoolManager;
 
@@ -62,9 +64,7 @@ impl SpoolQueuePort for DurableSpoolQueue {
         self.spool_manager
             .write(&request.rep_id, &request.bytes)
             .await
-            .map_err(|err| {
-                anyhow::anyhow!("failed to write spool file for {}: {}", request.rep_id, err)
-            })?;
+            .context("failed to write spool file")?;
 
         // Notify the background worker to immediately process this entry.
         // A failure here is non-fatal: the spool file is on disk and will be
@@ -72,7 +72,8 @@ impl SpoolQueuePort for DurableSpoolQueue {
         if let Err(err) = self.worker_tx.try_send(request.rep_id.clone()) {
             warn!(
                 representation_id = %request.rep_id,
-                error = %err,
+                error_kind = "worker_notify",
+                io_error_kind = io_error_kind(&err),
                 "Failed to notify worker after spool write; will be recovered on next startup"
             );
         }

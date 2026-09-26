@@ -23,6 +23,7 @@ use uc_core::clipboard::ClipboardContentCategorySet;
 use uc_core::ids::DeviceId;
 use uc_core::ports::PeerAddressRepositoryPort;
 use uc_core::MemberRepositoryPort;
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::deps::CurrentSpaceMemberScopePort;
 
@@ -67,12 +68,13 @@ impl TargetSelector {
         input: &DispatchClipboardEntryInput,
         local_device: &DeviceId,
     ) -> Result<Vec<DeviceId>, DispatchSyncError> {
-        let records =
-            self.peer_addr_repo.list().await.map_err(|err| {
-                DispatchSyncError::Repository(format!("peer_addr_repo.list: {err}"))
-            })?;
+        let records = self.peer_addr_repo.list().await.map_err(|err| {
+            DispatchSyncError::Repository(anyhow::Error::new(err).context("list peer addresses"))
+        })?;
         let scope = self.peer_scope.snapshot().await.map_err(|error| {
-            DispatchSyncError::Repository(format!("current peer scope: {error:?}"))
+            DispatchSyncError::Repository(
+                anyhow::Error::new(error).context("read current peer scope"),
+            )
         })?;
 
         let mut candidates: Vec<DeviceId> = Vec::with_capacity(records.len());
@@ -143,7 +145,8 @@ impl TargetSelector {
             }
             Err(err) => {
                 warn!(
-                    error = %err,
+                    error_kind = "member_lookup",
+                    io_error_kind = io_error_kind(&err),
                     "dispatch: member repo lookup failed; failing open"
                 );
                 true
@@ -392,7 +395,7 @@ mod tests {
         let mut member_repo = MockMemberRepo::new();
         member_repo
             .expect_get()
-            .returning(|_| Err(MembershipError::Repository("db down".to_string())));
+            .returning(|_| Err(MembershipError::Repository("db down".into())));
 
         let selector = selector(repo, member_repo);
         let targets = selector
@@ -410,7 +413,7 @@ mod tests {
         let mut repo = MockPeerAddrRepo::new();
         repo.expect_list()
             .times(1)
-            .returning(|| Err(uc_core::ports::PeerAddressError::Internal("io".to_string())));
+            .returning(|| Err(uc_core::ports::PeerAddressError::Internal("io".into())));
 
         let selector = selector(repo, member_repo_all_enabled());
         let err = selector
@@ -418,6 +421,12 @@ mod tests {
             .await
             .expect_err("list failure must surface");
 
-        assert!(matches!(err, DispatchSyncError::Repository(_)));
+        let DispatchSyncError::Repository(source) = err else {
+            panic!("expected repository failure");
+        };
+        assert!(matches!(
+            source.downcast_ref::<uc_core::ports::PeerAddressError>(),
+            Some(uc_core::ports::PeerAddressError::Internal(_))
+        ));
     }
 }

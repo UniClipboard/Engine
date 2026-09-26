@@ -4,6 +4,22 @@ pub struct PendingInboundMember {
     pub display_name: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InboundPairingStatus {
+    AwaitingConfirmation,
+    ConfirmationMissed,
+    NeedsAttention,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboundPairing {
+    pub pairing_id: [u8; 32],
+    pub device_id: Option<uc_core::DeviceId>,
+    pub display_name: Option<String>,
+    pub status: InboundPairingStatus,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JoinedSpace {
     pub sponsor_device_id: uc_core::DeviceId,
@@ -22,6 +38,16 @@ pub enum JoinSpaceTerminationReason {
     Superseded,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinSpaceAttentionReason {
+    OutcomeCannotBeProven,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinSpaceAttentionRecovery {
+    PreserveDataAndContactSupport,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CurrentJoinStatus {
     Active {
@@ -36,6 +62,19 @@ pub enum CurrentJoinStatus {
         sponsor_identity_fingerprint: Option<uc_core::security::IdentityFingerprint>,
         cancel_requested: bool,
         peer_upgrade_required: bool,
+    },
+    Processing {
+        join_id: [u8; 16],
+        target_space_id: String,
+        sponsor_device_id: uc_core::DeviceId,
+        sponsor_identity_fingerprint: uc_core::security::IdentityFingerprint,
+        peer_upgrade_required: bool,
+    },
+    NeedsAttention {
+        join_id: [u8; 16],
+        reason: JoinSpaceAttentionReason,
+        recovery: JoinSpaceAttentionRecovery,
+        next_retry_at_ms: Option<i64>,
     },
     Rejected {
         join_id: [u8; 16],

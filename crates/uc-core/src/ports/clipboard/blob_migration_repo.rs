@@ -23,12 +23,12 @@ use crate::ids::{EventId, RepresentationId};
 #[derive(Debug, thiserror::Error)]
 pub enum BlobMigrationRepoError {
     /// 后端存储不可用（DB 连接断、磁盘满、事务冲突等）。
-    #[error("storage failure: {0}")]
-    Storage(String),
+    #[error("storage failure")]
+    Storage(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     /// 其它内部错误（serde 失败、不可恢复的逻辑错）。
-    #[error("blob migration repo internal error: {0}")]
-    Internal(String),
+    #[error("blob migration repo internal error")]
+    Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// 一条迁移备份记录：迁移开始时把每个 representation 的 inline_data

@@ -11,6 +11,6 @@ pub enum QueryPairingInvitationAddressesError {
     #[error("pairing invitation address is not available: {0}")]
     AddressNotAvailable(IpAddr),
 
-    #[error("failed to query pairing invitation addresses: {0}")]
-    Internal(String),
+    #[error("failed to query pairing invitation addresses")]
+    Internal(#[source] anyhow::Error),
 }

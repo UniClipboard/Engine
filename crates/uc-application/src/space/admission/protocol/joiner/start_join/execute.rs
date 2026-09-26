@@ -67,7 +67,7 @@ impl JoinerAdmissionService {
                 }
             })
             .transpose()
-            .map_err(|_| JoinSpaceError::PreviousJoinCannotBeSuperseded)?;
+            .map_err(JoinSpaceError::previous_join_cannot_be_superseded_from)?;
 
         let prepared_invitation = self.prepare_invitation.prepare(&input).await?;
         let (admission_id, join_id, mut transition) = match prepared_invitation {
@@ -86,9 +86,9 @@ impl JoinerAdmissionService {
                     join_request,
                     SpaceAdmissionMessageKind::Candidate,
                     AdmissionRetryState::new(0, 0)
-                        .map_err(|_| JoinSpaceError::InvalidStartMaterial)?,
+                        .map_err(JoinSpaceError::invalid_start_material_from)?,
                 )
-                .map_err(|_| JoinSpaceError::InvalidStartMaterial)?;
+                .map_err(JoinSpaceError::invalid_start_material_from)?;
                 let transition = JoinerAdmission::start_join(
                     admission_id,
                     join_id,
@@ -99,7 +99,7 @@ impl JoinerAdmissionService {
                     pending_exchange,
                     started_at_ms,
                 )
-                .map_err(|_| JoinSpaceError::InvalidStartMaterial)?;
+                .map_err(JoinSpaceError::invalid_start_material_from)?;
                 (admission_id, join_id, transition)
             }
             PreparedJoinerInvitation::Short {
@@ -117,21 +117,21 @@ impl JoinerAdmissionService {
                     short_code,
                     started_at_ms,
                 )
-                .map_err(|_| JoinSpaceError::InvalidStartMaterial)?;
+                .map_err(JoinSpaceError::invalid_start_material_from)?;
                 (admission_id, join_id, transition)
             }
         };
         let expires_at_ms = transition
             .replacement()
             .expires_at_ms()
-            .ok_or(JoinSpaceError::InvalidStartMaterial)?;
+            .ok_or_else(JoinSpaceError::invalid_start_material)?;
         let now_ms = self.clock.now_ms();
         if now_ms >= expires_at_ms {
             transition = transition
                 .into_replacement()
                 .terminate_if_expired(now_ms)
-                .map_err(|_| JoinSpaceError::InvalidStartMaterial)?
-                .ok_or(JoinSpaceError::InvalidStartMaterial)?;
+                .map_err(JoinSpaceError::invalid_start_material_from)?
+                .ok_or_else(JoinSpaceError::invalid_start_material)?;
         }
         let terminated = transition.replacement().termination_reason();
 
@@ -168,7 +168,7 @@ impl JoinerAdmissionService {
                     reason: JoinSpaceTerminationReason::Expired,
                 }
             }
-            Some(_) => return Err(JoinSpaceError::InvalidStartMaterial),
+            Some(_) => return Err(JoinSpaceError::invalid_start_material()),
             None => CurrentJoinStatus::Pending {
                 join_id: *join_id.as_bytes(),
                 target_space_id: None,
@@ -199,7 +199,7 @@ async fn persist_device_name(
     let mut current = settings
         .load()
         .await
-        .map_err(|error| JoinSpaceError::Settings(error.to_string()))?;
+        .map_err(|error| JoinSpaceError::Settings(anyhow::Error::from(error)))?;
     if current.general.device_name.as_deref() == Some(device_name) {
         return Ok(());
     }
@@ -207,5 +207,5 @@ async fn persist_device_name(
     settings
         .save(&current)
         .await
-        .map_err(|error| JoinSpaceError::Settings(error.to_string()))
+        .map_err(|error| JoinSpaceError::Settings(anyhow::Error::from(error)))
 }

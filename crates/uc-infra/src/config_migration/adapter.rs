@@ -150,6 +150,7 @@ impl ConfigMigrationAdapter {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(_) => Err(ConfigMigrationError::Io {
                 details: "failed reading a configuration file".to_string(),
+                source: None,
             }),
         }
     }
@@ -157,8 +158,9 @@ impl ConfigMigrationAdapter {
     /// Read a required file: missing or unreadable both fail (the caller's
     /// precondition is that an initialized installation has these).
     fn read_required(path: &Path) -> Result<Vec<u8>, ConfigMigrationError> {
-        std::fs::read(path).map_err(|_| ConfigMigrationError::Internal {
+        std::fs::read(path).map_err(|error| ConfigMigrationError::Internal {
             details: "a required configuration file was missing or unreadable".to_string(),
+            source: Some(Box::new(error)),
         })
     }
 
@@ -174,12 +176,12 @@ impl ConfigMigrationAdapter {
         let mut kek = None;
 
         for spec in migratable_secret_keys(self.profile_id.inner()) {
-            let value =
-                self.secure_storage
-                    .get(&spec.key)
-                    .map_err(|_| ConfigMigrationError::Internal {
-                        details: "secure storage read failed while collecting secrets".to_string(),
-                    })?;
+            let value = self.secure_storage.get(&spec.key).map_err(|error| {
+                ConfigMigrationError::Internal {
+                    details: "secure storage read failed while collecting secrets".to_string(),
+                    source: Some(Box::new(error)),
+                }
+            })?;
 
             if let Some(bytes) = value {
                 if matches!(spec.kind, MigratableSecretKind::ProfileKek) {
@@ -205,18 +207,23 @@ impl ConfigMigrationAdapter {
             Err(_) => {
                 return Err(ConfigMigrationError::Io {
                     details: "failed reading the device-identity directory".to_string(),
+                    source: None,
                 })
             }
         };
 
         let mut files = Vec::new();
         for entry in read_dir {
-            let entry = entry.map_err(|_| ConfigMigrationError::Io {
+            let entry = entry.map_err(|error| ConfigMigrationError::Io {
                 details: "failed enumerating the device-identity directory".to_string(),
+                source: Some(Box::new(error)),
             })?;
-            let file_type = entry.file_type().map_err(|_| ConfigMigrationError::Io {
-                details: "failed inspecting a device-identity entry".to_string(),
-            })?;
+            let file_type = entry
+                .file_type()
+                .map_err(|error| ConfigMigrationError::Io {
+                    details: "failed inspecting a device-identity entry".to_string(),
+                    source: Some(Box::new(error)),
+                })?;
             if !file_type.is_file() {
                 continue;
             }
@@ -245,10 +252,12 @@ impl ConfigMigrationAdapter {
                 if e.kind() == std::io::ErrorKind::NotFound {
                     ConfigMigrationError::Io {
                         details: "bundle source file not found".to_string(),
+                        source: None,
                     }
                 } else {
                     ConfigMigrationError::Io {
                         details: "failed reading bundle source".to_string(),
+                        source: None,
                     }
                 }
             })?;
@@ -260,12 +269,14 @@ impl ConfigMigrationAdapter {
             let manifest_bytes = archive.get(MANIFEST_MEMBER).ok_or_else(|| {
                 ConfigMigrationError::IncompatibleBundle {
                     reason: "bundle is missing its manifest".to_string(),
+                    source: None,
                 }
             })?;
             let manifest: BundleManifest =
-                serde_json::from_slice(manifest_bytes).map_err(|_| {
+                serde_json::from_slice(manifest_bytes).map_err(|error| {
                     ConfigMigrationError::IncompatibleBundle {
                         reason: "bundle manifest could not be parsed".to_string(),
+                        source: Some(Box::new(error)),
                     }
                 })?;
 
@@ -275,14 +286,16 @@ impl ConfigMigrationAdapter {
                         "bundle archive schema {} is newer than supported {}",
                         manifest.schema_ver, MANIFEST_SCHEMA_VER
                     ),
+                    source: None,
                 });
             }
 
             Ok::<_, ConfigMigrationError>((archive, manifest))
         })
         .await
-        .map_err(|_| ConfigMigrationError::Internal {
+        .map_err(|error| ConfigMigrationError::Internal {
             details: "bundle decode task failed to run".to_string(),
+            source: Some(Box::new(error)),
         })??;
 
         Ok((archive, manifest))
@@ -291,10 +304,15 @@ impl ConfigMigrationAdapter {
 
 fn map_bundle_err(err: BundleError) -> ConfigMigrationError {
     match err {
-        BundleError::InvalidOrCorrupt => ConfigMigrationError::InvalidPasswordOrCorrupt,
-        BundleError::Incompatible(reason) => ConfigMigrationError::IncompatibleBundle { reason },
-        BundleError::Crypto => ConfigMigrationError::Internal {
+        // 口令错误与数据损坏刻意不可区分（不提供口令猜测的判断依据），不向上携带细节。
+        BundleError::InvalidOrCorrupt { .. } => ConfigMigrationError::InvalidPasswordOrCorrupt,
+        BundleError::Incompatible(reason) => ConfigMigrationError::IncompatibleBundle {
+            reason,
+            source: None,
+        },
+        error @ BundleError::Crypto { .. } => ConfigMigrationError::Internal {
             details: "bundle cryptographic operation failed".to_string(),
+            source: Some(Box::new(error)),
         },
     }
 }
@@ -304,26 +322,30 @@ fn map_archive_err(err: ArchiveError) -> ConfigMigrationError {
         // A decrypted-but-unparseable archive is treated as corruption: the
         // AEAD tag already verified, so this is a structural defect, not a
         // password issue — but to a caller it is still "this bundle is broken".
-        ArchiveError::Malformed | ArchiveError::UnsafePath => {
+        error @ (ArchiveError::Malformed { .. } | ArchiveError::UnsafePath { .. }) => {
             ConfigMigrationError::IncompatibleBundle {
                 reason: "bundle archive is malformed".to_string(),
+                source: Some(Box::new(error)),
             }
         }
         ArchiveError::TooLarge => ConfigMigrationError::IncompatibleBundle {
             reason: "bundle archive exceeds the supported size".to_string(),
+            source: None,
         },
     }
 }
 
 fn map_db_snapshot_err(err: DbSnapshotError) -> ConfigMigrationError {
     match err {
-        DbSnapshotError::Connection { .. } | DbSnapshotError::Query { .. } => {
+        error @ (DbSnapshotError::Connection { .. } | DbSnapshotError::Query { .. }) => {
             ConfigMigrationError::Internal {
                 details: "database snapshot failed".to_string(),
+                source: Some(Box::new(error)),
             }
         }
-        DbSnapshotError::Io { .. } => ConfigMigrationError::Io {
+        error @ DbSnapshotError::Io { .. } => ConfigMigrationError::Io {
             details: "database snapshot file io failed".to_string(),
+            source: Some(Box::new(error)),
         },
     }
 }
@@ -340,12 +362,14 @@ fn parse_keyslot_kdf(
     keyslot_bytes: &[u8],
 ) -> Result<([u8; 16], Argon2Params), ConfigMigrationError> {
     let keyslot: KeySlotFile =
-        serde_json::from_slice(keyslot_bytes).map_err(|_| ConfigMigrationError::Internal {
+        serde_json::from_slice(keyslot_bytes).map_err(|error| ConfigMigrationError::Internal {
             details: "keyslot could not be parsed for export".to_string(),
+            source: Some(Box::new(error)),
         })?;
     if keyslot.kdf.alg != "Argon2id" {
         return Err(ConfigMigrationError::Internal {
             details: "unsupported key-derivation algorithm in keyslot".to_string(),
+            source: None,
         });
     }
     let salt: [u8; 16] =
@@ -353,8 +377,9 @@ fn parse_keyslot_kdf(
             .salt
             .as_slice()
             .try_into()
-            .map_err(|_| ConfigMigrationError::Internal {
+            .map_err(|error| ConfigMigrationError::Internal {
                 details: "keyslot salt has unexpected length".to_string(),
+                source: Some(Box::new(error)),
             })?;
     let kdf = Argon2Params {
         mem_kib: keyslot.kdf.params.mem_kib,
@@ -366,11 +391,13 @@ fn parse_keyslot_kdf(
 
 fn map_staging_err(err: StagingError) -> ConfigMigrationError {
     match err {
-        StagingError::Io => ConfigMigrationError::Io {
+        error @ StagingError::Io { .. } => ConfigMigrationError::Io {
             details: "writing the staged import failed".to_string(),
+            source: Some(Box::new(error)),
         },
-        StagingError::Serialize => ConfigMigrationError::Internal {
+        error @ StagingError::Serialize { .. } => ConfigMigrationError::Internal {
             details: "encoding the staged import failed".to_string(),
+            source: Some(Box::new(error)),
         },
     }
 }
@@ -387,8 +414,9 @@ impl ExportConfigBundlePort for ConfigMigrationAdapter {
         let db_bytes =
             tokio::task::spawn_blocking(move || db_snapshot::snapshot_to_bytes(&pool, &scratch))
                 .await
-                .map_err(|_| ConfigMigrationError::Internal {
+                .map_err(|error| ConfigMigrationError::Internal {
                     details: "snapshot task failed to run".to_string(),
+                    source: Some(Box::new(error)),
                 })?
                 .map_err(map_db_snapshot_err)?;
 
@@ -403,12 +431,14 @@ impl ExportConfigBundlePort for ConfigMigrationAdapter {
             error!("export aborted: current-profile KEK absent from secure storage while unlocked");
             return Err(ConfigMigrationError::Internal {
                 details: "key material unavailable for export".to_string(),
+                source: None,
             });
         };
-        let kek_key: [u8; 32] = kek_bytes.as_slice().try_into().map_err(|_| {
+        let kek_key: [u8; 32] = kek_bytes.as_slice().try_into().map_err(|error| {
             error!("export aborted: KEK material has unexpected length");
             ConfigMigrationError::Internal {
                 details: "key material has unexpected length".to_string(),
+                source: Some(Box::new(error)),
             }
         })?;
         let secrets_file = SecretsFile::from_raw(secret_entries);
@@ -433,8 +463,9 @@ impl ExportConfigBundlePort for ConfigMigrationAdapter {
             .local_identity
             .get_current_fingerprint()
             .await
-            .map_err(|_| ConfigMigrationError::Internal {
+            .map_err(|error| ConfigMigrationError::Internal {
                 details: "reading device fingerprint failed".to_string(),
+                source: Some(Box::new(error)),
             })?
             .map(|fp| fp.to_string())
             .unwrap_or_default();
@@ -474,10 +505,12 @@ impl ExportConfigBundlePort for ConfigMigrationAdapter {
             device_fingerprint: fingerprint,
             included: archive.member_paths(),
         };
-        let manifest_bytes =
-            serde_json::to_vec_pretty(&manifest).map_err(|_| ConfigMigrationError::Internal {
+        let manifest_bytes = serde_json::to_vec_pretty(&manifest).map_err(|error| {
+            ConfigMigrationError::Internal {
                 details: "encoding the bundle manifest failed".to_string(),
-            })?;
+                source: Some(Box::new(error)),
+            }
+        })?;
         // `included` is computed before the manifest member is added; reinsert
         // with the manifest now present so the recorded list is accurate.
         archive.insert(MANIFEST_MEMBER, manifest_bytes);
@@ -487,8 +520,11 @@ impl ExportConfigBundlePort for ConfigMigrationAdapter {
         };
         archive.insert(
             MANIFEST_MEMBER,
-            serde_json::to_vec_pretty(&manifest).map_err(|_| ConfigMigrationError::Internal {
-                details: "encoding the bundle manifest failed".to_string(),
+            serde_json::to_vec_pretty(&manifest).map_err(|error| {
+                ConfigMigrationError::Internal {
+                    details: "encoding the bundle manifest failed".to_string(),
+                    source: Some(Box::new(error)),
+                }
             })?,
         );
 
@@ -501,30 +537,35 @@ impl ExportConfigBundlePort for ConfigMigrationAdapter {
             bundle::seal_with_key(&kek_key, &bundle_salt, bundle_kdf, &tar_bytes)
         })
         .await
-        .map_err(|_| ConfigMigrationError::Internal {
+        .map_err(|error| ConfigMigrationError::Internal {
             details: "bundle seal task failed to run".to_string(),
+            source: Some(Box::new(error)),
         })?
         .map_err(map_bundle_err)?;
 
         let destination = destination.to_path_buf();
         let final_path = tokio::task::spawn_blocking(move || {
             if let Some(parent) = destination.parent().filter(|p| !p.as_os_str().is_empty()) {
-                std::fs::create_dir_all(parent).map_err(|_| ConfigMigrationError::Io {
+                std::fs::create_dir_all(parent).map_err(|error| ConfigMigrationError::Io {
                     details: "failed creating the destination directory".to_string(),
+                    source: Some(Box::new(error)),
                 })?;
             }
             let tmp = destination.with_extension("ucbundle.tmp");
-            std::fs::write(&tmp, &sealed).map_err(|_| ConfigMigrationError::Io {
+            std::fs::write(&tmp, &sealed).map_err(|error| ConfigMigrationError::Io {
                 details: "failed writing the bundle file".to_string(),
+                source: Some(Box::new(error)),
             })?;
-            std::fs::rename(&tmp, &destination).map_err(|_| ConfigMigrationError::Io {
+            std::fs::rename(&tmp, &destination).map_err(|error| ConfigMigrationError::Io {
                 details: "failed finalizing the bundle file".to_string(),
+                source: Some(Box::new(error)),
             })?;
             Ok::<_, ConfigMigrationError>(destination)
         })
         .await
-        .map_err(|_| ConfigMigrationError::Internal {
+        .map_err(|error| ConfigMigrationError::Internal {
             details: "bundle write task failed to run".to_string(),
+            source: Some(Box::new(error)),
         })??;
 
         info!("config bundle export complete");
@@ -592,8 +633,9 @@ impl StageConfigImportPort for ConfigMigrationAdapter {
             layout.write(&archive, &marker)
         })
         .await
-        .map_err(|_| ConfigMigrationError::Internal {
+        .map_err(|error| ConfigMigrationError::Internal {
             details: "staging task failed to run".to_string(),
+            source: Some(Box::new(error)),
         })?
         .map_err(map_staging_err)?;
 

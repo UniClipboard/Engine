@@ -6,7 +6,8 @@ mod ports;
 pub use error::{ExecuteJoinerActivationError, JoinerActivationStateError};
 pub use model::{
     CompletedJoinerActivation, JoinerActivationCommitToken, JoinerActivationIntent,
-    JoinerActivationMutation, JoinerActivationOutcome, LoadedJoinerActivation,
+    JoinerActivationMutation, JoinerActivationOutcome, JoinerMembershipStart,
+    LoadedJoinerActivation,
 };
 pub use ports::{
     ExecuteJoinerActivationPort, JoinerActivationStatePort, ValidateJoinerActivationIntentPort,

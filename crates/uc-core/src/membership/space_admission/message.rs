@@ -18,13 +18,19 @@ use super::id::{AdmissionMessageId, InvitationId, SpaceAdmissionId};
 pub enum SpaceAdmissionProtocolVersion {
     V1,
     V2,
+    V3,
+    V4,
 }
 
 impl SpaceAdmissionProtocolVersion {
+    pub const CURRENT: Self = Self::V4;
+
     pub const fn from_u16(value: u16) -> Option<Self> {
         match value {
             1 => Some(Self::V1),
             2 => Some(Self::V2),
+            3 => Some(Self::V3),
+            4 => Some(Self::V4),
             _ => None,
         }
     }
@@ -33,6 +39,8 @@ impl SpaceAdmissionProtocolVersion {
         match self {
             Self::V1 => 1,
             Self::V2 => 2,
+            Self::V3 => 3,
+            Self::V4 => 4,
         }
     }
 }
@@ -239,6 +247,11 @@ pub enum SpaceAdmissionRejectionReason {
     BaseHistoryChanged,
     JoinerHistoryAhead,
     HistoryConflict,
+    CompletionInvalid,
+    MembershipHistoryInvalid,
+    SecurityMaterialInvalid,
+    RelationshipConflict,
+    ActivationStateInvalid,
     PeerUpgradeRequired,
     Cancelled,
     RemovedBeforeActivation,
@@ -284,6 +297,7 @@ impl AdmissionJoinRequestV1 {
     ) -> Result<Self, AdmissionJoinRequestError> {
         membership_credential
             .validate()
+            // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
             .map_err(|_| AdmissionJoinRequestError::InvalidMembershipCredential)?;
         if identity_facts.device_id != device_id
             || identity_facts.member_instance
@@ -392,6 +406,7 @@ impl AdmissionCandidateV1 {
         }
         security_commitment
             .validate()
+            // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
             .map_err(|_| AdmissionCandidateError::InvalidSecurityCommitment)?;
         if candidate_event.lineage_id != security_commitment.lineage_id {
             return Err(AdmissionCandidateError::LineageMismatch);
@@ -596,6 +611,7 @@ pub enum AdmissionAbandonmentReasonV2 {
     Cancelled,
     Expired,
     Superseded,
+    Rejected,
 }
 
 #[derive(Clone, PartialEq, Eq)]

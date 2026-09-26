@@ -18,6 +18,7 @@ use uc_core::ports::blob::{
 };
 use uc_core::ports::security::TransferCipherPort;
 use uc_core::ports::ContentHashPort;
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::facade::host_event::{HostEvent, HostEventBus, TransferHostEvent};
 use crate::transfer::blob::{
@@ -211,18 +212,18 @@ pub struct FetchBlobToPathResult {
 
 #[derive(Debug, thiserror::Error)]
 pub enum BlobTransferError {
-    #[error("publish blob failed: {0}")]
-    Publish(String),
-    #[error("fetch blob failed: {0}")]
-    Fetch(String),
+    #[error("publish blob failed")]
+    Publish(#[source] anyhow::Error),
+    #[error("fetch blob failed")]
+    Fetch(#[source] anyhow::Error),
     /// fetch_blob / fetch_blob_to_path 在进行中被外部 cancel(用户点取消、
     /// timeout sweep、删除流程)。目标文件可能是 partial,调用方应当把
     /// `target_path` 视为不可用并交由 cleanup 删除。与 `Fetch` 不同:
     /// Fetch 表达"传输本身失败",Cancelled 表达"传输被主动撤回"。
     #[error("fetch blob cancelled")]
     Cancelled,
-    #[error("record blob transfer failed: {0}")]
-    Persistence(String),
+    #[error("record blob transfer failed")]
+    Persistence(#[source] anyhow::Error),
 }
 
 /// Result of attempting to cancel an inbound transfer.
@@ -328,7 +329,7 @@ impl BlobTransferFacade {
             })
             .await
             .map(Some)
-            .map_err(|error| BlobTransferError::Persistence(error.to_string()))
+            .map_err(|error| BlobTransferError::Persistence(anyhow::Error::from(error)))
     }
 
     async fn existing_lifecycle(
@@ -343,7 +344,9 @@ impl BlobTransferFacade {
             .await
             .map(Some)
             .ok_or_else(|| {
-                BlobTransferError::Persistence("active file transfer session is missing".into())
+                BlobTransferError::Persistence(anyhow::anyhow!(
+                    "active file transfer session is missing"
+                ))
             })
     }
 
@@ -354,12 +357,12 @@ impl BlobTransferFacade {
                     .fail(FileTransferFailureReason::Unknown, Some(detail))
                     .await
                 {
-                    warn!(error = %error, transfer_id = %ctx.transfer_id, "could not finish unfetched transfer failure");
+                    warn!(error_kind = "unfetched_failure_finish", io_error_kind = io_error_kind(&error), transfer_id = %ctx.transfer_id, "could not finish unfetched transfer failure");
                 }
             }
             Ok(None) => {}
             Err(error) => {
-                warn!(error = %error, transfer_id = %ctx.transfer_id, "could not begin unfetched transfer failure");
+                warn!(error_kind = "unfetched_failure_begin", io_error_kind = io_error_kind(&error), transfer_id = %ctx.transfer_id, "could not begin unfetched transfer failure");
             }
         }
     }
@@ -398,7 +401,10 @@ impl BlobTransferFacade {
         let entry = self
             .inflight_fetches
             .lock()
-            .map_err(|_| BlobTransferError::Fetch("in-flight fetch registry is poisoned".into()))?
+            // 锁中毒：PoisonError 持有 guard，不能作为来源保存。
+            .map_err(|_| {
+                BlobTransferError::Fetch(anyhow::anyhow!("in-flight fetch registry is poisoned"))
+            })?
             .remove(transfer_id);
         let Some(entry) = entry else {
             info!(
@@ -448,7 +454,8 @@ impl BlobTransferFacade {
         {
             warn!(
                 transfer_id,
-                error = %err,
+                error_kind = "inflight_fetch_shutdown",
+                io_error_kind = io_error_kind(&err),
                 "cancel_inbound_transfer: shutdown_inflight_fetch failed (treated as already gone)"
             );
         }
@@ -457,7 +464,12 @@ impl BlobTransferFacade {
         // registry,这里取出来直接发,避免编一个污染事件流。
         if let Some(session) = entry.session {
             if let Err(error) = session.cancel(reason).await {
-                warn!(transfer_id, error = %error, "cancel_inbound_transfer: session cancel failed");
+                warn!(
+                    transfer_id,
+                    error_kind = "session_cancel",
+                    io_error_kind = io_error_kind(&error),
+                    "cancel_inbound_transfer: session cancel failed"
+                );
             }
         }
 
@@ -472,7 +484,10 @@ impl BlobTransferFacade {
         let transfer_ids = self
             .inflight_fetches
             .lock()
-            .map_err(|_| BlobTransferError::Fetch("in-flight fetch registry is poisoned".into()))?
+            // 锁中毒：PoisonError 持有 guard，不能作为来源保存。
+            .map_err(|_| {
+                BlobTransferError::Fetch(anyhow::anyhow!("in-flight fetch registry is poisoned"))
+            })?
             .iter()
             .filter(|(_, fetch)| fetch.attempt_id.as_deref() == Some(attempt_id))
             .map(|(transfer_id, _)| transfer_id.clone())
@@ -485,7 +500,7 @@ impl BlobTransferFacade {
                 Ok(InboundCancelOutcome::Cancelled) => cancelled += 1,
                 Ok(InboundCancelOutcome::NotInflight) => {}
                 Err(error) => {
-                    warn!(%transfer_id, %error, "failed to cancel directory member transfer");
+                    warn!(%transfer_id, error_kind = "member_transfer_cancel", io_error_kind = io_error_kind(&error), "failed to cancel directory member transfer");
                     if first_error.is_none() {
                         first_error = Some(error);
                     }
@@ -509,7 +524,7 @@ impl BlobTransferFacade {
                 entry_id: command.entry_id.unwrap_or_default(),
             })
             .await
-            .map_err(|e| BlobTransferError::Publish(e.to_string()))?;
+            .map_err(|e| BlobTransferError::Publish(anyhow::Error::from(e)))?;
         Ok(PublishBlobResult {
             ticket: outcome.ticket,
             entry_id: outcome.entry_id,
@@ -531,7 +546,7 @@ impl BlobTransferFacade {
                 entry_id: command.entry_id.unwrap_or_default(),
             })
             .await
-            .map_err(|e| BlobTransferError::Publish(e.to_string()))?;
+            .map_err(|e| BlobTransferError::Publish(anyhow::Error::from(e)))?;
         Ok(PublishBlobResult {
             ticket: outcome.ticket,
             entry_id: outcome.entry_id,
@@ -572,8 +587,11 @@ impl BlobTransferFacade {
         if let Some(ctx) = command.transfer_context.as_ref() {
             self.inflight_fetches
                 .lock()
+                // 锁中毒：PoisonError 持有 guard，不能作为来源保存。
                 .map_err(|_| {
-                    BlobTransferError::Fetch("in-flight fetch registry is poisoned".into())
+                    BlobTransferError::Fetch(anyhow::anyhow!(
+                        "in-flight fetch registry is poisoned"
+                    ))
                 })?
                 .insert(
                     ctx.transfer_id.clone(),
@@ -594,14 +612,17 @@ impl BlobTransferFacade {
                 ticket: command.ticket,
                 entry_id: iroh_tag_entry_id,
                 progress: progress_sink.clone(),
-            }) => result.map_err(|error| BlobTransferError::Fetch(error.to_string())),
+            }) => result.map_err(|error| BlobTransferError::Fetch(anyhow::Error::from(error))),
         };
 
         if let Some(ctx) = command.transfer_context.as_ref() {
             self.inflight_fetches
                 .lock()
+                // 锁中毒：PoisonError 持有 guard，不能作为来源保存。
                 .map_err(|_| {
-                    BlobTransferError::Fetch("in-flight fetch registry is poisoned".into())
+                    BlobTransferError::Fetch(anyhow::anyhow!(
+                        "in-flight fetch registry is poisoned"
+                    ))
                 })?
                 .remove(&ctx.transfer_id);
         }
@@ -620,7 +641,7 @@ impl BlobTransferFacade {
                     if ctx.individual_lifecycle {
                         if let Some(session) = lifecycle_session.as_ref() {
                             if let Err(error) = session.complete().await {
-                                warn!(transfer_id = %ctx.transfer_id, error = %error, "blob fetch: session completion failed");
+                                warn!(transfer_id = %ctx.transfer_id, error_kind = "session_complete", io_error_kind = io_error_kind(&error), "blob fetch: session completion failed");
                             }
                         }
                     }
@@ -628,7 +649,7 @@ impl BlobTransferFacade {
                         if !ctx.individual_lifecycle {
                             if let Some(session) = lifecycle_session.as_ref() {
                                 if let Err(error) = session.complete().await {
-                                    warn!(transfer_id = %ctx.transfer_id, error = %error, "blob fetch: batch session completion failed");
+                                    warn!(transfer_id = %ctx.transfer_id, error_kind = "batch_session_complete", io_error_kind = io_error_kind(&error), "blob fetch: batch session completion failed");
                                 }
                             }
                         }
@@ -653,10 +674,10 @@ impl BlobTransferFacade {
                 if let Some(ctx) = command.transfer_context.as_ref() {
                     if let Some(session) = lifecycle_session.as_ref() {
                         if let Err(error) = session
-                            .fail(FileTransferFailureReason::Unknown, Some(msg.clone()))
+                            .fail(FileTransferFailureReason::Unknown, Some(msg.to_string()))
                             .await
                         {
-                            warn!(transfer_id = %ctx.transfer_id, error = %error, "blob fetch: session failure settlement failed");
+                            warn!(transfer_id = %ctx.transfer_id, error_kind = "session_failure_settle", io_error_kind = io_error_kind(&error), "blob fetch: session failure settlement failed");
                         }
                     }
                     self.report_outbound_terminal(
@@ -720,8 +741,11 @@ impl BlobTransferFacade {
         if let Some(ctx) = command.transfer_context.as_ref() {
             self.inflight_fetches
                 .lock()
+                // 锁中毒：PoisonError 持有 guard，不能作为来源保存。
                 .map_err(|_| {
-                    BlobTransferError::Fetch("in-flight fetch registry is poisoned".into())
+                    BlobTransferError::Fetch(anyhow::anyhow!(
+                        "in-flight fetch registry is poisoned"
+                    ))
                 })?
                 .insert(
                     ctx.transfer_id.clone(),
@@ -749,7 +773,7 @@ impl BlobTransferFacade {
                 target_path: command.target_path,
                 progress: progress_sink.clone(),
             }) => {
-                res.map_err(|e| BlobTransferError::Fetch(e.to_string()))
+                res.map_err(|e| BlobTransferError::Fetch(anyhow::Error::from(e)))
             }
         };
 
@@ -758,8 +782,11 @@ impl BlobTransferFacade {
         if let Some(ctx) = command.transfer_context.as_ref() {
             self.inflight_fetches
                 .lock()
+                // 锁中毒：PoisonError 持有 guard，不能作为来源保存。
                 .map_err(|_| {
-                    BlobTransferError::Fetch("in-flight fetch registry is poisoned".into())
+                    BlobTransferError::Fetch(anyhow::anyhow!(
+                        "in-flight fetch registry is poisoned"
+                    ))
                 })?
                 .remove(&ctx.transfer_id);
         }
@@ -775,7 +802,7 @@ impl BlobTransferFacade {
                     if ctx.individual_lifecycle {
                         if let Some(session) = lifecycle_session.as_ref() {
                             if let Err(error) = session.complete().await {
-                                warn!(transfer_id = %ctx.transfer_id, error = %error, "blob fetch: session completion failed");
+                                warn!(transfer_id = %ctx.transfer_id, error_kind = "session_complete", io_error_kind = io_error_kind(&error), "blob fetch: session completion failed");
                             }
                         }
                     }
@@ -783,7 +810,7 @@ impl BlobTransferFacade {
                         if !ctx.individual_lifecycle {
                             if let Some(session) = lifecycle_session.as_ref() {
                                 if let Err(error) = session.complete().await {
-                                    warn!(transfer_id = %ctx.transfer_id, error = %error, "blob fetch: batch session completion failed");
+                                    warn!(transfer_id = %ctx.transfer_id, error_kind = "batch_session_complete", io_error_kind = io_error_kind(&error), "blob fetch: batch session completion failed");
                                 }
                             }
                         }
@@ -816,10 +843,10 @@ impl BlobTransferFacade {
                 if let Some(ctx) = command.transfer_context.as_ref() {
                     if let Some(session) = lifecycle_session.as_ref() {
                         if let Err(error) = session
-                            .fail(FileTransferFailureReason::Unknown, Some(msg.clone()))
+                            .fail(FileTransferFailureReason::Unknown, Some(msg))
                             .await
                         {
-                            warn!(transfer_id = %ctx.transfer_id, error = %error, "blob fetch: session failure settlement failed");
+                            warn!(transfer_id = %ctx.transfer_id, error_kind = "session_failure_settle", io_error_kind = io_error_kind(&error), "blob fetch: session failure settlement failed");
                         }
                     }
                     self.report_outbound_terminal(
@@ -830,7 +857,7 @@ impl BlobTransferFacade {
                     )
                     .await;
                 }
-                Err(BlobTransferError::Fetch(msg))
+                Err(BlobTransferError::Fetch(anyhow::Error::from(e)))
             }
         }
     }
@@ -955,7 +982,8 @@ impl BlobProgressSink for FileTransferProgressSink {
             {
                 warn!(
                     transfer_id = %self.transfer_id,
-                    error = %error,
+                    error_kind = "progress_settle",
+                    io_error_kind = io_error_kind(&error),
                     "blob fetch: progress settlement failed"
                 );
             }
@@ -1062,7 +1090,7 @@ mod tests {
             _ciphertext: Bytes,
             _reason: TagReason,
         ) -> Result<BlobDigest, BlobError> {
-            Err(BlobError::Internal("unused".to_owned()))
+            Err(BlobError::Internal("unused".into()))
         }
 
         async fn publish_path(
@@ -1070,11 +1098,11 @@ mod tests {
             _path: &std::path::Path,
             _reason: TagReason,
         ) -> Result<BlobDigest, BlobError> {
-            Err(BlobError::Internal("unused".to_owned()))
+            Err(BlobError::Internal("unused".into()))
         }
 
         async fn issue_ticket(&self, _digest: &BlobDigest) -> Result<BlobTicket, BlobError> {
-            Err(BlobError::Internal("unused".to_owned()))
+            Err(BlobError::Internal("unused".into()))
         }
 
         async fn fetch(
@@ -1087,7 +1115,7 @@ mod tests {
                 .release
                 .acquire()
                 .await
-                .map_err(|error| BlobError::Internal(error.to_string()))?;
+                .map_err(|error| BlobError::Internal(error.into()))?;
             permit.forget();
             Ok(Bytes::from_static(b"image"))
         }
@@ -1098,7 +1126,7 @@ mod tests {
             _target_path: &std::path::Path,
             _progress: Option<&dyn BlobProgressSink>,
         ) -> Result<BlobDigest, BlobError> {
-            Err(BlobError::Internal("unused".to_owned()))
+            Err(BlobError::Internal("unused".into()))
         }
 
         async fn shutdown_inflight_fetch(&self, _ticket: &BlobTicket) -> Result<(), BlobError> {
@@ -1122,7 +1150,7 @@ mod tests {
             let bytes: [u8; 32] = ticket
                 .as_bytes()
                 .try_into()
-                .map_err(|_| BlobError::InvalidTicket)?;
+                .map_err(BlobError::invalid_ticket_from)?;
             Ok(BlobDigest::from_bytes(bytes))
         }
     }

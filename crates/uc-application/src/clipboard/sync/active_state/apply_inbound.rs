@@ -44,6 +44,7 @@ use uc_core::ports::clipboard::{
     FindEntryIdBySnapshotHashPort, InboundActiveClipboardState, LoadActiveClipboardPort,
 };
 use uc_core::ports::{ClockPort, PeerAddressRepositoryPort, PeerReachabilityPort};
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::deps::CurrentSpaceMemberScopePort;
 use uc_core::MemberRepositoryPort;
@@ -81,11 +82,11 @@ pub(crate) struct ActiveClipboardConvergedEvent {
 pub(crate) enum InboundPulledContentStoreError {
     /// The envelope could not be decrypted (e.g. the session locked between
     /// the pull and the store, or the bytes were malformed / tampered).
-    #[error("pulled content decrypt failed: {0}")]
-    Decrypt(String),
+    #[error("pulled content decrypt failed")]
+    Decrypt(#[source] anyhow::Error),
     /// The decrypted envelope could not be decoded / persisted.
-    #[error("pulled content store failed: {0}")]
-    Store(String),
+    #[error("pulled content store failed")]
+    Store(#[source] anyhow::Error),
 }
 
 /// Result of checking and storing a pulled transfer envelope.
@@ -308,7 +309,11 @@ impl ApplyInboundActiveClipboardStateUseCase {
         let current = match self.load_register.load().await {
             Ok(c) => c,
             Err(err) => {
-                warn!(error = %err, "active state inbound dropped: register load failed");
+                warn!(
+                    error_kind = "register_load",
+                    io_error_kind = io_error_kind(&err),
+                    "active state inbound dropped: register load failed"
+                );
                 return;
             }
         };
@@ -369,7 +374,11 @@ impl ApplyInboundActiveClipboardStateUseCase {
                 }
             }
             Err(err) => {
-                warn!(error = %err, "active state inbound dropped: entry lookup failed");
+                warn!(
+                    error_kind = "entry_lookup",
+                    io_error_kind = io_error_kind(&err),
+                    "active state inbound dropped: entry lookup failed"
+                );
                 return;
             }
         };
@@ -390,7 +399,8 @@ impl ApplyInboundActiveClipboardStateUseCase {
                 Ok(is_available) => is_available,
                 Err(err) => {
                     warn!(
-                        error = %err,
+                        error_kind = "availability_check",
+                        io_error_kind = io_error_kind(&err),
                         entry_id = %entry_id,
                         "active state inbound: availability check failed; treating entry as unavailable"
                     );
@@ -435,8 +445,8 @@ impl ApplyInboundActiveClipboardStateUseCase {
                 debug!("active state inbound: pull failed (peer cannot serve content); dropping");
                 return None;
             }
-            Err(ActiveClipboardPullClientError::Io(reason)) => {
-                warn!(reason, "active state inbound: pull failed (io); dropping");
+            Err(ActiveClipboardPullClientError::Io(_)) => {
+                warn!("active state inbound: pull failed (io); dropping");
                 return None;
             }
         };
@@ -456,7 +466,11 @@ impl ApplyInboundActiveClipboardStateUseCase {
                 None
             }
             Err(err) => {
-                warn!(error = %err, "active state inbound: pulled content store failed; dropping");
+                warn!(
+                    error_kind = "pulled_content_store",
+                    io_error_kind = io_error_kind(&err),
+                    "active state inbound: pulled content store failed; dropping"
+                );
                 None
             }
         }
@@ -480,7 +494,7 @@ impl ApplyInboundActiveClipboardStateUseCase {
         let snapshot = match self.reconstructor.reconstruct(&local_entry_id).await {
             Ok(s) => s,
             Err(err) => {
-                warn!(error = %err, entry_id = %local_entry_id, "active state inbound dropped: snapshot reconstruct failed");
+                warn!(error_kind = "snapshot_reconstruct", io_error_kind = io_error_kind(&err), entry_id = %local_entry_id, "active state inbound dropped: snapshot reconstruct failed");
                 return;
             }
         };
@@ -539,7 +553,8 @@ impl ApplyInboundActiveClipboardStateUseCase {
             .await
         {
             warn!(
-                error = %err,
+                error_kind = "os_write_failed",
+                io_error_kind = io_error_kind(err.as_ref()),
                 snapshot_hash = %state.snapshot_hash,
                 "active state inbound: OS write failed; not advancing register or re-broadcasting"
             );
@@ -561,7 +576,8 @@ impl ApplyInboundActiveClipboardStateUseCase {
             }
             Err(err) => {
                 warn!(
-                    error = %err,
+                    error_kind = "register_advance",
+                    io_error_kind = io_error_kind(&err),
                     snapshot_hash = %state.snapshot_hash,
                     "active state inbound: register advance failed; skipping re-broadcast"
                 );

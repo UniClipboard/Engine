@@ -4,12 +4,12 @@ use async_trait::async_trait;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineVersionStateError {
-    #[error("failed to read the stored Engine version: {0}")]
-    Read(String),
-    #[error("stored Engine version is invalid: {0}")]
-    Invalid(String),
-    #[error("failed to record the Engine version: {0}")]
-    Write(String),
+    #[error("failed to read the stored Engine version")]
+    Read(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error("stored Engine version is invalid")]
+    Invalid(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error("failed to record the Engine version")]
+    Write(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 #[async_trait]

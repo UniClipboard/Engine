@@ -7,6 +7,7 @@ use std::sync::{Arc, RwLock};
 use tracing::debug;
 use uc_core::blob::ports::BlobReaderPort;
 use uc_core::BlobId;
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::blob::hashing::{copy_and_hash, stream_hash_file};
 use crate::blob::{BlobStorePort, StoredPathBlob};
@@ -147,7 +148,8 @@ impl BlobStorePort for FilesystemBlobStore {
                 Err(err) => {
                     debug!(
                         blob_id = %blob_id,
-                        error = %err,
+                        error_kind = "hardlink_fallback",
+                        io_error_kind = io_error_kind(&err),
                         "Hardlink failed; streaming copy+hash (likely EXDEV or unsupported FS)"
                     );
                     // Streaming copy that hashes in the same pass: the source is
@@ -188,9 +190,7 @@ impl BlobStorePort for FilesystemBlobStore {
             }
             // Idempotent: an already-absent blob is a no-op, not an error.
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(err) => {
-                Err(err).with_context(|| format!("failed to delete blob {}", path.display()))
-            }
+            Err(err) => Err(err).context("failed to delete blob"),
         }
     }
 }

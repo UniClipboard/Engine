@@ -23,6 +23,7 @@ pub async fn execute_list_history_entries(
     if input.limit == 0 || input.limit > MAX_HISTORY_LIST_SIZE {
         return Err(invalid_input_error());
     }
+    // TryFromIntError：目标分类完整表达数值范围不符。
     let offset = usize::try_from(input.offset).map_err(|_| invalid_input_error())?;
     let entries = facade
         .list_history_entries(ClipboardListInput {
@@ -229,9 +230,9 @@ mod tests {
     fn history_failures_have_stable_categories_without_exposing_details() {
         let missing = map_history_error(ClipboardHistoryError::NotFound);
         let unsupported = map_history_error(ClipboardHistoryError::UnsupportedContent);
-        let internal = map_history_error(ClipboardHistoryError::Internal(
-            "/private/path/secret.txt".into(),
-        ));
+        let internal = map_history_error(ClipboardHistoryError::Internal(anyhow::anyhow!(
+            "/private/path/secret.txt"
+        )));
 
         assert_eq!(missing.category(), EngineErrorCategory::NotFound);
         assert_eq!(unsupported.category(), EngineErrorCategory::Conflict);

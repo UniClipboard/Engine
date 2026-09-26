@@ -734,6 +734,7 @@ const fn encode_abandonment_reason(reason: AdmissionAbandonmentReasonV2) -> u8 {
         AdmissionAbandonmentReasonV2::Cancelled => 0,
         AdmissionAbandonmentReasonV2::Expired => 1,
         AdmissionAbandonmentReasonV2::Superseded => 2,
+        AdmissionAbandonmentReasonV2::Rejected => 3,
     }
 }
 
@@ -744,6 +745,7 @@ const fn decode_abandonment_reason(
         0 => Ok(AdmissionAbandonmentReasonV2::Cancelled),
         1 => Ok(AdmissionAbandonmentReasonV2::Expired),
         2 => Ok(AdmissionAbandonmentReasonV2::Superseded),
+        3 => Ok(AdmissionAbandonmentReasonV2::Rejected),
         _ => Err(SpaceAdmissionPersistenceError::InvalidState),
     }
 }

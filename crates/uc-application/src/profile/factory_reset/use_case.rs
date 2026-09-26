@@ -64,7 +64,7 @@ impl ProfileFactoryResetFacade {
             self.keys
                 .wipe_and_verify_profile_keys(generation)
                 .await
-                .map_err(|_| ProfileFactoryResetError::WipeKeys)?;
+                .map_err(ProfileFactoryResetError::wipe_keys_from)?;
 
             let previous = lifecycle.clone();
             lifecycle.mark_keys_wiped(generation)?;
@@ -76,7 +76,7 @@ impl ProfileFactoryResetFacade {
             self.state
                 .clear_and_verify_profile_state()
                 .await
-                .map_err(|_| ProfileFactoryResetError::ClearState)?;
+                .map_err(ProfileFactoryResetError::clear_state_from)?;
 
             let previous = lifecycle.clone();
             lifecycle.complete_state_clear(generation, next_generation(generation))?;
@@ -170,7 +170,7 @@ mod tests {
                 })
                 .is_ok()
             {
-                Err(ProfileFactoryResetCapabilityError)
+                Err(ProfileFactoryResetCapabilityError::new())
             } else {
                 Ok(())
             }
@@ -277,7 +277,7 @@ mod tests {
 
         assert!(matches!(
             reset.execute(ProfileFactoryResetRequest::Start).await,
-            Err(ProfileFactoryResetError::WipeKeys)
+            Err(ProfileFactoryResetError::WipeKeys { .. })
         ));
         assert_eq!(
             lifecycle.current().state(),
@@ -288,7 +288,7 @@ mod tests {
             reset
                 .execute(ProfileFactoryResetRequest::ResumeIfNeeded)
                 .await,
-            Err(ProfileFactoryResetError::ClearState)
+            Err(ProfileFactoryResetError::ClearState { .. })
         ));
         assert_eq!(
             lifecycle.current().state(),

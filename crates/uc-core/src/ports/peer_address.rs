@@ -25,8 +25,8 @@ pub struct PeerAddressRecord {
 
 #[derive(Debug, thiserror::Error)]
 pub enum PeerAddressError {
-    #[error("internal: {0}")]
-    Internal(String),
+    #[error("internal")]
+    Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("peer address repository failed ({category})")]
     Repository {
         category: &'static str,

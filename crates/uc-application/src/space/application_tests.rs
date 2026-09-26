@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use uc_core::ids::DeviceId;
@@ -10,8 +10,6 @@ use super::adapters::{SpaceAdmissionAdapters, SpaceMembershipAdapters, SpaceRunt
 use super::admission::*;
 use super::application::SpaceApplication;
 use super::membership::*;
-
-struct MemoryLedger(Mutex<LoadedMembershipLedger>);
 
 fn join_request_identity_facts(
     device_id: DeviceId,
@@ -30,31 +28,30 @@ fn join_request_identity_facts(
     }
 }
 
-#[async_trait]
-impl LoadMembershipLedgerPort for MemoryLedger {
-    async fn load(&self) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
-        Ok(self.0.lock().unwrap().clone())
-    }
-}
-
-#[async_trait]
-impl CommitMembershipLedgerPort for MemoryLedger {
-    async fn compare_and_commit(
-        &self,
-        mutation: MembershipLedgerMutation,
-    ) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
-        let mut loaded = self.0.lock().unwrap();
-        if loaded.revision != mutation.expected_revision {
-            return Err(MembershipLedgerError::Conflict);
-        }
-        *loaded = mutation.replacement;
-        Ok(loaded.clone())
-    }
-}
-
 #[derive(Default)]
 struct PassivePorts {
     join_commits: AtomicUsize,
+}
+
+#[async_trait]
+impl uc_core::ports::LocalIdentityPort for PassivePorts {
+    async fn create(&self) -> Result<IdentityFingerprint, uc_core::ports::LocalIdentityError> {
+        Err(uc_core::ports::LocalIdentityError::Storage(
+            "passive identity".into(),
+        ))
+    }
+
+    async fn ensure(&self) -> Result<IdentityFingerprint, uc_core::ports::LocalIdentityError> {
+        Err(uc_core::ports::LocalIdentityError::Storage(
+            "passive identity".into(),
+        ))
+    }
+
+    async fn get_current_fingerprint(
+        &self,
+    ) -> Result<Option<IdentityFingerprint>, uc_core::ports::LocalIdentityError> {
+        Ok(None)
+    }
 }
 
 #[async_trait]
@@ -138,8 +135,20 @@ impl GroupRevocationPort for PassivePorts {
     ) -> Result<usize, KeyEpochError> {
         Ok(0)
     }
+    async fn space_group_update_delivery_status(
+        &self,
+    ) -> Result<GroupUpdateDeliveryStatus, KeyEpochError> {
+        Ok(GroupUpdateDeliveryStatus::Completed)
+    }
     async fn acknowledge_space_group_update(&self, _: &str, _: i64) -> Result<bool, KeyEpochError> {
         Ok(false)
+    }
+    async fn settle_obsolete_space_group_updates(
+        &self,
+        _: &[DeviceId],
+        _: i64,
+    ) -> Result<usize, KeyEpochError> {
+        Ok(0)
     }
 }
 
@@ -187,10 +196,6 @@ impl CurrentMembershipAnnouncementPort for PassivePorts {
     async fn current_announcement_material(
         &self,
     ) -> Result<CurrentMembershipAnnouncementMaterial, CurrentMembershipIdentityError> {
-        unreachable!()
-    }
-
-    async fn wait_for_announcement_change(&self) -> Result<(), CurrentMembershipIdentityError> {
         unreachable!()
     }
 }
@@ -415,7 +420,7 @@ impl SpaceAdmissionTransportPort for PassivePorts {
         _route: &SpaceAdmissionRoute,
         _encrypted_password_equivalent: &AdmissionEncryptedPasswordEquivalent,
     ) -> Result<Box<dyn AuthenticatedAdmissionExchangePort>, SpaceAdmissionTransportError> {
-        Err(SpaceAdmissionTransportError::Deferred)
+        Err(SpaceAdmissionTransportError::deferred())
     }
 
     async fn resume(
@@ -425,7 +430,7 @@ impl SpaceAdmissionTransportPort for PassivePorts {
         _peer_binding: AdmissionPeerBinding,
         _continuation_credential: &AdmissionContinuationCredential,
     ) -> Result<Box<dyn AuthenticatedAdmissionExchangePort>, SpaceAdmissionTransportError> {
-        Err(SpaceAdmissionTransportError::Deferred)
+        Err(SpaceAdmissionTransportError::deferred())
     }
 }
 
@@ -487,7 +492,7 @@ impl PrepareSponsorSettledPort for PassivePorts {
     async fn prepare(
         &self,
         _admission_id: SpaceAdmissionId,
-        _preparation: SponsorSettlementPreparation<'_>,
+        _preparation: &SponsorSettlementPreparation<'_>,
         _complete_ack: &SpaceAdmissionEnvelopeV1,
     ) -> Result<PreparedSponsorSettled, PrepareSponsorSettledError> {
         unreachable!()
@@ -618,7 +623,7 @@ impl AdmissionSpaceTransitionPort for PassivePorts {
 impl ApplyMembershipMemberFactsPort for PassivePorts {
     async fn apply_member_facts(
         &self,
-        _effect: &PendingMembershipEffect,
+        _effect: &UnfinishedMemberEffect,
     ) -> Result<(), MembershipEffectExecutionError> {
         unreachable!()
     }
@@ -628,7 +633,7 @@ impl ApplyMembershipMemberFactsPort for PassivePorts {
 impl ApplyMembershipSecurityPort for PassivePorts {
     async fn apply_membership_security(
         &self,
-        _effect: &PendingMembershipEffect,
+        _effect: &UnfinishedMemberEffect,
     ) -> Result<(), MembershipEffectExecutionError> {
         unreachable!()
     }
@@ -638,7 +643,7 @@ impl ApplyMembershipSecurityPort for PassivePorts {
 impl ActivateMembershipEffectPort for PassivePorts {
     async fn activate_membership_effect(
         &self,
-        _effect: &PendingMembershipEffect,
+        _effect: &UnfinishedMemberEffect,
     ) -> Result<(), MembershipEffectExecutionError> {
         unreachable!()
     }
@@ -652,16 +657,6 @@ impl RestrictedMembershipDeliveryPort for PassivePorts {
         _delivery: &RestrictedMembershipDelivery,
     ) -> Result<(), RestrictedMembershipDeliveryError> {
         unreachable!()
-    }
-}
-
-#[async_trait]
-impl ApplyMembershipProjectionPort for PassivePorts {
-    async fn apply_membership_projection(
-        &self,
-        _plan: MembershipProjectionPlan,
-    ) -> Result<(), ApplyMembershipProjectionError> {
-        Ok(())
     }
 }
 
@@ -776,8 +771,10 @@ impl ActivateSponsorAdmissionPort for PassivePorts {
     async fn activate(
         &self,
         _activated_security: &uc_core::membership::AdmissionActivatedSecurityState,
-    ) -> Result<(), ActivateSponsorAdmissionError> {
-        Ok(())
+    ) -> Result<VersionedMembershipHistory, ActivateSponsorAdmissionError> {
+        Err(ActivateSponsorAdmissionError::new(anyhow::anyhow!(
+            "passive sponsor activation"
+        )))
     }
 }
 
@@ -801,9 +798,7 @@ impl crate::space::membership::RePairingStateStorePort for PassivePorts {
 
 #[tokio::test]
 async fn complete_application_exposes_endpoints_before_runtime_starts() {
-    let repository = Arc::new(MemoryLedger(Mutex::new(
-        LoadedMembershipLedger::no_current_space(),
-    )));
+    let records = MemoryMembershipRecords::empty();
     let passive = Arc::new(PassivePorts::default());
     let (_peer_reachability_tx, peer_reachability_rx) = tokio::sync::broadcast::channel(4);
     let (_known_peer_contact_tx, known_peer_contact_rx) = tokio::sync::broadcast::channel(4);
@@ -833,8 +828,8 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
                 current_join_status: passive.clone(),
             },
             membership: SpaceMembershipAdapters {
-                load_membership_ledger: repository.clone(),
-                commit_membership_ledger: repository,
+                membership_records: records,
+                peer_access: PeerAccess::unbound(),
                 historical_membership_signatures: passive.clone(),
                 current_member_signatures: passive.clone(),
                 membership_identity: passive.clone(),
@@ -853,10 +848,10 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
                 restricted_membership_delivery: passive.clone(),
                 group_update_store: passive.clone(),
                 group_update_dispatch: passive.clone(),
-                apply_membership_projection: passive.clone(),
                 membership_network_activity: passive.clone(),
             },
         },
+        passive.clone(),
         passive.clone(),
         passive.clone(),
         passive.clone(),

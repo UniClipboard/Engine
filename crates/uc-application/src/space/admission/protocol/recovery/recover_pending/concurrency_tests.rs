@@ -115,7 +115,7 @@ impl SpaceAdmissionTransportPort for DelayedFirstTransport {
         if self.delay_next.swap(false, Ordering::SeqCst) {
             self.barrier.wait().await;
         }
-        Err(SpaceAdmissionTransportError::Deferred)
+        Err(SpaceAdmissionTransportError::deferred())
     }
 
     async fn resume(
@@ -125,7 +125,7 @@ impl SpaceAdmissionTransportPort for DelayedFirstTransport {
         _peer: AdmissionPeerBinding,
         _credential: &AdmissionContinuationCredential,
     ) -> Result<Box<dyn AuthenticatedAdmissionExchangePort>, SpaceAdmissionTransportError> {
-        Err(SpaceAdmissionTransportError::Deferred)
+        Err(SpaceAdmissionTransportError::deferred())
     }
 }
 

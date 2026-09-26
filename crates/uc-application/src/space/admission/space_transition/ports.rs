@@ -64,7 +64,6 @@ pub struct AdmissionSpaceTransitionPreparationV2 {
     pub attempt_id: uc_core::membership::SpaceAdmissionId,
     pub target_space_id: String,
     pub target_security_commitment: AdmissionSecurityCommitmentV1,
-    pub target_membership_history: Vec<u8>,
     pub target_security_state: Vec<u8>,
     pub target_protection_group_id: String,
     pub target_key_catalog: Vec<u8>,

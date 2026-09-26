@@ -81,8 +81,8 @@ use uc_infra::security::{
 };
 use uc_infra::settings::repository::FileSettingsRepository;
 use uc_infra::space::{
-    InMemorySession, KeyMaterialStore, SqliteMembershipLedger, SqliteSpaceAdmissionCredentials,
-    SqliteSpaceAdmissionState,
+    InMemorySession, KeyMaterialStore, OpenMlsHistoricalSignatureVerifier,
+    SqliteMembershipRecordStore, SqliteSpaceAdmissionCredentials, SqliteSpaceAdmissionState,
 };
 use uc_infra::{FileAppVersionStateRepository, FileFirstSyncStateRepository, SystemClock};
 use uc_observability_contract::analytics::{AnalyticsFacade, AnalyticsPort};
@@ -462,28 +462,39 @@ pub async fn wire_dependencies_from_inputs(
         );
     let profile_key_access_probe = space_access_adapter.clone();
     let membership_session = Arc::clone(&platform.session);
-    let membership_ledger = Arc::new(SqliteMembershipLedger::new(
+    let relationship_store = Arc::new(EncryptedRelationshipStore::new(
         Arc::clone(&infra.control_db_executor),
-        Arc::clone(&admission_keys),
+        Arc::clone(&space_access_ports.derive_subkey),
+        Arc::clone(&platform.current_profile),
     ));
+    // 成员记录与成员读模型同库，由成员状态负责人在同一事务中提交。
+    let membership_ledger = Arc::new(
+        SqliteMembershipRecordStore::new(
+            Arc::clone(&infra.control_db_executor),
+            Arc::clone(&admission_keys),
+            Arc::new(OpenMlsHistoricalSignatureVerifier),
+            Arc::clone(&infra.clock),
+        )
+        .with_projection(Arc::clone(&relationship_store)),
+    );
     let admission_state = Arc::new(SqliteSpaceAdmissionState::new(
         Arc::clone(&infra.db_executor),
         Arc::clone(&admission_keys),
         Arc::clone(&active_generation_manifest_store),
-        Arc::clone(&membership_ledger) as Arc<dyn uc_application::deps::LoadMembershipLedgerPort>,
+        Arc::clone(&membership_ledger) as Arc<dyn uc_application::deps::MembershipRecordStorePort>,
     ));
     let admission_credentials = Arc::new(SqliteSpaceAdmissionCredentials::new(
         Arc::clone(&infra.control_db_executor),
         Arc::clone(&admission_keys),
         Arc::clone(&active_generation_manifest_store),
-        Arc::clone(&membership_ledger) as Arc<dyn uc_application::deps::LoadMembershipLedgerPort>,
+        Arc::clone(&membership_ledger) as Arc<dyn uc_application::deps::MembershipRecordStorePort>,
         Arc::clone(&admission_state),
     ));
     let encryption_passphrase_change = Arc::new(uc_infra::space::EncryptionPassphraseChange::new(
         Arc::clone(&space_access_adapter),
         Arc::clone(&admission_credentials),
         Arc::clone(&active_generation_manifest_store),
-        profile_key_recovery,
+        Arc::clone(&profile_key_recovery),
     ));
     encryption_passphrase_change
         .recover_pending()
@@ -512,6 +523,7 @@ pub async fn wire_dependencies_from_inputs(
             Arc::clone(&active_generation_manifest_store),
             Arc::clone(&control_generations),
             Arc::clone(&space_access_adapter),
+            Arc::clone(&profile_key_recovery),
         ));
         let admission_transition = Arc::new(match storage.fresh_generations() {
             Some((profile_data_generation, _)) => {
@@ -556,9 +568,9 @@ pub async fn wire_dependencies_from_inputs(
                         Arc::clone(&active_generation_manifest_store),
                     )
                     .ok_or_else(|| {
-                        WiringError::DatabaseInit(
-                            "fresh V3 runtime generations are invalid".to_string(),
-                        )
+                        WiringError::DatabaseInit(anyhow::anyhow!(
+                            "fresh V3 runtime generations are invalid"
+                        ))
                     })?,
                 ),
                 None => current_space_resolver.clone(),
@@ -578,15 +590,9 @@ pub async fn wire_dependencies_from_inputs(
             transition,
         )
     };
-    let peer_admission =
-        build_peer_admission_port(Arc::clone(&membership_ledger)
-            as Arc<dyn uc_application::deps::LoadMembershipLedgerPort>);
+    // 网络入口先于 Space 应用组装，访问判定在成员状态负责人建立后才绑定；绑定前一律拒绝。
+    let peer_access = uc_application::deps::PeerAccess::unbound();
 
-    let relationship_store = Arc::new(EncryptedRelationshipStore::new(
-        Arc::clone(&infra.control_db_executor),
-        Arc::clone(&space_access_ports.derive_subkey),
-        Arc::clone(&platform.current_profile),
-    ));
     let member_repo: Arc<dyn uc_core::MemberRepositoryPort> = Arc::new(
         DieselSpaceMemberRepository::new(Arc::clone(&relationship_store)),
     );
@@ -598,10 +604,6 @@ pub async fn wire_dependencies_from_inputs(
     );
     let relationship_reset: Arc<dyn uc_core::membership::RelationshipStateResetPort> =
         relationship_store.clone();
-    let membership_projection = Arc::new(uc_infra::space::MembershipProjectionAdapter::new(
-        membership_ledger.clone(),
-        relationship_store,
-    ));
     let v3_content_protection = platform.payload_runtime.content().cloned();
 
     // Transfer metadata and event payloads are encrypted with two independent
@@ -1018,7 +1020,7 @@ pub async fn wire_dependencies_from_inputs(
             #[cfg(test)]
             analytics: sync_analytics,
             iroh_identity_storage,
-            peer_admission,
+            peer_access,
             peer_addr_repo: Arc::clone(&peer_addr_repo),
             relationship_reset,
             space_security_reset,
@@ -1026,7 +1028,6 @@ pub async fn wire_dependencies_from_inputs(
             membership_session,
             security_lifecycle: Arc::clone(&space_access_adapter),
             membership_ledger,
-            membership_projection,
             admission_state,
             admission_credentials,
             encryption_passphrase_change,

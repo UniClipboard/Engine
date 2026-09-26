@@ -14,6 +14,7 @@ use uc_core::ports::inbound_file_target::{
     ReserveInboundFileTargetPort, ResolveInboundSaveDirPort,
 };
 use uc_core::ports::settings::SettingsPort;
+use uc_observability_contract::error_source::io_error_kind;
 
 /// Upper bound on collision-suffix attempts before giving up and falling back.
 const MAX_COLLISION_ATTEMPTS: u32 = 10_000;
@@ -37,7 +38,8 @@ impl FsInboundFileTarget {
             Ok(s) => s,
             Err(e) => {
                 warn!(
-                    error = %e,
+                    error_kind = "settings_load",
+                    io_error_kind = io_error_kind(e.as_ref()),
                     "reserve_target: failed to load settings; falling back to managed storage"
                 );
                 return None;
@@ -56,7 +58,6 @@ impl FsInboundFileTarget {
         // fall back to managed storage instead.
         if !path.is_absolute() {
             warn!(
-                dir = %path.display(),
                 "reserve_target: configured auto-save dir is not absolute; falling back to managed storage"
             );
             return None;
@@ -85,7 +86,8 @@ impl FsInboundFileTarget {
         // (e.g. an existing regular file), since `create_dir_all` fails there.
         if let Err(e) = tokio::fs::create_dir_all(&dir).await {
             warn!(
-                error = %e,
+                error_kind = "auto_save_dir_create",
+                io_error_kind = io_error_kind(&e),
                 "auto-save dir unusable; falling back to managed storage"
             );
             return None;
@@ -148,7 +150,8 @@ async fn reserve_unique(dir: &Path, file_name: &str) -> Option<PathBuf> {
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => {
                 warn!(
-                    error = %e,
+                    error_kind = "reservation_placeholder_create",
+                    io_error_kind = io_error_kind(&e),
                     "reserve_target: failed to create reservation placeholder"
                 );
                 return None;

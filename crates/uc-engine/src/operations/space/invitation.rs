@@ -6,6 +6,7 @@
 use tracing::error;
 use uc_application::facade::{AppFacade, IssuePairingInvitationError};
 use uc_observability_contract::analytics::{AnalyticsFacade, Event, InvitationIssueErrorCategory};
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::error_codes::{
     INVITATION_DIRECTORY_INVALID_RESPONSE_CODE, INVITATION_DIRECTORY_REJECTED_CODE,
@@ -123,7 +124,11 @@ fn map_issue_invitation_error(error: IssuePairingInvitationError) -> EngineError
             true,
         ),
         IssuePairingInvitationError::PassphraseChangeRecovery { .. } => {
-            error!(error = %error, "issue invitation requires passphrase change recovery");
+            error!(
+                error_kind = "invitation_recovery_required",
+                io_error_kind = io_error_kind(&error),
+                "issue invitation requires passphrase change recovery"
+            );
             EngineError::new(
                 INVITATION_RECOVERY_REQUIRED_CODE,
                 EngineErrorCategory::InvalidState,
@@ -131,7 +136,11 @@ fn map_issue_invitation_error(error: IssuePairingInvitationError) -> EngineError
             )
         }
         IssuePairingInvitationError::Internal(_) => {
-            error!(error = %error, "issue invitation failed");
+            error!(
+                error_kind = "issue_invitation",
+                io_error_kind = io_error_kind(&error),
+                "issue invitation failed"
+            );
             EngineError::new(INVITATION_FAILED_CODE, EngineErrorCategory::Internal, false)
         }
     }
@@ -284,7 +293,7 @@ mod tests {
     fn unexpected_internal_failure_records_one_terminal_failure() {
         let (sink, analytics) = recording_analytics();
         let error = map_issue_invitation_error(IssuePairingInvitationError::Internal(
-            "private internal detail".into(),
+            anyhow::anyhow!("private internal detail"),
         ));
 
         capture_invitation_failure(&analytics, &error);

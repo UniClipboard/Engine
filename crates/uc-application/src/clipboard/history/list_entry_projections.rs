@@ -15,6 +15,7 @@ use uc_core::ports::{
 };
 use uc_core::search::document::ContentType;
 use uc_core::search::tag::TaggableContent;
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::clipboard::file_set_query::load_has_directory_structure;
 use crate::search::tagging::evaluate_builtin_content_tags;
@@ -62,8 +63,8 @@ pub(crate) enum ListProjectionsError {
     #[error("Invalid limit: {0}")]
     InvalidLimit(String),
 
-    #[error("Repository error: {0}")]
-    RepositoryError(String),
+    #[error("Repository error")]
+    RepositoryError(#[source] anyhow::Error),
 }
 
 pub(crate) struct ListClipboardEntryProjectionsUseCase {
@@ -290,7 +291,7 @@ impl ListClipboardEntryProjectionsUseCase {
             .entry_repo
             .list_entries(limit, offset)
             .await
-            .map_err(|e| ListProjectionsError::RepositoryError(e.to_string()))?;
+            .map_err(|e| ListProjectionsError::RepositoryError(anyhow::Error::from(e)))?;
 
         let mut projections = Vec::with_capacity(entries.len());
 
@@ -312,7 +313,8 @@ impl ListClipboardEntryProjectionsUseCase {
                 Err(e) => {
                     warn!(
                         entry_id = %entry_id_str,
-                        error = %e,
+                        error_kind = "selection_lookup",
+                        io_error_kind = io_error_kind(e.as_ref()),
                         "Skipping entry due to selection lookup failure"
                     );
                     continue;
@@ -338,7 +340,8 @@ impl ListClipboardEntryProjectionsUseCase {
                     warn!(
                         event_id = %event_id_str,
                         preview_rep_id = %preview_rep_id,
-                        error = %e,
+                        error_kind = "preview_representation_lookup",
+                        io_error_kind = io_error_kind(&e),
                         "Skipping entry due to preview representation lookup failure"
                     );
                     continue;
@@ -371,7 +374,8 @@ impl ListClipboardEntryProjectionsUseCase {
                         warn!(
                             entry_id = %entry_id_str,
                             paste_rep_id = %selection.selection.paste_rep_id,
-                            error = %e,
+                            error_kind = "paste_representation_lookup",
+                            io_error_kind = io_error_kind(&e),
                             "Failed to fetch paste_rep for projection; treating as healthy"
                         );
                         None
@@ -397,7 +401,8 @@ impl ListClipboardEntryProjectionsUseCase {
                     Ok(None) => (None, None, None),
                     Err(err) => {
                         tracing::error!(
-                            error = %err,
+                            error_kind = "thumbnail_metadata_lookup",
+                            io_error_kind = io_error_kind(err.as_ref()),
                             entry_id = %entry_id_str,
                             "Failed to fetch thumbnail metadata"
                         );
@@ -471,7 +476,8 @@ impl ListClipboardEntryProjectionsUseCase {
                 Err(e) => {
                     warn!(
                         entry_id = %entry_id_str,
-                        error = %e,
+                        error_kind = "file_transfer_summary_lookup",
+                        io_error_kind = io_error_kind(&e),
                         "Failed to query file transfer summary for entry in list"
                     );
                     (None, None, vec![])
@@ -488,7 +494,8 @@ impl ListClipboardEntryProjectionsUseCase {
                     .unwrap_or_else(|e| {
                         warn!(
                             entry_id = %entry_id_str,
-                            error = %e,
+                            error_kind = "file_set_load",
+                            io_error_kind = io_error_kind(&e),
                             "Failed to load file set for directory flag; projecting as non-directory"
                         );
                         false
@@ -1024,7 +1031,7 @@ mod tests {
         file_set_repo
             .expect_load()
             .times(1)
-            .return_once(|_| Err(EntryFileSetError::Storage("boom".to_string())));
+            .return_once(|_| Err(EntryFileSetError::Storage("boom".into())));
 
         let projections = project_single_entry(
             ClipboardEntryContentCategory::File,

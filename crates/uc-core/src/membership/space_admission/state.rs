@@ -2,6 +2,7 @@ mod aggregate;
 mod capability;
 mod helper;
 mod joiner;
+mod outstanding;
 mod persistence;
 mod replay;
 mod sponsor;
@@ -11,6 +12,7 @@ mod view;
 
 use super::super::{
     AdmissionActivationReceipt, MemberInstanceId, MembershipEventId, MembershipOperationV2,
+    SettlementWindow,
 };
 use super::artifact::{
     AdmissionActivatedSecurityState, AdmissionBaseSnapshot, AdmissionContinuationCredential,
@@ -26,8 +28,8 @@ use super::attempt::{
 };
 use super::exchange::{
     AdmissionErrorCategory, AdmissionExchangeBlockReason, AdmissionInboundDecision,
-    AdmissionInboundExpectation, AdmissionMessageEvidence, AdmissionRetryState,
-    PendingAdmissionExchange, SavedAdmissionReply,
+    AdmissionInboundExpectation, AdmissionMessageEvidence, AdmissionPendingExchangeError,
+    AdmissionRetryState, PendingAdmissionExchange, SavedAdmissionReply,
 };
 use super::id::{AdmissionMessageId, JoinId, SpaceAdmissionId};
 use super::message::{
@@ -57,6 +59,7 @@ pub use joiner::{
     SpaceAdmissionJoinerPrepared, SpaceAdmissionJoinerResolvedInvitation,
     SpaceAdmissionJoinerResolvingInvitation, SpaceAdmissionJoinerState,
 };
+pub use outstanding::{AdmissionObligation, AdmissionOutstandingWork, AdmissionRecoveryStep};
 pub use persistence::SpaceAdmissionPersistenceError;
 pub(crate) use persistence::{decode_envelope_v1, encode_envelope_v1};
 pub use sponsor::{

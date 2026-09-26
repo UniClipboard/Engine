@@ -18,27 +18,27 @@ use crate::settings::models::{SettingsPatch, SettingsView};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SettingsFacadeError {
-    #[error("failed to load settings: {0}")]
-    Load(String),
-    #[error("failed to save settings: {0}")]
-    Save(String),
+    #[error("failed to load settings")]
+    Load(#[source] anyhow::Error),
+    #[error("failed to save settings")]
+    Save(#[source] anyhow::Error),
     #[error("invalid settings: {0}")]
     Invalid(String),
     /// Relay 探测能力未在本进程装配。常见于 webserver / 单元测试场景。
     #[error("relay probe is unavailable in this runtime")]
     RelayProbeUnavailable,
-    #[error("invalid relay URL: {0}")]
-    RelayProbeInvalidUrl(String),
-    #[error("dns lookup failed: {0}")]
-    RelayProbeDns(String),
-    #[error("tls handshake failed: {0}")]
-    RelayProbeTls(String),
-    #[error("relay handshake failed: {0}")]
-    RelayProbeHandshake(String),
+    #[error("invalid relay URL")]
+    RelayProbeInvalidUrl(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error("dns lookup failed")]
+    RelayProbeDns(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error("tls handshake failed")]
+    RelayProbeTls(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error("relay handshake failed")]
+    RelayProbeHandshake(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("relay probe timed out")]
     RelayProbeTimeout,
-    #[error("relay probe failed: {0}")]
-    RelayProbeOther(String),
+    #[error("relay probe failed")]
+    RelayProbeOther(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("relay credential storage is unavailable")]
     RelayCredentialsUnavailable,
     #[error("invalid relay credential URL")]
@@ -82,12 +82,14 @@ impl From<RelayProbeReport> for RelayProbeReportView {
 impl From<RelayProbeError> for SettingsFacadeError {
     fn from(value: RelayProbeError) -> Self {
         match value {
-            RelayProbeError::InvalidUrl(msg) => SettingsFacadeError::RelayProbeInvalidUrl(msg),
-            RelayProbeError::Dns(msg) => SettingsFacadeError::RelayProbeDns(msg),
-            RelayProbeError::Tls(msg) => SettingsFacadeError::RelayProbeTls(msg),
-            RelayProbeError::Handshake(msg) => SettingsFacadeError::RelayProbeHandshake(msg),
+            RelayProbeError::InvalidUrl(source) => {
+                SettingsFacadeError::RelayProbeInvalidUrl(source)
+            }
+            RelayProbeError::Dns(source) => SettingsFacadeError::RelayProbeDns(source),
+            RelayProbeError::Tls(source) => SettingsFacadeError::RelayProbeTls(source),
+            RelayProbeError::Handshake(source) => SettingsFacadeError::RelayProbeHandshake(source),
             RelayProbeError::Timeout => SettingsFacadeError::RelayProbeTimeout,
-            RelayProbeError::Other(msg) => SettingsFacadeError::RelayProbeOther(msg),
+            RelayProbeError::Other(source) => SettingsFacadeError::RelayProbeOther(source),
         }
     }
 }
@@ -99,7 +101,7 @@ impl From<RelayCredentialsError> for SettingsFacadeError {
             RelayCredentialsError::InvalidToken => Self::RelayCredentialInvalidToken,
             RelayCredentialsError::InvalidTarget => Self::RelayCredentialInvalidTarget,
             RelayCredentialsError::Storage(_) => Self::RelayCredentialStorage,
-            RelayCredentialsError::Corrupt => Self::RelayCredentialCorrupt,
+            RelayCredentialsError::Corrupt { .. } => Self::RelayCredentialCorrupt,
         }
     }
 }
@@ -138,7 +140,7 @@ impl SettingsFacade {
         self.settings
             .load()
             .await
-            .map_err(|error| SettingsFacadeError::Load(error.to_string()))
+            .map_err(|error| SettingsFacadeError::Load(anyhow::Error::from(error)))
     }
 
     /// 注入中继诊断端口。Production daemon 会通过 bootstrap 调用,
@@ -216,7 +218,7 @@ impl SettingsFacade {
             .load()
             .await
             .map(SettingsView::from)
-            .map_err(|err| SettingsFacadeError::Load(err.to_string()))
+            .map_err(|err| SettingsFacadeError::Load(anyhow::Error::from(err)))
     }
 
     #[instrument(skip_all)]

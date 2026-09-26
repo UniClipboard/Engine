@@ -92,14 +92,43 @@ pub enum RenderDecodeError {
     #[error("unsupported render payload format version: {0:#x}")]
     UnsupportedVersion(u8),
     #[error("render payload AEAD verification failed")]
-    DecryptFailed,
+    DecryptFailed {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     // Deliberately content-free: this parse runs on decrypted plaintext, so the
     // underlying serde error string could carry render content. Carrying only the
     // category keeps it safe to log (see `SearchDocumentRow::to_domain`).
     #[error("render payload JSON malformed")]
-    MalformedJson,
+    MalformedJson {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("unsupported render payload schema version: {0}")]
     UnsupportedPayloadVersion(u8),
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl RenderDecodeError {
+    pub fn decrypt_failed() -> Self {
+        Self::DecryptFailed { source: None }
+    }
+
+    pub fn decrypt_failed_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::DecryptFailed {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn malformed_json() -> Self {
+        Self::MalformedJson { source: None }
+    }
+
+    pub fn malformed_json_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::MalformedJson {
+            source: Some(source.into()),
+        }
+    }
 }
 
 /// Encoding error — an internal fault (key/serialization), not a data-corruption
@@ -108,9 +137,25 @@ pub enum RenderDecodeError {
 #[derive(Debug, thiserror::Error)]
 pub enum RenderEncodeError {
     #[error("render payload AEAD encryption failed")]
-    EncryptFailed,
-    #[error("render payload JSON serialization failed: {0}")]
-    SerializeJson(String),
+    EncryptFailed {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
+    #[error("render payload JSON serialization failed")]
+    SerializeJson(#[source] serde_json::Error),
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl RenderEncodeError {
+    pub fn encrypt_failed() -> Self {
+        Self::EncryptFailed { source: None }
+    }
+
+    pub fn encrypt_failed_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::EncryptFailed {
+            source: Some(source.into()),
+        }
+    }
 }
 
 /// AEAD codec holding a per-session [`RenderKey`].
@@ -149,11 +194,10 @@ impl RenderPayloadCodec {
         entry_id: &EntryId,
         fields: &RenderFields,
     ) -> Result<Vec<u8>, RenderEncodeError> {
-        let plaintext = serde_json::to_vec(fields)
-            .map_err(|e| RenderEncodeError::SerializeJson(e.to_string()))?;
+        let plaintext = serde_json::to_vec(fields).map_err(RenderEncodeError::SerializeJson)?;
         let ad = aad::for_search_render(entry_id);
         let (nonce, ciphertext) = encrypt_xchacha_raw(self.render_key.as_bytes(), &plaintext, &ad)
-            .map_err(|_| RenderEncodeError::EncryptFailed)?;
+            .map_err(RenderEncodeError::encrypt_failed_from)?;
 
         let mut buf = Vec::with_capacity(HEADER_LEN + ciphertext.len());
         buf.extend_from_slice(&RENDER_MAGIC);
@@ -183,9 +227,9 @@ impl RenderPayloadCodec {
         let ciphertext = &bytes[HEADER_LEN..];
         let ad = aad::for_search_render(entry_id);
         let plaintext = decrypt_xchacha_raw(self.render_key.as_bytes(), nonce, ciphertext, &ad)
-            .map_err(|_| RenderDecodeError::DecryptFailed)?;
+            .map_err(RenderDecodeError::decrypt_failed_from)?;
         let fields: RenderFields =
-            serde_json::from_slice(&plaintext).map_err(|_| RenderDecodeError::MalformedJson)?;
+            serde_json::from_slice(&plaintext).map_err(RenderDecodeError::malformed_json_from)?;
         // The inner schema version is independent of the envelope `format_version`
         // (which gates nonce/header layout). An unknown schema version means the
         // field set may not be what this binary expects, so fail into the degrade
@@ -250,7 +294,7 @@ mod tests {
         let codec = RenderPayloadCodec::new(key(0xD4));
         let env = codec.encrypt(&EntryId::from("entry-a"), &sample()).unwrap();
         let err = codec.decrypt(&EntryId::from("entry-b"), &env).unwrap_err();
-        assert!(matches!(err, RenderDecodeError::DecryptFailed));
+        assert!(matches!(err, RenderDecodeError::DecryptFailed { .. }));
     }
 
     #[test]
@@ -261,7 +305,7 @@ mod tests {
         let env = a.encrypt(&id, &sample()).unwrap();
         assert!(matches!(
             b.decrypt(&id, &env).unwrap_err(),
-            RenderDecodeError::DecryptFailed
+            RenderDecodeError::DecryptFailed { .. }
         ));
     }
 
@@ -325,7 +369,7 @@ mod tests {
         env[last] ^= 0x01;
         assert!(matches!(
             codec.decrypt(&id, &env).unwrap_err(),
-            RenderDecodeError::DecryptFailed
+            RenderDecodeError::DecryptFailed { .. }
         ));
     }
 }

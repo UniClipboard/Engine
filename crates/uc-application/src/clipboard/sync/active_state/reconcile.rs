@@ -47,6 +47,7 @@ use tracing::{debug, info, instrument};
 use uc_core::ports::clipboard::{
     LoadActiveClipboardPort, ResetActiveClipboardPort, SystemClipboardPort,
 };
+use uc_observability_contract::error_source::io_error_kind;
 
 use super::super::snapshot_from_entry::SnapshotReconstructor;
 
@@ -137,7 +138,8 @@ impl ReconcileActiveClipboardStateUseCase {
             Ok(snapshot) => snapshot.snapshot_hash().to_string(),
             Err(err) => {
                 info!(
-                    error = %err,
+                    error_kind = "snapshot_reconstruct",
+                    io_error_kind = io_error_kind(&err),
                     entry_id = %stored.entry_id,
                     "active state reconcile: stored entry not reconstructable; clearing as untrusted"
                 );

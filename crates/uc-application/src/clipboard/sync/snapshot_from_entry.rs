@@ -48,6 +48,7 @@ use uc_core::{
     },
     BlobId,
 };
+use uc_observability_contract::error_source::io_error_kind;
 
 /// Typed errors returned by [`reconstruct_snapshot_from_entry`].
 ///
@@ -82,8 +83,12 @@ pub(crate) enum BuildSnapshotError {
     /// Blob fetch failed for the paste representation. Distinct from
     /// `PasteRepUnavailable`: the resolver succeeded with a `BlobRef` but the
     /// downstream blob store could not deliver the bytes.
-    #[error("Failed to fetch paste representation blob {blob_id}: {reason}")]
-    PasteRepBlobFetchFailed { blob_id: BlobId, reason: String },
+    #[error("Failed to fetch paste representation blob {blob_id}")]
+    PasteRepBlobFetchFailed {
+        blob_id: BlobId,
+        #[source]
+        source: anyhow::Error,
+    },
 
     /// Defensive guard: every candidate rep was skipped. The paste-rep
     /// failure paths above should normally cover this, but a fully empty
@@ -198,7 +203,7 @@ pub(crate) async fn reconstruct_snapshot_from_entry(
                     Err(err) if is_paste_rep => {
                         return Err(BuildSnapshotError::PasteRepBlobFetchFailed {
                             blob_id,
-                            reason: err.to_string(),
+                            source: err,
                         });
                     }
                     Err(err) => {
@@ -206,7 +211,8 @@ pub(crate) async fn reconstruct_snapshot_from_entry(
                             entry_id = %entry_id,
                             rep_id = %rep.id,
                             blob_id = %blob_id,
-                            error = %err,
+                            error_kind = "blob_fetch",
+                            io_error_kind = io_error_kind(err.as_ref()),
                             "snapshot_from_entry.reconstruct: skipping rep, blob fetch failed"
                         );
                         continue;
@@ -229,7 +235,8 @@ pub(crate) async fn reconstruct_snapshot_from_entry(
                     rep_id = %rep.id,
                     format_id = %rep.format_id,
                     payload_state = ?rep.payload_state,
-                    error = %err,
+                    error_kind = "representation_resolve",
+                    io_error_kind = io_error_kind(&err),
                     "snapshot_from_entry.reconstruct: skipping rep, resolver failed (likely Staged without cache/spool bytes)"
                 );
                 continue;
@@ -338,7 +345,8 @@ pub(crate) async fn demote_orphaned_to_lost(
         Err(err) => {
             warn!(
                 representation_id = %rep_id,
-                error = %err,
+                error_kind = "representation_demote",
+                io_error_kind = io_error_kind(&err),
                 "Failed to demote orphaned representation to Lost"
             );
         }
@@ -498,7 +506,7 @@ mod tests {
     #[tokio::test]
     async fn demote_orphaned_swallows_repo_error() {
         let repo = FakeRepRepo::new(Err(ClipboardRepositoryError::Storage(
-            "transient db error".to_string(),
+            "transient db error".into(),
         )));
         let rep_id = RepresentationId::from("rep-4");
 

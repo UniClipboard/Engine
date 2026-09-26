@@ -1,4 +1,16 @@
 #[test]
+fn activating_joiner_still_holds_pairing_open_without_a_network_recovery_step() {
+    let activating = joiner_activating_aggregate_fixture();
+    let work = activating.outstanding_work();
+
+    assert!(work.holds_pairing_open());
+    assert_eq!(work.obligations(), &[AdmissionObligation::ProtocolInFlight]);
+    assert_eq!(work.next_step(), None);
+    assert_eq!(work.deadline_ms(), None);
+    assert!(!work.missing_deadline());
+}
+
+#[test]
 fn initiated_joiner_exposes_one_complete_initial_recovery_view() {
     let aggregate = initiated_joiner_aggregate_fixture();
 

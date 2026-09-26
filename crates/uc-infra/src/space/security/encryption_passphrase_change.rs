@@ -143,8 +143,6 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
-    use async_trait::async_trait;
-    use uc_application::deps::{LoadedMembershipLedger, MembershipLedgerError};
     use uc_core::app_dirs::AppPaths;
     use uc_core::ids::SpaceId;
     use uc_core::membership::{
@@ -189,8 +187,6 @@ mod tests {
         }
     }
 
-    struct EmptyLedger;
-
     struct MemoryProfilePassphraseRecovery;
 
     impl ProfilePassphraseRecoveryPort for MemoryProfilePassphraseRecovery {
@@ -202,6 +198,20 @@ mod tests {
         }
 
         fn finish_passphrase_change(
+            &self,
+            _kek: &[u8],
+        ) -> Result<(), crate::security::ProfileKeyRecoveryError> {
+            Ok(())
+        }
+
+        fn prepare_kek_replacement(
+            &self,
+            _kek: &[u8],
+        ) -> Result<(), crate::security::ProfileKeyRecoveryError> {
+            Ok(())
+        }
+
+        fn finish_kek_replacement(
             &self,
             _kek: &[u8],
         ) -> Result<(), crate::security::ProfileKeyRecoveryError> {
@@ -228,12 +238,19 @@ mod tests {
             }
             Ok(())
         }
-    }
 
-    #[async_trait]
-    impl uc_application::deps::LoadMembershipLedgerPort for EmptyLedger {
-        async fn load(&self) -> Result<LoadedMembershipLedger, MembershipLedgerError> {
-            Ok(LoadedMembershipLedger::no_current_space())
+        fn prepare_kek_replacement(
+            &self,
+            _kek: &[u8],
+        ) -> Result<(), crate::security::ProfileKeyRecoveryError> {
+            Ok(())
+        }
+
+        fn finish_kek_replacement(
+            &self,
+            _kek: &[u8],
+        ) -> Result<(), crate::security::ProfileKeyRecoveryError> {
+            Ok(())
         }
     }
 
@@ -310,13 +327,13 @@ mod tests {
                 Arc::clone(&executor),
                 Arc::clone(&keys),
                 Arc::clone(&manifests),
-                Arc::new(EmptyLedger),
+                crate::space::membership_record::test_support::no_space_records(),
             ));
             let credentials = Arc::new(SqliteSpaceAdmissionCredentials::new(
                 executor,
                 keys,
                 Arc::clone(&manifests),
-                Arc::new(EmptyLedger),
+                crate::space::membership_record::test_support::no_space_records(),
                 admissions,
             ));
             let space_id = SpaceId::from_string("space-a".to_owned());

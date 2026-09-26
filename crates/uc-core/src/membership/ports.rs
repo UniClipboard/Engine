@@ -4,18 +4,15 @@ use crate::ids::{DeviceId, SpaceId};
 use crate::membership::error::MembershipInitializationError;
 
 use super::error::{
-    CurrentMembershipIdentityError, GroupUpdateDispatchError, MembershipAttestationEndpointError,
-    MembershipAttestationError, MembershipError, MembershipGossipEndpointError,
-    MembershipGossipTransportError, MembershipHistoryExchangeError, MembershipSecurityUpdateError,
-    RelationshipStateResetError, SpaceSecurityStateResetError,
+    CurrentMembershipIdentityError, GroupUpdateDispatchError, MembershipError,
+    MembershipHistoryExchangeError, RelationshipStateResetError, SpaceSecurityStateResetError,
 };
-use super::gossip::{SpaceMembershipCandidate, VerifiedMembershipPeer};
 use super::member::SpaceMember;
 use super::membership_history::MembershipHistoryMessage;
 use super::revocation::{
-    GroupEpoch, GroupRevocationResult, KeyEpochError, PendingGroupUpdate,
-    PreparedRevocationResolution, RevocationId, RevocationRecord, RevocationStage,
-    SpaceKeyMaterial,
+    GroupEpoch, GroupRevocationResult, GroupUpdateDeliveryStatus, KeyEpochError,
+    PendingGroupUpdate, PreparedRevocationResolution, RevocationId, RevocationRecord,
+    RevocationStage, SpaceKeyMaterial,
 };
 use crate::security::IdentityFingerprint;
 
@@ -39,63 +36,6 @@ pub trait MemberRepositoryPort: Send + Sync {
     /// Remove a member record. Returns `true` when a record actually
     /// existed and was removed, `false` otherwise.
     async fn remove(&self, device_id: &DeviceId) -> Result<bool, MembershipError>;
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MembershipSecurityState {
-    pub space_id: SpaceId,
-    pub group_epoch: u64,
-}
-
-#[async_trait]
-pub trait MembershipSecurityUpdatePort: Send + Sync {
-    async fn current_state(&self)
-        -> Result<MembershipSecurityState, MembershipSecurityUpdateError>;
-
-    async fn apply_group_epoch_update(
-        &self,
-        payload: &[u8],
-    ) -> Result<u64, MembershipSecurityUpdateError>;
-}
-
-#[async_trait]
-pub trait MembershipGossipTransportPort: Send + Sync {
-    async fn exchange(
-        &self,
-        recipient: &DeviceId,
-        message: super::gossip::MembershipGossipMessage,
-    ) -> Result<super::gossip::MembershipGossipMessage, MembershipGossipTransportError>;
-}
-
-#[async_trait]
-pub trait MembershipGossipEndpointPort: Send + Sync {
-    async fn handle_message(
-        &self,
-        source_device_id: &DeviceId,
-        message: super::gossip::MembershipGossipMessage,
-    ) -> Result<super::gossip::MembershipGossipMessage, MembershipGossipEndpointError>;
-}
-
-#[async_trait]
-pub trait MembershipAttestationPort: Send + Sync {
-    async fn attest_candidate(
-        &self,
-        candidate: &SpaceMembershipCandidate,
-    ) -> Result<VerifiedMembershipPeer, MembershipAttestationError>;
-}
-
-#[async_trait]
-pub trait MembershipAttestationEndpointPort: Send + Sync {
-    async fn apply_relayed_security_updates(
-        &self,
-        space_id: &SpaceId,
-        updates: &[super::gossip::RelayedSecurityUpdate],
-    ) -> Result<u64, MembershipAttestationEndpointError>;
-
-    async fn accept_verified_peer(
-        &self,
-        peer: VerifiedMembershipPeer,
-    ) -> Result<(), MembershipAttestationEndpointError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,10 +68,6 @@ pub trait CurrentMembershipAnnouncementPort: Send + Sync {
     async fn current_announcement_material(
         &self,
     ) -> Result<CurrentMembershipAnnouncementMaterial, CurrentMembershipIdentityError>;
-
-    /// Wait until the transport-facing announcement material changes.
-    /// Implementations must not emit the current value immediately.
-    async fn wait_for_announcement_change(&self) -> Result<(), CurrentMembershipIdentityError>;
 }
 
 #[async_trait]
@@ -186,6 +122,11 @@ pub trait RevocationRepositoryPort: Send + Sync {
         now_ms: i64,
     ) -> Result<usize, KeyEpochError>;
 
+    async fn group_update_delivery_status(
+        &self,
+        space_id: &SpaceId,
+    ) -> Result<GroupUpdateDeliveryStatus, KeyEpochError>;
+
     async fn begin_revocation(
         &self,
         prepared: &RevocationRecord,
@@ -236,6 +177,17 @@ pub trait RevocationRepositoryPort: Send + Sync {
         recipient: &DeviceId,
         now_ms: i64,
     ) -> Result<RevocationRecord, KeyEpochError>;
+
+    /// 结清收件人已不在保留名单中的 outbox 消息，返回结清数量。
+    ///
+    /// 与 `acknowledge_recipient` 走同一条完成路径：剩余消息全部确认时撤销随即完成。
+    /// 撤销不在分发阶段时没有可结清的投递，返回 0。
+    async fn settle_obsolete_revocation_recipients(
+        &self,
+        revocation_id: &RevocationId,
+        retained_recipients: &[DeviceId],
+        now_ms: i64,
+    ) -> Result<usize, KeyEpochError>;
 }
 
 #[async_trait]
@@ -300,11 +252,25 @@ pub trait GroupRevocationPort: Send + Sync {
         now_ms: i64,
     ) -> Result<usize, KeyEpochError>;
 
+    async fn space_group_update_delivery_status(
+        &self,
+    ) -> Result<GroupUpdateDeliveryStatus, KeyEpochError>;
+
     async fn acknowledge_space_group_update(
         &self,
         update_id: &str,
         now_ms: i64,
     ) -> Result<bool, KeyEpochError>;
+
+    /// 结清收件人已不在保留名单中的待投递项，返回结清数量。
+    ///
+    /// 名单由成员历史导出，实现只做队列读写与名单匹配，不自行判断成员资格，
+    /// 也不受投递退避影响：整个队列一次判定，而不只是本轮到期项。
+    async fn settle_obsolete_space_group_updates(
+        &self,
+        retained_recipients: &[DeviceId],
+        now_ms: i64,
+    ) -> Result<usize, KeyEpochError>;
 }
 
 #[async_trait]
@@ -351,40 +317,6 @@ pub trait ContentExchangeGatePort: Send + Sync {
     async fn is_locally_removed(&self, device_id: &DeviceId) -> bool;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CurrentWorkspacePeerScopeSource {
-    CurrentHistory,
-    Legacy,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CurrentWorkspaceLocalMembership {
-    Active,
-    Removed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CurrentWorkspacePeerSnapshot {
-    pub revision: u64,
-    pub source: CurrentWorkspacePeerScopeSource,
-    pub local_membership: CurrentWorkspaceLocalMembership,
-    pub peer_device_ids: Vec<DeviceId>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CurrentWorkspacePeerScopeError {
-    Locked,
-    Unavailable,
-    Corrupt,
-}
-
-#[async_trait]
-pub trait CurrentWorkspacePeerScopePort: Send + Sync {
-    async fn snapshot(
-        &self,
-    ) -> Result<CurrentWorkspacePeerSnapshot, CurrentWorkspacePeerScopeError>;
-}
-
 /// 准入前由成员历史负责人给出的唯一决定。
 ///
 /// 邀请创建和使用都必须读取这一结果，不能自行根据成员列表、在线状态或
@@ -397,17 +329,6 @@ pub enum MembershipAdmissionDecision {
     RecoveryRequired,
     SupersededInvitation,
     Unavailable,
-}
-
-/// 成员历史与准入之间的窄边界。
-///
-/// `invitation_generation` 是邀请创建时取得的空间准入编号。新成员历史会推进
-/// 编号，因此旧邀请即使尚未过期也不能重新建立旧权限。
-#[async_trait]
-pub trait MembershipAdmissionGatePort: Send + Sync {
-    async fn admission_decision(&self, invitation_generation: u64) -> MembershipAdmissionDecision;
-
-    async fn invitation_generation(&self) -> Result<u64, MembershipAdmissionDecision>;
 }
 
 #[async_trait]

@@ -59,7 +59,10 @@ pub enum EncryptionError {
     CorruptedBlob,
 
     #[error("internal crypto failure")]
-    CryptoFailure,
+    CryptoFailure {
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     #[error("invalid key")]
     InvalidKey,
@@ -81,7 +84,10 @@ pub enum EncryptionError {
     KeyNotFound, // keyring 或 keyslot 缺失
 
     #[error("key material is corrupt")]
-    KeyMaterialCorrupt, // keyslot 或 keyring 内容损坏/长度不对/反序列化失败
+    KeyMaterialCorrupt {
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    }, // keyslot 或 keyring 内容损坏/长度不对/反序列化失败
 
     #[error("other encryption error: {0}")]
     KeyringError(String),
@@ -90,7 +96,10 @@ pub enum EncryptionError {
     PermissionDenied, // keyring 权限/系统拒绝
 
     #[error("I/O failure during key material access")]
-    IoFailure, // 文件/DB IO
+    IoFailure {
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    }, // 文件/DB IO
 
     #[error("unsupported version for key material")]
     UnsupportedVersion, // keyslot/blob 版本不支持
@@ -100,6 +109,41 @@ pub enum EncryptionError {
         #[source]
         source: Error,
     },
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl EncryptionError {
+    pub fn io_failure() -> Self {
+        Self::IoFailure { source: None }
+    }
+
+    pub fn io_failure_from(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::IoFailure {
+            source: Some(Box::new(source)),
+        }
+    }
+
+    pub fn key_material_corrupt() -> Self {
+        Self::KeyMaterialCorrupt { source: None }
+    }
+
+    pub fn key_material_corrupt_from(
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::KeyMaterialCorrupt {
+            source: Some(Box::new(source)),
+        }
+    }
+
+    pub fn crypto_failure() -> Self {
+        Self::CryptoFailure { source: None }
+    }
+
+    pub fn crypto_failure_from(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::CryptoFailure {
+            source: Some(Box::new(source)),
+        }
+    }
 }
 
 impl fmt::Debug for EncryptionError {
@@ -113,13 +157,16 @@ impl From<SecureStorageError> for EncryptionError {
     fn from(source: SecureStorageError) -> Self {
         match source {
             SecureStorageError::PermissionDenied(_) => Self::PermissionDenied,
-            SecureStorageError::Corrupt(_) => Self::KeyMaterialCorrupt,
+            source @ SecureStorageError::Corrupt(_) => Self::key_material_corrupt_from(source),
             SecureStorageError::Unavailable(message) | SecureStorageError::Other(message) => {
                 Self::KeyringError(message)
             }
             SecureStorageError::AccessFailed(failure) => Self::KeyMaterialAccessFailed {
                 source: failure.into_source(),
             },
+            SecureStorageError::StorageFailed { source } => {
+                Self::KeyMaterialAccessFailed { source }
+            }
         }
     }
 }
@@ -155,7 +202,7 @@ mod tests {
         ));
         assert!(matches!(
             EncryptionError::from(SecureStorageError::Corrupt("private".into())),
-            EncryptionError::KeyMaterialCorrupt
+            EncryptionError::KeyMaterialCorrupt { .. }
         ));
 
         let error = EncryptionError::from(SecureStorageError::AccessFailed(
@@ -167,5 +214,22 @@ mod tests {
             .downcast_ref::<io::Error>()
             .is_some());
         assert!(!format!("{error:?}").contains("private"));
+    }
+
+    #[test]
+    fn storage_failure_keeps_lower_error_as_key_material_access_source() {
+        let error = EncryptionError::from(SecureStorageError::StorageFailed {
+            source: io::Error::from(io::ErrorKind::PermissionDenied).into(),
+        });
+
+        assert!(matches!(
+            error,
+            EncryptionError::KeyMaterialAccessFailed { .. }
+        ));
+        let source = error.source().unwrap();
+        assert_eq!(
+            source.downcast_ref::<io::Error>().map(io::Error::kind),
+            Some(io::ErrorKind::PermissionDenied)
+        );
     }
 }

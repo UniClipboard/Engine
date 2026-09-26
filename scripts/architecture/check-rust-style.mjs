@@ -11,6 +11,50 @@ const SCRIPT_DIR = dirname(SCRIPT_PATH)
 const REPOSITORY_ROOT = resolve(SCRIPT_DIR, '../..')
 const SOURCE_ROOTS = ['crates', 'bindings', 'compatibility', 'tests']
 const ALLOW_MARKER = /\/\/\s*rust-style:\s*allow-qualified-path\s*--\s*\S.+$/
+// 错误变量名：扫描规则与执行计划中的清单保持一致。
+const ERROR_VARIABLE = String.raw`(?:e|err|error|source|cause|[a-z][a-z0-9_]*_err|[a-z][a-z0-9_]*_error)`
+const TO_STRING_ERROR = String.raw`\b${ERROR_VARIABLE}\s*\.\s*to_string\s*\(\s*\)`
+const INTERPOLATED_ERROR = String.raw`"[^"]*\{${ERROR_VARIABLE}(?::[^}]*)?\}[^"]*"`
+const POSITIONAL_ERROR = String.raw`"[^"]*\{(?::[^}]*)?\}[^"]*"\s*,[^;]*\b${ERROR_VARIABLE}\b`
+const ERROR_SOURCE_RULES = [
+  {
+    kind: 'S1',
+    code: new RegExp(String.raw`\banyhow!\s*\(\s*${TO_STRING_ERROR}\s*\)|\bError::msg\s*\(\s*${ERROR_VARIABLE}\s*\)`),
+    message: '不得把下层错误字符串化后重新包装成 anyhow；直接 ? 或 anyhow::Error::new',
+  },
+  {
+    kind: 'S2',
+    raw: new RegExp(String.raw`\b(?:anyhow|bail)!\s*\(\s*(?:${INTERPOLATED_ERROR}|${POSITIONAL_ERROR})`),
+    message: '不得把下层错误拼进 anyhow 文本；改用 .context("固定动作")',
+  },
+  {
+    kind: 'S3',
+    code: new RegExp(
+      String.raw`::\s*[A-Z]\w*\s*\(\s*${TO_STRING_ERROR}\s*[,)]` +
+        String.raw`|\b(?:message|detail|details|reason|description|cause|error)\s*:\s*${TO_STRING_ERROR}` +
+        String.raw`|\bmap_err\s*\(\s*\|\s*(\w+)\s*\|\s*\1\s*\.\s*to_string\s*\(\s*\)\s*\)`
+    ),
+    raw: new RegExp(
+      String.raw`::\s*[A-Z]\w*\s*\(\s*format!\s*\(\s*(?:${INTERPOLATED_ERROR}|${POSITIONAL_ERROR})` +
+        String.raw`|\b[a-z_]+\s*:\s*format!\s*\(\s*${INTERPOLATED_ERROR}`
+    ),
+    message: '错误变体不得只保存下层错误文本；改为 #[source] 携带具体错误',
+  },
+  {
+    kind: 'L1',
+    code: new RegExp(
+      String.raw`\b(?:error|err|cause|source)\s*=\s*[%?]\s*&?${ERROR_VARIABLE}\b` +
+        String.raw`|[(,]\s*[%?]\s*${ERROR_VARIABLE}\s*[,)]`
+    ),
+    raw: new RegExp(String.raw`\b(?:error|warn|info|debug|trace)!\s*\([^;]*${INTERPOLATED_ERROR}`),
+    message: '日志不得输出错误正文；写固定 error_kind，并用 io_error_kind(..) 从来源链提取分类',
+  },
+]
+// 错误文本与 panic 文本不得包含路径：`.display()` 出现在错误构造的同一行或其后三行内。
+const ERROR_TEXT_START = /\b(?:with_context|anyhow!|bail!|panic!|custom)\s*\(|\bcontext\s*\(\s*format!/
+const PATH_DISPLAY = /\.\s*display\s*\(\s*\)/
+const DISCARDED_SOURCE = /\bmap_err\s*\(\s*(?:move\s*)?\|\s*_\w*\s*(?::[^|]*)?\|/
+const CHINESE_COMMENT = /\/\/.*[\u4e00-\u9fff]/
 const FUNCTION_START = /(^|\n)\s*(pub(?:\s*\([^)]*\))?\s+)?(?:const\s+)?(?:unsafe\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\b/g
 
 function git(args) {
@@ -147,15 +191,69 @@ function isTestPath(path) {
   return (
     path.startsWith('tests/') ||
     path.includes('/tests/') ||
-    path.includes('/src/testing/') ||
+    path.includes('/testing/') ||
     path.endsWith('/tests.rs') ||
     path.endsWith('/test_support.rs') ||
+    path.includes('/test_support/') ||
     path.endsWith('_test.rs')
   )
 }
 
 function approvedException(lines, lineNumber) {
   return [lines[lineNumber - 1], lines[lineNumber - 2]].filter(Boolean).some(line => ALLOW_MARKER.test(line))
+}
+
+// 跨行写法（如 `Variant(` 换行后 `error.to_string(),`）拼接前一行一起判断。
+function joinedWithPrevious(lines, lineNumber) {
+  const current = lines[lineNumber - 1] ?? ''
+  const previous = lines[lineNumber - 2] ?? ''
+  return `${previous.trimEnd()} ${current.trim()}`
+}
+
+function errorSourceViolations(path, lines, codeLines, lineNumber) {
+  const violations = []
+  const code = codeLines[lineNumber - 1] ?? ''
+  // 注释与空行跳过；只含字符串字面量的续行（如格式串单独成行）仍需检查。
+  if (!code.trim() && !(lines[lineNumber - 1] ?? '').trim().startsWith('"')) return violations
+  const joinedCode = joinedWithPrevious(codeLines, lineNumber)
+  const joinedRaw = joinedWithPrevious(lines, lineNumber)
+  const rawLine = lines[lineNumber - 1] ?? ''
+  const previousCode = codeLines[lineNumber - 2] ?? ''
+  const previousRaw = lines[lineNumber - 2] ?? ''
+  // 当前行单独命中，或只有与前一行拼接后才命中（前一行单独命中时已在前一行报告）。
+  const matches = (pattern, current, joined, previous) =>
+    Boolean(pattern) && (pattern.test(current) || (pattern.test(joined) && !pattern.test(previous)))
+  for (const rule of ERROR_SOURCE_RULES) {
+    const matchesCode = matches(rule.code, code, joinedCode, previousCode)
+    const matchesRaw = matches(rule.raw, rawLine, joinedRaw, previousRaw)
+    if (!matchesCode && !matchesRaw) continue
+    violations.push({ path, line: lineNumber, source: lines[lineNumber - 1].trim(), type: 'error-source', message: rule.message })
+  }
+  if (PATH_DISPLAY.test(code)) {
+    const window = codeLines.slice(Math.max(0, lineNumber - 4), lineNumber).join('\n')
+    if (ERROR_TEXT_START.test(window)) {
+      violations.push({
+        path,
+        line: lineNumber,
+        source: lines[lineNumber - 1].trim(),
+        type: 'error-source',
+        message: '错误与 panic 文本不得包含路径；改用固定动作文本，路径不进入错误链',
+      })
+    }
+  }
+  if (DISCARDED_SOURCE.test(code)) {
+    const commented = [lines[lineNumber - 1], lines[lineNumber - 2]].filter(Boolean).some(line => CHINESE_COMMENT.test(line))
+    if (!commented) {
+      violations.push({
+        path,
+        line: lineNumber,
+        source: lines[lineNumber - 1].trim(),
+        type: 'error-source',
+        message: 'map_err(|_| ..) 丢弃了下层错误；改为 #[source] 携带，属于允许例外时在同一行或前一行用中文注释写明理由',
+      })
+    }
+  }
+  return violations
 }
 
 function lineNumberAt(source, offset) {
@@ -216,6 +314,7 @@ function violationsFor(path, addedLines, changedFunctionLines) {
   for (const lineNumber of addedLines) {
     const raw = lines[lineNumber - 1] ?? ''
     const code = codeLines[lineNumber - 1] ?? ''
+    if (!testLines.has(lineNumber)) violations.push(...errorSourceViolations(path, lines, codeLines, lineNumber))
     if (!/\bcrate\s*::/.test(code)) continue
     if (/^\s*(?:pub(?:\([^)]*\))?\s+)?use\s+crate\s*::/.test(code)) continue
     if (testLines.has(lineNumber) || approvedException(lines, lineNumber)) continue
@@ -280,6 +379,10 @@ function main() {
     return
   }
   for (const violation of violations) {
+    if (violation.type === 'error-source') {
+      process.stderr.write(`ERROR ${violation.path}:${violation.line} ${violation.message}：${violation.source}\n`)
+      continue
+    }
     if (violation.type === 'forwarding-method') {
       process.stderr.write(
         `ERROR ${violation.path}:${violation.line} 仓库内部方法不得只保留转调：${violation.source}\n`
@@ -290,7 +393,7 @@ function main() {
       `ERROR ${violation.path}:${violation.line} 正文请先集中引入名称：${violation.source}\n`
     )
   }
-  if (violations.some(violation => violation.type !== 'forwarding-method')) {
+  if (violations.some(violation => violation.type === undefined)) {
     process.stderr.write(
       '确有必要时，在前一行添加 rust-style: allow-qualified-path 并写明具体理由。\n'
     )

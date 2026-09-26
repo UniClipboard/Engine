@@ -43,6 +43,7 @@ use uc_core::{
         ClipboardSelectionRepositoryPort,
     },
 };
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::clipboard::write::{
     ClipboardWriteCoordinator, ClipboardWriteIntent, LocalActiveRegisterAdvancer,
@@ -231,7 +232,8 @@ impl RestoreClipboardEntryAsPlainTextUseCase {
                     warn!(
                         entry_id = %entry_id,
                         rep_id = %rep.id,
-                        error = %err,
+                        error_kind = "representation_resolve",
+                        io_error_kind = io_error_kind(err.as_ref()),
                         "restore_file_paths: skipping uri-list rep due to resolve failure"
                     );
                     continue;
@@ -329,7 +331,8 @@ impl RestoreClipboardEntryAsPlainTextUseCase {
             Err(err) => warn!(
                 entry_id = %entry_id,
                 op,
-                error = %err,
+                error_kind = "snapshot_hash_lookup",
+                io_error_kind = io_error_kind(&err),
                 "restore: snapshot_hash lookup failed; skipping active-register advance"
             ),
         }
@@ -408,7 +411,8 @@ impl RestoreClipboardEntryAsPlainTextUseCase {
                     warn!(
                         entry_id = %entry_id,
                         rep_id = %rep.id,
-                        error = %err,
+                        error_kind = "representation_resolve",
+                        io_error_kind = io_error_kind(err.as_ref()),
                         "restore_plain.build_snapshot: skipping plain rep due to resolve failure"
                     );
                     continue;
@@ -600,6 +604,7 @@ mod tests {
                 .ok_or_else(|| PayloadResolveError::Integrity {
                     rep_id: rep.id.clone(),
                     reason: "test resolver requires inline_data".to_string(),
+                    source: None,
                 })?;
             Ok(ResolvedClipboardPayload::Inline {
                 mime: rep

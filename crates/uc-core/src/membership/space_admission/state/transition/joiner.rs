@@ -1,6 +1,51 @@
 use super::*;
 
 impl SpaceAdmissionAggregate {
+    pub(crate) fn defer_pending_exchange(
+        mut self,
+        next_attempt_at_ms: i64,
+    ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
+        let record_version = self
+            .record_version
+            .checked_add(1)
+            .ok_or(SpaceAdmissionAggregateError::RecordVersionOverflow)?;
+        let exchange = match &mut self.state {
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Initiated(state)) => {
+                &mut state.pending_exchange
+            }
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Prepared(state)) => {
+                &mut state.pending_exchange
+            }
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Applied(state)) => {
+                &mut state.pending_exchange
+            }
+            SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Cancelling(state)) => {
+                &mut state.pending_exchange
+            }
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Active(
+                SpaceAdmissionActiveState::PendingSettlement(state),
+            )) => &mut state.pending_exchange,
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(state)) => {
+                state
+                    .cleanup
+                    .as_mut()
+                    .and_then(|cleanup| cleanup.pending_exchange.as_mut())
+                    .ok_or(SpaceAdmissionAggregateError::InvalidTransition)?
+            }
+            _ => return Err(SpaceAdmissionAggregateError::InvalidTransition),
+        };
+        exchange
+            .record_failure(next_attempt_at_ms)
+            .map_err(|error| match error {
+                AdmissionPendingExchangeError::RetryCountOverflow => {
+                    SpaceAdmissionAggregateError::CounterOverflow
+                }
+                _ => SpaceAdmissionAggregateError::InvalidRetryState,
+            })?;
+        self.record_version = record_version;
+        Ok(AdmissionTransition::new(self, &[]))
+    }
+
     pub(crate) fn start_resolved_join(
         mut self,
         private_state: AdmissionJoinerPrivateState,
@@ -167,6 +212,37 @@ impl SpaceAdmissionAggregate {
         Ok(AdmissionTransition::new(self, &[]))
     }
 
+    pub(crate) fn reject_activation(
+        self,
+        reason: SpaceAdmissionRejectionReason,
+    ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
+        let termination = match reason {
+            SpaceAdmissionRejectionReason::HistoryConflict => {
+                SpaceAdmissionTerminationReason::ActivationRejected
+            }
+            SpaceAdmissionRejectionReason::CompletionInvalid => {
+                SpaceAdmissionTerminationReason::CompletionRejected
+            }
+            SpaceAdmissionRejectionReason::MembershipHistoryInvalid => {
+                SpaceAdmissionTerminationReason::MembershipHistoryRejected
+            }
+            SpaceAdmissionRejectionReason::SecurityMaterialInvalid => {
+                SpaceAdmissionTerminationReason::SecurityMaterialRejected
+            }
+            SpaceAdmissionRejectionReason::RelationshipConflict => {
+                SpaceAdmissionTerminationReason::RelationshipRejected
+            }
+            SpaceAdmissionRejectionReason::IdentityConflict => {
+                SpaceAdmissionTerminationReason::IdentityRejected
+            }
+            SpaceAdmissionRejectionReason::ActivationStateInvalid => {
+                SpaceAdmissionTerminationReason::ActivationStateRejected
+            }
+            _ => return Err(SpaceAdmissionAggregateError::InvalidTransition),
+        };
+        self.terminate_locally(termination)
+    }
+
     pub(crate) fn reject_peer_upgrade(
         mut self,
     ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
@@ -285,6 +361,7 @@ impl SpaceAdmissionAggregate {
                     timeline.expires_at_ms(),
                 )
                 .map(|contract| contract.digest())
+                // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
                 .map_err(|_| SpaceAdmissionAggregateError::InvalidAttemptTimeline)
             })
             .transpose()?;
@@ -540,11 +617,13 @@ impl SpaceAdmissionAggregate {
         ))
     }
 
+    /// `staged_target` 是激活准备补全后的暂存目标，替换 Applied 阶段保存的版本。
     pub(crate) fn accept_complete(
         mut self,
         complete: SpaceAdmissionEnvelopeV1,
         canonical_digest: [u8; 32],
         space_transition: AdmissionSpaceTransition,
+        staged_target: AdmissionStagedTarget,
     ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
         let record_version = self
             .record_version
@@ -593,7 +672,7 @@ impl SpaceAdmissionAggregate {
                 peer_binding: state.peer_binding,
                 continuation_credential: state.continuation_credential,
                 exact_commit: state.exact_commit,
-                staged_target: state.staged_target,
+                staged_target,
                 completion: complete,
                 completion_evidence,
                 space_transition,
@@ -706,6 +785,7 @@ impl SpaceAdmissionAggregate {
                     SpaceAdmissionRoute::from_bytes(
                         candidate.continuation_route().as_bytes().to_vec(),
                     )
+                    // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
                     .map_err(|_| SpaceAdmissionAggregateError::InvalidCancellationRequest)?,
                     state.candidate_evidence.message_id(),
                     1,
@@ -713,6 +793,7 @@ impl SpaceAdmissionAggregate {
             }
             SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Prepared(state)) => (
                 SpaceAdmissionRoute::from_bytes(state.pending_exchange.route().as_bytes().to_vec())
+                    // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
                     .map_err(|_| SpaceAdmissionAggregateError::InvalidCancellationRequest)?,
                 state.candidate_evidence.message_id(),
                 2,
@@ -735,6 +816,7 @@ impl SpaceAdmissionAggregate {
             Some(predecessor),
             SpaceAdmissionBodyV1::CancelRequested,
         )
+        // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
         .map_err(|_| SpaceAdmissionAggregateError::InvalidCancellationRequest)?;
         let mut pending_exchange = PendingAdmissionExchange::new(
             route,
@@ -742,6 +824,7 @@ impl SpaceAdmissionAggregate {
             SpaceAdmissionMessageKind::Rejected,
             retry_state,
         )
+        // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
         .map_err(|_| SpaceAdmissionAggregateError::InvalidCancellationRequest)?;
         if peer_upgrade_required {
             pending_exchange.mark_peer_upgrade_required();
@@ -809,19 +892,7 @@ impl SpaceAdmissionAggregate {
     }
 
     pub(crate) fn supersede(mut self) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
-        if self.attempt_timeline.is_none()
-            && self.attempt_digest.is_none()
-            && matches!(
-                &self.state,
-                SpaceAdmissionRecordState::Joiner(
-                    SpaceAdmissionJoinerState::Prepared(_)
-                        | SpaceAdmissionJoinerState::Committed(_)
-                        | SpaceAdmissionJoinerState::Applied(_)
-                        | SpaceAdmissionJoinerState::Activating(_)
-                        | SpaceAdmissionJoinerState::Cancelling(_)
-                )
-            )
-        {
+        if self.is_unbounded_late_join() {
             return self.terminate_locally(SpaceAdmissionTerminationReason::Cancelled);
         }
         if self.attempt_digest.is_some()

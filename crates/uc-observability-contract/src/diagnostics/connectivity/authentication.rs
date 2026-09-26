@@ -189,6 +189,17 @@ pub fn take_local_completion_detail(
                 "member",
                 "error",
             ),
+            LocalCompletionDetail::MembershipHistory(detail) => (
+                "space_membership",
+                "membership_history_sync",
+                "member",
+                match detail.reason {
+                    super::MembershipHistoryFailureReason::PeerRejected => "rejected",
+                    super::MembershipHistoryFailureReason::PeerOffline
+                    | super::MembershipHistoryFailureReason::PairingInProgress
+                    | super::MembershipHistoryFailureReason::Transport => "error",
+                },
+            ),
             LocalCompletionDetail::Authentication(_) => {
                 ("space_admission", "network_transport", "sponsor", "error")
             }
@@ -213,6 +224,7 @@ pub enum LocalCompletionDetail {
     Authentication(AuthenticationFailure),
     AdmissionConnection(DialFailure),
     GroupUpdate(super::GroupUpdateFailureDetail),
+    MembershipHistory(super::MembershipHistoryFailureDetail),
 }
 impl LocalCompletionDetail {
     pub fn local_fields(self) -> (&'static str, &'static str) {
@@ -222,6 +234,7 @@ impl LocalCompletionDetail {
             Self::Authentication(failure) => failure.local_fields(),
             Self::AdmissionConnection(reason) => ("connect", dial_reason(reason)),
             Self::GroupUpdate(detail) => (detail.phase.as_str(), detail.reason.as_str()),
+            Self::MembershipHistory(detail) => (detail.phase.as_str(), detail.reason.as_str()),
         }
     }
 
@@ -229,9 +242,15 @@ impl LocalCompletionDetail {
         match self {
             Self::ClipboardReceive(failure) => failure.source_chain(),
             Self::GroupUpdate(detail) => Some([
-                "membership_update",
+                "space_device_update",
                 detail.phase.as_str(),
                 detail.source.as_str(),
+                detail.reason.as_str(),
+            ]),
+            Self::MembershipHistory(detail) => Some([
+                "space_device_update",
+                "membership_history",
+                detail.phase.as_str(),
                 detail.reason.as_str(),
             ]),
             _ => None,
@@ -269,6 +288,18 @@ pub fn complete_group_update_failure(
 ) {
     let context = opentelemetry::Context::current().with_value(PendingCompletionDetail {
         detail: LocalCompletionDetail::GroupUpdate(detail),
+        consumed: std::sync::atomic::AtomicBool::new(false),
+    });
+    let _guard = context.attach();
+    super::super::complete_operation(completion);
+}
+
+pub fn complete_membership_history_failure(
+    detail: super::MembershipHistoryFailureDetail,
+    completion: super::super::OperationCompletion,
+) {
+    let context = opentelemetry::Context::current().with_value(PendingCompletionDetail {
+        detail: LocalCompletionDetail::MembershipHistory(detail),
         consumed: std::sync::atomic::AtomicBool::new(false),
     });
     let _guard = context.attach();

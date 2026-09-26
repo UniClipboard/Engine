@@ -44,7 +44,7 @@ impl MasterKey {
         let mut buf = [0u8; Self::LEN];
         OsRng
             .try_fill_bytes(&mut buf)
-            .map_err(|_| EncryptionError::CryptoFailure)?;
+            .map_err(EncryptionError::crypto_failure_from)?;
         Self::from_bytes(&buf)
     }
 

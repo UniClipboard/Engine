@@ -22,11 +22,12 @@
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 use uc_observability_contract::analytics::{
     AnalyticsPort, CaptureOrigin, Event, PayloadSizeBucket, PayloadType,
 };
+use uc_observability_contract::error_source::io_error_kind;
 use unicode_normalization::UnicodeNormalization;
 
 use uc_core::blob::ports::BlobContentIngestPort;
@@ -388,7 +389,7 @@ impl CaptureClipboardUseCase {
                         max_member_count: s.file_sync.max_file_set_member_count,
                     },
                     Err(err) => {
-                        warn!(error = %err, "capture: settings load failed; using fallback file-set caps for this capture");
+                        warn!(error_kind = "settings_load", io_error_kind = io_error_kind(err.as_ref()), "capture: settings load failed; using fallback file-set caps for this capture");
                         FileSetCaps::fallback()
                     }
                 };
@@ -488,13 +489,9 @@ impl CaptureClipboardUseCase {
                                 .ingest_path(path)
                                 .await
                                 .map(|ingested| ingested.blob_id)
-                                .map_err(|err| {
-                                    // No path in the message: a clipboard file
-                                    // path is user content.
-                                    anyhow::anyhow!(
-                                        "LocalFile rep ingest into blob store failed: {err}"
-                                    )
-                                })?;
+                                // No path in the message: a clipboard file
+                                // path is user content.
+                                .context("LocalFile rep ingest into blob store failed")?;
                             info!(
                                 rep_id = %observed.id,
                                 blob_id = %blob_id,
@@ -654,7 +651,7 @@ impl CaptureClipboardUseCase {
                 let content_category = ClipboardEntryContentCategory::from_snapshot(&snapshot);
                 let now_ms = SystemTime::now()
                     .duration_since(SystemTime::UNIX_EPOCH)
-                    .map_err(|e| anyhow::anyhow!("Failed to get system time: {}", e))?
+                    .context("Failed to get system time")?
                     .as_millis() as i64;
                 if let Some(commit_context) = commit_context {
                     let record = match commit_mode {
@@ -768,7 +765,8 @@ impl CaptureClipboardUseCase {
                     if let Err(err) = self.entry_file_set_repo.save(&entry_id, file_set).await {
                         warn!(
                             entry_id = %entry_id,
-                            error = %err,
+                            error_kind = "file_set_manifest_save",
+                            io_error_kind = io_error_kind(&err),
                             "capture: failed to persist entry file-set manifest"
                         );
                     }
@@ -879,7 +877,11 @@ async fn resurface_existing_entry(
         Ok(Some(existing)) => existing,
         Ok(None) => return None,
         Err(e) => {
-            warn!(error = %e, "Local-capture dedup lookup failed; proceeding to create entry");
+            warn!(
+                error_kind = "dedup_lookup",
+                io_error_kind = io_error_kind(&e),
+                "Local-capture dedup lookup failed; proceeding to create entry"
+            );
             return None;
         }
     };
@@ -896,7 +898,8 @@ async fn resurface_existing_entry(
         Err(e) => {
             warn!(
                 entry_id = %existing,
-                error = %e,
+                error_kind = "entry_resurface",
+                io_error_kind = io_error_kind(&e),
                 "Failed to resurface existing entry; creating new entry"
             );
             None
@@ -1304,14 +1307,16 @@ async fn expand_directory(
     let mut pending = Vec::new();
     let mut queue = VecDeque::from([(root.path.clone(), String::new())]);
     while let Some((directory, relative_directory)) = queue.pop_front() {
-        let mut read_dir = tokio::fs::read_dir(&directory).await.map_err(|_| {
+        let mut read_dir = tokio::fs::read_dir(&directory).await.map_err(|error| {
+            expansion_io_failed(&error);
             (
                 ExpansionFailure::IngestFailed,
                 directory_marker(root, next_line_index, &relative_directory),
             )
         })?;
         let mut entries = Vec::new();
-        while let Some(entry) = read_dir.next_entry().await.map_err(|_| {
+        while let Some(entry) = read_dir.next_entry().await.map_err(|error| {
+            expansion_io_failed(&error);
             (
                 ExpansionFailure::IngestFailed,
                 directory_marker(root, next_line_index, &relative_directory),
@@ -1360,7 +1365,8 @@ async fn expand_directory(
                 format!("{relative_directory}/{name}")
             };
             let path = entry.path();
-            let metadata = tokio::fs::symlink_metadata(&path).await.map_err(|_| {
+            let metadata = tokio::fs::symlink_metadata(&path).await.map_err(|error| {
+                expansion_io_failed(&error);
                 (
                     ExpansionFailure::IngestFailed,
                     directory_marker(root, next_line_index, &relative_path),
@@ -1401,6 +1407,15 @@ async fn expand_directory(
         }
     }
     Ok(pending)
+}
+
+/// 展开失败落为文件集中的排除行（业务结果），错误不向上传递；在此记录一次 IO 分类，不记录路径。
+fn expansion_io_failed(error: &std::io::Error) {
+    warn!(
+        error_kind = "file_set_expand",
+        io_error_kind = io_error_kind(error),
+        "capture: file-set expansion could not read a member; excluding the set"
+    );
 }
 
 fn directory_marker(
@@ -1478,7 +1493,11 @@ async fn classify_file_path(
         },
         Err(err) => {
             // No path in the field: a clipboard file path is user content.
-            warn!(error = %err, "capture: could not derive file-set line content hash");
+            warn!(
+                error_kind = "file_content_hash",
+                io_error_kind = io_error_kind(err.as_ref()),
+                "capture: could not derive file-set line content hash"
+            );
             EntryFileSetLineKind::Excluded {
                 reason: EntryFileSetExcludeReason::IngestFailed,
             }
@@ -1654,6 +1673,80 @@ mod tests {
             )));
             assert_eq!(set.file_lines().count(), 0);
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unreadable_directory_member_logs_io_classification_without_path() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::{Arc, Mutex};
+        use tracing::instrument::WithSubscriber;
+
+        #[derive(Clone, Default)]
+        struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+        struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
+        impl Write for CapturedLogWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedLogs {
+            type Writer = CapturedLogWriter;
+            fn make_writer(&'writer self) -> Self::Writer {
+                CapturedLogWriter(Arc::clone(&self.0))
+            }
+        }
+
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("root");
+        let locked = root.join("private-locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&locked).is_ok() {
+            // 以 root 运行时权限位不生效，无法构造真实的读取失败。
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+            return;
+        }
+        let uri_list = format!("file://{}", root.display());
+        let snapshot = snapshot_with(vec![rep(
+            "public.file-url",
+            Some("text/uri-list"),
+            uri_list.as_bytes(),
+        )]);
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(logs.clone())
+            .finish();
+
+        let set = build_entry_file_set(&snapshot, &PanicOnHash, FileSetCaps::unbounded())
+            .with_subscriber(subscriber)
+            .await
+            .expect("ineligible directory should still produce a manifest");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(set.lines.iter().any(|line| matches!(
+            line.kind,
+            EntryFileSetLineKind::Excluded {
+                reason: EntryFileSetExcludeReason::IngestFailed
+            }
+        )));
+        let output = String::from_utf8_lossy(&logs.0.lock().unwrap()).into_owned();
+        assert!(
+            output.contains("error_kind=\"file_set_expand\""),
+            "{output}"
+        );
+        assert!(
+            output.contains("io_error_kind=PermissionDenied"),
+            "{output}"
+        );
+        assert!(!output.contains("private-locked"), "{output}");
     }
 
     #[tokio::test]
@@ -2309,7 +2402,7 @@ mod tests {
         ) -> Result<Option<EntryId>, ClipboardRepositoryError> {
             if self.find_err {
                 return Err(ClipboardRepositoryError::Storage(
-                    "simulated dedup lookup failure".to_string(),
+                    "simulated dedup lookup failure".into(),
                 ));
             }
             Ok(self.found.clone())
@@ -2327,7 +2420,7 @@ mod tests {
                 Touch::Updated => Ok(true),
                 Touch::NoRows => Ok(false),
                 Touch::Err => Err(ClipboardRepositoryError::Storage(
-                    "simulated touch failure".to_string(),
+                    "simulated touch failure".into(),
                 )),
             }
         }

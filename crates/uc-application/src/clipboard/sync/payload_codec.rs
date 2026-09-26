@@ -25,7 +25,7 @@
 
 use std::io::{Read, Write};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
 
 use uc_core::clipboard::normalize_wire_mime;
@@ -96,9 +96,7 @@ pub fn encode_snapshot_to_v3_bytes(snapshot: &SystemClipboardSnapshot) -> Result
         representations: reps,
     };
 
-    let bytes = payload
-        .encode_to_vec()
-        .map_err(|e| anyhow!("encode V3 envelope: {e}"))?;
+    let bytes = payload.encode_to_vec().context("encode V3 envelope")?;
     let snapshot_hash = snapshot.snapshot_hash().to_string();
 
     Ok((Bytes::from(bytes), snapshot_hash))
@@ -118,8 +116,7 @@ pub fn encode_snapshot_with_blob_refs_to_v3_bytes(
     }
 
     let mut out = bytes.to_vec();
-    write_blob_refs_extension(&mut out, blob_refs)
-        .map_err(|e| anyhow!("encode V3 blob refs extension: {e}"))?;
+    write_blob_refs_extension(&mut out, blob_refs).context("encode V3 blob refs extension")?;
     Ok((Bytes::from(out), snapshot_hash))
 }
 
@@ -130,10 +127,8 @@ pub fn encode_snapshot_with_blob_refs_and_file_set_to_v3_bytes(
 ) -> Result<(Bytes, String)> {
     let (bytes, snapshot_hash) = encode_snapshot_to_v3_bytes(snapshot)?;
     let mut out = bytes.to_vec();
-    write_blob_refs_extension(&mut out, blob_refs)
-        .map_err(|e| anyhow!("encode V3 blob refs extension: {e}"))?;
-    write_file_set_extension(&mut out, manifest)
-        .map_err(|e| anyhow!("encode directory file-set extension: {e}"))?;
+    write_blob_refs_extension(&mut out, blob_refs).context("encode V3 blob refs extension")?;
+    write_file_set_extension(&mut out, manifest).context("encode directory file-set extension")?;
     Ok((Bytes::from(out), snapshot_hash))
 }
 
@@ -168,8 +163,7 @@ pub fn decode_v3_bytes_to_snapshot_blob_refs_and_file_set(
     Option<InboundFileSetManifest>,
 )> {
     let mut cursor = bytes;
-    let payload = ClipboardBinaryPayload::decode_from(&mut cursor)
-        .map_err(|e| anyhow!("decode V3 envelope: {e}"))?;
+    let payload = ClipboardBinaryPayload::decode_from(&mut cursor).context("decode V3 envelope")?;
 
     let representations = payload
         .representations
@@ -212,8 +206,7 @@ pub(crate) fn decode_v3_bytes_as_legacy_peer(
     bytes: &[u8],
 ) -> Result<(SystemClipboardSnapshot, Vec<V3BlobRef>)> {
     let mut cursor = bytes;
-    let _ = ClipboardBinaryPayload::decode_from(&mut cursor)
-        .map_err(|e| anyhow!("decode V3 envelope: {e}"))?;
+    let _ = ClipboardBinaryPayload::decode_from(&mut cursor).context("decode V3 envelope")?;
     let (_, trailing) = read_blob_refs_extension_with_remainder(cursor)?;
     if !trailing.is_empty() {
         // Verbatim legacy error: `read_blob_refs_extension` rejected any
@@ -262,7 +255,7 @@ fn read_blob_refs_extension_with_remainder(mut bytes: &[u8]) -> Result<(Vec<V3Bl
     let mut magic = [0u8; 4];
     bytes
         .read_exact(&mut magic)
-        .map_err(|e| anyhow!("read V3 blob refs magic: {e}"))?;
+        .context("read V3 blob refs magic")?;
     if &magic != BLOB_REFS_MAGIC {
         return Err(anyhow!("unknown V3 trailing extension"));
     }
@@ -333,7 +326,7 @@ fn read_file_set_extension(mut bytes: &[u8]) -> Result<Option<InboundFileSetMani
     let mut magic = [0u8; 4];
     bytes
         .read_exact(&mut magic)
-        .map_err(|e| anyhow!("read directory file-set magic: {e}"))?;
+        .context("read directory file-set magic")?;
     if &magic != FILE_SET_MAGIC {
         return Err(anyhow!("unknown V3 trailing extension"));
     }
@@ -348,7 +341,7 @@ fn read_file_set_extension(mut bytes: &[u8]) -> Result<Option<InboundFileSetMani
         let mut kind = [0u8; 1];
         bytes
             .read_exact(&mut kind)
-            .map_err(|e| anyhow!("read directory member kind: {e}"))?;
+            .context("read directory member kind")?;
         let kind = match kind[0] {
             b'f' => FileSetMemberKind::File,
             b'x' => FileSetMemberKind::Executable,
@@ -358,7 +351,7 @@ fn read_file_set_extension(mut bytes: &[u8]) -> Result<Option<InboundFileSetMani
         let mut root_is_file = [0u8; 1];
         bytes
             .read_exact(&mut root_is_file)
-            .map_err(|e| anyhow!("read directory root kind: {e}"))?;
+            .context("read directory root kind")?;
         let root_is_file = match root_is_file[0] {
             0 => false,
             1 => true,
@@ -392,6 +385,7 @@ fn write_bytes_u32<W: Write>(writer: &mut W, value: &[u8], label: &str) -> std::
             ),
         ));
     }
+    // TryFromIntError：目标分类完整表达数值范围不符。
     let len = u32::try_from(value.len()).map_err(|_| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -414,6 +408,7 @@ fn write_string_u16<W: Write>(writer: &mut W, value: &str, label: &str) -> std::
             ),
         ));
     }
+    // TryFromIntError：目标分类完整表达数值范围不符。
     let len = u16::try_from(bytes.len()).map_err(|_| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -449,7 +444,7 @@ fn read_optional_u32<R: Read>(reader: &mut R, label: &str) -> Result<Option<u32>
     let mut marker = [0u8; 1];
     reader
         .read_exact(&mut marker)
-        .map_err(|e| anyhow!("read {label} marker: {e}"))?;
+        .with_context(|| format!("read {label} marker"))?;
     match marker[0] {
         NONE_U32_MARKER => Ok(None),
         SOME_U32_MARKER => Ok(Some(read_u32(reader, label)?)),
@@ -467,7 +462,7 @@ fn read_bytes_u32<R: Read>(reader: &mut R, label: &str) -> Result<Vec<u8>> {
     let mut bytes = vec![0u8; len];
     reader
         .read_exact(&mut bytes)
-        .map_err(|e| anyhow!("read {label}: {e}"))?;
+        .with_context(|| format!("read {label}"))?;
     Ok(bytes)
 }
 
@@ -481,8 +476,8 @@ fn read_string_u16<R: Read>(reader: &mut R, label: &str) -> Result<String> {
     let mut bytes = vec![0u8; len];
     reader
         .read_exact(&mut bytes)
-        .map_err(|e| anyhow!("read {label}: {e}"))?;
-    String::from_utf8(bytes).map_err(|e| anyhow!("invalid UTF-8 in {label}: {e}"))
+        .with_context(|| format!("read {label}"))?;
+    String::from_utf8(bytes).with_context(|| format!("invalid UTF-8 in {label}"))
 }
 
 fn read_optional_string_u16<R: Read>(reader: &mut R, label: &str) -> Result<Option<String>> {
@@ -499,17 +494,17 @@ fn read_optional_string_u16<R: Read>(reader: &mut R, label: &str) -> Result<Opti
     let mut bytes = vec![0u8; len];
     reader
         .read_exact(&mut bytes)
-        .map_err(|e| anyhow!("read {label}: {e}"))?;
+        .with_context(|| format!("read {label}"))?;
     String::from_utf8(bytes)
         .map(Some)
-        .map_err(|e| anyhow!("invalid UTF-8 in {label}: {e}"))
+        .with_context(|| format!("invalid UTF-8 in {label}"))
 }
 
 fn read_u16<R: Read>(reader: &mut R, label: &str) -> Result<u16> {
     let mut bytes = [0u8; 2];
     reader
         .read_exact(&mut bytes)
-        .map_err(|e| anyhow!("read {label}: {e}"))?;
+        .with_context(|| format!("read {label}"))?;
     Ok(u16::from_le_bytes(bytes))
 }
 
@@ -517,7 +512,7 @@ fn read_u32<R: Read>(reader: &mut R, label: &str) -> Result<u32> {
     let mut bytes = [0u8; 4];
     reader
         .read_exact(&mut bytes)
-        .map_err(|e| anyhow!("read {label}: {e}"))?;
+        .with_context(|| format!("read {label}"))?;
     Ok(u32::from_le_bytes(bytes))
 }
 
@@ -525,7 +520,7 @@ fn read_u64<R: Read>(reader: &mut R, label: &str) -> Result<u64> {
     let mut bytes = [0u8; 8];
     reader
         .read_exact(&mut bytes)
-        .map_err(|e| anyhow!("read {label}: {e}"))?;
+        .with_context(|| format!("read {label}"))?;
     Ok(u64::from_le_bytes(bytes))
 }
 
@@ -545,6 +540,17 @@ mod tests {
             file_content_digests: Vec::new(),
             file_set_v1_component: None,
         }
+    }
+
+    #[test]
+    fn truncated_field_keeps_io_error_as_source() {
+        let error = read_u32(&mut [0u8; 2].as_slice(), "blob ref length").unwrap_err();
+
+        assert_eq!(error.to_string(), "read blob ref length");
+        let io_error = error
+            .downcast_ref::<std::io::Error>()
+            .expect("io error in source chain");
+        assert_eq!(io_error.kind(), std::io::ErrorKind::UnexpectedEof);
     }
 
     /// Verdict 1 — roundtrip: encoded + decoded snapshot carries the

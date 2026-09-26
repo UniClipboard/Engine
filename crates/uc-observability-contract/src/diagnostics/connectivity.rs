@@ -6,6 +6,7 @@ mod address;
 mod address_record;
 mod admission_exchange;
 mod admission_network;
+mod local_identity;
 mod local_work;
 mod maintenance;
 pub use admission_exchange::{
@@ -15,6 +16,7 @@ pub use admission_exchange::{
 pub use admission_network::{
     record_admission_network_snapshot, AdmissionNetworkPoint, AdmissionNetworkSnapshot,
 };
+pub use local_identity::{record_local_identity_changed, LocalIdentityState};
 pub use local_work::{
     observe_blob_publish_sync_result, observe_local_result, observe_local_sync_result,
     scope_blob_publish, scope_pairing_work, LocalWorkObservation, LocalWorkOutcome, LocalWorkStep,
@@ -34,6 +36,8 @@ pub use clipboard_receive::{
 };
 mod connection;
 mod group_update;
+mod inbound_peer;
+mod membership_history;
 mod network_recovery;
 mod physical;
 mod record;
@@ -41,8 +45,15 @@ mod source;
 pub use source::{LocalDiagnosticSource, SourceCapability, SourceCollection};
 
 pub use authentication::complete_group_update_failure;
+pub use authentication::complete_membership_history_failure;
 pub use group_update::{
     GroupUpdateFailureDetail, GroupUpdatePhase, GroupUpdateReason, GroupUpdateSource,
+};
+pub use inbound_peer::{
+    record_inbound_peer_rejection, InboundPeerProtocol, InboundPeerRejectionReason,
+};
+pub use membership_history::{
+    MembershipHistoryFailureDetail, MembershipHistoryFailurePhase, MembershipHistoryFailureReason,
 };
 
 pub use network_recovery::{

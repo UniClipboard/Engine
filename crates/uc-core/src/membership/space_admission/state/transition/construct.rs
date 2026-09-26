@@ -11,6 +11,7 @@ impl SpaceAdmissionAggregate {
         started_at_ms: i64,
     ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
         let attempt_timeline = AdmissionAttemptTimeline::start(started_at_ms)
+            // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
             .map_err(|_| SpaceAdmissionAggregateError::InvalidAttemptTimeline)?;
         Ok(AdmissionTransition::new(
             Self {
@@ -48,6 +49,7 @@ impl SpaceAdmissionAggregate {
         started_at_ms: i64,
     ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
         let attempt_timeline = AdmissionAttemptTimeline::start(started_at_ms)
+            // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
             .map_err(|_| SpaceAdmissionAggregateError::InvalidAttemptTimeline)?;
         if pending_exchange.request_envelope().header().admission_id() != admission_id {
             return Err(SpaceAdmissionAggregateError::AdmissionMismatch);

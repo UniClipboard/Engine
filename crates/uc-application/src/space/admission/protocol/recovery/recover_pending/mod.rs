@@ -6,8 +6,6 @@ mod ports;
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
-pub(crate) use model::AdmissionRecoveryDisposition;
 pub use model::{
     AdmissionRecoveryCommitToken, AdmissionRecoveryReport, AdmissionRecoveryTrigger,
     AuthenticatedAdmissionReply, LoadedAdmissionRecovery, LoadedPendingAdmission,

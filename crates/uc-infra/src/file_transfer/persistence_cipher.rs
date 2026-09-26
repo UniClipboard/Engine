@@ -1,3 +1,4 @@
+use anyhow::Context;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -150,8 +151,8 @@ impl V3TransferPersistenceCipher {
         transfer_id: &str,
         metadata: &TransferMetadata,
     ) -> Result<Vec<u8>, TransferPersistenceCipherError> {
-        let plaintext =
-            postcard::to_stdvec(metadata).map_err(|_| TransferPersistenceCipherError::Serialize)?;
+        let plaintext = postcard::to_stdvec(metadata)
+            .map_err(TransferPersistenceCipherError::serialize_from)?;
         self.seal(plaintext, aad::for_file_transfer_metadata(transfer_id))
             .await
     }
@@ -164,7 +165,7 @@ impl V3TransferPersistenceCipher {
         let plaintext = self
             .open(ciphertext, aad::for_file_transfer_metadata(transfer_id))
             .await?;
-        postcard::from_bytes(&plaintext).map_err(|_| TransferPersistenceCipherError::Deserialize)
+        postcard::from_bytes(&plaintext).map_err(TransferPersistenceCipherError::deserialize_from)
     }
 
     pub(crate) async fn seal_event(
@@ -175,7 +176,7 @@ impl V3TransferPersistenceCipher {
         event: &FileTransferEvent,
     ) -> Result<Vec<u8>, TransferPersistenceCipherError> {
         let plaintext =
-            serde_json::to_vec(event).map_err(|_| TransferPersistenceCipherError::Serialize)?;
+            serde_json::to_vec(event).map_err(TransferPersistenceCipherError::serialize_from)?;
         self.seal(
             plaintext,
             aad::for_file_transfer_event(transfer_id, sequence, event_type),
@@ -196,7 +197,7 @@ impl V3TransferPersistenceCipher {
                 aad::for_file_transfer_event(transfer_id, sequence, event_type),
             )
             .await?;
-        serde_json::from_slice(&plaintext).map_err(|_| TransferPersistenceCipherError::Deserialize)
+        serde_json::from_slice(&plaintext).map_err(TransferPersistenceCipherError::deserialize_from)
     }
 
     async fn seal(
@@ -259,8 +260,8 @@ impl TransferPersistenceCipher {
         transfer_id: &str,
         metadata: &TransferMetadata,
     ) -> Result<Vec<u8>, TransferPersistenceCipherError> {
-        let plaintext =
-            postcard::to_stdvec(metadata).map_err(|_| TransferPersistenceCipherError::Serialize)?;
+        let plaintext = postcard::to_stdvec(metadata)
+            .map_err(TransferPersistenceCipherError::serialize_from)?;
         seal(
             &self.metadata_key,
             METADATA_MAGIC,
@@ -280,7 +281,7 @@ impl TransferPersistenceCipher {
             envelope,
             &aad::for_file_transfer_metadata(transfer_id),
         )?;
-        postcard::from_bytes(&plaintext).map_err(|_| TransferPersistenceCipherError::Deserialize)
+        postcard::from_bytes(&plaintext).map_err(TransferPersistenceCipherError::deserialize_from)
     }
 
     pub(crate) fn seal_event(
@@ -291,7 +292,7 @@ impl TransferPersistenceCipher {
         event: &FileTransferEvent,
     ) -> Result<Vec<u8>, TransferPersistenceCipherError> {
         let plaintext =
-            serde_json::to_vec(event).map_err(|_| TransferPersistenceCipherError::Serialize)?;
+            serde_json::to_vec(event).map_err(TransferPersistenceCipherError::serialize_from)?;
         seal(
             &self.event_key,
             EVENT_MAGIC,
@@ -313,7 +314,7 @@ impl TransferPersistenceCipher {
             envelope,
             &aad::for_file_transfer_event(transfer_id, sequence, event_type),
         )?;
-        serde_json::from_slice(&plaintext).map_err(|_| TransferPersistenceCipherError::Deserialize)
+        serde_json::from_slice(&plaintext).map_err(TransferPersistenceCipherError::deserialize_from)
     }
 }
 
@@ -324,7 +325,7 @@ pub(crate) async fn derive_transfer_persistence_cipher(
     let profile = current_profile
         .current_profile()
         .await
-        .map_err(|error| anyhow::anyhow!("current profile unavailable: {error}"))?;
+        .context("current profile unavailable")?;
     let metadata_key = derive_subkey
         .derive_subkey(profile.as_ref().as_bytes(), METADATA_KEY_INFO)
         .await
@@ -354,18 +355,57 @@ pub(crate) enum TransferPersistenceCipherError {
     #[error("unsupported transfer persistence envelope version")]
     UnsupportedVersion,
     #[error("transfer persistence encryption failed")]
-    Encrypt,
+    Encrypt {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("transfer persistence verification failed")]
-    Decrypt,
+    Decrypt {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("transfer persistence serialization failed")]
-    Serialize,
+    Serialize {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("transfer persistence deserialization failed")]
-    Deserialize,
+    Deserialize {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("V3 transfer persistence protection failed")]
     V3 {
         #[source]
         source: anyhow::Error,
     },
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl TransferPersistenceCipherError {
+    pub fn encrypt_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Encrypt {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn decrypt_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Decrypt {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn serialize_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Serialize {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn deserialize_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Deserialize {
+            source: Some(source.into()),
+        }
+    }
 }
 
 fn seal(
@@ -375,7 +415,7 @@ fn seal(
     aad: &[u8],
 ) -> Result<Vec<u8>, TransferPersistenceCipherError> {
     let (nonce, ciphertext) = encrypt_xchacha_raw(key, plaintext, aad)
-        .map_err(|_| TransferPersistenceCipherError::Encrypt)?;
+        .map_err(TransferPersistenceCipherError::encrypt_from)?;
     let mut envelope = Vec::with_capacity(HEADER_LEN + ciphertext.len());
     envelope.extend_from_slice(&magic);
     envelope.push(FORMAT_VERSION);
@@ -400,7 +440,7 @@ fn open(
         return Err(TransferPersistenceCipherError::UnsupportedVersion);
     }
     decrypt_xchacha_raw(key, &envelope[5..HEADER_LEN], &envelope[HEADER_LEN..], aad)
-        .map_err(|_| TransferPersistenceCipherError::Decrypt)
+        .map_err(TransferPersistenceCipherError::decrypt_from)
 }
 
 #[cfg(test)]

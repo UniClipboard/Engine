@@ -6,7 +6,9 @@ use uc_core::membership::{
     MembershipEventId,
 };
 
-use super::{CurrentMemberSignaturePort, MembershipConflictStatus, MembershipLedger};
+use uc_core::membership::{PeerLink, PeerRelation};
+
+use super::{CurrentMemberSignaturePort, MembershipConflictStatus, MembershipOwner};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MembershipDiagnosticsView {
@@ -41,32 +43,34 @@ pub enum QueryMembershipDiagnosticsError {
 }
 
 pub(crate) struct QueryMembershipDiagnosticsUseCase {
-    ledger: Arc<MembershipLedger>,
+    owner: Arc<MembershipOwner>,
     signer: Arc<dyn CurrentMemberSignaturePort>,
 }
 
 impl QueryMembershipDiagnosticsUseCase {
     pub(crate) fn new(
-        ledger: Arc<MembershipLedger>,
+        owner: Arc<MembershipOwner>,
         signer: Arc<dyn CurrentMemberSignaturePort>,
     ) -> Self {
-        Self { ledger, signer }
+        Self { owner, signer }
     }
 
     pub(crate) async fn execute(
         &self,
     ) -> Result<MembershipDiagnosticsView, QueryMembershipDiagnosticsError> {
-        let snapshot = self.ledger.load_verified().await.map_err(|error| {
-            QueryMembershipDiagnosticsError::Ledger {
-                source: anyhow::Error::new(error),
-            }
-        })?;
-        let history =
-            snapshot
-                .history()
-                .ok_or_else(|| QueryMembershipDiagnosticsError::InvalidState {
-                    source: anyhow::anyhow!("current membership history is unavailable"),
+        let view =
+            self.owner
+                .load()
+                .await
+                .map_err(|error| QueryMembershipDiagnosticsError::Ledger {
+                    source: anyhow::Error::new(error),
                 })?;
+        let space = view
+            .space()
+            .ok_or_else(|| QueryMembershipDiagnosticsError::InvalidState {
+                source: anyhow::anyhow!("current membership history is unavailable"),
+            })?;
+        let history = space.history();
         let position = history.current_position().map_err(|error| {
             QueryMembershipDiagnosticsError::InvalidState {
                 source: anyhow::Error::new(error),
@@ -88,35 +92,36 @@ impl QueryMembershipDiagnosticsUseCase {
                 source: anyhow::Error::new(error),
             }
         })?;
-        let record = snapshot.record();
+        let record = space.branch_recovery();
         Ok(MembershipDiagnosticsView {
-            revision: record.revision,
+            revision: view.revision(),
             branch_id,
             head_event_id,
             group_epoch,
             effective_member_count: history.active_members().len(),
             pending_conflict_count: record
-                .membership_conflicts
+                .conflicts
                 .values()
                 .filter(|conflict| conflict.status != MembershipConflictStatus::Completed)
                 .count(),
-            pending_confirmation_count: record
-                .peer_reconciliation
-                .values()
-                .filter(|peer| {
-                    history
-                        .effective_member_for_device(&peer.peer_device_id)
-                        .is_some()
-                        && peer.awaits_confirmation(&position)
+            pending_confirmation_count: space
+                .ledger()
+                .peers()
+                // 仍在等待确认的对端：一致但尚未确认本机当前位置，或一方仍在决定一项移除。
+                .filter(|(_, link)| {
+                    matches!(link, PeerLink::Member(member)
+                    if (member.relation() == PeerRelation::Consistent
+                        && member.confirmed_position() != Some(&position))
+                        || matches!(
+                            member.relation(),
+                            PeerRelation::AwaitingLocalDecision
+                                | PeerRelation::AwaitingPeerDecision
+                        ))
                 })
                 .count(),
-            pending_effect_count: record
-                .current_effects(history)
-                .iter()
-                .filter(|(_, effect)| effect.phase < super::MembershipEffectPhase::Activated)
-                .count(),
+            pending_effect_count: space.ledger().unfinished_effects().count(),
             transition_phases: record
-                .membership_branch_transitions
+                .branch_transitions
                 .values()
                 .map(|transition| transition.phase())
                 .collect(),

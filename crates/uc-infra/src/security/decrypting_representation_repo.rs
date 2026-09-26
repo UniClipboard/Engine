@@ -242,7 +242,7 @@ impl ClipboardRepresentationStore for DecryptingClipboardRepresentationRepositor
 // translates the storage error into the typed domain error.
 
 fn to_repo_err(e: anyhow::Error) -> ClipboardRepositoryError {
-    ClipboardRepositoryError::Storage(e.to_string())
+    ClipboardRepositoryError::Storage(e.context("clipboard repository operation").into())
 }
 
 #[async_trait]

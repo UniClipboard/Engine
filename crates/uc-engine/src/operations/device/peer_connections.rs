@@ -35,6 +35,7 @@ pub(crate) async fn execute_query_peer_connections(
 pub(crate) async fn execute_refresh_peer_connections(
     facade: &AppFacade,
 ) -> Result<OperationResult, EngineError> {
+    // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
     let report = facade.refresh_peer_reachability().await.map_err(|_| {
         EngineError::new(
             REFRESH_PEER_CONNECTIONS_FAILED_CODE,
@@ -114,6 +115,7 @@ mod tests {
     use tracing_subscriber::fmt::MakeWriter;
 
     use super::*;
+    use uc_core::membership::MembershipError;
 
     fn relay_peer(device_id: &str, relay_url: Option<&str>) -> PeerSnapshotView {
         PeerSnapshotView {
@@ -150,9 +152,9 @@ mod tests {
 
     #[test]
     fn query_errors_do_not_expose_internal_details() {
-        let error = map_query_error(RosterError::MemberRepository(
-            "private database path".to_string(),
-        ));
+        let error = map_query_error(RosterError::MemberRepository(MembershipError::Repository(
+            "private database path".into(),
+        )));
 
         assert_eq!(error.code(), QUERY_PEER_CONNECTIONS_FAILED_CODE);
         assert_eq!(error.category(), EngineErrorCategory::Internal);

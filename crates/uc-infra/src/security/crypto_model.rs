@@ -133,7 +133,7 @@ impl KeySlot {
         let mut salt = vec![0u8; kdf.salt_len()];
         OsRng
             .try_fill_bytes(&mut salt)
-            .map_err(|_| EncryptionError::CryptoFailure)?;
+            .map_err(EncryptionError::crypto_failure_from)?;
 
         Ok(Self {
             version: "V1".to_string(),

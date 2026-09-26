@@ -41,7 +41,8 @@ pub use crate::space::{
     CancelSpaceJoinError, CurrentJoinStatus, DecideDeviceTrustChange, DecideDeviceTrustChangeError,
     DecideDeviceTrustChangeResult, DeviceGroupChoiceImpact, DeviceTrustChangeChoice,
     DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership, DeviceTrustObservation,
-    DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, JoinSpaceError,
+    DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, InboundPairing,
+    InboundPairingStatus, JoinSpaceAttentionReason, JoinSpaceAttentionRecovery, JoinSpaceError,
     JoinSpaceInput, JoinSpaceResult, JoinSpaceTerminationReason, JoinedSpace,
     LockSpaceSessionError, MembershipCommitReceipt, MembershipConflictStatus,
     MembershipDiagnosticsView, MembershipReadiness, NetworkRecoveryEvent, NetworkRecoveryFacade,
@@ -50,7 +51,8 @@ pub use crate::space::{
     QueryDeviceTrustError, QueryMembershipDiagnosticsError, QueryMembershipReadinessError,
     QuerySpaceAccessStateError, RebuildNetworkSessionError, RebuildNetworkSessionPort,
     RecoverSpaceSessionError, RecoverSpaceSessionResult, RemoveSpaceMemberError,
-    RemoveSpaceMemberResult, SpaceAccessState,
+    RemoveSpaceMemberResult, SpaceAccessState, SpaceDeviceUpdatePhase, SpaceDeviceUpdateProblem,
+    SpaceDeviceUpdateRecovery, SpaceDeviceUpdateStatus,
 };
 
 pub use crate::clipboard::active::{ActiveClipboardFacade, ActiveClipboardReconcileOutcome};

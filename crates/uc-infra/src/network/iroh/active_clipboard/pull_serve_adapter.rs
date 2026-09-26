@@ -13,7 +13,7 @@
 //!
 //! Admission is **member-fingerprint only** (issue #1017 D2): the inbound
 //! connection's `remote_id()` is resolved to a `SpaceMember` via the shared
-//! [`IdentityFingerprintFactoryPort`] + [`MemberRepositoryPort`], and unknown
+//! [`IdentityFingerprintFactoryPort`] + [`PeerIdentityDirectoryPort`], and unknown
 //! peers are dropped. There is **no** send-preference gate here — a member
 //! whose `send_enabled` is off can still pull. This is the accepted asymmetry
 //! with the active push path: the served content is still the
@@ -30,17 +30,21 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use uc_application::deps::PeerIdentityDirectoryPort;
 
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use tracing::{debug, warn};
 
+#[cfg(test)]
 use uc_core::ids::DeviceId;
-use uc_core::membership::{ContentExchangeGatePort, MemberRepositoryPort, PeerAdmissionPort};
+use uc_core::membership::{ContentExchangeGatePort, PeerAdmissionPort};
 use uc_core::ports::clipboard::{ActiveClipboardPullServeError, ActiveClipboardPullServePort};
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
-use uc_core::security::IdentityFingerprint;
+use uc_observability_contract::diagnostics::connectivity::InboundPeerProtocol;
+use uc_observability_contract::error_source::io_error_kind;
 
+use super::super::inbound_peer::InboundPeerGate;
 use super::pull_wire::{self, PullResponse};
 
 /// ALPN identifier for the active-clipboard pull protocol. An independent
@@ -61,16 +65,14 @@ pub struct IrohActiveClipboardPullServeAdapter {
 }
 
 struct HandlerState {
-    member_repo: Arc<dyn MemberRepositoryPort>,
-    peer_admission: Arc<dyn PeerAdmissionPort>,
-    fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
+    gate: InboundPeerGate,
     content_gate: Arc<dyn ContentExchangeGatePort>,
     serve: Arc<dyn ActiveClipboardPullServePort>,
 }
 
 impl IrohActiveClipboardPullServeAdapter {
     pub fn new(
-        member_repo: Arc<dyn MemberRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         serve: Arc<dyn ActiveClipboardPullServePort>,
@@ -78,9 +80,12 @@ impl IrohActiveClipboardPullServeAdapter {
     ) -> Self {
         Self {
             state: Arc::new(HandlerState {
-                member_repo,
-                peer_admission,
-                fingerprint_factory,
+                gate: InboundPeerGate::new(
+                    InboundPeerProtocol::ActiveClipboardPull,
+                    identities,
+                    peer_admission,
+                    fingerprint_factory,
+                ),
                 content_gate,
                 serve,
             }),
@@ -118,21 +123,13 @@ impl ProtocolHandler for IrohActiveClipboardPullServeHandler {
 
         // 1. Member-fingerprint admission ONLY (D2). Unknown peers never reach
         //    the serve port. No send-preference gate — a muted member can pull.
-        let Some(peer_device_id) = self.state.resolve_device(&remote_bytes).await else {
-            warn!(
-                remote = %remote,
-                "active-clipboard pull serve: unknown peer fingerprint; dropping connection"
-            );
-            return Ok(());
+        let peer_device_id = match self.state.gate.admit(&remote_bytes).await {
+            Ok(device) => device,
+            Err(rejection) => {
+                self.state.gate.record_rejection(rejection);
+                return Ok(());
+            }
         };
-
-        if !self.state.is_admitted(&peer_device_id).await {
-            warn!(
-                peer = %peer_device_id.as_str(),
-                "active-clipboard pull serve: peer is not admitted by current space protection"
-            );
-            return Ok(());
-        }
 
         // 2. Accept the bi-stream. The requester opens it, writes the request,
         //    and reads our response on the same stream.
@@ -140,7 +137,8 @@ impl ProtocolHandler for IrohActiveClipboardPullServeHandler {
             Ok(pair) => pair,
             Err(err) => {
                 warn!(
-                    error = %err,
+                    error_kind = "accept_bi",
+                    io_error_kind = io_error_kind(&err),
                     peer = %peer_device_id.as_str(),
                     "active-clipboard pull serve: accept_bi failed; dropping connection"
                 );
@@ -155,7 +153,8 @@ impl ProtocolHandler for IrohActiveClipboardPullServeHandler {
             Ok(h) => h,
             Err(err) => {
                 warn!(
-                    error = %err,
+                    error_kind = "request_decode",
+                    io_error_kind = io_error_kind(&err),
                     peer = %peer_device_id.as_str(),
                     "active-clipboard pull serve: request decode failed; dropping connection"
                 );
@@ -197,10 +196,9 @@ impl ProtocolHandler for IrohActiveClipboardPullServeHandler {
                     );
                     PullResponse::Locked
                 }
-                Err(ActiveClipboardPullServeError::Internal(reason)) => {
+                Err(ActiveClipboardPullServeError::Internal(_)) => {
                     warn!(
                         peer = %peer_device_id.as_str(),
-                        reason,
                         "active-clipboard pull serve: internal failure; responding Internal"
                     );
                     PullResponse::Internal
@@ -211,7 +209,8 @@ impl ProtocolHandler for IrohActiveClipboardPullServeHandler {
         // 6. Write the response frame, then close the send half.
         if let Err(err) = pull_wire::write_response(&mut send, &response).await {
             warn!(
-                error = %err,
+                error_kind = "response_write",
+                io_error_kind = io_error_kind(&err),
                 peer = %peer_device_id.as_str(),
                 "active-clipboard pull serve: response write failed; dropping connection"
             );
@@ -219,7 +218,8 @@ impl ProtocolHandler for IrohActiveClipboardPullServeHandler {
         }
         if let Err(err) = send.finish() {
             debug!(
-                error = %err,
+                error_kind = "send_finish",
+                io_error_kind = io_error_kind(&err),
                 peer = %peer_device_id.as_str(),
                 "active-clipboard pull serve: send.finish failed"
             );
@@ -232,58 +232,6 @@ impl ProtocolHandler for IrohActiveClipboardPullServeHandler {
     }
 }
 
-impl HandlerState {
-    /// Look up a `SpaceMember` whose `identity_fingerprint` equals the one
-    /// derived from `remote_pubkey_bytes`. Returns `None` when the peer is
-    /// unknown or the repository errors (logged). Mirrors the bulk receiver's
-    /// member-fingerprint admission; the roster is bounded (N ≤ 10).
-    async fn is_admitted(&self, device_id: &DeviceId) -> bool {
-        match self.peer_admission.is_admitted(device_id).await {
-            Ok(admitted) => admitted,
-            Err(error) => {
-                warn!(error = %error, peer = %device_id.as_str(), "active-clipboard pull serve: peer admission check failed");
-                false
-            }
-        }
-    }
-
-    async fn resolve_device(&self, remote_pubkey_bytes: &[u8; 32]) -> Option<DeviceId> {
-        let derived = match self
-            .fingerprint_factory
-            .from_public_key(remote_pubkey_bytes)
-        {
-            Ok(fp) => fp,
-            Err(err) => {
-                warn!(
-                    error = %err,
-                    "active-clipboard pull serve: fingerprint derivation failed — cannot resolve peer"
-                );
-                return None;
-            }
-        };
-
-        let members = match self.member_repo.list().await {
-            Ok(ms) => ms,
-            Err(err) => {
-                warn!(
-                    error = %err,
-                    "active-clipboard pull serve: member_repo.list failed; treating peer as unknown"
-                );
-                return None;
-            }
-        };
-
-        members
-            .into_iter()
-            .find(|m| fingerprints_equal(&m.identity_fingerprint, &derived))
-            .map(|m| m.device_id)
-    }
-}
-
-fn fingerprints_equal(a: &IdentityFingerprint, b: &IdentityFingerprint) -> bool {
-    a == b
-}
-
 // ============================================================================
 // Tests
 // ============================================================================
@@ -291,6 +239,7 @@ fn fingerprints_equal(a: &IdentityFingerprint, b: &IdentityFingerprint) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uc_core::membership::MemberRepositoryPort;
 
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -315,6 +264,7 @@ mod tests {
     struct MemMemberRepo {
         inner: Mutex<HashMap<String, SpaceMember>>,
     }
+    crate::network::iroh::inbound_peer::member_table_identity_directory!(MemMemberRepo);
     #[async_trait]
     impl MemberRepositoryPort for MemMemberRepo {
         async fn get(&self, device_id: &DeviceId) -> Result<Option<SpaceMember>, MembershipError> {
@@ -451,7 +401,7 @@ mod tests {
         let endpoint = bind_endpoint_with(seed).await;
         wait_for_direct_addrs(&endpoint).await;
         let adapter = IrohActiveClipboardPullServeAdapter::new(
-            member_repo,
+            crate::network::iroh::inbound_peer::member_table_directory(member_repo),
             Arc::new(crate::network::iroh::StaticPeerAdmission(admitted)),
             Arc::new(Sha256IdentityFingerprintFactory),
             serve,

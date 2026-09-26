@@ -247,9 +247,10 @@ impl ObservedClipboardRepresentation {
                     ClipboardPayloadSource::Inline(b) => uc_content_hash::content_hash(b),
                     ClipboardPayloadSource::LocalFile { path, .. } => stream_content_hash(path)
                         .unwrap_or_else(|err| {
+                            // panic 文本不含用户文件路径与错误正文，只保留 IO 分类。
                             panic!(
-                                "ObservedClipboardRepresentation::content_hash: failed to stream-hash {} : {err}",
-                                path.display()
+                                "ObservedClipboardRepresentation::content_hash: failed to stream-hash local file ({:?})",
+                                err.kind()
                             )
                         }),
                 };
@@ -285,13 +286,10 @@ impl serde::Serialize for ObservedClipboardRepresentation {
                 };
                 proxy.serialize(ser)
             }
-            ClipboardPayloadSource::LocalFile { path, .. } => {
-                Err(serde::ser::Error::custom(format!(
-                    "ObservedClipboardRepresentation: LocalFile source cannot be serialized \
-                     (path={}); capture pipeline must materialize to blob storage first",
-                    path.display()
-                )))
-            }
+            ClipboardPayloadSource::LocalFile { .. } => Err(serde::ser::Error::custom(
+                "ObservedClipboardRepresentation: LocalFile source cannot be serialized; \
+                     capture pipeline must materialize to blob storage first",
+            )),
         }
     }
 }
@@ -479,9 +477,9 @@ impl std::fmt::Debug for ObservedClipboardRepresentation {
             ClipboardPayloadSource::Inline(b) => {
                 s.field("source", &"Inline").field("bytes_len", &b.len());
             }
-            ClipboardPayloadSource::LocalFile { path, size_bytes } => {
+            // 本地文件路径是用户内容，Debug 输出不包含它。
+            ClipboardPayloadSource::LocalFile { size_bytes, .. } => {
                 s.field("source", &"LocalFile")
-                    .field("path", &path.display().to_string())
                     .field("size_bytes", size_bytes);
             }
         }

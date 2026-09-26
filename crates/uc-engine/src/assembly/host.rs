@@ -3,6 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use anyhow::Context;
 use tracing::warn;
 use uc_application::deps::{
     PrepareProfileStartupUseCase, ProfileUpgradeBackupPort, ProfileUpgradeVersions,
@@ -32,7 +33,7 @@ use crate::engine::startup::StartupProgressStore;
 use crate::{
     EngineConfig, EngineEvent, HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory,
     HostClipboard, HostClipboardChangeStream, HostClipboardRepresentation, HostDirectories,
-    HostFileAccess, HostSecureStorage, TransferProgress,
+    HostFileAccess, HostSecureStorage, RefreshReason, TransferProgress,
 };
 
 struct HostSecureStorageAdapter {
@@ -87,10 +88,7 @@ struct HostClipboardAdapter {
 
 impl SystemClipboardPort for HostClipboardAdapter {
     fn read_snapshot(&self) -> anyhow::Result<SystemClipboardSnapshot> {
-        let snapshot = self
-            .host
-            .read()
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let snapshot = self.host.read()?;
         let mut representations = Vec::with_capacity(snapshot.representations.len());
         let mut file_metadata = Vec::new();
         let operation_dir = self
@@ -99,14 +97,14 @@ impl SystemClipboardPort for HostClipboardAdapter {
                 &mut representations,
                 &mut file_metadata,
             )
-            .map_err(|error| anyhow::anyhow!("host clipboard file import failed: {error}"))?;
+            .context("host clipboard file import failed")?;
 
         if !file_metadata.is_empty() {
             let encoded = FileDisplayMetadata {
                 files: file_metadata,
             }
             .encode()
-            .map_err(|_| anyhow::anyhow!("host clipboard metadata encoding failed"));
+            .map_err(|error| anyhow::Error::new(error).context("encode host clipboard metadata"));
             match encoded {
                 Ok(bytes) => representations.push(ObservedClipboardRepresentation::new(
                     RepresentationId::new(),
@@ -155,7 +153,7 @@ impl SystemClipboardPort for HostClipboardAdapter {
                 observed_at_ms: snapshot.ts_ms,
                 representations,
             })
-            .map_err(|error| anyhow::anyhow!(error.to_string()))
+            .map_err(anyhow::Error::new)
     }
 }
 
@@ -233,9 +231,7 @@ fn copy_host_clipboard_file(
     size_bytes: u64,
     destination: &Path,
 ) -> anyhow::Result<()> {
-    let metadata = files
-        .metadata(handle)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let metadata = files.metadata(handle)?;
     if metadata.size_bytes != size_bytes {
         return Err(anyhow::anyhow!("host clipboard file size changed"));
     }
@@ -246,9 +242,7 @@ fn copy_host_clipboard_file(
     let mut offset = 0_u64;
     while offset < size_bytes {
         let requested = (size_bytes - offset).min(HOST_CLIPBOARD_FILE_CHUNK_SIZE as u64) as u32;
-        let chunk = files
-            .read_chunk(handle, offset, requested)
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let chunk = files.read_chunk(handle, offset, requested)?;
         if chunk.is_empty() || chunk.len() > requested as usize {
             return Err(anyhow::anyhow!("host clipboard file read was incomplete"));
         }
@@ -425,11 +419,12 @@ impl HostEventEmitterPort for EngineHostEventEmitter {
             HostEvent::Membership(MembershipHostEvent::LedgerCommitted { revision }) => {
                 EngineEvent::DeviceTrustChanged { revision }
             }
-            HostEvent::Membership(MembershipHostEvent::AdmissionChanged) => {
-                EngineEvent::RefreshRequired {
-                    reason: crate::RefreshReason::StateInvalidated,
-                }
-            }
+            HostEvent::Membership(
+                MembershipHostEvent::AdmissionChanged
+                | MembershipHostEvent::SpaceDeviceUpdateChanged,
+            ) => EngineEvent::RefreshRequired {
+                reason: RefreshReason::StateInvalidated,
+            },
         };
         self.events.send(event);
         Ok(())
@@ -503,20 +498,24 @@ pub(crate) async fn wire_host_capabilities_with_emitter(
     .map_err(|source| WiringError::StorageUpgradePrerequisite {
         source: source.into(),
     })?;
-    let clipboard_changes = clipboard.take_change_stream().map_err(|_| {
-        WiringError::ClipboardInit("failed to open host clipboard change stream".into())
+    let clipboard_changes = clipboard.take_change_stream().map_err(|error| {
+        WiringError::ClipboardInit(
+            anyhow::Error::from(error).context("failed to open host clipboard change stream"),
+        )
     })?;
     let temporary_dir = directories.temporary().to_path_buf();
     let clipboard_import_root = temporary_dir.join("clipboard-imports");
     if let Err(error) = std::fs::remove_dir_all(&clipboard_import_root) {
         if error.kind() != std::io::ErrorKind::NotFound {
             return Err(WiringError::ClipboardInit(
-                "failed to clear stale host clipboard imports".into(),
+                anyhow::Error::from(error).context("failed to clear stale host clipboard imports"),
             ));
         }
     }
-    std::fs::create_dir_all(&clipboard_import_root).map_err(|_| {
-        WiringError::ClipboardInit("failed to create host clipboard import directory".into())
+    std::fs::create_dir_all(&clipboard_import_root).map_err(|error| {
+        WiringError::ClipboardInit(
+            anyhow::Error::from(error).context("failed to create host clipboard import directory"),
+        )
     })?;
     let files: Arc<dyn HostFileAccess> = Arc::from(files);
     let wired = wire_dependencies_from_inputs(CoreWiringInputs {
@@ -568,20 +567,20 @@ mod tests {
     use uc_core::file_transfer::FileTransferDirection;
     use uc_core::ports::{
         ClipboardHostEvent, ClipboardOriginKind, DeliveryHostEvent, HostEvent,
-        HostEventEmitterPort, MembershipHostEvent, TransferHostEvent,
+        HostEventEmitterPort, MembershipHostEvent, SystemClipboardPort, TransferHostEvent,
     };
     use uc_core::TaskRegistry;
 
     use crate::engine::event_stream::event_channel;
     use crate::{
         ClipboardOriginSummary, DeliveryStatusChanged, EngineConfig, EngineEvent, HostCapabilities,
-        HostCapabilityError, HostClipboard, HostClipboardSnapshot, HostDirectories, HostFileAccess,
-        HostFileHandle, HostFileMetadata, HostSecureStorage, IncomingPendingEvent,
-        ReceiveAttemptStateChanged, TransferDirectionSummary, TransferProgress,
-        TransferStatusChanged,
+        HostCapabilityError, HostCapabilityErrorCategory, HostClipboard, HostClipboardSnapshot,
+        HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata, HostSecureStorage,
+        IncomingPendingEvent, ReceiveAttemptStateChanged, TransferDirectionSummary,
+        TransferProgress, TransferStatusChanged,
     };
 
-    use super::{wire_host_capabilities, EngineHostEventEmitter};
+    use super::{wire_host_capabilities, EngineHostEventEmitter, HostClipboardAdapter};
     use crate::assembly::deps::WiringError;
     use crate::assembly::lifecycle::{build_network_runtime, prepare_daemon_session};
 
@@ -740,6 +739,44 @@ mod tests {
         }
     }
 
+    struct DeniedHostClipboard;
+
+    impl HostClipboard for DeniedHostClipboard {
+        fn read(&self) -> Result<HostClipboardSnapshot, HostCapabilityError> {
+            Err(HostCapabilityError::new(
+                HostCapabilityErrorCategory::PermissionDenied,
+                "test clipboard denied",
+            ))
+        }
+
+        fn write(&self, _snapshot: HostClipboardSnapshot) -> Result<(), HostCapabilityError> {
+            Err(HostCapabilityError::new(
+                HostCapabilityErrorCategory::PermissionDenied,
+                "test clipboard denied",
+            ))
+        }
+    }
+
+    #[test]
+    fn host_clipboard_read_failure_keeps_host_error_as_source() {
+        let root = tempfile::tempdir().unwrap();
+        let adapter = HostClipboardAdapter {
+            host: Box::new(DeniedHostClipboard),
+            files: Arc::new(EmptyHostFiles),
+            import_root: root.path().to_path_buf(),
+        };
+
+        let error = adapter.read_snapshot().unwrap_err();
+
+        let host_error = error
+            .downcast_ref::<HostCapabilityError>()
+            .expect("host capability error in source chain");
+        assert_eq!(
+            host_error.category(),
+            HostCapabilityErrorCategory::PermissionDenied
+        );
+    }
+
     struct EmptyHostFiles;
 
     impl HostFileAccess for EmptyHostFiles {
@@ -795,15 +832,15 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
+        assert!(matches!(
             wiring
                 .wired
                 .sync_engine
                 .current_member_signatures
                 .current_member_epoch()
                 .await,
-            Err(CurrentMemberSignatureError::Unavailable)
-        );
+            Err(CurrentMemberSignatureError::Unavailable { .. })
+        ));
         assert!(!wiring.wired.sync_engine.membership_session.is_ready());
     }
 
@@ -893,6 +930,8 @@ mod tests {
             "1.2.3",
             #[cfg(feature = "lan-compat")]
             wiring.wired.mobile_sync_ports.clone(),
+            #[cfg(feature = "dev-tools")]
+            Arc::new(crate::dev::JoinerFinalConfirmationGate::default()),
             network.prepare_session(),
         )
         .await

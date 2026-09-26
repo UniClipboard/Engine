@@ -42,11 +42,11 @@ fn join_request_envelope_fixture_with_version(
 }
 
 #[test]
-fn canonical_transport_envelope_preserves_v2_for_replies() {
+fn canonical_transport_envelope_preserves_the_current_version_for_replies() {
     let admission_id =
         SpaceAdmissionId::from_bytes([0xd3; 32]).expect("non-zero admission id fixture");
     let original = join_request_envelope_fixture_with_version(
-        SpaceAdmissionProtocolVersion::V2,
+        SpaceAdmissionProtocolVersion::CURRENT,
         admission_id,
         AdmissionMessageId::from_bytes([0xd4; 32]).expect("non-zero message id fixture"),
     );
@@ -67,11 +67,11 @@ fn canonical_transport_envelope_preserves_v2_for_replies() {
 
     assert_eq!(
         decoded.header().protocol_version(),
-        SpaceAdmissionProtocolVersion::V2
+        SpaceAdmissionProtocolVersion::CURRENT
     );
     assert_eq!(
         reply.header().protocol_version(),
-        SpaceAdmissionProtocolVersion::V2
+        SpaceAdmissionProtocolVersion::CURRENT
     );
 }
 
@@ -591,4 +591,17 @@ fn joiner_applied_aggregate_fixture() -> SpaceAdmissionAggregate {
         )
         .expect("Applied Joiner fixture")
         .into_replacement()
+}
+
+#[test]
+fn role_scoped_records_only_open_under_their_own_role() {
+    let joiner = joiner_prepared_aggregate_fixture();
+    assert_eq!(joiner.record_role(), Some(AdmissionRole::Joiner));
+    assert!(SponsorAdmission::try_from_record(joiner).is_none());
+    assert!(JoinerAdmission::try_from_record(joiner_prepared_aggregate_fixture()).is_some());
+
+    let sponsor = sponsor_committed_aggregate_fixture();
+    assert_eq!(sponsor.record_role(), Some(AdmissionRole::Sponsor));
+    assert!(JoinerAdmission::try_from_record(sponsor).is_none());
+    assert!(SponsorAdmission::try_from_record(sponsor_committed_aggregate_fixture()).is_some());
 }

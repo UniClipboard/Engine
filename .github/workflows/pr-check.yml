@@ -15,6 +15,82 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  testkit:
+    name: Engine testkit and structured evidence
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          workspaces: . -> target
+          shared-key: rust-testkit
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
+        with:
+          tool: cargo-nextest@0.9.145
+
+      - name: Run testkit evidence suites
+        run: bash scripts/testing/run-test-group.sh evidence
+        env:
+          UC_TEST_ARTIFACTS_DIR: target/test-artifacts/ci
+
+      - name: Retain testkit evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: engine-testkit-evidence
+          path: |
+            target/nextest/ci/junit.xml
+            target/test-artifacts/ci
+            target/test-artifacts/membership-recovery
+            target/test-artifacts/real-dependencies
+          if-no-files-found: error
+
+  membership-e2e-smoke:
+    name: Membership multi-device smoke
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          workspaces: . -> target
+          shared-key: rust-membership-e2e
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
+        with:
+          tool: cargo-nextest@0.9.145
+
+      - name: Run membership smoke scenarios
+        run: >-
+          bash scripts/testing/run-test-group.sh membership-e2e
+          -E 'test(/^automatic_connections::/) | test(/^removal_convergence::/)
+          | test(=admission::fresh_device_join_completes_through_stable_operations)'
+        env:
+          UC_TEST_ARTIFACTS_DIR: target/test-artifacts/ci
+
+      - name: Retain membership smoke evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: engine-membership-e2e-smoke
+          path: |
+            target/nextest/ci/junit.xml
+            target/test-artifacts/ci/membership-e2e
+          if-no-files-found: error
+
   connection-recovery:
     name: Connection recovery on isolated Linux networks
     runs-on: ubuntu-24.04
@@ -96,11 +172,11 @@ jobs:
         with:
           tool: cargo-llvm-cov
 
-      - name: Validate automatic connections without coverage instrumentation
-        run: "cargo test -p uc-engine --features dev-tools --test space_membership_auto_pairing_e2e --locked -- automatic_connections:: --test-threads=1"
+      - name: Validate dev-tools test support
+        run: "cargo test -p uc-engine --features dev-tools --lib --locked dev::"
 
       - name: Generate Rust coverage
-        run: cargo llvm-cov --workspace --all-targets --locked --lcov --output-path lcov.info
+        run: cargo llvm-cov --workspace --all-targets --locked --ignore-filename-regex 'crates/uc-engine/src/dev/' --lcov --output-path lcov.info
 
       - name: Upload Rust coverage to Codecov
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f

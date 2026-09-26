@@ -1,30 +1,39 @@
 use std::sync::Arc;
 
+use anyhow::Error as SourceError;
+
 use uc_core::file_transfer::FileTransferCancellationReason;
 use uc_core::ids::EntryId;
 use uc_core::ports::{
     CancelDirectoryAttemptTransfersPort, CleanupDirectoryStagingPort, ClockPort,
-    CommitInboundReceivePort, GetDirectoryPublishRecordPort, GetEntryAttemptPort,
-    InboundReceiveSettlement, NoEntryReceiveArtifacts, PartialReceiveTerminal,
-    RequestReceiveCancellationOutcome, RequestReceiveCancellationPort,
+    CommitInboundReceivePort, DirectoryStagingCleanupError, GetDirectoryPublishRecordPort,
+    GetEntryAttemptPort, InboundReceiveSettlement, NoEntryReceiveArtifacts, PartialReceiveTerminal,
+    PublishLogError, RequestReceiveCancellationOutcome, RequestReceiveCancellationPort,
 };
 
 use tracing::instrument;
 
-use crate::facade::blob_transfer::BlobTransferFacade;
+use crate::facade::blob_transfer::{BlobTransferError, BlobTransferFacade};
 use crate::facade::{ClipboardHostEvent, HostEvent, HostEventBus};
 
+/// 与 [`BlobTransferFacade::cancel_inbound_attempt`] 同签名，供用例替换为测试替身。
 #[async_trait::async_trait]
 pub(super) trait AttemptTransferCancellation: Send + Sync {
-    async fn cancel_attempt(&self, attempt_id: &str) -> Result<usize, String>;
+    async fn cancel_inbound_attempt(
+        &self,
+        attempt_id: &str,
+        reason: FileTransferCancellationReason,
+    ) -> Result<usize, BlobTransferError>;
 }
 
 #[async_trait::async_trait]
 impl AttemptTransferCancellation for BlobTransferFacade {
-    async fn cancel_attempt(&self, attempt_id: &str) -> Result<usize, String> {
-        self.cancel_inbound_attempt(attempt_id, FileTransferCancellationReason::LocalUser)
-            .await
-            .map_err(|error| error.to_string())
+    async fn cancel_inbound_attempt(
+        &self,
+        attempt_id: &str,
+        reason: FileTransferCancellationReason,
+    ) -> Result<usize, BlobTransferError> {
+        BlobTransferFacade::cancel_inbound_attempt(self, attempt_id, reason).await
     }
 }
 
@@ -41,14 +50,19 @@ pub enum CancelEntryReceiveOutcome {
 pub enum CancelEntryReceiveError {
     #[error("entry receive cancellation is unavailable")]
     Unavailable,
-    #[error("receive attempt state is unavailable: {0}")]
-    Attempt(String),
-    #[error("receive publication metadata is unavailable: {0}")]
-    PublishLog(String),
-    #[error("one or more member transfers could not be cancelled: {0}")]
-    Transfer(String),
-    #[error("receive staging cleanup failed: {0}")]
-    Cleanup(String),
+    #[error("receive attempt state is unavailable")]
+    Attempt(#[source] SourceError),
+    #[error("receive publication metadata is unavailable")]
+    PublishLog(#[source] PublishLogError),
+    /// 只保存第一个失败作为来源，其余失败只计数，避免把多条下层文本拼接进错误。
+    #[error("{failed_count} member transfer cancellation(s) failed")]
+    Transfer {
+        failed_count: usize,
+        #[source]
+        source: SourceError,
+    },
+    #[error("receive staging cleanup failed")]
+    Cleanup(#[source] DirectoryStagingCleanupError),
 }
 
 pub(super) struct CancelEntryReceiveUseCase {
@@ -102,7 +116,11 @@ impl CancelEntryReceiveUseCase {
             .get_attempt
             .get_entry_attempt(entry_id.as_ref())
             .await
-            .map_err(|error| CancelEntryReceiveError::Attempt(error.to_string()))?
+            .map_err(|error| {
+                CancelEntryReceiveError::Attempt(
+                    SourceError::from(error).context("read receive attempt"),
+                )
+            })?
         else {
             return Ok(CancelEntryReceiveOutcome::NotReceiving);
         };
@@ -119,8 +137,11 @@ impl CancelEntryReceiveUseCase {
                 self.clock.now_ms(),
             )
             .await
-            .map_err(|error| CancelEntryReceiveError::Attempt(error.to_string()))?
-        {
+            .map_err(|error| {
+                CancelEntryReceiveError::Attempt(
+                    SourceError::from(error).context("request receive cancellation"),
+                )
+            })? {
             RequestReceiveCancellationOutcome::Requested
             | RequestReceiveCancellationOutcome::AlreadyCancelling => {}
             RequestReceiveCancellationOutcome::TooLate => {
@@ -143,13 +164,16 @@ impl CancelEntryReceiveUseCase {
         ));
 
         let mut transfer_errors = Vec::new();
-        if let Some(error) = self
+        if let Err(error) = self
             .transfer_cancellation
-            .cancel_attempt(expected_attempt_id)
+            .cancel_inbound_attempt(
+                expected_attempt_id,
+                FileTransferCancellationReason::LocalUser,
+            )
             .await
-            .err()
         {
-            transfer_errors.push(error);
+            transfer_errors
+                .push(SourceError::from(error).context("cancel inbound attempt transfers"));
         }
         if let Err(error) = self
             .cancel_projection
@@ -161,14 +185,15 @@ impl CancelEntryReceiveUseCase {
             )
             .await
         {
-            transfer_errors.push(error.to_string());
+            transfer_errors
+                .push(SourceError::from(error).context("cancel directory attempt transfers"));
         }
 
         let record = self
             .get_publish
             .get_publish_record(entry_id.as_ref(), expected_attempt_id)
             .await
-            .map_err(|error| CancelEntryReceiveError::PublishLog(error.to_string()))?;
+            .map_err(CancelEntryReceiveError::PublishLog)?;
         if let Some(record) = record {
             let staged_roots = record
                 .root_map
@@ -178,13 +203,15 @@ impl CancelEntryReceiveUseCase {
             self.staging_cleanup
                 .cleanup_staging_roots(&staged_roots)
                 .await
-                .map_err(|error| CancelEntryReceiveError::Cleanup(error.to_string()))?;
+                .map_err(CancelEntryReceiveError::Cleanup)?;
         }
 
-        if !transfer_errors.is_empty() {
-            return Err(CancelEntryReceiveError::Transfer(
-                transfer_errors.join("; "),
-            ));
+        let failed_count = transfer_errors.len();
+        if let Some(source) = transfer_errors.into_iter().next() {
+            return Err(CancelEntryReceiveError::Transfer {
+                failed_count,
+                source,
+            });
         }
         self.commit_inbound
             .commit_inbound_receive(&InboundReceiveSettlement::NoEntry {
@@ -195,7 +222,11 @@ impl CancelEntryReceiveUseCase {
                 now_ms: self.clock.now_ms(),
             })
             .await
-            .map_err(|error| CancelEntryReceiveError::Attempt(error.to_string()))?;
+            .map_err(|error| {
+                CancelEntryReceiveError::Attempt(
+                    SourceError::from(error).context("commit cancelled receive"),
+                )
+            })?;
         self.host_event_bus.emit_or_warn(HostEvent::Clipboard(
             ClipboardHostEvent::ReceiveAttemptStateChanged {
                 entry_id: entry_id.as_ref().to_owned(),
@@ -337,8 +368,13 @@ mod tests {
 
     #[async_trait]
     impl AttemptTransferCancellation for TransferMock {
-        async fn cancel_attempt(&self, attempt_id: &str) -> Result<usize, String> {
+        async fn cancel_inbound_attempt(
+            &self,
+            attempt_id: &str,
+            reason: FileTransferCancellationReason,
+        ) -> Result<usize, BlobTransferError> {
             assert_eq!(attempt_id, "attempt-1");
+            assert_eq!(reason, FileTransferCancellationReason::LocalUser);
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(2)
         }
@@ -525,5 +561,76 @@ mod tests {
         assert_eq!(transfers.calls.load(Ordering::SeqCst), 0);
         assert_eq!(projection.calls.load(Ordering::SeqCst), 0);
         assert_eq!(cleaner.calls.load(Ordering::SeqCst), 0);
+    }
+
+    struct FailingTransfers;
+
+    #[async_trait]
+    impl AttemptTransferCancellation for FailingTransfers {
+        async fn cancel_inbound_attempt(
+            &self,
+            _attempt_id: &str,
+            _reason: FileTransferCancellationReason,
+        ) -> Result<usize, BlobTransferError> {
+            Err(BlobTransferError::Fetch(SourceError::from(
+                std::io::Error::other("transport gone"),
+            )))
+        }
+    }
+
+    struct FailingProjection;
+
+    #[async_trait]
+    impl CancelDirectoryAttemptTransfersPort for FailingProjection {
+        async fn cancel_attempt_transfers(
+            &self,
+            _entry_id: &str,
+            _attempt_id: &str,
+            _reason: FileTransferCancellationReason,
+            _now_ms: i64,
+        ) -> Result<u32, uc_core::ports::FileTransferProjectionError> {
+            Err(uc_core::ports::FileTransferProjectionError::Backend(
+                "projection gone".into(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn transfer_cancellation_failures_keep_first_source_and_count() {
+        let attempts = Arc::new(AttemptMock {
+            state: AttemptState::Receiving,
+            cancel_outcome: RequestReceiveCancellationOutcome::Requested,
+            cancel_calls: AtomicUsize::new(0),
+        });
+        let use_case = CancelEntryReceiveUseCase::new(
+            attempts.clone(),
+            attempts,
+            Arc::new(CommitMock::default()),
+            Arc::new(NoPublishMock),
+            Arc::new(CleanerMock::default()),
+            Arc::new(FailingProjection),
+            Arc::new(FailingTransfers),
+            Arc::new(ClockMock),
+            Arc::new(HostEventBus::new()),
+        );
+
+        let error = use_case
+            .execute(&EntryId::new(), "attempt-1")
+            .await
+            .expect_err("both transfer cancellations fail");
+
+        let CancelEntryReceiveError::Transfer {
+            failed_count,
+            source,
+        } = &error
+        else {
+            panic!("expected transfer failure, got {error:?}");
+        };
+        assert_eq!(*failed_count, 2);
+        assert!(source
+            .chain()
+            .any(|cause| cause.downcast_ref::<std::io::Error>().is_some()));
+        assert!(!error.to_string().contains("transport gone"));
+        assert!(!error.to_string().contains("projection gone"));
     }
 }

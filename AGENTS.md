@@ -46,6 +46,7 @@
 - 项目文档与代码注释使用中文；代码标识符、提交信息使用英文。
 - 保持单一事实来源，不长期保留新旧两套实现或文档入口。
 - 文档中的仓库路径使用相对路径。
+- 使用 planning-with-files 时，`task_plan.md`、`findings.md`、`progress.md` 统一存放在 `.planning/<YYYY-MM-DD>-<任务短名>/` 下，不得创建在仓库根目录；继续已有任务时复用其原目录。
 - Rust 命令从仓库根目录运行。
 - Cargo 构建默认复用仓库 `target`；该路径不可用时先停止并修复，不得把任务命名的 `CARGO_TARGET_DIR` 改到 `/tmp` 或 `/private/tmp` 继续构建。
 - 多 Agent 可以并行读代码和修改互不重叠的文件，但 Cargo 验证由一个负责人通过共享 `target` 串行执行；不得让每个 Agent 各建一套完整构建目录。

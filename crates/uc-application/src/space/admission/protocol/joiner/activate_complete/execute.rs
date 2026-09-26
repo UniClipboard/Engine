@@ -1,12 +1,12 @@
-use super::{ExecuteJoinerActivationError, JoinerActivationStateError};
+use super::{ExecuteJoinerActivationError, JoinerActivationStateError, JoinerMembershipStart};
 use crate::space::admission::protocol::{
     AdmissionRecoveryReport, JoinerActivationOutcome, JoinerAdmissionService,
     SpaceAdmissionProtocol,
 };
 use crate::space::admission::{
-    CompletePendingSpaceTransitionError, CurrentJoinStatus, JoinedSpace,
-    QueryPendingSpaceTransitionError,
+    CompletePendingSpaceTransitionError, CurrentJoinStatus, QueryPendingSpaceTransitionError,
 };
+use crate::space::membership::MembershipLedgerError;
 use uc_observability_contract::diagnostics::connectivity::{
     scope_pairing_work, AdmissionExchangeSide,
 };
@@ -57,7 +57,13 @@ impl JoinerAdmissionService {
                                 return (report, None);
                             }
                         };
-                        let (transition_result, pending_exchange, outcome) = completed.into_parts();
+                        let (transition_result, pending_exchange, outcome, membership) =
+                            completed.into_parts();
+                        // 成员事实先于准入终态提交；重启后重放同一激活时 Owner 不产生第二次变化。
+                        if let Err(error) = self.establish_membership(membership).await {
+                            record_membership_error(&mut report, &error);
+                            return (report, None);
+                        }
                         let transition = match aggregate
                             .activate_complete(transition_result, pending_exchange)
                         {
@@ -84,6 +90,27 @@ impl JoinerAdmissionService {
                 ),
             )
             .await
+    }
+}
+
+impl JoinerAdmissionService {
+    /// 目标控制世代已生效：Owner 按数据库代号的变化读取新世代的记录，再建立本机成员状态。
+    async fn establish_membership(
+        &self,
+        membership: JoinerMembershipStart,
+    ) -> Result<(), MembershipLedgerError> {
+        let JoinerMembershipStart {
+            space_id,
+            local_device_id,
+            local_member,
+            history,
+        } = membership;
+        self.members
+            .commit(move |draft| {
+                draft.join_space(&space_id, history, local_device_id, local_member)
+            })
+            .await
+            .map(|_| ())
     }
 }
 
@@ -120,21 +147,35 @@ impl SpaceAdmissionProtocol {
                     CompletePendingSpaceTransitionError::JoinNotActive
                 }
             })?;
-            Ok(CurrentJoinStatus::Active {
+            Ok(CurrentJoinStatus::Processing {
                 join_id: outcome.join_id,
-                joined_space: JoinedSpace {
-                    sponsor_device_id: outcome.sponsor_device_id,
-                    sponsor_identity_fingerprint: outcome.sponsor_identity_fingerprint,
-                    space_id: outcome.space_id,
-                    self_device_id: outcome.self_device_id,
-                    self_identity_fingerprint: outcome.self_identity_fingerprint,
-                    migrated_records: outcome.migrated_records,
-                    preserved_unreadable_records: outcome.preserved_unreadable_records,
-                },
+                target_space_id: outcome.space_id,
+                sponsor_device_id: outcome.sponsor_device_id,
+                sponsor_identity_fingerprint: outcome.sponsor_identity_fingerprint,
                 peer_upgrade_required: false,
             })
         })
         .await
+    }
+}
+
+fn record_membership_error(report: &mut AdmissionRecoveryReport, error: &MembershipLedgerError) {
+    let error_kind = match error {
+        MembershipLedgerError::Locked => "locked",
+        MembershipLedgerError::Unavailable { .. } => "unavailable",
+        MembershipLedgerError::Conflict => "conflict",
+        MembershipLedgerError::Corrupt { .. } => "corrupt",
+        MembershipLedgerError::RecoveryRequired => "recovery_required",
+    };
+    tracing::warn!(error_kind, "加入方激活后建立本机成员状态失败");
+    match error {
+        MembershipLedgerError::Locked | MembershipLedgerError::Unavailable { .. } => {
+            report.deferred_count += 1
+        }
+        // 当前成员状态属于其他 Space 或其他成员实例，或无法校验：不能在其上完成本次加入。
+        MembershipLedgerError::Conflict
+        | MembershipLedgerError::Corrupt { .. }
+        | MembershipLedgerError::RecoveryRequired => report.recovery_required_count += 1,
     }
 }
 

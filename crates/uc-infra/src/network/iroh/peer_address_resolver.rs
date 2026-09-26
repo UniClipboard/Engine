@@ -104,7 +104,7 @@ mod tests {
                     addr_blob: addr_blob.clone(),
                     observed_at: Utc::now(),
                 })),
-                Reply::Failed => Err(PeerAddressError::Internal("test failure".to_owned())),
+                Reply::Failed => Err(PeerAddressError::Internal("test failure".into())),
             }
         }
 

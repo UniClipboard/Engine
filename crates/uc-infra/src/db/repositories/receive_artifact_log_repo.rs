@@ -60,20 +60,24 @@ impl ReceiveArtifactProtection {
         current_profile: &dyn CurrentProfilePort,
     ) -> Result<ReceiveArtifactCipher, ReceiveArtifactLogError> {
         let profile = current_profile.current_profile().await.map_err(|error| {
-            ReceiveArtifactLogError::EncryptionUnavailable(format!(
-                "current profile unavailable: {error}"
-            ))
+            ReceiveArtifactLogError::EncryptionUnavailable(
+                anyhow::Error::from(error)
+                    .context("current profile unavailable")
+                    .into(),
+            )
         })?;
         let key = derive_subkey
             .derive_subkey(profile.as_ref().as_bytes(), ARTIFACT_KEY_INFO)
             .await
             .map_err(|error| match error {
                 SpaceAccessError::NotUnlocked => ReceiveArtifactLogError::EncryptionUnavailable(
-                    "session locked: receive artifact key unavailable".to_owned(),
+                    "session locked: receive artifact key unavailable".into(),
                 ),
-                other => ReceiveArtifactLogError::EncryptionUnavailable(format!(
-                    "derive receive artifact key: {other}"
-                )),
+                other => ReceiveArtifactLogError::EncryptionUnavailable(
+                    anyhow::Error::from(other)
+                        .context("derive receive artifact key")
+                        .into(),
+                ),
             })?;
         Ok(ReceiveArtifactCipher::new(key))
     }
@@ -93,7 +97,7 @@ impl ReceiveArtifactProtection {
                 .seal(entry_id, attempt_id, artifacts),
             Self::V3(cipher) => cipher.seal(entry_id, attempt_id, artifacts).await,
         }
-        .map_err(|error| ReceiveArtifactLogError::Backend(error.to_string()))
+        .map_err(|error| ReceiveArtifactLogError::Backend(error.into()))
     }
 
     async fn open(
@@ -111,12 +115,12 @@ impl ReceiveArtifactProtection {
                 .open(entry_id, attempt_id, ciphertext),
             Self::V3(cipher) => cipher.open(entry_id, attempt_id, ciphertext).await,
         }
-        .map_err(|error| ReceiveArtifactLogError::Backend(error.to_string()))
+        .map_err(|error| ReceiveArtifactLogError::Backend(error.into()))
     }
 }
 
 fn backend(error: anyhow::Error) -> ReceiveArtifactLogError {
-    ReceiveArtifactLogError::Backend(error.to_string())
+    ReceiveArtifactLogError::Backend(error.context("receive artifact log storage").into())
 }
 
 async fn decode_row(

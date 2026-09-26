@@ -21,7 +21,14 @@ impl JoinerAdmissionService {
         let preparation = match aggregate.joiner_complete_preparation() {
             Some(preparation) => preparation,
             None => {
-                report.recovery_required_count += 1;
+                recovery
+                    .save_joiner_activation_rejection(
+                        report,
+                        aggregate,
+                        token,
+                        uc_core::membership::SpaceAdmissionRejectionReason::ActivationStateInvalid,
+                    )
+                    .await;
                 return JoinerReplyHandlingOutcome::NoImmediateWork;
             }
         };
@@ -31,8 +38,10 @@ impl JoinerAdmissionService {
             .await
         {
             Ok(activation) => activation,
-            Err(PrepareJoinerActivationError::Invalid { .. }) => {
-                report.recovery_required_count += 1;
+            Err(PrepareJoinerActivationError::Invalid { reason, .. }) => {
+                recovery
+                    .save_joiner_activation_rejection(report, aggregate, token, reason)
+                    .await;
                 return JoinerReplyHandlingOutcome::NoImmediateWork;
             }
             Err(PrepareJoinerActivationError::Unavailable { .. }) => {
@@ -40,10 +49,12 @@ impl JoinerAdmissionService {
                 return JoinerReplyHandlingOutcome::NoImmediateWork;
             }
         };
+        let (space_transition, staged_target) = activation.into_parts();
         let transition = match aggregate.accept_complete(
             reply,
             canonical_digest,
-            activation.into_transition(),
+            space_transition,
+            staged_target,
         ) {
             Ok(transition) => transition,
             Err(_) => {

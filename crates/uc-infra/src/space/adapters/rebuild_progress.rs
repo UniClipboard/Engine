@@ -22,7 +22,7 @@ impl FileSpaceRebuildProgress {
 
         fs::create_dir_all(parent)
             .await
-            .map_err(|_| SpaceRebuildProgressError::Unavailable)
+            .map_err(SpaceRebuildProgressError::unavailable_from)
     }
 }
 
@@ -32,7 +32,7 @@ impl SpaceRebuildProgressPort for FileSpaceRebuildProgress {
         match fs::read_to_string(&self.target_path).await {
             Ok(value) => Ok(Some(SpaceId::from_str(value.trim()))),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(_) => Err(SpaceRebuildProgressError::Unavailable),
+            Err(_) => Err(SpaceRebuildProgressError::unavailable()),
         }
     }
 
@@ -40,13 +40,13 @@ impl SpaceRebuildProgressPort for FileSpaceRebuildProgress {
         self.ensure_parent_dir().await?;
         let mut file = fs::File::create(&self.target_path)
             .await
-            .map_err(|_| SpaceRebuildProgressError::Unavailable)?;
+            .map_err(SpaceRebuildProgressError::unavailable_from)?;
         file.write_all(space_id.as_str().as_bytes())
             .await
-            .map_err(|_| SpaceRebuildProgressError::Unavailable)?;
+            .map_err(SpaceRebuildProgressError::unavailable_from)?;
         file.sync_all()
             .await
-            .map_err(|_| SpaceRebuildProgressError::Unavailable)?;
+            .map_err(SpaceRebuildProgressError::unavailable_from)?;
         Ok(())
     }
 
@@ -54,7 +54,7 @@ impl SpaceRebuildProgressPort for FileSpaceRebuildProgress {
         match fs::remove_file(&self.target_path).await {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(_) => Err(SpaceRebuildProgressError::Unavailable),
+            Err(_) => Err(SpaceRebuildProgressError::unavailable()),
         }
     }
 }

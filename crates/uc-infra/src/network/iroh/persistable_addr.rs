@@ -161,7 +161,7 @@ mod tests {
 
         async fn upsert(&self, record: &PeerAddressRecord) -> Result<(), PeerAddressError> {
             if self.fail {
-                return Err(PeerAddressError::Internal("injected".to_owned()));
+                return Err(PeerAddressError::Internal("injected".into()));
             }
             *self.saved.lock().unwrap() = Some(record.clone());
             Ok(())

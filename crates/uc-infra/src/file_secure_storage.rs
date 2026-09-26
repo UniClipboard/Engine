@@ -19,8 +19,10 @@ impl FileSecureStorage {
         self.base_dir.join(format!("{encoded}.bin"))
     }
 
-    fn map_io_error(context: &str, error: io::Error) -> SecureStorageError {
-        SecureStorageError::Other(format!("{context}: {error}"))
+    fn map_io_error(context: &'static str, error: io::Error) -> SecureStorageError {
+        SecureStorageError::StorageFailed {
+            source: anyhow::Error::new(error).context(context),
+        }
     }
 }
 
@@ -69,5 +71,37 @@ impl SecureStoragePort for FileSecureStorage {
                 error,
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+
+    use uc_observability_contract::error_source::find_source;
+
+    use super::*;
+
+    #[test]
+    fn read_failure_keeps_io_source_without_path_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = FileSecureStorage::with_base_dir(dir.path().to_path_buf());
+        // 在密钥文件位置放一个目录，让读取返回真实的 IO 错误（而非 NotFound）。
+        fs::create_dir(storage.file_path("private-key")).unwrap();
+
+        let error = storage.get("private-key").unwrap_err();
+
+        assert!(matches!(error, SecureStorageError::StorageFailed { .. }));
+        assert!(find_source::<io::Error>(&error).is_some());
+        let dir_text = dir.path().display().to_string();
+        let chain = std::iter::successors(Some(&error as &(dyn Error + 'static)), |&current| {
+            current.source()
+        })
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+        assert!(
+            chain.iter().all(|text| !text.contains(&dir_text)),
+            "{chain:?}"
+        );
     }
 }

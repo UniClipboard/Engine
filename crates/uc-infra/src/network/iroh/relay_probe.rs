@@ -11,6 +11,8 @@
 //! §6.2 共同要求(iroh-relay 是 transport-layer 实现,不允许沿端口契约
 //! 泄露到 core)。
 
+use std::error::Error;
+use std::fmt;
 use std::time::{Duration, Instant};
 
 use iroh::dns::DnsResolver;
@@ -33,21 +35,81 @@ pub struct RelayProbeReport {
 
 /// infra 内部归类后的探测错误。每个变体语义稳定,bootstrap 直接 match 转
 /// 到 application 错误集合;具体三方错误(`ConnectError` / `DialError` /
-/// `DnsError` 等)被压成 `String`,不沿此类型泄漏出 infra crate 边界。
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+/// `DnsError` 等)经 [`RelayProbeDetail`] 以不透明 source 保留,类型不泄漏出 infra crate 边界。
+#[derive(Debug, thiserror::Error)]
 pub enum RelayProbeError {
-    #[error("invalid relay URL: {0}")]
-    InvalidUrl(String),
-    #[error("dns lookup failed: {0}")]
-    Dns(String),
-    #[error("tls handshake failed: {0}")]
-    Tls(String),
-    #[error("relay handshake failed: {0}")]
-    Handshake(String),
+    #[error("invalid relay URL")]
+    InvalidUrl(#[source] RelayProbeDetail),
+    #[error("dns lookup failed")]
+    Dns(#[source] RelayProbeDetail),
+    #[error("tls handshake failed")]
+    Tls(#[source] RelayProbeDetail),
+    #[error("relay handshake failed")]
+    Handshake(#[source] RelayProbeDetail),
     #[error("relay probe timed out")]
     Timeout,
-    #[error("relay probe failed: {0}")]
-    Other(String),
+    #[error("relay probe failed")]
+    Other(#[source] RelayProbeDetail),
+}
+
+/// 探测失败的宿主诊断细节。
+///
+/// 显示文本按既定契约原样交给宿主（`RelayProbeOutcome` 的 `message`），因此保持与下层错误文本一致；
+/// 下层错误同时作为 source 保留，供分类使用。
+#[derive(Debug)]
+pub enum RelayProbeDetail {
+    /// 由本模块给出的说明文本，没有下层错误。
+    Message(String),
+    /// 下层错误；`context` 为可选的固定前缀。
+    Source {
+        context: Option<&'static str>,
+        source: Box<dyn Error + Send + Sync>,
+    },
+}
+
+impl RelayProbeDetail {
+    fn message(text: impl Into<String>) -> Self {
+        Self::Message(text.into())
+    }
+
+    fn source(source: impl Error + Send + Sync + 'static) -> Self {
+        Self::Source {
+            context: None,
+            source: Box::new(source),
+        }
+    }
+
+    fn with_context(context: &'static str, source: impl Error + Send + Sync + 'static) -> Self {
+        Self::Source {
+            context: Some(context),
+            source: Box::new(source),
+        }
+    }
+}
+
+impl fmt::Display for RelayProbeDetail {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Message(text) => formatter.write_str(text),
+            Self::Source {
+                context: Some(context),
+                source,
+            } => write!(formatter, "{context}: {source}"),
+            Self::Source {
+                context: None,
+                source,
+            } => write!(formatter, "{source}"),
+        }
+    }
+}
+
+impl Error for RelayProbeDetail {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Message(_) => None,
+            Self::Source { source, .. } => Some(source.as_ref()),
+        }
+    }
 }
 
 /// 使用 iroh-relay 官方 client 做协议级握手的探测器。
@@ -66,7 +128,9 @@ impl IrohRelayProbeAdapter {
         let crypto_provider = tls::default_provider();
         let tls_config = CaRootsConfig::embedded()
             .client_config(crypto_provider)
-            .map_err(|err| RelayProbeError::Other(format!("init tls config: {err}")))?;
+            .map_err(|err| {
+                RelayProbeError::Other(RelayProbeDetail::with_context("init tls config", err))
+            })?;
         Ok(Self {
             dns_resolver: DnsResolver::new(),
             tls_config,
@@ -95,28 +159,28 @@ impl IrohRelayProbeAdapter {
     ) -> Result<RelayProbeReport, RelayProbeError> {
         let trimmed = url.trim();
         if trimmed.is_empty() {
-            return Err(RelayProbeError::InvalidUrl(
-                "relay URL must not be empty".to_string(),
-            ));
+            return Err(RelayProbeError::InvalidUrl(RelayProbeDetail::message(
+                "relay URL must not be empty",
+            )));
         }
         let relay_url: RelayUrl = trimmed
             .parse()
-            .map_err(|err| RelayProbeError::InvalidUrl(format!("{err}")))?;
+            .map_err(|err| RelayProbeError::InvalidUrl(RelayProbeDetail::source(err)))?;
         let scheme = relay_url.scheme();
         if scheme != "http" && scheme != "https" {
-            return Err(RelayProbeError::InvalidUrl(format!(
-                "scheme `{scheme}` is not supported; expected http or https"
+            return Err(RelayProbeError::InvalidUrl(RelayProbeDetail::message(
+                format!("scheme `{scheme}` is not supported; expected http or https"),
             )));
         }
         if relay_url.host_str().is_none() {
-            return Err(RelayProbeError::InvalidUrl(
-                "relay URL must include a host".to_string(),
-            ));
+            return Err(RelayProbeError::InvalidUrl(RelayProbeDetail::message(
+                "relay URL must include a host",
+            )));
         }
         if !relay_url.username().is_empty() || relay_url.password().is_some() {
-            return Err(RelayProbeError::InvalidUrl(
-                "relay URL must not include credentials".to_string(),
-            ));
+            return Err(RelayProbeError::InvalidUrl(RelayProbeDetail::message(
+                "relay URL must not include credentials",
+            )));
         }
 
         // Rebuild the DNS resolver against the *current* system config before
@@ -181,82 +245,92 @@ fn map_connect_error(err: ConnectError) -> RelayProbeError {
     // `ConnectError` 与 `DialError` 用 n0-error 派生宏注入了 `meta` 字段,
     // 这里只关心可读语义,统一用 `..` 跳过 meta。
     match err {
-        ConnectError::InvalidWebsocketUrl { url, .. } => {
-            RelayProbeError::InvalidUrl(format!("invalid websocket URL: {url}"))
-        }
-        ConnectError::InvalidRelayUrl { url, .. } => {
-            RelayProbeError::InvalidUrl(format!("invalid relay URL: {url}"))
-        }
+        ConnectError::InvalidWebsocketUrl { url, .. } => RelayProbeError::InvalidUrl(
+            RelayProbeDetail::message(format!("invalid websocket URL: {url}")),
+        ),
+        ConnectError::InvalidRelayUrl { url, .. } => RelayProbeError::InvalidUrl(
+            RelayProbeDetail::message(format!("invalid relay URL: {url}")),
+        ),
         ConnectError::Dial { source, .. } => map_dial_error(source),
-        ConnectError::Tls { source, .. } => RelayProbeError::Tls(source.to_string()),
+        ConnectError::Tls { source, .. } => RelayProbeError::Tls(RelayProbeDetail::source(source)),
         ConnectError::InvalidTlsServername { .. } => {
-            RelayProbeError::Tls("invalid TLS servername".to_string())
+            RelayProbeError::Tls(RelayProbeDetail::message("invalid TLS servername"))
         }
         ConnectError::InvalidAuthToken { .. } => {
-            RelayProbeError::Handshake("invalid relay access token".to_string())
+            RelayProbeError::Handshake(RelayProbeDetail::message("invalid relay access token"))
         }
-        ConnectError::Handshake { source, .. } => RelayProbeError::Handshake(source.to_string()),
+        ConnectError::Handshake { source, .. } => {
+            RelayProbeError::Handshake(RelayProbeDetail::source(source))
+        }
         ConnectError::BadVersionHeader { server_version, .. } => {
-            RelayProbeError::Handshake(format!(
+            RelayProbeError::Handshake(RelayProbeDetail::message(format!(
                 "server replied with unsupported version `{}`",
                 server_version.as_deref().unwrap_or("<empty>")
-            ))
+            )))
         }
-        ConnectError::UnexpectedUpgradeStatus { code, .. } => {
-            RelayProbeError::Handshake(format!("unexpected HTTP upgrade status: {code}"))
-        }
-        ConnectError::Upgrade { source, .. } => {
-            RelayProbeError::Handshake(format!("http upgrade failed: {source}"))
-        }
+        ConnectError::UnexpectedUpgradeStatus { code, .. } => RelayProbeError::Handshake(
+            RelayProbeDetail::message(format!("unexpected HTTP upgrade status: {code}")),
+        ),
+        ConnectError::Upgrade { source, .. } => RelayProbeError::Handshake(
+            RelayProbeDetail::with_context("http upgrade failed", source),
+        ),
         ConnectError::Websocket { source, .. } => {
-            RelayProbeError::Handshake(format!("websocket error: {source}"))
+            RelayProbeError::Handshake(RelayProbeDetail::with_context("websocket error", source))
         }
-        ConnectError::NoLocalAddr { .. } => {
-            RelayProbeError::Other("no local socket address available".to_string())
-        }
+        ConnectError::NoLocalAddr { .. } => RelayProbeError::Other(RelayProbeDetail::message(
+            "no local socket address available",
+        )),
         ConnectError::MissingCryptoProvider { .. } => {
-            RelayProbeError::Other("rustls crypto provider missing".to_string())
+            RelayProbeError::Other(RelayProbeDetail::message("rustls crypto provider missing"))
         }
         // 兜底分支:把陌生 ConnectError 变体压成 Other,同时 warn 保留源头便
         // 于排查(iroh-relay 升级新增变体时是这里第一时间发现)。
         other => {
-            warn!(error = ?other, "relay probe: unmapped ConnectError variant");
-            RelayProbeError::Other(other.to_string())
+            warn!(
+                error_kind = "unmapped_connect_error",
+                "relay probe: unmapped ConnectError variant"
+            );
+            RelayProbeError::Other(RelayProbeDetail::source(other))
         }
     }
 }
 
 fn map_dial_error(err: DialError) -> RelayProbeError {
     match err {
-        DialError::Dns { source, .. } => RelayProbeError::Dns(source.to_string()),
+        DialError::Dns { source, .. } => RelayProbeError::Dns(RelayProbeDetail::source(source)),
         DialError::Timeout { .. } => RelayProbeError::Timeout,
-        DialError::Io { source, .. } => RelayProbeError::Other(format!("io: {source}")),
-        DialError::InvalidUrl { url, .. } => {
-            RelayProbeError::InvalidUrl(format!("invalid dial URL: {url}"))
+        DialError::Io { source, .. } => {
+            RelayProbeError::Other(RelayProbeDetail::with_context("io", source))
         }
+        DialError::InvalidUrl { url, .. } => RelayProbeError::InvalidUrl(
+            RelayProbeDetail::message(format!("invalid dial URL: {url}")),
+        ),
         DialError::InvalidTargetPort { .. } => {
-            RelayProbeError::InvalidUrl("invalid target port".to_string())
+            RelayProbeError::InvalidUrl(RelayProbeDetail::message("invalid target port"))
         }
-        DialError::ProxyConnectInvalidStatus { status, .. } => {
-            RelayProbeError::Other(format!("proxy connect returned {status}"))
-        }
-        DialError::ProxyInvalidUrl { proxy_url, .. } => {
-            RelayProbeError::Other(format!("invalid proxy URL: {proxy_url}"))
-        }
-        DialError::ProxyConnect { source, .. } => {
-            RelayProbeError::Other(format!("proxy connect failed: {source}"))
-        }
-        DialError::ProxyInvalidTlsServername { proxy_hostname, .. } => {
-            RelayProbeError::Tls(format!("invalid proxy TLS servername: {proxy_hostname}"))
-        }
+        DialError::ProxyConnectInvalidStatus { status, .. } => RelayProbeError::Other(
+            RelayProbeDetail::message(format!("proxy connect returned {status}")),
+        ),
+        DialError::ProxyInvalidUrl { proxy_url, .. } => RelayProbeError::Other(
+            RelayProbeDetail::message(format!("invalid proxy URL: {proxy_url}")),
+        ),
+        DialError::ProxyConnect { source, .. } => RelayProbeError::Other(
+            RelayProbeDetail::with_context("proxy connect failed", source),
+        ),
+        DialError::ProxyInvalidTlsServername { proxy_hostname, .. } => RelayProbeError::Tls(
+            RelayProbeDetail::message(format!("invalid proxy TLS servername: {proxy_hostname}")),
+        ),
         DialError::ProxyInvalidTargetPort { .. } => {
-            RelayProbeError::InvalidUrl("invalid proxy target port".to_string())
+            RelayProbeError::InvalidUrl(RelayProbeDetail::message("invalid proxy target port"))
         }
         // 与 map_connect_error 同理:陌生 DialError 变体走 Other,源信息进
         // tracing 便于跨版本对账。
         other => {
-            warn!(error = ?other, "relay probe: unmapped DialError variant");
-            RelayProbeError::Other(other.to_string())
+            warn!(
+                error_kind = "unmapped_dial_error",
+                "relay probe: unmapped DialError variant"
+            );
+            RelayProbeError::Other(RelayProbeDetail::source(other))
         }
     }
 }
@@ -264,6 +338,32 @@ fn map_dial_error(err: DialError) -> RelayProbeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detail_text_matches_the_host_contract_and_keeps_its_source() {
+        let io = || std::io::Error::other("connection refused");
+
+        let plain = RelayProbeDetail::source(io());
+        assert_eq!(plain.to_string(), io().to_string());
+        assert!(Error::source(&plain)
+            .and_then(|cause| cause.downcast_ref::<std::io::Error>())
+            .is_some());
+
+        let prefixed = RelayProbeDetail::with_context("proxy connect failed", io());
+        assert_eq!(
+            prefixed.to_string(),
+            format!("proxy connect failed: {}", io())
+        );
+        assert!(Error::source(&prefixed).is_some());
+
+        let message = RelayProbeDetail::message("invalid target port");
+        assert_eq!(message.to_string(), "invalid target port");
+        assert!(Error::source(&message).is_none());
+
+        // 外层变体的显示文本只给分类，不重复细节。
+        let error = RelayProbeError::Other(prefixed);
+        assert_eq!(error.to_string(), "relay probe failed");
+    }
 
     #[tokio::test]
     async fn rejects_empty_url() {

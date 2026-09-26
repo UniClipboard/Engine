@@ -60,11 +60,15 @@ fn member_update_detail_is_consumed_once_into_the_actual_local_file() {
     assert_eq!(
         rows[0]["fields"]["error.chain"],
         serde_json::json!([
-            "membership_update",
+            "space_device_update",
             "persist_state",
             "io",
             "permission_denied"
         ])
+    );
+    assert_eq!(
+        rows[0]["fields"]["error.call_path"],
+        rows[0]["fields"]["error.chain"]
     );
     assert!(rows[1]["fields"].get("error.phase").is_none());
     assert_eq!(rows[0]["run_id"], rows[1]["run_id"]);

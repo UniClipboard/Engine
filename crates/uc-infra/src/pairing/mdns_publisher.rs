@@ -50,25 +50,25 @@ pub enum MdnsPublisherError {
     /// `swarm-discovery` couldn't bind a multicast socket on any local
     /// interface (IPv4 or IPv6). Sponsor's UI surface this as "LAN
     /// channel unavailable" while the cloud channel may still work.
-    #[error("mDNS socket bind failed: {0}")]
-    SocketBind(String),
+    #[error("mDNS socket bind failed")]
+    SocketBind(#[source] anyhow::Error),
 
     /// The TXT record we tried to publish exceeded `swarm-discovery`'s
     /// per-attribute size budget. Should not happen with the fixed
     /// shape we use — surfaced for defence in depth.
-    #[error("TXT attribute too long: {0}")]
-    TxtTooLong(String),
+    #[error("TXT attribute too long")]
+    TxtTooLong(#[source] anyhow::Error),
 }
 
 impl From<SpawnError> for MdnsPublisherError {
     fn from(err: SpawnError) -> Self {
-        Self::SocketBind(err.to_string())
+        Self::SocketBind(err.into())
     }
 }
 
 impl From<TxtAttributeError> for MdnsPublisherError {
     fn from(err: TxtAttributeError) -> Self {
-        Self::TxtTooLong(err.to_string())
+        Self::TxtTooLong(err.into())
     }
 }
 
@@ -130,7 +130,9 @@ impl MdnsPairingPublisher {
             ),
         ];
         txt_attributes.extend(ticket_txt_attributes(ticket_hex).ok_or_else(|| {
-            MdnsPublisherError::TxtTooLong("endpoint ticket exceeds the bounded TXT format".into())
+            MdnsPublisherError::TxtTooLong(anyhow::anyhow!(
+                "endpoint ticket exceeds the bounded TXT format"
+            ))
         })?);
 
         let discoverer = Discoverer::new(PAIR_SERVICE_NAME.to_string(), actor_id.clone())

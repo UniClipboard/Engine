@@ -95,8 +95,8 @@ pub enum InboundReceiveCommitError {
     ArtifactRecordMissing,
     #[error("required directory publication record is missing")]
     DirectoryPublishRecordMissing,
-    #[error("inbound receive commit store error: {0}")]
-    Backend(String),
+    #[error("inbound receive commit store error")]
+    Backend(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 #[async_trait]

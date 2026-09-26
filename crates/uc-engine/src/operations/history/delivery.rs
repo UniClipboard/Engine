@@ -108,9 +108,9 @@ mod tests {
     fn delivery_failures_keep_stable_categories_without_details() {
         let missing =
             map_delivery_error(GetEntryDeliveryViewError::EntryNotFound("entry-1".into()));
-        let internal = map_delivery_error(GetEntryDeliveryViewError::Storage(
-            "/private/path/uniclipboard.db".into(),
-        ));
+        let internal = map_delivery_error(GetEntryDeliveryViewError::Storage(anyhow::anyhow!(
+            "/private/path/uniclipboard.db"
+        )));
 
         assert_eq!(missing.category(), EngineErrorCategory::NotFound);
         assert_eq!(internal.category(), EngineErrorCategory::Internal);

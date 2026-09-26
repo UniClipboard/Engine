@@ -1,10 +1,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use uc_application::deps::{
-    ActivateMembershipEffectPort, MembershipEffectExecutionError, MembershipEffectKind,
-    PendingMembershipEffect,
-};
+use uc_application::deps::{ActivateMembershipEffectPort, MembershipEffectExecutionError};
+use uc_core::membership::{MemberEffectKind, UnfinishedMemberEffect};
 use uc_core::ports::PeerReachabilityPort;
 
 /// 在账本开放最终成员 scope 前清理与旧资格绑定的网络观察。
@@ -22,13 +20,13 @@ impl MembershipActivationAdapter {
 impl ActivateMembershipEffectPort for MembershipActivationAdapter {
     async fn activate_membership_effect(
         &self,
-        effect: &PendingMembershipEffect,
+        effect: &UnfinishedMemberEffect,
     ) -> Result<(), MembershipEffectExecutionError> {
-        if effect.affected_device_ids.is_empty() {
+        if effect.affected_device_ids().is_empty() {
             return Err(MembershipEffectExecutionError::Corrupt);
         }
-        if effect.kind == MembershipEffectKind::RemoveDevice {
-            for device_id in &effect.affected_device_ids {
+        if effect.kind() == MemberEffectKind::RemoveDevice {
+            for device_id in effect.affected_device_ids() {
                 self.reachability.forget(device_id).await;
             }
         }
@@ -41,7 +39,6 @@ mod tests {
     use std::sync::Mutex;
 
     use tokio::sync::broadcast;
-    use uc_application::deps::MembershipEffectPhase;
     use uc_core::ids::DeviceId;
     use uc_core::ports::{PeerReachabilityChanged, PeerReachabilityError, ReachabilityState};
 
@@ -81,13 +78,11 @@ mod tests {
         let adapter = MembershipActivationAdapter::new(reachability.clone());
 
         adapter
-            .activate_membership_effect(&PendingMembershipEffect {
-                event_id: [1; 32],
-                kind: MembershipEffectKind::RemoveDevice,
-                phase: MembershipEffectPhase::SecurityApplied,
-                affected_device_ids: vec![DeviceId::new("removed")],
-                payload: Vec::new(),
-            })
+            .activate_membership_effect(
+                &crate::space::adapters::membership_member_facts::tests::removal_effect(
+                    DeviceId::new("removed"),
+                ),
+            )
             .await
             .unwrap();
 

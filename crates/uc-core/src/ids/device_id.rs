@@ -66,6 +66,7 @@ impl Serialize for DeviceId {
 impl<'de> Deserialize<'de> for DeviceId {
     fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
         let s: std::borrow::Cow<'de, str> = Deserialize::deserialize(de)?;
+        // 外部输入的标识超长：CapacityError 只回显原值，目标分类已完整表达。
         ArrayString::from(s.as_ref()).map(DeviceId).map_err(|_| {
             serde::de::Error::custom(format!(
                 "device id exceeds {DEVICE_ID_MAX_BYTES} bytes (got {} bytes)",

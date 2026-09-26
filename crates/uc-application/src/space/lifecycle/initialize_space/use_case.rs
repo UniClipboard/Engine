@@ -163,9 +163,7 @@ impl InitializeSpaceUseCase {
         //    it through `StorageFailed` so the caller sees a typed error
         //    rather than a panic.
         let fingerprint = self.local_identity.ensure().await.map_err(|e| match e {
-            LocalIdentityError::Storage(message) => {
-                InitializeSpaceError::storage(anyhow::anyhow!(message))
-            }
+            error @ LocalIdentityError::Storage(_) => InitializeSpaceError::storage(error),
             LocalIdentityError::AlreadyExists => InitializeSpaceError::storage(anyhow::anyhow!(
                 "local identity adapter raised AlreadyExists from ensure(); \
                  violates LocalIdentityPort idempotency contract"
@@ -309,9 +307,7 @@ impl InitializeSpaceUseCase {
 fn map_initialize_space_access_err(err: SpaceAccessError) -> InitializeSpaceError {
     match err {
         SpaceAccessError::AlreadyInitialized => InitializeSpaceError::AlreadyInitialized,
-        SpaceAccessError::Internal(message) => {
-            InitializeSpaceError::internal(anyhow::anyhow!(message))
-        }
+        err @ SpaceAccessError::Internal(_) => InitializeSpaceError::internal(err),
         SpaceAccessError::SecurityState { source } => {
             InitializeSpaceError::internal(source.context("activate initialized space security"))
         }
@@ -503,7 +499,7 @@ mod tests {
             let has_completed = self.profile_readiness.get_status().await.has_completed;
             self.observed_completed.lock().unwrap().push(has_completed);
             if *self.fail.lock().unwrap() {
-                return Err(MembershipInitializationError::Unavailable);
+                return Err(MembershipInitializationError::unavailable());
             }
             Ok(())
         }
@@ -937,8 +933,7 @@ mod tests {
         // 落地之后才发——member_repo.save 失败属于第 6 步失败，第 7 步未执行，
         // 不应 emit 该事件，否则 Activation 漏斗会把"未完成"误判为"已完成"。
         let h = build_harness();
-        *h.member_repo.save_err.lock().unwrap() =
-            Some(MembershipError::Repository("boom".to_string()));
+        *h.member_repo.save_err.lock().unwrap() = Some(MembershipError::Repository("boom".into()));
         let _ = h.uc.execute(ok_cmd(Some("My Mac"))).await.unwrap_err();
         let events = h.analytics.events();
         assert!(
@@ -1083,8 +1078,7 @@ mod tests {
     #[tokio::test]
     async fn member_repo_save_failure_maps_to_storage_failed() {
         let h = build_harness();
-        *h.member_repo.save_err.lock().unwrap() =
-            Some(MembershipError::Repository("boom".to_string()));
+        *h.member_repo.save_err.lock().unwrap() = Some(MembershipError::Repository("boom".into()));
         let err = h.uc.execute(ok_cmd(Some("My Mac"))).await.unwrap_err();
         assert!(matches!(err, InitializeSpaceError::StorageFailed { .. }));
         let status = h.profile_readiness.get_status().await;

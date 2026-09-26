@@ -20,7 +20,7 @@ use argon2::Argon2;
 use chacha20poly1305::aead::Aead;
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
 use rand::RngCore;
-use uc_core::crypto::model::Passphrase;
+use uc_core::crypto::model::{EncryptionError, Passphrase};
 
 use super::crypto_model::{EncryptedBlob, KdfParams};
 use super::secrets::{Kek, MasterKey};
@@ -34,11 +34,69 @@ const ENCRYPTION_FORMAT_V1: &str = "V1";
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum AeadError {
     #[error("invalid key length")]
-    InvalidKey,
+    InvalidKey {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("AEAD encryption failed")]
-    EncryptFailed,
+    EncryptFailed {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("AEAD decryption failed (key mismatch / corrupted ciphertext)")]
-    DecryptFailed,
+    DecryptFailed {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl AeadError {
+    pub fn decrypt_failed() -> Self {
+        Self::DecryptFailed { source: None }
+    }
+
+    pub fn decrypt_failed_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::DecryptFailed {
+            source: Some(source.into()),
+        }
+    }
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl AeadError {
+    pub fn invalid_key() -> Self {
+        Self::InvalidKey { source: None }
+    }
+
+    pub fn invalid_key_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::InvalidKey {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn encrypt_failed() -> Self {
+        Self::EncryptFailed { source: None }
+    }
+
+    pub fn encrypt_failed_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::EncryptFailed {
+            source: Some(source.into()),
+        }
+    }
+}
+
+/// KEK 派生失败的分类；算法名等输入值不进入错误文本。
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum KdfError {
+    #[error("unsupported KDF algorithm")]
+    UnsupportedAlgorithm,
+    #[error("invalid argon2 parameters")]
+    Params(#[source] argon2::Error),
+    #[error("argon2 hashing failed")]
+    Hash(#[source] argon2::Error),
+    #[error("derived KEK is invalid")]
+    Key(#[source] EncryptionError),
 }
 
 /// Argon2id 派生 KEK。
@@ -46,9 +104,9 @@ pub(crate) fn derive_kek_argon2id(
     passphrase: &Passphrase,
     salt: &[u8],
     kdf: &KdfParams,
-) -> Result<Kek, String> {
+) -> Result<Kek, KdfError> {
     if kdf.alg != KDF_ALG_ARGON2ID {
-        return Err(format!("unsupported KDF algorithm: {}", kdf.alg));
+        return Err(KdfError::UnsupportedAlgorithm);
     }
     let argon2 = Argon2::new(
         argon2::Algorithm::Argon2id,
@@ -59,13 +117,13 @@ pub(crate) fn derive_kek_argon2id(
             kdf.params.parallelism,
             Some(32),
         )
-        .map_err(|e| format!("argon2 params: {e}"))?,
+        .map_err(KdfError::Params)?,
     );
     let mut okm = [0u8; 32];
     argon2
         .hash_password_into(passphrase.as_bytes(), salt, &mut okm)
-        .map_err(|e| format!("argon2 hash: {e}"))?;
-    Kek::from_bytes(&okm).map_err(|e| format!("Kek::from_bytes: {e}"))
+        .map_err(KdfError::Hash)?;
+    Kek::from_bytes(&okm).map_err(KdfError::Key)
 }
 
 /// XChaCha20-Poly1305 包装 MasterKey。
@@ -79,10 +137,10 @@ pub(crate) fn wrap_master_key_xchacha(
     rand::rng().fill_bytes(&mut nonce);
 
     let cipher =
-        XChaCha20Poly1305::new_from_slice(kek.as_bytes()).map_err(|_| AeadError::InvalidKey)?;
+        XChaCha20Poly1305::new_from_slice(kek.as_bytes()).map_err(AeadError::invalid_key_from)?;
     let ciphertext = cipher
         .encrypt(XNonce::from_slice(&nonce), master_key.as_bytes())
-        .map_err(|_| AeadError::EncryptFailed)?;
+        .map_err(AeadError::encrypt_failed_from)?;
 
     Ok(EncryptedBlob {
         version: ENCRYPTION_FORMAT_V1.to_string(),
@@ -99,14 +157,14 @@ pub(crate) fn unwrap_master_key_xchacha(
     wrapped: &EncryptedBlob,
 ) -> Result<MasterKey, AeadError> {
     let cipher =
-        XChaCha20Poly1305::new_from_slice(kek.as_bytes()).map_err(|_| AeadError::InvalidKey)?;
+        XChaCha20Poly1305::new_from_slice(kek.as_bytes()).map_err(AeadError::invalid_key_from)?;
     let plaintext = cipher
         .decrypt(
             XNonce::from_slice(&wrapped.nonce),
             wrapped.ciphertext.as_ref(),
         )
-        .map_err(|_| AeadError::DecryptFailed)?;
-    MasterKey::from_bytes(&plaintext).map_err(|_| AeadError::DecryptFailed)
+        .map_err(AeadError::decrypt_failed_from)?;
+    MasterKey::from_bytes(&plaintext).map_err(AeadError::decrypt_failed_from)
 }
 
 /// XChaCha20-Poly1305 底层加密原语,以裸 32 字节 key 为参。
@@ -124,7 +182,7 @@ pub(crate) fn encrypt_xchacha_raw(
     let mut nonce = vec![0u8; 24];
     rand::rng().fill_bytes(&mut nonce);
 
-    let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(|_| AeadError::InvalidKey)?;
+    let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(AeadError::invalid_key_from)?;
     let ciphertext = cipher
         .encrypt(
             XNonce::from_slice(&nonce),
@@ -133,7 +191,7 @@ pub(crate) fn encrypt_xchacha_raw(
                 aad,
             },
         )
-        .map_err(|_| AeadError::EncryptFailed)?;
+        .map_err(AeadError::encrypt_failed_from)?;
 
     Ok((nonce, ciphertext))
 }
@@ -148,9 +206,9 @@ pub(crate) fn decrypt_xchacha_raw(
     aad: &[u8],
 ) -> Result<Vec<u8>, AeadError> {
     if nonce.len() != 24 {
-        return Err(AeadError::DecryptFailed);
+        return Err(AeadError::decrypt_failed());
     }
-    let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(|_| AeadError::InvalidKey)?;
+    let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(AeadError::invalid_key_from)?;
     cipher
         .decrypt(
             XNonce::from_slice(nonce),
@@ -159,7 +217,7 @@ pub(crate) fn decrypt_xchacha_raw(
                 aad,
             },
         )
-        .map_err(|_| AeadError::DecryptFailed)
+        .map_err(AeadError::decrypt_failed_from)
 }
 
 /// XChaCha20-Poly1305 加密业务 blob,返回完整的 `EncryptedBlob`。
@@ -255,7 +313,24 @@ mod tests {
         let mut kdf = cheap_kdf();
         kdf.alg = "scrypt".to_string();
         let err = derive_kek_argon2id(&Passphrase("x".into()), &[0u8; 16], &kdf).unwrap_err();
-        assert!(err.contains("unsupported KDF"), "got: {err}");
+        assert!(
+            matches!(err, KdfError::UnsupportedAlgorithm),
+            "got: {err:?}"
+        );
+        assert!(!err.to_string().contains("scrypt"));
+    }
+
+    #[test]
+    fn derive_kek_keeps_argon2_parameter_error_as_source() {
+        let mut kdf = cheap_kdf();
+        kdf.params.parallelism = 0;
+        let err = derive_kek_argon2id(&Passphrase("x".into()), &[0u8; 16], &kdf).unwrap_err();
+        let KdfError::Params(source) = &err else {
+            panic!("expected Params, got {err:?}");
+        };
+        assert!(std::error::Error::source(&err)
+            .and_then(|cause| cause.downcast_ref::<argon2::Error>())
+            .is_some_and(|cause| cause == source));
     }
 
     // ── wrap / unwrap master key ─────────────────────────────────────────
@@ -278,7 +353,7 @@ mod tests {
     fn unwrap_master_key_with_wrong_kek_fails() {
         let wrapped = wrap_master_key_xchacha(&kek(0x01), &master_key(0x02)).unwrap();
         let err = unwrap_master_key_xchacha(&kek(0x09), &wrapped).unwrap_err();
-        assert!(matches!(err, AeadError::DecryptFailed));
+        assert!(matches!(err, AeadError::DecryptFailed { .. }));
     }
 
     #[test]
@@ -287,7 +362,7 @@ mod tests {
         let mut wrapped = wrap_master_key_xchacha(&kek, &master_key(0x06)).unwrap();
         wrapped.ciphertext[0] ^= 0xFF;
         let err = unwrap_master_key_xchacha(&kek, &wrapped).unwrap_err();
-        assert!(matches!(err, AeadError::DecryptFailed));
+        assert!(matches!(err, AeadError::DecryptFailed { .. }));
     }
 
     #[test]
@@ -333,7 +408,7 @@ mod tests {
         let mk = master_key(0x55);
         let blob = encrypt_blob_xchacha(&mk, b"secret", b"good-aad").unwrap();
         let err = decrypt_blob_xchacha(&mk, &blob.nonce, &blob.ciphertext, b"bad-aad").unwrap_err();
-        assert!(matches!(err, AeadError::DecryptFailed));
+        assert!(matches!(err, AeadError::DecryptFailed { .. }));
     }
 
     #[test]
@@ -341,7 +416,7 @@ mod tests {
         let blob = encrypt_blob_xchacha(&master_key(0x01), b"secret", b"aad").unwrap();
         let err = decrypt_blob_xchacha(&master_key(0x02), &blob.nonce, &blob.ciphertext, b"aad")
             .unwrap_err();
-        assert!(matches!(err, AeadError::DecryptFailed));
+        assert!(matches!(err, AeadError::DecryptFailed { .. }));
     }
 
     #[test]
@@ -351,7 +426,7 @@ mod tests {
         let mut ct = blob.ciphertext.clone();
         ct[0] ^= 0x01;
         let err = decrypt_blob_xchacha(&mk, &blob.nonce, &ct, b"aad").unwrap_err();
-        assert!(matches!(err, AeadError::DecryptFailed));
+        assert!(matches!(err, AeadError::DecryptFailed { .. }));
     }
 
     #[test]
@@ -360,7 +435,7 @@ mod tests {
         let blob = encrypt_blob_xchacha(&mk, b"secret", b"aad").unwrap();
         let short_nonce = vec![0u8; 12];
         let err = decrypt_blob_xchacha(&mk, &short_nonce, &blob.ciphertext, b"aad").unwrap_err();
-        assert!(matches!(err, AeadError::DecryptFailed));
+        assert!(matches!(err, AeadError::DecryptFailed { .. }));
     }
 
     #[test]

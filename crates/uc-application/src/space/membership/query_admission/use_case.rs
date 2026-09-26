@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
-use uc_core::membership::{MembershipAdmissionDecision, MembershipHistoryRelationship};
+use uc_core::membership::{
+    LedgerMemberStatus, MembershipAdmissionDecision, PeerLink, PeerRelation,
+};
 
-use crate::space::membership::{MembershipEffectPhase, MembershipLedger, MembershipLedgerError};
+use crate::space::membership::{MembershipLedgerError, MembershipOwner};
 
 use super::{MembershipAdmissionSnapshot, QueryMembershipAdmissionError};
 
@@ -15,12 +17,12 @@ pub trait QueryMembershipAdmissionPort: Send + Sync {
 }
 
 pub(crate) struct QueryMembershipAdmissionUseCase {
-    ledger: Arc<MembershipLedger>,
+    owner: Arc<MembershipOwner>,
 }
 
 impl QueryMembershipAdmissionUseCase {
-    pub(crate) fn new(ledger: Arc<MembershipLedger>) -> Self {
-        Self { ledger }
+    pub(crate) fn new(owner: Arc<MembershipOwner>) -> Self {
+        Self { owner }
     }
 }
 
@@ -30,41 +32,29 @@ impl QueryMembershipAdmissionPort for QueryMembershipAdmissionUseCase {
         &self,
         invitation_generation: Option<u64>,
     ) -> Result<MembershipAdmissionSnapshot, QueryMembershipAdmissionError> {
-        let snapshot = self
-            .ledger
-            .load_verified()
-            .await
-            .map_err(map_ledger_error)?;
-        let current_generation = snapshot.record().revision;
-        let history = snapshot
-            .history()
-            .ok_or(QueryMembershipAdmissionError::RecoveryRequired)?;
-        let local_member = snapshot
-            .record()
-            .local_member_instance
-            .ok_or(QueryMembershipAdmissionError::RecoveryRequired)?;
+        let view = self.owner.load().await.map_err(map_ledger_error)?;
+        let current_generation = view.revision();
+        let space = view.require_space().map_err(map_ledger_error)?;
+        let ledger = space.ledger();
+        let history = space.history();
+        let local_member = space.local_member();
         let active_peer_device_ids = history
             .active_members()
             .iter()
             .filter(|member| **member != local_member)
             .filter_map(|member| history.admission_facts_for(*member))
-            .map(|facts| facts.device_id.clone())
+            .map(|facts| facts.device_id)
             .collect::<std::collections::BTreeSet<_>>();
+        // 只看当前已激活成员的关系与未完成效果；已不在当前历史中的旧关系不阻塞邀请。
         let decision =
             if invitation_generation.is_some_and(|generation| generation != current_generation) {
                 MembershipAdmissionDecision::SupersededInvitation
-            } else if !snapshot.record().local_join_active
-                || !history.active_members().contains(&local_member)
-            {
+            } else if ledger.local_status() != LedgerMemberStatus::Active {
                 MembershipAdmissionDecision::RecoveryRequired
-            } else if snapshot.record().peer_reconciliation.values().any(|peer| {
-                active_peer_device_ids.contains(&peer.peer_device_id)
-                    && !matches!(peer.relationship, MembershipHistoryRelationship::Consistent)
-            }) || snapshot
-                .record()
-                .current_effects(history)
-                .iter()
-                .any(|(_, effect)| effect.phase < MembershipEffectPhase::Activated)
+            } else if ledger.peers().any(|(device_id, link)| {
+                active_peer_device_ids.contains(device_id)
+                    && !matches!(link, PeerLink::Member(member) if member.relation() == PeerRelation::Consistent)
+            }) || ledger.unfinished_effects().next().is_some()
             {
                 MembershipAdmissionDecision::AwaitingConvergence
             } else {
@@ -80,10 +70,10 @@ impl QueryMembershipAdmissionPort for QueryMembershipAdmissionUseCase {
 fn map_ledger_error(error: MembershipLedgerError) -> QueryMembershipAdmissionError {
     match error {
         MembershipLedgerError::Locked => QueryMembershipAdmissionError::Locked,
-        MembershipLedgerError::Corrupt | MembershipLedgerError::RecoveryRequired => {
+        MembershipLedgerError::Corrupt { .. } | MembershipLedgerError::RecoveryRequired => {
             QueryMembershipAdmissionError::RecoveryRequired
         }
-        MembershipLedgerError::Conflict | MembershipLedgerError::Unavailable => {
+        MembershipLedgerError::Conflict | MembershipLedgerError::Unavailable { .. } => {
             QueryMembershipAdmissionError::Unavailable
         }
     }

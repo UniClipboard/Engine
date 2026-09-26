@@ -6,6 +6,7 @@ use tracing::error;
 use uc_application::facade::{
     AppFacade, SearchFacadeError, SearchPageView, SearchQueryInput, SearchResultView,
 };
+use uc_observability_contract::error_source::io_error_kind;
 
 use crate::{
     EngineError, EngineErrorCategory, EntrySummary, OperationResult, QueryHistoryInput,
@@ -107,7 +108,7 @@ fn search_result(result: SearchResultView) -> SearchResultSummary {
 }
 
 fn map_search_error(error: SearchFacadeError) -> EngineError {
-    let error_message = error.to_string();
+    let io_kind = io_error_kind(&error);
     let (code, category, retryable, variant, log_details) = match error {
         SearchFacadeError::InvalidQuery(_) => (
             SEARCH_INVALID_QUERY_CODE,
@@ -174,7 +175,7 @@ fn map_search_error(error: SearchFacadeError) -> EngineError {
         ),
     };
     if log_details {
-        error!(variant, error = %error_message, "search operation failed");
+        error!(variant, io_error_kind = io_kind, "search operation failed");
     }
     EngineError::new(code, category, retryable)
 }
@@ -262,7 +263,11 @@ pub(crate) fn map_query_history_error(error: SearchFacadeError) -> EngineError {
             true,
         ),
         SearchFacadeError::Internal(_) => {
-            error!(error = %error, "query history failed");
+            error!(
+                error_kind = "query_history",
+                io_error_kind = io_error_kind(&error),
+                "query history failed"
+            );
             EngineError::new(
                 QUERY_HISTORY_FAILED_CODE,
                 EngineErrorCategory::Internal,

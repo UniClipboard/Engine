@@ -1,5 +1,6 @@
 use crate::error_codes::*;
 
+use std::error::Error;
 use std::time::Duration;
 
 use uc_application::facade::settings as app;
@@ -61,6 +62,7 @@ fn map_custom_relay_mutation(
             access_token: access_token
                 .map(|token| app::RelayAccessToken::new(token.expose().to_string()))
                 .transpose()
+                // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
                 .map_err(|_| invalid_relay_token_error())?,
         },
         CustomRelayMutation::Edit {
@@ -73,6 +75,7 @@ fn map_custom_relay_mutation(
             access_token: access_token
                 .map(|token| app::RelayAccessToken::new(token.expose().to_string()))
                 .transpose()
+                // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
                 .map_err(|_| invalid_relay_token_error())?,
         },
         CustomRelayMutation::Delete { url } => app::RelayConfigurationMutation::Delete { url },
@@ -99,6 +102,7 @@ pub(crate) async fn execute_query_settings(
     let settings = facade
         .settings()
         .await
+        // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
         .map_err(|_| internal_error(QUERY_SETTINGS_FAILED_CODE))?;
     Ok(OperationResult::Settings(Box::new(map_settings(settings))))
 }
@@ -126,6 +130,12 @@ pub(crate) async fn execute_update_settings(
     }
 }
 
+/// 中继探测诊断文本按宿主契约原样透传（已确认的例外）：取下层来源的显示文本，
+/// 与探测错误改为携带 source 之前交给宿主的文本逐字一致。
+fn relay_probe_host_message(source: &(dyn Error + Send + Sync)) -> String {
+    source.to_string()
+}
+
 pub(crate) async fn execute_probe_relay(
     facade: &AppFacade,
     input: RelayProbeInput,
@@ -148,18 +158,26 @@ pub(crate) async fn execute_probe_relay(
         Ok(report) => RelayProbeOutcome::Success {
             latency_ms: report.latency_ms,
         },
-        Err(app::SettingsFacadeError::RelayProbeInvalidUrl(message)) => {
-            RelayProbeOutcome::InvalidUrl { message }
+        Err(app::SettingsFacadeError::RelayProbeInvalidUrl(source)) => {
+            RelayProbeOutcome::InvalidUrl {
+                message: relay_probe_host_message(source.as_ref()),
+            }
         }
-        Err(app::SettingsFacadeError::RelayProbeDns(message)) => RelayProbeOutcome::Dns { message },
-        Err(app::SettingsFacadeError::RelayProbeTls(message)) => RelayProbeOutcome::Tls { message },
-        Err(app::SettingsFacadeError::RelayProbeHandshake(message)) => {
-            RelayProbeOutcome::Handshake { message }
+        Err(app::SettingsFacadeError::RelayProbeDns(source)) => RelayProbeOutcome::Dns {
+            message: relay_probe_host_message(source.as_ref()),
+        },
+        Err(app::SettingsFacadeError::RelayProbeTls(source)) => RelayProbeOutcome::Tls {
+            message: relay_probe_host_message(source.as_ref()),
+        },
+        Err(app::SettingsFacadeError::RelayProbeHandshake(source)) => {
+            RelayProbeOutcome::Handshake {
+                message: relay_probe_host_message(source.as_ref()),
+            }
         }
         Err(app::SettingsFacadeError::RelayProbeTimeout) => RelayProbeOutcome::Timeout,
-        Err(app::SettingsFacadeError::RelayProbeOther(message)) => {
-            RelayProbeOutcome::Other { message }
-        }
+        Err(app::SettingsFacadeError::RelayProbeOther(source)) => RelayProbeOutcome::Other {
+            message: relay_probe_host_message(source.as_ref()),
+        },
         Err(app::SettingsFacadeError::RelayProbeUnavailable) => {
             return Err(EngineError::new(
                 PROBE_RELAY_UNAVAILABLE_CODE,
@@ -577,6 +595,7 @@ fn unmap_retention_rule(value: RetentionRulePatch) -> Result<app::RetentionRuleP
         },
         RetentionRulePatch::ByCount { max_items } => app::RetentionRulePatchValue::ByCount {
             max_items: usize::try_from(max_items)
+                // TryFromIntError：目标分类完整表达数值范围不符。
                 .map_err(|_| "retention count exceeds this platform's limit".to_string())?,
         },
         RetentionRulePatch::ByContentType {
@@ -720,9 +739,9 @@ mod tests {
 
     #[test]
     fn relay_settings_persistence_failure_uses_the_relay_save_error_code() {
-        let error = map_save_relay_error(app::SettingsFacadeError::Save(
-            "settings storage unavailable".to_string(),
-        ));
+        let error = map_save_relay_error(app::SettingsFacadeError::Save(anyhow::anyhow!(
+            "settings storage unavailable"
+        )));
 
         assert_eq!(error.code(), SAVE_RELAY_FAILED_CODE);
         assert_eq!(error.category(), EngineErrorCategory::Internal);

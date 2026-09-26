@@ -80,8 +80,8 @@ pub struct ShortcutInstallMethodOption {
 
 #[derive(Debug, thiserror::Error)]
 pub enum GetMobileSyncSettingsError {
-    #[error("settings load failed: {0}")]
-    SettingsLoadFailed(String),
+    #[error("settings load failed")]
+    SettingsLoadFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     #[error("endpoint info probe failed: {0}")]
     EndpointInfoFailed(String),
@@ -109,11 +109,9 @@ impl GetMobileSyncSettingsUseCase {
     pub(crate) async fn execute(
         &self,
     ) -> Result<MobileSyncSettingsView, GetMobileSyncSettingsError> {
-        let settings = self
-            .settings
-            .load()
-            .await
-            .map_err(|err| GetMobileSyncSettingsError::SettingsLoadFailed(err.to_string()))?;
+        let settings = self.settings.load().await.map_err(|err| {
+            GetMobileSyncSettingsError::SettingsLoadFailed(err.context("load settings").into())
+        })?;
         let mobile = settings.mobile_sync.clone();
 
         let status = self

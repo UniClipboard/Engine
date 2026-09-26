@@ -5,8 +5,8 @@ use std::sync::Arc;
 use super::active_space_generation_manifest_store::V3ManifestPromotionOutcome;
 use super::{
     ActiveRuntimeManifest, ActiveRuntimeManifestV3, ActiveSpaceGenerationManifestStore,
-    ActiveSpaceGenerationManifestStoreError, PreparedSpaceControlGeneration, ProfileRuntimeLayout,
-    SpaceControlGeneration,
+    ActiveSpaceGenerationManifestStoreError, PreparedSpaceControlGeneration,
+    ProfilePassphraseRecoveryPort, ProfileRuntimeLayout, SpaceControlGeneration,
 };
 use crate::db::pool::DbPool;
 use crate::space::RuntimeSpaceAccessAdapter;
@@ -23,6 +23,7 @@ pub struct SpaceTransitionActivation {
     manifests: Arc<ActiveSpaceGenerationManifestStore>,
     control_generations: Arc<SpaceControlGeneration>,
     space_access: Arc<RuntimeSpaceAccessAdapter>,
+    profile_vault: Arc<dyn ProfilePassphraseRecoveryPort>,
     activation_lock: tokio::sync::Mutex<()>,
 }
 
@@ -33,6 +34,7 @@ impl SpaceTransitionActivation {
         manifests: Arc<ActiveSpaceGenerationManifestStore>,
         control_generations: Arc<SpaceControlGeneration>,
         space_access: Arc<RuntimeSpaceAccessAdapter>,
+        profile_vault: Arc<dyn ProfilePassphraseRecoveryPort>,
     ) -> Self {
         Self {
             profile_root,
@@ -40,6 +42,7 @@ impl SpaceTransitionActivation {
             manifests,
             control_generations,
             space_access,
+            profile_vault,
             activation_lock: tokio::sync::Mutex::new(()),
         }
     }
@@ -490,7 +493,11 @@ impl SpaceTransitionActivation {
             .replace_database(database)
             .map_err(recovery)?;
         self.space_access
-            .activate_prepared_control_generation(target.layout().space_id(), target_access_state)
+            .activate_prepared_control_generation(
+                target.layout().space_id(),
+                target_access_state,
+                self.profile_vault.as_ref(),
+            )
             .await
             .map_err(|source| recovery(anyhow::Error::new(source)))?;
 
@@ -671,7 +678,7 @@ fn map_manifest_error(
         ActiveSpaceGenerationManifestStoreError::Storage { .. } => {
             storage(anyhow::Error::new(source))
         }
-        ActiveSpaceGenerationManifestStoreError::Corrupt
+        ActiveSpaceGenerationManifestStoreError::Corrupt { .. }
         | ActiveSpaceGenerationManifestStoreError::UnsupportedVersion => {
             inconsistent(anyhow::Error::new(source))
         }
@@ -696,4 +703,27 @@ fn sync_directory(directory: &std::path::Path) -> std::io::Result<()> {
         std::fs::File::open(directory)?.sync_all()?;
     }
     Ok(())
+}
+
+/// 测试中不涉及资料 vault 的切换场景使用；vault 重新包裹由资料密钥恢复存储自身的测试覆盖。
+#[cfg(test)]
+pub(crate) struct WithoutProfileVault;
+
+#[cfg(test)]
+impl ProfilePassphraseRecoveryPort for WithoutProfileVault {
+    fn prepare_passphrase_change(&self, _kek: &[u8]) -> Result<(), super::ProfileKeyRecoveryError> {
+        Ok(())
+    }
+
+    fn finish_passphrase_change(&self, _kek: &[u8]) -> Result<(), super::ProfileKeyRecoveryError> {
+        Ok(())
+    }
+
+    fn prepare_kek_replacement(&self, _kek: &[u8]) -> Result<(), super::ProfileKeyRecoveryError> {
+        Ok(())
+    }
+
+    fn finish_kek_replacement(&self, _kek: &[u8]) -> Result<(), super::ProfileKeyRecoveryError> {
+        Ok(())
+    }
 }

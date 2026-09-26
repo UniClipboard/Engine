@@ -69,6 +69,7 @@ impl ClipboardBinaryPayload {
                 ),
             ));
         }
+        // TryFromIntError：目标分类完整表达数值范围不符。
         let rep_count = u16::try_from(self.representations.len()).map_err(|_| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -93,6 +94,7 @@ impl ClipboardBinaryPayload {
                     ),
                 ));
             }
+            // TryFromIntError：目标分类完整表达数值范围不符。
             let format_id_len = u16::try_from(format_id_bytes.len()).map_err(|_| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
@@ -118,6 +120,7 @@ impl ClipboardBinaryPayload {
                             ),
                         ));
                     }
+                    // TryFromIntError：目标分类完整表达数值范围不符。
                     let mime_len = u16::try_from(mime_bytes.len()).map_err(|_| {
                         std::io::Error::new(
                             std::io::ErrorKind::InvalidInput,
@@ -143,6 +146,7 @@ impl ClipboardBinaryPayload {
                     ),
                 ));
             }
+            // TryFromIntError：目标分类完整表达数值范围不符。
             let data_len = u32::try_from(rep.data.len()).map_err(|_| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,

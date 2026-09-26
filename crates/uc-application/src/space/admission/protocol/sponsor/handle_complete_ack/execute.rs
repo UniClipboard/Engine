@@ -1,10 +1,11 @@
-use uc_core::membership::AdmissionReplayDecision;
+use uc_core::membership::{AdmissionReplayDecision, LedgerInput};
 
 use super::super::{
     AuthenticatedSpaceAdmissionMessage, HandleAuthenticatedSpaceAdmissionMessageError,
     SpaceAdmissionMessageReply, SponsorAdmissionMutation, SponsorAdmissionState,
 };
 use crate::space::admission::protocol::SponsorAdmissionService;
+use crate::space::membership::ledger_error;
 
 impl SponsorAdmissionService {
     pub(in crate::space::admission::protocol::sponsor) async fn handle_complete_ack(
@@ -53,8 +54,25 @@ impl SponsorAdmissionService {
         })?;
         let settled = self
             .prepare_settled
-            .prepare(aggregate.admission_id(), preparation, &complete_ack)
+            .prepare(aggregate.admission_id(), &preparation, &complete_ack)
             .await?;
+        let history = self
+            .activate_admission
+            .activate(preparation.activated_security())
+            .await?;
+        // 成员事实先于准入终态提交；同一加入重复提交时账本返回未变化，不产生第二次加入。
+        self.members
+            .commit(|draft| {
+                draft
+                    .apply(LedgerInput::AdmissionCommitted { history })
+                    .map_err(ledger_error)
+            })
+            .await
+            .map_err(|source| {
+                HandleAuthenticatedSpaceAdmissionMessageError::unavailable(anyhow::Error::new(
+                    source,
+                ))
+            })?;
         let transition =
             aggregate.settle_complete_ack(complete_ack, canonical_digest, settled.into_reply())?;
         let committed = self

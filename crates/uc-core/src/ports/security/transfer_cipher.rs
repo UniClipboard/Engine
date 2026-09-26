@@ -39,8 +39,8 @@ pub enum TransferCipherError {
     DecryptionFailed,
 
     /// 其它不可恢复的内部故障。
-    #[error("transfer cipher internal error: {0}")]
-    Internal(String),
+    #[error("transfer cipher internal error")]
+    Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// 剪切板传输加解密 port。

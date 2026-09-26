@@ -273,6 +273,7 @@ pub async fn prepare_local_diagnostic_export(
             .map_err(failure)
     })
     .await
+    // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
     .map_err(|_| {
         napi::Error::new(
             napi::Status::GenericFailure,

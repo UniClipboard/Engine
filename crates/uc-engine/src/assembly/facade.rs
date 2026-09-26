@@ -27,6 +27,7 @@ use uc_infra::network::iroh::{IrohRelayProbeAdapter, IrohRelayProbeError, IrohRe
 use uc_mobile_lan::{
     IncomingMobileBuffer, MobileSyncFacade, MobileSyncFacadeDeps, MobileSyncSnapshotPorts,
 };
+use uc_observability_contract::error_source::io_error_kind;
 
 // ---------------------------------------------------------------------------
 // IrohRelayDiagnosticAdapter
@@ -63,12 +64,12 @@ fn map_relay_probe_report(report: IrohRelayProbeReport) -> RelayProbeReport {
 
 fn map_relay_probe_error(err: IrohRelayProbeError) -> RelayProbeError {
     match err {
-        IrohRelayProbeError::InvalidUrl(msg) => RelayProbeError::InvalidUrl(msg),
-        IrohRelayProbeError::Dns(msg) => RelayProbeError::Dns(msg),
-        IrohRelayProbeError::Tls(msg) => RelayProbeError::Tls(msg),
-        IrohRelayProbeError::Handshake(msg) => RelayProbeError::Handshake(msg),
+        IrohRelayProbeError::InvalidUrl(detail) => RelayProbeError::InvalidUrl(Box::new(detail)),
+        IrohRelayProbeError::Dns(detail) => RelayProbeError::Dns(Box::new(detail)),
+        IrohRelayProbeError::Tls(detail) => RelayProbeError::Tls(Box::new(detail)),
+        IrohRelayProbeError::Handshake(detail) => RelayProbeError::Handshake(Box::new(detail)),
         IrohRelayProbeError::Timeout => RelayProbeError::Timeout,
-        IrohRelayProbeError::Other(msg) => RelayProbeError::Other(msg),
+        IrohRelayProbeError::Other(detail) => RelayProbeError::Other(Box::new(detail)),
     }
 }
 
@@ -80,7 +81,8 @@ pub(crate) fn build_relay_diagnostic() -> Option<Arc<dyn RelayDiagnosticPort>> {
         Err(error) => {
             tracing::warn!(
                 target: "bootstrap.network",
-                error = %error,
+                error_kind = "relay_probe_unavailable",
+                io_error_kind = io_error_kind(&error),
                 "relay probe adapter unavailable; settings.probe_relay_url will reject"
             );
             None

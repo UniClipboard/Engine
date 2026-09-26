@@ -24,13 +24,42 @@ const MAX_ARCHIVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub enum ArchiveError {
     /// The tar stream is malformed or a member could not be read.
     #[error("malformed archive")]
-    Malformed,
+    Malformed {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     /// A member path is unsafe (absolute, or escapes via `..`).
     #[error("unsafe member path")]
-    UnsafePath,
+    UnsafePath {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     /// Total extracted size exceeded the in-memory ceiling.
     #[error("archive exceeds size ceiling")]
     TooLarge,
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl ArchiveError {
+    pub fn malformed() -> Self {
+        Self::Malformed { source: None }
+    }
+
+    pub fn malformed_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Malformed {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn unsafe_path() -> Self {
+        Self::UnsafePath { source: None }
+    }
+
+    pub fn unsafe_path_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::UnsafePath {
+            source: Some(source.into()),
+        }
+    }
 }
 
 /// An in-memory archive: ordered map of member path → bytes.
@@ -74,17 +103,18 @@ impl BundleArchive {
             let mut header = tar::Header::new_gnu();
             header
                 .set_path(path)
-                .map_err(|_| ArchiveError::UnsafePath)?;
+                .map_err(ArchiveError::unsafe_path_from)?;
             header.set_size(bytes.len() as u64);
             header.set_mode(0o600);
             header.set_cksum();
             builder
                 .append(&header, Cursor::new(bytes))
-                .map_err(|_| ArchiveError::Malformed)?;
+                .map_err(ArchiveError::malformed_from)?;
         }
-        let inner = builder.into_inner().map_err(|_| ArchiveError::Malformed)?;
+        let inner = builder.into_inner().map_err(ArchiveError::malformed_from)?;
         let mut out = Vec::new();
-        out.write_all(&inner).map_err(|_| ArchiveError::Malformed)?;
+        out.write_all(&inner)
+            .map_err(ArchiveError::malformed_from)?;
         Ok(out)
     }
 
@@ -95,13 +125,16 @@ impl BundleArchive {
         let mut members = BTreeMap::new();
         let mut total: u64 = 0;
 
-        let entries = archive.entries().map_err(|_| ArchiveError::Malformed)?;
+        let entries = archive.entries().map_err(ArchiveError::malformed_from)?;
         for entry in entries {
-            let mut entry = entry.map_err(|_| ArchiveError::Malformed)?;
-            let path = entry.path().map_err(|_| ArchiveError::Malformed)?;
+            let mut entry = entry.map_err(ArchiveError::malformed_from)?;
+            let path = entry.path().map_err(ArchiveError::malformed_from)?;
             let rel = safe_relative_path(&path)?;
 
-            let size = entry.header().size().map_err(|_| ArchiveError::Malformed)?;
+            let size = entry
+                .header()
+                .size()
+                .map_err(ArchiveError::malformed_from)?;
             total = total.checked_add(size).ok_or(ArchiveError::TooLarge)?;
             if total > MAX_ARCHIVE_BYTES {
                 return Err(ArchiveError::TooLarge);
@@ -110,7 +143,7 @@ impl BundleArchive {
             let mut buf = Vec::with_capacity(size as usize);
             entry
                 .read_to_end(&mut buf)
-                .map_err(|_| ArchiveError::Malformed)?;
+                .map_err(ArchiveError::malformed_from)?;
             members.insert(rel, buf);
         }
 
@@ -125,18 +158,18 @@ fn safe_relative_path(path: &Path) -> Result<String, ArchiveError> {
     for component in path.components() {
         match component {
             Component::Normal(part) => {
-                let s = part.to_str().ok_or(ArchiveError::UnsafePath)?;
+                let s = part.to_str().ok_or_else(ArchiveError::unsafe_path)?;
                 parts.push(s.to_string());
             }
             // Reject root, prefixes (Windows drive), and parent traversal.
             Component::RootDir
             | Component::Prefix(_)
             | Component::ParentDir
-            | Component::CurDir => return Err(ArchiveError::UnsafePath),
+            | Component::CurDir => return Err(ArchiveError::unsafe_path()),
         }
     }
     if parts.is_empty() {
-        return Err(ArchiveError::UnsafePath);
+        return Err(ArchiveError::unsafe_path());
     }
     Ok(parts.join("/"))
 }
@@ -181,13 +214,13 @@ mod tests {
     #[test]
     fn absolute_member_path_is_rejected() {
         let err = safe_relative_path(Path::new("/etc/passwd")).unwrap_err();
-        assert!(matches!(err, ArchiveError::UnsafePath));
+        assert!(matches!(err, ArchiveError::UnsafePath { .. }));
     }
 
     #[test]
     fn parent_traversal_is_rejected() {
         let err = safe_relative_path(Path::new("../../escape")).unwrap_err();
-        assert!(matches!(err, ArchiveError::UnsafePath));
+        assert!(matches!(err, ArchiveError::UnsafePath { .. }));
     }
 
     #[test]

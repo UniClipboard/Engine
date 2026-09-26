@@ -1,13 +1,15 @@
 use std::sync::Arc;
 
 use uc_core::membership::{
-    HistoricalMembershipSignatureVerifier, MembershipBranchTransitionPhaseV1,
+    HistoricalMembershipSignatureVerifier, LedgerInput, LedgerOutcome, MemberInstanceId,
+    MembershipBranchTransitionPhaseV1, MembershipBranchTransitionV1, VersionedMembershipHistory,
 };
 use uc_core::ports::ClockPort;
 
 use crate::space::membership::{
-    MembershipBranchRecoverySession, MembershipConflictStatus, MembershipLedger,
-    MembershipLedgerError, MembershipMaintenanceStepOutcome, RecoverMembershipConflictsPort,
+    ledger_error, MembershipBranchRecoverySession, MembershipConflictStatus, MembershipLedgerError,
+    MembershipMaintenanceStepOutcome, MembershipOwner, RecoverMembershipConflictsPort,
+    StagedMembershipRecord,
 };
 
 use super::{
@@ -28,7 +30,7 @@ pub(crate) enum RecoverMembershipConflictOutcome {
 }
 
 pub(crate) struct RecoverMembershipConflictUseCase {
-    ledger: Arc<MembershipLedger>,
+    owner: Arc<MembershipOwner>,
     recovery_channel: Arc<dyn MembershipBranchRecoveryChannelPort>,
     recipient_preparer: Arc<dyn PrepareMembershipBranchRecoveryRecipientPort>,
     transition: Arc<dyn PrepareMembershipBranchTransitionPort>,
@@ -58,7 +60,7 @@ impl RecoverMembershipConflictsPort for RecoverMembershipConflictUseCase {
 
 impl RecoverMembershipConflictUseCase {
     pub(crate) fn new(
-        ledger: Arc<MembershipLedger>,
+        owner: Arc<MembershipOwner>,
         recovery_channel: Arc<dyn MembershipBranchRecoveryChannelPort>,
         recipient_preparer: Arc<dyn PrepareMembershipBranchRecoveryRecipientPort>,
         transition: Arc<dyn PrepareMembershipBranchTransitionPort>,
@@ -67,7 +69,7 @@ impl RecoverMembershipConflictUseCase {
         clock: Arc<dyn ClockPort>,
     ) -> Self {
         Self {
-            ledger,
+            owner,
             recovery_channel,
             recipient_preparer,
             transition,
@@ -80,40 +82,29 @@ impl RecoverMembershipConflictUseCase {
 
     pub(crate) async fn execute(&self) -> RecoverMembershipConflictOutcome {
         let _guard = self.execution_lock.lock().await;
-        let snapshot = match self.ledger.load_verified().await {
-            Ok(snapshot) => snapshot,
+        let view = match self.owner.load().await {
+            Ok(view) => view,
             Err(error) => return map_ledger_error(error),
         };
-        let Some(conflict) = snapshot
-            .record()
-            .membership_conflicts
-            .values()
-            .find(|conflict| {
-                conflict.status == MembershipConflictStatus::Selected
-                    || conflict.status == MembershipConflictStatus::Transitioning
-            })
-        else {
+        let Some(space) = view.space() else {
             return RecoverMembershipConflictOutcome::Completed;
         };
-        let (Some(target_branch_id), Some(transition_id), Some(recipient_member)) = (
-            conflict.selected_branch_id,
-            conflict.transition_id,
-            snapshot.record().local_member_instance,
-        ) else {
+        let record = space.branch_recovery();
+        let Some(conflict) = record.conflicts.values().find(|conflict| {
+            conflict.status == MembershipConflictStatus::Selected
+                || conflict.status == MembershipConflictStatus::Transitioning
+        }) else {
+            return RecoverMembershipConflictOutcome::Completed;
+        };
+        let recipient_member = space.local_member();
+        let (Some(target_branch_id), Some(transition_id)) =
+            (conflict.selected_branch_id, conflict.transition_id)
+        else {
             return RecoverMembershipConflictOutcome::Corrupt;
         };
         let conflict_id = conflict.conflict_id;
-        if let Some(transition) = snapshot
-            .record()
-            .membership_branch_transitions
-            .get(&transition_id)
-            .cloned()
-        {
-            let Some(session) = snapshot
-                .record()
-                .membership_branch_recovery_sessions
-                .get(&transition_id)
-            else {
+        if let Some(transition) = record.branch_transitions.get(&transition_id).cloned() {
+            let Some(session) = record.recovery_sessions.get(&transition_id) else {
                 return RecoverMembershipConflictOutcome::Corrupt;
             };
             let Some((recipient_staged_mls_state, recovery_package)) =
@@ -140,11 +131,7 @@ impl RecoverMembershipConflictUseCase {
             target_branch_id,
             recipient_member,
         };
-        let existing_session = snapshot
-            .record()
-            .membership_branch_recovery_sessions
-            .get(&transition_id)
-            .cloned();
+        let existing_session = record.recovery_sessions.get(&transition_id).cloned();
         let package = if let Some(session) = existing_session.as_ref() {
             if let Some((_, package)) = session.recipient_completion() {
                 package.clone()
@@ -192,10 +179,11 @@ impl RecoverMembershipConflictUseCase {
                 return RecoverMembershipConflictOutcome::StableFailure;
             };
             let persisted = self
-                .ledger
-                .compare_and_commit(move |record| {
+                .owner
+                .commit(move |draft| {
+                    let record = draft.branch_recovery_mut()?;
                     let current = record
-                        .membership_conflicts
+                        .conflicts
                         .get(&conflict_id)
                         .ok_or(MembershipLedgerError::Conflict)?;
                     if current.selected_branch_id != Some(target_branch_id)
@@ -209,7 +197,7 @@ impl RecoverMembershipConflictUseCase {
                         return Err(MembershipLedgerError::Conflict);
                     }
                     if record
-                        .membership_branch_recovery_sessions
+                        .recovery_sessions
                         .insert(transition_id, session)
                         .is_some()
                     {
@@ -270,17 +258,16 @@ impl RecoverMembershipConflictUseCase {
         }
 
         match self
-            .ledger
-            .compare_and_commit(move |record| {
-                if let Some(consuming_conflict) =
-                    record.consumed_membership_recovery_nonces.get(&nonce)
-                {
+            .owner
+            .commit(move |draft| {
+                let record = draft.branch_recovery_mut()?;
+                if let Some(consuming_conflict) = record.consumed_recovery_nonces.get(&nonce) {
                     if consuming_conflict != &conflict_id {
                         return Err(MembershipLedgerError::Conflict);
                     }
                 }
                 let current = record
-                    .membership_conflicts
+                    .conflicts
                     .get_mut(&conflict_id)
                     .ok_or(MembershipLedgerError::Conflict)?;
                 if current.selected_branch_id != Some(target_branch_id)
@@ -293,17 +280,13 @@ impl RecoverMembershipConflictUseCase {
                 {
                     return Err(MembershipLedgerError::Conflict);
                 }
-                if let Some(existing) = record.membership_branch_transitions.get(&transition_id) {
+                if let Some(existing) = record.branch_transitions.get(&transition_id) {
                     return (existing == &prepared)
                         .then_some(())
                         .ok_or(MembershipLedgerError::Conflict);
                 }
-                record
-                    .consumed_membership_recovery_nonces
-                    .insert(nonce, conflict_id);
-                record
-                    .membership_branch_transitions
-                    .insert(transition_id, prepared);
+                record.consumed_recovery_nonces.insert(nonce, conflict_id);
+                record.branch_transitions.insert(transition_id, prepared);
                 current.status = MembershipConflictStatus::Transitioning;
                 Ok(())
             })
@@ -332,6 +315,26 @@ impl RecoverMembershipConflictUseCase {
                     Ok(history) => history,
                     Err(_) => return RecoverMembershipConflictOutcome::StableFailure,
                 };
+            let staged_membership =
+                if transition.phase() == MembershipBranchTransitionPhaseV1::TargetVerified {
+                    match self
+                        .stage_target_membership(
+                            transition_id,
+                            &transition,
+                            recovery_package.recipient_member(),
+                            &target_history,
+                        )
+                        .await
+                    {
+                        Ok(staged) => Some(staged),
+                        Err(MembershipLedgerError::Conflict) => {
+                            return RecoverMembershipConflictOutcome::StableFailure;
+                        }
+                        Err(error) => return map_ledger_error(error),
+                    }
+                } else {
+                    None
+                };
             let next = match self
                 .transition_executor
                 .advance_membership_branch_transition(AdvanceMembershipBranchTransitionInput {
@@ -339,6 +342,7 @@ impl RecoverMembershipConflictUseCase {
                     recipient_staged_mls_state: recipient_staged_mls_state.clone(),
                     recovery_package: recovery_package.clone(),
                     target_history,
+                    staged_membership,
                 })
                 .await
             {
@@ -356,7 +360,8 @@ impl RecoverMembershipConflictUseCase {
             if transition.advance(next.phase()).as_ref() != Some(&next) {
                 return RecoverMembershipConflictOutcome::StableFailure;
             }
-            if let Err(error) = self.ledger.load_verified().await {
+            // 提升后当前控制世代已换成目标世代，Owner 按数据库代号的变化读取其中已暂存的成员记录。
+            if let Err(error) = self.owner.load().await {
                 return map_ledger_error(error);
             }
             let completed = next.phase() == MembershipBranchTransitionPhaseV1::Completed;
@@ -365,10 +370,11 @@ impl RecoverMembershipConflictUseCase {
             let persisted_transition = transition.clone();
             let persisted_next = next.clone();
             match self
-                .ledger
-                .compare_and_commit(move |record| {
+                .owner
+                .commit(move |draft| {
+                    let record = draft.branch_recovery_mut()?;
                     let current = record
-                        .membership_branch_transitions
+                        .branch_transitions
                         .get_mut(&transition_id)
                         .ok_or(MembershipLedgerError::Conflict)?;
                     if current != &persisted_transition {
@@ -377,7 +383,7 @@ impl RecoverMembershipConflictUseCase {
                     *current = persisted_next;
                     if completed {
                         let conflict = record
-                            .membership_conflicts
+                            .conflicts
                             .get_mut(&conflict_id)
                             .ok_or(MembershipLedgerError::Conflict)?;
                         if conflict.transition_id != Some(transition_id) {
@@ -385,7 +391,7 @@ impl RecoverMembershipConflictUseCase {
                         }
                         conflict.status = MembershipConflictStatus::Completed;
                         record
-                            .membership_branch_recovery_sessions
+                            .recovery_sessions
                             .remove(&transition_id)
                             .ok_or(MembershipLedgerError::Conflict)?;
                     }
@@ -407,6 +413,48 @@ impl RecoverMembershipConflictUseCase {
                 Err(error) => return map_ledger_error(error),
             }
         }
+    }
+
+    /// 目标控制世代的成员记录：在当前状态上采用目标分支历史，并把本次转换的检查点推进到
+    /// `TargetStaged`，使目标世代提升后即可从该检查点继续。
+    async fn stage_target_membership(
+        &self,
+        transition_id: [u8; 32],
+        transition: &MembershipBranchTransitionV1,
+        recipient_member: MemberInstanceId,
+        target_history: &VersionedMembershipHistory,
+    ) -> Result<StagedMembershipRecord, MembershipLedgerError> {
+        let staged_transition = transition
+            .advance(MembershipBranchTransitionPhaseV1::TargetStaged)
+            .ok_or(MembershipLedgerError::Conflict)?;
+        let history = target_history.clone();
+        self.owner
+            .stage(move |draft| {
+                if draft.require_space()?.local_member() != recipient_member {
+                    return Err(MembershipLedgerError::Conflict);
+                }
+                let checkpoint = draft
+                    .branch_recovery_mut()?
+                    .branch_transitions
+                    .get_mut(&transition_id)
+                    .ok_or(MembershipLedgerError::Conflict)?;
+                if checkpoint != transition {
+                    return Err(MembershipLedgerError::Conflict);
+                }
+                *checkpoint = staged_transition;
+                // 旧分支的历史交换暂存不跨分支继承。
+                *draft.history_exchange_mut()? = Default::default();
+                match draft
+                    .apply(LedgerInput::BranchRecovered { history })
+                    .map_err(ledger_error)?
+                {
+                    LedgerOutcome::Applied => Ok(()),
+                    LedgerOutcome::Unchanged | LedgerOutcome::Stale => {
+                        Err(MembershipLedgerError::Conflict)
+                    }
+                }
+            })
+            .await
     }
 
     async fn submit_and_persist_package(
@@ -439,10 +487,11 @@ impl RecoverMembershipConflictUseCase {
             return Err(RecoverMembershipConflictOutcome::StableFailure);
         }
         let persisted_package = package.clone();
-        self.ledger
-            .compare_and_commit(move |record| {
-                let session = record
-                    .membership_branch_recovery_sessions
+        self.owner
+            .commit(move |draft| {
+                let session = draft
+                    .branch_recovery_mut()?
+                    .recovery_sessions
                     .get_mut(&transition_id)
                     .ok_or(MembershipLedgerError::Conflict)?;
                 session
@@ -485,11 +534,11 @@ fn map_recipient_error(
 
 fn map_ledger_error(error: MembershipLedgerError) -> RecoverMembershipConflictOutcome {
     match error {
-        MembershipLedgerError::Locked | MembershipLedgerError::Unavailable => {
+        MembershipLedgerError::Locked | MembershipLedgerError::Unavailable { .. } => {
             RecoverMembershipConflictOutcome::Deferred
         }
         MembershipLedgerError::Conflict => RecoverMembershipConflictOutcome::StableFailure,
-        MembershipLedgerError::Corrupt | MembershipLedgerError::RecoveryRequired => {
+        MembershipLedgerError::Corrupt { .. } | MembershipLedgerError::RecoveryRequired => {
             RecoverMembershipConflictOutcome::Corrupt
         }
     }

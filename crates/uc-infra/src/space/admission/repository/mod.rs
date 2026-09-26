@@ -1,5 +1,14 @@
 pub(super) mod codec;
 mod persisted;
+// rust-style: allow-qualified-path -- 仅向相邻准入实现开放内部仓储格式，不扩大正式接口
+pub(in crate::space::admission) use persisted::PersistedSpaceAdmissionRepositoryV2;
+#[cfg(test)]
+// rust-style: allow-qualified-path -- 仅向相邻准入测试开放内部仓储夹具，不扩大正式接口
+pub(in crate::space::admission) fn fresh_test_repository_state(
+    profile_generation: [u8; 16],
+) -> PersistedSpaceAdmissionRepositoryV2 {
+    PersistedSpaceAdmissionRepositoryV2::fresh(profile_generation)
+}
 mod recovery_index;
 pub(super) mod token;
 
@@ -14,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use crate::db::ports::DbExecutor;
 use crate::security::{ActiveSpaceGenerationManifestStore, AdmissionKeyManager};
 use uc_application::deps::AdmissionReadFailureCategory;
-use uc_application::deps::LoadMembershipLedgerPort;
+use uc_application::deps::MembershipRecordStorePort;
 use uc_core::membership::{AdmissionContinuationCredential, SpaceAdmissionId};
 
 use codec::RepositoryReadCache;
@@ -26,7 +35,7 @@ pub struct SqliteSpaceAdmissionState<E> {
     pub(super) executor: E,
     pub(super) keys: Arc<AdmissionKeyManager>,
     pub(super) manifests: Arc<ActiveSpaceGenerationManifestStore>,
-    pub(super) membership: Arc<dyn LoadMembershipLedgerPort>,
+    pub(super) membership: Arc<dyn MembershipRecordStorePort>,
     read_cache: Mutex<Option<RepositoryReadCache>>,
     #[cfg(test)]
     record_reads: std::sync::atomic::AtomicUsize,
@@ -37,7 +46,7 @@ impl<E> SqliteSpaceAdmissionState<E> {
         executor: E,
         keys: Arc<AdmissionKeyManager>,
         manifests: Arc<ActiveSpaceGenerationManifestStore>,
-        membership: Arc<dyn LoadMembershipLedgerPort>,
+        membership: Arc<dyn MembershipRecordStorePort>,
     ) -> Self {
         Self {
             executor,
@@ -56,7 +65,10 @@ pub(super) enum SpaceAdmissionStateStoreError {
     #[error("space admission state is locked")]
     Locked,
     #[error("space admission state is corrupt")]
-    Corrupt,
+    Corrupt {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("space admission repository read requires recovery")]
     ReadInvalid {
         category: AdmissionReadFailureCategory,
@@ -66,7 +78,33 @@ pub(super) enum SpaceAdmissionStateStoreError {
     #[error("space admission state changed")]
     Conflict,
     #[error("space admission state storage is unavailable")]
-    Unavailable,
+    Unavailable {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl SpaceAdmissionStateStoreError {
+    pub fn corrupt() -> Self {
+        Self::Corrupt { source: None }
+    }
+
+    pub fn corrupt_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Corrupt {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn unavailable() -> Self {
+        Self::Unavailable { source: None }
+    }
+
+    pub fn unavailable_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Unavailable {
+            source: Some(source.into()),
+        }
+    }
 }
 
 impl SpaceAdmissionStateStoreError {
@@ -84,7 +122,7 @@ impl SpaceAdmissionStateStoreError {
     pub(in crate::space::admission) fn read_category(&self) -> AdmissionReadFailureCategory {
         match self {
             Self::ReadInvalid { category, .. } => *category,
-            Self::Locked | Self::Corrupt | Self::Conflict | Self::Unavailable => {
+            Self::Locked | Self::Corrupt { .. } | Self::Conflict | Self::Unavailable { .. } => {
                 AdmissionReadFailureCategory::OtherStorageError
             }
         }
@@ -92,8 +130,8 @@ impl SpaceAdmissionStateStoreError {
 }
 
 impl From<diesel::result::Error> for SpaceAdmissionStateStoreError {
-    fn from(_error: diesel::result::Error) -> Self {
-        Self::Unavailable
+    fn from(error: diesel::result::Error) -> Self {
+        Self::unavailable_from(error)
     }
 }
 
@@ -127,16 +165,15 @@ impl CredentialLoadError {
             Self::CredentialMissing => CredentialFailure::CredentialMissing,
             Self::State(SpaceAdmissionStateStoreError::Locked) => CredentialFailure::Locked,
             Self::State(
-                SpaceAdmissionStateStoreError::Corrupt
+                SpaceAdmissionStateStoreError::Corrupt { .. }
                 | SpaceAdmissionStateStoreError::ReadInvalid { .. },
             )
             | Self::Invalid { .. } => CredentialFailure::Corrupt,
             Self::State(SpaceAdmissionStateStoreError::Conflict) => {
                 CredentialFailure::RecoveryRequired
             }
-            Self::State(SpaceAdmissionStateStoreError::Unavailable) | Self::Storage { .. } => {
-                CredentialFailure::Unavailable
-            }
+            Self::State(SpaceAdmissionStateStoreError::Unavailable { .. })
+            | Self::Storage { .. } => CredentialFailure::Unavailable,
         }
     }
 
