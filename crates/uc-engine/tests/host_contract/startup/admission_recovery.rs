@@ -250,3 +250,69 @@ async fn legacy_table_compatibility_does_not_bypass_unreadable_admission_metadat
         assert_eq!(payload.encrypted_payload, [0xff]);
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admission_failure_found_on_resume_enters_restricted_recovery() {
+    let root = tempfile::tempdir().unwrap();
+    let storage = MemorySecureStorage::default();
+    let (engine, _events) = Engine::start(
+        EngineConfig::new("2.0.0"),
+        host(root.path(), Box::new(storage.clone())),
+    )
+    .await
+    .unwrap();
+    engine
+        .execute(Operation::CreateSpace(CreateSpaceInput {
+            device_name: Some("resume recovery test".into()),
+            passphrase: SecretString::new("test-passphrase"),
+            passphrase_confirmation: SecretString::new("test-passphrase"),
+        }))
+        .await
+        .unwrap();
+    engine.suspend().await.unwrap();
+    let (database, _) = runtime_databases(root.path());
+    let mut connection =
+        diesel::sqlite::SqliteConnection::establish(database.to_str().unwrap()).unwrap();
+    connection
+        .batch_execute(
+            "INSERT OR REPLACE INTO admission_repository_state (singleton_id, encrypted_payload) \
+             VALUES (1, X'FF')",
+        )
+        .unwrap();
+    drop(connection);
+
+    engine
+        .resume()
+        .await
+        .expect("resume must leave a queryable restricted instance");
+    let OperationResult::ProfileRecovery(summary) = engine
+        .execute(Operation::QueryProfileRecovery)
+        .await
+        .unwrap()
+    else {
+        panic!("expected admission recovery summary")
+    };
+    assert_eq!(
+        summary.state,
+        uc_engine::ProfileRecoveryState::AdmissionRecoveryRequired
+    );
+    assert_eq!(
+        summary
+            .admission
+            .expect("admission failure must be public")
+            .category,
+        uc_engine::AdmissionRecoveryCategory::LegacyFallbackInvalid
+    );
+    assert_profile_recovery_required(
+        engine
+            .execute(Operation::SendText(SendTextInput {
+                text: "must not be saved after restricted resume".into(),
+                target_devices: Vec::new(),
+            }))
+            .await,
+    );
+    engine.suspend().await.unwrap();
+    engine.resume().await.unwrap();
+    assert_profile_recovery_required(engine.execute(Operation::QueryDeviceGroupChoices).await);
+    engine.shutdown(Duration::from_secs(15)).await.unwrap();
+}

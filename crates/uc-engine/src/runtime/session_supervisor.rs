@@ -51,7 +51,9 @@ use crate::{
     InboundNoticeEvent, InboundRepresentationSummary, RefreshReason,
 };
 
-use super::{operation_error_with_code, operation_unavailable_error};
+use super::{
+    operation_error_with_code, operation_unavailable_error, profile_recovery_required_error,
+};
 use crate::{EngineError, EngineErrorCategory, OperationResult};
 
 const SESSION_OPERATION_GRACE: Duration = Duration::from_secs(2);
@@ -223,6 +225,8 @@ pub(super) struct SessionSupervisor {
     test_control: Arc<SessionHandoverTestControl>,
     session_recovery_enabled: AtomicBool,
     coordinator: Arc<RuntimeLifecycle>,
+    /// 会话装配发现准入资料无法读取后保持置位；同一进程不重试修复，由恢复运行期转入受限模式。
+    admission_recovery: StdMutex<Option<AdmissionRecoverySummary>>,
 }
 
 pub(super) struct SessionOperationLease {
@@ -363,6 +367,7 @@ impl SessionSupervisor {
             #[cfg(feature = "dev-tools")]
             test_control: Arc::new(SessionHandoverTestControl::default()),
             session_recovery_enabled: AtomicBool::new(false),
+            admission_recovery: StdMutex::new(None),
             coordinator: application
                 .runtime_lifecycle(Arc::new(SessionWork(owner.clone())), security),
         })
@@ -689,6 +694,13 @@ impl SessionSupervisor {
         self.coordinator.stop(deadline).await
     }
 
+    pub(super) fn admission_recovery(&self) -> Option<AdmissionRecoverySummary> {
+        *self
+            .admission_recovery
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn configured_factory(&self) -> Option<Arc<ProductionSessionFactory>> {
         self.factory
             .lock()
@@ -799,7 +811,18 @@ impl SessionSupervisor {
                 .ok_or_else(operation_unavailable_error)?
                 .prepare_session()
         };
-        let prepared = factory.prepare(session_builder).await?;
+        let prepared = match factory.prepare(session_builder).await {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                if let Some(summary) = error.admission_recovery() {
+                    *self
+                        .admission_recovery
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(summary);
+                }
+                return Err(error);
+            }
+        };
         #[cfg(feature = "dev-tools")]
         if self
             .test_control
@@ -999,14 +1022,18 @@ impl ProductionSessionFactory {
         {
             Ok(runtime) => Arc::new(runtime),
             Err(error) => {
-                let admission = error
-                    .admission_failure()
-                    .map(AdmissionRecoverySummary::from);
-                let mut primary = session_runtime_error("application runtime", error);
-                if let Some(summary) = admission {
-                    error!(category = ?summary.category, stage = ?summary.stage, "admission startup requires recovery");
-                    primary = primary.with_admission_recovery(summary);
-                }
+                let primary = match error.admission_failure() {
+                    Some(category) => {
+                        let summary = AdmissionRecoverySummary::from(category);
+                        error!(
+                            category = ?summary.category,
+                            stage = ?summary.stage,
+                            "application runtime requires admission recovery"
+                        );
+                        profile_recovery_required_error().with_admission_recovery(summary)
+                    }
+                    None => session_runtime_error("application runtime", error),
+                };
                 prepared_session.shutdown().await;
                 let additional = sync_session
                     .shutdown(FileTransferCancellationReason::Unknown, None)

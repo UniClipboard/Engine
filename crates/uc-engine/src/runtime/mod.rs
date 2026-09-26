@@ -36,10 +36,11 @@ use crate::assembly::mobile_lan::MobileLanEndpointUpdater;
 #[cfg(feature = "dev-tools")]
 use crate::dev::JoinerFinalConfirmationGate;
 use crate::engine::event_stream::EventSender;
-use crate::error_codes::PROFILE_UPGRADE_BACKUP_KEY_MISSING_CODE;
+use crate::error_codes::{PROFILE_RECOVERY_REQUIRED_CODE, PROFILE_UPGRADE_BACKUP_KEY_MISSING_CODE};
 use crate::{
-    EngineConfig, EngineError, EngineErrorCategory, EngineEvent, HostCapabilities, HostFileAccess,
-    NetworkRecoveryPhaseSummary, NetworkRecoveryStatusSummary, RefreshReason,
+    AdmissionRecoverySummary, EngineConfig, EngineError, EngineErrorCategory, EngineEvent,
+    HostCapabilities, HostFileAccess, NetworkRecoveryPhaseSummary, NetworkRecoveryStatusSummary,
+    RefreshReason,
 };
 use host_clipboard::{spawn_host_clipboard_change_task, HostClipboardChangeRuntime};
 pub(crate) use profile_recovery::RecoverableRuntime;
@@ -150,6 +151,11 @@ fn engine_event_for_mobile_settings_update(
 }
 
 impl ProductionRuntime {
+    /// 启动后重建会话时发现的准入读取失败；存在时业务会话不可用，恢复运行期需转入受限模式。
+    pub(crate) fn admission_recovery(&self) -> Option<AdmissionRecoverySummary> {
+        self.session_supervisor.admission_recovery()
+    }
+
     pub(crate) async fn start(
         config: EngineConfig,
         host: HostCapabilities,
@@ -431,6 +437,15 @@ where
         current = source.source();
     }
     false
+}
+
+/// 资料需要恢复时拒绝业务操作；重试同一请求不能解决，宿主应查询恢复状态。
+fn profile_recovery_required_error() -> EngineError {
+    EngineError::new(
+        PROFILE_RECOVERY_REQUIRED_CODE,
+        EngineErrorCategory::Unavailable,
+        false,
+    )
 }
 
 fn operation_unavailable_error() -> EngineError {
