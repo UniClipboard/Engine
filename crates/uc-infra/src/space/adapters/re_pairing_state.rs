@@ -94,7 +94,8 @@ fn map_key_error(error: AdmissionKeyError) -> RePairingStateError {
         AdmissionKeyError::SecureStorage { .. } | AdmissionKeyError::StorageNotPersisted => {
             RePairingStateError::unavailable()
         }
-        AdmissionKeyError::Corrupt { .. }
+        AdmissionKeyError::Missing
+        | AdmissionKeyError::Corrupt { .. }
         | AdmissionKeyError::InvalidLayout
         | AdmissionKeyError::OpenFailed { .. } => RePairingStateError::inconsistent(),
     }

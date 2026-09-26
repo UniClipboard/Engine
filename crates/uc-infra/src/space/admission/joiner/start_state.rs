@@ -76,7 +76,9 @@ impl<E: DbExecutor + Send + Sync> JoinerStartStatePort for SqliteSpaceAdmissionS
             self.executor
                 .run(|conn| {
                     conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
-                        let mut state = self.load_state_on(conn).map_err(into_anyhow)?;
+                        let mut state = self
+                            .load_state_in_transaction_on(conn)
+                            .map_err(into_anyhow)?;
                         let current_id = state.current_local_join_id;
                         let current = current_id
                             .map(|id| {
@@ -160,7 +162,10 @@ fn map_joiner_error(error: SpaceAdmissionStateStoreError) -> JoinerStartStateErr
     match error {
         SpaceAdmissionStateStoreError::Locked => JoinerStartStateError::Locked,
         SpaceAdmissionStateStoreError::Conflict => JoinerStartStateError::StateChanged,
-        SpaceAdmissionStateStoreError::Corrupt { .. } => JoinerStartStateError::RecoveryRequired,
+        SpaceAdmissionStateStoreError::Corrupt { .. }
+        | SpaceAdmissionStateStoreError::ReadInvalid { .. } => {
+            JoinerStartStateError::RecoveryRequired
+        }
         SpaceAdmissionStateStoreError::Unavailable { .. } => JoinerStartStateError::Unavailable,
     }
 }

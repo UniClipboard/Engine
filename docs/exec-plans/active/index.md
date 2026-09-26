@@ -13,6 +13,7 @@
 - [050 成员多设备真实场景迁入 nextest 与 testkit 架构](050-membership-e2e-nextest-migration.md)（实施中：S1–S3、S5 已完成，CI 远程运行待登记）
 - [051 升级兼容性测试矩阵](051-upgrade-compatibility-matrix.md)（已确认，待实施：以 Desktop 1.0.0 各发布锁定的 Engine rev 为锚点，覆盖升级、先后升级、新旧互通与降级）
 - [历史可读时的邀请失败](2026-09-12-invitation-admission-recovery.md)
+- [升级后准入读取受限恢复](2026-09-21-admission-read-recovery.md)（实施中）
 - [本地产物准备](local-artifacts-preparation.md)
 - [配对通信等待诊断](2026-09-12-admission-exchange-diagnostics.md)
 - [配对内部处理与排队诊断](2026-09-13-pairing-local-work-diagnostics.md)

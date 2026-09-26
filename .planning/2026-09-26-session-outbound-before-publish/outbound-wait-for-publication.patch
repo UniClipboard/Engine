@@ -1,0 +1,328 @@
+diff --git a/crates/uc-infra/src/network/iroh/node.rs b/crates/uc-infra/src/network/iroh/node.rs
+index 64a99069..129f70c8 100644
+--- a/crates/uc-infra/src/network/iroh/node.rs
++++ b/crates/uc-infra/src/network/iroh/node.rs
+@@ -30,7 +30,7 @@ use uc_observability_contract::error_source::io_error_kind;
+ use super::protocol_router::ProtocolRouterBuilder;
+ use super::session_generation::{
+     SessionProtocolGenerationHandle, SessionProtocolHandlers, SessionProtocolHandlersBuilder,
+-    SessionProtocolRegistry, SessionProtocolRegistryError,
++    SessionProtocolPreparation, SessionProtocolRegistry, SessionProtocolRegistryError,
+ };
+ use iroh::address_lookup::AddrFilter;
+ use iroh::endpoint::{presets, QuicTransportConfig, VarInt};
+@@ -205,7 +205,10 @@ pub struct IrohNode {
+ impl IrohNode {
+     /// 为下一代空间会话准备协议能力，但不影响当前会话。
+     pub fn prepare_session(&self) -> IrohSessionBuilder {
+-        IrohSessionBuilder::new(Arc::clone(&self.session_context))
++        IrohSessionBuilder::new(
++            Arc::clone(&self.session_context),
++            self.session_protocols.begin_preparation(),
++        )
+     }
+ 
+     /// 停止当前空间会话并排空其连接，长期网络节点继续运行。
+@@ -226,12 +229,14 @@ impl IrohNode {
+         &mut self,
+         prepared: PreparedIrohSession,
+     ) -> Result<(), IrohNodeError> {
+-        let generation = self
+-            .session_protocols
+-            .publish(prepared.handlers)
+-            .await
+-            .map_err(IrohNodeError::session_protocol)?;
+-        self.session_generation = Some(generation);
++        let PreparedIrohSession {
++            handlers,
++            preparation,
++        } = prepared;
++        let published = self.session_protocols.publish(handlers).await;
++        // 发布结果确定后才结束准备，等待中的出站连接据此放行或拒绝。
++        drop(preparation);
++        self.session_generation = Some(published.map_err(IrohNodeError::session_protocol)?);
+         Ok(())
+     }
+ 
+@@ -625,23 +630,31 @@ struct IrohSessionContext {
+ pub struct IrohSessionBuilder {
+     context: Arc<IrohSessionContext>,
+     handlers: SessionProtocolHandlersBuilder,
++    preparation: SessionProtocolPreparation,
+ }
+ 
+ pub struct PreparedIrohSession {
+     handlers: SessionProtocolHandlers,
++    preparation: SessionProtocolPreparation,
+ }
+ 
+ impl PreparedIrohSession {
+     pub async fn shutdown(self) {
+-        self.handlers.shutdown().await;
++        let Self {
++            handlers,
++            preparation,
++        } = self;
++        drop(preparation);
++        handlers.shutdown().await;
+     }
+ }
+ 
+ impl IrohSessionBuilder {
+-    fn new(context: Arc<IrohSessionContext>) -> Self {
++    fn new(context: Arc<IrohSessionContext>, preparation: SessionProtocolPreparation) -> Self {
+         Self {
+             context,
+             handlers: SessionProtocolHandlersBuilder::new(),
++            preparation,
+         }
+     }
+ 
+@@ -649,6 +662,7 @@ impl IrohSessionBuilder {
+     pub fn finish(self) -> PreparedIrohSession {
+         PreparedIrohSession {
+             handlers: self.handlers.build(),
++            preparation: self.preparation,
+         }
+     }
+ 
+@@ -780,7 +794,10 @@ impl IrohSessionBuilder {
+ impl IrohNodeBuilder {
+     /// 创建一套尚未发布的空间会话能力。
+     pub fn prepare_session(&self) -> IrohSessionBuilder {
+-        IrohSessionBuilder::new(Arc::clone(&self.session_context))
++        IrohSessionBuilder::new(
++            Arc::clone(&self.session_context),
++            self.session_protocols.begin_preparation(),
++        )
+     }
+ 
+     /// Bind the iroh endpoint, reusing the Ed25519 secret persisted by
+diff --git a/crates/uc-infra/src/network/iroh/protocol_router.rs b/crates/uc-infra/src/network/iroh/protocol_router.rs
+index ab337170..956bffbe 100644
+--- a/crates/uc-infra/src/network/iroh/protocol_router.rs
++++ b/crates/uc-infra/src/network/iroh/protocol_router.rs
+@@ -291,4 +291,58 @@ mod tests {
+         client.close().await;
+         router.shutdown().await.unwrap();
+     }
++
++    #[tokio::test]
++    async fn outbound_dial_waits_for_the_generation_being_prepared() {
++        const TEST_ALPN: &[u8] = b"uniclipboard/test-preparing-generation/1";
++
++        let registry = Arc::new(SessionProtocolRegistry::new());
++        let _dispatcher = registry.dispatcher(TEST_ALPN);
++        let hooks = registry.endpoint_hooks();
++        let target = iroh::SecretKey::generate().public();
++        let addr = iroh::EndpointAddr::new(target);
++
++        let published_preparation = registry.begin_preparation();
++        let waiting_for_publication = tokio::spawn({
++            let addr = addr.clone();
++            let hooks = registry.endpoint_hooks();
++            async move { hooks.before_connect(&addr, TEST_ALPN).await }
++        });
++        tokio::task::yield_now().await;
++        assert!(!waiting_for_publication.is_finished());
++        let mut handlers = SessionProtocolHandlersBuilder::new();
++        handlers.install([TEST_ALPN], Hold).unwrap();
++        let generation = registry.publish(handlers.build()).await.unwrap();
++        drop(published_preparation);
++        assert!(matches!(
++            waiting_for_publication.await.unwrap(),
++            iroh::endpoint::BeforeConnectOutcome::Accept
++        ));
++        registry.quiesce(&generation).await.unwrap();
++
++        let abandoned_preparation = registry.begin_preparation();
++        let waiting_for_abandonment = tokio::spawn({
++            let addr = addr.clone();
++            let hooks = registry.endpoint_hooks();
++            async move { hooks.before_connect(&addr, TEST_ALPN).await }
++        });
++        tokio::task::yield_now().await;
++        assert!(!waiting_for_abandonment.is_finished());
++        drop(abandoned_preparation);
++        assert!(matches!(
++            waiting_for_abandonment.await.unwrap(),
++            iroh::endpoint::BeforeConnectOutcome::Reject
++        ));
++
++        // 没有下一代在准备时，空窗期的出站连接仍立即拒绝。
++        assert!(matches!(
++            tokio::time::timeout(
++                std::time::Duration::from_secs(1),
++                hooks.before_connect(&addr, TEST_ALPN)
++            )
++            .await
++            .unwrap(),
++            iroh::endpoint::BeforeConnectOutcome::Reject
++        ));
++    }
+ }
+diff --git a/crates/uc-infra/src/network/iroh/session_generation.rs b/crates/uc-infra/src/network/iroh/session_generation.rs
+index 8e3ab024..77ceb709 100644
+--- a/crates/uc-infra/src/network/iroh/session_generation.rs
++++ b/crates/uc-infra/src/network/iroh/session_generation.rs
+@@ -1,5 +1,6 @@
+ use std::collections::{BTreeMap, BTreeSet, HashMap};
+ use std::sync::{Arc, Mutex};
++use std::time::Duration;
+ 
+ use iroh::endpoint::{
+     AfterHandshakeOutcome, BeforeConnectOutcome, Connection, EndpointHooks, WeakConnectionHandle,
+@@ -7,15 +8,35 @@ use iroh::endpoint::{
+ use iroh::protocol::{AcceptError, DynProtocolHandler, ProtocolHandler};
+ use tokio::sync::{watch, Notify};
+ 
++/// 下一代会话准备期间，出站连接等待其发布的最长时间；超时后按无会话拒绝，由调用方既有重试兜底。
++const PREPARATION_OUTBOUND_WAIT: Duration = Duration::from_secs(10);
++
+ #[derive(Debug)]
+ pub(super) struct SessionProtocolRegistry {
+     state: Mutex<RegistryState>,
++    changed: Notify,
+ }
+ 
+ #[derive(Debug)]
+ struct RegistryState {
+     managed_alpns: BTreeSet<Vec<u8>>,
+     current: Option<Arc<SessionProtocolGeneration>>,
++    preparing: usize,
++}
++
++/// 一代会话从开始准备到发布或放弃之间的标记。
++///
++/// 新会话的后台工作在发布前就已启动；持有期间其受管协议出站连接等待发布，而不是被立即拒绝。
++#[derive(Debug)]
++pub(super) struct SessionProtocolPreparation {
++    registry: Arc<SessionProtocolRegistry>,
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++enum OutboundDecision {
++    Accept,
++    Reject,
++    WaitForPublication,
+ }
+ 
+ #[derive(Debug)]
+@@ -104,10 +125,33 @@ impl SessionProtocolRegistry {
+             state: Mutex::new(RegistryState {
+                 managed_alpns: BTreeSet::new(),
+                 current: None,
++                preparing: 0,
+             }),
++            changed: Notify::new(),
+         }
+     }
+ 
++    pub(super) fn begin_preparation(self: &Arc<Self>) -> SessionProtocolPreparation {
++        self.lock_state().preparing += 1;
++        SessionProtocolPreparation {
++            registry: Arc::clone(self),
++        }
++    }
++
++    fn end_preparation(&self) {
++        {
++            let mut state = self.lock_state();
++            state.preparing = state.preparing.saturating_sub(1);
++        }
++        self.changed.notify_waiters();
++    }
++
++    fn lock_state(&self) -> std::sync::MutexGuard<'_, RegistryState> {
++        self.state
++            .lock()
++            .unwrap_or_else(|poisoned| poisoned.into_inner())
++    }
++
+     pub(super) fn dispatcher(
+         self: &Arc<Self>,
+         alpn: impl AsRef<[u8]>,
+@@ -144,6 +188,8 @@ impl SessionProtocolRegistry {
+             } else {
+                 let generation = Arc::new(SessionProtocolGeneration::new(handlers));
+                 state.current = Some(Arc::clone(&generation));
++                drop(state);
++                self.changed.notify_waiters();
+                 return Ok(SessionProtocolGenerationHandle { generation });
+             }
+         };
+@@ -169,6 +215,7 @@ impl SessionProtocolRegistry {
+             }
+             state.current = None;
+         }
++        self.changed.notify_waiters();
+ 
+         let connections = handle.generation.begin_quiesce();
+         let closed = connections
+@@ -200,18 +247,34 @@ impl SessionProtocolRegistry {
+         generation.acquire(alpn, connection)
+     }
+ 
+-    fn permits_outbound(&self, alpn: &[u8]) -> bool {
+-        let state = self
+-            .state
+-            .lock()
+-            .unwrap_or_else(|poisoned| poisoned.into_inner());
++    async fn permits_outbound(&self, alpn: &[u8]) -> bool {
++        let waited = tokio::time::timeout(PREPARATION_OUTBOUND_WAIT, async {
++            loop {
++                let changed = self.changed.notified();
++                tokio::pin!(changed);
++                changed.as_mut().enable();
++                match self.outbound_decision(alpn) {
++                    OutboundDecision::Accept => return true,
++                    OutboundDecision::Reject => return false,
++                    OutboundDecision::WaitForPublication => changed.await,
++                }
++            }
++        })
++        .await;
++        waited.unwrap_or(false)
++    }
++
++    fn outbound_decision(&self, alpn: &[u8]) -> OutboundDecision {
++        let state = self.lock_state();
+         if !state.managed_alpns.contains(alpn) {
+-            return true;
++            return OutboundDecision::Accept;
++        }
++        match state.current.as_ref() {
++            Some(generation) if generation.accepts(alpn) => OutboundDecision::Accept,
++            Some(_) => OutboundDecision::Reject,
++            None if state.preparing > 0 => OutboundDecision::WaitForPublication,
++            None => OutboundDecision::Reject,
+         }
+-        state
+-            .current
+-            .as_ref()
+-            .is_some_and(|generation| generation.accepts(alpn))
+     }
+ 
+     fn register_connection(&self, connection: &Connection) -> bool {
+@@ -423,7 +486,7 @@ impl EndpointHooks for SessionProtocolEndpointHooks {
+         _remote_addr: &iroh::EndpointAddr,
+         alpn: &[u8],
+     ) -> BeforeConnectOutcome {
+-        if self.registry.permits_outbound(alpn) {
++        if self.registry.permits_outbound(alpn).await {
+             BeforeConnectOutcome::Accept
+         } else {
+             BeforeConnectOutcome::Reject
+@@ -442,6 +505,12 @@ impl EndpointHooks for SessionProtocolEndpointHooks {
+     }
+ }
+ 
++impl Drop for SessionProtocolPreparation {
++    fn drop(&mut self) {
++        self.registry.end_preparation();
++    }
++}
++
+ impl SessionProtocolLease {
+     async fn cancelled(&self) {
+         let mut cancellation = self.generation.cancellation.subscribe();

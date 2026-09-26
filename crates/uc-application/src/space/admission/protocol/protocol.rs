@@ -55,7 +55,8 @@ impl AcquireSpaceWorkPermitPort for SpaceAdmissionProtocol {
             )
             .await
             .map_err(|error| match error {
-                PendingAdmissionRecoveryStateError::RecoveryRequired => {
+                PendingAdmissionRecoveryStateError::ReadFailure { .. }
+                | PendingAdmissionRecoveryStateError::RecoveryRequired => {
                     QuerySpaceWorkModeError::NeedsAttention
                 }
                 PendingAdmissionRecoveryStateError::Locked

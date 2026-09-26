@@ -35,21 +35,25 @@ use uc_observability_contract::error_source::io_error_kind;
 use crate::assembly::deps::WiredDependencies;
 #[cfg(feature = "lan-compat")]
 use crate::assembly::facade::build_mobile_sync_facade;
-use crate::assembly::lifecycle::{build_network_runtime, prepare_daemon_session};
+use crate::assembly::lifecycle::{
+    build_network_runtime, prepare_daemon_session, reconcile_session_peers,
+};
 use crate::assembly::sync_engine::SyncSessionAssembly;
 #[cfg(feature = "dev-tools")]
 use crate::dev::JoinerFinalConfirmationGate;
-use crate::engine::event_stream::EventSender;
+use crate::engine::event_stream::{EventSender, RefreshHold};
 use crate::operations::space::reset_space::execute_reset_space;
 use crate::subsystems::peer_keepalive::spawn_peer_reachability_event_task;
 #[cfg(feature = "dev-tools")]
 use crate::SessionHandoverFailurePoint;
 use crate::{
-    ActiveClipboardChanged, EngineEvent, InboundNoticeActionSummary, InboundNoticeEvent,
-    InboundRepresentationSummary, RefreshReason,
+    ActiveClipboardChanged, AdmissionRecoverySummary, EngineEvent, InboundNoticeActionSummary,
+    InboundNoticeEvent, InboundRepresentationSummary, RefreshReason,
 };
 
-use super::{operation_error_with_code, operation_unavailable_error};
+use super::{
+    operation_error_with_code, operation_unavailable_error, profile_recovery_required_error,
+};
 use crate::{EngineError, EngineErrorCategory, OperationResult};
 
 const SESSION_OPERATION_GRACE: Duration = Duration::from_secs(2);
@@ -221,6 +225,10 @@ pub(super) struct SessionSupervisor {
     test_control: Arc<SessionHandoverTestControl>,
     session_recovery_enabled: AtomicBool,
     coordinator: Arc<RuntimeLifecycle>,
+    /// 会话装配发现准入资料无法读取后保持置位；同一进程不重试修复，由恢复运行期转入受限模式。
+    admission_recovery: StdMutex<Option<AdmissionRecoverySummary>>,
+    /// 空间切换拆除会话后暂存重新查询通知；只在替换会话完整可用后释放，安装或恢复失败则保留到下次成功。
+    refresh_hold: StdMutex<Option<RefreshHold>>,
 }
 
 pub(super) struct SessionOperationLease {
@@ -361,6 +369,8 @@ impl SessionSupervisor {
             #[cfg(feature = "dev-tools")]
             test_control: Arc::new(SessionHandoverTestControl::default()),
             session_recovery_enabled: AtomicBool::new(false),
+            admission_recovery: StdMutex::new(None),
+            refresh_hold: StdMutex::new(None),
             coordinator: application
                 .runtime_lifecycle(Arc::new(SessionWork(owner.clone())), security),
         })
@@ -553,6 +563,7 @@ impl SessionSupervisor {
                 }
             }
 
+            self.hold_refresh_until_session_installed();
             self.quiesce_network_session().await?;
             let session = self
                 .runtime
@@ -687,6 +698,13 @@ impl SessionSupervisor {
         self.coordinator.stop(deadline).await
     }
 
+    pub(super) fn admission_recovery(&self) -> Option<AdmissionRecoverySummary> {
+        *self
+            .admission_recovery
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn configured_factory(&self) -> Option<Arc<ProductionSessionFactory>> {
         self.factory
             .lock()
@@ -797,7 +815,18 @@ impl SessionSupervisor {
                 .ok_or_else(operation_unavailable_error)?
                 .prepare_session()
         };
-        let prepared = factory.prepare(session_builder).await?;
+        let prepared = match factory.prepare(session_builder).await {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                if let Some(summary) = error.admission_recovery() {
+                    *self
+                        .admission_recovery
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(summary);
+                }
+                return Err(error);
+            }
+        };
         #[cfg(feature = "dev-tools")]
         if self
             .test_control
@@ -852,6 +881,28 @@ impl SessionSupervisor {
         Ok(())
     }
 
+    /// 拆除会话前调用：替换会话完整可用之前，宿主收到的重新查询通知只能读到不可用错误。
+    fn hold_refresh_until_session_installed(&self) {
+        let mut hold = self
+            .refresh_hold
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if hold.is_none() {
+            *hold = self
+                .configured_factory()
+                .map(|factory| factory.events.hold_refresh());
+        }
+    }
+
+    fn release_refresh_hold(&self) {
+        let hold = self
+            .refresh_hold
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        drop(hold);
+    }
+
     async fn install_new_session(&self, resume_space_activities: bool) -> Result<(), EngineError> {
         let factory = self
             .configured_factory()
@@ -872,6 +923,7 @@ impl SessionSupervisor {
             }
         };
         if pending_transition {
+            self.hold_refresh_until_session_installed();
             self.quiesce_network_session().await?;
             let session = self
                 .runtime
@@ -917,6 +969,8 @@ impl SessionSupervisor {
             return Err(self.shutdown_after_failure(primary).await);
         }
         self.operations.reopen();
+        // 未完成切换、会话恢复都已结束，替换会话此时才可读。
+        self.release_refresh_hold();
         Ok(())
     }
 }
@@ -997,7 +1051,18 @@ impl ProductionSessionFactory {
         {
             Ok(runtime) => Arc::new(runtime),
             Err(error) => {
-                let primary = session_runtime_error("application runtime", error);
+                let primary = match error.admission_failure() {
+                    Some(category) => {
+                        let summary = AdmissionRecoverySummary::from(category);
+                        error!(
+                            category = ?summary.category,
+                            stage = ?summary.stage,
+                            "application runtime requires admission recovery"
+                        );
+                        profile_recovery_required_error().with_admission_recovery(summary)
+                    }
+                    None => session_runtime_error("application runtime", error),
+                };
                 prepared_session.shutdown().await;
                 let additional = sync_session
                     .shutdown(FileTransferCancellationReason::Unknown, None)
@@ -1012,6 +1077,7 @@ impl ProductionSessionFactory {
                 }));
             }
         };
+        reconcile_session_peers(&wired.sync_engine).await;
         let facade = application_runtime.facade();
         #[cfg(feature = "lan-compat")]
         let mobile_sync = build_mobile_sync_facade(

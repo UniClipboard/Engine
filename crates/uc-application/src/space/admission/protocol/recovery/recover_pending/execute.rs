@@ -97,6 +97,21 @@ impl JoinerRecoveryObservation {
 const MAX_IMMEDIATE_EXCHANGES_PER_ADMISSION: usize = 4;
 
 impl SpaceAdmissionProtocol {
+    /// 每次装配业务会话前核验准入资料；锁定时由后续解锁流程处理，不阻断装配。
+    pub(crate) async fn verify_admission_readable(
+        &self,
+    ) -> Result<(), PendingAdmissionRecoveryStateError> {
+        match self
+            .recovery
+            .state
+            .verify_readable(self.recovery.now_ms())
+            .await
+        {
+            Ok(()) | Err(PendingAdmissionRecoveryStateError::Locked) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     pub(crate) async fn recover_pending(
         &self,
         trigger: AdmissionRecoveryTrigger,
@@ -616,7 +631,8 @@ fn record_recovery_load_error(
     error: &PendingAdmissionRecoveryStateError,
 ) {
     let decision = match error {
-        PendingAdmissionRecoveryStateError::RecoveryRequired => {
+        PendingAdmissionRecoveryStateError::ReadFailure { .. }
+        | PendingAdmissionRecoveryStateError::RecoveryRequired => {
             RecoveryDecision::RequiresRecovery(Some(RecoveryProblem::CorruptState))
         }
         PendingAdmissionRecoveryStateError::Locked => {
@@ -635,7 +651,8 @@ fn record_recovery_load_error(
         decision,
     );
     let outcome = match error {
-        PendingAdmissionRecoveryStateError::RecoveryRequired => {
+        PendingAdmissionRecoveryStateError::ReadFailure { .. }
+        | PendingAdmissionRecoveryStateError::RecoveryRequired => {
             SpaceAdmissionObservationOutcome::Failed(DiagnosticErrorType::Corrupt)
         }
         PendingAdmissionRecoveryStateError::Locked

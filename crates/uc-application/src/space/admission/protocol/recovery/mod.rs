@@ -9,7 +9,8 @@ use crate::space::membership::AdmissionRevocationPort;
 mod recover_pending;
 
 pub use recover_pending::{
-    AdmissionRecoveryCommitToken, AdmissionRecoveryReport, AdmissionRecoveryTrigger,
+    AdmissionReadFailureCategory, AdmissionRecoveryAction, AdmissionRecoveryCommitToken,
+    AdmissionRecoveryReport, AdmissionRecoveryStage, AdmissionRecoveryTrigger,
     AuthenticatedAdmissionExchangePort, AuthenticatedAdmissionReply, LoadedAdmissionRecovery,
     LoadedPendingAdmission, LoadedSponsorAbandonment, LoadedSponsorDeadline,
     PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
@@ -126,7 +127,8 @@ impl AdmissionRecoveryService {
         error: PendingAdmissionRecoveryStateError,
     ) {
         match error {
-            PendingAdmissionRecoveryStateError::RecoveryRequired => {
+            PendingAdmissionRecoveryStateError::ReadFailure { .. }
+            | PendingAdmissionRecoveryStateError::RecoveryRequired => {
                 report.recovery_required_count += 1;
             }
             PendingAdmissionRecoveryStateError::Locked

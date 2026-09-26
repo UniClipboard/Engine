@@ -11,8 +11,69 @@ use super::{
     LoadedSponsorAbandonment, LoadedSponsorDeadline,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+/// 无法区分密钥不匹配与密文认证失败时使用同一类别。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionReadFailureCategory {
+    CredentialMissing,
+    AuthenticationMismatch,
+    CurrentMetadataInvalid,
+    LegacyFallbackInvalid,
+    LegacyMigrationFailed,
+    RecordRelationIncomplete,
+    DerivedSummaryInvalid,
+    GenerationMismatch,
+    OtherStorageError,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionRecoveryAction {
+    RestoreCredential,
+    ChooseBackup,
+    RebuildDerivedState,
+    ExportDiagnostics,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionRecoveryStage {
+    Credential,
+    RepositoryMetadata,
+    LegacyRepository,
+    RepositoryRecord,
+    RecoverySummary,
+    Storage,
+}
+
+impl AdmissionReadFailureCategory {
+    pub fn guidance(self) -> (AdmissionRecoveryStage, AdmissionRecoveryAction) {
+        use AdmissionReadFailureCategory as Category;
+        use AdmissionRecoveryAction as Action;
+        use AdmissionRecoveryStage as Stage;
+        match self {
+            Category::CredentialMissing => (Stage::Credential, Action::RestoreCredential),
+            Category::AuthenticationMismatch => (Stage::Credential, Action::ChooseBackup),
+            Category::CurrentMetadataInvalid | Category::GenerationMismatch => {
+                (Stage::RepositoryMetadata, Action::ChooseBackup)
+            }
+            Category::LegacyFallbackInvalid | Category::LegacyMigrationFailed => {
+                (Stage::LegacyRepository, Action::ChooseBackup)
+            }
+            Category::RecordRelationIncomplete => (Stage::RepositoryRecord, Action::ChooseBackup),
+            Category::DerivedSummaryInvalid => {
+                (Stage::RecoverySummary, Action::RebuildDerivedState)
+            }
+            Category::OtherStorageError => (Stage::Storage, Action::ExportDiagnostics),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
 pub enum PendingAdmissionRecoveryStateError {
+    #[error("pending admission state requires restricted recovery")]
+    ReadFailure {
+        category: AdmissionReadFailureCategory,
+        #[source]
+        source: anyhow::Error,
+    },
     #[error("pending admission recovery state is locked")]
     Locked,
 
@@ -26,8 +87,31 @@ pub enum PendingAdmissionRecoveryStateError {
     RecoveryRequired,
 }
 
+impl PendingAdmissionRecoveryStateError {
+    /// 已证实资料无法读取或核验时返回类别；锁定、暂不可用和并发变化都可重试，不进入受限恢复。
+    pub fn restricted_recovery_category(&self) -> Option<AdmissionReadFailureCategory> {
+        match self {
+            Self::ReadFailure { .. } | Self::RecoveryRequired => Some(self.category()),
+            Self::Locked | Self::Unavailable | Self::StateChanged => None,
+        }
+    }
+
+    pub fn category(&self) -> AdmissionReadFailureCategory {
+        match self {
+            Self::ReadFailure { category, .. } => *category,
+            Self::Locked | Self::Unavailable | Self::StateChanged | Self::RecoveryRequired => {
+                AdmissionReadFailureCategory::OtherStorageError
+            }
+        }
+    }
+}
+
 #[async_trait]
 pub trait PendingAdmissionRecoveryStatePort: Send + Sync {
+    /// 完整核验权威准入记录与派生摘要可读，不修复损坏资料；旧格式迁移沿用既有读取路径。
+    /// 未证实资料损坏的存储故障按可重试错误返回。
+    async fn verify_readable(&self, now_ms: i64) -> Result<(), PendingAdmissionRecoveryStateError>;
+
     async fn load(
         &self,
         trigger: AdmissionRecoveryTrigger,

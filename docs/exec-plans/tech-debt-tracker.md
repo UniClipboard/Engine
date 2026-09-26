@@ -13,5 +13,6 @@
 | 网络身份被替换后没有恢复方式 | 已能检测并阻止静默替换，恢复方式未定 | 先按只读现场证据判定应“重新配对引导”还是“身份更新事件”，另写计划实施；在此之前不得公开 `re_pair` 恢复动作 | [发现记录](completed/2026-09-23-inbound-peer-admission.md#s5b-恢复方式待定不在本计划实施范围) |
 | 已有空间设备的网络身份文件在两次运行之间消失 | 原因未查明（`dev` 现场一次） | 资料与身份存储负责人查明删除来源（疑似开发构建未设 `UC_PROFILE` 落到 `dev` 资料目录）；复现后修复并保留诊断 | [发现记录](completed/2026-09-23-inbound-peer-admission.md#实施记录) |
 | Core 规则外泄、效果义务无约束力、存储格式与运行时依赖在 Core | 已盘点，修复未开始 | 清单逐项修复或登记为规范例外；Core 自动检查在 CI 阻断 | [计划](active/2026-09-23-core-boundary-remediation.md) |
+| 新会话发布前的出站连接被本机拒绝，每次加入的最终确认多等约 1 秒 | 已定位，候选方案因暴露重启补传问题暂缓 | 先修复同身份重启后握手超时及投递恢复只尝试一次的问题；`interrupted_file_transfer_recovers_after_receiver_process_restart` 连续 10 次通过，且最终确认首连不再 `locally_rejected` | [发现记录](../../.planning/2026-09-26-session-outbound-before-publish/findings.md) |
 
 关闭项目时记录验证证据，更新稳定文档，并将对应计划移入 `completed/`。

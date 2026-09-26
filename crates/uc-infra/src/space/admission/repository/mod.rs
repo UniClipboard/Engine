@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::db::ports::DbExecutor;
 use crate::security::{ActiveSpaceGenerationManifestStore, AdmissionKeyManager};
+use uc_application::deps::AdmissionReadFailureCategory;
 use uc_application::deps::MembershipRecordStorePort;
 use uc_core::membership::{AdmissionContinuationCredential, SpaceAdmissionId};
 
@@ -68,6 +69,12 @@ pub(super) enum SpaceAdmissionStateStoreError {
         #[source]
         source: Option<anyhow::Error>,
     },
+    #[error("space admission repository read requires recovery")]
+    ReadInvalid {
+        category: AdmissionReadFailureCategory,
+        #[source]
+        source: anyhow::Error,
+    },
     #[error("space admission state changed")]
     Conflict,
     #[error("space admission state storage is unavailable")]
@@ -96,6 +103,28 @@ impl SpaceAdmissionStateStoreError {
     pub fn unavailable_from(source: impl Into<anyhow::Error>) -> Self {
         Self::Unavailable {
             source: Some(source.into()),
+        }
+    }
+}
+
+impl SpaceAdmissionStateStoreError {
+    pub(super) fn read_invalid(
+        category: AdmissionReadFailureCategory,
+        source: impl Into<anyhow::Error>,
+    ) -> Self {
+        Self::ReadInvalid {
+            category,
+            source: source.into(),
+        }
+    }
+
+    // rust-style: allow-qualified-path -- 方法需由相邻 recovery 模块读取，限制在 admission 范围
+    pub(in crate::space::admission) fn read_category(&self) -> AdmissionReadFailureCategory {
+        match self {
+            Self::ReadInvalid { category, .. } => *category,
+            Self::Locked | Self::Corrupt { .. } | Self::Conflict | Self::Unavailable { .. } => {
+                AdmissionReadFailureCategory::OtherStorageError
+            }
         }
     }
 }
@@ -135,9 +164,11 @@ impl CredentialLoadError {
             Self::RecordMissing => CredentialFailure::RecordMissing,
             Self::CredentialMissing => CredentialFailure::CredentialMissing,
             Self::State(SpaceAdmissionStateStoreError::Locked) => CredentialFailure::Locked,
-            Self::State(SpaceAdmissionStateStoreError::Corrupt { .. }) | Self::Invalid { .. } => {
-                CredentialFailure::Corrupt
-            }
+            Self::State(
+                SpaceAdmissionStateStoreError::Corrupt { .. }
+                | SpaceAdmissionStateStoreError::ReadInvalid { .. },
+            )
+            | Self::Invalid { .. } => CredentialFailure::Corrupt,
             Self::State(SpaceAdmissionStateStoreError::Conflict) => {
                 CredentialFailure::RecoveryRequired
             }

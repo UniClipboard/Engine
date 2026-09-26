@@ -222,7 +222,8 @@ fn map_key_error(error: AdmissionKeyError) -> MembershipLedgerError {
         AdmissionKeyError::SecureStorage { .. } | AdmissionKeyError::StorageNotPersisted => {
             MembershipLedgerError::Locked
         }
-        error @ (AdmissionKeyError::Corrupt { .. }
+        error @ (AdmissionKeyError::Missing
+        | AdmissionKeyError::Corrupt { .. }
         | AdmissionKeyError::InvalidLayout
         | AdmissionKeyError::OpenFailed { .. }) => MembershipLedgerError::corrupt_from(error),
     }

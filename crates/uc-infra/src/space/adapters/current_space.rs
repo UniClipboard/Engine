@@ -236,7 +236,8 @@ fn map_key_error(error: AdmissionKeyError) -> CurrentSpaceIdentityError {
         AdmissionKeyError::SecureStorage { .. } | AdmissionKeyError::StorageNotPersisted => {
             CurrentSpaceIdentityError::unavailable()
         }
-        AdmissionKeyError::Corrupt { .. }
+        AdmissionKeyError::Missing
+        | AdmissionKeyError::Corrupt { .. }
         | AdmissionKeyError::InvalidLayout
         | AdmissionKeyError::OpenFailed { .. } => CurrentSpaceIdentityError::inconsistent(),
     }

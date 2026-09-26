@@ -3,6 +3,7 @@ use diesel::prelude::*;
 use diesel::sql_query;
 use diesel::sql_types::{Binary, Integer, Nullable};
 use serde::{Deserialize, Serialize};
+use uc_application::deps::AdmissionReadFailureCategory;
 use uc_core::membership::{
     AdmissionRecoveryStep, AdmissionRole, JoinerAdmission, SpaceAdmissionAggregate,
     SponsorAdmission,
@@ -11,12 +12,21 @@ use uc_core::membership::{
 use super::codec::{map_key_error, EncryptedRecordRow};
 use super::{SpaceAdmissionStateStoreError, SqliteSpaceAdmissionState};
 use crate::db::ports::DbExecutor;
+use crate::security::AdmissionKeyError;
 
 const RECOVERY_SUMMARY_FORMAT_V3: u16 = 3;
 const LEGACY_RECOVERY_SUMMARY_FORMAT_V2: u16 = 2;
 const RECOVERY_INDEX_BATCH_SIZE: i32 = 64;
 const RECOVERY_SUMMARY_MARKER: [u8; 8] = *b"UCARSV3\0";
 const LEGACY_RECOVERY_SUMMARY_MARKER_V2: [u8; 8] = *b"UCARSV2\0";
+
+#[derive(Debug, thiserror::Error)]
+enum RecoverySummaryValidationError {
+    #[error("space admission recovery summary does not match its record")]
+    RecordMismatch,
+    #[error("space admission recovery summary format is invalid")]
+    InvalidFormat,
+}
 
 #[derive(QueryableByName)]
 struct RecoverySummaryRow {
@@ -144,6 +154,20 @@ impl RecoverySummary {
 }
 
 impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
+    /// 解密并校验全部权威记录后再读取派生摘要，任何一步无法证实都返回带类别的失败。
+    // rust-style: allow-qualified-path -- 相邻 recovery 模块需要调用此仓储核验
+    pub(in crate::space::admission) fn verify_repository_on(
+        &self,
+        conn: &mut SqliteConnection,
+        now_ms: i64,
+    ) -> Result<(), SpaceAdmissionStateStoreError> {
+        let state = self.load_state_on(conn)?;
+        for (admission_id, record) in &state.records {
+            self.open_record(*admission_id, record)?;
+        }
+        self.load_recovery_index_on(conn, now_ms).map(|_| ())
+    }
+
     // rust-style: allow-qualified-path -- 相邻 recovery 模块需要调用此仓储查询
     pub(in crate::space::admission) fn load_recovery_index_on(
         &self,
@@ -192,7 +216,10 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                         || self.record_lookup_token(summary.admission_id)?.as_slice()
                             != row.lookup_token.as_slice()
                     {
-                        return Err(SpaceAdmissionStateStoreError::corrupt());
+                        return Err(SpaceAdmissionStateStoreError::read_invalid(
+                            AdmissionReadFailureCategory::DerivedSummaryInvalid,
+                            RecoverySummaryValidationError::RecordMismatch,
+                        ));
                     }
                     needs_attention |= summary.legacy_no_deadline;
                     if let Some(deadline) =
@@ -265,7 +292,17 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
             .profile_payload_reader(&row.purpose())
             .map_err(map_key_error)?
             .open_compact(encrypted)
-            .map_err(map_key_error)?;
+            .map_err(|error| match error {
+                error @ (AdmissionKeyError::Corrupt { .. }
+                | AdmissionKeyError::InvalidLayout
+                | AdmissionKeyError::OpenFailed { .. }) => {
+                    SpaceAdmissionStateStoreError::read_invalid(
+                        AdmissionReadFailureCategory::DerivedSummaryInvalid,
+                        error,
+                    )
+                }
+                other => map_key_error(other),
+            })?;
         decode_recovery_summary(&plaintext)
     }
 
@@ -325,11 +362,19 @@ fn decode_recovery_summary(
         {
             return Ok(None);
         }
-        return Err(SpaceAdmissionStateStoreError::corrupt());
+        return Err(SpaceAdmissionStateStoreError::read_invalid(
+            AdmissionReadFailureCategory::DerivedSummaryInvalid,
+            RecoverySummaryValidationError::InvalidFormat,
+        ));
     }
     postcard::from_bytes::<LegacyRecoverySummaryV1>(plaintext)
         .map(|_| None)
-        .map_err(SpaceAdmissionStateStoreError::corrupt_from)
+        .map_err(|source| {
+            SpaceAdmissionStateStoreError::read_invalid(
+                AdmissionReadFailureCategory::DerivedSummaryInvalid,
+                source,
+            )
+        })
 }
 
 #[cfg(test)]

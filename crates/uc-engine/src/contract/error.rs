@@ -2,6 +2,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use super::AdmissionRecoverySummary;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EngineErrorCategory {
@@ -36,6 +38,9 @@ pub struct EngineError {
     code: u32,
     category: EngineErrorCategory,
     retryable: bool,
+    /// 仅在 Engine 内部把启动期准入读取失败交给恢复运行期；不属于公开错误契约。
+    #[serde(skip)]
+    admission_recovery: Option<AdmissionRecoverySummary>,
 }
 
 impl EngineError {
@@ -44,6 +49,7 @@ impl EngineError {
             code,
             category,
             retryable,
+            admission_recovery: None,
         }
     }
 
@@ -57,6 +63,15 @@ impl EngineError {
 
     pub fn is_retryable(&self) -> bool {
         self.retryable
+    }
+
+    pub(crate) fn with_admission_recovery(mut self, summary: AdmissionRecoverySummary) -> Self {
+        self.admission_recovery = Some(summary);
+        self
+    }
+
+    pub(crate) fn admission_recovery(&self) -> Option<AdmissionRecoverySummary> {
+        self.admission_recovery
     }
 }
 

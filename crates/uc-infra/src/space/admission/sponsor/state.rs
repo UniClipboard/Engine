@@ -130,7 +130,9 @@ impl<E: DbExecutor + Send + Sync> SponsorAdmissionStatePort for SqliteSpaceAdmis
             self.executor
                 .run(|conn| {
                     conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
-                        let mut state = self.load_state_on(conn).map_err(into_anyhow)?;
+                        let mut state = self
+                            .load_state_in_transaction_on(conn)
+                            .map_err(into_anyhow)?;
                         let admission_id = *replacement.admission_id().as_bytes();
                         if let Some(stored) = state.records.get(&admission_id).cloned() {
                             let current = self
@@ -237,7 +239,8 @@ fn map_sponsor_error(error: SpaceAdmissionStateStoreError) -> SponsorAdmissionSt
     match &error {
         SpaceAdmissionStateStoreError::Locked => SponsorAdmissionStateError::locked(error),
         SpaceAdmissionStateStoreError::Conflict => SponsorAdmissionStateError::state_changed(error),
-        SpaceAdmissionStateStoreError::Corrupt { .. } => {
+        SpaceAdmissionStateStoreError::Corrupt { .. }
+        | SpaceAdmissionStateStoreError::ReadInvalid { .. } => {
             SponsorAdmissionStateError::recovery_required(error)
         }
         SpaceAdmissionStateStoreError::Unavailable { .. } => {

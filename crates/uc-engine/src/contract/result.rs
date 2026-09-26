@@ -1,6 +1,10 @@
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use uc_application::facade::{
+    AdmissionReadFailureCategory, AdmissionRecoveryAction as ReadRecoveryAction,
+    AdmissionRecoveryStage as ReadRecoveryStage,
+};
 
 use super::{EngineError, ResendEntryOutcome, SendReportSummary};
 use crate::{
@@ -1078,6 +1082,104 @@ pub enum ProfileRecoveryState {
     Recovered,
     PartiallyRecoverable,
     Failed,
+    AdmissionRecoveryRequired,
+}
+
+/// 准入资料无法读取或核验的稳定类别；无法区分密钥不匹配与密文认证失败时同为 `AuthenticationMismatch`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionRecoveryCategory {
+    CredentialMissing,
+    AuthenticationMismatch,
+    CurrentMetadataInvalid,
+    LegacyFallbackInvalid,
+    LegacyMigrationFailed,
+    RecordRelationIncomplete,
+    DerivedSummaryInvalid,
+    GenerationMismatch,
+    OtherStorageError,
+}
+
+/// 读取失败所在的资料层次。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionRecoveryStage {
+    Credential,
+    RepositoryMetadata,
+    LegacyRepository,
+    RepositoryRecord,
+    RecoverySummary,
+    Storage,
+}
+
+/// 宿主应引导用户采取的处理方向；Engine 不自动执行这些动作。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionRecoveryAction {
+    RestoreCredential,
+    ChooseBackup,
+    RebuildDerivedState,
+    ExportDiagnostics,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionRecoverySummary {
+    pub category: AdmissionRecoveryCategory,
+    pub stage: AdmissionRecoveryStage,
+    pub action: AdmissionRecoveryAction,
+}
+
+impl From<AdmissionReadFailureCategory> for AdmissionRecoverySummary {
+    fn from(value: AdmissionReadFailureCategory) -> Self {
+        let (stage, action) = value.guidance();
+        Self {
+            category: value.into(),
+            stage: stage.into(),
+            action: action.into(),
+        }
+    }
+}
+
+impl From<AdmissionReadFailureCategory> for AdmissionRecoveryCategory {
+    fn from(value: AdmissionReadFailureCategory) -> Self {
+        match value {
+            AdmissionReadFailureCategory::CredentialMissing => Self::CredentialMissing,
+            AdmissionReadFailureCategory::AuthenticationMismatch => Self::AuthenticationMismatch,
+            AdmissionReadFailureCategory::CurrentMetadataInvalid => Self::CurrentMetadataInvalid,
+            AdmissionReadFailureCategory::LegacyFallbackInvalid => Self::LegacyFallbackInvalid,
+            AdmissionReadFailureCategory::LegacyMigrationFailed => Self::LegacyMigrationFailed,
+            AdmissionReadFailureCategory::RecordRelationIncomplete => {
+                Self::RecordRelationIncomplete
+            }
+            AdmissionReadFailureCategory::DerivedSummaryInvalid => Self::DerivedSummaryInvalid,
+            AdmissionReadFailureCategory::GenerationMismatch => Self::GenerationMismatch,
+            AdmissionReadFailureCategory::OtherStorageError => Self::OtherStorageError,
+        }
+    }
+}
+
+impl From<ReadRecoveryStage> for AdmissionRecoveryStage {
+    fn from(value: ReadRecoveryStage) -> Self {
+        match value {
+            ReadRecoveryStage::Credential => Self::Credential,
+            ReadRecoveryStage::RepositoryMetadata => Self::RepositoryMetadata,
+            ReadRecoveryStage::LegacyRepository => Self::LegacyRepository,
+            ReadRecoveryStage::RepositoryRecord => Self::RepositoryRecord,
+            ReadRecoveryStage::RecoverySummary => Self::RecoverySummary,
+            ReadRecoveryStage::Storage => Self::Storage,
+        }
+    }
+}
+
+impl From<ReadRecoveryAction> for AdmissionRecoveryAction {
+    fn from(value: ReadRecoveryAction) -> Self {
+        match value {
+            ReadRecoveryAction::RestoreCredential => Self::RestoreCredential,
+            ReadRecoveryAction::ChooseBackup => Self::ChooseBackup,
+            ReadRecoveryAction::RebuildDerivedState => Self::RebuildDerivedState,
+            ReadRecoveryAction::ExportDiagnostics => Self::ExportDiagnostics,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1088,6 +1190,8 @@ pub struct ProfileRecoverySummary {
     pub background_ready: bool,
     pub cleanup_pending: bool,
     pub losses: Vec<ProfileRecoveryLoss>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission: Option<AdmissionRecoverySummary>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

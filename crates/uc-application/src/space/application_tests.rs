@@ -394,6 +394,13 @@ impl LoadCurrentJoinStatusPort for PassivePorts {
 
 #[async_trait]
 impl PendingAdmissionRecoveryStatePort for PassivePorts {
+    async fn verify_readable(
+        &self,
+        _now_ms: i64,
+    ) -> Result<(), PendingAdmissionRecoveryStateError> {
+        Ok(())
+    }
+
     async fn load(
         &self,
         _trigger: AdmissionRecoveryTrigger,

@@ -53,6 +53,7 @@
 - 正常路径：地址保存/读取和 Iroh 地址二次解码保持原结果。
 - 门禁：相关 crate 测试、`cargo metadata --locked`、workspace check、fmt、Rust style、Engine repository、观测隐私及 `git diff --check`。
 - 平台限制：Rust backtrace 在 release 构建可捕获，但符号完整度取决于目标平台的符号表、内联和剥离设置；没有符号时必须报告 `unresolved`，不能生成静态替代栈。实体 macOS/Windows/iOS/Android 产品构建本计划不执行，均记为跳过。
+- CI：覆盖率插桩同样改变内联，异步帧只剩匿名符号，覆盖率步骤以 `UC_EXPECT_DIAGNOSTIC_STACK=release` 运行；完整符号栈由同一任务中未插桩的 `peer_address_read_diagnostics` 单独验证。
 
 ## 实施结果
 

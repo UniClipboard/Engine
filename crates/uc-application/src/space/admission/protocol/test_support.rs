@@ -689,6 +689,13 @@ impl CurrentJoinAdmissionStatePort for RecordingJoinerStartState {
 
 #[async_trait]
 impl PendingAdmissionRecoveryStatePort for RecordingJoinerStartState {
+    async fn verify_readable(
+        &self,
+        _now_ms: i64,
+    ) -> Result<(), PendingAdmissionRecoveryStateError> {
+        Ok(())
+    }
+
     async fn load(
         &self,
         _trigger: AdmissionRecoveryTrigger,
@@ -1310,6 +1317,13 @@ impl SponsorAdmissionStatePort for RecordingSponsorState {
 
 #[async_trait]
 impl PendingAdmissionRecoveryStatePort for RecordingSponsorState {
+    async fn verify_readable(
+        &self,
+        _now_ms: i64,
+    ) -> Result<(), PendingAdmissionRecoveryStateError> {
+        Ok(())
+    }
+
     async fn load(
         &self,
         _trigger: AdmissionRecoveryTrigger,

@@ -12,6 +12,7 @@ pub use model::{
     LoadedSponsorAbandonment, LoadedSponsorDeadline,
 };
 pub use ports::{
+    AdmissionReadFailureCategory, AdmissionRecoveryAction, AdmissionRecoveryStage,
     AuthenticatedAdmissionExchangePort, PendingAdmissionRecoveryStateError,
     PendingAdmissionRecoveryStatePort, SpaceAdmissionTransportError, SpaceAdmissionTransportPort,
 };

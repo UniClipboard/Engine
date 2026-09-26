@@ -3,13 +3,21 @@ use std::net::{Ipv4Addr, Ipv6Addr, UdpSocket};
 use std::sync::Arc;
 use std::time::Duration;
 
+use diesel::connection::SimpleConnection;
+use diesel::Connection;
 use uc_engine::{
-    ChangeEncryptionPassphraseInput, CreateSpaceInput, Engine, EngineConfig, EngineEvent,
-    HistoryEntryInput, Operation, OperationResult, ProfileRecoveryLoss, ProfileRecoveryState,
-    SecretString, SendTextInput, StartupProgress, StartupState, UnlockSpaceInput,
+    AdmissionRecoveryCategory, ChangeEncryptionPassphraseInput, CreateSpaceInput, Engine,
+    EngineConfig, EngineEvent, HistoryEntryInput, Operation, OperationResult, ProfileRecoveryLoss,
+    ProfileRecoveryState, SecretString, SendTextInput, StartupProgress, StartupState,
+    UnlockSpaceInput,
 };
 
-use super::{startup::host, MemorySecureStorage};
+use uc_engine::error_codes::PROFILE_RECOVERY_REQUIRED_CODE;
+
+use super::{
+    startup::{assert_profile_recovery_required, host, runtime_database},
+    MemorySecureStorage,
+};
 
 const PASSPHRASE: &str = "key-recovery-test-passphrase";
 
@@ -176,6 +184,75 @@ async fn wrong_unlock_key_recovers_with_original_passphrase() {
         .await
         .unwrap();
     assert_history(&engine, entry, "history before key loss").await;
+    engine.shutdown(Duration::from_secs(15)).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovered_credentials_enter_admission_recovery_when_repository_is_unreadable() {
+    let root = tempfile::tempdir().unwrap();
+    let storage = MemorySecureStorage::default();
+    let (_entry, kek_name) = create_profile(root.path(), &storage).await;
+    let database = runtime_database(
+        root.path(),
+        "profile-data-generations",
+        "v3-payloads/profile.sqlite",
+    );
+    let mut connection =
+        diesel::sqlite::SqliteConnection::establish(database.to_str().unwrap()).unwrap();
+    connection
+        .batch_execute(
+            "INSERT OR REPLACE INTO admission_repository_state (singleton_id, encrypted_payload) \
+             VALUES (1, X'FF')",
+        )
+        .unwrap();
+    drop(connection);
+    storage.values().remove(&kek_name);
+
+    let (input, progress) = StartupProgress::channel();
+    let (engine, _events) = Engine::start_with_progress(
+        EngineConfig::new("2.0.0"),
+        host(root.path(), Box::new(storage)),
+        input,
+    )
+    .await
+    .expect("missing automatic credential must expose passphrase recovery");
+    assert_eq!(progress.snapshot().state, StartupState::RecoveryAvailable);
+
+    let error = engine
+        .execute(Operation::UnlockSpace(UnlockSpaceInput {
+            passphrase: SecretString::new(PASSPHRASE),
+        }))
+        .await
+        .expect_err("unreadable admission repository must block normal startup");
+    assert_eq!(error.code(), PROFILE_RECOVERY_REQUIRED_CODE);
+    assert!(!error.is_retryable());
+    let OperationResult::ProfileRecovery(summary) = engine
+        .execute(Operation::QueryProfileRecovery)
+        .await
+        .unwrap()
+    else {
+        panic!("expected admission recovery summary")
+    };
+    assert_eq!(
+        summary.state,
+        ProfileRecoveryState::AdmissionRecoveryRequired
+    );
+    assert!(!summary.can_submit_passphrase);
+    assert!(!summary.restart_required);
+    assert!(!summary.background_ready);
+    assert_eq!(
+        summary.admission.unwrap().category,
+        AdmissionRecoveryCategory::LegacyFallbackInvalid
+    );
+    assert_profile_recovery_required(
+        engine
+            .execute(Operation::SendText(SendTextInput {
+                text: "restricted recovery must not save content".into(),
+                target_devices: Vec::new(),
+            }))
+            .await,
+    );
+    assert_profile_recovery_required(engine.execute(Operation::QueryDeviceGroupChoices).await);
     engine.shutdown(Duration::from_secs(15)).await.unwrap();
 }
 

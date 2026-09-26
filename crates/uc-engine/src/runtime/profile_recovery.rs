@@ -15,7 +15,7 @@ use uc_infra::security::{
 };
 use uc_observability_contract::error_source::io_error_kind;
 
-use super::{startup_error, ProductionRuntime};
+use super::{profile_recovery_required_error, startup_error, ProductionRuntime};
 use crate::assembly::host::{
     derive_app_paths, profile_key_recovery_store, wire_host_capabilities_with_emitter,
     EngineHostEventEmitter,
@@ -25,18 +25,17 @@ use crate::engine::startup::StartupProgressStore;
 use crate::engine::EngineRuntime;
 use crate::error_codes::{
     PROFILE_RECOVERY_PARTIAL_CODE, PROFILE_RECOVERY_PERSISTENCE_FAILED_CODE,
-    PROFILE_RECOVERY_REQUIRED_CODE, PROFILE_RECOVERY_UNSUPPORTED_CODE, UNLOCK_SPACE_CORRUPTED_CODE,
-    UNLOCK_SPACE_UNAUTHORIZED_CODE,
+    PROFILE_RECOVERY_UNSUPPORTED_CODE, UNLOCK_SPACE_CORRUPTED_CODE, UNLOCK_SPACE_UNAUTHORIZED_CODE,
 };
 use crate::operations::space::factory_reset::execute_factory_reset_space;
+use crate::{
+    AdmissionRecoverySummary, EncryptionStateSummary, EngineConfig, EngineError,
+    EngineErrorCategory, EngineEvent, HostCapabilities, HostCapabilityError,
+    HostCapabilityErrorCategory, HostSecureStorage, Operation, OperationKind, OperationResult,
+    ProfileRecoveryLoss, ProfileRecoveryState, ProfileRecoverySummary,
+};
 #[cfg(feature = "dev-tools")]
 use crate::{DevOperation, DevOperationResult};
-use crate::{
-    EncryptionStateSummary, EngineConfig, EngineError, EngineErrorCategory, EngineEvent,
-    HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory, HostSecureStorage,
-    Operation, OperationKind, OperationResult, ProfileRecoveryLoss, ProfileRecoveryState,
-    ProfileRecoverySummary,
-};
 
 #[derive(Clone)]
 enum RuntimeMode {
@@ -45,6 +44,11 @@ enum RuntimeMode {
         recovered: bool,
     },
     Recovery(Arc<RecoveryBootstrap>),
+    AdmissionRecovery {
+        summary: AdmissionRecoverySummary,
+        /// 启动后才发现时保留已启动的运行期，关闭时仍须完整释放。
+        runtime: Option<Arc<ProductionRuntime>>,
+    },
 }
 
 struct RecoveryBootstrap {
@@ -75,19 +79,33 @@ impl RecoverableRuntime {
                 host.replace_secure_storage(Arc::new(RecoveryHostStorage {
                     inner: Arc::clone(&recovery),
                 }));
-                RuntimeMode::Ready {
-                    runtime: Arc::new(
-                        ProductionRuntime::start(
-                            config,
-                            host,
-                            paths,
-                            events.clone(),
-                            Arc::clone(&progress),
-                            Arc::clone(&recovery),
-                        )
-                        .await?,
-                    ),
-                    recovered: false,
+                match ProductionRuntime::start(
+                    config,
+                    host,
+                    paths,
+                    events.clone(),
+                    Arc::clone(&progress),
+                    Arc::clone(&recovery),
+                )
+                .await
+                {
+                    Ok(runtime) => RuntimeMode::Ready {
+                        runtime: Arc::new(runtime),
+                        recovered: false,
+                    },
+                    Err(error) => match error.admission_recovery() {
+                        Some(summary) => {
+                            progress.recovery_available();
+                            events.send(EngineEvent::ProfileRecoveryChanged(admission_summary(
+                                summary,
+                            )));
+                            RuntimeMode::AdmissionRecovery {
+                                summary,
+                                runtime: None,
+                            }
+                        }
+                        None => return Err(error),
+                    },
                 }
             }
             ProfileRecoveryPreparation::AwaitingPassphrase { losses } => {
@@ -103,6 +121,7 @@ impl RecoverableRuntime {
                     background_ready: false,
                     cleanup_pending: false,
                     losses: public_losses(losses),
+                    admission: None,
                 };
                 events.send(EngineEvent::ProfileRecoveryChanged(summary.clone()));
                 RuntimeMode::Recovery(Arc::new(RecoveryBootstrap {
@@ -122,7 +141,53 @@ impl RecoverableRuntime {
     }
 
     async fn mode(&self) -> RuntimeMode {
-        self.mode.read().await.clone()
+        let mode = self.mode.read().await.clone();
+        let RuntimeMode::Ready { runtime, .. } = &mode else {
+            return mode;
+        };
+        match runtime.admission_recovery() {
+            Some(summary) => {
+                self.enter_admission_recovery(summary, Some(Arc::clone(runtime)))
+                    .await
+            }
+            None => mode,
+        }
+    }
+
+    /// 转入受限模式只发布一次；之后同一进程只允许查询与关闭，重建会话不被当作修复。
+    async fn enter_admission_recovery(
+        &self,
+        summary: AdmissionRecoverySummary,
+        runtime: Option<Arc<ProductionRuntime>>,
+    ) -> RuntimeMode {
+        let mut mode = self.mode.write().await;
+        if !matches!(*mode, RuntimeMode::AdmissionRecovery { .. }) {
+            *mode = RuntimeMode::AdmissionRecovery { summary, runtime };
+            self.events
+                .send(EngineEvent::ProfileRecoveryChanged(admission_summary(
+                    summary,
+                )));
+        }
+        mode.clone()
+    }
+
+    /// 启动后重建会话失败时，若已证实准入资料无法读取，改报需要恢复而不是可重试的会话错误。
+    async fn restrict_after_failure<T>(
+        &self,
+        runtime: &Arc<ProductionRuntime>,
+        result: Result<T, EngineError>,
+    ) -> Result<T, EngineError> {
+        let Err(error) = result else {
+            return result;
+        };
+        match runtime.admission_recovery() {
+            Some(summary) => {
+                self.enter_admission_recovery(summary, Some(Arc::clone(runtime)))
+                    .await;
+                Err(profile_recovery_required_error())
+            }
+            None => Err(error),
+        }
     }
 
     async fn execute_ready(
@@ -176,6 +241,7 @@ impl RecoverableRuntime {
                         background_ready: true,
                         cleanup_pending: self.recovery.cleanup_pending(),
                         losses: Vec::new(),
+                        admission: None,
                     };
                     *self.lock_ready_summary_override() = Some(summary.clone());
                     self.events
@@ -215,7 +281,7 @@ impl RecoverableRuntime {
                         .await;
                 }
                 if !bootstrap.lock_summary().can_submit_passphrase {
-                    return Err(recovery_unavailable());
+                    return Err(profile_recovery_required_error());
                 }
                 self.publish_summary(&bootstrap, |summary| {
                     summary.state = ProfileRecoveryState::Recovering
@@ -239,7 +305,7 @@ impl RecoverableRuntime {
                         let bootstrap_input = bootstrap.input.lock().await.take();
                         let Some((config, mut host)) = bootstrap_input else {
                             self.publish_restart_required(&bootstrap);
-                            return Err(recovery_unavailable());
+                            return Err(profile_recovery_required_error());
                         };
                         let paths = derive_app_paths(host.directories());
                         host.replace_secure_storage(Arc::new(RecoveryHostStorage {
@@ -257,6 +323,11 @@ impl RecoverableRuntime {
                         {
                             Ok(runtime) => Arc::new(runtime),
                             Err(error) => {
+                                if let Some(summary) = error.admission_recovery() {
+                                    bootstrap.progress.recovery_available();
+                                    self.enter_admission_recovery(summary, None).await;
+                                    return Err(profile_recovery_required_error());
+                                }
                                 self.publish_restart_required(&bootstrap);
                                 return Err(restart_required_error(error));
                             }
@@ -316,7 +387,7 @@ impl RecoverableRuntime {
                 }
             }
             Operation::FactoryResetSpace => self.factory_reset_from_recovery(&bootstrap).await,
-            _ => Err(recovery_unavailable()),
+            _ => Err(profile_recovery_required_error()),
         }
     }
 
@@ -328,13 +399,13 @@ impl RecoverableRuntime {
         let _gate = bootstrap.gate.lock().await;
         let mut input = bootstrap.input.lock().await;
         if input.is_none() {
-            return Err(recovery_unavailable());
+            return Err(profile_recovery_required_error());
         }
         if !self.recovery.open_for_factory_reset().await? {
-            return Err(recovery_unavailable());
+            return Err(profile_recovery_required_error());
         }
         let Some((config, mut host)) = input.take() else {
-            return Err(recovery_unavailable());
+            return Err(profile_recovery_required_error());
         };
         drop(input);
         let paths = derive_app_paths(host.directories());
@@ -434,13 +505,27 @@ impl EngineRuntime for RecoverableRuntime {
     ) -> Result<OperationResult, EngineError> {
         match self.mode().await {
             RuntimeMode::Ready { runtime, recovered } => {
-                self.execute_ready(runtime, recovered, operation, cancellation)
-                    .await
+                let result = self
+                    .execute_ready(Arc::clone(&runtime), recovered, operation, cancellation)
+                    .await;
+                self.restrict_after_failure(&runtime, result).await
             }
             RuntimeMode::Recovery(bootstrap) => {
                 self.execute_recovery(bootstrap, operation, cancellation)
                     .await
             }
+            RuntimeMode::AdmissionRecovery { summary, .. } => match operation {
+                Operation::QueryProfileRecovery => {
+                    Ok(OperationResult::ProfileRecovery(admission_summary(summary)))
+                }
+                Operation::QueryEncryptionState => {
+                    Ok(OperationResult::EncryptionState(EncryptionStateSummary {
+                        initialized: true,
+                        session_ready: false,
+                    }))
+                }
+                _ => Err(profile_recovery_required_error()),
+            },
         }
     }
 
@@ -454,13 +539,19 @@ impl EngineRuntime for RecoverableRuntime {
             RuntimeMode::Ready { runtime, .. } => {
                 runtime.execute_dev(operation, cancellation).await
             }
-            RuntimeMode::Recovery(_) => Err(recovery_unavailable()),
+            RuntimeMode::Recovery(_) | RuntimeMode::AdmissionRecovery { .. } => {
+                Err(profile_recovery_required_error())
+            }
         }
     }
 
     async fn suspend(&self, deadline: Option<Instant>) -> Result<(), EngineError> {
         match self.mode().await {
-            RuntimeMode::Ready { runtime, .. } => {
+            RuntimeMode::Ready { runtime, .. }
+            | RuntimeMode::AdmissionRecovery {
+                runtime: Some(runtime),
+                ..
+            } => {
                 // The lifecycle queue keeps an accepted suspend alive after its caller times out.
                 // Once the original deadline has elapsed, cleanup must run without reusing that
                 // stale deadline or it can leave the production runtime only partly suspended.
@@ -469,25 +560,45 @@ impl EngineRuntime for RecoverableRuntime {
                 self.recovery.suspend();
                 Ok(())
             }
-            RuntimeMode::Recovery(_) => Ok(()),
+            RuntimeMode::Recovery(_) | RuntimeMode::AdmissionRecovery { runtime: None, .. } => {
+                Ok(())
+            }
         }
     }
 
     async fn resume(&self, cancellation: CancellationToken) -> Result<(), EngineError> {
         match self.mode().await {
-            RuntimeMode::Ready { runtime, .. } => runtime.resume(cancellation).await,
-            RuntimeMode::Recovery(_) => Ok(()),
+            RuntimeMode::Ready { runtime, .. } => match runtime.resume(cancellation).await {
+                Ok(()) => Ok(()),
+                // 与启动期一致：恢复为可查询的受限实例，业务操作统一返回需要恢复。
+                Err(error) => match runtime.admission_recovery() {
+                    Some(summary) => {
+                        self.enter_admission_recovery(summary, Some(Arc::clone(&runtime)))
+                            .await;
+                        Ok(())
+                    }
+                    None => Err(error),
+                },
+            },
+            // 受限模式不重建业务会话；已启动的运行期保持挂起直到关闭。
+            RuntimeMode::Recovery(_) | RuntimeMode::AdmissionRecovery { .. } => Ok(()),
         }
     }
 
     async fn shutdown(&self, deadline: Option<Instant>) -> Result<(), EngineError> {
         match self.mode().await {
-            RuntimeMode::Ready { runtime, .. } => {
+            RuntimeMode::Ready { runtime, .. }
+            | RuntimeMode::AdmissionRecovery {
+                runtime: Some(runtime),
+                ..
+            } => {
                 runtime.shutdown(deadline).await?;
                 self.recovery.suspend();
                 Ok(())
             }
-            RuntimeMode::Recovery(_) => Ok(()),
+            RuntimeMode::Recovery(_) | RuntimeMode::AdmissionRecovery { runtime: None, .. } => {
+                Ok(())
+            }
         }
     }
 }
@@ -569,14 +680,6 @@ impl From<ProfileKeyRecoveryError> for EngineError {
     }
 }
 
-fn recovery_unavailable() -> EngineError {
-    EngineError::new(
-        PROFILE_RECOVERY_REQUIRED_CODE,
-        EngineErrorCategory::Unavailable,
-        false,
-    )
-}
-
 fn restart_required_error(error: EngineError) -> EngineError {
     EngineError::new(error.code(), error.category(), false)
 }
@@ -607,6 +710,19 @@ fn ready_summary(recovered: bool, cleanup_pending: bool) -> ProfileRecoverySumma
         background_ready: true,
         cleanup_pending,
         losses: Vec::new(),
+        admission: None,
+    }
+}
+
+fn admission_summary(admission: AdmissionRecoverySummary) -> ProfileRecoverySummary {
+    ProfileRecoverySummary {
+        state: ProfileRecoveryState::AdmissionRecoveryRequired,
+        can_submit_passphrase: false,
+        restart_required: false,
+        background_ready: false,
+        cleanup_pending: false,
+        losses: Vec::new(),
+        admission: Some(admission),
     }
 }
 

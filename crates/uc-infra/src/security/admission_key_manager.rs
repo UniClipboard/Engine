@@ -22,6 +22,8 @@ pub enum AdmissionKeyError {
     /// 安全存储接受了写入或删除，但回读结果不一致。
     #[error("profile admission key storage did not keep the change")]
     StorageNotPersisted,
+    #[error("profile admission key is missing")]
+    Missing,
     #[error("profile admission key is corrupt")]
     Corrupt {
         #[source]
@@ -154,6 +156,15 @@ impl AdmissionKeyManager {
         MasterKey::from_bytes(&persisted).map_err(AdmissionKeyError::corrupt)
     }
 
+    fn existing_profile_key(&self) -> Result<MasterKey, AdmissionKeyError> {
+        let bytes = self
+            .secure_storage
+            .get(PROFILE_ADMISSION_KEY_NAME)
+            .map_err(AdmissionKeyError::from)?
+            .ok_or(AdmissionKeyError::Missing)?;
+        MasterKey::from_bytes(&bytes).map_err(AdmissionKeyError::corrupt)
+    }
+
     pub(crate) const fn profile_generation(&self) -> [u8; 16] {
         self.profile_generation
     }
@@ -233,7 +244,7 @@ impl AdmissionKeyManager {
         purpose: &[u8],
     ) -> Result<ProfilePayloadReader, AdmissionKeyError> {
         Ok(ProfilePayloadReader {
-            key: self.profile_key()?,
+            key: self.existing_profile_key()?,
             aad: self.profile_payload_aad(purpose),
         })
     }

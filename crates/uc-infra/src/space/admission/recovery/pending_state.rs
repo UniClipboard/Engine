@@ -19,6 +19,16 @@ use super::super::repository::{SpaceAdmissionStateStoreError, SqliteSpaceAdmissi
 impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
     for SqliteSpaceAdmissionState<E>
 {
+    #[tracing::instrument(name = "space_admission.recovery_state.verify", skip_all, err)]
+    async fn verify_readable(&self, now_ms: i64) -> Result<(), PendingAdmissionRecoveryStateError> {
+        observe_local_result(LocalWorkStep::JoinerStateLoad, async {
+            self.executor
+                .run(|conn| self.verify_repository_on(conn, now_ms).map_err(into_anyhow))
+                .map_err(map_read_error)
+        })
+        .await
+    }
+
     #[tracing::instrument(name = "space_admission.recovery_state.load", skip_all, err)]
     async fn load(
         &self,
@@ -65,8 +75,7 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
                         index.needs_attention,
                     ))
                 })
-                .map_err(map_executor_error)
-                .map_err(map_recovery_error)
+                .map_err(map_read_error)
         })
         .await
     }
@@ -82,7 +91,9 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
             self.executor
                 .run(|conn| {
                     conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
-                        let mut state = self.load_state_on(conn).map_err(into_anyhow)?;
+                        let mut state = self
+                            .load_state_in_transaction_on(conn)
+                            .map_err(into_anyhow)?;
                         let admission_id = *replacement.admission_id().as_bytes();
                         let stored =
                             state.records.get(&admission_id).cloned().ok_or_else(|| {
@@ -135,7 +146,9 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
             self.executor
                 .run(|conn| {
                     conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
-                        let mut state = self.load_state_on(conn).map_err(into_anyhow)?;
+                        let mut state = self
+                            .load_state_in_transaction_on(conn)
+                            .map_err(into_anyhow)?;
                         let admission_id = *replacement.admission_id().as_bytes();
                         let stored =
                             state.records.get(&admission_id).cloned().ok_or_else(|| {
@@ -183,7 +196,9 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
             self.executor
                 .run(|conn| {
                     conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
-                        let mut state = self.load_state_on(conn).map_err(into_anyhow)?;
+                        let mut state = self
+                            .load_state_in_transaction_on(conn)
+                            .map_err(into_anyhow)?;
                         let admission_id = *replacement.admission_id().as_bytes();
                         let stored =
                             state.records.get(&admission_id).cloned().ok_or_else(|| {
@@ -232,6 +247,12 @@ fn recovery_commit_token(
 
 fn map_recovery_error(error: SpaceAdmissionStateStoreError) -> PendingAdmissionRecoveryStateError {
     match error {
+        SpaceAdmissionStateStoreError::ReadInvalid { .. } => {
+            PendingAdmissionRecoveryStateError::ReadFailure {
+                category: error.read_category(),
+                source: anyhow::Error::new(error),
+            }
+        }
         SpaceAdmissionStateStoreError::Locked => PendingAdmissionRecoveryStateError::Locked,
         SpaceAdmissionStateStoreError::Conflict => PendingAdmissionRecoveryStateError::StateChanged,
         SpaceAdmissionStateStoreError::Corrupt { .. } => {
@@ -240,5 +261,18 @@ fn map_recovery_error(error: SpaceAdmissionStateStoreError) -> PendingAdmissionR
         SpaceAdmissionStateStoreError::Unavailable { .. } => {
             PendingAdmissionRecoveryStateError::Unavailable
         }
+    }
+}
+
+/// 只有已证实的资料失败进入受限恢复；锁定、并发变化和存储暂不可用保持可重试。
+fn map_read_error(source: anyhow::Error) -> PendingAdmissionRecoveryStateError {
+    match map_executor_error(source) {
+        error @ SpaceAdmissionStateStoreError::Corrupt { .. } => {
+            PendingAdmissionRecoveryStateError::ReadFailure {
+                category: error.read_category(),
+                source: anyhow::Error::new(error),
+            }
+        }
+        error => map_recovery_error(error),
     }
 }

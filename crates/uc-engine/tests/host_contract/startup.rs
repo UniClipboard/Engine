@@ -22,6 +22,10 @@ mod targets;
 #[path = "startup/control.rs"]
 mod control;
 
+#[path = "startup/admission_recovery.rs"]
+mod admission_recovery;
+pub(super) use admission_recovery::{assert_profile_recovery_required, runtime_database};
+
 #[cfg(feature = "dev-tools")]
 #[path = "startup/failure.rs"]
 mod failure;

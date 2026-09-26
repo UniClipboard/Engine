@@ -3,6 +3,7 @@ set -euo pipefail
 
 usage() {
   echo "Usage: $0 [--suite all|local|network] [--repeat N] [--mode all|direct|known-peer|relay|legacy] [--case PREFIX]"
+  echo "  --repeat applies to the network scenarios only; the local suite always runs once."
 }
 
 suite=all
@@ -26,15 +27,15 @@ done
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$repo"
 
+# 本地部分是确定性测试，只跑一轮；--repeat 只作用于真实网络场景。
+# 同一测试目标的多个过滤条件合并为一次调用，避免每条命令重复编译。
 if [[ "$suite" != network ]]; then
-  for ((run=1; run<=repeat; run++)); do
-    cargo test -p uc-infra --lib --locked peer_reachability -- --test-threads=1
-    cargo test -p uc-infra --lib --locked protocol_router -- --test-threads=1
-    cargo test -p uc-infra --lib --locked rejecting_new_dials_keeps_established_streams_usable -- --test-threads=1
-    cargo test -p uc-application --lib --locked space::connectivity -- --test-threads=1
-    cargo test -p uc-engine --features dev-tools --test space_membership_auto_pairing_e2e --locked -- automatic_connections::existing_connections_survive_rejected_new_dials --test-threads=1
-    cargo test -p uc-engine --features dev-tools --test space_membership_auto_pairing_e2e --locked -- automatic_connections::failed_content_dial_preserves_peer_connection --test-threads=1
-  done
+  cargo test -p uc-infra --lib --locked -- --test-threads=1 \
+    peer_reachability protocol_router rejecting_new_dials_keeps_established_streams_usable
+  cargo test -p uc-application --lib --locked space::connectivity -- --test-threads=1
+  cargo test -p uc-engine --features dev-tools --test space_membership_auto_pairing_e2e --locked -- --test-threads=1 \
+    automatic_connections::existing_connections_survive_rejected_new_dials \
+    automatic_connections::failed_content_dial_preserves_peer_connection
 fi
 [[ "$suite" != local ]] || exit 0
 [[ $(uname -s) == Linux ]] || { echo 'Network validation requires Linux.' >&2; exit 2; }
