@@ -327,7 +327,13 @@ impl uc_application::deps::InitializeSpacePort for MigrationSpaceAccessAdapter {
             .await
             .map_err(map_encryption_error)?
         {
-            return Err(SpaceAccessError::AlreadyInitialized);
+            tracing::info!(
+                "orphaned keyslot exists on disk during migration initialize; quarantining"
+            );
+            self.key_material
+                .quarantine_keyslot()
+                .await
+                .map_err(map_encryption_error)?;
         }
         let profile = self
             .current_profile
@@ -1946,9 +1952,12 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
             {
                 info!(
                     path = PATH,
-                    "initialize rejected: keyslot already exists on disk"
+                    "orphaned keyslot exists on disk while initializing new space; quarantining"
                 );
-                return Err(SpaceAccessError::AlreadyInitialized);
+                self.key_material.quarantine_keyslot().await.map_err(|e| {
+                    error!(path = PATH, error = %e, "failed to quarantine orphaned keyslot");
+                    SpaceAccessError::Internal(e.to_string())
+                })?;
             }
 
             let profile = self
@@ -6659,5 +6668,58 @@ mod admission_tests {
             PrepareMembershipBranchRecoveryMaterialError::Invalid { .. }
         ));
         assert!(error.source().is_some());
+    }
+
+    #[tokio::test]
+    async fn initialize_quarantines_orphaned_keyslot_and_succeeds() {
+        let dir = tempdir().unwrap();
+        let key_store = Arc::new(JsonKeySlotStore::new(dir.path().to_path_buf()));
+        let key_material = Arc::new(KeyMaterialStore::new(
+            memory_secure_storage(),
+            key_store.clone(),
+        ));
+        let (adapter, _) = adapter_with_vault(
+            &dir,
+            key_material.clone(),
+            Arc::new(InMemorySession::new()),
+            memory_revocation_repository(None).0,
+        );
+
+        // Simulate an orphaned keyslot.json remaining from a previous generation
+        let keyslot_path = dir.path().join("keyslot.json");
+        tokio::fs::write(&keyslot_path, "{}").await.unwrap();
+        assert!(keyslot_path.exists());
+
+        let space_id = SpaceId::new();
+        let passphrase = Passphrase::new("test passphrase for recovery");
+
+        // initialize should quarantine the orphaned keyslot and succeed
+        let result = SpaceAccessStore::initialize(&adapter, &space_id, &passphrase).await;
+        assert!(
+            result.is_ok(),
+            "initialize should succeed despite orphaned keyslot: {:?}",
+            result.err()
+        );
+
+        // The original keyslot.json should have been initialized with new material
+        assert!(keyslot_path.exists());
+
+        // A quarantined backup file should exist
+        let mut entries = tokio::fs::read_dir(dir.path()).await.unwrap();
+        let mut found_quarantine = false;
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("keyslot.corrupt.")
+            {
+                found_quarantine = true;
+                break;
+            }
+        }
+        assert!(
+            found_quarantine,
+            "orphaned keyslot should have been quarantined to backup file"
+        );
     }
 }

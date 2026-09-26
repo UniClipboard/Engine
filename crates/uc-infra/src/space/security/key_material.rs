@@ -146,11 +146,7 @@ impl KeyMaterialStore {
     /// `EncryptionStatePort.load_state() == Initialized` 判断:从"是否写过
     /// marker 文件"改成"是否真的有 keyslot",更精确。
     pub async fn keyslot_exists(&self) -> Result<bool, EncryptionError> {
-        match self.keyslot_store.load().await {
-            Ok(_) => Ok(true),
-            Err(EncryptionError::KeyNotFound) => Ok(false),
-            Err(other) => Err(other),
-        }
+        Ok(self.keyslot_store.exists().await)
     }
 
     pub async fn store_keyslot(&self, keyslot: &KeySlot) -> Result<(), EncryptionError> {
@@ -167,5 +163,9 @@ impl KeyMaterialStore {
             return Err(EncryptionError::key_material_corrupt());
         }
         self.keyslot_store.delete().await
+    }
+
+    pub async fn quarantine_keyslot(&self) -> Result<(), EncryptionError> {
+        self.keyslot_store.quarantine().await
     }
 }
