@@ -12,8 +12,10 @@ use uc_engine::{
     UnlockSpaceInput,
 };
 
+use uc_engine::error_codes::PROFILE_RECOVERY_REQUIRED_CODE;
+
 use super::{
-    startup::{host, runtime_database},
+    startup::{assert_profile_recovery_required, host, runtime_database},
     MemorySecureStorage,
 };
 
@@ -222,6 +224,7 @@ async fn recovered_credentials_enter_admission_recovery_when_repository_is_unrea
         }))
         .await
         .expect_err("unreadable admission repository must block normal startup");
+    assert_eq!(error.code(), PROFILE_RECOVERY_REQUIRED_CODE);
     assert!(!error.is_retryable());
     let OperationResult::ProfileRecovery(summary) = engine
         .execute(Operation::QueryProfileRecovery)
@@ -241,17 +244,15 @@ async fn recovered_credentials_enter_admission_recovery_when_repository_is_unrea
         summary.admission.unwrap().category,
         AdmissionRecoveryCategory::LegacyFallbackInvalid
     );
-    assert!(engine
-        .execute(Operation::SendText(SendTextInput {
-            text: "restricted recovery must not save content".into(),
-            target_devices: Vec::new(),
-        }))
-        .await
-        .is_err());
-    assert!(engine
-        .execute(Operation::QueryDeviceGroupChoices)
-        .await
-        .is_err());
+    assert_profile_recovery_required(
+        engine
+            .execute(Operation::SendText(SendTextInput {
+                text: "restricted recovery must not save content".into(),
+                target_devices: Vec::new(),
+            }))
+            .await,
+    );
+    assert_profile_recovery_required(engine.execute(Operation::QueryDeviceGroupChoices).await);
     engine.shutdown(Duration::from_secs(15)).await.unwrap();
 }
 

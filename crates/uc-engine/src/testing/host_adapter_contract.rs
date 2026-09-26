@@ -184,39 +184,50 @@ async fn unreadable_admission_from_isolated_profile_copy_is_stable() {
             admission.action,
             crate::AdmissionRecoveryAction::ChooseBackup
         );
-        assert!(engine
-            .execute(crate::Operation::IssueInvitation)
-            .await
-            .is_err());
-        assert!(engine
-            .execute(crate::Operation::JoinSpace(crate::JoinSpaceInput {
-                invitation_code: "TEST-CODE".into(),
-                device_name: None,
-                passphrase: crate::SecretString::new("test-passphrase"),
-                preserve_unreadable_history: false,
-            }))
-            .await
-            .is_err());
-        assert!(engine
-            .execute(crate::Operation::SendText(crate::SendTextInput {
-                text: "must remain restricted".into(),
-                target_devices: Vec::new(),
-            }))
-            .await
-            .is_err());
-        assert!(engine
-            .execute(crate::Operation::QueryDeviceGroupChoices)
-            .await
-            .is_err());
-        assert!(engine
-            .execute(crate::Operation::QueryMembershipReadiness)
-            .await
-            .is_err());
+        assert_profile_recovery_required(engine.execute(crate::Operation::IssueInvitation).await);
+        assert_profile_recovery_required(
+            engine
+                .execute(crate::Operation::JoinSpace(crate::JoinSpaceInput {
+                    invitation_code: "TEST-CODE".into(),
+                    device_name: None,
+                    passphrase: crate::SecretString::new("test-passphrase"),
+                    preserve_unreadable_history: false,
+                }))
+                .await,
+        );
+        assert_profile_recovery_required(
+            engine
+                .execute(crate::Operation::SendText(crate::SendTextInput {
+                    text: "must remain restricted".into(),
+                    target_devices: Vec::new(),
+                }))
+                .await,
+        );
+        assert_profile_recovery_required(
+            engine
+                .execute(crate::Operation::QueryDeviceGroupChoices)
+                .await,
+        );
+        assert_profile_recovery_required(
+            engine
+                .execute(crate::Operation::QueryMembershipReadiness)
+                .await,
+        );
         engine
             .shutdown(std::time::Duration::from_secs(15))
             .await
             .unwrap();
     }
+}
+
+#[cfg(not(coverage))]
+fn assert_profile_recovery_required(result: Result<crate::OperationResult, crate::EngineError>) {
+    let error = result.expect_err("restricted admission recovery must reject the operation");
+    assert_eq!(
+        error.code(),
+        crate::error_codes::PROFILE_RECOVERY_REQUIRED_CODE
+    );
+    assert!(!error.is_retryable());
 }
 
 async fn next_engine_event_matching(

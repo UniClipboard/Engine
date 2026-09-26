@@ -4,13 +4,21 @@ use std::time::Duration;
 use diesel::connection::SimpleConnection;
 use diesel::sql_types::Binary;
 use diesel::{Connection, RunQueryDsl};
+use uc_engine::error_codes::PROFILE_RECOVERY_REQUIRED_CODE;
 use uc_engine::{
-    CreateSpaceInput, DeviceMembershipSummary, Engine, EngineConfig, JoinSpaceInput,
+    CreateSpaceInput, DeviceMembershipSummary, Engine, EngineConfig, EngineError, JoinSpaceInput,
     ListHistoryEntriesInput, Operation, OperationResult, SecretString, SendTextInput,
     StartupProgress, StartupState,
 };
 
 use super::{host, MemorySecureStorage};
+
+/// 受限恢复必须以固定错误码拒绝，且不能让宿主按可重试错误反复重建会话。
+pub(crate) fn assert_profile_recovery_required(result: Result<OperationResult, EngineError>) {
+    let error = result.expect_err("restricted admission recovery must reject the operation");
+    assert_eq!(error.code(), PROFILE_RECOVERY_REQUIRED_CODE);
+    assert!(!error.is_retryable());
+}
 
 pub(crate) fn runtime_database(root: &Path, generation_directory: &str, relative: &str) -> PathBuf {
     let databases = std::fs::read_dir(root.join("private").join(generation_directory))
@@ -212,22 +220,24 @@ async fn legacy_table_compatibility_does_not_bypass_unreadable_admission_metadat
             uc_engine::AdmissionRecoveryAction::ChooseBackup
         );
         assert!(!summary.background_ready);
-        assert!(engine
-            .execute(Operation::SendText(SendTextInput {
-                text: "must not be saved or synced".into(),
-                target_devices: Vec::new(),
-            }))
-            .await
-            .is_err());
-        assert!(engine
-            .execute(Operation::JoinSpace(JoinSpaceInput {
-                invitation_code: "TEST-CODE".into(),
-                device_name: None,
-                passphrase: SecretString::new("test-passphrase"),
-                preserve_unreadable_history: false,
-            }))
-            .await
-            .is_err());
+        assert_profile_recovery_required(
+            engine
+                .execute(Operation::SendText(SendTextInput {
+                    text: "must not be saved or synced".into(),
+                    target_devices: Vec::new(),
+                }))
+                .await,
+        );
+        assert_profile_recovery_required(
+            engine
+                .execute(Operation::JoinSpace(JoinSpaceInput {
+                    invitation_code: "TEST-CODE".into(),
+                    device_name: None,
+                    passphrase: SecretString::new("test-passphrase"),
+                    preserve_unreadable_history: false,
+                }))
+                .await,
+        );
         engine.shutdown(Duration::from_secs(15)).await.unwrap();
         drop(engine);
         let mut connection =
