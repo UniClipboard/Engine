@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use uc_core::membership::{
     AdmissionAttemptTimeline, AdmissionContinuationCredential,
     AdmissionEncryptedPasswordEquivalent, AdmissionPeerBinding, JoinerAdmissionTransition,
@@ -13,8 +12,7 @@ use super::{
 };
 
 /// 无法区分密钥不匹配与密文认证失败时使用同一类别。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionReadFailureCategory {
     CredentialMissing,
     AuthenticationMismatch,
@@ -27,8 +25,7 @@ pub enum AdmissionReadFailureCategory {
     OtherStorageError,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionRecoveryAction {
     RestoreCredential,
     ChooseBackup,
@@ -36,8 +33,7 @@ pub enum AdmissionRecoveryAction {
     ExportDiagnostics,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionRecoveryStage {
     Credential,
     RepositoryMetadata,
