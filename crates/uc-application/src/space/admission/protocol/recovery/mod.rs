@@ -127,10 +127,8 @@ impl AdmissionRecoveryService {
         error: PendingAdmissionRecoveryStateError,
     ) {
         match error {
-            PendingAdmissionRecoveryStateError::ReadFailure { .. } => {
-                report.recovery_required_count += 1;
-            }
-            PendingAdmissionRecoveryStateError::RecoveryRequired => {
+            PendingAdmissionRecoveryStateError::ReadFailure { .. }
+            | PendingAdmissionRecoveryStateError::RecoveryRequired => {
                 report.recovery_required_count += 1;
             }
             PendingAdmissionRecoveryStateError::Locked

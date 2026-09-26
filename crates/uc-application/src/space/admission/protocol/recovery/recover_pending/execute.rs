@@ -631,10 +631,8 @@ fn record_recovery_load_error(
     error: &PendingAdmissionRecoveryStateError,
 ) {
     let decision = match error {
-        PendingAdmissionRecoveryStateError::ReadFailure { .. } => {
-            RecoveryDecision::RequiresRecovery(Some(RecoveryProblem::CorruptState))
-        }
-        PendingAdmissionRecoveryStateError::RecoveryRequired => {
+        PendingAdmissionRecoveryStateError::ReadFailure { .. }
+        | PendingAdmissionRecoveryStateError::RecoveryRequired => {
             RecoveryDecision::RequiresRecovery(Some(RecoveryProblem::CorruptState))
         }
         PendingAdmissionRecoveryStateError::Locked => {
@@ -653,10 +651,8 @@ fn record_recovery_load_error(
         decision,
     );
     let outcome = match error {
-        PendingAdmissionRecoveryStateError::ReadFailure { .. } => {
-            SpaceAdmissionObservationOutcome::Failed(DiagnosticErrorType::Corrupt)
-        }
-        PendingAdmissionRecoveryStateError::RecoveryRequired => {
+        PendingAdmissionRecoveryStateError::ReadFailure { .. }
+        | PendingAdmissionRecoveryStateError::RecoveryRequired => {
             SpaceAdmissionObservationOutcome::Failed(DiagnosticErrorType::Corrupt)
         }
         PendingAdmissionRecoveryStateError::Locked
