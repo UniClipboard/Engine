@@ -22,42 +22,27 @@ impl DeviceHarness {
     }
 
     pub(crate) async fn start_with_clipboard(&self, clipboard: Box<dyn HostClipboard>) -> Engine {
-        self.start_configured(clipboard, true).await
+        self.start_with_events(clipboard).await.0
     }
 
     pub(crate) async fn start_with_files(&self, files: Box<dyn HostFileAccess>) -> Engine {
-        self.start_with_host(Box::new(EmptyClipboard), files, true)
+        self.start_with_host(Box::new(EmptyClipboard), files)
             .await
             .0
-    }
-
-    pub(crate) async fn start_with_relay_fallback(&self, relay_fallback: bool) -> Engine {
-        self.start_configured(Box::new(EmptyClipboard), relay_fallback)
-            .await
-    }
-
-    pub(crate) async fn start_configured(
-        &self,
-        clipboard: Box<dyn HostClipboard>,
-        relay_fallback: bool,
-    ) -> Engine {
-        self.start_with_events(clipboard, relay_fallback).await.0
     }
 
     pub(crate) async fn start_with_events(
         &self,
         clipboard: Box<dyn HostClipboard>,
-        relay_fallback: bool,
     ) -> (Engine, uc_engine::EventStream) {
-        self.start_with_host(clipboard, Box::new(EmptyFiles), relay_fallback)
-            .await
+        self.start_with_host(clipboard, Box::new(EmptyFiles)).await
     }
 
+    /// 场景只在本机直连，禁用公网 relay 回退，结果不受外部 relay 可达性影响。
     pub(crate) async fn start_with_host(
         &self,
         clipboard: Box<dyn HostClipboard>,
         files: Box<dyn HostFileAccess>,
-        relay_fallback: bool,
     ) -> (Engine, uc_engine::EventStream) {
         let root = self.root.path();
         let host = HostCapabilities::new(
@@ -73,7 +58,7 @@ impl DeviceHarness {
         );
         let config = EngineConfig::new("1.1.0")
             .with_rendezvous_base_url(self.rendezvous_base_url.clone())
-            .with_test_relay_fallback(relay_fallback);
+            .with_test_relay_fallback(false);
         Engine::start(config, host)
             .await
             .expect("start complete engine")

@@ -89,8 +89,8 @@ async fn paired_devices_cold_start_without_refresh() {
     let rendezvous = mount_rendezvous().await;
     let a_host = DeviceHarness::new(rendezvous.uri());
     let b_host = DeviceHarness::new(rendezvous.uri());
-    let a = a_host.start_with_relay_fallback(false).await;
-    let b = b_host.start_with_relay_fallback(false).await;
+    let a = a_host.start().await;
+    let b = b_host.start().await;
     let space_id = create_space(&a, "A").await.0;
     let b_id = join_through(&a, &b, "B", &space_id).await.self_device_id;
     wait_for_active_member_count(&a, 2).await;
@@ -99,10 +99,7 @@ async fn paired_devices_cold_start_without_refresh() {
     a.shutdown(SHUTDOWN_TIMEOUT).await.unwrap();
     b.shutdown(SHUTDOWN_TIMEOUT).await.unwrap();
 
-    let (a, b) = tokio::join!(
-        a_host.start_with_relay_fallback(false),
-        b_host.start_with_relay_fallback(false)
-    );
+    let (a, b) = tokio::join!(a_host.start(), b_host.start());
     tokio::join!(wait_online(&a, &b_id), wait_online(&b, &a_id));
     for (sender, receiver, target, text) in [
         (&a, &b, b_id, "automatic cold start A to B"),
@@ -138,12 +135,8 @@ impl Pair {
             DeviceHarness::new(rendezvous.uri()),
             DeviceHarness::new(rendezvous.uri()),
         ];
-        let (a, a_events) = hosts[0]
-            .start_with_events(Box::new(EmptyClipboard), false)
-            .await;
-        let (b, b_events) = hosts[1]
-            .start_with_events(Box::new(EmptyClipboard), false)
-            .await;
+        let (a, a_events) = hosts[0].start_with_events(Box::new(EmptyClipboard)).await;
+        let (b, b_events) = hosts[1].start_with_events(Box::new(EmptyClipboard)).await;
         let space = create_space(&a, "A").await.0;
         let b_id = join_through(&a, &b, "B", &space).await.self_device_id;
         wait_for_active_member_count(&a, 2).await;
@@ -392,10 +385,10 @@ async fn either_peer_can_start_later_without_refresh() {
     for early in 0..2 {
         let mut pair = Pair::new().await;
         pair.shutdown().await;
-        pair.engines[early] = pair.hosts[early].start_with_relay_fallback(false).await;
+        pair.engines[early] = pair.hosts[early].start().await;
         // 明确制造对方尚未启动、首次尝试已可能失败的时间段；成功仍用条件等待。
         tokio::time::sleep(Duration::from_secs(6)).await;
-        pair.engines[1 - early] = pair.hosts[1 - early].start_with_relay_fallback(false).await;
+        pair.engines[1 - early] = pair.hosts[1 - early].start().await;
         pair.online().await;
         pair.transfer("later startup").await;
         pair.shutdown().await;
@@ -411,7 +404,7 @@ async fn either_peer_restart_and_suspend_resume_reconnect_automatically() {
             .shutdown(SHUTDOWN_TIMEOUT)
             .await
             .unwrap();
-        pair.engines[index] = pair.hosts[index].start_with_relay_fallback(false).await;
+        pair.engines[index] = pair.hosts[index].start().await;
         pair.online().await;
         pair.transfer(&format!("restart {index}")).await;
         pair.engines[index].suspend().await.unwrap();
@@ -539,7 +532,7 @@ async fn offline_member_does_not_block_another_members_restart() {
     let pair = Pair::new().await;
     pair.engines[1].shutdown(SHUTDOWN_TIMEOUT).await.unwrap();
     let c_host = DeviceHarness::new(pair._rendezvous.uri());
-    let c = c_host.start_with_relay_fallback(false).await;
+    let c = c_host.start().await;
     let c_id = join_through(&pair.engines[0], &c, "C", &pair.space)
         .await
         .self_device_id;
@@ -553,12 +546,9 @@ async fn offline_member_does_not_block_another_members_restart() {
     wait_online(&pair.engines[0], &c_id).await;
     wait_online(&c, &pair.ids[0]).await;
     c.shutdown(SHUTDOWN_TIMEOUT).await.unwrap();
-    let c = tokio::time::timeout(
-        Duration::from_secs(5),
-        c_host.start_with_relay_fallback(false),
-    )
-    .await
-    .expect("an offline member must not delay local startup readiness");
+    let c = tokio::time::timeout(Duration::from_secs(5), c_host.start())
+        .await
+        .expect("an offline member must not delay local startup readiness");
     let OperationResult::Devices(devices) = c.execute(Operation::ListDevices).await.unwrap() else {
         panic!("expected the locally restored device list");
     };
