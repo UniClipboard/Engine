@@ -199,7 +199,7 @@ impl ApplicationNetworkBinding {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApplicationStartError {
-    #[error("admission state requires restricted recovery")]
+    #[error("space admission state could not be verified")]
     AdmissionRead {
         #[source]
         source: PendingAdmissionRecoveryStateError,
@@ -230,9 +230,10 @@ pub enum ApplicationStartError {
 }
 
 impl ApplicationStartError {
+    /// 仅在准入资料已证实无法读取时返回类别；可重试的存储故障返回 `None`。
     pub fn admission_failure(&self) -> Option<AdmissionReadFailureCategory> {
         match self {
-            Self::AdmissionRead { source } => Some(source.category()),
+            Self::AdmissionRead { source } => source.restricted_recovery_category(),
             _ => None,
         }
     }

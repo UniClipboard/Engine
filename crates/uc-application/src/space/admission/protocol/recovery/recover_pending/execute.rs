@@ -97,16 +97,17 @@ impl JoinerRecoveryObservation {
 const MAX_IMMEDIATE_EXCHANGES_PER_ADMISSION: usize = 4;
 
 impl SpaceAdmissionProtocol {
-    pub(crate) async fn verify_startup_readiness(
+    /// 每次装配业务会话前核验准入资料；锁定时由后续解锁流程处理，不阻断装配。
+    pub(crate) async fn verify_admission_readable(
         &self,
     ) -> Result<(), PendingAdmissionRecoveryStateError> {
         match self
             .recovery
             .state
-            .load(AdmissionRecoveryTrigger::Startup, self.recovery.now_ms())
+            .verify_readable(self.recovery.now_ms())
             .await
         {
-            Ok(_) | Err(PendingAdmissionRecoveryStateError::Locked) => Ok(()),
+            Ok(()) | Err(PendingAdmissionRecoveryStateError::Locked) => Ok(()),
             Err(error) => Err(error),
         }
     }

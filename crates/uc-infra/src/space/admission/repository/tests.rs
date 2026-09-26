@@ -219,14 +219,10 @@ async fn public_admission_read_classifies_current_and_legacy_decode_failures() {
         .seal_profile_payload_compact(b"space-admission-repository-metadata-v3", &[0xff])
         .unwrap();
     fixture.write_encrypted(invalid_current);
-    let error = PendingAdmissionRecoveryStatePort::load(
-        &fixture.repository,
-        AdmissionRecoveryTrigger::Startup,
-        0,
-    )
-    .await
-    .err()
-    .expect("invalid current metadata");
+    let error = PendingAdmissionRecoveryStatePort::verify_readable(&fixture.repository, 0)
+        .await
+        .err()
+        .expect("invalid current metadata");
     assert_eq!(
         error.category(),
         AdmissionReadFailureCategory::CurrentMetadataInvalid
@@ -238,14 +234,10 @@ async fn public_admission_read_classifies_current_and_legacy_decode_failures() {
         .seal_profile_payload(b"space-admission-repository-v1", &[0xff])
         .unwrap();
     fixture.write_encrypted(invalid_legacy);
-    let error = PendingAdmissionRecoveryStatePort::load(
-        &fixture.repository,
-        AdmissionRecoveryTrigger::Startup,
-        0,
-    )
-    .await
-    .err()
-    .expect("invalid legacy repository");
+    let error = PendingAdmissionRecoveryStatePort::verify_readable(&fixture.repository, 0)
+        .await
+        .err()
+        .expect("invalid legacy repository");
     assert_eq!(
         error.category(),
         AdmissionReadFailureCategory::LegacyFallbackInvalid
@@ -266,14 +258,10 @@ async fn public_admission_read_classifies_generation_and_migration_failure() {
         )
         .unwrap();
     fixture.write_encrypted(encrypted);
-    let error = PendingAdmissionRecoveryStatePort::load(
-        &fixture.repository,
-        AdmissionRecoveryTrigger::Startup,
-        0,
-    )
-    .await
-    .err()
-    .expect("generation mismatch");
+    let error = PendingAdmissionRecoveryStatePort::verify_readable(&fixture.repository, 0)
+        .await
+        .err()
+        .expect("generation mismatch");
     assert_eq!(
         error.category(),
         AdmissionReadFailureCategory::GenerationMismatch
@@ -293,14 +281,10 @@ async fn public_admission_read_classifies_generation_and_migration_failure() {
         },
     );
     fixture.write_state(&state);
-    let error = PendingAdmissionRecoveryStatePort::load(
-        &fixture.repository,
-        AdmissionRecoveryTrigger::Startup,
-        0,
-    )
-    .await
-    .err()
-    .expect("legacy migration failed");
+    let error = PendingAdmissionRecoveryStatePort::verify_readable(&fixture.repository, 0)
+        .await
+        .err()
+        .expect("legacy migration failed");
     assert_eq!(
         error.category(),
         AdmissionReadFailureCategory::LegacyMigrationFailed
@@ -312,14 +296,10 @@ async fn public_admission_read_rejects_incomplete_legacy_and_current_relations()
     let mut fixture = Fixture::new();
     let mut legacy = PersistedSpaceAdmissionRepositoryV2::fresh([0x32; 16]);
     fixture.write_state(&legacy);
-    let error = PendingAdmissionRecoveryStatePort::load(
-        &fixture.repository,
-        AdmissionRecoveryTrigger::Startup,
-        0,
-    )
-    .await
-    .err()
-    .expect("legacy generation mismatch must fail");
+    let error = PendingAdmissionRecoveryStatePort::verify_readable(&fixture.repository, 0)
+        .await
+        .err()
+        .expect("legacy generation mismatch must fail");
     assert_eq!(
         error.category(),
         AdmissionReadFailureCategory::GenerationMismatch
@@ -328,14 +308,10 @@ async fn public_admission_read_rejects_incomplete_legacy_and_current_relations()
     legacy.profile_generation = [0x31; 16];
     legacy.current_local_join_id = Some([0x41; 32]);
     fixture.write_state(&legacy);
-    let error = PendingAdmissionRecoveryStatePort::load(
-        &fixture.repository,
-        AdmissionRecoveryTrigger::Startup,
-        0,
-    )
-    .await
-    .err()
-    .expect("legacy record relation must fail");
+    let error = PendingAdmissionRecoveryStatePort::verify_readable(&fixture.repository, 0)
+        .await
+        .err()
+        .expect("legacy record relation must fail");
     assert_eq!(
         error.category(),
         AdmissionReadFailureCategory::RecordRelationIncomplete
@@ -354,14 +330,10 @@ async fn public_admission_read_rejects_incomplete_legacy_and_current_relations()
         )
         .unwrap();
     fixture.write_encrypted(encrypted);
-    let error = PendingAdmissionRecoveryStatePort::load(
-        &fixture.repository,
-        AdmissionRecoveryTrigger::Startup,
-        0,
-    )
-    .await
-    .err()
-    .expect("current record relation must fail");
+    let error = PendingAdmissionRecoveryStatePort::verify_readable(&fixture.repository, 0)
+        .await
+        .err()
+        .expect("current record relation must fail");
     assert_eq!(
         error.category(),
         AdmissionReadFailureCategory::RecordRelationIncomplete
@@ -396,14 +368,10 @@ async fn public_admission_read_rejects_record_envelope_corruption() {
             }
             _ => unreachable!(),
         }
-        let error = PendingAdmissionRecoveryStatePort::load(
-            &fixture.repository,
-            AdmissionRecoveryTrigger::Startup,
-            0,
-        )
-        .await
-        .err()
-        .expect("record envelope corruption must fail");
+        let error = PendingAdmissionRecoveryStatePort::verify_readable(&fixture.repository, 0)
+            .await
+            .err()
+            .expect("record envelope corruption must fail");
         assert_eq!(
             error.category(),
             AdmissionReadFailureCategory::RecordRelationIncomplete,

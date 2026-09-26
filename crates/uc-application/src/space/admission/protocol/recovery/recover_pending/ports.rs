@@ -92,6 +92,14 @@ pub enum PendingAdmissionRecoveryStateError {
 }
 
 impl PendingAdmissionRecoveryStateError {
+    /// 已证实资料无法读取或核验时返回类别；锁定、暂不可用和并发变化都可重试，不进入受限恢复。
+    pub fn restricted_recovery_category(&self) -> Option<AdmissionReadFailureCategory> {
+        match self {
+            Self::ReadFailure { .. } | Self::RecoveryRequired => Some(self.category()),
+            Self::Locked | Self::Unavailable | Self::StateChanged => None,
+        }
+    }
+
     pub fn category(&self) -> AdmissionReadFailureCategory {
         match self {
             Self::ReadFailure { category, .. } => *category,
@@ -104,6 +112,10 @@ impl PendingAdmissionRecoveryStateError {
 
 #[async_trait]
 pub trait PendingAdmissionRecoveryStatePort: Send + Sync {
+    /// 完整核验权威准入记录与派生摘要可读，不修复损坏资料；旧格式迁移沿用既有读取路径。
+    /// 未证实资料损坏的存储故障按可重试错误返回。
+    async fn verify_readable(&self, now_ms: i64) -> Result<(), PendingAdmissionRecoveryStateError>;
+
     async fn load(
         &self,
         trigger: AdmissionRecoveryTrigger,

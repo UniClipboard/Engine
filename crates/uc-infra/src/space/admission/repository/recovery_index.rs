@@ -154,22 +154,28 @@ impl RecoverySummary {
 }
 
 impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
+    /// 解密并校验全部权威记录后再读取派生摘要，任何一步无法证实都返回带类别的失败。
+    // rust-style: allow-qualified-path -- 相邻 recovery 模块需要调用此仓储核验
+    pub(in crate::space::admission) fn verify_repository_on(
+        &self,
+        conn: &mut SqliteConnection,
+        now_ms: i64,
+    ) -> Result<(), SpaceAdmissionStateStoreError> {
+        let state = self.load_state_on(conn)?;
+        for (admission_id, record) in &state.records {
+            self.open_record(*admission_id, record)?;
+        }
+        self.load_recovery_index_on(conn, now_ms).map(|_| ())
+    }
+
     // rust-style: allow-qualified-path -- 相邻 recovery 模块需要调用此仓储查询
     pub(in crate::space::admission) fn load_recovery_index_on(
         &self,
         conn: &mut SqliteConnection,
         now_ms: i64,
-        verify_repository: bool,
     ) -> Result<LoadedRecoveryIndex, SpaceAdmissionStateStoreError> {
         // Legacy migration must acquire write eligibility before the recovery read transaction.
-        if verify_repository {
-            let state = self.load_state_on(conn)?;
-            for (admission_id, record) in &state.records {
-                self.open_record(*admission_id, record)?;
-            }
-        } else {
-            self.load_metadata_on(conn)?;
-        }
+        self.load_metadata_on(conn)?;
         conn.transaction(|conn| {
             if self.load_metadata_on(conn)?.is_none() {
                 return Ok(LoadedRecoveryIndex {

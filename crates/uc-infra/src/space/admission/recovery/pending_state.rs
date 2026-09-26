@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use uc_application::deps::{
-    AdmissionReadFailureCategory, AdmissionRecoveryCommitToken, AdmissionRecoveryTrigger,
-    LoadedAdmissionRecovery, LoadedPendingAdmission, LoadedSponsorAbandonment,
-    LoadedSponsorDeadline, PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
+    AdmissionRecoveryCommitToken, AdmissionRecoveryTrigger, LoadedAdmissionRecovery,
+    LoadedPendingAdmission, LoadedSponsorAbandonment, LoadedSponsorDeadline,
+    PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
 };
 use uc_core::membership::{
     AdmissionRecordPersistence, JoinerAdmissionTransition, SponsorAdmissionTransition,
@@ -19,21 +19,27 @@ use super::super::repository::{SpaceAdmissionStateStoreError, SqliteSpaceAdmissi
 impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
     for SqliteSpaceAdmissionState<E>
 {
+    #[tracing::instrument(name = "space_admission.recovery_state.verify", skip_all, err)]
+    async fn verify_readable(&self, now_ms: i64) -> Result<(), PendingAdmissionRecoveryStateError> {
+        observe_local_result(LocalWorkStep::JoinerStateLoad, async {
+            self.executor
+                .run(|conn| self.verify_repository_on(conn, now_ms).map_err(into_anyhow))
+                .map_err(map_read_error)
+        })
+        .await
+    }
+
     #[tracing::instrument(name = "space_admission.recovery_state.load", skip_all, err)]
     async fn load(
         &self,
-        trigger: AdmissionRecoveryTrigger,
+        _trigger: AdmissionRecoveryTrigger,
         now_ms: i64,
     ) -> Result<LoadedAdmissionRecovery, PendingAdmissionRecoveryStateError> {
         observe_local_result(LocalWorkStep::JoinerStateLoad, async {
             self.executor
                 .run(|conn| {
                     let index = self
-                        .load_recovery_index_on(
-                            conn,
-                            now_ms,
-                            trigger == AdmissionRecoveryTrigger::Startup,
-                        )
+                        .load_recovery_index_on(conn, now_ms)
                         .map_err(into_anyhow)?;
                     let profile_generation = self.keys.profile_generation();
                     let pending = index
@@ -258,16 +264,15 @@ fn map_recovery_error(error: SpaceAdmissionStateStoreError) -> PendingAdmissionR
     }
 }
 
+/// 只有已证实的资料失败进入受限恢复；锁定、并发变化和存储暂不可用保持可重试。
 fn map_read_error(source: anyhow::Error) -> PendingAdmissionRecoveryStateError {
-    match source.downcast_ref::<SpaceAdmissionStateStoreError>() {
-        Some(SpaceAdmissionStateStoreError::Locked) => PendingAdmissionRecoveryStateError::Locked,
-        Some(error) => PendingAdmissionRecoveryStateError::ReadFailure {
-            category: error.read_category(),
-            source,
-        },
-        None => PendingAdmissionRecoveryStateError::ReadFailure {
-            category: AdmissionReadFailureCategory::OtherStorageError,
-            source,
-        },
+    match map_executor_error(source) {
+        error @ SpaceAdmissionStateStoreError::Corrupt { .. } => {
+            PendingAdmissionRecoveryStateError::ReadFailure {
+                category: error.read_category(),
+                source: anyhow::Error::new(error),
+            }
+        }
+        error => map_recovery_error(error),
     }
 }

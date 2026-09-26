@@ -602,14 +602,10 @@ async fn admission_read_distinguishes_missing_and_mismatched_credential() {
     let key = "profile_admission_master_key:v1";
     let original = fixture.secure_storage.get(key).unwrap().unwrap();
     fixture.secure_storage.delete(key).unwrap();
-    let missing = PendingAdmissionRecoveryStatePort::load(
-        &fixture.reopen(),
-        AdmissionRecoveryTrigger::Startup,
-        0,
-    )
-    .await
-    .err()
-    .expect("missing key must fail");
+    let missing = PendingAdmissionRecoveryStatePort::verify_readable(&fixture.reopen(), 0)
+        .await
+        .err()
+        .expect("missing key must fail");
     assert_eq!(
         missing.category(),
         AdmissionReadFailureCategory::CredentialMissing
@@ -619,14 +615,10 @@ async fn admission_read_distinguishes_missing_and_mismatched_credential() {
     assert!(fixture.secure_storage.get(key).unwrap().is_none());
 
     fixture.secure_storage.set(key, &[0x99; 32]).unwrap();
-    let mismatch = PendingAdmissionRecoveryStatePort::load(
-        &fixture.reopen(),
-        AdmissionRecoveryTrigger::Startup,
-        0,
-    )
-    .await
-    .err()
-    .expect("mismatched key must fail");
+    let mismatch = PendingAdmissionRecoveryStatePort::verify_readable(&fixture.reopen(), 0)
+        .await
+        .err()
+        .expect("mismatched key must fail");
     assert_eq!(
         mismatch.category(),
         AdmissionReadFailureCategory::AuthenticationMismatch
@@ -651,14 +643,10 @@ async fn admission_read_rejects_missing_record_and_corrupt_summary() {
     let fixture = Fixture::new();
     commit_fresh_join(&fixture, 0xb5, 0xb6).await;
     fixture.execute("DELETE FROM admission_repository_record");
-    let missing = PendingAdmissionRecoveryStatePort::load(
-        &fixture.reopen(),
-        AdmissionRecoveryTrigger::Startup,
-        0,
-    )
-    .await
-    .err()
-    .expect("missing record must fail");
+    let missing = PendingAdmissionRecoveryStatePort::verify_readable(&fixture.reopen(), 0)
+        .await
+        .err()
+        .expect("missing record must fail");
     assert_eq!(
         missing.category(),
         AdmissionReadFailureCategory::RecordRelationIncomplete
@@ -677,14 +665,10 @@ async fn admission_read_rejects_missing_record_and_corrupt_summary() {
     .ok()
     .expect("healthy summary creation");
     fixture.execute("UPDATE admission_recovery_summary SET encrypted_payload = X'FF'");
-    let summary = PendingAdmissionRecoveryStatePort::load(
-        &fixture.reopen(),
-        AdmissionRecoveryTrigger::Startup,
-        0,
-    )
-    .await
-    .err()
-    .expect("invalid derived summary must fail");
+    let summary = PendingAdmissionRecoveryStatePort::verify_readable(&fixture.reopen(), 0)
+        .await
+        .err()
+        .expect("invalid derived summary must fail");
     assert_eq!(
         summary.category(),
         AdmissionReadFailureCategory::DerivedSummaryInvalid
@@ -752,24 +736,53 @@ fn admission_read_categories_expose_stable_recovery_guidance() {
 }
 
 #[tokio::test]
-async fn admission_read_classifies_unexpected_database_failure_as_other_storage() {
+async fn admission_storage_failure_stays_retryable_instead_of_restricted() {
     let fixture = Fixture::new();
     fixture.execute("DROP TABLE admission_repository_state");
 
-    let error = PendingAdmissionRecoveryStatePort::load(
-        &fixture.store,
-        AdmissionRecoveryTrigger::Startup,
-        0,
-    )
-    .await
-    .err()
-    .expect("database failure must be classified");
+    for error in [
+        PendingAdmissionRecoveryStatePort::verify_readable(&fixture.store, 0)
+            .await
+            .err()
+            .expect("verification must report the storage failure"),
+        PendingAdmissionRecoveryStatePort::load(
+            &fixture.store,
+            AdmissionRecoveryTrigger::Periodic,
+            0,
+        )
+        .await
+        .err()
+        .expect("load must report the storage failure"),
+    ] {
+        assert!(matches!(
+            error,
+            PendingAdmissionRecoveryStateError::Unavailable
+        ));
+        assert_eq!(error.restricted_recovery_category(), None);
+    }
+}
 
+#[test]
+fn only_proven_read_failures_require_restricted_recovery() {
+    let read_failure = PendingAdmissionRecoveryStateError::ReadFailure {
+        category: AdmissionReadFailureCategory::CredentialMissing,
+        source: anyhow::anyhow!("credential missing"),
+    };
     assert_eq!(
-        error.category(),
-        AdmissionReadFailureCategory::OtherStorageError
+        read_failure.restricted_recovery_category(),
+        Some(AdmissionReadFailureCategory::CredentialMissing)
     );
-    assert!(std::error::Error::source(&error).is_some());
+    assert_eq!(
+        PendingAdmissionRecoveryStateError::RecoveryRequired.restricted_recovery_category(),
+        Some(AdmissionReadFailureCategory::OtherStorageError)
+    );
+    for retryable in [
+        PendingAdmissionRecoveryStateError::Locked,
+        PendingAdmissionRecoveryStateError::Unavailable,
+        PendingAdmissionRecoveryStateError::StateChanged,
+    ] {
+        assert_eq!(retryable.restricted_recovery_category(), None);
+    }
 }
 
 #[tokio::test]

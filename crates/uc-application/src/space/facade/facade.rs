@@ -376,7 +376,7 @@ impl SpaceFacade {
     pub async fn start_application_runtime(
         &self,
     ) -> Result<bool, PendingAdmissionRecoveryStateError> {
-        self.space_admission.verify_startup_readiness().await?;
+        self.space_admission.verify_admission_readable().await?;
         let mut application = self.application.lock().await;
         let started = application
             .as_mut()
