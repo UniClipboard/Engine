@@ -121,7 +121,7 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 | --- | --- |
 | `CreateSpace` | 创建空间、设备身份和加密存储 |
 | `UnlockSpace` | 使用口令恢复当前空间会话 |
-| `QueryProfileRecovery` | 查询是否等待口令、正在恢复、已经恢复、只能部分恢复或恢复失败，以及后台是否真正可用 |
+| `QueryProfileRecovery` | 查询是否等待口令、正在恢复、已经恢复、只能部分恢复、恢复失败或需要准入资料恢复，以及后台是否真正可用 |
 | `RecoverSession` | 按宿主策略从系统安全存储恢复加密与空间会话 |
 | `ChangeEncryptionPassphrase` | 当前设备列表只显示有效本机时，把加密口令修改为用户输入并再次确认的新口令，同时撤销此前签发的邀请 |
 | `JoinSpace` | 接受完整长邀请或可手输短码，发起或继续同一次空间加入，返回 Active、Pending 或 Rejected，并携带稳定 `join_id` |
@@ -197,6 +197,8 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 当资料和 keyslot 仍在，但自动解锁材料缺失或错误时，`Engine::start` 返回可用的受限实例，启动进度为 `RecoveryAvailable`。此时 `QueryProfileRecovery`、`QueryEncryptionState`、`UnlockSpace` 和生命周期关闭可用，业务数据库、网络、搜索、收发与历史操作返回 `PROFILE_RECOVERY_REQUIRED`；`session_ready` 必须为 `false`。宿主继续用 `UnlockSpace` 提交原口令。错误口令返回 `UNLOCK_SPACE_UNAUTHORIZED_CODE` 且不写入；正确口令恢复原密钥、启动完整后台并报告 `Recovered`。缺少旧独立密钥副本时报告 `PartiallyRecoverable` 及稳定影响类别，不返回已经解锁。损坏、不支持格式和保存失败分别使用原损坏分类、`PROFILE_RECOVERY_UNSUPPORTED_CODE` 和 `PROFILE_RECOVERY_PERSISTENCE_FAILED_CODE`，其他启动错误保持原分类。恢复口令通过后若完整后台启动或后续解锁失败，状态必须进入 `Failed`，`can_submit_passphrase=false`、`restart_required=true`；同一进程不得复用已经消费的宿主能力，宿主重启 Engine 后继续。旧升级备份存在但其保护材料在 userdata 与系统安全存储中都永久缺失时返回稳定的 `PROFILE_UPGRADE_BACKUP_KEY_MISSING_CODE`，不得生成替代材料或绕过备份门槛。
 
 本机已有空间、网络身份文件却缺失时，`Engine::start` 同样返回受限实例：状态为 `PartiallyRecoverable`，损失类别为 `DeviceIdentity`，`can_submit_passphrase=false`。此时不绑定网络，也不生成替代身份；成员历史只认原身份，补发新身份会让其他设备永久拒绝本机。旧版身份目录待改名或存在待应用的配置导入时，身份将在装配阶段写入，不作此判定。受限实例在资料密钥仍可自动打开时接受 `FactoryResetSpace`：只装配重置所需依赖，不启动后台，完成后报告 `restart_required=true`，宿主重启 Engine 后以全新资料启动；资料密钥无法自动打开时该操作返回 `PROFILE_RECOVERY_REQUIRED`。
+
+每次装配业务会话前，Engine 都会完整核验空间准入资料（权威记录、元数据与派生摘要）。已证实无法读取或核验时进入准入受限恢复：`Engine::start` 返回可用的受限实例，启动进度为 `RecoveryAvailable` 且 `allowed_actions.retry=false`；运行期恢复前台或重建会话时发现同类失败，`resume` 同样以受限实例完成，不报可重试错误。受限状态下 `ProfileRecoveryState` 为 `AdmissionRecoveryRequired`，`can_submit_passphrase`、`restart_required` 和 `background_ready` 均为 `false`，`admission` 字段给出稳定的 `category`、`stage` 和 `action`，并发出 `ProfileRecoveryChanged`。只有 `QueryProfileRecovery`、`QueryEncryptionState`（`session_ready=false`）与生命周期操作可用；准入、成员维护、收发和同步等其余操作，包括 `UnlockSpace` 与 `FactoryResetSpace`，都返回不可重试的 `PROFILE_RECOVERY_REQUIRED`。同一进程不重试修复，也不删除、忽略或改写权威记录；宿主按 `action` 引导用户恢复凭据（`restore_credential`）、选择可信备份（`choose_backup`）、重建派生状态（`rebuild_derived_state`）或导出诊断（`export_diagnostics`），处理后重启 Engine。类别只在原因可证实时精确给出，无法区分密钥不匹配与密文篡改时统一为 `authentication_mismatch`；公开结果不含原始错误文本或资料内容。锁定、存储暂不可用和并发变化不属于此状态，按原有可重试错误返回。
 
 正常启动和恢复完成后的系统安全存储只保留当前资料的一条自动解锁材料；独立随机密钥位于 userdata 的加密文件中。完整 userdata 加当前口令可以在空安全存储环境恢复，导出与导入会携带该密文文件。`FactoryResetSpace` 同时清除两处副本。宿主不得把 GUI 内容锁定解释为此处的真实密钥恢复状态。
 
