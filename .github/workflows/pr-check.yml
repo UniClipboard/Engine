@@ -175,8 +175,14 @@ jobs:
       - name: Validate dev-tools test support
         run: "cargo test -p uc-engine --features dev-tools --lib --locked dev::"
 
+      # 覆盖率插桩改变内联，部分符号按设计报告 unresolved；完整符号栈在未插桩构建下单独验证。
+      - name: Validate captured diagnostic stacks
+        run: cargo test -p uc-infra --test peer_address_read_diagnostics --locked
+
       - name: Generate Rust coverage
         run: cargo llvm-cov --workspace --all-targets --locked --ignore-filename-regex 'crates/uc-engine/src/dev/' --lcov --output-path lcov.info
+        env:
+          UC_EXPECT_DIAGNOSTIC_STACK: release
 
       - name: Upload Rust coverage to Codecov
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f
