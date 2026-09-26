@@ -102,6 +102,8 @@ pub async fn prepare_daemon_session(
 }
 
 /// 资料校验通过后才整理成员关系，受限恢复不触碰这些记录。
+/// 清理只删除非成员的派生地址与信任条目，而连接协调只面向成员，
+/// 因此在业务会话启动后执行不会与连接竞争。
 pub async fn reconcile_session_peers(space_setup: &SyncEngineDeps) {
     // 启动期 reconcile:把 peer_addr_repo / trusted_peer_repo 中
     // member_repo 已不再持有的孤儿条目清掉,恢复设计意图的不变量
