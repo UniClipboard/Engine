@@ -341,6 +341,43 @@ async fn public_admission_read_rejects_incomplete_legacy_and_current_relations()
 }
 
 #[tokio::test]
+async fn admission_verification_classifies_undecodable_record_body() {
+    let mut fixture = Fixture::new();
+    let admission_id = [0x61; 32];
+    let wrapped_data_key = fixture
+        .keys
+        .create_wrapped_attempt_key(admission_id)
+        .unwrap();
+    let encrypted_payload = fixture
+        .keys
+        .seal_attempt_payload(admission_id, &wrapped_data_key, &[0xff])
+        .unwrap();
+    let mut state = PersistedSpaceAdmissionRepositoryV2::fresh([0x31; 16]);
+    state.records.insert(
+        admission_id,
+        StoredSpaceAdmissionV1 {
+            wrapped_data_key,
+            encrypted_payload: encrypted_payload.into(),
+        },
+    );
+    fixture
+        .repository
+        .save_state_on(&mut fixture.connection, &state)
+        .unwrap();
+
+    let error = PendingAdmissionRecoveryStatePort::verify_readable(&fixture.repository, 0)
+        .await
+        .err()
+        .expect("undecodable record body must fail verification");
+
+    assert_eq!(
+        error.category(),
+        AdmissionReadFailureCategory::RecordRelationIncomplete
+    );
+    assert!(std::error::Error::source(&error).is_some());
+}
+
+#[tokio::test]
 async fn public_admission_read_rejects_record_envelope_corruption() {
     for corruption in ["ciphertext", "encoding", "content_token"] {
         let mut fixture = Fixture::new();

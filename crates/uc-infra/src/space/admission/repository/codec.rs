@@ -526,10 +526,18 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                 &stored.encrypted_payload,
             )
             .map_err(map_key_error)?;
-        let aggregate = SpaceAdmissionAggregate::decode_persisted(&plaintext)
-            .map_err(SpaceAdmissionStateStoreError::corrupt_from)?;
+        let aggregate =
+            SpaceAdmissionAggregate::decode_persisted(&plaintext).map_err(|source| {
+                SpaceAdmissionStateStoreError::read_invalid(
+                    AdmissionReadFailureCategory::RecordRelationIncomplete,
+                    source,
+                )
+            })?;
         if aggregate.admission_id().as_bytes() != &admission_id {
-            return Err(SpaceAdmissionStateStoreError::corrupt());
+            return Err(SpaceAdmissionStateStoreError::read_invalid(
+                AdmissionReadFailureCategory::RecordRelationIncomplete,
+                RepositoryReadValidationError::RecordRelationIncomplete,
+            ));
         }
         Ok(aggregate)
     }
