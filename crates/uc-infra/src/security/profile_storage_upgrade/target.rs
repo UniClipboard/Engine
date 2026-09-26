@@ -95,13 +95,20 @@ const OPTIONAL_RETIRED_TABLES: &[&str] = &[
     "relationship_legacy_space_member",
     "relationship_legacy_trusted_peer",
 ];
-// 旧版 V3 活动库在常规迁移前尚不存在的另一库归属表。
-const LATER_FORBIDDEN_TABLES: &[&str] = &[
+// 早期 V3 活动库尚未通过常规迁移补建、且属于另一库的表；缺失等同于没有越界行。
+const TABLES_ADDED_AFTER_EARLY_V3: &[&str] = &[
     "group_update_delivery",
     "group_update_source",
     "admission_recovery_summary",
     "admission_repository_record",
 ];
+
+/// 行归属核验针对的库代次：暂存库由本次升级建成，表必须齐全；已提升的活动库可能来自早期 V3。
+#[derive(Clone, Copy)]
+pub(super) enum RuntimeTableSet {
+    Staged,
+    Promoted,
+}
 
 impl TargetGenerationStager {
     pub(super) fn new(root: PathBuf, source_pool: DbPool, keys: Arc<AdmissionKeyManager>) -> Self {
@@ -314,13 +321,12 @@ impl TargetGenerationStager {
     pub(super) fn verify_runtime_row_ownership(
         &self,
         journal: &UpgradeJournalV1,
-        allow_later_missing: bool,
+        tables: RuntimeTableSet,
     ) -> Result<(), ProfileStorageUpgradeError> {
         let paths = self.paths(journal);
-        let optional_missing = if allow_later_missing {
-            LATER_FORBIDDEN_TABLES
-        } else {
-            &[]
+        let optional_missing = match tables {
+            RuntimeTableSet::Staged => &[],
+            RuntimeTableSet::Promoted => TABLES_ADDED_AFTER_EARLY_V3,
         };
         ensure_tables_empty(
             &paths.payload_output.join(PROFILE_DATABASE_FILE),
