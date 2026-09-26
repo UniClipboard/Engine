@@ -143,22 +143,13 @@ impl DeliverPendingGroupUpdatesUseCase {
         }
         Ok(pending)
     }
-}
 
-#[async_trait::async_trait]
-impl DeliverPendingGroupUpdatesPort for DeliverPendingGroupUpdatesUseCase {
-    async fn deliver_pending_group_updates(
+    /// 投递本轮选中的更新并写回结果；`delivery_changed` 记录是否已有确认或退避写入存储。
+    async fn dispatch_updates(
         &self,
-        _trigger: &MembershipMaintenanceTrigger,
-        reachable_peers: &[DeviceId],
+        pending: &[PendingGroupUpdate],
+        delivery_changed: &mut bool,
     ) -> MembershipMaintenanceStepOutcome {
-        if let Err(outcome) = self.settle_obsolete_updates().await {
-            return outcome;
-        }
-        let pending = match self.deliverable_updates(reachable_peers).await {
-            Ok(pending) => pending,
-            Err(error) => return classify_store_error(&error),
-        };
         let mut outcome = MembershipMaintenanceStepOutcome::Completed;
         let mut failures = Vec::new();
         let mut unavailable_peers = HashSet::new();
@@ -185,7 +176,7 @@ impl DeliverPendingGroupUpdatesPort for DeliverPendingGroupUpdatesUseCase {
                     .acknowledge_space_group_update(update.update_id(), self.clock.now_ms())
                     .await
                 {
-                    Ok(true) => {}
+                    Ok(true) => *delivery_changed = true,
                     Ok(false) => outcome = MembershipMaintenanceStepOutcome::StableFailure,
                     Err(error) => return classify_store_error(&error),
                 },
@@ -216,8 +207,11 @@ impl DeliverPendingGroupUpdatesPort for DeliverPendingGroupUpdatesUseCase {
                 .record_space_group_update_failures(&failures, self.clock.now_ms())
                 .await
             {
-                Ok(deferred) if deferred == failures.len() => {}
-                Ok(_) => outcome = MembershipMaintenanceStepOutcome::StableFailure,
+                Ok(deferred) if deferred == failures.len() => *delivery_changed = true,
+                Ok(deferred) => {
+                    *delivery_changed |= deferred > 0;
+                    outcome = MembershipMaintenanceStepOutcome::StableFailure;
+                }
                 Err(error) => return classify_store_error(&error),
             }
         }
@@ -227,6 +221,32 @@ impl DeliverPendingGroupUpdatesPort for DeliverPendingGroupUpdatesUseCase {
         } else {
             outcome
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl DeliverPendingGroupUpdatesPort for DeliverPendingGroupUpdatesUseCase {
+    async fn deliver_pending_group_updates(
+        &self,
+        _trigger: &MembershipMaintenanceTrigger,
+        reachable_peers: &[DeviceId],
+    ) -> MembershipMaintenanceStepOutcome {
+        if let Err(outcome) = self.settle_obsolete_updates().await {
+            return outcome;
+        }
+        let pending = match self.deliverable_updates(reachable_peers).await {
+            Ok(pending) => pending,
+            Err(error) => return classify_store_error(&error),
+        };
+        let mut delivery_changed = false;
+        let outcome = self.dispatch_updates(&pending, &mut delivery_changed).await;
+        // 确认与退避都会改变宿主可见的设备更新状态，且不推进成员账本修订号，必须单独通知重读。
+        if delivery_changed {
+            self.host_events.emit_or_warn(HostEvent::Membership(
+                MembershipHostEvent::SpaceDeviceUpdateChanged,
+            ));
+        }
+        outcome
     }
 }
 
@@ -487,7 +507,13 @@ mod tests {
 
         assert_eq!(outcome, MembershipMaintenanceStepOutcome::Completed);
         assert_eq!(dispatch.dispatched.lock().unwrap().as_slice(), [update_id]);
-        assert!(recorded.lock().unwrap().is_empty());
+        // 确认不推进成员账本修订号，宿主只能靠这次通知重读到已完成状态。
+        assert!(matches!(
+            recorded.lock().unwrap().as_slice(),
+            [HostEvent::Membership(
+                MembershipHostEvent::SpaceDeviceUpdateChanged
+            )]
+        ));
     }
 
     #[tokio::test]
