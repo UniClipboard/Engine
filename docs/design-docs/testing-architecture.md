@@ -283,7 +283,7 @@ Iroh host 和成熟系统工具。网络故障必须在对应真实环境中实�
 | `Scenario` + Application fixtures | 固定 seed、调用一个真实负责人、最终公开状态 | 预算、阶段、事件等待、临时资源、清理、JSON/文本/JUnit 和复现命令 | 节点准备由领域 fixture 提供；不建立跨五类的通用 topology DSL |
 | `PairingScenarioFixture` | 准备 `JoinSpaceInput`、调用一次 `complete_joiner_pairing`、断言稳定快照 | 可控 transport/clock/persistence、真实 admission maintenance、激活和最终确认 | 只证明 joiner 规则；Sponsor 唯一性由三设备场景证明，双方链路由 E01 证明 |
 | `TwoMemberHistoryScenario` + `VirtualMembershipNetwork` | 准备两节点、exchange/partition/heal、预期 ACK/Offline | 真实 Application endpoint/ledger、节点注册、typed message 路由、frame 预算、故障生命周期与脱敏 trace | 只覆盖成员历史，不负责 invitation、内容或真实连接生命周期 |
-| `run-connection-recovery-e2e.sh --mode ... --case ...` | mode、场景前缀、repeat | Engine 进程、profile、身份、端口、namespace、relay、等待、清理和 JSON 工件 | Linux/root 环境；PR 全矩阵仍约 67 分钟，不属于快速线 |
+| `run-connection-recovery-e2e.sh --mode ... --case ...` | mode、场景前缀、网络场景 repeat | Engine 进程、profile、身份、端口、namespace、relay、等待、清理和 JSON 工件 | Linux/root 环境；本地测试只跑一轮，不属于快速线 |
 | `engine-real-environment.yml` 的 `profile-upgrade` | 选择升级模式 | 固定 nextest、编译/场景/总耗时、JUnit 与 testkit 工件 | workflow 尚未进入默认分支，当前不能 workflow_dispatch |
 
 选择迁移对象时，先处理这五类中最慢、最不稳定且诊断收益最高的测试；已有简单快速测试保持原样。t-0010

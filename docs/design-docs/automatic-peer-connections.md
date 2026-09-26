@@ -75,7 +75,7 @@ Application 只有在当前成员的完整历史同步通过业务校验并提�
 公开 Engine 错误继续使用稳定分类；内部新增错误转换保留源错误。
 
 原自动连接验收见[原执行记录](../exec-plans/completed/2026-09-11-automatic-peer-connections.md)，活性与恢复改动见[本次执行记录](../exec-plans/completed/2026-09-12-connection-liveness-and-recovery.md)。
-专用入口为 `bash scripts/testing/run-connection-recovery-e2e.sh --suite all --repeat 3`，独立网络部分必须在支持命名空间和 nftables 的 Linux 环境执行。
+专用入口为 `bash scripts/testing/run-connection-recovery-e2e.sh --suite all --repeat 3`，独立网络部分必须在支持命名空间和 nftables 的 Linux 环境执行。本地确定性测试只跑一轮，`--repeat` 只控制真实网络场景的重复次数。
 只走中转的三秒恢复门使用 `bash scripts/testing/run-connection-recovery-e2e.sh --suite network --mode relay --case E10-relay-only --repeat 20`：测试先用内核规则阻断并计数全部 UDP 直连，中转重启后等两端都重新建立中转连接，再从较晚完成时刻起要求三秒内双方 Online 且完成双向精确内容传送。中转故障期间的离线识别单独计时，不计入三秒。
 自动验收只查询在线状态，不能通过刷新或发送促成连接；连接后再验证当前成员资格及实际内容传送。
 其中已知设备联系场景使用三台独立进程：第三台设备经中间成员加入，使等待方已知但尚未确认该成员；随后第三台设备更换固定端口，测试同时阻断等待方的本地发现和主动发起，只允许换址设备主动联系。验收必须独立证明旧端口关闭、防火墙规则实际命中、20 秒内自动上线，并在上线后完成双向传送；默认连续运行三次。
