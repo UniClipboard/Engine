@@ -284,10 +284,11 @@ async fn public_admission_read_classifies_generation_and_migration_failure() {
     let error = PendingAdmissionRecoveryStatePort::verify_readable(&fixture.repository, 0)
         .await
         .err()
-        .expect("legacy migration failed");
+        .expect("legacy migration storage failed");
+    // 迁移写入被存储层拒绝属于运行期存储故障，保持原分类，不归为需要恢复的迁移失败。
     assert_eq!(
         error.category(),
-        AdmissionReadFailureCategory::LegacyMigrationFailed
+        AdmissionReadFailureCategory::OtherStorageError
     );
 }
 

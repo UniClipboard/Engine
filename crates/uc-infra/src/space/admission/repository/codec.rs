@@ -112,12 +112,16 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
             return self.load_v3_state_on(conn, metadata);
         }
         let legacy = self.open_legacy_state(&row.encrypted_payload)?;
-        self.persist_v3_state_on(conn, &legacy).map_err(|source| {
-            SpaceAdmissionStateStoreError::read_invalid(
-                AdmissionReadFailureCategory::LegacyMigrationFailed,
-                source,
-            )
-        })?;
+        self.persist_v3_state_on(conn, &legacy)
+            .map_err(|source| match source {
+                // 锁竞争与存储不可用属于可重试的运行期故障，不能归为需要恢复的迁移失败
+                SpaceAdmissionStateStoreError::Locked
+                | SpaceAdmissionStateStoreError::Unavailable { .. } => source,
+                source => SpaceAdmissionStateStoreError::read_invalid(
+                    AdmissionReadFailureCategory::LegacyMigrationFailed,
+                    source,
+                ),
+            })?;
         self.clear_read_cache();
         Ok(legacy)
     }
