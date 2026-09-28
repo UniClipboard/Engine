@@ -34,7 +34,7 @@ use uc_core::blob::ports::BlobContentIngestPort;
 use uc_core::clipboard::{
     is_file_mime_or_format, ClipboardPayloadSource, EntryFileSet, EntryFileSetExcludeReason,
     EntryFileSetLine, EntryFileSetLineKind, FileSetMemberKind, FileSetMemberLocation,
-    PersistedClipboardRepresentation,
+    PersistedClipboardRepresentation, IMAGE_FROM_FILE_FORMAT,
 };
 
 use crate::clipboard::outbound::{parse_uri_list_line, UriListLineKind};
@@ -947,17 +947,26 @@ impl FileSetCaps {
 /// resolvable file lines (not a file-class snapshot at all).
 ///
 /// Two file-rep shapes contribute lines:
-/// - `ClipboardPayloadSource::LocalFile` reps (e.g. macOS Finder copy): one
-///   line per rep, keyed by its path (there is no backing uri-list text to
-///   preserve, so the path's display form stands in for `original_text`).
+/// - `ClipboardPayloadSource::LocalFile` member reps (e.g. host file
+///   imports): one line per rep, keyed by its path (there is no backing
+///   uri-list text to preserve, so the path's display form stands in for
+///   `original_text`).
 /// - An inline `text/uri-list` file rep (e.g. Windows file copy): one line
 ///   per line of that rep's text, in original order — including blank/
 ///   comment/non-file lines, so the manifest can later distinguish "one more
 ///   line" or "different line order" as a different identity.
 ///
-/// The two shapes are mutually exclusive in practice (a snapshot carries
-/// either `LocalFile` reps or an inline uri-list rep), so the inline branch
-/// only runs when no `LocalFile` rep is present.
+/// The two member shapes are mutually exclusive in practice (a snapshot
+/// carries either `LocalFile` member reps or an inline uri-list rep), so
+/// the inline branch only runs when no `LocalFile` member rep is present.
+///
+/// `image-from-file` reps are the exception to the LocalFile rule: the
+/// platform capture emits one as a lazily-read preview companion whenever
+/// the copied file list contains an image, so its `LocalFile` path merely
+/// repeats a uri-list member rather than declaring an additional copied
+/// file. Counting it as a member would collapse a mixed multi-file copy
+/// (e.g. `a.mdx` + `a.css` + `a.png`) to just the image, so such reps are
+/// filtered out before the member scan below.
 ///
 /// # Whole-set caps (ADR-010)
 ///
@@ -995,6 +1004,10 @@ async fn build_entry_file_set(
     let local_file_members: Vec<TopLevelFileMember> = snapshot
         .representations
         .iter()
+        // Derived preview reps (`image-from-file`) also use `LocalFile`
+        // sourcing but never represent a copied file member — see the
+        // doc comment above.
+        .filter(|rep| !rep.format_id.eq_ignore_ascii_case(IMAGE_FROM_FILE_FORMAT))
         .filter_map(|rep| match rep.source() {
             ClipboardPayloadSource::LocalFile { path, size_bytes } => {
                 Some((path.clone(), *size_bytes))
@@ -2295,6 +2308,46 @@ mod tests {
                 reason: EntryFileSetExcludeReason::SizeCapExceeded
             }
         )));
+    }
+
+    /// Regression: a multi-file copy that includes an image also carries an
+    /// `image-from-file` LocalFile preview rep alongside the uri-list rep.
+    /// The preview rep must not be counted as a file member — previously it
+    /// claimed the LocalFile-only branch and collapsed the manifest to just
+    /// the image, so peers received one file instead of the full set.
+    #[tokio::test]
+    async fn uri_list_manifest_ignores_image_from_file_preview_rep() {
+        let snap = snapshot_with(vec![
+            rep(
+                "files",
+                Some("text/uri-list"),
+                b"file:///tmp/a.mdx\nfile:///tmp/a.css\nfile:///tmp/a.png",
+            ),
+            ObservedClipboardRepresentation::new_local_file(
+                RepresentationId::new(),
+                FormatId::from("image-from-file"),
+                Some(MimeType("image/png".to_string())),
+                std::path::PathBuf::from("/tmp/a.png"),
+                10,
+            ),
+        ]);
+
+        let file_set = build_entry_file_set(&snap, &FakeIngestByName, FileSetCaps::unbounded())
+            .await
+            .expect("file-class snapshot yields a manifest");
+
+        assert_eq!(
+            file_set.file_lines().count(),
+            3,
+            "all uri-list members must survive alongside the preview rep"
+        );
+        assert!(
+            file_set
+                .lines
+                .iter()
+                .all(|l| l.original_text.starts_with("file://")),
+            "manifest lines must come from the uri-list rep, not the preview rep's path"
+        );
     }
 
     #[test]

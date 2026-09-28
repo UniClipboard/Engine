@@ -346,6 +346,13 @@ pub(crate) fn is_image_representation(rep: &ObservedClipboardRepresentation) -> 
     rep.mime.as_ref().is_some_and(|m| m.is_image()) || rep.format_id.eq_ignore_ascii_case("image")
 }
 
+/// 平台捕获端在「文件列表中含图片」时补出的派生预览 rep 的 format_id。
+///
+/// 这条 rep 以 `LocalFile` source 延迟读盘，其路径本身就是文件列表成员
+/// 的重复：它只服务于 UI 预览与粘贴策略，不是文件集合的成员——构建
+/// entry 文件清单时必须排除，否则混合多文件复制会被塌缩成只剩图片。
+pub const IMAGE_FROM_FILE_FORMAT: &str = "image-from-file";
+
 /// Check if a mime type and format ID combination represents a file clipboard entry.
 ///
 /// This is the canonical check used across the codebase — wrappers for specific

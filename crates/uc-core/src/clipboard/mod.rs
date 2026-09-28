@@ -48,6 +48,7 @@ pub use snapshot::*;
 pub use system::{
     is_file_mime_or_format, is_plain_text_mime_or_format, ClipboardPayloadSource,
     ObservedClipboardRepresentation, RepresentationHash, SnapshotHash, SystemClipboardSnapshot,
+    IMAGE_FROM_FILE_FORMAT,
 };
 
 pub use decision::{ClipboardContentActionDecision, DuplicationHint, RejectReason};
