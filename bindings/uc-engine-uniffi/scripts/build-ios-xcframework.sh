@@ -2,7 +2,8 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 REPO_ROOT="$(cd "${1:-$REPO_ROOT}" && pwd)"
 TARGET_DIR="${UC_ENGINE_UNIFFI_TARGET_DIR:-${CARGO_TARGET_DIR:-$REPO_ROOT/target}}"
 DIST_ROOT="${UC_ENGINE_UNIFFI_DIST_DIR:-$TARGET_DIR/uc-engine-uniffi-dist}"
@@ -65,7 +66,8 @@ selective_strip_archive() {
       fi
     done
     xcrun strip -S "${strip_objects[@]}"
-    xcrun ar rcs "$rebuilt" ./*.o
+    # cctools ar 默认写入当前时间，同一源码重新打包也会得到不同字节。
+    ZERO_AR_DATE=1 xcrun ar rcs "$rebuilt" ./*.o
   )
   mv "$rebuilt" "$archive"
   rm -rf "$work_dir"
@@ -84,6 +86,7 @@ export CARGO_TARGET_DIR="$TARGET_DIR"
 export CARGO_PROFILE_RELEASE_DEBUG="${CARGO_PROFILE_RELEASE_DEBUG:-0}"
 export IPHONEOS_DEPLOYMENT_TARGET="${UC_ENGINE_UNIFFI_IOS_DEPLOYMENT_TARGET:-16.4}"
 cd "$REPO_ROOT"
+source "$SCRIPT_DIR/release-path-remap.sh"
 rm -rf "$STAGE_DIR" "$DIST_DIR" "$DEBUG_DIR"
 mkdir -p \
   "$INCLUDE_DIR" \
@@ -151,16 +154,17 @@ cp "$BINDINGS_DIR/uc_engine_uniffiFFI.modulemap" "$INCLUDE_DIR/module.modulemap"
 
 if [[ "$SLICE" != "simulator" ]]; then
   echo "==> Build iOS device library"
-  cargo build -p uc-engine-uniffi --profile "$BUILD_PROFILE" --target aarch64-apple-ios $CARGO_LOCKED_FLAG
+  cargo_with_release_path_remap build -p uc-engine-uniffi --profile "$BUILD_PROFILE" --target aarch64-apple-ios $CARGO_LOCKED_FLAG
   cp "$TARGET_DIR/aarch64-apple-ios/$PROFILE_DIR/libuc_engine_uniffi.a" "$DEVICE_DIR/"
   cp "$DEVICE_DIR/libuc_engine_uniffi.a" "$DEBUG_DIR/device.a"
   selective_strip_archive "$DEVICE_DIR/libuc_engine_uniffi.a"
+  verify_release_paths "$DEVICE_DIR/libuc_engine_uniffi.a"
 fi
 
 if [[ "$SLICE" != "device" ]]; then
   echo "==> Build iOS simulator libraries"
-  cargo build -p uc-engine-uniffi --profile "$BUILD_PROFILE" --target aarch64-apple-ios-sim $CARGO_LOCKED_FLAG
-  cargo build -p uc-engine-uniffi --profile "$BUILD_PROFILE" --target x86_64-apple-ios $CARGO_LOCKED_FLAG
+  cargo_with_release_path_remap build -p uc-engine-uniffi --profile "$BUILD_PROFILE" --target aarch64-apple-ios-sim $CARGO_LOCKED_FLAG
+  cargo_with_release_path_remap build -p uc-engine-uniffi --profile "$BUILD_PROFILE" --target x86_64-apple-ios $CARGO_LOCKED_FLAG
   cp "$TARGET_DIR/aarch64-apple-ios-sim/$PROFILE_DIR/libuc_engine_uniffi.a" \
     "$SIMULATOR_ARM64_DIR/"
   cp "$TARGET_DIR/x86_64-apple-ios/$PROFILE_DIR/libuc_engine_uniffi.a" \
@@ -169,6 +173,8 @@ if [[ "$SLICE" != "device" ]]; then
   cp "$SIMULATOR_X86_64_DIR/libuc_engine_uniffi.a" "$DEBUG_DIR/simulator-x86_64.a"
   selective_strip_archive "$SIMULATOR_ARM64_DIR/libuc_engine_uniffi.a"
   selective_strip_archive "$SIMULATOR_X86_64_DIR/libuc_engine_uniffi.a"
+  verify_release_paths "$SIMULATOR_ARM64_DIR/libuc_engine_uniffi.a"
+  verify_release_paths "$SIMULATOR_X86_64_DIR/libuc_engine_uniffi.a"
   lipo -create \
     "$SIMULATOR_ARM64_DIR/libuc_engine_uniffi.a" \
     "$SIMULATOR_X86_64_DIR/libuc_engine_uniffi.a" \
@@ -184,9 +190,26 @@ if [[ "$SLICE" != "device" ]]; then
   XCFRAMEWORK_ARGS+=(-library "$SIMULATOR_DIR/libuc_engine_uniffi.a" -headers "$INCLUDE_DIR")
 fi
 xcodebuild -create-xcframework "${XCFRAMEWORK_ARGS[@]}" -output "$XCFRAMEWORK"
+# xcodebuild 每次运行给出的切片顺序不固定；按库标识排序，使同一源码的清单一致。
+python3 - "$XCFRAMEWORK/Info.plist" <<'PY'
+import plistlib
+import sys
+
+path = sys.argv[1]
+with open(path, "rb") as source:
+    info = plistlib.load(source)
+info["AvailableLibraries"].sort(key=lambda library: library["LibraryIdentifier"])
+with open(path, "wb") as target:
+    plistlib.dump(info, target)
+PY
 
 cp "$BINDINGS_DIR/uc_engine_uniffi.swift" "$DIST_DIR/"
-ditto -c -k --keepParent "$XCFRAMEWORK" "$XCFRAMEWORK_ZIP"
+# zip 记录文件时间与扩展属性：时间统一为源码提交时间，并去除 AppleDouble 扩展属性条目。
+# DOS 时间按本地时区写入，固定 UTC 才能跨时区一致。
+SOURCE_TIME="$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y%m%d%H%M.%S)"
+find "$XCFRAMEWORK" -exec env TZ=UTC touch -h -t "$SOURCE_TIME" {} +
+TZ=UTC ditto -c -k --norsrc --noextattr --noqtn --noacl --keepParent \
+  "$XCFRAMEWORK" "$XCFRAMEWORK_ZIP"
 shasum -a 256 "$XCFRAMEWORK_ZIP" | awk '{print $1}' > "$CHECKSUM_FILE"
 
 VERSION="$(cargo pkgid -p uc-engine-uniffi)"

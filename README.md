@@ -456,6 +456,8 @@ if (!recovery.unlocked) {
 
 两端脚本默认生成正式产物。设置 `UC_ENGINE_UNIFFI_BUILD_PROFILE=dev` 可生成本地调试产物；只接受 `dev` 或 `release`。还可以把另一个 Engine 源码目录作为脚本的第一个参数，使用当前打包工具构建该目录中的固定版本。正式发布只接受标记为 `release` 的 iOS 与 Android 产物。
 
+正式产物中的源码路径与检出位置无关：工作区代码本来就是相对路径；`CARGO_HOME` 下的依赖源码记为 `/cargo-home/...`，本机 rust-src 中的标准库记为 `/rustc/<编译器提交>/...`，与未安装 rust-src 的工具链一致。脚本通过 `--remap-path-prefix` 追加这两项，并保留仓库配置与环境变量中已有的 rustflags；依赖中的 C 与汇编源码（如 ring 在 Apple 目标上带调试信息编译的对象）通过追加到 `CFLAGS` 的 `-ffile-prefix-map` 做同样映射，`CARGO_HOME` 或其 `registry`、`git` 为符号链接时也映射链接目标。原生库仍含源码目录、编译目录、`CARGO_HOME` 或 Rust 工具链路径时构建直接失败。iOS 打包另外固定了会随运行变化的元数据：重新归档静态库时成员时间写零，XCFramework 清单按库标识排序切片，zip 中文件时间统一为源码提交时间（UTC）并去除扩展属性条目。因此在相同源码、锁文件与工具链（Rust、NDK、Xcode 与本机 C 编译器、JDK 与 Gradle）下，不同目录构建的 AAR 与 XCFramework 字节一致。panic 位置与 tracing 事件中的依赖路径同样显示为上述固定前缀，本地排查时对应回自己的 `CARGO_HOME` 与工具链目录。`dev` 产物不做重映射，保留本机路径供调试器定位源码。
+
 ### iOS
 
 ```bash

@@ -2,7 +2,8 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 REPO_ROOT="$(cd "${1:-$REPO_ROOT}" && pwd)"
 TARGET_DIR="${UC_ENGINE_UNIFFI_TARGET_DIR:-${CARGO_TARGET_DIR:-$REPO_ROOT/target}}"
 DIST_ROOT="${UC_ENGINE_UNIFFI_DIST_DIR:-$TARGET_DIR/uc-engine-uniffi-dist}"
@@ -36,6 +37,7 @@ esac
 
 export CARGO_TARGET_DIR="$TARGET_DIR"
 cd "$REPO_ROOT"
+source "$SCRIPT_DIR/release-path-remap.sh"
 rm -rf "$STAGE_DIR" "$DIST_DIR" "$DEBUG_DIR"
 mkdir -p "$BINDINGS_DIR" "$JNI_DIR" "$DIST_DIR" "$DEBUG_DIR"
 
@@ -49,13 +51,15 @@ cargo run -p uc-engine-uniffi --profile dev --features bindgen-cli \
   --out-dir "$BINDINGS_DIR" --no-format
 
 echo "==> Build Android native libraries"
-cargo ndk -t arm64-v8a -t x86_64 \
+cargo_with_release_path_remap ndk -t arm64-v8a -t x86_64 \
   build -p uc-engine-uniffi --profile "$BUILD_PROFILE" $CARGO_LOCKED_FLAG
 mkdir -p "$JNI_DIR/arm64-v8a" "$JNI_DIR/x86_64"
 cp "$TARGET_DIR/aarch64-linux-android/$PROFILE_DIR/libuc_engine_uniffi.so" \
   "$JNI_DIR/arm64-v8a/"
 cp "$TARGET_DIR/x86_64-linux-android/$PROFILE_DIR/libuc_engine_uniffi.so" \
   "$JNI_DIR/x86_64/"
+verify_release_paths "$JNI_DIR/arm64-v8a/libuc_engine_uniffi.so"
+verify_release_paths "$JNI_DIR/x86_64/libuc_engine_uniffi.so"
 cp "$JNI_DIR/arm64-v8a/libuc_engine_uniffi.so" "$DEBUG_DIR/arm64-v8a.so"
 cp "$JNI_DIR/x86_64/libuc_engine_uniffi.so" "$DEBUG_DIR/x86_64.so"
 

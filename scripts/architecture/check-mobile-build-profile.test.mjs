@@ -29,7 +29,9 @@ function run(
   mkdirSync(scripts, { recursive: true })
   mkdirSync(bin)
   const name = platform === 'ios' ? 'build-ios-xcframework.sh' : 'build-android-aar.sh'
-  copyFileSync(join(root, 'bindings/uc-engine-uniffi/scripts', name), join(scripts, name))
+  for (const file of [name, 'release-path-remap.sh']) {
+    copyFileSync(join(root, 'bindings/uc-engine-uniffi/scripts', file), join(scripts, file))
+  }
   writeExecutable(join(bin, 'uname'), '#!/bin/sh\necho Darwin\n')
   writeExecutable(join(bin, 'cargo'), `#!/bin/bash
 set -eu
@@ -68,11 +70,16 @@ fi
 `)
   writeExecutable(join(bin, 'git'), `#!/bin/sh
 if [ "$1" = rev-parse ]; then printf '%040d\n' 0; fi
+if [ "$1" = log ]; then echo 202601010000.00; fi
+`)
+  writeExecutable(join(bin, 'rustc'), `#!/bin/sh
+if [ "$1" = --print ]; then echo "$PROFILE_TEST_SOURCE/toolchain"; else echo 'commit-hash: fixture'; fi
 `)
   writeExecutable(join(bin, 'xcodebuild'), `#!/bin/bash
 set -eu
 while [[ "$1" != -output ]]; do shift; done
 mkdir -p "$2"
+printf '%s' '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>AvailableLibraries</key><array/></dict></plist>' > "$2/Info.plist"
 `)
   writeExecutable(join(bin, 'ditto'), '#!/bin/bash\nset -eu\ntouch "${@: -1}"\n')
   writeExecutable(join(bin, 'unzip'), `#!/bin/sh
