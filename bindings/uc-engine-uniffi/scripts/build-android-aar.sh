@@ -51,7 +51,7 @@ cargo run -p uc-engine-uniffi --profile dev --features bindgen-cli \
   --out-dir "$BINDINGS_DIR" --no-format
 
 echo "==> Build Android native libraries"
-cargo_with_release_path_remap ndk -t arm64-v8a -t x86_64 \
+with_release_path_remap cargo ndk -t arm64-v8a -t x86_64 \
   build -p uc-engine-uniffi --profile "$BUILD_PROFILE" $CARGO_LOCKED_FLAG
 mkdir -p "$JNI_DIR/arm64-v8a" "$JNI_DIR/x86_64"
 cp "$TARGET_DIR/aarch64-linux-android/$PROFILE_DIR/libuc_engine_uniffi.so" \

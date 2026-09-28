@@ -154,7 +154,7 @@ cp "$BINDINGS_DIR/uc_engine_uniffiFFI.modulemap" "$INCLUDE_DIR/module.modulemap"
 
 if [[ "$SLICE" != "simulator" ]]; then
   echo "==> Build iOS device library"
-  cargo_with_release_path_remap build -p uc-engine-uniffi --profile "$BUILD_PROFILE" --target aarch64-apple-ios $CARGO_LOCKED_FLAG
+  with_release_path_remap cargo build -p uc-engine-uniffi --profile "$BUILD_PROFILE" --target aarch64-apple-ios $CARGO_LOCKED_FLAG
   cp "$TARGET_DIR/aarch64-apple-ios/$PROFILE_DIR/libuc_engine_uniffi.a" "$DEVICE_DIR/"
   cp "$DEVICE_DIR/libuc_engine_uniffi.a" "$DEBUG_DIR/device.a"
   selective_strip_archive "$DEVICE_DIR/libuc_engine_uniffi.a"
@@ -163,8 +163,8 @@ fi
 
 if [[ "$SLICE" != "device" ]]; then
   echo "==> Build iOS simulator libraries"
-  cargo_with_release_path_remap build -p uc-engine-uniffi --profile "$BUILD_PROFILE" --target aarch64-apple-ios-sim $CARGO_LOCKED_FLAG
-  cargo_with_release_path_remap build -p uc-engine-uniffi --profile "$BUILD_PROFILE" --target x86_64-apple-ios $CARGO_LOCKED_FLAG
+  with_release_path_remap cargo build -p uc-engine-uniffi --profile "$BUILD_PROFILE" --target aarch64-apple-ios-sim $CARGO_LOCKED_FLAG
+  with_release_path_remap cargo build -p uc-engine-uniffi --profile "$BUILD_PROFILE" --target x86_64-apple-ios $CARGO_LOCKED_FLAG
   cp "$TARGET_DIR/aarch64-apple-ios-sim/$PROFILE_DIR/libuc_engine_uniffi.a" \
     "$SIMULATOR_ARM64_DIR/"
   cp "$TARGET_DIR/x86_64-apple-ios/$PROFILE_DIR/libuc_engine_uniffi.a" \

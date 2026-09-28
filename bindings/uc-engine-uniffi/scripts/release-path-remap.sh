@@ -88,9 +88,10 @@ if [[ "$BUILD_PROFILE" == "release" ]]; then
 fi
 
 # 以环境和参数补齐发布构建的路径重映射；开发构建原样执行。
-cargo_with_release_path_remap() {
+# 参数是完整的 cargo 命令，重映射参数追加在末尾。
+with_release_path_remap() {
   # 空数组写法兼容 macOS 自带 bash 3.2 的 set -u。
-  env ${RELEASE_PATH_REMAP_ENV[@]+"${RELEASE_PATH_REMAP_ENV[@]}"} cargo "$@" \
+  env ${RELEASE_PATH_REMAP_ENV[@]+"${RELEASE_PATH_REMAP_ENV[@]}"} "$@" \
     ${RELEASE_PATH_REMAP_CARGO_ARGS[@]+"${RELEASE_PATH_REMAP_CARGO_ARGS[@]}"}
 }
 
