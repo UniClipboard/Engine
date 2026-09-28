@@ -1,6 +1,7 @@
 //! 矩阵维度：各维度只声明版本顺序、动作与期望，进程、资料与证据由单元运行器和设备负责。
 
 mod downgrade;
+mod legacy_upgrade;
 mod mixed_versions;
 mod sequential_upgrade;
 mod upgrade;
@@ -31,6 +32,9 @@ pub(crate) async fn run(run: &mut CellRun, spec: &CellSpec) -> Result<(), Scenar
             mixed_versions::pair(run, from, to, inviter).await
         }
         (Versions::Pair { from, to }, Dimension::Downgrade) => downgrade::pair(run, from, to).await,
+        (Versions::Legacy { from, to }, Dimension::Upgrade) => {
+            legacy_upgrade::run(run, from, to, spec.interruption).await
+        }
         _ => Err(failure(
             FailureKind::FixtureInvalid,
             "cell-shape-unsupported",

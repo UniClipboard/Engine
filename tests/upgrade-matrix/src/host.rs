@@ -27,12 +27,15 @@ pub(crate) fn binary(point: &Point) -> PathBuf {
     let target = std::env::var_os("UC_UPGRADE_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"));
+    // Windows 可执行文件带 `.exe`；缺少后缀会被误判为宿主缺失而跳过单元。
+    let name = format!("uc-connectivity-host{}", std::env::consts::EXE_SUFFIX);
     match &point.engine_rev {
         Some(rev) => target
             .join("upgrade-anchors")
             .join(rev)
-            .join("bin/uc-connectivity-host"),
-        None => target.join("debug/uc-connectivity-host"),
+            .join("bin")
+            .join(name),
+        None => target.join("debug").join(name),
     }
 }
 

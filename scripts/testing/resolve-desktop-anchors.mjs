@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url'
 const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const MATRIX_DIR = join(REPOSITORY_ROOT, 'tests/upgrade-matrix')
 const ANCHORS_PATH = join(MATRIX_DIR, 'anchors.json')
+const LEGACY_ANCHORS_PATH = join(MATRIX_DIR, 'legacy-anchors.json')
 const EXPECTATIONS_PATH = join(MATRIX_DIR, 'expectations.json')
 const DESKTOP_REPOSITORY = 'UniClipboard/UniClipboard'
 const ENGINE_GIT_URL = 'https://github.com/UniClipboard/Engine.git'
@@ -96,8 +97,17 @@ function resolveAnchors() {
 
 // 矩阵只覆盖当前源码：每个已发布锚点到 head 的单元，加一条单设备经过全部可运行锚点到 head 的完整链。已发布锚点
 // 之间的组合不随当前源码变化，不再展开；单元数随锚点数线性增长。
-export function expandCells(anchorIds) {
+// 早于 Engine 的 Desktop 发布只以静态资料快照参与 D1，由人工维护，不从 GitHub 发布生成。
+export function readLegacyAnchorIds() {
+  return (readJson(LEGACY_ANCHORS_PATH)?.anchors ?? []).map(anchor => anchor.id)
+}
+
+export function expandCells(anchorIds, legacyIds = []) {
   const cells = []
+  for (const from of legacyIds) {
+    cells.push(`d1-${from}-head`)
+    cells.push(`d1-${from}-head-commit-interrupted`)
+  }
   for (const from of anchorIds) cells.push(`d1-${from}-head`)
   cells.push('d1-chain')
   for (const from of anchorIds) cells.push(`d2-${from}-head`)
@@ -111,7 +121,10 @@ export function expandCells(anchorIds) {
 
 function expectationsFor(anchors, previous) {
   const known = new Map((previous?.cells ?? []).map(cell => [cell.cell, cell]))
-  const cells = expandCells(anchors.anchors.map(anchor => anchor.id)).map(cell => {
+  const cells = expandCells(
+    anchors.anchors.map(anchor => anchor.id),
+    readLegacyAnchorIds(),
+  ).map(cell => {
     const recorded = known.get(cell)
     // 保留人工登记（非“通过”或带排除点与原因的条目）；其余单元初始期望为“通过”。
     return recorded && Object.keys(recorded).some(key => key !== 'cell' && key !== 'expected') ? recorded : recorded?.expected === 'pass' || !recorded ? { cell, expected: 'pass' } : recorded

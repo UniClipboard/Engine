@@ -65,6 +65,23 @@ impl Device {
         })
     }
 
+    /// 设备资料目录；旧版快照在首次启动前装入这里。
+    pub(crate) fn root(&self) -> &std::path::Path {
+        &self.root
+    }
+
+    /// 首次启动前预置宿主安全存储，对应旧版在系统钥匙串中留下的条目。
+    pub(crate) fn preload_secure_storage(&mut self, storage: Value) -> Result<(), ScenarioFailure> {
+        if self.host.is_some() || self.secure_storage.is_some() {
+            return Err(failure(
+                FailureKind::FixtureInvalid,
+                "secure-storage-already-present",
+            ));
+        }
+        self.secure_storage = Some(storage);
+        Ok(())
+    }
+
     /// 以指定版本打开同一资料目录；无法在本地网络运行的旧版本记为环境不可用。
     pub(crate) async fn launch(
         &mut self,
@@ -117,6 +134,10 @@ impl Device {
                 })
             }
             Started::Refused { reply } => {
+                // 启动失败前 Engine 可能已改写安全存储；保存它，下一次启动才与真实宿主一致。
+                if reply["secure_storage"].is_object() {
+                    self.secure_storage = Some(reply["secure_storage"].clone());
+                }
                 run.record_event("host-refused");
                 Ok(Launch::Refused { reply })
             }

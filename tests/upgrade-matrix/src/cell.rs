@@ -287,7 +287,7 @@ pub async fn run_cell(id: &'static str) {
     );
     let budget = match spec.versions {
         catalog::Versions::Chain(_) => CHAIN_BUDGET,
-        catalog::Versions::Pair { .. } => PAIR_BUDGET,
+        catalog::Versions::Pair { .. } | catalog::Versions::Legacy { .. } => PAIR_BUDGET,
     };
     let scenario = match Scenario::start(ScenarioConfig::new(
         name,
@@ -383,6 +383,9 @@ pub async fn run_cell(id: &'static str) {
 fn versions_json(spec: &CellSpec) -> Value {
     match &spec.versions {
         catalog::Versions::Pair { from, to } => json!({ "from": from.id, "to": to.id }),
+        catalog::Versions::Legacy { from, to } => {
+            json!({ "from": from.id, "from_release": from.desktop_release, "to": to.id })
+        }
         catalog::Versions::Chain(points) => {
             json!({ "chain": points.iter().map(|point| point.id.clone()).collect::<Vec<_>>() })
         }

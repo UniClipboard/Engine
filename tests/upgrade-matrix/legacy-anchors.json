@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "note": "Desktop releases that predate the Engine. Each anchor is a static profile snapshot (see fixtures/README.md) that only the current source opens; old-side dimensions do not apply.",
+  "anchors": [
+    {
+      "id": "l0194",
+      "desktop_release": "v0.19.4",
+      "fixture": "fixtures/desktop-0.19.4",
+      "device_name": "LegacyFixture",
+      "history": [
+        "legacy fixture text 1",
+        "legacy fixture text 2",
+        "legacy fixture text 3"
+      ]
+    }
+  ]
+}

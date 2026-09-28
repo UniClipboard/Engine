@@ -13,7 +13,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
-import { expandCells } from './resolve-desktop-anchors.mjs'
+import { expandCells, readLegacyAnchorIds } from './resolve-desktop-anchors.mjs'
 
 const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const roots = process.argv.slice(2).filter(argument => !argument.startsWith('--'))
@@ -28,7 +28,11 @@ const anchors = JSON.parse(readFileSync(join(REPOSITORY_ROOT, 'tests/upgrade-mat
 const expectations = JSON.parse(readFileSync(join(REPOSITORY_ROOT, 'tests/upgrade-matrix/expectations.json'), 'utf8'))
 const points = [...anchors.map(anchor => anchor.id), 'head']
 const registered = new Map(expectations.cells.map(cell => [cell.cell, cell]))
-const expanded = expandCells(anchors.map(anchor => anchor.id))
+const legacyPoints = readLegacyAnchorIds()
+const expanded = expandCells(
+  anchors.map(anchor => anchor.id),
+  legacyPoints,
+)
 
 // CI 下载的分片工件为 <分片>/test-artifacts/ci/upgrade-matrix/<单元>，单元目录位于根目录下第 5 层。
 function cellDirectories(directory, depth = 0) {
@@ -151,13 +155,19 @@ function table() {
   ]
   const header = `| 起始版本 → head | ${columns.map(([title]) => title).join(' | ')} |`
   const rule = `| --- | ${columns.map(() => '---').join(' | ')} |`
-  const rows = points.slice(0, -1).map(from => {
-    const marks = columns.map(
-      ([, dimension, suffix]) => SYMBOL[cells.find(cell => cell.cell === `${dimension}-${from}-head${suffix}`)?.status ?? 'not-run'],
+  const mark = id => SYMBOL[cells.find(cell => cell.cell === id)?.status ?? 'not-run']
+  // 旧版快照只参与 D1；提交中断单元的结果写在同一格内。
+  const legacyRows = legacyPoints.map(from => {
+    const marks = columns.map(([, dimension]) =>
+      dimension === 'd1' ? `${mark(`d1-${from}-head`)}（中断 ${mark(`d1-${from}-head-commit-interrupted`)}）` : '—',
     )
+    return `| ${from}（快照） | ${marks.join(' | ')} |`
+  })
+  const rows = points.slice(0, -1).map(from => {
+    const marks = columns.map(([, dimension, suffix]) => mark(`${dimension}-${from}-head${suffix}`))
     return `| ${from} | ${marks.join(' | ')} |`
   })
-  return [header, rule, ...rows].join('\n')
+  return [header, rule, ...legacyRows, ...rows].join('\n')
 }
 
 const chain = dimension => {

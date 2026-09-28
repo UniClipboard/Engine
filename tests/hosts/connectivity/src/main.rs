@@ -582,11 +582,19 @@ async fn main() -> Result<()> {
         Ok(started) => started,
         Err(error) => {
             // 启动失败是被测结果之一（例如旧版打开较新资料）；如实报告错误码后正常退出。
+            // 失败前 Engine 可能已改写安全存储，一并交回，下一次启动才与真实宿主的钥匙串一致。
+            let secure_storage = storage
+                .0
+                .lock()
+                .map(|values| json!(*values))
+                .map_err(|_| anyhow!("storage unavailable"))?;
             respond(json!({
                 "ready": false,
                 "error": "start_failed",
                 "code": error.code(),
+                "retryable": error.is_retryable(),
                 "startup": startup,
+                "secure_storage": secure_storage,
                 "host": host_identity(),
             }))?;
             return Ok(());

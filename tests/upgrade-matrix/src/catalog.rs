@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 const ANCHORS: &str = include_str!("../anchors.json");
+const LEGACY_ANCHORS: &str = include_str!("../legacy-anchors.json");
 const EXPECTATIONS: &str = include_str!("../expectations.json");
 
 /// 矩阵中的一个版本点：一个旧锚点或当前源码 `head`。
@@ -13,6 +14,18 @@ pub(crate) struct Point {
     pub(crate) engine_rev: Option<String>,
     /// 传给 Engine 的应用版本：锚点取其首个 Desktop 发布版本，`head` 取最后发布版本的下一个预发布号。
     pub(crate) app_version: String,
+}
+
+/// 早于 Engine 的 Desktop 发布：只能以静态资料快照参与，由当前源码打开。
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct LegacyAnchor {
+    pub(crate) id: String,
+    pub(crate) desktop_release: String,
+    /// 相对本 crate 根目录的快照目录，内含 `profile/` 与 `SHA256SUMS`。
+    pub(crate) fixture: String,
+    pub(crate) device_name: String,
+    /// 快照中历史条目的原文，用于升级后逐条核对。
+    pub(crate) history: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -40,10 +53,18 @@ pub(crate) enum Inviter {
     New,
 }
 
+/// 升级过程中注入的外部干扰。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Interruption {
+    /// 首次升级期间外部持有 Space 转换激活租约，使单设备重建在提交边界失败；随后释放并重启。
+    CommitInterrupted,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum Versions {
     Pair { from: Point, to: Point },
     Chain(Vec<Point>),
+    Legacy { from: LegacyAnchor, to: Point },
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -137,6 +158,7 @@ pub(crate) struct CellSpec {
     pub(crate) dimension: Dimension,
     pub(crate) versions: Versions,
     pub(crate) inviter: Option<Inviter>,
+    pub(crate) interruption: Option<Interruption>,
     pub(crate) expected: Expected,
     pub(crate) expected_raw: Value,
 }
@@ -156,6 +178,17 @@ struct AnchorEntry {
 #[derive(Deserialize)]
 struct Release {
     tag: String,
+}
+
+#[derive(Deserialize)]
+struct LegacyAnchorFile {
+    anchors: Vec<LegacyAnchor>,
+}
+
+pub(crate) fn legacy_anchors() -> Result<Vec<LegacyAnchor>, String> {
+    serde_json::from_str::<LegacyAnchorFile>(LEGACY_ANCHORS)
+        .map(|file| file.anchors)
+        .map_err(|_| "legacy-anchors.json is invalid".to_owned())
 }
 
 pub(crate) fn points() -> Result<Vec<Point>, String> {
@@ -225,8 +258,20 @@ pub(crate) fn cell(id: &str) -> Result<CellSpec, String> {
         Some("d4") => Dimension::Downgrade,
         _ => return Err(format!("{id} has an unknown dimension")),
     };
+    let legacy = legacy_anchors()?;
     let versions = if parts.get(1) == Some(&"chain") {
         Versions::Chain(points.clone())
+    } else if let Some(from) = parts
+        .get(1)
+        .and_then(|id| legacy.iter().find(|anchor| anchor.id == *id))
+    {
+        let Some(to) = parts.get(2) else {
+            return Err(format!("{id} does not name a target version"));
+        };
+        Versions::Legacy {
+            from: from.clone(),
+            to: point(to)?,
+        }
     } else {
         let (Some(from), Some(to)) = (parts.get(1), parts.get(2)) else {
             return Err(format!("{id} does not name two versions"));
@@ -236,17 +281,19 @@ pub(crate) fn cell(id: &str) -> Result<CellSpec, String> {
             to: point(to)?,
         }
     };
-    let inviter = match (parts.get(3).copied(), parts.get(4).copied()) {
-        (Some("old"), Some("inviter")) => Some(Inviter::Old),
-        (Some("new"), Some("inviter")) => Some(Inviter::New),
-        (None, None) => None,
-        _ => return Err(format!("{id} has an unknown inviter direction")),
+    let (inviter, interruption) = match (parts.get(3).copied(), parts.get(4).copied()) {
+        (Some("old"), Some("inviter")) => (Some(Inviter::Old), None),
+        (Some("new"), Some("inviter")) => (Some(Inviter::New), None),
+        (Some("commit"), Some("interrupted")) => (None, Some(Interruption::CommitInterrupted)),
+        (None, None) => (None, None),
+        _ => return Err(format!("{id} has an unknown variant")),
     };
     Ok(CellSpec {
         id: id.to_owned(),
         dimension,
         versions,
         inviter,
+        interruption,
         expected,
         expected_raw: raw,
     })
