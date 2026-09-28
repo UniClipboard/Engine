@@ -53,5 +53,5 @@ pub(super) use session::{
     MembershipSessionActivityPort, SpaceSessionActivityPort, SpaceSessionRecovery,
     SpaceSessionRecoveryPort,
 };
-pub(super) use unlock_space::{LocalSessionReadiness, UnlockSpaceUseCase};
+pub(super) use unlock_space::{LocalSessionReadiness, SessionReadinessError, UnlockSpaceUseCase};
 pub(super) use upgrade_space::UpgradeSpaceUseCase;

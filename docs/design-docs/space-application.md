@@ -255,7 +255,8 @@ flowchart TD
     GroupUpdates --> Network[移除通知 / 决定 / 离开到期 / 历史同步]
 ```
 
-维护运行期只负责触发、合并、暂停、关闭与工作许可，不知道任何成员步骤。准入恢复后若不在普通工作模式（配对中或需要处理），
+维护运行期只负责触发、合并、暂停、关闭与工作许可，不知道任何成员步骤。需要独占成员与控制状态的流程（单设备 Space 重建）
+经 `ExcludeMembershipMaintenancePort` 取得同一轮次执行锁：进行中的轮次先完整结束，持有期间新轮次等待。准入恢复后若不在普通工作模式（配对中或需要处理），
 本轮结束；许可在 Worker 执行期间保持，避免与配对交错。Worker 做什么完全由账本 `outstanding_work` 决定：
 先推进本机成员效果，再恢复分叉与投递组密钥更新，最后执行网络待办，使对端在看到新历史前已能收到对应的组密钥更新。
 同一轮中每项待办最多尝试一次，未完成的留给下一次触发；没有已到期待办时按最早剩余时间安排唤醒。
@@ -318,7 +319,14 @@ flowchart TD
 - **入口**：无输入，内部返回唯一目标 `SpaceId`。
 - **职责/作用**：准备或恢复单一重建目标，stage 目标，重绑 session，清理旧成员事实，保存本机成员，建立新 V2 根，promote 并 finalize。
 - **关系**：`SpaceRebuildTransition` 负责 stage/promote/finalize；`SpaceMembershipRebuilder` 负责成员资料；`RelationshipStateResetPort` 清旧成员运行事实。
+  整个重建期间经 `ExcludeMembershipMaintenancePort` 持有维护执行锁，维护轮次不与重建的写入和提交摘要交错。
 - **重点关注**：重启必须继续同一目标；来源 Space 在 promote 前不能被半修改；旧成员表不能生成新授权。
+  - 已 stage 但未提升的目标只含来源快照与本次重建的派生结果。重试或重启时由 Infra 在激活关口确认来源仍生效后丢弃它，
+    并把日志退回 Allocated，从来源重新快照；不在已改写的目标上重做，也不以“epoch 已存在”判断完成。
+    被放弃尝试写入 profile vault 的内容密钥组保留（vault 只追加），此前用它加密的内容仍可读。
+  - 目标已生效而进度记录未推进时，重试先 promote（幂等）再 finalize。
+  - 转换暂时不可用（锁争用、激活租约被占用）经 `SessionReadinessError::UpgradeUnavailable` →
+    `RecoverSpaceSessionError::Unavailable` 报告为可重试；不一致与需恢复仍不可重试。
 
 #### `ResetSpaceUseCase`
 

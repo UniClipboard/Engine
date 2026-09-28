@@ -35,7 +35,8 @@ use crate::space::membership::{
     RetainedGroupUpdateRecipientsPort,
 };
 use crate::space::membership::{
-    MaintainSpaceMembershipDeps, MaintainSpaceMembershipUseCase, SpaceMembershipMaintenanceRuntime,
+    ExcludeMembershipMaintenancePort, MaintainSpaceMembershipDeps, MaintainSpaceMembershipUseCase,
+    SpaceMembershipMaintenanceRuntime,
 };
 use crate::space::SpaceAdmissionObservationRegistry;
 
@@ -144,6 +145,7 @@ pub(crate) struct SpaceApplication {
     membership_history_endpoint: Arc<HandleMembershipHistoryMessageUseCase>,
     initialize_membership: Arc<InitializeSpaceMembershipUseCase>,
     membership_activity: crate::space::membership::SpaceMembershipMaintenanceActivity,
+    maintenance_exclusion: Arc<dyn ExcludeMembershipMaintenancePort>,
     prepared_runtime: Option<PreparedSpaceMembershipMaintenanceRuntime>,
     runtime: Option<SpaceMembershipMaintenanceRuntime>,
 }
@@ -402,6 +404,8 @@ impl SpaceApplication {
             },
             space_admission.clone(),
         ));
+        let maintenance_exclusion: Arc<dyn ExcludeMembershipMaintenancePort> =
+            Arc::clone(&maintain) as _;
         let prepared_runtime = SpaceMembershipMaintenanceRuntime::prepare(
             maintain,
             peer_reachability_changed_events,
@@ -447,6 +451,7 @@ impl SpaceApplication {
             membership_history_endpoint,
             initialize_membership,
             membership_activity,
+            maintenance_exclusion,
             prepared_runtime: Some(prepared_runtime),
             runtime: None,
         }
@@ -478,6 +483,12 @@ impl SpaceApplication {
         &self,
     ) -> Arc<dyn crate::space::lifecycle::MembershipSessionActivityPort> {
         Arc::new(self.membership_activity.clone())
+    }
+
+    pub(crate) fn membership_maintenance_exclusion(
+        &self,
+    ) -> Arc<dyn ExcludeMembershipMaintenancePort> {
+        Arc::clone(&self.maintenance_exclusion)
     }
 
     pub(crate) fn membership_maintenance_wake(

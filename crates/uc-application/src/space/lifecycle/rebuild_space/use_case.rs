@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 
 use super::error::RebuildSpaceError;
 use super::ports::SpaceRebuildTransitionPort;
+use crate::space::membership::ExcludeMembershipMaintenancePort;
 use uc_core::ports::{ClockPort, DeviceIdentityPort};
 use uc_core::{
     ids::SpaceId,
@@ -22,6 +23,7 @@ pub(crate) struct RebuildSpaceUseCase {
     rebind_space_session: Arc<dyn RebindSpaceSessionPort>,
     membership_reset: Arc<dyn SpaceMembershipResetPort>,
     membership_rebuilder: Arc<dyn SpaceMembershipRebuildPort>,
+    maintenance_exclusion: Arc<dyn ExcludeMembershipMaintenancePort>,
     clock: Arc<dyn ClockPort>,
     execution_lock: tokio::sync::Mutex<()>,
 }
@@ -43,6 +45,7 @@ impl RebuildSpaceUseCase {
         rebind_space_session: Arc<dyn RebindSpaceSessionPort>,
         membership_reset: Arc<dyn SpaceMembershipResetPort>,
         membership_rebuilder: Arc<dyn SpaceMembershipRebuildPort>,
+        maintenance_exclusion: Arc<dyn ExcludeMembershipMaintenancePort>,
         clock: Arc<dyn ClockPort>,
     ) -> Self {
         Self {
@@ -53,6 +56,7 @@ impl RebuildSpaceUseCase {
             rebind_space_session,
             membership_reset,
             membership_rebuilder,
+            maintenance_exclusion,
             clock,
             execution_lock: tokio::sync::Mutex::new(()),
         }
@@ -60,10 +64,19 @@ impl RebuildSpaceUseCase {
 
     pub(crate) async fn execute(&self) -> Result<SpaceId, RebuildSpaceError> {
         let _guard = self.execution_lock.lock().await;
+        // 重建改写成员账本、关系与控制库并在提交时计算目标摘要；成员维护若同时写入，
+        // 会与提交争用写锁或破坏提升证明，因此整个重建期间排除维护。
+        let _maintenance = self
+            .maintenance_exclusion
+            .exclude_membership_maintenance()
+            .await;
 
         let ctx = self.prepare().await?;
 
         if ctx.already_committed {
+            // 目标已生效但提升记录可能未推进（在两者之间崩溃）；promote 对已生效目标幂等，
+            // 必须先于 finalize 完成记录，否则 finalize 会把未推进的记录判为不一致。
+            self.commit(&ctx).await?;
             self.finalize(&ctx).await?;
             return Ok(ctx.space_id);
         }

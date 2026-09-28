@@ -971,3 +971,43 @@ async fn online_events_for_different_peers_coalesce_into_one_change_wake() {
     );
     runtime.shutdown().await.unwrap();
 }
+
+/// 需要独占成员与控制状态的流程持有维护互斥期间，维护轮次不得运行，释放后照常完成。
+#[tokio::test]
+async fn a_round_waits_while_membership_maintenance_is_excluded() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let step = |name| {
+        Arc::new(RecordingStep {
+            name,
+            calls: Arc::clone(&calls),
+            outcome: MembershipMaintenanceStepOutcome::Completed,
+        })
+    };
+    let maintain = Arc::new(MaintainSpaceMembershipUseCase::new(
+        MaintainSpaceMembershipDeps {
+            admissions: step("admissions"),
+            work: step("work"),
+        },
+    ));
+    let exclusion = maintain.exclude_membership_maintenance().await;
+
+    let round = tokio::spawn({
+        let maintain = Arc::clone(&maintain);
+        async move {
+            maintain
+                .execute(MembershipMaintenanceTrigger::StateChanged)
+                .await
+        }
+    });
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "a round ran while excluded"
+    );
+
+    drop(exclusion);
+    round.await.unwrap();
+    assert_eq!(calls.lock().unwrap().as_slice(), &["admissions", "work"]);
+}

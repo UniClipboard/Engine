@@ -21,3 +21,10 @@ pub(crate) enum UpgradeSpaceError {
     #[error("Engine upgrade completed but recording its version failed")]
     RecordVersion(#[source] EngineVersionStateError),
 }
+
+impl UpgradeSpaceError {
+    /// 升级中的 Space 重建暂时不可用，已持久的进度可在下一次尝试中续做。
+    pub(crate) fn is_temporarily_unavailable(&self) -> bool {
+        matches!(self, Self::Rebuild(error) if error.is_temporarily_unavailable())
+    }
+}

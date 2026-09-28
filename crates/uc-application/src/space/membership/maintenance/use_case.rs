@@ -1,13 +1,15 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
+
 use uc_observability_contract::diagnostics::connectivity::{
     LocalWorkObservation, LocalWorkOutcome, LocalWorkStep,
 };
 
 use super::{
-    AcquireSpaceWorkPermitPort, MembershipMaintenanceReport, MembershipMaintenanceStepOutcome,
-    MembershipMaintenanceTrigger, QuerySpaceWorkModeError, RecoverSpaceAdmissionsPort,
-    RunMembershipWorkPort, SpaceWorkMode,
+    AcquireSpaceWorkPermitPort, ExcludeMembershipMaintenancePort, MembershipMaintenanceExclusion,
+    MembershipMaintenanceReport, MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger,
+    QuerySpaceWorkModeError, RecoverSpaceAdmissionsPort, RunMembershipWorkPort, SpaceWorkMode,
 };
 use crate::space::membership::worker::record_outcome;
 
@@ -19,7 +21,8 @@ pub(crate) struct MaintainSpaceMembershipDeps {
 /// 一轮成员维护：先恢复准入并取得普通成员工作许可，再交给执行器完成全部已到期待办。
 pub(crate) struct MaintainSpaceMembershipUseCase {
     deps: MaintainSpaceMembershipDeps,
-    execution_lock: tokio::sync::Mutex<()>,
+    /// 整轮维护的执行锁；需要独占成员与控制状态的流程经 [`ExcludeMembershipMaintenancePort`] 持有它。
+    execution_lock: Arc<tokio::sync::Mutex<()>>,
     work_permit: Option<Arc<dyn AcquireSpaceWorkPermitPort>>,
 }
 
@@ -28,7 +31,7 @@ impl MaintainSpaceMembershipUseCase {
     pub(crate) fn new(deps: MaintainSpaceMembershipDeps) -> Self {
         Self {
             deps,
-            execution_lock: tokio::sync::Mutex::new(()),
+            execution_lock: Arc::new(tokio::sync::Mutex::new(())),
             work_permit: None,
         }
     }
@@ -39,7 +42,7 @@ impl MaintainSpaceMembershipUseCase {
     ) -> Self {
         Self {
             deps,
-            execution_lock: tokio::sync::Mutex::new(()),
+            execution_lock: Arc::new(tokio::sync::Mutex::new(())),
             work_permit: Some(work_permit),
         }
     }
@@ -87,6 +90,13 @@ impl MaintainSpaceMembershipUseCase {
         report.stable_failure_count += worked.stable_failure_count;
         report.corrupt_count += worked.corrupt_count;
         report
+    }
+}
+
+#[async_trait]
+impl ExcludeMembershipMaintenancePort for MaintainSpaceMembershipUseCase {
+    async fn exclude_membership_maintenance(&self) -> MembershipMaintenanceExclusion {
+        MembershipMaintenanceExclusion::new(Arc::clone(&self.execution_lock).lock_owned().await)
     }
 }
 

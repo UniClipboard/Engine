@@ -13,3 +13,6 @@ pub(crate) use membership_rebuilder::SpaceMembershipRebuilder;
 pub(crate) use ports::SpaceMembershipResetPort;
 pub(crate) use transition::SpaceRebuildTransition;
 pub(crate) use use_case::RebuildSpaceUseCase;
+
+#[cfg(test)]
+mod tests;

@@ -144,6 +144,7 @@ impl SpaceFacade {
         let space_admission_endpoint = application.space_admission_endpoint();
         let membership_session_activity = application.membership_session_activity();
         let membership_maintenance = application.membership_maintenance_wake();
+        let membership_maintenance_exclusion = application.membership_maintenance_exclusion();
         let query_membership_readiness = application.query_membership_readiness();
         let application_activity = Arc::new(DeferredSpaceSessionActivity::new());
         let SpaceSessionDeps {
@@ -230,6 +231,7 @@ impl SpaceFacade {
             Arc::clone(&space_access.adopt_isolated_space),
             membership_reset,
             membership_rebuilder,
+            membership_maintenance_exclusion,
             Arc::clone(&clock),
         ));
         let reset_space = Arc::new(ResetSpaceUseCase::new(

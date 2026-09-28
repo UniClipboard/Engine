@@ -4,6 +4,7 @@ mod persistence;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use diesel::result::Error as DieselError;
 use uc_application::deps::{
     AdmissionSpaceTransitionPreparationV2, AdvanceMembershipBranchTransitionInput, MembershipRecord,
 };
@@ -20,6 +21,7 @@ use self::persistence::{
     TargetSessionSubkeyDeriver,
 };
 use super::{ActiveRuntimeManifestV3, AdmissionKeyManager, ProfileRuntimeLayout};
+use crate::db::connection::is_lock_contention;
 use crate::db::executor::DieselSqliteExecutor;
 use crate::db::repositories::{DieselSpaceSecurityStore, EncryptedRelationshipStore};
 use crate::fs::FsAtomicPublisher;
@@ -245,7 +247,7 @@ impl SpaceControlGeneration {
                 source,
                 target,
             )
-            .map_err(inconsistent)?;
+            .map_err(credential_rebind_error)?;
             compact_database(final_database)?;
             verify_sqlite(final_database)?;
             return Ok(PreparedSpaceControlGeneration {
@@ -276,7 +278,7 @@ impl SpaceControlGeneration {
                 source,
                 target,
             )
-            .map_err(inconsistent)?;
+            .map_err(credential_rebind_error)?;
             compact_database(&work_database)?;
             verify_sqlite(&work_database)?;
             let digest = database_digest(&work_database)?;
@@ -434,7 +436,7 @@ impl SpaceControlGeneration {
             source,
             target,
         )
-        .map_err(inconsistent)?;
+        .map_err(credential_rebind_error)?;
         checkpoint_database(active_pool, database)?;
         verify_sqlite(database)?;
 
@@ -689,6 +691,39 @@ impl SpaceControlGeneration {
         sync_directory(parent)
     }
 
+    /// 删除已被 Reset 重建改写、从未提升的目标 control generation，使下一次尝试从来源重新快照。
+    ///
+    /// 目标已被改写，不能再用准备时的摘要证明其身份；调用方必须先在 transition activation 的同一
+    /// 租约下证明来源仍是活动 manifest。目标不存在视为已经删除。
+    pub(crate) fn discard_unpromoted_device_reset_target(
+        &self,
+        source: &ActiveRuntimeManifestV3,
+        target: &ActiveRuntimeManifestV3,
+    ) -> Result<(), SpaceControlGenerationError> {
+        if source.layout().space_id() == target.layout().space_id()
+            || source.keyslot_generation() != target.keyslot_generation()
+            || source.layout().profile_data_generation()
+                != target.layout().profile_data_generation()
+            || source.layout().space_control_generation()
+                == target.layout().space_control_generation()
+        {
+            return Err(inconsistent(anyhow::anyhow!(
+                "device reset discard input is inconsistent"
+            )));
+        }
+        let layout = ProfileRuntimeLayout::v3(&self.profile_root, target);
+        let directory = layout
+            .control_database()
+            .parent()
+            .ok_or_else(|| storage(anyhow::anyhow!("control generation directory is missing")))?;
+        let parent = directory
+            .parent()
+            .ok_or_else(|| storage(anyhow::anyhow!("control generation parent is missing")))?;
+        let _lease = acquire_lease(parent)?;
+        remove_directory_if_present(directory)?;
+        sync_directory(parent)
+    }
+
     async fn build_database(
         &self,
         database: &Path,
@@ -763,6 +798,20 @@ fn branch_record_matches(
                     == Some(checkpoint)
         }
         MembershipRecord::NoSpace { .. } => false,
+    }
+}
+
+/// 凭据重绑的失败：锁争用是暂时的，其余说明目标内容与预期不符。
+fn credential_rebind_error(source: anyhow::Error) -> SpaceControlGenerationError {
+    let contended = source.chain().any(|cause| {
+        cause
+            .downcast_ref::<DieselError>()
+            .is_some_and(is_lock_contention)
+    });
+    if contended {
+        SpaceControlGenerationError::Busy { source }
+    } else {
+        inconsistent(source)
     }
 }
 

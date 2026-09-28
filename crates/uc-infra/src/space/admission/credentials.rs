@@ -17,6 +17,7 @@ use uc_core::membership::{
 };
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
+use crate::db::connection::establish_waiting;
 use crate::db::pool::DbPool;
 use crate::db::ports::DbExecutor;
 use crate::network::iroh::{
@@ -205,7 +206,7 @@ pub(crate) fn verify_prepared_registration_for_control_generation(
     let database = database
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("credential control database path is invalid"))?;
-    let mut connection = SqliteConnection::establish(database)?;
+    let mut connection = establish_waiting(database)?;
     let row = load_encrypted_row(&mut connection)?
         .ok_or_else(|| anyhow::anyhow!("credential registration is missing"))?;
     let actual = open_credentials(keys, &row.encrypted_payload)?;
@@ -343,7 +344,7 @@ pub(crate) fn upgrade_registration_to_control_generation(
     let database = database
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("credential control database path is invalid"))?;
-    let mut connection = SqliteConnection::establish(database)?;
+    let mut connection = establish_waiting(database)?;
     connection.immediate_transaction::<_, anyhow::Error, _>(|connection| {
         let row = load_encrypted_row(connection)?;
         let Some(row) = row else {
@@ -412,7 +413,7 @@ pub(crate) fn rebind_registration_to_control_generation(
     let database = database
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("credential control database path is invalid"))?;
-    let mut connection = SqliteConnection::establish(database)?;
+    let mut connection = establish_waiting(database)?;
     connection.immediate_transaction::<_, anyhow::Error, _>(|connection| {
         let Some(row) = load_encrypted_row(connection)? else {
             return Ok(());

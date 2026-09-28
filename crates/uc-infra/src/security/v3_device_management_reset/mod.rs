@@ -125,6 +125,52 @@ impl V3DeviceManagementReset {
             .map_err(map_manifest_error)
     }
 
+    /// 在来源 control generation 上建立目标快照并记录其摘要。
+    async fn prepare_snapshot(
+        &self,
+        source: &ActiveRuntimeManifestV3,
+        journal: &mut DeviceManagementResetJournalV3,
+    ) -> Result<(), AdmissionSpaceTransitionError> {
+        let target = Self::target_manifest(journal)?;
+        let prepared = self
+            .control_generations
+            .prepare_device_reset_snapshot(source, &target, &self.control_pool)
+            .await
+            .map_err(map_generation_error)?;
+        journal.prepared_database_digest = *prepared.database_digest();
+        journal.phase = DeviceManagementResetPhaseV3::Prepared;
+        self.save_journal(journal).await
+    }
+
+    /// 上一次尝试已在 stage 后改写目标、却没有完成提升：目标只是来源快照加上重建的派生结果，
+    /// 来源仍是活动 manifest 且未被修改。丢弃目标并把日志退回 Allocated，重建从来源重新开始，
+    /// 不在已改写的目标上重做。
+    ///
+    /// 顺序：先让运行期连接池回到来源（同一进程内重试时它仍指向目标），再删除目标，最后改回日志；
+    /// 任一步后崩溃，日志仍为 Staged，下一次会再次安全执行。
+    async fn rewind_staged_target(
+        &self,
+        source: &ActiveRuntimeManifestV3,
+        journal: &mut DeviceManagementResetJournalV3,
+    ) -> Result<(), AdmissionSpaceTransitionError> {
+        let target = Self::target_manifest(journal)?;
+        let source_database = ProfileRuntimeLayout::v3(&self.profile_root, source);
+        self.control_pool
+            .replace_database(source_database.control_database().to_str().ok_or_else(|| {
+                AdmissionSpaceTransitionError::storage(anyhow::anyhow!(
+                    "control database path is not valid UTF-8"
+                ))
+            })?)
+            .map_err(AdmissionSpaceTransitionError::recovery_required)?;
+        self.activation
+            .discard_unpromoted_device_reset(source, &target)
+            .await
+            .map_err(map_activation_error)?;
+        journal.phase = DeviceManagementResetPhaseV3::Allocated;
+        journal.prepared_database_digest = [0; 32];
+        self.save_journal(journal).await
+    }
+
     async fn save_journal(
         &self,
         journal: &DeviceManagementResetJournalV3,
@@ -179,15 +225,7 @@ impl DeviceManagementResetDataPort for V3DeviceManagementReset {
         };
         match journal.phase {
             DeviceManagementResetPhaseV3::Allocated => {
-                let target = Self::target_manifest(&journal)?;
-                let prepared = self
-                    .control_generations
-                    .prepare_device_reset_snapshot(&source, &target, &self.control_pool)
-                    .await
-                    .map_err(map_generation_error)?;
-                journal.prepared_database_digest = *prepared.database_digest();
-                journal.phase = DeviceManagementResetPhaseV3::Prepared;
-                self.save_journal(&journal).await
+                self.prepare_snapshot(&source, &mut journal).await
             }
             DeviceManagementResetPhaseV3::Prepared => {
                 let target = Self::target_manifest(&journal)?;
@@ -197,7 +235,10 @@ impl DeviceManagementResetDataPort for V3DeviceManagementReset {
                     .map_err(map_generation_error)?;
                 Ok(())
             }
-            DeviceManagementResetPhaseV3::Staged => Ok(()),
+            DeviceManagementResetPhaseV3::Staged => {
+                self.rewind_staged_target(&source, &mut journal).await?;
+                self.prepare_snapshot(&source, &mut journal).await
+            }
             DeviceManagementResetPhaseV3::Promoted
             | DeviceManagementResetPhaseV3::CleanupPending => {
                 Err(AdmissionSpaceTransitionError::missing(
@@ -245,6 +286,12 @@ impl DeviceManagementResetDataPort for V3DeviceManagementReset {
             }
             DeviceManagementResetPhaseV3::Staged => {
                 let database = ProfileRuntimeLayout::v3(&self.profile_root, &target);
+                // 目标不存在时打开会新建一个只有表结构的空库，随后可能被当作重建结果提升。
+                if !database.control_database().is_file() {
+                    return Err(AdmissionSpaceTransitionError::missing(
+                        "staged device reset target is missing",
+                    ));
+                }
                 self.control_pool
                     .replace_database(database.control_database().to_str().ok_or_else(|| {
                         AdmissionSpaceTransitionError::storage(anyhow::anyhow!(

@@ -47,6 +47,20 @@ impl RebuildSpaceError {
     anyhow_error_constructor!(rebuild, RebuildFailed);
     anyhow_error_constructor!(commit, CommitFailed);
     anyhow_error_constructor!(finalize, FinalizationFailed);
+
+    /// 数据转换暂时不可用（锁争用、转换租约被占用）：持久状态可续做，稍后重试即可继续。
+    pub(crate) fn is_temporarily_unavailable(&self) -> bool {
+        match self {
+            Self::PreparationFailed { source }
+            | Self::StagingFailed { source }
+            | Self::CommitFailed { source }
+            | Self::FinalizationFailed { source } => matches!(
+                source.downcast_ref::<SpaceRebuildTransitionError>(),
+                Some(SpaceRebuildTransitionError::Unavailable { .. })
+            ),
+            Self::RebuildFailed { .. } | Self::DeviceNameUnavailable | Self::InvalidClock => false,
+        }
+    }
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]

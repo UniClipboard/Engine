@@ -30,12 +30,15 @@ pub use decide_device_trust_change::{
     DecideDeviceTrustChange, DecideDeviceTrustChangeError, DecideDeviceTrustChangeResult,
     DeviceTrustChangeChoice,
 };
-pub(crate) use maintenance::PreparedSpaceMembershipMaintenanceRuntime;
 pub use maintenance::{
     AcquireSpaceWorkPermitPort, AdmissionMaintenanceOutcome, DeliverPendingGroupUpdatesPort,
     KnownPeerContact, MembershipNetworkActivityPort, QuerySpaceWorkModeError,
     RecoverMembershipConflictsPort, RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort,
     SpaceWorkMode, SpaceWorkPermit,
+};
+pub(crate) use maintenance::{
+    ExcludeMembershipMaintenancePort, MembershipMaintenanceExclusion,
+    PreparedSpaceMembershipMaintenanceRuntime,
 };
 pub use ports::{
     ActivateMembershipEffectPort, ApplyMembershipMemberFactsPort, ApplyMembershipSecurityPort,

@@ -4,7 +4,9 @@ use uc_core::ports::space::SpaceAccessError;
 
 use crate::space::lifecycle::CurrentSpaceIdentityPort;
 use crate::space::lifecycle::ResumeSpaceSessionPort;
-use crate::space::lifecycle::{LocalSessionReadiness, SpaceSessionRecoveryPort};
+use crate::space::lifecycle::{
+    LocalSessionReadiness, SessionReadinessError, SpaceSessionRecoveryPort,
+};
 
 use super::{RecoverSpaceSessionError, RecoverSpaceSessionResult};
 
@@ -64,7 +66,14 @@ impl RecoverSpaceSessionUseCase {
         self.readiness
             .prepare_data()
             .await
-            .map_err(RecoverSpaceSessionError::Internal)?;
+            .map_err(|error| match error {
+                SessionReadinessError::UpgradeUnavailable(_) => {
+                    RecoverSpaceSessionError::Unavailable(anyhow::Error::new(error))
+                }
+                SessionReadinessError::Failed(_) => {
+                    RecoverSpaceSessionError::Internal(anyhow::Error::new(error))
+                }
+            })?;
         self.recovery.request_activation().await?;
         Ok(RecoverSpaceSessionResult {
             unlocked: true,

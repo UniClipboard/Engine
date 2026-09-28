@@ -470,6 +470,22 @@ fn operation_error_with_code(
     EngineError::new(code, EngineErrorCategory::Internal, false)
 }
 
+/// 下层报告暂时不可用、持久进度可续做的失败：与 [`operation_error_with_code`] 记录相同的诊断，
+/// 但向宿主报告为可重试。
+fn retryable_operation_error_with_code(
+    code: u32,
+    context: &'static str,
+    error: impl Into<Box<dyn Error + Send + Sync>>,
+) -> EngineError {
+    let error = error.into();
+    error!(
+        context,
+        io_error_kind = io_error_kind(error.as_ref()),
+        "engine operation temporarily unavailable"
+    );
+    EngineError::new(code, EngineErrorCategory::Unavailable, true)
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "dev-tools")]

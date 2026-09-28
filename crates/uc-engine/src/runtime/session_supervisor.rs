@@ -53,6 +53,7 @@ use crate::{
 
 use super::{
     operation_error_with_code, operation_unavailable_error, profile_recovery_required_error,
+    retryable_operation_error_with_code,
 };
 use crate::{EngineError, EngineErrorCategory, OperationResult};
 
@@ -955,6 +956,11 @@ impl SessionSupervisor {
             Ok(recovered) => recovered.unlocked,
             // 缺少缓存口令是正常锁定；存储故障和损坏不能降级为恢复成功。
             Err(RecoverSpaceSessionError::KeyringMiss) if !resume_space_activities => false,
+            Err(error @ RecoverSpaceSessionError::Unavailable(_)) => {
+                let primary =
+                    retryable_operation_error_with_code(1103, "recover local session", error);
+                return Err(self.shutdown_after_failure(primary).await);
+            }
             Err(error) => {
                 let primary = operation_error_with_code(1103, "recover local session", error);
                 return Err(self.shutdown_after_failure(primary).await);

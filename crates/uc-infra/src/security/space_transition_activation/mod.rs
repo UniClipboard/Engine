@@ -7,6 +7,7 @@ use super::{
     ActiveRuntimeManifest, ActiveRuntimeManifestV3, ActiveSpaceGenerationManifestStore,
     ActiveSpaceGenerationManifestStoreError, PreparedSpaceControlGeneration,
     ProfilePassphraseRecoveryPort, ProfileRuntimeLayout, SpaceControlGeneration,
+    SpaceControlGenerationError,
 };
 use crate::db::pool::DbPool;
 use crate::space::RuntimeSpaceAccessAdapter;
@@ -410,6 +411,43 @@ impl SpaceTransitionActivation {
         self.control_generations
             .discard_prepared(prepared)
             .map_err(|source| storage(anyhow::Error::new(source)))
+    }
+
+    /// 丢弃已被 Reset 重建改写、从未提升的目标，使下一次尝试从来源重新快照。
+    ///
+    /// 与 manifest 提升处于同一关口：只有来源仍是活动 manifest 时才删除，已生效的目标绝不丢弃。
+    pub async fn discard_unpromoted_device_reset(
+        &self,
+        expected_source: &ActiveRuntimeManifestV3,
+        target: &ActiveRuntimeManifestV3,
+    ) -> Result<(), SpaceTransitionActivationError> {
+        let _guard = self.activation_lock.lock().await;
+        let _lease = acquire_activation_lease(&self.profile_root)?;
+        let active = self
+            .manifests
+            .load_runtime()
+            .await
+            .map_err(map_manifest_error)?;
+        if active.as_ref() != Some(&ActiveRuntimeManifest::V3(expected_source.clone())) {
+            return Err(inconsistent(anyhow::anyhow!(
+                "device reset target is no longer pre-activation"
+            )));
+        }
+        // 同一进程内重试时会话仍指向上一次尝试的目标；重新快照需要来源会话。
+        self.space_access
+            .rebind_session_to_retained_source(expected_source.layout().space_id())
+            .map_err(|source| storage(anyhow::Error::new(source)))?;
+        self.control_generations
+            .discard_unpromoted_device_reset_target(expected_source, target)
+            .map_err(|source| match source {
+                SpaceControlGenerationError::Busy { .. } => SpaceTransitionActivationError::Busy {
+                    source: anyhow::Error::new(source),
+                },
+                SpaceControlGenerationError::Inconsistent { .. } => {
+                    inconsistent(anyhow::Error::new(source))
+                }
+                SpaceControlGenerationError::Storage { .. } => storage(anyhow::Error::new(source)),
+            })
     }
 
     pub async fn discard_fresh(

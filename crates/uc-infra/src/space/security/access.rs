@@ -785,6 +785,19 @@ impl RuntimeSpaceAccessAdapter {
         Ok(())
     }
 
+    /// 丢弃尚未提升的 Reset 目标时，让会话重新指向仍生效的来源 Space。
+    ///
+    /// 上一次尝试已把会话重绑到目标；重新快照要求来源会话。重绑会清空当前内容密钥，
+    /// 随后的重建再次绑定目标并安装新材料，期间不会用被放弃的密钥封装内容。
+    pub(crate) fn rebind_session_to_retained_source(
+        &self,
+        space_id: &SpaceId,
+    ) -> Result<(), SpaceAccessError> {
+        self.session
+            .rebind_to_space(space_id)
+            .map_err(map_encryption_error)
+    }
+
     /// 停止使用已被终止准入提升的控制世代；持久停止事实由切换负责人先保存。
     pub(crate) fn stop_using_admission_target(&self) {
         self.session.clear();

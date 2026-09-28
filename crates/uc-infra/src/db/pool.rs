@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use tracing::info;
 
+use super::connection::BUSY_TIMEOUT_MS;
+
 /// Embed all diesel migrations at compile time
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
@@ -109,7 +111,7 @@ impl CustomizeConnection<SqliteConnection, diesel::r2d2::Error> for SqlitePragma
     ) -> std::result::Result<(), diesel::r2d2::Error> {
         use diesel::r2d2::Error::QueryError;
 
-        diesel::sql_query("PRAGMA busy_timeout = 5000")
+        diesel::sql_query(format!("PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}"))
             .execute(conn)
             .map_err(|e| QueryError(e))?;
 

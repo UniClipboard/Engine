@@ -2,8 +2,9 @@ use async_trait::async_trait;
 use uc_core::ids::DeviceId;
 
 use super::{
-    AdmissionMaintenanceOutcome, MembershipMaintenanceReport, MembershipMaintenanceStepOutcome,
-    MembershipMaintenanceTrigger, QuerySpaceWorkModeError, SpaceWorkPermit,
+    AdmissionMaintenanceOutcome, MembershipMaintenanceExclusion, MembershipMaintenanceReport,
+    MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger, QuerySpaceWorkModeError,
+    SpaceWorkPermit,
 };
 
 pub trait WakeSpaceMembershipMaintenancePort: Send + Sync {
@@ -64,4 +65,10 @@ pub(crate) trait RunMembershipWorkPort: Send + Sync {
         &self,
         trigger: &MembershipMaintenanceTrigger,
     ) -> MembershipMaintenanceReport;
+}
+
+/// 需要独占成员与控制状态的流程（如单设备 Space 重建）在执行期间排除成员维护。
+#[async_trait]
+pub(crate) trait ExcludeMembershipMaintenancePort: Send + Sync {
+    async fn exclude_membership_maintenance(&self) -> MembershipMaintenanceExclusion;
 }

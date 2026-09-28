@@ -90,3 +90,14 @@ pub struct MembershipMaintenanceReport {
     pub stable_failure_count: usize,
     pub corrupt_count: usize,
 }
+
+/// 成员维护互斥许可：存续期间不会有维护轮次运行；取得许可前进行中的轮次已完整结束。
+pub(crate) struct MembershipMaintenanceExclusion {
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl MembershipMaintenanceExclusion {
+    pub(crate) fn new(guard: tokio::sync::OwnedMutexGuard<()>) -> Self {
+        Self { _guard: guard }
+    }
+}
