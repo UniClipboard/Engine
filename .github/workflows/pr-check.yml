@@ -27,6 +27,12 @@ jobs:
     name: Engine repository checks
     if: github.event.action != 'labeled'
     runs-on: macos-14
+    # 编译缓存凭据：只有 main 上的可信运行绑定限定 main 分支的写入环境，其余运行（PR、合并队列、其他分支）用只读令牌；
+    # fork 与 Dependabot 拿不到任何 secret，回退为按 ref 隔离的 GitHub Actions 缓存。
+    # 本文件其余 Rust job 使用相同绑定；详见 docs/design-docs/decisions/029-ci-r2-compile-cache.md。
+    environment:
+      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
+      deployment: false
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -37,6 +43,10 @@ jobs:
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: rust-checks-macos
+          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
+          compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
 
       - name: Validate workspace metadata
         run: cargo metadata --locked --format-version 1 > /dev/null
@@ -52,8 +62,10 @@ jobs:
         env:
           RUST_STYLE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
 
-      - name: Check mobile build profiles
-        run: node --test scripts/architecture/check-mobile-build-profile.test.mjs scripts/release/build-profile.test.mjs
+      - name: Check mobile build profiles and CI compile cache boundaries
+        run: >-
+          node --test scripts/architecture/check-mobile-build-profile.test.mjs scripts/release/build-profile.test.mjs
+          scripts/build-cache/ci-compile-cache.test.mjs
 
       - name: Check patch whitespace
         run: git diff --check
@@ -67,6 +79,9 @@ jobs:
     name: Upgrade compatibility smoke
     if: github.event.action != 'labeled'
     runs-on: ubuntu-24.04
+    environment:
+      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
+      deployment: false
     timeout-minutes: 60
     env:
       UC_TEST_ARTIFACTS_DIR: target/test-artifacts/ci
@@ -82,6 +97,10 @@ jobs:
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: rust-upgrade-matrix-linux
+          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
+          compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
 
       - name: Cache anchor hosts
         uses: actions/cache@v4
@@ -115,6 +134,9 @@ jobs:
     name: Engine tests
     if: github.event.action != 'labeled'
     runs-on: ubuntu-24.04
+    environment:
+      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
+      deployment: false
     timeout-minutes: 60
     env:
       # 所有测试组共用同一次全工作区构建，只编译一次。
@@ -130,6 +152,10 @@ jobs:
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: rust-tests-linux
+          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
+          compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
@@ -195,6 +221,9 @@ jobs:
       || (contains(github.event.pull_request.labels.*.name, 'full-ci')
       && (github.event.action != 'labeled' || github.event.label.name == 'full-ci'))
     runs-on: ubuntu-24.04
+    environment:
+      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
+      deployment: false
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -204,6 +233,10 @@ jobs:
         with:
           cache-key: rust-coverage-linux
           fast-compile-infra: "true"
+          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
+          compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
 
       - name: Install coverage tools
         uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
@@ -238,6 +271,9 @@ jobs:
       || (contains(github.event.pull_request.labels.*.name, 'full-ci')
       && (github.event.action != 'labeled' || github.event.label.name == 'full-ci'))
     runs-on: ubuntu-24.04
+    environment:
+      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
+      deployment: false
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -255,6 +291,10 @@ jobs:
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: connection-recovery-linux
+          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
+          compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
 
       - name: Validate connection liveness and recovery
         run: bash scripts/testing/run-connection-recovery-e2e.sh --suite network --repeat 1 --mode "${{ matrix.mode }}"

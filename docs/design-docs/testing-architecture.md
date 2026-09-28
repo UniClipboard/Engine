@@ -247,8 +247,12 @@ impl Scenario {
 | 完整检查 | 合并队列、主线推送、手工触发，或带 `full-ci` 标签的 PR | Linux 覆盖率（`cargo llvm-cov nextest`）与四种真实网络模式各一轮 |
 
 - 所有 Rust job 通过 `.github/actions/rust-ci-setup` 使用固定工具链、依赖缓存、sccache 与全部逻辑核；仓库
-  `.cargo/config.toml` 的两路并行限制只约束本地构建。不经该 action 的发布工作流在工作流级设置
-  `CARGO_BUILD_JOBS=default`；升级矩阵的旧版宿主构建不采用锚点快照自带的并行设置，统一沿用当前仓库的值。
+  `.cargo/config.toml` 的两路并行限制只约束本地构建，CI 把 `CARGO_BUILD_JOBS` 设为 runner 逻辑核数（数字，
+  `cargo llvm-cov` 不接受 `default`）。不经该 action 的发布工作流在工作流级设置 `CARGO_BUILD_JOBS=default`；
+  升级矩阵的旧版宿主构建不采用锚点快照自带的并行设置，统一沿用当前仓库的值。
+- sccache 的跨运行缓存在 R2：只有 `main` 上的运行经限定分支的 GitHub 环境拿到写入令牌，其余运行只读，
+  fork 与 Dependabot 回退为按 ref 隔离的 Actions 缓存；后端选择、失败回退与配置见
+  [ADR-029](decisions/029-ci-r2-compile-cache.md)，冷/暖对照由 `compile-cache-benchmark.yml` 手工运行。
 - CI 通过 `UC_ENGINE_SOURCE_COMMIT`/`UC_ENGINE_SOURCE_STATE` 显式提供构建来源。显式来源时
   `uc-observability-runtime` 的 build script 只以这两个变量为重跑条件，同一 job 内多次 cargo 调用不会因
   git 或源码目录的修改时间变化而连锁重编。

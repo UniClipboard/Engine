@@ -13,6 +13,32 @@ inputs:
       depend on that optimization level, such as instrumented coverage.
     required: false
     default: "false"
+  compile-cache-access:
+    description: >-
+      write only for jobs bound to the branch-restricted engine-build-cache-writer environment; read otherwise.
+      The R2 token itself enforces the permission, this only selects the sccache read/write mode.
+    required: false
+    default: read
+  compile-cache-r2-endpoint:
+    description: R2 S3 endpoint secret; empty selects the GitHub Actions cache fallback.
+    required: false
+    default: ""
+  compile-cache-r2-access-key-id:
+    description: R2 S3 access key id secret; empty selects the GitHub Actions cache fallback.
+    required: false
+    default: ""
+  compile-cache-r2-secret-access-key:
+    description: R2 S3 secret access key secret; empty selects the GitHub Actions cache fallback.
+    required: false
+    default: ""
+  dependency-cache:
+    description: Restore and save third-party build outputs with rust-cache. Disabled only for cold-cache measurements.
+    required: false
+    default: "true"
+  compile-cache-key-prefix:
+    description: Override of the R2 object prefix, only for disposable benchmark prefixes under engine/.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -22,26 +48,29 @@ runs:
       run: rustup show active-toolchain
 
     - name: Cache Rust dependencies
+      if: inputs.dependency-cache == 'true'
       uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
       with:
         workspaces: . -> target
         shared-key: ${{ inputs.cache-key }}
 
-    # rust-cache 只保留第三方依赖；工作区 crate 由 sccache 按内容缓存，未改动的 crate 跨运行复用。
+    # rust-cache 只保留第三方依赖与 Cargo 下载内容；工作区 crate 由 sccache 按内容缓存，未改动的 crate 跨运行复用。
     - name: Install compiler cache
       uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      with:
+        # 不指定时 action 会安装最新发布；版本与 start-ci-sccache.sh 中的二进制摘要同步固定。
+        version: v0.18.0
 
-    - name: Configure compiler cache and build parallelism
+    # 选择唯一缓存后端并常驻 sccache 服务；R2 凭据只进入服务进程环境，不写入 GITHUB_ENV。
+    - name: Start compiler cache
       shell: bash
-      run: |
-        {
-          echo "SCCACHE_GHA_ENABLED=true"
-          echo "RUSTC_WRAPPER=sccache"
-          # sccache 不缓存增量编译产物。
-          echo "CARGO_INCREMENTAL=0"
-          # .cargo/config.toml 为本地开发限制为 2 个并行编译任务；CI runner 专用于本次构建，恢复为全部逻辑核。
-          echo "CARGO_BUILD_JOBS=default"
-        } >> "$GITHUB_ENV"
+      env:
+        BUILD_CACHE_ACCESS: ${{ inputs.compile-cache-access }}
+        BUILD_CACHE_R2_ENDPOINT: ${{ inputs.compile-cache-r2-endpoint }}
+        BUILD_CACHE_R2_ACCESS_KEY_ID: ${{ inputs.compile-cache-r2-access-key-id }}
+        BUILD_CACHE_R2_SECRET_ACCESS_KEY: ${{ inputs.compile-cache-r2-secret-access-key }}
+        BUILD_CACHE_KEY_PREFIX: ${{ inputs.compile-cache-key-prefix }}
+      run: bash scripts/build-cache/start-ci-sccache.sh
 
     # 显式提供构建来源后，uc-observability-runtime 的 build script 不再跟踪 git 与源码目录的修改时间；
     # 否则同一 job 内每次 cargo 调用都可能重跑它，并连锁重编 uc-infra、uc-engine 与全部宿主。
