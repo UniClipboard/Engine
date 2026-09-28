@@ -450,6 +450,20 @@ metadata 定位并打包维护库提供的 Java 组件，同时附带消费者�
 任何输出都不得包含剪贴板内容、密码、密钥、完整令牌、邀请、设备名、地址、文件名、路径、profile/Space/member/device/entry/
 transfer 原始 ID、摘要、原始错误正文或可恢复派生值。
 
+### 构建来源
+
+本地记录的 `source_commit`/`source_state` 与诊断状态的 `source_commit` 描述产物实际编译的 Engine 源码，
+运行期不读取 git。`uc-observability-runtime` 的 build script 取显式输入 `UC_ENGINE_SOURCE_COMMIT`/
+`UC_ENGINE_SOURCE_STATE`，缺失或不是完整提交号时读取所在源码树的 git；仍无法确定时记为 `unknown`，
+不从版本号推断。
+
+来源不以编译期常量编入 rlib。build script 把来源编译为独立原生静态库（固定长度只读数组），默认打包进
+rlib，所有产物（包括 Desktop 等下游 crate 生成的静态库）与以往一样自带来源。显式提供来源的托管构建（CI 经
+`rust-ci-setup`）改为以 `static:-bundle` 声明：rlib 不随提交变化，`uc-observability-runtime` 与
+`uc-engine` 跨提交可命中编译缓存，来源由 Cargo 在最终链接可执行文件、测试与动态库时加入，缺少定义时链接失败。
+这类构建顺带生成的非 iOS 静态库不含来源，不作为交付物；iOS 交付的是静态库，始终打包。
+读取端逐项校验格式，不合格时记为 `unknown`。Engine facade、port 与宿主接口不因来源而变化。
+
 ## 验证
 
 每次修改至少验证：

@@ -255,7 +255,9 @@ impl Scenario {
   [ADR-029](decisions/029-ci-r2-compile-cache.md)，冷/暖对照由 `compile-cache-benchmark.yml` 手工运行。
 - CI 通过 `UC_ENGINE_SOURCE_COMMIT`/`UC_ENGINE_SOURCE_STATE` 显式提供构建来源。显式来源时
   `uc-observability-runtime` 的 build script 只以这两个变量为重跑条件，同一 job 内多次 cargo 调用不会因
-  git 或源码目录的修改时间变化而连锁重编。
+  git 或源码目录的修改时间变化而连锁重编；显式来源时来源也不打包进该 crate 的 rlib，只随最终链接进入产物，换提交后
+  `uc-observability-runtime` 与 `uc-engine` 的 rlib 仍可命中跨运行缓存，见
+  [运行期观测装配](observability.md#构建来源)。
 - 只有插桩覆盖率 job 取消 `uc-infra` 的 `opt-level = 3` 覆盖以缩短编译：该 job 已按 release 口径校验诊断栈，
   而未插桩的诊断栈符号校验与真实网络、多设备时序都依赖产品实际使用的优化级别。
 - 全工作区测试由 nextest 并行执行；依赖满载时序的测试在 `.config/nextest.toml` 中独占运行或放宽期限，不靠全局串行。

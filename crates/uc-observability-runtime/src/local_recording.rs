@@ -1,4 +1,5 @@
 //! 进程运行时的本地关联元数据；对端映射有界且只驻留内存。
+use crate::build_source::build_source;
 use crate::config::ObservabilityResource;
 use crate::local_capture::CapturePolicy;
 use crate::local_file::LocalFileRuntime;
@@ -154,8 +155,9 @@ impl LocalRecordingState {
         record["platform"] = json!(self.resource.os.as_str());
         record["environment"] = json!(self.resource.environment.as_str());
         record["app_channel"] = json!(self.resource.app_channel);
-        record["source_commit"] = json!(env!("UC_OBSERVABILITY_SOURCE_COMMIT"));
-        record["source_state"] = json!(env!("UC_OBSERVABILITY_SOURCE_STATE"));
+        let source = build_source();
+        record["source_commit"] = json!(source.commit);
+        record["source_state"] = json!(source.state);
         if let Some(peer) =
             uc_observability_contract::diagnostics::connectivity::local_connection_peer()
         {
@@ -194,7 +196,7 @@ impl LocalRecordingState {
             schema_rejected_records: policy.rejected,
             correlation_limited_records: policy.limited,
             engine_version: env!("CARGO_PKG_VERSION").into(),
-            source_commit: env!("UC_OBSERVABILITY_SOURCE_COMMIT").into(),
+            source_commit: build_source().commit.into(),
             counter_scope: "typed_events_only",
             sources: policy.coverage(),
             local_file,

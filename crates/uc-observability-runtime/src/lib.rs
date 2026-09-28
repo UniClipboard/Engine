@@ -2,6 +2,7 @@
 
 #[cfg(target_os = "android")]
 mod android;
+mod build_source;
 mod config;
 mod file_statistics;
 mod host_diagnostics;
