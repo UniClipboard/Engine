@@ -16,11 +16,19 @@ fn valid_commit(value: &str) -> bool {
     value == "unknown" || (value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
-fn expected(primary: &str, fallback: &str) -> Option<String> {
-    std::env::var(primary)
-        .ok()
-        .or_else(|| std::env::var(fallback).ok())
-        .filter(|value| !value.is_empty())
+fn explicit(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+/// 与 build.rs 相同的采用规则：只有完整提交号才作为显式来源，状态随之生效且未识别时记为 unknown；
+/// 否则构建改读 git，此处无从得知期望值，不作断言。
+fn ci_source() -> Option<(String, String)> {
+    let commit = explicit("UC_ENGINE_SOURCE_COMMIT")
+        .filter(|value| value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))?;
+    let state = explicit("UC_ENGINE_SOURCE_STATE")
+        .filter(|state| matches!(state.as_str(), "clean" | "modified" | "unknown"))
+        .unwrap_or_else(|| "unknown".into());
+    Some((commit, state))
 }
 
 #[test]
@@ -74,10 +82,15 @@ fn local_records_and_status_report_the_linked_build_source() {
         assert_eq!(record["source_commit"], status.source_commit.as_str());
         assert_eq!(record["source_state"], state);
     }
-    if let Some(commit) = expected("UC_EXPECTED_SOURCE_COMMIT", "UC_ENGINE_SOURCE_COMMIT") {
+    let ci = ci_source();
+    if let Some(commit) = explicit("UC_EXPECTED_SOURCE_COMMIT")
+        .or_else(|| ci.as_ref().map(|(commit, _)| commit.clone()))
+    {
         assert_eq!(status.source_commit, commit);
     }
-    if let Some(expected_state) = expected("UC_EXPECTED_SOURCE_STATE", "UC_ENGINE_SOURCE_STATE") {
+    if let Some(expected_state) =
+        explicit("UC_EXPECTED_SOURCE_STATE").or_else(|| ci.map(|(_, state)| state))
+    {
         assert_eq!(state, expected_state);
     }
 }
