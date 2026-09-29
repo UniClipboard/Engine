@@ -373,7 +373,8 @@ pub struct NetworkSettings {
     /// 业务正向语义：UI "LAN-only Mode = ON" → 此字段 = `false`。
     pub allow_relay_fallback: bool,
 
-    /// 仅局域网模式下用户声明的可信网段（CIDR 文本）。
+    /// 用户声明的可信网段（CIDR 文本）：只放行本来会被跳过的 CGNAT/Tailscale 段地址，
+    /// 不限制其他可达地址，不是网络隔离边界。
     ///
     /// 只接受私有地址空间，保存时由 `uc_core::network::TrustedNetworks::parse`
     /// 严格校验；网络启动时宽松解析，手工写入的无效条目被跳过。
