@@ -4,5 +4,6 @@
 
 - [PRD-001：本地加密历史搜索](001-local-encrypted-search.md)
 - [个人设备信任核对产品契约](021-device-trust-reconciliation.md)
+- [PRD-022：仅局域网模式与可信网络](022-lan-only-trusted-networks.md)
 
 实现设计应链接到 [`design-docs/`](../design-docs/)，执行状态应链接到 [`exec-plans/`](../exec-plans/)。
