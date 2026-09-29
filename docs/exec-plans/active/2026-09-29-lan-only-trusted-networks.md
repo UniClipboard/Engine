@@ -35,12 +35,13 @@
 - 网络设置删除 `allow_overlay_network_addrs`，新增可信网段列表与固定端口字段。
 - `CURRENT_SCHEMA_VERSION` 从 3 升到 4；旧值为真迁移为 `100.64.0.0/10` 与 `fd7a:115c:a1e0::/48`，为假或缺失时列表为空。
 - `addr_filter.rs` 的 overlay 判定改读 `TrustedNetworks`，行为与迁移前等价。
-- `uc-engine` 设置契约与 iOS、Android、HarmonyOS 绑定同版本删除旧字段、新增新字段。
-- 验证：Core 单元测试覆盖校验与迁移映射；迁移测试覆盖 schema 3 的真、假、缺失三种输入；绑定生成检查通过。
+- `uc-engine` 设置契约同版本删除旧字段、新增新字段。移动绑定不暴露网络设置，不受影响。
+- 验证：Core 单元测试覆盖校验与迁移映射；迁移测试覆盖 schema 3 的真、假、缺失三种输入。
 
 ### 切片 2：发布与拨号两侧共用可信过滤
 
-- 本端邀请与发布候选、对端拨号候选统一经 `TrustedNetworks` 有效集合过滤（本机物理私网加用户列表，减永久排除）。
+- 先由用户决定 LAN-only 下是否改为白名单（本机物理私网加用户列表，减永久排除）；现有过滤是黑名单，见技术设计未决问题。
+- 本端邀请与发布候选、对端拨号候选统一经同一判定过滤。
 - LAN-only 下候选被全部排除时返回稳定失败分类，不改走 relay。
 - 新增测试固定：LAN-only 下解码出的邀请路由不含 relay。
 - 验证：Infra 单元测试覆盖两侧一致性；日志与观测不含地址或网段内容。
@@ -68,6 +69,15 @@
   全程 relay、公共 DNS 与云 rendezvous 访问计数为零。
 - 独立网络部分须在支持命名空间和 nftables 的 Linux 环境执行；未执行项记为“跳过”。
 
+## 公开契约缺口（切片 1 核查）
+
+- iOS、Android（`bindings/uc-engine-uniffi`）与 HarmonyOS（`bindings/uc-ohos-napi`）没有绑定任何设置读写操作，
+  移动端目前无法读写可信网段、固定端口或 `allow_relay_fallback`。移动端设置界面需要 Engine 先新增绑定，属于未规划的新范围。
+- 发起端选择写入邀请的本机地址只存在于开发操作（`ListPairingInvitationAddresses`、`IssueInvitationForAddress`），
+  不是公开操作。产品界面要选地址，需要先把它提升为公开契约，同样属于未规划的新范围。
+- 完整邀请的复制与粘贴不需要 Engine 改动：`IssueInvitation` 已返回 `full_invitation`，`JoinSpace` 已接受完整邀请，两个绑定均已暴露。
+- 设置更新的拒绝原因只有英文文本；下游若需本地化或逐条定位，需要 Engine 提供结构化拒绝。
+
 ## 下游衔接
 
 | 下游工作 | 依赖 | 可开始时间 |
@@ -88,7 +98,10 @@
 
 ## 进度
 
-- [ ] 切片 1
+- [x] 切片 1（2026-09-29，本地未推送）：Core `TrustedNetworks`、schema 3→4 迁移、`addr_filter`/节点/邀请改读可信网段、
+  Application 校验与视图、Engine 契约。`SettingsFacadeError::Invalid` 改为携带 `SettingsValidationError` 来源。
+  已运行 workspace check、`uc-infra --features lan-compat` check、fmt、Rust 风格与仓库检查、diff check，以及
+  uc-core/uc-infra/uc-application/uc-engine 相关单元测试与 `uc-engine` public_contract；完整 workspace 测试未运行。
 - [ ] 切片 2
 - [ ] 切片 3
 - [ ] 切片 4

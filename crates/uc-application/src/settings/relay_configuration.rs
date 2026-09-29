@@ -4,7 +4,10 @@ use tokio::sync::Mutex;
 use uc_core::{ports::SettingsPort, settings::model::Settings};
 
 use super::{
-    models::{apply_settings_patch, validate_settings, NetworkSettingsPatch, SettingsPatch},
+    models::{
+        apply_settings_patch, validate_settings, NetworkSettingsPatch, SettingsPatch,
+        SettingsValidationError,
+    },
     RelayAccessToken, RelayCredentialEdit, RelayCredentials, RelayCredentialsError,
 };
 
@@ -61,8 +64,8 @@ pub enum RelayConfigurationError {
     Load(#[source] anyhow::Error),
     #[error("failed to save settings")]
     Save(#[source] anyhow::Error),
-    #[error("invalid settings: {0}")]
-    Invalid(String),
+    #[error("invalid settings")]
+    Invalid(#[source] SettingsValidationError),
     #[error("relay credentials are unavailable")]
     CredentialsUnavailable,
     #[error(transparent)]
@@ -377,7 +380,11 @@ fn canonical_entries(
 ) -> Result<Vec<RelayConfigurationEntry>, RelayConfigurationError> {
     let urls = canonical_urls(urls)
         // 用户输入的 URL 解析失败只作输入校验，拒绝原因已完整表达。
-        .map_err(|_| RelayConfigurationError::Invalid("invalid custom relay URL".to_string()))?;
+        .map_err(|_| {
+            RelayConfigurationError::Invalid(SettingsValidationError::CustomRelayUrl(
+                "invalid custom relay URL".to_string(),
+            ))
+        })?;
     urls.into_iter()
         .map(|url| {
             let credential_configured = credentials.is_configured(&url)?;

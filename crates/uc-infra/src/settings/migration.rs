@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use serde::Deserialize;
 use tracing::info;
 use uc_core::ports::SettingsMigrationPort;
 use uc_core::settings::model::{
@@ -115,6 +116,66 @@ impl SettingsMigrationPort for MigrationV2ToV3 {
     }
 }
 
+/// v3 旧值为真时写入的 Tailscale 网段：CGNAT IPv4 与 Tailscale ULA IPv6。
+const LEGACY_OVERLAY_NETWORKS: [&str; 2] = ["100.64.0.0/10", "fd7a:115c:a1e0::/48"];
+
+/// 当前模型已删除、但迁移仍需读取的旧字段。
+///
+/// 删除字段后 `Settings` 反序列化会丢掉旧值，因此由持久格式所有者 Infra 从同一份
+/// 原始 settings.json 单独读取，再交给对应迁移步骤。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct LegacySettingsFields {
+    network: LegacyNetworkFields,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+struct LegacyNetworkFields {
+    allow_overlay_network_addrs: bool,
+}
+
+impl LegacySettingsFields {
+    pub fn from_json(content: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(content)
+    }
+}
+
+/// v3 -> v4: 用可信网段取代只放行 Tailscale 的 overlay 开关。
+///
+/// 旧开关为真的用户得到 Tailscale 两个网段，行为不变；为假或缺失时列表保持原样。
+/// 旧字段在 v4 模型中不存在，保存后自然从文件中消失。
+struct MigrationV3ToV4 {
+    legacy: LegacySettingsFields,
+}
+
+impl SettingsMigrationPort for MigrationV3ToV4 {
+    fn from_version(&self) -> u32 {
+        3
+    }
+
+    fn to_version(&self) -> u32 {
+        4
+    }
+
+    fn migrate(&self, mut settings: Settings) -> Settings {
+        if self.legacy.network.allow_overlay_network_addrs {
+            for network in LEGACY_OVERLAY_NETWORKS {
+                if !settings
+                    .network
+                    .trusted_networks
+                    .iter()
+                    .any(|entry| entry == network)
+                {
+                    settings.network.trusted_networks.push(network.to_owned());
+                }
+            }
+        }
+        settings.schema_version = self.to_version();
+        settings
+    }
+}
+
 pub struct SettingsMigrator {
     migrations: Vec<Box<dyn SettingsMigrationPort>>,
 }
@@ -125,12 +186,16 @@ impl SettingsMigrator {
     /// # Examples
     ///
     /// ```
-    /// # use uc_infra::settings::migration::SettingsMigrator;
-    /// let migrator = SettingsMigrator::new();
+    /// # use uc_infra::settings::migration::{LegacySettingsFields, SettingsMigrator};
+    /// let migrator = SettingsMigrator::new(LegacySettingsFields::default());
     /// ```
-    pub fn new() -> Self {
+    pub fn new(legacy: LegacySettingsFields) -> Self {
         Self {
-            migrations: vec![Box::new(MigrationV1ToV2), Box::new(MigrationV2ToV3)],
+            migrations: vec![
+                Box::new(MigrationV1ToV2),
+                Box::new(MigrationV2ToV3),
+                Box::new(MigrationV3ToV4 { legacy }),
+            ],
         }
     }
 
@@ -146,10 +211,10 @@ impl SettingsMigrator {
     /// # Examples
     ///
     /// ```no_run
-    /// # use uc_infra::settings::migration::SettingsMigrator;
+    /// # use uc_infra::settings::migration::{LegacySettingsFields, SettingsMigrator};
     /// # use uc_core::settings::model::Settings;
     /// # use uc_infra::settings::migration::MigrationError;
-    /// let migrator = SettingsMigrator::new();
+    /// let migrator = SettingsMigrator::new(LegacySettingsFields::default());
     /// let settings = Settings::default();
     /// let migrated = migrator.migrate_to_latest(settings)?;
     /// # Ok::<(), MigrationError>(())
@@ -219,7 +284,9 @@ mod tests {
             ..Settings::default()
         };
 
-        let migrated = SettingsMigrator::new().migrate_to_latest(settings).unwrap();
+        let migrated = SettingsMigrator::new(LegacySettingsFields::default())
+            .migrate_to_latest(settings)
+            .unwrap();
 
         assert_eq!(migrated.schema_version, CURRENT_SCHEMA_VERSION);
         assert_eq!(migrated.retention_policy.rules.len(), 1);
@@ -249,7 +316,9 @@ mod tests {
         let settings: Settings = serde_json::from_str(json).expect("parse versionless settings");
         assert_eq!(settings.schema_version, 1);
 
-        let migrated = SettingsMigrator::new().migrate_to_latest(settings).unwrap();
+        let migrated = SettingsMigrator::new(LegacySettingsFields::default())
+            .migrate_to_latest(settings)
+            .unwrap();
 
         assert_eq!(migrated.schema_version, CURRENT_SCHEMA_VERSION);
         assert_eq!(migrated.retention_policy.rules.len(), 1);
@@ -269,7 +338,9 @@ mod tests {
             ..Settings::default()
         };
 
-        let migrated = SettingsMigrator::new().migrate_to_latest(settings).unwrap();
+        let migrated = SettingsMigrator::new(LegacySettingsFields::default())
+            .migrate_to_latest(settings)
+            .unwrap();
 
         assert_eq!(migrated.schema_version, CURRENT_SCHEMA_VERSION);
         assert_eq!(migrated.retention_policy.rules, customized.rules);
@@ -286,7 +357,9 @@ mod tests {
             ..Settings::default()
         };
 
-        let migrated = SettingsMigrator::new().migrate_to_latest(settings).unwrap();
+        let migrated = SettingsMigrator::new(LegacySettingsFields::default())
+            .migrate_to_latest(settings)
+            .unwrap();
 
         assert_eq!(migrated.schema_version, CURRENT_SCHEMA_VERSION);
         assert!(!migrated.retention_policy.enabled);
@@ -298,7 +371,7 @@ mod tests {
         let settings = Settings::default();
         assert_eq!(settings.schema_version, CURRENT_SCHEMA_VERSION);
 
-        let migrated = SettingsMigrator::new()
+        let migrated = SettingsMigrator::new(LegacySettingsFields::default())
             .migrate_to_latest(settings.clone())
             .unwrap();
 
@@ -316,7 +389,9 @@ mod tests {
         };
         settings.general.lightweight_start = true;
 
-        let migrated = SettingsMigrator::new().migrate_to_latest(settings).unwrap();
+        let migrated = SettingsMigrator::new(LegacySettingsFields::default())
+            .migrate_to_latest(settings)
+            .unwrap();
 
         assert_eq!(migrated.schema_version, CURRENT_SCHEMA_VERSION);
         assert_eq!(migrated.general.startup_mode, StartupMode::Lightweight);
@@ -330,7 +405,9 @@ mod tests {
         };
         settings.general.silent_start = true;
 
-        let migrated = SettingsMigrator::new().migrate_to_latest(settings).unwrap();
+        let migrated = SettingsMigrator::new(LegacySettingsFields::default())
+            .migrate_to_latest(settings)
+            .unwrap();
 
         assert_eq!(migrated.schema_version, CURRENT_SCHEMA_VERSION);
         assert_eq!(migrated.general.startup_mode, StartupMode::Silent);
@@ -343,7 +420,9 @@ mod tests {
             ..Settings::default()
         };
 
-        let migrated = SettingsMigrator::new().migrate_to_latest(settings).unwrap();
+        let migrated = SettingsMigrator::new(LegacySettingsFields::default())
+            .migrate_to_latest(settings)
+            .unwrap();
 
         assert_eq!(migrated.schema_version, CURRENT_SCHEMA_VERSION);
         assert_eq!(migrated.general.startup_mode, StartupMode::Normal);
@@ -358,7 +437,9 @@ mod tests {
         settings.general.silent_start = true;
         settings.general.lightweight_start = true;
 
-        let migrated = SettingsMigrator::new().migrate_to_latest(settings).unwrap();
+        let migrated = SettingsMigrator::new(LegacySettingsFields::default())
+            .migrate_to_latest(settings)
+            .unwrap();
 
         assert_eq!(migrated.general.startup_mode, StartupMode::Lightweight);
     }
@@ -374,9 +455,64 @@ mod tests {
         let settings: Settings = serde_json::from_str(json).expect("parse versionless settings");
         assert_eq!(settings.schema_version, 1);
 
-        let migrated = SettingsMigrator::new().migrate_to_latest(settings).unwrap();
+        let migrated = SettingsMigrator::new(LegacySettingsFields::default())
+            .migrate_to_latest(settings)
+            .unwrap();
 
         assert_eq!(migrated.schema_version, CURRENT_SCHEMA_VERSION);
         assert_eq!(migrated.general.startup_mode, StartupMode::Lightweight);
+    }
+
+    fn migrate_v3_document(json: &str) -> Settings {
+        let legacy = LegacySettingsFields::from_json(json).expect("read legacy fields");
+        let settings: Settings = serde_json::from_str(json).expect("parse v3 settings");
+        assert_eq!(settings.schema_version, 3);
+        SettingsMigrator::new(legacy)
+            .migrate_to_latest(settings)
+            .expect("migrate v3 settings")
+    }
+
+    #[test]
+    fn v3_overlay_enabled_becomes_tailscale_trusted_networks() {
+        let migrated = migrate_v3_document(
+            r#"{ "schema_version": 3, "network": { "allow_relay_fallback": false, "allow_overlay_network_addrs": true } }"#,
+        );
+
+        assert_eq!(migrated.schema_version, 4);
+        assert_eq!(
+            migrated.network.trusted_networks,
+            vec![
+                "100.64.0.0/10".to_string(),
+                "fd7a:115c:a1e0::/48".to_string()
+            ]
+        );
+        assert!(!migrated.network.allow_relay_fallback);
+        assert_eq!(migrated.network.listen_port, None);
+    }
+
+    #[test]
+    fn v3_overlay_disabled_or_missing_leaves_trusted_networks_empty() {
+        for json in [
+            r#"{ "schema_version": 3, "network": { "allow_overlay_network_addrs": false } }"#,
+            r#"{ "schema_version": 3, "network": { "allow_relay_fallback": true } }"#,
+            r#"{ "schema_version": 3 }"#,
+        ] {
+            let migrated = migrate_v3_document(json);
+            assert_eq!(migrated.schema_version, 4);
+            assert!(migrated.network.trusted_networks.is_empty(), "{json}");
+        }
+    }
+
+    #[test]
+    fn migrated_v4_settings_no_longer_carry_the_overlay_switch() {
+        let migrated = migrate_v3_document(
+            r#"{ "schema_version": 3, "network": { "allow_overlay_network_addrs": true } }"#,
+        );
+        let persisted = serde_json::to_value(&migrated).expect("serialize migrated settings");
+
+        assert!(persisted["network"]
+            .get("allow_overlay_network_addrs")
+            .is_none());
+        assert_eq!(persisted["schema_version"], 4);
     }
 }

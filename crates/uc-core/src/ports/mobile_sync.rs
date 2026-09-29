@@ -243,7 +243,7 @@ pub enum EndpointInfoError {
 /// 二维码里的 LAN URL。返回的列表是"adapter 看到的全部 IPv4 接口"——是否
 /// 排除 loopback / link-local / VPN-overlay / CGNAT 等由 application 层 use
 /// case 按当前产品策略过滤,便于以后随设置(如
-/// `NetworkSettings.allow_overlay_network_addrs`)调整而无需改 adapter。
+/// `NetworkSettings.trusted_networks`)调整而无需改 adapter。
 ///
 /// 同步而非异步:实现里就是一次 syscall,没必要扛 async 成本。但保留
 /// `async fn` 是因为某些平台需要起 tokio 任务读 sysctl —— 让 trait 形状

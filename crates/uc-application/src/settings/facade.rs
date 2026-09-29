@@ -14,7 +14,7 @@ use crate::facade::settings::relay_diagnostic::{
 use crate::facade::settings::{
     RelayCredentialEdit, RelayCredentials, RelayCredentialsError, RelayProbeCredential,
 };
-use crate::settings::models::{SettingsPatch, SettingsView};
+use crate::settings::models::{SettingsPatch, SettingsValidationError, SettingsView};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SettingsFacadeError {
@@ -22,8 +22,8 @@ pub enum SettingsFacadeError {
     Load(#[source] anyhow::Error),
     #[error("failed to save settings")]
     Save(#[source] anyhow::Error),
-    #[error("invalid settings: {0}")]
-    Invalid(String),
+    #[error("invalid settings")]
+    Invalid(#[source] SettingsValidationError),
     /// Relay 探测能力未在本进程装配。常见于 webserver / 单元测试场景。
     #[error("relay probe is unavailable in this runtime")]
     RelayProbeUnavailable,
@@ -836,7 +836,7 @@ mod tests {
                 facade
                     .update(SettingsPatch {
                         network: Some(crate::facade::settings::NetworkSettingsPatch {
-                            allow_overlay_network_addrs: Some(true),
+                            trusted_networks: Some(vec!["10.8.0.0/24".to_string()]),
                             ..Default::default()
                         }),
                         ..Default::default()
@@ -861,7 +861,7 @@ mod tests {
             .expect("save settings");
         let persisted = settings.load().await.expect("load final settings");
         assert_eq!(persisted.network.custom_relay_urls, vec![relay]);
-        assert!(persisted.network.allow_overlay_network_addrs);
+        assert_eq!(persisted.network.trusted_networks, vec!["10.8.0.0/24"]);
     }
 
     #[tokio::test]

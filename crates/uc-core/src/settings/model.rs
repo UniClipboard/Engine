@@ -11,7 +11,11 @@ use serde_with::{serde_as, DurationSeconds};
 /// v2 -> v3: one-time rewrite of the legacy `silent_start` /
 /// `lightweight_start` booleans into the mutually-exclusive `startup_mode`
 /// enum. See `uc_infra::settings::migration::MigrationV2ToV3`.
-pub const CURRENT_SCHEMA_VERSION: u32 = 3;
+///
+/// v3 -> v4: 删除 `network.allow_overlay_network_addrs`，旧值为真时改写为
+/// `network.trusted_networks` 中的 Tailscale 两个网段。See
+/// `uc_infra::settings::migration::MigrationV3ToV4`.
+pub const CURRENT_SCHEMA_VERSION: u32 = 4;
 
 // 所有 settings struct 统一使用 `#[serde(default)]`：缺字段时回退到
 // `Default::default()`（在 `defaults.rs` 中实现），保证向后兼容。
@@ -356,7 +360,7 @@ impl std::str::FromStr for CongestionController {
 ///
 /// `#[serde(default)]` 让缺字段时回退到 `Default::default()`：
 /// - `allow_relay_fallback = true`（允许 fallback，breaking change 警惕）
-/// - `allow_overlay_network_addrs = false`（默认过滤虚拟网卡候选）
+/// - `trusted_networks = []`、`listen_port = None`
 /// - `custom_relay_urls = []`（空列表继续使用 iroh 默认中继）
 ///
 /// 修改默认值前请先 grep `LAN-only Mode` 文档与 changelog。
@@ -369,18 +373,21 @@ pub struct NetworkSettings {
     /// 业务正向语义：UI "LAN-only Mode = ON" → 此字段 = `false`。
     pub allow_relay_fallback: bool,
 
-    /// 是否允许把 VPN / overlay 类虚拟网卡地址（CGNAT 100.64.0.0/10、
-    /// Tailscale ULA fd7a:115c:a1e0::/48）作为 iroh 直连候选。
+    /// 仅局域网模式下用户声明的可信网段（CIDR 文本）。
     ///
-    /// 默认 `false`：默认过滤，避免对端不在同一 tailnet 时把死候选发给 peer，
-    /// 拖慢 path-validation、占用 PathId 预算。两端确实都接入同一 VPN
-    /// （如 Tailscale）希望让 iroh 借用该 overlay 网络互联时改为 `true`。
+    /// 只接受私有地址空间，保存时由 `uc_core::network::TrustedNetworks::parse`
+    /// 严格校验；网络启动时宽松解析，手工写入的无效条目被跳过。
+    /// `198.18.0.0/15`（Clash fake-ip）与 `169.254.0.0/16`（链路本地）不属于私有
+    /// 地址空间，永远不能被声明为可信。
     ///
-    /// 注意：`198.18.0.0/15`（Clash fake-ip）、`169.254.0.0/16`（IPv4 link-local）
-    /// 与本字段无关，永远过滤。
+    /// 用户批准以明文保存在 settings.json：网络在内容解锁前绑定，需要读取此值。
+    /// 日志与公开错误不得输出条目内容。修改后需重启 daemon 生效。
+    pub trusted_networks: Vec<String>,
+
+    /// 固定的 iroh UDP 监听端口；`None` 表示随机端口。
     ///
-    /// 修改后需重启 daemon 生效（iroh endpoint bind-time 常量）。
-    pub allow_overlay_network_addrs: bool,
+    /// 与 `trusted_networks` 相同，按用户批准明文保存。修改后需重启 daemon 生效。
+    pub listen_port: Option<u16>,
 
     /// 自定义 iroh relay 节点 URL 列表。
     ///

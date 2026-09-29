@@ -270,7 +270,10 @@ pub enum CongestionControllerSummary {
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkSettingsSummary {
     pub allow_relay_fallback: bool,
-    pub allow_overlay_network_addrs: bool,
+    /// 仅局域网可直连的可信网段（CIDR 文本）。修改后重启生效。
+    pub trusted_networks: Vec<String>,
+    /// 固定 UDP 监听端口；`None` 表示随机端口。修改后重启生效。
+    pub listen_port: Option<u16>,
     pub custom_relay_urls: Vec<String>,
     pub congestion_controller: CongestionControllerSummary,
 }
@@ -278,7 +281,10 @@ pub struct NetworkSettingsSummary {
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkSettingsPatch {
     pub allow_relay_fallback: Option<bool>,
-    pub allow_overlay_network_addrs: Option<bool>,
+    /// 整体替换可信网段；只接受私有地址空间，否则整次更新被拒绝。
+    pub trusted_networks: Option<Vec<String>>,
+    /// `Some(0)` 恢复随机端口，`Some(port)` 固定端口。
+    pub listen_port: Option<u16>,
     pub custom_relay_urls: Option<Vec<String>>,
     pub congestion_controller: Option<CongestionControllerSummary>,
 }

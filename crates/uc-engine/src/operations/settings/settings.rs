@@ -123,8 +123,10 @@ pub(crate) async fn execute_update_settings(
         Ok(settings) => Ok(OperationResult::SettingsUpdated(
             SettingsUpdateOutcome::Updated(Box::new(map_settings(settings))),
         )),
-        Err(app::SettingsFacadeError::Invalid(reason)) => Ok(OperationResult::SettingsUpdated(
-            SettingsUpdateOutcome::Rejected { reason },
+        Err(app::SettingsFacadeError::Invalid(error)) => Ok(OperationResult::SettingsUpdated(
+            SettingsUpdateOutcome::Rejected {
+                reason: error.rejection_reason(),
+            },
         )),
         Err(_) => Err(internal_error(UPDATE_SETTINGS_FAILED_CODE)),
     }
@@ -225,9 +227,9 @@ pub(crate) async fn execute_save_relay(
                 configured: saved.credential_status.configured,
             },
         })),
-        Err(app::SettingsFacadeError::Invalid(reason)) => {
+        Err(app::SettingsFacadeError::Invalid(error)) => {
             Ok(OperationResult::RelaySaved(SaveRelayOutcome::Rejected {
-                reason,
+                reason: error.rejection_reason(),
             }))
         }
         Err(error) => Err(map_save_relay_error(error)),
@@ -348,7 +350,8 @@ fn map_settings(settings: app::SettingsView) -> SettingsSummary {
         },
         network: NetworkSettingsSummary {
             allow_relay_fallback: settings.network.allow_relay_fallback,
-            allow_overlay_network_addrs: settings.network.allow_overlay_network_addrs,
+            trusted_networks: settings.network.trusted_networks,
+            listen_port: settings.network.listen_port,
             custom_relay_urls: settings.network.custom_relay_urls,
             congestion_controller: map_congestion_controller(
                 settings.network.congestion_controller,
@@ -441,7 +444,8 @@ fn map_patch(patch: SettingsPatch) -> Result<app::SettingsPatch, String> {
         }),
         network: patch.network.map(|value| app::NetworkSettingsPatch {
             allow_relay_fallback: value.allow_relay_fallback,
-            allow_overlay_network_addrs: value.allow_overlay_network_addrs,
+            trusted_networks: value.trusted_networks,
+            listen_port: value.listen_port,
             custom_relay_urls: value.custom_relay_urls,
             congestion_controller: value.congestion_controller.map(unmap_congestion_controller),
         }),

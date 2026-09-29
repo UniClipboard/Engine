@@ -7,9 +7,9 @@
 //! - 接受 RFC1918 私有地址（10/8 / 172.16/12 / 192.168/16）—— 真实 LAN。
 //! - 接受 CGNAT 段 100.64.0.0/10 —— Tailscale 默认 IPv4，iPhone 在同一
 //!   tailnet 内可直连。这是"显示给用户"语义，与 P2P 直连候选过滤
-//!   （`NetworkSettings.allow_overlay_network_addrs`）独立 ——
+//!   （`NetworkSettings.trusted_networks`）独立 ——
 //!   mobile sync 是用户手动从下拉里挑 IP，不会浪费 path-validation 预算
-//!   去试死路，没有跟着 overlay 开关走的理由。
+//!   去试死路，没有跟着可信网段走的理由。
 //! - 剔除 loopback、链路本地 169.254/16、Clash fake-ip 198.18/15 等"看似
 //!   可达实际不通"的陷阱。
 //!

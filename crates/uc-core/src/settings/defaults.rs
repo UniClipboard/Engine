@@ -257,7 +257,8 @@ impl Default for NetworkSettings {
     ///
     /// 默认值：
     /// - `allow_relay_fallback`: true
-    /// - `allow_overlay_network_addrs`: false
+    /// - `trusted_networks`: 空列表
+    /// - `listen_port`: None（随机端口）
     /// - `custom_relay_urls`: 空列表（沿用 iroh 默认中继）
     ///
     // 默认 true = 允许 fallback。
@@ -266,7 +267,8 @@ impl Default for NetworkSettings {
     fn default() -> Self {
         Self {
             allow_relay_fallback: true,
-            allow_overlay_network_addrs: false,
+            trusted_networks: Vec::new(),
+            listen_port: None,
             custom_relay_urls: Vec::new(),
             congestion_controller: CongestionController::default(),
         }
@@ -422,41 +424,22 @@ mod tests {
         assert!(s.network.allow_relay_fallback);
     }
 
-    /// 默认值：默认过滤 overlay 网络地址，保持 v0.6.x 起的现行行为。
+    /// 默认值：没有用户声明的可信网段，也不固定端口。
     #[test]
-    fn network_settings_default_filters_overlay_addrs() {
+    fn network_settings_default_has_no_trusted_networks_or_fixed_port() {
         let n = NetworkSettings::default();
-        assert!(
-            !n.allow_overlay_network_addrs,
-            "NetworkSettings::default().allow_overlay_network_addrs MUST be false"
-        );
+        assert!(n.trusted_networks.is_empty());
+        assert_eq!(n.listen_port, None);
     }
 
-    /// 老 settings.json 缺 `allow_overlay_network_addrs` 字段时回填默认 false。
+    /// 已删除的旧字段不再出现在序列化结果中。
     #[test]
-    fn old_settings_json_without_overlay_field_falls_back_to_default() {
-        let json = r#"{ "network": { "allow_relay_fallback": true } }"#;
-        let s: Settings = serde_json::from_str(json).expect("parse old network section");
-        assert!(
-            !s.network.allow_overlay_network_addrs,
-            "missing allow_overlay_network_addrs MUST default to false"
-        );
-    }
-
-    /// 显式 true 必须保留（专业用户主动开启）。
-    #[test]
-    fn explicit_allow_overlay_network_addrs_true_is_preserved() {
-        let json = r#"{ "network": { "allow_relay_fallback": true, "allow_overlay_network_addrs": true } }"#;
-        let s: Settings = serde_json::from_str(json).expect("parse explicit overlay true");
-        assert!(s.network.allow_overlay_network_addrs);
-    }
-
-    /// 显式 false 必须保留（双向覆盖）。
-    #[test]
-    fn explicit_allow_overlay_network_addrs_false_is_preserved() {
-        let json = r#"{ "network": { "allow_relay_fallback": true, "allow_overlay_network_addrs": false } }"#;
-        let s: Settings = serde_json::from_str(json).expect("parse explicit overlay false");
-        assert!(!s.network.allow_overlay_network_addrs);
+    fn network_settings_no_longer_serialize_overlay_switch() {
+        let persisted =
+            serde_json::to_value(NetworkSettings::default()).expect("serialize network settings");
+        assert!(persisted.get("allow_overlay_network_addrs").is_none());
+        assert_eq!(persisted["trusted_networks"], serde_json::json!([]));
+        assert!(persisted["listen_port"].is_null());
     }
 
     /// 默认值：空列表继续使用 iroh 默认中继，不改变老用户行为。
@@ -472,7 +455,7 @@ mod tests {
     /// 老 settings.json 缺 `custom_relay_urls` 字段时回填空列表。
     #[test]
     fn old_settings_json_without_custom_relay_urls_falls_back_to_default() {
-        let json = r#"{ "network": { "allow_relay_fallback": true, "allow_overlay_network_addrs": false } }"#;
+        let json = r#"{ "network": { "allow_relay_fallback": true } }"#;
         let s: Settings = serde_json::from_str(json).expect("parse old network section");
         assert!(s.network.custom_relay_urls.is_empty());
     }

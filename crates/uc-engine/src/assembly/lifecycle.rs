@@ -32,12 +32,11 @@ pub async fn build_network_runtime(
         .context("network settings preparation failed")?;
     let allow_relay_fallback =
         relay_fallback_override.unwrap_or(prepared_network.allow_relay_fallback);
-    let allow_overlay_network_addrs = prepared_network.allow_overlay_network_addrs;
     let custom_relay_urls = prepared_network.custom_relay_urls;
     let congestion_controller = prepared_network.congestion_controller;
     let mut iroh_config = crate::assembly::network::relay_policy_to_iroh_config(
         allow_relay_fallback,
-        allow_overlay_network_addrs,
+        prepared_network.trusted_networks,
         custom_relay_urls,
         congestion_controller,
         rendezvous_base_url,
@@ -57,13 +56,13 @@ pub async fn build_network_runtime(
         target: "settings.network",
         allow_relay_fallback,
         disable_relays = iroh_config.disable_relays,
-        allow_overlay_network_addrs = iroh_config.allow_overlay_network_addrs,
+        trusted_network_count = iroh_config.trusted_networks.len(),
         custom_relay_count = iroh_config.custom_relay_urls.len(),
         congestion_controller = %iroh_config.congestion_controller,
-        "applying network settings: allow_relay_fallback={} → disable_relays={}, allow_overlay_network_addrs={}, custom_relay_count={}, cc={}",
+        "applying network settings: allow_relay_fallback={} → disable_relays={}, trusted_network_count={}, custom_relay_count={}, cc={}",
         allow_relay_fallback,
         iroh_config.disable_relays,
-        iroh_config.allow_overlay_network_addrs,
+        iroh_config.trusted_networks.len(),
         iroh_config.custom_relay_urls.len(),
         iroh_config.congestion_controller,
     );

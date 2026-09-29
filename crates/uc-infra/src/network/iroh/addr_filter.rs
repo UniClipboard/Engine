@@ -19,6 +19,7 @@ use uc_observability_contract::error_source::io_error_kind;
 
 use iroh::{EndpointAddr, TransportAddr};
 use tracing::{debug, info, warn};
+use uc_core::network::TrustedNetworks;
 
 /// A snapshot of one local LAN interface — IP + netmask — captured at
 /// endpoint-bind time so the hairpin filter (`apply_addr_filter`) can decide
@@ -27,39 +28,47 @@ use tracing::{debug, info, warn};
 ///
 /// Captured once because [`iroh::address_lookup::AddrFilter`] is fixed at
 /// endpoint bind; the user must restart the daemon if they switch wifi /
-/// LAN. That matches the existing constraint on `allow_overlay`.
+/// LAN. That matches the existing constraint on trusted networks.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct LocalLanV4 {
     pub ip: Ipv4Addr,
     pub netmask: Ipv4Addr,
 }
 
-/// 判断某个 IP 是否属于需要过滤的虚拟网卡候选。
-pub(crate) fn is_virtual_nic_ip(ip: IpAddr, allow_overlay: bool) -> bool {
+/// Clash fake-ip 198.18.0.0/15 与 IPv4 链路本地 169.254.0.0/16：永远不是有效路径。
+fn is_always_excluded(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             let o = v4.octets();
-            if (o[0] == 198 && (o[1] & 0xfe) == 18) || (o[0] == 169 && o[1] == 254) {
-                return true;
-            }
-            if !allow_overlay && o[0] == 100 && (o[1] & 0xc0) == 64 {
-                return true;
-            }
-            false
+            (o[0] == 198 && (o[1] & 0xfe) == 18) || (o[0] == 169 && o[1] == 254)
+        }
+        IpAddr::V6(_) => false,
+    }
+}
+
+/// CGNAT/Tailscale 100.64.0.0/10 与 Tailscale ULA fd7a:115c:a1e0::/48：只有落在用户
+/// 可信网段内时才作为候选。
+fn is_overlay_range(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            o[0] == 100 && (o[1] & 0xc0) == 64
         }
         IpAddr::V6(v6) => {
             let segs = v6.segments();
-            if !allow_overlay && segs[0] == 0xfd7a && segs[1] == 0x115c && segs[2] == 0xa1e0 {
-                return true;
-            }
-            false
+            segs[0] == 0xfd7a && segs[1] == 0x115c && segs[2] == 0xa1e0
         }
     }
 }
 
-fn should_filter_transport_addr(addr: &TransportAddr, allow_overlay: bool) -> bool {
+/// 判断某个 IP 是否属于需要过滤的虚拟网卡候选。
+pub(crate) fn is_virtual_nic_ip(ip: IpAddr, trusted: &TrustedNetworks) -> bool {
+    is_always_excluded(ip) || (is_overlay_range(ip) && !trusted.contains(ip))
+}
+
+fn should_filter_transport_addr(addr: &TransportAddr, trusted: &TrustedNetworks) -> bool {
     match addr {
-        TransportAddr::Ip(socket) => is_virtual_nic_ip(socket.ip(), allow_overlay),
+        TransportAddr::Ip(socket) => is_virtual_nic_ip(socket.ip(), trusted),
         _ => false,
     }
 }
@@ -70,8 +79,7 @@ fn should_filter_transport_addr(addr: &TransportAddr, allow_overlay: bool) -> bo
 ///
 /// Used by the hairpin filter to identify candidates that should be dropped
 /// when we know the peer is reachable via direct LAN. CGNAT/Tailscale 100.64
-/// and Clash 198.18 are handled via `is_virtual_nic_ip(.., allow_overlay=false)`
-/// so we re-use that judgment instead of duplicating range checks.
+/// and Clash 198.18 are never public regardless of trusted networks.
 fn is_public_v4(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -81,7 +89,8 @@ fn is_public_v4(ip: IpAddr) -> bool {
                 && !v4.is_broadcast()
                 && !v4.is_documentation()
                 && !v4.is_unspecified()
-                && !is_virtual_nic_ip(IpAddr::V4(v4), /* allow_overlay= */ false)
+                && !is_always_excluded(IpAddr::V4(v4))
+                && !is_overlay_range(IpAddr::V4(v4))
         }
         IpAddr::V6(_) => false,
     }
@@ -123,7 +132,7 @@ fn peer_reachable_in_local_lan(addrs: &[TransportAddr], local_lan_v4: &[LocalLan
 ///
 /// Run once at endpoint-bind time; the result is captured into the
 /// `AddrFilter` closure and is not refreshed afterwards. Switching wifi /
-/// LAN requires a daemon restart (same constraint as `allow_overlay`).
+/// LAN requires a daemon restart (same constraint as trusted networks).
 ///
 /// Returns an empty vec — and logs a warn — if interface enumeration fails;
 /// the hairpin filter then degrades to "never drop public IPs", i.e. the
@@ -163,13 +172,13 @@ pub(crate) fn enumerate_local_lan_v4() -> Vec<LocalLanV4> {
     out
 }
 
-fn log_dropped_addrs(dropped: &[String], allow_overlay: bool) {
+fn log_dropped_addrs(dropped: &[String], trusted: &TrustedNetworks) {
     if dropped.is_empty() {
         return;
     }
     debug!(
         target: "iroh.addr_filter",
-        allow_overlay,
+        trusted_network_count = trusted.len(),
         dropped_count = dropped.len(),
         dropped = ?dropped,
         "filtered virtual-NIC addresses from candidate set",
@@ -181,8 +190,8 @@ fn log_dropped_addrs(dropped: &[String], allow_overlay: bool) {
 /// 两层过滤:
 ///
 /// 1. **虚拟 NIC 过滤** (existing) — Clash fake-ip 198.18/15、IPv4 link-local
-///    169.254/16、CGNAT 100.64/10、Tailscale ULA fd7a:115c:a1e0::/48。
-///    详见 `is_virtual_nic_ip`。
+///    169.254/16 永远过滤；CGNAT 100.64/10、Tailscale ULA fd7a:115c:a1e0::/48
+///    仅在落入可信网段时保留。详见 `is_virtual_nic_ip`。
 ///
 /// 2. **Hairpin public IP 过滤** (新) — 如果 peer 的某个 RFC1918 IP 跟本机
 ///    任一 LAN 子网同 subnet（即我们能直连 LAN），就丢掉 peer 的所有 public
@@ -196,12 +205,12 @@ fn log_dropped_addrs(dropped: &[String], allow_overlay: bool) {
 /// clippy-fix 成 `&[TransportAddr]`, 否则会和 iroh 的 `Fn` 签名失配。
 pub(crate) fn apply_addr_filter<'a>(
     addrs: &'a Vec<TransportAddr>,
-    allow_overlay: bool,
+    trusted: &TrustedNetworks,
     local_lan_v4: &[LocalLanV4],
 ) -> Cow<'a, Vec<TransportAddr>> {
     let any_virtual = addrs
         .iter()
-        .any(|addr| should_filter_transport_addr(addr, allow_overlay));
+        .any(|addr| should_filter_transport_addr(addr, trusted));
     let drop_hairpin = peer_reachable_in_local_lan(addrs, local_lan_v4);
 
     if !any_virtual && !drop_hairpin {
@@ -210,7 +219,7 @@ pub(crate) fn apply_addr_filter<'a>(
 
     let kept: Vec<TransportAddr> = addrs
         .iter()
-        .filter(|addr| !should_filter_transport_addr(addr, allow_overlay))
+        .filter(|addr| !should_filter_transport_addr(addr, trusted))
         .filter(|addr| {
             // Apply hairpin filter only when peer is LAN-reachable.
             if !drop_hairpin {
@@ -227,7 +236,7 @@ pub(crate) fn apply_addr_filter<'a>(
     let virtual_dropped: Vec<String> = addrs
         .iter()
         .filter_map(|addr| match addr {
-            TransportAddr::Ip(socket) if is_virtual_nic_ip(socket.ip(), allow_overlay) => {
+            TransportAddr::Ip(socket) if is_virtual_nic_ip(socket.ip(), trusted) => {
                 Some(format!("virtual:{}", socket))
             }
             _ => None,
@@ -238,8 +247,7 @@ pub(crate) fn apply_addr_filter<'a>(
             .iter()
             .filter_map(|addr| match addr {
                 TransportAddr::Ip(socket)
-                    if !is_virtual_nic_ip(socket.ip(), allow_overlay)
-                        && is_public_v4(socket.ip()) =>
+                    if !is_virtual_nic_ip(socket.ip(), trusted) && is_public_v4(socket.ip()) =>
                 {
                     Some(format!("hairpin:{}", socket))
                 }
@@ -251,19 +259,19 @@ pub(crate) fn apply_addr_filter<'a>(
     };
     let mut all_dropped = virtual_dropped;
     all_dropped.extend(hairpin_dropped);
-    log_dropped_addrs(&all_dropped, allow_overlay);
+    log_dropped_addrs(&all_dropped, trusted);
 
     Cow::Owned(kept)
 }
 
 /// 过滤完整的 `EndpointAddr`，用于把本端地址写进可交给远端拨号的 ticket。
-pub(crate) fn filter_endpoint_addr(addr: EndpointAddr, allow_overlay: bool) -> EndpointAddr {
+pub(crate) fn filter_endpoint_addr(addr: EndpointAddr, trusted: &TrustedNetworks) -> EndpointAddr {
     let EndpointAddr { id, addrs } = addr;
     let mut kept = Vec::new();
     let mut dropped = Vec::new();
 
     for addr in addrs {
-        if should_filter_transport_addr(&addr, allow_overlay) {
+        if should_filter_transport_addr(&addr, trusted) {
             if let TransportAddr::Ip(socket) = &addr {
                 dropped.push(socket.to_string());
             }
@@ -272,6 +280,6 @@ pub(crate) fn filter_endpoint_addr(addr: EndpointAddr, allow_overlay: bool) -> E
         }
     }
 
-    log_dropped_addrs(&dropped, allow_overlay);
+    log_dropped_addrs(&dropped, trusted);
     EndpointAddr::from_parts(id, kept)
 }

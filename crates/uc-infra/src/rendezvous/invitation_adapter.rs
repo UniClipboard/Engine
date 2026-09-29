@@ -29,6 +29,7 @@ use tokio::runtime::Handle as RuntimeHandle;
 use tokio::sync::Mutex;
 use tracing::{debug, instrument, warn};
 
+use uc_core::network::TrustedNetworks;
 use uc_core::pairing::invitation::InvitationCode;
 use uc_core::ports::{
     CodeOrigin, ConsumeInvitationError, DeviceIdentityPort, InvitationError, IssuedInvitation,
@@ -118,16 +119,19 @@ impl RendezvousPairingInvitationAdapter {
             })
     }
 
-    fn serialize_ticket(&self, allow_overlay: bool) -> Result<(String, String), InvitationError> {
-        serialize_filtered_endpoint_ticket(self.endpoint.addr(), allow_overlay)
+    fn serialize_ticket(
+        &self,
+        trusted: &TrustedNetworks,
+    ) -> Result<(String, String), InvitationError> {
+        serialize_filtered_endpoint_ticket(self.endpoint.addr(), trusted)
     }
 
     fn serialize_ticket_for_ip(
         &self,
-        allow_overlay: bool,
+        trusted: &TrustedNetworks,
         selected_ip: IpAddr,
     ) -> Result<(String, String), InvitationError> {
-        serialize_endpoint_ticket_for_ip(self.endpoint.addr(), allow_overlay, selected_ip)
+        serialize_endpoint_ticket_for_ip(self.endpoint.addr(), trusted, selected_ip)
     }
 
     async fn create_pairing_with_ticket(
@@ -431,6 +435,11 @@ fn is_cloud_recoverable(err: &RendezvousHttpError) -> bool {
 /// Real iroh endpoints always have at least one IP `TransportAddr`
 /// online by the time we're issuing invitations, so the `None` case is
 /// a defensive guard for tests / very early init.
+/// 邀请只使用设置中可解析的可信网段；无效条目由保存校验拒绝，这里不阻断配对。
+fn trusted_networks(settings: &Settings) -> TrustedNetworks {
+    TrustedNetworks::parse_lenient(&settings.network.trusted_networks).networks
+}
+
 fn pick_endpoint_port(addr: &EndpointAddr) -> anyhow::Result<u16> {
     addr.addrs
         .iter()
@@ -443,9 +452,9 @@ fn pick_endpoint_port(addr: &EndpointAddr) -> anyhow::Result<u16> {
 
 fn serialize_filtered_endpoint_ticket(
     addr: EndpointAddr,
-    allow_overlay: bool,
+    trusted: &TrustedNetworks,
 ) -> Result<(String, String), InvitationError> {
-    let addr = filter_endpoint_addr(addr, allow_overlay);
+    let addr = filter_endpoint_addr(addr, trusted);
     if addr.addrs.is_empty() {
         return Err(InvitationError::NoPublishableAddress {
             source: anyhow::Error::msg("endpoint has no address after product filtering"),
@@ -459,17 +468,17 @@ fn serialize_filtered_endpoint_ticket(
 ///
 /// **Ordering matters**: the product address filter runs *first*, so an
 /// IP that the filter drops (overlay-network rules with
-/// `allow_overlay=false`, link-local, Clash fake-ip 198.18.0.0/15) will
+/// outside trusted networks, link-local, Clash fake-ip 198.18.0.0/15) will
 /// surface as `AddressNotAvailable` rather than slipping into the ticket.
 /// This is intentional — the dev tool reuses the product filter so
 /// observing "what gets published if we pick this IP" stays aligned with
 /// the runtime that production peers see.
 fn serialize_endpoint_ticket_for_ip(
     addr: EndpointAddr,
-    allow_overlay: bool,
+    trusted: &TrustedNetworks,
     selected_ip: IpAddr,
 ) -> Result<(String, String), InvitationError> {
-    let addr = filter_endpoint_addr(addr, allow_overlay);
+    let addr = filter_endpoint_addr(addr, trusted);
     let EndpointAddr { id, addrs } = addr;
     let selected: Vec<TransportAddr> = addrs
         .into_iter()
@@ -486,9 +495,9 @@ fn serialize_endpoint_ticket_for_ip(
 
 fn list_invitation_address_candidates(
     addr: EndpointAddr,
-    allow_overlay: bool,
+    trusted: &TrustedNetworks,
 ) -> Result<Vec<PairingInvitationAddressCandidate>, InvitationError> {
-    let addr = filter_endpoint_addr(addr, allow_overlay);
+    let addr = filter_endpoint_addr(addr, trusted);
     let candidates: Vec<PairingInvitationAddressCandidate> = addr
         .ip_addrs()
         .map(|socket| PairingInvitationAddressCandidate {
@@ -514,8 +523,7 @@ impl PairingInvitationPort for RendezvousPairingInvitationAdapter {
     #[instrument(skip_all)]
     async fn issue_invitation(&self) -> Result<IssuedInvitation, InvitationError> {
         let settings = self.load_settings().await?;
-        let (endpoint_id, ticket) =
-            self.serialize_ticket(settings.network.allow_overlay_network_addrs)?;
+        let (endpoint_id, ticket) = self.serialize_ticket(&trusted_networks(&settings))?;
         self.create_pairing_with_ticket(settings, endpoint_id, ticket)
             .await
     }
@@ -552,10 +560,7 @@ impl PairingInvitationAddressQueryPort for RendezvousPairingInvitationAdapter {
         &self,
     ) -> Result<Vec<PairingInvitationAddressCandidate>, InvitationError> {
         let settings = self.load_settings().await?;
-        list_invitation_address_candidates(
-            self.endpoint.addr(),
-            settings.network.allow_overlay_network_addrs,
-        )
+        list_invitation_address_candidates(self.endpoint.addr(), &trusted_networks(&settings))
     }
 }
 
@@ -567,8 +572,8 @@ impl PairingInvitationByAddressPort for RendezvousPairingInvitationAdapter {
         selected_ip: IpAddr,
     ) -> Result<IssuedInvitation, InvitationError> {
         let settings = self.load_settings().await?;
-        let (endpoint_id, ticket) = self
-            .serialize_ticket_for_ip(settings.network.allow_overlay_network_addrs, selected_ip)?;
+        let (endpoint_id, ticket) =
+            self.serialize_ticket_for_ip(&trusted_networks(&settings), selected_ip)?;
         self.create_pairing_with_ticket(settings, endpoint_id, ticket)
             .await
     }
@@ -685,6 +690,10 @@ mod tests {
         }
     }
 
+    fn tailscale_trusted() -> TrustedNetworks {
+        TrustedNetworks::parse(&["100.64.0.0/10", "fd7a:115c:a1e0::/48"]).expect("trusted networks")
+    }
+
     struct FakeDeviceIdentity(DeviceId);
     impl DeviceIdentityPort for FakeDeviceIdentity {
         fn current_device_id(&self) -> DeviceId {
@@ -793,7 +802,8 @@ mod tests {
             ],
         );
 
-        let (_, ticket) = serialize_filtered_endpoint_ticket(addr, true).expect("ticket");
+        let (_, ticket) =
+            serialize_filtered_endpoint_ticket(addr, &tailscale_trusted()).expect("ticket");
         let decoded: EndpointAddr = serde_json::from_str(&ticket).expect("decode ticket");
         let ips: Vec<String> = decoded
             .ip_addrs()
@@ -817,8 +827,8 @@ mod tests {
             ],
         );
 
-        let (_, ticket) =
-            serialize_endpoint_ticket_for_ip(addr, true, selected_ip).expect("ticket");
+        let (_, ticket) = serialize_endpoint_ticket_for_ip(addr, &tailscale_trusted(), selected_ip)
+            .expect("ticket");
         let decoded: EndpointAddr = serde_json::from_str(&ticket).expect("decode ticket");
         let sockets: Vec<SocketAddr> = decoded.ip_addrs().copied().collect();
 
@@ -838,7 +848,8 @@ mod tests {
             )],
         );
 
-        let err = serialize_endpoint_ticket_for_ip(addr, true, selected_ip).unwrap_err();
+        let err =
+            serialize_endpoint_ticket_for_ip(addr, &tailscale_trusted(), selected_ip).unwrap_err();
         assert!(matches!(
             err,
             InvitationError::AddressNotAvailable(ip) if ip == selected_ip
@@ -856,7 +867,8 @@ mod tests {
             ],
         );
 
-        let candidates = list_invitation_address_candidates(addr, true).expect("candidates");
+        let candidates =
+            list_invitation_address_candidates(addr, &tailscale_trusted()).expect("candidates");
         let rendered: Vec<String> = candidates
             .iter()
             .map(|candidate| format!("{}:{}", candidate.ip, candidate.port))
@@ -1148,7 +1160,8 @@ mod tests {
             )],
         );
 
-        let error = serialize_filtered_endpoint_ticket(addr, false).unwrap_err();
+        let error =
+            serialize_filtered_endpoint_ticket(addr, &TrustedNetworks::default()).unwrap_err();
 
         assert!(matches!(
             error,
