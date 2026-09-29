@@ -1132,6 +1132,30 @@ mod tests {
         ED25519_SIGNATURE_ALGORITHM_V1,
     };
 
+    /// Client states written by the openmls 0.8.1 stack are already persisted in
+    /// released profiles (`group_state` reaches SQLite through the space security
+    /// store), so the current stack must keep reading them. The fixture was
+    /// produced by the 0.8.1 dependency set with the same `snapshot()` layout;
+    /// regenerate it only when the state format itself gains a new version.
+    #[test]
+    fn client_state_written_by_openmls_0_8_1_still_restores() {
+        const FIXTURE: &[u8] = include_bytes!("fixtures/mls_client_state_openmls_0_8_1.json");
+
+        let state = MlsClientState::from_bytes(FIXTURE.to_vec());
+        let (provider, stored) = restore(&state).expect("0.8.1 client state restores");
+
+        let group_id = stored.group_id.clone().expect("fixture carries a group id");
+        let group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&group_id))
+            .expect("group loads from the restored storage")
+            .expect("group is present");
+        assert!(group.is_active());
+
+        restore_signer(&provider, &stored).expect("signer restores from the old state");
+
+        MlsGroupEngine::validate_state(&state, &group_id)
+            .expect("the production validation path accepts the old state");
+    }
+
     #[test]
     fn local_device_id_comes_from_the_active_local_leaf() {
         let sponsor = MlsGroupEngine::create_sponsor(b"space-a", b"alice").unwrap();
