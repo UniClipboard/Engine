@@ -98,6 +98,7 @@ use super::network_partition::IrohNetworkPartitionGate;
 use super::peer_reachability_adapter::{
     IrohPeerReachabilityAdapter, LEGACY_PEER_REACHABILITY_ALPN, PEER_REACHABILITY_ALPN,
 };
+use super::runtime_consts::DialPolicy;
 use super::space_admission::{
     IrohSpaceAdmissionHandler, IrohSpaceAdmissionTransport, SpaceAdmissionChannelCredentialPort,
     SPACE_ADMISSION_ALPN,
@@ -591,7 +592,7 @@ impl Drop for NodeRunLease {
         {
             // Clear the runtime configuration before releasing the lease so a
             // newly-bound node cannot inherit the previous node's LAN policy.
-            super::runtime_consts::clear_lan_only();
+            super::runtime_consts::clear_dial_policy();
             match NODE_RUN_ACTIVE.lock() {
                 Ok(mut active) => *active = false,
                 Err(_) => warn!("iroh node runtime state lock poisoned during release"),
@@ -846,14 +847,17 @@ impl IrohNodeBuilder {
         // 对方"的用户预期相悖。所以 `disable_relays = true` 路径下显式 clear
         // 掉 N0 注入的 lookup services，再单挂 mDNS。
         //
-        // 同步把 LAN-only 状态固化到 `runtime_consts::LAN_ONLY` 进程常量 ——
-        // `connect.rs` 出站 dial 时会读这个常量，从对端 `EndpointAddr` 中剥掉
-        // `TransportAddr::Relay`。否则即便本端 `RelayMode::Disabled`，iroh 仍
-        // 会用对端发布的 relay url 走中转（已在 dev 日志中观测到）。
+        // 同步把 LAN-only 状态与可信网段固化为 `runtime_consts` 的拨号策略 ——
+        // `connect.rs` 出站 dial 时读取它：按同一可信判定过滤直连地址，并在
+        // LAN-only 下剥掉 `TransportAddr::Relay`。否则即便本端 `RelayMode::Disabled`，
+        // iroh 仍会用对端发布的 relay url 走中转（已在 dev 日志中观测到）。
         //
         // 取舍：跨网段已配对设备无法通过 NodeId 反查到，这是 LAN-only 的设计
         // 意图（不是 bug）。
-        super::runtime_consts::install_lan_only(config.disable_relays);
+        super::runtime_consts::install_dial_policy(DialPolicy {
+            lan_only: config.disable_relays,
+            trusted_networks: config.trusted_networks.clone(),
+        });
         if config.disable_relays {
             endpoint_builder = endpoint_builder.clear_address_lookup();
             info!(

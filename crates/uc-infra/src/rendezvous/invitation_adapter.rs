@@ -905,6 +905,30 @@ mod tests {
         assert_eq!(mdns_bytes, invitation.as_str().as_bytes());
     }
 
+    /// LAN-only 下本端 `RelayMode::Disabled`，完整邀请的路由不得带 relay 提示。
+    #[tokio::test]
+    async fn relay_disabled_endpoint_produces_route_without_relay() {
+        let endpoint = loopback_endpoint().await;
+        let (_, ticket) =
+            serialize_filtered_endpoint_ticket(endpoint.addr(), &TrustedNetworks::default())
+                .expect("ticket");
+        let sponsor: EndpointAddr = serde_json::from_str(&ticket).expect("decode ticket");
+        let invitation_id =
+            uc_core::membership::InvitationId::from_bytes([0x41; 32]).expect("valid invitation id");
+        let route =
+            crate::network::iroh::encode_space_admission_route(&sponsor, Some(invitation_id))
+                .expect("encode route");
+        let (decoded, _) =
+            crate::network::iroh::space_admission::decode_space_admission_route(&route)
+                .expect("decode route");
+
+        assert!(decoded.ip_addrs().next().is_some());
+        assert!(!decoded
+            .addrs
+            .iter()
+            .any(|addr| matches!(addr, TransportAddr::Relay(_))));
+    }
+
     #[tokio::test]
     async fn issue_invitation_happy_path() {
         let ep = loopback_endpoint().await;

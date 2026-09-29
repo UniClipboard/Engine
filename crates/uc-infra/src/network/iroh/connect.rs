@@ -15,6 +15,9 @@ use tokio::time::error::Elapsed;
 use tracing::instrument::WithSubscriber;
 use uc_observability_contract::diagnostics::connectivity::AddressInputSource;
 
+use super::addr_filter::filter_endpoint_addr;
+use super::runtime_consts::DialPolicy;
+
 /// Per-attempt connect timeout.
 ///
 /// 3s sits comfortably above the observed LAN/direct `iroh connect`
@@ -47,19 +50,22 @@ const STAGGERED_DELAYS: [Duration; 3] = [
     Duration::from_millis(1500),
 ];
 
-/// LAN-only Mode 反向防御：本端 `RelayMode::Disabled` **不阻止** iroh 用对端
-/// `EndpointAddr` 中的 `relay_url` 发起出站连接。已配对 peer 的 addr blob 在
-/// `to_persistable_addr` 阶段被收敛为"NodeId + Relay 提示"，所以 LAN-only
-/// 用户复制内容触发 dispatch 时仍会看到日志：
-///   `iroh::endpoint: connecting relay_url=Some(...) ip_addresses=[]`
+/// 出站拨号前按活动节点的拨号策略整理对端地址。
 ///
-/// 当 [`super::runtime_consts::lan_only`] 为 `true` 时剥掉 `TransportAddr::Relay`
-/// 项，强制 iroh 只能走 mDNS 重新解析的直连地址。如果对端不在同一子网
-/// （mDNS 不可达），connect 自然失败 —— 这正是 LAN-only 的设计意图。
+/// 1. 直连地址使用与地址发现相同的可信判定（`filter_endpoint_addr`）：Clash fake-ip 与
+///    IPv4 链路本地永远丢弃，CGNAT/Tailscale 段只保留可信网段内的地址。已保存的地址与
+///    邀请路由直接交给 `connect`，不经过 endpoint 的 `AddrFilter`，所以必须在这里执行。
+/// 2. LAN-only 下剥掉 `TransportAddr::Relay`：本端 `RelayMode::Disabled` **不阻止** iroh
+///    用对端 `EndpointAddr` 中的 relay url 发起出站连接。
 ///
-/// 非 LAN-only 路径下零开销直接返回原 addr（一次 `Vec::iter().any` 短路）。
-pub(super) fn strip_relay_if_lan_only(addr: EndpointAddr) -> EndpointAddr {
-    if !super::runtime_consts::lan_only() {
+/// 直连地址被全部丢弃时不提前失败：iroh 仍会经 mDNS 解析对端当前地址。
+pub(super) fn prepare_dial_addr(addr: EndpointAddr) -> EndpointAddr {
+    apply_dial_policy(addr, &super::runtime_consts::dial_policy())
+}
+
+fn apply_dial_policy(addr: EndpointAddr, policy: &DialPolicy) -> EndpointAddr {
+    let addr = filter_endpoint_addr(addr, &policy.trusted_networks);
+    if !policy.lan_only {
         return addr;
     }
     let EndpointAddr { id, addrs } = addr;
@@ -125,7 +131,7 @@ pub(super) async fn connect_with_staggered_retry_classified(
     purpose: &'static str,
     source: AddressInputSource,
 ) -> Result<Connection, StaggeredDialError> {
-    let addr = strip_relay_if_lan_only(addr);
+    let addr = prepare_dial_addr(addr);
     let observation =
         ConnectionObservation::begin(connection_purpose(purpose), *addr.id.as_bytes());
     let (summary, fingerprint) = super::connection_diagnostics::candidate_summary(&addr);
@@ -261,6 +267,52 @@ mod tests {
     use opentelemetry_sdk::logs::{InMemoryLogExporter, SdkLoggerProvider};
     use tracing::instrument::WithSubscriber;
     use tracing_subscriber::layer::SubscriberExt;
+    use uc_core::network::TrustedNetworks;
+
+    fn mixed_peer_addr() -> EndpointAddr {
+        let relay: iroh::RelayUrl = "https://relay.example.com".parse().unwrap();
+        EndpointAddr::from_parts(
+            iroh::SecretKey::generate().public(),
+            [
+                TransportAddr::Ip("10.8.0.2:42000".parse().unwrap()),
+                TransportAddr::Ip("100.64.1.9:42000".parse().unwrap()),
+                TransportAddr::Ip("198.18.0.1:42000".parse().unwrap()),
+                TransportAddr::Relay(relay),
+            ],
+        )
+    }
+
+    fn dial_ips(addr: &EndpointAddr) -> Vec<String> {
+        addr.ip_addrs()
+            .map(|socket| socket.ip().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn lan_only_dial_keeps_trusted_and_plain_private_addrs_without_relay() {
+        let policy = DialPolicy {
+            lan_only: true,
+            trusted_networks: TrustedNetworks::parse(&["100.64.1.0/24"]).unwrap(),
+        };
+        let addr = apply_dial_policy(mixed_peer_addr(), &policy);
+
+        assert_eq!(dial_ips(&addr), vec!["10.8.0.2", "100.64.1.9"]);
+        assert!(!addr
+            .addrs
+            .iter()
+            .any(|a| matches!(a, TransportAddr::Relay(_))));
+    }
+
+    #[test]
+    fn dial_drops_untrusted_overlay_but_keeps_relay_outside_lan_only() {
+        let addr = apply_dial_policy(mixed_peer_addr(), &DialPolicy::default());
+
+        assert_eq!(dial_ips(&addr), vec!["10.8.0.2"]);
+        assert!(addr
+            .addrs
+            .iter()
+            .any(|a| matches!(a, TransportAddr::Relay(_))));
+    }
 
     #[derive(Debug, Default)]
     struct BlockFirstAttempt(std::sync::atomic::AtomicBool);

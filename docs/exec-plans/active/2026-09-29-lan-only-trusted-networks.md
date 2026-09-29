@@ -40,9 +40,9 @@
 
 ### 切片 2：发布与拨号两侧共用可信过滤
 
-- 先由用户决定 LAN-only 下是否改为白名单（本机物理私网加用户列表，减永久排除）；现有过滤是黑名单，见技术设计未决问题。
-- 本端邀请与发布候选、对端拨号候选统一经同一判定过滤。
-- LAN-only 下候选被全部排除时返回稳定失败分类，不改走 relay。
+- 用户已确认保留黑名单（2026-09-29）。
+- 本端邀请与发布候选、对端拨号候选统一经同一判定过滤；出站拨号读取绑定时安装的 `DialPolicy`。
+- 候选被全部排除时不提前失败（mDNS 仍可解析），沿用既有失败分类，不改走 relay。
 - 新增测试固定：LAN-only 下解码出的邀请路由不含 relay。
 - 验证：Infra 单元测试覆盖两侧一致性；日志与观测不含地址或网段内容。
 
@@ -102,7 +102,10 @@
   Application 校验与视图、Engine 契约。`SettingsFacadeError::Invalid` 改为携带 `SettingsValidationError` 来源。
   已运行 workspace check、`uc-infra --features lan-compat` check、fmt、Rust 风格与仓库检查、diff check，以及
   uc-core/uc-infra/uc-application/uc-engine 相关单元测试与 `uc-engine` public_contract；完整 workspace 测试未运行。
-- [ ] 切片 2
+- [x] 切片 2（2026-09-29，本地）：`runtime_consts` 的 LAN-only 布尔改为 `DialPolicy`；`connect::prepare_dial_addr`
+  取代 `strip_relay_if_lan_only`，普通拨号与 blob 拨号共用；过滤日志改为只记数量；新增拨号策略与“relay 关闭时路由不含
+  relay”测试。已运行 workspace check、lan-compat check、fmt、仓库检查、diff check，以及 `uc-infra` network 模块
+  265 项与相关单元测试。真实网络与 E2E 未运行。
 - [ ] 切片 3
 - [ ] 切片 4
 - [ ] 切片 5

@@ -172,16 +172,17 @@ pub(crate) fn enumerate_local_lan_v4() -> Vec<LocalLanV4> {
     out
 }
 
-fn log_dropped_addrs(dropped: &[String], trusted: &TrustedNetworks) {
-    if dropped.is_empty() {
+/// 只记录丢弃数量与可信网段数量，不输出地址本身。
+fn log_dropped_addrs(virtual_count: usize, hairpin_count: usize, trusted: &TrustedNetworks) {
+    if virtual_count == 0 && hairpin_count == 0 {
         return;
     }
     debug!(
         target: "iroh.addr_filter",
         trusted_network_count = trusted.len(),
-        dropped_count = dropped.len(),
-        dropped = ?dropped,
-        "filtered virtual-NIC addresses from candidate set",
+        virtual_dropped_count = virtual_count,
+        hairpin_dropped_count = hairpin_count,
+        "filtered address candidates",
     );
 }
 
@@ -233,33 +234,24 @@ pub(crate) fn apply_addr_filter<'a>(
         .cloned()
         .collect();
 
-    let virtual_dropped: Vec<String> = addrs
+    let virtual_count = addrs
         .iter()
-        .filter_map(|addr| match addr {
-            TransportAddr::Ip(socket) if is_virtual_nic_ip(socket.ip(), trusted) => {
-                Some(format!("virtual:{}", socket))
-            }
-            _ => None,
-        })
-        .collect();
-    let hairpin_dropped: Vec<String> = if drop_hairpin {
+        .filter(|addr| should_filter_transport_addr(addr, trusted))
+        .count();
+    let hairpin_count = if drop_hairpin {
         addrs
             .iter()
-            .filter_map(|addr| match addr {
-                TransportAddr::Ip(socket)
-                    if !is_virtual_nic_ip(socket.ip(), trusted) && is_public_v4(socket.ip()) =>
-                {
-                    Some(format!("hairpin:{}", socket))
+            .filter(|addr| match addr {
+                TransportAddr::Ip(socket) => {
+                    !is_virtual_nic_ip(socket.ip(), trusted) && is_public_v4(socket.ip())
                 }
-                _ => None,
+                _ => false,
             })
-            .collect()
+            .count()
     } else {
-        Vec::new()
+        0
     };
-    let mut all_dropped = virtual_dropped;
-    all_dropped.extend(hairpin_dropped);
-    log_dropped_addrs(&all_dropped, trusted);
+    log_dropped_addrs(virtual_count, hairpin_count, trusted);
 
     Cow::Owned(kept)
 }
@@ -267,19 +259,11 @@ pub(crate) fn apply_addr_filter<'a>(
 /// 过滤完整的 `EndpointAddr`，用于把本端地址写进可交给远端拨号的 ticket。
 pub(crate) fn filter_endpoint_addr(addr: EndpointAddr, trusted: &TrustedNetworks) -> EndpointAddr {
     let EndpointAddr { id, addrs } = addr;
-    let mut kept = Vec::new();
-    let mut dropped = Vec::new();
-
-    for addr in addrs {
-        if should_filter_transport_addr(&addr, trusted) {
-            if let TransportAddr::Ip(socket) = &addr {
-                dropped.push(socket.to_string());
-            }
-        } else {
-            kept.push(addr);
-        }
-    }
-
-    log_dropped_addrs(&dropped, trusted);
+    let before = addrs.len();
+    let kept: Vec<TransportAddr> = addrs
+        .into_iter()
+        .filter(|addr| !should_filter_transport_addr(addr, trusted))
+        .collect();
+    log_dropped_addrs(before - kept.len(), 0, trusted);
     EndpointAddr::from_parts(id, kept)
 }
