@@ -32,12 +32,11 @@ use super::{
     ApplyMembershipSecurityPort, DeliverPendingGroupUpdatesPort, MembershipEffectExecutionError,
     MembershipLedgerError, MembershipMaintenanceReport, MembershipMaintenanceStepOutcome,
     MembershipMaintenanceTrigger, MembershipOwner, RecoverMembershipConflictsPort,
-    RecoverMembershipEffectsPort, RestrictedMembershipDelivery, RestrictedMembershipDeliveryError,
-    RestrictedMembershipDeliveryPort, RunMembershipWorkPort,
+    RecoverMembershipEffectsPort, RefreshVerifiedPeerAddressPort, RestrictedMembershipDelivery,
+    RestrictedMembershipDeliveryError, RestrictedMembershipDeliveryPort, RunMembershipWorkPort,
 };
 
 pub(crate) use effects::RePairingAwareMembershipActivation;
-pub use history_sync::RefreshVerifiedPeerAddressPort;
 
 use effects::MembershipEffectSteps;
 use history_sync::{HistorySynchronizer, MAX_PEERS_PER_ROUND};

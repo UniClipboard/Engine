@@ -4,7 +4,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use futures::{stream, StreamExt};
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
@@ -20,18 +19,13 @@ use uc_observability_contract::diagnostics::{
 
 use crate::space::membership::{
     ledger_error, MembershipLedgerError, MembershipOwner, ReconcileMembershipEvidenceUseCase,
+    RefreshVerifiedPeerAddressPort,
 };
 
 /// 一轮同步的固定总预算，不按对端数量叠加。
 const TOTAL_SYNC_BUDGET: Duration = Duration::from_secs(10);
 pub(super) const MAX_PEERS_PER_ROUND: usize = 8;
 const MAX_CONCURRENT_PEERS: usize = 4;
-
-/// 在成员历史完成验证后，刷新已认证成员的可复用网络地址。
-#[async_trait]
-pub trait RefreshVerifiedPeerAddressPort: Send + Sync {
-    async fn refresh_verified_peer_address(&self, peer: &DeviceId);
-}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct HistorySyncReport {
@@ -184,6 +178,7 @@ impl HistorySynchronizer {
                         | PeerSyncResult::Invalid
                         | PeerSyncResult::Rejected => report.stable_failure_count += 1,
                     }
+                    let confirmed = matches!(result, PeerSyncResult::Confirmed);
                     self.owner
                         .commit(|draft| {
                             draft
@@ -195,6 +190,12 @@ impl HistorySynchronizer {
                                 .map_err(ledger_error)
                         })
                         .await?;
+                    // 同步结果提交后才刷新地址；刷新尽力而为，不改变已提交的结果。
+                    if confirmed {
+                        self.address_refresh
+                            .refresh_verified_peer_address(&peer)
+                            .await;
+                    }
                 }
                 PeerExchange::DivergenceRecorded => report.stable_failure_count += 1,
             }
@@ -241,11 +242,6 @@ impl HistorySynchronizer {
             // 对端回复不符合协议：保留同步欠账并按退避重试，不把一次异常回复当作稳定结论。
             Err(ExchangeFailure::Unexpected) => PeerExchange::Finished(PeerSyncResult::Deferred),
         };
-        if matches!(exchange, PeerExchange::Finished(PeerSyncResult::Confirmed)) {
-            self.address_refresh
-                .refresh_verified_peer_address(peer)
-                .await;
-        }
         Ok(exchange)
     }
 

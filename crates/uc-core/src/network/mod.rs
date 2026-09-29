@@ -10,6 +10,6 @@ pub use protocol::{
 };
 pub use session::SessionId;
 pub use trusted_networks::{
-    IpNetwork, LenientTrustedNetworks, TrustedNetworkEntryError, TrustedNetworkRejection,
-    TrustedNetworks,
+    is_private_address, IpNetwork, LenientTrustedNetworks, TrustedNetworkEntryError,
+    TrustedNetworkRejection, TrustedNetworks,
 };

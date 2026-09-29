@@ -48,6 +48,7 @@ async fn legacy_candidates_converge_by_evidence() {
         let response = HandleMembershipHistoryMessageUseCase::new(
             insufficient.ledger.clone(),
             FixedSpaceWorkMode::active(),
+            Arc::new(NoopAddressRefresh),
         )
         .execute(
             &AuthenticatedMember::new(insufficient.peer.device_id),

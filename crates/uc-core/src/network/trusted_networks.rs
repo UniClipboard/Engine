@@ -166,6 +166,21 @@ impl TrustedNetworks {
     }
 }
 
+/// 地址是否位于私有地址空间（与可信网段可声明的范围相同）。
+///
+/// 回环、链路本地、Clash fake-ip 与公网地址都不在其中。
+pub fn is_private_address(ip: IpAddr) -> bool {
+    let prefix = match ip {
+        IpAddr::V4(_) => 32,
+        IpAddr::V6(_) => 128,
+    };
+    IpNetwork {
+        network: ip,
+        prefix,
+    }
+    .is_private()
+}
+
 fn mask(ip: IpAddr, prefix: u8) -> IpAddr {
     match ip {
         IpAddr::V4(v4) => {
@@ -286,6 +301,31 @@ mod tests {
 
         let duplicate = TrustedNetworks::parse(&["10.8.0.0/24", "10.8.0.9/24"]).unwrap_err();
         assert_eq!(duplicate.rejection, TrustedNetworkRejection::Duplicate);
+    }
+
+    #[test]
+    fn private_address_covers_only_the_trustable_space() {
+        for raw in [
+            "10.8.0.2",
+            "172.31.255.1",
+            "192.168.1.5",
+            "100.100.1.1",
+            "fd7a:115c:a1e0::1",
+        ] {
+            assert!(is_private_address(ip(raw)), "{raw} must be private");
+        }
+        for raw in [
+            "127.0.0.1",
+            "169.254.1.1",
+            "198.18.0.1",
+            "8.8.8.8",
+            "172.32.0.1",
+            "::1",
+            "fe80::1",
+            "2001:db8::1",
+        ] {
+            assert!(!is_private_address(ip(raw)), "{raw} must not be private");
+        }
     }
 
     #[test]

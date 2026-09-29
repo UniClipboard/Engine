@@ -174,3 +174,12 @@ pub trait RestrictedMembershipDeliveryPort: Send + Sync {
         delivery: &RestrictedMembershipDelivery,
     ) -> Result<(), RestrictedMembershipDeliveryError>;
 }
+
+/// 在与已认证成员的成员历史交换确认成功后，刷新该成员的可复用网络地址。
+///
+/// 出站同步与入站处理共用此能力：调用方只决定时机，可保存哪些路径由实现根据本次连接判定。
+/// 刷新尽力而为，失败不改变交换结果。
+#[async_trait]
+pub trait RefreshVerifiedPeerAddressPort: Send + Sync {
+    async fn refresh_verified_peer_address(&self, peer: &DeviceId);
+}

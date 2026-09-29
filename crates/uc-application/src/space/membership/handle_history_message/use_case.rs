@@ -13,7 +13,8 @@ use uc_core::membership::{
 use crate::space::membership::{
     ledger_error, AcquireSpaceWorkPermitPort, InboundMembershipTransfer,
     MembershipHistoryExchangeRecord, MembershipLedgerError, MembershipOwner,
-    QuerySpaceWorkModeError, ReconcileMembershipEvidenceUseCase, SpaceWorkMode,
+    QuerySpaceWorkModeError, ReconcileMembershipEvidenceUseCase, RefreshVerifiedPeerAddressPort,
+    SpaceWorkMode,
 };
 
 use super::{AuthenticatedMember, HandleMembershipHistoryMessageError};
@@ -21,27 +22,51 @@ use super::{AuthenticatedMember, HandleMembershipHistoryMessageError};
 pub(super) const MAX_COMPLETED_INBOUND_TRANSFERS: usize = 256;
 
 /// 一条已认证成员历史消息的完整处理：先持久保存结果，再回复 ACK。
+///
+/// 回复为确认（`AckV3::Confirmed`）时，发送方已被证明是当前成员且本次交换成功，
+/// 此时与出站同步使用同一证据标准刷新该成员的可复用地址。
 pub(crate) struct HandleMembershipHistoryMessageUseCase {
     owner: Arc<MembershipOwner>,
     evidence: ReconcileMembershipEvidenceUseCase,
     execution_lock: tokio::sync::Mutex<()>,
     work_mode: Arc<dyn AcquireSpaceWorkPermitPort>,
+    address_refresh: Arc<dyn RefreshVerifiedPeerAddressPort>,
 }
 
 impl HandleMembershipHistoryMessageUseCase {
     pub(crate) fn new(
         owner: Arc<MembershipOwner>,
         work_mode: Arc<dyn AcquireSpaceWorkPermitPort>,
+        address_refresh: Arc<dyn RefreshVerifiedPeerAddressPort>,
     ) -> Self {
         Self {
             evidence: ReconcileMembershipEvidenceUseCase::new(Arc::clone(&owner)),
             owner,
             execution_lock: tokio::sync::Mutex::new(()),
             work_mode,
+            address_refresh,
         }
     }
 
     pub(crate) async fn execute(
+        &self,
+        source: &AuthenticatedMember,
+        message: MembershipHistoryMessage,
+    ) -> Result<MembershipHistoryMessage, HandleMembershipHistoryMessageError> {
+        let response = self.respond(source, message).await?;
+        // 回复已持久确定后再刷新地址（执行锁已释放）；刷新尽力而为，不改变回复。
+        if matches!(
+            response,
+            MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Confirmed { .. })
+        ) {
+            self.address_refresh
+                .refresh_verified_peer_address(source.device_id())
+                .await;
+        }
+        Ok(response)
+    }
+
+    async fn respond(
         &self,
         source: &AuthenticatedMember,
         message: MembershipHistoryMessage,

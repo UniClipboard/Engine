@@ -9,7 +9,7 @@ use uc_core::ids::DeviceId;
 use uc_core::membership::{
     LedgerInput, MemberInstanceId, MembershipEventId, MembershipHistoryAckV3,
     MembershipHistoryExchangeEndpointPort, MembershipHistoryExchangeError,
-    MembershipHistoryExchangePort, MembershipHistoryMessage, MembershipLedger,
+    MembershipHistoryExchangePort, MembershipHistoryMessage, MembershipLedger, PeerLink,
     VersionedMembershipHistory,
 };
 use uc_core::ports::ReachabilityState;
@@ -17,8 +17,7 @@ use uc_core::ports::ReachabilityState;
 use super::virtual_membership_network::{VirtualMembershipNetwork, VirtualMembershipNetworkError};
 use super::{
     AcceptingVerifier, CompletedStep, FixedSpaceWorkMode, MemoryMembershipRecords,
-    NoopAddressRefresh, RecordingEffects, RecordingHostEvents, RecordingWake, TestClock,
-    TestSigner,
+    RecordingEffects, RecordingHostEvents, RecordingWake, TestClock, TestSigner,
 };
 use crate::space::membership::query_device_trust::NoCurrentJoinStatus;
 use crate::space::membership::{
@@ -27,9 +26,10 @@ use crate::space::membership::{
     DeviceTrustObservation, DeviceTrustStatus, HandleMembershipHistoryMessageUseCase,
     LoadDeviceTrustObservationsPort, MembershipMaintenanceReport, MembershipMaintenanceTrigger,
     MembershipOwner, MembershipRecord, MembershipWorker, MembershipWorkerDeps,
-    QueryDeviceTrustError, QueryDeviceTrustUseCase, RemoveSpaceMemberError,
-    RemoveSpaceMemberResult, RemoveSpaceMemberUseCase, RestrictedMembershipDelivery,
-    RestrictedMembershipDeliveryError, RestrictedMembershipDeliveryPort, RunMembershipWorkPort,
+    QueryDeviceTrustError, QueryDeviceTrustUseCase, RefreshVerifiedPeerAddressPort,
+    RemoveSpaceMemberError, RemoveSpaceMemberResult, RemoveSpaceMemberUseCase,
+    RestrictedMembershipDelivery, RestrictedMembershipDeliveryError,
+    RestrictedMembershipDeliveryPort, RunMembershipWorkPort,
 };
 
 /// 设备到节点标签的映射；未登记的设备视为离线。
@@ -39,6 +39,30 @@ struct NodeDirectory(Mutex<BTreeMap<DeviceId, &'static str>>);
 impl NodeDirectory {
     fn label(&self, device: &DeviceId) -> Option<&'static str> {
         self.0.lock().unwrap().get(device).copied()
+    }
+}
+
+/// 记录地址刷新请求，以及请求发生时本机账本是否已确认该对端位于本机当前位置。
+struct RecordingAddressRefresh {
+    records: Arc<MemoryMembershipRecords>,
+    calls: Mutex<Vec<(DeviceId, bool)>>,
+}
+
+#[async_trait]
+impl RefreshVerifiedPeerAddressPort for RecordingAddressRefresh {
+    async fn refresh_verified_peer_address(&self, peer: &DeviceId) {
+        let confirmed = match self.records.record() {
+            MembershipRecord::Space(space) => {
+                let ledger = MembershipLedger::restore(space.ledger).unwrap();
+                let current = ledger.history().current_position().unwrap();
+                matches!(
+                    ledger.peer(peer),
+                    Some(PeerLink::Member(link)) if link.confirmed_position() == Some(&current)
+                )
+            }
+            MembershipRecord::NoSpace { .. } => false,
+        };
+        self.calls.lock().unwrap().push((*peer, confirmed));
     }
 }
 
@@ -178,6 +202,7 @@ pub(crate) struct VirtualNode {
     transport: Arc<NodeTransport>,
     endpoint: Arc<SwitchableEndpoint>,
     wake: Arc<RecordingWake>,
+    address_refresh: Arc<RecordingAddressRefresh>,
     parts: Mutex<Arc<NodeParts>>,
 }
 
@@ -188,6 +213,7 @@ impl VirtualNode {
         signer: &Arc<TestSigner>,
         transport: &Arc<NodeTransport>,
         wake: &Arc<RecordingWake>,
+        address_refresh: &Arc<RecordingAddressRefresh>,
     ) -> NodeParts {
         let owner = Arc::new(MembershipOwner::new(
             records.clone(),
@@ -205,7 +231,7 @@ impl VirtualNode {
                 activation: effects,
                 restricted_delivery: transport.clone(),
                 history_transport: transport.clone(),
-                address_refresh: Arc::new(NoopAddressRefresh),
+                address_refresh: address_refresh.clone(),
                 conflicts: Arc::new(CompletedStep),
                 group_updates: Arc::new(CompletedStep),
             },
@@ -264,6 +290,11 @@ impl VirtualNode {
         &self.wake
     }
 
+    /// 本节点发起的地址刷新：`(对端, 刷新时本机账本是否已确认该对端位于当前位置)`。
+    pub(crate) fn address_refreshes(&self) -> Vec<(DeviceId, bool)> {
+        self.address_refresh.calls.lock().unwrap().clone()
+    }
+
     /// 模拟进程重启：丢弃内存中的全部组件，从同一持久记录重建。
     pub(crate) fn restart(&self) {
         let parts = Arc::new(Self::build_parts(
@@ -272,10 +303,12 @@ impl VirtualNode {
             &self.signer,
             &self.transport,
             &self.wake,
+            &self.address_refresh,
         ));
         *self.endpoint.0.lock().unwrap() = Arc::new(HandleMembershipHistoryMessageUseCase::new(
             parts.owner.clone(),
             FixedSpaceWorkMode::active(),
+            self.address_refresh.clone(),
         ));
         *self.parts.lock().unwrap() = parts;
     }
@@ -364,17 +397,23 @@ impl VirtualMembershipNodes {
             source: label,
         });
         let wake = Arc::new(RecordingWake::default());
+        let address_refresh = Arc::new(RecordingAddressRefresh {
+            records: records.clone(),
+            calls: Mutex::new(Vec::new()),
+        });
         let parts = Arc::new(VirtualNode::build_parts(
             &records,
             &self.clock,
             &signer,
             &transport,
             &wake,
+            &address_refresh,
         ));
         let endpoint = Arc::new(SwitchableEndpoint(Mutex::new(Arc::new(
             HandleMembershipHistoryMessageUseCase::new(
                 parts.owner.clone(),
                 FixedSpaceWorkMode::active(),
+                address_refresh.clone(),
             ),
         ))));
         self.network
@@ -390,6 +429,7 @@ impl VirtualMembershipNodes {
             transport,
             endpoint,
             wake,
+            address_refresh,
             parts: Mutex::new(parts),
         });
         self.nodes.push(node.clone());

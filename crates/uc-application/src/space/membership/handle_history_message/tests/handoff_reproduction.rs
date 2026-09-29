@@ -83,6 +83,7 @@ impl Fixture {
         let response = HandleMembershipHistoryMessageUseCase::new(
             self.ledger.clone(),
             FixedSpaceWorkMode::active(),
+            Arc::new(NoopAddressRefresh),
         )
         .execute(
             &AuthenticatedMember::new(sender.device_id),
@@ -403,6 +404,7 @@ async fn rejected_evidence_does_not_create_display_facts() {
     let response = HandleMembershipHistoryMessageUseCase::new(
         fixture.ledger.clone(),
         FixedSpaceWorkMode::active(),
+        Arc::new(NoopAddressRefresh),
     )
     .execute(
         &AuthenticatedMember::new(fixture.peer.device_id),

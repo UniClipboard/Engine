@@ -11,7 +11,7 @@ use uc_core::ports::ReachabilityState;
 use super::*;
 use crate::space::membership::testing::{
     established_history, member_facts, started_record, with_peer_relation, AcceptingVerifier,
-    FixedSpaceWorkMode, OwnerFixture, TestSigner,
+    FixedSpaceWorkMode, NoopAddressRefresh, OwnerFixture, TestSigner,
 };
 use crate::space::membership::{
     DeviceTrustMembership, DeviceTrustObservation, LoadDeviceTrustObservationsPort,
@@ -299,6 +299,7 @@ async fn handoff_rejecting_removal_does_not_require_a_second_keep_choice() {
     let response = HandleMembershipHistoryMessageUseCase::new(
         fixture.owner.clone(),
         FixedSpaceWorkMode::active(),
+        Arc::new(NoopAddressRefresh),
     )
     .execute(
         &crate::space::membership::handle_history_message::AuthenticatedMember::new(peer.device_id),
