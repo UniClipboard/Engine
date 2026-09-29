@@ -86,10 +86,13 @@
 
 ## 固定端口设置
 
-- 固定端口成为持久设置，取值 1–65535；空值表示随机端口。当前 `UC_IROH_BIND_PORT` 由 `apply_iroh_direct_reachability_from_env`
-  在装配时读取；`iroh_bind_port_override` 只是测试注入。设置成为唯一持久来源。
-  环境变量作为运行期覆盖保留给无头和容器部署（ADR-007 的用途），优先于设置，并在启动记录中标明生效来源；不作为第二份持久配置。
-- 端口被占用导致 bind 失败时，启动失败并给出稳定分类，不静默回退到随机端口，否则用户以为已固定。
+- 固定端口成为持久设置 `network.listen_port`，取值 1–65535；空值表示随机端口。只固定 IPv4 socket，IPv6 仍使用默认绑定。
+- 生效顺序：测试注入 `iroh_bind_port_override` > 环境变量 `UC_IROH_BIND_PORT` > 设置 > 随机端口。环境变量保留给无头和容器部署
+  （ADR-007 的用途），只在设置了有效非零值时覆盖设置，不作为第二份持久配置。启动记录用 `listen_port_source`
+  （`test_override`/`environment`/`settings`/`random`）标明来源，不输出端口值；环境变量日志也只记录是否设置。
+- 端口被占用时 iroh 绑定失败，Infra 从来源链识别 `AddrInUse` 并返回 `IrohNodeError::ListenPortUnavailable`，
+  不回退随机端口。Engine 映射为公开错误编号 `1102`、类别 `Unavailable`、不可重试：需要用户释放或更换端口，
+  后台自动重试没有意义。其他绑定失败仍为可重试的 `1101`。
 - 修改后重启生效，语义同可信网段。
 
 ## 设置迁移

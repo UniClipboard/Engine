@@ -45,12 +45,14 @@ use uc_infra::network::iroh::{IrohNodeConfig, IrohRelayAccessToken};
 /// 参数：
 /// - `allow_relay_fallback`：业务正向语义，由 `uc-core::Settings.network` 透传
 /// - `trusted_networks`：用户声明的可信网段；决定 CGNAT/Tailscale 段内地址能否作为直连候选
+/// - `listen_port`：设置中的固定 UDP 监听端口；`None` 为随机端口
 /// - `custom_relay_urls`：用户配置的 relay URL 列表；空列表沿用默认 relay
 /// - `rendezvous_base_url`：`None` 走 `RENDEZVOUS_BASE_URL` 默认；production 调
 ///   用方传 `None`；集成测试覆盖 override
 pub fn relay_policy_to_iroh_config(
     allow_relay_fallback: bool,
     trusted_networks: TrustedNetworks,
+    listen_port: Option<u16>,
     custom_relay_urls: Vec<String>,
     congestion_controller: CongestionController,
     rendezvous_base_url: Option<String>,
@@ -63,9 +65,9 @@ pub fn relay_policy_to_iroh_config(
         relay_access_tokens: Default::default(),
         congestion_controller,
         rendezvous_base_url,
-        // 直连可达性（#900）来源于 env，不在本设置翻译点决定；由
-        // `apply_iroh_direct_reachability_from_env` 在 daemon / CLI 入口处填充。
-        bind_port: None,
+        // 固定端口来自设置；`apply_iroh_direct_reachability_from_env` 可用 env 覆盖。
+        bind_port: listen_port,
+        // 公网地址广播（#900）只来源于 env。
         public_addr: None,
         network_partition_gate: None,
     }
@@ -171,21 +173,32 @@ pub(crate) fn parse_iroh_direct_reachability(
 /// `relay_policy_to_iroh_config` 之后调用——daemon 与 CLI 配对路径都要广播
 /// 同一个公网地址。让 `relay_policy_to_iroh_config` 保持纯（只吃 settings、
 /// 不碰 env）。
-pub fn apply_iroh_direct_reachability_from_env(cfg: &mut IrohNodeConfig) {
+///
+/// `UC_IROH_BIND_PORT` 只在设置了有效值时覆盖设置中的固定端口，供无头与容器部署使用；
+/// 未设置时保留设置值。返回 env 是否覆盖了监听端口。日志不输出端口或地址。
+pub fn apply_iroh_direct_reachability_from_env(cfg: &mut IrohNodeConfig) -> bool {
     let reach = parse_iroh_direct_reachability(
         std::env::var("UC_IROH_BIND_PORT").ok().as_deref(),
         std::env::var("UC_IROH_PUBLIC_ADDR").ok().as_deref(),
     );
+    apply_direct_reachability(cfg, reach)
+}
+
+fn apply_direct_reachability(cfg: &mut IrohNodeConfig, reach: IrohDirectReachability) -> bool {
     if reach.bind_port.is_some() || reach.public_addr.is_some() {
         tracing::info!(
             target: "settings.network",
-            bind_port = ?reach.bind_port,
-            public_addr = ?reach.public_addr,
+            has_bind_port = reach.bind_port.is_some(),
+            has_public_addr = reach.public_addr.is_some(),
             "iroh direct-reachability configured from env (UC_IROH_BIND_PORT / UC_IROH_PUBLIC_ADDR)",
         );
     }
-    cfg.bind_port = reach.bind_port;
+    let port_overridden = reach.bind_port.is_some();
+    if let Some(port) = reach.bind_port {
+        cfg.bind_port = Some(port);
+    }
     cfg.public_addr = reach.public_addr;
+    port_overridden
 }
 
 /// Override the congestion controller from `UC_CONGESTION_CONTROLLER` env.
@@ -266,6 +279,7 @@ mod tests {
         let cfg = relay_policy_to_iroh_config(
             true,
             TrustedNetworks::default(),
+            None,
             Vec::new(),
             CongestionController::default(),
             None,
@@ -280,6 +294,7 @@ mod tests {
         let cfg = relay_policy_to_iroh_config(
             false,
             TrustedNetworks::default(),
+            None,
             Vec::new(),
             CongestionController::default(),
             None,
@@ -294,6 +309,7 @@ mod tests {
         let cfg = relay_policy_to_iroh_config(
             true,
             TrustedNetworks::default(),
+            None,
             Vec::new(),
             CongestionController::default(),
             Some("http://test".into()),
@@ -311,11 +327,56 @@ mod tests {
         let cfg = relay_policy_to_iroh_config(
             true,
             tailscale_trusted(),
+            None,
             Vec::new(),
             CongestionController::default(),
             None,
         );
         assert_eq!(cfg.trusted_networks, tailscale_trusted());
+    }
+
+    /// 设置中的固定端口直接进入绑定配置。
+    #[test]
+    fn settings_listen_port_becomes_bind_port() {
+        let cfg = relay_policy_to_iroh_config(
+            true,
+            TrustedNetworks::default(),
+            Some(42000),
+            Vec::new(),
+            CongestionController::default(),
+            None,
+        );
+        assert_eq!(cfg.bind_port, Some(42000));
+    }
+
+    /// env 未设置端口时保留设置值；设置了有效端口时覆盖。
+    #[test]
+    fn environment_port_overrides_settings_only_when_present() {
+        let mut cfg = relay_policy_to_iroh_config(
+            true,
+            TrustedNetworks::default(),
+            Some(42000),
+            Vec::new(),
+            CongestionController::default(),
+            None,
+        );
+        assert!(!apply_direct_reachability(
+            &mut cfg,
+            IrohDirectReachability::default()
+        ));
+        assert_eq!(cfg.bind_port, Some(42000));
+
+        assert!(apply_direct_reachability(
+            &mut cfg,
+            parse_iroh_direct_reachability(Some("43000"), None)
+        ));
+        assert_eq!(cfg.bind_port, Some(43000));
+
+        assert!(!apply_direct_reachability(
+            &mut cfg,
+            parse_iroh_direct_reachability(Some("0"), None)
+        ));
+        assert_eq!(cfg.bind_port, Some(43000));
     }
 
     /// 空可信网段默认搬运。
@@ -324,6 +385,7 @@ mod tests {
         let cfg = relay_policy_to_iroh_config(
             true,
             TrustedNetworks::default(),
+            None,
             Vec::new(),
             CongestionController::default(),
             None,
@@ -337,6 +399,7 @@ mod tests {
         let cfg = relay_policy_to_iroh_config(
             false,
             tailscale_trusted(),
+            None,
             Vec::new(),
             CongestionController::default(),
             None,
@@ -351,6 +414,7 @@ mod tests {
         let cfg = relay_policy_to_iroh_config(
             true,
             TrustedNetworks::default(),
+            None,
             vec!["https://relay.example.com.".to_string()],
             CongestionController::default(),
             None,
@@ -375,6 +439,7 @@ mod tests {
         let mut config = relay_policy_to_iroh_config(
             true,
             TrustedNetworks::default(),
+            None,
             vec![relay_a.to_string(), relay_b.to_string()],
             CongestionController::Cubic,
             None,
@@ -413,6 +478,7 @@ mod tests {
         let mut config = relay_policy_to_iroh_config(
             true,
             TrustedNetworks::default(),
+            None,
             vec![relay_a.to_string(), relay_b.to_string()],
             CongestionController::Cubic,
             None,
@@ -430,6 +496,7 @@ mod tests {
         let cfg = relay_policy_to_iroh_config(
             true,
             TrustedNetworks::default(),
+            None,
             Vec::new(),
             CongestionController::default(),
             None,

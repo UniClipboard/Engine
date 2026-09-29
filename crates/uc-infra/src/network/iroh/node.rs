@@ -495,6 +495,34 @@ fn build_transport_config(cc: CongestionController) -> QuicTransportConfig {
         .build()
 }
 
+/// 固定端口被占用时单独分类；其他绑定失败保持 `Bind`。
+fn classify_bind_error(
+    error: impl std::error::Error + Send + Sync + 'static,
+    fixed_listen_port: bool,
+) -> IrohNodeError {
+    let address_in_use = fixed_listen_port && source_chain_has_address_in_use(&error);
+    let error = anyhow::Error::new(error);
+    if address_in_use {
+        IrohNodeError::ListenPortUnavailable(error)
+    } else {
+        IrohNodeError::Bind(error)
+    }
+}
+
+fn source_chain_has_address_in_use(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(error) = current {
+        if error
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::AddrInUse)
+        {
+            return true;
+        }
+        current = error.source();
+    }
+    false
+}
+
 /// Build the `AddrFilter` we hand to `Endpoint::builder().addr_filter(...)`.
 /// The filter is applied at the `AddressLookupServices` layer (see
 /// iroh#3960 / #4010), upstream of every individual lookup service, so a
@@ -867,24 +895,23 @@ impl IrohNodeBuilder {
         }
 
         // UniClipboard#900 (a): pin the UDP socket to a fixed IPv4 port so a
-        // NAT'd / containerized node is reachable at a stable port across
-        // restarts. `bind_addr("0.0.0.0:port")` replaces iroh's default
-        // ephemeral IPv4 socket (still listens on all interfaces); the IPv6
-        // default bind is left untouched. The port is pre-parsed from
-        // `UC_IROH_BIND_PORT` in `uc-bootstrap`, so the only realistic failure
-        // here is the port already being in use — surfaced as `Bind`.
+        // node is reachable at a stable port across restarts. The port comes
+        // from `Settings.network.listen_port`, overridable by
+        // `UC_IROH_BIND_PORT`. `bind_addr("0.0.0.0:port")` replaces iroh's
+        // default ephemeral IPv4 socket (still listens on all interfaces); the
+        // IPv6 default bind is left untouched. A port already in use fails
+        // `bind()` below as `ListenPortUnavailable`; it never falls back to a
+        // random port.
+        let fixed_listen_port = config.bind_port.is_some();
         if let Some(port) = config.bind_port {
             endpoint_builder = endpoint_builder
                 .bind_addr((Ipv4Addr::UNSPECIFIED, port))
                 .map_err(|err| {
-                    IrohNodeError::Bind(
-                        anyhow::Error::new(err).context("pin iroh UDP port (UC_IROH_BIND_PORT)"),
-                    )
+                    IrohNodeError::Bind(anyhow::Error::new(err).context("pin iroh UDP port"))
                 })?;
             info!(
                 target: "iroh.bind",
-                bind_port = port,
-                "pinned iroh UDP socket to fixed IPv4 port 0.0.0.0:{port} (UC_IROH_BIND_PORT)",
+                "pinned iroh UDP socket to a fixed IPv4 port",
             );
         }
 
@@ -923,7 +950,7 @@ impl IrohNodeBuilder {
                 tracing::subscriber::NoSubscriber::default(),
             ))
             .await
-            .map_err(|err| IrohNodeError::Bind(anyhow::Error::new(err)))?;
+            .map_err(|err| classify_bind_error(err, fixed_listen_port))?;
         let endpoint = Arc::new(endpoint);
         // 只有 bind 完成才将来源标记为可采集；失败构造不能留下 Enabled 假象。
         {
@@ -1523,6 +1550,10 @@ pub enum IrohNodeError {
     #[error("failed to bind iroh endpoint")]
     Bind(#[source] anyhow::Error),
 
+    /// 固定监听端口已被占用。不回退到随机端口，否则用户会误以为端口已固定。
+    #[error("fixed iroh listen port is already in use")]
+    ListenPortUnavailable(#[source] anyhow::Error),
+
     #[error("failed to initialize iroh blob store")]
     BlobStoreInit(#[source] anyhow::Error),
 
@@ -1664,6 +1695,30 @@ mod tests {
             bound.iter().any(|s| s.is_ipv4() && s.port() == port),
             "expected pinned IPv4 port {port} in bound sockets {bound:?}"
         );
+    }
+
+    /// 固定端口已被占用时绑定失败并单独分类，不回退到随机端口。
+    #[tokio::test]
+    async fn bind_fails_when_fixed_port_is_in_use() {
+        let occupant =
+            std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).expect("occupy UDP port");
+        let port = occupant.local_addr().expect("occupant addr").port();
+
+        let store = identity_store();
+        let cfg = IrohNodeConfig {
+            bind_port: Some(port),
+            ..Default::default()
+        };
+        let error = match IrohNodeBuilder::bind(&store, cfg).await {
+            Ok(_) => panic!("binding an occupied fixed port must fail"),
+            Err(error) => error,
+        };
+
+        assert!(
+            matches!(error, IrohNodeError::ListenPortUnavailable(_)),
+            "unexpected bind error: {error:?}"
+        );
+        drop(occupant);
     }
 
     /// UniClipboard#900: `public_addr` injects a configured public address

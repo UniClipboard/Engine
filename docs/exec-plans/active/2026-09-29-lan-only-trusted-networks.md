@@ -75,6 +75,8 @@
   移动端目前无法读写可信网段、固定端口或 `allow_relay_fallback`。移动端设置界面需要 Engine 先新增绑定，属于未规划的新范围。
 - 发起端选择写入邀请的本机地址只存在于开发操作（`ListPairingInvitationAddresses`、`IssueInvitationForAddress`），
   不是公开操作。产品界面要选地址，需要先把它提升为公开契约，同样属于未规划的新范围。
+  2026-09-29 用户决定本次不做，列为后续可选改进：不选时邀请已包含所有未被过滤的本机地址（通常含 VPN 地址），
+  #1750 不依赖它；真实网络验收若发现地址过多导致配对慢或失败再加入，届时宜同时返回网卡名。
 - 完整邀请的复制与粘贴不需要 Engine 改动：`IssueInvitation` 已返回 `full_invitation`，`JoinSpace` 已接受完整邀请，两个绑定均已暴露。
 - 设置更新的拒绝原因只有英文文本；下游若需本地化或逐条定位，需要 Engine 提供结构化拒绝。
 
@@ -106,6 +108,10 @@
   取代 `strip_relay_if_lan_only`，普通拨号与 blob 拨号共用；过滤日志改为只记数量；新增拨号策略与“relay 关闭时路由不含
   relay”测试。已运行 workspace check、lan-compat check、fmt、仓库检查、diff check，以及 `uc-infra` network 模块
   265 项与相关单元测试。真实网络与 E2E 未运行。
-- [ ] 切片 3
+- [x] 切片 3（2026-09-29，本地）：设置端口进入绑定配置；环境变量只在设置了有效值时覆盖，未设置时保留设置值；
+  启动记录标明端口来源且不输出端口与公网地址；端口占用返回 `ListenPortUnavailable` 并映射为公开错误 `1102`（不可重试）。
+  新增占用端口绑定失败、设置与环境变量优先级、错误映射测试。已运行 workspace check、lan-compat check、fmt、仓库检查、
+  diff check、`uc-infra` network 模块 266 项、`uc-engine` 相关单元测试与 public_contract。端口占用测试只在 macOS 本机运行，
+  Linux/Windows 的 `AddrInUse` 来源链未验证；真实网络与 E2E 未运行。
 - [ ] 切片 4
 - [ ] 切片 5

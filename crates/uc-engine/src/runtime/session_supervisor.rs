@@ -20,7 +20,7 @@ use uc_application::facade::{
 };
 use uc_core::{FileTransferCancellationReason, TaskRegistry};
 use uc_infra::fs::{FsAtomicPublisher, FsHiddenPathMarker, FsInboundFileTarget};
-use uc_infra::network::iroh::{IrohNode, IrohSessionBuilder, PreparedIrohSession};
+use uc_infra::network::iroh::{IrohNode, IrohNodeError, IrohSessionBuilder, PreparedIrohSession};
 use uc_infra::space::RuntimeSpaceAccessAdapter;
 use uc_observability_contract::diagnostics::connectivity::{
     observe_local_result, record_session_lock_wait, LocalWorkStep, SessionTransition,
@@ -59,6 +59,8 @@ use crate::{EngineError, EngineErrorCategory, OperationResult};
 
 const SESSION_OPERATION_GRACE: Duration = Duration::from_secs(2);
 const SESSION_RUNTIME_FAILED_CODE: u32 = 1101;
+/// 设置或环境变量指定的固定监听端口已被占用。需要用户更换端口或释放端口，自动重试无意义。
+const LISTEN_PORT_UNAVAILABLE_CODE: u32 = 1102;
 
 #[cfg(feature = "dev-tools")]
 #[derive(Default)]
@@ -136,6 +138,28 @@ fn session_runtime_error(
         SESSION_RUNTIME_FAILED_CODE,
         EngineErrorCategory::Unavailable,
         true,
+    )
+}
+
+fn network_build_error(error: anyhow::Error) -> EngineError {
+    let listen_port_unavailable = error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<IrohNodeError>(),
+            Some(IrohNodeError::ListenPortUnavailable(_))
+        )
+    });
+    if !listen_port_unavailable {
+        return session_runtime_error("p2p network", error);
+    }
+    error!(
+        context = "p2p network",
+        error_kind = "listen_port_unavailable",
+        "engine session lifecycle failed"
+    );
+    EngineError::new(
+        LISTEN_PORT_UNAVAILABLE_CODE,
+        EngineErrorCategory::Unavailable,
+        false,
     )
 }
 
@@ -999,7 +1023,7 @@ impl ProductionSessionFactory {
             None,
         )
         .await
-        .map_err(|error| session_runtime_error("p2p network", error))
+        .map_err(network_build_error)
     }
 
     async fn prepare(
@@ -1433,6 +1457,31 @@ mod tests {
 
         assert_eq!(error.code(), SESSION_RUNTIME_FAILED_CODE);
         assert_eq!(error.category(), EngineErrorCategory::Unavailable);
+        assert!(error.is_retryable());
+    }
+
+    #[test]
+    fn occupied_listen_port_has_its_own_non_retryable_code() {
+        let error = network_build_error(
+            anyhow::Error::new(IrohNodeError::ListenPortUnavailable(anyhow::anyhow!(
+                "address in use"
+            )))
+            .context("Iroh network bind failed"),
+        );
+
+        assert_eq!(error.code(), LISTEN_PORT_UNAVAILABLE_CODE);
+        assert_eq!(error.category(), EngineErrorCategory::Unavailable);
+        assert!(!error.is_retryable());
+    }
+
+    #[test]
+    fn other_network_build_failures_stay_retryable_session_failures() {
+        let error = network_build_error(
+            anyhow::Error::new(IrohNodeError::Bind(anyhow::anyhow!("bind failed")))
+                .context("Iroh network bind failed"),
+        );
+
+        assert_eq!(error.code(), SESSION_RUNTIME_FAILED_CODE);
         assert!(error.is_retryable());
     }
 

@@ -23,6 +23,7 @@ use super::{SettingsFacade, SettingsFacadeError};
 pub struct PreparedNetworkSettings {
     pub allow_relay_fallback: bool,
     pub trusted_networks: TrustedNetworks,
+    pub listen_port: Option<u16>,
     pub custom_relay_urls: Vec<String>,
     pub congestion_controller: CongestionController,
     pub relay_credentials: RelayCredentials,
@@ -96,6 +97,7 @@ impl SettingsAssembly {
         Ok(PreparedNetworkSettings {
             allow_relay_fallback: settings.network.allow_relay_fallback,
             trusted_networks: trusted.networks,
+            listen_port: settings.network.listen_port,
             custom_relay_urls: settings.network.custom_relay_urls,
             congestion_controller: settings.network.congestion_controller,
             relay_credentials: self.relay_credentials.clone(),
