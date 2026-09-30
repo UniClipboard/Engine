@@ -71,3 +71,8 @@ Still without a dedicated log test: #25 (needs the full outbound use case fixtur
   - `topology::f6_deep_chain_recovers_selected_branch_without_online_sponsors` (needs `--features dev-tools`): fails about half the time in isolation on this branch (1 of 3) and on the untouched base `c7a821b4` (2 of 4) with the same message (a node stuck at group epoch 7). Pre-existing flake.
 - `cargo test -p uc-upgrade-matrix --locked --no-fail-fast`: 66 of 68 fail, the same environment gap as the P0 baseline (missing anchor hosts).
 - Removed the now-unused `sanitize_url_for_log` in `relay_probe.rs` (its only caller was the removed `relay` span field).
+
+## 2026-09-30 use case spans
+
+Scanned 70 public async methods of `*UseCase` impls: 19 already had `#[instrument]`. Added `#[tracing::instrument(name = "usecase.<action>.<method>", skip_all)]` to 26 entry methods of independent business actions (settings upgrade acknowledge, blob fetch/publish, profile startup, invitation cancel, lock/upgrade/recover/reset/rebuild space, change passphrase, membership conflict recover/resolve, history evidence reconcile, history message handling, device trust decision, member removal, membership maintenance, clipboard capture (leaf methods), restore (selection, plain text, file paths), resend).
+Left out on purpose: queries and checks, `shutdown`, `ensure_ready`, `touch_entry`, `list_tags`, `probe`, wrapper `execute` that delegates to an instrumented method (capture, apply inbound), and `dispatch_entry` (hand-written spans).

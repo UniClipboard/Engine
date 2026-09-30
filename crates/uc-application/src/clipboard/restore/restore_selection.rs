@@ -116,6 +116,7 @@ impl RestoreClipboardSelectionUseCase {
         self
     }
 
+    #[tracing::instrument(name = "usecase.restore_selection.execute", skip_all)]
     pub(crate) async fn execute(&self, entry_id: &EntryId) -> Result<()> {
         uc_info!(entry_id = log_id(&entry_id), "restore.execute requested");
         if !self.mode.allow_os_write() {

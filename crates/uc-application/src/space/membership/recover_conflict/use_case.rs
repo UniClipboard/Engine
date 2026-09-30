@@ -83,6 +83,7 @@ impl RecoverMembershipConflictUseCase {
         }
     }
 
+    #[tracing::instrument(name = "usecase.recover_membership_conflict.execute", skip_all)]
     pub(crate) async fn execute(&self) -> RecoverMembershipConflictOutcome {
         let _guard = self.execution_lock.lock().await;
         let view = match self.owner.load().await {

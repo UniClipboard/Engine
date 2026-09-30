@@ -24,6 +24,7 @@ impl CancelPairingInvitationUseCase {
         }
     }
 
+    #[tracing::instrument(name = "usecase.cancel_invitation.execute", skip_all)]
     pub(crate) async fn execute(&self) -> Result<(), CancelInvitationError> {
         if self.execute_if_any().await? == 0 {
             return Err(CancelInvitationError::NotIssued);

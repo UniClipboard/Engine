@@ -228,6 +228,7 @@ impl ResendEntryUseCase {
 
     /// Chooses the user-authorized targets, then delegates all existing-entry
     /// delivery work to the shared private module.
+    #[tracing::instrument(name = "usecase.resend_entry.execute", skip_all)]
     pub(crate) async fn execute(
         &self,
         cmd: ResendEntryCommand,

@@ -27,6 +27,7 @@ impl ChangeEncryptionPassphraseUseCase {
         }
     }
 
+    #[tracing::instrument(name = "usecase.change_encryption_passphrase.execute", skip_all)]
     pub(crate) async fn execute(
         &self,
         passphrase: &Passphrase,

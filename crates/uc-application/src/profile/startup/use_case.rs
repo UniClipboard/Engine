@@ -31,6 +31,7 @@ impl PrepareProfileStartupUseCase {
         }
     }
 
+    #[tracing::instrument(name = "usecase.profile_startup.execute", skip_all)]
     pub async fn execute(&self) -> Result<ProfileLifecycle, ProfileStartupError> {
         let backed_up = self.ensure_backup().await?;
         let existing = self.lifecycle.load()?;

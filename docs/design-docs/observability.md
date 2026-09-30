@@ -399,6 +399,10 @@ decorator 负责。Sponsor 在等待执行锁之前确定已认证消息的固�
   `disallowed_macros` 在默认特性与 `lan-compat` 下各检查一轮，任何直接使用 `tracing::{trace,debug,info,warn,error}!` 都失败；
   `tracing::event!` 只有观测 crate 自己可以直接使用。clippy 只认 crate 级 allow，因此确需保留原始 tracing 的文件
   （观测运行期验证未登记字段处理的三个集成测试）在文件顶部用 `#![allow(clippy::disallowed_macros)]` 并写明理由。
+- **use case 的本地 span。** 独立业务动作（会改写状态或触发外部工作）的入口方法带
+  `#[tracing::instrument(name = "usecase.<动作>.<方法>", skip_all)]`，使该动作内部写出的模块日志在 `spans` 路径里带上动作名。
+  它只是本地诊断 span，不是业务入口：查询、检查、`shutdown`、只委托给另一个已带 span 的方法的包装方法、已有手写 span 的方法不加。
+  新增独立业务动作时按同一规则补，字段只能取自日志字段目录。
 - **规则检查。** `check-rust-style.mjs` 对新增行要求 `#[instrument]` 带 `skip_all` 或显式 `fields(..)`，`fields(..)` 的名称必须登记在日志字段目录，且不得使用 `err`、`ret`，拒绝直接使用日志宏，并拒绝 `#[error]` 文本内插
   `String`、`PathBuf`、`Vec<u8>`、`&str` 等未包装字段（文本启发式，需要人工复核）。
 

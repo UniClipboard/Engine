@@ -32,6 +32,7 @@ impl RecoverSpaceSessionUseCase {
         }
     }
 
+    #[tracing::instrument(name = "usecase.recover_space_session.execute", skip_all)]
     pub(crate) async fn execute(
         &self,
     ) -> Result<RecoverSpaceSessionResult, RecoverSpaceSessionError> {

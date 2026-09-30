@@ -256,6 +256,7 @@ impl CaptureClipboardUseCase {
     /// completed one it carries receiver-rewritten local paths; both hash
     /// differently from the wire identity and would fork the entry, breaking
     /// dedup against every other channel that carries the same wire hash.
+    #[tracing::instrument(name = "usecase.capture_clipboard.execute_with_origin", skip_all)]
     pub async fn execute_with_origin(
         &self,
         snapshot: SystemClipboardSnapshot,
@@ -275,6 +276,10 @@ impl CaptureClipboardUseCase {
         .await
     }
 
+    #[tracing::instrument(
+        name = "usecase.capture_clipboard.execute_directory_with_origin",
+        skip_all
+    )]
     pub(crate) async fn execute_directory_with_origin(
         &self,
         snapshot: SystemClipboardSnapshot,
@@ -301,6 +306,10 @@ impl CaptureClipboardUseCase {
         .await
     }
 
+    #[tracing::instrument(
+        name = "usecase.capture_clipboard.execute_inbound_with_origin",
+        skip_all
+    )]
     pub async fn execute_inbound_with_origin(
         &self,
         snapshot: SystemClipboardSnapshot,

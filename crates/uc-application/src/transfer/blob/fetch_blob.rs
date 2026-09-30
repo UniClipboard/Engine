@@ -74,6 +74,7 @@ impl FetchBlobUseCase {
         }
     }
 
+    #[tracing::instrument(name = "usecase.fetch_blob.execute", skip_all)]
     pub async fn execute(&self, input: FetchBlobInput) -> Result<FetchBlobOutcome, FetchBlobError> {
         let digest = self
             .blob_transfer
@@ -132,6 +133,7 @@ impl FetchBlobUseCase {
     ///   back in. Saves a second whole-file BLAKE3 pass.
     /// * Returns the file size from `tokio::fs::metadata` so callers can
     ///   emit a final progress event without re-reading the file.
+    #[tracing::instrument(name = "usecase.fetch_blob.execute_to_path", skip_all)]
     pub async fn execute_to_path(
         &self,
         input: FetchBlobPathInput,

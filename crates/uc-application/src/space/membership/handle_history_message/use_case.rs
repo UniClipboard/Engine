@@ -42,6 +42,7 @@ impl HandleMembershipHistoryMessageUseCase {
         }
     }
 
+    #[tracing::instrument(name = "usecase.handle_history_message.execute", skip_all)]
     pub(crate) async fn execute(
         &self,
         source: &AuthenticatedMember,

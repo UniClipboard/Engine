@@ -101,6 +101,7 @@ impl RemoveSpaceMemberUseCase {
     }
 
     /// 移除成员的唯一完整动作；本函数写这次动作的完成记录，Engine 只做错误码映射。
+    #[tracing::instrument(name = "usecase.remove_space_member.execute", skip_all)]
     pub(crate) async fn execute(
         &self,
         target_device_id: &DeviceId,

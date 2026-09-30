@@ -29,6 +29,7 @@ impl ResetSpaceUseCase {
         }
     }
 
+    #[tracing::instrument(name = "usecase.reset_space.execute", skip_all)]
     pub(crate) async fn execute(&self) -> Result<(), ResetSpaceError> {
         self.pending_invitations.cancel_all().await;
         self.rebuild_space

@@ -47,6 +47,7 @@ impl MaintainSpaceMembershipUseCase {
         }
     }
 
+    #[tracing::instrument(name = "usecase.maintain_space_membership.execute", skip_all)]
     pub(crate) async fn execute(
         &self,
         trigger: MembershipMaintenanceTrigger,

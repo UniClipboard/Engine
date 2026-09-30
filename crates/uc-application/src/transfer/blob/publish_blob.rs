@@ -57,6 +57,7 @@ impl PublishBlobUseCase {
         }
     }
 
+    #[tracing::instrument(name = "usecase.publish_blob.execute", skip_all)]
     pub async fn execute(
         &self,
         input: PublishBlobInput,

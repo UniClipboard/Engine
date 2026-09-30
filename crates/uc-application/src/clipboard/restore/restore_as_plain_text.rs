@@ -135,6 +135,7 @@ impl RestoreClipboardEntryAsPlainTextUseCase {
         self
     }
 
+    #[tracing::instrument(name = "usecase.restore_as_plain_text.execute", skip_all)]
     pub(crate) async fn execute(&self, entry_id: &EntryId) -> Result<PlainRestoreOutcome> {
         uc_info!(
             entry_id = log_id(&entry_id),
@@ -164,6 +165,7 @@ impl RestoreClipboardEntryAsPlainTextUseCase {
         Ok(PlainRestoreOutcome::Done)
     }
 
+    #[tracing::instrument(name = "usecase.restore_as_plain_text.execute_file_paths", skip_all)]
     pub(crate) async fn execute_file_paths(&self, entry_id: &EntryId) -> Result<()> {
         if !self.mode.allow_os_write() {
             return Err(anyhow::anyhow!(
