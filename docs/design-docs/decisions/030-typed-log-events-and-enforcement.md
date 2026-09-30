@@ -76,15 +76,20 @@
 - 封装宏若展开为 `tracing::warn!`，调用处仍被报告，在展开内加 `#[allow(clippy::disallowed_macros)]` 无效。
   封装宏展开为 `tracing::event!(Level::X, ..)` 则不被报告，直接调用仍被报告。
   因此封装宏走 `event!`，`tracing::event!` 的直接使用由 `check-rust-style.mjs` 单独拒绝（该写法在仓库中极少，文本检查即可）。
-- 当前工作区 `cargo clippy` 并不干净：同一次运行有约 190 条其他 lint 与 1 个 deny 级错误
-  （`async_yields_async`，`application/shutdown.rs:70`）。CI 目前不运行 clippy。棘轮必须只统计 `clippy::disallowed_macros`，
+- 全 workspace（`--workspace --all-targets`，默认特性）共 935 处唯一违规：`uc-application` 409、`uc-infra` 351、`uc-engine` 105、
+  `compatibility` 39、`bindings` 13、`uc-observability-runtime` 15、`uc-observability-contract` 3；
+  按级别 `warn` 400、`debug` 233、`info` 220、`error` 71、`trace` 11；位于测试文件的仅 19 处。冷缓存下整轮约 1 分半。
+- `LogSafe` 可用 `macro_rules!` 表达：字符串类字段值经密封 trait 约束，`String` 与非 `'static` 的 `&str` 编译失败，
+  字面量与 `u64` 通过；消息位置只接受字面量。数值、布尔与 `error = &e as &dyn Error` 需各自单独的匹配分支。
+- 当前工作区 `cargo clippy` 并不干净：`uc-application` 有约 190 条其他 lint 与 1 个 deny 级错误
+  （`async_yields_async`，`application/shutdown.rs:70`），`tests/hosts/uc-mobile-probe-core` 另有 2 个 `never_loop` 错误。CI 目前不运行 clippy。棘轮必须只统计 `clippy::disallowed_macros`，
   并用独立的 clippy 步骤，不能依赖“clippy 整体通过”。
 
 ## 未验证项
 
-- 全 workspace（含 `uc-infra`、`uc-engine`、测试目标与 `lan-compat` 特性）的违规总数与耗时；本次只覆盖 `uc-application` lib。
+- `lan-compat` 等非默认特性下的违规数；上面的全量计数只覆盖默认特性。
 - 棘轮基线的载体与 CI 耗时；需要新增一个只报告 `disallowed_macros` 的 clippy 步骤。
 - 分类 trait 能否覆盖跨 crate 的 `#[source]` 链而不引入新的循环依赖。
 - 封装宏对 span 字段（`#[instrument(fields(..))]`）的覆盖方式；`#[instrument]` 约 130 处不受 lint 影响，需要单独方案。
-- 字符串字段的 `LogSafe` 约束能否在 `macro_rules!` 内表达，还是需要过程宏。
+- 封装宏需要同时覆盖 `error = ..` 错误字段、`%`/`?` 格式化字段与可变字段个数；原型只验证了 `key = value` 形式。
 - 迁移期间基线文件与 `RUST_STYLE_BASE_SHA` 比较起点的配合。
