@@ -70,9 +70,9 @@ mod tests {
     #[test]
     fn restore_failures_keep_stable_categories_without_details() {
         let not_found = map_restore_result(Err(ClipboardRestoreError::NotFound)).unwrap_err();
-        let internal = map_restore_result(Err(ClipboardRestoreError::Internal(
-            "/private/path/clipboard-cache".into(),
-        )))
+        let internal = map_restore_result(Err(ClipboardRestoreError::Internal(anyhow::anyhow!(
+            "/private/path/clipboard-cache"
+        ))))
         .unwrap_err();
 
         assert_eq!(not_found.category(), EngineErrorCategory::NotFound);

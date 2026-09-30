@@ -23,7 +23,7 @@ pub enum SettingsFacadeError {
     Load(#[source] anyhow::Error),
     #[error("failed to save settings")]
     Save(#[source] anyhow::Error),
-    #[error("invalid settings: {0}")]
+    #[error("invalid settings")]
     Invalid(String),
     /// Relay 探测能力未在本进程装配。常见于 webserver / 单元测试场景。
     #[error("relay probe is unavailable in this runtime")]

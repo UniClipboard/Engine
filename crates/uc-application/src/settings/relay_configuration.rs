@@ -62,7 +62,7 @@ pub enum RelayConfigurationError {
     Load(#[source] anyhow::Error),
     #[error("failed to save settings")]
     Save(#[source] anyhow::Error),
-    #[error("invalid settings: {0}")]
+    #[error("invalid settings")]
     Invalid(String),
     #[error("relay credentials are unavailable")]
     CredentialsUnavailable,

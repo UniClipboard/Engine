@@ -45,11 +45,11 @@ pub enum ClipboardRestoreError {
     /// restore was asked for an entry that carries no restorable file paths.
     /// A client-side request problem, not a server fault: the API layer should
     /// map this to 400 Bad Request, **not** 500.
-    #[error("clipboard restore not applicable: {0}")]
+    #[error("clipboard restore not applicable")]
     NotApplicable(String),
 
-    #[error("clipboard restore failed: {0}")]
-    Internal(String),
+    #[error("clipboard restore failed")]
+    Internal(#[source] anyhow::Error),
 }
 
 /// Dependency bundle for `ClipboardRestoreFacade`. Composition roots build
@@ -288,11 +288,10 @@ fn map_restore_error(err: anyhow::Error, entry_id: &str) -> ClipboardRestoreErro
         return ClipboardRestoreError::NotApplicable(no_paths.to_string());
     }
 
-    let message = err.to_string();
-    if message.to_lowercase().contains("not found") {
+    if err.to_string().to_lowercase().contains("not found") {
         ClipboardRestoreError::NotFound
     } else {
-        ClipboardRestoreError::Internal(message)
+        ClipboardRestoreError::Internal(err)
     }
 }
 
@@ -341,7 +340,8 @@ mod tests {
 
         let mapped = map_restore_error(err, "entry-3");
         match mapped {
-            ClipboardRestoreError::Internal(msg) => {
+            ClipboardRestoreError::Internal(source) => {
+                let msg = source.to_string();
                 assert!(msg.to_lowercase().contains("integrity") || msg.contains("corrupt"));
             }
             other => panic!("expected Internal, got {other:?}"),
@@ -367,8 +367,8 @@ mod tests {
         let err = anyhow::anyhow!("write coordinator deadlocked");
         let mapped = map_restore_error(err, "entry-6");
         match mapped {
-            ClipboardRestoreError::Internal(msg) => {
-                assert_eq!(msg, "write coordinator deadlocked");
+            ClipboardRestoreError::Internal(source) => {
+                assert_eq!(source.to_string(), "write coordinator deadlocked");
             }
             other => panic!("expected Internal, got {other:?}"),
         }
