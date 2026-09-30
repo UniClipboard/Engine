@@ -267,7 +267,7 @@ impl IrohClipboardDispatchAdapter {
 
 #[async_trait]
 impl ClipboardDispatchPort for IrohClipboardDispatchAdapter {
-    #[instrument(skip_all, fields(device = %target.as_str(), payload_len = payload.ciphertext.len()))]
+    #[instrument(skip_all, fields(payload_len = payload.ciphertext.len()))]
     async fn dispatch(
         &self,
         target: &DeviceId,

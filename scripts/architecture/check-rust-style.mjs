@@ -261,9 +261,52 @@ const INSTRUMENT_ATTRIBUTE = /#\[\s*(?:tracing::)?instrument\b/
 const ERROR_ATTRIBUTE = /^\s*#\[error\(\s*"([^"]*)"/
 const FREE_TEXT_TYPE = /\b(?:String|PathBuf|OsString|Vec<u8>|Cow<)|&\s*(?:'(?!static\b)\w+\s+)?str\b/
 
+// span 字段与日志字段共用同一份字段目录：名称必须已登记，且不得用 err / ret 自动记录错误文本或返回值。
+const LOG_FIELD_CATALOG_PATH = 'crates/uc-observability-contract/src/log_fields.rs'
+let logFieldCatalog = null
+
+function catalogFieldNames() {
+  if (logFieldCatalog) return logFieldCatalog
+  const source = readFileSync(new URL(`../../${LOG_FIELD_CATALOG_PATH}`, import.meta.url), 'utf8')
+  logFieldCatalog = new Set([...source.matchAll(/^\s{4}([a-z][a-z0-9_]*):\s*[A-Z]\w*(?:\([a-z]+\))?,/gm)].map(match => match[1]))
+  return logFieldCatalog
+}
+
+export function instrumentFieldProblems(attribute) {
+  const problems = []
+  const body = attribute.slice(attribute.indexOf('('))
+  if (/[(,]\s*(?:err|ret)\b(?!\s*=)/.test(body.replace(/fields\s*\([\s\S]*\)\s*\)?/, ''))) {
+    problems.push('#[instrument] 不得使用 err 或 ret，它们会把错误文本与返回值写入 span')
+  }
+  const fields = body.match(/\bfields\s*\(/)
+  if (!fields) return problems
+  let depth = 1
+  let cursor = fields.index + fields[0].length
+  let segment = ''
+  const segments = []
+  for (; cursor < body.length && depth > 0; cursor += 1) {
+    const char = body[cursor]
+    if ('([{'.includes(char)) depth += 1
+    if (')]}'.includes(char)) depth -= 1
+    if (depth === 0) break
+    if (char === ',' && depth === 1) {
+      segments.push(segment)
+      segment = ''
+    } else segment += char
+  }
+  segments.push(segment)
+  for (const item of segments) {
+    const name = item.trim().match(/^([A-Za-z_][\w.]*)/)?.[1]
+    if (name && !catalogFieldNames().has(name)) {
+      problems.push(`#[instrument] 字段 ${name} 未登记在日志字段目录（${LOG_FIELD_CATALOG_PATH}）`)
+    }
+  }
+  return problems
+}
+
 function attributeText(lines, lineNumber) {
   let text = ''
-  for (let index = lineNumber - 1; index < Math.min(lines.length, lineNumber + 7); index += 1) {
+  for (let index = lineNumber - 1; index < Math.min(lines.length, lineNumber + 15); index += 1) {
     text += `${lines[index]}\n`
     if (/\]\s*$/.test(lines[index].trimEnd()) && (text.match(/\[/g) ?? []).length <= (text.match(/\]/g) ?? []).length) break
   }
@@ -329,6 +372,9 @@ function logPrivacyViolations(path, lines, codeLines, lineNumber) {
         type: 'error-source',
         message: '#[instrument] 必须写 skip_all 或显式 fields(..)，避免参数自动进入 span 字段',
       })
+    }
+    for (const message of instrumentFieldProblems(text)) {
+      violations.push({ path, line: lineNumber, source: lines[lineNumber - 1].trim(), type: 'error-source', message })
     }
   }
   const attribute = (lines[lineNumber - 1] ?? '').match(ERROR_ATTRIBUTE)

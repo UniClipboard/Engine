@@ -978,9 +978,7 @@ impl ApplyInboundClipboardUseCase {
         name = "apply_inbound.execute",
         skip_all,
         fields(
-            snapshot_hash = %input.snapshot_hash,
-            plaintext_len = input.plaintext.len(),
-        )
+            plaintext_len = input.plaintext.len(),)
     )]
     async fn execute_internal(
         &self,

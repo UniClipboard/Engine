@@ -97,7 +97,7 @@ impl ActiveClipboardPullServeUseCase {
     /// the content is not held / not materializable, and
     /// [`ActiveClipboardPullServeError::NotUnlocked`] when the session is
     /// locked.
-    #[instrument(name = "active_state.serve_pull", skip_all, fields(snapshot_hash = %snapshot_hash))]
+    #[instrument(name = "active_state.serve_pull", skip_all)]
     pub(crate) async fn serve(
         &self,
         snapshot_hash: &str,

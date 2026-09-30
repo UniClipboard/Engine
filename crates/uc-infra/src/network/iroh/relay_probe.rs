@@ -151,7 +151,7 @@ impl IrohRelayProbeAdapter {
 
     #[instrument(
         skip(self, url, access_token),
-        fields(relay = %sanitize_url_for_log(url), credential_configured = access_token.is_some())
+        fields(credential_configured = access_token.is_some())
     )]
     pub async fn probe_with_access_token(
         &self,

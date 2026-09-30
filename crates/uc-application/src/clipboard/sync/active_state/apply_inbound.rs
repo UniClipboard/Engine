@@ -270,9 +270,7 @@ impl ApplyInboundActiveClipboardStateUseCase {
         name = "active_state.apply_inbound",
         skip_all,
         fields(
-            snapshot_hash = %inbound.snapshot_hash,
-            activated_at_ms = inbound.activated_at_ms,
-        ),
+            activated_at_ms = inbound.activated_at_ms,),
     )]
     pub(crate) async fn handle_one(&self, inbound: InboundActiveClipboardState) {
         let peer = inbound.peer_device_id;

@@ -283,6 +283,37 @@ fn module_log_channel_records_renders_limits_and_exports_with_visible_counts() {
     assert_eq!(chain.len(), 17, "{long_row}");
     assert_eq!(chain[16], "<more layers omitted>", "{long_row}");
 
+    // 记录整体超过上限：字段被丢弃并标记 truncated，计数加一。
+    tracing::warn!(
+        target: "uc_infra::module_log_channel",
+        cause = leaked_text,
+        context = leaked_text,
+        dependency = leaked_text,
+        emitter = leaked_text,
+        event = leaked_text,
+        issue = leaked_text,
+        msg_kind = leaked_text,
+        plan = leaked_text,
+        operation = leaked_text,
+        table = leaked_text,
+        origin = leaked_text,
+        recovery_state = leaked_text,
+        reject_reason = leaked_text,
+        existing_status = leaked_text,
+        file_paths_source = leaked_text,
+        error_class = leaked_text,
+        source_class = leaked_text,
+        step = leaked_text,
+        "oversized record"
+    );
+    flush();
+    let oversized = module_rows(directory.path())
+        .into_iter()
+        .find(|row| row["message"] == "oversized record")
+        .expect("oversized row");
+    assert_eq!(oversized["truncated"], true, "{oversized}");
+    assert_eq!(oversized["fields"], serde_json::json!({}), "{oversized}");
+
     // 阶段五：热记录点限速，丢弃计数并在下一条放行记录里给出 suppressed（失败方式 4）。
     for _ in 0..200 {
         hot_event();

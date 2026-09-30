@@ -559,7 +559,7 @@ impl PairingInvitationAddressQueryPort for RendezvousPairingInvitationAdapter {
 
 #[async_trait]
 impl PairingInvitationByAddressPort for RendezvousPairingInvitationAdapter {
-    #[instrument(skip_all, fields(selected_ip = %selected_ip))]
+    #[instrument(skip_all)]
     async fn issue_invitation_for_address(
         &self,
         selected_ip: IpAddr,

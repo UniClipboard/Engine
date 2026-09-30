@@ -366,6 +366,38 @@ fn multi() {}
   assert.match(result.stderr, /fixture\.rs:8/)
 })
 
+test('拒绝 instrument 使用 err、ret 与未登记的 span 字段', () => {
+  const result = check(`
+#[instrument(skip_all, err)]
+async fn fallible() -> Result<(), Error> {}
+
+#[instrument(skip_all, ret)]
+fn returns() -> u8 {}
+
+#[instrument(skip_all, fields(selected_ip = %ip))]
+fn address(ip: IpAddr) {}
+`)
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /fixture\.rs:2.*err 或 ret/)
+  assert.match(result.stderr, /fixture\.rs:5.*err 或 ret/)
+  assert.match(result.stderr, /fixture\.rs:8.*selected_ip 未登记/)
+})
+
+test('接受字段目录内的 instrument 字段，包括多行写法', () => {
+  const result = check(`
+#[instrument(
+    skip_all,
+    fields(
+        operation = "load",
+        entry_id = %entry_id,
+        limit = 10,
+    )
+)]
+async fn load(entry_id: &EntryId) {}
+`)
+  assert.equal(result.status, 0, result.stderr)
+})
+
 test('接受 skip_all 或显式 fields 的 instrument 与带链的错误日志', () => {
   const result = check(`
 #[tracing::instrument(name = "space.load", skip_all)]

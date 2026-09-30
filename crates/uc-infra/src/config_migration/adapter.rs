@@ -579,7 +579,7 @@ impl ConfigMigrationAdapter {
 
 #[async_trait]
 impl ExportConfigBundlePort for ConfigMigrationAdapter {
-    #[instrument(skip_all, fields(profile = %self.profile_id.inner()))]
+    #[instrument(skip_all)]
     async fn export_bundle(&self, destination: &Path) -> Result<PathBuf, ConfigMigrationError> {
         let result = self.export_bundle_inner(destination).await;
         if let Err(error) = &result {

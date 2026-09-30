@@ -107,4 +107,4 @@
 
 - 检查在 CI 上的真实耗时（本地冷缓存两轮约 2 分钟）需要一次真实 PR 运行确认。
 - Windows 与 Android 专属代码里迁移过的调用点（例如 `hidden_path.rs` 的两处字面量消息）没有在对应平台上编译。
-- `#[instrument]` 约 130 处不受 lint 影响，其 `fields(..)` 与 `err` 参数未纳入目录，需要单独方案。
+- `#[instrument]` 的 `fields(..)` 已由 `check-rust-style.mjs` 按字段目录名称检查，`err`、`ret` 被拒绝；该检查只覆盖新增行，值类别（例如 `Identifier`）仍不像 `uc_*!` 那样在编译期约束。

@@ -396,7 +396,7 @@ decorator 负责。Sponsor 在等待执行锁之前确定已认证消息的固�
   `disallowed_macros` 在默认特性与 `lan-compat` 下各检查一轮，任何直接使用 `tracing::{trace,debug,info,warn,error}!` 都失败；
   `tracing::event!` 只有观测 crate 自己可以直接使用。clippy 只认 crate 级 allow，因此确需保留原始 tracing 的文件
   （观测运行期验证未登记字段处理的三个集成测试）在文件顶部用 `#![allow(clippy::disallowed_macros)]` 并写明理由。
-- **规则检查。** `check-rust-style.mjs` 对新增行要求 `#[instrument]` 带 `skip_all` 或显式 `fields(..)`，拒绝直接使用日志宏，并拒绝 `#[error]` 文本内插
+- **规则检查。** `check-rust-style.mjs` 对新增行要求 `#[instrument]` 带 `skip_all` 或显式 `fields(..)`，`fields(..)` 的名称必须登记在日志字段目录，且不得使用 `err`、`ret`，拒绝直接使用日志宏，并拒绝 `#[error]` 文本内插
   `String`、`PathBuf`、`Vec<u8>`、`&str` 等未包装字段（文本启发式，需要人工复核）。
 
 现有代码中的字符串化与日志正文清单见[错误来源保留执行计划](../exec-plans/completed/2026-09-24-error-source-preservation.md)。

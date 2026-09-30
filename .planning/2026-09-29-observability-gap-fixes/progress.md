@@ -36,3 +36,10 @@ Remote exporter build failure now yields `RemoteSetupFailure` (http_client/trace
 - Module log error chains now render only `io::Error` and `serde_json::Error` layers; per-layer character truncation was removed as unreachable, and the long-chain test now asserts the depth cap.
 - Verification: fmt, workspace check (default and lan-compat), core/contract/runtime/application/infra tests, style, direct-log and engine repository checks all pass.
 - Known pre-existing flake: `interrupted_file_transfer_recovers_after_receiver_process_restart` in uc-engine times out about half the time on the unmodified HEAD (4dda7e6 baseline: 2 of 4 runs failed); unrelated to this change.
+
+## 2026-09-30 #[instrument] fields
+
+- `check-rust-style.mjs` now requires `#[instrument(fields(..))]` names to be registered in the log field catalog and rejects `err`/`ret`; unit tests added. The check runs on added lines only, so a full-repo sweep was done with `--file`; only two extra sites needed changes.
+- Removed span fields carrying addresses, device ids, profile ids, relay URLs and content-derived hashes (`selected_ip`, `device`, `target`, `target_device_id`, `profile`, `relay`, `snapshot_hash`).
+- Registered scalar counters and the closed vocabularies `operator` and `ack`; added them to `NEWLY_VISIBLE`.
+- Fixed `module_log_channel` again: record-size truncation is now exercised with an oversized record of many bounded fields, because opaque error layers can no longer reach the limit.

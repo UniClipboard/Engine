@@ -136,7 +136,6 @@ where
             operation = "record_attempt",
             table = "clipboard_entry_delivery",
             entry_id = %record.entry_id,
-            target_device_id = %record.target_device_id,
         )
     )]
     async fn record_attempt(&self, record: &EntryDeliveryRecord) -> Result<(), EntryDeliveryError> {

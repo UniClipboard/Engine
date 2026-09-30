@@ -248,7 +248,7 @@ struct ReporterImpl {
 
 #[async_trait]
 impl OutboundProgressReporterPort for ReporterImpl {
-    #[instrument(skip(self), fields(target = %target.as_str(), bytes = bytes_transferred))]
+    #[instrument(skip(self), fields(bytes = bytes_transferred))]
     async fn report(
         &self,
         target: &DeviceId,

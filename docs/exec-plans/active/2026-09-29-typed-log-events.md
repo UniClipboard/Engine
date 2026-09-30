@@ -94,4 +94,4 @@ uc_warn!(error = &err as &dyn std::error::Error, "history cleanup failed");
 ## 仍开放
 
 - Windows 与 Android 专属代码里迁移过的调用点没有在对应平台上编译。
-- `#[instrument]` 约 130 处不受 lint 影响，单独处理。
+- `#[instrument]` 的字段名已纳入目录检查（2026-09-30）；地址、设备、档案与内容哈希字段已从 span 移除。值类别不在编译期约束。
