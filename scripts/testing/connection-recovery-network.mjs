@@ -420,6 +420,21 @@ function unblockOutboundInitiation(node, peer) {
   faults.push({ node: `${node.label}->${peer.label}`, action: 'outbound_initiation_restored', at_ms: Math.round(performance.now()) })
 }
 
+// 节点结构化日志中，给定时刻之后出现的第一条新连接的方向（inbound / outbound）；没有则为 undefined。
+function firstConnectionDirectionSince(node, since) {
+  let first
+  for (const name of readdirSync(join(node.root, 'logs')).filter(name => name.includes('.json'))) {
+    for (const line of readFileSync(join(node.root, 'logs', name), 'utf8').split('\n')) {
+      try {
+        const row = JSON.parse(line)
+        if (row.fields?.['event.name'] !== 'connection.established' || row.timestamp < since) continue
+        if (!first || row.timestamp < first.timestamp) first = { timestamp: row.timestamp, direction: row.fields.direction }
+      } catch {}
+    }
+  }
+  return first?.direction
+}
+
 async function scenario(id, action) {
   if (only && !id.startsWith(only)) return
   firstScenarioStartedAt ??= performance.now()
@@ -500,6 +515,7 @@ async function knownPeerRecoveryScenarios(a, b, c) {
       assert(!udpPortBound(c, oldPort), 'the previous fixed UDP port is still listening')
       const commandBaselines = new Map(nodes.map(node => [node, node.commands.length]))
       const contactStarted = performance.now()
+      const contactStartedAt = new Date().toISOString()
       const deadline = contactStarted + 20_000
       await scenario(`E13-known-peer-contact-${iteration}`, async () => {
         await c.start()
@@ -510,13 +526,11 @@ async function knownPeerRecoveryScenarios(a, b, c) {
         await online([c, a], remaining)
         const onlineAt = performance.now()
         assert(onlineAt - contactStarted <= 20_000, 'automatic known-peer recovery exceeded 20 seconds')
-        await until(async () => {
-          const [cConnections, aConnections] = await Promise.all([
-            c.call('connections'),
-            a.call('connections'),
-          ])
-          return cConnections.outgoing > 0 && aConnections.incoming > 0
-        }, deadline - performance.now(), 'the recovered connection direction did not become observable')
+        // 防火墙只能拦住 a 的“新建”出站；c 的流量让同 5 元组进入应答方向后，a 按成员恢复逻辑回拨也会放行，
+        // 所以最终在线连接的方向取决于竞速，不作断言。可证明的是：c 先联系了 a（a 收到的第一条新连接是入站）。
+        await a.call('flush')
+        const first = firstConnectionDirectionSince(a, contactStartedAt)
+        assert(first === 'inbound', `the first connection the peer saw after the restart was ${first ?? 'absent'}, not the restarted device contacting it`)
         const forbidden = new Set(['opportunity', 'recover', 'send', 'suspend', 'resume'])
         for (const node of [c, a]) {
           assert(!node.commands.slice(commandBaselines.get(node)).some(command => forbidden.has(command)), 'the scenario used a forbidden recovery trigger before Online')
@@ -526,8 +540,7 @@ async function knownPeerRecoveryScenarios(a, b, c) {
           replacement_port_bound: true,
           discovery_blocked: true,
           public_discovery_disabled: true,
-          initiator_outbound: true,
-          receiver_inbound: true,
+          restarted_device_contacted_first: true,
           automatic_online_within_ms: Math.round(onlineAt - contactStarted),
           forbidden_triggers_used: false,
         }
@@ -686,13 +699,11 @@ async function lanOnlyVpnScenarios(a, b) {
     return { ...proof, trusted_networks: 1, discovery_blocked: true, non_vpn_path: false, vpn_address_saved_after_reconnect: true, bidirectional_transfer: true }
   })
 
-  if (!wireguardAvailable()) {
-    const record = { id: 'V03-wireguard-tunnel-large-transfer', started: new Date().toISOString(), outcome: 'skipped', reason: 'wireguard_unavailable', completed: new Date().toISOString(), elapsed_ms: 0 }
-    records.push(record)
-    process.stdout.write(`${record.id}: skipped (WireGuard interfaces or the wg tool are unavailable in this environment)\n`)
-  } else {
-    await scenario('V03-wireguard-tunnel-large-transfer', () => wireguardScenario(a, b))
-  }
+  // 缺少 wg 工具或内核 WireGuard 支持时直接失败，不静默跳过：否则夜间任务会在没有覆盖真实隧道的情况下显示通过。
+  await scenario('V03-wireguard-tunnel-large-transfer', async () => {
+    assert(wireguardAvailable(), 'ENVIRONMENT INVALID: WireGuard is unavailable (the wg tool or kernel WireGuard interfaces are missing)')
+    return wireguardScenario(a, b)
+  })
 
   await scenario('V04-no-public-infrastructure', async () => {
     const egress = nodes.map(node => ({ node: node.label, packets: egressPackets(node) - node.egressBaseline }))
