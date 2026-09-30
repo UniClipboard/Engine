@@ -80,7 +80,7 @@ async fn failed_round_is_retained_by_pause_resume_shutdown_and_application_repor
 
 #[tokio::test]
 async fn panicked_round_is_recorded_once_as_a_task_join_failure() {
-    let logs = crate::test_support::log_capture::CapturedLogs::default();
+    let logs = uc_testkit::log_capture::CapturedLogs::default();
     let _guard = logs.install();
     let maintain = Arc::new(MaintainSpaceMembershipUseCase::new(
         MaintainSpaceMembershipDeps {

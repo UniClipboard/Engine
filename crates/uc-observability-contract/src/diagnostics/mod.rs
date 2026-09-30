@@ -549,6 +549,8 @@ pub enum DiagnosticTaskKind {
     MembershipMaintenanceRound,
     /// 活跃剪贴板必需 worker 的任务异常退出（panic 或被取消）。
     ActiveClipboardWorker,
+    /// 移动端绑定的引擎 worker 线程异常退出；宿主只收到稳定错误码。
+    MobileWorker,
 }
 
 impl DiagnosticTaskKind {
@@ -565,6 +567,7 @@ impl DiagnosticTaskKind {
             Self::SessionSuspend => "session_suspend",
             Self::MembershipMaintenanceRound => "membership_maintenance_round",
             Self::ActiveClipboardWorker => "active_clipboard_worker",
+            Self::MobileWorker => "mobile_worker",
         }
     }
 }

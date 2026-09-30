@@ -429,7 +429,7 @@ mod lifecycle_tests {
 
     #[tokio::test]
     async fn required_worker_stopping_early_is_recorded_with_its_fixed_name() {
-        let logs = crate::test_support::log_capture::CapturedLogs::default();
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
         let _guard = logs.install();
         let (lifecycle, cancel) = lifecycle_with_worker(async { "inbound" });
         cancel.cancelled().await;
@@ -444,7 +444,7 @@ mod lifecycle_tests {
 
     #[tokio::test]
     async fn panicked_required_worker_is_recorded_as_a_task_join_failure() {
-        let logs = crate::test_support::log_capture::CapturedLogs::default();
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
         let _guard = logs.install();
         let (lifecycle, cancel) = lifecycle_with_worker(async {
             assert!(false, "PRIVATE_WORKER_FAILURE");

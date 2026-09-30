@@ -10,3 +10,7 @@
   `interrupted_file_transfer_recovers_after_receiver_process_restart`（基线 3 次失败 1 次）、
   `engine_shutdown_removes_unfinished_mobile_upload_files`（lan-compat，基线 8 次失败 2 次）。
 - 下一步：补日志（findings.md 55 条）直接使用 `uc_*!` 宏；ADR 第 3 步（错误分类）与 `DiagnosticTaskKind` 声明生成另行处理。
+- 2026-09-29：补日志 P0 的 15 条全部完成（#1-#15，每条先写失败的日志捕获测试再实现）。新增任务类别
+  `membership_maintenance_round`、`active_clipboard_worker`、`mobile_worker`；共享日志捕获辅助放在 `uc-testkit::log_capture`。
+  验证：`cargo test --workspace` 3981 通过，失败仅为基线已有的 upgrade-matrix 与崩溃恢复偶发；直接日志宏检查为 0。
+  下一步：P1（#16-#45）与 P2（#46-#55）。

@@ -28,7 +28,7 @@ use crate::{
     QueryMemberSyncPreferencesInput, RemoveMemberInput, SpaceProtectionModeSummary,
     SpaceProtectionSummary, UpdateMemberSyncPreferencesInput,
 };
-use uc_observability_contract::{log_fields::log_vocab, uc_error, uc_info};
+use uc_observability_contract::{log_fields::log_vocab, uc_error, uc_info, uc_warn};
 
 pub async fn execute_list_devices(facade: &AppFacade) -> Result<OperationResult, EngineError> {
     // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
@@ -609,52 +609,124 @@ fn map_roster_error(error: RosterError) -> EngineError {
 }
 
 fn map_remove_space_member_error(error: RemoveSpaceMemberError) -> EngineError {
-    match error {
-        RemoveSpaceMemberError::Locked => EngineError::new(
+    // 输入类失败（目标不存在、删除自己）与被锁定属于调用方可预期的结果，只记 INFO；其余是需要排查的状态或本机问题。
+    let (code, category, retryable, variant, expected) = match error {
+        RemoveSpaceMemberError::Locked => (
             QUERY_WORKSPACE_CONVERGENCE_UNAVAILABLE_CODE,
             EngineErrorCategory::Unavailable,
             false,
+            "locked",
+            true,
         ),
         // 成员状态或本机签名暂时不可用（例如加入后仍在切换 Space 会话）：稍后重试即可完成。
-        RemoveSpaceMemberError::Unavailable => EngineError::new(
+        RemoveSpaceMemberError::Unavailable => (
             QUERY_WORKSPACE_CONVERGENCE_UNAVAILABLE_CODE,
             EngineErrorCategory::Unavailable,
             true,
+            "unavailable",
+            false,
         ),
-        RemoveSpaceMemberError::RecoveryRequired { .. } => EngineError::new(
+        RemoveSpaceMemberError::RecoveryRequired { .. } => (
             QUERY_WORKSPACE_CONVERGENCE_CORRUPT_CODE,
             EngineErrorCategory::InvalidState,
             false,
+            "recovery_required",
+            false,
         ),
-        RemoveSpaceMemberError::StateChanged => EngineError::new(
+        RemoveSpaceMemberError::StateChanged => (
             QUERY_WORKSPACE_CONVERGENCE_FAILED_CODE,
             EngineErrorCategory::InvalidState,
             true,
+            "state_changed",
+            false,
         ),
-        RemoveSpaceMemberError::TargetNotFound => {
-            EngineError::new(MEMBER_NOT_FOUND_CODE, EngineErrorCategory::NotFound, false)
-        }
-        RemoveSpaceMemberError::SelfTarget => EngineError::new(
+        RemoveSpaceMemberError::TargetNotFound => (
+            MEMBER_NOT_FOUND_CODE,
+            EngineErrorCategory::NotFound,
+            false,
+            "target_not_found",
+            true,
+        ),
+        RemoveSpaceMemberError::SelfTarget => (
             MEMBER_INVALID_INPUT_CODE,
             EngineErrorCategory::InvalidInput,
             false,
+            "self_target",
+            true,
         ),
-        RemoveSpaceMemberError::LocalMemberRemoved => EngineError::new(
+        RemoveSpaceMemberError::LocalMemberRemoved => (
             QUERY_WORKSPACE_CONVERGENCE_FAILED_CODE,
             EngineErrorCategory::InvalidState,
             false,
+            "local_member_removed",
+            false,
         ),
-        RemoveSpaceMemberError::CommittedButPending { .. } => EngineError::new(
+        // 本机已提交移除，但其他成员尚未确认；与 StateChanged 的错误码相同，只能靠这里的分类区分。
+        RemoveSpaceMemberError::CommittedButPending { .. } => (
             QUERY_WORKSPACE_CONVERGENCE_FAILED_CODE,
             EngineErrorCategory::InvalidState,
             true,
+            "committed_but_pending",
+            false,
         ),
+    };
+    if expected {
+        uc_info!(
+            operation = "remove_member",
+            variant = variant,
+            error_code = code,
+            error_category = log_vocab(&category),
+            retryable = retryable,
+            "member removal failed"
+        );
+    } else {
+        uc_warn!(
+            operation = "remove_member",
+            variant = variant,
+            error_code = code,
+            error_category = log_vocab(&category),
+            retryable = retryable,
+            "member removal failed"
+        );
     }
+    EngineError::new(code, category, retryable)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remove_member_failures_are_recorded_with_variant_code_and_retryability() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+
+        for error in [
+            RemoveSpaceMemberError::Unavailable,
+            RemoveSpaceMemberError::StateChanged,
+            RemoveSpaceMemberError::recovery_required(),
+            RemoveSpaceMemberError::LocalMemberRemoved,
+            RemoveSpaceMemberError::SelfTarget,
+        ] {
+            map_remove_space_member_error(error);
+        }
+
+        assert_eq!(logs.count("member removal failed"), 5);
+        let output = logs.output();
+        for variant in [
+            "unavailable",
+            "state_changed",
+            "recovery_required",
+            "local_member_removed",
+            "self_target",
+        ] {
+            assert!(
+                output.contains(&format!("variant=\"{variant}\"")),
+                "{variant}"
+            );
+        }
+        assert!(output.contains("operation=\"remove_member\""));
+    }
     use uc_core::membership::MembershipError;
 
     fn handoff_pending_removal(includes_local_device: bool) -> DeviceTrustStatus {

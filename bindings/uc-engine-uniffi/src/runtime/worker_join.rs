@@ -2,6 +2,9 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use uc_engine::observability::diagnostics::{record_task_join_failure, DiagnosticTaskKind};
+use uc_engine::observability::uc_warn;
+
 use super::{lock, shutdown::wait_timeout};
 use crate::BindingError;
 
@@ -34,19 +37,30 @@ impl WorkerJoin {
         let mut state = lock(&self.state.0);
         if let Some(worker) = state.worker.take() {
             let shared = Arc::clone(&self.state);
+            // reaper 是新线程，沿用等待方当前生效的订阅者，异常退出记录才会走同一条输出。
+            let dispatch = tracing::dispatcher::get_default(Clone::clone);
             if thread::Builder::new()
                 .name("uc-engine-uniffi-reaper".to_owned())
                 .spawn(move || {
                     let result = worker
                         .join()
                         // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
-                        .map_err(|_| BindingError::RuntimeUnavailable)
+                        .map_err(|_| {
+                            tracing::dispatcher::with_default(&dispatch, || {
+                                record_task_join_failure(DiagnosticTaskKind::MobileWorker);
+                            });
+                            BindingError::RuntimeUnavailable
+                        })
                         .and_then(|result| result);
                     lock(&shared.0).result = Some(result);
                     shared.1.notify_all();
                 })
                 .is_err()
             {
+                uc_warn!(
+                    error_kind = "reaper_spawn_failed",
+                    "engine worker reaper thread could not start"
+                );
                 state.result = Some(Err(BindingError::RuntimeUnavailable));
             }
         }
@@ -99,6 +113,23 @@ mod tests {
         let owner = WorkerJoin::new(thread::spawn(move || Err(failure)));
         assert_eq!(owner.wait(Duration::from_secs(1)), Err(error.clone()));
         assert_eq!(owner.wait(Duration::ZERO), Err(error));
+    }
+
+    #[test]
+    fn worker_panic_is_recorded_as_a_mobile_worker_join_failure() {
+        let recorder = crate::runtime::event_recorder::EventRecorder::default();
+        let dispatch = tracing::Dispatch::new(recorder.clone());
+        tracing::dispatcher::with_default(&dispatch, || {
+            let owner = WorkerJoin::new(thread::spawn(|| panic!("PRIVATE_WORKER_FAILURE")));
+            assert_eq!(
+                owner.wait(Duration::from_secs(1)),
+                Err(BindingError::RuntimeUnavailable)
+            );
+        });
+        let lines = recorder.lines();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("task.kind=mobile_worker"), "{lines:?}");
+        assert!(!lines[0].contains("PRIVATE"));
     }
 
     #[test]

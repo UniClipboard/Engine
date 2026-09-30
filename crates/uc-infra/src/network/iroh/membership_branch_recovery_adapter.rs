@@ -355,7 +355,7 @@ async fn write_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_log_capture::CapturedLogs;
+    use uc_testkit::log_capture::CapturedLogs;
 
     #[test]
     fn issuer_failures_are_recorded_by_kind_before_becoming_a_plain_rejection() {

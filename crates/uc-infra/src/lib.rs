@@ -23,8 +23,6 @@ pub mod search;
 pub mod security;
 pub mod settings;
 pub mod space;
-#[cfg(test)]
-pub(crate) mod test_log_capture;
 pub mod time;
 
 pub use app_version_state::FileAppVersionStateRepository;

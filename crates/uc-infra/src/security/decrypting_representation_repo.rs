@@ -379,11 +379,11 @@ impl ListRepresentationIdsByStatePort for DecryptingClipboardRepresentationRepos
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_log_capture::CapturedLogs;
     use uc_core::clipboard::PayloadAvailability;
     use uc_core::crypto::domain::Plaintext;
     use uc_core::ids::FormatId;
     use uc_core::ports::security::BlobCipherError;
+    use uc_testkit::log_capture::CapturedLogs;
 
     struct FixedRepresentations(Vec<PersistedClipboardRepresentation>);
 

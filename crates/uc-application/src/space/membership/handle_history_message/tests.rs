@@ -420,7 +420,7 @@ async fn restricted_event_applies_only_the_authenticated_signed_event() {
 
 #[tokio::test]
 async fn rejected_inbound_history_is_recorded_with_a_fixed_reason_and_no_identifiers() {
-    let logs = crate::test_support::log_capture::CapturedLogs::default();
+    let logs = uc_testkit::log_capture::CapturedLogs::default();
     let _guard = logs.install();
     let (local, local_credential) = member_facts("device-a", 0x41);
     let (peer, peer_credential) = member_facts("device-b", 0x42);

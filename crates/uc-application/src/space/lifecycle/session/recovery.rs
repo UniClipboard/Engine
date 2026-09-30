@@ -321,7 +321,7 @@ mod tests {
 
     #[tokio::test]
     async fn background_activation_failures_and_recovery_are_recorded() {
-        let logs = crate::test_support::log_capture::CapturedLogs::default();
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
         let _guard = logs.install();
         let activity = Arc::new(RecordingActivity {
             activations: AtomicUsize::new(0),

@@ -1,8 +1,8 @@
 use super::*;
-use crate::test_support::log_capture::CapturedLogs;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::broadcast;
 use uc_core::ports::{PeerReachabilityChanged, PeerReachabilityError};
+use uc_testkit::log_capture::CapturedLogs;
 
 struct Scope {
     peers: Mutex<Vec<DeviceId>>,

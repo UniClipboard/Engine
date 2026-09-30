@@ -388,7 +388,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_recovery_is_recorded_with_a_fixed_kind_and_no_error_text() {
-        let logs = crate::test_support::log_capture::CapturedLogs::default();
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
         let _guard = logs.install();
         let readiness = ReceiveReadinessCoordinator::new();
 
@@ -664,7 +664,7 @@ mod tests {
 
     #[tokio::test]
     async fn restart_recovery_records_a_numeric_summary_only_when_it_changed_state() {
-        let logs = crate::test_support::log_capture::CapturedLogs::default();
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
         let _guard = logs.install();
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("partial.bin");

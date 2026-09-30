@@ -86,7 +86,7 @@ mod tests {
         "version",
     ];
 
-    /// 一次性迁移时新增的可见文本字段：前十一个只接受 `&'static str`（编译期保证是固定字面量），
+    /// 迁移及其后补日志时新增的可见文本字段：`Literal` 字段只接受 `&'static str`（编译期保证是固定字面量），
     /// `existing_status` 是文件传输状态的已审定词表。
     const NEWLY_VISIBLE: &[&str] = &[
         "cause",
@@ -97,10 +97,13 @@ mod tests {
         "existing_status",
         "file_paths_source",
         "issue",
+        "msg_kind",
         "plan",
+        "reject_reason",
         "storage_generation",
         "task",
         "trigger",
+        "worker",
     ];
 
     #[test]

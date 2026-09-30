@@ -6044,7 +6044,7 @@ mod admission_tests {
 
     #[tokio::test]
     async fn permanent_loss_recovery_requires_group_rebuild_when_current_group_is_unreadable() {
-        let logs = crate::test_log_capture::CapturedLogs::default();
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
         let _log_guard = logs.install();
         let directory = tempdir().unwrap();
         let space_id = SpaceId::from("corrupt-recovery-space");

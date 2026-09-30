@@ -34,6 +34,8 @@ use crate::{
 use uc_engine::observability::{log_vocab_debug, uc_warn};
 
 const LIFECYCLE_TRANSITION_DEADLINE: Duration = Duration::from_secs(10);
+#[cfg(test)]
+mod event_recorder;
 mod lifecycle;
 mod shutdown;
 mod startup_lifecycle;
@@ -44,7 +46,7 @@ pub use startup_lifecycle::MobileStartupLifecycle;
 use worker_join::WorkerJoin;
 use worker_lifecycle::LifecycleCommand;
 
-fn log_mobile_query_failure(operation: &'static str, error: &BindingError) {
+fn log_mobile_failure(operation: &'static str, error: &BindingError) {
     match error {
         BindingError::Engine {
             code,
@@ -56,81 +58,81 @@ fn log_mobile_query_failure(operation: &'static str, error: &BindingError) {
             error_code = *code,
             error_category = log_vocab_debug(&category),
             retryable = *retryable,
-            "mobile query failed"
+            "mobile operation failed"
         ),
         BindingError::HostUnavailable => {
             uc_warn!(
                 operation = operation,
                 error_kind = "host_unavailable",
-                "mobile query failed"
+                "mobile operation failed"
             )
         }
         BindingError::HostPermissionDenied => {
             uc_warn!(
                 operation = operation,
                 error_kind = "host_permission_denied",
-                "mobile query failed"
+                "mobile operation failed"
             )
         }
         BindingError::HostInvalidHandle => {
             uc_warn!(
                 operation = operation,
                 error_kind = "host_invalid_handle",
-                "mobile query failed"
+                "mobile operation failed"
             )
         }
         BindingError::HostIo => uc_warn!(
             operation = operation,
             error_kind = "host_io",
-            "mobile query failed"
+            "mobile operation failed"
         ),
         BindingError::RuntimeUnavailable => {
             uc_warn!(
                 operation = operation,
                 error_kind = "runtime_unavailable",
-                "mobile query failed"
+                "mobile operation failed"
             )
         }
         BindingError::AlreadyStopped => {
             uc_warn!(
                 operation = operation,
                 error_kind = "already_stopped",
-                "mobile query failed"
+                "mobile operation failed"
             )
         }
         BindingError::ObservabilityConfigInvalid => {
             uc_warn!(
                 operation = operation,
                 error_kind = "observability_config_invalid",
-                "mobile query failed"
+                "mobile operation failed"
             )
         }
         BindingError::ObservabilityConfigConflict => {
             uc_warn!(
                 operation = operation,
                 error_kind = "observability_config_conflict",
-                "mobile query failed"
+                "mobile operation failed"
             )
         }
         BindingError::ObservabilityRuntimeUnavailable => {
             uc_warn!(
                 operation = operation,
                 error_kind = "observability_runtime_unavailable",
-                "mobile query failed"
+                "mobile operation failed"
             )
         }
         BindingError::ObservabilityNotInstalled => {
             uc_warn!(
                 operation = operation,
                 error_kind = "observability_not_installed",
-                "mobile query failed"
+                "mobile operation failed"
             )
         }
         BindingError::UnexpectedResult => {
             uc_warn!(
                 operation = operation,
                 error_kind = "unexpected_result",
-                "mobile query failed"
+                "mobile operation failed"
             )
         }
     }
@@ -873,7 +875,10 @@ impl MobileEngine {
                 )
             })
             // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
-            .map_err(|_| BindingError::RuntimeUnavailable)?;
+            .map_err(|_| {
+                log_mobile_failure("thread_spawn", &BindingError::RuntimeUnavailable);
+                BindingError::RuntimeUnavailable
+            })?;
 
         match start_result.recv() {
             Ok(Ok(())) => Ok(Arc::new(Self {
@@ -1430,6 +1435,7 @@ fn run_worker(
     {
         Ok(runtime) => runtime,
         Err(_) => {
+            log_mobile_failure("runtime_build", &BindingError::RuntimeUnavailable);
             let _ = started.send(Err(BindingError::RuntimeUnavailable));
             return Err(BindingError::RuntimeUnavailable);
         }
@@ -1465,6 +1471,7 @@ async fn run_worker_loop(
         Ok(started_engine) => started_engine,
         Err(error) => {
             let error = BindingError::from(error);
+            log_mobile_failure("engine_start", &error);
             let _ = started.send(Err(error.clone()));
             return Err(error);
         }
@@ -1647,7 +1654,7 @@ async fn run_operations(
                     .map_err(BindingError::from)
                     .and_then(map_space_state);
                 if let Err(error) = &result {
-                    log_mobile_query_failure("query_space_state", error);
+                    log_mobile_failure("query_space_state", error);
                 }
                 let _ = response.send(result);
             }
@@ -1658,7 +1665,7 @@ async fn run_operations(
                     .map_err(BindingError::from)
                     .and_then(map_devices);
                 if let Err(error) = &result {
-                    log_mobile_query_failure("list_devices", error);
+                    log_mobile_failure("list_devices", error);
                 }
                 let _ = response.send(result);
             }
@@ -2837,6 +2844,31 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn worker_start_failures_are_recorded_with_phase_and_stable_codes_only() {
+        let recorder = event_recorder::EventRecorder::default();
+        let dispatch = tracing::Dispatch::new(recorder.clone());
+        tracing::dispatcher::with_default(&dispatch, || {
+            log_mobile_failure("runtime_build", &BindingError::RuntimeUnavailable);
+            log_mobile_failure(
+                "engine_start",
+                &BindingError::Engine {
+                    code: 1108,
+                    category: crate::BindingErrorCategory::Internal,
+                    retryable: true,
+                },
+            );
+        });
+
+        let lines = recorder.lines();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("operation=runtime_build"));
+        assert!(lines[0].contains("error_kind=runtime_unavailable"));
+        assert!(lines[1].contains("operation=engine_start"));
+        assert!(lines[1].contains("error_code=1108"));
+        assert!(lines[1].contains("retryable=true"));
+    }
+
     use super::*;
 
     #[tokio::test]

@@ -1588,7 +1588,7 @@ mod tests {
     /// 列表失败后重建仍以已收集的条目结束并置为就绪；这个降级结果必须在记录里可见。
     #[tokio::test]
     async fn rebuild_from_a_truncated_listing_is_recorded_as_such() {
-        let logs = crate::test_support::log_capture::CapturedLogs::default();
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
         let _guard = logs.install();
         let index = FakeSearchIndex {
             meta: SearchIndexMeta {
