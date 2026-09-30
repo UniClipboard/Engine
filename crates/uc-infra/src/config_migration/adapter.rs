@@ -35,7 +35,7 @@ use super::staging::{
     DB_MEMBER, DEVICE_ID_MEMBER, IROH_IDENTITY_PREFIX, KEYSLOT_MEMBER, PENDING_IMPORT_SCHEMA_VER,
     PROFILE_SECRETS_MEMBER, SETTINGS_MEMBER, STAGING_DIR_NAME, UI_STATE_PREFIX,
 };
-use uc_observability_contract::{uc_error, uc_info, uc_warn};
+use uc_observability_contract::{error_source::io_error_kind, uc_error, uc_info, uc_warn};
 
 /// Raw secure-storage entries collected for a bundle, paired with the
 /// current-profile KEK bytes when one was among them.
@@ -403,10 +403,11 @@ fn map_staging_err(err: StagingError) -> ConfigMigrationError {
     }
 }
 
-#[async_trait]
-impl ExportConfigBundlePort for ConfigMigrationAdapter {
-    #[instrument(skip_all, fields(profile = %self.profile_id.inner()))]
-    async fn export_bundle(&self, destination: &Path) -> Result<PathBuf, ConfigMigrationError> {
+impl ConfigMigrationAdapter {
+    async fn export_bundle_inner(
+        &self,
+        destination: &Path,
+    ) -> Result<PathBuf, ConfigMigrationError> {
         uc_info!("starting config bundle export");
 
         // 1. Consistent db snapshot (blocking; sqlite + file IO).
@@ -577,6 +578,18 @@ impl ExportConfigBundlePort for ConfigMigrationAdapter {
 }
 
 #[async_trait]
+impl ExportConfigBundlePort for ConfigMigrationAdapter {
+    #[instrument(skip_all, fields(profile = %self.profile_id.inner()))]
+    async fn export_bundle(&self, destination: &Path) -> Result<PathBuf, ConfigMigrationError> {
+        let result = self.export_bundle_inner(destination).await;
+        if let Err(error) = &result {
+            record_boundary_failure("export", error);
+        }
+        result
+    }
+}
+
+#[async_trait]
 impl PreviewConfigImportPort for ConfigMigrationAdapter {
     #[instrument(skip_all)]
     async fn preview_import(
@@ -598,10 +611,8 @@ impl PreviewConfigImportPort for ConfigMigrationAdapter {
     }
 }
 
-#[async_trait]
-impl StageConfigImportPort for ConfigMigrationAdapter {
-    #[instrument(skip_all)]
-    async fn stage_import(
+impl ConfigMigrationAdapter {
+    async fn stage_import_inner(
         &self,
         password: &Passphrase,
         source: &Path,
@@ -650,5 +661,78 @@ impl StageConfigImportPort for ConfigMigrationAdapter {
         Ok(StagedConfigImport {
             unlock_required_after_apply: !has_kek,
         })
+    }
+}
+
+#[async_trait]
+impl StageConfigImportPort for ConfigMigrationAdapter {
+    #[instrument(skip_all)]
+    async fn stage_import(
+        &self,
+        password: &Passphrase,
+        source: &Path,
+    ) -> Result<StagedConfigImport, ConfigMigrationError> {
+        let result = self.stage_import_inner(password, source).await;
+        if let Err(error) = &result {
+            record_boundary_failure("stage_import", error);
+        }
+        result
+    }
+}
+
+/// 导出与暂存导入的边界失败：Engine 侧会把 `Err` 折叠为内部错误，变体与阶段在此保留。
+/// 用户原因（口令错误、版本不兼容）为 WARN，io 与内部故障为 ERROR；不含路径、口令或错误正文。
+fn record_boundary_failure(operation: &'static str, error: &ConfigMigrationError) {
+    let error_kind = match error {
+        ConfigMigrationError::Locked => "locked",
+        ConfigMigrationError::NotInitialized => "not_initialized",
+        ConfigMigrationError::InvalidPasswordOrCorrupt => "invalid_password_or_corrupt",
+        ConfigMigrationError::IncompatibleBundle { .. } => "incompatible_bundle",
+        ConfigMigrationError::Io { .. } => "io",
+        ConfigMigrationError::Internal { .. } => "internal",
+    };
+    match error {
+        ConfigMigrationError::Io { .. } | ConfigMigrationError::Internal { .. } => uc_error!(
+            stage = operation,
+            error_kind = error_kind,
+            io_error_kind = io_error_kind(error),
+            "config migration failed"
+        ),
+        _ => uc_warn!(
+            stage = operation,
+            error_kind = error_kind,
+            "config migration rejected"
+        ),
+    }
+}
+
+#[cfg(test)]
+mod boundary_failure_tests {
+    use super::*;
+
+    #[test]
+    fn user_causes_warn_and_io_failures_error_without_error_text() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+
+        record_boundary_failure(
+            "stage_import",
+            &ConfigMigrationError::InvalidPasswordOrCorrupt,
+        );
+        record_boundary_failure(
+            "export",
+            &ConfigMigrationError::Io {
+                details: "PRIVATE_DETAIL".to_owned(),
+                source: Some(Box::new(std::io::Error::other("PRIVATE_IO"))),
+            },
+        );
+
+        assert_eq!(logs.count("config migration rejected"), 1);
+        assert_eq!(logs.count("config migration failed"), 1);
+        assert!(logs
+            .output()
+            .contains("error_kind=\"invalid_password_or_corrupt\""));
+        assert!(logs.output().contains("io_error_kind=Other"));
+        assert!(!logs.output().contains("PRIVATE"));
     }
 }

@@ -210,6 +210,41 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_drop_shutdown_and_a_leaked_worker_are_recorded() {
+        let recorder = crate::runtime::event_recorder::EventRecorder::default();
+        let dispatch = tracing::Dispatch::new(recorder.clone());
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+        let (commands, requests) = tokio::sync::mpsc::unbounded_channel();
+        let (lifecycle_commands, lifecycle_requests) = tokio::sync::mpsc::unbounded_channel();
+        drop(requests);
+        drop(lifecycle_requests);
+        let (release, released) = mpsc::channel::<()>();
+        let worker = std::thread::spawn(move || {
+            let _ = released.recv();
+            Ok(())
+        });
+        let engine = MobileEngine {
+            commands: Mutex::new(Some(commands)),
+            lifecycle_commands: Mutex::new(Some(lifecycle_commands)),
+            shutdown_pending: AtomicBool::new(false),
+            events: Arc::new(EventQueue::new(1)),
+            worker: WorkerJoin::new(worker),
+        };
+
+        drop(engine);
+
+        let lines = recorder.lines().join("\n");
+        assert_eq!(
+            lines.matches("mobile operation failed").count(),
+            2,
+            "{lines}"
+        );
+        assert!(lines.contains("drop_shutdown_failed"), "{lines}");
+        assert!(lines.contains("drop_worker_leaked"), "{lines}");
+        release.send(()).unwrap();
+    }
+
+    #[test]
     fn disconnected_reply_after_event_close_joins_the_completed_worker() {
         let (commands, requests) = tokio::sync::mpsc::unbounded_channel();
         let (lifecycle_commands, mut lifecycle_requests) = tokio::sync::mpsc::unbounded_channel();

@@ -1,11 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::future::Future;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use iroh::endpoint::{
     AfterHandshakeOutcome, BeforeConnectOutcome, Connection, EndpointHooks, WeakConnectionHandle,
 };
 use iroh::protocol::{AcceptError, DynProtocolHandler, ProtocolHandler};
 use tokio::sync::{watch, Notify};
+use uc_observability_contract::uc_warn;
 
 #[derive(Debug)]
 pub(super) struct SessionProtocolRegistry {
@@ -178,9 +181,24 @@ impl SessionProtocolRegistry {
         for connection in connections.iter().filter_map(WeakConnectionHandle::upgrade) {
             connection.close(0u32.into(), b"session_retired");
         }
-        handle.generation.wait_until_drained().await;
-        futures_util::future::join_all(closed).await;
-        handle.generation.shutdown_handlers().await;
+        with_stall_watchdog(
+            "wait_until_drained",
+            QUIESCE_STALL_BUDGET,
+            handle.generation.wait_until_drained(),
+        )
+        .await;
+        with_stall_watchdog(
+            "connections_closed",
+            QUIESCE_STALL_BUDGET,
+            futures_util::future::join_all(closed),
+        )
+        .await;
+        with_stall_watchdog(
+            "shutdown_handlers",
+            QUIESCE_STALL_BUDGET,
+            handle.generation.shutdown_handlers(),
+        )
+        .await;
         handle.generation.mark_retired();
         Ok(())
     }
@@ -226,6 +244,28 @@ impl SessionProtocolRegistry {
             .current
             .as_ref()
             .is_some_and(|generation| generation.register_connection(connection.alpn(), connection))
+    }
+}
+
+/// 退出会话世代的每个无界等待阶段允许的静默时长；超过后只记录卡在哪一阶段，等待与资源所有权不变。
+const QUIESCE_STALL_BUDGET: Duration = Duration::from_secs(15);
+
+async fn with_stall_watchdog<F: Future>(
+    phase: &'static str,
+    budget: Duration,
+    future: F,
+) -> F::Output {
+    tokio::pin!(future);
+    match tokio::time::timeout(budget, &mut future).await {
+        Ok(output) => output,
+        Err(_) => {
+            uc_warn!(
+                phase = phase,
+                budget_ms = u64::try_from(budget.as_millis()).unwrap_or(u64::MAX),
+                "session quiesce phase exceeded its budget; still waiting"
+            );
+            future.await
+        }
     }
 }
 
@@ -463,5 +503,28 @@ impl Drop for SessionProtocolLease {
         if state.handler_leases.is_empty() {
             self.generation.drained.notify_waiters();
         }
+    }
+}
+
+#[cfg(test)]
+mod stall_watchdog_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_stalled_phase_is_recorded_once_and_still_completes() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+
+        let value = with_stall_watchdog("wait_until_drained", Duration::from_millis(20), async {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            7
+        })
+        .await;
+        let quick =
+            with_stall_watchdog("shutdown_handlers", Duration::from_millis(500), async { 1 }).await;
+
+        assert_eq!((value, quick), (7, 1));
+        assert_eq!(logs.count("exceeded its budget"), 1);
+        assert!(logs.output().contains("phase=\"wait_until_drained\""));
     }
 }

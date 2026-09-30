@@ -6,6 +6,7 @@ use rand::RngCore as _;
 use uc_application::deps::{AdmissionSpaceTransitionError, DeviceManagementResetDataPort};
 use uc_core::ids::SpaceId;
 use uc_core::membership::ActiveRuntimeLayout;
+use uc_observability_contract::{log_fields::log_vocab_debug, uc_info, uc_warn};
 
 use super::active_space_generation_manifest_store::{
     DeviceManagementResetJournalV3, DeviceManagementResetPhaseV3,
@@ -236,7 +237,19 @@ impl DeviceManagementResetDataPort for V3DeviceManagementReset {
                 Ok(())
             }
             DeviceManagementResetPhaseV3::Staged => {
-                self.rewind_staged_target(&source, &mut journal).await?;
+                uc_info!(
+                    previous_phase = "Staged",
+                    next_phase = "Allocated",
+                    "device reset rewinds a staged target after an interrupted attempt"
+                );
+                if let Err(error) = self.rewind_staged_target(&source, &mut journal).await {
+                    uc_warn!(
+                        error_kind = "device_reset_rewind",
+                        error = &error as &dyn std::error::Error,
+                        "device reset could not rewind the staged target"
+                    );
+                    return Err(error);
+                }
                 self.prepare_snapshot(&source, &mut journal).await
             }
             DeviceManagementResetPhaseV3::Promoted
@@ -337,6 +350,12 @@ impl DeviceManagementResetDataPort for V3DeviceManagementReset {
         let target = Self::target_manifest(&journal)?;
         match self.active_runtime().await? {
             Some(ActiveRuntimeManifest::V3(active)) if active == target => {
+                uc_info!(
+                    reason = "already_target",
+                    previous_phase = log_vocab_debug(&journal.phase),
+                    next_phase = "Promoted",
+                    "device reset promotion finds the target already active"
+                );
                 self.activation
                     .recover_device_reset(&target)
                     .await
@@ -350,6 +369,12 @@ impl DeviceManagementResetDataPort for V3DeviceManagementReset {
                         "device reset journal is not staged",
                     ));
                 }
+                uc_info!(
+                    reason = "finalize_from_source",
+                    previous_phase = "Staged",
+                    next_phase = "Promoted",
+                    "device reset promotes the staged target"
+                );
                 let prepared = self
                     .control_generations
                     .finalize_device_reset_target(&source, &target, &self.control_pool)

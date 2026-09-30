@@ -37,7 +37,9 @@ use anyhow::{Context, Result};
 use indexmap::IndexMap;
 use tokio::fs;
 use uc_core::ids::RepresentationId;
-use uc_observability_contract::{error_source::io_error_kind, log_fields::log_id, uc_warn};
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_id, uc_info, uc_warn,
+};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -52,6 +54,41 @@ pub struct SpoolManager {
 /// In-memory 账本：insertion-ordered 表示条目 + 累计字节数。
 /// 用 `IndexMap` 而不是 `HashMap` 因为容量驱逐需要稳定的 FIFO 顺序
 /// （近似 write order，等价于粗粒度 mtime asc）。
+/// 一次写入前的容量驱逐决定。被驱逐的 spool 若尚未被 worker 物化，内容即丢失，之后的“表示缺失”只能追溯到这里。
+#[derive(Default)]
+struct EvictionPlan {
+    victims: Vec<(RepresentationId, usize)>,
+    freed_bytes: usize,
+    /// 驱逐后的预计总量。
+    total_bytes: usize,
+    still_over_capacity: bool,
+}
+
+impl EvictionPlan {
+    /// 只汇总数字，不含表示标识与路径。
+    fn record(&self, max_bytes: usize) {
+        if self.victims.is_empty() && !self.still_over_capacity {
+            return;
+        }
+        if !self.victims.is_empty() {
+            uc_info!(
+                evicted_count = self.victims.len(),
+                freed_bytes = self.freed_bytes,
+                total_bytes = self.total_bytes,
+                max_bytes = max_bytes,
+                "spool capacity eviction"
+            );
+        }
+        if self.still_over_capacity {
+            uc_warn!(
+                total_bytes = self.total_bytes,
+                max_bytes = max_bytes,
+                "spool capacity eviction could not free enough space"
+            );
+        }
+    }
+}
+
 struct SpoolState {
     entries: IndexMap<RepresentationId, usize>,
     total_bytes: usize,
@@ -230,8 +267,9 @@ impl SpoolManager {
         // 关键 invariant：本次 write 的目标 id 不应被 evict 自己，否则会出现
         // "刚 evict 完又准备写回同一个文件" 的语义混乱（重写场景由
         // SpoolState::register 内部以 "刷新到尾部" 的方式处理）。
-        let victims = self.plan_eviction(rep_id, bytes.len());
-        for victim_id in victims {
+        let plan = self.plan_eviction(rep_id, bytes.len());
+        plan.record(self.max_bytes);
+        for (victim_id, _) in plan.victims {
             // 文件可能已被后台 worker.spool.delete 删除（race 在此处是无害的：
             // 我们已经通过 in-memory 账本把它扣减了，磁盘 ENOENT 就是预期）。
             let path = self.spool_dir.join(victim_id.to_string());
@@ -286,11 +324,7 @@ impl SpoolManager {
     /// 拆成独立函数是因为 eviction 的"决策"是纯内存操作（持锁），
     /// 但"执行"（`fs::remove_file`）必须在 .await 之前释放锁。
     /// `MutexGuard` 不允许跨 .await 持有。
-    fn plan_eviction(
-        &self,
-        incoming_id: &RepresentationId,
-        incoming_size: usize,
-    ) -> Vec<RepresentationId> {
+    fn plan_eviction(&self, incoming_id: &RepresentationId, incoming_size: usize) -> EvictionPlan {
         let mut state = self.state.lock().expect("spool state mutex poisoned");
 
         // 覆写场景：先扣掉同 id 的旧 size，让"是否超限"的判断基于真实剩余空间。
@@ -302,10 +336,12 @@ impl SpoolManager {
             .saturating_add(incoming_size);
 
         if projected_total <= self.max_bytes {
-            return Vec::new();
+            return EvictionPlan::default();
         }
 
         let mut victims = Vec::new();
+        let mut freed_bytes = 0usize;
+        let mut still_over_capacity = false;
         let mut running_total = projected_total;
         while running_total > self.max_bytes {
             // 不允许 evict 自己（覆写时 incoming_id 仍在 entries 里）。
@@ -313,12 +349,19 @@ impl SpoolManager {
                 // 没有其他条目可 evict 了 —— max_bytes 太小，单靠本次写入就突破上限。
                 // 此时仍然让 write 继续（已经过了 single-entry 大小检查），保留
                 // existing oversize 现象但至少不会卡死。
+                still_over_capacity = true;
                 break;
             };
             running_total = running_total.saturating_sub(victim_size);
-            victims.push(victim_id);
+            freed_bytes = freed_bytes.saturating_add(victim_size);
+            victims.push((victim_id, victim_size));
         }
-        victims
+        EvictionPlan {
+            victims,
+            freed_bytes,
+            total_bytes: running_total,
+            still_over_capacity,
+        }
     }
 
     /// 读取 spool 字节，不存在返回 None。
@@ -616,6 +659,26 @@ mod tests {
         assert!(spool.exists(&rep_id("c")).await.unwrap());
         assert_eq!(spool.tracked_entry_count(), 2);
         assert_eq!(spool.tracked_total_bytes(), 10);
+    }
+
+    #[tokio::test]
+    async fn capacity_eviction_is_summarized_with_numbers_only() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let dir = TempDir::new().expect("tempdir");
+        let spool = SpoolManager::new(dir.path(), 12).expect("spool");
+
+        spool.write(&rep_id("a"), b"AAAAA").await.expect("write a");
+        spool.write(&rep_id("b"), b"BBBBB").await.expect("write b");
+        assert_eq!(logs.count("spool capacity eviction"), 0);
+        spool.write(&rep_id("c"), b"CCCCC").await.expect("write c");
+
+        assert_eq!(logs.count("spool capacity eviction"), 1);
+        assert!(logs.output().contains("evicted_count=1"));
+        assert!(logs.output().contains("freed_bytes=5"));
+        assert!(logs.output().contains("total_bytes=10"));
+        assert!(logs.output().contains("max_bytes=12"));
+        assert!(!logs.output().contains("\"a\""));
     }
 
     #[tokio::test]

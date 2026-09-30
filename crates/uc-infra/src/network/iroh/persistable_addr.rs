@@ -56,6 +56,7 @@ use iroh::endpoint::TransportAddrUsage;
 use iroh::{Endpoint, EndpointAddr, EndpointId, TransportAddr};
 use uc_core::ids::DeviceId;
 use uc_core::ports::{ClockPort, PeerAddressRecord, PeerAddressRepositoryPort};
+use uc_observability_contract::uc_warn;
 
 /// Convert a freshly observed [`EndpointAddr`] into the form we want to
 /// persist for a paired peer: NodeId + relay hint, with ephemeral
@@ -121,13 +122,23 @@ pub(super) async fn persist_observed_stable_addr(
     let Some(observed_at) = Utc.timestamp_millis_opt(clock.now_ms()).single() else {
         return;
     };
-    let _ = repository
+    // 仅记录仓储写入失败：编码与时钟越界几乎不会失败；失败会留下陈旧地址，后续拨号才暴露。
+    if let Err(error) = repository
         .upsert(&PeerAddressRecord {
             device_id: device.clone(),
             addr_blob,
             observed_at,
         })
-        .await;
+        .await
+    {
+        let (category, stage) = error.diagnostic();
+        uc_warn!(
+            error_kind = "peer_address_persist",
+            reason = category,
+            stage = stage,
+            "observed peer address could not be saved"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -304,6 +315,14 @@ mod tests {
             saved: Mutex::new(None),
             fail: true,
         };
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
         persist_observed_stable_addr(&failing, &FixedClock, &device, EndpointAddr::new(id)).await;
+
+        assert_eq!(logs.count("observed peer address could not be saved"), 1);
+        assert!(logs
+            .output()
+            .contains("error_kind=\"peer_address_persist\""));
+        assert!(!logs.output().contains("device-b"));
     }
 }

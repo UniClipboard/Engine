@@ -498,6 +498,8 @@ async fn restart_rebuilds_a_staged_target_from_the_unchanged_source() {
 /// 同一进程内提交失败后重试：运行期连接池仍指向目标，重试必须先回到来源再重新快照。
 #[tokio::test]
 async fn retry_in_the_same_process_rebuilds_the_staged_target_from_the_source() {
+    let logs = uc_testkit::log_capture::CapturedLogs::default();
+    let _guard = logs.install();
     let profile = ResetProfile::create().await;
     let process = profile.open().await;
     process.prepare_and_stage(&profile).await;
@@ -516,6 +518,9 @@ async fn retry_in_the_same_process_rebuilds_the_staged_target_from_the_source() 
     drop(process);
     assert_eq!(active_space(&profile).await, profile.target_space);
     assert_eq!(profile.control_generations().len(), 1);
+    assert_eq!(logs.count("rewinds a staged target"), 1);
+    assert_eq!(logs.count("promotes the staged target"), 1);
+    assert!(logs.output().contains("previous_phase=\"Staged\""));
 }
 
 /// 删除已改写目标后、改回日志前崩溃：目标目录已不存在，重启不得打开一个只有表结构的空库。
@@ -547,6 +552,8 @@ async fn a_missing_staged_target_is_rebuilt_from_the_source_instead_of_opened_em
 /// manifest 已提升到目标、日志尚未推进时崩溃：目标已是当前数据，重启只能向前收尾，绝不能丢弃。
 #[tokio::test]
 async fn an_activated_target_is_finished_instead_of_discarded() {
+    let logs = uc_testkit::log_capture::CapturedLogs::default();
+    let _guard = logs.install();
     let profile = ResetProfile::create().await;
     {
         let first = profile.open().await;
@@ -574,6 +581,8 @@ async fn an_activated_target_is_finished_instead_of_discarded() {
     drop(second);
     assert_eq!(active_space(&profile).await, profile.target_space);
     assert_eq!(profile.control_generations().len(), 1);
+    assert_eq!(logs.count("finds the target already active"), 1);
+    assert!(logs.output().contains("reason=\"already_target\""));
 }
 
 /// 提交时另一连接短暂持有目标库写锁（例如成员维护的写事务）：提交应等待其结束后成功。

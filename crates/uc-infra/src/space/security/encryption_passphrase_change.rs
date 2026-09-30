@@ -5,6 +5,7 @@ use uc_application::deps::{
     ApplyEncryptionPassphraseChangePort, ApplyEncryptionPassphraseChangePortError,
 };
 use uc_core::crypto::domain::Passphrase;
+use uc_observability_contract::{uc_info, uc_warn};
 
 use super::RuntimeSpaceAccessAdapter;
 use crate::db::ports::DbExecutor;
@@ -40,31 +41,38 @@ impl<E> EncryptionPassphraseChange<E> {
 }
 
 impl<E: DbExecutor> EncryptionPassphraseChange<E> {
+    /// 向前滚动 journal；`stage` 始终指向正在执行的步骤，失败时调用方据此留下固定标签。
     async fn complete(
         &self,
         journal: &EncryptionPassphraseChangeJournal,
+        stage: &mut &'static str,
     ) -> Result<(), ApplyEncryptionPassphraseChangePortError> {
+        *stage = "registration";
         self.credentials
             .replace_registration_with_prepared(&journal.prepared_registration)
             .await
             .map_err(recovery)?;
         let kek = Kek::from_bytes(&journal.kek).map_err(recovery)?;
+        *stage = "profile_prepare";
         if let Err(error) = self
             .profile_recovery
             .prepare_passphrase_change(kek.as_bytes())
         {
             return Err(recovery(error));
         }
+        *stage = "install_material";
         self.access
             .install_encryption_passphrase_material(&journal.keyslot, &kek)
             .await
             .map_err(recovery)?;
+        *stage = "profile_finish";
         if let Err(error) = self
             .profile_recovery
             .finish_passphrase_change(kek.as_bytes())
         {
             return Err(recovery(error));
         }
+        *stage = "clear_journal";
         self.manifests
             .clear_encryption_passphrase_change_journal()
             .await
@@ -80,7 +88,27 @@ impl<E: DbExecutor> EncryptionPassphraseChange<E> {
         else {
             return Ok(());
         };
-        self.complete(&journal).await
+        // 只在真正找到 journal 时留痕；无待处理保持静默。
+        uc_info!(
+            trigger = "recover_pending",
+            "encryption passphrase change journal found; rolling forward"
+        );
+        let mut stage = "load_journal";
+        let result = self.complete(&journal, &mut stage).await;
+        match &result {
+            Ok(()) => uc_info!(
+                trigger = "recover_pending",
+                "encryption passphrase change journal completed"
+            ),
+            Err(error) => uc_warn!(
+                trigger = "recover_pending",
+                stage = stage,
+                error_kind = "passphrase_change_recovery",
+                error = error as &dyn std::error::Error,
+                "encryption passphrase change recovery failed"
+            ),
+        }
+        result
     }
 
     pub async fn recover_pending(&self) -> Result<(), ApplyEncryptionPassphraseChangePortError> {
@@ -121,7 +149,8 @@ impl<E: DbExecutor + Send + Sync> ApplyEncryptionPassphraseChangePort
             .save_encryption_passphrase_change_journal(&journal)
             .await
             .map_err(unavailable)?;
-        self.complete(&journal).await
+        let mut stage = "apply";
+        self.complete(&journal, &mut stage).await
     }
 }
 
@@ -518,6 +547,67 @@ mod tests {
             )
             .await
         );
+    }
+
+    struct FailFinishAlways;
+
+    impl ProfilePassphraseRecoveryPort for FailFinishAlways {
+        fn prepare_passphrase_change(
+            &self,
+            _kek: &[u8],
+        ) -> Result<(), crate::security::ProfileKeyRecoveryError> {
+            Ok(())
+        }
+
+        fn finish_passphrase_change(
+            &self,
+            _kek: &[u8],
+        ) -> Result<(), crate::security::ProfileKeyRecoveryError> {
+            Err(crate::security::ProfileKeyRecoveryError::Corrupt)
+        }
+
+        fn prepare_kek_replacement(
+            &self,
+            _kek: &[u8],
+        ) -> Result<(), crate::security::ProfileKeyRecoveryError> {
+            Ok(())
+        }
+
+        fn finish_kek_replacement(
+            &self,
+            _kek: &[u8],
+        ) -> Result<(), crate::security::ProfileKeyRecoveryError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_records_the_failed_step_and_stays_silent_when_nothing_is_pending() {
+        let fixture = Fixture::new().await;
+        let change = EncryptionPassphraseChange::new(
+            Arc::clone(&fixture.access),
+            Arc::clone(&fixture.credentials),
+            Arc::clone(&fixture.manifests),
+            Arc::new(FailFinishAlways) as Arc<dyn ProfilePassphraseRecoveryPort>,
+        );
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+
+        change.recover_pending().await.unwrap();
+        assert_eq!(logs.output(), "");
+        assert!(change
+            .apply_encryption_passphrase_change(&Passphrase::new("stuck-passphrase"))
+            .await
+            .is_err());
+        assert_eq!(logs.count("recovery failed"), 0, "用户主动变更不是恢复");
+        assert!(change.recover_pending().await.is_err());
+
+        assert_eq!(
+            logs.count("encryption passphrase change recovery failed"),
+            1
+        );
+        assert!(logs.output().contains("stage=\"profile_finish\""));
+        assert!(!logs.output().contains("stuck-passphrase"));
     }
 
     #[tokio::test]

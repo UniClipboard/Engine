@@ -1414,8 +1414,12 @@ impl MobileEngine {
 
 impl Drop for MobileEngine {
     fn drop(&mut self) {
-        if self.shutdown_inner(Duration::from_secs(5), true).is_err() {
-            let _ = self.join_worker(Duration::ZERO);
+        if let Err(error) = self.shutdown_inner(Duration::from_secs(5), true) {
+            log_mobile_failure("drop_shutdown_failed", &error);
+            // 已无调用方可重试：worker 线程若仍在运行即被泄漏，这是唯一留痕的机会。
+            if let Err(error) = self.join_worker(Duration::ZERO) {
+                log_mobile_failure("drop_worker_leaked", &error);
+            }
         }
     }
 }

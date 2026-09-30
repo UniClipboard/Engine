@@ -234,6 +234,11 @@ impl ProtocolHandler for IrohPeerReachabilityHandler {
             match tokio::time::timeout(PEER_ADMISSION_IO_TIMEOUT, connection.accept_bi()).await {
                 Ok(Ok(streams)) => streams,
                 _ => {
+                    // 探测连接也会走到这里，只适合 debug。
+                    uc_debug!(
+                        error_kind = "confirmation_missing",
+                        "presence accept: closing connection without an admission confirmation"
+                    );
                     connection.close(0u32.into(), b"admission_confirmation_missing");
                     return Ok(());
                 }
@@ -244,6 +249,10 @@ impl ProtocolHandler for IrohPeerReachabilityHandler {
             Ok(Ok(_))
         ) || request[0] != ADMISSION_CONFIRMATION_REQUEST
         {
+            uc_debug!(
+                error_kind = "confirmation_invalid",
+                "presence accept: closing connection with an invalid admission confirmation"
+            );
             connection.close(0u32.into(), b"admission_confirmation_invalid");
             return Ok(());
         }
@@ -286,6 +295,10 @@ impl ProtocolHandler for IrohPeerReachabilityHandler {
                     .count()
                     >= 2
                 {
+                    uc_warn!(
+                        error_kind = "capacity",
+                        "presence accept: closing connection because the peer already holds the maximum pending connections"
+                    );
                     connection.close(0u32.into(), b"admission_capacity");
                     return Ok(());
                 }
@@ -310,6 +323,10 @@ impl ProtocolHandler for IrohPeerReachabilityHandler {
                 || !observation.is_current(device_id, &before)
                 || !self.state.accepting.load(Ordering::Acquire)
             {
+                uc_warn!(
+                    error_kind = "confirmation_failed",
+                    "presence accept: closing connection because admission confirmation did not complete"
+                );
                 connection.close(0u32.into(), b"admission_confirmation_failed");
                 return Ok(());
             }
