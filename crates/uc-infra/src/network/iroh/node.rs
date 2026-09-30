@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::str::FromStr;
-#[cfg(not(any(test, feature = "test-util")))]
+#[cfg(not(any(test, feature = "in-process-multi-node")))]
 use std::sync::Mutex;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use uc_application::deps::ClipboardReceiverPort;
@@ -592,14 +592,14 @@ fn relay_mode_from_config(config: &IrohNodeConfig) -> Result<RelayMode, IrohNode
 /// A process-wide lease prevents two live production endpoints from sharing
 /// mutable runtime state. Unlike the former `OnceLock`, the lease is owned by
 /// the builder and then the live node, so a completed shutdown permits restart.
-#[cfg(not(any(test, feature = "test-util")))]
+#[cfg(not(any(test, feature = "in-process-multi-node")))]
 static NODE_RUN_ACTIVE: Mutex<bool> = Mutex::new(false);
 
 struct NodeRunLease;
 
 impl NodeRunLease {
     fn acquire() -> Result<Self, IrohNodeError> {
-        #[cfg(not(any(test, feature = "test-util")))]
+        #[cfg(not(any(test, feature = "in-process-multi-node")))]
         {
             let mut active = NODE_RUN_ACTIVE
                 .lock()
@@ -616,7 +616,7 @@ impl NodeRunLease {
 
 impl Drop for NodeRunLease {
     fn drop(&mut self) {
-        #[cfg(not(any(test, feature = "test-util")))]
+        #[cfg(not(any(test, feature = "in-process-multi-node")))]
         {
             // Clear the runtime configuration before releasing the lease so a
             // newly-bound node cannot inherit the previous node's LAN policy.

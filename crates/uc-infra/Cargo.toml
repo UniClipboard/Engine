@@ -9,10 +9,15 @@ publish = false
 [features]
 default = []
 lan-compat = ["dep:network-interface"]
-# Allows test harnesses to bind sponsor and joiner endpoints in one process.
-# Production builds must not enable it: the runtime lease must reject a second
-# live node. See src/network/iroh/node.rs for the production lifecycle guard.
+# Test-only hooks (network partition gate, protocol probes, in-memory stores).
+# It does not change process-wide network policy: a host built with only this
+# feature still runs the production runtime lease and dial policy.
 test-util = ["dep:tempfile"]
+# Allows harnesses to bind several nodes in one process by turning the
+# process-wide runtime state (single-node lease, LAN-only flag, dial policy)
+# into no-ops. Production builds and single-node test hosts must not enable it.
+# See src/network/iroh/node.rs and runtime_consts.rs.
+in-process-multi-node = []
 
 [dependencies]
 # ===== Workspace crates =====

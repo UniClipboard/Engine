@@ -4,10 +4,10 @@
 //! reset before that lease is released, so a replacement node cannot inherit a
 //! previous node's bind-time configuration.
 
-#[cfg(not(any(test, feature = "test-util")))]
+#[cfg(not(any(test, feature = "in-process-multi-node")))]
 use std::sync::Mutex;
 
-#[cfg(not(any(test, feature = "test-util")))]
+#[cfg(not(any(test, feature = "in-process-multi-node")))]
 use tracing::warn;
 use uc_core::network::TrustedNetworks;
 
@@ -22,13 +22,13 @@ pub(crate) struct DialPolicy {
     pub trusted_networks: TrustedNetworks,
 }
 
-#[cfg(not(any(test, feature = "test-util")))]
+#[cfg(not(any(test, feature = "in-process-multi-node")))]
 static DIAL_POLICY: Mutex<Option<DialPolicy>> = Mutex::new(None);
 
 /// Install the active node's dial policy. Test multi-node harnesses do not
 /// share a process-wide policy and therefore retain the no-op implementation.
 pub(crate) fn install_dial_policy(policy: DialPolicy) {
-    #[cfg(not(any(test, feature = "test-util")))]
+    #[cfg(not(any(test, feature = "in-process-multi-node")))]
     {
         let mut current = DIAL_POLICY.lock().unwrap_or_else(|poisoned| {
             warn!("iroh dial policy lock poisoned while installing policy");
@@ -36,7 +36,7 @@ pub(crate) fn install_dial_policy(policy: DialPolicy) {
         });
         *current = Some(policy);
     }
-    #[cfg(any(test, feature = "test-util"))]
+    #[cfg(any(test, feature = "in-process-multi-node"))]
     {
         let _ = policy;
     }
@@ -44,7 +44,7 @@ pub(crate) fn install_dial_policy(policy: DialPolicy) {
 
 /// Clear the active node's dial policy before its runtime lease is released.
 /// Test multi-node harnesses intentionally have no shared policy.
-#[cfg(not(any(test, feature = "test-util")))]
+#[cfg(not(any(test, feature = "in-process-multi-node")))]
 pub(crate) fn clear_dial_policy() {
     let mut current = DIAL_POLICY.lock().unwrap_or_else(|poisoned| {
         warn!("iroh dial policy lock poisoned while clearing policy");
@@ -57,7 +57,7 @@ pub(crate) fn clear_dial_policy() {
 /// test multi-node harnesses, this is the default: not LAN-only, no trusted
 /// networks.
 pub(crate) fn dial_policy() -> DialPolicy {
-    #[cfg(not(any(test, feature = "test-util")))]
+    #[cfg(not(any(test, feature = "in-process-multi-node")))]
     {
         let current = DIAL_POLICY.lock().unwrap_or_else(|poisoned| {
             warn!("iroh dial policy lock poisoned while reading policy");
@@ -65,7 +65,7 @@ pub(crate) fn dial_policy() -> DialPolicy {
         });
         current.clone().unwrap_or_default()
     }
-    #[cfg(any(test, feature = "test-util"))]
+    #[cfg(any(test, feature = "in-process-multi-node"))]
     {
         DialPolicy::default()
     }
