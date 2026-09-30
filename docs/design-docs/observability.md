@@ -50,7 +50,7 @@
   不额外制造一串独立的“生命周期成功”。
 - 关闭超时、任务异常退出等进入运行诊断，必须说明具体动作和失败类别，不能只写 `session_lifecycle`。
   任务异常退出统一由等待该任务的负责人调用 `record_task_join_failure`，以固定 `task.kind` 写入健康记录；
-  Engine 操作、生命周期转换与会话挂起交接分别为 `engine_operation`、`engine_lifecycle_transition`、`session_suspend`。
+  Engine 操作、生命周期转换与会话挂起交接分别为 `engine_operation`、`engine_lifecycle_transition`、`session_suspend`；成员维护的一轮动作为 `membership_maintenance_round`。
 - 真正执行的后台恢复可以成为独立动作，但要说明上线、重启、重试等固定触发原因，以及实际恢复结果。
 - 隐藏例行噪声不能丢失业务动作中的失败证据，不能单独过滤必要父节点、导致完整记录变成孤儿片段。
 - 测试记录与实际产品记录明确隔离。测试可以显式导出整批诊断用于验收，但不能让这些记录默认混入实际产品的业务视图。

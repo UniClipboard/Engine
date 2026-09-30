@@ -17,7 +17,7 @@ use crate::space::membership::{
 };
 
 use super::{AuthenticatedMember, HandleMembershipHistoryMessageError};
-use uc_observability_contract::uc_debug;
+use uc_observability_contract::{uc_debug, uc_info};
 
 pub(super) const MAX_COMPLETED_INBOUND_TRANSFERS: usize = 256;
 
@@ -78,10 +78,11 @@ impl HandleMembershipHistoryMessageUseCase {
                     .effective_member_for_device(source.device_id())
                     .and_then(|member| history.admission_facts_for(member))
                     == Some(&summary.sender_admission);
-                if !sender_claim_matches_connection || summary.lineage_id != history.lineage_id() {
-                    return Ok(MembershipHistoryMessage::AckV3(
-                        MembershipHistoryAckV3::Invalid,
-                    ));
+                if !sender_claim_matches_connection {
+                    return Ok(reject("summary", "sender_mismatch"));
+                }
+                if summary.lineage_id != history.lineage_id() {
+                    return Ok(reject("summary", "lineage_mismatch"));
                 }
                 let current_position = history
                     .current_position()
@@ -101,9 +102,7 @@ impl HandleMembershipHistoryMessageUseCase {
                     MembershipHistoryReconciliationPlan::Noop
                     | MembershipHistoryReconciliationPlan::OfferSuffix => {
                         if !sender_is_current {
-                            return Ok(MembershipHistoryMessage::AckV3(
-                                MembershipHistoryAckV3::Invalid,
-                            ));
+                            return Ok(reject("summary", "sender_not_current"));
                         }
                         // OfferSuffix 先确认远端真实祖先；本机持久欠账会驱动反向发送。
                         Ok(MembershipHistoryMessage::AckV3(
@@ -128,9 +127,9 @@ impl HandleMembershipHistoryMessageUseCase {
                             },
                         ))
                     }
-                    MembershipHistoryReconciliationPlan::Invalid => Ok(
-                        MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Invalid),
-                    ),
+                    MembershipHistoryReconciliationPlan::Invalid => {
+                        Ok(reject("summary", "position_invalid"))
+                    }
                 };
             }
             MembershipHistoryMessage::SuffixPageV4(page) => page,
@@ -154,9 +153,7 @@ impl HandleMembershipHistoryMessageUseCase {
                 .map(|bytes| bytes.len() > MAX_MEMBERSHIP_HISTORY_FRAME_SIZE)
                 .unwrap_or(true)
         {
-            return Ok(MembershipHistoryMessage::AckV3(
-                MembershipHistoryAckV3::Invalid,
-            ));
+            return Ok(reject("suffix_page", "envelope_or_size"));
         }
         let _guard = self.execution_lock.lock().await;
         let view = self.owner.load().await.map_err(map_ledger_error)?;
@@ -169,10 +166,11 @@ impl HandleMembershipHistoryMessageUseCase {
             && history
                 .effective_member_for_device(&source_device_id)
                 .is_none();
-        if page.sender_admission().device_id != source_device_id || sender_was_removed {
-            return Ok(MembershipHistoryMessage::AckV3(
-                MembershipHistoryAckV3::Invalid,
-            ));
+        if page.sender_admission().device_id != source_device_id {
+            return Ok(reject("suffix_page", "sender_mismatch"));
+        }
+        if sender_was_removed {
+            return Ok(reject("suffix_page", "sender_removed"));
         }
         let transfer_id = page.transfer_id();
         if let Some(ack) = space
@@ -199,9 +197,7 @@ impl HandleMembershipHistoryMessageUseCase {
             super::transfer::PageAdmission::Rejected => {
                 self.commit_invalid_transfer(source_device_id, transfer_id)
                     .await?;
-                return Ok(MembershipHistoryMessage::AckV3(
-                    MembershipHistoryAckV3::Invalid,
-                ));
+                return Ok(reject("suffix_page", "transfer_rejected"));
             }
             super::transfer::PageAdmission::Continue { next, changed } => {
                 if let Some(transfer) = changed {
@@ -327,6 +323,14 @@ impl HandleMembershipHistoryMessageUseCase {
             new_effect_count = new_effect_count,
             "成员历史入站后缀完成原子处理"
         );
+        if matches!(ack, MembershipHistoryAckV3::Invalid) {
+            let reason = if sender_is_bound {
+                "suffix_invalid"
+            } else {
+                "sender_not_bound"
+            };
+            return Ok(reject("suffix_page", reason));
+        }
         Ok(MembershipHistoryMessage::AckV3(ack))
     }
 
@@ -342,9 +346,7 @@ impl HandleMembershipHistoryMessageUseCase {
             .map(|bytes| bytes.len() > MAX_MEMBERSHIP_HISTORY_FRAME_SIZE)
             .unwrap_or(true)
         {
-            return Ok(MembershipHistoryMessage::AckV3(
-                MembershipHistoryAckV3::Invalid,
-            ));
+            return Ok(reject("conflict_evidence", "malformed_or_oversize"));
         }
         let _guard = self.execution_lock.lock().await;
         let Some(exchange) = self
@@ -353,9 +355,7 @@ impl HandleMembershipHistoryMessageUseCase {
             .await
             .map_err(map_ledger_error)?
         else {
-            return Ok(MembershipHistoryMessage::AckV3(
-                MembershipHistoryAckV3::Invalid,
-            ));
+            return Ok(reject("conflict_evidence", "evidence_unusable"));
         };
         Ok(MembershipHistoryMessage::ConflictEvidenceV3(
             exchange.response,
@@ -376,9 +376,7 @@ impl HandleMembershipHistoryMessageUseCase {
                 .effective_member_for_device(&source_device_id)
         });
         if source_member != Some(event.author_member_instance_id) {
-            return Ok(MembershipHistoryMessage::AckV3(
-                MembershipHistoryAckV3::Invalid,
-            ));
+            return Ok(reject("restricted_event", "author_mismatch"));
         }
         let verifier = self.owner.verifier_handle();
         let committed = self
@@ -419,6 +417,9 @@ impl HandleMembershipHistoryMessageUseCase {
             })
             .await
             .map_err(map_ledger_error)?;
+        if matches!(committed.output, MembershipHistoryAckV3::Invalid) {
+            return Ok(reject("restricted_event", "verification_failed"));
+        }
         Ok(MembershipHistoryMessage::AckV3(committed.output))
     }
 
@@ -438,9 +439,7 @@ impl HandleMembershipHistoryMessageUseCase {
             )
         });
         if signer_device != Some(source_device_id) {
-            return Ok(MembershipHistoryMessage::AckV3(
-                MembershipHistoryAckV3::Invalid,
-            ));
+            return Ok(reject("restricted_decision", "signer_mismatch"));
         }
         let verifier = self.owner.verifier_handle();
         let committed = self
@@ -468,6 +467,9 @@ impl HandleMembershipHistoryMessageUseCase {
             })
             .await
             .map_err(map_ledger_error)?;
+        if matches!(committed.output, MembershipHistoryAckV3::Invalid) {
+            return Ok(reject("restricted_decision", "verification_failed"));
+        }
         Ok(MembershipHistoryMessage::AckV3(committed.output))
     }
 
@@ -575,4 +577,15 @@ impl MembershipHistoryExchangeEndpointPort for HandleMembershipHistoryMessageUse
             _ => MembershipHistoryExchangeError::Rejected,
         })
     }
+}
+
+/// 入站成员历史消息被判为无效：对端可触发，只记录固定的消息类别与拒绝原因（INFO，模块日志按记录点限速），
+/// 不含设备、成员与传输标识，然后返回 Invalid 确认。
+fn reject(msg_kind: &'static str, reject_reason: &'static str) -> MembershipHistoryMessage {
+    uc_info!(
+        msg_kind = msg_kind,
+        reject_reason = reject_reason,
+        "membership history message rejected as invalid"
+    );
+    MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Invalid)
 }

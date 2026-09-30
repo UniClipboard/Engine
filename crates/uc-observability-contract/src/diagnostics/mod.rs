@@ -545,6 +545,8 @@ pub enum DiagnosticTaskKind {
     EngineLifecycleTransition,
     /// 会话挂起交接给独立任务后，该任务异常退出。
     SessionSuspend,
+    /// 成员维护的一轮完整动作异常退出；此后收敛、副作用与群更新投递都会停止。
+    MembershipMaintenanceRound,
 }
 
 impl DiagnosticTaskKind {
@@ -559,6 +561,7 @@ impl DiagnosticTaskKind {
             Self::EngineOperation => "engine_operation",
             Self::EngineLifecycleTransition => "engine_lifecycle_transition",
             Self::SessionSuspend => "session_suspend",
+            Self::MembershipMaintenanceRound => "membership_maintenance_round",
         }
     }
 }

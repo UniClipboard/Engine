@@ -82,6 +82,20 @@ pub enum SpaceActivityError {
     Task(#[source] tokio::task::JoinError),
 }
 
+impl SpaceActivityError {
+    /// 日志用的固定分类，只反映变体，不含下层错误正文。
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::Connectivity(_) => "connectivity",
+            Self::Unavailable => "unavailable",
+            Self::Search(_) => "search",
+            Self::Receive(_) => "receive",
+            Self::Membership(_) => "membership",
+            Self::Task(_) => "task",
+        }
+    }
+}
+
 impl fmt::Debug for SpaceActivityError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {

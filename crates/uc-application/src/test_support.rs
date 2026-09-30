@@ -4,6 +4,7 @@
 //! unlock facades) need the same trivial stand-ins; keeping them here avoids
 //! re-declaring one-off fakes per module.
 
+pub(crate) mod log_capture;
 pub(crate) mod membership_scenario;
 
 use async_trait::async_trait;

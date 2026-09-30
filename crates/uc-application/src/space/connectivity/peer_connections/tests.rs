@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::log_capture::CapturedLogs;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::broadcast;
 use uc_core::ports::{PeerReachabilityChanged, PeerReachabilityError};
@@ -878,5 +879,27 @@ async fn incoming_success_does_not_strand_a_queued_manual_refresh() {
         .unwrap()
         .unwrap();
     assert_eq!((report.total, report.online, report.errors), (5, 5, 0));
+    owner.shutdown().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn scope_failures_are_recorded_once_per_streak_and_recovery_is_recorded() {
+    let logs = CapturedLogs::default();
+    let _guard = logs.install();
+    let (owner, scope, _) = fixture();
+    scope.unavailable.store(true, Ordering::SeqCst);
+    owner.start().await;
+    settle().await;
+    for _ in 0..3 {
+        tokio::time::advance(Duration::from_secs(61)).await;
+        settle().await;
+    }
+    assert_eq!(logs.count("peer connection scope reconcile failed"), 1);
+    assert!(logs.output().contains("error_kind=\"scope_unavailable\""));
+
+    scope.unavailable.store(false, Ordering::SeqCst);
+    tokio::time::advance(Duration::from_secs(61)).await;
+    settle().await;
+    assert_eq!(logs.count("peer connection scope recovered"), 1);
     owner.shutdown().await.unwrap();
 }

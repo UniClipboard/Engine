@@ -13,6 +13,7 @@ use uc_core::ports::{PeerReachabilityChanged, ReachabilityState};
 use uc_observability_contract::diagnostics::connectivity::{
     LocalWorkOutcome, MaintenanceDisposition, MaintenanceObservation, RecoveryTrigger,
 };
+use uc_observability_contract::diagnostics::{record_task_join_failure, DiagnosticTaskKind};
 
 use super::{MaintainSpaceMembershipUseCase, MembershipMaintenanceTrigger};
 use crate::space::lifecycle::MembershipSessionActivityPort;
@@ -247,7 +248,7 @@ impl SpaceMembershipMaintenanceRuntime {
                     }, if active_round.is_some() => {
                         active_round = None;
                         if let Some(Err(source)) = result {
-                            let _ = failure.set(Arc::new(source));
+                            record_round_failure(&failure, source);
                             break;
                         }
                         if !paused {
@@ -266,7 +267,7 @@ impl SpaceMembershipMaintenanceRuntime {
                             network_activity.pause_network_work();
                             if let Some(round) = active_round.take() {
                                 if let Err(source) = round.await {
-                                    let _ = failure.set(Arc::new(source));
+                                    record_round_failure(&failure, source);
                                     break;
                                 }
                             }
@@ -355,7 +356,7 @@ impl SpaceMembershipMaintenanceRuntime {
             // 宿主期限由外层负责；必须等当前完整动作结束后才能释放成员运行期。
             if let Some(round) = active_round {
                 if let Err(source) = round.await {
-                    let _ = failure.set(Arc::new(source));
+                    record_round_failure(&failure, source);
                 }
             }
         });
@@ -374,7 +375,7 @@ impl SpaceMembershipMaintenanceRuntime {
         self.activity.cancel.cancel();
         if let Some(task) = self.task.take() {
             if let Err(source) = task.await {
-                let _ = self.activity.failure.set(Arc::new(source));
+                record_round_failure(&self.activity.failure, source);
             }
         }
         self.activity.check_failure().map_err(anyhow::Error::new)
@@ -449,5 +450,12 @@ impl ScheduledRound {
 impl Drop for SpaceMembershipMaintenanceRuntime {
     fn drop(&mut self) {
         self.activity.cancel.cancel();
+    }
+}
+
+/// 首次保存失败时记录一次任务异常退出；之后各处再读到同一个失败不重复记录。
+fn record_round_failure(failure: &OnceLock<Arc<JoinError>>, source: JoinError) {
+    if failure.set(Arc::new(source)).is_ok() {
+        record_task_join_failure(DiagnosticTaskKind::MembershipMaintenanceRound);
     }
 }

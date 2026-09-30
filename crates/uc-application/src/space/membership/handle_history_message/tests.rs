@@ -419,6 +419,60 @@ async fn restricted_event_applies_only_the_authenticated_signed_event() {
 }
 
 #[tokio::test]
+async fn rejected_inbound_history_is_recorded_with_a_fixed_reason_and_no_identifiers() {
+    let logs = crate::test_support::log_capture::CapturedLogs::default();
+    let _guard = logs.install();
+    let (local, local_credential) = member_facts("device-a", 0x41);
+    let (peer, peer_credential) = member_facts("device-b", 0x42);
+    let base = established_history(&[
+        (local.clone(), local_credential),
+        (peer.clone(), peer_credential.clone()),
+    ]);
+    let author = MembershipAdmissionV2 {
+        facts: peer.clone(),
+        membership_credential: peer_credential,
+        resume_public_key_digest: [7; 32],
+        security_commitment_id: [8; 32],
+    };
+    let event = add_event(
+        &base,
+        &author,
+        admission(
+            "device-c",
+            MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x43; 32]),
+        ),
+        0x51,
+    );
+    let fixture = OwnerFixture::new(started_record(
+        base,
+        local.device_id,
+        local.member_instance,
+        3,
+    ));
+
+    // 事件由 device-b 的成员实例签署，却经 device-x 的连接送达。
+    let response = handler(&fixture)
+        .execute(
+            &AuthenticatedMember::new(DeviceId::new("device-x")),
+            MembershipHistoryMessage::RestrictedEventV3(event),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response,
+        MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Invalid)
+    );
+    assert_eq!(
+        logs.count("membership history message rejected as invalid"),
+        1
+    );
+    assert!(logs.output().contains("msg_kind=\"restricted_event\""));
+    assert!(logs.output().contains("reject_reason=\"author_mismatch\""));
+    assert!(!logs.output().contains("device-"));
+}
+
+#[tokio::test]
 async fn restricted_remote_removal_is_persisted_without_advancing_the_local_branch() {
     let (local, local_credential) = member_facts("device-a", 0x41);
     let (peer, peer_credential) = member_facts("device-b", 0x42);
