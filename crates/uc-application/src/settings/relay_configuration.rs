@@ -5,7 +5,7 @@ use uc_core::{ports::SettingsPort, settings::model::Settings};
 
 use super::{
     models::{
-        apply_settings_patch, validate_settings, NetworkSettingsPatch, SettingsPatch,
+        apply_and_validate_settings_patch, NetworkSettingsPatch, SettingsPatch,
         SettingsValidationError,
     },
     RelayAccessToken, RelayCredentialEdit, RelayCredentials, RelayCredentialsError,
@@ -122,8 +122,8 @@ impl RelayConfiguration {
             .await
             .map_err(|error| RelayConfigurationError::Load(anyhow::Error::from(error)))?;
         let previous_relay_urls = existing.network.custom_relay_urls.clone();
-        let merged = apply_settings_patch(existing.clone(), patch);
-        validate_settings(&merged).map_err(RelayConfigurationError::Invalid)?;
+        let merged = apply_and_validate_settings_patch(existing.clone(), patch)
+            .map_err(RelayConfigurationError::Invalid)?;
         self.commit(existing, previous_relay_urls, merged, edit)
             .await
     }
@@ -292,8 +292,8 @@ impl RelayConfiguration {
         edit: Option<&RelayCredentialEdit>,
     ) -> Result<RelayConfigurationUpdate, RelayConfigurationError> {
         let previous_relay_urls = existing.network.custom_relay_urls.clone();
-        let merged = apply_settings_patch(existing.clone(), patch);
-        validate_settings(&merged).map_err(RelayConfigurationError::Invalid)?;
+        let merged = apply_and_validate_settings_patch(existing.clone(), patch)
+            .map_err(RelayConfigurationError::Invalid)?;
         self.commit(existing, previous_relay_urls, merged, edit)
             .await
     }

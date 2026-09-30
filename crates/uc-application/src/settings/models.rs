@@ -846,6 +846,39 @@ fn normalize_list_entries(entries: Vec<String>) -> Vec<String> {
         .collect()
 }
 
+/// 应用补丁并校验；条目错误的位置按调用方提交的列表计，而不是去掉空白项之后的列表。
+pub(crate) fn apply_and_validate_settings_patch(
+    existing: core::Settings,
+    patch: SettingsPatch,
+) -> Result<core::Settings, SettingsValidationError> {
+    let submitted_positions = patch
+        .network
+        .as_ref()
+        .and_then(|network| network.trusted_networks.as_ref())
+        .map(|entries| {
+            entries
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| !entry.trim().is_empty())
+                .map(|(position, _)| position)
+                .collect::<Vec<_>>()
+        });
+    let merged = apply_settings_patch(existing, patch);
+    match validate_settings(&merged) {
+        Ok(()) => Ok(merged),
+        Err(SettingsValidationError::TrustedNetwork(mut entry)) => {
+            if let Some(position) = submitted_positions
+                .as_ref()
+                .and_then(|positions| positions.get(entry.index))
+            {
+                entry.index = *position;
+            }
+            Err(SettingsValidationError::TrustedNetwork(entry))
+        }
+        Err(other) => Err(other),
+    }
+}
+
 /// 设置保存前的输入校验失败。展示文本即对外拒绝原因。
 #[derive(Debug, thiserror::Error)]
 pub enum SettingsValidationError {
@@ -946,6 +979,31 @@ mod network_settings_apply_patch_tests {
             ..NetworkSettings::default()
         };
         s
+    }
+
+    /// 拒绝位置是调用方提交列表里的位置，空白项被丢弃后仍占位置。
+    #[test]
+    fn rejection_index_counts_blank_entries_in_the_submitted_list() {
+        for (entries, expected) in [
+            (vec!["", "8.8.8.0/24"], 1),
+            (vec!["10.9.0.0/24", "  ", "8.8.8.0/24"], 2),
+            (vec![" ", "garbage-entry"], 1),
+            (vec!["8.8.8.0/24", ""], 0),
+        ] {
+            let patch = SettingsPatch {
+                network: Some(NetworkSettingsPatch {
+                    trusted_networks: Some(entries.iter().map(|e| e.to_string()).collect()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let Err(SettingsValidationError::TrustedNetwork(entry)) =
+                apply_and_validate_settings_patch(Settings::default(), patch)
+            else {
+                panic!("expected a trusted network rejection for {entries:?}");
+            };
+            assert_eq!(entry.index, expected, "{entries:?}");
+        }
     }
 
     /// NETSET-02 #2 硬约束：旧客户端 PUT 不带 `network` 段时，

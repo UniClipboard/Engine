@@ -172,6 +172,27 @@ async fn network_settings_updates_are_structured_and_all_or_nothing() {
             1,
             TrustedNetworkRejectionKind::Duplicate,
         ),
+        // 位置按提交的列表计：空白项虽会被丢弃，仍占位置。
+        (
+            vec!["", "8.8.8.0/24"],
+            1,
+            TrustedNetworkRejectionKind::OutsidePrivateSpace,
+        ),
+        (
+            vec!["10.9.0.0/24", "   ", "8.8.8.0/24"],
+            2,
+            TrustedNetworkRejectionKind::OutsidePrivateSpace,
+        ),
+        (
+            vec![" ", "", "garbage-entry"],
+            2,
+            TrustedNetworkRejectionKind::InvalidFormat,
+        ),
+        (
+            vec!["10.9.0.0/24", "", "10.9.0.7/24"],
+            2,
+            TrustedNetworkRejectionKind::Duplicate,
+        ),
     ] {
         // 同一次提交里还带一个合法的端口变更：拒绝后端口也必须保持不变。
         let outcome = update(NetworkSettingsPatch {
@@ -184,7 +205,7 @@ async fn network_settings_updates_are_structured_and_all_or_nothing() {
             panic!("expected a rejection for {entries:?}");
         };
         assert_eq!(rejection, SettingsRejection::TrustedNetwork { index, kind });
-        for entry in &entries {
+        for entry in entries.iter().filter(|entry| !entry.trim().is_empty()) {
             assert!(
                 !reason.contains(entry),
                 "the reason must not echo user input"

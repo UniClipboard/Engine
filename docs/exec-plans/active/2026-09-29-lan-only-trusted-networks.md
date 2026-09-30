@@ -2,7 +2,7 @@
 
 ## 状态
 
-- **状态**：已确认，待实施
+- **状态**：实施中（切片 1–4 与移动端网络设置绑定已在本地完成，切片 5 真实网络验收进行中）
 - **日期**：2026-09-29
 - **问题来源**：UniClipboard/UniClipboard#1750，仅局域网在 WireGuard 等自建 VPN 内无法发现、配对和连接
 - **产品规格**：[PRD-022](../../product-specs/022-lan-only-trusted-networks.md)
@@ -11,7 +11,7 @@
   - 可信判定规则：`uc-core` 的 `TrustedNetworks`，发布与拨号两侧共用
   - 设置保存与迁移：既有设置流程与 `SettingsMigrator`
   - 连接重试与恢复：既有 `PeerConnectionCoordinator`，本计划不新增重试循环
-  - 地址写回时机：既有成员维护流程（`HistorySynchronizer`）与 `RefreshVerifiedPeerAddressPort`
+  - 地址写回时机：`PeerConnectionCoordinator` 收到当前成员 `Online` 时调用 `RefreshVerifiedPeerAddressPort`（成员历史交换不再触发）
 - **调用方唯一动作**：宿主保存网络设置（可信网段、固定端口）；配对继续使用既有邀请生成与输入操作
 - **成功结果**：设置保存成功并在重启后生效；经局域网或用户 VPN 直接可达的对端可配对、连接和同步（CGNAT/Tailscale 段需放行），全程不访问 relay、公共 DNS 或云 rendezvous。可信网段只是放行规则，不提供网络隔离
 - **失败结果**：设置校验失败返回稳定分类且不保存；端口占用时启动按稳定分类失败；直连地址被全部排除时不提前失败（mDNS 仍可解析），最终连接失败沿用既有分类；任何情况都不降级到 relay
@@ -76,20 +76,20 @@
 - **调用方动作**：查询、更新；新设置经 `recover_network` 立即生效（会中断传输），或下次启动生效。
 - **结果**：`Saved`（已保存）、`Rejected`（整次不保存，带字段、条目位置与固定分类），或 Engine 错误码。
 - **重试**：没有自动重试，由用户改正输入后再提交。
-- 已实现（本地未提交）：Engine 结构化拒绝、UniFFI 与 napi 各两个函数、`RecoverNetwork` 保留 `1102`。
+- 已实现（本地已提交）：Engine 结构化拒绝、UniFFI 与 napi 各两个函数、`RecoverNetwork` 保留 `1102`。
   实测发现的缺口（保存了被占用的端口后宿主无法自行改回）2026-09-30 已由用户决定：报错，由产品侧提示，不做引擎侧自救；
   并批准新增三处稳定信号（公开 1102 常量、`StartupFailureReason::ListenPortUnavailable`、恢复状态失败类别），已实现。
 
 ## 公开契约缺口（切片 1 核查）
 
-- iOS、Android（`bindings/uc-engine-uniffi`）与 HarmonyOS（`bindings/uc-ohos-napi`）没有绑定任何设置读写操作，
-  移动端目前无法读写可信网段、固定端口或 `allow_relay_fallback`。移动端设置界面需要 Engine 先新增绑定，属于未规划的新范围。
+- 切片 1 核查时，iOS、Android 与 HarmonyOS 绑定没有任何设置读写操作。该缺口已由“追加范围：移动端网络设置绑定”关闭：
+  两个绑定现提供网络设置的查询与更新（可信网段、固定端口；`allow_relay_fallback` 只读）。其他设置仍未绑定。
 - 发起端选择写入邀请的本机地址只存在于开发操作（`ListPairingInvitationAddresses`、`IssueInvitationForAddress`），
   不是公开操作。产品界面要选地址，需要先把它提升为公开契约，同样属于未规划的新范围。
   2026-09-29 用户决定本次不做，列为后续可选改进：不选时邀请已包含所有未被过滤的本机地址（通常含 VPN 地址），
   #1750 不依赖它；真实网络验收若发现地址过多导致配对慢或失败再加入，届时宜同时返回网卡名。
 - 完整邀请的复制与粘贴不需要 Engine 改动：`IssueInvitation` 已返回 `full_invitation`，`JoinSpace` 已接受完整邀请，两个绑定均已暴露。
-- 设置更新的拒绝原因只有英文文本；下游若需本地化或逐条定位，需要 Engine 提供结构化拒绝。
+- 设置更新的拒绝原因原本只有英文文本；结构化拒绝（字段、按提交列表计的条目位置、固定分类）已由移动端网络设置绑定交付。
 
 ## 下游衔接
 

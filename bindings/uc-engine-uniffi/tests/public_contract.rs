@@ -1170,6 +1170,22 @@ fn network_settings_project_the_engine_state_and_reject_structurally() {
             1,
             NetworkSettingsRejectionKind::Duplicate,
         ),
+        // 位置按提交的列表计：空白项虽会被丢弃，仍占位置。
+        (
+            vec!["", "8.8.8.0/24"],
+            1,
+            NetworkSettingsRejectionKind::OutsidePrivateSpace,
+        ),
+        (
+            vec!["10.9.0.0/24", "   ", "8.8.8.0/24"],
+            2,
+            NetworkSettingsRejectionKind::OutsidePrivateSpace,
+        ),
+        (
+            vec![" ", "", "garbage-entry"],
+            2,
+            NetworkSettingsRejectionKind::InvalidCidr,
+        ),
     ] {
         let rejected = engine
             .update_network_settings(NetworkSettingsUpdate {
