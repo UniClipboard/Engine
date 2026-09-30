@@ -4,7 +4,7 @@
 - **日期**：2026-09-29
 - **范围**：`uc-application`、`uc-infra`、`uc-engine` 中的 `tracing` 调用点，`uc-observability-contract` 的任务与字段词表，
   `scripts/architecture/check-rust-style.mjs` 与 workspace clippy 配置；不改变分层责任、远程遥测合同与业务记录准入标准
-- **实施计划**：[类型化日志事件与工具链强制](../../exec-plans/active/2026-09-29-typed-log-events.md)
+- **实施计划**：[类型化日志事件与工具链强制](../../exec-plans/completed/2026-09-29-typed-log-events.md)
 - **相关文件**：[运行期观测](../observability.md)、[错误处理](../error-handling.md)、
   [`module_log_fields.rs`](../../../crates/uc-observability-runtime/src/module_log_fields.rs)、
   [`diagnostics/mod.rs`](../../../crates/uc-observability-contract/src/diagnostics/mod.rs)

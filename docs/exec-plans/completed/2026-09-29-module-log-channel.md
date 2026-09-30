@@ -1,6 +1,6 @@
 # 模块日志通道与错误链
 
-状态：实施中（P0、P1 门禁、P2 部分、P3 已完成本地验证；开关已按用户决定删除）。来源：交接文档 `engine-observability-framework-handoff.md`
+状态：已完成（2026-09-30；P0–P3 本地验证完成，开关已按用户决定删除；错误层登记与 `warn_on_error!` 已由 `ErrorClass` 取代，见 ADR-030，下文为历史记录）。来源：交接文档 `engine-observability-framework-handoff.md`
 （SHA256 `2db2f0db9b2e622dfb1a17f518bf56fc56ea40897df3ab3128ff44206f07a76a`），基线 `c7a821b4`。
 
 ## 动作与责任

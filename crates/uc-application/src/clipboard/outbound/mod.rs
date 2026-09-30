@@ -400,17 +400,12 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
 
         let file_set_manifest = match directory_members {
             Some(members) => {
-                if plan.files.len() != extracted_paths_count {
-                    uc_warn!(
-                        entry_id = log_id(&entry_id_str),
-                        reason = "planner_excluded_member",
-                        file_candidate_count = plan.files.len(),
-                        extracted_paths_count = extracted_paths_count,
-                        "outbound: directory set skipped because the planner excluded a member"
-                    );
-                    return Ok(ClipboardOutboundOutcome::Skipped {
-                        reason: "file_set_member_unavailable".to_string(),
-                    });
+                if let Some(skipped) = skip_when_planner_excluded_member(
+                    &entry_id_str,
+                    plan.files.len(),
+                    extracted_paths_count,
+                ) {
+                    return Ok(skipped);
                 }
                 Some(build_transfer_manifest(&members, &plan.files)?)
             }
@@ -682,6 +677,28 @@ pub(crate) struct DirectoryMemberSource {
     pub location: FileSetMemberLocation,
     pub path: Option<PathBuf>,
     pub root_is_file: bool,
+}
+
+/// 目录集成员被 planner 丢弃时整组不发送：此时 blob 已发布，但传输清单无法完整描述目录，
+/// 写一条只带数量的记录，返回值里的原因字符串是既有的公开取值。
+fn skip_when_planner_excluded_member(
+    entry_id: &str,
+    file_candidate_count: usize,
+    extracted_paths_count: usize,
+) -> Option<ClipboardOutboundOutcome> {
+    if file_candidate_count == extracted_paths_count {
+        return None;
+    }
+    uc_warn!(
+        entry_id = log_id(&entry_id),
+        reason = "planner_excluded_member",
+        file_candidate_count = file_candidate_count,
+        extracted_paths_count = extracted_paths_count,
+        "outbound: directory set skipped because the planner excluded a member"
+    );
+    Some(ClipboardOutboundOutcome::Skipped {
+        reason: "file_set_member_unavailable".to_string(),
+    })
 }
 
 /// Resolve the member path list for an outbound file-class send, preferring
@@ -1670,5 +1687,41 @@ mod tests {
                 .map(|v| v.iter().map(|d| d.as_str().to_string()).collect::<Vec<_>>()),
             Some(vec!["peer-a".to_string(), "peer-b".to_string()])
         );
+    }
+
+    #[test]
+    fn a_planner_that_drops_a_directory_member_skips_the_set_with_a_counted_record() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+
+        let skipped = skip_when_planner_excluded_member("entry-1", 2, 3);
+
+        assert!(matches!(
+            skipped,
+            Some(ClipboardOutboundOutcome::Skipped { ref reason })
+                if reason == "file_set_member_unavailable"
+        ));
+        assert_eq!(
+            logs.count("planner excluded a member"),
+            1,
+            "{}",
+            logs.output()
+        );
+        let output = logs.output();
+        assert!(
+            output.contains("reason=\"planner_excluded_member\""),
+            "{output}"
+        );
+        assert!(output.contains("file_candidate_count=2"), "{output}");
+        assert!(output.contains("extracted_paths_count=3"), "{output}");
+    }
+
+    #[test]
+    fn a_complete_plan_does_not_skip_or_log() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+
+        assert!(skip_when_planner_excluded_member("entry-1", 3, 3).is_none());
+        assert_eq!(logs.count("planner excluded"), 0, "{}", logs.output());
     }
 }

@@ -35,7 +35,7 @@ Remote exporter build failure now yields `RemoteSetupFailure` (http_client/trace
 - Replaced `log_safe_errors!` registration with the fixed `uc_core::error_class::ErrorClass` trait; new catalog fields `error_class` and `source_class`; removed the registry, `warn_on_error!`, both `register_log_safe_errors()` functions and `check-module-log-errors.mjs`.
 - Module log error chains now render only `io::Error` and `serde_json::Error` layers; per-layer character truncation was removed as unreachable, and the long-chain test now asserts the depth cap.
 - Verification: fmt, workspace check (default and lan-compat), core/contract/runtime/application/infra tests, style, direct-log and engine repository checks all pass.
-- Known pre-existing flake: `interrupted_file_transfer_recovers_after_receiver_process_restart` in uc-engine times out about half the time on the unmodified HEAD (4dda7e6 baseline: 2 of 4 runs failed); unrelated to this change.
+- Known pre-existing flake: `interrupted_file_transfer_recovers_after_receiver_process_restart` in uc-engine times out about half the time on the unmodified HEAD (4ddac4da baseline: 2 of 4 runs failed); unrelated to this change.
 
 ## 2026-09-30 #[instrument] fields
 

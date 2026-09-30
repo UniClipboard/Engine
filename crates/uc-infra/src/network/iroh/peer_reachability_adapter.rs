@@ -1451,6 +1451,47 @@ mod tests {
         assert!(!record.contains(&client.id().to_string()), "{record}");
     }
 
+    /// 探测连接没有打开确认流就关闭：只在 debug 留下固定分类。
+    #[tokio::test]
+    async fn a_connection_closed_before_any_confirmation_is_recorded_as_missing() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let server = bound_endpoint().await;
+        wait_for_direct_addrs(&server).await;
+        let client = bound_endpoint().await;
+        let adapter = build_adapter(server.clone(), Arc::new(FakePeerAddressRepo::default()));
+        let router = Router::builder((*server).clone())
+            .accept(PEER_REACHABILITY_ALPN, adapter.handler())
+            .spawn();
+
+        let connection = client
+            .connect(server.addr(), PEER_REACHABILITY_ALPN)
+            .await
+            .unwrap();
+        connection.close(0u32.into(), b"probe_only");
+        timeout(Duration::from_secs(2), async {
+            while logs.count("without an admission confirmation") == 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("a missing confirmation must be recorded");
+        router.shutdown().await.unwrap();
+        client.close().await;
+
+        let record = logs
+            .output()
+            .lines()
+            .find(|line| line.contains("without an admission confirmation"))
+            .unwrap()
+            .to_owned();
+        assert!(
+            record.contains("error_kind=\"confirmation_missing\""),
+            "{record}"
+        );
+        assert!(!record.contains(&client.id().to_string()), "{record}");
+    }
+
     /// 第一次检查通过、写出确认后再检查已不被接纳（例如刚被撤销）。
     struct AdmittedOnlyOnce(std::sync::atomic::AtomicUsize);
     #[async_trait]

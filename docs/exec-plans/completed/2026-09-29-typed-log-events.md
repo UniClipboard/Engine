@@ -1,6 +1,6 @@
 # 类型化日志事件与工具链强制
 
-状态：M0、M1、M2、M4 已完成（一次性迁移，2026-09-29）；M3 与 `DiagnosticTaskKind` 声明生成未做；对应 [ADR-030](../../design-docs/decisions/030-typed-log-events-and-enforcement.md)（已采纳）。
+状态：已完成（M0–M4 与 `DiagnosticTaskKind` 声明生成，2026-09-30；未执行的 Windows 与 Android 编译、CI 真实耗时记为“跳过”）；对应 [ADR-030](../../design-docs/decisions/030-typed-log-events-and-enforcement.md)（已采纳）。
 基线：`a37be892`（模块日志通道已提交）。
 
 ## 动作与责任
