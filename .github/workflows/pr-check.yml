@@ -62,6 +62,16 @@ jobs:
         env:
           RUST_STYLE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
 
+      # 公告库在运行时拉取最新版本，工具版本固定并与本地 cargo audit 一致。漏洞与 unsound 公告都会阻断，
+      # 当前锁无需任何例外；新增公告必须通过升级修复，不得以忽略方式放行。
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
+        with:
+          tool: cargo-audit@0.22.2
+
+      - name: Audit locked dependencies
+        run: cargo audit --deny unsound
+
       - name: Check mobile build profiles and CI compile cache boundaries
         run: >-
           node --test scripts/architecture/check-mobile-build-profile.test.mjs scripts/release/build-profile.test.mjs

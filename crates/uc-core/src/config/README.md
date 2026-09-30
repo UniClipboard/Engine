@@ -24,9 +24,6 @@ use uc_core::config::AppConfig;
 
 // Empty config is valid (fact, not error)
 let config = AppConfig::empty();
-
-// From TOML - missing fields become empty values
-let config = AppConfig::from_toml(&toml_value)?;
 ```
 
 ## Migration Note / 迁移说明

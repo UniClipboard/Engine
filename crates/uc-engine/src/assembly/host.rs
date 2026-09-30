@@ -18,7 +18,7 @@ use uc_core::ids::{FormatId, RepresentationId};
 use uc_core::ports::{
     ClipboardHostEvent, ClipboardOriginKind, DeliveryHostEvent, EmitError, HostEvent,
     HostEventEmitterPort, MembershipHostEvent, PlatformClipboardPort, SecureStorageError,
-    SecureStoragePort, SystemClipboardPort, TransferHostEvent,
+    SecureStoragePort, SettingsHostEvent, SettingsSection, SystemClipboardPort, TransferHostEvent,
 };
 use uc_infra::security::{
     ProfileLifecycleRepository, ProfileStartupStorage, ProfileUpgradeBackupStore,
@@ -33,7 +33,8 @@ use crate::engine::startup::StartupProgressStore;
 use crate::{
     EngineConfig, EngineEvent, HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory,
     HostClipboard, HostClipboardChangeStream, HostClipboardRepresentation, HostDirectories,
-    HostFileAccess, HostSecureStorage, RefreshReason, TransferProgress,
+    HostFileAccess, HostSecureStorage, RefreshReason, SettingsChanged, SettingsSectionSummary,
+    TransferProgress,
 };
 
 struct HostSecureStorageAdapter {
@@ -416,6 +417,29 @@ impl HostEventEmitterPort for EngineHostEventEmitter {
                 attempt_id,
                 state,
             }),
+            HostEvent::Settings(SettingsHostEvent::Changed { sections }) => {
+                EngineEvent::SettingsChanged(SettingsChanged {
+                    sections: sections
+                        .into_iter()
+                        .map(|section| match section {
+                            SettingsSection::General => SettingsSectionSummary::General,
+                            SettingsSection::Sync => SettingsSectionSummary::Sync,
+                            SettingsSection::RetentionPolicy => {
+                                SettingsSectionSummary::RetentionPolicy
+                            }
+                            SettingsSection::Security => SettingsSectionSummary::Security,
+                            SettingsSection::Pairing => SettingsSectionSummary::Pairing,
+                            SettingsSection::KeyboardShortcuts => {
+                                SettingsSectionSummary::KeyboardShortcuts
+                            }
+                            SettingsSection::FileSync => SettingsSectionSummary::FileSync,
+                            SettingsSection::Network => SettingsSectionSummary::Network,
+                            SettingsSection::MobileSync => SettingsSectionSummary::MobileSync,
+                            SettingsSection::QuickPanel => SettingsSectionSummary::QuickPanel,
+                        })
+                        .collect(),
+                })
+            }
             HostEvent::Membership(MembershipHostEvent::LedgerCommitted { revision }) => {
                 EngineEvent::DeviceTrustChanged { revision }
             }

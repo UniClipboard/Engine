@@ -1,0 +1,7 @@
+# Findings
+
+- swarm-discovery: Engine third_party = 0.6.1 + GC fix; Desktop release lock = crates.io 0.6.3 (multicast interface fixes). Rebased patch onto 0.6.3 in Engine third_party (updater.rs identical to old patch; test carried over). RED (unpatched 0.6.3 gc) = 5 sends in 55 ms; GREEN = 1.
+- Desktop with local path override: only swarm-discovery source/checksum lines change in Cargo.lock; version stays 0.6.3; present in uc-daemon and GUI production graphs.
+- Advisory DB 2026-09-28 (ef036051): Engine lock had 10 vulnerabilities (h2, rustls, libcrux x5, quick-xml x2) + unsound (anyhow, diesel, lru). Fixed by cargo update: h2 0.4.19, rustls 0.23.45 (+webpki 0.103.15), diesel 2.3.13, anyhow 1.0.104, lru 0.18.5. Remaining 8 vulns need hpke-rs 0.7/openmls_rust_crypto 0.6 and iroh/netwatch bumps -> registered exceptions with a guard, same as Desktop.
+- tokio test-util: n0-future 0.3.2 has a NORMAL dep on tokio with test-util (non-wasm), so test-util stays in every production graph with iroh. Moving it to dev in uc-desktop/uc-webserver changes no production feature set (before/after tree identical). apps/daemon tests use start_paused and previously got test-util only by unification via uc-webserver -> added explicit dev dep.
+- image: uc-platform is only in the daemon graph; GUI image comes from tauri (jpeg,png,tiff,webp). Candidate set removes 46 packages from uc-daemon only. Item stays blocked (no 3-platform E2E).

@@ -156,6 +156,7 @@ fn every_public_operation_has_a_stable_kind() {
                 extensions: None,
                 source_devices: None,
                 tags: None,
+                tag_match: None,
                 limit: 50,
                 offset: 0,
             }),
@@ -1241,6 +1242,7 @@ fn search_contract_preserves_fields_without_debugging_user_content() {
         extensions: Some("private-extension".into()),
         source_devices: Some("device-1".into()),
         tags: Some("private-tag".into()),
+        tag_match: Some("all".into()),
         limit: 50,
         offset: 0,
     };

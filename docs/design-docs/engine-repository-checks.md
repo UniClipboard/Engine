@@ -16,6 +16,7 @@ node scripts/architecture/check-engine-repository.mjs
 - UniFFI、HarmonyOS 绑定和 `uc-engine` 必须使用同一版本。
 - 三端打包脚本必须记录版本、来源提交和校验值。
 - 密文扫描器必须接受干净目录、拒绝含探针明文的目录，并且不能输出探针内容。
+- 依赖锁文件不得含 RustSec 漏洞或 unsound 公告：PR Check 用固定版本的 `cargo audit --deny unsound` 检查。当前锁不含任何例外；新公告必须通过依赖升级修复，不得以忽略清单放行。
 - LAN 兼容能力默认关闭，P2P 使用方不得隐式启用，也不得出现自动回退逻辑。
 
 检查程序自带三个隔离的错误样例，分别模拟仓库外本地依赖、绑定版本不一致和自动 LAN 回退。每次执行都必须证明三个错误会被拒绝。

@@ -96,6 +96,7 @@ use crate::assembly::deps::{
 use crate::assembly::maintenance_space_transition::MaintenanceOnlySpaceTransitionPorts;
 use crate::assembly::platform::{create_platform_layer, ProfilePayloadMode, SystemClipboardLayer};
 use crate::assembly::runtime_storage::RuntimeStorageSelection;
+use crate::assembly::settings_notification::NotifyingSettings;
 use infra::*;
 
 /// Infrastructure layer implementations
@@ -424,7 +425,7 @@ pub async fn wire_dependencies_from_inputs(
     // off its own pooled connection; clone before infra consumes the pool.
     let db_pool_for_config_migration = db_pool.clone();
 
-    let infra = create_infra_layer(
+    let mut infra = create_infra_layer(
         db_pool,
         control_db_pool,
         &vault_path,
@@ -432,6 +433,11 @@ pub async fn wire_dependencies_from_inputs(
         &app_data_root,
         secure_storage.clone(),
     )?;
+    // 唯一的设置保存出口：所有写入路径共享同一个变更通知。
+    infra.settings_repo = Arc::new(NotifyingSettings::new(
+        infra.settings_repo,
+        Arc::clone(&host_event_emitter),
+    ));
     let storage_config = Arc::new(ClipboardStorageConfig::defaults());
     let profile_salt = profile_id.inner().as_bytes().to_vec();
     let platform = create_platform_layer(

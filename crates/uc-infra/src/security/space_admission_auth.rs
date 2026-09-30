@@ -3,8 +3,6 @@ use hkdf::Hkdf;
 use opaque_ke::argon2::{Algorithm, Argon2, Params, Version};
 use opaque_ke::ciphersuite::CipherSuite;
 use opaque_ke::generic_array::typenum::Unsigned;
-use opaque_ke::rand::rngs::OsRng;
-use opaque_ke::rand::RngCore;
 use opaque_ke::{
     ClientLogin, ClientLoginFinishParameters, ClientRegistration,
     ClientRegistrationFinishParameters, CredentialFinalization, CredentialFinalizationLen,
@@ -12,6 +10,8 @@ use opaque_ke::{
     ServerLogin, ServerLoginParameters, ServerRegistration, ServerRegistrationLen, ServerSetup,
     TripleDh,
 };
+use rand_opaque::rngs::OsRng;
+use rand_opaque::RngCore;
 use sha2::{Digest, Sha512};
 use subtle::ConstantTimeEq;
 use uc_core::crypto::domain::Passphrase;

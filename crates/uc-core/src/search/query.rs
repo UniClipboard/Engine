@@ -33,6 +33,20 @@ pub enum TimeRangeFilter {
     Absolute { from_ms: u64, to_ms: u64 },
 }
 
+/// 标签维度内的匹配方式。
+///
+/// 其他维度（内容类型、扩展名、来源设备）始终组内取“或”；只有标签维度可以切换为“且”。
+/// 各维度之间恒为“且”。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TagMatchMode {
+    /// 命中任一所列标签即可。
+    #[default]
+    Any,
+    /// 必须同时携带所有所列标签。
+    All,
+}
+
 /// Structured search query — mirrors the daemon HTTP request body shape.
 ///
 /// Field ordering follows D-10 exactly.
@@ -47,9 +61,12 @@ pub struct SearchQuery {
     /// Multi-select file type filter. Empty slice means no type restriction.
     pub content_types: Vec<ContentType>,
     /// Derived/user-state tag filter (e.g. `link`, `favorited`). Empty means no
-    /// tag restriction. Tags within this group are OR-combined; the group is
+    /// tag restriction. Tags within this group combine per `tag_match`; the group is
     /// AND-combined with the other filters.
     pub tags: Vec<TagId>,
+    /// How `tags` combine: any of them (default) or all of them.
+    #[serde(default)]
+    pub tag_match: TagMatchMode,
     /// File extension filter (e.g. `["md", "txt"]`). Empty means no restriction.
     pub extensions: Vec<String>,
     /// Source-device filter. Restricts results to entries that originated from

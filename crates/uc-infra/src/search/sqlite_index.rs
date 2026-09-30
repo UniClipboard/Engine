@@ -26,7 +26,7 @@ use uc_core::ports::search::search_key::SearchKeyDerivationPort;
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::search::document::{SearchDocument, SearchIndexMeta, SearchPosting};
 use uc_core::search::error::SearchError;
-use uc_core::search::query::{QueryOperator, SearchQuery, TimeRangeFilter};
+use uc_core::search::query::{QueryOperator, SearchQuery, TagMatchMode, TimeRangeFilter};
 use uc_core::search::result::{RebuildProgress, RebuildStage, SearchResult, SearchResultsPage};
 use uc_core::search::tag::{SearchTagCount, TagId};
 use uc_core::search::SearchProtectionRef;
@@ -43,7 +43,7 @@ use crate::search::rows::{
 };
 use crate::search::search_key_derivation::term_tag;
 use crate::search::tokenizer::SearchTokenizer;
-use crate::search::{SearchGroupRef, V3SearchProtection};
+use crate::search::{SearchGroupRef, V3SearchProtection, V3SearchProtectionError};
 
 /// Owned, query-derived filter inputs shared by both search paths.
 ///
@@ -51,7 +51,9 @@ use crate::search::{SearchGroupRef, V3SearchProtection};
 /// stored snake_case `file_type` strings; `extensions` are pre-lowercased.
 struct FilterParams {
     content_types: Vec<String>,
+    /// 已去重的标签 id；顺序保持首次出现。
     tags: Vec<String>,
+    tag_match: TagMatchMode,
     extensions: Vec<String>,
     source_devices: Vec<String>,
     time_range: Option<TimeRangeFilter>,
@@ -786,13 +788,22 @@ impl SqliteSearchIndex {
                     );
                 }
                 if !filters.tags.is_empty() {
-                    // Tag membership (OR within the group) as an indexed subquery —
-                    // served by `idx_entry_tag_by_tag (profile_id, tag_id)`.
-                    let members = search_entry_tag::table
-                        .filter(search_entry_tag::profile_id.eq(profile_id))
-                        .filter(search_entry_tag::tag_id.eq_any(filters.tags.clone()))
-                        .select(search_entry_tag::entry_id);
-                    q = q.filter(search_document::entry_id.eq_any(members));
+                    // Tag membership as indexed subqueries — served by
+                    // `idx_entry_tag_by_tag (profile_id, tag_id)`. `Any` is one
+                    // OR-group; `All` is one membership subquery per tag, ANDed.
+                    let groups: Vec<Vec<String>> = match filters.tag_match {
+                        TagMatchMode::Any => vec![filters.tags.clone()],
+                        TagMatchMode::All => {
+                            filters.tags.iter().map(|tag| vec![tag.clone()]).collect()
+                        }
+                    };
+                    for group in groups {
+                        let members = search_entry_tag::table
+                            .filter(search_entry_tag::profile_id.eq(profile_id))
+                            .filter(search_entry_tag::tag_id.eq_any(group))
+                            .select(search_entry_tag::entry_id);
+                        q = q.filter(search_document::entry_id.eq_any(members));
+                    }
                 }
                 if let Some((from_ms, to_ms)) = time_bounds {
                     q = q.filter(search_document::active_time_ms.between(from_ms, to_ms));
@@ -876,6 +887,7 @@ impl SqliteSearchIndex {
                 conn,
                 profile_id,
                 &filters.tags,
+                filters.tag_match,
             )?)
         };
         let source_set: Option<HashSet<&str>> = if filters.source_devices.is_empty() {
@@ -1068,23 +1080,106 @@ impl SqliteSearchIndex {
         Ok(map)
     }
 
-    /// Load the set of entry ids carrying any of `tag_ids` (OR semantics).
+    /// Load the set of entry ids matching `tag_ids` per `mode`: `Any` keeps entries
+    /// carrying at least one, `All` only those carrying every distinct tag.
     /// Used to restrict search results by tag membership before pagination.
     fn load_entry_ids_for_tags(
         conn: &mut SqliteConnection,
         profile_id: &str,
         tag_ids: &[String],
+        mode: TagMatchMode,
     ) -> Result<HashSet<String>, SearchError> {
         use crate::db::schema::search_entry_tag::dsl;
 
         let rows = dsl::search_entry_tag
             .filter(dsl::profile_id.eq(profile_id))
             .filter(dsl::tag_id.eq_any(tag_ids))
-            .select(dsl::entry_id)
-            .load::<String>(conn)
+            .select((dsl::entry_id, dsl::tag_id))
+            .load::<(String, String)>(conn)
             .map_err(internal("load_entry_ids_for_tags failed"))?;
 
-        Ok(rows.into_iter().collect())
+        match mode {
+            TagMatchMode::Any => Ok(rows.into_iter().map(|(entry_id, _)| entry_id).collect()),
+            TagMatchMode::All => {
+                let required = tag_ids.iter().collect::<HashSet<_>>().len();
+                let mut matched: HashMap<String, HashSet<String>> = HashMap::new();
+                for (entry_id, tag_id) in rows {
+                    matched.entry(entry_id).or_default().insert(tag_id);
+                }
+                Ok(matched
+                    .into_iter()
+                    .filter(|(_, tags)| tags.len() == required)
+                    .map(|(entry_id, _)| entry_id)
+                    .collect())
+            }
+        }
+    }
+
+    /// 查询前的保护准备：派生关键词 term tag、渲染解密器，并在会话锁定时返回
+    /// `SessionLocked`。`search`、`count` 与按日统计共用这一入口，锁定语义因此不会分叉。
+    async fn prepare_protection(
+        &self,
+        pool: &DbPool,
+        profile_id: &str,
+        terms: &[String],
+        is_filter_only: bool,
+    ) -> Result<(Vec<Vec<u8>>, usize, SearchRenderStrategy), SearchError> {
+        match &self.protection {
+            SearchProtectionStrategy::Legacy(derivation) => {
+                let tags = if is_filter_only {
+                    Vec::new()
+                } else {
+                    let search_key = derivation.derive_search_key().await?;
+                    terms
+                        .iter()
+                        .map(|term| term_tag(search_key.key(), term))
+                        .collect::<Result<_, _>>()
+                        .map_err(internal("term_tag computation failed"))?
+                };
+                let render_key = derivation.derive_render_key().await?;
+                Ok((
+                    tags,
+                    terms.len(),
+                    SearchRenderStrategy::Legacy(RenderPayloadCodec::new(render_key)),
+                ))
+            }
+            SearchProtectionStrategy::V3(protection) => {
+                // SQLite 只负责枚举索引中实际存在的 opaque group ref；vault
+                // 解析与多组 query alternatives 在异步密码边界外完成。
+                let refs = {
+                    let pool = pool.clone();
+                    let profile_id = profile_id.to_string();
+                    tokio::task::spawn_blocking(move || {
+                        let mut conn = pool.get().map_err(internal("pool error"))?;
+                        Self::require_ready_version(&mut conn, &profile_id, V3_INDEX_VERSION)?;
+                        Self::load_v3_group_refs(&mut conn, &profile_id)
+                    })
+                    .await
+                    .map_err(internal("spawn_blocking error"))??
+                };
+                let query_tags = protection
+                    .query_terms(&refs, &terms)
+                    .await
+                    .map_err(|error| match error {
+                        V3SearchProtectionError::InvalidGroupReferences { .. } => {
+                            SearchError::IndexNotReady
+                        }
+                        other if other.runtime_closed() => SearchError::SessionLocked,
+                        other => internal("prepare V3 search query failed")(other),
+                    })?;
+                let tags = query_tags
+                    .alternatives_by_term()
+                    .iter()
+                    .flatten()
+                    .cloned()
+                    .collect();
+                Ok((
+                    tags,
+                    terms.len(),
+                    SearchRenderStrategy::V3(Arc::clone(protection)),
+                ))
+            }
+        }
     }
 
     // ─── Rebuild helpers ──────────────────────────────────────────────────────
@@ -1543,62 +1638,9 @@ impl SearchIndexPort for SqliteSearchIndex {
         let terms = Self::normalize_query_terms(&query)?;
         let is_filter_only = terms.is_empty();
 
-        let (term_tags, required_term_count, renderer) = match &self.protection {
-            SearchProtectionStrategy::Legacy(derivation) => {
-                let tags = if is_filter_only {
-                    Vec::new()
-                } else {
-                    let search_key = derivation.derive_search_key().await?;
-                    terms
-                        .iter()
-                        .map(|term| term_tag(search_key.key(), term))
-                        .collect::<Result<_, _>>()
-                        .map_err(internal("term_tag computation failed"))?
-                };
-                let render_key = derivation.derive_render_key().await?;
-                (
-                    tags,
-                    terms.len(),
-                    SearchRenderStrategy::Legacy(RenderPayloadCodec::new(render_key)),
-                )
-            }
-            SearchProtectionStrategy::V3(protection) => {
-                // SQLite 只负责枚举索引中实际存在的 opaque group ref；vault
-                // 解析与多组 query alternatives 在异步密码边界外完成。
-                let refs = {
-                    let pool = pool.clone();
-                    let profile_id = profile_id.clone();
-                    tokio::task::spawn_blocking(move || {
-                        let mut conn = pool.get().map_err(internal("pool error"))?;
-                        Self::require_ready_version(&mut conn, &profile_id, V3_INDEX_VERSION)?;
-                        Self::load_v3_group_refs(&mut conn, &profile_id)
-                    })
-                    .await
-                    .map_err(internal("spawn_blocking error"))??
-                };
-                let query_tags = protection
-                    .query_terms(&refs, &terms)
-                    .await
-                    .map_err(|error| match error {
-                        crate::search::V3SearchProtectionError::InvalidGroupReferences {
-                            ..
-                        } => SearchError::IndexNotReady,
-                        other if other.runtime_closed() => SearchError::SessionLocked,
-                        other => internal("prepare V3 search query failed")(other),
-                    })?;
-                let tags = query_tags
-                    .alternatives_by_term()
-                    .iter()
-                    .flatten()
-                    .cloned()
-                    .collect();
-                (
-                    tags,
-                    terms.len(),
-                    SearchRenderStrategy::V3(Arc::clone(protection)),
-                )
-            }
-        };
+        let (term_tags, required_term_count, renderer) = self
+            .prepare_protection(&pool, &profile_id, &terms, is_filter_only)
+            .await?;
 
         let operator = query.operator.clone();
         // Pre-encode `content_type` to its stored snake_case string form once, so
@@ -1612,7 +1654,16 @@ impl SearchIndexPort for SqliteSearchIndex {
             .map_err(internal("content_type encode failed"))?;
         let filters = FilterParams {
             content_types,
-            tags: query.tags.iter().map(|t| t.as_str().to_string()).collect(),
+            tags: {
+                let mut seen = HashSet::new();
+                query
+                    .tags
+                    .iter()
+                    .map(|t| t.as_str().to_string())
+                    .filter(|tag| seen.insert(tag.clone()))
+                    .collect()
+            },
+            tag_match: query.tag_match,
             extensions: query.extensions.iter().map(|e| e.to_lowercase()).collect(),
             source_devices: query
                 .source_devices
@@ -1677,6 +1728,45 @@ impl SearchIndexPort for SqliteSearchIndex {
             has_more,
             corrupted_entry_ids,
         })
+    }
+
+    /// 按活跃时间分桶计数；先走与 `search` 相同的保护准备，保证会话锁定语义一致。
+    async fn count_by_active_time(&self, boundaries_ms: &[i64]) -> Result<Vec<u32>, SearchError> {
+        let bucket_count = boundaries_ms.len().saturating_sub(1);
+        if bucket_count == 0 || boundaries_ms.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(SearchError::InvalidQuery(
+                "bucket boundaries must be strictly increasing with at least two entries"
+                    .to_string(),
+            ));
+        }
+        let profile_id = self.current_profile_id().await?.into_inner();
+        let pool = self.pool.clone();
+        let index_version = self.protection.index_version();
+        self.prepare_protection(&pool, &profile_id, &[], true)
+            .await?;
+
+        let boundaries = boundaries_ms.to_vec();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = pool.get().map_err(internal("pool error"))?;
+            Self::require_ready_version(&mut conn, &profile_id, index_version)?;
+            let (first, last) = (boundaries[0], boundaries[boundaries.len() - 1]);
+            let times: Vec<i64> = search_document::table
+                .filter(search_document::profile_id.eq(&profile_id))
+                .filter(search_document::active_time_ms.ge(first))
+                .filter(search_document::active_time_ms.lt(last))
+                .select(search_document::active_time_ms)
+                .load(&mut conn)
+                .map_err(internal("daily count load failed"))?;
+            let mut counts = vec![0u32; bucket_count];
+            for time in times {
+                // 已按 [first, last) 过滤，partition_point 至少为 1。
+                let bucket = boundaries.partition_point(|boundary| *boundary <= time) - 1;
+                counts[bucket] = counts[bucket].saturating_add(1);
+            }
+            Ok(counts)
+        })
+        .await
+        .map_err(internal("spawn_blocking error"))?
     }
 
     /// Full index rebuild using temp-table workspace.
@@ -2329,6 +2419,7 @@ mod tests {
             time_range: None,
             content_types: vec![],
             tags: vec![],
+            tag_match: TagMatchMode::Any,
             extensions: vec![],
             source_devices: vec![],
             limit: 50,
@@ -2616,6 +2707,61 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(none.total, 0);
+    }
+
+    /// 标签“且”：filter-only 路径要求同时携带所有所列标签；默认 Any 仍取“或”。
+    #[tokio::test]
+    async fn tag_match_all_requires_every_tag_in_browse() {
+        let (index, _pool, _dir) = make_index();
+        for (id, tags) in [
+            ("both", vec![TagId::link(), TagId::code()]),
+            ("only-link", vec![TagId::link()]),
+            ("only-code", vec![TagId::code()]),
+            ("none", vec![]),
+        ] {
+            index.index_entry(make_doc(id, tags), vec![]).await.unwrap();
+        }
+        let both_tags = vec![TagId::link(), TagId::code()];
+
+        let any = index
+            .search(SearchQuery {
+                tags: both_tags.clone(),
+                ..filter_only_query()
+            })
+            .await
+            .unwrap();
+        assert_eq!(any.total, 3, "default match keeps OR semantics");
+
+        let all = index
+            .search(SearchQuery {
+                tags: both_tags,
+                tag_match: TagMatchMode::All,
+                ..filter_only_query()
+            })
+            .await
+            .unwrap();
+        assert_eq!(all.total, 1);
+        assert_eq!(all.items[0].entry_id.to_string(), "both");
+        assert!(!all.has_more);
+    }
+
+    /// 重复标签不能把“且”变成不可满足。
+    #[tokio::test]
+    async fn tag_match_all_ignores_duplicate_tag_ids() {
+        let (index, _pool, _dir) = make_index();
+        index
+            .index_entry(make_doc("e1", vec![TagId::link()]), vec![])
+            .await
+            .unwrap();
+        let page = index
+            .search(SearchQuery {
+                tags: vec![TagId::link(), TagId::link()],
+                tag_match: TagMatchMode::All,
+                ..filter_only_query()
+            })
+            .await
+            .unwrap();
+        assert_eq!(page.total, 1);
     }
 
     #[tokio::test]

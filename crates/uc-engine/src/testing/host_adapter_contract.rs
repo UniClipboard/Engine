@@ -3264,6 +3264,7 @@ async fn engine_start_builds_a_resumable_real_session() {
             extensions: None,
             source_devices: None,
             tags: None,
+            tag_match: None,
             limit: 25,
             offset: 0,
         }))
