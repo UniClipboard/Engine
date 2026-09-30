@@ -99,6 +99,7 @@ mod tests {
         "issue",
         "msg_kind",
         "plan",
+        "recovery_state",
         "reject_reason",
         "rollback_target",
         "storage_generation",

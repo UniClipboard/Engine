@@ -58,7 +58,13 @@ pub(super) async fn spawn_host_clipboard_change_task(
                             );
                         }
                     }
-                    Ok(HostClipboardChange::Closed) => return,
+                    Ok(HostClipboardChange::Closed) => {
+                        uc_warn!(
+                            error_kind = "change_stream_closed",
+                            "host clipboard change stream closed; watcher stopped"
+                        );
+                        return;
+                    }
                     Err(error) => {
                         uc_warn!(
                             error_kind = "change_stream",
@@ -126,6 +132,11 @@ impl HostClipboardChangeRuntime {
             .await
             .map_err(|error| observe_error("clipboard encryption state", error))?;
         if !encryption.session_ready {
+            // 在 observe_local_copy 之前返回，没有复制并同步的业务记录；这里补一条，使“复制了但没同步”可归因。
+            uc_info!(
+                reason = "space_locked",
+                "host clipboard change skipped: space is locked"
+            );
             return Ok(None);
         }
 

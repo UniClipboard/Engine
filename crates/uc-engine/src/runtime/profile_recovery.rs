@@ -13,7 +13,9 @@ use uc_infra::security::{
     ProfileKeyRecoveryError, ProfileKeyRecoveryStore, ProfileRecoveryLosses,
     ProfileRecoveryOutcome, ProfileRecoveryPreparation,
 };
-use uc_observability_contract::{error_source::io_error_kind, uc_warn};
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_vocab_debug, uc_info, uc_warn,
+};
 
 use super::{profile_recovery_required_error, startup_error, ProductionRuntime};
 use crate::assembly::host::{
@@ -96,9 +98,7 @@ impl RecoverableRuntime {
                     Err(error) => match error.admission_recovery() {
                         Some(summary) => {
                             progress.recovery_available();
-                            events.send(EngineEvent::ProfileRecoveryChanged(admission_summary(
-                                summary,
-                            )));
+                            publish_profile_recovery(&events, admission_summary(summary));
                             RuntimeMode::AdmissionRecovery {
                                 summary,
                                 runtime: None,
@@ -123,7 +123,7 @@ impl RecoverableRuntime {
                     losses: public_losses(losses),
                     admission: None,
                 };
-                events.send(EngineEvent::ProfileRecoveryChanged(summary.clone()));
+                publish_profile_recovery(&events, summary.clone());
                 RuntimeMode::Recovery(Arc::new(RecoveryBootstrap {
                     input: Mutex::new(Some((config, host))),
                     gate: Mutex::new(()),
@@ -163,10 +163,7 @@ impl RecoverableRuntime {
         let mut mode = self.mode.write().await;
         if !matches!(*mode, RuntimeMode::AdmissionRecovery { .. }) {
             *mode = RuntimeMode::AdmissionRecovery { summary, runtime };
-            self.events
-                .send(EngineEvent::ProfileRecoveryChanged(admission_summary(
-                    summary,
-                )));
+            publish_profile_recovery(&self.events, admission_summary(summary));
         }
         mode.clone()
     }
@@ -221,11 +218,10 @@ impl RecoverableRuntime {
             match self.recovery.refresh_after_authentication().await {
                 Ok(()) => {
                     if self.lock_ready_summary_override().take().is_some() {
-                        self.events
-                            .send(EngineEvent::ProfileRecoveryChanged(ready_summary(
-                                recovered,
-                                self.recovery.cleanup_pending(),
-                            )));
+                        publish_profile_recovery(
+                            &self.events,
+                            ready_summary(recovered, self.recovery.cleanup_pending()),
+                        );
                     }
                 }
                 Err(error) => {
@@ -244,8 +240,7 @@ impl RecoverableRuntime {
                         admission: None,
                     };
                     *self.lock_ready_summary_override() = Some(summary.clone());
-                    self.events
-                        .send(EngineEvent::ProfileRecoveryChanged(summary));
+                    publish_profile_recovery(&self.events, summary);
                 }
             }
         }
@@ -343,7 +338,13 @@ impl RecoverableRuntime {
                         {
                             Ok(result) => result,
                             Err(error) => {
-                                let _ = runtime.shutdown(None).await;
+                                if let Err(shutdown) = runtime.shutdown(None).await {
+                                    uc_warn!(
+                                        error_kind = "profile_recovery_shutdown",
+                                        io_error_kind = io_error_kind(&shutdown),
+                                        "profile recovery unlock failed and the runtime did not shut down cleanly"
+                                    );
+                                }
                                 self.publish_restart_required(&bootstrap);
                                 return Err(restart_required_error(error));
                             }
@@ -376,6 +377,11 @@ impl RecoverableRuntime {
                         ))
                     }
                     Err(error) => {
+                        uc_warn!(
+                            error_kind = "profile_recovery",
+                            io_error_kind = io_error_kind(&error),
+                            "profile recovery attempt failed"
+                        );
                         let error = EngineError::from(error);
                         self.publish_summary(&bootstrap, |summary| {
                             summary.state = ProfileRecoveryState::Failed;
@@ -468,8 +474,7 @@ impl RecoverableRuntime {
             update(&mut summary);
             summary.clone()
         };
-        self.events
-            .send(EngineEvent::ProfileRecoveryChanged(summary));
+        publish_profile_recovery(&self.events, summary);
     }
 
     fn publish_restart_required(&self, bootstrap: &RecoveryBootstrap) {
@@ -486,6 +491,17 @@ impl RecoverableRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+}
+
+/// 资料恢复状态机的每次转换：同一处发布事件并留下时间线，只含状态枚举与两个布尔位。
+fn publish_profile_recovery(events: &EventSender, summary: ProfileRecoverySummary) {
+    uc_info!(
+        recovery_state = log_vocab_debug(&summary.state),
+        restart_required = summary.restart_required,
+        can_submit_passphrase = summary.can_submit_passphrase,
+        "profile recovery state changed"
+    );
+    events.send(EngineEvent::ProfileRecoveryChanged(summary));
 }
 
 impl RecoveryBootstrap {
@@ -729,6 +745,31 @@ fn admission_summary(admission: AdmissionRecoverySummary) -> ProfileRecoverySumm
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::event_stream::event_channel;
+
+    #[test]
+    fn a_state_change_is_recorded_with_its_state_and_flags_only() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let (events, _stream) = event_channel(4);
+
+        publish_profile_recovery(
+            &events,
+            ProfileRecoverySummary {
+                state: ProfileRecoveryState::Failed,
+                can_submit_passphrase: false,
+                restart_required: true,
+                background_ready: false,
+                cleanup_pending: false,
+                losses: Vec::new(),
+                admission: None,
+            },
+        );
+
+        assert_eq!(logs.count("profile recovery state changed"), 1);
+        assert!(logs.output().contains("recovery_state=Failed"));
+        assert!(logs.output().contains("restart_required=true"));
+    }
 
     #[test]
     fn recovery_storage_errors_keep_stable_public_categories() {

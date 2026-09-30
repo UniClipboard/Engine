@@ -10,7 +10,8 @@ use uc_core::file_transfer::{
     FileTransferCancellationReason, FileTransferDirection, OutboundProgressStatus,
 };
 use uc_infra::network::iroh::transfer_progress_adapter::InboundProgressEvent;
-use uc_observability_contract::uc_debug;
+use uc_observability_contract::diagnostics::{record_task_join_failure, DiagnosticTaskKind};
+use uc_observability_contract::uc_warn;
 
 // 每次传输最多每秒发布五次进度，终态不受节流影响。
 const TRANSLATOR_PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(200);
@@ -134,6 +135,7 @@ impl OutboundProgressRuntime {
                                         forward_outbound_progress(&bus, &mut last_progress_emit, &mut active, event);
                                     }
                                     Err(broadcast::error::TryRecvError::Lagged(skipped)) => {
+                                        record_progress_lag(skipped);
                                         remaining = remaining.saturating_sub(usize::try_from(skipped).unwrap_or(usize::MAX));
                                     }
                                     Err(_) => break,
@@ -163,12 +165,7 @@ impl OutboundProgressRuntime {
                     },
                     received = rx.recv() => match received {
                     Ok(event) => forward_outbound_progress(&bus, &mut last_progress_emit, &mut active, event),
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        uc_debug!(
-                            skipped = n,
-                            "outbound progress translator: lagged; some frames skipped"
-                        );
-                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => record_progress_lag(n),
                     Err(broadcast::error::RecvError::Closed) => {
                         break;
                     }
@@ -186,8 +183,21 @@ impl OutboundProgressRuntime {
         let _ = self
             .commands
             .send(OutboundProgressCommand::Shutdown { reason });
-        self.task.await
+        let result = self.task.await;
+        if result.is_err() {
+            record_task_join_failure(DiagnosticTaskKind::OutboundProgressTranslator);
+        }
+        result
     }
+}
+
+/// 丢失的帧可能是终态帧，使该传输一直停在“传输中”；不含传输与对端标识。
+fn record_progress_lag(skipped: u64) {
+    uc_warn!(
+        error_kind = "outbound_progress_lagged",
+        skipped = skipped,
+        "outbound progress translator lagged; some frames skipped"
+    );
 }
 
 #[cfg(test)]
@@ -231,6 +241,50 @@ mod outbound_progress_tests {
             total_bytes: Some(2),
             status,
         }
+    }
+
+    #[tokio::test]
+    async fn a_lagged_receiver_is_warned_about_with_the_skipped_count_only() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let (events, _) = broadcast::channel(2);
+        let receiver = events.subscribe();
+        for index in 0..5 {
+            events
+                .send(progress(
+                    &format!("transfer-{index}"),
+                    OutboundProgressStatus::InProgress,
+                ))
+                .unwrap();
+        }
+        let runtime = OutboundProgressRuntime::spawn(receiver, Arc::new(HostEventBus::new()));
+        tokio::task::yield_now().await;
+        runtime
+            .shutdown(FileTransferCancellationReason::ConnectivityRecovery)
+            .await
+            .unwrap();
+
+        assert_eq!(logs.count("outbound progress translator lagged"), 1);
+        assert!(logs.output().contains("skipped=3"));
+        assert!(!logs.output().contains("transfer-"));
+        assert!(!logs.output().contains("peer-test"));
+    }
+
+    #[tokio::test]
+    async fn a_translator_task_that_did_not_finish_is_recorded_as_a_join_failure() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let (events, _) = broadcast::channel(2);
+        let runtime =
+            OutboundProgressRuntime::spawn(events.subscribe(), Arc::new(HostEventBus::new()));
+        runtime.task.abort();
+
+        let result = runtime
+            .shutdown(FileTransferCancellationReason::ConnectivityRecovery)
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(logs.count("outbound_progress_translator"), 1);
     }
 
     #[tokio::test]

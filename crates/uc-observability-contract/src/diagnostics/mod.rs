@@ -551,6 +551,10 @@ pub enum DiagnosticTaskKind {
     ActiveClipboardWorker,
     /// 移动端绑定的引擎 worker 线程异常退出；宿主只收到稳定错误码。
     MobileWorker,
+    /// Engine 启动任务异常退出；调用方只收到稳定错误码 1108，启动请求与进度都不会收尾。
+    EngineStartup,
+    /// 出站进度翻译任务异常退出；此后出站传输状态不再更新。
+    OutboundProgressTranslator,
 }
 
 impl DiagnosticTaskKind {
@@ -568,6 +572,8 @@ impl DiagnosticTaskKind {
             Self::MembershipMaintenanceRound => "membership_maintenance_round",
             Self::ActiveClipboardWorker => "active_clipboard_worker",
             Self::MobileWorker => "mobile_worker",
+            Self::EngineStartup => "engine_startup",
+            Self::OutboundProgressTranslator => "outbound_progress_translator",
         }
     }
 }

@@ -1,5 +1,6 @@
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
+use uc_observability_contract::diagnostics::{record_task_join_failure, DiagnosticTaskKind};
 
 use super::{Engine, EventStream, StartupLifecycleInput, StartupProgressInput};
 use crate::{EngineConfig, EngineError, EngineErrorCategory, HostCapabilities};
@@ -29,8 +30,11 @@ impl Engine {
             // 发送成功也可能尚未被接收；交接守卫持续持有关闭责任直到调用方实际取走。
             let _ = sender.send(result);
         });
-        // oneshot RecvError 只表示发送端已丢弃，没有其他诊断信息。
-        receiver.await.map_err(|_| startup_task_failed())??.claim()
+        let handoff = receiver
+            .await
+            // oneshot RecvError 只表示发送端已丢弃（启动任务 panic 或被取消），没有其他诊断信息；健康记录承载这一事实。
+            .map_err(|_| startup_task_failed_recorded())??;
+        handoff.claim()
     }
 }
 
@@ -76,6 +80,11 @@ impl Drop for StartupHandoff {
             drop(progress);
         });
     }
+}
+
+fn startup_task_failed_recorded() -> EngineError {
+    record_task_join_failure(DiagnosticTaskKind::EngineStartup);
+    startup_task_failed()
 }
 
 fn startup_task_failed() -> EngineError {
