@@ -11,6 +11,7 @@ use uc_core::ports::{
     HostEvent, HostEventEmitterPort, SettingsHostEvent, SettingsPort, SettingsSection,
 };
 use uc_core::settings::model::Settings;
+use uc_observability_contract::{error_source::io_error_kind, uc_warn};
 
 pub(crate) struct NotifyingSettings {
     inner: Arc<dyn SettingsPort>,
@@ -54,9 +55,9 @@ impl SettingsPort for NotifyingSettings {
                 .emit(HostEvent::Settings(SettingsHostEvent::Changed { sections }))
             {
                 // 设置已经保存成功；通知失败不能反向让保存失败。宿主仍可在下次查询时读到新值。
-                tracing::warn!(
+                uc_warn!(
                     error_kind = "settings_change_notification",
-                    io_error_kind = uc_observability_contract::error_source::io_error_kind(&error),
+                    io_error_kind = io_error_kind(&error),
                     "settings change notification was not delivered"
                 );
             }
