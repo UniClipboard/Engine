@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 [--suite all|local|network] [--repeat N] [--mode all|direct|known-peer|relay|legacy] [--case PREFIX] [--prebuilt]"
+  echo "Usage: $0 [--suite all|local|network] [--repeat N] [--mode all|direct|known-peer|relay|legacy|lan-only|lan-only-vpn] [--case PREFIX] [--prebuilt]"
   echo "  --repeat applies to the network scenarios only; the local suite always runs once."
   echo "  --prebuilt reuses the test host already built in the cargo target directory, such as by the workspace test build."
 }
@@ -25,8 +25,14 @@ while (($#)); do
 done
 [[ "$repeat" =~ ^[1-9][0-9]*$ ]] || exit 2
 [[ "$suite" == all || "$suite" == local || "$suite" == network ]] || exit 2
-[[ "$mode" == all || "$mode" == direct || "$mode" == known-peer || "$mode" == relay || "$mode" == legacy ]] || exit 2
+[[ "$mode" == all || "$mode" == direct || "$mode" == known-peer || "$mode" == relay || "$mode" == legacy || "$mode" == lan-only || "$mode" == lan-only-vpn ]] || exit 2
 [[ "$suite" != local || "$mode" == all ]] || { echo '--mode only applies to network validation.' >&2; exit 2; }
+# 仅局域网验证要求宿主运行生产的进程级策略。workspace 测试构建会合并 dev-dependency 特性，
+# 其产物可能带着测试用的空操作策略，所以不允许复用。
+if ((prebuilt)) && [[ "$suite" != local && ( "$mode" == all || "$mode" == lan-only || "$mode" == lan-only-vpn ) ]]; then
+  echo '--prebuilt cannot be used for lan-only validation; build the host with cargo build -p uc-connectivity-host.' >&2
+  exit 2
+fi
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$repo"
 
@@ -92,6 +98,8 @@ if [[ -n "$case_prefix" ]]; then runner+=(--case "$case_prefix"); fi
 if ((EUID != 0)); then runner=(sudo -- "${runner[@]}"); fi
 if [[ "$mode" == all || "$mode" == direct ]]; then "${runner[@]}" --mode direct; fi
 if [[ "$mode" == all || "$mode" == known-peer ]]; then "${runner[@]}" --mode known-peer; fi
+if [[ "$mode" == all || "$mode" == lan-only ]]; then "${runner[@]}" --mode lan-only; fi
+if [[ "$mode" == all || "$mode" == lan-only-vpn ]]; then "${runner[@]}" --mode lan-only-vpn; fi
 if [[ "$mode" == all || "$mode" == relay ]]; then "${runner[@]}" --mode relay --relay "$target/debug/uc-connectivity-relay"; fi
 if [[ "$mode" == all || "$mode" == legacy ]]; then
   "${runner[@]}" --mode legacy --legacy-host "$target/upgrade-anchors/$legacy_revision/bin/uc-connectivity-host" --legacy-side 0

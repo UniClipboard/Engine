@@ -75,6 +75,8 @@ pub enum StartupFailureReason {
     CorruptData,
     SourceChanged,
     AlreadyRunning,
+    /// 固定监听端口已被占用（对应错误码 1102），需要用户释放或更换端口。
+    ListenPortUnavailable,
     StartupFailed,
 }
 

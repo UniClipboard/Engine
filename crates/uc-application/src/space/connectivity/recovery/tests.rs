@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use tokio::sync::{Mutex, Notify};
 
 use super::{
-    NetworkRecoveryEvent, NetworkRecoveryFacade, NetworkRecoveryPhase, NetworkRecoveryRequestError,
-    RebuildNetworkSessionError, RebuildNetworkSessionPort,
+    NetworkRecoveryEvent, NetworkRecoveryFacade, NetworkRecoveryFailure, NetworkRecoveryPhase,
+    NetworkRecoveryRequestError, RebuildNetworkSessionError, RebuildNetworkSessionPort,
 };
 
 mod shutdown;
@@ -142,4 +142,53 @@ async fn recovery_publishes_started_and_succeeded_events() {
     assert_eq!(recovery.request_recovery().await, Ok(()));
     assert_eq!(events.recv().await, Ok(NetworkRecoveryEvent::Started));
     assert_eq!(events.recv().await, Ok(NetworkRecoveryEvent::Succeeded));
+}
+
+#[tokio::test]
+async fn a_classified_rebuild_failure_reaches_the_event_and_the_status_until_the_next_cycle() {
+    let occupied = RebuildNetworkSessionError::new(io::Error::other("port in use"), false)
+        .with_failure(NetworkRecoveryFailure::ListenPortUnavailable);
+    let recovery = NetworkRecoveryFacade::new(Arc::new(RecordingRebuilder::new([
+        Err(occupied.clone()),
+        Ok(()),
+    ])));
+    let mut events = recovery.subscribe();
+
+    assert_eq!(
+        recovery.request_recovery().await,
+        Err(NetworkRecoveryRequestError::Rebuild(occupied))
+    );
+    assert_eq!(events.recv().await, Ok(NetworkRecoveryEvent::Started));
+    assert_eq!(
+        events.recv().await,
+        Ok(NetworkRecoveryEvent::Failed {
+            retryable: false,
+            failure: NetworkRecoveryFailure::ListenPortUnavailable,
+        })
+    );
+    let status = recovery.status().await;
+    assert_eq!(status.phase, NetworkRecoveryPhase::Failed);
+    assert!(!status.retryable);
+    assert_eq!(
+        status.failure,
+        Some(NetworkRecoveryFailure::ListenPortUnavailable)
+    );
+
+    // 下一轮恢复开始后，旧的失败分类不能残留；成功后状态里也没有分类。
+    assert_eq!(recovery.request_recovery().await, Ok(()));
+    assert_eq!(recovery.status().await.failure, None);
+}
+
+#[tokio::test]
+async fn an_unclassified_rebuild_failure_is_reported_as_other() {
+    let recovery = NetworkRecoveryFacade::new(Arc::new(RecordingRebuilder::new([Err(
+        RebuildNetworkSessionError::new(io::Error::other("other"), false),
+    )])));
+
+    let _ = recovery.request_recovery().await;
+
+    assert_eq!(
+        recovery.status().await.failure,
+        Some(NetworkRecoveryFailure::Other)
+    );
 }

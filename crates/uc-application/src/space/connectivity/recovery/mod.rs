@@ -11,7 +11,7 @@ use tokio::time::Instant;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 use cycle::start_cycle;
-pub use error::{NetworkRecoveryRequestError, RebuildNetworkSessionError};
+pub use error::{NetworkRecoveryFailure, NetworkRecoveryRequestError, RebuildNetworkSessionError};
 
 const RETRY_DELAYS: [Duration; 5] = [
     Duration::from_secs(1),
@@ -35,14 +35,21 @@ pub struct NetworkRecoveryStatus {
     pub phase: NetworkRecoveryPhase,
     pub retryable: bool,
     pub next_retry_in: Option<Duration>,
+    /// 仅在 `Failed` 阶段有值：最近一次重建失败的分类。
+    pub failure: Option<NetworkRecoveryFailure>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetworkRecoveryEvent {
     Started,
-    RetryScheduled { delay: Duration },
+    RetryScheduled {
+        delay: Duration,
+    },
     Succeeded,
-    Failed { retryable: bool },
+    Failed {
+        retryable: bool,
+        failure: NetworkRecoveryFailure,
+    },
 }
 
 /// The Engine owns the complete replacement of a running network session.
@@ -73,6 +80,7 @@ struct RecoveryState {
     next_retry_at: Option<Instant>,
     in_flight: Option<RecoveryCompletion>,
     failure: Option<NetworkRecoveryRequestError>,
+    failure_category: Option<NetworkRecoveryFailure>,
 }
 
 type RecoveryCompletion = Shared<BoxFuture<'static, Result<(), NetworkRecoveryRequestError>>>;
@@ -94,6 +102,7 @@ impl NetworkRecoveryFacade {
                     next_retry_at: None,
                     in_flight: None,
                     failure: None,
+                    failure_category: None,
                 }),
             }),
         }
@@ -110,6 +119,9 @@ impl NetworkRecoveryFacade {
             next_retry_in: state
                 .next_retry_at
                 .and_then(|at| at.checked_duration_since(Instant::now())),
+            failure: (state.phase == NetworkRecoveryPhase::Failed)
+                .then_some(state.failure_category)
+                .flatten(),
         }
     }
 

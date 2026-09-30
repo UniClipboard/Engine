@@ -270,7 +270,10 @@ pub enum CongestionControllerSummary {
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkSettingsSummary {
     pub allow_relay_fallback: bool,
-    pub allow_overlay_network_addrs: bool,
+    /// 仅局域网可直连的可信网段（CIDR 文本）。修改后重启生效。
+    pub trusted_networks: Vec<String>,
+    /// 固定 UDP 监听端口；`None` 表示随机端口。修改后重启生效。
+    pub listen_port: Option<u16>,
     pub custom_relay_urls: Vec<String>,
     pub congestion_controller: CongestionControllerSummary,
 }
@@ -278,7 +281,10 @@ pub struct NetworkSettingsSummary {
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkSettingsPatch {
     pub allow_relay_fallback: Option<bool>,
-    pub allow_overlay_network_addrs: Option<bool>,
+    /// 整体替换可信网段；只接受私有地址空间，否则整次更新被拒绝。
+    pub trusted_networks: Option<Vec<String>>,
+    /// `Some(0)` 恢复随机端口，`Some(port)` 固定端口。
+    pub listen_port: Option<u16>,
     pub custom_relay_urls: Option<Vec<String>>,
     pub congestion_controller: Option<CongestionControllerSummary>,
 }
@@ -355,10 +361,41 @@ pub struct SettingsPatch {
     pub quick_panel: Option<QuickPanelSettingsPatch>,
 }
 
+/// 可信网段条目被拒绝的固定分类。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TrustedNetworkRejectionKind {
+    /// 不是合法的 `地址/前缀`。
+    InvalidFormat,
+    /// 网段不完全位于私有地址空间内。
+    OutsidePrivateSpace,
+    /// 规范化后与前面的条目重复。
+    Duplicate,
+}
+
+/// 设置更新被拒绝的结构化原因，由与 `reason` 相同的校验错误派生，不重复校验。
+/// 只含字段、条目位置与固定分类，不含用户输入的原文（网段或 URL）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SettingsRejection {
+    /// 可信网段列表中第 `index` 条（从 0 开始）被拒绝。
+    TrustedNetwork {
+        index: u32,
+        kind: TrustedNetworkRejectionKind,
+    },
+    /// 已保存或本次提交的自定义中转 URL 不合法。
+    CustomRelayUrl,
+    /// 其他字段的补丁无法转换或保存；只有 `reason` 说明原因。
+    Other,
+}
+
+/// 整次更新要么全部保存，要么全部拒绝。`reason` 是英文诊断文本，可能含用户输入，宿主不得解析或记录它；
+/// 需要分类展示时使用 `rejection`。
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SettingsUpdateOutcome {
     Updated(Box<SettingsSummary>),
-    Rejected { reason: String },
+    Rejected {
+        reason: String,
+        rejection: SettingsRejection,
+    },
 }
 
 impl fmt::Debug for SettingsUpdateOutcome {

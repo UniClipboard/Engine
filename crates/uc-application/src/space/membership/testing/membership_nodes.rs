@@ -17,8 +17,7 @@ use uc_core::ports::ReachabilityState;
 use super::virtual_membership_network::{VirtualMembershipNetwork, VirtualMembershipNetworkError};
 use super::{
     AcceptingVerifier, CompletedStep, FixedSpaceWorkMode, MemoryMembershipRecords,
-    NoopAddressRefresh, RecordingEffects, RecordingHostEvents, RecordingWake, TestClock,
-    TestSigner,
+    RecordingEffects, RecordingHostEvents, RecordingWake, TestClock, TestSigner,
 };
 use crate::space::membership::query_device_trust::NoCurrentJoinStatus;
 use crate::space::membership::{
@@ -205,7 +204,6 @@ impl VirtualNode {
                 activation: effects,
                 restricted_delivery: transport.clone(),
                 history_transport: transport.clone(),
-                address_refresh: Arc::new(NoopAddressRefresh),
                 conflicts: Arc::new(CompletedStep),
                 group_updates: Arc::new(CompletedStep),
             },

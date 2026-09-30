@@ -774,7 +774,8 @@ async fn failed_background_start_requires_restart_and_never_returns_to_recoverin
         }))
         .await
         .expect_err("occupied network port must fail recovered background startup");
-    assert_eq!(failure.code(), 1101);
+    // 固定端口被占用是独立的稳定分类（1102），不再落入通用的网络启动失败（1101）。
+    assert_eq!(failure.code(), 1102);
     assert_eq!(
         failure.category(),
         uc_engine::EngineErrorCategory::Unavailable

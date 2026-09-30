@@ -3,6 +3,7 @@ use std::time::Instant;
 
 use tokio::sync::watch;
 
+use crate::error_codes::LISTEN_PORT_UNAVAILABLE_CODE;
 use crate::{
     EngineError, StartupAllowedActions, StartupFailure, StartupFailureReason, StartupSnapshot,
     StartupState, StartupStepProgress, StartupUpgradeProgress, StartupUpgradeStep,
@@ -164,8 +165,13 @@ impl StartupProgressInput {
             }
             Err(error) => {
                 snapshot.state = StartupState::Failed;
+                let reason = if error.code() == LISTEN_PORT_UNAVAILABLE_CODE {
+                    StartupFailureReason::ListenPortUnavailable
+                } else {
+                    StartupFailureReason::StartupFailed
+                };
                 let failure = snapshot.failure.get_or_insert(StartupFailure {
-                    reason: StartupFailureReason::StartupFailed,
+                    reason,
                     retryable: error.is_retryable(),
                 });
                 snapshot.allowed_actions.retry = failure.retryable;
@@ -368,6 +374,23 @@ mod tests {
         input.store.starting_services();
         input.finish(&Ok::<_, crate::EngineError>(()));
         assert_eq!(input.store.sender.borrow().state, StartupState::Ready);
+    }
+
+    #[test]
+    fn occupied_listen_port_has_its_own_startup_failure_reason() {
+        let (input, progress) = StartupProgress::channel();
+        input.finish(&Err::<(), _>(crate::EngineError::new(
+            LISTEN_PORT_UNAVAILABLE_CODE,
+            crate::EngineErrorCategory::Unavailable,
+            false,
+        )));
+        drop(input);
+        let snapshot = progress.snapshot();
+        assert_eq!(snapshot.state, StartupState::Failed);
+        let failure = snapshot.failure.unwrap();
+        assert_eq!(failure.reason, StartupFailureReason::ListenPortUnavailable);
+        assert!(!failure.retryable);
+        assert!(!snapshot.allowed_actions.retry);
     }
 
     #[test]

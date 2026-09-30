@@ -9,17 +9,19 @@ use uc_engine::{
     CancelJoinSpaceInput, ChangeEncryptionPassphraseInput, ChooseDeviceGroupInput,
     ClipboardRestoreMode, ClipboardRestoreOutcome, CreateSpaceInput, Engine, EngineConfig,
     EngineError, EngineEvent, EngineState, EventStream, ExportEntryInput, HostFileHandle,
-    InvitationAvailability, JoinSpaceInput, Operation, OperationResult, OperationTerminal,
-    RecoverSessionInput, RefreshReason, RemoveMemberInput, RestoreClipboardInput, SecretString,
-    SendFilesInput, SendImageInput, SendReportSummary, SendTextInput, StartupLifecycle,
-    StartupLifecycleInput, StartupProgress,
+    InvitationAvailability, JoinSpaceInput, NetworkSettingsPatch, Operation, OperationResult,
+    OperationTerminal, RecoverSessionInput, RefreshReason, RemoveMemberInput,
+    RestoreClipboardInput, SecretString, SendFilesInput, SendImageInput, SendReportSummary,
+    SendTextInput, SettingsPatch, SettingsRejection, SettingsUpdateOutcome, StartupLifecycle,
+    StartupLifecycleInput, StartupProgress, TrustedNetworkRejectionKind,
 };
 use zeroize::Zeroizing;
 
 use crate::{
     host, OhActiveClipboard, OhEngineConfig, OhEngineEvent, OhHost, OhInvitationIssued,
-    OhJoinSpaceStatus, OhJoinedSpace, OhLocalDevice, OhNetworkRecoveryStatus, OhSendReport,
-    OhSessionRecovery, OhSpaceCreated, OhWorkspaceConvergence,
+    OhJoinSpaceStatus, OhJoinedSpace, OhLocalDevice, OhNetworkRecoveryStatus, OhNetworkSettings,
+    OhNetworkSettingsUpdate, OhNetworkSettingsUpdateResult, OhSendReport, OhSessionRecovery,
+    OhSpaceCreated, OhWorkspaceConvergence,
 };
 
 #[napi]
@@ -178,6 +180,52 @@ impl OhEngine {
             .map_err(engine_error)?
         {
             OperationResult::NetworkRecovered => Ok(()),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    /// 读取仅局域网相关的网络设置。
+    #[napi]
+    pub async fn query_network_settings(&self) -> napi::Result<OhNetworkSettings> {
+        match self
+            .engine
+            .execute(Operation::QuerySettings)
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::Settings(settings) => Ok(network_settings(settings.network)),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    /// 更新可信网段与固定端口。整次提交全有或全无；新值经 `recoverNetwork` 或重启后生效。
+    /// 拒绝是业务结果（`status: 'rejected'`），不是错误。
+    #[napi]
+    pub async fn update_network_settings(
+        &self,
+        update: OhNetworkSettingsUpdate,
+    ) -> napi::Result<OhNetworkSettingsUpdateResult> {
+        // 端口先转成 u16：这只是类型边界，范围之外没有可表达的端口；语义校验仍只在 Engine。
+        let listen_port = match update.listen_port {
+            // 公开契约边界：超出端口范围只产出稳定的无效参数错误，转换错误本身不携带更多信息。
+            Some(port) => Some(u16::try_from(port).map_err(|_| invalid_listen_port())?),
+            None => None,
+        };
+        let patch = SettingsPatch {
+            network: Some(NetworkSettingsPatch {
+                trusted_networks: update.trusted_networks,
+                listen_port,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        match self
+            .engine
+            .execute(Operation::UpdateSettings(Box::new(patch)))
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::SettingsUpdated(outcome) => network_settings_update_result(outcome),
             _ => Err(unexpected_result()),
         }
     }
@@ -621,6 +669,52 @@ fn device_trust_json(summary: uc_engine::DeviceTrustSnapshotSummary) -> napi::Re
     serde_json::to_string(&summary).map_err(|_| unexpected_result())
 }
 
+fn network_settings(network: uc_engine::NetworkSettingsSummary) -> OhNetworkSettings {
+    OhNetworkSettings {
+        allow_relay_fallback: network.allow_relay_fallback,
+        trusted_networks: network.trusted_networks,
+        listen_port: network.listen_port.map(u32::from),
+    }
+}
+
+/// 拒绝分类直接取自 Engine 契约的 `SettingsRejection`，这里不校验输入也不解析 `reason`。
+fn network_settings_update_result(
+    outcome: SettingsUpdateOutcome,
+) -> napi::Result<OhNetworkSettingsUpdateResult> {
+    let rejected = |field: &str, index: Option<u32>, kind: &str| OhNetworkSettingsUpdateResult {
+        status: "rejected".to_owned(),
+        settings: None,
+        rejection_field: Some(field.to_owned()),
+        rejection_index: index,
+        rejection_kind: Some(kind.to_owned()),
+    };
+    match outcome {
+        SettingsUpdateOutcome::Updated(settings) => Ok(OhNetworkSettingsUpdateResult {
+            status: "saved".to_owned(),
+            settings: Some(network_settings(settings.network)),
+            rejection_field: None,
+            rejection_index: None,
+            rejection_kind: None,
+        }),
+        SettingsUpdateOutcome::Rejected { rejection, .. } => match rejection {
+            SettingsRejection::TrustedNetwork { index, kind } => Ok(rejected(
+                "trusted_networks",
+                Some(index),
+                match kind {
+                    TrustedNetworkRejectionKind::InvalidFormat => "invalid_cidr",
+                    TrustedNetworkRejectionKind::OutsidePrivateSpace => "outside_private_space",
+                    TrustedNetworkRejectionKind::Duplicate => "duplicate",
+                },
+            )),
+            SettingsRejection::CustomRelayUrl => {
+                Ok(rejected("custom_relays", None, "invalid_relay_url"))
+            }
+            // 补丁只含网络字段中的两项，其他字段的转换失败在这里不可能出现。
+            SettingsRejection::Other => Err(unexpected_result()),
+        },
+    }
+}
+
 fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus> {
     let OperationResult::JoinSpace(status) = result else {
         return Err(unexpected_result());
@@ -967,6 +1061,10 @@ fn unexpected_result() -> napi::Error {
     napi::Error::new(Status::GenericFailure, "UC_ENGINE:UNEXPECTED_RESULT")
 }
 
+fn invalid_listen_port() -> napi::Error {
+    napi::Error::new(Status::InvalidArg, "OHOS_INVALID_LISTEN_PORT")
+}
+
 fn invalid_restore_mode() -> napi::Error {
     napi::Error::new(Status::InvalidArg, "OHOS_INVALID_CLIPBOARD_RESTORE_MODE")
 }
@@ -1000,6 +1098,7 @@ mod tests {
                 phase: uc_engine::NetworkRecoveryPhaseSummary::RetryScheduled,
                 retryable: true,
                 next_retry_in_ms: Some(500),
+                failure: None,
             },
         ));
 
@@ -1229,5 +1328,66 @@ mod tests {
             assert!(json.contains("blocked_reason"));
             assert!(json.contains(&format!("\"pairing_confirmation\":\"{expected}\"")));
         }
+    }
+
+    #[test]
+    fn network_settings_update_maps_saved_and_every_structured_rejection() {
+        use super::network_settings_update_result;
+        use uc_engine::{
+            SettingsRejection, SettingsSummary, SettingsUpdateOutcome, TrustedNetworkRejectionKind,
+        };
+
+        let mut summary = SettingsSummary::default();
+        summary.network.trusted_networks = vec!["10.8.0.0/24".to_owned()];
+        summary.network.listen_port = Some(4242);
+        let saved =
+            network_settings_update_result(SettingsUpdateOutcome::Updated(Box::new(summary)))
+                .unwrap();
+        assert_eq!(saved.status, "saved");
+        let settings = saved.settings.expect("saved results carry the settings");
+        assert_eq!(settings.trusted_networks, vec!["10.8.0.0/24".to_owned()]);
+        assert_eq!(settings.listen_port, Some(4242));
+        assert!(saved.rejection_field.is_none() && saved.rejection_kind.is_none());
+
+        for (kind, expected) in [
+            (TrustedNetworkRejectionKind::InvalidFormat, "invalid_cidr"),
+            (
+                TrustedNetworkRejectionKind::OutsidePrivateSpace,
+                "outside_private_space",
+            ),
+            (TrustedNetworkRejectionKind::Duplicate, "duplicate"),
+        ] {
+            let rejected = network_settings_update_result(SettingsUpdateOutcome::Rejected {
+                reason: "private validation detail 10.9.0.0/24".to_owned(),
+                rejection: SettingsRejection::TrustedNetwork { index: 3, kind },
+            })
+            .unwrap();
+            assert_eq!(rejected.status, "rejected");
+            assert!(rejected.settings.is_none());
+            assert_eq!(
+                rejected.rejection_field.as_deref(),
+                Some("trusted_networks")
+            );
+            assert_eq!(rejected.rejection_index, Some(3));
+            assert_eq!(rejected.rejection_kind.as_deref(), Some(expected));
+        }
+
+        let relay = network_settings_update_result(SettingsUpdateOutcome::Rejected {
+            reason: "invalid custom relay URL `https://private.example`".to_owned(),
+            rejection: SettingsRejection::CustomRelayUrl,
+        })
+        .unwrap();
+        assert_eq!(relay.rejection_field.as_deref(), Some("custom_relays"));
+        assert_eq!(relay.rejection_index, None);
+        assert_eq!(relay.rejection_kind.as_deref(), Some("invalid_relay_url"));
+
+        // 补丁只含两项网络字段，其他字段的拒绝不可能出现，出现即契约违反。
+        assert!(
+            network_settings_update_result(SettingsUpdateOutcome::Rejected {
+                reason: String::new(),
+                rejection: SettingsRejection::Other,
+            })
+            .is_err()
+        );
     }
 }

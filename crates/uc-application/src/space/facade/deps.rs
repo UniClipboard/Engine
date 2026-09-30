@@ -21,7 +21,7 @@ use crate::deps::{
     CurrentSpaceIdentityPort, InitialSpaceActivationPort, RePairingStateStorePort,
     SpaceAccessPorts, SpaceRebuildProgressPort,
 };
-use crate::space::{KnownPeerContact, SpaceRuntimeAdapters};
+use crate::space::{KnownPeerContact, RefreshVerifiedPeerAddressPort, SpaceRuntimeAdapters};
 
 pub(crate) struct SpaceSessionDeps {
     pub space_access: SpaceAccessPorts,
@@ -44,6 +44,7 @@ pub(crate) struct SpaceAdmissionDeps {
     pub pairing_invitation_addresses: Arc<dyn PairingInvitationAddressQueryPort>,
     pub pairing_invitation_by_address: Arc<dyn PairingInvitationByAddressPort>,
     pub peer_reachability: Arc<dyn PeerReachabilityPort>,
+    pub verified_peer_address_refresh: Arc<dyn RefreshVerifiedPeerAddressPort>,
     pub analytics: Arc<dyn AnalyticsFacade>,
     pub connection_channel: Option<Arc<dyn uc_core::ports::ConnectionChannelPort>>,
 }

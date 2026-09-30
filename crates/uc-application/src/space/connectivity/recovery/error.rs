@@ -6,9 +6,18 @@ use anyhow::Error as SourceError;
 use thiserror::Error;
 use tokio::task::JoinError;
 
+/// 网络重建失败的稳定分类，供宿主展示；不携带端口或地址。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkRecoveryFailure {
+    /// 固定监听端口已被占用，需要用户释放或更换端口，自动重试没有意义。
+    ListenPortUnavailable,
+    Other,
+}
+
 #[derive(Clone)]
 pub struct RebuildNetworkSessionError {
     retryable: bool,
+    failure: NetworkRecoveryFailure,
     source: Arc<SourceError>,
 }
 
@@ -17,11 +26,22 @@ impl RebuildNetworkSessionError {
         Self {
             source: Arc::new(source.into()),
             retryable,
+            failure: NetworkRecoveryFailure::Other,
         }
+    }
+
+    /// 由构造失败的一方（Engine）标明分类；未标明时为 `Other`。
+    pub fn with_failure(mut self, failure: NetworkRecoveryFailure) -> Self {
+        self.failure = failure;
+        self
     }
 
     pub fn is_retryable(&self) -> bool {
         self.retryable
+    }
+
+    pub fn failure(&self) -> NetworkRecoveryFailure {
+        self.failure
     }
 }
 
@@ -36,6 +56,7 @@ impl fmt::Debug for RebuildNetworkSessionError {
         formatter
             .debug_struct("RebuildNetworkSessionError")
             .field("retryable", &self.retryable)
+            .field("failure", &self.failure)
             .finish_non_exhaustive()
     }
 }
@@ -48,7 +69,9 @@ impl StdError for RebuildNetworkSessionError {
 
 impl PartialEq for RebuildNetworkSessionError {
     fn eq(&self, other: &Self) -> bool {
-        self.retryable == other.retryable && Arc::ptr_eq(&self.source, &other.source)
+        self.retryable == other.retryable
+            && self.failure == other.failure
+            && Arc::ptr_eq(&self.source, &other.source)
     }
 }
 

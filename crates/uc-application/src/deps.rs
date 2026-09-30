@@ -28,7 +28,9 @@ use uc_core::ports::*;
 use uc_core::MemberRepositoryPort;
 use uc_observability_contract::analytics::AnalyticsPort;
 
-pub use crate::space::{KnownPeerIdentity, PeerAccess, PeerIdentityDirectoryPort};
+pub use crate::space::{
+    KnownPeerIdentity, PeerAccess, PeerIdentityDirectoryPort, RefreshVerifiedPeerAddressPort,
+};
 
 pub use crate::application::{
     ApplicationAdapters, ApplicationClipboardAdapters, ApplicationHostAdapters,
@@ -127,9 +129,8 @@ pub use crate::space::{
     PrepareMembershipBranchTransitionInput, PrepareMembershipBranchTransitionPort,
     PrepareSpaceAdmissionCredentialsPort, PreparedMembershipBranchRecoveryMaterial,
     PreparedMembershipBranchRecoveryRecipient, QueryDeviceTrustError,
-    RefreshVerifiedPeerAddressPort, SpaceAdmissionCredentialPreparationError,
-    SpaceRebuildProgressError, SpaceRebuildProgressPort, SpaceSessionRebindError, SpaceWorkMode,
-    StagedMembershipRecord, UnlockSpacePort,
+    SpaceAdmissionCredentialPreparationError, SpaceRebuildProgressError, SpaceRebuildProgressPort,
+    SpaceSessionRebindError, SpaceWorkMode, StagedMembershipRecord, UnlockSpacePort,
 };
 pub use crate::space::{
     MembershipBranchRecoveryRecord, MembershipHistoryExchangeRecord, MembershipRecord,

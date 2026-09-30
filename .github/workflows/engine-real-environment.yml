@@ -21,6 +21,8 @@ on:
           - known-peer
           - relay
           - legacy
+          - lan-only
+          - lan-only-vpn
           - profile-upgrade
           - membership-e2e
           - upgrade-matrix
@@ -62,13 +64,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: [direct, known-peer, relay, legacy]
+        mode: [direct, known-peer, relay, legacy, lan-only, lan-only-vpn]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
       - name: Install network test tools
-        run: sudo apt-get update && sudo apt-get install -y iproute2 nftables iputils-ping file clang libclang-dev cmake
+        run: sudo apt-get update && sudo apt-get install -y iproute2 nftables wireguard-tools iputils-ping file clang libclang-dev cmake
       - name: Prepare Rust build
         uses: ./.github/actions/rust-ci-setup
         with:
@@ -129,7 +131,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Install network test tools
-        run: sudo apt-get update && sudo apt-get install -y iproute2 nftables iputils-ping file clang libclang-dev cmake
+        run: sudo apt-get update && sudo apt-get install -y iproute2 nftables wireguard-tools iputils-ping file clang libclang-dev cmake
       - name: Prepare Rust build
         uses: ./.github/actions/rust-ci-setup
         with:

@@ -23,6 +23,7 @@
 use std::net::SocketAddr;
 
 use uc_application::facade::settings::RelayCredentials;
+use uc_core::network::TrustedNetworks;
 use uc_core::settings::model::CongestionController;
 use uc_observability_contract::error_source::io_error_kind;
 
@@ -36,21 +37,22 @@ use uc_infra::network::iroh::{IrohNodeConfig, IrohRelayAccessToken};
 /// - `allow_relay_fallback = false` → `disable_relays = true`（LAN-only，跨
 ///   网段设备会失联）
 ///
-/// `allow_overlay_network_addrs` 为正向同名字段，直接传递不取反。
+/// `trusted_networks` 为已宽松解析的可信网段，直接传递。
 ///
 /// `custom_relay_urls` 为正向同名列表，空列表表示继续使用 iroh 默认 relay；
 /// 非空列表由 infra 翻译为 `RelayMode::Custom`。
 ///
 /// 参数：
 /// - `allow_relay_fallback`：业务正向语义，由 `uc-core::Settings.network` 透传
-/// - `allow_overlay_network_addrs`：业务正向语义，由 `uc-core::Settings.network`
-///   透传；专业用户开关，控制是否把 VPN/overlay 类虚拟网卡 IP 作为 iroh 直连候选
+/// - `trusted_networks`：用户声明的可信网段；决定 CGNAT/Tailscale 段内地址能否作为直连候选
+/// - `listen_port`：设置中的固定 UDP 监听端口；`None` 为随机端口
 /// - `custom_relay_urls`：用户配置的 relay URL 列表；空列表沿用默认 relay
 /// - `rendezvous_base_url`：`None` 走 `RENDEZVOUS_BASE_URL` 默认；production 调
 ///   用方传 `None`；集成测试覆盖 override
 pub fn relay_policy_to_iroh_config(
     allow_relay_fallback: bool,
-    allow_overlay_network_addrs: bool,
+    trusted_networks: TrustedNetworks,
+    listen_port: Option<u16>,
     custom_relay_urls: Vec<String>,
     congestion_controller: CongestionController,
     rendezvous_base_url: Option<String>,
@@ -58,15 +60,14 @@ pub fn relay_policy_to_iroh_config(
     IrohNodeConfig {
         // ↓ 全工程**唯一**取反点 — Pitfall 1 防御铁律。
         disable_relays: !allow_relay_fallback,
-        // ↓ 正向同名字段，直接搬运不取反。
-        allow_overlay_network_addrs,
+        trusted_networks,
         custom_relay_urls,
         relay_access_tokens: Default::default(),
         congestion_controller,
         rendezvous_base_url,
-        // 直连可达性（#900）来源于 env，不在本设置翻译点决定；由
-        // `apply_iroh_direct_reachability_from_env` 在 daemon / CLI 入口处填充。
-        bind_port: None,
+        // 固定端口来自设置；`apply_iroh_direct_reachability_from_env` 可用 env 覆盖。
+        bind_port: listen_port,
+        // 公网地址广播（#900）只来源于 env。
         public_addr: None,
         network_partition_gate: None,
     }
@@ -172,21 +173,32 @@ pub(crate) fn parse_iroh_direct_reachability(
 /// `relay_policy_to_iroh_config` 之后调用——daemon 与 CLI 配对路径都要广播
 /// 同一个公网地址。让 `relay_policy_to_iroh_config` 保持纯（只吃 settings、
 /// 不碰 env）。
-pub fn apply_iroh_direct_reachability_from_env(cfg: &mut IrohNodeConfig) {
+///
+/// `UC_IROH_BIND_PORT` 只在设置了有效值时覆盖设置中的固定端口，供无头与容器部署使用；
+/// 未设置时保留设置值。返回 env 是否覆盖了监听端口。日志不输出端口或地址。
+pub fn apply_iroh_direct_reachability_from_env(cfg: &mut IrohNodeConfig) -> bool {
     let reach = parse_iroh_direct_reachability(
         std::env::var("UC_IROH_BIND_PORT").ok().as_deref(),
         std::env::var("UC_IROH_PUBLIC_ADDR").ok().as_deref(),
     );
+    apply_direct_reachability(cfg, reach)
+}
+
+fn apply_direct_reachability(cfg: &mut IrohNodeConfig, reach: IrohDirectReachability) -> bool {
     if reach.bind_port.is_some() || reach.public_addr.is_some() {
         tracing::info!(
             target: "settings.network",
-            bind_port = ?reach.bind_port,
-            public_addr = ?reach.public_addr,
+            has_bind_port = reach.bind_port.is_some(),
+            has_public_addr = reach.public_addr.is_some(),
             "iroh direct-reachability configured from env (UC_IROH_BIND_PORT / UC_IROH_PUBLIC_ADDR)",
         );
     }
-    cfg.bind_port = reach.bind_port;
+    let port_overridden = reach.bind_port.is_some();
+    if let Some(port) = reach.bind_port {
+        cfg.bind_port = Some(port);
+    }
     cfg.public_addr = reach.public_addr;
+    port_overridden
 }
 
 /// Override the congestion controller from `UC_CONGESTION_CONTROLLER` env.
@@ -266,7 +278,8 @@ mod tests {
     fn allow_true_means_disable_false() {
         let cfg = relay_policy_to_iroh_config(
             true,
-            false,
+            TrustedNetworks::default(),
+            None,
             Vec::new(),
             CongestionController::default(),
             None,
@@ -280,7 +293,8 @@ mod tests {
     fn allow_false_means_disable_true() {
         let cfg = relay_policy_to_iroh_config(
             false,
-            false,
+            TrustedNetworks::default(),
+            None,
             Vec::new(),
             CongestionController::default(),
             None,
@@ -294,7 +308,8 @@ mod tests {
     fn rendezvous_override_passes_through() {
         let cfg = relay_policy_to_iroh_config(
             true,
-            false,
+            TrustedNetworks::default(),
+            None,
             Vec::new(),
             CongestionController::default(),
             Some("http://test".into()),
@@ -302,45 +317,95 @@ mod tests {
         assert_eq!(cfg.rendezvous_base_url, Some("http://test".into()));
     }
 
-    /// allow_overlay_network_addrs 正向同名搬运（不取反）。
+    fn tailscale_trusted() -> TrustedNetworks {
+        TrustedNetworks::parse(&["100.64.0.0/10", "fd7a:115c:a1e0::/48"]).unwrap()
+    }
+
+    /// 可信网段原样搬运。
     #[test]
-    fn overlay_addrs_true_passes_through() {
+    fn trusted_networks_pass_through() {
         let cfg = relay_policy_to_iroh_config(
             true,
-            true,
+            tailscale_trusted(),
+            None,
             Vec::new(),
             CongestionController::default(),
             None,
         );
-        assert!(cfg.allow_overlay_network_addrs);
+        assert_eq!(cfg.trusted_networks, tailscale_trusted());
     }
 
-    /// allow_overlay_network_addrs=false 默认搬运。
+    /// 设置中的固定端口直接进入绑定配置。
     #[test]
-    fn overlay_addrs_false_passes_through() {
+    fn settings_listen_port_becomes_bind_port() {
         let cfg = relay_policy_to_iroh_config(
             true,
-            false,
+            TrustedNetworks::default(),
+            Some(42000),
             Vec::new(),
             CongestionController::default(),
             None,
         );
-        assert!(!cfg.allow_overlay_network_addrs);
+        assert_eq!(cfg.bind_port, Some(42000));
     }
 
-    /// 两个开关相互独立（正交）：disable_relays 由 allow_relay_fallback 决定，
-    /// 与 allow_overlay_network_addrs 无关。
+    /// env 未设置端口时保留设置值；设置了有效端口时覆盖。
+    #[test]
+    fn environment_port_overrides_settings_only_when_present() {
+        let mut cfg = relay_policy_to_iroh_config(
+            true,
+            TrustedNetworks::default(),
+            Some(42000),
+            Vec::new(),
+            CongestionController::default(),
+            None,
+        );
+        assert!(!apply_direct_reachability(
+            &mut cfg,
+            IrohDirectReachability::default()
+        ));
+        assert_eq!(cfg.bind_port, Some(42000));
+
+        assert!(apply_direct_reachability(
+            &mut cfg,
+            parse_iroh_direct_reachability(Some("43000"), None)
+        ));
+        assert_eq!(cfg.bind_port, Some(43000));
+
+        assert!(!apply_direct_reachability(
+            &mut cfg,
+            parse_iroh_direct_reachability(Some("0"), None)
+        ));
+        assert_eq!(cfg.bind_port, Some(43000));
+    }
+
+    /// 空可信网段默认搬运。
+    #[test]
+    fn empty_trusted_networks_pass_through() {
+        let cfg = relay_policy_to_iroh_config(
+            true,
+            TrustedNetworks::default(),
+            None,
+            Vec::new(),
+            CongestionController::default(),
+            None,
+        );
+        assert!(cfg.trusted_networks.is_empty());
+    }
+
+    /// disable_relays 只由 allow_relay_fallback 决定，与可信网段无关。
     #[test]
     fn switches_are_independent() {
         let cfg = relay_policy_to_iroh_config(
             false,
-            true,
+            tailscale_trusted(),
+            None,
             Vec::new(),
             CongestionController::default(),
             None,
         );
-        assert!(cfg.disable_relays, "LAN-only on, overlay on");
-        assert!(cfg.allow_overlay_network_addrs);
+        assert!(cfg.disable_relays, "LAN-only on, trusted networks set");
+        assert_eq!(cfg.trusted_networks.len(), 2);
     }
 
     /// custom_relay_urls 正向列表搬运，空列表/非空列表都不参与取反。
@@ -348,7 +413,8 @@ mod tests {
     fn custom_relay_urls_pass_through() {
         let cfg = relay_policy_to_iroh_config(
             true,
-            false,
+            TrustedNetworks::default(),
+            None,
             vec!["https://relay.example.com.".to_string()],
             CongestionController::default(),
             None,
@@ -372,7 +438,8 @@ mod tests {
         credentials.set(relay_a, &token).expect("store token");
         let mut config = relay_policy_to_iroh_config(
             true,
-            false,
+            TrustedNetworks::default(),
+            None,
             vec![relay_a.to_string(), relay_b.to_string()],
             CongestionController::Cubic,
             None,
@@ -410,7 +477,8 @@ mod tests {
         storage.corrupt_on_get.store(2, Ordering::SeqCst);
         let mut config = relay_policy_to_iroh_config(
             true,
-            false,
+            TrustedNetworks::default(),
+            None,
             vec![relay_a.to_string(), relay_b.to_string()],
             CongestionController::Cubic,
             None,
@@ -427,7 +495,8 @@ mod tests {
     fn relay_policy_leaves_direct_reachability_unset() {
         let cfg = relay_policy_to_iroh_config(
             true,
-            false,
+            TrustedNetworks::default(),
+            None,
             Vec::new(),
             CongestionController::default(),
             None,

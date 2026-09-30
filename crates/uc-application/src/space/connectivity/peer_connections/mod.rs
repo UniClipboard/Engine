@@ -1,5 +1,6 @@
 //! 已配对设备连接的唯一调度与恢复负责人。
 
+mod address_refresh;
 mod runtime;
 #[cfg(test)]
 mod tests;
@@ -18,6 +19,8 @@ use uc_core::ports::{PeerReachabilityPort, ReachabilityState};
 use crate::facade::roster::PeerReachabilityRefreshReport;
 use crate::space::membership::{CurrentSpaceMemberScopeError, CurrentSpaceMemberScopePort};
 use runtime::ConnectionRuntime;
+
+pub use address_refresh::RefreshVerifiedPeerAddressPort;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectivityOpportunity {
@@ -72,6 +75,7 @@ impl PeerConnectionCoordinator {
     pub(crate) fn new(
         scope: Arc<dyn CurrentSpaceMemberScopePort>,
         peer_reachability: Arc<dyn PeerReachabilityPort>,
+        address_refresh: Arc<dyn RefreshVerifiedPeerAddressPort>,
         hints: BoxStream<'static, Result<ConnectionHint, anyhow::Error>>,
     ) -> Arc<Self> {
         let (commands, receiver) = mpsc::channel(32);
@@ -80,6 +84,7 @@ impl PeerConnectionCoordinator {
         let runtime = ConnectionRuntime::new(
             scope,
             peer_reachability,
+            address_refresh,
             hints,
             receiver,
             opportunities,

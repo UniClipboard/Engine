@@ -14,6 +14,7 @@
 | 已有空间设备的网络身份文件在两次运行之间消失 | 原因未查明（`dev` 现场一次） | 资料与身份存储负责人查明删除来源（疑似开发构建未设 `UC_PROFILE` 落到 `dev` 资料目录）；复现后修复并保留诊断 | [发现记录](completed/2026-09-23-inbound-peer-admission.md#实施记录) |
 | Core 规则外泄、效果义务无约束力、存储格式与运行时依赖在 Core | 已盘点，修复未开始 | 清单逐项修复或登记为规范例外；Core 自动检查在 CI 阻断 | [计划](active/2026-09-23-core-boundary-remediation.md) |
 | 新会话发布前的出站连接被本机拒绝，每次加入的最终确认多等约 1 秒 | 已定位，候选方案因暴露重启补传问题暂缓 | 先修复同身份重启后握手超时及投递恢复只尝试一次的问题；`interrupted_file_transfer_recovers_after_receiver_process_restart` 连续 10 次通过，且最终确认首连不再 `locally_rejected` | [发现记录](../../.planning/2026-09-26-session-outbound-before-publish/findings.md) |
-| 接收方以同一身份、同一端口重启后，文件续传偶发等不到投递 | 已复现，原因即上一行记录的两个既有问题；该测试已进入 PR 必需门禁 | 本机 nextest 全工作区构建下 `interrupted_file_transfer_recovers_after_receiver_process_restart` 失败 2/10（1381 修复前）与 3/10（修复后），单包构建 1/10，均为等待投递超时；网络与投递恢复负责人修复同身份重启握手超时及投递恢复只尝试一次，之后连续 10 次通过 | [发现记录](../../.planning/2026-09-26-session-outbound-before-publish/findings.md) |
+| 补发因拨号失败记为 Unreachable 后，对端持续在线时不再有触发 | 已确认：恢复流程只在 Online 状态跃迁事件时补发，复检仍在线不产生事件；同身份重启握手超时的原因已在固定端口同时钉住 IPv6 后消除（`interrupted_file_transfer_recovers_after_receiver_process_restart` 修复后连续 20 次通过，此前约 35–40% 失败） | 投递恢复负责人在补发仍为 Unreachable 且目标在线时安排有界重试；先定间隔与次数上限并经用户确认，用不依赖真实网络的确定性用例覆盖，不能靠加长等待或盲目重试掩盖 | [findings](../../.planning/2026-09-26-session-outbound-before-publish/findings.md) |
+| 成员拓扑 e2e 偶发失败（“nodes did not reach group epoch N”） | 2026-09-30 已复现：`space_membership_auto_pairing_e2e` 的 `topology::` 组在干净 `faf480ea` 上也偶发失败（涉及 f1、f6、offline_member_catches_multiple_removals…），完整运行约 15 分钟，与本机负载不呈简单相关 | 单独立项：查明群组纪元收敛依赖的时序（等待预算、并行度、重试触发），用可复现的最小用例固定后修复；不能靠加长等待掩盖 | [断言位置](../../crates/uc-engine/tests/space_membership_auto_pairing_e2e/harness/membership_topology.rs) |
 
 关闭项目时记录验证证据，更新稳定文档，并将对应计划移入 `completed/`。

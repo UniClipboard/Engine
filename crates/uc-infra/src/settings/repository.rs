@@ -12,7 +12,7 @@ use uc_core::{
     settings::model::{Settings, CURRENT_SCHEMA_VERSION},
 };
 
-use crate::settings::migration::SettingsMigrator;
+use crate::settings::migration::{LegacySettingsFields, SettingsMigrator};
 
 pub struct FileSettingsRepository {
     path: PathBuf,
@@ -104,8 +104,9 @@ impl FileSettingsRepository {
 
 fn deserialize_and_migrate_settings(content: &str) -> Result<(Settings, u32)> {
     let settings: Settings = serde_json::from_str(content)?;
+    let legacy = LegacySettingsFields::from_json(content)?;
     let original_version = settings.schema_version;
-    let migrator = SettingsMigrator::new();
+    let migrator = SettingsMigrator::new(legacy);
     let migrated = migrator
         .migrate_to_latest(settings)
         .context("settings migration failed")?;

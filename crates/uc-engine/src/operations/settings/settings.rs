@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use uc_application::facade::settings as app;
 use uc_application::facade::AppFacade;
+use uc_core::network::TrustedNetworkRejection;
 use uc_core::settings::model::ShortcutKey;
 
 use crate::{
@@ -16,8 +17,9 @@ use crate::{
     RelayProbeCredential, RelayProbeInput, RelayProbeOutcome, RetentionPolicySummary,
     RetentionRulePatch, RetentionRuleSummary, RuleEvaluationSummary, SaveRelayInput,
     SaveRelayOutcome, SecuritySettingsSummary, SettingsContentTypes, SettingsContentTypesPatch,
-    SettingsPatch, SettingsSummary, SettingsUpdateOutcome, ShortcutKeySummary, StartupModeSummary,
-    SyncFrequencySummary, SyncSettingsSummary, ThemeSummary, UpdateChannelSummary,
+    SettingsPatch, SettingsRejection, SettingsSummary, SettingsUpdateOutcome, ShortcutKeySummary,
+    StartupModeSummary, SyncFrequencySummary, SyncSettingsSummary, ThemeSummary,
+    TrustedNetworkRejectionKind, UpdateChannelSummary,
 };
 
 pub(crate) async fn execute_query_custom_relays(
@@ -115,7 +117,10 @@ pub(crate) async fn execute_update_settings(
         Ok(patch) => patch,
         Err(reason) => {
             return Ok(OperationResult::SettingsUpdated(
-                SettingsUpdateOutcome::Rejected { reason },
+                SettingsUpdateOutcome::Rejected {
+                    reason,
+                    rejection: SettingsRejection::Other,
+                },
             ));
         }
     };
@@ -123,10 +128,33 @@ pub(crate) async fn execute_update_settings(
         Ok(settings) => Ok(OperationResult::SettingsUpdated(
             SettingsUpdateOutcome::Updated(Box::new(map_settings(settings))),
         )),
-        Err(app::SettingsFacadeError::Invalid(reason)) => Ok(OperationResult::SettingsUpdated(
-            SettingsUpdateOutcome::Rejected { reason },
+        Err(app::SettingsFacadeError::Invalid(error)) => Ok(OperationResult::SettingsUpdated(
+            SettingsUpdateOutcome::Rejected {
+                reason: error.rejection_reason(),
+                rejection: map_settings_rejection(&error),
+            },
         )),
         Err(_) => Err(internal_error(UPDATE_SETTINGS_FAILED_CODE)),
+    }
+}
+
+/// 结构化拒绝直接取自校验错误本身的分类，不再次解析或校验用户输入。
+fn map_settings_rejection(error: &app::SettingsValidationError) -> SettingsRejection {
+    match error {
+        app::SettingsValidationError::CustomRelayUrl(_) => SettingsRejection::CustomRelayUrl,
+        app::SettingsValidationError::TrustedNetwork(entry) => SettingsRejection::TrustedNetwork {
+            // 条目数远小于 u32 上限；转换失败时饱和，仍指向“列表末尾之后”，不会指向错误的条目。
+            index: u32::try_from(entry.index).unwrap_or(u32::MAX),
+            kind: match entry.rejection {
+                TrustedNetworkRejection::InvalidFormat => {
+                    TrustedNetworkRejectionKind::InvalidFormat
+                }
+                TrustedNetworkRejection::NotPrivate => {
+                    TrustedNetworkRejectionKind::OutsidePrivateSpace
+                }
+                TrustedNetworkRejection::Duplicate => TrustedNetworkRejectionKind::Duplicate,
+            },
+        },
     }
 }
 
@@ -225,9 +253,9 @@ pub(crate) async fn execute_save_relay(
                 configured: saved.credential_status.configured,
             },
         })),
-        Err(app::SettingsFacadeError::Invalid(reason)) => {
+        Err(app::SettingsFacadeError::Invalid(error)) => {
             Ok(OperationResult::RelaySaved(SaveRelayOutcome::Rejected {
-                reason,
+                reason: error.rejection_reason(),
             }))
         }
         Err(error) => Err(map_save_relay_error(error)),
@@ -348,7 +376,8 @@ fn map_settings(settings: app::SettingsView) -> SettingsSummary {
         },
         network: NetworkSettingsSummary {
             allow_relay_fallback: settings.network.allow_relay_fallback,
-            allow_overlay_network_addrs: settings.network.allow_overlay_network_addrs,
+            trusted_networks: settings.network.trusted_networks,
+            listen_port: settings.network.listen_port,
             custom_relay_urls: settings.network.custom_relay_urls,
             congestion_controller: map_congestion_controller(
                 settings.network.congestion_controller,
@@ -441,7 +470,8 @@ fn map_patch(patch: SettingsPatch) -> Result<app::SettingsPatch, String> {
         }),
         network: patch.network.map(|value| app::NetworkSettingsPatch {
             allow_relay_fallback: value.allow_relay_fallback,
-            allow_overlay_network_addrs: value.allow_overlay_network_addrs,
+            trusted_networks: value.trusted_networks,
+            listen_port: value.listen_port,
             custom_relay_urls: value.custom_relay_urls,
             congestion_controller: value.congestion_controller.map(unmap_congestion_controller),
         }),

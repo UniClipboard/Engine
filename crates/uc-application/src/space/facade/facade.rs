@@ -173,12 +173,14 @@ impl SpaceFacade {
             pairing_invitation_addresses,
             pairing_invitation_by_address,
             peer_reachability,
+            verified_peer_address_refresh,
             analytics,
             connection_channel,
         } = admission;
         let connections = crate::space::connectivity::PeerConnectionCoordinator::new(
             Arc::clone(&peer_scope),
             Arc::clone(&peer_reachability),
+            verified_peer_address_refresh,
             connection_hints,
         );
         let member_roster = MemberRosterFacade::new(MemberRosterDeps {

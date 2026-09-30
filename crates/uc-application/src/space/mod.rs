@@ -38,8 +38,9 @@ pub use admission::{
 };
 pub use connectivity::{
     ConnectionHint, ConnectivityOpportunity, NetworkRecoveryEvent, NetworkRecoveryFacade,
-    NetworkRecoveryPhase, NetworkRecoveryRequestError, NetworkRecoveryStatus, PeerConnectionError,
-    RebuildNetworkSessionError, RebuildNetworkSessionPort,
+    NetworkRecoveryFailure, NetworkRecoveryPhase, NetworkRecoveryRequestError,
+    NetworkRecoveryStatus, PeerConnectionError, RebuildNetworkSessionError,
+    RebuildNetworkSessionPort, RefreshVerifiedPeerAddressPort,
 };
 pub use facade::{
     InitializeSpaceInput, InvitationAvailability, IssuePairingInvitationError,
@@ -56,7 +57,6 @@ pub use lifecycle::{
     RecoverSpaceSessionResult, ResetSpaceError, SpaceAccessState, UnlockSpaceError,
 };
 pub use lifecycle::{CurrentInvitation, QuerySetupStateError, SetupStateView};
-pub use membership::RefreshVerifiedPeerAddressPort;
 pub use membership::{
     AdmissionAbandonmentRevocationTarget, AdmissionRevocationPort, AdmissionRevocationResult,
     AdmissionRevocationTarget, MembershipCommitReceipt, RemoveSpaceMemberError,

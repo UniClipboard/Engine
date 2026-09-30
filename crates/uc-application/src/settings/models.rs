@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::Duration;
 
+use uc_core::network::{TrustedNetworkEntryError, TrustedNetworks};
 use uc_core::settings::model as core;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,7 +161,10 @@ pub struct FileSyncSettingsView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetworkSettingsView {
     pub allow_relay_fallback: bool,
-    pub allow_overlay_network_addrs: bool,
+    /// 用户声明的可信网段（CIDR 文本），见 `uc_core::network::TrustedNetworks`。
+    pub trusted_networks: Vec<String>,
+    /// 固定 UDP 监听端口；`None` 表示随机端口。
+    pub listen_port: Option<u16>,
     pub custom_relay_urls: Vec<String>,
     pub congestion_controller: CongestionControllerView,
 }
@@ -307,7 +311,10 @@ pub struct FileSyncSettingsPatch {
 #[derive(Debug, Clone, Default)]
 pub struct NetworkSettingsPatch {
     pub allow_relay_fallback: Option<bool>,
-    pub allow_overlay_network_addrs: Option<bool>,
+    /// `Some(list)` 整体替换可信网段；条目会 trim 并过滤空行，保存前严格校验。
+    pub trusted_networks: Option<Vec<String>>,
+    /// `Some(0)` 恢复随机端口，`Some(port)` 固定端口。
+    pub listen_port: Option<u16>,
     pub custom_relay_urls: Option<Vec<String>>,
     pub congestion_controller: Option<CongestionControllerView>,
 }
@@ -621,7 +628,8 @@ impl From<core::Settings> for SettingsView {
             },
             network: NetworkSettingsView {
                 allow_relay_fallback: value.network.allow_relay_fallback,
-                allow_overlay_network_addrs: value.network.allow_overlay_network_addrs,
+                trusted_networks: value.network.trusted_networks,
+                listen_port: value.network.listen_port,
                 custom_relay_urls: value.network.custom_relay_urls,
                 congestion_controller: value.network.congestion_controller.into(),
             },
@@ -801,11 +809,14 @@ pub(crate) fn apply_settings_patch(
         if let Some(v) = network.allow_relay_fallback {
             existing.network.allow_relay_fallback = v;
         }
-        if let Some(v) = network.allow_overlay_network_addrs {
-            existing.network.allow_overlay_network_addrs = v;
+        if let Some(v) = network.trusted_networks {
+            existing.network.trusted_networks = normalize_list_entries(v);
+        }
+        if let Some(v) = network.listen_port {
+            existing.network.listen_port = (v != 0).then_some(v);
         }
         if let Some(v) = network.custom_relay_urls {
-            existing.network.custom_relay_urls = normalize_relay_urls(v);
+            existing.network.custom_relay_urls = normalize_list_entries(v);
         }
         if let Some(v) = network.congestion_controller {
             existing.network.congestion_controller = v.into();
@@ -827,15 +838,74 @@ pub(crate) fn apply_settings_patch(
     existing
 }
 
-fn normalize_relay_urls(urls: Vec<String>) -> Vec<String> {
-    urls.into_iter()
-        .map(|url| url.trim().to_string())
-        .filter(|url| !url.is_empty())
+fn normalize_list_entries(entries: Vec<String>) -> Vec<String> {
+    entries
+        .into_iter()
+        .map(|entry| entry.trim().to_string())
+        .filter(|entry| !entry.is_empty())
         .collect()
 }
 
-pub(crate) fn validate_settings(settings: &core::Settings) -> Result<(), String> {
+/// 应用补丁并校验；条目错误的位置按调用方提交的列表计，而不是去掉空白项之后的列表。
+pub(crate) fn apply_and_validate_settings_patch(
+    existing: core::Settings,
+    patch: SettingsPatch,
+) -> Result<core::Settings, SettingsValidationError> {
+    let submitted_positions = patch
+        .network
+        .as_ref()
+        .and_then(|network| network.trusted_networks.as_ref())
+        .map(|entries| {
+            entries
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| !entry.trim().is_empty())
+                .map(|(position, _)| position)
+                .collect::<Vec<_>>()
+        });
+    let merged = apply_settings_patch(existing, patch);
+    match validate_settings(&merged) {
+        Ok(()) => Ok(merged),
+        Err(SettingsValidationError::TrustedNetwork(mut entry)) => {
+            if let Some(position) = submitted_positions
+                .as_ref()
+                .and_then(|positions| positions.get(entry.index))
+            {
+                entry.index = *position;
+            }
+            Err(SettingsValidationError::TrustedNetwork(entry))
+        }
+        Err(other) => Err(other),
+    }
+}
+
+/// 设置保存前的输入校验失败。展示文本即对外拒绝原因。
+#[derive(Debug, thiserror::Error)]
+pub enum SettingsValidationError {
+    #[error("{0}")]
+    CustomRelayUrl(String),
+    /// 只含条目位置与分类，不回显网段内容。
+    #[error(transparent)]
+    TrustedNetwork(#[from] TrustedNetworkEntryError),
+}
+
+impl SettingsValidationError {
+    /// 对外拒绝原因：由固定分类与条目位置组成，不含网段内容。
+    pub fn rejection_reason(&self) -> String {
+        match self {
+            Self::CustomRelayUrl(reason) => reason.clone(),
+            Self::TrustedNetwork(entry) => {
+                format!("trusted network entry {}: {}", entry.index, entry.rejection)
+            }
+        }
+    }
+}
+
+pub(crate) fn validate_settings(settings: &core::Settings) -> Result<(), SettingsValidationError> {
     validate_custom_relay_urls(&settings.network.custom_relay_urls)
+        .map_err(SettingsValidationError::CustomRelayUrl)?;
+    TrustedNetworks::parse(&settings.network.trusted_networks)?;
+    Ok(())
 }
 
 fn validate_custom_relay_urls(urls: &[String]) -> Result<(), String> {
@@ -896,22 +966,44 @@ mod network_settings_apply_patch_tests {
         let mut s = Settings::default();
         s.network = NetworkSettings {
             allow_relay_fallback: allow,
-            allow_overlay_network_addrs: false,
-            custom_relay_urls: Vec::new(),
-            congestion_controller: Default::default(),
+            ..NetworkSettings::default()
         };
         s
     }
 
-    fn baseline_with_overlay(allow_overlay: bool) -> Settings {
+    fn baseline_with_trusted(entries: &[&str], listen_port: Option<u16>) -> Settings {
         let mut s = Settings::default();
         s.network = NetworkSettings {
-            allow_relay_fallback: true,
-            allow_overlay_network_addrs: allow_overlay,
-            custom_relay_urls: Vec::new(),
-            congestion_controller: Default::default(),
+            trusted_networks: entries.iter().map(|entry| entry.to_string()).collect(),
+            listen_port,
+            ..NetworkSettings::default()
         };
         s
+    }
+
+    /// 拒绝位置是调用方提交列表里的位置，空白项被丢弃后仍占位置。
+    #[test]
+    fn rejection_index_counts_blank_entries_in_the_submitted_list() {
+        for (entries, expected) in [
+            (vec!["", "8.8.8.0/24"], 1),
+            (vec!["10.9.0.0/24", "  ", "8.8.8.0/24"], 2),
+            (vec![" ", "garbage-entry"], 1),
+            (vec!["8.8.8.0/24", ""], 0),
+        ] {
+            let patch = SettingsPatch {
+                network: Some(NetworkSettingsPatch {
+                    trusted_networks: Some(entries.iter().map(|e| e.to_string()).collect()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let Err(SettingsValidationError::TrustedNetwork(entry)) =
+                apply_and_validate_settings_patch(Settings::default(), patch)
+            else {
+                panic!("expected a trusted network rejection for {entries:?}");
+            };
+            assert_eq!(entry.index, expected, "{entries:?}");
+        }
     }
 
     /// NETSET-02 #2 硬约束：旧客户端 PUT 不带 `network` 段时，
@@ -984,58 +1076,75 @@ mod network_settings_apply_patch_tests {
         );
     }
 
-    /// allow_overlay_network_addrs：patch 缺字段时不抹掉已存在值。
+    /// 可信网段与端口：patch 缺字段时不抹掉已存在值。
     #[test]
-    fn apply_patch_with_no_overlay_field_keeps_existing() {
-        let existing = baseline_with_overlay(true);
+    fn apply_patch_without_trusted_fields_keeps_existing() {
+        let existing = baseline_with_trusted(&["10.8.0.0/24"], Some(42000));
         let patch = SettingsPatch {
             network: Some(NetworkSettingsPatch::default()),
             ..Default::default()
         };
         let result = apply_settings_patch(existing, patch);
-        assert!(
-            result.network.allow_overlay_network_addrs,
-            "inner None must keep existing true"
-        );
+        assert_eq!(result.network.trusted_networks, vec!["10.8.0.0/24"]);
+        assert_eq!(result.network.listen_port, Some(42000));
     }
 
-    /// allow_overlay_network_addrs：显式 Some(true) 写入生效。
+    /// 可信网段整体替换并去除空白条目；端口 0 恢复随机端口。
     #[test]
-    fn apply_patch_with_overlay_explicit_true_writes_through() {
-        let existing = baseline_with_overlay(false);
+    fn apply_patch_replaces_trusted_networks_and_clears_port_with_zero() {
+        let existing = baseline_with_trusted(&["10.8.0.0/24"], Some(42000));
         let patch = SettingsPatch {
             network: Some(NetworkSettingsPatch {
-                allow_overlay_network_addrs: Some(true),
+                trusted_networks: Some(vec![" 192.168.50.0/24 ".into(), "  ".into()]),
+                listen_port: Some(0),
                 ..Default::default()
             }),
             ..Default::default()
         };
         let result = apply_settings_patch(existing, patch);
-        assert!(result.network.allow_overlay_network_addrs);
+        assert_eq!(result.network.trusted_networks, vec!["192.168.50.0/24"]);
+        assert_eq!(result.network.listen_port, None);
     }
 
-    /// allow_overlay_network_addrs：显式 Some(false) 双向覆盖。
+    /// 显式端口写入生效。
     #[test]
-    fn apply_patch_with_overlay_explicit_false_writes_through() {
-        let existing = baseline_with_overlay(true);
+    fn apply_patch_sets_fixed_listen_port() {
+        let existing = baseline_with_trusted(&[], None);
         let patch = SettingsPatch {
             network: Some(NetworkSettingsPatch {
-                allow_overlay_network_addrs: Some(false),
+                listen_port: Some(42000),
                 ..Default::default()
             }),
             ..Default::default()
         };
         let result = apply_settings_patch(existing, patch);
-        assert!(!result.network.allow_overlay_network_addrs);
+        assert_eq!(result.network.listen_port, Some(42000));
     }
 
-    /// View 透明搬运 allow_overlay_network_addrs。
+    /// View 透明搬运可信网段与端口。
     #[test]
-    fn from_core_settings_passes_through_overlay_field() {
-        let mut s = Settings::default();
-        s.network.allow_overlay_network_addrs = true;
-        let view: SettingsView = s.into();
-        assert!(view.network.allow_overlay_network_addrs);
+    fn from_core_settings_passes_through_trusted_fields() {
+        let view: SettingsView = baseline_with_trusted(&["10.8.0.0/24"], Some(42000)).into();
+        assert_eq!(view.network.trusted_networks, vec!["10.8.0.0/24"]);
+        assert_eq!(view.network.listen_port, Some(42000));
+    }
+
+    /// 公网段被拒绝，拒绝原因不回显网段内容。
+    #[test]
+    fn validate_settings_rejects_public_trusted_network_without_echoing_it() {
+        let settings = baseline_with_trusted(&["10.8.0.0/24", "8.8.8.0/24"], None);
+        let reason = validate_settings(&settings)
+            .expect_err("public network must be rejected")
+            .rejection_reason();
+        assert!(reason.contains("entry 1"));
+        assert!(!reason.contains("8.8.8"));
+    }
+
+    /// 私有网段通过校验。
+    #[test]
+    fn validate_settings_accepts_private_trusted_networks() {
+        let settings = baseline_with_trusted(&["10.8.0.0/24", "fd7a:115c:a1e0::/48"], None);
+        assert!(validate_settings(&settings).is_ok());
     }
 
     /// custom_relay_urls：patch 缺字段时不抹掉已存在列表。

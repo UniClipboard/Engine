@@ -5,7 +5,9 @@
 
 use std::sync::Arc;
 
+use tracing::warn;
 use uc_core::app_dirs::AppPaths;
+use uc_core::network::TrustedNetworks;
 use uc_core::settings::model::CongestionController;
 
 use crate::deps::ApplicationDeps;
@@ -20,7 +22,8 @@ use super::{SettingsFacade, SettingsFacadeError};
 
 pub struct PreparedNetworkSettings {
     pub allow_relay_fallback: bool,
-    pub allow_overlay_network_addrs: bool,
+    pub trusted_networks: TrustedNetworks,
+    pub listen_port: Option<u16>,
     pub custom_relay_urls: Vec<String>,
     pub congestion_controller: CongestionController,
     pub relay_credentials: RelayCredentials,
@@ -83,9 +86,18 @@ impl SettingsAssembly {
 
     pub async fn prepare_network(&self) -> Result<PreparedNetworkSettings, SettingsFacadeError> {
         let settings = self.settings.prepare_network_settings().await?;
+        let trusted = TrustedNetworks::parse_lenient(&settings.network.trusted_networks);
+        if trusted.rejected_count > 0 {
+            // 保存校验会拒绝无效条目；这里只可能来自手工编辑的设置文件，跳过而不阻断网络启动。
+            warn!(
+                rejected_count = trusted.rejected_count,
+                "skipped invalid trusted network entries in settings"
+            );
+        }
         Ok(PreparedNetworkSettings {
             allow_relay_fallback: settings.network.allow_relay_fallback,
-            allow_overlay_network_addrs: settings.network.allow_overlay_network_addrs,
+            trusted_networks: trusted.networks,
+            listen_port: settings.network.listen_port,
             custom_relay_urls: settings.network.custom_relay_urls,
             congestion_controller: settings.network.congestion_controller,
             relay_credentials: self.relay_credentials.clone(),

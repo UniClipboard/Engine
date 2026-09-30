@@ -5,8 +5,8 @@ use tokio::time::Instant;
 use tracing::Instrument;
 
 use super::{
-    NetworkRecoveryEvent, NetworkRecoveryInner, NetworkRecoveryPhase, NetworkRecoveryRequestError,
-    RecoveryCompletion, RETRY_DELAYS,
+    NetworkRecoveryEvent, NetworkRecoveryFailure, NetworkRecoveryInner, NetworkRecoveryPhase,
+    NetworkRecoveryRequestError, RecoveryCompletion, RETRY_DELAYS,
 };
 
 pub(super) fn start_cycle(inner: Arc<NetworkRecoveryInner>) -> RecoveryCompletion {
@@ -20,9 +20,11 @@ pub(super) fn start_cycle(inner: Arc<NetworkRecoveryInner>) -> RecoveryCompletio
                 state.failure = Some(NetworkRecoveryRequestError::Task(Arc::clone(&source)));
                 if state.phase != NetworkRecoveryPhase::Stopped && !inner.cancel.is_cancelled() {
                     state.phase = NetworkRecoveryPhase::Failed;
-                    let _ = inner
-                        .events
-                        .send(NetworkRecoveryEvent::Failed { retryable: false });
+                    state.failure_category = Some(NetworkRecoveryFailure::Other);
+                    let _ = inner.events.send(NetworkRecoveryEvent::Failed {
+                        retryable: false,
+                        failure: NetworkRecoveryFailure::Other,
+                    });
                 }
                 state.next_retry_at = None;
                 state.in_flight = None;
@@ -73,6 +75,7 @@ async fn run_recovery_cycle(
             }
             let resumed_from_retry = state.phase == NetworkRecoveryPhase::RetryScheduled;
             state.phase = NetworkRecoveryPhase::Recovering;
+            state.failure_category = None;
             state.next_retry_at = None;
             if resumed_from_retry {
                 let _ = inner.events.send(NetworkRecoveryEvent::Started);
@@ -123,8 +126,13 @@ async fn finish_cycle(
         state.phase = NetworkRecoveryPhase::Idle;
         NetworkRecoveryEvent::Succeeded
     } else {
+        let failure = match &result {
+            Err(NetworkRecoveryRequestError::Rebuild(source)) => source.failure(),
+            _ => NetworkRecoveryFailure::Other,
+        };
         state.phase = NetworkRecoveryPhase::Failed;
-        NetworkRecoveryEvent::Failed { retryable }
+        state.failure_category = Some(failure);
+        NetworkRecoveryEvent::Failed { retryable, failure }
     };
     // 结果发布与关闭接收使用同一把锁，不能在关闭确认后再发布旧成功。
     let _ = inner.events.send(event);

@@ -27,8 +27,8 @@ pub use models::{
     QuickPanelDoubleTapModifierView, QuickPanelPositionView, QuickPanelSettingsPatch,
     QuickPanelSettingsView, RetentionPolicyPatch, RetentionPolicyView, RetentionRulePatchValue,
     RetentionRuleView, RuleEvaluationView, SecuritySettingsPatch, SecuritySettingsView,
-    SettingsPatch, SettingsView, ShortcutKeyView, StartupModeView, SyncFrequencyView,
-    SyncSettingsPatch, SyncSettingsView, ThemeView, UpdateChannelView,
+    SettingsPatch, SettingsValidationError, SettingsView, ShortcutKeyView, StartupModeView,
+    SyncFrequencyView, SyncSettingsPatch, SyncSettingsView, ThemeView, UpdateChannelView,
 };
 pub use relay_configuration::{
     RelayConfiguration, RelayConfigurationEntry, RelayConfigurationMutation,

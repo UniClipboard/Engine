@@ -138,11 +138,9 @@ impl EngineRuntime for ProductionRuntime {
                         NetworkRecoveryRequestError::Stopped => {
                             super::operation_unavailable_error()
                         }
-                        NetworkRecoveryRequestError::Rebuild(source) => EngineError::new(
-                            1105,
-                            EngineErrorCategory::Unavailable,
-                            source.is_retryable(),
-                        ),
+                        NetworkRecoveryRequestError::Rebuild(source) => {
+                            super::session_supervisor::rebuild_failure_error(&source)
+                        }
                         NetworkRecoveryRequestError::Task(_) => {
                             EngineError::new(1108, EngineErrorCategory::Internal, false)
                         }
@@ -173,6 +171,7 @@ impl EngineRuntime for ProductionRuntime {
                         next_retry_in_ms: status
                             .next_retry_in
                             .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64),
+                        failure: status.failure.map(super::network_recovery_failure),
                     },
                 ));
             }

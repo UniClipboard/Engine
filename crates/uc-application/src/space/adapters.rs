@@ -22,7 +22,7 @@ use super::membership::{
     MembershipBranchRecoveryChannelPort, MembershipNetworkActivityPort, MembershipRecordStorePort,
     PeerAccess, PrepareMembershipBranchRecoveryMaterialPort,
     PrepareMembershipBranchRecoveryRecipientPort, PrepareMembershipBranchTransitionPort,
-    RefreshVerifiedPeerAddressPort, RestrictedMembershipDeliveryPort,
+    RestrictedMembershipDeliveryPort,
 };
 
 /// Engine 一次提交给 Space admission owner 的完整 adapter 集合。
@@ -65,7 +65,6 @@ pub struct SpaceMembershipAdapters {
     pub membership_announcement: Arc<dyn CurrentMembershipAnnouncementPort>,
     pub device_trust_observations: Arc<dyn LoadDeviceTrustObservationsPort>,
     pub membership_history_transport: Arc<dyn MembershipHistoryExchangePort>,
-    pub verified_peer_address_refresh: Arc<dyn RefreshVerifiedPeerAddressPort>,
     pub membership_branch_recovery_channel: Arc<dyn MembershipBranchRecoveryChannelPort>,
     pub membership_branch_recovery_recipient: Arc<dyn PrepareMembershipBranchRecoveryRecipientPort>,
     pub membership_branch_transition: Arc<dyn PrepareMembershipBranchTransitionPort>,

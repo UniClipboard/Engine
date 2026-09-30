@@ -390,7 +390,6 @@ pub async fn prepare_sync_session(
             Arc::clone(&peer_reachability),
         )),
         membership_history_transport: membership_history_synchronization_transport,
-        verified_peer_address_refresh: membership_history_exchange_adapter.clone(),
         membership_branch_recovery_channel,
         membership_branch_recovery_recipient: Arc::clone(
             &space_setup
@@ -481,6 +480,7 @@ pub async fn prepare_sync_session(
             pairing_invitation_addresses: handlers.invitation_addresses,
             pairing_invitation_by_address: handlers.invitation_by_address,
             peer_reachability: Arc::clone(&peer_reachability),
+            verified_peer_address_refresh: membership_history_exchange_adapter.clone(),
             analytics: Arc::clone(&space_setup.analytics_facade),
             connection_channel: Some(Arc::clone(&connection_channel)),
             device_management_reset_data: Arc::clone(&space_setup.device_management_reset_data),

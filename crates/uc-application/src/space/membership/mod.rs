@@ -104,7 +104,6 @@ pub(crate) use testing::{
     append_active_peer_to_history, member_facts, started_record, MemoryMembershipRecords,
     OwnerFixture,
 };
-pub use worker::RefreshVerifiedPeerAddressPort;
 
 pub(super) use decide_device_trust_change::DecideDeviceTrustChangeUseCase;
 pub(super) use group_update_delivery::DeliverPendingGroupUpdatesUseCase;

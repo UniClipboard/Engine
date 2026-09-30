@@ -15,7 +15,8 @@ use uc_engine_uniffi::{
     BindingError, BindingErrorCategory, BindingEvent, BindingFileMetadata, BindingHost,
     BindingObservabilityConfig, BindingObservabilitySetupStatus, BindingObservabilitySignalResult,
     BindingOperationTerminal, CustomRelayMutationRejection, HostBindingError, InvitationIssued,
-    MobileEngine, MobileStartupLifecycle, SendReport,
+    MobileEngine, MobileStartupLifecycle, NetworkSettingsRejectionField,
+    NetworkSettingsRejectionKind, NetworkSettingsUpdate, NetworkSettingsUpdateResult, SendReport,
 };
 
 static ENGINE_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -1113,6 +1114,173 @@ fn custom_relay_methods_preserve_authoritative_results_and_stable_errors() {
         .expect("legacy delete");
     assert!(!legacy_deleted.configured);
 
+    engine
+        .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
+        .expect("binding engine must shut down within the deadline");
+}
+
+#[test]
+fn network_settings_project_the_engine_state_and_reject_structurally() {
+    let _test_guard = engine_test_guard();
+    let root = tempfile::tempdir().expect("temporary host root must be available");
+    let host = Arc::new(MemoryHost::new(root.path()));
+    let engine = MobileEngine::start(
+        BindingConfig {
+            app_version: "1.2.3".to_owned(),
+            profile_id: "binding-network-settings".to_owned(),
+        },
+        host,
+    )
+    .expect("binding engine must start");
+
+    let initial = engine.query_network_settings().expect("default settings");
+    assert!(initial.trusted_networks.is_empty());
+    assert_eq!(initial.listen_port, None);
+
+    let saved = engine
+        .update_network_settings(NetworkSettingsUpdate {
+            trusted_networks: Some(vec!["  10.8.0.0/24  ".to_owned(), "   ".to_owned()]),
+            listen_port: Some(4242),
+        })
+        .expect("valid update");
+    let NetworkSettingsUpdateResult::Saved { settings } = saved else {
+        panic!("a valid update must be saved");
+    };
+    assert_eq!(settings.trusted_networks, vec!["10.8.0.0/24".to_owned()]);
+    assert_eq!(settings.listen_port, Some(4242));
+    assert_eq!(settings.allow_relay_fallback, initial.allow_relay_fallback);
+    assert_eq!(engine.query_network_settings().unwrap(), settings);
+    let debug = format!("{settings:?}");
+    assert!(!debug.contains("10.8.0.0") && !debug.contains("4242"));
+
+    // 每一类拒绝都带字段、条目位置和固定分类；同一次提交里合法的端口也不能被保存。
+    for (entries, index, kind) in [
+        (
+            vec!["10.9.0.0/24", "8.8.8.0/24"],
+            1,
+            NetworkSettingsRejectionKind::OutsidePrivateSpace,
+        ),
+        (
+            vec!["garbage-entry"],
+            0,
+            NetworkSettingsRejectionKind::InvalidCidr,
+        ),
+        (
+            vec!["10.9.0.0/24", "10.9.0.7/24"],
+            1,
+            NetworkSettingsRejectionKind::Duplicate,
+        ),
+        // 位置按提交的列表计：空白项虽会被丢弃，仍占位置。
+        (
+            vec!["", "8.8.8.0/24"],
+            1,
+            NetworkSettingsRejectionKind::OutsidePrivateSpace,
+        ),
+        (
+            vec!["10.9.0.0/24", "   ", "8.8.8.0/24"],
+            2,
+            NetworkSettingsRejectionKind::OutsidePrivateSpace,
+        ),
+        (
+            vec![" ", "", "garbage-entry"],
+            2,
+            NetworkSettingsRejectionKind::InvalidCidr,
+        ),
+    ] {
+        let rejected = engine
+            .update_network_settings(NetworkSettingsUpdate {
+                trusted_networks: Some(entries.iter().map(|entry| (*entry).to_owned()).collect()),
+                listen_port: Some(5555),
+            })
+            .expect("a rejection is a business result, not an error");
+        assert_eq!(
+            rejected,
+            NetworkSettingsUpdateResult::Rejected {
+                field: NetworkSettingsRejectionField::TrustedNetworks,
+                index: Some(index),
+                kind,
+            }
+        );
+        assert_eq!(
+            engine.query_network_settings().unwrap(),
+            settings,
+            "a rejected update must save nothing"
+        );
+    }
+
+    // None 保持不变；Some([]) 与 Some(0) 清除。
+    let unchanged = engine
+        .update_network_settings(NetworkSettingsUpdate {
+            trusted_networks: None,
+            listen_port: None,
+        })
+        .unwrap();
+    assert_eq!(unchanged, NetworkSettingsUpdateResult::Saved { settings });
+    let cleared = engine
+        .update_network_settings(NetworkSettingsUpdate {
+            trusted_networks: Some(Vec::new()),
+            listen_port: Some(0),
+        })
+        .unwrap();
+    let NetworkSettingsUpdateResult::Saved { settings } = cleared else {
+        panic!("clearing must be saved");
+    };
+    assert!(settings.trusted_networks.is_empty());
+    assert_eq!(settings.listen_port, None);
+
+    engine
+        .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
+        .expect("binding engine must shut down within the deadline");
+}
+
+#[test]
+fn occupied_fixed_port_surfaces_1102_through_recover_network() {
+    let _test_guard = engine_test_guard();
+    let root = tempfile::tempdir().expect("temporary host root must be available");
+    let host = Arc::new(MemoryHost::new(root.path()));
+    let engine = MobileEngine::start(
+        BindingConfig {
+            app_version: "1.2.3".to_owned(),
+            profile_id: "binding-network-port".to_owned(),
+        },
+        host,
+    )
+    .expect("binding engine must start");
+    engine
+        .create_space(
+            Some("network settings device".to_owned()),
+            "network-settings-passphrase".to_owned(),
+        )
+        .expect("create a space so the network session exists");
+
+    let occupied = std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0))
+        .expect("reserve a UDP port");
+    let port = occupied.local_addr().expect("reserved address").port();
+    let applied = engine
+        .update_network_settings(NetworkSettingsUpdate {
+            trusted_networks: None,
+            listen_port: Some(port),
+        })
+        .expect("saving the setting does not bind the port");
+    assert!(matches!(applied, NetworkSettingsUpdateResult::Saved { .. }));
+
+    let error = engine
+        .recover_network()
+        .expect_err("an occupied fixed port must fail the rebuild");
+    assert!(
+        matches!(
+            error,
+            BindingError::Engine {
+                code: 1102,
+                category: BindingErrorCategory::Unavailable,
+                retryable: false,
+            }
+        ),
+        "unexpected recovery error: {error:?}"
+    );
+
+    // 重建失败后 Engine 的操作保持关闭：此时无法再通过 Engine 修改设置，见设计文档“固定端口被占用”的已知缺口。
+    // 这里只固定错误码的透出，不把该缺口写成期望行为。
     engine
         .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
         .expect("binding engine must shut down within the deadline");

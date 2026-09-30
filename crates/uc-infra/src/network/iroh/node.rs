@@ -18,9 +18,9 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
-#[cfg(not(any(test, feature = "test-util")))]
+#[cfg(not(any(test, feature = "in-process-multi-node")))]
 use std::sync::Mutex;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use uc_application::deps::ClipboardReceiverPort;
@@ -33,7 +33,7 @@ use super::session_generation::{
     SessionProtocolRegistry, SessionProtocolRegistryError,
 };
 use iroh::address_lookup::AddrFilter;
-use iroh::endpoint::{presets, QuicTransportConfig, VarInt};
+use iroh::endpoint::{presets, BindOpts, QuicTransportConfig, VarInt};
 use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, RelayConfig, RelayMode, RelayUrl, TransportAddr};
 use iroh_mdns_address_lookup::MdnsAddressLookup;
@@ -54,6 +54,7 @@ use uc_core::membership::{
     ContentExchangeGatePort, GroupRevocationPort, GroupUpdateDispatchPort,
     MembershipHistoryExchangeEndpointPort, PeerAdmissionPort,
 };
+use uc_core::network::TrustedNetworks;
 use uc_core::ports::blob::BlobTransferPort;
 use uc_core::ports::pairing_invitation::{
     PairingInvitationAddressQueryPort, PairingInvitationByAddressPort, PairingInvitationPort,
@@ -97,6 +98,7 @@ use super::network_partition::IrohNetworkPartitionGate;
 use super::peer_reachability_adapter::{
     IrohPeerReachabilityAdapter, LEGACY_PEER_REACHABILITY_ALPN, PEER_REACHABILITY_ALPN,
 };
+use super::runtime_consts::DialPolicy;
 use super::space_admission::{
     IrohSpaceAdmissionHandler, IrohSpaceAdmissionTransport, SpaceAdmissionChannelCredentialPort,
     SPACE_ADMISSION_ALPN,
@@ -324,16 +326,11 @@ pub struct IrohNodeConfig {
     /// Access tokens keyed by their matching custom relay URL. Values are
     /// redacted in debug output and zeroized when dropped.
     pub relay_access_tokens: BTreeMap<String, IrohRelayAccessToken>,
-    /// If true, allow VPN / overlay-network virtual NIC addresses (CGNAT
-    /// `100.64.0.0/10`, Tailscale ULA `fd7a:115c:a1e0::/48`) to flow through
-    /// the address filter as direct-connection candidates. Default `false`
-    /// (drop them). Power users set this when both peers share an overlay
-    /// network and want iroh to leverage that path.
-    ///
-    /// Clash fake-ip (`198.18.0.0/15`) and IPv4 link-local (`169.254.0.0/16`)
-    /// are unconditionally filtered regardless of this flag — they have no
-    /// legitimate cross-host use case.
-    pub allow_overlay_network_addrs: bool,
+    /// 用户声明的可信网段。CGNAT `100.64.0.0/10` 与 Tailscale ULA
+    /// `fd7a:115c:a1e0::/48` 内的地址只有落入这些网段才作为直连候选；
+    /// Clash fake-ip（`198.18.0.0/15`）与 IPv4 链路本地（`169.254.0.0/16`）
+    /// 永远过滤。
+    pub trusted_networks: TrustedNetworks,
     /// Congestion controller to use for QUIC connections.
     /// `Cubic` (default) gives excellent LAN throughput; `Bbr3` may be
     /// better on lossy WAN paths. Mapped from `Settings.network`.
@@ -498,6 +495,34 @@ fn build_transport_config(cc: CongestionController) -> QuicTransportConfig {
         .build()
 }
 
+/// 固定端口被占用时单独分类；其他绑定失败保持 `Bind`。
+fn classify_bind_error(
+    error: impl std::error::Error + Send + Sync + 'static,
+    fixed_listen_port: bool,
+) -> IrohNodeError {
+    let address_in_use = fixed_listen_port && source_chain_has_address_in_use(&error);
+    let error = anyhow::Error::new(error);
+    if address_in_use {
+        IrohNodeError::ListenPortUnavailable(error)
+    } else {
+        IrohNodeError::Bind(error)
+    }
+}
+
+fn source_chain_has_address_in_use(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(error) = current {
+        if error
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::AddrInUse)
+        {
+            return true;
+        }
+        current = error.source();
+    }
+    false
+}
+
 /// Build the `AddrFilter` we hand to `Endpoint::builder().addr_filter(...)`.
 /// The filter is applied at the `AddressLookupServices` layer (see
 /// iroh#3960 / #4010), upstream of every individual lookup service, so a
@@ -505,19 +530,19 @@ fn build_transport_config(cc: CongestionController) -> QuicTransportConfig {
 /// place — that's what makes this a viable replacement for "fork iroh and
 /// patch magicsock" (issue #486 §三 A).
 ///
-/// `allow_overlay` is captured by the closure so the predicate behaviour is
+/// `trusted` is captured by the closure so the predicate behaviour is
 /// fixed at endpoint bind time — the iroh `Endpoint` does not support
-/// runtime mutation of address filters; toggling
-/// `Settings.network.allow_overlay_network_addrs` requires a daemon restart
+/// runtime mutation of address filters; changing
+/// `Settings.network.trusted_networks` requires a daemon restart
 /// (the same constraint as `disable_relays`).
-fn build_addr_filter(allow_overlay: bool) -> AddrFilter {
+fn build_addr_filter(trusted: TrustedNetworks) -> AddrFilter {
     // Snapshot local LAN subnets ONCE at endpoint-bind time. The closure
     // captures the result for the lifetime of the endpoint; switching
     // wifi/LAN at runtime won't be picked up (same constraint as
-    // `allow_overlay`). See `enumerate_local_lan_v4` doc for rationale.
+    // trusted networks). See `enumerate_local_lan_v4` doc for rationale.
     let local_lan_v4 = enumerate_local_lan_v4();
     AddrFilter::new(move |addrs: &Vec<TransportAddr>| {
-        apply_addr_filter(addrs, allow_overlay, &local_lan_v4)
+        apply_addr_filter(addrs, &trusted, &local_lan_v4)
     })
 }
 
@@ -567,14 +592,14 @@ fn relay_mode_from_config(config: &IrohNodeConfig) -> Result<RelayMode, IrohNode
 /// A process-wide lease prevents two live production endpoints from sharing
 /// mutable runtime state. Unlike the former `OnceLock`, the lease is owned by
 /// the builder and then the live node, so a completed shutdown permits restart.
-#[cfg(not(any(test, feature = "test-util")))]
+#[cfg(not(any(test, feature = "in-process-multi-node")))]
 static NODE_RUN_ACTIVE: Mutex<bool> = Mutex::new(false);
 
 struct NodeRunLease;
 
 impl NodeRunLease {
     fn acquire() -> Result<Self, IrohNodeError> {
-        #[cfg(not(any(test, feature = "test-util")))]
+        #[cfg(not(any(test, feature = "in-process-multi-node")))]
         {
             let mut active = NODE_RUN_ACTIVE
                 .lock()
@@ -591,11 +616,11 @@ impl NodeRunLease {
 
 impl Drop for NodeRunLease {
     fn drop(&mut self) {
-        #[cfg(not(any(test, feature = "test-util")))]
+        #[cfg(not(any(test, feature = "in-process-multi-node")))]
         {
             // Clear the runtime configuration before releasing the lease so a
             // newly-bound node cannot inherit the previous node's LAN policy.
-            super::runtime_consts::clear_lan_only();
+            super::runtime_consts::clear_dial_policy();
             match NODE_RUN_ACTIVE.lock() {
                 Ok(mut active) => *active = false,
                 Err(_) => warn!("iroh node runtime state lock poisoned during release"),
@@ -802,13 +827,10 @@ impl IrohNodeBuilder {
             .map_err(|source| IrohNodeError::Discovery {
                 source: anyhow::Error::new(source),
             })?;
-        // Snapshot the overlay flag before consuming `config` into `Self`.
-        let allow_overlay = config.allow_overlay_network_addrs;
         info!(
             target: "iroh.addr_filter",
-            allow_overlay,
-            "addr filter configured: overlay-network addresses {} (Tailscale 100.64/10 + fd7a:115c:a1e0::/48)",
-            if allow_overlay { "ALLOWED" } else { "BLOCKED" },
+            trusted_network_count = config.trusted_networks.len(),
+            "addr filter configured with user trusted networks",
         );
         let recorder =
             uc_observability_contract::diagnostics::connectivity::NetworkRecorder::current();
@@ -822,8 +844,8 @@ impl IrohNodeBuilder {
             .transport_config(build_transport_config(config.congestion_controller))
             // UniClipboard#486: drop Clash TUN / link-local IPs from every
             // address-lookup service in one shot, and drop CGNAT/Tailscale
-            // overlay IPs unless the user opts in. See `build_addr_filter`.
-            .addr_filter(build_addr_filter(allow_overlay))
+            // overlay IPs outside the user's trusted networks. See `build_addr_filter`.
+            .addr_filter(build_addr_filter(config.trusted_networks.clone()))
             .hooks(session_protocols.endpoint_hooks());
         // 保留 N0 原生平台的原服务及原配置，只包裹固定的采集入口。
         if !config.disable_relays {
@@ -853,14 +875,17 @@ impl IrohNodeBuilder {
         // 对方"的用户预期相悖。所以 `disable_relays = true` 路径下显式 clear
         // 掉 N0 注入的 lookup services，再单挂 mDNS。
         //
-        // 同步把 LAN-only 状态固化到 `runtime_consts::LAN_ONLY` 进程常量 ——
-        // `connect.rs` 出站 dial 时会读这个常量，从对端 `EndpointAddr` 中剥掉
-        // `TransportAddr::Relay`。否则即便本端 `RelayMode::Disabled`，iroh 仍
-        // 会用对端发布的 relay url 走中转（已在 dev 日志中观测到）。
+        // 同步把 LAN-only 状态与可信网段固化为 `runtime_consts` 的拨号策略 ——
+        // `connect.rs` 出站 dial 时读取它：按同一可信判定过滤直连地址，并在
+        // LAN-only 下剥掉 `TransportAddr::Relay`。否则即便本端 `RelayMode::Disabled`，
+        // iroh 仍会用对端发布的 relay url 走中转（已在 dev 日志中观测到）。
         //
         // 取舍：跨网段已配对设备无法通过 NodeId 反查到，这是 LAN-only 的设计
         // 意图（不是 bug）。
-        super::runtime_consts::install_lan_only(config.disable_relays);
+        super::runtime_consts::install_dial_policy(DialPolicy {
+            lan_only: config.disable_relays,
+            trusted_networks: config.trusted_networks.clone(),
+        });
         if config.disable_relays {
             endpoint_builder = endpoint_builder.clear_address_lookup();
             info!(
@@ -869,25 +894,32 @@ impl IrohNodeBuilder {
             );
         }
 
-        // UniClipboard#900 (a): pin the UDP socket to a fixed IPv4 port so a
-        // NAT'd / containerized node is reachable at a stable port across
-        // restarts. `bind_addr("0.0.0.0:port")` replaces iroh's default
-        // ephemeral IPv4 socket (still listens on all interfaces); the IPv6
-        // default bind is left untouched. The port is pre-parsed from
-        // `UC_IROH_BIND_PORT` in `uc-bootstrap`, so the only realistic failure
-        // here is the port already being in use — surfaced as `Bind`.
+        // UniClipboard#900 (a): pin the UDP sockets to a fixed port so a node is
+        // reachable at a stable port across restarts. The port comes from
+        // `Settings.network.listen_port`, overridable by `UC_IROH_BIND_PORT`.
+        // IPv4 (`0.0.0.0:port`) is required: a port already in use fails
+        // `bind()` below as `ListenPortUnavailable`; it never falls back to a
+        // random port. IPv6 (`[::]:port`, v6-only) is pinned to the same port
+        // but optional: a peer's selected path may be an IPv6 address, and an
+        // ephemeral IPv6 port would leave that path stale after a restart,
+        // black-holing every new handshake sent to it. Hosts without IPv6 (or
+        // with the IPv6 port taken) keep starting on IPv4 alone.
+        let fixed_listen_port = config.bind_port.is_some();
         if let Some(port) = config.bind_port {
             endpoint_builder = endpoint_builder
                 .bind_addr((Ipv4Addr::UNSPECIFIED, port))
-                .map_err(|err| {
-                    IrohNodeError::Bind(
-                        anyhow::Error::new(err).context("pin iroh UDP port (UC_IROH_BIND_PORT)"),
+                .and_then(|builder| {
+                    builder.bind_addr_with_opts(
+                        (Ipv6Addr::UNSPECIFIED, port),
+                        BindOpts::default().set_is_required(false),
                     )
+                })
+                .map_err(|err| {
+                    IrohNodeError::Bind(anyhow::Error::new(err).context("pin iroh UDP port"))
                 })?;
             info!(
                 target: "iroh.bind",
-                bind_port = port,
-                "pinned iroh UDP socket to fixed IPv4 port 0.0.0.0:{port} (UC_IROH_BIND_PORT)",
+                "pinned iroh UDP sockets to a fixed port",
             );
         }
 
@@ -926,7 +958,7 @@ impl IrohNodeBuilder {
                 tracing::subscriber::NoSubscriber::default(),
             ))
             .await
-            .map_err(|err| IrohNodeError::Bind(anyhow::Error::new(err)))?;
+            .map_err(|err| classify_bind_error(err, fixed_listen_port))?;
         let endpoint = Arc::new(endpoint);
         // 只有 bind 完成才将来源标记为可采集；失败构造不能留下 Enabled 假象。
         {
@@ -987,7 +1019,7 @@ impl IrohNodeBuilder {
         debug!(
             endpoint_id = %endpoint.id().fmt_short(),
             disable_relays = config.disable_relays,
-            allow_overlay_network_addrs = config.allow_overlay_network_addrs,
+            trusted_network_count = config.trusted_networks.len(),
             custom_relay_count = config.custom_relay_urls.len(),
             rendezvous_override = config.rendezvous_base_url.is_some(),
             "iroh node bound; ready to install transport handlers"
@@ -1526,6 +1558,10 @@ pub enum IrohNodeError {
     #[error("failed to bind iroh endpoint")]
     Bind(#[source] anyhow::Error),
 
+    /// 固定监听端口已被占用。不回退到随机端口，否则用户会误以为端口已固定。
+    #[error("fixed iroh listen port is already in use")]
+    ListenPortUnavailable(#[source] anyhow::Error),
+
     #[error("failed to initialize iroh blob store")]
     BlobStoreInit(#[source] anyhow::Error),
 
@@ -1646,7 +1682,7 @@ mod tests {
     }
 
     /// UniClipboard#900: `bind_port` pins the iroh UDP socket to a fixed
-    /// IPv4 port. We grab a currently-free port from the OS, release it, then
+    /// port on IPv4 (and IPv6 when available). We grab a currently-free port from the OS, release it, then
     /// assert the endpoint binds exactly that number (stable across restarts).
     #[tokio::test]
     async fn bind_pins_fixed_udp_port() {
@@ -1667,6 +1703,38 @@ mod tests {
             bound.iter().any(|s| s.is_ipv4() && s.port() == port),
             "expected pinned IPv4 port {port} in bound sockets {bound:?}"
         );
+        // IPv6 可选：绑定成功时必须使用同一端口，否则重启后对端保留的旧 IPv6 已选路径会失效。
+        assert!(
+            bound
+                .iter()
+                .filter(|s| s.is_ipv6())
+                .all(|s| s.port() == port),
+            "IPv6 sockets must share the pinned port {port}, bound sockets {bound:?}"
+        );
+    }
+
+    /// 固定端口已被占用时绑定失败并单独分类，不回退到随机端口。
+    #[tokio::test]
+    async fn bind_fails_when_fixed_port_is_in_use() {
+        let occupant =
+            std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).expect("occupy UDP port");
+        let port = occupant.local_addr().expect("occupant addr").port();
+
+        let store = identity_store();
+        let cfg = IrohNodeConfig {
+            bind_port: Some(port),
+            ..Default::default()
+        };
+        let error = match IrohNodeBuilder::bind(&store, cfg).await {
+            Ok(_) => panic!("binding an occupied fixed port must fail"),
+            Err(error) => error,
+        };
+
+        assert!(
+            matches!(error, IrohNodeError::ListenPortUnavailable(_)),
+            "unexpected bind error: {error:?}"
+        );
+        drop(occupant);
     }
 
     /// UniClipboard#900: `public_addr` injects a configured public address
@@ -2129,24 +2197,33 @@ mod tests {
     fn v6(ip: &str) -> IpAddr {
         IpAddr::V6(ip.parse::<Ipv6Addr>().unwrap())
     }
+    fn no_trusted() -> TrustedNetworks {
+        TrustedNetworks::default()
+    }
+    fn tailscale_trusted() -> TrustedNetworks {
+        TrustedNetworks::parse(&["100.64.0.0/10", "fd7a:115c:a1e0::/48"]).unwrap()
+    }
 
     /// Always-filtered classes are filtered regardless of the overlay flag.
     #[test]
     fn always_filtered_classes_ignore_overlay_flag() {
-        for &allow in &[false, true] {
+        for allow in [no_trusted(), tailscale_trusted()] {
             // 198.18.0.0/15 — Clash fake-ip
             assert!(
-                is_virtual_nic_ip(v4("198.18.0.1"), allow),
-                "198.18.0.1 must be filtered (allow_overlay={allow})"
+                is_virtual_nic_ip(v4("198.18.0.1"), &allow),
+                "198.18.0.1 must be filtered (trusted_count={})",
+                allow.len()
             );
             assert!(
-                is_virtual_nic_ip(v4("198.19.255.255"), allow),
-                "198.19.255.255 must be filtered (allow_overlay={allow})"
+                is_virtual_nic_ip(v4("198.19.255.255"), &allow),
+                "198.19.255.255 must be filtered (trusted_count={})",
+                allow.len()
             );
             // 169.254.0.0/16 — IPv4 link-local
             assert!(
-                is_virtual_nic_ip(v4("169.254.1.1"), allow),
-                "169.254.1.1 must be filtered (allow_overlay={allow})"
+                is_virtual_nic_ip(v4("169.254.1.1"), &allow),
+                "169.254.1.1 must be filtered (trusted_count={})",
+                allow.len()
             );
         }
     }
@@ -2155,31 +2232,55 @@ mod tests {
     /// allowed when overlay is permitted.
     #[test]
     fn cgnat_v4_respects_overlay_flag() {
-        // allow_overlay = false → filtered
-        assert!(is_virtual_nic_ip(v4("100.64.0.1"), false));
-        assert!(is_virtual_nic_ip(v4("100.100.100.100"), false));
-        assert!(is_virtual_nic_ip(v4("100.127.255.255"), false));
+        // 无可信网段 → filtered
+        assert!(is_virtual_nic_ip(v4("100.64.0.1"), &no_trusted()));
+        assert!(is_virtual_nic_ip(v4("100.100.100.100"), &no_trusted()));
+        assert!(is_virtual_nic_ip(v4("100.127.255.255"), &no_trusted()));
 
-        // allow_overlay = true → allowed (predicate returns false)
-        assert!(!is_virtual_nic_ip(v4("100.64.0.1"), true));
-        assert!(!is_virtual_nic_ip(v4("100.100.100.100"), true));
-        assert!(!is_virtual_nic_ip(v4("100.127.255.255"), true));
+        // 信任 Tailscale 网段 → allowed (predicate returns false)
+        assert!(!is_virtual_nic_ip(v4("100.64.0.1"), &tailscale_trusted()));
+        assert!(!is_virtual_nic_ip(
+            v4("100.100.100.100"),
+            &tailscale_trusted()
+        ));
+        assert!(!is_virtual_nic_ip(
+            v4("100.127.255.255"),
+            &tailscale_trusted()
+        ));
+    }
+
+    /// 只信任 overlay 段中的一部分时，段外地址仍被过滤。
+    #[test]
+    fn overlay_addresses_outside_trusted_subnet_stay_filtered() {
+        let trusted = TrustedNetworks::parse(&["100.64.1.0/24"]).unwrap();
+        assert!(!is_virtual_nic_ip(v4("100.64.1.9"), &trusted));
+        assert!(is_virtual_nic_ip(v4("100.64.2.9"), &trusted));
+        assert!(is_virtual_nic_ip(v6("fd7a:115c:a1e0::1"), &trusted));
     }
 
     /// Tailscale IPv6 ULA fd7a:115c:a1e0::/48 mirrors the CGNAT v4 case.
     #[test]
     fn tailscale_ula_v6_respects_overlay_flag() {
         // First three 16-bit segments must match: fd7a:115c:a1e0
-        assert!(is_virtual_nic_ip(v6("fd7a:115c:a1e0::1"), false));
-        assert!(is_virtual_nic_ip(v6("fd7a:115c:a1e0:ab12:cd34::"), false));
-        assert!(!is_virtual_nic_ip(v6("fd7a:115c:a1e0::1"), true));
-        assert!(!is_virtual_nic_ip(v6("fd7a:115c:a1e0:ab12:cd34::"), true));
+        assert!(is_virtual_nic_ip(v6("fd7a:115c:a1e0::1"), &no_trusted()));
+        assert!(is_virtual_nic_ip(
+            v6("fd7a:115c:a1e0:ab12:cd34::"),
+            &no_trusted()
+        ));
+        assert!(!is_virtual_nic_ip(
+            v6("fd7a:115c:a1e0::1"),
+            &tailscale_trusted()
+        ));
+        assert!(!is_virtual_nic_ip(
+            v6("fd7a:115c:a1e0:ab12:cd34::"),
+            &tailscale_trusted()
+        ));
     }
 
     /// Real-world LAN/WAN IPs are never filtered, regardless of flag.
     #[test]
     fn real_world_addresses_pass_through() {
-        for &allow in &[false, true] {
+        for allow in [no_trusted(), tailscale_trusted()] {
             for ip in [
                 v4("10.0.0.1"),
                 v4("192.168.1.42"),
@@ -2197,8 +2298,9 @@ mod tests {
                 v6("fc00::1"),           // generic ULA, not Tailscale
             ] {
                 assert!(
-                    !is_virtual_nic_ip(ip, allow),
-                    "{ip} must NOT be filtered (allow_overlay={allow})"
+                    !is_virtual_nic_ip(ip, &allow),
+                    "{ip} must NOT be filtered (trusted_count={})",
+                    allow.len()
                 );
             }
         }
@@ -2218,7 +2320,7 @@ mod tests {
                 4242,
             ))),
         ];
-        let kept = apply_addr_filter(&addrs, false, &[]);
+        let kept = apply_addr_filter(&addrs, &no_trusted(), &[]);
         assert_eq!(
             kept.len(),
             addrs.len(),
@@ -2226,7 +2328,7 @@ mod tests {
         );
     }
 
-    /// apply_addr_filter: drops virtual NIC addrs when allow_overlay=false.
+    /// apply_addr_filter: drops virtual NIC addrs without trusted networks.
     #[test]
     fn addr_filter_drops_overlay_when_disallowed() {
         let addrs = vec![
@@ -2249,7 +2351,7 @@ mod tests {
                 4242,
             ))), // Clash — always dropped
         ];
-        let kept: Vec<TransportAddr> = apply_addr_filter(&addrs, false, &[]).into_owned();
+        let kept: Vec<TransportAddr> = apply_addr_filter(&addrs, &no_trusted(), &[]).into_owned();
         assert_eq!(kept.len(), 1, "only the real LAN IP should survive");
         match &kept[0] {
             TransportAddr::Ip(s) => assert_eq!(s.ip().to_string(), "192.168.1.1"),
@@ -2257,7 +2359,7 @@ mod tests {
         }
     }
 
-    /// apply_addr_filter: keeps overlay addrs when allow_overlay=true,
+    /// apply_addr_filter: keeps overlay addrs inside trusted networks,
     /// but still drops always-filtered classes.
     #[test]
     fn addr_filter_keeps_overlay_when_allowed_but_still_drops_clash() {
@@ -2285,7 +2387,8 @@ mod tests {
                 4242,
             ))), // link-local — always dropped
         ];
-        let kept: Vec<TransportAddr> = apply_addr_filter(&addrs, true, &[]).into_owned();
+        let kept: Vec<TransportAddr> =
+            apply_addr_filter(&addrs, &tailscale_trusted(), &[]).into_owned();
         assert_eq!(kept.len(), 3, "real LAN + 2 overlay candidates kept");
         let ips: Vec<String> = kept
             .iter()
@@ -2328,7 +2431,8 @@ mod tests {
             v4_socket("192.168.31.224", 60053), // peer LAN — keep
             v4_socket("180.164.125.95", 58279), // peer public NAT — drop (hairpin)
         ];
-        let kept: Vec<TransportAddr> = apply_addr_filter(&addrs, false, &lan_31()).into_owned();
+        let kept: Vec<TransportAddr> =
+            apply_addr_filter(&addrs, &no_trusted(), &lan_31()).into_owned();
         assert_eq!(kept.len(), 1, "only peer LAN should survive");
         match &kept[0] {
             TransportAddr::Ip(s) => assert_eq!(s.ip().to_string(), "192.168.31.224"),
@@ -2345,7 +2449,8 @@ mod tests {
             v4_socket("192.168.1.5", 60053),  // peer LAN — NOT our subnet
             v4_socket("203.0.113.42", 58279), // peer public — must keep
         ];
-        let kept: Vec<TransportAddr> = apply_addr_filter(&addrs, false, &lan_31()).into_owned();
+        let kept: Vec<TransportAddr> =
+            apply_addr_filter(&addrs, &no_trusted(), &lan_31()).into_owned();
         assert_eq!(
             kept.len(),
             2,
@@ -2359,7 +2464,8 @@ mod tests {
     #[test]
     fn hairpin_filter_keeps_public_when_peer_has_no_rfc1918() {
         let addrs = vec![v4_socket("203.0.113.42", 58279)];
-        let kept: Vec<TransportAddr> = apply_addr_filter(&addrs, false, &lan_31()).into_owned();
+        let kept: Vec<TransportAddr> =
+            apply_addr_filter(&addrs, &no_trusted(), &lan_31()).into_owned();
         assert_eq!(
             kept.len(),
             1,
@@ -2375,7 +2481,7 @@ mod tests {
             v4_socket("192.168.31.224", 60053),
             v4_socket("180.164.125.95", 58279), // would be dropped if hairpin filter active
         ];
-        let kept: Vec<TransportAddr> = apply_addr_filter(&addrs, false, &[]).into_owned();
+        let kept: Vec<TransportAddr> = apply_addr_filter(&addrs, &no_trusted(), &[]).into_owned();
         assert_eq!(
             kept.len(),
             2,
@@ -2392,7 +2498,8 @@ mod tests {
             v4_socket("10.0.0.5", 60053),       // peer's other LAN (different subnet)
             v4_socket("180.164.125.95", 58279), // public — drop
         ];
-        let kept: Vec<TransportAddr> = apply_addr_filter(&addrs, false, &lan_31()).into_owned();
+        let kept: Vec<TransportAddr> =
+            apply_addr_filter(&addrs, &no_trusted(), &lan_31()).into_owned();
         let kept_ips: Vec<String> = kept
             .iter()
             .filter_map(|a| match a {
@@ -2419,7 +2526,8 @@ mod tests {
             v4_socket("180.164.125.95", 58279), // dropped
             TransportAddr::Relay(relay_url),    // must survive
         ];
-        let kept: Vec<TransportAddr> = apply_addr_filter(&addrs, false, &lan_31()).into_owned();
+        let kept: Vec<TransportAddr> =
+            apply_addr_filter(&addrs, &no_trusted(), &lan_31()).into_owned();
         let relay_count = kept
             .iter()
             .filter(|a| matches!(a, TransportAddr::Relay(_)))

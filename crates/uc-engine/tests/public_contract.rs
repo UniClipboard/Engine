@@ -397,6 +397,7 @@ fn network_recovery_contract_exposes_one_action_and_one_status_query() {
         phase: uc_engine::NetworkRecoveryPhaseSummary::RetryScheduled,
         retryable: true,
         next_retry_in_ms: Some(1_000),
+        failure: None,
     });
     assert!(format!("{status:?}").contains("network_recovery_status"));
 }
@@ -480,6 +481,10 @@ fn settings_contract_preserves_updates_and_probe_outcomes_without_debugging_user
         }),
         OperationResult::SettingsUpdated(uc_engine::SettingsUpdateOutcome::Rejected {
             reason: "private validation detail".into(),
+            rejection: uc_engine::SettingsRejection::TrustedNetwork {
+                index: 2,
+                kind: uc_engine::TrustedNetworkRejectionKind::OutsidePrivateSpace,
+            },
         }),
         OperationResult::RelayProbed(uc_engine::RelayProbeOutcome::Dns {
             message: "private dns detail".into(),

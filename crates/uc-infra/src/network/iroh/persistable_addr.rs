@@ -1,67 +1,33 @@
-//! Helper that turns an iroh [`EndpointAddr`] freshly observed from a
-//! local [`iroh::Endpoint`] into a form that is **safe to persist** in
-//! [`crate::storage::peer_address::DieselPeerAddressRepository`] (or any
-//! other [`PeerAddressRepositoryPort`] implementor) for the lifetime of
-//! a paired peer.
+//! 对端地址进入 [`PeerAddressRepositoryPort`] 前的整理规则。
 //!
-//! ## Why a transformation is needed at all
+//! 仓储里的记录有两个来源，规则不同：
 //!
-//! `endpoint.addr()` returns the endpoint's **current** view of itself:
-//! the persistent NodeId, every direct UDP socket address magicsock has
-//! discovered, and (when relays are enabled) the assigned relay URL.
-//! Two of those parts have very different lifetimes:
+//! 1. **配对时对端自报的地址**（[`to_persistable_addr`]）：尚未被任何一次连接验证。
+//!    有 relay 时去掉直连 IP，只留节点 ID 与 relay；没有 relay 时（LAN-only 或禁用
+//!    relay 的测试）保留直连 IP，否则拨号时没有任何路径可试。
+//! 2. **成员历史交换成功后观察到的路径**（[`reusable_remote_addr`]）：只保存本次连接
+//!    正在使用的路径。直连地址只保存私有地址空间内、且拨号过滤会保留的地址；公网与
+//!    NAT 映射地址、回环和链路本地地址都不保存。本次没有使用 relay 时沿用已保存的
+//!    relay，避免直连成功反而丢掉长期提示。
 //!
-//! | Component | Stable across process restart? |
-//! |-----------|--------------------------------|
-//! | NodeId | Yes — derived from the persistent secret key |
-//! | Relay URL | Yes — sticky per home-region selection |
-//! | Direct `Ip(SocketAddr)` | **No** — magicsock binds a fresh random UDP port on every start, and NAT mappings rotate independently |
-//!
-//! Persisting the direct addresses bakes the **pairing-time UDP port**
-//! into our repository. After the peer's daemon restarts the stored
-//! port no longer matches the listening socket; packets sent to it land
-//! on a closed socket, the kernel silently drops them, and `iroh`
-//! `Endpoint::connect` waits the full QUIC handshake budget (~30 s) for
-//! a reply that never comes. Real-device test runs surfaced this as
-//! every dispatch attempt logging `→ Offline` even though both peers
-//! were demonstrably up on the same LAN.
-//!
-//! ## Why this transformation lives at the producer (write side)
-//!
-//! Stripping at the read side is a patch — a translation layer that
-//! quietly disagrees with what the repository claims to hold. By
-//! running the transformation **before** the blob enters the
-//! repository, the repository's contract becomes truthful: a stored
-//! [`PeerAddressRecord`] only carries identity (NodeId) and a long-
-//! lived hint (Relay), exactly the parts that survive a peer restart.
-//! Read sites then decode and dial directly with no further massaging,
-//! and `iroh`'s built-in pkarr discovery fills in the peer's *currently
-//! published* direct addresses for each connect attempt.
-//!
-//! ## Conditional behaviour: keep direct addrs when no relay is present
-//!
-//! With no relay in the input there is nothing for `iroh` discovery to
-//! fall back on once the directs are gone — connect would have no path
-//! to try. Unit fixtures that bind endpoints with `RelayMode::Disabled`
-//! (loopback-only tests) depend on this branch: their stored blobs are
-//! direct-only by design. Production daemons run with the default
-//! `RelayMode::Default`, which always assigns a relay URL, so the
-//! stripping branch is the production path.
+//! 默认随机端口重启后，保存的直连地址会失效。这不会拖慢拨号：iroh 在选定路径前把
+//! 握手包同时发往全部已知路径（已保存地址、mDNS 与其他发现结果），`connect.rs` 的
+//! 单次尝试上限为 3 秒并按 0/500/1500ms 错峰，失效地址只是得不到回应。下一次成功
+//! 交换会覆盖旧记录。
 //!
 //! [`PeerAddressRepositoryPort`]: uc_core::ports::PeerAddressRepositoryPort
-//! [`PeerAddressRecord`]: uc_core::ports::PeerAddressRecord
 
 use chrono::{TimeZone, Utc};
 use iroh::endpoint::TransportAddrUsage;
-use iroh::{Endpoint, EndpointAddr, EndpointId, TransportAddr};
+use iroh::{Endpoint, EndpointAddr, TransportAddr};
 use uc_core::ids::DeviceId;
+use uc_core::network::{is_private_address, TrustedNetworks};
 use uc_core::ports::{ClockPort, PeerAddressRecord, PeerAddressRepositoryPort};
 
-/// Convert a freshly observed [`EndpointAddr`] into the form we want to
-/// persist for a paired peer: NodeId + relay hint, with ephemeral
-/// `Ip(...)` direct addresses dropped. When the input carries no relay
-/// the addr is returned unchanged so the caller still has dialable
-/// paths; see the module doc for the rationale.
+use super::addr_filter::is_virtual_nic_ip;
+
+/// 把配对时对端自报的地址整理成可保存形式：有 relay 时去掉直连 IP；没有 relay 时原样
+/// 保留，调用方仍有可拨的路径。见模块文档。
 pub fn to_persistable_addr(addr: EndpointAddr) -> EndpointAddr {
     let has_relay = addr
         .addrs
@@ -78,38 +44,63 @@ pub fn to_persistable_addr(addr: EndpointAddr) -> EndpointAddr {
     EndpointAddr::from_parts(id, kept)
 }
 
-/// 从一次已经建立的连接观察中提取可长期保存的远端提示。
+/// 从一次已建立连接的路径观察中提取可长期保存的远端地址。
 ///
-/// 只有当前正在使用的 relay 才足以证明本次可达；动态 IP 和未参与本次连接的
-/// 旧 relay 都不能覆盖已有记录。没有这种提示时返回 `None`。
-pub(super) fn stable_remote_addr(
-    id: EndpointId,
-    addrs: impl IntoIterator<Item = (TransportAddr, bool)>,
+/// `observed` 为 `(地址, 是否正在使用)`。保留正在使用的 relay，以及正在使用、位于私有
+/// 地址空间且未被可信判定排除的直连地址；本次没有正在使用的 relay 时沿用 `stored`
+/// 中的 relay。没有任何正在使用的可保存路径时返回 `None`，不覆盖已有记录。
+pub(super) fn reusable_remote_addr(
+    stored: &EndpointAddr,
+    observed: impl IntoIterator<Item = (TransportAddr, bool)>,
+    trusted: &TrustedNetworks,
 ) -> Option<EndpointAddr> {
-    let relays = addrs
+    let (relays, directs): (Vec<_>, Vec<_>) = observed
         .into_iter()
-        .filter_map(|(addr, active)| {
-            (active && matches!(addr, TransportAddr::Relay(_))).then_some(addr)
+        .filter_map(|(addr, active)| active.then_some(addr))
+        .filter(|addr| match addr {
+            TransportAddr::Ip(socket) => {
+                is_private_address(socket.ip()) && !is_virtual_nic_ip(socket.ip(), trusted)
+            }
+            TransportAddr::Relay(_) => true,
+            _ => false,
         })
-        .collect::<Vec<_>>();
-    (!relays.is_empty()).then(|| EndpointAddr::from_parts(id, relays))
+        .partition(|addr| matches!(addr, TransportAddr::Relay(_)));
+    if relays.is_empty() && directs.is_empty() {
+        return None;
+    }
+    let relays = if relays.is_empty() {
+        stored
+            .addrs
+            .iter()
+            .filter(|addr| matches!(addr, TransportAddr::Relay(_)))
+            .cloned()
+            .collect()
+    } else {
+        relays
+    };
+    Some(EndpointAddr::from_parts(
+        stored.id,
+        directs.into_iter().chain(relays),
+    ))
 }
 
-pub(super) async fn observed_stable_remote_addr(
+pub(super) async fn observed_reusable_remote_addr(
     endpoint: &Endpoint,
-    id: EndpointId,
+    stored: &EndpointAddr,
+    trusted: &TrustedNetworks,
 ) -> Option<EndpointAddr> {
-    let info = endpoint.remote_info(id).await?;
-    stable_remote_addr(
-        info.id(),
+    let info = endpoint.remote_info(stored.id).await?;
+    reusable_remote_addr(
+        stored,
         info.into_addrs().map(|addr| {
             let active = matches!(addr.usage(), TransportAddrUsage::Active);
             (addr.into_addr(), active)
         }),
+        trusted,
     )
 }
 
-pub(super) async fn persist_observed_stable_addr(
+pub(super) async fn persist_observed_addr(
     repository: &dyn PeerAddressRepositoryPort,
     clock: &dyn ClockPort,
     device: &DeviceId,
@@ -136,6 +127,7 @@ mod tests {
 
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use async_trait::async_trait;
     use iroh::{EndpointId, RelayUrl, SecretKey};
@@ -258,28 +250,146 @@ mod tests {
             .all(|a| matches!(a, TransportAddr::Relay(_))));
     }
 
-    #[test]
-    fn stable_remote_addr_keeps_only_active_relays() {
-        let id = test_id();
-        let active_relay: RelayUrl = "https://active-relay.example.com/".parse().unwrap();
-        let inactive_relay: RelayUrl = "https://old-relay.example.com/".parse().unwrap();
+    fn socket(raw: &str) -> TransportAddr {
+        TransportAddr::Ip(raw.parse().unwrap())
+    }
 
-        let persisted = stable_remote_addr(
+    fn relay(raw: &str) -> TransportAddr {
+        TransportAddr::Relay(raw.parse().unwrap())
+    }
+
+    #[test]
+    fn reusable_remote_addr_keeps_active_private_directs_and_active_relays() {
+        let id = test_id();
+        let stored = EndpointAddr::from_parts(id, [relay("https://old-relay.example.com/")]);
+        let trusted = TrustedNetworks::parse(&["100.64.1.0/24"]).unwrap();
+
+        let saved = reusable_remote_addr(
+            &stored,
+            [
+                (socket("192.168.1.5:50754"), true),
+                (socket("10.8.0.2:50754"), true),
+                (socket("100.64.1.9:50754"), true),
+                (socket("192.168.1.6:50754"), false),
+                (relay("https://active-relay.example.com/"), true),
+                (relay("https://idle-relay.example.com/"), false),
+            ],
+            &trusted,
+        )
+        .expect("active private paths are reusable");
+
+        assert_eq!(saved.id, id);
+        assert_eq!(
+            saved.addrs.into_iter().collect::<Vec<_>>(),
+            vec![
+                relay("https://active-relay.example.com/"),
+                socket("10.8.0.2:50754"),
+                socket("100.64.1.9:50754"),
+                socket("192.168.1.5:50754"),
+            ]
+        );
+    }
+
+    #[test]
+    fn reusable_remote_addr_never_saves_public_loopback_link_local_or_untrusted_overlay() {
+        let stored = EndpointAddr::new(test_id());
+        let saved = reusable_remote_addr(
+            &stored,
+            [
+                (socket("1.2.3.4:59875"), true),
+                (socket("127.0.0.1:50754"), true),
+                (socket("169.254.1.1:50754"), true),
+                (socket("198.18.0.1:50754"), true),
+                (socket("[fe80::1]:50754"), true),
+                (socket("100.64.1.9:50754"), true),
+            ],
+            &TrustedNetworks::default(),
+        );
+
+        assert!(saved.is_none(), "no active path is reusable");
+    }
+
+    #[test]
+    fn direct_only_observation_keeps_the_stored_relay_hint() {
+        let id = test_id();
+        let stored = EndpointAddr::from_parts(
             id,
             [
-                (TransportAddr::Ip(lan_addr(50754)), true),
-                (TransportAddr::Relay(inactive_relay), false),
-                (TransportAddr::Relay(active_relay.clone()), true),
+                socket("192.168.1.5:40000"),
+                relay("https://home-relay.example.com/"),
             ],
-        )
-        .expect("an active relay is a stable remote hint");
+        );
 
-        assert_eq!(persisted.id, id);
-        assert_eq!(persisted.addrs.len(), 1);
-        assert!(persisted
-            .addrs
-            .contains(&TransportAddr::Relay(active_relay)));
-        assert!(stable_remote_addr(id, [(TransportAddr::Ip(lan_addr(50754)), true)]).is_none());
+        let saved = reusable_remote_addr(
+            &stored,
+            [(socket("192.168.1.5:50754"), true)],
+            &TrustedNetworks::default(),
+        )
+        .expect("an active private direct path is reusable");
+
+        assert_eq!(
+            saved.addrs.into_iter().collect::<Vec<_>>(),
+            vec![
+                relay("https://home-relay.example.com/"),
+                socket("192.168.1.5:50754"),
+            ]
+        );
+    }
+
+    async fn has_active_direct_path(endpoint: &Endpoint, remote: EndpointId) -> bool {
+        endpoint.remote_info(remote).await.is_some_and(|info| {
+            info.addrs().any(|addr| {
+                matches!(addr.addr(), TransportAddr::Ip(_))
+                    && matches!(addr.usage(), TransportAddrUsage::Active)
+            })
+        })
+    }
+
+    /// 写回依赖的 iroh 行为：双方都把本次连接实际使用的直连路径标为正在使用，
+    /// 并且连接关闭后仍保留该标记，因此同步结果提交后再观察不会丢失证据。
+    #[tokio::test]
+    async fn both_sides_keep_the_used_direct_path_active_after_the_connection_closes() {
+        const ALPN: &[u8] = b"test/reusable-remote-addr";
+        let bind = || async {
+            Endpoint::builder(iroh::endpoint::presets::N0)
+                .relay_mode(iroh::RelayMode::Disabled)
+                .clear_address_lookup()
+                .alpns(vec![ALPN.to_vec()])
+                .bind()
+                .await
+                .unwrap()
+        };
+        let client = bind().await;
+        let server = bind().await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while server.addr().addrs.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let (outgoing, incoming) = tokio::join!(client.connect(server.addr(), ALPN), async {
+            server.accept().await.unwrap().await.unwrap()
+        });
+        let outgoing = outgoing.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !(has_active_direct_path(&client, server.id()).await
+                && has_active_direct_path(&server, client.id()).await)
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("both sides register the used direct path");
+
+        outgoing.close(0u32.into(), b"done");
+        tokio::time::timeout(Duration::from_secs(2), incoming.closed())
+            .await
+            .unwrap();
+
+        assert!(has_active_direct_path(&client, server.id()).await);
+        assert!(has_active_direct_path(&server, client.id()).await);
     }
 
     #[tokio::test]
@@ -290,7 +400,7 @@ mod tests {
         let device = DeviceId::new("device-b");
         let repository = Arc::new(RecordingRepository::default());
 
-        persist_observed_stable_addr(repository.as_ref(), &FixedClock, &device, addr.clone()).await;
+        persist_observed_addr(repository.as_ref(), &FixedClock, &device, addr.clone()).await;
 
         let saved = repository.saved.lock().unwrap().clone().unwrap();
         assert_eq!(saved.device_id, device);
@@ -304,6 +414,6 @@ mod tests {
             saved: Mutex::new(None),
             fail: true,
         };
-        persist_observed_stable_addr(&failing, &FixedClock, &device, EndpointAddr::new(id)).await;
+        persist_observed_addr(&failing, &FixedClock, &device, EndpointAddr::new(id)).await;
     }
 }

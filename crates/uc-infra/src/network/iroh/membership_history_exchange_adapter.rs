@@ -31,7 +31,8 @@ use uc_observability_contract::diagnostics::{
 use super::connect_with_staggered_retry;
 use super::inbound_peer::{record_inbound_rejection, InboundPeerRejection, PeerIdentityResolver};
 use super::peer_address_resolver::PeerAddressResolver;
-use super::persistable_addr::{observed_stable_remote_addr, persist_observed_stable_addr};
+use super::persistable_addr::{observed_reusable_remote_addr, persist_observed_addr};
+use super::runtime_consts::dial_policy;
 use super::trace_context::{inject_current, set_remote_parent, WireTraceContext};
 
 pub const MEMBERSHIP_HISTORY_EXCHANGE_ALPN: &[u8] = b"uniclipboard/membership-history/4";
@@ -174,13 +175,15 @@ impl MembershipHistoryExchangePort for IrohMembershipHistoryExchangeAdapter {
 #[async_trait]
 impl RefreshVerifiedPeerAddressPort for IrohMembershipHistoryExchangeAdapter {
     async fn refresh_verified_peer_address(&self, peer: &DeviceId) {
-        let Some(address) = self.resolve_addr(peer).await else {
+        let Some(stored) = self.resolve_addr(peer).await else {
             return;
         };
-        let Some(observed) = observed_stable_remote_addr(&self.endpoint, address.id).await else {
+        let trusted = dial_policy().trusted_networks;
+        let Some(observed) = observed_reusable_remote_addr(&self.endpoint, &stored, &trusted).await
+        else {
             return;
         };
-        persist_observed_stable_addr(
+        persist_observed_addr(
             self.peer_addr_repo.as_ref(),
             self.clock.as_ref(),
             peer,
