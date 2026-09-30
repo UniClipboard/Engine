@@ -105,6 +105,14 @@ impl RuntimeUpgradeBootstrap {
             None => {
                 let legacy_space_id = self.resolve_legacy_space_id().await?;
                 progress.required(legacy_space_id.is_some());
+                if legacy_space_id.is_none() {
+                    let keyslot_store =
+                        crate::fs::key_slot_store::JsonKeySlotStore::new(self.vault_path.clone());
+                    use crate::fs::key_slot_store::KeySlotStore as _;
+                    if let Err(error) = keyslot_store.quarantine().await {
+                        tracing::warn!(%error, "failed to quarantine orphaned keyslot during fresh bootstrap");
+                    }
+                }
                 (
                     legacy_database.to_path_buf(),
                     legacy_blob_root.to_path_buf(),
