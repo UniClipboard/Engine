@@ -17,3 +17,11 @@
 - 2026-09-30：P1 完成 #16-#43、#45（#44 需要改观测合同，暂缓）。新增任务类别 `engine_startup`、`outbound_progress_translator`；
   新字段 `rollback_target`、`recovery_state`、`restart_required`、`can_submit_passphrase`、`evicted_count`、`max_bytes`。
   无专门日志测试的项：#25、#29、#30、#32、#37（需要真实 Engine 多线程运行或真实 iroh 连接）。下一步：P2（#46-#55）。
+
+## P2 (#46-#55)
+
+All ten items implemented and verified (fmt, workspace check default and lan-compat, uc-application/uc-infra/uc-engine tests, direct-log 0, style, repo preflight, diff check).
+
+- Tested: #46 (settings failure source), #55 (shared `remove_work_directory_best_effort`, no path in logs).
+- Compile and adjacent tests only: #47, #48, #50, #51, #53, #54 (need real session, iroh connection or vault fixtures); #49, #52 are trivial refactors.
+- Deferred: #44 (needs a contract change: setup_degraded health event and `ObservabilityHealth` reason).
