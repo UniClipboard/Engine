@@ -7,6 +7,7 @@
 //! 4. Further split on `_`, `-`, `.`, `/`
 //! 5. Split camelCase and PascalCase boundaries
 //! 6. For identifier/path-like inputs, preserve the original normalized whole segment plus parts
+//!    (index side only; a query word falls back to its whole form only when no part survives)
 //! 7. Drop single-character Latin tokens (keep CJK characters)
 //! 8. Generate overlapping bigrams over contiguous CJK runs
 //!
@@ -36,6 +37,15 @@ const PREFIX_MIN_LEN: usize = 3;
 /// add `O(len)` prefix tokens per occurrence. See `search-internals.mdx`.
 const PREFIX_MAX_LEN: usize = 32;
 
+/// 索引与查询共用同一套切分规则，只在两点上不同：前缀展开与整段标签。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenizeMode {
+    /// 保留整段标签并展开前缀。
+    Index,
+    /// 不展开前缀；整段标签仅在没有任何组成部分留存时使用。
+    Query,
+}
+
 /// Stateless deterministic tokenizer.
 ///
 /// Call `tokenize_segment()` or `tokenize_all()` to produce normalized tokens.
@@ -51,18 +61,24 @@ impl SearchTokenizer {
     /// of which field it came from. Use [`tokenize_segment_no_prefix`] at query
     /// time so the user's partial term is looked up as an exact tag.
     pub fn tokenize_segment(&self, raw: &str) -> Vec<String> {
-        self.tokenize_segment_inner(raw, true)
+        self.tokenize_segment_inner(raw, TokenizeMode::Index)
     }
 
     /// Tokenize a single raw segment **without** prefix expansion.
     ///
     /// Used at query time: the user's partial term (e.g. `"loca"`) is looked up
     /// as an exact tag, matching the prefix tags stored at index time.
+    ///
+    /// 查询词不保留“整段”标签：索引把整段正文当作一个片段，正文中的复合词
+    /// （`gitlab-runner`、`docker-compose.yml`）只留下各组成部分，整词标签
+    /// 只有在该词独占一个片段时才存在。AND 语义下强制要求整词会让这类词永远
+    /// 查不到。只要整词被索引，其组成部分也一定被索引，因此只要求组成部分
+    /// 不会漏掉原本能命中的条目。没有任何组成部分留存时（如 `a-b`）才回退到整词。
     pub fn tokenize_segment_no_prefix(&self, raw: &str) -> Vec<String> {
-        self.tokenize_segment_inner(raw, false)
+        self.tokenize_segment_inner(raw, TokenizeMode::Query)
     }
 
-    fn tokenize_segment_inner(&self, raw: &str, with_prefixes: bool) -> Vec<String> {
+    fn tokenize_segment_inner(&self, raw: &str, mode: TokenizeMode) -> Vec<String> {
         if raw.is_empty() {
             return vec![];
         }
@@ -76,7 +92,8 @@ impl SearchTokenizer {
         let mut candidate_tokens: Vec<String> = Vec::new();
 
         // Preserve the normalized whole segment for identifier/path-like inputs.
-        if is_identifier_like {
+        // 仅索引侧保留；查询侧见 `tokenize_segment_no_prefix`。
+        if is_identifier_like && mode == TokenizeMode::Index {
             candidate_tokens.push(lowered.clone());
         }
 
@@ -109,10 +126,19 @@ impl SearchTokenizer {
         }
 
         // Step 7: Filter — drop single-character Latin tokens.
-        let filtered: Vec<String> = candidate_tokens
+        let mut filtered: Vec<String> = candidate_tokens
             .into_iter()
             .filter(|t| should_keep_token(t))
             .collect();
+
+        // 查询词的组成部分全部被过滤时，整词是唯一可查的标签。
+        if filtered.is_empty()
+            && is_identifier_like
+            && mode == TokenizeMode::Query
+            && should_keep_token(&lowered)
+        {
+            filtered.push(lowered.clone());
+        }
 
         // Step 8: Dedup and CJK bigrams.
         let mut result: Vec<String> = Vec::new();
@@ -148,9 +174,9 @@ impl SearchTokenizer {
         // `192.168.1.1:8080`) get the same expansion as URL/file fields.
         //
         // CJK tokens are skipped — they go through the bigram path instead.
-        // `with_prefixes` is set to false at query time so the user's partial
-        // term is looked up as an exact tag.
-        if with_prefixes {
+        // Query mode skips this so the user's partial term is looked up as an
+        // exact tag.
+        if mode == TokenizeMode::Index {
             let base_tokens: Vec<String> = result.clone();
             for tok in &base_tokens {
                 if cjk_bigrams(tok).is_empty() {
@@ -171,7 +197,7 @@ impl SearchTokenizer {
     /// Includes prefix expansion. Use for identifier-rich index fields (file names,
     /// paths, URLs). For query-time tokenization use [`tokenize_all_no_prefix`].
     pub fn tokenize_all(&self, raw_segments: &[String]) -> Vec<String> {
-        self.tokenize_all_inner(raw_segments, true)
+        self.tokenize_all_inner(raw_segments, TokenizeMode::Index)
     }
 
     /// Tokenize multiple raw segments without prefix expansion.
@@ -179,15 +205,15 @@ impl SearchTokenizer {
     /// Use at query time: the user's partial term (e.g. `"uniclip"`) is looked up
     /// as an exact token, matching the prefix tokens stored at index time.
     pub fn tokenize_all_no_prefix(&self, raw_segments: &[String]) -> Vec<String> {
-        self.tokenize_all_inner(raw_segments, false)
+        self.tokenize_all_inner(raw_segments, TokenizeMode::Query)
     }
 
-    fn tokenize_all_inner(&self, raw_segments: &[String], with_prefixes: bool) -> Vec<String> {
+    fn tokenize_all_inner(&self, raw_segments: &[String], mode: TokenizeMode) -> Vec<String> {
         let mut seen: HashSet<String> = HashSet::new();
         let mut result = Vec::new();
 
         for seg in raw_segments {
-            for tok in self.tokenize_segment_inner(seg, with_prefixes) {
+            for tok in self.tokenize_segment_inner(seg, mode) {
                 if seen.insert(tok.clone()) {
                     result.push(tok);
                 }
@@ -442,6 +468,55 @@ mod tests {
         let indexed = index_tags("uniclipboard release notes");
         assert!(matches(&indexed, "uniclip"));
         assert!(matches(&indexed, "release"));
+    }
+
+    // ─── 长文本中的复合词：按自然写法查询 ────────────────────────────────────
+
+    /// 查询按空白拆词后逐词分词；索引则把整段正文作为一个片段。复合词在正文里
+    /// 只留下各组成部分，查询时不能再强制要求“整词”标签，否则永远无法命中。
+    #[test]
+    fn compound_word_inside_longer_text_matches_its_natural_spelling() {
+        let indexed = index_tags("sudo systemctl restart gitlab-runner");
+        assert!(matches(&indexed, "gitlab-runner"));
+        assert!(matches(&indexed, "gitlab-run"), "partial compound word");
+        assert!(matches(&indexed, "systemctl"));
+    }
+
+    #[test]
+    fn separators_and_camel_case_inside_longer_text_match() {
+        let indexed = index_tags("rm -rf node_modules && open docker-compose.yml in src/lib");
+        assert!(matches(&indexed, "node_modules"));
+        assert!(matches(&indexed, "docker-compose.yml"));
+        assert!(matches(&indexed, "src/lib"));
+
+        let indexed = index_tags("then call getUserName before render");
+        assert!(matches(&indexed, "getUserName"));
+    }
+
+    #[test]
+    fn query_keeps_the_whole_word_when_no_part_survives() {
+        // `a-b` 的组成部分都是单个拉丁字符，会被过滤；此时整词是唯一可查的标签。
+        assert_eq!(query_tags("a-b"), ["a-b"]);
+        let indexed = index_tags("a-b");
+        assert!(matches(&indexed, "a-b"));
+    }
+
+    #[test]
+    fn query_for_a_compound_word_does_not_match_unrelated_text() {
+        let indexed = index_tags("sudo systemctl restart nginx");
+        assert!(!matches(&indexed, "gitlab-runner"));
+        // 只命中一部分组成词也不算匹配（AND 语义保持不变）。
+        let indexed = index_tags("restart the test runner");
+        assert!(!matches(&indexed, "gitlab-runner"));
+    }
+
+    #[test]
+    fn indexing_still_preserves_the_whole_segment() {
+        // 索引侧行为不变：整段仍然保留，文件名等整段即标识符的字段照常可查。
+        let indexed = index_tags("my-report.pdf");
+        assert!(indexed.contains("my-report.pdf"));
+        assert!(matches(&indexed, "my-report.pdf"));
+        assert!(matches(&indexed, "my-rep"), "prefix of the whole segment");
     }
 
     // ─── Long-token boundary (>32 chars, no separators) ─────────────────────

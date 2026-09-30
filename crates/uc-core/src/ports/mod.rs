@@ -97,7 +97,8 @@ pub use file_transfer::{
 pub use hidden_path::MarkHiddenPort;
 pub use host_event::{
     ClipboardHostEvent, ClipboardOriginKind, DeliveryHostEvent, EmitError, HostEvent,
-    HostEventEmitterPort, MembershipHostEvent, TransferHostEvent,
+    HostEventEmitterPort, MembershipHostEvent, SettingsHostEvent, SettingsSection,
+    TransferHostEvent,
 };
 pub use inbound_file_target::{ReserveInboundFileTargetPort, ResolveInboundSaveDirPort};
 pub use inbound_receive_commit::{

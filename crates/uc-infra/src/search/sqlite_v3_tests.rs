@@ -13,7 +13,7 @@ use uc_core::ports::search::search_index::SearchIndexPort;
 use uc_core::ports::security::current_profile::{CurrentProfileError, CurrentProfilePort};
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
 use uc_core::search::document::{ContentType, SearchDocument, SearchPosting};
-use uc_core::search::query::{QueryOperator, SearchQuery};
+use uc_core::search::query::{QueryOperator, SearchQuery, TagMatchMode};
 
 use super::search_key_derivation::term_tag;
 use super::{SqliteSearchIndex, V3SearchProtection, V3_INDEX_VERSION};
@@ -164,6 +164,7 @@ fn and_query(query_string: &str) -> SearchQuery {
         time_range: None,
         content_types: Vec::new(),
         tags: Vec::new(),
+        tag_match: TagMatchMode::Any,
         extensions: Vec::new(),
         source_devices: Vec::new(),
         limit: 50,
@@ -510,6 +511,171 @@ async fn paginated_v3_search_reuses_one_cold_catalog_without_changing_results() 
     vault.close();
     assert!(matches!(
         index.search(queries[0].clone()).await,
+        Err(uc_core::search::SearchError::SessionLocked)
+    ));
+}
+
+/// 单组 V3 保护的索引夹具：真实加密与 SQLite，用于按能力验证查询语义。
+struct V3Fixture {
+    index: SqliteSearchIndex,
+    protection: Arc<V3SearchProtection>,
+    vault: Arc<ProfileContentKeyVault>,
+    _directory: tempfile::TempDir,
+}
+
+async fn v3_fixture() -> V3Fixture {
+    let directory = tempfile::tempdir().unwrap();
+    let pool = init_db_pool(directory.path().join("search.sqlite").to_str().unwrap()).unwrap();
+    let session = Arc::new(InMemorySession::new());
+    let vault = Arc::new(ProfileContentKeyVault::new(
+        directory.path().join("vault"),
+        Arc::new(MemorySecureStorage::default()),
+        [0xA3; 16],
+    ));
+    let material = ready_material("space-c", "group-c", "key-c", 5, 0x43);
+    vault
+        .install_verified_space_material(&material)
+        .await
+        .unwrap();
+    activate(&session, &material);
+    let protection = Arc::new(V3SearchProtection::new(session, Arc::clone(&vault)));
+    let index = SqliteSearchIndex::new_v3(pool, Arc::new(FixedProfile), Arc::clone(&protection));
+    V3Fixture {
+        index,
+        protection,
+        vault,
+        _directory: directory,
+    }
+}
+
+async fn index_tagged(
+    fixture: &V3Fixture,
+    entry_id: &str,
+    active_time_ms: i64,
+    tags: Vec<uc_core::search::tag::TagId>,
+    terms: &[&str],
+) {
+    let mut doc = document(entry_id, &format!("preview of {entry_id}"));
+    doc.active_time_ms = active_time_ms;
+    doc.tags = tags;
+    fixture
+        .index
+        .index_entry(doc, postings(&fixture.protection, entry_id, terms).await)
+        .await
+        .unwrap();
+}
+
+/// 关键词路径同样支持标签“且”：关键词命中 + 必须同时携带两个标签。
+#[tokio::test]
+async fn keyword_search_honors_tag_match_all() {
+    use uc_core::search::tag::TagId;
+    let fixture = v3_fixture().await;
+    index_tagged(
+        &fixture,
+        "both",
+        1,
+        vec![TagId::link(), TagId::code()],
+        &["shared"],
+    )
+    .await;
+    index_tagged(&fixture, "link-only", 2, vec![TagId::link()], &["shared"]).await;
+    index_tagged(&fixture, "code-only", 3, vec![TagId::code()], &["shared"]).await;
+    index_tagged(
+        &fixture,
+        "other-term",
+        4,
+        vec![TagId::link(), TagId::code()],
+        &["else"],
+    )
+    .await;
+
+    let mut query = and_query("shared");
+    query.tags = vec![TagId::link(), TagId::code()];
+    assert_eq!(fixture.index.search(query.clone()).await.unwrap().total, 3);
+
+    query.tag_match = TagMatchMode::All;
+    let page = fixture.index.search(query.clone()).await.unwrap();
+    assert_eq!(page.total, 1);
+    assert_eq!(page.items[0].entry_id.to_string(), "both");
+    assert_eq!(fixture.index.count(query).await.unwrap(), 1);
+}
+
+/// 计数与搜索的 `total` 逐项一致，且不受分页字段影响。
+#[tokio::test]
+async fn count_matches_search_total_for_every_filter_shape() {
+    use uc_core::search::tag::TagId;
+    let fixture = v3_fixture().await;
+    for i in 0..7 {
+        let tags = if i % 2 == 0 {
+            vec![TagId::link()]
+        } else {
+            vec![]
+        };
+        index_tagged(&fixture, &format!("e{i}"), i, tags, &["shared"]).await;
+    }
+    let mut shapes = vec![and_query(""), and_query("shared"), and_query("absent")];
+    let mut tagged = and_query("");
+    tagged.tags = vec![TagId::link()];
+    shapes.push(tagged);
+    let mut all_mode = and_query("shared");
+    all_mode.tags = vec![TagId::link(), TagId::favorited()];
+    all_mode.tag_match = TagMatchMode::All;
+    shapes.push(all_mode);
+    for mut query in shapes {
+        query.limit = 2;
+        query.offset = 1;
+        let total = fixture.index.search(query.clone()).await.unwrap().total;
+        assert_eq!(fixture.index.count(query).await.unwrap(), total);
+    }
+}
+
+/// 按日统计：区间左闭右开，区间外的条目不计入，空桶为零。
+#[tokio::test]
+async fn daily_counts_bucket_entries_by_half_open_ranges() {
+    let fixture = v3_fixture().await;
+    for (id, time) in [
+        ("before", 99),
+        ("a1", 100),
+        ("a2", 199),
+        ("b1", 200),
+        ("d1", 399),
+        ("after", 400),
+    ] {
+        index_tagged(&fixture, id, time, vec![], &["x"]).await;
+    }
+    let counts = fixture
+        .index
+        .count_by_active_time(&[100, 200, 300, 400])
+        .await
+        .unwrap();
+    assert_eq!(counts, vec![2, 1, 1]);
+}
+
+#[tokio::test]
+async fn daily_counts_reject_unsorted_or_too_short_boundaries() {
+    let fixture = v3_fixture().await;
+    for boundaries in [&[][..], &[5][..], &[5, 5][..], &[9, 3][..]] {
+        assert!(matches!(
+            fixture.index.count_by_active_time(boundaries).await,
+            Err(uc_core::search::SearchError::InvalidQuery(_))
+        ));
+    }
+}
+
+/// 会话锁定时，计数和按日统计与搜索一样返回 SessionLocked，不泄露条目数量。
+#[tokio::test]
+async fn count_and_daily_counts_fail_closed_when_the_session_is_locked() {
+    let fixture = v3_fixture().await;
+    index_tagged(&fixture, "secret", 150, vec![], &["shared"]).await;
+    fixture.vault.close();
+    for query in [and_query(""), and_query("shared")] {
+        assert!(matches!(
+            fixture.index.count(query).await,
+            Err(uc_core::search::SearchError::SessionLocked)
+        ));
+    }
+    assert!(matches!(
+        fixture.index.count_by_active_time(&[100, 200]).await,
         Err(uc_core::search::SearchError::SessionLocked)
     ));
 }

@@ -2,6 +2,7 @@ use super::model::{SelectionPolicyVersion, SelectionTarget};
 use crate::{
     clipboard::{
         ClipboardSelection, ObservedClipboardRepresentation, PolicyError, SystemClipboardSnapshot,
+        IMAGE_FROM_FILE_FORMAT,
     },
     ids::RepresentationId,
     ports::SelectRepresentationPolicyPort,
@@ -97,7 +98,7 @@ impl SelectRepresentationPolicyV1 {
             // wins, matching the "small inline preview, large via thumbnail"
             // contract enforced at capture time.
             (SelectionTarget::UiPreview, RepKind::Image)
-                if rep.format_id.eq_ignore_ascii_case("image-from-file")
+                if rep.format_id.eq_ignore_ascii_case(IMAGE_FROM_FILE_FORMAT)
                     && rep.size_bytes() <= INLINE_PREVIEW_MAX_BYTES =>
             {
                 100
@@ -121,7 +122,7 @@ impl SelectRepresentationPolicyV1 {
             //   里还有任何真实可用 rep，它都不会被选成 paste；只有当整个 snapshot
             //   退化到只剩 image-from-file 时才回退到它（避免 select_one 返回 None）。
             (SelectionTarget::DefaultPaste, RepKind::Image)
-                if rep.format_id.eq_ignore_ascii_case("image-from-file") =>
+                if rep.format_id.eq_ignore_ascii_case(IMAGE_FROM_FILE_FORMAT) =>
             {
                 30
             }

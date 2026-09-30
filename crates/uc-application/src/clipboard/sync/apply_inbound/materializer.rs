@@ -21,7 +21,7 @@ use url::Url;
 use uc_core::clipboard::{
     ContentHash, EntryFileSet, EntryFileSetLine, EntryFileSetLineKind, FileDisplayMetadata,
     FileDisplayMetadataEntry, FileSetMemberKind, FileSetMemberLocation, HashAlgorithm,
-    FILE_DISPLAY_METADATA_FORMAT, FILE_DISPLAY_METADATA_MIME,
+    FILE_DISPLAY_METADATA_FORMAT, FILE_DISPLAY_METADATA_MIME, IMAGE_FROM_FILE_FORMAT,
 };
 use uc_core::ids::{DeviceId, EntryId, FormatId, RepresentationId};
 use uc_core::ports::atomic_publish::{AtomicPublishPort, PublishError};
@@ -1323,7 +1323,7 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                     .representations
                     .push(ObservedClipboardRepresentation::new_local_file(
                         RepresentationId::new(),
-                        FormatId::from("image-from-file"),
+                        FormatId::from(IMAGE_FROM_FILE_FORMAT),
                         Some(MimeType(image_mime.to_string())),
                         path.clone(),
                         meta.len(),

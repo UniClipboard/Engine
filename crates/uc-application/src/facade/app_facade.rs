@@ -772,6 +772,38 @@ impl AppFacade {
         self.search.query(input).await
     }
 
+    /// 批量统计与搜索同过滤语义的匹配数。加密会话未就绪时失败关闭，不泄露数量。
+    pub async fn search_count(
+        &self,
+        inputs: Vec<SearchQueryInput>,
+    ) -> Result<Vec<u32>, SearchFacadeError> {
+        self.require_search_session().await?;
+        self.search.count(inputs).await
+    }
+
+    /// 按调用方给出的桶边界统计条目数。加密会话未就绪时失败关闭，不泄露数量。
+    pub async fn search_daily_counts(
+        &self,
+        boundaries_ms: Vec<i64>,
+    ) -> Result<Vec<u32>, SearchFacadeError> {
+        self.require_search_session().await?;
+        self.search.daily_counts(boundaries_ms).await
+    }
+
+    /// 聚合查询的会话前置条件：索引即使仍持有后台可用的密钥，用户主动锁定后也不得回答数量类问题。
+    async fn require_search_session(&self) -> Result<(), SearchFacadeError> {
+        let state = self
+            .space
+            .query_space_access_state()
+            .await
+            .map_err(SearchFacadeError::SessionStateUnavailable)?;
+        if state.session_ready {
+            Ok(())
+        } else {
+            Err(SearchFacadeError::SessionLocked)
+        }
+    }
+
     pub async fn search_tags(
         &self,
     ) -> Result<Vec<crate::facade::SearchTagView>, SearchFacadeError> {
