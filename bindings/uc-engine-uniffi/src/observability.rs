@@ -3,15 +3,16 @@ use std::time::Duration;
 
 use uc_engine::observability::{
     DeploymentEnvironment, LocalLogConfig, ObservabilityConfig, ObservabilityInstallError,
-    ObservabilityInstallOutcome, ObservabilityResource, ObservabilitySetupStatus,
-    ObservabilitySignalResult, OperatingSystem, OtlpHttpConfig, ProcessObservabilityHandle,
-    ProcessObservabilityRuntime, SecretHeaderValue,
+    ObservabilityInstallOutcome, ObservabilityRemoteSetupFailure, ObservabilityResource,
+    ObservabilitySetupStatus, ObservabilitySignalResult, OperatingSystem, OtlpHttpConfig,
+    ProcessObservabilityHandle, ProcessObservabilityRuntime, SecretHeaderValue,
 };
 use uc_engine::HostDirectories;
 
 use crate::{
     BindingCollectorConfig, BindingDeploymentEnvironment, BindingError, BindingObservabilityConfig,
-    BindingObservabilityFlushSummary, BindingObservabilityHealth, BindingObservabilitySetup,
+    BindingObservabilityFlushSummary, BindingObservabilityHealth,
+    BindingObservabilityRemoteSetupFailure, BindingObservabilitySetup,
     BindingObservabilitySetupStatus, BindingObservabilityShutdownSummary,
     BindingObservabilitySignalResult,
 };
@@ -48,6 +49,7 @@ pub(crate) fn health() -> Result<BindingObservabilityHealth, BindingError> {
         .health();
     Ok(BindingObservabilityHealth {
         remote: map_setup_status(health.remote),
+        remote_setup_failure: health.remote_setup_failure.map(map_remote_setup_failure),
         local_file: map_setup_status(health.local_file),
         dropped_local_records: health.dropped_local_records,
         dropped_remote_spans: health.dropped_remote_spans,
@@ -170,6 +172,22 @@ fn map_setup_status(status: ObservabilitySetupStatus) -> BindingObservabilitySet
         ObservabilitySetupStatus::Disabled => BindingObservabilitySetupStatus::Disabled,
         ObservabilitySetupStatus::Ready => BindingObservabilitySetupStatus::Ready,
         ObservabilitySetupStatus::Unavailable => BindingObservabilitySetupStatus::Unavailable,
+    }
+}
+
+fn map_remote_setup_failure(
+    failure: ObservabilityRemoteSetupFailure,
+) -> BindingObservabilityRemoteSetupFailure {
+    match failure {
+        ObservabilityRemoteSetupFailure::HttpClient => {
+            BindingObservabilityRemoteSetupFailure::HttpClient
+        }
+        ObservabilityRemoteSetupFailure::TraceExporter => {
+            BindingObservabilityRemoteSetupFailure::TraceExporter
+        }
+        ObservabilityRemoteSetupFailure::LogExporter => {
+            BindingObservabilityRemoteSetupFailure::LogExporter
+        }
     }
 }
 

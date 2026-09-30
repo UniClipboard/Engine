@@ -15,8 +15,10 @@ use crate::config::ObservabilityConfig;
 use crate::filter::local_sink_enabled;
 use crate::local_file::LocalFileRuntime;
 use crate::module_log::{is_engine_source, module_metadata, ModuleLogLayer, ModuleLogStats};
+use crate::remote_health::record_remote_setup_degraded;
 use crate::status::{
-    FlushSummary, ObservabilityHealth, SetupStatus, ShutdownSummary, SignalResult,
+    FlushSummary, ObservabilityHealth, RemoteSetupFailure, SetupStatus, ShutdownSummary,
+    SignalResult,
 };
 use crate::subscriber::{local_health_layer, system_layer};
 use crate::telemetry::TelemetryRuntime;
@@ -64,6 +66,9 @@ impl ProcessObservabilityRuntime {
             .set(Arc::clone(&state))
             // 错误只表示全局状态已被设置（或携带待写入的状态值），没有其他诊断信息。
             .map_err(|_| InstallError::AlreadyInstalled)?;
+        if let Some(failure) = state.health.remote_setup_failure {
+            record_remote_setup_degraded(failure);
+        }
         state.telemetry.recording.checkpoint(
             "diagnostics.run.started",
             serde_json::json!({ "capture_mode": "standard" }),
@@ -369,7 +374,7 @@ fn build_runtime(
         None => (SetupStatus::Disabled, None),
     };
 
-    let (telemetry, remote) = TelemetryRuntime::new(&config, local_file.clone());
+    let (telemetry, remote_setup) = TelemetryRuntime::new(&config, local_file.clone());
     let telemetry_accepting = telemetry.accepting();
     layers.extend(telemetry.layers());
     layers.push(system_layer());
@@ -414,7 +419,8 @@ fn build_runtime(
         config,
         telemetry,
         health: ObservabilityHealth {
-            remote,
+            remote: remote_setup.status,
+            remote_setup_failure: remote_setup.failure,
             local_file: local_file_status,
             dropped_local_records: 0,
             dropped_remote_spans: 0,
@@ -765,6 +771,39 @@ mod tests {
         CaptureEndReason, DeploymentEnvironment, LocalCaptureMode, LocalLogConfig,
         ObservabilityResource, OperatingSystem,
     };
+
+    #[test]
+    fn remote_setup_failure_is_written_to_the_local_sink_as_a_closed_category() {
+        let directory = tempfile::tempdir().expect("日志目录");
+        let config = ObservabilityConfig::new(
+            ObservabilityResource::new(
+                "1.1.0",
+                DeploymentEnvironment::Test,
+                OperatingSystem::Macos,
+                "test",
+            )
+            .expect("资源配置"),
+        )
+        .with_local_logs(LocalLogConfig::new(directory.path()));
+        let (state, subscriber) = build_runtime(config, Vec::new());
+        let handle = ProcessObservabilityHandle { state };
+
+        tracing::subscriber::with_default(subscriber, || {
+            record_remote_setup_degraded(RemoteSetupFailure::TraceExporter);
+        });
+        assert_eq!(
+            handle.shutdown(Duration::from_secs(2)).logs,
+            SignalResult::Completed
+        );
+
+        let written = crate::managed_log_files(directory.path())
+            .expect("日志文件")
+            .into_iter()
+            .map(|path| std::fs::read_to_string(path).expect("读取日志"))
+            .collect::<String>();
+        assert!(written.contains("uc.observability.setup_degraded"));
+        assert!(written.contains("trace_exporter"));
+    }
 
     #[test]
     fn shutdown_rejects_capture_that_passed_the_outer_check_before_closing() {

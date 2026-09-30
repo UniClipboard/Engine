@@ -111,6 +111,7 @@ fn process_observability_is_host_owned_reused_and_lifecycle_safe() {
     let _ = flush_process_observability(25).expect("bounded flush");
     let health = query_process_observability_health().expect("observable process health");
     assert!(health.failed_remote_span_batches > 0 || health.failed_remote_log_batches > 0);
+    assert_eq!(health.remote_setup_failure, None);
     let _ = shutdown_process_observability(250).expect("process shutdown");
     let after_shutdown = flush_process_observability(25).expect("closed runtime summary");
     assert_eq!(

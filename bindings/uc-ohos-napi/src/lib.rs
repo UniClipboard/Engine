@@ -69,6 +69,7 @@ pub struct OhObservabilitySetup {
 #[napi(object)]
 pub struct OhObservabilityHealth {
     pub remote: String,
+    pub remote_setup_failure: Option<String>,
     pub local_file: String,
     pub dropped_local_records: f64,
     pub dropped_remote_spans: f64,

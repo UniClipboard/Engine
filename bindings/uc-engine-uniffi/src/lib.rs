@@ -223,6 +223,14 @@ pub enum BindingObservabilitySetupStatus {
     Unavailable,
 }
 
+/// 远端导出器构建失败的阶段；只有固定分类，不含 endpoint 或错误正文。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum BindingObservabilityRemoteSetupFailure {
+    HttpClient,
+    TraceExporter,
+    LogExporter,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct BindingObservabilitySetup {
     pub reused: bool,
@@ -234,6 +242,7 @@ pub struct BindingObservabilitySetup {
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct BindingObservabilityHealth {
     pub remote: BindingObservabilitySetupStatus,
+    pub remote_setup_failure: Option<BindingObservabilityRemoteSetupFailure>,
     pub local_file: BindingObservabilitySetupStatus,
     pub dropped_local_records: u64,
     pub dropped_remote_spans: u64,

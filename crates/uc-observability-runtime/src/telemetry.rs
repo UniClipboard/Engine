@@ -23,7 +23,7 @@ use crate::remote_health::{
     RemoteHealthCounters, RemoteHealthSnapshot, RemoteSubmissionControl, TrackedLogProcessor,
     TrackedSpanProcessor,
 };
-use crate::status::{SetupStatus, SignalResult};
+use crate::status::{RemoteSetupFailure, SetupStatus, SignalResult};
 use crate::subscriber::RuntimeLayer;
 #[cfg(test)]
 use crate::{DeploymentEnvironment, ObservabilityResource, OperatingSystem};
@@ -47,31 +47,45 @@ impl TelemetryRuntime {
     pub(crate) fn new(
         config: &ObservabilityConfig,
         local_file: Option<Arc<LocalFileRuntime>>,
-    ) -> (Self, SetupStatus) {
+    ) -> (Self, RemoteSetup) {
+        Self::new_with(config, local_file, Self::remote)
+    }
+
+    fn new_with(
+        config: &ObservabilityConfig,
+        local_file: Option<Arc<LocalFileRuntime>>,
+        build_remote: impl FnOnce(
+            Resource,
+            &OtlpHttpConfig,
+            Arc<AtomicBool>,
+            Option<Arc<LocalFileRuntime>>,
+            Arc<LocalRecordingState>,
+        ) -> Result<Self, RemoteSetupFailure>,
+    ) -> (Self, RemoteSetup) {
         let resource = resource(config);
         let accepting = Arc::new(AtomicBool::new(true));
         let recording = Arc::new(LocalRecordingState::new(
             &config.resource,
             local_file.as_ref(),
         ));
-        match config.remote.as_ref().and_then(|remote| {
-            Self::remote(
-                resource.clone(),
-                remote,
-                Arc::clone(&accepting),
-                local_file.clone(),
-                Arc::clone(&recording),
-            )
-            .ok()
-        }) {
-            Some(runtime) => (runtime, SetupStatus::Ready),
-            None if config.remote.is_some() => (
+        let Some(remote) = config.remote.as_ref() else {
+            let runtime = Self::local(resource, accepting, local_file, recording);
+            return (runtime, RemoteSetup::status(SetupStatus::Disabled));
+        };
+        match build_remote(
+            resource.clone(),
+            remote,
+            Arc::clone(&accepting),
+            local_file.clone(),
+            Arc::clone(&recording),
+        ) {
+            Ok(runtime) => (runtime, RemoteSetup::status(SetupStatus::Ready)),
+            Err(failure) => (
                 Self::local(resource, accepting, local_file, recording),
-                SetupStatus::Unavailable,
-            ),
-            None => (
-                Self::local(resource, accepting, local_file, recording),
-                SetupStatus::Disabled,
+                RemoteSetup {
+                    status: SetupStatus::Unavailable,
+                    failure: Some(failure),
+                },
             ),
         }
     }
@@ -169,7 +183,7 @@ impl TelemetryRuntime {
         accepting: Arc<AtomicBool>,
         local_file: Option<Arc<LocalFileRuntime>>,
         recording: Arc<LocalRecordingState>,
-    ) -> Result<Self, ()> {
+    ) -> Result<Self, RemoteSetupFailure> {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let headers = config
             .headers()
@@ -179,8 +193,8 @@ impl TelemetryRuntime {
         let client = reqwest::blocking::Client::builder()
             .timeout(config.timeout())
             .build()
-            // 观测运行时自身初始化失败只降级为 Unavailable 状态；此时日志通道尚未建立，来源无处记录。
-            .map_err(|_| ())?;
+            // 此时日志通道尚未建立；只保留固定阶段分类，由安装完成后的 health 事件与 `ObservabilityHealth` 报告，不携带底层错误正文。
+            .map_err(|_| RemoteSetupFailure::HttpClient)?;
         let span_exporter = opentelemetry_otlp::SpanExporter::builder()
             .with_http()
             .with_http_client(client.clone())
@@ -189,8 +203,8 @@ impl TelemetryRuntime {
             .with_protocol(Protocol::HttpBinary)
             .with_headers(headers.clone())
             .build()
-            // 观测运行时自身初始化失败只降级为 Unavailable 状态；此时日志通道尚未建立，来源无处记录。
-            .map_err(|_| ())?;
+            // 此时日志通道尚未建立；只保留固定阶段分类，由安装完成后的 health 事件与 `ObservabilityHealth` 报告，不携带底层错误正文。
+            .map_err(|_| RemoteSetupFailure::TraceExporter)?;
         let log_exporter = opentelemetry_otlp::LogExporter::builder()
             .with_http()
             .with_http_client(client)
@@ -199,8 +213,8 @@ impl TelemetryRuntime {
             .with_protocol(Protocol::HttpBinary)
             .with_headers(headers)
             .build()
-            // 观测运行时自身初始化失败只降级为 Unavailable 状态；此时日志通道尚未建立，来源无处记录。
-            .map_err(|_| ())?;
+            // 此时日志通道尚未建立；只保留固定阶段分类，由安装完成后的 health 事件与 `ObservabilityHealth` 报告，不携带底层错误正文。
+            .map_err(|_| RemoteSetupFailure::LogExporter)?;
         let health = RemoteHealthCounters::default();
         let submission = RemoteSubmissionControl::new(health.clone());
         Ok(Self {
@@ -271,6 +285,22 @@ fn signal_result<T>(result: Result<T, opentelemetry_sdk::error::OTelSdkError>) -
     }
 }
 
+/// 远端导出器装配结果：状态加上失败阶段（仅失败时存在）。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RemoteSetup {
+    pub(crate) status: SetupStatus,
+    pub(crate) failure: Option<RemoteSetupFailure>,
+}
+
+impl RemoteSetup {
+    fn status(status: SetupStatus) -> Self {
+        Self {
+            status,
+            failure: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,5 +312,61 @@ mod tests {
         )));
 
         assert_eq!(result, SignalResult::TimedOut);
+    }
+    use crate::{
+        DeploymentEnvironment, ObservabilityConfig, ObservabilityResource, OperatingSystem,
+    };
+
+    fn config_with_remote() -> ObservabilityConfig {
+        let remote = OtlpHttpConfig::new_loopback(
+            "http://127.0.0.1:4318/v1/traces",
+            "http://127.0.0.1:4318/v1/logs",
+        )
+        .expect("远端配置");
+        ObservabilityConfig::new(
+            ObservabilityResource::new(
+                "1.1.0",
+                DeploymentEnvironment::Test,
+                OperatingSystem::Macos,
+                "test",
+            )
+            .expect("资源配置"),
+        )
+        .with_remote(remote)
+    }
+
+    #[test]
+    fn a_failed_remote_build_degrades_to_local_and_keeps_the_failing_stage() {
+        for failure in [
+            RemoteSetupFailure::HttpClient,
+            RemoteSetupFailure::TraceExporter,
+            RemoteSetupFailure::LogExporter,
+        ] {
+            let (_runtime, setup) =
+                TelemetryRuntime::new_with(&config_with_remote(), None, |_, _, _, _, _| {
+                    Err(failure)
+                });
+
+            assert_eq!(setup.status, SetupStatus::Unavailable);
+            assert_eq!(setup.failure, Some(failure));
+        }
+    }
+
+    #[test]
+    fn without_remote_configuration_there_is_no_failure_stage() {
+        let config = ObservabilityConfig::new(
+            ObservabilityResource::new(
+                "1.1.0",
+                DeploymentEnvironment::Test,
+                OperatingSystem::Macos,
+                "test",
+            )
+            .expect("资源配置"),
+        );
+
+        let (_runtime, setup) = TelemetryRuntime::new(&config, None);
+
+        assert_eq!(setup.status, SetupStatus::Disabled);
+        assert_eq!(setup.failure, None);
     }
 }

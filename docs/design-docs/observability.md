@@ -160,6 +160,9 @@ handler 创建。强行交给 Engine 会迫使 Core/Application message 增加 c
 容量门与 exporter wrapper 只统计发送前丢弃总数和最终发送失败，不复制官方批处理、线程或刷新逻辑。发送前丢弃包括格式拒绝、
 锁争用、队列已满和运行时已关闭，首个原因使用不同固定分类记录；累计字段不冒充单独的队列满计数。`health()` 还返回失败批次数
 和本地文件丢弃数；每类首次故障写一条无正文的本地健康记录，且不递归进入远程 exporter。
+远端导出器构建失败（`http_client`、`trace_exporter`、`log_exporter` 三个固定阶段之一）时，`remote` 为 `Unavailable`，`health()` 的
+`remote_setup_failure` 携带该阶段，并在全局 subscriber 安装后写一条 `uc.observability.setup_degraded` 健康记录（`error.type` 为同一固定阶段）；
+不含 endpoint、header 或底层错误正文。本地目录失败没有本地 sink，只体现在 `local_file` 状态。
 直接 Rust、Apple/Android UniFFI 与 HarmonyOS N-API 都公开同一份当前累计健康查询；初始安装结果只表示安装时状态，不能代替
 运行一段时间后的查询。
 

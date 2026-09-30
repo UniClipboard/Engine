@@ -72,6 +72,7 @@ export interface OhObservabilitySetup {
 
 export interface OhObservabilityHealth {
   remote: 'disabled' | 'ready' | 'unavailable'
+  remoteSetupFailure?: 'http_client' | 'trace_exporter' | 'log_exporter'
   localFile: 'disabled' | 'ready' | 'unavailable'
   droppedLocalRecords: number
   droppedRemoteSpans: number

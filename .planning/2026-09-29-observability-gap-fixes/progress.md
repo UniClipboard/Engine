@@ -25,3 +25,7 @@ All ten items implemented and verified (fmt, workspace check default and lan-com
 - Tested: #46 (settings failure source), #55 (shared `remove_work_directory_best_effort`, no path in logs).
 - Compile and adjacent tests only: #47, #48, #50, #51, #53, #54 (need real session, iroh connection or vault fixtures); #49, #52 are trivial refactors.
 - Deferred: #44 (needs a contract change: setup_degraded health event and `ObservabilityHealth` reason).
+
+## #44 (done)
+
+Remote exporter build failure now yields `RemoteSetupFailure` (http_client/trace_exporter/log_exporter) in `ObservabilityHealth.remote_setup_failure`, exposed by both bindings, plus one `uc.observability.setup_degraded` health event after the subscriber is installed. Tested via an injectable builder and a real local sink; the install-time emit call is not separately tested (process-global).

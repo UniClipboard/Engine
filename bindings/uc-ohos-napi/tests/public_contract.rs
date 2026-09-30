@@ -44,6 +44,7 @@ async fn process_observability_health_is_public_and_current() {
     assert_eq!(health.dropped_remote_logs, 0.0);
     assert_eq!(health.failed_remote_span_batches, 0.0);
     assert_eq!(health.failed_remote_log_batches, 0.0);
+    assert_eq!(health.remote_setup_failure, None);
 
     use uc_ohos_napi::*;
     register_host_diagnostic_source(
@@ -96,6 +97,7 @@ fn typescript_contract_exposes_process_observability_health() {
         "droppedRemoteLogs: number",
         "failedRemoteSpanBatches: number",
         "failedRemoteLogBatches: number",
+        "remoteSetupFailure?:",
         "queryProcessObservabilityHealth(): OhObservabilityHealth",
     ] {
         assert!(
