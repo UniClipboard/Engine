@@ -14,3 +14,6 @@
   `membership_maintenance_round`、`active_clipboard_worker`、`mobile_worker`；共享日志捕获辅助放在 `uc-testkit::log_capture`。
   验证：`cargo test --workspace` 3981 通过，失败仅为基线已有的 upgrade-matrix 与崩溃恢复偶发；直接日志宏检查为 0。
   下一步：P1（#16-#45）与 P2（#46-#55）。
+- 2026-09-30：P1 完成 #16-#43、#45（#44 需要改观测合同，暂缓）。新增任务类别 `engine_startup`、`outbound_progress_translator`；
+  新字段 `rollback_target`、`recovery_state`、`restart_required`、`can_submit_passphrase`、`evicted_count`、`max_bytes`。
+  无专门日志测试的项：#25、#29、#30、#32、#37（需要真实 Engine 多线程运行或真实 iroh 连接）。下一步：P2（#46-#55）。
