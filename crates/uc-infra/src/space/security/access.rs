@@ -1136,6 +1136,10 @@ impl RuntimeSpaceAccessAdapter {
                         })?;
                     if base.state().epoch() < record.previous_epoch() {
                         if rebuilding_prepared {
+                            uc_warn!(
+                                reason = "epoch_regressed",
+                                "revocation moved to recovery required"
+                            );
                             record = repository
                                 .resolve_prepared_revocation(
                                     record.revocation_id(),
@@ -1158,6 +1162,10 @@ impl RuntimeSpaceAccessAdapter {
                     ) {
                         Ok(active) => active,
                         Err(_) if rebuilding_prepared => {
+                            uc_warn!(
+                                reason = "mls_state_unreadable",
+                                "revocation moved to recovery required"
+                            );
                             record = repository
                                 .resolve_prepared_revocation(
                                     record.revocation_id(),
@@ -1535,6 +1543,10 @@ impl RuntimeSpaceAccessAdapter {
                 Ok(true) => still_in_group.push(lost_device_id.clone()),
                 Ok(false) => already_absent.push(lost_device_id.clone()),
                 Err(_) => {
+                    uc_warn!(
+                        reason = "mls_state_unreadable",
+                        "revocation moved to recovery required"
+                    );
                     stage.transition_to(RevocationStatus::RecoveryRequired, now_ms)?;
                     let record = repository
                         .commit_revocation_recovery(&stage, &material)
@@ -6032,6 +6044,8 @@ mod admission_tests {
 
     #[tokio::test]
     async fn permanent_loss_recovery_requires_group_rebuild_when_current_group_is_unreadable() {
+        let logs = crate::test_log_capture::CapturedLogs::default();
+        let _log_guard = logs.install();
         let directory = tempdir().unwrap();
         let space_id = SpaceId::from("corrupt-recovery-space");
         let mut record = RevocationRecord::prepare_with_recipients(
@@ -6113,6 +6127,9 @@ mod admission_tests {
 
         assert_eq!(result.status(), Some(RevocationStatus::RecoveryRequired));
         assert!(result.pending_recipient_device_ids().is_empty());
+        assert_eq!(logs.count("revocation moved to recovery required"), 1);
+        assert!(logs.output().contains("reason=\"mls_state_unreadable\""));
+        assert!(!logs.output().contains("lost-device"));
     }
 
     #[tokio::test]

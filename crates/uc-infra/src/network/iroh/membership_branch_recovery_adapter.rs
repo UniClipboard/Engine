@@ -8,15 +8,17 @@ use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uc_application::deps::{
-    BeginMembershipBranchRecoveryInput, IssueMembershipBranchRecoveryInput,
-    IssueMembershipBranchRecoveryPort, MembershipBranchRecoveryChannelError,
-    MembershipBranchRecoveryChannelPort, MembershipBranchRecoveryCommit,
-    MembershipBranchRecoveryRequest,
+    BeginMembershipBranchRecoveryInput, IssueMembershipBranchRecoveryError,
+    IssueMembershipBranchRecoveryInput, IssueMembershipBranchRecoveryPort,
+    MembershipBranchRecoveryChannelError, MembershipBranchRecoveryChannelPort,
+    MembershipBranchRecoveryCommit, MembershipBranchRecoveryRequest,
 };
 use uc_core::ids::DeviceId;
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::PeerAddressRepositoryPort;
-use uc_observability_contract::{diagnostics::connectivity::InboundPeerProtocol, uc_debug};
+use uc_observability_contract::{
+    diagnostics::connectivity::InboundPeerProtocol, error_source::io_error_kind, uc_debug, uc_warn,
+};
 
 use iroh::{Endpoint, EndpointAddr};
 
@@ -213,7 +215,7 @@ impl IrohMembershipBranchRecoveryHandler {
                 .await
             {
                 Ok(group_info) => MembershipBranchRecoveryWireMessage::group_info(group_info),
-                Err(_) => MembershipBranchRecoveryWireMessage::rejected(),
+                Err(error) => rejected_after("begin", &error),
             },
             MembershipBranchRecoveryWireMessage::SubmitExternalCommit {
                 conflict_id,
@@ -233,7 +235,7 @@ impl IrohMembershipBranchRecoveryHandler {
                 .await
             {
                 Ok(package) => MembershipBranchRecoveryWireMessage::recovery_package(package),
-                Err(_) => MembershipBranchRecoveryWireMessage::rejected(),
+                Err(error) => rejected_after("issue", &error),
             },
             _ => MembershipBranchRecoveryWireMessage::rejected(),
         }
@@ -261,8 +263,15 @@ impl ProtocolHandler for IrohMembershipBranchRecoveryHandler {
             .await
         {
             Ok(source_device_id) => match read_request(&mut receive).await {
-                Some(message) => self.dispatch(source_device_id, message).await,
-                None => MembershipBranchRecoveryWireMessage::rejected(),
+                Ok(message) => self.dispatch(source_device_id, message).await,
+                Err(stage) => {
+                    uc_debug!(
+                        stage = stage,
+                        error_kind = "request_rejected",
+                        "membership branch recovery request could not be read"
+                    );
+                    MembershipBranchRecoveryWireMessage::rejected()
+                }
             },
             Err(rejection) => {
                 record_inbound_rejection(InboundPeerProtocol::MembershipBranchRecovery, rejection);
@@ -274,23 +283,50 @@ impl ProtocolHandler for IrohMembershipBranchRecoveryHandler {
     }
 }
 
+/// 读取一条恢复请求；失败时返回固定的阶段名，供对端可触发的拒绝记录使用。
 async fn read_request(
     receive: &mut iroh::endpoint::RecvStream,
-) -> Option<MembershipBranchRecoveryWireMessage> {
-    let length = tokio::time::timeout(IO_TIMEOUT, receive.read_u32())
-        .await
-        .ok()?
-        .ok()? as usize;
+) -> Result<MembershipBranchRecoveryWireMessage, &'static str> {
+    let length = match tokio::time::timeout(IO_TIMEOUT, receive.read_u32()).await {
+        Ok(Ok(length)) => length as usize,
+        _ => return Err("request_read"),
+    };
     if length == 0 || length > MAX_RECOVERY_FRAME_SIZE {
-        return None;
+        return Err("request_size");
     }
-    let bytes = tokio::time::timeout(IO_TIMEOUT, receive.read_to_end(length))
-        .await
-        .ok()?
-        .ok()?;
-    (bytes.len() == length)
-        .then(|| decode(&bytes).ok())
-        .flatten()
+    let bytes = match tokio::time::timeout(IO_TIMEOUT, receive.read_to_end(length)).await {
+        Ok(Ok(bytes)) if bytes.len() == length => bytes,
+        _ => return Err("request_read"),
+    };
+    decode(&bytes).map_err(|_| "request_decode")
+}
+
+/// sponsor 侧把签发端失败折叠成对外的 Rejected 之前留下本地记录：
+/// 对端可触发的正常拒绝只记 DEBUG，本机不可用或状态损坏记 WARN。
+fn rejected_after(
+    stage: &'static str,
+    error: &IssueMembershipBranchRecoveryError,
+) -> MembershipBranchRecoveryWireMessage {
+    match error {
+        IssueMembershipBranchRecoveryError::Rejected { .. } => uc_debug!(
+            stage = stage,
+            error_kind = "rejected",
+            "membership branch recovery request rejected by the issuer"
+        ),
+        IssueMembershipBranchRecoveryError::Unavailable { .. } => uc_warn!(
+            stage = stage,
+            error_kind = "issuer_unavailable",
+            io_error_kind = io_error_kind(error),
+            "membership branch recovery issuer unavailable"
+        ),
+        IssueMembershipBranchRecoveryError::Corrupt { .. } => uc_warn!(
+            stage = stage,
+            error_kind = "issuer_corrupt",
+            io_error_kind = io_error_kind(error),
+            "membership branch recovery issuer state is corrupt"
+        ),
+    }
+    MembershipBranchRecoveryWireMessage::rejected()
 }
 
 async fn write_response(
@@ -313,5 +349,35 @@ async fn write_response(
         ) {
             uc_debug!(stage = "response_confirmation", "成员分支恢复响应未获确认");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_log_capture::CapturedLogs;
+
+    #[test]
+    fn issuer_failures_are_recorded_by_kind_before_becoming_a_plain_rejection() {
+        let logs = CapturedLogs::default();
+        let _guard = logs.install();
+        let cause = || anyhow::anyhow!("PRIVATE_ISSUER_DETAIL");
+
+        for error in [
+            IssueMembershipBranchRecoveryError::Rejected { source: cause() },
+            IssueMembershipBranchRecoveryError::Unavailable { source: cause() },
+            IssueMembershipBranchRecoveryError::Corrupt { source: cause() },
+        ] {
+            assert!(matches!(
+                rejected_after("issue", &error),
+                MembershipBranchRecoveryWireMessage::Rejected { .. }
+            ));
+        }
+
+        assert_eq!(logs.count("rejected by the issuer"), 1);
+        assert_eq!(logs.count("issuer unavailable"), 1);
+        assert_eq!(logs.count("issuer state is corrupt"), 1);
+        assert!(logs.output().contains("stage=\"issue\""));
+        assert!(!logs.output().contains("PRIVATE"));
     }
 }
