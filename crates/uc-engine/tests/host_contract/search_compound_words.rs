@@ -53,6 +53,7 @@ async fn search(engine: &Engine, query: &str) -> Vec<String> {
             extensions: None,
             source_devices: None,
             tags: None,
+            tag_match: None,
             limit: 50,
             offset: 0,
         }))
