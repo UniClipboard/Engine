@@ -35,7 +35,7 @@
 
 ## local debug
 
-共 1217 个调用点。
+共 1222 个调用点。
 
 | Target | 调用点 | 类型 | 风险标记 |
 | --- | --- | --- | --- |
@@ -520,19 +520,22 @@
 | `<module>` | `crates/uc-application/src/space/lifecycle/unlock_space/use_case.rs:86` | `info` | message-body |
 | `<module>` | `crates/uc-application/src/space/lifecycle/upgrade_space/use_case.rs:71` | `instrument` | - |
 | `<module>` | `crates/uc-application/src/space/membership/decide_device_trust_change/use_case.rs:43` | `instrument` | - |
-| `<module>` | `crates/uc-application/src/space/membership/group_update_delivery.rs:261` | `debug` | message-body |
-| `<module>` | `crates/uc-application/src/space/membership/group_update_delivery.rs:268` | `warn` | message-body |
+| `<module>` | `crates/uc-application/src/space/membership/group_update_delivery.rs:231` | `instrument` | - |
+| `<module>` | `crates/uc-application/src/space/membership/group_update_delivery.rs:262` | `debug` | message-body |
+| `<module>` | `crates/uc-application/src/space/membership/group_update_delivery.rs:269` | `warn` | message-body |
 | `<module>` | `crates/uc-application/src/space/membership/handle_history_message/use_case.rs:45` | `instrument` | - |
 | `<module>` | `crates/uc-application/src/space/membership/handle_history_message/use_case.rs:98` | `debug` | message-body |
 | `<module>` | `crates/uc-application/src/space/membership/handle_history_message/use_case.rs:182` | `debug` | message-body |
 | `<module>` | `crates/uc-application/src/space/membership/handle_history_message/use_case.rs:215` | `debug` | message-body |
 | `<module>` | `crates/uc-application/src/space/membership/handle_history_message/use_case.rs:320` | `debug` | message-body |
 | `<module>` | `crates/uc-application/src/space/membership/handle_history_message/use_case.rs:586` | `info` | message-body |
+| `<module>` | `crates/uc-application/src/space/membership/initializer.rs:45` | `instrument` | - |
 | `<module>` | `crates/uc-application/src/space/membership/maintenance/use_case.rs:50` | `instrument` | - |
 | `<module>` | `crates/uc-application/src/space/membership/owner.rs:150` | `warn` | message-body |
 | `<module>` | `crates/uc-application/src/space/membership/query_device_trust/dependency.rs:33` | `warn` | message-body |
 | `<module>` | `crates/uc-application/src/space/membership/query_member_roster.rs:70` | `instrument` | - |
 | `<module>` | `crates/uc-application/src/space/membership/reconcile_history_evidence/use_case.rs:24` | `instrument` | - |
+| `<module>` | `crates/uc-application/src/space/membership/recover_conflict/issuer.rs:95` | `instrument` | - |
 | `<module>` | `crates/uc-application/src/space/membership/recover_conflict/use_case.rs:86` | `instrument` | - |
 | `<module>` | `crates/uc-application/src/space/membership/recover_conflict/use_case.rs:357` | `warn` | message-body |
 | `<module>` | `crates/uc-application/src/space/membership/recover_conflict/use_case.rs:408` | `debug` | message-body |
@@ -543,6 +546,8 @@
 | `<module>` | `crates/uc-application/src/space/membership/remove_space_member/use_case.rs:38` | `info` | message-body |
 | `<module>` | `crates/uc-application/src/space/membership/remove_space_member/use_case.rs:44` | `warn` | message-body |
 | `<module>` | `crates/uc-application/src/space/membership/remove_space_member/use_case.rs:104` | `instrument` | - |
+| `<module>` | `crates/uc-application/src/space/membership/remove_space_member/use_case.rs:350` | `instrument` | - |
+| `<module>` | `crates/uc-application/src/space/membership/remove_space_member/use_case.rs:361` | `instrument` | - |
 | `<module>` | `crates/uc-application/src/space/membership/resolve_conflict/use_case.rs:36` | `instrument` | - |
 | `<module>` | `crates/uc-application/src/space/membership/worker.rs:194` | `debug` | message-body |
 | `<module>` | `crates/uc-application/src/space/membership/worker.rs:212` | `warn` | message-body |
