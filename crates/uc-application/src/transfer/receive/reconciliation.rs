@@ -16,7 +16,9 @@ use uc_core::ports::{
     NoEntryReceiveArtifacts, PartialReceiveTerminal, ProvisionalReceiveAction, ReceiveArtifact,
     ReceiveArtifactOwnership,
 };
-use uc_observability_contract::{log_fields::log_id, uc_error};
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_id, uc_error, uc_info, uc_warn,
+};
 
 pub struct ReceiveReadinessCoordinator {
     ready: AtomicBool,
@@ -115,6 +117,11 @@ impl ReceiveReadinessCoordinator {
                 Ok(())
             }
             Err(error) => {
+                uc_warn!(
+                    error_kind = "receive_recovery",
+                    io_error_kind = io_error_kind(error.as_ref()),
+                    "receive readiness recovery failed; receive gate stays closed"
+                );
                 self.mark_not_ready();
                 *self
                     .degraded_reason
@@ -176,6 +183,10 @@ impl ReconcileReceiveAttemptsUseCase {
     #[instrument(name = "usecase.reconcile_receive_attempts.execute", skip_all)]
     pub async fn execute(&self) -> Result<u32> {
         let mut reconciled = 0u32;
+        let mut provisional_discarded = 0u32;
+        let mut failed = 0u32;
+        let mut cancelled = 0u32;
+        let mut rolled_back = 0u32;
         for provisional in self
             .list_provisional
             .list_provisional_receives()
@@ -206,6 +217,7 @@ impl ReconcileReceiveAttemptsUseCase {
                 .await
                 .map_err(anyhow::Error::new)?;
             reconciled = reconciled.saturating_add(1);
+            provisional_discarded = provisional_discarded.saturating_add(1);
         }
 
         let mut artifacts = self
@@ -270,8 +282,15 @@ impl ReconcileReceiveAttemptsUseCase {
                 PartialReceiveTerminal::Failed
             };
 
+            match terminal {
+                PartialReceiveTerminal::Cancelled => cancelled = cancelled.saturating_add(1),
+                PartialReceiveTerminal::Failed => failed = failed.saturating_add(1),
+            }
             let artifact_record =
                 artifacts.remove(&(attempt.entry_id.clone(), attempt.current_attempt_id.clone()));
+            if artifact_record.is_some() {
+                rolled_back = rolled_back.saturating_add(1);
+            }
             let mut cleanup = artifact_record
                 .as_ref()
                 .map(|record| record.artifacts.clone())
@@ -320,6 +339,16 @@ impl ReconcileReceiveAttemptsUseCase {
             );
             return Err(anyhow!("unsettled receive artifacts were not reconciled"));
         }
+        if reconciled > 0 {
+            uc_info!(
+                reconciled = reconciled,
+                provisional_discarded = provisional_discarded,
+                failed = failed,
+                cancelled = cancelled,
+                rolled_back = rolled_back,
+                "receive attempts reconciled after restart"
+            );
+        }
         Ok(reconciled)
     }
 }
@@ -355,6 +384,22 @@ mod tests {
             .await
             .expect("waiter must be released")
             .expect("waiter task must succeed");
+    }
+
+    #[tokio::test]
+    async fn failed_recovery_is_recorded_with_a_fixed_kind_and_no_error_text() {
+        let logs = crate::test_support::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let readiness = ReceiveReadinessCoordinator::new();
+
+        readiness
+            .ensure_ready(|| async { Err(anyhow!("PRIVATE_ARTIFACT_PATH cannot be decrypted")) })
+            .await
+            .expect_err("failed recovery must remain observable");
+
+        assert_eq!(logs.count("receive readiness recovery failed"), 1);
+        assert!(logs.output().contains("error_kind=\"receive_recovery\""));
+        assert!(!logs.output().contains("PRIVATE"));
     }
 
     #[tokio::test]
@@ -615,6 +660,26 @@ mod tests {
         assert_eq!(use_case(store.clone()).execute().await.unwrap(), 1);
         assert!(!path.exists());
         assert_eq!(store.commit_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn restart_recovery_records_a_numeric_summary_only_when_it_changed_state() {
+        let logs = crate::test_support::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("partial.bin");
+        tokio::fs::write(&path, b"partial").await.unwrap();
+        let store = store(AttemptState::Receiving, path);
+
+        use_case(store).execute().await.unwrap();
+
+        assert_eq!(logs.count("receive attempts reconciled after restart"), 1);
+        let output = logs.output();
+        assert!(output.contains("reconciled=1"));
+        assert!(output.contains("failed=1"));
+        assert!(output.contains("rolled_back=1"));
+        assert!(output.contains("cancelled=0"));
+        assert!(!output.contains("partial.bin"));
     }
 
     #[tokio::test]

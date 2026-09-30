@@ -547,6 +547,8 @@ pub enum DiagnosticTaskKind {
     SessionSuspend,
     /// 成员维护的一轮完整动作异常退出；此后收敛、副作用与群更新投递都会停止。
     MembershipMaintenanceRound,
+    /// 活跃剪贴板必需 worker 的任务异常退出（panic 或被取消）。
+    ActiveClipboardWorker,
 }
 
 impl DiagnosticTaskKind {
@@ -562,6 +564,7 @@ impl DiagnosticTaskKind {
             Self::EngineLifecycleTransition => "engine_lifecycle_transition",
             Self::SessionSuspend => "session_suspend",
             Self::MembershipMaintenanceRound => "membership_maintenance_round",
+            Self::ActiveClipboardWorker => "active_clipboard_worker",
         }
     }
 }

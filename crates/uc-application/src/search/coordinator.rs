@@ -508,6 +508,9 @@ impl SearchCoordinator {
         const BATCH_SIZE: usize = 200;
         let mut all_entries = Vec::new();
         let mut offset = 0usize;
+        let mut list_failed = false;
+        let mut skipped_projection = 0usize;
+        let mut skipped_pipeline = 0usize;
 
         let search_key = match deps.search_key_derivation.derive_search_key().await {
             Ok(k) => k,
@@ -540,6 +543,7 @@ impl SearchCoordinator {
                         reason = log_vocab(&reason),
                         "search coordinator: failed to list entries during rebuild"
                     );
+                    list_failed = true;
                     break;
                 }
             };
@@ -560,7 +564,10 @@ impl SearchCoordinator {
                 .await
                 {
                     Some(input) => input,
-                    None => continue,
+                    None => {
+                        skipped_projection += 1;
+                        continue;
+                    }
                 };
 
                 match deps.search_pipeline.build(&pipeline_input, &search_key) {
@@ -571,6 +578,7 @@ impl SearchCoordinator {
                         all_entries.push((doc, postings));
                     }
                     Err(e) => {
+                        skipped_pipeline += 1;
                         uc_warn!(
                             error_kind = "pipeline_build",
                             io_error_kind = io_error_kind(e.as_ref()),
@@ -592,6 +600,7 @@ impl SearchCoordinator {
         }
         let (progress_tx, mut progress_rx) = mpsc::channel::<RebuildProgress>(64);
         let event_tx_clone = event_tx.clone();
+        let indexed = all_entries.len();
         let rebuild = deps.rebuild_index.rebuild(all_entries, progress_tx);
         let progress_forwarder = async move {
             while let Some(progress) = progress_rx.recv().await {
@@ -603,10 +612,26 @@ impl SearchCoordinator {
 
         match rebuild_result {
             Ok(()) => {
-                uc_info!(
-                    reason = log_vocab(&reason),
-                    "search coordinator: rebuild completed successfully"
-                );
+                if list_failed {
+                    // 列表中途失败后仍以已收集的条目完成并置为就绪：降级结果必须可见。
+                    uc_warn!(
+                        reason = log_vocab(&reason),
+                        indexed = indexed,
+                        skipped_projection = skipped_projection,
+                        skipped_pipeline = skipped_pipeline,
+                        list_failed = true,
+                        "search coordinator: rebuild completed from a truncated entry listing"
+                    );
+                } else {
+                    uc_info!(
+                        reason = log_vocab(&reason),
+                        indexed = indexed,
+                        skipped_projection = skipped_projection,
+                        skipped_pipeline = skipped_pipeline,
+                        list_failed = false,
+                        "search coordinator: rebuild completed successfully"
+                    );
+                }
                 {
                     let mut s = state.lock().await;
                     s.status = STATUS_READY.to_string();
@@ -1031,6 +1056,22 @@ mod tests {
             let end = (offset + limit).min(self.entries.len());
             let start = offset.min(end);
             Ok(self.entries[start..end].to_vec())
+        }
+    }
+
+    /// Fails every listing, as a storage outage in the middle of a rebuild would.
+    struct FailingEntryRepo;
+
+    #[async_trait::async_trait]
+    impl ListClipboardEntriesPort for FailingEntryRepo {
+        async fn list_entries(
+            &self,
+            _limit: usize,
+            _offset: usize,
+        ) -> Result<Vec<ClipboardEntry>, uc_core::clipboard::ClipboardRepositoryError> {
+            Err(uc_core::clipboard::ClipboardRepositoryError::Storage(
+                "PRIVATE_LIST_FAILURE".into(),
+            ))
         }
     }
 
@@ -1542,6 +1583,55 @@ mod tests {
         let snapshot = coordinator.status_snapshot().await;
         assert_eq!(snapshot.state, STATUS_READY);
         assert_eq!(snapshot.reason, None);
+    }
+
+    /// 列表失败后重建仍以已收集的条目结束并置为就绪；这个降级结果必须在记录里可见。
+    #[tokio::test]
+    async fn rebuild_from_a_truncated_listing_is_recorded_as_such() {
+        let logs = crate::test_support::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let index = FakeSearchIndex {
+            meta: SearchIndexMeta {
+                index_version: CURRENT_INDEX_VERSION.to_string(),
+                search_blocked: true,
+                last_rebuild_started_at_ms: Some(2_000),
+                last_rebuild_completed_at_ms: Some(1_000),
+                plaintext_purge_done_ms: Some(1_500),
+            },
+            rebuild_called: Arc::new(AtomicBool::new(false)),
+        };
+        let rep_id = RepresentationId::new();
+        let deps = SearchCoordinatorDeps::new(
+            Arc::new(index),
+            Arc::new(FakeMaintenance),
+            Arc::new(FakeKeyDerivation),
+            Arc::new(FakePipeline),
+            Arc::new(FailingEntryRepo),
+            Arc::new(FakeGetEntry),
+            Arc::new(FakeRepRepo {
+                rep_id: rep_id.clone(),
+            }),
+            Arc::new(FakeSelectionRepo { rep_id }),
+            Arc::new(FakeEventRepo),
+            Arc::new(FakeFileSetRepo),
+        );
+        let coordinator = SearchCoordinator::new(deps);
+
+        coordinator.startup_evaluation().await;
+        for _ in 0..200 {
+            if logs.count("search coordinator: rebuild completed") > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        assert_eq!(
+            logs.count("search coordinator: rebuild completed from a truncated entry listing"),
+            1
+        );
+        assert!(logs.output().contains("list_failed=true"));
+        assert!(logs.output().contains("indexed=0"));
+        assert!(!logs.output().contains("PRIVATE"));
     }
 
     #[tokio::test]
