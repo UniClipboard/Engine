@@ -2,6 +2,7 @@ use std::{fmt, sync::Arc};
 
 use tokio::sync::Mutex;
 use uc_core::{ports::SettingsPort, settings::model::Settings};
+use uc_observability_contract::{error_source::io_error_kind, uc_info, uc_warn};
 
 use super::{
     models::{apply_settings_patch, validate_settings, NetworkSettingsPatch, SettingsPatch},
@@ -67,6 +68,19 @@ pub enum RelayConfigurationError {
     CredentialsUnavailable,
     #[error(transparent)]
     Credentials(#[from] RelayCredentialsError),
+}
+
+impl RelayConfigurationError {
+    /// 日志用的固定分类，只反映变体，不含设置值或下层错误正文。
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Load(_) => "load",
+            Self::Save(_) => "save",
+            Self::Invalid(_) => "invalid",
+            Self::CredentialsUnavailable => "credentials_unavailable",
+            Self::Credentials(_) => "credentials",
+        }
+    }
 }
 
 pub(crate) struct RelayConfigurationUpdate {
@@ -158,7 +172,7 @@ impl RelayConfiguration {
 
         if let Err(error) = self.settings.save(&merged).await {
             if transaction_started {
-                self.recover_locked().await?;
+                self.recover_after_failed_write("save_settings").await?;
             }
             return Err(RelayConfigurationError::Save(anyhow::Error::from(error)));
         }
@@ -168,7 +182,8 @@ impl RelayConfiguration {
                 return Err(RelayConfigurationError::CredentialsUnavailable);
             };
             if let Err(error) = credentials.complete_settings_transaction() {
-                self.recover_locked().await?;
+                self.recover_after_failed_write("complete_transaction")
+                    .await?;
                 return Err(error.into());
             }
         }
@@ -331,6 +346,24 @@ impl RelayConfiguration {
         self.credentials.as_ref()
     }
 
+    /// 写入失败后回滚；回滚本身失败时其错误会替换原错误，因此在此留痕，不含 URL 或凭据。
+    async fn recover_after_failed_write(
+        &self,
+        stage: &'static str,
+    ) -> Result<(), RelayConfigurationError> {
+        let result = self.recover_locked().await;
+        if let Err(error) = &result {
+            uc_warn!(
+                stage = stage,
+                error_kind = "relay_recovery",
+                reason = error.kind(),
+                io_error_kind = io_error_kind(error),
+                "relay settings recovery failed after a failed write; the original error is replaced"
+            );
+        }
+        result
+    }
+
     async fn recover_locked(&self) -> Result<(), RelayConfigurationError> {
         let Some(credentials) = self.credentials() else {
             return Ok(());
@@ -343,6 +376,7 @@ impl RelayConfiguration {
             .await
             .map_err(|error| RelayConfigurationError::Save(anyhow::Error::from(error)))?;
         credentials.complete_settings_transaction()?;
+        uc_info!("relay settings transaction recovered");
         Ok(())
     }
 }
@@ -451,6 +485,8 @@ mod tests {
 
     #[tokio::test]
     async fn recovery_restores_settings_and_tokens_after_interrupted_commit() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
         let old_relay = "https://old-relay.example.com/";
         let new_relay = "https://new-relay.example.com/";
         let mut previous = Settings::default();
@@ -497,6 +533,45 @@ mod tests {
             "old-relay-token"
         );
         assert!(credentials.load(new_relay).unwrap().is_none());
+        assert_eq!(logs.count("relay settings transaction recovered"), 1);
+        assert!(!logs.output().contains("relay.example.com"));
+    }
+
+    struct FailingSaveSettings;
+
+    #[async_trait]
+    impl uc_core::ports::SettingsPort for FailingSaveSettings {
+        async fn load(&self) -> anyhow::Result<Settings> {
+            Ok(Settings::default())
+        }
+
+        async fn save(&self, _settings: &Settings) -> anyhow::Result<()> {
+            Err(anyhow::anyhow!("PRIVATE_SAVE_DETAIL"))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_rollback_that_replaces_the_original_error_is_recorded() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let configuration = RelayConfiguration::new(Arc::new(FailingSaveSettings))
+            .with_credentials(RelayCredentials::new(Arc::new(
+                InMemorySecureStorage::default(),
+            )));
+
+        let result = configuration
+            .mutate(RelayConfigurationMutation::Add {
+                url: "https://private-relay.example.com/".to_string(),
+                access_token: None,
+            })
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(logs.count("relay settings recovery failed"), 1);
+        assert!(logs.output().contains("stage=\"save_settings\""));
+        assert!(logs.output().contains("error_kind=\"relay_recovery\""));
+        assert!(!logs.output().contains("private-relay"));
+        assert!(!logs.output().contains("PRIVATE"));
     }
 
     #[tokio::test]

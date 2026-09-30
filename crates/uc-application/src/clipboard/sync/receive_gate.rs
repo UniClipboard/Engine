@@ -25,7 +25,7 @@ use crate::deps::CurrentSpaceMemberScopePort;
 use uc_observability_contract::diagnostics::connectivity::{
     describe_clipboard_receive_failure, ClipboardReceiveFailure,
 };
-use uc_observability_contract::{uc_info, uc_warn};
+use uc_observability_contract::{error_source::io_error_kind, uc_info, uc_warn};
 
 /// Reads a peer's per-device sync preferences to decide whether inbound
 /// clipboard data from it should be accepted.
@@ -59,12 +59,20 @@ impl MemberReceiveGate {
     pub(crate) async fn authorize(&self, peer: &DeviceId) -> Option<MemberReceivePermit> {
         let scope = match self.member_scope.snapshot().await {
             Ok(scope) if scope.usable_peer_device_ids.contains(peer) => scope,
-            unavailable => {
-                describe_clipboard_receive_failure(if unavailable.is_err() {
-                    ClipboardReceiveFailure::MembershipScopeUnavailable
-                } else {
-                    ClipboardReceiveFailure::MembershipScopeBlocked
-                });
+            // 读取范围失败（存储故障）与真实的“不在可用范围”不同：前者会让所有入站帧被丢弃，必须单独可见。
+            Err(error) => {
+                describe_clipboard_receive_failure(
+                    ClipboardReceiveFailure::MembershipScopeUnavailable,
+                );
+                uc_warn!(
+                    reason = "membership_scope_unavailable",
+                    io_error_kind = io_error_kind(&error),
+                    "receive gate: dropping inbound because the membership scope cannot be read"
+                );
+                return None;
+            }
+            Ok(_) => {
+                describe_clipboard_receive_failure(ClipboardReceiveFailure::MembershipScopeBlocked);
                 uc_info!(
                     reason = "membership_scope_blocked",
                     "receive gate: dropping inbound from unavailable peer"
@@ -204,6 +212,32 @@ mod tests {
         let gate = MemberReceiveGate::new(Arc::new(AllowingMemberRepo), Arc::new(EmptyScope));
 
         assert!(gate.authorize(&DeviceId::new("peer")).await.is_none());
+    }
+
+    struct FailingScope;
+
+    #[async_trait]
+    impl CurrentSpaceMemberScopePort for FailingScope {
+        async fn snapshot(&self) -> Result<CurrentSpaceMemberScope, CurrentSpaceMemberScopeError> {
+            Err(CurrentSpaceMemberScopeError::Unavailable)
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_scope_is_warned_apart_from_a_real_scope_block() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let peer = DeviceId::new("peer");
+
+        let unreadable =
+            MemberReceiveGate::new(Arc::new(AllowingMemberRepo), Arc::new(FailingScope));
+        let blocked = MemberReceiveGate::new(Arc::new(AllowingMemberRepo), Arc::new(EmptyScope));
+        assert!(unreadable.authorize(&peer).await.is_none());
+        assert!(blocked.authorize(&peer).await.is_none());
+
+        assert_eq!(logs.count("membership_scope_unavailable"), 1);
+        assert_eq!(logs.count("membership_scope_blocked"), 1);
+        assert_eq!(logs.count("WARN"), 1);
     }
 
     #[tokio::test]

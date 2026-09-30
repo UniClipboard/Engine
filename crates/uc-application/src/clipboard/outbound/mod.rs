@@ -401,6 +401,13 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
         let file_set_manifest = match directory_members {
             Some(members) => {
                 if plan.files.len() != extracted_paths_count {
+                    uc_warn!(
+                        entry_id = log_id(&entry_id_str),
+                        reason = "planner_excluded_member",
+                        file_candidate_count = plan.files.len(),
+                        extracted_paths_count = extracted_paths_count,
+                        "outbound: directory set skipped because the planner excluded a member"
+                    );
                     return Ok(ClipboardOutboundOutcome::Skipped {
                         reason: "file_set_member_unavailable".to_string(),
                     });

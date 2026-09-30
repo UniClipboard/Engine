@@ -113,6 +113,21 @@ pub enum ResendEntryError {
     Dispatch(#[source] anyhow::Error),
 }
 
+impl ResendEntryError {
+    /// 日志用的固定分类，只反映变体，不含条目、设备标识或下层错误正文。
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::SynchronizationDisabled => "synchronization_disabled",
+            Self::EntryNotFound(_) => "entry_not_found",
+            Self::EntryNotResendable { .. } => "entry_not_resendable",
+            Self::TargetNotTrusted(_) => "target_not_trusted",
+            Self::NoEligibleTargets => "no_eligible_targets",
+            Self::Storage(_) => "storage",
+            Self::Dispatch(_) => "dispatch",
+        }
+    }
+}
+
 /// resend 失败时的细分原因。UI 据此选不同的英文文案 / i18n key。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotResendableReason {

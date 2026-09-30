@@ -4,6 +4,8 @@ use std::sync::OnceLock;
 
 use async_trait::async_trait;
 
+use uc_observability_contract::{error_source::io_error_kind, uc_warn};
+
 use crate::facade::search::SearchFacade;
 use crate::transfer::receive::reconciliation::EnsureReceiveReadyPort;
 
@@ -201,8 +203,13 @@ impl SpaceSessionActivityPort for CombinedSpaceSessionActivity {
             .await
             .map_err(SpaceActivityError::Membership)?;
         if let Err(error) = self.other.pause_for_lock().await {
-            let _ = self.other.restore_after_failed_lock().await;
-            let _ = self.membership.resume().await;
+            // 回滚失败不改变返回给调用方的原错误，但成员维护或连接工作可能在空间仍解锁时保持暂停，必须留痕。
+            if let Err(rollback) = self.other.restore_after_failed_lock().await {
+                record_rollback_failure("restore_after_failed_lock", &rollback);
+            }
+            if let Err(rollback) = self.membership.resume().await {
+                record_rollback_failure("membership_resume", &rollback);
+            }
             return Err(error);
         }
         Ok(())
@@ -213,6 +220,15 @@ impl SpaceSessionActivityPort for CombinedSpaceSessionActivity {
         let membership = self.membership.resume().await;
         restore_results(vec![other, membership])
     }
+}
+
+fn record_rollback_failure(stage: &'static str, error: &anyhow::Error) {
+    uc_warn!(
+        stage = stage,
+        error_kind = "lock_rollback",
+        io_error_kind = io_error_kind(error.as_ref()),
+        "space lock failed and rollback did not complete; background work may stay paused"
+    );
 }
 
 #[async_trait]
@@ -309,6 +325,41 @@ mod tests {
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
+    }
+
+    struct FailingRollback;
+
+    #[async_trait]
+    impl MembershipSessionActivityPort for FailingRollback {
+        async fn pause(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn resume(&self) -> anyhow::Result<()> {
+            Err(anyhow::Error::new(std::io::Error::other("PRIVATE_RESUME")))
+        }
+
+        fn wake(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_rollback_after_a_failed_lock_is_recorded_and_the_original_error_is_returned() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let activity = combine_space_session_activity(
+            Arc::new(FailingRollback),
+            Arc::new(FailingApplicationActivity(AtomicUsize::new(0))),
+        );
+
+        let error = activity.pause_for_lock().await.unwrap_err();
+
+        assert_eq!(error.kind(), "search");
+        assert_eq!(logs.count("rollback did not complete"), 1);
+        assert!(logs.output().contains("stage=\"membership_resume\""));
+        assert!(logs.output().contains("io_error_kind=Other"));
+        assert!(!logs.output().contains("PRIVATE"));
     }
 
     #[tokio::test]

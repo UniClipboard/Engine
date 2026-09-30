@@ -223,7 +223,14 @@ impl PeerOnlineResyncWorker {
 
         let scope = match self.peer_scope.snapshot().await {
             Ok(scope) => scope,
-            Err(_) => return,
+            Err(err) => {
+                uc_warn!(
+                    error_kind = "peer_scope_unavailable",
+                    io_error_kind = io_error_kind(&err),
+                    "peer-online resync skipped: current peer scope unavailable"
+                );
+                return;
+            }
         };
         for target in targets {
             // Never resend the state to the device that activated it: it is
@@ -368,6 +375,17 @@ mod tests {
         }
         async fn remove(&self, _device_id: &DeviceId) -> Result<bool, MembershipError> {
             Ok(false)
+        }
+    }
+
+    struct UnavailablePeerScope;
+
+    #[async_trait]
+    impl CurrentSpaceMemberScopePort for UnavailablePeerScope {
+        async fn snapshot(&self) -> Result<CurrentSpaceMemberScope, CurrentSpaceMemberScopeError> {
+            Err(CurrentSpaceMemberScopeError::RecoveryRequired {
+                source: Some(anyhow::Error::new(std::io::Error::other("PRIVATE_SCOPE"))),
+            })
         }
     }
 
@@ -580,6 +598,36 @@ mod tests {
         assert_eq!(sent.len(), 1, "the online peer gets exactly one resync");
         assert_eq!(sent[0], ("peer-1".to_string(), "blake3v1:aa".to_string()));
         drop(sent);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn unavailable_peer_scope_skips_the_resync_and_is_recorded() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let (peer_reachability, peer_reachability_tx) = FakePeerReachability::new();
+        let dispatch = Arc::new(DispatchSpy::default());
+        let worker = PeerOnlineResyncWorker::new(
+            peer_reachability,
+            Arc::new(FixedRegister(Some(state("blake3v1:aa", "self")))),
+            reconstructor(),
+            Arc::clone(&dispatch) as Arc<dyn ActiveClipboardDispatchPort>,
+            Arc::new(UnavailablePeerScope),
+            Arc::new(AllowAllMembers),
+        );
+        let handle = worker.spawn();
+        tokio::task::yield_now().await;
+
+        peer_reachability_tx.send(online("peer-1")).unwrap();
+        tokio::time::sleep(past_window()).await;
+
+        assert!(dispatch.sent.lock().unwrap().is_empty());
+        assert_eq!(logs.count("current peer scope unavailable"), 1);
+        assert!(logs
+            .output()
+            .contains("error_kind=\"peer_scope_unavailable\""));
+        assert!(logs.output().contains("io_error_kind=Other"));
+        assert!(!logs.output().contains("PRIVATE"));
         handle.abort();
     }
 

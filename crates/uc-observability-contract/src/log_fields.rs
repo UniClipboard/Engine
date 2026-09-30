@@ -256,6 +256,7 @@ __log_field_catalog! {
     msg_kind: Literal,
     plan: Literal,
     reject_reason: Literal,
+    rollback_target: Literal,
     step: Literal,
     storage_generation: Literal,
     strategy: Literal,

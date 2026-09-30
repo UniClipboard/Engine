@@ -301,12 +301,26 @@ async fn recover_for_target(
                 ),
                 Err(ResendEntryError::EntryNotResendable { reason, .. }) => {
                     if matches!(reason, NotResendableReason::PayloadLost) {
+                        uc_info!(
+                            entry_id = log_id(&entry.entry_id),
+                            reason = "payload_lost",
+                            "clipboard delivery recovery stopped: entry payload is gone"
+                        );
                         stop_automatic_recovery(deps, &entry.entry_id, &target).await;
                     }
                 }
-                Err(_) => {
+                Err(error @ (ResendEntryError::Storage(_) | ResendEntryError::Dispatch(_))) => {
+                    uc_warn!(
+                        error_kind = "delivery",
+                        reason = error.kind(),
+                        entry_id = log_id(&entry.entry_id),
+                        "clipboard delivery recovery skipped entry"
+                    );
+                }
+                Err(error) => {
                     uc_debug!(
                         error_kind = "delivery",
+                        reason = error.kind(),
                         entry_id = log_id(&entry.entry_id),
                         "clipboard delivery recovery skipped entry"
                     );

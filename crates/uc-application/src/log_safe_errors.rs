@@ -9,6 +9,10 @@ use crate::deps::{
     JoinerActivationStateError, JoinerCancellationStateError, JoinerStartStateError,
     MembershipLedgerError, PendingAdmissionRecoveryStateError, SponsorAdmissionStateError,
 };
+use uc_core::membership::{KeyEpochError, MembershipHistoryV2Error};
+
+use crate::runtime_lifecycle::LifecycleError;
+use crate::search::SearchShutdownError;
 
 log_safe_errors!(fn admission_state_errors => [
     SponsorAdmissionStateError,
@@ -17,6 +21,10 @@ log_safe_errors!(fn admission_state_errors => [
     JoinerCancellationStateError,
     PendingAdmissionRecoveryStateError,
     MembershipLedgerError,
+    MembershipHistoryV2Error,
+    KeyEpochError,
+    LifecycleError,
+    SearchShutdownError,
 ]);
 
 /// 登记本 crate 拥有的错误类型；由 Engine 装配统一调用。

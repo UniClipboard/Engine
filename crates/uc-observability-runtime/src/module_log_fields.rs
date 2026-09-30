@@ -100,6 +100,7 @@ mod tests {
         "msg_kind",
         "plan",
         "reject_reason",
+        "rollback_target",
         "storage_generation",
         "task",
         "trigger",

@@ -449,8 +449,12 @@ impl ApplyInboundActiveClipboardStateUseCase {
                 );
                 return None;
             }
-            Err(ActiveClipboardPullClientError::Io(_)) => {
-                uc_warn!("active state inbound: pull failed (io); dropping");
+            Err(ActiveClipboardPullClientError::Io(err)) => {
+                uc_warn!(
+                    error_kind = "pull_io",
+                    io_error_kind = io_error_kind(&*err),
+                    "active state inbound: pull failed (io); dropping"
+                );
                 return None;
             }
         };
@@ -1440,6 +1444,30 @@ mod tests {
             1,
             "pull must be attempted exactly once (no retry)"
         );
+        assert_inert(&h);
+    }
+
+    /// An io failure while pulling is dropped, but recorded with its fixed kind and no error text.
+    #[tokio::test]
+    async fn pull_io_failure_is_recorded_with_its_io_kind() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let pull_client = PullClientSpy::new(Err(ActiveClipboardPullClientError::Io(Box::new(
+            std::io::Error::other("PRIVATE_PULL_DETAIL"),
+        ))));
+        let h = pull_harness(
+            Some(Arc::clone(&pull_client) as _),
+            Some(Arc::new(StoreNeverCalled)),
+            EntryId::new(),
+        );
+
+        h.uc.handle_one(inbound("blake3v1:aa", 1_000, "dev-x"))
+            .await;
+
+        assert_eq!(logs.count("pull failed (io)"), 1);
+        assert!(logs.output().contains("error_kind=\"pull_io\""));
+        assert!(logs.output().contains("io_error_kind=Other"));
+        assert!(!logs.output().contains("PRIVATE"));
         assert_inert(&h);
     }
 

@@ -5,7 +5,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::sync::Notify;
 
-use super::{HistoryMaintenance, HistoryMaintenanceRuntime};
+use super::{run_history_maintenance_once, HistoryMaintenance, HistoryMaintenanceRuntime};
 use crate::clipboard::history::views::{
     CleanupResultView, ClipboardHistoryError, ReconcileResultView, RetentionEnforcementResultView,
 };
@@ -317,4 +317,21 @@ async fn shutdown_preserves_task_failure_without_exposing_panic_text() {
     let source = error.source().unwrap().downcast_ref::<JoinError>().unwrap();
     assert!(source.is_panic());
     assert_eq!(error.to_string(), "history maintenance task failed");
+}
+
+#[tokio::test]
+async fn each_failed_pass_is_recorded_with_its_fixed_kind() {
+    let logs = uc_testkit::log_capture::CapturedLogs::default();
+    let _guard = logs.install();
+    let failing_later_passes = FakeHistoryMaintenance::new(0, true, true);
+    let failing_reconcile = FakeHistoryMaintenance::new(1, false, false);
+    let cancel = tokio_util::sync::CancellationToken::new();
+
+    run_history_maintenance_once(&failing_later_passes, &cancel).await;
+    run_history_maintenance_once(&failing_reconcile, &cancel).await;
+
+    let output = logs.output();
+    assert!(output.contains("error_kind=\"history_cleanup\""));
+    assert!(output.contains("error_kind=\"history_retention\""));
+    assert!(output.contains("error_kind=\"history_reconcile\""));
 }
