@@ -13,6 +13,8 @@ current-engine = [
   "connectivity-opportunity",
   "device-group-choices",
   "join-status",
+  "listen-port-setting",
+  "trusted-networks-setting",
   "network-recovery",
   "process-observability",
   "startup-progress",
@@ -21,6 +23,8 @@ current-engine = [
 connectivity-opportunity = []
 device-group-choices = []
 join-status = []
+listen-port-setting = []
+trusted-networks-setting = []
 network-recovery = []
 process-observability = []
 startup-progress = []

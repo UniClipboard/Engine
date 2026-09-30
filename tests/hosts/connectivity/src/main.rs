@@ -370,6 +370,35 @@ async fn operation(
             }),
             ..Default::default()
         })),
+        // 经公开设置固定或清除监听端口（0 恢复随机）；重启后生效。
+        #[cfg(feature = "listen-port-setting")]
+        "listen_port" => Operation::UpdateSettings(Box::new(SettingsPatch {
+            network: Some(uc_engine::NetworkSettingsPatch {
+                listen_port: Some(
+                    u16::try_from(request["port"].as_u64().context("missing listen port")?)
+                        .context("listen port is out of range")?,
+                ),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })),
+        // 整体替换可信网段（空列表清空）；重启后生效。
+        #[cfg(feature = "trusted-networks-setting")]
+        "trusted_networks" => Operation::UpdateSettings(Box::new(SettingsPatch {
+            network: Some(uc_engine::NetworkSettingsPatch {
+                trusted_networks: Some(
+                    request["networks"]
+                        .as_array()
+                        .context("missing trusted networks")?
+                        .iter()
+                        .map(|value| value.as_str().map(str::to_owned))
+                        .collect::<Option<Vec<_>>>()
+                        .context("trusted network entries must be strings")?,
+                ),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })),
         "unlock" => Operation::UnlockSpace(UnlockSpaceInput {
             passphrase: SecretString::new(PASSPHRASE),
         }),
@@ -474,6 +503,11 @@ fn host_identity() -> Value {
             "device-group-choices",
         ),
         (cfg!(feature = "join-status"), "join-status"),
+        (cfg!(feature = "listen-port-setting"), "listen-port-setting"),
+        (
+            cfg!(feature = "trusted-networks-setting"),
+            "trusted-networks-setting",
+        ),
         (
             cfg!(feature = "connectivity-opportunity"),
             "connectivity-opportunity",

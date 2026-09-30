@@ -268,6 +268,22 @@ bash scripts/testing/run-connection-recovery-e2e.sh --suite network --mode direc
 runner 工件中的 `timings.prepare_ms`、`scenario_ms`、`cleanup_ms` 和 `total_ms` 用于核对 30 分钟目标；场景 records
 仍保留每个业务步骤耗时，二者不能互相替代。
 
+### 仅局域网与 VPN 形态（`lan-only`、`lan-only-vpn`）
+
+两个 mode 只进夜间矩阵与手动触发，不进 PR 检查。它们让测试主机运行生产的进程级 LAN-only 策略（节点绑定时关闭中转，
+拨号策略与可信网段生效）：`uc-infra` 的 `in-process-multi-node` 特性才会把单节点租约、LAN-only 标记与拨号策略变成空操作，
+测试主机不得开启它；`lan-only` 的前置检查在签发邀请时发现 rendezvous 请求就判定环境无效，包装脚本也拒绝对这两个 mode
+使用 `--prebuilt`（workspace 测试构建会合并特性）。
+
+| mode | 场景 | 证明的事实 |
+| --- | --- | --- |
+| `lan-only` | L01 组播屏蔽下完整邀请配对；L02 设置固定端口；L03 随机端口一方重启后恢复；L04 两端同时随机端口重启在无发现时不能恢复；L05 出站包与 rendezvous 请求为 0 | 仅局域网不依赖组播、中转、公共发现和云端；连接建立后地址写回使端口变化后的重连可恢复 |
+| `lan-only-vpn` | V01 可信网段为空时 100.64/10 地址被拒绝；V02 加入可信网段后配对、传输、重启恢复；V03 WireGuard 真隧道（MTU 1420）承载 10.x 地址并传输 512 KiB；V04 出站包与 rendezvous 请求为 0 | 地址过滤、可信网段、完整邀请、固定端口与地址写回在 VPN 形态链路上的行为 |
+
+V03 需要 `wg` 命令与内核 WireGuard 接口，缺失时该场景在工件中记为 `skipped`（不是通过），其余场景照常运行。
+这些 mode 在容器或虚拟机内的隔离命名空间里运行，能证明地址与策略行为，**不能**证明 Tailscale 产品本身（登录、NAT 穿透、
+DERP）、真实 Wi-Fi 或路由器的组播行为，以及各平台网络栈；这些项目仍须记为“跳过”。
+
 当前 draft PR 的等价隔离 Linux job 已使用 `--repeat 3` 逐 mode 实测：
 
 | mode | prepare | scenario | cleanup | total |

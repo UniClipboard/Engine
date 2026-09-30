@@ -14,7 +14,7 @@ for (let i = 2; i < process.argv.length; i += 2) options.set(process.argv[i], pr
 const binary = resolve(options.get('--host') ?? 'target/debug/uc-connectivity-host')
 const only = options.get('--case')
 const mode = options.get('--mode') ?? 'direct'
-assert(['direct', 'known-peer', 'legacy', 'relay'].includes(mode))
+assert(['direct', 'known-peer', 'legacy', 'relay', 'lan-only', 'lan-only-vpn'].includes(mode))
 const legacySide = Number(options.get('--legacy-side') ?? 1)
 const relayBinary = options.get('--relay')
 const legacyBinary = options.get('--legacy-host')
@@ -29,12 +29,16 @@ const runId = `ucr${process.pid}`
 const nodes = []
 const namespaces = []
 const bridge = `${runId}br`.slice(0, 15)
+const vpnBridge = `${runId}bv`.slice(0, 15)
 const root = mkdtempSync(join(tmpdir(), 'uc-connectivity-'))
 const records = []
 const faults = []
 const timingStartedAt = performance.now()
 let firstScenarioStartedAt
 let server
+let rendezvousRequests = 0
+// 只记录去掉邀请码后的请求形态，用于证明哪一步访问了 rendezvous。
+const rendezvousRoutes = []
 let interrupted = false
 
 function command(program, args, input) {
@@ -147,7 +151,7 @@ class Host {
     this.events = []
     this.commands = []
     this.partitionedAt = undefined
-    this.bindPort = 21_000 + this.index
+    this.bindPort = mode === 'known-peer' ? 21_000 + this.index : undefined
     rmSync(this.root, { recursive: true, force: true })
     await this.start()
   }
@@ -164,11 +168,12 @@ async function until(predicate, milliseconds, description) {
   }
 }
 
-async function paired(group) {
+async function paired(group, afterInvite) {
   const created = await group[0].call('create', { name: group[0].label })
   group[0].id = created.device
   for (const node of group.slice(1)) {
     const invitation = await group[0].call('invite')
+    if (afterInvite) await afterInvite()
     await node.call('join', { invitation: invitation.invitation, name: node.label })
     await until(async () => {
       const response = await node.raw({ command: 'setup' })
@@ -209,7 +214,7 @@ async function offline(isolated, budget) {
   }, budget + offlineObservationGrace, 'silent disconnection exceeded its deadline')
 }
 
-async function online(group, budget) {
+async function online(group, budget, description = 'automatic connection exceeded its deadline') {
   await until(async () => {
     for (const node of group) {
       const response = await node.raw({ command: 'peers' })
@@ -219,7 +224,7 @@ async function online(group, budget) {
       if (!group.filter(peer => peer !== node).every(peer => peers.some(row => row.peer_id === peer.id && row.connected))) return false
     }
     return true
-  }, budget, 'automatic connection exceeded its deadline')
+  }, budget, description)
 }
 
 async function transfer(left, right, marker) {
@@ -241,11 +246,11 @@ async function transfer(left, right, marker) {
   }
 }
 
-async function transferFile(left, right, marker) {
+async function transferFile(left, right, marker, extraBytes = 0) {
   for (const [sender, receiver] of [[left, right], [right, left]]) {
     const handle = `managed-${marker}-${sender.label}`
     const displayName = `evidence-${sender.label}.bin`
-    const content = `managed-file-payload-${marker}-${sender.label}`
+    const content = `managed-file-payload-${marker}-${sender.label}`.padEnd(extraBytes, 'x')
     const result = await sender.call('send_file', {
       peer: receiver.id,
       handle,
@@ -329,6 +334,52 @@ function udpPortBound(node, port) {
   return net(node, 'ss', '-H', '-l', '-u', '-n', `sport = :${port}`).trim().length > 0
 }
 
+// 宿主监听的 UDP 端口（不含 mDNS 5353）；用于证明重启后随机端口确实改变。
+function listeningUdpPorts(node) {
+  return new Set(net(node, 'ss', '-H', '-l', '-u', '-n').trim().split('\n').filter(Boolean)
+    .map(line => Number(line.trim().split(/\s+/)[3].split(':').at(-1)))
+    .filter(port => port !== 5353))
+}
+
+// 给节点一条经测试网桥的默认路由，并统计发往测试网段之外（含 DNS）的全部出站包。网桥不转发，
+// 这些包到不了任何外部服务；计数只用于证明仅局域网模式从未尝试访问 relay、公共发现或 DNS。
+function watchEgress(node, gateway = '10.233.0.1') {
+  net(node, 'ip', 'route', 'add', 'default', 'via', gateway)
+  nft(node, 'add', 'table', 'inet', 'uc_egress')
+  nft(node, 'add', 'chain', 'inet', 'uc_egress', 'output', '{ type filter hook output priority -70; policy accept; }')
+  nft(node, 'add', 'rule', 'inet', 'uc_egress', 'output', 'udp', 'dport', '53', 'counter', 'drop')
+  nft(node, 'add', 'rule', 'inet', 'uc_egress', 'output', 'tcp', 'dport', '53', 'counter', 'drop')
+  nft(node, 'add', 'rule', 'inet', 'uc_egress', 'output', 'ip', 'daddr', '!=', '{ 10.233.0.0/24, 100.64.0.0/24, 10.44.0.0/24, 127.0.0.0/8, 224.0.0.0/4 }', 'counter', 'drop')
+  nft(node, 'add', 'rule', 'inet', 'uc_egress', 'output', 'ip6', 'daddr', '!=', '{ ::1, fe80::/10, ff00::/8 }', 'counter', 'drop')
+  // 独立探测证明计数有效：一次公共 DNS 形态的发送必须被记录。
+  try { net(node, 'node', '-e', "const s=require('dgram').createSocket('udp4');s.send('probe',53,'192.0.2.1',()=>s.close())") } catch {}
+  const baseline = egressPackets(node)
+  assert(baseline > 0, 'egress counters were not exercised')
+  faults.push({ node: node.label, action: 'egress_watched', at_ms: Math.round(performance.now()), verified_counted_packets: baseline })
+  return baseline
+}
+
+function egressPackets(node) {
+  const rules = JSON.parse(net(node, 'nft', '-j', 'list', 'table', 'inet', 'uc_egress'))
+  return rules.nftables.flatMap(row => row.rule?.expr ?? []).reduce((total, expr) => total + (expr.counter?.packets ?? 0), 0)
+}
+
+// 地址仓储写入成功的诊断次数（不含地址内容）；用于等待入站写回完成。
+async function savedAddressRecords(node) {
+  await node.call('flush')
+  let count = 0
+  for (const name of readdirSync(join(node.root, 'logs')).filter(name => name.includes('.json'))) {
+    for (const line of readFileSync(join(node.root, 'logs', name), 'utf8').split('\n')) {
+      try { if (JSON.parse(line).fields?.['event.name'] === 'address.record.saved') count++ } catch {}
+    }
+  }
+  return count
+}
+
+async function disconnected(observer, peer, budget, description) {
+  await until(async () => (await observer.call('peers')).some(row => row.peer_id === peer.id && !row.connected), budget, description)
+}
+
 function blockPeerPair(left, right) {
   for (const [node, peer] of [[left, right], [right, left]]) {
     const peerIp = `10.233.0.${peer.index + 11}`
@@ -392,6 +443,8 @@ async function requiredScenario(id, action) {
 }
 
 async function handleRendezvousRequest(request, response) {
+  rendezvousRequests++
+  rendezvousRoutes.push(`${request.method} ${(request.url ?? '').replace(/^\/v1\/pairings\/[^/]+/, '/v1/pairings/<code>')}`)
   let body = ''
   for await (const chunk of request) {
     body += chunk
@@ -494,6 +547,220 @@ async function knownPeerRecoveryScenarios(a, b, c) {
   }
 }
 
+// 仅局域网：宿主以 `relay: false` 启动，即 `allow_relay_fallback = false` 的生产路径（无 relay、只用 mDNS）。
+// 全程屏蔽组播，只靠完整邀请、已保存地址与固定端口建立和恢复连接。
+async function lanOnlyScenarios(a, b) {
+  const fixedPort = 23_000
+  blockDiscovery(a)
+  blockDiscovery(b)
+  const rendezvousBaseline = rendezvousRequests
+
+  await scenario('L01-full-invitation-pairing-without-multicast', async () => {
+    // 前置检查：证明宿主运行的是生产的进程级 LAN-only 策略。该策略被空操作化（例如宿主与
+    // in-process-multi-node 特性一起构建）时，签发邀请仍会访问 rendezvous；此时环境无效，
+    // 后续任何结果都不能作为仅局域网的证据，所以在配对之前直接终止。
+    const created = await paired([a, b], () => {
+      assert.equal(rendezvousRequests, rendezvousBaseline, `ENVIRONMENT INVALID: the host is not running the production LAN-only policy (rendezvous contacted while issuing an invitation: ${rendezvousRoutes.join(', ')})`)
+    })
+    await transfer(a, b, 'lan-only-paired')
+    const proof = await pairingProof([a, b], created)
+    assert.equal(rendezvousRequests, rendezvousBaseline, `LAN-only pairing contacted the rendezvous service: ${rendezvousRoutes.join(', ')}`)
+    return { ...proof, discovery_blocked: true, rendezvous_requests: 0, bidirectional_transfer: true }
+  })
+
+  await scenario('L02-settings-fixed-port', async () => {
+    const learnedBefore = await savedAddressRecords(b)
+    assert('Updated' in await a.call('listen_port', { port: fixedPort }), 'the fixed port setting was rejected')
+    await a.stop()
+    await disconnected(b, a, 20_000, 'fixed-port restart was not observed')
+    await a.start()
+    assert(udpPortBound(a, fixedPort), 'the fixed port from settings is not listening')
+    await online([a, b], 20_000, 'the fixed-port restart did not reconnect')
+    // 未重启的一方在连接建立后学到对方新的固定端口地址；这是 L03 中它重启后能找到对方的前提。
+    await until(async () => (await savedAddressRecords(b)) > learnedBefore, 20_000, 'the peer that stayed up did not save the restarted fixed-port address')
+    await transfer(a, b, 'lan-only-fixed-port')
+    return { fixed_port_from_settings: true, peer_address_saved_after_reconnect: true, discovery_blocked: true, bidirectional_transfer: true }
+  })
+
+  await scenario('L03-random-port-restart-recovers', async () => {
+    const previousPorts = listeningUdpPorts(b)
+    const learnedBefore = await savedAddressRecords(a)
+    await b.stop()
+    await disconnected(a, b, 20_000, 'random-port restart was not observed')
+    const restartedAt = performance.now()
+    await b.start()
+    const currentPorts = listeningUdpPorts(b)
+    assert(currentPorts.size > 0 && [...currentPorts].every(port => !previousPorts.has(port)), 'the random port did not change')
+    // B 用保存的 A 固定端口地址主动连接；没有组播、没有中转。
+    await online([a, b], 20_000, 'the random-port peer did not reconnect to the fixed port')
+    const recoveredMs = Math.round(performance.now() - restartedAt)
+    // 固定端口一方在入站连接通过准入后保存对方的新地址，之后它重启也能找到对方。
+    await until(async () => (await savedAddressRecords(a)) > learnedBefore, 20_000, 'the fixed-port side did not save the restarted peer address')
+    await transfer(a, b, 'lan-only-random-port-restart')
+    return { random_port_changed: true, recovered_within_ms: recoveredMs, inbound_address_saved: true, discovery_blocked: true, bidirectional_transfer: true }
+  })
+
+  await scenario('L04-both-random-restart-needs-discovery', async () => {
+    assert('Updated' in await a.call('listen_port', { port: 0 }), 'clearing the fixed port was rejected')
+    const previous = [listeningUdpPorts(a), listeningUdpPorts(b)]
+    await a.stop()
+    await b.stop()
+    await a.start()
+    await b.start()
+    for (const [index, node] of [a, b].entries()) {
+      assert([...listeningUdpPorts(node)].every(port => !previous[index].has(port)), 'a random port did not change')
+    }
+    // 设计上的已知限制：两端同时换随机端口且没有组播时不能自动恢复。
+    await delay(20_000)
+    for (const [node, peer] of [[a, b], [b, a]]) {
+      assert(!(await node.call('peers')).some(row => row.peer_id === peer.id && row.connected), 'peers recovered without any valid address')
+    }
+    unblockDiscovery(a)
+    unblockDiscovery(b)
+    const restoredAt = performance.now()
+    await online([a, b], 20_000)
+    const restoredMs = Math.round(performance.now() - restoredAt)
+    await transfer(a, b, 'lan-only-discovery-restored')
+    return { both_ports_changed: true, recovered_without_discovery: false, recovered_after_discovery_within_ms: restoredMs }
+  })
+
+  await scenario('L05-no-public-infrastructure', async () => {
+    const egress = nodes.map(node => ({ node: node.label, packets: egressPackets(node) - node.egressBaseline }))
+    assert(egress.every(row => row.packets === 0), 'LAN-only sent packets outside the test network')
+    assert.equal(rendezvousRequests, rendezvousBaseline, `LAN-only contacted the rendezvous service: ${rendezvousRoutes.join(', ')}`)
+    return { egress_packets_outside_test_network: egress, rendezvous_requests: 0 }
+  })
+}
+
+// VPN 形态的仅局域网验收：节点之间只有单播路径且没有组播。V1–V2 用 Tailscale 形态的 100.64/10 地址，
+// V3 用真实 WireGuard 隧道承载 10.x 地址。这里验证的是地址过滤、可信网段、完整邀请、固定端口与地址写回在这类链路上
+// 的行为，不验证 Tailscale 产品本身（登录、NAT 穿透、DERP）。
+async function lanOnlyVpnScenarios(a, b) {
+  blockDiscovery(a)
+  blockDiscovery(b)
+  const rendezvousBaseline = rendezvousRequests
+  // 环境前置检查：VPN 网段可达，且没有经 eth0 的备用路径，否则后续结果不能说明 VPN 场景。
+  const ping = (node, address) => { try { net(node, 'ping', '-c', '1', '-W', '1', address); return true } catch { return false } }
+  assert(ping(a, '100.64.0.12') && ping(b, '100.64.0.11'), 'ENVIRONMENT INVALID: the VPN segment is not reachable')
+  assert(!ping(a, '10.233.0.12') && !ping(b, '10.233.0.11'), 'ENVIRONMENT INVALID: a non-VPN path exists between the nodes')
+
+  await scenario('V01-cgnat-addresses-refused-until-trusted', async () => {
+    const created = await a.call('create', { name: a.label })
+    a.id = created.device
+    const issued = await a.raw({ command: 'invite' })
+    if (issued.error) {
+      assert.notEqual(issued.code, undefined, 'the refusal has no stable error code')
+      return { refused_at: 'invitation', error_code: issued.code, trusted_networks: 0 }
+    }
+    // 邀请可以签发（例如只含回环地址）时，加入方必须无法完成配对。
+    const joined = await b.raw({ command: 'join', invitation: issued.ok.invitation, name: b.label })
+    if (joined.error) {
+      assert.notEqual(joined.code, undefined, 'the refusal has no stable error code')
+      return { refused_at: 'join_request', error_code: joined.code, trusted_networks: 0 }
+    }
+    await delay(15_000)
+    const setup = await b.call('setup')
+    assert.equal(setup.has_completed, false, 'pairing completed over addresses outside the trusted networks')
+    const current = (await b.call('eligibility')).device_trust.current_join
+    return { refused_at: 'join', join_status: current?.status ?? 'none', join_reason: current?.reason ?? 'none', trusted_networks: 0 }
+  })
+
+  await scenario('V02-trusted-cgnat-pairing-and-recovery', async () => {
+    for (const node of [a, b]) await node.reset()
+    for (const node of [a, b]) {
+      assert('Updated' in await node.call('trusted_networks', { networks: ['100.64.0.0/10'] }), 'the trusted network list was rejected')
+      // 可信网段在网络启动时读取，修改后需要重启才生效。
+      await node.stop()
+      await node.start()
+    }
+    const created = await paired([a, b])
+    const proof = await pairingProof([a, b], created)
+    await transfer(a, b, 'vpn-cgnat')
+    const learnedBefore = await savedAddressRecords(a)
+    await b.stop()
+    await disconnected(a, b, 20_000, 'restart was not observed over the VPN')
+    await b.start()
+    await online([a, b], 20_000, 'the random-port peer did not reconnect over the VPN')
+    await until(async () => (await savedAddressRecords(a)) > learnedBefore, 20_000, 'the VPN address of the restarted peer was not saved')
+    await transfer(b, a, 'vpn-cgnat-restart')
+    return { ...proof, trusted_networks: 1, discovery_blocked: true, non_vpn_path: false, vpn_address_saved_after_reconnect: true, bidirectional_transfer: true }
+  })
+
+  if (!wireguardAvailable()) {
+    const record = { id: 'V03-wireguard-tunnel-large-transfer', started: new Date().toISOString(), outcome: 'skipped', reason: 'wireguard_unavailable', completed: new Date().toISOString(), elapsed_ms: 0 }
+    records.push(record)
+    process.stdout.write(`${record.id}: skipped (WireGuard interfaces or the wg tool are unavailable in this environment)\n`)
+  } else {
+    await scenario('V03-wireguard-tunnel-large-transfer', () => wireguardScenario(a, b))
+  }
+
+  await scenario('V04-no-public-infrastructure', async () => {
+    const egress = nodes.map(node => ({ node: node.label, packets: egressPackets(node) - node.egressBaseline }))
+    assert(egress.every(row => row.packets === 0), 'LAN-only over VPN sent packets outside the test networks')
+    assert.equal(rendezvousRequests, rendezvousBaseline, `LAN-only over VPN contacted the rendezvous service: ${rendezvousRoutes.join(', ')}`)
+    return { egress_packets_outside_test_networks: egress, rendezvous_requests: 0 }
+  })
+}
+
+function wireguardAvailable() {
+  const probe = `${runId}wgprobe`
+  try {
+    command('wg', ['--version'])
+    ip('netns', 'add', probe)
+    ip('netns', 'exec', probe, 'ip', 'link', 'add', 'wgprobe0', 'type', 'wireguard')
+    return true
+  } catch { return false }
+  finally { try { ip('netns', 'del', probe) } catch {} }
+}
+
+function wireguardTransfer(node) {
+  const [, rx, tx] = net(node, 'wg', 'show', 'wg0', 'transfer').trim().split(/\s+/)
+  return { rx: Number(rx), tx: Number(tx) }
+}
+
+async function wireguardScenario(a, b) {
+  const fileBytes = 512 * 1024
+  for (const node of [a, b]) await node.stop()
+  const keys = nodes.map(node => {
+    const file = join(root, `wg-${node.label}.key`)
+    const secret = command('wg', ['genkey']).trim()
+    writeFileSync(file, `${secret}\n`, { mode: 0o600 })
+    return { file, pub: command('wg', ['pubkey'], `${secret}\n`).trim() }
+  })
+  for (const [index, node] of nodes.entries()) {
+    const peer = 1 - index
+    net(node, 'ip', 'link', 'set', 'vpn0', 'down')
+    net(node, 'ip', 'link', 'set', 'eth0', 'up')
+    net(node, 'ip', 'route', 'replace', 'default', 'via', '10.233.0.1')
+    net(node, 'ip', 'link', 'add', 'wg0', 'type', 'wireguard')
+    net(node, 'wg', 'set', 'wg0', 'listen-port', '51820', 'private-key', keys[index].file, 'peer', keys[peer].pub, 'allowed-ips', `10.44.0.${peer + 11}/32`, 'endpoint', `10.233.0.${peer + 11}:51820`)
+    net(node, 'ip', 'addr', 'add', `10.44.0.${index + 11}/24`, 'dev', 'wg0')
+    net(node, 'ip', 'link', 'set', 'wg0', 'mtu', '1420', 'up')
+    // 底层网络只放行 WireGuard 的外层 UDP；其余流量（包括 Engine 直接使用底层地址）一律丢弃并计数。
+    const peerUnderlay = `10.233.0.${peer + 11}`
+    nft(node, 'add', 'table', 'inet', 'uc_underlay')
+    nft(node, 'add', 'chain', 'inet', 'uc_underlay', 'output', '{ type filter hook output priority -60; policy accept; }')
+    nft(node, 'add', 'rule', 'inet', 'uc_underlay', 'output', 'ip', 'daddr', peerUnderlay, 'udp', 'dport', '51820', 'accept')
+    nft(node, 'add', 'rule', 'inet', 'uc_underlay', 'output', 'ip', 'daddr', peerUnderlay, 'counter', 'drop')
+    nft(node, 'add', 'chain', 'inet', 'uc_underlay', 'input', '{ type filter hook input priority -60; policy accept; }')
+    nft(node, 'add', 'rule', 'inet', 'uc_underlay', 'input', 'ip', 'saddr', peerUnderlay, 'udp', 'sport', '51820', 'accept')
+    nft(node, 'add', 'rule', 'inet', 'uc_underlay', 'input', 'ip', 'saddr', peerUnderlay, 'counter', 'drop')
+  }
+  const pingOnce = (node, address) => { try { net(node, 'ping', '-c', '1', '-W', '1', address); return true } catch { return false } }
+  await until(async () => pingOnce(a, '10.44.0.12') && pingOnce(b, '10.44.0.11'), 15_000, 'ENVIRONMENT INVALID: the WireGuard tunnel did not come up')
+  assert(!pingOnce(a, '10.233.0.12') && !pingOnce(b, '10.233.0.11'), 'ENVIRONMENT INVALID: the underlay is reachable outside the tunnel')
+  for (const node of [a, b]) await node.reset()
+  const created = await paired([a, b])
+  const proof = await pairingProof([a, b], created)
+  const before = [wireguardTransfer(a), wireguardTransfer(b)]
+  await transferFile(a, b, 'wireguard', fileBytes)
+  const after = [wireguardTransfer(a), wireguardTransfer(b)]
+  // 每个方向都发送了 fileBytes 字节，隧道计数必须至少增长这么多，证明数据经过了隧道而不是底层网络。
+  const sent = after.map((row, index) => row.tx - before[index].tx)
+  assert(sent.every(bytes => bytes >= fileBytes), `the tunnel carried less than the transferred payload (${sent.join(', ')} bytes)`)
+  return { ...proof, tunnel_mtu: 1420, file_bytes_each_direction: fileBytes, tunnel_tx_bytes_growth: sent, underlay_isolated: true, trusted_networks: 0, bidirectional_transfer: true }
+}
+
 async function run() {
   assert.equal(process.platform, 'linux', 'Linux network namespaces are required')
   command('nft', ['--version'])
@@ -512,6 +779,12 @@ async function run() {
   server.listen(0, '10.233.0.1')
   await once(server, 'listening')
   if (mode === 'relay') await startRelay()
+  if (mode === 'lan-only-vpn') {
+    // 第二张网桥模拟 VPN 网段：只有单播，网桥本机地址充当网关；节点的 eth0 保持关闭，VPN 是唯一路径。
+    ip('link', 'add', vpnBridge, 'type', 'bridge')
+    ip('addr', 'add', '100.64.0.1/24', 'dev', vpnBridge)
+    ip('link', 'set', vpnBridge, 'up')
+  }
   for (let index = 0; index < (mode === 'direct' || mode === 'known-peer' ? 3 : 2); index++) {
     const node = new Host(index)
     nodes.push(node)
@@ -524,6 +797,17 @@ async function run() {
     net(node, 'ip', 'link', 'set', 'lo', 'up')
     net(node, 'ip', 'addr', 'add', `10.233.0.${index + 11}/24`, 'dev', 'eth0')
     net(node, 'ip', 'link', 'set', 'eth0', 'up')
+    if (mode === 'lan-only') node.egressBaseline = watchEgress(node)
+    if (mode === 'lan-only-vpn') {
+      const vpn = `${runId}w${index}`.slice(0, 15)
+      ip('link', 'add', vpn, 'type', 'veth', 'peer', 'name', 'vpn0', 'netns', node.namespace)
+      ip('link', 'set', vpn, 'master', vpnBridge)
+      ip('link', 'set', vpn, 'up')
+      net(node, 'ip', 'addr', 'add', `100.64.0.${index + 11}/24`, 'dev', 'vpn0')
+      net(node, 'ip', 'link', 'set', 'vpn0', 'up')
+      net(node, 'ip', 'link', 'set', 'eth0', 'down')
+      node.egressBaseline = watchEgress(node, '100.64.0.1')
+    }
     await node.start()
     if (mode === 'relay') {
       await node.call('relay_config', { url: 'http://10.233.0.1:19090' })
@@ -534,6 +818,18 @@ async function run() {
   if (mode === 'known-peer') {
     const [a, b, c] = nodes
     await knownPeerRecoveryScenarios(a, b, c)
+    for (const node of nodes) await node.stop()
+    return
+  }
+  if (mode === 'lan-only') {
+    const [a, b] = nodes
+    await lanOnlyScenarios(a, b)
+    for (const node of nodes) await node.stop()
+    return
+  }
+  if (mode === 'lan-only-vpn') {
+    const [a, b] = nodes
+    await lanOnlyVpnScenarios(a, b)
     for (const node of nodes) await node.stop()
     return
   }
@@ -789,8 +1085,9 @@ finally {
             const reason = row.fields?.['error.reason']
             if (allowedReasons.has(reason)) node.failureReasons.push({ timestamp: row.timestamp, reason })
             const fields = row.fields ?? {}
-            if (['relay.status.observed', 'address.loaded', 'address.used'].includes(fields['event.name'])) {
-              node.networkFacts.push(Object.fromEntries(Object.entries(fields).filter(([key]) => ['event.name', 'connected_count', 'known_count', 'direct_count', 'relay_count', 'other_count'].includes(key))))
+            const historySync = fields['event.name'] === 'uc.operation.completed' && fields['uc.operation'] === 'membership_history_sync'
+            if (historySync || ['relay.status.observed', 'address.loaded', 'address.used', 'address.record.saved', 'address.record.save_failed'].includes(fields['event.name'])) {
+              node.networkFacts.push({ timestamp: row.timestamp, ...Object.fromEntries(Object.entries(fields).filter(([key]) => ['event.name', 'connected_count', 'known_count', 'direct_count', 'relay_count', 'other_count', 'uc.role', 'uc.outcome'].includes(key))) })
             }
           } catch {}
         }
@@ -819,6 +1116,7 @@ finally {
   let cleaned = true
   for (const namespace of namespaces.reverse()) { try { ip('netns', 'del', namespace) } catch { cleaned = false } }
   try { ip('link', 'del', bridge) } catch { cleaned = false }
+  if (mode === 'lan-only-vpn') { try { ip('link', 'del', vpnBridge) } catch { cleaned = false } }
   rmSync(root, { recursive: true, force: true })
   const binaries = [binary, legacyBinary, relayBinary].filter(Boolean).map(path => ({ sha256: createHash('sha256').update(readFileSync(path)).digest('hex') }))
   if (!cleaned) failed = true
