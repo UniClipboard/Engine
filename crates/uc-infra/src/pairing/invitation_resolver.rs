@@ -9,13 +9,14 @@ use std::time::Duration;
 use anyhow::Context;
 use async_trait::async_trait;
 use iroh::Endpoint;
-use tracing::debug;
+
 use uc_application::deps::{ResolveJoinerInvitationError, ResolveJoinerInvitationPort};
 use uc_core::membership::AdmissionShortInvitationCode;
 use uc_core::pairing::invitation::FullInvitation;
 use uc_observability_contract::diagnostics::connectivity::{observe_local_result, LocalWorkStep};
 
 use crate::rendezvous::{RendezvousClient, RendezvousHttpError};
+use uc_observability_contract::uc_debug;
 
 /// 通过完整邀请、rendezvous 或局域网 mDNS 解析新准入邀请。
 pub struct PairingInvitationResolverAdapter {
@@ -41,7 +42,7 @@ impl PairingInvitationResolverAdapter {
         }
 
         if crate::network::iroh::runtime_consts::lan_only() {
-            debug!("LAN-only 模式只通过 mDNS 解析邀请");
+            uc_debug!("LAN-only 模式只通过 mDNS 解析邀请");
             return self.resolve_via_mdns(code).await;
         }
 

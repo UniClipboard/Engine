@@ -24,13 +24,14 @@ use swarm_discovery::{Discoverer, IpClass, SpawnError};
 use thiserror::Error;
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
-use tracing::{debug, info, warn};
+
 use uc_observability_contract::diagnostics::{record_task_join_failure, DiagnosticTaskKind};
 
 use super::discovery_constants::{
     compute_code_hash, ticket_from_txt_attributes, PAIR_SERVICE_NAME, TXT_CODE_HASH,
     TXT_EXPIRES_AT_MS,
 };
+use uc_observability_contract::{uc_debug, uc_info, uc_warn};
 
 /// Errors raised while starting / running a resolver. Timeout is
 /// **not** an error — it returns `Ok(None)` so the caller can compose
@@ -82,7 +83,7 @@ impl MdnsPairingResolver {
         //     apples to apples.
         let self_actor_id = super::mdns_publisher::derive_actor_id(self_node_id);
 
-        debug!(code_hash = %code_hash, "starting mDNS pairing resolver");
+        uc_debug!("starting mDNS pairing resolver");
 
         // One-shot channel: the callback fires for every peer the
         // browse sees; on the first match we send and stop using
@@ -176,17 +177,17 @@ impl MdnsPairingResolver {
 
         match tokio::time::timeout(timeout, rx.recv()).await {
             Ok(Some(ticket)) => {
-                info!(code_hash = %code_hash, "mDNS pairing resolver matched");
+                uc_info!("mDNS pairing resolver matched");
                 Ok(Some(ticket))
             }
             Ok(None) => {
                 // Channel closed without a message — shouldn't happen
                 // until guard drop. Treat as no-match.
-                warn!(code_hash = %code_hash, "mDNS resolver channel closed without match");
+                uc_warn!("mDNS resolver channel closed without match");
                 Ok(None)
             }
             Err(_) => {
-                debug!(code_hash = %code_hash, "mDNS resolver timed out without match");
+                uc_debug!("mDNS resolver timed out without match");
                 Ok(None)
             }
         }

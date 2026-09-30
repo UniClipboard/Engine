@@ -28,7 +28,7 @@ use std::time::Duration;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::{debug, warn};
+use uc_observability_contract::{uc_debug, uc_warn};
 
 /// Production rendezvous service base URL.
 pub const RENDEZVOUS_BASE_URL: &str = "https://rendezvous.uniclipboard.app";
@@ -157,7 +157,7 @@ impl RendezvousClient {
     ) -> Result<CreatePairingResponse, RendezvousHttpError> {
         let url = self.url("/v1/pairings");
         let resp = self.http.post(&url).json(req).send().await.map_err(|err| {
-            warn!(
+            uc_warn!(
                 failure_stage = "transport",
                 "rendezvous create transport failed"
             );
@@ -189,7 +189,7 @@ impl RendezvousClient {
             .send()
             .await
             .map_err(|err| {
-                debug!(
+                uc_debug!(
                     failure_stage = "transport",
                     "rendezvous resolve transport failed"
                 );
@@ -218,7 +218,7 @@ impl RendezvousClient {
             .send()
             .await
             .map_err(|err| {
-                warn!(
+                uc_warn!(
                     failure_stage = "transport",
                     "rendezvous consume transport failed"
                 );
@@ -243,7 +243,7 @@ impl Default for RendezvousClient {
 /// extract the error slug.
 async fn classify_status(resp: reqwest::Response, status: StatusCode) -> RendezvousHttpError {
     if status.is_server_error() {
-        warn!(%status, "rendezvous 5xx");
+        uc_warn!("rendezvous 5xx");
         return RendezvousHttpError::ServiceUnavailable(status);
     }
     match status {
@@ -252,7 +252,7 @@ async fn classify_status(resp: reqwest::Response, status: StatusCode) -> Rendezv
         StatusCode::CONFLICT => RendezvousHttpError::Conflict,
         _ => {
             let slug = parse_error_slug(resp).await;
-            warn!(%status, "rendezvous unexpected status");
+            uc_warn!("rendezvous unexpected status");
             RendezvousHttpError::Unexpected { status, slug }
         }
     }

@@ -16,13 +16,11 @@
 
 use std::sync::Arc;
 
-use tracing::warn;
-
 use uc_core::ids::EntryId;
 use uc_core::ports::clipboard::EntryFileSetRepositoryPort;
 use uc_core::ports::SettingsPort;
 use uc_core::{ClipboardChangeOrigin, SystemClipboardSnapshot};
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, log_fields::log_id, uc_warn};
 
 use crate::clipboard::sync::apply_inbound::{compute_file_set_component, InboundFileSetManifest};
 use crate::clipboard::sync::V3BlobRef;
@@ -90,11 +88,11 @@ pub(crate) async fn assemble_outbound_payload(
             size_cap_exceeded,
             unsupported_member,
         } => {
-            warn!(
-                entry_id = %entry_id,
-                ingest_failed,
-                size_cap_exceeded,
-                unsupported_member,
+            uc_warn!(
+                entry_id = log_id(&entry_id),
+                ingest_failed = ingest_failed,
+                size_cap_exceeded = size_cap_exceeded,
+                unsupported_member = unsupported_member,
                 "outbound payload: file-set manifest has excluded lines; not reproducible (all-or-nothing)"
             );
             return Err(OutboundPayloadError::Unavailable);
@@ -114,18 +112,18 @@ pub(crate) async fn assemble_outbound_payload(
                 size: meta.len(),
             }),
             Err(err) if from_manifest => {
-                warn!(
+                uc_warn!(
                     error_kind = "file_set_member_unreadable",
                     io_error_kind = io_error_kind(&err),
-                    entry_id = %entry_id,
+                    entry_id = log_id(&entry_id),
                     "outbound payload: file-set member unreadable; not reproducible (all-or-nothing)"
                 );
                 return Err(OutboundPayloadError::Unavailable);
             }
-            Err(err) => warn!(
+            Err(err) => uc_warn!(
                 error_kind = "file_metadata_unreadable",
                 io_error_kind = io_error_kind(&err),
-                entry_id = %entry_id,
+                entry_id = log_id(&entry_id),
                 "outbound payload: excluding clipboard file whose metadata could not be read"
             ),
         }
@@ -143,8 +141,8 @@ pub(crate) async fn assemble_outbound_payload(
         )
         .await;
     let Some(mut clipboard_intent) = plan.clipboard else {
-        warn!(
-            entry_id = %entry_id,
+        uc_warn!(
+            entry_id = log_id(&entry_id),
             "outbound payload: planner excluded every referenced file; not reproducible"
         );
         return Err(OutboundPayloadError::Unavailable);
@@ -156,8 +154,8 @@ pub(crate) async fn assemble_outbound_payload(
     // identity covers. Serving the remainder would ship path text under a
     // content-keyed identity — refuse instead.
     if from_manifest && plan.files.len() != extracted_paths_count {
-        warn!(
-            entry_id = %entry_id,
+        uc_warn!(
+            entry_id = log_id(&entry_id),
             published = plan.files.len(),
             expected = extracted_paths_count,
             "outbound payload: planner excluded manifest members; not reproducible (all-or-nothing)"
@@ -183,8 +181,8 @@ pub(crate) async fn assemble_outbound_payload(
         let mut capture_digests = expected_digests;
         capture_digests.dedup();
         if wire_digests != capture_digests {
-            warn!(
-                entry_id = %entry_id,
+            uc_warn!(
+                entry_id = log_id(&entry_id),
                 "outbound payload: file content drifted between capture and send; wire identity keyed on current bytes"
             );
         }

@@ -25,7 +25,9 @@ use std::sync::Mutex;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use uc_application::deps::ClipboardReceiverPort;
 use uc_application::deps::PeerIdentityDirectoryPort;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_vocab, uc_debug, uc_info, uc_warn,
+};
 
 use super::protocol_router::ProtocolRouterBuilder;
 use super::session_generation::{
@@ -38,8 +40,8 @@ use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, RelayConfig, RelayMode, RelayUrl, TransportAddr};
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 use noq_proto::congestion::{Bbr3Config, CubicConfig};
+use tracing::instrument;
 use tracing::instrument::WithSubscriber;
-use tracing::{debug, info, instrument, warn};
 use uc_application::deps::{IssueMembershipBranchRecoveryPort, KnownPeerContact};
 use uc_core::settings::model::CongestionController;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -391,13 +393,10 @@ fn log_publish_addrs(endpoint: &Endpoint, stage: &'static str) {
             _ => None,
         })
         .collect();
-    info!(
-        stage,
-        endpoint_id = %endpoint.id().fmt_short(),
+    uc_info!(
+        stage = stage,
         ip_addr_count = ip_addrs.len(),
         relay_url_count = relay_urls.len(),
-        ip_addrs = ?ip_addrs,
-        relay_urls = ?relay_urls,
         "iroh endpoint publish snapshot (refs UniClipboard#486)"
     );
 }
@@ -426,7 +425,10 @@ fn build_transport_config(cc: CongestionController) -> QuicTransportConfig {
         CongestionController::Cubic => Arc::new(CubicConfig::default()),
         CongestionController::Bbr3 => Arc::new(Bbr3Config::default()),
     };
-    info!(congestion_controller = %cc, "QUIC congestion controller selected");
+    uc_info!(
+        congestion_controller = log_vocab(&cc),
+        "QUIC congestion controller selected"
+    );
     QuicTransportConfig::builder()
         .congestion_controller_factory(cc_factory)
         // QUIC flow-control sized for hole-punched cross-WAN BDP. iroh-blobs
@@ -598,7 +600,7 @@ impl Drop for NodeRunLease {
             super::runtime_consts::clear_lan_only();
             match NODE_RUN_ACTIVE.lock() {
                 Ok(mut active) => *active = false,
-                Err(_) => warn!("iroh node runtime state lock poisoned during release"),
+                Err(_) => uc_warn!("iroh node runtime state lock poisoned during release"),
             }
         }
     }
@@ -804,9 +806,9 @@ impl IrohNodeBuilder {
             })?;
         // Snapshot the overlay flag before consuming `config` into `Self`.
         let allow_overlay = config.allow_overlay_network_addrs;
-        info!(
+        uc_info!(
             target: "iroh.addr_filter",
-            allow_overlay,
+            allow_overlay = allow_overlay,
             "addr filter configured for overlay-network addresses (Tailscale 100.64/10 + fd7a:115c:a1e0::/48)"
         );
         let recorder =
@@ -862,7 +864,7 @@ impl IrohNodeBuilder {
         super::runtime_consts::install_lan_only(config.disable_relays);
         if config.disable_relays {
             endpoint_builder = endpoint_builder.clear_address_lookup();
-            info!(
+            uc_info!(
                 target: "iroh.address_lookup",
                 "LAN-only mode: cleared n0 pkarr/DNS lookup services; only mDNS will publish/resolve",
             );
@@ -883,9 +885,8 @@ impl IrohNodeBuilder {
                         anyhow::Error::new(err).context("pin iroh UDP port (UC_IROH_BIND_PORT)"),
                     )
                 })?;
-            info!(
+            uc_info!(
                 target: "iroh.bind",
-                bind_port = port,
                 "pinned iroh UDP socket to fixed IPv4 port (UC_IROH_BIND_PORT)"
             );
         }
@@ -898,9 +899,8 @@ impl IrohNodeBuilder {
         // desktop that knows only this address can dial the node directly.
         if let Some(public_addr) = config.public_addr {
             endpoint_builder = endpoint_builder.external_addr(public_addr);
-            info!(
+            uc_info!(
                 target: "iroh.bind",
-                %public_addr,
                 "advertising configured public address as a direct candidate (UC_IROH_PUBLIC_ADDR)",
             );
         }
@@ -983,8 +983,7 @@ impl IrohNodeBuilder {
         ] {
             router_builder = router_builder.accept(alpn, session_protocols.dispatcher(alpn));
         }
-        debug!(
-            endpoint_id = %endpoint.id().fmt_short(),
+        uc_debug!(
             disable_relays = config.disable_relays,
             allow_overlay_network_addrs = config.allow_overlay_network_addrs,
             custom_relay_count = config.custom_relay_urls.len(),
@@ -1435,11 +1434,11 @@ impl IrohSessionBuilder {
         match store.tags().delete_prefix(b"auto-").await {
             Ok(removed) => {
                 if removed > 0 {
-                    info!(removed, "iroh blobs: swept stale auto-* tags");
+                    uc_info!(removed = removed, "iroh blobs: swept stale auto-* tags");
                 }
             }
             Err(err) => {
-                warn!(
+                uc_warn!(
                     error_kind = "stale_tag_sweep",
                     io_error_kind = io_error_kind(&err),
                     "iroh blobs: failed to sweep stale auto-* tags (non-fatal)"
@@ -1456,9 +1455,8 @@ impl IrohSessionBuilder {
             store,
         ));
 
-        info!(
-            alpn = %String::from_utf8_lossy(BLOBS_ALPN),
-            endpoint_id = %self.context.endpoint.id().fmt_short(),
+        uc_info!(
+            alpn = log_vocab(&String::from_utf8_lossy(BLOBS_ALPN)),
             gc_interval_secs = crate::network::iroh::blobs::BLOBS_GC_INTERVAL.as_secs(),
             "iroh blobs acceptor installed"
         );

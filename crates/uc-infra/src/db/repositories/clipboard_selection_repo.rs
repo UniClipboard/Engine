@@ -12,6 +12,7 @@ use diesel::{ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl};
 use uc_core::clipboard::ClipboardSelectionDecision;
 use uc_core::ids::EntryId;
 use uc_core::ports::clipboard::ClipboardSelectionRepositoryPort;
+use uc_observability_contract::{log_fields::log_id, uc_error};
 
 /// In-memory clipboard selection repository (placeholder)
 ///
@@ -151,9 +152,9 @@ where
                     .optional()?)
             })
             .map_err(|e| {
-                tracing::error!(
+                uc_error!(
                     error = e.as_ref() as &dyn std::error::Error,
-                    entry_id = %entry_id_str,
+                    entry_id = log_id(&entry_id_str),
                     "failed to query clipboard_selection"
                 );
                 e

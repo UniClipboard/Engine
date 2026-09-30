@@ -37,7 +37,7 @@ use anyhow::{Context, Result};
 use indexmap::IndexMap;
 use tokio::fs;
 use uc_core::ids::RepresentationId;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, log_fields::log_id, uc_warn};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -167,7 +167,7 @@ impl SpoolManager {
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(err) => {
-                    tracing::warn!(
+                    uc_warn!(
                         error_kind = "spool_dir_entry_read",
                         io_error_kind = io_error_kind(&err),
                         "Skipping unreadable spool dir entry at startup"
@@ -179,7 +179,7 @@ impl SpoolManager {
                 Ok(meta) => meta,
                 Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
                 Err(err) => {
-                    tracing::warn!(
+                    uc_warn!(
                         error_kind = "spool_entry_metadata",
                         io_error_kind = io_error_kind(&err),
                         "Skipping spool entry with unreadable metadata at startup"
@@ -192,7 +192,7 @@ impl SpoolManager {
             }
             let file_name = entry.file_name();
             let Some(name) = file_name.to_str() else {
-                tracing::warn!("Skipping spool entry with non-utf8 filename at startup");
+                uc_warn!("Skipping spool entry with non-utf8 filename at startup");
                 continue;
             };
             let modified = meta.modified().unwrap_or(UNIX_EPOCH);
@@ -241,8 +241,8 @@ impl SpoolManager {
                 Err(err) => {
                     // 不是 ENOENT 的失败保留为 warn，因为内存账本已扣减；
                     // 磁盘上残留的旧文件最终会被 SpoolJanitor 的 TTL 清理收掉。
-                    tracing::warn!(
-                        representation_id = %victim_id,
+                    uc_warn!(
+                        representation_id = log_id(&victim_id),
                         error_kind = "spool_file_evict",
                         io_error_kind = io_error_kind(&err),
                         "Failed to evict oldest spool file; in-memory counter already decremented",
@@ -410,13 +410,13 @@ impl SpoolManager {
             }
             let file_name = entry.file_name();
             let Some(name) = file_name.to_str() else {
-                tracing::warn!("Skipping spool entry with non-utf8 filename");
+                uc_warn!("Skipping spool entry with non-utf8 filename");
                 continue;
             };
             let modified = match meta.modified() {
                 Ok(t) => t,
                 Err(err) => {
-                    tracing::warn!(
+                    uc_warn!(
                         error_kind = "spool_entry_mtime",
                         io_error_kind = io_error_kind(&err),
                         "Skipping spool entry with unreadable mtime"

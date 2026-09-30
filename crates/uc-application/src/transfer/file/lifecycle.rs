@@ -9,14 +9,16 @@ use std::time::Duration;
 
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use tracing::{info, info_span, warn, Instrument};
+use tracing::{info_span, Instrument};
 
 use uc_core::file_transfer::FileTransferCancellationReason;
 use uc_core::ports::file_transfer::TrackedFileTransferStatus;
 use uc_core::ports::inbound_file_target::ResolveInboundSaveDirPort;
 use uc_core::ports::EnsureFileTransferPrivacyMaintenancePort;
 use uc_core::ports::{ClockPort, FailInflightTransfersPort, ListExpiredInflightTransfersPort};
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_id, uc_info, uc_warn,
+};
 
 use crate::facade::blob_transfer::{BlobTransferFacade, InboundCancelOutcome};
 use crate::facade::host_event::{HostEvent, HostEventBus, TransferHostEvent};
@@ -191,7 +193,7 @@ impl FileTransferLifecycle {
                         biased;
                         changed = cancel.changed() => {
                             if changed.is_err() || *cancel.borrow() {
-                                info!("File transfer timeout sweep shutting down");
+                                uc_info!("File transfer timeout sweep shutting down");
                                 return;
                             }
                             continue;
@@ -209,7 +211,7 @@ impl FileTransferLifecycle {
                     {
                         Ok(list) => list,
                         Err(err) => {
-                            warn!(error_kind = "timeout_sweep_query", io_error_kind = io_error_kind(&err), "Timeout sweep query failed");
+                            uc_warn!(error_kind = "timeout_sweep_query", io_error_kind = io_error_kind(&err), "Timeout sweep query failed");
                             continue;
                         }
                     };
@@ -218,7 +220,7 @@ impl FileTransferLifecycle {
                         continue;
                     }
 
-                    info!(
+                    uc_info!(
                         count = expired.len(),
                         "Timeout sweep found expired in-flight transfers"
                     );
@@ -243,10 +245,10 @@ impl FileTransferLifecycle {
                                     // fall through to mark_failed
                                 }
                                 Err(err) => {
-                                    warn!(
+                                    uc_warn!(
                                         error_kind = "inbound_transfer_cancel",
                                         io_error_kind = io_error_kind(&err),
-                                        transfer_id = %t.transfer_id,
+                                        transfer_id = log_id(&t.transfer_id),
                                         "Timeout sweep: cancel_inbound_transfer failed, falling back to mark_failed"
                                     );
                                 }
@@ -256,10 +258,10 @@ impl FileTransferLifecycle {
                         let reason = timeout_reason_for(t.status);
 
                         if let Err(err) = fail_inflight.mark_failed(&t.transfer_id, reason, now_ms).await {
-                            warn!(
+                            uc_warn!(
                                 error_kind = "transfer_mark_failed",
                                 io_error_kind = io_error_kind(&err),
-                                transfer_id = %t.transfer_id,
+                                transfer_id = log_id(&t.transfer_id),
                                 "Failed to mark expired transfer as failed"
                             );
                             continue;
@@ -303,11 +305,11 @@ impl FileTransferLifecycle {
         };
 
         if cleanup_targets.is_empty() {
-            info!("No orphaned in-flight transfers found at startup");
+            uc_info!("No orphaned in-flight transfers found at startup");
             return Ok(());
         }
 
-        info!(
+        uc_info!(
             count = cleanup_targets.len(),
             "Reconciled orphaned in-flight transfers at startup"
         );
@@ -423,7 +425,7 @@ async fn sweep_inbound_staging(
                 }
                 Ok(None) => break,
                 Err(err) => {
-                    warn!(
+                    uc_warn!(
                         error_kind = "cache_dir_list",
                         io_error_kind = io_error_kind(&err),
                         "could not enumerate managed cache while sweeping staging areas"
@@ -435,7 +437,7 @@ async fn sweep_inbound_staging(
         // No cache dir yet (first run) is the normal case, not a problem.
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
         Err(err) => {
-            warn!(
+            uc_warn!(
                 error_kind = "cache_dir_open",
                 io_error_kind = io_error_kind(&err),
                 "could not open managed cache while sweeping staging areas"
@@ -456,7 +458,7 @@ async fn cleanup_cached_path(cached_path: &str) {
 
     if path.is_file() {
         if let Err(err) = tokio::fs::remove_file(path).await {
-            warn!(
+            uc_warn!(
                 error_kind = "cache_file_remove",
                 io_error_kind = io_error_kind(&err),
                 "Failed to remove cached file"
@@ -472,7 +474,7 @@ async fn cleanup_cached_path(cached_path: &str) {
             if let Ok(mut entries) = tokio::fs::read_dir(parent).await {
                 if entries.next_entry().await.ok().flatten().is_none() {
                     if let Err(err) = tokio::fs::remove_dir(parent).await {
-                        warn!(
+                        uc_warn!(
                             error_kind = "transfer_dir_remove",
                             io_error_kind = io_error_kind(&err),
                             "Failed to remove empty transfer directory"

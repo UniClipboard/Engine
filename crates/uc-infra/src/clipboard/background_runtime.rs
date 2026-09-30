@@ -8,7 +8,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::{mpsc, Mutex};
-use tracing::{info, warn};
 
 use uc_application::deps::{ClipboardBackgroundError, ClipboardBackgroundPort};
 use uc_core::ids::RepresentationId;
@@ -17,7 +16,7 @@ use uc_core::ports::clipboard::{
 };
 use uc_core::ports::{ClockPort, ContentHashPort};
 use uc_core::TaskRegistry;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_info, uc_warn};
 
 use super::background_activity::BackgroundActivity;
 use crate::blob::BlobWriterPort;
@@ -108,8 +107,8 @@ impl ClipboardBackgroundPort for ClipboardBackgroundRuntime {
             .await
             .map_err(|source| ClipboardBackgroundError::SpoolRecovery { source })?;
         if recovered > 0 {
-            info!(
-                recovered,
+            uc_info!(
+                recovered = recovered,
                 "recovered staged clipboard representations from spool"
             );
         }
@@ -123,7 +122,10 @@ impl ClipboardBackgroundPort for ClipboardBackgroundRuntime {
             .await
             .map_err(|source| ClipboardBackgroundError::SpoolRecovery { source })?;
         if demoted > 0 {
-            info!(demoted, "demoted orphaned staged clipboard representations");
+            uc_info!(
+                demoted = demoted,
+                "demoted orphaned staged clipboard representations"
+            );
         }
 
         let worker = BackgroundBlobWorker::new(
@@ -145,7 +147,7 @@ impl ClipboardBackgroundPort for ClipboardBackgroundRuntime {
                 worker
                     .run_until_cancelled(activity, cancel.cancelled_owned())
                     .await;
-                info!("background clipboard blob worker stopped");
+                uc_info!("background clipboard blob worker stopped");
             })
             .await;
 
@@ -169,9 +171,9 @@ impl ClipboardBackgroundPort for ClipboardBackgroundRuntime {
                                 continue;
                             };
                             match janitor.run_once().await {
-                            Ok(removed) if removed > 0 => info!(removed, "removed expired spool entries"),
+                            Ok(removed) if removed > 0 => uc_info!(removed = removed, "removed expired spool entries"),
                             Ok(_) => {}
-                            Err(error) => warn!(error_kind = "spool_janitor_sweep", io_error_kind = io_error_kind(error.as_ref()), "spool janitor sweep failed"),
+                            Err(error) => uc_warn!(error_kind = "spool_janitor_sweep", io_error_kind = io_error_kind(error.as_ref()), "spool janitor sweep failed"),
                             }
                         }
                     }

@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use iroh::SecretKey;
-use tracing::{debug, instrument};
+use tracing::instrument;
 
 use uc_core::{
     ports::{
@@ -18,6 +18,7 @@ use uc_core::{
     },
     security::IdentityFingerprint,
 };
+use uc_observability_contract::uc_debug;
 
 /// Secure-storage key under which the 32-byte Ed25519 secret is persisted.
 ///
@@ -122,7 +123,7 @@ impl LocalIdentityPort for IrohIdentityStore {
         let sk = Self::generate_new();
         self.persist_secret(&sk)?;
         let fp = self.derive_fingerprint(&sk)?;
-        debug!(fingerprint = %fp, "iroh identity created");
+        uc_debug!("iroh identity created");
         Ok(fp)
     }
 
@@ -134,7 +135,7 @@ impl LocalIdentityPort for IrohIdentityStore {
         let sk = Self::generate_new();
         self.persist_secret(&sk)?;
         let fp = self.derive_fingerprint(&sk)?;
-        debug!(fingerprint = %fp, "iroh identity generated via ensure()");
+        uc_debug!("iroh identity generated via ensure()");
         Ok(fp)
     }
 

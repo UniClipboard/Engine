@@ -371,21 +371,27 @@ decorator 负责。Sponsor 在等待执行锁之前确定已认证消息的固�
   稳定版 Rust 只能对已知具体类型 `downcast`：`std::io::Error` 与 `serde_json::Error` 内置结构化提取；仓库自有错误类型由所属
   crate 用 `log_safe_errors!` 登记（Application 与 Infra 各有登记入口，由 Engine 装配统一调用；宏同时识别 `#[source] Box<T>` 得到的 `Box<T>` 层）；其余层，包括 anyhow 的
   context 层与第三方错误，一律写 `<opaque>` 并累计 `opaque_error_layers`，不回退到 `Display`。
-- **自由文本字段默认拒绝。** 数字与布尔字段原样记录；字符串与 `%`/`?` 格式化字段只有字段名在
-  `crates/uc-observability-runtime/src/module_log_fields.rs` 的 `ALLOWED_TEXT_FIELDS`（固定词表、枚举名、应用生成的随机标识）
-  中才写出取值，其余一律记为 `<omitted>`。清单按字段名审定，并核对过存量记录点的取值表达式；名字审定不证明每个取值安全，
-  取值仍须遵守下条敏感值规则。设备名、路径、地址、对端与节点标识、指纹、空间/资料标识、标签名、内容派生的哈希均不在允许清单内。
-- **消息正文只能是字面量。** 取值放进字段，不得写进格式串（`check-rust-style.mjs` 拒绝新增的内插与位置参数）；运行期无法区分字面量与
-  已插值的消息，所以这一条靠静态检查保证。
+- **自由文本字段默认拒绝。** 数字与布尔字段原样记录；文本字段只有登记在字段目录
+  （`crates/uc-observability-contract/src/log_fields.rs`）且类别为文本时才写出取值，其余一律记为 `<omitted>`。
+  文本类别有三种：`Literal`（`&'static str` 字面量）、`Identifier(random)`（应用生成的随机标识，经 `log_id(&x)` 适配）和
+  `Vocabulary(reviewed)`（已审定的词表类文本，如枚举名、表名，字面量直接接受，其余经 `log_vocab` 或 `log_vocab_debug` 适配），
+  另有 `IoKind`（`io_error_kind(..)` 的结果）。目录按字段名审定，适配器表示调用点断言“该取值属于这个类别”，并不由类型证明；
+  取值仍须遵守下条敏感值规则。设备名、路径、地址、对端与节点标识、指纹、空间/资料标识、会话与连接标识、标签名、内容派生的哈希
+  均不在目录内，因此不能出现在 `uc_*!` 记录点里。
+- **消息正文只能是字面量。** 取值放进字段，不得写进格式串；`uc_*!` 宏只接受字面量消息，内插在编译期失败。
 - **敏感值。** 设备名、路径、地址、节点或对端标识、邀请、令牌、密钥、剪贴板内容、文件名若可能进入日志字段、span 字段或错误文本，
   必须用 `Sensitive<T>` 包装；`Sensitive` 的 `Debug` 与 `Display` 只输出 `<redacted>`。任意 `Display` 不因“只是字符串”而视为安全。
-- **写入口与字段目录（ADR-030，迁移中）。** 新的记录点使用 `uc_trace!`、`uc_debug!`、`uc_info!`、`uc_warn!`、`uc_error!`
-  （`uc_observability_contract::log_event`）：字段名必须登记在 `log_fields` 目录，值必须是该字段声明类别接受的类型
-  （固定词表字面量、经 `id(&x)` 适配的应用生成随机标识、数字、布尔），`error = &e as &dyn Error` 是唯一特例。
-  未登记字段与类别不符是编译错误，取代运行期 `<omitted>`。运行期文本字段白名单由目录并上过渡清单 `LEGACY_TEXT_FIELDS` 得出；
-  字段迁移到目录后从过渡清单移除。直接使用 `tracing` 日志宏的数量由 `check-log-macro-ratchet.mjs` 按文件只减不增，
-  `tracing::event!` 只有观测 crate 自己可以直接使用。
-- **规则检查。** `check-rust-style.mjs` 对新增行要求 `#[instrument]` 带 `skip_all` 或显式 `fields(..)`、日志字段名已在上述清单中归类、消息正文为字面量，并拒绝 `#[error]` 文本内插
+- **写入口与字段目录（ADR-030）。** 日志一律使用 `uc_trace!`、`uc_debug!`、`uc_info!`、`uc_warn!`、`uc_error!`
+  （`uc_observability_contract::log_event`；绑定经 `uc_engine::observability` 使用同一组宏与适配器）。字段名必须登记在
+  `log_fields` 目录，值必须是该字段声明类别接受的类型，`error = &e as &dyn Error` 是唯一特例；`target:` 只接受字面量。
+  未登记字段与类别不符是编译错误，取代运行期 `<omitted>`。新增字段先在目录登记并说明类别，`Identifier` 与 `Vocabulary`
+  必须写明确认记号（`random`、`reviewed`），漏写是编译错误。运行期文本字段白名单直接由目录得出，
+  只保留为绕过宏的调用（观测运行期自己的集成测试、第三方 crate 事件）的最后一道防线。
+- **直接使用 tracing 日志宏被禁止。** `node scripts/architecture/check-direct-log-macros.mjs`（PR Check）用 clippy 的
+  `disallowed_macros` 在默认特性与 `lan-compat` 下各检查一轮，任何直接使用 `tracing::{trace,debug,info,warn,error}!` 都失败；
+  `tracing::event!` 只有观测 crate 自己可以直接使用。clippy 只认 crate 级 allow，因此确需保留原始 tracing 的文件
+  （观测运行期验证未登记字段处理的三个集成测试）在文件顶部用 `#![allow(clippy::disallowed_macros)]` 并写明理由。
+- **规则检查。** `check-rust-style.mjs` 对新增行要求 `#[instrument]` 带 `skip_all` 或显式 `fields(..)`，拒绝直接使用日志宏，并拒绝 `#[error]` 文本内插
   `String`、`PathBuf`、`Vec<u8>`、`&str` 等未包装字段（文本启发式，需要人工复核）。
 
 现有代码中的字符串化与日志正文清单见[错误来源保留执行计划](../exec-plans/completed/2026-09-24-error-source-preservation.md)。

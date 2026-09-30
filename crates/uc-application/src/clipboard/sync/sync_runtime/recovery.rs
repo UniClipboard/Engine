@@ -3,7 +3,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
 
 use uc_core::clipboard::{DeliveryFailureReason, EntryDeliveryRecord, EntryDeliveryStatus};
 use uc_core::ids::{DeviceId, EntryId};
@@ -18,6 +17,7 @@ use crate::clipboard::outbound::{
     ClipboardOutboundFacade, NotResendableReason, ResendEntryError, ResendReport,
 };
 use crate::deps::CurrentSpaceMemberScopePort;
+use uc_observability_contract::{log_fields::log_id, uc_debug, uc_info, uc_warn};
 
 #[cfg(test)]
 mod tests;
@@ -92,7 +92,7 @@ impl OfflineDeliveryRecovery {
                         }
                         Ok(_) => {}
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
-                            warn!(missed, "clipboard delivery recovery: presence events lagged");
+                            uc_warn!(missed = missed, "clipboard delivery recovery: presence events lagged");
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                     }
@@ -113,8 +113,8 @@ impl OfflineDeliveryRecovery {
     ) {
         for target in targets {
             if !supersede_older_recoverable_entries(&self.deps, entry_id, target).await {
-                warn!(
-                    entry_id = %entry_id,
+                uc_warn!(
+                    entry_id = log_id(&entry_id),
                     "clipboard delivery recovery: unable to replace older offline content"
                 );
             }
@@ -146,7 +146,7 @@ async fn recover_currently_online(deps: &OfflineDeliveryRecoveryDeps, cancel: &C
     let peers = match deps.known_peers.list().await {
         Ok(peers) => peers,
         Err(_) => {
-            warn!(
+            uc_warn!(
                 error_kind = "peer_listing",
                 "clipboard delivery recovery: startup scan skipped"
             );
@@ -209,7 +209,7 @@ async fn recover_for_target(
         let entries = match deps.entries.list_entries(RECOVERY_PAGE_SIZE, offset).await {
             Ok(entries) => entries,
             Err(_) => {
-                warn!(
+                uc_warn!(
                     error_kind = "entry_listing",
                     "clipboard delivery recovery: scan stopped"
                 );
@@ -230,7 +230,7 @@ async fn recover_for_target(
             let source = match deps.events.get_source_device(&entry.event_id).await {
                 Ok(source) => source,
                 Err(_) => {
-                    warn!(
+                    uc_warn!(
                         error_kind = "entry_source",
                         "clipboard delivery recovery: entry skipped"
                     );
@@ -246,7 +246,7 @@ async fn recover_for_target(
             let records = match deps.deliveries.list_by_entry(&entry.entry_id).await {
                 Ok(records) => records,
                 Err(_) => {
-                    warn!(
+                    uc_warn!(
                         error_kind = "delivery_lookup",
                         "clipboard delivery recovery: entry skipped"
                     );
@@ -268,8 +268,8 @@ async fn recover_for_target(
             }
             // 旧内容失效是一项完整动作，必须完成后才处理停止，避免重启后补发旧内容。
             if !supersede_older_recoverable_entries(deps, &entry.entry_id, &target).await {
-                warn!(
-                    entry_id = %entry.entry_id,
+                uc_warn!(
+                    entry_id = log_id(&entry.entry_id),
                     "clipboard delivery recovery: unable to replace older offline content"
                 );
                 return;
@@ -290,8 +290,8 @@ async fn recover_for_target(
                 .deliver_existing_local_entry(entry.entry_id.clone(), vec![target.clone()])
                 .await
             {
-                Ok(report) => info!(
-                    entry_id = %entry.entry_id,
+                Ok(report) => uc_info!(
+                    entry_id = log_id(&entry.entry_id),
                     accepted = report.accepted,
                     duplicate = report.duplicate,
                     offline = report.offline,
@@ -305,7 +305,11 @@ async fn recover_for_target(
                     }
                 }
                 Err(_) => {
-                    debug!(error_kind = "delivery", entry_id = %entry.entry_id, "clipboard delivery recovery skipped entry");
+                    uc_debug!(
+                        error_kind = "delivery",
+                        entry_id = log_id(&entry.entry_id),
+                        "clipboard delivery recovery skipped entry"
+                    );
                 }
             }
             return;
@@ -396,7 +400,7 @@ async fn stop_automatic_recovery(
         updated_at_ms: deps.clock.now_ms(),
     };
     if deps.deliveries.record_attempt(&record).await.is_err() {
-        warn!(
+        uc_warn!(
             error_kind = "delivery_record",
             "clipboard delivery recovery: failed to stop unavailable entry recovery"
         );
@@ -416,7 +420,7 @@ async fn supersede_delivery(
         updated_at_ms: deps.clock.now_ms(),
     };
     if deps.deliveries.record_attempt(&record).await.is_err() {
-        warn!(
+        uc_warn!(
             error_kind = "delivery_record",
             "clipboard delivery recovery: failed to stop ineligible target recovery"
         );

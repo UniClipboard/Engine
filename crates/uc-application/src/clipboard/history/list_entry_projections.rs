@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use std::sync::Arc;
-use tracing::{debug, warn};
+
 use uc_core::clipboard::link_utils::{detect_link_urls as detect_web_urls, parse_uri_list};
 use uc_core::clipboard::{
     ClipboardEntryContentCategory, MimeType, PayloadAvailability, PersistedClipboardRepresentation,
@@ -15,7 +15,9 @@ use uc_core::ports::{
 };
 use uc_core::search::document::ContentType;
 use uc_core::search::tag::TaggableContent;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_id, uc_debug, uc_error, uc_warn,
+};
 
 use crate::clipboard::file_set_query::load_has_directory_structure;
 use crate::search::tagging::evaluate_builtin_content_tags;
@@ -304,15 +306,15 @@ impl ListClipboardEntryProjectionsUseCase {
             let selection = match self.selection_repo.get_selection(&entry.entry_id).await {
                 Ok(Some(selection)) => selection,
                 Ok(None) => {
-                    warn!(
-                        entry_id = %entry_id_str,
+                    uc_warn!(
+                        entry_id = log_id(&entry_id_str),
                         "Skipping entry without selection while listing projections"
                     );
                     continue;
                 }
                 Err(e) => {
-                    warn!(
-                        entry_id = %entry_id_str,
+                    uc_warn!(
+                        entry_id = log_id(&entry_id_str),
                         error_kind = "selection_lookup",
                         io_error_kind = io_error_kind(e.as_ref()),
                         "Skipping entry due to selection lookup failure"
@@ -329,17 +331,17 @@ impl ListClipboardEntryProjectionsUseCase {
             {
                 Ok(Some(rep)) => rep,
                 Ok(None) => {
-                    warn!(
-                        event_id = %event_id_str,
-                        preview_rep_id = %preview_rep_id,
+                    uc_warn!(
+                        event_id = log_id(&event_id_str),
+                        preview_rep_id = log_id(&preview_rep_id),
                         "Skipping entry because preview representation is missing"
                     );
                     continue;
                 }
                 Err(e) => {
-                    warn!(
-                        event_id = %event_id_str,
-                        preview_rep_id = %preview_rep_id,
+                    uc_warn!(
+                        event_id = log_id(&event_id_str),
+                        preview_rep_id = log_id(&preview_rep_id),
                         error_kind = "preview_representation_lookup",
                         io_error_kind = io_error_kind(&e),
                         "Skipping entry due to preview representation lookup failure"
@@ -371,9 +373,9 @@ impl ListClipboardEntryProjectionsUseCase {
                     Ok(Some(rep)) => Some(rep),
                     Ok(None) => None,
                     Err(e) => {
-                        warn!(
-                            entry_id = %entry_id_str,
-                            paste_rep_id = %selection.selection.paste_rep_id,
+                        uc_warn!(
+                            entry_id = log_id(&entry_id_str),
+                            paste_rep_id = log_id(&selection.selection.paste_rep_id),
                             error_kind = "paste_representation_lookup",
                             io_error_kind = io_error_kind(&e),
                             "Failed to fetch paste_rep for projection; treating as healthy"
@@ -400,10 +402,10 @@ impl ListClipboardEntryProjectionsUseCase {
                     ),
                     Ok(None) => (None, None, None),
                     Err(err) => {
-                        tracing::error!(
+                        uc_error!(
                             error_kind = "thumbnail_metadata_lookup",
                             io_error_kind = io_error_kind(err.as_ref()),
-                            entry_id = %entry_id_str,
+                            entry_id = log_id(&entry_id_str),
                             "Failed to fetch thumbnail metadata"
                         );
                         (None, None, None)
@@ -474,8 +476,8 @@ impl ListClipboardEntryProjectionsUseCase {
                 ),
                 Ok(None) => (None, None, vec![]),
                 Err(e) => {
-                    warn!(
-                        entry_id = %entry_id_str,
+                    uc_warn!(
+                        entry_id = log_id(&entry_id_str),
                         error_kind = "file_transfer_summary_lookup",
                         io_error_kind = io_error_kind(&e),
                         "Failed to query file transfer summary for entry in list"
@@ -492,8 +494,8 @@ impl ListClipboardEntryProjectionsUseCase {
                 load_has_directory_structure(self.entry_file_set_repo.as_ref(), &entry.entry_id)
                     .await
                     .unwrap_or_else(|e| {
-                        warn!(
-                            entry_id = %entry_id_str,
+                        uc_warn!(
+                            entry_id = log_id(&entry_id_str),
                             error_kind = "file_set_load",
                             io_error_kind = io_error_kind(&e),
                             "Failed to load file set for directory flag; projecting as non-directory"
@@ -530,9 +532,9 @@ impl ListClipboardEntryProjectionsUseCase {
             });
         }
 
-        debug!(
-            limit,
-            offset,
+        uc_debug!(
+            limit = limit,
+            offset = offset,
             projections = projections.len(),
             "Listed clipboard entry projections"
         );

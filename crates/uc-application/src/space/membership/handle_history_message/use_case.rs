@@ -17,6 +17,7 @@ use crate::space::membership::{
 };
 
 use super::{AuthenticatedMember, HandleMembershipHistoryMessageError};
+use uc_observability_contract::uc_debug;
 
 pub(super) const MAX_COMPLETED_INBOUND_TRANSFERS: usize = 256;
 
@@ -92,7 +93,7 @@ impl HandleMembershipHistoryMessageUseCase {
                     &summary.current_position,
                     history.contains_strict_ancestor_position(&summary.current_position),
                 );
-                tracing::debug!(
+                uc_debug!(
                     plan = reconciliation_plan_kind(plan),
                     "成员历史摘要完成关系规划"
                 );
@@ -179,7 +180,7 @@ impl HandleMembershipHistoryMessageUseCase {
             .completed_inbound_transfers
             .get(&(source_device_id, transfer_id))
         {
-            tracing::debug!(
+            uc_debug!(
                 ack_kind = history_ack_kind(ack),
                 "成员历史入站传输命中幂等 ACK"
             );
@@ -214,7 +215,7 @@ impl HandleMembershipHistoryMessageUseCase {
                         })
                         .await
                         .map_err(map_ledger_error)?;
-                    tracing::debug!(
+                    uc_debug!(
                         received_page_count = next,
                         "成员历史入站后缀已持久等待后续页"
                     );
@@ -319,11 +320,11 @@ impl HandleMembershipHistoryMessageUseCase {
             .await
             .map_err(map_ledger_error)?;
         let (ack, new_effect_count, sender_is_bound) = committed.output;
-        tracing::debug!(
+        uc_debug!(
             ack_kind = history_ack_kind(&ack),
-            sender_is_bound,
-            page_count,
-            new_effect_count,
+            sender_is_bound = sender_is_bound,
+            page_count = page_count,
+            new_effect_count = new_effect_count,
             "成员历史入站后缀完成原子处理"
         );
         Ok(MembershipHistoryMessage::AckV3(ack))

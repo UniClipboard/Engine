@@ -11,12 +11,13 @@ use crate::{
     DeviceGroupChoiceResultSummary, DeviceGroupChoicesSummary, EngineError, EngineErrorCategory,
     OperationResult,
 };
+use uc_observability_contract::uc_debug;
 
 pub async fn execute_query_device_group_choices(
     facade: &uc_application::facade::AppFacade,
 ) -> Result<OperationResult, EngineError> {
     let view = facade.query_device_group_choices().await.map_err(|error| {
-        tracing::debug!(
+        uc_debug!(
             error_kind = query_error_kind(&error),
             error_stage = "load_space_device_state",
             "device group choice query failed"
@@ -93,7 +94,7 @@ pub async fn execute_choose_device_group(
         })
         .await
         .map_err(|error| {
-            tracing::debug!(
+            uc_debug!(
                 error_kind = choose_error_kind(&error),
                 "device group choice failed"
             );

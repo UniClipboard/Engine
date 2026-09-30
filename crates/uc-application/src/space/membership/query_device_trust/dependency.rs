@@ -6,6 +6,7 @@
 use uc_core::membership::{KeyEpochError, KeyEpochStateIssue};
 
 use super::QueryDeviceTrustError;
+use uc_observability_contract::uc_warn;
 
 /// 设备信任查询读取的外部依赖。
 #[derive(Debug, Clone, Copy)]
@@ -29,7 +30,7 @@ impl TrustDependency {
     /// 依赖失败时记录一条运行诊断，错误原样返回。
     pub(super) fn diagnose(self, error: QueryDeviceTrustError) -> QueryDeviceTrustError {
         if let QueryDeviceTrustError::Dependency { source } = &error {
-            tracing::warn!(
+            uc_warn!(
                 dependency = self.as_str(),
                 cause = cause_of(source),
                 "设备信任查询的依赖失败"

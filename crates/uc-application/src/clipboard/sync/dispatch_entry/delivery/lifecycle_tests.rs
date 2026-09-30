@@ -102,7 +102,6 @@ async fn abandoned_shutdown_keeps_the_real_deferred_write_in_the_drain() {
         Some(EntryId::from("entry")),
         Arc::new(FixedClock(0)),
         recorder,
-        "test".into(),
     );
     repository.entered.notified().await;
     assert!(timeout(Duration::from_millis(10), owner.shutdown())

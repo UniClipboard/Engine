@@ -18,12 +18,10 @@
 
 use std::sync::Arc;
 
-use tracing::{debug, info, warn};
-
 use uc_core::clipboard::ClipboardContentCategorySet;
 use uc_core::ids::DeviceId;
 use uc_core::MemberRepositoryPort;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_debug, uc_info, uc_warn};
 
 use crate::deps::CurrentSpaceMemberScope;
 
@@ -58,7 +56,7 @@ impl MemberSendGate {
         scope: &CurrentSpaceMemberScope,
     ) -> bool {
         if !scope.usable_peer_device_ids.contains(peer) {
-            info!(
+            uc_info!(
                 reason = "membership_scope_blocked",
                 "active state send gate: skipping unavailable peer"
             );
@@ -67,14 +65,14 @@ impl MemberSendGate {
         match self.member_repo.get(peer).await {
             Ok(Some(member)) => {
                 if !member.sync_preferences.send_enabled {
-                    debug!(
+                    uc_debug!(
                         reason = "send_disabled_by_user",
                         "active state send gate: skipping peer per per-device sync preferences"
                     );
                     return false;
                 }
                 if !categories.allowed_by(&member.sync_preferences.send_content_types) {
-                    info!(
+                    uc_info!(
                         reason = "content_type_disabled_by_user",
                         "active state send gate: skipping peer per per-device content_types filter"
                     );
@@ -83,11 +81,11 @@ impl MemberSendGate {
                 true
             }
             Ok(None) => {
-                warn!("active state send gate: peer missing in member repo; failing open");
+                uc_warn!("active state send gate: peer missing in member repo; failing open");
                 true
             }
             Err(err) => {
-                warn!(
+                uc_warn!(
                     error_kind = "member_lookup",
                     io_error_kind = io_error_kind(&err),
                     "active state send gate: member repo lookup failed; failing open"

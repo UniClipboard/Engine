@@ -3,6 +3,7 @@ use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, StreamExt}
 use tokio::sync::broadcast;
 use tokio::time::Instant;
 use uc_core::ports::PeerReachabilityChanged;
+use uc_observability_contract::{uc_info, uc_warn};
 
 const MAX_CONCURRENT: usize = 4;
 // Bound the complete target operation, including qualification and admission.
@@ -191,7 +192,7 @@ impl ConnectionRuntime {
                     Some(Ok(ConnectionHint::CommunicationFailed(device))) if !self.paused => self.opportunity(Some(device), "communication_failed"),
                     Some(Err(source)) => {
                         let failure = PeerConnectionError::Environment(source);
-                        tracing::warn!(error.type = "unavailable", "peer connection environment observation failed");
+                        uc_warn!(error_kind = "unavailable", "peer connection environment observation failed");
                         drop(failure);
                         next_scope = Instant::now();
                     }
@@ -439,10 +440,10 @@ impl ConnectionRuntime {
             DialResult::Error(source) => ("error", source.kind()),
             DialResult::Cancelled => ("cancelled", "none"),
         };
-        tracing::info!(
+        uc_info!(
             trigger = peer.active_trigger,
-            outcome,
-            error_kind,
+            outcome = outcome,
+            error_kind = error_kind,
             "peer connection recovery attempt finished"
         );
         if matches!(result, DialResult::State(ReachabilityState::Online)) {

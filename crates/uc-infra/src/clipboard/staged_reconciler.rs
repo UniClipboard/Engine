@@ -32,12 +32,13 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use tracing::{debug, info, warn};
 
 use uc_core::clipboard::PayloadAvailability;
 use uc_core::ports::clipboard::ProcessingUpdateOutcome;
 use uc_core::ports::ClipboardRepresentationStore;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_id, uc_debug, uc_info, uc_warn,
+};
 
 use crate::clipboard::SpoolManager;
 
@@ -66,7 +67,7 @@ impl StagedReconciler {
             .await?;
 
         if candidates.is_empty() {
-            info!("Staged reconciler: no Staged/Processing representations to check");
+            uc_info!("Staged reconciler: no Staged/Processing representations to check");
             return Ok(0);
         }
 
@@ -84,8 +85,8 @@ impl StagedReconciler {
                     // Fall through to demotion.
                 }
                 Err(err) => {
-                    warn!(
-                        representation_id = %rep_id,
+                    uc_warn!(
+                        representation_id = log_id(&rep_id),
                         error_kind = "spool_file_stat",
                         io_error_kind = io_error_kind(err.as_ref()),
                         "Staged reconciler: failed to stat spool file; skipping"
@@ -107,26 +108,26 @@ impl StagedReconciler {
             {
                 Ok(ProcessingUpdateOutcome::Updated(_)) => {
                     demoted += 1;
-                    info!(
-                        representation_id = %rep_id,
+                    uc_info!(
+                        representation_id = log_id(&rep_id),
                         "Staged reconciler: demoted orphaned representation to Lost"
                     );
                 }
                 Ok(ProcessingUpdateOutcome::StateMismatch) => {
-                    debug!(
-                        representation_id = %rep_id,
+                    uc_debug!(
+                        representation_id = log_id(&rep_id),
                         "Staged reconciler: skipped demotion due to state mismatch"
                     );
                 }
                 Ok(ProcessingUpdateOutcome::NotFound) => {
-                    debug!(
-                        representation_id = %rep_id,
+                    uc_debug!(
+                        representation_id = log_id(&rep_id),
                         "Staged reconciler: representation vanished mid-sweep"
                     );
                 }
                 Err(err) => {
-                    warn!(
-                        representation_id = %rep_id,
+                    uc_warn!(
+                        representation_id = log_id(&rep_id),
                         error_kind = "representation_demote",
                         io_error_kind = io_error_kind(err.as_ref()),
                         "Staged reconciler: failed to demote representation"
@@ -135,7 +136,12 @@ impl StagedReconciler {
             }
         }
 
-        info!(total, healthy, demoted, "Staged reconciler completed");
+        uc_info!(
+            total = total,
+            healthy = healthy,
+            demoted = demoted,
+            "Staged reconciler completed"
+        );
         Ok(demoted)
     }
 }

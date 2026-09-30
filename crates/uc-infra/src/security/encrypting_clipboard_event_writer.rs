@@ -8,7 +8,6 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::sync::Arc;
-use tracing::{debug, trace};
 
 use uc_core::{
     clipboard::{ClipboardEvent, PersistedClipboardRepresentation},
@@ -17,6 +16,7 @@ use uc_core::{
     ids::EventId,
     ports::{security::BlobCipherPort, ClipboardEventWriterPort},
 };
+use uc_observability_contract::{log_fields::log_id, uc_debug, uc_trace};
 
 /// Decorator that encrypts representation inline_data before storage.
 pub struct EncryptingClipboardEventWriter {
@@ -57,8 +57,8 @@ impl ClipboardEventWriterPort for EncryptingClipboardEventWriter {
                     .context("failed to encrypt inline_data")?;
                 let encrypted_bytes = ciphertext.into_bytes();
 
-                trace!(
-                    representation_id = %rep.id.as_ref(),
+                uc_trace!(
+                    representation_id = log_id(&rep.id.as_ref()),
                     plaintext_bytes = plaintext_len,
                     ciphertext_bytes = encrypted_bytes.len(),
                     "Encrypted inline_data via BlobCipherPort"
@@ -85,12 +85,12 @@ impl ClipboardEventWriterPort for EncryptingClipboardEventWriter {
         }
 
         if encrypted_count > 0 {
-            debug!(
-                event_id = %event.event_id.as_ref(),
+            uc_debug!(
+                event_id = log_id(&event.event_id.as_ref()),
                 representations = representations.len(),
                 encrypted = encrypted_count,
-                total_plaintext_bytes,
-                total_ciphertext_bytes,
+                total_plaintext_bytes = total_plaintext_bytes,
+                total_ciphertext_bytes = total_ciphertext_bytes,
                 "Encrypted inline_data for event via BlobCipherPort"
             );
         }

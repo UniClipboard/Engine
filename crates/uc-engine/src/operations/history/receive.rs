@@ -2,7 +2,6 @@
 
 use crate::error_codes::*;
 
-use tracing::error;
 use uc_application::facade::{
     AppFacade, BlobTransferError, CancelEntryReceiveError,
     CancelEntryReceiveOutcome as AppEntryReceiveCancellationOutcome,
@@ -14,6 +13,7 @@ use crate::{
     EntryReceiveCancellationOutcome, EntryReceiveProgressInput, InboundTransferCancellationOutcome,
     OperationResult, ReceiveProgressSummary, TransferCancellationReason,
 };
+use uc_observability_contract::uc_error;
 
 pub async fn execute_query_entry_receive_progress(
     facade: &AppFacade,
@@ -150,14 +150,14 @@ fn map_receive_error(error: CancelEntryReceiveError) -> EngineError {
         | CancelEntryReceiveError::PublishLog(_)
         | CancelEntryReceiveError::Transfer { .. }
         | CancelEntryReceiveError::Cleanup(_) => {
-            error!("entry receive operation failed");
+            uc_error!("entry receive operation failed");
             EngineError::new(RECEIVE_FAILED_CODE, EngineErrorCategory::Internal, false)
         }
     }
 }
 
 fn map_transfer_cancel_error(_error: BlobTransferError) -> EngineError {
-    error!("inbound transfer cancellation failed");
+    uc_error!("inbound transfer cancellation failed");
     EngineError::new(
         TRANSFER_CANCEL_FAILED_CODE,
         EngineErrorCategory::Internal,

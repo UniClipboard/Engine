@@ -4,12 +4,13 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::{JoinError, JoinHandle};
-use tracing::debug;
+
 use uc_application::facade::{HostEvent, HostEventBus, TransferHostEvent};
 use uc_core::file_transfer::{
     FileTransferCancellationReason, FileTransferDirection, OutboundProgressStatus,
 };
 use uc_infra::network::iroh::transfer_progress_adapter::InboundProgressEvent;
+use uc_observability_contract::uc_debug;
 
 // 每次传输最多每秒发布五次进度，终态不受节流影响。
 const TRANSLATOR_PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(200);
@@ -163,7 +164,7 @@ impl OutboundProgressRuntime {
                     received = rx.recv() => match received {
                     Ok(event) => forward_outbound_progress(&bus, &mut last_progress_emit, &mut active, event),
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        debug!(
+                        uc_debug!(
                             skipped = n,
                             "outbound progress translator: lagged; some frames skipped"
                         );

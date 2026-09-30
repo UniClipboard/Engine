@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
-use tracing::{error, warn};
+
 use uc_application::deps::{LifecycleError, ProfileUpgradeBackupPort};
 use uc_application::facade::{
     AppFacade, ApplicationRuntime, NetworkRecoveryEvent, ProfileFactoryResetFacade,
@@ -26,7 +26,7 @@ use uc_application::facade::{
 };
 use uc_core::ports::ClockPort;
 use uc_core::TaskRegistry;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_error, uc_warn};
 
 use crate::assembly::host::{
     wire_host_capabilities_with_emitter, EngineHostEventEmitter, HostWiring,
@@ -379,7 +379,7 @@ async fn spawn_space_transition_watcher(
                     }
                     Ok(None) => {}
                     Err(error) => {
-                        warn!(
+                        uc_warn!(
                             error_code = error.code(),
                             retryable = error.is_retryable(),
                             "runtime Space transition attempt failed"
@@ -414,7 +414,11 @@ fn startup_error(
         std::io::stderr().lock(),
         "uc-engine startup failed [{context}] io_error_kind={io_kind:?}"
     );
-    error!(context, io_error_kind = io_kind, "engine startup failed");
+    uc_error!(
+        context = context,
+        io_error_kind = io_kind,
+        "engine startup failed"
+    );
     if error_chain_contains::<uc_infra::security::ProfileUpgradeBackupRecordKeyMissing>(&error) {
         return EngineError::new(
             PROFILE_UPGRADE_BACKUP_KEY_MISSING_CODE,
@@ -462,8 +466,8 @@ fn operation_error_with_code(
     error: impl Into<Box<dyn Error + Send + Sync>>,
 ) -> EngineError {
     let error = error.into();
-    error!(
-        context,
+    uc_error!(
+        context = context,
         io_error_kind = io_error_kind(error.as_ref()),
         "engine operation failed"
     );
@@ -478,8 +482,8 @@ fn retryable_operation_error_with_code(
     error: impl Into<Box<dyn Error + Send + Sync>>,
 ) -> EngineError {
     let error = error.into();
-    error!(
-        context,
+    uc_error!(
+        context = context,
         io_error_kind = io_error_kind(error.as_ref()),
         "engine operation temporarily unavailable"
     );

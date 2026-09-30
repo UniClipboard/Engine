@@ -15,10 +15,9 @@
 
 use std::borrow::Cow;
 use std::net::{IpAddr, Ipv4Addr};
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_debug, uc_info, uc_warn};
 
 use iroh::{EndpointAddr, TransportAddr};
-use tracing::{debug, info, warn};
 
 /// A snapshot of one local LAN interface — IP + netmask — captured at
 /// endpoint-bind time so the hairpin filter (`apply_addr_filter`) can decide
@@ -132,7 +131,7 @@ pub(crate) fn enumerate_local_lan_v4() -> Vec<LocalLanV4> {
     let ifaces = match if_addrs::get_if_addrs() {
         Ok(ifaces) => ifaces,
         Err(e) => {
-            warn!(
+            uc_warn!(
                 target: "iroh.addr_filter",
                 error_kind = "interface_list",
                 io_error_kind = io_error_kind(&e),
@@ -154,10 +153,9 @@ pub(crate) fn enumerate_local_lan_v4() -> Vec<LocalLanV4> {
         })
         .collect();
 
-    info!(
+    uc_info!(
         target: "iroh.addr_filter",
         count = out.len(),
-        subnets = ?out,
         "enumerated local LAN v4 subnets for hairpin filter"
     );
     out
@@ -167,11 +165,10 @@ fn log_dropped_addrs(dropped: &[String], allow_overlay: bool) {
     if dropped.is_empty() {
         return;
     }
-    debug!(
+    uc_debug!(
         target: "iroh.addr_filter",
-        allow_overlay,
+        allow_overlay = allow_overlay,
         dropped_count = dropped.len(),
-        dropped = ?dropped,
         "filtered virtual-NIC addresses from candidate set",
     );
 }

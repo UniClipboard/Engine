@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::StreamExt;
-use iroh::{Endpoint, EndpointId};
+use iroh::Endpoint;
 use iroh_blobs::{
     api::blobs::{AddPathOptions, ExportMode, ExportOptions, ImportMode},
     api::downloader::{DownloadProgressItem, Downloader},
@@ -19,7 +19,7 @@ use iroh_blobs::{
     BlobFormat, Hash, HashAndFormat,
 };
 use iroh_tickets::Ticket;
-use tracing::{debug, info, instrument, warn};
+use tracing::instrument;
 
 use uc_core::ports::blob::{
     BlobDigest, BlobError, BlobProgressSink, BlobTicket, BlobTransferPort, TagReason,
@@ -27,7 +27,9 @@ use uc_core::ports::blob::{
 use uc_observability_contract::diagnostics::connectivity::{
     LocalWorkObservation, LocalWorkOutcome, LocalWorkStep,
 };
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_vocab_debug, uc_debug, uc_info, uc_warn,
+};
 
 /// Minimum wall-clock interval between two `BlobProgressSink::report` calls.
 ///
@@ -124,49 +126,6 @@ impl IrohBlobTransferAdapter {
             }
         }
     }
-
-    /// Snapshot the current connection path to `endpoint_id`. Used purely
-    /// for log decoration on the blob-fetch hot path.
-    ///
-    /// iroh 0.98 replaced the watcher-based `Endpoint::conn_type` with the
-    /// snapshot-style async `remote_info`. Renders only the `Active`
-    /// `TransportAddrInfo`s — the closest equivalent to the old
-    /// Direct/Relay/Mixed tag. This is the same shape `connect.rs` uses for
-    /// its `iroh connect selected path` log, so log fields stay comparable
-    /// across the connect-time and fetch-time stories.
-    ///
-    /// Cheap to call: `remote_info` is a snapshot, not a watcher
-    /// subscription, and we run it once per relevant tracing event so the
-    /// reported path reflects the moment the event fired, not a
-    /// pre-fetched stale value.
-    async fn conn_label(&self, endpoint_id: EndpointId) -> String {
-        match self.endpoint.remote_info(endpoint_id).await {
-            Some(info) => {
-                let active: Vec<String> = info
-                    .addrs()
-                    .filter(|a| matches!(a.usage(), iroh::endpoint::TransportAddrUsage::Active))
-                    .map(|a| format!("{:?}", a.addr()))
-                    .collect();
-                if active.is_empty() {
-                    "no_active_paths".to_string()
-                } else {
-                    active.join(",")
-                }
-            }
-            None => "unknown".to_string(),
-        }
-    }
-}
-
-/// Render the first 10 hex chars of a blob hash for log correlation.
-/// Never log full hashes — combined with a tag reason, they can become a
-/// weak content identifier.
-fn hex_prefix(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(10);
-    for b in bytes.iter().take(5) {
-        out.push_str(&format!("{:02x}", b));
-    }
-    out
 }
 
 /// Pick the `ImportMode` for `Blobs::add_path` based on the host platform.
@@ -221,11 +180,9 @@ impl BlobTransferPort for IrohBlobTransferAdapter {
             LocalWorkOutcome::Error
         });
         let haf = publish_result.map_err(|e| BlobError::Internal(e.into()))?;
-        info!(
-            bytes,
+        uc_info!(
+            bytes = bytes,
             add_bytes_ms = started.elapsed().as_millis() as u64,
-            blob_hash = %hex_prefix(haf.hash.as_bytes()),
-            tag = %tag_name,
             "iroh blob publish: add_bytes completed"
         );
         Ok(Self::core_digest(haf.hash))
@@ -276,11 +233,9 @@ impl BlobTransferPort for IrohBlobTransferAdapter {
             .with_named_tag(tag_name.as_bytes())
             .await
             .map_err(|e| BlobError::Internal(e.into()))?;
-        info!(
+        uc_info!(
             add_path_ms = started.elapsed().as_millis() as u64,
-            mode = ?mode,
-            blob_hash = %hex_prefix(haf.hash.as_bytes()),
-            tag = %tag_name,
+            mode = log_vocab_debug(&mode),
             "iroh blob publish: add_path completed (streaming)"
         );
         Ok(Self::core_digest(haf.hash))
@@ -363,7 +318,6 @@ impl BlobTransferPort for IrohBlobTransferAdapter {
         // receiver 拉同一个 blob,这条能力实际无人使用,可接受。
         let native = Self::parse_ticket(ticket)?;
         let digest = Self::core_digest(native.hash());
-        let hash_prefix = hex_prefix(native.hash().as_bytes());
 
         // GC race window protection — see `fetch` for the full rationale.
         // Keeping `_temp_tag` alive through both `ensure_blob_in_store` and
@@ -395,8 +349,7 @@ impl BlobTransferPort for IrohBlobTransferAdapter {
             })
             .await
             .map_err(|e| BlobError::Internal(e.into()))?;
-        info!(
-            hash = %hash_prefix,
+        uc_info!(
             bytes = bytes_written,
             export_ms = export_start.elapsed().as_millis() as u64,
             "blob fetch_to_path: export completed (TryReference)"
@@ -417,23 +370,16 @@ impl BlobTransferPort for IrohBlobTransferAdapter {
         // 幂等:对端不在 pool 里时 close 是 no-op。
         let native = Self::parse_ticket(ticket)?;
         let endpoint_id = native.addr().id;
-        let hash_prefix = hex_prefix(native.hash().as_bytes());
         match self.downloader().shutdown_endpoint(endpoint_id).await {
             Ok(()) => {
-                info!(
-                    hash = %hash_prefix,
-                    endpoint = %endpoint_id.fmt_short(),
-                    "blob fetch: shutdown_endpoint dispatched"
-                );
+                uc_info!("blob fetch: shutdown_endpoint dispatched");
                 Ok(())
             }
             Err(err) => {
                 // Pool shutdown 是 process-wide 失败,不是单次 cancel 失败 ——
                 // 仍然映射成 Internal 让上层知道,但取消请求本身不视为"对端
                 // 还在传"的语义错误。
-                warn!(
-                    hash = %hash_prefix,
-                    endpoint = %endpoint_id.fmt_short(),
+                uc_warn!(
                     error_kind = "endpoint_shutdown",
                     io_error_kind = io_error_kind(&err),
                     "blob fetch: shutdown_endpoint failed (pool already gone)"
@@ -477,7 +423,7 @@ impl BlobTransferPort for IrohBlobTransferAdapter {
             .delete(name.as_bytes())
             .await
             .map_err(|e| BlobError::Internal(e.into()))?;
-        debug!(removed, "blob tag removed");
+        uc_debug!(removed = removed, "blob tag removed");
         Ok(())
     }
 
@@ -503,11 +449,8 @@ impl IrohBlobTransferAdapter {
         progress: Option<&dyn BlobProgressSink>,
     ) -> Result<(), BlobError> {
         let digest = Self::core_digest(native.hash());
-        let hash_prefix = hex_prefix(native.hash().as_bytes());
-        let provider_id = native.addr().id;
-
         if self.has(&digest).await? {
-            info!(hash = %hash_prefix, "blob fetch: local hit, skipping network");
+            uc_info!("blob fetch: local hit, skipping network");
             return Ok(());
         }
 
@@ -529,17 +472,11 @@ impl IrohBlobTransferAdapter {
         // `strip_relay_if_lan_only` 内部读 runtime_consts 的进程级 LAN-only
         // 常量；非 LAN-only 路径下零开销直接返回原 addr。
         let dial_addr = super::connect::strip_relay_if_lan_only(native.addr().clone());
-        // Inlined what was a `.map_err(|e| { warn!; ... })?` closure: the
-        // closure is sync but `conn_label` is async on iroh 0.98, so the
-        // connect-failed branch needs an `.await` that closures can't host.
         let _connection = match self.endpoint.connect(dial_addr, BLOBS_ALPN).await {
             Ok(c) => c,
             Err(e) => {
-                let conn = self.conn_label(provider_id).await;
-                warn!(
-                    hash = %hash_prefix,
+                uc_warn!(
                     elapsed_ms = connect_start.elapsed().as_millis() as u64,
-                    conn = %conn,
                     error_kind = "endpoint_connect",
                     io_error_kind = io_error_kind(&e),
                     "blob fetch: endpoint.connect failed"
@@ -547,11 +484,8 @@ impl IrohBlobTransferAdapter {
                 return Err(BlobError::Unavailable(e.into()));
             }
         };
-        let conn = self.conn_label(provider_id).await;
-        info!(
-            hash = %hash_prefix,
+        uc_info!(
             elapsed_ms = connect_start.elapsed().as_millis() as u64,
-            conn = %conn,
             "blob fetch: endpoint.connect ready, launching download"
         );
 
@@ -586,12 +520,9 @@ impl IrohBlobTransferAdapter {
             {
                 Ok(s) => s,
                 Err(e) => {
-                    let conn = self.conn_label(provider_id).await;
-                    warn!(
-                        hash = %hash_prefix,
+                    uc_warn!(
                         elapsed_ms = download_start.elapsed().as_millis() as u64,
-                        attempt,
-                        conn = %conn,
+                        attempt = attempt,
                         error_kind = "download_stream_open",
                         io_error_kind = io_error_kind(&e),
                         "blob fetch: downloader.stream() open failed"
@@ -610,43 +541,32 @@ impl IrohBlobTransferAdapter {
                     break Ok(());
                 };
                 match item {
-                    DownloadProgressItem::TryProvider { id, .. } => {
+                    DownloadProgressItem::TryProvider { .. } => {
                         tried_providers += 1;
-                        let conn = self.conn_label(provider_id).await;
-                        info!(
-                            hash = %hash_prefix,
-                            provider = %id.fmt_short(),
+                        uc_info!(
                             elapsed_ms = download_start.elapsed().as_millis() as u64,
-                            attempt,
-                            conn = %conn,
+                            attempt = attempt,
                             "blob fetch: trying provider"
                         );
                     }
-                    DownloadProgressItem::ProviderFailed { id, .. } => {
+                    DownloadProgressItem::ProviderFailed { .. } => {
                         provider_failures += 1;
                         // execute_get drops the underlying error here — we only
                         // get to know which provider failed and how far we got.
-                        let conn = self.conn_label(provider_id).await;
-                        warn!(
-                            hash = %hash_prefix,
-                            provider = %id.fmt_short(),
+                        uc_warn!(
                             elapsed_ms = download_start.elapsed().as_millis() as u64,
                             bytes_downloaded = bytes_so_far,
-                            attempt,
-                            conn = %conn,
+                            attempt = attempt,
                             "blob fetch: provider failed (cause discarded by iroh-blobs::execute_get)"
                         );
                     }
                     DownloadProgressItem::Progress(total) => {
                         bytes_so_far = total;
                         if total >= last_logged_bytes + PROGRESS_LOG_BYTES {
-                            let conn = self.conn_label(provider_id).await;
-                            info!(
-                                hash = %hash_prefix,
+                            uc_info!(
                                 bytes = total,
                                 elapsed_ms = download_start.elapsed().as_millis() as u64,
-                                attempt,
-                                conn = %conn,
+                                attempt = attempt,
                                 "blob fetch: progress checkpoint"
                             );
                             last_logged_bytes = total;
@@ -665,13 +585,10 @@ impl IrohBlobTransferAdapter {
                         }
                     }
                     DownloadProgressItem::PartComplete { .. } => {
-                        let conn = self.conn_label(provider_id).await;
-                        info!(
-                            hash = %hash_prefix,
+                        uc_info!(
                             bytes = bytes_so_far,
                             elapsed_ms = download_start.elapsed().as_millis() as u64,
-                            attempt,
-                            conn = %conn,
+                            attempt = attempt,
                             "blob fetch: part complete"
                         );
                         if let Some(sink) = progress {
@@ -683,15 +600,12 @@ impl IrohBlobTransferAdapter {
                         }
                     }
                     DownloadProgressItem::DownloadError => {
-                        let conn = self.conn_label(provider_id).await;
-                        warn!(
-                            hash = %hash_prefix,
+                        uc_warn!(
                             elapsed_ms = download_start.elapsed().as_millis() as u64,
                             bytes_downloaded = bytes_so_far,
-                            provider_failures,
-                            tried_providers,
-                            attempt,
-                            conn = %conn,
+                            provider_failures = provider_failures,
+                            tried_providers = tried_providers,
+                            attempt = attempt,
                             "blob fetch: DownloadError signalled (split-strategy aggregate failure)"
                         );
                         break Err(BlobError::Unavailable("Download error".into()));
@@ -700,15 +614,12 @@ impl IrohBlobTransferAdapter {
                         // The single most useful event: the anyhow chain here
                         // typically wraps the quinn::ConnectionError or
                         // ReadError that `execute_get` swallowed earlier.
-                        let conn = self.conn_label(provider_id).await;
-                        warn!(
-                            hash = %hash_prefix,
+                        uc_warn!(
                             elapsed_ms = download_start.elapsed().as_millis() as u64,
                             bytes_downloaded = bytes_so_far,
-                            provider_failures,
-                            tried_providers,
-                            attempt,
-                            conn = %conn,
+                            provider_failures = provider_failures,
+                            tried_providers = tried_providers,
+                            attempt = attempt,
                             error_kind = "download_stream",
                             io_error_kind = io_error_kind(&e),
                             "blob fetch: downloader Error event (root cause from anyhow chain)"
@@ -728,9 +639,8 @@ impl IrohBlobTransferAdapter {
                 }
                 Err(BlobError::Unavailable(msg)) if attempt < BLOB_FETCH_MAX_ATTEMPTS => {
                     let backoff = BLOB_FETCH_BACKOFFS[(attempt - 1) as usize];
-                    warn!(
-                        hash = %hash_prefix,
-                        attempt,
+                    uc_warn!(
+                        attempt = attempt,
                         max_attempts = BLOB_FETCH_MAX_ATTEMPTS,
                         backoff_ms = backoff.as_millis() as u64,
                         error_kind = "blob_unavailable_retry",
@@ -744,15 +654,12 @@ impl IrohBlobTransferAdapter {
             }
         }
 
-        let conn = self.conn_label(provider_id).await;
-        info!(
-            hash = %hash_prefix,
+        uc_info!(
             bytes = final_bytes,
-            last_attempt_ms,
+            last_attempt_ms = last_attempt_ms,
             download_ms = fetch_start.elapsed().as_millis() as u64,
             connect_ms = (connect_start.elapsed() - fetch_start.elapsed()).as_millis() as u64,
             tried_providers = total_tried_providers,
-            conn = %conn,
             "blob fetch: download complete"
         );
 

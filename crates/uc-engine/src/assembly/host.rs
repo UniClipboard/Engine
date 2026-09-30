@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context;
-use tracing::warn;
+
 use uc_application::deps::{
     PrepareProfileStartupUseCase, ProfileUpgradeBackupPort, ProfileUpgradeVersions,
 };
@@ -23,7 +23,7 @@ use uc_core::ports::{
 use uc_infra::security::{
     ProfileLifecycleRepository, ProfileStartupStorage, ProfileUpgradeBackupStore,
 };
-use uc_observability_contract::analytics::DefaultAnalyticsFacade;
+use uc_observability_contract::{analytics::DefaultAnalyticsFacade, uc_warn};
 
 use crate::assembly::deps::{WiredDependencies, WiringError, WiringResult};
 use crate::assembly::platform::SystemClipboardLayer;
@@ -260,7 +260,7 @@ fn cleanup_import_directory(directory: Option<&Path>) {
         return;
     };
     if std::fs::remove_dir_all(directory).is_err() {
-        warn!("failed to remove incomplete host clipboard import");
+        uc_warn!("failed to remove incomplete host clipboard import");
     }
 }
 

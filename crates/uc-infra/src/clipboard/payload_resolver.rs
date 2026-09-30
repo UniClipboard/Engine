@@ -6,13 +6,17 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info_span, warn, Instrument};
+use tracing::{info_span, Instrument};
 
 use uc_core::clipboard::{PayloadAvailability, PersistedClipboardRepresentation};
 use uc_core::ids::RepresentationId;
 use uc_core::ports::clipboard::{PayloadResolveError, ResolvedClipboardPayload};
 use uc_core::ports::ClipboardPayloadResolverPort;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind,
+    log_fields::{log_id, log_vocab_debug},
+    uc_debug, uc_error, uc_warn,
+};
 
 use crate::clipboard::{RepresentationCache, SpoolManager};
 
@@ -64,7 +68,7 @@ impl ClipboardPayloadResolverPort for ClipboardPayloadResolver {
                             return Err(err);
                         }
                     };
-                    debug!("Resolving from inline data");
+                    uc_debug!("Resolving from inline data");
                     Ok(ResolvedClipboardPayload::Inline {
                         mime,
                         bytes: inline_data.clone(),
@@ -82,7 +86,7 @@ impl ClipboardPayloadResolverPort for ClipboardPayloadResolver {
                             return Err(err);
                         }
                     };
-                    debug!("Resolving from existing blob reference");
+                    uc_debug!("Resolving from existing blob reference");
                     Ok(ResolvedClipboardPayload::BlobRef {
                         mime,
                         blob_id: blob_id.clone(),
@@ -92,21 +96,21 @@ impl ClipboardPayloadResolverPort for ClipboardPayloadResolver {
                 | PayloadAvailability::Processing
                 | PayloadAvailability::Failed { .. } => {
                     if let Some(bytes) = self.cache.get(&representation.id).await {
-                        debug!("Resolving from cache bytes");
+                        uc_debug!("Resolving from cache bytes");
                         self.try_requeue(&representation.id);
                         return Ok(ResolvedClipboardPayload::Inline { mime, bytes });
                     }
 
                     match self.spool.read(&representation.id).await {
                         Ok(Some(bytes)) => {
-                            debug!("Resolving from spool bytes");
+                            uc_debug!("Resolving from spool bytes");
                             self.try_requeue(&representation.id);
                             Ok(ResolvedClipboardPayload::Inline { mime, bytes })
                         }
                         Ok(None) => {
-                            warn!(
-                                representation_id = %representation.id,
-                                payload_state = ?&representation.payload_state,
+                            uc_warn!(
+                                representation_id = log_id(&representation.id),
+                                payload_state = log_vocab_debug(&&representation.payload_state),
                                 "Bytes not available in cache or spool"
                             );
                             Err(PayloadResolveError::Orphaned {
@@ -115,8 +119,8 @@ impl ClipboardPayloadResolverPort for ClipboardPayloadResolver {
                             })
                         }
                         Err(err) => {
-                            error!(
-                                representation_id = %representation.id,
+                            uc_error!(
+                                representation_id = log_id(&representation.id),
                                 error_kind = "spool_read",
                                 io_error_kind = io_error_kind(err.as_ref()),
                                 "Failed to read bytes from spool"
@@ -157,8 +161,8 @@ impl ClipboardPayloadResolver {
 
     fn try_requeue(&self, rep_id: &RepresentationId) {
         if let Err(err) = self.worker_tx.try_send(rep_id.clone()) {
-            warn!(
-                representation_id = %rep_id,
+            uc_warn!(
+                representation_id = log_id(&rep_id),
                 error_kind = "worker_requeue",
                 io_error_kind = io_error_kind(&err),
                 "Failed to re-queue representation for background processing"

@@ -9,6 +9,7 @@ use crate::space::membership::{
     ActivateMembershipEffectPort, ApplyMembershipMemberFactsPort, ApplyMembershipSecurityPort,
     MembershipEffectExecutionError, ResolveRePairingPort,
 };
+use uc_observability_contract::{log_fields::log_vocab_debug, uc_debug};
 
 /// 加入效果激活成功后才清除重新配对提示。
 pub(crate) struct RePairingAwareMembershipActivation {
@@ -66,9 +67,9 @@ impl MembershipEffectSteps {
         &self,
         effect: &UnfinishedMemberEffect,
     ) -> Result<(), MembershipEffectExecutionError> {
-        tracing::debug!(
-            kind = ?effect.kind(),
-            phase = ?effect.phase(),
+        uc_debug!(
+            kind = log_vocab_debug(&effect.kind()),
+            phase = log_vocab_debug(&effect.phase()),
             affected_device_count = effect.affected_device_ids().len(),
             "开始执行成员效果阶段"
         );

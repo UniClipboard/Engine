@@ -3,8 +3,9 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
-use tracing::debug;
+
 use uc_core::{ports::TimerPort, SessionId};
+use uc_observability_contract::uc_debug;
 
 pub struct Timer {
     timers: Arc<Mutex<HashMap<SessionId, tokio::task::AbortHandle>>>,
@@ -42,7 +43,7 @@ impl TimerPort for Timer {
         });
 
         timers_guard.insert(session_id.clone(), handle.abort_handle());
-        debug!(session_id = %session_id, ttl_secs, "timer started");
+        uc_debug!(ttl_secs = ttl_secs, "timer started");
         Ok(())
     }
 
@@ -50,7 +51,7 @@ impl TimerPort for Timer {
         let mut timers_guard = self.timers.lock().await;
         if let Some(handle) = timers_guard.remove(session_id) {
             handle.abort();
-            debug!(session_id = %session_id, "timer stopped");
+            uc_debug!("timer stopped");
         }
         Ok(())
     }

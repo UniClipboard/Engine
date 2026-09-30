@@ -21,6 +21,7 @@ use uc_core::membership::{
 };
 
 use crate::security::MasterKey;
+use uc_observability_contract::uc_warn;
 
 const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 const STATE_VERSION: u8 = 1;
@@ -576,13 +577,13 @@ impl MlsGroupEngine {
         welcome: &[u8],
     ) -> Result<CompletedMlsJoin, MlsGroupError> {
         let message = MlsMessageIn::tls_deserialize_exact(welcome.to_vec()).map_err(|error| {
-            tracing::warn!(failure = "welcome_decode_failed", "MLS welcome rejected");
+            uc_warn!(failure = "welcome_decode_failed", "MLS welcome rejected");
             MlsGroupError::invalid_message_from(error)
         })?;
         let welcome = match message.extract() {
             MlsMessageBodyIn::Welcome(welcome) => welcome,
             _ => {
-                tracing::warn!(
+                uc_warn!(
                     failure = "welcome_message_type_invalid",
                     "MLS welcome rejected"
                 );
@@ -602,15 +603,15 @@ impl MlsGroupEngine {
         let staged =
             StagedWelcome::new_from_welcome(&provider, group_config().join_config(), welcome, None)
                 .map_err(|error| {
-                    tracing::warn!(failure = "welcome_staging_failed", "MLS welcome rejected");
+                    uc_warn!(failure = "welcome_staging_failed", "MLS welcome rejected");
                     MlsGroupError::protocol_from(error)
                 })?;
         let group = staged.into_group(&provider).map_err(|error| {
-            tracing::warn!(failure = "welcome_install_failed", "MLS welcome rejected");
+            uc_warn!(failure = "welcome_install_failed", "MLS welcome rejected");
             MlsGroupError::protocol_from(error)
         })?;
         if group.group_id().as_slice() != expected_space_id {
-            tracing::warn!(failure = "welcome_space_mismatch", "MLS welcome rejected");
+            uc_warn!(failure = "welcome_space_mismatch", "MLS welcome rejected");
             return Err(MlsGroupError::identity_mismatch());
         }
         let wrapping_key = export_wrapping_key(&group, &provider)?;

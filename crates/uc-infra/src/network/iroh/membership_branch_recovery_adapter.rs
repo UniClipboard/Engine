@@ -16,7 +16,7 @@ use uc_application::deps::{
 use uc_core::ids::DeviceId;
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::PeerAddressRepositoryPort;
-use uc_observability_contract::diagnostics::connectivity::InboundPeerProtocol;
+use uc_observability_contract::{diagnostics::connectivity::InboundPeerProtocol, uc_debug};
 
 use iroh::{Endpoint, EndpointAddr};
 
@@ -311,7 +311,7 @@ async fn write_response(
             tokio::time::timeout(IO_TIMEOUT, send.stopped()).await,
             Ok(Ok(None))
         ) {
-            tracing::debug!(stage = "response_confirmation", "成员分支恢复响应未获确认");
+            uc_debug!(stage = "response_confirmation", "成员分支恢复响应未获确认");
         }
     }
 }

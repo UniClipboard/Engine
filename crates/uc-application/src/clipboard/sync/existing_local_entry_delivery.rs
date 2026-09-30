@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tracing::info;
+
 use uc_core::blob::ports::BlobReaderPort;
 use uc_core::clipboard::ClipboardContentCategorySet;
 use uc_core::ids::{DeviceId, EntryId};
@@ -30,6 +30,7 @@ use crate::clipboard::sync::resend_entry::{NotResendableReason, ResendEntryError
 use crate::clipboard::sync::snapshot_from_entry::{
     reconstruct_snapshot_from_entry, BuildSnapshotError,
 };
+use uc_observability_contract::{log_fields::log_id, uc_info};
 
 #[async_trait]
 pub(crate) trait ExistingLocalEntryDeliveryRunner: Send + Sync {
@@ -149,8 +150,8 @@ impl ExistingLocalEntryDeliveryRunner for ExistingLocalEntryDelivery {
             .await
             .map_err(map_dispatch_sync_error)?;
 
-        info!(
-            entry_id = %entry_id,
+        uc_info!(
+            entry_id = log_id(&entry_id),
             accepted = outcome.total_accepted,
             duplicate = outcome.total_duplicate,
             offline = outcome.total_offline,

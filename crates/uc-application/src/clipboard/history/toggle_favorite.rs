@@ -3,7 +3,9 @@ use std::sync::Arc;
 use uc_core::ids::EntryId;
 use uc_core::ports::clipboard::SetClipboardEntryFavoritePort;
 use uc_core::ports::search::search_index::SearchIndexPort;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_id, uc_info, uc_warn,
+};
 
 /// Set the favorite state of a clipboard entry.
 ///
@@ -62,20 +64,24 @@ impl ToggleFavoriteClipboardEntryUseCase {
             // later rebuild reconciles the tag from the stored state.
             if let Some(mirror) = &self.search_mirror {
                 if let Err(e) = mirror.set_entry_favorite_tag(entry_id, is_favorited).await {
-                    tracing::warn!(
-                        entry_id = %entry_id,
-                        is_favorited,
+                    uc_warn!(
+                        entry_id = log_id(&entry_id),
+                        is_favorited = is_favorited,
                         error_kind = "search_favorite_tag",
                         io_error_kind = io_error_kind(&e),
                         "favorite persisted but search tag mirror failed; rebuild will reconcile"
                     );
                 }
             }
-            tracing::info!(entry_id = %entry_id, is_favorited, "Favorite state persisted");
+            uc_info!(
+                entry_id = log_id(&entry_id),
+                is_favorited = is_favorited,
+                "Favorite state persisted"
+            );
         } else {
-            tracing::warn!(
-                entry_id = %entry_id,
-                is_favorited,
+            uc_warn!(
+                entry_id = log_id(&entry_id),
+                is_favorited = is_favorited,
                 "Favorite toggle ignored: no entry matches the id"
             );
         }

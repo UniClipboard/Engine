@@ -6,12 +6,12 @@
 use crate::error_codes::*;
 
 use crate::{EngineError, EngineErrorCategory, OperationResult, UnlockSpaceInput};
-use tracing::error;
+
 use uc_application::facade::{
     AppFacade, UnlockSpaceError, UnlockSpaceInput as AppUnlockSpaceInput,
 };
 use uc_core::crypto::domain::Passphrase;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_error};
 
 pub async fn execute_unlock_space(
     facade: &AppFacade,
@@ -52,7 +52,7 @@ fn map_unlock_space_error(error: UnlockSpaceError) -> EngineError {
             false,
         ),
         UnlockSpaceError::Internal { .. } => {
-            error!(
+            uc_error!(
                 error_kind = "unlock_space",
                 io_error_kind = io_error_kind(&error),
                 "unlock space failed"

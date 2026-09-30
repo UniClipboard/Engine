@@ -25,12 +25,12 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use iroh::{Endpoint, EndpointAddr};
-use tracing::{debug, instrument, warn};
+use tracing::instrument;
 
 use uc_core::ids::DeviceId;
 use uc_core::ports::clipboard::{ActiveClipboardPullClientError, ActiveClipboardPullClientPort};
 use uc_core::ports::PeerAddressRepositoryPort;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_debug, uc_warn};
 
 use super::super::connect::connect_with_staggered_retry;
 use super::super::peer_address_resolver::PeerAddressResolver;
@@ -69,7 +69,7 @@ impl IrohActiveClipboardPullClientAdapter {
         match self.peer_address_resolver.resolve(target).await {
             Ok(address) => address,
             Err(error) => {
-                warn!(
+                uc_warn!(
                     error_kind = error.kind(),
                     "active-clipboard pull address resolution failed; treating peer as unreachable"
                 );
@@ -93,7 +93,7 @@ impl ActiveClipboardPullClientPort for IrohActiveClipboardPullClientAdapter {
         match tokio::time::timeout(PULL_TIMEOUT, self.exchange(peer, snapshot_hash)).await {
             Ok(result) => result,
             Err(_) => {
-                debug!("active-clipboard pull: exceeded deadline; treating as Unreachable");
+                uc_debug!("active-clipboard pull: exceeded deadline; treating as Unreachable");
                 Err(ActiveClipboardPullClientError::Unreachable)
             }
         }
@@ -125,7 +125,7 @@ impl IrohActiveClipboardPullClientAdapter {
         {
             Ok(connection) => connection,
             Err(err) => {
-                debug!(
+                uc_debug!(
                     error_kind = "dial_failed",
                     io_error_kind = io_error_kind(&err),
                     "active-clipboard pull: dial failed, treating as Unreachable"
@@ -176,10 +176,7 @@ impl IrohActiveClipboardPullClientAdapter {
         match response {
             PullResponse::Envelope(bytes) => Ok(bytes),
             PullResponse::NotAvailable | PullResponse::Locked | PullResponse::Internal => {
-                debug!(
-                    ?response,
-                    "active-clipboard pull: holder cannot serve the content"
-                );
+                uc_debug!("active-clipboard pull: holder cannot serve the content");
                 Err(ActiveClipboardPullClientError::NotAvailable)
             }
         }

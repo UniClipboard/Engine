@@ -27,6 +27,10 @@ use uc_core::ports::file_transfer::{
 };
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::space::DeriveSpaceSubkeyPort;
+use uc_observability_contract::{
+    log_fields::{log_id, log_vocab},
+    uc_debug,
+};
 
 /// SQLite adapter for the receiver-side file-transfer projection ports.
 pub struct DieselFileTransferRepository<E> {
@@ -135,9 +139,9 @@ impl<E: DbExecutor> RecordReceiverTransferPort for DieselFileTransferRepository<
                         .optional()?;
                     if let Some(status) = existing_status.as_deref() {
                         if status != TrackedFileTransferStatus::Pending.as_str() {
-                            tracing::debug!(
-                                transfer_id = %row.transfer_id,
-                                existing_status = status,
+                            uc_debug!(
+                                transfer_id = log_id(&row.transfer_id),
+                                existing_status = log_vocab(&status),
                                 "upsert_pending_transfer: skipping — existing row is not pending"
                             );
                             return Ok(());

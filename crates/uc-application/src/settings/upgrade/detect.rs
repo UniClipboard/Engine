@@ -18,10 +18,11 @@
 use std::sync::Arc;
 
 use thiserror::Error;
-use tracing::{debug, warn};
 
 use uc_core::ports::{AppVersionStateError, AppVersionStatePort};
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_vocab, uc_debug, uc_warn,
+};
 
 #[cfg(test)]
 use crate::space::CurrentSpaceIdentityError;
@@ -79,9 +80,9 @@ impl DetectUpgradeUseCase {
                     .is_some();
 
                 if has_completed {
-                    debug!(
+                    uc_debug!(
                         target: "upgrade",
-                        current = %current,
+                        current = log_vocab(&current),
                         "no version cursor; setup completed → treating as upgraded from unknown"
                     );
                     Ok(UpgradeStatus::Upgraded {
@@ -89,9 +90,9 @@ impl DetectUpgradeUseCase {
                         to: current,
                     })
                 } else {
-                    debug!(
+                    uc_debug!(
                         target: "upgrade",
-                        current = %current,
+                        current = log_vocab(&current),
                         "no version cursor; setup not completed → fresh install"
                     );
                     Ok(UpgradeStatus::FreshInstall)
@@ -99,18 +100,16 @@ impl DetectUpgradeUseCase {
             }
             Some(raw) => match semver::Version::parse(&raw) {
                 Ok(prev) if prev == current => {
-                    debug!(
+                    uc_debug!(
                         target: "upgrade",
-                        current = %current,
+                        current = log_vocab(&current),
                         "cursor matches current version"
                     );
                     Ok(UpgradeStatus::NoChange)
                 }
                 Ok(prev) if prev < current => {
-                    debug!(
+                    uc_debug!(
                         target: "upgrade",
-                        from = %prev,
-                        to = %current,
                         "upgrade detected"
                     );
                     Ok(UpgradeStatus::Upgraded {
@@ -120,10 +119,8 @@ impl DetectUpgradeUseCase {
                 }
                 Ok(prev) => {
                     // prev > current —— 回滚。
-                    debug!(
+                    uc_debug!(
                         target: "upgrade",
-                        from = %prev,
-                        to = %current,
                         "downgrade detected"
                     );
                     Ok(UpgradeStatus::Downgraded {
@@ -132,7 +129,7 @@ impl DetectUpgradeUseCase {
                     })
                 }
                 Err(e) => {
-                    warn!(
+                    uc_warn!(
                         target: "upgrade",
                         error_kind = "cursor_version_parse",
                         io_error_kind = io_error_kind(&e),

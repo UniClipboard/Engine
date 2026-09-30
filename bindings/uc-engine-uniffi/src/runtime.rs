@@ -6,7 +6,6 @@ use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use tracing::warn;
 use uc_engine::observability::{
     AdoptOutcome, AnalyticsEventContext, AnalyticsIdentityError, AnalyticsIdentityPort,
     AnalyticsPort, DeviceType, Event, GroupIdentifyPayload, IdentifyPayload, Os, ReleaseOutcome,
@@ -24,13 +23,15 @@ use uc_engine::{
 use zeroize::Zeroizing;
 
 use crate::{
-    BindingAnalyticsContext, BindingAnalyticsDeviceType, BindingAnalyticsHost, BindingAnalyticsOs,
-    BindingClipboardOrigin, BindingClipboardRepresentation, BindingClipboardRestoreMode,
-    BindingClipboardRestoreOutcome, BindingClipboardSnapshot, BindingConfig, BindingEngineState,
-    BindingError, BindingErrorCategory, BindingEvent, BindingFailure, BindingFileMetadata,
-    BindingHost, BindingLifecycleAction, BindingOperationTerminal, BindingRePairingScope,
-    BindingRefreshReason, BindingTransferDirection, HostBindingError,
+    BindingAnalyticsContext, BindingAnalyticsDeviceType, BindingAnalyticsHost,
+    BindingAnalyticsHostError, BindingAnalyticsOs, BindingClipboardOrigin,
+    BindingClipboardRepresentation, BindingClipboardRestoreMode, BindingClipboardRestoreOutcome,
+    BindingClipboardSnapshot, BindingConfig, BindingEngineState, BindingError,
+    BindingErrorCategory, BindingEvent, BindingFailure, BindingFileMetadata, BindingHost,
+    BindingLifecycleAction, BindingOperationTerminal, BindingRePairingScope, BindingRefreshReason,
+    BindingTransferDirection, HostBindingError,
 };
+use uc_engine::observability::{log_vocab_debug, uc_warn};
 
 const LIFECYCLE_TRANSITION_DEADLINE: Duration = Duration::from_secs(10);
 mod lifecycle;
@@ -49,81 +50,85 @@ fn log_mobile_query_failure(operation: &'static str, error: &BindingError) {
             code,
             category,
             retryable,
-        } => warn!(
-            operation,
+        } => uc_warn!(
+            operation = operation,
             error_kind = "engine",
             error_code = *code,
-            error_category = ?category,
+            error_category = log_vocab_debug(&category),
             retryable = *retryable,
             "mobile query failed"
         ),
         BindingError::HostUnavailable => {
-            warn!(
-                operation,
+            uc_warn!(
+                operation = operation,
                 error_kind = "host_unavailable",
                 "mobile query failed"
             )
         }
         BindingError::HostPermissionDenied => {
-            warn!(
-                operation,
+            uc_warn!(
+                operation = operation,
                 error_kind = "host_permission_denied",
                 "mobile query failed"
             )
         }
         BindingError::HostInvalidHandle => {
-            warn!(
-                operation,
+            uc_warn!(
+                operation = operation,
                 error_kind = "host_invalid_handle",
                 "mobile query failed"
             )
         }
-        BindingError::HostIo => warn!(operation, error_kind = "host_io", "mobile query failed"),
+        BindingError::HostIo => uc_warn!(
+            operation = operation,
+            error_kind = "host_io",
+            "mobile query failed"
+        ),
         BindingError::RuntimeUnavailable => {
-            warn!(
-                operation,
+            uc_warn!(
+                operation = operation,
                 error_kind = "runtime_unavailable",
                 "mobile query failed"
             )
         }
         BindingError::AlreadyStopped => {
-            warn!(
-                operation,
+            uc_warn!(
+                operation = operation,
                 error_kind = "already_stopped",
                 "mobile query failed"
             )
         }
         BindingError::ObservabilityConfigInvalid => {
-            warn!(
-                operation,
+            uc_warn!(
+                operation = operation,
                 error_kind = "observability_config_invalid",
                 "mobile query failed"
             )
         }
         BindingError::ObservabilityConfigConflict => {
-            warn!(
-                operation,
+            uc_warn!(
+                operation = operation,
                 error_kind = "observability_config_conflict",
                 "mobile query failed"
             )
         }
         BindingError::ObservabilityRuntimeUnavailable => {
-            warn!(
-                operation,
+            uc_warn!(
+                operation = operation,
                 error_kind = "observability_runtime_unavailable",
                 "mobile query failed"
             )
         }
         BindingError::ObservabilityNotInstalled => {
-            warn!(
-                operation,
+            uc_warn!(
+                operation = operation,
                 error_kind = "observability_not_installed",
                 "mobile query failed"
             )
         }
         BindingError::UnexpectedResult => {
-            warn!(
-                operation,
+            uc_warn!(
+                operation = operation,
                 error_kind = "unexpected_result",
                 "mobile query failed"
             )
@@ -674,9 +679,19 @@ impl BindingAnalyticsAdapter {
         })
     }
 
-    fn warn_callback(scope: &'static str, error: &crate::BindingAnalyticsHostError) {
+    fn warn_callback(scope: &'static str, error: &BindingAnalyticsHostError) {
         // 宿主回调错误是无字段的固定枚举，变体名即完整分类。
-        tracing::warn!(scope, error_kind = ?error, "mobile analytics callback failed");
+        let error_kind = match error {
+            BindingAnalyticsHostError::ContextUnavailable => "ContextUnavailable",
+            BindingAnalyticsHostError::DeliveryFailed => "DeliveryFailed",
+            BindingAnalyticsHostError::PersistenceFailed => "PersistenceFailed",
+            BindingAnalyticsHostError::InvalidIdentity => "InvalidIdentity",
+        };
+        uc_warn!(
+            scope = scope,
+            error_kind = error_kind,
+            "mobile analytics callback failed"
+        );
     }
 }
 

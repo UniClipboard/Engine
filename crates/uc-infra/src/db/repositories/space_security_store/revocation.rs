@@ -15,6 +15,7 @@ use crate::security::MasterKey;
 use super::encrypted_payload::{open, seal, space_lookup_token};
 use super::space_material::{load_space_material_on, save_space_material_on};
 use super::{backend, epoch_to_i64, transaction_failure, DieselSpaceSecurityStore};
+use uc_observability_contract::uc_warn;
 
 #[derive(QueryableByName)]
 pub(super) struct RevocationRow {
@@ -206,7 +207,7 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
                                     "obsolete prepared revocation could not be replaced"
                                 ));
                             }
-                            tracing::warn!(
+                            uc_warn!(
                                 event = "member_revocation.obsolete_prepared_replaced",
                                 previous_epoch = existing.previous_epoch().value(),
                                 current_epoch = prepared.previous_epoch().value(),

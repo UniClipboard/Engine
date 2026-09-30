@@ -13,7 +13,6 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use thiserror::Error;
-use tracing::info;
 
 use crate::deps::CurrentSpaceMemberScopePort;
 use uc_core::blob::ports::BlobReaderPort;
@@ -34,6 +33,10 @@ use crate::clipboard::sync::dispatch_entry::DispatchEntryRunner;
 
 use super::existing_local_entry_delivery::ExistingLocalEntryDelivery;
 pub(crate) use super::existing_local_entry_delivery::ExistingLocalEntryDeliveryRunner;
+use uc_observability_contract::{
+    log_fields::{log_id, log_vocab},
+    uc_info,
+};
 
 /// 用户主动 resend 的命令。
 #[derive(Debug, Clone)]
@@ -214,9 +217,15 @@ impl ResendEntryUseCase {
         &self,
         cmd: ResendEntryCommand,
     ) -> Result<ResendReport, ResendEntryError> {
-        info!(
-            entry_id = %cmd.entry_id,
-            filter_kind = if cmd.target_filter.is_some() { "explicit" } else { "diff_set" },
+        uc_info!(
+            entry_id = log_id(&cmd.entry_id),
+            filter_kind = log_vocab(
+                &(if cmd.target_filter.is_some() {
+                    "explicit"
+                } else {
+                    "diff_set"
+                })
+            ),
             "resend.execute start"
         );
 

@@ -1,7 +1,6 @@
 use anyhow::Result;
 use chrono::Utc;
 use diesel::prelude::*;
-use tracing::debug;
 
 use crate::db::schema::file_transfer;
 use crate::file_transfer::event_store::sqlite::TransferCommitConflict;
@@ -10,6 +9,7 @@ use uc_core::file_transfer::{
     FileTransferCancellationReason, FileTransferEvent, FileTransferFailureReason,
 };
 use uc_core::ports::file_transfer::TrackedFileTransferStatus;
+use uc_observability_contract::uc_debug;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProjectionSnapshot {
@@ -126,7 +126,7 @@ pub(crate) fn apply_prepared_projection(
     }
 
     let Some(expected) = prepared.expected.as_ref() else {
-        debug!("no receiver projection row for event; skipping projection update");
+        uc_debug!("no receiver projection row for event; skipping projection update");
         return Ok(());
     };
     let Some(mutation) = prepared.mutation.as_ref() else {

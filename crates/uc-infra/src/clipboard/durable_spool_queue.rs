@@ -31,10 +31,10 @@ use anyhow::Context;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
-use tracing::warn;
+
 use uc_core::ids::RepresentationId;
 use uc_core::ports::clipboard::{SpoolQueuePort, SpoolRequest};
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, log_fields::log_id, uc_warn};
 
 use crate::clipboard::SpoolManager;
 
@@ -70,8 +70,8 @@ impl SpoolQueuePort for DurableSpoolQueue {
         // A failure here is non-fatal: the spool file is on disk and will be
         // recovered by SpoolScanner on the next application startup.
         if let Err(err) = self.worker_tx.try_send(request.rep_id.clone()) {
-            warn!(
-                representation_id = %request.rep_id,
+            uc_warn!(
+                representation_id = log_id(&request.rep_id),
                 error_kind = "worker_notify",
                 io_error_kind = io_error_kind(&err),
                 "Failed to notify worker after spool write; will be recovered on next startup"

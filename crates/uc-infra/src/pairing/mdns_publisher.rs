@@ -28,12 +28,12 @@ use std::time::Duration;
 use swarm_discovery::{Discoverer, DropGuard, IpClass, SpawnError, TxtAttributeError};
 use thiserror::Error;
 use tokio::runtime::Handle;
-use tracing::{debug, info, warn};
 
 use super::discovery_constants::{
     compute_code_hash, ticket_txt_attributes, PAIR_SERVICE_NAME, TXT_CODE_HASH, TXT_EXPIRES_AT_MS,
     TXT_NODE_ID,
 };
+use uc_observability_contract::{uc_debug, uc_info, uc_warn};
 
 /// Default mDNS query/announce cadence for pairing. Tighter than the
 /// 10s default `swarm-discovery` ships because pairing is a UX-critical
@@ -114,10 +114,9 @@ impl MdnsPairingPublisher {
         let actor_id = derive_actor_id(node_id);
         let addrs = enumerate_publish_addrs();
 
-        debug!(
-            code_hash = %code_hash,
+        uc_debug!(
             addr_count = addrs.len(),
-            port,
+            port = port,
             "starting mDNS pairing publisher",
         );
 
@@ -153,10 +152,7 @@ impl MdnsPairingPublisher {
 
         let guard = discoverer.spawn(handle)?;
 
-        info!(
-            code_hash = %code_hash,
-            "mDNS pairing announce live (window-scoped)",
-        );
+        uc_info!("mDNS pairing announce live (window-scoped)",);
 
         Ok(PublisherHandle { _guard: guard })
     }
@@ -197,7 +193,7 @@ fn enumerate_publish_addrs() -> Vec<IpAddr> {
             .filter(|ip| !ip.is_loopback())
             .collect(),
         Err(_err) => {
-            warn!(
+            uc_warn!(
                 failure_stage = "address_enumeration",
                 "if-addrs enumerate failed; mDNS publisher will run without local addresses"
             );

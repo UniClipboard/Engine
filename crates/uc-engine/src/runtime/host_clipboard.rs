@@ -2,13 +2,13 @@ use std::error::Error;
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
-use tracing::{error, warn};
+
 use uc_application::facade::{
     HostClipboardDispatch, LocalClipboardIntent, LocalClipboardOutcome, LocalClipboardRequest,
 };
 use uc_core::ports::{SelfWriteLedgerPort, SystemClipboardPort};
 use uc_core::{ClipboardChangeOrigin, TaskRegistry};
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_error, uc_info, uc_warn};
 
 use super::host_operations::send_report_summary;
 use super::operation_error_with_code;
@@ -37,7 +37,7 @@ pub(super) async fn spawn_host_clipboard_change_task(
             loop {
                 let Some(change) = next_change_or_stop(changes.as_mut(), &cancel).await else {
                     if let Err(error) = changes.shutdown().await {
-                        warn!(
+                        uc_warn!(
                             error_kind = "change_stream_shutdown",
                             io_error_kind = io_error_kind(&error),
                             "host clipboard change stream shutdown failed"
@@ -51,7 +51,7 @@ pub(super) async fn spawn_host_clipboard_change_task(
                             .process_change(HostClipboardDispatch::Background)
                             .await
                         {
-                            warn!(
+                            uc_warn!(
                                 error_kind = "change_processing",
                                 io_error_kind = io_error_kind(&error),
                                 "host clipboard change processing failed"
@@ -60,7 +60,7 @@ pub(super) async fn spawn_host_clipboard_change_task(
                     }
                     Ok(HostClipboardChange::Closed) => return,
                     Err(error) => {
-                        warn!(
+                        uc_warn!(
                             error_kind = "change_stream",
                             io_error_kind = io_error_kind(&error),
                             "host clipboard change stream failed"
@@ -145,7 +145,7 @@ impl HostClipboardChangeRuntime {
             return Ok(None);
         }
         if origin == ClipboardChangeOrigin::Resend {
-            error!("host clipboard watcher observed an invalid resend origin");
+            uc_error!("host clipboard watcher observed an invalid resend origin");
             return Ok(None);
         }
 
@@ -170,7 +170,7 @@ impl HostClipboardChangeRuntime {
         match dispatch_mode {
             HostClipboardDispatch::AwaitReport => Ok(Some(report)),
             HostClipboardDispatch::Background => {
-                tracing::info!(
+                uc_info!(
                     accepted = report.total_accepted,
                     duplicate = report.total_duplicate,
                     offline = report.total_offline,

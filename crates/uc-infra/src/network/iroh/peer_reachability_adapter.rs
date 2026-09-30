@@ -16,7 +16,7 @@ use iroh::Endpoint;
 use iroh::EndpointAddr;
 use tokio::sync::{broadcast, Mutex};
 use tokio::task::JoinHandle;
-use tracing::{debug, info, instrument, warn};
+use tracing::instrument;
 
 use uc_application::deps::KnownPeerContact;
 use uc_core::ids::DeviceId;
@@ -37,6 +37,7 @@ use super::net_recovery::{
 };
 use super::peer_address_resolver::PeerAddressResolver;
 use super::peer_reachability_protocol;
+use uc_observability_contract::{uc_debug, uc_info, uc_warn};
 
 mod liveness;
 
@@ -193,8 +194,8 @@ impl HandlerState {
     fn now(&self) -> DateTime<Utc> {
         let ms = self.clock.now_ms();
         Utc.timestamp_millis_opt(ms).single().unwrap_or_else(|| {
-            warn!(
-                ms,
+            uc_warn!(
+                ms = ms,
                 "ClockPort returned out-of-range epoch millis; falling back to Utc::now",
             );
             Utc::now()
@@ -227,7 +228,7 @@ impl ProtocolHandler for IrohPeerReachabilityHandler {
         let generation = self.state.observations.lock().await.generation;
         let remote = connection.remote_id();
         let connection_id = connection.stable_id();
-        debug!("presence connection accepted; holding open until peer closes");
+        uc_debug!("presence connection accepted; holding open until peer closes");
 
         let (mut send, mut receive) =
             match tokio::time::timeout(PEER_ADMISSION_IO_TIMEOUT, connection.accept_bi()).await {
@@ -256,7 +257,10 @@ impl ProtocolHandler for IrohPeerReachabilityHandler {
                     .state
                     .known_peer_contact_tx
                     .send(KnownPeerContact { device_id });
-                warn!(error.type = "peer_rejected", "presence accept: peer is not admitted by current space protection");
+                uc_warn!(
+                    error_kind = "peer_rejected",
+                    "presence accept: peer is not admitted by current space protection"
+                );
                 self.state.gate.record_rejection(rejection);
                 reject_admission(send, &connection).await;
                 return Ok(());
@@ -353,9 +357,9 @@ impl ProtocolHandler for IrohPeerReachabilityHandler {
                     state: ReachabilityState::Online,
                     at: now_at,
                 });
-                info!("inbound presence connection: peer marked Online",);
+                uc_info!("inbound presence connection: peer marked Online",);
             } else {
-                debug!("inbound presence connection: peer already Online (no event)",);
+                uc_debug!("inbound presence connection: peer already Online (no event)",);
             }
         } else {
             // A peer that is no longer in the local space must not keep a
@@ -364,7 +368,7 @@ impl ProtocolHandler for IrohPeerReachabilityHandler {
                 self.state.gate.record_rejection(rejection);
             }
             reject_admission(send, &connection).await;
-            debug!("inbound presence connection from unresolved peer; closing",);
+            uc_debug!("inbound presence connection from unresolved peer; closing",);
             return Ok(());
         }
 
@@ -381,7 +385,7 @@ impl ProtocolHandler for IrohPeerReachabilityHandler {
         if let Ok(device) = admitted_device {
             self.state.mark_offline_if_disconnected(device).await;
         }
-        debug!("presence connection closed by peer",);
+        uc_debug!("presence connection closed by peer",);
         Ok(())
     }
 }
@@ -570,8 +574,8 @@ impl IrohPeerReachabilityAdapter {
         match Utc.timestamp_millis_opt(ms).single() {
             Some(dt) => dt,
             None => {
-                warn!(
-                    ms,
+                uc_warn!(
+                    ms = ms,
                     "ClockPort returned out-of-range epoch millis; falling back to Utc::now"
                 );
                 Utc::now()
@@ -649,7 +653,7 @@ impl IrohPeerReachabilityAdapter {
                 Some(address) => address,
                 None => {
                     *failure = PresenceCheckResult::AddressMissing;
-                    debug!("dial_and_track: no address record; returning NoAddress");
+                    uc_debug!("dial_and_track: no address record; returning NoAddress");
                     return Err(PeerReachabilityError::NoAddress(*device));
                 }
             };
@@ -726,7 +730,7 @@ impl IrohPeerReachabilityAdapter {
                     last.insert(*device, ReachabilityState::Online)
                         != Some(ReachabilityState::Online)
                 };
-                info!("dial_and_track: dial succeeded, peer marked Online");
+                uc_info!("dial_and_track: dial succeeded, peer marked Online");
                 if should_broadcast {
                     self.broadcast(*device, ReachabilityState::Online, now);
                 }
@@ -844,7 +848,7 @@ impl PeerReachabilityPort for IrohPeerReachabilityAdapter {
                         .values()
                         .any(|(id, connection)| id == device && fresh(connection))
                 {
-                    debug!("reusing recent peer response");
+                    uc_debug!("reusing recent peer response");
                     return Ok(ReachabilityState::Online);
                 }
             }
@@ -867,7 +871,7 @@ impl PeerReachabilityPort for IrohPeerReachabilityAdapter {
         if let Some(observations) = &self.network_recovery_observations {
             observations.publish(NetworkRecoveryObservation::CommunicationFailed(*device));
         }
-        debug!("communication failure submitted for peer recheck");
+        uc_debug!("communication failure submitted for peer recheck");
     }
 
     async fn forget(&self, device: &DeviceId) {

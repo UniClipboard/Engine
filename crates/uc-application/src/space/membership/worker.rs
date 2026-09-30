@@ -41,6 +41,7 @@ pub use history_sync::RefreshVerifiedPeerAddressPort;
 
 use effects::MembershipEffectSteps;
 use history_sync::{HistorySynchronizer, MAX_PEERS_PER_ROUND};
+use uc_observability_contract::{uc_debug, uc_warn};
 
 /// 单次运行最多推进的轮数；每轮至少完成一项新待办，上限只防止异常状态下的无界循环。
 const MAX_PASSES_PER_RUN: usize = 256;
@@ -190,7 +191,7 @@ impl MembershipWorker {
                 })
             });
             if !still_due {
-                tracing::debug!("成员效果阶段已由并发执行推进，本次跳过");
+                uc_debug!("成员效果阶段已由并发执行推进，本次跳过");
                 return Ok(());
             }
             match self.effects.run(&effect).await {
@@ -208,14 +209,14 @@ impl MembershipWorker {
                     tally.completed += 1;
                 }
                 Err(MembershipEffectExecutionError::Corrupt) => {
-                    tracing::warn!("成员效果内容损坏");
+                    uc_warn!("成员效果内容损坏");
                     tally.corrupt += 1;
                 }
                 Err(
                     MembershipEffectExecutionError::Deferred { .. }
                     | MembershipEffectExecutionError::Dependency { .. },
                 ) => {
-                    tracing::debug!("成员效果执行延后");
+                    uc_debug!("成员效果执行延后");
                     tally.deferred += 1;
                 }
             }
@@ -417,7 +418,7 @@ impl Tally {
     fn record_ledger_error(&mut self, error: MembershipLedgerError) {
         match error {
             MembershipLedgerError::Corrupt { .. } | MembershipLedgerError::RecoveryRequired => {
-                tracing::warn!("成员待办无法读取或提交已验证成员状态");
+                uc_warn!("成员待办无法读取或提交已验证成员状态");
                 self.corrupt += 1;
             }
             MembershipLedgerError::Locked

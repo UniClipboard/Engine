@@ -2,9 +2,10 @@ use async_trait::async_trait;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
-use tracing::debug;
+
 use uc_core::ports::clipboard::{SelfWriteAttribution, SelfWriteLedgerPort, SelfWriteMatch};
 use uc_core::ClipboardChangeOrigin;
+use uc_observability_contract::uc_debug;
 
 /// In-memory [`SelfWriteLedgerPort`] implementation.
 ///
@@ -213,17 +214,14 @@ impl SelfWriteLedgerPort for InMemorySelfWriteLedger {
         Self::prune_expired(&mut state, now);
         match matching {
             SelfWriteMatch::ByContent(snapshot_hash) => {
-                debug!(
-                    snapshot_hash = %snapshot_hash,
-                    ?attribution,
+                uc_debug!(
                     ttl_ms = ttl.as_millis(),
                     "self_write_ledger record content guard"
                 );
                 Self::remember_content_record(&mut state, snapshot_hash, attribution, expires_at);
             }
             SelfWriteMatch::ByNextChange(guard_key) => {
-                debug!(
-                    ?attribution,
+                uc_debug!(
                     ttl_ms = ttl.as_millis(),
                     "self_write_ledger record next-change fallback"
                 );
@@ -283,11 +281,7 @@ impl SelfWriteLedgerPort for InMemorySelfWriteLedger {
                 }) {
                     Self::consume_fallback_credit(&mut state, fidx, now, self.echo_tail);
                 }
-                debug!(
-                    snapshot_hash = %snapshot_hash,
-                    ?stored.attribution,
-                    "self_write_ledger content guard matched"
-                );
+                uc_debug!("self_write_ledger content guard matched");
                 return attribution_to_origin(stored.attribution);
             }
         }
@@ -304,18 +298,11 @@ impl SelfWriteLedgerPort for InMemorySelfWriteLedger {
         {
             let attribution = state.next_changes[idx].attribution;
             Self::consume_fallback_credit(&mut state, idx, now, self.echo_tail);
-            debug!(
-                snapshot_hash = %snapshot_hash,
-                ?attribution,
-                "self_write_ledger next-change fallback matched"
-            );
+            uc_debug!("self_write_ledger next-change fallback matched");
             return attribution_to_origin(attribution);
         }
 
-        debug!(
-            snapshot_hash = %snapshot_hash,
-            "self_write_ledger no guard matched; treating as local capture"
-        );
+        uc_debug!("self_write_ledger no guard matched; treating as local capture");
 
         ClipboardChangeOrigin::LocalCapture
     }

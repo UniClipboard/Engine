@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+
 use uc_application::deps::{LifecycleError, StopProfileRuntimePort};
 use uc_application::facade::ProfileFactoryResetFacade;
 use uc_core::crypto::domain::Passphrase;
@@ -13,7 +13,7 @@ use uc_infra::security::{
     ProfileKeyRecoveryError, ProfileKeyRecoveryStore, ProfileRecoveryLosses,
     ProfileRecoveryOutcome, ProfileRecoveryPreparation,
 };
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_warn};
 
 use super::{profile_recovery_required_error, startup_error, ProductionRuntime};
 use crate::assembly::host::{
@@ -229,7 +229,7 @@ impl RecoverableRuntime {
                     }
                 }
                 Err(error) => {
-                    warn!(
+                    uc_warn!(
                         error_kind = "profile_recovery_refresh",
                         io_error_kind = io_error_kind(&error),
                         "profile recovery refresh failed after committed operation"

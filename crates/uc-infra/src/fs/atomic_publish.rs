@@ -18,9 +18,9 @@
 use std::path::Path;
 
 use async_trait::async_trait;
-use tracing::{debug, warn};
+
 use uc_core::ports::atomic_publish::{AtomicPublishPort, PublishError};
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_debug, uc_warn};
 
 pub struct FsAtomicPublisher;
 
@@ -79,7 +79,7 @@ impl AtomicPublishPort for FsAtomicPublisher {
         match tokio::task::spawn_blocking(move || probe_no_replace(&probe_dir)).await {
             Ok(supported) => supported,
             Err(err) => {
-                warn!(
+                uc_warn!(
                     error_kind = "probe_task_join",
                     io_error_kind = io_error_kind(&err),
                     "no-replace probe task did not run; assuming unsupported"
@@ -117,7 +117,7 @@ fn probe_no_replace(probe_dir: &Path) -> bool {
     for path in &created {
         if let Err(err) = std::fs::remove_dir_all(path) {
             if err.kind() != std::io::ErrorKind::NotFound {
-                warn!(
+                uc_warn!(
                     error_kind = "probe_entry_cleanup",
                     io_error_kind = io_error_kind(&err),
                     "failed to clean up a no-replace probe entry"
@@ -129,23 +129,23 @@ fn probe_no_replace(probe_dir: &Path) -> bool {
     match result {
         Ok(Err(PublishError::DestinationExists)) => true,
         Ok(Err(PublishError::Unsupported)) => {
-            debug!("volume rejects no-replace publication");
+            uc_debug!("volume rejects no-replace publication");
             false
         }
         // The rename reported success against an occupied destination: the
         // flag was accepted and disregarded, so the guarantee is a fiction here.
         Ok(Ok(())) => {
-            warn!(
+            uc_warn!(
                 "volume accepts the no-replace flag but replaces anyway; treating as unsupported"
             );
             false
         }
         Ok(Err(PublishError::Io(_))) => {
-            debug!("no-replace probe failed; assuming unsupported");
+            uc_debug!("no-replace probe failed; assuming unsupported");
             false
         }
         Err(err) => {
-            debug!(
+            uc_debug!(
                 error_kind = "probe_stage",
                 io_error_kind = io_error_kind(&err),
                 "could not stage a no-replace probe; assuming unsupported"

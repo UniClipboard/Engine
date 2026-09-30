@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use tokio_util::sync::CancellationToken;
-use tracing::{error, warn};
+
 use uc_application::facade::{
     AppFacade, ClipboardHistoryError, ClipboardOutboundOutcome, LocalClipboardIntent,
     LocalClipboardOutcome, LocalClipboardRequest, ResourceFacadeError,
@@ -15,7 +15,7 @@ use uc_core::{
     ObservedClipboardRepresentation, SystemClipboardSnapshot, FILE_DISPLAY_METADATA_FORMAT,
     FILE_DISPLAY_METADATA_MIME,
 };
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_error, uc_warn};
 
 use super::{operation_error_with_code, operation_unavailable_error, ProductionRuntime};
 use crate::{
@@ -115,7 +115,7 @@ impl ProductionRuntime {
         }
         .encode()
         .map_err(|error| {
-            error!(
+            uc_error!(
                 error_kind = "display_metadata_encode",
                 io_error_kind = io_error_kind(&error),
                 "failed to encode file display metadata"
@@ -171,7 +171,7 @@ impl ProductionRuntime {
     ) -> Result<Vec<ImportedHostFile>, EngineError> {
         let import_root = self.file_cache_dir.join("engine-imports");
         std::fs::create_dir_all(&import_root).map_err(|error| {
-            error!(
+            uc_error!(
                 error_kind = "import_dir_create",
                 io_error_kind = io_error_kind(&error),
                 "failed to create engine file import directory"
@@ -180,7 +180,7 @@ impl ProductionRuntime {
         })?;
         let operation_dir = import_root.join(RepresentationId::new().to_string());
         std::fs::create_dir(&operation_dir).map_err(|error| {
-            error!(
+            uc_error!(
                 error_kind = "import_operation_dir_create",
                 io_error_kind = io_error_kind(&error),
                 "failed to create engine file import operation directory"
@@ -336,7 +336,7 @@ fn copy_host_file(
         .write(true)
         .open(destination)
         .map_err(|error| {
-            error!(
+            uc_error!(
                 error_kind = "import_file_create",
                 io_error_kind = io_error_kind(&error),
                 "failed to create imported host file"
@@ -357,7 +357,7 @@ fn copy_host_file(
             return Err(send_failed_error());
         }
         output.write_all(&chunk).map_err(|error| {
-            error!(
+            uc_error!(
                 error_kind = "import_file_write",
                 io_error_kind = io_error_kind(&error),
                 "failed to write imported host file"
@@ -369,7 +369,7 @@ fn copy_host_file(
             .ok_or_else(send_failed_error)?;
     }
     output.sync_all().map_err(|error| {
-        error!(
+        uc_error!(
             error_kind = "import_file_sync",
             io_error_kind = io_error_kind(&error),
             "failed to sync imported host file"
@@ -380,7 +380,7 @@ fn copy_host_file(
 
 fn cleanup_failed_import(operation_dir: &Path) {
     if let Err(error) = std::fs::remove_dir_all(operation_dir) {
-        warn!(
+        uc_warn!(
             error_kind = "import_cleanup",
             io_error_kind = io_error_kind(&error),
             "failed to remove incomplete engine file import"
@@ -411,7 +411,7 @@ fn map_send_host_error(error: crate::HostCapabilityError) -> EngineError {
         crate::HostCapabilityErrorCategory::Unavailable
         | crate::HostCapabilityErrorCategory::Io => (EngineErrorCategory::Unavailable, true),
     };
-    error!(
+    uc_error!(
         error_kind = "host_file_import",
         io_error_kind = io_error_kind(&error),
         "host file import failed"
@@ -495,7 +495,7 @@ fn map_export_host_error(error: crate::HostCapabilityError) -> EngineError {
             true,
         ),
     };
-    error!(
+    uc_error!(
         error_kind = "host_export",
         io_error_kind = io_error_kind(&error),
         "host export failed"

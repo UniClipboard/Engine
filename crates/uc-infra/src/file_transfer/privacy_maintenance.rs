@@ -1,12 +1,12 @@
 use async_trait::async_trait;
 use diesel::prelude::*;
-use tracing::{info, warn};
 
 use crate::db::ports::DbExecutor;
 use crate::db::schema::file_transfer_privacy_maintenance;
 use uc_core::ports::{
     EnsureFileTransferPrivacyMaintenancePort, FileTransferPrivacyMaintenanceError,
 };
+use uc_observability_contract::{uc_info, uc_warn};
 
 pub struct SqliteFileTransferPrivacyMaintenance<E> {
     executor: E,
@@ -65,7 +65,7 @@ where
                     anyhow::bail!("file transfer privacy maintenance marker changed during purge");
                 }
 
-                info!(
+                uc_info!(
                     elapsed_ms = started.elapsed().as_millis() as u64,
                     "file transfer plaintext residue purge completed"
                 );
@@ -95,9 +95,9 @@ fn run_with_busy_retry(
             Err(diesel::result::Error::DatabaseError(_, ref info))
                 if attempt < MAX_ATTEMPTS && is_busy_or_locked(info.message()) =>
             {
-                warn!(
-                    sql,
-                    attempt, "file transfer privacy maintenance is busy; retrying"
+                uc_warn!(
+                    attempt = attempt,
+                    "file transfer privacy maintenance is busy; retrying"
                 );
                 std::thread::sleep(std::time::Duration::from_millis(50 * attempt as u64));
             }

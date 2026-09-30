@@ -8,7 +8,6 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::sync::Arc;
-use tracing::trace;
 
 use uc_core::{
     clipboard::ObservedClipboardRepresentation,
@@ -17,6 +16,7 @@ use uc_core::{
     ids::{EventId, RepresentationId},
     ports::{security::BlobCipherPort, ClipboardEventRepositoryPort},
 };
+use uc_observability_contract::{log_fields::log_id, uc_trace};
 
 /// Decorator that decrypts ObservedClipboardRepresentation.bytes on read.
 pub struct DecryptingClipboardEventRepository {
@@ -60,8 +60,8 @@ impl ClipboardEventRepositoryPort for DecryptingClipboardEventRepository {
                 .await
                 .context("failed to decrypt representation bytes")?;
 
-            trace!(
-                representation_id = %representation_id,
+            uc_trace!(
+                representation_id = log_id(&representation_id),
                 bytes = plaintext.len(),
                 "Decrypted representation bytes via BlobCipherPort"
             );

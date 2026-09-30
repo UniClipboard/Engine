@@ -5,11 +5,13 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::fs;
-use tracing::{debug, warn};
+
 use uc_core::clipboard::PayloadAvailability;
 use uc_core::ports::clipboard::ProcessingUpdateOutcome;
 use uc_core::ports::{ClipboardRepresentationStore, ClockPort};
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_id, uc_debug, uc_warn,
+};
 
 use crate::clipboard::SpoolManager;
 
@@ -65,15 +67,15 @@ impl SpoolJanitor {
             {
                 Ok(ProcessingUpdateOutcome::Updated(_)) => true,
                 Ok(ProcessingUpdateOutcome::StateMismatch) => {
-                    debug!(
-                        representation_id = %entry.representation_id,
+                    uc_debug!(
+                        representation_id = log_id(&entry.representation_id),
                         "Skipping spool file delete: state mismatch (rep moved past Staged/Processing)"
                     );
                     false
                 }
                 Ok(ProcessingUpdateOutcome::NotFound) => {
-                    debug!(
-                        representation_id = %entry.representation_id,
+                    uc_debug!(
+                        representation_id = log_id(&entry.representation_id),
                         "Skipping spool file delete: representation missing from DB"
                     );
                     // The rep is gone from DB; the spool file is genuinely
@@ -81,8 +83,8 @@ impl SpoolJanitor {
                     true
                 }
                 Err(err) => {
-                    warn!(
-                        representation_id = %entry.representation_id,
+                    uc_warn!(
+                        representation_id = log_id(&entry.representation_id),
                         error_kind = "representation_mark_lost",
                         io_error_kind = io_error_kind(err.as_ref()),
                         "Failed to mark Lost during spool cleanup; leaving spool file for retry"
@@ -93,8 +95,8 @@ impl SpoolJanitor {
 
             if updated {
                 if let Err(err) = fs::remove_file(&entry.file_path).await {
-                    warn!(
-                        representation_id = %entry.representation_id,
+                    uc_warn!(
+                        representation_id = log_id(&entry.representation_id),
                         error_kind = "spool_file_delete",
                         io_error_kind = io_error_kind(&err),
                         "Failed to delete expired spool file"

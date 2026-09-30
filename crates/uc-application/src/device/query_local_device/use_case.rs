@@ -3,6 +3,7 @@ use std::sync::Arc;
 use uc_core::ports::{DeviceIdentityPort, SettingsPort};
 
 use super::LocalDeviceInfo;
+use uc_observability_contract::uc_warn;
 
 const DEFAULT_DEVICE_NAME: &str = "Uniclipboard Device";
 
@@ -26,7 +27,7 @@ impl QueryLocalDeviceUseCase {
         let device_name = match self.settings.load().await {
             Ok(settings) => normalize_device_name(settings.general.device_name),
             Err(_) => {
-                tracing::warn!("local device settings unavailable; using fallback device name");
+                uc_warn!("local device settings unavailable; using fallback device name");
                 DEFAULT_DEVICE_NAME.to_string()
             }
         };

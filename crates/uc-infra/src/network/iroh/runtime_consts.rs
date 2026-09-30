@@ -8,7 +8,7 @@
 use std::sync::Mutex;
 
 #[cfg(not(any(test, feature = "test-util")))]
-use tracing::warn;
+use uc_observability_contract::uc_warn;
 
 #[cfg(not(any(test, feature = "test-util")))]
 static LAN_ONLY: Mutex<bool> = Mutex::new(false);
@@ -19,7 +19,7 @@ pub(crate) fn install_lan_only(lan_only: bool) {
     #[cfg(not(any(test, feature = "test-util")))]
     {
         let mut current = LAN_ONLY.lock().unwrap_or_else(|poisoned| {
-            warn!("iroh LAN-only runtime state lock poisoned while installing policy");
+            uc_warn!("iroh LAN-only runtime state lock poisoned while installing policy");
             poisoned.into_inner()
         });
         *current = lan_only;
@@ -37,7 +37,7 @@ pub(crate) fn clear_lan_only() {
     #[cfg(not(any(test, feature = "test-util")))]
     {
         let mut current = LAN_ONLY.lock().unwrap_or_else(|poisoned| {
-            warn!("iroh LAN-only runtime state lock poisoned while clearing policy");
+            uc_warn!("iroh LAN-only runtime state lock poisoned while clearing policy");
             poisoned.into_inner()
         });
         *current = false;
@@ -50,7 +50,7 @@ pub(crate) fn lan_only() -> bool {
     #[cfg(not(any(test, feature = "test-util")))]
     {
         let current = LAN_ONLY.lock().unwrap_or_else(|poisoned| {
-            warn!("iroh LAN-only runtime state lock poisoned while reading policy");
+            uc_warn!("iroh LAN-only runtime state lock poisoned while reading policy");
             poisoned.into_inner()
         });
         *current

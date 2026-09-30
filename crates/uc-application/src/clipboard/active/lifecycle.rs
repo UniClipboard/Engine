@@ -10,13 +10,13 @@ use tokio::sync::{
 };
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
 
 use super::{resurface_entry, ActiveClipboardConvergedEvent, ActiveClipboardFacade};
 use crate::clipboard::sync::active_state::peer_online_resync_worker::PeerOnlineResyncWorker;
 use crate::clipboard::sync::active_state::restore_broadcast_worker::RestoreBroadcastWorker;
 use crate::clipboard::write::RestoreBroadcastRequest;
 use crate::runtime_lifecycle::LifecycleError;
+use uc_observability_contract::uc_debug;
 
 impl ActiveClipboardFacade {
     /// 启动并持有当前剪贴板的全部后台工作，装配方只通过返回值管理其生命周期。
@@ -113,7 +113,7 @@ impl ActiveClipboardFacade {
                     .await;
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
-                    debug!(
+                    uc_debug!(
                         missed = n,
                         "resurface worker lagged; some entries may not resurface immediately"
                     );

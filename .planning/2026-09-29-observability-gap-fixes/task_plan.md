@@ -4,14 +4,14 @@
 
 ## 硬约束（每个切片都要满足）
 - 不新增 Engine 对 Application/Core 内部阶段、状态、标识的暴露；Engine 只装饰既有完整能力。
-- 不含剪贴板内容、密钥、令牌、设备名、地址、文件名、路径；字段必须在 `ALLOWED_TEXT_FIELDS`，
+- 不含剪贴板内容、密钥、令牌、设备名、地址、文件名、路径；字段必须登记在字段目录（`uc_observability_contract::log_fields`），
   错误只走 `error_kind` / `io_error_kind` / 已登记 `log_safe_errors!` 类型，不用 `%e` `?e`。
 - 状态迁移只在提交迁移的负责人处记一次；已返回给上层的错误不重复记。
 - 对端可触发的失败用 debug 或限速 warn；“终止整个流程”的丢弃不得只写 debug。
 - 诊断日志是永久日志，不做临时调试输出。
 
 ## 顺序（用户 2026-09-29 决定）
-先完成 ADR-030（`docs/design-docs/decisions/030-typed-log-events-and-enforcement.md`）及其第 1-3 步，再做本任务的补日志。
+ADR-030 的第 1 步（类型化 `uc_*!` 宏、字段目录、零容忍检查）已于 2026-09-29 一次性完成；其第 3 步（错误分类）与 `DiagnosticTaskKind` 声明生成未做。本任务的补日志现在可以开始，一律用 `uc_*!` 宏编写。
 因此本计划的所有阶段暂缓，P-A 中“新增 DiagnosticTaskKind / 登记类型”改按 ADR 第 2、3 步的声明与分类方式书写，
 不再沿用 `log_safe_errors!` 逐层登记。ADR 采纳前，findings 仍是有效的缺口清单。
 

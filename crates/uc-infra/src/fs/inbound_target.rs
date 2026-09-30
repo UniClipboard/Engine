@@ -9,12 +9,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tracing::{debug, warn};
+
 use uc_core::ports::inbound_file_target::{
     ReserveInboundFileTargetPort, ResolveInboundSaveDirPort,
 };
 use uc_core::ports::settings::SettingsPort;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_debug, uc_warn};
 
 /// Upper bound on collision-suffix attempts before giving up and falling back.
 const MAX_COLLISION_ATTEMPTS: u32 = 10_000;
@@ -37,7 +37,7 @@ impl FsInboundFileTarget {
         let settings = match self.settings.load().await {
             Ok(s) => s,
             Err(e) => {
-                warn!(
+                uc_warn!(
                     error_kind = "settings_load",
                     io_error_kind = io_error_kind(e.as_ref()),
                     "reserve_target: failed to load settings; falling back to managed storage"
@@ -57,7 +57,7 @@ impl FsInboundFileTarget {
         // daemon's working directory, an unpredictable location. Reject it and
         // fall back to managed storage instead.
         if !path.is_absolute() {
-            warn!(
+            uc_warn!(
                 "reserve_target: configured auto-save dir is not absolute; falling back to managed storage"
             );
             return None;
@@ -85,7 +85,7 @@ impl FsInboundFileTarget {
         // instead. This also rejects a configured path that is not a directory
         // (e.g. an existing regular file), since `create_dir_all` fails there.
         if let Err(e) = tokio::fs::create_dir_all(&dir).await {
-            warn!(
+            uc_warn!(
                 error_kind = "auto_save_dir_create",
                 io_error_kind = io_error_kind(&e),
                 "auto-save dir unusable; falling back to managed storage"
@@ -111,14 +111,14 @@ impl ReserveInboundFileTargetPort for FsInboundFileTarget {
         let sanitized = sanitize_basename(file_name);
         match reserve_unique(&dir, &sanitized).await {
             Some(path) => {
-                debug!("reserve_target: reserved auto-save path");
+                uc_debug!("reserve_target: reserved auto-save path");
                 Some(path)
             }
             None => {
                 // Neither the name nor the resulting path may appear here: an
                 // inbound file name is user content, and these logs are
                 // plaintext.
-                warn!(
+                uc_warn!(
                     "reserve_target: could not reserve a unique path; falling back to managed storage"
                 );
                 None
@@ -149,7 +149,7 @@ async fn reserve_unique(dir: &Path, file_name: &str) -> Option<PathBuf> {
             Ok(_placeholder) => return Some(candidate),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => {
-                warn!(
+                uc_warn!(
                     error_kind = "reservation_placeholder_create",
                     io_error_kind = io_error_kind(&e),
                     "reserve_target: failed to create reservation placeholder"

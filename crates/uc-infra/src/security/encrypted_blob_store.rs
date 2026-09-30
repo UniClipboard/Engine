@@ -25,7 +25,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{debug, info_span, Instrument};
+use tracing::{info_span, Instrument};
 
 use uc_core::membership::{ContentKeyId, ContentKeyPurpose, GroupEpoch};
 use uc_core::{blob::ports::BlobReaderPort, crypto::aad, BlobId, ContentHash};
@@ -34,6 +34,7 @@ use super::key_epoch_aad;
 use super::v1_aead;
 use crate::blob::{BlobStorePort, StoredPathBlob};
 use crate::space::InMemorySession;
+use uc_observability_contract::{log_fields::log_id, uc_debug};
 
 /// Magic bytes identifying a UniClipboard blob file ("UCBL")
 const BLOB_MAGIC: [u8; 4] = [0x55, 0x43, 0x42, 0x4C];
@@ -207,8 +208,8 @@ impl EncryptedBlobStore {
         let plaintext = zstd::bulk::decompress(&compressed, MAX_DECOMPRESSED_SIZE)
             .context("failed to decompress blob data - data may be corrupted")?;
 
-        debug!(
-            blob_id = %blob_id.as_ref(),
+        uc_debug!(
+            blob_id = log_id(&blob_id.as_ref()),
             on_disk_size = binary_data.len(),
             compressed_size = compressed.len(),
             plaintext_size = plaintext.len(),
@@ -270,11 +271,11 @@ impl BlobStorePort for EncryptedBlobStore {
             .instrument(info_span!("inner_blob_put", blob_id = %blob_id.as_ref()))
             .await?;
 
-        debug!(
-            blob_id = %blob_id.as_ref(),
-            plaintext_size,
-            compressed_size,
-            on_disk_size,
+        uc_debug!(
+            blob_id = log_id(&blob_id.as_ref()),
+            plaintext_size = plaintext_size,
+            compressed_size = compressed_size,
+            on_disk_size = on_disk_size,
             "Wrote V2 blob (compress -> encrypt -> UCBL binary)"
         );
 

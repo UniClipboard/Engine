@@ -5,9 +5,13 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Error as SourceError};
 use moka::sync::Cache;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::instrument;
 use uc_observability_contract::diagnostics::{DiagnosticTaskKind, ObservationContext};
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind,
+    log_fields::{log_id, log_vocab},
+    uc_debug, uc_error, uc_info, uc_warn,
+};
 
 use uc_core::clipboard::ActiveClipboardState;
 use uc_core::file_transfer::{OutboundProgressReporterPort, OutboundProgressStatus};
@@ -448,13 +452,22 @@ impl ApplyInboundClipboardUseCase {
             .await
         {
             Ok(ClipboardLiveIndexOutcome::Indexed) => {
-                debug!(entry_id = %entry_id, "inbound: indexed for search")
+                uc_debug!(entry_id = log_id(&entry_id), "inbound: indexed for search")
             }
             Ok(ClipboardLiveIndexOutcome::Skipped { reason }) => {
-                debug!(entry_id = %entry_id, reason, "inbound: search live index skipped")
+                uc_debug!(
+                    entry_id = log_id(&entry_id),
+                    reason = log_vocab(&reason),
+                    "inbound: search live index skipped"
+                )
             }
             Err(e) => {
-                warn!(error_kind = "search_live_index", io_error_kind = io_error_kind(&e), entry_id = %entry_id, "inbound: search live index failed (best-effort, ignored)")
+                uc_warn!(
+                    error_kind = "search_live_index",
+                    io_error_kind = io_error_kind(&e),
+                    entry_id = log_id(&entry_id),
+                    "inbound: search live index failed (best-effort, ignored)"
+                )
             }
         }
     }
@@ -480,10 +493,9 @@ impl ApplyInboundClipboardUseCase {
             .is_mobile_consumable(&state.entry_id)
             .await;
         if let Err(e) = register.advance(&state, mobile_consumable).await {
-            warn!(
+            uc_warn!(
                 error_kind = "register_advance",
                 io_error_kind = io_error_kind(&e),
-                snapshot_hash = %state.snapshot_hash,
                 "active register: inbound advance failed (best-effort, ignored)"
             );
         }
@@ -814,8 +826,8 @@ impl ApplyInboundClipboardUseCase {
         activated_at_ms: i64,
     ) -> ApplyOutcome {
         let Some(resurface) = self.resurface_ports() else {
-            debug!(
-                existing_entry_id = %existing_id,
+            uc_debug!(
+                existing_entry_id = log_id(&existing_id),
                 "inbound dropped: duplicate of existing, fully-held local entry (resurface unwired)"
             );
             return ApplyOutcome::DuplicateSkipped {
@@ -835,8 +847,8 @@ impl ApplyInboundClipboardUseCase {
             .get(&input.snapshot_hash)
             .is_some()
         {
-            debug!(
-                existing_entry_id = %existing_id,
+            uc_debug!(
+                existing_entry_id = log_id(&existing_id),
                 "inbound dropped: re-activation of a just-activated entry (rapid duplicate)"
             );
             return ApplyOutcome::DuplicateSkipped {
@@ -851,10 +863,10 @@ impl ApplyInboundClipboardUseCase {
         let snapshot = match resurface.rebuild.rebuild(existing_id).await {
             Ok(snapshot) => snapshot,
             Err(err) => {
-                warn!(
+                uc_warn!(
                     error_kind = "held_entry_rebuild",
                     io_error_kind = io_error_kind(err.as_ref()),
-                    existing_entry_id = %existing_id,
+                    existing_entry_id = log_id(&existing_id),
                     "inbound: held entry could not be rebuilt; skipping re-activation"
                 );
                 return ApplyOutcome::DuplicateSkipped {
@@ -871,11 +883,11 @@ impl ApplyInboundClipboardUseCase {
             };
         };
         if let Err(err) = write.write(snapshot, input.resurface_intent).await {
-            warn!(
+            uc_warn!(
                 event = "inbound_os_write_failed",
                 error_kind = "inbound_os_write_failed",
                 io_error_kind = io_error_kind(err.as_ref()),
-                existing_entry_id = %existing_id,
+                existing_entry_id = log_id(&existing_id),
                 "inbound: OS clipboard write failed while re-activating held entry; \
                  not advancing the active register"
             );
@@ -908,20 +920,20 @@ impl ApplyInboundClipboardUseCase {
             .await
         {
             Ok(true) => {}
-            Ok(false) => debug!(
-                existing_entry_id = %existing_id,
+            Ok(false) => uc_debug!(
+                existing_entry_id = log_id(&existing_id),
                 "inbound: resurface target vanished before history bump"
             ),
-            Err(err) => warn!(
+            Err(err) => uc_warn!(
                 error_kind = "history_bump",
                 io_error_kind = io_error_kind(&err),
-                existing_entry_id = %existing_id,
+                existing_entry_id = log_id(&existing_id),
                 "inbound: history bump failed (best-effort, ignored)"
             ),
         }
 
-        info!(
-            existing_entry_id = %existing_id,
+        uc_info!(
+            existing_entry_id = log_id(&existing_id),
             "inbound: re-activated already-held entry (no download, no duplicate row)"
         );
 
@@ -990,15 +1002,17 @@ impl ApplyInboundClipboardUseCase {
                 Ok(decoded) => decoded,
                 Err(e) => {
                     let reason = e.to_string();
-                    warn!(reason, "inbound dropped: envelope decode failed");
+                    uc_warn!(
+                        reason = log_vocab(&reason),
+                        "inbound dropped: envelope decode failed"
+                    );
                     return Ok(ApplyOutcome::DecodeFailed { reason });
                 }
             };
 
-        info!(
+        uc_info!(
             blob_ref_count = blob_refs.len(),
             rep_count = snapshot.representations.len(),
-            rep_formats = %format_rep_summary(&snapshot),
             "inbound: decoded V3 envelope"
         );
 
@@ -1041,8 +1055,8 @@ impl ApplyInboundClipboardUseCase {
                     .resurface_held_entry(&input, existing_id, snapshot.ts_ms)
                     .await);
             }
-            debug!(
-                existing_entry_id = %existing_id,
+            uc_debug!(
+                existing_entry_id = log_id(&existing_id),
                 "inbound: hash matches a partial local entry; will materialize and upgrade in place"
             );
         }
@@ -1180,11 +1194,11 @@ impl ApplyInboundClipboardUseCase {
                                 false,
                             )
                             .await?;
-                            warn!(
+                            uc_warn!(
                                 error_kind = "blob_materialize",
                                 io_error_kind = io_error_kind(error.as_ref()),
                                 blob_ref_count = count,
-                                cancelled,
+                                cancelled = cancelled,
                                 "inbound: blob materialize stopped"
                             );
                             self.emit_host_event(HostEvent::Transfer(
@@ -1249,12 +1263,11 @@ impl ApplyInboundClipboardUseCase {
                             ));
                         }
                     }
-                    info!(
+                    uc_info!(
                         blob_ref_count = count,
                         rep_count = result.snapshot.representations.len(),
-                        rep_formats = %format_rep_summary(&result.snapshot),
                         missing_count = result.missing.len(),
-                        partial,
+                        partial = partial,
                         "inbound: blob refs materialized into local cache"
                     );
                     let receive_artifacts = result.take_receive_artifacts();
@@ -1268,7 +1281,10 @@ impl ApplyInboundClipboardUseCase {
                 (true, None) => {
                     let reason =
                         "payload contains blob refs but no blob materializer is wired".to_string();
-                    warn!(reason, "inbound dropped: blob materializer missing");
+                    uc_warn!(
+                        reason = log_vocab(&reason),
+                        "inbound dropped: blob materializer missing"
+                    );
                     self.emit_host_event(HostEvent::Transfer(TransferHostEvent::StatusChanged {
                         transfer_id: receiver_entry_id.as_ref().to_string(),
                         entry_id: Some(receiver_entry_id.as_ref().to_string()),
@@ -1300,8 +1316,8 @@ impl ApplyInboundClipboardUseCase {
             if let Some(existing_entry_id) =
                 self.find_recent_duplicate(&input.snapshot_hash, visible_key.as_deref())
             {
-                debug!(
-                    existing_entry_id = %existing_entry_id,
+                uc_debug!(
+                    existing_entry_id = log_id(&existing_entry_id),
                     "inbound dropped: rapid duplicate of recently applied entry"
                 );
                 // The content is already here under another entry, so this
@@ -1404,8 +1420,8 @@ impl ApplyInboundClipboardUseCase {
                     // Don't replace a partial with another partial: keep the
                     // existing placeholder so the eventual completed delivery
                     // upgrades it (avoids thrashing between two partials).
-                    debug!(
-                        existing_entry_id = %existing_id,
+                    uc_debug!(
+                        existing_entry_id = log_id(&existing_id),
                         "inbound: delivery also partial; keeping existing placeholder"
                     );
                     // Defensive: a directory receive is all-or-nothing and never
@@ -1595,10 +1611,11 @@ impl ApplyInboundClipboardUseCase {
                 .await;
 
             if let Some(write_port) = self.write_port().cloned() {
-                debug!(entry_id = %entry_id, "inbound: entry persisted, scheduling background OS clipboard write");
+                uc_debug!(
+                    entry_id = log_id(&entry_id),
+                    "inbound: entry persisted, scheduling background OS clipboard write"
+                );
                 let entry_id_for_write = entry_id.clone();
-                let snapshot_hash_for_write = input.snapshot_hash.clone();
-                let origin_guard_key_for_write = snapshot_for_write.origin_guard_key();
                 // 只延续在线关联，后台写入不延长原接收 span。
                 let observation = ObservationContext::capture();
                 work.continuation().spawn(
@@ -1610,25 +1627,26 @@ impl ApplyInboundClipboardUseCase {
                             .write(snapshot_for_write, ClipboardWriteIntent::RemotePush)
                             .await
                         {
-                            error!(
+                            uc_error!(
                                 event = "inbound_os_write_failed",
                                 error_kind = "inbound_os_write_failed",
                                 io_error_kind = io_error_kind(e.as_ref()),
-                                entry_id = %entry_id_for_write,
-                                snapshot_hash = %snapshot_hash_for_write,
-                                origin_guard_key = %origin_guard_key_for_write,
+                                entry_id = log_id(&entry_id_for_write),
                                 "inbound: OS clipboard background write failed after capture"
                             );
                         }
                     }),
                 );
             } else {
-                debug!(entry_id = %entry_id, "inbound: store-only mode persisted entry without writing the system clipboard");
+                uc_debug!(
+                    entry_id = log_id(&entry_id),
+                    "inbound: store-only mode persisted entry without writing the system clipboard"
+                );
                 drop(snapshot_for_write);
             }
         } else {
-            info!(
-                entry_id = %entry_id,
+            uc_info!(
+                entry_id = log_id(&entry_id),
                 "inbound: partial entry persisted, skipping OS clipboard write to avoid \
                  leaking uniclip-missing:// placeholders into the system pasteboard"
             );
@@ -1636,7 +1654,7 @@ impl ApplyInboundClipboardUseCase {
             drop(snapshot_for_write);
         }
 
-        info!(entry_id = %entry_id, "inbound clipboard applied");
+        uc_info!(entry_id = log_id(&entry_id), "inbound clipboard applied");
 
         self.emit_receive_state(
             &entry_id,
@@ -1727,43 +1745,20 @@ async fn withdraw_publication(publication: Option<DirectoryPublication>, reason:
     let root_count = publication.root_count();
     match publication.rollback().await {
         RollbackOutcome::Clean => {
-            info!(
-                root_count,
-                reason, "inbound: withdrew published directory roots; final location is clean"
+            uc_info!(
+                root_count = root_count,
+                reason = reason,
+                "inbound: withdrew published directory roots; final location is clean"
             );
         }
         RollbackOutcome::PartialPublication { visible_roots } => {
-            warn!(
+            uc_warn!(
                 partial_publication = true,
-                visible_roots,
-                root_count,
-                reason,
+                visible_roots = visible_roots,
+                root_count = root_count,
+                reason = reason,
                 "inbound: some directory roots could not be withdrawn and stay visible"
             );
         }
     }
-}
-
-/// Compact summary of the snapshot's representations for tracing.
-/// Format: `format_id[@mime]:bytes, ...` — always safe to log because
-/// `format_id` / `mime` / byte counts are metadata, never user payload.
-pub(super) fn format_rep_summary(snapshot: &SystemClipboardSnapshot) -> String {
-    snapshot
-        .representations
-        .iter()
-        .map(|rep| {
-            let mime_suffix = rep
-                .mime
-                .as_ref()
-                .map(|m| format!("@{}", m.as_str()))
-                .unwrap_or_default();
-            format!(
-                "{}{}:{}",
-                rep.format_id.as_str(),
-                mime_suffix,
-                rep.size_bytes()
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
 }

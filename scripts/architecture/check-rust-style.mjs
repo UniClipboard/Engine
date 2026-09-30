@@ -286,102 +286,30 @@ function fieldTypeFor(placeholder, followingLines) {
   return null
 }
 
-const FIELD_LIST_PATH = 'crates/uc-observability-runtime/src/module_log_fields.rs'
-const FIELD_CATALOG_PATH = 'crates/uc-observability-contract/src/log_fields.rs'
-const LOG_MACRO_START = /\b(?:tracing::)?(?:info|warn|error|debug|trace)!\s*\(/
-let reviewedFieldNames = null
-
-function reviewedFields() {
-  if (reviewedFieldNames) return reviewedFieldNames
-  const source = readFileSync(resolve(REPOSITORY_ROOT, FIELD_LIST_PATH), 'utf8')
-  reviewedFieldNames = new Set([...source.matchAll(/^\s*"([^"]+)",\s*$/gm)].map(match => match[1]))
-  // 已迁移到 `uc_*!` 宏的字段登记在字段目录里，同样视为已审定。
-  const catalog = readFileSync(resolve(REPOSITORY_ROOT, FIELD_CATALOG_PATH), 'utf8')
-  const block = catalog.match(/^__log_field_catalog! \{\n([\s\S]*?)^\}/m)
-  for (const entry of (block?.[1] ?? '').matchAll(/^\s*([a-z_][a-z0-9_]*)\s*:\s*\w+(?:\(\w+\))?,\s*$/gm)) {
-    reviewedFieldNames.add(entry[1])
-  }
-  // 记录点里特殊处理的名字：`error` 走错误链渲染，`message` 是消息正文。
-  reviewedFieldNames.add('error')
-  reviewedFieldNames.add('message')
-  return reviewedFieldNames
-}
-
-// 取出从 `lineNumber` 起的一次日志宏调用的顶层实参；括号不配平时返回 null。
-function logMacroArguments(lines, lineNumber) {
-  const text = lines.slice(lineNumber - 1, lineNumber + 15).join('\n')
-  const start = text.match(LOG_MACRO_START)
-  if (!start) return null
-  let depth = 1
-  let quoted = false
-  let previous = ''
-  let current = ''
-  const parts = []
-  for (let index = start.index + start[0].length; index < text.length; index += 1) {
-    const character = text[index]
-    if (character === '"' && previous !== '\\') quoted = !quoted
-    if (!quoted) {
-      if ('([{'.includes(character)) depth += 1
-      if (')]}'.includes(character)) depth -= 1
-      if (depth === 0) {
-        parts.push(current.trim())
-        return parts.filter(Boolean)
-      }
-      if (character === ',' && depth === 1) {
-        parts.push(current.trim())
-        current = ''
-        previous = character
-        continue
-      }
-    }
-    current += character
-    previous = character
-  }
-  return null
-}
-
-function logMacroViolations(path, lines, lineNumber) {
-  const violations = []
-  const code = lines[lineNumber - 1] ?? ''
-  if (!LOG_MACRO_START.test(code) || /^\s*\/\//.test(code)) return violations
-  const args = logMacroArguments(lines, lineNumber)
-  if (!args) return violations
-  const report = message =>
-    violations.push({ path, line: lineNumber, source: code.trim(), type: 'error-source', message })
-  const named = /^([A-Za-z_][\w.]*)\s*=/
-  const positional = []
-  for (const argument of args) {
-    if (/^(?:target|parent)\s*:/.test(argument)) continue
-    const match = argument.match(named)
-    if (match) {
-      if (!reviewedFields().has(match[1])) {
-        report(`日志字段 ${match[1]} 尚未审定；先在 ${FIELD_CATALOG_PATH} 登记，或在 ${FIELD_LIST_PATH} 归类（过渡清单：LEGACY_TEXT_FIELDS / REVIEWED_OMITTED_FIELDS）`)
-      }
-    } else positional.push(argument)
-  }
-  const messageIndex = positional.findIndex(argument => argument.startsWith('"'))
-  if (messageIndex !== -1) {
-    const trailing = positional.slice(messageIndex + 1)
-    if (/\{[^{}]*\}/.test(positional[messageIndex]) || trailing.length > 0) {
-      report('日志消息只能是字面量；取值放进字段，避免正文夹带设备名、路径、标识等')
-    }
-  }
-  for (const argument of positional.slice(0, messageIndex === -1 ? undefined : messageIndex)) {
-    const shorthand = argument.replace(/^[%?]/, '')
-    if (/^[A-Za-z_]\w*$/.test(shorthand) && !reviewedFields().has(shorthand)) {
-      report(`日志字段 ${shorthand} 尚未审定；先在 ${FIELD_LIST_PATH} 归类`)
-    }
-  }
-  return violations
-}
-
+// 直接使用 tracing 日志宏已被禁止（ADR-030）：字段目录与值类别只由 `uc_*!` 宏在编译期保证。
+// 唯一例外是故意测试运行期对未登记字段处理的观测运行期集成测试，这些文件顶部用 crate 级 allow 声明。
+const RAW_LOG_MACRO_EXEMPT = [
+  'crates/uc-observability-runtime/tests/host_composition.rs',
+  'crates/uc-observability-runtime/tests/module_log_channel.rs',
+  'crates/uc-observability-runtime/tests/otlp_http.rs',
+]
 // `uc_*!` 宏展开为 `tracing::event!`，所以只有观测 crate 自己可以直接使用它。
 const EVENT_MACRO = /\b(?:tracing::)?event!\s*\(/
 const EVENT_MACRO_OWNERS = ['crates/uc-observability-contract/', 'crates/uc-observability-runtime/']
+const RAW_LOG_MACRO = /\b(?:tracing::)?(?:trace|debug|info|warn|error)!\s*\(/
 
 function logPrivacyViolations(path, lines, codeLines, lineNumber) {
-  const violations = [...logMacroViolations(path, lines, lineNumber)]
+  const violations = []
   const code = codeLines[lineNumber - 1] ?? ''
+  if (RAW_LOG_MACRO.test(code) && !RAW_LOG_MACRO_EXEMPT.some(exempt => path.endsWith(exempt))) {
+    violations.push({
+      path,
+      line: lineNumber,
+      source: lines[lineNumber - 1].trim(),
+      type: 'error-source',
+      message: '不得直接使用 tracing 日志宏；改用 uc_*! 宏（ADR-030）',
+    })
+  }
   if (EVENT_MACRO.test(code) && !EVENT_MACRO_OWNERS.some(owner => path.startsWith(owner))) {
     violations.push({
       path,

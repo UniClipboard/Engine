@@ -7,7 +7,7 @@
 
 use std::{fmt, sync::Arc};
 
-use tracing::{debug, instrument};
+use tracing::instrument;
 
 use uc_core::mobile_sync::{MintedCredentials, MobileDeviceError, MobileDeviceId};
 use uc_core::ports::{
@@ -19,6 +19,7 @@ use super::register_device::{
     validate_label, validate_password_length, validate_username_shape,
     RegisterMobileShortcutDeviceError,
 };
+use uc_observability_contract::uc_debug;
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum MobileDevicePasswordEdit {
@@ -203,10 +204,7 @@ impl UpdateMobileDeviceUseCase {
             .await
             .map_err(|err| translate_update_error(err, &device.username))?;
         if !updated {
-            debug!(
-                device_id = %device.device_id,
-                "device disappeared between find and update_mobile_device"
-            );
+            uc_debug!("device disappeared between find and update_mobile_device");
             return Err(UpdateMobileDeviceError::NotFound(device.device_id));
         }
 

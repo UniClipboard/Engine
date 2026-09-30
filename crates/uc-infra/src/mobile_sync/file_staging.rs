@@ -60,13 +60,15 @@ use async_trait::async_trait;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
-use tracing::{debug, warn};
+
 use uuid::Uuid;
 
 use uc_core::mobile_sync::{StagedFile, StagedFileUri, StagingHandle};
 use uc_core::ports::inbound_file_target::ReserveInboundFileTargetPort;
 use uc_core::ports::{MobileFileStagingError, MobileFileStagingPort};
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_vocab, uc_debug, uc_warn,
+};
 
 /// 子目录名 —— `<cache_root>/mobile_inbound/<scope_id>/<file>`。
 const STAGING_SUBDIR: &str = "mobile_inbound";
@@ -134,13 +136,13 @@ impl FilesystemMobileFileStaging {
         target_reserver: Option<Arc<dyn ReserveInboundFileTargetPort>>,
     ) -> Arc<Self> {
         if let Err(err) = std::fs::create_dir_all(&cache_root) {
-            warn!(
+            uc_warn!(
                 error_kind = "cache_root_create",
                 io_error_kind = io_error_kind(&err),
                 "mobile_sync staging: failed to ensure cache_root exists at startup"
             );
         }
-        debug!("mobile_sync staging: adapter ready");
+        uc_debug!("mobile_sync staging: adapter ready");
         Arc::new(Self {
             cache_root,
             target_reserver,
@@ -224,7 +226,7 @@ impl MobileFileStagingPort for FilesystemMobileFileStaging {
 
         let bytes = tokio::fs::read(&path).await.map_err(|err| {
             if err.kind() == std::io::ErrorKind::NotFound {
-                debug!("mobile_sync staging: read_by_uri path not found");
+                uc_debug!("mobile_sync staging: read_by_uri path not found");
                 MobileFileStagingError::NotFound
             } else {
                 MobileFileStagingError::Io(
@@ -234,9 +236,9 @@ impl MobileFileStagingPort for FilesystemMobileFileStaging {
         })?;
         let bytes_len = bytes.len();
         if matches!(bytes_len, 0) {
-            debug!("mobile_sync staging: read_by_uri served empty file");
+            uc_debug!("mobile_sync staging: read_by_uri served empty file");
         } else {
-            debug!(
+            uc_debug!(
                 bytes = bytes_len,
                 "mobile_sync staging: read_by_uri served file bytes"
             );
@@ -266,7 +268,7 @@ impl MobileFileStagingPort for FilesystemMobileFileStaging {
             // is never removed here.
             if let Err(rm) = tokio::fs::remove_file(&resolved.path).await {
                 if rm.kind() != std::io::ErrorKind::NotFound {
-                    warn!(
+                    uc_warn!(
                         error_kind = "partial_file_remove",
                         io_error_kind = io_error_kind(&rm),
                         "mobile_sync staging: failed to remove partial file after write error"
@@ -279,8 +281,8 @@ impl MobileFileStagingPort for FilesystemMobileFileStaging {
         }
 
         let uri = path_to_file_uri(&resolved.path)?;
-        debug!(
-            mime = %mime,
+        uc_debug!(
+            mime = log_vocab(&mime),
             bytes = bytes_len,
             "mobile_sync staging: file written"
         );
@@ -319,8 +321,8 @@ impl MobileFileStagingPort for FilesystemMobileFileStaging {
                 cleanup_dir: resolved.cleanup_dir,
             },
         );
-        debug!(
-            mime = %mime,
+        uc_debug!(
+            mime = log_vocab(&mime),
             "mobile_sync staging: streaming session opened"
         );
         Ok(handle)
@@ -377,7 +379,7 @@ impl MobileFileStagingPort for FilesystemMobileFileStaging {
         drop(session.file);
 
         let uri = path_to_file_uri(&session.path)?;
-        debug!("mobile_sync staging: streaming session finalized");
+        uc_debug!("mobile_sync staging: streaming session finalized");
         Ok(StagedFile {
             uri: StagedFileUri::new(uri),
             sanitized_name: session.sanitized_name,
@@ -404,7 +406,7 @@ impl MobileFileStagingPort for FilesystemMobileFileStaging {
             // NotFound 不算异常 —— 半写入文件可能根本没创建过(create 后立即
             // 触发的 abort)。
             if err.kind() != std::io::ErrorKind::NotFound {
-                warn!(
+                uc_warn!(
                     error_kind = "partial_file_remove",
                     io_error_kind = io_error_kind(&err),
                     "mobile_sync staging: abort_stage failed to remove partial file"
@@ -419,7 +421,7 @@ impl MobileFileStagingPort for FilesystemMobileFileStaging {
         // removed.
         if let Some(scope_dir) = session.cleanup_dir.as_ref() {
             if let Err(err) = tokio::fs::remove_dir(scope_dir).await {
-                debug!(
+                uc_debug!(
                     error_kind = "scope_dir_remove",
                     io_error_kind = io_error_kind(&err),
                     "mobile_sync staging: scope dir not removed on abort (expected when non-empty)"
@@ -427,7 +429,7 @@ impl MobileFileStagingPort for FilesystemMobileFileStaging {
             }
         }
 
-        debug!("mobile_sync staging: streaming session aborted");
+        uc_debug!("mobile_sync staging: streaming session aborted");
     }
 }
 

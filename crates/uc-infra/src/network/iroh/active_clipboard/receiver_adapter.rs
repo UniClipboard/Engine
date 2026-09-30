@@ -33,14 +33,14 @@ use async_trait::async_trait;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use tokio::sync::broadcast;
-use tracing::{debug, warn};
 
 use uc_core::ids::DeviceId;
 use uc_core::membership::PeerAdmissionPort;
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::{ActiveClipboardReceiverPort, InboundActiveClipboardState};
-use uc_observability_contract::diagnostics::connectivity::InboundPeerProtocol;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    diagnostics::connectivity::InboundPeerProtocol, error_source::io_error_kind, uc_debug, uc_warn,
+};
 
 use super::super::inbound_peer::InboundPeerGate;
 use super::wire;
@@ -146,10 +146,9 @@ impl ProtocolHandler for IrohActiveClipboardReceiverHandler {
         let (_send, mut recv) = match connection.accept_bi().await {
             Ok(pair) => pair,
             Err(err) => {
-                warn!(
+                uc_warn!(
                     error_kind = "accept_bi",
                     io_error_kind = io_error_kind(&err),
-                    peer = %peer_device_id.as_str(),
                     "active-clipboard receiver: accept_bi failed; dropping connection"
                 );
                 return Ok(());
@@ -161,10 +160,9 @@ impl ProtocolHandler for IrohActiveClipboardReceiverHandler {
         let msg = match wire::read_frame(&mut recv).await {
             Ok(m) => m,
             Err(err) => {
-                warn!(
+                uc_warn!(
                     error_kind = "frame_decode",
                     io_error_kind = io_error_kind(&err),
-                    peer = %peer_device_id.as_str(),
                     "active-clipboard receiver: frame decode failed; dropping connection"
                 );
                 return Ok(());
@@ -176,8 +174,7 @@ impl ProtocolHandler for IrohActiveClipboardReceiverHandler {
         //    field is untrusted peer input, so a malformed id drops the
         //    frame like any other codec failure.
         let Some(activated_by) = DeviceId::try_new(&msg.activated_by) else {
-            warn!(
-                peer = %peer_device_id.as_str(),
+            uc_warn!(
                 "active-clipboard receiver: activated_by exceeds device id bound; dropping frame"
             );
             return Ok(());
@@ -194,10 +191,7 @@ impl ProtocolHandler for IrohActiveClipboardReceiverHandler {
             activated_by,
         };
         if self.state.event_tx.send(inbound).is_err() {
-            debug!(
-                peer = %peer_device_id.as_str(),
-                "active-clipboard receiver: no subscribers attached; observation dropped"
-            );
+            uc_debug!("active-clipboard receiver: no subscribers attached; observation dropped");
         }
 
         Ok(())

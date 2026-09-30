@@ -11,12 +11,15 @@
 //! 8. 记录出现绝对路径或临时目录。
 //!
 //! 运行期只能安装一次，所以所有阶段放在同一个测试里依次执行。
+// 本文件故意直接使用 tracing 日志宏：它验证运行期对未登记字段、内插消息和非 `uc_*` target 的处理，
+// `uc_*!` 宏在编译期就拒绝这些写法，无法构造这些输入。clippy 只认 crate 级 allow（ADR-030）。
+#![allow(clippy::disallowed_macros)]
 
 use std::error::Error;
 use std::time::Duration;
 
 use uc_observability_contract::error_source::io_error_kind;
-use uc_observability_contract::log_fields::id;
+use uc_observability_contract::log_fields::log_id;
 use uc_observability_contract::module_log::{register_error_layer_renderers, Sensitive};
 use uc_observability_contract::{log_safe_errors, uc_warn};
 use uc_observability_runtime::{
@@ -184,7 +187,7 @@ fn module_log_channel_records_renders_limits_and_exports_with_visible_counts() {
     uc_warn!(
         target: "uc_infra::module_log_channel",
         error_kind = "fixed_kind",
-        entry_id = id(&"entry-typed"),
+        entry_id = log_id(&"entry-typed"),
         io_error_kind = io_error_kind(&typed_io),
         error = &typed_io as &dyn Error,
         "typed event"

@@ -35,7 +35,7 @@ use async_trait::async_trait;
 use iroh::endpoint::Connection;
 use iroh::{Endpoint, EndpointAddr};
 use tokio::sync::{broadcast, Mutex};
-use tracing::{debug, instrument, warn, Instrument};
+use tracing::{instrument, Instrument};
 
 use uc_core::ids::DeviceId;
 use uc_core::ports::{
@@ -46,7 +46,7 @@ use uc_observability_contract::diagnostics::{
     complete_operation, operation_span, DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation,
     DiagnosticRole, DiagnosticSpanKind, OperationCompletion, OperationContext,
 };
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_debug, uc_warn};
 
 use super::clipboard_wire::{self, AckCode, WireEncodeError};
 use super::conn_path::{path_for, OnMissing};
@@ -171,7 +171,7 @@ impl IrohClipboardDispatchAdapter {
                 // than each calling `peer_reachability.report_communication_failure` on their own
                 // failure return.
                 if let Err(ref err) = result {
-                    debug!(
+                    uc_debug!(
                         error_kind = "dial_failed",
                         io_error_kind = io_error_kind(err),
                         "clipboard dispatch: single-flight dial failed; marking offline"
@@ -207,7 +207,7 @@ impl IrohClipboardDispatchAdapter {
         match self.peer_address_resolver.resolve(target).await {
             Ok(address) => address,
             Err(error) => {
-                warn!(
+                uc_warn!(
                     error_kind = error.kind(),
                     "clipboard dispatch address resolution failed; treating peer as offline"
                 );
@@ -344,7 +344,7 @@ impl ClipboardDispatchPort for IrohClipboardDispatchAdapter {
         let connection = match connection {
             Ok(connection) => connection,
             Err(err) => {
-                debug!(
+                uc_debug!(
                     error_kind = "dial_failed",
                     io_error_kind = io_error_kind(&err),
                     "clipboard dispatch: dial failed (single-flight), treating as Offline"

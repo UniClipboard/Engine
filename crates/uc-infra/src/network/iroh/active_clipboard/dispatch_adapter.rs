@@ -21,14 +21,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use iroh::{Endpoint, EndpointAddr};
-use tracing::{debug, instrument, warn};
+use tracing::instrument;
 
 use uc_core::clipboard::ActiveClipboardState;
 use uc_core::ids::DeviceId;
 use uc_core::ports::{
     ActiveClipboardDispatchError, ActiveClipboardDispatchPort, PeerAddressRepositoryPort,
 };
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_debug, uc_warn};
 
 use super::super::connect::connect_with_staggered_retry;
 use super::super::peer_address_resolver::PeerAddressResolver;
@@ -61,7 +61,7 @@ impl IrohActiveClipboardDispatchAdapter {
         match self.peer_address_resolver.resolve(target).await {
             Ok(address) => address,
             Err(error) => {
-                warn!(
+                uc_warn!(
                     error_kind = error.kind(),
                     "active-clipboard dispatch address resolution failed; treating peer as offline"
                 );
@@ -102,7 +102,7 @@ impl ActiveClipboardDispatchPort for IrohActiveClipboardDispatchAdapter {
         {
             Ok(connection) => connection,
             Err(err) => {
-                debug!(
+                uc_debug!(
                     error_kind = "dial_failed",
                     io_error_kind = io_error_kind(&err),
                     "active-clipboard dispatch: dial failed, treating as Offline"

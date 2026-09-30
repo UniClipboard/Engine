@@ -21,6 +21,7 @@ use uc_observability_contract::diagnostics::{
 use crate::space::membership::{
     ledger_error, MembershipLedgerError, MembershipOwner, ReconcileMembershipEvidenceUseCase,
 };
+use uc_observability_contract::uc_debug;
 
 /// 一轮同步的固定总预算，不按对端数量叠加。
 const TOTAL_SYNC_BUDGET: Duration = Duration::from_secs(10);
@@ -199,7 +200,7 @@ impl HistorySynchronizer {
                 PeerExchange::DivergenceRecorded => report.stable_failure_count += 1,
             }
         }
-        tracing::debug!(
+        uc_debug!(
             completed_peer_count = report.completed_peer_count,
             deferred_peer_count = report.deferred_peer_count,
             stable_failure_count = report.stable_failure_count,
@@ -268,7 +269,7 @@ impl HistorySynchronizer {
             )
             .await
             .map_err(ExchangeFailure::Transport)?;
-        tracing::debug!(
+        uc_debug!(
             reply_kind = membership_message_kind(&reply),
             "成员历史摘要收到回复"
         );
@@ -299,7 +300,7 @@ impl HistorySynchronizer {
                     .export_suffix_pages_v4(context.sender.clone(), known_position)
                     // 导出失败只决定本轮交换延期（PeerSyncResult::Deferred），没有向上传递的调用方。
                     .map_err(|_| ExchangeFailure::Unexpected)?;
-                tracing::debug!(page_count = pages.len(), "成员历史后缀已导出");
+                uc_debug!(page_count = pages.len(), "成员历史后缀已导出");
                 self.send_suffix_pages(peer, pages, context).await
             }
             MembershipHistoryMessage::RequestConflictEvidenceV3(request)
@@ -308,7 +309,7 @@ impl HistorySynchronizer {
                 self.exchange_complete_evidence(peer, context).await
             }
             _ => {
-                tracing::debug!("成员历史摘要收到不匹配的回复");
+                uc_debug!("成员历史摘要收到不匹配的回复");
                 Err(ExchangeFailure::Unexpected)
             }
         }
@@ -380,10 +381,10 @@ impl HistorySynchronizer {
                 .await
                 .map_err(ExchangeFailure::Transport)?;
             let MembershipHistoryMessage::AckV3(ack) = reply else {
-                tracing::debug!("成员历史后缀页收到非 ACK 回复");
+                uc_debug!("成员历史后缀页收到非 ACK 回复");
                 return Err(ExchangeFailure::Unexpected);
             };
-            tracing::debug!(
+            uc_debug!(
                 page_number = next_page_index.saturating_add(1),
                 page_count = pages.len(),
                 ack_kind = membership_ack_kind(&ack),

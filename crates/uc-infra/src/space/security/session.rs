@@ -14,7 +14,7 @@ use std::time::Duration;
 use hkdf::Hkdf;
 use sha2::Sha256;
 use tokio::sync::Notify;
-use tracing::{debug, debug_span};
+use tracing::debug_span;
 use uc_core::crypto::model::EncryptionError;
 use uc_core::ids::SpaceId;
 use uc_core::membership::{
@@ -30,6 +30,7 @@ use super::content_key_catalog::{
     decode as decode_content_key_catalog, encode as encode_content_key_catalog,
     PersistedContentKeyCatalog, PersistedContentKeyEntry,
 };
+use uc_observability_contract::uc_debug;
 
 tokio::task_local! {
     static TRANSACTION_MASTER_KEY: TransactionMasterKey;
@@ -344,7 +345,7 @@ impl InMemorySession {
             state.current_content_key_id = None;
             state.current_epoch = None;
             state.content_keys.clear();
-            debug!("master key set");
+            uc_debug!("master key set");
         });
         self.ready.notify_waiters();
     }
@@ -860,7 +861,7 @@ impl InMemorySession {
         span.in_scope(|| {
             let mut state = self.lock_state();
             Self::clear_state(&mut state);
-            debug!("master key cleared");
+            uc_debug!("master key cleared");
         });
         self.ready.notify_waiters();
     }

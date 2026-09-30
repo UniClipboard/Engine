@@ -37,14 +37,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use uc_application::deps::PeerIdentityDirectoryPort;
 use uc_application::deps::{ClipboardDelivery, ClipboardReceiverPort};
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_debug, uc_warn};
 
 use async_trait::async_trait;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::Endpoint;
 use tokio::sync::broadcast;
-use tracing::{debug, instrument, warn, Instrument};
+use tracing::{instrument, Instrument};
 
 #[cfg(test)]
 use uc_core::ids::DeviceId;
@@ -159,7 +159,7 @@ impl ProtocolHandler for IrohClipboardReceiverHandler {
         let (mut send, mut recv) = match connection.accept_bi().await {
             Ok(pair) => pair,
             Err(err) => {
-                warn!(
+                uc_warn!(
                     error_kind = "accept_bi",
                     io_error_kind = io_error_kind(&err),
                     "clipboard receiver: accept_bi failed; dropping connection"
@@ -192,10 +192,9 @@ impl ProtocolHandler for IrohClipboardReceiverHandler {
         let decoded = match clipboard_wire::read_frame_header(&mut recv).await {
             Ok(decoded) => decoded,
             Err(err) => {
-                warn!(
+                uc_warn!(
                     error_kind = "frame_decode",
                     io_error_kind = io_error_kind(&err),
-                    peer = %peer_device_id.as_str(),
                     "clipboard receiver: frame decode failed; sending Rejected ack"
                 );
                 let ack = if matches!(err, clipboard_wire::WireDecodeError::IncompatibleLayout) {
@@ -232,7 +231,7 @@ impl ProtocolHandler for IrohClipboardReceiverHandler {
                             DiagnosticErrorType::StreamFailed,
                             started.elapsed(),
                         ));
-                        warn!(
+                        uc_warn!(
                             error_kind = "payload_read",
                             io_error_kind = io_error_kind(&error),
                             "clipboard receiver: payload read failed; sending Rejected ack"
@@ -260,10 +259,7 @@ impl ProtocolHandler for IrohClipboardReceiverHandler {
                 .send(ClipboardDelivery::new(inbound))
                 .is_err()
             {
-                debug!(
-                    peer = %peer_device_id.as_str(),
-                    "clipboard receiver: no subscribers attached; inbound frame dropped"
-                );
+                uc_debug!("clipboard receiver: no subscribers attached; inbound frame dropped");
                 emit_ack(&mut send, AckCode::Rejected).await;
                 complete_clipboard_receive_failure(
                     ClipboardReceiveFailure::NoConsumer,
@@ -336,7 +332,7 @@ impl ProtocolHandler for IrohClipboardReceiverHandler {
 #[instrument(skip_all, fields(ack = ?ack))]
 async fn emit_ack(send: &mut iroh::endpoint::SendStream, ack: AckCode) {
     if let Err(err) = send.write_all(&[ack.as_byte()]).await {
-        debug!(
+        uc_debug!(
             error_kind = "ack_write",
             io_error_kind = io_error_kind(&err),
             "clipboard receiver: ack write failed"
@@ -344,7 +340,7 @@ async fn emit_ack(send: &mut iroh::endpoint::SendStream, ack: AckCode) {
         return;
     }
     if let Err(err) = send.finish() {
-        debug!(
+        uc_debug!(
             error_kind = "send_finish",
             io_error_kind = io_error_kind(&err),
             "clipboard receiver: send.finish failed"

@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use tracing::instrument;
 use uc_core::ports::CacheFsPort;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_info, uc_warn};
 
 #[derive(Clone)]
 pub struct StorageFacadeDeps {
@@ -59,12 +59,12 @@ impl StorageFacade {
         .map_err(|err| StorageFacadeError::Stats(anyhow::Error::from(err)))?;
 
         let total_bytes = database_bytes + vault_bytes + cache_bytes + logs_bytes;
-        tracing::info!(
-            database_bytes,
-            vault_bytes,
-            cache_bytes,
-            logs_bytes,
-            total_bytes,
+        uc_info!(
+            database_bytes = database_bytes,
+            vault_bytes = vault_bytes,
+            cache_bytes = cache_bytes,
+            logs_bytes = logs_bytes,
+            total_bytes = total_bytes,
             "storage facade: stats computed"
         );
 
@@ -101,14 +101,14 @@ impl StorageFacade {
             for entry in entries {
                 if entry.is_dir {
                     if let Err(err) = deps.cache_fs.remove_dir_all(&entry.path).await {
-                        tracing::warn!(
+                        uc_warn!(
                             error_kind = "cache_dir_remove",
                             io_error_kind = io_error_kind(err.as_ref()),
                             "storage facade: failed to remove cache subdirectory"
                         );
                     }
                 } else if let Err(err) = deps.cache_fs.remove_file(&entry.path).await {
-                    tracing::warn!(
+                    uc_warn!(
                         error_kind = "cache_file_remove",
                         io_error_kind = io_error_kind(err.as_ref()),
                         "storage facade: failed to remove cache file"
@@ -124,7 +124,7 @@ impl StorageFacade {
             .map_err(|err| StorageFacadeError::ClearCache(anyhow::Error::from(err)))?;
         let freed_bytes = size_before.saturating_sub(size_after);
 
-        tracing::info!(freed_bytes, "storage facade: cache cleared");
+        uc_info!(freed_bytes = freed_bytes, "storage facade: cache cleared");
         Ok(ClearCacheResultView { freed_bytes })
     }
 }

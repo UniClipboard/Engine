@@ -2,7 +2,6 @@
 
 use crate::error_codes::*;
 
-use tracing::error;
 use uc_application::facade::{
     AppFacade, ClipboardHistoryError, ClipboardListInput, EntryDetailView, EntryProjectionView,
     EntryResourceView,
@@ -13,6 +12,7 @@ use crate::{
     HistoryEntryInput, HistoryEntryResourceSummary, HistoryEntrySummary, HistoryStatsSummary,
     ListHistoryEntriesInput, OperationResult, SetHistoryEntryFavoriteInput,
 };
+use uc_observability_contract::uc_error;
 
 const MAX_HISTORY_LIST_SIZE: u32 = 1000;
 
@@ -187,7 +187,7 @@ fn map_history_error(error: ClipboardHistoryError) -> EngineError {
             false,
         ),
         ClipboardHistoryError::Internal(_) => {
-            error!("clipboard history operation failed");
+            uc_error!("clipboard history operation failed");
             EngineError::new(HISTORY_FAILED_CODE, EngineErrorCategory::Internal, false)
         }
     }

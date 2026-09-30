@@ -62,14 +62,14 @@ fn set_hidden(path: &Path) {
     // whatever else the path carries (FILE_ATTRIBUTE_DIRECTORY above all).
     let current = unsafe { GetFileAttributesW(wide.as_ptr()) };
     if current == INVALID_FILE_ATTRIBUTES {
-        tracing::debug!("could not read attributes while hiding a path");
+        uc_observability_contract::uc_debug!("could not read attributes while hiding a path");
         return;
     }
     if current & FILE_ATTRIBUTE_HIDDEN != 0 {
         return;
     }
     if unsafe { SetFileAttributesW(wide.as_ptr(), current | FILE_ATTRIBUTE_HIDDEN) } == 0 {
-        tracing::debug!("could not hide a path; it stays visible");
+        uc_observability_contract::uc_debug!("could not hide a path; it stays visible");
     }
 }
 

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use tokio::sync::{broadcast, mpsc, Mutex, Semaphore};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, info_span, instrument, warn, Instrument};
+use tracing::{info_span, instrument, Instrument};
 
 use uc_core::clipboard::{ClipboardEntry, ClipboardEntryContentCategory};
 use uc_core::ids::EntryId;
@@ -19,7 +19,11 @@ use uc_core::search::{
     RebuildProgress, RebuildStage, SearchError, SearchPipelineInput, SearchResult,
     SearchResultsPage,
 };
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind,
+    log_fields::{log_id, log_vocab},
+    uc_debug, uc_info, uc_warn,
+};
 
 use crate::clipboard::file_set_query::load_has_directory_structure;
 use crate::search::mutation_gate::SearchMutationGate;
@@ -259,15 +263,15 @@ impl SearchCoordinator {
                     });
 
                 if accepted.is_some() {
-                    info!(reason = REASON_MANUAL_REBUILD, "search rebuild accepted");
+                    uc_info!(reason = REASON_MANUAL_REBUILD, "search rebuild accepted");
                     ManualRebuildResult::Accepted
                 } else {
-                    warn!("search rebuild rejected: coordinator unavailable");
+                    uc_warn!("search rebuild rejected: coordinator unavailable");
                     ManualRebuildResult::Unavailable
                 }
             }
             Err(_) => {
-                info!("search rebuild rejected: already in progress");
+                uc_info!("search rebuild rejected: already in progress");
                 ManualRebuildResult::AlreadyInProgress
             }
         }
@@ -290,7 +294,7 @@ impl SearchCoordinator {
         let meta = match self.deps.search_index.get_index_meta().await {
             Ok(m) => m,
             Err(e) => {
-                warn!(
+                uc_warn!(
                     error_kind = "index_meta_read",
                     io_error_kind = io_error_kind(&e),
                     "search coordinator: failed to get index meta at startup"
@@ -305,9 +309,9 @@ impl SearchCoordinator {
             return;
         }
         if meta.index_version != self.deps.search_maintenance.current_index_version() {
-            info!(
-                current = %meta.index_version,
-                expected = %self.deps.search_maintenance.current_index_version(),
+            uc_info!(
+                current = log_vocab(&meta.index_version),
+                expected = log_vocab(&self.deps.search_maintenance.current_index_version()),
                 "search coordinator: index version mismatch, triggering rebuild"
             );
             self.trigger_rebuild_locked(REASON_VERSION_MISMATCH, cancel)
@@ -319,7 +323,7 @@ impl SearchCoordinator {
             let has_entries = match self.deps.clipboard_entry_repo.list_entries(1, 0).await {
                 Ok(entries) => !entries.is_empty(),
                 Err(e) => {
-                    warn!(
+                    uc_warn!(
                         error_kind = "entry_list",
                         io_error_kind = io_error_kind(&e),
                         "search coordinator: failed to list entries at startup"
@@ -329,7 +333,7 @@ impl SearchCoordinator {
             };
 
             if has_entries {
-                info!("search coordinator: no completed rebuild found and entries exist, triggering initial_backfill");
+                uc_info!("search coordinator: no completed rebuild found and entries exist, triggering initial_backfill");
                 self.trigger_rebuild_locked(REASON_INITIAL_BACKFILL, cancel)
                     .await;
                 return;
@@ -342,7 +346,7 @@ impl SearchCoordinator {
             // mid-flight (process killed, crash, or hard failure) leaves it true
             // forever. Nothing else drives a retry, so resume by rebuilding here
             // instead of dead-ending at `unavailable` until a manual rebuild.
-            warn!(
+            uc_warn!(
                 "search coordinator: index left blocked by an interrupted rebuild, resuming rebuild"
             );
             self.trigger_rebuild_locked(REASON_INTERRUPTED_REBUILD, cancel)
@@ -358,7 +362,7 @@ impl SearchCoordinator {
             self.spawn_purge_if_needed();
         }
 
-        info!("search coordinator: index is ready");
+        uc_info!("search coordinator: index is ready");
         self.set_state(STATUS_READY, None).await;
     }
 
@@ -394,10 +398,10 @@ impl SearchCoordinator {
             Ok(_guard) => {
                 // Guard dropped at end of scope; startup_evaluation re-acquires as
                 // needed. Re-reading meta inside it is the idempotency re-check.
-                info!("search coordinator: session ready, re-evaluating index state");
+                uc_info!("search coordinator: session ready, re-evaluating index state");
             }
             Err(_) => {
-                debug!("search coordinator: session ready while rebuild in progress, skipping");
+                uc_debug!("search coordinator: session ready while rebuild in progress, skipping");
                 return Ok(());
             }
         }
@@ -490,7 +494,10 @@ impl SearchCoordinator {
         if cancel.is_cancelled() {
             return;
         }
-        info!(reason, "search coordinator: starting rebuild");
+        uc_info!(
+            reason = log_vocab(&reason),
+            "search coordinator: starting rebuild"
+        );
         {
             let mut s = state.lock().await;
             s.status = STATUS_REBUILDING.to_string();
@@ -505,10 +512,10 @@ impl SearchCoordinator {
         let search_key = match deps.search_key_derivation.derive_search_key().await {
             Ok(k) => k,
             Err(e) => {
-                warn!(
+                uc_warn!(
                     error_kind = "search_key_derive",
                     io_error_kind = io_error_kind(&e),
-                    reason,
+                    reason = log_vocab(&reason),
                     "search coordinator: key derivation failed during rebuild"
                 );
                 set_failed_state(&event_tx, &state).await;
@@ -527,10 +534,10 @@ impl SearchCoordinator {
             {
                 Ok(b) => b,
                 Err(e) => {
-                    warn!(
+                    uc_warn!(
                         error_kind = "entry_list",
                         io_error_kind = io_error_kind(&e),
-                        reason,
+                        reason = log_vocab(&reason),
                         "search coordinator: failed to list entries during rebuild"
                     );
                     break;
@@ -564,10 +571,10 @@ impl SearchCoordinator {
                         all_entries.push((doc, postings));
                     }
                     Err(e) => {
-                        warn!(
+                        uc_warn!(
                             error_kind = "pipeline_build",
                             io_error_kind = io_error_kind(e.as_ref()),
-                            entry_id = %entry.entry_id,
+                            entry_id = log_id(&entry.entry_id),
                             "search coordinator: pipeline build failed for entry, skipping"
                         );
                     }
@@ -596,7 +603,10 @@ impl SearchCoordinator {
 
         match rebuild_result {
             Ok(()) => {
-                info!(reason, "search coordinator: rebuild completed successfully");
+                uc_info!(
+                    reason = log_vocab(&reason),
+                    "search coordinator: rebuild completed successfully"
+                );
                 {
                     let mut s = state.lock().await;
                     s.status = STATUS_READY.to_string();
@@ -609,10 +619,10 @@ impl SearchCoordinator {
                 purge_plaintext_residue_if_needed(&deps, cancel).await;
             }
             Err(e) => {
-                warn!(
+                uc_warn!(
                     error_kind = "rebuild",
                     io_error_kind = io_error_kind(&e),
-                    reason,
+                    reason = log_vocab(&reason),
                     "search coordinator: rebuild failed"
                 );
                 set_failed_state(&event_tx, &state).await;
@@ -628,18 +638,18 @@ impl SearchCoordinator {
     }
 
     pub async fn start(&self, cancel: CancellationToken) -> anyhow::Result<()> {
-        info!("search coordinator starting");
+        uc_info!("search coordinator starting");
         tokio::select! {
             biased;
             _ = cancel.cancelled() => {}
             _ = async {
                 self.startup_evaluation().await;
-                info!("search coordinator startup evaluation complete");
+                uc_info!("search coordinator startup evaluation complete");
                 cancel.cancelled().await;
             } => {}
         }
         self.task_scope.close(true).await?;
-        info!("search coordinator cancelled");
+        uc_info!("search coordinator cancelled");
         Ok(())
     }
 }
@@ -713,10 +723,10 @@ async fn project_persisted_entry(
     {
         Ok(r) => r,
         Err(e) => {
-            debug!(
+            uc_debug!(
                 error_kind = "representation_load",
                 io_error_kind = io_error_kind(&e),
-                entry_id = %entry.entry_id,
+                entry_id = log_id(&entry.entry_id),
                 "search projection: failed to load reps for entry, skipping"
             );
             return None;
@@ -726,17 +736,17 @@ async fn project_persisted_entry(
     let selection = match selection_repo.get_selection(&entry.entry_id).await {
         Ok(Some(sel)) => sel,
         Ok(None) => {
-            debug!(
-                entry_id = %entry.entry_id,
+            uc_debug!(
+                entry_id = log_id(&entry.entry_id),
                 "search projection: no selection for entry, skipping"
             );
             return None;
         }
         Err(e) => {
-            debug!(
+            uc_debug!(
                 error_kind = "selection_lookup",
                 io_error_kind = io_error_kind(e.as_ref()),
-                entry_id = %entry.entry_id,
+                entry_id = log_id(&entry.entry_id),
                 "search projection: failed to get selection for entry, skipping"
             );
             return None;
@@ -748,10 +758,10 @@ async fn project_persisted_entry(
     let source_device = match event_repo.get_source_device(&entry.event_id).await {
         Ok(device) => device.map(|d| d.to_string()),
         Err(e) => {
-            debug!(
+            uc_debug!(
                 error_kind = "source_device_lookup",
                 io_error_kind = io_error_kind(e.as_ref()),
-                entry_id = %entry.entry_id,
+                entry_id = log_id(&entry.entry_id),
                 "search projection: failed to resolve source device, projecting without it"
             );
             None
@@ -764,10 +774,10 @@ async fn project_persisted_entry(
         load_has_directory_structure(entry_file_set_repo, &entry.entry_id)
             .await
             .unwrap_or_else(|e| {
-                debug!(
+                uc_debug!(
                     error_kind = "file_set_load",
                     io_error_kind = io_error_kind(&e),
-                    entry_id = %entry.entry_id,
+                    entry_id = log_id(&entry.entry_id),
                     "search projection: failed to load file set, projecting without directory tag"
                 );
                 false
@@ -846,7 +856,7 @@ async fn purge_plaintext_residue_if_needed(
     let meta = match deps.search_index.get_index_meta().await {
         Ok(m) => m,
         Err(e) => {
-            warn!(
+            uc_warn!(
                 error_kind = "index_meta_read",
                 io_error_kind = io_error_kind(&e),
                 "search coordinator: purge check failed to read index meta"
@@ -864,9 +874,9 @@ async fn purge_plaintext_residue_if_needed(
     if meta.plaintext_purge_done_ms.is_some() {
         return;
     }
-    info!("search coordinator: running one-shot plaintext-residue purge");
+    uc_info!("search coordinator: running one-shot plaintext-residue purge");
     if let Err(e) = deps.search_maintenance.purge_plaintext_residue().await {
-        warn!(
+        uc_warn!(
             error_kind = "plaintext_residue_purge",
             io_error_kind = io_error_kind(&e),
             "search coordinator: plaintext-residue purge failed; will retry on next startup"
@@ -875,9 +885,9 @@ async fn purge_plaintext_residue_if_needed(
     }
     let ts = chrono::Utc::now().timestamp_millis();
     if let Err(e) = deps.search_maintenance.mark_plaintext_purge_done(ts).await {
-        warn!(error_kind = "purge_completion_record", io_error_kind = io_error_kind(&e), "search coordinator: purge ran but recording completion failed; will re-run next startup");
+        uc_warn!(error_kind = "purge_completion_record", io_error_kind = io_error_kind(&e), "search coordinator: purge ran but recording completion failed; will re-run next startup");
     } else {
-        info!("search coordinator: plaintext-residue purge complete");
+        uc_info!("search coordinator: plaintext-residue purge complete");
     }
 }
 
@@ -888,11 +898,19 @@ async fn repair_entry(deps: &SearchCoordinatorDeps, entry_id: &EntryId) {
     let entry = match deps.get_entry.get_entry(entry_id).await {
         Ok(Some(e)) => e,
         Ok(None) => {
-            debug!(entry_id = %entry_id, "search repair: entry no longer exists, skipping");
+            uc_debug!(
+                entry_id = log_id(&entry_id),
+                "search repair: entry no longer exists, skipping"
+            );
             return;
         }
         Err(e) => {
-            warn!(entry_id = %entry_id, error_kind = "entry_load", io_error_kind = io_error_kind(&e), "search repair: failed to load entry");
+            uc_warn!(
+                entry_id = log_id(&entry_id),
+                error_kind = "entry_load",
+                io_error_kind = io_error_kind(&e),
+                "search repair: failed to load entry"
+            );
             return;
         }
     };
@@ -908,7 +926,10 @@ async fn repair_entry(deps: &SearchCoordinatorDeps, entry_id: &EntryId) {
     {
         Some(i) => i,
         None => {
-            debug!(entry_id = %entry_id, "search repair: entry not projectable, skipping");
+            uc_debug!(
+                entry_id = log_id(&entry_id),
+                "search repair: entry not projectable, skipping"
+            );
             return;
         }
     };
@@ -916,7 +937,12 @@ async fn repair_entry(deps: &SearchCoordinatorDeps, entry_id: &EntryId) {
     let search_key = match deps.search_key_derivation.derive_search_key().await {
         Ok(k) => k,
         Err(e) => {
-            warn!(entry_id = %entry_id, error_kind = "search_key_derive", io_error_kind = io_error_kind(&e), "search repair: key derivation failed");
+            uc_warn!(
+                entry_id = log_id(&entry_id),
+                error_kind = "search_key_derive",
+                io_error_kind = io_error_kind(&e),
+                "search repair: key derivation failed"
+            );
             return;
         }
     };
@@ -924,17 +950,30 @@ async fn repair_entry(deps: &SearchCoordinatorDeps, entry_id: &EntryId) {
     let (doc, postings) = match deps.search_pipeline.build(&input, &search_key) {
         Ok(v) => v,
         Err(e) => {
-            warn!(entry_id = %entry_id, error_kind = "pipeline_build", io_error_kind = io_error_kind(e.as_ref()), "search repair: pipeline build failed");
+            uc_warn!(
+                entry_id = log_id(&entry_id),
+                error_kind = "pipeline_build",
+                io_error_kind = io_error_kind(e.as_ref()),
+                "search repair: pipeline build failed"
+            );
             return;
         }
     };
 
     match deps.search_index.index_entry(doc, postings).await {
         Ok(()) => {
-            info!(entry_id = %entry_id, "search repair: re-projected corrupted render payload")
+            uc_info!(
+                entry_id = log_id(&entry_id),
+                "search repair: re-projected corrupted render payload"
+            )
         }
         Err(e) => {
-            warn!(entry_id = %entry_id, error_kind = "index_entry", io_error_kind = io_error_kind(&e), "search repair: index_entry failed; not retrying")
+            uc_warn!(
+                entry_id = log_id(&entry_id),
+                error_kind = "index_entry",
+                io_error_kind = io_error_kind(&e),
+                "search repair: index_entry failed; not retrying"
+            )
         }
     }
 }

@@ -2,7 +2,6 @@
 
 use crate::error_codes::*;
 
-use tracing::error;
 use uc_application::facade::{
     AppFacade, ClipboardRestoreError, ClipboardRestoreMode as AppClipboardRestoreMode,
 };
@@ -11,6 +10,7 @@ use crate::{
     ClipboardRestoreMode, ClipboardRestoreOutcome, EngineError, EngineErrorCategory,
     OperationResult, RestoreClipboardInput,
 };
+use uc_observability_contract::uc_error;
 
 pub async fn execute_restore_clipboard(
     facade: &AppFacade,
@@ -53,7 +53,7 @@ fn map_restore_result(
             OperationResult::ClipboardRestored(ClipboardRestoreOutcome::NotApplicable { reason }),
         ),
         Err(ClipboardRestoreError::Internal(_)) => {
-            error!("clipboard restore failed");
+            uc_error!("clipboard restore failed");
             Err(EngineError::new(
                 RESTORE_CLIPBOARD_FAILED_CODE,
                 EngineErrorCategory::Internal,

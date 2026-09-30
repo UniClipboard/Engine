@@ -10,7 +10,7 @@ use crate::space::membership::MembershipLedgerError;
 use uc_observability_contract::diagnostics::connectivity::{
     scope_pairing_work, AdmissionExchangeSide,
 };
-use uc_observability_contract::diagnostics::AdmissionObservationAction;
+use uc_observability_contract::{diagnostics::AdmissionObservationAction, uc_warn};
 
 use super::model::JoinerActivationMutation;
 
@@ -167,7 +167,7 @@ fn record_membership_error(report: &mut AdmissionRecoveryReport, error: &Members
         MembershipLedgerError::Corrupt { .. } => "corrupt",
         MembershipLedgerError::RecoveryRequired => "recovery_required",
     };
-    tracing::warn!(error_kind, "加入方激活后建立本机成员状态失败");
+    uc_warn!(error_kind = error_kind, "加入方激活后建立本机成员状态失败");
     match error {
         MembershipLedgerError::Locked | MembershipLedgerError::Unavailable { .. } => {
             report.deferred_count += 1

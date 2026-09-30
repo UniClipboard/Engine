@@ -12,7 +12,6 @@
 
 use anyhow::Result;
 use std::sync::Arc;
-use tracing::info;
 
 use uc_core::{
     blob::ports::BlobReaderPort,
@@ -26,7 +25,9 @@ use uc_core::{
         ClipboardSelectionRepositoryPort,
     },
 };
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_id, uc_info, uc_warn,
+};
 
 use crate::clipboard::sync::snapshot_from_entry::{
     reconstruct_snapshot_from_entry, BuildSnapshotError,
@@ -116,7 +117,7 @@ impl RestoreClipboardSelectionUseCase {
     }
 
     pub(crate) async fn execute(&self, entry_id: &EntryId) -> Result<()> {
-        info!(entry_id = %entry_id, "restore.execute requested");
+        uc_info!(entry_id = log_id(&entry_id), "restore.execute requested");
         if !self.mode.allow_os_write() {
             return Err(anyhow::anyhow!(
                 "System clipboard writes disabled (UC_CLIPBOARD_MODE=passive)"
@@ -165,14 +166,14 @@ impl RestoreClipboardSelectionUseCase {
                     }
                 }
                 Ok(None) => {
-                    info!(
-                        entry_id = %entry_id,
+                    uc_info!(
+                        entry_id = log_id(&entry_id),
                         "restore: no persisted snapshot_hash for entry; skipping active-register advance"
                     );
                 }
                 Err(err) => {
-                    tracing::warn!(
-                        entry_id = %entry_id,
+                    uc_warn!(
+                        entry_id = log_id(&entry_id),
                         error_kind = "snapshot_hash_lookup",
                         io_error_kind = io_error_kind(&err),
                         "restore: snapshot_hash lookup failed; skipping active-register advance"

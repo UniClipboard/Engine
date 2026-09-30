@@ -3,10 +3,10 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
-use tracing::warn;
+
 use uc_application::deps::{LifecycleError, StopProfileRuntimePort};
 use uc_core::TaskRegistry;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_warn};
 
 use super::session_supervisor::{lifecycle_error, SessionSupervisor};
 use super::task_shutdown::shutdown_tasks;
@@ -67,7 +67,7 @@ impl ShutdownActions for ProductionShutdownActions<'_> {
         self.0.session_supervisor.clear_factory();
         if let Err(error) = std::fs::remove_dir_all(&self.0.clipboard_import_root) {
             if error.kind() != std::io::ErrorKind::NotFound {
-                warn!(
+                uc_warn!(
                     error_kind = "clipboard_imports_remove",
                     io_error_kind = io_error_kind(&error),
                     "failed to remove host clipboard imports"

@@ -22,7 +22,7 @@ use uc_core::ports::{
 };
 use uc_core::trusted_peer::TrustedPeerRepositoryPort;
 use uc_core::MemberRepositoryPort;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, log_fields::log_id, uc_warn};
 
 use crate::deps::CurrentSpaceMemberScopePort;
 
@@ -193,10 +193,10 @@ impl GetEntryDeliveryViewUseCase {
                 .map(|m| (m.device_id, m.device_name))
                 .collect(),
             Err(err) => {
-                tracing::warn!(
+                uc_warn!(
                     error_kind = "member_list",
                     io_error_kind = io_error_kind(&err),
-                    entry_id = %entry_id,
+                    entry_id = log_id(&entry_id),
                     "delivery view: member_repo.list failed; falling back to id-only names",
                 );
                 HashMap::new()
@@ -303,7 +303,7 @@ impl GetEntryDeliveryViewUseCase {
             Ok(Some(device)) if !device.label.trim().is_empty() => Some(device.label),
             Ok(_) => None,
             Err(err) => {
-                tracing::warn!(
+                uc_warn!(
                     error_kind = "mobile_device_lookup",
                     io_error_kind = io_error_kind(&err),
                     "delivery view: mobile_device_repo lookup failed; falling back to id-only name",

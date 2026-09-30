@@ -50,12 +50,11 @@
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_info, uc_warn};
 
 use iroh::{Endpoint, Watcher as _};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
 
 /// Diagnostic DNS self-test target. Resolving it exercises the *same* resolver
 /// the relay/net-report path uses, so a failure here mirrors the relay
@@ -202,7 +201,7 @@ impl DemandRecoveryCoordinator {
             Ok(mut gate) => gate.claim(self.relays_enabled, relay_is_healthy, Instant::now()),
             Err(_) => {
                 // 锁中毒只表示持锁线程 panic，分类本身即完整信息。
-                warn!(target: "iroh.net_recovery", error_kind = "gate_lock_poisoned", "demand recovery gate lock poisoned");
+                uc_warn!(target: "iroh.net_recovery", error_kind = "gate_lock_poisoned", "demand recovery gate lock poisoned");
                 false
             }
         };
@@ -242,7 +241,7 @@ fn reset_resolver(endpoint: &Endpoint) {
     match endpoint.dns_resolver() {
         Ok(resolver) => resolver.reset(),
         Err(err) => {
-            warn!(target: "iroh.net_recovery", error_kind = "dns_resolver_reset", io_error_kind = io_error_kind(&err), "cannot reset DNS resolver");
+            uc_warn!(target: "iroh.net_recovery", error_kind = "dns_resolver_reset", io_error_kind = io_error_kind(&err), "cannot reset DNS resolver");
         }
     }
 }
@@ -401,7 +400,7 @@ async fn run(
     let mut watcher = endpoint.home_relay_status();
     let mut state = RecoveryState::new(policy);
     let mut was_unhealthy = !relay_healthy(&watcher.get());
-    info!(
+    uc_info!(
         target: "iroh.net_recovery",
         grace_ms = policy.grace.as_millis() as u64,
         "relay self-healing watchdog started"
@@ -434,7 +433,7 @@ async fn run(
             Action::Nudge(next) => {
                 let observation = recorder
                     .recovery_action(*endpoint.id().as_bytes(), NetworkRecoveryTrigger::Watchdog);
-                warn!(
+                uc_warn!(
                     target: "iroh.net_recovery",
                     next_recheck_ms = next.as_millis() as u64,
                     "home relay unhealthy past grace; resetting DNS resolver + nudging endpoint to rebuild relay connection",
@@ -479,7 +478,7 @@ async fn run(
         }
     }
 
-    info!(target: "iroh.net_recovery", "relay self-healing watchdog stopped");
+    uc_info!(target: "iroh.net_recovery", "relay self-healing watchdog stopped");
 }
 
 /// `sleep(d)` for `Some`, an eternally-pending future for `None` — lets the

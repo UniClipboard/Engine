@@ -26,6 +26,7 @@ use crate::search::live_index::{
     ClipboardLiveIndexError, ClipboardLiveIndexInput, ClipboardLiveIndexOutcome,
     ClipboardLiveIndexPort,
 };
+use uc_observability_contract::uc_warn;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostClipboardDispatch {
@@ -202,7 +203,7 @@ impl LocalClipboardProcessor {
                     LocalClipboardIndexStatus::Skipped { reason }
                 }
                 Err(ClipboardLiveIndexError::Internal(_)) => {
-                    tracing::warn!(
+                    uc_warn!(
                         error_kind = "live_index",
                         "local clipboard live index failed"
                     );

@@ -4,7 +4,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
-use tracing::trace;
 
 use crate::config::clipboard_storage_config::ClipboardStorageConfig;
 use uc_core::clipboard::{
@@ -12,6 +11,10 @@ use uc_core::clipboard::{
     PersistedClipboardRepresentation,
 };
 use uc_core::ports::clipboard::ClipboardRepresentationNormalizerPort;
+use uc_observability_contract::{
+    log_fields::{log_id, log_vocab},
+    uc_trace,
+};
 
 const PREVIEW_LENGTH_CHARS: usize = 500;
 
@@ -92,10 +95,10 @@ impl ClipboardRepresentationNormalizerPort for ClipboardRepresentationNormalizer
         // 决策：内联、预览还是为 blob 物化创建暂存状态
         if size_bytes <= inline_threshold_bytes {
             // Small content: store full data inline
-            trace!(
-                representation_id = %observed.id,
-                format_id = %observed.format_id,
-                size_bytes,
+            uc_trace!(
+                representation_id = log_id(&observed.id),
+                format_id = log_vocab(&observed.format_id),
+                size_bytes = size_bytes,
                 threshold = inline_threshold_bytes,
                 strategy = "inline",
                 "Normalizing small content inline"
@@ -113,10 +116,10 @@ impl ClipboardRepresentationNormalizerPort for ClipboardRepresentationNormalizer
             if is_text_mime_type(&observed.mime) {
                 // Text type: keep a 500-char inline preview but mark as staged so
                 // background worker can materialize full payload into blob storage.
-                trace!(
-                    representation_id = %observed.id,
-                    format_id = %observed.format_id,
-                    size_bytes,
+                uc_trace!(
+                    representation_id = log_id(&observed.id),
+                    format_id = log_vocab(&observed.format_id),
+                    size_bytes = size_bytes,
                     threshold = inline_threshold_bytes,
                     preview_length_chars = PREVIEW_LENGTH_CHARS,
                     strategy = "staged_with_preview",
@@ -134,10 +137,10 @@ impl ClipboardRepresentationNormalizerPort for ClipboardRepresentationNormalizer
                 )
             } else {
                 // Non-text (images, etc.): create staged representation for blob materialization
-                trace!(
-                    representation_id = %observed.id,
-                    format_id = %observed.format_id,
-                    size_bytes,
+                uc_trace!(
+                    representation_id = log_id(&observed.id),
+                    format_id = log_vocab(&observed.format_id),
+                    size_bytes = size_bytes,
                     threshold = inline_threshold_bytes,
                     strategy = "staged",
                     "Normalizing large non-text as staged (blob materialization pending)"

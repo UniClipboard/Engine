@@ -2,11 +2,10 @@
 
 use crate::error_codes::*;
 
-use tracing::error;
 use uc_application::facade::{
     AppFacade, SearchFacadeError, SearchPageView, SearchQueryInput, SearchResultView,
 };
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_error};
 
 use crate::{
     EngineError, EngineErrorCategory, EntrySummary, OperationResult, QueryHistoryInput,
@@ -175,7 +174,11 @@ fn map_search_error(error: SearchFacadeError) -> EngineError {
         ),
     };
     if log_details {
-        error!(variant, io_error_kind = io_kind, "search operation failed");
+        uc_error!(
+            variant = variant,
+            io_error_kind = io_kind,
+            "search operation failed"
+        );
     }
     EngineError::new(code, category, retryable)
 }
@@ -263,7 +266,7 @@ pub(crate) fn map_query_history_error(error: SearchFacadeError) -> EngineError {
             true,
         ),
         SearchFacadeError::Internal(_) => {
-            error!(
+            uc_error!(
                 error_kind = "query_history",
                 io_error_kind = io_error_kind(&error),
                 "query history failed"

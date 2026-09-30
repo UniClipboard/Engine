@@ -7,6 +7,7 @@ use tokio::sync::Mutex;
 use uc_core::ids::{SessionId, SpaceId};
 use uc_core::ports::space::ProofPort;
 use uc_core::space_access::{ProofDerivedKey, SpaceAccessProofArtifact};
+use uc_observability_contract::{uc_debug, uc_info, uc_warn};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -100,11 +101,7 @@ impl ProofPort for HmacProofAdapter {
         derived_key: &ProofDerivedKey,
     ) -> anyhow::Result<SpaceAccessProofArtifact> {
         let key_bytes = derived_key.as_bytes();
-        tracing::debug!(
-            session_id = %pairing_session_id,
-            space_id = %space_id,
-            "building HMAC proof"
-        );
+        uc_debug!("building HMAC proof");
 
         let proof_bytes =
             Self::compute_hmac(pairing_session_id, space_id, challenge_nonce, key_bytes)?;
@@ -128,11 +125,7 @@ impl ProofPort for HmacProofAdapter {
         expected_nonce: [u8; 32],
     ) -> anyhow::Result<bool> {
         if proof.challenge_nonce != expected_nonce {
-            tracing::warn!(
-                session_id = %proof.pairing_session_id,
-                space_id = %proof.space_id,
-                "proof verification failed: challenge nonce mismatch"
-            );
+            uc_warn!("proof verification failed: challenge nonce mismatch");
             return Ok(false);
         }
 
@@ -147,10 +140,7 @@ impl ProofPort for HmacProofAdapter {
         };
 
         let Some(master_key) = master_key else {
-            tracing::warn!(
-                session_id = %proof.pairing_session_id,
-                "proof verification failed: no transcript credential cached"
-            );
+            uc_warn!("proof verification failed: no transcript credential cached");
             return Ok(false);
         };
 
@@ -162,17 +152,12 @@ impl ProofPort for HmacProofAdapter {
             &proof.proof_bytes,
         )?;
         if !matched {
-            tracing::warn!(
-                session_id = %proof.pairing_session_id,
-                space_id = %proof.space_id,
+            uc_warn!(
                 proof_len = proof.proof_bytes.len(),
                 "proof verification failed: HMAC mismatch"
             );
         } else {
-            tracing::info!(
-                session_id = %proof.pairing_session_id,
-                "proof verification succeeded"
-            );
+            uc_info!("proof verification succeeded");
         }
 
         Ok(matched)

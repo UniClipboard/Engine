@@ -21,12 +21,12 @@ use uc_core::membership::{
 };
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::{ClockPort, PeerAddressRepositoryPort};
-use uc_observability_contract::diagnostics::connectivity::InboundPeerProtocol;
 use uc_observability_contract::diagnostics::{
     complete_operation, describe_membership_exchange, describe_operation_failure, operation_span,
     DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation, DiagnosticRole, DiagnosticSpanKind,
     MembershipExchangePurpose, OperationCompletion, OperationContext,
 };
+use uc_observability_contract::{diagnostics::connectivity::InboundPeerProtocol, uc_warn};
 
 use super::connect_with_staggered_retry;
 use super::inbound_peer::{record_inbound_rejection, InboundPeerRejection, PeerIdentityResolver};
@@ -125,7 +125,7 @@ impl IrohMembershipHistoryExchangeAdapter {
         match self.peer_address_resolver.resolve(recipient).await {
             Ok(address) => address,
             Err(error) => {
-                tracing::warn!(
+                uc_warn!(
                     error_kind = error.kind(),
                     "membership history address resolution failed"
                 );

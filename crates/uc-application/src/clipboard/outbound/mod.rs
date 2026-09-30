@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 use thiserror::Error;
-use tracing::{debug, info, warn};
+
 use uc_core::blob::ports::BlobReaderPort;
 use uc_core::clipboard::{
     is_file_mime_or_format, ClipboardPayloadSource, EntryFileSetExcludeReason,
@@ -26,7 +26,11 @@ use uc_core::{ClipboardChangeOrigin, SystemClipboardSnapshot};
 use uc_observability_contract::diagnostics::connectivity::{
     LocalWorkObservation, LocalWorkOutcome, LocalWorkStep,
 };
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind,
+    log_fields::{log_id, log_vocab},
+    uc_debug, uc_info, uc_warn,
+};
 
 use crate::clipboard::sync::apply_inbound::{
     compute_file_set_component, InboundFileSetManifest, InboundFileSetMember,
@@ -222,8 +226,8 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
                 .snapshot
                 .representations
                 .retain(|rep| !matches!(rep.source(), ClipboardPayloadSource::LocalFile { .. }));
-            info!(
-                entry_id = %input.entry_id,
+            uc_info!(
+                entry_id = log_id(&input.entry_id),
                 stripped_count = stripped,
                 "outbound: stripped LocalFile reps before envelope construction (already in blob store; \
                  peers receive bytes via files rep + iroh-blobs)"
@@ -270,11 +274,11 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
                 // Publishing the readable subset would key the receiver's copy
                 // on content digests — a diverged identity and a duplicate
                 // entry on the next copy of the same set.
-                warn!(
-                    entry_id = %entry_id_str,
-                    ingest_failed,
-                    size_cap_exceeded,
-                    unsupported_member,
+                uc_warn!(
+                    entry_id = log_id(&entry_id_str),
+                    ingest_failed = ingest_failed,
+                    size_cap_exceeded = size_cap_exceeded,
+                    unsupported_member = unsupported_member,
                     "outbound: file-set manifest has excluded lines; skipping dispatch (all-or-nothing)"
                 );
                 return Ok(ClipboardOutboundOutcome::Skipped {
@@ -304,10 +308,10 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
                     // A manifest member vanished between capture and dispatch.
                     // Same all-or-nothing rule as above: never sync a subset of
                     // a set whose identity covers all members.
-                    warn!(
+                    uc_warn!(
                         error_kind = "file_set_member_unreadable",
                         io_error_kind = io_error_kind(&err),
-                        entry_id = %entry_id_str,
+                        entry_id = log_id(&entry_id_str),
                         "outbound: file-set member unreadable at dispatch; skipping dispatch (all-or-nothing)"
                     );
                     if let Some(observation) = metadata_observation.take() {
@@ -317,7 +321,7 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
                         reason: "file_set_member_unavailable".to_string(),
                     });
                 }
-                Err(err) => warn!(
+                Err(err) => uc_warn!(
                     error_kind = "file_metadata_unreadable",
                     io_error_kind = io_error_kind(&err),
                     "排除无法读取元数据的剪贴板文件"
@@ -340,8 +344,8 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
             .await;
         planning_observation.finish(LocalWorkOutcome::Ok);
         let Some(mut clipboard_intent) = plan.clipboard else {
-            info!(
-                entry_id = %entry_id_str,
+            uc_info!(
+                entry_id = log_id(&entry_id_str),
                 "outbound: dispatch_capture skipped (planner suppressed)"
             );
             return Ok(ClipboardOutboundOutcome::Skipped {
@@ -349,10 +353,10 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
             });
         };
 
-        info!(
-            entry_id = %entry_id_str,
-            snapshot_rep_count,
-            extracted_paths_count,
+        uc_info!(
+            entry_id = log_id(&entry_id_str),
+            snapshot_rep_count = snapshot_rep_count,
+            extracted_paths_count = extracted_paths_count,
             file_paths_source = if from_manifest { "manifest" } else { "reps" },
             file_candidate_count = plan.files.len(),
             total_file_bytes = total_file_metadata_bytes,
@@ -377,8 +381,8 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
             let mut capture_digests = expected_digests;
             capture_digests.dedup();
             if wire_digests != capture_digests {
-                warn!(
-                    entry_id = %entry_id_str,
+                uc_warn!(
+                    entry_id = log_id(&entry_id_str),
                     "outbound: file content drifted between capture and dispatch; wire identity keyed on current bytes"
                 );
             }
@@ -455,9 +459,9 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
                 .await
         }
         .map_err(|err| ClipboardOutboundError::Internal(anyhow::Error::from(err)))?;
-        info!(
-            entry_id = %entry_id_str,
-            blob_ref_count,
+        uc_info!(
+            entry_id = log_id(&entry_id_str),
+            blob_ref_count = blob_ref_count,
             accepted = dispatch_result.total_accepted,
             offline = dispatch_result.total_offline,
             errored = dispatch_result.total_errored,
@@ -699,8 +703,8 @@ pub(crate) async fn resolve_outbound_file_set(
             // Expected for every pre-manifest (legacy) file entry, so keep it
             // at debug: during the migration window this fires on each dispatch
             // /resend of an old file entry and would otherwise flood info.
-            debug!(
-                entry_id = %entry_id.as_str(),
+            uc_debug!(
+                entry_id = log_id(&entry_id.as_str()),
                 "outbound: no file-set manifest for file-class entry; falling back to rep parsing"
             );
             return OutboundFileSetResolution::Fallback {
@@ -708,8 +712,8 @@ pub(crate) async fn resolve_outbound_file_set(
             };
         }
         Err(err) => {
-            warn!(
-                entry_id = %entry_id.as_str(),
+            uc_warn!(
+                entry_id = log_id(&entry_id.as_str()),
                 error_kind = "file_set_manifest_load",
                 io_error_kind = io_error_kind(&err),
                 "outbound: file-set manifest load failed; falling back to rep parsing"
@@ -811,8 +815,8 @@ pub(crate) async fn resolve_outbound_file_set(
                 // shrink the published set — never publish a subset. Degrade
                 // to the legacy fallback instead (no worse than pre-manifest
                 // behavior).
-                warn!(
-                    entry_id = %entry_id.as_str(),
+                uc_warn!(
+                    entry_id = log_id(&entry_id.as_str()),
                     line_index = line.line_index,
                     "outbound: could not recover path from file-set manifest line; falling back to rep parsing"
                 );
@@ -991,11 +995,11 @@ pub(crate) async fn publish_oversized_inline_blob_refs(
             })
             .await
             .map_err(|err| ClipboardOutboundError::Internal(anyhow::Error::from(err)))?;
-        info!(
-            entry_id = %entry_id.as_str(),
+        uc_info!(
+            entry_id = log_id(&entry_id.as_str()),
             representation_index = idx,
-            size_bytes,
-            mime = mime_str.as_deref().unwrap_or("?"),
+            size_bytes = size_bytes,
+            mime = log_vocab(&mime_str.as_deref().unwrap_or("?")),
             reused_existing = result.reused_existing,
             "outbound: oversized inline rep published as blob"
         );
@@ -1040,8 +1044,8 @@ pub(crate) async fn publish_file_blob_refs(
             })
             .await
             .map_err(|err| ClipboardOutboundError::Internal(anyhow::Error::from(err)))?;
-        info!(
-            entry_id = %entry_id.as_str(),
+        uc_info!(
+            entry_id = log_id(&entry_id.as_str()),
             size_bytes = file.size,
             reused_existing = result.reused_existing,
             "outbound: file blob published (streaming)"

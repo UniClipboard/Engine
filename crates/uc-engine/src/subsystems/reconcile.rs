@@ -11,7 +11,7 @@ use uc_core::ids::DeviceId;
 use uc_core::membership::MemberRepositoryPort;
 use uc_core::ports::peer_address::PeerAddressRepositoryPort;
 use uc_core::trusted_peer::TrustedPeerRepositoryPort;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_debug, uc_info, uc_warn};
 
 /// 启动期清理:删除所有"在 `peer_addr_repo` 但不在 `member_repo`"的孤儿
 /// 条目。
@@ -49,11 +49,11 @@ pub async fn reconcile_peer_addresses(
         .collect();
 
     if orphans.is_empty() {
-        tracing::debug!("peer_addr reconcile: no orphans");
+        uc_debug!("peer_addr reconcile: no orphans");
         return Ok(());
     }
 
-    tracing::info!(
+    uc_info!(
         orphan_count = orphans.len(),
         "peer_addr reconcile: removing orphan entries (in peer_addr_repo but not in member_repo)"
     );
@@ -61,15 +61,11 @@ pub async fn reconcile_peer_addresses(
     for device_id in &orphans {
         match peer_addr_repo.remove(device_id).await {
             Ok(()) => {
-                tracing::info!(
-                    device_id = %device_id.as_str(),
-                    "peer_addr reconcile: removed orphan"
-                );
+                uc_info!("peer_addr reconcile: removed orphan");
             }
             Err(err) => {
                 // 单条失败不阻断其余清理,reconcile 是治理性,不是关键路径。
-                tracing::warn!(
-                    device_id = %device_id.as_str(),
+                uc_warn!(
                     error_kind = "orphan_remove",
                     io_error_kind = io_error_kind(&err),
                     "peer_addr reconcile: failed to remove orphan; will retry next boot"
@@ -115,11 +111,11 @@ pub async fn reconcile_trusted_peers(
         .collect();
 
     if orphans.is_empty() {
-        tracing::debug!("trusted_peer reconcile: no orphans");
+        uc_debug!("trusted_peer reconcile: no orphans");
         return Ok(());
     }
 
-    tracing::info!(
+    uc_info!(
         orphan_count = orphans.len(),
         "trusted_peer reconcile: removing orphan entries (in trusted_peer_repo but not in member_repo)"
     );
@@ -127,15 +123,10 @@ pub async fn reconcile_trusted_peers(
     for device_id in &orphans {
         match trusted_peer_repo.remove(device_id).await {
             Ok(removed) => {
-                tracing::info!(
-                    device_id = %device_id.as_str(),
-                    removed,
-                    "trusted_peer reconcile: removed orphan"
-                );
+                uc_info!(removed = removed, "trusted_peer reconcile: removed orphan");
             }
             Err(err) => {
-                tracing::warn!(
-                    device_id = %device_id.as_str(),
+                uc_warn!(
                     error_kind = "orphan_remove",
                     io_error_kind = io_error_kind(&err),
                     "trusted_peer reconcile: failed to remove orphan; will retry next boot"

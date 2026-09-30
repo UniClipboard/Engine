@@ -77,6 +77,7 @@ Engine 前构造 `ObservabilityResource` 和 `ObservabilityConfig`，再调用 `
 
 Rust 宿主需要实现产品分析能力或识别受管诊断文件时，通过 `uc_engine::observability::analytics` 和
 `uc_engine::observability::diagnostics` 使用完整合同；不得直接依赖 Engine 内部的 `uc-observability-contract` 包。
+绑定与宿主写日志时使用同一入口再导出的 `uc_trace!`、`uc_debug!`、`uc_info!`、`uc_warn!`、`uc_error!` 与 `log_id`、`log_vocab`、`log_vocab_debug`（见[运行期观测](observability.md)），它们只是日志写入口，不暴露 Application 或 Core 的内部阶段、状态或标识。
 
 需要保留宿主自身日志层的 Rust 宿主，可在首次安装时调用 `ProcessObservabilityRuntime::install_with_host_layers`，
 传入标准 `HostLogLayer`。共同运行时负责分组过滤：核心诊断及底层原始网络输出不会绕行到宿主层。

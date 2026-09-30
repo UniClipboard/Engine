@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tracing::{error, info, instrument, warn};
+use tracing::instrument;
 
 use uc_core::crypto::domain::Passphrase;
 use uc_core::ids::ProfileId;
@@ -35,6 +35,7 @@ use super::staging::{
     DB_MEMBER, DEVICE_ID_MEMBER, IROH_IDENTITY_PREFIX, KEYSLOT_MEMBER, PENDING_IMPORT_SCHEMA_VER,
     PROFILE_SECRETS_MEMBER, SETTINGS_MEMBER, STAGING_DIR_NAME, UI_STATE_PREFIX,
 };
+use uc_observability_contract::{uc_error, uc_info, uc_warn};
 
 /// Raw secure-storage entries collected for a bundle, paired with the
 /// current-profile KEK bytes when one was among them.
@@ -406,7 +407,7 @@ fn map_staging_err(err: StagingError) -> ConfigMigrationError {
 impl ExportConfigBundlePort for ConfigMigrationAdapter {
     #[instrument(skip_all, fields(profile = %self.profile_id.inner()))]
     async fn export_bundle(&self, destination: &Path) -> Result<PathBuf, ConfigMigrationError> {
-        info!("starting config bundle export");
+        uc_info!("starting config bundle export");
 
         // 1. Consistent db snapshot (blocking; sqlite + file IO).
         let pool = self.db_pool.clone();
@@ -428,14 +429,16 @@ impl ExportConfigBundlePort for ConfigMigrationAdapter {
         //    passphrase can open.
         let (secret_entries, kek) = self.collect_secrets()?;
         let Some(kek_bytes) = kek else {
-            error!("export aborted: current-profile KEK absent from secure storage while unlocked");
+            uc_error!(
+                "export aborted: current-profile KEK absent from secure storage while unlocked"
+            );
             return Err(ConfigMigrationError::Internal {
                 details: "key material unavailable for export".to_string(),
                 source: None,
             });
         };
         let kek_key: [u8; 32] = kek_bytes.as_slice().try_into().map_err(|error| {
-            error!("export aborted: KEK material has unexpected length");
+            uc_error!("export aborted: KEK material has unexpected length");
             ConfigMigrationError::Internal {
                 details: "key material has unexpected length".to_string(),
                 source: Some(Box::new(error)),
@@ -568,7 +571,7 @@ impl ExportConfigBundlePort for ConfigMigrationAdapter {
             source: Some(Box::new(error)),
         })??;
 
-        info!("config bundle export complete");
+        uc_info!("config bundle export complete");
         Ok(final_path)
     }
 }
@@ -603,7 +606,7 @@ impl StageConfigImportPort for ConfigMigrationAdapter {
         password: &Passphrase,
         source: &Path,
     ) -> Result<StagedConfigImport, ConfigMigrationError> {
-        info!("staging config import");
+        uc_info!("staging config import");
         let (archive, _manifest) = self.open_archive(password, source).await?;
 
         // Decide whether a KEK is present by inspecting the staged secrets.
@@ -640,9 +643,9 @@ impl StageConfigImportPort for ConfigMigrationAdapter {
         .map_err(map_staging_err)?;
 
         if !has_kek {
-            warn!("staged bundle carried no KEK; unlock will be required after apply");
+            uc_warn!("staged bundle carried no KEK; unlock will be required after apply");
         }
-        info!(has_kek, "config import staged");
+        uc_info!(has_kek = has_kek, "config import staged");
 
         Ok(StagedConfigImport {
             unlock_required_after_apply: !has_kek,

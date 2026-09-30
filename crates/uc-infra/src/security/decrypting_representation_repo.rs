@@ -8,7 +8,6 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::sync::Arc;
-use tracing::{debug, trace};
 
 use uc_core::ports::clipboard::{
     GetRepresentationByBlobIdPort, GetRepresentationByIdPort, GetRepresentationPort,
@@ -26,6 +25,7 @@ use uc_core::{
     ports::{security::BlobCipherPort, ClipboardRepresentationStore},
     BlobId,
 };
+use uc_observability_contract::{log_fields::log_id, uc_debug, uc_trace};
 
 /// Decorator that decrypts representation inline_data on read.
 pub struct DecryptingClipboardRepresentationRepository {
@@ -67,8 +67,8 @@ impl ClipboardRepresentationStore for DecryptingClipboardRepresentationRepositor
                 .await
                 .context("failed to decrypt inline_data")?;
 
-            trace!(
-                representation_id = %representation_id.as_ref(),
+            uc_trace!(
+                representation_id = log_id(&representation_id.as_ref()),
                 bytes = plaintext.len(),
                 "Decrypted inline_data for representation via BlobCipherPort"
             );
@@ -104,8 +104,8 @@ impl ClipboardRepresentationStore for DecryptingClipboardRepresentationRepositor
         };
 
         if rep.inline_data.is_some() {
-            trace!(
-                representation_id = %representation_id.as_ref(),
+            uc_trace!(
+                representation_id = log_id(&representation_id.as_ref()),
                 "Skipping inline_data decryption: event_id unavailable"
             );
         }
@@ -124,8 +124,8 @@ impl ClipboardRepresentationStore for DecryptingClipboardRepresentationRepositor
         };
 
         if rep.inline_data.is_some() {
-            trace!(
-                blob_id = %blob_id.as_ref(),
+            uc_trace!(
+                blob_id = log_id(&blob_id.as_ref()),
                 "Skipping inline_data decryption: event_id unavailable"
             );
         }
@@ -207,11 +207,11 @@ impl ClipboardRepresentationStore for DecryptingClipboardRepresentationRepositor
             }
         }
         if decrypted_count > 0 {
-            debug!(
-                event_id = %event_id.as_ref(),
+            uc_debug!(
+                event_id = log_id(&event_id.as_ref()),
                 representations = input_count,
                 decrypted = decrypted_count,
-                decrypted_bytes,
+                decrypted_bytes = decrypted_bytes,
                 "Decrypted representations for event via BlobCipherPort"
             );
         }

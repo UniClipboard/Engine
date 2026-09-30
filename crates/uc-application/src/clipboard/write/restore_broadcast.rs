@@ -16,9 +16,9 @@
 //! apply the per-device `send_content_types` filter without re-deriving them.
 
 use tokio::sync::mpsc::UnboundedSender;
-use tracing::trace;
 
 use uc_core::clipboard::{ActiveClipboardState, ClipboardContentCategorySet};
+use uc_observability_contract::uc_trace;
 
 /// One restore activation offered to the broadcast subsystem: the activated
 /// state plus the content category set of what was put on the clipboard.
@@ -47,7 +47,7 @@ impl RestoreBroadcastTrigger {
     pub fn offer(&self, state: ActiveClipboardState, categories: ClipboardContentCategorySet) {
         let request = RestoreBroadcastRequest { state, categories };
         if self.tx.send(request).is_err() {
-            trace!("restore broadcast trigger: receiver dropped; skipping offer");
+            uc_trace!("restore broadcast trigger: receiver dropped; skipping offer");
         }
     }
 }

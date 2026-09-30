@@ -1,6 +1,6 @@
 # 类型化日志事件与工具链强制
 
-状态：实施中（M0 起）；对应 [ADR-030](../../design-docs/decisions/030-typed-log-events-and-enforcement.md)（已采纳）。
+状态：M0、M1、M2、M4 已完成（一次性迁移，2026-09-29）；M3 与 `DiagnosticTaskKind` 声明生成未做；对应 [ADR-030](../../design-docs/decisions/030-typed-log-events-and-enforcement.md)（已采纳）。
 基线：`a37be892`（模块日志通道已提交）。
 
 ## 动作与责任
@@ -50,39 +50,34 @@ uc_warn!(error = &err as &dyn std::error::Error, "history cleanup failed");
 
 ### 强制
 
-- workspace clippy 使用独立配置禁止五个 tracing 宏（不含 `tracing::event`，见 ADR 试验）；
-  观测三个 crate 与测试文件通过配置豁免或 `cfg_attr(test, allow(..))`。
-- 新增 CI 步骤只统计 `clippy::disallowed_macros`，与整体 clippy 是否通过无关（当前整体不干净，且 CI 不跑 clippy）。
-- 基线文件按文件记录违规数，脚本对比：任何文件的计数只许下降，下降后基线必须同步下调。“被修改的文件清零”不作为门禁（会让一行改动被迫迁移几十处），
-  而是 M2 逐模块迁移的目标。
-- `check-rust-style.mjs` 增加：拒绝 `tracing::event!` 直接使用、拒绝 `uc_*!` 消息中的内插与位置参数。
+- workspace clippy 使用独立配置禁止五个 tracing 宏（不含 `tracing::event`，见 ADR 试验），只经 `CLIPPY_CONF_DIR` 启用。
+- 检查只统计 `clippy::disallowed_macros`，与整体 clippy 是否通过无关（当前整体不干净，且 CI 不跑整体 clippy）；任何一处都失败，没有基线。
+- clippy 只认 crate 级 allow：故意保留原始 tracing 的文件在文件顶部用 `#![allow(clippy::disallowed_macros)]` 并写明理由。
+- `check-rust-style.mjs` 拒绝直接使用日志宏与观测 crate 之外的 `tracing::event!`；`uc_*!` 宏自身只接受字面量消息，内插在编译期失败。
 
 ## 阶段
 
-- [x] **M0 宏与目录（2026-09-29 完成）**：`uc_observability_contract::{log_fields, log_event}`；五个级别宏、`target:`、`error =` 分支；
-  目录种子 `entry_id`（`Identifier(random)`）、`error_kind`（`Literal`）、`io_error_kind`（`IoKind`）；
-  运行期文本字段白名单由目录并上过渡清单 `LEGACY_TEXT_FIELDS` 得出，测试冻结迁移前的 69 个名字、保证集合不变；
-  `warn_on_error!` 改为 `event!` 形式；`check-rust-style.mjs` 同时读取目录，并把 `$crate::` 视为宏卫生路径；
-  `trybuild` 用例覆盖未登记字段、`String` 入固定词表字段、标识未经 `id()`、内插消息、`Identifier` 缺少确认记号；
-  第一个真实调用点是 `clipboard/sync/active_state/fanout.rs` 的两处 `warn!`，端到端测试确认落盘字段、错误链与源码位置不变。
-  验证：`cargo check --workspace --all-targets --locked`、`fmt --check`、两个架构脚本、脚本测试、契约与运行期测试、`cargo audit` 均通过。
-  实施中定下的细节：字段名不含点号（仓库 2 处带点字段改名，不进目录）；`Literal` 类别只接受 `&'static str` 或为自己实现
-  `Accept<Literal>` 的封闭枚举；类别约束放在调用点（`Accept::<fields::名::Class>::accept`），`#[diagnostic::on_unimplemented]`
-  给出稳定报错，避免每次新增字段都改写 `trybuild` 的期望输出；`target:` 暂接受任意表达式，M2 再收紧到目录常量。
-- [x] **M1 强制与基线（2026-09-29 完成）**：`scripts/architecture/log-macro-clippy/clippy.toml`（只经 `CLIPPY_CONF_DIR` 启用，
-  日常 clippy 不受影响）、`check-log-macro-ratchet.mjs` 与其测试、`log-macro-baseline.json`、PR Check 步骤、
-  `check-rust-style.mjs` 拒绝观测 crate 之外直接使用 `tracing::event!`。
-  实测基线 945 处 / 199 个文件：默认特性 932，加 `uc-engine/lan-compat` 后 945（多 13 处），所以脚本跑两轮并取并集。
-  用 `--cap-lints warn -A clippy::all -W clippy::disallowed_macros` 避开仓库已有的 clippy 错误，只统计目标 lint。
-  端到端验证：故意新增一处 `tracing::warn!` 使脚本以 1 退出并指出文件与行号，撤销后通过。
-  未采用的原方案：观测 crate 与测试文件不设豁免，其现有违规照常计入基线，避免维护第二套豁免清单。
-- [ ] **M2 逐 crate 迁移**：顺序 `uc-application`（409）→ `uc-engine`（105）→ `uc-infra`（351）→ 其余；
-  每个提交只迁一个模块，基线同步下调。内容派生哈希字段逐个裁决：改成不记录，或改用 `Sensitive`。
-  补日志任务的 55 条缺口在 M0、M1 完成后直接使用新宏写入，不先写旧式再迁移。
-- [ ] **M3 错误分类（ADR 第 3 步）**：分类 trait 与 `error_kind` 词表进目录；随触碰的错误类型渐进实现；
-  `log_safe_errors!` 全部覆盖后删除并更新 `check-module-log-errors.mjs`。
-- [ ] **M4 收尾**：删除旧白名单与 `REVIEWED_OMITTED_FIELDS`、旧启发式检查；更新 `observability.md` 与
-  `error-handling.md`；把 ADR-030 改为已采纳并记录最终偏离。
+- [x] **M0 宏与目录**：`uc_observability_contract::{log_fields, log_event}`；五个级别宏、`target:`（仅字面量）、`error =` 分支；
+  值类别 `Literal`、`Identifier(random)`、`Vocabulary(reviewed)`、`IoKind`、`Scalar` 与适配器 `log_id`、`log_vocab`、`log_vocab_debug`；
+  `warn_on_error!` 改为 `event!` 形式；`trybuild` 用例覆盖未登记字段、`String` 入固定词表字段、标识与词表未经适配器、
+  内插消息、`Identifier` 缺少确认记号、已删除字段不在目录里。
+- [x] **M1 强制**：`scripts/architecture/log-macro-clippy/clippy.toml`（只经 `CLIPPY_CONF_DIR` 启用）、
+  `check-direct-log-macros.mjs` 与其测试、PR Check 步骤；`check-rust-style.mjs` 拒绝直接使用日志宏与观测 crate 之外的 `tracing::event!`。
+  用 `--cap-lints warn -A clippy::all -W clippy::disallowed_macros` 避开仓库已有的 clippy 错误；默认特性与 `uc-engine/lan-compat`
+  各一轮取并集（后者多 13 处）。起草时的“基线棘轮”随一次性迁移退化为零容忍检查，不再有基线文件。
+- [x] **M2 一次性迁移**：用确定性 codemod（解析每个调用点的参数与偏移，按字段类别改写取值、展开简写、整理导入）加编译器逐轮纠错，
+  一次改完 936 处调用点（198 个文件）。分类表见 `.planning/2026-09-29-observability-gap-fixes/field-classification.md`。
+  用户裁决：已放行的文本字段用 `Vocabulary(reviewed)` 适配器保持落盘文本不变；已审定为不落盘的字段在调用点直接删除；
+  绑定经 `uc_engine::observability` 再导出宏与适配器。
+  手工处理：`sql`、`relay_url` 与 `blobs.rs` 的连接路径标签删除；`error.type` 改为 `error_kind`；绑定的 `error_kind = ?error`
+  改成变体名的固定映射（原来写入 Debug 输出）；因字段删除而失去用途的变量、参数与死函数一并清理。
+  故意保留原始 tracing 的三个观测运行期集成测试用 crate 级 allow。
+- [ ] **M3 错误分类（ADR 第 3 步）**：分类 trait 与 `error_kind` 词表；随触碰的错误类型渐进实现；`log_safe_errors!` 全部覆盖后删除。
+  未在本次一次性迁移范围内。
+- [x] **M4 收尾**：删除 `LEGACY_TEXT_FIELDS`、`REVIEWED_OMITTED_FIELDS` 与 `check-rust-style.mjs` 里读它们的字段审定逻辑；
+  运行期白名单直接由目录得出，并有测试冻结“迁移前 69 个名字（去掉 `error.type`）加 12 个已批准新增”的集合；
+  更新 `observability.md`、`engine-repository-checks.md`、`uc-engine-interface.md`、`AGENTS.md` 与 ADR-030。
+- [ ] **`DiagnosticTaskKind` 由声明生成**：M0 起草时列入，本次未做，与补日志任务新增的任务类别一起单独处理。
 
 ## 验证
 
@@ -98,5 +93,5 @@ uc_warn!(error = &err as &dyn std::error::Error, "history cleanup failed");
 
 ## 仍开放
 
-- `bindings`（13 处，只能依赖 `uc-engine`）与 `compatibility`（39 处，独立发布线）能否直接使用宏，M2 前核对；若需经 `uc-engine` 再导出，先论证不属于为观测扩大 facade。
-- 基线文件与 `RUST_STYLE_BASE_SHA` 差异检查并存时的冲突处理，M1 内定。
+- Windows 与 Android 专属代码里迁移过的调用点没有在对应平台上编译。
+- `#[instrument]` 约 130 处不受 lint 影响，单独处理。

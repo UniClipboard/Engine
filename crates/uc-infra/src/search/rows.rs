@@ -16,10 +16,10 @@ use crate::search::constants::CURRENT_INDEX_VERSION;
 use crate::search::render_payload::{RenderFields, RenderPayloadCodec};
 use anyhow::{Context, Result};
 use diesel::prelude::*;
-use tracing::warn;
+
 use uc_core::ids::EntryId;
 use uc_core::search::document::{ContentType, SearchDocument, SearchIndexMeta, SearchPosting};
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, log_fields::log_id, uc_warn};
 
 // ──────────────────────────────────────────────
 // search_document
@@ -164,8 +164,8 @@ impl SearchDocumentRow {
             Some(bytes) => match codec.decrypt(&entry_id, bytes) {
                 Ok(fields) => (fields, false),
                 Err(err) => {
-                    warn!(
-                        entry_id = %self.entry_id,
+                    uc_warn!(
+                        entry_id = log_id(&self.entry_id),
                         error_kind = "render_payload_decode",
                         io_error_kind = io_error_kind(&err),
                         "search: render payload decode failed, blanking render fields"
@@ -174,8 +174,8 @@ impl SearchDocumentRow {
                 }
             },
             None => {
-                warn!(
-                    entry_id = %self.entry_id,
+                uc_warn!(
+                    entry_id = log_id(&self.entry_id),
                     "search: render payload is NULL on current index version, blanking render fields"
                 );
                 (RenderFields::default(), true)

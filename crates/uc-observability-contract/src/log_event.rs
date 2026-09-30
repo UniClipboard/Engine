@@ -21,37 +21,37 @@ macro_rules! __uc_log {
             $($rest)+
         )
     };
-    ($level:ident [$($target:tt)*] [$($fields:tt)*] $message:literal) => {
+    ($level:ident [$($target:tt)*] [$($fields:tt)*] $message:literal $(,)?) => {
         $crate::__tracing::event!($($target)* $crate::__tracing::Level::$level, $($fields)* $message)
     };
 }
 
 #[macro_export]
 macro_rules! uc_trace {
-    (target: $target:expr, $($rest:tt)+) => { $crate::__uc_log!(TRACE [target: $target,] [] $($rest)+) };
+    (target: $target:literal, $($rest:tt)+) => { $crate::__uc_log!(TRACE [target: $target,] [] $($rest)+) };
     ($($rest:tt)+) => { $crate::__uc_log!(TRACE [] [] $($rest)+) };
 }
 
 #[macro_export]
 macro_rules! uc_debug {
-    (target: $target:expr, $($rest:tt)+) => { $crate::__uc_log!(DEBUG [target: $target,] [] $($rest)+) };
+    (target: $target:literal, $($rest:tt)+) => { $crate::__uc_log!(DEBUG [target: $target,] [] $($rest)+) };
     ($($rest:tt)+) => { $crate::__uc_log!(DEBUG [] [] $($rest)+) };
 }
 
 #[macro_export]
 macro_rules! uc_info {
-    (target: $target:expr, $($rest:tt)+) => { $crate::__uc_log!(INFO [target: $target,] [] $($rest)+) };
+    (target: $target:literal, $($rest:tt)+) => { $crate::__uc_log!(INFO [target: $target,] [] $($rest)+) };
     ($($rest:tt)+) => { $crate::__uc_log!(INFO [] [] $($rest)+) };
 }
 
 #[macro_export]
 macro_rules! uc_warn {
-    (target: $target:expr, $($rest:tt)+) => { $crate::__uc_log!(WARN [target: $target,] [] $($rest)+) };
+    (target: $target:literal, $($rest:tt)+) => { $crate::__uc_log!(WARN [target: $target,] [] $($rest)+) };
     ($($rest:tt)+) => { $crate::__uc_log!(WARN [] [] $($rest)+) };
 }
 
 #[macro_export]
 macro_rules! uc_error {
-    (target: $target:expr, $($rest:tt)+) => { $crate::__uc_log!(ERROR [target: $target,] [] $($rest)+) };
+    (target: $target:literal, $($rest:tt)+) => { $crate::__uc_log!(ERROR [target: $target,] [] $($rest)+) };
     ($($rest:tt)+) => { $crate::__uc_log!(ERROR [] [] $($rest)+) };
 }

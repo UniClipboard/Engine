@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tokio::sync::{Mutex, RwLock};
-use tracing::warn;
+
 use uc_core::mobile_sync::{MobileDeviceId, StagedFile, StagingHandle};
 use uc_core::ports::MobileFileStagingPort;
 use uc_core::{FileTransferCancellationReason, FileTransferFailureReason};
@@ -16,6 +16,7 @@ use crate::usecases::apply_incoming::{
 use uc_application::facade::file_transfer::{
     BeginReceiverTransfer, FileTransferFacade, ReceiverTransferHandle, ReceiverTransferRegistration,
 };
+use uc_observability_contract::uc_warn;
 
 const MOBILE_UPLOAD_PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 const MOBILE_UPLOAD_HANDLE_PREFIX: &str = "uc-mobile-upload-v1:";
@@ -418,7 +419,7 @@ impl MobileFileUploadCoordinator {
                 .is_err()
             {
                 failed = true;
-                warn!("mobile file upload close could not settle one transfer");
+                uc_warn!("mobile file upload close could not settle one transfer");
             }
         }
         if failed {
@@ -472,7 +473,7 @@ impl MobileFileUploadCoordinator {
             .await
             .is_err()
         {
-            warn!("mobile file upload failure could not settle transfer");
+            uc_warn!("mobile file upload failure could not settle transfer");
         }
     }
 }

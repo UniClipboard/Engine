@@ -20,7 +20,8 @@ use iroh::{RelayUrl, SecretKey};
 use iroh_relay::client::{ClientBuilder, ConnectError, DialError};
 use iroh_relay::tls::{self, CaRootsConfig};
 use tokio::time::error::Elapsed;
-use tracing::{debug, instrument, warn};
+use tracing::instrument;
+use uc_observability_contract::{uc_debug, uc_warn};
 
 /// 探测整体预算。覆盖 DNS + TCP + TLS + WebSocket upgrade + 协议握手;
 /// 超过此预算返回 [`RelayProbeError::Timeout`]。
@@ -209,7 +210,7 @@ impl IrohRelayProbeAdapter {
             Ok(Ok(_client)) => {
                 let latency_ms =
                     u32::try_from(started_at.elapsed().as_millis()).unwrap_or(u32::MAX);
-                debug!(latency_ms, "relay probe succeeded");
+                uc_debug!(latency_ms = latency_ms, "relay probe succeeded");
                 Ok(RelayProbeReport { latency_ms })
             }
             Ok(Err(err)) => Err(map_connect_error(err)),
@@ -286,7 +287,7 @@ fn map_connect_error(err: ConnectError) -> RelayProbeError {
         // 兜底分支:把陌生 ConnectError 变体压成 Other,同时 warn 保留源头便
         // 于排查(iroh-relay 升级新增变体时是这里第一时间发现)。
         other => {
-            warn!(
+            uc_warn!(
                 error_kind = "unmapped_connect_error",
                 "relay probe: unmapped ConnectError variant"
             );
@@ -326,7 +327,7 @@ fn map_dial_error(err: DialError) -> RelayProbeError {
         // 与 map_connect_error 同理:陌生 DialError 变体走 Other,源信息进
         // tracing 便于跨版本对账。
         other => {
-            warn!(
+            uc_warn!(
                 error_kind = "unmapped_dial_error",
                 "relay probe: unmapped DialError variant"
             );

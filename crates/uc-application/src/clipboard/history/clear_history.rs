@@ -1,14 +1,16 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{info, info_span, warn, Instrument};
+use tracing::{info_span, Instrument};
 use uc_core::ports::blob::BlobTransferPort;
 use uc_core::ports::clipboard::{
     DeleteClipboardEntryPort, GetClipboardEntryPort, ListClipboardEntriesPort,
     ListRepresentationsForEventPort,
 };
 use uc_core::ports::{ClipboardEventWriterPort, ClipboardSelectionRepositoryPort, SearchIndexPort};
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_id, uc_info, uc_warn,
+};
 
 use super::delete_entry::DeleteClipboardEntryUseCase;
 
@@ -76,7 +78,7 @@ impl ClearClipboardHistoryUseCase {
         let entries = self.collect_all_entries().await?;
 
         let total = entries.len() as u64;
-        info!(
+        uc_info!(
             total_entries = total,
             "Starting bulk clipboard history deletion"
         );
@@ -113,8 +115,8 @@ impl ClearClipboardHistoryUseCase {
             match delete_uc.execute(&entry.entry_id).await {
                 Ok(()) => deleted_count += 1,
                 Err(e) => {
-                    warn!(
-                        entry_id = %entry.entry_id,
+                    uc_warn!(
+                        entry_id = log_id(&entry.entry_id),
                         error_kind = "entry_delete",
                         io_error_kind = io_error_kind(e.as_ref()),
                         "Failed to delete entry during bulk clear"
@@ -124,7 +126,7 @@ impl ClearClipboardHistoryUseCase {
             }
         }
 
-        info!(
+        uc_info!(
             deleted = deleted_count,
             failed = failed_entries.len(),
             total = total,

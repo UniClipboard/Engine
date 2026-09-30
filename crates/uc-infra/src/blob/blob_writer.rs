@@ -1,12 +1,16 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::path::Path;
-use tracing::{debug, debug_span, warn, Instrument};
+use tracing::{debug_span, Instrument};
 use uc_core::blob::ports::{BlobContentIngestPort, BlobWriterPort, IngestedBlob};
 use uc_core::ports::ClockPort;
 use uc_core::BlobId;
 use uc_core::ContentHash;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind,
+    log_fields::{log_id, log_vocab},
+    uc_debug, uc_warn,
+};
 
 use crate::blob::hashing::stream_hash_file;
 use crate::blob::{Blob, BlobRepositoryPort, BlobStorageLocator, BlobStorePort, StoredPathBlob};
@@ -75,8 +79,7 @@ where
                     return Err(err);
                 }
             };
-            debug!(
-                content_hash = %content_hash,
+            uc_debug!(
                 file_size = size_bytes,
                 "Persisted path-backed blob; recording by authoritative content hash"
             );
@@ -86,9 +89,8 @@ where
             //    先 discard,否则会留下无记录引用的孤儿 blob。
             match self.blob_repo.find_by_hash(&content_hash).await {
                 Ok(Some(existing)) => {
-                    debug!(
-                        content_hash = %content_hash,
-                        blob_id = %existing.blob_id,
+                    uc_debug!(
+                        blob_id = log_id(&existing.blob_id),
                         "Path ingest: dedup hit, dropping freshly written blob and reusing existing"
                     );
                     self.discard_blob(&blob_id, "dedup hit").await;
@@ -120,10 +122,9 @@ where
                 // Insert most likely lost the content_hash UNIQUE race with a
                 // concurrent ingest; reuse the winner's record if it is present.
                 if let Ok(Some(existing)) = self.blob_repo.find_by_hash(&content_hash).await {
-                    debug!(
+                    uc_debug!(
                         error_kind = "insert_race",
                         io_error_kind = io_error_kind(insert_err.as_ref()),
-                        content_hash = %content_hash,
                         "Path ingest insert raced with existing blob; dropping freshly written blob and returning existing record",
                     );
                     self.discard_blob(&blob_id, "insert race").await;
@@ -154,11 +155,11 @@ where
     /// orphan, not a correctness fault for the ingest the caller asked for.
     async fn discard_blob(&self, blob_id: &BlobId, reason: &str) {
         if let Err(err) = self.blob_store.delete(blob_id).await {
-            warn!(
+            uc_warn!(
                 error_kind = "redundant_blob_remove",
                 io_error_kind = io_error_kind(err.as_ref()),
-                blob_id = %blob_id,
-                reason,
+                blob_id = log_id(&blob_id),
+                reason = log_vocab(&reason),
                 "Failed to remove redundant blob during path ingest cleanup"
             );
         }
@@ -206,10 +207,9 @@ where
 
             if let Err(err) = self.blob_repo.insert_blob(&record).await {
                 if let Some(existing) = self.blob_repo.find_by_hash(content_id).await? {
-                    debug!(
+                    uc_debug!(
                         error_kind = "insert_race",
                         io_error_kind = io_error_kind(err.as_ref()),
-                        content_hash = %content_id,
                         "Insert raced with existing blob; returning existing record",
                     );
                     return Ok(existing.blob_id);
@@ -248,9 +248,8 @@ where
                 tokio::task::spawn_blocking(move || stream_hash_file(&source))
                     .await
                     .context("hash join failed")??;
-            debug!(
-                content_hash = %content_id,
-                file_size,
+            uc_debug!(
+                file_size = file_size,
                 "Computed content hash for path (identity only, no materialization)"
             );
             Ok(content_id)

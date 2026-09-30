@@ -41,7 +41,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use thiserror::Error;
-use tracing::{debug, info, instrument, warn};
+use tracing::instrument;
 
 use uc_application::facade::clipboard_write::ClipboardWriteIntent;
 use uc_core::file_transfer::FileTransferFailureReason;
@@ -51,7 +51,11 @@ use uc_core::ports::mobile_sync::{MobileFileStagingError, MobileFileStagingPort}
 use uc_core::ports::{ClockPort, ReceiveItemRole};
 use uc_core::{MimeType, ObservedClipboardRepresentation, SystemClipboardSnapshot};
 use uc_observability_contract::analytics::{AnalyticsPort, Direction, Event, PayloadSizeBucket};
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind,
+    log_fields::{log_id, log_vocab},
+    uc_debug, uc_info, uc_warn,
+};
 
 use crate::usecases::clipboard_doc::SyncClipboardItemType;
 #[cfg(test)]
@@ -331,8 +335,7 @@ impl IncomingMobileBuffer {
             // to make room. v1: HashMap iter order; if real-world traffic
             // shows orphan accumulation we'll switch to LRU in P5a.3.5+.
             if let Some(victim) = guard.keys().next().cloned() {
-                warn!(
-                    victim = %victim,
+                uc_warn!(
                     cap = MAX_BUFFERED_FILES,
                     "mobile_sync IncomingMobileBuffer full; dropping oldest entry"
                 );
@@ -486,9 +489,9 @@ impl ApplyIncomingMobileClipUseCase {
                 }
                 self.buffer
                     .store(data_name.clone(), mime.clone(), staged, transfer_id.clone());
-                info!(
-                    mime = %mime,
-                    transfer_id = %transfer_id,
+                uc_info!(
+                    mime = log_vocab(&mime),
+                    transfer_id = log_id(&transfer_id),
                     "mobile_sync apply_incoming: buffered staged file"
                 );
                 Ok(ApplyIncomingMobileClipOutcome::Buffered)
@@ -511,8 +514,7 @@ impl ApplyIncomingMobileClipUseCase {
                 let built = match build_result {
                     Ok(s) => s,
                     Err(BuildSnapshotFailure::Decode(reason)) => {
-                        warn!(
-                            item_type = ?item_type,
+                        uc_warn!(
                             error_kind = "decode_failed",
                             "mobile_sync apply_incoming: decode failed"
                         );
@@ -526,10 +528,7 @@ impl ApplyIncomingMobileClipUseCase {
                         return Ok(ApplyIncomingMobileClipOutcome::DecodeFailed { reason });
                     }
                     Err(BuildSnapshotFailure::Internal(source)) => {
-                        warn!(
-                            item_type = ?item_type,
-                            "mobile_sync apply_incoming: internal failure (file staging)"
-                        );
+                        uc_warn!("mobile_sync apply_incoming: internal failure (file staging)");
                         return Err(ApplyIncomingMobileClipError::Internal(source));
                     }
                 };
@@ -587,7 +586,7 @@ impl ApplyIncomingMobileClipUseCase {
                 );
                 self.maybe_announce_activation(&dispatch_outcome, snapshot_for_announce)
                     .await;
-                self.finalize_transfer_lifecycle(transfer_id, source_device_id, &dispatch_outcome)
+                self.finalize_transfer_lifecycle(transfer_id, &dispatch_outcome)
                     .await;
                 dispatch_outcome
             }
@@ -669,7 +668,7 @@ impl ApplyIncomingMobileClipUseCase {
             // 游 `snapshot_for_fanout` 被错误构造成 None, 属于编程错误。
             // 沉默而不是 panic —— 这条 fan-out 只是"事后传播", 不应让
             // mobile 上传整体失败。
-            warn!("mobile_sync fan-out: fan_out wired but snapshot_for_fanout=None, skipping");
+            uc_warn!("mobile_sync fan-out: fan_out wired but snapshot_for_fanout=None, skipping");
             return;
         };
         fan_out.fan_out(entry_id.clone(), snapshot, source_device_id.clone());
@@ -719,8 +718,8 @@ impl ApplyIncomingMobileClipUseCase {
                 os_write_succeeded: false,
                 ..
             }) => {
-                warn!(
-                    entry_id = %existing_entry_id,
+                uc_warn!(
+                    entry_id = log_id(&existing_entry_id),
                     "mobile_sync apply_incoming: held entry re-activation did not reach the OS \
                      clipboard; skipping active-clipboard convergence"
                 );
@@ -729,11 +728,13 @@ impl ApplyIncomingMobileClipUseCase {
             _ => return,
         };
         let Some(snapshot) = snapshot_for_announce else {
-            warn!("mobile_sync announce: announce wired but snapshot_for_announce=None, skipping");
+            uc_warn!(
+                "mobile_sync announce: announce wired but snapshot_for_announce=None, skipping"
+            );
             return;
         };
-        info!(
-            entry_id = %entry_id,
+        uc_info!(
+            entry_id = log_id(&entry_id),
             "mobile_sync apply_incoming: inbound activated local clipboard, announcing active-clipboard state"
         );
         announce.announce_new(entry_id, snapshot).await;
@@ -746,7 +747,6 @@ impl ApplyIncomingMobileClipUseCase {
     async fn finalize_transfer_lifecycle(
         &self,
         transfer_id: Option<String>,
-        source_device_id: MobileDeviceId,
         dispatch: &Result<ApplyIncomingMobileClipOutcome, ApplyIncomingMobileClipError>,
     ) {
         let Some(facade) = self.file_transfer.as_ref() else {
@@ -756,9 +756,8 @@ impl ApplyIncomingMobileClipUseCase {
             return;
         };
         let Some(session) = facade.active_session(&transfer_id).await else {
-            warn!(
-                transfer_id,
-                source_device_id = %source_device_id,
+            uc_warn!(
+                transfer_id = log_id(&transfer_id),
                 "mobile_sync apply_incoming: active transfer session is missing"
             );
             return;
@@ -786,8 +785,8 @@ impl ApplyIncomingMobileClipUseCase {
 
     async fn complete_transfer(&self, session: &ReceiverTransferHandle) {
         if let Err(err) = session.complete().await {
-            warn!(
-                transfer_id = session.transfer_id(),
+            uc_warn!(
+                transfer_id = log_id(&session.transfer_id()),
                 error_kind = "lifecycle_complete",
                 io_error_kind = io_error_kind(&err),
                 "mobile_sync apply_incoming: complete lifecycle failed"
@@ -800,8 +799,8 @@ impl ApplyIncomingMobileClipUseCase {
             .fail(FileTransferFailureReason::Unknown, Some(detail))
             .await
         {
-            warn!(
-                transfer_id = session.transfer_id(),
+            uc_warn!(
+                transfer_id = log_id(&session.transfer_id()),
                 error_kind = "lifecycle_fail",
                 io_error_kind = io_error_kind(&err),
                 "mobile_sync apply_incoming: fail lifecycle failed"
@@ -912,7 +911,7 @@ impl ApplyIncomingMobileClipUseCase {
             Some(MimeType("text/uri-list".to_string())),
             uri_list.into_bytes(),
         );
-        info!("mobile_sync apply_incoming: file staged into uri-list rep");
+        uc_info!("mobile_sync apply_incoming: file staged into uri-list rep");
         Ok(BuiltSnapshot {
             snapshot: SystemClipboardSnapshot {
                 ts_ms: self.clock.now_ms(),
@@ -940,10 +939,8 @@ impl ApplyIncomingMobileClipUseCase {
         // 一眼看出"这条不是 P2P 来的", 不污染真实 P2P DeviceId 命名空间。
         let pseudo_from = DeviceId::new(format!("mobile_sync:{}", source_device_id));
 
-        debug!(
-            snapshot_hash = %snapshot_hash,
+        uc_debug!(
             plaintext_len = plaintext.len(),
-            from_device = %pseudo_from,
             "mobile_sync apply_incoming: dispatching to ApplyInbound"
         );
 
@@ -969,7 +966,10 @@ impl ApplyIncomingMobileClipUseCase {
         Ok(match outcome {
             InboundClipboardApplyOutcome::Applied { entry_id } => {
                 let entry_id = EntryId::from(entry_id);
-                info!(entry_id = %entry_id, "mobile_sync apply_incoming: applied");
+                uc_info!(
+                    entry_id = log_id(&entry_id),
+                    "mobile_sync apply_incoming: applied"
+                );
                 ApplyIncomingMobileClipOutcome::Applied {
                     entry_id,
                     content_id: snapshot_hash,
@@ -980,10 +980,9 @@ impl ApplyIncomingMobileClipUseCase {
                 existing_entry_id,
                 os_write_succeeded,
             } => {
-                debug!(
-                    snapshot_hash = %hash,
-                    existing_entry_id = %existing_entry_id,
-                    os_write_succeeded,
+                uc_debug!(
+                    existing_entry_id = log_id(&existing_entry_id),
+                    os_write_succeeded = os_write_succeeded,
                     "mobile_sync apply_incoming: dedup hit, held entry re-activated"
                 );
                 ApplyIncomingMobileClipOutcome::Resurfaced {
@@ -996,9 +995,8 @@ impl ApplyIncomingMobileClipUseCase {
                 snapshot_hash: hash,
                 existing_entry_id,
             } => {
-                debug!(
-                    snapshot_hash = %hash,
-                    existing_entry_id = %existing_entry_id,
+                uc_debug!(
+                    existing_entry_id = log_id(&existing_entry_id),
                     "mobile_sync apply_incoming: redundant delivery, skipping"
                 );
                 ApplyIncomingMobileClipOutcome::DuplicateSkipped {
@@ -1009,7 +1007,7 @@ impl ApplyIncomingMobileClipUseCase {
             InboundClipboardApplyOutcome::DecodeFailed { reason } => {
                 // 我们刚 encode 出来的 envelope 又被 inbound decode 失败 ——
                 // 几乎不可能, 但为了类型完备保留这条路径 + warn 日志。
-                warn!(
+                uc_warn!(
                     error_kind = "inbound_decode_failed",
                     "mobile_sync apply_incoming: inbound decode failed (unexpected — we just encoded it)"
                 );

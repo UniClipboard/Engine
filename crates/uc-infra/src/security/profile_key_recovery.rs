@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
-use tracing::warn;
+
 use uc_core::app_dirs::AppPaths;
 use uc_core::crypto::domain::Passphrase;
 use uc_core::crypto::model::EncryptionError;
@@ -26,6 +26,7 @@ use crate::migration_state::{decode_legacy_migration_run_id, DEFAULT_MIGRATION_S
 use crate::network::iroh::IDENTITY_STORE_KEY;
 use crate::space::KeyMaterialStore;
 use crate::FileSecureStorage;
+use uc_observability_contract::uc_warn;
 
 pub const PROFILE_SECRET_FILE_NAME: &str = "profile-secrets-v1";
 const FORMAT_VERSION: u16 = 1;
@@ -884,7 +885,7 @@ impl ProfileKeyRecoveryStore {
             Err(error) => {
                 // 安全存储端口只能携带固定文本，真实原因只以固定分类记录。
                 let error = ProfileKeyRecoveryError::from(error);
-                warn!(
+                uc_warn!(
                     stage = "decode_automatic_unlock_key",
                     reason = error.diagnostic_reason(),
                     "资料 vault 自动打开失败"
@@ -895,7 +896,7 @@ impl ProfileKeyRecoveryStore {
             }
         };
         if let Err(error) = self.activate_existing(&kek) {
-            warn!(
+            uc_warn!(
                 stage = "open_vault",
                 reason = error.diagnostic_reason(),
                 "资料 vault 自动打开失败"

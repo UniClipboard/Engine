@@ -24,7 +24,9 @@ use std::net::SocketAddr;
 
 use uc_application::facade::settings::RelayCredentials;
 use uc_core::settings::model::CongestionController;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_vocab, uc_info, uc_warn,
+};
 
 use uc_infra::network::iroh::{IrohNodeConfig, IrohRelayAccessToken};
 
@@ -79,7 +81,7 @@ pub fn load_relay_access_tokens(config: &mut IrohNodeConfig, credentials: &Relay
             Ok(Some(token)) => token,
             Ok(None) => continue,
             Err(error) => {
-                tracing::warn!(
+                uc_warn!(
                     error_kind = "relay_credential_unavailable",
                     io_error_kind = io_error_kind(&error),
                     "relay credential unavailable during startup; continuing without it"
@@ -90,7 +92,7 @@ pub fn load_relay_access_tokens(config: &mut IrohNodeConfig, credentials: &Relay
         let token = match IrohRelayAccessToken::new(token.expose_secret().to_string()) {
             Ok(token) => token,
             Err(error) => {
-                tracing::warn!(
+                uc_warn!(
                     error_kind = "relay_credential_unusable",
                     io_error_kind = io_error_kind(&error),
                     "stored relay credential cannot be used; continuing without it"
@@ -128,16 +130,14 @@ pub(crate) fn parse_iroh_direct_reachability(
         .filter(|raw| !raw.is_empty())
         .and_then(|raw| match raw.parse::<u16>() {
             Ok(0) => {
-                tracing::warn!(
-                    uc_iroh_bind_port = %raw,
+                uc_warn!(
                     "UC_IROH_BIND_PORT=0 is the ephemeral-port sentinel; ignoring (use a non-zero fixed port)",
                 );
                 None
             }
             Ok(port) => Some(port),
             Err(err) => {
-                tracing::warn!(
-                    uc_iroh_bind_port = %raw,
+                uc_warn!(
                     error_kind = "invalid_bind_port",
                     io_error_kind = io_error_kind(&err),
                     "invalid UC_IROH_BIND_PORT; ignoring (expected an integer 1..=65535)",
@@ -152,7 +152,7 @@ pub(crate) fn parse_iroh_direct_reachability(
         .and_then(|raw| match raw.parse::<SocketAddr>() {
             Ok(addr) => Some(addr),
             Err(err) => {
-                tracing::warn!(
+                uc_warn!(
                     error_kind = "invalid_public_addr",
                     io_error_kind = io_error_kind(&err),
                     "invalid UC_IROH_PUBLIC_ADDR; ignoring (expected ip:port, e.g. 203.0.113.7:51820)",
@@ -178,10 +178,8 @@ pub fn apply_iroh_direct_reachability_from_env(cfg: &mut IrohNodeConfig) {
         std::env::var("UC_IROH_PUBLIC_ADDR").ok().as_deref(),
     );
     if reach.bind_port.is_some() || reach.public_addr.is_some() {
-        tracing::info!(
+        uc_info!(
             target: "settings.network",
-            bind_port = ?reach.bind_port,
-            public_addr = ?reach.public_addr,
             "iroh direct-reachability configured from env (UC_IROH_BIND_PORT / UC_IROH_PUBLIC_ADDR)",
         );
     }
@@ -199,16 +197,16 @@ pub fn apply_congestion_controller_from_env(cfg: &mut IrohNodeConfig) {
         }
         match trimmed.parse::<CongestionController>() {
             Ok(cc) => {
-                tracing::info!(
+                uc_info!(
                     target: "settings.network",
-                    congestion_controller = %cc,
+                    congestion_controller = log_vocab(&cc),
                     "congestion controller overridden from env (UC_CONGESTION_CONTROLLER)",
                 );
                 cfg.congestion_controller = cc;
             }
             Err(_) => {
-                tracing::warn!(
-                    uc_congestion_controller = %raw,
+                uc_warn!(
+                    uc_congestion_controller = log_vocab(&raw),
                     error_kind = "invalid_congestion_controller",
                     "invalid UC_CONGESTION_CONTROLLER; ignoring (expected cubic or bbr3)",
                 );

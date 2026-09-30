@@ -15,6 +15,7 @@ use crate::facade::settings::{
     RelayCredentialEdit, RelayCredentials, RelayCredentialsError, RelayProbeCredential,
 };
 use crate::settings::models::{SettingsPatch, SettingsView};
+use uc_observability_contract::{uc_debug, uc_info};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SettingsFacadeError {
@@ -229,7 +230,7 @@ impl SettingsFacade {
             .await
             .map(|saved| saved.settings.into())
             .map_err(Into::into);
-        tracing::debug!(success = result.is_ok(), "settings update completed");
+        uc_debug!(success = result.is_ok(), "settings update completed");
         result
     }
 
@@ -250,7 +251,7 @@ impl SettingsFacade {
                 },
             })
             .map_err(Into::into);
-        tracing::info!(success = result.is_ok(), "relay settings save completed");
+        uc_info!(success = result.is_ok(), "relay settings save completed");
         result
     }
 }

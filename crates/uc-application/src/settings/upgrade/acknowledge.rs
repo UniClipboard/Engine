@@ -6,9 +6,9 @@
 use std::sync::Arc;
 
 use thiserror::Error;
-use tracing::info;
 
 use uc_core::ports::{AppVersionStateError, AppVersionStatePort};
+use uc_observability_contract::{log_fields::log_vocab, uc_info};
 
 #[derive(Debug, Error)]
 pub(crate) enum AcknowledgeError {
@@ -35,9 +35,9 @@ impl AcknowledgeUseCase {
             .map_err(AcknowledgeError::CurrentVersionMalformed)?;
 
         self.app_version_state.write(current_version_str).await?;
-        info!(
+        uc_info!(
             target: "upgrade",
-            version = %current_version_str,
+            version = log_vocab(&current_version_str),
             "app version cursor advanced"
         );
         Ok(())

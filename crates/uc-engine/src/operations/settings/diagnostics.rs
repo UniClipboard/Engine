@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use uc_application::facade::{AppFacade, DiagnosticsFacadeError};
 use uc_core::ids::RepresentationId;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_warn};
 
 use crate::runtime::host_file::{copy_path_to_host, HostFileCopyError};
 use crate::{
@@ -80,7 +80,7 @@ pub(crate) async fn execute_export_diagnostic_logs(
     };
 
     if let Err(error) = std::fs::remove_dir_all(&export_dir) {
-        tracing::warn!(
+        uc_warn!(
             error_kind = "temp_dir_remove",
             io_error_kind = io_error_kind(&error),
             "failed to remove diagnostic export temporary directory"

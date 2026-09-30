@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use tracing::{debug, info_span, Instrument};
+use tracing::{info_span, Instrument};
 use uc_core::blob::ports::BlobReaderPort;
 use uc_core::crypto::aad;
 use uc_core::crypto::domain::{Aad, Ciphertext, Plaintext};
@@ -11,6 +11,7 @@ use uc_core::{BlobId, ContentHash};
 
 use super::ContentProtection;
 use crate::blob::{BlobStorePort, StoredPathBlob};
+use uc_observability_contract::uc_debug;
 
 const BLOB_MAGIC: [u8; 4] = *b"UCBL";
 const BLOB_FORMAT_VERSION_V3: u8 = 3;
@@ -56,9 +57,11 @@ impl BlobStorePort for V3EncryptedBlobStore {
             .instrument(info_span!("v3_inner_blob_put"))
             .await
             .context("persist V3 profile blob")?;
-        debug!(
-            plaintext_size,
-            compressed_size, on_disk_size, "Wrote V3 profile blob"
+        uc_debug!(
+            plaintext_size = plaintext_size,
+            compressed_size = compressed_size,
+            on_disk_size = on_disk_size,
+            "Wrote V3 profile blob"
         );
         Ok((path, Some(on_disk_size)))
     }
@@ -108,7 +111,7 @@ impl BlobReaderPort for V3EncryptedBlobStore {
             .context("open V3 profile blob")?;
         let plaintext = zstd::bulk::decompress(compressed.as_bytes(), MAX_DECOMPRESSED_SIZE)
             .context("decompress V3 profile blob")?;
-        debug!(
+        uc_debug!(
             on_disk_size = binary_data.len(),
             compressed_size = compressed.len(),
             plaintext_size = plaintext.len(),

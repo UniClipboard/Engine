@@ -25,7 +25,7 @@ struct FixedMembershipLedger {
 
 #[tokio::test]
 async fn sponsor_state_load_is_correlated_in_standard_log_file() {
-    uc_application::register_log_safe_errors();
+    uc_application::deps::register_log_safe_errors();
     uc_infra::register_log_safe_errors();
     let logs = tempfile::tempdir().expect("logs");
     let runtime = ProcessObservabilityRuntime::install(

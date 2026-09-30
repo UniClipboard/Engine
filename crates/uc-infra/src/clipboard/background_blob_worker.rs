@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 use tokio::time::sleep;
-use tracing::{debug, error, info_span, warn, Instrument};
+use tracing::{info_span, Instrument};
 use uc_core::clipboard::{MimeType, PayloadAvailability};
 use uc_core::clipboard::{ThumbnailMetadata, TimestampMs};
 use uc_core::ids::RepresentationId;
@@ -16,7 +16,11 @@ use uc_core::ports::clipboard::{
     ProcessingUpdateOutcome, ThumbnailGeneratorPort, ThumbnailRepositoryPort,
 };
 use uc_core::ports::{ClipboardRepresentationStore, ClockPort, ContentHashPort};
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind,
+    log_fields::{log_id, log_vocab},
+    uc_debug, uc_error, uc_warn,
+};
 
 use super::background_activity::BackgroundActivity;
 use crate::blob::BlobWriterPort;
@@ -165,7 +169,7 @@ impl BackgroundBlobWorker {
             // cache hit because removal only happens after the loop exits.
             self.cache.remove(&rep_id).await;
             if let Err(err) = result {
-                error!(
+                uc_error!(
                     error_kind = "representation_process",
                     io_error_kind = io_error_kind(err.as_ref()),
                     "Failed to process representation"
@@ -187,8 +191,8 @@ impl BackgroundBlobWorker {
                         return Err(err);
                     }
 
-                    warn!(
-                        attempt,
+                    uc_warn!(
+                        attempt = attempt,
                         max_attempts = self.retry_max_attempts,
                         error_kind = "representation_process_retry",
                         io_error_kind = io_error_kind(err.as_ref()),
@@ -217,14 +221,17 @@ impl BackgroundBlobWorker {
         {
             Ok(ProcessingUpdateOutcome::Updated(_)) => {}
             Ok(ProcessingUpdateOutcome::StateMismatch) => {
-                debug!(
-                    representation_id = %rep_id,
+                uc_debug!(
+                    representation_id = log_id(&rep_id),
                     "Skipping processing due to state mismatch"
                 );
                 return Ok(ProcessResult::Completed);
             }
             Ok(ProcessingUpdateOutcome::NotFound) => {
-                debug!(representation_id = %rep_id, "Representation missing");
+                uc_debug!(
+                    representation_id = log_id(&rep_id),
+                    "Representation missing"
+                );
                 return Ok(ProcessResult::Completed);
             }
             Err(err) => {
@@ -236,18 +243,18 @@ impl BackgroundBlobWorker {
         let cached = self.cache.get(rep_id).await;
 
         let raw_bytes = if let Some(bytes) = cached {
-            tracing::debug!(representation_id = %rep_id, "Worker cache hit");
+            uc_debug!(representation_id = log_id(&rep_id), "Worker cache hit");
             bytes
         } else {
             match self.spool.read(rep_id).await? {
                 Some(bytes) => {
-                    tracing::debug!(representation_id = %rep_id, "Worker spool hit");
+                    uc_debug!(representation_id = log_id(&rep_id), "Worker spool hit");
                     bytes
                 }
                 None => {
                     let last_error = "cache/spool miss: bytes not available";
-                    warn!(
-                        representation_id = %rep_id,
+                    uc_warn!(
+                        representation_id = log_id(&rep_id),
                         cache_hit = false,
                         "Bytes missing in cache and spool; returning representation to Staged"
                     );
@@ -264,17 +271,20 @@ impl BackgroundBlobWorker {
                     {
                         Ok(ProcessingUpdateOutcome::Updated(_)) => {}
                         Ok(ProcessingUpdateOutcome::StateMismatch) => {
-                            warn!(
-                                representation_id = %rep_id,
+                            uc_warn!(
+                                representation_id = log_id(&rep_id),
                                 "Skipping revert to Staged due to state mismatch"
                             );
                         }
                         Ok(ProcessingUpdateOutcome::NotFound) => {
-                            warn!(representation_id = %rep_id, "Representation missing");
+                            uc_warn!(
+                                representation_id = log_id(&rep_id),
+                                "Representation missing"
+                            );
                         }
                         Err(err) => {
-                            warn!(
-                                representation_id = %rep_id,
+                            uc_warn!(
+                                representation_id = log_id(&rep_id),
                                 error_kind = "representation_revert",
                                 io_error_kind = io_error_kind(err.as_ref()),
                                 "Failed to revert representation to Staged after cache/spool miss"
@@ -301,9 +311,9 @@ impl BackgroundBlobWorker {
             let original_size = raw_bytes.len();
             match convert_image_to_png(&raw_bytes) {
                 Ok(converted) => {
-                    debug!(
-                        representation_id = %rep_id,
-                        original_mime = %original_mime,
+                    uc_debug!(
+                        representation_id = log_id(&rep_id),
+                        original_mime = log_vocab(&original_mime),
                         original_size = original_size,
                         converted_size = converted.png_bytes.len(),
                         "Converted image to PNG for blob storage"
@@ -313,9 +323,9 @@ impl BackgroundBlobWorker {
                     (converted.png_bytes, true)
                 }
                 Err(err) => {
-                    warn!(
-                        representation_id = %rep_id,
-                        original_mime = %original_mime,
+                    uc_warn!(
+                        representation_id = log_id(&rep_id),
+                        original_mime = log_vocab(&original_mime),
                         error_kind = "image_png_convert",
                         io_error_kind = io_error_kind(err.as_ref()),
                         "Failed to convert image to PNG; storing original bytes"
@@ -346,8 +356,8 @@ impl BackgroundBlobWorker {
                 .update_mime_type(rep_id, &MimeType("image/png".to_string()))
                 .await
             {
-                warn!(
-                    representation_id = %rep_id,
+                uc_warn!(
+                    representation_id = log_id(&rep_id),
                     error_kind = "mime_update",
                     io_error_kind = io_error_kind(err.as_ref()),
                     "Failed to update MIME type to image/png after conversion"
@@ -369,8 +379,8 @@ impl BackgroundBlobWorker {
         match updated {
             Ok(ProcessingUpdateOutcome::Updated(_)) => {
                 if let Err(err) = self.spool.delete(rep_id).await {
-                    warn!(
-                        representation_id = %rep_id,
+                    uc_warn!(
+                        representation_id = log_id(&rep_id),
                         error_kind = "spool_entry_delete",
                         io_error_kind = io_error_kind(err.as_ref()),
                         "Failed to delete spool entry after blob materialization"
@@ -381,14 +391,17 @@ impl BackgroundBlobWorker {
                 Ok(ProcessResult::Completed)
             }
             Ok(ProcessingUpdateOutcome::StateMismatch) => {
-                debug!(
-                    representation_id = %rep_id,
+                uc_debug!(
+                    representation_id = log_id(&rep_id),
                     "Skipping update due to state mismatch"
                 );
                 Ok(ProcessResult::Completed)
             }
             Ok(ProcessingUpdateOutcome::NotFound) => {
-                debug!(representation_id = %rep_id, "Representation missing");
+                uc_debug!(
+                    representation_id = log_id(&rep_id),
+                    "Representation missing"
+                );
                 Ok(ProcessResult::Completed)
             }
             Err(err) => Err(err),
@@ -411,17 +424,20 @@ impl BackgroundBlobWorker {
         {
             Ok(ProcessingUpdateOutcome::Updated(_)) => {}
             Ok(ProcessingUpdateOutcome::StateMismatch) => {
-                debug!(
-                    representation_id = %rep_id,
+                uc_debug!(
+                    representation_id = log_id(&rep_id),
                     "Skipping mark_failed due to state mismatch"
                 );
             }
             Ok(ProcessingUpdateOutcome::NotFound) => {
-                debug!(representation_id = %rep_id, "Representation missing");
+                uc_debug!(
+                    representation_id = log_id(&rep_id),
+                    "Representation missing"
+                );
             }
             Err(err) => {
-                error!(
-                    representation_id = %rep_id,
+                uc_error!(
+                    representation_id = log_id(&rep_id),
                     error_kind = "representation_mark_failed",
                     io_error_kind = io_error_kind(err.as_ref()),
                     "Failed to mark representation as Failed"
@@ -441,8 +457,8 @@ impl BackgroundBlobWorker {
             .generate_thumbnail(rep_id, raw_bytes, pre_decoded_rgba)
             .await
         {
-            error!(
-                representation_id = %rep_id,
+            uc_error!(
+                representation_id = log_id(&rep_id),
                 error_kind = "thumbnail_generate",
                 io_error_kind = io_error_kind(err.as_ref()),
                 "Failed to generate thumbnail"
@@ -459,8 +475,8 @@ impl BackgroundBlobWorker {
         let rep = match self.repo.get_representation_by_id(rep_id).await? {
             Some(rep) => rep,
             None => {
-                warn!(
-                    representation_id = %rep_id,
+                uc_warn!(
+                    representation_id = log_id(&rep_id),
                     "Representation missing while generating thumbnail"
                 );
                 return Ok(());

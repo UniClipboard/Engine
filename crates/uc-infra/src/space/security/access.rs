@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracing::{debug, error, info, info_span, warn, Instrument};
+use tracing::{info_span, Instrument};
 use zeroize::Zeroize;
 
 use uc_application::deps::{
@@ -40,7 +40,9 @@ use uc_application::deps::{
 use uc_application::deps::{RuntimeLifecyclePort, TransitionContext};
 use uc_core::crypto::domain::{ActiveSpace, Passphrase as DomainPassphrase};
 use uc_core::crypto::model::{EncryptionError, Passphrase as LegacyPassphrase};
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_vocab, uc_debug, uc_error, uc_info, uc_warn,
+};
 
 use crate::security::crypto_model::{
     validate_kdf, EncryptedBlob, KeyScope, KeySlot, WrappedMasterKey,
@@ -243,14 +245,9 @@ impl RuntimeSpaceAccessAdapter {
         let draft = KeySlot::draft_v1(scope).map_err(map_encryption_error)?;
         let legacy = LegacyPassphrase(passphrase.expose().to_owned());
         let kek = v1_aead::derive_kek_argon2id(&legacy, &draft.salt, &draft.kdf)
-            .map_err(|error| map_and_log_kdf_error(error, "prepare_encryption_passphrase"))?;
-        let wrapped = v1_aead::wrap_master_key_xchacha(&kek, &master_key).map_err(|error| {
-            map_and_log_local_crypto_error(
-                error,
-                "prepare_encryption_passphrase",
-                "wrap_master_key",
-            )
-        })?;
+            .map_err(map_and_log_kdf_error)?;
+        let wrapped = v1_aead::wrap_master_key_xchacha(&kek, &master_key)
+            .map_err(|error| map_and_log_local_crypto_error(error, "wrap_master_key"))?;
         Ok((draft.finalize(WrappedMasterKey { blob: wrapped }), kek))
     }
 
@@ -343,11 +340,10 @@ impl uc_application::deps::InitializeSpacePort for MigrationSpaceAccessAdapter {
             .map_err(|error| SpaceAccessError::Internal(Box::new(error)))?;
         let legacy = LegacyPassphrase(passphrase.expose().to_owned());
         let kek = v1_aead::derive_kek_argon2id(&legacy, &draft.salt, &draft.kdf)
-            .map_err(|error| map_and_log_kdf_error(error, "migration_initialize"))?;
+            .map_err(map_and_log_kdf_error)?;
         let master_key = MasterKey::generate().map_err(map_encryption_error)?;
-        let blob = v1_aead::wrap_master_key_xchacha(&kek, &master_key).map_err(|error| {
-            map_and_log_local_crypto_error(error, "migration_initialize", "wrap_master_key")
-        })?;
+        let blob = v1_aead::wrap_master_key_xchacha(&kek, &master_key)
+            .map_err(|error| map_and_log_local_crypto_error(error, "wrap_master_key"))?;
         let keyslot = draft.finalize(WrappedMasterKey { blob });
 
         self.key_material
@@ -443,17 +439,15 @@ fn map_aead_error_for_unwrap(err: v1_aead::AeadError) -> SpaceAccessError {
 /// 失败,UI 引导用户重输",不应作为 `error!` 级告警污染 Sentry 面板。
 /// 其余变体 (`InvalidKey` / `EncryptFailed` / 长度异常等) 才是密码学库
 /// 不该发生的故障,保留 `error!` 让 Sentry 抓到。
-fn map_and_log_unwrap_aead_error(err: v1_aead::AeadError, path: &'static str) -> SpaceAccessError {
+fn map_and_log_unwrap_aead_error(err: v1_aead::AeadError) -> SpaceAccessError {
     match &err {
         v1_aead::AeadError::DecryptFailed { .. } => {
-            warn!(
-                path,
+            uc_warn!(
                 "unwrap_master_key rejected: KEK does not match wrapped master key (passphrase mismatch or keyring/keyslot drift)"
             );
         }
         _ => {
-            error!(
-                path,
+            uc_error!(
                 error_kind = "unwrap_aead_failed",
                 "unwrap_master_key failed: unexpected AEAD failure"
             );
@@ -464,9 +458,8 @@ fn map_and_log_unwrap_aead_error(err: v1_aead::AeadError, path: &'static str) ->
 
 /// KDF (Argon2id) 失败属于密码学库底层故障——参数已由 keyslot 固定,
 /// 输入 passphrase 字节合法,这一步不该失败。走 `error!` + `Internal`。
-fn map_and_log_kdf_error(err: v1_aead::KdfError, path: &'static str) -> SpaceAccessError {
-    error!(
-        path,
+fn map_and_log_kdf_error(err: v1_aead::KdfError) -> SpaceAccessError {
+    uc_error!(
         error_kind = "kdf_failed",
         io_error_kind = io_error_kind(&err),
         "derive_kek_argon2id failed: unexpected KDF failure"
@@ -478,12 +471,10 @@ fn map_and_log_kdf_error(err: v1_aead::KdfError, path: &'static str) -> SpaceAcc
 /// 路径上的失败同样属于密码学库底层故障。走 `error!` + `Internal`。
 fn map_and_log_local_crypto_error(
     err: impl Error + Send + Sync + 'static,
-    path: &'static str,
     op: &'static str,
 ) -> SpaceAccessError {
-    error!(
-        path,
-        op,
+    uc_error!(
+        op = op,
         error_kind = "local_crypto_failed",
         io_error_kind = io_error_kind(&err),
         "local crypto operation failed"
@@ -817,7 +808,7 @@ impl RuntimeSpaceAccessAdapter {
         let keyslot_draft = KeySlot::draft_v1(scope).map_err(map_encryption_error)?;
         let legacy = LegacyPassphrase(passphrase.expose().to_string());
         let kek = v1_aead::derive_kek_argon2id(&legacy, &keyslot_draft.salt, &keyslot_draft.kdf)
-            .map_err(|error| map_and_log_kdf_error(error, "prepare_target_access"))?;
+            .map_err(map_and_log_kdf_error)?;
         let master_key = MasterKey::generate().map_err(map_encryption_error)?;
         let wrapped = v1_aead::wrap_master_key_xchacha(&kek, &master_key)
             .map_err(|error| SpaceAccessError::Internal(Box::new(error)))?;
@@ -1053,7 +1044,7 @@ impl RuntimeSpaceAccessAdapter {
         let keyslot_draft = KeySlot::draft_v1(scope.clone()).map_err(map_encryption_error)?;
         let legacy = LegacyPassphrase(passphrase.expose().to_string());
         let kek = v1_aead::derive_kek_argon2id(&legacy, &keyslot_draft.salt, &keyslot_draft.kdf)
-            .map_err(|error| map_and_log_kdf_error(error, "install_group_join"))?;
+            .map_err(map_and_log_kdf_error)?;
         let local_root = MasterKey::generate().map_err(map_encryption_error)?;
         let wrapped = v1_aead::wrap_master_key_xchacha(&kek, &local_root)
             .map_err(|error| SpaceAccessError::Internal(Box::new(error)))?;
@@ -1762,7 +1753,7 @@ impl RuntimeSpaceAccessAdapter {
                 .await?;
         }
         if settled > 0 {
-            tracing::info!(settled_count = settled, "已结清无需投递的安全资料");
+            uc_info!(settled_count = settled, "已结清无需投递的安全资料");
         }
         Ok(settled)
     }
@@ -1804,14 +1795,14 @@ impl RuntimeSpaceAccessAdapter {
         match previous {
             Some((keyslot, kek)) => {
                 if let Err(error) = self.key_material.store_kek(scope, &kek).await {
-                    error!(
+                    uc_error!(
                         error_kind = "join_rollback",
                         io_error_kind = io_error_kind(&error),
                         "failed to restore previous KEK after join failure"
                     );
                 }
                 if let Err(error) = self.key_material.store_keyslot(&keyslot).await {
-                    error!(
+                    uc_error!(
                         error_kind = "join_rollback",
                         io_error_kind = io_error_kind(&error),
                         "failed to restore previous keyslot after join failure"
@@ -1820,14 +1811,14 @@ impl RuntimeSpaceAccessAdapter {
             }
             None => {
                 if let Err(error) = self.key_material.delete_keyslot(scope).await {
-                    warn!(
+                    uc_warn!(
                         error_kind = "join_rollback",
                         io_error_kind = io_error_kind(&error),
                         "failed to remove staged keyslot after join failure"
                     );
                 }
                 if let Err(error) = self.key_material.delete_kek(scope).await {
-                    warn!(
+                    uc_warn!(
                         error_kind = "join_rollback",
                         io_error_kind = io_error_kind(&error),
                         "failed to remove staged KEK after join failure"
@@ -1849,10 +1840,10 @@ impl RuntimeSpaceAccessAdapter {
             .await
             .map_err(map_active_security_session_error)?;
         if let Some(group_epoch) = restored_epoch {
-            info!(group_epoch = group_epoch.value(), "空间会话安全材料已安装");
+            uc_info!(group_epoch = group_epoch.value(), "空间会话安全材料已安装");
         } else {
             // 缺少记录表示既有 Legacy Space，不代表已经安全创建群组与 catalog。
-            info!("空间会话恢复未发现群组安全材料");
+            uc_info!("空间会话恢复未发现群组安全材料");
         }
         Ok(())
     }
@@ -1866,24 +1857,22 @@ impl RuntimeSpaceAccessAdapter {
         scope: &KeyScope,
         passphrase: &DomainPassphrase,
     ) -> Result<KeySlot, SpaceAccessError> {
-        const PATH: &str = "first_time_init";
-
         let keyslot_draft = KeySlot::draft_v1(scope.clone())
-            .map_err(|e| map_and_log_local_crypto_error(e, PATH, "draft_keyslot_v1"))?;
-        debug!("keyslot draft created");
+            .map_err(|e| map_and_log_local_crypto_error(e, "draft_keyslot_v1"))?;
+        uc_debug!("keyslot draft created");
 
         let legacy = LegacyPassphrase(passphrase.expose().to_string());
         let kek = v1_aead::derive_kek_argon2id(&legacy, &keyslot_draft.salt, &keyslot_draft.kdf)
-            .map_err(|e| map_and_log_kdf_error(e, PATH))?;
-        debug!("KEK derived");
+            .map_err(|e| map_and_log_kdf_error(e))?;
+        uc_debug!("KEK derived");
 
         let master_key = MasterKey::generate()
-            .map_err(|e| map_and_log_local_crypto_error(e, PATH, "generate_master_key"))?;
-        debug!("master key generated");
+            .map_err(|e| map_and_log_local_crypto_error(e, "generate_master_key"))?;
+        uc_debug!("master key generated");
 
         let blob = v1_aead::wrap_master_key_xchacha(&kek, &master_key)
-            .map_err(|e| map_and_log_local_crypto_error(e, PATH, "wrap_master_key"))?;
-        debug!("master key wrapped");
+            .map_err(|e| map_and_log_local_crypto_error(e, "wrap_master_key"))?;
+        uc_debug!("master key wrapped");
 
         let keyslot = keyslot_draft.finalize(WrappedMasterKey { blob });
 
@@ -1894,16 +1883,14 @@ impl RuntimeSpaceAccessAdapter {
 
         if let Err(e) = self.key_material.store_keyslot(&keyslot).await {
             if let Err(err) = self.key_material.delete_keyslot(scope).await {
-                warn!(
-                    path = PATH,
+                uc_warn!(
                     error_kind = "key_material_rollback",
                     io_error_kind = io_error_kind(&err),
                     "rollback delete_keyslot failed"
                 );
             }
             if let Err(err) = self.key_material.delete_kek(scope).await {
-                warn!(
-                    path = PATH,
+                uc_warn!(
                     error_kind = "key_material_rollback",
                     io_error_kind = io_error_kind(&err),
                     "rollback delete_kek failed"
@@ -1920,16 +1907,14 @@ impl RuntimeSpaceAccessAdapter {
         if let Err(error) = self.activate_session(space_id, master_key).await {
             self.session.clear();
             if let Err(rollback_error) = self.key_material.delete_keyslot(scope).await {
-                warn!(
-                    path = PATH,
+                uc_warn!(
                     error_kind = "key_material_rollback",
                     io_error_kind = io_error_kind(&rollback_error),
                     "rollback delete_keyslot failed"
                 );
             }
             if let Err(rollback_error) = self.key_material.delete_kek(scope).await {
-                warn!(
-                    path = PATH,
+                uc_warn!(
                     error_kind = "key_material_rollback",
                     io_error_kind = io_error_kind(&rollback_error),
                     "rollback delete_kek failed"
@@ -1950,10 +1935,9 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
         space_id: &SpaceId,
         passphrase: &DomainPassphrase,
     ) -> Result<ActiveSpace, SpaceAccessError> {
-        const PATH: &str = "initialize";
         let span = info_span!("infra.space_access.initialize", space_id = %space_id);
         async {
-            info!("initializing new space");
+            uc_info!("initializing new space");
 
             if self
                 .key_material
@@ -1961,10 +1945,7 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
                 .await
                 .map_err(|e| SpaceAccessError::Internal(Box::new(e)))?
             {
-                info!(
-                    path = PATH,
-                    "initialize rejected: keyslot already exists on disk"
-                );
+                uc_info!("initialize rejected: keyslot already exists on disk");
                 return Err(SpaceAccessError::AlreadyInitialized);
             }
 
@@ -1974,12 +1955,15 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
                 .await
                 .map_err(|e| SpaceAccessError::Internal(Box::new(e)))?;
             let scope = key_scope_from_profile(&profile);
-            debug!(path = PATH, scope = %scope_identifier(&scope), "got key scope");
+            uc_debug!(
+                scope = log_vocab(&scope_identifier(&scope)),
+                "got key scope"
+            );
 
             self.do_first_time_init(space_id, &scope, passphrase)
                 .await?;
 
-            info!("space initialized successfully");
+            uc_info!("space initialized successfully");
             Ok(ActiveSpace::new(space_id.clone()))
         }
         .instrument(span)
@@ -1991,10 +1975,9 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
         space_id: &SpaceId,
         passphrase: &DomainPassphrase,
     ) -> Result<ActiveSpace, SpaceAccessError> {
-        const PATH: &str = "unlock";
         let span = info_span!("infra.space_access.unlock", space_id = %space_id);
         async {
-            info!("unlocking space with passphrase");
+            uc_info!("unlocking space with passphrase");
 
             if !self
                 .key_material
@@ -2002,10 +1985,7 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
                 .await
                 .map_err(|e| SpaceAccessError::Internal(Box::new(e)))?
             {
-                info!(
-                    path = PATH,
-                    "unlock rejected: no keyslot on disk (not initialized)"
-                );
+                uc_info!("unlock rejected: no keyslot on disk (not initialized)");
                 return Err(SpaceAccessError::NotInitialized);
             }
 
@@ -2015,7 +1995,10 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
                 .await
                 .map_err(|e| SpaceAccessError::Internal(Box::new(e)))?;
             let scope = key_scope_from_profile(&profile);
-            debug!(path = PATH, scope = %scope_identifier(&scope), "got key scope");
+            uc_debug!(
+                scope = log_vocab(&scope_identifier(&scope)),
+                "got key scope"
+            );
 
             let master_key = match self
                 .key_material
@@ -2029,7 +2012,7 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
 
             self.activate_session(space_id, master_key).await?;
 
-            info!("space unlocked successfully");
+            uc_info!("space unlocked successfully");
             Ok(ActiveSpace::new(space_id.clone()))
         }
         .instrument(span)
@@ -2049,10 +2032,9 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
         &self,
         space_id: &SpaceId,
     ) -> Result<Option<ActiveSpace>, SpaceAccessError> {
-        const PATH: &str = "try_resume_session";
         let span = info_span!("infra.space_access.try_resume_session", space_id = %space_id);
         async {
-            info!("attempting silent session resume from keyring");
+            uc_info!("attempting silent session resume from keyring");
 
             // session 已经在内存中(典型场景:用户刚 `initialize` 完成,前端
             // setup 后的 onSetupComplete 回调又触发了一次 unlock flow
@@ -2060,7 +2042,7 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
             // set_master_key 这一整圈——尤其是 load_kek 在 macOS 上每次都可能
             // 触发 keychain 授权弹窗。直接返回 Ok(Some) 表达"会话已就绪"。
             if self.session.is_ready() {
-                info!("session already in-memory, skip keychain probe");
+                uc_info!("session already in-memory, skip keychain probe");
                 return Ok(Some(ActiveSpace::new(space_id.clone())));
             }
 
@@ -2070,7 +2052,7 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
                 .await
                 .map_err(|e| SpaceAccessError::Internal(Box::new(e)))?
             {
-                info!(path = PATH, "no keyslot on disk, no session to resume");
+                uc_info!("no keyslot on disk, no session to resume");
                 return Ok(None);
             }
 
@@ -2080,7 +2062,10 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
                 .await
                 .map_err(|e| SpaceAccessError::Internal(Box::new(e)))?;
             let scope = key_scope_from_profile(&profile);
-            debug!(path = PATH, scope = %scope_identifier(&scope), "got key scope");
+            uc_debug!(
+                scope = log_vocab(&scope_identifier(&scope)),
+                "got key scope"
+            );
 
             let keyslot = self
                 .key_material
@@ -2088,10 +2073,7 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
                 .await
                 .map_err(|e| map_encryption_error(e))?;
             let wrapped_master_key = keyslot.wrapped_master_key.as_ref().ok_or_else(|| {
-                warn!(
-                    path = PATH,
-                    "keyslot on disk has no wrapped_master_key (corrupted key material)"
-                );
+                uc_warn!("keyslot on disk has no wrapped_master_key (corrupted key material)");
                 SpaceAccessError::corrupted_key_material()
             })?;
 
@@ -2106,7 +2088,7 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
                 .map_err(|e| map_encryption_error(e))?;
 
             let master_key = v1_aead::unwrap_master_key_xchacha(&kek, &wrapped_master_key.blob)
-                .map_err(|e| map_and_log_unwrap_aead_error(e, PATH))?;
+                .map_err(|e| map_and_log_unwrap_aead_error(e))?;
 
             // load_kek 成功 + unwrap 成功 ⇒ keychain 中 KEK 与本机 keyslot 匹配。
             // 标记本进程已观察到该 KEK,后续 profile key access probe /
@@ -2115,7 +2097,7 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
 
             self.activate_session(space_id, master_key).await?;
 
-            info!("session resumed from keyring");
+            uc_info!("session resumed from keyring");
             Ok(Some(ActiveSpace::new(space_id.clone())))
         }
         .instrument(span)
@@ -2123,21 +2105,19 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
     }
 
     async fn derive_subkey(&self, salt: &[u8], info: &[u8]) -> Result<[u8; 32], SpaceAccessError> {
-        const PATH: &str = "derive_subkey";
         if !self
             .session
             .settle_pending_transaction(SESSION_TRANSACTION_SETTLE_LIMIT)
             .await
         {
-            warn!(
-                path = PATH,
+            uc_warn!(
                 error_kind = "session_transaction_pending",
                 "derive_subkey gave up waiting for a pending session transaction"
             );
             return Err(SpaceAccessError::NotUnlocked);
         }
         if !self.session.is_ready() {
-            warn!(path = PATH, "derive_subkey called while session not ready");
+            uc_warn!("derive_subkey called while session not ready");
             return Err(SpaceAccessError::NotUnlocked);
         }
         let okm = self
@@ -2163,19 +2143,18 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
         space_id: &SpaceId,
         passphrase: &DomainPassphrase,
     ) -> Result<JoinOffer, SpaceAccessError> {
-        const PATH: &str = "prepare_join_offer";
         let span = info_span!("infra.space_access.prepare_join_offer", space_id = %space_id);
         async {
-            info!("preparing sponsor join offer");
+            uc_info!("preparing sponsor join offer");
 
             let already_initialized = self
                 .key_material
                 .keyslot_exists()
                 .await
                 .map_err(|e| SpaceAccessError::Internal(Box::new(e)))?;
-            debug!(
-                path = PATH,
-                already_initialized, "checked keyslot existence"
+            uc_debug!(
+                already_initialized = already_initialized,
+                "checked keyslot existence"
             );
 
             let profile = self
@@ -2184,7 +2163,10 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
                 .await
                 .map_err(|e| SpaceAccessError::Internal(Box::new(e)))?;
             let scope = key_scope_from_profile(&profile);
-            debug!(path = PATH, scope = %scope_identifier(&scope), "got key scope");
+            uc_debug!(
+                scope = log_vocab(&scope_identifier(&scope)),
+                "got key scope"
+            );
 
             // Branch A — 运行时已初始化的 sponsor 路径: 从 key_material 读已有 keyslot,
             // 不重新生成 MasterKey。passphrase 参数此时不参与派生。
@@ -2202,7 +2184,7 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
                 })?;
                 let mut challenge_nonce = [0u8; 32];
                 rand::rng().fill_bytes(&mut challenge_nonce);
-                info!("sponsor join offer prepared (runtime, already initialized)");
+                uc_info!("sponsor join offer prepared (runtime, already initialized)");
                 return Ok(JoinOffer {
                     space_id: space_id.clone(),
                     keyslot_blob,
@@ -2223,7 +2205,7 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
             let mut challenge_nonce = [0u8; 32];
             rand::rng().fill_bytes(&mut challenge_nonce);
 
-            info!("sponsor join offer prepared");
+            uc_info!("sponsor join offer prepared");
             Ok(JoinOffer {
                 space_id: space_id.clone(),
                 keyslot_blob,
@@ -2239,32 +2221,31 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
         offer: &JoinOffer,
         passphrase: &DomainPassphrase,
     ) -> Result<ProofDerivedKey, SpaceAccessError> {
-        const PATH: &str = "derive_master_key_for_proof";
         let span = info_span!("infra.space_access.derive_master_key_for_proof", space_id = %offer.space_id);
         async {
-            info!("deriving master key from pairing offer");
+            uc_info!("deriving master key from pairing offer");
 
             let keyslot: KeySlot = serde_json::from_slice(&offer.keyslot_blob)
                 .map_err(SpaceAccessError::corrupted_key_material_from)?;
             if validate_kdf(&keyslot.kdf).is_err() {
-                warn!(path = PATH, "offer keyslot KDF parameters are unsupported or excessive");
+                uc_warn!("offer keyslot KDF parameters are unsupported or excessive");
                 return Err(SpaceAccessError::corrupted_key_material());
             }
             let scope = keyslot.scope.clone();
-            debug!(path = PATH, scope = %scope_identifier(&scope), "parsed keyslot from offer blob");
+            uc_debug!(
+                scope = log_vocab(&scope_identifier(&scope)),
+                "parsed keyslot from offer blob"
+            );
 
             let wrapped_master_key = keyslot.wrapped_master_key.as_ref().ok_or_else(|| {
-                warn!(
-                    path = PATH,
-                    "offer keyslot has no wrapped_master_key (corrupted offer)"
-                );
+                uc_warn!("offer keyslot has no wrapped_master_key (corrupted offer)");
                 SpaceAccessError::corrupted_key_material()
             })?;
 
             let legacy = LegacyPassphrase(passphrase.expose().to_string());
             let kek = v1_aead::derive_kek_argon2id(&legacy, &keyslot.salt, &keyslot.kdf)
-                .map_err(|e| map_and_log_kdf_error(e, PATH))?;
-            debug!(path = PATH, "KEK derived from passphrase and offer keyslot");
+                .map_err(|e| map_and_log_kdf_error(e))?;
+            uc_debug!("KEK derived from passphrase and offer keyslot");
 
             // 先 unwrap 验证 KEK + keyslot 真的匹配,再动本机持久状态。
             // 之前的顺序是 store_kek → store_keyslot → unwrap, unwrap 失败时
@@ -2275,8 +2256,8 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
             // 需要手动 factory_reset"就来源于此)。把 unwrap 抬到 store
             // 之前,失败时直接返回, 本机原状一字不动。
             let master_key = v1_aead::unwrap_master_key_xchacha(&kek, &wrapped_master_key.blob)
-                .map_err(|e| map_and_log_unwrap_aead_error(e, PATH))?;
-            debug!(path = PATH, "master key unwrapped");
+                .map_err(|e| map_and_log_unwrap_aead_error(e))?;
+            uc_debug!("master key unwrapped");
 
             // unwrap 已确认 KEK + keyslot 匹配, 再覆盖本机磁盘 / keyring。
             // 此处仍有"store_keyslot 失败 → delete_kek 回滚把刚刚覆盖的本机
@@ -2289,10 +2270,18 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
 
             if let Err(e) = self.key_material.store_keyslot(&keyslot).await {
                 if let Err(err) = self.key_material.delete_keyslot(&scope).await {
-                    warn!(path = PATH, error_kind = "key_material_rollback", io_error_kind = io_error_kind(&err), "rollback delete_keyslot failed");
+                    uc_warn!(
+                        error_kind = "key_material_rollback",
+                        io_error_kind = io_error_kind(&err),
+                        "rollback delete_keyslot failed"
+                    );
                 }
                 if let Err(err) = self.key_material.delete_kek(&scope).await {
-                    warn!(path = PATH, error_kind = "key_material_rollback", io_error_kind = io_error_kind(&err), "rollback delete_kek failed");
+                    uc_warn!(
+                        error_kind = "key_material_rollback",
+                        io_error_kind = io_error_kind(&err),
+                        "rollback delete_kek failed"
+                    );
                 }
                 self.kek_observed.store(false, Ordering::Release);
                 return Err(map_encryption_error(e));
@@ -2302,10 +2291,11 @@ impl SpaceAccessStore for RuntimeSpaceAccessAdapter {
             // 同时包装一份成不透明凭据返回 joiner 侧调用方。
             // Phase C 起不再写 `.initialized_encryption` marker 文件;
             // "本机已初始化" 的真相由磁盘 keyslot 文件存在性回答。
-            self.activate_session(&offer.space_id, master_key.clone()).await?;
+            self.activate_session(&offer.space_id, master_key.clone())
+                .await?;
             let derived = ProofDerivedKey::from_bytes(master_key.into_bytes());
 
-            info!("master key derivation completed");
+            uc_info!("master key derivation completed");
             Ok(derived)
         }
         .instrument(span)
@@ -2317,11 +2307,10 @@ impl RuntimeSpaceAccessAdapter {
     async fn probe_profile_key_access(
         &self,
     ) -> Result<ProfileKeyAccessProbe, ProfileKeyAccessProbePortError> {
-        const PATH: &str = "probe_profile_key_access";
         let span = info_span!("infra.space_access.probe_profile_key_access");
         async {
             if self.kek_observed.load(Ordering::Acquire) {
-                debug!(path = PATH, "kek_observed cached, skip keychain probe");
+                uc_debug!("kek_observed cached, skip keychain probe");
                 return Ok(ProfileKeyAccessProbe::Available);
             }
 
@@ -2330,8 +2319,7 @@ impl RuntimeSpaceAccessAdapter {
                 .current_profile()
                 .await
                 .map_err(|error| {
-                    error!(
-                        path = PATH,
+                    uc_error!(
                         error_kind = "current_profile_resolve",
                         io_error_kind = io_error_kind(&error),
                         "current_profile resolution failed"
@@ -2343,28 +2331,26 @@ impl RuntimeSpaceAccessAdapter {
             match self.key_material.load_kek(&scope).await {
                 Ok(_) => {
                     self.kek_observed.store(true, Ordering::Release);
-                    debug!(path = PATH, "profile key access verified");
+                    uc_debug!("profile key access verified");
                     Ok(ProfileKeyAccessProbe::Available)
                 }
                 Err(EncryptionError::PermissionDenied) => {
-                    info!(path = PATH, "profile key access denied");
+                    uc_info!("profile key access denied");
                     Ok(ProfileKeyAccessProbe::PermissionDenied)
                 }
                 Err(EncryptionError::KeyringError(_)) => {
-                    warn!(
-                        path = PATH,
+                    uc_warn!(
                         error_kind = "keyring_unavailable",
                         "profile key store temporarily unavailable"
                     );
                     Ok(ProfileKeyAccessProbe::TemporarilyUnavailable)
                 }
                 Err(EncryptionError::KeyNotFound) => {
-                    info!(path = PATH, "profile key is missing");
+                    uc_info!("profile key is missing");
                     Ok(ProfileKeyAccessProbe::Missing)
                 }
                 Err(error) => {
-                    error!(
-                        path = PATH,
+                    uc_error!(
                         error_kind = "profile_key_access",
                         io_error_kind = io_error_kind(&error),
                         "unexpected profile key access failure"
@@ -2606,7 +2592,7 @@ impl GroupRevocationPort for RuntimeSpaceAccessAdapter {
             .await
             .inspect_err(|error| {
                 let detail = super::group_update_failure_detail(error);
-                warn!(
+                uc_warn!(
                     phase = detail.phase.as_str(),
                     reason = detail.reason.as_str(),
                     source = detail.source.as_str(),
@@ -3164,7 +3150,7 @@ impl ActivateSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
             .as_ref()
             .is_some_and(|current| current == &staged)
         {
-            info!(
+            uc_info!(
                 group_epoch = staged.state().epoch().value(),
                 pending_group_update_count = staged.pending_group_updates().len(),
                 "Sponsor 安全状态激活命中幂等持久状态"
@@ -3179,7 +3165,7 @@ impl ActivateSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
             .save_space_material(&staged)
             .await
             .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
-        info!(
+        uc_info!(
             group_epoch = staged.state().epoch().value(),
             pending_group_update_count = staged.pending_group_updates().len(),
             "Sponsor 安全状态已持久化"
@@ -3188,7 +3174,7 @@ impl ActivateSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
             .install_current_material(&staged)
             .await
             .map_err(map_admission_security_session_error)?;
-        info!(
+        uc_info!(
             group_epoch = staged.state().epoch().value(),
             "Sponsor 安全状态已安装到活动会话"
         );

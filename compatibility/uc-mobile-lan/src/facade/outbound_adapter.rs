@@ -48,9 +48,12 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use tracing::{info, warn};
 use uc_observability_contract::diagnostics::{record_task_join_failure, DiagnosticTaskKind};
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind,
+    log_fields::{log_id, log_vocab},
+    uc_info, uc_warn,
+};
 
 use uc_core::ids::EntryId;
 use uc_core::mobile_sync::MobileDeviceId;
@@ -105,26 +108,26 @@ impl MobileInboundFanOutPort for ClipboardOutboundFanOutAdapter {
                     pending,
                     blob_ref_count,
                     ..
-                }) => info!(
-                    entry_id = %entry_id_log,
-                    source = %source_log,
-                    accepted,
-                    duplicate,
-                    offline,
-                    errored,
-                    pending,
-                    blob_ref_count,
+                }) => uc_info!(
+                    entry_id = log_id(&entry_id_log),
+                    source = log_vocab(&source_log),
+                    accepted = accepted,
+                    duplicate = duplicate,
+                    offline = offline,
+                    errored = errored,
+                    pending = pending,
+                    blob_ref_count = blob_ref_count,
                     "mobile_sync fan-out: relayed mobile-inbound snapshot to paired peers"
                 ),
-                Ok(ClipboardOutboundOutcome::Skipped { reason }) => info!(
-                    entry_id = %entry_id_log,
-                    source = %source_log,
-                    reason = %reason,
+                Ok(ClipboardOutboundOutcome::Skipped { reason }) => uc_info!(
+                    entry_id = log_id(&entry_id_log),
+                    source = log_vocab(&source_log),
+                    reason = log_vocab(&reason),
                     "mobile_sync fan-out: dispatcher skipped (planner / origin guard)"
                 ),
-                Err(err) => warn!(
-                    entry_id = %entry_id_log,
-                    source = %source_log,
+                Err(err) => uc_warn!(
+                    entry_id = log_id(&entry_id_log),
+                    source = log_vocab(&source_log),
                     error_kind = "dispatch_capture",
                     io_error_kind = io_error_kind(&err),
                     "mobile_sync fan-out: dispatch_capture failed — mobile-inbound NOT relayed to other paired devices"

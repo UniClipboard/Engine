@@ -8,6 +8,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::{SpaceActivityError, SpaceSessionActivityPort};
+use uc_observability_contract::uc_warn;
 
 #[async_trait]
 pub(crate) trait SpaceSessionRecoveryPort: Send + Sync {
@@ -121,8 +122,8 @@ impl SpaceSessionRecoveryPort for SpaceSessionRecovery {
                 if activation.is_ok() {
                     return true;
                 }
-                tracing::warn!(
-                    attempt,
+                uc_warn!(
+                    attempt = attempt,
                     "space session background activation failed; retrying"
                 );
                 let delay = retry_delays

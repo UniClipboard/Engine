@@ -6,12 +6,12 @@
 use crate::error_codes::*;
 
 use crate::{CreateSpaceInput, EngineError, EngineErrorCategory, OperationResult};
-use tracing::error;
+
 use uc_application::facade::{
     AppFacade, InitializeSpaceError, InitializeSpaceInput as AppInitializeSpaceInput,
 };
 use uc_core::crypto::domain::Passphrase;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_error};
 
 pub async fn execute_create_space(
     facade: &AppFacade,
@@ -56,7 +56,7 @@ fn map_create_space_error(error: InitializeSpaceError) -> EngineError {
             false,
         ),
         InitializeSpaceError::StorageFailed { .. } | InitializeSpaceError::Internal { .. } => {
-            error!(
+            uc_error!(
                 error_kind = "create_space",
                 io_error_kind = io_error_kind(&error),
                 "create space failed"

@@ -42,7 +42,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use iroh::Endpoint;
-use tracing::debug;
 
 use uc_core::ids::DeviceId;
 use uc_core::ports::connection_channel::{ConnectionChannelPort, ConnectionPath};
@@ -50,6 +49,7 @@ use uc_core::ports::peer_address::PeerAddressRepositoryPort;
 
 use super::conn_path::{path_for, OnMissing};
 use super::peer_address_resolver::PeerAddressResolver;
+use uc_observability_contract::uc_debug;
 
 /// Iroh-backed [`ConnectionChannelPort`] implementation.
 pub struct IrohConnectionChannelAdapter {
@@ -76,11 +76,11 @@ impl ConnectionChannelPort for IrohConnectionChannelAdapter {
         let endpoint_addr = match self.peer_address_resolver.resolve(device).await {
             Ok(Some(address)) => address,
             Ok(None) => {
-                debug!("channel_for: no peer address record; reporting Unknown");
+                uc_debug!("channel_for: no peer address record; reporting Unknown");
                 return ConnectionPath::default();
             }
             Err(error) => {
-                debug!(
+                uc_debug!(
                     error_kind = error.kind(),
                     "channel_for: peer address resolution failed; reporting Unknown"
                 );

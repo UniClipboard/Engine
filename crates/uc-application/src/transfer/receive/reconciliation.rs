@@ -6,7 +6,7 @@ use std::sync::{Arc, RwLock};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use tokio::sync::{Mutex, Notify};
-use tracing::{error, instrument};
+use tracing::instrument;
 use uc_core::ids::EntryId;
 use uc_core::ports::{
     AttemptState, BeginReceiveFailureOutcome, BeginReceiveFailurePort, CleanupReceiveArtifactsPort,
@@ -16,6 +16,7 @@ use uc_core::ports::{
     NoEntryReceiveArtifacts, PartialReceiveTerminal, ProvisionalReceiveAction, ReceiveArtifact,
     ReceiveArtifactOwnership,
 };
+use uc_observability_contract::{log_fields::log_id, uc_error};
 
 pub struct ReceiveReadinessCoordinator {
     ready: AtomicBool,
@@ -224,9 +225,9 @@ impl ReconcileReceiveAttemptsUseCase {
                 .map_err(anyhow::Error::new)?
                 .ok_or_else(|| anyhow!("unsettled receive artifacts have no attempt authority"))?;
             if current.current_attempt_id != *attempt_id || current.state.is_terminal() {
-                error!(
-                    entry_id = %entry_id,
-                    attempt_id = %attempt_id,
+                uc_error!(
+                    entry_id = log_id(&entry_id),
+                    attempt_id = log_id(&attempt_id),
                     "reconcile: unsettled artifact metadata belongs to a terminal or superseded receive"
                 );
                 return Err(anyhow!(
@@ -258,9 +259,9 @@ impl ReconcileReceiveAttemptsUseCase {
                         .await
                         .map_err(anyhow::Error::new)?;
                     if outcome != BeginReceiveFailureOutcome::Begun {
-                        error!(
-                            entry_id = %attempt.entry_id,
-                            attempt_id = %attempt.current_attempt_id,
+                        uc_error!(
+                            entry_id = log_id(&attempt.entry_id),
+                            attempt_id = log_id(&attempt.current_attempt_id),
                             "reconcile: interrupted receive lost its failure claim during recovery"
                         );
                         return Err(anyhow!("interrupted receive failure claim was lost"));
@@ -313,7 +314,7 @@ impl ReconcileReceiveAttemptsUseCase {
         }
 
         if !artifacts.is_empty() {
-            error!(
+            uc_error!(
                 orphaned = artifacts.len(),
                 "reconcile: unsettled receive artifacts had no matching non-terminal attempt"
             );

@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::sync::{Mutex, Notify};
 use tokio::time::{timeout_at, Instant};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, Instrument};
+use tracing::Instrument;
 use uc_application::deps::LifecycleError;
 use uc_application::facade::{
     AppFacade, ApplicationAssembly, ApplicationRuntime, ClipboardInboundEvent,
@@ -30,7 +30,9 @@ use uc_observability_contract::diagnostics::{
     complete_operation, operation_span, DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation,
     DiagnosticRole, DiagnosticSpanKind, OperationCompletion, OperationContext,
 };
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_vocab_debug, uc_error, uc_warn,
+};
 
 use crate::assembly::deps::WiredDependencies;
 #[cfg(feature = "lan-compat")]
@@ -127,8 +129,8 @@ fn session_runtime_error(
     error: impl Into<Box<dyn Error + Send + Sync>>,
 ) -> EngineError {
     let error = error.into();
-    error!(
-        context,
+    uc_error!(
+        context = context,
         io_error_kind = io_error_kind(error.as_ref()),
         "engine session lifecycle failed"
     );
@@ -145,8 +147,8 @@ fn retryable_space_transition_runtime_error(
     error: impl Into<Box<dyn Error + Send + Sync>>,
 ) -> EngineError {
     let error = error.into();
-    error!(
-        context,
+    uc_error!(
+        context = context,
         io_error_kind = io_error_kind(error.as_ref()),
         "engine Space transition failed"
     );
@@ -157,8 +159,8 @@ fn space_transition_error(
     context: &'static str,
     error: CompletePendingSpaceTransitionError,
 ) -> EngineError {
-    error!(
-        context,
+    uc_error!(
+        context = context,
         error_kind = "space_transition",
         io_error_kind = io_error_kind(&error),
         "engine Space transition failed"
@@ -841,7 +843,7 @@ impl SessionSupervisor {
                 .await
                 .is_err()
             {
-                tracing::warn!("prepared session cleanup failed after injected activation failure");
+                uc_warn!("prepared session cleanup failed after injected activation failure");
             }
             return Err(session_runtime_error(
                 "activate p2p session",
@@ -858,7 +860,7 @@ impl SessionSupervisor {
                 .await
                 .is_err()
             {
-                tracing::warn!("prepared session cleanup failed after network became unavailable");
+                uc_warn!("prepared session cleanup failed after network became unavailable");
             }
             return Err(operation_unavailable_error());
         };
@@ -874,7 +876,7 @@ impl SessionSupervisor {
                 .await
                 .is_err()
             {
-                tracing::warn!("prepared session cleanup failed after activation failure");
+                uc_warn!("prepared session cleanup failed after activation failure");
             }
             return Err(error);
         }
@@ -1060,9 +1062,9 @@ impl ProductionSessionFactory {
                 let primary = match error.admission_failure() {
                     Some(category) => {
                         let summary = AdmissionRecoverySummary::from(category);
-                        error!(
-                            category = ?summary.category,
-                            stage = ?summary.stage,
+                        uc_error!(
+                            category = log_vocab_debug(&summary.category),
+                            stage = log_vocab_debug(&summary.stage),
                             "application runtime requires admission recovery"
                         );
                         profile_recovery_required_error().with_admission_recovery(summary)
@@ -1259,7 +1261,7 @@ impl SessionOperationGate {
                 .await
                 .is_err()
                 {
-                    tracing::warn!(
+                    uc_warn!(
                         error_kind = "session_operation_drain_timeout",
                         "session operation did not stop after cancellation"
                     );

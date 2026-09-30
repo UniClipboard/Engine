@@ -28,7 +28,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
-use tracing::{debug, info, instrument, warn};
+use tracing::instrument;
 
 use uc_core::ids::SpaceId;
 #[cfg(test)]
@@ -53,6 +53,7 @@ use crate::space::lifecycle::{
 use super::{
     InitializeSpaceError, InitializeSpacePort, InitializeSpaceRequest, InitializeSpaceResult,
 };
+use uc_observability_contract::{uc_debug, uc_info, uc_warn};
 
 pub(crate) struct InitializeSpaceUseCase {
     space_access: Arc<dyn InitializeSpacePort>,
@@ -153,7 +154,7 @@ impl InitializeSpaceUseCase {
             .initialize(&space_id, &cmd.passphrase)
             .await
             .map_err(map_initialize_space_access_err)?;
-        debug!("space initialized");
+        uc_debug!("space initialized");
 
         // 4. Resolve the local network identity. In Slice 1 the iroh
         //    endpoint binds its Ed25519 secret at bootstrap time, so
@@ -169,7 +170,7 @@ impl InitializeSpaceUseCase {
                  violates LocalIdentityPort idempotency contract"
             )),
         })?;
-        debug!("local identity resolved");
+        uc_debug!("local identity resolved");
 
         // 5-6. Build and persist the owner SpaceMember record.
         let device_id = self.device_identity.current_device_id();
@@ -185,7 +186,7 @@ impl InitializeSpaceUseCase {
             .save(&member)
             .await
             .map_err(InitializeSpaceError::storage)?;
-        debug!("local Space member persisted");
+        uc_debug!("local Space member persisted");
 
         // 7. A successful A1 must already be ready to sponsor the first durable
         //    admission. Keep the security-group creation and trusted-history
@@ -209,7 +210,7 @@ impl InitializeSpaceUseCase {
             .ensure_for_unlocked_space(&cmd.passphrase)
             .await
             .map_err(InitializeSpaceError::internal)?;
-        info!("space initialization completed");
+        uc_info!("space initialization completed");
 
         // Identity switches before `setup_completed` fires so that event
         // already reports under the new person — keeps the activation
@@ -298,7 +299,7 @@ impl InitializeSpaceUseCase {
     fn now_utc(&self) -> Result<DateTime<Utc>, InitializeSpaceError> {
         let ms = self.clock.now_ms();
         DateTime::<Utc>::from_timestamp_millis(ms).ok_or_else(|| {
-            warn!(ms, "clock returned a timestamp outside chrono's range");
+            uc_warn!(ms = ms, "clock returned a timestamp outside chrono's range");
             InitializeSpaceError::internal(anyhow::anyhow!("clock returned invalid timestamp"))
         })
     }

@@ -20,6 +20,7 @@ use uc_core::membership::{
 use uc_observability_contract::diagnostics::connectivity::{observe_local_result, LocalWorkStep};
 
 use super::candidate::SponsorCandidateStagedV1;
+use uc_observability_contract::uc_info;
 
 const SPONSOR_ACTIVATED_SECURITY_FORMAT_V1: u16 = 1;
 
@@ -117,7 +118,7 @@ impl DefaultSponsorAdmissionActivation {
         if history.lineage_id() != activated.space_id {
             anyhow::bail!("the Sponsor activation history has a different lineage");
         }
-        tracing::info!(
+        uc_info!(
             target_epoch = activated.expected_commitment.target_epoch,
             active_member_count = history.active_members().len(),
             "Sponsor admission 激活开始"
@@ -131,7 +132,7 @@ impl DefaultSponsorAdmissionActivation {
             })
             .await
             .map_err(anyhow::Error::new)?;
-        tracing::info!("Sponsor admission 安全状态激活完成");
+        uc_info!("Sponsor admission 安全状态激活完成");
         Ok(history)
     }
 }

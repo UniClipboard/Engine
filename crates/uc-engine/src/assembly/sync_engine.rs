@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::time::Instant;
 
-use tracing::{info, instrument};
+use tracing::instrument;
 
 use outbound_progress::OutboundProgressRuntime;
 
@@ -55,6 +55,7 @@ use uc_infra::space::{
     MembershipActivationAdapter, MembershipMemberFactsAdapter, MembershipNetworkGate,
     OpenMlsHistoricalSignatureVerifier,
 };
+use uc_observability_contract::uc_info;
 
 struct CurrentMemberContentGate {
     scope: Arc<dyn CurrentSpaceMemberScopePort>,
@@ -541,7 +542,7 @@ pub async fn prepare_sync_session(
         Arc::clone(&application.host_event_bus()),
     );
 
-    info!("Iroh adapters registered against the Application network binding");
+    uc_info!("Iroh adapters registered against the Application network binding");
     Ok(PreparedSyncSession {
         session: SyncSessionAssembly {
             outbound_progress_translator,

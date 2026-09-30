@@ -2,9 +2,10 @@ use std::time::Duration;
 use std::{error::Error, fmt};
 
 use tokio::time::{timeout_at, Instant};
-use tracing::{debug, instrument, warn};
+use tracing::instrument;
 
 use super::IrohNode;
+use uc_observability_contract::{uc_debug, uc_warn};
 
 const ROUTER_WATCHDOG: Duration = Duration::from_secs(5);
 
@@ -86,7 +87,7 @@ impl IrohNode {
                 match timeout_at(watchdog, &mut closing).await {
                     Ok(result) => result,
                     Err(_) => {
-                        warn!(
+                        uc_warn!(
                             budget_ms = watchdog.saturating_duration_since(started).as_millis() as u64,
                             "iroh router cleanup is still pending; retaining shutdown ownership"
                         );
@@ -107,7 +108,7 @@ impl IrohNode {
         if let Err(error) = result {
             failures.push(anyhow::Error::new(error).context("stop network router"));
         }
-        debug!("iroh node shut down");
+        uc_debug!("iroh node shut down");
         if failures.is_empty() {
             Ok(())
         } else {

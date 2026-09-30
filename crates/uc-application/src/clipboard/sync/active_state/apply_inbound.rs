@@ -34,7 +34,7 @@ use async_trait::async_trait;
 use thiserror::Error;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, instrument, warn};
+use tracing::instrument;
 
 use uc_core::clipboard::{ActiveClipboardState, ClipboardContentCategorySet};
 use uc_core::ids::{DeviceId, EntryId, SpaceId};
@@ -44,7 +44,9 @@ use uc_core::ports::clipboard::{
     FindEntryIdBySnapshotHashPort, InboundActiveClipboardState, LoadActiveClipboardPort,
 };
 use uc_core::ports::{ClockPort, PeerAddressRepositoryPort, PeerReachabilityPort};
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_id, uc_debug, uc_info, uc_warn,
+};
 
 use crate::deps::CurrentSpaceMemberScopePort;
 use uc_core::MemberRepositoryPort;
@@ -244,13 +246,13 @@ impl ApplyInboundActiveClipboardStateUseCase {
             match inbound {
                 Ok(inbound) => self.handle_one(inbound).await,
                 Err(broadcast::error::RecvError::Lagged(missed)) => {
-                    warn!(
-                        missed,
+                    uc_warn!(
+                        missed = missed,
                         "active state inbound receiver lagged; dropped observations"
                     );
                 }
                 Err(broadcast::error::RecvError::Closed) => {
-                    info!("active state inbound receiver closed; exiting loop");
+                    uc_info!("active state inbound receiver closed; exiting loop");
                     break;
                 }
             }
@@ -287,7 +289,7 @@ impl ApplyInboundActiveClipboardStateUseCase {
 
         // 1. Locked → fully lazy (D5).
         if !self.is_unlocked.is_unlocked(&Self::space_id()).await {
-            debug!("active state inbound dropped: space locked");
+            uc_debug!("active state inbound dropped: space locked");
             return;
         }
 
@@ -298,7 +300,7 @@ impl ApplyInboundActiveClipboardStateUseCase {
             .map(|scope| scope.usable_peer_device_ids.contains(&peer))
             .unwrap_or(false);
         if !peer_is_current {
-            debug!("active state inbound dropped: source is outside current peer scope");
+            uc_debug!("active state inbound dropped: source is outside current peer scope");
             return;
         }
 
@@ -309,7 +311,7 @@ impl ApplyInboundActiveClipboardStateUseCase {
         let current = match self.load_register.load().await {
             Ok(c) => c,
             Err(err) => {
-                warn!(
+                uc_warn!(
                     error_kind = "register_load",
                     io_error_kind = io_error_kind(&err),
                     "active state inbound dropped: register load failed"
@@ -319,11 +321,11 @@ impl ApplyInboundActiveClipboardStateUseCase {
         };
         if let Some(current) = &current {
             if incoming.is_same_activation(current) {
-                debug!("active state inbound ignored: same activation already converged");
+                uc_debug!("active state inbound ignored: same activation already converged");
                 return;
             }
             if !incoming.supersedes(current) {
-                debug!("active state inbound ignored: stale under LWW order");
+                uc_debug!("active state inbound ignored: stale under LWW order");
                 return;
             }
         }
@@ -331,8 +333,8 @@ impl ApplyInboundActiveClipboardStateUseCase {
         // 3. Future-timestamp guard (D9).
         let now_ms = self.clock.now_ms();
         if incoming.activated_at_ms > now_ms + FUTURE_TIMESTAMP_TOLERANCE_MS {
-            warn!(
-                now_ms,
+            uc_warn!(
+                now_ms = now_ms,
                 tolerance_ms = FUTURE_TIMESTAMP_TOLERANCE_MS,
                 "active state inbound dropped: activation timestamp too far in the future"
             );
@@ -374,7 +376,7 @@ impl ApplyInboundActiveClipboardStateUseCase {
                 }
             }
             Err(err) => {
-                warn!(
+                uc_warn!(
                     error_kind = "entry_lookup",
                     io_error_kind = io_error_kind(&err),
                     "active state inbound dropped: entry lookup failed"
@@ -398,10 +400,10 @@ impl ApplyInboundActiveClipboardStateUseCase {
             Some(availability) => match availability.is_entry_available(entry_id).await {
                 Ok(is_available) => is_available,
                 Err(err) => {
-                    warn!(
+                    uc_warn!(
                         error_kind = "availability_check",
                         io_error_kind = io_error_kind(&err),
-                        entry_id = %entry_id,
+                        entry_id = log_id(&entry_id),
                         "active state inbound: availability check failed; treating entry as unavailable"
                     );
                     false
@@ -427,7 +429,7 @@ impl ApplyInboundActiveClipboardStateUseCase {
             self.pull_client.as_ref(),
             self.pulled_content_store.as_ref(),
         ) else {
-            info!("active state inbound: content not held locally and pull subsystem unwired; dropping");
+            uc_info!("active state inbound: content not held locally and pull subsystem unwired; dropping");
             return None;
         };
 
@@ -436,17 +438,19 @@ impl ApplyInboundActiveClipboardStateUseCase {
         let envelope = match pull_client.pull(peer, snapshot_hash).await {
             Ok(bytes) => bytes,
             Err(ActiveClipboardPullClientError::Unreachable) => {
-                debug!(
+                uc_debug!(
                     "active state inbound: pull failed (peer unreachable / timed out); dropping"
                 );
                 return None;
             }
             Err(ActiveClipboardPullClientError::NotAvailable) => {
-                debug!("active state inbound: pull failed (peer cannot serve content); dropping");
+                uc_debug!(
+                    "active state inbound: pull failed (peer cannot serve content); dropping"
+                );
                 return None;
             }
             Err(ActiveClipboardPullClientError::Io(_)) => {
-                warn!("active state inbound: pull failed (io); dropping");
+                uc_warn!("active state inbound: pull failed (io); dropping");
                 return None;
             }
         };
@@ -458,15 +462,18 @@ impl ApplyInboundActiveClipboardStateUseCase {
             .await
         {
             Ok(InboundPulledContentStoreOutcome::Stored(entry_id)) => {
-                info!(entry_id = %entry_id, "active state inbound: pulled content stored");
+                uc_info!(
+                    entry_id = log_id(&entry_id),
+                    "active state inbound: pulled content stored"
+                );
                 Some(entry_id)
             }
             Ok(InboundPulledContentStoreOutcome::RejectedByReceivePolicy) => {
-                info!("active state inbound: pulled content rejected by receive policy");
+                uc_info!("active state inbound: pulled content rejected by receive policy");
                 None
             }
             Err(err) => {
-                warn!(
+                uc_warn!(
                     error_kind = "pulled_content_store",
                     io_error_kind = io_error_kind(&err),
                     "active state inbound: pulled content store failed; dropping"
@@ -494,7 +501,12 @@ impl ApplyInboundActiveClipboardStateUseCase {
         let snapshot = match self.reconstructor.reconstruct(&local_entry_id).await {
             Ok(s) => s,
             Err(err) => {
-                warn!(error_kind = "snapshot_reconstruct", io_error_kind = io_error_kind(&err), entry_id = %local_entry_id, "active state inbound dropped: snapshot reconstruct failed");
+                uc_warn!(
+                    error_kind = "snapshot_reconstruct",
+                    io_error_kind = io_error_kind(&err),
+                    entry_id = log_id(&local_entry_id),
+                    "active state inbound dropped: snapshot reconstruct failed"
+                );
                 return;
             }
         };
@@ -552,10 +564,9 @@ impl ApplyInboundActiveClipboardStateUseCase {
             .write(snapshot, ClipboardWriteIntent::RemotePush)
             .await
         {
-            warn!(
+            uc_warn!(
                 error_kind = "os_write_failed",
                 io_error_kind = io_error_kind(err.as_ref()),
-                snapshot_hash = %state.snapshot_hash,
                 "active state inbound: OS write failed; not advancing register or re-broadcasting"
             );
             return;
@@ -568,17 +579,15 @@ impl ApplyInboundActiveClipboardStateUseCase {
         match advance_register.advance(&state, mobile_consumable).await {
             Ok(true) => {}
             Ok(false) => {
-                debug!(
-                    snapshot_hash = %state.snapshot_hash,
+                uc_debug!(
                     "active state inbound: register did not advance (lost LWW race); skipping re-broadcast"
                 );
                 return;
             }
             Err(err) => {
-                warn!(
+                uc_warn!(
                     error_kind = "register_advance",
                     io_error_kind = io_error_kind(&err),
-                    snapshot_hash = %state.snapshot_hash,
                     "active state inbound: register advance failed; skipping re-broadcast"
                 );
                 return;

@@ -32,9 +32,9 @@ use std::path::{Path, PathBuf};
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
-use tracing::{error, info};
+
 use uc_core::ports::SecureStoragePort;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_error, uc_info};
 
 use crate::security::PROFILE_SECRET_FILE_NAME;
 
@@ -271,12 +271,12 @@ pub fn apply_pending_import(
         return Ok(());
     }
 
-    info!("pending config import detected; applying staged bundle on boot");
+    uc_info!("pending config import detected; applying staged bundle on boot");
     let marker_bytes = std::fs::read(&marker_path).map_err(PendingImportError::read_marker_from)?;
     let marker: PendingImportMarker =
         serde_json::from_slice(&marker_bytes).map_err(PendingImportError::parse_marker_from)?;
     if marker.schema_ver != PENDING_IMPORT_SCHEMA_VER {
-        error!(
+        uc_error!(
             found_schema_ver = marker.schema_ver,
             expected_schema_ver = PENDING_IMPORT_SCHEMA_VER,
             "staged import schema version mismatch; skipping apply and preserving staging"
@@ -289,7 +289,7 @@ pub fn apply_pending_import(
         .map_err(PendingImportError::read_secrets_from)?;
     let secrets: SecretsFile =
         serde_json::from_slice(&secrets_bytes).map_err(PendingImportError::parse_secrets_from)?;
-    info!(
+    uc_info!(
         secret_count = secrets.secrets.len(),
         has_kek = marker.has_kek,
         "writing staged secrets into current secure-storage backend"
@@ -299,7 +299,7 @@ pub fn apply_pending_import(
         let bytes = match decode_secret_value(encoded) {
             Ok(bytes) => bytes,
             Err(_) => {
-                error!(
+                uc_error!(
                     key_class = classify_secret_key(key),
                     "staged secret value failed to decode; aborting import apply, staging preserved"
                 );
@@ -307,7 +307,7 @@ pub fn apply_pending_import(
             }
         };
         if let Err(error) = secure_storage.set(key, &bytes) {
-            error!(
+            uc_error!(
                 key_class = classify_secret_key(key),
                 error_kind = "staged_secret_write",
                 io_error_kind = io_error_kind(&error),
@@ -317,7 +317,7 @@ pub fn apply_pending_import(
         }
     }
 
-    info!("staged secrets written; copying staged files into live locations");
+    uc_info!("staged secrets written; copying staged files into live locations");
     copy_member(&staging_dir, DB_MEMBER, db_path)?;
     remove_stale_db_sidecars(db_path)?;
     copy_member(
@@ -350,7 +350,7 @@ pub fn apply_pending_import(
 
     std::fs::remove_dir_all(&staging_dir).map_err(PendingImportError::cleanup_from)?;
     std::fs::remove_file(&marker_path).map_err(PendingImportError::cleanup_from)?;
-    info!("staged config import applied; staging cleaned up");
+    uc_info!("staged config import applied; staging cleaned up");
     Ok(())
 }
 

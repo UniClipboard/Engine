@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::sync::broadcast;
-use tracing::{debug, instrument, warn};
+use tracing::instrument;
 
 use uc_core::clipboard::{ActiveClipboardState, ClipboardContentCategorySet};
 use uc_core::ids::{DeviceId, EntryId};
@@ -37,7 +37,9 @@ use uc_core::ports::{
     ClockPort, DeviceIdentityPort, PeerAddressRepositoryPort, PeerReachabilityPort, SettingsPort,
 };
 use uc_core::{blob::ports::BlobReaderPort, MemberRepositoryPort};
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_vocab, uc_debug, uc_warn,
+};
 
 use crate::deps::CurrentSpaceMemberScopePort;
 
@@ -250,7 +252,7 @@ impl ActiveClipboardFacade {
 
         match (&deps.pull_client, &deps.pull_apply) {
             (Some(_), None) | (None, Some(_)) => {
-                warn!("active clipboard: partial pull dependency — both pull_client and pull_apply must be provided together; pull disabled");
+                uc_warn!("active clipboard: partial pull dependency — both pull_client and pull_apply must be provided together; pull disabled");
             }
             _ => {}
         }
@@ -342,7 +344,7 @@ async fn resurface_entry(
     let now_ms = clock.now_ms();
     match touch.touch_entry(entry_id, now_ms).await {
         Ok(true) => {
-            debug!("entry resurfaced");
+            uc_debug!("entry resurfaced");
             bus.emit_or_warn(HostEvent::Clipboard(ClipboardHostEvent::NewContent {
                 entry_id: entry_id.as_ref().to_string(),
                 attempt_id: None,
@@ -351,10 +353,10 @@ async fn resurface_entry(
             }));
         }
         Ok(false) => {
-            debug!("touch_entry found no row (entry deleted?)");
+            uc_debug!("touch_entry found no row (entry deleted?)");
         }
         Err(err) => {
-            warn!(
+            uc_warn!(
                 error_kind = "entry_touch",
                 io_error_kind = io_error_kind(&err),
                 "touch_entry failed (best-effort, ignored)"
@@ -436,7 +438,10 @@ impl InboundPulledContentStore for PulledContentStore {
                 existing_entry_id,
             ))),
             InboundClipboardApplyOutcome::DecodeFailed { reason } => {
-                warn!(reason, "pulled content store: envelope decode failed");
+                uc_warn!(
+                    reason = log_vocab(&reason),
+                    "pulled content store: envelope decode failed"
+                );
                 Err(InboundPulledContentStoreError::Store(anyhow::anyhow!(
                     "pulled envelope decode failed"
                 )))

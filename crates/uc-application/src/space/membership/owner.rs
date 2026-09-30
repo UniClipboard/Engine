@@ -29,6 +29,7 @@ use super::{
 use crate::space::lifecycle::{SpaceMembershipRebuildError, SpaceMembershipResetPort};
 
 pub(crate) use draft::MembershipDraft;
+use uc_observability_contract::uc_warn;
 pub(crate) use view::{pause_reason, MembershipView};
 
 pub(crate) struct MembershipOwner {
@@ -146,7 +147,7 @@ impl MembershipOwner {
                         ))
                         .is_err()
                     {
-                        tracing::warn!("成员设备信任变化事件发布失败");
+                        uc_warn!("成员设备信任变化事件发布失败");
                     }
                 }
                 LedgerFollowUp::WakeWorker => self.worker_wake.wake(),

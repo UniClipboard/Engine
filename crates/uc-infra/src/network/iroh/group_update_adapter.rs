@@ -7,7 +7,7 @@ use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointAddr};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+
 use uc_core::membership::{
     GroupRevocationPort, GroupUpdateDispatchError, GroupUpdateDispatchPort, KeyEpochError,
     PendingGroupUpdate,
@@ -22,6 +22,7 @@ use super::connect_with_staggered_retry;
 use super::peer_address_resolver::PeerAddressResolver;
 use super::trace_context::{inject_current, set_remote_parent, WireTraceContext};
 use crate::space::group_update_failure_detail;
+use uc_observability_contract::{uc_debug, uc_warn};
 
 pub const GROUP_UPDATE_ALPN: &[u8] = b"uniclipboard/group-update/1";
 const MAX_UPDATE_SIZE: usize = 4 * 1024 * 1024;
@@ -91,7 +92,7 @@ impl IrohGroupUpdateAdapter {
         match self.peer_address_resolver.resolve(update.recipient()).await {
             Ok(address) => address,
             Err(error) => {
-                warn!(
+                uc_warn!(
                     error_kind = error.kind(),
                     "group update address resolution failed"
                 );
@@ -165,14 +166,14 @@ impl ProtocolHandler for IrohGroupUpdateHandler {
             match tokio::time::timeout(GROUP_UPDATE_IO_TIMEOUT, connection.accept_bi()).await {
                 Ok(Ok(streams)) => streams,
                 Ok(Err(_)) => {
-                    debug!(
+                    uc_debug!(
                         error_kind = "stream_accept",
                         "group update stream accept failed"
                     );
                     return Ok(());
                 }
                 Err(_) => {
-                    debug!("group update stream accept timed out");
+                    uc_debug!("group update stream accept timed out");
                     return Ok(());
                 }
             };

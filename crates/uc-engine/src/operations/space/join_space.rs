@@ -4,13 +4,12 @@ use std::error::Error;
 
 use crate::error_codes::*;
 
-use tracing::error;
 use uc_application::facade::{
     AppFacade, JoinSpaceError as AppJoinSpaceError, JoinSpaceInput as AppJoinSpaceInput,
 };
 use uc_core::crypto::domain::Passphrase;
 use uc_core::pairing::InvitationCode;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_error};
 
 use crate::operations::device::member::join_space_status;
 
@@ -96,8 +95,8 @@ fn join_internal_error(
     error: impl Into<Box<dyn Error + Send + Sync>>,
 ) -> EngineError {
     let error = error.into();
-    error!(
-        context,
+    uc_error!(
+        context = context,
         io_error_kind = io_error_kind(error.as_ref()),
         "join-space operation failed"
     );

@@ -42,7 +42,7 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, instrument, warn};
+use tracing::instrument;
 
 use uc_core::clipboard::ClipboardContentCategorySet;
 use uc_core::ids::DeviceId;
@@ -50,7 +50,9 @@ use uc_core::ports::clipboard::{ActiveClipboardDispatchPort, LoadActiveClipboard
 use uc_core::ports::peer_reachability::{PeerReachabilityChanged, ReachabilityState};
 use uc_core::ports::PeerReachabilityPort;
 use uc_core::MemberRepositoryPort;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_id, uc_debug, uc_info, uc_warn,
+};
 
 use crate::deps::CurrentSpaceMemberScopePort;
 
@@ -113,7 +115,7 @@ impl PeerOnlineResyncWorker {
             let first = match first {
                 Some(device) => device,
                 None => {
-                    info!("peer-online resync worker: presence subscription closed; exiting");
+                    uc_info!("peer-online resync worker: presence subscription closed; exiting");
                     return;
                 }
             };
@@ -163,7 +165,10 @@ impl PeerOnlineResyncWorker {
                 Err(broadcast::error::RecvError::Lagged(missed)) => {
                     // A missed online transition self-heals: peer_reachability
                     // re-emits, or the peer's own resync reaches us.
-                    warn!(missed, "peer-online resync: presence receiver lagged");
+                    uc_warn!(
+                        missed = missed,
+                        "peer-online resync: presence receiver lagged"
+                    );
                     continue;
                 }
                 Err(broadcast::error::RecvError::Closed) => return None,
@@ -186,11 +191,11 @@ impl PeerOnlineResyncWorker {
         let state = match self.load_register.load().await {
             Ok(Some(state)) => state,
             Ok(None) => {
-                debug!("peer-online resync: register empty; nothing to resend");
+                uc_debug!("peer-online resync: register empty; nothing to resend");
                 return;
             }
             Err(err) => {
-                warn!(
+                uc_warn!(
                     error_kind = "register_load",
                     io_error_kind = io_error_kind(&err),
                     "peer-online resync skipped: register load failed"
@@ -206,10 +211,10 @@ impl PeerOnlineResyncWorker {
         let categories = match self.reconstructor.reconstruct(&state.entry_id).await {
             Ok(snapshot) => ClipboardContentCategorySet::from_snapshot(&snapshot),
             Err(err) => {
-                warn!(
+                uc_warn!(
                     error_kind = "snapshot_reconstruct",
                     io_error_kind = io_error_kind(&err),
-                    entry_id = %state.entry_id,
+                    entry_id = log_id(&state.entry_id),
                     "peer-online resync skipped: snapshot reconstruct failed"
                 );
                 return;

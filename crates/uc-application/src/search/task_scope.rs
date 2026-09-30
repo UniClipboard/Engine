@@ -6,7 +6,8 @@ use std::sync::{Arc, Mutex};
 use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
-use tracing::{warn, Instrument, Span};
+use tracing::{Instrument, Span};
+use uc_observability_contract::uc_warn;
 
 #[derive(Clone)]
 pub struct SearchTaskError(Vec<Arc<JoinError>>);
@@ -210,7 +211,7 @@ impl SearchTaskScope {
                         .await;
                 if let Err(source) = result {
                     owner.record_failure(source);
-                    warn!(
+                    uc_warn!(
                         event = "task.panicked",
                         task = name,
                         "search background task failed"

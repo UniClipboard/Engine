@@ -27,7 +27,7 @@ use iroh::{Endpoint, EndpointAddr, TransportAddr};
 use rand::RngCore;
 use tokio::runtime::Handle as RuntimeHandle;
 use tokio::sync::Mutex;
-use tracing::{debug, instrument, warn};
+use tracing::instrument;
 
 use uc_core::pairing::invitation::InvitationCode;
 use uc_core::ports::{
@@ -42,6 +42,7 @@ use crate::network::iroh::runtime_consts;
 use crate::pairing::{mint_invitation_code, MdnsPairingPublisher, PublisherHandle};
 
 use super::client::{CreatePairingRequest, RendezvousClient, RendezvousHttpError};
+use uc_observability_contract::{uc_debug, uc_warn};
 
 /// TTL used when minting a code locally (cloud channel was unreachable).
 /// Matches the typical TTL the rendezvous service returns for back-compat.
@@ -185,10 +186,7 @@ impl RendezvousPairingInvitationAdapter {
         // locally — the LAN channel will be the only publish surface.
         if runtime_consts::lan_only() {
             let code = InvitationCode::new(mint_invitation_code());
-            debug!(
-                %expires_at,
-                "LAN-only mode: minted invitation locally, skipping cloud channel"
-            );
+            uc_debug!("LAN-only mode: minted invitation locally, skipping cloud channel");
             if let Err(err) = self
                 .start_mdns_publisher(&code, &endpoint_id, full_invitation.as_str(), expires_at)
                 .await
@@ -198,7 +196,7 @@ impl RendezvousPairingInvitationAdapter {
                 // contract requires `Ok` only when at least one channel is
                 // live, so surface the failure instead of returning an
                 // undialable code.
-                warn!(
+                uc_warn!(
                     failure_stage = "local_publication",
                     "mDNS publisher start failed in LAN-only mode; this invitation cannot be discovered",
                 );
@@ -226,7 +224,7 @@ impl RendezvousPairingInvitationAdapter {
                         DirectoryResponseError::ExpiryPrecedesInvitation,
                     ));
                 }
-                debug!(%expires_at, "cloud channel issued invitation");
+                uc_debug!("cloud channel issued invitation");
                 (code, None)
             }
             Err(err) => {
@@ -238,7 +236,7 @@ impl RendezvousPairingInvitationAdapter {
                     return Err(map_create_err(err));
                 }
                 let code = InvitationCode::new(mint_invitation_code());
-                warn!(
+                uc_warn!(
                     failure_stage = "directory_transport",
                     "cloud channel unreachable; minted invitation locally — only LAN joiners will resolve",
                 );
@@ -251,7 +249,7 @@ impl RendezvousPairingInvitationAdapter {
             .start_mdns_publisher(&code, &endpoint_id, full_invitation.as_str(), expires_at)
             .await
         {
-            warn!(
+            uc_warn!(
                 failure_stage = "local_publication",
                 directory_available = directory_failure.is_none(),
                 "mDNS publisher start failed; LAN joiners will not resolve via this code",
@@ -336,8 +334,8 @@ impl RendezvousPairingInvitationAdapter {
         map.retain(|_code, (_handle, exp)| *exp > now);
         let removed = before.saturating_sub(map.len());
         if removed > 0 {
-            debug!(
-                removed,
+            uc_debug!(
+                removed = removed,
                 remaining = map.len(),
                 "mDNS publisher GC swept expired handles"
             );
@@ -385,7 +383,7 @@ impl DirectoryResponseError {
 }
 
 fn invalid_directory_response(source: DirectoryResponseError) -> InvitationError {
-    warn!(
+    uc_warn!(
         failure_stage = "directory_response",
         failure_reason = source.diagnostic_reason(),
         "rendezvous create response failed validation"
@@ -532,12 +530,12 @@ impl PairingInvitationPort for RendezvousPairingInvitationAdapter {
         // this call.
         self.gc_expired_publishers(Utc::now()).await;
         if self.publishers.lock().await.remove(code).is_some() {
-            debug!("mDNS publisher stopped for consumed invitation");
+            uc_debug!("mDNS publisher stopped for consumed invitation");
         }
 
         match self.rendezvous.consume_pairing(code.as_str()).await {
             Ok(()) => {
-                debug!("cloud channel invitation consumed");
+                uc_debug!("cloud channel invitation consumed");
                 Ok(())
             }
             Err(err) => Err(map_consume_err(err)),

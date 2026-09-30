@@ -2,11 +2,10 @@
 
 use crate::error_codes::*;
 
-use tracing::error;
 use uc_application::facade::{
     ProfileFactoryResetError, ProfileFactoryResetFacade, ProfileFactoryResetRequest,
 };
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_error};
 
 use crate::{EngineError, EngineErrorCategory, OperationResult};
 
@@ -29,8 +28,8 @@ pub(crate) fn map_profile_factory_reset_error(error: ProfileFactoryResetError) -
         | ProfileFactoryResetError::Repository(_)
         | ProfileFactoryResetError::LifecycleMissing => FACTORY_RESET_FAILED_CODE,
     };
-    error!(
-        code,
+    uc_error!(
+        code = code,
         error_kind = "factory_reset",
         io_error_kind = io_error_kind(&error),
         "factory reset space failed"

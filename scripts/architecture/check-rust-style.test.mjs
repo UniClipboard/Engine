@@ -290,9 +290,9 @@ test('接受固定分类的日志字段', () => {
   const result = check(`
 fn run() {
     if let Err(err) = load() {
-        warn!(error_kind = "load", io_error_kind = io_error_kind(&err), "load failed");
+        uc_warn!(error_kind = "load", io_error_kind = io_error_kind(&err), "load failed");
     }
-    warn!(source = %source_label, reason = ?reason, error_kind = ?callback_error, "skipped");
+    uc_warn!(source = log_vocab(&source_label), reason = log_vocab_debug(&reason), "skipped");
 }
 `)
   assert.equal(result.status, 0, result.stderr)
@@ -375,7 +375,7 @@ async fn load() {}
 fn save(&self) {}
 
 fn log(e: anyhow::Error) {
-    tracing::warn!(error = e.as_ref() as &dyn std::error::Error, "load failed");
+    uc_warn!(error = e.as_ref() as &dyn std::error::Error, "load failed");
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -408,46 +408,6 @@ enum LoadError {
   assert.doesNotMatch(result.stderr, /fixture\.rs:10/)
 })
 
-test('拒绝日志消息正文内插取值', () => {
-  const result = check(`
-fn run(path: &str, count: u64) {
-    tracing::info!("opened {path}");
-    tracing::warn!("copied {} files", count);
-    tracing::info!(
-        target: "uc_infra::x",
-        error_kind = "fixed",
-        "value {}",
-        count
-    );
-}
-`)
-  assert.equal(result.status, 1)
-  assert.match(result.stderr, /fixture\.rs:3/)
-  assert.match(result.stderr, /fixture\.rs:4/)
-  assert.match(result.stderr, /fixture\.rs:5/)
-})
-
-test('接受字面量消息与已审定字段名', () => {
-  const result = check(`
-fn run(entry_id: &str, error: &dyn std::error::Error) {
-    tracing::info!(error_kind = "fixed", entry_id = %entry_id, count = 3u64, "clipboard entry stored");
-    tracing::warn!(error = error, reason = "expired", "sync stopped");
-}
-`)
-  assert.equal(result.status, 0, result.stderr)
-})
-
-test('拒绝未归类的日志字段名', () => {
-  const result = check(`
-fn run(device_label: &str) {
-    tracing::info!(brand_new_field = %device_label, "clipboard entry stored");
-}
-`)
-  assert.equal(result.status, 1)
-  assert.match(result.stderr, /fixture\.rs:3/)
-  assert.match(result.stderr, /brand_new_field/)
-})
-
 test('宏展开使用 $crate 路径不算正文完整路径', () => {
   const result = check(`
 macro_rules! forward {
@@ -465,4 +425,26 @@ fn log() {
 `)
   assert.notEqual(result.status, 0)
   assert.match(result.stderr, /不得直接使用 tracing::event!/)
+})
+
+test('拒绝直接使用 tracing 日志宏', () => {
+  const result = check(`
+fn run() {
+    tracing::warn!(error_kind = "fixed", "sync stopped");
+    info!("started");
+}
+`)
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /fixture\.rs:3 .*不得直接使用 tracing 日志宏/)
+  assert.match(result.stderr, /fixture\.rs:4 .*不得直接使用 tracing 日志宏/)
+})
+
+test('接受 uc_* 日志宏与 span 宏', () => {
+  const result = check(`
+fn run() {
+    uc_warn!(error_kind = "fixed", "sync stopped");
+    let _span = tracing::info_span!("sync");
+}
+`)
+  assert.equal(result.status, 0, result.stderr)
 })

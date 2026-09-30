@@ -3,7 +3,7 @@
 use crate::error_codes::*;
 
 use base64::Engine as _;
-use tracing::{error, info};
+
 use uc_application::facade::{
     AppFacade, ContentTypesPatch as AppContentTypesPatch, CurrentJoinStatus, DeviceTrustMembership,
     DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, InboundPairingStatus,
@@ -28,11 +28,12 @@ use crate::{
     QueryMemberSyncPreferencesInput, RemoveMemberInput, SpaceProtectionModeSummary,
     SpaceProtectionSummary, UpdateMemberSyncPreferencesInput,
 };
+use uc_observability_contract::{log_fields::log_vocab, uc_error, uc_info};
 
 pub async fn execute_list_devices(facade: &AppFacade) -> Result<OperationResult, EngineError> {
     // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
     let encryption = facade.encryption_state().await.map_err(|_| {
-        error!(
+        uc_error!(
             operation = "list_devices",
             source = "encryption_state",
             error_code = MEMBER_REPOSITORY_FAILED_CODE,
@@ -47,7 +48,7 @@ pub async fn execute_list_devices(facade: &AppFacade) -> Result<OperationResult,
         )
     })?;
     if !encryption.initialized {
-        info!(
+        uc_info!(
             operation = "list_devices",
             encryption_initialized = false,
             device_count = 0,
@@ -68,7 +69,7 @@ pub async fn execute_list_devices(facade: &AppFacade) -> Result<OperationResult,
             online: entry.is_local || entry.state == ReachabilityState::Online,
         })
         .collect::<Vec<_>>();
-    info!(
+    uc_info!(
         operation = "list_devices",
         encryption_initialized = true,
         device_count = devices.len(),
@@ -596,12 +597,12 @@ fn map_roster_error(error: RosterError) -> EngineError {
             "space_protection",
         ),
     };
-    error!(
+    uc_error!(
         operation = "member_roster",
-        variant,
+        variant = variant,
         error_code = code,
-        error_category = %category,
-        retryable,
+        error_category = log_vocab(&category),
+        retryable = retryable,
         "member roster operation failed"
     );
     EngineError::new(code, category, retryable)

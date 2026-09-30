@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use tracing::warn;
+
 use uc_application::deps::{
     AdmissionSpaceTransitionError, AdmissionSpaceTransitionPort,
     AdmissionSpaceTransitionPreparationV2, AdmissionSpaceTransitionStepV2,
@@ -30,6 +30,7 @@ use crate::space::security::mls_group::{MlsClientState, MlsGroupEngine};
 
 use super::super::sponsor::{activation_receipt_digest, SponsorCandidateStagedV1};
 use super::sponsor_identity::{sponsor_identity_rejection, verify_sponsor_route_identity};
+use uc_observability_contract::uc_warn;
 
 const JOINER_STAGED_TARGET_FORMAT_V2: u16 = 2;
 /// V3 在 V2 之后追加本机激活回执：目标控制世代生效后，本机成员状态由它与已保存的 Commit 重建。
@@ -647,7 +648,7 @@ fn map_activation_preparation_error(
                 }
                 None => SpaceAdmissionRejectionReason::ActivationStateInvalid,
             };
-            warn!(
+            uc_warn!(
                 stage = "prepare_space_transition",
                 issue = issue.map_or("unclassified", AdmissionInputIssue::as_str),
                 "加入方激活准备发现目标资料不一致"

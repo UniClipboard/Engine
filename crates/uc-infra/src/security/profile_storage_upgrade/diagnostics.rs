@@ -1,5 +1,6 @@
 use super::journal::UpgradePhaseV1;
 use super::ProfileStorageUpgradeError;
+use uc_observability_contract::{error_source::io_error_kind, uc_error};
 
 /// 仅供本地排障，不新增业务 trace，也不把升级内部阶段暴露给调用方。
 pub(super) struct UpgradeDiagnostics {
@@ -50,14 +51,13 @@ impl UpgradeDiagnostics {
             UpgradePhaseV1::CleanupPending => "cleanup_pending",
         });
         let io = find_io_source(error);
-        let io_kind = io.map(|source| format!("{:?}", source.kind()));
-        tracing::error!(
+        uc_error!(
             target: "uc_infra::security::profile_storage_upgrade",
             upgrade_phase = phase,
             upgrade_action = self.action,
             target_activated = self.target_activated,
-            error_kind,
-            io_error_kind = io_kind.as_deref(),
+            error_kind = error_kind,
+            io_error_kind = io_error_kind(error),
             io_error_code = io.and_then(std::io::Error::raw_os_error),
             "profile storage upgrade step failed"
         );

@@ -20,6 +20,7 @@ use super::{
     PrepareMembershipBranchRecoveryRecipientPort, PrepareMembershipBranchTransitionError,
     PrepareMembershipBranchTransitionInput, PrepareMembershipBranchTransitionPort,
 };
+use uc_observability_contract::{log_fields::log_vocab_debug, uc_debug};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RecoverMembershipConflictOutcome {
@@ -400,11 +401,19 @@ impl RecoverMembershipConflictUseCase {
                 .await
             {
                 Ok(_) if completed => {
-                    tracing::debug!(?previous_phase, ?next_phase, "成员分支转换阶段已持久化");
+                    uc_debug!(
+                        previous_phase = log_vocab_debug(&previous_phase),
+                        next_phase = log_vocab_debug(&next_phase),
+                        "成员分支转换阶段已持久化"
+                    );
                     return RecoverMembershipConflictOutcome::Completed;
                 }
                 Ok(_) => {
-                    tracing::debug!(?previous_phase, ?next_phase, "成员分支转换阶段已持久化");
+                    uc_debug!(
+                        previous_phase = log_vocab_debug(&previous_phase),
+                        next_phase = log_vocab_debug(&next_phase),
+                        "成员分支转换阶段已持久化"
+                    );
                     transition = next;
                 }
                 Err(MembershipLedgerError::Conflict) => {

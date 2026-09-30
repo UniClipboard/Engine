@@ -7,11 +7,13 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tokio::fs;
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+
 use uc_core::clipboard::PayloadAvailability;
 use uc_core::ids::RepresentationId;
 use uc_core::ports::ClipboardRepresentationStore;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_id, uc_debug, uc_info, uc_warn,
+};
 
 /// Scans spool directory and re-queues recoverable representations.
 /// 扫描磁盘缓存目录并重新入队可恢复的表示。
@@ -57,12 +59,12 @@ impl SpoolScanner {
 
             let file_name = entry.file_name();
             let Some(file_name_str) = file_name.to_str() else {
-                debug!("Skipping spool entry with non-utf8 filename");
+                uc_debug!("Skipping spool entry with non-utf8 filename");
                 continue;
             };
 
             if file_name_str.is_empty() {
-                debug!("Skipping spool entry with empty filename");
+                uc_debug!("Skipping spool entry with empty filename");
                 continue;
             }
 
@@ -76,8 +78,8 @@ impl SpoolScanner {
                                 recovered += 1;
                             }
                             Err(err) => {
-                                warn!(
-                                    representation_id = %rep_id,
+                                uc_warn!(
+                                    representation_id = log_id(&rep_id),
                                     error_kind = "worker_requeue",
                                     io_error_kind = io_error_kind(&err),
                                     "Failed to re-queue representation during recovery"
@@ -88,8 +90,8 @@ impl SpoolScanner {
                     _ => {
                         let path = entry.path();
                         if let Err(err) = fs::remove_file(&path).await {
-                            warn!(
-                                representation_id = %rep_id,
+                            uc_warn!(
+                                representation_id = log_id(&rep_id),
                                 error_kind = "spool_file_delete",
                                 io_error_kind = io_error_kind(&err),
                                 "Failed to delete stale spool file"
@@ -99,13 +101,13 @@ impl SpoolScanner {
                 },
                 None => {
                     let path = entry.path();
-                    debug!(
-                        representation_id = %rep_id,
+                    uc_debug!(
+                        representation_id = log_id(&rep_id),
                         "Representation missing for spool entry; deleting stale file"
                     );
                     if let Err(err) = fs::remove_file(&path).await {
-                        warn!(
-                            representation_id = %rep_id,
+                        uc_warn!(
+                            representation_id = log_id(&rep_id),
                             error_kind = "spool_file_delete",
                             io_error_kind = io_error_kind(&err),
                             "Failed to delete orphaned spool file"
@@ -115,7 +117,7 @@ impl SpoolScanner {
             }
         }
 
-        info!(recovered, "Spool scan completed");
+        uc_info!(recovered = recovered, "Spool scan completed");
         Ok(recovered)
     }
 }

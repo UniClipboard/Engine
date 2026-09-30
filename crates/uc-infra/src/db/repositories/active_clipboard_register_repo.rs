@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use diesel::prelude::*;
-use tracing::{debug_span, warn, Instrument};
+use tracing::{debug_span, Instrument};
 
 use super::active_clipboard_register_cipher::{
     ActiveClipboardRegisterCipher, V3ActiveClipboardRegisterCipher, CONSUMABLE_HKDF_INFO,
@@ -21,7 +21,7 @@ use uc_core::ports::clipboard::{
 };
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::space::{DeriveSpaceSubkeyPort, SpaceAccessError};
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_warn};
 
 mod storage;
 
@@ -260,7 +260,7 @@ impl<E: DbExecutor + 'static> LoadMobileConsumableClipboardPort
                 // "nothing consumable", never break the read path. Discard it
                 // so the warning does not repeat on every poll; the next
                 // consumable advance or unlock backfill rewrites the column.
-                warn!(
+                uc_warn!(
                     error_kind = "reference_ciphertext_unreadable",
                     io_error_kind = io_error_kind(&err),
                     "mobile-consumable reference ciphertext is unreadable; discarding it"
@@ -288,7 +288,7 @@ impl<E: DbExecutor + 'static> LoadMobileConsumableClipboardPort
                     })
                     .await
                 {
-                    warn!(
+                    uc_warn!(
                         error_kind = "reference_ciphertext_discard",
                         io_error_kind = io_error_kind(&clear_err),
                         "failed to discard unreadable mobile-consumable ciphertext"

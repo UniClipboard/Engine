@@ -15,7 +15,9 @@ use crate::subsystems::reconcile::{reconcile_peer_addresses, reconcile_trusted_p
 use uc_application::facade::ApplicationAssembly;
 use uc_infra::network::iroh::{IrohIdentityStore, IrohNode, IrohNodeBuilder, IrohSessionBuilder};
 use uc_infra::security::Sha256IdentityFingerprintFactory;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_vocab, uc_info, uc_warn,
+};
 
 /// 建立一次 Engine 活跃期内唯一的长期网络节点。
 pub async fn build_network_runtime(
@@ -53,13 +55,13 @@ pub async fn build_network_runtime(
     iroh_config.network_partition_gate = network_partition_gate;
     crate::assembly::network::apply_congestion_controller_from_env(&mut iroh_config);
 
-    tracing::info!(
+    uc_info!(
         target: "settings.network",
-        allow_relay_fallback,
+        allow_relay_fallback = allow_relay_fallback,
         disable_relays = iroh_config.disable_relays,
         allow_overlay_network_addrs = iroh_config.allow_overlay_network_addrs,
         custom_relay_count = iroh_config.custom_relay_urls.len(),
-        congestion_controller = %iroh_config.congestion_controller,
+        congestion_controller = log_vocab(&iroh_config.congestion_controller),
         "applying network settings"
     );
 
@@ -110,7 +112,7 @@ pub async fn reconcile_session_peers(space_setup: &SyncEngineDeps) {
     )
     .await
     {
-        tracing::warn!(
+        uc_warn!(
             error_kind = "peer_addr_reconcile",
             io_error_kind = io_error_kind(err.as_ref()),
             "peer_addr reconcile failed at boot; daemon continues with whatever orphans remain"
@@ -122,7 +124,7 @@ pub async fn reconcile_session_peers(space_setup: &SyncEngineDeps) {
     )
     .await
     {
-        tracing::warn!(
+        uc_warn!(
             error_kind = "trusted_peer_reconcile",
             io_error_kind = io_error_kind(err.as_ref()),
             "trusted_peer reconcile failed at boot; daemon continues with whatever orphans remain"

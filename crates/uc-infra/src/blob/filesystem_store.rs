@@ -4,10 +4,10 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-use tracing::debug;
+
 use uc_core::blob::ports::BlobReaderPort;
 use uc_core::BlobId;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, log_fields::log_id, uc_debug};
 
 use crate::blob::hashing::{copy_and_hash, stream_hash_file};
 use crate::blob::{BlobStorePort, StoredPathBlob};
@@ -132,8 +132,8 @@ impl BlobStorePort for FilesystemBlobStore {
                 .context("hardlink join failed")?
             {
                 Ok(()) => {
-                    debug!(
-                        blob_id = %blob_id,
+                    uc_debug!(
+                        blob_id = log_id(&blob_id),
                         "Hardlinked source file into blob store; hashing stored blob"
                     );
                     // Hash the destination (== the linked inode), not the source:
@@ -146,8 +146,8 @@ impl BlobStorePort for FilesystemBlobStore {
                         .context("blob hash join failed")??
                 }
                 Err(err) => {
-                    debug!(
-                        blob_id = %blob_id,
+                    uc_debug!(
+                        blob_id = log_id(&blob_id),
                         error_kind = "hardlink_fallback",
                         io_error_kind = io_error_kind(&err),
                         "Hardlink failed; streaming copy+hash (likely EXDEV or unsupported FS)"
@@ -166,9 +166,9 @@ impl BlobStorePort for FilesystemBlobStore {
                 }
             };
 
-        debug!(
-            blob_id = %blob_id,
-            size_bytes,
+        uc_debug!(
+            blob_id = log_id(&blob_id),
+            size_bytes = size_bytes,
             "Persisted source file into blob store"
         );
 
@@ -185,7 +185,10 @@ impl BlobStorePort for FilesystemBlobStore {
         let path = self.blob_path(blob_id);
         match tokio::fs::remove_file(&path).await {
             Ok(()) => {
-                debug!(blob_id = %blob_id, "Deleted blob from filesystem store");
+                uc_debug!(
+                    blob_id = log_id(&blob_id),
+                    "Deleted blob from filesystem store"
+                );
                 Ok(())
             }
             // Idempotent: an already-absent blob is a no-op, not an error.

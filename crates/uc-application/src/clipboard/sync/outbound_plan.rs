@@ -2,9 +2,8 @@
 
 use std::sync::Arc;
 
-use tracing::warn;
 use uc_core::{ports::SettingsPort, ClipboardChangeOrigin, SystemClipboardSnapshot};
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_warn};
 
 use super::outbound_plan_types::{
     ClipboardSyncIntent, FileCandidate, FileSyncIntent, OutboundSyncPlan,
@@ -70,7 +69,7 @@ impl OutboundSyncPlanner {
         let settings = match self.settings.load().await {
             Ok(s) => s,
             Err(err) => {
-                warn!(
+                uc_warn!(
                     error_kind = "settings_load",
                     io_error_kind = io_error_kind(err.as_ref()),
                     "OutboundSyncPlanner: failed to load settings; using safe defaults \

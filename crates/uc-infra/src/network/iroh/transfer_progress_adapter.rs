@@ -32,15 +32,17 @@ use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointAddr};
 use tokio::sync::{broadcast, Mutex};
-use tracing::{debug, instrument, trace, warn};
+use tracing::instrument;
 
 use uc_core::file_transfer::{OutboundProgressReporterPort, OutboundProgressStatus};
 use uc_core::ids::DeviceId;
 use uc_core::membership::PeerAdmissionPort;
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::PeerAddressRepositoryPort;
-use uc_observability_contract::diagnostics::connectivity::InboundPeerProtocol;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    diagnostics::connectivity::InboundPeerProtocol, error_source::io_error_kind,
+    log_fields::log_id, uc_debug, uc_trace, uc_warn,
+};
 
 use super::connect::{connect_with_staggered_retry, StaggeredDialError};
 use super::inbound_peer::InboundPeerGate;
@@ -173,10 +175,7 @@ impl ProtocolHandler for IrohTransferProgressHandler {
             }
         };
 
-        debug!(
-            from_device = %from_device.as_str(),
-            "transfer progress: accepted connection from admitted peer",
-        );
+        uc_debug!("transfer progress: accepted connection from admitted peer",);
 
         // 2. Loop accepting uni-streams. Receiver writes one frame per
         //    stream; the connection itself stays open for the duration of
@@ -187,8 +186,7 @@ impl ProtocolHandler for IrohTransferProgressHandler {
             let mut recv = match connection.accept_uni().await {
                 Ok(stream) => stream,
                 Err(err) => {
-                    debug!(
-                        from_device = %from_device.as_str(),
+                    uc_debug!(
                         error_kind = "connection_closed",
                         io_error_kind = io_error_kind(&err),
                         "transfer progress: connection closed",
@@ -206,19 +204,17 @@ impl ProtocolHandler for IrohTransferProgressHandler {
                         total_bytes: frame.total_bytes,
                         status: frame.status,
                     };
-                    trace!(
-                        from_device = %event.from_device.as_str(),
-                        transfer_id = %event.transfer_id,
+                    uc_trace!(
+                        transfer_id = log_id(&event.transfer_id),
                         bytes = event.bytes_transferred,
                         "transfer progress: frame received",
                     );
                     if self.state.event_tx.send(event).is_err() {
-                        debug!("transfer progress: no subscribers; frame dropped");
+                        uc_debug!("transfer progress: no subscribers; frame dropped");
                     }
                 }
                 Err(err) => {
-                    warn!(
-                        from_device = %from_device.as_str(),
+                    uc_warn!(
                         error_kind = "frame_decode",
                         io_error_kind = io_error_kind(&err),
                         "transfer progress: frame decode failed",
@@ -262,8 +258,8 @@ impl OutboundProgressReporterPort for ReporterImpl {
         status: OutboundProgressStatus,
     ) {
         let Some(transfer_id_bytes) = transfer_id_to_bytes(transfer_id) else {
-            warn!(
-                transfer_id,
+            uc_warn!(
+                transfer_id = log_id(&transfer_id),
                 "progress reporter: transfer_id is not a uuid; skipping"
             );
             return;
@@ -275,7 +271,7 @@ impl OutboundProgressReporterPort for ReporterImpl {
             status,
         };
         if let Err(err) = self.send_frame(target, &frame).await {
-            warn!(
+            uc_warn!(
                 error_kind = "frame_send",
                 io_error_kind = io_error_kind(&err),
                 "progress reporter: send failed"
@@ -289,7 +285,7 @@ impl ReporterImpl {
         match self.peer_address_resolver.resolve(target).await {
             Ok(address) => address,
             Err(error) => {
-                warn!(
+                uc_warn!(
                     error_kind = error.kind(),
                     "progress reporter address resolution failed",
                 );

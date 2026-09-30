@@ -19,6 +19,7 @@ use super::super::repository::token::{sponsor_existing_token, sponsor_fresh_toke
 use super::super::repository::{
     AdmissionRefusal, SpaceAdmissionStateStoreError, SqliteSpaceAdmissionState,
 };
+use uc_observability_contract::uc_warn;
 
 const INVITATION_CLAIM_FORMAT_V1: u16 = 1;
 
@@ -121,7 +122,7 @@ impl<E: DbExecutor + Send + Sync> SponsorAdmissionStatePort for SqliteSpaceAdmis
         })
         .await;
         if let Err(error) = &result {
-            tracing::warn!(
+            uc_warn!(
                 error = error as &dyn std::error::Error,
                 "sponsor admission state load failed"
             );

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use thiserror::Error;
-use tracing::debug;
+
 use uc_core::clipboard::ClipboardEntryContentCategory;
 use uc_core::ids::EntryId;
 use uc_core::ports::clipboard::{
@@ -11,7 +11,7 @@ use uc_core::ports::clipboard::{
 use uc_core::ports::search::SearchPipelinePort;
 use uc_core::ports::{SearchIndexPort, SearchKeyDerivationPort, SelectRepresentationPolicyPort};
 use uc_core::SystemClipboardSnapshot;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, log_fields::log_id, uc_debug};
 
 use crate::clipboard::file_set_query::load_has_directory_structure;
 use crate::facade::SearchProjectionBuilder;
@@ -109,10 +109,10 @@ impl ClipboardLiveIndexPort for ClipboardLiveIndexer {
         {
             Ok(device) => device.map(|d| d.to_string()),
             Err(err) => {
-                debug!(
+                uc_debug!(
                     error_kind = "source_device_lookup",
                     io_error_kind = io_error_kind(err.as_ref()),
-                    entry_id = %entry_id,
+                    entry_id = log_id(&entry_id),
                     "search: failed to resolve source device, indexing without it"
                 );
                 None
@@ -125,10 +125,10 @@ impl ClipboardLiveIndexPort for ClipboardLiveIndexer {
             load_has_directory_structure(self.deps.entry_file_set_repo.as_ref(), &entry_id)
                 .await
                 .unwrap_or_else(|err| {
-                    debug!(
+                    uc_debug!(
                         error_kind = "file_set_load",
                         io_error_kind = io_error_kind(&err),
-                        entry_id = %entry_id,
+                        entry_id = log_id(&entry_id),
                         "search: failed to load file set, indexing without directory tag"
                     );
                     false
@@ -152,10 +152,10 @@ impl ClipboardLiveIndexPort for ClipboardLiveIndexer {
         let search_key = match self.deps.search_key_derivation.derive_search_key().await {
             Ok(search_key) => search_key,
             Err(err) => {
-                debug!(
+                uc_debug!(
                     error_kind = "search_key_derive",
                     io_error_kind = io_error_kind(&err),
-                    entry_id = %entry_id,
+                    entry_id = log_id(&entry_id),
                     "search: key derivation failed, skipping live index"
                 );
                 return Ok(ClipboardLiveIndexOutcome::Skipped {

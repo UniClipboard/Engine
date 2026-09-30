@@ -8,6 +8,7 @@ use super::authenticate_basic::{
 use crate::deps::RecordMobileDeviceActivityPort;
 use std::sync::Arc;
 use uc_core::ports::ClockPort;
+use uc_observability_contract::{log_fields::log_vocab, uc_warn};
 
 pub(crate) struct AuthenticateMobileRequestUseCase {
     credentials: AuthenticateBasicAuthUseCase,
@@ -39,7 +40,10 @@ impl AuthenticateMobileRequestUseCase {
             .await
         {
             // Display 仅含固定分类；绝不输出 Debug 或原始 source 正文。
-            tracing::warn!(error_category = %error, "mobile request activity recording failed");
+            uc_warn!(
+                error_category = log_vocab(&error),
+                "mobile request activity recording failed"
+            );
         }
         Ok(authenticated)
     }
