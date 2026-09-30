@@ -298,7 +298,11 @@ async fn read_request(
         Ok(Ok(bytes)) if bytes.len() == length => bytes,
         _ => return Err("request_read"),
     };
-    decode(&bytes).map_err(|_| "request_decode")
+    match decode(&bytes) {
+        Ok(message) => Ok(message),
+        // 解码失败只对外表现为固定阶段名，具体原因不属于对端可见信息。
+        Err(_) => Err("request_decode"),
+    }
 }
 
 /// sponsor 侧把签发端失败折叠成对外的 Rejected 之前留下本地记录：
