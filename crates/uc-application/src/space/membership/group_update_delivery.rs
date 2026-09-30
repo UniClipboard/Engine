@@ -228,6 +228,7 @@ impl DeliverPendingGroupUpdatesUseCase {
 
 #[async_trait::async_trait]
 impl DeliverPendingGroupUpdatesPort for DeliverPendingGroupUpdatesUseCase {
+    #[tracing::instrument(name = "usecase.deliver_pending_group_updates.deliver", skip_all)]
     async fn deliver_pending_group_updates(
         &self,
         _trigger: &MembershipMaintenanceTrigger,

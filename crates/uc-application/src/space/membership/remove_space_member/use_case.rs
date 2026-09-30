@@ -28,21 +28,21 @@ const COMMITTED_STATUS_QUERY_BACKOFF: Duration = Duration::from_millis(100);
 
 /// 完成记录：成功一条 INFO；失败按可预期与否分 INFO / WARN，只写变体级分类。
 /// `committed_but_pending` 表示本机已提交移除，其他成员尚未确认。
-fn record_removal_outcome(result: &Result<RemoveSpaceMemberResult, RemoveSpaceMemberError>) {
+fn record_removal_outcome<T>(operation: &'static str, result: &Result<T, RemoveSpaceMemberError>) {
     match result {
         Ok(_) => uc_info!(
-            operation = "remove_member",
+            operation = operation,
             outcome = "completed",
             "member removal completed"
         ),
         Err(error) if error.is_expected() => uc_info!(
-            operation = "remove_member",
+            operation = operation,
             outcome = "rejected",
             error_class = error.class(),
             "member removal rejected"
         ),
         Err(error) => uc_warn!(
-            operation = "remove_member",
+            operation = operation,
             outcome = "failed",
             error_class = error.class(),
             "member removal failed"
@@ -107,7 +107,7 @@ impl RemoveSpaceMemberUseCase {
         target_device_id: &DeviceId,
     ) -> Result<RemoveSpaceMemberResult, RemoveSpaceMemberError> {
         let result = self.remove(target_device_id).await;
-        record_removal_outcome(&result);
+        record_removal_outcome("remove_member", &result);
         result
     }
 
@@ -322,21 +322,12 @@ impl RemoveSpaceMemberUseCase {
     }
 }
 
-#[async_trait::async_trait]
-impl AdmissionRevocationPort for RemoveSpaceMemberUseCase {
-    async fn revoke_admission(
-        &self,
-        target: AdmissionRevocationTarget,
-    ) -> Result<AdmissionRevocationResult, RemoveSpaceMemberError> {
-        let _guard = self.execution_lock.lock().await;
-        self.execute_admission_revocation(target).await
-    }
-
-    async fn revoke_abandoned_admission(
+impl RemoveSpaceMemberUseCase {
+    /// 持有执行锁时，把已放弃的准入还原为精确绑定并执行撤销。
+    async fn revoke_abandoned_admission_locked(
         &self,
         target: AdmissionAbandonmentRevocationTarget,
     ) -> Result<AdmissionRevocationResult, RemoveSpaceMemberError> {
-        let _guard = self.execution_lock.lock().await;
         let view = self.owner.load().await.map_err(map_ledger_error)?;
         let history = view.require_space().map_err(map_ledger_error)?.history();
         let binding = AdmissionMemberBindingV2::new(
@@ -351,6 +342,34 @@ impl AdmissionRevocationPort for RemoveSpaceMemberUseCase {
             binding,
         ))
         .await
+    }
+}
+
+#[async_trait::async_trait]
+impl AdmissionRevocationPort for RemoveSpaceMemberUseCase {
+    #[tracing::instrument(name = "usecase.remove_space_member.revoke_admission", skip_all)]
+    async fn revoke_admission(
+        &self,
+        target: AdmissionRevocationTarget,
+    ) -> Result<AdmissionRevocationResult, RemoveSpaceMemberError> {
+        let _guard = self.execution_lock.lock().await;
+        let result = self.execute_admission_revocation(target).await;
+        record_removal_outcome("revoke_admission", &result);
+        result
+    }
+
+    #[tracing::instrument(
+        name = "usecase.remove_space_member.revoke_abandoned_admission",
+        skip_all
+    )]
+    async fn revoke_abandoned_admission(
+        &self,
+        target: AdmissionAbandonmentRevocationTarget,
+    ) -> Result<AdmissionRevocationResult, RemoveSpaceMemberError> {
+        let _guard = self.execution_lock.lock().await;
+        let result = self.revoke_abandoned_admission_locked(target).await;
+        record_removal_outcome("revoke_abandoned_admission", &result);
+        result
     }
 }
 

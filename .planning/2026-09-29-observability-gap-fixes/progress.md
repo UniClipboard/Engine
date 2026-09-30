@@ -76,3 +76,13 @@ Still without a dedicated log test: #25 (needs the full outbound use case fixtur
 
 Scanned 70 public async methods of `*UseCase` impls: 19 already had `#[instrument]`. Added `#[tracing::instrument(name = "usecase.<action>.<method>", skip_all)]` to 26 entry methods of independent business actions (settings upgrade acknowledge, blob fetch/publish, profile startup, invitation cancel, lock/upgrade/recover/reset/rebuild space, change passphrase, membership conflict recover/resolve, history evidence reconcile, history message handling, device trust decision, member removal, membership maintenance, clipboard capture (leaf methods), restore (selection, plain text, file paths), resend).
 Left out on purpose: queries and checks, `shutdown`, `ensure_ready`, `touch_entry`, `list_tags`, `probe`, wrapper `execute` that delegates to an instrumented method (capture, apply inbound), and `dispatch_entry` (hand-written spans).
+
+## 2026-09-30 trait-impl entry points and revoke_admission
+
+- The first span scan only matched inherent `pub async fn` in `impl XUseCase`; a second scan of `impl Port for XUseCase` added spans to `InitializeSpaceMembership::execute`, `deliver_pending_group_updates`, `begin_membership_branch_recovery`, `revoke_admission` and `revoke_abandoned_admission`. The other trait impls only delegate to an already instrumented method or are queries.
+- `revoke_admission` and `revoke_abandoned_admission` had no completion record (the recovery caller only counts outcomes). `RemoveSpaceMemberUseCase` now records them with the same shape as `remove_member` (`operation`, `outcome`, `error_class`); tests cover success and failure.
+
+## 2026-09-30 second untruncated verification
+
+- `cargo test --workspace --exclude uc-upgrade-matrix`: 4034 passed, 2 failed; `-p uc-infra --features lan-compat,test-util`: 1303 passed, 0 failed; the `clipboard_trace` e2e tests ran (dev-tools is unified into the workspace run). fmt, lan-compat check, style, engine repository, direct-log and privacy checks pass.
+- Failures: `interrupted_file_transfer_recovers_after_receiver_process_restart` (known flake) and `topology::f1_remove_and_add_from_parent_head_preserve_branch_membership` ("nodes did not reach group epoch 5"). f1 is in the same convergence-wait harness as `f6_deep_chain` (about 50% on the untouched base). f1 in isolation: this branch failed 2 of 17 runs (10 of 10 passed in the last batch), the untouched base `c7a821b4` failed 0 of 15. The difference is not statistically clear and no code path explains it, but it was NOT proven to be pre-existing; treat it as an open observation.
