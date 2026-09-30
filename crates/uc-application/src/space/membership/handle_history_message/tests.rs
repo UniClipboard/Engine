@@ -14,48 +14,12 @@ use super::*;
 mod handoff_reproduction;
 use crate::space::membership::testing::{
     established_history, started_record, with_peer_relation, AcceptingVerifier, FixedSpaceWorkMode,
-    NoopAddressRefresh, OwnerFixture,
+    OwnerFixture,
 };
-use crate::space::membership::{
-    MembershipHistoryExchangeRecord, MembershipRecord, RefreshVerifiedPeerAddressPort,
-    SpaceWorkMode,
-};
+use crate::space::membership::{MembershipHistoryExchangeRecord, MembershipRecord, SpaceWorkMode};
 
 fn handler(fixture: &OwnerFixture) -> HandleMembershipHistoryMessageUseCase {
-    HandleMembershipHistoryMessageUseCase::new(
-        fixture.owner.clone(),
-        FixedSpaceWorkMode::active(),
-        Arc::new(NoopAddressRefresh),
-    )
-}
-
-#[derive(Default)]
-struct RecordingAddressRefresh {
-    refreshed: std::sync::Mutex<Vec<DeviceId>>,
-}
-
-#[async_trait::async_trait]
-impl RefreshVerifiedPeerAddressPort for RecordingAddressRefresh {
-    async fn refresh_verified_peer_address(&self, peer: &DeviceId) {
-        self.refreshed.lock().unwrap().push(*peer);
-    }
-}
-
-impl RecordingAddressRefresh {
-    fn refreshed(&self) -> Vec<DeviceId> {
-        self.refreshed.lock().unwrap().clone()
-    }
-}
-
-fn refreshing_handler(
-    fixture: &OwnerFixture,
-    refresh: &Arc<RecordingAddressRefresh>,
-) -> HandleMembershipHistoryMessageUseCase {
-    HandleMembershipHistoryMessageUseCase::new(
-        fixture.owner.clone(),
-        FixedSpaceWorkMode::active(),
-        refresh.clone(),
-    )
+    HandleMembershipHistoryMessageUseCase::new(fixture.owner.clone(), FixedSpaceWorkMode::active())
 }
 
 fn relation(fixture: &OwnerFixture, peer: &DeviceId) -> Option<PeerRelation> {
@@ -110,7 +74,6 @@ async fn pairing_rejects_inbound_history_as_retryable_before_ledger_access() {
     let handler = HandleMembershipHistoryMessageUseCase::new(
         fixture.owner.clone(),
         Arc::new(FixedSpaceWorkMode(SpaceWorkMode::Pairing)),
-        Arc::new(NoopAddressRefresh),
     );
 
     let result = uc_core::membership::MembershipHistoryExchangeEndpointPort::handle_membership_history_exchange(
@@ -573,58 +536,6 @@ async fn two_page_transfer_persists_each_page_and_applies_only_when_complete() {
         .collect::<Vec<_>>();
     assert!(prepared_add_devices.contains(&DeviceId::new("device-large-c")));
     assert!(prepared_add_devices.contains(&DeviceId::new("device-large-d")));
-}
-
-#[tokio::test]
-async fn only_a_confirmed_inbound_exchange_refreshes_the_sender_address() {
-    let (loaded, peer_device_id, pages) = two_page_extension();
-    let fixture = OwnerFixture::new(loaded);
-    let refresh = Arc::new(RecordingAddressRefresh::default());
-    let handler = refreshing_handler(&fixture, &refresh);
-    let source = AuthenticatedMember::new(peer_device_id);
-
-    handler.execute(&source, pages[0].clone()).await.unwrap();
-    assert!(
-        refresh.refreshed().is_empty(),
-        "a partial transfer is not a success"
-    );
-
-    let final_ack = handler.execute(&source, pages[1].clone()).await.unwrap();
-
-    assert!(matches!(
-        final_ack,
-        MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Confirmed { .. })
-    ));
-    assert_eq!(refresh.refreshed(), vec![peer_device_id]);
-}
-
-#[tokio::test]
-async fn failed_or_mismatched_inbound_exchange_does_not_refresh_the_address() {
-    let (loaded, peer_device_id, pages) = two_page_extension();
-    let fixture = OwnerFixture::new(loaded);
-    let refresh = Arc::new(RecordingAddressRefresh::default());
-    let handler = refreshing_handler(&fixture, &refresh);
-    let source = AuthenticatedMember::new(peer_device_id);
-
-    let out_of_order = handler.execute(&source, pages[1].clone()).await.unwrap();
-    assert!(!matches!(
-        out_of_order,
-        MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Confirmed { .. })
-    ));
-    let impostor = AuthenticatedMember::new(DeviceId::new("device-impostor"));
-    let mismatched = handler.execute(&impostor, pages[0].clone()).await.unwrap();
-    assert_eq!(
-        mismatched,
-        MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Invalid)
-    );
-    handler.execute(&source, pages[0].clone()).await.unwrap();
-    fixture.records.fail_next_commits(1);
-    handler
-        .execute(&source, pages[1].clone())
-        .await
-        .unwrap_err();
-
-    assert!(refresh.refreshed().is_empty());
 }
 
 #[tokio::test]

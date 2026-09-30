@@ -238,9 +238,7 @@ mod tests {
     use uc_core::DeviceId;
 
     use super::{VirtualFrameOutcome, VirtualMembershipNetwork, VirtualMembershipNetworkError};
-    use crate::space::membership::testing::{
-        started_record, FixedSpaceWorkMode, NoopAddressRefresh, OwnerFixture,
-    };
+    use crate::space::membership::testing::{started_record, FixedSpaceWorkMode, OwnerFixture};
     use crate::space::membership::HandleMembershipHistoryMessageUseCase;
     use crate::test_support::membership_scenario::{finish, require, scenario};
 
@@ -465,7 +463,6 @@ mod tests {
         Arc::new(HandleMembershipHistoryMessageUseCase::new(
             fixture.owner,
             FixedSpaceWorkMode::active(),
-            Arc::new(NoopAddressRefresh),
         ))
     }
 

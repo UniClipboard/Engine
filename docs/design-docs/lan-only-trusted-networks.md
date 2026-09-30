@@ -73,7 +73,7 @@ LAN-only 与默认模式。
   这一依据已经过时：iroh 1.0.0-rc.1 在选定路径前把握手包同时发往全部已知路径（已保存地址、mDNS 与其他发现结果），
   失效地址只是得不到回应；`connect.rs` 的单次尝试上限为 3 秒并按 0/500/1500ms 错峰。
 - 对端地址在满足以下全部条件时写回既有加密地址仓储（`persistable_addr::reusable_remote_addr`）：
-  1. 与该对端的成员历史交换成功确认（出站：同步结果为 `Confirmed` 且已提交；入站：回复为 `AckV3::Confirmed`）；
+  1. 与该对端的连接已建立并通过准入：连接负责人收到当前成员范围内该设备的 `Online` 通知（出站、入站相同）；
   2. 该地址在 iroh 远端信息中标为正在使用（`TransportAddrUsage::Active`，即路径已打开）；
   3. 直连地址位于私有地址空间（`uc_core::network::is_private_address`，与可信网段可声明范围相同），
      并且未被拨号使用的同一过滤规则排除。公网与 NAT 映射地址、回环、链路本地、Clash fake-ip 以及未放行的
@@ -82,9 +82,10 @@ LAN-only 与默认模式。
   没有任何可保存路径时不写入，保留原记录。LAN-only 下拨号前仍剥掉 relay。
 - 拨号不需要排序代码：已保存地址与 mDNS 结果进入 iroh 同一路径集合并同时尝试，失效的已保存地址不阻挡 mDNS。
   失败后沿用现有退避，不删除记录（下一次成功会覆盖）。
-- 双向学习：出站由 `HistorySynchronizer` 在同步结果提交后调用 `RefreshVerifiedPeerAddressPort`；入站由
-  `HandleMembershipHistoryMessageUseCase` 在回复为确认时调用同一端口（执行锁释放后）。入站证据与出站相同：
-  传输层已验证身份、该身份是当前成员、本次交换成功确认。Application 只决定时机，Infra 按本次连接判定可保存路径。
+- 双向学习：唯一的时机负责人是 `PeerConnectionCoordinator`（见[已配对设备自动连接](automatic-peer-connections.md)）。
+  出站拨号成功与入站连接通过准入都会让该设备发布 `Online`，连接负责人据此调用 `RefreshVerifiedPeerAddressPort`；
+  Application 只决定时机，Infra 按本次连接判定可保存路径。成员历史交换不再触发写回：已一致的对端重连不需要历史交换
+  （`needs_history_sync` 为假），用它做触发会让端口变化后的重连永远学不到新地址（2026-09-29 真实网络 L03 证据）。
   设备 ID 到节点 ID 的对应沿用已保存记录；配对时的记录在没有 relay 时保留直连地址，因此记录总是存在。
 - iroh 在连接关闭后仍保留路径的“正在使用”标记，直到远端状态被回收，所以提交后再观察不会丢失证据；
   Infra 测试固定了这一行为，升级 iroh 时须重新验证。

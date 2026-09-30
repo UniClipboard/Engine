@@ -55,10 +55,12 @@
 ### 切片 4：私网直连地址保存与入站写回
 
 - 2026-09-29 用户确认：LAN-only 与默认模式统一，写回本次正在使用的私网直连路径（经同一过滤规则），默认模式另保留正在使用的 relay。
-- 出站写回改为同步结果提交后执行；成员历史交换的服务端确认点新增入站写回，使用同一端口，证据标准与出站一致。
+- 写回触发点改为连接负责人 `PeerConnectionCoordinator` 收到当前成员的 `Online` 通知（2026-09-29 真实网络 L03 证明成员历史交换
+  不会在已一致对端重连时发生，用它触发学不到端口变化）；历史交换里的两处触发已删除。
 - 拨号不加排序代码：已保存地址与 mDNS 结果由 iroh 同时尝试。
 - 同步修正 `persistable_addr.rs` 模块文档中已过时的“约 30 秒握手”描述，并修订联系恢复计划中“动态直连地址不写回”的不变量。
-- 验证：写回条件的正反用例；入站写回不在交换失败、身份不符或未确认时发生；出站写回发生在提交之后；iroh 路径标记行为。
+- 验证：写回条件的正反用例；协调者只对范围内成员的 Online 刷新、暂停与成员移除时取消、重叠通知合并；iroh 路径标记行为；
+  容器内真实网络 L03（随机端口一方重启后由保存的新地址恢复）。
 
 ### 切片 5：真实网络验收
 
@@ -113,7 +115,8 @@
   diff check、`uc-infra` network 模块 266 项、`uc-engine` 相关单元测试与 public_contract。端口占用测试只在 macOS 本机运行，
   Linux/Windows 的 `AddrInUse` 来源链未验证；真实网络与 E2E 未运行。
 - [x] 切片 4（2026-09-29，本地）：Core 公开 `is_private_address`；Infra `reusable_remote_addr` 保存正在使用的私网直连路径
-  与 relay（无正在使用的 relay 时沿用已保存 relay）；`RefreshVerifiedPeerAddressPort` 移入成员共享 port，出站在提交后调用，
-  入站在确认回复后调用。新增 Core、Infra（含双端点回环的 iroh 路径标记测试）与 Application（入站正反用例、出站提交后刷新）
-  测试。真实网络、组播屏蔽环境与 E2E 未运行。
+  与 relay（无正在使用的 relay 时沿用已保存 relay）。写回时机最初挂在成员历史交换上（提交 650b763f），真实网络 L03 证明
+  已一致对端重连不发生历史交换后，改为 `PeerConnectionCoordinator` 收到当前成员 `Online` 时调用 `RefreshVerifiedPeerAddressPort`
+  （端口移入 `space/connectivity`，历史交换里的两处触发已删除）。新增 Core、Infra（含双端点回环的 iroh 路径标记测试）与
+  协调者（范围内刷新、范围外与暂停不刷新、重叠通知合并、成员移除与暂停取消）测试。
 - [ ] 切片 5

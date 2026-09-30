@@ -259,7 +259,6 @@ impl SpaceApplication {
             membership_announcement,
             device_trust_observations,
             membership_history_transport,
-            verified_peer_address_refresh,
             membership_branch_recovery_channel,
             membership_branch_recovery_recipient,
             membership_branch_transition,
@@ -333,7 +332,6 @@ impl SpaceApplication {
                 )),
                 restricted_delivery: restricted_membership_delivery,
                 history_transport: membership_history_transport,
-                address_refresh: Arc::clone(&verified_peer_address_refresh),
                 conflicts: recover_membership_conflicts,
                 group_updates: deliver_group_updates,
             },
@@ -390,7 +388,6 @@ impl SpaceApplication {
         let membership_history_endpoint = Arc::new(HandleMembershipHistoryMessageUseCase::new(
             Arc::clone(&owner),
             space_admission.clone(),
-            Arc::clone(&verified_peer_address_refresh),
         ));
         let issue_membership_branch_recovery = Arc::new(IssueMembershipBranchRecoveryUseCase::new(
             Arc::clone(&owner),

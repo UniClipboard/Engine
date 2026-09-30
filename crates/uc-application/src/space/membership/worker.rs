@@ -32,8 +32,8 @@ use super::{
     ApplyMembershipSecurityPort, DeliverPendingGroupUpdatesPort, MembershipEffectExecutionError,
     MembershipLedgerError, MembershipMaintenanceReport, MembershipMaintenanceStepOutcome,
     MembershipMaintenanceTrigger, MembershipOwner, RecoverMembershipConflictsPort,
-    RecoverMembershipEffectsPort, RefreshVerifiedPeerAddressPort, RestrictedMembershipDelivery,
-    RestrictedMembershipDeliveryError, RestrictedMembershipDeliveryPort, RunMembershipWorkPort,
+    RecoverMembershipEffectsPort, RestrictedMembershipDelivery, RestrictedMembershipDeliveryError,
+    RestrictedMembershipDeliveryPort, RunMembershipWorkPort,
 };
 
 pub(crate) use effects::RePairingAwareMembershipActivation;
@@ -50,7 +50,6 @@ pub(crate) struct MembershipWorkerDeps {
     pub(crate) activation: Arc<dyn ActivateMembershipEffectPort>,
     pub(crate) restricted_delivery: Arc<dyn RestrictedMembershipDeliveryPort>,
     pub(crate) history_transport: Arc<dyn MembershipHistoryExchangePort>,
-    pub(crate) address_refresh: Arc<dyn RefreshVerifiedPeerAddressPort>,
     pub(crate) conflicts: Arc<dyn RecoverMembershipConflictsPort>,
     pub(crate) group_updates: Arc<dyn DeliverPendingGroupUpdatesPort>,
 }
@@ -88,11 +87,7 @@ impl MembershipWorker {
         Self {
             effects: MembershipEffectSteps::new(deps.member_facts, deps.security, deps.activation),
             restricted_delivery: deps.restricted_delivery,
-            history: HistorySynchronizer::new(
-                Arc::clone(&owner),
-                deps.history_transport,
-                deps.address_refresh,
-            ),
+            history: HistorySynchronizer::new(Arc::clone(&owner), deps.history_transport),
             conflicts: deps.conflicts,
             group_updates: deps.group_updates,
             owner,

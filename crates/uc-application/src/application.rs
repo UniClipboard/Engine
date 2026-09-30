@@ -45,8 +45,8 @@ use crate::search::{SearchAssembly, SearchShutdownError};
 use crate::settings::SettingsAssembly;
 use crate::space::{
     AdmissionReadFailureCategory, KnownPeerContact, PendingAdmissionRecoveryStateError,
-    SpaceAdmissionDeps, SpaceAdmissionObservationRegistry, SpaceFacade, SpaceFacadeDeps,
-    SpaceRuntimeAdapters, SpaceSessionDeps, SpaceTransitionDeps,
+    RefreshVerifiedPeerAddressPort, SpaceAdmissionDeps, SpaceAdmissionObservationRegistry,
+    SpaceFacade, SpaceFacadeDeps, SpaceRuntimeAdapters, SpaceSessionDeps, SpaceTransitionDeps,
 };
 use crate::transfer::blob::facade::BlobTransferDeps;
 use crate::transfer::file::assembly::FileTransferAssembly;
@@ -69,6 +69,7 @@ pub struct ApplicationSpaceAdapters {
     pub pairing_invitation_addresses: Arc<dyn PairingInvitationAddressQueryPort>,
     pub pairing_invitation_by_address: Arc<dyn PairingInvitationByAddressPort>,
     pub peer_reachability: Arc<dyn PeerReachabilityPort>,
+    pub verified_peer_address_refresh: Arc<dyn RefreshVerifiedPeerAddressPort>,
     pub analytics: Arc<dyn uc_observability_contract::analytics::AnalyticsFacade>,
     pub connection_channel: Option<Arc<dyn ConnectionChannelPort>>,
     pub device_management_reset_data: Arc<dyn crate::deps::DeviceManagementResetDataPort>,
@@ -402,6 +403,7 @@ impl ApplicationAssembly {
             pairing_invitation_addresses,
             pairing_invitation_by_address,
             peer_reachability,
+            verified_peer_address_refresh,
             analytics,
             connection_channel,
             device_management_reset_data,
@@ -437,6 +439,7 @@ impl ApplicationAssembly {
                 pairing_invitation_addresses,
                 pairing_invitation_by_address,
                 peer_reachability: Arc::clone(&peer_reachability),
+                verified_peer_address_refresh,
                 analytics,
                 connection_channel,
             },

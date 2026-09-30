@@ -27,6 +27,12 @@ struct Peer {
     active_trigger: &'static str,
 }
 
+/// 一台设备的地址刷新：在途期间又收到上线通知时只记一次后续，成员移除时取消。
+struct AddressRefresh {
+    rerun: bool,
+    cancel: CancellationToken,
+}
+
 struct Refresh {
     pending: HashSet<DeviceId>,
     report: PeerReachabilityRefreshReport,
@@ -62,10 +68,12 @@ enum DialResult {
     Cancelled,
 }
 type Dial = BoxFuture<'static, (DeviceId, u64, DialResult)>;
+type AddressWrite = BoxFuture<'static, DeviceId>;
 
 pub(super) struct ConnectionRuntime {
     scope: Arc<dyn CurrentSpaceMemberScopePort>,
     peer_reachability: Arc<dyn PeerReachabilityPort>,
+    address_refresh: Arc<dyn RefreshVerifiedPeerAddressPort>,
     scope_changes: watch::Receiver<()>,
     peer_reachability_changes: broadcast::Receiver<PeerReachabilityChanged>,
     hints: BoxStream<'static, Result<ConnectionHint, anyhow::Error>>,
@@ -74,6 +82,8 @@ pub(super) struct ConnectionRuntime {
     cancel: CancellationToken,
     peers: HashMap<DeviceId, Peer>,
     dials: FuturesUnordered<Dial>,
+    address_writes: FuturesUnordered<AddressWrite>,
+    address_refreshes: HashMap<DeviceId, AddressRefresh>,
     refreshes: Vec<Refresh>,
     generation: u64,
     paused: bool,
@@ -83,6 +93,7 @@ impl ConnectionRuntime {
     pub(super) fn new(
         scope: Arc<dyn CurrentSpaceMemberScopePort>,
         peer_reachability: Arc<dyn PeerReachabilityPort>,
+        address_refresh: Arc<dyn RefreshVerifiedPeerAddressPort>,
         hints: BoxStream<'static, Result<ConnectionHint, anyhow::Error>>,
         commands: mpsc::Receiver<Command>,
         opportunities: watch::Receiver<ConnectivityOpportunity>,
@@ -93,12 +104,15 @@ impl ConnectionRuntime {
             peer_reachability_changes: peer_reachability.subscribe(),
             scope,
             peer_reachability,
+            address_refresh,
             hints,
             commands,
             opportunities,
             cancel,
             peers: HashMap::new(),
             dials: FuturesUnordered::new(),
+            address_writes: FuturesUnordered::new(),
+            address_refreshes: HashMap::new(),
             refreshes: vec![],
             generation: 0,
             paused: false,
@@ -167,6 +181,9 @@ impl ConnectionRuntime {
                 },
                 result = self.dials.next(), if !self.dials.is_empty() => {
                     if let Some((device, generation, result)) = result { self.finish(device, generation, result); }
+                }
+                device = self.address_writes.next(), if !self.address_writes.is_empty() => {
+                    if let Some(device) = device { self.address_write_finished(device); }
                 }
                 changed = self.scope_changes.changed(), if scope_open => {
                     if changed.is_err() { scope_open = false; }
@@ -242,6 +259,9 @@ impl ConnectionRuntime {
                 if let Some(cancel) = peer.in_flight {
                     cancel.cancel();
                 }
+            }
+            if let Some(refresh) = self.address_refreshes.remove(&device) {
+                refresh.cancel.cancel();
             }
             self.peer_reachability.forget(&device).await;
             self.settle_refresh(device, &DialResult::Error(AttemptError::Ineligible));
@@ -326,6 +346,8 @@ impl ConnectionRuntime {
                 if peer.in_flight.is_none() && !awaiting_refresh {
                     peer.due = Some(Instant::now() + HEALTH_CHECK_INTERVAL);
                 }
+                // 只有当前成员范围内设备的 Online 才会走到这里：身份已验证、连接已通过准入。
+                self.refresh_address(event.device_id);
             }
             _ => {
                 let was_online = peer.online;
@@ -334,6 +356,44 @@ impl ConnectionRuntime {
                     self.opportunity(Some(event.device_id), "peer_disconnected");
                 }
             }
+        }
+    }
+
+    /// 连接建立后刷新该成员的可复用地址。同一设备同时只有一个在途刷新，期间的新上线通知只记一次后续。
+    fn refresh_address(&mut self, device: DeviceId) {
+        if let Some(refresh) = self.address_refreshes.get_mut(&device) {
+            refresh.rerun = true;
+            return;
+        }
+        let cancel = self.cancel.child_token();
+        self.address_refreshes.insert(
+            device,
+            AddressRefresh {
+                rerun: false,
+                cancel: cancel.clone(),
+            },
+        );
+        let address_refresh = Arc::clone(&self.address_refresh);
+        self.address_writes.push(
+            async move {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {}
+                    _ = address_refresh.refresh_verified_peer_address(&device) => {}
+                }
+                device
+            }
+            .boxed(),
+        );
+    }
+
+    fn address_write_finished(&mut self, device: DeviceId) {
+        let rerun = self
+            .address_refreshes
+            .remove(&device)
+            .is_some_and(|refresh| refresh.rerun && !refresh.cancel.is_cancelled());
+        if rerun && !self.paused && self.peers.contains_key(&device) {
+            self.refresh_address(device);
         }
     }
 
@@ -492,6 +552,9 @@ impl ConnectionRuntime {
     async fn clear(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.dials.clear();
+        // 暂停、锁定或关闭后主密钥可能不可用，不能继续写入地址。
+        self.address_writes.clear();
+        self.address_refreshes.clear();
         self.peers.clear();
         for request in self.refreshes.drain(..) {
             let _ = request.response.send(Err(PeerConnectionError::Paused));

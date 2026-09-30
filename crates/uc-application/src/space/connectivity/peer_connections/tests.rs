@@ -91,6 +91,39 @@ impl PeerReachabilityPort for PeerReachability {
     }
 }
 
+/// 记录地址刷新请求；`blocked` 时刷新停在门口，只有拿到许可后才算完成。
+struct AddressRefreshes {
+    started: std::sync::Mutex<Vec<DeviceId>>,
+    finished: AtomicUsize,
+    blocked: AtomicBool,
+    permits: tokio::sync::Semaphore,
+}
+
+impl AddressRefreshes {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            started: std::sync::Mutex::new(Vec::new()),
+            finished: AtomicUsize::new(0),
+            blocked: AtomicBool::new(false),
+            permits: tokio::sync::Semaphore::new(0),
+        })
+    }
+    fn started(&self) -> Vec<DeviceId> {
+        self.started.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl RefreshVerifiedPeerAddressPort for AddressRefreshes {
+    async fn refresh_verified_peer_address(&self, peer: &DeviceId) {
+        self.started.lock().unwrap().push(*peer);
+        if self.blocked.load(Ordering::SeqCst) {
+            self.permits.acquire().await.unwrap().forget();
+        }
+        self.finished.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 fn dependencies() -> (Arc<Scope>, Arc<PeerReachability>) {
     let scope = Arc::new(Scope {
         peers: Mutex::new(vec![DeviceId::new("peer")]),
@@ -121,9 +154,35 @@ fn fixture() -> (
     let owner = PeerConnectionCoordinator::new(
         scope.clone(),
         peer_reachability.clone(),
+        AddressRefreshes::new(),
         Box::pin(futures::stream::pending()),
     );
     (owner, scope, peer_reachability)
+}
+
+fn fixture_with_address_refresh() -> (
+    Arc<PeerConnectionCoordinator>,
+    Arc<Scope>,
+    Arc<PeerReachability>,
+    Arc<AddressRefreshes>,
+) {
+    let (scope, peer_reachability) = dependencies();
+    let address_refresh = AddressRefreshes::new();
+    let owner = PeerConnectionCoordinator::new(
+        scope.clone(),
+        peer_reachability.clone(),
+        address_refresh.clone(),
+        Box::pin(futures::stream::pending()),
+    );
+    (owner, scope, peer_reachability, address_refresh)
+}
+
+fn online_event(peer: &str) -> PeerReachabilityChanged {
+    PeerReachabilityChanged {
+        device_id: DeviceId::new(peer),
+        state: ReachabilityState::Online,
+        at: chrono::Utc::now(),
+    }
 }
 
 fn fixture_with_hints(
@@ -139,8 +198,12 @@ fn fixture_with_hints(
     let hints = futures::stream::unfold(receiver, |mut receiver| async {
         receiver.recv().await.map(|event| (event, receiver))
     });
-    let owner =
-        PeerConnectionCoordinator::new(scope.clone(), peer_reachability.clone(), Box::pin(hints));
+    let owner = PeerConnectionCoordinator::new(
+        scope.clone(),
+        peer_reachability.clone(),
+        AddressRefreshes::new(),
+        Box::pin(hints),
+    );
     (owner, scope, peer_reachability, sender)
 }
 
@@ -879,4 +942,109 @@ async fn incoming_success_does_not_strand_a_queued_manual_refresh() {
         .unwrap();
     assert_eq!((report.total, report.online, report.errors), (5, 5, 0));
     owner.shutdown().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn online_notification_for_a_current_member_refreshes_its_address() {
+    let (owner, _, peer_reachability, address_refresh) = fixture_with_address_refresh();
+    owner.start().await;
+    settle().await;
+    assert!(
+        address_refresh.started().is_empty(),
+        "an offline peer has no verified connection"
+    );
+
+    peer_reachability.events.send(online_event("peer")).unwrap();
+    settle().await;
+
+    assert_eq!(address_refresh.started(), vec![DeviceId::new("peer")]);
+    assert_eq!(address_refresh.finished.load(Ordering::SeqCst), 1);
+    owner.shutdown().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn online_notification_outside_the_current_scope_or_while_paused_does_not_refresh() {
+    let (owner, _, peer_reachability, address_refresh) = fixture_with_address_refresh();
+    owner.start().await;
+    settle().await;
+
+    peer_reachability
+        .events
+        .send(online_event("stranger"))
+        .unwrap();
+    settle().await;
+    assert!(
+        address_refresh.started().is_empty(),
+        "a device outside the member scope is not evidence"
+    );
+
+    owner.pause().await.unwrap();
+    peer_reachability.events.send(online_event("peer")).unwrap();
+    settle().await;
+    assert!(
+        address_refresh.started().is_empty(),
+        "a paused session must not write addresses"
+    );
+    owner.shutdown().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn overlapping_online_notifications_share_one_refresh_and_one_follow_up() {
+    let (owner, _, peer_reachability, address_refresh) = fixture_with_address_refresh();
+    address_refresh.blocked.store(true, Ordering::SeqCst);
+    owner.start().await;
+    settle().await;
+
+    for _ in 0..3 {
+        peer_reachability.events.send(online_event("peer")).unwrap();
+    }
+    settle().await;
+    assert_eq!(
+        address_refresh.started().len(),
+        1,
+        "only one refresh may be in flight per device"
+    );
+
+    address_refresh.permits.add_permits(1);
+    settle().await;
+    assert_eq!(
+        address_refresh.started().len(),
+        2,
+        "overlapping notifications need exactly one follow-up"
+    );
+    address_refresh.permits.add_permits(1);
+    settle().await;
+    assert_eq!(address_refresh.started().len(), 2);
+    assert_eq!(address_refresh.finished.load(Ordering::SeqCst), 2);
+    owner.shutdown().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn removal_and_pause_cancel_an_in_flight_address_refresh() {
+    for pause in [false, true] {
+        let (owner, scope, peer_reachability, address_refresh) = fixture_with_address_refresh();
+        address_refresh.blocked.store(true, Ordering::SeqCst);
+        owner.start().await;
+        settle().await;
+        peer_reachability.events.send(online_event("peer")).unwrap();
+        settle().await;
+        assert_eq!(address_refresh.started().len(), 1);
+
+        if pause {
+            owner.pause().await.unwrap();
+        } else {
+            scope.peers.lock().await.clear();
+            scope.changes.send_replace(());
+        }
+        settle().await;
+        address_refresh.permits.add_permits(1);
+        settle().await;
+
+        assert_eq!(
+            address_refresh.finished.load(Ordering::SeqCst),
+            0,
+            "a removed or paused member must not get an address written"
+        );
+        owner.shutdown().await.unwrap();
+    }
 }

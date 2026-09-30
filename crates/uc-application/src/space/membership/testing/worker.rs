@@ -14,8 +14,8 @@ use crate::space::membership::{
     DeliverPendingGroupUpdatesPort, MembershipEffectExecutionError,
     MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger, MembershipOwner,
     MembershipWorker, MembershipWorkerDeps, RecoverMembershipConflictsPort,
-    RefreshVerifiedPeerAddressPort, RestrictedMembershipDelivery,
-    RestrictedMembershipDeliveryError, RestrictedMembershipDeliveryPort,
+    RestrictedMembershipDelivery, RestrictedMembershipDeliveryError,
+    RestrictedMembershipDeliveryPort,
 };
 
 /// 按阶段记录并成功完成的成员效果能力。
@@ -137,13 +137,6 @@ impl MembershipHistoryExchangePort for OfflineHistoryExchange {
     }
 }
 
-pub(crate) struct NoopAddressRefresh;
-
-#[async_trait]
-impl RefreshVerifiedPeerAddressPort for NoopAddressRefresh {
-    async fn refresh_verified_peer_address(&self, _peer: &DeviceId) {}
-}
-
 pub(crate) struct CompletedStep;
 
 #[async_trait]
@@ -199,7 +192,6 @@ impl WorkerFixture {
                 activation: effects.clone(),
                 restricted_delivery: delivery.clone(),
                 history_transport: ports.history,
-                address_refresh: Arc::new(NoopAddressRefresh),
                 conflicts: ports.conflicts,
                 group_updates: ports.group_updates,
             },

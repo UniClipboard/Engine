@@ -19,7 +19,6 @@ use uc_observability_contract::diagnostics::{
 
 use crate::space::membership::{
     ledger_error, MembershipLedgerError, MembershipOwner, ReconcileMembershipEvidenceUseCase,
-    RefreshVerifiedPeerAddressPort,
 };
 
 /// 一轮同步的固定总预算，不按对端数量叠加。
@@ -52,7 +51,6 @@ pub(super) struct HistorySynchronizer {
     owner: Arc<MembershipOwner>,
     evidence: ReconcileMembershipEvidenceUseCase,
     transport: Arc<dyn MembershipHistoryExchangePort>,
-    address_refresh: Arc<dyn RefreshVerifiedPeerAddressPort>,
     peer_locks: tokio::sync::Mutex<BTreeMap<DeviceId, Arc<tokio::sync::Mutex<()>>>>,
 }
 
@@ -66,13 +64,11 @@ impl HistorySynchronizer {
     pub(super) fn new(
         owner: Arc<MembershipOwner>,
         transport: Arc<dyn MembershipHistoryExchangePort>,
-        address_refresh: Arc<dyn RefreshVerifiedPeerAddressPort>,
     ) -> Self {
         Self {
             evidence: ReconcileMembershipEvidenceUseCase::new(Arc::clone(&owner)),
             owner,
             transport,
-            address_refresh,
             peer_locks: tokio::sync::Mutex::new(BTreeMap::new()),
         }
     }
@@ -178,7 +174,6 @@ impl HistorySynchronizer {
                         | PeerSyncResult::Invalid
                         | PeerSyncResult::Rejected => report.stable_failure_count += 1,
                     }
-                    let confirmed = matches!(result, PeerSyncResult::Confirmed);
                     self.owner
                         .commit(|draft| {
                             draft
@@ -190,12 +185,6 @@ impl HistorySynchronizer {
                                 .map_err(ledger_error)
                         })
                         .await?;
-                    // 同步结果提交后才刷新地址；刷新尽力而为，不改变已提交的结果。
-                    if confirmed {
-                        self.address_refresh
-                            .refresh_verified_peer_address(&peer)
-                            .await;
-                    }
                 }
                 PeerExchange::DivergenceRecorded => report.stable_failure_count += 1,
             }

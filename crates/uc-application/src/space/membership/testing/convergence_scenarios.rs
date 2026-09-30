@@ -76,34 +76,6 @@ async fn w1_offline_removed_device_disappears_exactly_when_the_departure_window_
     );
 }
 
-// 出站同步确认后，同步结果先提交再刷新对端地址；入站确认同样刷新发送方地址。
-#[tokio::test]
-async fn confirmed_history_sync_refreshes_addresses_on_both_sides_after_commit() {
-    let mut nodes = VirtualMembershipNodes::new(START_MS, 10_000);
-    let space = EstablishedSpace::new(&["device-a", "device-b"]);
-    let a = nodes.add_node(
-        "node-a",
-        space.record("device-a", 1),
-        space.signer("device-a"),
-    );
-    let b = nodes.add_node(
-        "node-b",
-        space.record("device-b", 1),
-        space.signer("device-b"),
-    );
-
-    a.run_worker().await;
-
-    assert_eq!(a.address_refreshes(), vec![(device("device-b"), true)]);
-    assert_eq!(
-        b.address_refreshes()
-            .into_iter()
-            .map(|(peer, _)| peer)
-            .collect::<Vec<_>>(),
-        vec![device("device-a")]
-    );
-}
-
 /// 固定种子伪随机序列。
 struct Seeded(u64);
 

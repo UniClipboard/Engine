@@ -43,8 +43,8 @@ pub(crate) use maintenance::{
 pub use ports::{
     ActivateMembershipEffectPort, ApplyMembershipMemberFactsPort, ApplyMembershipSecurityPort,
     MembershipEffectExecutionError, MembershipLedgerError, MembershipRecordCommit,
-    MembershipRecordStorePort, RefreshVerifiedPeerAddressPort, RestrictedMembershipDelivery,
-    RestrictedMembershipDeliveryError, RestrictedMembershipDeliveryPort, StagedMembershipRecord,
+    MembershipRecordStorePort, RestrictedMembershipDelivery, RestrictedMembershipDeliveryError,
+    RestrictedMembershipDeliveryPort, StagedMembershipRecord,
 };
 pub use projection::MembershipProjectionPlan;
 pub(crate) use query_device_group_choices::QueryDeviceGroupChoicesUseCase;
