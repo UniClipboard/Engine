@@ -18,7 +18,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
 #[cfg(not(any(test, feature = "in-process-multi-node")))]
 use std::sync::Mutex;
@@ -33,7 +33,7 @@ use super::session_generation::{
     SessionProtocolRegistry, SessionProtocolRegistryError,
 };
 use iroh::address_lookup::AddrFilter;
-use iroh::endpoint::{presets, QuicTransportConfig, VarInt};
+use iroh::endpoint::{presets, BindOpts, QuicTransportConfig, VarInt};
 use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, RelayConfig, RelayMode, RelayUrl, TransportAddr};
 use iroh_mdns_address_lookup::MdnsAddressLookup;
@@ -894,24 +894,32 @@ impl IrohNodeBuilder {
             );
         }
 
-        // UniClipboard#900 (a): pin the UDP socket to a fixed IPv4 port so a
-        // node is reachable at a stable port across restarts. The port comes
-        // from `Settings.network.listen_port`, overridable by
-        // `UC_IROH_BIND_PORT`. `bind_addr("0.0.0.0:port")` replaces iroh's
-        // default ephemeral IPv4 socket (still listens on all interfaces); the
-        // IPv6 default bind is left untouched. A port already in use fails
+        // UniClipboard#900 (a): pin the UDP sockets to a fixed port so a node is
+        // reachable at a stable port across restarts. The port comes from
+        // `Settings.network.listen_port`, overridable by `UC_IROH_BIND_PORT`.
+        // IPv4 (`0.0.0.0:port`) is required: a port already in use fails
         // `bind()` below as `ListenPortUnavailable`; it never falls back to a
-        // random port.
+        // random port. IPv6 (`[::]:port`, v6-only) is pinned to the same port
+        // but optional: a peer's selected path may be an IPv6 address, and an
+        // ephemeral IPv6 port would leave that path stale after a restart,
+        // black-holing every new handshake sent to it. Hosts without IPv6 (or
+        // with the IPv6 port taken) keep starting on IPv4 alone.
         let fixed_listen_port = config.bind_port.is_some();
         if let Some(port) = config.bind_port {
             endpoint_builder = endpoint_builder
                 .bind_addr((Ipv4Addr::UNSPECIFIED, port))
+                .and_then(|builder| {
+                    builder.bind_addr_with_opts(
+                        (Ipv6Addr::UNSPECIFIED, port),
+                        BindOpts::default().set_is_required(false),
+                    )
+                })
                 .map_err(|err| {
                     IrohNodeError::Bind(anyhow::Error::new(err).context("pin iroh UDP port"))
                 })?;
             info!(
                 target: "iroh.bind",
-                "pinned iroh UDP socket to a fixed IPv4 port",
+                "pinned iroh UDP sockets to a fixed port",
             );
         }
 
@@ -1674,7 +1682,7 @@ mod tests {
     }
 
     /// UniClipboard#900: `bind_port` pins the iroh UDP socket to a fixed
-    /// IPv4 port. We grab a currently-free port from the OS, release it, then
+    /// port on IPv4 (and IPv6 when available). We grab a currently-free port from the OS, release it, then
     /// assert the endpoint binds exactly that number (stable across restarts).
     #[tokio::test]
     async fn bind_pins_fixed_udp_port() {
@@ -1694,6 +1702,14 @@ mod tests {
         assert!(
             bound.iter().any(|s| s.is_ipv4() && s.port() == port),
             "expected pinned IPv4 port {port} in bound sockets {bound:?}"
+        );
+        // IPv6 可选：绑定成功时必须使用同一端口，否则重启后对端保留的旧 IPv6 已选路径会失效。
+        assert!(
+            bound
+                .iter()
+                .filter(|s| s.is_ipv6())
+                .all(|s| s.port() == port),
+            "IPv6 sockets must share the pinned port {port}, bound sockets {bound:?}"
         );
     }
 

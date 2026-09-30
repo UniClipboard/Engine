@@ -98,7 +98,7 @@ LAN-only 与默认模式。
 
 ## 固定端口设置
 
-- 固定端口成为持久设置 `network.listen_port`，取值 1–65535；空值表示随机端口。只固定 IPv4 socket，IPv6 仍使用默认绑定。
+- 固定端口成为持久设置 `network.listen_port`，取值 1–65535；空值表示随机端口。IPv4 与 IPv6 socket 都固定到该端口：IPv4 必须绑定成功，占用即启动失败；IPv6 为可选绑定，不可用或被占用时只跳过 IPv6。IPv6 若用随机端口，重启后对端保留的旧 IPv6 已选路径会失效，新握手包只发往该路径而超时。
 - 生效顺序：测试注入 `iroh_bind_port_override` > 环境变量 `UC_IROH_BIND_PORT` > 设置 > 随机端口。环境变量保留给无头和容器部署
   （ADR-007 的用途），只在设置了有效非零值时覆盖设置，不作为第二份持久配置。启动记录用 `listen_port_source`
   （`test_override`/`environment`/`settings`/`random`）标明来源，不输出端口值；环境变量日志也只记录是否设置。
