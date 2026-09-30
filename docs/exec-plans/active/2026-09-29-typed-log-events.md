@@ -58,9 +58,16 @@ uc_warn!(error = &err as &dyn std::error::Error, "history cleanup failed");
 
 ## 阶段
 
-- [ ] **M0 宏与目录（不迁移调用点）**：目录声明与生成、值类别、五个级别宏、`error` 字段分支、`target:` 分支；
-  运行期白名单改由目录生成并保持现有落盘行为；`DiagnosticTaskKind` 改由声明生成。
-  验收：编译失败测试（未登记字段、`String` 值、内插消息）、生成物快照、现有模块日志隐私测试全部通过。
+- [x] **M0 宏与目录（2026-09-29 完成）**：`uc_observability_contract::{log_fields, log_event}`；五个级别宏、`target:`、`error =` 分支；
+  目录种子 `entry_id`（`Identifier(random)`）、`error_kind`（`Literal`）、`io_error_kind`（`IoKind`）；
+  运行期文本字段白名单由目录并上过渡清单 `LEGACY_TEXT_FIELDS` 得出，测试冻结迁移前的 69 个名字、保证集合不变；
+  `warn_on_error!` 改为 `event!` 形式；`check-rust-style.mjs` 同时读取目录，并把 `$crate::` 视为宏卫生路径；
+  `trybuild` 用例覆盖未登记字段、`String` 入固定词表字段、标识未经 `id()`、内插消息、`Identifier` 缺少确认记号；
+  第一个真实调用点是 `clipboard/sync/active_state/fanout.rs` 的两处 `warn!`，端到端测试确认落盘字段、错误链与源码位置不变。
+  验证：`cargo check --workspace --all-targets --locked`、`fmt --check`、两个架构脚本、脚本测试、契约与运行期测试、`cargo audit` 均通过。
+  实施中定下的细节：字段名不含点号（仓库 2 处带点字段改名，不进目录）；`Literal` 类别只接受 `&'static str` 或为自己实现
+  `Accept<Literal>` 的封闭枚举；类别约束放在调用点（`Accept::<fields::名::Class>::accept`），`#[diagnostic::on_unimplemented]`
+  给出稳定报错，避免每次新增字段都改写 `trybuild` 的期望输出；`target:` 暂接受任意表达式，M2 再收紧到目录常量。
 - [ ] **M1 强制与基线**：clippy 配置与豁免、基线文件（初值 935）、棘轮脚本与其测试、CI 步骤、`check-rust-style.mjs` 规则。
   验收：故意新增一处 `tracing::warn!` 使 CI 失败；删除一处后基线可下调。
 - [ ] **M2 逐 crate 迁移**：顺序 `uc-application`（409）→ `uc-engine`（105）→ `uc-infra`（351）→ 其余；
@@ -85,6 +92,6 @@ uc_warn!(error = &err as &dyn std::error::Error, "history cleanup failed");
 
 ## 仍开放
 
-- 带点号的字段名（2 处，如 `error.type`）在目录中的表达：别名或改名，M0 内定。
-- `lan-compat` 等非默认特性下的违规数，M1 前补测。
+- `lan-compat` 等非默认特性下的违规数，M1 前补测；`warn_on_error!` 的 12 个调用点已改为 `event!`，M1 基线以 M0 之后重新计数为准，不沿用 935。
+- `bindings`（13 处，只能依赖 `uc-engine`）与 `compatibility`（39 处，独立发布线）能否直接使用宏，M2 前核对；若需经 `uc-engine` 再导出，先论证不属于为观测扩大 facade。
 - 基线文件与 `RUST_STYLE_BASE_SHA` 差异检查并存时的冲突处理，M1 内定。

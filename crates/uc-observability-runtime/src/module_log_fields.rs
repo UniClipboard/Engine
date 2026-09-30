@@ -1,12 +1,15 @@
-//! 模块日志自由文本字段的审定清单：只有名字在 `ALLOWED_TEXT_FIELDS` 中的文本字段才原样落盘，
+//! 模块日志自由文本字段的审定清单：只有名字在字段目录或 `LEGACY_TEXT_FIELDS` 中的文本字段才原样落盘，
 //! 其余文本字段一律记为 `<omitted>`。数字与布尔字段不受此限。
 //!
 //! 清单按字段名审定（固定词表、枚举名，或应用生成的随机标识），并核对过存量记录点的取值表达式。
 //! 新增记录点若使用清单以外的字段名，`scripts/architecture/check-rust-style.mjs` 会要求先在这里归类：
-//! 固定词表放入 `ALLOWED_TEXT_FIELDS`，其余放入 `REVIEWED_OMITTED_FIELDS`。
+//! 固定词表放入字段目录，其余放入 `REVIEWED_OMITTED_FIELDS`。
 //! 名字审定不证明每个取值都安全，取值仍须遵守敏感值规则，敏感值用 `Sensitive` 包装。
 
-pub(crate) const ALLOWED_TEXT_FIELDS: &[&str] = &[
+use uc_observability_contract::log_fields::text_field_in_catalog;
+
+/// 尚未迁移到 `uc_*!` 宏目录（`uc_observability_contract::log_fields`）的文本字段；字段迁移后从此处移除。
+pub(crate) const LEGACY_TEXT_FIELDS: &[&str] = &[
     "ack_kind",
     "alpn",
     "attempt_id",
@@ -16,12 +19,10 @@ pub(crate) const ALLOWED_TEXT_FIELDS: &[&str] = &[
     "current",
     "current_version",
     "doc_table",
-    "entry_id",
     "entry_id_str",
     "error.type",
     "error_category",
     "error_code",
-    "error_kind",
     "error_stage",
     "error_type",
     "evaluation",
@@ -36,7 +37,6 @@ pub(crate) const ALLOWED_TEXT_FIELDS: &[&str] = &[
     "format_id",
     "format_ids",
     "intent",
-    "io_error_kind",
     "key_class",
     "kind",
     "mime",
@@ -356,5 +356,100 @@ pub(crate) const REVIEWED_OMITTED_FIELDS: &[&str] = &[
 ];
 
 pub(crate) fn text_field_allowed(name: &str) -> bool {
-    ALLOWED_TEXT_FIELDS.contains(&name)
+    text_field_in_catalog(name) || LEGACY_TEXT_FIELDS.contains(&name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::text_field_allowed;
+
+    /// 迁移到字段目录之前的文本字段白名单；迁移期间集合必须保持不变，M4 删除本保护。
+    const PRE_CATALOG_ALLOWED: &[&str] = &[
+        "ack_kind",
+        "alpn",
+        "attempt_id",
+        "blob_id",
+        "category",
+        "congestion_controller",
+        "current",
+        "current_version",
+        "doc_table",
+        "entry_id",
+        "entry_id_str",
+        "error.type",
+        "error_category",
+        "error_code",
+        "error_kind",
+        "error_stage",
+        "error_type",
+        "evaluation",
+        "event_id",
+        "event_kind",
+        "existing_entry_id",
+        "expected",
+        "failure",
+        "failure_reason",
+        "failure_stage",
+        "filter_kind",
+        "format_id",
+        "format_ids",
+        "intent",
+        "io_error_kind",
+        "key_class",
+        "kind",
+        "mime",
+        "mimes",
+        "mode",
+        "next_phase",
+        "op",
+        "operation",
+        "origin",
+        "original_mime",
+        "outcome",
+        "packed_rep_ids",
+        "paste_rep_id",
+        "payload_state",
+        "phase",
+        "plain_rep_id",
+        "posting_table",
+        "preview_rep_id",
+        "previous_phase",
+        "reason",
+        "rep_id",
+        "reply_kind",
+        "representation_id",
+        "result",
+        "rules",
+        "scope",
+        "source",
+        "stage",
+        "state",
+        "step",
+        "stored_version",
+        "strategy",
+        "table",
+        "transfer_id",
+        "uc_congestion_controller",
+        "upgrade_action",
+        "upgrade_phase",
+        "variant",
+        "version",
+    ];
+
+    #[test]
+    fn text_field_allowlist_is_unchanged_by_catalog_migration() {
+        for name in PRE_CATALOG_ALLOWED {
+            assert!(text_field_allowed(name), "{name} must stay allowed");
+        }
+        let legacy = super::LEGACY_TEXT_FIELDS.iter().copied();
+        let catalog = uc_observability_contract::log_fields::CATALOG
+            .iter()
+            .filter(|field| field.class.is_text())
+            .map(|field| field.name);
+        let mut current: Vec<&str> = legacy.chain(catalog).collect();
+        let mut expected: Vec<&str> = PRE_CATALOG_ALLOWED.to_vec();
+        current.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(current, expected);
+    }
 }

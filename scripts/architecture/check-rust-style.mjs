@@ -287,6 +287,7 @@ function fieldTypeFor(placeholder, followingLines) {
 }
 
 const FIELD_LIST_PATH = 'crates/uc-observability-runtime/src/module_log_fields.rs'
+const FIELD_CATALOG_PATH = 'crates/uc-observability-contract/src/log_fields.rs'
 const LOG_MACRO_START = /\b(?:tracing::)?(?:info|warn|error|debug|trace)!\s*\(/
 let reviewedFieldNames = null
 
@@ -294,6 +295,12 @@ function reviewedFields() {
   if (reviewedFieldNames) return reviewedFieldNames
   const source = readFileSync(resolve(REPOSITORY_ROOT, FIELD_LIST_PATH), 'utf8')
   reviewedFieldNames = new Set([...source.matchAll(/^\s*"([^"]+)",\s*$/gm)].map(match => match[1]))
+  // 已迁移到 `uc_*!` 宏的字段登记在字段目录里，同样视为已审定。
+  const catalog = readFileSync(resolve(REPOSITORY_ROOT, FIELD_CATALOG_PATH), 'utf8')
+  const block = catalog.match(/^__log_field_catalog! \{\n([\s\S]*?)^\}/m)
+  for (const entry of (block?.[1] ?? '').matchAll(/^\s*([a-z_][a-z0-9_]*)\s*:\s*\w+(?:\(\w+\))?,\s*$/gm)) {
+    reviewedFieldNames.add(entry[1])
+  }
   // 记录点里特殊处理的名字：`error` 走错误链渲染，`message` 是消息正文。
   reviewedFieldNames.add('error')
   reviewedFieldNames.add('message')
@@ -348,7 +355,7 @@ function logMacroViolations(path, lines, lineNumber) {
     const match = argument.match(named)
     if (match) {
       if (!reviewedFields().has(match[1])) {
-        report(`日志字段 ${match[1]} 尚未审定；先在 ${FIELD_LIST_PATH} 归类（固定词表进 ALLOWED_TEXT_FIELDS，其余进 REVIEWED_OMITTED_FIELDS）`)
+        report(`日志字段 ${match[1]} 尚未审定；先在 ${FIELD_CATALOG_PATH} 登记，或在 ${FIELD_LIST_PATH} 归类（过渡清单：LEGACY_TEXT_FIELDS / REVIEWED_OMITTED_FIELDS）`)
       }
     } else positional.push(argument)
   }
@@ -469,7 +476,8 @@ function violationsFor(path, addedLines, changedFunctionLines) {
       violations.push(...errorSourceViolations(path, lines, codeLines, lineNumber))
       violations.push(...logPrivacyViolations(path, lines, codeLines, lineNumber))
     }
-    if (!/\bcrate\s*::/.test(code)) continue
+    // `$crate::` 是宏卫生所需的路径，不属于可改成集中引入的正文路径。
+    if (!/(?<!\$)\bcrate\s*::/.test(code)) continue
     if (/^\s*(?:pub(?:\([^)]*\))?\s+)?use\s+crate\s*::/.test(code)) continue
     if (testLines.has(lineNumber) || approvedException(lines, lineNumber)) continue
     violations.push({ path, line: lineNumber, source: raw.trim() })

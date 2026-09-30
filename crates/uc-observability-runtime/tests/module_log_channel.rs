@@ -15,8 +15,10 @@
 use std::error::Error;
 use std::time::Duration;
 
-use uc_observability_contract::log_safe_errors;
+use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::log_fields::id;
 use uc_observability_contract::module_log::{register_error_layer_renderers, Sensitive};
+use uc_observability_contract::{log_safe_errors, uc_warn};
 use uc_observability_runtime::{
     DeploymentEnvironment, DetailedCaptureRequest, LocalLogConfig, ObservabilityConfig,
     ObservabilityResource, OperatingSystem, ProcessObservabilityRuntime, SignalResult,
@@ -177,6 +179,37 @@ fn module_log_channel_records_renders_limits_and_exports_with_visible_counts() {
     for omitted in ["path", "device_name", "peer", "note"] {
         assert_eq!(field_row["fields"][omitted], "<omitted>", "{omitted}");
     }
+    // 阶段二补充：`uc_*!` 宏写出的记录与旧写法落盘结果一致，且错误链照常渲染。
+    let typed_io = std::io::Error::from(std::io::ErrorKind::NotFound);
+    uc_warn!(
+        target: "uc_infra::module_log_channel",
+        error_kind = "fixed_kind",
+        entry_id = id(&"entry-typed"),
+        io_error_kind = io_error_kind(&typed_io),
+        error = &typed_io as &dyn Error,
+        "typed event"
+    );
+    flush();
+    let typed_rows = module_rows(directory.path());
+    let typed_row = typed_rows
+        .iter()
+        .find(|row| row["message"] == "typed event")
+        .expect("typed row");
+    assert_eq!(typed_row["fields"]["error_kind"], "fixed_kind");
+    assert_eq!(typed_row["fields"]["entry_id"], "entry-typed");
+    assert_eq!(typed_row["fields"]["io_error_kind"], "NotFound");
+    assert!(typed_row["error.chain"][0]
+        .as_str()
+        .expect("io layer")
+        .starts_with("io error kind=NotFound"));
+    // 宏展开在调用处：源码位置属于调用方文件，而不是契约 crate 内的宏定义。
+    assert!(
+        typed_row["location"]
+            .as_str()
+            .expect("location")
+            .contains("module_log_channel.rs"),
+        "{typed_row}"
+    );
     let all_text = std::fs::read_dir(directory.path())
         .expect("dir")
         .map(|entry| std::fs::read_to_string(entry.expect("entry").path()).expect("file"))

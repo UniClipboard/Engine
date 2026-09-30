@@ -15,13 +15,13 @@
 
 use std::sync::Arc;
 
-use tracing::{debug, warn};
+use tracing::debug;
 
 use uc_core::clipboard::{ActiveClipboardState, ClipboardContentCategorySet};
 use uc_core::ids::DeviceId;
 use uc_core::ports::clipboard::ActiveClipboardDispatchPort;
 use uc_core::ports::{PeerAddressRepositoryPort, PeerReachabilityPort, ReachabilityState};
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_warn};
 
 use crate::deps::{CurrentSpaceMemberScope, CurrentSpaceMemberScopePort};
 
@@ -73,7 +73,7 @@ pub(crate) async fn fan_out_active_state(
     let scope = match peer_scope.snapshot().await {
         Ok(snapshot) => snapshot,
         Err(err) => {
-            warn!(
+            uc_warn!(
                 error_kind = "peer_scope_unavailable",
                 io_error_kind = io_error_kind(&err),
                 "active state fan-out skipped: current peer scope unavailable"
@@ -84,7 +84,7 @@ pub(crate) async fn fan_out_active_state(
     let records = match peer_addr_repo.list().await {
         Ok(r) => r,
         Err(err) => {
-            warn!(
+            uc_warn!(
                 error_kind = "peer_address_list",
                 io_error_kind = io_error_kind(&err),
                 "active state fan-out skipped: peer_addr_repo.list failed"

@@ -1,0 +1,11 @@
+error: no rules expected `,`
+ --> tests/ui/fail/interpolated_message.rs:5:46
+  |
+5 |     uc_warn!(error_kind = "fixed", "value {}", value);
+  |                                              ^ no rules expected this token in macro call
+  |
+note: while trying to match meta-variable `$message:literal`
+ --> src/log_event.rs
+  |
+  |     ($level:ident [$($target:tt)*] [$($fields:tt)*] $message:literal) => {
+  |                                                     ^^^^^^^^^^^^^^^^

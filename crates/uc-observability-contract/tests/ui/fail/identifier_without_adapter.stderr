@@ -1,0 +1,31 @@
+error[E0277]: this value is not accepted by the log field's declared class
+ --> tests/ui/fail/identifier_without_adapter.rs:5:25
+  |
+5 |     uc_warn!(entry_id = entry, "identifier must go through id()");
+  |     --------------------^^^^^------------------------------------
+  |     |                   |
+  |     |                   not accepted here
+  |     required by a bound introduced by this call
+  |
+  = help: the trait `Accept<uc_observability_contract::log_fields::Identifier>` is not implemented for `String`
+  = note: fixed-vocabulary fields take literals or closed enums; identifier fields take `id(&value)`; see `uc_observability_contract::log_fields`
+help: the trait `Accept<uc_observability_contract::log_fields::Literal>` is implemented for `&str`
+ --> src/log_fields.rs
+  |
+  | impl Accept<Literal> for &'static str {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0277]: this value is not accepted by the log field's declared class
+ --> tests/ui/fail/identifier_without_adapter.rs:5:5
+  |
+5 |     uc_warn!(entry_id = entry, "identifier must go through id()");
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not accepted here
+  |
+  = help: the trait `Accept<uc_observability_contract::log_fields::Identifier>` is not implemented for `String`
+  = note: fixed-vocabulary fields take literals or closed enums; identifier fields take `id(&value)`; see `uc_observability_contract::log_fields`
+help: the trait `Accept<uc_observability_contract::log_fields::Literal>` is implemented for `&str`
+ --> src/log_fields.rs
+  |
+  | impl Accept<Literal> for &'static str {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  = note: this error originates in the macro `$crate::__uc_log` which comes from the expansion of the macro `uc_warn` (in Nightly builds, run with -Z macro-backtrace for more info)

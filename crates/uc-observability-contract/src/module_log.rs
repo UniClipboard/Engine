@@ -81,7 +81,11 @@ macro_rules! warn_on_error {
     ($result:expr, $message:literal) => {{
         let result = $result;
         if let ::core::result::Result::Err(error) = &result {
-            ::tracing::warn!(error = error as &dyn ::std::error::Error, $message);
+            $crate::__tracing::event!(
+                $crate::__tracing::Level::WARN,
+                error = error as &dyn ::std::error::Error,
+                $message
+            );
         }
         result
     }};

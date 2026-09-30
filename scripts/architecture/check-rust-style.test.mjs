@@ -447,3 +447,12 @@ fn run(device_label: &str) {
   assert.match(result.stderr, /fixture\.rs:3/)
   assert.match(result.stderr, /brand_new_field/)
 })
+
+test('宏展开使用 $crate 路径不算正文完整路径', () => {
+  const result = check(`
+macro_rules! forward {
+    ($($t:tt)*) => { $crate::inner!($($t)*) };
+}
+`)
+  assert.equal(result.status, 0, result.stderr)
+})

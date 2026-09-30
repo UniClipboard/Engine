@@ -1,0 +1,11 @@
+error: unexpected end of macro invocation
+ --> src/log_fields.rs
+  |
+  |         $($crate::__log_field_ack!($class $(($ack))?);)*
+  |                                          ^ missing tokens in macro arguments
+  |
+note: while trying to match `(`
+ --> src/log_fields.rs
+  |
+  |     (Identifier(random)) => {};
+  |                ^
