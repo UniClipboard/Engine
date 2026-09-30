@@ -50,6 +50,7 @@
   不额外制造一串独立的“生命周期成功”。
 - 关闭超时、任务异常退出等进入运行诊断，必须说明具体动作和失败类别，不能只写 `session_lifecycle`。
   任务异常退出统一由等待该任务的负责人调用 `record_task_join_failure`，以固定 `task.kind` 写入健康记录；
+  剪贴板投递记录、入站系统写入、活跃剪贴板收敛、延后排空、配对 mDNS 转发与移动端出站分发分别为 `clipboard_delivery_record`、`clipboard_inbound_os_write`、`active_clipboard_converge`、`clipboard_deferred_drain`、`pairing_mdns_forward`、`mobile_outbound_dispatch`；
   Engine 操作、生命周期转换与会话挂起交接分别为 `engine_operation`、`engine_lifecycle_transition`、`session_suspend`；成员维护的一轮动作为 `membership_maintenance_round`，活跃剪贴板必需 worker 为 `active_clipboard_worker`，移动端绑定的引擎 worker 线程为 `mobile_worker`，Engine 启动任务为 `engine_startup`，出站进度翻译任务为 `outbound_progress_translator`。
 - 真正执行的后台恢复可以成为独立动作，但要说明上线、重启、重试等固定触发原因，以及实际恢复结果。
 - 隐藏例行噪声不能丢失业务动作中的失败证据，不能单独过滤必要父节点、导致完整记录变成孤儿片段。
