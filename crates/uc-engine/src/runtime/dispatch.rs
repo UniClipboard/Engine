@@ -35,8 +35,9 @@ use crate::operations::history::resource::{
     execute_read_blob, execute_read_entry_file, execute_read_thumbnail,
 };
 use crate::operations::history::search::{
-    execute_query_search_status, execute_query_search_tags, execute_rebuild_search_index,
-    execute_search_entries, history_page_result, history_search_input, map_query_history_error,
+    execute_count_search_entries, execute_query_daily_entry_counts, execute_query_search_status,
+    execute_query_search_tags, execute_rebuild_search_index, execute_search_entries,
+    history_page_result, history_search_input, map_query_history_error,
 };
 use crate::operations::settings::config_migration::{
     execute_export_config, execute_preview_config_import, execute_stage_config_import,
@@ -446,6 +447,13 @@ impl EngineRuntime for ProductionRuntime {
                 }
                 Operation::SearchEntries(input) => {
                     execute_search_entries(self.current_facade().await?.as_ref(), input).await
+                }
+                Operation::CountSearchEntries(input) => {
+                    execute_count_search_entries(self.current_facade().await?.as_ref(), input).await
+                }
+                Operation::QueryDailyEntryCounts(input) => {
+                    execute_query_daily_entry_counts(self.current_facade().await?.as_ref(), input)
+                        .await
                 }
                 Operation::QuerySearchTags => {
                     execute_query_search_tags(self.current_facade().await?.as_ref()).await

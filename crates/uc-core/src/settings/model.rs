@@ -16,7 +16,7 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 // 所有 settings struct 统一使用 `#[serde(default)]`：缺字段时回退到
 // `Default::default()`（在 `defaults.rs` 中实现），保证向后兼容。
 // 详见 issue #581：旧版本 settings.json 缺新增字段会让 daemon 启动失败。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct GeneralSettings {
     pub auto_start: bool,
@@ -235,7 +235,7 @@ pub struct RetentionPolicy {
     pub evaluation: RuleEvaluation,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, rename_all = "snake_case")]
 pub struct SecuritySettings {
     /// 是否启用本地数据加密
@@ -255,7 +255,7 @@ pub struct SecuritySettings {
 }
 
 #[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct PairingSettings {
     #[serde_as(as = "DurationSeconds<u64>")]
@@ -510,7 +510,7 @@ pub struct MobileSyncSettings {
     pub lan_port: Option<u16>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Settings {
     #[serde(default = "oldest_known_schema_version")]
     pub schema_version: u32,

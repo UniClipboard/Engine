@@ -95,6 +95,8 @@ pub enum OperationKind {
     QueryMembershipDiagnostics,
     QuerySpaceProtection,
     SearchEntries,
+    CountSearchEntries,
+    QueryDailyEntryCounts,
     QuerySearchTags,
     QuerySearchStatus,
     RebuildSearchIndex,
@@ -198,6 +200,8 @@ impl fmt::Display for OperationKind {
             Self::QueryMembershipDiagnostics => "query_membership_diagnostics",
             Self::QuerySpaceProtection => "query_space_protection",
             Self::SearchEntries => "search_entries",
+            Self::CountSearchEntries => "count_search_entries",
+            Self::QueryDailyEntryCounts => "query_daily_entry_counts",
             Self::QuerySearchTags => "query_search_tags",
             Self::QuerySearchStatus => "query_search_status",
             Self::RebuildSearchIndex => "rebuild_search_index",
@@ -345,6 +349,8 @@ pub enum Operation {
     QueryMembershipDiagnostics,
     QuerySpaceProtection,
     SearchEntries(SearchEntriesInput),
+    CountSearchEntries(CountSearchEntriesInput),
+    QueryDailyEntryCounts(DailyEntryCountsInput),
     QuerySearchTags,
     QuerySearchStatus,
     RebuildSearchIndex,
@@ -450,6 +456,8 @@ impl Operation {
             Self::QueryMembershipDiagnostics => OperationKind::QueryMembershipDiagnostics,
             Self::QuerySpaceProtection => OperationKind::QuerySpaceProtection,
             Self::SearchEntries(_) => OperationKind::SearchEntries,
+            Self::CountSearchEntries(_) => OperationKind::CountSearchEntries,
+            Self::QueryDailyEntryCounts(_) => OperationKind::QueryDailyEntryCounts,
             Self::QuerySearchTags => OperationKind::QuerySearchTags,
             Self::QuerySearchStatus => OperationKind::QuerySearchStatus,
             Self::RebuildSearchIndex => OperationKind::RebuildSearchIndex,
@@ -633,6 +641,8 @@ pub struct SearchEntriesInput {
     pub extensions: Option<String>,
     pub source_devices: Option<String>,
     pub tags: Option<String>,
+    /// 标签维度的组合方式：`any`（默认）或 `all`。
+    pub tag_match: Option<String>,
     pub limit: u32,
     pub offset: u32,
 }
@@ -652,8 +662,40 @@ impl fmt::Debug for SearchEntriesInput {
             .field("has_extensions", &self.extensions.is_some())
             .field("has_source_devices", &self.source_devices.is_some())
             .field("has_tags", &self.tags.is_some())
+            .field("has_tag_match", &self.tag_match.is_some())
             .field("limit", &self.limit)
             .field("offset", &self.offset)
+            .finish()
+    }
+}
+
+/// 批量计数请求：每个查询与 `SearchEntries` 使用同一套过滤语义，`limit` 与 `offset` 被忽略。
+#[derive(Clone, PartialEq, Eq)]
+pub struct CountSearchEntriesInput {
+    pub queries: Vec<SearchEntriesInput>,
+}
+
+impl fmt::Debug for CountSearchEntriesInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CountSearchEntriesInput")
+            .field("query_count", &self.queries.len())
+            .finish()
+    }
+}
+
+/// 按日统计请求。`boundaries_ms` 是严格递增的本地日边界（毫秒时间戳），
+/// 第 `i` 个桶为 `[boundaries[i], boundaries[i+1])`。边界由调用方按其时区计算。
+#[derive(Clone, PartialEq, Eq)]
+pub struct DailyEntryCountsInput {
+    pub boundaries_ms: Vec<i64>,
+}
+
+impl fmt::Debug for DailyEntryCountsInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DailyEntryCountsInput")
+            .field("boundary_count", &self.boundaries_ms.len())
             .finish()
     }
 }

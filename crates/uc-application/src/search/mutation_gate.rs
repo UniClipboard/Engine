@@ -86,6 +86,14 @@ impl SearchIndexPort for CoordinatedSearchIndex {
     async fn list_tags(&self) -> Result<Vec<SearchTagCount>, SearchError> {
         self.inner.list_tags().await
     }
+
+    async fn count(&self, query: SearchQuery) -> Result<u32, SearchError> {
+        self.inner.count(query).await
+    }
+
+    async fn count_by_active_time(&self, boundaries_ms: &[i64]) -> Result<Vec<u32>, SearchError> {
+        self.inner.count_by_active_time(boundaries_ms).await
+    }
 }
 
 #[cfg(test)]

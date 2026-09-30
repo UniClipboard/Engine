@@ -15,9 +15,12 @@ mod task_scope;
 use uc_core::ids::DeviceId;
 use uc_core::ports::SearchIndexPort;
 use uc_core::search::tag::TagId;
-use uc_core::search::{ContentType, QueryOperator, SearchError, SearchQuery, TimeRangeFilter};
+use uc_core::search::{
+    ContentType, QueryOperator, SearchError, SearchQuery, TagMatchMode, TimeRangeFilter,
+};
 
 use crate::search::query::SearchClipboardEntriesUseCase;
+use crate::space::QuerySpaceAccessStateError;
 
 pub use assembly::SearchAssembly;
 use coordinator::{ManualRebuildResult, SearchCoordinator};
@@ -51,11 +54,18 @@ pub struct SearchQueryInput {
     /// Comma-separated source device ids; restricts results to those origins.
     pub source_devices: Option<String>,
     /// Comma-separated tag ids (e.g. `link,favorited`); restricts to entries
-    /// carrying any of them.
+    /// carrying any of them (or all, per `tag_match`).
     pub tags: Option<String>,
+    /// 标签维度的组合方式：`any`（默认，命中任一）或 `all`（必须全部携带）。
+    pub tag_match: Option<String>,
     pub limit: u32,
     pub offset: u32,
 }
+
+/// 单次计数请求最多包含的查询数。
+const MAX_COUNT_BATCH: usize = 32;
+/// 单次按日统计最多包含的桶数（覆盖一年多，足够日历视图）。
+const MAX_COUNT_BUCKETS: usize = 400;
 
 /// Response freshness for a `query()` page: the index served the page.
 pub const SEARCH_STATE_READY: &str = "ready";
@@ -139,6 +149,9 @@ pub enum SearchFacadeError {
     IndexUnavailable,
     #[error("search service is unavailable: {0}")]
     ServiceUnavailable(String),
+    /// 无法确认加密会话是否已就绪，聚合查询按失败关闭处理。
+    #[error("encryption session state is unavailable")]
+    SessionStateUnavailable(#[source] QuerySpaceAccessStateError),
     #[error("search rebuild is already running")]
     RebuildAlreadyRunning,
     #[error("search failed")]
@@ -194,6 +207,57 @@ impl SearchFacade {
                     .map_err(map_search_error)?;
                 Ok(search_page_to_view(page, SEARCH_STATE_DEGRADED))
             }
+            Err(SearchError::IndexNotReady) => Err(SearchFacadeError::IndexRebuilding),
+            Err(other) => Err(map_search_error(other)),
+        }
+    }
+
+    /// 批量统计与 `query` 过滤语义一致的匹配数，按输入顺序返回。分页字段被忽略。
+    ///
+    /// 只服务索引；索引未就绪时不降级为主库浏览，一律返回 `IndexRebuilding`，
+    /// 因为计数只用于提示，不能给出与筛选不一致的近似值。
+    pub async fn count(
+        &self,
+        inputs: Vec<SearchQueryInput>,
+    ) -> Result<Vec<u32>, SearchFacadeError> {
+        if inputs.len() > MAX_COUNT_BATCH {
+            return Err(SearchFacadeError::BadRequest(format!(
+                "at most {MAX_COUNT_BATCH} count queries per request"
+            )));
+        }
+        let queries = inputs
+            .into_iter()
+            .map(parse_search_query)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut counts = Vec::with_capacity(queries.len());
+        for query in queries {
+            match self.query_uc.count(query).await {
+                Ok(total) => counts.push(total),
+                Err(SearchError::IndexNotReady) => return Err(SearchFacadeError::IndexRebuilding),
+                Err(other) => return Err(map_search_error(other)),
+            }
+        }
+        Ok(counts)
+    }
+
+    /// 按调用方给出的桶边界统计每个桶内的条目数（见 `SearchIndexPort::count_by_active_time`）。
+    pub async fn daily_counts(
+        &self,
+        boundaries_ms: Vec<i64>,
+    ) -> Result<Vec<u32>, SearchFacadeError> {
+        if boundaries_ms.len() < 2 || boundaries_ms.len() > MAX_COUNT_BUCKETS + 1 {
+            return Err(SearchFacadeError::BadRequest(format!(
+                "boundaries must contain between 2 and {} entries",
+                MAX_COUNT_BUCKETS + 1
+            )));
+        }
+        if boundaries_ms.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(SearchFacadeError::BadRequest(
+                "boundaries must be strictly increasing".to_string(),
+            ));
+        }
+        match self.query_uc.count_by_active_time(&boundaries_ms).await {
+            Ok(counts) => Ok(counts),
             Err(SearchError::IndexNotReady) => Err(SearchFacadeError::IndexRebuilding),
             Err(other) => Err(map_search_error(other)),
         }
@@ -316,11 +380,22 @@ fn parse_search_query(input: SearchQueryInput) -> Result<SearchQuery, SearchFaca
         time_range: parse_time_range(&input)?,
         content_types: parse_content_types(input.content_types.as_deref())?,
         tags: parse_tags(input.tags.as_deref()),
+        tag_match: parse_tag_match(input.tag_match.as_deref())?,
         extensions: parse_extensions(input.extensions.as_deref()),
         source_devices: parse_source_devices(input.source_devices.as_deref()),
         limit: input.limit.min(200),
         offset: input.offset,
     })
+}
+
+fn parse_tag_match(raw: Option<&str>) -> Result<TagMatchMode, SearchFacadeError> {
+    match raw.map(|value| value.trim().to_lowercase()).as_deref() {
+        None | Some("") | Some("any") => Ok(TagMatchMode::Any),
+        Some("all") => Ok(TagMatchMode::All),
+        Some(other) => Err(SearchFacadeError::BadRequest(format!(
+            "invalid tagMatch: {other}"
+        ))),
+    }
 }
 
 fn strip_and_infer_operator(
@@ -487,6 +562,7 @@ mod tests {
             time_range: None,
             content_types: Vec::new(),
             tags: Vec::new(),
+            tag_match: TagMatchMode::Any,
             extensions: Vec::new(),
             source_devices: Vec::new(),
             limit: 50,

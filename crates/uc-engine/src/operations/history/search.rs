@@ -9,9 +9,9 @@ use uc_application::facade::{
 use uc_observability_contract::error_source::io_error_kind;
 
 use crate::{
-    EngineError, EngineErrorCategory, EntrySummary, OperationResult, QueryHistoryInput,
-    SearchEntriesInput, SearchPageSummary, SearchResultSummary, SearchStatusSummary,
-    SearchTagSummary,
+    CountSearchEntriesInput, DailyEntryCountsInput, EngineError, EngineErrorCategory, EntrySummary,
+    OperationResult, QueryHistoryInput, SearchEntriesInput, SearchPageSummary, SearchResultSummary,
+    SearchStatusSummary, SearchTagSummary,
 };
 
 const QUERY_HISTORY_INVALID_INPUT_CODE: u32 = 1241;
@@ -36,6 +36,7 @@ pub async fn execute_search_entries(
             extensions: input.extensions,
             source_devices: input.source_devices,
             tags: input.tags,
+            tag_match: input.tag_match,
             limit: input.limit,
             offset: input.offset,
         })
@@ -48,6 +49,46 @@ pub async fn execute_search_entries(
         state: page.state,
         items: page.items.into_iter().map(search_result).collect(),
     }))
+}
+
+pub async fn execute_count_search_entries(
+    facade: &AppFacade,
+    input: CountSearchEntriesInput,
+) -> Result<OperationResult, EngineError> {
+    let inputs = input
+        .queries
+        .into_iter()
+        .map(|query| SearchQueryInput {
+            query: query.query,
+            operator: query.operator,
+            time_preset: query.time_preset,
+            from_ms: query.from_ms,
+            to_ms: query.to_ms,
+            content_types: query.content_types,
+            extensions: query.extensions,
+            source_devices: query.source_devices,
+            tags: query.tags,
+            tag_match: query.tag_match,
+            limit: 0,
+            offset: 0,
+        })
+        .collect();
+    let counts = facade
+        .search_count(inputs)
+        .await
+        .map_err(map_search_error)?;
+    Ok(OperationResult::SearchCounts(counts))
+}
+
+pub async fn execute_query_daily_entry_counts(
+    facade: &AppFacade,
+    input: DailyEntryCountsInput,
+) -> Result<OperationResult, EngineError> {
+    let counts = facade
+        .search_daily_counts(input.boundaries_ms)
+        .await
+        .map_err(map_search_error)?;
+    Ok(OperationResult::DailyEntryCounts(counts))
 }
 
 pub async fn execute_query_search_tags(facade: &AppFacade) -> Result<OperationResult, EngineError> {
@@ -159,6 +200,13 @@ fn map_search_error(error: SearchFacadeError) -> EngineError {
             "service_unavailable",
             true,
         ),
+        SearchFacadeError::SessionStateUnavailable(_) => (
+            SEARCH_SERVICE_UNAVAILABLE_CODE,
+            EngineErrorCategory::Unavailable,
+            true,
+            "session_state_unavailable",
+            true,
+        ),
         SearchFacadeError::RebuildAlreadyRunning => (
             SEARCH_REBUILD_ALREADY_RUNNING_CODE,
             EngineErrorCategory::Conflict,
@@ -204,6 +252,7 @@ pub(crate) fn history_search_input(
         extensions: None,
         source_devices: None,
         tags: None,
+        tag_match: None,
         limit: input.limit,
         offset,
     })
@@ -252,7 +301,8 @@ pub(crate) fn map_query_history_error(error: SearchFacadeError) -> EngineError {
         SearchFacadeError::IndexNotReady
         | SearchFacadeError::IndexRebuilding
         | SearchFacadeError::IndexUnavailable
-        | SearchFacadeError::ServiceUnavailable(_) => EngineError::new(
+        | SearchFacadeError::ServiceUnavailable(_)
+        | SearchFacadeError::SessionStateUnavailable(_) => EngineError::new(
             QUERY_HISTORY_UNAVAILABLE_CODE,
             EngineErrorCategory::Unavailable,
             true,

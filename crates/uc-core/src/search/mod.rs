@@ -17,6 +17,6 @@ pub use document::{ContentType, SearchDocument, SearchIndexMeta, SearchPosting};
 pub use error::SearchError;
 pub use key::{RenderKey, SearchKey, SearchKeyContext, SearchProtectionRef};
 pub use pipeline_input::SearchPipelineInput;
-pub use query::{QueryOperator, SearchQuery, TimeRangeFilter};
+pub use query::{QueryOperator, SearchQuery, TagMatchMode, TimeRangeFilter};
 pub use result::{RebuildProgress, RebuildStage, SearchResult, SearchResultsPage};
 pub use tag::{builtin as builtin_tags, TagId, TagKind, TagRule, TaggableContent};

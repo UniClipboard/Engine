@@ -52,6 +52,7 @@ crate 根只保留稳定名称的统一导出，内部按职责分为七层：
 | `WorkspaceConvergenceChanged` | 仅 `dev-tools` 的内部收敛诊断事件；不进入正式宿主和发布产物 |
 | `NetworkRecoveryChanged` | 网络会话恢复开始、等待下一次尝试、成功或最终失败的稳定状态变化 |
 | `ProfileRecoveryChanged` | 资料密钥恢复状态发生变化；宿主仍可通过查询重新取得完整快照 |
+| `SettingsChanged { sections }` | 一次成功保存使持久化设置发生变化，只列出变化的分区（`general`、`sync`、`retention_policy`、`security`、`pairing`、`keyboard_shortcuts`、`file_sync`、`network`、`mobile_sync`、`quick_panel`），不携带设置值；宿主重新调用 `QuerySettings`。所有写入路径共享同一个通知出口，内容没有变化的保存和被拒绝的更新不产生事件 |
 | `RePairingRequired { scope }` | 旧资料独立化完成，需要产品提示重新配对；`all_devices` 表示全部旧设备关系均须重新建立 |
 | `RefreshRequired` | 宿主必须重新查询当前状态 |
 | `OperationFinished` | 一次操作进入成功、失败或取消终态 |
@@ -165,7 +166,9 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 | `QueryDeviceGroupChoices` | 返回 revision、完整设备信任快照，以及当前所有待处理设备组问题与可选设备组 |
 | `ChooseDeviceGroup` | 按问题编号、选择编号和预期 revision 选择设备组；本机将被移除时要求明确确认 |
 | `QueryMembershipDiagnostics` | 仅 `dev-tools`：返回内部成员分支、epoch、冲突、待执行效果和过渡阶段诊断 |
-| `SearchEntries` | 使用关键词、时间、内容类型、来源设备和标签等条件查询加密搜索索引 |
+| `SearchEntries` | 使用关键词、时间、内容类型、来源设备和标签等条件查询加密搜索索引。`tag_match` 取 `any`（默认，命中任一标签）或 `all`（必须同时携带所有标签）；其他维度组内取“或”，维度之间取“且” |
+| `CountSearchEntries` | 批量统计匹配数：每个查询与 `SearchEntries` 走同一套解析与索引路径，`total` 逐项一致，`limit`、`offset` 被忽略；单次最多 32 个查询，按输入顺序返回。加密会话未就绪时返回搜索会话锁定错误，索引重建中返回重建错误，不降级为近似值 |
+| `QueryDailyEntryCounts` | 按调用方给出的严格递增绝对时间戳边界统计条目数，第 `i` 个桶为 `[b[i], b[i+1])`，最多 400 个桶。Engine 不含时区与夏令时规则，日边界由宿主按用户本地时区计算。会话锁定失败关闭，规则与 `CountSearchEntries` 相同 |
 | `QuerySearchTags` | 查询当前索引中的标签和条目数量 |
 | `QuerySearchStatus` | 查询索引是否可用及最近重建时间 |
 | `RebuildSearchIndex` | 请求重建当前加密搜索索引 |

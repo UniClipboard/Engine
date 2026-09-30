@@ -90,9 +90,34 @@ pub enum MembershipHostEvent {
     SpaceDeviceUpdateChanged,
 }
 
+/// 用户设置的分区；变化通知只指出哪些分区变了，不携带任何设置值。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SettingsSection {
+    General,
+    Sync,
+    RetentionPolicy,
+    Security,
+    Pairing,
+    KeyboardShortcuts,
+    FileSync,
+    Network,
+    MobileSync,
+    QuickPanel,
+}
+
+/// 设置子系统事件。
+#[derive(Debug, Clone)]
+pub enum SettingsHostEvent {
+    /// 持久化设置在某次成功保存后发生了变化；宿主必须重新读取完整设置。
+    ///
+    /// `sections` 至少包含一个分区。只表示“重新读取”，不携带设置值。
+    Changed { sections: Vec<SettingsSection> },
+}
+
 /// Unified host event envelope.
 #[derive(Debug, Clone)]
 pub enum HostEvent {
+    Settings(SettingsHostEvent),
     Clipboard(ClipboardHostEvent),
     Transfer(TransferHostEvent),
     Delivery(DeliveryHostEvent),

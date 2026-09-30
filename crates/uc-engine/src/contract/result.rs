@@ -576,6 +576,8 @@ pub enum OperationResult {
     MembershipDiagnostics(MembershipDiagnosticsSummary),
     SpaceProtection(SpaceProtectionSummary),
     SearchPage(SearchPageSummary),
+    SearchCounts(Vec<u32>),
+    DailyEntryCounts(Vec<u32>),
     SearchTags(Vec<SearchTagSummary>),
     SearchStatus(SearchStatusSummary),
     SearchRebuildAccepted {
@@ -878,6 +880,12 @@ impl fmt::Debug for OperationResult {
                 .field("kind", &"space_protection")
                 .field("summary", summary),
             Self::SearchPage(page) => debug.field("kind", &"search_page").field("page", page),
+            Self::SearchCounts(counts) => debug
+                .field("kind", &"search_counts")
+                .field("count_len", &counts.len()),
+            Self::DailyEntryCounts(counts) => debug
+                .field("kind", &"daily_entry_counts")
+                .field("bucket_count", &counts.len()),
             Self::SearchTags(tags) => debug
                 .field("kind", &"search_tags")
                 .field("tag_count", &tags.len()),

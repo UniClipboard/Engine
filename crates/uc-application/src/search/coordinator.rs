@@ -1188,6 +1188,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SearchIndexPort for FakeSearchIndex {
+        async fn count_by_active_time(
+            &self,
+            _boundaries_ms: &[i64],
+        ) -> Result<Vec<u32>, SearchError> {
+            Err(SearchError::IndexUnavailable)
+        }
+
         async fn index_entry(
             &self,
             _document: SearchDocument,
@@ -1236,6 +1243,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SearchIndexPort for BlockingSearchIndex {
+        async fn count_by_active_time(
+            &self,
+            _boundaries_ms: &[i64],
+        ) -> Result<Vec<u32>, SearchError> {
+            Err(SearchError::IndexUnavailable)
+        }
+
         async fn index_entry(
             &self,
             _document: SearchDocument,

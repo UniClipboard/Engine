@@ -78,4 +78,27 @@ pub trait SearchIndexPort: Send + Sync {
     async fn list_tags(&self) -> Result<Vec<SearchTagCount>, SearchError> {
         Ok(Vec::new())
     }
+
+    /// 统计与 [`search`](Self::search) 过滤语义完全一致的匹配条目数。
+    ///
+    /// 默认实现取零条数的一页的 `total`，因此关键词、标签“或/且”、时间、类型、来源等
+    /// 语义与会话锁定行为都与 `search` 同源，不会分叉。分页字段被忽略。
+    async fn count(&self, query: SearchQuery) -> Result<u32, SearchError> {
+        let page = self
+            .search(SearchQuery {
+                limit: 0,
+                offset: 0,
+                ..query
+            })
+            .await?;
+        Ok(page.total)
+    }
+
+    /// 按活跃时间分桶统计条目数。
+    ///
+    /// `boundaries_ms` 是严格递增的桶边界，第 `i` 个桶为 `[boundaries[i], boundaries[i+1])`，
+    /// 返回长度为 `boundaries.len() - 1`。边界本身已经是绝对时间戳，因此本契约不含时区与
+    /// 夏令时规则。会话锁定时与 `search` 一样返回 `SessionLocked`。
+    /// 没有默认实现：包装适配器必须显式转发，不能悄悄退化成“不可用”。
+    async fn count_by_active_time(&self, boundaries_ms: &[i64]) -> Result<Vec<u32>, SearchError>;
 }
