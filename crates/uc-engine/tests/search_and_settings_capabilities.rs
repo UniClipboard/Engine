@@ -505,3 +505,72 @@ async fn settings_updates_emit_a_section_only_change_event() {
     );
     engine.shutdown(Duration::from_secs(15)).await.unwrap();
 }
+
+/// 并发更新不同分区：无论谁先落盘，最终设置里的每处变化都必须被某条通知覆盖。
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_settings_updates_are_all_covered_by_notifications() {
+    let root = tempfile::tempdir().unwrap();
+    let storage = MemorySecureStorage::default();
+    let (engine, mut events) = start(root.path(), &storage).await;
+    create_space(&engine).await;
+    while let Ok(Some(_)) = tokio::time::timeout(Duration::from_millis(500), events.next()).await {}
+
+    let engine = Arc::new(engine);
+    let mut tasks = Vec::new();
+    for round in 0..8 {
+        let language = format!("lang-{round}");
+        let engine_a = Arc::clone(&engine);
+        let engine_b = Arc::clone(&engine);
+        tasks.push(tokio::spawn(async move {
+            engine_a
+                .execute(Operation::UpdateSettings(Box::new(SettingsPatch {
+                    general: Some(GeneralSettingsPatch {
+                        language: Some(Some(language)),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })))
+                .await
+                .unwrap();
+        }));
+        tasks.push(tokio::spawn(async move {
+            engine_b
+                .execute(Operation::UpdateSettings(Box::new(SettingsPatch {
+                    quick_panel: Some(QuickPanelSettingsPatch {
+                        enabled: Some(round % 2 == 0),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })))
+                .await
+                .unwrap();
+        }));
+    }
+    for task in tasks {
+        task.await.unwrap();
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    while let Ok(Some(event)) = tokio::time::timeout(Duration::from_secs(1), events.next()).await {
+        if let EngineEvent::SettingsChanged(changed) = event {
+            seen.extend(changed.sections);
+        }
+    }
+    assert!(seen.contains(&SettingsSectionSummary::General), "{seen:?}");
+    assert!(
+        seen.contains(&SettingsSectionSummary::QuickPanel),
+        "{seen:?}"
+    );
+    let OperationResult::Settings(final_settings) =
+        engine.execute(Operation::QuerySettings).await.unwrap()
+    else {
+        panic!("expected settings")
+    };
+    // 并发任务的落盘顺序不固定，只断言最终值确实来自这些更新之一。
+    assert!(final_settings
+        .general
+        .language
+        .as_deref()
+        .is_some_and(|language| language.starts_with("lang-")));
+    engine.shutdown(Duration::from_secs(15)).await.unwrap();
+}

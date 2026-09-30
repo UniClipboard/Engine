@@ -15,6 +15,9 @@ use uc_core::settings::model::Settings;
 pub(crate) struct NotifyingSettings {
     inner: Arc<dyn SettingsPort>,
     emitter: Arc<dyn HostEventEmitterPort>,
+    /// 串行化“读旧值、保存、通知”，使通知比较的正是这次保存实际改写的磁盘状态。
+    /// 只覆盖本装饰器的保存；调用方各自“读取整份、修改、保存整份”造成的覆盖丢失不在此处理。
+    save_gate: tokio::sync::Mutex<()>,
 }
 
 impl NotifyingSettings {
@@ -22,7 +25,11 @@ impl NotifyingSettings {
         inner: Arc<dyn SettingsPort>,
         emitter: Arc<dyn HostEventEmitterPort>,
     ) -> Self {
-        Self { inner, emitter }
+        Self {
+            inner,
+            emitter,
+            save_gate: tokio::sync::Mutex::new(()),
+        }
     }
 }
 
@@ -33,6 +40,7 @@ impl SettingsPort for NotifyingSettings {
     }
 
     async fn save(&self, settings: &Settings) -> anyhow::Result<()> {
+        let _gate = self.save_gate.lock().await;
         // 保存前的旧值只用于比较；读取失败时无法确定差异，保守地通知所有分区。
         let before = self.inner.load().await.ok();
         self.inner.save(settings).await?;
@@ -233,5 +241,75 @@ mod tests {
         settings.save(&next).await.unwrap();
         let debug = format!("{:?}", emitter.events.lock().unwrap());
         assert!(!debug.contains("private device name"));
+    }
+
+    /// 第一次读取拿到旧快照后才慢慢返回；每次保存记录“磁盘上实际发生的分区变化”。
+    #[derive(Default)]
+    struct SlowFirstLoadSettings {
+        stored: Mutex<Option<Settings>>,
+        loads: Mutex<usize>,
+        transitions: Mutex<Vec<Vec<SettingsSection>>>,
+    }
+
+    #[async_trait]
+    impl SettingsPort for SlowFirstLoadSettings {
+        async fn load(&self) -> anyhow::Result<Settings> {
+            let snapshot = self.stored.lock().unwrap().clone().unwrap_or_default();
+            let call = {
+                let mut loads = self.loads.lock().unwrap();
+                *loads += 1;
+                *loads
+            };
+            if call == 1 {
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            }
+            Ok(snapshot)
+        }
+
+        async fn save(&self, settings: &Settings) -> anyhow::Result<()> {
+            let before = self.stored.lock().unwrap().clone().unwrap_or_default();
+            self.transitions
+                .lock()
+                .unwrap()
+                .push(changed_sections(&before, settings));
+            *self.stored.lock().unwrap() = Some(settings.clone());
+            Ok(())
+        }
+    }
+
+    /// 两个并发保存都基于同一份旧快照（调用方整份覆盖式保存，既有行为）时，
+    /// 后保存者实际把先保存者的改动改回去。通知必须如实报告每次磁盘状态变化，
+    /// 而不是只报告相对过期快照的差异。
+    #[tokio::test]
+    async fn concurrent_saves_report_the_transition_each_save_really_made() {
+        let inner = Arc::new(SlowFirstLoadSettings::default());
+        let emitter = Arc::new(RecordingEmitter::default());
+        let settings = Arc::new(NotifyingSettings::new(inner.clone(), emitter.clone()));
+
+        let base = Settings::default();
+        let mut quick_panel = base.clone();
+        quick_panel.quick_panel.enabled = !base.quick_panel.enabled;
+        let mut language = base.clone();
+        language.general.language = Some("zh-CN".into());
+
+        let first = {
+            let settings = Arc::clone(&settings);
+            tokio::spawn(async move { settings.save(&quick_panel).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let second = {
+            let settings = Arc::clone(&settings);
+            tokio::spawn(async move { settings.save(&language).await })
+        };
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+
+        let transitions = inner.transitions.lock().unwrap().clone();
+        assert_eq!(transitions.len(), 2);
+        assert_eq!(
+            emitter.events.lock().unwrap().as_slice(),
+            transitions.as_slice(),
+            "每次通知都必须等于该次保存实际改写的分区"
+        );
     }
 }
