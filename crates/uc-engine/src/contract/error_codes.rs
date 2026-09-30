@@ -4,6 +4,10 @@
 //! numeric value because callers always interpret an error in the context of
 //! the operation they submitted.
 
+/// 固定监听端口已被占用：启动、解锁触发的会话安装和 `RecoverNetwork` 都可能返回，不可重试，
+/// 需要用户释放或更换端口。
+pub const LISTEN_PORT_UNAVAILABLE_CODE: u32 = 1102;
+
 pub const CREATE_SPACE_PASSPHRASE_MISMATCH_CODE: u32 = 1201;
 pub const CREATE_SPACE_ALREADY_INITIALIZED_CODE: u32 = 1202;
 pub const CREATE_SPACE_FAILED_CODE: u32 = 1203;

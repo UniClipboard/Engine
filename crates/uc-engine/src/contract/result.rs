@@ -49,11 +49,22 @@ pub struct MembershipReadinessSummary {
     pub state: MembershipReadinessStateSummary,
 }
 
+/// 网络重建失败的稳定分类，不携带端口或地址。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkRecoveryFailureSummary {
+    /// 固定监听端口已被占用，需要用户释放或更换端口。
+    ListenPortUnavailable,
+    Other,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkRecoveryStatusSummary {
     pub phase: NetworkRecoveryPhaseSummary,
     pub retryable: bool,
     pub next_retry_in_ms: Option<u64>,
+    /// 仅在 `Failed` 阶段有值：最近一次重建失败的分类。
+    pub failure: Option<NetworkRecoveryFailureSummary>,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]

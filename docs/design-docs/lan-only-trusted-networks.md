@@ -107,15 +107,21 @@ LAN-only 与默认模式。
   后台自动重试没有意义。其他绑定失败仍为可重试的 `1101`。
 - 修改后重启生效，语义同可信网段。也可以经 `RecoverNetwork` 立即应用：它关闭并重建网络会话，重建时重读设置；
   这会关闭操作并取消传输中的文件。重建失败时公开错误为 `1105`，但固定端口被占用保留 `1102`（不可重试）。
-- **已知缺口（2026-09-30 实测）**：保存了被占用的端口后，`Engine::start`（已有可解锁的空间时）与 `RecoverNetwork` 都以
-  `1102` 失败；此时没有可用的 Engine，或操作保持关闭（设置更新返回 `1103`），宿主无法通过 Engine 把端口改回去，只能
-  释放端口或用环境变量 `UC_IROH_BIND_PORT` 覆盖。产品上的处理方式待用户决定，见技术债登记。
+- **已决定的行为（2026-09-30 用户确认）**：保存了被占用的端口后，`Engine::start`（已有可解锁的空间时）与 `RecoverNetwork`
+  都以 `1102` 失败，Engine 不降级、不回退随机端口，也不提供引擎侧的自救路径；此时没有可用的 Engine，或操作保持关闭
+  （设置更新返回 `1103`）。产品侧必须把这个错误清楚地提示给用户：说明固定端口被占用，并提示释放该端口后重试
+  （重新启动即可）。宿主看到的稳定信号：`1102`（公开常量 `error_codes::LISTEN_PORT_UNAVAILABLE_CODE`）、启动快照的
+  `StartupFailureReason::ListenPortUnavailable`、恢复状态的 `failure = ListenPortUnavailable`。
 
 ## 网络设置的宿主接口
 
 - Engine 契约只新增结构化拒绝：`SettingsUpdateOutcome::Rejected { reason, rejection }`，`rejection` 为
   `TrustedNetwork { index, kind } | CustomRelayUrl | Other`，`kind` 为 `InvalidFormat | OutsidePrivateSpace | Duplicate`。
   它取自校验错误本身，不另做校验；`reason` 是可能含用户输入的英文诊断文本，宿主不得解析或记录。
+- 供宿主提示固定端口被占用的稳定信号（不携带端口值）：公开常量 `error_codes::LISTEN_PORT_UNAVAILABLE_CODE`（1102）；
+  `StartupFailureReason::ListenPortUnavailable`（启动快照）；`NetworkRecoveryStatusSummary.failure`
+  （`NetworkRecoveryFailureSummary::ListenPortUnavailable | Other`，仅 `Failed` 阶段有值，随恢复事件一并发布）。
+  移动端绑定不暴露该失败类别，只通过 `BindingError` 的数字码 1102 获得同一信息。
 - UniFFI（iOS/Android）与 napi（HarmonyOS）各新增 `query_network_settings` / `update_network_settings`，是
   `QuerySettings` / `UpdateSettings` 网络部分的投影，不保存状态。更新只含 `trusted_networks`（`Some(列表)` 整体替换，
   `Some([])` 清空）与 `listen_port`（`Some(0)` 恢复随机）；`allow_relay_fallback` 只读，自定义中转继续走各自接口。

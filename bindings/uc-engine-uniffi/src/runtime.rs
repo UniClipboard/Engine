@@ -3304,6 +3304,7 @@ mod tests {
                     phase: uc_engine::NetworkRecoveryPhaseSummary::RetryScheduled,
                     retryable: true,
                     next_retry_in_ms: Some(500),
+                    failure: None,
                 },
             )),
             BindingEvent::NetworkRecoveryChanged {

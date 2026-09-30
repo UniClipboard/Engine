@@ -23,6 +23,76 @@ mod stale_callback;
 
 use lease::{find_lease, open_lease};
 
+/// 固定端口被占用：`RecoverNetwork` 返回公开的 1102，恢复状态带出稳定类别，清除端口后可再恢复。
+#[tokio::test(flavor = "multi_thread")]
+async fn occupied_fixed_port_reaches_the_recovery_status_with_a_stable_category() {
+    use uc_engine::error_codes::LISTEN_PORT_UNAVAILABLE_CODE;
+    use uc_engine::{
+        CreateSpaceInput, Engine, EngineConfig, NetworkRecoveryFailureSummary,
+        NetworkRecoveryPhaseSummary, NetworkSettingsPatch, Operation, OperationResult,
+        SecretString, SettingsPatch,
+    };
+
+    let root = tempfile::tempdir().unwrap();
+    let host = HostCapabilities::new(
+        HostDirectories::new(
+            root.path().join("private"),
+            root.path().join("cache"),
+            root.path().join("temporary"),
+            root.path().join("logs"),
+        ),
+        Box::new(MemorySecureStorage::default()),
+        Box::new(EmptyClipboard),
+        Box::new(EmptyFiles),
+    );
+    let (engine, _events) = Engine::start(EngineConfig::new("2.0.0"), host)
+        .await
+        .unwrap();
+    engine
+        .execute(Operation::CreateSpace(CreateSpaceInput {
+            device_name: Some("port category".into()),
+            passphrase: SecretString::new("port-category-passphrase"),
+            passphrase_confirmation: SecretString::new("port-category-passphrase"),
+        }))
+        .await
+        .unwrap();
+    let occupied = std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    let port = occupied.local_addr().unwrap().port();
+    engine
+        .execute(Operation::UpdateSettings(Box::new(SettingsPatch {
+            network: Some(NetworkSettingsPatch {
+                listen_port: Some(port),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })))
+        .await
+        .unwrap();
+
+    let error = engine
+        .execute(Operation::RecoverNetwork)
+        .await
+        .expect_err("an occupied fixed port must fail the rebuild");
+    assert_eq!(error.code(), LISTEN_PORT_UNAVAILABLE_CODE);
+    assert!(!error.is_retryable());
+
+    let OperationResult::NetworkRecoveryStatus(status) = engine
+        .execute(Operation::QueryNetworkRecoveryStatus)
+        .await
+        .unwrap()
+    else {
+        panic!("expected the recovery status");
+    };
+    assert_eq!(status.phase, NetworkRecoveryPhaseSummary::Failed);
+    assert!(!status.retryable);
+    assert_eq!(
+        status.failure,
+        Some(NetworkRecoveryFailureSummary::ListenPortUnavailable)
+    );
+    drop(occupied);
+    let _ = engine.shutdown(std::time::Duration::from_secs(15)).await;
+}
+
 /// 网络设置更新：整次全有或全无，拒绝带结构化分类且不含用户输入原文，0/空列表表示清除。
 #[tokio::test(flavor = "multi_thread")]
 async fn network_settings_updates_are_structured_and_all_or_nothing() {

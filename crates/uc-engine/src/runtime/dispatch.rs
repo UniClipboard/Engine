@@ -170,6 +170,7 @@ impl EngineRuntime for ProductionRuntime {
                         next_retry_in_ms: status
                             .next_retry_in
                             .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64),
+                        failure: status.failure.map(super::network_recovery_failure),
                     },
                 ));
             }

@@ -7,6 +7,7 @@ pub use peer_connections::{
 };
 
 pub use recovery::{
-    NetworkRecoveryEvent, NetworkRecoveryFacade, NetworkRecoveryPhase, NetworkRecoveryRequestError,
-    NetworkRecoveryStatus, RebuildNetworkSessionError, RebuildNetworkSessionPort,
+    NetworkRecoveryEvent, NetworkRecoveryFacade, NetworkRecoveryFailure, NetworkRecoveryPhase,
+    NetworkRecoveryRequestError, NetworkRecoveryStatus, RebuildNetworkSessionError,
+    RebuildNetworkSessionPort,
 };

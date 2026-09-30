@@ -21,8 +21,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 use uc_application::deps::{LifecycleError, ProfileUpgradeBackupPort};
 use uc_application::facade::{
-    AppFacade, ApplicationRuntime, NetworkRecoveryEvent, ProfileFactoryResetFacade,
-    ProfileFactoryResetOutcome, ProfileFactoryResetRequest,
+    AppFacade, ApplicationRuntime, NetworkRecoveryEvent, NetworkRecoveryFailure,
+    ProfileFactoryResetFacade, ProfileFactoryResetOutcome, ProfileFactoryResetRequest,
 };
 use uc_core::ports::ClockPort;
 use uc_core::TaskRegistry;
@@ -39,8 +39,8 @@ use crate::engine::event_stream::EventSender;
 use crate::error_codes::{PROFILE_RECOVERY_REQUIRED_CODE, PROFILE_UPGRADE_BACKUP_KEY_MISSING_CODE};
 use crate::{
     AdmissionRecoverySummary, EngineConfig, EngineError, EngineErrorCategory, EngineEvent,
-    HostCapabilities, HostFileAccess, NetworkRecoveryPhaseSummary, NetworkRecoveryStatusSummary,
-    RefreshReason,
+    HostCapabilities, HostFileAccess, NetworkRecoveryFailureSummary, NetworkRecoveryPhaseSummary,
+    NetworkRecoveryStatusSummary, RefreshReason,
 };
 use host_clipboard::{spawn_host_clipboard_change_task, HostClipboardChangeRuntime};
 pub(crate) use profile_recovery::RecoverableRuntime;
@@ -96,22 +96,37 @@ fn network_recovery_summary(event: NetworkRecoveryEvent) -> NetworkRecoveryStatu
             phase: NetworkRecoveryPhaseSummary::Recovering,
             retryable: false,
             next_retry_in_ms: None,
+            failure: None,
         },
         NetworkRecoveryEvent::RetryScheduled { delay } => NetworkRecoveryStatusSummary {
             phase: NetworkRecoveryPhaseSummary::RetryScheduled,
             retryable: true,
             next_retry_in_ms: Some(delay.as_millis().min(u128::from(u64::MAX)) as u64),
+            failure: None,
         },
         NetworkRecoveryEvent::Succeeded => NetworkRecoveryStatusSummary {
             phase: NetworkRecoveryPhaseSummary::Idle,
             retryable: false,
             next_retry_in_ms: None,
+            failure: None,
         },
-        NetworkRecoveryEvent::Failed { retryable } => NetworkRecoveryStatusSummary {
+        NetworkRecoveryEvent::Failed { retryable, failure } => NetworkRecoveryStatusSummary {
             phase: NetworkRecoveryPhaseSummary::Failed,
             retryable,
             next_retry_in_ms: None,
+            failure: Some(network_recovery_failure(failure)),
         },
+    }
+}
+
+pub(crate) fn network_recovery_failure(
+    failure: NetworkRecoveryFailure,
+) -> NetworkRecoveryFailureSummary {
+    match failure {
+        NetworkRecoveryFailure::ListenPortUnavailable => {
+            NetworkRecoveryFailureSummary::ListenPortUnavailable
+        }
+        NetworkRecoveryFailure::Other => NetworkRecoveryFailureSummary::Other,
     }
 }
 
@@ -579,14 +594,19 @@ mod tests {
                 phase: crate::NetworkRecoveryPhaseSummary::RetryScheduled,
                 retryable: true,
                 next_retry_in_ms: Some(500),
+                failure: None,
             }
         );
         assert_eq!(
-            network_recovery_summary(NetworkRecoveryEvent::Failed { retryable: false }),
+            network_recovery_summary(NetworkRecoveryEvent::Failed {
+                retryable: false,
+                failure: NetworkRecoveryFailure::ListenPortUnavailable,
+            }),
             crate::NetworkRecoveryStatusSummary {
                 phase: crate::NetworkRecoveryPhaseSummary::Failed,
                 retryable: false,
                 next_retry_in_ms: None,
+                failure: Some(NetworkRecoveryFailureSummary::ListenPortUnavailable),
             }
         );
     }

@@ -396,6 +396,7 @@ fn network_recovery_contract_exposes_one_action_and_one_status_query() {
         phase: uc_engine::NetworkRecoveryPhaseSummary::RetryScheduled,
         retryable: true,
         next_retry_in_ms: Some(1_000),
+        failure: None,
     });
     assert!(format!("{status:?}").contains("network_recovery_status"));
 }

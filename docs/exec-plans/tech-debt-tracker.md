@@ -16,6 +16,6 @@
 | 新会话发布前的出站连接被本机拒绝，每次加入的最终确认多等约 1 秒 | 已定位，候选方案因暴露重启补传问题暂缓 | 先修复同身份重启后握手超时及投递恢复只尝试一次的问题；`interrupted_file_transfer_recovers_after_receiver_process_restart` 连续 10 次通过，且最终确认首连不再 `locally_rejected` | [发现记录](../../.planning/2026-09-26-session-outbound-before-publish/findings.md) |
 | 补发因拨号失败记为 Unreachable 后，对端持续在线时不再有触发 | 已确认：恢复流程只在 Online 状态跃迁事件时补发，复检仍在线不产生事件；同身份重启握手超时的原因已在固定端口同时钉住 IPv6 后消除（`interrupted_file_transfer_recovers_after_receiver_process_restart` 修复后连续 20 次通过，此前约 35–40% 失败） | 投递恢复负责人在补发仍为 Unreachable 且目标在线时安排有界重试；先定间隔与次数上限并经用户确认，用不依赖真实网络的确定性用例覆盖，不能靠加长等待或盲目重试掩盖 | [findings](../../.planning/2026-09-26-session-outbound-before-publish/findings.md) |
 
-| 固定端口被占用后宿主无法自行改回 | 2026-09-30 实测：保存被占用端口后 `Engine::start`（已有可解锁空间）与 `RecoverNetwork` 均以 1102 失败，Engine 不可用或操作保持关闭（设置更新 1103） | 用户决定处理方式（例如网络构建失败时保持设置操作可用，或让宿主在无网络的降级状态下改设置），再实现并补启动与恢复两条路径的测试 | [设计文档](../design-docs/lan-only-trusted-networks.md#固定端口设置) |
+| 成员拓扑 e2e 偶发失败（“nodes did not reach group epoch N”） | 2026-09-30 已复现：`space_membership_auto_pairing_e2e` 的 `topology::` 组在干净 `faf480ea` 上也偶发失败（涉及 f1、f6、offline_member_catches_multiple_removals…），完整运行约 15 分钟，与本机负载不呈简单相关 | 单独立项：查明群组纪元收敛依赖的时序（等待预算、并行度、重试触发），用可复现的最小用例固定后修复；不能靠加长等待掩盖 | [断言位置](../../crates/uc-engine/tests/space_membership_auto_pairing_e2e/harness/membership_topology.rs) |
 
 关闭项目时记录验证证据，更新稳定文档，并将对应计划移入 `completed/`。

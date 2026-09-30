@@ -1,12 +1,15 @@
 use std::sync::atomic::Ordering;
 
 use async_trait::async_trait;
-use uc_application::facade::{RebuildNetworkSessionError, RebuildNetworkSessionPort};
+use uc_application::facade::{
+    NetworkRecoveryFailure, RebuildNetworkSessionError, RebuildNetworkSessionPort,
+};
 use uc_core::FileTransferCancellationReason;
 use uc_observability_contract::diagnostics::DiagnosticOperation;
 
 use super::lifecycle::lifecycle_error;
 use super::{observe_runtime_operation, SessionSupervisor};
+use crate::error_codes::LISTEN_PORT_UNAVAILABLE_CODE;
 use crate::runtime::operation_unavailable_error;
 use crate::EngineError;
 
@@ -32,7 +35,12 @@ impl RebuildNetworkSessionPort for SessionSupervisor {
 
 fn rebuild_error(source: EngineError) -> RebuildNetworkSessionError {
     let retryable = source.is_retryable();
-    RebuildNetworkSessionError::new(source, retryable)
+    let failure = if source.code() == LISTEN_PORT_UNAVAILABLE_CODE {
+        NetworkRecoveryFailure::ListenPortUnavailable
+    } else {
+        NetworkRecoveryFailure::Other
+    };
+    RebuildNetworkSessionError::new(source, retryable).with_failure(failure)
 }
 
 #[cfg(test)]
@@ -41,6 +49,28 @@ mod tests {
 
     use super::rebuild_error;
     use crate::{EngineError, EngineErrorCategory};
+
+    #[test]
+    fn rebuild_classification_marks_an_occupied_listen_port() {
+        let occupied = rebuild_error(EngineError::new(
+            crate::error_codes::LISTEN_PORT_UNAVAILABLE_CODE,
+            EngineErrorCategory::Unavailable,
+            false,
+        ));
+        assert_eq!(
+            occupied.failure(),
+            uc_application::facade::NetworkRecoveryFailure::ListenPortUnavailable
+        );
+        let other = rebuild_error(EngineError::new(
+            1101,
+            EngineErrorCategory::Unavailable,
+            true,
+        ));
+        assert_eq!(
+            other.failure(),
+            uc_application::facade::NetworkRecoveryFailure::Other
+        );
+    }
 
     #[test]
     fn rebuild_classification_preserves_the_original_failure() {

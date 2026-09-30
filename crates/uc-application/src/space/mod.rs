@@ -38,8 +38,9 @@ pub use admission::{
 };
 pub use connectivity::{
     ConnectionHint, ConnectivityOpportunity, NetworkRecoveryEvent, NetworkRecoveryFacade,
-    NetworkRecoveryPhase, NetworkRecoveryRequestError, NetworkRecoveryStatus, PeerConnectionError,
-    RebuildNetworkSessionError, RebuildNetworkSessionPort, RefreshVerifiedPeerAddressPort,
+    NetworkRecoveryFailure, NetworkRecoveryPhase, NetworkRecoveryRequestError,
+    NetworkRecoveryStatus, PeerConnectionError, RebuildNetworkSessionError,
+    RebuildNetworkSessionPort, RefreshVerifiedPeerAddressPort,
 };
 pub use facade::{
     InitializeSpaceInput, InvitationAvailability, IssuePairingInvitationError,

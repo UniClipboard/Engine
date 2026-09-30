@@ -16,7 +16,7 @@ use uc_application::deps::LifecycleError;
 use uc_application::facade::{
     AppFacade, ApplicationAssembly, ApplicationRuntime, ClipboardInboundEvent,
     ClipboardInboundEventAction, ClipboardInboundEventPort, CompletePendingSpaceTransitionError,
-    RebuildNetworkSessionError, RecoverSpaceSessionError, RuntimeLifecycle,
+    NetworkRecoveryFailure, RebuildNetworkSessionError, RecoverSpaceSessionError, RuntimeLifecycle,
 };
 use uc_core::{FileTransferCancellationReason, TaskRegistry};
 use uc_infra::fs::{FsAtomicPublisher, FsHiddenPathMarker, FsInboundFileTarget};
@@ -55,12 +55,11 @@ use super::{
     operation_error_with_code, operation_unavailable_error, profile_recovery_required_error,
     retryable_operation_error_with_code,
 };
+use crate::error_codes::LISTEN_PORT_UNAVAILABLE_CODE;
 use crate::{EngineError, EngineErrorCategory, OperationResult};
 
 const SESSION_OPERATION_GRACE: Duration = Duration::from_secs(2);
 const SESSION_RUNTIME_FAILED_CODE: u32 = 1101;
-/// 设置或环境变量指定的固定监听端口已被占用。需要用户更换端口或释放端口，自动重试无意义。
-const LISTEN_PORT_UNAVAILABLE_CODE: u32 = 1102;
 
 #[cfg(feature = "dev-tools")]
 #[derive(Default)]
@@ -164,15 +163,18 @@ fn network_build_error(error: anyhow::Error) -> EngineError {
 }
 
 /// 重建网络会话失败时的公开错误。固定端口被占用是用户可处理的独立分类，保留 1102；
-/// 其余失败统一为 1105，是否可重试沿用来源。
+/// 其余失败统一为 1105，是否可重试沿用来源。分类由构造失败的一方标明，这里不再解析来源链。
 pub(crate) fn rebuild_failure_error(error: &RebuildNetworkSessionError) -> EngineError {
-    std::error::Error::source(error)
-        .and_then(|cause| cause.downcast_ref::<EngineError>())
-        .filter(|cause| cause.code() == LISTEN_PORT_UNAVAILABLE_CODE)
-        .cloned()
-        .unwrap_or_else(|| {
+    match error.failure() {
+        NetworkRecoveryFailure::ListenPortUnavailable => EngineError::new(
+            LISTEN_PORT_UNAVAILABLE_CODE,
+            EngineErrorCategory::Unavailable,
+            false,
+        ),
+        NetworkRecoveryFailure::Other => {
             EngineError::new(1105, EngineErrorCategory::Unavailable, error.is_retryable())
-        })
+        }
+    }
 }
 
 #[cfg(any(test, feature = "dev-tools"))]
@@ -1495,7 +1497,8 @@ mod tests {
                 false,
             ),
             false,
-        );
+        )
+        .with_failure(NetworkRecoveryFailure::ListenPortUnavailable);
         let error = rebuild_failure_error(&occupied);
         assert_eq!(error.code(), LISTEN_PORT_UNAVAILABLE_CODE);
         assert!(!error.is_retryable());
