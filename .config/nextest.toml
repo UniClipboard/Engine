@@ -227,3 +227,13 @@ slow-timeout = { period = "300s", terminate-after = 12 }
 filter = "package(uc-upgrade-matrix)"
 test-group = "upgrade-matrix"
 slow-timeout = { period = "120s", terminate-after = 8 }
+
+# 编译期字段目录 UI 测试在测试内用 trybuild 另建一个工程并编译全部失败样例；冷缓存的 CI 上单项超过 20 秒，
+# 不是卡死。期限需覆盖冷编译，测试本身仍然运行并逐条比对编译器输出。
+[[profile.default.overrides]]
+filter = "package(uc-observability-contract) & binary(log_event_ui)"
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-observability-contract) & binary(log_event_ui)"
+slow-timeout = { period = "60s", terminate-after = 5 }
