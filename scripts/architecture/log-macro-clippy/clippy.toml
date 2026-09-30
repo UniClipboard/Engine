@@ -1,0 +1,10 @@
+# 只用于 check-log-macro-ratchet.mjs：通过 CLIPPY_CONF_DIR 启用，不影响日常 cargo clippy。
+# 禁止直接使用 tracing 日志宏；`tracing::event` 不在其中，因为 `uc_*!` 宏展开为 event!，
+# 直接使用 event! 由 check-rust-style.mjs 单独拒绝。
+disallowed-macros = [
+  "tracing::trace",
+  "tracing::debug",
+  "tracing::info",
+  "tracing::warn",
+  "tracing::error",
+]

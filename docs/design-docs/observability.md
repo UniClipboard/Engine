@@ -379,6 +379,12 @@ decorator 负责。Sponsor 在等待执行锁之前确定已认证消息的固�
   已插值的消息，所以这一条靠静态检查保证。
 - **敏感值。** 设备名、路径、地址、节点或对端标识、邀请、令牌、密钥、剪贴板内容、文件名若可能进入日志字段、span 字段或错误文本，
   必须用 `Sensitive<T>` 包装；`Sensitive` 的 `Debug` 与 `Display` 只输出 `<redacted>`。任意 `Display` 不因“只是字符串”而视为安全。
+- **写入口与字段目录（ADR-030，迁移中）。** 新的记录点使用 `uc_trace!`、`uc_debug!`、`uc_info!`、`uc_warn!`、`uc_error!`
+  （`uc_observability_contract::log_event`）：字段名必须登记在 `log_fields` 目录，值必须是该字段声明类别接受的类型
+  （固定词表字面量、经 `id(&x)` 适配的应用生成随机标识、数字、布尔），`error = &e as &dyn Error` 是唯一特例。
+  未登记字段与类别不符是编译错误，取代运行期 `<omitted>`。运行期文本字段白名单由目录并上过渡清单 `LEGACY_TEXT_FIELDS` 得出；
+  字段迁移到目录后从过渡清单移除。直接使用 `tracing` 日志宏的数量由 `check-log-macro-ratchet.mjs` 按文件只减不增，
+  `tracing::event!` 只有观测 crate 自己可以直接使用。
 - **规则检查。** `check-rust-style.mjs` 对新增行要求 `#[instrument]` 带 `skip_all` 或显式 `fields(..)`、日志字段名已在上述清单中归类、消息正文为字面量，并拒绝 `#[error]` 文本内插
   `String`、`PathBuf`、`Vec<u8>`、`&str` 等未包装字段（文本启发式，需要人工复核）。
 

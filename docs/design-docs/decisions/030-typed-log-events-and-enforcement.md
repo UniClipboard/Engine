@@ -32,8 +32,8 @@
      （固定词表枚举、`&'static str` 字面量、应用生成的随机标识、`Sensitive<T>`）；裸 `String`、`&str` 变量、路径、地址无法通过编译。
    - workspace clippy 启用 `disallowed_macros`，禁止业务 crate 直接使用 `tracing::{trace,debug,info,warn,error}!`。
      封装宏所在 crate 显式豁免。工具链固定为 1.95.0，该 lint 可用。
-   - 存量调用点用基线计数棘轮迁移：CI 比较 clippy 报告的违规数与已提交基线，只许减少不许增加；
-     被修改的文件必须清零。不做一次性全量迁移。
+   - 存量调用点用基线计数棘轮迁移：CI 比较 clippy 报告的违规数与已提交基线，只许减少不许增加，减少后基线同步下调；
+     逐模块迁移到清零是 M2 的目标，不是门禁。不做一次性全量迁移。
 2. **事件与字段词表单点声明并生成。**
    - `DiagnosticTaskKind`、日志字段名与允许取值、`error_kind` 词表用一份声明生成枚举、`as_str`、白名单与 schema 快照。
    - 新增变体只改声明；生成结果由快照测试守护，声明与生成物不一致时测试失败。
@@ -88,7 +88,6 @@
 
 ## 未验证项
 
-- `lan-compat` 等非默认特性下的违规数；上面的全量计数只覆盖默认特性。
 - 棘轮基线的载体与 CI 耗时；需要新增一个只报告 `disallowed_macros` 的 clippy 步骤。
 - 分类 trait 能否覆盖跨 crate 的 `#[source]` 链而不引入新的循环依赖。
 - 封装宏对 span 字段（`#[instrument(fields(..))]`）的覆盖方式；`#[instrument]` 约 130 处不受 lint 影响，需要单独方案。

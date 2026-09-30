@@ -375,9 +375,22 @@ function logMacroViolations(path, lines, lineNumber) {
   return violations
 }
 
+// `uc_*!` 宏展开为 `tracing::event!`，所以只有观测 crate 自己可以直接使用它。
+const EVENT_MACRO = /\b(?:tracing::)?event!\s*\(/
+const EVENT_MACRO_OWNERS = ['crates/uc-observability-contract/', 'crates/uc-observability-runtime/']
+
 function logPrivacyViolations(path, lines, codeLines, lineNumber) {
   const violations = [...logMacroViolations(path, lines, lineNumber)]
   const code = codeLines[lineNumber - 1] ?? ''
+  if (EVENT_MACRO.test(code) && !EVENT_MACRO_OWNERS.some(owner => path.startsWith(owner))) {
+    violations.push({
+      path,
+      line: lineNumber,
+      source: lines[lineNumber - 1].trim(),
+      type: 'error-source',
+      message: '不得直接使用 tracing::event!；改用 uc_*! 日志宏（ADR-030）',
+    })
+  }
   if (INSTRUMENT_ATTRIBUTE.test(code)) {
     const text = attributeText(codeLines, lineNumber)
     if (!/\bskip_all\b|\bfields\s*\(/.test(text)) {

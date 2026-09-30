@@ -53,7 +53,8 @@ uc_warn!(error = &err as &dyn std::error::Error, "history cleanup failed");
 - workspace clippy 使用独立配置禁止五个 tracing 宏（不含 `tracing::event`，见 ADR 试验）；
   观测三个 crate 与测试文件通过配置豁免或 `cfg_attr(test, allow(..))`。
 - 新增 CI 步骤只统计 `clippy::disallowed_macros`，与整体 clippy 是否通过无关（当前整体不干净，且 CI 不跑 clippy）。
-- 基线文件按文件记录违规数，脚本对比：任何文件的计数只许下降；被本次修改的文件必须为 0。
+- 基线文件按文件记录违规数，脚本对比：任何文件的计数只许下降，下降后基线必须同步下调。“被修改的文件清零”不作为门禁（会让一行改动被迫迁移几十处），
+  而是 M2 逐模块迁移的目标。
 - `check-rust-style.mjs` 增加：拒绝 `tracing::event!` 直接使用、拒绝 `uc_*!` 消息中的内插与位置参数。
 
 ## 阶段
@@ -68,8 +69,13 @@ uc_warn!(error = &err as &dyn std::error::Error, "history cleanup failed");
   实施中定下的细节：字段名不含点号（仓库 2 处带点字段改名，不进目录）；`Literal` 类别只接受 `&'static str` 或为自己实现
   `Accept<Literal>` 的封闭枚举；类别约束放在调用点（`Accept::<fields::名::Class>::accept`），`#[diagnostic::on_unimplemented]`
   给出稳定报错，避免每次新增字段都改写 `trybuild` 的期望输出；`target:` 暂接受任意表达式，M2 再收紧到目录常量。
-- [ ] **M1 强制与基线**：clippy 配置与豁免、基线文件（初值 935）、棘轮脚本与其测试、CI 步骤、`check-rust-style.mjs` 规则。
-  验收：故意新增一处 `tracing::warn!` 使 CI 失败；删除一处后基线可下调。
+- [x] **M1 强制与基线（2026-09-29 完成）**：`scripts/architecture/log-macro-clippy/clippy.toml`（只经 `CLIPPY_CONF_DIR` 启用，
+  日常 clippy 不受影响）、`check-log-macro-ratchet.mjs` 与其测试、`log-macro-baseline.json`、PR Check 步骤、
+  `check-rust-style.mjs` 拒绝观测 crate 之外直接使用 `tracing::event!`。
+  实测基线 945 处 / 199 个文件：默认特性 932，加 `uc-engine/lan-compat` 后 945（多 13 处），所以脚本跑两轮并取并集。
+  用 `--cap-lints warn -A clippy::all -W clippy::disallowed_macros` 避开仓库已有的 clippy 错误，只统计目标 lint。
+  端到端验证：故意新增一处 `tracing::warn!` 使脚本以 1 退出并指出文件与行号，撤销后通过。
+  未采用的原方案：观测 crate 与测试文件不设豁免，其现有违规照常计入基线，避免维护第二套豁免清单。
 - [ ] **M2 逐 crate 迁移**：顺序 `uc-application`（409）→ `uc-engine`（105）→ `uc-infra`（351）→ 其余；
   每个提交只迁一个模块，基线同步下调。内容派生哈希字段逐个裁决：改成不记录，或改用 `Sensitive`。
   补日志任务的 55 条缺口在 M0、M1 完成后直接使用新宏写入，不先写旧式再迁移。
@@ -92,6 +98,5 @@ uc_warn!(error = &err as &dyn std::error::Error, "history cleanup failed");
 
 ## 仍开放
 
-- `lan-compat` 等非默认特性下的违规数，M1 前补测；`warn_on_error!` 的 12 个调用点已改为 `event!`，M1 基线以 M0 之后重新计数为准，不沿用 935。
 - `bindings`（13 处，只能依赖 `uc-engine`）与 `compatibility`（39 处，独立发布线）能否直接使用宏，M2 前核对；若需经 `uc-engine` 再导出，先论证不属于为观测扩大 facade。
 - 基线文件与 `RUST_STYLE_BASE_SHA` 差异检查并存时的冲突处理，M1 内定。

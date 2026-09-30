@@ -456,3 +456,13 @@ macro_rules! forward {
 `)
   assert.equal(result.status, 0, result.stderr)
 })
+
+test('拒绝观测 crate 之外直接使用 tracing::event!', () => {
+  const result = check(`
+fn log() {
+    tracing::event!(tracing::Level::WARN, error_kind = "fixed", "sync stopped");
+}
+`)
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /不得直接使用 tracing::event!/)
+})
