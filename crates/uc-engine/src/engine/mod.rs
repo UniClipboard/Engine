@@ -112,9 +112,6 @@ impl Engine {
     ) -> Result<(Self, EventStream), EngineError> {
         const EVENT_CAPACITY: usize = 256;
 
-        // 模块日志按登记的错误类型渲染错误链；登记幂等且早于升级与恢复路径，只增加识别范围。
-        uc_application::deps::register_log_safe_errors();
-        uc_infra::register_log_safe_errors();
         let (events, stream) = event_channel(EVENT_CAPACITY);
         let runtime = Arc::new(
             RecoverableRuntime::start(config, host, events.clone(), Arc::clone(&progress.store))

@@ -1,3 +1,4 @@
+use crate::space::admission::failure_log::warn_state_failure;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use uc_application::deps::{
@@ -19,7 +20,6 @@ use super::super::repository::token::{sponsor_existing_token, sponsor_fresh_toke
 use super::super::repository::{
     AdmissionRefusal, SpaceAdmissionStateStoreError, SqliteSpaceAdmissionState,
 };
-use uc_observability_contract::uc_warn;
 
 const INVITATION_CLAIM_FORMAT_V1: u16 = 1;
 
@@ -121,13 +121,7 @@ impl<E: DbExecutor + Send + Sync> SponsorAdmissionStatePort for SqliteSpaceAdmis
                 .map_err(map_sponsor_error)
         })
         .await;
-        if let Err(error) = &result {
-            uc_warn!(
-                error = error as &dyn std::error::Error,
-                "sponsor admission state load failed"
-            );
-        }
-        result
+        warn_state_failure!(result, "sponsor admission state load failed")
     }
 
     #[tracing::instrument(name = "space_admission.sponsor_state.commit", skip_all)]
@@ -215,10 +209,7 @@ impl<E: DbExecutor + Send + Sync> SponsorAdmissionStatePort for SqliteSpaceAdmis
             .await
         }
         .await;
-        uc_observability_contract::warn_on_error!(
-            result,
-            "space_admission.sponsor_state.commit failed"
-        )
+        warn_state_failure!(result, "space_admission.sponsor_state.commit failed")
     }
 }
 

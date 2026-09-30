@@ -1,3 +1,4 @@
+use crate::space::admission::failure_log::warn_state_failure;
 use async_trait::async_trait;
 use uc_application::deps::{
     AdmissionRecoveryCommitToken, AdmissionRecoveryTrigger, LoadedAdmissionRecovery,
@@ -30,10 +31,7 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
             .await
         }
         .await;
-        uc_observability_contract::warn_on_error!(
-            result,
-            "space_admission.recovery_state.verify failed"
-        )
+        warn_state_failure!(result, "space_admission.recovery_state.verify failed")
     }
 
     #[tracing::instrument(name = "space_admission.recovery_state.load", skip_all)]
@@ -88,10 +86,7 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
             .await
         }
         .await;
-        uc_observability_contract::warn_on_error!(
-            result,
-            "space_admission.recovery_state.load failed"
-        )
+        warn_state_failure!(result, "space_admission.recovery_state.load failed")
     }
 
     #[tracing::instrument(name = "space_admission.recovery_state.commit", skip_all)]
@@ -150,10 +145,7 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
             .await
         }
         .await;
-        uc_observability_contract::warn_on_error!(
-            result,
-            "space_admission.recovery_state.commit failed"
-        )
+        warn_state_failure!(result, "space_admission.recovery_state.commit failed")
     }
 
     async fn commit_sponsor_deadline(

@@ -3,6 +3,7 @@ use std::{collections::HashSet, fmt};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::error_class::ErrorClass;
 use crate::ids::{DeviceId, SpaceId};
 use crate::space_access::GroupAdmission;
 
@@ -1416,6 +1417,31 @@ pub enum KeyEpochError {
 
     #[error("key epoch state rejected: {0:?}")]
     StateIssue(KeyEpochStateIssue),
+}
+
+impl ErrorClass for KeyEpochError {
+    fn class(&self) -> &'static str {
+        match self {
+            Self::EpochOverflow => "epoch_overflow",
+            Self::InvalidContentKeyId => "invalid_content_key_id",
+            Self::InvalidProtectionGroupId => "invalid_protection_group_id",
+            Self::ContentKeyReuse => "content_key_reuse",
+            Self::SpaceNotReady => "space_not_ready",
+            Self::InvalidSpaceSecurityTransition { .. } => "invalid_space_security_transition",
+            Self::InvalidRevocationStage => "invalid_revocation_stage",
+            Self::InvalidRevocationRecord => "invalid_revocation_record",
+            Self::DecryptionFailed { .. } => "decryption_failed",
+            Self::PersistedStateIntegrityFailed { .. } => "persisted_state_integrity_failed",
+            Self::SecurityState { .. } => "security_state",
+            Self::RemovedMemberInOutbox => "removed_member_in_outbox",
+            Self::RevocationRecipientNotFound => "revocation_recipient_not_found",
+            Self::PermanentLossRecipientNotPending => "permanent_loss_recipient_not_pending",
+            Self::InvalidRevocationId => "invalid_revocation_id",
+            Self::InvalidRevocationTransition { .. } => "invalid_revocation_transition",
+            Self::Repository(_) => "repository",
+            Self::StateIssue(_) => "state_issue",
+        }
+    }
 }
 
 /// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。

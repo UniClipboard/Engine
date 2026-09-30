@@ -1,3 +1,4 @@
+use crate::space::admission::failure_log::warn_state_failure;
 use async_trait::async_trait;
 use uc_application::deps::{
     JoinerStartMutation, JoinerStartStateError, JoinerStartStatePort, LoadedJoinerStartState,
@@ -58,10 +59,7 @@ impl<E: DbExecutor + Send + Sync> JoinerStartStatePort for SqliteSpaceAdmissionS
             .await
         }
         .await;
-        uc_observability_contract::warn_on_error!(
-            result,
-            "space_admission.joiner_state.load failed"
-        )
+        warn_state_failure!(result, "space_admission.joiner_state.load failed")
     }
 
     #[tracing::instrument(name = "space_admission.joiner_state.commit", skip_all)]
@@ -165,10 +163,7 @@ impl<E: DbExecutor + Send + Sync> JoinerStartStatePort for SqliteSpaceAdmissionS
         .await
     }
         .await;
-        uc_observability_contract::warn_on_error!(
-            result,
-            "space_admission.joiner_state.commit failed"
-        )
+        warn_state_failure!(result, "space_admission.joiner_state.commit failed")
     }
 }
 

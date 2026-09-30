@@ -40,9 +40,3 @@ pub use security::{
     KeyMaterialStore, MigrationSpaceAccessAdapter, OpenMlsHistoricalSignatureVerifier,
     RuntimeSpaceAccessAdapter, SpaceSessionRebindAdapter,
 };
-
-/// 本模块拥有的、可安全进入日志的错误类型识别函数。
-pub(crate) fn error_layer_renderers(
-) -> Vec<uc_observability_contract::module_log::ErrorLayerRenderer> {
-    vec![admission::repo_error_layers]
-}

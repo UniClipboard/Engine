@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
+use uc_core::error_class::ErrorClass;
 use uc_observability_contract::diagnostics::connectivity::{
     record_pending_group_updates, LocalWorkObservation, LocalWorkOutcome, LocalWorkStep,
 };
@@ -258,7 +259,7 @@ fn classify_store_error(error: &KeyEpochError) -> MembershipMaintenanceStepOutco
         | KeyEpochError::SecurityState { .. }
         | KeyEpochError::SpaceNotReady => {
             uc_debug!(
-                error = error as &dyn std::error::Error,
+                error_class = error.class(),
                 "group update store unavailable; delivery deferred"
             );
             MembershipMaintenanceStepOutcome::Deferred
@@ -266,7 +267,7 @@ fn classify_store_error(error: &KeyEpochError) -> MembershipMaintenanceStepOutco
         _ => {
             uc_warn!(
                 error_kind = "group_update_store",
-                error = error as &dyn std::error::Error,
+                error_class = error.class(),
                 "group update store is corrupt; delivery stopped"
             );
             MembershipMaintenanceStepOutcome::Corrupt

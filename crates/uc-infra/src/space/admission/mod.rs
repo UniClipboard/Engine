@@ -1,6 +1,7 @@
 mod credentials;
 mod digest;
 mod display;
+mod failure_log;
 mod full_invitation;
 mod joiner;
 mod recovery;
@@ -25,7 +26,6 @@ pub use joiner::{
     DefaultJoinerCandidatePreparation, DefaultJoinerInvitationPreparation,
     DefaultJoinerStartMaterial,
 };
-pub(crate) use repository::repo_error_layers;
 #[cfg(feature = "test-util")]
 pub use repository::AdmissionRepositoryBenchmark;
 pub use repository::SqliteSpaceAdmissionState;

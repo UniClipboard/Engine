@@ -1,3 +1,4 @@
+use crate::space::admission::failure_log::warn_state_failure;
 use async_trait::async_trait;
 use uc_application::deps::{
     JoinerActivationCommitToken, JoinerActivationMutation, JoinerActivationStateError,
@@ -45,7 +46,7 @@ impl<E: DbExecutor + Send + Sync> JoinerActivationStatePort for SqliteSpaceAdmis
                 .map_err(map_activation_error)
         }
         .await;
-        uc_observability_contract::warn_on_error!(
+        warn_state_failure!(
             result,
             "space_admission.joiner_activation_state.load failed"
         )
@@ -124,7 +125,7 @@ impl<E: DbExecutor + Send + Sync> JoinerActivationStatePort for SqliteSpaceAdmis
             .await
         }
         .await;
-        uc_observability_contract::warn_on_error!(
+        warn_state_failure!(
             result,
             "space_admission.joiner_activation_state.commit failed"
         )

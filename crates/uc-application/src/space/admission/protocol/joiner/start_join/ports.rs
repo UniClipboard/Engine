@@ -2,6 +2,7 @@ use super::model::{
     JoinerStartMaterial, JoinerStartMutation, LoadedJoinerStartState, PreparedJoinerInvitation,
     SpaceAdmissionCommitToken,
 };
+use uc_core::error_class::ErrorClass;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PrepareJoinerInvitationError {
@@ -117,6 +118,17 @@ pub enum JoinerStartStateError {
 
     #[error("joiner start state is unavailable")]
     Unavailable,
+}
+
+impl ErrorClass for JoinerStartStateError {
+    fn class(&self) -> &'static str {
+        match self {
+            Self::Locked => "locked",
+            Self::StateChanged => "state_changed",
+            Self::RecoveryRequired => "recovery_required",
+            Self::Unavailable => "unavailable",
+        }
+    }
 }
 
 impl From<JoinerStartStateError> for JoinSpaceError {

@@ -71,13 +71,15 @@ Application 对依赖、存储、网络、系统或密码能力失败进行稳�
 令牌、设备名、地址、邀请、文件名、文件路径或其他敏感负载。
 
 保留下来的 source chain 供类型判断、固定分类提取和模块日志的错误链使用。合同记录仍不以 `%error`、`{:#}` 或 `?error`
-输出错误正文；模块日志在完整负责人处以 `error = &e as &dyn std::error::Error` 记录，逐层渲染并只输出已登记类型的文本
-（规则见[运行期观测](observability.md#模块日志)）。日志字段要求见[运行期观测](observability.md#错误来源与日志字段)。
+输出错误正文。仓库自有错误类型实现 `uc_core::error_class::ErrorClass`，在完整负责人处以 `error_class = e.class()` 记录变体级固定分类；
+第三方与 anyhow 错误在记录点用 `error = &e as &dyn std::error::Error`，模块日志只渲染其中的 `io::Error` 与 `serde_json::Error`
+摘要，其余层写 `<opaque>`（规则见[运行期观测](observability.md#模块日志)）。日志字段要求见[运行期观测](observability.md#错误来源与日志字段)。
 
 表示业务拒绝的错误不得是没有原因的单元变体：变体携带 `#[source]` 指向一个固定原因类型，其 `#[error]` 文本只含固定文字与枚举变体名，
 使错误链能说明拒绝原因（例：`SpaceAdmissionStateStoreError::Conflict` 的来源 `AdmissionRefusal::UnsettledAttempt`，
-文本 `space admission refused: unsettled_attempt <记录角色> <义务>`）。拥有错误类型的 crate 用
-`uc_observability_contract::log_safe_errors!` 登记这些类型，未登记的层在日志中记为 `<opaque>`。
+文本 `space admission refused: unsettled_attempt <记录角色> <义务>`）。`ErrorClass::class` 对变体穷举匹配（不写通配分支），
+新增变体时由编译器要求补充分类；拒绝原因等下层细节由持有具体类型的记录点用 `source_class` 另行写出（例：准入状态仓储的
+`SpaceAdmissionStateStoreError` 分类含 `AdmissionRefusal` 原因）。分类名是字面量 snake_case，不携带运行期值。
 `#[error]` 文本不得内插 `String`、`PathBuf`、`Vec<u8>` 等自由文本字段，需要时用 `Sensitive<T>` 包装。
 
 ## 测试

@@ -50,7 +50,7 @@
   `crates/uc-observability-runtime/src/module_log_fields.rs`（`ALLOWED_TEXT_FIELDS` 与 `REVIEWED_OMITTED_FIELDS`）；
   自由文本字段默认省略为 `<omitted>`；5 处消息正文内插已改为字面量 + 字段（其中一处原先把 diesel 错误正文写进消息）；
   `check-rust-style.mjs` 对新增行强制：字段名已归类、消息为字面量、`#[instrument]` 带 `skip_all`/`fields(..)`、
-  `#[error]` 不内插自由文本；`check-module-log-errors.mjs` 拒绝已登记类型内插自由文本。
+  `#[error]` 不内插自由文本；`check-module-log-errors.mjs` 拒绝已登记类型内插自由文本（该检查与登记机制已随 ADR-030 第 3 步于 2026-09-30 删除）。
   45 个内插自由文本的 `#[error]` 类型未登记，链上只出 `<opaque>`。用户已决定删除发布构建开关，所有构建启用（2026-09-29，用户原话：“删除这个开关， 都启用”）。
 - P2：12 处 `instrument(err)` 已迁移为 `warn_on_error!`（完整链）。按用户决定删除 `LocalCompletionDetail` 的本地
   `error.chain`/`error.call_path`（`source_chain()` 及其 `error.call_path` 重复）；`error.phase`/`error.reason` 保留。

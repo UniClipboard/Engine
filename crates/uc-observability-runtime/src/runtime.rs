@@ -17,8 +17,7 @@ use crate::local_file::LocalFileRuntime;
 use crate::module_log::{is_engine_source, module_metadata, ModuleLogLayer, ModuleLogStats};
 use crate::remote_health::record_remote_setup_degraded;
 use crate::status::{
-    FlushSummary, ObservabilityHealth, RemoteSetupFailure, SetupStatus, ShutdownSummary,
-    SignalResult,
+    FlushSummary, ObservabilityHealth, SetupStatus, ShutdownSummary, SignalResult,
 };
 use crate::subscriber::{local_health_layer, system_layer};
 use crate::telemetry::TelemetryRuntime;
@@ -767,6 +766,7 @@ mod tests {
     use std::sync::Barrier;
 
     use super::*;
+    use crate::status::RemoteSetupFailure;
     use crate::{
         CaptureEndReason, DeploymentEnvironment, LocalCaptureMode, LocalLogConfig,
         ObservabilityResource, OperatingSystem,

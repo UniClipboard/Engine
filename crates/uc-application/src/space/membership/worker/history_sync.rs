@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
+use uc_core::error_class::ErrorClass;
 
 use async_trait::async_trait;
 use futures::{stream, StreamExt};
@@ -481,7 +482,7 @@ impl UnexpectedExchange {
             ),
             Self::Export(error) => uc_warn!(
                 error_kind = "history_export",
-                error = error as &dyn std::error::Error,
+                error_class = error.class(),
                 "membership history export failed; peer sync deferred"
             ),
             Self::PeerReply(reject_reason) => uc_info!(

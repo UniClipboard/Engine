@@ -1,3 +1,5 @@
+use uc_core::error_class::ErrorClass;
+
 #[derive(Debug, thiserror::Error)]
 pub enum SponsorAdmissionStateError {
     #[error("sponsor admission state is locked")]
@@ -20,6 +22,17 @@ pub enum SponsorAdmissionStateError {
         #[source]
         source: anyhow::Error,
     },
+}
+
+impl ErrorClass for SponsorAdmissionStateError {
+    fn class(&self) -> &'static str {
+        match self {
+            Self::Locked { .. } => "locked",
+            Self::StateChanged { .. } => "state_changed",
+            Self::RecoveryRequired { .. } => "recovery_required",
+            Self::Unavailable { .. } => "unavailable",
+        }
+    }
 }
 
 impl SponsorAdmissionStateError {

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use uc_core::error_class::ErrorClass;
 
 use thiserror::Error;
 
@@ -37,6 +38,15 @@ pub enum SearchShutdownError {
         #[source]
         source: tokio::task::JoinError,
     },
+}
+
+impl ErrorClass for SearchShutdownError {
+    fn class(&self) -> &'static str {
+        match self {
+            Self::Coordinator { .. } => "coordinator",
+            Self::Task { .. } => "task",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

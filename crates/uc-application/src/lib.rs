@@ -8,7 +8,6 @@ pub(crate) mod application;
 pub mod deps;
 pub(crate) mod error;
 pub mod facade;
-mod log_safe_errors;
 pub(crate) mod profile;
 pub(crate) mod runtime_lifecycle;
 

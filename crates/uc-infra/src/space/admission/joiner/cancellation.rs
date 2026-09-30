@@ -1,3 +1,4 @@
+use crate::space::admission::failure_log::warn_state_failure;
 use async_trait::async_trait;
 use rand::RngCore;
 use uc_application::deps::{
@@ -69,10 +70,7 @@ impl<E: DbExecutor + Send + Sync> CurrentJoinAdmissionStatePort for SqliteSpaceA
                 .map_err(map_state_error)
         }
         .await;
-        uc_observability_contract::warn_on_error!(
-            result,
-            "space_admission.current_join_state.load failed"
-        )
+        warn_state_failure!(result, "space_admission.current_join_state.load failed")
     }
 
     #[tracing::instrument(name = "space_admission.current_join_state.commit", skip_all)]
@@ -132,10 +130,7 @@ impl<E: DbExecutor + Send + Sync> CurrentJoinAdmissionStatePort for SqliteSpaceA
                 .map_err(map_state_error)
         }
         .await;
-        uc_observability_contract::warn_on_error!(
-            result,
-            "space_admission.current_join_state.commit failed"
-        )
+        warn_state_failure!(result, "space_admission.current_join_state.commit failed")
     }
 }
 

@@ -1,6 +1,7 @@
 //! 成员状态负责人与执行器需要的外部能力。
 
 use async_trait::async_trait;
+use uc_core::error_class::ErrorClass;
 use uc_core::ids::DeviceId;
 use uc_core::membership::{MembershipDecisionV2, MembershipEventV2, UnfinishedMemberEffect};
 
@@ -27,6 +28,18 @@ pub enum MembershipLedgerError {
 }
 
 /// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl ErrorClass for MembershipLedgerError {
+    fn class(&self) -> &'static str {
+        match self {
+            Self::Locked => "locked",
+            Self::Conflict => "conflict",
+            Self::Corrupt { .. } => "corrupt",
+            Self::Unavailable { .. } => "unavailable",
+            Self::RecoveryRequired => "recovery_required",
+        }
+    }
+}
+
 impl MembershipLedgerError {
     pub fn corrupt() -> Self {
         Self::Corrupt { source: None }

@@ -28,8 +28,6 @@ use uc_core::ports::*;
 use uc_core::MemberRepositoryPort;
 use uc_observability_contract::analytics::AnalyticsPort;
 
-pub use crate::log_safe_errors::register_log_safe_errors;
-
 pub use crate::space::{KnownPeerIdentity, PeerAccess, PeerIdentityDirectoryPort};
 
 pub use crate::application::{

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use uc_core::error_class::ErrorClass;
 
 use uc_core::membership::{
     HistoricalMembershipSignatureVerifier, LedgerInput, LedgerOutcome, MemberInstanceId,
@@ -571,7 +572,7 @@ fn decode_target_failed(error: &MembershipHistoryV2Error) -> RecoverMembershipCo
     uc_warn!(
         stage = "decode_target",
         error_kind = "decode",
-        error = error as &dyn std::error::Error,
+        error_class = error.class(),
         "membership conflict recovery stopped with a stable failure"
     );
     RecoverMembershipConflictOutcome::StableFailure

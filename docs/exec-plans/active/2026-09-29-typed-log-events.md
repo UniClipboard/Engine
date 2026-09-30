@@ -72,12 +72,12 @@ uc_warn!(error = &err as &dyn std::error::Error, "history cleanup failed");
   手工处理：`sql`、`relay_url` 与 `blobs.rs` 的连接路径标签删除；`error.type` 改为 `error_kind`；绑定的 `error_kind = ?error`
   改成变体名的固定映射（原来写入 Debug 输出）；因字段删除而失去用途的变量、参数与死函数一并清理。
   故意保留原始 tracing 的三个观测运行期集成测试用 crate 级 allow。
-- [ ] **M3 错误分类（ADR 第 3 步）**：分类 trait 与 `error_kind` 词表；随触碰的错误类型渐进实现；`log_safe_errors!` 全部覆盖后删除。
-  未在本次一次性迁移范围内。
+- [x] **M3 错误分类（ADR 第 3 步，2026-09-30）**：`uc_core::error_class::ErrorClass` 与 `error_class`/`source_class` 字段；
+  已登记的 12 个类型一次性迁移，`log_safe_errors!` 及登记入口、`warn_on_error!`、`check-module-log-errors.mjs` 全部删除。
 - [x] **M4 收尾**：删除 `LEGACY_TEXT_FIELDS`、`REVIEWED_OMITTED_FIELDS` 与 `check-rust-style.mjs` 里读它们的字段审定逻辑；
   运行期白名单直接由目录得出，并有测试冻结“迁移前 69 个名字（去掉 `error.type`）加 12 个已批准新增”的集合；
   更新 `observability.md`、`engine-repository-checks.md`、`uc-engine-interface.md`、`AGENTS.md` 与 ADR-030。
-- [ ] **`DiagnosticTaskKind` 由声明生成**：M0 起草时列入，本次未做，与补日志任务新增的任务类别一起单独处理。
+- [x] **`DiagnosticTaskKind` 由声明生成（2026-09-30）**：`diagnostic_task_kinds!` 一处声明，合同测试核对取值与 `observability.md`。
 
 ## 验证
 

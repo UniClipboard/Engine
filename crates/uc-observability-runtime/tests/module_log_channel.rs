@@ -20,8 +20,8 @@ use std::time::Duration;
 
 use uc_observability_contract::error_source::io_error_kind;
 use uc_observability_contract::log_fields::log_id;
-use uc_observability_contract::module_log::{register_error_layer_renderers, Sensitive};
-use uc_observability_contract::{log_safe_errors, uc_warn};
+use uc_observability_contract::module_log::Sensitive;
+use uc_observability_contract::uc_warn;
 use uc_observability_runtime::{
     DeploymentEnvironment, DetailedCaptureRequest, LocalLogConfig, ObservabilityConfig,
     ObservabilityResource, OperatingSystem, ProcessObservabilityRuntime, SignalResult,
@@ -31,7 +31,7 @@ use uc_observability_runtime::{
 const BUDGET_BYTES: u64 = 24_000;
 
 #[derive(Debug, thiserror::Error)]
-#[error("registered layer {kind}")]
+#[error("layer {kind}")]
 struct Registered {
     kind: &'static str,
     #[source]
@@ -50,8 +50,6 @@ struct Long {
 #[derive(Debug, thiserror::Error)]
 #[error("UNREGISTERED_EXTERNAL_SECRET_TEXT")]
 struct Unregistered;
-
-log_safe_errors!(fn test_layers => [Registered, Long]);
 
 fn rows(directory: &std::path::Path) -> Vec<serde_json::Value> {
     let mut text = String::new();
@@ -90,7 +88,6 @@ macro_rules! distinct_callsites {
 
 #[test]
 fn module_log_channel_records_renders_limits_and_exports_with_visible_counts() {
-    register_error_layer_renderers(&[test_layers]);
     let directory = tempfile::tempdir().expect("logs");
     let config = ObservabilityConfig::new(
         ObservabilityResource::new(
@@ -123,14 +120,15 @@ fn module_log_channel_records_renders_limits_and_exports_with_visible_counts() {
         .iter()
         .find(|row| row["message"] == "chain rendering")
         .expect("chain row");
-    assert_eq!(chain_row["error.chain"][0], "registered layer outer");
+    // 仓库错误类型不再登记正文；自有类型与 anyhow 的 context 层都记为固定占位。
+    assert_eq!(chain_row["error.chain"][0], "<opaque>");
     assert_eq!(chain_row["error.chain"][1], "<opaque>");
     let io_layer = chain_row["error.chain"][2].as_str().expect("io layer");
     assert!(
         io_layer.starts_with("io error kind=PermissionDenied os_code=13"),
         "{io_layer}"
     );
-    assert_eq!(chain_row["error.opaque_layers"], 1);
+    assert_eq!(chain_row["error.opaque_layers"], 2);
     let serde_row = rows_after_chain
         .iter()
         .find(|row| row["message"] == "serde rendering")
@@ -268,7 +266,7 @@ fn module_log_channel_records_renders_limits_and_exports_with_visible_counts() {
         text: leaked_text,
         inner: None,
     };
-    for _ in 0..15 {
+    for _ in 0..19 {
         long = Long {
             text: leaked_text,
             inner: Some(Box::new(long)),
@@ -281,8 +279,9 @@ fn module_log_channel_records_renders_limits_and_exports_with_visible_counts() {
         .iter()
         .find(|row| row["message"] == "long chain")
         .expect("long row");
-    assert_eq!(long_row["truncated"], true, "{long_row}");
-    assert_eq!(long_row["error.chain"].as_array().expect("chain").len(), 16);
+    let chain = long_row["error.chain"].as_array().expect("chain");
+    assert_eq!(chain.len(), 17, "{long_row}");
+    assert_eq!(chain[16], "<more layers omitted>", "{long_row}");
 
     // 阶段五：热记录点限速，丢弃计数并在下一条放行记录里给出 suppressed（失败方式 4）。
     for _ in 0..200 {

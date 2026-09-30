@@ -372,9 +372,10 @@ decorator 负责。Sponsor 在等待执行锁之前确定已认证消息的固�
 - **三种“路径”严格区分。** `error.chain` 是 `Error::source` 链；`spans` 是 tracing span 名路径；`location` 是日志宏所在源码位置。
   三者都不是 backtrace。移动端发布构建未符号化，因此不采集 backtrace。
 - **错误链渲染。** 记录点写 `error = &e as &dyn std::error::Error`（anyhow 用 `e.as_ref()`），层逐个渲染，绝不对整个错误使用 `Debug`。
-  稳定版 Rust 只能对已知具体类型 `downcast`：`std::io::Error` 与 `serde_json::Error` 内置结构化提取；仓库自有错误类型由所属
-  crate 用 `log_safe_errors!` 登记（Application 与 Infra 各有登记入口，由 Engine 装配统一调用；宏同时识别 `#[source] Box<T>` 得到的 `Box<T>` 层）；其余层，包括 anyhow 的
-  context 层与第三方错误，一律写 `<opaque>` 并累计 `opaque_error_layers`，不回退到 `Display`。
+  稳定版 Rust 只能对已知具体类型 `downcast`：`std::io::Error` 与 `serde_json::Error` 内置结构化提取；其余层，包括仓库自有错误、
+  anyhow 的 context 层与第三方错误，一律写 `<opaque>` 并累计 `opaque_error_layers`，不回退到 `Display`。
+  **仓库自有错误的原因用固定分类记录**：类型实现 `uc_core::error_class::ErrorClass`，记录点写 `error_class = e.class()`（本层变体级分类），
+  需要下层细节时再写 `source_class`（由持有具体类型的记录点从来源链取得，例如准入状态端口错误的仓储来源）。不再有按类型登记的入口。
 - **自由文本字段默认拒绝。** 数字与布尔字段原样记录；文本字段只有登记在字段目录
   （`crates/uc-observability-contract/src/log_fields.rs`）且类别为文本时才写出取值，其余一律记为 `<omitted>`。
   文本类别有三种：`Literal`（`&'static str` 字面量）、`Identifier(random)`（应用生成的随机标识，经 `log_id(&x)` 适配）和

@@ -1,6 +1,7 @@
 //! 历史规则的稳定结果与错误。
 
 use super::MembershipEventId;
+use crate::error_class::ErrorClass;
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +50,38 @@ pub enum MembershipHistoryV2Error {
     InvalidPersistedHistory,
     IncompleteHistoryProof,
     HistoryPositionChanged,
+}
+
+impl ErrorClass for MembershipHistoryV2Error {
+    fn class(&self) -> &'static str {
+        match self {
+            Self::UpgradeRequired => "upgrade_required",
+            Self::InvalidLineage => "invalid_lineage",
+            Self::InvalidGenesis => "invalid_genesis",
+            Self::UnknownParent => "unknown_parent",
+            Self::InvalidParentDepth => "invalid_parent_depth",
+            Self::OperationReplay => "operation_replay",
+            Self::UnauthorizedAuthor => "unauthorized_author",
+            Self::AwaitingActivationReceipt => "awaiting_activation_receipt",
+            Self::InvalidCredential => "invalid_credential",
+            Self::CredentialConflict => "credential_conflict",
+            Self::InvalidSignature => "invalid_signature",
+            Self::UnsupportedSignatureAlgorithm => "unsupported_signature_algorithm",
+            Self::InvalidSecurityCommitment => "invalid_security_commitment",
+            Self::InvalidActivationBaseline => "invalid_activation_baseline",
+            Self::InvalidOperation => "invalid_operation",
+            Self::ResultingMembersDigestMismatch => "resulting_members_digest_mismatch",
+            Self::InvalidActivationReceipt => "invalid_activation_receipt",
+            Self::ActivationReceiptConflict => "activation_receipt_conflict",
+            Self::UnknownRemoval => "unknown_removal",
+            Self::InvalidDecision => "invalid_decision",
+            Self::DecisionConflict => "decision_conflict",
+            Self::InvalidPersistedHistory => "invalid_persisted_history",
+            Self::IncompleteHistoryProof => "incomplete_history_proof",
+            Self::HistoryPositionChanged => "history_position_changed",
+            Self::MissingMembershipEvent(_) => "missing_membership_event",
+        }
+    }
 }
 
 impl fmt::Display for MembershipHistoryV2Error {

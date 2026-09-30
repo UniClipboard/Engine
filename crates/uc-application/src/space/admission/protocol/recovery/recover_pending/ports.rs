@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use uc_core::error_class::ErrorClass;
 use uc_core::membership::{
     AdmissionAttemptTimeline, AdmissionContinuationCredential,
     AdmissionEncryptedPasswordEquivalent, AdmissionPeerBinding, JoinerAdmissionTransition,
@@ -85,6 +86,18 @@ pub enum PendingAdmissionRecoveryStateError {
 
     #[error("pending admission recovery state is corrupt")]
     RecoveryRequired,
+}
+
+impl ErrorClass for PendingAdmissionRecoveryStateError {
+    fn class(&self) -> &'static str {
+        match self {
+            Self::ReadFailure { .. } => "read_failure",
+            Self::Locked => "locked",
+            Self::Unavailable => "unavailable",
+            Self::StateChanged => "state_changed",
+            Self::RecoveryRequired => "recovery_required",
+        }
+    }
 }
 
 impl PendingAdmissionRecoveryStateError {

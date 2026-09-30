@@ -1,6 +1,6 @@
 # ADR-030：日志编写改为类型化事件并由工具链强制
 
-- **状态**：已采纳；第 1 步已于 2026-09-29 一次性完成，第 2 步部分完成，第 3 步未开始
+- **状态**：已采纳；第 1 步已于 2026-09-29 一次性完成，第 2、3 步已于 2026-09-30 完成
 - **日期**：2026-09-29
 - **范围**：`uc-application`、`uc-infra`、`uc-engine` 中的 `tracing` 调用点，`uc-observability-contract` 的任务与字段词表，
   `scripts/architecture/check-rust-style.mjs` 与 workspace clippy 配置；不改变分层责任、远程遥测合同与业务记录准入标准
@@ -14,7 +14,7 @@
 当前日志规则正确但主要靠人和文本检查守住，违规的表现是静默降级而不是编译失败：
 
 1. 字符串字段不在 `ALLOWED_TEXT_FIELDS` 时运行期记为 `<omitted>`，编译与测试都不报错。
-2. 错误类型未用 `log_safe_errors!` 登记时该层渲染为 `<opaque>`。仓库约 325 个错误类型，登记入口约 15 处。
+2. 错误类型未用 `log_safe_errors!`（已删除）登记时该层渲染为 `<opaque>`。仓库约 325 个错误类型，登记入口约 15 处。
    稳定版 Rust 只能对具体类型 `downcast`，anyhow 的 context 层与第三方错误无法覆盖。
 3. 新增一个 `DiagnosticTaskKind` 变体要同步枚举、`as_str`、schema 快照与隐私测试四处。
 4. 仓库约 900 个日志调用点直接使用 `tracing::{info,warn,error,debug}!`。`check-rust-style.mjs` 对新增行做文本启发式检查，
@@ -42,12 +42,18 @@
      `check-direct-log-macros.mjs` 在默认特性与 `lan-compat` 下各跑一轮 clippy 的 `disallowed_macros`，任何一处都失败。
      clippy 只认 crate 级 allow，故意保留原始 tracing 的文件（观测运行期验证未登记字段处理的三个集成测试）在文件顶部
      用 `#![allow(clippy::disallowed_macros)]` 并写明理由。`tracing::event!` 只有观测 crate 自己可以直接使用。
-2. **事件与字段词表单点声明并生成（部分完成）。** 日志字段目录与运行期白名单已是单一声明；
-   `DiagnosticTaskKind` 由声明生成、`error_kind` 词表与 schema 快照仍未做，作为独立后续。
-3. **错误改为固定分类，取代逐层 downcast 登记（未开始）。**
-   - 仓库自有错误类型实现分类 trait（返回固定 `ErrorKind` 枚举）。日志边界取分类与 `io_error_kind`，
-     不再依赖 `log_safe_errors!` 逐层渲染；第三方与 anyhow 层继续保守渲染为 `<opaque>`。
-   - 迁移随触碰的错误类型渐进进行，`log_safe_errors!` 在覆盖完成前保留，之后删除，不长期并存两套入口。
+2. **事件与字段词表单点声明并生成（已完成，2026-09-30）。** 日志字段目录与运行期白名单是单一声明；
+   `DiagnosticTaskKind` 的变体、`as_str` 与 `ALL` 由 `diagnostic_task_kinds!` 一处声明生成，合同测试遍历 `ALL` 校验取值唯一、
+   snake_case，并要求每个取值都写在 `observability.md`。schema 快照与 `error_kind` 词表本仓没有独立副本，无需生成。
+3. **错误改为固定分类，取代逐层 downcast 登记（已完成，2026-09-30，一次性迁移）。**
+   - `uc_core::error_class::ErrorClass`（`fn class(&self) -> &'static str`）放在 Core：它不含观测依赖，Core、Application、Infra
+     的错误类型都能实现（孤儿规则不构成阻碍）。实现对所有变体穷举匹配，新增变体时编译器要求补充分类。
+   - 原先登记的 12 个类型（含 `AdmissionRefusal` 的记录角色与义务组合）都实现了 `ErrorClass`，其记录点改写 `error_class`；
+     Infra 准入状态端口失败经 `warn_state_failure!` 额外写 `source_class`（来源链上仓储错误的分类），保留拒绝原因。
+   - `log_safe_errors!`、`register_error_layer_renderers`、`warn_on_error!`、两个 crate 的 `register_log_safe_errors()`、Engine 装配调用、
+     `check-module-log-errors.mjs` 与其测试一并删除，不并存两套入口。
+   - `error =` 写法保留给第三方与 anyhow 错误：只渲染 `io::Error` 与 `serde_json::Error`，其余层一律 `<opaque>`（保守渲染）。
+   - 新字段 `error_class`、`source_class` 为 `Vocabulary(reviewed)`，已加入冻结白名单测试的新增集合。
 
 ## 先后关系
 

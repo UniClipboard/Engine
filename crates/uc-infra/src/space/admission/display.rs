@@ -1,3 +1,4 @@
+use crate::space::admission::failure_log::warn_state_failure;
 use async_trait::async_trait;
 use uc_application::deps::{
     AdmissionDisplayStatus, LoadCurrentJoinStatusPort, PairingConfirmationObservation,
@@ -52,10 +53,7 @@ impl<E: DbExecutor + Send + Sync> LoadCurrentJoinStatusPort for SqliteSpaceAdmis
             }
         }
         .await;
-        uc_observability_contract::warn_on_error!(
-            result,
-            "space_admission.current_join_status.load failed"
-        )
+        warn_state_failure!(result, "space_admission.current_join_status.load failed")
     }
 
     #[tracing::instrument(name = "space_admission.display_status.load", skip_all)]
@@ -186,10 +184,7 @@ impl<E: DbExecutor + Send + Sync> LoadCurrentJoinStatusPort for SqliteSpaceAdmis
             })
         }
         .await;
-        uc_observability_contract::warn_on_error!(
-            result,
-            "space_admission.display_status.load failed"
-        )
+        warn_state_failure!(result, "space_admission.display_status.load failed")
     }
 }
 

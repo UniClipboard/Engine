@@ -25,8 +25,6 @@ struct FixedMembershipLedger {
 
 #[tokio::test]
 async fn sponsor_state_load_is_correlated_in_standard_log_file() {
-    uc_application::deps::register_log_safe_errors();
-    uc_infra::register_log_safe_errors();
     let logs = tempfile::tempdir().expect("logs");
     let runtime = ProcessObservabilityRuntime::install(
         ObservabilityConfig::new(
@@ -136,20 +134,16 @@ async fn sponsor_state_load_is_correlated_in_standard_log_file() {
         })
         .unwrap_or_else(|| panic!("module record missing: {records:?}"));
     assert_eq!(refusal["level"], "WARN");
-    let chain: Vec<&str> = refusal["error.chain"]
-        .as_array()
-        .expect("chain")
-        .iter()
-        .map(|layer| layer.as_str().expect("layer"))
-        .collect();
-    assert_eq!(chain.len(), 3, "{chain:?}");
-    assert_eq!(chain[0], "sponsor admission state changed");
-    assert_eq!(chain[1], "space admission state changed");
+    // 仓库自有错误只写固定分类：本层分类加仓储来源分类（含拒绝原因），不渲染错误正文。
+    assert_eq!(refusal["fields"]["error_class"], "state_changed");
+    let source_class = refusal["fields"]["source_class"]
+        .as_str()
+        .expect("source class");
     assert!(
-        chain[2].starts_with("space admission refused: unsettled_attempt sponsor_record "),
-        "{chain:?}"
+        source_class.starts_with("unsettled_sponsor_record_"),
+        "{source_class}"
     );
-    assert_eq!(refusal["error.root"], chain[2]);
+    assert!(refusal.get("error.chain").is_none(), "{refusal}");
     let location = refusal["location"].as_str().expect("location");
     assert!(location.starts_with("uc-infra/src/"), "{location}");
     assert!(refusal["spans"]

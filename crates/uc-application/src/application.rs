@@ -6,6 +6,7 @@
 use crate::clipboard::inbound::ClipboardReceiverPort;
 use std::sync::Arc;
 use tokio::time::Instant;
+use uc_core::error_class::ErrorClass;
 use uc_observability_contract::uc_warn;
 
 use uc_core::clipboard::ClipboardIntegrationMode;
@@ -250,21 +251,21 @@ fn record_rollback_failures(
     if let Some(error) = search {
         uc_warn!(
             rollback_target = "search",
-            error = error as &dyn std::error::Error,
+            error_class = error.class(),
             "application start rollback failed"
         );
     }
     if let Some(error) = active_clipboard {
         uc_warn!(
             rollback_target = "active_clipboard",
-            error = error as &dyn std::error::Error,
+            error_class = error.class(),
             "application start rollback failed"
         );
     }
     if let Some(error) = space {
         uc_warn!(
             rollback_target = "space",
-            error = error.as_ref() as &dyn std::error::Error,
+            error_class = error.class(),
             "application start rollback failed"
         );
     }
@@ -843,6 +844,8 @@ mod tests {
 
         assert_eq!(logs.count("application start rollback failed"), 1);
         assert!(logs.output().contains("rollback_target=\"space\""));
+        assert!(logs.output().contains("error_class=\"incomplete\""));
+        assert!(!logs.output().contains("space shutdown failed"));
     }
 
     #[test]
