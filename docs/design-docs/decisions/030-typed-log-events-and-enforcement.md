@@ -1,6 +1,6 @@
 # ADR-030：日志编写改为类型化事件并由工具链强制
 
-- **状态**：提案（未采纳；依赖 `2026-09-29-module-log-channel` 任务落定，见“先后关系”）
+- **状态**：已采纳（2026-09-29；模块日志通道已提交，见“先后关系”；开放问题的裁决见实施计划）
 - **日期**：2026-09-29
 - **范围**：`uc-application`、`uc-infra`、`uc-engine` 中的 `tracing` 调用点，`uc-observability-contract` 的任务与字段词表，
   `scripts/architecture/check-rust-style.mjs` 与 workspace clippy 配置；不改变分层责任、远程遥测合同与业务记录准入标准

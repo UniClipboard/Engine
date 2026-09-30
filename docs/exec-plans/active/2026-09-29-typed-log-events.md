@@ -1,7 +1,7 @@
 # 类型化日志事件与工具链强制
 
-状态：设计草案，待用户审阅；对应 [ADR-030](../../design-docs/decisions/030-typed-log-events-and-enforcement.md)（提案）。
-本计划只定义实施方式，采纳 ADR 之前不改任何源码。基线：`a37be892`（模块日志通道已提交）。
+状态：实施中（M0 起）；对应 [ADR-030](../../design-docs/decisions/030-typed-log-events-and-enforcement.md)（已采纳）。
+基线：`a37be892`（模块日志通道已提交）。
 
 ## 动作与责任
 
@@ -77,11 +77,14 @@ uc_warn!(error = &err as &dyn std::error::Error, "history cleanup failed");
 - Cargo 由单一负责人使用共享 `target` 串行执行；`-p uc-infra --features lan-compat` 单独覆盖。
 - 交付前检查沿用仓库清单；设备矩阵未执行项记为“跳过”。
 
-## 开放问题
+## 已裁决问题（2026-09-29，用户）
 
-1. 编译失败测试用 `trybuild` 需要新增开发依赖；替代方案是用 `compile_fail` 文档测试，覆盖力较弱。
-2. `#[instrument]` 约 130 处不受 lint 影响，其 `fields(..)` 与 `err` 参数是否纳入目录，倾向 M2 之后单独处理。
-3. 带点号的字段名（2 处，如 `error.type`）在目录中如何表达，需要别名机制或改名。
-4. `Id` 适配器的滥用风险：是否要求每个 `id(..)` 字段名在目录里标注“已确认随机生成”，并在评审清单中列出。
-5. `lan-compat` 等非默认特性下的违规数尚未统计，M1 前补测。
-6. 与 `RUST_STYLE_BASE_SHA` 比较起点的配合：基线文件与差异检查并存时的冲突处理。
+1. 编译失败测试采用 `trybuild` 作为开发依赖，不用 `compile_fail` 文档测试。
+2. `#[instrument]` 约 130 处不纳入本轮 lint，M2 完成后单独处理。
+3. 目录中每个 `Id` 字段必须标注“已确认随机生成”，并在评审清单中列出。
+
+## 仍开放
+
+- 带点号的字段名（2 处，如 `error.type`）在目录中的表达：别名或改名，M0 内定。
+- `lan-compat` 等非默认特性下的违规数，M1 前补测。
+- 基线文件与 `RUST_STYLE_BASE_SHA` 差异检查并存时的冲突处理，M1 内定。
