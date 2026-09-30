@@ -479,6 +479,10 @@ fn settings_contract_preserves_updates_and_probe_outcomes_without_debugging_user
         }),
         OperationResult::SettingsUpdated(uc_engine::SettingsUpdateOutcome::Rejected {
             reason: "private validation detail".into(),
+            rejection: uc_engine::SettingsRejection::TrustedNetwork {
+                index: 2,
+                kind: uc_engine::TrustedNetworkRejectionKind::OutsidePrivateSpace,
+            },
         }),
         OperationResult::RelayProbed(uc_engine::RelayProbeOutcome::Dns {
             message: "private dns detail".into(),

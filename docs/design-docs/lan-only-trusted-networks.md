@@ -105,7 +105,21 @@ LAN-only 与默认模式。
 - 端口被占用时 iroh 绑定失败，Infra 从来源链识别 `AddrInUse` 并返回 `IrohNodeError::ListenPortUnavailable`，
   不回退随机端口。Engine 映射为公开错误编号 `1102`、类别 `Unavailable`、不可重试：需要用户释放或更换端口，
   后台自动重试没有意义。其他绑定失败仍为可重试的 `1101`。
-- 修改后重启生效，语义同可信网段。
+- 修改后重启生效，语义同可信网段。也可以经 `RecoverNetwork` 立即应用：它关闭并重建网络会话，重建时重读设置；
+  这会关闭操作并取消传输中的文件。重建失败时公开错误为 `1105`，但固定端口被占用保留 `1102`（不可重试）。
+- **已知缺口（2026-09-30 实测）**：保存了被占用的端口后，`Engine::start`（已有可解锁的空间时）与 `RecoverNetwork` 都以
+  `1102` 失败；此时没有可用的 Engine，或操作保持关闭（设置更新返回 `1103`），宿主无法通过 Engine 把端口改回去，只能
+  释放端口或用环境变量 `UC_IROH_BIND_PORT` 覆盖。产品上的处理方式待用户决定，见技术债登记。
+
+## 网络设置的宿主接口
+
+- Engine 契约只新增结构化拒绝：`SettingsUpdateOutcome::Rejected { reason, rejection }`，`rejection` 为
+  `TrustedNetwork { index, kind } | CustomRelayUrl | Other`，`kind` 为 `InvalidFormat | OutsidePrivateSpace | Duplicate`。
+  它取自校验错误本身，不另做校验；`reason` 是可能含用户输入的英文诊断文本，宿主不得解析或记录。
+- UniFFI（iOS/Android）与 napi（HarmonyOS）各新增 `query_network_settings` / `update_network_settings`，是
+  `QuerySettings` / `UpdateSettings` 网络部分的投影，不保存状态。更新只含 `trusted_networks`（`Some(列表)` 整体替换，
+  `Some([])` 清空）与 `listen_port`（`Some(0)` 恢复随机）；`allow_relay_fallback` 只读，自定义中转继续走各自接口。
+  整次提交全有或全无，拒绝不含用户输入的原文。
 
 ## 设置迁移
 

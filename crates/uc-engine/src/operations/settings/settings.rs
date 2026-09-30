@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use uc_application::facade::settings as app;
 use uc_application::facade::AppFacade;
+use uc_core::network::TrustedNetworkRejection;
 use uc_core::settings::model::ShortcutKey;
 
 use crate::{
@@ -16,8 +17,9 @@ use crate::{
     RelayProbeCredential, RelayProbeInput, RelayProbeOutcome, RetentionPolicySummary,
     RetentionRulePatch, RetentionRuleSummary, RuleEvaluationSummary, SaveRelayInput,
     SaveRelayOutcome, SecuritySettingsSummary, SettingsContentTypes, SettingsContentTypesPatch,
-    SettingsPatch, SettingsSummary, SettingsUpdateOutcome, ShortcutKeySummary, StartupModeSummary,
-    SyncFrequencySummary, SyncSettingsSummary, ThemeSummary, UpdateChannelSummary,
+    SettingsPatch, SettingsRejection, SettingsSummary, SettingsUpdateOutcome, ShortcutKeySummary,
+    StartupModeSummary, SyncFrequencySummary, SyncSettingsSummary, ThemeSummary,
+    TrustedNetworkRejectionKind, UpdateChannelSummary,
 };
 
 pub(crate) async fn execute_query_custom_relays(
@@ -115,7 +117,10 @@ pub(crate) async fn execute_update_settings(
         Ok(patch) => patch,
         Err(reason) => {
             return Ok(OperationResult::SettingsUpdated(
-                SettingsUpdateOutcome::Rejected { reason },
+                SettingsUpdateOutcome::Rejected {
+                    reason,
+                    rejection: SettingsRejection::Other,
+                },
             ));
         }
     };
@@ -126,9 +131,30 @@ pub(crate) async fn execute_update_settings(
         Err(app::SettingsFacadeError::Invalid(error)) => Ok(OperationResult::SettingsUpdated(
             SettingsUpdateOutcome::Rejected {
                 reason: error.rejection_reason(),
+                rejection: map_settings_rejection(&error),
             },
         )),
         Err(_) => Err(internal_error(UPDATE_SETTINGS_FAILED_CODE)),
+    }
+}
+
+/// 结构化拒绝直接取自校验错误本身的分类，不再次解析或校验用户输入。
+fn map_settings_rejection(error: &app::SettingsValidationError) -> SettingsRejection {
+    match error {
+        app::SettingsValidationError::CustomRelayUrl(_) => SettingsRejection::CustomRelayUrl,
+        app::SettingsValidationError::TrustedNetwork(entry) => SettingsRejection::TrustedNetwork {
+            // 条目数远小于 u32 上限；转换失败时饱和，仍指向“列表末尾之后”，不会指向错误的条目。
+            index: u32::try_from(entry.index).unwrap_or(u32::MAX),
+            kind: match entry.rejection {
+                TrustedNetworkRejection::InvalidFormat => {
+                    TrustedNetworkRejectionKind::InvalidFormat
+                }
+                TrustedNetworkRejection::NotPrivate => {
+                    TrustedNetworkRejectionKind::OutsidePrivateSpace
+                }
+                TrustedNetworkRejection::Duplicate => TrustedNetworkRejectionKind::Duplicate,
+            },
+        },
     }
 }
 

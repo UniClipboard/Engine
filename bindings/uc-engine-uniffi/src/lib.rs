@@ -11,10 +11,11 @@ pub use runtime::{
     ActiveClipboard, ConnectivityOpportunity, CustomRelay, CustomRelayMutationRejection,
     CustomRelayMutationResult, Device, EntryNotResendableReason, InvitationAvailability,
     InvitationIssued, JoinSpaceRejectionReason, JoinSpaceStatus, JoinSpaceTerminationReason,
-    JoinedSpace, LocalDevice, MobileEngine, MobileStartupLifecycle, PeerConnectionRefresh,
-    RelaySaveResult, ResendEntryOutcome, SendReport, SessionRecovery, SpaceCreated,
-    SpaceInvitation, SpaceState, WorkspaceConvergence, WorkspaceConvergenceFailureCategory,
-    WorkspaceConvergencePhase,
+    JoinedSpace, LocalDevice, MobileEngine, MobileStartupLifecycle, NetworkSettings,
+    NetworkSettingsRejectionField, NetworkSettingsRejectionKind, NetworkSettingsUpdate,
+    NetworkSettingsUpdateResult, PeerConnectionRefresh, RelaySaveResult, ResendEntryOutcome,
+    SendReport, SessionRecovery, SpaceCreated, SpaceInvitation, SpaceState, WorkspaceConvergence,
+    WorkspaceConvergenceFailureCategory, WorkspaceConvergencePhase,
 };
 
 uniffi::setup_scaffolding!();

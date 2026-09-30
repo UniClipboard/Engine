@@ -23,6 +23,125 @@ mod stale_callback;
 
 use lease::{find_lease, open_lease};
 
+/// 网络设置更新：整次全有或全无，拒绝带结构化分类且不含用户输入原文，0/空列表表示清除。
+#[tokio::test(flavor = "multi_thread")]
+async fn network_settings_updates_are_structured_and_all_or_nothing() {
+    use uc_engine::{
+        Engine, EngineConfig, NetworkSettingsPatch, Operation, OperationResult, SettingsPatch,
+        SettingsRejection, SettingsUpdateOutcome, TrustedNetworkRejectionKind,
+    };
+
+    let root = tempfile::tempdir().unwrap();
+    let host = HostCapabilities::new(
+        HostDirectories::new(
+            root.path().join("private"),
+            root.path().join("cache"),
+            root.path().join("temporary"),
+            root.path().join("logs"),
+        ),
+        Box::new(MemorySecureStorage::default()),
+        Box::new(EmptyClipboard),
+        Box::new(EmptyFiles),
+    );
+    let (engine, _events) = Engine::start(EngineConfig::new("2.0.0"), host)
+        .await
+        .unwrap();
+    let update = |network: NetworkSettingsPatch| {
+        let engine = &engine;
+        async move {
+            let result = engine
+                .execute(Operation::UpdateSettings(Box::new(SettingsPatch {
+                    network: Some(network),
+                    ..Default::default()
+                })))
+                .await
+                .unwrap();
+            let OperationResult::SettingsUpdated(outcome) = result else {
+                panic!("expected a settings update outcome");
+            };
+            outcome
+        }
+    };
+    let network_now = || async {
+        let OperationResult::Settings(settings) =
+            engine.execute(Operation::QuerySettings).await.unwrap()
+        else {
+            panic!("expected settings");
+        };
+        (
+            settings.network.trusted_networks,
+            settings.network.listen_port,
+        )
+    };
+
+    let saved = update(NetworkSettingsPatch {
+        trusted_networks: Some(vec!["10.8.0.0/24".into()]),
+        listen_port: Some(4242),
+        ..Default::default()
+    })
+    .await;
+    assert!(matches!(saved, SettingsUpdateOutcome::Updated(_)));
+    assert_eq!(
+        network_now().await,
+        (vec!["10.8.0.0/24".to_string()], Some(4242))
+    );
+
+    for (entries, index, kind) in [
+        (
+            vec!["10.9.0.0/24", "8.8.8.0/24"],
+            1,
+            TrustedNetworkRejectionKind::OutsidePrivateSpace,
+        ),
+        (
+            vec!["garbage-entry"],
+            0,
+            TrustedNetworkRejectionKind::InvalidFormat,
+        ),
+        (
+            vec!["10.9.0.0/24", "10.9.0.7/24"],
+            1,
+            TrustedNetworkRejectionKind::Duplicate,
+        ),
+    ] {
+        // 同一次提交里还带一个合法的端口变更：拒绝后端口也必须保持不变。
+        let outcome = update(NetworkSettingsPatch {
+            trusted_networks: Some(entries.iter().map(|entry| entry.to_string()).collect()),
+            listen_port: Some(5555),
+            ..Default::default()
+        })
+        .await;
+        let SettingsUpdateOutcome::Rejected { reason, rejection } = outcome else {
+            panic!("expected a rejection for {entries:?}");
+        };
+        assert_eq!(rejection, SettingsRejection::TrustedNetwork { index, kind });
+        for entry in &entries {
+            assert!(
+                !reason.contains(entry),
+                "the reason must not echo user input"
+            );
+        }
+        assert_eq!(
+            network_now().await,
+            (vec!["10.8.0.0/24".to_string()], Some(4242)),
+            "a rejected update must save nothing"
+        );
+    }
+
+    let cleared = update(NetworkSettingsPatch {
+        trusted_networks: Some(Vec::new()),
+        listen_port: Some(0),
+        ..Default::default()
+    })
+    .await;
+    assert!(matches!(cleared, SettingsUpdateOutcome::Updated(_)));
+    assert_eq!(network_now().await, (Vec::new(), None));
+
+    engine
+        .shutdown(std::time::Duration::from_secs(15))
+        .await
+        .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn suspended_engine_releases_profile_lease_and_can_resume() {
     use std::time::Duration;

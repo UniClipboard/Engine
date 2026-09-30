@@ -136,6 +136,39 @@ pub struct OhNetworkRecoveryStatus {
     pub next_retry_in_ms: Option<f64>,
 }
 
+/// 仅局域网相关的网络设置；自定义中转不在这里读写。
+#[napi(object)]
+pub struct OhNetworkSettings {
+    /// 只读：`false` 表示仅局域网已开启。更新不能修改它。
+    pub allow_relay_fallback: bool,
+    /// 放行的 CGNAT/Tailscale 段（CIDR 文本）。修改后需 `recoverNetwork` 或重启才生效。
+    pub trusted_networks: Vec<String>,
+    /// 固定 UDP 监听端口（1–65535）；`undefined` 表示随机端口。修改后需 `recoverNetwork` 或重启才生效。
+    pub listen_port: Option<u32>,
+}
+
+/// 网络设置更新。`undefined` 表示保持不变。
+#[napi(object)]
+pub struct OhNetworkSettingsUpdate {
+    /// 有值时整体替换（条目去空白、空白条目丢弃），空数组清空。
+    pub trusted_networks: Option<Vec<String>>,
+    /// `0` 恢复随机端口，`1..=65535` 固定端口；超出范围按无效参数拒绝。
+    pub listen_port: Option<u32>,
+}
+
+/// 整次更新全部保存（`saved`）或整次拒绝（`rejected`）。拒绝不含用户输入的原文。
+#[napi(object)]
+pub struct OhNetworkSettingsUpdateResult {
+    pub status: String,
+    pub settings: Option<OhNetworkSettings>,
+    /// `trusted_networks` 或 `custom_relays`。
+    pub rejection_field: Option<String>,
+    /// 被拒绝条目在提交列表中的位置（从 0 开始）；整字段被拒绝时缺省。
+    pub rejection_index: Option<u32>,
+    /// `invalid_cidr`、`outside_private_space`、`duplicate` 或 `invalid_relay_url`。
+    pub rejection_kind: Option<String>,
+}
+
 #[napi(object)]
 pub struct OhLocalDevice {
     pub device_id: String,

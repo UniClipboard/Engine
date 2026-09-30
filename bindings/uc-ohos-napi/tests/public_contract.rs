@@ -106,6 +106,37 @@ fn typescript_contract_exposes_process_observability_health() {
 }
 
 #[test]
+fn typescript_contract_exposes_network_settings() {
+    let declarations = include_str!("../ohos/index.d.ts");
+    for required in [
+        "export interface OhNetworkSettings",
+        "allowRelayFallback: boolean",
+        "trustedNetworks: string[]",
+        "listenPort?: number",
+        "export interface OhNetworkSettingsUpdate",
+        "export interface OhNetworkSettingsUpdateResult",
+        "status: 'saved' | 'rejected'",
+        "rejectionField?: 'trusted_networks' | 'custom_relays'",
+        "rejectionIndex?: number",
+        "rejectionKind?: 'invalid_cidr' | 'outside_private_space' | 'duplicate' | 'invalid_relay_url'",
+        "queryNetworkSettings(): Promise<OhNetworkSettings>",
+        "updateNetworkSettings(update: OhNetworkSettingsUpdate): Promise<OhNetworkSettingsUpdateResult>",
+    ] {
+        assert!(
+            declarations.contains(required),
+            "OHOS declarations missing {required}"
+        );
+    }
+    // 移动端没有 LAN-only 开关：更新记录不能带 allowRelayFallback。
+    let update = declarations
+        .split("export interface OhNetworkSettingsUpdate ")
+        .nth(1)
+        .and_then(|rest| rest.split('}').next())
+        .expect("update declaration");
+    assert!(!update.contains("allowRelayFallback"));
+}
+
+#[test]
 fn typescript_contract_exposes_join_upgrade_status() {
     let declarations = include_str!("../ohos/index.d.ts");
     for required in [

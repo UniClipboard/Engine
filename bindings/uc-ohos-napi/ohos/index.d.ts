@@ -106,6 +106,25 @@ export interface OhNetworkRecoveryStatus {
   nextRetryInMs?: number
 }
 
+export interface OhNetworkSettings {
+  allowRelayFallback: boolean
+  trustedNetworks: string[]
+  listenPort?: number
+}
+
+export interface OhNetworkSettingsUpdate {
+  trustedNetworks?: string[]
+  listenPort?: number
+}
+
+export interface OhNetworkSettingsUpdateResult {
+  status: 'saved' | 'rejected'
+  settings?: OhNetworkSettings
+  rejectionField?: 'trusted_networks' | 'custom_relays'
+  rejectionIndex?: number
+  rejectionKind?: 'invalid_cidr' | 'outside_private_space' | 'duplicate' | 'invalid_relay_url'
+}
+
 export interface OhLocalDevice {
   deviceId: string
   displayName: string
@@ -226,6 +245,8 @@ export interface OhEngine {
   recoverSession(allowSecureStorageUnlock: boolean): Promise<OhSessionRecovery>
   recoverNetwork(): Promise<void>
   queryNetworkRecoveryStatus(): Promise<OhNetworkRecoveryStatus>
+  queryNetworkSettings(): Promise<OhNetworkSettings>
+  updateNetworkSettings(update: OhNetworkSettingsUpdate): Promise<OhNetworkSettingsUpdateResult>
   queryLocalDevice(): Promise<OhLocalDevice>
   queryDeviceGroupChoices(): Promise<string>
   queryMembershipConvergence(): Promise<OhMembershipConvergence>

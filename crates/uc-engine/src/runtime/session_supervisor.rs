@@ -16,7 +16,7 @@ use uc_application::deps::LifecycleError;
 use uc_application::facade::{
     AppFacade, ApplicationAssembly, ApplicationRuntime, ClipboardInboundEvent,
     ClipboardInboundEventAction, ClipboardInboundEventPort, CompletePendingSpaceTransitionError,
-    RecoverSpaceSessionError, RuntimeLifecycle,
+    RebuildNetworkSessionError, RecoverSpaceSessionError, RuntimeLifecycle,
 };
 use uc_core::{FileTransferCancellationReason, TaskRegistry};
 use uc_infra::fs::{FsAtomicPublisher, FsHiddenPathMarker, FsInboundFileTarget};
@@ -161,6 +161,18 @@ fn network_build_error(error: anyhow::Error) -> EngineError {
         EngineErrorCategory::Unavailable,
         false,
     )
+}
+
+/// 重建网络会话失败时的公开错误。固定端口被占用是用户可处理的独立分类，保留 1102；
+/// 其余失败统一为 1105，是否可重试沿用来源。
+pub(crate) fn rebuild_failure_error(error: &RebuildNetworkSessionError) -> EngineError {
+    std::error::Error::source(error)
+        .and_then(|cause| cause.downcast_ref::<EngineError>())
+        .filter(|cause| cause.code() == LISTEN_PORT_UNAVAILABLE_CODE)
+        .cloned()
+        .unwrap_or_else(|| {
+            EngineError::new(1105, EngineErrorCategory::Unavailable, error.is_retryable())
+        })
 }
 
 #[cfg(any(test, feature = "dev-tools"))]
@@ -1472,6 +1484,34 @@ mod tests {
         assert_eq!(error.code(), LISTEN_PORT_UNAVAILABLE_CODE);
         assert_eq!(error.category(), EngineErrorCategory::Unavailable);
         assert!(!error.is_retryable());
+    }
+
+    #[test]
+    fn rebuild_keeps_the_occupied_port_code_and_maps_other_failures_to_1105() {
+        let occupied = RebuildNetworkSessionError::new(
+            EngineError::new(
+                LISTEN_PORT_UNAVAILABLE_CODE,
+                EngineErrorCategory::Unavailable,
+                false,
+            ),
+            false,
+        );
+        let error = rebuild_failure_error(&occupied);
+        assert_eq!(error.code(), LISTEN_PORT_UNAVAILABLE_CODE);
+        assert!(!error.is_retryable());
+
+        let other = RebuildNetworkSessionError::new(
+            EngineError::new(
+                SESSION_RUNTIME_FAILED_CODE,
+                EngineErrorCategory::Unavailable,
+                true,
+            ),
+            true,
+        );
+        let error = rebuild_failure_error(&other);
+        assert_eq!(error.code(), 1105);
+        assert_eq!(error.category(), EngineErrorCategory::Unavailable);
+        assert!(error.is_retryable());
     }
 
     #[test]

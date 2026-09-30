@@ -34,11 +34,16 @@ use crate::{
 
 const LIFECYCLE_TRANSITION_DEADLINE: Duration = Duration::from_secs(10);
 mod lifecycle;
+mod network_settings;
 mod shutdown;
 mod startup_lifecycle;
 mod worker_join;
 mod worker_lifecycle;
 mod worker_shutdown;
+pub use network_settings::{
+    NetworkSettings, NetworkSettingsRejectionField, NetworkSettingsRejectionKind,
+    NetworkSettingsUpdate, NetworkSettingsUpdateResult,
+};
 pub use startup_lifecycle::MobileStartupLifecycle;
 use worker_join::WorkerJoin;
 use worker_lifecycle::LifecycleCommand;
@@ -491,6 +496,13 @@ enum WorkerCommand {
     MutateCustomRelay {
         mutation: CustomRelayMutation,
         response: mpsc::Sender<Result<CustomRelayMutationResult, BindingError>>,
+    },
+    QueryNetworkSettings {
+        response: mpsc::Sender<Result<NetworkSettings, BindingError>>,
+    },
+    UpdateNetworkSettings {
+        update: NetworkSettingsUpdate,
+        response: mpsc::Sender<Result<NetworkSettingsUpdateResult, BindingError>>,
     },
     RecoverNetwork {
         response: mpsc::Sender<Result<(), BindingError>>,
@@ -1022,6 +1034,19 @@ impl MobileEngine {
     ) -> Result<CustomRelayMutationResult, BindingError> {
         let mutation = CustomRelayMutation::Delete { url };
         self.request(|response| WorkerCommand::MutateCustomRelay { mutation, response })
+    }
+
+    /// 读取仅局域网相关的网络设置；自定义中转用 `query_custom_relays`。
+    pub fn query_network_settings(&self) -> Result<NetworkSettings, BindingError> {
+        self.request(|response| WorkerCommand::QueryNetworkSettings { response })
+    }
+
+    /// 更新可信网段与固定端口。整次提交全有或全无；新值经 `recover_network` 或重启后生效。
+    pub fn update_network_settings(
+        &self,
+        update: NetworkSettingsUpdate,
+    ) -> Result<NetworkSettingsUpdateResult, BindingError> {
+        self.request(|response| WorkerCommand::UpdateNetworkSettings { update, response })
     }
 
     pub fn recover_network(&self) -> Result<(), BindingError> {
@@ -1607,6 +1632,24 @@ async fn run_operations(
                     .await
                     .map_err(BindingError::from)
                     .and_then(map_custom_relay_mutation);
+                let _ = response.send(result);
+            }
+            WorkerCommand::QueryNetworkSettings { response } => {
+                let result = engine
+                    .execute(Operation::QuerySettings)
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(network_settings::map_network_settings);
+                let _ = response.send(result);
+            }
+            WorkerCommand::UpdateNetworkSettings { update, response } => {
+                let result = engine
+                    .execute(Operation::UpdateSettings(Box::new(
+                        network_settings::update_patch(update),
+                    )))
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(network_settings::map_network_settings_update);
                 let _ = response.send(result);
             }
             WorkerCommand::RecoverNetwork { response } => {

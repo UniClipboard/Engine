@@ -2013,6 +2013,7 @@ mod tests {
         let settings_rejected = operation_response(OperationResult::SettingsUpdated(
             uc_engine::SettingsUpdateOutcome::Rejected {
                 reason: "private settings rejection".into(),
+                rejection: uc_engine::SettingsRejection::Other,
             },
         ));
         let mobile_settings = operation_response(OperationResult::MobileSyncSettings(Box::new(
