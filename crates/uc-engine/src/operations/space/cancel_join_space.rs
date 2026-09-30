@@ -1,6 +1,5 @@
 use base64::Engine as _;
 use uc_application::facade::CancelSpaceJoinError;
-use uc_observability_contract::{error_source::io_error_kind, uc_error};
 
 use crate::error_codes::{CANCEL_JOIN_SPACE_NOT_FOUND_CODE, JOIN_SPACE_FAILED_CODE};
 use crate::operations::device::member::join_space_status;
@@ -26,12 +25,8 @@ pub async fn execute_cancel_join_space(
 fn map_cancel_join_error(error: CancelSpaceJoinError) -> EngineError {
     match error {
         CancelSpaceJoinError::NotFound => not_found(),
+        // 失败记录由取消加入的流程负责人写；这里只做稳定错误码映射。
         CancelSpaceJoinError::State { .. } => {
-            uc_error!(
-                error_kind = "cancel_join_space",
-                io_error_kind = io_error_kind(&error),
-                "cancel join space failed"
-            );
             EngineError::new(JOIN_SPACE_FAILED_CODE, EngineErrorCategory::Internal, false)
         }
     }
@@ -50,7 +45,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_state_failure_is_recorded_once_and_a_missing_join_stays_silent() {
+    fn a_state_failure_maps_to_a_stable_code_without_a_second_record() {
         let logs = uc_testkit::log_capture::CapturedLogs::default();
         let _guard = logs.install();
 
@@ -61,8 +56,6 @@ mod tests {
 
         assert_eq!(missing.code(), CANCEL_JOIN_SPACE_NOT_FOUND_CODE);
         assert_eq!(failed.code(), JOIN_SPACE_FAILED_CODE);
-        assert_eq!(logs.count("cancel join space failed"), 1);
-        assert!(logs.output().contains("io_error_kind=Other"));
-        assert!(!logs.output().contains("PRIVATE"));
+        assert_eq!(logs.count("cancel"), 0, "{}", logs.output());
     }
 }

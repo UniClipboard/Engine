@@ -3,11 +3,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
+use uc_core::error_class::ErrorClass;
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
     AdmissionMemberBindingV2, LedgerInput, LedgerMemberStatus, MemberInstanceId, MembershipEventId,
     MembershipHistoryV2ReceiveOutcome, VersionedMembershipHistory,
 };
+use uc_observability_contract::{uc_info, uc_warn};
 
 use crate::space::membership::{
     ledger_error, CurrentMemberSignatureError, CurrentMemberSignaturePort, DeviceTrustStatus,
@@ -23,6 +25,30 @@ use super::{
 
 const COMMITTED_STATUS_QUERY_ATTEMPTS: usize = 3;
 const COMMITTED_STATUS_QUERY_BACKOFF: Duration = Duration::from_millis(100);
+
+/// 完成记录：成功一条 INFO；失败按可预期与否分 INFO / WARN，只写变体级分类。
+/// `committed_but_pending` 表示本机已提交移除，其他成员尚未确认。
+fn record_removal_outcome(result: &Result<RemoveSpaceMemberResult, RemoveSpaceMemberError>) {
+    match result {
+        Ok(_) => uc_info!(
+            operation = "remove_member",
+            outcome = "completed",
+            "member removal completed"
+        ),
+        Err(error) if error.is_expected() => uc_info!(
+            operation = "remove_member",
+            outcome = "rejected",
+            error_class = error.class(),
+            "member removal rejected"
+        ),
+        Err(error) => uc_warn!(
+            operation = "remove_member",
+            outcome = "failed",
+            error_class = error.class(),
+            "member removal failed"
+        ),
+    }
+}
 
 pub(crate) struct RemoveSpaceMemberUseCase {
     owner: Arc<MembershipOwner>,
@@ -74,7 +100,17 @@ impl RemoveSpaceMemberUseCase {
         }
     }
 
+    /// 移除成员的唯一完整动作；本函数写这次动作的完成记录，Engine 只做错误码映射。
     pub(crate) async fn execute(
+        &self,
+        target_device_id: &DeviceId,
+    ) -> Result<RemoveSpaceMemberResult, RemoveSpaceMemberError> {
+        let result = self.remove(target_device_id).await;
+        record_removal_outcome(&result);
+        result
+    }
+
+    async fn remove(
         &self,
         target_device_id: &DeviceId,
     ) -> Result<RemoveSpaceMemberResult, RemoveSpaceMemberError> {

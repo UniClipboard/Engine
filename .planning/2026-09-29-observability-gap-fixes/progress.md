@@ -43,3 +43,10 @@ Remote exporter build failure now yields `RemoteSetupFailure` (http_client/trace
 - Removed span fields carrying addresses, device ids, profile ids, relay URLs and content-derived hashes (`selected_ip`, `device`, `target`, `target_device_id`, `profile`, `relay`, `snapshot_hash`).
 - Registered scalar counters and the closed vocabularies `operator` and `ack`; added them to `NEWLY_VISIBLE`.
 - Fixed `module_log_channel` again: record-size truncation is now exercised with an oversized record of many bounded fields, because opaque error layers can no longer reach the limit.
+
+## 2026-09-30 opaque-context sites resolved by design
+
+- Decision (confirmed by the user): none of the five sites needs a new opaque observation context. Completion records belong to the flow owner; Engine only maps error codes; restart recovery stays an independent diagnostic per the correlation standard.
+- Remove member: `RemoveSpaceMemberUseCase::execute` now writes one completion record (`operation=remove_member`, `outcome=completed|rejected|failed`, `error_class`); the Engine boundary log was removed and its test now asserts no second record.
+- Cancel join: `SpaceAdmissionProtocol::cancel_join` writes the outcome (`requested|completed|failed`); Engine mapping no longer logs; a missing join stays silent.
+- Config migration keeps its port-boundary failure record; reconciliation and session recovery keep their existing independent records.

@@ -148,6 +148,8 @@ async fn cancellation_reloads_after_a_concurrent_admission_update() {
 
 #[tokio::test]
 async fn persistent_cancellation_conflicts_preserve_the_failure_source() {
+    let logs = uc_testkit::log_capture::CapturedLogs::default();
+    let _guard = logs.install();
     let pair = SpaceAdmissionProtocolTestPair::receiving_candidate().await;
     let started = pair
         .joiner()
@@ -172,4 +174,39 @@ async fn persistent_cancellation_conflicts_preserve_the_failure_source() {
     ));
     assert!(source.chain().count() >= 2);
     assert!(!pair.take_created_join().is_cancelling());
+    assert_eq!(
+        logs.count("join cancellation failed"),
+        1,
+        "{}",
+        logs.output()
+    );
+    let output = logs.output();
+    assert!(
+        output.contains("error_kind=\"cancel_join_space\""),
+        "{output}"
+    );
+    assert!(output.contains("outcome=\"failed\""), "{output}");
+}
+
+#[tokio::test]
+async fn a_cancellation_writes_its_outcome_and_a_missing_join_stays_silent() {
+    let logs = uc_testkit::log_capture::CapturedLogs::default();
+    let _guard = logs.install();
+    let pair = SpaceAdmissionProtocolTestPair::receiving_candidate().await;
+    let started = pair
+        .joiner()
+        .start_join_at(join_input("cancel-outcome"), 1_000)
+        .await
+        .expect("saved join");
+    let CurrentJoinStatus::Pending { join_id, .. } = started.status else {
+        panic!("pending join");
+    };
+
+    pair.joiner().cancel_join([0x55; 16]).await.unwrap_err();
+    assert_eq!(logs.count("join cancellation"), 0, "{}", logs.output());
+
+    pair.joiner().cancel_join(join_id).await.expect("cancel");
+    let output = logs.output();
+    assert_eq!(logs.count("join cancellation"), 1, "{output}");
+    assert!(output.contains("operation=\"cancel_join\""), "{output}");
 }

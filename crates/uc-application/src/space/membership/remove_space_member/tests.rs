@@ -390,3 +390,48 @@ fn append_active_peer(
     fixture.owner.reload_for_test();
     member.unwrap()
 }
+
+#[tokio::test]
+async fn a_completed_removal_writes_one_completion_record() {
+    let logs = uc_testkit::log_capture::CapturedLogs::default();
+    let _guard = logs.install();
+    let (fixture, signer) = active_space();
+    let remove = remove_case(&fixture, signer, Arc::new(NoopEffects));
+
+    remove.execute(&DeviceId::new("device-b")).await.unwrap();
+
+    assert_eq!(
+        logs.count("member removal completed"),
+        1,
+        "{}",
+        logs.output()
+    );
+    let output = logs.output();
+    assert!(output.contains("operation=\"remove_member\""), "{output}");
+    assert!(output.contains("outcome=\"completed\""), "{output}");
+    assert!(!output.contains("device-b"), "{output}");
+}
+
+#[tokio::test]
+async fn a_rejected_removal_records_only_its_error_class() {
+    let logs = uc_testkit::log_capture::CapturedLogs::default();
+    let _guard = logs.install();
+    let (fixture, signer) = active_space();
+    let remove = remove_case(&fixture, signer, Arc::new(NoopEffects));
+
+    remove
+        .execute(&DeviceId::new("device-a"))
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        logs.count("member removal rejected"),
+        1,
+        "{}",
+        logs.output()
+    );
+    let output = logs.output();
+    assert!(output.contains("error_class=\"self_target\""), "{output}");
+    assert!(output.contains("outcome=\"rejected\""), "{output}");
+    assert!(!output.contains("device-a"), "{output}");
+}
