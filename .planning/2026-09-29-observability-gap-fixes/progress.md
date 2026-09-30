@@ -56,3 +56,10 @@ Remote exporter build failure now yields `RemoteSetupFailure` (http_client/trace
 Added log tests for: #32 (lost startup task health record), #48 (import cleanup failure and silent success), #50 (sponsor at capacity, real iroh endpoints), #51 (serve internal failure, real iroh endpoints), #37 confirmation_invalid only, #53 (double-fault rollback in migration initialize), #54 (kek_missing, kek_unwrap_failed, recreated).
 
 Still without a dedicated log test: #25 (needs the full outbound use case fixture), #29 and #30 (need a `SessionSupervisor`), #37 capacity/confirmation_failed/confirmation_missing (need stalled or duplicated inbound connections), #47 (needs a real `ProductionSession`), #16 local-invariant branch, #44 install-time emit, #43 timing.
+
+## 2026-09-30 test seams
+
+- #30: the host clipboard watch loop is now `watch_host_clipboard_changes(changes, cancel, process)`; the per-change work is injected, so closed/failed streams and processing failures are tested with a scripted stream.
+- #29: covered through the existing Engine contract harness (create space, lock encryption, trigger a host clipboard change, assert the `space_locked` record).
+- #37: `capacity` (third pending connection from one peer) and `confirmation_failed` (admission revoked after the confirmation was written) are tested with real iroh endpoints, no structural change. `confirmation_missing` remains untested.
+- Still no dedicated log test: #25, #47, #16 local-invariant branch, #44 install-time emit, #43 timing.

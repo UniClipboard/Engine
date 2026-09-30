@@ -1451,6 +1451,144 @@ mod tests {
         assert!(!record.contains(&client.id().to_string()), "{record}");
     }
 
+    /// 第一次检查通过、写出确认后再检查已不被接纳（例如刚被撤销）。
+    struct AdmittedOnlyOnce(std::sync::atomic::AtomicUsize);
+    #[async_trait]
+    impl PeerAdmissionPort for AdmittedOnlyOnce {
+        async fn is_admitted(
+            &self,
+            _device: &DeviceId,
+        ) -> Result<bool, uc_core::membership::PeerAdmissionError> {
+            Ok(self.0.fetch_add(1, Ordering::SeqCst) == 0)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_confirmation_that_no_longer_holds_is_recorded_before_the_connection_closes() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let client = bound_endpoint().await;
+        let server = bound_endpoint().await;
+        wait_for_direct_addrs(&server).await;
+        let members = Arc::new(MemMemberRepo::default());
+        members.seed(member_for_endpoint(&client, "revoked-after-confirmation"));
+        let adapter = IrohPeerReachabilityAdapter::new(
+            server.clone(),
+            Arc::new(FakePeerAddressRepo::default()),
+            members,
+            Arc::new(AdmittedOnlyOnce(std::sync::atomic::AtomicUsize::new(0))),
+            Arc::new(Sha256IdentityFingerprintFactory),
+            Arc::new(FixedClock),
+        );
+        let router = Router::builder((*server).clone())
+            .accept(PEER_REACHABILITY_ALPN, adapter.handler())
+            .spawn();
+
+        let connection = client
+            .connect(server.addr(), PEER_REACHABILITY_ALPN)
+            .await
+            .unwrap();
+        let (mut send, _receive) = connection.open_bi().await.unwrap();
+        send.write_all(&[ADMISSION_CONFIRMATION_REQUEST])
+            .await
+            .unwrap();
+        send.finish().unwrap();
+        let closed = timeout(Duration::from_secs(2), connection.closed())
+            .await
+            .expect("a failed confirmation closes the connection");
+        assert!(
+            format!("{closed:?}").contains("admission_confirmation_failed"),
+            "{closed:?}"
+        );
+        router.shutdown().await.unwrap();
+        client.close().await;
+
+        let output = logs.output();
+        let record = output
+            .lines()
+            .find(|line| line.contains("admission confirmation did not complete"))
+            .unwrap_or_else(|| panic!("failed confirmation record missing: {output}"));
+        assert!(
+            record.contains("error_kind=\"confirmation_failed\""),
+            "{record}"
+        );
+        assert!(!record.contains(&client.id().to_string()), "{record}");
+    }
+
+    /// 同一设备的待确认入站连接超过上限时，第三条连接被关闭并留下固定分类。
+    #[tokio::test]
+    async fn a_third_pending_connection_from_one_peer_is_recorded_as_over_capacity() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let blocked = Arc::new(
+            Endpoint::builder(iroh::endpoint::presets::N0)
+                .alpns(vec![PEER_REACHABILITY_ALPN.to_vec()])
+                .relay_mode(RelayMode::Disabled)
+                .clear_address_lookup()
+                .transport_config(
+                    iroh::endpoint::QuicTransportConfig::builder()
+                        .stream_receive_window(0u32.into())
+                        .build(),
+                )
+                .bind()
+                .await
+                .unwrap(),
+        );
+        let server = bound_endpoint().await;
+        wait_for_direct_addrs(&server).await;
+        let members = Arc::new(MemMemberRepo::default());
+        members.seed(member_for_endpoint(&blocked, "blocked"));
+        let gate = Arc::new(DelayedAdmission {
+            checking: tokio::sync::Notify::new(),
+            proceed: tokio::sync::Semaphore::new(16),
+        });
+        let adapter = IrohPeerReachabilityAdapter::new(
+            server.clone(),
+            Arc::new(FakePeerAddressRepo::default()),
+            members,
+            gate,
+            Arc::new(Sha256IdentityFingerprintFactory),
+            Arc::new(FixedClock),
+        );
+        let router = Router::builder((*server).clone())
+            .accept(PEER_REACHABILITY_ALPN, adapter.handler())
+            .spawn();
+
+        let mut held = Vec::new();
+        for _ in 0..3 {
+            let connection = blocked
+                .connect(server.addr(), PEER_REACHABILITY_ALPN)
+                .await
+                .unwrap();
+            let (mut send, receive) = connection.open_bi().await.unwrap();
+            send.write_all(&[ADMISSION_CONFIRMATION_REQUEST])
+                .await
+                .unwrap();
+            send.finish().unwrap();
+            held.push((connection, receive));
+            // 前两条要先进入待确认，第三条才会撞上上限。
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+        timeout(Duration::from_secs(3), async {
+            while logs.count("maximum pending connections") == 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the third pending connection must be recorded");
+
+        let record = logs
+            .output()
+            .lines()
+            .find(|line| line.contains("maximum pending connections"))
+            .unwrap()
+            .to_owned();
+        assert!(record.contains("error_kind=\"capacity\""), "{record}");
+        assert!(!record.contains(&blocked.id().to_string()), "{record}");
+        router.shutdown().await.unwrap();
+        blocked.close().await;
+    }
+
     #[tokio::test]
     async fn stalled_confirmation_does_not_block_other_peers_or_shutdown() {
         for close_all in [false, true] {

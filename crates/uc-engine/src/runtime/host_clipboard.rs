@@ -1,4 +1,5 @@
 use std::error::Error;
+use std::future::Future;
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
@@ -28,55 +29,68 @@ pub(super) struct HostClipboardChangeRuntime {
 }
 
 pub(super) async fn spawn_host_clipboard_change_task(
-    mut changes: Box<dyn HostClipboardChangeStream>,
+    changes: Box<dyn HostClipboardChangeStream>,
     runtime: HostClipboardChangeRuntime,
     tasks: Arc<TaskRegistry>,
 ) {
     let _ = tasks
         .spawn(move |cancel| async move {
-            loop {
-                let Some(change) = next_change_or_stop(changes.as_mut(), &cancel).await else {
-                    if let Err(error) = changes.shutdown().await {
-                        uc_warn!(
-                            error_kind = "change_stream_shutdown",
-                            io_error_kind = io_error_kind(&error),
-                            "host clipboard change stream shutdown failed"
-                        );
-                    }
-                    return;
-                };
-                match change {
-                    Ok(HostClipboardChange::Changed) => {
-                        if let Err(error) = runtime
-                            .process_change(HostClipboardDispatch::Background)
-                            .await
-                        {
-                            uc_warn!(
-                                error_kind = "change_processing",
-                                io_error_kind = io_error_kind(&error),
-                                "host clipboard change processing failed"
-                            );
-                        }
-                    }
-                    Ok(HostClipboardChange::Closed) => {
-                        uc_warn!(
-                            error_kind = "change_stream_closed",
-                            "host clipboard change stream closed; watcher stopped"
-                        );
-                        return;
-                    }
-                    Err(error) => {
-                        uc_warn!(
-                            error_kind = "change_stream",
-                            io_error_kind = io_error_kind(&error),
-                            "host clipboard change stream failed"
-                        );
-                        return;
-                    }
-                }
-            }
+            watch_host_clipboard_changes(changes, cancel, || {
+                runtime.process_change(HostClipboardDispatch::Background)
+            })
+            .await;
         })
         .await;
+}
+
+/// 监听循环本身：流的结束方式（取消、关闭、失败）与处理失败都在这里记录一次。
+/// 单次变化的处理由调用方注入，循环不依赖会话与应用。
+async fn watch_host_clipboard_changes<Process, Processing>(
+    mut changes: Box<dyn HostClipboardChangeStream>,
+    cancel: CancellationToken,
+    process: Process,
+) where
+    Process: Fn() -> Processing,
+    Processing: Future<Output = Result<Option<SendReportSummary>, EngineError>>,
+{
+    loop {
+        let Some(change) = next_change_or_stop(changes.as_mut(), &cancel).await else {
+            if let Err(error) = changes.shutdown().await {
+                uc_warn!(
+                    error_kind = "change_stream_shutdown",
+                    io_error_kind = io_error_kind(&error),
+                    "host clipboard change stream shutdown failed"
+                );
+            }
+            return;
+        };
+        match change {
+            Ok(HostClipboardChange::Changed) => {
+                if let Err(error) = process().await {
+                    uc_warn!(
+                        error_kind = "change_processing",
+                        io_error_kind = io_error_kind(&error),
+                        "host clipboard change processing failed"
+                    );
+                }
+            }
+            Ok(HostClipboardChange::Closed) => {
+                uc_warn!(
+                    error_kind = "change_stream_closed",
+                    "host clipboard change stream closed; watcher stopped"
+                );
+                return;
+            }
+            Err(error) => {
+                uc_warn!(
+                    error_kind = "change_stream",
+                    io_error_kind = io_error_kind(&error),
+                    "host clipboard change stream failed"
+                );
+                return;
+            }
+        }
+    }
 }
 
 async fn next_change_or_stop(
@@ -234,5 +248,119 @@ mod tests {
 
         assert!(next_change_or_stop(&mut changes, &cancel).await.is_none());
         assert!(!next_called.load(Ordering::SeqCst));
+    }
+
+    struct ScriptedChanges {
+        script: std::collections::VecDeque<Result<HostClipboardChange, HostCapabilityError>>,
+        shutdowns: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl HostClipboardChangeStream for ScriptedChanges {
+        async fn next(&mut self) -> Result<HostClipboardChange, HostCapabilityError> {
+            match self.script.pop_front() {
+                Some(next) => next,
+                None => std::future::pending().await,
+            }
+        }
+
+        async fn shutdown(&mut self) -> Result<(), HostCapabilityError> {
+            self.shutdowns.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn scripted(
+        script: Vec<Result<HostClipboardChange, HostCapabilityError>>,
+    ) -> (
+        Box<dyn HostClipboardChangeStream>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let shutdowns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let stream = ScriptedChanges {
+            script: script.into(),
+            shutdowns: Arc::clone(&shutdowns),
+        };
+        (Box::new(stream), shutdowns)
+    }
+
+    #[tokio::test]
+    async fn a_closed_change_stream_stops_the_watcher_with_one_warning() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let (changes, _) = scripted(vec![Ok(HostClipboardChange::Closed)]);
+
+        watch_host_clipboard_changes(changes, CancellationToken::new(), || async { Ok(None) })
+            .await;
+
+        assert_eq!(
+            logs.count("host clipboard change stream closed; watcher stopped"),
+            1,
+            "{}",
+            logs.output()
+        );
+        assert!(logs
+            .output()
+            .contains("error_kind=\"change_stream_closed\""));
+    }
+
+    #[tokio::test]
+    async fn a_failed_change_stream_records_its_io_kind_and_stops() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let (changes, _) = scripted(vec![Err(HostCapabilityError::new(
+            crate::HostCapabilityErrorCategory::Io,
+            "PRIVATE_STREAM_DETAIL",
+        ))]);
+
+        watch_host_clipboard_changes(changes, CancellationToken::new(), || async { Ok(None) })
+            .await;
+
+        assert_eq!(
+            logs.count("host clipboard change stream failed"),
+            1,
+            "{}",
+            logs.output()
+        );
+        assert!(!logs.output().contains("PRIVATE_STREAM_DETAIL"));
+    }
+
+    #[tokio::test]
+    async fn a_processing_failure_is_recorded_and_the_watcher_keeps_running_until_stopped() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let (changes, shutdowns) = scripted(vec![
+            Ok(HostClipboardChange::Changed),
+            Ok(HostClipboardChange::Changed),
+        ]);
+        let cancel = CancellationToken::new();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let watcher = tokio::spawn({
+            let cancel = cancel.clone();
+            let calls = Arc::clone(&calls);
+            watch_host_clipboard_changes(changes, cancel, move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async {
+                    Err(EngineError::new(
+                        OBSERVE_CLIPBOARD_FAILED_CODE,
+                        crate::EngineErrorCategory::Internal,
+                        false,
+                    ))
+                }
+            })
+        });
+        while calls.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+        cancel.cancel();
+        watcher.await.unwrap();
+
+        assert_eq!(
+            logs.count("host clipboard change processing failed"),
+            2,
+            "{}",
+            logs.output()
+        );
+        assert_eq!(shutdowns.load(Ordering::SeqCst), 1);
     }
 }
