@@ -3,3 +3,4 @@
 pub mod analytics;
 pub mod diagnostics;
 pub mod error_source;
+pub mod module_log;

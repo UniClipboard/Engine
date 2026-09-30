@@ -70,8 +70,15 @@ Application 对依赖、存储、网络、系统或密码能力失败进行稳�
 `with_context`、`anyhow!`、`bail!`、`panic!` 与 serde `custom` 错误文本中出现 `.display()` 路径。不得加入剪贴板内容、密码、密钥、
 令牌、设备名、地址、邀请、文件名、文件路径或其他敏感负载。
 
-保留下来的 source chain 只供类型判断与固定分类提取使用，不以 `%error`、`{:#}` 或 `?error` 输出到日志；
-日志字段要求见[运行期观测](observability.md#错误来源与日志字段)。
+保留下来的 source chain 供类型判断、固定分类提取和模块日志的错误链使用。合同记录仍不以 `%error`、`{:#}` 或 `?error`
+输出错误正文；模块日志在完整负责人处以 `error = &e as &dyn std::error::Error` 记录，逐层渲染并只输出已登记类型的文本
+（规则见[运行期观测](observability.md#模块日志)）。日志字段要求见[运行期观测](observability.md#错误来源与日志字段)。
+
+表示业务拒绝的错误不得是没有原因的单元变体：变体携带 `#[source]` 指向一个固定原因类型，其 `#[error]` 文本只含固定文字与枚举变体名，
+使错误链能说明拒绝原因（例：`SpaceAdmissionStateStoreError::Conflict` 的来源 `AdmissionRefusal::UnsettledAttempt`，
+文本 `space admission refused: unsettled_attempt <记录角色> <义务>`）。拥有错误类型的 crate 用
+`uc_observability_contract::log_safe_errors!` 登记这些类型，未登记的层在日志中记为 `<opaque>`。
+`#[error]` 文本不得内插 `String`、`PathBuf`、`Vec<u8>` 等自由文本字段，需要时用 `Sensitive<T>` 包装。
 
 ## 测试
 

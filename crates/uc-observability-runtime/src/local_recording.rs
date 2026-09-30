@@ -181,6 +181,43 @@ impl LocalRecordingState {
         self.annotate_stored(record);
     }
 
+    /// 是否处于 Detailed 采集窗口；用于模块日志的 DEBUG 等级门。
+    pub(crate) fn detailed_active(&self) -> bool {
+        self.capture
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active_capture_id(Instant::now())
+            .is_some()
+    }
+
+    /// 给模块日志记录补充运行与采集元数据；不接触连接、对端等合同记录才有的关联。
+    pub(crate) fn module_metadata(&self, record: &mut Value) {
+        record["local_schema_version"] = json!(2);
+        record["run_id"] = json!(self.run_id.to_string());
+        record["monotonic_offset_ms"] =
+            json!(u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX));
+        record["engine_version"] = json!(env!("CARGO_PKG_VERSION"));
+        record["host_version"] = json!(self.resource.service_version);
+        record["platform"] = json!(self.resource.os.as_str());
+        record["environment"] = json!(self.resource.environment.as_str());
+        record["app_channel"] = json!(self.resource.app_channel);
+        let source = build_source();
+        record["source_commit"] = json!(source.commit);
+        record["source_state"] = json!(source.state);
+        let capture = self
+            .capture
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active_capture_id(Instant::now());
+        match capture {
+            Some(id) => {
+                record["capture_mode"] = json!("detailed");
+                record["capture_id"] = json!(id.to_string());
+            }
+            None => record["capture_mode"] = json!("standard"),
+        }
+    }
+
     pub(crate) fn status(&self, local_file: SetupStatus, closed: bool) -> LocalDiagnosticStatus {
         let mut policy = self
             .capture

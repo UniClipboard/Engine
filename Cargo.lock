@@ -7437,6 +7437,7 @@ dependencies = [
 name = "uc-observability-runtime"
 version = "1.1.0-rc.21"
 dependencies = [
+ "anyhow",
  "cc",
  "chrono",
  "jni 0.22.4",

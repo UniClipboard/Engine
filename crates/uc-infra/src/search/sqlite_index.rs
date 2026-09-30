@@ -1494,7 +1494,7 @@ impl SearchIndexPort for SqliteSearchIndex {
         .map_err(internal("spawn_blocking error"))?
     }
 
-    #[instrument(name = "search_index.remove_entry", level = "debug", skip(self), fields(entry_id = %entry_id))]
+    #[instrument(name = "search_index.remove_entry", level = "debug", skip_all, fields(entry_id = %entry_id))]
     async fn remove_entry(&self, entry_id: &EntryId) -> Result<(), SearchError> {
         let profile_id = self.current_profile_id().await?.into_inner();
         let pool = self.pool.clone();
@@ -1943,7 +1943,7 @@ impl SearchIndexPort for SqliteSearchIndex {
         Ok(())
     }
 
-    #[instrument(name = "search_index.get_index_meta", level = "debug", skip(self))]
+    #[instrument(name = "search_index.get_index_meta", level = "debug", skip_all)]
     async fn get_index_meta(&self) -> Result<SearchIndexMeta, SearchError> {
         let profile_id = self.current_profile_id().await?.into_inner();
         let pool = self.pool.clone();
@@ -1962,7 +1962,7 @@ impl SearchIndexPort for SqliteSearchIndex {
     #[instrument(
         name = "search_index.set_entry_favorite_tag",
         level = "debug",
-        skip(self),
+        skip_all,
         fields(entry_id = %entry_id, favorited)
     )]
     async fn set_entry_favorite_tag(
@@ -2005,7 +2005,7 @@ impl SearchIndexPort for SqliteSearchIndex {
         .map_err(internal("spawn_blocking error"))?
     }
 
-    #[instrument(name = "search_index.list_tags", level = "debug", skip(self))]
+    #[instrument(name = "search_index.list_tags", level = "debug", skip_all)]
     async fn list_tags(&self) -> Result<Vec<SearchTagCount>, SearchError> {
         let profile_id = self.current_profile_id().await?.into_inner();
         let pool = self.pool.clone();
@@ -2043,7 +2043,7 @@ impl SearchIndexMaintenancePort for SqliteSearchIndex {
     #[instrument(
         name = "search_index.purge_plaintext_residue",
         level = "info",
-        skip(self)
+        skip_all
     )]
     async fn purge_plaintext_residue(&self) -> Result<(), SearchError> {
         let pool = self.pool.clone();
@@ -2084,7 +2084,7 @@ impl SearchIndexMaintenancePort for SqliteSearchIndex {
     #[instrument(
         name = "search_index.mark_plaintext_purge_done",
         level = "debug",
-        skip(self),
+        skip_all,
         fields(ts_ms)
     )]
     async fn mark_plaintext_purge_done(&self, ts_ms: i64) -> Result<(), SearchError> {

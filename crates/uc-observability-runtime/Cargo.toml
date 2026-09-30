@@ -43,6 +43,7 @@ tracing-oslog = "0.3"
 cc = "1.2"
 
 [dev-dependencies]
+anyhow = "1"
 opentelemetry-proto = { version = "=0.32.0", default-features = false, features = ["gen-tonic-messages", "trace", "logs"] }
 opentelemetry_sdk = { version = "=0.32.1", default-features = false, features = ["trace", "logs", "testing"] }
 prost = "0.14"

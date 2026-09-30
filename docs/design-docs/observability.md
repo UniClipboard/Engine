@@ -325,14 +325,20 @@ decorator 负责。Sponsor 在等待执行锁之前确定已认证消息的固�
 
 ### 错误来源与日志字段
 
-日志中的失败原因只能是固定分类，这些分类由记录点沿 source chain 逐层 `downcast` 得到，例如 `error_kind`、
-`io_error_kind`、`io_error_code`、SQLite 错误码类别。因此日志能否说清原因，取决于上游错误转换是否保留了具体类型。
+本节区分两类输出，规则不同：
+
+- **合同记录**（`uc.telemetry` 等合同 target，远程与本地共用）：失败原因只能是固定分类，由记录点沿 source chain 逐层
+  `downcast` 得到，例如 `error_kind`、`io_error_kind`、`io_error_code`、SQLite 错误码类别。
+- **模块日志**（`uc_*` 目标的普通 `tracing` 事件，见[模块日志](#模块日志)）：只写本地文件与诊断导出，可以写出经过登记的
+  错误链，但仍不写未识别错误层的正文。
+
+因此日志能否说清原因，取决于上游错误转换是否保留了具体类型。
 
 - **上游不得字符串化。** `anyhow!(error.to_string())`、`anyhow!("动作: {error}")`、`Error::X(error.to_string())`
   和丢弃来源的 `map_err(|_| ..)` 会让分类器只能记 `unknown`。049 S3.a 中组密钥投递状态读取失败只记下
   `source="storage" reason="unknown"`，原因就是存储层把 SQLite 错误字符串化，`BUSY` 无法被识别，只能推断。
   转换写法与允许例外见[错误处理与转换](error-handling.md#字符串化的常见形式)。
-- **日志不输出错误正文。** `error = %error` 只有最外层文本，丢掉整条来源；`error = ?error` 或 `{:#}` 会输出整条链，
+- **合同记录不输出错误正文。** `error = %error` 只有最外层文本，丢掉整条来源；`error = ?error` 或 `{:#}` 会输出整条链，
   可能带出路径、标识、标签值或内容片段。两者都不合规。记录点应提取固定分类字段；无法识别时省略该字段或记为
   固定的 `unknown`，不回退到正文。
 - **分类提取放在记录点。** 在完整负责人已有的完成或失败记录处提取一次，读取层与错误转换只保留 source，不各自记录同一失败。
@@ -343,10 +349,38 @@ decorator 负责。Sponsor 在等待执行锁之前确定已认证消息的固�
   `scripts/architecture/check-rust-style.mjs` 拒绝新增的 `error = %e`、`error = ?e`、`%error` 简写与日志格式串内插错误变量。
 - **记录后原样返回的失败不重复记录。** 失败随来源返回给调用方时由完整负责人记录，读取层删除自己的日志；只有返回值丢弃
   来源（公开契约边界、固定分类）或错误被吞掉降级时，才在当地记录分类。
-- **普通 target 同样适用。** 运行时只导出合同 target，核心模块的普通 `tracing` 事件在产品中既不进入本地文件，也不进入
-  宿主日志层，只在测试与开发订阅者中可见；隐私规则不因输出范围而放宽。
 - **新增分类前先确认来源可达。** 为某类失败新增固定原因时，用测试构造真实下层错误，经完整转换路径后断言分类值，
   而不是直接构造上层错误；这能发现中途被字符串化的转换。
+
+### 模块日志
+
+`uc-observability-runtime` 的模块日志层接收 `uc_*` 目标的普通 `tracing` 事件，写入与合同记录相同的本地 JSONL
+（`source = "engine_module"`），随诊断导出一并带出。它从不进入远程遥测、宿主日志层或系统日志层。
+
+- **等级与范围。** 标准模式记录 INFO 及以上；Detailed 采集窗口内提升到 DEBUG，TRACE 不记录。这不是“所有日志”：
+  等级过滤、按记录点限速、本次运行字节预算和单条 4096 字节上限都会丢弃或裁剪内容，全部计入
+  `LocalDiagnosticExportReport.module_logs`（`emitted`、`rate_limited`、`budget_dropped`、`truncated`、`rejected`、
+  `opaque_error_layers`），不承诺无限无损。被限速的条数在下一条放行记录的 `suppressed` 字段给出。
+- **启用范围。** 所有构建（含发布）在配置了本地日志目录时都启用，没有编译期开关；关闭只能通过不配置本地日志目录。
+- **记录字段。** 在既有字段之外增加 `source`、`location`（crate 相对 `file:line`）、`spans`（span 名路径）、`message`、
+  `fields`、`error.chain`（由外到内）、`error.root`、`error.opaque_layers`。`trace_id/span_id` 取最近的 OpenTelemetry
+  祖先，与合同记录一致。
+- **三种“路径”严格区分。** `error.chain` 是 `Error::source` 链；`spans` 是 tracing span 名路径；`location` 是日志宏所在源码位置。
+  三者都不是 backtrace。移动端发布构建未符号化，因此不采集 backtrace。
+- **错误链渲染。** 记录点写 `error = &e as &dyn std::error::Error`（anyhow 用 `e.as_ref()`），层逐个渲染，绝不对整个错误使用 `Debug`。
+  稳定版 Rust 只能对已知具体类型 `downcast`：`std::io::Error` 与 `serde_json::Error` 内置结构化提取；仓库自有错误类型由所属
+  crate 用 `log_safe_errors!` 登记（Application 与 Infra 各有登记入口，由 Engine 装配统一调用；宏同时识别 `#[source] Box<T>` 得到的 `Box<T>` 层）；其余层，包括 anyhow 的
+  context 层与第三方错误，一律写 `<opaque>` 并累计 `opaque_error_layers`，不回退到 `Display`。
+- **自由文本字段默认拒绝。** 数字与布尔字段原样记录；字符串与 `%`/`?` 格式化字段只有字段名在
+  `crates/uc-observability-runtime/src/module_log_fields.rs` 的 `ALLOWED_TEXT_FIELDS`（固定词表、枚举名、应用生成的随机标识）
+  中才写出取值，其余一律记为 `<omitted>`。清单按字段名审定，并核对过存量记录点的取值表达式；名字审定不证明每个取值安全，
+  取值仍须遵守下条敏感值规则。设备名、路径、地址、对端与节点标识、指纹、空间/资料标识、标签名、内容派生的哈希均不在允许清单内。
+- **消息正文只能是字面量。** 取值放进字段，不得写进格式串（`check-rust-style.mjs` 拒绝新增的内插与位置参数）；运行期无法区分字面量与
+  已插值的消息，所以这一条靠静态检查保证。
+- **敏感值。** 设备名、路径、地址、节点或对端标识、邀请、令牌、密钥、剪贴板内容、文件名若可能进入日志字段、span 字段或错误文本，
+  必须用 `Sensitive<T>` 包装；`Sensitive` 的 `Debug` 与 `Display` 只输出 `<redacted>`。任意 `Display` 不因“只是字符串”而视为安全。
+- **规则检查。** `check-rust-style.mjs` 对新增行要求 `#[instrument]` 带 `skip_all` 或显式 `fields(..)`、日志字段名已在上述清单中归类、消息正文为字面量，并拒绝 `#[error]` 文本内插
+  `String`、`PathBuf`、`Vec<u8>`、`&str` 等未包装字段（文本启发式，需要人工复核）。
 
 现有代码中的字符串化与日志正文清单见[错误来源保留执行计划](../exec-plans/completed/2026-09-24-error-source-preservation.md)。
 

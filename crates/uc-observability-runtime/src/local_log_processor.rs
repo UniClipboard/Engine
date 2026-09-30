@@ -151,10 +151,6 @@ fn decode_record(
         let (phase, reason) = detail.local_fields();
         fields.insert("error.phase".into(), json!(phase));
         fields.insert("error.reason".into(), json!(reason));
-        if let Some(chain) = detail.source_chain() {
-            fields.insert("error.chain".into(), json!(chain));
-            fields.insert("error.call_path".into(), json!(chain));
-        }
     }
     let timestamp: DateTime<Utc> = data.timestamp().or(data.observed_timestamp())?.into();
     let mut record = json!({

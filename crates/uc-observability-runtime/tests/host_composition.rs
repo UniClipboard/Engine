@@ -82,10 +82,13 @@ fn one_process_can_keep_host_logs_and_route_engine_records_only_to_the_common_ru
         engine_output
             .lines()
             .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON"))
-            .filter(|row| row["target"] != "uc.diagnostics")
+            .filter(|row| row["target"] != "uc.diagnostics" && row["source"] != "engine_module")
             .count(),
         2
     );
+    // 模块日志只进入本地文件：Engine 自有目标的普通事件写入文件，但从不进入宿主日志层。
+    assert!(engine_output.contains("PRIVATE_ENGINE_PAYLOAD"));
+    assert!(!engine_output.contains("PRIVATE_NETWORK_PAYLOAD"));
     assert!(engine_output.contains("record_missing"));
     assert!(engine_output.contains("profile_upgrade.backup.failed"));
     assert!(engine_output.contains("capture_profile_files"));

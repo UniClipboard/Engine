@@ -25,6 +25,7 @@ pub use joiner::{
     DefaultJoinerCandidatePreparation, DefaultJoinerInvitationPreparation,
     DefaultJoinerStartMaterial,
 };
+pub(crate) use repository::repo_error_layers;
 #[cfg(feature = "test-util")]
 pub use repository::AdmissionRepositoryBenchmark;
 pub use repository::SqliteSpaceAdmissionState;

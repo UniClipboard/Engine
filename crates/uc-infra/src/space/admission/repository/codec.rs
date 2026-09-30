@@ -82,7 +82,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
             }
             conn.immediate_transaction::<_, SpaceAdmissionStateStoreError, _>(|conn| {
                 let current =
-                    load_repository_row(conn)?.ok_or(SpaceAdmissionStateStoreError::Conflict)?;
+                    load_repository_row(conn)?.ok_or(SpaceAdmissionStateStoreError::conflict())?;
                 self.open_or_migrate_state_on(conn, current)
             })
         })

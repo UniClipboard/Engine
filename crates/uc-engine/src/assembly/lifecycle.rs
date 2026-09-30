@@ -60,12 +60,7 @@ pub async fn build_network_runtime(
         allow_overlay_network_addrs = iroh_config.allow_overlay_network_addrs,
         custom_relay_count = iroh_config.custom_relay_urls.len(),
         congestion_controller = %iroh_config.congestion_controller,
-        "applying network settings: allow_relay_fallback={} → disable_relays={}, allow_overlay_network_addrs={}, custom_relay_count={}, cc={}",
-        allow_relay_fallback,
-        iroh_config.disable_relays,
-        iroh_config.allow_overlay_network_addrs,
-        iroh_config.custom_relay_urls.len(),
-        iroh_config.congestion_controller,
+        "applying network settings"
     );
 
     let identity_store = IrohIdentityStore::new(

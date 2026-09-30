@@ -71,7 +71,7 @@ impl ClearClipboardHistoryUseCase {
         self
     }
 
-    #[tracing::instrument(name = "usecase.clear_clipboard_history.execute", skip(self))]
+    #[tracing::instrument(name = "usecase.clear_clipboard_history.execute", skip_all)]
     pub(crate) async fn execute(&self) -> Result<ClearHistoryResult> {
         let entries = self.collect_all_entries().await?;
 

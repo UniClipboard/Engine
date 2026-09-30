@@ -807,8 +807,7 @@ impl IrohNodeBuilder {
         info!(
             target: "iroh.addr_filter",
             allow_overlay,
-            "addr filter configured: overlay-network addresses {} (Tailscale 100.64/10 + fd7a:115c:a1e0::/48)",
-            if allow_overlay { "ALLOWED" } else { "BLOCKED" },
+            "addr filter configured for overlay-network addresses (Tailscale 100.64/10 + fd7a:115c:a1e0::/48)"
         );
         let recorder =
             uc_observability_contract::diagnostics::connectivity::NetworkRecorder::current();
@@ -887,7 +886,7 @@ impl IrohNodeBuilder {
             info!(
                 target: "iroh.bind",
                 bind_port = port,
-                "pinned iroh UDP socket to fixed IPv4 port 0.0.0.0:{port} (UC_IROH_BIND_PORT)",
+                "pinned iroh UDP socket to fixed IPv4 port (UC_IROH_BIND_PORT)"
             );
         }
 

@@ -232,7 +232,7 @@ impl SearchCoordinator {
         .await
     }
 
-    #[instrument(name = "search.request_manual_rebuild", level = "info", skip(self))]
+    #[instrument(name = "search.request_manual_rebuild", level = "info", skip_all)]
     pub async fn request_manual_rebuild(&self) -> ManualRebuildResult {
         match self.rebuild_lock.clone().try_lock_owned() {
             Ok(guard) => {
@@ -273,7 +273,7 @@ impl SearchCoordinator {
         }
     }
 
-    #[instrument(name = "search.startup_evaluation", level = "info", skip(self))]
+    #[instrument(name = "search.startup_evaluation", level = "info", skip_all)]
     async fn startup_evaluation(&self) {
         let owner = self.clone();
         self.task_scope

@@ -200,8 +200,7 @@ pub fn create_platform_layer(
                 } else {
                     tracing::warn!(
                         errors = errors,
-                        "Skipping V2 migration sentinel: {} errors during cleanup, will retry next startup",
-                        errors
+                        "Skipping V2 migration sentinel after cleanup errors, will retry next startup"
                     );
                 }
             }

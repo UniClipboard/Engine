@@ -58,7 +58,7 @@ impl EnforceRetentionPolicyUseCase {
         }
     }
 
-    #[tracing::instrument(name = "usecase.enforce_retention_policy.execute", skip(self))]
+    #[tracing::instrument(name = "usecase.enforce_retention_policy.execute", skip_all)]
     pub(crate) async fn execute(&self) -> Result<RetentionEnforcementResult> {
         let settings = self.settings.load().await?;
         let policy = settings.retention_policy;

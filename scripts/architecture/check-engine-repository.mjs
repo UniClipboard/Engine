@@ -180,6 +180,20 @@ function runRustStyleCheck() {
   process.stdout.write(output)
 }
 
+function runModuleLogErrorCheck() {
+  const checker = join(REPOSITORY_ROOT, 'scripts/architecture/check-module-log-errors.mjs')
+  const result = spawnSync(process.execPath, [checker], {
+    cwd: REPOSITORY_ROOT,
+    encoding: 'utf8',
+  })
+  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`
+  if (result.status !== 0) {
+    process.stderr.write(output)
+    throw new Error('Module log error registration validation did not pass')
+  }
+  process.stdout.write(output)
+}
+
 function packageByName(metadata, name) {
   const found = metadata.packages.find(candidate => candidate.name === name)
   if (!found) throw new Error(`workspace package is missing: ${name}`)
@@ -2432,6 +2446,7 @@ function main() {
   }
   runCargoBuildStorageCheck()
   runRustStyleCheck()
+  runModuleLogErrorCheck()
   const metadata = cargoMetadata()
   const sources = repositorySources()
   const problems = collectProblems(metadata, sources)

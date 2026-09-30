@@ -235,25 +235,6 @@ impl LocalCompletionDetail {
             Self::MembershipHistory(detail) => (detail.phase.as_str(), detail.reason.as_str()),
         }
     }
-
-    pub fn source_chain(self) -> Option<[&'static str; 4]> {
-        match self {
-            Self::ClipboardReceive(failure) => failure.source_chain(),
-            Self::GroupUpdate(detail) => Some([
-                "space_device_update",
-                detail.phase.as_str(),
-                detail.source.as_str(),
-                detail.reason.as_str(),
-            ]),
-            Self::MembershipHistory(detail) => Some([
-                "space_device_update",
-                "membership_history",
-                detail.phase.as_str(),
-                detail.reason.as_str(),
-            ]),
-            _ => None,
-        }
-    }
 }
 
 pub fn complete_clipboard_receive_failure(

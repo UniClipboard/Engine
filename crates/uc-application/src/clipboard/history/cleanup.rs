@@ -131,7 +131,7 @@ impl CleanupExpiredFilesUseCase {
         self
     }
 
-    #[tracing::instrument(name = "usecase.cleanup_expired_files.execute", skip(self))]
+    #[tracing::instrument(name = "usecase.cleanup_expired_files.execute", skip_all)]
     pub(crate) async fn execute(&self) -> Result<CleanupResult> {
         let settings = self.settings.load().await?;
 

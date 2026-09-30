@@ -14,55 +14,63 @@ use super::super::repository::{SpaceAdmissionStateStoreError, SqliteSpaceAdmissi
 
 #[async_trait]
 impl<E: DbExecutor + Send + Sync> JoinerStartStatePort for SqliteSpaceAdmissionState<E> {
-    #[tracing::instrument(name = "space_admission.joiner_state.load", skip_all, err)]
+    #[tracing::instrument(name = "space_admission.joiner_state.load", skip_all)]
     async fn load(&self) -> Result<LoadedJoinerStartState, JoinerStartStateError> {
-        observe_local_result(LocalWorkStep::JoinerStateLoad, async {
-            let (source_snapshot, requires_session_transition) = self
-                .load_source_snapshot()
-                .await
-                .map_err(map_joiner_error)?;
-            let source_bytes = source_snapshot.as_bytes().to_vec();
-            self.executor
-                .run(|conn| {
-                    let state = self.load_state_on(conn).map_err(into_anyhow)?;
-                    let current_join = state
-                        .current_local_join_id
-                        .map(|id| {
-                            let stored = state
-                                .records
-                                .get(&id)
-                                .ok_or_else(SpaceAdmissionStateStoreError::corrupt)?;
-                            let record = self.open_record(id, stored)?;
-                            JoinerAdmission::try_from_record(record)
-                                .ok_or_else(SpaceAdmissionStateStoreError::corrupt)
-                        })
-                        .transpose()?;
-                    let token = SpaceAdmissionCommitToken::from_bytes(joiner_start_token(
-                        &state,
-                        current_join.as_ref(),
-                        &source_bytes,
-                    ))
-                    .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
-                    Ok(LoadedJoinerStartState::new(
-                        state.next_local_join_ordinal,
-                        source_snapshot,
-                        current_join,
-                        requires_session_transition,
-                        token,
-                    ))
-                })
-                .map_err(map_executor_error)
-                .map_err(map_joiner_error)
-        })
-        .await
+        let result: Result<LoadedJoinerStartState, JoinerStartStateError> = async {
+            observe_local_result(LocalWorkStep::JoinerStateLoad, async {
+                let (source_snapshot, requires_session_transition) = self
+                    .load_source_snapshot()
+                    .await
+                    .map_err(map_joiner_error)?;
+                let source_bytes = source_snapshot.as_bytes().to_vec();
+                self.executor
+                    .run(|conn| {
+                        let state = self.load_state_on(conn).map_err(into_anyhow)?;
+                        let current_join = state
+                            .current_local_join_id
+                            .map(|id| {
+                                let stored = state
+                                    .records
+                                    .get(&id)
+                                    .ok_or_else(SpaceAdmissionStateStoreError::corrupt)?;
+                                let record = self.open_record(id, stored)?;
+                                JoinerAdmission::try_from_record(record)
+                                    .ok_or_else(SpaceAdmissionStateStoreError::corrupt)
+                            })
+                            .transpose()?;
+                        let token = SpaceAdmissionCommitToken::from_bytes(joiner_start_token(
+                            &state,
+                            current_join.as_ref(),
+                            &source_bytes,
+                        ))
+                        .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
+                        Ok(LoadedJoinerStartState::new(
+                            state.next_local_join_ordinal,
+                            source_snapshot,
+                            current_join,
+                            requires_session_transition,
+                            token,
+                        ))
+                    })
+                    .map_err(map_executor_error)
+                    .map_err(map_joiner_error)
+            })
+            .await
+        }
+        .await;
+        uc_observability_contract::warn_on_error!(
+            result,
+            "space_admission.joiner_state.load failed"
+        )
     }
 
-    #[tracing::instrument(name = "space_admission.joiner_state.commit", skip_all, err)]
+    #[tracing::instrument(name = "space_admission.joiner_state.commit", skip_all)]
     async fn commit(
         &self,
         token: SpaceAdmissionCommitToken,
         mutation: JoinerStartMutation,
     ) -> Result<(), JoinerStartStateError> {
+        let result: Result<(), JoinerStartStateError> = async {
         observe_local_result(LocalWorkStep::JoinerStateCommit, async {
             let (source_snapshot, _) = self
                 .load_source_snapshot()
@@ -93,7 +101,7 @@ impl<E: DbExecutor + Send + Sync> JoinerStartStatePort for SqliteSpaceAdmissionS
                             .transpose()?;
                         let expected = joiner_start_token(&state, current.as_ref(), &source_bytes);
                         if token.as_bytes() != &expected {
-                            return Err(into_anyhow(SpaceAdmissionStateStoreError::Conflict));
+                            return Err(into_anyhow(SpaceAdmissionStateStoreError::conflict()));
                         }
                         let valid_created = created.record_version() == 0
                             || (created.record_version() == 1
@@ -136,7 +144,7 @@ impl<E: DbExecutor + Send + Sync> JoinerStartStatePort for SqliteSpaceAdmissionS
                                     self.seal_record(next, wrapped).map_err(into_anyhow)?;
                                 state.records.insert(id, sealed);
                             }
-                            _ => return Err(into_anyhow(SpaceAdmissionStateStoreError::Conflict)),
+                            _ => return Err(into_anyhow(SpaceAdmissionStateStoreError::conflict())),
                         }
 
                         let created_id = *created.admission_id().as_bytes();
@@ -156,12 +164,18 @@ impl<E: DbExecutor + Send + Sync> JoinerStartStatePort for SqliteSpaceAdmissionS
         })
         .await
     }
+        .await;
+        uc_observability_contract::warn_on_error!(
+            result,
+            "space_admission.joiner_state.commit failed"
+        )
+    }
 }
 
 fn map_joiner_error(error: SpaceAdmissionStateStoreError) -> JoinerStartStateError {
     match error {
         SpaceAdmissionStateStoreError::Locked => JoinerStartStateError::Locked,
-        SpaceAdmissionStateStoreError::Conflict => JoinerStartStateError::StateChanged,
+        SpaceAdmissionStateStoreError::Conflict { .. } => JoinerStartStateError::StateChanged,
         SpaceAdmissionStateStoreError::Corrupt { .. }
         | SpaceAdmissionStateStoreError::ReadInvalid { .. } => {
             JoinerStartStateError::RecoveryRequired

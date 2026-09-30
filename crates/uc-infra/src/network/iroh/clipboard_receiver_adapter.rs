@@ -333,7 +333,7 @@ impl ProtocolHandler for IrohClipboardReceiverHandler {
 /// Write a one-byte ack + finish the send half. Failures are logged but
 /// swallowed: the connection is about to close either way, and the port
 /// contract documents that adapter-level frame failures are best-effort.
-#[instrument(skip(send))]
+#[instrument(skip_all, fields(ack = ?ack))]
 async fn emit_ack(send: &mut iroh::endpoint::SendStream, ack: AckCode) {
     if let Err(err) = send.write_all(&[ack.as_byte()]).await {
         debug!(

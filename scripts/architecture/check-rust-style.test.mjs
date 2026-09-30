@@ -345,3 +345,105 @@ mod tests {
 `)
   assert.equal(result.status, 0, result.stderr)
 })
+
+test('拒绝没有 skip_all 或显式字段的 instrument', () => {
+  const result = check(`
+#[tracing::instrument(name = "space.load")]
+async fn load(value: Value) {}
+
+#[instrument]
+fn bare() {}
+
+#[tracing::instrument(
+    name = "space.multi",
+    level = "info"
+)]
+fn multi() {}
+`)
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /fixture\.rs:2/)
+  assert.match(result.stderr, /fixture\.rs:5/)
+  assert.match(result.stderr, /fixture\.rs:8/)
+})
+
+test('接受 skip_all 或显式 fields 的 instrument 与带链的错误日志', () => {
+  const result = check(`
+#[tracing::instrument(name = "space.load", skip_all)]
+async fn load() {}
+
+#[tracing::instrument(name = "space.save", skip(self), fields(step = "save"))]
+fn save(&self) {}
+
+fn log(e: anyhow::Error) {
+    tracing::warn!(error = e.as_ref() as &dyn std::error::Error, "load failed");
+}
+
+#[derive(Debug, thiserror::Error)]
+enum Refused {
+    #[error("refused {reason}")]
+    Fixed { reason: &'static str },
+}
+`)
+  assert.equal(result.status, 0, result.stderr)
+})
+
+test('拒绝错误文本内插未包装的字符串与路径字段', () => {
+  const result = check(`
+#[derive(Debug, thiserror::Error)]
+enum LoadError {
+    #[error("cannot open {path}")]
+    Open { path: std::path::PathBuf },
+    #[error("bad name {0}")]
+    Name(String),
+    #[error("bad label {label}")]
+    Label { label: Sensitive<String> },
+    #[error("bad kind {kind:?}")]
+    Kind { kind: Kind },
+}
+`)
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /fixture\.rs:4/)
+  assert.match(result.stderr, /fixture\.rs:6/)
+  assert.doesNotMatch(result.stderr, /fixture\.rs:8/)
+  assert.doesNotMatch(result.stderr, /fixture\.rs:10/)
+})
+
+test('拒绝日志消息正文内插取值', () => {
+  const result = check(`
+fn run(path: &str, count: u64) {
+    tracing::info!("opened {path}");
+    tracing::warn!("copied {} files", count);
+    tracing::info!(
+        target: "uc_infra::x",
+        error_kind = "fixed",
+        "value {}",
+        count
+    );
+}
+`)
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /fixture\.rs:3/)
+  assert.match(result.stderr, /fixture\.rs:4/)
+  assert.match(result.stderr, /fixture\.rs:5/)
+})
+
+test('接受字面量消息与已审定字段名', () => {
+  const result = check(`
+fn run(entry_id: &str, error: &dyn std::error::Error) {
+    tracing::info!(error_kind = "fixed", entry_id = %entry_id, count = 3u64, "clipboard entry stored");
+    tracing::warn!(error = error, reason = "expired", "sync stopped");
+}
+`)
+  assert.equal(result.status, 0, result.stderr)
+})
+
+test('拒绝未归类的日志字段名', () => {
+  const result = check(`
+fn run(device_label: &str) {
+    tracing::info!(brand_new_field = %device_label, "clipboard entry stored");
+}
+`)
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /fixture\.rs:3/)
+  assert.match(result.stderr, /brand_new_field/)
+})

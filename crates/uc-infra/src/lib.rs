@@ -31,3 +31,10 @@ pub use file_secure_storage::FileSecureStorage;
 pub use first_sync_state::FileFirstSyncStateRepository;
 pub use migration_state::FileLegacyMigrationRecovery;
 pub use time::{SystemClock, Timer};
+
+/// 登记本 crate 拥有的错误类型，使模块日志能渲染它们的错误链；由 Engine 装配统一调用。
+pub fn register_log_safe_errors() {
+    uc_observability_contract::module_log::register_error_layer_renderers(
+        &space::error_layer_renderers(),
+    );
+}

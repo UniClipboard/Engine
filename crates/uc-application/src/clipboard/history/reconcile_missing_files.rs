@@ -100,7 +100,7 @@ impl ReconcileMissingFilesUseCase {
         self
     }
 
-    #[tracing::instrument(name = "usecase.reconcile_missing_files.execute", skip(self))]
+    #[tracing::instrument(name = "usecase.reconcile_missing_files.execute", skip_all)]
     pub(crate) async fn execute(&self) -> Result<ReconcileResult> {
         if !self.cache_fs.exists(&self.file_cache_dir).await {
             info!("File cache directory does not exist, nothing to reconcile");

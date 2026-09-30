@@ -152,9 +152,9 @@ where
             })
             .map_err(|e| {
                 tracing::error!(
-                    "Failed to query clipboard_selection for entry_id '{}': {}",
-                    entry_id_str,
-                    e
+                    error = e.as_ref() as &dyn std::error::Error,
+                    entry_id = %entry_id_str,
+                    "failed to query clipboard_selection"
                 );
                 e
             })?;

@@ -256,6 +256,157 @@ function errorSourceViolations(path, lines, codeLines, lineNumber) {
   return violations
 }
 
+// 模块日志直接输出错误与 span 文本，因此 instrument 必须显式限定记录的字段，错误文本不得内插未包装的自由文本。
+const INSTRUMENT_ATTRIBUTE = /#\[\s*(?:tracing::)?instrument\b/
+const ERROR_ATTRIBUTE = /^\s*#\[error\(\s*"([^"]*)"/
+const FREE_TEXT_TYPE = /\b(?:String|PathBuf|OsString|Vec<u8>|Cow<)|&\s*(?:'(?!static\b)\w+\s+)?str\b/
+
+function attributeText(lines, lineNumber) {
+  let text = ''
+  for (let index = lineNumber - 1; index < Math.min(lines.length, lineNumber + 7); index += 1) {
+    text += `${lines[index]}\n`
+    if (/\]\s*$/.test(lines[index].trimEnd()) && (text.match(/\[/g) ?? []).length <= (text.match(/\]/g) ?? []).length) break
+  }
+  return text
+}
+
+function fieldTypeFor(placeholder, followingLines) {
+  const name = placeholder.split(':')[0].trim()
+  if (/^\d+$/.test(name)) {
+    const tuple = followingLines.find(line => /^\s*(?:pub(?:\([^)]*\))?\s+)?(?:struct\s+)?[A-Z]\w*\s*\(/.test(line))
+    if (!tuple) return null
+    const inner = tuple.slice(tuple.indexOf('(') + 1, tuple.lastIndexOf(')'))
+    return inner.split(/,(?![^<]*>)/)[Number(name)] ?? null
+  }
+  const pattern = new RegExp(String.raw`\b${name}\s*:\s*([^,}]+)`)
+  for (const line of followingLines) {
+    const match = line.match(pattern)
+    if (match) return match[1]
+  }
+  return null
+}
+
+const FIELD_LIST_PATH = 'crates/uc-observability-runtime/src/module_log_fields.rs'
+const LOG_MACRO_START = /\b(?:tracing::)?(?:info|warn|error|debug|trace)!\s*\(/
+let reviewedFieldNames = null
+
+function reviewedFields() {
+  if (reviewedFieldNames) return reviewedFieldNames
+  const source = readFileSync(resolve(REPOSITORY_ROOT, FIELD_LIST_PATH), 'utf8')
+  reviewedFieldNames = new Set([...source.matchAll(/^\s*"([^"]+)",\s*$/gm)].map(match => match[1]))
+  // 记录点里特殊处理的名字：`error` 走错误链渲染，`message` 是消息正文。
+  reviewedFieldNames.add('error')
+  reviewedFieldNames.add('message')
+  return reviewedFieldNames
+}
+
+// 取出从 `lineNumber` 起的一次日志宏调用的顶层实参；括号不配平时返回 null。
+function logMacroArguments(lines, lineNumber) {
+  const text = lines.slice(lineNumber - 1, lineNumber + 15).join('\n')
+  const start = text.match(LOG_MACRO_START)
+  if (!start) return null
+  let depth = 1
+  let quoted = false
+  let previous = ''
+  let current = ''
+  const parts = []
+  for (let index = start.index + start[0].length; index < text.length; index += 1) {
+    const character = text[index]
+    if (character === '"' && previous !== '\\') quoted = !quoted
+    if (!quoted) {
+      if ('([{'.includes(character)) depth += 1
+      if (')]}'.includes(character)) depth -= 1
+      if (depth === 0) {
+        parts.push(current.trim())
+        return parts.filter(Boolean)
+      }
+      if (character === ',' && depth === 1) {
+        parts.push(current.trim())
+        current = ''
+        previous = character
+        continue
+      }
+    }
+    current += character
+    previous = character
+  }
+  return null
+}
+
+function logMacroViolations(path, lines, lineNumber) {
+  const violations = []
+  const code = lines[lineNumber - 1] ?? ''
+  if (!LOG_MACRO_START.test(code) || /^\s*\/\//.test(code)) return violations
+  const args = logMacroArguments(lines, lineNumber)
+  if (!args) return violations
+  const report = message =>
+    violations.push({ path, line: lineNumber, source: code.trim(), type: 'error-source', message })
+  const named = /^([A-Za-z_][\w.]*)\s*=/
+  const positional = []
+  for (const argument of args) {
+    if (/^(?:target|parent)\s*:/.test(argument)) continue
+    const match = argument.match(named)
+    if (match) {
+      if (!reviewedFields().has(match[1])) {
+        report(`日志字段 ${match[1]} 尚未审定；先在 ${FIELD_LIST_PATH} 归类（固定词表进 ALLOWED_TEXT_FIELDS，其余进 REVIEWED_OMITTED_FIELDS）`)
+      }
+    } else positional.push(argument)
+  }
+  const messageIndex = positional.findIndex(argument => argument.startsWith('"'))
+  if (messageIndex !== -1) {
+    const trailing = positional.slice(messageIndex + 1)
+    if (/\{[^{}]*\}/.test(positional[messageIndex]) || trailing.length > 0) {
+      report('日志消息只能是字面量；取值放进字段，避免正文夹带设备名、路径、标识等')
+    }
+  }
+  for (const argument of positional.slice(0, messageIndex === -1 ? undefined : messageIndex)) {
+    const shorthand = argument.replace(/^[%?]/, '')
+    if (/^[A-Za-z_]\w*$/.test(shorthand) && !reviewedFields().has(shorthand)) {
+      report(`日志字段 ${shorthand} 尚未审定；先在 ${FIELD_LIST_PATH} 归类`)
+    }
+  }
+  return violations
+}
+
+function logPrivacyViolations(path, lines, codeLines, lineNumber) {
+  const violations = [...logMacroViolations(path, lines, lineNumber)]
+  const code = codeLines[lineNumber - 1] ?? ''
+  if (INSTRUMENT_ATTRIBUTE.test(code)) {
+    const text = attributeText(codeLines, lineNumber)
+    if (!/\bskip_all\b|\bfields\s*\(/.test(text)) {
+      violations.push({
+        path,
+        line: lineNumber,
+        source: lines[lineNumber - 1].trim(),
+        type: 'error-source',
+        message: '#[instrument] 必须写 skip_all 或显式 fields(..)，避免参数自动进入 span 字段',
+      })
+    }
+  }
+  const attribute = (lines[lineNumber - 1] ?? '').match(ERROR_ATTRIBUTE)
+  if (attribute) {
+    const following = []
+    for (const line of lines.slice(lineNumber, lineNumber + 10)) {
+      if (ERROR_ATTRIBUTE.test(line)) break
+      following.push(line)
+    }
+    for (const placeholder of attribute[1].matchAll(/\{([^{}]*)\}/g)) {
+      const type = fieldTypeFor(placeholder[1], following)
+      if (type && FREE_TEXT_TYPE.test(type) && !type.includes('Sensitive<')) {
+        violations.push({
+          path,
+          line: lineNumber,
+          source: lines[lineNumber - 1].trim(),
+          type: 'error-source',
+          message: '#[error] 文本不得内插未包装的自由文本字段；用 Sensitive<..> 包装或改为固定文字/枚举名',
+        })
+        break
+      }
+    }
+  }
+  return violations
+}
+
 function lineNumberAt(source, offset) {
   return source.slice(0, offset).split('\n').length
 }
@@ -314,7 +465,10 @@ function violationsFor(path, addedLines, changedFunctionLines) {
   for (const lineNumber of addedLines) {
     const raw = lines[lineNumber - 1] ?? ''
     const code = codeLines[lineNumber - 1] ?? ''
-    if (!testLines.has(lineNumber)) violations.push(...errorSourceViolations(path, lines, codeLines, lineNumber))
+    if (!testLines.has(lineNumber)) {
+      violations.push(...errorSourceViolations(path, lines, codeLines, lineNumber))
+      violations.push(...logPrivacyViolations(path, lines, codeLines, lineNumber))
+    }
     if (!/\bcrate\s*::/.test(code)) continue
     if (/^\s*(?:pub(?:\([^)]*\))?\s+)?use\s+crate\s*::/.test(code)) continue
     if (testLines.has(lineNumber) || approvedException(lines, lineNumber)) continue
