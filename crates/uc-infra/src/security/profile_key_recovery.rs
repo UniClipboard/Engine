@@ -26,7 +26,7 @@ use crate::migration_state::{decode_legacy_migration_run_id, DEFAULT_MIGRATION_S
 use crate::network::iroh::IDENTITY_STORE_KEY;
 use crate::space::KeyMaterialStore;
 use crate::FileSecureStorage;
-use uc_observability_contract::uc_warn;
+use uc_observability_contract::{uc_info, uc_warn};
 
 pub const PROFILE_SECRET_FILE_NAME: &str = "profile-secrets-v1";
 const FORMAT_VERSION: u16 = 1;
@@ -263,12 +263,24 @@ impl ProfileKeyRecoveryStore {
                     return Err(ProfileKeyRecoveryError::Corrupt);
                 };
                 if v1_aead::unwrap_master_key_xchacha(&kek, &wrapped.blob).is_err() {
+                    uc_warn!(
+                        reason = "kek_unwrap_failed",
+                        "profile key recovery requires passphrase"
+                    );
                     return Ok(ProfileRecoveryPreparation::AwaitingPassphrase { losses });
                 }
                 self.activate_or_migrate(&kek)?;
                 Ok(ProfileRecoveryPreparation::Ready)
             }
-            Err(EncryptionError::KeyNotFound | EncryptionError::KeyMaterialCorrupt { .. }) => {
+            Err(
+                error @ (EncryptionError::KeyNotFound | EncryptionError::KeyMaterialCorrupt { .. }),
+            ) => {
+                let reason = if matches!(error, EncryptionError::KeyNotFound) {
+                    "kek_missing"
+                } else {
+                    "kek_corrupt"
+                };
+                uc_warn!(reason = reason, "profile key recovery requires passphrase");
                 Ok(ProfileRecoveryPreparation::AwaitingPassphrase { losses })
             }
             Err(error) => Err(error.into()),
@@ -334,12 +346,14 @@ impl ProfileKeyRecoveryStore {
             return Ok(());
         }
         if self.file.exists() && self.rewrap_active(&kek)? {
+            uc_info!(reason = "rewrapped", "profile key vault refreshed");
             self.authorize_cleanup()?;
             self.cleanup_legacy_entries()?;
             return Ok(());
         }
         let secrets = self.current_or_legacy_secrets()?;
         self.create_and_activate(&kek, secrets, true)?;
+        uc_warn!(reason = "recreated", "profile key vault recreated");
         self.cleanup_legacy_entries()?;
         Ok(())
     }

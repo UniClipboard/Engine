@@ -20,6 +20,7 @@ use uc_core::ports::security::{BlobCipherError, BlobCipherPort as _};
 use uc_core::BlobId;
 
 use crate::blob::{BlobStorePort, FilesystemBlobStore};
+use crate::fs::work_directory::remove_work_directory_best_effort;
 use crate::security::{
     BlobCipherAdapter, ContentProtection, EncryptedBlobStore, ProfileContentKeyVault,
     V3EncryptedBlobStore, V3InlinePayloadCipher,
@@ -129,7 +130,7 @@ impl PrimaryPayloadConverter {
         let converted = match result {
             Ok(converted) => converted,
             Err(error) => {
-                let _ = std::fs::remove_dir_all(&work);
+                remove_work_directory_best_effort(&work);
                 return Err(error);
             }
         };

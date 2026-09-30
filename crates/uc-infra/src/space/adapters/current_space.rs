@@ -44,7 +44,7 @@ impl EncryptedLegacyCurrentSpaceIdStore {
         let ciphertext = match fs::read(&self.path).await {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(_) => return Err(CurrentSpaceIdentityError::unavailable()),
+            Err(error) => return Err(CurrentSpaceIdentityError::unavailable_from(error)),
         };
         let plaintext = self
             .keys

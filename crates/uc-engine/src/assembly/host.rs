@@ -23,7 +23,9 @@ use uc_core::ports::{
 use uc_infra::security::{
     ProfileLifecycleRepository, ProfileStartupStorage, ProfileUpgradeBackupStore,
 };
-use uc_observability_contract::{analytics::DefaultAnalyticsFacade, uc_warn};
+use uc_observability_contract::{
+    analytics::DefaultAnalyticsFacade, error_source::io_error_kind, uc_warn,
+};
 
 use crate::assembly::deps::{WiredDependencies, WiringError, WiringResult};
 use crate::assembly::platform::SystemClipboardLayer;
@@ -259,8 +261,12 @@ fn cleanup_import_directory(directory: Option<&Path>) {
     let Some(directory) = directory else {
         return;
     };
-    if std::fs::remove_dir_all(directory).is_err() {
-        uc_warn!("failed to remove incomplete host clipboard import");
+    if let Err(error) = std::fs::remove_dir_all(directory) {
+        uc_warn!(
+            error_kind = "clipboard_import_cleanup",
+            io_error_kind = io_error_kind(&error),
+            "failed to remove incomplete host clipboard import"
+        );
     }
 }
 

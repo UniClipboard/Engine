@@ -28,6 +28,7 @@ use crate::db::repositories::receive_artifact_cipher::{
 use crate::file_transfer::persistence_cipher::{
     TransferPersistenceCipher, V3TransferPersistenceCipher,
 };
+use crate::fs::work_directory::remove_work_directory_best_effort;
 use crate::search::{RenderDecodeError, RenderPayloadCodec, SearchGroupRef, V3SearchProtection};
 use crate::security::{ContentProtection, ProfileContentKeyVault};
 use crate::space::InMemorySession;
@@ -125,7 +126,7 @@ impl DerivedPayloadConverter {
         let converted = match result {
             Ok(converted) => converted,
             Err(error) => {
-                let _ = std::fs::remove_dir_all(&work);
+                remove_work_directory_best_effort(&work);
                 return Err(error);
             }
         };

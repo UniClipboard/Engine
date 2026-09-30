@@ -18,7 +18,7 @@ use uc_core::{
     },
     security::IdentityFingerprint,
 };
-use uc_observability_contract::uc_debug;
+use uc_observability_contract::uc_info;
 
 /// Secure-storage key under which the 32-byte Ed25519 secret is persisted.
 ///
@@ -94,8 +94,12 @@ impl IrohIdentityStore {
             })
     }
 
-    fn generate_new() -> SecretKey {
-        SecretKey::generate()
+    /// 生成并持久化新的网络身份密钥；只记录固定来源，不记录指纹或密钥材料。
+    fn generate_and_persist(&self, origin: &'static str) -> Result<SecretKey, LocalIdentityError> {
+        let sk = SecretKey::generate();
+        self.persist_secret(&sk)?;
+        uc_info!(origin = origin, "iroh network identity generated");
+        Ok(sk)
     }
 
     /// Return the persisted iroh `SecretKey`, generating + persisting a fresh
@@ -107,9 +111,7 @@ impl IrohIdentityStore {
         if let Some(existing) = self.load_secret()? {
             return Ok(existing);
         }
-        let sk = Self::generate_new();
-        self.persist_secret(&sk)?;
-        Ok(sk)
+        self.generate_and_persist("bind")
     }
 }
 
@@ -120,11 +122,8 @@ impl LocalIdentityPort for IrohIdentityStore {
         if self.load_secret()?.is_some() {
             return Err(LocalIdentityError::AlreadyExists);
         }
-        let sk = Self::generate_new();
-        self.persist_secret(&sk)?;
-        let fp = self.derive_fingerprint(&sk)?;
-        uc_debug!("iroh identity created");
-        Ok(fp)
+        let sk = self.generate_and_persist("create")?;
+        self.derive_fingerprint(&sk)
     }
 
     #[instrument(skip_all)]
@@ -132,11 +131,8 @@ impl LocalIdentityPort for IrohIdentityStore {
         if let Some(existing) = self.load_secret()? {
             return self.derive_fingerprint(&existing);
         }
-        let sk = Self::generate_new();
-        self.persist_secret(&sk)?;
-        let fp = self.derive_fingerprint(&sk)?;
-        uc_debug!("iroh identity generated via ensure()");
-        Ok(fp)
+        let sk = self.generate_and_persist("ensure")?;
+        self.derive_fingerprint(&sk)
     }
 
     #[instrument(skip_all)]

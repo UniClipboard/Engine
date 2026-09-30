@@ -8,6 +8,7 @@ pub mod inbound_target;
 pub mod key_slot_store;
 pub mod receive_artifact_cleanup;
 mod vault_layout;
+pub(crate) mod work_directory;
 
 pub use atomic_publish::FsAtomicPublisher;
 pub use cache_fs::TokioCacheFsAdapter;

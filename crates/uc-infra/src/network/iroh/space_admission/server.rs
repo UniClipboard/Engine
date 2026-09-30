@@ -33,7 +33,7 @@ use uc_observability_contract::diagnostics::connectivity::{
 };
 mod authentication;
 use authentication::AuthenticatedRequest;
-use uc_observability_contract::{log_fields::log_vocab_debug, uc_debug};
+use uc_observability_contract::{log_fields::log_vocab_debug, uc_debug, uc_warn};
 const EXCHANGE_DEADLINE: Duration = Duration::from_secs(120);
 const MAX_INBOUND_EXCHANGES: usize = 8;
 
@@ -245,6 +245,10 @@ impl ProtocolHandler for IrohSpaceAdmissionHandler {
             return Ok(());
         }
         let Ok(_permit) = Arc::clone(&self.permits).try_acquire_owned() else {
+            uc_warn!(
+                reason = "busy",
+                "Space admission connection rejected while sponsor is at capacity"
+            );
             connection.close(CLOSE_BUSY.into(), b"admission_busy");
             return Ok(());
         };

@@ -41,7 +41,7 @@ impl RePairingStateStorePort for EncryptedRePairingStateStore {
         let ciphertext = match fs::read(&self.path).await {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(_) => return Err(RePairingStateError::unavailable()),
+            Err(error) => return Err(RePairingStateError::unavailable_from(error)),
         };
         let plaintext = self
             .keys

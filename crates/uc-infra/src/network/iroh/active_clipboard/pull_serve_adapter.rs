@@ -189,8 +189,12 @@ impl ProtocolHandler for IrohActiveClipboardPullServeHandler {
                     uc_debug!("active-clipboard pull serve: session locked; responding Locked");
                     PullResponse::Locked
                 }
-                Err(ActiveClipboardPullServeError::Internal(_)) => {
-                    uc_warn!("active-clipboard pull serve: internal failure; responding Internal");
+                Err(ActiveClipboardPullServeError::Internal(error)) => {
+                    uc_warn!(
+                        error_kind = "serve_internal",
+                        io_error_kind = io_error_kind(error.as_ref()),
+                        "active-clipboard pull serve: internal failure; responding Internal"
+                    );
                     PullResponse::Internal
                 }
             }

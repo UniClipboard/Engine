@@ -32,7 +32,7 @@ impl SpaceRebuildProgressPort for FileSpaceRebuildProgress {
         match fs::read_to_string(&self.target_path).await {
             Ok(value) => Ok(Some(SpaceId::from_str(value.trim()))),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(_) => Err(SpaceRebuildProgressError::unavailable()),
+            Err(error) => Err(SpaceRebuildProgressError::unavailable_from(error)),
         }
     }
 
@@ -54,7 +54,7 @@ impl SpaceRebuildProgressPort for FileSpaceRebuildProgress {
         match fs::remove_file(&self.target_path).await {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(_) => Err(SpaceRebuildProgressError::unavailable()),
+            Err(error) => Err(SpaceRebuildProgressError::unavailable_from(error)),
         }
     }
 }

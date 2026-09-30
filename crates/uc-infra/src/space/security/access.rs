@@ -351,8 +351,20 @@ impl uc_application::deps::InitializeSpacePort for MigrationSpaceAccessAdapter {
             .await
             .map_err(map_encryption_error)?;
         if let Err(error) = self.key_material.store_keyslot(&keyslot).await {
-            let _ = self.key_material.delete_keyslot(&scope).await;
-            let _ = self.key_material.delete_kek(&scope).await;
+            if let Err(rollback_error) = self.key_material.delete_keyslot(&scope).await {
+                uc_warn!(
+                    error_kind = "key_material_rollback",
+                    io_error_kind = io_error_kind(&rollback_error),
+                    "rollback delete_keyslot failed"
+                );
+            }
+            if let Err(rollback_error) = self.key_material.delete_kek(&scope).await {
+                uc_warn!(
+                    error_kind = "key_material_rollback",
+                    io_error_kind = io_error_kind(&rollback_error),
+                    "rollback delete_kek failed"
+                );
+            }
             return Err(map_encryption_error(error));
         }
         self.session

@@ -124,6 +124,21 @@ pub(super) struct SessionHandoverDiagnostics {
     pub(super) session_activation_failure_count: usize,
 }
 
+/// 会话激活未完成时回收已准备好的会话；清理失败只记分类，不改变激活失败的结果。
+async fn cleanup_prepared_session(session: ProductionSession, stage: &'static str) {
+    if let Err(error) = session
+        .shutdown(uc_core::FileTransferCancellationReason::Unknown, None)
+        .await
+    {
+        uc_warn!(
+            error_kind = "prepared_session_cleanup",
+            stage = stage,
+            io_error_kind = io_error_kind(&error),
+            "prepared session cleanup failed"
+        );
+    }
+}
+
 fn session_runtime_error(
     context: &'static str,
     error: impl Into<Box<dyn Error + Send + Sync>>,
@@ -837,14 +852,7 @@ impl SessionSupervisor {
             .consume()
         {
             prepared.network_session.shutdown().await;
-            if prepared
-                .session
-                .shutdown(uc_core::FileTransferCancellationReason::Unknown, None)
-                .await
-                .is_err()
-            {
-                uc_warn!("prepared session cleanup failed after injected activation failure");
-            }
+            cleanup_prepared_session(prepared.session, "activation_failed").await;
             return Err(session_runtime_error(
                 "activate p2p session",
                 "injected session activation failure",
@@ -854,14 +862,7 @@ impl SessionSupervisor {
         let Some(network) = runtime.network.as_mut() else {
             drop(runtime);
             prepared.network_session.shutdown().await;
-            if prepared
-                .session
-                .shutdown(uc_core::FileTransferCancellationReason::Unknown, None)
-                .await
-                .is_err()
-            {
-                uc_warn!("prepared session cleanup failed after network became unavailable");
-            }
+            cleanup_prepared_session(prepared.session, "network_unavailable").await;
             return Err(operation_unavailable_error());
         };
         let activation = network
@@ -870,14 +871,7 @@ impl SessionSupervisor {
             .map_err(|error| session_runtime_error("activate p2p session", error));
         if let Err(error) = activation {
             drop(runtime);
-            if prepared
-                .session
-                .shutdown(uc_core::FileTransferCancellationReason::Unknown, None)
-                .await
-                .is_err()
-            {
-                uc_warn!("prepared session cleanup failed after activation failure");
-            }
+            cleanup_prepared_session(prepared.session, "activation_failed").await;
             return Err(error);
         }
         runtime.session = Some(prepared.session);

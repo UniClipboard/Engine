@@ -24,6 +24,7 @@ use super::{ActiveRuntimeManifestV3, AdmissionKeyManager, ProfileRuntimeLayout};
 use crate::db::connection::is_lock_contention;
 use crate::db::executor::DieselSqliteExecutor;
 use crate::db::repositories::{DieselSpaceSecurityStore, EncryptedRelationshipStore};
+use crate::fs::work_directory::remove_work_directory_best_effort;
 use crate::fs::FsAtomicPublisher;
 use crate::space::{
     install_prepared_registration_for_control_generation,
@@ -294,7 +295,7 @@ impl SpaceControlGeneration {
         }
         .await;
         if result.is_err() {
-            let _ = remove_directory_if_present(&work_directory);
+            remove_work_directory_best_effort(&work_directory);
         }
         result
     }
@@ -359,7 +360,7 @@ impl SpaceControlGeneration {
         }
         .await;
         if result.is_err() {
-            let _ = remove_directory_if_present(&work_directory);
+            remove_work_directory_best_effort(&work_directory);
         }
         result
     }

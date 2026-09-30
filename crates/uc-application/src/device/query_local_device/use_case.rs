@@ -1,3 +1,4 @@
+use std::error::Error;
 use std::sync::Arc;
 
 use uc_core::ports::{DeviceIdentityPort, SettingsPort};
@@ -26,8 +27,11 @@ impl QueryLocalDeviceUseCase {
     pub async fn execute(&self) -> LocalDeviceInfo {
         let device_name = match self.settings.load().await {
             Ok(settings) => normalize_device_name(settings.general.device_name),
-            Err(_) => {
-                uc_warn!("local device settings unavailable; using fallback device name");
+            Err(error) => {
+                uc_warn!(
+                    error = error.as_ref() as &dyn Error,
+                    "local device settings unavailable; using fallback device name"
+                );
                 DEFAULT_DEVICE_NAME.to_string()
             }
         };
@@ -116,5 +120,17 @@ mod tests {
 
         assert_eq!(blank.device_name, DEFAULT_DEVICE_NAME);
         assert_eq!(failed.device_name, DEFAULT_DEVICE_NAME);
+    }
+
+    #[tokio::test]
+    async fn a_settings_failure_is_recorded_with_its_error_source() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+
+        let info = use_case(None, true).execute().await;
+
+        assert_eq!(info.device_name, DEFAULT_DEVICE_NAME);
+        assert_eq!(logs.count("local device settings unavailable"), 1);
+        assert!(logs.output().contains("error=settings unavailable"));
     }
 }
