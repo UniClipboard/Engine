@@ -219,29 +219,6 @@ impl IrohRelayProbeAdapter {
     }
 }
 
-/// 把任意输入压成 `scheme://host[:port]`,无法解析时返回 `<unparseable>`。
-///
-/// 仅用于 tracing 字段 —— 避免把 userinfo / path / query / fragment(可能含
-/// token、session id 等敏感片段)落进日志。完整的原始 URL 仅在内存里参与
-/// 协议握手,不会跨进程边界。
-fn sanitize_url_for_log(url: &str) -> String {
-    let trimmed = url.trim();
-    if trimmed.is_empty() {
-        return "<empty>".to_string();
-    }
-    url::Url::parse(trimmed)
-        .ok()
-        .and_then(|parsed| {
-            let host = parsed.host_str()?;
-            let scheme = parsed.scheme();
-            Some(match parsed.port() {
-                Some(port) => format!("{scheme}://{host}:{port}"),
-                None => format!("{scheme}://{host}"),
-            })
-        })
-        .unwrap_or_else(|| "<unparseable>".to_string())
-}
-
 fn map_connect_error(err: ConnectError) -> RelayProbeError {
     // `ConnectError` 与 `DialError` 用 n0-error 派生宏注入了 `meta` 字段,
     // 这里只关心可读语义,统一用 `..` 跳过 meta。

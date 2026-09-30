@@ -63,3 +63,11 @@ Still without a dedicated log test: #25 (needs the full outbound use case fixtur
 - #29: covered through the existing Engine contract harness (create space, lock encryption, trigger a host clipboard change, assert the `space_locked` record).
 - #37: `capacity` (third pending connection from one peer) and `confirmation_failed` (admission revoked after the confirmation was written) are tested with real iroh endpoints, no structural change. `confirmation_missing` remains untested.
 - Still no dedicated log test: #25, #47, #16 local-invariant branch, #44 install-time emit, #43 timing.
+
+## 2026-09-30 final verification (untruncated)
+
+- `cargo test --workspace --exclude uc-upgrade-matrix --locked --no-fail-fast`: 4032 passed, 2 failed, 15 doc-test targets ran, `a_complete_plan_does_not_skip_or_log` passed.
+  - `interrupted_file_transfer_recovers_after_receiver_process_restart` (known flake, see above).
+  - `topology::f6_deep_chain_recovers_selected_branch_without_online_sponsors` (needs `--features dev-tools`): fails about half the time in isolation on this branch (1 of 3) and on the untouched base `c7a821b4` (2 of 4) with the same message (a node stuck at group epoch 7). Pre-existing flake.
+- `cargo test -p uc-upgrade-matrix --locked --no-fail-fast`: 66 of 68 fail, the same environment gap as the P0 baseline (missing anchor hosts).
+- Removed the now-unused `sanitize_url_for_log` in `relay_probe.rs` (its only caller was the removed `relay` span field).
