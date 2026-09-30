@@ -6705,3 +6705,113 @@ mod admission_tests {
         assert!(error.source().is_some());
     }
 }
+
+#[cfg(test)]
+mod migration_initialize_tests {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    use uc_application::deps::InitializeSpacePort;
+    use uc_core::ports::security::current_profile::CurrentProfileError;
+    use uc_core::ports::security::secure_storage::{SecureStorageError, SecureStoragePort};
+
+    use super::*;
+    use crate::fs::key_slot_store::KeySlotStore;
+    use crate::security::crypto_model::KeySlotFile;
+
+    struct Profile;
+
+    #[async_trait]
+    impl CurrentProfilePort for Profile {
+        async fn current_profile(&self) -> Result<ProfileId, CurrentProfileError> {
+            Ok(ProfileId::from("migration-initialize-fixture"))
+        }
+    }
+
+    /// 写入成功、删除失败的安全存储，用来制造回滚也失败的双重故障。
+    #[derive(Default)]
+    struct StorageThatCannotDelete(Mutex<HashMap<String, Vec<u8>>>);
+
+    impl SecureStoragePort for StorageThatCannotDelete {
+        fn get(&self, key: &str) -> Result<Option<Vec<u8>>, SecureStorageError> {
+            Ok(self.0.lock().unwrap().get(key).cloned())
+        }
+
+        fn set(&self, key: &str, value: &[u8]) -> Result<(), SecureStorageError> {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(key.to_owned(), value.to_vec());
+            Ok(())
+        }
+
+        fn delete(&self, _key: &str) -> Result<(), SecureStorageError> {
+            Err(SecureStorageError::Unavailable("PRIVATE_DELETE".into()))
+        }
+    }
+
+    /// 没有密钥槽，写入与删除都以 IO 失败。
+    struct KeySlotsThatCannotBeWritten;
+
+    fn io_failure() -> EncryptionError {
+        EncryptionError::CryptoFailure {
+            source: Some(Box::new(std::io::Error::other("PRIVATE_KEYSLOT_IO"))),
+        }
+    }
+
+    #[async_trait]
+    impl KeySlotStore for KeySlotsThatCannotBeWritten {
+        async fn load(&self) -> Result<KeySlotFile, EncryptionError> {
+            Err(EncryptionError::KeyNotFound)
+        }
+
+        async fn store(&self, _slot: &KeySlotFile) -> Result<(), EncryptionError> {
+            Err(io_failure())
+        }
+
+        async fn delete(&self) -> Result<(), EncryptionError> {
+            Err(io_failure())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_keyslot_store_records_each_failed_rollback_step() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let adapter = MigrationSpaceAccessAdapter::new(
+            Arc::new(KeyMaterialStore::new(
+                Arc::new(StorageThatCannotDelete::default()),
+                Arc::new(KeySlotsThatCannotBeWritten),
+            )),
+            Arc::new(Profile),
+            Arc::new(InMemorySession::new()),
+        );
+
+        let result = adapter
+            .initialize(
+                &SpaceId::from("space-a"),
+                &DomainPassphrase::new("passphrase"),
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            logs.count("rollback delete_keyslot failed"),
+            1,
+            "{}",
+            logs.output()
+        );
+        assert_eq!(
+            logs.count("rollback delete_kek failed"),
+            1,
+            "{}",
+            logs.output()
+        );
+        let output = logs.output();
+        assert!(
+            output.contains("error_kind=\"key_material_rollback\""),
+            "{output}"
+        );
+        assert!(!output.contains("PRIVATE_"), "{output}");
+    }
+}

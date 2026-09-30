@@ -1411,6 +1411,46 @@ mod tests {
         }
     }
 
+    /// 未完成确认的接入关闭要留下固定分类；只走 debug，避免探测连接刷屏。
+    #[tokio::test]
+    async fn an_invalid_admission_confirmation_is_recorded_before_the_connection_closes() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let server = bound_endpoint().await;
+        wait_for_direct_addrs(&server).await;
+        let client = bound_endpoint().await;
+        let adapter = build_adapter(server.clone(), Arc::new(FakePeerAddressRepo::default()));
+        let router = Router::builder((*server).clone())
+            .accept(PEER_REACHABILITY_ALPN, adapter.handler())
+            .spawn();
+
+        let connection = client
+            .connect(server.addr(), PEER_REACHABILITY_ALPN)
+            .await
+            .unwrap();
+        let (mut send, _receive) = connection.open_bi().await.unwrap();
+        send.write_all(&[ADMISSION_CONFIRMATION_REQUEST.wrapping_add(1)])
+            .await
+            .unwrap();
+        send.finish().unwrap();
+        timeout(Duration::from_secs(2), connection.closed())
+            .await
+            .expect("an invalid confirmation closes the connection");
+        router.shutdown().await.unwrap();
+        client.close().await;
+
+        let output = logs.output();
+        let record = output
+            .lines()
+            .find(|line| line.contains("invalid admission confirmation"))
+            .unwrap_or_else(|| panic!("invalid confirmation record missing: {output}"));
+        assert!(
+            record.contains("error_kind=\"confirmation_invalid\""),
+            "{record}"
+        );
+        assert!(!record.contains(&client.id().to_string()), "{record}");
+    }
+
     #[tokio::test]
     async fn stalled_confirmation_does_not_block_other_peers_or_shutdown() {
         for close_all in [false, true] {

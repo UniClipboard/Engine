@@ -1327,6 +1327,114 @@ mod tests {
         }
     }
 
+    async fn keyslot_with_wrapping_key(
+        directory: &tempfile::TempDir,
+    ) -> (ProfileKeyRecoveryStore, KeyMaterialStore, KeyScope) {
+        let storage = Arc::new(MemoryStorage::default());
+        let backing: Arc<dyn SecureStoragePort> = storage;
+        let paths = test_paths(directory);
+        let profile_id = uc_core::ids::ProfileId::new().into_inner();
+        let scope = KeyScope {
+            profile_id: profile_id.clone(),
+        };
+        let material = KeyMaterialStore::new(
+            Arc::clone(&backing),
+            Arc::new(JsonKeySlotStore::new(paths.vault_dir.clone())),
+        );
+        let draft = KeySlot::draft_v1(scope.clone()).unwrap();
+        let legacy = LegacyPassphrase("recovery passphrase".to_owned());
+        let kek = v1_aead::derive_kek_argon2id(&legacy, &draft.salt, &draft.kdf).unwrap();
+        let master = MasterKey::generate().unwrap();
+        let wrapped = v1_aead::wrap_master_key_xchacha(&kek, &master).unwrap();
+        material
+            .store_keyslot(&draft.finalize(WrappedMasterKey { blob: wrapped }))
+            .await
+            .unwrap();
+        let recovery = ProfileKeyRecoveryStore::new(paths, profile_id, backing);
+        (recovery, material, scope)
+    }
+
+    #[tokio::test]
+    async fn a_missing_kek_records_its_reason_and_asks_for_the_passphrase() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let directory = tempfile::tempdir().unwrap();
+        let (recovery, _material, _scope) = keyslot_with_wrapping_key(&directory).await;
+
+        let preparation = recovery.prepare_startup().await.unwrap();
+
+        assert!(matches!(
+            preparation,
+            ProfileRecoveryPreparation::AwaitingPassphrase { .. }
+        ));
+        assert_eq!(
+            logs.count("profile key recovery requires passphrase"),
+            1,
+            "{}",
+            logs.output()
+        );
+        assert!(
+            logs.output().contains("reason=\"kek_missing\""),
+            "{}",
+            logs.output()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_kek_that_cannot_unwrap_the_master_key_records_its_reason() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let directory = tempfile::tempdir().unwrap();
+        let (recovery, material, scope) = keyslot_with_wrapping_key(&directory).await;
+        let other = LegacyPassphrase("another passphrase".to_owned());
+        let draft = KeySlot::draft_v1(scope.clone()).unwrap();
+        let wrong = v1_aead::derive_kek_argon2id(&other, &draft.salt, &draft.kdf).unwrap();
+        material.store_kek(&scope, &wrong).await.unwrap();
+
+        let preparation = recovery.prepare_startup().await.unwrap();
+
+        assert!(matches!(
+            preparation,
+            ProfileRecoveryPreparation::AwaitingPassphrase { .. }
+        ));
+        assert!(
+            logs.output().contains("reason=\"kek_unwrap_failed\""),
+            "{}",
+            logs.output()
+        );
+    }
+
+    #[tokio::test]
+    async fn refreshing_without_a_vault_file_records_that_the_vault_was_recreated() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let directory = tempfile::tempdir().unwrap();
+        let (recovery, material, scope) = keyslot_with_wrapping_key(&directory).await;
+        let draft = KeySlot::draft_v1(scope.clone()).unwrap();
+        let kek = v1_aead::derive_kek_argon2id(
+            &LegacyPassphrase("recovery passphrase".to_owned()),
+            &draft.salt,
+            &draft.kdf,
+        )
+        .unwrap();
+        material.store_kek(&scope, &kek).await.unwrap();
+
+        recovery.refresh_after_authentication().await.unwrap();
+
+        assert_eq!(
+            logs.count("profile key vault recreated"),
+            1,
+            "{}",
+            logs.output()
+        );
+        assert!(
+            logs.output().contains("reason=\"recreated\""),
+            "{}",
+            logs.output()
+        );
+        assert!(recovery.vault_file().is_file());
+    }
+
     #[tokio::test]
     async fn automatic_migration_stops_when_protected_history_has_lost_legacy_material() {
         let directory = tempfile::tempdir().unwrap();

@@ -468,6 +468,47 @@ mod tests {
         router.shutdown().await.ok();
     }
 
+    /// 服务端内部失败只记固定分类与 io 类别，不带错误正文，并向对端回 Internal。
+    #[tokio::test]
+    async fn internal_serve_failure_is_recorded_without_its_message() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let sender_seed = [0x51u8; 32];
+        let receiver_seed = [0x52u8; 32];
+        let member_repo: Arc<dyn MemberRepositoryPort> = Arc::new(MemMemberRepo::default());
+        member_repo
+            .save(&make_member(sender_seed, "member-internal"))
+            .await
+            .unwrap();
+        let serve = StubServe::new(Err(ActiveClipboardPullServeError::Internal(Box::new(
+            std::io::Error::other("PRIVATE_SERVE_DETAIL"),
+        ))));
+        let (endpoint, router) = spawn_serve(
+            receiver_seed,
+            Arc::clone(&member_repo),
+            Arc::clone(&serve) as _,
+        )
+        .await;
+
+        let hash = format!("blake3v1:{}", "9".repeat(64));
+        let resp = pull_request(sender_seed, endpoint.addr(), &hash)
+            .await
+            .expect("response decodes");
+
+        assert_eq!(resp, PullResponse::Internal);
+        assert_eq!(
+            logs.count("pull serve: internal failure"),
+            1,
+            "{}",
+            logs.output()
+        );
+        let output = logs.output();
+        assert!(output.contains("error_kind=\"serve_internal\""), "{output}");
+        assert!(output.contains("io_error_kind=Other"), "{output}");
+        assert!(!output.contains("PRIVATE_SERVE_DETAIL"), "{output}");
+        router.shutdown().await.ok();
+    }
+
     /// Verdict 2 — an unknown peer (fingerprint not in member_repo) is dropped
     /// at the admission gate; the serve port is never reached and the dial
     /// surfaces as a closed connection / io error (no response frame).

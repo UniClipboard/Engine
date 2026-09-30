@@ -68,6 +68,12 @@ impl IrohSpaceAdmissionHandler {
         self
     }
 
+    #[cfg(test)]
+    pub(super) fn with_capacity(mut self, permits: usize) -> Self {
+        self.permits = Arc::new(Semaphore::new(permits));
+        self
+    }
+
     async fn run(&self, connection: &Connection) -> Result<(), HandlerError> {
         let connection_started = std::time::Instant::now();
         let deadline = tokio::time::Instant::now() + self.exchange_deadline;

@@ -123,3 +123,24 @@ async fn claimed_startup_becomes_ready_and_leaves_shutdown_to_the_caller() {
     engine.shutdown(Duration::from_secs(1)).await.unwrap();
     assert_eq!(runtime.calls.load(Ordering::SeqCst), 1);
 }
+
+#[test]
+fn a_lost_startup_task_is_recorded_as_a_join_failure_and_keeps_its_stable_code() {
+    let logs = uc_testkit::log_capture::CapturedLogs::default();
+    let _guard = logs.install();
+
+    let error = startup_task_failed_recorded();
+
+    assert_eq!(error.code(), 1108);
+    assert_eq!(logs.count("uc.task.join_failed"), 1, "{}", logs.output());
+    assert_eq!(logs.count("engine_startup"), 1, "{}", logs.output());
+}
+
+#[test]
+fn an_unrecorded_claim_failure_does_not_write_a_health_record() {
+    let logs = uc_testkit::log_capture::CapturedLogs::default();
+    let _guard = logs.install();
+
+    assert_eq!(startup_task_failed().code(), 1108);
+    assert_eq!(logs.count("uc.task.join_failed"), 0, "{}", logs.output());
+}

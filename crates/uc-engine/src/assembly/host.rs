@@ -1201,3 +1201,47 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod import_cleanup_tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_cleanup_records_its_io_kind_without_the_directory_path() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let directory = tempfile::tempdir().expect("temp dir");
+        let missing = directory.path().join("PRIVATE_IMPORT_DIR");
+
+        cleanup_import_directory(Some(&missing));
+
+        assert_eq!(
+            logs.count("failed to remove incomplete host clipboard import"),
+            1,
+            "{}",
+            logs.output()
+        );
+        let output = logs.output();
+        assert!(
+            output.contains("error_kind=\"clipboard_import_cleanup\""),
+            "{output}"
+        );
+        assert!(output.contains("io_error_kind=NotFound"), "{output}");
+        assert!(!output.contains("PRIVATE_IMPORT_DIR"), "{output}");
+    }
+
+    #[test]
+    fn a_successful_or_absent_cleanup_stays_silent() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let directory = tempfile::tempdir().expect("temp dir");
+        let existing = directory.path().join("import");
+        std::fs::create_dir(&existing).expect("create import dir");
+
+        cleanup_import_directory(Some(&existing));
+        cleanup_import_directory(None);
+
+        assert!(!existing.exists());
+        assert_eq!(logs.count("failed to remove"), 0, "{}", logs.output());
+    }
+}

@@ -50,3 +50,9 @@ Remote exporter build failure now yields `RemoteSetupFailure` (http_client/trace
 - Remove member: `RemoveSpaceMemberUseCase::execute` now writes one completion record (`operation=remove_member`, `outcome=completed|rejected|failed`, `error_class`); the Engine boundary log was removed and its test now asserts no second record.
 - Cancel join: `SpaceAdmissionProtocol::cancel_join` writes the outcome (`requested|completed|failed`); Engine mapping no longer logs; a missing join stays silent.
 - Config migration keeps its port-boundary failure record; reconciliation and session recovery keep their existing independent records.
+
+## 2026-09-30 test gaps closed
+
+Added log tests for: #32 (lost startup task health record), #48 (import cleanup failure and silent success), #50 (sponsor at capacity, real iroh endpoints), #51 (serve internal failure, real iroh endpoints), #37 confirmation_invalid only, #53 (double-fault rollback in migration initialize), #54 (kek_missing, kek_unwrap_failed, recreated).
+
+Still without a dedicated log test: #25 (needs the full outbound use case fixture), #29 and #30 (need a `SessionSupervisor`), #37 capacity/confirmation_failed/confirmation_missing (need stalled or duplicated inbound connections), #47 (needs a real `ProductionSession`), #16 local-invariant branch, #44 install-time emit, #43 timing.

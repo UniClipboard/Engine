@@ -158,6 +158,58 @@ async fn stalled_pre_authentication_records_one_unassociated_timeout() {
     }));
 }
 
+#[tokio::test]
+async fn a_sponsor_at_capacity_records_one_busy_warning_without_peer_identity() {
+    let logs = uc_testkit::log_capture::CapturedLogs::default();
+    let _guard = logs.install();
+    let sponsor = bound_endpoint().await;
+    wait_for_direct_addrs(&sponsor).await;
+    let joiner = bound_endpoint().await;
+    wait_for_direct_addrs(&joiner).await;
+    let endpoint = Arc::new(HangingLoopbackEndpoint {
+        calls: AtomicUsize::new(0),
+        entered: Notify::new(),
+    });
+    let credentials = Arc::new(LoopbackCredentials {
+        initial: Mutex::new(None),
+        continuation: Mutex::new(None),
+    });
+    let handler = Arc::new(
+        IrohSpaceAdmissionHandler::new(&sponsor, endpoint.clone(), credentials)
+            .expect("handler")
+            .with_capacity(0),
+    );
+    let router = Router::builder((*sponsor).clone())
+        .accept(SPACE_ADMISSION_ALPN, handler)
+        .spawn();
+    let connection = connect(&joiner, sponsor.addr())
+        .await
+        .expect("connect to a full sponsor");
+    tokio::time::timeout(Duration::from_secs(2), connection.closed())
+        .await
+        .expect("a full sponsor closes the connection");
+    assert_eq!(endpoint.calls.load(Ordering::SeqCst), 0);
+
+    router.shutdown().await.expect("router shutdown");
+    joiner.close().await;
+    sponsor.close().await;
+
+    assert_eq!(
+        logs.count("rejected while sponsor is at capacity"),
+        1,
+        "{}",
+        logs.output()
+    );
+    // 传输层自己的 TRACE 会带端点标识，这里只检查本条业务记录。
+    let output = logs.output();
+    let record = output
+        .lines()
+        .find(|line| line.contains("rejected while sponsor is at capacity"))
+        .expect("busy record");
+    assert!(record.contains("reason=\"busy\""), "{record}");
+    assert!(!record.contains(&joiner.id().to_string()), "{record}");
+}
+
 #[derive(Debug)]
 struct DetailProbe(Arc<std::sync::Mutex<Vec<(&'static str, &'static str)>>>);
 impl opentelemetry_sdk::logs::LogProcessor for DetailProbe {
