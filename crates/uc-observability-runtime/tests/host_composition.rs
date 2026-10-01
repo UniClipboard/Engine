@@ -63,6 +63,7 @@ fn one_process_can_keep_host_logs_and_route_engine_records_only_to_the_common_ru
         "permission_denied",
         Some("PermissionDenied"),
         Some(5),
+        true,
     );
     drop(entered);
     drop(host_span);

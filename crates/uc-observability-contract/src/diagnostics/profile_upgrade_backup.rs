@@ -6,6 +6,7 @@ pub fn record_profile_upgrade_backup_failure(
     error_kind: &'static str,
     io_error_kind: Option<&str>,
     io_error_code: Option<i32>,
+    retryable: bool,
 ) {
     tracing::event!(
         target: "uc.local_diagnostic",
@@ -15,6 +16,6 @@ pub fn record_profile_upgrade_backup_failure(
         error_kind,
         io_error_kind,
         io_error_code,
-        retryable = true,
+        retryable,
     );
 }

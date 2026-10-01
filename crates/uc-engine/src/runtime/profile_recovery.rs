@@ -441,6 +441,7 @@ impl RecoverableRuntime {
             Arc::clone(&wired.profile_reset.lifecycle_repository),
             Arc::new(NoProfileRuntime),
             Arc::clone(&wired.profile_reset.keys),
+            Arc::clone(&wired.profile_reset.backup_security),
             Arc::clone(&wired.profile_reset.state),
         );
         let result = execute_factory_reset_space(&reset).await;

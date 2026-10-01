@@ -41,6 +41,10 @@ pub struct ProfileUpgradeBackupStore {
 }
 
 impl ProfileUpgradeBackupStore {
+    pub(super) fn record_failure(action: &'static str, error: &ProfileUpgradeBackupError) {
+        record_backup_failure(action, error);
+    }
+
     fn record_result<T>(
         action: &'static str,
         result: Result<T, ProfileUpgradeBackupError>,
@@ -457,10 +461,11 @@ fn file_size(path: &Path) -> Result<u64, ProfileUpgradeBackupError> {
         .map_err(backup_error)
 }
 
-fn remove_if_exists(path: &Path) -> Result<(), ProfileUpgradeBackupError> {
+/// 返回是否确实删除了文件；不存在视为已完成。
+pub(super) fn remove_if_exists(path: &Path) -> Result<bool, ProfileUpgradeBackupError> {
     match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(backup_error(error)),
     }
 }

@@ -501,13 +501,13 @@ pub(crate) async fn wire_host_capabilities_with_emitter(
     let (directories, secure_storage, mut clipboard, files, analytics) = host.into_parts();
     let secure_storage = adapt_shared_secure_storage(secure_storage);
     let app_data_root = paths.app_data_root_dir.clone();
-    let profile_upgrade_backups: Arc<dyn ProfileUpgradeBackupPort> =
-        Arc::new(ProfileUpgradeBackupStore::new(
-            paths.clone(),
-            config.profile_id().to_owned(),
-            Arc::clone(&secure_storage),
-            directories.upgrade_backups().to_path_buf(),
-        ));
+    let upgrade_backup_store = Arc::new(ProfileUpgradeBackupStore::new(
+        paths.clone(),
+        config.profile_id().to_owned(),
+        Arc::clone(&secure_storage),
+        directories.upgrade_backups().to_path_buf(),
+    ));
+    let profile_upgrade_backups: Arc<dyn ProfileUpgradeBackupPort> = upgrade_backup_store.clone();
     let profile_lifecycle = PrepareProfileStartupUseCase::new(
         Arc::new(super::startup_progress::StartupProfileUpgradeBackup::new(
             Arc::clone(&profile_upgrade_backups),
@@ -574,6 +574,7 @@ pub(crate) async fn wire_host_capabilities_with_emitter(
         host_event_emitter,
         startup_progress,
         profile_key_recovery,
+        upgrade_backup_security: upgrade_backup_store,
     })
     .await?;
 

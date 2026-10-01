@@ -215,6 +215,7 @@ impl ProductionRuntime {
             Arc::clone(&wired.profile_reset.lifecycle_repository),
             profile_runtime_port,
             Arc::clone(&wired.profile_reset.keys),
+            Arc::clone(&wired.profile_reset.backup_security),
             Arc::clone(&wired.profile_reset.state),
         ));
         if profile_reset

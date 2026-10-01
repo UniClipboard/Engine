@@ -2,6 +2,7 @@ use uc_application::deps::ProfileUpgradeBackupError;
 use uc_core::ports::SecureStorageError;
 use uc_observability_contract::diagnostics::record_profile_upgrade_backup_failure;
 
+use super::ProfileUpgradeBackupRecordKeyMissing;
 use crate::security::ProfileBackupArchiveError;
 
 /// 只为本地备份诊断记录稳定且不泄露隐私的元数据。
@@ -17,11 +18,14 @@ pub(super) fn record_backup_failure(
         .unwrap_or(fallback_action);
     let io = find_source::<std::io::Error>(error);
     let io_kind = io.map(|source| format!("{:?}", source.kind()));
+    let error_kind = classify_error(error);
     record_profile_upgrade_backup_failure(
         backup_action,
-        classify_error(error),
+        error_kind,
         io_kind.as_deref(),
         io.and_then(std::io::Error::raw_os_error),
+        // 与 Engine 启动结果一致：记录密钥缺失不会因重试而恢复。
+        error_kind != RECORD_KEY_MISSING,
     );
 }
 
@@ -49,7 +53,14 @@ pub(super) fn with_backup_action(
     }
 }
 
+/// 升级备份安全记录的保护密钥已不存在。
+pub(super) const RECORD_KEY_MISSING: &str = "record_key_missing";
+
 fn classify_error(error: &(dyn std::error::Error + 'static)) -> &'static str {
+    // 先于 IO 与存储分类：缺钥错误可能带有下层上下文，但原因只有一个。
+    if find_source::<ProfileUpgradeBackupRecordKeyMissing>(error).is_some() {
+        return RECORD_KEY_MISSING;
+    }
     let io = find_source::<std::io::Error>(error);
     if let Some(archive) = find_source::<ProfileBackupArchiveError>(error) {
         return match archive {
@@ -230,5 +241,18 @@ mod tests {
 
         assert_eq!(fields["error_kind"], "protection_storage");
         assert!(!format!("{fields:?}").contains("private host payload"));
+    }
+
+    #[test]
+    fn missing_record_key_has_its_own_non_retryable_classification() {
+        let fields = capture(ProfileUpgradeBackupError {
+            source: anyhow::Error::new(ProfileUpgradeBackupRecordKeyMissing)
+                .context("private-path/secret-name"),
+        });
+
+        assert_eq!(fields["error_kind"], "record_key_missing");
+        assert_eq!(fields["retryable"], "false");
+        assert!(!format!("{fields:?}").contains("backup_internal"));
+        assert!(!format!("{fields:?}").contains("private-path"));
     }
 }

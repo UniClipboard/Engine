@@ -188,7 +188,7 @@ Relationship: config migration 清单只含当前 KEK，升级备份另含 admis
 | 旧资料永久缺少独立材料 | `PartiallyRecoverable` + 明确 loss；UnlockSpace 不返回 SpaceUnlocked | 不把“口令正确”当作后台已恢复 |
 | 保存自动解锁材料失败 | `PROFILE_RECOVERY_PERSISTENCE_FAILED` | 不报告持久恢复完成；已有 ready 会话不清理 |
 | 口令通过后其他启动依赖失败 | 保留对应启动错误，状态 Failed，`restart_required=true` | 同一实例不可重试；重启 Engine 后继续 |
-| 升级备份存在但其保护材料永久缺失 | `PROFILE_UPGRADE_BACKUP_KEY_MISSING_CODE`（1224） | 不可重试，不生成替代材料，不绕过升级安全门槛 |
+| 升级备份存在但其保护材料永久缺失 | 升级准备：作废旧安全记录并重建（不再失败）；严格读取安全记录内容的路径仍为 `PROFILE_UPGRADE_BACKUP_KEY_MISSING_CODE`（1224）。2026-10-01 起以[升级备份安全记录生命周期](../active/2026-10-01-upgrade-backup-security-record-lifecycle.md)为准 | 严格路径不可重试且不生成替代材料；文件副本校验门槛不变 |
 | 旧条目删除失败 | 新格式可用，`cleanup_pending=true` | 自动有界重试/下次启动继续，不报告完全迁移完成 |
 
 新增数字错误码实施时在 `contract/error_codes.rs` 分配并通过唯一性测试；不得复用其他语义已有编号。Application/Infra 错误保留 source chain，对外只输出脱敏稳定分类。AEAD 失败本身无法区分错误口令与结构完整的密文篡改，不声称具备这种辨别能力。

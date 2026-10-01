@@ -14,7 +14,7 @@ use tempfile::{tempdir, TempDir};
 use uc_application::deps::{
     PrepareProfileStartupUseCase, ProfileGeneration, ProfileLifecycle,
     ProfileLifecycleRepositoryPort, ProfileStartupError, ProfileUpgradeBackupPort,
-    ProfileUpgradeVersions,
+    ProfileUpgradeVersions, RetireUpgradeBackupSecurityRecordsPort,
 };
 use uc_core::app_dirs::AppPaths;
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
@@ -536,24 +536,12 @@ async fn missing_security_record_key_does_not_prevent_file_verification_or_resto
         .verify_prepared(&fixture.target())
         .await
         .unwrap();
-    let error = fixture.prepare().await.unwrap_err();
-    let mut source: &(dyn std::error::Error + 'static) = &error;
-    let mut classified = false;
-    loop {
-        if source
-            .downcast_ref::<ProfileUpgradeBackupRecordKeyMissing>()
-            .is_some()
-        {
-            classified = true;
-            break;
-        }
-        let Some(next) = source.source() else {
-            break;
-        };
-        source = next;
-    }
-    assert!(classified);
-    assert!(fixture.storage.get(record::RECORD_KEY).unwrap().is_none());
+    // 安全记录只是文件副本的派生物；缺钥时重建它，不能让启动永久失败。
+    fixture.prepare().await.unwrap();
+    assert!(fixture.storage.get(record::RECORD_KEY).unwrap().is_some());
+    let rebuilt = fixture.record();
+    assert_eq!(rebuilt.files.receipt, receipt);
+    assert!(!rebuilt.secrets.is_empty());
     let destination = fixture.temporary.path().join("no-security-record-key");
     ProfileBackupArchive::new(fixture.backup.directory())
         .restore_to_new_directory(&receipt, &destination)
@@ -561,6 +549,89 @@ async fn missing_security_record_key_does_not_prevent_file_verification_or_resto
     assert_eq!(
         fs::read(destination.join("settings.json")).unwrap(),
         b"private-settings-before-upgrade"
+    );
+}
+
+fn error_chain_has_missing_record_key(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut source = Some(error);
+    while let Some(current) = source {
+        if current
+            .downcast_ref::<ProfileUpgradeBackupRecordKeyMissing>()
+            .is_some()
+        {
+            return true;
+        }
+        source = current.source();
+    }
+    false
+}
+
+#[tokio::test]
+async fn stale_security_records_with_a_lost_key_do_not_block_later_upgrades_or_retention() {
+    let fixture = Fixture::new();
+    fixture.seed();
+    for version in 1..=3 {
+        let target = ProfileUpgradeVersions {
+            product: format!("2.0.{version}"),
+            engine: format!("3.0.{version}"),
+        };
+        fixture.workflow(target).execute().await.unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    fixture.storage.delete(record::RECORD_KEY).unwrap();
+    // 之后的升级要跨过保留上限，保留清理会读取目录里的每个旧安全记录。
+    for version in 4..=8 {
+        let target = ProfileUpgradeVersions {
+            product: format!("2.0.{version}"),
+            engine: format!("3.0.{version}"),
+        };
+        fixture.workflow(target).execute().await.unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    let backups = fixture.backup.list_backups().await.unwrap();
+    assert_eq!(backups.len(), 5);
+    fixture
+        .backup
+        .delete_backup(&backups.last().unwrap().id)
+        .await
+        .unwrap();
+    assert_eq!(fixture.backup.list_backups().await.unwrap().len(), 4);
+    assert!(!fixture.record().secrets.is_empty());
+}
+
+#[tokio::test]
+async fn real_key_loss_still_stops_strict_security_record_reads() {
+    let fixture = Fixture::new();
+    fixture.seed();
+    fixture.prepare().await.unwrap();
+    let backup = fixture.backup.list_backups().await.unwrap().remove(0);
+    fixture.storage.delete(record::RECORD_KEY).unwrap();
+
+    let error = record::read_record(&fixture.backup.directory(), fixture.storage.as_ref())
+        .err()
+        .unwrap();
+    assert!(error_chain_has_missing_record_key(&error));
+    let error = fixture.backup.delete_backup(&backup.id).await.unwrap_err();
+    assert!(error_chain_has_missing_record_key(&error));
+    assert!(fixture.storage.get(record::RECORD_KEY).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn unreadable_security_record_with_its_key_present_is_not_treated_as_absent() {
+    let fixture = Fixture::new();
+    fixture.seed();
+    fixture.prepare().await.unwrap();
+    let current = fixture.backup.directory().join("security-current");
+    fs::write(&current, b"not-a-protected-record").unwrap();
+    let key = fixture.storage.get(record::RECORD_KEY).unwrap().unwrap();
+
+    let error = fixture.prepare().await.unwrap_err();
+
+    assert!(!error_chain_has_missing_record_key(&error));
+    assert_eq!(fs::read(&current).unwrap(), b"not-a-protected-record");
+    assert_eq!(
+        fixture.storage.get(record::RECORD_KEY).unwrap().unwrap(),
+        key
     );
 }
 
@@ -682,4 +753,115 @@ async fn failed_delete_is_recorded_with_its_backup_action() {
     assert_eq!(logs.count("backup_action=\"delete_backup\""), 2, "{output}");
     assert!(output.contains("io_error_kind"), "{output}");
     assert!(!output.contains(&missing), "{output}");
+}
+
+fn directory_names(directory: &std::path::Path) -> Vec<String> {
+    let mut names = fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
+#[tokio::test]
+async fn retiring_security_records_keeps_file_backups_restorable_and_is_repeatable() {
+    let fixture = Fixture::new();
+    fixture.seed();
+    fixture.prepare().await.unwrap();
+    fixture
+        .workflow(ProfileUpgradeVersions {
+            product: "2.1.0".into(),
+            engine: "3.0.0".into(),
+        })
+        .execute()
+        .await
+        .unwrap();
+    let receipt = read_file_record(&fixture.backup.directory())
+        .unwrap()
+        .unwrap()
+        .receipt;
+    let before = directory_names(&fixture.backup.directory());
+    assert!(before.iter().any(|name| name == "security-current"));
+    assert!(before.iter().any(|name| name.ends_with(".record")));
+
+    fixture
+        .backup
+        .retire_upgrade_backup_security_records()
+        .await
+        .unwrap();
+    fixture
+        .backup
+        .retire_upgrade_backup_security_records()
+        .await
+        .unwrap();
+
+    let after = directory_names(&fixture.backup.directory());
+    assert!(!after.iter().any(|name| name == "security-current"));
+    assert!(!after.iter().any(|name| name.ends_with(".record")));
+    assert!(after.iter().any(|name| name == "current"));
+    assert_eq!(
+        after.iter().filter(|name| name.ends_with(".files")).count(),
+        2
+    );
+    assert!(fixture.storage.get(record::RECORD_KEY).unwrap().is_none());
+    fixture
+        .backup
+        .verify_prepared(&ProfileUpgradeVersions {
+            product: "2.1.0".into(),
+            engine: "3.0.0".into(),
+        })
+        .await
+        .unwrap();
+    let destination = fixture.temporary.path().join("after-retirement");
+    ProfileBackupArchive::new(fixture.backup.directory())
+        .restore_to_new_directory(&receipt, &destination)
+        .unwrap();
+    assert_eq!(
+        fs::read(destination.join("settings.json")).unwrap(),
+        b"private-settings-before-upgrade"
+    );
+}
+
+#[tokio::test]
+async fn retiring_security_records_without_any_backup_directory_creates_nothing() {
+    let fixture = Fixture::new();
+
+    fixture
+        .backup
+        .retire_upgrade_backup_security_records()
+        .await
+        .unwrap();
+
+    assert!(!fixture.backup.directory().exists());
+}
+
+#[tokio::test]
+async fn factory_reset_then_a_later_version_prepares_the_new_profile() {
+    let fixture = Fixture::new();
+    fixture.seed();
+    fixture.prepare().await.unwrap();
+    let first = fixture.record().files.receipt;
+    // 出厂重置：先作废安全记录，再随资料目录一起清掉保护材料与业务资料。
+    fixture
+        .backup
+        .retire_upgrade_backup_security_records()
+        .await
+        .unwrap();
+    fs::remove_dir_all(fixture.paths.vault_dir.clone()).unwrap();
+    fs::remove_file(&fixture.paths.settings_path).unwrap();
+    fixture.storage.delete(record::RECORD_KEY).unwrap();
+    fs::create_dir_all(&fixture.paths.vault_dir).unwrap();
+    fs::write(&fixture.paths.settings_path, b"settings-of-the-new-profile").unwrap();
+
+    let later = ProfileUpgradeVersions {
+        product: "2.1.0".into(),
+        engine: "3.0.0".into(),
+    };
+    fixture.workflow(later).execute().await.unwrap();
+
+    assert_ne!(fixture.record().files.receipt.archive_id, first.archive_id);
+    ProfileBackupArchive::new(fixture.backup.directory())
+        .verify(&first)
+        .unwrap();
 }

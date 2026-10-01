@@ -3,13 +3,15 @@ use std::sync::Arc;
 use super::{
     ClearProfileStatePort, FactoryResetPhase, ProfileFactoryResetError, ProfileFactoryResetOutcome,
     ProfileFactoryResetRequest, ProfileGeneration, ProfileLifecycleRepositoryPort,
-    ProfileLifecycleState, StopProfileRuntimePort, WipeProfileKeysPort,
+    ProfileLifecycleState, RetireUpgradeBackupSecurityRecordsPort, StopProfileRuntimePort,
+    WipeProfileKeysPort,
 };
 
 pub struct ProfileFactoryResetFacade {
     lifecycle_repository: Arc<dyn ProfileLifecycleRepositoryPort>,
     runtime: Arc<dyn StopProfileRuntimePort>,
     keys: Arc<dyn WipeProfileKeysPort>,
+    backup_security: Arc<dyn RetireUpgradeBackupSecurityRecordsPort>,
     state: Arc<dyn ClearProfileStatePort>,
     operation_lock: tokio::sync::Mutex<()>,
 }
@@ -19,12 +21,14 @@ impl ProfileFactoryResetFacade {
         lifecycle_repository: Arc<dyn ProfileLifecycleRepositoryPort>,
         runtime: Arc<dyn StopProfileRuntimePort>,
         keys: Arc<dyn WipeProfileKeysPort>,
+        backup_security: Arc<dyn RetireUpgradeBackupSecurityRecordsPort>,
         state: Arc<dyn ClearProfileStatePort>,
     ) -> Self {
         Self {
             lifecycle_repository,
             runtime,
             keys,
+            backup_security,
             state,
             operation_lock: tokio::sync::Mutex::new(()),
         }
@@ -73,6 +77,13 @@ impl ProfileFactoryResetFacade {
         }
 
         if lifecycle.state() == ProfileLifecycleState::FactoryReset(FactoryResetPhase::KeysWiped) {
+            // 密钥已清除后，用它保护的升级备份安全记录不再有效；文件备份不受影响。
+            // 与状态清除同属 KeysWiped 阶段，重启后随阶段重放，不新增持久阶段。
+            self.backup_security
+                .retire_upgrade_backup_security_records()
+                .await
+                .map_err(ProfileFactoryResetError::retire_upgrade_backup_security_from)?;
+
             self.state
                 .clear_and_verify_profile_state()
                 .await
@@ -198,6 +209,15 @@ mod tests {
     }
 
     #[async_trait]
+    impl RetireUpgradeBackupSecurityRecordsPort for Capability {
+        async fn retire_upgrade_backup_security_records(
+            &self,
+        ) -> Result<(), ProfileFactoryResetCapabilityError> {
+            self.invoke()
+        }
+    }
+
+    #[async_trait]
     impl ClearProfileStatePort for Capability {
         async fn clear_and_verify_profile_state(
             &self,
@@ -215,6 +235,7 @@ mod tests {
             lifecycle.clone(),
             Arc::new(Capability::new("stop", Arc::clone(&calls), 0)),
             Arc::new(Capability::new("wipe", Arc::clone(&calls), 0)),
+            Arc::new(Capability::new("retire", Arc::clone(&calls), 0)),
             Arc::new(Capability::new("clear", Arc::clone(&calls), 0)),
         );
 
@@ -226,7 +247,7 @@ mod tests {
         assert_eq!(outcome, ProfileFactoryResetOutcome::Completed);
         assert_eq!(lifecycle.current().state(), ProfileLifecycleState::Ready);
         assert_ne!(lifecycle.current().generation(), generation);
-        assert_eq!(*calls.lock().unwrap(), ["stop", "wipe", "clear"]);
+        assert_eq!(*calls.lock().unwrap(), ["stop", "wipe", "retire", "clear"]);
     }
 
     #[tokio::test]
@@ -238,6 +259,7 @@ mod tests {
             lifecycle.clone(),
             Arc::new(Capability::new("stop", Arc::clone(&calls), 1)),
             Arc::new(Capability::new("wipe", Arc::clone(&calls), 0)),
+            Arc::new(Capability::new("retire", Arc::clone(&calls), 0)),
             Arc::new(Capability::new("clear", Arc::clone(&calls), 0)),
         );
         let error = reset
@@ -260,7 +282,10 @@ mod tests {
             .execute(ProfileFactoryResetRequest::Start)
             .await
             .unwrap();
-        assert_eq!(*calls.lock().unwrap(), ["stop", "stop", "wipe", "clear"]);
+        assert_eq!(
+            *calls.lock().unwrap(),
+            ["stop", "stop", "wipe", "retire", "clear"]
+        );
     }
 
     #[tokio::test]
@@ -272,6 +297,7 @@ mod tests {
             lifecycle.clone(),
             Arc::new(Capability::new("stop", Arc::clone(&calls), 0)),
             Arc::new(Capability::new("wipe", Arc::clone(&calls), 1)),
+            Arc::new(Capability::new("retire", Arc::clone(&calls), 1)),
             Arc::new(Capability::new("clear", Arc::clone(&calls), 1)),
         );
 
@@ -282,6 +308,18 @@ mod tests {
         assert_eq!(
             lifecycle.current().state(),
             ProfileLifecycleState::FactoryReset(FactoryResetPhase::Started)
+        );
+
+        // 作废备份安全记录属于密钥已清除之后、状态清除之前的步骤；失败时阶段不前进。
+        assert!(matches!(
+            reset
+                .execute(ProfileFactoryResetRequest::ResumeIfNeeded)
+                .await,
+            Err(ProfileFactoryResetError::RetireUpgradeBackupSecurity { .. })
+        ));
+        assert_eq!(
+            lifecycle.current().state(),
+            ProfileLifecycleState::FactoryReset(FactoryResetPhase::KeysWiped)
         );
 
         assert!(matches!(
@@ -305,7 +343,10 @@ mod tests {
         assert_eq!(lifecycle.current().state(), ProfileLifecycleState::Ready);
         assert_eq!(
             *calls.lock().unwrap(),
-            ["stop", "wipe", "stop", "wipe", "clear", "stop", "clear"]
+            [
+                "stop", "wipe", "stop", "wipe", "retire", "stop", "retire", "clear", "stop",
+                "retire", "clear"
+            ]
         );
         assert_eq!(
             reset

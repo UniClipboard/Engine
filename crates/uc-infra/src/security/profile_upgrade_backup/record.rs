@@ -10,7 +10,7 @@ use zeroize::Zeroizing;
 
 use super::inventory::SecretValue;
 use super::security_stream::{ArchiveReader, ArchiveWriter};
-use super::store::backup_error;
+use super::store::{backup_error, remove_if_exists};
 use super::ProfileUpgradeBackupRecordKeyMissing;
 use crate::security::profile_backup_archive::tree::open_regular_file;
 use crate::security::profile_backup_archive::{private_new_file, sync_directory};
@@ -117,6 +117,30 @@ pub(super) fn read_record_path(
         )));
     }
     Ok(Some(record))
+}
+
+/// 作废目录里的全部安全记录（`security-current` 与各代 `*.record`），文件副本不动。
+///
+/// 这些记录都由同一把记录密钥保护；密钥缺失或被重置清除后它们无法再解密，继续保留只会让
+/// 保留清理与删除备份读到不可用的旧记录。先删指针再删记录，中途中断也不会留下指向缺失文件的指针。
+/// 目录或记录不存在时视为已完成；返回是否确实移除了记录。
+pub(super) fn retire_security_records(directory: &Path) -> Result<bool, ProfileUpgradeBackupError> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(backup_error(error)),
+    };
+    let mut retired = remove_if_exists(&directory.join("security-current"))?;
+    for entry in entries {
+        let path = entry.map_err(backup_error)?.path();
+        if path.extension().and_then(|value| value.to_str()) == Some("record") {
+            retired |= remove_if_exists(&path)?;
+        }
+    }
+    if retired {
+        sync_directory(directory).map_err(backup_error)?;
+    }
+    Ok(retired)
 }
 
 pub(super) fn publish_record(

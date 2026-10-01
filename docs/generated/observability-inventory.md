@@ -35,7 +35,7 @@
 
 ## local debug
 
-共 1250 个调用点。
+共 1251 个调用点。
 
 | Target | 调用点 | 类型 | 风险标记 |
 | --- | --- | --- | --- |
@@ -657,8 +657,8 @@
 | `<module>` | `crates/uc-engine/src/assembly/sync_engine.rs:154` | `instrument` | - |
 | `<module>` | `crates/uc-engine/src/assembly/sync_engine.rs:545` | `info` | message-body |
 | `<module>` | `crates/uc-engine/src/assembly/sync_engine/outbound_progress.rs:196` | `warn` | message-body |
-| `<module>` | `crates/uc-engine/src/assembly/wire/mod.rs:376` | `info` | message-body |
-| `<module>` | `crates/uc-engine/src/assembly/wire/mod.rs:407` | `info` | message-body |
+| `<module>` | `crates/uc-engine/src/assembly/wire/mod.rs:378` | `info` | message-body |
+| `<module>` | `crates/uc-engine/src/assembly/wire/mod.rs:409` | `info` | message-body |
 | `<module>` | `crates/uc-engine/src/dev/space_work.rs:393` | `record` | - |
 | `<module>` | `crates/uc-engine/src/dev/space_work.rs:420` | `record` | - |
 | `<module>` | `crates/uc-engine/src/dev/space_work.rs:425` | `record` | - |
@@ -698,7 +698,7 @@
 | `<module>` | `crates/uc-engine/src/operations/space/device_group_choice.rs:97` | `debug` | message-body |
 | `<module>` | `crates/uc-engine/src/operations/space/encryption_passphrase.rs:47` | `error` | message-body |
 | `<module>` | `crates/uc-engine/src/operations/space/encryption_passphrase.rs:59` | `error` | message-body |
-| `<module>` | `crates/uc-engine/src/operations/space/factory_reset.rs:31` | `error` | message-body |
+| `<module>` | `crates/uc-engine/src/operations/space/factory_reset.rs:34` | `error` | message-body |
 | `<module>` | `crates/uc-engine/src/operations/space/invitation.rs:126` | `error` | message-body |
 | `<module>` | `crates/uc-engine/src/operations/space/invitation.rs:138` | `error` | message-body |
 | `<module>` | `crates/uc-engine/src/operations/space/join_space.rs:98` | `error` | message-body |
@@ -728,14 +728,14 @@
 | `<module>` | `crates/uc-engine/src/runtime/host_operations.rs:383` | `warn` | message-body |
 | `<module>` | `crates/uc-engine/src/runtime/host_operations.rs:414` | `error` | message-body |
 | `<module>` | `crates/uc-engine/src/runtime/host_operations.rs:498` | `error` | message-body |
-| `<module>` | `crates/uc-engine/src/runtime/mod.rs:382` | `warn` | message-body |
-| `<module>` | `crates/uc-engine/src/runtime/mod.rs:417` | `error` | message-body |
-| `<module>` | `crates/uc-engine/src/runtime/mod.rs:469` | `error` | message-body |
-| `<module>` | `crates/uc-engine/src/runtime/mod.rs:485` | `error` | message-body |
+| `<module>` | `crates/uc-engine/src/runtime/mod.rs:383` | `warn` | message-body |
+| `<module>` | `crates/uc-engine/src/runtime/mod.rs:418` | `error` | message-body |
+| `<module>` | `crates/uc-engine/src/runtime/mod.rs:470` | `error` | message-body |
+| `<module>` | `crates/uc-engine/src/runtime/mod.rs:486` | `error` | message-body |
 | `<module>` | `crates/uc-engine/src/runtime/profile_recovery.rs:228` | `warn` | message-body |
 | `<module>` | `crates/uc-engine/src/runtime/profile_recovery.rs:342` | `warn` | message-body |
 | `<module>` | `crates/uc-engine/src/runtime/profile_recovery.rs:380` | `warn` | message-body |
-| `<module>` | `crates/uc-engine/src/runtime/profile_recovery.rs:498` | `info` | message-body |
+| `<module>` | `crates/uc-engine/src/runtime/profile_recovery.rs:499` | `info` | message-body |
 | `<module>` | `crates/uc-engine/src/runtime/session_supervisor.rs:133` | `warn` | message-body |
 | `<module>` | `crates/uc-engine/src/runtime/session_supervisor.rs:147` | `error` | message-body |
 | `<module>` | `crates/uc-engine/src/runtime/session_supervisor.rs:165` | `error` | message-body |
@@ -1166,6 +1166,7 @@
 | `<module>` | `crates/uc-infra/src/security/profile_key_recovery.rs:902` | `warn` | message-body |
 | `<module>` | `crates/uc-infra/src/security/profile_key_recovery.rs:913` | `warn` | message-body |
 | `uc_infra::security::profile_storage_upgrade` | `crates/uc-infra/src/security/profile_storage_upgrade/diagnostics.rs:54` | `error` | message-body |
+| `<module>` | `crates/uc-infra/src/security/profile_upgrade_backup/security_materials.rs:82` | `warn` | message-body |
 | `<module>` | `crates/uc-infra/src/security/v3_device_management_reset/mod.rs:240` | `info` | message-body |
 | `<module>` | `crates/uc-infra/src/security/v3_device_management_reset/mod.rs:246` | `warn` | raw-error, message-body |
 | `<module>` | `crates/uc-infra/src/security/v3_device_management_reset/mod.rs:353` | `info` | message-body |
@@ -1286,7 +1287,7 @@
 | `<module>` | `crates/uc-observability-contract/src/diagnostics/mod.rs:887` | `record` | - |
 | `<module>` | `crates/uc-observability-contract/src/diagnostics/mod.rs:894` | `record` | - |
 | `<module>` | `crates/uc-observability-contract/src/diagnostics/mod.rs:897` | `record` | - |
-| `uc.local_diagnostic` | `crates/uc-observability-contract/src/diagnostics/profile_upgrade_backup.rs:10` | `event` | - |
+| `uc.local_diagnostic` | `crates/uc-observability-contract/src/diagnostics/profile_upgrade_backup.rs:11` | `event` | - |
 | `<module>` | `crates/uc-observability-contract/src/log_event.rs:25` | `event` | - |
 | `<module>` | `crates/uc-observability-runtime/src/module_log.rs:261` | `record` | - |
 

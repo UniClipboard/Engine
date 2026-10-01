@@ -12,7 +12,7 @@ pub use model::{
     ProfileLifecycle, ProfileLifecycleState,
 };
 pub use ports::{
-    ClearProfileStatePort, ProfileLifecycleRepositoryPort, StopProfileRuntimePort,
-    WipeProfileKeysPort,
+    ClearProfileStatePort, ProfileLifecycleRepositoryPort, RetireUpgradeBackupSecurityRecordsPort,
+    StopProfileRuntimePort, WipeProfileKeysPort,
 };
 pub use use_case::ProfileFactoryResetFacade;

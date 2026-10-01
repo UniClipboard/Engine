@@ -26,8 +26,8 @@ use uc_application::deps::{
     ConfigMigrationDeps, CurrentSpaceIdentityPort, DevicePorts, DirectoryReceivePorts,
     FileTransferPorts, InitialSpaceActivationPort, PortableCurrentSpaceIdentityPort,
     ProfileLifecycle, ProfileLifecycleRepositoryPort, ProfileLifecycleState,
-    RePairingStateStorePort, SearchPorts, SecurityPorts, SpaceAccessPorts,
-    SpaceRebuildProgressPort, StoragePorts, SystemPorts,
+    RePairingStateStorePort, RetireUpgradeBackupSecurityRecordsPort, SearchPorts, SecurityPorts,
+    SpaceAccessPorts, SpaceRebuildProgressPort, StoragePorts, SystemPorts,
 };
 use uc_application::facade::HostEventEmitterPort;
 use uc_core::app_dirs::AppPaths;
@@ -181,6 +181,7 @@ pub struct CoreWiringInputs {
     pub host_event_emitter: Arc<dyn HostEventEmitterPort>,
     pub startup_progress: Arc<dyn uc_infra::security::StorageUpgradeObserver>,
     pub profile_key_recovery: Arc<dyn ProfilePassphraseRecoveryPort>,
+    pub upgrade_backup_security: Arc<dyn RetireUpgradeBackupSecurityRecordsPort>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -336,6 +337,7 @@ pub async fn wire_dependencies_from_inputs(
         host_event_emitter,
         startup_progress,
         profile_key_recovery,
+        upgrade_backup_security,
     } = inputs;
     let profile_reset_paths = paths.clone();
     let profile_reset_profile_id = profile_id.inner().to_owned();
@@ -854,6 +856,7 @@ pub async fn wire_dependencies_from_inputs(
             profile_reset_paths.vault_dir.join("keyslot.json"),
             profile_reset_identity_dir,
         )),
+        backup_security: upgrade_backup_security,
         state: Arc::new(uc_infra::security::ProfileStateCleaner::new(
             db_pool_for_profile_reset,
             profile_reset_paths,

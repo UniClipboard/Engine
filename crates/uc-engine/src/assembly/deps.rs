@@ -13,7 +13,7 @@ use tokio::sync::broadcast;
 
 use uc_application::deps::{
     ClearProfileStatePort, CurrentMemberSignaturePort, ProfileLifecycleRepositoryPort,
-    WipeProfileKeysPort,
+    RetireUpgradeBackupSecurityRecordsPort, WipeProfileKeysPort,
 };
 use uc_core::clipboard::ActiveClipboardState;
 use uc_core::ports::blob::BlobReferenceRepositoryPort;
@@ -186,6 +186,7 @@ pub struct SharedRuntimeDeps {
 pub struct ProfileResetDeps {
     pub lifecycle_repository: Arc<dyn ProfileLifecycleRepositoryPort>,
     pub keys: Arc<dyn WipeProfileKeysPort>,
+    pub backup_security: Arc<dyn RetireUpgradeBackupSecurityRecordsPort>,
     pub state: Arc<dyn ClearProfileStatePort>,
 }
 

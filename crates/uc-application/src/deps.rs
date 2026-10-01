@@ -43,8 +43,8 @@ pub use crate::facade::config_migration::ConfigMigrationDeps;
 pub use crate::profile::factory_reset::{
     ClearProfileStatePort, FactoryResetPhase, ProfileFactoryResetCapabilityError,
     ProfileGeneration, ProfileLifecycle, ProfileLifecycleError, ProfileLifecycleRepositoryError,
-    ProfileLifecycleRepositoryPort, ProfileLifecycleState, StopProfileRuntimePort,
-    WipeProfileKeysPort,
+    ProfileLifecycleRepositoryPort, ProfileLifecycleState, RetireUpgradeBackupSecurityRecordsPort,
+    StopProfileRuntimePort, WipeProfileKeysPort,
 };
 pub use crate::profile::probe_profile_key_access::{
     ProbeProfileKeyAccessPort, ProbeProfileKeyAccessUseCase, ProfileKeyAccessProbe,
