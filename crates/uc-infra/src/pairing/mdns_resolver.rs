@@ -31,6 +31,7 @@ use super::discovery_constants::{
     compute_code_hash, ticket_from_txt_attributes, PAIR_SERVICE_NAME, TXT_CODE_HASH,
     TXT_EXPIRES_AT_MS,
 };
+use super::mdns_interfaces::MdnsInterfaceSnapshot;
 
 /// Errors raised while starting / running a resolver. Timeout is
 /// **not** an error — it returns `Ok(None)` so the caller can compose
@@ -106,6 +107,12 @@ impl MdnsPairingResolver {
             self_actor_id.clone()
         };
 
+        let (_, multicast_v4) = MdnsInterfaceSnapshot::capture().into_parts();
+        debug!(
+            multicast_interface_count = multicast_v4.len(),
+            "configured pairing mDNS resolver interfaces"
+        );
+
         let discoverer = Discoverer::new(PAIR_SERVICE_NAME.to_string(), actor_id)
             // See [`MdnsPairingPublisher::start`] for why `Auto` instead
             // of `V4AndV6`: hosts with no IPv6 default route (Wi-Fi off,
@@ -113,6 +120,7 @@ impl MdnsPairingResolver {
             // the resolver crash on `join_multicast_v6` even when v4
             // multicast works fine.
             .with_ip_class(IpClass::Auto)
+            .with_multicast_interfaces_v4(multicast_v4)
             .with_callback(move |peer_id, peer| {
                 // Ignore our own announce if it leaked back.
                 if peer_id == self_id_for_cb {

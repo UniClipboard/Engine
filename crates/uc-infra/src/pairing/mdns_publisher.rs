@@ -22,18 +22,18 @@
 //!
 //! Sharing iroh's `Discoverer` would force compromises on all three.
 
-use std::net::IpAddr;
 use std::time::Duration;
 
 use swarm_discovery::{Discoverer, DropGuard, IpClass, SpawnError, TxtAttributeError};
 use thiserror::Error;
 use tokio::runtime::Handle;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use super::discovery_constants::{
     compute_code_hash, ticket_txt_attributes, PAIR_SERVICE_NAME, TXT_CODE_HASH, TXT_EXPIRES_AT_MS,
     TXT_NODE_ID,
 };
+use super::mdns_interfaces::MdnsInterfaceSnapshot;
 
 /// Default mDNS query/announce cadence for pairing. Tighter than the
 /// 10s default `swarm-discovery` ships because pairing is a UX-critical
@@ -112,11 +112,12 @@ impl MdnsPairingPublisher {
     ) -> Result<PublisherHandle, MdnsPublisherError> {
         let code_hash = compute_code_hash(code);
         let actor_id = derive_actor_id(node_id);
-        let addrs = enumerate_publish_addrs();
+        let (addrs, multicast_v4) = MdnsInterfaceSnapshot::capture().into_parts();
 
         debug!(
             code_hash = %code_hash,
             addr_count = addrs.len(),
+            multicast_interface_count = multicast_v4.len(),
             port,
             "starting mDNS pairing publisher",
         );
@@ -137,6 +138,7 @@ impl MdnsPairingPublisher {
 
         let discoverer = Discoverer::new(PAIR_SERVICE_NAME.to_string(), actor_id.clone())
             .with_addrs(port, addrs)
+            .with_multicast_interfaces_v4(multicast_v4)
             .with_cadence(PAIR_CADENCE)
             // `Auto` binds whatever the kernel lets us bind (v4 alone, v6
             // alone, or both) and only fails when both sockets are
@@ -180,30 +182,6 @@ pub(crate) fn derive_actor_id(node_id: &str) -> String {
     // entropy — collision-proof at any realistic LAN swarm size).
     let digest = blake3::hash(node_id.as_bytes());
     hex::encode(&digest.as_bytes()[..8])
-}
-
-/// Enumerate local interface IPs eligible to publish. Skips loopback in
-/// production; tests that need loopback construct a `Discoverer`
-/// directly with a hand-picked address.
-///
-/// Best-effort: any `if-addrs` failure yields an empty list (logged
-/// warn) rather than failing the whole publisher — a sponsor with no
-/// usable interface still gets to publish via cloud channel.
-fn enumerate_publish_addrs() -> Vec<IpAddr> {
-    match if_addrs::get_if_addrs() {
-        Ok(ifs) => ifs
-            .into_iter()
-            .map(|i| i.addr.ip())
-            .filter(|ip| !ip.is_loopback())
-            .collect(),
-        Err(_err) => {
-            warn!(
-                failure_stage = "address_enumeration",
-                "if-addrs enumerate failed; mDNS publisher will run without local addresses"
-            );
-            Vec::new()
-        }
-    }
 }
 
 #[cfg(test)]
