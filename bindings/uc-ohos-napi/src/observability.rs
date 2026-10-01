@@ -117,7 +117,7 @@ fn runtime_config(
         OperatingSystem::Ohos,
         config.app_channel,
     )
-    // 宿主输入校验：无法解析的输入按固定错误码拒绝，拒绝原因已完整表达。
+    // discarded-source[input-validation]: the rejection reason is fully expressed by the target classification
     .map_err(|_| config_invalid())?;
     let runtime =
         ObservabilityConfig::new(resource).with_local_logs(LocalLogConfig::new(directories.logs()));
@@ -130,12 +130,12 @@ fn runtime_config(
 
 fn remote_config(config: OhCollectorConfig) -> napi::Result<OtlpHttpConfig> {
     let remote = OtlpHttpConfig::new(&config.trace_endpoint, &config.log_endpoint)
-        // 宿主输入校验：无法解析的输入按固定错误码拒绝，拒绝原因已完整表达。
+        // discarded-source[input-validation]: the rejection reason is fully expressed by the target classification
         .map_err(|_| config_invalid())?;
     match (config.auth_header_name, config.auth_header_value) {
         (Some(name), Some(value)) => remote
             .with_header(name, SecretHeaderValue::new(value))
-            // 宿主输入校验：无法解析的输入按固定错误码拒绝，拒绝原因已完整表达。
+            // discarded-source[input-validation]: the rejection reason is fully expressed by the target classification
             .map_err(|_| config_invalid()),
         (None, None) => Ok(remote),
         _ => Err(config_invalid()),

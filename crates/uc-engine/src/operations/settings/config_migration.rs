@@ -28,7 +28,10 @@ pub(crate) async fn execute_export_config(
     let result = match exported {
         Ok(path) => copy_path_to_host(files, &input.destination, &path)
             .await
-            .map_err(|error| map_copy_error(error, EXPORT_CONFIG_FAILED_CODE))
+            .map_err(|error| {
+                error.record();
+                map_copy_error(error, EXPORT_CONFIG_FAILED_CODE)
+            })
             .map(|()| OperationResult::ConfigExport(ConfigExportOutcome::Exported)),
         Err(ConfigMigrationError::Locked) => {
             Ok(OperationResult::ConfigExport(ConfigExportOutcome::Locked))
@@ -52,7 +55,10 @@ pub(crate) async fn execute_preview_config_import(
     let bundle_path = operation_dir.join("bundle.ucbundle");
     let copied = copy_host_to_path(files, &input.source, &bundle_path)
         .await
-        .map_err(|error| map_copy_error(error, PREVIEW_CONFIG_IMPORT_FAILED_CODE));
+        .map_err(|error| {
+            error.record();
+            map_copy_error(error, PREVIEW_CONFIG_IMPORT_FAILED_CODE)
+        });
     let result = match copied {
         Ok(()) => {
             let password = Passphrase::new(input.password.expose().to_string());
@@ -98,7 +104,10 @@ pub(crate) async fn execute_stage_config_import(
     let bundle_path = operation_dir.join("bundle.ucbundle");
     let copied = copy_host_to_path(files, &input.source, &bundle_path)
         .await
-        .map_err(|error| map_copy_error(error, STAGE_CONFIG_IMPORT_FAILED_CODE));
+        .map_err(|error| {
+            error.record();
+            map_copy_error(error, STAGE_CONFIG_IMPORT_FAILED_CODE)
+        });
     let result = match copied {
         Ok(()) => {
             let password = Passphrase::new(input.password.expose().to_string());
@@ -132,9 +141,14 @@ fn create_operation_dir(
     prefix: &str,
 ) -> Result<std::path::PathBuf, EngineError> {
     let directory = temporary_root.join(format!("{prefix}-{}", RepresentationId::new()));
-    std::fs::create_dir_all(&directory)
-        // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
-        .map_err(|_| internal_error(CONFIG_FILE_UNAVAILABLE_CODE))?;
+    std::fs::create_dir_all(&directory).map_err(|error| {
+        uc_warn!(
+            error_kind = "temp_dir_create",
+            io_error_kind = io_error_kind(&error),
+            "failed to create config migration temporary directory"
+        );
+        internal_error(CONFIG_FILE_UNAVAILABLE_CODE)
+    })?;
     Ok(directory)
 }
 
@@ -150,7 +164,9 @@ fn cleanup_operation_dir(directory: &Path) {
 
 fn map_copy_error(error: HostFileCopyError, fallback_code: u32) -> EngineError {
     match error {
-        HostFileCopyError::SourceIo => {
+        HostFileCopyError::LocalRead(_)
+        | HostFileCopyError::LocalWrite(_)
+        | HostFileCopyError::HostChunkInvalid => {
             EngineError::new(fallback_code, EngineErrorCategory::Internal, true)
         }
         HostFileCopyError::Host(error) => match error.category() {
@@ -178,4 +194,30 @@ fn map_copy_error(error: HostFileCopyError, fallback_code: u32) -> EngineError {
 
 fn internal_error(code: u32) -> EngineError {
     EngineError::new(code, EngineErrorCategory::Internal, false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_operation_dir_creation_is_recorded_without_the_path_and_keeps_its_code() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let root = tempfile::tempdir().unwrap();
+        let blocker = root.path().join("PRIVATE_BLOCKER");
+        std::fs::write(&blocker, b"file").unwrap();
+
+        let error = create_operation_dir(&blocker, "config-export").unwrap_err();
+
+        assert_eq!(error.code(), CONFIG_FILE_UNAVAILABLE_CODE);
+        assert_eq!(
+            logs.count("error_kind=\"temp_dir_create\""),
+            1,
+            "{}",
+            logs.output()
+        );
+        assert!(logs.output().contains("io_error_kind"), "{}", logs.output());
+        assert!(!logs.output().contains("PRIVATE"), "{}", logs.output());
+    }
 }

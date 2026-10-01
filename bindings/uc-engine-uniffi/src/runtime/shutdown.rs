@@ -41,7 +41,7 @@ impl MobileEngine {
         let (response, result) = mpsc::channel();
         commands
             .send(LifecycleCommand::Shutdown { deadline, response })
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: `tokio::sync::mpsc::error::SendError<LifecycleCommand>`: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         match result.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok(result) => result.map(|()| false),

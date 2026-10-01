@@ -264,7 +264,7 @@ impl MobileFileUploadCoordinator {
     ) -> Result<(), MobileFileUploadError> {
         let _operation = self.lifecycle_gate.read().await;
         let appended_bytes =
-            // TryFromIntError：目标分类完整表达数值范围不符。
+            // discarded-source[int-conversion]: `TryFromIntError`: the target classification already expresses the range or length mismatch
             u64::try_from(chunk.len()).map_err(|_| MobileFileUploadError::InvalidInput)?;
         let upload = self
             .registry

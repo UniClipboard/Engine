@@ -17,7 +17,7 @@ impl SearchProtectionRef {
     pub const LEN: usize = 32;
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, SearchError> {
-        // TryFromSliceError：切片范围已固定，目标分类完整表达长度不符。
+        // discarded-source[int-conversion]: `core::array::TryFromSliceError`: the target classification already expresses the range or length mismatch
         let value = bytes.try_into().map_err(|_| {
             SearchError::Internal("invalid search protection reference length".into())
         })?;

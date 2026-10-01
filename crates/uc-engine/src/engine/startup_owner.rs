@@ -32,7 +32,7 @@ impl Engine {
         });
         let handoff = receiver
             .await
-            // oneshot RecvError 只表示发送端已丢弃（启动任务 panic 或被取消），没有其他诊断信息；健康记录承载这一事实。
+            // discarded-source[channel]: `tokio::sync::oneshot::error::RecvError`: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| startup_task_failed_recorded())??;
         handoff.claim()
     }

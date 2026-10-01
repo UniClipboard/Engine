@@ -31,16 +31,8 @@ use crate::{
 use uc_observability_contract::{log_fields::log_vocab, uc_error, uc_info};
 
 pub async fn execute_list_devices(facade: &AppFacade) -> Result<OperationResult, EngineError> {
-    // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+    // discarded-source[contract-boundary]: the public error carries a stable code only, the owner records the failure classification
     let encryption = facade.encryption_state().await.map_err(|_| {
-        uc_error!(
-            operation = "list_devices",
-            source = "encryption_state",
-            error_code = MEMBER_REPOSITORY_FAILED_CODE,
-            error_category = "internal",
-            retryable = false,
-            "device list query failed"
-        );
         EngineError::new(
             MEMBER_REPOSITORY_FAILED_CODE,
             EngineErrorCategory::Internal,

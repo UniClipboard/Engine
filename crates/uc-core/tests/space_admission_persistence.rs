@@ -239,14 +239,14 @@ fn persistence_rejects_unknown_version_and_corrupt_payload() {
         .expect("initial Joiner state should encode");
     unknown_version[0] = 3;
 
-    assert_eq!(
+    assert!(matches!(
         JoinerAdmission::decode_persisted(&unknown_version),
         Err(SpaceAdmissionPersistenceError::UnsupportedVersion)
-    );
-    assert_eq!(
+    ));
+    assert!(matches!(
         JoinerAdmission::decode_persisted(&[0xff]),
-        Err(SpaceAdmissionPersistenceError::InvalidEncoding)
-    );
+        Err(SpaceAdmissionPersistenceError::InvalidEncoding { .. })
+    ));
 }
 
 #[test]
@@ -265,14 +265,14 @@ fn persisted_records_reject_the_wrong_role_capability() {
     let joiner = initiated_joiner_fixture();
     let sponsor = sponsor_accepted_fixture();
 
-    assert_eq!(
+    assert!(matches!(
         SponsorAdmission::decode_persisted(&joiner.encode_persisted().unwrap()),
         Err(SpaceAdmissionPersistenceError::InvalidState)
-    );
-    assert_eq!(
+    ));
+    assert!(matches!(
         JoinerAdmission::decode_persisted(&sponsor.encode_persisted().unwrap()),
         Err(SpaceAdmissionPersistenceError::InvalidState)
-    );
+    ));
 }
 
 fn initiated_joiner_fixture() -> JoinerAdmission {

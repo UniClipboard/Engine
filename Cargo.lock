@@ -7414,6 +7414,7 @@ dependencies = [
  "uc-infra",
  "uc-mobile-proto",
  "uc-observability-contract",
+ "uc-testkit",
  "url",
  "uuid",
 ]

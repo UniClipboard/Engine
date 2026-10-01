@@ -27,8 +27,10 @@ impl PersistedSponsorCommittedV1 {
             peer_binding: self.peer_binding.into_domain()?,
             continuation_credential: decode_continuation_credential(self.continuation_credential)?,
             committed_history: AdmissionSignedMembershipHistory::from_bytes(self.committed_history)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             sealed_security: AdmissionSealedSecurityState::from_bytes(self.sealed_security)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             saved_reply,
         })
@@ -64,11 +66,13 @@ impl PersistedSponsorAppliedV1 {
             peer_binding: self.peer_binding.into_domain()?,
             continuation_credential: decode_continuation_credential(self.continuation_credential)?,
             committed_history: AdmissionSignedMembershipHistory::from_bytes(self.committed_history)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             activation_receipt: self.activation_receipt,
             activated_security: AdmissionActivatedSecurityState::from_bytes(
                 self.activated_security,
             )
+            // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
             .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             saved_reply,
             confirmation: None,

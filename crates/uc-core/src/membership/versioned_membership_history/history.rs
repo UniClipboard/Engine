@@ -200,7 +200,7 @@ impl VersionedMembershipHistory {
         let event_id = self.known_head;
         let depth = event_id
             .and_then(|head| self.depth(head))
-            .ok_or(MembershipHistoryV2Error::InvalidPersistedHistory)?;
+            .ok_or_else(MembershipHistoryV2Error::invalid_persisted_history)?;
         let encoded = self.encode_persisted_v2()?;
         let mut hasher = Sha256::new();
         hasher.update(b"uniclipboard/membership-history-position/v1\0");

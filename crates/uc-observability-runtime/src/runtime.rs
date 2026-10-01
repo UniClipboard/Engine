@@ -58,12 +58,12 @@ impl ProcessObservabilityRuntime {
 
         let (state, subscriber) = build_runtime(config, host_layers);
         tracing::subscriber::set_global_default(subscriber)
-            // 错误只表示全局状态已被设置（或携带待写入的状态值），没有其他诊断信息。
+            // discarded-source[no-information]: the error value carries no usable diagnostic information
             .map_err(|_| InstallError::SubscriberAlreadyInstalled)?;
         let _ = tracing_log::LogTracer::init();
         INSTALLED
             .set(Arc::clone(&state))
-            // 错误只表示全局状态已被设置（或携带待写入的状态值），没有其他诊断信息。
+            // discarded-source[no-information]: the error value carries no usable diagnostic information
             .map_err(|_| InstallError::AlreadyInstalled)?;
         if let Some(failure) = state.health.remote_setup_failure {
             record_remote_setup_degraded(failure);
@@ -542,7 +542,7 @@ fn run_reserved_with_deadline<T: Send + 'static>(
         .spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));
             worker_gate.release();
-            // panic 载荷不是 Error，结果只用于判定任务是否正常结束。
+            // discarded-source[no-information]: the error value carries no usable diagnostic information
             let _ = sender.send(result.map_err(|_| ()));
         })
         .is_err()

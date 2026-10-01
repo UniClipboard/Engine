@@ -86,7 +86,7 @@ impl ProfileLifecycleRepositoryPort for ProfileLifecycleRepository {
         let _guard = self
             .write_lock
             .lock()
-            // 锁中毒：PoisonError 持有 guard，不能作为来源保存。
+            // discarded-source[lock-poisoned]: `std::sync::PoisonError<Guard>`: the poison error holds the guard and cannot be stored across threads
             .map_err(|_| ProfileLifecycleRepositoryError::unavailable())?;
         let current = self.load()?;
         if current.as_ref() != expected {

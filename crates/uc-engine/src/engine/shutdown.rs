@@ -1,8 +1,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::task::JoinHandle;
+use tokio::task::{JoinError, JoinHandle};
 use tokio::time::{timeout_at, Instant};
+use uc_observability_contract::diagnostics::{record_task_join_failure, DiagnosticTaskKind};
 
 use super::{operation_cancelled_error, Engine};
 use crate::{EngineError, EngineErrorCategory, EngineEvent, EngineState, OperationTerminal};
@@ -14,8 +15,7 @@ impl Engine {
     pub async fn shutdown_until_complete(&self) -> Result<(), EngineError> {
         self.start_shutdown(None)
             .await
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
-            .map_err(|_| EngineError::new(1108, EngineErrorCategory::Internal, true))?
+            .map_err(shutdown_task_failed)?
     }
 
     pub async fn shutdown(&self, deadline: Duration) -> Result<(), EngineError> {
@@ -24,10 +24,9 @@ impl Engine {
             .ok_or_else(|| EngineError::new(1003, EngineErrorCategory::InvalidInput, false))?;
         timeout_at(deadline_at, self.start_shutdown(Some(deadline_at)))
             .await
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[timeout]: `tokio::time::error::Elapsed`: the timeout itself is the classification
             .map_err(|_| operation_cancelled_error())?
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
-            .map_err(|_| EngineError::new(1108, EngineErrorCategory::Internal, true))?
+            .map_err(shutdown_task_failed)?
     }
 
     pub(super) fn start_shutdown(
@@ -88,6 +87,12 @@ impl Engine {
             result
         })
     }
+}
+
+/// 关闭任务在等待方处异常退出；任务类别即完整分类，宿主只收到稳定错误码。
+fn shutdown_task_failed(_: JoinError) -> EngineError {
+    record_task_join_failure(DiagnosticTaskKind::EngineLifecycleTransition);
+    EngineError::new(1108, EngineErrorCategory::Internal, true)
 }
 
 fn remaining_until(deadline: Instant) -> Duration {

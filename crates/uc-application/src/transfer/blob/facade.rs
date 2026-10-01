@@ -412,7 +412,7 @@ impl BlobTransferFacade {
         let entry = self
             .inflight_fetches
             .lock()
-            // 锁中毒：PoisonError 持有 guard，不能作为来源保存。
+            // discarded-source[lock-poisoned]: `std::sync::PoisonError<Guard>`: the poison error holds the guard and cannot be stored across threads
             .map_err(|_| {
                 BlobTransferError::Fetch(anyhow::anyhow!("in-flight fetch registry is poisoned"))
             })?
@@ -495,7 +495,7 @@ impl BlobTransferFacade {
         let transfer_ids = self
             .inflight_fetches
             .lock()
-            // 锁中毒：PoisonError 持有 guard，不能作为来源保存。
+            // discarded-source[lock-poisoned]: `std::sync::PoisonError<Guard>`: the poison error holds the guard and cannot be stored across threads
             .map_err(|_| {
                 BlobTransferError::Fetch(anyhow::anyhow!("in-flight fetch registry is poisoned"))
             })?
@@ -603,7 +603,7 @@ impl BlobTransferFacade {
         if let Some(ctx) = command.transfer_context.as_ref() {
             self.inflight_fetches
                 .lock()
-                // 锁中毒：PoisonError 持有 guard，不能作为来源保存。
+                // discarded-source[lock-poisoned]: `std::sync::PoisonError<Guard>`: the poison error holds the guard and cannot be stored across threads
                 .map_err(|_| {
                     BlobTransferError::Fetch(anyhow::anyhow!(
                         "in-flight fetch registry is poisoned"
@@ -634,7 +634,7 @@ impl BlobTransferFacade {
         if let Some(ctx) = command.transfer_context.as_ref() {
             self.inflight_fetches
                 .lock()
-                // 锁中毒：PoisonError 持有 guard，不能作为来源保存。
+                // discarded-source[lock-poisoned]: `std::sync::PoisonError<Guard>`: the poison error holds the guard and cannot be stored across threads
                 .map_err(|_| {
                     BlobTransferError::Fetch(anyhow::anyhow!(
                         "in-flight fetch registry is poisoned"
@@ -772,7 +772,7 @@ impl BlobTransferFacade {
         if let Some(ctx) = command.transfer_context.as_ref() {
             self.inflight_fetches
                 .lock()
-                // 锁中毒：PoisonError 持有 guard，不能作为来源保存。
+                // discarded-source[lock-poisoned]: `std::sync::PoisonError<Guard>`: the poison error holds the guard and cannot be stored across threads
                 .map_err(|_| {
                     BlobTransferError::Fetch(anyhow::anyhow!(
                         "in-flight fetch registry is poisoned"
@@ -813,7 +813,7 @@ impl BlobTransferFacade {
         if let Some(ctx) = command.transfer_context.as_ref() {
             self.inflight_fetches
                 .lock()
-                // 锁中毒：PoisonError 持有 guard，不能作为来源保存。
+                // discarded-source[lock-poisoned]: `std::sync::PoisonError<Guard>`: the poison error holds the guard and cannot be stored across threads
                 .map_err(|_| {
                     BlobTransferError::Fetch(anyhow::anyhow!(
                         "in-flight fetch registry is poisoned"

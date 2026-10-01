@@ -7,6 +7,7 @@ pub use uc_observability_contract::analytics::{
     AdoptOutcome, AnalyticsEventContext, AnalyticsIdentityError, AnalyticsIdentityPort,
     AnalyticsPort, DeviceType, Event, GroupIdentifyPayload, IdentifyPayload, Os, ReleaseOutcome,
 };
+pub use uc_observability_contract::error_source::io_error_kind;
 pub use uc_observability_contract::log_fields::{log_id, log_vocab, log_vocab_debug};
 pub use uc_observability_contract::{
     analytics, diagnostics, uc_debug, uc_error, uc_info, uc_trace, uc_warn,

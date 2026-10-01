@@ -170,7 +170,7 @@ impl IrohSpaceAdmissionHandler {
         })
         .instrument(span.clone())
         .await
-        // 超时本身就是分类。
+        // discarded-source[timeout]: `Elapsed`: the timeout itself is the classification
         .map_err(|_| HandlerError::Timeout)
         .and_then(|result| result);
         if let Err(error) = &result {

@@ -580,7 +580,7 @@ impl NodeRunLease {
         {
             let mut active = NODE_RUN_ACTIVE
                 .lock()
-                // 锁中毒：PoisonError 持有 guard，不能作为来源保存。
+                // discarded-source[lock-poisoned]: `std::sync::PoisonError<Guard>`: the poison error holds the guard and cannot be stored across threads
                 .map_err(|_| IrohNodeError::RuntimeStatePoisoned)?;
             if *active {
                 return Err(IrohNodeError::AlreadyRunning);

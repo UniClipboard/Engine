@@ -41,7 +41,7 @@ pub(super) fn encode(
         })?;
     let nonce: [u8; NONCE_BYTES] = nonce
         .try_into()
-        // TryFromSliceError：切片范围已固定，目标分类完整表达长度不符。
+        // discarded-source[no-information]: the error value carries no usable diagnostic information
         .map_err(|_| ContentProtectionError::Cryptography {
             source: anyhow::anyhow!("V3 content nonce has an invalid length"),
         })?;

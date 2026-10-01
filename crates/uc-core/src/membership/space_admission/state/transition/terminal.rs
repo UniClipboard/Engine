@@ -55,7 +55,7 @@ impl SpaceAdmissionAggregate {
                         SpaceAdmissionRoute::from_bytes(
                             state.pending_exchange.route().as_bytes().to_vec(),
                         )
-                        // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
+                        // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                         .map_err(|_| SpaceAdmissionAggregateError::InvalidTransition)?,
                         state.candidate_evidence.message_id(),
                         reason,
@@ -100,7 +100,7 @@ impl SpaceAdmissionAggregate {
                 let local_space_transition = AdmissionSpaceTransition::from_bytes(
                     state.space_transition.as_bytes().to_vec(),
                 )
-                // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionAggregateError::InvalidTransition)?;
                 let mut cleanup = known_cleanup_obligation(
                     self.attempt_digest,
@@ -264,7 +264,7 @@ impl SpaceAdmissionAggregate {
         );
         let AdmissionInboundDecision::New(_) = expected
             .classify(&abandoned, canonical_digest, None)
-            // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
+            // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
             .map_err(|_| SpaceAdmissionAggregateError::InvalidTransition)?
         else {
             return Err(SpaceAdmissionAggregateError::InvalidTransition);
@@ -285,7 +285,7 @@ impl SpaceAdmissionAggregate {
             pending
                 .request_envelope()
                 .encode_canonical_v1()
-                // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionAggregateError::InvalidTransition)?,
         )
         .into();
@@ -319,7 +319,7 @@ fn known_cleanup_obligation(
         admission.facts.member_instance,
         event.event_id(),
     )
-    // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
+    // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
     .map_err(|_| SpaceAdmissionAggregateError::InvalidCommitReply)?;
     let route = SpaceAdmissionRoute::from_bytes(
         commit
@@ -328,7 +328,7 @@ fn known_cleanup_obligation(
             .as_bytes()
             .to_vec(),
     )
-    // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
+    // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
     .map_err(|_| SpaceAdmissionAggregateError::InvalidCommitReply)?;
     cleanup_obligation(
         exact_commit.header().admission_id(),
@@ -383,17 +383,17 @@ fn cleanup_obligation(
         Some(predecessor_message_id),
         SpaceAdmissionBodyV1::Abandonment(body),
     )
-    // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
+    // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
     .map_err(|_| SpaceAdmissionAggregateError::InvalidTransition)?;
     let pending_exchange = PendingAdmissionExchange::new(
         route,
         request,
         SpaceAdmissionMessageKind::Abandoned,
         AdmissionRetryState::new(0, 0)
-            // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
+            // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
             .map_err(|_| SpaceAdmissionAggregateError::InvalidTransition)?,
     )
-    // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
+    // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
     .map_err(|_| SpaceAdmissionAggregateError::InvalidTransition)?;
     Ok(AdmissionCleanupObligation {
         commit_knowledge,

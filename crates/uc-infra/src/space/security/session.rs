@@ -499,7 +499,7 @@ impl InMemorySession {
         let hkdf = Hkdf::<Sha256>::new(Some(space_id.as_ref().as_bytes()), legacy_key.as_bytes());
         let mut content_key_bytes = Zeroizing::new([0_u8; MasterKey::LEN]);
         hkdf.expand(CONTENT_KEY_INFO, content_key_bytes.as_mut())
-            // hkdf::InvalidLength 未实现 Error，且只表示输出长度超限（这里长度是常量）。
+            // discarded-source[no-information]: the error value carries no usable diagnostic information
             .map_err(|_| EncryptionError::crypto_failure())?;
         let content_key = MasterKey::from_bytes(content_key_bytes.as_ref())?;
         let catalog = PersistedContentKeyCatalog {
@@ -810,7 +810,7 @@ impl InMemorySession {
         let hkdf = Hkdf::<Sha256>::new(Some(salt), legacy_key.key.as_bytes());
         let mut output = [0u8; 32];
         hkdf.expand(info, &mut output)
-            // hkdf::InvalidLength 未实现 Error，且只表示输出长度超限（这里长度是常量）。
+            // discarded-source[no-information]: the error value carries no usable diagnostic information
             .map_err(|_| EncryptionError::crypto_failure())?;
         Ok(output)
     }
@@ -832,7 +832,7 @@ impl InMemorySession {
         let mut output = [0u8; MasterKey::LEN];
         let info = format!("uniclipboard-content-key/v1/{}", purpose.as_str());
         hkdf.expand(info.as_bytes(), &mut output)
-            // hkdf::InvalidLength 未实现 Error，且只表示输出长度超限（这里长度是常量）。
+            // discarded-source[no-information]: the error value carries no usable diagnostic information
             .map_err(|_| EncryptionError::crypto_failure())?;
         Ok(ResolvedContentKey {
             content_key_id: content_key_id.clone(),

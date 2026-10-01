@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use std::fmt;
 
 use crate::clipboard::{ActiveClipboardState, MobileConsumableRef};
+use crate::error_class::ErrorClass;
 
 /// Error surface for active-clipboard register persistence.
 #[derive(thiserror::Error)]
@@ -12,6 +13,15 @@ pub enum ActiveClipboardRegisterError {
     NotUnlocked,
     #[error("active clipboard register storage failure")]
     Storage(#[source] anyhow::Error),
+}
+
+impl ErrorClass for ActiveClipboardRegisterError {
+    fn class(&self) -> &'static str {
+        match self {
+            Self::NotUnlocked => "not_unlocked",
+            Self::Storage(_) => "storage",
+        }
+    }
 }
 
 impl fmt::Debug for ActiveClipboardRegisterError {

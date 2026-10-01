@@ -73,6 +73,7 @@ impl PersistedSavedCandidateReplyV1 {
         let inbound_evidence = self.inbound_evidence.into_domain()?;
         let exact_reply = self.exact_reply.into_domain()?;
         SavedAdmissionReply::new(admission_id, inbound_evidence, exact_reply)
+            // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
             .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)
     }
 }
@@ -206,8 +207,10 @@ impl PersistedEnvelopeV1 {
             } => SpaceAdmissionBodyV1::Commit(AdmissionCommitV1::new(
                 exact_candidate.into_domain()?,
                 AdmissionSignedMembershipHistory::from_bytes(target_membership_history)
+                    // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                     .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
                 AdmissionSealedRecoveryMaterial::from_bytes(sealed_recovery_material)
+                    // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                     .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             )),
             PersistedBodyV1::Applied(receipt) => {
@@ -244,7 +247,7 @@ impl PersistedEnvelopeV1 {
                     member_binding
                         .map(|binding| AdmissionMemberBindingV2::decode_canonical(&binding))
                         .transpose()
-                        .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
+                        .map_err(SpaceAdmissionPersistenceError::InvalidMemberBinding)?,
                     decode_abandonment_reason(reason)?,
                 )
                 .ok_or(SpaceAdmissionPersistenceError::InvalidState)?,
@@ -263,6 +266,7 @@ impl PersistedEnvelopeV1 {
             predecessor_message_id,
             body,
         )
+        // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
         .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)
     }
 }
@@ -293,12 +297,15 @@ impl PersistedAnyPendingExchangeV1 {
         }
         let exchange = PendingAdmissionExchange::new(
             SpaceAdmissionRoute::from_bytes(self.route)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             request,
             decode_message_kind(self.expected_reply_kind)?,
             AdmissionRetryState::new(self.retry_attempt_count, self.retry_next_attempt_at_ms)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
         )
+        // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
         .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?;
         restore_exchange_block_reason(exchange, self.block_reason)
     }
@@ -325,6 +332,7 @@ impl PersistedSavedReplyV1 {
             self.inbound_evidence.into_domain()?,
             self.exact_reply.into_domain()?,
         )
+        // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
         .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)
     }
 }
@@ -364,6 +372,7 @@ impl PersistedCandidateEnvelopeV1 {
             predecessor_message_id,
             SpaceAdmissionBodyV1::Candidate(self.body.into_domain()?),
         )
+        // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
         .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)
     }
 }
@@ -387,16 +396,21 @@ impl PersistedCandidateV1 {
     ) -> Result<AdmissionCandidateV1, SpaceAdmissionPersistenceError> {
         AdmissionCandidateV1::new(
             AdmissionSignedMembershipHistory::from_bytes(self.base_membership_history)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             self.candidate_event,
             self.security_commitment,
             AdmissionMlsCommit::from_bytes(self.mls_commit)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             AdmissionMlsWelcome::from_bytes(self.mls_welcome)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             AdmissionContinuationRoute::from_bytes(self.continuation_route)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
         )
+        // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
         .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)
     }
 }
@@ -439,6 +453,7 @@ impl PersistedPreparedEnvelopeV1 {
             predecessor_message_id,
             SpaceAdmissionBodyV1::Prepared(AdmissionPreparedV1::new(self.proof)),
         )
+        // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
         .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)
     }
 }
@@ -476,12 +491,15 @@ impl PersistedPreparedPendingExchangeV1 {
         }
         let exchange = PendingAdmissionExchange::new(
             SpaceAdmissionRoute::from_bytes(self.route)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             request,
             decode_message_kind(self.expected_reply_kind)?,
             AdmissionRetryState::new(self.retry_attempt_count, self.retry_next_attempt_at_ms)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
         )
+        // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
         .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?;
         let exchange = restore_exchange_block_reason(exchange, self.block_reason)?;
         if exchange.exact_expected_reply_kind() != SpaceAdmissionMessageKind::Commit
@@ -543,12 +561,15 @@ impl PersistedPendingExchangeV1 {
         }
         let exchange = PendingAdmissionExchange::new(
             SpaceAdmissionRoute::from_bytes(self.route)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             request,
             decode_message_kind(self.expected_reply_kind)?,
             AdmissionRetryState::new(self.retry_attempt_count, self.retry_next_attempt_at_ms)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
         )
+        // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
         .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?;
         restore_exchange_block_reason(exchange, self.block_reason)
     }
@@ -618,6 +639,7 @@ impl PersistedJoinRequestEnvelopeV1 {
             predecessor_message_id,
             SpaceAdmissionBodyV1::JoinRequest(self.body.into_domain()?),
         )
+        // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
         .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)
     }
 }
@@ -664,13 +686,16 @@ impl PersistedJoinRequestV1 {
             self.identity_facts,
             credential,
             AdmissionKeyPackage::from_bytes(self.key_package)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             AdmissionRecoveryPublicKey::from_bytes(self.recovery_public_key)
                 .ok_or(SpaceAdmissionPersistenceError::InvalidState)?,
             AdmissionIdentitySignature::from_bytes(self.identity_signature)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             decode_unreadable_history_policy(self.unreadable_history_policy)?,
         )
+        // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
         .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)
     }
 }

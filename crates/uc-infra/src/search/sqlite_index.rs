@@ -411,7 +411,7 @@ impl SqliteSearchIndex {
 
     /// 读取 V12 文档实际涉及的保护组引用。任何空值或非法长度都代表索引
     /// 尚未完成 V12 重建，查询必须 fail closed，不能退回 V11 key。
-    fn load_v3_group_refs(
+    pub(super) fn load_v3_group_refs(
         conn: &mut SqliteConnection,
         profile_id: &str,
     ) -> Result<Vec<SearchGroupRef>, SearchError> {
@@ -426,8 +426,14 @@ impl SqliteSearchIndex {
         refs.into_iter()
             .map(|value| {
                 let value = value.ok_or(SearchError::IndexNotReady)?;
-                // Core 纯长度校验失败表示索引数据不完整，改归为“索引未就绪”以触发重建。
-                SearchGroupRef::from_bytes(&value).map_err(|_| SearchError::IndexNotReady)
+                // discarded-source[business-outcome]: the failure becomes a business outcome and is recorded once here with a fixed classification
+                SearchGroupRef::from_bytes(&value).map_err(|_| {
+                    uc_warn!(
+                        error_kind = "search_protection_group_ref_invalid",
+                        "persisted search group reference is malformed; the index is treated as not ready"
+                    );
+                    SearchError::IndexNotReady
+                })
             })
             .collect()
     }

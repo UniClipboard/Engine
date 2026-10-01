@@ -11,7 +11,7 @@ pub(crate) async fn execute_query_upgrade_status(
     let status = facade
         .upgrade_status(app_version)
         .await
-        // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+        // discarded-source[contract-boundary]: the public error carries a stable code only, the owner records the failure classification
         .map_err(|_| internal_error(QUERY_UPGRADE_STATUS_FAILED_CODE))?;
     Ok(OperationResult::UpgradeStatus(map_status(
         status,
@@ -26,7 +26,7 @@ pub(crate) async fn execute_acknowledge_upgrade(
     facade
         .acknowledge_upgrade(app_version)
         .await
-        // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+        // discarded-source[contract-boundary]: the public error carries a stable code only, the owner records the failure classification
         .map_err(|_| internal_error(ACKNOWLEDGE_UPGRADE_FAILED_CODE))?;
     Ok(OperationResult::UpgradeAcknowledged {
         version: app_version.to_string(),

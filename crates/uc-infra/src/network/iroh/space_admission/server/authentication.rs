@@ -49,7 +49,7 @@ impl IrohSpaceAdmissionHandler {
             })?;
             let (mut send, mut receive) = tokio::time::timeout(IO_DEADLINE, connection.accept_bi())
                 .await
-                // 超时本身就是分类。
+                // discarded-source[timeout]: `Elapsed`: the timeout itself is the classification
                 .map_err(|_| HandlerError::Timeout)?
                 .map_err(|source| HandlerError::Transport {
                     source: anyhow::Error::new(source),

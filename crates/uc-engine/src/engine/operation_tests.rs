@@ -214,3 +214,22 @@ async fn cancellation_wins_when_operation_result_is_already_ready() {
 
     assert_eq!(error.category(), EngineErrorCategory::DeadlineExceeded);
 }
+
+#[tokio::test]
+async fn a_lost_wrapper_task_is_recorded_as_a_join_failure_and_keeps_its_stable_code() {
+    let failures = TaskJoinFailures::default();
+    let _capture = failures.install();
+    let task = tokio::spawn(async {
+        panic!("private-wrapper-panic");
+        #[allow(unreachable_code)]
+        Ok::<OperationResult, EngineError>(OperationResult::Devices(Vec::new()))
+    });
+
+    let error = await_operation_completion(CancellationToken::new(), task)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), 1108);
+    assert_eq!(error.category(), EngineErrorCategory::Internal);
+    assert_eq!(failures.kinds(), ["engine_operation"]);
+}

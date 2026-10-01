@@ -200,7 +200,7 @@ impl MobileFileStagingPort for FilesystemMobileFileStaging {
             .map_err(|error| MobileFileStagingError::Io(Box::new(error)))?;
         let path = url
             .to_file_path()
-            // to_file_path 的错误类型是 ()，没有可保存的来源。
+            // discarded-source[no-information]: `()`: the error value carries no usable diagnostic information
             .map_err(|_| MobileFileStagingError::Io("staged file URI is not local".into()))?;
         match tokio::fs::remove_file(path).await {
             Ok(()) => Ok(()),
@@ -219,7 +219,7 @@ impl MobileFileStagingPort for FilesystemMobileFileStaging {
                     .into(),
             )
         })?;
-        // to_file_path 的错误类型是 ()，没有可保存的来源；文本不带 URI。
+        // discarded-source[no-information]: `()`: the error value carries no usable diagnostic information
         let path = parsed.to_file_path().map_err(|_| {
             MobileFileStagingError::Io("URI is not a file:// URL or has no usable path".into())
         })?;
@@ -439,7 +439,7 @@ impl MobileFileStagingPort for FilesystemMobileFileStaging {
 fn path_to_file_uri(path: &Path) -> Result<String, MobileFileStagingError> {
     url::Url::from_file_path(path)
         .map(|u| u.to_string())
-        // from_file_path 的错误类型是 ()，没有可保存的来源；文本不带路径。
+        // discarded-source[no-information]: `()`: the error value carries no usable diagnostic information
         .map_err(|_| MobileFileStagingError::Io("failed to convert path to file URI".into()))
 }
 

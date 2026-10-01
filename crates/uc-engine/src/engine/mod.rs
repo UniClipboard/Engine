@@ -130,7 +130,7 @@ impl Engine {
         let startup_handoff = engine.bind_lifecycle(true);
         startup_handoff
             .await
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: `tokio::sync::oneshot::error::RecvError`: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| EngineError::new(1108, EngineErrorCategory::Internal, true))?;
         Ok((engine, stream))
     }
@@ -235,6 +235,7 @@ mod tests {
         pub(super) shutdown_deadline: StdMutex<Option<Duration>>,
         pub(super) fail_shutdown: AtomicBool,
         pub(super) block_shutdown: AtomicBool,
+        pub(super) panic_shutdown: AtomicBool,
         pub(super) shutdown_started: Notify,
         pub(super) shutdown_release: Notify,
     }
@@ -290,6 +291,9 @@ mod tests {
             if self.block_shutdown.load(Ordering::SeqCst) {
                 self.shutdown_started.notify_one();
                 self.shutdown_release.notified().await;
+            }
+            if self.panic_shutdown.load(Ordering::SeqCst) {
+                panic!("private-shutdown-panic");
             }
             if self.fail_shutdown.load(Ordering::SeqCst) {
                 return Err(EngineError::new(9001, EngineErrorCategory::Internal, false));

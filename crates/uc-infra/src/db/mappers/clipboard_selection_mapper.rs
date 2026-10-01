@@ -61,7 +61,7 @@ impl RowMapper<ClipboardSelectionRow, ClipboardSelectionDecision> for ClipboardS
         let policy_version = row
             .policy_version
             .parse()
-            // FromStr 的错误只是回显原值的 String，没有额外诊断信息；持久值与条目标识不写入错误。
+            // discarded-source[no-information]: the error value carries no usable diagnostic information
             .map_err(|_| anyhow::anyhow!("invalid selection policy version"))?;
 
         let selection = ClipboardSelection {

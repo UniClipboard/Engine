@@ -252,7 +252,7 @@ pub(super) async fn read_raw_with_limit<R: AsyncRead + Unpin>(
 async fn run_io<T>(future: impl Future<Output = io::Result<T>>) -> Result<T, WireError> {
     tokio::time::timeout(IO_DEADLINE, future)
         .await
-        // 超时本身就是分类。
+        // discarded-source[timeout]: `Elapsed`: the timeout itself is the classification
         .map_err(|_| WireError::Timeout)?
         .map_err(WireError::Io)
 }

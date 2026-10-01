@@ -35,27 +35,27 @@ fn pending_exchanges_decode_real_bytes_from_the_previous_v1_layout() {
     let current = aggregate.encode_persisted().expect("current bytes encode");
     let mut current_with_junk = current.clone();
     current_with_junk.push(0xaa);
-    assert_eq!(
+    assert!(matches!(
         SpaceAdmissionAggregate::decode_persisted(&current_with_junk),
-        Err(crate::membership::SpaceAdmissionPersistenceError::InvalidEncoding)
-    );
+        Err(crate::membership::SpaceAdmissionPersistenceError::InvalidEncoding { .. })
+    ));
 
     let mut legacy_with_junk = current;
     assert_eq!(legacy_with_junk.pop(), Some(0));
     legacy_with_junk.extend_from_slice(&[0, 0xaa]);
-    assert_eq!(
+    assert!(matches!(
         SpaceAdmissionAggregate::decode_persisted(&legacy_with_junk),
-        Err(crate::membership::SpaceAdmissionPersistenceError::InvalidEncoding)
-    );
+        Err(crate::membership::SpaceAdmissionPersistenceError::InvalidEncoding { .. })
+    ));
 
     let mut truncated_terminal = active_settled_aggregate_fixture()
         .encode_persisted()
         .expect("terminal bytes encode");
     truncated_terminal.pop().expect("terminal bytes are non-empty");
-    assert_eq!(
+    assert!(matches!(
         SpaceAdmissionAggregate::decode_persisted(&truncated_terminal),
-        Err(crate::membership::SpaceAdmissionPersistenceError::InvalidEncoding)
-    );
+        Err(crate::membership::SpaceAdmissionPersistenceError::InvalidEncoding { .. })
+    ));
 }
 
 #[test]

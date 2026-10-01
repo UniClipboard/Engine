@@ -12,6 +12,7 @@ use super::super::artifact::{
     AdmissionMlsCommit, AdmissionMlsWelcome, AdmissionRecoveryPublicKey,
     AdmissionSealedRecoveryMaterial, SpaceAdmissionRoute,
 };
+use super::super::attempt::AdmissionMemberBindingError;
 use super::super::exchange::{AdmissionRetryState, SavedAdmissionReply};
 use super::super::id::{AdmissionChannelPeerId, InvitationId};
 use super::super::message::{
@@ -40,25 +41,43 @@ pub(crate) fn encode_envelope_v1(
     envelope: &SpaceAdmissionEnvelopeV1,
 ) -> Result<Vec<u8>, SpaceAdmissionPersistenceError> {
     let persisted = PersistedEnvelopeV1::try_from(envelope)?;
-    postcard::to_stdvec(&persisted).map_err(|_| SpaceAdmissionPersistenceError::InvalidEncoding)
+    postcard::to_stdvec(&persisted).map_err(SpaceAdmissionPersistenceError::invalid_encoding_from)
 }
 
 pub(crate) fn decode_envelope_v1(
     encoded: &[u8],
 ) -> Result<SpaceAdmissionEnvelopeV1, SpaceAdmissionPersistenceError> {
     let persisted: PersistedEnvelopeV1 = postcard::from_bytes(encoded)
-        .map_err(|_| SpaceAdmissionPersistenceError::InvalidEncoding)?;
+        .map_err(SpaceAdmissionPersistenceError::invalid_encoding_from)?;
     persisted.into_domain()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum SpaceAdmissionPersistenceError {
     #[error("the persisted admission encoding is invalid")]
-    InvalidEncoding,
+    InvalidEncoding {
+        #[source]
+        source: Option<postcard::Error>,
+    },
+    #[error("the persisted admission member binding is invalid")]
+    InvalidMemberBinding(#[source] AdmissionMemberBindingError),
     #[error("the persisted admission version is not supported")]
     UnsupportedVersion,
     #[error("the persisted admission state violates protocol rules")]
     InvalidState,
+}
+
+/// 纯结构校验失败时 `source` 为空；postcard 编解码失败时保留为来源。
+impl SpaceAdmissionPersistenceError {
+    pub fn invalid_encoding() -> Self {
+        Self::InvalidEncoding { source: None }
+    }
+
+    pub fn invalid_encoding_from(source: postcard::Error) -> Self {
+        Self::InvalidEncoding {
+            source: Some(source),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]

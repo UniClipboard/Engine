@@ -2654,7 +2654,7 @@ fn local_file_uri_list(paths: &[PathBuf]) -> Result<String> {
     let mut out = String::new();
     for path in paths {
         let url = Url::from_file_path(path)
-            // 下层错误类型是 ()，没有可保存的来源。
+            // discarded-source[no-information]: `()`: the error value carries no usable diagnostic information
             .map_err(|_| anyhow!("failed to convert cache path to file URL"))?;
         out.push_str(url.as_str());
         out.push('\n');

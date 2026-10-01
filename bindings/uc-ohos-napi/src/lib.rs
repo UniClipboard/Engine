@@ -13,6 +13,7 @@ use napi::bindgen_prelude::{Buffer, External};
 use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunction};
 use napi::Env;
 use napi_derive::napi;
+use uc_engine::observability::uc_warn;
 
 pub use runtime::OhEngine;
 
@@ -260,8 +261,15 @@ pub async fn flush_process_observability(
         observability::force_flush(std::time::Duration::from_millis(u64::from(deadline_ms)))
     })
     .await
-    // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
-    .map_err(|_| observability::runtime_unavailable())?
+    // discarded-source[business-outcome]: the failure becomes a business outcome and is recorded once here with a fixed classification
+    .map_err(|_| {
+        uc_warn!(
+            operation = "process_observability_flush",
+            error_kind = "blocking_task_join_failed",
+            "observability operation failed"
+        );
+        observability::runtime_unavailable()
+    })?
 }
 
 #[napi]
@@ -272,8 +280,15 @@ pub async fn shutdown_process_observability(
         observability::shutdown(std::time::Duration::from_millis(u64::from(deadline_ms)))
     })
     .await
-    // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
-    .map_err(|_| observability::runtime_unavailable())?
+    // discarded-source[business-outcome]: the failure becomes a business outcome and is recorded once here with a fixed classification
+    .map_err(|_| {
+        uc_warn!(
+            operation = "process_observability_shutdown",
+            error_kind = "blocking_task_join_failed",
+            "observability operation failed"
+        );
+        observability::runtime_unavailable()
+    })?
 }
 
 #[napi]

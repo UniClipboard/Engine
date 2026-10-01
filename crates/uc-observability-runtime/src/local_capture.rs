@@ -264,7 +264,7 @@ impl CapturePolicy {
         id: &str,
         now: Instant,
     ) -> Result<StopCaptureResult, LocalDiagnosticError> {
-        // 宿主提供的配置输入校验，拒绝原因已完整表达。
+        // discarded-source[input-validation]: `uuid::Error`: the rejection reason is fully expressed by the target classification
         let id = Uuid::parse_str(id).map_err(|_| LocalDiagnosticError::InvalidCaptureId)?;
         self.expire(now);
         match &self.active {

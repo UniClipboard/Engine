@@ -666,3 +666,20 @@ async fn listed_backup_can_be_deleted_without_touching_the_profile() {
     assert!(!fixture.backup.directory().join("security-current").exists());
     assert!(fixture.storage.get(record::RECORD_KEY).unwrap().is_none());
 }
+
+#[tokio::test]
+async fn failed_delete_is_recorded_with_its_backup_action() {
+    let logs = uc_testkit::log_capture::CapturedLogs::default();
+    let _guard = logs.install();
+    let fixture = Fixture::new();
+
+    let missing = uuid::Uuid::new_v4().to_string();
+    assert!(fixture.backup.delete_backup(&missing).await.is_err());
+    assert!(fixture.backup.delete_backup("not-a-uuid").await.is_err());
+
+    let output = logs.output();
+    assert_eq!(logs.count("profile_upgrade.backup.failed"), 2, "{output}");
+    assert_eq!(logs.count("backup_action=\"delete_backup\""), 2, "{output}");
+    assert!(output.contains("io_error_kind"), "{output}");
+    assert!(!output.contains(&missing), "{output}");
+}

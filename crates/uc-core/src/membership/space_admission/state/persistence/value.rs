@@ -14,6 +14,7 @@ pub(super) fn decode_continuation_credential(
     bytes: Vec<u8>,
 ) -> Result<AdmissionContinuationCredential, SpaceAdmissionPersistenceError> {
     AdmissionContinuationCredential::from_bytes(bytes)
+        // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
         .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)
 }
 
@@ -21,6 +22,7 @@ pub(super) fn decode_staged_target(
     bytes: Vec<u8>,
 ) -> Result<AdmissionStagedTarget, SpaceAdmissionPersistenceError> {
     AdmissionStagedTarget::from_bytes(bytes)
+        // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
         .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)
 }
 

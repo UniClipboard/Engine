@@ -188,7 +188,7 @@ impl<E: DbExecutor> RecordDirectoryPublishPort for DieselDirectoryPublishLogRepo
         now_ms: i64,
     ) -> Result<(), PublishLogError> {
         let visible_roots = i32::try_from(visible_roots)
-            // TryFromIntError：固定文本已完整表达范围不符。
+            // discarded-source[int-conversion]: `core::num::TryFromIntError`: the target classification already expresses the range or length mismatch
             .map_err(|_| PublishLogError::Backend("visible root count exceeds i32".into()))?;
         let entry_id = entry_id.to_owned();
         let attempt_id = attempt_id.to_owned();
@@ -252,7 +252,7 @@ impl<E: DbExecutor> GetDirectoryPublishRecordPort for DieselDirectoryPublishLogR
             None => Vec::new(),
         };
         let partial_visible_roots = if row.partial_publication {
-            // TryFromIntError：目标分类完整表达数值范围不符。
+            // discarded-source[int-conversion]: `core::num::TryFromIntError`: the target classification already expresses the range or length mismatch
             Some(u32::try_from(row.partial_root_count).map_err(|_| {
                 PublishLogError::Backend("negative persisted visible root count".into())
             })?)

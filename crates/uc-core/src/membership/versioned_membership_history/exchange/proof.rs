@@ -58,7 +58,7 @@ impl MembershipHistoryProof {
             || !strictly_ordered(&self.activation_receipts)
             || !strictly_ordered(&self.decisions)
         {
-            return Err(MembershipHistoryV2Error::InvalidPersistedHistory);
+            return Err(MembershipHistoryV2Error::invalid_persisted_history());
         }
         if self.baseline_digest
             != <[u8; 32]>::from(Sha256::digest(available.activation_baseline_identity()?))
@@ -100,10 +100,10 @@ impl MembershipHistoryProof {
             known_head: target.event_id,
         };
         let bytes = postcard::to_stdvec(&archive)
-            .map_err(|_| MembershipHistoryV2Error::InvalidPersistedHistory)?;
+            .map_err(MembershipHistoryV2Error::invalid_persisted_history_from)?;
         let verified = VersionedMembershipHistory::decode_persisted_v2(&bytes, verifier)?;
         if verified.current_position()? != *target {
-            return Err(MembershipHistoryV2Error::InvalidPersistedHistory);
+            return Err(MembershipHistoryV2Error::invalid_persisted_history());
         }
         Ok(verified)
     }

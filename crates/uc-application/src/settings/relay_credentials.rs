@@ -474,7 +474,7 @@ fn storage_key(relay_url: &str) -> Result<String, RelayCredentialsError> {
 
 fn canonical_relay_url(relay_url: &str) -> Result<String, RelayCredentialsError> {
     let url =
-        // 用户输入的 URL 解析失败只作输入校验，拒绝原因已完整表达。
+        // discarded-source[input-validation]: `url::ParseError`: the rejection reason is fully expressed by the target classification
         url::Url::parse(relay_url.trim()).map_err(|_| RelayCredentialsError::InvalidRelayUrl)?;
     if !matches!(url.scheme(), "http" | "https")
         || url.host_str().is_none()

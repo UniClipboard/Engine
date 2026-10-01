@@ -447,7 +447,7 @@ impl RuntimeHost {
             })?;
         let handle = handle_rx
             .recv()
-            // mpsc RecvError 只表示发送端已退出，没有其他诊断信息。
+            // discarded-source[channel]: `std::sync::mpsc::RecvError`: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| SyncError::Internal {
                 reason: "runtime thread exited before handing back a handle".into(),
             })?
@@ -1231,7 +1231,7 @@ fn endpoint(base_url: &str, segments: &[&str]) -> Result<url::Url, SyncError> {
     {
         let mut path = url
             .path_segments_mut()
-            // 下层错误类型是 ()，没有可保存的来源。
+            // discarded-source[no-information]: `()`: the error value carries no usable diagnostic information
             .map_err(|_| SyncError::InvalidInput {
                 reason: "base_url cannot be a base".into(),
             })?;

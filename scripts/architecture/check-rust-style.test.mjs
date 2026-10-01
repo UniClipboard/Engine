@@ -236,29 +236,79 @@ fn run() -> Result<(), StoreError> {
   for (const line of [3, 4, 6, 10, 13]) assert.match(result.stderr, new RegExp(`fixture\\.rs:${line} .*#\\[source\\]`))
 })
 
-test('拒绝无理由丢弃下层错误', () => {
+test('拒绝没有类别标签的丢弃来源', () => {
   const result = check(`
 fn run() -> Result<(), StoreError> {
     load().map_err(|_| StoreError::Storage)?;
     save().map_err(|_error| StoreError::Storage)?;
+    // A reason without a category tag is not accepted
+    parse().map_err(|_| StoreError::Storage)?;
     Ok(())
 }
 `)
   assert.equal(result.status, 1)
-  assert.match(result.stderr, /fixture\.rs:3 .*中文注释/)
+  assert.match(result.stderr, /fixture\.rs:3 .*discarded-source\[category\]/)
   assert.match(result.stderr, /fixture\.rs:4 /)
+  assert.match(result.stderr, /fixture\.rs:6 /)
 })
 
-test('接受写明中文理由的丢弃来源例外', () => {
+test('拒绝不在清单内的丢弃来源类别', () => {
+  const result = check(`
+fn run() -> Result<(), StoreError> {
+    // discarded-source[whatever]: looks fine
+    load().map_err(|_| StoreError::Storage)?;
+    Ok(())
+}
+`)
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /fixture\.rs:4 .*is not allowed/)
+})
+
+test('接受带类别标签的丢弃来源例外', () => {
   const result = check(`
 fn run(bytes: &[u8]) -> Result<[u8; 32], KeyError> {
-    // TryFromSliceError 只表示长度不符，目标分类已完整表达
+    // discarded-source[int-conversion]: TryFromSliceError only means a length mismatch
     let key = bytes.try_into().map_err(|_| KeyError::Length)?;
-    let guard = lock.lock().map_err(|_| KeyError::Poisoned)?; // 锁中毒持有 guard，不能保存
+    let guard = lock.lock().map_err(|_| KeyError::Poisoned)?; // discarded-source[lock-poisoned]: holds the guard
+    // discarded-source[contract-boundary]: the public error carries a stable code only,
+    // the owner records the failure classification.
+    store.delete().await.map_err(|_| EngineError::new(CODE))?;
     Ok(key)
 }
 `)
   assert.equal(result.status, 0, result.stderr)
+})
+
+test('测试专用函数里的丢弃来源不检查', () => {
+  const result = check(`
+fn run() {}
+
+#[cfg(test)]
+fn helper() -> Result<(), StoreError> {
+    load().map_err(|_| StoreError::Storage)?;
+    Ok(())
+}
+`)
+  assert.equal(result.status, 0, result.stderr)
+})
+
+test('接受 error-handling.md 列出的每个丢弃来源类别', () => {
+  const categories = ['lock-poisoned', 'int-conversion', 'timeout', 'channel', 'no-information', 'input-validation', 'core-pure-validation', 'observability-init', 'business-outcome', 'contract-boundary', 'in-memory-encoding']
+  const body = categories
+    .map(category => `    // discarded-source[${category}]: reason\n    step().map_err(|_| StoreError::Storage)?;`)
+    .join('\n')
+  const result = check(`fn run() -> Result<(), StoreError> {\n${body}\n    Ok(())\n}\n`)
+  assert.equal(result.status, 0, result.stderr)
+})
+
+test('丢弃来源检查扫描整个文件而不只是新增行', () => {
+  const result = check(`
+fn untouched() -> Result<(), StoreError> {
+    load().map_err(|_| StoreError::Storage)?;
+    Ok(())
+}
+`)
+  assert.equal(result.status, 1)
 })
 
 test('拒绝日志输出错误正文', () => {

@@ -55,6 +55,23 @@ const ERROR_TEXT_START = /\b(?:with_context|anyhow!|bail!|panic!|custom)\s*\(|\b
 const PATH_DISPLAY = /\.\s*display\s*\(\s*\)/
 const DISCARDED_SOURCE = /\bmap_err\s*\(\s*(?:move\s*)?\|\s*_\w*\s*(?::[^|]*)?\|/
 const CHINESE_COMMENT = /\/\/.*[\u4e00-\u9fff]/
+const ANY_COMMENT = /\/\/.*\S/
+// Matches the table in error-handling.md ("Allowed cases for discarding the source") one to one;
+// reasons outside this list are rejected.
+export const DISCARD_CATEGORIES = [
+  'lock-poisoned',
+  'int-conversion',
+  'timeout',
+  'channel',
+  'no-information',
+  'input-validation',
+  'core-pure-validation',
+  'observability-init',
+  'business-outcome',
+  'contract-boundary',
+  'in-memory-encoding',
+]
+const DISCARD_TAG = /discarded-source\[([^\]]+)\]/
 const FUNCTION_START = /(^|\n)\s*(pub(?:\s*\([^)]*\))?\s+)?(?:const\s+)?(?:unsafe\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\b/g
 
 function git(args) {
@@ -169,19 +186,21 @@ function testLineNumbers(lines, codeLines) {
   const testLines = new Set()
   for (let index = 0; index < lines.length; index += 1) {
     if (!lines[index].trim().startsWith('#[cfg(test)]')) continue
-    let moduleLine = index + 1
-    while (moduleLine < lines.length && !/\bmod\s+\w+\s*\{/.test(lines[moduleLine])) {
-      if (lines[moduleLine].trim() && !lines[moduleLine].trim().startsWith('#')) break
-      moduleLine += 1
-    }
-    if (moduleLine >= lines.length || !/\bmod\s+\w+\s*\{/.test(lines[moduleLine])) continue
+    // 属性与空行之后的第一行是被标注的条目（模块、函数、impl、use 等）。
+    let itemLine = index + 1
+    while (itemLine < lines.length && (!lines[itemLine].trim() || lines[itemLine].trim().startsWith('#'))) itemLine += 1
+    if (itemLine >= lines.length) continue
     let depth = 0
-    for (let cursor = moduleLine; cursor < lines.length; cursor += 1) {
+    let opened = false
+    for (let cursor = itemLine; cursor < lines.length; cursor += 1) {
       const code = codeLines[cursor]
+      testLines.add(cursor + 1)
       depth += [...code].filter(character => character === '{').length
       depth -= [...code].filter(character => character === '}').length
-      testLines.add(cursor + 1)
-      if (depth === 0) break
+      if (code.includes('{')) opened = true
+      // 没有花括号的条目（如 `use ..;`）在分号处结束。
+      if (!opened && code.includes(';')) break
+      if (opened && depth <= 0) break
     }
   }
   return testLines
@@ -238,18 +257,6 @@ function errorSourceViolations(path, lines, codeLines, lineNumber) {
         source: lines[lineNumber - 1].trim(),
         type: 'error-source',
         message: '错误与 panic 文本不得包含路径；改用固定动作文本，路径不进入错误链',
-      })
-    }
-  }
-  if (DISCARDED_SOURCE.test(code)) {
-    const commented = [lines[lineNumber - 1], lines[lineNumber - 2]].filter(Boolean).some(line => CHINESE_COMMENT.test(line))
-    if (!commented) {
-      violations.push({
-        path,
-        line: lineNumber,
-        source: lines[lineNumber - 1].trim(),
-        type: 'error-source',
-        message: 'map_err(|_| ..) 丢弃了下层错误；改为 #[source] 携带，属于允许例外时在同一行或前一行用中文注释写明理由',
       })
     }
   }
@@ -448,6 +455,61 @@ function forwardingMethod(functionInfo) {
   return forwarding[1]
 }
 
+// 列出非测试代码中所有丢弃下层错误的 `map_err(|_| ..)`，附带紧邻注释里的类别标签（没有则为 null）。
+export function discardedSourceSites(source, path = 'fixture.rs') {
+  const lines = source.split('\n')
+  const lexicalState = { blockComment: false, string: null, escape: false }
+  const codeLines = lines.map(line => stripStringsAndComments(line, lexicalState))
+  const testLines = testLineNumbers(lines, codeLines)
+  const sites = []
+  for (let lineNumber = 1; lineNumber <= lines.length; lineNumber += 1) {
+    if (testLines.has(lineNumber) || !DISCARDED_SOURCE.test(codeLines[lineNumber - 1] ?? '')) continue
+    sites.push({
+      path,
+      line: lineNumber,
+      source: lines[lineNumber - 1].trim(),
+      category: discardCategory(lines, lineNumber),
+      commented: precedingComment(lines, lineNumber).length > 0,
+    })
+  }
+  return sites
+}
+
+// 同一行，或紧邻其上连续的 `//` 注释行（至多 6 行）。
+function precedingComment(lines, lineNumber) {
+  const collected = []
+  const current = lines[lineNumber - 1] ?? ''
+  if (ANY_COMMENT.test(current)) collected.push(current)
+  for (let index = lineNumber - 2; index >= 0 && lineNumber - 2 - index < 6; index -= 1) {
+    const line = lines[index].trim()
+    if (!line.startsWith('//')) break
+    collected.unshift(line)
+  }
+  return collected
+}
+
+function discardCategory(lines, lineNumber) {
+  const text = precedingComment(lines, lineNumber).join('\n')
+  const tag = text.match(DISCARD_TAG)
+  return tag ? tag[1] : null
+}
+
+function discardedSourceViolations(path, lines, sites) {
+  const violations = []
+  for (const site of sites) {
+    let message = null
+    if (site.category === null) {
+      message =
+        'map_err(|_| ..) 丢弃了下层错误；改为 #[source] 携带。属于 error-handling.md 允许的例外时，在同一行或紧邻上方的注释里写 ' +
+        `"discarded-source[category]: reason"，category 只能是：${DISCARD_CATEGORIES.join(', ')}`
+    } else if (!DISCARD_CATEGORIES.includes(site.category)) {
+      message = `discarded-source category "${site.category}" is not allowed; use one of: ${DISCARD_CATEGORIES.join(', ')}`
+    }
+    if (message) violations.push({ path: site.path ?? path, line: site.line, source: site.source, type: 'error-source', message })
+  }
+  return violations
+}
+
 function violationsFor(path, addedLines, changedFunctionLines) {
   const absolutePath = resolve(REPOSITORY_ROOT, path)
   if (!existsSync(absolutePath) || isTestPath(path)) return []
@@ -519,10 +581,38 @@ function selectedFiles() {
   return selected
 }
 
-function main() {
-  const violations = [...selectedFiles()].flatMap(([path, lines]) =>
-    violationsFor(path, lines.addedLines, lines.changedFunctionLines)
+// 全仓非测试 Rust 文件；丢弃来源的检查不只看新增行，存量代码同样适用。
+function allProductionRustFiles() {
+  return git(['ls-files', '--cached', '--others', '--exclude-standard', '--', ...SOURCE_ROOTS])
+    .split('\n')
+    .filter(path => path.endsWith('.rs') && !isTestPath(path) && existsSync(resolve(REPOSITORY_ROOT, path)))
+}
+
+function allDiscardedSites() {
+  return allProductionRustFiles().flatMap(path =>
+    discardedSourceSites(readFileSync(resolve(REPOSITORY_ROOT, path), 'utf8'), path)
   )
+}
+
+function discardedSourceScan(files) {
+  if (files) {
+    const absolutePath = resolve(files)
+    const path = relative(REPOSITORY_ROOT, absolutePath)
+    return discardedSourceViolations(path, [], discardedSourceSites(readFileSync(absolutePath, 'utf8'), path))
+  }
+  return discardedSourceViolations('', [], allDiscardedSites())
+}
+
+function main() {
+  if (process.argv[2] === '--list-discarded') {
+    process.stdout.write(`${JSON.stringify(allDiscardedSites(), null, 1)}\n`)
+    return
+  }
+  const fileMode = process.argv[2] === '--file' ? process.argv[3] : null
+  const violations = [
+    ...[...selectedFiles()].flatMap(([path, lines]) => violationsFor(path, lines.addedLines, lines.changedFunctionLines)),
+    ...discardedSourceScan(fileMode),
+  ]
   if (violations.length === 0) {
     process.stdout.write('Rust 编写规范检查通过\n')
     return

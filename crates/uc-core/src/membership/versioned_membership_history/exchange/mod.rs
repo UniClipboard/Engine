@@ -98,11 +98,11 @@ impl MembershipHistorySuffixPageV4 {
             || (record_count == 0 && self.page_count != 1)
             || self.sender_proof.is_some() != (self.page_index == 0)
             || postcard::to_stdvec(self)
-                .map_err(|_| MembershipHistoryV2Error::InvalidPersistedHistory)?
+                .map_err(MembershipHistoryV2Error::invalid_persisted_history_from)?
                 .len()
                 > MAX_MEMBERSHIP_HISTORY_FRAME_SIZE
         {
-            return Err(MembershipHistoryV2Error::InvalidPersistedHistory);
+            return Err(MembershipHistoryV2Error::invalid_persisted_history());
         }
         Ok(())
     }
@@ -123,7 +123,7 @@ impl MembershipHistoryPageV2 {
             || (self.page_index != 0
                 && (self.activation_baseline.is_some() || self.known_head.is_some()))
         {
-            return Err(MembershipHistoryV2Error::InvalidPersistedHistory);
+            return Err(MembershipHistoryV2Error::invalid_persisted_history());
         }
         Ok(())
     }
@@ -131,7 +131,7 @@ impl MembershipHistoryPageV2 {
     pub(super) fn encoded_frame_size(&self) -> Result<usize, MembershipHistoryV2Error> {
         postcard::to_stdvec(self)
             .map(|page| page.len() + MEMBERSHIP_HISTORY_PAGE_FRAME_OVERHEAD)
-            .map_err(|_| MembershipHistoryV2Error::InvalidPersistedHistory)
+            .map_err(MembershipHistoryV2Error::invalid_persisted_history_from)
     }
 
     pub fn transfer_id(&self) -> [u8; 32] {

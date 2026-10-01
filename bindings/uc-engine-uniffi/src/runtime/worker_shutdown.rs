@@ -2,6 +2,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use tokio::task::JoinHandle;
+use uc_engine::observability::uc_warn;
 use uc_engine::EngineError;
 
 use super::EventQueue;
@@ -20,8 +21,16 @@ pub(super) async fn finish_shutdown(
     let forwarded = forwarder.await;
     events.close();
     result?;
-    // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
-    forwarded.map_err(|_| BindingError::RuntimeUnavailable)
+    // discarded-source[business-outcome]: the failure becomes a business outcome and is recorded once here with a fixed classification
+    forwarded.map_err(|_| {
+        // 关闭已成功，此时转发任务仍异常退出只可能是 panic；宿主只收到稳定错误码，原因在此留下记录。
+        uc_warn!(
+            operation = "engine_shutdown",
+            error_kind = "event_forwarder_join_failed",
+            "mobile operation failed"
+        );
+        BindingError::RuntimeUnavailable
+    })
 }
 
 #[cfg(test)]
@@ -114,5 +123,24 @@ mod tests {
             events.next(Duration::ZERO),
             Some(BindingEvent::RefreshRequired { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn a_panicked_forwarder_after_successful_shutdown_is_recorded() {
+        let recorder = crate::runtime::event_recorder::EventRecorder::default();
+        let dispatch = tracing::Dispatch::new(recorder.clone());
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+        let events = Arc::new(EventQueue::new(1));
+        let forwarder = tokio::spawn(async { panic!("forwarder boom") });
+
+        let result = finish_shutdown(async { Ok(()) }, forwarder, events).await;
+
+        assert_eq!(result, Err(BindingError::RuntimeUnavailable));
+        let lines = recorder.lines().join("\n");
+        assert!(
+            lines.contains("error_kind=event_forwarder_join_failed"),
+            "{lines}"
+        );
+        assert!(!lines.contains("boom"), "{lines}");
     }
 }

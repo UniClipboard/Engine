@@ -5,6 +5,7 @@ use crate::observability::schedule_flush_after_success;
 use napi::bindgen_prelude::Buffer;
 use napi::Status;
 use napi_derive::napi;
+use uc_engine::observability::uc_warn;
 use uc_engine::{
     CancelJoinSpaceInput, ChangeEncryptionPassphraseInput, ChooseDeviceGroupInput,
     ClipboardRestoreMode, ClipboardRestoreOutcome, CreateSpaceInput, Engine, EngineConfig,
@@ -224,8 +225,7 @@ impl OhEngine {
             .map_err(engine_error)?
         {
             OperationResult::DeviceGroupChoices(summary) => {
-                // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
-                serde_json::to_string(&summary).map_err(|_| unexpected_result())
+                summary_json(serde_json::to_string(&summary))
             }
             _ => Err(unexpected_result()),
         }
@@ -240,7 +240,7 @@ impl OhEngine {
         confirm_local_removal: bool,
     ) -> napi::Result<String> {
         let expected_revision = u64::try_from(expected_revision)
-            // TryFromIntError：目标分类完整表达数值范围不符。
+            // discarded-source[int-conversion]: `core::num::TryFromIntError`: the target classification already expresses the range or length mismatch
             .map_err(|_| napi::Error::new(Status::InvalidArg, "invalid revision"))?;
         match self
             .engine
@@ -254,8 +254,7 @@ impl OhEngine {
             .map_err(engine_error)?
         {
             OperationResult::DeviceGroupChosen(result) => {
-                // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
-                serde_json::to_string(&result).map_err(|_| unexpected_result())
+                summary_json(serde_json::to_string(&result))
             }
             _ => Err(unexpected_result()),
         }
@@ -848,12 +847,12 @@ fn send_report(report: SendReportSummary) -> napi::Result<OhSendReport> {
 }
 
 fn count(value: usize) -> napi::Result<u32> {
-    // TryFromIntError：目标分类完整表达数值范围不符。
+    // discarded-source[int-conversion]: `core::num::TryFromIntError`: the target classification already expresses the range or length mismatch
     u32::try_from(value).map_err(|_| unexpected_result())
 }
 
 fn count_u64(value: u64) -> napi::Result<u32> {
-    // TryFromIntError：目标分类完整表达数值范围不符。
+    // discarded-source[int-conversion]: `core::num::TryFromIntError`: the target classification already expresses the range or length mismatch
     u32::try_from(value).map_err(|_| unexpected_result())
 }
 
@@ -961,6 +960,19 @@ fn map_event_error(error: EngineError, mapped: &mut OhEngineEvent) {
     mapped.error_code = Some(error.code());
     mapped.error_category = Some(error.category().to_string());
     mapped.retryable = Some(error.is_retryable());
+}
+
+/// 结果摘要序列化为 JSON 的失败点；只记录固定分类，JS 侧收到稳定错误码。
+fn summary_json(serialized: serde_json::Result<String>) -> napi::Result<String> {
+    // discarded-source[business-outcome]: the failure becomes a business outcome and is recorded once here with a fixed classification
+    serialized.map_err(|_| {
+        uc_warn!(
+            operation = "summary_serialize",
+            error_kind = "unexpected_result",
+            "engine operation failed"
+        );
+        unexpected_result()
+    })
 }
 
 fn unexpected_result() -> napi::Error {

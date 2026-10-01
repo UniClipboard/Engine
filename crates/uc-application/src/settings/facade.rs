@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use tracing::instrument;
 
+use uc_core::error_class::ErrorClass;
 use uc_core::ports::SettingsPort;
 
 use crate::facade::settings::relay_configuration::{
@@ -15,7 +16,7 @@ use crate::facade::settings::{
     RelayCredentialEdit, RelayCredentials, RelayCredentialsError, RelayProbeCredential,
 };
 use crate::settings::models::{SettingsPatch, SettingsView};
-use uc_observability_contract::{uc_debug, uc_info};
+use uc_observability_contract::{error_source::io_error_kind, uc_debug, uc_info, uc_warn};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SettingsFacadeError {
@@ -52,6 +53,29 @@ pub enum SettingsFacadeError {
     RelayCredentialStorage,
     #[error("stored relay credential is corrupt")]
     RelayCredentialCorrupt,
+}
+
+impl ErrorClass for SettingsFacadeError {
+    fn class(&self) -> &'static str {
+        match self {
+            Self::Load(_) => "load",
+            Self::Save(_) => "save",
+            Self::Invalid(_) => "invalid",
+            Self::RelayProbeUnavailable => "relay_probe_unavailable",
+            Self::RelayProbeInvalidUrl(_) => "relay_probe_invalid_url",
+            Self::RelayProbeDns(_) => "relay_probe_dns",
+            Self::RelayProbeTls(_) => "relay_probe_tls",
+            Self::RelayProbeHandshake(_) => "relay_probe_handshake",
+            Self::RelayProbeTimeout => "relay_probe_timeout",
+            Self::RelayProbeOther(_) => "relay_probe_other",
+            Self::RelayCredentialsUnavailable => "relay_credentials_unavailable",
+            Self::RelayCredentialInvalidUrl => "relay_credential_invalid_url",
+            Self::RelayCredentialInvalidToken => "relay_credential_invalid_token",
+            Self::RelayCredentialInvalidTarget => "relay_credential_invalid_target",
+            Self::RelayCredentialStorage => "relay_credential_storage",
+            Self::RelayCredentialCorrupt => "relay_credential_corrupt",
+        }
+    }
 }
 
 /// 应用层暴露的中继探测结果视图。沿用核心层的字段语义,但与 core 类型解耦,
@@ -212,8 +236,24 @@ impl SettingsFacade {
         Ok(report.into())
     }
 
+    /// 失败原样返回，同时由本负责人记录一次固定分类（公开契约边界会丢弃来源）。
     #[instrument(skip_all)]
     pub async fn get(&self) -> Result<SettingsView, SettingsFacadeError> {
+        let result = self.load_view().await;
+        if let Err(error) = &result {
+            uc_warn!(
+                operation = "get_settings",
+                outcome = "failed",
+                error_kind = "settings_get",
+                error_class = error.class(),
+                io_error_kind = io_error_kind(error),
+                "settings read failed"
+            );
+        }
+        result
+    }
+
+    async fn load_view(&self) -> Result<SettingsView, SettingsFacadeError> {
         self.relay_configuration.recover().await?;
         self.settings
             .load()
@@ -405,6 +445,53 @@ mod tests {
             *self.settings.lock().unwrap() = settings.clone();
             Ok(())
         }
+    }
+
+    struct FailingLoadSettings;
+
+    #[async_trait]
+    impl SettingsPort for FailingLoadSettings {
+        async fn load(&self) -> anyhow::Result<Settings> {
+            Err(anyhow::Error::new(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "SECRET_SETTINGS_PATH",
+            ))
+            .context("read settings file"))
+        }
+
+        async fn save(&self, _settings: &Settings) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_settings_read_records_only_fixed_classification() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let facade = SettingsFacade::new(Arc::new(FailingLoadSettings));
+
+        let error = facade.get().await.unwrap_err();
+
+        assert!(matches!(error, SettingsFacadeError::Load(_)));
+        let output = logs.output();
+        assert_eq!(logs.count("settings read failed"), 1, "{output}");
+        assert!(output.contains("error_kind=\"settings_get\""), "{output}");
+        assert!(output.contains("error_class=\"load\""), "{output}");
+        assert!(
+            output.contains("io_error_kind=PermissionDenied"),
+            "{output}"
+        );
+        assert!(!output.contains("SECRET_SETTINGS_PATH"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn a_successful_settings_read_writes_no_failure_record() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+
+        facade_with(Settings::default()).get().await.unwrap();
+
+        assert_eq!(logs.count("settings read failed"), 0);
     }
 
     fn facade_with(settings: Settings) -> SettingsFacade {

@@ -35,7 +35,24 @@ Application 对依赖、存储、网络、系统或密码能力失败进行稳�
 
 ### 允许丢弃来源的情形
 
-以下来源不含可用诊断信息，或不能作为 source 保存，可以使用 `map_err(|_| ..)`，但必须在同一行或前一行用中文注释写明理由：
+以下来源不含可用诊断信息，或不能作为 source 保存，可以使用 `map_err(|_| ..)`。每一处都必须在同一行或紧邻上方的注释里写英文标签
+`discarded-source[category]: reason`，category 只能取下列固定标签，清单之外的理由不被接受：
+
+| 标签 | 对应情形 |
+| --- | --- |
+| `lock-poisoned` | `PoisonError<Guard>` |
+| `int-conversion` | `TryFromIntError`、`TryFromSliceError` |
+| `timeout` | `tokio::time::error::Elapsed` |
+| `channel` | `SendError<T>`、`TrySendError<T>`、`RecvError` 等只表示对端已退出或携带负载的通道错误 |
+| `no-information` | 错误类型为 `()`、panic 载荷、只回显原值的错误、未启用 `std` 而不实现 `Error` 的错误等 |
+| `input-validation` | 宿主或用户输入的纯格式校验 |
+| `core-pure-validation` | `uc-core` 内部纯校验结果改分类，下层同样是纯校验 |
+| `observability-init` | 观测运行时自身的初始化失败 |
+| `business-outcome` | 失败落为业务结果、不向上传递，吞错处已按固定分类记录一次 |
+| `contract-boundary` | 公开契约边界映射，且负责人已有完成记录 |
+| `in-memory-encoding` | 对内存中已校验数据的 postcard 编码，失败只可能是序列化实现缺陷，错误值只含固定种类 |
+
+各情形的细则：
 
 - 锁中毒 `PoisonError<Guard>`：持有 guard，不能跨线程保存；
 - `TryFromIntError`、`TryFromSliceError`：目标分类已完整表达长度或范围不符；
@@ -59,9 +76,11 @@ Application 对依赖、存储、网络、系统或密码能力失败进行稳�
 
 读取持久数据、对端输入或外部系统时，即使只是解析失败，也必须保留来源。
 
-`scripts/architecture/check-rust-style.mjs` 对新增的非测试代码行执行上表检查：拒绝前三种写法，以及同一行和前一行都没有中文注释的
-`map_err(|_| ..)`。检查基于文本规则，错误变量按 `e`、`err`、`error`、`source`、`cause` 及 `*_err`、`*_error` 命名识别；
-经其他变量名转手的写法仍需审查发现。
+`scripts/architecture/check-rust-style.mjs` 对新增的非测试代码行执行上表检查，拒绝前三种写法。`map_err(|_| ..)` 不只检查新增行，
+而是**全量扫描**所有非测试代码（`#[cfg(test)]` 模块与函数、`tests/` 目录除外）：没有 `discarded-source[category]` 标签、或类别不在上表清单内的一律失败，
+存量代码没有豁免；`node scripts/architecture/check-rust-style.mjs --list-discarded` 列出全部站点与类别。标签必须与真实错误类型相符，
+是否相符由评审判断，脚本只保证标签存在且类别受控。其余规则基于文本，错误变量按 `e`、`err`、`error`、`source`、`cause` 及
+`*_err`、`*_error` 命名识别；经其他变量名转手的写法仍需审查发现。`.ok()`、`let _ =` 等其他丢弃形式不在本检查范围内。
 现有代码的逐项清理见[错误来源保留执行计划](../exec-plans/completed/2026-09-24-error-source-preservation.md)。
 
 ## 安全上下文

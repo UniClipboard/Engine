@@ -193,7 +193,7 @@ impl TelemetryRuntime {
         let client = reqwest::blocking::Client::builder()
             .timeout(config.timeout())
             .build()
-            // 此时日志通道尚未建立；只保留固定阶段分类，由安装完成后的 health 事件与 `ObservabilityHealth` 报告，不携带底层错误正文。
+            // discarded-source[observability-init]: `reqwest::Error`: setup failure only degrades to a fixed status and the log channel is not built yet
             .map_err(|_| RemoteSetupFailure::HttpClient)?;
         let span_exporter = opentelemetry_otlp::SpanExporter::builder()
             .with_http()
@@ -203,7 +203,7 @@ impl TelemetryRuntime {
             .with_protocol(Protocol::HttpBinary)
             .with_headers(headers.clone())
             .build()
-            // 此时日志通道尚未建立；只保留固定阶段分类，由安装完成后的 health 事件与 `ObservabilityHealth` 报告，不携带底层错误正文。
+            // discarded-source[observability-init]: `opentelemetry_otlp::ExporterBuildError`: setup failure only degrades to a fixed status and the log channel is not built yet
             .map_err(|_| RemoteSetupFailure::TraceExporter)?;
         let log_exporter = opentelemetry_otlp::LogExporter::builder()
             .with_http()
@@ -213,7 +213,7 @@ impl TelemetryRuntime {
             .with_protocol(Protocol::HttpBinary)
             .with_headers(headers)
             .build()
-            // 此时日志通道尚未建立；只保留固定阶段分类，由安装完成后的 health 事件与 `ObservabilityHealth` 报告，不携带底层错误正文。
+            // discarded-source[observability-init]: `opentelemetry_otlp::ExporterBuildError`: setup failure only degrades to a fixed status and the log channel is not built yet
             .map_err(|_| RemoteSetupFailure::LogExporter)?;
         let health = RemoteHealthCounters::default();
         let submission = RemoteSubmissionControl::new(health.clone());

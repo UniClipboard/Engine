@@ -36,7 +36,7 @@ pub(crate) async fn execute_query_peer_connections(
 pub(crate) async fn execute_refresh_peer_connections(
     facade: &AppFacade,
 ) -> Result<OperationResult, EngineError> {
-    // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+    // discarded-source[contract-boundary]: the public error carries a stable code only, the owner records the failure classification
     let report = facade.refresh_peer_reachability().await.map_err(|_| {
         EngineError::new(
             REFRESH_PEER_CONNECTIONS_FAILED_CODE,

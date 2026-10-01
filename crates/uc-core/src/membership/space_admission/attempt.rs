@@ -342,7 +342,7 @@ impl AdmissionMemberBindingV2 {
 fn copy_array<const N: usize>(bytes: &[u8]) -> Result<[u8; N], AdmissionAttemptContractError> {
     bytes
         .try_into()
-        // TryFromSliceError：切片范围已固定，目标分类完整表达长度不符。
+        // discarded-source[int-conversion]: `core::array::TryFromSliceError`: the target classification already expresses the range or length mismatch
         .map_err(|_| AdmissionAttemptContractError::InvalidEncoding)
 }
 

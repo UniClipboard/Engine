@@ -142,12 +142,12 @@ impl AdmissionContentKeyCatalogV1 {
 
     pub fn encode(&self) -> Result<Vec<u8>, MembershipHistoryV2Error> {
         self.validate()?;
-        postcard::to_stdvec(self).map_err(|_| MembershipHistoryV2Error::InvalidPersistedHistory)
+        postcard::to_stdvec(self).map_err(MembershipHistoryV2Error::invalid_persisted_history_from)
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, MembershipHistoryV2Error> {
         let catalog: Self = postcard::from_bytes(bytes)
-            .map_err(|_| MembershipHistoryV2Error::InvalidPersistedHistory)?;
+            .map_err(MembershipHistoryV2Error::invalid_persisted_history_from)?;
         catalog.validate()?;
         Ok(catalog)
     }

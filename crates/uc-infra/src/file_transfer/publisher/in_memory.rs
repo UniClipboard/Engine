@@ -18,7 +18,7 @@ impl InMemoryEventPublisher {
         let published = self
             .published
             .read()
-            // 锁中毒：PoisonError 持有 guard，不能作为来源保存。
+            // discarded-source[lock-poisoned]: `std::sync::PoisonError<Guard>`: the poison error holds the guard and cannot be stored across threads
             .map_err(|_| anyhow!("in-memory file transfer publisher read lock poisoned"))?;
 
         Ok(published.clone())
@@ -31,7 +31,7 @@ impl FileTransferEventPublisherPort for InMemoryEventPublisher {
         let mut published = self
             .published
             .write()
-            // 锁中毒：PoisonError 持有 guard，不能作为来源保存。
+            // discarded-source[lock-poisoned]: `std::sync::PoisonError<Guard>`: the poison error holds the guard and cannot be stored across threads
             .map_err(|_| anyhow!("in-memory file transfer publisher write lock poisoned"))?;
 
         published.push(event);

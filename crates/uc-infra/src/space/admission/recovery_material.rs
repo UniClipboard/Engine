@@ -115,7 +115,7 @@ fn derive_key(
     let mut key = Zeroizing::new([0u8; 32]);
     Hkdf::<Sha256>::new(Some(&salt), shared)
         .expand(RECOVERY_KEY_INFO, key.as_mut())
-        // hkdf::InvalidLength 未实现 Error，且只表示输出长度超限（这里长度是常量）。
+        // discarded-source[no-information]: the error value carries no usable diagnostic information
         .map_err(|_| RecoveryMaterialError::key_derivation())?;
     Ok(key)
 }

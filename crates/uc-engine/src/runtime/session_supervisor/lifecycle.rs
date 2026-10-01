@@ -72,7 +72,7 @@ impl RuntimeLifecyclePort for SessionWork {
 
 async fn join_owned(task: JoinHandle<anyhow::Result<()>>) -> anyhow::Result<()> {
     task.await
-        // 公开契约边界：只产出稳定错误码；任务异常退出由本处的任务诊断记录。
+        // discarded-source[contract-boundary]: `tokio::task::JoinError`: the public error carries a stable code only, the owner records the failure classification
         .map_err(|_| {
             record_task_join_failure(DiagnosticTaskKind::SessionSuspend);
             EngineError::new(1108, EngineErrorCategory::Internal, true)

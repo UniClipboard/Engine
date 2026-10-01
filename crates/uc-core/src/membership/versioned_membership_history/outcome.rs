@@ -23,7 +23,7 @@ pub enum MembershipDecisionStoreOutcome {
     AlreadyKnown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MembershipHistoryV2Error {
     UpgradeRequired,
     InvalidLineage,
@@ -47,9 +47,24 @@ pub enum MembershipHistoryV2Error {
     UnknownRemoval,
     InvalidDecision,
     DecisionConflict,
-    InvalidPersistedHistory,
+    /// 纯结构校验失败时 `source` 为空；postcard 编解码失败时保留为来源。
+    InvalidPersistedHistory {
+        source: Option<postcard::Error>,
+    },
     IncompleteHistoryProof,
     HistoryPositionChanged,
+}
+
+impl MembershipHistoryV2Error {
+    pub fn invalid_persisted_history() -> Self {
+        Self::InvalidPersistedHistory { source: None }
+    }
+
+    pub fn invalid_persisted_history_from(source: postcard::Error) -> Self {
+        Self::InvalidPersistedHistory {
+            source: Some(source),
+        }
+    }
 }
 
 impl ErrorClass for MembershipHistoryV2Error {
@@ -76,7 +91,7 @@ impl ErrorClass for MembershipHistoryV2Error {
             Self::UnknownRemoval => "unknown_removal",
             Self::InvalidDecision => "invalid_decision",
             Self::DecisionConflict => "decision_conflict",
-            Self::InvalidPersistedHistory => "invalid_persisted_history",
+            Self::InvalidPersistedHistory { .. } => "invalid_persisted_history",
             Self::IncompleteHistoryProof => "incomplete_history_proof",
             Self::HistoryPositionChanged => "history_position_changed",
             Self::MissingMembershipEvent(_) => "missing_membership_event",
@@ -119,11 +134,20 @@ impl fmt::Display for MembershipHistoryV2Error {
             Self::UnknownRemoval => "membership decision references an unknown removal",
             Self::InvalidDecision => "membership decision is invalid at the removal parent",
             Self::DecisionConflict => "membership decision conflicts with retained history",
-            Self::InvalidPersistedHistory => "persisted membership history is invalid",
+            Self::InvalidPersistedHistory { .. } => "persisted membership history is invalid",
             Self::IncompleteHistoryProof => "complete membership history evidence is required",
             Self::HistoryPositionChanged => "membership history changed during transfer",
         })
     }
 }
 
-impl std::error::Error for MembershipHistoryV2Error {}
+impl std::error::Error for MembershipHistoryV2Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidPersistedHistory {
+                source: Some(source),
+            } => Some(source),
+            _ => None,
+        }
+    }
+}

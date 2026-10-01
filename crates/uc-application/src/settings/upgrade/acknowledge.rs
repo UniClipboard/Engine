@@ -7,8 +7,11 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
+use uc_core::error_class::ErrorClass;
 use uc_core::ports::{AppVersionStateError, AppVersionStatePort};
-use uc_observability_contract::{log_fields::log_vocab, uc_info};
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_vocab, uc_info, uc_warn,
+};
 
 #[derive(Debug, Error)]
 pub(crate) enum AcknowledgeError {
@@ -17,6 +20,15 @@ pub(crate) enum AcknowledgeError {
 
     #[error("write app version cursor failed: {0}")]
     WriteCursor(#[from] AppVersionStateError),
+}
+
+impl ErrorClass for AcknowledgeError {
+    fn class(&self) -> &'static str {
+        match self {
+            Self::CurrentVersionMalformed(_) => "current_version_malformed",
+            Self::WriteCursor(_) => "write_cursor",
+        }
+    }
 }
 
 pub(crate) struct AcknowledgeUseCase {
@@ -30,8 +42,26 @@ impl AcknowledgeUseCase {
 
     /// 把游标推进到 `current_version_str`。先用 semver 校验合法性，
     /// 避免把无效字符串写回磁盘污染游标。
+    ///
+    /// 失败原样返回，同时由本负责人记录一次固定分类（公开契约边界会丢弃来源）。
     #[tracing::instrument(name = "usecase.acknowledge_settings_upgrade.execute", skip_all)]
     pub(crate) async fn execute(&self, current_version_str: &str) -> Result<(), AcknowledgeError> {
+        let result = self.acknowledge(current_version_str).await;
+        if let Err(error) = &result {
+            uc_warn!(
+                target: "upgrade",
+                operation = "acknowledge_upgrade",
+                outcome = "failed",
+                error_kind = "upgrade_acknowledge",
+                error_class = error.class(),
+                io_error_kind = io_error_kind(error),
+                "upgrade acknowledgement failed"
+            );
+        }
+        result
+    }
+
+    async fn acknowledge(&self, current_version_str: &str) -> Result<(), AcknowledgeError> {
         let _validated = semver::Version::parse(current_version_str)
             .map_err(AcknowledgeError::CurrentVersionMalformed)?;
 
@@ -76,7 +106,10 @@ mod tests {
         }
         async fn write(&self, version: &str) -> Result<(), AppVersionStateError> {
             if self.write_should_fail {
-                return Err(AppVersionStateError::Write("simulated".into()));
+                return Err(AppVersionStateError::Write(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "SECRET_CURSOR_PATH",
+                ))));
             }
             *self.value.lock().unwrap() = Some(version.to_string());
             Ok(())
@@ -103,5 +136,50 @@ mod tests {
         let uc = AcknowledgeUseCase::new(FakeVersionState::failing());
         let err = uc.execute("1.0.0").await.unwrap_err();
         assert!(matches!(err, AcknowledgeError::WriteCursor(_)));
+    }
+
+    #[tokio::test]
+    async fn a_failed_cursor_write_records_only_fixed_classification() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let uc = AcknowledgeUseCase::new(FakeVersionState::failing());
+
+        uc.execute("1.0.0").await.unwrap_err();
+
+        let output = logs.output();
+        assert_eq!(logs.count("upgrade acknowledgement failed"), 1, "{output}");
+        assert!(
+            output.contains("error_kind=\"upgrade_acknowledge\""),
+            "{output}"
+        );
+        assert!(output.contains("error_class=\"write_cursor\""), "{output}");
+        assert!(
+            output.contains("io_error_kind=PermissionDenied"),
+            "{output}"
+        );
+        assert!(!output.contains("SECRET_CURSOR_PATH"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn a_malformed_version_records_its_class_and_a_success_records_no_failure() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+
+        AcknowledgeUseCase::new(FakeVersionState::new())
+            .execute("1.0.0")
+            .await
+            .unwrap();
+        assert_eq!(logs.count("upgrade acknowledgement failed"), 0);
+
+        AcknowledgeUseCase::new(FakeVersionState::new())
+            .execute("not-semver")
+            .await
+            .unwrap_err();
+        let output = logs.output();
+        assert_eq!(logs.count("upgrade acknowledgement failed"), 1, "{output}");
+        assert!(
+            output.contains("error_class=\"current_version_malformed\""),
+            "{output}"
+        );
     }
 }

@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
+use uc_core::error_class::ErrorClass;
 use uc_core::ports::{AppVersionStateError, AppVersionStatePort};
 use uc_observability_contract::{
     error_source::io_error_kind, log_fields::log_vocab, uc_debug, uc_warn,
@@ -42,6 +43,16 @@ pub(crate) enum DetectUpgradeError {
     ReadCurrentSpace(#[source] anyhow::Error),
 }
 
+impl ErrorClass for DetectUpgradeError {
+    fn class(&self) -> &'static str {
+        match self {
+            Self::CurrentVersionMalformed(_) => "current_version_malformed",
+            Self::ReadCursor(_) => "read_cursor",
+            Self::ReadCurrentSpace(_) => "read_current_space",
+        }
+    }
+}
+
 pub(crate) struct DetectUpgradeUseCase {
     app_version_state: Arc<dyn AppVersionStatePort>,
     current_space_identity: Arc<dyn CurrentSpaceIdentityPort>,
@@ -61,10 +72,28 @@ impl DetectUpgradeUseCase {
     /// 执行一次性判定。`current_version_str` 由调用方传入
     /// （通常 = `env!("CARGO_PKG_VERSION")`），保持 use case 不依赖
     /// 构建期常量、利于测试。
+    ///
+    /// 失败原样返回，同时由本负责人记录一次固定分类（公开契约边界会丢弃来源）。
     pub(crate) async fn execute(
         &self,
         current_version_str: &str,
     ) -> Result<UpgradeStatus, DetectUpgradeError> {
+        let result = self.detect(current_version_str).await;
+        if let Err(error) = &result {
+            uc_warn!(
+                target: "upgrade",
+                operation = "detect_upgrade",
+                outcome = "failed",
+                error_kind = "upgrade_detect",
+                error_class = error.class(),
+                io_error_kind = io_error_kind(error),
+                "upgrade detection failed"
+            );
+        }
+        result
+    }
+
+    async fn detect(&self, current_version_str: &str) -> Result<UpgradeStatus, DetectUpgradeError> {
         let current = semver::Version::parse(current_version_str)
             .map_err(DetectUpgradeError::CurrentVersionMalformed)?;
 
@@ -184,6 +213,72 @@ mod tests {
                 .has_completed
                 .then(|| uc_core::ids::SpaceId::from("space")))
         }
+    }
+
+    struct FailingReadVersionState;
+    #[async_trait]
+    impl AppVersionStatePort for FailingReadVersionState {
+        async fn read(&self) -> Result<Option<String>, AppVersionStateError> {
+            Err(AppVersionStateError::Read(Box::new(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "SECRET_CURSOR_PATH",
+            ))))
+        }
+        async fn write(&self, _version: &str) -> Result<(), AppVersionStateError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_cursor_read_records_only_fixed_classification() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let uc = DetectUpgradeUseCase::new(
+            Arc::new(FailingReadVersionState),
+            Arc::new(FakeCurrentSpace {
+                has_completed: true,
+            }),
+        );
+
+        let error = uc.execute("1.0.0").await.unwrap_err();
+
+        assert!(matches!(error, DetectUpgradeError::ReadCursor(_)));
+        let output = logs.output();
+        assert_eq!(logs.count("upgrade detection failed"), 1, "{output}");
+        assert!(output.contains("error_kind=\"upgrade_detect\""), "{output}");
+        assert!(output.contains("error_class=\"read_cursor\""), "{output}");
+        assert!(
+            output.contains("io_error_kind=PermissionDenied"),
+            "{output}"
+        );
+        assert!(!output.contains("SECRET_CURSOR_PATH"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn a_malformed_current_version_records_its_class() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let uc = build(None, false);
+
+        uc.execute("not-a-version").await.unwrap_err();
+
+        let output = logs.output();
+        assert_eq!(logs.count("upgrade detection failed"), 1, "{output}");
+        assert!(
+            output.contains("error_class=\"current_version_malformed\""),
+            "{output}"
+        );
+        assert!(!output.contains("io_error_kind"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn a_successful_detection_writes_no_failure_record() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+
+        build(Some("1.0.0"), true).execute("1.0.0").await.unwrap();
+
+        assert_eq!(logs.count("upgrade detection failed"), 0);
     }
 
     fn build(cursor: Option<&str>, has_completed: bool) -> DetectUpgradeUseCase {

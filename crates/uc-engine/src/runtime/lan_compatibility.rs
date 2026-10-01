@@ -44,7 +44,7 @@ impl ProductionRuntime {
                     .await?
                     .list_lan_interfaces()
                     .await
-                    // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+                    // discarded-source[contract-boundary]: the public error carries a stable code only, the owner records the failure classification
                     .map_err(|_| EngineError::new(1450, EngineErrorCategory::Unavailable, true))?;
                 Ok(OperationResult::MobileLanInterfaces(
                     interfaces

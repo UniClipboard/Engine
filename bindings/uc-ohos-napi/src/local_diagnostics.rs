@@ -2,6 +2,7 @@
 use napi_derive::napi;
 use std::time::Duration;
 use uc_engine::observability as engine;
+use uc_engine::observability::uc_warn;
 
 use crate::observability;
 
@@ -273,8 +274,13 @@ pub async fn prepare_local_diagnostic_export(
             .map_err(failure)
     })
     .await
-    // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+    // discarded-source[no-information]: the error value carries no usable diagnostic information
     .map_err(|_| {
+        uc_warn!(
+            operation = "local_diagnostic_export_prepare",
+            error_kind = "blocking_task_join_failed",
+            "local diagnostic operation failed"
+        );
         napi::Error::new(
             napi::Status::GenericFailure,
             "local diagnostic worker failed",

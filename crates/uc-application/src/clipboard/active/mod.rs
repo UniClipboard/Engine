@@ -7,6 +7,7 @@
 //! single lifecycle seam for worker startup, late restore-source attachment,
 //! and coordinated shutdown.
 
+mod current;
 mod lifecycle;
 mod reconcile;
 
@@ -295,7 +296,7 @@ impl ActiveClipboardFacade {
         &self,
     ) -> Result<Option<ActiveClipboardState>, uc_core::ports::clipboard::ActiveClipboardRegisterError>
     {
-        self.load_register.load().await
+        current::load_current(self.load_register.as_ref()).await
     }
 
     /// Announce a locally-originated activation of this device's clipboard

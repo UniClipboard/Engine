@@ -103,23 +103,27 @@ impl ProfileUpgradeBackupPort for ProfileUpgradeBackupStore {
         &self,
     ) -> Result<Vec<ProfileUpgradeBackupEntry>, ProfileUpgradeBackupError> {
         let store = self.clone();
-        tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             let _lease = store.lease()?;
             store.list_locked()
         })
         .await
-        .map_err(backup_error)?
+        .map_err(backup_error)
+        .and_then(|listed| listed);
+        Self::record_result("list_backups", result)
     }
 
     async fn delete_backup(&self, id: &str) -> Result<(), ProfileUpgradeBackupError> {
         let store = self.clone();
         let id = id.to_owned();
-        tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             let _lease = store.lease()?;
             store.delete_locked(&id)
         })
         .await
-        .map_err(backup_error)?
+        .map_err(backup_error)
+        .and_then(|deleted| deleted);
+        Self::record_result("delete_backup", result)
     }
 
     fn read_source(&self) -> Result<ProfileUpgradeSource, ProfileUpgradeBackupError> {

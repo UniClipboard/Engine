@@ -679,3 +679,37 @@ async fn count_and_daily_counts_fail_closed_when_the_session_is_locked() {
         Err(uc_core::search::SearchError::SessionLocked)
     ));
 }
+
+#[tokio::test]
+async fn a_malformed_protection_group_reference_is_recorded_and_blocks_search() {
+    let logs = uc_testkit::log_capture::CapturedLogs::default();
+    let _guard = logs.install();
+    let fixture = v3_fixture().await;
+    index_tagged(&fixture, "entry-a", 1, Vec::new(), &["alpha"]).await;
+    let pool = init_db_pool(
+        fixture
+            ._directory
+            .path()
+            .join("search.sqlite")
+            .to_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let mut conn = pool.get().unwrap();
+    diesel::update(search_document::table.filter(search_document::profile_id.eq(PROFILE_ID)))
+        .set(search_document::protection_group_ref.eq(Some(vec![0u8; 5])))
+        .execute(&mut conn)
+        .unwrap();
+    drop(conn);
+
+    let mut conn = pool.get().unwrap();
+    let error = SqliteSearchIndex::load_v3_group_refs(&mut conn, PROFILE_ID).unwrap_err();
+
+    assert!(matches!(error, uc_core::search::SearchError::IndexNotReady));
+    let output = logs.output();
+    assert_eq!(
+        logs.count("error_kind=\"search_protection_group_ref_invalid\""),
+        1,
+        "{output}"
+    );
+}
