@@ -1,6 +1,3 @@
-use super::super::super::space_admission_wire::{
-    read_envelope, write_envelope, AuthenticatedEnvelopeV1,
-};
 use super::super::diagnostics::wire_failure;
 use super::super::diagnostics::{handler_failure, server_completion};
 use super::super::exchange::EstablishedExchange;
@@ -13,6 +10,7 @@ use uc_observability_contract::diagnostics::connectivity::{
     decode_local_record, AdmissionExchangeFailure, AdmissionExchangeObservation,
     AdmissionExchangeSide, AdmissionExchangeStep,
 };
+use uc_sync_protocol::space_admission::{read_envelope, write_envelope, AuthenticatedEnvelopeV1};
 
 #[test]
 fn wire_diagnostics_classify_io_without_destroying_the_source() {

@@ -1,9 +1,9 @@
 use std::time::Duration;
 use uc_application::deps::SpaceAdmissionTransportError;
 
-use super::super::space_admission_wire::WireError;
 use super::credential::SpaceAdmissionChannelCredentialError;
 use super::crypto::ProofError;
+use uc_sync_protocol::space_admission::WireError;
 
 impl From<ProofError> for HandlerError {
     fn from(source: ProofError) -> Self {

@@ -1,7 +1,7 @@
 //! Iroh-backed implementation of [`ClipboardDispatchPort`] (Slice 2 Phase 2).
 //!
 //! Each call opens a fresh iroh bi-stream on [`CLIPBOARD_ALPN`], writes the
-//! framed header + ciphertext per [`crate::network::iroh::clipboard_wire`],
+//! framed header + ciphertext per [`uc_sync_protocol::clipboard`],
 //! reads the peer's single-byte ack, and closes. Concurrent fan-out to
 //! multiple peers is assembled by the application-layer dispatch use case;
 //! this adapter stays single-target.
@@ -48,10 +48,11 @@ use uc_observability_contract::diagnostics::{
 };
 use uc_observability_contract::{error_source::io_error_kind, uc_debug, uc_warn};
 
-use super::clipboard_wire::{self, AckCode, WireEncodeError};
 use super::conn_path::{path_for, OnMissing};
 use super::connect::{connect_with_staggered_retry, StaggeredDialError};
 use super::peer_address_resolver::PeerAddressResolver;
+use super::trace_context::inject_current;
+use uc_sync_protocol::clipboard::{self as clipboard_wire, AckCode, WireEncodeError};
 
 /// ALPN identifier for the Slice 2 clipboard sync protocol. Independent of
 /// the peer_reachability / pairing ALPNs so the Router can multiplex all three
@@ -232,8 +233,13 @@ impl IrohClipboardDispatchAdapter {
 
         // Write the frame + close the send half so the peer's read_exact on
         // the payload length / body reaches a terminal state.
-        let frame_write = match clipboard_wire::write_frame(&mut send, header, &payload.ciphertext)
-            .await
+        let frame_write = match clipboard_wire::write_frame(
+            &mut send,
+            header,
+            inject_current(),
+            &payload.ciphertext,
+        )
+        .await
         {
             Ok(()) => send.finish().map_err(|err| {
                 ClipboardDispatchError::Io(anyhow::Error::from(err).context("send.finish").into())

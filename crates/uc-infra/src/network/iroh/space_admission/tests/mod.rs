@@ -25,15 +25,16 @@ use crate::security::{
     SpaceAdmissionAuth, SpaceAdmissionAuthContext, SpaceAdmissionKe1, SpaceAdmissionKe3,
 };
 
-use super::super::space_admission_wire::LARGE_MESSAGE_LIMIT;
-use super::super::space_admission_wire::{
+use super::super::trace_context::inject_current;
+use super::super::trace_context::set_remote_parent;
+use uc_observability_contract::diagnostics::connectivity::{AuthenticationFailure, ProofFailure};
+use uc_observability_contract::diagnostics::DiagnosticErrorType;
+use uc_sync_protocol::space_admission::LARGE_MESSAGE_LIMIT;
+use uc_sync_protocol::space_admission::{
     read_raw_with_limit, read_typed, write_typed, ContinuationHelloV1, FrameKind, InitialHelloV2,
     OpaqueFinishV1, OpaqueResponseV1, WireError, AUTH_FRAME_LIMIT, IO_DEADLINE,
 };
-use super::super::trace_context::set_remote_parent;
-use super::super::trace_context::{inject_current, WireTraceContext};
-use uc_observability_contract::diagnostics::connectivity::{AuthenticationFailure, ProofFailure};
-use uc_observability_contract::diagnostics::DiagnosticErrorType;
+use uc_sync_protocol::WireTraceContext;
 
 use super::connection::{connect, open_stream};
 use super::crypto::{calculate_mac, peer_id, verify_mac};

@@ -35,6 +35,7 @@ Port 归需要能力的层所有，因此 Infra 既可以实现 Core port，也�
 | `crates/uc-core/` | 与平台无关的领域规则、状态机和值对象 |
 | `crates/uc-application/` | 用户/系统动作的完整流程、持久恢复和能力 port |
 | `crates/uc-infra/` | SQLite、加密、文件、搜索、Iroh 和系统能力实现 |
+| `crates/uc-sync-protocol/` | 传输无关的同步线上格式（帧、版本、上限、编解码与 golden 向量），只依赖 `uc-core`，被 `uc-infra` 使用 |
 | `crates/uc-engine/` | 唯一稳定 Rust 入口、生命周期、运行期与依赖组装 |
 | `bindings/` | iOS、Android、HarmonyOS 的薄语言绑定 |
 | `compatibility/` | 用户显式启用、独立版本与发布的 LAN 兼容线 |

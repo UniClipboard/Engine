@@ -1,10 +1,10 @@
 //! Wire codec for the active-clipboard state protocol.
 //!
 //! This is an independent sibling of the bulk clipboard codec
-//! ([`super::clipboard_wire`]). The active-clipboard protocol carries a
+//! ([`crate::clipboard`]). The active-clipboard protocol carries a
 //! small last-writer-wins (LWW) register observation — "this content is now
 //! the active clipboard" — not the content bytes themselves. It is a clean
-//! sibling on purpose: the bulk codec's [`read_frame`](super::clipboard_wire::read_frame)
+//! sibling on purpose: the bulk codec's [`read_frame`](crate::clipboard::read_frame)
 //! hard-rejects any magic other than its own, so the two frame formats never
 //! share a parser.
 //!
@@ -42,7 +42,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Sentinel byte identifying an active-clipboard state frame at the head of
 /// the stream. Distinct from the bulk clipboard codec
-/// ([`CLIPBOARD_MAGIC`](super::clipboard_wire::CLIPBOARD_MAGIC) = `0xC1`) so a
+/// ([`CLIPBOARD_MAGIC`](crate::clipboard::CLIPBOARD_MAGIC) = `0xC1`) so a
 /// mis-routed connection fails fast instead of drifting into postcard.
 pub const ACTIVE_CLIPBOARD_MAGIC: u8 = 0xC3;
 

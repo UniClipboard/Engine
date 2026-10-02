@@ -7,19 +7,19 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use uc_core::membership::{SpaceAdmissionEnvelopeV1, SpaceAdmissionMessageKind};
 
-use super::trace_context::WireTraceContext;
+use crate::trace_context::WireTraceContext;
 
 const WIRE_MAGIC: [u8; 4] = *b"UCSA";
 const WIRE_VERSION: u8 = 1;
 const HEADER_LEN: usize = 10;
-pub(super) const AUTH_FRAME_LIMIT: usize = 64 * 1024;
-pub(super) const DURABLE_MESSAGE_LIMIT: usize = 256 * 1024;
-pub(super) const LARGE_MESSAGE_LIMIT: usize = 4 * 1024 * 1024;
-pub(super) const IO_DEADLINE: Duration = Duration::from_secs(30);
+pub const AUTH_FRAME_LIMIT: usize = 64 * 1024;
+pub const DURABLE_MESSAGE_LIMIT: usize = 256 * 1024;
+pub const LARGE_MESSAGE_LIMIT: usize = 4 * 1024 * 1024;
+pub const IO_DEADLINE: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub(super) enum FrameKind {
+pub enum FrameKind {
     InitialHello = 1,
     OpaqueResponse = 2,
     OpaqueFinish = 3,
@@ -49,7 +49,7 @@ impl FrameKind {
 }
 
 #[derive(Serialize, Deserialize)]
-pub(super) struct InitialHelloV2 {
+pub struct InitialHelloV2 {
     pub protocol_version: u16,
     pub admission_id: [u8; 32],
     pub invitation_id: [u8; 32],
@@ -60,18 +60,18 @@ pub(super) struct InitialHelloV2 {
 }
 
 #[derive(Serialize, Deserialize)]
-pub(super) struct OpaqueResponseV1 {
+pub struct OpaqueResponseV1 {
     pub sponsor_peer_id: [u8; 32],
     pub ke2: Vec<u8>,
 }
 
 #[derive(Serialize, Deserialize)]
-pub(super) struct OpaqueFinishV1 {
+pub struct OpaqueFinishV1 {
     pub ke3: Vec<u8>,
 }
 
 #[derive(Serialize, Deserialize)]
-pub(super) struct ContinuationHelloV1 {
+pub struct ContinuationHelloV1 {
     pub admission_id: [u8; 32],
     pub local_peer_id: [u8; 32],
     pub remote_peer_id: [u8; 32],
@@ -81,7 +81,7 @@ pub(super) struct ContinuationHelloV1 {
 }
 
 #[derive(Serialize, Deserialize)]
-pub(super) struct AuthenticatedEnvelopeV1 {
+pub struct AuthenticatedEnvelopeV1 {
     pub nonce: [u8; 32],
     pub canonical_envelope: Vec<u8>,
     pub trace_context: Option<WireTraceContext>,
@@ -89,7 +89,7 @@ pub(super) struct AuthenticatedEnvelopeV1 {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(super) enum WireError {
+pub enum WireError {
     #[error("space admission wire I/O failed")]
     Io(#[source] io::Error),
     #[error("space admission wire operation timed out")]
@@ -135,7 +135,7 @@ impl WireError {
     }
 }
 
-pub(super) async fn write_typed<W, T>(
+pub async fn write_typed<W, T>(
     writer: &mut W,
     kind: FrameKind,
     value: &T,
@@ -149,7 +149,7 @@ where
     write_raw(writer, kind, &payload, limit).await
 }
 
-pub(super) async fn read_typed<R, T>(
+pub async fn read_typed<R, T>(
     reader: &mut R,
     expected: FrameKind,
     limit: usize,
@@ -162,7 +162,7 @@ where
     decode_exact(&payload)
 }
 
-pub(super) async fn write_envelope<W: AsyncWrite + Unpin>(
+pub async fn write_envelope<W: AsyncWrite + Unpin>(
     writer: &mut W,
     kind: FrameKind,
     envelope: &AuthenticatedEnvelopeV1,
@@ -172,7 +172,7 @@ pub(super) async fn write_envelope<W: AsyncWrite + Unpin>(
     write_typed(writer, kind, envelope, envelope_limit(domain.kind())).await
 }
 
-pub(super) async fn read_envelope<R: AsyncRead + Unpin>(
+pub async fn read_envelope<R: AsyncRead + Unpin>(
     reader: &mut R,
     kind: FrameKind,
 ) -> Result<(AuthenticatedEnvelopeV1, SpaceAdmissionEnvelopeV1, [u8; 32]), WireError> {
@@ -226,7 +226,7 @@ async fn read_raw<R: AsyncRead + Unpin>(
     Ok(payload)
 }
 
-pub(super) async fn read_raw_with_limit<R: AsyncRead + Unpin>(
+pub async fn read_raw_with_limit<R: AsyncRead + Unpin>(
     reader: &mut R,
     limit: usize,
 ) -> Result<(FrameKind, Vec<u8>), WireError> {

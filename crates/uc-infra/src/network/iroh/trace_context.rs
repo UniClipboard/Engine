@@ -3,22 +3,8 @@ use std::collections::HashMap;
 use opentelemetry::propagation::{Extractor, Injector, TextMapPropagator};
 use opentelemetry::trace::TraceContextExt;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
-use serde::{Deserialize, Serialize};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
-
-const TRACEPARENT_MAX_BYTES: usize = 256;
-
-/// 只在 Iroh 协议内部流转的有界 W3C 上下文。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) struct WireTraceContext {
-    pub(super) traceparent: String,
-}
-
-impl WireTraceContext {
-    pub(super) fn is_bounded(&self) -> bool {
-        !self.traceparent.is_empty() && self.traceparent.len() <= TRACEPARENT_MAX_BYTES
-    }
-}
+use uc_sync_protocol::WireTraceContext;
 
 pub(super) fn inject_current() -> Option<WireTraceContext> {
     let mut carrier = TraceCarrier::default();
@@ -70,6 +56,7 @@ mod tests {
     use opentelemetry::trace::TracerProvider as _;
     use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
     use tracing_subscriber::layer::SubscriberExt;
+    use uc_sync_protocol::TRACEPARENT_MAX_BYTES;
 
     use super::*;
 

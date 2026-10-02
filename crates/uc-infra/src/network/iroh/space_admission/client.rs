@@ -1,8 +1,4 @@
 //! Joiner 负责建立初次或恢复连接，并交付已认证交换。
-use super::super::space_admission_wire::{
-    read_typed, write_typed, ContinuationHelloV1, FrameKind, InitialHelloV2, OpaqueFinishV1,
-    OpaqueResponseV1, AUTH_FRAME_LIMIT,
-};
 use super::connection::{connect, open_stream};
 use super::crypto::{calculate_mac, copy_credential, peer_id, random_nonce};
 use super::diagnostics::record_client_completion;
@@ -27,6 +23,10 @@ use uc_observability_contract::diagnostics::connectivity::complete_admission_con
 use uc_observability_contract::diagnostics::{
     operation_span, DiagnosticDomain, DiagnosticOperation, DiagnosticRole, DiagnosticSpanKind,
     OperationContext,
+};
+use uc_sync_protocol::space_admission::{
+    read_typed, write_typed, ContinuationHelloV1, FrameKind, InitialHelloV2, OpaqueFinishV1,
+    OpaqueResponseV1, AUTH_FRAME_LIMIT,
 };
 
 pub struct IrohSpaceAdmissionTransport {

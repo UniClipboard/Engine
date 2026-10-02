@@ -4,6 +4,7 @@ members = [
   "crates/uc-core",
   "crates/uc-application",
   "crates/uc-infra",
+  "crates/uc-sync-protocol",
   "crates/uc-content-hash",
   "crates/uc-observability-contract",
   "crates/uc-observability-runtime",

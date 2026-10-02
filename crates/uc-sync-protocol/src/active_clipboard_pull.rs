@@ -1,8 +1,8 @@
 //! Wire codec for the active-clipboard pull protocol.
 //!
 //! This is an independent sibling of the bulk clipboard codec
-//! ([`super::clipboard_wire`]) and the active-clipboard state codec
-//! ([`super::wire`]). A pull is a single request → response
+//! ([`crate::clipboard`]) and the active-clipboard state codec
+//! ([`crate::active_clipboard_state`]). A pull is a single request → response
 //! exchange on one bi-stream:
 //!
 //! ```text
@@ -37,9 +37,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Sentinel byte identifying an active-clipboard pull request frame at the
 /// head of the stream. Distinct from the bulk clipboard codec
-/// ([`CLIPBOARD_MAGIC`](super::clipboard_wire::CLIPBOARD_MAGIC) = `0xC1`) and
+/// ([`CLIPBOARD_MAGIC`](crate::clipboard::CLIPBOARD_MAGIC) = `0xC1`) and
 /// the active-clipboard state codec
-/// ([`ACTIVE_CLIPBOARD_MAGIC`](super::wire::ACTIVE_CLIPBOARD_MAGIC) = `0xC3`)
+/// ([`ACTIVE_CLIPBOARD_MAGIC`](crate::active_clipboard_state::ACTIVE_CLIPBOARD_MAGIC) = `0xC3`)
 /// so a mis-routed connection fails fast at the magic check.
 pub const ACTIVE_PULL_MAGIC: u8 = 0xC2;
 

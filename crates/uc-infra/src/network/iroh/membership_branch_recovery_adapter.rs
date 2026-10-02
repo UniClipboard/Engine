@@ -24,10 +24,10 @@ use iroh::{Endpoint, EndpointAddr};
 
 use super::connect_with_staggered_retry;
 use super::inbound_peer::{record_inbound_rejection, PeerIdentityResolver};
-use super::membership_branch_recovery_wire::{
+use super::peer_address_resolver::PeerAddressResolver;
+use uc_sync_protocol::membership_branch_recovery::{
     decode, encode, MembershipBranchRecoveryWireMessage, MAX_RECOVERY_FRAME_SIZE,
 };
-use super::peer_address_resolver::PeerAddressResolver;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -61,7 +61,7 @@ impl IrohMembershipBranchRecoveryChannel {
         let connection = connect_with_staggered_retry(
             Arc::clone(&self.endpoint),
             address,
-            super::membership_branch_recovery_wire::MEMBERSHIP_BRANCH_RECOVERY_ALPN,
+            uc_sync_protocol::membership_branch_recovery::MEMBERSHIP_BRANCH_RECOVERY_ALPN,
             "membership-branch-recovery",
             uc_observability_contract::diagnostics::connectivity::AddressInputSource::Stored,
         )

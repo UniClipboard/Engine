@@ -8,9 +8,7 @@
 pub mod dispatch_adapter;
 pub mod pull_client_adapter;
 pub mod pull_serve_adapter;
-pub mod pull_wire;
 pub mod receiver_adapter;
-pub mod wire;
 
 pub use dispatch_adapter::IrohActiveClipboardDispatchAdapter;
 pub use pull_client_adapter::IrohActiveClipboardPullClientAdapter;

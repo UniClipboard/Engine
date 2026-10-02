@@ -32,7 +32,8 @@ use super::connect_with_staggered_retry;
 use super::inbound_peer::{record_inbound_rejection, InboundPeerRejection, PeerIdentityResolver};
 use super::peer_address_resolver::PeerAddressResolver;
 use super::persistable_addr::{observed_stable_remote_addr, persist_observed_stable_addr};
-use super::trace_context::{inject_current, set_remote_parent, WireTraceContext};
+use super::trace_context::{inject_current, set_remote_parent};
+use uc_sync_protocol::WireTraceContext;
 
 pub const MEMBERSHIP_HISTORY_EXCHANGE_ALPN: &[u8] = b"uniclipboard/membership-history/4";
 

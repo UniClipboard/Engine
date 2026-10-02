@@ -45,7 +45,7 @@ use uc_observability_contract::{
 };
 
 use super::super::inbound_peer::InboundPeerGate;
-use super::pull_wire::{self, PullResponse};
+use uc_sync_protocol::active_clipboard_pull::{self as pull_wire, PullResponse};
 
 /// ALPN identifier for the active-clipboard pull protocol. An independent
 /// sibling of the bulk clipboard / active-clipboard-state ALPNs so the Router
@@ -247,8 +247,8 @@ mod tests {
     use uc_core::membership::{MembershipError, SpaceMember};
     use uc_core::MemberSyncPreferences;
 
-    use super::super::pull_wire::{read_response, write_request, PullResponse};
     use crate::security::Sha256IdentityFingerprintFactory;
+    use uc_sync_protocol::active_clipboard_pull::{read_response, write_request, PullResponse};
 
     // ----- test doubles ------------------------------------------------------
 

@@ -40,6 +40,7 @@ const EXPECTED_PACKAGES = [
   'uc-observability-contract',
   'uc-observability-runtime',
   'uc-ohos-napi',
+  'uc-sync-protocol',
   'uc-testkit',
   'uc-upgrade-matrix',
 ]
@@ -54,7 +55,22 @@ const INTERNAL_PACKAGES = new Set([
   'uc-mobile-proto',
   'uc-observability-contract',
   'uc-observability-runtime',
+  'uc-sync-protocol',
 ])
+
+// uc-sync-protocol 只保存传输无关的线上格式：只能依赖 uc-core 和下列无传输、
+// 无存储、无密钥的通用库，任何新增依赖都必须先更新这里并说明理由。
+const SYNC_PROTOCOL_ALLOWED_DEPENDENCIES = [
+  'anyhow',
+  'bytes',
+  'postcard',
+  'serde',
+  'sha2',
+  'thiserror',
+  'tokio',
+  'uc-core',
+  'uuid',
+]
 
 const BINDING_PACKAGES = ['uc-engine-uniffi', 'uc-ohos-napi']
 const P2P_CONSUMERS = [...BINDING_PACKAGES, 'uc-mobile-probe-core', 'uc-connectivity-host']
@@ -341,6 +357,22 @@ function checkTestkitBoundary(metadata) {
       problems,
       'testkit boundary',
       `uc-testkit must not depend on product packages; found ${productDependencies.join(', ')}`
+    )
+  }
+  return problems
+}
+
+function checkSyncProtocolBoundary(metadata) {
+  const problems = []
+  const unexpected = normalDependencies(packageByName(metadata, 'uc-sync-protocol'))
+    .map(dependency => dependency.name)
+    .filter(name => !SYNC_PROTOCOL_ALLOWED_DEPENDENCIES.includes(name))
+    .sort()
+  if (unexpected.length > 0) {
+    addProblem(
+      problems,
+      'sync protocol boundary',
+      `uc-sync-protocol must stay transport-independent; unexpected dependencies: ${unexpected.join(', ')}`
     )
   }
   return problems
@@ -2242,6 +2274,7 @@ function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
     ...checkOpenMlsValidation(metadata),
     ...checkLocalDependencies(metadata),
     ...checkTestkitBoundary(metadata),
+    ...checkSyncProtocolBoundary(metadata),
     ...checkPublicSurface(metadata, sources),
     ...checkApplicationDependencyInventory(sources),
     ...checkBindingProvenance(metadata, sources),

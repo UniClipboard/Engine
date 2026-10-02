@@ -89,7 +89,6 @@ use super::group_update_adapter::{IrohGroupUpdateAdapter, GROUP_UPDATE_ALPN};
 use super::identity_store::IrohIdentityStore;
 use super::inbound_peer::{PeerIdentityError, PeerIdentityResolver};
 use super::membership_branch_recovery_adapter::IrohMembershipBranchRecoveryHandler;
-use super::membership_branch_recovery_wire::MEMBERSHIP_BRANCH_RECOVERY_ALPN;
 use super::membership_history_exchange_adapter::{
     IrohMembershipHistoryExchangeAdapter, MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
 };
@@ -107,6 +106,7 @@ use super::space_admission::{
 use super::transfer_progress_adapter::{
     InboundProgressEvent, IrohTransferProgressAdapter, TRANSFER_PROGRESS_ALPN,
 };
+use uc_sync_protocol::membership_branch_recovery::MEMBERSHIP_BRANCH_RECOVERY_ALPN;
 
 mod shutdown;
 pub use shutdown::IrohNodeShutdownError;

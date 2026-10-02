@@ -18,14 +18,14 @@ use uc_observability_contract::diagnostics::{
     OperationContext,
 };
 
-use super::super::space_admission_wire::{read_envelope, WireError};
-use super::super::space_admission_wire::{
-    write_envelope, write_typed, AuthenticatedEnvelopeV1, FrameKind, AUTH_FRAME_LIMIT, IO_DEADLINE,
-};
 use super::super::trace_context::inject_current;
 use super::crypto::{calculate_mac, random_nonce, verify_mac};
 use super::diagnostics::{client_completion, io_failure, record_network_snapshot, wire_failure};
 use super::errors::{application_close_error, map_reply_wire_error};
+use uc_sync_protocol::space_admission::{read_envelope, WireError};
+use uc_sync_protocol::space_admission::{
+    write_envelope, write_typed, AuthenticatedEnvelopeV1, FrameKind, AUTH_FRAME_LIMIT, IO_DEADLINE,
+};
 
 pub(super) struct EstablishedExchange {
     connection: Connection,

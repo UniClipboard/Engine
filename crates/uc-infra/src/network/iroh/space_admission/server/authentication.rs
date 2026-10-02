@@ -6,11 +6,6 @@ use uc_core::membership::{
 };
 use uc_observability_contract::diagnostics::connectivity::complete_admission_authentication_failure;
 
-use super::super::super::space_admission_wire::{
-    read_envelope, read_raw_with_limit, read_typed, write_typed, AuthenticatedEnvelopeV1,
-    ContinuationHelloV1, FrameKind, InitialHelloV2, OpaqueFinishV1, OpaqueResponseV1,
-    AUTH_FRAME_LIMIT, IO_DEADLINE,
-};
 use super::super::crypto::{peer_id, verify_mac};
 use super::super::diagnostics::AuthenticationStep;
 use super::super::errors::{map_request_wire_error, map_server_wire_error, HandlerError};
@@ -18,6 +13,11 @@ use super::IrohSpaceAdmissionHandler;
 use crate::security::{
     SpaceAdmissionAuth, SpaceAdmissionAuthContext, SpaceAdmissionContinuationCredential,
     SpaceAdmissionKe1, SpaceAdmissionKe3,
+};
+use uc_sync_protocol::space_admission::{
+    read_envelope, read_raw_with_limit, read_typed, write_typed, AuthenticatedEnvelopeV1,
+    ContinuationHelloV1, FrameKind, InitialHelloV2, OpaqueFinishV1, OpaqueResponseV1,
+    AUTH_FRAME_LIMIT, IO_DEADLINE,
 };
 
 pub(super) struct AuthenticatedRequest {

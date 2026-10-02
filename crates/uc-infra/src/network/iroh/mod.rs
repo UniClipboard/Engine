@@ -9,7 +9,6 @@ mod addr_filter;
 pub mod blobs;
 pub mod clipboard_dispatch_adapter;
 pub mod clipboard_receiver_adapter;
-pub mod clipboard_wire;
 mod conn_path;
 mod connect;
 pub mod connection_channel_adapter;
@@ -18,7 +17,6 @@ pub mod group_update_adapter;
 pub mod identity_store;
 pub(crate) mod inbound_peer;
 mod membership_branch_recovery_adapter;
-pub(crate) mod membership_branch_recovery_wire;
 pub mod membership_history_exchange_adapter;
 mod membership_identity_adapter;
 mod net_recovery;
@@ -35,7 +33,6 @@ pub mod relay_probe;
 pub(crate) mod runtime_consts;
 mod session_generation;
 pub mod space_admission;
-mod space_admission_wire;
 mod trace_context;
 pub mod transfer_progress_adapter;
 
@@ -52,7 +49,6 @@ impl uc_core::membership::PeerAdmissionPort for StaticPeerAdmission {
         Ok(self.0)
     }
 }
-pub mod transfer_progress_wire;
 
 pub use active_clipboard::{
     IrohActiveClipboardDispatchAdapter, IrohActiveClipboardPullClientAdapter,
@@ -69,7 +65,6 @@ pub use connection_channel_adapter::IrohConnectionChannelAdapter;
 pub use group_update_adapter::{IrohGroupUpdateAdapter, IrohGroupUpdateHandler, GROUP_UPDATE_ALPN};
 pub use identity_store::{IrohIdentityStore, IDENTITY_STORE_KEY};
 pub use membership_branch_recovery_adapter::IrohMembershipBranchRecoveryChannel;
-pub use membership_branch_recovery_wire::MEMBERSHIP_BRANCH_RECOVERY_ALPN;
 pub use membership_history_exchange_adapter::{
     IrohMembershipHistoryExchangeAdapter, IrohMembershipHistoryExchangeHandler,
     MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
@@ -94,3 +89,4 @@ pub use space_admission::{
     SpaceAdmissionChannelCredentialError, SpaceAdmissionChannelCredentialPort,
     SponsorOpaqueMaterial, SPACE_ADMISSION_ALPN,
 };
+pub use uc_sync_protocol::membership_branch_recovery::MEMBERSHIP_BRANCH_RECOVERY_ALPN;

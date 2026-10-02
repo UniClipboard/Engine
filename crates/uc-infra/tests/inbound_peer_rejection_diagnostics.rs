@@ -21,12 +21,13 @@ use uc_core::ports::{
     PeerReachabilityPort,
 };
 use uc_infra::network::iroh::{
-    clipboard_wire, IrohClipboardReceiverAdapter, IrohPeerReachabilityAdapter, CLIPBOARD_ALPN,
+    IrohClipboardReceiverAdapter, IrohPeerReachabilityAdapter, CLIPBOARD_ALPN,
     PEER_REACHABILITY_ALPN,
 };
 use uc_infra::security::Sha256IdentityFingerprintFactory;
 use uc_infra::SystemClock;
 use uc_observability_runtime::*;
+use uc_sync_protocol::clipboard as clipboard_wire;
 
 const ADMISSION_REQUEST: u8 = 1;
 const ADMISSION_ACCEPTED: u8 = 1;
@@ -244,6 +245,7 @@ async fn clipboard(dialer: &Endpoint, members: Members, admission: Arc<Admission
             origin_device_name: "private-name-sentinel".into(),
             payload_version: 3,
         },
+        None,
         &Bytes::from_static(b"private-content-sentinel"),
     )
     .await

@@ -6,12 +6,12 @@ use uc_observability_contract::diagnostics::connectivity::{
     ConnectionPurpose, DialFailure,
 };
 
-use super::super::space_admission_wire::IO_DEADLINE;
 use super::diagnostics::record_network_snapshot;
 use super::SPACE_ADMISSION_ALPN;
 use uc_observability_contract::diagnostics::connectivity::{
     AdmissionExchangeSide, AdmissionNetworkPoint,
 };
+use uc_sync_protocol::space_admission::IO_DEADLINE;
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum AdmissionConnectError {

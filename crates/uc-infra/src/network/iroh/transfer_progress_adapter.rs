@@ -6,7 +6,7 @@
 //! * **方向**:receiver → sender(仅一向)。
 //! * **传输**:专用 ALPN [`TRANSFER_PROGRESS_ALPN`] 上的 iroh `accept_uni`
 //!   单向流;每帧一个 uni stream,connection 在 transfer 期间持续复用。
-//! * **wire**:见 [`super::transfer_progress_wire`] —— 固定 34 字节定长帧。
+//! * **wire**:见 [`uc_sync_protocol::transfer_progress`] —— 固定 34 字节定长帧。
 //!
 //! ## 身份验证
 //!
@@ -47,8 +47,8 @@ use uc_observability_contract::{
 use super::connect::{connect_with_staggered_retry, StaggeredDialError};
 use super::inbound_peer::InboundPeerGate;
 use super::peer_address_resolver::PeerAddressResolver;
-use super::transfer_progress_wire::{
-    self, transfer_id_from_bytes, transfer_id_to_bytes, ProgressFrame,
+use uc_sync_protocol::transfer_progress::{
+    self as transfer_progress_wire, transfer_id_from_bytes, transfer_id_to_bytes, ProgressFrame,
 };
 
 /// ALPN identifier for the reverse-direction transfer progress protocol.

@@ -6,7 +6,7 @@ use uc_core::membership::{
     AdmissionChannelPeerId, AdmissionContinuationCredential, SpaceAdmissionId,
 };
 
-use super::super::trace_context::WireTraceContext;
+use uc_sync_protocol::WireTraceContext;
 
 type HmacSha512 = Hmac<Sha512>;
 

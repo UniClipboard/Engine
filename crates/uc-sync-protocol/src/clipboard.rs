@@ -46,7 +46,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use uc_core::ports::ClipboardHeader;
 
-use super::trace_context::{inject_current, WireTraceContext};
+use crate::trace_context::WireTraceContext;
 
 // ============================================================================
 // Constants
@@ -175,11 +175,7 @@ pub enum WireDecodeError {
 ///
 /// v2 与 v3 共用同一份 postcard schema([`WireHeaderV2`]),仅版本号不同;
 /// v1 仅作为兼容老对端的*解码*入口存在(见 [`decode_header`])。
-pub fn encode_header(header: &ClipboardHeader) -> Result<Vec<u8>, WireEncodeError> {
-    encode_header_with_context(header, inject_current())
-}
-
-fn encode_header_with_context(
+pub fn encode_header(
     header: &ClipboardHeader,
     trace_context: Option<WireTraceContext>,
 ) -> Result<Vec<u8>, WireEncodeError> {
@@ -261,6 +257,7 @@ fn decode_wire_header(bytes: &[u8]) -> Result<DecodedWireHeader, WireDecodeError
 pub async fn write_frame<W: AsyncWrite + Unpin>(
     send: &mut W,
     header: &ClipboardHeader,
+    trace_context: Option<WireTraceContext>,
     payload: &Bytes,
 ) -> Result<(), WireEncodeError> {
     if payload.len() > MAX_PAYLOAD_SIZE as usize {
@@ -269,7 +266,7 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(
             max: MAX_PAYLOAD_SIZE,
         });
     }
-    let header_bytes = encode_header(header)?;
+    let header_bytes = encode_header(header, trace_context)?;
     let header_len = header_bytes.len() as u32; // bounded by MAX_HEADER_SIZE
     let payload_len = payload.len() as u32;
 
@@ -296,14 +293,14 @@ pub struct ReadFrame {
     pub ciphertext: Bytes,
 }
 
-pub(super) struct ReadFrameHeader {
-    pub(super) header: ClipboardHeader,
-    pub(super) trace_context: Option<WireTraceContext>,
+pub struct ReadFrameHeader {
+    pub header: ClipboardHeader,
+    pub trace_context: Option<WireTraceContext>,
     payload_len: u32,
 }
 
 impl ReadFrameHeader {
-    pub(super) fn payload_len(&self) -> u32 {
+    pub fn payload_len(&self) -> u32 {
         self.payload_len
     }
 }
@@ -319,7 +316,7 @@ pub async fn read_frame<R: AsyncRead + Unpin>(recv: &mut R) -> Result<ReadFrame,
     })
 }
 
-pub(super) async fn read_frame_header<R: AsyncRead + Unpin>(
+pub async fn read_frame_header<R: AsyncRead + Unpin>(
     recv: &mut R,
 ) -> Result<ReadFrameHeader, WireDecodeError> {
     let mut magic_buf = [0u8; 1];
@@ -367,7 +364,7 @@ pub(super) async fn read_frame_header<R: AsyncRead + Unpin>(
     })
 }
 
-pub(super) async fn read_frame_payload<R: AsyncRead + Unpin>(
+pub async fn read_frame_payload<R: AsyncRead + Unpin>(
     recv: &mut R,
     payload_len: u32,
 ) -> Result<Bytes, WireDecodeError> {
@@ -409,7 +406,9 @@ mod tests {
         let h = header.clone();
         let p = payload.clone();
         let send_task = tokio::spawn(async move {
-            write_frame(&mut client, &h, &p).await.expect("write frame");
+            write_frame(&mut client, &h, None, &p)
+                .await
+                .expect("write frame");
             client.shutdown().await.expect("shutdown client");
         });
         let frame = read_frame(&mut server).await?;
@@ -484,7 +483,7 @@ mod tests {
     #[tokio::test]
     async fn read_frame_rejects_oversized_payload_length() {
         let header = sample_header();
-        let header_bytes = encode_header(&header).unwrap();
+        let header_bytes = encode_header(&header, None).unwrap();
         let oversized = MAX_PAYLOAD_SIZE + 1;
 
         let (mut client, mut server) = duplex(64 * 1024);
@@ -577,7 +576,7 @@ mod tests {
             Err(WireDecodeError::IncompatibleLayout)
         ));
 
-        let current_bytes = encode_header(&sample_header()).unwrap();
+        let current_bytes = encode_header(&sample_header(), None).unwrap();
         assert!(
             current_bytes.first().copied() != Some(ClipboardHeader::CURRENT_VERSION),
             "旧 decoder 必须在读取 postcard 前按首字节拒绝当前布局"
@@ -590,7 +589,7 @@ mod tests {
         let context = WireTraceContext {
             traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_owned(),
         };
-        let mut bytes = encode_header_with_context(&header, Some(context.clone())).unwrap();
+        let mut bytes = encode_header(&header, Some(context.clone())).unwrap();
         let decoded = decode_wire_header(&bytes).unwrap();
         assert_eq!(decoded.header, header);
         assert_eq!(decoded.trace_context, Some(context));
@@ -607,7 +606,7 @@ mod tests {
         let mut header = sample_header();
         header.version = ClipboardHeader::DIRECTORY_VERSION;
 
-        let bytes = encode_header(&header).unwrap();
+        let bytes = encode_header(&header, None).unwrap();
         let decoded = decode_header(&bytes).unwrap();
 
         assert_eq!(decoded.version, ClipboardHeader::DIRECTORY_VERSION);

@@ -60,10 +60,10 @@ use uc_observability_contract::diagnostics::{
     DiagnosticRole, DiagnosticSpanKind, OperationCompletion, OperationContext,
 };
 
-use super::clipboard_wire::{self, AckCode};
 use super::conn_path::{path_for, OnMissing};
 use super::inbound_peer::InboundPeerGate;
 use super::trace_context::set_remote_parent;
+use uc_sync_protocol::clipboard::{self as clipboard_wire, AckCode};
 
 /// Capacity of the `InboundClipboard` broadcast channel. Matches the
 /// peer_reachability adapter (`PRESENCE_EVENT_CHANNEL_CAPACITY`) so both streams

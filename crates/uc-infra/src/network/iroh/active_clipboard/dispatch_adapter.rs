@@ -33,7 +33,7 @@ use uc_observability_contract::{error_source::io_error_kind, uc_debug, uc_warn};
 use super::super::connect::connect_with_staggered_retry;
 use super::super::peer_address_resolver::PeerAddressResolver;
 use super::receiver_adapter::ACTIVE_CLIPBOARD_ALPN;
-use super::wire::{self, ActiveClipboardWireMessage};
+use uc_sync_protocol::active_clipboard_state::{self as wire, ActiveClipboardWireMessage};
 
 /// Sends one active-clipboard state observation to a single peer over the
 /// active-clipboard ALPN. Reuses the shared endpoint + `peer_addr_repo` so a

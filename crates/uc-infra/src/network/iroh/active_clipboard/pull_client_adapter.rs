@@ -35,7 +35,7 @@ use uc_observability_contract::{error_source::io_error_kind, uc_debug, uc_warn};
 use super::super::connect::connect_with_staggered_retry;
 use super::super::peer_address_resolver::PeerAddressResolver;
 use super::pull_serve_adapter::ACTIVE_CLIPBOARD_PULL_ALPN;
-use super::pull_wire::{self, PullResponse};
+use uc_sync_protocol::active_clipboard_pull::{self as pull_wire, PullResponse};
 
 /// Hard deadline on one pull exchange (dial + request + response). Issue #1017
 /// D6 fixes this at 10s: pull-fail (timeout, offline, holder locked) does not

@@ -14,9 +14,10 @@ use uc_core::membership::{
 };
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::ClipboardHeader;
-use uc_infra::network::iroh::{clipboard_wire, IrohClipboardReceiverAdapter, CLIPBOARD_ALPN};
+use uc_infra::network::iroh::{IrohClipboardReceiverAdapter, CLIPBOARD_ALPN};
 use uc_infra::security::Sha256IdentityFingerprintFactory;
 use uc_observability_runtime::*;
+use uc_sync_protocol::clipboard as clipboard_wire;
 
 struct Member(SpaceMember);
 #[async_trait]
@@ -136,6 +137,7 @@ async fn receipt_failures_remain_distinct_in_standard_and_detailed_exports() {
                     origin_device_name: "private-name-sentinel".into(),
                     payload_version: 3,
                 },
+                None,
                 &Bytes::from_static(b"private-content-sentinel"),
             )
             .await

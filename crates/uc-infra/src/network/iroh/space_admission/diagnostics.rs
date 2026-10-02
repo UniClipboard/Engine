@@ -13,8 +13,8 @@ use uc_observability_contract::diagnostics::{
     DiagnosticRole, DiagnosticSpanKind, OperationCompletion, OperationContext,
 };
 
-use super::super::space_admission_wire::WireError;
 use super::errors::HandlerError;
+use uc_sync_protocol::space_admission::WireError;
 
 pub(super) fn record_client_completion(
     operation: DiagnosticOperation,

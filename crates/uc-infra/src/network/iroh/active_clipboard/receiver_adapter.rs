@@ -43,7 +43,7 @@ use uc_observability_contract::{
 };
 
 use super::super::inbound_peer::InboundPeerGate;
-use super::wire;
+use uc_sync_protocol::active_clipboard_state as wire;
 
 /// ALPN identifier for the active-clipboard state protocol. An independent
 /// sibling of the bulk clipboard / peer_reachability / pairing ALPNs so the Router can
@@ -220,8 +220,8 @@ mod tests {
     use uc_core::membership::{MembershipError, SpaceMember};
     use uc_core::MemberSyncPreferences;
 
-    use super::super::wire::{write_frame, ActiveClipboardWireMessage};
     use crate::security::Sha256IdentityFingerprintFactory;
+    use uc_sync_protocol::active_clipboard_state::{write_frame, ActiveClipboardWireMessage};
 
     // ----- test doubles ------------------------------------------------------
 

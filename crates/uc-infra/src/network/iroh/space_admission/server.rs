@@ -1,7 +1,4 @@
 //! Sponsor 拥有一次入站交换、并发限制、截止时间和关闭责任。
-use super::super::space_admission_wire::{
-    read_typed, write_envelope, AuthenticatedEnvelopeV1, FrameKind, WireError, AUTH_FRAME_LIMIT,
-};
 use super::super::trace_context::set_remote_parent;
 use super::credential::SpaceAdmissionChannelCredentialPort;
 use super::crypto::{calculate_mac, copy_credential, peer_id, random_nonce};
@@ -30,6 +27,9 @@ use uc_core::membership::{AdmissionChannelPeerId, AdmissionPeerBinding};
 use uc_observability_contract::diagnostics::connectivity::{
     AdmissionExchangeFailure, AdmissionExchangeObservation, AdmissionExchangeSide,
     AdmissionExchangeStep, AdmissionNetworkPoint,
+};
+use uc_sync_protocol::space_admission::{
+    read_typed, write_envelope, AuthenticatedEnvelopeV1, FrameKind, WireError, AUTH_FRAME_LIMIT,
 };
 mod authentication;
 use authentication::AuthenticatedRequest;

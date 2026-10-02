@@ -5,10 +5,10 @@ use uc_core::membership::{
 
 pub const MEMBERSHIP_BRANCH_RECOVERY_ALPN: &[u8] = b"uniclipboard/membership-branch-recovery/1";
 const WIRE_VERSION: u16 = 1;
-pub(crate) const MAX_RECOVERY_FRAME_SIZE: usize = 4 * 1024 * 1024;
+pub const MAX_RECOVERY_FRAME_SIZE: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Serialize, Deserialize)]
-pub(crate) enum MembershipBranchRecoveryWireMessage {
+pub enum MembershipBranchRecoveryWireMessage {
     RequestGroupInfo {
         version: u16,
         conflict_id: MembershipConflictId,
@@ -36,7 +36,7 @@ pub(crate) enum MembershipBranchRecoveryWireMessage {
 }
 
 impl MembershipBranchRecoveryWireMessage {
-    pub(crate) fn request_group_info(
+    pub fn request_group_info(
         conflict_id: MembershipConflictId,
         target_branch_id: MembershipBranchId,
         recipient_member: MemberInstanceId,
@@ -49,14 +49,14 @@ impl MembershipBranchRecoveryWireMessage {
         }
     }
 
-    pub(crate) fn group_info(group_info: Vec<u8>) -> Self {
+    pub fn group_info(group_info: Vec<u8>) -> Self {
         Self::GroupInfo {
             version: WIRE_VERSION,
             group_info,
         }
     }
 
-    pub(crate) fn submit_external_commit(
+    pub fn submit_external_commit(
         conflict_id: MembershipConflictId,
         target_branch_id: MembershipBranchId,
         recipient_member: MemberInstanceId,
@@ -71,20 +71,20 @@ impl MembershipBranchRecoveryWireMessage {
         }
     }
 
-    pub(crate) fn recovery_package(package: MembershipBranchRecoveryPackageV1) -> Self {
+    pub fn recovery_package(package: MembershipBranchRecoveryPackageV1) -> Self {
         Self::RecoveryPackage {
             version: WIRE_VERSION,
             package,
         }
     }
 
-    pub(crate) const fn rejected() -> Self {
+    pub const fn rejected() -> Self {
         Self::Rejected {
             version: WIRE_VERSION,
         }
     }
 
-    pub(crate) fn validate(&self) -> Result<(), MembershipBranchRecoveryWireError> {
+    pub fn validate(&self) -> Result<(), MembershipBranchRecoveryWireError> {
         let (version, payload_is_valid) = match self {
             Self::RequestGroupInfo { version, .. } | Self::Rejected { version } => (*version, true),
             Self::GroupInfo {
@@ -120,7 +120,7 @@ impl std::fmt::Debug for MembershipBranchRecoveryWireMessage {
 }
 
 #[derive(thiserror::Error)]
-pub(crate) enum MembershipBranchRecoveryWireError {
+pub enum MembershipBranchRecoveryWireError {
     #[error("membership branch recovery frame is invalid")]
     Invalid {
         #[source]
@@ -134,7 +134,7 @@ impl std::fmt::Debug for MembershipBranchRecoveryWireError {
     }
 }
 
-pub(crate) fn encode(
+pub fn encode(
     message: &MembershipBranchRecoveryWireMessage,
 ) -> Result<Vec<u8>, MembershipBranchRecoveryWireError> {
     message.validate()?;
@@ -148,7 +148,7 @@ pub(crate) fn encode(
     Ok(encoded)
 }
 
-pub(crate) fn decode(
+pub fn decode(
     bytes: &[u8],
 ) -> Result<MembershipBranchRecoveryWireMessage, MembershipBranchRecoveryWireError> {
     if bytes.is_empty() || bytes.len() > MAX_RECOVERY_FRAME_SIZE {

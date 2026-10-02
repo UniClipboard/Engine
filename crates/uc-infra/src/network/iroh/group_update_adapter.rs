@@ -20,9 +20,10 @@ use uc_observability_contract::diagnostics::{
 
 use super::connect_with_staggered_retry;
 use super::peer_address_resolver::PeerAddressResolver;
-use super::trace_context::{inject_current, set_remote_parent, WireTraceContext};
+use super::trace_context::{inject_current, set_remote_parent};
 use crate::space::group_update_failure_detail;
 use uc_observability_contract::{uc_debug, uc_warn};
+use uc_sync_protocol::WireTraceContext;
 
 pub const GROUP_UPDATE_ALPN: &[u8] = b"uniclipboard/group-update/1";
 const MAX_UPDATE_SIZE: usize = 4 * 1024 * 1024;
