@@ -307,23 +307,49 @@ async fn repeated_leaves_do_not_accumulate_tasks_or_descriptors() {
     let (early, late) = samples.split_at(3);
     let early_tasks = early.iter().map(|sample| sample.tasks).min().unwrap();
     let late_tasks = late.iter().map(|sample| sample.tasks).max().unwrap();
-    let early_descriptors = early.iter().map(|sample| sample.descriptors).min().unwrap();
-    let late_descriptors = late.iter().map(|sample| sample.descriptors).max().unwrap();
     assert!(
         late_tasks <= early_tasks + 1,
         "alive tasks grew across leave cycles: {samples:?}"
     );
-    assert!(
-        late_descriptors <= early_descriptors + 1,
-        "open descriptors grew across leave cycles: {samples:?}"
-    );
+    // 只有受支持的平台才有句柄计数；不可用时不做该断言，也不当作通过。
+    #[cfg(unix)]
+    {
+        let counts = |range: &[ResourceSample]| {
+            range
+                .iter()
+                .map(|sample| sample.descriptors.expect("descriptor count on unix"))
+                .collect::<Vec<_>>()
+        };
+        let early_descriptors = counts(early).into_iter().min().unwrap();
+        let late_descriptors = counts(late).into_iter().max().unwrap();
+        assert!(
+            late_descriptors <= early_descriptors + 1,
+            "open descriptors grew across leave cycles: {samples:?}"
+        );
+    }
     engine.shutdown(Duration::from_secs(15)).await.unwrap();
 }
 
 #[derive(Debug, Clone, Copy)]
 struct ResourceSample {
     tasks: usize,
-    descriptors: usize,
+    /// 仅 Unix 可数；其他平台为 `None`，对应断言被跳过而不是以 0 通过。
+    descriptors: Option<usize>,
+}
+
+#[cfg(unix)]
+fn open_descriptors() -> Option<usize> {
+    // Unix 上读取失败是测试环境问题，必须暴露而不是退化成 0。
+    Some(
+        std::fs::read_dir("/dev/fd")
+            .expect("/dev/fd must be readable on unix")
+            .count(),
+    )
+}
+
+#[cfg(not(unix))]
+fn open_descriptors() -> Option<usize> {
+    None
 }
 
 fn resource_sample() -> ResourceSample {
@@ -331,8 +357,6 @@ fn resource_sample() -> ResourceSample {
         tasks: tokio::runtime::Handle::current()
             .metrics()
             .num_alive_tasks(),
-        descriptors: std::fs::read_dir("/dev/fd")
-            .map(|entries| entries.count())
-            .unwrap_or(0),
+        descriptors: open_descriptors(),
     }
 }
