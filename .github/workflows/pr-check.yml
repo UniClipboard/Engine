@@ -79,6 +79,7 @@ jobs:
         run: >-
           node --test scripts/architecture/check-mobile-build-profile.test.mjs scripts/release/build-profile.test.mjs
           scripts/build-cache/ci-compile-cache.test.mjs scripts/architecture/check-direct-log-macros.test.mjs
+          scripts/testing/relay-recovery-support.test.mjs
 
       - name: Check patch whitespace
         run: git diff --check

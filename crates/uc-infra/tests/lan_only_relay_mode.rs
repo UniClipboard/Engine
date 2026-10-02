@@ -25,6 +25,7 @@
 
 use std::time::Duration;
 
+use iroh::address_lookup::{DnsAddressLookup, PkarrPublisher};
 use iroh::{Endpoint, RelayMode, TransportAddr};
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 
@@ -134,11 +135,44 @@ async fn lan_only_publishes_only_mdns_address_lookup() {
     endpoint.close().await;
 }
 
-/// 对照测试：`presets::N0` + 后挂 mDNS 的"默认"链路应注册 3 个 service
+/// 对照测试：默认（启用 relay）生产链路的 builder 形状应注册 3 个 service
 /// （`PkarrPublisher` + `DnsAddressLookup` + `MdnsAddressLookup`）。
 /// 与 [`lan_only_publishes_only_mdns_address_lookup`] 共同锁定结构差。
+///
+/// 镜像 `IrohNodeBuilder::bind`：从 `presets::N0` 出发先 `clear_address_lookup()`，
+/// 再显式挂 publisher 与 DNS lookup，所以 iroh 以后往 `presets::N0` 里增加的服务
+/// （见 [`n0_preset_registers_the_https_pkarr_resolver`]）不会悄悄进入产品行为。
 #[tokio::test]
 async fn relay_default_publishes_three_address_lookup_services() {
+    let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
+        .alpns(vec![TEST_ALPN.to_vec()])
+        .relay_mode(RelayMode::Default)
+        .clear_address_lookup()
+        .address_lookup(PkarrPublisher::n0_dns())
+        .address_lookup(DnsAddressLookup::n0_dns())
+        .address_lookup(MdnsAddressLookup::builder())
+        .bind()
+        .await
+        .expect("bind endpoint");
+
+    let services = endpoint.address_lookup().expect("endpoint not closed");
+    assert_eq!(
+        services.len(),
+        3,
+        "Default path MUST register 3 address lookups (pkarr publisher + dns + mdns); \
+         saw {} — did the production builder shape change?",
+        services.len(),
+    );
+
+    endpoint.close().await;
+}
+
+/// iroh 1.0.3 起 `presets::N0` 还会注册 `PkarrResolver::n0_dns()`（经 HTTPS 向 `dns.iroh.link/pkarr`
+/// 解析）。产品的启用 relay 链路清掉 N0 注入的 lookup 再显式挂载，因此不使用它；本断言只在
+/// iroh 再改动 `presets::N0` 的 lookup 集合时提示，需要显式审阅是否纳入产品行为。
+/// 数量 = publisher + HTTPS resolver + DNS lookup + mdns。
+#[tokio::test]
+async fn n0_preset_registers_the_https_pkarr_resolver() {
     let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
         .alpns(vec![TEST_ALPN.to_vec()])
         .relay_mode(RelayMode::Default)
@@ -150,9 +184,9 @@ async fn relay_default_publishes_three_address_lookup_services() {
     let services = endpoint.address_lookup().expect("endpoint not closed");
     assert_eq!(
         services.len(),
-        3,
-        "Default path MUST register 3 address lookups (pkarr publisher + dns + mdns); \
-         saw {} — `presets::N0` injection contract changed?",
+        4,
+        "presets::N0 lookup set changed (expected publisher + HTTPS resolver + DNS + mdns); \
+         review whether the new service belongs in the product path, saw {}",
         services.len(),
     );
 

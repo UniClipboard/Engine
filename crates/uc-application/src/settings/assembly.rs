@@ -92,7 +92,7 @@ impl SettingsAssembly {
         })
     }
 
-    /// 网络节点绑定前记录实际采用的 relay 路由，供概览区分已保存与已生效。
+    /// 网络节点绑定成功后记录实际采用的 relay 路由（绑定前以 `None` 清空），供概览区分已保存与已生效。
     pub fn record_applied_relays(&self, applied: Option<super::AppliedRelayRouting>) {
         self.settings.record_applied_relays(applied);
     }

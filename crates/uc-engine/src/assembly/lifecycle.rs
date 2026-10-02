@@ -73,7 +73,7 @@ pub async fn build_network_runtime(
         allow_relay_fallback = allow_relay_fallback,
         disable_relays = iroh_config.disable_relays,
         allow_overlay_network_addrs = iroh_config.allow_overlay_network_addrs,
-        relay_routing = log_vocab_debug(&relay_routing),
+        mode = log_vocab_debug(&relay_routing),
         relay_count = iroh_config.relay_urls.len(),
         congestion_controller = log_vocab(&iroh_config.congestion_controller),
         "applying network settings"

@@ -8,6 +8,7 @@ import { resolve, join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { setTimeout as delay } from 'node:timers/promises'
 import { createHash } from 'node:crypto'
+import { ONLINE_DEADLINE_MESSAGE, measureRecoveryMs, terminateRelay } from './relay-recovery-support.mjs'
 
 const options = new Map()
 for (let i = 2; i < process.argv.length; i += 2) options.set(process.argv[i], process.argv[i + 1])
@@ -245,7 +246,7 @@ async function online(group, budget) {
       if (!group.filter(peer => peer !== node).every(peer => peers.some(row => row.peer_id === peer.id && row.connected))) return false
     }
     return true
-  }, budget, 'automatic connection exceeded its deadline')
+  }, budget, ONLINE_DEADLINE_MESSAGE)
 }
 
 async function transfer(left, right, marker) {
@@ -716,11 +717,7 @@ async function startRelay() {
 }
 
 async function stopRelay() {
-  for (const relay of relays) {
-    relay.kill('SIGINT')
-    await once(relay, 'exit')
-    assert.equal(relay.exitCode, 0, 'local relay failed to shut down')
-  }
+  for (const relay of relays) await terminateRelay(relay)
 }
 
 function blockDirect(node) {
@@ -787,8 +784,8 @@ async function relayScenarios(a, b) {
         }
         let nudging = demandNudge
         const nudger = (async () => { let count = 0; while (nudging) { try { await (nudgeCommand === 'recover' ? a.call('recover') : a.call('send', { peer: b.id, text: `nudge-${iteration}-${count++}` })) } catch { count++ } await delay(1000) } return count })()
-        try { await online(nodes, 40_000); proof.recovery_ms = Math.round(performance.now() - relayReadyAt) }
-        catch { proof.recovery_ms = null }
+        // 只有预期的 40 秒期限超时记为 null；宿主退出、命令错误等其他失败直接让场景失败。
+        proof.recovery_ms = await measureRecoveryMs(() => online(nodes, 40_000), relayReadyAt)
         nudging = false
         proof.nudge_sends = await nudger
         proof.demand_nudge = demandNudge
@@ -802,8 +799,8 @@ async function relayScenarios(a, b) {
       catch (error) {
         if (convergeProbe) {
           const missedAt = performance.now()
-          try { await online(nodes, 90_000); proof.converged_after_deadline_ms = Math.round(performance.now() - relayReadyAt) }
-          catch { proof.converged_after_deadline_ms = null; proof.not_converged_within_ms = Math.round(performance.now() - relayReadyAt) }
+          proof.converged_after_deadline_ms = await measureRecoveryMs(() => online(nodes, 90_000), relayReadyAt)
+          if (proof.converged_after_deadline_ms === null) proof.not_converged_within_ms = Math.round(performance.now() - relayReadyAt)
           proof.deadline_missed_at_ms = Math.round(missedAt - relayReadyAt)
           proof.peer_state_after_probe = await Promise.all(nodes.map(async node => ({ node: node.label, peers: (await node.call('peers')).map(row => ({ connected: row.connected })) })))
         }

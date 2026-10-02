@@ -303,7 +303,6 @@ __log_field_catalog! {
     posting_table: Vocabulary(reviewed),
     previous_phase: Vocabulary(reviewed),
     reason: Vocabulary(reviewed),
-    relay_routing: Vocabulary(reviewed),
     recovery_state: Vocabulary(reviewed),
     reply_kind: Vocabulary(reviewed),
     result: Vocabulary(reviewed),
