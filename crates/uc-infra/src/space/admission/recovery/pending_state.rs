@@ -24,8 +24,7 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
     async fn verify_readable(&self, now_ms: i64) -> Result<(), PendingAdmissionRecoveryStateError> {
         let result: Result<(), PendingAdmissionRecoveryStateError> = async {
             observe_local_result(LocalWorkStep::JoinerStateLoad, async {
-                self.executor
-                    .run(|conn| self.verify_repository_on(conn, now_ms).map_err(into_anyhow))
+                self.run_keyed(|conn| self.verify_repository_on(conn, now_ms).map_err(into_anyhow))
                     .map_err(map_read_error)
             })
             .await
@@ -42,46 +41,45 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
     ) -> Result<LoadedAdmissionRecovery, PendingAdmissionRecoveryStateError> {
         let result: Result<LoadedAdmissionRecovery, PendingAdmissionRecoveryStateError> = async {
             observe_local_result(LocalWorkStep::JoinerStateLoad, async {
-                self.executor
-                    .run(|conn| {
-                        let index = self
-                            .load_recovery_index_on(conn, now_ms)
-                            .map_err(into_anyhow)?;
-                        let profile_generation = self.keys.profile_generation();
-                        let pending = index
-                            .joiners
-                            .into_iter()
-                            .map(|aggregate| {
-                                recovery_commit_token(profile_generation, &aggregate)
-                                    .map(|token| LoadedPendingAdmission::new(aggregate, token))
-                            })
-                            .collect::<Result<Vec<_>, _>>()?;
-                        let confirmations = index
-                            .sponsor_deadlines
-                            .into_iter()
-                            .map(|aggregate| {
-                                recovery_commit_token(profile_generation, &aggregate)
-                                    .map(|token| LoadedSponsorDeadline::new(aggregate, token))
-                            })
-                            .collect::<Result<Vec<_>, _>>()?;
-                        let abandonments = index
-                            .sponsor_abandonments
-                            .into_iter()
-                            .map(|aggregate| {
-                                recovery_commit_token(profile_generation, &aggregate)
-                                    .map(|token| LoadedSponsorAbandonment::new(aggregate, token))
-                            })
-                            .collect::<Result<Vec<_>, _>>()?;
-                        Ok(LoadedAdmissionRecovery::new(
-                            pending,
-                            confirmations,
-                            abandonments,
-                            index.next_deadline_ms,
-                            index.sponsor_pairing_open,
-                            index.needs_attention,
-                        ))
-                    })
-                    .map_err(map_read_error)
+                self.run_keyed(|conn| {
+                    let index = self
+                        .load_recovery_index_on(conn, now_ms)
+                        .map_err(into_anyhow)?;
+                    let profile_generation = self.keys.profile_generation();
+                    let pending = index
+                        .joiners
+                        .into_iter()
+                        .map(|aggregate| {
+                            recovery_commit_token(profile_generation, &aggregate)
+                                .map(|token| LoadedPendingAdmission::new(aggregate, token))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let confirmations = index
+                        .sponsor_deadlines
+                        .into_iter()
+                        .map(|aggregate| {
+                            recovery_commit_token(profile_generation, &aggregate)
+                                .map(|token| LoadedSponsorDeadline::new(aggregate, token))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let abandonments = index
+                        .sponsor_abandonments
+                        .into_iter()
+                        .map(|aggregate| {
+                            recovery_commit_token(profile_generation, &aggregate)
+                                .map(|token| LoadedSponsorAbandonment::new(aggregate, token))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(LoadedAdmissionRecovery::new(
+                        pending,
+                        confirmations,
+                        abandonments,
+                        index.next_deadline_ms,
+                        index.sponsor_pairing_open,
+                        index.needs_attention,
+                    ))
+                })
+                .map_err(map_read_error)
             })
             .await
         }
@@ -98,49 +96,49 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
         let result: Result<LoadedPendingAdmission, PendingAdmissionRecoveryStateError> = async {
             observe_local_result(LocalWorkStep::JoinerStateCommit, async {
                 let replacement = transition.into_replacement();
-                self.executor
-                    .run(|conn| {
-                        conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
-                            let mut state = self
-                                .load_state_in_transaction_on(conn)
-                                .map_err(into_anyhow)?;
-                            let admission_id = *replacement.admission_id().as_bytes();
-                            let stored =
-                                state.records.get(&admission_id).cloned().ok_or_else(|| {
-                                    into_anyhow(SpaceAdmissionStateStoreError::conflict())
-                                })?;
-                            let current = self
-                                .open_record(admission_id, &stored)
-                                .map_err(into_anyhow)?;
-                            let expected_token = recovery_token(state.profile_generation, &current);
-                            let expected_version =
-                                current.record_version().checked_add(1).ok_or_else(|| {
-                                    into_anyhow(SpaceAdmissionStateStoreError::corrupt())
-                                })?;
-                            if token.as_bytes() != &expected_token
-                                || replacement.record_version() != expected_version
-                            {
-                                return Err(into_anyhow(SpaceAdmissionStateStoreError::conflict()));
-                            }
-                            let sealed = self
-                                .seal_record(&replacement, stored.wrapped_data_key)
-                                .map_err(into_anyhow)?;
-                            state.records.insert(admission_id, sealed);
-                            if state.current_local_join_id == Some(admission_id)
-                                && replacement.is_terminal()
-                            {
-                                state.current_local_join_id = None;
-                            }
-                            self.save_state_on(conn, &state).map_err(into_anyhow)?;
-                            let next_token = AdmissionRecoveryCommitToken::from_bytes(
-                                recovery_token(state.profile_generation, &replacement),
-                            )
+                self.run_keyed(|conn| {
+                    conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
+                        let mut state = self
+                            .load_state_in_transaction_on(conn)
+                            .map_err(into_anyhow)?;
+                        let admission_id = *replacement.admission_id().as_bytes();
+                        let stored =
+                            state.records.get(&admission_id).cloned().ok_or_else(|| {
+                                into_anyhow(SpaceAdmissionStateStoreError::conflict())
+                            })?;
+                        let current = self
+                            .open_record(admission_id, &stored)
+                            .map_err(into_anyhow)?;
+                        let expected_token = recovery_token(state.profile_generation, &current);
+                        let expected_version = current
+                            .record_version()
+                            .checked_add(1)
                             .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
-                            Ok(LoadedPendingAdmission::new(replacement, next_token))
-                        })
+                        if token.as_bytes() != &expected_token
+                            || replacement.record_version() != expected_version
+                        {
+                            return Err(into_anyhow(SpaceAdmissionStateStoreError::conflict()));
+                        }
+                        let sealed = self
+                            .seal_record(&replacement, stored.wrapped_data_key)
+                            .map_err(into_anyhow)?;
+                        state.records.insert(admission_id, sealed);
+                        if state.current_local_join_id == Some(admission_id)
+                            && replacement.is_terminal()
+                        {
+                            state.current_local_join_id = None;
+                        }
+                        self.save_state_on(conn, &state).map_err(into_anyhow)?;
+                        let next_token = AdmissionRecoveryCommitToken::from_bytes(recovery_token(
+                            state.profile_generation,
+                            &replacement,
+                        ))
+                        .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
+                        Ok(LoadedPendingAdmission::new(replacement, next_token))
                     })
-                    .map_err(map_executor_error)
-                    .map_err(map_recovery_error)
+                })
+                .map_err(map_executor_error)
+                .map_err(map_recovery_error)
             })
             .await
         }
@@ -155,45 +153,44 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
     ) -> Result<LoadedSponsorDeadline, PendingAdmissionRecoveryStateError> {
         observe_local_result(LocalWorkStep::SponsorStateCommit, async {
             let replacement = transition.into_replacement();
-            self.executor
-                .run(|conn| {
-                    conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
-                        let mut state = self
-                            .load_state_in_transaction_on(conn)
-                            .map_err(into_anyhow)?;
-                        let admission_id = *replacement.admission_id().as_bytes();
-                        let stored =
-                            state.records.get(&admission_id).cloned().ok_or_else(|| {
-                                into_anyhow(SpaceAdmissionStateStoreError::conflict())
-                            })?;
-                        let current = self
-                            .open_record(admission_id, &stored)
-                            .map_err(into_anyhow)?;
-                        let expected_token = recovery_token(state.profile_generation, &current);
-                        let expected_version = current
-                            .record_version()
-                            .checked_add(1)
-                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
-                        if token.as_bytes() != &expected_token
-                            || replacement.record_version() != expected_version
-                        {
-                            return Err(into_anyhow(SpaceAdmissionStateStoreError::conflict()));
-                        }
-                        let sealed = self
-                            .seal_record(&replacement, stored.wrapped_data_key)
-                            .map_err(into_anyhow)?;
-                        state.records.insert(admission_id, sealed);
-                        self.save_state_on(conn, &state).map_err(into_anyhow)?;
-                        let next_token = AdmissionRecoveryCommitToken::from_bytes(recovery_token(
-                            state.profile_generation,
-                            &replacement,
-                        ))
+            self.run_keyed(|conn| {
+                conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
+                    let mut state = self
+                        .load_state_in_transaction_on(conn)
+                        .map_err(into_anyhow)?;
+                    let admission_id = *replacement.admission_id().as_bytes();
+                    let stored =
+                        state.records.get(&admission_id).cloned().ok_or_else(|| {
+                            into_anyhow(SpaceAdmissionStateStoreError::conflict())
+                        })?;
+                    let current = self
+                        .open_record(admission_id, &stored)
+                        .map_err(into_anyhow)?;
+                    let expected_token = recovery_token(state.profile_generation, &current);
+                    let expected_version = current
+                        .record_version()
+                        .checked_add(1)
                         .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
-                        Ok(LoadedSponsorDeadline::new(replacement, next_token))
-                    })
+                    if token.as_bytes() != &expected_token
+                        || replacement.record_version() != expected_version
+                    {
+                        return Err(into_anyhow(SpaceAdmissionStateStoreError::conflict()));
+                    }
+                    let sealed = self
+                        .seal_record(&replacement, stored.wrapped_data_key)
+                        .map_err(into_anyhow)?;
+                    state.records.insert(admission_id, sealed);
+                    self.save_state_on(conn, &state).map_err(into_anyhow)?;
+                    let next_token = AdmissionRecoveryCommitToken::from_bytes(recovery_token(
+                        state.profile_generation,
+                        &replacement,
+                    ))
+                    .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
+                    Ok(LoadedSponsorDeadline::new(replacement, next_token))
                 })
-                .map_err(map_executor_error)
-                .map_err(map_recovery_error)
+            })
+            .map_err(map_executor_error)
+            .map_err(map_recovery_error)
         })
         .await
     }
@@ -205,45 +202,44 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
     ) -> Result<LoadedSponsorAbandonment, PendingAdmissionRecoveryStateError> {
         observe_local_result(LocalWorkStep::SponsorStateCommit, async {
             let replacement = transition.into_replacement();
-            self.executor
-                .run(|conn| {
-                    conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
-                        let mut state = self
-                            .load_state_in_transaction_on(conn)
-                            .map_err(into_anyhow)?;
-                        let admission_id = *replacement.admission_id().as_bytes();
-                        let stored =
-                            state.records.get(&admission_id).cloned().ok_or_else(|| {
-                                into_anyhow(SpaceAdmissionStateStoreError::conflict())
-                            })?;
-                        let current = self
-                            .open_record(admission_id, &stored)
-                            .map_err(into_anyhow)?;
-                        let expected_token = recovery_token(state.profile_generation, &current);
-                        let expected_version = current
-                            .record_version()
-                            .checked_add(1)
-                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
-                        if token.as_bytes() != &expected_token
-                            || replacement.record_version() != expected_version
-                        {
-                            return Err(into_anyhow(SpaceAdmissionStateStoreError::conflict()));
-                        }
-                        let sealed = self
-                            .seal_record(&replacement, stored.wrapped_data_key)
-                            .map_err(into_anyhow)?;
-                        state.records.insert(admission_id, sealed);
-                        self.save_state_on(conn, &state).map_err(into_anyhow)?;
-                        let next_token = AdmissionRecoveryCommitToken::from_bytes(recovery_token(
-                            state.profile_generation,
-                            &replacement,
-                        ))
+            self.run_keyed(|conn| {
+                conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
+                    let mut state = self
+                        .load_state_in_transaction_on(conn)
+                        .map_err(into_anyhow)?;
+                    let admission_id = *replacement.admission_id().as_bytes();
+                    let stored =
+                        state.records.get(&admission_id).cloned().ok_or_else(|| {
+                            into_anyhow(SpaceAdmissionStateStoreError::conflict())
+                        })?;
+                    let current = self
+                        .open_record(admission_id, &stored)
+                        .map_err(into_anyhow)?;
+                    let expected_token = recovery_token(state.profile_generation, &current);
+                    let expected_version = current
+                        .record_version()
+                        .checked_add(1)
                         .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
-                        Ok(LoadedSponsorAbandonment::new(replacement, next_token))
-                    })
+                    if token.as_bytes() != &expected_token
+                        || replacement.record_version() != expected_version
+                    {
+                        return Err(into_anyhow(SpaceAdmissionStateStoreError::conflict()));
+                    }
+                    let sealed = self
+                        .seal_record(&replacement, stored.wrapped_data_key)
+                        .map_err(into_anyhow)?;
+                    state.records.insert(admission_id, sealed);
+                    self.save_state_on(conn, &state).map_err(into_anyhow)?;
+                    let next_token = AdmissionRecoveryCommitToken::from_bytes(recovery_token(
+                        state.profile_generation,
+                        &replacement,
+                    ))
+                    .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
+                    Ok(LoadedSponsorAbandonment::new(replacement, next_token))
                 })
-                .map_err(map_executor_error)
-                .map_err(map_recovery_error)
+            })
+            .map_err(map_executor_error)
+            .map_err(map_recovery_error)
         })
         .await
     }

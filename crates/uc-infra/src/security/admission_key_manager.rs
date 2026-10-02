@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -12,6 +14,34 @@ use super::crypto_model::EncryptedBlob;
 use super::{v1_aead, MasterKey};
 
 pub(super) const PROFILE_ADMISSION_KEY_NAME: &str = "profile_admission_master_key:v1";
+
+static NEXT_MANAGER_ID: AtomicU64 = AtomicU64::new(1);
+
+thread_local! {
+    static ACTIVE_KEY_SCOPE: RefCell<Option<KeyScope>> = const { RefCell::new(None) };
+}
+
+/// 一次同步操作内共用的画像准入密钥：只存在于该线程的该次操作期间，结束即清零，不跨操作、不跨线程。
+struct KeyScope {
+    manager_id: u64,
+    key: Option<MasterKey>,
+}
+
+enum KeyScopeEntry {
+    Owner,
+    Joined,
+    Foreign,
+}
+
+struct KeyScopeGuard(KeyScopeEntry);
+
+impl Drop for KeyScopeGuard {
+    fn drop(&mut self) {
+        if matches!(self.0, KeyScopeEntry::Owner) {
+            ACTIVE_KEY_SCOPE.with(|scope| *scope.borrow_mut() = None);
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum AdmissionKeyError {
@@ -88,6 +118,7 @@ pub struct WrappedSpaceAdmissionDataKey {
 
 #[derive(Clone)]
 pub struct AdmissionKeyManager {
+    id: u64,
     secure_storage: Arc<dyn SecureStoragePort>,
     profile_generation: [u8; 16],
 }
@@ -131,9 +162,67 @@ impl ProfilePayloadReader {
 impl AdmissionKeyManager {
     pub fn new(secure_storage: Arc<dyn SecureStoragePort>, profile_generation: [u8; 16]) -> Self {
         Self {
+            id: NEXT_MANAGER_ID.fetch_add(1, Ordering::Relaxed),
             secure_storage,
             profile_generation,
         }
+    }
+
+    /// 在闭包内让同一线程上的所有密钥使用只读取一次安全存储。
+    ///
+    /// 闭包必须是同步的：密钥不得跨 `await` 或线程保留，闭包返回（含 panic）后立即清零。嵌套调用共用外层
+    /// 的密钥；已有其他管理器的作用域时不缓存，行为与不使用作用域完全一致。
+    pub(crate) fn scoped<T>(&self, work: impl FnOnce() -> T) -> T {
+        let entry = ACTIVE_KEY_SCOPE.with(|scope| {
+            let mut scope = scope.borrow_mut();
+            match scope.as_ref() {
+                None => {
+                    *scope = Some(KeyScope {
+                        manager_id: self.id,
+                        key: None,
+                    });
+                    KeyScopeEntry::Owner
+                }
+                Some(active) if active.manager_id == self.id => KeyScopeEntry::Joined,
+                Some(_) => KeyScopeEntry::Foreign,
+            }
+        });
+        let _guard = KeyScopeGuard(entry);
+        work()
+    }
+
+    fn scoped_key(&self) -> Option<MasterKey> {
+        ACTIVE_KEY_SCOPE.with(|scope| {
+            scope
+                .borrow()
+                .as_ref()
+                .filter(|active| active.manager_id == self.id)
+                .and_then(|active| active.key.clone())
+        })
+    }
+
+    fn remember_scoped_key(&self, key: &MasterKey) {
+        ACTIVE_KEY_SCOPE.with(|scope| {
+            if let Some(active) = scope
+                .borrow_mut()
+                .as_mut()
+                .filter(|active| active.manager_id == self.id)
+            {
+                active.key = Some(key.clone());
+            }
+        });
+    }
+
+    fn forget_scoped_key(&self) {
+        ACTIVE_KEY_SCOPE.with(|scope| {
+            if let Some(active) = scope
+                .borrow_mut()
+                .as_mut()
+                .filter(|active| active.manager_id == self.id)
+            {
+                active.key = None;
+            }
+        });
     }
 
     /// 读取画像准入密钥的存储字节；每次读取都计入当前被观测工作的安全存储用量。
@@ -145,6 +234,15 @@ impl AdmissionKeyManager {
     }
 
     fn profile_key(&self) -> Result<MasterKey, AdmissionKeyError> {
+        if let Some(key) = self.scoped_key() {
+            return Ok(key);
+        }
+        let key = self.load_or_create_profile_key()?;
+        self.remember_scoped_key(&key);
+        Ok(key)
+    }
+
+    fn load_or_create_profile_key(&self) -> Result<MasterKey, AdmissionKeyError> {
         if let Some(bytes) = self.read_profile_key_bytes()? {
             return MasterKey::from_bytes(&bytes).map_err(AdmissionKeyError::corrupt);
         }
@@ -163,10 +261,15 @@ impl AdmissionKeyManager {
     }
 
     fn existing_profile_key(&self) -> Result<MasterKey, AdmissionKeyError> {
+        if let Some(key) = self.scoped_key() {
+            return Ok(key);
+        }
         let bytes = self
             .read_profile_key_bytes()?
             .ok_or(AdmissionKeyError::Missing)?;
-        MasterKey::from_bytes(&bytes).map_err(AdmissionKeyError::corrupt)
+        let key = MasterKey::from_bytes(&bytes).map_err(AdmissionKeyError::corrupt)?;
+        self.remember_scoped_key(&key);
+        Ok(key)
     }
 
     pub(crate) const fn profile_generation(&self) -> [u8; 16] {
@@ -181,6 +284,7 @@ impl AdmissionKeyManager {
     }
 
     pub fn delete_profile_key(&self) -> Result<(), AdmissionKeyError> {
+        self.forget_scoped_key();
         self.secure_storage
             .delete(PROFILE_ADMISSION_KEY_NAME)
             .map_err(AdmissionKeyError::from)?;
@@ -387,10 +491,18 @@ mod tests {
     #[derive(Default)]
     struct MemorySecureStorage {
         values: Mutex<HashMap<String, Vec<u8>>>,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl MemorySecureStorage {
+        fn reads(&self) -> usize {
+            self.reads.load(std::sync::atomic::Ordering::SeqCst)
+        }
     }
 
     impl SecureStoragePort for MemorySecureStorage {
         fn get(&self, key: &str) -> Result<Option<Vec<u8>>, SecureStorageError> {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(self.values.lock().unwrap().get(key).cloned())
         }
 
@@ -540,5 +652,109 @@ mod tests {
             }
         ));
         assert!(std::error::Error::source(&error).is_some());
+    }
+
+    #[test]
+    fn scoped_operation_reads_secure_storage_once_for_every_key_use() {
+        let storage = Arc::new(MemorySecureStorage::default());
+        let manager = AdmissionKeyManager::new(storage.clone(), [1; 16]);
+        manager.seal_profile_payload(b"warm", b"x").unwrap();
+        let before = storage.reads();
+
+        let sealed = manager.scoped(|| {
+            let first = manager.seal_profile_payload(b"purpose", b"one").unwrap();
+            let second = manager
+                .seal_profile_payload_compact(b"purpose", b"two")
+                .unwrap();
+            manager.repository_token(b"token", b"value").unwrap();
+            manager.profile_payload_reader(b"purpose").unwrap();
+            manager.scoped(|| manager.repository_token(b"token", b"nested").unwrap());
+            (first, second)
+        });
+
+        assert_eq!(storage.reads() - before, 1, "one read for the whole scope");
+        assert_eq!(
+            manager.open_profile_payload(b"purpose", &sealed.0).unwrap(),
+            b"one"
+        );
+    }
+
+    #[test]
+    fn key_is_not_kept_after_the_scope_ends() {
+        let storage = Arc::new(MemorySecureStorage::default());
+        let manager = AdmissionKeyManager::new(storage.clone(), [1; 16]);
+        manager.scoped(|| manager.repository_token(b"t", b"v").unwrap());
+        let after_scope = storage.reads();
+
+        manager.repository_token(b"t", b"v").unwrap();
+        manager.repository_token(b"t", b"v").unwrap();
+
+        assert_eq!(
+            storage.reads() - after_scope,
+            2,
+            "outside a scope every use reads"
+        );
+    }
+
+    #[test]
+    fn scope_does_not_survive_a_panic() {
+        let storage = Arc::new(MemorySecureStorage::default());
+        let manager = AdmissionKeyManager::new(storage.clone(), [1; 16]);
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            manager.scoped(|| {
+                manager.repository_token(b"t", b"v").unwrap();
+                panic!("simulated failure inside a scope");
+            })
+        }));
+        assert!(panicked.is_err());
+        let before = storage.reads();
+
+        manager.repository_token(b"t", b"v").unwrap();
+
+        assert_eq!(
+            storage.reads() - before,
+            1,
+            "the aborted scope left nothing cached"
+        );
+    }
+
+    #[test]
+    fn deleting_the_key_inside_a_scope_drops_the_cached_copy() {
+        let storage = Arc::new(MemorySecureStorage::default());
+        let manager = AdmissionKeyManager::new(storage.clone(), [1; 16]);
+        manager.scoped(|| {
+            manager.repository_token(b"t", b"v").unwrap();
+            manager.delete_profile_key().unwrap();
+            assert!(!manager.profile_key_exists().unwrap());
+            // 删除后重新生成的是新密钥，不能继续沿用旧的缓存副本。
+            let regenerated = manager.profile_key().unwrap();
+            assert_eq!(
+                storage
+                    .get("profile_admission_master_key:v1")
+                    .unwrap()
+                    .unwrap(),
+                regenerated.as_bytes()
+            );
+        });
+    }
+
+    #[test]
+    fn a_scope_of_another_manager_is_never_used() {
+        let storage = Arc::new(MemorySecureStorage::default());
+        let first = AdmissionKeyManager::new(storage.clone(), [1; 16]);
+        let second = AdmissionKeyManager::new(storage.clone(), [2; 16]);
+        first.scoped(|| {
+            first.repository_token(b"t", b"v").unwrap();
+            let before = storage.reads();
+            second.scoped(|| {
+                second.repository_token(b"t", b"v").unwrap();
+                second.repository_token(b"t", b"v").unwrap();
+            });
+            assert_eq!(
+                storage.reads() - before,
+                2,
+                "a foreign active scope disables caching rather than leaking the key"
+            );
+        });
     }
 }

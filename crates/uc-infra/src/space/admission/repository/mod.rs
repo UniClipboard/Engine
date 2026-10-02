@@ -22,6 +22,8 @@ mod tests;
 
 use std::sync::{Arc, Mutex};
 
+use diesel::SqliteConnection;
+
 use crate::db::ports::DbExecutor;
 use crate::security::{ActiveSpaceGenerationManifestStore, AdmissionKeyManager};
 use uc_application::deps::AdmissionReadFailureCategory;
@@ -219,33 +221,41 @@ impl CredentialLoadError {
 }
 
 impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
+    /// 在一次数据库操作内让所有加解密共用一次安全存储读取；操作结束后密钥立即清零。
+    // rust-style: allow-qualified-path -- 可见性必须覆盖 admission 下相邻的 joiner、sponsor 与 recovery 模块
+    pub(in crate::space::admission) fn run_keyed<T>(
+        &self,
+        work: impl FnOnce(&mut SqliteConnection) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        self.executor.run(|conn| self.keys.scoped(|| work(conn)))
+    }
+
     pub(in crate::space::admission) fn load_continuation_credential(
         &self,
         admission_id: SpaceAdmissionId,
     ) -> Result<AdmissionContinuationCredential, CredentialLoadError> {
-        self.executor
-            .run(|conn| {
-                let state = self
-                    .load_state_on(conn)
-                    .map_err(CredentialLoadError::from)?;
-                let stored = state
-                    .records
-                    .get(admission_id.as_bytes())
-                    .ok_or(CredentialLoadError::RecordMissing)?;
-                let aggregate = self
-                    .open_record(*admission_id.as_bytes(), stored)
-                    .map_err(CredentialLoadError::from)?;
-                let credential = aggregate
-                    .sponsor_continuation_credential()
-                    .ok_or(CredentialLoadError::CredentialMissing)?;
-                AdmissionContinuationCredential::from_bytes(credential.as_bytes().to_vec()).map_err(
-                    |source| {
-                        anyhow::Error::new(CredentialLoadError::Invalid {
-                            source: anyhow::Error::new(source),
-                        })
-                    },
-                )
-            })
-            .map_err(CredentialLoadError::from_executor)
+        self.run_keyed(|conn| {
+            let state = self
+                .load_state_on(conn)
+                .map_err(CredentialLoadError::from)?;
+            let stored = state
+                .records
+                .get(admission_id.as_bytes())
+                .ok_or(CredentialLoadError::RecordMissing)?;
+            let aggregate = self
+                .open_record(*admission_id.as_bytes(), stored)
+                .map_err(CredentialLoadError::from)?;
+            let credential = aggregate
+                .sponsor_continuation_credential()
+                .ok_or(CredentialLoadError::CredentialMissing)?;
+            AdmissionContinuationCredential::from_bytes(credential.as_bytes().to_vec()).map_err(
+                |source| {
+                    anyhow::Error::new(CredentialLoadError::Invalid {
+                        source: anyhow::Error::new(source),
+                    })
+                },
+            )
+        })
+        .map_err(CredentialLoadError::from_executor)
     }
 }

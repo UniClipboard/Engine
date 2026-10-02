@@ -175,15 +175,21 @@ async fn uninterrupted_admission_uses_one_trace() {
             "缺少配对内部分项记录：{step}"
         );
     }
-    assert!(
-        local_records.iter().any(|r| {
+    let commit_reads: Vec<u64> = local_records
+        .iter()
+        .filter(|r| {
             r["fields"]["event.name"] == "runtime.work.finished"
-                && r["fields"]["step"] == "repository_save"
-                && r["fields"]["secure_storage_reads"]
-                    .as_u64()
-                    .is_some_and(|reads| reads > 0)
-        }),
-        "仓库保存必须报告安全存储读取次数与耗时"
+                && r["fields"]["step"] == "joiner_state_commit"
+        })
+        .filter_map(|r| r["fields"]["secure_storage_reads"].as_u64())
+        .collect();
+    assert!(
+        !commit_reads.is_empty(),
+        "状态提交必须报告安全存储读取次数与耗时"
+    );
+    assert!(
+        commit_reads.iter().all(|reads| *reads <= 3),
+        "一次状态提交应只读取安全存储常数次，而不是随记录数增长：{commit_reads:?}"
     );
     for message in ["join_request", "prepared", "applied", "complete_ack"] {
         for role in ["joiner", "sponsor"] {

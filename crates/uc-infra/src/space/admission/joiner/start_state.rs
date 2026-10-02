@@ -24,37 +24,36 @@ impl<E: DbExecutor + Send + Sync> JoinerStartStatePort for SqliteSpaceAdmissionS
                     .await
                     .map_err(map_joiner_error)?;
                 let source_bytes = source_snapshot.as_bytes().to_vec();
-                self.executor
-                    .run(|conn| {
-                        let state = self.load_state_on(conn).map_err(into_anyhow)?;
-                        let current_join = state
-                            .current_local_join_id
-                            .map(|id| {
-                                let stored = state
-                                    .records
-                                    .get(&id)
-                                    .ok_or_else(SpaceAdmissionStateStoreError::corrupt)?;
-                                let record = self.open_record(id, stored)?;
-                                JoinerAdmission::try_from_record(record)
-                                    .ok_or_else(SpaceAdmissionStateStoreError::corrupt)
-                            })
-                            .transpose()?;
-                        let token = SpaceAdmissionCommitToken::from_bytes(joiner_start_token(
-                            &state,
-                            current_join.as_ref(),
-                            &source_bytes,
-                        ))
-                        .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
-                        Ok(LoadedJoinerStartState::new(
-                            state.next_local_join_ordinal,
-                            source_snapshot,
-                            current_join,
-                            requires_session_transition,
-                            token,
-                        ))
-                    })
-                    .map_err(map_executor_error)
-                    .map_err(map_joiner_error)
+                self.run_keyed(|conn| {
+                    let state = self.load_state_on(conn).map_err(into_anyhow)?;
+                    let current_join = state
+                        .current_local_join_id
+                        .map(|id| {
+                            let stored = state
+                                .records
+                                .get(&id)
+                                .ok_or_else(SpaceAdmissionStateStoreError::corrupt)?;
+                            let record = self.open_record(id, stored)?;
+                            JoinerAdmission::try_from_record(record)
+                                .ok_or_else(SpaceAdmissionStateStoreError::corrupt)
+                        })
+                        .transpose()?;
+                    let token = SpaceAdmissionCommitToken::from_bytes(joiner_start_token(
+                        &state,
+                        current_join.as_ref(),
+                        &source_bytes,
+                    ))
+                    .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
+                    Ok(LoadedJoinerStartState::new(
+                        state.next_local_join_ordinal,
+                        source_snapshot,
+                        current_join,
+                        requires_session_transition,
+                        token,
+                    ))
+                })
+                .map_err(map_executor_error)
+                .map_err(map_joiner_error)
             })
             .await
         }
@@ -79,8 +78,7 @@ impl<E: DbExecutor + Send + Sync> JoinerStartStatePort for SqliteSpaceAdmissionS
             let created = created.into_replacement();
             let superseded = superseded.map(|transition| transition.into_replacement());
 
-            self.executor
-                .run(|conn| {
+            self.run_keyed(|conn| {
                     conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
                         let mut state = self
                             .load_state_in_transaction_on(conn)
