@@ -140,6 +140,11 @@ impl GroupRevocationPort for PassivePorts {
     ) -> Result<GroupUpdateDeliveryStatus, KeyEpochError> {
         Ok(GroupUpdateDeliveryStatus::Completed)
     }
+    async fn space_group_update_recipient_status(
+        &self,
+    ) -> Result<Vec<GroupUpdateRecipientStatus>, KeyEpochError> {
+        Ok(Vec::new())
+    }
     async fn acknowledge_space_group_update(&self, _: &str, _: i64) -> Result<bool, KeyEpochError> {
         Ok(false)
     }

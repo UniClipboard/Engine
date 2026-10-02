@@ -3084,6 +3084,7 @@ mod tests {
                 pairing_confirmation: Some(
                     uc_engine::PairingConfirmationSummary::AwaitingPeerConfirmation,
                 ),
+                update: uc_engine::DeviceUpdateSummary::default(),
                 available_actions: Vec::new(),
                 blocked_reason: None,
             });

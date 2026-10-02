@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use crate::ids::DeviceId;
-use crate::membership::{AdmissionChangeFacts, MemberInstanceId};
+use crate::membership::{AdmissionChangeFacts, BaseMembershipHistoryPosition, MemberInstanceId};
 
 use super::{LedgerTransitionError, MembershipLedger, PeerLink, PeerRelation, PeerSyncOutcome};
 
@@ -44,6 +44,22 @@ pub enum PeerSyncView {
     Paused(PeerPauseReason),
 }
 
+/// 本机把成员历史送达某台设备的进度；只描述该设备，不含网络细节。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerHistoryUpdateView {
+    /// 本机、已移除或尚未激活的设备，没有历史更新可做。
+    NotApplicable,
+    UpToDate,
+    /// 尚未同步或仍有待送达的决定。
+    Pending,
+    /// 上次尝试被推迟，到时间再试。
+    Retrying {
+        next_retry_at_ms: i64,
+    },
+    /// 对端稳定拒绝了本机历史。
+    Rejected,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LedgerDeviceView {
     pub device_id: DeviceId,
@@ -52,6 +68,7 @@ pub struct LedgerDeviceView {
     pub status: LedgerMemberStatus,
     pub relation: PeerRelationView,
     pub sync: PeerSyncView,
+    pub history_update: PeerHistoryUpdateView,
 }
 
 /// 普通消费者可用的对端范围；暂停的对端只能继续缩小，不能加回可用范围。
@@ -289,6 +306,14 @@ impl MembershipLedger {
                     }
                 }
             };
+            let history_update = if is_local
+                || status != LedgerMemberStatus::Active
+                || self.local_status() != LedgerMemberStatus::Active
+            {
+                PeerHistoryUpdateView::NotApplicable
+            } else {
+                self.history_update_view(&device_id, &current)
+            };
             views.push(LedgerDeviceView {
                 device_id,
                 is_local,
@@ -296,9 +321,37 @@ impl MembershipLedger {
                 status,
                 relation,
                 sync,
+                history_update,
             });
         }
         Ok(views)
+    }
+
+    /// 一台已激活对端的历史更新进度；与整体 `device_update` 使用同一组判定。
+    fn history_update_view(
+        &self,
+        device: &DeviceId,
+        current: &BaseMembershipHistoryPosition,
+    ) -> PeerHistoryUpdateView {
+        let Some(PeerLink::Member(member)) = self.peers.get(device) else {
+            return PeerHistoryUpdateView::Pending;
+        };
+        if member.outgoing_decision().is_some() {
+            return PeerHistoryUpdateView::Pending;
+        }
+        let needs_sync = member.needs_history_sync(current);
+        match member.sync().last_outcome() {
+            PeerSyncOutcome::StableRejected => PeerHistoryUpdateView::Rejected,
+            PeerSyncOutcome::Deferred if needs_sync => PeerHistoryUpdateView::Retrying {
+                next_retry_at_ms: member.sync().next_attempt_at_ms(),
+            },
+            PeerSyncOutcome::Never | PeerSyncOutcome::Acked if needs_sync => {
+                PeerHistoryUpdateView::Pending
+            }
+            PeerSyncOutcome::Never | PeerSyncOutcome::Deferred | PeerSyncOutcome::Acked => {
+                PeerHistoryUpdateView::UpToDate
+            }
+        }
     }
 
     fn device_update(

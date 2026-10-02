@@ -157,6 +157,17 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
             .map_err(transaction_failure)
     }
 
+    async fn group_update_recipient_status(
+        &self,
+        space_id: &SpaceId,
+    ) -> Result<Vec<uc_core::membership::GroupUpdateRecipientStatus>, KeyEpochError> {
+        self.due_group_updates(space_id, i64::MIN, None).await?;
+        let key = self.session.get_master_key().map_err(backend)?;
+        self.executor
+            .run(|conn| Ok(self.load_group_update_recipient_status_on(conn, &key, space_id)?))
+            .map_err(transaction_failure)
+    }
+
     async fn begin_revocation(
         &self,
         prepared: &RevocationRecord,

@@ -6,11 +6,11 @@ use base64::Engine as _;
 
 use uc_application::facade::{
     AppFacade, ContentTypesPatch as AppContentTypesPatch, CurrentJoinStatus, DeviceTrustMembership,
-    DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, InboundPairingStatus,
-    JoinSpaceTerminationReason, MemberProtectionStatusView,
-    MemberSyncPreferencesPatch as AppMemberSyncPreferencesPatch, MemberSyncPreferencesView,
-    PairingConfirmationStatus, RemoveSpaceMemberError, RosterError, SpaceProtectionModeView,
-    SpaceProtectionView,
+    DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, DeviceUpdate,
+    DeviceUpdateItem, DeviceUpdateState, InboundPairingStatus, JoinSpaceTerminationReason,
+    MemberProtectionStatusView, MemberSyncPreferencesPatch as AppMemberSyncPreferencesPatch,
+    MemberSyncPreferencesView, PairingConfirmationStatus, RemoveSpaceMemberError, RosterError,
+    SpaceProtectionModeView, SpaceProtectionView,
 };
 use uc_core::ports::ReachabilityState;
 
@@ -19,7 +19,8 @@ use crate::{
     DeviceGroupRelationshipSummary, DeviceMembershipSummary, DeviceReachabilitySummary,
     DeviceSummary, DeviceSyncRelationshipSummary, DeviceTrustChangeSummary,
     DeviceTrustChoiceSummary, DeviceTrustImpactSummary, DeviceTrustRecoverySummary,
-    DeviceTrustRelationshipSummary, DeviceTrustSnapshotSummary, EngineError, EngineErrorCategory,
+    DeviceTrustRelationshipSummary, DeviceTrustSnapshotSummary, DeviceUpdateItemSummary,
+    DeviceUpdateStateSummary, DeviceUpdateSummary, EngineError, EngineErrorCategory,
     InboundPairingStatusSummary, InboundPairingSummary, JoinSpaceAttentionReasonSummary,
     JoinSpaceAttentionRecoverySummary, JoinSpaceRejectionReasonSummary, JoinSpaceStatusSummary,
     JoinSpaceTerminationReasonSummary, JoinedSpaceSummary, MemberProtectionStatusSummary,
@@ -261,6 +262,7 @@ pub(crate) fn device_trust_snapshot(snapshot: DeviceTrustStatus) -> DeviceTrustS
                     }
                     PairingConfirmationStatus::Confirmed => PairingConfirmationSummary::Confirmed,
                 }),
+                update: device_update_summary(device.update),
                 available_actions: Vec::new(),
                 blocked_reason: None,
             })
@@ -269,6 +271,30 @@ pub(crate) fn device_trust_snapshot(snapshot: DeviceTrustStatus) -> DeviceTrustS
         allowed_actions: Vec::new(),
         blocked_reason: None,
         updated_at_ms: 0,
+    }
+}
+
+fn device_update_summary(update: DeviceUpdate) -> DeviceUpdateSummary {
+    DeviceUpdateSummary {
+        state: match update.state {
+            DeviceUpdateState::UpToDate => DeviceUpdateStateSummary::UpToDate,
+            DeviceUpdateState::Pending => DeviceUpdateStateSummary::Pending,
+            DeviceUpdateState::Retrying => DeviceUpdateStateSummary::Retrying,
+            DeviceUpdateState::NeedsAttention => DeviceUpdateStateSummary::NeedsAttention,
+            DeviceUpdateState::UpgradeRequired => DeviceUpdateStateSummary::UpgradeRequired,
+        },
+        pending: update
+            .pending
+            .into_iter()
+            .map(|item| match item {
+                DeviceUpdateItem::HistorySync => DeviceUpdateItemSummary::HistorySync,
+                DeviceUpdateItem::GroupKeyUpdate => DeviceUpdateItemSummary::GroupKeyUpdate,
+                DeviceUpdateItem::RelationshipConfirmation => {
+                    DeviceUpdateItemSummary::RelationshipConfirmation
+                }
+            })
+            .collect(),
+        next_retry_at_ms: update.next_retry_at_ms,
     }
 }
 
@@ -673,7 +699,7 @@ mod tests {
 
     fn handoff_pending_removal(includes_local_device: bool) -> DeviceTrustStatus {
         use uc_application::deps::SpaceMemberPauseReason;
-        use uc_application::facade::{DeviceTrustDevice, PendingDeviceTrustChange};
+        use uc_application::facade::{DeviceTrustDevice, DeviceUpdate, PendingDeviceTrustChange};
         use uc_core::{membership::MembershipEventId, DeviceId};
 
         let members = |ids: &[&str]| {
@@ -764,6 +790,7 @@ mod tests {
                         DeviceTrustSyncState::Usable
                     },
                     pairing_confirmation: None,
+                    update: DeviceUpdate::up_to_date(),
                 })
                 .collect(),
         }

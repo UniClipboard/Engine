@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    LedgerMemberStatus, LedgerUpdateProblem, LedgerUpdateView, MemberInstanceId, MembershipLedger,
-    MembershipOperationV2, PeerLink, PeerRelationView, PeerSyncView, SecurityDeliveryStatus,
+    GroupUpdateDeliveryStatus, LedgerDeviceView, LedgerMemberStatus, LedgerUpdateProblem,
+    LedgerUpdateView, MemberInstanceId, MembershipLedger, MembershipOperationV2,
+    PeerHistoryUpdateView, PeerLink, PeerRelationView, PeerSyncView, SecurityDeliveryStatus,
     VersionedMembershipHistory,
 };
 use uc_core::ports::{LocalIdentityPort, ReachabilityState};
@@ -18,7 +20,8 @@ use crate::space::membership::{
 use super::dependency::TrustDependency;
 use super::{
     DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership, DeviceTrustObservation,
-    DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, LoadCurrentJoinStatusPort,
+    DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, DeviceUpdate,
+    DeviceUpdateItem, DeviceUpdateState, LoadCurrentJoinStatusPort,
     LoadDeviceTrustObservationsPort, LoadSecurityDeviceUpdateStatusPort, PairingConfirmationTarget,
     PendingDeviceTrustChange, QueryDeviceTrustError, SpaceDeviceUpdatePhase,
     SpaceDeviceUpdateProblem, SpaceDeviceUpdateRecovery, SpaceDeviceUpdateStatus,
@@ -143,6 +146,15 @@ impl QueryDeviceTrustUseCase {
             .load_security_device_update_status()
             .await
             .map_err(|error| TrustDependency::SecurityUpdateStatus.diagnose(error))?;
+        let recipient_updates: BTreeMap<DeviceId, GroupUpdateDeliveryStatus> = self
+            .security_updates
+            .load_security_recipient_updates()
+            .await
+            .map_err(|error| TrustDependency::SecurityUpdateStatus.diagnose(error))?
+            .into_iter()
+            .map(|entry| (entry.recipient, entry.status))
+            .collect();
+        let now_ms = self.owner.now_ms();
         let presented = ledger
             .present(security_delivery(security_updates))
             .map_err(QueryDeviceTrustError::recovery_required_from)?;
@@ -208,6 +220,11 @@ impl QueryDeviceTrustUseCase {
                             })
                     })
                     .and_then(|target| pairing_confirmations.get(&target).copied()),
+                update: device_update_of(
+                    device,
+                    recipient_updates.get(&device.device_id).copied(),
+                    now_ms,
+                ),
             });
         }
 
@@ -337,6 +354,9 @@ impl LocalIdentityPort for MissingLocalIdentity {
 }
 
 #[cfg(test)]
+use uc_core::membership::GroupUpdateRecipientStatus;
+
+#[cfg(test)]
 struct CompletedSecurityUpdates;
 
 #[cfg(test)]
@@ -346,6 +366,12 @@ impl LoadSecurityDeviceUpdateStatusPort for CompletedSecurityUpdates {
         &self,
     ) -> Result<SpaceDeviceUpdateStatus, QueryDeviceTrustError> {
         Ok(SpaceDeviceUpdateStatus::completed())
+    }
+
+    async fn load_security_recipient_updates(
+        &self,
+    ) -> Result<Vec<GroupUpdateRecipientStatus>, QueryDeviceTrustError> {
+        Ok(Vec::new())
     }
 }
 
@@ -512,6 +538,104 @@ fn relationship_of(relation: PeerRelationView) -> DeviceTrustRelationship {
 }
 
 /// 组密钥投递的观察结果；需要处理的投递一律视为被拒绝。
+/// 把一台设备在账本中的历史、关系状态与组密钥投递进度合成它自己的更新进度。
+///
+/// 状态取最需要关注的一项：需要处理 > 需要升级 > 等待重试 > 待处理 > 已是最新。
+fn device_update_of(
+    device: &LedgerDeviceView,
+    security: Option<GroupUpdateDeliveryStatus>,
+    now_ms: i64,
+) -> DeviceUpdate {
+    if device.is_local || device.status == LedgerMemberStatus::Removed {
+        return DeviceUpdate::up_to_date();
+    }
+    let mut state = DeviceUpdateState::UpToDate;
+    let mut pending = Vec::new();
+    let mut next_retry_at_ms: Option<i64> = None;
+    let mut escalate = |candidate: DeviceUpdateState| {
+        if severity(candidate) > severity(state) {
+            state = candidate;
+        }
+    };
+    let retry = |at_ms: i64, next_retry: &mut Option<i64>| {
+        *next_retry = Some(next_retry.map_or(at_ms, |known| known.min(at_ms)));
+    };
+    if device.status == LedgerMemberStatus::PendingActivation {
+        pending.push(DeviceUpdateItem::RelationshipConfirmation);
+        escalate(DeviceUpdateState::Pending);
+    }
+    match device.relation {
+        PeerRelationView::UpgradeRequired => escalate(DeviceUpdateState::UpgradeRequired),
+        PeerRelationView::PendingLocalDecision
+        | PeerRelationView::Diverged
+        | PeerRelationView::Invalid => escalate(DeviceUpdateState::NeedsAttention),
+        PeerRelationView::ConfirmationPending | PeerRelationView::Unknown
+            if device.status == LedgerMemberStatus::Active =>
+        {
+            pending.push(DeviceUpdateItem::RelationshipConfirmation);
+            escalate(DeviceUpdateState::Pending);
+        }
+        PeerRelationView::Local
+        | PeerRelationView::Consistent
+        | PeerRelationView::ConfirmationPending
+        | PeerRelationView::AwaitingRemovalAcknowledgement
+        | PeerRelationView::Unknown => {}
+    }
+    match device.history_update {
+        PeerHistoryUpdateView::NotApplicable | PeerHistoryUpdateView::UpToDate => {}
+        PeerHistoryUpdateView::Pending => {
+            pending.push(DeviceUpdateItem::HistorySync);
+            escalate(DeviceUpdateState::Pending);
+        }
+        PeerHistoryUpdateView::Retrying {
+            next_retry_at_ms: at_ms,
+        } => {
+            pending.push(DeviceUpdateItem::HistorySync);
+            retry(at_ms, &mut next_retry_at_ms);
+            escalate(DeviceUpdateState::Retrying);
+        }
+        PeerHistoryUpdateView::Rejected => {
+            pending.push(DeviceUpdateItem::HistorySync);
+            escalate(DeviceUpdateState::NeedsAttention);
+        }
+    }
+    match security {
+        None | Some(GroupUpdateDeliveryStatus::Completed) => {}
+        Some(GroupUpdateDeliveryStatus::Pending { next_attempt_at_ms }) => {
+            pending.push(DeviceUpdateItem::GroupKeyUpdate);
+            if next_attempt_at_ms > now_ms {
+                retry(next_attempt_at_ms, &mut next_retry_at_ms);
+                escalate(DeviceUpdateState::Retrying);
+            } else {
+                escalate(DeviceUpdateState::Pending);
+            }
+        }
+        Some(GroupUpdateDeliveryStatus::Rejected) => {
+            pending.push(DeviceUpdateItem::GroupKeyUpdate);
+            escalate(DeviceUpdateState::NeedsAttention);
+        }
+    }
+    pending.sort();
+    pending.dedup();
+    DeviceUpdate {
+        state,
+        pending,
+        next_retry_at_ms: (state == DeviceUpdateState::Retrying)
+            .then_some(next_retry_at_ms)
+            .flatten(),
+    }
+}
+
+const fn severity(state: DeviceUpdateState) -> u8 {
+    match state {
+        DeviceUpdateState::UpToDate => 0,
+        DeviceUpdateState::Pending => 1,
+        DeviceUpdateState::Retrying => 2,
+        DeviceUpdateState::UpgradeRequired => 3,
+        DeviceUpdateState::NeedsAttention => 4,
+    }
+}
+
 fn security_delivery(status: SpaceDeviceUpdateStatus) -> SecurityDeliveryStatus {
     match status.phase {
         SpaceDeviceUpdatePhase::Completed => SecurityDeliveryStatus::Completed,

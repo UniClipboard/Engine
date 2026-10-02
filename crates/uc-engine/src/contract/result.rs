@@ -1332,6 +1332,36 @@ pub struct DeviceTrustChangeSummary {
     pub blocked_reason: Option<DeviceTrustUnavailableReasonSummary>,
 }
 
+/// 本机还欠某台设备的更新进度；只描述这一台设备，不含地址、设备名或内部步骤。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceUpdateStateSummary {
+    #[default]
+    UpToDate,
+    Pending,
+    Retrying,
+    NeedsAttention,
+    UpgradeRequired,
+}
+
+/// 尚未送达或确认的更新项。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceUpdateItemSummary {
+    HistorySync,
+    GroupKeyUpdate,
+    RelationshipConfirmation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DeviceUpdateSummary {
+    pub state: DeviceUpdateStateSummary,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending: Vec<DeviceUpdateItemSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_retry_at_ms: Option<i64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceTrustRelationshipSummary {
     pub device_id: String,
@@ -1344,6 +1374,9 @@ pub struct DeviceTrustRelationshipSummary {
     pub sync_relationship: DeviceSyncRelationshipSummary,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pairing_confirmation: Option<PairingConfirmationSummary>,
+    /// 本机还欠这台设备的更新；整体 `space_device_update` 是各设备与本机状态的汇总。
+    #[serde(default)]
+    pub update: DeviceUpdateSummary,
     pub available_actions: Vec<DeviceTrustActionSummary>,
     pub blocked_reason: Option<DeviceTrustUnavailableReasonSummary>,
 }

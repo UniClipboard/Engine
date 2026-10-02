@@ -75,10 +75,11 @@ pub use membership::{
 };
 pub use membership::{
     DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership, DeviceTrustObservation,
-    DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState,
-    PairingConfirmationObservation, PairingConfirmationStatus, PairingConfirmationTarget,
-    PendingDeviceTrustChange, QueryDeviceTrustError, SpaceDeviceUpdatePhase,
-    SpaceDeviceUpdateProblem, SpaceDeviceUpdateRecovery, SpaceDeviceUpdateStatus,
+    DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, DeviceUpdate,
+    DeviceUpdateItem, DeviceUpdateState, PairingConfirmationObservation, PairingConfirmationStatus,
+    PairingConfirmationTarget, PendingDeviceTrustChange, QueryDeviceTrustError,
+    SpaceDeviceUpdatePhase, SpaceDeviceUpdateProblem, SpaceDeviceUpdateRecovery,
+    SpaceDeviceUpdateStatus,
 };
 pub use membership::{
     MembershipBranchRecoveryRecord, MembershipHistoryExchangeRecord, MembershipRecord,

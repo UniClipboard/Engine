@@ -10,9 +10,9 @@ use super::error::{
 use super::member::SpaceMember;
 use super::membership_history::MembershipHistoryMessage;
 use super::revocation::{
-    GroupEpoch, GroupRevocationResult, GroupUpdateDeliveryStatus, KeyEpochError,
-    PendingGroupUpdate, PreparedRevocationResolution, RevocationId, RevocationRecord,
-    RevocationStage, SpaceKeyMaterial,
+    GroupEpoch, GroupRevocationResult, GroupUpdateDeliveryStatus, GroupUpdateRecipientStatus,
+    KeyEpochError, PendingGroupUpdate, PreparedRevocationResolution, RevocationId,
+    RevocationRecord, RevocationStage, SpaceKeyMaterial,
 };
 use crate::security::IdentityFingerprint;
 
@@ -126,6 +126,12 @@ pub trait RevocationRepositoryPort: Send + Sync {
         &self,
         space_id: &SpaceId,
     ) -> Result<GroupUpdateDeliveryStatus, KeyEpochError>;
+
+    /// 仍未完成投递的收件人及各自进度；与整体状态来自同一份持久队列。
+    async fn group_update_recipient_status(
+        &self,
+        space_id: &SpaceId,
+    ) -> Result<Vec<GroupUpdateRecipientStatus>, KeyEpochError>;
 
     async fn begin_revocation(
         &self,
@@ -255,6 +261,10 @@ pub trait GroupRevocationPort: Send + Sync {
     async fn space_group_update_delivery_status(
         &self,
     ) -> Result<GroupUpdateDeliveryStatus, KeyEpochError>;
+
+    async fn space_group_update_recipient_status(
+        &self,
+    ) -> Result<Vec<GroupUpdateRecipientStatus>, KeyEpochError>;
 
     async fn acknowledge_space_group_update(
         &self,

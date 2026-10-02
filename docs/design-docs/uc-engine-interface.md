@@ -299,6 +299,14 @@ device id 与 display name，但这些字段不得进入日志或调试输出。
 “设备组尚未确认一致”，不能按正常关系展示；有效确认到达后自动恢复为 `consistent`。离线、超时、重启或
 失去通信路径都不能自行清除该状态，它也不等同于已经取得两份不可比较历史的 `diverged`。
 
+每个设备关系还带 `update`，表示本机还欠这一台设备什么：`state`（`up_to_date`、`pending`、`retrying`、
+`needs_attention`、`upgrade_required`）、`pending`（尚未完成的项：`history_sync`、`group_key_update`、
+`relationship_confirmation`）以及 `retrying` 时的 `next_retry_at_ms`。它来自该设备在成员账本中的历史同步进度、
+组密钥更新的逐收件人持久投递进度和设备关系，状态取最需要关注的一项（需要处理 > 需要升级 > 等待重试 >
+待处理）。整体 `space_device_update` 仍保留，用于“全部设备是否已更新”这一个问题；产品要说明具体哪台设备
+联系不上或还没更新时读取这里，不要从整体状态或在线状态推断。字段只包含固定枚举与时间，不含地址、
+内部步骤或错误正文；本机、已移除设备永远是 `up_to_date`。旧客户忽略该字段即可。
+
 产品调用 `ChooseDeviceGroup` 时必须原样回传同一次查询中的 `issue_id`、`choice_id` 和 `expected_revision`。
 结果明确区分完成、仍在等待、需要重新配对、已经完成、状态已变化和需要确认移除本机；状态已变化时重新
 查询，不得用旧选择覆盖新事实。本机将被移除时，只有在产品取得用户明确确认后才传入

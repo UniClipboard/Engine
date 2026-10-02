@@ -148,6 +148,41 @@ pub struct DeviceTrustObservation {
     pub reachability: ReachabilityState,
 }
 
+/// 本机还欠某台设备的更新进度；只描述这一台设备，整体状态由各设备汇总而来。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceUpdateState {
+    UpToDate,
+    Pending,
+    Retrying,
+    NeedsAttention,
+    UpgradeRequired,
+}
+
+/// 尚未送达或确认的更新项。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DeviceUpdateItem {
+    HistorySync,
+    GroupKeyUpdate,
+    RelationshipConfirmation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceUpdate {
+    pub state: DeviceUpdateState,
+    pub pending: Vec<DeviceUpdateItem>,
+    pub next_retry_at_ms: Option<i64>,
+}
+
+impl DeviceUpdate {
+    pub const fn up_to_date() -> Self {
+        Self {
+            state: DeviceUpdateState::UpToDate,
+            pending: Vec::new(),
+            next_retry_at_ms: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceTrustDevice {
     pub device_id: DeviceId,
@@ -158,6 +193,7 @@ pub struct DeviceTrustDevice {
     pub relationship: DeviceTrustRelationship,
     pub sync_state: DeviceTrustSyncState,
     pub pairing_confirmation: Option<PairingConfirmationStatus>,
+    pub update: DeviceUpdate,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

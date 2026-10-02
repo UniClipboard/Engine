@@ -52,10 +52,11 @@ pub use query_device_group_choices::{DeviceGroupChoicesView, QueryDeviceGroupCho
 pub use query_device_trust::{
     AdmissionDisplayStatus, DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership,
     DeviceTrustObservation, DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState,
-    LoadCurrentJoinStatusPort, LoadDeviceTrustObservationsPort, PairingConfirmationObservation,
-    PairingConfirmationStatus, PairingConfirmationTarget, PendingDeviceTrustChange,
-    QueryDeviceTrustError, SpaceDeviceUpdatePhase, SpaceDeviceUpdateProblem,
-    SpaceDeviceUpdateRecovery, SpaceDeviceUpdateStatus,
+    DeviceUpdate, DeviceUpdateItem, DeviceUpdateState, LoadCurrentJoinStatusPort,
+    LoadDeviceTrustObservationsPort, PairingConfirmationObservation, PairingConfirmationStatus,
+    PairingConfirmationTarget, PendingDeviceTrustChange, QueryDeviceTrustError,
+    SpaceDeviceUpdatePhase, SpaceDeviceUpdateProblem, SpaceDeviceUpdateRecovery,
+    SpaceDeviceUpdateStatus,
 };
 pub(super) use query_diagnostics::QueryMembershipDiagnosticsUseCase;
 pub use query_diagnostics::{MembershipDiagnosticsView, QueryMembershipDiagnosticsError};

@@ -59,10 +59,11 @@ pub use ledger::{
     LedgerReadModel, LedgerScope, LedgerTransition, LedgerTransitionError,
     LedgerTransitionErrorCategory, LedgerUpdateProblem, LedgerUpdateView, LedgerView, LedgerWork,
     MemberEffectKind, MemberEffectMaterial, MemberEffectPhase, MemberLink, MemberLinkSnapshot,
-    MembershipLedger, MembershipLedgerSnapshot, PeerEvidence, PeerLink, PeerLinkSnapshot,
-    PeerPauseReason, PeerRelation, PeerRelationView, PeerSyncBackoff, PeerSyncBackoffSnapshot,
-    PeerSyncOutcome, PeerSyncResult, PeerSyncView, ScheduledLedgerWork, SecurityDeliveryStatus,
-    UnfinishedMemberEffect, UnfinishedMemberEffectSnapshot, DEPARTURE_WINDOW_MS,
+    MembershipLedger, MembershipLedgerSnapshot, PeerEvidence, PeerHistoryUpdateView, PeerLink,
+    PeerLinkSnapshot, PeerPauseReason, PeerRelation, PeerRelationView, PeerSyncBackoff,
+    PeerSyncBackoffSnapshot, PeerSyncOutcome, PeerSyncResult, PeerSyncView, ScheduledLedgerWork,
+    SecurityDeliveryStatus, UnfinishedMemberEffect, UnfinishedMemberEffectSnapshot,
+    DEPARTURE_WINDOW_MS,
 };
 pub use member::SpaceMember;
 pub use member_instance::MemberInstanceId;
@@ -102,10 +103,10 @@ pub use protection::{
 };
 pub use revocation::{
     AdmissionReplayId, ContentKeyId, ContentKeyPurpose, GroupEpoch, GroupRevocationResult,
-    GroupUpdateDeliveryStatus, KeyEpochError, KeyEpochStateIssue, PendingGroupUpdate,
-    PreparedRevocationResolution, ProtectionGroupAdmission, ProtectionGroupId, RevocationId,
-    RevocationOutboxMessage, RevocationRecord, RevocationStage, RevocationStatus, SpaceKeyMaterial,
-    SpaceKeyState, SpaceSecurityMode,
+    GroupUpdateDeliveryStatus, GroupUpdateRecipientStatus, KeyEpochError, KeyEpochStateIssue,
+    PendingGroupUpdate, PreparedRevocationResolution, ProtectionGroupAdmission, ProtectionGroupId,
+    RevocationId, RevocationOutboxMessage, RevocationRecord, RevocationStage, RevocationStatus,
+    SpaceKeyMaterial, SpaceKeyState, SpaceSecurityMode,
 };
 pub use settlement_window::{SettlementWindow, SettlementWindowState};
 pub use space_admission::{

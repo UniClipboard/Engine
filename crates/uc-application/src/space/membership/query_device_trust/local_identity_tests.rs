@@ -59,6 +59,12 @@ impl LoadSecurityDeviceUpdateStatusPort for SecurityUpdates {
     ) -> Result<SpaceDeviceUpdateStatus, QueryDeviceTrustError> {
         Ok(self.0)
     }
+
+    async fn load_security_recipient_updates(
+        &self,
+    ) -> Result<Vec<uc_core::membership::GroupUpdateRecipientStatus>, QueryDeviceTrustError> {
+        Ok(Vec::new())
+    }
 }
 
 #[derive(Clone, Copy)]
