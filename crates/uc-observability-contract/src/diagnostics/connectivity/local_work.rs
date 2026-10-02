@@ -1,6 +1,8 @@
 //! 内部工作只记录本地等待与执行证据，不创建业务 span 或改变调用结果。
 use std::future::Future;
-use std::time::Instant;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -13,6 +15,50 @@ tokio::task_local! {
     static PAIRING_WORK: PairingWork;
     static WORK_ACTIVE: ();
     static BLOB_PUBLISH_ACTIVE: ();
+    static SECURE_STORAGE_TALLY: Arc<SecureStorageTally>;
+}
+
+/// 一项被观测工作内部的安全存储读取次数与累计耗时；子工作的读取计入外层，外层数值是含子工作的总和。
+#[derive(Default)]
+struct SecureStorageTally {
+    reads: AtomicU64,
+    nanos: AtomicU64,
+}
+
+impl SecureStorageTally {
+    fn add(&self, reads: u64, nanos: u64) {
+        self.reads.fetch_add(reads, Ordering::Relaxed);
+        self.nanos.fetch_add(nanos, Ordering::Relaxed);
+    }
+
+    fn usage(&self) -> Option<SecureStorageUse> {
+        let reads = self.reads.load(Ordering::Relaxed);
+        (reads > 0).then(|| SecureStorageUse {
+            reads,
+            duration_ms: self.nanos.load(Ordering::Relaxed) / 1_000_000,
+        })
+    }
+
+    fn add_into(&self, parent: &Self) {
+        parent.add(
+            self.reads.load(Ordering::Relaxed),
+            self.nanos.load(Ordering::Relaxed),
+        );
+    }
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SecureStorageUse {
+    reads: u64,
+    duration_ms: u64,
+}
+
+/// 记录一次安全存储读取；只在被观测的本地工作内累计，其余位置不产生任何记录。
+pub fn record_secure_storage_read(elapsed: Duration) {
+    let _ = SECURE_STORAGE_TALLY.try_with(|tally| {
+        tally.add(1, u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX));
+    });
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -117,6 +163,11 @@ pub enum LocalWorkStep {
     BlobStorePublish,
     BlobReferenceSave,
     BlobTicketIssue,
+    SourceSnapshotLoad,
+    DatabaseConnectionAcquire,
+    JoinerResolveInvitationCloud,
+    JoinerResolveInvitationLan,
+    SpaceTransitionAdvance,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,6 +195,8 @@ pub(super) enum LocalWorkEvent {
         maintenance: Option<MaintenanceContext>,
         duration_ms: u64,
         outcome: LocalWorkOutcome,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        secure_storage: Option<SecureStorageUse>,
     },
 }
 
@@ -208,11 +261,16 @@ impl LocalWorkEvent {
         if let Self::Finished {
             duration_ms,
             outcome,
+            secure_storage,
             ..
         } = self
         {
             fields.insert("duration_ms".into(), json!(duration_ms));
             fields.insert("uc.outcome".into(), json!(outcome));
+            if let Some(usage) = secure_storage {
+                fields.insert("secure_storage_reads".into(), json!(usage.reads));
+                fields.insert("secure_storage_read_ms".into(), json!(usage.duration_ms));
+            }
         }
         fields
     }
@@ -226,6 +284,7 @@ pub struct LocalWorkObservation {
     pairing: Option<PairingWork>,
     maintenance: Option<MaintenanceContext>,
     enabled: bool,
+    tally: Option<Arc<SecureStorageTally>>,
 }
 
 impl LocalWorkObservation {
@@ -239,6 +298,7 @@ impl LocalWorkObservation {
             maintenance: MaintenanceContext::capture(),
             enabled: !matches!(step, LocalWorkStep::ProtocolLock)
                 || PAIRING_WORK.try_with(|_| ()).is_ok(),
+            tally: None,
         };
         observation.emit(LocalWorkEvent::Started {
             step,
@@ -250,13 +310,24 @@ impl LocalWorkObservation {
 
     pub fn finish(mut self, outcome: LocalWorkOutcome) {
         self.finished = true;
-        self.emit(LocalWorkEvent::Finished {
+        self.emit(self.finished_event(outcome));
+    }
+
+    fn finished_event(&self, outcome: LocalWorkOutcome) -> LocalWorkEvent {
+        LocalWorkEvent::Finished {
             step: self.step,
             pairing: self.pairing,
             maintenance: self.maintenance,
             duration_ms: millis(self.started.elapsed()),
             outcome,
-        });
+            secure_storage: self.tally.as_deref().and_then(SecureStorageTally::usage),
+        }
+    }
+
+    /// 让本项工作累计内部的安全存储读取，结束时随完成记录输出。
+    fn with_tally(mut self, tally: Arc<SecureStorageTally>) -> Self {
+        self.tally = Some(tally);
+        self
     }
 
     fn emit(&self, record: LocalWorkEvent) {
@@ -270,13 +341,7 @@ impl LocalWorkObservation {
 impl Drop for LocalWorkObservation {
     fn drop(&mut self) {
         if !self.finished {
-            self.emit(LocalWorkEvent::Finished {
-                step: self.step,
-                pairing: self.pairing,
-                maintenance: self.maintenance,
-                duration_ms: millis(self.started.elapsed()),
-                outcome: LocalWorkOutcome::Interrupted,
-            });
+            self.emit(self.finished_event(LocalWorkOutcome::Interrupted));
         }
     }
 }
@@ -288,13 +353,20 @@ pub fn observe_local_result<T, E>(
     // 与会话观测一致，不能让计时包裹复制大型业务 future 的内联状态。
     let work = Box::pin(work);
     async move {
-        let observation = LocalWorkObservation::begin(step);
-        let result = WORK_ACTIVE.scope((), work).await;
+        let tally = Arc::new(SecureStorageTally::default());
+        let parent = SECURE_STORAGE_TALLY.try_with(Arc::clone).ok();
+        let observation = LocalWorkObservation::begin(step).with_tally(Arc::clone(&tally));
+        let result = SECURE_STORAGE_TALLY
+            .scope(Arc::clone(&tally), WORK_ACTIVE.scope((), work))
+            .await;
         observation.finish(if result.is_ok() {
             LocalWorkOutcome::Ok
         } else {
             LocalWorkOutcome::Error
         });
+        if let Some(parent) = parent {
+            tally.add_into(&parent);
+        }
         result
     }
 }
@@ -306,8 +378,31 @@ pub fn observe_local_sync_result<T, E>(
     if WORK_ACTIVE.try_with(|_| ()).is_err() {
         return work();
     }
+    let tally = Arc::new(SecureStorageTally::default());
+    let parent = SECURE_STORAGE_TALLY.try_with(Arc::clone).ok();
+    let observation = LocalWorkObservation::begin(step).with_tally(Arc::clone(&tally));
+    let result = SECURE_STORAGE_TALLY.sync_scope(Arc::clone(&tally), work);
+    observation.finish(if result.is_ok() {
+        LocalWorkOutcome::Ok
+    } else {
+        LocalWorkOutcome::Error
+    });
+    if let Some(parent) = parent {
+        tally.add_into(&parent);
+    }
+    result
+}
+
+/// 只在配对工作范围内记录一次同步等待；范围外的热路径不付任何观测成本。
+pub fn observe_pairing_wait<T, E>(
+    step: LocalWorkStep,
+    wait: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
+    if PAIRING_WORK.try_with(|_| ()).is_err() {
+        return wait();
+    }
     let observation = LocalWorkObservation::begin(step);
-    let result = work();
+    let result = wait();
     observation.finish(if result.is_ok() {
         LocalWorkOutcome::Ok
     } else {
@@ -391,6 +486,32 @@ mod tests {
             let decoded = decode_local_record("runtime.work.finished", &record.to_string(), "INFO")
                 .expect("blob publish step should be accepted");
             assert_eq!(decoded["step"], step);
+        }
+    }
+
+    #[test]
+    fn secure_storage_use_and_new_pairing_steps_are_part_of_the_closed_contract() {
+        let name = "runtime.work.finished";
+        let with_use = json!({"kind": "local_work", "record": {"event": "finished", "step": "repository_save", "pairing": null, "maintenance": null, "duration_ms": 12, "outcome": "ok", "secure_storage": {"reads": 7, "duration_ms": 9}}});
+        let decoded = decode_local_record(name, &with_use.to_string(), "INFO")
+            .expect("secure storage use should be accepted");
+        assert_eq!(decoded["secure_storage_reads"], 7);
+        assert_eq!(decoded["secure_storage_read_ms"], 9);
+        let mut extra = with_use.clone();
+        extra["record"]["secure_storage"]["key_name"] = json!("PRIVATE");
+        assert!(decode_local_record(name, &extra.to_string(), "INFO").is_none());
+        for step in [
+            "source_snapshot_load",
+            "database_connection_acquire",
+            "joiner_resolve_invitation_cloud",
+            "joiner_resolve_invitation_lan",
+            "space_transition_advance",
+        ] {
+            let record = json!({"kind": "local_work", "record": {"event": "finished", "step": step, "pairing": null, "maintenance": null, "duration_ms": 1, "outcome": "ok"}});
+            assert!(
+                decode_local_record(name, &record.to_string(), "INFO").is_some(),
+                "{step}"
+            );
         }
     }
 }

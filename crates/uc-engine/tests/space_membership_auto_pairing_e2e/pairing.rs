@@ -163,6 +163,28 @@ async fn uninterrupted_admission_uses_one_trace() {
             );
         }
     }
+    for step in [
+        "source_snapshot_load",
+        "database_connection_acquire",
+        "space_transition_advance",
+    ] {
+        assert!(
+            local_records.iter().any(|r| {
+                r["fields"]["event.name"] == "runtime.work.finished" && r["fields"]["step"] == step
+            }),
+            "缺少配对内部分项记录：{step}"
+        );
+    }
+    assert!(
+        local_records.iter().any(|r| {
+            r["fields"]["event.name"] == "runtime.work.finished"
+                && r["fields"]["step"] == "repository_save"
+                && r["fields"]["secure_storage_reads"]
+                    .as_u64()
+                    .is_some_and(|reads| reads > 0)
+        }),
+        "仓库保存必须报告安全存储读取次数与耗时"
+    );
     for message in ["join_request", "prepared", "applied", "complete_ack"] {
         for role in ["joiner", "sponsor"] {
             assert!(

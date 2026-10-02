@@ -93,13 +93,15 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
         &self,
         conn: &mut SqliteConnection,
     ) -> Result<PersistedSpaceAdmissionRepositoryV2, SpaceAdmissionStateStoreError> {
-        let Some(row) = load_repository_row(conn)? else {
-            self.clear_read_cache();
-            return Ok(PersistedSpaceAdmissionRepositoryV2::fresh(
-                self.keys.profile_generation(),
-            ));
-        };
-        self.open_or_migrate_state_on(conn, row)
+        observe_local_sync_result(LocalWorkStep::RepositoryLoad, || {
+            let Some(row) = load_repository_row(conn)? else {
+                self.clear_read_cache();
+                return Ok(PersistedSpaceAdmissionRepositoryV2::fresh(
+                    self.keys.profile_generation(),
+                ));
+            };
+            self.open_or_migrate_state_on(conn, row)
+        })
     }
 
     fn open_or_migrate_state_on(

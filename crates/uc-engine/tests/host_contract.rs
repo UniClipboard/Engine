@@ -122,6 +122,66 @@ async fn suspended_engine_releases_profile_lease_and_can_resume() {
     assert!(released, "暂停成功后仍持有 profile 文件锁");
 }
 
+/// 调用方放弃等待不能遗弃已接受的恢复：会话安装与后台工作启动由负责人任务完整完成，之后暂停与恢复仍可用。
+#[tokio::test(flavor = "multi_thread")]
+async fn abandoned_resume_wait_still_installs_a_usable_session() {
+    use std::time::Duration;
+    use tokio::time::{sleep, timeout, Instant};
+    use uc_engine::{
+        CreateSpaceInput, Engine, EngineConfig, EngineState, Operation, SecretString, SendTextInput,
+    };
+
+    let root = tempfile::tempdir().unwrap();
+    let host = HostCapabilities::new(
+        HostDirectories::new(
+            root.path().join("private"),
+            root.path().join("cache"),
+            root.path().join("temporary"),
+            root.path().join("logs"),
+        ),
+        Box::new(MemorySecureStorage::default()),
+        Box::new(EmptyClipboard),
+        Box::new(EmptyFiles),
+    );
+    let (engine, _events) = Engine::start(EngineConfig::new("2.0.0"), host)
+        .await
+        .unwrap();
+    engine
+        .execute(Operation::CreateSpace(CreateSpaceInput {
+            device_name: Some("abandoned resume".into()),
+            passphrase: SecretString::new("abandoned-resume-passphrase"),
+            passphrase_confirmation: SecretString::new("abandoned-resume-passphrase"),
+        }))
+        .await
+        .unwrap();
+    engine.suspend().await.unwrap();
+
+    // 等待方在安装中途离开；已接受的恢复仍必须由负责人任务做完。
+    let abandoned = timeout(Duration::from_millis(1), engine.resume()).await;
+    assert!(abandoned.is_err(), "恢复不应在 1 毫秒内完成");
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while engine.lifecycle_state().await != EngineState::Running {
+        assert!(
+            Instant::now() < deadline,
+            "被放弃等待的恢复没有自行完成：{:?}",
+            engine.lifecycle_state().await
+        );
+        sleep(Duration::from_millis(50)).await;
+    }
+    engine
+        .execute(Operation::SendText(SendTextInput {
+            text: "after abandoned resume".into(),
+            target_devices: Vec::new(),
+        }))
+        .await
+        .unwrap();
+
+    engine.suspend().await.unwrap();
+    engine.resume().await.unwrap();
+    engine.shutdown(Duration::from_secs(15)).await.unwrap();
+}
+
 #[derive(Clone, Default)]
 struct MemorySecureStorage {
     values: Arc<Mutex<HashMap<String, Vec<u8>>>>,

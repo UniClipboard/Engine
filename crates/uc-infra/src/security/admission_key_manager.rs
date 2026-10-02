@@ -1,10 +1,12 @@
 use std::fmt;
 use std::sync::Arc;
+use std::time::Instant;
 
 use hmac::{Hmac, Mac};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
+use uc_observability_contract::diagnostics::connectivity::record_secure_storage_read;
 
 use super::crypto_model::EncryptedBlob;
 use super::{v1_aead, MasterKey};
@@ -134,12 +136,16 @@ impl AdmissionKeyManager {
         }
     }
 
+    /// 读取画像准入密钥的存储字节；每次读取都计入当前被观测工作的安全存储用量。
+    fn read_profile_key_bytes(&self) -> Result<Option<Vec<u8>>, AdmissionKeyError> {
+        let started = Instant::now();
+        let read = self.secure_storage.get(PROFILE_ADMISSION_KEY_NAME);
+        record_secure_storage_read(started.elapsed());
+        read.map_err(AdmissionKeyError::from)
+    }
+
     fn profile_key(&self) -> Result<MasterKey, AdmissionKeyError> {
-        if let Some(bytes) = self
-            .secure_storage
-            .get(PROFILE_ADMISSION_KEY_NAME)
-            .map_err(AdmissionKeyError::from)?
-        {
+        if let Some(bytes) = self.read_profile_key_bytes()? {
             return MasterKey::from_bytes(&bytes).map_err(AdmissionKeyError::corrupt);
         }
 
@@ -158,9 +164,7 @@ impl AdmissionKeyManager {
 
     fn existing_profile_key(&self) -> Result<MasterKey, AdmissionKeyError> {
         let bytes = self
-            .secure_storage
-            .get(PROFILE_ADMISSION_KEY_NAME)
-            .map_err(AdmissionKeyError::from)?
+            .read_profile_key_bytes()?
             .ok_or(AdmissionKeyError::Missing)?;
         MasterKey::from_bytes(&bytes).map_err(AdmissionKeyError::corrupt)
     }

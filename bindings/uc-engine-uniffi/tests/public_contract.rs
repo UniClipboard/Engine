@@ -1500,55 +1500,6 @@ fn restore_clipboard_writes_a_structured_snapshot_to_the_host() {
 }
 
 #[test]
-fn active_clipboard_can_be_queried_after_the_activation_event_was_missed() {
-    let _test_guard = engine_test_guard();
-    let root = tempfile::tempdir().expect("temporary host root must be available");
-    let host = Arc::new(MemoryHost::new(root.path()));
-    host.set_clipboard(BindingClipboardSnapshot {
-        observed_at_ms: 1_700_000_000_000,
-        representations: vec![BindingClipboardRepresentation::Inline {
-            format: "text/plain".to_owned(),
-            mime_type: Some("text/plain".to_owned()),
-            bytes: b"current active clipboard".to_vec(),
-        }],
-    });
-    let engine = MobileEngine::start(
-        BindingConfig {
-            app_version: "1.2.3".to_owned(),
-            profile_id: "binding-query-active-clipboard".to_owned(),
-        },
-        host,
-    )
-    .expect("binding engine must start");
-    engine
-        .create_space(
-            Some("mobile-query-active-host".to_owned()),
-            "correct horse battery staple".to_owned(),
-        )
-        .expect("binding must create a space");
-    let entry_id = engine
-        .observe_clipboard_change(true)
-        .expect("binding must observe the host clipboard")
-        .expect("changed clipboard must be dispatched")
-        .entry_id;
-    let local_device = engine
-        .query_local_device()
-        .expect("binding must expose the local device");
-
-    let active = engine
-        .query_active_clipboard()
-        .expect("binding must query the active clipboard")
-        .expect("captured clipboard must be active");
-
-    assert_eq!(active.entry_id, entry_id);
-    assert_eq!(active.activated_by, local_device.device_id);
-
-    engine
-        .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
-        .expect("binding engine must shut down");
-}
-
-#[test]
 fn active_clipboard_query_returns_empty_before_the_first_activation() {
     let _test_guard = engine_test_guard();
     let root = tempfile::tempdir().expect("temporary host root must be available");

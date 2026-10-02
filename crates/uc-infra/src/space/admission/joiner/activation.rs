@@ -343,13 +343,14 @@ impl ExecuteJoinerActivationPort for DefaultJoinerActivationExecutor {
             let result = {
                 let mut completed = None;
                 for _ in 0..MAX_TRANSITION_ADVANCES {
-                    match self
-                        .transition
-                        .advance_admission(&transition, intent)
-                        .await
-                        .map_err(|error| {
-                            ExecuteJoinerActivationError::unavailable(anyhow::Error::new(error))
-                        })? {
+                    match observe_local_result(
+                        LocalWorkStep::SpaceTransitionAdvance,
+                        self.transition.advance_admission(&transition, intent),
+                    )
+                    .await
+                    .map_err(|error| {
+                        ExecuteJoinerActivationError::unavailable(anyhow::Error::new(error))
+                    })? {
                         AdmissionSpaceTransitionStepV2::Advanced(next) => transition = next,
                         AdmissionSpaceTransitionStepV2::Finished(result) => {
                             completed = Some(result);

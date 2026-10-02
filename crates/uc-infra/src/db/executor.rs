@@ -1,4 +1,5 @@
 use diesel::SqliteConnection;
+use uc_observability_contract::diagnostics::connectivity::{observe_pairing_wait, LocalWorkStep};
 
 use crate::db::pool::DbPool;
 use crate::db::ports::DbExecutor;
@@ -18,7 +19,8 @@ impl DbExecutor for DieselSqliteExecutor {
         &self,
         f: impl FnOnce(&mut SqliteConnection) -> anyhow::Result<T>,
     ) -> anyhow::Result<T> {
-        let mut conn = self.pool.get()?;
+        let mut conn =
+            observe_pairing_wait(LocalWorkStep::DatabaseConnectionAcquire, || self.pool.get())?;
         f(&mut conn)
     }
 

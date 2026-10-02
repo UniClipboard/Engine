@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use uc_core::membership::{ActiveSpaceGenerationManifestV2, AdmissionSourceSnapshot};
 
+use uc_observability_contract::diagnostics::connectivity::{observe_local_result, LocalWorkStep};
+
 use crate::db::ports::DbExecutor;
 use crate::security::{ActiveRuntimeManifest, ActiveSpaceGenerationManifestStoreError};
 
@@ -26,6 +28,16 @@ struct PersistedAdmissionSourceSnapshotV2 {
 
 impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
     pub(super) async fn load_source_snapshot(
+        &self,
+    ) -> Result<(AdmissionSourceSnapshot, bool), SpaceAdmissionStateStoreError> {
+        observe_local_result(
+            LocalWorkStep::SourceSnapshotLoad,
+            self.read_source_snapshot(),
+        )
+        .await
+    }
+
+    async fn read_source_snapshot(
         &self,
     ) -> Result<(AdmissionSourceSnapshot, bool), SpaceAdmissionStateStoreError> {
         let active_runtime = self

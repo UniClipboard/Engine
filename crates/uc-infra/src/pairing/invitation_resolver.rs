@@ -60,6 +60,14 @@ impl PairingInvitationResolverAdapter {
     }
 
     async fn resolve_via_cloud(&self, code: &str) -> anyhow::Result<FullInvitation> {
+        observe_local_result(
+            LocalWorkStep::JoinerResolveInvitationCloud,
+            self.request_cloud_invitation(code),
+        )
+        .await
+    }
+
+    async fn request_cloud_invitation(&self, code: &str) -> anyhow::Result<FullInvitation> {
         let response = self
             .rendezvous
             .resolve_pairing(code)
@@ -73,6 +81,14 @@ impl PairingInvitationResolverAdapter {
     }
 
     async fn resolve_via_mdns(&self, code: &str) -> anyhow::Result<FullInvitation> {
+        observe_local_result(
+            LocalWorkStep::JoinerResolveInvitationLan,
+            self.request_lan_invitation(code),
+        )
+        .await
+    }
+
+    async fn request_lan_invitation(&self, code: &str) -> anyhow::Result<FullInvitation> {
         let ticket = crate::pairing::MdnsPairingResolver::resolve(
             &tokio::runtime::Handle::current(),
             &self.endpoint.id().to_string(),
