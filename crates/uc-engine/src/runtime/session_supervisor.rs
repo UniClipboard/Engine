@@ -874,7 +874,14 @@ impl SessionSupervisor {
             cleanup_prepared_session(prepared.session, "activation_failed").await;
             return Err(error);
         }
+        let application = Arc::clone(&prepared.session.application);
         runtime.session = Some(prepared.session);
+        drop(runtime);
+        // 网络 handler 已发布：此后启动的后台恢复才能拨出连接，不会被未开放的会话拒绝。
+        if let Err(error) = application.begin_background_work().await {
+            let primary = session_runtime_error("application background work", error);
+            return Err(self.shutdown_after_failure(primary).await);
+        }
         Ok(())
     }
 

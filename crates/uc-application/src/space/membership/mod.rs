@@ -38,7 +38,7 @@ pub use maintenance::{
 };
 pub(crate) use maintenance::{
     ExcludeMembershipMaintenancePort, MembershipMaintenanceExclusion,
-    PreparedSpaceMembershipMaintenanceRuntime,
+    PreparedSpaceMembershipMaintenanceRuntime, WorkPreemption,
 };
 pub use ports::{
     ActivateMembershipEffectPort, ApplyMembershipMemberFactsPort, ApplyMembershipSecurityPort,

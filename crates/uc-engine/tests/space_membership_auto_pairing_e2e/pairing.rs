@@ -191,6 +191,13 @@ async fn uninterrupted_admission_uses_one_trace() {
                 && r["trace_id"] == transition["trace_id"]),
         "实际切换必须有完整结果"
     );
+    assert!(
+        !local_records.iter().any(|r| {
+            r["fields"]["event.name"] == "connection.attempt.finished"
+                && r["fields"]["error.reason"] == "locally_rejected"
+        }),
+        "会话切换后的维护必须在新会话发布后才拨出准入连接，不能被本机拒绝后等待下一次触发"
+    );
     for step in [
         "session_drain_operations",
         "session_stop_application",

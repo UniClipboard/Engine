@@ -373,12 +373,16 @@ impl SpaceFacade {
         Arc::clone(&self.current_member_scope)
     }
 
-    /// 在网络 handler 已绑定且 Router ready 后启动 Space 后台恢复。
-    /// 返回 `false` 表示 runtime 已启动或 facade 已关闭。
-    pub async fn start_application_runtime(
+    /// 在会话准备阶段确认准入状态可读；不可读时启动失败并带出恢复分类，此时不启动任何后台工作。
+    pub async fn verify_application_runtime_ready(
         &self,
-    ) -> Result<bool, PendingAdmissionRecoveryStateError> {
-        self.space_admission.verify_admission_readable().await?;
+    ) -> Result<(), PendingAdmissionRecoveryStateError> {
+        self.space_admission.verify_admission_readable().await
+    }
+
+    /// 在网络 handler 已发布、Router 可接受本机拨出后启动 Space 后台恢复。
+    /// 返回 `false` 表示 runtime 已启动或 facade 已关闭。
+    pub async fn start_application_runtime(&self) -> bool {
         let mut application = self.application.lock().await;
         let started = application
             .as_mut()
@@ -386,7 +390,7 @@ impl SpaceFacade {
         if started {
             self.connections.start().await;
         }
-        Ok(started)
+        started
     }
 
     /// 绑定 Search 与 receive 的完整 Space session activity。

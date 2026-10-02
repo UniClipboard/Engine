@@ -187,13 +187,18 @@ struct BlockingPairingAdmission {
 
 struct SharedWorkPermit {
     lock: Arc<tokio::sync::RwLock<()>>,
+    preemption: WorkPreemption,
 }
 
 #[async_trait]
 impl AcquireSpaceWorkPermitPort for SharedWorkPermit {
     async fn acquire_space_work_permit(&self) -> Result<SpaceWorkPermit, QuerySpaceWorkModeError> {
         let guard = Arc::clone(&self.lock).read_owned().await;
-        Ok(SpaceWorkPermit::guarded(SpaceWorkMode::Active, guard))
+        Ok(SpaceWorkPermit::guarded(
+            SpaceWorkMode::Active,
+            guard,
+            self.preemption.clone(),
+        ))
     }
 }
 
@@ -434,6 +439,7 @@ async fn local_admission_actions_can_interrupt_pairing_recovery_before_ordinary_
         },
         Arc::new(SharedWorkPermit {
             lock: Arc::clone(&work_lock),
+            preemption: WorkPreemption::default(),
         }),
     ));
     let round = tokio::spawn(async move {
@@ -1042,4 +1048,98 @@ async fn a_round_waits_while_membership_maintenance_is_excluded() {
     drop(exclusion);
     round.await.unwrap();
     assert_eq!(calls.lock().unwrap().as_slice(), &["admissions", "work"]);
+}
+
+struct NeverFinishingWork {
+    started: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl RunMembershipWorkPort for NeverFinishingWork {
+    async fn run_membership_work(
+        &self,
+        _trigger: &MembershipMaintenanceTrigger,
+    ) -> MembershipMaintenanceReport {
+        self.started.notify_one();
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn pairing_request_makes_a_long_membership_round_hand_back_its_permit() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let work_lock = Arc::new(tokio::sync::RwLock::new(()));
+    let preemption = WorkPreemption::default();
+    let maintain = Arc::new(MaintainSpaceMembershipUseCase::new_coordinated(
+        MaintainSpaceMembershipDeps {
+            admissions: Arc::new(RecordingStep {
+                name: "admissions",
+                calls: Arc::new(Mutex::new(Vec::new())),
+                outcome: MembershipMaintenanceStepOutcome::Completed,
+            }),
+            work: Arc::new(NeverFinishingWork {
+                started: Arc::clone(&started),
+            }),
+        },
+        Arc::new(SharedWorkPermit {
+            lock: Arc::clone(&work_lock),
+            preemption: preemption.clone(),
+        }),
+    ));
+    let round = tokio::spawn(async move {
+        maintain
+            .execute(MembershipMaintenanceTrigger::Periodic)
+            .await
+    });
+    started.notified().await;
+
+    let _request = preemption.request();
+    let report = tokio::time::timeout(std::time::Duration::from_millis(200), round)
+        .await
+        .expect("the round must stop once a pairing action waits for the lock")
+        .unwrap();
+
+    assert_eq!(report.deferred_count, 1);
+    tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        Arc::clone(&work_lock).write_owned(),
+    )
+    .await
+    .expect("the permit must be released after the round yields");
+}
+
+#[tokio::test]
+async fn membership_round_without_a_pairing_request_keeps_its_permit() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let work_lock = Arc::new(tokio::sync::RwLock::new(()));
+    let maintain = Arc::new(MaintainSpaceMembershipUseCase::new_coordinated(
+        MaintainSpaceMembershipDeps {
+            admissions: Arc::new(RecordingStep {
+                name: "admissions",
+                calls: Arc::new(Mutex::new(Vec::new())),
+                outcome: MembershipMaintenanceStepOutcome::Completed,
+            }),
+            work: Arc::new(NeverFinishingWork {
+                started: Arc::clone(&started),
+            }),
+        },
+        Arc::new(SharedWorkPermit {
+            lock: Arc::clone(&work_lock),
+            preemption: WorkPreemption::default(),
+        }),
+    ));
+    let round = tokio::spawn(async move {
+        maintain
+            .execute(MembershipMaintenanceTrigger::Periodic)
+            .await
+    });
+    started.notified().await;
+
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        Arc::clone(&work_lock).write_owned(),
+    )
+    .await
+    .is_err());
+    round.abort();
 }

@@ -69,7 +69,7 @@ impl MaintainSpaceMembershipUseCase {
             return report;
         }
         // 配对期间普通成员工作暂停；许可在整轮执行期间保持，避免与配对交错。
-        let _work_permit = if let Some(work_permit) = self.work_permit.as_ref() {
+        let held_permit = if let Some(work_permit) = self.work_permit.as_ref() {
             match work_permit.acquire_space_work_permit().await {
                 Ok(permit) if permit.mode() == SpaceWorkMode::Active => Some(permit),
                 Ok(_) => return report,
@@ -85,7 +85,17 @@ impl MaintainSpaceMembershipUseCase {
         } else {
             None
         };
-        let worked = self.deps.work.run_membership_work(&trigger).await;
+        // 准入动作等待独占执行时放弃本轮：未完成的待办持久保存，配对结束后由普通维护重新接上。
+        let worked = match held_permit.as_ref() {
+            Some(permit) => tokio::select! {
+                worked = self.deps.work.run_membership_work(&trigger) => worked,
+                () = permit.preempted() => {
+                    report.deferred_count += 1;
+                    return report;
+                }
+            },
+            None => self.deps.work.run_membership_work(&trigger).await,
+        };
         report.completed_count += worked.completed_count;
         report.deferred_count += worked.deferred_count;
         report.stable_failure_count += worked.stable_failure_count;
