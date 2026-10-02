@@ -4,7 +4,7 @@ use std::sync::Arc;
 use super::{AdmissionRecoveryService, JoinerAdmissionService, SponsorAdmissionService};
 use super::{AdmissionRecoveryTrigger, PendingAdmissionRecoveryStateError};
 use crate::space::membership::{
-    AcquireSpaceWorkPermitPort, QuerySpaceWorkModeError, SpaceWorkPermit,
+    AcquireSpaceWorkPermitPort, QuerySpaceWorkModeError, SpaceWorkPermit, WorkPreemption,
 };
 use tokio::sync::RwLock;
 use uc_observability_contract::diagnostics::connectivity::{
@@ -18,6 +18,8 @@ pub(crate) struct SpaceAdmissionProtocol {
     /// 准入动作独占执行；普通成员工作许可共享持有，只与准入互斥，彼此之间不互斥。成员历史交换的双方
     /// 可能同时各自持有许可并等待对方的入站处理，许可因此不能互斥。
     execution_lock: Arc<RwLock<()>>,
+    /// 准入动作等待独占执行时通知持有许可的普通成员工作让位，避免配对被其网络等待拖住。
+    preemption: WorkPreemption,
 }
 
 impl SpaceAdmissionProtocol {
@@ -31,12 +33,15 @@ impl SpaceAdmissionProtocol {
             sponsor,
             recovery,
             execution_lock: Arc::new(RwLock::new(())),
+            preemption: WorkPreemption::default(),
         }
     }
 
     pub(super) async fn execute_exclusively<T>(&self, action: impl Future<Output = T>) -> T {
         let waiting = LocalWorkObservation::begin(LocalWorkStep::ProtocolLock);
+        let request = self.preemption.request();
         let _guard = self.execution_lock.write().await;
+        drop(request);
         waiting.finish(LocalWorkOutcome::Ok);
         action.await
     }
@@ -66,6 +71,10 @@ impl AcquireSpaceWorkPermitPort for SpaceAdmissionProtocol {
                 }
             })?;
         let mode = loaded.work_mode();
-        Ok(SpaceWorkPermit::guarded(mode, guard))
+        Ok(SpaceWorkPermit::guarded(
+            mode,
+            guard,
+            self.preemption.clone(),
+        ))
     }
 }

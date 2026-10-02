@@ -3,12 +3,12 @@ mod ports;
 mod runtime;
 mod use_case;
 
-pub(crate) use model::MembershipMaintenanceExclusion;
 pub use model::{
     AdmissionMaintenanceOutcome, KnownPeerContact, MembershipMaintenanceReport,
     MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger, QuerySpaceWorkModeError,
     SpaceWorkMode, SpaceWorkPermit,
 };
+pub(crate) use model::{MembershipMaintenanceExclusion, WorkPreemption};
 pub use ports::{
     AcquireSpaceWorkPermitPort, DeliverPendingGroupUpdatesPort, RecoverMembershipConflictsPort,
     RecoverMembershipEffectsPort, RecoverSpaceAdmissionsPort, WakeSpaceMembershipMaintenancePort,

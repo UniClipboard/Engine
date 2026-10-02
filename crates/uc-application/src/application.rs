@@ -206,8 +206,6 @@ pub enum ApplicationStartError {
         #[source]
         source: PendingAdmissionRecoveryStateError,
     },
-    #[error("Space application runtime was unavailable")]
-    SpaceRuntimeUnavailable,
     #[error("active clipboard startup failed")]
     ActiveClipboard {
         #[source]
@@ -582,13 +580,10 @@ impl ApplicationAssembly {
             active_pull_adapters,
             is_unlocked,
         } = network;
-        if !space
-            .start_application_runtime()
+        space
+            .verify_application_runtime_ready()
             .await
-            .map_err(|source| ApplicationStartError::AdmissionRead { source })?
-        {
-            return Err(ApplicationStartError::SpaceRuntimeUnavailable);
-        }
+            .map_err(|source| ApplicationStartError::AdmissionRead { source })?;
         let search = SearchAssembly::start(&self.deps);
         let active_clipboard = match self
             .clipboard
@@ -763,6 +758,21 @@ impl ApplicationRuntime {
         adapters: ApplicationAdapters,
     ) -> Result<Self, ApplicationStartError> {
         assembly.start_runtime(adapters).await
+    }
+
+    /// 启动会拨出网络连接的 Space 后台恢复；调用方必须在新会话的网络 handler 发布之后调用，
+    /// 否则恢复发出的连接会被尚未开放的会话拒绝，只能等待下一次触发。
+    pub async fn begin_background_work(&self) -> Result<(), ApplicationRuntimeError> {
+        let space = {
+            let owners = self.owners.lock().await;
+            owners.as_ref().map(|owners| Arc::clone(&owners.space))
+        };
+        let space = space.ok_or(ApplicationRuntimeError::Unavailable)?;
+        if space.start_application_runtime().await {
+            Ok(())
+        } else {
+            Err(ApplicationRuntimeError::Unavailable)
+        }
     }
 
     pub fn facade(&self) -> Arc<AppFacade> {

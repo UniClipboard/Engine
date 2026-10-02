@@ -44,6 +44,38 @@ async fn ordinary_work_permit_serializes_a_new_pairing_request() {
 }
 
 #[tokio::test]
+async fn waiting_pairing_request_asks_ordinary_work_to_hand_back_its_permit() {
+    let pair = SpaceAdmissionProtocolTestPair::fresh().await;
+    let permit = pair
+        .sponsor()
+        .acquire_space_work_permit()
+        .await
+        .expect("active space should grant ordinary work");
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), permit.preempted())
+            .await
+            .is_err(),
+        "no pairing request is waiting yet"
+    );
+    let request = pair.sponsor().handle(authenticated_join_request());
+    tokio::pin!(request);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), &mut request)
+            .await
+            .is_err()
+    );
+
+    tokio::time::timeout(std::time::Duration::from_millis(100), permit.preempted())
+        .await
+        .expect("a waiting pairing request must ask the permit holder to yield");
+    drop(permit);
+
+    request
+        .await
+        .expect("pairing request should continue once the permit is handed back");
+}
+
+#[tokio::test]
 async fn ambiguous_saved_pairing_blocks_ordinary_work_with_needs_attention() {
     let pair = SpaceAdmissionProtocolTestPair::fresh().await;
     pair.mark_sponsor_recovery_required();
