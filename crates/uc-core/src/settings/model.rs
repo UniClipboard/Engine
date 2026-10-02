@@ -357,7 +357,7 @@ impl std::str::FromStr for CongestionController {
 /// `#[serde(default)]` 让缺字段时回退到 `Default::default()`：
 /// - `allow_relay_fallback = true`（允许 fallback，breaking change 警惕）
 /// - `allow_overlay_network_addrs = false`（默认过滤虚拟网卡候选）
-/// - `custom_relay_urls = []`（空列表继续使用 iroh 默认中继）
+/// - `custom_relay_urls = []`（空列表使用产品内置 relay，见 `relay_routing`）
 ///
 /// 修改默认值前请先 grep `LAN-only Mode` 文档与 changelog。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -384,8 +384,8 @@ pub struct NetworkSettings {
 
     /// 自定义 iroh relay 节点 URL 列表。
     ///
-    /// 空列表表示沿用 iroh 默认 n0 relay；非空时由 bootstrap/infra 翻译为
-    /// `RelayMode::Custom`，只使用这些用户配置的 relay 节点。仅在
+    /// 空列表表示使用产品内置 relay（`relay_routing::BUILTIN_RELAYS`，不写入本字段）；
+    /// 非空时只使用这些用户配置的 relay 节点，整体替换内置列表。仅在
     /// `allow_relay_fallback = true` 时生效；LAN-only 模式下 relay 整体禁用，
     /// 但列表仍会被保留，方便用户稍后重新开启 relay fallback。
     ///

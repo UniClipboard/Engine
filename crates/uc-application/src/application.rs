@@ -44,7 +44,7 @@ use crate::runtime_lifecycle::{
     TransitionContext,
 };
 use crate::search::{SearchAssembly, SearchShutdownError};
-use crate::settings::SettingsAssembly;
+use crate::settings::{AppliedRelayRouting, SettingsAssembly};
 use crate::space::{
     AdmissionReadFailureCategory, KnownPeerContact, PendingAdmissionRecoveryStateError,
     SpaceAdmissionDeps, SpaceAdmissionObservationRegistry, SpaceFacade, SpaceFacadeDeps,
@@ -360,6 +360,10 @@ impl ApplicationAssembly {
         &self,
     ) -> Result<crate::settings::PreparedNetworkSettings, crate::facade::SettingsFacadeError> {
         self.settings.prepare_network().await
+    }
+
+    pub fn record_applied_relays(&self, applied: Option<AppliedRelayRouting>) {
+        self.settings.record_applied_relays(applied);
     }
 
     pub async fn ensure_current_version(

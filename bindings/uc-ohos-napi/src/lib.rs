@@ -138,6 +138,25 @@ pub struct OhNetworkRecoveryStatus {
     pub next_retry_in_ms: Option<f64>,
 }
 
+/// `source` 为 `built_in` 或 `custom`；`in_effect` 表示运行中的节点按此地址配置，不代表已连通。
+#[napi(object)]
+pub struct OhRelayOverviewEntry {
+    pub source: String,
+    pub region_id: Option<String>,
+    pub url: String,
+    pub credential_configured: bool,
+    pub in_effect: bool,
+}
+
+/// `saved_mode` / `applied_mode` 取值 `built_in`、`custom`、`disabled`。
+#[napi(object)]
+pub struct OhRelayOverview {
+    pub saved_mode: String,
+    pub applied_mode: Option<String>,
+    pub change_pending: bool,
+    pub entries: Vec<OhRelayOverviewEntry>,
+}
+
 #[napi(object)]
 pub struct OhLocalDevice {
     pub device_id: String,

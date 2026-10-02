@@ -44,6 +44,7 @@ use tracing::instrument;
 use tracing::instrument::WithSubscriber;
 use uc_application::deps::{IssueMembershipBranchRecoveryPort, KnownPeerContact};
 use uc_core::settings::model::CongestionController;
+use uc_core::settings::relay_routing::RelayRouting;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use uc_application::deps::{
@@ -295,7 +296,7 @@ impl fmt::Debug for IrohRelayAccessToken {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct IrohNodeConfig {
     /// Override rendezvous base URL. `None` → use
     /// [`crate::rendezvous::RENDEZVOUS_BASE_URL`].
@@ -319,11 +320,11 @@ pub struct IrohNodeConfig {
     /// `EndpointAddr` 注入）。production `false` 保持完整 N0 行为
     /// （pkarr publish + DNS lookup + relay fallback）。
     pub disable_relays: bool,
-    /// 用户配置的 iroh relay URL 列表。空列表表示沿用 iroh 默认 relay；
-    /// 非空时在 `disable_relays = false` 路径下翻译为 `RelayMode::Custom`。
-    /// `disable_relays = true` 时该列表被保留但不参与 endpoint bind。
-    pub custom_relay_urls: Vec<String>,
-    /// Access tokens keyed by their matching custom relay URL. Values are
+    /// 节点实际使用的 relay URL 列表，由调用方（产品默认或用户配置）决定，
+    /// 本模块不再隐含任何上游默认列表。`disable_relays = false` 时必须非空并翻译为
+    /// `RelayMode::Custom`；`disable_relays = true` 时该列表不参与 endpoint bind。
+    pub relay_urls: Vec<String>,
+    /// Access tokens keyed by their matching relay URL. Values are
     /// redacted in debug output and zeroized when dropped.
     pub relay_access_tokens: BTreeMap<String, IrohRelayAccessToken>,
     /// If true, allow VPN / overlay-network virtual NIC addresses (CGNAT
@@ -365,6 +366,23 @@ pub struct IrohNodeConfig {
     pub public_addr: Option<SocketAddr>,
     /// 测试专用的认证 peer 网络分区门；生产组装始终为 `None`。
     pub network_partition_gate: Option<IrohNetworkPartitionGate>,
+}
+
+impl Default for IrohNodeConfig {
+    /// 默认配置等于产品默认路由：启用 relay 并使用产品内置列表。
+    fn default() -> Self {
+        Self {
+            rendezvous_base_url: None,
+            disable_relays: false,
+            relay_urls: RelayRouting::BuiltIn.effective_urls(&[]),
+            relay_access_tokens: BTreeMap::new(),
+            allow_overlay_network_addrs: false,
+            congestion_controller: CongestionController::default(),
+            bind_port: None,
+            public_addr: None,
+            network_partition_gate: None,
+        }
+    }
 }
 
 /// Snapshot the candidate set this endpoint is currently advertising and
@@ -528,12 +546,14 @@ fn relay_mode_from_config(config: &IrohNodeConfig) -> Result<RelayMode, IrohNode
         return Ok(RelayMode::Disabled);
     }
 
-    if config.custom_relay_urls.is_empty() {
-        return Ok(RelayMode::Default);
+    if config.relay_urls.is_empty() {
+        return Err(IrohNodeError::InvalidRelayUrl(
+            RelayUrlProblem::NoneConfigured,
+        ));
     }
 
-    let mut relay_configs = Vec::with_capacity(config.custom_relay_urls.len());
-    for raw in &config.custom_relay_urls {
+    let mut relay_configs = Vec::with_capacity(config.relay_urls.len());
+    for raw in &config.relay_urls {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
             return Err(IrohNodeError::InvalidRelayUrl(RelayUrlProblem::Empty));
@@ -986,7 +1006,7 @@ impl IrohNodeBuilder {
         uc_debug!(
             disable_relays = config.disable_relays,
             allow_overlay_network_addrs = config.allow_overlay_network_addrs,
-            custom_relay_count = config.custom_relay_urls.len(),
+            relay_count = config.relay_urls.len(),
             rendezvous_override = config.rendezvous_base_url.is_some(),
             "iroh node bound; ready to install transport handlers"
         );
@@ -1554,6 +1574,8 @@ pub enum IrohNodeError {
 pub enum RelayUrlProblem {
     #[error("relay URL must not be empty")]
     Empty,
+    #[error("no relay URL is configured while relays are enabled")]
+    NoneConfigured,
     #[error("relay URL could not be parsed")]
     Parse(#[source] <RelayUrl as FromStr>::Err),
     #[error("relay URL scheme must be http or https")]
@@ -2436,21 +2458,48 @@ mod tests {
     }
 
     #[test]
-    fn relay_mode_empty_custom_urls_uses_default_when_enabled() {
+    fn relay_mode_rejects_empty_relay_list_when_enabled() {
         let cfg = IrohNodeConfig {
             disable_relays: false,
-            custom_relay_urls: Vec::new(),
+            relay_urls: Vec::new(),
             ..Default::default()
         };
-        let mode = relay_mode_from_config(&cfg).expect("relay mode");
-        assert!(matches!(mode, RelayMode::Default));
+        assert!(matches!(
+            relay_mode_from_config(&cfg),
+            Err(IrohNodeError::InvalidRelayUrl(
+                RelayUrlProblem::NoneConfigured
+            ))
+        ));
+    }
+
+    /// 内置列表脱离 `RelayMode::Default` 后，仍须与所用 iroh 版本的上游默认条目逐项一致
+    /// （含 QUIC 地址发现配置）；升级 iroh 时若上游默认变化，此处失败即提示显式审阅内置列表。
+    #[test]
+    fn builtin_relay_list_matches_iroh_default_relay_map() {
+        let cfg = IrohNodeConfig {
+            disable_relays: false,
+            relay_urls: uc_core::settings::relay_routing::RelayRouting::BuiltIn.effective_urls(&[]),
+            ..Default::default()
+        };
+        let RelayMode::Custom(builtin) = relay_mode_from_config(&cfg).expect("relay mode") else {
+            panic!("built-in routing must build an explicit relay map");
+        };
+        let upstream = iroh::defaults::prod::default_relay_map();
+        assert_eq!(builtin.len(), upstream.len());
+        for upstream_relay in upstream.relays::<Vec<_>>() {
+            let ours = builtin
+                .get(&upstream_relay.url)
+                .expect("built-in list must contain every upstream default relay");
+            assert_eq!(ours.quic, upstream_relay.quic);
+            assert!(ours.auth_token.is_none());
+        }
     }
 
     #[test]
     fn relay_mode_custom_urls_builds_custom_map() {
         let cfg = IrohNodeConfig {
             disable_relays: false,
-            custom_relay_urls: vec![
+            relay_urls: vec![
                 "https://relay-a.example.com.".to_string(),
                 "https://relay-b.example.com.".to_string(),
             ],
@@ -2478,7 +2527,7 @@ mod tests {
         let relay_b = "https://relay-b.example.com./";
         let cfg = IrohNodeConfig {
             disable_relays: false,
-            custom_relay_urls: vec![relay_a.to_string(), relay_b.to_string()],
+            relay_urls: vec![relay_a.to_string(), relay_b.to_string()],
             relay_access_tokens: std::collections::BTreeMap::from([(
                 relay_a.to_string(),
                 IrohRelayAccessToken::new("relay-a-token".to_string()).expect("valid token"),
@@ -2519,7 +2568,7 @@ mod tests {
     fn relay_mode_lan_only_ignores_custom_urls() {
         let cfg = IrohNodeConfig {
             disable_relays: true,
-            custom_relay_urls: vec!["https://relay.example.com.".to_string()],
+            relay_urls: vec!["https://relay.example.com.".to_string()],
             ..Default::default()
         };
         let mode = relay_mode_from_config(&cfg).expect("relay mode");
@@ -2530,7 +2579,7 @@ mod tests {
     fn relay_mode_rejects_invalid_custom_url() {
         let cfg = IrohNodeConfig {
             disable_relays: false,
-            custom_relay_urls: vec!["not a url".to_string()],
+            relay_urls: vec!["not a url".to_string()],
             ..Default::default()
         };
         let err = relay_mode_from_config(&cfg).expect_err("invalid relay url");
@@ -2541,7 +2590,7 @@ mod tests {
     fn relay_mode_error_omits_the_configured_url_and_credentials() {
         let cfg = IrohNodeConfig {
             disable_relays: false,
-            custom_relay_urls: vec!["https://user:secret-pass@relay.example.com".to_string()],
+            relay_urls: vec!["https://user:secret-pass@relay.example.com".to_string()],
             ..Default::default()
         };
         let err = relay_mode_from_config(&cfg).expect_err("credentials rejected");
@@ -2559,7 +2608,7 @@ mod tests {
     fn relay_mode_rejects_custom_url_with_unsupported_scheme() {
         let cfg = IrohNodeConfig {
             disable_relays: false,
-            custom_relay_urls: vec!["ftp://relay.example.com".to_string()],
+            relay_urls: vec!["ftp://relay.example.com".to_string()],
             ..Default::default()
         };
         let err = relay_mode_from_config(&cfg).expect_err("invalid relay scheme");
@@ -2572,7 +2621,7 @@ mod tests {
         let relay_url = std::env::var("RELAY_ENDPOINT_TARGET").expect("relay target");
         let access_token = std::env::var("RELAY_ENDPOINT_TOKEN").expect("relay token");
         let config = IrohNodeConfig {
-            custom_relay_urls: vec![relay_url.clone()],
+            relay_urls: vec![relay_url.clone()],
             relay_access_tokens: BTreeMap::from([(
                 relay_url,
                 IrohRelayAccessToken::new(access_token).expect("valid token"),

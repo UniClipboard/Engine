@@ -6,6 +6,7 @@ use std::time::Duration;
 use uc_application::facade::settings as app;
 use uc_application::facade::AppFacade;
 use uc_core::settings::model::ShortcutKey;
+use uc_core::settings::relay_routing::RelayRouting;
 
 use crate::{
     CongestionControllerSummary, CustomRelayMutation, CustomRelayMutationOutcome,
@@ -13,10 +14,11 @@ use crate::{
     FileSyncSettingsSummary, GeneralSettingsSummary, NetworkSettingsSummary, OperationResult,
     PairingSettingsSummary, QuickPanelDoubleTapModifierSummary, QuickPanelPositionSummary,
     QuickPanelSettingsSummary, RelayCredentialEdit, RelayCredentialInput, RelayCredentialStatus,
-    RelayProbeCredential, RelayProbeInput, RelayProbeOutcome, RetentionPolicySummary,
-    RetentionRulePatch, RetentionRuleSummary, RuleEvaluationSummary, SaveRelayInput,
-    SaveRelayOutcome, SecuritySettingsSummary, SettingsContentTypes, SettingsContentTypesPatch,
-    SettingsPatch, SettingsSummary, SettingsUpdateOutcome, ShortcutKeySummary, StartupModeSummary,
+    RelayEntrySource, RelayOverview, RelayOverviewEntry, RelayProbeCredential, RelayProbeInput,
+    RelayProbeOutcome, RelayRoutingMode, RetentionPolicySummary, RetentionRulePatch,
+    RetentionRuleSummary, RuleEvaluationSummary, SaveRelayInput, SaveRelayOutcome,
+    SecuritySettingsSummary, SettingsContentTypes, SettingsContentTypesPatch, SettingsPatch,
+    SettingsSummary, SettingsUpdateOutcome, ShortcutKeySummary, StartupModeSummary,
     SyncFrequencySummary, SyncSettingsSummary, ThemeSummary, UpdateChannelSummary,
 };
 
@@ -27,6 +29,42 @@ pub(crate) async fn execute_query_custom_relays(
     Ok(OperationResult::CustomRelays(
         relays.into_iter().map(map_custom_relay).collect(),
     ))
+}
+
+pub(crate) async fn execute_query_relay_overview(
+    facade: &AppFacade,
+) -> Result<OperationResult, EngineError> {
+    let overview = facade
+        .relay_overview()
+        .await
+        .map_err(map_save_relay_error)?;
+    Ok(OperationResult::RelayOverview(RelayOverview {
+        saved_mode: map_routing_mode(overview.saved_routing),
+        applied_mode: overview.applied_routing.map(map_routing_mode),
+        change_pending: overview.change_pending,
+        entries: overview
+            .entries
+            .into_iter()
+            .map(|entry| RelayOverviewEntry {
+                source: match entry.source {
+                    app::RelayEntrySource::BuiltIn => RelayEntrySource::BuiltIn,
+                    app::RelayEntrySource::Custom => RelayEntrySource::Custom,
+                },
+                region_id: entry.region.map(str::to_owned),
+                url: entry.url,
+                credential_configured: entry.credential_configured,
+                in_effect: entry.in_effect,
+            })
+            .collect(),
+    }))
+}
+
+fn map_routing_mode(routing: RelayRouting) -> RelayRoutingMode {
+    match routing {
+        RelayRouting::BuiltIn => RelayRoutingMode::BuiltIn,
+        RelayRouting::Custom => RelayRoutingMode::Custom,
+        RelayRouting::Disabled => RelayRoutingMode::Disabled,
+    }
 }
 
 pub(crate) async fn execute_mutate_custom_relay(

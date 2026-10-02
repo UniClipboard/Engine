@@ -40,20 +40,21 @@ use uc_infra::network::iroh::{IrohNodeConfig, IrohRelayAccessToken};
 ///
 /// `allow_overlay_network_addrs` 为正向同名字段，直接传递不取反。
 ///
-/// `custom_relay_urls` 为正向同名列表，空列表表示继续使用 iroh 默认 relay；
-/// 非空列表由 infra 翻译为 `RelayMode::Custom`。
+/// `relay_urls` 是节点实际使用的 relay 列表，由调用方按 Core 的 relay 路由决策
+/// （内置默认或用户自定义）算好后传入；infra 总是把它翻译为 `RelayMode::Custom`，
+/// 不再隐含任何上游默认列表。
 ///
 /// 参数：
 /// - `allow_relay_fallback`：业务正向语义，由 `uc-core::Settings.network` 透传
 /// - `allow_overlay_network_addrs`：业务正向语义，由 `uc-core::Settings.network`
 ///   透传；专业用户开关，控制是否把 VPN/overlay 类虚拟网卡 IP 作为 iroh 直连候选
-/// - `custom_relay_urls`：用户配置的 relay URL 列表；空列表沿用默认 relay
+/// - `relay_urls`：节点实际使用的 relay URL 列表（LAN-only 时不参与 bind）
 /// - `rendezvous_base_url`：`None` 走 `RENDEZVOUS_BASE_URL` 默认；production 调
 ///   用方传 `None`；集成测试覆盖 override
 pub fn relay_policy_to_iroh_config(
     allow_relay_fallback: bool,
     allow_overlay_network_addrs: bool,
-    custom_relay_urls: Vec<String>,
+    relay_urls: Vec<String>,
     congestion_controller: CongestionController,
     rendezvous_base_url: Option<String>,
 ) -> IrohNodeConfig {
@@ -62,7 +63,7 @@ pub fn relay_policy_to_iroh_config(
         disable_relays: !allow_relay_fallback,
         // ↓ 正向同名字段，直接搬运不取反。
         allow_overlay_network_addrs,
-        custom_relay_urls,
+        relay_urls,
         relay_access_tokens: Default::default(),
         congestion_controller,
         rendezvous_base_url,
@@ -76,7 +77,7 @@ pub fn relay_policy_to_iroh_config(
 
 pub fn load_relay_access_tokens(config: &mut IrohNodeConfig, credentials: &RelayCredentials) {
     config.relay_access_tokens.clear();
-    for relay_url in &config.custom_relay_urls {
+    for relay_url in &config.relay_urls {
         let token = match credentials.load(relay_url) {
             Ok(Some(token)) => token,
             Ok(None) => continue,
@@ -341,9 +342,9 @@ mod tests {
         assert!(cfg.allow_overlay_network_addrs);
     }
 
-    /// custom_relay_urls 正向列表搬运，空列表/非空列表都不参与取反。
+    /// relay_urls 列表原样搬运，空列表/非空列表都不参与取反。
     #[test]
-    fn custom_relay_urls_pass_through() {
+    fn relay_urls_pass_through() {
         let cfg = relay_policy_to_iroh_config(
             true,
             false,
@@ -352,7 +353,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            cfg.custom_relay_urls,
+            cfg.relay_urls,
             vec!["https://relay.example.com.".to_string()]
         );
     }

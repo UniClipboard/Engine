@@ -50,8 +50,8 @@ use crate::operations::settings::encryption::{
 };
 use crate::operations::settings::settings::{
     execute_mutate_custom_relay, execute_probe_relay, execute_query_custom_relays,
-    execute_query_relay_credential, execute_query_settings, execute_save_relay,
-    execute_update_settings,
+    execute_query_relay_credential, execute_query_relay_overview, execute_query_settings,
+    execute_save_relay, execute_update_settings,
 };
 use crate::operations::settings::storage::{
     execute_clear_storage_cache, execute_query_storage_stats,
@@ -269,6 +269,9 @@ impl EngineRuntime for ProductionRuntime {
                 }
                 Operation::QueryCustomRelays => {
                     execute_query_custom_relays(self.current_facade().await?.as_ref()).await
+                }
+                Operation::QueryRelayOverview => {
+                    execute_query_relay_overview(self.current_facade().await?.as_ref()).await
                 }
                 Operation::MutateCustomRelay(mutation) => {
                     execute_mutate_custom_relay(self.current_facade().await?.as_ref(), mutation)

@@ -467,6 +467,60 @@ impl std::fmt::Debug for CustomRelay {
     }
 }
 
+/// Relay 路由方式。优先级：`Disabled`（仅局域网）> `Custom`（替换内置列表）> `BuiltIn`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum RelayRoutingMode {
+    BuiltIn,
+    Custom,
+    Disabled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum RelayEntrySource {
+    BuiltIn,
+    Custom,
+}
+
+/// `in_effect` 表示运行中的节点按此地址配置，不代表已经连通。
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
+pub struct RelayOverviewEntry {
+    pub source: RelayEntrySource,
+    pub region_id: Option<String>,
+    pub url: String,
+    pub credential_configured: bool,
+    pub in_effect: bool,
+}
+
+impl std::fmt::Debug for RelayOverviewEntry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RelayOverviewEntry")
+            .field("source", &self.source)
+            .field("in_effect", &self.in_effect)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
+pub struct RelayOverview {
+    pub saved_mode: RelayRoutingMode,
+    pub applied_mode: Option<RelayRoutingMode>,
+    pub change_pending: bool,
+    pub entries: Vec<RelayOverviewEntry>,
+}
+
+impl std::fmt::Debug for RelayOverview {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RelayOverview")
+            .field("saved_mode", &self.saved_mode)
+            .field("applied_mode", &self.applied_mode)
+            .field("change_pending", &self.change_pending)
+            .field("entry_count", &self.entries.len())
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum CustomRelayMutationRejection {
     InvalidUrl,
@@ -530,6 +584,9 @@ enum WorkerCommand {
     },
     QueryCustomRelays {
         response: mpsc::Sender<Result<Vec<CustomRelay>, BindingError>>,
+    },
+    QueryRelayOverview {
+        response: mpsc::Sender<Result<RelayOverview, BindingError>>,
     },
     MutateCustomRelay {
         mutation: CustomRelayMutation,
@@ -1040,6 +1097,10 @@ impl MobileEngine {
 
     pub fn query_custom_relays(&self) -> Result<Vec<CustomRelay>, BindingError> {
         self.request(|response| WorkerCommand::QueryCustomRelays { response })
+    }
+
+    pub fn query_relay_overview(&self) -> Result<RelayOverview, BindingError> {
+        self.request(|response| WorkerCommand::QueryRelayOverview { response })
     }
 
     pub fn add_custom_relay(
@@ -1657,6 +1718,14 @@ async fn run_operations(
                     .await
                     .map_err(BindingError::from)
                     .and_then(map_custom_relays);
+                let _ = response.send(result);
+            }
+            WorkerCommand::QueryRelayOverview { response } => {
+                let result = engine
+                    .execute(Operation::QueryRelayOverview)
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(map_relay_overview);
                 let _ = response.send(result);
             }
             WorkerCommand::MutateCustomRelay { mutation, response } => {
@@ -2470,6 +2539,39 @@ fn map_custom_relays(result: OperationResult) -> Result<Vec<CustomRelay>, Bindin
                 credential_configured: relay.credential_configured,
             })
             .collect()),
+        _ => Err(BindingError::UnexpectedResult),
+    }
+}
+
+fn map_relay_routing_mode(mode: uc_engine::RelayRoutingMode) -> RelayRoutingMode {
+    match mode {
+        uc_engine::RelayRoutingMode::BuiltIn => RelayRoutingMode::BuiltIn,
+        uc_engine::RelayRoutingMode::Custom => RelayRoutingMode::Custom,
+        uc_engine::RelayRoutingMode::Disabled => RelayRoutingMode::Disabled,
+    }
+}
+
+fn map_relay_overview(result: OperationResult) -> Result<RelayOverview, BindingError> {
+    match result {
+        OperationResult::RelayOverview(overview) => Ok(RelayOverview {
+            saved_mode: map_relay_routing_mode(overview.saved_mode),
+            applied_mode: overview.applied_mode.map(map_relay_routing_mode),
+            change_pending: overview.change_pending,
+            entries: overview
+                .entries
+                .into_iter()
+                .map(|entry| RelayOverviewEntry {
+                    source: match entry.source {
+                        uc_engine::RelayEntrySource::BuiltIn => RelayEntrySource::BuiltIn,
+                        uc_engine::RelayEntrySource::Custom => RelayEntrySource::Custom,
+                    },
+                    region_id: entry.region_id,
+                    url: entry.url,
+                    credential_configured: entry.credential_configured,
+                    in_effect: entry.in_effect,
+                })
+                .collect(),
+        }),
         _ => Err(BindingError::UnexpectedResult),
     }
 }

@@ -15,7 +15,7 @@ use crate::{
     MobileDeviceSummary, MobileDeviceUpdateOutcome, MobileFileUploadHandle,
     MobileLanInterfaceSummary, MobileSyncDocument, MobileSyncDocumentApplyOutcome,
     MobileSyncFileReadOutcome, MobileSyncSettingsSummary, MobileSyncSettingsUpdateOutcome,
-    RelayCredentialStatus, RelayProbeOutcome, SaveRelayOutcome, SettingsSummary,
+    RelayCredentialStatus, RelayOverview, RelayProbeOutcome, SaveRelayOutcome, SettingsSummary,
     SettingsUpdateOutcome, UpgradeStatusSummary,
 };
 
@@ -519,6 +519,7 @@ pub enum OperationResult {
     NetworkRecoveryStatus(NetworkRecoveryStatusSummary),
     Settings(Box<SettingsSummary>),
     CustomRelays(Vec<CustomRelaySummary>),
+    RelayOverview(RelayOverview),
     CustomRelayMutated(CustomRelayMutationOutcome),
     SettingsUpdated(SettingsUpdateOutcome),
     RelaySaved(SaveRelayOutcome),
@@ -747,6 +748,9 @@ impl fmt::Debug for OperationResult {
             Self::CustomRelays(relays) => debug
                 .field("kind", &"custom_relays")
                 .field("relay_count", &relays.len()),
+            Self::RelayOverview(overview) => debug
+                .field("kind", &"relay_overview")
+                .field("overview", overview),
             Self::CustomRelayMutated(outcome) => debug
                 .field("kind", &"custom_relay_mutated")
                 .field("outcome", outcome),

@@ -28,3 +28,4 @@ ADR 记录重要取舍的背景、备选方案和后果。编号保持历史稳�
 - [ADR-028：可选 mbx 编译缓存](028-optional-mbx-build-cache.md)
 - [ADR-029：CI 编译缓存使用 R2](029-ci-r2-compile-cache.md)
 - [ADR-030：类型化日志事件与工具链强制](030-typed-log-events-and-enforcement.md)
+- [ADR-031：内置 relay 列表由产品持有](031-product-owned-builtin-relay-list.md)

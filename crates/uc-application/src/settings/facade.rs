@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError, RwLock};
 
 use tracing::instrument;
 
@@ -6,8 +6,8 @@ use uc_core::error_class::ErrorClass;
 use uc_core::ports::SettingsPort;
 
 use crate::facade::settings::relay_configuration::{
-    RelayConfiguration, RelayConfigurationEntry, RelayConfigurationError,
-    RelayConfigurationMutation, RelayConfigurationRejection,
+    AppliedRelayRouting, RelayConfiguration, RelayConfigurationEntry, RelayConfigurationError,
+    RelayConfigurationMutation, RelayConfigurationRejection, RelayOverview,
 };
 use crate::facade::settings::relay_diagnostic::{
     RelayDiagnosticPort, RelayProbeError, RelayProbeReport,
@@ -147,11 +147,13 @@ pub struct SettingsFacade {
     settings: Arc<dyn SettingsPort>,
     relay_diagnostic: Option<Arc<dyn RelayDiagnosticPort>>,
     relay_configuration: RelayConfiguration,
+    applied_relays: RwLock<Option<AppliedRelayRouting>>,
 }
 
 impl SettingsFacade {
     pub fn new(settings: Arc<dyn SettingsPort>) -> Self {
         Self {
+            applied_relays: RwLock::new(None),
             relay_configuration: RelayConfiguration::new(Arc::clone(&settings)),
             settings,
             relay_diagnostic: None,
@@ -189,6 +191,26 @@ impl SettingsFacade {
         Ok(RelayCredentialStatusView {
             configured: self.relay_configuration.credential_status(url)?,
         })
+    }
+
+    /// 网络节点绑定成功后记录它实际采用的 relay 路由；绑定开始前先清空。
+    pub fn record_applied_relays(&self, applied: Option<AppliedRelayRouting>) {
+        *self
+            .applied_relays
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = applied;
+    }
+
+    pub async fn relay_overview(&self) -> Result<RelayOverview, SettingsFacadeError> {
+        let applied = self
+            .applied_relays
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        self.relay_configuration
+            .overview(applied.as_ref())
+            .await
+            .map_err(Into::into)
     }
 
     pub async fn list_relays(&self) -> Result<Vec<RelayConfigurationEntry>, SettingsFacadeError> {

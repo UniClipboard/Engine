@@ -258,7 +258,7 @@ impl Default for NetworkSettings {
     /// 默认值：
     /// - `allow_relay_fallback`: true
     /// - `allow_overlay_network_addrs`: false
-    /// - `custom_relay_urls`: 空列表（沿用 iroh 默认中继）
+    /// - `custom_relay_urls`: 空列表（使用产品内置 relay）
     ///
     // 默认 true = 允许 fallback。
     // 改成 false 会让所有跨网段老用户突然离线，属于 breaking change。

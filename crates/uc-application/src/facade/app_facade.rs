@@ -116,7 +116,7 @@ use crate::clipboard::history::maintenance_runtime::HistoryMaintenanceRuntime;
 use crate::device::query_local_device::QueryLocalDeviceUseCase;
 use crate::facade::settings::{
     GeneralSettingsPatch, RelayConfigurationEntry, RelayConfigurationMutation,
-    RelayConfigurationRejection, SettingsPatch,
+    RelayConfigurationRejection, RelayOverview, SettingsPatch,
 };
 use crate::facade::space_setup::{
     InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult, IssuePairingInvitationError,
@@ -859,6 +859,10 @@ impl AppFacade {
         edit: crate::facade::settings::RelayCredentialEdit,
     ) -> Result<crate::facade::settings::RelaySaveView, SettingsFacadeError> {
         self.settings.save_relay(patch, edit).await
+    }
+
+    pub async fn relay_overview(&self) -> Result<RelayOverview, SettingsFacadeError> {
+        self.settings.relay_overview().await
     }
 
     pub async fn list_relays(&self) -> Result<Vec<RelayConfigurationEntry>, SettingsFacadeError> {

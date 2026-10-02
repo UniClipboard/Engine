@@ -19,8 +19,8 @@ use zeroize::Zeroizing;
 
 use crate::{
     host, OhActiveClipboard, OhEngineConfig, OhEngineEvent, OhHost, OhInvitationIssued,
-    OhJoinSpaceStatus, OhJoinedSpace, OhLocalDevice, OhNetworkRecoveryStatus, OhSendReport,
-    OhSessionRecovery, OhSpaceCreated, OhWorkspaceConvergence,
+    OhJoinSpaceStatus, OhJoinedSpace, OhLocalDevice, OhNetworkRecoveryStatus, OhRelayOverview,
+    OhRelayOverviewEntry, OhSendReport, OhSessionRecovery, OhSpaceCreated, OhWorkspaceConvergence,
 };
 
 #[napi]
@@ -195,6 +195,40 @@ impl OhEngine {
                 phase: recovery_phase(status.phase).to_string(),
                 retryable: status.retryable,
                 next_retry_in_ms: status.next_retry_in_ms.map(|value| value as f64),
+            }),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
+    pub async fn query_relay_overview(&self) -> napi::Result<OhRelayOverview> {
+        match self
+            .engine
+            .execute(Operation::QueryRelayOverview)
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::RelayOverview(overview) => Ok(OhRelayOverview {
+                saved_mode: relay_mode_name(overview.saved_mode).to_string(),
+                applied_mode: overview
+                    .applied_mode
+                    .map(|mode| relay_mode_name(mode).to_string()),
+                change_pending: overview.change_pending,
+                entries: overview
+                    .entries
+                    .into_iter()
+                    .map(|entry| OhRelayOverviewEntry {
+                        source: match entry.source {
+                            uc_engine::RelayEntrySource::BuiltIn => "built_in",
+                            uc_engine::RelayEntrySource::Custom => "custom",
+                        }
+                        .to_string(),
+                        region_id: entry.region_id,
+                        url: entry.url,
+                        credential_configured: entry.credential_configured,
+                        in_effect: entry.in_effect,
+                    })
+                    .collect(),
             }),
             _ => Err(unexpected_result()),
         }
@@ -1241,5 +1275,13 @@ mod tests {
             assert!(json.contains("blocked_reason"));
             assert!(json.contains(&format!("\"pairing_confirmation\":\"{expected}\"")));
         }
+    }
+}
+
+fn relay_mode_name(mode: uc_engine::RelayRoutingMode) -> &'static str {
+    match mode {
+        uc_engine::RelayRoutingMode::BuiltIn => "built_in",
+        uc_engine::RelayRoutingMode::Custom => "custom",
+        uc_engine::RelayRoutingMode::Disabled => "disabled",
     }
 }

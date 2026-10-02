@@ -1,7 +1,13 @@
 use std::{fmt, sync::Arc};
 
 use tokio::sync::Mutex;
-use uc_core::{ports::SettingsPort, settings::model::Settings};
+use uc_core::{
+    ports::SettingsPort,
+    settings::{
+        model::Settings,
+        relay_routing::{RelayRouting, BUILTIN_RELAYS},
+    },
+};
 use uc_observability_contract::{error_source::io_error_kind, uc_info, uc_warn};
 
 use super::{
@@ -81,6 +87,52 @@ impl RelayConfigurationError {
             Self::Credentials(_) => "credentials",
         }
     }
+}
+
+/// 运行中网络节点绑定时采用的 relay 路由。由网络装配在每次构建节点时记录，
+/// 用来区分“已保存的配置”和“实际生效的配置”。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppliedRelayRouting {
+    pub routing: RelayRouting,
+    pub urls: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayEntrySource {
+    BuiltIn,
+    Custom,
+}
+
+/// Relay 概览中的一条记录。`in_effect` 只说明运行中的节点是否使用该地址配置，
+/// 不代表已经连通。
+#[derive(Clone, PartialEq, Eq)]
+pub struct RelayOverviewEntry {
+    pub source: RelayEntrySource,
+    /// 内置 relay 的稳定区域标识；自定义条目为空。
+    pub region: Option<&'static str>,
+    pub url: String,
+    pub credential_configured: bool,
+    pub in_effect: bool,
+}
+
+impl fmt::Debug for RelayOverviewEntry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RelayOverviewEntry")
+            .field("source", &self.source)
+            .field("in_effect", &self.in_effect)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayOverview {
+    pub saved_routing: RelayRouting,
+    /// 节点尚未构建时为空。
+    pub applied_routing: Option<RelayRouting>,
+    /// 已保存配置与运行中节点的 relay 列表不一致，需要重新构建节点后才生效。
+    pub change_pending: bool,
+    pub entries: Vec<RelayOverviewEntry>,
 }
 
 pub(crate) struct RelayConfigurationUpdate {
@@ -207,6 +259,62 @@ impl RelayConfiguration {
             .as_ref()
             .ok_or(RelayConfigurationError::CredentialsUnavailable)?;
         canonical_entries(&settings.network.custom_relay_urls, credentials)
+    }
+
+    pub async fn overview(
+        &self,
+        applied: Option<&AppliedRelayRouting>,
+    ) -> Result<RelayOverview, RelayConfigurationError> {
+        let _guard = self.mutation_gate.lock().await;
+        self.recover_locked().await?;
+        let settings = self
+            .settings
+            .load()
+            .await
+            .map_err(|error| RelayConfigurationError::Load(anyhow::Error::from(error)))?;
+        let credentials = self
+            .credentials
+            .as_ref()
+            .ok_or(RelayConfigurationError::CredentialsUnavailable)?;
+        let custom = canonical_entries(&settings.network.custom_relay_urls, credentials)?;
+        let custom_urls: Vec<String> = custom.iter().map(|entry| entry.url.clone()).collect();
+        let saved_routing =
+            RelayRouting::resolve(settings.network.allow_relay_fallback, &custom_urls);
+        let saved_urls = saved_routing.effective_urls(&custom_urls);
+        let applied_urls: Vec<String> = applied
+            .map(|applied| {
+                applied
+                    .urls
+                    .iter()
+                    .filter_map(|url| canonical_url(url).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let in_effect = |url: &str| applied_urls.iter().any(|applied| applied == url);
+
+        let mut entries = Vec::with_capacity(BUILTIN_RELAYS.len() + custom.len());
+        entries.extend(BUILTIN_RELAYS.iter().map(|relay| RelayOverviewEntry {
+            source: RelayEntrySource::BuiltIn,
+            region: Some(relay.region),
+            url: relay.url.to_owned(),
+            credential_configured: false,
+            in_effect: in_effect(relay.url),
+        }));
+        entries.extend(custom.into_iter().map(|entry| RelayOverviewEntry {
+            source: RelayEntrySource::Custom,
+            region: None,
+            in_effect: in_effect(&entry.url),
+            credential_configured: entry.credential_configured,
+            url: entry.url,
+        }));
+        Ok(RelayOverview {
+            saved_routing,
+            applied_routing: applied.map(|applied| applied.routing),
+            change_pending: applied.is_some_and(|applied| {
+                applied.routing != saved_routing || applied_urls != saved_urls
+            }),
+            entries,
+        })
     }
 
     pub async fn mutate(
