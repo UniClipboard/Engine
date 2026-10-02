@@ -23,12 +23,14 @@ use super::super::space_admission_wire::{
     write_envelope, write_typed, AuthenticatedEnvelopeV1, FrameKind, AUTH_FRAME_LIMIT, IO_DEADLINE,
 };
 use super::super::trace_context::inject_current;
+use super::connection::ReusableConnection;
 use super::crypto::{calculate_mac, random_nonce, verify_mac};
 use super::diagnostics::{client_completion, io_failure, record_network_snapshot, wire_failure};
 use super::errors::{application_close_error, map_reply_wire_error};
 
 pub(super) struct EstablishedExchange {
     connection: Connection,
+    reusable: ReusableConnection,
     send: SendStream,
     receive: RecvStream,
     admission_id: SpaceAdmissionId,
@@ -38,8 +40,13 @@ pub(super) struct EstablishedExchange {
 }
 
 impl EstablishedExchange {
+    pub(super) fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
     pub(super) fn new(
         connection: Connection,
+        reusable: ReusableConnection,
         send: SendStream,
         receive: RecvStream,
         admission_id: SpaceAdmissionId,
@@ -49,6 +56,7 @@ impl EstablishedExchange {
     ) -> Self {
         Self {
             connection,
+            reusable,
             send,
             receive,
             admission_id,
@@ -192,6 +200,9 @@ impl AuthenticatedAdmissionExchangePort for EstablishedExchange {
             started.elapsed(),
             result.as_ref().err(),
         ));
+        if result.is_ok() {
+            self.reusable.store(self.connection.clone());
+        }
         result
     }
 }

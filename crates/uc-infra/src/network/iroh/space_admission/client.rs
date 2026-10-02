@@ -3,7 +3,7 @@ use super::super::space_admission_wire::{
     read_typed, write_typed, ContinuationHelloV1, FrameKind, InitialHelloV2, OpaqueFinishV1,
     OpaqueResponseV1, AUTH_FRAME_LIMIT,
 };
-use super::connection::{connect, open_stream};
+use super::connection::{connect, open_stream, ReusableConnection};
 use super::crypto::{calculate_mac, copy_credential, peer_id, random_nonce};
 use super::diagnostics::record_client_completion;
 use super::errors::initial_hello_close_error;
@@ -16,26 +16,183 @@ use std::sync::Arc;
 use std::time::Instant;
 use tracing::Instrument;
 use uc_application::deps::{
-    AuthenticatedAdmissionExchangePort, SpaceAdmissionTransportError, SpaceAdmissionTransportPort,
+    AuthenticatedAdmissionExchangePort, AuthenticatedAdmissionReply, SpaceAdmissionTransportError,
+    SpaceAdmissionTransportPort,
 };
 use uc_core::membership::{
     AdmissionAttemptContractV2, AdmissionAttemptTimeline, AdmissionContinuationCredential,
-    AdmissionEncryptedPasswordEquivalent, AdmissionPeerBinding, InvitationId, SpaceAdmissionId,
-    SpaceAdmissionProtocolVersion, SpaceAdmissionRoute,
+    AdmissionEncryptedPasswordEquivalent, AdmissionPeerBinding, InvitationId,
+    SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionProtocolVersion, SpaceAdmissionRoute,
 };
-use uc_observability_contract::diagnostics::connectivity::complete_admission_connection_failure;
+use uc_observability_contract::diagnostics::connectivity::{
+    complete_admission_connection_failure, DialFailure,
+};
 use uc_observability_contract::diagnostics::{
     operation_span, DiagnosticDomain, DiagnosticOperation, DiagnosticRole, DiagnosticSpanKind,
     OperationContext,
 };
 
+#[derive(Clone)]
 pub struct IrohSpaceAdmissionTransport {
     endpoint: Arc<Endpoint>,
+    reusable: ReusableConnection,
 }
 
 impl IrohSpaceAdmissionTransport {
     pub fn new(endpoint: Arc<Endpoint>) -> Self {
-        Self { endpoint }
+        Self {
+            endpoint,
+            reusable: ReusableConnection::default(),
+        }
+    }
+}
+
+impl IrohSpaceAdmissionTransport {
+    /// 建立恢复交换的已认证流；`allow_reuse` 时优先使用上一轮仍打开的连接，返回值标明是否复用了旧连接。
+    async fn open_continuation(
+        &self,
+        admission_id: SpaceAdmissionId,
+        route: &SpaceAdmissionRoute,
+        binding: AdmissionPeerBinding,
+        credential: &AdmissionContinuationCredential,
+        allow_reuse: bool,
+        connection_failure: &mut Option<DialFailure>,
+    ) -> Result<(Box<EstablishedExchange>, bool), SpaceAdmissionTransportError> {
+        let route = decode_route(route, false)?;
+        let local = peer_id(self.endpoint.id().as_bytes())?;
+        let remote = peer_id(route.endpoint_addr.id.as_bytes())?;
+        if binding.local_peer_id() != local || binding.remote_peer_id() != remote {
+            return Err(SpaceAdmissionTransportError::authentication_rejected());
+        }
+        // 上一轮成功后仍打开的连接优先复用；对端已关闭（旧版邀请端每条连接只处理一次交换）或打开流失败时
+        // 重新建立连接，行为与不复用完全一致。
+        let reused = match allow_reuse
+            .then(|| self.reusable.take_open(route.endpoint_addr.id))
+            .flatten()
+        {
+            Some(connection) => open_stream(&connection)
+                .await
+                .ok()
+                .map(|(send, receive)| (connection, send, receive)),
+            None => None,
+        };
+        let was_reused = reused.is_some();
+        let (connection, mut send, receive) = match reused {
+            Some(reused) => reused,
+            None => {
+                let connection =
+                    connect(&self.endpoint, route.endpoint_addr)
+                        .await
+                        .map_err(|error| {
+                            *connection_failure = Some(error.category());
+                            SpaceAdmissionTransportError::deferred()
+                        })?;
+                let (send, receive) = open_stream(&connection).await?;
+                (connection, send, receive)
+            }
+        };
+        let nonce = random_nonce();
+        let request_digest = [0u8; 32];
+        let mac = calculate_mac(
+            credential,
+            b"resume",
+            admission_id,
+            local,
+            remote,
+            &nonce,
+            &request_digest,
+            None,
+        )
+        .map_err(SpaceAdmissionTransportError::authentication_rejected_from)?;
+        write_typed(
+            &mut send,
+            FrameKind::ContinuationHello,
+            &ContinuationHelloV1 {
+                admission_id: *admission_id.as_bytes(),
+                local_peer_id: *local.as_bytes(),
+                remote_peer_id: *remote.as_bytes(),
+                nonce,
+                request_digest,
+                mac,
+            },
+            AUTH_FRAME_LIMIT,
+        )
+        .await
+        .map_err(SpaceAdmissionTransportError::unavailable_from)?;
+        Ok((
+            Box::new(EstablishedExchange::new(
+                connection,
+                self.reusable.clone(),
+                send,
+                receive,
+                admission_id,
+                binding,
+                copy_credential(credential)?,
+                None,
+            )),
+            was_reused,
+        ))
+    }
+}
+
+/// 复用旧连接的交换：旧连接在发出请求前后被对端关闭时，在新连接上重发同一请求一次。
+/// 请求是幂等的（对端按已保存的状态重放回复），所以重发不会重复生效。
+struct ReusedExchange {
+    inner: Box<EstablishedExchange>,
+    transport: IrohSpaceAdmissionTransport,
+    admission_id: SpaceAdmissionId,
+    route: SpaceAdmissionRoute,
+    binding: AdmissionPeerBinding,
+    credential: AdmissionContinuationCredential,
+}
+
+#[async_trait]
+impl AuthenticatedAdmissionExchangePort for ReusedExchange {
+    fn peer_binding(&self) -> AdmissionPeerBinding {
+        self.binding
+    }
+
+    fn take_newly_established_continuation(&mut self) -> Option<AdmissionContinuationCredential> {
+        None
+    }
+
+    async fn exchange(
+        self: Box<Self>,
+        request: &SpaceAdmissionEnvelopeV1,
+    ) -> Result<AuthenticatedAdmissionReply, SpaceAdmissionTransportError> {
+        let Self {
+            inner,
+            transport,
+            admission_id,
+            route,
+            binding,
+            credential,
+        } = *self;
+        let connection = inner.connection().clone();
+        let result = inner.exchange(request).await;
+        let Err(error) = &result else {
+            return result;
+        };
+        let explicit_rejection = matches!(
+            error,
+            SpaceAdmissionTransportError::AuthenticationRejected { .. }
+                | SpaceAdmissionTransportError::PeerUpgradeRequired
+        );
+        if explicit_rejection || connection.close_reason().is_none() {
+            return result;
+        }
+        let mut connection_failure = None;
+        let (fresh, _) = transport
+            .open_continuation(
+                admission_id,
+                &route,
+                binding,
+                &credential,
+                false,
+                &mut connection_failure,
+            )
+            .await?;
+        fresh.exchange(request).await
     }
 }
 
@@ -143,6 +300,7 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
             let newly_established = copy_credential(&credential)?;
             Ok(Box::new(EstablishedExchange::new(
                 connection,
+                self.reusable.clone(),
                 send,
                 receive,
                 admission_id,
@@ -184,62 +342,17 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
         });
         uc_observability_contract::diagnostics::describe_admission_connection(&span, true);
         let mut connection_failure = None;
-        let result = async {
-            let route = decode_route(route, false)?;
-            let local = peer_id(self.endpoint.id().as_bytes())?;
-            let remote = peer_id(route.endpoint_addr.id.as_bytes())?;
-            if binding.local_peer_id() != local || binding.remote_peer_id() != remote {
-                return Err(SpaceAdmissionTransportError::authentication_rejected());
-            }
-            let connection =
-                connect(&self.endpoint, route.endpoint_addr)
-                    .await
-                    .map_err(|error| {
-                        connection_failure = Some(error.category());
-                        SpaceAdmissionTransportError::deferred()
-                    })?;
-            let (mut send, receive) = open_stream(&connection).await?;
-            let nonce = random_nonce();
-            let request_digest = [0u8; 32];
-            let mac = calculate_mac(
-                credential,
-                b"resume",
+        let result = self
+            .open_continuation(
                 admission_id,
-                local,
-                remote,
-                &nonce,
-                &request_digest,
-                None,
-            )
-            .map_err(SpaceAdmissionTransportError::authentication_rejected_from)?;
-            write_typed(
-                &mut send,
-                FrameKind::ContinuationHello,
-                &ContinuationHelloV1 {
-                    admission_id: *admission_id.as_bytes(),
-                    local_peer_id: *local.as_bytes(),
-                    remote_peer_id: *remote.as_bytes(),
-                    nonce,
-                    request_digest,
-                    mac,
-                },
-                AUTH_FRAME_LIMIT,
-            )
-            .await
-            .map_err(SpaceAdmissionTransportError::unavailable_from)?;
-            Ok(Box::new(EstablishedExchange::new(
-                connection,
-                send,
-                receive,
-                admission_id,
+                route,
                 binding,
-                copy_credential(credential)?,
-                None,
-            ))
-                as Box<dyn AuthenticatedAdmissionExchangePort>)
-        }
-        .instrument(span.clone())
-        .await;
+                credential,
+                true,
+                &mut connection_failure,
+            )
+            .instrument(span.clone())
+            .await;
         span.in_scope(|| {
             if let Some(failure) = connection_failure {
                 complete_admission_connection_failure(failure, started.elapsed());
@@ -251,6 +364,18 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
                 result.as_ref().err(),
             )
         });
-        result
+        let (exchange, reused) = result?;
+        if !reused {
+            return Ok(exchange);
+        }
+        Ok(Box::new(ReusedExchange {
+            inner: exchange,
+            transport: self.clone(),
+            admission_id,
+            route: SpaceAdmissionRoute::from_bytes(route.as_bytes().to_vec())
+                .map_err(SpaceAdmissionTransportError::protocol_rejected_from)?,
+            binding,
+            credential: copy_credential(credential)?,
+        }))
     }
 }

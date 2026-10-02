@@ -446,6 +446,41 @@ async fn stalled_authenticated_endpoint_records_one_server_timeout() {
         .any(|(key, _)| key.as_str() == "uc.flow.id"));
 }
 
+#[derive(Debug)]
+struct CountingHandler {
+    inner: Arc<IrohSpaceAdmissionHandler>,
+    accepted: Arc<AtomicUsize>,
+}
+
+impl ProtocolHandler for CountingHandler {
+    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+        self.accepted.fetch_add(1, Ordering::SeqCst);
+        self.inner.accept(connection).await
+    }
+
+    async fn shutdown(&self) {
+        self.inner.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn consecutive_exchanges_reuse_one_admission_connection() {
+    let (connections, exchanges) = run_loopback(true).await;
+    assert_eq!(exchanges, 2);
+    assert_eq!(
+        connections, 1,
+        "the continuation exchange must reuse the first connection"
+    );
+}
+
+#[tokio::test]
+async fn joiner_reconnects_when_the_sponsor_closes_after_one_exchange() {
+    // 零空闲等价于旧版邀请端：每条连接处理一次交换后即关闭，加入方必须无感地重新连接。
+    let (connections, exchanges) = run_loopback(false).await;
+    assert_eq!(exchanges, 2);
+    assert_eq!(connections, 2, "a closed connection must not be reused");
+}
+
 #[tokio::test]
 async fn real_iroh_loopback_runs_initial_and_continuation_typed_exchanges() {
     let sponsor = bound_endpoint().await;
@@ -534,4 +569,112 @@ async fn real_iroh_loopback_runs_initial_and_continuation_typed_exchanges() {
     router.shutdown().await.expect("router shutdown");
     joiner.close().await;
     sponsor.close().await;
+}
+
+async fn run_loopback(reuse_connections: bool) -> (usize, usize) {
+    let sponsor = bound_endpoint().await;
+    wait_for_direct_addrs(&sponsor).await;
+    let joiner = bound_endpoint().await;
+    wait_for_direct_addrs(&joiner).await;
+    let invitation = InvitationId::from_bytes([0x51; 32]).expect("invitation id");
+    let admission = SpaceAdmissionId::from_bytes([0x52; 32]).expect("admission id");
+    let derived = SpaceAdmissionAuth::derive_password_equivalent(b"loopback-pass", invitation);
+    let setup = SpaceAdmissionAuth::generate_server_setup();
+    let registration =
+        SpaceAdmissionAuth::register_password_equivalent(&setup, &derived).expect("registration");
+    let credentials = Arc::new(LoopbackCredentials {
+        initial: Mutex::new(Some(SponsorOpaqueMaterial::new(setup, registration))),
+        continuation: Mutex::new(None),
+    });
+    let route_bytes =
+        encode_space_admission_route(&sponsor.addr(), Some(invitation)).expect("route encoding");
+    let route = SpaceAdmissionRoute::from_bytes(route_bytes.clone()).expect("route");
+    let endpoint = Arc::new(PersistingLoopbackEndpoint {
+        credentials: Arc::clone(&credentials),
+        candidate_state: Mutex::new(None),
+        calls: AtomicUsize::new(0),
+        completed: AtomicUsize::new(0),
+        continuation_route: route_bytes,
+    });
+    let handler = Arc::new(
+        IrohSpaceAdmissionHandler::new(&sponsor, endpoint.clone(), credentials).expect("handler"),
+    );
+    let handler = if reuse_connections {
+        handler
+    } else {
+        Arc::new(
+            Arc::try_unwrap(handler)
+                .expect("sole handler owner")
+                .without_connection_reuse(),
+        )
+    };
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let router = Router::builder((*sponsor).clone())
+        .accept(
+            SPACE_ADMISSION_ALPN,
+            CountingHandler {
+                inner: Arc::clone(&handler),
+                accepted: Arc::clone(&accepted),
+            },
+        )
+        .spawn();
+    let transport = IrohSpaceAdmissionTransport::new(joiner.clone());
+    let password = AdmissionEncryptedPasswordEquivalent::from_bytes(derived.as_bytes().to_vec())
+        .expect("password equivalent");
+    let mut initial = transport
+        .establish_initial(
+            admission,
+            AdmissionAttemptTimeline::start(1_000).expect("valid attempt timeline"),
+            &route,
+            &password,
+        )
+        .await
+        .expect("initial OPAQUE");
+    let binding = initial.peer_binding();
+    let continuation = initial
+        .take_newly_established_continuation()
+        .expect("new continuation");
+    let join_request = join_request(admission, invitation);
+    let candidate_result = initial.exchange(&join_request).await;
+    assert_eq!(endpoint.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(endpoint.completed.load(Ordering::SeqCst), 1);
+    let saved = endpoint
+        .candidate_state
+        .lock()
+        .await
+        .clone()
+        .expect("candidate state persisted");
+    let saved = SponsorAdmission::decode_persisted(&saved).expect("candidate state decodes");
+    let saved_reply = saved.current_exact_reply().expect("candidate reply saved");
+    let canonical = saved_reply
+        .encode_canonical_v1()
+        .expect("candidate encodes");
+    SpaceAdmissionEnvelopeV1::decode_canonical_v1(&canonical)
+        .expect("candidate canonical reply decodes");
+    let candidate = candidate_result.expect("Candidate reply");
+    let (candidate, _) = candidate.into_parts();
+    assert_eq!(
+        candidate.kind(),
+        uc_core::membership::SpaceAdmissionMessageKind::Candidate
+    );
+
+    let prepared = prepared_request(admission, &candidate);
+    let resumed = transport
+        .resume(admission, &route, binding, &continuation)
+        .await
+        .expect("continuation authentication");
+    let commit = resumed.exchange(&prepared).await.expect("Commit reply");
+    let (commit, _) = commit.into_parts();
+    assert_eq!(
+        commit.kind(),
+        uc_core::membership::SpaceAdmissionMessageKind::Commit
+    );
+    assert_eq!(endpoint.calls.load(Ordering::SeqCst), 2);
+    let connections = accepted.load(Ordering::SeqCst);
+    let exchanges = endpoint.calls.load(Ordering::SeqCst);
+
+    router.shutdown().await.expect("router shutdown");
+    joiner.close().await;
+    sponsor.close().await;
+    (connections, exchanges)
 }

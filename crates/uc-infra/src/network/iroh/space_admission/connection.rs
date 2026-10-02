@@ -78,6 +78,30 @@ pub(super) async fn connect(
     result
 }
 
+/// 上一次成功交换后仍然打开的准入连接；下一轮交换优先复用，失效或对端已关闭时由调用方重新建立。
+#[derive(Clone, Default)]
+pub(super) struct ReusableConnection(std::sync::Arc<std::sync::Mutex<Option<Connection>>>);
+
+impl ReusableConnection {
+    pub(super) fn store(&self, connection: Connection) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(connection);
+    }
+
+    /// 取走指向同一对端且仍未关闭的连接；其余情况返回 `None`，旧连接随之丢弃。
+    pub(super) fn take_open(&self, remote: iroh::EndpointId) -> Option<Connection> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .filter(|connection| {
+                connection.remote_id() == remote && connection.close_reason().is_none()
+            })
+    }
+}
+
 pub(super) async fn open_stream(
     connection: &Connection,
 ) -> Result<(SendStream, RecvStream), uc_application::deps::SpaceAdmissionTransportError> {

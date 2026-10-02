@@ -35,7 +35,7 @@ use super::super::trace_context::{inject_current, WireTraceContext};
 use uc_observability_contract::diagnostics::connectivity::{AuthenticationFailure, ProofFailure};
 use uc_observability_contract::diagnostics::DiagnosticErrorType;
 
-use super::connection::{connect, open_stream};
+use super::connection::{connect, open_stream, ReusableConnection};
 use super::crypto::{calculate_mac, peer_id, verify_mac};
 use super::diagnostics::{record_client_completion, server_error_type};
 use super::errors::{

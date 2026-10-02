@@ -285,6 +285,8 @@ pub struct LocalWorkObservation {
     maintenance: Option<MaintenanceContext>,
     enabled: bool,
     tally: Option<Arc<SecureStorageTally>>,
+    /// 外层工作的用量；本项结束或被取消时只汇入一次。
+    parent_tally: Option<Arc<SecureStorageTally>>,
 }
 
 impl LocalWorkObservation {
@@ -299,6 +301,7 @@ impl LocalWorkObservation {
             enabled: !matches!(step, LocalWorkStep::ProtocolLock)
                 || PAIRING_WORK.try_with(|_| ()).is_ok(),
             tally: None,
+            parent_tally: None,
         };
         observation.emit(LocalWorkEvent::Started {
             step,
@@ -311,6 +314,14 @@ impl LocalWorkObservation {
     pub fn finish(mut self, outcome: LocalWorkOutcome) {
         self.finished = true;
         self.emit(self.finished_event(outcome));
+        self.settle_tally();
+    }
+
+    /// 把本项的安全存储用量汇入外层；结束与取消两条路径共用，保证只汇入一次。
+    fn settle_tally(&mut self) {
+        if let (Some(tally), Some(parent)) = (self.tally.as_deref(), self.parent_tally.take()) {
+            tally.add_into(&parent);
+        }
     }
 
     fn finished_event(&self, outcome: LocalWorkOutcome) -> LocalWorkEvent {
@@ -325,8 +336,13 @@ impl LocalWorkObservation {
     }
 
     /// 让本项工作累计内部的安全存储读取，结束时随完成记录输出。
-    fn with_tally(mut self, tally: Arc<SecureStorageTally>) -> Self {
+    fn with_tally(
+        mut self,
+        tally: Arc<SecureStorageTally>,
+        parent: Option<Arc<SecureStorageTally>>,
+    ) -> Self {
         self.tally = Some(tally);
+        self.parent_tally = parent;
         self
     }
 
@@ -342,6 +358,7 @@ impl Drop for LocalWorkObservation {
     fn drop(&mut self) {
         if !self.finished {
             self.emit(self.finished_event(LocalWorkOutcome::Interrupted));
+            self.settle_tally();
         }
     }
 }
@@ -355,7 +372,7 @@ pub fn observe_local_result<T, E>(
     async move {
         let tally = Arc::new(SecureStorageTally::default());
         let parent = SECURE_STORAGE_TALLY.try_with(Arc::clone).ok();
-        let observation = LocalWorkObservation::begin(step).with_tally(Arc::clone(&tally));
+        let observation = LocalWorkObservation::begin(step).with_tally(Arc::clone(&tally), parent);
         let result = SECURE_STORAGE_TALLY
             .scope(Arc::clone(&tally), WORK_ACTIVE.scope((), work))
             .await;
@@ -364,9 +381,6 @@ pub fn observe_local_result<T, E>(
         } else {
             LocalWorkOutcome::Error
         });
-        if let Some(parent) = parent {
-            tally.add_into(&parent);
-        }
         result
     }
 }
@@ -380,16 +394,13 @@ pub fn observe_local_sync_result<T, E>(
     }
     let tally = Arc::new(SecureStorageTally::default());
     let parent = SECURE_STORAGE_TALLY.try_with(Arc::clone).ok();
-    let observation = LocalWorkObservation::begin(step).with_tally(Arc::clone(&tally));
+    let observation = LocalWorkObservation::begin(step).with_tally(Arc::clone(&tally), parent);
     let result = SECURE_STORAGE_TALLY.sync_scope(Arc::clone(&tally), work);
     observation.finish(if result.is_ok() {
         LocalWorkOutcome::Ok
     } else {
         LocalWorkOutcome::Error
     });
-    if let Some(parent) = parent {
-        tally.add_into(&parent);
-    }
     result
 }
 

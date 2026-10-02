@@ -126,6 +126,7 @@ async fn actual_client_exchange_reports_reply_failures_and_preserves_trace_resul
         .expect("binding");
         let exchange = Box::new(EstablishedExchange::new(
             client_connection,
+            ReusableConnection::default(),
             send,
             receive,
             admission_id(),

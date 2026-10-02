@@ -253,9 +253,7 @@ impl AdmissionKeyManager {
             .set(PROFILE_ADMISSION_KEY_NAME, &generated)
             .map_err(AdmissionKeyError::from)?;
         let persisted = self
-            .secure_storage
-            .get(PROFILE_ADMISSION_KEY_NAME)
-            .map_err(AdmissionKeyError::from)?
+            .read_profile_key_bytes()?
             .ok_or(AdmissionKeyError::StorageNotPersisted)?;
         MasterKey::from_bytes(&persisted).map_err(AdmissionKeyError::corrupt)
     }

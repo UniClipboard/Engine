@@ -37,6 +37,7 @@ impl IrohSpaceAdmissionHandler {
     pub(super) async fn authenticate(
         &self,
         connection: &Connection,
+        streams: Option<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)>,
         deadline: tokio::time::Instant,
         connection_started: std::time::Instant,
     ) -> Result<AuthenticatedRequest, HandlerError> {
@@ -47,13 +48,16 @@ impl IrohSpaceAdmissionHandler {
                     source: anyhow::Error::new(source),
                 }
             })?;
-            let (mut send, mut receive) = tokio::time::timeout(IO_DEADLINE, connection.accept_bi())
-                .await
-                // discarded-source[timeout]: `Elapsed`: the timeout itself is the classification
-                .map_err(|_| HandlerError::Timeout)?
-                .map_err(|source| HandlerError::Transport {
-                    source: anyhow::Error::new(source),
-                })?;
+            let (mut send, mut receive) = match streams {
+                Some(streams) => streams,
+                None => tokio::time::timeout(IO_DEADLINE, connection.accept_bi())
+                    .await
+                    // discarded-source[timeout]: `Elapsed`: the timeout itself is the classification
+                    .map_err(|_| HandlerError::Timeout)?
+                    .map_err(|source| HandlerError::Transport {
+                        source: anyhow::Error::new(source),
+                    })?,
+            };
             let (kind, payload) = read_raw_with_limit(&mut receive, AUTH_FRAME_LIMIT)
                 .await
                 .map_err(map_server_wire_error)?;

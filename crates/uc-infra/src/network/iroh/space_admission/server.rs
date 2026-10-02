@@ -13,7 +13,7 @@ use super::errors::{
     map_server_wire_error, HandlerError, CLOSE_AUTHENTICATION, CLOSE_BUSY,
     CLOSE_PEER_UPGRADE_REQUIRED, CLOSE_PROTOCOL,
 };
-use iroh::endpoint::Connection;
+use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::Endpoint;
 use sha2::{Digest, Sha256};
@@ -35,6 +35,8 @@ mod authentication;
 use authentication::AuthenticatedRequest;
 use uc_observability_contract::{log_fields::log_vocab_debug, uc_debug, uc_warn};
 const EXCHANGE_DEADLINE: Duration = Duration::from_secs(120);
+/// 一次交换成功后同一连接上等待下一次交换的时长；加入方每轮之间的本机处理通常数秒内完成。
+const CONNECTION_REUSE_IDLE: Duration = Duration::from_secs(30);
 const MAX_INBOUND_EXCHANGES: usize = 8;
 
 pub struct IrohSpaceAdmissionHandler {
@@ -44,6 +46,7 @@ pub struct IrohSpaceAdmissionHandler {
     permits: Arc<Semaphore>,
     accepting: AtomicBool,
     exchange_deadline: Duration,
+    reuse_connections: bool,
 }
 
 impl IrohSpaceAdmissionHandler {
@@ -59,6 +62,7 @@ impl IrohSpaceAdmissionHandler {
             permits: Arc::new(Semaphore::new(MAX_INBOUND_EXCHANGES)),
             accepting: AtomicBool::new(true),
             exchange_deadline: EXCHANGE_DEADLINE,
+            reuse_connections: true,
         })
     }
 
@@ -68,15 +72,45 @@ impl IrohSpaceAdmissionHandler {
         self
     }
 
+    /// 关闭复用等价于旧版邀请端：每条连接只处理一次交换。
+    #[cfg(test)]
+    pub(super) fn without_connection_reuse(mut self) -> Self {
+        self.reuse_connections = false;
+        self
+    }
+
     #[cfg(test)]
     pub(super) fn with_capacity(mut self, permits: usize) -> Self {
         self.permits = Arc::new(Semaphore::new(permits));
         self
     }
 
-    async fn run(&self, connection: &Connection) -> Result<(), HandlerError> {
+    /// 在同一条连接上依次处理加入方的各轮交换：第一次交换按原有期限与错误分类处理；之后加入方可以复用连接，
+    /// 对端关闭或空闲超时只是正常结束，不记为失败。旧加入方每条连接只有一次交换，行为不变。
+    async fn serve(&self, connection: &Connection) -> Result<(), HandlerError> {
+        let mut streams = None;
+        loop {
+            // 第一次交换的流在认证阶段接受，期限与错误分类保持原样；之后加入方复用连接时，空闲等待不计入期限。
+            let deadline = tokio::time::Instant::now() + self.exchange_deadline;
+            self.run(connection, streams.take(), deadline).await?;
+            if !self.reuse_connections {
+                return Ok(());
+            }
+            streams =
+                match tokio::time::timeout(CONNECTION_REUSE_IDLE, connection.accept_bi()).await {
+                    Ok(Ok(next)) => Some(next),
+                    Ok(Err(_)) | Err(_) => return Ok(()),
+                };
+        }
+    }
+
+    async fn run(
+        &self,
+        connection: &Connection,
+        streams: Option<(SendStream, RecvStream)>,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), HandlerError> {
         let connection_started = std::time::Instant::now();
-        let deadline = tokio::time::Instant::now() + self.exchange_deadline;
         let AuthenticatedRequest {
             mut send,
             mut receive,
@@ -89,7 +123,7 @@ impl IrohSpaceAdmissionHandler {
             canonical_digest,
             attempt_contract,
         } = self
-            .authenticate(connection, deadline, connection_started)
+            .authenticate(connection, streams, deadline, connection_started)
             .await?;
         let span = server_operation_span();
         let _ = set_remote_parent(&span, wire.trace_context.as_ref());
@@ -258,7 +292,7 @@ impl ProtocolHandler for IrohSpaceAdmissionHandler {
             connection.close(CLOSE_BUSY.into(), b"admission_busy");
             return Ok(());
         };
-        match self.run(&connection).await {
+        match self.serve(&connection).await {
             Ok(()) => {}
             Err(
                 error @ (HandlerError::Authentication { .. }
