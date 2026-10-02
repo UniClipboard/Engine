@@ -19,6 +19,10 @@ import { fileURLToPath } from 'node:url'
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const REPOSITORY_ROOT = realpathSync(resolve(SCRIPT_DIR, '../..'))
 
+// 随仓库发布的第三方源码副本：只允许 uc-infra 以 third_party 下的路径依赖引用，
+// 这样依赖 Engine 的仓库不需要重复任何 [patch]。
+const VENDORED_THIRD_PARTY_PACKAGES = ['iroh-mdns-address-lookup', 'swarm-discovery']
+
 const EXPECTED_PACKAGES = [
   'openmls-validation',
   'uc-connectivity-host',
@@ -307,6 +311,12 @@ function checkLocalDependencies(metadata) {
           'dependency firewall',
           `${packageMetadata.name} has a repository-external local dependency: ${dependency.name}`
         )
+      } else if (
+        VENDORED_THIRD_PARTY_PACKAGES.includes(dependency.name) &&
+        packageMetadata.name === 'uc-infra' &&
+        relative(REPOSITORY_ROOT, resolve(dependency.path)) === join('third_party', dependency.name)
+      ) {
+        continue
       } else if (!EXPECTED_PACKAGES.includes(dependency.name)) {
         addProblem(
           problems,

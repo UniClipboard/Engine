@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use iroh::dns::DnsResolver;
 use iroh::{RelayUrl, SecretKey};
 use iroh_relay::client::{ClientBuilder, ConnectError, DialError};
-use iroh_relay::tls::{self, CaRootsConfig};
+use iroh_relay::tls::{self, CaTlsConfig};
 use tokio::time::error::Elapsed;
 use tracing::instrument;
 use uc_observability_contract::{uc_debug, uc_warn};
@@ -127,7 +127,7 @@ impl IrohRelayProbeAdapter {
     /// 构造一个使用系统 DNS + 内嵌 webpki 根证书的探测器。
     pub fn new() -> Result<Self, RelayProbeError> {
         let crypto_provider = tls::default_provider();
-        let tls_config = CaRootsConfig::embedded()
+        let tls_config = CaTlsConfig::embedded()
             .client_config(crypto_provider)
             .map_err(|err| {
                 RelayProbeError::Other(RelayProbeDetail::with_context("init tls config", err))

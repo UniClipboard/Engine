@@ -114,34 +114,37 @@ zstd = { version = "0.13", features = ["zstdmt"] }
 indexmap = "2"
 
 # ===== Network stack (iroh + rendezvous HTTP) =====
-iroh = { version = "1.0.0-rc.1" }
+iroh = { version = "1.3.0" }
 # mDNS LAN discovery (swarm-discovery TXT records over LAN multicast) so two
 # peers on the same Wi-Fi advertise their LAN IPs to each other directly.
 # Extracted from iroh core into a standalone crate in iroh 1.0.0-rc.1.
 # UniClipboard#486 §三 B.
-iroh-mdns-address-lookup = "0.3"
-iroh-blobs = "0.102"
+# Vendored 0.6.0 that depends on the patched swarm-discovery by path (third_party/iroh-mdns-address-lookup).
+iroh-mdns-address-lookup = { version = "0.6.0", path = "../../third_party/iroh-mdns-address-lookup" }
+# UniClipboard fork: upstream v0.103.0 plus four audited fixes (UNICLIPBOARD_PATCH.md in the fork).
+# A direct git dependency, not a [patch], so repositories that depend on Engine need no patch of their own.
+iroh-blobs = { version = "0.103.0", git = "https://github.com/UniClipboard/iroh-blobs.git", rev = "124780fb69768b8506565b2760c435182f9e2d20" }
 # Direct dep so pairing's own mDNS publisher/resolver can spin up window-
 # scoped `Discoverer` instances on a separate service name from iroh's
 # `_irohv1._udp.local` peer-discovery flow. We can't reuse iroh's
 # `MdnsAddressLookup` because it is bind-time fixed to the shared Endpoint
 # and has no lifecycle hook for "announce only while a pairing code is
 # pending."
-swarm-discovery = "0.6.0-alpha.2"
+swarm-discovery = { version = "0.6.3", path = "../../third_party/swarm-discovery" }
 # (`if-addrs` is already declared elsewhere in this manifest; pairing
 # publishers/resolvers reuse that same version.)
 # 直接依赖 iroh-relay 0.98 以使用其 ClientBuilder 做"中继可达性探测"。
 # iroh 本身只 re-export 了 `dns`/`RelayMap`,没有暴露 `client` 模块。
 # default features 已经带上 `tls-ring`,与 iroh 自身保持一致。
-iroh-relay = "1.0.0-rc.1"
+iroh-relay = "1.3.0"
 # 用于持有 ClientBuilder 需要的 `ClientConfig`。版本对齐 iroh / iroh-relay,
 # 并且显式使用同一个 ring provider,避免 rustls 默认引入 AWS-LC 的 C 构建链。
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
-iroh-tickets = "1.0.0-rc.1"
+iroh-tickets = "1.0.0"
 # iroh 0.97 forked quinn-proto into noq-proto (Custom Transports & noq).
 # Used solely to reach `congestion::Bbr3Config` when wiring the QUIC
 # TransportConfig — iroh re-exports the trait but not the BBR factory itself.
-noq-proto = "1.0.0-rc.1"
+noq-proto = "1.3"
 reqwest = { version = "0.12", default-features = false, features = [
   "json",
   "rustls-tls",
