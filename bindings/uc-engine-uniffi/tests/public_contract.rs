@@ -703,10 +703,26 @@ fn space_management_preserves_state_devices_resend_outcomes_and_local_history() 
     engine
         .leave_space()
         .expect("binding must leave the local space");
-    assert!(matches!(
-        engine.query_space_state(),
-        Err(BindingError::Engine { code: 1103, .. })
-    ));
+    // 离开成功意味着同一实例已回到可查询的空空间，宿主不需要先重启。
+    let emptied = engine
+        .query_space_state()
+        .expect("the instance must stay queryable after leaving");
+    assert!(!emptied.has_completed);
+    assert!(emptied.space_id.is_none());
+    assert!(
+        engine
+            .list_devices()
+            .expect("the instance must list devices after leaving")
+            .is_empty(),
+        "leaving a space must not retain its member roster"
+    );
+    engine
+        .query_device_group_choices()
+        .expect("the join page must be able to read device group choices after leaving");
+    engine
+        .leave_space()
+        .expect("leaving an already empty space must stay successful");
+    // 仍然兼容“离开后关闭并重启”的宿主。
     engine
         .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
         .expect("reset binding engine must shut down within the deadline");

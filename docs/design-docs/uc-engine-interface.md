@@ -133,7 +133,7 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 | `IssueInvitation` | 签发一次配对邀请，同时返回指向同一邀请身份的短码与完整长邀请 |
 | `CancelInvitation` | 取消当前尚未兑换的配对邀请 |
 | `ResetSpace` | 保留本机资料、设置、身份和解锁能力，废弃全部旧设备关系并建立只含本机的新空间 |
-| `FactoryResetSpace` | 停止旧运行入口后依次清除密钥材料、空间状态和邀请，使设备可重新初始化 |
+| `FactoryResetSpace` | 停止旧运行入口后依次清除密钥材料、空间状态和邀请，并在同一 Engine 内重建全新运行期，使设备可立即重新初始化 |
 | `QuerySetupState` | 查询设置是否完成、当前邀请和已保存设备名 |
 | `QueryStorageStats` | 查询数据库、密钥库、缓存和日志占用大小，不返回本机目录 |
 | `ClearStorageCache` | 清理核心缓存并返回实际释放的字节数 |
@@ -215,8 +215,16 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 迁移到只含本机的新空间，并保存全部设备需要重新配对的状态。它不等待网络，不清除一般设置、设备身份、
 解锁材料或本机资料；中断和重复调用继续同一个目标空间。`FactoryResetSpace` 则停止
 全部旧运行入口，先清除并确认密钥材料不存在，再清除数据库、空间世代、设置、邀请、关系、准入记录、
-导入暂存和受管缓存。完成后旧 Engine 会话失效，宿主必须重新创建 Engine；启动遇到未完成清理时会续完
-清理并返回可重试的 unavailable，宿主随后再次创建 Engine。`QuerySetupState` 不返回内部服务状态。
+导入暂存和受管缓存。成功结果表示同一个 Engine 已按全新资料重建运行期：随后可直接查询空空间、创建或
+加入空间，再次离开仍然成功，宿主不需要重新创建 Engine；仍然“关闭后重新创建”的宿主结果相同。重建由
+恢复运行期统一负责，全程持有运行期写锁，其间到达的其他操作排队后面对新运行期；宿主级资源（剪贴板变化流）
+在运行期之间归还复用，只在 Engine 最终关闭时关闭。重置本身失败时保持原运行期并返回对应的重置错误码，
+业务操作在完成前返回 `1103`，同一实例再次调用 `FactoryResetSpace` 会从已持久的阶段续做。资料已清除但
+新运行期无法装配时，不报告成功：返回不可重试的 `FACTORY_RESET_RESTART_REQUIRED_CODE`（1375，
+`Unavailable`），发布 `restart_required=true` 的 `ProfileRecoveryChanged`，此后除 `QueryProfileRecovery`
+与生命周期关闭外的操作都返回同一错误码，宿主重新创建 Engine 后以全新资料启动。与离开并发的在途操作
+可能在旧运行期上以 `1103` 结束，重试即可。启动遇到未完成清理时会续完清理并返回可重试的 unavailable，宿主
+随后再次创建 Engine。`QuerySetupState` 不返回内部服务状态。
 
 规格 023 的稳定产品外形已经接入：`JoinSpace` 返回 Active、Pending、Processing、Rejected 四类结果并公开稳定
 `join_id`。Pending 表示加入已经保存但尚未完成本机准备，Processing 表示本机准备完成并等待最终确认收尾；两者跨重启和重复查询都返回同一个 `join_id`，宿主不另存加入编号或推断后台阶段。Pending、Processing 与 Active 的 `peer_upgrade_required` 表示这次加入仍需对端升级，首次请求不兼容则以 Rejected 的稳定原因明确返回。

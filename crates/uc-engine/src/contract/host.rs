@@ -250,10 +250,11 @@ pub struct HostCapabilities {
     directories: HostDirectories,
     pub(crate) secure_storage: Arc<dyn HostSecureStorage>,
     clipboard: Box<dyn HostClipboard>,
-    files: Box<dyn HostFileAccess>,
+    files: Arc<dyn HostFileAccess>,
     analytics: HostAnalyticsCapabilities,
 }
 
+#[derive(Clone)]
 pub(crate) struct HostAnalyticsCapabilities {
     pub(crate) sink: Arc<dyn AnalyticsPort>,
     pub(crate) identity: Arc<dyn AnalyticsIdentityPort>,
@@ -279,8 +280,25 @@ impl HostCapabilities {
             directories,
             secure_storage: Arc::from(secure_storage),
             clipboard,
-            files,
+            files: Arc::from(files),
             analytics: HostAnalyticsCapabilities::default(),
+        }
+    }
+
+    /// 用已共享的能力重新组装一份宿主能力；同一进程内重建运行期时复用宿主已交出的实现。
+    pub(crate) fn from_shared_parts(
+        directories: HostDirectories,
+        secure_storage: Arc<dyn HostSecureStorage>,
+        clipboard: Box<dyn HostClipboard>,
+        files: Arc<dyn HostFileAccess>,
+        analytics: HostAnalyticsCapabilities,
+    ) -> Self {
+        Self {
+            directories,
+            secure_storage,
+            clipboard,
+            files,
+            analytics,
         }
     }
 
@@ -322,7 +340,7 @@ impl HostCapabilities {
         HostDirectories,
         Arc<dyn HostSecureStorage>,
         Box<dyn HostClipboard>,
-        Box<dyn HostFileAccess>,
+        Arc<dyn HostFileAccess>,
         HostAnalyticsCapabilities,
     ) {
         (

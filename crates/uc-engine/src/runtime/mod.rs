@@ -7,6 +7,7 @@ mod lan_compatibility;
 #[cfg(feature = "lan-compat")]
 mod mobile_upload;
 mod profile_recovery;
+mod reusable_host;
 mod session_supervisor;
 mod shutdown;
 mod task_shutdown;

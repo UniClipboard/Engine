@@ -3562,14 +3562,16 @@ async fn engine_start_builds_a_resumable_real_session() {
             .unwrap(),
         crate::OperationResult::SpaceFactoryReset
     );
-    let invalidated = engine
-        .execute(crate::Operation::QueryEncryptionState)
-        .await
-        .unwrap_err();
-    assert_eq!(invalidated.code(), 1103);
+    // 离开空间后同一实例已是空空间的新运行期；宿主仍然可以关闭并重启，结果相同。
     assert_eq!(
-        invalidated.category(),
-        crate::EngineErrorCategory::Unavailable
+        engine
+            .execute(crate::Operation::QueryEncryptionState)
+            .await
+            .unwrap(),
+        crate::OperationResult::EncryptionState(crate::EncryptionStateSummary {
+            initialized: false,
+            session_ready: false,
+        })
     );
     engine
         .shutdown(std::time::Duration::from_secs(15))

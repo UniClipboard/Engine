@@ -17,6 +17,7 @@ use uc_observability_contract::{
     error_source::io_error_kind, log_fields::log_vocab_debug, uc_info, uc_warn,
 };
 
+use super::reusable_host::ReusableHost;
 use super::{profile_recovery_required_error, startup_error, ProductionRuntime};
 use crate::assembly::host::{
     derive_app_paths, profile_key_recovery_store, wire_host_capabilities_with_emitter,
@@ -26,15 +27,16 @@ use crate::engine::event_stream::EventSender;
 use crate::engine::startup::StartupProgressStore;
 use crate::engine::EngineRuntime;
 use crate::error_codes::{
-    PROFILE_RECOVERY_PARTIAL_CODE, PROFILE_RECOVERY_PERSISTENCE_FAILED_CODE,
-    PROFILE_RECOVERY_UNSUPPORTED_CODE, UNLOCK_SPACE_CORRUPTED_CODE, UNLOCK_SPACE_UNAUTHORIZED_CODE,
+    FACTORY_RESET_RESTART_REQUIRED_CODE, PROFILE_RECOVERY_PARTIAL_CODE,
+    PROFILE_RECOVERY_PERSISTENCE_FAILED_CODE, PROFILE_RECOVERY_UNSUPPORTED_CODE,
+    UNLOCK_SPACE_CORRUPTED_CODE, UNLOCK_SPACE_UNAUTHORIZED_CODE,
 };
 use crate::operations::space::factory_reset::execute_factory_reset_space;
 use crate::{
     AdmissionRecoverySummary, EncryptionStateSummary, EngineConfig, EngineError,
     EngineErrorCategory, EngineEvent, HostCapabilities, HostCapabilityError,
     HostCapabilityErrorCategory, HostSecureStorage, Operation, OperationKind, OperationResult,
-    ProfileRecoveryLoss, ProfileRecoveryState, ProfileRecoverySummary,
+    ProfileRecoveryLoss, ProfileRecoveryState, ProfileRecoverySummary, StartupProgress,
 };
 #[cfg(feature = "dev-tools")]
 use crate::{DevOperation, DevOperationResult};
@@ -51,10 +53,16 @@ enum RuntimeMode {
         /// 启动后才发现时保留已启动的运行期，关闭时仍须完整释放。
         runtime: Option<Arc<ProductionRuntime>>,
     },
+    /// 离开空间已清除资料，但新的运行期没能装配；只能查询恢复状态与关闭，宿主须重启 Engine。
+    RestartRequired {
+        /// 重置后尚未确认释放干净的旧运行期，关闭时仍须完整释放。
+        runtime: Option<Arc<ProductionRuntime>>,
+    },
 }
 
 struct RecoveryBootstrap {
-    input: Mutex<Option<(EngineConfig, HostCapabilities)>>,
+    /// 口令恢复或恢复出厂只能各自消费一次启动输入；消费后只能重启。
+    input_available: Mutex<bool>,
     gate: Mutex<()>,
     summary: StdMutex<ProfileRecoverySummary>,
     progress: Arc<StartupProgressStore>,
@@ -62,6 +70,8 @@ struct RecoveryBootstrap {
 
 pub(crate) struct RecoverableRuntime {
     mode: RwLock<RuntimeMode>,
+    config: EngineConfig,
+    host: ReusableHost,
     recovery: Arc<ProfileKeyRecoveryStore>,
     ready_summary_override: StdMutex<Option<ProfileRecoverySummary>>,
     events: EventSender,
@@ -70,70 +80,18 @@ pub(crate) struct RecoverableRuntime {
 impl RecoverableRuntime {
     pub(crate) async fn start(
         config: EngineConfig,
-        mut host: HostCapabilities,
+        host: HostCapabilities,
         events: EventSender,
         progress: Arc<StartupProgressStore>,
     ) -> Result<Self, EngineError> {
         let paths = derive_app_paths(host.directories());
         let recovery = profile_key_recovery_store(&config, &paths, &host);
-        let mode = match recovery.prepare_startup().await? {
-            ProfileRecoveryPreparation::Ready => {
-                host.replace_secure_storage(Arc::new(RecoveryHostStorage {
-                    inner: Arc::clone(&recovery),
-                }));
-                match ProductionRuntime::start(
-                    config,
-                    host,
-                    paths,
-                    events.clone(),
-                    Arc::clone(&progress),
-                    Arc::clone(&recovery),
-                )
-                .await
-                {
-                    Ok(runtime) => RuntimeMode::Ready {
-                        runtime: Arc::new(runtime),
-                        recovered: false,
-                    },
-                    Err(error) => match error.admission_recovery() {
-                        Some(summary) => {
-                            progress.recovery_available();
-                            publish_profile_recovery(&events, admission_summary(summary));
-                            RuntimeMode::AdmissionRecovery {
-                                summary,
-                                runtime: None,
-                            }
-                        }
-                        None => return Err(error),
-                    },
-                }
-            }
-            ProfileRecoveryPreparation::AwaitingPassphrase { losses } => {
-                progress.recovery_available();
-                let summary = ProfileRecoverySummary {
-                    state: if !losses.is_empty() {
-                        ProfileRecoveryState::PartiallyRecoverable
-                    } else {
-                        ProfileRecoveryState::AwaitingPassphrase
-                    },
-                    can_submit_passphrase: losses.is_empty(),
-                    restart_required: false,
-                    background_ready: false,
-                    cleanup_pending: false,
-                    losses: public_losses(losses),
-                    admission: None,
-                };
-                publish_profile_recovery(&events, summary.clone());
-                RuntimeMode::Recovery(Arc::new(RecoveryBootstrap {
-                    input: Mutex::new(Some((config, host))),
-                    gate: Mutex::new(()),
-                    progress,
-                    summary: StdMutex::new(summary),
-                }))
-            }
-        };
+        let host = ReusableHost::new(host);
+        let mode = start_profile_mode(&config, &host, &events, &progress, &recovery).await?;
         Ok(Self {
             mode: RwLock::new(mode),
+            config,
+            host,
             recovery,
             ready_summary_override: StdMutex::new(None),
             events,
@@ -203,11 +161,6 @@ impl RecoverableRuntime {
         }
         let kind = operation.kind();
         let result = runtime.execute(operation, cancellation).await?;
-        if matches!(kind, OperationKind::FactoryResetSpace) {
-            self.recovery.forget_after_factory_reset();
-            *self.lock_ready_summary_override() = None;
-            return Ok(result);
-        }
         if matches!(
             kind,
             OperationKind::CreateSpace
@@ -297,18 +250,14 @@ impl RecoverableRuntime {
                         ))
                     }
                     Ok(ProfileRecoveryOutcome::Ready) => {
-                        let bootstrap_input = bootstrap.input.lock().await.take();
-                        let Some((config, mut host)) = bootstrap_input else {
+                        if !take_startup_input(&bootstrap).await {
                             self.publish_restart_required(&bootstrap);
                             return Err(profile_recovery_required_error());
-                        };
-                        let paths = derive_app_paths(host.directories());
-                        host.replace_secure_storage(Arc::new(RecoveryHostStorage {
-                            inner: Arc::clone(&self.recovery),
-                        }));
+                        }
+                        let paths = derive_app_paths(self.host.directories());
                         let runtime = match ProductionRuntime::start(
-                            config,
-                            host,
+                            self.config.clone(),
+                            self.recovery_host_capabilities(),
                             paths,
                             self.events.clone(),
                             Arc::clone(&bootstrap.progress),
@@ -403,24 +352,19 @@ impl RecoverableRuntime {
         bootstrap: &RecoveryBootstrap,
     ) -> Result<OperationResult, EngineError> {
         let _gate = bootstrap.gate.lock().await;
-        let mut input = bootstrap.input.lock().await;
-        if input.is_none() {
+        if !*bootstrap.input_available.lock().await {
             return Err(profile_recovery_required_error());
         }
         if !self.recovery.open_for_factory_reset().await? {
             return Err(profile_recovery_required_error());
         }
-        let Some((config, mut host)) = input.take() else {
+        if !take_startup_input(bootstrap).await {
             return Err(profile_recovery_required_error());
-        };
-        drop(input);
-        let paths = derive_app_paths(host.directories());
-        host.replace_secure_storage(Arc::new(RecoveryHostStorage {
-            inner: Arc::clone(&self.recovery),
-        }));
+        }
+        let paths = derive_app_paths(self.host.directories());
         let wiring = wire_host_capabilities_with_emitter(
-            &config,
-            host,
+            &self.config,
+            self.recovery_host_capabilities(),
             paths,
             Arc::new(EngineHostEventEmitter::new(self.events.clone())),
             Arc::clone(&bootstrap.progress),
@@ -465,6 +409,81 @@ impl RecoverableRuntime {
         }
     }
 
+    /// 离开空间：重置、释放旧运行期、按启动决策重建，由这里统一负责。
+    ///
+    /// 全程持有模式写锁，其他操作要么在旧运行期完成后排队，要么直接面对新运行期。
+    /// 重置本身失败时保持原运行期（重置阶段已持久，重试同一操作会续做）；
+    /// 清除完成但新运行期装配失败时转入需要重启，不报告成功。
+    async fn factory_reset_ready(
+        &self,
+        cancellation: CancellationToken,
+    ) -> Result<OperationResult, EngineError> {
+        let mut mode = self.mode.write().await;
+        let runtime = match &*mode {
+            RuntimeMode::Ready { runtime, .. } => Arc::clone(runtime),
+            RuntimeMode::RestartRequired { .. } => return Err(restart_required_error_for_reset()),
+            RuntimeMode::Recovery(_) | RuntimeMode::AdmissionRecovery { .. } => {
+                return Err(profile_recovery_required_error())
+            }
+        };
+        let result = runtime
+            .execute(Operation::FactoryResetSpace, cancellation)
+            .await?;
+        self.recovery.forget_after_factory_reset();
+        *self.lock_ready_summary_override() = None;
+
+        if let Err(error) = runtime.shutdown(None).await {
+            uc_warn!(
+                error_code = error.code(),
+                "space left but the previous runtime did not release cleanly"
+            );
+            return Err(self.require_restart(&mut mode, Some(runtime)));
+        }
+        // 启动进度属于宿主观察过的那一次启动，这里重建使用不被任何人观察的独立进度。
+        let (detached_progress, _) = StartupProgress::channel();
+        match start_profile_mode(
+            &self.config,
+            &self.host,
+            &self.events,
+            &detached_progress.store,
+            &self.recovery,
+        )
+        .await
+        {
+            Ok(next) => {
+                uc_info!("space left and a fresh runtime is ready");
+                *mode = next;
+                Ok(result)
+            }
+            Err(error) => {
+                uc_warn!(
+                    error_code = error.code(),
+                    "space left but the fresh runtime could not start"
+                );
+                Err(self.require_restart(&mut mode, None))
+            }
+        }
+    }
+
+    fn require_restart(
+        &self,
+        mode: &mut RuntimeMode,
+        runtime: Option<Arc<ProductionRuntime>>,
+    ) -> EngineError {
+        *mode = RuntimeMode::RestartRequired { runtime };
+        publish_profile_recovery(&self.events, restart_required_summary());
+        restart_required_error_for_reset()
+    }
+
+    /// 重建与恢复装配共用：宿主能力加上资料密钥恢复存储。
+    fn recovery_host_capabilities(&self) -> HostCapabilities {
+        let mut capabilities = self.host.capabilities();
+        capabilities.replace_secure_storage(Arc::new(RecoveryHostStorage {
+            inner: Arc::clone(&self.recovery),
+        }));
+        capabilities
+    }
+
     fn publish_summary(
         &self,
         bootstrap: &RecoveryBootstrap,
@@ -492,6 +511,101 @@ impl RecoverableRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+}
+
+/// 按资料当前状态决定运行模式：正常装配运行期，或进入口令恢复/准入恢复。
+/// 进程启动与离开空间后的重建使用同一条路径。
+async fn start_profile_mode(
+    config: &EngineConfig,
+    host: &ReusableHost,
+    events: &EventSender,
+    progress: &Arc<StartupProgressStore>,
+    recovery: &Arc<ProfileKeyRecoveryStore>,
+) -> Result<RuntimeMode, EngineError> {
+    let paths = derive_app_paths(host.directories());
+    match recovery.prepare_startup().await? {
+        ProfileRecoveryPreparation::Ready => {
+            let mut capabilities = host.capabilities();
+            capabilities.replace_secure_storage(Arc::new(RecoveryHostStorage {
+                inner: Arc::clone(recovery),
+            }));
+            match ProductionRuntime::start(
+                config.clone(),
+                capabilities,
+                paths,
+                events.clone(),
+                Arc::clone(progress),
+                Arc::clone(recovery),
+            )
+            .await
+            {
+                Ok(runtime) => Ok(RuntimeMode::Ready {
+                    runtime: Arc::new(runtime),
+                    recovered: false,
+                }),
+                Err(error) => match error.admission_recovery() {
+                    Some(summary) => {
+                        progress.recovery_available();
+                        publish_profile_recovery(events, admission_summary(summary));
+                        Ok(RuntimeMode::AdmissionRecovery {
+                            summary,
+                            runtime: None,
+                        })
+                    }
+                    None => Err(error),
+                },
+            }
+        }
+        ProfileRecoveryPreparation::AwaitingPassphrase { losses } => {
+            progress.recovery_available();
+            let summary = ProfileRecoverySummary {
+                state: if !losses.is_empty() {
+                    ProfileRecoveryState::PartiallyRecoverable
+                } else {
+                    ProfileRecoveryState::AwaitingPassphrase
+                },
+                can_submit_passphrase: losses.is_empty(),
+                restart_required: false,
+                background_ready: false,
+                cleanup_pending: false,
+                losses: public_losses(losses),
+                admission: None,
+            };
+            publish_profile_recovery(events, summary.clone());
+            Ok(RuntimeMode::Recovery(Arc::new(RecoveryBootstrap {
+                input_available: Mutex::new(true),
+                gate: Mutex::new(()),
+                progress: Arc::clone(progress),
+                summary: StdMutex::new(summary),
+            })))
+        }
+    }
+}
+
+/// 消费一次启动输入；已被消费时返回 `false`。
+async fn take_startup_input(bootstrap: &RecoveryBootstrap) -> bool {
+    std::mem::replace(&mut *bootstrap.input_available.lock().await, false)
+}
+
+fn restart_required_summary() -> ProfileRecoverySummary {
+    ProfileRecoverySummary {
+        state: ProfileRecoveryState::Failed,
+        can_submit_passphrase: false,
+        restart_required: true,
+        background_ready: false,
+        cleanup_pending: false,
+        losses: Vec::new(),
+        admission: None,
+    }
+}
+
+/// 离开空间的资料已清除，但同一实例无法继续服务；重试同一请求不能解决，宿主须重启 Engine。
+fn restart_required_error_for_reset() -> EngineError {
+    EngineError::new(
+        FACTORY_RESET_RESTART_REQUIRED_CODE,
+        EngineErrorCategory::Unavailable,
+        false,
+    )
 }
 
 /// 资料恢复状态机的每次转换：同一处发布事件并留下时间线，只含状态枚举与两个布尔位。
@@ -522,11 +636,20 @@ impl EngineRuntime for RecoverableRuntime {
     ) -> Result<OperationResult, EngineError> {
         match self.mode().await {
             RuntimeMode::Ready { runtime, recovered } => {
+                if matches!(operation, Operation::FactoryResetSpace) {
+                    return self.factory_reset_ready(cancellation).await;
+                }
                 let result = self
                     .execute_ready(Arc::clone(&runtime), recovered, operation, cancellation)
                     .await;
                 self.restrict_after_failure(&runtime, result).await
             }
+            RuntimeMode::RestartRequired { .. } => match operation {
+                Operation::QueryProfileRecovery => {
+                    Ok(OperationResult::ProfileRecovery(restart_required_summary()))
+                }
+                _ => Err(restart_required_error_for_reset()),
+            },
             RuntimeMode::Recovery(bootstrap) => {
                 self.execute_recovery(bootstrap, operation, cancellation)
                     .await
@@ -559,6 +682,7 @@ impl EngineRuntime for RecoverableRuntime {
             RuntimeMode::Recovery(_) | RuntimeMode::AdmissionRecovery { .. } => {
                 Err(profile_recovery_required_error())
             }
+            RuntimeMode::RestartRequired { .. } => Err(restart_required_error_for_reset()),
         }
     }
 
@@ -577,9 +701,10 @@ impl EngineRuntime for RecoverableRuntime {
                 self.recovery.suspend();
                 Ok(())
             }
-            RuntimeMode::Recovery(_) | RuntimeMode::AdmissionRecovery { runtime: None, .. } => {
-                Ok(())
-            }
+            // 重置后的旧运行期已经停止，没有可挂起的内容。
+            RuntimeMode::Recovery(_)
+            | RuntimeMode::AdmissionRecovery { runtime: None, .. }
+            | RuntimeMode::RestartRequired { .. } => Ok(()),
         }
     }
 
@@ -598,7 +723,9 @@ impl EngineRuntime for RecoverableRuntime {
                 },
             },
             // 受限模式不重建业务会话；已启动的运行期保持挂起直到关闭。
-            RuntimeMode::Recovery(_) | RuntimeMode::AdmissionRecovery { .. } => Ok(()),
+            RuntimeMode::Recovery(_)
+            | RuntimeMode::AdmissionRecovery { .. }
+            | RuntimeMode::RestartRequired { .. } => Ok(()),
         }
     }
 
@@ -608,15 +735,26 @@ impl EngineRuntime for RecoverableRuntime {
             | RuntimeMode::AdmissionRecovery {
                 runtime: Some(runtime),
                 ..
+            }
+            | RuntimeMode::RestartRequired {
+                runtime: Some(runtime),
             } => {
                 runtime.shutdown(deadline).await?;
                 self.recovery.suspend();
-                Ok(())
             }
-            RuntimeMode::Recovery(_) | RuntimeMode::AdmissionRecovery { runtime: None, .. } => {
-                Ok(())
-            }
+            RuntimeMode::Recovery(_)
+            | RuntimeMode::AdmissionRecovery { runtime: None, .. }
+            | RuntimeMode::RestartRequired { runtime: None } => {}
         }
+        // 变化流是宿主级资源，运行期只是借用；Engine 最终关闭时才真正关闭。
+        if let Err(error) = self.host.close_change_stream().await {
+            uc_warn!(
+                error_kind = "change_stream_shutdown",
+                io_error_kind = io_error_kind(&error),
+                "host clipboard change stream shutdown failed"
+            );
+        }
+        Ok(())
     }
 }
 

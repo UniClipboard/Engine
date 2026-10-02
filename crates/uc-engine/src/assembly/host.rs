@@ -547,7 +547,6 @@ pub(crate) async fn wire_host_capabilities_with_emitter(
             anyhow::Error::from(error).context("failed to create host clipboard import directory"),
         )
     })?;
-    let files: Arc<dyn HostFileAccess> = Arc::from(files);
     let wired = wire_dependencies_from_inputs(CoreWiringInputs {
         profile_lifecycle,
         paths: paths.clone(),
