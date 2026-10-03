@@ -378,22 +378,19 @@ function unblockPeerPair(left, right) {
   faults.push({ node: `${left.label}-${right.label}`, action: 'peer_pair_restored', at_ms: Math.round(performance.now()) })
 }
 
-function blockOutboundInitiation(node, peer) {
-  const peerIp = `10.233.0.${peer.index + 11}`
-  nft(node, 'add', 'table', 'inet', 'uc_initiator')
-  nft(node, 'add', 'chain', 'inet', 'uc_initiator', 'output', '{ type filter hook output priority -90; policy accept; }')
-  nft(node, 'add', 'rule', 'inet', 'uc_initiator', 'output', 'ip', 'daddr', peerIp, 'ct', 'state', 'new', 'counter', 'drop')
-  try { net(node, 'ping', '-c', '1', '-W', '1', peerIp); assert.fail('outbound initiation rule did not block the probe') }
-  catch (error) { if (error.code === 'ERR_ASSERTION') throw error }
-  const rules = JSON.parse(net(node, 'nft', '-j', 'list', 'table', 'inet', 'uc_initiator'))
-  const dropped = rules.nftables.flatMap(row => row.rule?.expr ?? []).reduce((total, expr) => total + (expr.counter?.packets ?? 0), 0)
-  assert(dropped > 0, 'outbound initiation counters remained empty')
-  faults.push({ node: `${node.label}->${peer.label}`, action: 'outbound_initiation_blocked', at_ms: Math.round(performance.now()), verified_dropped_packets: dropped })
+// UDP conntrack 的双向流量不能限定 QUIC 发起方向；在真实 connect 入口阻断新 reachability 拨号。
+// 成员历史交换、已建立连接和入站响应仍走正常网络，不引入恢复触发。
+async function blockReachabilityInitiation(node, peer) {
+  const endpoint = await peer.call('network_endpoint')
+  const result = await node.call('reject_reachability_dials', { endpoint_ids: [endpoint] })
+  assert.equal(result.blocked_peer_count, 1, 'reachability dial rejection did not select the peer')
+  faults.push({ node: `${node.label}->${peer.label}`, action: 'reachability_outbound_blocked', at_ms: Math.round(performance.now()), blocked_peer_count: result.blocked_peer_count })
 }
 
-function unblockOutboundInitiation(node, peer) {
-  net(node, 'nft', 'delete', 'table', 'inet', 'uc_initiator')
-  faults.push({ node: `${node.label}->${peer.label}`, action: 'outbound_initiation_restored', at_ms: Math.round(performance.now()) })
+async function unblockReachabilityInitiation(node, peer) {
+  const result = await node.call('reject_reachability_dials', { endpoint_ids: [] })
+  assert.equal(result.blocked_peer_count, 0, 'reachability dial rejection remained enabled')
+  faults.push({ node: `${node.label}->${peer.label}`, action: 'reachability_outbound_restored', at_ms: Math.round(performance.now()) })
 }
 
 async function scenario(id, action) {
@@ -461,9 +458,9 @@ async function knownPeerRecoveryScenarios(a, b, c) {
     }, 120_000, 'isolated new member did not become a known pending peer')
 
     const oldPort = c.bindPort
+    await blockReachabilityInitiation(a, c)
     await c.stop()
     await until(async () => (await b.call('peers')).some(peer => peer.peer_id === c.id && !peer.connected), 20_000, 'third member did not disconnect before the directed recovery')
-    blockOutboundInitiation(a, c)
     unblockPeerPair(a, c)
 
     blockDiscovery(a)
@@ -489,6 +486,12 @@ async function knownPeerRecoveryScenarios(a, b, c) {
             c.call('connections'),
             a.call('connections'),
           ])
+          const observations = records.at(-1).connection_directions ??= []
+          const sample = { initiator_incoming: cConnections.incoming, initiator_outgoing: cConnections.outgoing,
+            receiver_incoming: aConnections.incoming, receiver_outgoing: aConnections.outgoing }
+          if (JSON.stringify(observations.at(-1)?.counts) !== JSON.stringify(sample)) {
+            observations.push({ after_ms: Math.round(performance.now() - contactStarted), counts: sample })
+          }
           return cConnections.outgoing > 0 && aConnections.incoming > 0
         }, deadline - performance.now(), 'the recovered connection direction did not become observable')
         const forbidden = new Set(['opportunity', 'recover', 'send', 'suspend', 'resume'])
@@ -502,6 +505,7 @@ async function knownPeerRecoveryScenarios(a, b, c) {
           public_discovery_disabled: true,
           initiator_outbound: true,
           receiver_inbound: true,
+          receiver_rejected_outbound_dials: await a.call('rejected_dials'),
           automatic_online_within_ms: Math.round(onlineAt - contactStarted),
           forbidden_triggers_used: false,
         }
@@ -514,7 +518,7 @@ async function knownPeerRecoveryScenarios(a, b, c) {
         discoveryBlocked = false
       }
       if (outboundInitiationBlocked) {
-        unblockOutboundInitiation(a, c)
+        await unblockReachabilityInitiation(a, c)
         outboundInitiationBlocked = false
       }
     }
