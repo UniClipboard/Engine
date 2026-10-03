@@ -289,7 +289,8 @@ impl BindingHost for MemoryHost {
         let gate = {
             let mut gate = lock(&self.secure_read_gate);
             if gate.as_mut().is_some_and(|gate| gate.matches(&key)) {
-                gate.take()
+                // 同一受控密钥的并发读取都等待放行，不能被成员维护抢走唯一阻塞机会。
+                gate.clone()
             } else {
                 None
             }

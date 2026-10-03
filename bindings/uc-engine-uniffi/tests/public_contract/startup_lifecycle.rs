@@ -1,4 +1,4 @@
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -27,12 +27,12 @@ fn mobile_startup_accepts_a_pause_before_the_engine_is_returned() {
     initial.shutdown(ENGINE_SHUTDOWN_DEADLINE_MS).unwrap();
 
     let (entered, waiting) = mpsc::channel();
-    let (release, proceed) = mpsc::channel();
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
     *lock(&host.secure_read_gate) = Some(ReadGate {
         key_prefix: "kek:v1:",
         matches_before_wait: 0,
         entered,
-        release: proceed,
+        release: release.clone(),
     });
     let lifecycle = MobileStartupLifecycle::new();
     let starting = thread::spawn({
@@ -52,7 +52,8 @@ fn mobile_startup_accepts_a_pause_before_the_engine_is_returned() {
         })
     ));
     assert!(started_at.elapsed() < Duration::from_secs(1));
-    release.send(()).unwrap();
+    *lock(&release.0) = true;
+    release.1.notify_all();
 
     let engine = starting.join().unwrap().unwrap();
     assert!(matches!(

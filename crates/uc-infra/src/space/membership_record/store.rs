@@ -4,6 +4,8 @@ use async_trait::async_trait;
 use diesel::prelude::*;
 use diesel::sql_query;
 use diesel::sql_types::Binary;
+use tokio::task::spawn_blocking;
+use tracing::Span;
 use uc_application::deps::{
     MembershipLedgerError, MembershipProjectionPlan, MembershipRecord, MembershipRecordCommit,
     MembershipRecordStorePort, StagedMembershipRecord,
@@ -25,6 +27,7 @@ pub(super) struct EncryptedRecordRow {
     pub(super) encrypted_payload: Vec<u8>,
 }
 
+#[derive(Clone)]
 pub struct SqliteMembershipRecordStore<E> {
     executor: E,
     keys: Arc<AdmissionKeyManager>,
@@ -152,7 +155,7 @@ impl<E: DbExecutor> SqliteMembershipRecordStore<E> {
     }
 }
 
-impl<E: DbExecutor + Send + Sync> SqliteMembershipRecordStore<E> {
+impl<E: DbExecutor + Clone + 'static> SqliteMembershipRecordStore<E> {
     /// 把成员状态负责人为暂存控制世代形成的记录与读模型计划原样写入同一事务。
     ///
     /// 暂存世代尚未生效，没有其他写入方；替换记录的修订号不得小于其中已有记录，中断后重复写入同一记录
@@ -168,29 +171,45 @@ impl<E: DbExecutor + Send + Sync> SqliteMembershipRecordStore<E> {
             .membership_projection_writer()
             .await
             .map_err(MembershipLedgerError::unavailable_from)?;
-        self.executor
-            .run(|conn| {
-                conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
-                    let current = self.load_on(conn).map_err(anyhow::Error::new)?;
-                    if staged.replacement.revision() < current.revision() {
-                        return Err(anyhow::Error::new(MembershipLedgerError::Conflict));
-                    }
-                    self.save_on(conn, &staged.replacement)
-                        .map_err(anyhow::Error::new)?;
-                    writer.apply(conn, &staged.projection).map_err(|error| {
-                        anyhow::Error::new(MembershipLedgerError::unavailable_from(error))
-                    })?;
-                    Ok(())
-                })
+        let staged = staged.clone();
+        let store = self.clone();
+        let span = Span::current();
+        spawn_blocking(move || {
+            span.in_scope(|| {
+                store
+                    .executor
+                    .run(|conn| {
+                        conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
+                            let current = store.load_on(conn).map_err(anyhow::Error::new)?;
+                            if staged.replacement.revision() < current.revision() {
+                                return Err(anyhow::Error::new(MembershipLedgerError::Conflict));
+                            }
+                            store
+                                .save_on(conn, &staged.replacement)
+                                .map_err(anyhow::Error::new)?;
+                            writer.apply(conn, &staged.projection).map_err(|error| {
+                                anyhow::Error::new(MembershipLedgerError::unavailable_from(error))
+                            })?;
+                            Ok(())
+                        })
+                    })
+                    .map_err(map_executor_error)
             })
-            .map_err(map_executor_error)
+        })
+        .await
+        .map_err(MembershipLedgerError::unavailable_from)?
     }
 }
 
 #[async_trait]
-impl<E: DbExecutor + Send + Sync> MembershipRecordStorePort for SqliteMembershipRecordStore<E> {
+impl<E: DbExecutor + Clone + 'static> MembershipRecordStorePort for SqliteMembershipRecordStore<E> {
     async fn load(&self) -> Result<MembershipRecord, MembershipLedgerError> {
-        SqliteMembershipRecordStore::load(self)
+        // 同步事务会调用宿主密钥存储；整体移出运行线程，让生命周期通知仍可被接收。
+        let store = self.clone();
+        let span = Span::current();
+        spawn_blocking(move || span.in_scope(|| store.load()))
+            .await
+            .map_err(MembershipLedgerError::unavailable_from)?
     }
 
     fn generation(&self) -> u64 {
@@ -209,11 +228,19 @@ impl<E: DbExecutor + Send + Sync> MembershipRecordStorePort for SqliteMembership
             // 读模型计划无处落实时不写记录，避免两者分离。
             (Some(_), None) => return Err(MembershipLedgerError::unavailable()),
         };
-        self.commit_record(
-            commit.expected_revision,
-            &commit.replacement,
-            writer.as_ref().zip(commit.projection.as_ref()),
-        )
+        let store = self.clone();
+        let span = Span::current();
+        spawn_blocking(move || {
+            span.in_scope(|| {
+                store.commit_record(
+                    commit.expected_revision,
+                    &commit.replacement,
+                    writer.as_ref().zip(commit.projection.as_ref()),
+                )
+            })
+        })
+        .await
+        .map_err(MembershipLedgerError::unavailable_from)?
     }
 }
 
