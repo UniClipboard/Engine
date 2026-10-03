@@ -23,7 +23,8 @@ use uc_core::ports::config_migration::{
 };
 use uc_core::ports::{ClockPort, LocalIdentityPort, SecureStoragePort};
 
-use crate::security::{crypto_model::KeySlotFile, PROFILE_SECRET_FILE_NAME};
+use crate::security::PROFILE_SECRET_FILE_NAME;
+use uc_infra_crypto::crypto_model::KeySlotFile;
 
 use super::archive::{ArchiveError, BundleArchive};
 use super::bundle::{self, Argon2Params, BundleError};

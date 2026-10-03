@@ -36,7 +36,7 @@ use rand::TryRngCore;
 use uc_core::crypto::domain::Passphrase;
 use zeroize::Zeroize;
 
-use crate::security::crypto_model::kdf_cost_is_bounded;
+use uc_infra_crypto::crypto_model::kdf_cost_is_bounded;
 
 /// Magic prefix identifying a `.ucbundle` file.
 pub const MAGIC: &[u8; 8] = b"UCBUNDLE";

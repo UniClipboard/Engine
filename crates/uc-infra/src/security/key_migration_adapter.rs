@@ -2,7 +2,7 @@
 //!
 //! 把一次性 32 字节 migration_key 持久化到 [`SecureStoragePort`]
 //! （macOS Keychain / Windows Credential Manager / Linux secret-service /
-//! 测试用内存 fake），加解密复用 `super::v1_aead` 的 V1 XChaCha20-Poly1305
+//! 测试用内存 fake），加解密复用 `uc_infra_crypto::v1_aead` 的 V1 XChaCha20-Poly1305
 //! 实现，与 `BlobCipherAdapter` 保持算法一致。
 //!
 //! Keyring entry 命名空间：`migration_key:v1:<run_id>`，与既有 `kek:v1:<scope>`
@@ -19,9 +19,9 @@ use uc_core::ports::security::MigrationRunId;
 use uc_core::ports::security::{KeyMigrationError, KeyMigrationPort};
 use uc_core::ports::SecureStoragePort;
 
-use super::crypto_model::EncryptedBlob;
-use super::secrets::MasterKey;
-use super::v1_aead;
+use uc_infra_crypto::crypto_model::EncryptedBlob;
+use uc_infra_crypto::secrets::MasterKey;
+use uc_infra_crypto::v1_aead;
 
 pub(super) const KEYRING_PREFIX: &str = "migration_key:v1:";
 

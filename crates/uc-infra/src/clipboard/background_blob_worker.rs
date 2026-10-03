@@ -23,8 +23,8 @@ use uc_observability_contract::{
 };
 
 use super::background_activity::BackgroundActivity;
-use crate::blob::BlobWriterPort;
 use crate::clipboard::{RepresentationCache, SpoolManager};
+use uc_infra_local::blob::BlobWriterPort;
 
 /// Check if an image MIME type needs conversion to PNG before blob storage.
 /// Returns true for image/* types that are not already PNG or WebP.

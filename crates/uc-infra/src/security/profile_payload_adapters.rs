@@ -7,8 +7,8 @@ use super::{
     BlobCipherAdapter, ContentProtection, EncryptedBlobStore, V3EncryptedBlobStore,
     V3InlinePayloadCipher,
 };
-use crate::blob::BlobStorePort;
 use crate::space::InMemorySession;
+use uc_infra_local::blob::BlobStorePort;
 
 /// 同一 profile runtime 的 primary payload adapter family。
 ///

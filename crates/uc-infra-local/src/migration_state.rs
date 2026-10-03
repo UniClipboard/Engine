@@ -47,7 +47,7 @@ enum LegacyMigrationPhaseV1 {
 }
 
 /// 备份只复用历史格式解析，不执行历史恢复动作。
-pub(crate) fn decode_legacy_migration_run_id(
+pub fn decode_legacy_migration_run_id(
     bytes: &[u8],
 ) -> Result<Option<MigrationRunId>, serde_json::Error> {
     serde_json::from_slice::<Option<LegacyMigrationPhaseV1>>(bytes).map(|phase| {
@@ -74,7 +74,7 @@ async fn read_legacy_phase(
         .map_err(LegacyMigrationRecoveryError::recovery_required_from)
 }
 
-pub(crate) async fn legacy_migration_run_id(
+pub async fn legacy_migration_run_id(
     base_dir: &std::path::Path,
 ) -> Result<Option<MigrationRunId>, LegacyMigrationRecoveryError> {
     Ok(

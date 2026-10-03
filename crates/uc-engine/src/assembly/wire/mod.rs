@@ -36,7 +36,6 @@ use uc_core::ids::{ProfileId, RepresentationId};
 use uc_core::ports::blob::BlobReferenceRepositoryPort;
 use uc_core::ports::clipboard::{RepresentationCachePort, SelfWriteLedgerPort, SpoolQueuePort};
 use uc_core::ports::*;
-use uc_infra::blob::BlobRepositoryPort;
 use uc_infra::clipboard::{
     new_in_memory_change_origin, ClipboardPayloadResolver, DurableSpoolQueue,
     InfraThumbnailGenerator, RepresentationCache, SpoolManager,
@@ -65,7 +64,6 @@ use uc_infra::db::repositories::{
     DieselThumbnailRepository, DieselTrustedPeerRepository, EncryptedRelationshipStore,
 };
 use uc_infra::fs::key_slot_store::JsonKeySlotStore;
-use uc_infra::fs::VaultLayout;
 use uc_infra::network::iroh::IrohIdentityStore;
 use uc_infra::search::{
     HkdfSearchKeyDerivation, SearchPipeline, SqliteSearchIndex, V3SearchKeyDerivation,
@@ -79,12 +77,14 @@ use uc_infra::security::{
     V3AdmissionSpaceTransition, V3DeviceManagementReset, V3InitialSpaceActivation,
     V3MembershipBranchTransition,
 };
-use uc_infra::settings::repository::FileSettingsRepository;
 use uc_infra::space::{
     InMemorySession, KeyMaterialStore, OpenMlsHistoricalSignatureVerifier,
     SqliteMembershipRecordStore, SqliteSpaceAdmissionCredentials, SqliteSpaceAdmissionState,
 };
-use uc_infra::{FileAppVersionStateRepository, FileFirstSyncStateRepository, SystemClock};
+use uc_infra_local::blob::BlobRepositoryPort;
+use uc_infra_local::fs::VaultLayout;
+use uc_infra_local::settings::repository::FileSettingsRepository;
+use uc_infra_local::{FileAppVersionStateRepository, FileFirstSyncStateRepository, SystemClock};
 use uc_observability_contract::analytics::{AnalyticsFacade, AnalyticsPort};
 
 #[cfg(feature = "lan-compat")]
@@ -837,7 +837,7 @@ pub async fn wire_dependencies_from_inputs(
     // The network identity remains in its dedicated file storage so upgrades
     // preserve the endpoint identity paired by earlier releases.
     let iroh_identity_storage: Arc<dyn SecureStoragePort> = Arc::new(
-        uc_infra::FileSecureStorage::with_base_dir(iroh_identity_dir.clone()),
+        uc_infra_local::FileSecureStorage::with_base_dir(iroh_identity_dir.clone()),
     );
     // The remaining bypass repos are `Arc::clone`d directly from `infra` at the
     // `WiredDependencies` construction site below (infra retains ownership).
@@ -914,8 +914,10 @@ pub async fn wire_dependencies_from_inputs(
         relay_diagnostic: build_relay_diagnostic(),
         host_event_bus: Arc::clone(&host_event_bus),
         file_transfer_event_store: file_transfer_store_arc,
-        receive_artifact_cleanup: Arc::new(uc_infra::fs::FsReceiveArtifactCleaner),
-        receive_save_dir: uc_infra::fs::FsInboundFileTarget::new(Arc::clone(&infra.settings_repo)),
+        receive_artifact_cleanup: Arc::new(uc_infra_local::fs::FsReceiveArtifactCleaner),
+        receive_save_dir: uc_infra_local::fs::FsInboundFileTarget::new(Arc::clone(
+            &infra.settings_repo,
+        )),
         clipboard_background,
         trusted_peer_repo: Arc::clone(&trusted_peer_repo),
         entry_delivery_repo: Arc::clone(&infra.entry_delivery_repo),
@@ -980,7 +982,7 @@ pub async fn wire_dependencies_from_inputs(
         system: SystemPorts {
             clock: infra.clock,
             hash: infra.hash,
-            cache_fs: Arc::new(uc_infra::fs::TokioCacheFsAdapter::new()),
+            cache_fs: Arc::new(uc_infra_local::fs::TokioCacheFsAdapter::new()),
         },
         search: SearchPorts::new(
             search_index,

@@ -12,7 +12,7 @@
 //! 2. `password` —— 16 字节 OsRng + base64 url-safe 无填充(约 22 字符)。
 //!    给用户一次性可见,写进 SyncClipboard shortcut 的 `password` 输入框。
 //! 3. `password_hash` —— 同步用 Argon2id 算 PHC 字符串(参数对齐
-//!    `crate::security::hashing::pin_hash`:m=65536, t=3, p=4)。RFC 9106
+//!    `uc_infra_crypto::hashing::pin_hash`:m=65536, t=3, p=4)。RFC 9106
 //!    推荐内存优先档,登记是用户级动作(秒级延迟可接受),不引入 spawn_blocking,
 //!    保持 minter 接口同步。
 //! 4. `device_id` —— 16 字节 OsRng + lowercase hex,前缀 `did_`,与

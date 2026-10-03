@@ -21,8 +21,8 @@ use uc_core::crypto::aad;
 use uc_core::ids::{EntryId, ProfileId};
 use uc_core::search::RenderKey;
 
-use crate::security::v1_aead::{decrypt_xchacha_raw, encrypt_xchacha_raw};
 use crate::space::InMemorySession;
+use uc_infra_crypto::v1_aead::{decrypt_xchacha_raw, encrypt_xchacha_raw};
 
 use super::search_key_derivation::RENDER_KEY_INFO;
 

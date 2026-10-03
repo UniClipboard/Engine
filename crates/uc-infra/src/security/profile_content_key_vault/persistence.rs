@@ -9,13 +9,14 @@ use sha2::Sha256;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use zeroize::Zeroizing;
 
-use crate::fs::file_lock::try_lock_exclusive;
+use uc_infra_local::fs::file_lock::try_lock_exclusive;
 
-use super::super::crypto_model::EncryptedBlob;
+use super::super::MasterKey;
 use super::super::SecureStorageAccess;
-use super::super::{v1_aead, MasterKey};
 use super::model::{PersistedVault, ProfileContentKeyVaultError, MAX_VAULT_PLAINTEXT_BYTES};
 use super::{catalog, key_store};
+use uc_infra_crypto::crypto_model::EncryptedBlob;
+use uc_infra_crypto::v1_aead;
 
 mod filesystem;
 

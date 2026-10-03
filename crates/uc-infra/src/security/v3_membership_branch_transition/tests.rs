@@ -41,7 +41,7 @@ use crate::space::{
     DefaultMembershipBranchTransitionPreparation, InMemorySession, KeyMaterialStore,
     OpenMlsHistoricalSignatureVerifier, RuntimeSpaceAccessAdapter, SqliteMembershipRecordStore,
 };
-use crate::time::SystemClock;
+use uc_infra_local::time::SystemClock;
 
 #[derive(Default)]
 struct MemorySecureStorage(Mutex<HashMap<String, Vec<u8>>>);

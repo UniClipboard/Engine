@@ -46,10 +46,11 @@ impl ProfileKeyWiper {
     }
 
     async fn wipe_migration_key(&self) -> Result<(), ProfileFactoryResetCapabilityError> {
-        let Some(run_id) =
-            crate::migration_state::legacy_migration_run_id(&self.legacy_migration_base_dir)
-                .await
-                .map_err(capability_error_from)?
+        let Some(run_id) = uc_infra_local::migration_state::legacy_migration_run_id(
+            &self.legacy_migration_base_dir,
+        )
+        .await
+        .map_err(capability_error_from)?
         else {
             return Ok(());
         };

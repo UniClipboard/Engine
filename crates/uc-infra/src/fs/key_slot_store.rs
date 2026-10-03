@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use std::path::PathBuf;
 use uc_core::crypto::model::EncryptionError;
 
-use crate::security::crypto_model::KeySlotFile;
+use uc_infra_crypto::crypto_model::KeySlotFile;
 
 #[async_trait]
 pub trait KeySlotStore: Send + Sync {

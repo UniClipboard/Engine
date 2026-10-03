@@ -11,9 +11,9 @@ use std::sync::Arc;
 use uc_core::crypto::domain::{Aad, Ciphertext, Plaintext};
 use uc_core::membership::{ContentKeyId, ContentKeyPurpose};
 
-use crate::security::v1_aead::{decrypt_xchacha_raw, encrypt_xchacha_raw};
 use crate::security::{ProfileContentKeyVault, ProfileContentKeyVaultError};
 use crate::space::InMemorySession;
+use uc_infra_crypto::v1_aead::{decrypt_xchacha_raw, encrypt_xchacha_raw};
 
 use context::ProtectionContextV1;
 

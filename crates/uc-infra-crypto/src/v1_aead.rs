@@ -1,4 +1,4 @@
-//! V1 加密原语集中点（pub(crate)）。
+//! V1 加密原语集中点（uc-infra-crypto 内的 pub API，供 uc-infra 消费）。
 //!
 //! 把 KEK 派生 / MasterKey 包装拆解 / blob AEAD 三组算法封装成纯函数,
 //! 供 `BlobCipherAdapter` / `EncryptedBlobStore` / 后续 SpaceAccessAdapter
@@ -22,8 +22,8 @@ use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
 use rand::RngCore;
 use uc_core::crypto::model::{EncryptionError, Passphrase};
 
-use super::crypto_model::{EncryptedBlob, KdfParams};
-use super::secrets::{Kek, MasterKey};
+use crate::crypto_model::{EncryptedBlob, KdfParams};
+use crate::secrets::{Kek, MasterKey};
 
 // 字面值常量——与历史 serde enum 输出字节级一致,为磁盘/wire format ironclad
 // 不变量(Slice 4 B.4.1-3 删除四个单变体 enum 后从 adapter 端硬编码)。
@@ -32,7 +32,7 @@ const AEAD_XCHACHA20_POLY1305: &str = "XChaCha20Poly1305";
 const ENCRYPTION_FORMAT_V1: &str = "V1";
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum AeadError {
+pub enum AeadError {
     #[error("invalid key length")]
     InvalidKey {
         #[source]
@@ -88,7 +88,7 @@ impl AeadError {
 
 /// KEK 派生失败的分类；算法名等输入值不进入错误文本。
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum KdfError {
+pub enum KdfError {
     #[error("unsupported KDF algorithm")]
     UnsupportedAlgorithm,
     #[error("invalid argon2 parameters")]
@@ -100,7 +100,7 @@ pub(crate) enum KdfError {
 }
 
 /// Argon2id 派生 KEK。
-pub(crate) fn derive_kek_argon2id(
+pub fn derive_kek_argon2id(
     passphrase: &Passphrase,
     salt: &[u8],
     kdf: &KdfParams,
@@ -129,7 +129,7 @@ pub(crate) fn derive_kek_argon2id(
 /// XChaCha20-Poly1305 包装 MasterKey。
 ///
 /// 输出 `EncryptedBlob` 直接对接 KeySlot.wrapped_master_key（V1 格式）。
-pub(crate) fn wrap_master_key_xchacha(
+pub fn wrap_master_key_xchacha(
     kek: &Kek,
     master_key: &MasterKey,
 ) -> Result<EncryptedBlob, AeadError> {
@@ -152,7 +152,7 @@ pub(crate) fn wrap_master_key_xchacha(
 }
 
 /// XChaCha20-Poly1305 解包 MasterKey。
-pub(crate) fn unwrap_master_key_xchacha(
+pub fn unwrap_master_key_xchacha(
     kek: &Kek,
     wrapped: &EncryptedBlob,
 ) -> Result<MasterKey, AeadError> {
@@ -174,7 +174,7 @@ pub(crate) fn unwrap_master_key_xchacha(
 /// 供不同存储格式(UCBL blob 头、UCSR search render 头)各自封装复用。
 ///
 /// key 长度非法时返回 `AeadError::InvalidKey`(底层 `new_from_slice` 校验)。
-pub(crate) fn encrypt_xchacha_raw(
+pub fn encrypt_xchacha_raw(
     key: &[u8],
     plaintext: &[u8],
     aad: &[u8],
@@ -199,7 +199,7 @@ pub(crate) fn encrypt_xchacha_raw(
 /// XChaCha20-Poly1305 底层解密原语,以裸 32 字节 key 为参。
 ///
 /// nonce 长度必须为 24,否则返回 `AeadError::DecryptFailed`。
-pub(crate) fn decrypt_xchacha_raw(
+pub fn decrypt_xchacha_raw(
     key: &[u8],
     nonce: &[u8],
     ciphertext: &[u8],
@@ -223,7 +223,7 @@ pub(crate) fn decrypt_xchacha_raw(
 /// XChaCha20-Poly1305 加密业务 blob,返回完整的 `EncryptedBlob`。
 ///
 /// 调用方决定 AAD（业务上下文绑定,例如条目 id / blob id）。
-pub(crate) fn encrypt_blob_xchacha(
+pub fn encrypt_blob_xchacha(
     master_key: &MasterKey,
     plaintext: &[u8],
     aad: &[u8],
@@ -244,7 +244,7 @@ pub(crate) fn encrypt_blob_xchacha(
 ///
 /// 接收 nonce + ciphertext + AAD 三件直接调底层 AEAD,绕过 EncryptedBlob
 /// 结构（让 EncryptedBlobStore 用 UCBL 二进制头时也能直接消费）。
-pub(crate) fn decrypt_blob_xchacha(
+pub fn decrypt_blob_xchacha(
     master_key: &MasterKey,
     nonce: &[u8],
     ciphertext: &[u8],
@@ -256,7 +256,7 @@ pub(crate) fn decrypt_blob_xchacha(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::security::crypto_model::KdfParamsV1;
+    use crate::crypto_model::KdfParamsV1;
     use uc_core::crypto::model::Passphrase;
 
     /// 单测专用的廉价 Argon2id 参数。生产默认是 128 MiB / 3 iters,在单测里

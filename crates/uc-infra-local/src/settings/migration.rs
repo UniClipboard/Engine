@@ -125,7 +125,7 @@ impl SettingsMigrator {
     /// # Examples
     ///
     /// ```
-    /// # use uc_infra::settings::migration::SettingsMigrator;
+    /// # use uc_infra_local::settings::migration::SettingsMigrator;
     /// let migrator = SettingsMigrator::new();
     /// ```
     pub fn new() -> Self {
@@ -146,9 +146,9 @@ impl SettingsMigrator {
     /// # Examples
     ///
     /// ```no_run
-    /// # use uc_infra::settings::migration::SettingsMigrator;
+    /// # use uc_infra_local::settings::migration::SettingsMigrator;
     /// # use uc_core::settings::model::Settings;
-    /// # use uc_infra::settings::migration::MigrationError;
+    /// # use uc_infra_local::settings::migration::MigrationError;
     /// let migrator = SettingsMigrator::new();
     /// let settings = Settings::default();
     /// let migrated = migrator.migrate_to_latest(settings)?;

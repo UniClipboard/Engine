@@ -39,7 +39,7 @@ struct UpgradeCursorFile {
 const CURRENT_SCHEMA_VERSION: u32 = 1;
 
 /// 升级前只读来源版本，复用游标格式，不创建目录、不打开数据库。
-pub(crate) fn read_version_before_upgrade(path: &Path) -> io::Result<Option<String>> {
+pub fn read_version_before_upgrade(path: &Path) -> io::Result<Option<String>> {
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),

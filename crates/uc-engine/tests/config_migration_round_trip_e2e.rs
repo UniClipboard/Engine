@@ -40,7 +40,7 @@ use uc_infra::fs::key_slot_store::JsonKeySlotStore;
 use uc_infra::network::iroh::IrohIdentityStore;
 use uc_infra::security::{DefaultCurrentProfile, Sha256IdentityFingerprintFactory};
 use uc_infra::space::{InMemorySession, KeyMaterialStore, MigrationSpaceAccessAdapter};
-use uc_infra::SystemClock;
+use uc_infra_local::SystemClock;
 #[derive(Default)]
 struct TestSecureStorage {
     values: Mutex<HashMap<String, Vec<u8>>>,

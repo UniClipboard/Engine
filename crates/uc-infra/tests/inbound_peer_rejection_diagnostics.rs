@@ -25,7 +25,7 @@ use uc_infra::network::iroh::{
     PEER_REACHABILITY_ALPN,
 };
 use uc_infra::security::Sha256IdentityFingerprintFactory;
-use uc_infra::SystemClock;
+use uc_infra_local::SystemClock;
 use uc_observability_runtime::*;
 use uc_sync_protocol::clipboard as clipboard_wire;
 

@@ -10,7 +10,7 @@ use uc_core::crypto::domain::{Aad, Ciphertext, Plaintext};
 use uc_core::{BlobId, ContentHash};
 
 use super::ContentProtection;
-use crate::blob::{BlobStorePort, StoredPathBlob};
+use uc_infra_local::blob::{BlobStorePort, StoredPathBlob};
 use uc_observability_contract::uc_debug;
 
 const BLOB_MAGIC: [u8; 4] = *b"UCBL";

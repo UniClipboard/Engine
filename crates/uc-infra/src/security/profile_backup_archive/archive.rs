@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 #[cfg(target_os = "android")]
-use crate::fs::atomic_publish::rename_no_replace_io;
+use uc_infra_local::fs::atomic_publish::rename_no_replace_io;
 
 use super::error::invalid_archive;
 use super::tree::read_tree;

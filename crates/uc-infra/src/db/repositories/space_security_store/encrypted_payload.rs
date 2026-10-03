@@ -4,8 +4,9 @@ use sha2::Sha256;
 use uc_core::ids::SpaceId;
 use uc_core::membership::KeyEpochError;
 
-use crate::security::crypto_model::EncryptedBlob;
-use crate::security::{v1_aead, MasterKey};
+use crate::security::MasterKey;
+use uc_infra_crypto::crypto_model::EncryptedBlob;
+use uc_infra_crypto::v1_aead;
 
 use super::backend;
 

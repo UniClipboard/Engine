@@ -31,7 +31,7 @@ impl FileSettingsRepository {
     /// # Examples
     ///
     /// ```
-    /// # use uc_infra::settings::repository::FileSettingsRepository;
+    /// # use uc_infra_local::settings::repository::FileSettingsRepository;
     /// let _repo = FileSettingsRepository::new("config/settings.json");
     /// ```
     pub fn new(path: impl Into<PathBuf>) -> Self {
@@ -141,7 +141,7 @@ impl SettingsPort for FileSettingsRepository {
     /// # Examples
     ///
     /// ```no_run
-    /// # use uc_infra::settings::repository::FileSettingsRepository;
+    /// # use uc_infra_local::settings::repository::FileSettingsRepository;
     /// # use uc_core::ports::SettingsPort;
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let repo = FileSettingsRepository::new(std::path::PathBuf::from("/tmp/nonexistent_settings.json"));
@@ -180,7 +180,7 @@ impl SettingsPort for FileSettingsRepository {
     /// # Examples
     ///
     /// ```no_run
-    /// # use uc_infra::settings::repository::FileSettingsRepository;
+    /// # use uc_infra_local::settings::repository::FileSettingsRepository;
     /// # use uc_core::settings::model::Settings;
     /// # use uc_core::ports::SettingsPort;
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -207,7 +207,7 @@ impl SettingsPort for CachedSettingsRepository {
     /// # Examples
     ///
     /// ```no_run
-    /// # use uc_infra::settings::repository::FileSettingsRepository;
+    /// # use uc_infra_local::settings::repository::FileSettingsRepository;
     /// # use uc_core::ports::SettingsPort;
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let repo = FileSettingsRepository::new(std::path::PathBuf::from("/tmp/nonexistent_settings.json"));
@@ -239,7 +239,7 @@ impl SettingsPort for CachedSettingsRepository {
     /// # Examples
     ///
     /// ```no_run
-    /// # use uc_infra::settings::repository::FileSettingsRepository;
+    /// # use uc_infra_local::settings::repository::FileSettingsRepository;
     /// # use uc_core::settings::model::Settings;
     /// # use uc_core::ports::SettingsPort;
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {

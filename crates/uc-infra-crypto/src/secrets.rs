@@ -63,7 +63,7 @@ impl MasterKey {
 
     /// 消费 self 取出原始字节,只在必须移交所有权(如把字节交给 `ProofDerivedKey`
     /// 这种已经自身负责 zeroize 的目标类型)的极少数路径上使用。
-    pub(crate) fn into_bytes(self) -> [u8; 32] {
+    pub fn into_bytes(self) -> [u8; 32] {
         // 拷贝出去后 self 仍会被 drop,届时 self.0 会被自身 ZeroizeOnDrop 清零;
         // 调用方持有的副本由调用方负责保护。
         self.0
