@@ -269,7 +269,11 @@ async fn peer_address_failures_export_stable_categories_and_real_stack_symbols()
         if expected_stack_mode == "captured" {
             assert_eq!(stack_status, "captured");
         } else {
-            assert_eq!(expected_stack_mode, "release");
+            // 插桩或平台差异允许符号缺失，但不保证一定丢失；release 专项仍要求实际覆盖缺失。
+            assert!(matches!(
+                expected_stack_mode.as_str(),
+                "available" | "release"
+            ));
             assert!(matches!(stack_status, "captured" | "unresolved"));
         }
         let stack = row["error.stack"].as_array().expect("stack array");

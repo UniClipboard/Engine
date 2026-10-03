@@ -182,8 +182,8 @@ jobs:
       - name: Run workspace tests
         run: bash scripts/testing/run-test-group.sh workspace
         env:
-          # Linux 内联帧只有短名称，诊断栈按符号丢失口径校验；真实符号由 macOS checks job 校验。
-          UC_EXPECT_DIAGNOSTIC_STACK: release
+          # Linux 内联帧可能只有短名称；校验实际可用符号，完整符号由 macOS checks job 校验。
+          UC_EXPECT_DIAGNOSTIC_STACK: available
 
       - name: Keep workspace test report
         if: always()
@@ -257,7 +257,7 @@ jobs:
         with:
           tool: cargo-llvm-cov,cargo-nextest@0.9.145
 
-      # 插桩改变内联，部分符号按设计报告 unresolved；完整符号栈由 tests job 的未插桩构建验证。
+      # 插桩可能改变内联，允许 unresolved，但不要求符号必须丢失；完整符号由 checks job 验证。
       # 升级兼容矩阵依赖先构建的旧版宿主，只经 upgrade-matrix 分组运行，不计入覆盖率。
       - name: Generate Rust coverage
         run: >-
@@ -267,7 +267,7 @@ jobs:
           -E 'not kind(bench) & not package(uc-upgrade-matrix)'
         env:
           NEXTEST_PROFILE: ci
-          UC_EXPECT_DIAGNOSTIC_STACK: release
+          UC_EXPECT_DIAGNOSTIC_STACK: available
 
       - name: Upload Rust coverage to Codecov
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f
