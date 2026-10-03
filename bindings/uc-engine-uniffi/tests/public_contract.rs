@@ -1630,6 +1630,12 @@ fn active_clipboard_query_survives_session_recovery() {
         .query_local_device()
         .expect("first binding engine must expose the local device")
         .device_id;
+    let active_before_shutdown = first
+        .query_active_clipboard()
+        .expect("first binding engine must query the active clipboard")
+        .expect("captured clipboard must be active before shutdown");
+    assert_eq!(active_before_shutdown.entry_id, entry_id);
+    assert_eq!(active_before_shutdown.activated_by, activated_by);
     first
         .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
         .expect("first binding engine must shut down");

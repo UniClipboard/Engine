@@ -170,8 +170,9 @@ impl<E: DbExecutor + 'static> AdvanceActiveClipboardPort
         };
 
         self.run(move |conn| {
-            // 比较和写入在同一事务内，较旧状态不改变登记。
-            conn.transaction::<bool, diesel::result::Error, _>(|conn| {
+            // 先取得写事务再读取，避免 WAL 快照在并发写入后无法升级为写事务。
+            // 比较和写入仍在同一事务内，较旧状态不改变登记。
+            conn.immediate_transaction::<bool, diesel::result::Error, _>(|conn| {
                 let current: Option<(i64, String)> = active_clipboard_register::table
                     .filter(active_clipboard_register::id.eq(REGISTER_ROW_ID))
                     .select((
