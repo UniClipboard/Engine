@@ -2625,6 +2625,18 @@ impl GroupRevocationPort for RuntimeSpaceAccessAdapter {
             })
     }
 
+    async fn space_group_update_recipient_status(
+        &self,
+    ) -> Result<Vec<uc_core::membership::GroupUpdateRecipientStatus>, KeyEpochError> {
+        let space_id = self
+            .session
+            .current_space_id()
+            .map_err(|source| KeyEpochError::Repository(source.into()))?;
+        self.key_epoch_repository
+            .group_update_recipient_status(&space_id)
+            .await
+    }
+
     async fn acknowledge_space_group_update(
         &self,
         update_id: &str,
@@ -3956,6 +3968,10 @@ mod admission_tests {
                 &self,
                 space_id: &SpaceId,
             ) -> Result<uc_core::membership::GroupUpdateDeliveryStatus, KeyEpochError>;
+            async fn group_update_recipient_status(
+                &self,
+                space_id: &SpaceId,
+            ) -> Result<Vec<uc_core::membership::GroupUpdateRecipientStatus>, KeyEpochError>;
             async fn begin_revocation(
                 &self,
                 prepared: &RevocationRecord,

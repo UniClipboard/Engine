@@ -399,6 +399,13 @@ pub struct PendingGroupUpdate {
     payload: Vec<u8>,
 }
 
+/// 某个收件人的组密钥更新投递进度；只包含仍未完成的收件人，状态不会是 `Completed`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GroupUpdateRecipientStatus {
+    pub recipient: DeviceId,
+    pub status: GroupUpdateDeliveryStatus,
+}
+
 /// 空间安全资料投递的持久状态摘要。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GroupUpdateDeliveryStatus {

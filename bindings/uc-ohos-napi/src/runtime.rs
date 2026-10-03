@@ -1248,6 +1248,7 @@ mod tests {
                 compatibility: uc_engine::DeviceCompatibilitySummary::Compatible,
                 sync_relationship: uc_engine::DeviceSyncRelationshipSummary::Usable,
                 pairing_confirmation: Some(uc_engine::PairingConfirmationSummary::Unconfirmed),
+                update: uc_engine::DeviceUpdateSummary::default(),
                 available_actions: Vec::new(),
                 blocked_reason: None,
             });

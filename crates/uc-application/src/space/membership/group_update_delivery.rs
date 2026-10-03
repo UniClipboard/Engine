@@ -9,7 +9,7 @@ use uc_observability_contract::{uc_debug, uc_warn};
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
     GroupRevocationPort, GroupUpdateDeliveryStatus, GroupUpdateDispatchError,
-    GroupUpdateDispatchPort, KeyEpochError, PendingGroupUpdate,
+    GroupUpdateDispatchPort, GroupUpdateRecipientStatus, KeyEpochError, PendingGroupUpdate,
 };
 use uc_core::ports::{ClockPort, HostEvent, MembershipHostEvent};
 
@@ -66,6 +66,15 @@ impl LoadSecurityDeviceUpdateStatusPort for DeliverPendingGroupUpdatesUseCase {
                 SpaceDeviceUpdateRecovery::ReviewDevices,
             ),
         })
+    }
+
+    async fn load_security_recipient_updates(
+        &self,
+    ) -> Result<Vec<GroupUpdateRecipientStatus>, QueryDeviceTrustError> {
+        self.store
+            .space_group_update_recipient_status()
+            .await
+            .map_err(map_query_error)
     }
 }
 
@@ -394,6 +403,12 @@ mod tests {
             &self,
         ) -> Result<GroupUpdateDeliveryStatus, KeyEpochError> {
             Ok(GroupUpdateDeliveryStatus::Completed)
+        }
+
+        async fn space_group_update_recipient_status(
+            &self,
+        ) -> Result<Vec<GroupUpdateRecipientStatus>, KeyEpochError> {
+            Ok(Vec::new())
         }
 
         async fn acknowledge_space_group_update(

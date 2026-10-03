@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
-    GroupEpoch, GroupUpdateDeliveryStatus, GroupUpdateDispatchError, KeyEpochError,
-    PendingGroupUpdate, RevocationStage, RevocationStatus,
+    GroupEpoch, GroupUpdateDeliveryStatus, GroupUpdateDispatchError, GroupUpdateRecipientStatus,
+    KeyEpochError, PendingGroupUpdate, RevocationStage, RevocationStatus,
 };
 
 use super::encrypted_payload::{open, seal, space_lookup_token};
@@ -241,6 +241,32 @@ impl<E: DbExecutor> DieselSpaceSecurityStore<E> {
             .map_or(GroupUpdateDeliveryStatus::Completed, |next_attempt_at_ms| {
                 GroupUpdateDeliveryStatus::Pending { next_attempt_at_ms }
             }))
+    }
+
+    pub(super) fn load_group_update_recipient_status_on(
+        &self,
+        conn: &mut SqliteConnection,
+        key: &MasterKey,
+        space_id: &SpaceId,
+    ) -> Result<Vec<GroupUpdateRecipientStatus>, KeyEpochError> {
+        let scope = space_lookup_token(key, space_id)?;
+        let mut states = read_states(conn, key, &scope)?;
+        states.sort_by_key(|(_, state)| (state.epoch, state.next_attempt_ms));
+        let mut recipients = HashSet::new();
+        Ok(states
+            .into_iter()
+            .filter_map(|(_, state)| recipients.insert(state.recipient).then_some(state))
+            .map(|state| GroupUpdateRecipientStatus {
+                recipient: state.recipient,
+                status: if state.rejected {
+                    GroupUpdateDeliveryStatus::Rejected
+                } else {
+                    GroupUpdateDeliveryStatus::Pending {
+                        next_attempt_at_ms: state.next_attempt_ms,
+                    }
+                },
+            })
+            .collect())
     }
 
     pub(super) fn load_due_updates_on(

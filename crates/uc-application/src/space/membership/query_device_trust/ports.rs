@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use uc_core::ids::DeviceId;
+use uc_core::membership::GroupUpdateRecipientStatus;
 
 use super::{
     AdmissionDisplayStatus, DeviceTrustObservation, PairingConfirmationTarget,
@@ -20,6 +21,11 @@ pub(crate) trait LoadSecurityDeviceUpdateStatusPort: Send + Sync {
     async fn load_security_device_update_status(
         &self,
     ) -> Result<SpaceDeviceUpdateStatus, QueryDeviceTrustError>;
+
+    /// 仍未完成组密钥投递的收件人及各自进度。
+    async fn load_security_recipient_updates(
+        &self,
+    ) -> Result<Vec<GroupUpdateRecipientStatus>, QueryDeviceTrustError>;
 }
 
 #[async_trait]

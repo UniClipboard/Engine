@@ -337,7 +337,8 @@ mod tests {
     use tracing_subscriber::layer::SubscriberExt;
     use uc_core::ids::DeviceId;
     use uc_core::membership::{
-        GroupEpoch, GroupRevocationResult, GroupUpdateDeliveryStatus, KeyEpochError, RevocationId,
+        GroupEpoch, GroupRevocationResult, GroupUpdateDeliveryStatus, GroupUpdateRecipientStatus,
+        KeyEpochError, RevocationId,
     };
     use uc_core::ports::{PeerAddressError, PeerAddressRecord};
 
@@ -357,6 +358,7 @@ mod tests {
             async fn due_space_group_updates(&self, now_ms: i64, online_peer: Option<DeviceId>) -> Result<Vec<PendingGroupUpdate>, KeyEpochError>;
             async fn record_space_group_update_failures(&self, failures: &[(String, GroupUpdateDispatchError)], now_ms: i64) -> Result<usize, KeyEpochError>;
             async fn space_group_update_delivery_status(&self) -> Result<GroupUpdateDeliveryStatus, KeyEpochError>;
+            async fn space_group_update_recipient_status(&self) -> Result<Vec<GroupUpdateRecipientStatus>, KeyEpochError>;
             async fn acknowledge_space_group_update(&self, update_id: &str, now_ms: i64) -> Result<bool, KeyEpochError>;
             async fn settle_obsolete_space_group_updates(&self, retained_recipients: &[DeviceId], now_ms: i64) -> Result<usize, KeyEpochError>;
         }
