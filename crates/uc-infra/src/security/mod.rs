@@ -3,15 +3,12 @@ mod admission_key_manager;
 mod admission_proof;
 mod blob_cipher_adapter;
 mod content_protection;
-pub mod crypto_model;
 mod decrypting_clipboard_event_repo;
 mod decrypting_representation_repo;
 mod default_current_profile;
 mod encrypted_blob_store;
 mod encrypting_clipboard_event_writer;
 mod encrypting_inbound_receive_commit;
-mod hashing;
-mod identity_fingerprint;
 pub(crate) mod key_epoch_aad;
 mod key_migration_adapter;
 mod profile_backup_archive;
@@ -23,12 +20,10 @@ mod profile_runtime_layout;
 mod profile_startup_storage;
 mod profile_storage_upgrade;
 mod profile_upgrade_backup;
-mod secrets;
 mod secure_storage_access;
 mod space_admission_auth;
 mod space_control_generation;
 mod space_transition_activation;
-pub(crate) mod v1_aead;
 mod v3_admission_space_transition;
 mod v3_device_management_reset;
 mod v3_initial_space_activation;
@@ -47,18 +42,12 @@ pub use blob_cipher_adapter::BlobCipherAdapter;
 pub use content_protection::{
     ContentProtection, ContentProtectionError, V3EncryptedBlobStore, V3InlinePayloadCipher,
 };
-pub use crypto_model::{
-    EncryptedBlob, KdfParams, KdfParamsV1, KeyScope, KeySlot, KeySlotConvertError, KeySlotFile,
-    WrappedMasterKey,
-};
 pub use decrypting_clipboard_event_repo::DecryptingClipboardEventRepository;
 pub use decrypting_representation_repo::DecryptingClipboardRepresentationRepository;
 pub use default_current_profile::DefaultCurrentProfile;
 pub use encrypted_blob_store::EncryptedBlobStore;
 pub use encrypting_clipboard_event_writer::EncryptingClipboardEventWriter;
 pub use encrypting_inbound_receive_commit::EncryptingInboundReceiveCommit;
-pub use hashing::Blake3Hasher;
-pub use identity_fingerprint::{FingerprintDerivationError, Sha256IdentityFingerprintFactory};
 pub use key_migration_adapter::DefaultKeyMigrationAdapter;
 pub use profile_backup_archive::{
     ProfileArchiveReceipt, ProfileBackupArchive, ProfileBackupArchiveError, ProfileBackupSource,
@@ -78,7 +67,6 @@ pub use profile_storage_upgrade::{
     StorageUpgradeSnapshot, StorageUpgradeStep, StorageUpgradeStepProgress, StorageUpgradeUnit,
 };
 pub use profile_upgrade_backup::{ProfileUpgradeBackupRecordKeyMissing, ProfileUpgradeBackupStore};
-pub(crate) use secrets::{Kek, MasterKey};
 pub(crate) use secure_storage_access::SecureStorageAccess;
 pub use space_admission_auth::{
     SpaceAdmissionAuth, SpaceAdmissionAuthContext, SpaceAdmissionAuthError,
@@ -94,6 +82,15 @@ pub use space_control_generation::{
 pub use space_transition_activation::{
     SpaceTransitionActivation, SpaceTransitionActivationError, SpaceTransitionActivationOutcome,
 };
+pub use uc_infra_crypto::crypto_model::{
+    EncryptedBlob, KdfParams, KdfParamsV1, KeyScope, KeySlot, KeySlotConvertError, KeySlotFile,
+    WrappedMasterKey,
+};
+pub use uc_infra_crypto::hashing::Blake3Hasher;
+pub use uc_infra_crypto::identity_fingerprint::{
+    FingerprintDerivationError, Sha256IdentityFingerprintFactory,
+};
+pub(crate) use uc_infra_crypto::secrets::{Kek, MasterKey};
 pub use v3_admission_space_transition::V3AdmissionSpaceTransition;
 pub use v3_device_management_reset::V3DeviceManagementReset;
 pub use v3_initial_space_activation::V3InitialSpaceActivation;

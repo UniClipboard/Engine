@@ -8,7 +8,7 @@ use uc_observability_contract::{error_source::io_error_kind, uc_warn};
 /// 尽力删除失败流程遗留的工作目录；不存在视为已清理，其他失败只记录分类，不改变调用方的失败结果。
 ///
 /// 残留目录可能含数据库副本或重绑定数据，因此不记录路径。
-pub(crate) fn remove_work_directory_best_effort(directory: &Path) {
+pub fn remove_work_directory_best_effort(directory: &Path) {
     match std::fs::remove_dir_all(directory) {
         Ok(()) => {}
         Err(error) if error.kind() == ErrorKind::NotFound => {}

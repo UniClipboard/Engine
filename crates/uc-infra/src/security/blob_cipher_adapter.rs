@@ -11,7 +11,7 @@
 //! 保留这个格式让 SQL 中既有的密文仍可被新 adapter 解开（V1 数据兼容
 //! ironclad 不变量）。
 //!
-//! adapter 内部不依赖旧 `EncryptionPort`——AEAD 调用通过 `super::v1_aead`
+//! adapter 内部不依赖旧 `EncryptionPort`——AEAD 调用通过 `uc_infra_crypto::v1_aead`
 //! 私有 helper 直接落地，跟 `EncryptionRepository` / `EncryptedBlobStore`
 //! 共用同一份算法实现，杜绝行为漂移。
 
@@ -23,10 +23,10 @@ use uc_core::crypto::domain::{Aad, Ciphertext, Plaintext};
 use uc_core::membership::{ContentKeyId, ContentKeyPurpose, GroupEpoch};
 use uc_core::ports::security::blob_cipher::{BlobCipherError, BlobCipherPort};
 
-use super::crypto_model::EncryptedBlob;
 use super::key_epoch_aad;
-use super::v1_aead;
 use crate::space::InMemorySession;
+use uc_infra_crypto::crypto_model::EncryptedBlob;
+use uc_infra_crypto::v1_aead;
 
 pub struct BlobCipherAdapter {
     session: Arc<InMemorySession>,
@@ -208,7 +208,7 @@ impl BlobCipherPort for BlobCipherAdapter {
 }
 
 fn decrypt(
-    key: &super::secrets::MasterKey,
+    key: &uc_infra_crypto::secrets::MasterKey,
     nonce: &[u8],
     ciphertext: &[u8],
     aad: &[u8],
@@ -230,7 +230,7 @@ mod tests {
     use uc_core::ids::SpaceId;
 
     use super::*;
-    use crate::security::secrets::MasterKey;
+    use uc_infra_crypto::secrets::MasterKey;
 
     fn ready_session() -> (Arc<InMemorySession>, SpaceId, MasterKey) {
         let root = MasterKey::from_bytes(&[9u8; 32]).unwrap();

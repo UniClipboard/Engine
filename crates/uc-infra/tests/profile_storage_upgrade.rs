@@ -484,8 +484,8 @@ async fn runtime_upgrade_resumes_v2_only_after_the_lease_and_promotes_v3() {
 
     use diesel::prelude::*;
     use uc_core::{blob::ports::BlobReaderPort, BlobId};
-    use uc_infra::blob::{BlobStorePort, FilesystemBlobStore};
     use uc_infra::security::{ContentProtection, EncryptedBlobStore, V3EncryptedBlobStore};
+    use uc_infra_local::blob::{BlobStorePort, FilesystemBlobStore};
 
     let source_blobs = EncryptedBlobStore::new(
         Arc::new(FilesystemBlobStore::new(source_root.join("blobs"))),
@@ -1155,7 +1155,7 @@ async fn held_profile_lease_returns_busy_without_creating_a_journal() {
         .write(true)
         .open(upgrade_directory.join(".lease"))
         .unwrap();
-    uc_infra::fs::file_lock::try_lock_exclusive(&lease).unwrap();
+    uc_infra_local::fs::file_lock::try_lock_exclusive(&lease).unwrap();
 
     let secure_storage = Arc::new(MemorySecureStorage::default());
     let keys = Arc::new(AdmissionKeyManager::new(secure_storage.clone(), [0x41; 16]));

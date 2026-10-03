@@ -9,9 +9,9 @@ use uc_core::ids::ProfileId;
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::space::{DeriveSpaceSubkeyPort, SpaceAccessError};
 
-use crate::security::v1_aead::{decrypt_xchacha_raw, encrypt_xchacha_raw};
 use crate::security::ContentProtection;
 use crate::space::InMemorySession;
+use uc_infra_crypto::v1_aead::{decrypt_xchacha_raw, encrypt_xchacha_raw};
 
 const METADATA_MAGIC: [u8; 4] = *b"UCTM";
 const EVENT_MAGIC: [u8; 4] = *b"UCTE";

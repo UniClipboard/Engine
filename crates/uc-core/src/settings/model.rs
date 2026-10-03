@@ -6,11 +6,11 @@ use serde_with::{serde_as, DurationSeconds};
 
 /// v1 -> v2: one-time rewrite of a stock v1-default `retention_policy`
 /// (`ByAge(30d) + ByCount(500)`) to the new default (`ByAge(180d)`, no count
-/// cap). See `uc_infra::settings::migration::MigrationV1ToV2`.
+/// cap). See `uc_infra_local::settings::migration::MigrationV1ToV2`.
 ///
 /// v2 -> v3: one-time rewrite of the legacy `silent_start` /
 /// `lightweight_start` booleans into the mutually-exclusive `startup_mode`
-/// enum. See `uc_infra::settings::migration::MigrationV2ToV3`.
+/// enum. See `uc_infra_local::settings::migration::MigrationV2ToV3`.
 pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 // 所有 settings struct 统一使用 `#[serde(default)]`：缺字段时回退到

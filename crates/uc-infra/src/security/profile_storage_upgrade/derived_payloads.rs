@@ -28,10 +28,10 @@ use crate::db::repositories::receive_artifact_cipher::{
 use crate::file_transfer::persistence_cipher::{
     TransferPersistenceCipher, V3TransferPersistenceCipher,
 };
-use crate::fs::work_directory::remove_work_directory_best_effort;
 use crate::search::{RenderDecodeError, RenderPayloadCodec, SearchGroupRef, V3SearchProtection};
 use crate::security::{ContentProtection, ProfileContentKeyVault};
 use crate::space::InMemorySession;
+use uc_infra_local::fs::work_directory::remove_work_directory_best_effort;
 
 use super::journal::UpgradeJournalV1;
 use super::primary_payloads::{blob_tree_digest, compact_database, sync_directory};
@@ -878,7 +878,7 @@ fn copy_directory(source: &Path, destination: &Path) -> Result<(), ProfileStorag
             copy_directory(&entry.path(), &target)?;
         } else if kind.is_file() {
             std::fs::copy(entry.path(), &target).map_err(io_storage)?;
-            crate::fs::durability::sync_existing_file(&target).map_err(io_storage)?;
+            uc_infra_local::fs::durability::sync_existing_file(&target).map_err(io_storage)?;
         } else {
             return Err(corrupt(anyhow::anyhow!(
                 "primary payload output contains an unsupported entry"

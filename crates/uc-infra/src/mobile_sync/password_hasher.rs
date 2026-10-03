@@ -1,7 +1,7 @@
 //! `Argon2idPasswordHasher` —— [`PasswordHasherPort`] 的真实实现。
 //!
 //! 用 Argon2id PHC 字符串(`$argon2id$v=19$m=...,t=...,p=...$<salt>$<hash>`)
-//! 作为密码哈希的 wire format。参数与 `crate::security::hashing::pin_hash`
+//! 作为密码哈希的 wire format。参数与 `uc_infra_crypto::hashing::pin_hash`
 //! 对齐(m=65536, t=3, p=4, parallelism=4),让项目里所有 password-style 哈
 //! 希共享同一档 RFC 9106 推荐内存优先档。
 //!

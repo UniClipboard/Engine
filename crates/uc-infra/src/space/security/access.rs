@@ -3,7 +3,7 @@
 //! Slice 3 - C8 起完全独立运行: 不再依赖任何已删除的 port trait
 //! (EncryptionPort / EncryptionSessionPort / KeyMaterialPort),
 //! 改用 uc-infra 内部具体类型 `KeyMaterialStore` + `InMemorySession`,
-//! AEAD 算法走 `crate::security::v1_aead` helper。
+//! AEAD 算法走 `uc_infra_crypto::v1_aead` helper。
 //!
 //! 该 adapter 实现内层聚合 trait `SpaceAccessStore`,并把每个窄意图 port
 //! application/core intent ports are delegated through narrow implementations
@@ -44,12 +44,7 @@ use uc_observability_contract::{
     error_source::io_error_kind, log_fields::log_vocab, uc_debug, uc_error, uc_info, uc_warn,
 };
 
-use crate::security::crypto_model::{
-    validate_kdf, EncryptedBlob, KeyScope, KeySlot, WrappedMasterKey,
-};
-use crate::security::{
-    v1_aead, Kek, MasterKey, ProfileContentKeyVault, ProfilePassphraseRecoveryPort,
-};
+use crate::security::{Kek, MasterKey, ProfileContentKeyVault, ProfilePassphraseRecoveryPort};
 use uc_core::ids::{DeviceId, ProfileId, SpaceId};
 #[cfg(test)]
 use uc_core::membership::{AdmissionReplayId, ProtectionGroupAdmission};
@@ -68,6 +63,10 @@ use uc_core::ports::space::{SpaceAccessError, SpaceAccessStore};
 #[cfg(test)]
 use uc_core::space_access::{GroupAdmission, PreparedGroupJoin};
 use uc_core::space_access::{JoinOffer, PreparedAdmissionTargetAccess, ProofDerivedKey};
+use uc_infra_crypto::crypto_model::{
+    validate_kdf, EncryptedBlob, KeyScope, KeySlot, WrappedMasterKey,
+};
+use uc_infra_crypto::v1_aead;
 
 use super::active_space_security_session::{
     ActiveSpaceSecuritySession, ActiveSpaceSecuritySessionError,
@@ -5799,8 +5798,8 @@ mod admission_tests {
 
     #[tokio::test]
     async fn join_offer_rejects_excessive_kdf_parameters_before_derivation() {
-        use crate::security::crypto_model::MAX_KDF_PARALLELISM;
         use uc_core::ports::space::DeriveProofKeyPort;
+        use uc_infra_crypto::crypto_model::MAX_KDF_PARALLELISM;
 
         let (sponsor, _, _, space_id, _sponsor_dir) = sponsor_fixture();
         let mut offer = sponsor
@@ -6717,7 +6716,7 @@ mod migration_initialize_tests {
 
     use super::*;
     use crate::fs::key_slot_store::KeySlotStore;
-    use crate::security::crypto_model::KeySlotFile;
+    use uc_infra_crypto::crypto_model::KeySlotFile;
 
     struct Profile;
 

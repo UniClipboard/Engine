@@ -4,17 +4,17 @@ use std::path::Path;
 
 /// 刷新当前写入流程拥有的已有普通文件；不创建、不截断，也不修改访问权限。
 /// Windows 的 FlushFileBuffers 要求写权限，不能使用 File::open 的只读句柄。
-pub(crate) fn sync_existing_file(path: &Path) -> io::Result<()> {
+pub fn sync_existing_file(path: &Path) -> io::Result<()> {
     OpenOptions::new().write(true).open(path)?.sync_all()
 }
 
 #[cfg(not(windows))]
-pub(crate) fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
+pub fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
     std::fs::rename(source, destination)
 }
 
 #[cfg(windows)]
-pub(crate) fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
+pub fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
         MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
@@ -42,7 +42,7 @@ pub(crate) fn replace_file(source: &Path, destination: &Path) -> io::Result<()> 
     Ok(())
 }
 
-pub(crate) fn sync_directory(path: &Path) -> io::Result<()> {
+pub fn sync_directory(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     std::fs::File::open(path)?.sync_all()?;
     // Windows commits the replacement itself with MOVEFILE_WRITE_THROUGH;

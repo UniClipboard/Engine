@@ -134,7 +134,7 @@ mod tests {
             ("file-b", "", "files"),
         ] {
             let aad = aad::for_inline(&EventId::from("event"), &RepresentationId::from(id));
-            let encrypted = crate::security::v1_aead::encrypt_blob_xchacha(
+            let encrypted = uc_infra_crypto::v1_aead::encrypt_blob_xchacha(
                 &root,
                 b"file:///managed/missing",
                 &aad,

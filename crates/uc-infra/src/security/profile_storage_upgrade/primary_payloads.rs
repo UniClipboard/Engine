@@ -19,13 +19,13 @@ use uc_core::ids::{EventId, RepresentationId};
 use uc_core::ports::security::{BlobCipherError, BlobCipherPort as _};
 use uc_core::BlobId;
 
-use crate::blob::{BlobStorePort, FilesystemBlobStore};
-use crate::fs::work_directory::remove_work_directory_best_effort;
 use crate::security::{
     BlobCipherAdapter, ContentProtection, EncryptedBlobStore, ProfileContentKeyVault,
     V3EncryptedBlobStore, V3InlinePayloadCipher,
 };
 use crate::space::InMemorySession;
+use uc_infra_local::blob::{BlobStorePort, FilesystemBlobStore};
+use uc_infra_local::fs::work_directory::remove_work_directory_best_effort;
 
 use super::journal::UpgradeJournalV1;
 use super::progress::UpgradeProgress;
@@ -186,7 +186,7 @@ impl PrimaryPayloadConverter {
         std::fs::create_dir(work).map_err(io_storage)?;
         let database = work.join(OUTPUT_DATABASE);
         std::fs::copy(separated_database, &database).map_err(io_storage)?;
-        crate::fs::durability::sync_existing_file(&database).map_err(io_storage)?;
+        uc_infra_local::fs::durability::sync_existing_file(&database).map_err(io_storage)?;
         let (inline_count, inline_warning_count) = self.convert_inline(&database, progress).await?;
         let (blob_count, blob_warning_count) = self
             .convert_blobs(&database, work, final_output, progress)
@@ -351,7 +351,8 @@ impl PrimaryPayloadConverter {
                     // 同一候选数据库事务中提交。介质与保护材料失败仍向上传递。
                     let preserved = work_blob_root.join(blob_id.as_str());
                     std::fs::write(&preserved, &source_bytes).map_err(io_storage)?;
-                    crate::fs::durability::sync_existing_file(&preserved).map_err(io_storage)?;
+                    uc_infra_local::fs::durability::sync_existing_file(&preserved)
+                        .map_err(io_storage)?;
                     converted.push((
                         row.blob_id,
                         final_output.join(OUTPUT_BLOBS).join(blob_id.as_str()),
@@ -666,7 +667,7 @@ pub(super) fn compact_database(path: &Path) -> Result<(), ProfileStorageUpgradeE
         .batch_execute("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode = DELETE; VACUUM;")
         .map_err(database_storage)?;
     drop(connection);
-    crate::fs::durability::sync_existing_file(path).map_err(io_storage)
+    uc_infra_local::fs::durability::sync_existing_file(path).map_err(io_storage)
 }
 
 pub(super) fn blob_tree_digest(root: &Path) -> Result<[u8; 32], ProfileStorageUpgradeError> {
@@ -850,7 +851,7 @@ mod tests {
         let unreadable_source_path = source_blob_root.join(unreadable_blob_id.as_str());
         // 与现场相同：V1 文件使用早期 MasterKey，当前 session 无法认证。
         let compressed = zstd::bulk::compress(b"unreadable private legacy payload", 3).unwrap();
-        let encrypted = crate::security::v1_aead::encrypt_blob_xchacha(
+        let encrypted = uc_infra_crypto::v1_aead::encrypt_blob_xchacha(
             &MasterKey::from_bytes(&[0xA0; 32]).unwrap(),
             &compressed,
             &aad::for_blob_v2(&unreadable_blob_id),

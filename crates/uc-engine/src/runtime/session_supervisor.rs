@@ -19,9 +19,9 @@ use uc_application::facade::{
     RecoverSpaceSessionError, RuntimeLifecycle,
 };
 use uc_core::{FileTransferCancellationReason, TaskRegistry};
-use uc_infra::fs::{FsAtomicPublisher, FsHiddenPathMarker, FsInboundFileTarget};
 use uc_infra::network::iroh::{IrohNode, IrohSessionBuilder, PreparedIrohSession};
 use uc_infra::space::RuntimeSpaceAccessAdapter;
+use uc_infra_local::fs::{FsAtomicPublisher, FsHiddenPathMarker, FsInboundFileTarget};
 use uc_observability_contract::diagnostics::connectivity::{
     observe_local_result, record_session_lock_wait, LocalWorkStep, SessionTransition,
     SessionTransitionResult,

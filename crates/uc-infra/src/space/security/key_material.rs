@@ -7,13 +7,14 @@ use std::sync::Arc;
 use uc_core::{crypto::model::EncryptionError, ports::SecureStoragePort};
 
 use crate::fs::key_slot_store::KeySlotStore;
-use crate::security::crypto_model::{validate_kdf, KeyScope, KeySlot, KeySlotFile};
 use crate::security::{Kek, SecureStorageAccess};
+use uc_infra_crypto::crypto_model::{validate_kdf, KeyScope, KeySlot, KeySlotFile};
 
 use super::scope_identifier::scope_identifier;
-use crate::security::{v1_aead, MasterKey};
+use crate::security::MasterKey;
 use uc_core::crypto::domain::Passphrase;
 use uc_core::crypto::model::Passphrase as LegacyPassphrase;
+use uc_infra_crypto::v1_aead;
 
 #[cfg(test)]
 mod tests;

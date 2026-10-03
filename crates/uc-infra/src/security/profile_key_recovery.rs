@@ -13,19 +13,22 @@ use uc_core::ports::{SecureStorageError, SecureStoragePort};
 use zeroize::Zeroize;
 
 use super::admission_key_manager::PROFILE_ADMISSION_KEY_NAME;
-use super::crypto_model::{EncryptedBlob, KeyScope};
 use super::key_migration_adapter::{DefaultKeyMigrationAdapter, KEYRING_PREFIX};
 use super::profile_content_key_vault::PROFILE_CONTENT_VAULT_KEY_NAME;
 use super::profile_lifecycle::PROFILE_LIFECYCLE_MARKER_NAME;
 use super::profile_upgrade_backup::PROFILE_UPGRADE_BACKUP_RECORD_KEY;
-use super::{v1_aead, Kek, MasterKey};
+use super::{Kek, MasterKey};
 use crate::config_migration::staging::PENDING_IMPORT_MARKER;
-use crate::fs::durability::{replace_file, sync_directory};
 use crate::fs::key_slot_store::JsonKeySlotStore;
-use crate::migration_state::{decode_legacy_migration_run_id, DEFAULT_MIGRATION_STATE_FILE};
 use crate::network::iroh::IDENTITY_STORE_KEY;
 use crate::space::KeyMaterialStore;
-use crate::FileSecureStorage;
+use uc_infra_crypto::crypto_model::{EncryptedBlob, KeyScope};
+use uc_infra_crypto::v1_aead;
+use uc_infra_local::fs::durability::{replace_file, sync_directory};
+use uc_infra_local::migration_state::{
+    decode_legacy_migration_run_id, DEFAULT_MIGRATION_STATE_FILE,
+};
+use uc_infra_local::FileSecureStorage;
 use uc_observability_contract::{uc_info, uc_warn};
 
 pub const PROFILE_SECRET_FILE_NAME: &str = "profile-secrets-v1";
@@ -1076,7 +1079,7 @@ mod tests {
     use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
     use super::*;
-    use crate::security::crypto_model::{KeySlot, WrappedMasterKey};
+    use uc_infra_crypto::crypto_model::{KeySlot, WrappedMasterKey};
 
     const UPGRADE_BACKUP_KEY: &str = "profile_upgrade_backup_record_key:v1";
 

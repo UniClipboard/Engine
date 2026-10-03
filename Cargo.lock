@@ -7118,6 +7118,7 @@ dependencies = [
  "uc-application",
  "uc-core",
  "uc-infra",
+ "uc-infra-local",
  "uc-mobile-lan",
  "uc-mobile-proto",
  "uc-observability-contract",
@@ -7209,6 +7210,8 @@ dependencies = [
  "tracing-subscriber",
  "uc-application",
  "uc-core",
+ "uc-infra-crypto",
+ "uc-infra-local",
  "uc-observability-contract",
  "uc-observability-runtime",
  "uc-sync-protocol",
@@ -7222,6 +7225,47 @@ dependencies = [
  "x25519-dalek 2.0.1",
  "zeroize",
  "zstd",
+]
+
+[[package]]
+name = "uc-infra-crypto"
+version = "1.1.0-rc.22"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "base32",
+ "blake3",
+ "chacha20poly1305",
+ "chrono",
+ "rand 0.9.4",
+ "serde",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "uc-core",
+ "zeroize",
+]
+
+[[package]]
+name = "uc-infra-local"
+version = "1.1.0-rc.22"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "blake3",
+ "chrono",
+ "hex",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uc-core",
+ "uc-observability-contract",
+ "uc-testkit",
+ "uuid",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

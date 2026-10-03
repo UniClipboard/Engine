@@ -13,14 +13,14 @@ use uc_application::deps::{
 use uc_core::app_dirs::AppPaths;
 use uc_core::ports::SecureStoragePort;
 
-use crate::app_version_state::{read_version_before_upgrade, DEFAULT_FILE_NAME};
-use crate::fs::file_lock::try_lock_exclusive;
-use crate::fs::VaultLayout;
 use crate::security::profile_backup_archive::{
     sync_directory,
     tree::{create_private_directory, require_disjoint_destination, resolve_source_root},
 };
 use crate::security::{ProfileArchiveReceipt, ProfileBackupArchive, ProfileBackupSource};
+use uc_infra_local::app_version_state::{read_version_before_upgrade, DEFAULT_FILE_NAME};
+use uc_infra_local::fs::file_lock::try_lock_exclusive;
+use uc_infra_local::fs::VaultLayout;
 
 use super::diagnostics::{record_backup_failure, with_backup_action};
 use super::inventory::{excluded_paths, has_profile};

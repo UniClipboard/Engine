@@ -19,7 +19,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use crate::db::models::{EncryptedRelationshipRow, NewEncryptedRelationshipRow};
 use crate::db::ports::DbExecutor;
 use crate::db::schema::{encrypted_relationship, relationship_privacy_maintenance};
-use crate::security::v1_aead::{decrypt_xchacha_raw, encrypt_xchacha_raw};
+use uc_infra_crypto::v1_aead::{decrypt_xchacha_raw, encrypt_xchacha_raw};
 
 const RELATIONSHIP_KEY_INFO: &[u8] = b"uniclipboard-relationship/v1";
 const RELATIONSHIP_MAGIC: [u8; 4] = *b"UCRL";
