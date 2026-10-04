@@ -29,7 +29,6 @@ use super::V3AdmissionSpaceTransition;
 use crate::db::executor::DieselSqliteExecutor;
 use crate::db::pool::init_db_pool;
 use crate::db::repositories::DieselSpaceSecurityStore;
-use crate::fs::key_slot_store::JsonKeySlotStore;
 use crate::security::active_space_generation_manifest_store::V3ManifestPromotionOutcome;
 use crate::security::{
     ActiveRuntimeManifest, ActiveRuntimeManifestV3, ActiveSpaceGenerationManifestStore,
@@ -42,6 +41,7 @@ use crate::space::{
     prepare_registration, CurrentSpaceResolver, InMemorySession, KeyMaterialStore,
     RuntimeSpaceAccessAdapter,
 };
+use uc_infra_security::key_slot_store::JsonKeySlotStore;
 
 #[derive(Default)]
 struct MemorySecureStorage(Mutex<HashMap<String, Vec<u8>>>);

@@ -11,8 +11,8 @@ use uc_core::membership::{
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
 use super::ActiveSpaceSecuritySession;
-use crate::security::{MasterKey, ProfileContentKeyVault};
-use crate::space::security::InMemorySession;
+use crate::InMemorySession;
+use crate::{MasterKey, ProfileContentKeyVault};
 
 #[derive(Default)]
 struct MemorySecureStorage(
@@ -319,7 +319,7 @@ async fn current_material_vault_failure_preserves_the_previous_session_and_sourc
 
 #[tokio::test]
 async fn active_content_reads_reuse_profile_keys_across_payloads_and_search() {
-    use crate::security::ContentProtection;
+    use crate::ContentProtection;
     use std::sync::atomic::Ordering;
     use uc_core::crypto::domain::{Aad, Plaintext};
 
@@ -386,7 +386,7 @@ async fn clear_releases_reuse_but_historical_maintenance_reads_remain_available(
         .unwrap_err();
     assert!(matches!(
         error,
-        crate::security::ProfileContentKeyVaultError::Storage { .. }
+        crate::ProfileContentKeyVaultError::Storage { .. }
     ));
     assert!(std::error::Error::source(&error).is_some());
     session.clear();
@@ -397,13 +397,13 @@ async fn clear_releases_reuse_but_historical_maintenance_reads_remain_available(
     // 未持有运行期租约，另一个实例可以进入并报告其真正的缺钥错误。
     assert!(matches!(
         contender.resolve(&id, GroupEpoch::new(7)).await,
-        Err(crate::security::ProfileContentKeyVaultError::Corrupt { .. })
+        Err(crate::ProfileContentKeyVaultError::Corrupt { .. })
     ));
 }
 
 #[tokio::test]
 async fn closed_profile_cannot_reactivate_or_classify_read_as_corrupt() {
-    use crate::security::{ContentProtection, ContentProtectionError};
+    use crate::{ContentProtection, ContentProtectionError};
     use uc_core::crypto::domain::{Aad, Plaintext};
     let (_directory, session, vault, active) = active_fixture();
     let material = ready_material("space-a", "group-a", "key-a");
@@ -623,7 +623,7 @@ async fn starting_reuse_during_a_transient_read_requires_a_new_owned_load() {
     let contender = ProfileContentKeyVault::new(directory.path().into(), storage, [19; 16]);
     assert!(matches!(
         contender.search_catalog().await,
-        Err(crate::security::ProfileContentKeyVaultError::Storage { .. })
+        Err(crate::ProfileContentKeyVaultError::Storage { .. })
     ));
 }
 

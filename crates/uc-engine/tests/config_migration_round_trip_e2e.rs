@@ -36,11 +36,11 @@ use uc_infra::config_migration::staging::apply_pending_import;
 use uc_infra::config_migration::staging::StagingLayout;
 use uc_infra::config_migration::{ConfigMigrationAdapter, ConfigMigrationPaths};
 use uc_infra::db::pool::{init_db_pool, DbPool};
-use uc_infra::fs::key_slot_store::JsonKeySlotStore;
 use uc_infra::network::iroh::IrohIdentityStore;
 use uc_infra::security::{DefaultCurrentProfile, Sha256IdentityFingerprintFactory};
 use uc_infra::space::{InMemorySession, KeyMaterialStore, MigrationSpaceAccessAdapter};
 use uc_infra_local::SystemClock;
+use uc_infra_security::key_slot_store::JsonKeySlotStore;
 #[derive(Default)]
 struct TestSecureStorage {
     values: Mutex<HashMap<String, Vec<u8>>>,

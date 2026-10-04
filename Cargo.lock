@@ -7119,6 +7119,7 @@ dependencies = [
  "uc-core",
  "uc-infra",
  "uc-infra-local",
+ "uc-infra-security",
  "uc-mobile-lan",
  "uc-mobile-proto",
  "uc-observability-contract",
@@ -7212,6 +7213,7 @@ dependencies = [
  "uc-core",
  "uc-infra-crypto",
  "uc-infra-local",
+ "uc-infra-security",
  "uc-observability-contract",
  "uc-observability-runtime",
  "uc-sync-protocol",
@@ -7237,11 +7239,22 @@ dependencies = [
  "blake3",
  "chacha20poly1305",
  "chrono",
+ "hkdf 0.12.4",
+ "opaque-ke",
+ "openmls",
+ "openmls_basic_credential",
+ "openmls_memory_storage",
+ "openmls_rust_crypto",
+ "openmls_traits",
+ "rand 0.8.7",
  "rand 0.9.4",
  "serde",
+ "serde_json",
  "sha2 0.10.9",
+ "subtle",
  "thiserror 2.0.18",
  "uc-core",
+ "uc-observability-contract",
  "zeroize",
 ]
 
@@ -7266,6 +7279,39 @@ dependencies = [
  "uc-testkit",
  "uuid",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "uc-infra-security"
+version = "1.1.0-rc.22"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "blake3",
+ "chrono",
+ "hex",
+ "hkdf 0.12.4",
+ "hmac 0.12.1",
+ "mockall",
+ "postcard",
+ "rand 0.9.4",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uc-application",
+ "uc-core",
+ "uc-infra-crypto",
+ "uc-infra-local",
+ "uc-observability-contract",
+ "uc-testkit",
+ "uuid",
+ "windows-sys 0.59.0",
+ "zeroize",
 ]
 
 [[package]]

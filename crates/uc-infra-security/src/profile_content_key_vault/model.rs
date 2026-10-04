@@ -100,17 +100,17 @@ pub struct ResolvedProfileContentKey {
 ///
 /// 该类型只在 Infra 内流转，不暴露 vault 外层 AEAD key；搜索模块必须再按
 /// 固定 domain 和保护组构造 group ref 与 term tag。
-pub(crate) struct ProfileSearchCatalog {
+pub struct ProfileSearchCatalog {
     pub(super) root_key: MasterKey,
     pub(super) protection_groups: Vec<ProtectionGroupId>,
 }
 
 impl ProfileSearchCatalog {
-    pub(crate) fn root_key(&self) -> &MasterKey {
+    pub fn root_key(&self) -> &MasterKey {
         &self.root_key
     }
 
-    pub(crate) fn protection_groups(&self) -> &[ProtectionGroupId] {
+    pub fn protection_groups(&self) -> &[ProtectionGroupId] {
         &self.protection_groups
     }
 }

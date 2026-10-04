@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 use uc_core::ids::SpaceId;
 use uc_core::membership::{ContentKeyId, ProtectionGroupId, SpaceKeyMaterial, SpaceSecurityMode};
 
-use crate::space::export_admission_content_key_catalog;
+use uc_infra_crypto::content_key_catalog::export_admission_content_key_catalog;
 
 use super::super::MasterKey;
 use super::model::{

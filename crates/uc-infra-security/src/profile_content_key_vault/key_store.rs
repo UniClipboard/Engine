@@ -2,14 +2,14 @@ use anyhow::Error;
 use uc_core::ports::SecureStoragePort;
 use zeroize::Zeroizing;
 
-use crate::security::SecureStorageAccess;
+use crate::SecureStorageAccess;
 
 use super::{MasterKey, ProfileContentKeyVaultError};
 
 #[cfg(test)]
 mod tests;
 
-pub(in super::super) const VAULT_KEY_NAME: &str = "profile_content_vault_key:v1";
+pub const VAULT_KEY_NAME: &str = "profile_content_vault_key:v1";
 
 pub(super) async fn load_existing(
     storage: SecureStorageAccess,

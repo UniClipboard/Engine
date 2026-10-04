@@ -136,8 +136,8 @@ impl RuntimeUpgradeBootstrap {
             let current_profile: Arc<
                 dyn uc_core::ports::security::current_profile::CurrentProfilePort,
             > = Arc::new(DefaultCurrentProfile::for_profile(self.profile_id.clone()));
-            let keyslot_store: Arc<dyn crate::fs::key_slot_store::KeySlotStore> = Arc::new(
-                crate::fs::key_slot_store::JsonKeySlotStore::new(self.vault_path.clone()),
+            let keyslot_store: Arc<dyn uc_infra_security::key_slot_store::KeySlotStore> = Arc::new(
+                uc_infra_security::key_slot_store::JsonKeySlotStore::new(self.vault_path.clone()),
             );
             let key_material = Arc::new(KeyMaterialStore::new(
                 Arc::clone(&self.secure_storage),

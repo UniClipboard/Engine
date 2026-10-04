@@ -47,7 +47,8 @@ pub use source::{LocalDiagnosticSource, SourceCapability, SourceCollection};
 pub use authentication::complete_group_update_failure;
 pub use authentication::complete_membership_history_failure;
 pub use group_update::{
-    GroupUpdateFailureDetail, GroupUpdatePhase, GroupUpdateReason, GroupUpdateSource,
+    ClassifiedGroupUpdateStorageFailure, GroupUpdateFailureDetail, GroupUpdatePhase,
+    GroupUpdateReason, GroupUpdateSource,
 };
 pub use inbound_peer::{
     record_inbound_peer_rejection, InboundPeerProtocol, InboundPeerRejectionReason,

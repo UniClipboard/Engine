@@ -115,7 +115,7 @@ pub(super) fn lock(state: &Mutex<ReadState>) -> MutexGuard<'_, ReadState> {
 }
 
 /// 只关联有效期；不携带密钥，旧许可不能撤销新运行期。
-pub(crate) struct ProfileKeyReadLease {
+pub struct ProfileKeyReadLease {
     state: Weak<Mutex<ReadState>>,
     generation: Arc<()>,
 }

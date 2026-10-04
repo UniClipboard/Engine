@@ -30,8 +30,8 @@ use tracing::{info_span, Instrument};
 use uc_core::membership::{ContentKeyId, ContentKeyPurpose, GroupEpoch};
 use uc_core::{blob::ports::BlobReaderPort, crypto::aad, BlobId, ContentHash};
 
-use super::key_epoch_aad;
 use crate::space::InMemorySession;
+use uc_infra_crypto::key_epoch_aad;
 use uc_infra_crypto::v1_aead;
 use uc_infra_local::blob::{BlobStorePort, StoredPathBlob};
 use uc_observability_contract::{log_fields::log_id, uc_debug};

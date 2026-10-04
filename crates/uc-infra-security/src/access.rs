@@ -44,9 +44,9 @@ use uc_observability_contract::{
     error_source::io_error_kind, log_fields::log_vocab, uc_debug, uc_error, uc_info, uc_warn,
 };
 
-use crate::security::{Kek, MasterKey, ProfileContentKeyVault, ProfilePassphraseRecoveryPort};
+use crate::{Kek, MasterKey, ProfileContentKeyVault, ProfilePassphraseRecoveryPort};
 use uc_core::ids::{DeviceId, ProfileId, SpaceId};
-#[cfg(test)]
+#[cfg(feature = "test-util")]
 use uc_core::membership::{AdmissionReplayId, ProtectionGroupAdmission};
 use uc_core::membership::{
     BeginRevocationOutcome, BootstrapError, BootstrapId, GroupBootstrapPort, GroupBootstrapResult,
@@ -60,7 +60,7 @@ use uc_core::membership::{
 };
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::space::{SpaceAccessError, SpaceAccessStore};
-#[cfg(test)]
+#[cfg(feature = "test-util")]
 use uc_core::space_access::{GroupAdmission, PreparedGroupJoin};
 use uc_core::space_access::{JoinOffer, PreparedAdmissionTargetAccess, ProofDerivedKey};
 use uc_infra_crypto::crypto_model::{
@@ -72,11 +72,11 @@ use super::active_space_security_session::{
     ActiveSpaceSecuritySession, ActiveSpaceSecuritySessionError,
 };
 use super::key_material::KeyMaterialStore;
-#[cfg(test)]
-use super::mls_group::PendingMlsJoin;
-use super::mls_group::{MlsClientState, MlsGroupEngine};
 use super::scope_identifier::scope_identifier;
 use super::session::InMemorySession;
+#[cfg(feature = "test-util")]
+use uc_infra_crypto::mls_group::PendingMlsJoin;
+use uc_infra_crypto::mls_group::{MlsClientState, MlsGroupEngine};
 
 const MAX_STALLED_REVOCATION_ITERATIONS: usize = 3;
 /// 读取者等待内部会话事务结束的上限。事务只包含本机安全材料的持久化与安装，
@@ -220,7 +220,7 @@ impl RuntimeSpaceAccessAdapter {
         }
     }
 
-    pub(crate) async fn prepare_encryption_passphrase_material(
+    pub async fn prepare_encryption_passphrase_material(
         &self,
         passphrase: &DomainPassphrase,
     ) -> Result<(KeySlot, Kek), SpaceAccessError> {
@@ -250,7 +250,7 @@ impl RuntimeSpaceAccessAdapter {
         Ok((draft.finalize(WrappedMasterKey { blob: wrapped }), kek))
     }
 
-    pub(crate) async fn install_encryption_passphrase_material(
+    pub async fn install_encryption_passphrase_material(
         &self,
         keyslot: &KeySlot,
         kek: &Kek,
@@ -674,7 +674,7 @@ impl RuntimeSpaceAccessAdapter {
         result
     }
 
-    pub(crate) async fn prepared_target_session(
+    pub async fn prepared_target_session(
         &self,
         target_space_id: &SpaceId,
         encoded: &[u8],
@@ -693,7 +693,7 @@ impl RuntimeSpaceAccessAdapter {
     }
 
     /// 为 SameSpace control generation 构造保留当前 MasterKey/keyslot 的隔离会话。
-    pub(crate) fn retained_control_session(
+    pub fn retained_control_session(
         &self,
         space_id: &SpaceId,
     ) -> Result<Arc<InMemorySession>, SpaceAccessError> {
@@ -711,7 +711,7 @@ impl RuntimeSpaceAccessAdapter {
     ///
     /// 该操作只用于 promoted 后的前向恢复：任一步失败都由同一 transition
     /// 以相同 target access state 重试，不回滚到已失去 manifest 所有权的来源。
-    pub(crate) async fn activate_prepared_control_generation(
+    pub async fn activate_prepared_control_generation(
         &self,
         target_space_id: &SpaceId,
         encoded: &[u8],
@@ -762,7 +762,7 @@ impl RuntimeSpaceAccessAdapter {
 
     /// 在 SameSpace manifest 已提升后保留现有 keyslot，只从新 control pool
     /// 恢复目标安全状态、vault catalog 与活动 session。
-    pub(crate) async fn activate_retained_control_generation(
+    pub async fn activate_retained_control_generation(
         &self,
         space_id: &SpaceId,
     ) -> Result<(), SpaceAccessError> {
@@ -791,7 +791,7 @@ impl RuntimeSpaceAccessAdapter {
     ///
     /// 上一次尝试已把会话重绑到目标；重新快照要求来源会话。重绑会清空当前内容密钥，
     /// 随后的重建再次绑定目标并安装新材料，期间不会用被放弃的密钥封装内容。
-    pub(crate) fn rebind_session_to_retained_source(
+    pub fn rebind_session_to_retained_source(
         &self,
         space_id: &SpaceId,
     ) -> Result<(), SpaceAccessError> {
@@ -801,7 +801,7 @@ impl RuntimeSpaceAccessAdapter {
     }
 
     /// 停止使用已被终止准入提升的控制世代；持久停止事实由切换负责人先保存。
-    pub(crate) fn stop_using_admission_target(&self) {
+    pub fn stop_using_admission_target(&self) {
         self.session.clear();
     }
 
@@ -837,8 +837,8 @@ impl RuntimeSpaceAccessAdapter {
         encoded.map(PreparedAdmissionTargetAccess::from_bytes)
     }
 
-    #[cfg(test)]
-    pub(crate) async fn prepare_group_join(
+    #[cfg(feature = "test-util")]
+    pub async fn prepare_group_join(
         &self,
         device_id: &DeviceId,
     ) -> Result<PreparedGroupJoin, SpaceAccessError> {
@@ -852,7 +852,7 @@ impl RuntimeSpaceAccessAdapter {
         Ok(prepared)
     }
 
-    #[cfg(test)]
+    #[cfg(feature = "test-util")]
     pub(super) async fn admit_group_member_with_replay(
         &self,
         space_id: &SpaceId,
@@ -969,8 +969,8 @@ impl RuntimeSpaceAccessAdapter {
         Ok((group_admission, replay_admission))
     }
 
-    #[cfg(test)]
-    pub(crate) async fn admit_group_member(
+    #[cfg(feature = "test-util")]
+    pub async fn admit_group_member(
         &self,
         space_id: &SpaceId,
         sponsor_device_id: &DeviceId,
@@ -990,8 +990,8 @@ impl RuntimeSpaceAccessAdapter {
         .map(|(admission, _)| admission)
     }
 
-    #[cfg(test)]
-    pub(crate) async fn install_group_join(
+    #[cfg(feature = "test-util")]
+    pub async fn install_group_join(
         &self,
         space_id: &SpaceId,
         passphrase: &DomainPassphrase,
@@ -1807,8 +1807,8 @@ impl RuntimeSpaceAccessAdapter {
         })
     }
 
-    #[cfg(test)]
-    async fn restore_join_install(
+    #[cfg(feature = "test-util")]
+    pub(crate) async fn restore_join_install(
         &self,
         scope: &KeyScope,
         previous: Option<(KeySlot, Kek)>,
@@ -3046,8 +3046,9 @@ impl PrepareSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
                 chrono::Utc::now().timestamp_millis(),
             )
             .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
-        let target_key_catalog = super::export_admission_content_key_catalog(&next)
-            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
+        let target_key_catalog =
+            uc_infra_crypto::content_key_catalog::export_admission_content_key_catalog(&next)
+                .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         let encrypted_key_catalog = seal_group_catalog(&admission.wrapping_key, &next)
             .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         let group_update = GroupEpochUpdate {
@@ -3150,8 +3151,9 @@ impl ActivateSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
         {
             return Err(AdmissionSecurityTransitionError::invalid_state());
         }
-        let catalog = super::export_admission_content_key_catalog(&staged)
-            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
+        let catalog =
+            uc_infra_crypto::content_key_catalog::export_admission_content_key_catalog(&staged)
+                .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         let expected = &request.expected_commitment;
         let rederived = MlsGroupEngine::derive_public_admission_commitment(
             &MlsClientState::from_bytes(staged.group_state().to_vec()),
@@ -3289,8 +3291,9 @@ impl ActivateCompletionHelperAdmissionSecurityPort for RuntimeSpaceAccessAdapter
             .with_pending_group_updates_from(&current)
         };
 
-        let catalog = super::export_admission_content_key_catalog(&material)
-            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
+        let catalog =
+            uc_infra_crypto::content_key_catalog::export_admission_content_key_catalog(&material)
+                .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         if catalog
             .encode()
             .map_err(AdmissionSecurityTransitionError::invalid_state_from)?
@@ -3573,7 +3576,7 @@ impl PrepareMembershipBranchRecoveryMaterialPort for RuntimeSpaceAccessAdapter {
 }
 
 impl RuntimeSpaceAccessAdapter {
-    pub(crate) fn prepare_recovered_membership_branch_material(
+    pub fn prepare_recovered_membership_branch_material(
         &self,
         recipient_staged_mls_state: &[u8],
         sealed_mls_recovery_material: &[u8],
@@ -3611,7 +3614,7 @@ impl RuntimeSpaceAccessAdapter {
             space_id.as_ref().as_bytes(),
         )
         .map_err(EncryptionError::key_material_corrupt_from)?;
-        super::export_admission_content_key_catalog(&material)?;
+        uc_infra_crypto::content_key_catalog::export_admission_content_key_catalog(&material)?;
         Ok(material)
     }
 
@@ -3648,7 +3651,7 @@ fn validate_membership_branch_recovery_material(
         material.state().space_id().as_ref().as_bytes(),
     )
     .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
-    super::export_admission_content_key_catalog(material)
+    uc_infra_crypto::content_key_catalog::export_admission_content_key_catalog(material)
         .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
     Ok(())
 }
@@ -3719,11 +3722,8 @@ mod admission_tests {
     use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
     use super::*;
-    use crate::db::executor::DieselSqliteExecutor;
-    use crate::db::pool::init_db_pool;
-    use crate::db::repositories::DieselSpaceSecurityStore;
-    use crate::fs::key_slot_store::JsonKeySlotStore;
-    use crate::security::DefaultCurrentProfile;
+    use crate::key_slot_store::JsonKeySlotStore;
+    use crate::DefaultCurrentProfile;
 
     mockall::mock! {
         SecureStorage {}
@@ -4996,60 +4996,10 @@ mod admission_tests {
         ));
     }
 
-    #[tokio::test]
-    async fn current_revocation_snapshot_survives_repository_restart() {
-        let directory = tempdir().unwrap();
-        let database_url = directory.path().join("current-revocation-restart.sqlite");
-        let pool = init_db_pool(database_url.to_str().unwrap()).unwrap();
-        let session = Arc::new(InMemorySession::new());
-        let space_id = SpaceId::from("space-revocation-restart");
-        session.set_master_key_for_space(
-            space_id.clone(),
-            MasterKey::from_bytes(&[0x41; 32]).unwrap(),
-        );
-        let repository = Arc::new(DieselSpaceSecurityStore::new(
-            DieselSqliteExecutor::new(pool.clone()),
-            session.as_ref().clone(),
-        ));
-        let record = RevocationRecord::prepare_with_recipients(
-            RevocationId::from_string("revocation-restart").unwrap(),
-            space_id,
-            DeviceId::new("dev-removed"),
-            vec![DeviceId::new("dev-c"), DeviceId::new("dev-d")],
-            GroupEpoch::new(1),
-            123,
-        )
-        .unwrap();
-        repository.begin_revocation(&record).await.unwrap();
-        drop(repository);
-
-        let reopened: Arc<dyn RevocationRepositoryPort> = Arc::new(DieselSpaceSecurityStore::new(
-            DieselSqliteExecutor::new(pool),
-            session.as_ref().clone(),
-        ));
-        let restarted = RuntimeSpaceAccessAdapter::new(
-            local_key_material(&directory, memory_secure_storage()),
-            Arc::new(DefaultCurrentProfile::new()),
-            session,
-            reopened,
-            Arc::new(MemoryLegacyBootstrapRepository::new()),
-            profile_content_key_vault(&directory),
-        );
-
-        let current = restarted.current_group_revocation().await.unwrap().unwrap();
-
-        assert_eq!(
-            current.revocation_id().map(RevocationId::as_str),
-            Some("revocation-restart")
-        );
-        assert_eq!(current.removed_device_ids(), [DeviceId::new("dev-removed")]);
-        assert_eq!(
-            current.pending_recipient_device_ids(),
-            [DeviceId::new("dev-c"), DeviceId::new("dev-d")]
-        );
-        assert_eq!(current.pending_recipients(), 2);
-        assert_eq!(current.updated_at_ms(), 123);
-    }
+    // `current_revocation_snapshot_survives_repository_restart` 迁到
+    // `uc-infra` 的 `tests/space_access_adapter_restart.rs`：它要跑真实
+    // SQLite 仓储（`DieselSpaceSecurityStore`），而仓储仍留在 `uc-infra`，
+    // 不能再和这个 crate 内的其余纯内存测试共享模块。
 
     #[tokio::test]
     async fn current_member_signature_port_uses_persisted_current_group() {
@@ -6176,8 +6126,36 @@ mod admission_tests {
 
     #[tokio::test]
     async fn retained_device_applies_admission_then_revocation_epoch_updates() {
-        use crate::clipboard::chunked_transfer::TransferCipherAdapter;
-        use uc_core::ports::TransferCipherPort;
+        // 这条场景只验证 admission/revocation 后内容密钥代次正确轮转——用本
+        // crate 内同样"绑定当前 session 代次"的 `BlobCipherAdapter` 代替
+        // `crate::clipboard::chunked_transfer::TransferCipherAdapter`
+        // （content，未拆分前仍留在 uc-infra，不能反向依赖）；两者对代次
+        // 轮转的响应方式一致，换用不影响这条测试要证明的东西。
+        use crate::BlobCipherAdapter;
+        use uc_core::crypto::domain::{Aad, Ciphertext, Plaintext};
+        use uc_core::ports::security::blob_cipher::BlobCipherPort;
+
+        let transfer_aad = Aad::new(b"retained-device-transfer-test".to_vec());
+        async fn encrypt_transfer(
+            adapter: &crate::BlobCipherAdapter,
+            aad: &Aad,
+            bytes: &[u8],
+        ) -> Ciphertext {
+            adapter
+                .encrypt(&Plaintext::new(bytes.to_vec()), aad)
+                .await
+                .expect("transfer-equivalent encrypt")
+        }
+        async fn decrypt_transfer(
+            adapter: &crate::BlobCipherAdapter,
+            aad: &Aad,
+            ciphertext: &Ciphertext,
+        ) -> Result<Vec<u8>, uc_core::ports::security::blob_cipher::BlobCipherError> {
+            adapter
+                .decrypt(ciphertext, aad)
+                .await
+                .map(|plaintext| plaintext.as_bytes().to_vec())
+        }
 
         for missing_admission in [false, true] {
             let (sponsor, sponsor_session, repository, space_id, _sponsor_dir) = sponsor_fixture();
@@ -6278,25 +6256,21 @@ mod admission_tests {
                 .await
                 .unwrap()
                 .unwrap();
-            let sender = TransferCipherAdapter::new(sponsor_session.clone());
-            let receiver = TransferCipherAdapter::new(bob_session.clone());
-            let old_message = receiver
-                .encrypt(b"old sender payload")
-                .await
-                .expect("old encrypt");
-            let new_message = sender
-                .encrypt(b"new sender payload")
-                .await
-                .expect("new encrypt");
+            let sender = BlobCipherAdapter::new(sponsor_session.clone());
+            let receiver = BlobCipherAdapter::new(bob_session.clone());
+            let old_message =
+                encrypt_transfer(&receiver, &transfer_aad, b"old sender payload").await;
+            let new_message = encrypt_transfer(&sender, &transfer_aad, b"new sender payload").await;
             assert_eq!(
-                sender
-                    .decrypt(&old_message)
+                decrypt_transfer(&sender, &transfer_aad, &old_message)
                     .await
                     .expect("new receives old"),
                 b"old sender payload"
             );
             assert!(
-                receiver.decrypt(&new_message).await.is_err(),
+                decrypt_transfer(&receiver, &transfer_aad, &new_message)
+                    .await
+                    .is_err(),
                 "缺少更新时不能接受新密钥的内容"
             );
             if missing_admission {
@@ -6318,18 +6292,17 @@ mod admission_tests {
                 .await
                 .unwrap();
             assert_eq!(
-                receiver
-                    .decrypt(&new_message)
+                decrypt_transfer(&receiver, &transfer_aad, &new_message)
                     .await
                     .expect("更新后接收成功"),
                 b"new sender payload"
             );
-            let reverse = receiver
-                .encrypt(b"recovered reverse payload")
-                .await
-                .expect("reverse encrypt");
+            let reverse =
+                encrypt_transfer(&receiver, &transfer_aad, b"recovered reverse payload").await;
             assert_eq!(
-                sender.decrypt(&reverse).await.expect("反向接收成功"),
+                decrypt_transfer(&sender, &transfer_aad, &reverse)
+                    .await
+                    .expect("反向接收成功"),
                 b"recovered reverse payload"
             );
 
@@ -6715,7 +6688,7 @@ mod migration_initialize_tests {
     use uc_core::ports::security::secure_storage::{SecureStorageError, SecureStoragePort};
 
     use super::*;
-    use crate::fs::key_slot_store::KeySlotStore;
+    use crate::key_slot_store::KeySlotStore;
     use uc_infra_crypto::crypto_model::KeySlotFile;
 
     struct Profile;

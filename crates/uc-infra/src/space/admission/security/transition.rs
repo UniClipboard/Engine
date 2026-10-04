@@ -6,7 +6,7 @@ use uc_application::deps::{
 use uc_core::membership::AdmissionSecurityCommitmentV1;
 use zeroize::Zeroize;
 
-use crate::space::security::mls_group::{MlsClientState, MlsGroupEngine, PendingMlsJoin};
+use uc_infra_crypto::mls_group::{MlsClientState, MlsGroupEngine, PendingMlsJoin};
 
 pub struct AdmissionSecurityTransitionAdapter;
 

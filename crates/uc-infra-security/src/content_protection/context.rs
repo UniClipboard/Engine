@@ -6,7 +6,7 @@ use uc_core::crypto::domain::Aad;
 use uc_core::membership::{ContentKeyId, ContentKeyPurpose, GroupEpoch, ProtectionGroupId};
 use zeroize::Zeroizing;
 
-use crate::security::MasterKey;
+use crate::MasterKey;
 
 use super::envelope::{AEAD_XCHACHA20_POLY1305, FORMAT_VERSION_V3};
 use super::ContentProtectionError;

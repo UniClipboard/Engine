@@ -1,7 +1,7 @@
 use uc_core::ids::SpaceId;
 use uc_core::membership::{ContentKeyId, ContentKeyPurpose, GroupEpoch};
 
-pub(crate) fn bind(
+pub fn bind(
     format: &[u8],
     space_id: &SpaceId,
     epoch: GroupEpoch,

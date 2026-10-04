@@ -13,9 +13,9 @@ use uc_core::ports::SecureStoragePort;
 
 use crate::db::pool::DbPool;
 
-use super::admission_key_manager::AdmissionKeyManager;
-use super::key_migration_adapter::DefaultKeyMigrationAdapter;
-use super::profile_content_key_vault::PROFILE_CONTENT_VAULT_KEY_NAME;
+use uc_infra_security::profile_content_key_vault::PROFILE_CONTENT_VAULT_KEY_NAME;
+use uc_infra_security::AdmissionKeyManager;
+use uc_infra_security::DefaultKeyMigrationAdapter;
 
 pub struct ProfileKeyWiper {
     admission_keys: AdmissionKeyManager,

@@ -6,27 +6,27 @@ use uc_core::membership::{
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 #[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
-pub(super) struct PersistedContentKeyCatalog {
-    pub(super) version: u8,
-    pub(super) entries: Vec<PersistedContentKeyEntry>,
+pub struct PersistedContentKeyCatalog {
+    pub version: u8,
+    pub entries: Vec<PersistedContentKeyEntry>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
-pub(super) struct PersistedContentKeyEntry {
-    pub(super) content_key_id: String,
-    pub(super) epoch: u64,
-    pub(super) key: Vec<u8>,
+pub struct PersistedContentKeyEntry {
+    pub content_key_id: String,
+    pub epoch: u64,
+    pub key: Vec<u8>,
 }
 
-pub(super) fn decode(encoded: &[u8]) -> Result<PersistedContentKeyCatalog, EncryptionError> {
+pub fn decode(encoded: &[u8]) -> Result<PersistedContentKeyCatalog, EncryptionError> {
     serde_json::from_slice(encoded).map_err(EncryptionError::key_material_corrupt_from)
 }
 
-pub(super) fn encode(catalog: &PersistedContentKeyCatalog) -> Result<Vec<u8>, EncryptionError> {
+pub fn encode(catalog: &PersistedContentKeyCatalog) -> Result<Vec<u8>, EncryptionError> {
     serde_json::to_vec(catalog).map_err(EncryptionError::key_material_corrupt_from)
 }
 
-pub(crate) fn export_admission_content_key_catalog(
+pub fn export_admission_content_key_catalog(
     material: &SpaceKeyMaterial,
 ) -> Result<AdmissionContentKeyCatalogV1, EncryptionError> {
     let catalog = decode(material.key_catalog())?;
@@ -55,7 +55,7 @@ pub(crate) fn export_admission_content_key_catalog(
 
 /// 把已经通过 admission commitment 验证的目录转换为 session/repository
 /// 唯一接受的 V2 持久格式。控制世代 owner 不复制该私有格式。
-pub(crate) fn import_admission_content_key_catalog(
+pub fn import_admission_content_key_catalog(
     catalog: &AdmissionContentKeyCatalogV1,
 ) -> Result<Vec<u8>, EncryptionError> {
     catalog

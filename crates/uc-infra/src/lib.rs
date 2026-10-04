@@ -6,7 +6,6 @@ pub mod config;
 pub mod config_migration;
 pub mod db;
 pub mod file_transfer;
-pub mod fs;
 #[cfg(feature = "lan-compat")]
 pub mod mobile_sync;
 pub mod network;

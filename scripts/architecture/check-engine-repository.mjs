@@ -35,6 +35,7 @@ const EXPECTED_PACKAGES = [
   'uc-infra',
   'uc-infra-crypto',
   'uc-infra-local',
+  'uc-infra-security',
   'uc-mobile',
   'uc-mobile-lan',
   'uc-mobile-proto',
@@ -54,6 +55,7 @@ const INTERNAL_PACKAGES = new Set([
   'uc-infra',
   'uc-infra-crypto',
   'uc-infra-local',
+  'uc-infra-security',
   'uc-mobile',
   'uc-mobile-lan',
   'uc-mobile-proto',
@@ -1503,18 +1505,21 @@ function checkInfraSpaceAdmissionOwnership() {
 
 function checkInfraSpaceSecurityOwnership() {
   const problems = []
-  const securityRoot = 'crates/uc-infra/src/space/security'
+  // Engine issue #144 S2：这组实现从 crates/uc-infra/src/space/security
+  // 整体搬进独立的 uc-infra-security crate；history_signature.rs 和
+  // mls_group.rs 随 OpenMLS 引擎一起搬进 uc-infra-crypto。
+  const securityRoot = 'crates/uc-infra-security/src'
   const requiredEntries = [
-    'mod.rs',
+    'lib.rs',
     'access.rs',
-    'history_signature.rs',
     'key_material.rs',
     'membership_update.rs',
-    'mls_group.rs',
     'scope_identifier.rs',
     'session.rs',
     'session_rebind.rs',
   ]
+  const cryptoRoot = 'crates/uc-infra-crypto/src'
+  const requiredCryptoEntries = ['history_signature.rs', 'mls_group.rs']
   const retiredEntries = [
     'crates/uc-infra/src/security/adapters/space_session_rebind.rs',
     'crates/uc-infra/src/security/admission_security_transition.rs',
@@ -1527,6 +1532,7 @@ function checkInfraSpaceSecurityOwnership() {
     'crates/uc-infra/src/security/scope_identifier.rs',
     'crates/uc-infra/src/security/session.rs',
     'crates/uc-infra/src/security/space_access_adapter.rs',
+    'crates/uc-infra/src/space/security',
   ]
 
   for (const entry of requiredEntries) {
@@ -1535,6 +1541,15 @@ function checkInfraSpaceSecurityOwnership() {
         problems,
         'infra space security ownership',
         `missing Space security implementation: ${securityRoot}/${entry}`
+      )
+    }
+  }
+  for (const entry of requiredCryptoEntries) {
+    if (!existsSync(join(REPOSITORY_ROOT, cryptoRoot, entry))) {
+      addProblem(
+        problems,
+        'infra space security ownership',
+        `missing Space security crypto implementation: ${cryptoRoot}/${entry}`
       )
     }
   }
@@ -2212,7 +2227,7 @@ function repositorySources() {
     runtimeLifecycleCoordinator: read(
       'crates/uc-application/src/runtime_lifecycle/coordinator.rs'
     ),
-    spaceAccess: read('crates/uc-infra/src/space/security/access.rs'),
+    spaceAccess: read('crates/uc-infra-security/src/access.rs'),
     configMigration: read('crates/uc-infra/src/config_migration/mod.rs'),
     engineSpaceAccessWiring: read('crates/uc-engine/src/assembly/wire/infra.rs'),
     legacySpaceTransitionPathPresent: existsSync(
@@ -2220,11 +2235,11 @@ function repositorySources() {
     ),
     infraSecurityModule: read('crates/uc-infra/src/security/mod.rs'),
     infraSecurityRuntime: readSourceTree('crates/uc-infra/src/security'),
-    secureStorageAccess: read('crates/uc-infra/src/security/secure_storage_access.rs'),
+    secureStorageAccess: read('crates/uc-infra-security/src/secure_storage_access.rs'),
     profileContentVaultKeyStore: read(
-      'crates/uc-infra/src/security/profile_content_key_vault/key_store.rs'
+      'crates/uc-infra-security/src/profile_content_key_vault/key_store.rs'
     ),
-    spaceKeyMaterial: read('crates/uc-infra/src/space/security/key_material.rs'),
+    spaceKeyMaterial: read('crates/uc-infra-security/src/key_material.rs'),
     runtimeStorage: read('crates/uc-engine/src/assembly/runtime_storage.rs'),
     observabilityModule: read('crates/uc-engine/src/assembly/observability/mod.rs'),
     engineObservability: readSourceTree('crates/uc-engine/src/assembly/observability'),

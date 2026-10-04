@@ -15,11 +15,11 @@ use uc_core::membership::{ContentKeyId, GroupEpoch, SpaceKeyMaterial};
 use uc_core::ports::SecureStoragePort;
 
 use super::{MasterKey, SecureStorageAccess};
-pub(super) use key_store::VAULT_KEY_NAME as PROFILE_CONTENT_VAULT_KEY_NAME;
+pub use key_store::VAULT_KEY_NAME as PROFILE_CONTENT_VAULT_KEY_NAME;
 pub(crate) use model::ProfileSearchCatalog;
 pub use model::{InstalledProfileCatalog, ProfileContentKeyVaultError, ResolvedProfileContentKey};
 use persistence::VaultPersistence;
-pub(crate) use read_state::ProfileKeyReadLease;
+pub use read_state::ProfileKeyReadLease;
 use read_state::{lock, InvalidateOnDrop, ReadState, ReadView};
 
 /// Profile 历史密钥的唯一目录所有者；安装、并发读视图和清理均在模块内完成。
@@ -138,7 +138,7 @@ impl ProfileContentKeyVault {
     }
 
     /// 搜索能力与内容读取共用已认证目录；外层 key 不离开 persistence。
-    pub(crate) async fn search_catalog(
+    pub async fn search_catalog(
         &self,
     ) -> Result<ProfileSearchCatalog, ProfileContentKeyVaultError> {
         self.with_catalog(|view| catalog::search_catalog(&view.vault, view.root.clone()))

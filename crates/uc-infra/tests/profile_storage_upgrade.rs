@@ -16,7 +16,6 @@ use uc_core::ports::{SecureStorageError, SecureStoragePort};
 use uc_infra::db::executor::DieselSqliteExecutor;
 use uc_infra::db::pool::init_db_pool;
 use uc_infra::db::repositories::DieselSpaceSecurityStore;
-use uc_infra::fs::key_slot_store::JsonKeySlotStore;
 use uc_infra::network::iroh::SpaceAdmissionChannelCredentialPort;
 use uc_infra::security::{
     ActiveSpaceGenerationManifestStore, AdmissionKeyManager, DefaultCurrentProfile,
@@ -27,6 +26,7 @@ use uc_infra::space::{
     CurrentSpaceResolver, InMemorySession, KeyMaterialStore, RuntimeSpaceAccessAdapter,
     SqliteSpaceAdmissionCredentials, SqliteSpaceAdmissionState,
 };
+use uc_infra_security::key_slot_store::JsonKeySlotStore;
 
 #[derive(Default)]
 struct MemorySecureStorage(Mutex<BTreeMap<String, Vec<u8>>>);

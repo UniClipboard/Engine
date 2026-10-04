@@ -1,18 +1,11 @@
 mod active_space_generation_manifest_store;
-mod admission_key_manager;
-mod admission_proof;
-mod blob_cipher_adapter;
 mod content_protection;
 mod decrypting_clipboard_event_repo;
 mod decrypting_representation_repo;
-mod default_current_profile;
 mod encrypted_blob_store;
 mod encrypting_clipboard_event_writer;
 mod encrypting_inbound_receive_commit;
-pub(crate) mod key_epoch_aad;
-mod key_migration_adapter;
 mod profile_backup_archive;
-mod profile_content_key_vault;
 mod profile_lifecycle;
 mod profile_payload_adapters;
 mod profile_reset;
@@ -20,8 +13,6 @@ mod profile_runtime_layout;
 mod profile_startup_storage;
 mod profile_storage_upgrade;
 mod profile_upgrade_backup;
-mod secure_storage_access;
-mod space_admission_auth;
 mod space_control_generation;
 mod space_transition_activation;
 mod v3_admission_space_transition;
@@ -34,27 +25,14 @@ pub use active_space_generation_manifest_store::{
     ActiveRuntimeManifest, ActiveRuntimeManifestV3, ActiveSpaceGenerationManifestStore,
     ActiveSpaceGenerationManifestStoreError,
 };
-pub use admission_key_manager::{
-    AdmissionKeyError, AdmissionKeyManager, WrappedSpaceAdmissionDataKey,
-};
-pub use admission_proof::HmacProofAdapter;
-pub use blob_cipher_adapter::BlobCipherAdapter;
-pub use content_protection::{
-    ContentProtection, ContentProtectionError, V3EncryptedBlobStore, V3InlinePayloadCipher,
-};
+pub use content_protection::V3EncryptedBlobStore;
 pub use decrypting_clipboard_event_repo::DecryptingClipboardEventRepository;
 pub use decrypting_representation_repo::DecryptingClipboardRepresentationRepository;
-pub use default_current_profile::DefaultCurrentProfile;
 pub use encrypted_blob_store::EncryptedBlobStore;
 pub use encrypting_clipboard_event_writer::EncryptingClipboardEventWriter;
 pub use encrypting_inbound_receive_commit::EncryptingInboundReceiveCommit;
-pub use key_migration_adapter::DefaultKeyMigrationAdapter;
 pub use profile_backup_archive::{
     ProfileArchiveReceipt, ProfileBackupArchive, ProfileBackupArchiveError, ProfileBackupSource,
-};
-pub use profile_content_key_vault::{
-    InstalledProfileCatalog, ProfileContentKeyVault, ProfileContentKeyVaultError,
-    ResolvedProfileContentKey,
 };
 pub use profile_lifecycle::ProfileLifecycleRepository;
 pub use profile_payload_adapters::ProfilePayloadAdapters;
@@ -67,14 +45,6 @@ pub use profile_storage_upgrade::{
     StorageUpgradeSnapshot, StorageUpgradeStep, StorageUpgradeStepProgress, StorageUpgradeUnit,
 };
 pub use profile_upgrade_backup::{ProfileUpgradeBackupRecordKeyMissing, ProfileUpgradeBackupStore};
-pub(crate) use secure_storage_access::SecureStorageAccess;
-pub use space_admission_auth::{
-    SpaceAdmissionAuth, SpaceAdmissionAuthContext, SpaceAdmissionAuthError,
-    SpaceAdmissionClientState, SpaceAdmissionContinuationCredential, SpaceAdmissionKe1,
-    SpaceAdmissionKe2, SpaceAdmissionKe3, SpaceAdmissionPasswordEquivalent,
-    SpaceAdmissionRegistration, SpaceAdmissionRegistrationEncoding, SpaceAdmissionServerSetup,
-    SpaceAdmissionServerSetupEncoding, SpaceAdmissionServerState,
-};
 pub use space_control_generation::{
     AdmissionInputInconsistency, AdmissionInputIssue, PreparedSpaceControlGeneration,
     SpaceControlGeneration, SpaceControlGenerationError,
@@ -91,12 +61,23 @@ pub use uc_infra_crypto::identity_fingerprint::{
     FingerprintDerivationError, Sha256IdentityFingerprintFactory,
 };
 pub(crate) use uc_infra_crypto::secrets::{Kek, MasterKey};
+pub use uc_infra_crypto::space_admission_auth::{
+    SpaceAdmissionAuth, SpaceAdmissionAuthContext, SpaceAdmissionAuthError,
+    SpaceAdmissionClientState, SpaceAdmissionContinuationCredential, SpaceAdmissionKe1,
+    SpaceAdmissionKe2, SpaceAdmissionKe3, SpaceAdmissionPasswordEquivalent,
+    SpaceAdmissionRegistration, SpaceAdmissionRegistrationEncoding, SpaceAdmissionServerSetup,
+    SpaceAdmissionServerSetupEncoding, SpaceAdmissionServerState,
+};
+pub use uc_infra_security::{
+    AdmissionKeyError, AdmissionKeyManager, BlobCipherAdapter, ContentProtection,
+    ContentProtectionError, DefaultCurrentProfile, DefaultKeyMigrationAdapter,
+    InstalledProfileCatalog, ProfileContentKeyVault, ProfileContentKeyVaultError,
+    ResolvedProfileContentKey, V3InlinePayloadCipher, WrappedSpaceAdmissionDataKey,
+};
 pub use v3_admission_space_transition::V3AdmissionSpaceTransition;
 pub use v3_device_management_reset::V3DeviceManagementReset;
 pub use v3_initial_space_activation::V3InitialSpaceActivation;
 pub use v3_membership_branch_transition::V3MembershipBranchTransition;
-
-pub(crate) use profile_content_key_vault::ProfileKeyReadLease;
 
 mod profile_key_recovery;
 pub use profile_key_recovery::{

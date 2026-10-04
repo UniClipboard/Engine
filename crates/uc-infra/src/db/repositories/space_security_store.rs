@@ -27,8 +27,44 @@ impl<E> DieselSpaceSecurityStore<E> {
     }
 }
 
+/// Diesel 是这条 repository 唯一真实接触数据库错误类型的位置；在这里把它翻译
+/// 成诊断合同的固定分类（见 `ClassifiedGroupUpdateStorageFailure`），往上
+/// 只暴露分类结果，不让 security/p2p 的诊断读取反过来认识 Diesel 类型。
 fn backend(error: impl Into<anyhow::Error>) -> KeyEpochError {
-    KeyEpochError::Repository(error.into())
+    let error = error.into();
+    match error.downcast::<diesel::result::Error>() {
+        Ok(diesel_error) => KeyEpochError::Repository(
+            uc_observability_contract::diagnostics::connectivity::ClassifiedGroupUpdateStorageFailure::new(
+                classify_diesel_error(&diesel_error),
+                diesel_error,
+            )
+            .into(),
+        ),
+        Err(error) => KeyEpochError::Repository(error),
+    }
+}
+
+fn classify_diesel_error(
+    error: &diesel::result::Error,
+) -> uc_observability_contract::diagnostics::connectivity::GroupUpdateReason {
+    use diesel::result::{DatabaseErrorKind as Kind, Error};
+    use uc_observability_contract::diagnostics::connectivity::GroupUpdateReason as Reason;
+    match error {
+        Error::NotFound => Reason::NotFound,
+        Error::DatabaseError(
+            Kind::UniqueViolation
+            | Kind::ForeignKeyViolation
+            | Kind::NotNullViolation
+            | Kind::CheckViolation,
+            _,
+        ) => Reason::Constraint,
+        Error::DatabaseError(Kind::SerializationFailure, _) => Reason::Conflict,
+        Error::DatabaseError(Kind::ReadOnlyTransaction, _) => Reason::PermissionDenied,
+        Error::DatabaseError(Kind::ClosedConnection | Kind::UnableToSendCommand, _) => {
+            Reason::Unavailable
+        }
+        _ => Reason::Unknown,
+    }
 }
 
 /// 事务闭包内返回的 `KeyEpochError` 保持原分类；其余下层失败按存储失败保留来源。
@@ -59,5 +95,30 @@ mod failure_contract_tests {
         assert_eq!(source.kind(), std::io::ErrorKind::PermissionDenied);
         assert!(!error.to_string().contains("PRIVATE_STORAGE_PATH"));
         assert!(!format!("{error:?}").contains("PRIVATE_STORAGE_PATH"));
+    }
+
+    #[test]
+    fn a_real_sqlite_failure_is_classified_at_the_conversion_site_without_a_table_name_leak() {
+        use diesel::{Connection, RunQueryDsl};
+        let mut connection =
+            diesel::sqlite::SqliteConnection::establish(":memory:").expect("sqlite");
+        let source = diesel::sql_query("INSERT INTO PRIVATE_MISSING_TABLE VALUES (1)")
+            .execute(&mut connection)
+            .expect_err("missing table");
+
+        let error = backend(source);
+
+        let classified = std::error::Error::source(&error)
+            .and_then(|source| {
+                source.downcast_ref::<uc_observability_contract::diagnostics::connectivity::ClassifiedGroupUpdateStorageFailure>()
+            })
+            .expect("a diesel error must be wrapped as a classified storage failure");
+        assert_eq!(
+            classified.reason.as_str(),
+            "unknown",
+            "不能从 SQLite 原始错误正文推测错误码"
+        );
+        assert!(!error.to_string().contains("PRIVATE_"));
+        assert!(!format!("{error:?}").contains("PRIVATE_"));
     }
 }

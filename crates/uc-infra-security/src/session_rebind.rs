@@ -39,7 +39,7 @@ fn map_rebind_error(error: EncryptionError) -> SpaceSessionRebindError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::security::MasterKey;
+    use crate::MasterKey;
 
     #[tokio::test]
     async fn rejects_rebind_when_session_is_not_unlocked() {

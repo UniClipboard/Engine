@@ -23,9 +23,9 @@ use uc_core::crypto::domain::{Aad, Ciphertext, Plaintext};
 use uc_core::membership::{ContentKeyId, ContentKeyPurpose, GroupEpoch};
 use uc_core::ports::security::blob_cipher::{BlobCipherError, BlobCipherPort};
 
-use super::key_epoch_aad;
-use crate::space::InMemorySession;
+use crate::InMemorySession;
 use uc_infra_crypto::crypto_model::EncryptedBlob;
+use uc_infra_crypto::key_epoch_aad;
 use uc_infra_crypto::v1_aead;
 
 pub struct BlobCipherAdapter {

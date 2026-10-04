@@ -20,7 +20,7 @@ use uc_core::membership::{
     ADMISSION_SECURITY_COMMITMENT_FORMAT_V1, ED25519_SIGNATURE_ALGORITHM_V1,
 };
 
-use crate::security::MasterKey;
+use crate::secrets::MasterKey;
 use uc_observability_contract::uc_warn;
 
 const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
@@ -29,7 +29,7 @@ const EXPORT_LABEL: &str = "uniclipboard-key-catalog-wrap-v1";
 
 /// MLS 组操作失败。`source` 为空表示纯状态或输入校验失败；有下层错误时保留为来源。
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum MlsGroupError {
+pub enum MlsGroupError {
     #[error("invalid MLS state")]
     InvalidState {
         #[source]
@@ -100,7 +100,7 @@ impl MlsGroupError {
 }
 
 #[derive(thiserror::Error)]
-pub(crate) enum MlsExternalRecoveryError {
+pub enum MlsExternalRecoveryError {
     #[error("invalid MLS recovery state")]
     InvalidState {
         #[source]
@@ -169,20 +169,20 @@ struct StoredClientState {
     group_id: Option<Vec<u8>>,
 }
 
-pub(crate) struct MlsClientState {
+pub struct MlsClientState {
     bytes: Vec<u8>,
 }
 
 impl MlsClientState {
-    pub(crate) fn from_bytes(bytes: Vec<u8>) -> Self {
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
         Self { bytes }
     }
 
-    pub(crate) fn as_bytes(&self) -> &[u8] {
+    pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
     }
 
-    pub(crate) fn into_bytes(self) -> Vec<u8> {
+    pub fn into_bytes(self) -> Vec<u8> {
         self.bytes
     }
 }
@@ -196,16 +196,16 @@ impl std::fmt::Debug for MlsClientState {
     }
 }
 
-pub(crate) struct PendingMlsJoin {
-    pub(crate) key_package: Vec<u8>,
-    pub(crate) client_state: MlsClientState,
+pub struct PendingMlsJoin {
+    pub key_package: Vec<u8>,
+    pub client_state: MlsClientState,
     /// Member instance derived from this admission's fresh credential,
     /// when the credential was generated during preparation.
-    pub(crate) member_instance: Option<uc_core::membership::MemberInstanceId>,
+    pub member_instance: Option<uc_core::membership::MemberInstanceId>,
 }
 
 impl PendingMlsJoin {
-    pub(crate) fn new(key_package: Vec<u8>, client_state: MlsClientState) -> Self {
+    pub fn new(key_package: Vec<u8>, client_state: MlsClientState) -> Self {
         Self {
             key_package,
             client_state,
@@ -213,10 +213,7 @@ impl PendingMlsJoin {
         }
     }
 
-    pub(crate) fn with_member_instance(
-        mut self,
-        instance: uc_core::membership::MemberInstanceId,
-    ) -> Self {
+    pub fn with_member_instance(mut self, instance: uc_core::membership::MemberInstanceId) -> Self {
         self.member_instance = Some(instance);
         self
     }
@@ -238,12 +235,12 @@ impl std::fmt::Debug for PendingMlsJoin {
     }
 }
 
-pub(crate) struct MlsAdmission {
-    pub(crate) sponsor_state: MlsClientState,
-    pub(crate) commit: Vec<u8>,
-    pub(crate) welcome: Vec<u8>,
-    pub(crate) epoch: u64,
-    pub(crate) wrapping_key: MasterKey,
+pub struct MlsAdmission {
+    pub sponsor_state: MlsClientState,
+    pub commit: Vec<u8>,
+    pub welcome: Vec<u8>,
+    pub epoch: u64,
+    pub wrapping_key: MasterKey,
 }
 
 impl std::fmt::Debug for MlsAdmission {
@@ -259,24 +256,24 @@ impl std::fmt::Debug for MlsAdmission {
     }
 }
 
-pub(crate) struct CompletedMlsJoin {
-    pub(crate) client_state: MlsClientState,
-    pub(crate) epoch: u64,
-    pub(crate) wrapping_key: MasterKey,
+pub struct CompletedMlsJoin {
+    pub client_state: MlsClientState,
+    pub epoch: u64,
+    pub wrapping_key: MasterKey,
 }
 
-pub(crate) struct PreparedMlsExternalRecovery {
-    pub(crate) recipient_state: MlsClientState,
-    pub(crate) commit: Vec<u8>,
-    pub(crate) epoch: u64,
-    pub(crate) wrapping_key: MasterKey,
+pub struct PreparedMlsExternalRecovery {
+    pub recipient_state: MlsClientState,
+    pub commit: Vec<u8>,
+    pub epoch: u64,
+    pub wrapping_key: MasterKey,
 }
 
-pub(crate) struct MlsRemoval {
-    pub(crate) sponsor_state: MlsClientState,
-    pub(crate) commit: Vec<u8>,
-    pub(crate) epoch: u64,
-    pub(crate) wrapping_key: MasterKey,
+pub struct MlsRemoval {
+    pub sponsor_state: MlsClientState,
+    pub commit: Vec<u8>,
+    pub epoch: u64,
+    pub wrapping_key: MasterKey,
 }
 
 impl std::fmt::Debug for MlsRemoval {
@@ -302,12 +299,10 @@ impl std::fmt::Debug for CompletedMlsJoin {
     }
 }
 
-pub(crate) struct MlsGroupEngine;
+pub struct MlsGroupEngine;
 
 impl MlsGroupEngine {
-    pub(crate) fn local_device_id(
-        client_state: &MlsClientState,
-    ) -> Result<DeviceId, MlsGroupError> {
+    pub fn local_device_id(client_state: &MlsClientState) -> Result<DeviceId, MlsGroupError> {
         let (provider, stored) = restore(client_state)?;
         if stored.signer_public.is_empty() {
             return Err(MlsGroupError::invalid_state());
@@ -329,7 +324,7 @@ impl MlsGroupEngine {
 
     /// 导出不含成员私钥的签名 GroupInfo，供已有成员从 sibling 状态发起
     /// external commit。ratchet tree 作为 GroupInfo 扩展携带。
-    pub(crate) fn export_external_recovery_group_info(
+    pub fn export_external_recovery_group_info(
         client_state: &MlsClientState,
     ) -> Result<Vec<u8>, MlsExternalRecoveryError> {
         let (provider, stored) = restore_external_recovery_state(client_state)?;
@@ -360,7 +355,7 @@ impl MlsGroupEngine {
 
     /// 使用接收设备自己的 MLS 签名私钥创建 external commit。OpenMLS 会在
     /// 目标树中发现相同签名公钥并把旧 leaf 与本次重新加入原子替换。
-    pub(crate) fn prepare_external_recovery(
+    pub fn prepare_external_recovery(
         recipient_state: &MlsClientState,
         group_info: &[u8],
     ) -> Result<PreparedMlsExternalRecovery, MlsExternalRecoveryError> {
@@ -412,7 +407,7 @@ impl MlsGroupEngine {
             wrapping_key,
         })
     }
-    pub(crate) fn validate_state(
+    pub fn validate_state(
         client_state: &MlsClientState,
         expected_space_id: &[u8],
     ) -> Result<(), MlsGroupError> {
@@ -438,7 +433,7 @@ impl MlsGroupEngine {
         Ok(())
     }
 
-    pub(crate) fn create_sponsor(
+    pub fn create_sponsor(
         space_id: &[u8],
         device_identity: &[u8],
     ) -> Result<MlsClientState, MlsGroupError> {
@@ -462,7 +457,7 @@ impl MlsGroupEngine {
         snapshot(&provider, &signer, Some(group.group_id().as_slice()))
     }
 
-    pub(crate) fn prepare_join(device_identity: &[u8]) -> Result<PendingMlsJoin, MlsGroupError> {
+    pub fn prepare_join(device_identity: &[u8]) -> Result<PendingMlsJoin, MlsGroupError> {
         let provider = SnapshotProvider::default();
         let (credential, signer) = credential(device_identity, &provider)?;
         let bundle = KeyPackage::builder()
@@ -480,7 +475,7 @@ impl MlsGroupEngine {
         Ok(PendingMlsJoin::new(key_package, client_state).with_member_instance(member_instance))
     }
 
-    pub(crate) fn admit_member(
+    pub fn admit_member(
         sponsor_state: &MlsClientState,
         expected_device_identity: &[u8],
         key_package: &[u8],
@@ -488,7 +483,7 @@ impl MlsGroupEngine {
         Self::admit_member_inner(sponsor_state, expected_device_identity, key_package, false)
     }
 
-    pub(crate) fn admit_or_replace_member(
+    pub fn admit_or_replace_member(
         sponsor_state: &MlsClientState,
         expected_device_identity: &[u8],
         key_package: &[u8],
@@ -571,7 +566,7 @@ impl MlsGroupEngine {
         })
     }
 
-    pub(crate) fn complete_join(
+    pub fn complete_join(
         pending: PendingMlsJoin,
         expected_space_id: &[u8],
         welcome: &[u8],
@@ -624,7 +619,7 @@ impl MlsGroupEngine {
         })
     }
 
-    pub(crate) fn remove_member(
+    pub fn remove_member(
         sponsor_state: &MlsClientState,
         target_device_identity: &[u8],
     ) -> Result<MlsRemoval, MlsGroupError> {
@@ -664,7 +659,7 @@ impl MlsGroupEngine {
         })
     }
 
-    pub(crate) fn contains_active_member(
+    pub fn contains_active_member(
         client_state: &MlsClientState,
         expected_device_identity: &[u8],
     ) -> Result<bool, MlsGroupError> {
@@ -684,7 +679,7 @@ impl MlsGroupEngine {
     }
 
     #[cfg(feature = "test-util")]
-    pub(crate) fn matching_member_count(
+    pub fn matching_member_count(
         client_state: &MlsClientState,
         expected_device_identity: &[u8],
     ) -> Result<usize, MlsGroupError> {
@@ -702,7 +697,7 @@ impl MlsGroupEngine {
             .count())
     }
 
-    pub(crate) fn sign_member_payload(
+    pub fn sign_member_payload(
         client_state: &MlsClientState,
         payload: &[u8],
     ) -> Result<Vec<u8>, MlsGroupError> {
@@ -720,9 +715,7 @@ impl MlsGroupEngine {
             .map_err(|error| MlsGroupError::protocol_from(SignerFailure(error)))
     }
 
-    pub(crate) fn signing_public_key(
-        client_state: &MlsClientState,
-    ) -> Result<Vec<u8>, MlsGroupError> {
+    pub fn signing_public_key(client_state: &MlsClientState) -> Result<Vec<u8>, MlsGroupError> {
         let (_, stored) = restore(client_state)?;
         if stored.signer_public.is_empty() {
             return Err(MlsGroupError::invalid_state());
@@ -730,7 +723,7 @@ impl MlsGroupEngine {
         Ok(stored.signer_public)
     }
 
-    pub(crate) fn sign_pending_member_payload(
+    pub fn sign_pending_member_payload(
         client_state: &MlsClientState,
         payload: &[u8],
     ) -> Result<Vec<u8>, MlsGroupError> {
@@ -745,7 +738,7 @@ impl MlsGroupEngine {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn derive_public_admission_commitment(
+    pub fn derive_public_admission_commitment(
         client_state: &MlsClientState,
         attempt_id: [u8; 32],
         base_history_position: BaseMembershipHistoryPosition,
@@ -824,7 +817,7 @@ impl MlsGroupEngine {
         .map_err(MlsGroupError::invalid_state_from)
     }
 
-    pub(crate) fn current_epoch(client_state: &MlsClientState) -> Result<u64, MlsGroupError> {
+    pub fn current_epoch(client_state: &MlsClientState) -> Result<u64, MlsGroupError> {
         let (provider, stored) = restore(client_state)?;
         let group_id = stored.group_id.ok_or_else(MlsGroupError::invalid_state)?;
         let group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&group_id))
@@ -836,7 +829,7 @@ impl MlsGroupEngine {
         Ok(group.epoch().as_u64())
     }
 
-    pub(crate) fn current_member_instance(
+    pub fn current_member_instance(
         client_state: &MlsClientState,
         device_identity: &[u8],
     ) -> Result<uc_core::membership::MemberInstanceId, MlsGroupError> {
@@ -857,7 +850,7 @@ impl MlsGroupEngine {
         ))
     }
 
-    pub(crate) fn verify_member_payload(
+    pub fn verify_member_payload(
         client_state: &MlsClientState,
         expected_device_identity: &[u8],
         payload: &[u8],
@@ -889,7 +882,7 @@ impl MlsGroupEngine {
             .is_ok())
     }
 
-    pub(crate) fn verify_member_instance_payload(
+    pub fn verify_member_instance_payload(
         client_state: &MlsClientState,
         expected_device_identity: &[u8],
         expected_member_instance: uc_core::membership::MemberInstanceId,
@@ -930,7 +923,7 @@ impl MlsGroupEngine {
             .is_ok())
     }
 
-    pub(crate) fn apply_commit(
+    pub fn apply_commit(
         client_state: &MlsClientState,
         expected_space_id: &[u8],
         commit: &[u8],
@@ -1127,7 +1120,7 @@ mod tests {
     use std::error::Error as _;
 
     use super::*;
-    use crate::space::OpenMlsHistoricalSignatureVerifier;
+    use crate::history_signature::OpenMlsHistoricalSignatureVerifier;
     use uc_core::membership::{
         BaseMembershipHistoryPosition, HistoricalMembershipSignatureVerifier, MembershipEventId,
         ED25519_SIGNATURE_ALGORITHM_V1,

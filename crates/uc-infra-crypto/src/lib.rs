@@ -1,5 +1,10 @@
+pub mod content_key_catalog;
 pub mod crypto_model;
 pub mod hashing;
+pub mod history_signature;
 pub mod identity_fingerprint;
+pub mod key_epoch_aad;
+pub mod mls_group;
 pub mod secrets;
+pub mod space_admission_auth;
 pub mod v1_aead;

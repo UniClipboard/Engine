@@ -63,7 +63,6 @@ use uc_infra::db::repositories::{
     DieselReceiveArtifactLogRepository, DieselSpaceMemberRepository, DieselSpaceSecurityStore,
     DieselThumbnailRepository, DieselTrustedPeerRepository, EncryptedRelationshipStore,
 };
-use uc_infra::fs::key_slot_store::JsonKeySlotStore;
 use uc_infra::network::iroh::IrohIdentityStore;
 use uc_infra::search::{
     HkdfSearchKeyDerivation, SearchPipeline, SqliteSearchIndex, V3SearchKeyDerivation,
@@ -85,6 +84,7 @@ use uc_infra_local::blob::BlobRepositoryPort;
 use uc_infra_local::fs::VaultLayout;
 use uc_infra_local::settings::repository::FileSettingsRepository;
 use uc_infra_local::{FileAppVersionStateRepository, FileFirstSyncStateRepository, SystemClock};
+use uc_infra_security::key_slot_store::JsonKeySlotStore;
 use uc_observability_contract::analytics::{AnalyticsFacade, AnalyticsPort};
 
 #[cfg(feature = "lan-compat")]

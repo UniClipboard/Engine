@@ -6,12 +6,12 @@
 use std::sync::Arc;
 use uc_core::{crypto::model::EncryptionError, ports::SecureStoragePort};
 
-use crate::fs::key_slot_store::KeySlotStore;
-use crate::security::{Kek, SecureStorageAccess};
+use crate::key_slot_store::KeySlotStore;
+use crate::{Kek, SecureStorageAccess};
 use uc_infra_crypto::crypto_model::{validate_kdf, KeyScope, KeySlot, KeySlotFile};
 
 use super::scope_identifier::scope_identifier;
-use crate::security::MasterKey;
+use crate::MasterKey;
 use uc_core::crypto::domain::Passphrase;
 use uc_core::crypto::model::Passphrase as LegacyPassphrase;
 use uc_infra_crypto::v1_aead;
@@ -64,7 +64,7 @@ impl KeyMaterialStore {
             .await
     }
 
-    pub(crate) async fn authenticate_and_restore_kek(
+    pub async fn authenticate_and_restore_kek(
         &self,
         scope: &KeyScope,
         passphrase: &Passphrase,
@@ -74,7 +74,7 @@ impl KeyMaterialStore {
         Ok(master)
     }
 
-    pub(crate) async fn authenticate_kek(
+    pub async fn authenticate_kek(
         &self,
         scope: &KeyScope,
         passphrase: &Passphrase,
@@ -96,7 +96,7 @@ impl KeyMaterialStore {
         Ok((master, kek))
     }
 
-    pub(crate) async fn persist_authenticated_kek(
+    pub async fn persist_authenticated_kek(
         &self,
         scope: &KeyScope,
         kek: &Kek,
