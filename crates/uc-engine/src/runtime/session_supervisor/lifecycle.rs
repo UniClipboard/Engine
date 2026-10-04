@@ -32,6 +32,9 @@ pub(in super::super) fn lifecycle_error(error: LifecycleError) -> EngineError {
     }) {
         return EngineError::new(1108, EngineErrorCategory::Internal, false);
     }
+    if error.is_deadline_elapsed() {
+        return EngineError::new(1106, EngineErrorCategory::DeadlineExceeded, true);
+    }
     if source
         .chain()
         .filter_map(|source| source.downcast_ref::<TaskShutdownReport>())

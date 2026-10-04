@@ -133,7 +133,17 @@ impl Transition {
         }
         // 等待期限只约束调用方；已接受的暂停必须在真实读写结束后继续收尾。
         self.operations.wait_empty().await;
-        let result = self.runtime.suspend(deadline).await;
+        let result = match self.runtime.suspend(deadline).await {
+            // 期限内未完成的参与者调用已按共同期限结束；由本次已接受的暂停再完整执行一次，
+            // 等在途工作实际退出后交还本地资源，宿主无需剩余时间发出第二次请求。
+            Err(error)
+                if deadline.is_some()
+                    && error.category() == EngineErrorCategory::DeadlineExceeded =>
+            {
+                self.runtime.suspend(None).await
+            }
+            result => result,
+        };
         self.report_result(LifecycleAction::Suspend, result)?;
         self.publish(EngineState::Suspended).await;
         Ok(())
