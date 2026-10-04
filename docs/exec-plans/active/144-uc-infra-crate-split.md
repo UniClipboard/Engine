@@ -42,7 +42,7 @@
 | 1 | 七个实现 crate 均有单一明确能力归属，无原 `uc-infra` 包、聚合壳或复制代码 | 满足（有记录在案的偏离） | 七个 crate 已落地，`uc-infra` 已删除，`check-engine-repository.mjs` 校验包清单。偏离：`membership_record` 与准入仓储留在 profile，见实施记录"已决定不改"一节；`mobile_sync` 迁到 `uc-mobile-lan`。复制：只在测试中复刻过一段契约断言（`mobile_device_repo`），没有复制生产代码 |
 | 2 | metadata 证明生产依赖有向无环；p2p 无 storage/profile/image/Diesel 闭包；默认 Engine 不引入 LAN | 满足 | Cargo 本身拒绝循环依赖；S4/S5 用 `cargo metadata` 遍历 p2p 生产闭包，631 个依赖中 diesel、libsqlite3-sys、image、zstd、tantivy、rusqlite 零命中；`dependency_firewall` 的 lan-compat 合同测试通过 |
 | 3 | 修改 SQL 或内容实现的探针证明兄弟能力保持 fresh；Core/Application 修改不纳入窄失效承诺 | 满足（本机受控条件） | S6b 的 Cargo JSON `fresh` 字段：改 SQL 只重编 storage/profile/Engine，改缩略图只重编 content/profile/Engine，三轮一致。没测 Core/Application 修改，符合"不纳入" |
-| 4 | 原有事务与安全操作仍由一个模块负责；Engine 不新增步骤编排、原始密钥或观测阶段查询 | 部分满足 | 现有架构门禁（所有权、观测接口、Engine 编排相关检查）每个切片都通过；Engine 源码没有引用任何密钥类结构。缺口：没有逐项人工审计；在 main `1dd4cbad` 上，两处原始密钥字节字段放宽为 `pub`，与 issue §5 不一致（另外，没有发现真实输出）。修复在 [PR #154](https://github.com/UniClipboard/Engine/pull/154)（`157aead8`），未合并。见下方"密钥字段可见性审计" |
+| 4 | 原有事务与安全操作仍由一个模块负责；Engine 不新增步骤编排、原始密钥或观测阶段查询 | 部分满足 | 现有架构门禁（所有权、观测接口、Engine 编排相关检查）每个切片都通过；Engine 源码没有引用任何密钥类结构。缺口：没有逐项人工审计；在 main `1dd4cbad` 上，两处原始密钥字节字段放宽为 `pub`，与 issue §5 不一致（另外，没有发现真实输出）。修复已随 [PR #154](https://github.com/UniClipboard/Engine/pull/154) 于 2026-10-04T16:08:39Z 合并为 main `cdf272ee`；该合并的 main CI 结果需要另行确认。见下方"密钥字段可见性审计" |
 | 5 | 原存储/协议 golden fixtures 与旧 Profile E2E 可读，持久化无新版本 | 满足 | 拆分前后 migrations 逐个相同（61 个）；格式/版本常量集合完全相同；`crates/uc-sync-protocol/tests/golden_vectors.rs` 与 Upgrade compatibility smoke 在 CI 上通过 |
 | 6 | 稳定入口 E2E 与失败恢复验证通过，提供可复跑、可校验工件 | 部分满足 | Engine tests（含 `host_contract`、membership smoke）、Connection recovery 在 main CI 上通过。缺口：没有按 issue §8 格式产出 E2E 工件（场景、revision、双方终态、脱敏日志）；本机有 `lifecycle_targets.rs:73` 偶发暂停超时、crash E2E 偶发超时（拆分前就有）、`host_contract space_leave::repeated_leaves…` 稳定超时（在干净 main 上也超时）。main 上的 Rust coverage 是否转绿见下方"未闭环事项" |
 | 7 | 默认与 lan-compat、代表性直接 Rust 宿主和绑定检查通过；未运行设备平台明记跳过 | 部分满足 | 默认与 `lan-compat,dev-tools` 的 workspace check、uniffi/ohos `workspace_contract`、uniffi `public_contract` 通过。iOS/Android/HarmonyOS 实机和模拟器：**跳过** |
@@ -85,7 +85,7 @@
 - 三处都没有发现密钥被真实输出：没有日志、`Debug` 或错误正文会写出密钥；序列化只用于加密落盘。
 - 这只说明目前没有泄漏，**不能**据此认为 ① 不是问题。
 
-**修复**（2026-10-04，[PR #154](https://github.com/UniClipboard/Engine/pull/154)，提交 `157aead89f830892f55f148df11ac0bd53bcfdae`，分支 `hp/uni/t-0161-key-boundary`，基于 main `1dd4cbad`；**未合并**）：
+**修复**（2026-10-04，[PR #154](https://github.com/UniClipboard/Engine/pull/154)，提交 `157aead89f830892f55f148df11ac0bd53bcfdae`，分支 `hp/uni/t-0161-key-boundary`，基于 main `1dd4cbad`；2026-10-04T16:08:39Z 合并为 main `cdf272ee`，合并时 PR 上的 CI 尚未跑完）：
 
 - **`EncryptionPassphraseChangeJournal`（由 storage 负责）**：
   - 公开类型只保存 `KeySlot`、不透明的 `Kek` 和 `Zeroizing` 包装的 `prepared_registration`。字段全部私有，不实现 serde，`Debug` 仍然脱敏。
@@ -139,7 +139,7 @@
 2. **`lifecycle_targets.rs:73` 偶发的暂停超时**：根因未查明；t-0176 的 `083fd0aa` 可能相关，未验证。
 3. **与 t-0176 的协作去重**：`is_admission_target_stopped` 仍在运行期线程上同步解密。按 2026-10-04 定下的方案 1，PR #153
    保持原范围（当时的 head 是 `d8bcb887`），该 PR 已于 2026-10-04T13:35:53Z 合并。是否随 t-0176 的 iOS 修复带入，由 t-0176 根据真实生命周期复现决定。
-4. **密钥字段边界**：修复在 [PR #154](https://github.com/UniClipboard/Engine/pull/154)（`157aead8`，见"密钥字段可见性审计"），未合并。合入 main 之前不算闭环。
+4. **密钥字段边界**：修复已随 [PR #154](https://github.com/UniClipboard/Engine/pull/154) 合并为 main `cdf272ee`（2026-10-04T16:08:39Z），见"密钥字段可见性审计"。合并时 PR 上的 CI 还没跑完；要等 main 上这次合并的 CI 通过后才算闭环。
 5. **全部收尾后**：再把本计划整体移入 `completed/`。稳定结论已写回 `docs/design-docs/layers/infrastructure.md`：§2.3、§3 是七个 crate 的划分和依赖方向，§13.2.1 是 async 入口不得在运行期线程上同步阻塞。
 
 ## 遗留风险 / 下一步必须处理的事项
