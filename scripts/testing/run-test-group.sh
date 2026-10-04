@@ -127,7 +127,7 @@ case "${GROUP}" in
     fi
     artifact_root="$(artifact_root)"
     export UC_TEST_ARTIFACTS_DIR="${artifact_root}"
-    run_group 6 -p uc-testkit -p uc-application -p uc-infra-p2p -p uc-infra-profile \
+    run_group 8 -p uc-testkit -p uc-application -p uc-infra-p2p -p uc-infra-profile \
       'package(uc-testkit) | package(uc-application) & (test(admission_recovery_scenarios) | test(device_trust_recovery_scenario) | test(legacy_candidate_convergence_scenario) | test(virtual_membership_network) | test(file_transfer_completion_scenario_reports_final_state) | test(text_transfer_scenario)) | package(uc-infra-p2p) & test(provider_dependency_evidence) | package(uc-infra-profile) & binary(profile_storage_upgrade_crash)'
     require_scenario_result "${artifact_root}" "text-transfer-dispatch"
     require_scenario_result "${artifact_root}" "file-transfer-completion"
@@ -139,7 +139,7 @@ case "${GROUP}" in
     printf 'nextest JUnit: target/nextest/ci/junit.xml\n'
     ;;
   persistence-provider)
-    run_group 2 -p uc-infra-profile -p uc-infra-p2p \
+    run_group 4 -p uc-infra-profile -p uc-infra-p2p \
       'package(uc-infra-profile) & (binary(membership_record) | binary(profile_storage_upgrade) | binary(space_admission_state)) | package(uc-infra-p2p) & test(provider_dependency_evidence)' \
       "$@"
     ;;
