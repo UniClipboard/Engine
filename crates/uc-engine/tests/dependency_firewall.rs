@@ -838,6 +838,71 @@ fn normal_dependency<'a>(
         })
 }
 
+/// 七个 Infra 能力 crate 都继承原 uc-infra 的 dev opt-level 3：移动端开发构建走完整加密 blob、
+/// 网络与存储流程，且拆分前后的构建对照只允许改变 crate 边界（issue #144）。
+#[test]
+fn every_infra_capability_crate_keeps_the_dev_optimization_override() {
+    let metadata = workspace_metadata();
+    let infra = metadata
+        .workspace_packages()
+        .into_iter()
+        .map(|package| package.name.to_string())
+        .filter(|name| name.starts_with("uc-infra-"))
+        .collect::<Vec<_>>();
+    assert_eq!(infra.len(), 7, "{infra:?}");
+    let manifest = std::fs::read_to_string(metadata.workspace_root.join("Cargo.toml"))
+        .expect("root manifest must be readable");
+    assert_eq!(
+        dev_opt_level_problems(&manifest, &infra),
+        Vec::<String>::new()
+    );
+
+    let removed = manifest.replace("[profile.dev.package.uc-infra-p2p]\nopt-level = 3\n", "");
+    assert_ne!(removed, manifest);
+    assert_eq!(
+        dev_opt_level_problems(&removed, &infra),
+        vec!["uc-infra-p2p: None".to_owned()]
+    );
+    let lowered = manifest.replace(
+        "[profile.dev.package.uc-infra-storage]\nopt-level = 3",
+        "[profile.dev.package.uc-infra-storage]\nopt-level = 1",
+    );
+    assert_ne!(lowered, manifest);
+    assert_eq!(
+        dev_opt_level_problems(&lowered, &infra),
+        vec!["uc-infra-storage: Some(Integer(1))".to_owned()]
+    );
+    // Cargo 接受的等价写法（表头空白、带引号的包名）不能被误判为缺失。
+    let respelled = manifest.replace(
+        "[profile.dev.package.uc-infra-p2p]",
+        "[ profile.dev.package.\"uc-infra-p2p\" ]",
+    );
+    assert_ne!(respelled, manifest);
+    assert_eq!(
+        dev_opt_level_problems(&respelled, &infra),
+        Vec::<String>::new()
+    );
+}
+
+fn dev_opt_level_problems(manifest: &str, packages: &[String]) -> Vec<String> {
+    let manifest = manifest
+        .parse::<toml::Table>()
+        .expect("root manifest must be valid TOML");
+    let overrides = manifest
+        .get("profile")
+        .and_then(|profile| profile.get("dev"))
+        .and_then(|dev| dev.get("package"));
+    packages
+        .iter()
+        .filter_map(|name| {
+            let level = overrides
+                .and_then(|packages| packages.get(name))
+                .and_then(|package| package.get("opt-level"));
+            (level != Some(&toml::Value::Integer(3))).then(|| format!("{name}: {level:?}"))
+        })
+        .collect()
+}
+
 fn assert_default_does_not_enable(package: &cargo_metadata::Package, feature: &str) {
     let default_features = package.features.get("default");
     assert!(

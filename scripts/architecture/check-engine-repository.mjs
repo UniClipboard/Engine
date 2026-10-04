@@ -259,33 +259,6 @@ function checkWorkspaceShape(metadata) {
   return problems
 }
 
-// 七个 Infra 能力 crate 都继承原 uc-infra 的 dev opt-level 3：移动端开发构建走完整加密 blob、
-// 网络与存储流程，且拆分前后的构建对照只允许改变 crate 边界（issue #144）。
-function checkInfraDevOptimization(metadata, sources) {
-  const problems = []
-  const infraPackages = metadata.workspace_members
-    .map(id => metadata.packages.find(candidate => candidate.id === id)?.name)
-    .filter(name => name?.startsWith('uc-infra-'))
-  const optLevels = new Map()
-  let section = null
-  for (const line of sources.rootManifest.split('\n')) {
-    const header = line.match(/^\[(.+)\]\s*$/)
-    if (header) {
-      section = header[1]
-      continue
-    }
-    const optLevel = line.match(/^opt-level\s*=\s*(\S+)\s*$/)
-    if (optLevel && section) optLevels.set(section, optLevel[1])
-  }
-  for (const name of infraPackages) {
-    const level = optLevels.get(`profile.dev.package.${name}`)
-    if (level !== '3') {
-      addProblem(problems, 'infra dev optimization', `${name} must keep [profile.dev.package.${name}] opt-level = 3; found ${level ?? 'none'}`)
-    }
-  }
-  return problems
-}
-
 function checkPackageSelectors(metadata, sources) {
   const problems = []
   const members = new Set(
@@ -2233,7 +2206,6 @@ function packageSelectorSources() {
 
 function repositorySources() {
   return {
-    rootManifest: read('Cargo.toml'),
     packageSelectors: packageSelectorSources(),
     monolithicMembershipHistoryPresent: existsSync(join(REPOSITORY_ROOT, 'crates/uc-core/src/membership/versioned_membership_history.rs')),
     membershipHistoryRoot: read('crates/uc-core/src/membership/versioned_membership_history/mod.rs'),
@@ -2357,7 +2329,6 @@ function repositorySources() {
 function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
   return [
     ...checkWorkspaceShape(metadata),
-    ...checkInfraDevOptimization(metadata, sources),
     ...checkPackageSelectors(metadata, sources),
     ...checkOpenMlsValidation(metadata),
     ...checkLocalDependencies(metadata),
@@ -2417,12 +2388,6 @@ function runNegativeFixtures(metadata, sources) {
   }, metadata, sources)
   expectRejected('public membership history implementation modules', (_metadata, changed) => {
     changed.membershipHistoryRoot += '\npub mod archive;\n'
-  }, metadata, sources)
-  expectRejected('infra capability crate without the dev optimization override', (_metadata, changed) => {
-    changed.rootManifest = changed.rootManifest.replace(/\[profile\.dev\.package\.uc-infra-p2p\]\nopt-level = 3\n/, '')
-  }, metadata, sources)
-  expectRejected('infra capability crate with a lowered dev optimization level', (_metadata, changed) => {
-    changed.rootManifest = changed.rootManifest.replace(/(\[profile\.dev\.package\.uc-infra-storage\]\nopt-level = )3/, '$11')
   }, metadata, sources)
   expectRejected('test selector naming a removed package', (_metadata, changed) => {
     changed.packageSelectors = [
