@@ -11,7 +11,7 @@ use uc_application::deps::{
 use uc_core::app_dirs::AppPaths;
 use uc_core::ports::SecureStoragePort;
 
-use crate::db::pool::DbPool;
+use uc_infra_storage::db::pool::DbPool;
 
 use uc_infra_security::profile_content_key_vault::PROFILE_CONTENT_VAULT_KEY_NAME;
 use uc_infra_security::AdmissionKeyManager;
@@ -440,7 +440,8 @@ mod tests {
             .execute(&mut connection)
             .unwrap();
         drop(connection);
-        let pool = crate::db::pool::init_db_pool(paths.db_path.to_str().unwrap()).unwrap();
+        let pool =
+            uc_infra_storage::db::pool::init_db_pool(paths.db_path.to_str().unwrap()).unwrap();
         let cleaner = ProfileStateCleaner::new(pool, paths.clone(), paths.db_path.clone());
 
         cleaner.clear_and_verify_profile_state().await.unwrap();
@@ -465,7 +466,8 @@ mod tests {
             .exists());
         assert!(!paths.app_data_root_dir.join("import-staging").exists());
         assert!(!paths.app_data_root_dir.join("pending-import.json").exists());
-        let reopened_pool = crate::db::pool::init_db_pool(paths.db_path.to_str().unwrap()).unwrap();
+        let reopened_pool =
+            uc_infra_storage::db::pool::init_db_pool(paths.db_path.to_str().unwrap()).unwrap();
         let mut reopened = reopened_pool.get().unwrap();
         #[derive(diesel::QueryableByName)]
         struct CountRow {

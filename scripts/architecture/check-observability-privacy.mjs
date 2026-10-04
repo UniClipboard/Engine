@@ -14,6 +14,8 @@ const SOURCE_ROOTS = [
   'crates/uc-infra-local/src',
   'crates/uc-infra-crypto/src',
   'crates/uc-infra-security/src',
+  'crates/uc-infra-storage/src',
+  'crates/uc-infra-content/src',
   'crates/uc-engine/src',
   'crates/uc-observability-contract/src',
   'crates/uc-observability-runtime/src',

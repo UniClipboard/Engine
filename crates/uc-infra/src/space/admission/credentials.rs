@@ -17,9 +17,6 @@ use uc_core::membership::{
 };
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use crate::db::connection::establish_waiting;
-use crate::db::pool::DbPool;
-use crate::db::ports::DbExecutor;
 use crate::network::iroh::{
     SpaceAdmissionChannelCredentialError, SpaceAdmissionChannelCredentialPort,
     SponsorOpaqueMaterial,
@@ -28,6 +25,9 @@ use crate::security::{
     ActiveRuntimeManifest, ActiveSpaceGenerationManifestStore, AdmissionKeyError,
     AdmissionKeyManager, SpaceAdmissionAuth,
 };
+use uc_infra_storage::db::connection::establish_waiting;
+use uc_infra_storage::db::pool::DbPool;
+use uc_infra_storage::db::ports::DbExecutor;
 
 use super::repository::{CredentialLoadError, SqliteSpaceAdmissionState};
 
@@ -759,12 +759,12 @@ mod tests {
     };
     use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
-    use crate::db::executor::DieselSqliteExecutor;
-    use crate::db::pool::init_db_pool;
-    use crate::db::ports::DbExecutor;
     use crate::security::{
         ActiveRuntimeManifestV3, ActiveSpaceGenerationManifestStore, SpaceAdmissionAuthContext,
     };
+    use uc_infra_storage::db::executor::DieselSqliteExecutor;
+    use uc_infra_storage::db::pool::init_db_pool;
+    use uc_infra_storage::db::ports::DbExecutor;
 
     #[test]
     fn credential_failure_diagnostics_preserve_source_without_exporting_it() {

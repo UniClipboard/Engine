@@ -53,15 +53,15 @@ mod tests {
         IROH_IDENTITY_PREFIX, KEYSLOT_MEMBER,
     };
     use super::{ConfigMigrationAdapter, ConfigMigrationPaths};
-    use crate::db::pool::init_db_pool;
     use crate::security::DefaultCurrentProfile;
     use crate::space::{InMemorySession, KeyMaterialStore, MigrationSpaceAccessAdapter};
     use uc_infra_security::key_slot_store::JsonKeySlotStore;
+    use uc_infra_storage::db::pool::init_db_pool;
 
     use std::collections::HashMap;
     use std::sync::Mutex;
 
-    type DbPool = crate::db::pool::DbPool;
+    type DbPool = uc_infra_storage::db::pool::DbPool;
 
     /// Space passphrase used to initialize the fixture. The KEK is derived from
     /// it, so this same passphrase opens the exported bundle.

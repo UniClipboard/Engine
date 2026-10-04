@@ -126,7 +126,7 @@ impl RuntimeUpgradeBootstrap {
                 .ok_or_else(|| ProfileStorageUpgradeError::Storage {
                     source: anyhow::anyhow!("profile storage upgrade source path is invalid"),
                 })?;
-        let source_pool = crate::db::pool::init_db_pool(database).map_err(|source| {
+        let source_pool = uc_infra_storage::db::pool::init_db_pool(database).map_err(|source| {
             ProfileStorageUpgradeError::Storage {
                 source: source.context("open profile storage upgrade source database"),
             }
@@ -143,14 +143,15 @@ impl RuntimeUpgradeBootstrap {
                 Arc::clone(&self.secure_storage),
                 keyslot_store,
             ));
-            let executor = Arc::new(crate::db::executor::DieselSqliteExecutor::new(
+            let executor = Arc::new(uc_infra_storage::db::executor::DieselSqliteExecutor::new(
                 source_pool.clone(),
             ));
-            let security_repository =
-                Arc::new(crate::db::repositories::DieselSpaceSecurityStore::new(
+            let security_repository = Arc::new(
+                uc_infra_storage::db::repositories::DieselSpaceSecurityStore::new(
                     executor,
                     source_session.as_ref().clone(),
-                ));
+                ),
+            );
             let access = RuntimeSpaceAccessAdapter::new(
                 key_material,
                 current_profile,
@@ -322,7 +323,7 @@ impl ProfileStorageUpgrade {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         profile_root: PathBuf,
-        source_pool: crate::db::pool::DbPool,
+        source_pool: uc_infra_storage::db::pool::DbPool,
         source_blob_root: std::path::PathBuf,
         profile_id: ProfileId,
         source_session: Arc<InMemorySession>,
@@ -348,7 +349,7 @@ impl ProfileStorageUpgrade {
     #[allow(clippy::too_many_arguments)]
     pub fn new_stepwise_for_testing(
         profile_root: PathBuf,
-        source_pool: crate::db::pool::DbPool,
+        source_pool: uc_infra_storage::db::pool::DbPool,
         source_blob_root: PathBuf,
         profile_id: ProfileId,
         source_session: Arc<InMemorySession>,
@@ -372,7 +373,7 @@ impl ProfileStorageUpgrade {
     #[allow(clippy::too_many_arguments)]
     fn with_source(
         profile_root: PathBuf,
-        source_pool: crate::db::pool::DbPool,
+        source_pool: uc_infra_storage::db::pool::DbPool,
         source_blob_root: PathBuf,
         profile_id: ProfileId,
         source_session: Arc<InMemorySession>,

@@ -2,7 +2,8 @@
 
 ## 状态与完整责任
 
-- **状态**：实施中。S0（完整基线实验）按用户指示跳过；S1、S2 已完成（S1 已合并，S2 本次提交）。S3–S6 未开始。
+- **状态**：实施中。S0（完整基线实验）按用户指示跳过；S1、S2 已完成并合并；S3 的 storage、content 两半均已完成。
+  S4–S6 未开始。
 - **日期**：2026-10-04。
 - **跟踪**：[Issue #144](https://github.com/UniClipboard/Engine/issues/144)（设计全文、七个 crate 的职责/允许依赖表、
   六类依赖切断方案、Edge Cases、测试策略、构建性能实验方法、验收标准均在 issue 正文，本文件不复制，只跟踪切片状态）。
@@ -25,8 +26,8 @@
 | --- | --- | --- | --- |
 | S0 | 精确逐文件迁移清单 + 真实 timings/RSS 基线 | **跳过**（用户 2026-10-03 明确指示直接动代码） | 无基线数据；后续构建性能验收缺这一环 |
 | S1 | 提取 `uc-infra-local`、`uc-infra-crypto` | **完成** | [PR #145](https://github.com/UniClipboard/Engine/pull/145)，已 squash merge 到 `main`（`f0f0b5fb`，2026-10-04） |
-| S2 | 原子提取 `uc-infra-security`（session/vault/事务代次一起搬，DB 耦合的生命周期部分留给 profile） | **完成** | 本次提交；见下方"S2 范围" |
-| S3 | 提取 `uc-infra-storage`、`uc-infra-content` | 未开始 | — |
+| S2 | 原子提取 `uc-infra-security`（session/vault/事务代次一起搬，DB 耦合的生命周期部分留给 profile） | **完成** | [PR #147](https://github.com/UniClipboard/Engine/pull/147)，已 squash merge 到 `main`（`ec3301a3`） |
+| S3 | 提取 `uc-infra-storage`、`uc-infra-content` | **完成** | 本次提交；见下方"S3 范围" |
 | S4 | 完成邀请 codec、错误分类、身份槽位切断，再提取整个 `uc-infra-p2p` | 未开始 | — |
 | S5 | 剩余升级/激活能力迁 `uc-infra-profile`，LAN 移 `uc-mobile-lan`，删除 `uc-infra` | 未开始 | — |
 | S6 | 更新架构门禁、CI、构建缓存、发布脚本、文档；完成公平性能对照 | 未开始（S1/S2 已顺带同步 `check-engine-repository.mjs`、`check-observability-privacy.mjs` 的扫描范围，但完整 S6 清单未逐项核对） | — |
@@ -116,13 +117,60 @@
 `uc-engine --lib` 276 passed 不变。全部 0 failed。这满足了"不丢覆盖"的实质要求，但不是 issue 字面要求的
 "先列失败矩阵"文档；如果后续复盘认为这不够，需要补一份显式的矩阵。
 
+## S3 范围（2026-10-04，storage + content 两半）
+
+**`uc-infra-storage`（新建）**：`db/`（全部 repository/mapper/model/schema，含其 Diesel `migrations/` 目录）、
+`file_transfer/`、`search/`、`active_space_generation_manifest_store.rs`（及其
+`EncryptionPassphraseChangeJournal`，仍只在 `uc-infra` 的 `space/encryption_passphrase_change.rs` 内部使用）。
+
+**没有跟着这一半走的部分**（issue 原表把它们的 SQL 所有权分给 storage，但本次刻意不动）：
+
+- `space/membership_record/`（issue 第 5 节第 5 条："成员记录 membership_record/ 移 storage"）
+- `space/admission/repository/` 及其 `display.rs` 配套读取（issue 同一条："准入记录 repository/、配套 display
+  读取实现...移 storage，完整事务一起移动"）
+
+这两组和 `space/admission/` 其余"preparation/activation"（profile 目标，留在 `uc-infra` 等 S5）物理上还在同一
+目录树里，没有先做一次"只挪 SQL 那一半、把 preparation/activation 留在原地"的拆分就直接搬，风险和工作量都
+不比这一刀本身小；留给专门的后续切片，不在 S3 这次顺带做。
+
+**`uc-infra-content`（issue 原表 S3 的另一半，2026-10-04 完成）**：`clipboard/`、`config/`、
+`security/encrypted_blob_store.rs`（现 `uc-infra-content/src/encrypted_blob_store.rs`）、
+`content_protection/blob_store.rs`（现 `uc-infra-content/src/content_protection/blob_store.rs`）、
+`profile_payload_adapters.rs`，以及 `decrypting_clipboard_event_repo`/`decrypting_representation_repo`/
+`encrypting_clipboard_event_writer`/`encrypting_inbound_receive_commit` 四个加解密适配器，全部只依赖
+`uc-infra-local`/`uc-infra-crypto`/`uc-infra-security`。`uc-infra/src/security/mod.rs` 保留
+`pub use uc_infra_content::{...}` 转发，不留旧实现。`EncryptedBlobStore::open_bytes` 从 `pub(super)` 放宽到
+`pub`，供 `uc-infra` 的 `profile_storage_upgrade::primary_payloads` 跨 crate 调用（升级路径需要先读原字节区分
+介质失败与密文认证失败）。`uc-engine` 里 4 处 `uc_infra::clipboard::`/`uc_infra::config::` 引用改成
+`uc_infra_content::clipboard::`/`uc_infra_content::config::`，`uc-infra`/`uc-engine` 的 `Cargo.toml` 都加了
+`uc-infra-content` 依赖（`uc-infra` 的 `test-util` feature 一并转发 `uc-infra-content/test-util`）。验证：
+`uc-infra-content` 自身 76 passed；`uc-infra --lib` 513 passed（含本次新增的可见性放宽覆盖）；`uc-engine --lib`
+276 passed/3 ignored，与既有基线一致。
+
+### 可复用的模式（延续 S2 的跨 crate 测试处理方式）
+
+- **编译器驱动的可见性修正**：和 S2 一样，没有预先枚举——每个 `cargo check` 报的"方法不存在/不可见"都用来
+  判断该放宽到 `pub`（真实跨 crate 调用方，主要是 `uc-infra` 的 `profile_storage_upgrade`/
+  `space/membership_record`/`space/admission`）还是该转 `#[cfg(any(test, feature = "test-util"))]`
+  （`test_relationship_store` 等纯测试脚手架）。
+- **跨 crate 测试：原样迁移/新 integration test/小量复刻，三选一，不删测试**：这次只用到了"小量复刻"——
+  `mobile_device_repo` 的并发写入契约测试（`verify_activity_contract`）原本在 `uc-infra` 的
+  `mobile_sync::device_repo::tests` 里，同时被内存 fake（留在 `uc-infra`）和真实 SQLite repo（现在在
+  `uc-infra-storage`）复用；由于依赖方向是 `uc-infra` → `uc-infra-storage`，storage 不能反过来调用 `uc-infra`
+  的测试私有方法，所以在 `uc-infra-storage` 里复刻了一份同样内容的契约测试（纯测试断言，不是生产实现）。
+- **已知的架构脚本缺口**：`check-engine-repository.mjs` 里有两处之前直接 `read()` 旧路径
+  （`crates/uc-infra/src/db/repositories/{mod.rs,relationship_store.rs}`）的硬编码检查，这次一起改到了新路径；
+  如果后续还发现类似遗漏，优先假设"检查脚本跟旧路径"而不是"代码本身有问题"。
+
 ## 遗留风险 / 下一步必须处理的事项
 
-1. **构建性能 A/B 实验（issue §8/§9）完全没有做**：S1/S2 分出的三个 crate 里，`uc-infra-security` 依赖
-   OpenMLS/opaque-ke 等重依赖，`uc-infra` 仍是编译耗时的主体。必须等 S3（storage/content）或更晚再测，
-   否则"提速 20%"之类的验收标准无法验证。
-2. **S2 没有产出 issue 字面要求的失败矩阵文档**（见上一节），只做了等价的"零覆盖流失"验证。
-3. **S3 开工前的分支状态**：本次 S2 提交若按 squash merge 流程合并，继续 S4 需要先从新 `main` 切干净分支。
-4. **`uc-infra-security` 新增的 `test-util` feature** 目前只转发 `uc-infra-crypto/test-util` 并放宽了若干
-   `#[cfg(test)]` 方法；S3/S4 继续拆分时如果还有类似的跨 crate 测试脚手架需求，复用同一个 feature，不要
-   新增第二个同义 feature。
+1. **构建性能 A/B 实验（issue §8/§9）完全没有做**：即使 storage、content 两个较大的 crate 已经分出去，`uc-infra`
+   仍然持有 profile/admission 的大头，现在测仍然不是公平对照。留给 S5（profile 拆完）之后再测。
+2. **S2 没有产出 issue 字面要求的失败矩阵文档**，S3 同样没有补；只做了等价的"零覆盖流失"验证。
+3. **`space/membership_record/`、`space/admission/repository/`+`display.rs` 的 SQL 所有权还留在 `uc-infra`**，
+   和 issue 原表不一致，需要专门的切片处理（见上）。
+4. **继续 S4（或下一个切片）开工前的分支状态**：本次 S3 content 提交若按 squash merge 流程合并，
+   继续后续工作需要先从新 `main` 切干净分支。
+5. **`uc-infra-security`/`uc-infra-storage`/`uc-infra-content` 的 `test-util` feature** 目前各自放宽了若干
+   `#[cfg(test)]`/`#[cfg(any(test, feature = "test-util"))]` 方法；继续拆分时如果还有类似的跨 crate 测试
+   脚手架需求，复用同一个 feature 名字，不要新增第二个同义 feature。

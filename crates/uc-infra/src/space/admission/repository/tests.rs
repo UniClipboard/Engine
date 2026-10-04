@@ -19,10 +19,10 @@ use super::persisted::{
     PersistedSpaceAdmissionMetadataV3, PersistedSpaceAdmissionRepositoryV2, StoredSpaceAdmissionV1,
 };
 use super::{SpaceAdmissionStateStoreError, SqliteSpaceAdmissionState};
-use crate::db::executor::DieselSqliteExecutor;
-use crate::db::pool::init_db_pool;
 use crate::security::{ActiveSpaceGenerationManifestStore, AdmissionKeyManager};
 use crate::space::membership_record::test_support::UnavailableMembershipRecords;
+use uc_infra_storage::db::executor::DieselSqliteExecutor;
+use uc_infra_storage::db::pool::init_db_pool;
 
 #[derive(Default)]
 struct MemoryStorage(Mutex<HashMap<String, Vec<u8>>>, AtomicBool);

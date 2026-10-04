@@ -19,16 +19,16 @@ use uc_core::ports::{
     ReceiveArtifactResolution, RecordReceiveArtifactsPort, RequestReceiveCancellationPort,
 };
 use uc_core::SnapshotHash;
-use uc_infra::db::executor::DieselSqliteExecutor;
-use uc_infra::db::mappers::clipboard_entry_mapper::ClipboardEntryRowMapper;
-use uc_infra::db::mappers::clipboard_selection_mapper::ClipboardSelectionRowMapper;
-use uc_infra::db::pool::init_db_pool;
-use uc_infra::db::ports::DbExecutor;
-use uc_infra::db::repositories::{
+use uc_infra_storage::db::executor::DieselSqliteExecutor;
+use uc_infra_storage::db::mappers::clipboard_entry_mapper::ClipboardEntryRowMapper;
+use uc_infra_storage::db::mappers::clipboard_selection_mapper::ClipboardSelectionRowMapper;
+use uc_infra_storage::db::pool::init_db_pool;
+use uc_infra_storage::db::ports::DbExecutor;
+use uc_infra_storage::db::repositories::{
     DieselClipboardEntryRepository, DieselEntryReceiveAttemptRepository,
     DieselInboundReceiveCommitRepository, DieselReceiveArtifactLogRepository,
 };
-use uc_infra::db::schema::{clipboard_entry, entry_receive_attempt, receive_artifact_log};
+use uc_infra_storage::db::schema::{clipboard_entry, entry_receive_attempt, receive_artifact_log};
 
 struct FixedSubkey;
 

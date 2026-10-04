@@ -72,7 +72,7 @@ const commit = readFileSync(join(releaseDirectory, 'source-commit.txt'), 'utf8')
 const lockPath = join(releaseDirectory, 'Cargo.lock')
 const rustToolchain = readFileSync(join(repositoryRoot, 'rust-toolchain.toml'), 'utf8')
   .match(/channel\s*=\s*"([^"]+)"/)?.[1]
-const migrations = readdirSync(join(repositoryRoot, 'crates/uc-infra/migrations'))
+const migrations = readdirSync(join(repositoryRoot, 'crates/uc-infra-storage/migrations'))
   .filter(name => /^\d/.test(name))
   .sort()
 const metadata = parseJson(

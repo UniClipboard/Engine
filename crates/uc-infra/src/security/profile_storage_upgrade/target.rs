@@ -5,7 +5,6 @@ use diesel::connection::SimpleConnection as _;
 use diesel::{Connection as _, RunQueryDsl as _};
 
 use crate::config_migration::db_snapshot;
-use crate::db::pool::DbPool;
 use crate::security::profile_runtime_layout::{
     control_generation_directory, profile_generation_directory, CONTROL_DATABASE_FILE,
     PAYLOAD_OUTPUT_DIRECTORY, PROFILE_DATABASE_FILE,
@@ -13,6 +12,7 @@ use crate::security::profile_runtime_layout::{
 use crate::security::{AdmissionKeyError, AdmissionKeyManager};
 use crate::space::upgrade_registration_to_control_generation;
 use uc_core::membership::ActiveSpaceGenerationManifestV2;
+use uc_infra_storage::db::pool::DbPool;
 
 use super::journal::UpgradeJournalV1;
 use super::ProfileStorageUpgradeError;
@@ -689,7 +689,7 @@ mod tests {
     use super::{
         ensure_tables_empty, separate_database, PROFILE_COORDINATION_TABLES, SPACE_CONTROL_TABLES,
     };
-    use crate::db::pool::init_db_pool;
+    use uc_infra_storage::db::pool::init_db_pool;
 
     #[test]
     fn final_profile_ownership_rejects_space_control_rows() {

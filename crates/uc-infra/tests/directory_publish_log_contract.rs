@@ -10,12 +10,12 @@ use uc_core::ports::space::{DeriveSpaceSubkeyPort, SpaceAccessError};
 use uc_core::ports::{
     GetDirectoryPublishRecordPort, PublishLogError, PublishPhase, RecordDirectoryPublishPort,
 };
-use uc_infra::db::executor::DieselSqliteExecutor;
-use uc_infra::db::models::DirectoryPublishLogRow;
-use uc_infra::db::pool::init_db_pool;
-use uc_infra::db::ports::DbExecutor;
-use uc_infra::db::repositories::DieselDirectoryPublishLogRepository;
-use uc_infra::db::schema::directory_publish_log;
+use uc_infra_storage::db::executor::DieselSqliteExecutor;
+use uc_infra_storage::db::models::DirectoryPublishLogRow;
+use uc_infra_storage::db::pool::init_db_pool;
+use uc_infra_storage::db::ports::DbExecutor;
+use uc_infra_storage::db::repositories::DieselDirectoryPublishLogRepository;
+use uc_infra_storage::db::schema::directory_publish_log;
 
 struct FixedSubkey;
 

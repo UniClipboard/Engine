@@ -33,6 +33,8 @@ uc-core = { path = "../uc-core", features = ["task-registry"] }
 uc-infra = { path = "../uc-infra" }
 uc-infra-local = { path = "../uc-infra-local" }
 uc-infra-security = { path = "../uc-infra-security" }
+uc-infra-storage = { path = "../uc-infra-storage" }
+uc-infra-content = { path = "../uc-infra-content" }
 uc-mobile-lan = { path = "../../compatibility/uc-mobile-lan", optional = true }
 uc-mobile-proto = { path = "../../compatibility/uc-mobile-proto", optional = true }
 uc-observability-contract = { path = "../uc-observability-contract" }

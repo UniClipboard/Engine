@@ -461,8 +461,8 @@ impl PrimaryPayloadConverter {
                 )))
             }
         }
-        use crate::db::schema::clipboard_snapshot_representation::dsl as representation;
         use diesel::prelude::*;
+        use uc_infra_storage::db::schema::clipboard_snapshot_representation::dsl as representation;
         let states = representation::clipboard_snapshot_representation
             .filter(representation::blob_id.eq(blob_id.as_str()))
             .select((representation::payload_state, representation::last_error))
@@ -741,8 +741,8 @@ mod tests {
     use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
     use super::*;
-    use crate::db::pool::init_db_pool;
     use crate::security::MasterKey;
+    use uc_infra_storage::db::pool::init_db_pool;
 
     #[derive(Default)]
     struct MemorySecureStorage(Mutex<BTreeMap<String, Vec<u8>>>);
@@ -1104,14 +1104,14 @@ mod tests {
         );
         let mut output_connection = open_connection(&output.join(OUTPUT_DATABASE)).unwrap();
         let (payload_state, last_error) =
-            crate::db::schema::clipboard_snapshot_representation::table
+            uc_infra_storage::db::schema::clipboard_snapshot_representation::table
                 .filter(
-                    crate::db::schema::clipboard_snapshot_representation::id
+                    uc_infra_storage::db::schema::clipboard_snapshot_representation::id
                         .eq("representation-unreadable"),
                 )
                 .select((
-                    crate::db::schema::clipboard_snapshot_representation::payload_state,
-                    crate::db::schema::clipboard_snapshot_representation::last_error,
+                    uc_infra_storage::db::schema::clipboard_snapshot_representation::payload_state,
+                    uc_infra_storage::db::schema::clipboard_snapshot_representation::last_error,
                 ))
                 .first::<(String, Option<String>)>(&mut output_connection)
                 .unwrap();
@@ -1121,15 +1121,15 @@ mod tests {
             Some("unreadable encrypted payload preserved during profile storage upgrade")
         );
         let (preserved_inline, inline_state, inline_error) =
-            crate::db::schema::clipboard_snapshot_representation::table
+            uc_infra_storage::db::schema::clipboard_snapshot_representation::table
                 .filter(
-                    crate::db::schema::clipboard_snapshot_representation::id
+                    uc_infra_storage::db::schema::clipboard_snapshot_representation::id
                         .eq("representation-unreadable-inline"),
                 )
                 .select((
-                    crate::db::schema::clipboard_snapshot_representation::inline_data,
-                    crate::db::schema::clipboard_snapshot_representation::payload_state,
-                    crate::db::schema::clipboard_snapshot_representation::last_error,
+                    uc_infra_storage::db::schema::clipboard_snapshot_representation::inline_data,
+                    uc_infra_storage::db::schema::clipboard_snapshot_representation::payload_state,
+                    uc_infra_storage::db::schema::clipboard_snapshot_representation::last_error,
                 ))
                 .first::<(Option<Vec<u8>>, String, Option<String>)>(&mut output_connection)
                 .unwrap();

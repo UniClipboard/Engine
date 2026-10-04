@@ -21,9 +21,6 @@ use self::persistence::{
     TargetSessionSubkeyDeriver,
 };
 use super::{ActiveRuntimeManifestV3, AdmissionKeyManager, ProfileRuntimeLayout};
-use crate::db::connection::is_lock_contention;
-use crate::db::executor::DieselSqliteExecutor;
-use crate::db::repositories::{DieselSpaceSecurityStore, EncryptedRelationshipStore};
 use crate::space::{
     install_prepared_registration_for_control_generation,
     rebind_registration_to_control_generation, verify_prepared_registration_for_control_generation,
@@ -33,6 +30,9 @@ use crate::space::{
 use uc_infra_local::fs::work_directory::remove_work_directory_best_effort;
 use uc_infra_local::fs::FsAtomicPublisher;
 use uc_infra_local::time::SystemClock;
+use uc_infra_storage::db::connection::is_lock_contention;
+use uc_infra_storage::db::executor::DieselSqliteExecutor;
+use uc_infra_storage::db::repositories::{DieselSpaceSecurityStore, EncryptedRelationshipStore};
 
 /// 已完整写入、由 production repository 回读且原子发布的控制世代证明。
 ///
@@ -189,7 +189,7 @@ impl SpaceControlGeneration {
         &self,
         source: &ActiveRuntimeManifestV3,
         target: &ActiveRuntimeManifestV3,
-        source_pool: &crate::db::pool::DbPool,
+        source_pool: &uc_infra_storage::db::pool::DbPool,
     ) -> Result<PreparedSpaceControlGeneration, SpaceControlGenerationError> {
         self.prepare_retained_control_snapshot(source, target, source_pool, true)
             .await
@@ -200,7 +200,7 @@ impl SpaceControlGeneration {
         &self,
         source: &ActiveRuntimeManifestV3,
         target: &ActiveRuntimeManifestV3,
-        source_pool: &crate::db::pool::DbPool,
+        source_pool: &uc_infra_storage::db::pool::DbPool,
     ) -> Result<PreparedSpaceControlGeneration, SpaceControlGenerationError> {
         self.prepare_retained_control_snapshot(source, target, source_pool, false)
             .await
@@ -210,7 +210,7 @@ impl SpaceControlGeneration {
         &self,
         source: &ActiveRuntimeManifestV3,
         target: &ActiveRuntimeManifestV3,
-        source_pool: &crate::db::pool::DbPool,
+        source_pool: &uc_infra_storage::db::pool::DbPool,
         space_changes: bool,
     ) -> Result<PreparedSpaceControlGeneration, SpaceControlGenerationError> {
         let _guard = self.prepare_lock.lock().await;
@@ -410,7 +410,7 @@ impl SpaceControlGeneration {
         &self,
         source: &ActiveRuntimeManifestV3,
         target: &ActiveRuntimeManifestV3,
-        active_pool: &crate::db::pool::DbPool,
+        active_pool: &uc_infra_storage::db::pool::DbPool,
     ) -> Result<PreparedSpaceControlGeneration, SpaceControlGenerationError> {
         let _guard = self.prepare_lock.lock().await;
         if source.layout().space_id() == target.layout().space_id()

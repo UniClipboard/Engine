@@ -1,7 +1,7 @@
 //! `InMemoryMobileDeviceRepository` —— [`MobileDeviceStore`] 的进
 //! 程内实现(v3 SyncClipboard 兼容版)。
 //!
-//! 现在 daemon 链路上默认走 [`crate::db::repositories::DieselMobileDeviceRepository`]
+//! 现在 daemon 链路上默认走 [`uc_infra_storage::db::repositories::DieselMobileDeviceRepository`]
 //! (跨进程 / 重启稳定),本类型仅作为 use case 单测的轻量替身保留:测试
 //! 侧不愿意为了一两条断言去搭 Diesel + tempdir,直接用 in-memory 就够了。
 //!

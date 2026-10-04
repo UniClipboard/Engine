@@ -157,7 +157,7 @@ pub(super) fn build_cipher_decorators(
     // TransferCipherPort — uc-application clipboard_sync encrypts/decrypts V3
     // network bytes through this port, sharing the same InMemorySession.
     let transfer_cipher: Arc<dyn uc_core::ports::security::TransferCipherPort> = Arc::new(
-        uc_infra::clipboard::TransferCipherAdapter::new(session.clone()),
+        uc_infra_content::clipboard::TransferCipherAdapter::new(session.clone()),
     );
 
     // Wrap ports with encryption decorators.
@@ -351,7 +351,9 @@ pub(super) fn create_infra_layer(
     let representation_repo: Arc<dyn ClipboardRepresentationStore> = Arc::new(rep_repo);
 
     let entry_delivery_repo: Arc<dyn uc_core::ports::EntryDeliveryRepositoryPort> = Arc::new(
-        uc_infra::db::repositories::DieselEntryDeliveryRepository::new(Arc::clone(&db_executor)),
+        uc_infra_storage::db::repositories::DieselEntryDeliveryRepository::new(Arc::clone(
+            &db_executor,
+        )),
     );
 
     // NOTE: the entry-file-set repo seals its path columns with a per-session

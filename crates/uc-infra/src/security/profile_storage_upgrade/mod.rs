@@ -24,7 +24,6 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use super::{ActiveRuntimeManifest, ActiveSpaceGenerationManifestStore};
-use crate::security::active_space_generation_manifest_store::V3ManifestPromotionOutcome;
 use bootstrap::RuntimeUpgradeBootstrap;
 use derived_payloads::DerivedPayloadConverter;
 use diagnostics::UpgradeDiagnostics;
@@ -37,6 +36,7 @@ pub use progress::{
     StorageUpgradeSnapshot, StorageUpgradeStep, StorageUpgradeStepProgress, StorageUpgradeUnit,
 };
 use target::TargetGenerationStager;
+use uc_infra_storage::active_space_generation_manifest_store::V3ManifestPromotionOutcome;
 use validation::RuntimeGenerationValidator;
 
 /// 一次完整存储升级检查的稳定结果。

@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use uc_core::membership::{ActiveSpaceGenerationManifestV2, AdmissionSourceSnapshot};
 
-use crate::db::ports::DbExecutor;
 use crate::security::{ActiveRuntimeManifest, ActiveSpaceGenerationManifestStoreError};
+use uc_infra_storage::db::ports::DbExecutor;
 
 use super::super::repository::{SpaceAdmissionStateStoreError, SqliteSpaceAdmissionState};
 
@@ -85,11 +85,11 @@ mod tests {
     use uc_core::membership::{ActiveRuntimeLayout, ActiveSpaceGenerationManifestV2};
     use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
-    use crate::db::executor::DieselSqliteExecutor;
-    use crate::db::pool::init_db_pool;
     use crate::security::{
         ActiveRuntimeManifestV3, ActiveSpaceGenerationManifestStore, AdmissionKeyManager,
     };
+    use uc_infra_storage::db::executor::DieselSqliteExecutor;
+    use uc_infra_storage::db::pool::init_db_pool;
 
     use super::super::super::repository::SqliteSpaceAdmissionState;
     use super::{PersistedAdmissionSourceSnapshotV1, SOURCE_SNAPSHOT_FORMAT_V1};

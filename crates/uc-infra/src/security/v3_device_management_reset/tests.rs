@@ -18,10 +18,6 @@ use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
 use super::V3DeviceManagementReset;
-use crate::db::executor::DieselSqliteExecutor;
-use crate::db::pool::{init_db_pool, DbPool};
-use crate::db::repositories::DieselSpaceSecurityStore;
-use crate::security::active_space_generation_manifest_store::V3ManifestPromotionOutcome;
 use crate::security::{
     ActiveRuntimeManifest, ActiveRuntimeManifestV3, ActiveSpaceGenerationManifestStore,
     AdmissionKeyManager, DefaultCurrentProfile, MasterKey, ProfileContentKeyVault,
@@ -29,6 +25,10 @@ use crate::security::{
 };
 use crate::space::{InMemorySession, KeyMaterialStore, RuntimeSpaceAccessAdapter};
 use uc_infra_security::key_slot_store::JsonKeySlotStore;
+use uc_infra_storage::active_space_generation_manifest_store::V3ManifestPromotionOutcome;
+use uc_infra_storage::db::executor::DieselSqliteExecutor;
+use uc_infra_storage::db::pool::{init_db_pool, DbPool};
+use uc_infra_storage::db::repositories::DieselSpaceSecurityStore;
 
 #[derive(Default)]
 struct MemorySecureStorage(Mutex<HashMap<String, Vec<u8>>>);

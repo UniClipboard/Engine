@@ -18,7 +18,7 @@ use uc_core::{
         PeerAddressRecord, PeerAddressRepositoryPort,
     },
 };
-use uc_infra::db::{
+use uc_infra_storage::db::{
     executor::DieselSqliteExecutor,
     pool::init_db_pool,
     ports::DbExecutor,

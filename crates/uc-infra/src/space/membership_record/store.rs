@@ -15,9 +15,9 @@ use uc_core::ports::ClockPort;
 use zeroize::Zeroizing;
 
 use super::codec::{self, Decoded};
-use crate::db::ports::DbExecutor;
-use crate::db::repositories::{EncryptedRelationshipStore, MembershipProjectionWriter};
 use crate::security::{AdmissionKeyError, AdmissionKeyManager};
+use uc_infra_storage::db::ports::DbExecutor;
+use uc_infra_storage::db::repositories::{EncryptedRelationshipStore, MembershipProjectionWriter};
 
 pub(super) const MEMBERSHIP_RECORD_PURPOSE: &[u8] = b"membership-ledger-v1";
 

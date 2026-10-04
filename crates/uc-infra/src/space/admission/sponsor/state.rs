@@ -13,7 +13,7 @@ use uc_core::membership::{
 };
 use uc_observability_contract::diagnostics::connectivity::{observe_local_result, LocalWorkStep};
 
-use crate::db::ports::DbExecutor;
+use uc_infra_storage::db::ports::DbExecutor;
 
 use super::super::repository::codec::{into_anyhow, map_executor_error};
 use super::super::repository::token::{sponsor_existing_token, sponsor_fresh_token};

@@ -13,25 +13,27 @@ use diesel::{Connection as _, RunQueryDsl as _};
 use uc_core::crypto::domain::{Aad, Ciphertext, Plaintext};
 use uc_core::ids::{EntryId, ProfileId};
 
-use crate::db::repositories::active_clipboard_register_cipher::{
-    ActiveClipboardRegisterCipher, V3ActiveClipboardRegisterCipher,
-};
-use crate::db::repositories::directory_publish_log_cipher::{
-    DirectoryPublishLogCipher, V3DirectoryPublishLogCipher,
-};
-use crate::db::repositories::entry_file_set_cipher::{
-    EntryFileSetPathCipher, FileSetCipherError, V3EntryFileSetPathCipher,
-};
-use crate::db::repositories::receive_artifact_cipher::{
-    ReceiveArtifactCipher, V3ReceiveArtifactCipher,
-};
-use crate::file_transfer::persistence_cipher::{
-    TransferPersistenceCipher, V3TransferPersistenceCipher,
-};
-use crate::search::{RenderDecodeError, RenderPayloadCodec, SearchGroupRef, V3SearchProtection};
 use crate::security::{ContentProtection, ProfileContentKeyVault};
 use crate::space::InMemorySession;
 use uc_infra_local::fs::work_directory::remove_work_directory_best_effort;
+use uc_infra_storage::db::repositories::active_clipboard_register_cipher::{
+    ActiveClipboardRegisterCipher, V3ActiveClipboardRegisterCipher,
+};
+use uc_infra_storage::db::repositories::directory_publish_log_cipher::{
+    DirectoryPublishLogCipher, V3DirectoryPublishLogCipher,
+};
+use uc_infra_storage::db::repositories::entry_file_set_cipher::{
+    EntryFileSetPathCipher, FileSetCipherError, V3EntryFileSetPathCipher,
+};
+use uc_infra_storage::db::repositories::receive_artifact_cipher::{
+    ReceiveArtifactCipher, V3ReceiveArtifactCipher,
+};
+use uc_infra_storage::file_transfer::persistence_cipher::{
+    TransferPersistenceCipher, V3TransferPersistenceCipher,
+};
+use uc_infra_storage::search::{
+    RenderDecodeError, RenderPayloadCodec, SearchGroupRef, V3SearchProtection,
+};
 
 use super::journal::UpgradeJournalV1;
 use super::primary_payloads::{blob_tree_digest, compact_database, sync_directory};
@@ -931,10 +933,10 @@ mod tests {
     };
 
     use super::*;
-    use crate::db::pool::init_db_pool;
-    use crate::file_transfer::persistence_cipher::TransferMetadata;
-    use crate::search::RenderFields;
     use crate::security::MasterKey;
+    use uc_infra_storage::db::pool::init_db_pool;
+    use uc_infra_storage::file_transfer::persistence_cipher::TransferMetadata;
+    use uc_infra_storage::search::RenderFields;
 
     #[derive(Default)]
     struct MemorySecureStorage(Mutex<BTreeMap<String, Vec<u8>>>);

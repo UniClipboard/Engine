@@ -11,8 +11,8 @@ use uc_core::membership::{
 
 use super::codec::{map_key_error, EncryptedRecordRow};
 use super::{SpaceAdmissionStateStoreError, SqliteSpaceAdmissionState};
-use crate::db::ports::DbExecutor;
 use crate::security::AdmissionKeyError;
+use uc_infra_storage::db::ports::DbExecutor;
 
 const RECOVERY_SUMMARY_FORMAT_V3: u16 = 3;
 const LEGACY_RECOVERY_SUMMARY_FORMAT_V2: u16 = 2;

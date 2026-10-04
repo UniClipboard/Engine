@@ -100,24 +100,24 @@ pub struct SyncEngineDeps {
     /// MasterKey-encrypted single membership record, committed together with its read model.
     pub membership_ledger: Arc<
         uc_infra::space::SqliteMembershipRecordStore<
-            Arc<uc_infra::db::executor::DieselSqliteExecutor>,
+            Arc<uc_infra_storage::db::executor::DieselSqliteExecutor>,
         >,
     >,
     /// MasterKey-encrypted aggregate repository shared by all admission roles.
     pub admission_state: Arc<
         uc_infra::space::SqliteSpaceAdmissionState<
-            Arc<uc_infra::db::executor::DieselSqliteExecutor>,
+            Arc<uc_infra_storage::db::executor::DieselSqliteExecutor>,
         >,
     >,
     /// Space-generation-bound OPAQUE setup and registration lifecycle.
     pub admission_credentials: Arc<
         uc_infra::space::SqliteSpaceAdmissionCredentials<
-            Arc<uc_infra::db::executor::DieselSqliteExecutor>,
+            Arc<uc_infra_storage::db::executor::DieselSqliteExecutor>,
         >,
     >,
     pub encryption_passphrase_change: Arc<
         uc_infra::space::EncryptionPassphraseChange<
-            Arc<uc_infra::db::executor::DieselSqliteExecutor>,
+            Arc<uc_infra_storage::db::executor::DieselSqliteExecutor>,
         >,
     >,
     pub admission_space_transition: Arc<dyn uc_application::deps::AdmissionSpaceTransitionPort>,

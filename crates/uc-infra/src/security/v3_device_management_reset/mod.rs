@@ -8,15 +8,15 @@ use uc_core::ids::SpaceId;
 use uc_core::membership::ActiveRuntimeLayout;
 use uc_observability_contract::{log_fields::log_vocab_debug, uc_info, uc_warn};
 
-use super::active_space_generation_manifest_store::{
-    DeviceManagementResetJournalV3, DeviceManagementResetPhaseV3,
-};
 use super::{
     ActiveRuntimeManifest, ActiveRuntimeManifestV3, ActiveSpaceGenerationManifestStore,
     ActiveSpaceGenerationManifestStoreError, ProfileRuntimeLayout, SpaceControlGeneration,
     SpaceControlGenerationError, SpaceTransitionActivation, SpaceTransitionActivationError,
 };
-use crate::db::pool::DbPool;
+use uc_infra_storage::active_space_generation_manifest_store::{
+    DeviceManagementResetJournalV3, DeviceManagementResetPhaseV3,
+};
+use uc_infra_storage::db::pool::DbPool;
 
 /// Device Reset 的完整 V3 control-generation adapter。
 ///

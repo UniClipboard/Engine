@@ -13,9 +13,6 @@ use uc_core::ids::{ProfileId, SpaceId};
 use uc_core::membership::{ActiveSpaceGenerationManifestV2, InvitationId, SpaceAdmissionId};
 use uc_core::ports::space::SpaceAccessStore;
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
-use uc_infra::db::executor::DieselSqliteExecutor;
-use uc_infra::db::pool::init_db_pool;
-use uc_infra::db::repositories::DieselSpaceSecurityStore;
 use uc_infra::network::iroh::SpaceAdmissionChannelCredentialPort;
 use uc_infra::security::{
     ActiveSpaceGenerationManifestStore, AdmissionKeyManager, DefaultCurrentProfile,
@@ -27,6 +24,9 @@ use uc_infra::space::{
     SqliteSpaceAdmissionCredentials, SqliteSpaceAdmissionState,
 };
 use uc_infra_security::key_slot_store::JsonKeySlotStore;
+use uc_infra_storage::db::executor::DieselSqliteExecutor;
+use uc_infra_storage::db::pool::init_db_pool;
+use uc_infra_storage::db::repositories::DieselSpaceSecurityStore;
 
 #[derive(Default)]
 struct MemorySecureStorage(Mutex<BTreeMap<String, Vec<u8>>>);
@@ -305,7 +305,7 @@ fn new_upgrade(
 
 fn new_upgrade_from_pool(
     root: &Path,
-    source_pool: uc_infra::db::pool::DbPool,
+    source_pool: uc_infra_storage::db::pool::DbPool,
     secure_storage: Arc<dyn SecureStoragePort>,
     keys: Arc<AdmissionKeyManager>,
     manifests: Arc<ActiveSpaceGenerationManifestStore>,
@@ -329,7 +329,7 @@ fn new_upgrade_from_pool(
 
 fn new_production_upgrade_from_pool(
     root: &Path,
-    source_pool: uc_infra::db::pool::DbPool,
+    source_pool: uc_infra_storage::db::pool::DbPool,
     source_blob_root: PathBuf,
     secure_storage: Arc<dyn SecureStoragePort>,
     keys: Arc<AdmissionKeyManager>,
@@ -592,7 +592,7 @@ async fn runtime_upgrade_resumes_v2_only_after_the_lease_and_promotes_v3() {
     let mut connection =
         diesel::sqlite::SqliteConnection::establish(layout.profile_database().to_str().unwrap())
             .unwrap();
-    use uc_infra::db::schema::{blob, clipboard_snapshot_representation as representation};
+    use uc_infra_storage::db::schema::{blob, clipboard_snapshot_representation as representation};
     for (id, ciphertext) in &preserved {
         assert_eq!(
             std::fs::read(layout.blob_root().join(id.as_str())).unwrap(),

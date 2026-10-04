@@ -7,12 +7,12 @@ use uc_application::deps::{
 use uc_core::crypto::domain::Passphrase;
 use uc_observability_contract::{uc_info, uc_warn};
 
-use crate::db::ports::DbExecutor;
 use crate::security::{ActiveSpaceGenerationManifestStore, EncryptionPassphraseChangeJournal};
 use crate::space::{prepare_registration, SqliteSpaceAdmissionCredentials};
 use uc_infra_crypto::secrets::Kek;
 use uc_infra_security::profile_passphrase_recovery::ProfilePassphraseRecoveryPort;
 use uc_infra_security::RuntimeSpaceAccessAdapter;
+use uc_infra_storage::db::ports::DbExecutor;
 
 pub struct EncryptionPassphraseChange<E> {
     access: Arc<RuntimeSpaceAccessAdapter>,
@@ -182,9 +182,6 @@ mod tests {
     use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
     use super::*;
-    use crate::db::executor::DieselSqliteExecutor;
-    use crate::db::pool::init_db_pool;
-    use crate::db::repositories::DieselSpaceSecurityStore;
     use crate::network::iroh::SpaceAdmissionChannelCredentialPort;
     use crate::security::{
         AdmissionKeyManager, DefaultCurrentProfile, ProfileContentKeyVault, SpaceAdmissionAuth,
@@ -192,6 +189,9 @@ mod tests {
     };
     use crate::space::{InMemorySession, KeyMaterialStore, SqliteSpaceAdmissionState};
     use uc_infra_security::key_slot_store::JsonKeySlotStore;
+    use uc_infra_storage::db::executor::DieselSqliteExecutor;
+    use uc_infra_storage::db::pool::init_db_pool;
+    use uc_infra_storage::db::repositories::DieselSpaceSecurityStore;
 
     #[derive(Default)]
     struct MemorySecureStorage(Mutex<HashMap<String, Vec<u8>>>);

@@ -503,7 +503,7 @@ mod tests {
         SeedProvisionalReceivePort,
     };
     use uc_core::{FileTransferCancellationReason, FileTransferEvent, FileTransferFailureReason};
-    use uc_infra::file_transfer::{InMemoryEventPublisher, InMemoryEventStore};
+    use uc_infra_storage::file_transfer::{InMemoryEventPublisher, InMemoryEventStore};
 
     use crate::usecases::apply_incoming::{
         ApplyIncomingMobileClipError, ApplyIncomingMobileClipOutcome,

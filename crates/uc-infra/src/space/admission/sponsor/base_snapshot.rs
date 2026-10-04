@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use uc_application::deps::{MembershipLedgerError, MembershipRecord};
 use uc_core::membership::AdmissionBaseSnapshot;
 
-use crate::db::ports::DbExecutor;
+use uc_infra_storage::db::ports::DbExecutor;
 
 use super::super::repository::{SpaceAdmissionStateStoreError, SqliteSpaceAdmissionState};
 

@@ -14,7 +14,7 @@ use super::{
     ActiveSpaceGenerationManifestStoreError, SpaceControlGeneration, SpaceControlGenerationError,
     SpaceTransitionActivation, SpaceTransitionActivationError,
 };
-use crate::db::pool::DbPool;
+use uc_infra_storage::db::pool::DbPool;
 
 /// Membership branch 的完整 V3 control-generation owner。
 ///

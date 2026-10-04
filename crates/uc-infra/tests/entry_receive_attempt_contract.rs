@@ -18,13 +18,13 @@ use uc_core::ports::{
     RecordReceiverTransferPort, RequestReceiveCancellationOutcome, RequestReceiveCancellationPort,
     SeedProvisionalReceivePort, TrackedFileTransferStatus, UpdateProvisionalReceivePathPort,
 };
-use uc_infra::db::executor::DieselSqliteExecutor;
-use uc_infra::db::pool::init_db_pool;
-use uc_infra::db::ports::DbExecutor;
-use uc_infra::db::repositories::{
+use uc_infra_storage::db::executor::DieselSqliteExecutor;
+use uc_infra_storage::db::pool::init_db_pool;
+use uc_infra_storage::db::ports::DbExecutor;
+use uc_infra_storage::db::repositories::{
     DieselEntryReceiveAttemptRepository, DieselFileTransferRepository,
 };
-use uc_infra::db::schema::{entry_receive_attempt, file_transfer};
+use uc_infra_storage::db::schema::{entry_receive_attempt, file_transfer};
 
 type AttemptRepo = DieselEntryReceiveAttemptRepository<DieselSqliteExecutor>;
 type TransferRepo = DieselFileTransferRepository<DieselSqliteExecutor>;

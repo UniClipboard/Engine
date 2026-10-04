@@ -12,15 +12,15 @@ use uc_core::blob::ports::{BlobContentIngestPort, BlobReaderPort, BlobWriterPort
 use uc_core::ids::ProfileId;
 use uc_core::ports::clipboard::ClipboardRepresentationNormalizerPort;
 use uc_core::ports::*;
-use uc_infra::clipboard::ClipboardRepresentationNormalizer;
-use uc_infra::config::ClipboardStorageConfig;
-use uc_infra::search::V3SearchProtection;
 use uc_infra::security::{ContentProtection, ProfileContentKeyVault, ProfilePayloadAdapters};
 use uc_infra::space::InMemorySession;
+use uc_infra_content::clipboard::ClipboardRepresentationNormalizer;
+use uc_infra_content::config::ClipboardStorageConfig;
 use uc_infra_local::blob::{
     BlobRepositoryPort, BlobStorePort, BlobWriter, SwitchableFilesystemBlobStore,
 };
 use uc_infra_local::device::LocalDeviceIdentity;
+use uc_infra_storage::search::V3SearchProtection;
 use uc_observability_contract::{error_source::io_error_kind, uc_info, uc_warn};
 
 /// 已由启动 manifest/gate 选择的 profile primary payload 格式。

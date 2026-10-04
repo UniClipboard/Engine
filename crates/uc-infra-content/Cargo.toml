@@ -1,0 +1,67 @@
+[package]
+name = "uc-infra-content"
+version.workspace = true
+license.workspace = true
+edition = "2021"
+description = "Clipboard representation, thumbnails, spool and blob payload protection for UniClipboard infra"
+publish = false
+
+[features]
+default = []
+test-util = ["dep:tempfile", "dep:mockall"]
+
+[dependencies]
+uc-core = { path = "../uc-core" }
+uc-application = { path = "../uc-application" }
+uc-infra-local = { path = "../uc-infra-local" }
+uc-infra-crypto = { path = "../uc-infra-crypto" }
+uc-infra-security = { path = "../uc-infra-security" }
+uc-observability-contract = { path = "../uc-observability-contract" }
+
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+anyhow = "1.0"
+thiserror = "2.0"
+async-trait = "0.1"
+tokio = { version = "1", features = [
+  "sync",
+  "fs",
+  "rt-multi-thread",
+  "macros",
+  "time",
+  "io-util",
+] }
+tracing = "0.1"
+chacha20poly1305 = { version = "0.10.1", features = ["std", "stream"] }
+blake3 = "1.8.2"
+image = { version = "0.25", default-features = false, features = [
+  "png",
+  "jpeg",
+  "webp",
+  "tiff",
+] }
+zstd = { version = "0.13", features = ["zstdmt"] }
+indexmap = "2"
+
+[dependencies.uuid]
+version = "1.10.0"
+features = ["v4"]
+
+[dependencies.tempfile]
+version = "3"
+optional = true
+
+[dependencies.mockall]
+version = "0.13"
+optional = true
+
+[dev-dependencies]
+uc-testkit = { path = "../../tests/uc-testkit" }
+uc-infra-security = { path = "../uc-infra-security", features = ["test-util"] }
+tokio = { version = "1", features = ["full", "test-util"] }
+tempfile = "3"
+mockall = "0.13"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[lints]
+workspace = true
