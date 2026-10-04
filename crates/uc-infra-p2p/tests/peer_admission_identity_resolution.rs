@@ -13,9 +13,9 @@ use uc_core::membership::{
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::{PeerAddressError, PeerAddressRecord, PeerAddressRepositoryPort};
 use uc_core::{DeviceId, MemberSyncPreferences};
-use uc_infra::network::iroh::{IrohPeerReachabilityAdapter, PEER_REACHABILITY_ALPN};
-use uc_infra::security::Sha256IdentityFingerprintFactory;
+use uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory;
 use uc_infra_local::SystemClock;
+use uc_infra_p2p::network::iroh::{IrohPeerReachabilityAdapter, PEER_REACHABILITY_ALPN};
 use uc_testkit::{Scenario, ScenarioBudget, ScenarioConfig};
 
 const ADMISSION_REQUEST: u8 = 1;

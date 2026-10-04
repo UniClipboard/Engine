@@ -156,7 +156,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::security::Sha256IdentityFingerprintFactory;
+    use uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory;
 
     #[derive(Default)]
     struct InMemorySecureStorage {

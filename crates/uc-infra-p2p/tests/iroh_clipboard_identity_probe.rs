@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use iroh::{Endpoint, RelayMode, SecretKey};
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
-use uc_infra::security::Sha256IdentityFingerprintFactory;
+use uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory;
 
 const PROBE_ALPN: &[u8] = b"uniclipboard/clipboard-identity-probe/0";
 

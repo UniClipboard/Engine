@@ -36,6 +36,7 @@ const EXPECTED_PACKAGES = [
   'uc-infra-content',
   'uc-infra-crypto',
   'uc-infra-local',
+  'uc-infra-p2p',
   'uc-infra-security',
   'uc-infra-storage',
   'uc-mobile',
@@ -58,6 +59,7 @@ const INTERNAL_PACKAGES = new Set([
   'uc-infra-content',
   'uc-infra-crypto',
   'uc-infra-local',
+  'uc-infra-p2p',
   'uc-infra-security',
   'uc-infra-storage',
   'uc-mobile',
@@ -340,7 +342,7 @@ function checkLocalDependencies(metadata) {
         )
       } else if (
         VENDORED_THIRD_PARTY_PACKAGES.includes(dependency.name) &&
-        packageMetadata.name === 'uc-infra' &&
+        packageMetadata.name === 'uc-infra-p2p' &&
         relative(REPOSITORY_ROOT, resolve(dependency.path)) === join('third_party', dependency.name)
       ) {
         continue
@@ -737,7 +739,7 @@ function checkRetiredLegacyPairingRecovery() {
     'crates/uc-application/src/space/convergence/membership/legacy_upgrade_tests.rs',
     'crates/uc-core/src/membership/upgrade.rs',
     'crates/uc-core/tests/legacy_upgrade.rs',
-    'crates/uc-infra/src/network/iroh/legacy_upgrade_adapter.rs',
+    'crates/uc-infra-p2p/src/network/iroh/legacy_upgrade_adapter.rs',
   ]
   for (const path of retiredPaths) {
     if (existsSync(join(REPOSITORY_ROOT, path))) {
@@ -793,8 +795,8 @@ function checkRetiredPairingTransport(sources) {
     'crates/uc-core/src/ports/pairing/mod.rs',
     'crates/uc-core/src/ports/pairing/events.rs',
     'crates/uc-core/src/ports/pairing/session.rs',
-    'crates/uc-infra/src/pairing/session.rs',
-    'crates/uc-infra/src/pairing/wire.rs',
+    'crates/uc-infra-p2p/src/pairing/session.rs',
+    'crates/uc-infra-p2p/src/pairing/wire.rs',
   ]
   for (const path of retiredPaths) {
     if (existsSync(join(REPOSITORY_ROOT, path))) {
@@ -1440,8 +1442,8 @@ function checkDualInvitationEntry() {
   }
 
   for (const path of [
-    'crates/uc-infra/src/rendezvous/invitation_adapter.rs',
-    'crates/uc-infra/src/pairing/invitation_resolver.rs',
+    'crates/uc-infra-p2p/src/rendezvous/invitation_adapter.rs',
+    'crates/uc-infra-p2p/src/pairing/invitation_resolver.rs',
   ]) {
     if (/code\s*=\s*%code\.as_str\(\)/.test(read(path))) {
       addProblem(problems, 'dual invitation entry', `${path} logs a full invitation code`)
@@ -1475,8 +1477,8 @@ function checkInfraSpaceAdmissionOwnership() {
   ]
   const retiredEntries = [
     'crates/uc-infra/src/db/repositories/space_join_record_store.rs',
-    'crates/uc-infra/src/network/iroh/admission_completion_recovery_adapter.rs',
-    'crates/uc-infra/src/pairing/admission_outbox_delivery.rs',
+    'crates/uc-infra-p2p/src/network/iroh/admission_completion_recovery_adapter.rs',
+    'crates/uc-infra-p2p/src/pairing/admission_outbox_delivery.rs',
   ]
 
   for (const entry of requiredEntries) {
@@ -2211,7 +2213,7 @@ function repositorySources() {
       read('crates/uc-infra-storage/src/db/repositories/relationship_store.rs'),
     ].join('\n'),
     irohPeerAddressResolver: read(
-      'crates/uc-infra/src/network/iroh/peer_address_resolver.rs'
+      'crates/uc-infra-p2p/src/network/iroh/peer_address_resolver.rs'
     ),
     irohAddressConsumers: [
       'clipboard_dispatch_adapter.rs',
@@ -2223,7 +2225,7 @@ function repositorySources() {
       'transfer_progress_adapter.rs',
       'active_clipboard/dispatch_adapter.rs',
       'active_clipboard/pull_client_adapter.rs',
-    ].map(path => read(`crates/uc-infra/src/network/iroh/${path}`)).join('\n'),
+    ].map(path => read(`crates/uc-infra-p2p/src/network/iroh/${path}`)).join('\n'),
     runtimeModule: read('crates/uc-engine/src/runtime/mod.rs'),
     sessionSupervisor: read('crates/uc-engine/src/runtime/session_supervisor.rs'),
     runtimeLifecycleModule: read('crates/uc-application/src/runtime_lifecycle/mod.rs'),
@@ -2272,7 +2274,7 @@ function repositorySources() {
     ),
     spaceAdapters: read('crates/uc-application/src/space/adapters.rs'),
     spaceApplication: read('crates/uc-application/src/space/application.rs'),
-    network: readSourceTree('crates/uc-infra/src/network'),
+    network: readSourceTree('crates/uc-infra-p2p/src/network'),
     v3AdmissionTransition: read(
       'crates/uc-infra/src/security/v3_admission_space_transition.rs'
     ),

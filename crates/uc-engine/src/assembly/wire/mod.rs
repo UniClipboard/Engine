@@ -37,7 +37,6 @@ use uc_core::ports::blob::BlobReferenceRepositoryPort;
 use uc_core::ports::clipboard::{RepresentationCachePort, SelfWriteLedgerPort, SpoolQueuePort};
 use uc_core::ports::*;
 use uc_infra::config_migration::{ConfigMigrationAdapter, ConfigMigrationPaths};
-use uc_infra::network::iroh::IrohIdentityStore;
 use uc_infra::security::{
     ActiveSpaceGenerationManifestStore, AdmissionKeyManager, Blake3Hasher,
     DecryptingClipboardRepresentationRepository, EncryptingClipboardEventWriter,
@@ -60,6 +59,7 @@ use uc_infra_local::blob::BlobRepositoryPort;
 use uc_infra_local::fs::VaultLayout;
 use uc_infra_local::settings::repository::FileSettingsRepository;
 use uc_infra_local::{FileAppVersionStateRepository, FileFirstSyncStateRepository, SystemClock};
+use uc_infra_p2p::network::iroh::IrohIdentityStore;
 use uc_infra_security::key_slot_store::JsonKeySlotStore;
 use uc_infra_storage::db::executor::DieselSqliteExecutor;
 #[cfg(feature = "lan-compat")]

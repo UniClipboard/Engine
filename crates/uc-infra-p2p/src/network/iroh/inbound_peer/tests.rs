@@ -12,7 +12,7 @@ use uc_core::security::IdentityFingerprint;
 use uc_observability_contract::diagnostics::connectivity::InboundPeerProtocol;
 
 use super::{InboundPeerGate, InboundPeerRejection, PeerIdentityResolver};
-use crate::security::Sha256IdentityFingerprintFactory;
+use uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory;
 
 const KEY: [u8; 32] = [0x11; 32];
 const OTHER_KEY: [u8; 32] = [0x22; 32];

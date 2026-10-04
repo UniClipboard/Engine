@@ -31,7 +31,6 @@ pub use encryption_passphrase_change::EncryptionPassphraseChange;
 pub use membership_branch_transition::DefaultMembershipBranchTransitionPreparation;
 pub use membership_record::SqliteMembershipRecordStore;
 pub use uc_infra_crypto::history_signature::OpenMlsHistoricalSignatureVerifier;
-pub(crate) use uc_infra_security::group_update_failure_detail;
 pub use uc_infra_security::{
     DefaultMembershipSecurityUpdateAdapter, InMemorySession, KeyMaterialStore,
     MigrationSpaceAccessAdapter, RuntimeSpaceAccessAdapter, SpaceSessionRebindAdapter,

@@ -6,8 +6,8 @@ use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::security::IdentityFingerprint;
 
 use super::{sponsor_identity_rejection, verify_sponsor_route_identity, SponsorRouteIdentityError};
-use crate::network::iroh::encode_space_admission_route;
 use crate::security::Sha256IdentityFingerprintFactory;
+use uc_infra_p2p::network::iroh::encode_space_admission_route;
 
 fn route_for(key: &SecretKey) -> AdmissionContinuationRoute {
     let bytes = encode_space_admission_route(&EndpointAddr::new(key.public()), None).unwrap();

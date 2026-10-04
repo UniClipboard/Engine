@@ -247,7 +247,7 @@ mod tests {
     use uc_core::membership::{MembershipError, SpaceMember};
     use uc_core::MemberSyncPreferences;
 
-    use crate::security::Sha256IdentityFingerprintFactory;
+    use uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory;
     use uc_sync_protocol::active_clipboard_pull::{read_response, write_request, PullResponse};
 
     // ----- test doubles ------------------------------------------------------

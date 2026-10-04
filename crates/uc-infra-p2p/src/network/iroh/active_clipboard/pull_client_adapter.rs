@@ -210,7 +210,7 @@ mod tests {
     use super::super::pull_serve_adapter::{
         IrohActiveClipboardPullServeAdapter, ACTIVE_CLIPBOARD_PULL_ALPN,
     };
-    use crate::security::Sha256IdentityFingerprintFactory;
+    use uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory;
 
     struct AllowAllContent;
 

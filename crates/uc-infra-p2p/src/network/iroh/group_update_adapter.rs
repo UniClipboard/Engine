@@ -21,7 +21,7 @@ use uc_observability_contract::diagnostics::{
 use super::connect_with_staggered_retry;
 use super::peer_address_resolver::PeerAddressResolver;
 use super::trace_context::{inject_current, set_remote_parent};
-use crate::space::group_update_failure_detail;
+use uc_infra_security::group_update_failure_detail;
 use uc_observability_contract::{uc_debug, uc_warn};
 use uc_sync_protocol::WireTraceContext;
 

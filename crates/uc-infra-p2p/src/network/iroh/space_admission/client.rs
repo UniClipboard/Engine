@@ -5,7 +5,6 @@ use super::diagnostics::record_client_completion;
 use super::errors::initial_hello_close_error;
 use super::exchange::EstablishedExchange;
 use super::route::decode_route;
-use crate::security::{SpaceAdmissionAuth, SpaceAdmissionAuthContext, SpaceAdmissionKe2};
 use async_trait::async_trait;
 use iroh::Endpoint;
 use std::sync::Arc;
@@ -18,6 +17,9 @@ use uc_core::membership::{
     AdmissionAttemptContractV2, AdmissionAttemptTimeline, AdmissionContinuationCredential,
     AdmissionEncryptedPasswordEquivalent, AdmissionPeerBinding, InvitationId, SpaceAdmissionId,
     SpaceAdmissionProtocolVersion, SpaceAdmissionRoute,
+};
+use uc_infra_crypto::space_admission_auth::{
+    SpaceAdmissionAuth, SpaceAdmissionAuthContext, SpaceAdmissionKe2,
 };
 use uc_observability_contract::diagnostics::connectivity::complete_admission_connection_failure;
 use uc_observability_contract::diagnostics::{

@@ -9,7 +9,7 @@ use uc_application::facade::{HostEvent, HostEventBus, TransferHostEvent};
 use uc_core::file_transfer::{
     FileTransferCancellationReason, FileTransferDirection, OutboundProgressStatus,
 };
-use uc_infra::network::iroh::transfer_progress_adapter::InboundProgressEvent;
+use uc_infra_p2p::network::iroh::transfer_progress_adapter::InboundProgressEvent;
 use uc_observability_contract::diagnostics::{record_task_join_failure, DiagnosticTaskKind};
 use uc_observability_contract::uc_warn;
 

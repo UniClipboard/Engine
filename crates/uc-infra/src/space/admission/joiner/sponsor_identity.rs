@@ -4,7 +4,7 @@ use uc_core::membership::{AdmissionContinuationRoute, SpaceAdmissionRejectionRea
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::security::IdentityFingerprint;
 
-use crate::network::iroh::space_admission::decode_space_admission_continuation_endpoint;
+use uc_infra_p2p::network::iroh::space_admission::decode_space_admission_continuation_endpoint;
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum SponsorRouteIdentityError {

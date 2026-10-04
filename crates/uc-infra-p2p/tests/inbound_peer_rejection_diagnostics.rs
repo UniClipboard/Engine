@@ -20,12 +20,12 @@ use uc_core::ports::{
     ClipboardHeader, PeerAddressError, PeerAddressRecord, PeerAddressRepositoryPort,
     PeerReachabilityPort,
 };
-use uc_infra::network::iroh::{
+use uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory;
+use uc_infra_local::SystemClock;
+use uc_infra_p2p::network::iroh::{
     IrohClipboardReceiverAdapter, IrohPeerReachabilityAdapter, CLIPBOARD_ALPN,
     PEER_REACHABILITY_ALPN,
 };
-use uc_infra::security::Sha256IdentityFingerprintFactory;
-use uc_infra_local::SystemClock;
 use uc_observability_runtime::*;
 use uc_sync_protocol::clipboard as clipboard_wire;
 

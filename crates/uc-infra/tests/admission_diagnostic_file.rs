@@ -11,12 +11,12 @@ use uc_core::membership::{
     SpaceAdmissionId, SpaceAdmissionProtocolVersion, SpaceAdmissionRoute,
 };
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
-use uc_infra::network::iroh::{
+use uc_infra::security::{ActiveSpaceGenerationManifestStore, AdmissionKeyManager};
+use uc_infra::space::{SqliteSpaceAdmissionCredentials, SqliteSpaceAdmissionState};
+use uc_infra_p2p::network::iroh::{
     encode_space_admission_route, IrohSpaceAdmissionHandler, IrohSpaceAdmissionTransport,
     SPACE_ADMISSION_ALPN,
 };
-use uc_infra::security::{ActiveSpaceGenerationManifestStore, AdmissionKeyManager};
-use uc_infra::space::{SqliteSpaceAdmissionCredentials, SqliteSpaceAdmissionState};
 use uc_infra_storage::db::{executor::DieselSqliteExecutor, pool::init_db_pool};
 use uc_observability_contract::diagnostics::{
     SpaceAdmissionObservation, SpaceAdmissionObservationOutcome,

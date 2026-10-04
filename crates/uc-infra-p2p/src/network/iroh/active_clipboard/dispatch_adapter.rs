@@ -174,7 +174,7 @@ mod tests {
     use super::super::receiver_adapter::{
         IrohActiveClipboardReceiverAdapter, ACTIVE_CLIPBOARD_ALPN,
     };
-    use crate::security::Sha256IdentityFingerprintFactory;
+    use uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory;
 
     use iroh::protocol::Router;
     use std::collections::HashMap;

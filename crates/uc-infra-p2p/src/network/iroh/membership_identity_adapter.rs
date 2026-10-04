@@ -9,7 +9,7 @@ use uc_core::membership::{
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::{DeviceIdentityPort, SettingsPort};
 
-use crate::space::InMemorySession;
+use uc_infra_security::InMemorySession;
 
 use super::persistable_addr::to_persistable_addr;
 
@@ -111,8 +111,9 @@ mod tests {
     use uc_core::settings::model::Settings;
 
     use super::IrohMembershipIdentityAdapter;
-    use crate::security::{MasterKey, Sha256IdentityFingerprintFactory};
-    use crate::space::InMemorySession;
+    use uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory;
+    use uc_infra_crypto::secrets::MasterKey;
+    use uc_infra_security::InMemorySession;
 
     struct FixedDeviceIdentity(DeviceId);
 

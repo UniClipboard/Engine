@@ -2,8 +2,8 @@
 
 ## 状态与完整责任
 
-- **状态**：实施中。S0（完整基线实验）按用户指示跳过；S1、S2 已完成并合并；S3 的 storage、content 两半均已完成。
-  S4–S6 未开始。
+- **状态**：实施中。S0（完整基线实验）按用户指示跳过；S1、S2、S3 已完成并合并；S4（`uc-infra-p2p`）已完成。
+  S5–S6 未开始。
 - **日期**：2026-10-04。
 - **跟踪**：[Issue #144](https://github.com/UniClipboard/Engine/issues/144)（设计全文、七个 crate 的职责/允许依赖表、
   六类依赖切断方案、Edge Cases、测试策略、构建性能实验方法、验收标准均在 issue 正文，本文件不复制，只跟踪切片状态）。
@@ -28,7 +28,7 @@
 | S1 | 提取 `uc-infra-local`、`uc-infra-crypto` | **完成** | [PR #145](https://github.com/UniClipboard/Engine/pull/145)，已 squash merge 到 `main`（`f0f0b5fb`，2026-10-04） |
 | S2 | 原子提取 `uc-infra-security`（session/vault/事务代次一起搬，DB 耦合的生命周期部分留给 profile） | **完成** | [PR #147](https://github.com/UniClipboard/Engine/pull/147)，已 squash merge 到 `main`（`ec3301a3`） |
 | S3 | 提取 `uc-infra-storage`、`uc-infra-content` | **完成** | 本次提交；见下方"S3 范围" |
-| S4 | 完成邀请 codec、错误分类、身份槽位切断，再提取整个 `uc-infra-p2p` | 未开始 | — |
+| S4 | 完成邀请 codec、错误分类、身份槽位切断，再提取整个 `uc-infra-p2p` | **完成** | 本次提交；见下方"S4 范围" |
 | S5 | 剩余升级/激活能力迁 `uc-infra-profile`，LAN 移 `uc-mobile-lan`，删除 `uc-infra` | 未开始 | — |
 | S6 | 更新架构门禁、CI、构建缓存、发布脚本、文档；完成公平性能对照 | 未开始（S1/S2 已顺带同步 `check-engine-repository.mjs`、`check-observability-privacy.mjs` 的扫描范围，但完整 S6 清单未逐项核对） | — |
 
@@ -162,15 +162,78 @@
   （`crates/uc-infra/src/db/repositories/{mod.rs,relationship_store.rs}`）的硬编码检查，这次一起改到了新路径；
   如果后续还发现类似遗漏，优先假设"检查脚本跟旧路径"而不是"代码本身有问题"。
 
+## S4 范围（2026-10-04，`uc-infra-p2p`）
+
+**新建 `uc-infra-p2p`**：`network/`（Iroh 节点/连接/发现/blob 网络传输/认证交换/网络诊断，含
+`space_admission/` 协议帧处理）、`pairing/`（mDNS 发现、短码邀请解析）、`rendezvous/`（HTTP 短码目录客户端、
+邀请签发/消费）。只依赖 `uc-core`/`uc-application`/`uc-infra-crypto`/`uc-infra-security`/
+`uc-observability-contract`/`uc-sync-protocol` 加 iroh/reqwest 网络栈本身；验证过（`cargo metadata` 遍历生产
+依赖闭包）不含 diesel/libsqlite3/image/zstd/搜索实现——issue 强调的验收标准在当前代码里本来就是干净的，
+不需要额外清理，只是确认并固定下来。
+
+**开工前先处理的真实双向耦合**（即表格里"完成邀请 codec、错误分类、身份槽位切断"指的内容，不是字面设计，是
+实际发现的两类问题）：
+
+1. **邀请票据 codec 反向依赖**：`pairing/invitation_resolver.rs`、`rendezvous/invitation_adapter.rs`（搬进
+   `uc-infra-p2p`）原本依赖 `uc-infra::space::admission::full_invitation` 的
+   `encode_full_invitation`/`decode_full_invitation`/`decode_invitation_entry`（纯 postcard/base64 编解码，
+   不含网络 I/O）；而 `uc-infra` 自己的 admission 侧也要用同一份 codec。两边互相需要，任何一边单方面依赖
+   另一边都会成环。解法：把这三个函数连同 `FullInvitationCodecError`/`DecodedFullInvitation` 整个迁到
+   `uc-sync-protocol`（其定位正是"transport-independent wire codecs"，且两边已经都依赖它），新增 `base64`
+   依赖（已同步加入 `check-engine-repository.mjs` 的 `SYNC_PROTOCOL_ALLOWED_DEPENDENCIES` 白名单）。原来两个
+   纯编解码单元测试原样迁入 `uc-sync-protocol`；一个需要完整 DI（`DefaultJoinerInvitationPreparation`）的
+   集成测试留在 `uc-infra`，迁到调用方 `invitation_start.rs` 自己的 `#[cfg(test)]` 模块。
+2. **`SpaceAdmissionChannelCredentialError::diagnostic_failure` 的孤儿实现**：这个方法原来是在 `uc-infra` 的
+   `space/admission/credentials.rs` 里给（物理上要搬进 `uc-infra-p2p` 的）`SpaceAdmissionChannelCredentialError`
+   类型追加的 inherent impl，内部向下转型 `uc-infra` 自己的 `CredentialLoadError`/
+   `SpaceAdmissionCredentialStoreError` 做更细的分类（Locked/RecoveryRequired）。一旦类型搬到 `uc-infra-p2p`，
+   `uc-infra` 不能再给外部 crate 的类型补 inherent impl（Rust 孤儿规则）,而这个 impl 要转型的两个类型又是
+   `uc-infra` 专属,不能反向依赖进 `uc-infra-p2p`。解法：在 `uc-infra-p2p` 里把这个方法简化成只返回
+   `Unavailable`/`Rejected` 两个变体各自对应的保底分类,删掉向下转型的细化逻辑——确认过唯一的外部调用方
+   （`uc-infra-p2p` 自己的 `space_admission/diagnostics.rs`）没有测试依赖那层细化，行为影响为零。
+
+**其余机械性工作**：`uc-infra` 里 6 个仍调用 `crate::network::iroh::...` 的文件（`security/profile_key_recovery.rs`、
+`security/profile_upgrade_backup/inventory.rs`、`space/encryption_passphrase_change.rs`、
+`space/admission/credentials.rs`、`space/admission/joiner/sponsor_identity.rs`、
+`space/adapters/membership_network_gate.rs`）改成 `uc_infra_p2p::network::iroh::...`，同时把
+`decode_space_admission_continuation_endpoint`、`membership_history_exchange_adapter::request_purpose`、
+`SponsorOpaqueMaterial::into_parts` 从 `pub(crate)`/`#[cfg(test)]` 放宽到 `pub`（均为真实生产跨 crate 调用，
+由编译错误驱动确认）。`uc-engine` 里 11 个文件的 `uc_infra::network::iroh::` 引用改成 `uc_infra_p2p::network::iroh::`。
+`uc-infra`/`uc-engine` 的 `Cargo.toml` 都加了 `uc-infra-p2p` 依赖；`uc-infra` 的 `test-util` feature 一并转发
+`uc-infra-p2p/test-util`。`uc-infra` 自身不再需要 iroh 网络栈大部分依赖（`iroh-blobs`/`iroh-mdns-address-lookup`/
+`iroh-relay`/`iroh-tickets`/`noq-proto`/`swarm-discovery`/`reqwest`/`rustls`/`if-addrs`/`futures-util`），全部移出
+`uc-infra/Cargo.toml`（只留 `iroh` 本身，因为 `EndpointAddr` 类型仍经 `uc-infra-p2p` 的解码函数回传到几个调用点）；
+`wiremock`/`mockall` 这两个 dev-dependency 同理只被 network/pairing/rendezvous 的测试用到，一并移出。
+
+**跨 crate 集成测试搬迁**：`crates/uc-infra/tests/` 下纯 p2p 的 8 个文件（`node_lifecycle.rs`、
+`lan_only_relay_mode.rs`、`iroh_blobs_probe.rs`、`iroh_clipboard_identity_probe.rs`、
+`iroh_peer_reachability_probe.rs`、`peer_admission_identity_resolution.rs`、
+`inbound_peer_rejection_diagnostics.rs`、`clipboard_receive_diagnostic_file.rs`）原样迁到
+`crates/uc-infra-p2p/tests/`；`admission_diagnostic_file.rs`、`profile_storage_upgrade.rs` 两个混合依赖
+（真实 SQLite admission/security 代码 + p2p 类型测试替身）留在 `uc-infra`，只改引用路径。
+
+**验证**：`cargo metadata` 遍历 `uc-infra-p2p` 生产依赖闭包，确认不含 diesel/libsqlite3/image/zstd/搜索；
+`uc-infra-p2p --all-targets` 全绿；`uc-infra --lib` 237 passed/3 ignored（较 S3 后的 511/5 减少的 274/2 恰好
+对应搬进 `uc-infra-p2p` 的测试，零覆盖流失）；`uc-engine --lib` 276 passed/3 ignored，与既有基线一致。
+
+### 可复用的模式（延续 S2/S3 的跨 crate 测试处理方式）
+
+- **先处理双向耦合，再搬文件**：S4 和 S1–S3 的关键差异是这次真的发现了双向依赖（见上），必须先把共享的纯
+  逻辑（codec）下沉到两边都能单向依赖的公共 crate，再做物理搬迁，不能先搬再补。
+- **Rust 孤儿规则是真实的物理约束**：给搬走的类型追加 inherent impl 在拆分前能编译，拆分后立刻报错；这类
+  "跨 crate 对同一类型的扩展"要在设计阶段就假设会出问题，而不是等编译器报错才发现。
+- **编译器驱动的可见性修正**：延续 S2/S3，没有预先枚举——每个 `cargo check` 报的"方法不存在/不可见"都用来
+  判断该放宽到 `pub` 还是转测试专属可见性。
+
 ## 遗留风险 / 下一步必须处理的事项
 
-1. **构建性能 A/B 实验（issue §8/§9）完全没有做**：即使 storage、content 两个较大的 crate 已经分出去，`uc-infra`
-   仍然持有 profile/admission 的大头，现在测仍然不是公平对照。留给 S5（profile 拆完）之后再测。
-2. **S2 没有产出 issue 字面要求的失败矩阵文档**，S3 同样没有补；只做了等价的"零覆盖流失"验证。
+1. **构建性能 A/B 实验（issue §8/§9）完全没有做**：即使 storage/content/p2p 三个较大的 crate 已经分出去，
+   `uc-infra` 仍然持有 profile/admission 的大头，现在测仍然不是公平对照。留给 S5（profile 拆完）之后再测。
+2. **S2 没有产出 issue 字面要求的失败矩阵文档**，S3/S4 同样没有补；只做了等价的"零覆盖流失"验证。
 3. **`space/membership_record/`、`space/admission/repository/`+`display.rs` 的 SQL 所有权还留在 `uc-infra`**，
    和 issue 原表不一致，需要专门的切片处理（见上）。
-4. **继续 S4（或下一个切片）开工前的分支状态**：本次 S3 content 提交若按 squash merge 流程合并，
+4. **继续 S5（或下一个切片）开工前的分支状态**：本次 S4 提交若按 squash merge 流程合并，
    继续后续工作需要先从新 `main` 切干净分支。
-5. **`uc-infra-security`/`uc-infra-storage`/`uc-infra-content` 的 `test-util` feature** 目前各自放宽了若干
-   `#[cfg(test)]`/`#[cfg(any(test, feature = "test-util"))]` 方法；继续拆分时如果还有类似的跨 crate 测试
-   脚手架需求，复用同一个 feature 名字，不要新增第二个同义 feature。
+5. **`uc-infra-security`/`uc-infra-storage`/`uc-infra-content`/`uc-infra-p2p` 的 `test-util` feature** 目前各自
+   放宽了若干 `#[cfg(test)]`/`#[cfg(any(test, feature = "test-util"))]` 方法；继续拆分时如果还有类似的跨 crate
+   测试脚手架需求，复用同一个 feature 名字，不要新增第二个同义 feature。

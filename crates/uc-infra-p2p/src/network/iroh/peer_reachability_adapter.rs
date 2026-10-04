@@ -1047,7 +1047,7 @@ mod tests {
     use uc_core::ports::{PeerAddressError, PeerAddressRecord};
     use uc_core::MemberSyncPreferences;
 
-    use crate::security::Sha256IdentityFingerprintFactory;
+    use uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory;
 
     const DIAL_BUDGET: Duration = Duration::from_secs(5);
     const OFFLINE_BUDGET: Duration = Duration::from_secs(10);

@@ -10,7 +10,7 @@ use super::super::crypto::{peer_id, verify_mac};
 use super::super::diagnostics::AuthenticationStep;
 use super::super::errors::{map_request_wire_error, map_server_wire_error, HandlerError};
 use super::IrohSpaceAdmissionHandler;
-use crate::security::{
+use uc_infra_crypto::space_admission_auth::{
     SpaceAdmissionAuth, SpaceAdmissionAuthContext, SpaceAdmissionContinuationCredential,
     SpaceAdmissionKe1, SpaceAdmissionKe3,
 };

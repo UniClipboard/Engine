@@ -68,7 +68,7 @@ pub(crate) struct ProductionRuntime {
     clipboard_change_runtime: HostClipboardChangeRuntime,
     events: EventSender,
     #[cfg(feature = "dev-tools")]
-    network_partition_gate: uc_infra::network::iroh::IrohNetworkPartitionGate,
+    network_partition_gate: uc_infra_p2p::network::iroh::IrohNetworkPartitionGate,
     #[cfg(feature = "dev-tools")]
     joiner_final_confirmation_gate: Arc<JoinerFinalConfirmationGate>,
 }
@@ -170,7 +170,8 @@ impl ProductionRuntime {
         let relay_fallback_override = config.test_relay_fallback_override();
         let iroh_bind_port_override = config.test_iroh_bind_port_override();
         #[cfg(feature = "dev-tools")]
-        let network_partition_gate = uc_infra::network::iroh::IrohNetworkPartitionGate::default();
+        let network_partition_gate =
+            uc_infra_p2p::network::iroh::IrohNetworkPartitionGate::default();
         #[cfg(feature = "dev-tools")]
         let joiner_final_confirmation_gate = Arc::new(JoinerFinalConfirmationGate::default());
         let emitter = Arc::new(EngineHostEventEmitter::new(events.clone()));

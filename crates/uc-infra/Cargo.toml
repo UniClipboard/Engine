@@ -12,7 +12,12 @@ lan-compat = ["dep:network-interface", "uc-infra-storage/lan-compat"]
 # Allows test harnesses to bind sponsor and joiner endpoints in one process.
 # Production builds must not enable it: the runtime lease must reject a second
 # live node. See src/network/iroh/node.rs for the production lifecycle guard.
-test-util = ["dep:tempfile", "uc-infra-security/test-util", "uc-infra-content/test-util"]
+test-util = [
+  "dep:tempfile",
+  "uc-infra-security/test-util",
+  "uc-infra-content/test-util",
+  "uc-infra-p2p/test-util",
+]
 
 [dependencies]
 # ===== Workspace crates =====
@@ -23,6 +28,7 @@ uc-infra-crypto = { path = "../uc-infra-crypto" }
 uc-infra-security = { path = "../uc-infra-security" }
 uc-infra-storage = { path = "../uc-infra-storage" }
 uc-infra-content = { path = "../uc-infra-content" }
+uc-infra-p2p = { path = "../uc-infra-p2p" }
 # Portable panic-visible supervision for detached tasks that have no natural
 # handle owner (for example, the pairing receive pump).
 uc-observability-contract = { path = "../uc-observability-contract" }
@@ -42,15 +48,6 @@ thiserror = "2.0"
 
 # Async traits
 async-trait = "0.1"
-
-# Stream consumption for iroh-blobs Downloader progress events
-futures-util = "0.3"
-
-# Enumerate local network interfaces (IP + netmask) at startup so the iroh
-# AddrFilter callback can decide whether a peer candidate is reachable via
-# direct LAN (suppressing hairpin-NAT-via-public-IP path oscillation).
-# Cross-platform: getifaddrs on Unix, GetAdaptersAddresses on Windows.
-if-addrs = "0.13"
 
 # ===== 数据库 =====
 diesel = { version = "2.3.5", features = [
@@ -120,43 +117,9 @@ zstd = { version = "0.13", features = ["zstdmt"] }
 # 普通 HashMap 做不到。
 indexmap = "2"
 
-# ===== Network stack (iroh + rendezvous HTTP) =====
+# EndpointAddr/EndpointId types surface through a handful of still-in-uc-infra
+# admission call sites that consume uc-infra-p2p's decoded continuation routes.
 iroh = { version = "1.3.0" }
-# mDNS LAN discovery (swarm-discovery TXT records over LAN multicast) so two
-# peers on the same Wi-Fi advertise their LAN IPs to each other directly.
-# Extracted from iroh core into a standalone crate in iroh 1.0.0-rc.1.
-# UniClipboard#486 §三 B.
-# Vendored 0.6.0 that depends on the patched swarm-discovery by path (third_party/iroh-mdns-address-lookup).
-iroh-mdns-address-lookup = { version = "0.6.0", path = "../../third_party/iroh-mdns-address-lookup" }
-# UniClipboard fork: upstream v0.103.0 plus four audited fixes (UNICLIPBOARD_PATCH.md in the fork).
-# A direct git dependency, not a [patch], so repositories that depend on Engine need no patch of their own.
-iroh-blobs = { version = "0.103.0", git = "https://github.com/UniClipboard/iroh-blobs.git", rev = "124780fb69768b8506565b2760c435182f9e2d20" }
-# Direct dep so pairing's own mDNS publisher/resolver can spin up window-
-# scoped `Discoverer` instances on a separate service name from iroh's
-# `_irohv1._udp.local` peer-discovery flow. We can't reuse iroh's
-# `MdnsAddressLookup` because it is bind-time fixed to the shared Endpoint
-# and has no lifecycle hook for "announce only while a pairing code is
-# pending."
-swarm-discovery = { version = "0.6.3", path = "../../third_party/swarm-discovery" }
-# (`if-addrs` is already declared elsewhere in this manifest; pairing
-# publishers/resolvers reuse that same version.)
-# 直接依赖 iroh-relay 0.98 以使用其 ClientBuilder 做"中继可达性探测"。
-# iroh 本身只 re-export 了 `dns`/`RelayMap`,没有暴露 `client` 模块。
-# default features 已经带上 `tls-ring`,与 iroh 自身保持一致。
-iroh-relay = "1.3.0"
-# 用于持有 ClientBuilder 需要的 `ClientConfig`。版本对齐 iroh / iroh-relay,
-# 并且显式使用同一个 ring provider,避免 rustls 默认引入 AWS-LC 的 C 构建链。
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
-iroh-tickets = "1.0.0"
-# iroh 0.97 forked quinn-proto into noq-proto (Custom Transports & noq).
-# Used solely to reach `congestion::Bbr3Config` when wiring the QUIC
-# TransportConfig — iroh re-exports the trait but not the BBR factory itself.
-noq-proto = "1.3"
-reqwest = { version = "0.12", default-features = false, features = [
-  "json",
-  "rustls-tls",
-  "rustls-tls-webpki-roots",
-] }
 # Slice 1 pairing session wire codec — binary, compact, serde-compatible.
 postcard = { version = "1", features = ["use-std"] }
 # Slice 2 Phase 2 clipboard wire codec — carry zero-copy ciphertext across
@@ -195,12 +158,11 @@ criterion = { version = "0.8", features = ["async_tokio"] }
 uc-infra-security = { path = "../uc-infra-security", features = ["test-util"] }
 uc-infra-storage = { path = "../uc-infra-storage", features = ["test-util"] }
 uc-infra-content = { path = "../uc-infra-content", features = ["test-util"] }
+uc-infra-p2p = { path = "../uc-infra-p2p", features = ["test-util"] }
 uc-observability-runtime = { path = "../uc-observability-runtime" }
 uc-testkit = { path = "../../tests/uc-testkit" }
 tokio = { version = "1", features = ["full", "test-util"] }
 tempfile = "3"
-mockall = "0.13"
-wiremock = "0.6"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 static_assertions = "1"
 opentelemetry = { version = "=0.32.0", default-features = false, features = ["trace", "logs"] }

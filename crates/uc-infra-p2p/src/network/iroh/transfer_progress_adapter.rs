@@ -389,7 +389,7 @@ mod tests {
     use uc_core::ports::{PeerAddressError, PeerAddressRecord};
     use uc_core::MemberSyncPreferences;
 
-    use crate::security::Sha256IdentityFingerprintFactory;
+    use uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory;
 
     // ----- test doubles ------------------------------------------------------
 

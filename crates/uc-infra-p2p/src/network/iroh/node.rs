@@ -71,7 +71,7 @@ use uc_core::ports::{
 
 use crate::pairing::PairingInvitationResolverAdapter;
 use crate::rendezvous::{RendezvousClient, RendezvousPairingInvitationAdapter};
-use crate::space::InMemorySession;
+use uc_infra_security::InMemorySession;
 
 use super::active_clipboard::{
     IrohActiveClipboardDispatchAdapter, IrohActiveClipboardPullClientAdapter,
@@ -1607,7 +1607,7 @@ mod tests {
     use uc_core::ports::{SecureStorageError, SecureStoragePort};
     use uc_core::settings::model::Settings;
 
-    use crate::security::Sha256IdentityFingerprintFactory;
+    use uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory;
 
     #[derive(Default)]
     struct InMemorySecureStorage {
@@ -1913,7 +1913,7 @@ mod tests {
                 Arc::new(EmptyPeerAddressRepo),
                 Arc::new(EmptyMemberRepo),
                 Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
-                Arc::new(crate::security::Sha256IdentityFingerprintFactory),
+                Arc::new(uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory),
                 Arc::new(FixedClock(1_700_000_000_000)),
                 tokio::sync::broadcast::channel(1).0,
             )
@@ -1944,7 +1944,7 @@ mod tests {
                 Arc::new(EmptyPeerAddressRepo),
                 Arc::new(EmptyMemberRepo),
                 Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
-                Arc::new(crate::security::Sha256IdentityFingerprintFactory),
+                Arc::new(uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory),
                 Arc::new(FixedClock(1_700_000_000_000)),
                 tokio::sync::broadcast::channel(1).0,
             )
@@ -1959,7 +1959,7 @@ mod tests {
                 Arc::new(EmptyPeerAddressRepo),
                 Arc::new(EmptyMemberRepo),
                 Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
-                Arc::new(crate::security::Sha256IdentityFingerprintFactory),
+                Arc::new(uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory),
                 Arc::new(FixedClock(1_700_000_000_001)),
                 tokio::sync::broadcast::channel(1).0,
             )
@@ -2030,7 +2030,7 @@ mod tests {
                 Arc::clone(&peer_addr_repo),
                 Arc::new(EmptyMemberRepo),
                 Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
-                Arc::new(crate::security::Sha256IdentityFingerprintFactory),
+                Arc::new(uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory),
                 Arc::new(FixedClock(1_700_000_000_000)),
                 tokio::sync::broadcast::channel(1).0,
             )
@@ -2041,7 +2041,7 @@ mod tests {
                 peer_addr_repo,
                 Arc::new(EmptyMemberRepo),
                 Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
-                Arc::new(crate::security::Sha256IdentityFingerprintFactory),
+                Arc::new(uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory),
                 peer_reachability,
             )
             .expect("install clipboard");
@@ -2098,7 +2098,7 @@ mod tests {
                 Arc::clone(&peer_addr_repo),
                 Arc::new(EmptyMemberRepo),
                 Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
-                Arc::new(crate::security::Sha256IdentityFingerprintFactory),
+                Arc::new(uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory),
                 Arc::new(FixedClock(1_700_000_000_000)),
                 tokio::sync::broadcast::channel(1).0,
             )
@@ -2109,7 +2109,7 @@ mod tests {
                 peer_addr_repo,
                 Arc::new(EmptyMemberRepo),
                 Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
-                Arc::new(crate::security::Sha256IdentityFingerprintFactory),
+                Arc::new(uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory),
                 peer_reachability,
             )
             .expect("install clipboard");

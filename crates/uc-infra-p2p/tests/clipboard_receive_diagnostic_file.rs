@@ -14,8 +14,8 @@ use uc_core::membership::{
 };
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::ClipboardHeader;
-use uc_infra::network::iroh::{IrohClipboardReceiverAdapter, CLIPBOARD_ALPN};
-use uc_infra::security::Sha256IdentityFingerprintFactory;
+use uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory;
+use uc_infra_p2p::network::iroh::{IrohClipboardReceiverAdapter, CLIPBOARD_ALPN};
 use uc_observability_runtime::*;
 use uc_sync_protocol::clipboard as clipboard_wire;
 

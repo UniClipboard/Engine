@@ -388,8 +388,8 @@ mod tests {
     use crate::network::iroh::clipboard_dispatch_adapter::{
         IrohClipboardDispatchAdapter, CLIPBOARD_ALPN,
     };
-    use crate::security::Sha256IdentityFingerprintFactory;
     use uc_core::ports::{PeerAddressError, PeerAddressRecord, PeerAddressRepositoryPort};
+    use uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory;
 
     struct TestTelemetry {
         traces: SdkTracerProvider,

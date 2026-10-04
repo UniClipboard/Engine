@@ -16,8 +16,10 @@ use crate::subsystems::reconcile::{reconcile_peer_addresses, reconcile_trusted_p
 use uc_application::facade::settings::AppliedRelayRouting;
 use uc_application::facade::ApplicationAssembly;
 use uc_core::settings::relay_routing::RelayRouting;
-use uc_infra::network::iroh::{IrohIdentityStore, IrohNode, IrohNodeBuilder, IrohSessionBuilder};
 use uc_infra::security::Sha256IdentityFingerprintFactory;
+use uc_infra_p2p::network::iroh::{
+    IrohIdentityStore, IrohNode, IrohNodeBuilder, IrohSessionBuilder,
+};
 use uc_observability_contract::{
     error_source::io_error_kind,
     log_fields::{log_vocab, log_vocab_debug},
@@ -31,7 +33,7 @@ pub async fn build_network_runtime(
     rendezvous_base_url: Option<String>,
     relay_fallback_override: Option<bool>,
     iroh_bind_port_override: Option<u16>,
-    network_partition_gate: Option<uc_infra::network::iroh::IrohNetworkPartitionGate>,
+    network_partition_gate: Option<uc_infra_p2p::network::iroh::IrohNetworkPartitionGate>,
 ) -> anyhow::Result<IrohNode> {
     let prepared_network = application
         .prepare_network()

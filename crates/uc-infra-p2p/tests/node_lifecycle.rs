@@ -9,8 +9,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use uc_core::ports::{LocalIdentityPort, SecureStorageError, SecureStoragePort};
-use uc_infra::network::iroh::{IrohIdentityStore, IrohNodeBuilder, IrohNodeConfig, IrohNodeError};
-use uc_infra::security::Sha256IdentityFingerprintFactory;
+use uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory;
+use uc_infra_p2p::network::iroh::{
+    IrohIdentityStore, IrohNodeBuilder, IrohNodeConfig, IrohNodeError,
+};
 
 #[derive(Default)]
 struct InMemorySecureStorage {

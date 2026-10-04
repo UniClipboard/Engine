@@ -21,7 +21,7 @@ use uc_observability_contract::diagnostics::{
     OperationContext,
 };
 
-use crate::security::{
+use uc_infra_crypto::space_admission_auth::{
     SpaceAdmissionAuth, SpaceAdmissionAuthContext, SpaceAdmissionKe1, SpaceAdmissionKe3,
 };
 

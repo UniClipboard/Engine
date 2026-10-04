@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use uc_core::membership::{AdmissionContinuationCredential, InvitationId, SpaceAdmissionId};
 
-use crate::security::{SpaceAdmissionRegistration, SpaceAdmissionServerSetup};
+use uc_infra_crypto::space_admission_auth::{
+    SpaceAdmissionRegistration, SpaceAdmissionServerSetup,
+};
 
 pub struct SponsorOpaqueMaterial {
     pub(super) server_setup: SpaceAdmissionServerSetup,
@@ -19,8 +21,7 @@ impl SponsorOpaqueMaterial {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn into_parts(self) -> (SpaceAdmissionServerSetup, SpaceAdmissionRegistration) {
+    pub fn into_parts(self) -> (SpaceAdmissionServerSetup, SpaceAdmissionRegistration) {
         (self.server_setup, self.registration)
     }
 }
@@ -37,6 +38,20 @@ pub enum SpaceAdmissionChannelCredentialError {
         #[source]
         source: anyhow::Error,
     },
+}
+
+impl SpaceAdmissionChannelCredentialError {
+    /// 协议负责人只取得脱敏分类；具体来源类型留在构造它的 Infra 适配器内部，
+    /// 跨 crate 不再对 `source` 做向下转型。
+    pub fn diagnostic_failure(
+        &self,
+    ) -> uc_observability_contract::diagnostics::connectivity::CredentialFailure {
+        use uc_observability_contract::diagnostics::connectivity::CredentialFailure;
+        match self {
+            Self::Unavailable { .. } => CredentialFailure::Unavailable,
+            Self::Rejected { .. } => CredentialFailure::RecoveryRequired,
+        }
+    }
 }
 
 #[async_trait]
