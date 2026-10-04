@@ -12,8 +12,11 @@ pub use benchmark::GroupUpdateDeliveryBenchmark;
 #[cfg(test)]
 mod tests;
 
+use tokio::task::spawn_blocking;
 use uc_core::membership::KeyEpochError;
+use uc_observability_contract::diagnostics::connectivity::LocalWorkContext;
 
+use crate::db::ports::DbExecutor;
 use uc_infra_security::InMemorySession;
 
 #[derive(Clone)]
@@ -25,6 +28,22 @@ pub struct DieselSpaceSecurityStore<E> {
 impl<E> DieselSpaceSecurityStore<E> {
     pub fn new(executor: E, session: InMemorySession) -> Self {
         Self { executor, session }
+    }
+}
+
+impl<E: DbExecutor + Clone + 'static> DieselSpaceSecurityStore<E> {
+    /// 成员维护轮次与入站组更新在移动绑定的单线程运行期上调用本仓储。一次完整的同步数据库工作
+    /// （取连接、整段事务或自动提交写入及其写锁等待）在阻塞线程执行，调用方仍等待其结果；
+    /// 避免其他连接持有控制库写锁时冻结同一运行期上的生命周期请求。
+    async fn run_blocking<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(&Self) -> Result<T, KeyEpochError> + Send + 'static,
+    ) -> Result<T, KeyEpochError> {
+        let store = self.clone();
+        let context = LocalWorkContext::capture();
+        spawn_blocking(move || context.run(|| work(&store)))
+            .await
+            .map_err(backend)?
     }
 }
 
