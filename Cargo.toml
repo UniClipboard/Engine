@@ -88,6 +88,8 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.uc-infra-content]
 opt-level = 3
+[profile.dev.package.uc-infra-p2p]
+opt-level = 3
 
 [profile.release]
 panic = "abort"

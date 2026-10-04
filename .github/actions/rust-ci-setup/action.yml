@@ -9,7 +9,7 @@ inputs:
     required: true
   fast-compile-infra:
     description: >-
-      Build uc-infra-profile without the opt-level 3 override from Cargo.toml. Only for jobs whose results do not
+      Build all seven uc-infra-* crates without the opt-level 3 override from Cargo.toml. Only for jobs whose results do not
       depend on that optimization level, such as instrumented coverage.
     required: false
     default: "false"
@@ -84,13 +84,15 @@ runs:
           echo "UC_ENGINE_SOURCE_STATE=$state"
         } >> "$GITHUB_ENV"
 
-    # Cargo.toml 为移动端开发构建把 uc-infra-profile 设为 opt-level 3，测试构建因此多花一倍以上编译时间。
+    # Cargo.toml 为移动端开发构建把七个 uc-infra-* crate 设为 opt-level 3，测试构建因此多花一倍以上编译时间。
     # 诊断栈符号校验与真实网络、多设备时序都依赖该优化级别，只有已按 release 口径校验诊断栈的
     # 插桩覆盖率 job 恢复为 dev 默认值。
-    - name: Compile uc-infra-profile without the mobile optimization override
+    - name: Compile uc-infra-* crates without the mobile optimization override
       if: inputs.fast-compile-infra == 'true'
       shell: bash
       run: |
         cargo_home="${CARGO_HOME:-$HOME/.cargo}"
         mkdir -p "$cargo_home"
-        printf '\n[profile.dev.package.uc-infra-profile]\nopt-level = 0\n' >> "$cargo_home/config.toml"
+        for crate in local crypto security storage content p2p profile; do
+          printf '\n[profile.dev.package.uc-infra-%s]\nopt-level = 0\n' "$crate" >> "$cargo_home/config.toml"
+        done

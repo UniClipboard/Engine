@@ -43,9 +43,9 @@ cd "$repo"
 # 三个包的测试在一次构建中完成特性解析，避免分次调用时按不同特性组合重复编译共同依赖。
 if [[ "$suite" != network ]]; then
   cargo nextest run --profile ci --locked --test-threads 1 \
-    -p uc-infra -p uc-application -p uc-engine --features uc-engine/dev-tools \
+    -p uc-infra-p2p -p uc-application -p uc-engine --features uc-engine/dev-tools \
     --lib --test space_membership_auto_pairing_e2e \
-    -E '(package(uc-infra) & kind(lib) & (test(peer_reachability) | test(protocol_router) | test(rejecting_new_dials_keeps_established_streams_usable)))
+    -E '(package(uc-infra-p2p) & kind(lib) & (test(peer_reachability) | test(protocol_router) | test(rejecting_new_dials_keeps_established_streams_usable)))
       | (package(uc-application) & kind(lib) & test(space::connectivity))
       | (package(uc-engine) & binary(space_membership_auto_pairing_e2e)
         & (test(=automatic_connections::existing_connections_survive_rejected_new_dials)
