@@ -122,6 +122,30 @@ impl JoinerAdmission {
         }
     }
 
+    /// 仅当处于 `RecoveryRequired` 终态且转换时成功捕获了 join_id 才返回；
+    /// 旧格式只保存了类别的记录重新打开后为 `None`。不要在这个终态下改用通用
+    /// `join_id()`——那个入口假定角色始终带有可展示的 join_id，对这一类历史记录会拒绝。
+    pub const fn recovery_join_id(&self) -> Option<JoinId> {
+        match &self.record.state {
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::RecoveryRequired(
+                state,
+            )) => state.join_id,
+            _ => None,
+        }
+    }
+
+    /// 仅供测试模拟本次改动之前写入的历史记录（只有类别，没有 join_id）。
+    #[cfg(test)]
+    pub(crate) fn forget_recovery_join_id_for_test(mut self) -> Self {
+        if let SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::RecoveryRequired(
+            state,
+        )) = &mut self.record.state
+        {
+            state.join_id = None;
+        }
+        self
+    }
+
     pub fn start_resolving_invitation(
         admission_id: SpaceAdmissionId,
         join_id: JoinId,

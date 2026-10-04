@@ -376,3 +376,19 @@ pub enum SpaceAdmissionJoinerState {
     Activating(SpaceAdmissionJoinerActivating),
     Cancelling(SpaceAdmissionJoinerCancelling),
 }
+
+impl SpaceAdmissionJoinerState {
+    pub(super) const fn join_id(&self) -> JoinId {
+        match self {
+            Self::ResolvingInvitation(state) => state.join_id,
+            Self::ResolvedInvitation(state) => state.join_id,
+            Self::Initiated(state) => state.join_id,
+            Self::Candidate(state) => state.join_id,
+            Self::Prepared(state) => state.join_id,
+            Self::Committed(state) => state.join_id,
+            Self::Applied(state) => state.join_id,
+            Self::Activating(state) => state.join_id,
+            Self::Cancelling(state) => state.join_id,
+        }
+    }
+}

@@ -180,6 +180,12 @@ enum PersistedSpaceAdmissionStateV1 {
     RecoveryRequired(u8),
     JoinerResolvingInvitation(PersistedJoinerResolvingInvitationV1),
     JoinerResolvedInvitation(PersistedJoinerResolvedInvitationV1),
+    /// 新增变体，追加在末尾以保持既有变体序号稳定；旧的 `RecoveryRequired(u8)` 仅保留给
+    /// 没有捕获到 join_id 的历史记录解码，新写入一律使用这个变体。
+    RecoveryRequiredWithJoinId {
+        category: u8,
+        join_id: [u8; 16],
+    },
 }
 
 #[derive(Serialize, Deserialize)]

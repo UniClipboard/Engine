@@ -56,7 +56,13 @@ impl<E: DbExecutor + Send + Sync> CurrentJoinAdmissionStatePort for SqliteSpaceA
                         .map_err(into_anyhow)?;
                     let admission = JoinerAdmission::try_from_record(record)
                         .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
-                    if admission.join_id() != join_id {
+                    // `RecoveryRequired` 终态不保证有可展示的 join_id；通用 `join_id()`
+                    // 对这个终态会拒绝，这里必须先走 `recovery_join_id()` 判断。
+                    let matches_requested_join_id = match admission.recovery_category() {
+                        Some(_) => admission.recovery_join_id() == Some(join_id),
+                        None => admission.join_id() == join_id,
+                    };
+                    if !matches_requested_join_id {
                         return Ok(None);
                     }
                     let token = JoinerCancellationCommitToken::from_bytes(recovery_token(

@@ -191,9 +191,16 @@ impl SpaceAdmissionAggregate {
             }
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::RecoveryRequired(
                 state,
-            )) => PersistedSpaceAdmissionStateV1::RecoveryRequired(encode_recovery_category(
-                state.category,
-            )),
+            )) => match state.join_id {
+                Some(join_id) => PersistedSpaceAdmissionStateV1::RecoveryRequiredWithJoinId {
+                    category: encode_recovery_category(state.category),
+                    join_id: *join_id.as_bytes(),
+                },
+                // 只有重新打开一条没有捕获到 join_id 的历史记录、再原样保存时才会落到这里。
+                None => PersistedSpaceAdmissionStateV1::RecoveryRequired(encode_recovery_category(
+                    state.category,
+                )),
+            },
         };
         if self.format_version == SPACE_ADMISSION_RECORD_FORMAT_V2 {
             // V2 复用已验证的 V1 状态编码，并只为新增状态提供专属变体。
@@ -329,6 +336,16 @@ fn decode_record_v1(
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::RecoveryRequired(
                 SpaceAdmissionRecoveryRequiredTerminal {
                     category: decode_recovery_category(category)?,
+                    // 旧格式只保存了类别；没有 join_id 可以还原。
+                    join_id: None,
+                },
+            ))
+        }
+        PersistedSpaceAdmissionStateV1::RecoveryRequiredWithJoinId { category, join_id } => {
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::RecoveryRequired(
+                SpaceAdmissionRecoveryRequiredTerminal {
+                    category: decode_recovery_category(category)?,
+                    join_id: JoinId::from_bytes(join_id),
                 },
             ))
         }
