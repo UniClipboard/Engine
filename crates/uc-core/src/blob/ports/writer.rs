@@ -7,8 +7,9 @@
 //! infrastructure layer via decorator.
 //!
 //! Lives in `uc-core` because the contract speaks only in domain types
-//! (`ContentHash` in, `BlobId` out; or `Path` in, `BlobId` out). Concrete
-//! implementations live in `uc-infra-local`.
+//! (`ContentHash` in, `BlobId` out; or `Path` in, `BlobId` out).
+//!
+//! 具体实现位于 `uc-infra-local`。
 
 use std::path::Path;
 

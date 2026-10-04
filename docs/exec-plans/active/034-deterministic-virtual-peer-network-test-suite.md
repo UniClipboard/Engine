@@ -470,7 +470,7 @@ Relationship: `VirtualPeerNetwork::partition` 只阻断动作边界后的新领�
 
 ```text
 Component: Membership persistence and branch transition integration tests
-Path: crates/uc-infra/tests/membership_ledger.rs, crates/uc-infra-profile/src/security/v3_membership_branch_transition/tests.rs
+Path: crates/uc-infra-profile/tests/membership_record.rs, crates/uc-infra-profile/src/security/v3_membership_branch_transition/tests.rs
 Responsibility: 验证真实 SQLite、MasterKey AEAD、CAS、nonce、control-generation 阶段与崩溃恢复。
 Relationship: virtual node restart 只验证 Application 重新组装和恢复决策；介质与安全原子性继续由这些测试证明。
 ```

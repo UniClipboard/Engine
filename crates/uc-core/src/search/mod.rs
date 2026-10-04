@@ -1,9 +1,8 @@
 //! Search domain models — types and errors referenced by SearchIndexPort and
 //! SearchKeyDerivationPort in `crate::ports::search`.
 //!
-//! This module is pure contract definition: no implementations, no database access,
-//! no HTTP routes. Implementation layers live in uc-infra-storage (Phase 90+) and
-//! daemon routes live in uc-daemon (Phase 92).
+//! 本模块只定义契约：没有实现、数据库访问或 HTTP 路由。
+//! 实现位于 `uc-infra-storage`（Phase 90+），daemon 路由位于 uc-daemon（Phase 92）。
 
 pub mod document;
 pub mod error;

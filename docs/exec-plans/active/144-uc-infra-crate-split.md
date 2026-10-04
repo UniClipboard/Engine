@@ -300,6 +300,8 @@ zstd/tantivy/rusqlite 零命中——确认整 crate 改名不影响 S4 已验�
 | S2/S4 | `uc-infra-profile::inbound_peer_single_owner` 五项 | 结构验收按 `crates/uc-infra/src/...` 读源码，文件不存在即 panic | 路径改到 `uc-infra-p2p`/`uc-infra-profile` 的实际位置 |
 | S4 | `admission_diagnostic_file`（`error.reason` 由 `record_missing` 退化为 `storage_recovery_required`） | **诊断回归**：S4 为避开孤儿规则把 `SpaceAdmissionChannelCredentialError::diagnostic_failure` 简化为按变体兜底，丢掉了按来源细分的凭据分类；当时判断"没有测试依赖"不成立 | 错误变体增加 `failure: CredentialFailure` 字段，由构造错误的凭据负责人（`uc-infra-profile`）按来源类型写入，网络侧只读取，不跨 crate 向下转型 |
 
+| S3 | Linux 上 `peer_address_read_diagnostics` 的栈断言（路由修复后才暴露） | `sanitized_backtrace` 先用完整行过滤，再把每帧截到 160 字符。内联组合子帧（`map<…>`）只在泛型参数里带模块路径，拆分前 `uc_infra::…::relationship_store` 恰好在第 160 字符结束；改名为 `uc_infra_storage::` 后标记被截掉 | 每帧上限改为 256，断言不变；Docker `rust:1.95-bookworm` 复现：拆分前通过、修复前失败、修复后连续 3 次通过 |
+
 修复后 `uc-infra-profile` + `uc-infra-p2p` 全部测试 635 通过，`uc-observability-runtime` 75 通过；
 本机按 CI 口径复跑：`evidence` 18 项、`persistence-provider` 65 项全部通过；`workspace` 4087 项中
 4084 通过，失败/超时的 `offline_lifecycle::crash::interrupted_file_transfer_recovers_after_receiver_process_restart`、
@@ -310,8 +312,8 @@ zstd/tantivy/rusqlite 零命中——确认整 crate 改名不影响 S4 已验�
 **issue 第 6 节"必须同步的已知入口"逐项核对**：
 
 - 根 `Cargo.toml`：**`uc-infra-p2p` 缺 dev `opt-level = 3`**（S4 漏加，七个 crate 里唯一一个），已补；
-  `check-engine-repository.mjs` 新增 `infra dev optimization` 检查（含两条负面用例），要求每个
-  `uc-infra-*` workspace 成员都保留该设置。
+  `crates/uc-engine/tests/dependency_firewall.rs` 用 `toml` crate 解析根清单，要求每个 `uc-infra-*`
+  workspace 成员都保留该设置（含删除与降级两条负面用例，以及等价表头写法不误报）。
 - `.github/actions/rust-ci-setup/action.yml` 的 `fast-compile-infra`：S5 后只把 `uc-infra-profile`
   降回 opt-level 0，原语义是整个 `uc-infra`，已扩展为七个 crate。
 - `scripts/testing/run-test-group.sh`（`evidence`/`persistence-provider`/`process`）与

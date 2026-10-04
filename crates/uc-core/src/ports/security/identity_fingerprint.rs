@@ -1,8 +1,9 @@
 //! Identity fingerprint factory port.
 //!
 //! Derives a stable `IdentityFingerprint` from a raw identity public key.
-//! Used during pairing for out-of-band verification. The concrete derivation
-//! (SHA-256 + Base32 grouping) lives in `uc-infra-crypto`.
+//! Used during pairing for out-of-band verification.
+//!
+//! 具体派生（SHA-256 + Base32 分组）位于 `uc-infra-crypto`。
 
 use anyhow::Result;
 
