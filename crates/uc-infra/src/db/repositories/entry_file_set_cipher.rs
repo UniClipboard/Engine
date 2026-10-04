@@ -23,9 +23,9 @@ use uc_core::crypto::aad;
 use uc_core::crypto::domain::{Aad, Ciphertext, Plaintext};
 use uc_core::ids::{EntryId, ProfileId};
 
-use crate::security::v1_aead::{decrypt_xchacha_raw, encrypt_xchacha_raw};
 use crate::security::ContentProtection;
 use crate::space::InMemorySession;
+use uc_infra_crypto::v1_aead::{decrypt_xchacha_raw, encrypt_xchacha_raw};
 
 /// UCFS envelope magic — "UCFS" (UniClipboard File Set).
 const FILE_SET_MAGIC: [u8; 4] = [0x55, 0x43, 0x46, 0x53];

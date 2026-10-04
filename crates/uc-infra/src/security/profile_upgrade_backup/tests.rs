@@ -22,9 +22,9 @@ use uc_core::ports::{SecureStorageError, SecureStoragePort};
 use super::inventory::{read_secrets, BACKUP_DIRECTORY};
 use super::record::{self, read_file_record};
 use super::{ProfileUpgradeBackupRecordKeyMissing, ProfileUpgradeBackupStore};
-use crate::app_version_state::DEFAULT_FILE_NAME;
-use crate::fs::VaultLayout;
 use crate::security::ProfileBackupArchive;
+use uc_infra_local::app_version_state::DEFAULT_FILE_NAME;
+use uc_infra_local::fs::VaultLayout;
 
 #[derive(Default)]
 struct MemoryStorage(Mutex<BTreeMap<String, Vec<u8>>>);

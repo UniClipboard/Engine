@@ -886,7 +886,7 @@ mod tests {
             .write(true)
             .open(upgrade_directory.join(".lease"))
             .unwrap();
-        uc_infra::fs::file_lock::try_lock_exclusive(&lease).unwrap();
+        uc_infra_local::fs::file_lock::try_lock_exclusive(&lease).unwrap();
         let host = HostCapabilities::new(
             HostDirectories::new(
                 private.clone(),

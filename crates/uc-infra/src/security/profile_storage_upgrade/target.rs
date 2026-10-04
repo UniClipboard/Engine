@@ -518,7 +518,7 @@ fn separate_database(
         .batch_execute("VACUUM; PRAGMA foreign_keys = ON;")
         .map_err(database_error)?;
     drop(connection);
-    crate::fs::durability::sync_existing_file(path).map_err(storage_error)?;
+    uc_infra_local::fs::durability::sync_existing_file(path).map_err(storage_error)?;
     Ok(())
 }
 

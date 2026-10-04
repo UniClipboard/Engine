@@ -6,8 +6,9 @@ use rand::RngCore;
 use sha2::{Digest, Sha256};
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
-use super::crypto_model::EncryptedBlob;
-use super::{v1_aead, MasterKey};
+use super::MasterKey;
+use uc_infra_crypto::crypto_model::EncryptedBlob;
+use uc_infra_crypto::v1_aead;
 
 pub(super) const PROFILE_ADMISSION_KEY_NAME: &str = "profile_admission_master_key:v1";
 
@@ -378,7 +379,8 @@ mod tests {
 
     use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
-    use super::{v1_aead, AdmissionKeyError, AdmissionKeyManager, MasterKey};
+    use super::{AdmissionKeyError, AdmissionKeyManager, MasterKey};
+    use uc_infra_crypto::v1_aead;
 
     #[derive(Default)]
     struct MemorySecureStorage {

@@ -24,7 +24,7 @@ use uc_infra::db::pool::init_db_pool;
 use uc_infra::db::ports::DbExecutor;
 use uc_infra::security::AdmissionKeyManager;
 use uc_infra::space::SqliteMembershipRecordStore;
-use uc_infra::time::SystemClock;
+use uc_infra_local::time::SystemClock;
 
 const SENSITIVE_DEVICE_NAME: &str = "sensitive-membership-device-name-marker";
 

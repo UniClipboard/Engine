@@ -19,7 +19,7 @@ use uc_core::TaskRegistry;
 use uc_observability_contract::{error_source::io_error_kind, uc_info, uc_warn};
 
 use super::background_activity::BackgroundActivity;
-use crate::blob::BlobWriterPort;
+use uc_infra_local::blob::BlobWriterPort;
 
 use super::{
     BackgroundBlobWorker, RepresentationCache, SpoolJanitor, SpoolManager, SpoolScanner,

@@ -11,6 +11,6 @@ pub use filesystem_store::{FilesystemBlobStore, SwitchableFilesystemBlobStore};
 pub use repository_port::BlobRepositoryPort;
 pub use store_port::{BlobStorePort, StoredPathBlob};
 // Re-export uc-core's BlobWriterPort under the existing path to keep
-// downstream `uc_infra::blob::BlobWriterPort` imports working during the
+// downstream `uc_infra_local::blob::BlobWriterPort` imports working during the
 // transition. New code should import directly from `uc_core::blob::ports`.
 pub use uc_core::blob::ports::{BlobReaderPort, BlobWriterPort};

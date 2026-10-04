@@ -41,7 +41,7 @@ pub(super) fn acquire_lease(
         .write(true)
         .open(generation_parent.join(".space-control-generation.lease"))
         .map_err(|source| storage(anyhow::Error::new(source)))?;
-    match crate::fs::file_lock::try_lock_exclusive(&file) {
+    match uc_infra_local::fs::file_lock::try_lock_exclusive(&file) {
         Ok(()) => Ok(ControlGenerationLease { _file: file }),
         Err(TryLockError::WouldBlock) => Err(SpaceControlGenerationError::Busy {
             source: anyhow::anyhow!("space control generation lease is held"),
@@ -77,7 +77,7 @@ pub(super) fn compact_database(database: &Path) -> Result<(), SpaceControlGenera
             storage(anyhow::Error::new(source).context("compact prepared control database"))
         })?;
     drop(connection);
-    crate::fs::durability::sync_existing_file(database)
+    uc_infra_local::fs::durability::sync_existing_file(database)
         .map_err(|source| storage(anyhow::Error::new(source)))?;
     let parent = database
         .parent()
@@ -105,7 +105,7 @@ pub(super) fn checkpoint_database(
             source: anyhow::anyhow!("mutable control database checkpoint is incomplete"),
         });
     }
-    crate::fs::durability::sync_existing_file(database)
+    uc_infra_local::fs::durability::sync_existing_file(database)
         .map_err(|source| storage(anyhow::Error::new(source)))?;
     let parent = database
         .parent()

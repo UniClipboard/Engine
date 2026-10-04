@@ -1,10 +1,10 @@
-use crate::blob::{Blob, BlobStorageLocator};
 use crate::db::models::blob::NewBlobRow;
 use crate::db::models::BlobRow;
 use crate::db::ports::{InsertMapper, RowMapper};
 use anyhow::Result;
 use std::path::PathBuf;
 use uc_core::{BlobId, ContentHash};
+use uc_infra_local::blob::{Blob, BlobStorageLocator};
 
 pub struct BlobRowMapper;
 

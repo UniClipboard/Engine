@@ -18,7 +18,7 @@
 //! 4 个剪切板 decorator 用的 JSON `EncryptedBlob` 字节布局不兼容,共享
 //! 同一个 port 会破坏既有 `.blob` 文件的可读性（V1 数据兼容 ironclad 不变量）。
 //!
-//! 改用 `super::v1_aead` 私有 helper 直接调底层 AEAD: 算法行为与历史
+//! 改用 `uc_infra_crypto::v1_aead` 私有 helper 直接调底层 AEAD: 算法行为与历史
 //! `EncryptionPort::encrypt_blob` 字节级一致,保证既有 UCBL 文件继续可读。
 
 use anyhow::{Context, Result};
@@ -31,9 +31,9 @@ use uc_core::membership::{ContentKeyId, ContentKeyPurpose, GroupEpoch};
 use uc_core::{blob::ports::BlobReaderPort, crypto::aad, BlobId, ContentHash};
 
 use super::key_epoch_aad;
-use super::v1_aead;
-use crate::blob::{BlobStorePort, StoredPathBlob};
 use crate::space::InMemorySession;
+use uc_infra_crypto::v1_aead;
+use uc_infra_local::blob::{BlobStorePort, StoredPathBlob};
 use uc_observability_contract::{log_fields::log_id, uc_debug};
 
 /// Magic bytes identifying a UniClipboard blob file ("UCBL")
@@ -339,8 +339,8 @@ impl BlobReaderPort for EncryptedBlobStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blob::FilesystemBlobStore;
-    use crate::security::secrets::MasterKey;
+    use uc_infra_crypto::secrets::MasterKey;
+    use uc_infra_local::blob::FilesystemBlobStore;
 
     fn hash_of(bytes: &[u8]) -> ContentHash {
         ContentHash::from(blake3::hash(bytes).as_bytes())

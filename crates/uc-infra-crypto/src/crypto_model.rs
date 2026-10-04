@@ -16,22 +16,22 @@ use serde::{Deserialize, Serialize};
 use uc_core::crypto::model::EncryptionError;
 
 /// 从持久资料读取的 Argon2 参数必须在认证前限制资源消耗。
-pub(crate) const MAX_KDF_MEM_KIB: u32 = 1024 * 1024;
-pub(crate) const MAX_KDF_ITERS: u32 = 1024;
-pub(crate) const MAX_KDF_PARALLELISM: u32 = 256;
+pub const MAX_KDF_MEM_KIB: u32 = 1024 * 1024;
+pub const MAX_KDF_ITERS: u32 = 1024;
+pub const MAX_KDF_PARALLELISM: u32 = 256;
 /// At most 512 MiB of total Argon2 memory filling. This admits the production
 /// default (128 MiB x 3) while rejecting individually valid combinations that
 /// can keep a device allocating or filling memory for an excessive duration.
-pub(crate) const MAX_KDF_WORK_KIB: u64 = 512 * 1024;
+pub const MAX_KDF_WORK_KIB: u64 = 512 * 1024;
 
-pub(crate) fn kdf_cost_is_bounded(mem_kib: u32, iters: u32, parallelism: u32) -> bool {
+pub fn kdf_cost_is_bounded(mem_kib: u32, iters: u32, parallelism: u32) -> bool {
     (8..=MAX_KDF_MEM_KIB).contains(&mem_kib)
         && (1..=MAX_KDF_ITERS).contains(&iters)
         && (1..=MAX_KDF_PARALLELISM).contains(&parallelism)
         && u64::from(mem_kib) * u64::from(iters) <= MAX_KDF_WORK_KIB
 }
 
-pub(crate) fn validate_kdf(kdf: &KdfParams) -> Result<(), EncryptionError> {
+pub fn validate_kdf(kdf: &KdfParams) -> Result<(), EncryptionError> {
     if kdf.alg != "Argon2id" {
         return Err(EncryptionError::UnsupportedKdfAlgorithm);
     }

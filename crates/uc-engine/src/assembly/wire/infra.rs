@@ -402,7 +402,7 @@ pub(super) fn create_infra_layer(
         FileAppVersionStateRepository::with_defaults(app_data_root.clone()),
     );
     let engine_version_state: Arc<dyn uc_core::ports::EngineVersionStatePort> = Arc::new(
-        uc_infra::FileEngineVersionStateRepository::with_defaults(app_data_root.clone()),
+        uc_infra_local::FileEngineVersionStateRepository::with_defaults(app_data_root.clone()),
     );
 
     // 首次同步事件去重 flag——独立小文件 first-sync-state.json，与升级游标同级。

@@ -17,9 +17,9 @@ use super::{
     envelope, ContentProtection, ContentProtectionError, V3EncryptedBlobStore,
     V3InlinePayloadCipher,
 };
-use crate::blob::{BlobStorePort, FilesystemBlobStore};
 use crate::security::{MasterKey, ProfileContentKeyVault, ProfilePayloadAdapters};
 use crate::space::InMemorySession;
+use uc_infra_local::blob::{BlobStorePort, FilesystemBlobStore};
 
 #[derive(Default)]
 struct MemorySecureStorage(Mutex<BTreeMap<String, Vec<u8>>>);

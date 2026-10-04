@@ -34,9 +34,6 @@ use uc_core::ports::{
     ActiveClipboardDispatchPort, ActiveClipboardReceiverPort, ClipboardDispatchPort,
     ConnectionChannelPort, LocalIdentityPort, PeerReachabilityPort,
 };
-use uc_infra::fs::{
-    FsAtomicPublisher, FsDirectoryStagingCleaner, FsHiddenPathMarker, FsInboundFileTarget,
-};
 use uc_infra::network::iroh::{
     encode_space_admission_route, ActiveClipboardHandlers, ActiveClipboardPullHandlers,
     BlobHandlers, ClipboardHandlers, GroupUpdateHandlers, IrohIdentityStore, IrohNodeError,
@@ -54,6 +51,9 @@ use uc_infra::space::{
     DeviceTrustObservationsAdapter, GatedMembershipHistoryExchange, GatedSpaceAdmissionTransport,
     MembershipActivationAdapter, MembershipMemberFactsAdapter, MembershipNetworkGate,
     OpenMlsHistoricalSignatureVerifier,
+};
+use uc_infra_local::fs::{
+    FsAtomicPublisher, FsDirectoryStagingCleaner, FsHiddenPathMarker, FsInboundFileTarget,
 };
 use uc_observability_contract::uc_info;
 
