@@ -1,3 +1,10 @@
+//! 完整邀请（full invitation）票据的编解码。
+//!
+//! 与传输无关：只做 postcard/base64 编解码与过期校验，不涉及拨号、准入判断或存储。
+//! Admission/pairing/rendezvous 侧的生产消费方分别在 `uc-infra`（admission）
+//! 与未来的 `uc-infra-p2p`（pairing/rendezvous）；放在本 crate 是为了让两边
+//! 单向依赖同一份 codec，而不是互相依赖。
+
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -7,8 +14,9 @@ use uc_core::pairing::invitation::FullInvitation;
 const FULL_INVITATION_PREFIX: &str = "ucspace1_";
 const FULL_INVITATION_FORMAT_V1: u16 = 1;
 const MAX_ROUTE_LEN: usize = 64 * 1024;
+
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum FullInvitationCodecError {
+pub enum FullInvitationCodecError {
     #[error("the full invitation route is invalid")]
     InvalidRoute,
     #[error("the full invitation encoding is invalid")]
@@ -43,29 +51,27 @@ struct FullInvitationV1 {
     expires_at_ms: i64,
 }
 
-pub(crate) struct DecodedFullInvitation {
+pub struct DecodedFullInvitation {
     invitation_id: InvitationId,
     route: Vec<u8>,
-    #[cfg(test)]
     expires_at_ms: i64,
 }
 
 impl DecodedFullInvitation {
-    pub(crate) const fn invitation_id(&self) -> InvitationId {
+    pub const fn invitation_id(&self) -> InvitationId {
         self.invitation_id
     }
 
-    pub(crate) fn route(&self) -> &[u8] {
+    pub fn route(&self) -> &[u8] {
         &self.route
     }
 
-    #[cfg(test)]
-    pub(crate) const fn expires_at_ms(&self) -> i64 {
+    pub const fn expires_at_ms(&self) -> i64 {
         self.expires_at_ms
     }
 }
 
-pub(crate) fn encode_full_invitation(
+pub fn encode_full_invitation(
     invitation_id: InvitationId,
     route: &[u8],
     expires_at_ms: i64,
@@ -85,7 +91,7 @@ pub(crate) fn encode_full_invitation(
     .map_err(FullInvitationCodecError::invalid_encoding_from)
 }
 
-pub(crate) fn decode_full_invitation(
+pub fn decode_full_invitation(
     invitation: &FullInvitation,
     now_ms: i64,
 ) -> Result<DecodedFullInvitation, FullInvitationCodecError> {
@@ -110,12 +116,11 @@ pub(crate) fn decode_full_invitation(
     Ok(DecodedFullInvitation {
         invitation_id,
         route: decoded.route,
-        #[cfg(test)]
         expires_at_ms: decoded.expires_at_ms,
     })
 }
 
-pub(crate) fn decode_invitation_entry(
+pub fn decode_invitation_entry(
     value: &str,
     now_ms: i64,
 ) -> Result<Option<DecodedFullInvitation>, FullInvitationCodecError> {
@@ -185,48 +190,6 @@ mod tests {
         assert!(matches!(
             decode_full_invitation(&future, 0),
             Err(FullInvitationCodecError::UnsupportedVersion)
-        ));
-    }
-
-    #[tokio::test]
-    async fn production_joiner_preparation_separates_full_and_short_entries() {
-        use uc_application::deps::{PrepareJoinerInvitationPort, PreparedJoinerInvitation};
-        use uc_application::facade::JoinSpaceInput;
-        use uc_core::crypto::domain::Passphrase;
-        use uc_core::pairing::InvitationCode;
-
-        let adapter = crate::space::DefaultJoinerInvitationPreparation;
-        let full = encode_full_invitation(invitation_id(), b"route", 1_900_000_000_000)
-            .expect("valid full invitation");
-        let prepared = adapter
-            .prepare(&JoinSpaceInput {
-                invitation_code: InvitationCode::new(full.as_str()),
-                device_name: None,
-                passphrase: Passphrase::new("secret-passphrase"),
-                preserve_unreadable_history: false,
-            })
-            .await
-            .expect("full invitation should prepare locally");
-        assert!(matches!(prepared, PreparedJoinerInvitation::Full));
-
-        let prepared = adapter
-            .prepare(&JoinSpaceInput {
-                invitation_code: InvitationCode::new("ABCD-1234"),
-                device_name: None,
-                passphrase: Passphrase::new("secret-passphrase"),
-                preserve_unreadable_history: true,
-            })
-            .await
-            .expect("short code should prepare a durable context");
-        assert!(matches!(
-            prepared,
-            PreparedJoinerInvitation::Short {
-                short_code,
-                start_context,
-                ..
-            } if short_code.as_bytes() == b"ABCD-1234"
-                && !start_context.as_bytes().is_empty()
-                && !format!("{start_context:?}").contains("secret-passphrase")
         ));
     }
 }

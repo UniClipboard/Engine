@@ -2,7 +2,6 @@ mod credentials;
 mod digest;
 mod display;
 mod failure_log;
-mod full_invitation;
 mod joiner;
 mod recovery;
 mod recovery_material;
@@ -17,9 +16,6 @@ pub(crate) use credentials::{
     verify_prepared_registration_for_control_generation,
 };
 pub use credentials::{SpaceAdmissionCredentialStoreError, SqliteSpaceAdmissionCredentials};
-#[cfg(test)]
-pub(crate) use full_invitation::decode_full_invitation;
-pub(crate) use full_invitation::{decode_invitation_entry, encode_full_invitation};
 pub use joiner::{
     DefaultJoinerActivationExecutor, DefaultJoinerActivationPreparation,
     DefaultJoinerAppliedPreparation, DefaultJoinerCancellationPreparation,

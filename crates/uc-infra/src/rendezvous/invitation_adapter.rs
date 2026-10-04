@@ -157,7 +157,7 @@ impl RendezvousPairingInvitationAdapter {
                             .into(),
                     )
                 })?;
-        let full_invitation = crate::space::encode_full_invitation(
+        let full_invitation = uc_sync_protocol::full_invitation::encode_full_invitation(
             invitation_id,
             &admission_route,
             expires_at.timestamp_millis(),
@@ -876,10 +876,17 @@ mod tests {
         let route = br#"{"node":"sponsor"}"#;
         let expires_at_ms = 1_800_000_000_000_i64;
 
-        let invitation = crate::space::encode_full_invitation(invitation_id, route, expires_at_ms)
-            .expect("full invitation should encode");
-        let decoded = crate::space::decode_full_invitation(&invitation, expires_at_ms - 1)
-            .expect("full invitation should decode");
+        let invitation = uc_sync_protocol::full_invitation::encode_full_invitation(
+            invitation_id,
+            route,
+            expires_at_ms,
+        )
+        .expect("full invitation should encode");
+        let decoded = uc_sync_protocol::full_invitation::decode_full_invitation(
+            &invitation,
+            expires_at_ms - 1,
+        )
+        .expect("full invitation should decode");
 
         assert!(invitation.as_str().starts_with("ucspace1_"));
         assert_eq!(decoded.invitation_id(), invitation_id);
@@ -925,7 +932,7 @@ mod tests {
             issued.expires_at >= before + LOCAL_MINT_TTL
                 && issued.expires_at <= after + LOCAL_MINT_TTL
         );
-        let decoded = crate::space::decode_full_invitation(
+        let decoded = uc_sync_protocol::full_invitation::decode_full_invitation(
             &issued.full_invitation,
             issued.expires_at.timestamp_millis() - 1,
         )

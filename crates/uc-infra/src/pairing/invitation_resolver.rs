@@ -112,11 +112,13 @@ impl ResolveJoinerInvitationPort for PairingInvitationResolverAdapter {
 }
 
 pub(crate) fn validate_invitation_route(invitation: &str) -> anyhow::Result<()> {
-    let decoded =
-        crate::space::decode_invitation_entry(invitation, chrono::Utc::now().timestamp_millis())
-            .map_err(anyhow::Error::new)
-            .context("验证 Space 邀请失败")?
-            .ok_or_else(|| anyhow::anyhow!("Space 邀请不可用"))?;
+    let decoded = uc_sync_protocol::full_invitation::decode_invitation_entry(
+        invitation,
+        chrono::Utc::now().timestamp_millis(),
+    )
+    .map_err(anyhow::Error::new)
+    .context("验证 Space 邀请失败")?
+    .ok_or_else(|| anyhow::anyhow!("Space 邀请不可用"))?;
     crate::network::iroh::space_admission::decode_space_admission_route(decoded.route())
         .map_err(anyhow::Error::new)
         .context("解析 Space 准入路由失败")?;

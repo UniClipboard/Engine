@@ -385,7 +385,7 @@ fn transport_failure_from(
     MembershipHistoryExchangeError::transport_from(source)
 }
 
-pub(crate) fn request_purpose(message: &MembershipHistoryMessage) -> MembershipExchangePurpose {
+pub fn request_purpose(message: &MembershipHistoryMessage) -> MembershipExchangePurpose {
     match message {
         MembershipHistoryMessage::SummaryV3(_) => MembershipExchangePurpose::CompareSummary,
         MembershipHistoryMessage::RequestSuffixV3(_) => MembershipExchangePurpose::RequestHistory,

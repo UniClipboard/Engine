@@ -67,7 +67,7 @@ pub(crate) fn decode_space_admission_route(
     ))
 }
 
-pub(crate) fn decode_space_admission_continuation_endpoint(
+pub fn decode_space_admission_continuation_endpoint(
     route: &[u8],
 ) -> Result<EndpointAddr, SpaceAdmissionTransportError> {
     let route = SpaceAdmissionRoute::from_bytes(route.to_vec())

@@ -72,6 +72,7 @@ const INTERNAL_PACKAGES = new Set([
 // 无存储、无密钥的通用库，任何新增依赖都必须先更新这里并说明理由。
 const SYNC_PROTOCOL_ALLOWED_DEPENDENCIES = [
   'anyhow',
+  'base64',
   'bytes',
   'postcard',
   'serde',
@@ -1372,7 +1373,7 @@ function checkDualInvitationEntry() {
     }
   }
 
-  const codecPath = 'crates/uc-infra/src/space/admission/full_invitation.rs'
+  const codecPath = 'crates/uc-sync-protocol/src/full_invitation.rs'
   const codec = read(codecPath)
   for (const required of [
     'FULL_INVITATION_PREFIX',
@@ -1455,7 +1456,6 @@ function checkInfraSpaceAdmissionOwnership() {
   const admissionRoot = 'crates/uc-infra/src/space/admission'
   const requiredEntries = [
     'mod.rs',
-    'full_invitation.rs',
     'security/mod.rs',
     'security/transition.rs',
     'repository/mod.rs',
