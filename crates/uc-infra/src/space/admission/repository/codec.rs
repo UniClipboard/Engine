@@ -15,9 +15,9 @@ use super::persisted::{
     SPACE_ADMISSION_REPOSITORY_FORMAT_V2, SPACE_ADMISSION_REPOSITORY_FORMAT_V3,
 };
 use super::{SpaceAdmissionStateStoreError, SqliteSpaceAdmissionState};
-use crate::db::ports::DbExecutor;
 use crate::security::{AdmissionKeyError, WrappedSpaceAdmissionDataKey};
 use uc_application::deps::AdmissionReadFailureCategory;
+use uc_infra_storage::db::ports::DbExecutor;
 
 const LEGACY_REPOSITORY_PAYLOAD_PURPOSE: &[u8] = b"space-admission-repository-v1";
 const METADATA_PAYLOAD_PURPOSE: &[u8] = b"space-admission-repository-metadata-v3";

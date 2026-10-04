@@ -5,11 +5,11 @@ use uc_application::deps::{CurrentSpaceIdentityError, InitialSpaceActivationPort
 use uc_core::ids::SpaceId;
 use uc_core::membership::ActiveRuntimeLayout;
 
-use super::active_space_generation_manifest_store::V3ManifestPromotionOutcome;
 use super::{
     ActiveRuntimeManifestV3, ActiveSpaceGenerationManifestStore,
     ActiveSpaceGenerationManifestStoreError,
 };
+use uc_infra_storage::active_space_generation_manifest_store::V3ManifestPromotionOutcome;
 
 const INITIAL_KEYSLOT_GENERATION_DOMAIN: &[u8] = b"uniclipboard/v3-initial-keyslot-generation/v1\0";
 

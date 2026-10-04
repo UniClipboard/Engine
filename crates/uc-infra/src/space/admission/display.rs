@@ -14,8 +14,8 @@ use uc_core::membership::{
     SponsorAdmission, SponsorPairingConfirmationStatus, VersionedMembershipHistory,
 };
 
-use crate::db::ports::DbExecutor;
 use crate::space::OpenMlsHistoricalSignatureVerifier;
+use uc_infra_storage::db::ports::DbExecutor;
 
 use super::repository::codec::{into_anyhow, map_executor_error};
 use super::repository::{SpaceAdmissionStateStoreError, SqliteSpaceAdmissionState};
@@ -359,11 +359,11 @@ mod tests {
     use uc_core::security::IdentityFingerprint;
 
     use super::*;
-    use crate::db::executor::DieselSqliteExecutor;
-    use crate::db::pool::init_db_pool;
     use crate::security::{ActiveSpaceGenerationManifestStore, AdmissionKeyManager};
     use crate::space::AdmissionSecurityTransitionAdapter;
     use uc_infra_crypto::mls_group::MlsGroupEngine;
+    use uc_infra_storage::db::executor::DieselSqliteExecutor;
+    use uc_infra_storage::db::pool::init_db_pool;
 
     use super::super::repository::fresh_test_repository_state;
 

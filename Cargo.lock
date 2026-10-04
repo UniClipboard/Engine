@@ -7120,6 +7120,7 @@ dependencies = [
  "uc-infra",
  "uc-infra-local",
  "uc-infra-security",
+ "uc-infra-storage",
  "uc-mobile-lan",
  "uc-mobile-proto",
  "uc-observability-contract",
@@ -7214,6 +7215,7 @@ dependencies = [
  "uc-infra-crypto",
  "uc-infra-local",
  "uc-infra-security",
+ "uc-infra-storage",
  "uc-observability-contract",
  "uc-observability-runtime",
  "uc-sync-protocol",
@@ -7315,6 +7317,53 @@ dependencies = [
 ]
 
 [[package]]
+name = "uc-infra-storage"
+version = "1.1.0-rc.22"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "blake3",
+ "chrono",
+ "criterion",
+ "diesel",
+ "diesel_migrations",
+ "hex",
+ "hkdf 0.12.4",
+ "hmac 0.12.1",
+ "image",
+ "iroh",
+ "libsqlite3-sys",
+ "mockall",
+ "opentelemetry",
+ "opentelemetry-appender-tracing",
+ "opentelemetry_sdk",
+ "postcard",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "static_assertions",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uc-application",
+ "uc-core",
+ "uc-infra-crypto",
+ "uc-infra-local",
+ "uc-infra-security",
+ "uc-observability-contract",
+ "uc-observability-runtime",
+ "uc-testkit",
+ "unicode-normalization",
+ "unicode-segmentation",
+ "url",
+ "uuid",
+ "wiremock",
+ "zeroize",
+]
+
+[[package]]
 name = "uc-mobile"
 version = "0.1.0"
 dependencies = [
@@ -7352,6 +7401,7 @@ dependencies = [
  "uc-application",
  "uc-core",
  "uc-infra",
+ "uc-infra-storage",
  "uc-mobile-proto",
  "uc-observability-contract",
  "uc-testkit",

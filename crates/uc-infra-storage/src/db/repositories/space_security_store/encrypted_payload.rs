@@ -1,0 +1,45 @@
+use hmac::{Hmac, Mac};
+use serde::{de::DeserializeOwned, Serialize};
+use sha2::Sha256;
+use uc_core::ids::SpaceId;
+use uc_core::membership::KeyEpochError;
+
+use uc_infra_crypto::crypto_model::EncryptedBlob;
+use uc_infra_crypto::v1_aead;
+use uc_infra_security::MasterKey;
+
+use super::backend;
+
+pub fn space_lookup_token(
+    master_key: &MasterKey,
+    space_id: &SpaceId,
+) -> Result<String, KeyEpochError> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(master_key.as_bytes()).map_err(backend)?;
+    mac.update(b"uc-space-lookup-v1|");
+    mac.update(&(space_id.as_ref().len() as u64).to_be_bytes());
+    mac.update(space_id.as_ref().as_bytes());
+    Ok(hex::encode(mac.finalize().into_bytes()))
+}
+
+pub fn seal<T: Serialize>(
+    master_key: &MasterKey,
+    value: &T,
+    aad: &[u8],
+) -> Result<Vec<u8>, KeyEpochError> {
+    let plaintext = serde_json::to_vec(value).map_err(backend)?;
+    let encrypted = v1_aead::encrypt_blob_xchacha(master_key, &plaintext, aad).map_err(backend)?;
+    serde_json::to_vec(&encrypted).map_err(backend)
+}
+
+pub fn open<T: DeserializeOwned>(
+    master_key: &MasterKey,
+    ciphertext: &[u8],
+    aad: &[u8],
+) -> Result<T, KeyEpochError> {
+    let encrypted: EncryptedBlob =
+        serde_json::from_slice(ciphertext).map_err(KeyEpochError::decryption_failed_from)?;
+    let plaintext =
+        v1_aead::decrypt_blob_xchacha(master_key, &encrypted.nonce, &encrypted.ciphertext, aad)
+            .map_err(KeyEpochError::decryption_failed_from)?;
+    serde_json::from_slice(&plaintext).map_err(KeyEpochError::persisted_state_integrity_failed_from)
+}

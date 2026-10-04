@@ -96,7 +96,7 @@ impl ConfigMigrationPaths {
 /// The config-migration adapter.
 pub struct ConfigMigrationAdapter {
     secure_storage: Arc<dyn SecureStoragePort>,
-    db_pool: crate::db::pool::DbPool,
+    db_pool: uc_infra_storage::db::pool::DbPool,
     local_identity: Arc<dyn LocalIdentityPort>,
     clock: Arc<dyn ClockPort>,
     app_version: String,
@@ -120,7 +120,7 @@ impl ConfigMigrationAdapter {
     /// * `source_mode` — storage layout already resolved by the host.
     pub fn new(
         secure_storage: Arc<dyn SecureStoragePort>,
-        db_pool: crate::db::pool::DbPool,
+        db_pool: uc_infra_storage::db::pool::DbPool,
         local_identity: Arc<dyn LocalIdentityPort>,
         clock: Arc<dyn ClockPort>,
         paths: ConfigMigrationPaths,

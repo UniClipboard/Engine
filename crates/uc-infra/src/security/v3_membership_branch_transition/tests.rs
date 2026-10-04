@@ -26,10 +26,6 @@ use uc_core::ports::space::SpaceAccessStore;
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
 use super::V3MembershipBranchTransition;
-use crate::db::executor::DieselSqliteExecutor;
-use crate::db::pool::init_db_pool;
-use crate::db::repositories::DieselSpaceSecurityStore;
-use crate::security::active_space_generation_manifest_store::V3ManifestPromotionOutcome;
 use crate::security::{
     ActiveRuntimeManifest, ActiveRuntimeManifestV3, ActiveSpaceGenerationManifestStore,
     AdmissionKeyManager, DefaultCurrentProfile, ProfileContentKeyVault, ProfileRuntimeLayout,
@@ -42,6 +38,10 @@ use crate::space::{
 };
 use uc_infra_local::time::SystemClock;
 use uc_infra_security::key_slot_store::JsonKeySlotStore;
+use uc_infra_storage::active_space_generation_manifest_store::V3ManifestPromotionOutcome;
+use uc_infra_storage::db::executor::DieselSqliteExecutor;
+use uc_infra_storage::db::pool::init_db_pool;
+use uc_infra_storage::db::repositories::DieselSpaceSecurityStore;
 
 #[derive(Default)]
 struct MemorySecureStorage(Mutex<HashMap<String, Vec<u8>>>);

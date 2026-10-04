@@ -19,11 +19,11 @@ use super::codec::{self, Decoded};
 use super::store::{EncryptedRecordRow, MEMBERSHIP_RECORD_PURPOSE};
 use super::test_support::projection_of_ledger;
 use super::SqliteMembershipRecordStore;
-use crate::db::executor::DieselSqliteExecutor;
-use crate::db::pool::{init_db_pool, DbPool};
-use crate::db::ports::DbExecutor;
-use crate::db::repositories::test_relationship_store;
 use crate::security::AdmissionKeyManager;
+use uc_infra_storage::db::executor::DieselSqliteExecutor;
+use uc_infra_storage::db::pool::{init_db_pool, DbPool};
+use uc_infra_storage::db::ports::DbExecutor;
+use uc_infra_storage::db::repositories::test_relationship_store;
 
 /// 计划 049 S0 固定向量写入时使用的 profile generation。
 const FIXTURE_GENERATION: [u8; 16] = [0x49; 16];

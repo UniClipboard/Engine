@@ -9,8 +9,8 @@
 
 use std::path::Path;
 
-use crate::db::pool::DbPool;
 use diesel::connection::SimpleConnection;
+use uc_infra_storage::db::pool::DbPool;
 
 /// Failures producing a snapshot.
 ///
@@ -74,8 +74,8 @@ pub fn snapshot_to_bytes(pool: &DbPool, scratch_path: &Path) -> Result<Vec<u8>, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::pool::init_db_pool;
     use diesel::RunQueryDsl;
+    use uc_infra_storage::db::pool::init_db_pool;
 
     fn temp_db_pool() -> (DbPool, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();

@@ -16,9 +16,6 @@ use uc_core::ports::space::PrepareAdmissionTargetAccessPort;
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
 use super::{acquire_lease, SpaceControlGeneration, SpaceControlGenerationError};
-use crate::db::executor::DieselSqliteExecutor;
-use crate::db::pool::init_db_pool;
-use crate::db::repositories::DieselSpaceSecurityStore;
 use crate::security::{
     ActiveRuntimeManifestV3, AdmissionKeyManager, DefaultCurrentProfile, ProfileContentKeyVault,
     ProfileRuntimeLayout,
@@ -28,6 +25,9 @@ use crate::space::{
     prepare_registration, InMemorySession, KeyMaterialStore, RuntimeSpaceAccessAdapter,
 };
 use uc_infra_security::key_slot_store::JsonKeySlotStore;
+use uc_infra_storage::db::executor::DieselSqliteExecutor;
+use uc_infra_storage::db::pool::init_db_pool;
+use uc_infra_storage::db::repositories::DieselSpaceSecurityStore;
 
 #[derive(Default)]
 struct MemorySecureStorage(Mutex<HashMap<String, Vec<u8>>>);

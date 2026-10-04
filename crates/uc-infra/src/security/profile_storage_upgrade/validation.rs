@@ -175,7 +175,7 @@ fn corrupt(source: anyhow::Error) -> ProfileStorageUpgradeError {
 #[cfg(test)]
 mod tests {
     use super::{schema_digest, validate_database};
-    use crate::db::pool::init_db_pool;
+    use uc_infra_storage::db::pool::init_db_pool;
 
     #[test]
     fn final_database_validation_rejects_invalid_sqlite() {

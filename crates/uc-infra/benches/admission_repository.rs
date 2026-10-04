@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use uc_infra::db::repositories::GroupUpdateDeliveryBenchmark;
 use uc_infra::space::AdmissionRepositoryBenchmark;
+use uc_infra_storage::db::repositories::GroupUpdateDeliveryBenchmark;
 
 fn benchmark_sizes() -> &'static [usize] {
     if std::env::var_os("UNICLIPBOARD_BENCH_SMOKE").is_some() {

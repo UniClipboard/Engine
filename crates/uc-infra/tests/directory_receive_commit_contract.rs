@@ -18,16 +18,18 @@ use uc_core::ports::{
     InboundReceiveSettlement, PublishPhase, RecordDirectoryPublishPort,
 };
 use uc_core::SnapshotHash;
-use uc_infra::db::executor::DieselSqliteExecutor;
-use uc_infra::db::models::snapshot_representation::NewSnapshotRepresentationRow;
-use uc_infra::db::models::{NewClipboardEntryRow, NewClipboardEventRow, NewClipboardSelectionRow};
-use uc_infra::db::pool::init_db_pool;
-use uc_infra::db::ports::DbExecutor;
-use uc_infra::db::repositories::{
+use uc_infra_storage::db::executor::DieselSqliteExecutor;
+use uc_infra_storage::db::models::snapshot_representation::NewSnapshotRepresentationRow;
+use uc_infra_storage::db::models::{
+    NewClipboardEntryRow, NewClipboardEventRow, NewClipboardSelectionRow,
+};
+use uc_infra_storage::db::pool::init_db_pool;
+use uc_infra_storage::db::ports::DbExecutor;
+use uc_infra_storage::db::repositories::{
     DieselDirectoryPublishLogRepository, DieselEntryReceiveAttemptRepository,
     DieselInboundReceiveCommitRepository,
 };
-use uc_infra::db::schema::{
+use uc_infra_storage::db::schema::{
     clipboard_entry, clipboard_event, clipboard_selection, clipboard_snapshot_representation,
     directory_publish_log, entry_file_set, entry_receive_attempt, file_transfer,
 };

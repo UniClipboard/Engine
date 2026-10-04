@@ -1,4 +1,3 @@
-mod active_space_generation_manifest_store;
 mod content_protection;
 mod decrypting_clipboard_event_repo;
 mod decrypting_representation_repo;
@@ -20,11 +19,6 @@ mod v3_device_management_reset;
 mod v3_initial_space_activation;
 mod v3_membership_branch_transition;
 
-pub(crate) use active_space_generation_manifest_store::EncryptionPassphraseChangeJournal;
-pub use active_space_generation_manifest_store::{
-    ActiveRuntimeManifest, ActiveRuntimeManifestV3, ActiveSpaceGenerationManifestStore,
-    ActiveSpaceGenerationManifestStoreError,
-};
 pub use content_protection::V3EncryptedBlobStore;
 pub use decrypting_clipboard_event_repo::DecryptingClipboardEventRepository;
 pub use decrypting_representation_repo::DecryptingClipboardRepresentationRepository;
@@ -73,6 +67,11 @@ pub use uc_infra_security::{
     ContentProtectionError, DefaultCurrentProfile, DefaultKeyMigrationAdapter,
     InstalledProfileCatalog, ProfileContentKeyVault, ProfileContentKeyVaultError,
     ResolvedProfileContentKey, V3InlinePayloadCipher, WrappedSpaceAdmissionDataKey,
+};
+pub(crate) use uc_infra_storage::EncryptionPassphraseChangeJournal;
+pub use uc_infra_storage::{
+    ActiveRuntimeManifest, ActiveRuntimeManifestV3, ActiveSpaceGenerationManifestStore,
+    ActiveSpaceGenerationManifestStoreError,
 };
 pub use v3_admission_space_transition::V3AdmissionSpaceTransition;
 pub use v3_device_management_reset::V3DeviceManagementReset;

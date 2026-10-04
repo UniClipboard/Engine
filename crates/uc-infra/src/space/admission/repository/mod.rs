@@ -22,12 +22,12 @@ mod tests;
 
 use std::sync::{Arc, Mutex};
 
-use crate::db::ports::DbExecutor;
 use crate::security::{ActiveSpaceGenerationManifestStore, AdmissionKeyManager};
 use uc_application::deps::AdmissionReadFailureCategory;
 use uc_application::deps::MembershipRecordStorePort;
 use uc_core::error_class::ErrorClass;
 use uc_core::membership::{AdmissionContinuationCredential, SpaceAdmissionId};
+use uc_infra_storage::db::ports::DbExecutor;
 
 use codec::RepositoryReadCache;
 

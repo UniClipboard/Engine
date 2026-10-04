@@ -42,31 +42,7 @@ use uc_infra::clipboard::{
 };
 use uc_infra::config::ClipboardStorageConfig;
 use uc_infra::config_migration::{ConfigMigrationAdapter, ConfigMigrationPaths};
-use uc_infra::db::executor::DieselSqliteExecutor;
-#[cfg(feature = "lan-compat")]
-use uc_infra::db::mappers::mobile_device_mapper::MobileDeviceRowMapper;
-use uc_infra::db::mappers::{
-    blob_mapper::BlobRowMapper, clipboard_entry_mapper::ClipboardEntryRowMapper,
-    clipboard_event_mapper::ClipboardEventRowMapper,
-    clipboard_selection_mapper::ClipboardSelectionRowMapper,
-    snapshot_representation_mapper::RepresentationRowMapper,
-};
-use uc_infra::db::pool::{init_db_pool, DbPool};
-#[cfg(feature = "lan-compat")]
-use uc_infra::db::repositories::DieselMobileDeviceRepository;
-use uc_infra::db::repositories::{
-    DieselBlobReferenceRepository, DieselBlobRepository, DieselClipboardEntryReplaceRepository,
-    DieselClipboardEntryRepository, DieselClipboardEventRepository,
-    DieselClipboardRepresentationRepository, DieselClipboardSelectionRepository,
-    DieselEntryAvailabilityRepository, DieselFileTransferRepository,
-    DieselInboundReceiveCommitRepository, DieselPeerAddressRepository,
-    DieselReceiveArtifactLogRepository, DieselSpaceMemberRepository, DieselSpaceSecurityStore,
-    DieselThumbnailRepository, DieselTrustedPeerRepository, EncryptedRelationshipStore,
-};
 use uc_infra::network::iroh::IrohIdentityStore;
-use uc_infra::search::{
-    HkdfSearchKeyDerivation, SearchPipeline, SqliteSearchIndex, V3SearchKeyDerivation,
-};
 use uc_infra::security::{
     ActiveSpaceGenerationManifestStore, AdmissionKeyManager, Blake3Hasher,
     DecryptingClipboardRepresentationRepository, EncryptingClipboardEventWriter,
@@ -85,6 +61,30 @@ use uc_infra_local::fs::VaultLayout;
 use uc_infra_local::settings::repository::FileSettingsRepository;
 use uc_infra_local::{FileAppVersionStateRepository, FileFirstSyncStateRepository, SystemClock};
 use uc_infra_security::key_slot_store::JsonKeySlotStore;
+use uc_infra_storage::db::executor::DieselSqliteExecutor;
+#[cfg(feature = "lan-compat")]
+use uc_infra_storage::db::mappers::mobile_device_mapper::MobileDeviceRowMapper;
+use uc_infra_storage::db::mappers::{
+    blob_mapper::BlobRowMapper, clipboard_entry_mapper::ClipboardEntryRowMapper,
+    clipboard_event_mapper::ClipboardEventRowMapper,
+    clipboard_selection_mapper::ClipboardSelectionRowMapper,
+    snapshot_representation_mapper::RepresentationRowMapper,
+};
+use uc_infra_storage::db::pool::{init_db_pool, DbPool};
+#[cfg(feature = "lan-compat")]
+use uc_infra_storage::db::repositories::DieselMobileDeviceRepository;
+use uc_infra_storage::db::repositories::{
+    DieselBlobReferenceRepository, DieselBlobRepository, DieselClipboardEntryReplaceRepository,
+    DieselClipboardEntryRepository, DieselClipboardEventRepository,
+    DieselClipboardRepresentationRepository, DieselClipboardSelectionRepository,
+    DieselEntryAvailabilityRepository, DieselFileTransferRepository,
+    DieselInboundReceiveCommitRepository, DieselPeerAddressRepository,
+    DieselReceiveArtifactLogRepository, DieselSpaceMemberRepository, DieselSpaceSecurityStore,
+    DieselThumbnailRepository, DieselTrustedPeerRepository, EncryptedRelationshipStore,
+};
+use uc_infra_storage::search::{
+    HkdfSearchKeyDerivation, SearchPipeline, SqliteSearchIndex, V3SearchKeyDerivation,
+};
 use uc_observability_contract::analytics::{AnalyticsFacade, AnalyticsPort};
 
 #[cfg(feature = "lan-compat")]
@@ -629,7 +629,7 @@ pub async fn wire_dependencies_from_inputs(
         ),
     });
     let file_transfer_privacy_maintenance = Arc::new(
-        uc_infra::file_transfer::SqliteFileTransferPrivacyMaintenance::new(
+        uc_infra_storage::file_transfer::SqliteFileTransferPrivacyMaintenance::new(
             infra.db_executor.clone(),
         ),
     );
@@ -648,11 +648,13 @@ pub async fn wire_dependencies_from_inputs(
         cancel_attempt: Arc::clone(&file_transfer_adapter) as _,
     };
     let file_transfer_store_arc = Arc::new(match &v3_content_protection {
-        Some(protection) => uc_infra::file_transfer::SqliteReceiverFileTransferStore::new_v3(
-            infra.db_executor.clone(),
-            Arc::clone(protection),
-        ),
-        None => uc_infra::file_transfer::SqliteReceiverFileTransferStore::new(
+        Some(protection) => {
+            uc_infra_storage::file_transfer::SqliteReceiverFileTransferStore::new_v3(
+                infra.db_executor.clone(),
+                Arc::clone(protection),
+            )
+        }
+        None => uc_infra_storage::file_transfer::SqliteReceiverFileTransferStore::new(
             infra.db_executor.clone(),
             space_access_ports.derive_subkey.clone(),
             platform.current_profile.clone(),
@@ -665,11 +667,13 @@ pub async fn wire_dependencies_from_inputs(
     // reusing the shared executor.
     let entry_file_set_repo: Arc<dyn uc_core::ports::clipboard::EntryFileSetRepositoryPort> =
         Arc::new(match &v3_content_protection {
-            Some(protection) => uc_infra::db::repositories::DieselEntryFileSetRepository::new_v3(
-                infra.db_executor.clone(),
-                Arc::clone(protection),
-            ),
-            None => uc_infra::db::repositories::DieselEntryFileSetRepository::new(
+            Some(protection) => {
+                uc_infra_storage::db::repositories::DieselEntryFileSetRepository::new_v3(
+                    infra.db_executor.clone(),
+                    Arc::clone(protection),
+                )
+            }
+            None => uc_infra_storage::db::repositories::DieselEntryFileSetRepository::new(
                 infra.db_executor.clone(),
                 space_access_ports.derive_subkey.clone(),
                 platform.current_profile.clone(),
@@ -677,18 +681,18 @@ pub async fn wire_dependencies_from_inputs(
         });
 
     let directory_attempt_impl = Arc::new(
-        uc_infra::db::repositories::DieselEntryReceiveAttemptRepository::new(
+        uc_infra_storage::db::repositories::DieselEntryReceiveAttemptRepository::new(
             infra.db_executor.clone(),
         ),
     );
     let directory_publish_impl = Arc::new(match &v3_content_protection {
         Some(protection) => {
-            uc_infra::db::repositories::DieselDirectoryPublishLogRepository::new_v3(
+            uc_infra_storage::db::repositories::DieselDirectoryPublishLogRepository::new_v3(
                 infra.db_executor.clone(),
                 Arc::clone(protection),
             )
         }
-        None => uc_infra::db::repositories::DieselDirectoryPublishLogRepository::new(
+        None => uc_infra_storage::db::repositories::DieselDirectoryPublishLogRepository::new(
             infra.db_executor.clone(),
             space_access_ports.derive_subkey.clone(),
             platform.current_profile.clone(),
@@ -737,12 +741,12 @@ pub async fn wire_dependencies_from_inputs(
     // write, current-read, mobile-read, backfill, and reset ports.
     let active_clipboard_register_impl = Arc::new(match &v3_content_protection {
         Some(protection) => {
-            uc_infra::db::repositories::DieselActiveClipboardRegisterRepository::new_v3(
+            uc_infra_storage::db::repositories::DieselActiveClipboardRegisterRepository::new_v3(
                 infra.db_executor.clone(),
                 Arc::clone(protection),
             )
         }
-        None => uc_infra::db::repositories::DieselActiveClipboardRegisterRepository::new(
+        None => uc_infra_storage::db::repositories::DieselActiveClipboardRegisterRepository::new(
             infra.db_executor.clone(),
             space_access_ports.derive_subkey.clone(),
             platform.current_profile.clone(),
@@ -923,7 +927,7 @@ pub async fn wire_dependencies_from_inputs(
         entry_delivery_repo: Arc::clone(&infra.entry_delivery_repo),
         clipboard: ClipboardPorts {
             history_file_references: Arc::new(
-                uc_infra::db::repositories::DieselHistoryFileReferences::new(
+                uc_infra_storage::db::repositories::DieselHistoryFileReferences::new(
                     infra.db_executor.clone(),
                     blob_cipher.clone(),
                 ),

@@ -12,9 +12,9 @@ use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
 use super::persisted::{PersistedSpaceAdmissionRepositoryV2, StoredSpaceAdmissionV1};
 use super::SqliteSpaceAdmissionState;
-use crate::db::executor::DieselSqliteExecutor;
-use crate::db::pool::{init_db_pool, DbPool};
 use crate::security::{ActiveSpaceGenerationManifestStore, AdmissionKeyManager};
+use uc_infra_storage::db::executor::DieselSqliteExecutor;
+use uc_infra_storage::db::pool::{init_db_pool, DbPool};
 
 #[derive(Default)]
 struct MemoryStorage {

@@ -2,16 +2,16 @@ use std::fs::{File, OpenOptions, TryLockError};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use super::active_space_generation_manifest_store::V3ManifestPromotionOutcome;
 use super::{
     ActiveRuntimeManifest, ActiveRuntimeManifestV3, ActiveSpaceGenerationManifestStore,
     ActiveSpaceGenerationManifestStoreError, PreparedSpaceControlGeneration,
     ProfilePassphraseRecoveryPort, ProfileRuntimeLayout, SpaceControlGeneration,
     SpaceControlGenerationError,
 };
-use crate::db::pool::DbPool;
 use crate::space::RuntimeSpaceAccessAdapter;
 use uc_application::deps::{JoinerActivationIntent, ValidateJoinerActivationIntentPort};
+use uc_infra_storage::active_space_generation_manifest_store::V3ManifestPromotionOutcome;
+use uc_infra_storage::db::pool::DbPool;
 
 /// V3 control-generation 的唯一 manifest 生效与进程内重绑入口。
 ///

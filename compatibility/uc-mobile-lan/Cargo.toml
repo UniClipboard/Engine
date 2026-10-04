@@ -33,6 +33,7 @@ anyhow = "1.0"
 mockall = "0.13"
 tokio = { version = "1", features = ["full"] }
 uc-infra = { path = "../../crates/uc-infra" }
+uc-infra-storage = { path = "../../crates/uc-infra-storage" }
 uc-testkit = { path = "../../tests/uc-testkit" }
 uc-application = { path = "../../crates/uc-application", features = ["test-support"] }
 

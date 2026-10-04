@@ -8,8 +8,8 @@ use diesel::{Connection as _, RunQueryDsl as _, SqliteConnection};
 use uc_core::ports::space::{DeriveSpaceSubkeyPort, SpaceAccessError};
 
 use super::{inconsistent, storage, SpaceControlGenerationError};
-use crate::db::pool::{init_db_pool, open_existing_db_pool, DbPool};
 use crate::space::InMemorySession;
+use uc_infra_storage::db::pool::{init_db_pool, open_existing_db_pool, DbPool};
 
 pub(super) struct TargetSessionSubkeyDeriver(InMemorySession);
 

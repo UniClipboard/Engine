@@ -17,15 +17,15 @@ use uc_core::membership::{
 };
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
-use uc_infra::db::executor::DieselSqliteExecutor;
-use uc_infra::db::pool::init_db_pool;
-use uc_infra::db::repositories::DieselSpaceSecurityStore;
 use uc_infra_crypto::secrets::MasterKey;
 use uc_infra_security::key_slot_store::JsonKeySlotStore;
 use uc_infra_security::{
     DefaultCurrentProfile, InMemorySession, KeyMaterialStore, ProfileContentKeyVault,
     RuntimeSpaceAccessAdapter,
 };
+use uc_infra_storage::db::executor::DieselSqliteExecutor;
+use uc_infra_storage::db::pool::init_db_pool;
+use uc_infra_storage::db::repositories::DieselSpaceSecurityStore;
 
 #[derive(Default)]
 struct MemorySecureStorage(Mutex<std::collections::BTreeMap<String, Vec<u8>>>);

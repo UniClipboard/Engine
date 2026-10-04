@@ -28,10 +28,10 @@ use uc_core::membership::{
 };
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
 use uc_core::security::IdentityFingerprint;
-use uc_infra::db::executor::DieselSqliteExecutor;
-use uc_infra::db::pool::init_db_pool;
 use uc_infra::security::{ActiveSpaceGenerationManifestStore, AdmissionKeyManager};
 use uc_infra::space::SqliteSpaceAdmissionState;
+use uc_infra_storage::db::executor::DieselSqliteExecutor;
+use uc_infra_storage::db::pool::init_db_pool;
 
 #[path = "space_admission_state/activation.rs"]
 mod activation;
@@ -128,7 +128,7 @@ impl Fixture {
     fn execute(&self, sql: &str) {
         let executor =
             DieselSqliteExecutor::new(init_db_pool(self.db_path.to_str().unwrap()).unwrap());
-        uc_infra::db::ports::DbExecutor::run(&executor, |conn| {
+        uc_infra_storage::db::ports::DbExecutor::run(&executor, |conn| {
             sql_query(sql).execute(conn)?;
             Ok(())
         })
@@ -143,7 +143,7 @@ impl Fixture {
         }
         let executor =
             DieselSqliteExecutor::new(init_db_pool(self.db_path.to_str().unwrap()).unwrap());
-        uc_infra::db::ports::DbExecutor::run(&executor, |conn| {
+        uc_infra_storage::db::ports::DbExecutor::run(&executor, |conn| {
             Ok(sql_query(
                 "SELECT encrypted_payload FROM admission_repository_state WHERE singleton_id = 1",
             )

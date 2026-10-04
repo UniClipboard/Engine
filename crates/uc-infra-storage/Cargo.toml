@@ -1,0 +1,87 @@
+[package]
+name = "uc-infra-storage"
+version.workspace = true
+license.workspace = true
+edition = "2021"
+description = "SQLite ciphertext repositories, search and atomic file-transfer commit for UniClipboard infra"
+publish = false
+
+[features]
+default = []
+lan-compat = []
+test-util = ["dep:tempfile"]
+
+[dependencies]
+uc-core = { path = "../uc-core" }
+uc-application = { path = "../uc-application" }
+uc-infra-local = { path = "../uc-infra-local" }
+uc-infra-crypto = { path = "../uc-infra-crypto" }
+uc-infra-security = { path = "../uc-infra-security" }
+uc-observability-contract = { path = "../uc-observability-contract" }
+
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1.0"
+thiserror = "2.0"
+async-trait = "0.1"
+tokio = { version = "1", features = [
+  "sync",
+  "fs",
+  "rt-multi-thread",
+  "macros",
+  "time",
+  "io-util",
+] }
+tracing = "0.1"
+hmac = "0.12"
+hkdf = "0.12"
+sha2 = "0.10"
+zeroize = { version = "1.8.2", features = ["derive"] }
+unicode-normalization = "0.1"
+unicode-segmentation = "1"
+url = "2"
+postcard = { version = "1", features = ["use-std"] }
+image = { version = "0.25", default-features = false, features = [
+  "png",
+  "jpeg",
+  "webp",
+  "tiff",
+] }
+hex = "0.4.3"
+blake3 = "1.8.2"
+
+diesel = { version = "2.3.5", features = [
+  "sqlite",
+  "returning_clauses_for_sqlite_3_35",
+  "r2d2",
+] }
+libsqlite3-sys = { version = "0.35", features = ["bundled"] }
+diesel_migrations = { version = "2.2.0", features = ["sqlite"] }
+
+[dependencies.uuid]
+version = "1.10.0"
+features = ["v4"]
+
+[dev-dependencies]
+criterion = { version = "0.8", features = ["async_tokio"] }
+uc-observability-runtime = { path = "../uc-observability-runtime" }
+uc-testkit = { path = "../../tests/uc-testkit" }
+uc-infra-security = { path = "../uc-infra-security", features = ["test-util"] }
+tokio = { version = "1", features = ["full", "test-util"] }
+tempfile = "3"
+mockall = "0.13"
+wiremock = "0.6"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+static_assertions = "1"
+opentelemetry = { version = "=0.32.0", default-features = false, features = ["trace", "logs"] }
+opentelemetry-appender-tracing = { version = "=0.32.0", default-features = false }
+opentelemetry_sdk = { version = "=0.32.1", default-features = false, features = ["trace", "logs", "testing"] }
+iroh = { version = "1.3.0" }
+
+[dependencies.tempfile]
+version = "3"
+optional = true
+
+[lints]
+workspace = true

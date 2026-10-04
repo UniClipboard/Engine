@@ -15,25 +15,27 @@ use uc_core::ports::{
     UpdateProvisionalReceivePathPort,
 };
 
-use crate::db::repositories::active_clipboard_register_cipher::V3ActiveClipboardRegisterCipher;
-use crate::db::repositories::directory_publish_log_cipher::V3DirectoryPublishLogCipher;
-use crate::db::repositories::entry_file_set_cipher::V3EntryFileSetPathCipher;
-use crate::db::repositories::receive_artifact_cipher::V3ReceiveArtifactCipher;
-use crate::db::repositories::{
+use crate::security::{ContentProtection, MasterKey, ProfileContentKeyVault};
+use crate::space::InMemorySession;
+use uc_infra_storage::db::repositories::active_clipboard_register_cipher::V3ActiveClipboardRegisterCipher;
+use uc_infra_storage::db::repositories::directory_publish_log_cipher::V3DirectoryPublishLogCipher;
+use uc_infra_storage::db::repositories::entry_file_set_cipher::V3EntryFileSetPathCipher;
+use uc_infra_storage::db::repositories::receive_artifact_cipher::V3ReceiveArtifactCipher;
+use uc_infra_storage::db::repositories::{
     DieselActiveClipboardRegisterRepository, DieselDirectoryPublishLogRepository,
     DieselEntryFileSetRepository, DieselFileTransferRepository, DieselReceiveArtifactLogRepository,
 };
-use crate::db::{
+use uc_infra_storage::db::{
     executor::DieselSqliteExecutor,
     models::{NewClipboardEntryRow, NewClipboardEventRow},
     pool::init_db_pool,
     ports::DbExecutor,
     schema::{clipboard_entry, clipboard_event},
 };
-use crate::file_transfer::persistence_cipher::{TransferMetadata, V3TransferPersistenceCipher};
-use crate::file_transfer::SqliteReceiverFileTransferStore;
-use crate::security::{ContentProtection, MasterKey, ProfileContentKeyVault};
-use crate::space::InMemorySession;
+use uc_infra_storage::file_transfer::persistence_cipher::{
+    TransferMetadata, V3TransferPersistenceCipher,
+};
+use uc_infra_storage::file_transfer::SqliteReceiverFileTransferStore;
 
 #[derive(Default)]
 struct MemorySecureStorage(Mutex<BTreeMap<String, Vec<u8>>>);

@@ -12,11 +12,11 @@ use uc_core::ports::{
     ReceiveArtifactOwnership, ReceiveArtifactPhase, ReceiveArtifactRecord,
     ReceiveArtifactResolution, RecordReceiveArtifactsPort,
 };
-use uc_infra::db::executor::DieselSqliteExecutor;
-use uc_infra::db::pool::init_db_pool;
-use uc_infra::db::ports::DbExecutor;
-use uc_infra::db::repositories::DieselReceiveArtifactLogRepository;
-use uc_infra::db::schema::receive_artifact_log;
+use uc_infra_storage::db::executor::DieselSqliteExecutor;
+use uc_infra_storage::db::pool::init_db_pool;
+use uc_infra_storage::db::ports::DbExecutor;
+use uc_infra_storage::db::repositories::DieselReceiveArtifactLogRepository;
+use uc_infra_storage::db::schema::receive_artifact_log;
 
 struct FixedSubkey;
 

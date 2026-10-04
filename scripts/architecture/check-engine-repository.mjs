@@ -36,6 +36,7 @@ const EXPECTED_PACKAGES = [
   'uc-infra-crypto',
   'uc-infra-local',
   'uc-infra-security',
+  'uc-infra-storage',
   'uc-mobile',
   'uc-mobile-lan',
   'uc-mobile-proto',
@@ -56,6 +57,7 @@ const INTERNAL_PACKAGES = new Set([
   'uc-infra-crypto',
   'uc-infra-local',
   'uc-infra-security',
+  'uc-infra-storage',
   'uc-mobile',
   'uc-mobile-lan',
   'uc-mobile-proto',
@@ -2203,8 +2205,8 @@ function repositorySources() {
       read('crates/uc-core/src/membership/ports.rs'),
       read('crates/uc-core/src/membership/error.rs'),
       read('crates/uc-core/src/membership/mod.rs'),
-      read('crates/uc-infra/src/db/repositories/mod.rs'),
-      read('crates/uc-infra/src/db/repositories/relationship_store.rs'),
+      read('crates/uc-infra-storage/src/db/repositories/mod.rs'),
+      read('crates/uc-infra-storage/src/db/repositories/relationship_store.rs'),
     ].join('\n'),
     irohPeerAddressResolver: read(
       'crates/uc-infra/src/network/iroh/peer_address_resolver.rs'
