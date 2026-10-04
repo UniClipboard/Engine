@@ -163,7 +163,8 @@ struct InfraLayer {
     // 持有具体类型是为了让 daemon 拿到写入面;同一份 Arc 通过 unsizing
     // coercion 也能 share 给 ApplicationDeps.mobile_sync.endpoint_info。
     #[cfg(feature = "lan-compat")]
-    mobile_sync_endpoint_info: Arc<uc_infra::mobile_sync::InMemoryMobileSyncEndpointInfoAdapter>,
+    mobile_sync_endpoint_info:
+        Arc<uc_mobile_lan::mobile_sync::InMemoryMobileSyncEndpointInfoAdapter>,
 }
 
 pub struct CoreWiringInputs {

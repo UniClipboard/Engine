@@ -508,7 +508,7 @@ function checkLanIsolation(metadata, sources) {
   for (const required of [
     'dep:uc-mobile-lan',
     'dep:uc-mobile-proto',
-    'uc-infra/lan-compat',
+    'uc-infra-storage/lan-compat',
   ]) {
     if (!featureItems(engine, 'lan-compat').includes(required)) {
       addProblem(problems, 'compatibility gate', `uc-engine/lan-compat is missing ${required}`)
@@ -517,8 +517,8 @@ function checkLanIsolation(metadata, sources) {
   if (normalDependency(application, 'uc-mobile-proto')) {
     addProblem(problems, 'compatibility gate', 'uc-application must not depend on uc-mobile-proto (moved to uc-mobile-lan)')
   }
-  if (!normalDependency(infra, 'network-interface')?.optional) {
-    addProblem(problems, 'compatibility gate', 'uc-infra must keep network-interface optional')
+  if (normalDependency(infra, 'network-interface')) {
+    addProblem(problems, 'compatibility gate', 'uc-infra must not depend on network-interface (mobile_sync moved to uc-mobile-lan)')
   }
   for (const consumerName of P2P_CONSUMERS) {
     const dependency = normalDependency(packageByName(metadata, consumerName), 'uc-engine')

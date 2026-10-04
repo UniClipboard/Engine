@@ -146,7 +146,7 @@ pub struct DaemonRuntimeDeps {
     /// (facade read side), sharing one allocation — daemon writes, facade reads
     /// (ports.md §8.3 single-adapter-reuse).
     pub mobile_sync_endpoint_info:
-        Arc<uc_infra::mobile_sync::InMemoryMobileSyncEndpointInfoAdapter>,
+        Arc<uc_mobile_lan::mobile_sync::InMemoryMobileSyncEndpointInfoAdapter>,
 }
 
 /// LAN compatibility 组合根所需的 Application 被动端口。

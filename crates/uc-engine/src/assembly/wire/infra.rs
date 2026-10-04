@@ -445,7 +445,7 @@ pub(super) fn create_infra_layer(
     // new 一份就足够。
     #[cfg(feature = "lan-compat")]
     let mobile_sync_endpoint_info =
-        Arc::new(uc_infra::mobile_sync::InMemoryMobileSyncEndpointInfoAdapter::new());
+        Arc::new(uc_mobile_lan::mobile_sync::InMemoryMobileSyncEndpointInfoAdapter::new());
 
     let infra = InfraLayer {
         clipboard_entry_ports,

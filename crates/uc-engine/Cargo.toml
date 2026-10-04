@@ -13,7 +13,7 @@ lan-compat = [
   "dep:uc-mobile-lan",
   "dep:uc-mobile-proto",
   "uc-application/lan-compat",
-  "uc-infra/lan-compat",
+  "uc-infra-storage/lan-compat",
 ]
 
 [dependencies]

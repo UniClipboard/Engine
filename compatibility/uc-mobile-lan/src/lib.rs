@@ -9,6 +9,7 @@
 
 pub(crate) mod deps;
 pub(crate) mod facade;
+pub mod mobile_sync;
 pub(crate) mod usecases;
 
 pub use deps::{MobileDevicePorts, MobileSyncPorts, RecordMobileDeviceActivityPort};
