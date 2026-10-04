@@ -1,9 +1,10 @@
-//! `ContentProtection`（`uc-infra-security`）与本 crate 仍持有的
+//! `ContentProtection`（`uc-infra-security`）与本 crate 的
 //! `ProfilePayloadAdapters`/`V3EncryptedBlobStore` 的跨 crate 集成验证。
 //!
 //! 这两条场景原本和 `ContentProtection` 的纯内部测试同在一个模块；security
-//! 拆成独立 crate 后，`ProfilePayloadAdapters`（content/profile 未拆分前）
-//! 不能再和 security 的纯测试共享模块，因此迁到这里。
+//! 拆成独立 crate 后先迁到 `uc-infra`（S2），content 拆出来后（S3）
+//! `ProfilePayloadAdapters`/`V3EncryptedBlobStore` 也到了这个 crate，
+//! 随它们一起迁过来。
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -18,7 +19,7 @@ use uc_core::ports::{SecureStorageError, SecureStoragePort};
 use uc_core::BlobId;
 
 use super::V3EncryptedBlobStore;
-use crate::security::ProfilePayloadAdapters;
+use crate::ProfilePayloadAdapters;
 use uc_infra_crypto::secrets::MasterKey;
 use uc_infra_local::blob::{BlobStorePort, FilesystemBlobStore};
 use uc_infra_security::{ContentProtection, InMemorySession, ProfileContentKeyVault};

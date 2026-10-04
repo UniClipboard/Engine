@@ -36,11 +36,6 @@ use uc_core::ids::{ProfileId, RepresentationId};
 use uc_core::ports::blob::BlobReferenceRepositoryPort;
 use uc_core::ports::clipboard::{RepresentationCachePort, SelfWriteLedgerPort, SpoolQueuePort};
 use uc_core::ports::*;
-use uc_infra::clipboard::{
-    new_in_memory_change_origin, ClipboardPayloadResolver, DurableSpoolQueue,
-    InfraThumbnailGenerator, RepresentationCache, SpoolManager,
-};
-use uc_infra::config::ClipboardStorageConfig;
 use uc_infra::config_migration::{ConfigMigrationAdapter, ConfigMigrationPaths};
 use uc_infra::network::iroh::IrohIdentityStore;
 use uc_infra::security::{
@@ -56,6 +51,11 @@ use uc_infra::space::{
     InMemorySession, KeyMaterialStore, OpenMlsHistoricalSignatureVerifier,
     SqliteMembershipRecordStore, SqliteSpaceAdmissionCredentials, SqliteSpaceAdmissionState,
 };
+use uc_infra_content::clipboard::{
+    new_in_memory_change_origin, ClipboardPayloadResolver, DurableSpoolQueue,
+    InfraThumbnailGenerator, RepresentationCache, SpoolManager,
+};
+use uc_infra_content::config::ClipboardStorageConfig;
 use uc_infra_local::blob::BlobRepositoryPort;
 use uc_infra_local::fs::VaultLayout;
 use uc_infra_local::settings::repository::FileSettingsRepository;
@@ -757,7 +757,7 @@ pub async fn wire_dependencies_from_inputs(
         uc_core::clipboard::ActiveClipboardState,
     >(ACTIVE_CLIPBOARD_SSE_CAPACITY);
     let active_clipboard_register: Arc<dyn uc_core::ports::clipboard::AdvanceActiveClipboardPort> =
-        Arc::new(uc_infra::clipboard::BroadcastingAdvance::new(
+        Arc::new(uc_infra_content::clipboard::BroadcastingAdvance::new(
             active_clipboard_register_impl.clone(),
             active_clipboard_sse_source.clone(),
         ));
@@ -896,22 +896,24 @@ pub async fn wire_dependencies_from_inputs(
     let host_event_bus: Arc<uc_application::facade::HostEventBus> =
         Arc::new(uc_application::facade::HostEventBus::new());
     host_event_bus.register("logging", host_event_emitter);
-    let clipboard_background = Arc::new(uc_infra::clipboard::ClipboardBackgroundRuntime::new(
-        representation_cache,
-        spool_manager,
-        worker_rx,
-        spool_dir,
-        storage_config.spool_ttl_days,
-        storage_config.worker_retry_max_attempts,
-        storage_config.worker_retry_backoff_ms,
-        Arc::clone(&decrypting_rep_repo),
-        worker_tx.clone(),
-        Arc::clone(&platform.blob_writer),
-        Arc::clone(&infra.hash),
-        Arc::clone(&infra.clock),
-        Arc::clone(&infra.thumbnail_repo),
-        Arc::clone(&infra.thumbnail_generator),
-    ));
+    let clipboard_background = Arc::new(
+        uc_infra_content::clipboard::ClipboardBackgroundRuntime::new(
+            representation_cache,
+            spool_manager,
+            worker_rx,
+            spool_dir,
+            storage_config.spool_ttl_days,
+            storage_config.worker_retry_max_attempts,
+            storage_config.worker_retry_backoff_ms,
+            Arc::clone(&decrypting_rep_repo),
+            worker_tx.clone(),
+            Arc::clone(&platform.blob_writer),
+            Arc::clone(&infra.hash),
+            Arc::clone(&infra.clock),
+            Arc::clone(&infra.thumbnail_repo),
+            Arc::clone(&infra.thumbnail_generator),
+        ),
+    );
 
     let mut deps = ApplicationDeps {
         paths: paths.clone(),

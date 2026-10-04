@@ -1,8 +1,6 @@
 // Tracing support for infra layer instrumentation
 pub use tracing;
 
-pub mod clipboard;
-pub mod config;
 pub mod config_migration;
 #[cfg(feature = "lan-compat")]
 pub mod mobile_sync;

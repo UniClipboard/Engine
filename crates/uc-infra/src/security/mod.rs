@@ -1,12 +1,5 @@
-mod content_protection;
-mod decrypting_clipboard_event_repo;
-mod decrypting_representation_repo;
-mod encrypted_blob_store;
-mod encrypting_clipboard_event_writer;
-mod encrypting_inbound_receive_commit;
 mod profile_backup_archive;
 mod profile_lifecycle;
-mod profile_payload_adapters;
 mod profile_reset;
 mod profile_runtime_layout;
 mod profile_startup_storage;
@@ -19,17 +12,10 @@ mod v3_device_management_reset;
 mod v3_initial_space_activation;
 mod v3_membership_branch_transition;
 
-pub use content_protection::V3EncryptedBlobStore;
-pub use decrypting_clipboard_event_repo::DecryptingClipboardEventRepository;
-pub use decrypting_representation_repo::DecryptingClipboardRepresentationRepository;
-pub use encrypted_blob_store::EncryptedBlobStore;
-pub use encrypting_clipboard_event_writer::EncryptingClipboardEventWriter;
-pub use encrypting_inbound_receive_commit::EncryptingInboundReceiveCommit;
 pub use profile_backup_archive::{
     ProfileArchiveReceipt, ProfileBackupArchive, ProfileBackupArchiveError, ProfileBackupSource,
 };
 pub use profile_lifecycle::ProfileLifecycleRepository;
-pub use profile_payload_adapters::ProfilePayloadAdapters;
 pub use profile_reset::{ProfileKeyWiper, ProfileStateCleaner};
 pub use profile_runtime_layout::ProfileRuntimeLayout;
 pub use profile_startup_storage::ProfileStartupStorage;
@@ -45,6 +31,12 @@ pub use space_control_generation::{
 };
 pub use space_transition_activation::{
     SpaceTransitionActivation, SpaceTransitionActivationError, SpaceTransitionActivationOutcome,
+};
+pub use uc_infra_content::content_protection::V3EncryptedBlobStore;
+pub use uc_infra_content::{
+    DecryptingClipboardEventRepository, DecryptingClipboardRepresentationRepository,
+    EncryptedBlobStore, EncryptingClipboardEventWriter, EncryptingInboundReceiveCommit,
+    ProfilePayloadAdapters,
 };
 pub use uc_infra_crypto::crypto_model::{
     EncryptedBlob, KdfParams, KdfParamsV1, KeyScope, KeySlot, KeySlotConvertError, KeySlotFile,

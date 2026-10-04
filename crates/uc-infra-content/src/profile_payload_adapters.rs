@@ -3,12 +3,12 @@ use std::sync::Arc;
 use uc_core::blob::ports::BlobReaderPort;
 use uc_core::ports::security::BlobCipherPort;
 
-use super::{
-    BlobCipherAdapter, ContentProtection, EncryptedBlobStore, V3EncryptedBlobStore,
-    V3InlinePayloadCipher,
-};
-use crate::space::InMemorySession;
+use crate::content_protection::V3EncryptedBlobStore;
+use crate::EncryptedBlobStore;
 use uc_infra_local::blob::BlobStorePort;
+use uc_infra_security::{
+    BlobCipherAdapter, ContentProtection, InMemorySession, V3InlinePayloadCipher,
+};
 
 /// 同一 profile runtime 的 primary payload adapter family。
 ///

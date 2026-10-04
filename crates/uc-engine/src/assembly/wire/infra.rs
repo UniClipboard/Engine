@@ -157,7 +157,7 @@ pub(super) fn build_cipher_decorators(
     // TransferCipherPort — uc-application clipboard_sync encrypts/decrypts V3
     // network bytes through this port, sharing the same InMemorySession.
     let transfer_cipher: Arc<dyn uc_core::ports::security::TransferCipherPort> = Arc::new(
-        uc_infra::clipboard::TransferCipherAdapter::new(session.clone()),
+        uc_infra_content::clipboard::TransferCipherAdapter::new(session.clone()),
     );
 
     // Wrap ports with encryption decorators.

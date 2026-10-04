@@ -557,7 +557,6 @@ enum ProcessResult {
 mod tests {
     use super::*;
     use crate::clipboard::testing::{ScriptedRepRepo, ScriptedReturn};
-    use crate::security::Blake3Hasher;
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::TempDir;
@@ -565,6 +564,7 @@ mod tests {
     use uc_core::ids::FormatId;
     use uc_core::ports::clipboard::GeneratedThumbnail;
     use uc_core::{BlobId, ContentHash};
+    use uc_infra_crypto::hashing::Blake3Hasher;
 
     struct FakeBlobWriter;
     #[async_trait]

@@ -41,9 +41,9 @@ use uc_observability_contract::diagnostics::connectivity::{
 };
 use uuid::Uuid;
 
-use crate::security::MasterKey;
-use crate::space::InMemorySession;
 use uc_infra_crypto::key_epoch_aad;
+use uc_infra_crypto::secrets::MasterKey;
+use uc_infra_security::InMemorySession;
 
 /// Nominal chunk size: 256 KB.
 /// Peak memory per encode or decode call: ~2 x CHUNK_SIZE.

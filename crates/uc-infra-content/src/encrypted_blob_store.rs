@@ -30,10 +30,10 @@ use tracing::{info_span, Instrument};
 use uc_core::membership::{ContentKeyId, ContentKeyPurpose, GroupEpoch};
 use uc_core::{blob::ports::BlobReaderPort, crypto::aad, BlobId, ContentHash};
 
-use crate::space::InMemorySession;
 use uc_infra_crypto::key_epoch_aad;
 use uc_infra_crypto::v1_aead;
 use uc_infra_local::blob::{BlobStorePort, StoredPathBlob};
+use uc_infra_security::InMemorySession;
 use uc_observability_contract::{log_fields::log_id, uc_debug};
 
 /// Magic bytes identifying a UniClipboard blob file ("UCBL")
@@ -166,7 +166,7 @@ impl EncryptedBlobStore {
     }
 
     /// 复用唯一旧格式解码器；升级器先读取原字节，以区分介质失败和密文认证失败。
-    pub(super) fn open_bytes(&self, blob_id: &BlobId, binary_data: &[u8]) -> Result<Vec<u8>> {
+    pub fn open_bytes(&self, blob_id: &BlobId, binary_data: &[u8]) -> Result<Vec<u8>> {
         let parsed = parse_blob(binary_data)?;
         let business_aad = aad::for_blob_v2(blob_id);
         let compressed = match parsed {

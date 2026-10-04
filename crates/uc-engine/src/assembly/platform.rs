@@ -12,10 +12,10 @@ use uc_core::blob::ports::{BlobContentIngestPort, BlobReaderPort, BlobWriterPort
 use uc_core::ids::ProfileId;
 use uc_core::ports::clipboard::ClipboardRepresentationNormalizerPort;
 use uc_core::ports::*;
-use uc_infra::clipboard::ClipboardRepresentationNormalizer;
-use uc_infra::config::ClipboardStorageConfig;
 use uc_infra::security::{ContentProtection, ProfileContentKeyVault, ProfilePayloadAdapters};
 use uc_infra::space::InMemorySession;
+use uc_infra_content::clipboard::ClipboardRepresentationNormalizer;
+use uc_infra_content::config::ClipboardStorageConfig;
 use uc_infra_local::blob::{
     BlobRepositoryPort, BlobStorePort, BlobWriter, SwitchableFilesystemBlobStore,
 };
