@@ -313,7 +313,7 @@ zstd/tantivy/rusqlite 零命中——确认整 crate 改名不影响 S4 已验�
 
 - 根 `Cargo.toml`：**`uc-infra-p2p` 缺 dev `opt-level = 3`**（S4 漏加，七个 crate 里唯一一个），已补；
   `crates/uc-engine/tests/dependency_firewall.rs` 用 `toml` crate 解析根清单，要求每个 `uc-infra-*`
-  workspace 成员都保留该设置（含删除与降级两条负面用例，以及等价表头写法不误报）。
+  workspace 成员都保留该设置（含从原 mjs 检查迁移的删除与降级两条负面用例）。
 - `.github/actions/rust-ci-setup/action.yml` 的 `fast-compile-infra`：S5 后只把 `uc-infra-profile`
   降回 opt-level 0，原语义是整个 `uc-infra`，已扩展为七个 crate。
 - `scripts/testing/run-test-group.sh`（`evidence`/`persistence-provider`/`process`）与
