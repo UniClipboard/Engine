@@ -20,7 +20,7 @@ use uc_core::ports::{
     HostEventEmitterPort, MembershipHostEvent, PlatformClipboardPort, SecureStorageError,
     SecureStoragePort, SettingsHostEvent, SettingsSection, SystemClipboardPort, TransferHostEvent,
 };
-use uc_infra::security::{
+use uc_infra_profile::security::{
     ProfileLifecycleRepository, ProfileStartupStorage, ProfileUpgradeBackupStore,
 };
 use uc_observability_contract::{
@@ -296,9 +296,9 @@ pub(crate) fn profile_key_recovery_store(
     config: &EngineConfig,
     paths: &AppPaths,
     host: &HostCapabilities,
-) -> Arc<uc_infra::security::ProfileKeyRecoveryStore> {
+) -> Arc<uc_infra_profile::security::ProfileKeyRecoveryStore> {
     let backing = adapt_shared_secure_storage(Arc::clone(&host.secure_storage));
-    Arc::new(uc_infra::security::ProfileKeyRecoveryStore::new(
+    Arc::new(uc_infra_profile::security::ProfileKeyRecoveryStore::new(
         paths.clone(),
         config.profile_id().to_owned(),
         backing,
@@ -496,7 +496,7 @@ pub(crate) async fn wire_host_capabilities_with_emitter(
     paths: AppPaths,
     host_event_emitter: Arc<dyn HostEventEmitterPort>,
     startup_progress: Arc<StartupProgressStore>,
-    profile_key_recovery: Arc<uc_infra::security::ProfileKeyRecoveryStore>,
+    profile_key_recovery: Arc<uc_infra_profile::security::ProfileKeyRecoveryStore>,
 ) -> WiringResult<HostWiring> {
     let (directories, secure_storage, mut clipboard, files, analytics) = host.into_parts();
     let secure_storage = adapt_shared_secure_storage(secure_storage);

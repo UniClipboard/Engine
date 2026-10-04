@@ -64,7 +64,7 @@ LAN HTTP 同步位于 `compatibility/`，拥有独立版本和 `uc-mobile-v*` �
 | `crates/uc-engine/` | 唯一稳定入口，负责启动、操作、事件和生命周期 |
 | `crates/uc-core/` | 领域模型和平台能力约定 |
 | `crates/uc-application/` | 业务流程编排 |
-| `crates/uc-infra/` | 数据库、加密、文件和 P2P 实现 |
+| `crates/uc-infra-*/` | 数据库、加密、文件和 P2P 实现（7 个能力 crate，见 [`ARCHITECTURE.md`](ARCHITECTURE.md)） |
 | `bindings/uc-engine-uniffi/` | iOS 与 Android 绑定及打包脚本 |
 | `bindings/uc-ohos-napi/` | HarmonyOS N-API 绑定与 ArkTS 声明 |
 | `compatibility/` | 独立版本的 LAN 兼容线 |
@@ -217,7 +217,7 @@ uc-engine = {
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
-不要直接依赖 `uc-core`、`uc-application` 或 `uc-infra`。只有明确接入 LAN 兼容通道时才启用 `uc-engine/lan-compat`，正式产品不得启用 `dev-tools`。
+不要直接依赖 `uc-core`、`uc-application` 或任何 `uc-infra-*` crate。只有明确接入 LAN 兼容通道时才启用 `uc-engine/lan-compat`，正式产品不得启用 `dev-tools`。
 
 ### 最小启动流程
 

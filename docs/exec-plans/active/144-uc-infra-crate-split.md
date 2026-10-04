@@ -2,8 +2,8 @@
 
 ## 状态与完整责任
 
-- **状态**：实施中。S0（完整基线实验）按用户指示跳过；S1、S2、S3 已完成并合并；S4（`uc-infra-p2p`）已完成。
-  S5–S6 未开始。
+- **状态**：实施中。S0（完整基线实验）按用户指示跳过；S1、S2、S3、S4 已完成并合并；S5（`uc-infra-profile`，
+  删除 `uc-infra`）已完成。S6 未开始。
 - **日期**：2026-10-04。
 - **跟踪**：[Issue #144](https://github.com/UniClipboard/Engine/issues/144)（设计全文、七个 crate 的职责/允许依赖表、
   六类依赖切断方案、Edge Cases、测试策略、构建性能实验方法、验收标准均在 issue 正文，本文件不复制，只跟踪切片状态）。
@@ -29,7 +29,7 @@
 | S2 | 原子提取 `uc-infra-security`（session/vault/事务代次一起搬，DB 耦合的生命周期部分留给 profile） | **完成** | [PR #147](https://github.com/UniClipboard/Engine/pull/147)，已 squash merge 到 `main`（`ec3301a3`） |
 | S3 | 提取 `uc-infra-storage`、`uc-infra-content` | **完成** | 本次提交；见下方"S3 范围" |
 | S4 | 完成邀请 codec、错误分类、身份槽位切断，再提取整个 `uc-infra-p2p` | **完成** | 本次提交；见下方"S4 范围" |
-| S5 | 剩余升级/激活能力迁 `uc-infra-profile`，LAN 移 `uc-mobile-lan`，删除 `uc-infra` | 未开始 | — |
+| S5 | 剩余升级/激活能力迁 `uc-infra-profile`，LAN 移 `uc-mobile-lan`，删除 `uc-infra` | **完成** | 本次提交；见下方"S5 范围" |
 | S6 | 更新架构门禁、CI、构建缓存、发布脚本、文档；完成公平性能对照 | 未开始（S1/S2 已顺带同步 `check-engine-repository.mjs`、`check-observability-privacy.mjs` 的扫描范围，但完整 S6 清单未逐项核对） | — |
 
 ## S1 范围（2026-10-03，PR #145）
@@ -225,15 +225,82 @@
 - **编译器驱动的可见性修正**：延续 S2/S3，没有预先枚举——每个 `cargo check` 报的"方法不存在/不可见"都用来
   判断该放宽到 `pub` 还是转测试专属可见性。
 
+## S5 范围（2026-10-03，`uc-infra-profile` + 删除 `uc-infra`）
+
+**`mobile_sync/` 先搬到 `uc-mobile-lan`，不进 `uc-infra-profile`**：issue 原表写"LAN 移既有兼容
+crate"，但实际检查 `uc-infra/src/mobile_sync/` 后发现它只实现 `uc-core::ports::mobile_sync` 的端口
+（`credentials_minter`/`password_hasher`/`endpoint_info`/`file_staging`/`lan_probe`），没有任何
+`crate::` 内部耦合——它从一开始就该和 `compatibility/uc-mobile-lan` 现有的 `facade`/`usecases`
+（同样消费这组端口）放在一起，不是先进 `uc-infra-profile` 再搬第二次。`uc-engine` 的 `lan-compat`
+feature 改为直接转发 `uc-infra-storage/lan-compat`（mobile 设备 SQLite 记录仍在 storage），不再经过
+`uc-infra`/`uc-infra-profile`。`uc-infra` 因此也不再需要 `network-interface`/`image` 依赖，一并删除。
+
+**`uc-infra` 剩余的 `config_migration/`、`security/`（`profile_backup_archive`、
+`profile_key_recovery`、`profile_lifecycle`、`profile_reset`、`profile_runtime_layout`、
+`profile_startup_storage`、`profile_storage_upgrade`、`profile_upgrade_backup`、
+`space_control_generation`、`space_transition_activation`、`v3_*`）、`space/`（`adapters`、
+`admission`、`membership_record`、`encryption_passphrase_change`、`membership_branch_transition`）
+整体就是 issue 表里的 `uc-infra-profile` 全部范围，没有剩余——这次是整 crate 改名
+（`git mv crates/uc-infra crates/uc-infra-profile` + 包名/描述/依赖方更新），不是部分抽取**。
+顺手清理了 S3 遗留的死文件：`diesel.toml`/`Makefile` 仍指向早已不存在的 `src/db/`、`migrations/`
+（S3 把它们搬进 `uc-infra-storage` 时没有删这两个配置文件），这次一起删除。
+
+**机械性更新**：`uc_infra::` → `uc_infra_profile::`（`uc-engine`、`uc-infra-profile` 自己的
+`tests/`/`benches/`、`uc-observability-runtime` 测试）；根 `Cargo.toml` workspace members、
+`[profile.dev.package.*]`；`uc-engine`/`uc-application` 的依赖声明与注释；`.config/nextest.toml`
+里四条按包名过滤的测试覆盖规则（两条已在 S4 随 `uc-infra-p2p` 搬迁但当时漏改：
+`provider_dependency_evidence`/`node_lifecycle` 应为 `package(uc-infra-p2p)`；两条
+`profile_storage_upgrade*` 改为 `package(uc-infra-profile)`）；`.github/workflows/*.yml`、
+`.github/actions/rust-ci-setup/action.yml`、`scripts/performance/run.mjs` 里按包名过滤的 CI 步骤；
+`scripts/architecture/check-engine-repository.mjs` 的 `EXPECTED_PACKAGES`/`INTERNAL_PACKAGES`/
+大量硬编码 `crates/uc-infra/src/...` 路径；`scripts/architecture/check-observability-privacy.mjs`
+的 `SOURCE_ROOTS`（新增 `crates/uc-infra-profile/src` 与 `compatibility/uc-mobile-lan/src`——后者
+是因为 `mobile_sync` 带着它的 `uc_observability_contract` 调用点一起搬进了 uc-mobile-lan，之前这个
+crate 从未被该检查脚本扫描过）；`crates/uc-engine/tests/dependency_firewall.rs` 的
+`engine_default_dependency_contract_excludes_lan_compat_dependencies` 整段重写（原来断言
+`uc-infra` 的 `network-interface` optional + `uc-infra/lan-compat` 转发，现在断言
+`uc-mobile-lan` 的 `network-interface` 是普通依赖 + `uc-infra-storage/lan-compat` 转发）。
+
+**验证**：`cargo check --workspace --all-targets --locked` 全绿（零错误，一次性通过，没有像 S1-S4
+那样需要反复用编译错误驱动修可见性——因为这次是整 crate 改名，内部可见性关系不变）；
+`check-engine-repository.mjs` 全绿（含全部负向夹具）；`check-observability-privacy.mjs`
+1324 个记录点（较 S4 后的 1261 新增 63，对应 `uc-mobile-lan` 首次被纳入扫描）；`uc-infra-profile --lib
+--features test-util` 237 passed/3 ignored（与 S4 后的基线完全一致，mobile_sync 搬离不影响这个
+crate 的测试数——它原本就是 `#[cfg(feature = "lan-compat")]` 才编译，默认 `--lib` 跑的测试本来就不含它）；
+`uc-mobile-lan --lib` 238 passed（含 mobile_sync 自带的 15 个单测，随文件原样迁入，零覆盖流失）；
+`uc-engine --lib` 276 passed/3 ignored，`dependency_firewall` 34 passed，均与既有基线一致；
+`uc-infra-p2p` 生产依赖闭包重新用 `cargo metadata` 遍历，631 个依赖，diesel/libsqlite3-sys/image/
+zstd/tantivy/rusqlite 零命中——确认整 crate 改名不影响 S4 已验证过的验收标准。
+
+### 可复用的模式
+
+- **"issue 设计表的职责归属"要先核对实际代码耦合，不能直接照抄**：`mobile_sync/` 在 issue 原表只写了
+  "LAN 移既有兼容 crate"，字面上可能被理解成先进 `uc-infra-profile` 再搬，但读代码后发现它和
+  `uc-infra-profile` 的其余模块没有任何耦合，是独立的端口实现集合，直接搬进真正的消费方更省一步、也
+  更准确。
+- **整 crate 改名用 `git mv` + 包名/路径机械替换，不要当成部分抽取来做**：当"剩下的全部内容都属于同一个
+  新 crate"时，不需要像 S1-S4 那样逐文件判断去留，`cargo check` 也因此一次性全绿，没有可见性修正的
+  反复迭代。
+- **架构脚本的"按包名过滤"规则（nextest 覆盖组、CI workflow 步骤）要和"按路径硬编码"规则一起检查**：
+  这次发现 `.config/nextest.toml` 里两条规则在 S4 搬 `uc-infra-p2p` 时已经漏改，说明这类按
+  `package(...)` 过滤的配置也需要在每次切片收尾时全仓搜索包名字符串，不能只检查
+  `check-engine-repository.mjs` 一个脚本。
+
 ## 遗留风险 / 下一步必须处理的事项
 
-1. **构建性能 A/B 实验（issue §8/§9）完全没有做**：即使 storage/content/p2p 三个较大的 crate 已经分出去，
-   `uc-infra` 仍然持有 profile/admission 的大头，现在测仍然不是公平对照。留给 S5（profile 拆完）之后再测。
-2. **S2 没有产出 issue 字面要求的失败矩阵文档**，S3/S4 同样没有补；只做了等价的"零覆盖流失"验证。
-3. **`space/membership_record/`、`space/admission/repository/`+`display.rs` 的 SQL 所有权还留在 `uc-infra`**，
-   和 issue 原表不一致，需要专门的切片处理（见上）。
-4. **继续 S5（或下一个切片）开工前的分支状态**：本次 S4 提交若按 squash merge 流程合并，
-   继续后续工作需要先从新 `main` 切干净分支。
-5. **`uc-infra-security`/`uc-infra-storage`/`uc-infra-content`/`uc-infra-p2p` 的 `test-util` feature** 目前各自
-   放宽了若干 `#[cfg(test)]`/`#[cfg(any(test, feature = "test-util"))]` 方法；继续拆分时如果还有类似的跨 crate
-   测试脚手架需求，复用同一个 feature 名字，不要新增第二个同义 feature。
+1. **构建性能 A/B 实验（issue §8/§9）完全没有做**：`uc-infra` 已删除，七个目标 crate 全部落地，
+   已经到了可以公平测的时间点，但本次仍未执行真实 timings/RSS 对照实验；需要专门的 S6 任务做。
+2. **S2 没有产出 issue 字面要求的失败矩阵文档**，S3/S4/S5 同样没有补；只做了等价的"零覆盖流失"验证。
+3. **`.github/workflows/*.yml`、`check-engine-repository.mjs`、`check-observability-privacy.mjs` 等
+   架构门禁/CI 脚本的完整性尚未逐项核对 issue 第 6 节"必须同步的已知入口"清单**（release 来源脚本、
+   `scripts/testing/` 等）——S6 需要专门过一遍。
+4. **文档里的旧路径残留**：S5 只修了入口文档（`ARCHITECTURE.md`、`README.md`）与直接受影响的
+   crate 地图（`uc-sync-protocol/AGENTS.md`），并重新生成了 `docs/generated/observability-inventory.md`
+   （它自 S1 起就停在旧路径，不是本次引入）。其余约 25 份 active 计划/设计文档、
+   `docs/generated/db-schema.md`/`search-rebuild-5000-benchmark.md`（S3 起来源指针已失效）、
+   `docs/design-docs/layers/infrastructure.md`，以及 `uc-core` 里若干把 `uc-infra` 当成"Infra 层"
+   泛称的 doc comment，仍引用 `crates/uc-infra/...`——按 issue 第 6 节归 S6 统一处理。
+5. **`uc-infra-security`/`uc-infra-storage`/`uc-infra-content`/`uc-infra-p2p`/`uc-infra-profile` 的
+   `test-util` feature** 各自放宽了若干 `#[cfg(test)]`/`#[cfg(any(test, feature = "test-util"))]`
+   方法；继续拆分时如果还有类似的跨 crate 测试脚手架需求，复用同一个 feature 名字，不要新增第二个
+   同义 feature。

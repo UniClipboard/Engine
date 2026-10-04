@@ -34,8 +34,16 @@ use uc_core::ports::{
     ActiveClipboardDispatchPort, ActiveClipboardReceiverPort, ClipboardDispatchPort,
     ConnectionChannelPort, LocalIdentityPort, PeerReachabilityPort,
 };
-use uc_infra::security::Sha256IdentityFingerprintFactory;
-use uc_infra::space::{
+use uc_infra_local::fs::{
+    FsAtomicPublisher, FsDirectoryStagingCleaner, FsHiddenPathMarker, FsInboundFileTarget,
+};
+use uc_infra_p2p::network::iroh::{
+    encode_space_admission_route, ActiveClipboardHandlers, ActiveClipboardPullHandlers,
+    BlobHandlers, ClipboardHandlers, GroupUpdateHandlers, IrohIdentityStore, IrohNodeError,
+    IrohSessionBuilder, PreparedIrohSession, TransferProgressHandlers,
+};
+use uc_infra_profile::security::Sha256IdentityFingerprintFactory;
+use uc_infra_profile::space::{
     DefaultJoinerActivationExecutor, DefaultJoinerActivationPreparation,
     DefaultJoinerAppliedPreparation, DefaultJoinerCancellationPreparation,
     DefaultJoinerCandidatePreparation, DefaultJoinerInvitationPreparation,
@@ -46,14 +54,6 @@ use uc_infra::space::{
     DeviceTrustObservationsAdapter, GatedMembershipHistoryExchange, GatedSpaceAdmissionTransport,
     MembershipActivationAdapter, MembershipMemberFactsAdapter, MembershipNetworkGate,
     OpenMlsHistoricalSignatureVerifier,
-};
-use uc_infra_local::fs::{
-    FsAtomicPublisher, FsDirectoryStagingCleaner, FsHiddenPathMarker, FsInboundFileTarget,
-};
-use uc_infra_p2p::network::iroh::{
-    encode_space_admission_route, ActiveClipboardHandlers, ActiveClipboardPullHandlers,
-    BlobHandlers, ClipboardHandlers, GroupUpdateHandlers, IrohIdentityStore, IrohNodeError,
-    IrohSessionBuilder, PreparedIrohSession, TransferProgressHandlers,
 };
 use uc_observability_contract::uc_info;
 

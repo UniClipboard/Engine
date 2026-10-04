@@ -3,7 +3,7 @@ use std::path::Path;
 
 use cargo_metadata::{DependencyKind, MetadataCommand, PackageId};
 
-const CORE_PACKAGES: [&str; 3] = ["uc-application", "uc-infra", "uc-engine"];
+const CORE_PACKAGES: [&str; 3] = ["uc-application", "uc-infra-profile", "uc-engine"];
 const DESKTOP_ONLY_PACKAGES: [&str; 7] = [
     "uc-app-paths",
     "uc-bootstrap",
@@ -102,20 +102,20 @@ fn engine_default_dependency_contract_excludes_lan_compat_dependencies() {
     let metadata = workspace_metadata();
     let engine = package(&metadata, "uc-engine");
     let application = package(&metadata, "uc-application");
-    let infra = package(&metadata, "uc-infra");
+    let storage = package(&metadata, "uc-infra-storage");
     let mobile_lan = package(&metadata, "uc-mobile-lan");
 
     assert_default_does_not_enable(engine, "lan-compat");
     assert_default_does_not_enable(application, "lan-compat");
-    assert_default_does_not_enable(infra, "lan-compat");
+    assert_default_does_not_enable(storage, "lan-compat");
 
     let application_dependency = normal_dependency(engine, "uc-application");
-    let infra_dependency = normal_dependency(engine, "uc-infra");
+    let storage_dependency = normal_dependency(engine, "uc-infra-storage");
     let mobile_lan_dependency = normal_dependency(engine, "uc-mobile-lan");
     assert!(!application_dependency
         .features
         .contains(&"lan-compat".to_string()));
-    assert!(!infra_dependency
+    assert!(!storage_dependency
         .features
         .contains(&"lan-compat".to_string()));
     assert!(
@@ -133,16 +133,15 @@ fn engine_default_dependency_contract_excludes_lan_compat_dependencies() {
         !application_has_mobile_proto,
         "uc-application must not depend on uc-mobile-proto (moved to uc-mobile-lan)"
     );
-    let network_interface = normal_dependency(infra, "network-interface");
+    let network_interface = normal_dependency(mobile_lan, "network-interface");
     assert!(
-        network_interface.optional,
-        "network-interface must remain optional in uc-infra"
+        !network_interface.optional,
+        "network-interface must be a normal dependency of uc-mobile-lan"
     );
 
-    assert_feature_enables(infra, "lan-compat", "dep:network-interface");
     assert_feature_enables(engine, "lan-compat", "dep:uc-mobile-lan");
     assert_feature_enables(engine, "lan-compat", "dep:uc-mobile-proto");
-    assert_feature_enables(engine, "lan-compat", "uc-infra/lan-compat");
+    assert_feature_enables(engine, "lan-compat", "uc-infra-storage/lan-compat");
     assert_default_does_not_enable(mobile_lan, "lan-compat");
 }
 

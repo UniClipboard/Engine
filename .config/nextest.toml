@@ -59,12 +59,12 @@ test-group = "fast"
 slow-timeout = { period = "2s", terminate-after = 1 }
 
 [[profile.default.overrides]]
-filter = "package(uc-infra) & test(provider_dependency_evidence)"
+filter = "package(uc-infra-p2p) & test(provider_dependency_evidence)"
 test-group = "persistence-provider"
 slow-timeout = { period = "5s", terminate-after = 1 }
 
 [[profile.default.overrides]]
-filter = "package(uc-infra) & binary(profile_storage_upgrade_crash)"
+filter = "package(uc-infra-profile) & binary(profile_storage_upgrade_crash)"
 test-group = "process"
 slow-timeout = { period = "20s", terminate-after = 1 }
 
@@ -79,12 +79,12 @@ test-group = "fast"
 slow-timeout = { period = "2s", terminate-after = 1 }
 
 [[profile.ci.overrides]]
-filter = "package(uc-infra) & test(provider_dependency_evidence)"
+filter = "package(uc-infra-p2p) & test(provider_dependency_evidence)"
 test-group = "persistence-provider"
 slow-timeout = { period = "5s", terminate-after = 1 }
 
 [[profile.ci.overrides]]
-filter = "package(uc-infra) & binary(profile_storage_upgrade_crash)"
+filter = "package(uc-infra-profile) & binary(profile_storage_upgrade_crash)"
 test-group = "process"
 slow-timeout = { period = "20s", terminate-after = 1 }
 
@@ -114,13 +114,13 @@ filter = "package(uc-core) & binary(membership_history_v2) & test(/^history_exch
 slow-timeout = { period = "30s", terminate-after = 4 }
 
 [[profile.default.overrides]]
-filter = "package(uc-infra) & test(actual_client_exchange_reports_reply_failures_and_preserves_trace_result)"
+filter = "package(uc-infra-p2p) & test(actual_client_exchange_reports_reply_failures_and_preserves_trace_result)"
 slow-timeout = { period = "30s", terminate-after = 4 }
 
 # 该测试先借用空闲 UDP 端口再以固定端口重启节点并核对端口已释放；并行时端口可能被其他测试的临时绑定占用，
 # 因此独占运行。
 [[profile.default.overrides]]
-filter = "package(uc-infra) & binary(node_lifecycle)"
+filter = "package(uc-infra-p2p) & binary(node_lifecycle)"
 threads-required = "num-test-threads"
 
 # 大历史分页与完整准入交换测试本身较慢（约 30–60 秒），不是卡死。
@@ -129,13 +129,13 @@ filter = "package(uc-core) & binary(membership_history_v2) & test(/^history_exch
 slow-timeout = { period = "30s", terminate-after = 4 }
 
 [[profile.ci.overrides]]
-filter = "package(uc-infra) & test(actual_client_exchange_reports_reply_failures_and_preserves_trace_result)"
+filter = "package(uc-infra-p2p) & test(actual_client_exchange_reports_reply_failures_and_preserves_trace_result)"
 slow-timeout = { period = "30s", terminate-after = 4 }
 
 # 该测试先借用空闲 UDP 端口再以固定端口重启节点并核对端口已释放；并行时端口可能被其他测试的临时绑定占用，
 # 因此独占运行。
 [[profile.ci.overrides]]
-filter = "package(uc-infra) & binary(node_lifecycle)"
+filter = "package(uc-infra-p2p) & binary(node_lifecycle)"
 threads-required = "num-test-threads"
 
 # 接收方进程崩溃后重启并续传文件，单项本身约 22 秒，不是卡死。

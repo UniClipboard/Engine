@@ -16,10 +16,10 @@ use crate::subsystems::reconcile::{reconcile_peer_addresses, reconcile_trusted_p
 use uc_application::facade::settings::AppliedRelayRouting;
 use uc_application::facade::ApplicationAssembly;
 use uc_core::settings::relay_routing::RelayRouting;
-use uc_infra::security::Sha256IdentityFingerprintFactory;
 use uc_infra_p2p::network::iroh::{
     IrohIdentityStore, IrohNode, IrohNodeBuilder, IrohSessionBuilder,
 };
+use uc_infra_profile::security::Sha256IdentityFingerprintFactory;
 use uc_observability_contract::{
     error_source::io_error_kind,
     log_fields::{log_vocab, log_vocab_debug},

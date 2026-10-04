@@ -6,7 +6,7 @@ use uc_application::deps::{
     ProfileUpgradeBackupError, ProfileUpgradeBackupPort, ProfileUpgradeSource,
     ProfileUpgradeVersions,
 };
-use uc_infra::security::{
+use uc_infra_profile::security::{
     ProfileUpgradeBackupRecordKeyMissing, StorageUpgradeFailure, StorageUpgradeObserver,
     StorageUpgradeProgressOutcome, StorageUpgradeSnapshot, StorageUpgradeStep, StorageUpgradeUnit,
 };

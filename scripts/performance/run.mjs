@@ -59,7 +59,7 @@ const benchmarkFilter =
 const cargoArguments = [
   "bench",
   "-p",
-  "uc-infra",
+  "uc-infra-profile",
   "--locked",
   "--features",
   "test-util",

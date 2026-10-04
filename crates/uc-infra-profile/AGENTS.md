@@ -1,12 +1,15 @@
-# `uc-infra` 维护地图
+# `uc-infra-profile` 维护地图
 
 完整规范见 [`docs/design-docs/layers/infrastructure.md`](../../docs/design-docs/layers/infrastructure.md)，安全边界见
 [`docs/SECURITY.md`](../../docs/SECURITY.md)，可靠性入口见 [`docs/RELIABILITY.md`](../../docs/RELIABILITY.md)。
 
 ## 范围
 
-- 实现 Core/Application port，对接 SQLite、文件、搜索、密码库、Iroh、系统 API 和第三方库。
-- 拥有持久/协议格式、codec、mapper、migration 与具体 adapter。
+- Profile 持久布局升级、备份/恢复/启动与跨存储的完整安全激活能力：`config_migration/`、
+  `security/profile_*`、`security/v3_*`、`security/space_control_generation/`、
+  `security/space_transition_activation/`、Space 准入准备/激活与 membership record。
+- 依赖 `uc-infra-local`/`uc-infra-crypto`/`uc-infra-security`/`uc-infra-storage`/
+  `uc-infra-content`/`uc-infra-p2p`，组合出完整的 Profile 技术能力。
 - 不定义业务真相、用户流程、UI/API 表示或 composition root。
 
 ## 硬约束

@@ -56,7 +56,12 @@ fn ohos_binding_is_a_workspace_member_with_a_public_engine_boundary() {
             "zeroize",
         ])
     );
-    for forbidden in ["uc-core", "uc-application", "uc-infra", "uc-bootstrap"] {
+    for forbidden in [
+        "uc-core",
+        "uc-application",
+        "uc-infra-profile",
+        "uc-bootstrap",
+    ] {
         assert!(
             !dependencies.contains(forbidden),
             "binding must not depend directly on {forbidden}"

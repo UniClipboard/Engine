@@ -1,8 +1,8 @@
 //! 完整邀请（full invitation）票据的编解码。
 //!
 //! 与传输无关：只做 postcard/base64 编解码与过期校验，不涉及拨号、准入判断或存储。
-//! Admission/pairing/rendezvous 侧的生产消费方分别在 `uc-infra`（admission）
-//! 与未来的 `uc-infra-p2p`（pairing/rendezvous）；放在本 crate 是为了让两边
+//! Admission/pairing/rendezvous 侧的生产消费方分别在 `uc-infra-profile`（admission）
+//! 与 `uc-infra-p2p`（pairing/rendezvous）；放在本 crate 是为了让两边
 //! 单向依赖同一份 codec，而不是互相依赖。
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;

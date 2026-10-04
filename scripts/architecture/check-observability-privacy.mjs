@@ -10,7 +10,7 @@ const INVENTORY_PATH = join(ROOT, 'docs/generated/observability-inventory.md')
 const SOURCE_ROOTS = [
   'crates/uc-core/src',
   'crates/uc-application/src',
-  'crates/uc-infra/src',
+  'crates/uc-infra-profile/src',
   'crates/uc-infra-local/src',
   'crates/uc-infra-crypto/src',
   'crates/uc-infra-security/src',
@@ -22,6 +22,7 @@ const SOURCE_ROOTS = [
   'crates/uc-observability-runtime/src',
   'bindings/uc-engine-uniffi/src',
   'bindings/uc-ohos-napi/src',
+  'compatibility/uc-mobile-lan/src',
 ]
 
 const AUDITED_TARGETS = new Set([

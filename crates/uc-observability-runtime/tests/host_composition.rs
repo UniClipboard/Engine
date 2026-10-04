@@ -50,7 +50,7 @@ fn one_process_can_keep_host_logs_and_route_engine_records_only_to_the_common_ru
             .expect("install")
             .handle();
     tracing::info!(target: "host.test", "host event");
-    tracing::info!(target: "uc_infra::private", "PRIVATE_ENGINE_PAYLOAD");
+    tracing::info!(target: "uc_infra_profile::private", "PRIVATE_ENGINE_PAYLOAD");
     tracing::info!(target: "iroh::private", "PRIVATE_NETWORK_PAYLOAD");
     let host_span = tracing::info_span!(target: "host.test", "host_request");
     let entered = host_span.enter();

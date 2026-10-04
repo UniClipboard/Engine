@@ -86,7 +86,7 @@ jobs:
 
       # 未插桩构建必须能解析出真实符号；Linux 的内联帧只有短名称，该项只在 macOS 校验。
       - name: Validate captured diagnostic stacks
-        run: cargo test -p uc-infra --test peer_address_read_diagnostics --locked
+        run: cargo test -p uc-infra-profile --test peer_address_read_diagnostics --locked
 
   # 升级兼容冒烟：上一个 Desktop 锚点到当前源码的 5 个单元；旧版宿主按 rev 与宿主摘要缓存，命中时不重建。
   upgrade-matrix-smoke:

@@ -6,11 +6,11 @@ use diesel::{Connection as _, RunQueryDsl};
 use uc_core::ids::ProfileId;
 use uc_core::membership::ActiveSpaceGenerationManifestV2;
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
-use uc_infra::security::{
+use uc_infra_profile::security::{
     ActiveSpaceGenerationManifestStore, AdmissionKeyManager, ProfileContentKeyVault,
     ProfileRuntimeLayout, ProfileStorageUpgrade, ProfileStorageUpgradeOutcome,
 };
-use uc_infra::space::InMemorySession;
+use uc_infra_profile::space::InMemorySession;
 use uc_infra_storage::db::pool::{init_db_pool, DbPool};
 use uc_testkit::{Scenario, ScenarioBudget, ScenarioConfig};
 

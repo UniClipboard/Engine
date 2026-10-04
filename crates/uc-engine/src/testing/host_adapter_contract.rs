@@ -3930,9 +3930,9 @@ async fn engine_start_finishes_an_interrupted_factory_reset_before_opening_a_new
         crate::assembly::host::profile_key_recovery_store(&config, &paths, &recovery_host);
     assert_eq!(
         recovery_storage.prepare_startup().await.unwrap(),
-        uc_infra::security::ProfileRecoveryPreparation::Ready
+        uc_infra_profile::security::ProfileRecoveryPreparation::Ready
     );
-    let lifecycle = uc_infra::security::ProfileLifecycleRepository::new(recovery_storage);
+    let lifecycle = uc_infra_profile::security::ProfileLifecycleRepository::new(recovery_storage);
     let initial = uc_application::deps::ProfileLifecycleRepositoryPort::load(&lifecycle)
         .unwrap()
         .unwrap();

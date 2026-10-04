@@ -2,7 +2,7 @@
 //!
 //! 这些 trait 仅描述"应用层在颁发凭据 / 持久化设备 / 探测当前 LAN 端点 /
 //! 验证密码时需要外部具备的能力",不涉及任何具体技术实现(OS RNG、SQLite、
-//! 网卡探测、Argon2 等)。具体实现由 `uc-infra` / `uc-platform` /
+//! 网卡探测、Argon2 等)。具体实现由 `uc-mobile-lan` / `uc-platform` /
 //! `uc-application` 中的 adapter 承担。
 //!
 //! 设计参考 `.context/mobile-sync/SPEC.md` §14 / §15(v3 权威章节)。
@@ -43,7 +43,7 @@ pub trait MobileCredentialsMinterPort: Send + Sync {
 /// 密码哈希与验证能力。
 ///
 /// 业务上只关心"这个明文密码能不能验证通过这个 hash",**不**关心具体算法。
-/// adapter 内部固定用 Argon2id(uc-infra::mobile_sync::password_hasher),
+/// adapter 内部固定用 Argon2id(uc-mobile-lan::mobile_sync::password_hasher),
 /// 但 trait 不暴露算法名 —— 未来切换 algo 不需要改 use case。
 ///
 /// `verify` 必须用 constant-time 比较(adapter 自己用 `subtle` 或 PHC 库内置

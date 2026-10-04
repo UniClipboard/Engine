@@ -19,9 +19,9 @@ use uc_core::membership::{
     VersionedMembershipHistory, ED25519_SIGNATURE_ALGORITHM_V1,
 };
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
-use uc_infra::security::AdmissionKeyManager;
-use uc_infra::space::SqliteMembershipRecordStore;
 use uc_infra_local::time::SystemClock;
+use uc_infra_profile::security::AdmissionKeyManager;
+use uc_infra_profile::space::SqliteMembershipRecordStore;
 use uc_infra_storage::db::executor::DieselSqliteExecutor;
 use uc_infra_storage::db::pool::init_db_pool;
 use uc_infra_storage::db::ports::DbExecutor;

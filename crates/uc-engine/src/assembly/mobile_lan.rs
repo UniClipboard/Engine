@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use uc_core::mobile_sync::LanEndpointInfo;
-use uc_infra::mobile_sync::InMemoryMobileSyncEndpointInfoAdapter;
+use uc_mobile_lan::mobile_sync::InMemoryMobileSyncEndpointInfoAdapter;
 use uc_observability_contract::{uc_info, uc_warn};
 
 use crate::{EngineError, MobileLanEndpointUpdate, OperationResult};

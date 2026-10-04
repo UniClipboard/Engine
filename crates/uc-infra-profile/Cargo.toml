@@ -1,14 +1,13 @@
 [package]
-name = "uc-infra"
+name = "uc-infra-profile"
 version.workspace = true
 license.workspace = true
 edition = "2021"
-description = "Infrastructure utilities and shared components for UniClipboard"
+description = "Profile storage upgrade, backup/recovery, and Space admission activation for UniClipboard"
 publish = false
 
 [features]
 default = []
-lan-compat = ["dep:network-interface", "uc-infra-storage/lan-compat"]
 # Allows test harnesses to bind sponsor and joiner endpoints in one process.
 # Production builds must not enable it: the runtime lease must reject a second
 # live node. See src/network/iroh/node.rs for the production lifecycle guard.
@@ -105,12 +104,6 @@ base32 = "0.5"
 unicode-normalization = "0.1"
 unicode-segmentation = "1"
 url = "2"
-image = { version = "0.25", default-features = false, features = [
-  "png",
-  "jpeg",
-  "webp",
-  "tiff",
-] }
 zstd = { version = "0.13", features = ["zstdmt"] }
 # SpoolManager 用 IndexMap 维护 insertion-ordered 条目，做 O(1) 容量计数 +
 # FIFO eviction。需要稳定的迭代顺序来表达 "evict 最旧未完成 staged" 语义，
@@ -126,10 +119,6 @@ postcard = { version = "1", features = ["use-std"] }
 # the stream/facade boundary without extra clones. Same crate uc-core already
 # pulls in on its own port contracts.
 bytes = "1.7"
-# Mobile-sync v1 LAN interface enumeration (`NetworkInterfaceLanProbe`).
-# Cross-platform wrapper over getifaddrs / GetAdaptersAddresses; we only
-# read IPv4 addresses + interface name, no other features pulled in.
-network-interface = { version = "2.0", optional = true }
 # Config-migration bundle: pack/unpack the plaintext archive that gets sealed
 # inside a `.ucbundle`. Plain (uncompressed) tar — no compression layer, so the
 # AEAD ciphertext does not leak archive structure through compression ratios.

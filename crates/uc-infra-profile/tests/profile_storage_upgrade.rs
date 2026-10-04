@@ -13,16 +13,16 @@ use uc_core::ids::{ProfileId, SpaceId};
 use uc_core::membership::{ActiveSpaceGenerationManifestV2, InvitationId, SpaceAdmissionId};
 use uc_core::ports::space::SpaceAccessStore;
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
-use uc_infra::security::{
+use uc_infra_p2p::network::iroh::SpaceAdmissionChannelCredentialPort;
+use uc_infra_profile::security::{
     ActiveSpaceGenerationManifestStore, AdmissionKeyManager, DefaultCurrentProfile,
     ProfileContentKeyVault, ProfileLifecycleRepository, ProfileRuntimeLayout,
     ProfileStorageUpgrade, ProfileStorageUpgradeError, ProfileStorageUpgradeOutcome,
 };
-use uc_infra::space::{
+use uc_infra_profile::space::{
     CurrentSpaceResolver, InMemorySession, KeyMaterialStore, RuntimeSpaceAccessAdapter,
     SqliteSpaceAdmissionCredentials, SqliteSpaceAdmissionState,
 };
-use uc_infra_p2p::network::iroh::SpaceAdmissionChannelCredentialPort;
 use uc_infra_security::key_slot_store::JsonKeySlotStore;
 use uc_infra_storage::db::executor::DieselSqliteExecutor;
 use uc_infra_storage::db::pool::init_db_pool;
@@ -53,10 +53,10 @@ impl SecureStoragePort for MemorySecureStorage {
 struct EmptyLedger;
 
 #[derive(Default)]
-struct UpgradeProgressRecorder(Mutex<Vec<uc_infra::security::StorageUpgradeSnapshot>>);
+struct UpgradeProgressRecorder(Mutex<Vec<uc_infra_profile::security::StorageUpgradeSnapshot>>);
 
-impl uc_infra::security::StorageUpgradeObserver for UpgradeProgressRecorder {
-    fn update(&self, snapshot: uc_infra::security::StorageUpgradeSnapshot) {
+impl uc_infra_profile::security::StorageUpgradeObserver for UpgradeProgressRecorder {
+    fn update(&self, snapshot: uc_infra_profile::security::StorageUpgradeSnapshot) {
         self.0.lock().unwrap().push(snapshot);
     }
 }
@@ -400,7 +400,7 @@ async fn production_upgrade_completes_all_pre_promotion_phases_in_one_call() {
     let last = updates.last().unwrap();
     assert_eq!(
         last.outcome,
-        Some(uc_infra::security::StorageUpgradeProgressOutcome::Completed)
+        Some(uc_infra_profile::security::StorageUpgradeProgressOutcome::Completed)
     );
     assert!(last.steps.iter().all(|step| step.completed));
     assert!(last.steps.len() <= 6);
@@ -414,7 +414,7 @@ async fn production_upgrade_completes_all_pre_promotion_phases_in_one_call() {
     assert!(restarted.iter().all(|snapshot| !snapshot.required));
     assert_eq!(
         restarted.last().unwrap().outcome,
-        Some(uc_infra::security::StorageUpgradeProgressOutcome::NotNeeded)
+        Some(uc_infra_profile::security::StorageUpgradeProgressOutcome::NotNeeded)
     );
 }
 
@@ -484,8 +484,8 @@ async fn runtime_upgrade_resumes_v2_only_after_the_lease_and_promotes_v3() {
 
     use diesel::prelude::*;
     use uc_core::{blob::ports::BlobReaderPort, BlobId};
-    use uc_infra::security::{ContentProtection, EncryptedBlobStore, V3EncryptedBlobStore};
     use uc_infra_local::blob::{BlobStorePort, FilesystemBlobStore};
+    use uc_infra_profile::security::{ContentProtection, EncryptedBlobStore, V3EncryptedBlobStore};
 
     let source_blobs = EncryptedBlobStore::new(
         Arc::new(FilesystemBlobStore::new(source_root.join("blobs"))),
@@ -692,7 +692,7 @@ async fn assert_legacy_runtime_upgrade(with_group: bool) {
             &uc_core::ids::EventId::from("alpha5-event"),
             &uc_core::ids::RepresentationId::from("alpha5-inline"),
         ));
-        let ciphertext = uc_infra::security::BlobCipherAdapter::new(source_session.clone())
+        let ciphertext = uc_infra_profile::security::BlobCipherAdapter::new(source_session.clone())
             .encrypt(&Plaintext::new(b"alpha5 retained history".to_vec()), &aad)
             .await
             .unwrap();
@@ -890,14 +890,16 @@ async fn v2_upgrade_coordination_is_durable_idempotent_and_encrypted() {
         assert_eq!(last.recovering, attempt > 0);
         assert_eq!(
             last.outcome,
-            Some(uc_infra::security::StorageUpgradeProgressOutcome::Pending)
+            Some(uc_infra_profile::security::StorageUpgradeProgressOutcome::Pending)
         );
         assert!(last.steps.len() <= 6);
         if attempt >= 4 {
             let blobs = last
                 .steps
                 .iter()
-                .find(|step| step.step == uc_infra::security::StorageUpgradeStep::LargeContents)
+                .find(|step| {
+                    step.step == uc_infra_profile::security::StorageUpgradeStep::LargeContents
+                })
                 .unwrap();
             assert_eq!(blobs.warning_count, Some(0));
             assert!(blobs.completed);
@@ -1174,7 +1176,7 @@ async fn held_profile_lease_returns_busy_without_creating_a_journal() {
     assert!(!upgrade_directory.join(".journal-v1").exists());
     assert_eq!(
         progress.0.lock().unwrap().last().unwrap().failure,
-        Some(uc_infra::security::StorageUpgradeFailure::Busy)
+        Some(uc_infra_profile::security::StorageUpgradeFailure::Busy)
     );
 }
 

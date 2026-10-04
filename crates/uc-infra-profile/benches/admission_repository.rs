@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use uc_infra::space::AdmissionRepositoryBenchmark;
+use uc_infra_profile::space::AdmissionRepositoryBenchmark;
 use uc_infra_storage::db::repositories::GroupUpdateDeliveryBenchmark;
 
 fn benchmark_sizes() -> &'static [usize] {

@@ -9,7 +9,7 @@ inputs:
     required: true
   fast-compile-infra:
     description: >-
-      Build uc-infra without the opt-level 3 override from Cargo.toml. Only for jobs whose results do not
+      Build uc-infra-profile without the opt-level 3 override from Cargo.toml. Only for jobs whose results do not
       depend on that optimization level, such as instrumented coverage.
     required: false
     default: "false"
@@ -73,7 +73,7 @@ runs:
       run: bash scripts/build-cache/start-ci-sccache.sh
 
     # 显式提供构建来源后，uc-observability-runtime 的 build script 不再跟踪 git 与源码目录的修改时间；
-    # 否则同一 job 内每次 cargo 调用都可能重跑它，并连锁重编 uc-infra、uc-engine 与全部宿主。
+    # 否则同一 job 内每次 cargo 调用都可能重跑它，并连锁重编 uc-infra-profile、uc-engine 与全部宿主。
     - name: Record build provenance
       shell: bash
       run: |
@@ -84,13 +84,13 @@ runs:
           echo "UC_ENGINE_SOURCE_STATE=$state"
         } >> "$GITHUB_ENV"
 
-    # Cargo.toml 为移动端开发构建把 uc-infra 设为 opt-level 3，测试构建因此多花一倍以上编译时间。
+    # Cargo.toml 为移动端开发构建把 uc-infra-profile 设为 opt-level 3，测试构建因此多花一倍以上编译时间。
     # 诊断栈符号校验与真实网络、多设备时序都依赖该优化级别，只有已按 release 口径校验诊断栈的
     # 插桩覆盖率 job 恢复为 dev 默认值。
-    - name: Compile uc-infra without the mobile optimization override
+    - name: Compile uc-infra-profile without the mobile optimization override
       if: inputs.fast-compile-infra == 'true'
       shell: bash
       run: |
         cargo_home="${CARGO_HOME:-$HOME/.cargo}"
         mkdir -p "$cargo_home"
-        printf '\n[profile.dev.package.uc-infra]\nopt-level = 0\n' >> "$cargo_home/config.toml"
+        printf '\n[profile.dev.package.uc-infra-profile]\nopt-level = 0\n' >> "$cargo_home/config.toml"

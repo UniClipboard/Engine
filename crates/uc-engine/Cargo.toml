@@ -8,12 +8,12 @@ publish = false
 
 [features]
 default = []
-dev-tools = ["dep:tracing-subscriber", "uc-infra/test-util"]
+dev-tools = ["dep:tracing-subscriber", "uc-infra-profile/test-util"]
 lan-compat = [
   "dep:uc-mobile-lan",
   "dep:uc-mobile-proto",
   "uc-application/lan-compat",
-  "uc-infra/lan-compat",
+  "uc-infra-storage/lan-compat",
 ]
 
 [dependencies]
@@ -30,12 +30,12 @@ url = "2"
 uuid = { version = "1", features = ["v4", "fast-rng"] }
 uc-application = { path = "../uc-application" }
 uc-core = { path = "../uc-core", features = ["task-registry"] }
-uc-infra = { path = "../uc-infra" }
 uc-infra-local = { path = "../uc-infra-local" }
 uc-infra-p2p = { path = "../uc-infra-p2p" }
 uc-infra-security = { path = "../uc-infra-security" }
 uc-infra-storage = { path = "../uc-infra-storage" }
 uc-infra-content = { path = "../uc-infra-content" }
+uc-infra-profile = { path = "../uc-infra-profile" }
 uc-mobile-lan = { path = "../../compatibility/uc-mobile-lan", optional = true }
 uc-mobile-proto = { path = "../../compatibility/uc-mobile-proto", optional = true }
 uc-observability-contract = { path = "../uc-observability-contract" }
@@ -53,7 +53,7 @@ tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-uc-infra = { path = "../uc-infra", features = ["test-util"] }
+uc-infra-profile = { path = "../uc-infra-profile", features = ["test-util"] }
 uc-testkit = { path = "../../tests/uc-testkit" }
 wiremock = "0.6"
 

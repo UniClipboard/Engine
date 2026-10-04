@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url'
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const REPOSITORY_ROOT = realpathSync(resolve(SCRIPT_DIR, '../..'))
 
-// 随仓库发布的第三方源码副本：只允许 uc-infra 以 third_party 下的路径依赖引用，
+// 随仓库发布的第三方源码副本：只允许 uc-infra-p2p 以 third_party 下的路径依赖引用，
 // 这样依赖 Engine 的仓库不需要重复任何 [patch]。
 const VENDORED_THIRD_PARTY_PACKAGES = ['iroh-mdns-address-lookup', 'swarm-discovery']
 
@@ -32,11 +32,11 @@ const EXPECTED_PACKAGES = [
   'uc-core',
   'uc-engine',
   'uc-engine-uniffi',
-  'uc-infra',
   'uc-infra-content',
   'uc-infra-crypto',
   'uc-infra-local',
   'uc-infra-p2p',
+  'uc-infra-profile',
   'uc-infra-security',
   'uc-infra-storage',
   'uc-mobile',
@@ -55,11 +55,11 @@ const INTERNAL_PACKAGES = new Set([
   'uc-application',
   'uc-content-hash',
   'uc-core',
-  'uc-infra',
   'uc-infra-content',
   'uc-infra-crypto',
   'uc-infra-local',
   'uc-infra-p2p',
+  'uc-infra-profile',
   'uc-infra-security',
   'uc-infra-storage',
   'uc-mobile',
@@ -498,9 +498,9 @@ function checkLanIsolation(metadata, sources) {
   const problems = []
   const engine = packageByName(metadata, 'uc-engine')
   const application = packageByName(metadata, 'uc-application')
-  const infra = packageByName(metadata, 'uc-infra')
+  const infraProfile = packageByName(metadata, 'uc-infra-profile')
 
-  for (const packageMetadata of [engine, application, infra]) {
+  for (const packageMetadata of [engine, application, infraProfile]) {
     if (featureItems(packageMetadata, 'default').includes('lan-compat')) {
       addProblem(problems, 'compatibility gate', `${packageMetadata.name} enables lan-compat by default`)
     }
@@ -508,7 +508,7 @@ function checkLanIsolation(metadata, sources) {
   for (const required of [
     'dep:uc-mobile-lan',
     'dep:uc-mobile-proto',
-    'uc-infra/lan-compat',
+    'uc-infra-storage/lan-compat',
   ]) {
     if (!featureItems(engine, 'lan-compat').includes(required)) {
       addProblem(problems, 'compatibility gate', `uc-engine/lan-compat is missing ${required}`)
@@ -517,8 +517,8 @@ function checkLanIsolation(metadata, sources) {
   if (normalDependency(application, 'uc-mobile-proto')) {
     addProblem(problems, 'compatibility gate', 'uc-application must not depend on uc-mobile-proto (moved to uc-mobile-lan)')
   }
-  if (!normalDependency(infra, 'network-interface')?.optional) {
-    addProblem(problems, 'compatibility gate', 'uc-infra must keep network-interface optional')
+  if (normalDependency(infraProfile, 'network-interface')) {
+    addProblem(problems, 'compatibility gate', 'uc-infra-profile must not depend on network-interface (mobile_sync moved to uc-mobile-lan)')
   }
   for (const consumerName of P2P_CONSUMERS) {
     const dependency = normalDependency(packageByName(metadata, consumerName), 'uc-engine')
@@ -570,7 +570,7 @@ function checkPlaintextScanner() {
 function checkProfileStorageGenerationOwnership(sources) {
   const problems = []
   const v3TransitionPath =
-    'crates/uc-infra/src/security/v3_admission_space_transition.rs'
+    'crates/uc-infra-profile/src/security/v3_admission_space_transition.rs'
   const forbiddenV3Dependencies = [
     'ProfileStorageUpgrade',
     'profile_storage_upgrade',
@@ -721,7 +721,7 @@ function checkMembershipConfirmationWatermarkOwnership(sources) {
     )
   }
 
-  const sponsorActivation = read('crates/uc-infra/src/space/admission/sponsor/complete.rs')
+  const sponsorActivation = read('crates/uc-infra-profile/src/space/admission/sponsor/complete.rs')
   if (/confirmed_position/.test(sponsorActivation)) {
     addProblem(
       problems,
@@ -893,9 +893,9 @@ function checkApplicationMembershipCutover() {
     'crates/uc-application/src/space/membership/ledger',
     'crates/uc-application/src/space/membership/synchronize_history',
     'crates/uc-application/src/space/membership/anti_entropy.rs',
-    'crates/uc-infra/src/space/membership_ledger.rs',
-    'crates/uc-infra/src/space/membership_ledger',
-    'crates/uc-infra/src/space/adapters/membership_projection.rs',
+    'crates/uc-infra-profile/src/space/membership_ledger.rs',
+    'crates/uc-infra-profile/src/space/membership_ledger',
+    'crates/uc-infra-profile/src/space/adapters/membership_projection.rs',
     'crates/uc-engine/src/assembly/membership_events.rs',
     'crates/uc-core/src/membership/space_join_record.rs',
   ]
@@ -1455,7 +1455,7 @@ function checkDualInvitationEntry() {
 
 function checkInfraSpaceAdmissionOwnership() {
   const problems = []
-  const admissionRoot = 'crates/uc-infra/src/space/admission'
+  const admissionRoot = 'crates/uc-infra-profile/src/space/admission'
   const requiredEntries = [
     'mod.rs',
     'security/mod.rs',
@@ -1476,7 +1476,7 @@ function checkInfraSpaceAdmissionOwnership() {
     'sponsor/state.rs',
   ]
   const retiredEntries = [
-    'crates/uc-infra/src/db/repositories/space_join_record_store.rs',
+    'crates/uc-infra-profile/src/db/repositories/space_join_record_store.rs',
     'crates/uc-infra-p2p/src/network/iroh/admission_completion_recovery_adapter.rs',
     'crates/uc-infra-p2p/src/pairing/admission_outbox_delivery.rs',
   ]
@@ -1511,7 +1511,7 @@ function checkInfraSpaceAdmissionOwnership() {
 
 function checkInfraSpaceSecurityOwnership() {
   const problems = []
-  // Engine issue #144 S2：这组实现从 crates/uc-infra/src/space/security
+  // Engine issue #144 S2：这组实现从 crates/uc-infra-profile/src/space/security
   // 整体搬进独立的 uc-infra-security crate；history_signature.rs 和
   // mls_group.rs 随 OpenMLS 引擎一起搬进 uc-infra-crypto。
   const securityRoot = 'crates/uc-infra-security/src'
@@ -1527,18 +1527,18 @@ function checkInfraSpaceSecurityOwnership() {
   const cryptoRoot = 'crates/uc-infra-crypto/src'
   const requiredCryptoEntries = ['history_signature.rs', 'mls_group.rs']
   const retiredEntries = [
-    'crates/uc-infra/src/security/adapters/space_session_rebind.rs',
-    'crates/uc-infra/src/security/admission_security_transition.rs',
-    'crates/uc-infra/src/security/historical_signature_adapter.rs',
-    'crates/uc-infra/src/security/key_material.rs',
-    'crates/uc-infra/src/security/membership_security_update_adapter.rs',
-    'crates/uc-infra/src/security/mls_group.rs',
-    'crates/uc-infra/src/security/peer_admission_adapter.rs',
-    'crates/uc-infra/src/space/security/peer_admission.rs',
-    'crates/uc-infra/src/security/scope_identifier.rs',
-    'crates/uc-infra/src/security/session.rs',
-    'crates/uc-infra/src/security/space_access_adapter.rs',
-    'crates/uc-infra/src/space/security',
+    'crates/uc-infra-profile/src/security/adapters/space_session_rebind.rs',
+    'crates/uc-infra-profile/src/security/admission_security_transition.rs',
+    'crates/uc-infra-profile/src/security/historical_signature_adapter.rs',
+    'crates/uc-infra-profile/src/security/key_material.rs',
+    'crates/uc-infra-profile/src/security/membership_security_update_adapter.rs',
+    'crates/uc-infra-profile/src/security/mls_group.rs',
+    'crates/uc-infra-profile/src/security/peer_admission_adapter.rs',
+    'crates/uc-infra-profile/src/space/security/peer_admission.rs',
+    'crates/uc-infra-profile/src/security/scope_identifier.rs',
+    'crates/uc-infra-profile/src/security/session.rs',
+    'crates/uc-infra-profile/src/security/space_access_adapter.rs',
+    'crates/uc-infra-profile/src/space/security',
   ]
 
   for (const entry of requiredEntries) {
@@ -1601,7 +1601,7 @@ function checkSecureStorageBlockingOwnership(sources) {
 
 function checkRetiredLegacySpaceTransition(sources) {
   const problems = []
-  const legacyPath = 'crates/uc-infra/src/security/admission_space_transition.rs'
+  const legacyPath = 'crates/uc-infra-profile/src/security/admission_space_transition.rs'
   if (sources.legacySpaceTransitionPathPresent) {
     addProblem(
       problems,
@@ -2187,23 +2187,23 @@ function repositorySources() {
         'crates/uc-application/src/space/membership/owner.rs',
         'crates/uc-application/src/space/membership/ports.rs',
       ]),
-      productionSources('crates/uc-infra/src'),
+      productionSources('crates/uc-infra-profile/src'),
       productionSources('crates/uc-engine/src'),
       readSourceTree('bindings'),
     ].join('\n'),
-    membershipRecordInfraOutsideCodec: productionSources('crates/uc-infra/src', [
-      'crates/uc-infra/src/space/membership_record/codec.rs',
-      ...readdirSync(join(REPOSITORY_ROOT, 'crates/uc-infra/src/space/membership_record/codec')).map(
-        name => `crates/uc-infra/src/space/membership_record/codec/${name}`
+    membershipRecordInfraOutsideCodec: productionSources('crates/uc-infra-profile/src', [
+      'crates/uc-infra-profile/src/space/membership_record/codec.rs',
+      ...readdirSync(join(REPOSITORY_ROOT, 'crates/uc-infra-profile/src/space/membership_record/codec')).map(
+        name => `crates/uc-infra-profile/src/space/membership_record/codec/${name}`
       ),
-      'crates/uc-infra/src/space/membership_record/test_support.rs',
+      'crates/uc-infra-profile/src/space/membership_record/test_support.rs',
     ]),
     membershipEvidenceOwner: read('crates/uc-application/src/space/membership/reconcile_history_evidence/use_case.rs'),
     retiredMembershipPersistencePathPresent: [
-      'crates/uc-infra/src/db/repositories/membership_candidate_repo.rs',
-      'crates/uc-infra/src/db/repositories/membership_announcement_repo.rs',
-      'crates/uc-infra/src/db/repositories/membership_outbox_repo.rs',
-      'crates/uc-infra/src/db/repositories/membership_applied_security_update_repo.rs',
+      'crates/uc-infra-profile/src/db/repositories/membership_candidate_repo.rs',
+      'crates/uc-infra-profile/src/db/repositories/membership_announcement_repo.rs',
+      'crates/uc-infra-profile/src/db/repositories/membership_outbox_repo.rs',
+      'crates/uc-infra-profile/src/db/repositories/membership_applied_security_update_repo.rs',
     ].some(path => existsSync(join(REPOSITORY_ROOT, path))),
     membershipPersistence: [
       read('crates/uc-core/src/membership/ports.rs'),
@@ -2234,13 +2234,13 @@ function repositorySources() {
       'crates/uc-application/src/runtime_lifecycle/coordinator.rs'
     ),
     spaceAccess: read('crates/uc-infra-security/src/access.rs'),
-    configMigration: read('crates/uc-infra/src/config_migration/mod.rs'),
+    configMigration: read('crates/uc-infra-profile/src/config_migration/mod.rs'),
     engineSpaceAccessWiring: read('crates/uc-engine/src/assembly/wire/infra.rs'),
     legacySpaceTransitionPathPresent: existsSync(
-      join(REPOSITORY_ROOT, 'crates/uc-infra/src/security/admission_space_transition.rs')
+      join(REPOSITORY_ROOT, 'crates/uc-infra-profile/src/security/admission_space_transition.rs')
     ),
-    infraSecurityModule: read('crates/uc-infra/src/security/mod.rs'),
-    infraSecurityRuntime: readSourceTree('crates/uc-infra/src/security'),
+    infraSecurityModule: read('crates/uc-infra-profile/src/security/mod.rs'),
+    infraSecurityRuntime: readSourceTree('crates/uc-infra-profile/src/security'),
     secureStorageAccess: read('crates/uc-infra-security/src/secure_storage_access.rs'),
     profileContentVaultKeyStore: read(
       'crates/uc-infra-security/src/profile_content_key_vault/key_store.rs'
@@ -2276,7 +2276,7 @@ function repositorySources() {
     spaceApplication: read('crates/uc-application/src/space/application.rs'),
     network: readSourceTree('crates/uc-infra-p2p/src/network'),
     v3AdmissionTransition: read(
-      'crates/uc-infra/src/security/v3_admission_space_transition.rs'
+      'crates/uc-infra-profile/src/security/v3_admission_space_transition.rs'
     ),
     uniffi: read('bindings/uc-engine-uniffi/src/lib.rs'),
     ohos: read('bindings/uc-ohos-napi/src/lib.rs'),
