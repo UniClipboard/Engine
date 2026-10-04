@@ -3,7 +3,7 @@
 //! Abstracts the build step that converts a clipboard-entry snapshot
 //! (`SearchPipelineInput`) into a `SearchDocument` and the matching
 //! aggregated `SearchPosting` rows. Concrete implementation (text
-//! extraction + tokenization + HMAC term tagging) lives in `uc-infra`.
+//! extraction + tokenization + HMAC term tagging) lives in `uc-infra-storage`.
 //!
 //! The port is synchronous because the underlying work is pure CPU
 //! (no IO). Implementations must be `Send + Sync` so a single instance

@@ -2,7 +2,7 @@
 //! SearchKeyDerivationPort in `crate::ports::search`.
 //!
 //! This module is pure contract definition: no implementations, no database access,
-//! no HTTP routes. Implementation layers live in uc-infra (Phase 90+) and
+//! no HTTP routes. Implementation layers live in uc-infra-storage (Phase 90+) and
 //! daemon routes live in uc-daemon (Phase 92).
 
 pub mod document;

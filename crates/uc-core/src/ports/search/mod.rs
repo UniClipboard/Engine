@@ -1,4 +1,4 @@
-//! Search ports — async traits implemented by uc-infra and injected into
+//! Search ports — async traits implemented by uc-infra-storage and injected into
 //! use cases via Arc<dyn Port + Send + Sync>.
 
 pub mod maintenance;

@@ -110,7 +110,7 @@ zstd = { version = "0.13", features = ["zstdmt"] }
 # 普通 HashMap 做不到。
 indexmap = "2"
 
-# EndpointAddr/EndpointId types surface through a handful of still-in-uc-infra
+# EndpointAddr/EndpointId types surface through a handful of uc-infra-profile
 # admission call sites that consume uc-infra-p2p's decoded continuation routes.
 iroh = { version = "1.3.0" }
 # Slice 1 pairing session wire codec — binary, compact, serde-compatible.

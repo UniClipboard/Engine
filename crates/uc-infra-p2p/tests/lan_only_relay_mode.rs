@@ -41,7 +41,7 @@ async fn bind_with_relay_mode(mode: RelayMode) -> Endpoint {
         .expect("bind endpoint")
 }
 
-/// LAN-only 生产链路 fixture —— 镜像 `uc-infra/src/network/iroh/node.rs`
+/// LAN-only 生产链路 fixture —— 镜像 `uc-infra-p2p/src/network/iroh/node.rs`
 /// `IrohNodeBuilder::bind` 在 `disable_relays = true` 时的 builder 形状：
 /// 从 `presets::N0` 出发，先 `clear_address_lookup()` 清掉 pkarr/DNS，再
 /// 单挂 mDNS。用来验证"LAN-only 路径下 address_lookup 只剩 mDNS"这条

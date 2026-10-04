@@ -152,7 +152,7 @@ mod tests {
 
     /// 本 crate 不接触任何存储库的具体错误类型；真实 Diesel/SQLite 失败如何
     /// 被翻译成 `ClassifiedGroupUpdateStorageFailure` 由存储层的转换处验证
-    /// （`uc-infra` 的 `db::repositories::space_security_store::backend`）。
+    /// （`uc-infra-storage` 的 `db::repositories::space_security_store::backend`）。
     /// 这里只验证读取端：已经分类好的存储失败正确映射到 phase/source/reason，
     /// 且不泄露任何底层错误文本。
     #[test]

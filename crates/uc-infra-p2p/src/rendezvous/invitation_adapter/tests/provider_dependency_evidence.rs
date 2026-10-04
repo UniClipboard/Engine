@@ -12,7 +12,7 @@ use super::{loopback_endpoint, make_adapter, InMemorySettings};
 use crate::rendezvous::invitation_adapter::{InvitationError, LOCAL_MINT_TTL};
 
 const REPRODUCE: &str =
-    "cargo nextest run --profile ci --locked -p uc-infra -E 'test(provider_dependency_evidence)'";
+    "cargo nextest run --profile ci --locked -p uc-infra-p2p -E 'test(provider_dependency_evidence)'";
 
 fn scenario(name: &'static str, seed: u64) -> Scenario {
     let artifact_root = PathBuf::from("../../target/test-artifacts/real-dependencies");

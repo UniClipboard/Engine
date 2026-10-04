@@ -1,10 +1,11 @@
 //! `RuntimeSpaceAccessAdapter`（`uc-infra-security`）读取真实 SQLite 仓储
-//! （`uc-infra` 的 `DieselSpaceSecurityStore`）持久化结果的跨 crate 集成验证。
+//! （`uc-infra-storage` 的 `DieselSpaceSecurityStore`）持久化结果的跨 crate 集成验证。
 //!
-//! 这条场景原本随 `RuntimeSpaceAccessAdapter` 的内部单测存在；security 拆成
-//! 独立 crate 后，真实数据库仓储仍留在 `uc-infra`（storage 未拆分前），
-//! 两者不能再共享同一个内部测试模块，因此迁到这里作为 `uc-infra` 的集成测试：
-//! `uc-infra` 本就依赖 `uc-infra-security`，这个方向不产生循环依赖。
+//! 这条场景原本随 `RuntimeSpaceAccessAdapter` 的内部单测存在；真实数据库仓储
+//! 位于 `uc-infra-storage`，而 `uc-infra-security` 不能反向依赖它，两者不能
+//! 共享同一个内部测试模块，因此放在这里作为 `uc-infra-profile` 的集成测试：
+//! 本 crate 同时依赖 `uc-infra-security` 与 `uc-infra-storage`，这个方向不产生
+//! 循环依赖。
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;

@@ -1,4 +1,4 @@
-//! `uc-infra::search` — persistence foundation for local encrypted search.
+//! `uc-infra-storage::search` — persistence foundation for local encrypted search.
 //!
 //! This module owns:
 //! - `constants`: authoritative `CURRENT_INDEX_VERSION` and field-mask bit positions.

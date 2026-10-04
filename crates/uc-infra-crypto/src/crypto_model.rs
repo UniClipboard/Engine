@@ -1,9 +1,9 @@
-//! 加密持久化/协议数据模型——uc-infra 内部。
+//! 加密持久化/协议数据模型——Infra 层内部(位于 uc-infra-crypto)。
 //!
 //! 从 `uc-core/src/crypto/model.rs` 物理下沉(Slice 6 U6 候选 F + Slice 7):
 //! `KdfParams` / `KdfParamsV1` / `KeySlot` / `WrappedMasterKey` / `EncryptedBlob` /
 //! `KeySlotFile` / `KeySlotConvertError` / `KeyScope` 都是磁盘 JSON 与 pairing
-//! wire format 的承载结构(ironclad 数据兼容),属于 uc-infra 的持久化职责。
+//! wire format 的承载结构(ironclad 数据兼容),属于 Infra 层的持久化职责。
 //! uc-core 仅保留 `Passphrase` / `EncryptionError`。
 //!
 //! serde 形状与历史完全一致——字段名、类型、可选性、skip_serializing_if 行为
@@ -53,7 +53,7 @@ pub fn validate_kdf(kdf: &KdfParams) -> Result<(), EncryptionError> {
 
 /// 单 profile 下 KEK/KeySlot 的作用域键。
 ///
-/// Slice 7 (U7 候选 B) 起从 uc-core 搬到 uc-infra——`KeyScopePort` 已改名
+/// Slice 7 (U7 候选 B) 起从 uc-core 搬到 Infra 层(现位于 uc-infra-crypto)——`KeyScopePort` 已改名
 /// `CurrentProfilePort` 返回 `ProfileId` 值对象,`KeyScope` 仅作为 adapter
 /// 层内部 wrapper 服务于 `KeySlotFile.scope` 字段的磁盘 JSON 兼容 + `kek_key`
 /// 前缀格式化。

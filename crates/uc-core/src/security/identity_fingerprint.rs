@@ -3,7 +3,7 @@
 //!
 //! Carries 16 Base32 characters grouped as `ABCD-EFGH-IJKL-MNOP`. The exact
 //! derivation (domain separator + SHA-256 over the Ed25519 public key + Base32
-//! truncation) lives in `uc-infra::security` and goes through
+//! truncation) lives in `uc-infra-crypto` (`Sha256IdentityFingerprintFactory`) and goes through
 //! `IdentityFingerprintFactoryPort`. This value object only validates shape
 //! and exposes display/raw/verify accessors.
 

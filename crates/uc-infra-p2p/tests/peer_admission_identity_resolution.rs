@@ -208,7 +208,7 @@ async fn identity_resolution_distinguishes_mapping_and_read_failures() {
         "peer-admission-identity-resolution",
         0x0010_2026_0923,
         ScenarioBudget::new(Duration::from_secs(30)),
-        "cargo test -p uc-infra --test peer_admission_identity_resolution --locked -- --nocapture",
+        "cargo test -p uc-infra-p2p --test peer_admission_identity_resolution --locked -- --nocapture",
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/test-artifacts/peer-admission-identity-resolution"),
     ))

@@ -251,7 +251,7 @@ V1 必须支持在解锁状态下执行全量重建。
 - `RemoveIndexedClipboardEntry`
 - `RebuildSearchIndex`
 
-### `uc-infra`
+### `uc-infra-storage`
 
 负责：
 

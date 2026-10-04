@@ -1,6 +1,6 @@
 //! SearchKeyDerivationPort — derives a SearchKey from the unlocked MasterKey.
 //!
-//! Implementation lives in uc-infra (Phase 90). The derivation is scoped per
+//! Implementation lives in uc-infra-storage (Phase 90). The derivation is scoped per
 //! profile via HKDF-SHA256 (per architecture spec). uc-core only sees the
 //! opaque SearchKey output; no raw MasterKey bytes cross the port boundary.
 
@@ -9,7 +9,7 @@ use async_trait::async_trait;
 
 /// Port for deriving search subkeys from the currently-unlocked encryption session.
 ///
-/// Implemented by uc-infra (Phase 90). Injected as `Arc<dyn SearchKeyDerivationPort + Send + Sync>`.
+/// Implemented by uc-infra-storage (Phase 90). Injected as `Arc<dyn SearchKeyDerivationPort + Send + Sync>`.
 #[async_trait]
 pub trait SearchKeyDerivationPort: Send + Sync {
     /// Derive a SearchKey for the currently-unlocked encryption session.

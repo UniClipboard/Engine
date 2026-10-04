@@ -1,4 +1,4 @@
-//! SearchIndexPort — async trait implemented by uc-infra (Phase 91).
+//! SearchIndexPort — async trait implemented by uc-infra-storage (Phase 91).
 //!
 //! All methods return Result<_, SearchError> to preserve typed error info
 //! across the port boundary (per D-03, D-04, D-05). Infra adapters may use
@@ -15,7 +15,7 @@ use tokio::sync::mpsc::Sender;
 
 /// Port for indexing and querying the local encrypted search index.
 ///
-/// Implemented by uc-infra (Phase 91). Injected as `Arc<dyn SearchIndexPort + Send + Sync>`
+/// Implemented by uc-infra-storage (Phase 91). Injected as `Arc<dyn SearchIndexPort + Send + Sync>`
 /// into use cases and daemon state.
 #[async_trait]
 pub trait SearchIndexPort: Send + Sync {

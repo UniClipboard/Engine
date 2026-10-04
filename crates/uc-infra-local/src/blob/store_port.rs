@@ -4,7 +4,7 @@
 //! Exposes the low-level put/get operations used by `BlobWriter` and by
 //! use cases that need to read raw blob bytes.
 //!
-//! This port lives in `uc-infra` rather than `uc-core` because its `put`
+//! This port lives in `uc-infra-local` rather than `uc-core` because its `put`
 //! contract returns a `PathBuf` and an optional on-disk compressed size —
 //! both are storage-implementation concerns with no domain meaning.
 

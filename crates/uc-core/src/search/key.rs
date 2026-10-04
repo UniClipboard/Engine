@@ -48,7 +48,7 @@ impl SearchKey {
     /// Length of a SearchKey in bytes.
     pub const LEN: usize = 32;
 
-    /// Access the raw key bytes — for use by uc-infra HMAC adapters only.
+    /// Access the raw key bytes — for use by uc-infra-storage HMAC adapters only.
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
@@ -131,7 +131,7 @@ impl RenderKey {
     /// Length of a RenderKey in bytes.
     pub const LEN: usize = 32;
 
-    /// Access the raw key bytes — for use by uc-infra AEAD adapters only.
+    /// Access the raw key bytes — for use by uc-infra-storage AEAD adapters only.
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }

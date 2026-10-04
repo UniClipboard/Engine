@@ -965,8 +965,8 @@ impl PeerReachabilityPort for IrohPeerReachabilityAdapter {
     // lookup(`last_state` / `peers`),没有外部 I/O,但被 roster /
     // list_with_peer_reachability / ensure_reachable_all 在热路径上反复调用,
     // 14 天观测到 ~20 万次 span 落到 Sentry。`ensure_reachable` /
-    // `verify_reachable` 真做拨号,继续保留 instrument(uc-infra §10.1
-    // 强制要求关键 adapter 有 tracing)。
+    // `verify_reachable` 真做拨号,继续保留 instrument(Infra 层设计文档
+    // §10.1 强制要求关键 adapter 有 tracing)。
     async fn current_state(&self, device: &DeviceId) -> ReachabilityState {
         self.last_state
             .lock()

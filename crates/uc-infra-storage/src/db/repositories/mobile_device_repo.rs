@@ -371,12 +371,12 @@ mod tests {
         (repo, tmp)
     }
 
-    // `verify_activity_contract` 复刻自 `uc-infra` 的
+    // `verify_activity_contract` 复刻自 `compatibility/uc-mobile-lan` 的
     // `mobile_sync::device_repo::tests`：同一个 `MobileDeviceStore` 契约测试
-    // 用于验证两个不同后端（内存 fake 留在 uc-infra，这里是真实 SQLite
-    // repository）；两边互不依赖，这个方向（`uc-infra` 依赖
-    // `uc-infra-storage`）不允许反过来 `uc-infra-storage` 的测试调用
-    // `uc-infra` 的测试私有方法。
+    // 用于验证两个不同后端（内存 fake 在 uc-mobile-lan，这里是真实 SQLite
+    // repository）；`uc-mobile-lan` 只在 dev-dependencies 中依赖
+    // `uc-infra-storage`，反方向不存在依赖，因此这里不能调用
+    // `uc-mobile-lan` 的测试私有方法。
     #[cfg(feature = "lan-compat")]
     async fn verify_activity_contract<R: MobileDeviceStore + 'static>(repo: R) {
         use uc_core::mobile_sync::MobileDeviceId;

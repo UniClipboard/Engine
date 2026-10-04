@@ -4,7 +4,7 @@
 //! 属于磁盘兼容不变量的一部分,不可变更。
 //!
 //! 历史上 impl 在 `uc-core/src/crypto/model.rs::KeyScope::to_identifier`,
-//! Slice 4 (U4-D) 起作为 uc-infra adapter 私有 helper,避免 uc-core 泄漏
+//! Slice 4 (U4-D) 起作为 Infra 层 adapter 私有 helper(现位于 uc-infra-security),避免 uc-core 泄漏
 //! 持久化格式细节。
 
 use uc_infra_crypto::crypto_model::KeyScope;

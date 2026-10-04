@@ -29,8 +29,9 @@ base32 = "0.5"
 hkdf = "0.12"
 subtle = "2.5.0"
 opaque-ke = { version = "=4.0.1", features = ["argon2", "ristretto255"] }
-# opaque-ke 4.0.1 takes RNG handles from rand 0.8; see uc-infra/Cargo.toml's
-# matching comment for why this separate rand 0.8 alias is required.
+# opaque-ke 4.0.1 takes RNG handles from rand 0.8 with default-features = false,
+# so `OsRng` only exists when some crate enables its `getrandom` feature; see
+# uc-infra-profile/Cargo.toml's matching comment for the full rationale.
 rand_opaque = { package = "rand", version = "0.8", default-features = false, features = ["getrandom"] }
 openmls = { version = "=0.9.0", features = ["fork-resolution"] }
 openmls_basic_credential = "=0.6.0"

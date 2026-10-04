@@ -2,8 +2,8 @@
 
 ## 依赖与职责
 
-固定依赖方向是 `uc-engine → uc-infra → uc-application → uc-core`。`uc-engine` 只负责组装、
-生命周期和稳定契约；`uc-infra` 可以实现 Core 或 Application 定义的 port，但不能决定业务；
+固定依赖方向是 `uc-engine → uc-infra-* → uc-application → uc-core`。`uc-engine` 只负责组装、
+生命周期和稳定契约；`uc-infra-*` 可以实现 Core 或 Application 定义的 port，但不能决定业务；
 `uc-application` 负责完整流程；`uc-core` 只表达纯业务规则。
 
 跨层功能开工前必须回答：

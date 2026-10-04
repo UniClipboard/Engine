@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | `uc-core` | 领域概念、合法状态转换、不变量、每次转换的效果义务、跨设备规则 | 规则 |
 | `uc-application` | 按效果义务调用能力的顺序、事务切分、重试与重启恢复 | 流程 |
-| `uc-infra` | 字节格式、数据库、网络、密码学、平台 API | 能力 |
+| `uc-infra-*` | 字节格式、数据库、网络、密码学、平台 API | 能力 |
 
 跨层原则见[核心信念](../core-beliefs.md)与[工程与模块设计原则](../engineering-principles.md)；本文只规定 Core 内部怎么写。
 当前代码与本文的差距及收口计划见 [Core 边界收口计划](../../exec-plans/active/2026-09-23-core-boundary-remediation.md)。

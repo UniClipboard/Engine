@@ -139,7 +139,7 @@ impl RendezvousClient {
             .user_agent(USER_AGENT)
             .timeout(HTTP_TIMEOUT)
             .build()
-            .expect("reqwest client build failed — check uc-infra feature flags");
+            .expect("reqwest client build failed — check uc-infra-p2p feature flags");
         Self {
             http,
             base_url: base_url.into(),

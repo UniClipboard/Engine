@@ -62,7 +62,7 @@ Relationship: 目标继续拥有协议步骤和消息幂等，向空间负责人
 ```text
 Component: SpaceAdmissionAggregate 与加密准入仓库
 Path: crates/uc-core/src/membership/space_admission/state/
-Path: crates/uc-infra/src/space/admission/repository/
+Path: crates/uc-infra-profile/src/space/admission/repository/
 Responsibility: 保存同一尝试编号、双方阶段、期限、消息证据和可重放回复。
 Relationship: 空间运行资格只能从这里推导，不能另存同义模式。
 ```

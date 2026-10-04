@@ -8,7 +8,7 @@
 //!
 //! Lives in `uc-core` because the contract speaks only in domain types
 //! (`ContentHash` in, `BlobId` out; or `Path` in, `BlobId` out). Concrete
-//! implementations live in `uc-infra`.
+//! implementations live in `uc-infra-local`.
 
 use std::path::Path;
 

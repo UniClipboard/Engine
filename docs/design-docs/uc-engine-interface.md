@@ -16,7 +16,7 @@ crate 根只保留稳定名称的统一导出，内部按职责分为七层：
 | `assembly/` | 宿主适配、数据库、网络、加密、搜索、剪贴板和传输组装 |
 | `compatibility/mobile_lan/` | 与完整 P2P 主路径隔离的 LAN 兼容能力 |
 
-开发与验收操作单独位于 `dev/`，且只在显式启用 `dev-tools` feature 时编译；正式宿主和发布产物不得启用它。内部宿主契约检查位于 `testing/`。`runtime/mod.rs` 只拥有生产会话的建立、后台任务挂接和生命周期资源，具体路由、宿主剪贴板、文件操作与移动上传各自由独立内部模块拥有。`uc-infra` 具体类型只允许出现在 `assembly/`；业务操作和生产路由只能接收已经组装好的能力。完整导航见 `crates/uc-engine/README.md`。
+开发与验收操作单独位于 `dev/`，且只在显式启用 `dev-tools` feature 时编译；正式宿主和发布产物不得启用它。内部宿主契约检查位于 `testing/`。`runtime/mod.rs` 只拥有生产会话的建立、后台任务挂接和生命周期资源，具体路由、宿主剪贴板、文件操作与移动上传各自由独立内部模块拥有。`uc-infra-*` 具体类型只允许出现在 `assembly/`；业务操作和生产路由只能接收已经组装好的能力。完整导航见 `crates/uc-engine/README.md`。
 
 外部 crate 只能使用 crate 根导出的稳定名称和 `error_codes`，不得依赖内部模块路径或源码文件位置。
 

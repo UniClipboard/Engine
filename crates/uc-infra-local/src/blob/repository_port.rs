@@ -4,7 +4,7 @@
 //! the `BlobWriter` adapter can depend on the SQLite-backed blob row store via
 //! an abstraction, keeping the two infra components swappable and testable.
 //!
-//! Consumers outside `uc-infra` should depend on `BlobWriterPort` instead.
+//! Consumers outside the `uc-infra-*` crates should depend on `BlobWriterPort` instead.
 
 use anyhow::Result;
 use async_trait::async_trait;

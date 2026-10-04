@@ -584,7 +584,7 @@ mod tests {
 
     // ─── Index-size benchmark: v2 (per-field rule) vs v3 (per-token rule) ───
     //
-    // Run with: `cargo test -p uc-infra search::tokenizer::tests::bench -- --ignored --nocapture`
+    // Run with: `cargo test -p uc-infra-storage search::tokenizer::tests::bench -- --ignored --nocapture`
     //
     // Acceptance from #580: index growth budget < 30%. The corpus below is a
     // hand-mixed approximation of typical clipboard traffic (plain prose, host

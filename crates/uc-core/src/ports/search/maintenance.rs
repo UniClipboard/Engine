@@ -1,6 +1,6 @@
 //! SearchIndexMaintenancePort — one-shot storage maintenance for the search index.
 //!
-//! Implemented by uc-infra. Kept separate from `SearchIndexPort` (query/index
+//! Implemented by uc-infra-storage. Kept separate from `SearchIndexPort` (query/index
 //! surface) because it is a background-only, storage-level concern with a
 //! different lifecycle: it runs once after a schema-changing rebuild.
 

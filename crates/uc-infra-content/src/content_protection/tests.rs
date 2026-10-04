@@ -1,10 +1,10 @@
 //! `ContentProtection`（`uc-infra-security`）与本 crate 的
 //! `ProfilePayloadAdapters`/`V3EncryptedBlobStore` 的跨 crate 集成验证。
 //!
-//! 这两条场景原本和 `ContentProtection` 的纯内部测试同在一个模块；security
-//! 拆成独立 crate 后先迁到 `uc-infra`（S2），content 拆出来后（S3）
-//! `ProfilePayloadAdapters`/`V3EncryptedBlobStore` 也到了这个 crate，
-//! 随它们一起迁过来。
+//! 这两条场景原本和 `ContentProtection` 的纯内部测试同在一个模块；它们要用
+//! 本 crate 的 `ProfilePayloadAdapters`/`V3EncryptedBlobStore`，而
+//! `uc-infra-security` 不能反向依赖 `uc-infra-content`，因此放在这里：
+//! 本 crate 依赖 `uc-infra-security`，这个方向不产生循环依赖。
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 

@@ -7,8 +7,8 @@
 //! - 后端 = `network.allow_relay_fallback = false`
 //! - infra (iroh) = `IrohNodeConfig.disable_relays = true`
 //!
-//! 三层语义两次反转。**全工程除本模块 + `uc-infra/src/network/iroh/node.rs:153-162`
-//! 字段定义 + 测试文件外，严禁在其他位置出现 `disable_relays = !allow_relay_fallback`
+//! 三层语义两次反转。**全工程除本模块 + `uc-infra-p2p/src/network/iroh/node.rs`
+//! `IrohNodeConfig.disable_relays` 字段定义 + 测试文件外，严禁在其他位置出现 `disable_relays = !allow_relay_fallback`
 //! 类的取反**。DTO ↔ View ↔ core 三层只搬运 `allow_relay_fallback` 业务正向语义。
 //!
 //! ## OTLP 不联动（Pitfall 6 防御）

@@ -7,7 +7,7 @@
 //! Distinct from [`super::writer::BlobWriterPort`], whose `write_path_if_absent`
 //! returns only a storage handle: a caller that must derive a snapshot's
 //! cross-device identity from file content needs the `ContentHash` itself, not
-//! just the opaque `BlobId`. Concrete implementations live in `uc-infra`.
+//! just the opaque `BlobId`. Concrete implementations live in `uc-infra-local`.
 
 use std::path::Path;
 

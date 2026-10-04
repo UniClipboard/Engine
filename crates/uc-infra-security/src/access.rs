@@ -2,7 +2,7 @@
 //!
 //! Slice 3 - C8 起完全独立运行: 不再依赖任何已删除的 port trait
 //! (EncryptionPort / EncryptionSessionPort / KeyMaterialPort),
-//! 改用 uc-infra 内部具体类型 `KeyMaterialStore` + `InMemorySession`,
+//! 改用本 crate 内部具体类型 `KeyMaterialStore` + `InMemorySession`,
 //! AEAD 算法走 `uc_infra_crypto::v1_aead` helper。
 //!
 //! 该 adapter 实现内层聚合 trait `SpaceAccessStore`,并把每个窄意图 port
@@ -408,8 +408,9 @@ fn map_recovery_security_session_error(
 
 /// Helper: 把端口返回的 `ProfileId` 包装成 key_material 使用的 `KeyScope`。
 ///
-/// Slice 7 (U7) 过渡期间 `KeyScope` 仍是 uc-core 类型(磁盘 `KeySlotFile.scope`
-/// 字段依赖);Slice 7 Commit 2 搬到 uc-infra 后这个 helper 可简化或消失。
+/// `CurrentProfilePort` 只返回 `ProfileId` 值对象;`KeyScope`
+/// (`uc-infra-crypto` 的 `crypto_model`)仅作为 adapter 层 wrapper 服务于磁盘
+/// `KeySlotFile.scope` 字段兼容,因此由这个 helper 在边界处转换。
 fn key_scope_from_profile(profile: &ProfileId) -> KeyScope {
     KeyScope {
         profile_id: profile.as_ref().to_string(),
@@ -4996,10 +4997,10 @@ mod admission_tests {
         ));
     }
 
-    // `current_revocation_snapshot_survives_repository_restart` 迁到
-    // `uc-infra` 的 `tests/space_access_adapter_restart.rs`：它要跑真实
-    // SQLite 仓储（`DieselSpaceSecurityStore`），而仓储仍留在 `uc-infra`，
-    // 不能再和这个 crate 内的其余纯内存测试共享模块。
+    // `current_revocation_snapshot_survives_repository_restart` 位于
+    // `uc-infra-profile` 的 `tests/space_access_adapter_restart.rs`：它要跑真实
+    // SQLite 仓储（`uc-infra-storage` 的 `DieselSpaceSecurityStore`），本 crate
+    // 不能反向依赖 storage，因此不和这里的其余纯内存测试共享模块。
 
     #[tokio::test]
     async fn current_member_signature_port_uses_persisted_current_group() {
@@ -6128,8 +6129,8 @@ mod admission_tests {
     async fn retained_device_applies_admission_then_revocation_epoch_updates() {
         // 这条场景只验证 admission/revocation 后内容密钥代次正确轮转——用本
         // crate 内同样"绑定当前 session 代次"的 `BlobCipherAdapter` 代替
-        // `crate::clipboard::chunked_transfer::TransferCipherAdapter`
-        // （content，未拆分前仍留在 uc-infra，不能反向依赖）；两者对代次
+        // `uc_infra_content::clipboard::TransferCipherAdapter`
+        // （位于 `uc-infra-content`，本 crate 不能反向依赖）；两者对代次
         // 轮转的响应方式一致，换用不影响这条测试要证明的东西。
         use crate::BlobCipherAdapter;
         use uc_core::crypto::domain::{Aad, Ciphertext, Plaintext};

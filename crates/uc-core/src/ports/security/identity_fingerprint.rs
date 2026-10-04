@@ -2,7 +2,7 @@
 //!
 //! Derives a stable `IdentityFingerprint` from a raw identity public key.
 //! Used during pairing for out-of-band verification. The concrete derivation
-//! (SHA-256 + Base32 grouping) lives in `uc-infra`.
+//! (SHA-256 + Base32 grouping) lives in `uc-infra-crypto`.
 
 use anyhow::Result;
 

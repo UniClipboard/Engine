@@ -48,7 +48,7 @@
 - `tests/uc-testkit/src/process.rs`：只负责测试子进程 spawn、预算等待、超时终止、回收和资源状态；不解释业务退出码。
 - `tests/uc-testkit/src/scenario.rs`：组合预算、进程资源和最终报告，继续作为单场景唯一负责人。
 - `tests/uc-testkit/tests/`：先覆盖并行冲突、异常退出、超时回收和失败分类，再修改实现。
-- `crates/uc-infra/tests/profile_storage_upgrade_crash.rs`：代表性真实进程采用，保留原业务断言并使用 kit 回收能力。
+- `crates/uc-infra-profile/tests/profile_storage_upgrade_crash.rs`：代表性真实进程采用，保留原业务断言并使用 kit 回收能力。
 - `docs/design-docs/testing-guide.md`：首次使用者指南和可运行最小示例。
 - `docs/references/test-adoption-inventory.md`：现有测试采用清单、保留/优先/真实网络设备边界。
 - `scripts/testing/run-test-group.sh`：保持唯一分组入口，补充只由真实使用需要证明的参数或输出。

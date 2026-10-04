@@ -15,7 +15,7 @@ use uc_infra_storage::db::pool::{init_db_pool, DbPool};
 use uc_testkit::{Scenario, ScenarioBudget, ScenarioConfig};
 
 const REPRODUCE: &str =
-    "cargo test -p uc-infra --test profile_storage_upgrade_crash --locked unfinished_separation_recovers_after_process_exit";
+    "cargo test -p uc-infra-profile --test profile_storage_upgrade_crash --locked unfinished_separation_recovers_after_process_exit";
 
 fn process_scenario() -> Scenario {
     let artifact_root = PathBuf::from("../../target/test-artifacts/real-dependencies");

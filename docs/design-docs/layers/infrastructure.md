@@ -1,10 +1,10 @@
-# `uc-infra` 设计规范
+# Infra 层设计规范
 
 ## 1. 文档目的
 
-`uc-infra` 是 UniClipboard 的基础设施实现层，负责将 `uc-core` 与 `uc-application` 中定义的端口抽象落地为具体实现。
+Infra 层（`uc-infra-*` 系列 crate）是 UniClipboard 的基础设施实现层，负责将 `uc-core` 与 `uc-application` 中定义的端口抽象落地为具体实现。
 
-本规范用于约束所有开发者和 AI Agent 在修改 `uc-infra` 时的设计与编码行为，确保：
+本规范用于约束所有开发者和 AI Agent 在修改 `uc-infra-*` 时的设计与编码行为，确保：
 
 * 不破坏 `uc-core` 的边界
 * 不侵入 `uc-application` 的流程职责
@@ -12,15 +12,15 @@
 * 各种外部依赖被隔离在明确边界内
 * 实现细节不会向上泄漏
 
-**任何修改 `uc-infra` 的提交，都必须遵循本规范并完成自我审查。**
+**任何修改 `uc-infra-*` 的提交，都必须遵循本规范并完成自我审查。**
 
 ---
 
-## 2. `uc-infra` 的定位
+## 2. Infra 层的定位
 
 ### 2.1 核心职责
 
-`uc-infra` 只负责以下事情：
+Infra 层只负责以下事情：
 
 1. **实现 `uc-core` 或 `uc-application` 定义的 ports**
 2. **对接外部系统与第三方库**
@@ -33,7 +33,7 @@
 
 ### 2.2 非职责
 
-以下内容 **不属于** `uc-infra`：
+以下内容 **不属于** Infra 层：
 
 | 类别        | 示例                               |
 | --------- | -------------------------------- |
@@ -46,24 +46,67 @@
 
 ---
 
+### 2.3 能力 crate 划分
+
+Infra 层按能力拆为 7 个 crate，与 [`ARCHITECTURE.md`](../../../ARCHITECTURE.md) 的模块表一致：
+
+| Crate | 责任 |
+| --- | --- |
+| `crates/uc-infra-local/` | 本机文件原语、文件布局、时钟与本机标识，以及本地 blob 存储 |
+| `crates/uc-infra-crypto/` | 无数据库/网络/会话生命周期的密码算法与算法格式（AEAD、OPAQUE `space_admission_auth`、secrets 等） |
+| `crates/uc-infra-security/` | 唯一进程安全会话、密钥材料、Profile 密钥目录与内容保护上下文 |
+| `crates/uc-infra-storage/` | SQLite/Diesel 密文仓储（`src/db/`）、`migrations/`、搜索索引与原子提交 |
+| `crates/uc-infra-content/` | 剪贴板表示、缩略图、spool 与 blob 负载保护 |
+| `crates/uc-infra-p2p/` | Iroh 节点、连接、发现（`src/network/iroh/`）、配对（`src/pairing/`）与 rendezvous（`src/rendezvous/`） |
+| `crates/uc-infra-profile/` | Profile 升级/备份/恢复（`src/security/profile_storage_upgrade`）、配置迁移（`src/config_migration`）与跨存储的 Space 准入激活（`src/space/`） |
+
+LAN 兼容线的 `mobile_sync` 适配不属于上述任何 crate，位于 `compatibility/uc-mobile-lan/src/mobile_sync/`，随兼容线独立版本与发布。
+
+---
+
 ## 3. 分层关系
 
 ```text
      uc-engine   ← composition root
          ↓
-      uc-infra   ← 实现外部能力
+    uc-infra-*   ← 实现外部能力（7 个能力 crate）
          ↓
   uc-application ← 流程及其 ports
          ↓
       uc-core    ← 领域规则及其 ports
 ```
 
+Infra 内部的 crate 依赖方向：
+
+```text
+uc-infra-local   uc-infra-crypto          （只依赖 uc-core）
+        ↘          ↙
+     uc-infra-security
+      ↙        ↓        ↘
+storage     content      p2p              （p2p 只依赖 security/crypto，不依赖 local/storage/content/profile）
+      ↘        ↓        ↙
+      uc-infra-profile                    （依赖 storage/security/content/p2p）
+```
+
+* `uc-infra-p2p` 依赖 `uc-infra-security`、`uc-infra-crypto`（及 `uc-sync-protocol`），**不依赖** `uc-infra-local`、`uc-infra-storage`、`uc-infra-content` 或 `uc-infra-profile`。
+* 需要跨存储、内容与网络协调的能力（Profile 升级、配置迁移、Space 准入激活）放在 `uc-infra-profile`，它依赖 `uc-infra-storage`、`uc-infra-security`、`uc-infra-content`、`uc-infra-p2p`。
+* 下层 crate 不得反向依赖上层 crate；需要跨 crate 共享时调整归属，而不是引入环。
+* `compatibility/uc-mobile-lan` 的生产依赖不含任何 `uc-infra-*` crate（只在测试中依赖 `uc-infra-storage`）；主线 Infra crate 不依赖兼容线。
+
+### 跨 crate 测试辅助
+
+供其他 crate 测试复用的 fake、fixture 与测试构造器放在提供方 crate 的 `test-util` feature 后，
+以 `#[cfg(any(test, feature = "test-util"))]` 门控；使用方只在 `[dev-dependencies]` 中以
+`features = ["test-util"]` 引入，上层 crate 的 `test-util` 转发其依赖的 `test-util`
+（如 `uc-infra-profile/test-util` 转发 `uc-infra-security`、`uc-infra-content`、`uc-infra-p2p`）。
+生产构建不得启用 `test-util`；仅为测试而放宽的可见性不得变成生产 API。
+
 ### 强制规则
 
-* `uc-infra` **可以依赖** `uc-core` 与 `uc-application`
-* `uc-infra` **不可以定义业务真相**
-* `uc-infra` **不可以绕过 port 直接主导应用行为**
-* `uc-infra` **不可以成为“半个 app 层”**
+* `uc-infra-*` **可以依赖** `uc-core` 与 `uc-application`
+* `uc-infra-*` **不可以定义业务真相**
+* `uc-infra-*` **不可以绕过 port 直接主导应用行为**
+* `uc-infra-*` **不可以成为“半个 app 层”**
 
 ---
 
@@ -71,7 +114,7 @@
 
 ## 4.1 实现层，不是决策层
 
-`uc-infra` 的任务是实现，不是决定业务。
+Infra 层的任务是实现，不是决定业务。
 
 错误示例：
 
@@ -156,7 +199,7 @@
 
 ---
 
-## 5. `uc-infra` 允许包含的内容
+## 5. Infra 层允许包含的内容
 
 ### 5.1 Repository 实现
 
@@ -202,7 +245,7 @@
 
 ---
 
-## 6. `uc-infra` 禁止包含的内容
+## 6. Infra 层禁止包含的内容
 
 ### 6.1 禁止流程编排
 
@@ -247,7 +290,7 @@ Infra 仓储只负责在同一事务中读取相关记录、调用该判定并�
 
 ### 6.4 禁止“工具箱式公共层”
 
-不要把 `uc-infra` 做成一个什么都能放的技术垃圾场。
+不要把任何 `uc-infra-*` crate 做成一个什么都能放的技术垃圾场。
 
 例如以下命名要高度警惕：
 
@@ -263,70 +306,34 @@ Infra 仓储只负责在同一事务中读取相关记录、调用该判定并�
 
 ## 7. 目录组织规范
 
-推荐优先按能力边界组织，而不是按“库类型”组织。
+先按 §2.3 的能力边界选择 crate，crate 内部再按能力边界组织，而不是按“库类型”组织。
 
-推荐结构：
+当前各 crate 的顶层结构（节选）：
 
 ```text
-uc-infra/
-  src/
-    storage/
-      sqlite/
-        mod.rs
-        clipboard_repository.rs
-        device_repository.rs
-        settings_repository.rs
-        models.rs
-        mappers.rs
-        schema.rs
-        migrations.rs
-
-      file_blob/
-        mod.rs
-        blob_store.rs
-        blob_codec.rs
-        path_layout.rs
-
-    network/
-      libp2p/
-        mod.rs
-        adapter.rs
-        event_mapper.rs
-        protocol/
-        peer_codec.rs
-
-      discovery/
-        mod.rs
-        mdns_adapter.rs
-
-    crypto/
-      mod.rs
-      aead_encryptor.rs
-      argon2_kdf.rs
-      random_bytes.rs
-      keyslot_codec.rs
-
-    clipboard/
-      mod.rs
-      windows.rs
-      macos.rs
-      linux.rs
-      normalizer.rs
-
-    secrets/
-      mod.rs
-      keychain.rs
-      windows_credential_manager.rs
-
-    search/
-      mod.rs
-      index_adapter.rs
-      tokenizer.rs
-
-    time/
-      mod.rs
-      system_clock.rs
+crates/
+  uc-infra-local/src/
+    fs/  blob/  device/  settings/  time/
+  uc-infra-crypto/src/
+    v1_aead.rs  space_admission_auth.rs  secrets.rs  hashing/  ...
+  uc-infra-security/src/
+    session.rs  key_material/  content_protection/  active_space_security_session/  ...
+  uc-infra-storage/
+    migrations/
+    src/
+      db/        models/  mappers/  repositories/  schema.rs  ...
+      search/
+      file_transfer/
+  uc-infra-content/src/
+    clipboard/  content_protection/  encrypted_blob_store.rs  ...
+  uc-infra-p2p/src/
+    network/iroh/  pairing/  rendezvous/
+  uc-infra-profile/src/
+    security/  config_migration/  space/
 ```
+
+新增能力时先判断它属于哪个 crate；若同时需要多个下层 crate 的能力，应放到依赖方向允许的最低一层，
+不得为方便调用而让下层 crate 反向依赖上层。
 
 ---
 
@@ -448,7 +455,7 @@ pub enum BlobStoreError {
 
 ## 10. 日志与 tracing 规范
 
-## 10.1 `uc-infra` 必须可观测
+## 10.1 Infra 层必须可观测
 
 所有关键适配器必须有 tracing。
 
@@ -553,7 +560,7 @@ infra 内部格式不是产品公共语义。
 
 ## 12. 测试规范
 
-## 12.1 `uc-infra` 必须重视集成测试
+## 12.1 Infra 层必须重视集成测试
 
 这里只做单元测试是不够的。
 
@@ -591,7 +598,7 @@ infra 内部格式不是产品公共语义。
 
 ## 13. 性能与资源规范
 
-## 13.1 `uc-infra` 必须显式关注资源占用
+## 13.1 Infra 层必须显式关注资源占用
 
 尤其你这个项目是剪切板工具，后台常驻。
 
@@ -636,7 +643,7 @@ panic 就随任务一起消失（runtime 把 panic 转成 `JoinError` 挂在句�
 1. **保留句柄 + abort/join（需要确定性关闭的长生命周期循环首选）**：由该任务的自然
    生命周期持有者（facade / adapter / bridge）持有 `JoinHandle`，在关闭路径
    `abort()` 后 `await`，把非取消的 `JoinError` 记成 `WARN`。参照
-   `network/iroh/net_recovery.rs` + `network/iroh/node.rs::shutdown` 的既有实现。
+   `crates/uc-infra-p2p/src/network/iroh/net_recovery.rs` + `crates/uc-infra-p2p/src/network/iroh/node.rs::shutdown` 的既有实现。
    **前提是 abort 掉这个任务是安全的**——若任务持有必须存活到对端 FIN 的资源
    （如 `pairing/session.rs` recv-pump 持有 `Connection`，提前 abort 会撕断握手），
    就不能用这种写法，改走第 2 种。
@@ -655,7 +662,7 @@ panic 就随任务一起消失（runtime 把 panic 转成 `JoinError` 挂在句�
 
 ## 14.1 平台差异留在 infra 内部
 
-Windows / macOS / Linux 的差异必须留在 `uc-infra` 或 `uc-platform`，不能上浮到 core。
+Windows / macOS / Linux 的差异必须留在 `uc-infra-*` 或 `uc-platform`，不能上浮到 core。
 
 例如：
 
@@ -728,7 +735,7 @@ Windows / macOS / Linux 的差异必须留在 `uc-infra` 或 `uc-platform`，不
 
 ## 17. 提交前自我审查清单
 
-每次修改 `uc-infra`，必须逐项自查：
+每次修改 `uc-infra-*`，必须逐项自查：
 
 ### 17.1 边界检查
 
@@ -770,7 +777,7 @@ Windows / macOS / Linux 的差异必须留在 `uc-infra` 或 `uc-platform`，不
 
 ## 18. Code Review 重点
 
-评审 `uc-infra` 时，优先检查：
+评审 `uc-infra-*` 时，优先检查：
 
 1. 是否越权承担了 app/core 的职责
 2. 是否有第三方类型泄漏
@@ -784,7 +791,7 @@ Windows / macOS / Linux 的差异必须留在 `uc-infra` 或 `uc-platform`，不
 
 ## 19. 反模式清单
 
-以下是 `uc-infra` 中必须警惕的典型反模式：
+以下是 Infra 层中必须警惕的典型反模式：
 
 ### 19.1 以实现反推领域
 
@@ -827,7 +834,7 @@ infra 是最接近失败源头的一层，这里如果吞错，上层就会完�
 
 ## 20. 总原则
 
-`uc-infra` 必须遵守这四条：
+Infra 层必须遵守这四条：
 
 ### 20.1 对上层隐藏实现细节
 
@@ -841,4 +848,4 @@ infra 是最接近失败源头的一层，这里如果吞错，上层就会完�
 
 ## 21. 一句话原则
 
-> `uc-infra` 的职责不是“让系统先跑起来”，而是“用清晰、可替换、可观测的方式，把 `uc-core` 的抽象稳定落地”。
+> Infra 层的职责不是“让系统先跑起来”，而是“用清晰、可替换、可观测的方式，把 `uc-core` 的抽象稳定落地”。

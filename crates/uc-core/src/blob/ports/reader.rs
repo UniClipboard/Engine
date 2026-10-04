@@ -6,7 +6,7 @@
 //! (`BlobId` in, `Vec<u8>` out) — no storage paths, sizes, or implementation
 //! details leak across the boundary. Use cases in `uc-app` depend on this
 //! trait; concrete implementations (filesystem, encrypted-decorator) live
-//! in `uc-infra`.
+//! in `uc-infra-local` (filesystem) and `uc-infra-content` (encrypted).
 
 use anyhow::Result;
 use async_trait::async_trait;

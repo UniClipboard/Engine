@@ -5,7 +5,7 @@
 //! the same `IdentityFingerprint` the pairing flow stored against the
 //! remote's `SpaceMember`.
 //!
-//! The factory at `uc-infra/security::Sha256IdentityFingerprintFactory`
+//! The factory at `uc-infra-crypto::identity_fingerprint::Sha256IdentityFingerprintFactory`
 //! accepts an arbitrary `&[u8]` of length 32. Both
 //!
 //! * `SecretKey::public().as_bytes()` — used by `IrohIdentityStore` when

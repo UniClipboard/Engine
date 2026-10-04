@@ -3,7 +3,8 @@
 ## 状态与完整责任
 
 - **状态**：实施中。S0（完整基线实验）按用户指示跳过；S1、S2、S3、S4 已完成并合并；S5（`uc-infra-profile`，
-  删除 `uc-infra`）已完成。S6 未开始。
+  删除 `uc-infra`）已完成。S6 第一部分（门禁/CI/文档核对与 S2–S5 回归修复）已完成；S6 第二部分
+  （构建性能 A/B 实验）未开始。
 - **日期**：2026-10-04。
 - **跟踪**：[Issue #144](https://github.com/UniClipboard/Engine/issues/144)（设计全文、七个 crate 的职责/允许依赖表、
   六类依赖切断方案、Edge Cases、测试策略、构建性能实验方法、验收标准均在 issue 正文，本文件不复制，只跟踪切片状态）。
@@ -27,10 +28,10 @@
 | S0 | 精确逐文件迁移清单 + 真实 timings/RSS 基线 | **跳过**（用户 2026-10-03 明确指示直接动代码） | 无基线数据；后续构建性能验收缺这一环 |
 | S1 | 提取 `uc-infra-local`、`uc-infra-crypto` | **完成** | [PR #145](https://github.com/UniClipboard/Engine/pull/145)，已 squash merge 到 `main`（`f0f0b5fb`，2026-10-04） |
 | S2 | 原子提取 `uc-infra-security`（session/vault/事务代次一起搬，DB 耦合的生命周期部分留给 profile） | **完成** | [PR #147](https://github.com/UniClipboard/Engine/pull/147)，已 squash merge 到 `main`（`ec3301a3`） |
-| S3 | 提取 `uc-infra-storage`、`uc-infra-content` | **完成** | 本次提交；见下方"S3 范围" |
-| S4 | 完成邀请 codec、错误分类、身份槽位切断，再提取整个 `uc-infra-p2p` | **完成** | 本次提交；见下方"S4 范围" |
-| S5 | 剩余升级/激活能力迁 `uc-infra-profile`，LAN 移 `uc-mobile-lan`，删除 `uc-infra` | **完成** | 本次提交；见下方"S5 范围" |
-| S6 | 更新架构门禁、CI、构建缓存、发布脚本、文档；完成公平性能对照 | 未开始（S1/S2 已顺带同步 `check-engine-repository.mjs`、`check-observability-privacy.mjs` 的扫描范围，但完整 S6 清单未逐项核对） | — |
+| S3 | 提取 `uc-infra-storage`、`uc-infra-content` | **完成** | [PR #148](https://github.com/UniClipboard/Engine/pull/148)（`bce30ec9`）；见下方"S3 范围" |
+| S4 | 完成邀请 codec、错误分类、身份槽位切断，再提取整个 `uc-infra-p2p` | **完成** | [PR #150](https://github.com/UniClipboard/Engine/pull/150)（`d3af2e55`）；见下方"S4 范围" |
+| S5 | 剩余升级/激活能力迁 `uc-infra-profile`，LAN 移 `uc-mobile-lan`，删除 `uc-infra` | **完成** | [PR #151](https://github.com/UniClipboard/Engine/pull/151)（`f8add578`）；见下方"S5 范围" |
+| S6 | 更新架构门禁、CI、构建缓存、发布脚本、文档；完成公平性能对照 | 第一部分**完成**；性能对照未开始 | 见下方"S6 第一部分范围" |
 
 ## S1 范围（2026-10-03，PR #145）
 
@@ -261,7 +262,8 @@ crate 从未被该检查脚本扫描过）；`crates/uc-engine/tests/dependency_
 `uc-infra` 的 `network-interface` optional + `uc-infra/lan-compat` 转发，现在断言
 `uc-mobile-lan` 的 `network-interface` 是普通依赖 + `uc-infra-storage/lan-compat` 转发）。
 
-**验证**：`cargo check --workspace --all-targets --locked` 全绿（零错误，一次性通过，没有像 S1-S4
+**验证**（更正：下列只覆盖 `--lib` 与少数集成测试，没有跑 `uc-infra-profile`、`uc-observability-runtime`
+的全部集成测试，PR #151 合入时 CI 的 Engine tests 实际失败，见"S6 第一部分范围"）：`cargo check --workspace --all-targets --locked` 全绿（零错误，一次性通过，没有像 S1-S4
 那样需要反复用编译错误驱动修可见性——因为这次是整 crate 改名，内部可见性关系不变）；
 `check-engine-repository.mjs` 全绿（含全部负向夹具）；`check-observability-privacy.mjs`
 1324 个记录点（较 S4 后的 1261 新增 63，对应 `uc-mobile-lan` 首次被纳入扫描）；`uc-infra-profile --lib
@@ -286,20 +288,52 @@ zstd/tantivy/rusqlite 零命中——确认整 crate 改名不影响 S4 已验�
   `package(...)` 过滤的配置也需要在每次切片收尾时全仓搜索包名字符串，不能只检查
   `check-engine-repository.mjs` 一个脚本。
 
+## S6 第一部分范围（2026-10-04，门禁/CI/文档核对与回归修复）
+
+**S2–S5 合入时 CI 的 Engine tests 都是失败的**，各切片只在本地跑了 `--lib` 与少数集成测试，失败被当作
+既有偶发失败一并忽略。逐次对比 `main` 上 pr-check 的失败清单后确认，下列失败由拆分引入（`uc-engine-uniffi`
+的 `lifecycle_targets`/`scheduled_flush` 等时序测试在拆分前的 `main` 上已偶发失败，不属于本列）：
+
+| 引入切片 | 失败 | 原因 | 修复 |
+| --- | --- | --- | --- |
+| S1 起 | `uc-observability-runtime` 的 `module_log_channel`、`host_composition`；S3 起 `peer_address_read_diagnostics`；S5 起 `space_admission_state::sponsor` | **生产回归**：`module_log::is_engine_source` 只认精确的 `uc_infra`/`uc_infra::` 前缀，所有 `uc_infra_*` crate 的记录被当作第三方来源，进不了模块日志通道与 Engine 运行期 | 前缀表改为七个能力 crate 的精确名称，不放宽匹配规则 |
+| S2/S4 | `uc-infra-profile::inbound_peer_single_owner` 五项 | 结构验收按 `crates/uc-infra/src/...` 读源码，文件不存在即 panic | 路径改到 `uc-infra-p2p`/`uc-infra-profile` 的实际位置 |
+| S4 | `admission_diagnostic_file`（`error.reason` 由 `record_missing` 退化为 `storage_recovery_required`） | **诊断回归**：S4 为避开孤儿规则把 `SpaceAdmissionChannelCredentialError::diagnostic_failure` 简化为按变体兜底，丢掉了按来源细分的凭据分类；当时判断"没有测试依赖"不成立 | 错误变体增加 `failure: CredentialFailure` 字段，由构造错误的凭据负责人（`uc-infra-profile`）按来源类型写入，网络侧只读取，不跨 crate 向下转型 |
+
+修复后 `uc-infra-profile` + `uc-infra-p2p` 全部测试 635 通过，`uc-observability-runtime` 75 通过；
+本机按 CI 口径复跑：`evidence` 18 项、`persistence-provider` 65 项全部通过；`workspace` 4087 项中
+4084 通过，失败/超时的 `offline_lifecycle::crash::interrupted_file_transfer_recovers_after_receiver_process_restart`、
+`host_contract space_leave::repeated_leaves_do_not_accumulate_tasks_or_descriptors` 与 uniffi
+`lifecycle_targets` 在拆分前的 `main`（`f8add578`）独立 worktree 上同样失败（前者 6 次中 3 次失败，
+后者稳定超时），不是本次引入；`process` 组 `key_loss` 的超时只在高并发下出现，单独运行全部通过。
+
+**issue 第 6 节"必须同步的已知入口"逐项核对**：
+
+- 根 `Cargo.toml`：**`uc-infra-p2p` 缺 dev `opt-level = 3`**（S4 漏加，七个 crate 里唯一一个），已补；
+  `check-engine-repository.mjs` 新增 `infra dev optimization` 检查（含两条负面用例），要求每个
+  `uc-infra-*` workspace 成员都保留该设置。
+- `.github/actions/rust-ci-setup/action.yml` 的 `fast-compile-infra`：S5 后只把 `uc-infra-profile`
+  降回 opt-level 0，原语义是整个 `uc-infra`，已扩展为七个 crate。
+- `scripts/testing/run-test-group.sh`（`evidence`/`persistence-provider`/`process`）与
+  `run-connection-recovery-e2e.sh` 仍用 `-p uc-infra`/`package(uc-infra)`，已按测试实际所在 crate 改写；
+  `check-engine-repository.mjs` 新增 `package selectors` 检查（含负面用例）：`.github/`、`scripts/`、
+  `.config/nextest.toml` 中的 `package(...)` 与 `-p/--package uc-*` 必须是 workspace 成员。
+- `check-observability-privacy.mjs` 已覆盖七个新根（S1–S5 随切片同步）；release 脚本只引用
+  `crates/uc-infra-storage/migrations`（S3 已改）；LAN 兼容线源码包是整个提交的 `git archive`，自然包含新闭包。
+- 文档：`docs/design-docs/layers/infrastructure.md` 按七个 crate 重写分层、依赖方向与 `test-util` 约定；
+  其余 active 计划、设计文档、ADR 中指向当前代码位置的路径与命令，`docs/generated/` 的来源指针，
+  以及代码注释/测试里的复跑命令全部改到实际 crate。completed 计划、`.planning/` 与 ADR 的历史叙述保持原样。
+  ADR-032 中"`uc-infra` 与 `network/iroh` 双向依赖"的未决事项已标为由 S4 解决。
+
 ## 遗留风险 / 下一步必须处理的事项
 
-1. **构建性能 A/B 实验（issue §8/§9）完全没有做**：`uc-infra` 已删除，七个目标 crate 全部落地，
-   已经到了可以公平测的时间点，但本次仍未执行真实 timings/RSS 对照实验；需要专门的 S6 任务做。
+1. **构建性能 A/B 实验（issue §8/§9）完全没有做**：S6 第二部分。基线只能取拆分前的 `54ffafb3`
+   （S0 跳过，没有预先登记的基线），按 issue §8 的成对样本方法在同机执行。
 2. **S2 没有产出 issue 字面要求的失败矩阵文档**，S3/S4/S5 同样没有补；只做了等价的"零覆盖流失"验证。
-3. **`.github/workflows/*.yml`、`check-engine-repository.mjs`、`check-observability-privacy.mjs` 等
-   架构门禁/CI 脚本的完整性尚未逐项核对 issue 第 6 节"必须同步的已知入口"清单**（release 来源脚本、
-   `scripts/testing/` 等）——S6 需要专门过一遍。
-4. **文档里的旧路径残留**：S5 只修了入口文档（`ARCHITECTURE.md`、`README.md`）与直接受影响的
-   crate 地图（`uc-sync-protocol/AGENTS.md`），并重新生成了 `docs/generated/observability-inventory.md`
-   （它自 S1 起就停在旧路径，不是本次引入）。其余约 25 份 active 计划/设计文档、
-   `docs/generated/db-schema.md`/`search-rebuild-5000-benchmark.md`（S3 起来源指针已失效）、
-   `docs/design-docs/layers/infrastructure.md`，以及 `uc-core` 里若干把 `uc-infra` 当成"Infra 层"
-   泛称的 doc comment，仍引用 `crates/uc-infra/...`——按 issue 第 6 节归 S6 统一处理。
+3. **切片收尾必须以 CI 的 Engine tests 为准**：本地只跑 `--lib` 会漏掉集成测试与跨 crate 观测测试；
+   S2–S5 的回归都是 CI 已报告但被当作偶发失败合入的。偶发失败要逐条与拆分前 `main` 的失败清单对比后才能忽略。
+4. **`infrastructure.md` 中与拆分无关的过时内容未处理**：§13.3.1 引用的 `pairing/session.rs` recv-pump
+   与 `spawn_supervised` 已不存在，§14.1 提到不存在的 `uc-platform`；拆分前就已过时，不在本计划范围。
 5. **`uc-infra-security`/`uc-infra-storage`/`uc-infra-content`/`uc-infra-p2p`/`uc-infra-profile` 的
    `test-util` feature** 各自放宽了若干 `#[cfg(test)]`/`#[cfg(any(test, feature = "test-util"))]`
    方法；继续拆分时如果还有类似的跨 crate 测试脚手架需求，复用同一个 feature 名字，不要新增第二个

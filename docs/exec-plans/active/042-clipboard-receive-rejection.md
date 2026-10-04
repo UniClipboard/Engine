@@ -33,9 +33,9 @@
 
 ```bash
 cargo test -p uc-application --locked clipboard:: --quiet
-cargo test -p uc-infra --locked --test clipboard_receive_diagnostic_file -- --nocapture
-cargo test -p uc-infra --locked --lib missing_key_and_epoch_mismatch_have_distinct -- --nocapture
-cargo test -p uc-infra --locked --lib retained_device_applies_admission_then_revocation_epoch_updates -- --nocapture
+cargo test -p uc-infra-p2p --locked --test clipboard_receive_diagnostic_file -- --nocapture
+cargo test -p uc-infra-content --locked --lib missing_key_and_epoch_mismatch_have_distinct -- --nocapture
+cargo test -p uc-infra-security --locked --lib retained_device_applies_admission_then_revocation_epoch_updates -- --nocapture
 ```
 
 失败证据：真实导出起初缺少 `error.phase`；队列解密失败起初只有 `application/rejected`；缺钥与代次不符起初同样只有笼统拒收；
