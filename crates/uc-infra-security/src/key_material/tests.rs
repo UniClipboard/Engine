@@ -6,7 +6,7 @@ use tokio::task::JoinError;
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
 use super::{EncryptionError, Kek, KeyMaterialStore, KeyScope};
-use crate::fs::key_slot_store::{JsonKeySlotStore, KeySlotStore};
+use crate::key_slot_store::{JsonKeySlotStore, KeySlotStore};
 use uc_infra_crypto::crypto_model::{
     EncryptedBlob, KeySlot, WrappedMasterKey, MAX_KDF_ITERS, MAX_KDF_MEM_KIB, MAX_KDF_PARALLELISM,
 };

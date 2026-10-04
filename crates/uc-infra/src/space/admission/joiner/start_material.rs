@@ -24,7 +24,7 @@ use x25519_dalek::{PublicKey as RecoveryPublicKey, StaticSecret as RecoverySecre
 use zeroize::Zeroizing;
 
 use crate::space::decode_invitation_entry;
-use crate::space::security::mls_group::MlsGroupEngine;
+use uc_infra_crypto::mls_group::MlsGroupEngine;
 
 const JOINER_PRIVATE_STATE_FORMAT_V2: u16 = 2;
 

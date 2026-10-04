@@ -54,9 +54,9 @@ mod tests {
     };
     use super::{ConfigMigrationAdapter, ConfigMigrationPaths};
     use crate::db::pool::init_db_pool;
-    use crate::fs::key_slot_store::JsonKeySlotStore;
     use crate::security::DefaultCurrentProfile;
     use crate::space::{InMemorySession, KeyMaterialStore, MigrationSpaceAccessAdapter};
+    use uc_infra_security::key_slot_store::JsonKeySlotStore;
 
     use std::collections::HashMap;
     use std::sync::Mutex;

@@ -23,7 +23,7 @@ use uc_infra_crypto::crypto_model::EncryptedBlob;
 use uc_infra_crypto::secrets::MasterKey;
 use uc_infra_crypto::v1_aead;
 
-pub(super) const KEYRING_PREFIX: &str = "migration_key:v1:";
+pub const KEYRING_PREFIX: &str = "migration_key:v1:";
 
 pub struct DefaultKeyMigrationAdapter {
     secure_storage: Arc<dyn SecureStoragePort>,
@@ -44,7 +44,7 @@ impl DefaultKeyMigrationAdapter {
         }
     }
 
-    pub(super) fn keyring_name(run_id: &MigrationRunId) -> String {
+    pub fn keyring_name(run_id: &MigrationRunId) -> String {
         format!("{KEYRING_PREFIX}{}", run_id.as_str())
     }
 

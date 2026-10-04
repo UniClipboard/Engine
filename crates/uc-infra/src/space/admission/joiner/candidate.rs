@@ -23,7 +23,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::space::admission::credentials::prepare_registration;
 use crate::space::admission::security::AdmissionSecurityTransitionAdapter;
-use crate::space::security::mls_group::{MlsClientState, MlsGroupEngine};
+use uc_infra_crypto::mls_group::{MlsClientState, MlsGroupEngine};
 
 const JOINER_STAGED_INPUT_FORMAT_V1: u16 = 1;
 const JOINER_STAGED_TARGET_FORMAT_V2: u16 = 2;
@@ -292,8 +292,8 @@ mod tests {
 
     use super::*;
     use crate::space::admission::joiner::DefaultJoinerAppliedPreparation;
-    use crate::space::security::mls_group::MlsGroupEngine;
     use crate::space::OpenMlsHistoricalSignatureVerifier;
+    use uc_infra_crypto::mls_group::MlsGroupEngine;
 
     struct FixedTargetAccess;
 

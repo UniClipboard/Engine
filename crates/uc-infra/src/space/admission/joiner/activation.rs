@@ -26,7 +26,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use crate::security::{AdmissionInputInconsistency, AdmissionInputIssue};
 use crate::space::admission::digest::completion_digest;
 use crate::space::admission::recovery_material::open_recovery_material;
-use crate::space::security::mls_group::{MlsClientState, MlsGroupEngine};
+use uc_infra_crypto::mls_group::{MlsClientState, MlsGroupEngine};
 
 use super::super::sponsor::{activation_receipt_digest, SponsorCandidateStagedV1};
 use super::sponsor_identity::{sponsor_identity_rejection, verify_sponsor_route_identity};

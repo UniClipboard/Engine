@@ -4,13 +4,11 @@ use std::sync::Arc;
 use super::{lock, ProfileContentKeyVault, ProfileContentKeyVaultError, ProfileKeyReadLease};
 
 impl ProfileContentKeyVault {
-    pub(crate) fn begin_read_reuse(
-        &self,
-    ) -> Result<ProfileKeyReadLease, ProfileContentKeyVaultError> {
+    pub fn begin_read_reuse(&self) -> Result<ProfileKeyReadLease, ProfileContentKeyVaultError> {
         ProfileKeyReadLease::begin(&self.reads)
     }
 
-    pub(crate) fn close(&self) {
+    pub fn close(&self) {
         lock(&self.reads).close();
     }
 

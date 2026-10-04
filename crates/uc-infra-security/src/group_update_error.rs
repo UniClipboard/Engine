@@ -62,7 +62,7 @@ pub(super) fn tag_action(action: GroupUpdateAction, error: KeyEpochError) -> Key
     }
 }
 
-pub(crate) fn group_update_failure_detail(
+pub fn group_update_failure_detail(
     error: &KeyEpochError,
 ) -> uc_observability_contract::diagnostics::connectivity::GroupUpdateFailureDetail {
     use uc_core::membership::KeyEpochStateIssue as State;
@@ -132,25 +132,11 @@ pub(crate) fn group_update_failure_detail(
                 | uc_core::crypto::EncryptionError::CorruptedKeySlot => Reason::Corrupt,
                 _ => Reason::Unknown,
             };
-        } else if let Some(error) = error.downcast_ref::<diesel::result::Error>() {
-            use diesel::result::{DatabaseErrorKind as Kind, Error};
+        } else if let Some(classified) = error.downcast_ref::<uc_observability_contract::diagnostics::connectivity::ClassifiedGroupUpdateStorageFailure>() {
+            // 存储层（Diesel/SQLite）已经在真实错误转换处把分类算好；这里只读
+            // 结果，不认识任何存储库的具体错误类型，保持本 crate 无数据库依赖。
             detail.source = Source::Storage;
-            detail.reason = match error {
-                Error::NotFound => Reason::NotFound,
-                Error::DatabaseError(
-                    Kind::UniqueViolation
-                    | Kind::ForeignKeyViolation
-                    | Kind::NotNullViolation
-                    | Kind::CheckViolation,
-                    _,
-                ) => Reason::Constraint,
-                Error::DatabaseError(Kind::SerializationFailure, _) => Reason::Conflict,
-                Error::DatabaseError(Kind::ReadOnlyTransaction, _) => Reason::PermissionDenied,
-                Error::DatabaseError(Kind::ClosedConnection | Kind::UnableToSendCommand, _) => {
-                    Reason::Unavailable
-                }
-                _ => Reason::Unknown,
-            };
+            detail.reason = classified.reason;
         }
         current = error.source();
     }
@@ -160,23 +146,26 @@ pub(crate) fn group_update_failure_detail(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uc_observability_contract::diagnostics::connectivity::{
+        ClassifiedGroupUpdateStorageFailure, GroupUpdateReason,
+    };
+
+    /// 本 crate 不接触任何存储库的具体错误类型；真实 Diesel/SQLite 失败如何
+    /// 被翻译成 `ClassifiedGroupUpdateStorageFailure` 由存储层的转换处验证
+    /// （`uc-infra` 的 `db::repositories::space_security_store::backend`）。
+    /// 这里只验证读取端：已经分类好的存储失败正确映射到 phase/source/reason，
+    /// 且不泄露任何底层错误文本。
     #[test]
-    fn real_sqlite_failure_keeps_the_persist_stage_and_safe_source_category() {
-        use diesel::{Connection, RunQueryDsl};
-        let mut connection =
-            diesel::sqlite::SqliteConnection::establish(":memory:").expect("sqlite");
-        let source = diesel::sql_query("INSERT INTO PRIVATE_MISSING_TABLE VALUES (1)")
-            .execute(&mut connection)
-            .expect_err("missing table");
-        let error = failed_action(GroupUpdateAction::PersistState, source);
+    fn a_classified_storage_failure_keeps_the_persist_stage_and_safe_source_category() {
+        let classified = ClassifiedGroupUpdateStorageFailure::new(
+            GroupUpdateReason::Unknown,
+            anyhow::anyhow!("PRIVATE_MISSING_TABLE"),
+        );
+        let error = failed_action(GroupUpdateAction::PersistState, classified);
         let detail = group_update_failure_detail(&error);
         assert_eq!(detail.phase.as_str(), "persist_state");
         assert_eq!(detail.source.as_str(), "storage");
-        assert_eq!(
-            detail.reason.as_str(),
-            "unknown",
-            "不能从 SQLite 原始错误正文推测错误码"
-        );
+        assert_eq!(detail.reason.as_str(), "unknown");
         assert!(!error.to_string().contains("PRIVATE_"));
         assert!(!format!("{error:?}").contains("PRIVATE_"));
     }

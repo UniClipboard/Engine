@@ -10,7 +10,7 @@ use super::{
     inconsistent, inconsistent_input, ActiveRuntimeManifestV3, AdmissionInputIssue,
     SpaceControlGenerationError,
 };
-use crate::space::import_admission_content_key_catalog;
+use uc_infra_crypto::content_key_catalog::import_admission_content_key_catalog;
 
 /// 加入方目标控制世代的安全材料与准入凭据。成员记录与成员读模型不在此写入：目标世代生效后由
 /// 成员状态负责人按加入后历史建立。

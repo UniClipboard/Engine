@@ -19,7 +19,6 @@ use super::{acquire_lease, SpaceControlGeneration, SpaceControlGenerationError};
 use crate::db::executor::DieselSqliteExecutor;
 use crate::db::pool::init_db_pool;
 use crate::db::repositories::DieselSpaceSecurityStore;
-use crate::fs::key_slot_store::JsonKeySlotStore;
 use crate::security::{
     ActiveRuntimeManifestV3, AdmissionKeyManager, DefaultCurrentProfile, ProfileContentKeyVault,
     ProfileRuntimeLayout,
@@ -28,6 +27,7 @@ use crate::space::membership_record::test_support::signed_target_members;
 use crate::space::{
     prepare_registration, InMemorySession, KeyMaterialStore, RuntimeSpaceAccessAdapter,
 };
+use uc_infra_security::key_slot_store::JsonKeySlotStore;
 
 #[derive(Default)]
 struct MemorySecureStorage(Mutex<HashMap<String, Vec<u8>>>);

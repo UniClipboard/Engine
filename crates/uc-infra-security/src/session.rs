@@ -23,10 +23,10 @@ use uc_core::membership::{
 };
 use zeroize::Zeroizing;
 
-use crate::security::ProfileKeyReadLease;
-use crate::security::{MasterKey, ProfileContentKeyVault};
+use crate::ProfileKeyReadLease;
+use crate::{MasterKey, ProfileContentKeyVault};
 
-use super::content_key_catalog::{
+use uc_infra_crypto::content_key_catalog::{
     decode as decode_content_key_catalog, encode as encode_content_key_catalog,
     PersistedContentKeyCatalog, PersistedContentKeyEntry,
 };
@@ -57,7 +57,7 @@ struct ContentKeyEntry {
     key: MasterKey,
 }
 
-pub(crate) struct ResolvedContentKey {
+pub struct ResolvedContentKey {
     content_key_id: ContentKeyId,
     epoch: GroupEpoch,
     key: MasterKey,
@@ -67,7 +67,7 @@ pub(crate) struct ResolvedContentKey {
 ///
 /// 该值只在 Infra 内部跨越 session 与 `ContentProtection` 边界；调用方不能
 /// 选择保护组、key id 或 epoch，也不能取得密钥字节。
-pub(crate) struct ActiveContentProtectionKey {
+pub struct ActiveContentProtectionKey {
     protection_group_id: ProtectionGroupId,
     content_key_id: ContentKeyId,
     epoch: GroupEpoch,
@@ -75,33 +75,33 @@ pub(crate) struct ActiveContentProtectionKey {
 }
 
 impl ActiveContentProtectionKey {
-    pub(crate) fn protection_group_id(&self) -> &ProtectionGroupId {
+    pub fn protection_group_id(&self) -> &ProtectionGroupId {
         &self.protection_group_id
     }
 
-    pub(crate) fn content_key_id(&self) -> &ContentKeyId {
+    pub fn content_key_id(&self) -> &ContentKeyId {
         &self.content_key_id
     }
 
-    pub(crate) const fn epoch(&self) -> GroupEpoch {
+    pub const fn epoch(&self) -> GroupEpoch {
         self.epoch
     }
 
-    pub(crate) fn key(&self) -> &MasterKey {
+    pub fn key(&self) -> &MasterKey {
         &self.key
     }
 }
 
 impl ResolvedContentKey {
-    pub(crate) fn content_key_id(&self) -> &ContentKeyId {
+    pub fn content_key_id(&self) -> &ContentKeyId {
         &self.content_key_id
     }
 
-    pub(crate) const fn epoch(&self) -> GroupEpoch {
+    pub const fn epoch(&self) -> GroupEpoch {
         self.epoch
     }
 
-    pub(crate) fn key(&self) -> &MasterKey {
+    pub fn key(&self) -> &MasterKey {
         &self.key
     }
 }
@@ -152,14 +152,14 @@ impl SessionState {
     }
 }
 
-pub(crate) struct SessionSnapshot {
-    #[cfg(test)]
+pub struct SessionSnapshot {
+    #[cfg(feature = "test-util")]
     material: State,
     generation: Arc<()>,
 }
 
 /// 异步激活的回滚责任留在 Infra；取消也不能留下临时装入的目标密钥。
-pub(crate) struct SessionTransaction<'a> {
+pub struct SessionTransaction<'a> {
     session: &'a InMemorySession,
     previous: Option<SessionSnapshot>,
     candidate_master_key: Option<MasterKey>,
@@ -170,7 +170,7 @@ impl SessionTransaction<'_> {
     ///
     /// task-local 能力不会被普通并发任务继承；共享 session 的所有公开读取在
     /// transaction 提交前仍保持不可用。
-    pub(crate) async fn with_candidate_master_key<F>(&self, work: F) -> F::Output
+    pub async fn with_candidate_master_key<F>(&self, work: F) -> F::Output
     where
         F: Future,
     {
@@ -261,7 +261,7 @@ impl InMemorySession {
     }
 
     /// 离线升级/验证不取得后台运行期的复用许可。
-    pub(crate) fn for_maintenance() -> Self {
+    pub fn for_maintenance() -> Self {
         let session = Self::new();
         session.lock_state().allow_reuse = false;
         session
@@ -277,7 +277,7 @@ impl InMemorySession {
         }
     }
 
-    pub(crate) fn detached_clone(&self) -> Arc<Self> {
+    pub fn detached_clone(&self) -> Arc<Self> {
         let session = Self::for_maintenance();
         session.lock_state().material = self.lock_state().material.clone();
         Arc::new(session)
@@ -298,7 +298,7 @@ impl InMemorySession {
     /// 事务只是 Infra 内部替换安全材料的短暂窗口，不代表 Space 被锁定；外部读取者
     /// 在此等待提交或回滚后再按实际状态判断。超过 `limit` 仍未结束时返回 `false`，
     /// 由调用方按当前不可读状态处理，避免事务负责人异常时读取者无限挂起。
-    pub(crate) async fn settle_pending_transaction(&self, limit: Duration) -> bool {
+    pub async fn settle_pending_transaction(&self, limit: Duration) -> bool {
         tokio::time::timeout(limit, async {
             loop {
                 let notified = self.ready.notified();
@@ -350,7 +350,7 @@ impl InMemorySession {
         self.ready.notify_waiters();
     }
 
-    pub(crate) fn set_master_key_for_space(&self, space_id: SpaceId, master_key: MasterKey) {
+    pub fn set_master_key_for_space(&self, space_id: SpaceId, master_key: MasterKey) {
         let mut state = self.lock_state();
         if state.closed {
             return;
@@ -361,7 +361,7 @@ impl InMemorySession {
     }
 
     /// 重绑与 clear 共用一个临界区，不能把清理前复制出的 MasterKey 写回。
-    pub(crate) fn rebind_to_space(&self, space_id: &SpaceId) -> Result<(), EncryptionError> {
+    pub fn rebind_to_space(&self, space_id: &SpaceId) -> Result<(), EncryptionError> {
         let mut state = self.lock_state();
         let master_key = state
             .master_key
@@ -390,7 +390,7 @@ impl InMemorySession {
         );
     }
 
-    pub(crate) fn begin_transaction(
+    pub fn begin_transaction(
         &self,
         target: Option<(SpaceId, MasterKey)>,
     ) -> Result<SessionTransaction<'_>, EncryptionError> {
@@ -402,7 +402,7 @@ impl InMemorySession {
             return Err(EncryptionError::NotInitialized);
         }
         let previous = SessionSnapshot {
-            #[cfg(test)]
+            #[cfg(feature = "test-util")]
             material: state.material.clone(),
             generation: state.generation.clone(),
         };
@@ -473,7 +473,7 @@ impl InMemorySession {
         ))
     }
 
-    pub(crate) fn create_profile_storage_upgrade_material(
+    pub fn create_profile_storage_upgrade_material(
         &self,
         space_id: &SpaceId,
     ) -> Result<SpaceKeyMaterial, EncryptionError> {
@@ -532,8 +532,8 @@ impl InMemorySession {
         ))
     }
 
-    #[cfg(test)]
-    pub(crate) fn create_legacy_bootstrap_material(
+    #[cfg(feature = "test-util")]
+    pub fn create_legacy_bootstrap_material(
         &self,
         space_id: &SpaceId,
         group_state: Vec<u8>,
@@ -545,7 +545,7 @@ impl InMemorySession {
         self.create_ready_space_material(space_id, None, group_state, updated_at_ms)
     }
 
-    pub(crate) fn create_legacy_bootstrap_material_in_group(
+    pub fn create_legacy_bootstrap_material_in_group(
         &self,
         space_id: &SpaceId,
         protection_group_id: ProtectionGroupId,
@@ -563,8 +563,8 @@ impl InMemorySession {
         )
     }
 
-    #[cfg(test)]
-    pub(crate) fn create_migrated_space_material(
+    #[cfg(feature = "test-util")]
+    pub fn create_migrated_space_material(
         &self,
         space_id: &SpaceId,
         updated_at_ms: i64,
@@ -577,7 +577,7 @@ impl InMemorySession {
         )
     }
 
-    pub(crate) fn install_space_material(
+    pub fn install_space_material(
         &self,
         material: &SpaceKeyMaterial,
     ) -> Result<(), EncryptionError> {
@@ -652,7 +652,7 @@ impl InMemorySession {
         Ok(())
     }
 
-    pub(crate) fn rotate_space_material(
+    pub fn rotate_space_material(
         &self,
         material: &SpaceKeyMaterial,
         group_state: Vec<u8>,
@@ -684,8 +684,8 @@ impl InMemorySession {
         )
     }
 
-    #[cfg(test)]
-    pub(crate) fn snapshot(&self) -> SessionSnapshot {
+    #[cfg(feature = "test-util")]
+    pub fn snapshot(&self) -> SessionSnapshot {
         {
             let state = self.lock_state();
             SessionSnapshot {
@@ -695,8 +695,8 @@ impl InMemorySession {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn restore(&self, snapshot: SessionSnapshot) {
+    #[cfg(feature = "test-util")]
+    pub fn restore(&self, snapshot: SessionSnapshot) {
         let mut state = self.lock_state();
         if !state.closed && Arc::ptr_eq(&state.generation, &snapshot.generation) {
             state.material = snapshot.material;
@@ -704,7 +704,7 @@ impl InMemorySession {
         }
     }
 
-    pub(crate) fn current_content_key(
+    pub fn current_content_key(
         &self,
         space_id: &SpaceId,
         purpose: ContentKeyPurpose,
@@ -723,7 +723,7 @@ impl InMemorySession {
         Self::resolve_from_state(&state, content_key_id, purpose)
     }
 
-    pub(crate) fn current_content_protection_key(
+    pub fn current_content_protection_key(
         &self,
     ) -> Result<ActiveContentProtectionKey, EncryptionError> {
         let state = self.lock_state();
@@ -755,7 +755,7 @@ impl InMemorySession {
         })
     }
 
-    pub(crate) fn current_space_id(&self) -> Result<SpaceId, EncryptionError> {
+    pub fn current_space_id(&self) -> Result<SpaceId, EncryptionError> {
         let state = self.lock_state();
         if state.pending_material.is_some() {
             return Err(EncryptionError::NotInitialized);
@@ -766,7 +766,7 @@ impl InMemorySession {
             .ok_or(EncryptionError::NotInitialized)
     }
 
-    pub(crate) fn legacy_content_key(&self) -> Result<MasterKey, EncryptionError> {
+    pub fn legacy_content_key(&self) -> Result<MasterKey, EncryptionError> {
         let state = self.lock_state();
         if state.pending_material.is_some() {
             return Err(EncryptionError::NotInitialized);
@@ -778,7 +778,7 @@ impl InMemorySession {
             .ok_or(EncryptionError::KeyNotFound)
     }
 
-    pub(crate) fn content_key(
+    pub fn content_key(
         &self,
         space_id: &SpaceId,
         content_key_id: &ContentKeyId,
@@ -794,7 +794,7 @@ impl InMemorySession {
         Self::resolve_from_state(&state, content_key_id, purpose)
     }
 
-    pub(crate) fn derive_stable_subkey(
+    pub fn derive_stable_subkey(
         &self,
         salt: &[u8],
         info: &[u8],
@@ -848,7 +848,7 @@ impl InMemorySession {
         }
     }
 
-    pub(crate) fn close(&self) {
+    pub fn close(&self) {
         let mut state = self.lock_state();
         state.closed = true;
         Self::clear_state(&mut state);

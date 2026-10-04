@@ -6,6 +6,7 @@ members = [
   "crates/uc-infra",
   "crates/uc-infra-local",
   "crates/uc-infra-crypto",
+  "crates/uc-infra-security",
   "crates/uc-sync-protocol",
   "crates/uc-content-hash",
   "crates/uc-observability-contract",
@@ -77,6 +78,8 @@ opt-level = 3
 [profile.dev.package.uc-infra-local]
 opt-level = 3
 [profile.dev.package.uc-infra-crypto]
+opt-level = 3
+[profile.dev.package.uc-infra-security]
 opt-level = 3
 
 [profile.release]

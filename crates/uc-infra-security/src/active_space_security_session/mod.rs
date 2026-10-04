@@ -4,7 +4,7 @@ use tokio::sync::Mutex;
 use uc_core::ids::SpaceId;
 use uc_core::membership::{GroupEpoch, RevocationRepositoryPort, SpaceKeyMaterial};
 
-use crate::security::{MasterKey, ProfileContentKeyVault, ProfileContentKeyVaultError};
+use crate::{MasterKey, ProfileContentKeyVault, ProfileContentKeyVaultError};
 
 use super::InMemorySession;
 
@@ -28,7 +28,7 @@ impl ActiveSpaceSecuritySession {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(feature = "test-util")]
     pub(crate) async fn activate(
         &self,
         space_id: &SpaceId,
@@ -152,9 +152,7 @@ fn session_error(
         source: anyhow::Error::new(source),
     }
 }
-fn vault_error(
-    source: crate::security::ProfileContentKeyVaultError,
-) -> ActiveSpaceSecuritySessionError {
+fn vault_error(source: ProfileContentKeyVaultError) -> ActiveSpaceSecuritySessionError {
     ActiveSpaceSecuritySessionError::Vault {
         source: anyhow::Error::new(source),
     }

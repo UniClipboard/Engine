@@ -10,7 +10,7 @@ use super::MasterKey;
 use uc_infra_crypto::crypto_model::EncryptedBlob;
 use uc_infra_crypto::v1_aead;
 
-pub(super) const PROFILE_ADMISSION_KEY_NAME: &str = "profile_admission_master_key:v1";
+pub const PROFILE_ADMISSION_KEY_NAME: &str = "profile_admission_master_key:v1";
 
 #[derive(Debug, thiserror::Error)]
 pub enum AdmissionKeyError {
@@ -65,7 +65,7 @@ impl From<SecureStorageError> for AdmissionKeyError {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) struct SpaceAdmissionDataKey([u8; 32]);
+pub struct SpaceAdmissionDataKey([u8; 32]);
 
 impl fmt::Debug for SpaceAdmissionDataKey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -74,7 +74,7 @@ impl fmt::Debug for SpaceAdmissionDataKey {
 }
 
 impl SpaceAdmissionDataKey {
-    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
+    pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 }
@@ -92,13 +92,13 @@ pub struct AdmissionKeyManager {
 }
 
 // 单次读取固定使用同一把密钥；缓存只保存绑定摘要，不延长密钥的生命周期。
-pub(crate) struct ProfilePayloadReader {
+pub struct ProfilePayloadReader {
     key: MasterKey,
     aad: Vec<u8>,
 }
 
 impl ProfilePayloadReader {
-    pub(crate) fn cache_binding(&self) -> [u8; 32] {
+    pub fn cache_binding(&self) -> [u8; 32] {
         let mut digest = Sha256::new();
         digest.update(b"uniclipboard/admission-read-cache/v1\0");
         digest.update(self.key.as_bytes());
@@ -106,12 +106,12 @@ impl ProfilePayloadReader {
         digest.finalize().into()
     }
 
-    pub(crate) fn open(&self, ciphertext: &[u8]) -> Result<Vec<u8>, AdmissionKeyError> {
+    pub fn open(&self, ciphertext: &[u8]) -> Result<Vec<u8>, AdmissionKeyError> {
         let encrypted = decode_json_blob(ciphertext)?;
         self.open_blob(&encrypted)
     }
 
-    pub(crate) fn open_compact(&self, ciphertext: &[u8]) -> Result<Vec<u8>, AdmissionKeyError> {
+    pub fn open_compact(&self, ciphertext: &[u8]) -> Result<Vec<u8>, AdmissionKeyError> {
         let encrypted = decode_compact_blob(ciphertext)?;
         self.open_blob(&encrypted)
     }
@@ -166,7 +166,7 @@ impl AdmissionKeyManager {
         MasterKey::from_bytes(&bytes).map_err(AdmissionKeyError::corrupt)
     }
 
-    pub(crate) const fn profile_generation(&self) -> [u8; 16] {
+    pub const fn profile_generation(&self) -> [u8; 16] {
         self.profile_generation
     }
 
@@ -196,7 +196,7 @@ impl AdmissionKeyManager {
         aad
     }
 
-    pub(crate) fn seal_profile_payload(
+    pub fn seal_profile_payload(
         &self,
         purpose: &[u8],
         plaintext: &[u8],
@@ -210,7 +210,7 @@ impl AdmissionKeyManager {
         serde_json::to_vec(&encrypted).map_err(AdmissionKeyError::corrupt)
     }
 
-    pub(crate) fn seal_profile_payload_compact(
+    pub fn seal_profile_payload_compact(
         &self,
         purpose: &[u8],
         plaintext: &[u8],
@@ -224,7 +224,7 @@ impl AdmissionKeyManager {
         postcard::to_stdvec(&encrypted).map_err(AdmissionKeyError::corrupt)
     }
 
-    pub(crate) fn open_profile_payload(
+    pub fn open_profile_payload(
         &self,
         purpose: &[u8],
         ciphertext: &[u8],
@@ -240,7 +240,7 @@ impl AdmissionKeyManager {
         .map_err(AdmissionKeyError::open_failed)
     }
 
-    pub(crate) fn profile_payload_reader(
+    pub fn profile_payload_reader(
         &self,
         purpose: &[u8],
     ) -> Result<ProfilePayloadReader, AdmissionKeyError> {
@@ -250,7 +250,7 @@ impl AdmissionKeyManager {
         })
     }
 
-    pub(crate) fn repository_token(
+    pub fn repository_token(
         &self,
         purpose: &[u8],
         value: &[u8],
@@ -294,7 +294,7 @@ impl AdmissionKeyManager {
         })
     }
 
-    pub(crate) fn unwrap_attempt_key(
+    pub fn unwrap_attempt_key(
         &self,
         attempt_id: [u8; 32],
         wrapped: &WrappedSpaceAdmissionDataKey,
@@ -325,7 +325,7 @@ impl AdmissionKeyManager {
         aad
     }
 
-    pub(crate) fn seal_attempt_payload(
+    pub fn seal_attempt_payload(
         &self,
         attempt_id: [u8; 32],
         wrapped: &WrappedSpaceAdmissionDataKey,
@@ -340,7 +340,7 @@ impl AdmissionKeyManager {
         postcard::to_stdvec(&encrypted).map_err(AdmissionKeyError::corrupt)
     }
 
-    pub(crate) fn open_attempt_payload(
+    pub fn open_attempt_payload(
         &self,
         attempt_id: [u8; 32],
         wrapped: &WrappedSpaceAdmissionDataKey,

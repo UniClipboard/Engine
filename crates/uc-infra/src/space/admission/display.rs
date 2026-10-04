@@ -362,8 +362,8 @@ mod tests {
     use crate::db::executor::DieselSqliteExecutor;
     use crate::db::pool::init_db_pool;
     use crate::security::{ActiveSpaceGenerationManifestStore, AdmissionKeyManager};
-    use crate::space::security::mls_group::MlsGroupEngine;
     use crate::space::AdmissionSecurityTransitionAdapter;
+    use uc_infra_crypto::mls_group::MlsGroupEngine;
 
     use super::super::repository::fresh_test_repository_state;
 

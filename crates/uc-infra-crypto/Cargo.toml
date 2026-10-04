@@ -6,10 +6,15 @@ edition = "2021"
 description = "Database/network/session-free cryptographic algorithms and formats for UniClipboard infra"
 publish = false
 
+[features]
+default = []
+test-util = []
+
 [dependencies]
 uc-core = { path = "../uc-core" }
 
 serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1.0"
 thiserror = "2.0"
@@ -21,6 +26,18 @@ zeroize = { version = "1.8.2", features = ["derive"] }
 blake3 = "1.8.2"
 sha2 = "0.10"
 base32 = "0.5"
+hkdf = "0.12"
+subtle = "2.5.0"
+opaque-ke = { version = "=4.0.1", features = ["argon2", "ristretto255"] }
+# opaque-ke 4.0.1 takes RNG handles from rand 0.8; see uc-infra/Cargo.toml's
+# matching comment for why this separate rand 0.8 alias is required.
+rand_opaque = { package = "rand", version = "0.8", default-features = false, features = ["getrandom"] }
+openmls = { version = "=0.9.0", features = ["fork-resolution"] }
+openmls_basic_credential = "=0.6.0"
+openmls_memory_storage = { version = "=0.6.0", features = ["test-utils"] }
+openmls_rust_crypto = "=0.6.0"
+openmls_traits = "=0.6.0"
+uc-observability-contract = { path = "../uc-observability-contract" }
 
 [lints]
 workspace = true

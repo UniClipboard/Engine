@@ -381,7 +381,7 @@ pub(super) fn create_infra_layer(
     let secure_storage_for_key_material = Arc::clone(&secure_storage);
 
     let keyslot_store = JsonKeySlotStore::new(vault_path.clone());
-    let keyslot_store: Arc<dyn uc_infra::fs::key_slot_store::KeySlotStore> =
+    let keyslot_store: Arc<dyn uc_infra_security::key_slot_store::KeySlotStore> =
         Arc::new(keyslot_store);
 
     let key_material = Arc::new(KeyMaterialStore::new(

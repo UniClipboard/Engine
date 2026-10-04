@@ -1,9 +1,8 @@
 mod adapters;
 mod admission;
+mod encryption_passphrase_change;
 mod membership_branch_transition;
 pub(crate) mod membership_record;
-mod security;
-pub(crate) use security::group_update_failure_detail;
 
 pub use adapters::{
     CurrentSpaceResolver, DeviceTrustObservationsAdapter, EncryptedRePairingStateStore,
@@ -31,12 +30,12 @@ pub use admission::{
     DefaultSponsorSettledPreparation, SpaceAdmissionCredentialStoreError,
     SqliteSpaceAdmissionCredentials, SqliteSpaceAdmissionState,
 };
+pub use encryption_passphrase_change::EncryptionPassphraseChange;
 pub use membership_branch_transition::DefaultMembershipBranchTransitionPreparation;
 pub use membership_record::SqliteMembershipRecordStore;
-pub(crate) use security::export_admission_content_key_catalog;
-pub(crate) use security::import_admission_content_key_catalog;
-pub use security::{
-    DefaultMembershipSecurityUpdateAdapter, EncryptionPassphraseChange, InMemorySession,
-    KeyMaterialStore, MigrationSpaceAccessAdapter, OpenMlsHistoricalSignatureVerifier,
-    RuntimeSpaceAccessAdapter, SpaceSessionRebindAdapter,
+pub use uc_infra_crypto::history_signature::OpenMlsHistoricalSignatureVerifier;
+pub(crate) use uc_infra_security::group_update_failure_detail;
+pub use uc_infra_security::{
+    DefaultMembershipSecurityUpdateAdapter, InMemorySession, KeyMaterialStore,
+    MigrationSpaceAccessAdapter, RuntimeSpaceAccessAdapter, SpaceSessionRebindAdapter,
 };

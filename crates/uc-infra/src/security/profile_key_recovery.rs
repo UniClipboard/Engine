@@ -12,16 +12,11 @@ use uc_core::crypto::model::EncryptionError;
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
 use zeroize::Zeroize;
 
-use super::admission_key_manager::PROFILE_ADMISSION_KEY_NAME;
-use super::key_migration_adapter::{DefaultKeyMigrationAdapter, KEYRING_PREFIX};
-use super::profile_content_key_vault::PROFILE_CONTENT_VAULT_KEY_NAME;
 use super::profile_lifecycle::PROFILE_LIFECYCLE_MARKER_NAME;
 use super::profile_upgrade_backup::PROFILE_UPGRADE_BACKUP_RECORD_KEY;
 use super::{Kek, MasterKey};
 use crate::config_migration::staging::PENDING_IMPORT_MARKER;
-use crate::fs::key_slot_store::JsonKeySlotStore;
 use crate::network::iroh::IDENTITY_STORE_KEY;
-use crate::space::KeyMaterialStore;
 use uc_infra_crypto::crypto_model::{EncryptedBlob, KeyScope};
 use uc_infra_crypto::v1_aead;
 use uc_infra_local::fs::durability::{replace_file, sync_directory};
@@ -29,6 +24,12 @@ use uc_infra_local::migration_state::{
     decode_legacy_migration_run_id, DEFAULT_MIGRATION_STATE_FILE,
 };
 use uc_infra_local::FileSecureStorage;
+use uc_infra_security::admission_key_manager::PROFILE_ADMISSION_KEY_NAME;
+use uc_infra_security::key_migration_adapter::{DefaultKeyMigrationAdapter, KEYRING_PREFIX};
+use uc_infra_security::key_slot_store::JsonKeySlotStore;
+use uc_infra_security::profile_content_key_vault::PROFILE_CONTENT_VAULT_KEY_NAME;
+pub use uc_infra_security::profile_passphrase_recovery::ProfilePassphraseRecoveryPort;
+use uc_infra_security::KeyMaterialStore;
 use uc_observability_contract::{uc_info, uc_warn};
 
 pub const PROFILE_SECRET_FILE_NAME: &str = "profile-secrets-v1";
@@ -69,64 +70,7 @@ pub enum ProfileRecoveryOutcome {
     PartiallyRecoverable(ProfileRecoveryLosses),
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum ProfileKeyRecoveryError {
-    #[error("profile recovery passphrase was rejected")]
-    WrongPassphrase,
-    #[error("profile recovery data is corrupt")]
-    Corrupt,
-    #[error("profile recovery format is unsupported")]
-    Unsupported,
-    #[error("profile recovery storage is unavailable")]
-    Storage(#[source] anyhow::Error),
-}
-
-impl ProfileKeyRecoveryError {
-    /// 诊断用固定分类；不包含下层错误正文。
-    pub(crate) fn diagnostic_reason(&self) -> &'static str {
-        match self {
-            Self::WrongPassphrase => "key_mismatch",
-            Self::Corrupt => "corrupt",
-            Self::Unsupported => "unsupported_version",
-            Self::Storage(_) => "storage_unavailable",
-        }
-    }
-}
-
-impl From<SecureStorageError> for ProfileKeyRecoveryError {
-    fn from(source: SecureStorageError) -> Self {
-        Self::Storage(source.into())
-    }
-}
-
-impl From<std::io::Error> for ProfileKeyRecoveryError {
-    fn from(source: std::io::Error) -> Self {
-        Self::Storage(source.into())
-    }
-}
-
-impl From<EncryptionError> for ProfileKeyRecoveryError {
-    fn from(source: EncryptionError) -> Self {
-        match source {
-            EncryptionError::WrongPassphrase => Self::WrongPassphrase,
-            EncryptionError::UnsupportedKeySlotVersion
-            | EncryptionError::UnsupportedBlobVersion
-            | EncryptionError::UnsupportedVersion
-            | EncryptionError::UnsupportedKdfAlgorithm => Self::Unsupported,
-            EncryptionError::CorruptedKeySlot
-            | EncryptionError::CorruptedBlob
-            | EncryptionError::KeyMaterialCorrupt { .. }
-            | EncryptionError::InvalidKey => Self::Corrupt,
-            other => Self::Storage(other.into()),
-        }
-    }
-}
-
-impl From<v1_aead::AeadError> for ProfileKeyRecoveryError {
-    fn from(source: v1_aead::AeadError) -> Self {
-        Self::Storage(anyhow::Error::new(source))
-    }
-}
+pub use uc_infra_security::profile_passphrase_recovery::ProfileKeyRecoveryError;
 
 #[derive(Serialize, Deserialize)]
 struct ProfileSecretFile {
@@ -179,15 +123,6 @@ pub struct ProfileKeyRecoveryStore {
     file: PathBuf,
     paths: AppPaths,
     state: Mutex<RecoveryState>,
-}
-
-pub trait ProfilePassphraseRecoveryPort: Send + Sync {
-    fn prepare_passphrase_change(&self, kek: &[u8]) -> Result<(), ProfileKeyRecoveryError>;
-    fn finish_passphrase_change(&self, kek: &[u8]) -> Result<(), ProfileKeyRecoveryError>;
-    /// 资料 KEK 被切换目标的访问材料替换前调用；vault 可能尚未创建或已随运行期挂起。
-    fn prepare_kek_replacement(&self, kek: &[u8]) -> Result<(), ProfileKeyRecoveryError>;
-    /// 新 KEK 写入安全存储后调用。
-    fn finish_kek_replacement(&self, kek: &[u8]) -> Result<(), ProfileKeyRecoveryError>;
 }
 
 impl ProfilePassphraseRecoveryPort for ProfileKeyRecoveryStore {
