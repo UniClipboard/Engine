@@ -130,7 +130,8 @@ fn network_admission_rule_lives_only_in_the_membership_ledger() {
     );
     for relative in [
         "crates/uc-infra/src/space/mod.rs",
-        "crates/uc-infra/src/space/security/mod.rs",
+        "crates/uc-infra-security/src/lib.rs",
+        "crates/uc-infra-security/src/access.rs",
         "crates/uc-engine/src/assembly/wire/infra.rs",
         "crates/uc-engine/src/assembly/wire/mod.rs",
     ] {
