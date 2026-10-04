@@ -42,8 +42,8 @@
 | 1 | 七个实现 crate 均有单一明确能力归属，无原 `uc-infra` 包、聚合壳或复制代码 | 满足（有记录在案的偏离） | 七个 crate 已落地，`uc-infra` 已删除，`check-engine-repository.mjs` 校验包清单。偏离：`membership_record` 与准入仓储留在 profile，见实施记录"已决定不改"一节；`mobile_sync` 迁到 `uc-mobile-lan`。复制：只在测试中复刻过一段契约断言（`mobile_device_repo`），没有复制生产代码 |
 | 2 | metadata 证明生产依赖有向无环；p2p 无 storage/profile/image/Diesel 闭包；默认 Engine 不引入 LAN | 满足 | Cargo 本身拒绝循环依赖；S4/S5 用 `cargo metadata` 遍历 p2p 生产闭包，631 个依赖中 diesel、libsqlite3-sys、image、zstd、tantivy、rusqlite 零命中；`dependency_firewall` 的 lan-compat 合同测试通过 |
 | 3 | 修改 SQL 或内容实现的探针证明兄弟能力保持 fresh；Core/Application 修改不纳入窄失效承诺 | 满足（本机受控条件） | S6b 的 Cargo JSON `fresh` 字段：改 SQL 只重编 storage/profile/Engine，改缩略图只重编 content/profile/Engine，三轮一致。没测 Core/Application 修改，符合"不纳入" |
-| 4 | 原有事务与安全操作仍由一个模块负责；Engine 不新增步骤编排、原始密钥或观测阶段查询 | 部分满足 | 现有架构门禁（所有权、观测接口、Engine 编排相关检查）每个切片都通过；Engine 没有引用任何密钥日志结构。缺口：没有逐项人工审计；S3 把 `EncryptionPassphraseChangeJournal`（含 `kek` 字段）等结构的可见性从 `pub(crate)` 放宽到 `pub`，供 profile 跨 crate 使用，Engine 未使用 |
-| 5 | 原存储/协议 golden fixtures 与旧 Profile E2E 可读，持久化无新版本 | 满足 | 拆分前后 migrations 逐个相同（61 个）；格式/版本常量集合完全相同；`uc-sync-protocol` golden 向量测试与 Upgrade compatibility smoke 在 CI 上通过 |
+| 4 | 原有事务与安全操作仍由一个模块负责；Engine 不新增步骤编排、原始密钥或观测阶段查询 | 部分满足 | 现有架构门禁（所有权、观测接口、Engine 编排相关检查）每个切片都通过；Engine 源码没有引用任何密钥类结构。缺口：没有逐项人工审计；两处原始密钥字节字段在拆分中放宽为 `pub`，其中日志结构在编译层面可被 Engine 访问，与 issue §5 不一致，但没有发现真实输出。见下方"密钥字段可见性审计" |
+| 5 | 原存储/协议 golden fixtures 与旧 Profile E2E 可读，持久化无新版本 | 满足 | 拆分前后 migrations 逐个相同（61 个）；格式/版本常量集合完全相同；`crates/uc-sync-protocol/tests/golden_vectors.rs` 与 Upgrade compatibility smoke 在 CI 上通过 |
 | 6 | 稳定入口 E2E 与失败恢复验证通过，提供可复跑、可校验工件 | 部分满足 | Engine tests（含 `host_contract`、membership smoke）、Connection recovery 在 main CI 上通过。缺口：没有按 issue §8 格式产出 E2E 工件（场景、revision、双方终态、脱敏日志）；本机有 `lifecycle_targets.rs:73` 偶发暂停超时、crash E2E 偶发超时（拆分前就有）、`host_contract space_leave::repeated_leaves…` 稳定超时（在干净 main 上也超时）。main 上的 Rust coverage 是否转绿见下方"未闭环事项" |
 | 7 | 默认与 lan-compat、代表性直接 Rust 宿主和绑定检查通过；未运行设备平台明记跳过 | 部分满足 | 默认与 `lan-compat,dev-tools` 的 workspace check、uniffi/ohos `workspace_contract`、uniffi `public_contract` 通过。iOS/Android/HarmonyOS 实机和模拟器：**跳过** |
 | 8 | 四类实现修改三轮中位耗时分别报告；建议至少三个场景降低 20%，其余不超过 5% 回退 | 满足（限定条件） | build 降 24.3%–38.9%，check 降 23.2%–48.1%，四类都超过 20%。仅限 Apple M4、`jobs = 2`、dev、预热 sccache 的增量构建；第 3 轮受其他会话干扰，只用前两轮复算结论不变 |
@@ -51,9 +51,44 @@
 | 10 | 若只证明增量构建收益，明确限定结论；冷构建与 release 未测不记通过 | 满足 | 结论已限定为增量构建；冷构建、完整 workspace、release/LTO、其他宿主：**未测，不记通过** |
 | 11 | 运行根 AGENTS 要求的交付检查；Cargo 验证串行复用 target | 满足 | 每个 PR 前都跑了 metadata、workspace all-targets check、fmt、Rust style、repository check、diff check，Cargo 验证串行执行（见实施记录） |
 
-另有两项 issue §6、§7 的过程要求**未按字面完成**：S0 精确基线按用户指示跳过；S2–S5 都没有产出"先列失败矩阵再改接口"的失败矩阵文档，只做了等价的"零覆盖流失"验证。
+另有两项 issue §6、§7 的过程要求**未按字面完成**：S0 精确基线按用户指示跳过；S2–S5 都没有产出"先列失败矩阵再改接口"的事前失败矩阵文档。收尾时补写了[事后失败矩阵](../completed/144-uc-infra-crate-split-failure-matrix.md)，把九类失败情形对应到现有证据，它不能代替事前矩阵和 S0 基线。
 
 详细证据见[实施记录](../completed/144-uc-infra-crate-split-record.md)。
+
+## 密钥字段可见性审计（2026-10-04，只读，未改生产代码）
+
+**issue 的原始要求**（§5 依赖切断第 100 行）：
+- `MasterKey`/`Kek` 需要跨包可见时，使用不透明类型，字段、`Debug` 和清零策略保持收敛。
+- 跨 crate 可见不等于稳定产品接口，禁止 Engine facade 重导出原始密钥访问。
+- 优先迁移完整的算法操作，避免新增方便调用方获取原始字节的接口。
+
+验收第 4 项要求 Engine 不新增原始密钥访问。
+
+**拆分中被放宽的密钥类字段**（对照 `54ffafb3` 与 `1dd4cbad`）：
+
+| 类型与字段 | 所在 crate | 拆分前 → 现在 | 字段类型 | `Debug` / 清零 / 序列化 | 跨 crate 使用方 | Engine 可达性 | 实际输出 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `EncryptionPassphraseChangeJournal.kek`（同一结构还有 `keyslot`、`prepared_registration`、`format_version`；`validate()` 也从 `pub(crate)` 变为 `pub`） | `uc-infra-storage`（crate 根 `pub use` 导出） | `pub(crate)` → `pub`（S3） | **原始字节** `Vec<u8>` | 手写 `Debug` 固定输出 `[REDACTED]`；`Drop` 清零 `kek` 与 `prepared_registration`；`Serialize` 只在 storage 内部写入 `Zeroizing` 缓冲，再用 profile 密钥加密落盘，读取时解密进 `Zeroizing`（这几点拆分前就如此） | `uc-infra-profile` 的 `space/encryption_passphrase_change.rs`：构造日志，读取 `kek` 后立即转成不透明的 `Kek::from_bytes` | `uc-engine` 直接依赖 storage，**编译层面可以访问**；Engine 和绑定源码中**没有引用**，facade 也没有重导出 | 未发现。profile 的 `uc_info!`/`uc_warn!` 只记录固定 trigger/stage 与错误类型，不包含日志结构内容 |
+| `PersistedContentKeyEntry.key`（以及 `content_key_id`、`epoch`，和外层 `PersistedContentKeyCatalog`） | `uc-infra-crypto` | `pub(super)` → `pub`（S1） | **原始字节** `Vec<u8>` | 没有 derive `Debug`，无法被格式化输出；`ZeroizeOnDrop`；`Serialize` 经 `encode()` 生成内容密钥目录字节 | `uc-infra-security` 的 `session.rs` 直接使用；`access.rs`、`profile_content_key_vault/catalog.rs`、profile 的 `space_control_generation/material.rs` 只调用 `export_`/`import_admission_content_key_catalog` 这类完整操作 | `uc-engine` 不直接依赖 `uc-infra-crypto`，**无法在源码中直接引用** | 未发现 |
+| `MlsAdmission` 等结构的 `wrapping_key`（4 处） | `uc-infra-crypto` | `pub(crate)` → `pub`（S1） | **不透明** `MasterKey` | `MasterKey` 的 `Debug` 输出 `[REDACTED]`，`ZeroizeOnDrop`；`MlsAdmission` 的 `Debug` 把该字段写成 `[REDACTED]` | `uc-infra-security` 的 `access.rs`、profile 的 `profile_key_recovery.rs` | 同上，Engine 不直接依赖 crypto | 未发现 |
+
+**结论**：
+- 三处都是**可见性扩大**。
+- 前两处属于"**可以访问原始字节**"：任何直接依赖对应 crate 的代码，都能读写原始密钥字节。这与 issue §5"避免新增方便调用方获取原始字节的接口"不一致。
+- 第三处用的是不透明类型，符合要求。
+- 三处都**没有发现真实输出**：没有日志、`Debug` 或错误正文会写出密钥；序列化只用于加密落盘。
+- Engine 目前没有引用这些结构，但它对 storage 的直接依赖，让日志结构在编译层面可以被 Engine 访问。
+
+**建议的最小边界方案**（本轮不改代码，需另行实施并验证）：
+1. **`EncryptionPassphraseChangeJournal`**：字段改为私有（serde 不受影响），由 storage 提供：
+   - `new(keyslot, kek: &Kek, prepared_registration)`
+   - `keyslot()`
+   - `kek() -> Kek`（不透明）
+   - `prepared_registration() -> &[u8]`
+
+   这样原始字节只留在 storage 内部。profile 只有两处需要改（构造、读取 `kek`）。这样也满足"Engine 不新增原始密钥"，不需要改依赖关系。
+2. **`PersistedContentKeyEntry`**：security 的 `session.rs` 确实需要原始内容密钥来组装会话材料。最小方案是字段私有，加构造器和只读访问器，至少让 crate 外不能直接改写。更彻底的方案是把目录与 `SpaceKeyMaterial` 之间的转换整体放进 crypto，作为完整操作，符合 issue §5 "优先迁移完整算法操作"。改动之前需要先盘点 `session.rs` 的使用点。
+3. `wrapping_key: MasterKey` 保持现状。
 
 ## 未闭环事项
 
@@ -64,13 +99,14 @@
 2. **`lifecycle_targets.rs:73` 偶发的暂停超时**：根因未查明；t-0176 的 `083fd0aa` 可能相关，未验证。
 3. **与 t-0176 的协作去重**：`is_admission_target_stopped` 仍在运行期线程上同步解密。按已定的方案 1，由 t-0176 在
    PR #153 合并后决定是否随其 iOS 修复带入（需要真实生命周期复现证明必要）。PR #153 不扩展这部分。
-4. **全部收尾后**：再把本计划整体移入 `completed/`。稳定结论已写回 `docs/design-docs/layers/infrastructure.md`：§2.3、§3 是七个 crate 的划分和依赖方向，§13.2.1 是 async 入口不得在运行期线程上同步阻塞。
+4. **密钥字段边界**：两处原始密钥字节字段的收敛方案见"密钥字段可见性审计"，尚未实施。
+5. **全部收尾后**：再把本计划整体移入 `completed/`。稳定结论已写回 `docs/design-docs/layers/infrastructure.md`：§2.3、§3 是七个 crate 的划分和依赖方向，§13.2.1 是 async 入口不得在运行期线程上同步阻塞。
 
 ## 遗留风险 / 下一步必须处理的事项
 
 1. **构建性能 A/B 实验已完成**（结果见实施记录）。冷构建、完整 workspace、release 和其他宿主仍未测。
-2. **main `7d4e496d` 的 Rust coverage 失败**：根因与修复见实施记录中"main coverage 失败"一节（PR #153）。
-3. **S2 没有产出 issue 字面要求的失败矩阵文档**，S3/S4/S5 同样没有补；只做了等价的"零覆盖流失"验证。
+2. **main `7d4e496d` 的 Rust coverage 失败**（历史，2026-10-04 run 37196002696）：根因与修复见实施记录中"main coverage 失败"一节（PR #153）；已被 main `1dd4cbad` 的 run 37206189173（全部 success）取代，见"未闭环事项"第 1 条。
+3. **S2–S5 没有产出 issue 字面要求的事前失败矩阵文档**（2026-10-04 收尾时补写了[事后对照](../completed/144-uc-infra-crate-split-failure-matrix.md)，不能代替事前矩阵）。
 4. **切片收尾必须以 CI 的 Engine tests 为准**：本地只跑 `--lib` 会漏掉集成测试与跨 crate 观测测试；
    S2–S5 的回归都是 CI 已报告但被当作偶发失败合入的。偶发失败要逐条与拆分前 `main` 的失败清单对比后才能忽略。
 5. **`infrastructure.md` 中与拆分无关的过时内容未处理**：§13.3.1 引用的 `pairing/session.rs` recv-pump
