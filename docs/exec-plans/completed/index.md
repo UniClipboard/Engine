@@ -2,6 +2,9 @@
 
 这里保留已完成、已由后续方案取代或仅供历史追溯的实施记录。它们不自动代表当前架构事实。
 
+- [144 `uc-infra` 拆成 7 个 crate：S1–S6 实施记录](144-uc-infra-crate-split-record.md)（拆分、回归修复、SQL 所有权决策、构建性能对照与 coverage 失败修复；未闭环事项见 active 计划）
+- [144 `uc-infra` 拆分：失败矩阵（事后对照）](144-uc-infra-crate-split-failure-matrix.md)（收尾时补写，把 issue §7 九类失败情形对应到现有证据；不代替事前矩阵与 S0 基线）
+
 - [049 成员状态单一负责人重写](049-single-owner-space-membership-rewrite.md)（S0–S6 完成：Core 成员账本、唯一写入者 Owner、V5 成员记录与遗留成员模块删除；实体双 Desktop 验收跳过）
 
 - [044 Engine testkit、测试分组与结构化报告基础](044-engine-testkit-foundation.md)（框架、nextest 分组、结构化工件与非破坏 CI 入口完成；真实网络、设备和远程 CI 跳过）

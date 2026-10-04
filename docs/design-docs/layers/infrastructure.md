@@ -624,6 +624,24 @@ infra 内部格式不是产品公共语义。
 
 ---
 
+## 13.2.1 async 入口不得在运行期线程上执行同步阻塞调用
+
+移动绑定用**单线程** tokio 运行期驱动 Engine，同一运行期还负责生命周期请求（暂停、恢复、状态查询）。
+async 适配器如果在运行期线程上直接执行同步阻塞调用，就会让这些请求一起停滞。这类调用包括：
+读取宿主安全存储（例如经 `AdmissionKeyManager` 解密而间接读取 profile key）、同步 SQLite 事务、同步文件 I/O。
+
+* async 入口中的同步阻塞调用必须放进 `spawn_blocking`，并带上调用方的观测上下文（至少带上 `Span`）。
+  文件读取等已有异步版本的 I/O 继续用异步 API。
+* 访问安全存储的 Infra 内部组件优先经已有的阻塞执行入口（`uc-infra-security` 的 `SecureStorageAccess`）；
+  仓储可在自身 async 方法内用 `spawn_blocking` 包住完整的同步访问，不得拆开连接或事务。
+* 同步版本（`*_sync`）只供启动等本身就在阻塞上下文中的调用方使用。
+
+依据：issue #144 收尾时，`ActiveSpaceGenerationManifestStore::load_runtime` 在运行期线程上同步解密，导致 uniffi
+`lifecycle_targets` 合同测试偶发失败（PR #153，见 [144 实施记录](../../exec-plans/completed/144-uc-infra-crate-split-record.md)）。
+同一个 store 的 `is_admission_target_stopped`、`promote`、`persist_manifest` 等路径仍有同类同步调用，尚未逐一处理。
+
+---
+
 ## 13.3 后台任务必须可停止、可感知失败
 
 任何 watcher、subscription、event loop、network listener 都必须：
