@@ -5,24 +5,119 @@ use uc_core::membership::{
 };
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+use crate::secrets::MasterKey;
+
+/// 内容密钥目录，即 session/repository 唯一接受的持久格式。
+///
+/// 内容密钥只以不透明的 `MasterKey` 出入本模块；原始字节与 JSON 编码只在本模块内部出现。
+pub struct ContentKeyCatalog {
+    version: u8,
+    entries: Vec<ContentKeyCatalogEntry>,
+}
+
+pub struct ContentKeyCatalogEntry {
+    content_key_id: String,
+    epoch: u64,
+    key: MasterKey,
+}
+
+impl ContentKeyCatalogEntry {
+    pub fn new(content_key_id: impl Into<String>, epoch: u64, key: MasterKey) -> Self {
+        Self {
+            content_key_id: content_key_id.into(),
+            epoch,
+            key,
+        }
+    }
+
+    pub fn content_key_id(&self) -> &str {
+        &self.content_key_id
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    pub fn key(&self) -> &MasterKey {
+        &self.key
+    }
+}
+
+impl ContentKeyCatalog {
+    /// 新目录只写 V2；V1 只作为已持久化资料的读取兼容。
+    pub fn v2(entries: Vec<ContentKeyCatalogEntry>) -> Self {
+        Self {
+            version: 2,
+            entries,
+        }
+    }
+
+    pub fn decode(encoded: &[u8]) -> Result<Self, EncryptionError> {
+        let persisted = decode(encoded)?;
+        let entries = persisted
+            .entries
+            .iter()
+            .map(|entry| {
+                MasterKey::from_bytes(&entry.key)
+                    .map(|key| {
+                        ContentKeyCatalogEntry::new(entry.content_key_id.clone(), entry.epoch, key)
+                    })
+                    .map_err(EncryptionError::key_material_corrupt_from)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            version: persisted.version,
+            entries,
+        })
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, EncryptionError> {
+        encode(&PersistedContentKeyCatalog {
+            version: self.version,
+            entries: self
+                .entries
+                .iter()
+                .map(|entry| PersistedContentKeyEntry {
+                    content_key_id: entry.content_key_id.clone(),
+                    epoch: entry.epoch,
+                    key: entry.key.as_bytes().to_vec(),
+                })
+                .collect(),
+        })
+    }
+
+    pub fn version(&self) -> u8 {
+        self.version
+    }
+
+    pub fn entries(&self) -> &[ContentKeyCatalogEntry] {
+        &self.entries
+    }
+
+    pub fn push(&mut self, entry: ContentKeyCatalogEntry) {
+        self.entries.push(entry);
+    }
+}
+
+/// 目录的磁盘格式。字段名、顺序与类型就是已发布的 JSON 格式，修改必须提升目录版本。
 #[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
-pub struct PersistedContentKeyCatalog {
-    pub version: u8,
-    pub entries: Vec<PersistedContentKeyEntry>,
+struct PersistedContentKeyCatalog {
+    version: u8,
+    entries: Vec<PersistedContentKeyEntry>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
-pub struct PersistedContentKeyEntry {
-    pub content_key_id: String,
-    pub epoch: u64,
-    pub key: Vec<u8>,
+struct PersistedContentKeyEntry {
+    content_key_id: String,
+    epoch: u64,
+    key: Vec<u8>,
 }
 
-pub fn decode(encoded: &[u8]) -> Result<PersistedContentKeyCatalog, EncryptionError> {
+fn decode(encoded: &[u8]) -> Result<PersistedContentKeyCatalog, EncryptionError> {
     serde_json::from_slice(encoded).map_err(EncryptionError::key_material_corrupt_from)
 }
 
-pub fn encode(catalog: &PersistedContentKeyCatalog) -> Result<Vec<u8>, EncryptionError> {
+fn encode(catalog: &PersistedContentKeyCatalog) -> Result<Vec<u8>, EncryptionError> {
     serde_json::to_vec(catalog).map_err(EncryptionError::key_material_corrupt_from)
 }
 
