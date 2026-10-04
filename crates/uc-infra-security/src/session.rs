@@ -27,10 +27,7 @@ use zeroize::Zeroizing;
 use crate::ProfileKeyReadLease;
 use crate::{MasterKey, ProfileContentKeyVault};
 
-use uc_infra_crypto::content_key_catalog::{
-    decode as decode_content_key_catalog, encode as encode_content_key_catalog,
-    PersistedContentKeyCatalog, PersistedContentKeyEntry,
-};
+use uc_infra_crypto::content_key_catalog::{ContentKeyCatalog, ContentKeyCatalogEntry};
 use uc_observability_contract::uc_debug;
 
 tokio::task_local! {
@@ -440,22 +437,11 @@ impl InMemorySession {
 
         let content_key_id = ContentKeyId::generate();
         let content_key = MasterKey::generate()?;
-        let catalog = PersistedContentKeyCatalog {
-            version: 2,
-            entries: vec![
-                PersistedContentKeyEntry {
-                    content_key_id: ContentKeyId::legacy_v1().as_str().to_owned(),
-                    epoch: 0,
-                    key: legacy_key.as_bytes().to_vec(),
-                },
-                PersistedContentKeyEntry {
-                    content_key_id: content_key_id.as_str().to_owned(),
-                    epoch: 1,
-                    key: content_key.as_bytes().to_vec(),
-                },
-            ],
-        };
-        let key_catalog = encode_content_key_catalog(&catalog)?;
+        let catalog = ContentKeyCatalog::v2(vec![
+            ContentKeyCatalogEntry::new(ContentKeyId::legacy_v1().as_str(), 0, legacy_key),
+            ContentKeyCatalogEntry::new(content_key_id.as_str(), 1, content_key),
+        ]);
+        let key_catalog = catalog.encode()?;
         let mut key_state = uc_core::membership::SpaceKeyState::legacy(space_id.clone());
         key_state
             .mark_migrating()
@@ -503,21 +489,10 @@ impl InMemorySession {
             // discarded-source[no-information]: the error value carries no usable diagnostic information
             .map_err(|_| EncryptionError::crypto_failure())?;
         let content_key = MasterKey::from_bytes(content_key_bytes.as_ref())?;
-        let catalog = PersistedContentKeyCatalog {
-            version: 2,
-            entries: vec![
-                PersistedContentKeyEntry {
-                    content_key_id: ContentKeyId::legacy_v1().as_str().to_owned(),
-                    epoch: 0,
-                    key: legacy_key.as_bytes().to_vec(),
-                },
-                PersistedContentKeyEntry {
-                    content_key_id: content_key_id.as_str().to_owned(),
-                    epoch: 1,
-                    key: content_key.as_bytes().to_vec(),
-                },
-            ],
-        };
+        let catalog = ContentKeyCatalog::v2(vec![
+            ContentKeyCatalogEntry::new(ContentKeyId::legacy_v1().as_str(), 0, legacy_key),
+            ContentKeyCatalogEntry::new(content_key_id.as_str(), 1, content_key),
+        ]);
         let mut key_state = uc_core::membership::SpaceKeyState::legacy(space_id.clone());
         key_state
             .mark_migrating()
@@ -528,7 +503,7 @@ impl InMemorySession {
         Ok(SpaceKeyMaterial::new(
             key_state,
             CONTENT_KEY_INFO.to_vec(),
-            encode_content_key_catalog(&catalog)?,
+            catalog.encode()?,
             0,
         ))
     }
@@ -587,8 +562,8 @@ impl InMemorySession {
             return Err(EncryptionError::key_material_corrupt());
         }
         let protection_group_id = material.state().protection_group_id().cloned();
-        let catalog = decode_content_key_catalog(material.key_catalog())?;
-        if catalog.version != 1 && catalog.version != 2 {
+        let catalog = ContentKeyCatalog::decode(material.key_catalog())?;
+        if catalog.version() != 1 && catalog.version() != 2 {
             return Err(EncryptionError::UnsupportedVersion);
         }
 
@@ -603,7 +578,7 @@ impl InMemorySession {
             return Err(EncryptionError::NotInitialized);
         }
         let mut keys = HashMap::new();
-        if catalog.version == 1 {
+        if catalog.version() == 1 {
             let legacy_key = state
                 .master_key
                 .as_ref()
@@ -617,22 +592,20 @@ impl InMemorySession {
                 },
             );
         }
-        for persisted in &catalog.entries {
-            let content_key_id = ContentKeyId::from_string(persisted.content_key_id.clone())
+        for persisted in catalog.entries() {
+            let content_key_id = ContentKeyId::from_string(persisted.content_key_id())
                 .map_err(EncryptionError::key_material_corrupt_from)?;
             if keys.contains_key(&content_key_id)
                 || (content_key_id == ContentKeyId::legacy_v1()
-                    && (catalog.version != 2 || persisted.epoch != 0))
+                    && (catalog.version() != 2 || persisted.epoch() != 0))
             {
                 return Err(EncryptionError::key_material_corrupt());
             }
-            let key = MasterKey::from_bytes(&persisted.key)
-                .map_err(EncryptionError::key_material_corrupt_from)?;
             keys.insert(
                 content_key_id,
                 ContentKeyEntry {
-                    epoch: GroupEpoch::new(persisted.epoch),
-                    key,
+                    epoch: GroupEpoch::new(persisted.epoch()),
+                    key: persisted.key().clone(),
                 },
             );
         }
@@ -660,8 +633,8 @@ impl InMemorySession {
         expected_epoch: GroupEpoch,
         updated_at_ms: i64,
     ) -> Result<SpaceKeyMaterial, EncryptionError> {
-        let mut catalog = decode_content_key_catalog(material.key_catalog())?;
-        if catalog.version != 2 || material.state().mode() != SpaceSecurityMode::Ready {
+        let mut catalog = ContentKeyCatalog::decode(material.key_catalog())?;
+        if catalog.version() != 2 || material.state().mode() != SpaceSecurityMode::Ready {
             return Err(EncryptionError::key_material_corrupt());
         }
         let content_key_id = ContentKeyId::generate();
@@ -673,12 +646,12 @@ impl InMemorySession {
         if state.epoch() != expected_epoch {
             return Err(EncryptionError::key_material_corrupt());
         }
-        catalog.entries.push(PersistedContentKeyEntry {
-            content_key_id: content_key_id.as_str().to_owned(),
-            epoch: expected_epoch.value(),
-            key: content_key.as_bytes().to_vec(),
-        });
-        let key_catalog = encode_content_key_catalog(&catalog)?;
+        catalog.push(ContentKeyCatalogEntry::new(
+            content_key_id.as_str(),
+            expected_epoch.value(),
+            content_key,
+        ));
+        let key_catalog = catalog.encode()?;
         Ok(
             SpaceKeyMaterial::new(state, group_state, key_catalog, updated_at_ms)
                 .with_pending_group_updates_from(material),

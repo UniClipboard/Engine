@@ -9,7 +9,10 @@ use tracing::Span;
 use uc_core::ids::SpaceId;
 use uc_core::membership::{ActiveRuntimeLayout, ActiveSpaceGenerationManifestV2};
 
+use uc_infra_crypto::crypto_model::KeySlot;
+use uc_infra_crypto::secrets::Kek;
 use uc_infra_security::{AdmissionKeyError, AdmissionKeyManager};
+use zeroize::{Zeroize, Zeroizing};
 
 const ACTIVE_GENERATION_MANIFEST_FILE: &str = ".active-space-manifest-v2";
 const ACTIVE_GENERATION_MANIFEST_PURPOSE: &[u8] = b"active-space-manifest-v2";
@@ -235,20 +238,40 @@ impl DeviceManagementResetJournalV3 {
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+const ENCRYPTION_PASSPHRASE_CHANGE_JOURNAL_FORMAT: u16 = 1;
+
+/// 口令变更 journal。KEK 只以不透明的 `Kek` 跨 crate 传递；原始字节只在本模块的持久化格式中出现。
 pub struct EncryptionPassphraseChangeJournal {
-    pub format_version: u16,
-    pub keyslot: uc_infra_crypto::crypto_model::KeySlot,
-    pub kek: Vec<u8>,
-    pub prepared_registration: Vec<u8>,
+    keyslot: KeySlot,
+    kek: Kek,
+    prepared_registration: Zeroizing<Vec<u8>>,
 }
 
 impl EncryptionPassphraseChangeJournal {
-    pub fn validate(&self) -> bool {
-        self.format_version == 1
-            && self.keyslot.version == "V1"
+    pub fn new(keyslot: KeySlot, kek: Kek, prepared_registration: Vec<u8>) -> Self {
+        Self {
+            keyslot,
+            kek,
+            prepared_registration: Zeroizing::new(prepared_registration),
+        }
+    }
+
+    pub fn keyslot(&self) -> &KeySlot {
+        &self.keyslot
+    }
+
+    pub fn kek(&self) -> &Kek {
+        &self.kek
+    }
+
+    pub fn prepared_registration(&self) -> &[u8] {
+        &self.prepared_registration
+    }
+
+    /// KEK 长度由 `Kek` 保证；其余条件与持久化格式 V1 的校验一致。
+    fn is_complete(&self) -> bool {
+        self.keyslot.version == "V1"
             && self.keyslot.wrapped_master_key.is_some()
-            && self.kek.len() == 32
             && !self.prepared_registration.is_empty()
     }
 }
@@ -259,9 +282,41 @@ impl std::fmt::Debug for EncryptionPassphraseChangeJournal {
     }
 }
 
-impl Drop for EncryptionPassphraseChangeJournal {
+/// journal 的磁盘格式。字段名、顺序与类型就是已发布的 JSON 格式，修改必须提升格式版本。
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PersistedEncryptionPassphraseChangeJournal {
+    format_version: u16,
+    keyslot: KeySlot,
+    kek: Vec<u8>,
+    prepared_registration: Vec<u8>,
+}
+
+impl PersistedEncryptionPassphraseChangeJournal {
+    fn from_journal(journal: &EncryptionPassphraseChangeJournal) -> Self {
+        Self {
+            format_version: ENCRYPTION_PASSPHRASE_CHANGE_JOURNAL_FORMAT,
+            keyslot: journal.keyslot.clone(),
+            kek: journal.kek.as_bytes().to_vec(),
+            prepared_registration: journal.prepared_registration.to_vec(),
+        }
+    }
+
+    fn into_journal(mut self) -> Option<EncryptionPassphraseChangeJournal> {
+        if self.format_version != ENCRYPTION_PASSPHRASE_CHANGE_JOURNAL_FORMAT {
+            return None;
+        }
+        let kek = Kek::from_bytes(&self.kek).ok()?;
+        let journal = EncryptionPassphraseChangeJournal::new(
+            self.keyslot.clone(),
+            kek,
+            std::mem::take(&mut self.prepared_registration),
+        );
+        journal.is_complete().then_some(journal)
+    }
+}
+
+impl Drop for PersistedEncryptionPassphraseChangeJournal {
     fn drop(&mut self) {
-        use zeroize::Zeroize as _;
         self.kek.zeroize();
         self.prepared_registration.zeroize();
     }
@@ -351,16 +406,17 @@ impl ActiveSpaceGenerationManifestStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(source) => return Err(ActiveSpaceGenerationManifestStoreError::storage(source)),
         };
-        let plaintext = zeroize::Zeroizing::new(
+        let plaintext = Zeroizing::new(
             self.keys
                 .open_profile_payload(ENCRYPTION_PASSPHRASE_CHANGE_JOURNAL_PURPOSE, &ciphertext)
                 .map_err(map_key_error)?,
         );
-        let journal: EncryptionPassphraseChangeJournal = serde_json::from_slice(&plaintext)
-            .map_err(ActiveSpaceGenerationManifestStoreError::corrupt_from)?;
-        journal
-            .validate()
-            .then_some(Some(journal))
+        let persisted: PersistedEncryptionPassphraseChangeJournal =
+            serde_json::from_slice(&plaintext)
+                .map_err(ActiveSpaceGenerationManifestStoreError::corrupt_from)?;
+        persisted
+            .into_journal()
+            .map(Some)
             .ok_or_else(ActiveSpaceGenerationManifestStoreError::corrupt)
     }
 
@@ -368,7 +424,7 @@ impl ActiveSpaceGenerationManifestStore {
         &self,
         journal: &EncryptionPassphraseChangeJournal,
     ) -> Result<(), ActiveSpaceGenerationManifestStoreError> {
-        if !journal.validate() {
+        if !journal.is_complete() {
             return Err(ActiveSpaceGenerationManifestStoreError::corrupt());
         }
         let _guard = self.write_lock.lock().await;
@@ -379,9 +435,11 @@ impl ActiveSpaceGenerationManifestStore {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(ActiveSpaceGenerationManifestStoreError::storage)?;
-        let plaintext = zeroize::Zeroizing::new(
-            serde_json::to_vec(journal)
-                .map_err(ActiveSpaceGenerationManifestStoreError::corrupt_from)?,
+        let plaintext = Zeroizing::new(
+            serde_json::to_vec(&PersistedEncryptionPassphraseChangeJournal::from_journal(
+                journal,
+            ))
+            .map_err(ActiveSpaceGenerationManifestStoreError::corrupt_from)?,
         );
         let ciphertext = self
             .keys

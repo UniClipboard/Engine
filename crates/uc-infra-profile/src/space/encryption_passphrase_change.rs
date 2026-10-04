@@ -9,7 +9,6 @@ use uc_observability_contract::{uc_info, uc_warn};
 
 use crate::security::{ActiveSpaceGenerationManifestStore, EncryptionPassphraseChangeJournal};
 use crate::space::{prepare_registration, SqliteSpaceAdmissionCredentials};
-use uc_infra_crypto::secrets::Kek;
 use uc_infra_security::profile_passphrase_recovery::ProfilePassphraseRecoveryPort;
 use uc_infra_security::RuntimeSpaceAccessAdapter;
 use uc_infra_storage::db::ports::DbExecutor;
@@ -48,10 +47,10 @@ impl<E: DbExecutor> EncryptionPassphraseChange<E> {
     ) -> Result<(), ApplyEncryptionPassphraseChangePortError> {
         *stage = "registration";
         self.credentials
-            .replace_registration_with_prepared(&journal.prepared_registration)
+            .replace_registration_with_prepared(journal.prepared_registration())
             .await
             .map_err(recovery)?;
-        let kek = Kek::from_bytes(&journal.kek).map_err(recovery)?;
+        let kek = journal.kek();
         *stage = "profile_prepare";
         if let Err(error) = self
             .profile_recovery
@@ -61,7 +60,7 @@ impl<E: DbExecutor> EncryptionPassphraseChange<E> {
         }
         *stage = "install_material";
         self.access
-            .install_encryption_passphrase_material(&journal.keyslot, &kek)
+            .install_encryption_passphrase_material(journal.keyslot(), kek)
             .await
             .map_err(recovery)?;
         *stage = "profile_finish";
@@ -138,12 +137,7 @@ impl<E: DbExecutor + Send + Sync> ApplyEncryptionPassphraseChangePort
             .await
             .map_err(unavailable)?;
         let prepared_registration = prepare_registration(passphrase).map_err(unavailable)?;
-        let journal = EncryptionPassphraseChangeJournal {
-            format_version: 1,
-            keyslot,
-            kek: kek.as_bytes().to_vec(),
-            prepared_registration,
-        };
+        let journal = EncryptionPassphraseChangeJournal::new(keyslot, kek, prepared_registration);
         self.manifests
             .save_encryption_passphrase_change_journal(&journal)
             .await
@@ -498,16 +492,11 @@ mod tests {
             .prepare_encryption_passphrase_material(&Passphrase::new("recovered-passphrase"))
             .await
             .unwrap();
-        let journal = EncryptionPassphraseChangeJournal {
-            format_version: 1,
+        let journal = EncryptionPassphraseChangeJournal::new(
             keyslot,
-            kek: kek.as_bytes().to_vec(),
-            prepared_registration: prepare_registration(&Passphrase::new("recovered-passphrase"))
-                .unwrap(),
-        };
-        let encoded = serde_json::to_vec(&journal).unwrap();
-        let decoded: EncryptionPassphraseChangeJournal = serde_json::from_slice(&encoded).unwrap();
-        assert!(decoded.validate());
+            kek,
+            prepare_registration(&Passphrase::new("recovered-passphrase")).unwrap(),
+        );
         fixture
             .manifests
             .save_encryption_passphrase_change_journal(&journal)
