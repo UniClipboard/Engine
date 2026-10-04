@@ -104,6 +104,10 @@ impl ObservationContext {
     pub async fn scope<F: Future>(self, future: F) -> F::Output {
         CONTINUATION.scope(self.0, future).await
     }
+
+    fn sync_scope<T>(self, work: impl FnOnce() -> T) -> T {
+        CONTINUATION.sync_scope(self.0, work)
+    }
 }
 
 pub const TELEMETRY_SCHEMA_VERSION: u16 = 1;

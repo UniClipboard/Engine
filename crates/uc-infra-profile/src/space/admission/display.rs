@@ -1,7 +1,5 @@
 use crate::space::admission::failure_log::warn_state_failure;
 use async_trait::async_trait;
-use tokio::task::spawn_blocking;
-use tracing::Span;
 use uc_application::deps::{
     AdmissionDisplayStatus, LoadCurrentJoinStatusPort, PairingConfirmationObservation,
     PairingConfirmationStatus, PairingConfirmationTarget, QueryDeviceTrustError,
@@ -82,37 +80,30 @@ impl<E: DbExecutor + Clone + Send + Sync + 'static> SqliteSpaceAdmissionState<E>
     async fn load_current_join_record(
         &self,
     ) -> Result<Option<JoinerAdmission>, QueryDeviceTrustError> {
-        let state = self.clone();
-        let span = Span::current();
-        spawn_blocking(move || {
-            span.in_scope(|| {
-                state
-                    .executor
-                    .run(|conn| {
-                        let repository = state.load_state_on(conn).map_err(into_anyhow)?;
-                        let Some(admission_id) = repository
-                            .current_local_join_id
-                            .or(repository.latest_local_join_id)
-                        else {
-                            return Ok(None);
-                        };
-                        let stored = repository
-                            .records
-                            .get(&admission_id)
-                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
-                        let record = state
-                            .open_record(admission_id, stored)
-                            .map_err(into_anyhow)?;
-                        let admission = JoinerAdmission::try_from_record(record)
-                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
-                        Ok(Some(admission))
-                    })
-                    .map_err(map_executor_error)
-                    .map_err(map_query_error)
+        self.run_blocking(move |state| {
+            state.executor.run(|conn| {
+                let repository = state.load_state_on(conn).map_err(into_anyhow)?;
+                let Some(admission_id) = repository
+                    .current_local_join_id
+                    .or(repository.latest_local_join_id)
+                else {
+                    return Ok(None);
+                };
+                let stored = repository
+                    .records
+                    .get(&admission_id)
+                    .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
+                let record = state
+                    .open_record(admission_id, stored)
+                    .map_err(into_anyhow)?;
+                let admission = JoinerAdmission::try_from_record(record)
+                    .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
+                Ok(Some(admission))
             })
         })
         .await
-        .map_err(map_join_error)?
+        .map_err(map_executor_error)
+        .map_err(map_query_error)
     }
 
     /// 与 [`Self::load_current_join_record`] 相同，整个同步读取留在一个阻塞闭包内。
@@ -128,114 +119,102 @@ impl<E: DbExecutor + Clone + Send + Sync + 'static> SqliteSpaceAdmissionState<E>
         ),
         QueryDeviceTrustError,
     > {
-        let state = self.clone();
         let targets = targets.to_vec();
-        let span = Span::current();
-        spawn_blocking(move || {
-            span.in_scope(|| {
-                state
-                    .executor
-                    .run(|conn| {
-                        let repository = state.load_state_on(conn).map_err(into_anyhow)?;
-                        let current_join = repository
-                            .current_local_join_id
-                            .or(repository.latest_local_join_id)
-                            .map(|admission_id| {
-                                let stored =
-                                    repository.records.get(&admission_id).ok_or_else(|| {
-                                        into_anyhow(SpaceAdmissionStateStoreError::corrupt())
-                                    })?;
-                                let record = state
-                                    .open_record(admission_id, stored)
-                                    .map_err(into_anyhow)?;
-                                JoinerAdmission::try_from_record(record).ok_or_else(|| {
-                                    into_anyhow(SpaceAdmissionStateStoreError::corrupt())
-                                })
-                            })
-                            .transpose()?;
-                        let mut confirmations = Vec::new();
-                        let mut inbound_pairings = Vec::new();
-                        for (admission_id, stored) in &repository.records {
-                            let aggregate = state
-                                .open_record(*admission_id, stored)
-                                .map_err(into_anyhow)?;
-                            let Some(sponsor) = SponsorAdmission::try_from_record(aggregate)
-                            else {
-                                continue;
-                            };
-                            if let Some(preparation) = sponsor.sponsor_settlement_preparation() {
-                                let history = VersionedMembershipHistory::decode_persisted_v2(
-                                    preparation.committed_history().as_bytes(),
-                                    &OpenMlsHistoricalSignatureVerifier,
-                                )
-                                .map_err(|error| {
-                                    into_anyhow(SpaceAdmissionStateStoreError::corrupt_from(error))
-                                })?;
-                                let facts = history
-                                    .admission_facts_for(
-                                        preparation.activation_receipt().joiner_member_instance_id,
-                                    )
-                                    .ok_or_else(|| {
-                                        into_anyhow(SpaceAdmissionStateStoreError::corrupt())
-                                    })?;
-                                let status = if sponsor.expires_at_ms().is_none() {
-                                    InboundPairingStatus::NeedsAttention
-                                } else {
-                                    match sponsor
-                                        .pairing_confirmation()
-                                        .map(|summary| summary.status())
-                                    {
-                                        Some(
-                                            SponsorPairingConfirmationStatus::AwaitingPeerConfirmation,
-                                        ) => InboundPairingStatus::AwaitingConfirmation,
-                                        Some(SponsorPairingConfirmationStatus::Unconfirmed) => {
-                                            InboundPairingStatus::ConfirmationMissed
-                                        }
-                                        Some(SponsorPairingConfirmationStatus::Confirmed)
-                                        | None => {
-                                            return Err(into_anyhow(
-                                                SpaceAdmissionStateStoreError::corrupt(),
-                                            ));
-                                        }
-                                    }
-                                };
-                                inbound_pairings.push(InboundPairing {
-                                    pairing_id: *admission_id,
-                                    device_id: Some(facts.device_id.clone()),
-                                    display_name: Some(facts.device_name.clone()),
-                                    status,
-                                });
-                            } else if sponsor.is_failed() {
-                                inbound_pairings.push(InboundPairing {
-                                    pairing_id: *admission_id,
-                                    device_id: None,
-                                    display_name: None,
-                                    status: InboundPairingStatus::Failed,
-                                });
-                            }
-                            let Some(summary) = sponsor.pairing_confirmation() else {
-                                continue;
-                            };
-                            let target = PairingConfirmationTarget {
-                                member_instance_id: summary.member_instance_id(),
-                                add_event_id: summary.add_event_id(),
-                            };
-                            if targets.contains(&target) {
-                                confirmations.push(PairingConfirmationObservation {
-                                    target,
-                                    status: map_pairing_confirmation_status(summary.status()),
-                                });
-                            }
-                        }
-                        inbound_pairings.sort_by_key(|pairing| pairing.pairing_id);
-                        Ok((current_join, inbound_pairings, confirmations))
+        self.run_blocking(move |state| {
+            state.executor.run(|conn| {
+                let repository = state.load_state_on(conn).map_err(into_anyhow)?;
+                let current_join = repository
+                    .current_local_join_id
+                    .or(repository.latest_local_join_id)
+                    .map(|admission_id| {
+                        let stored = repository
+                            .records
+                            .get(&admission_id)
+                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
+                        let record = state
+                            .open_record(admission_id, stored)
+                            .map_err(into_anyhow)?;
+                        JoinerAdmission::try_from_record(record)
+                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))
                     })
-                    .map_err(map_executor_error)
-                    .map_err(map_query_error)
+                    .transpose()?;
+                let mut confirmations = Vec::new();
+                let mut inbound_pairings = Vec::new();
+                for (admission_id, stored) in &repository.records {
+                    let aggregate = state
+                        .open_record(*admission_id, stored)
+                        .map_err(into_anyhow)?;
+                    let Some(sponsor) = SponsorAdmission::try_from_record(aggregate) else {
+                        continue;
+                    };
+                    if let Some(preparation) = sponsor.sponsor_settlement_preparation() {
+                        let history = VersionedMembershipHistory::decode_persisted_v2(
+                            preparation.committed_history().as_bytes(),
+                            &OpenMlsHistoricalSignatureVerifier,
+                        )
+                        .map_err(|error| {
+                            into_anyhow(SpaceAdmissionStateStoreError::corrupt_from(error))
+                        })?;
+                        let facts = history
+                            .admission_facts_for(
+                                preparation.activation_receipt().joiner_member_instance_id,
+                            )
+                            .ok_or_else(|| into_anyhow(SpaceAdmissionStateStoreError::corrupt()))?;
+                        let status = if sponsor.expires_at_ms().is_none() {
+                            InboundPairingStatus::NeedsAttention
+                        } else {
+                            match sponsor
+                                .pairing_confirmation()
+                                .map(|summary| summary.status())
+                            {
+                                Some(
+                                    SponsorPairingConfirmationStatus::AwaitingPeerConfirmation,
+                                ) => InboundPairingStatus::AwaitingConfirmation,
+                                Some(SponsorPairingConfirmationStatus::Unconfirmed) => {
+                                    InboundPairingStatus::ConfirmationMissed
+                                }
+                                Some(SponsorPairingConfirmationStatus::Confirmed) | None => {
+                                    return Err(into_anyhow(
+                                        SpaceAdmissionStateStoreError::corrupt(),
+                                    ));
+                                }
+                            }
+                        };
+                        inbound_pairings.push(InboundPairing {
+                            pairing_id: *admission_id,
+                            device_id: Some(facts.device_id.clone()),
+                            display_name: Some(facts.device_name.clone()),
+                            status,
+                        });
+                    } else if sponsor.is_failed() {
+                        inbound_pairings.push(InboundPairing {
+                            pairing_id: *admission_id,
+                            device_id: None,
+                            display_name: None,
+                            status: InboundPairingStatus::Failed,
+                        });
+                    }
+                    let Some(summary) = sponsor.pairing_confirmation() else {
+                        continue;
+                    };
+                    let target = PairingConfirmationTarget {
+                        member_instance_id: summary.member_instance_id(),
+                        add_event_id: summary.add_event_id(),
+                    };
+                    if targets.contains(&target) {
+                        confirmations.push(PairingConfirmationObservation {
+                            target,
+                            status: map_pairing_confirmation_status(summary.status()),
+                        });
+                    }
+                }
+                inbound_pairings.sort_by_key(|pairing| pairing.pairing_id);
+                Ok((current_join, inbound_pairings, confirmations))
             })
         })
         .await
-        .map_err(map_join_error)?
+        .map_err(map_executor_error)
+        .map_err(map_query_error)
     }
 
     async fn project_current_join(
@@ -1078,12 +1057,6 @@ fn map_pairing_confirmation_status(
 }
 
 fn map_query_error(error: SpaceAdmissionStateStoreError) -> QueryDeviceTrustError {
-    QueryDeviceTrustError::Dependency {
-        source: anyhow::Error::new(error),
-    }
-}
-
-fn map_join_error(error: tokio::task::JoinError) -> QueryDeviceTrustError {
     QueryDeviceTrustError::Dependency {
         source: anyhow::Error::new(error),
     }
