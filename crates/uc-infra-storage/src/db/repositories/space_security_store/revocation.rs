@@ -15,6 +15,8 @@ use uc_infra_security::MasterKey;
 use super::encrypted_payload::{open, seal, space_lookup_token};
 use super::space_material::{load_space_material_on, save_space_material_on};
 use super::{backend, epoch_to_i64, transaction_failure, DieselSpaceSecurityStore};
+use tokio::task::spawn_blocking;
+use uc_observability_contract::diagnostics::connectivity::LocalWorkContext;
 use uc_observability_contract::uc_warn;
 
 #[derive(QueryableByName)]
@@ -98,7 +100,7 @@ pub(super) fn decode_record(
 }
 
 #[async_trait]
-impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
+impl<E: DbExecutor + Clone + 'static> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
     async fn save_space_material(&self, material: &SpaceKeyMaterial) -> Result<(), KeyEpochError> {
         let master_key = self.session.get_master_key().map_err(backend)?;
         self.executor
@@ -128,9 +130,23 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
         online_peer: Option<DeviceId>,
     ) -> Result<Vec<PendingGroupUpdate>, KeyEpochError> {
         let key = self.session.get_master_key().map_err(backend)?;
-        self.executor
-            .run(|conn| Ok(self.load_due_updates_on(conn, &key, space_id, now_ms, online_peer)))
-            .map_err(transaction_failure)?
+        // 成员维护轮次在移动绑定的单线程运行期上调用这里；整段写事务（含等待写锁）
+        // 移到阻塞线程，避免其他连接持有控制库写锁时冻结同一运行期上的生命周期请求。
+        let store = self.clone();
+        let space_id = space_id.clone();
+        let context = LocalWorkContext::capture();
+        spawn_blocking(move || {
+            context.run(|| {
+                store
+                    .executor
+                    .run(|conn| {
+                        Ok(store.load_due_updates_on(conn, &key, &space_id, now_ms, online_peer))
+                    })
+                    .map_err(transaction_failure)?
+            })
+        })
+        .await
+        .map_err(backend)?
     }
 
     async fn record_group_update_failures(

@@ -16,6 +16,7 @@ use uc_core::membership::KeyEpochError;
 
 use uc_infra_security::InMemorySession;
 
+#[derive(Clone)]
 pub struct DieselSpaceSecurityStore<E> {
     executor: E,
     session: InMemorySession,
