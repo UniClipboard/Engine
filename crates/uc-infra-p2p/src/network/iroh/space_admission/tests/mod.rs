@@ -1,7 +1,9 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use uc_observability_contract::diagnostics::connectivity::complete_admission_authentication_failure;
+use uc_observability_contract::diagnostics::connectivity::{
+    complete_admission_authentication_failure, CredentialFailure,
+};
 
 use async_trait::async_trait;
 use iroh::endpoint::Connection;
@@ -103,6 +105,7 @@ impl SpaceAdmissionChannelCredentialPort for LoopbackCredentials {
     ) -> Result<SponsorOpaqueMaterial, SpaceAdmissionChannelCredentialError> {
         self.initial.lock().await.take().ok_or_else(|| {
             SpaceAdmissionChannelCredentialError::Rejected {
+                failure: CredentialFailure::RecoveryRequired,
                 source: anyhow::anyhow!("initial credential already consumed"),
             }
         })
@@ -114,11 +117,13 @@ impl SpaceAdmissionChannelCredentialPort for LoopbackCredentials {
     ) -> Result<AdmissionContinuationCredential, SpaceAdmissionChannelCredentialError> {
         let bytes = self.continuation.lock().await.clone().ok_or_else(|| {
             SpaceAdmissionChannelCredentialError::Unavailable {
+                failure: CredentialFailure::Unavailable,
                 source: anyhow::anyhow!("continuation is not committed"),
             }
         })?;
         AdmissionContinuationCredential::from_bytes(bytes).map_err(|source| {
             SpaceAdmissionChannelCredentialError::Rejected {
+                failure: CredentialFailure::RecoveryRequired,
                 source: anyhow::Error::new(source),
             }
         })

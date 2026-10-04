@@ -4,6 +4,7 @@ use uc_core::membership::{AdmissionContinuationCredential, InvitationId, SpaceAd
 use uc_infra_crypto::space_admission_auth::{
     SpaceAdmissionRegistration, SpaceAdmissionServerSetup,
 };
+use uc_observability_contract::diagnostics::connectivity::CredentialFailure;
 
 pub struct SponsorOpaqueMaterial {
     pub(super) server_setup: SpaceAdmissionServerSetup,
@@ -30,26 +31,24 @@ impl SponsorOpaqueMaterial {
 pub enum SpaceAdmissionChannelCredentialError {
     #[error("space admission channel credential is unavailable")]
     Unavailable {
+        failure: CredentialFailure,
         #[source]
         source: anyhow::Error,
     },
     #[error("space admission channel credential was rejected")]
     Rejected {
+        failure: CredentialFailure,
         #[source]
         source: anyhow::Error,
     },
 }
 
 impl SpaceAdmissionChannelCredentialError {
-    /// 协议负责人只取得脱敏分类；具体来源类型留在构造它的 Infra 适配器内部，
-    /// 跨 crate 不再对 `source` 做向下转型。
-    pub fn diagnostic_failure(
-        &self,
-    ) -> uc_observability_contract::diagnostics::connectivity::CredentialFailure {
-        use uc_observability_contract::diagnostics::connectivity::CredentialFailure;
+    /// 协议负责人只取得脱敏分类。分类由构造错误的凭据负责人按其来源类型写入，
+    /// 网络侧不对 `source` 做跨 crate 向下转型。
+    pub fn diagnostic_failure(&self) -> CredentialFailure {
         match self {
-            Self::Unavailable { .. } => CredentialFailure::Unavailable,
-            Self::Rejected { .. } => CredentialFailure::RecoveryRequired,
+            Self::Unavailable { failure, .. } | Self::Rejected { failure, .. } => *failure,
         }
     }
 }
