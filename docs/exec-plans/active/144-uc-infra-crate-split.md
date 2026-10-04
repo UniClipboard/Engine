@@ -451,13 +451,43 @@ main `7d4e496d` 为 B 组，在同一台机器上成对测量。
 
 **结论范围**：本结论只适用于 macOS（Apple M4、10 核）、`jobs = 2`、dev profile、预热好的共享 sccache、以 `uc-engine-uniffi` 为目标的增量构建。不能推广到冷构建、release 构建或下游产品仓的 workspace 根配置。
 
+## main coverage 失败：uniffi 生命周期测试的根因与修复（2026-10-04）
+
+**现象**：main `7d4e496d` 的 Rust coverage job（run 37196002696）中，
+`uc-engine-uniffi::public_contract lifecycle_targets::a_pause_reaches_the_engine_while_the_profile_vault_key_is_waiting`
+失败，位置在 `lifecycle_targets.rs:93`：`engine.lifecycle_state()` 返回 `RuntimeUnavailable`。第 39、40 行的 panic 是它连带出来的。
+
+**是否由拆分引入**：在本机用干净的拆分前 worktree（`54ffafb3`）和当前代码交替各跑 8 轮。这个测试在两边都是 **3/8 失败**，
+失败位置和报错完全相同。所以它在拆分前就已存在，不是拆分引入的。
+
+**根因**（用 macOS `sample` 在卡住期间抓到的线程栈证实）：
+- 移动绑定在 `uc-engine-uniffi` 线程上用**单线程** tokio 运行期驱动 Engine。
+- 恢复时，`RecoverSpaceSessionUseCase` 经 `CurrentSpaceResolver` 调用 `ActiveSpaceGenerationManifestStore::load_runtime`。这是一个 async 函数，但它在运行期线程上**同步**执行了 `AdmissionKeyManager::open_profile_payload`，进而同步读取宿主安全存储里的 profile key。
+- 测试的读取闸门让这次读取阻塞，于是运行期唯一的线程被占住，同一运行期上的生命周期 worker 无法处理状态查询，10 秒后返回 `RuntimeUnavailable`。
+- 另一路 `kek` 读取经 `spawn_blocking` 执行，走的是正确的路径。两路读取谁先撞上闸门是随机的，所以测试时好时坏。
+- 在真实设备上，这意味着恢复时只要宿主安全存储的读取较慢，就会让同一运行期上的暂停和状态查询停滞。
+
+**修复**：`load_runtime` 仍在运行期上读取文件，把解密这一步（会读安全存储）放进 `spawn_blocking`，并沿用 storage 仓储已有的 `Span::current().in_scope` 写法；解码部分抽成不碰存储的 `decode_runtime_plaintext`。同步版本 `load_runtime_sync` 的行为不变。没有新增抽象，也没有新增测试。
+
+**验证**：用现有的端到端测试验证：修复后两个 `lifecycle_targets` 测试各跑 16 次，第 93 行的失败为 **0/32**（修复前 3/8）。之后又连续抓栈运行 30 次，全部通过。
+
+**仍未解决**：
+- 修复后的 32 次运行里有 1 次在 `lifecycle_targets.rs:73` 失败：`create_space` 之后 `suspend()` 超出 10 秒期限（`DeadlineExceeded`）。修复前在本机高负载时也出现过。
+- 之后连续 30 次抓栈运行都没能再触发它，根因没有证据，所以没有做推测性修改。
+- 同一个 store 里 `promote`、`persist_manifest` 等 async 路径也会在运行期线程上同步调用 `seal_profile_payload`，属于同类风险，但这次没有被任何失败证实，暂不修改。
+
+工件在 `/Volumes/ExternalSSD/cargo-targets/workspaces/engine/6686a9a07cb796b0/test-artifacts/issue-144-uniffi-lifecycle-20261004T121315Z/`：
+- `results.txt`、`runs/`：修复前的对照
+- `sample/`：卡住时的线程栈
+- `fixed/`：修复后的 32 次运行和 `fix.diff`
+- `sample73/`：第 73 行问题的抓栈尝试
+- `verify/`：交付检查
+
 ## 遗留风险 / 下一步必须处理的事项
 
 1. **构建性能 A/B 实验已完成**（S6 第二部分，结果见上）。冷构建、完整 workspace、release 和其他宿主仍未测。
-2. **main `7d4e496d` 的 CI 没有全绿**（run 37196002696）：Rust coverage job 中
-   `uc-engine-uniffi::public_contract lifecycle_targets::a_pause_reaches_the_engine_while_the_profile_vault_key_is_waiting`
-   失败，Engine tests job 里同一项通过。同组 uniffi 生命周期测试在拆分前的 main 上也失败过，但这一项的根因还没分析，
-   也没有在拆分前的基线上重跑，**不能断言它是否属于拆分回归**。后续事项，不在本切片修复。
+2. **main `7d4e496d` 的 Rust coverage 失败**：根因已找到并修复，见"main coverage 失败"一节。修复后的 CI 结果
+   以本 PR 为准。`lifecycle_targets.rs:73` 偶发的暂停超时根因仍未找到。
 3. **S2 没有产出 issue 字面要求的失败矩阵文档**，S3/S4/S5 同样没有补；只做了等价的"零覆盖流失"验证。
 4. **切片收尾必须以 CI 的 Engine tests 为准**：本地只跑 `--lib` 会漏掉集成测试与跨 crate 观测测试；
    S2–S5 的回归都是 CI 已报告但被当作偶发失败合入的。偶发失败要逐条与拆分前 `main` 的失败清单对比后才能忽略。
