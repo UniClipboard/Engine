@@ -3,7 +3,7 @@
 这里包含设计中、实施中、待实现或暂时阻塞的工作。状态以各文件开头为准。
 
 - [034 确定性虚拟 Peer Network 测试套件](034-deterministic-virtual-peer-network-test-suite.md)
-- [144 `uc-infra` 拆成 7 个 crate](144-uc-infra-crate-split.md)（收尾中：S1–S6 实施完成并归档实施记录，Rust coverage 待 main 验证）
+- [144 `uc-infra` 拆成 7 个 crate](144-uc-infra-crate-split.md)（收尾中：S1–S6 实施完成并归档实施记录；main coverage 已转绿，验收中仍有部分满足与未测项）
 - [038 双设备配对本机耗时压缩到一秒](038-pairing-local-latency-budget.md)（实施中）
 - [039 历史本地调试记录逐项收口](039-local-debug-inventory-cleanup.md)
 - [041 可导出的连接故障调查记录](041-exportable-connection-diagnostics.md)（含 Engine、手机、桌面宿主及联合验收，进度见正文）
