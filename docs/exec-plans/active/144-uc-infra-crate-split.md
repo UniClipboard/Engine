@@ -3,8 +3,8 @@
 ## 状态与完整责任
 
 - **状态**：实施中。S0（完整基线实验）按用户指示跳过；S1、S2、S3、S4 已完成并合并；S5（`uc-infra-profile`，
-  删除 `uc-infra`）已完成。S6 第一部分（门禁/CI/文档核对与 S2–S5 回归修复）已完成；S6 第二部分
-  （构建性能 A/B 实验）未开始。
+  删除 `uc-infra`）已完成。S6 第一部分（门禁/CI/文档核对与 S2–S5 回归修复）已随 PR #152 合并（`7d4e496d`）；S6 第二部分
+  （构建性能 A/B 实验）已在本机受控条件下完成，结果见下方。
 - **日期**：2026-10-04。
 - **跟踪**：[Issue #144](https://github.com/UniClipboard/Engine/issues/144)（设计全文、七个 crate 的职责/允许依赖表、
   六类依赖切断方案、Edge Cases、测试策略、构建性能实验方法、验收标准均在 issue 正文，本文件不复制，只跟踪切片状态）。
@@ -31,7 +31,7 @@
 | S3 | 提取 `uc-infra-storage`、`uc-infra-content` | **完成** | [PR #148](https://github.com/UniClipboard/Engine/pull/148)（`bce30ec9`）；见下方"S3 范围" |
 | S4 | 完成邀请 codec、错误分类、身份槽位切断，再提取整个 `uc-infra-p2p` | **完成** | [PR #150](https://github.com/UniClipboard/Engine/pull/150)（`d3af2e55`）；见下方"S4 范围" |
 | S5 | 剩余升级/激活能力迁 `uc-infra-profile`，LAN 移 `uc-mobile-lan`，删除 `uc-infra` | **完成** | [PR #151](https://github.com/UniClipboard/Engine/pull/151)（`f8add578`）；见下方"S5 范围" |
-| S6 | 更新架构门禁、CI、构建缓存、发布脚本、文档；完成公平性能对照 | 第一部分**完成**；性能对照未开始 | 见下方"S6 第一部分范围" |
+| S6 | 更新架构门禁、CI、构建缓存、发布脚本、文档；完成公平性能对照 | 第一部分**完成**（PR #152，`7d4e496d`）；性能对照**完成**（本机受控增量构建，冷构建/release 跳过） | 见下方"S6 第一部分范围"与"S6 第二部分"两节 |
 
 ## S1 范围（2026-10-03，PR #145）
 
@@ -126,7 +126,7 @@
 
 **没有跟着这一半走的部分**（issue 原表把它们的 SQL 所有权分给 storage，但本次刻意不动）：
 
-- `space/membership_record/`（issue 第 5 节第 5 条："成员记录 membership_record/ 移 storage"）
+- `space/membership_record/`（issue 第 5 节第 5 条："成员记录 membership_record/ 移 storage"；后续已决定不改，见"已决定不改"一节）
 - `space/admission/repository/` 及其 `display.rs` 配套读取（issue 同一条："准入记录 repository/、配套 display
   读取实现...移 storage，完整事务一起移动"）
 
@@ -327,16 +327,173 @@ zstd/tantivy/rusqlite 零命中——确认整 crate 改名不影响 S4 已验�
   以及代码注释/测试里的复跑命令全部改到实际 crate。completed 计划、`.planning/` 与 ADR 的历史叙述保持原样。
   ADR-032 中"`uc-infra` 与 `network/iroh` 双向依赖"的未决事项已标为由 S4 解决。
 
+## 已决定不改：`membership_record` 与准入仓储留在 `uc-infra-profile`（2026-10-04）
+
+issue 第 5 节第 5 条把 `space/membership_record/` 和 `space/admission/repository/` 的 SQL 归给 storage。
+本计划决定**不搬迁**。边界定为：领域记录格式和对应查询由 `uc-infra-profile` 拥有；表结构、migrations、
+连接池、执行器与事务原语由 `uc-infra-storage` 提供；依赖方向是 profile → storage，没有环。
+
+**源码核查**（2026-10-04，以 `7d4e496d` 为准，只读）：
+
+- **规模**：
+  - `membership_record/`：9 个文件、约 2560 行，其中 2 个文件直接写 SQL，只碰 `membership_ledger_state` 一张表。
+  - `admission/repository/`：8 个文件、约 2950 行，其中 5 个文件直接写 SQL，碰 `admission_repository_state`、`admission_repository_record`、`admission_recovery_summary` 三张表。
+  - 其余代码是加密记录格式、旧格式迁移和恢复索引。
+- **profile 之外的调用方**：
+  - 对外公开的只有 `SqliteMembershipRecordStore`、`SqliteSpaceAdmissionState` 和 `AdmissionRepositoryBenchmark`。
+  - 生产代码里只有 Engine 组装层（`crates/uc-engine/src/assembly/deps.rs`、`assembly/wire/mod.rs`）构造它们，作为 Application port（如 `MembershipRecordStorePort`）注入。Engine 不读取记录内容。
+  - `uc-engine/tests/host_contract/{key_loss.rs,startup/admission_recovery.rs}` 直接用 SQL 写入或破坏准入表，用来构造故障现场，属于测试，不是生产调用方。
+  - 除 migrations 外，storage 和其他 `uc-infra-*` 的源码都不引用这四张表。
+- **跨表原子事务**：
+  - 成员记录提交（`membership_record/store.rs` 的 `commit_record` 和另一处提交路径）在同一个 `immediate_transaction` 里先写 `membership_ledger_state`，再调用 storage 的 `MembershipProjectionWriter::apply(conn, plan)`（`uc-infra-storage/src/db/repositories/relationship_store/projection.rs`），写入 `encrypted_relationship` 的 member、trusted_peer、peer_address 行。
+  - 这条跨 crate 的原子提交现在就能成立：storage 提供在调用方事务中执行的写入器，profile 负责组合，测试 `the_read_model_is_written_in_the_record_transaction` 覆盖了它。
+  - 准入仓储的"事务内读写"接口（`load_state_in_transaction_on`、`save_state_on` 等）只被 profile 自己的准入模块调用（`credentials.rs`、`joiner/activation_state.rs`、`joiner/cancellation.rs`、`display.rs`），没有被边界挡住的跨 crate 事务。
+
+**保留现状的理由**：没有 profile 之外的真实调用方需要这些记录；已有的跨表原子事务没有被边界阻断；
+整块搬进 storage 会让 storage 承担准入和成员领域格式，只拆 SQL 又要切开持久化格式代码；留在 profile
+时，改动这些记录只会让 profile 和 Engine 重新编译。
+
+**重新考虑的条件**：
+- 出现 profile 之外需要读写这些记录的生产调用方。
+- 出现需要和这些表同事务提交、但无法由 profile 组合 storage 写入器完成的 storage 侧写入。
+
+**核查边界**：
+- 只做了源码静态核查，没有运行时追踪。
+- 没有逐一核查 Application 层是否在一次业务动作中跨多个 port 期望原子性。那属于流程负责人的设计，不由本边界决定。
+
+## S6 第二部分：构建性能对照协议（2026-10-04）
+
+按 issue §8 执行。S0 被跳过，没有预先登记的基线，因此以拆分前的 `54ffafb3` 为 A 组、以 S6 第一部分合并后的
+main `7d4e496d` 为 B 组，在同一台机器上成对测量。
+
+- **固定条件**：
+  - toolchain 1.95.0；两组 `.cargo/config.toml` 逐字相同（`jobs = 2`，rustflags 为 `--cfg tokio_unstable`）。
+  - dev profile；A 组的 `uc-infra` 与 B 组的七个 `uc-infra-*` 都是 dev `opt-level = 3`。
+  - 共享 sccache 不清空，按 issue §8 第 1 条记录每次构建前后的命中/未命中差值。
+  - 两组各用独立 worktree，构建目录由 wrapper 分配。
+  - 每组的锁文件取各自提交的版本，使用 `--locked`。
+- **构建目标**：`cargo build --locked -p uc-engine-uniffi --lib`，产出 rlib、staticlib 和 cdylib，覆盖代表性宿主的最终链接。`cargo check` 用同一目标单列，不当作代码生成性能。
+- **修改探针**：在四个实际实现函数的函数体开头插入一行 `std::hint::black_box(<常量>);`。语义等价，但会改变代码生成。
+  - P2P：`network/iroh/clipboard_dispatch_adapter.rs::network_span`
+  - SQL：`db/repositories/relationship_store.rs::is_relationship_diagnostic_frame`
+  - 缩略图：`clipboard/thumbnail_generator.rs::calculate_target_size`
+  - Profile：`security/profile_storage_upgrade/journal.rs::record_primary_warnings`
+
+  每次测量都换一个新常量，按"轮次 × 文件 × 阶段"编码，并记录文件 SHA256，避免命中 sccache。每次测量前只有一个文件发生变化；跨阶段改动由不计入结果的同步构建吸收。
+- **轮次**：3 轮，A/B 在每个测量点交替执行，奇数轮先 A、偶数轮先 B。每轮依次做：
+  1. 同步构建（不计时）
+  2. 无修改 warm build
+  3. 四个文件各改一次后 build
+  4. 同步 check（不计时）
+  5. 无修改 warm check
+  6. 四个文件各改一次后 check
+- **采集**：
+  - wall time
+  - Cargo JSON 中 `compiler-artifact.fresh` 的 fresh/dirty 包列表
+  - `--timings` 原始 HTML
+  - sccache 统计差值
+  - 每 250 毫秒对 rustc、链接器、C 编译器和归档工具进程采样一次，记录单进程最大 RSS 和同一时刻的总 RSS。只在同一采样时刻内求和，采样间隔内可能漏掉峰值。
+- **不测的项目**（记为"跳过"）：
+  - 冷构建：要求不清空共享缓存，又没有独立的缓存命名空间。
+  - 完整 workspace 构建、release 构建、其他宿主或设备。
+- **判定**：按 issue §9 的建议预算，分别报告四类修改在三轮中的中位耗时。预算未达成就不宣称完成提速目标。
+
+## S6 第二部分：构建性能对照结果（2026-10-04）
+
+按上面的协议执行，3 轮共 60 个测量点，全部成功。原始数据、`--timings` HTML、Cargo JSON、驱动脚本、汇总脚本和 `SHA256SUMS`（`rounds-*` 共 190 个文件，`prime/` 4 个文件）在
+`/Volumes/ExternalSSD/cargo-targets/workspaces/engine/6686a9a07cb796b0/test-artifacts/issue-144-s6b-build-perf/`
+（`prime/` 和 `rounds-20261004T105410Z/`）。复跑命令：`python3 perf_ab.py <输出目录> 3 A=<54ffafb3 worktree> B=<7d4e496d worktree>`，再运行 `perf_summary.py <输出目录>`。
+
+**三轮中位 wall time**（A = 拆分前 `54ffafb3`，B = `7d4e496d`；目标为 `-p uc-engine-uniffi --lib`，含 staticlib/cdylib 链接）：
+
+| 模式 | 改动 | A 中位 | B 中位 | B 相对 A | A 单进程 RSS 中位 | B 单进程 RSS 中位 |
+| --- | --- | --- | --- | --- | --- | --- |
+| build | P2P | 85.9 s | 64.1 s | −25.4% | 2834 MB | 1566 MB |
+| build | SQL | 87.5 s | 66.2 s | −24.3% | 2866 MB | 1452 MB |
+| build | 缩略图 | 84.8 s | 54.0 s | −36.3% | 2923 MB | 1584 MB |
+| build | Profile | 85.6 s | 52.4 s | −38.9% | 2887 MB | 1517 MB |
+| check | P2P | 33.3 s | 25.5 s | −23.2% | 1476 MB | 854 MB |
+| check | SQL | 34.1 s | 22.6 s | −33.6% | 1453 MB | 854 MB |
+| check | 缩略图 | 34.05 s | 18.0 s | −47.1% | 1457 MB | 855 MB |
+| check | Profile | 33.6 s | 17.5 s | −48.1% | 1454 MB | 809 MB |
+
+无修改的 warm build/check 两组都在 0.4–1.2 秒之间，均无重编单元。
+
+**失效集合**（来自 Cargo JSON 的 `fresh` 字段，三轮一致）：
+- A 组：四类修改都会重编 `uc_infra`、`uc_engine`、`uc_engine_uniffi`。
+- B 组：
+  - 改 P2P 只重编 `uc_infra_p2p`、`uc_infra_profile`、`uc_engine`、`uc_engine_uniffi`。
+  - 改 SQL 只重编 storage、profile、Engine。
+  - 改缩略图只重编 content、profile、Engine。
+  - 改 Profile 只重编 profile、Engine。
+- 兄弟能力 crate 都保持 fresh，例如改 SQL 时 p2p、content、security 不重编。
+- 两组每次都会重编 `uc_observability_runtime`，原因未调查。它对两组相同，不影响对比。
+
+**按 issue §9 的预算判定**（只在下列受控条件内成立）：
+- 四类实际修改的 build 中位耗时降幅都超过 20%，**满足**"至少三个场景降低 20%、其余不超过 5% 回退"。
+- 单进程最大 RSS 下降约 45–50%，**满足**"单进程降低 20%"。
+- 同一时刻总 RSS 的 B 组中位值也低于 A 组，**满足**"总峰值不回退超过 10%"。
+
+**噪声与污染边界**：
+- 第 3 轮从 build 缩略图开始，负载均值升到 25–40，期间有 18–21 个其他会话的 cargo/rustc 进程。sccache 差值里也混入了其他会话的编译（例如 B 组第 3 轮改 SQL 时，命中 15 次、未命中 577 次）。60 个测量点中有 12 个记录到外部 cargo 进程。
+- 只用干净的第 1–2 轮复算，build 的降幅为 −24.6%、−29.2%、−37.6%、−40.0%，check 的降幅为 −23.7% 到 −48.0%，结论不变。
+- 本机常驻负载（Android 模拟器、远程桌面、浏览器）没有关闭，每个点都记录了负载均值。
+
+**RSS 测量边界**：
+- 每 0.25 秒用 `ps` 采样一次，只统计 rustc、ld、clang、cc、ar 等工具进程；同一时刻总量只在同一次采样内求和。
+- 可能漏掉持续时间短于采样间隔的峰值。
+- 没有统计 sccache 服务进程本身。
+
+**未测，记为"跳过"**：
+- 冷构建：不清空共享缓存，也没有独立的缓存命名空间。
+- 完整 workspace build 和 release/LTO 构建。
+- 其他宿主（Android、HarmonyOS、桌面）、其他机器和 CI 环境。
+
+**结论范围**：本结论只适用于 macOS（Apple M4、10 核）、`jobs = 2`、dev profile、预热好的共享 sccache、以 `uc-engine-uniffi` 为目标的增量构建。不能推广到冷构建、release 构建或下游产品仓的 workspace 根配置。
+
+## main coverage 失败：uniffi 生命周期测试的根因与修复（2026-10-04）
+
+**现象**：main `7d4e496d` 的 Rust coverage job（run 37196002696）中，
+`uc-engine-uniffi::public_contract lifecycle_targets::a_pause_reaches_the_engine_while_the_profile_vault_key_is_waiting`
+失败，位置在 `lifecycle_targets.rs:93`：`engine.lifecycle_state()` 返回 `RuntimeUnavailable`。第 39、40 行的 panic 是它连带出来的。
+
+**是否由拆分引入**：在本机用干净的拆分前 worktree（`54ffafb3`）和当前代码交替各跑 8 轮。这个测试在两边都是 **3/8 失败**，
+失败位置和报错完全相同。所以它在拆分前就已存在，不是拆分引入的。
+
+**根因**（用 macOS `sample` 在卡住期间抓到的线程栈证实）：
+- 移动绑定在 `uc-engine-uniffi` 线程上用**单线程** tokio 运行期驱动 Engine。
+- 恢复时，`RecoverSpaceSessionUseCase` 经 `CurrentSpaceResolver` 调用 `ActiveSpaceGenerationManifestStore::load_runtime`。这是一个 async 函数，但它在运行期线程上**同步**执行了 `AdmissionKeyManager::open_profile_payload`，进而同步读取宿主安全存储里的 profile key。
+- 测试的读取闸门让这次读取阻塞，于是运行期唯一的线程被占住，同一运行期上的生命周期 worker 无法处理状态查询，10 秒后返回 `RuntimeUnavailable`。
+- 另一路 `kek` 读取经 `spawn_blocking` 执行，走的是正确的路径。两路读取谁先撞上闸门是随机的，所以测试时好时坏。
+- 在真实设备上，这意味着恢复时只要宿主安全存储的读取较慢，就会让同一运行期上的暂停和状态查询停滞。
+
+**修复**：`load_runtime` 仍在运行期上读取文件，把解密这一步（会读安全存储）放进 `spawn_blocking`，并沿用 storage 仓储已有的 `Span::current().in_scope` 写法；解码部分抽成不碰存储的 `decode_runtime_plaintext`。同步版本 `load_runtime_sync` 的行为不变。没有新增抽象，也没有新增测试。
+
+**验证**：用现有的端到端测试验证：修复后两个 `lifecycle_targets` 测试各跑 16 次，第 93 行的失败为 **0/32**（修复前 3/8）。之后又连续抓栈运行 30 次，全部通过。
+
+**仍未解决**：
+- 修复后的 32 次运行里有 1 次在 `lifecycle_targets.rs:73` 失败：`create_space` 之后 `suspend()` 超出 10 秒期限（`DeadlineExceeded`）。修复前在本机高负载时也出现过。
+- 之后连续 30 次抓栈运行都没能再触发它，根因没有证据，所以没有做推测性修改。
+- 同一个 store 里 `promote`、`persist_manifest` 等 async 路径也会在运行期线程上同步调用 `seal_profile_payload`，属于同类风险，但这次没有被任何失败证实，暂不修改。
+
+工件在 `/Volumes/ExternalSSD/cargo-targets/workspaces/engine/6686a9a07cb796b0/test-artifacts/issue-144-uniffi-lifecycle-20261004T121315Z/`：
+- `results.txt`、`runs/`：修复前的对照
+- `sample/`：卡住时的线程栈
+- `fixed/`：修复后的 32 次运行和 `fix.diff`
+- `sample73/`：第 73 行问题的抓栈尝试
+- `verify/`：交付检查
+
 ## 遗留风险 / 下一步必须处理的事项
 
-1. **构建性能 A/B 实验（issue §8/§9）完全没有做**：S6 第二部分。基线只能取拆分前的 `54ffafb3`
-   （S0 跳过，没有预先登记的基线），按 issue §8 的成对样本方法在同机执行。
-2. **S2 没有产出 issue 字面要求的失败矩阵文档**，S3/S4/S5 同样没有补；只做了等价的"零覆盖流失"验证。
-3. **切片收尾必须以 CI 的 Engine tests 为准**：本地只跑 `--lib` 会漏掉集成测试与跨 crate 观测测试；
+1. **构建性能 A/B 实验已完成**（S6 第二部分，结果见上）。冷构建、完整 workspace、release 和其他宿主仍未测。
+2. **main `7d4e496d` 的 Rust coverage 失败**：根因已找到并修复，见"main coverage 失败"一节。修复后的 CI 结果
+   以本 PR 为准。`lifecycle_targets.rs:73` 偶发的暂停超时根因仍未找到。
+3. **S2 没有产出 issue 字面要求的失败矩阵文档**，S3/S4/S5 同样没有补；只做了等价的"零覆盖流失"验证。
+4. **切片收尾必须以 CI 的 Engine tests 为准**：本地只跑 `--lib` 会漏掉集成测试与跨 crate 观测测试；
    S2–S5 的回归都是 CI 已报告但被当作偶发失败合入的。偶发失败要逐条与拆分前 `main` 的失败清单对比后才能忽略。
-4. **`infrastructure.md` 中与拆分无关的过时内容未处理**：§13.3.1 引用的 `pairing/session.rs` recv-pump
+5. **`infrastructure.md` 中与拆分无关的过时内容未处理**：§13.3.1 引用的 `pairing/session.rs` recv-pump
    与 `spawn_supervised` 已不存在，§14.1 提到不存在的 `uc-platform`；拆分前就已过时，不在本计划范围。
-5. **`uc-infra-security`/`uc-infra-storage`/`uc-infra-content`/`uc-infra-p2p`/`uc-infra-profile` 的
+6. **`uc-infra-security`/`uc-infra-storage`/`uc-infra-content`/`uc-infra-p2p`/`uc-infra-profile` 的
    `test-util` feature** 各自放宽了若干 `#[cfg(test)]`/`#[cfg(any(test, feature = "test-util"))]`
    方法；继续拆分时如果还有类似的跨 crate 测试脚手架需求，复用同一个 feature 名字，不要新增第二个
    同义 feature。

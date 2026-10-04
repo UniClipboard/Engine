@@ -4,6 +4,8 @@ use std::sync::Arc;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
+use tokio::task::spawn_blocking;
+use tracing::Span;
 use uc_core::ids::SpaceId;
 use uc_core::membership::{ActiveRuntimeLayout, ActiveSpaceGenerationManifestV2};
 
@@ -442,7 +444,19 @@ impl ActiveSpaceGenerationManifestStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(source) => return Err(ActiveSpaceGenerationManifestStoreError::storage(source)),
         };
-        self.decode_runtime(&ciphertext).map(Some)
+        // 打开 manifest 会同步读取宿主安全存储中的 profile key；移到阻塞线程执行，
+        // 避免占住移动绑定的单线程运行期，使同一运行期上的生命周期请求无法推进。
+        let keys = Arc::clone(&self.keys);
+        let span = Span::current();
+        let plaintext = spawn_blocking(move || {
+            span.in_scope(|| {
+                keys.open_profile_payload(ACTIVE_GENERATION_MANIFEST_PURPOSE, &ciphertext)
+                    .map_err(map_key_error)
+            })
+        })
+        .await
+        .map_err(ActiveSpaceGenerationManifestStoreError::storage)??;
+        decode_runtime_plaintext(&plaintext).map(Some)
     }
 
     pub fn load_sync(
@@ -503,21 +517,7 @@ impl ActiveSpaceGenerationManifestStore {
         ciphertext: &[u8],
     ) -> Result<ActiveRuntimeManifest, ActiveSpaceGenerationManifestStoreError> {
         let plaintext = self.open_manifest(ciphertext)?;
-        let format_version = manifest_format_version(&plaintext)?;
-        match format_version {
-            uc_core::membership::ACTIVE_SPACE_GENERATION_MANIFEST_FORMAT_V2 => {
-                let manifest: ActiveSpaceGenerationManifestV2 = postcard::from_bytes(&plaintext)
-                    .map_err(ActiveSpaceGenerationManifestStoreError::corrupt_from)?;
-                manifest
-                    .validate()
-                    .then_some(ActiveRuntimeManifest::V2(manifest))
-                    .ok_or_else(ActiveSpaceGenerationManifestStoreError::corrupt)
-            }
-            ACTIVE_RUNTIME_MANIFEST_FORMAT_V3 => {
-                decode_v3_manifest(&plaintext).map(ActiveRuntimeManifest::V3)
-            }
-            _ => Err(ActiveSpaceGenerationManifestStoreError::corrupt()),
-        }
+        decode_runtime_plaintext(&plaintext)
     }
 
     pub async fn promote(
@@ -898,6 +898,26 @@ fn replace_file_atomically(
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
+}
+
+fn decode_runtime_plaintext(
+    plaintext: &[u8],
+) -> Result<ActiveRuntimeManifest, ActiveSpaceGenerationManifestStoreError> {
+    let format_version = manifest_format_version(plaintext)?;
+    match format_version {
+        uc_core::membership::ACTIVE_SPACE_GENERATION_MANIFEST_FORMAT_V2 => {
+            let manifest: ActiveSpaceGenerationManifestV2 = postcard::from_bytes(plaintext)
+                .map_err(ActiveSpaceGenerationManifestStoreError::corrupt_from)?;
+            manifest
+                .validate()
+                .then_some(ActiveRuntimeManifest::V2(manifest))
+                .ok_or_else(ActiveSpaceGenerationManifestStoreError::corrupt)
+        }
+        ACTIVE_RUNTIME_MANIFEST_FORMAT_V3 => {
+            decode_v3_manifest(plaintext).map(ActiveRuntimeManifest::V3)
+        }
+        _ => Err(ActiveSpaceGenerationManifestStoreError::corrupt()),
+    }
 }
 
 fn map_key_error(error: AdmissionKeyError) -> ActiveSpaceGenerationManifestStoreError {
