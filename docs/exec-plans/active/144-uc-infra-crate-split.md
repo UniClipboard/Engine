@@ -42,7 +42,7 @@
 | 1 | 七个实现 crate 均有单一明确能力归属，无原 `uc-infra` 包、聚合壳或复制代码 | 满足（有记录在案的偏离） | 七个 crate 已落地，`uc-infra` 已删除，`check-engine-repository.mjs` 校验包清单。偏离：`membership_record` 与准入仓储留在 profile，见实施记录"已决定不改"一节；`mobile_sync` 迁到 `uc-mobile-lan`。复制：只在测试中复刻过一段契约断言（`mobile_device_repo`），没有复制生产代码 |
 | 2 | metadata 证明生产依赖有向无环；p2p 无 storage/profile/image/Diesel 闭包；默认 Engine 不引入 LAN | 满足 | Cargo 本身拒绝循环依赖；S4/S5 用 `cargo metadata` 遍历 p2p 生产闭包，631 个依赖中 diesel、libsqlite3-sys、image、zstd、tantivy、rusqlite 零命中；`dependency_firewall` 的 lan-compat 合同测试通过 |
 | 3 | 修改 SQL 或内容实现的探针证明兄弟能力保持 fresh；Core/Application 修改不纳入窄失效承诺 | 满足（本机受控条件） | S6b 的 Cargo JSON `fresh` 字段：改 SQL 只重编 storage/profile/Engine，改缩略图只重编 content/profile/Engine，三轮一致。没测 Core/Application 修改，符合"不纳入" |
-| 4 | 原有事务与安全操作仍由一个模块负责；Engine 不新增步骤编排、原始密钥或观测阶段查询 | 部分满足 | 现有架构门禁（所有权、观测接口、Engine 编排相关检查）每个切片都通过；Engine 源码没有引用任何密钥类结构。缺口：没有逐项人工审计；两处原始密钥字节字段在拆分中放宽为 `pub`，其中日志结构在编译层面可被 Engine 访问，与 issue §5 不一致，但没有发现真实输出。见下方"密钥字段可见性审计" |
+| 4 | 原有事务与安全操作仍由一个模块负责；Engine 不新增步骤编排、原始密钥或观测阶段查询 | 部分满足 | 现有架构门禁（所有权、观测接口、Engine 编排相关检查）每个切片都通过；Engine 源码没有引用任何密钥类结构。缺口：没有逐项人工审计；在 main `1dd4cbad` 上，两处原始密钥字节字段放宽为 `pub`，与 issue §5 不一致（另外，没有发现真实输出）。修复在本地提交 `157aead8`，未合并。见下方"密钥字段可见性审计" |
 | 5 | 原存储/协议 golden fixtures 与旧 Profile E2E 可读，持久化无新版本 | 满足 | 拆分前后 migrations 逐个相同（61 个）；格式/版本常量集合完全相同；`crates/uc-sync-protocol/tests/golden_vectors.rs` 与 Upgrade compatibility smoke 在 CI 上通过 |
 | 6 | 稳定入口 E2E 与失败恢复验证通过，提供可复跑、可校验工件 | 部分满足 | Engine tests（含 `host_contract`、membership smoke）、Connection recovery 在 main CI 上通过。缺口：没有按 issue §8 格式产出 E2E 工件（场景、revision、双方终态、脱敏日志）；本机有 `lifecycle_targets.rs:73` 偶发暂停超时、crash E2E 偶发超时（拆分前就有）、`host_contract space_leave::repeated_leaves…` 稳定超时（在干净 main 上也超时）。main 上的 Rust coverage 是否转绿见下方"未闭环事项" |
 | 7 | 默认与 lan-compat、代表性直接 Rust 宿主和绑定检查通过；未运行设备平台明记跳过 | 部分满足 | 默认与 `lan-compat,dev-tools` 的 workspace check、uniffi/ohos `workspace_contract`、uniffi `public_contract` 通过。iOS/Android/HarmonyOS 实机和模拟器：**跳过** |
@@ -73,22 +73,62 @@
 | `MlsAdmission` 等结构的 `wrapping_key`（4 处） | `uc-infra-crypto` | `pub(crate)` → `pub`（S1） | **不透明** `MasterKey` | `MasterKey` 的 `Debug` 输出 `[REDACTED]`，`ZeroizeOnDrop`；`MlsAdmission` 的 `Debug` 把该字段写成 `[REDACTED]` | `uc-infra-security` 的 `access.rs`、profile 的 `profile_key_recovery.rs` | 同上，Engine 不直接依赖 crypto | 未发现 |
 
 **结论**：
-- 三处都是**可见性扩大**。
-- 前两处属于"**可以访问原始字节**"：任何直接依赖对应 crate 的代码，都能读写原始密钥字节。这与 issue §5"避免新增方便调用方获取原始字节的接口"不一致。
-- 第三处用的是不透明类型，符合要求。
-- 三处都**没有发现真实输出**：没有日志、`Debug` 或错误正文会写出密钥；序列化只用于加密落盘。
-- Engine 目前没有引用这些结构，但它对 storage 的直接依赖，让日志结构在编译层面可以被 Engine 访问。
+两个问题分开判断：
 
-**建议的最小边界方案**（本轮不改代码，需另行实施并验证）：
-1. **`EncryptionPassphraseChangeJournal`**：字段改为私有（serde 不受影响），由 storage 提供：
-   - `new(keyslot, kek: &Kek, prepared_registration)`
-   - `keyslot()`
-   - `kek() -> Kek`（不透明）
-   - `prepared_registration() -> &[u8]`
+**① 接口边界（违背 issue §5）**：
+- 三处都是可见性扩大。
+- 前两处让任何直接依赖对应 crate 的代码都能读写原始密钥字节，也能通过公开的 serde 实现把它们序列化出来，与 issue §5"使用不透明类型、避免新增方便调用方获取原始字节的接口"不一致。
+- 日志结构所在的 storage 被 `uc-engine` 直接依赖，因此 Engine 在编译层面可以拿到原始 KEK 字节，即使目前没有引用。
+- 第三处（`wrapping_key: MasterKey`）是不透明类型，符合要求。
 
-   这样原始字节只留在 storage 内部。profile 只有两处需要改（构造、读取 `kek`）。这样也满足"Engine 不新增原始密钥"，不需要改依赖关系。
-2. **`PersistedContentKeyEntry`**：security 的 `session.rs` 确实需要原始内容密钥来组装会话材料。最小方案是字段私有，加构造器和只读访问器，至少让 crate 外不能直接改写。更彻底的方案是把目录与 `SpaceKeyMaterial` 之间的转换整体放进 crypto，作为完整操作，符合 issue §5 "优先迁移完整算法操作"。改动之前需要先盘点 `session.rs` 的使用点。
-3. `wrapping_key: MasterKey` 保持现状。
+**② 实际输出（未发现）**：
+- 三处都没有发现密钥被真实输出：没有日志、`Debug` 或错误正文会写出密钥；序列化只用于加密落盘。
+- 这只说明目前没有泄漏，**不能**据此认为 ① 不是问题。
+
+**修复**（2026-10-04，本地提交 `157aead89f830892f55f148df11ac0bd53bcfdae`，分支 `hp/uni/t-0161-key-boundary`，基于 main `1dd4cbad`；**未推送、未合并**）：
+
+- **`EncryptionPassphraseChangeJournal`（由 storage 负责）**：
+  - 公开类型只保存 `KeySlot`、不透明的 `Kek` 和 `Zeroizing` 包装的 `prepared_registration`。字段全部私有，不实现 serde，`Debug` 仍然脱敏。
+  - 接口：`new(keyslot, kek: Kek, prepared_registration)`、`keyslot()`、`kek() -> &Kek`、`prepared_registration()`。
+  - 持久化由 storage 私有的 DTO 负责，字段名、顺序和类型与原结构相同，析构时清零。
+  - 原公开的 `validate()` 改为内部的完整性检查，条件不变。
+  - profile 的口令变更流程迁移了两处生产调用。
+  - 现有测试 `protected_journal_completes_after_restart_without_plaintext_passphrase` 里有 3 行对公开类型做 serde 往返，在新接口下无法再编写，已经移除。紧跟其后的保存、加载断言走的是真实持久化格式和校验，覆盖了同一性质。
+- **内容密钥目录（由 crypto 负责）**：
+  - 新增不透明的 `ContentKeyCatalog`/`ContentKeyCatalogEntry`，条目只保存 `MasterKey`。
+  - `decode`/`encode`/`v2`/`push`/`entries`/`version` 都由 crypto 实现；原 `PersistedContentKey*` 降为私有 DTO，原来的公开 `decode`/`encode` 函数也改为私有。
+  - security 的 `session.rs` 迁移了四处用法：两处新建目录、一处安装、一处轮换追加。
+  - 细节差异：密钥长度改为在 `decode` 时统一校验。错误分类仍是 `key_material_corrupt`，只是检查顺序变了。
+- 没有采用"私有字段 + 返回原始字节的 pub 方法"这种表面上的收敛：跨 crate 只能拿到 `Kek`/`MasterKey`，原始字节只出现在所属模块的持久化格式中。
+- 不在本次范围内：
+  - `wrapping_key: MasterKey` 已经符合要求，不改。
+  - `uc-core` 的 `AdmissionContentKeyEntryV1.key: Vec<u8>` 是拆分前就有的准入协议类型。
+  - `SpaceKeyMaterial::key_catalog()` 返回的编码后目录字节里包含密钥，这是拆分前就有的 Core 材料设计。
+  - 以上两项列为剩余风险。
+
+**修复的证据**（工件在 `<local-artifact-dir>/issue-144-key-boundary/`，含 `SHA256SUMS`，共 45 个文件）：
+
+- **格式兼容（真实跨版本）**：
+  - 用 `1dd4cbad` 的真实公开类型，以固定输入写出口令变更日志、V1 和 V2 内容密钥目录。
+  - 新代码能解码，内容一致；重新编码，以及用新接口新建，都与旧字节逐字节相同；`Debug` 仍然脱敏。
+  - 临时探针没有提交。
+- **边界确实收紧**：
+  - 从 `uc-engine` 读取 `journal.kek`、要求实现 `Serialize`、用结构体字面量构造，分别得到 `E0616`、`E0277`、`E0560`。
+  - 从 `uc-infra-security` 读取 `entry.key`、要求实现 `Serialize`、引用 DTO，分别得到 `E0616`、`E0277`、`E0603`。
+  - 同样的访问在 `1dd4cbad` 上能编译通过，说明探针确实能识别问题。
+  - 探针没有提交。
+- **现有端到端与集成测试**（修复前跑过一次，格式化后又跑了一次）：
+  - crypto、security、storage、profile 共 751 项通过，其中口令变更 4 项用真实存储和 access，包括重启后恢复。
+  - `host_contract` 的 `key_loss` 全组和 `startup` 共 23 项通过，包括 `passphrase_change_rewraps_recovery_without_replacing_history`，以及丢失钥匙串或解锁密钥后重启。
+  - `config_migration_round_trip_e2e` 2 项通过。
+  - `space_membership_auto_pairing_e2e` 的 admission、自动连接、移除收敛共 24 项通过。
+  - uniffi `public_contract` 30 项通过。
+  - `host_contract` 中唯一的超时是 `space_leave::repeated_leaves…`，它在干净的 main 上也稳定超时。
+- **交付清单**：metadata、workspace 与 `lan-compat` check、fmt、style、仓库检查、`git diff --check` 都通过。提交内容与测试时的代码树逐字节相同。
+- **没有验证的范围**：
+  - 完整升级矩阵（旧版本 Engine 写入、新版本读取）没有在本机运行。
+  - 已经存在于真实设备上的加密日志和目录文件，没有用真实设备回放。
+  - 设备平台没有运行。
 
 ## 未闭环事项
 
@@ -97,9 +137,9 @@
    和 4 个 Connection recovery job；上一次 run 37196002696 失败。这个失败本身是偶发的，单次通过不能单独证明问题已消失；
    主要证据仍是本地对照（修复前 3/8，修复后 0/32）。coverage 转绿只说明这一项闭环，上表中"部分满足"和"未测"的项目仍未闭环。
 2. **`lifecycle_targets.rs:73` 偶发的暂停超时**：根因未查明；t-0176 的 `083fd0aa` 可能相关，未验证。
-3. **与 t-0176 的协作去重**：`is_admission_target_stopped` 仍在运行期线程上同步解密。按已定的方案 1，由 t-0176 在
-   PR #153 合并后决定是否随其 iOS 修复带入（需要真实生命周期复现证明必要）。PR #153 不扩展这部分。
-4. **密钥字段边界**：两处原始密钥字节字段的收敛方案见"密钥字段可见性审计"，尚未实施。
+3. **与 t-0176 的协作去重**：`is_admission_target_stopped` 仍在运行期线程上同步解密。按 2026-10-04 定下的方案 1，PR #153
+   保持原范围（当时的 head 是 `d8bcb887`），该 PR 已于 2026-10-04T13:35:53Z 合并。是否随 t-0176 的 iOS 修复带入，由 t-0176 根据真实生命周期复现决定。
+4. **密钥字段边界**：已在本地修复分支 `hp/uni/t-0161-key-boundary` 实施（`157aead8`，见"密钥字段可见性审计"），未推送、未合并。合入 main 之前不算闭环。
 5. **全部收尾后**：再把本计划整体移入 `completed/`。稳定结论已写回 `docs/design-docs/layers/infrastructure.md`：§2.3、§3 是七个 crate 的划分和依赖方向，§13.2.1 是 async 入口不得在运行期线程上同步阻塞。
 
 ## 遗留风险 / 下一步必须处理的事项
