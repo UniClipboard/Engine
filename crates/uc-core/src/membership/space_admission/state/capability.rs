@@ -112,6 +112,16 @@ impl JoinerAdmission {
         ) || self.record.is_unbounded_late_join()
     }
 
+    /// 仅当处于 `RecoveryRequired` 终态时返回具体类别；其余 `needs_attention` 原因（如晚到加入）不携带类别。
+    pub const fn recovery_category(&self) -> Option<AdmissionRecoveryCategory> {
+        match &self.record.state {
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::RecoveryRequired(
+                state,
+            )) => Some(state.category),
+            _ => None,
+        }
+    }
+
     pub fn start_resolving_invitation(
         admission_id: SpaceAdmissionId,
         join_id: JoinId,

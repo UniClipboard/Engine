@@ -326,3 +326,25 @@ fn persistence_round_trips_superseded_rejected_and_recovery_states() {
             .into_replacement(),
     );
 }
+
+#[test]
+fn recovery_required_joiner_reopens_through_the_public_joiner_role() {
+    // `require_recovery` 只在 JoinerAdmission 上公开；记录角色必须保持 Joiner，
+    // 否则 `JoinerAdmission::decode_persisted` 会把持久化的 RecoveryRequired 记录
+    // 误判为无角色而拒绝重新打开——这正是加入方重启或续传恢复时真实发生的路径。
+    let recovered = JoinerAdmission::try_from_record(joiner_candidate_aggregate_fixture())
+        .expect("Candidate aggregate is a Joiner record")
+        .require_recovery(AdmissionRecoveryCategory::MissingKey)
+        .expect("Candidate Joiner can require recovery")
+        .into_replacement();
+    let encoded = recovered
+        .encode_persisted()
+        .expect("recovery-required Joiner must be persistable");
+    let reopened =
+        JoinerAdmission::decode_persisted(&encoded).expect("Joiner record must reopen as Joiner");
+    assert!(reopened.needs_attention());
+    assert_eq!(
+        reopened.recovery_category(),
+        Some(AdmissionRecoveryCategory::MissingKey)
+    );
+}

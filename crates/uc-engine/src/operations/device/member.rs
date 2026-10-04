@@ -368,10 +368,16 @@ pub(crate) fn join_space_status(status: CurrentJoinStatus) -> JoinSpaceStatusSum
                 uc_application::facade::JoinSpaceAttentionReason::OutcomeCannotBeProven => {
                     JoinSpaceAttentionReasonSummary::OutcomeCannotBeProven
                 }
+                uc_application::facade::JoinSpaceAttentionReason::ContinuationUnavailable => {
+                    JoinSpaceAttentionReasonSummary::ContinuationUnavailable
+                }
             },
             recovery: match recovery {
                 uc_application::facade::JoinSpaceAttentionRecovery::PreserveDataAndContactSupport => {
                     JoinSpaceAttentionRecoverySummary::PreserveDataAndContactSupport
+                }
+                uc_application::facade::JoinSpaceAttentionRecovery::RestartWithNewInvitation => {
+                    JoinSpaceAttentionRecoverySummary::RestartWithNewInvitation
                 }
             },
             next_retry_at_ms,

@@ -10,8 +10,9 @@ use uc_application::facade::{
     PendingInboundMember,
 };
 use uc_core::membership::{
-    AdmissionSpaceTransitionResultV2, JoinerAdmission, SpaceAdmissionTerminationReason,
-    SponsorAdmission, SponsorPairingConfirmationStatus, VersionedMembershipHistory,
+    AdmissionRecoveryCategory, AdmissionSpaceTransitionResultV2, JoinerAdmission,
+    SpaceAdmissionTerminationReason, SponsorAdmission, SponsorPairingConfirmationStatus,
+    VersionedMembershipHistory,
 };
 
 use crate::space::OpenMlsHistoricalSignatureVerifier;
@@ -224,10 +225,22 @@ impl<E: DbExecutor + Clone + Send + Sync + 'static> SqliteSpaceAdmissionState<E>
         let join_id = *admission.join_id().as_bytes();
         let peer_upgrade_required = admission.peer_upgrade_required();
         if admission.needs_attention() {
+            let (reason, recovery) = match admission.recovery_category() {
+                // 对端确认续传凭据不可用（记录缺失或校验失败）；本机此前已经完成过一次完整
+                // 密码校验，不是密码错误，但这次加入会话已经无法续传，只能换新邀请码重开。
+                Some(AdmissionRecoveryCategory::MissingKey) => (
+                    JoinSpaceAttentionReason::ContinuationUnavailable,
+                    JoinSpaceAttentionRecovery::RestartWithNewInvitation,
+                ),
+                _ => (
+                    JoinSpaceAttentionReason::OutcomeCannotBeProven,
+                    JoinSpaceAttentionRecovery::PreserveDataAndContactSupport,
+                ),
+            };
             return Ok(CurrentJoinStatus::NeedsAttention {
                 join_id,
-                reason: JoinSpaceAttentionReason::OutcomeCannotBeProven,
-                recovery: JoinSpaceAttentionRecovery::PreserveDataAndContactSupport,
+                reason,
+                recovery,
                 next_retry_at_ms: None,
             });
         }

@@ -264,11 +264,13 @@ pub enum JoinSpaceTerminationReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum JoinSpaceAttentionReason {
     OutcomeCannotBeProven,
+    ContinuationUnavailable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum JoinSpaceAttentionRecovery {
     PreserveDataAndContactSupport,
+    RestartWithNewInvitation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
@@ -2427,10 +2429,16 @@ fn map_join_space_status(result: OperationResult) -> Result<JoinSpaceStatus, Bin
                 uc_engine::JoinSpaceAttentionReasonSummary::OutcomeCannotBeProven => {
                     JoinSpaceAttentionReason::OutcomeCannotBeProven
                 }
+                uc_engine::JoinSpaceAttentionReasonSummary::ContinuationUnavailable => {
+                    JoinSpaceAttentionReason::ContinuationUnavailable
+                }
             },
             recovery: match recovery {
                 uc_engine::JoinSpaceAttentionRecoverySummary::PreserveDataAndContactSupport => {
                     JoinSpaceAttentionRecovery::PreserveDataAndContactSupport
+                }
+                uc_engine::JoinSpaceAttentionRecoverySummary::RestartWithNewInvitation => {
+                    JoinSpaceAttentionRecovery::RestartWithNewInvitation
                 }
             },
             next_retry_at_ms,

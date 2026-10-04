@@ -108,6 +108,7 @@ pub(super) enum ProtocolEvent {
     JoinerPeerUpgradeBlocked,
     JoinerSavedRejected,
     JoinerSavedTerminated,
+    JoinerSavedRecoveryRequired,
     AdmissionRecoveryWoken,
     JoinerInitialChannelRequested,
     JoinerAuthenticatedChannelSaved,
@@ -309,6 +310,7 @@ enum TransportMode {
     AuthenticateThenUpgradeRequired,
     AuthenticateThenCandidate,
     AuthenticateThenCandidateAndCommit,
+    AuthenticateThenCandidateAndContinuationRecordMissing,
     AuthenticateThenCandidateCommitAndComplete,
     AuthenticateThenCandidateCommitAndInvalidActivation,
     AuthenticateThenCandidateCommitInvalidActivationAndLoseAbandonmentOnce,
@@ -761,6 +763,10 @@ impl PendingAdmissionRecoveryStatePort for RecordingJoinerStartState {
             .termination_reason()
             .is_some()
             .then_some((ProtocolEvent::JoinerSavedTerminated, 0x31));
+        let recovery_required = aggregate
+            .recovery_category()
+            .is_some()
+            .then_some((ProtocolEvent::JoinerSavedRecoveryRequired, 0x33));
         let terminal_resolution_event = (aggregate.is_terminal()
             && aggregate.record_version() == 2)
             .then_some((ProtocolEvent::JoinerRejectedConsumedInvitation, 0x28));
@@ -772,6 +778,7 @@ impl PendingAdmissionRecoveryStatePort for RecordingJoinerStartState {
             .or(resolution_event)
             .or(peer_upgrade_rejection)
             .or(local_termination)
+            .or(recovery_required)
             .or(terminal_resolution_event)
             .or(peer_upgrade_block)
             .or(other_rejection)
@@ -941,6 +948,7 @@ impl SpaceAdmissionTransportPort for RecordingSpaceAdmissionTransport {
                 self.mode,
                 TransportMode::AuthenticateThenCandidate
                     | TransportMode::AuthenticateThenCandidateAndCommit
+                    | TransportMode::AuthenticateThenCandidateAndContinuationRecordMissing
                     | TransportMode::AuthenticateThenCandidateCommitAndComplete
                     | TransportMode::AuthenticateThenCandidateCommitAndInvalidActivation
                     | TransportMode::AuthenticateThenCandidateCommitInvalidActivationAndLoseAbandonmentOnce
@@ -965,6 +973,7 @@ impl SpaceAdmissionTransportPort for RecordingSpaceAdmissionTransport {
         if !matches!(
             self.mode,
             TransportMode::AuthenticateThenCandidateAndCommit
+                | TransportMode::AuthenticateThenCandidateAndContinuationRecordMissing
                 | TransportMode::AuthenticateThenCandidateCommitAndComplete
                 | TransportMode::AuthenticateThenCandidateCommitAndInvalidActivation
                 | TransportMode::AuthenticateThenCandidateCommitInvalidActivationAndLoseAbandonmentOnce
@@ -976,17 +985,22 @@ impl SpaceAdmissionTransportPort for RecordingSpaceAdmissionTransport {
             .lock()
             .expect("event recorder is available")
             .push(ProtocolEvent::JoinerContinuationChannelRequested);
+        // 真实续传连接本身会建立成功；对端记录缺失只会在后续交换消息时才被发现并关闭连接。
+        let continuation_record_missing = matches!(
+            self.mode,
+            TransportMode::AuthenticateThenCandidateAndContinuationRecordMissing
+        );
         Ok(Box::new(ExchangeThenDeferred {
             events: Arc::clone(&self.events),
             continuation: None,
             candidate_reply: false,
-            commit_reply: true,
+            commit_reply: !continuation_record_missing,
             complete_reply: self.mode.supports_complete_protocol(),
             settled_reply: self.mode.supports_complete_protocol(),
             upgrade_on: self.mode.upgrade_on(),
             upgrade_pending: Arc::clone(&self.upgrade_pending),
             abandonment_failure_pending: Arc::clone(&self.abandonment_failure_pending),
-            authentication_rejected: false,
+            authentication_rejected: continuation_record_missing,
         }))
     }
 }
@@ -1010,15 +1024,17 @@ impl AuthenticatedAdmissionExchangePort for ExchangeThenDeferred {
         request: &SpaceAdmissionEnvelopeV1,
     ) -> Result<AuthenticatedAdmissionReply, SpaceAdmissionTransportError> {
         assert_eq!(request.header().admission_id().as_bytes(), &[0x11; 32]);
+        // 续传通道自身被拒绝（对端记录缺失/校验失败）与具体业务消息种类无关，
+        // 在分派前统一检查，贴合真实协议：拒绝发生在连接层而不是某条消息上。
+        if self.authentication_rejected {
+            return Err(SpaceAdmissionTransportError::authentication_rejected());
+        }
         if request.kind() == SpaceAdmissionMessageKind::JoinRequest {
             assert_eq!(request.header().message_id().as_bytes(), &[0x18; 32]);
             self.events
                 .lock()
                 .expect("event recorder is available")
                 .push(ProtocolEvent::JoinerJoinRequestExchanged);
-            if self.authentication_rejected {
-                return Err(SpaceAdmissionTransportError::authentication_rejected());
-            }
             if self.take_upgrade_failure(request.kind()) {
                 return Err(SpaceAdmissionTransportError::PeerUpgradeRequired);
             }
@@ -1839,6 +1855,17 @@ impl SpaceAdmissionProtocolTestPair {
 
     pub(super) async fn receiving_commit() -> Self {
         Self::with_mode(None, TransportMode::AuthenticateThenCandidateAndCommit).await
+    }
+
+    /// 本机已完成一次完整的密码校验（Initial 握手成功），但对端在续传阶段确认
+    /// 找不到对应的续传凭据——复现 sponsor 在受理业务请求时一次性内部失败、
+    /// 未持久化续传凭据，导致两端状态永久不一致的真实场景。
+    pub(super) async fn continuation_record_missing_after_authentication() -> Self {
+        Self::with_mode(
+            None,
+            TransportMode::AuthenticateThenCandidateAndContinuationRecordMissing,
+        )
+        .await
     }
 
     pub(super) async fn receiving_complete() -> Self {
