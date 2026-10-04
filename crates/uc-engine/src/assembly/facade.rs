@@ -20,9 +20,11 @@ use uc_infra::mobile_sync::{
     Argon2idPasswordHasher, FilesystemMobileFileStaging, NetworkInterfaceLanProbe,
     OsRngCredentialsMinter,
 };
-use uc_infra::network::iroh::{IrohRelayProbeAdapter, IrohRelayProbeError, IrohRelayProbeReport};
 #[cfg(feature = "lan-compat")]
 use uc_infra_local::fs::FsInboundFileTarget;
+use uc_infra_p2p::network::iroh::{
+    IrohRelayProbeAdapter, IrohRelayProbeError, IrohRelayProbeReport,
+};
 #[cfg(feature = "lan-compat")]
 use uc_mobile_lan::{
     IncomingMobileBuffer, MobileSyncFacade, MobileSyncFacadeDeps, MobileSyncSnapshotPorts,

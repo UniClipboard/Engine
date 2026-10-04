@@ -32,6 +32,7 @@ uc-application = { path = "../uc-application" }
 uc-core = { path = "../uc-core", features = ["task-registry"] }
 uc-infra = { path = "../uc-infra" }
 uc-infra-local = { path = "../uc-infra-local" }
+uc-infra-p2p = { path = "../uc-infra-p2p" }
 uc-infra-security = { path = "../uc-infra-security" }
 uc-infra-storage = { path = "../uc-infra-storage" }
 uc-infra-content = { path = "../uc-infra-content" }

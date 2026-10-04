@@ -9,6 +9,7 @@ members = [
   "crates/uc-infra-security",
   "crates/uc-infra-storage",
   "crates/uc-infra-content",
+  "crates/uc-infra-p2p",
   "crates/uc-sync-protocol",
   "crates/uc-content-hash",
   "crates/uc-observability-contract",

@@ -1,0 +1,917 @@
+//! Bounded membership-history exchange on authenticated Iroh connections.
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use uc_application::deps::PeerIdentityDirectoryPort;
+
+use async_trait::async_trait;
+use iroh::endpoint::Connection;
+use iroh::protocol::{AcceptError, ProtocolHandler};
+use iroh::{Endpoint, EndpointAddr};
+use serde::{Deserialize, Serialize};
+use tracing::Instrument;
+use uc_application::deps::{
+    RefreshVerifiedPeerAddressPort, RestrictedMembershipDelivery,
+    RestrictedMembershipDeliveryError, RestrictedMembershipDeliveryPort,
+};
+use uc_core::ids::DeviceId;
+use uc_core::membership::{
+    MembershipHistoryAckV3, MembershipHistoryExchangeEndpointPort, MembershipHistoryExchangeError,
+    MembershipHistoryExchangePort, MembershipHistoryMessage, MAX_MEMBERSHIP_HISTORY_FRAME_SIZE,
+};
+use uc_core::ports::security::IdentityFingerprintFactoryPort;
+use uc_core::ports::{ClockPort, PeerAddressRepositoryPort};
+use uc_observability_contract::diagnostics::{
+    complete_operation, describe_membership_exchange, describe_operation_failure, operation_span,
+    DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation, DiagnosticRole, DiagnosticSpanKind,
+    MembershipExchangePurpose, OperationCompletion, OperationContext,
+};
+use uc_observability_contract::{diagnostics::connectivity::InboundPeerProtocol, uc_warn};
+
+use super::connect_with_staggered_retry;
+use super::inbound_peer::{record_inbound_rejection, InboundPeerRejection, PeerIdentityResolver};
+use super::peer_address_resolver::PeerAddressResolver;
+use super::persistable_addr::{observed_stable_remote_addr, persist_observed_stable_addr};
+use super::trace_context::{inject_current, set_remote_parent};
+use uc_sync_protocol::WireTraceContext;
+
+pub const MEMBERSHIP_HISTORY_EXCHANGE_ALPN: &[u8] = b"uniclipboard/membership-history/4";
+
+const WIRE_VERSION: u8 = 4;
+const REQUEST_LAYOUT_MARKER: &[u8; 4] = b"UCT1";
+const IO_TIMEOUT: Duration = Duration::from_secs(10);
+const ACCEPTED: u8 = 1;
+const REJECTED: u8 = 2;
+const BUSY: u8 = 3;
+
+fn decode_response_status(status: u8) -> Result<(), MembershipHistoryExchangeError> {
+    if status == BUSY {
+        return Err(MembershipHistoryExchangeError::PairingInProgress);
+    }
+    if status == REJECTED {
+        return Err(MembershipHistoryExchangeError::Rejected);
+    }
+    if status != ACCEPTED {
+        return Err(transport_failure(DiagnosticErrorType::DecodeFailed));
+    }
+    Ok(())
+}
+
+/// 服务端处理失败：诊断分类加下层来源。请求处理没有向上传递的调用方，来源只随这次失败一起结束。
+#[derive(Debug, thiserror::Error)]
+#[error("membership history server exchange failed")]
+struct ServerExchangeFailure {
+    kind: DiagnosticErrorType,
+    #[source]
+    source: anyhow::Error,
+}
+
+impl ServerExchangeFailure {
+    fn new(kind: DiagnosticErrorType, source: impl Into<anyhow::Error>) -> Self {
+        Self {
+            kind,
+            source: source.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerExchangeOutcome {
+    Completed,
+    PairingInProgress,
+}
+
+#[derive(Serialize, Deserialize)]
+struct WireMembershipHistoryRequest {
+    trace_context: Option<WireTraceContext>,
+    message: MembershipHistoryMessage,
+}
+
+pub struct IrohMembershipHistoryExchangeAdapter {
+    endpoint: Arc<Endpoint>,
+    peer_address_resolver: PeerAddressResolver,
+    peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+    clock: Arc<dyn ClockPort>,
+}
+
+impl IrohMembershipHistoryExchangeAdapter {
+    pub fn new(
+        endpoint: Arc<Endpoint>,
+        peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+        clock: Arc<dyn ClockPort>,
+    ) -> Self {
+        Self {
+            endpoint,
+            peer_address_resolver: PeerAddressResolver::new(Arc::clone(&peer_addr_repo)),
+            peer_addr_repo,
+            clock,
+        }
+    }
+
+    pub(crate) fn handler(
+        &self,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
+        fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
+        endpoint: Arc<dyn MembershipHistoryExchangeEndpointPort>,
+    ) -> IrohMembershipHistoryExchangeHandler {
+        IrohMembershipHistoryExchangeHandler {
+            state: Arc::new(HandlerState {
+                identity: PeerIdentityResolver::new(identities, fingerprint_factory),
+                endpoint,
+            }),
+        }
+    }
+
+    async fn resolve_addr(&self, recipient: &DeviceId) -> Option<EndpointAddr> {
+        match self.peer_address_resolver.resolve(recipient).await {
+            Ok(address) => address,
+            Err(error) => {
+                uc_warn!(
+                    error_kind = error.kind(),
+                    "membership history address resolution failed"
+                );
+                None
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl MembershipHistoryExchangePort for IrohMembershipHistoryExchangeAdapter {
+    async fn exchange_membership_history(
+        &self,
+        recipient: &DeviceId,
+        message: MembershipHistoryMessage,
+    ) -> Result<MembershipHistoryMessage, MembershipHistoryExchangeError> {
+        describe_membership_exchange(request_purpose(&message), false);
+        let payload = encode_request(message)?;
+        let address = self.resolve_addr(recipient).await.ok_or_else(|| {
+            describe_operation_failure(DiagnosticErrorType::AddressUnavailable);
+            MembershipHistoryExchangeError::offline()
+        })?;
+        let connection = connect_with_staggered_retry(
+            Arc::clone(&self.endpoint),
+            address,
+            MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
+            "membership-history",
+            uc_observability_contract::diagnostics::connectivity::AddressInputSource::Stored,
+        )
+        .await
+        .map_err(|error| {
+            describe_operation_failure(DiagnosticErrorType::ConnectFailed);
+            MembershipHistoryExchangeError::offline_from(error)
+        })?;
+        let (mut send, mut receive) = tokio::time::timeout(IO_TIMEOUT, connection.open_bi())
+            .await
+            .map_err(|error| transport_failure_from(DiagnosticErrorType::Timeout, error))?
+            .map_err(|error| transport_failure_from(DiagnosticErrorType::StreamFailed, error))?;
+        write_message(&mut send, &payload).await?;
+        decode_response_status(read_byte(&mut receive).await?)?;
+        let response = decode_message(&read_message(&mut receive).await?)?;
+        Ok(response)
+    }
+}
+
+#[async_trait]
+impl RefreshVerifiedPeerAddressPort for IrohMembershipHistoryExchangeAdapter {
+    async fn refresh_verified_peer_address(&self, peer: &DeviceId) {
+        let Some(address) = self.resolve_addr(peer).await else {
+            return;
+        };
+        let Some(observed) = observed_stable_remote_addr(&self.endpoint, address.id).await else {
+            return;
+        };
+        persist_observed_stable_addr(
+            self.peer_addr_repo.as_ref(),
+            self.clock.as_ref(),
+            peer,
+            observed,
+        )
+        .await;
+    }
+}
+
+#[async_trait]
+impl RestrictedMembershipDeliveryPort for IrohMembershipHistoryExchangeAdapter {
+    async fn deliver_restricted_membership(
+        &self,
+        peer: &DeviceId,
+        delivery: &RestrictedMembershipDelivery,
+    ) -> Result<(), RestrictedMembershipDeliveryError> {
+        let message = match delivery {
+            RestrictedMembershipDelivery::Event(event) => {
+                MembershipHistoryMessage::RestrictedEventV3(event.as_ref().clone())
+            }
+            RestrictedMembershipDelivery::Decision(decision) => {
+                MembershipHistoryMessage::RestrictedDecisionV3(decision.as_ref().clone())
+            }
+        };
+        match self.exchange_membership_history(peer, message).await {
+            Ok(MembershipHistoryMessage::AckV3(
+                MembershipHistoryAckV3::RestrictedConsistent
+                | MembershipHistoryAckV3::RestrictedApplied,
+            )) => Ok(()),
+            Ok(MembershipHistoryMessage::AckV3(
+                MembershipHistoryAckV3::Invalid
+                | MembershipHistoryAckV3::Diverged
+                | MembershipHistoryAckV3::NeedsEvidence,
+            ))
+            | Ok(MembershipHistoryMessage::SuffixPageV4(_))
+            | Ok(MembershipHistoryMessage::SummaryV3(_))
+            | Ok(MembershipHistoryMessage::RequestSuffixV3(_))
+            | Ok(MembershipHistoryMessage::RequestConflictEvidenceV3(_))
+            | Ok(MembershipHistoryMessage::ConflictEvidenceV3(_))
+            | Ok(MembershipHistoryMessage::AckV3(
+                MembershipHistoryAckV3::Continue { .. } | MembershipHistoryAckV3::Confirmed { .. },
+            ))
+            | Ok(MembershipHistoryMessage::RestrictedEventV3(_))
+            | Ok(MembershipHistoryMessage::RestrictedDecisionV3(_)) => {
+                Err(RestrictedMembershipDeliveryError::Rejected)
+            }
+            Err(MembershipHistoryExchangeError::Offline { .. })
+            | Err(MembershipHistoryExchangeError::PairingInProgress)
+            | Err(MembershipHistoryExchangeError::Transport { .. }) => {
+                Err(RestrictedMembershipDeliveryError::Deferred)
+            }
+            Err(MembershipHistoryExchangeError::Rejected) => {
+                Err(RestrictedMembershipDeliveryError::Rejected)
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct IrohMembershipHistoryExchangeHandler {
+    state: Arc<HandlerState>,
+}
+
+impl std::fmt::Debug for IrohMembershipHistoryExchangeHandler {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("IrohMembershipHistoryExchangeHandler")
+            .finish_non_exhaustive()
+    }
+}
+
+impl ProtocolHandler for IrohMembershipHistoryExchangeHandler {
+    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+        let (mut send, mut receive) =
+            match tokio::time::timeout(IO_TIMEOUT, connection.accept_bi()).await {
+                Ok(Ok(streams)) => streams,
+                _ => return Ok(()),
+            };
+        let message = match read_message(&mut receive).await {
+            Ok(message) => message,
+            Err(_) => {
+                reject(&mut send).await;
+                return Ok(());
+            }
+        };
+        let request = match decode_request(&message) {
+            Ok(request) => request,
+            Err(_) => {
+                reject(&mut send).await;
+                return Ok(());
+            }
+        };
+        let remote_id = connection.remote_id();
+        let remote_key = remote_id.as_bytes();
+        let source_device = match self.state.identity.identify(remote_key).await {
+            Ok(device) => device,
+            Err(rejection)
+                if rejection.is_identity_failure()
+                    && rejection == InboundPeerRejection::IdentityUnresolved =>
+            {
+                match introduced_device(&request.message, &self.state.identity, remote_key) {
+                    Some(device) => device,
+                    None => {
+                        record_inbound_rejection(
+                            InboundPeerProtocol::MembershipHistory,
+                            InboundPeerRejection::IdentityUnresolved,
+                        );
+                        reject(&mut send).await;
+                        return Ok(());
+                    }
+                }
+            }
+            Err(rejection) => {
+                record_inbound_rejection(InboundPeerProtocol::MembershipHistory, rejection);
+                reject(&mut send).await;
+                return Ok(());
+            }
+        };
+        let span = operation_span(OperationContext {
+            domain: DiagnosticDomain::SpaceMembership,
+            operation: DiagnosticOperation::MembershipHistorySync,
+            role: DiagnosticRole::Member,
+            kind: DiagnosticSpanKind::Server,
+        });
+        let _ = set_remote_parent(&span, request.trace_context.as_ref());
+        let started = Instant::now();
+        uc_observability_contract::diagnostics::scope_operation_diagnostics(async {
+            let result = async {
+                describe_membership_exchange(request_purpose(&request.message), true);
+                let response = match self
+                    .state
+                    .endpoint
+                    .handle_membership_history_exchange(&source_device, request.message)
+                    .await
+                {
+                    Ok(response) => response,
+                    Err(MembershipHistoryExchangeError::PairingInProgress) => {
+                        busy(&mut send).await;
+                        return Ok(ServerExchangeOutcome::PairingInProgress);
+                    }
+                    Err(error) => {
+                        return Err(ServerExchangeFailure::new(
+                            history_endpoint_error_type(&error),
+                            error,
+                        ))
+                    }
+                };
+                let payload = encode_message(&response).map_err(|error| {
+                    ServerExchangeFailure::new(DiagnosticErrorType::DecodeFailed, error)
+                })?;
+                send.write_all(&[ACCEPTED]).await.map_err(|error| {
+                    ServerExchangeFailure::new(DiagnosticErrorType::StreamFailed, error)
+                })?;
+                write_message(&mut send, &payload).await.map_err(|error| {
+                    ServerExchangeFailure::new(DiagnosticErrorType::StreamFailed, error)
+                })?;
+                Ok(ServerExchangeOutcome::Completed)
+            }
+            .instrument(span.clone())
+            .await;
+            if result.is_err() {
+                reject(&mut send).await;
+            }
+            span.in_scope(|| match &result {
+                Ok(ServerExchangeOutcome::PairingInProgress) => record_server_completion(
+                    started.elapsed(),
+                    Some(&DiagnosticErrorType::Unavailable),
+                ),
+                Ok(ServerExchangeOutcome::Completed) => {
+                    record_server_completion(started.elapsed(), None)
+                }
+                Err(failure) => record_server_completion(started.elapsed(), Some(&failure.kind)),
+            });
+        })
+        .await;
+        drop(span);
+        let _ = connection.closed().await;
+        Ok(())
+    }
+}
+
+fn history_endpoint_error_type(error: &MembershipHistoryExchangeError) -> DiagnosticErrorType {
+    match error {
+        MembershipHistoryExchangeError::Offline { .. }
+        | MembershipHistoryExchangeError::PairingInProgress => DiagnosticErrorType::Unavailable,
+        MembershipHistoryExchangeError::Rejected => DiagnosticErrorType::PeerRejected,
+        MembershipHistoryExchangeError::Transport { .. } => DiagnosticErrorType::StreamFailed,
+    }
+}
+
+fn transport_failure(error: DiagnosticErrorType) -> MembershipHistoryExchangeError {
+    describe_operation_failure(error);
+    MembershipHistoryExchangeError::transport()
+}
+
+fn transport_failure_from(
+    error: DiagnosticErrorType,
+    source: impl std::error::Error + Send + Sync + 'static,
+) -> MembershipHistoryExchangeError {
+    describe_operation_failure(error);
+    MembershipHistoryExchangeError::transport_from(source)
+}
+
+pub fn request_purpose(message: &MembershipHistoryMessage) -> MembershipExchangePurpose {
+    match message {
+        MembershipHistoryMessage::SummaryV3(_) => MembershipExchangePurpose::CompareSummary,
+        MembershipHistoryMessage::RequestSuffixV3(_) => MembershipExchangePurpose::RequestHistory,
+        MembershipHistoryMessage::SuffixPageV4(_) => MembershipExchangePurpose::SendHistory,
+        MembershipHistoryMessage::RequestConflictEvidenceV3(_) => {
+            MembershipExchangePurpose::RequestConflictEvidence
+        }
+        MembershipHistoryMessage::ConflictEvidenceV3(_) => {
+            MembershipExchangePurpose::SendConflictEvidence
+        }
+        MembershipHistoryMessage::AckV3(_) => MembershipExchangePurpose::Acknowledge,
+        MembershipHistoryMessage::RestrictedEventV3(_) => {
+            MembershipExchangePurpose::DeliverRestrictedEvent
+        }
+        MembershipHistoryMessage::RestrictedDecisionV3(_) => {
+            MembershipExchangePurpose::DeliverRestrictedDecision
+        }
+    }
+}
+
+fn encode_message(
+    message: &MembershipHistoryMessage,
+) -> Result<Vec<u8>, MembershipHistoryExchangeError> {
+    let mut payload = vec![WIRE_VERSION];
+    payload.extend(
+        postcard::to_stdvec(message)
+            .map_err(|error| transport_failure_from(DiagnosticErrorType::Internal, error))?,
+    );
+    if payload.len() > MAX_MEMBERSHIP_HISTORY_FRAME_SIZE {
+        return Err(transport_failure(DiagnosticErrorType::LocalPolicyExceeded));
+    }
+    Ok(payload)
+}
+
+fn encode_request(
+    message: MembershipHistoryMessage,
+) -> Result<Vec<u8>, MembershipHistoryExchangeError> {
+    let mut payload = vec![WIRE_VERSION];
+    payload.extend_from_slice(REQUEST_LAYOUT_MARKER);
+    payload.extend(
+        postcard::to_stdvec(&WireMembershipHistoryRequest {
+            trace_context: inject_current(),
+            message,
+        })
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::Internal, error))?,
+    );
+    if payload.len() > MAX_MEMBERSHIP_HISTORY_FRAME_SIZE {
+        return Err(transport_failure(DiagnosticErrorType::LocalPolicyExceeded));
+    }
+    Ok(payload)
+}
+
+fn decode_request(
+    payload: &[u8],
+) -> Result<WireMembershipHistoryRequest, MembershipHistoryExchangeError> {
+    let Some((&version, body)) = payload.split_first() else {
+        return Err(transport_failure(DiagnosticErrorType::DecodeFailed));
+    };
+    let Some(body) = body.strip_prefix(REQUEST_LAYOUT_MARKER) else {
+        return Err(transport_failure(DiagnosticErrorType::DecodeFailed));
+    };
+    if version != WIRE_VERSION
+        || body.is_empty()
+        || payload.len() > MAX_MEMBERSHIP_HISTORY_FRAME_SIZE
+    {
+        return Err(transport_failure(DiagnosticErrorType::DecodeFailed));
+    }
+    postcard::from_bytes(body)
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::DecodeFailed, error))
+}
+
+fn record_server_completion(elapsed: Duration, error: Option<&DiagnosticErrorType>) {
+    let completion = match error {
+        Some(error) => OperationCompletion::failed(
+            DiagnosticDomain::SpaceMembership,
+            DiagnosticOperation::MembershipHistorySync,
+            DiagnosticRole::Member,
+            *error,
+            elapsed,
+        ),
+        None => OperationCompletion::succeeded(
+            DiagnosticDomain::SpaceMembership,
+            DiagnosticOperation::MembershipHistorySync,
+            DiagnosticRole::Member,
+            elapsed,
+        ),
+    };
+    complete_operation(completion);
+}
+
+fn decode_message(
+    payload: &[u8],
+) -> Result<MembershipHistoryMessage, MembershipHistoryExchangeError> {
+    let Some((&version, body)) = payload.split_first() else {
+        return Err(transport_failure(DiagnosticErrorType::DecodeFailed));
+    };
+    if version != WIRE_VERSION
+        || body.is_empty()
+        || payload.len() > MAX_MEMBERSHIP_HISTORY_FRAME_SIZE
+    {
+        return Err(transport_failure(DiagnosticErrorType::DecodeFailed));
+    }
+    let message: MembershipHistoryMessage = postcard::from_bytes(body)
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::DecodeFailed, error))?;
+    if matches!(
+        message,
+        MembershipHistoryMessage::SummaryV3(_)
+            | MembershipHistoryMessage::RequestSuffixV3(_)
+            | MembershipHistoryMessage::AckV3(_)
+            | MembershipHistoryMessage::SuffixPageV4(_)
+            | MembershipHistoryMessage::RestrictedEventV3(_)
+            | MembershipHistoryMessage::RestrictedDecisionV3(_)
+            | MembershipHistoryMessage::RequestConflictEvidenceV3(_)
+            | MembershipHistoryMessage::ConflictEvidenceV3(_)
+    ) {
+        Ok(message)
+    } else {
+        Err(transport_failure(DiagnosticErrorType::DecodeFailed))
+    }
+}
+
+struct HandlerState {
+    identity: PeerIdentityResolver,
+    endpoint: Arc<dyn MembershipHistoryExchangeEndpointPort>,
+}
+
+fn introduced_device(
+    message: &MembershipHistoryMessage,
+    identity: &PeerIdentityResolver,
+    public_key: &[u8; 32],
+) -> Option<DeviceId> {
+    let admission = match message {
+        MembershipHistoryMessage::SummaryV3(summary) => &summary.sender_admission,
+        MembershipHistoryMessage::SuffixPageV4(page) => page.sender_admission(),
+        MembershipHistoryMessage::RequestSuffixV3(_)
+        | MembershipHistoryMessage::RequestConflictEvidenceV3(_)
+        | MembershipHistoryMessage::ConflictEvidenceV3(_)
+        | MembershipHistoryMessage::AckV3(_)
+        | MembershipHistoryMessage::RestrictedEventV3(_)
+        | MembershipHistoryMessage::RestrictedDecisionV3(_) => return None,
+    };
+    identity
+        .fingerprint_matches(public_key, &admission.identity_fingerprint)
+        .then(|| admission.device_id.clone())
+}
+
+async fn write_message(
+    send: &mut iroh::endpoint::SendStream,
+    payload: &[u8],
+) -> Result<(), MembershipHistoryExchangeError> {
+    let length = u32::try_from(payload.len())
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::StreamFailed, error))?;
+    send.write_all(&length.to_be_bytes())
+        .await
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::StreamFailed, error))?;
+    send.write_all(payload)
+        .await
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::StreamFailed, error))?;
+    send.finish()
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::StreamFailed, error))
+}
+
+async fn read_byte(
+    receive: &mut iroh::endpoint::RecvStream,
+) -> Result<u8, MembershipHistoryExchangeError> {
+    let mut value = [0; 1];
+    tokio::time::timeout(IO_TIMEOUT, receive.read_exact(&mut value))
+        .await
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::Timeout, error))?
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::StreamFailed, error))?;
+    Ok(value[0])
+}
+
+async fn read_message(
+    receive: &mut iroh::endpoint::RecvStream,
+) -> Result<Vec<u8>, MembershipHistoryExchangeError> {
+    let mut length = [0; 4];
+    tokio::time::timeout(IO_TIMEOUT, receive.read_exact(&mut length))
+        .await
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::Timeout, error))?
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::StreamFailed, error))?;
+    let length = checked_message_length(u32::from_be_bytes(length) as usize)?;
+    let mut payload = vec![0; length];
+    tokio::time::timeout(IO_TIMEOUT, receive.read_exact(&mut payload))
+        .await
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::Timeout, error))?
+        .map_err(|error| transport_failure_from(DiagnosticErrorType::StreamFailed, error))?;
+    Ok(payload)
+}
+
+fn checked_message_length(length: usize) -> Result<usize, MembershipHistoryExchangeError> {
+    if length == 0 || length > MAX_MEMBERSHIP_HISTORY_FRAME_SIZE {
+        return Err(transport_failure(DiagnosticErrorType::DecodeFailed));
+    }
+    Ok(length)
+}
+
+async fn reject(send: &mut iroh::endpoint::SendStream) {
+    let _ = send.write_all(&[REJECTED]).await;
+    let _ = send.finish();
+}
+
+async fn busy(send: &mut iroh::endpoint::SendStream) {
+    let _ = send.write_all(&[BUSY]).await;
+    let _ = send.finish();
+}
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn invalid_reply_keeps_decode_reason_on_the_completed_span() {
+        use tracing::Instrument;
+        use uc_observability_contract::diagnostics::*;
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_opentelemetry::layer().with_tracer(provider.tracer("membership-failure-test")),
+        );
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+        scope_operation_diagnostics(async {
+            let span = operation_span(OperationContext {
+                domain: DiagnosticDomain::SpaceMembership,
+                operation: DiagnosticOperation::MembershipHistorySync,
+                role: DiagnosticRole::Member,
+                kind: DiagnosticSpanKind::Client,
+            });
+            async {
+                describe_membership_exchange(MembershipExchangePurpose::CompareSummary, false);
+                assert!(super::decode_message(&[3, 255]).is_err());
+                complete_operation(OperationCompletion::failed(
+                    DiagnosticDomain::SpaceMembership,
+                    DiagnosticOperation::MembershipHistorySync,
+                    DiagnosticRole::Member,
+                    DiagnosticErrorType::StreamFailed,
+                    std::time::Duration::ZERO,
+                ));
+            }
+            .instrument(span)
+            .await;
+        })
+        .await;
+        provider.force_flush().expect("flush");
+        let spans = exporter.get_finished_spans().expect("spans");
+        assert_eq!(spans.len(), 1);
+        for (key, value) in [
+            ("error.type", "decode_failed"),
+            ("uc.outcome", "error"),
+            ("uc.display.name", "membership.compare_summary.exchange"),
+        ] {
+            assert!(
+                spans[0]
+                    .attributes
+                    .iter()
+                    .any(|field| field.key.as_str() == key && field.value.as_str() == value),
+                "missing {key}"
+            );
+        }
+    }
+
+    use super::super::inbound_peer::PeerIdentityResolver;
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+    use std::sync::Arc;
+    use tracing_subscriber::layer::SubscriberExt;
+    use uc_core::ids::DeviceId;
+    use uc_core::membership::{
+        AdmissionChangeFacts, MembershipCredential, MembershipHistoryAckV3,
+        MembershipHistoryMessage, ED25519_SIGNATURE_ALGORITHM_V1,
+        MAX_MEMBERSHIP_HISTORY_FRAME_SIZE,
+    };
+    use uc_core::ports::security::IdentityFingerprintFactoryPort;
+    use uc_core::security::IdentityFingerprint;
+
+    use super::{
+        checked_message_length, decode_message, decode_request, decode_response_status,
+        encode_message, encode_request, introduced_device, BUSY, MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
+    };
+
+    #[test]
+    fn history_busy_status_is_retryable_for_new_clients() {
+        assert!(matches!(
+            decode_response_status(BUSY),
+            Err(uc_core::membership::MembershipHistoryExchangeError::PairingInProgress)
+        ));
+    }
+
+    #[test]
+    fn history_frame_length_accepts_the_boundary_and_rejects_oversize_before_allocation() {
+        assert!(matches!(checked_message_length(1), Ok(1)));
+        assert!(matches!(
+            checked_message_length(MAX_MEMBERSHIP_HISTORY_FRAME_SIZE),
+            Ok(MAX_MEMBERSHIP_HISTORY_FRAME_SIZE)
+        ));
+        assert!(checked_message_length(0).is_err());
+        assert!(checked_message_length(MAX_MEMBERSHIP_HISTORY_FRAME_SIZE + 1).is_err());
+    }
+
+    #[test]
+    fn history_v4_wire_checks_version_before_decoding_the_body() {
+        assert_eq!(
+            MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
+            b"uniclipboard/membership-history/4"
+        );
+        let message = MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Invalid);
+        let encoded = encode_message(&message).unwrap();
+        assert_eq!(encoded[0], 4);
+        assert_eq!(decode_message(&encoded).unwrap(), message);
+
+        let mut old_version_with_invalid_body = vec![1];
+        old_version_with_invalid_body.extend([0xff; 32]);
+        assert!(decode_message(&old_version_with_invalid_body).is_err());
+    }
+
+    #[test]
+    fn history_request_layout_is_explicit_and_keeps_context_private() {
+        let message = MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Invalid);
+        let encoded = encode_request(message.clone()).expect("request encodes");
+
+        assert_eq!(&encoded[..5], b"\x04UCT1");
+        let decoded = decode_request(&encoded).expect("request decodes");
+        assert_eq!(decoded.message, message);
+        assert!(decoded.trace_context.is_none());
+        let mut old_version = encoded.clone();
+        old_version[0] = 3;
+        assert!(decode_request(&old_version).is_err());
+        assert!(decode_request(&encode_message(&message).expect("response encodes")).is_err());
+    }
+
+    #[test]
+    fn history_request_creates_a_real_server_parent_after_peer_resolution() {
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_opentelemetry::layer()
+                .with_tracer(provider.tracer("membership-history-trace-test"))
+                .with_context_activation(true),
+        );
+
+        tracing::subscriber::with_default(subscriber, || {
+            let client = uc_observability_contract::diagnostics::operation_span(
+                uc_observability_contract::diagnostics::OperationContext {
+                    domain: uc_observability_contract::diagnostics::DiagnosticDomain::SpaceMembership,
+                    operation: uc_observability_contract::diagnostics::DiagnosticOperation::MembershipHistorySync,
+                    role: uc_observability_contract::diagnostics::DiagnosticRole::Member,
+                    kind: uc_observability_contract::diagnostics::DiagnosticSpanKind::Client,
+                },
+            );
+            let _client_entered = client.enter();
+            let encoded = encode_request(MembershipHistoryMessage::AckV3(
+                MembershipHistoryAckV3::Invalid,
+            ))
+            .expect("request encodes");
+            let request = decode_request(&encoded).expect("request decodes");
+            let server = uc_observability_contract::diagnostics::operation_span(
+                uc_observability_contract::diagnostics::OperationContext {
+                    domain: uc_observability_contract::diagnostics::DiagnosticDomain::SpaceMembership,
+                    operation: uc_observability_contract::diagnostics::DiagnosticOperation::MembershipHistorySync,
+                    role: uc_observability_contract::diagnostics::DiagnosticRole::Member,
+                    kind: uc_observability_contract::diagnostics::DiagnosticSpanKind::Server,
+                },
+            );
+            assert!(super::set_remote_parent(
+                &server,
+                request.trace_context.as_ref()
+            ));
+            let _server_entered = server.enter();
+        });
+        provider.force_flush().expect("trace flush");
+
+        let spans = exporter.get_finished_spans().expect("finished spans");
+        assert_eq!(spans.len(), 2);
+        let client = spans
+            .iter()
+            .find(|span| span.parent_span_id == opentelemetry::trace::SpanId::INVALID)
+            .expect("client span");
+        let server = spans
+            .iter()
+            .find(|span| span.parent_span_id == client.span_context.span_id())
+            .expect("server span");
+        assert_eq!(
+            server.span_context.trace_id(),
+            client.span_context.trace_id()
+        );
+    }
+
+    #[test]
+    fn history_v3_summary_is_accepted_by_the_decode_allowlist() {
+        let message =
+            MembershipHistoryMessage::SummaryV3(uc_core::membership::MembershipHistorySummaryV3 {
+                lineage_id: "space-a".to_owned(),
+                current_position: uc_core::membership::BaseMembershipHistoryPosition {
+                    event_id: None,
+                    depth: 0,
+                    history_digest: [7; 32],
+                },
+                transfer_id: [8; 32],
+                sender_admission: admission_facts("device-a", fingerprint()),
+            });
+
+        let encoded = encode_message(&message).unwrap();
+
+        assert_eq!(decode_message(&encoded).unwrap(), message);
+    }
+
+    fn fingerprint() -> IdentityFingerprint {
+        IdentityFingerprint::from_display_string("ABCD-EFGH-IJKL-MNOP")
+            .unwrap_or_else(|_| panic!("test fingerprint must be valid"))
+    }
+
+    struct FixedFingerprint(IdentityFingerprint);
+
+    impl IdentityFingerprintFactoryPort for FixedFingerprint {
+        fn from_public_key(&self, _: &[u8]) -> anyhow::Result<IdentityFingerprint> {
+            Ok(self.0.clone())
+        }
+    }
+
+    struct UnusedMembers;
+
+    crate::network::iroh::inbound_peer::member_table_identity_directory!(UnusedMembers);
+    #[async_trait::async_trait]
+    impl uc_core::membership::MemberRepositoryPort for UnusedMembers {
+        async fn get(
+            &self,
+            _: &DeviceId,
+        ) -> Result<Option<uc_core::membership::SpaceMember>, uc_core::membership::MembershipError>
+        {
+            panic!("unused")
+        }
+        async fn list(
+            &self,
+        ) -> Result<Vec<uc_core::membership::SpaceMember>, uc_core::membership::MembershipError>
+        {
+            panic!("unused")
+        }
+        async fn save(
+            &self,
+            _: &uc_core::membership::SpaceMember,
+        ) -> Result<(), uc_core::membership::MembershipError> {
+            panic!("unused")
+        }
+        async fn remove(&self, _: &DeviceId) -> Result<bool, uc_core::membership::MembershipError> {
+            panic!("unused")
+        }
+    }
+
+    fn resolver(fingerprint: IdentityFingerprint) -> PeerIdentityResolver {
+        PeerIdentityResolver::new(
+            Arc::new(UnusedMembers),
+            Arc::new(FixedFingerprint(fingerprint)),
+        )
+    }
+
+    fn admission_facts(
+        device: &str,
+        identity_fingerprint: IdentityFingerprint,
+    ) -> AdmissionChangeFacts {
+        let device_id = DeviceId::new(device);
+        let credential = MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x41; 32]);
+        AdmissionChangeFacts {
+            member_instance: credential.member_instance_id(&device_id),
+            device_id,
+            device_name: device.to_owned(),
+            identity_fingerprint,
+            transport_public_key: vec![1],
+            transport_address_blob: vec![2],
+            identity_signature: vec![3],
+        }
+    }
+
+    #[test]
+    fn unknown_member_cannot_introduce_itself_with_a_regular_history_message() {
+        let message = MembershipHistoryMessage::AckV3(MembershipHistoryAckV3::Invalid);
+
+        assert_eq!(
+            introduced_device(&message, &resolver(fingerprint()), &[0; 32]),
+            None
+        );
+    }
+
+    #[test]
+    fn unknown_member_is_identified_from_a_fingerprint_bound_summary() {
+        let facts = admission_facts("device-c", fingerprint());
+        let expected = facts.device_id.clone();
+        let message =
+            MembershipHistoryMessage::SummaryV3(uc_core::membership::MembershipHistorySummaryV3 {
+                lineage_id: "space-a".to_owned(),
+                current_position: uc_core::membership::BaseMembershipHistoryPosition {
+                    event_id: None,
+                    depth: 2,
+                    history_digest: [7; 32],
+                },
+                transfer_id: [7; 32],
+                sender_admission: facts,
+            });
+
+        assert_eq!(
+            introduced_device(&message, &resolver(fingerprint()), &[0; 32]),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn unknown_member_claim_is_rejected_when_connection_fingerprint_differs() {
+        let facts = admission_facts("device-c", fingerprint());
+        let message =
+            MembershipHistoryMessage::SummaryV3(uc_core::membership::MembershipHistorySummaryV3 {
+                lineage_id: "space-a".to_owned(),
+                current_position: uc_core::membership::BaseMembershipHistoryPosition {
+                    event_id: None,
+                    depth: 2,
+                    history_digest: [7; 32],
+                },
+                transfer_id: [7; 32],
+                sender_admission: facts,
+            });
+        let other = IdentityFingerprint::from_display_string("QRST-UVWX-YZAB-CDEF")
+            .unwrap_or_else(|_| panic!("test fingerprint must be valid"));
+
+        assert_eq!(
+            introduced_device(&message, &resolver(other), &[0; 32]),
+            None
+        );
+    }
+}

@@ -849,11 +849,11 @@ impl EngineRuntime for ProductionRuntime {
             } => {
                 let alpns = if peer_reachability {
                     vec![
-                        uc_infra::network::iroh::LEGACY_PEER_REACHABILITY_ALPN.to_vec(),
-                        uc_infra::network::iroh::PEER_REACHABILITY_ALPN.to_vec(),
+                        uc_infra_p2p::network::iroh::LEGACY_PEER_REACHABILITY_ALPN.to_vec(),
+                        uc_infra_p2p::network::iroh::PEER_REACHABILITY_ALPN.to_vec(),
                     ]
                 } else {
-                    vec![uc_infra::network::iroh::CLIPBOARD_ALPN.to_vec()]
+                    vec![uc_infra_p2p::network::iroh::CLIPBOARD_ALPN.to_vec()]
                 };
                 Ok(DevOperationResult::NetworkPartitionUpdated {
                     blocked_peer_count: self

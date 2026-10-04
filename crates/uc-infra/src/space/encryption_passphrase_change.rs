@@ -182,12 +182,12 @@ mod tests {
     use uc_core::ports::{SecureStorageError, SecureStoragePort};
 
     use super::*;
-    use crate::network::iroh::SpaceAdmissionChannelCredentialPort;
     use crate::security::{
         AdmissionKeyManager, DefaultCurrentProfile, ProfileContentKeyVault, SpaceAdmissionAuth,
         SpaceAdmissionAuthContext,
     };
     use crate::space::{InMemorySession, KeyMaterialStore, SqliteSpaceAdmissionState};
+    use uc_infra_p2p::network::iroh::SpaceAdmissionChannelCredentialPort;
     use uc_infra_security::key_slot_store::JsonKeySlotStore;
     use uc_infra_storage::db::executor::DieselSqliteExecutor;
     use uc_infra_storage::db::pool::init_db_pool;

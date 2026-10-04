@@ -34,11 +34,6 @@ use uc_core::ports::{
     ActiveClipboardDispatchPort, ActiveClipboardReceiverPort, ClipboardDispatchPort,
     ConnectionChannelPort, LocalIdentityPort, PeerReachabilityPort,
 };
-use uc_infra::network::iroh::{
-    encode_space_admission_route, ActiveClipboardHandlers, ActiveClipboardPullHandlers,
-    BlobHandlers, ClipboardHandlers, GroupUpdateHandlers, IrohIdentityStore, IrohNodeError,
-    IrohSessionBuilder, PreparedIrohSession, TransferProgressHandlers,
-};
 use uc_infra::security::Sha256IdentityFingerprintFactory;
 use uc_infra::space::{
     DefaultJoinerActivationExecutor, DefaultJoinerActivationPreparation,
@@ -54,6 +49,11 @@ use uc_infra::space::{
 };
 use uc_infra_local::fs::{
     FsAtomicPublisher, FsDirectoryStagingCleaner, FsHiddenPathMarker, FsInboundFileTarget,
+};
+use uc_infra_p2p::network::iroh::{
+    encode_space_admission_route, ActiveClipboardHandlers, ActiveClipboardPullHandlers,
+    BlobHandlers, ClipboardHandlers, GroupUpdateHandlers, IrohIdentityStore, IrohNodeError,
+    IrohSessionBuilder, PreparedIrohSession, TransferProgressHandlers,
 };
 use uc_observability_contract::uc_info;
 
@@ -498,7 +498,7 @@ pub async fn prepare_sync_session(
             application_network.space_admission_endpoint(),
         ),
         space_setup.admission_credentials.clone()
-            as Arc<dyn uc_infra::network::iroh::SpaceAdmissionChannelCredentialPort>,
+            as Arc<dyn uc_infra_p2p::network::iroh::SpaceAdmissionChannelCredentialPort>,
     )?;
     builder.install_membership_history_exchange(
         &membership_history_exchange_adapter,

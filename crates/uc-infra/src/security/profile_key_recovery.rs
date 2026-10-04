@@ -16,7 +16,6 @@ use super::profile_lifecycle::PROFILE_LIFECYCLE_MARKER_NAME;
 use super::profile_upgrade_backup::PROFILE_UPGRADE_BACKUP_RECORD_KEY;
 use super::{Kek, MasterKey};
 use crate::config_migration::staging::PENDING_IMPORT_MARKER;
-use crate::network::iroh::IDENTITY_STORE_KEY;
 use uc_infra_crypto::crypto_model::{EncryptedBlob, KeyScope};
 use uc_infra_crypto::v1_aead;
 use uc_infra_local::fs::durability::{replace_file, sync_directory};
@@ -24,6 +23,7 @@ use uc_infra_local::migration_state::{
     decode_legacy_migration_run_id, DEFAULT_MIGRATION_STATE_FILE,
 };
 use uc_infra_local::FileSecureStorage;
+use uc_infra_p2p::network::iroh::IDENTITY_STORE_KEY;
 use uc_infra_security::admission_key_manager::PROFILE_ADMISSION_KEY_NAME;
 use uc_infra_security::key_migration_adapter::{DefaultKeyMigrationAdapter, KEYRING_PREFIX};
 use uc_infra_security::key_slot_store::JsonKeySlotStore;

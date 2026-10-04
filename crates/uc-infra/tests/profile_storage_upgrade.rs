@@ -13,7 +13,6 @@ use uc_core::ids::{ProfileId, SpaceId};
 use uc_core::membership::{ActiveSpaceGenerationManifestV2, InvitationId, SpaceAdmissionId};
 use uc_core::ports::space::SpaceAccessStore;
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
-use uc_infra::network::iroh::SpaceAdmissionChannelCredentialPort;
 use uc_infra::security::{
     ActiveSpaceGenerationManifestStore, AdmissionKeyManager, DefaultCurrentProfile,
     ProfileContentKeyVault, ProfileLifecycleRepository, ProfileRuntimeLayout,
@@ -23,6 +22,7 @@ use uc_infra::space::{
     CurrentSpaceResolver, InMemorySession, KeyMaterialStore, RuntimeSpaceAccessAdapter,
     SqliteSpaceAdmissionCredentials, SqliteSpaceAdmissionState,
 };
+use uc_infra_p2p::network::iroh::SpaceAdmissionChannelCredentialPort;
 use uc_infra_security::key_slot_store::JsonKeySlotStore;
 use uc_infra_storage::db::executor::DieselSqliteExecutor;
 use uc_infra_storage::db::pool::init_db_pool;

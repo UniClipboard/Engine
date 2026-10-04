@@ -9,12 +9,12 @@ use uc_core::ports::SecureStoragePort;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::config_migration::secret_keys::migratable_secret_keys;
-use crate::network::iroh::IDENTITY_STORE_KEY;
 use crate::security::profile_lifecycle::PROFILE_LIFECYCLE_MARKER_NAME;
 use crate::security::DefaultKeyMigrationAdapter;
 use uc_infra_local::migration_state::{
     decode_legacy_migration_run_id, DEFAULT_MIGRATION_STATE_FILE,
 };
+use uc_infra_p2p::network::iroh::IDENTITY_STORE_KEY;
 use uc_infra_security::admission_key_manager::PROFILE_ADMISSION_KEY_NAME;
 use uc_infra_security::profile_content_key_vault::PROFILE_CONTENT_VAULT_KEY_NAME;
 

@@ -5048,7 +5048,7 @@ async fn production_engine_reuses_v019_file_network_identity() {
         assert!(
             secure_storage
                 .values()
-                .get(uc_infra::network::iroh::IDENTITY_STORE_KEY)
+                .get(uc_infra_p2p::network::iroh::IDENTITY_STORE_KEY)
                 .is_none(),
             "network identity leaked into primary secure storage on cycle {cycle}"
         );

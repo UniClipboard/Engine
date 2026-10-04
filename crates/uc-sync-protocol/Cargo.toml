@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 uc-core = { path = "../uc-core" }
 
+base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["use-std"] }
 bytes = "1.7"

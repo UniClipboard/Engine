@@ -20,10 +20,10 @@ use uc_core::pairing::InvitationCode;
 use uc_core::ports::SettingsPort;
 use uc_core::security::IdentityFingerprint;
 use uc_observability_contract::diagnostics::connectivity::{observe_local_result, LocalWorkStep};
+use uc_sync_protocol::full_invitation::decode_invitation_entry;
 use x25519_dalek::{PublicKey as RecoveryPublicKey, StaticSecret as RecoverySecret};
 use zeroize::Zeroizing;
 
-use crate::space::decode_invitation_entry;
 use uc_infra_crypto::mls_group::MlsGroupEngine;
 
 const JOINER_PRIVATE_STATE_FORMAT_V2: u16 = 2;
@@ -282,7 +282,7 @@ mod tests {
     use uc_core::settings::model::Settings;
 
     use super::*;
-    use crate::space::encode_full_invitation;
+    use uc_sync_protocol::full_invitation::encode_full_invitation;
 
     #[tokio::test]
     async fn complete_joiner_start_material_is_created_from_a_full_invitation() {
@@ -329,7 +329,7 @@ mod tests {
             panic!("expected InvalidInvitation with its decode source, got {error:?}");
         };
         assert!(source
-            .downcast_ref::<crate::space::admission::full_invitation::FullInvitationCodecError>()
+            .downcast_ref::<uc_sync_protocol::full_invitation::FullInvitationCodecError>()
             .is_some());
     }
 

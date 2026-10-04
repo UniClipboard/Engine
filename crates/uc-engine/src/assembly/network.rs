@@ -28,7 +28,7 @@ use uc_observability_contract::{
     error_source::io_error_kind, log_fields::log_vocab, uc_info, uc_warn,
 };
 
-use uc_infra::network::iroh::{IrohNodeConfig, IrohRelayAccessToken};
+use uc_infra_p2p::network::iroh::{IrohNodeConfig, IrohRelayAccessToken};
 
 /// 把业务侧 `Settings.network` 翻译为 infra 侧 `IrohNodeConfig`。
 ///

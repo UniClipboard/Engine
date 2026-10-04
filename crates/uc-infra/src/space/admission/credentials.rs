@@ -17,13 +17,13 @@ use uc_core::membership::{
 };
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use crate::network::iroh::{
-    SpaceAdmissionChannelCredentialError, SpaceAdmissionChannelCredentialPort,
-    SponsorOpaqueMaterial,
-};
 use crate::security::{
     ActiveRuntimeManifest, ActiveSpaceGenerationManifestStore, AdmissionKeyError,
     AdmissionKeyManager, SpaceAdmissionAuth,
+};
+use uc_infra_p2p::network::iroh::{
+    SpaceAdmissionChannelCredentialError, SpaceAdmissionChannelCredentialPort,
+    SponsorOpaqueMaterial,
 };
 use uc_infra_storage::db::connection::establish_waiting;
 use uc_infra_storage::db::pool::DbPool;
@@ -710,36 +710,6 @@ fn map_admission_state_error(error: CredentialLoadError) -> SpaceAdmissionChanne
         SpaceAdmissionChannelCredentialError::Unavailable { source }
     } else {
         SpaceAdmissionChannelCredentialError::Rejected { source }
-    }
-}
-
-impl SpaceAdmissionChannelCredentialError {
-    /// 协议负责人只取得脱敏分类；来源类型和存储布局留在 Infra 内部。
-    pub(crate) fn diagnostic_failure(
-        &self,
-    ) -> uc_observability_contract::diagnostics::connectivity::CredentialFailure {
-        use uc_observability_contract::diagnostics::connectivity::CredentialFailure;
-        let (source, fallback) = match self {
-            Self::Unavailable { source } => (source, CredentialFailure::Unavailable),
-            Self::Rejected { source } => (source, CredentialFailure::RecoveryRequired),
-        };
-        for cause in source.chain() {
-            if let Some(error) = cause.downcast_ref::<CredentialLoadError>() {
-                return error.diagnostic_failure();
-            }
-            if let Some(error) = cause.downcast_ref::<SpaceAdmissionCredentialStoreError>() {
-                return match error {
-                    SpaceAdmissionCredentialStoreError::Locked { .. } => CredentialFailure::Locked,
-                    SpaceAdmissionCredentialStoreError::RecoveryRequired { .. } => {
-                        CredentialFailure::RecoveryRequired
-                    }
-                    SpaceAdmissionCredentialStoreError::Unavailable { .. } => {
-                        CredentialFailure::Unavailable
-                    }
-                };
-            }
-        }
-        fallback
     }
 }
 

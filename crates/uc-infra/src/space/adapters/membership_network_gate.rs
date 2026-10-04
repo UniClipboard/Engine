@@ -125,7 +125,7 @@ impl MembershipHistoryExchangePort for GatedMembershipHistoryExchange {
     ) -> Result<MembershipHistoryMessage, MembershipHistoryExchangeError> {
         if !self.gate.permits_network_work() {
             describe_membership_exchange(
-                crate::network::iroh::membership_history_exchange_adapter::request_purpose(
+                uc_infra_p2p::network::iroh::membership_history_exchange_adapter::request_purpose(
                     &message,
                 ),
                 false,

@@ -971,13 +971,15 @@ mod tests {
             .await
             .unwrap();
         let membership_history_reachable = network
-            .accepts_protocol_for_test(uc_infra::network::iroh::MEMBERSHIP_HISTORY_EXCHANGE_ALPN)
+            .accepts_protocol_for_test(
+                uc_infra_p2p::network::iroh::MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
+            )
             .await;
         let membership_branch_recovery_reachable = network
-            .accepts_protocol_for_test(uc_infra::network::iroh::MEMBERSHIP_BRANCH_RECOVERY_ALPN)
+            .accepts_protocol_for_test(uc_infra_p2p::network::iroh::MEMBERSHIP_BRANCH_RECOVERY_ALPN)
             .await;
         let space_admission_reachable = network
-            .accepts_protocol_for_test(uc_infra::network::iroh::SPACE_ADMISSION_ALPN)
+            .accepts_protocol_for_test(uc_infra_p2p::network::iroh::SPACE_ADMISSION_ALPN)
             .await;
         let (exchange, late, notice) = tokio::join!(
             network.accepts_protocol_for_test(b"uniclipboard/removal-exchange/1"),

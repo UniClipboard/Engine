@@ -9,12 +9,9 @@ pub use adapters::{
     FileSpaceRebuildProgress, GatedMembershipHistoryExchange, GatedSpaceAdmissionTransport,
     MembershipActivationAdapter, MembershipMemberFactsAdapter, MembershipNetworkGate,
 };
-#[cfg(test)]
-pub(crate) use admission::decode_full_invitation;
 pub(crate) use admission::prepare_registration;
 #[cfg(feature = "test-util")]
 pub use admission::AdmissionRepositoryBenchmark;
-pub(crate) use admission::{decode_invitation_entry, encode_full_invitation};
 pub(crate) use admission::{
     install_prepared_registration_for_control_generation,
     rebind_registration_to_control_generation, upgrade_registration_to_control_generation,
@@ -34,7 +31,6 @@ pub use encryption_passphrase_change::EncryptionPassphraseChange;
 pub use membership_branch_transition::DefaultMembershipBranchTransitionPreparation;
 pub use membership_record::SqliteMembershipRecordStore;
 pub use uc_infra_crypto::history_signature::OpenMlsHistoricalSignatureVerifier;
-pub(crate) use uc_infra_security::group_update_failure_detail;
 pub use uc_infra_security::{
     DefaultMembershipSecurityUpdateAdapter, InMemorySession, KeyMaterialStore,
     MigrationSpaceAccessAdapter, RuntimeSpaceAccessAdapter, SpaceSessionRebindAdapter,
