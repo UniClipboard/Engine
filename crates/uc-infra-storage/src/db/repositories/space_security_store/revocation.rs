@@ -101,16 +101,13 @@ pub(super) fn decode_record(
 impl<E: DbExecutor + Clone + 'static> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
     async fn save_space_material(&self, material: &SpaceKeyMaterial) -> Result<(), KeyEpochError> {
         let master_key = self.session.get_master_key().map_err(backend)?;
-        let material = material.clone();
-        self.run_blocking(move |store| {
-            store
-                .executor
-                .run(|conn| {
-                    save_space_material_on(conn, &master_key, &material).map_err(anyhow::Error::new)
-                })
-                .map_err(transaction_failure)
-        })
-        .await
+        // 入站组更新处理在生命周期等待范围之外调用这里；移到阻塞线程会让暂停在写入仍等待写锁时
+        // 报告已暂停，因此保持在调用线程执行，直到入站处理纳入暂停等待。
+        self.executor
+            .run(|conn| {
+                save_space_material_on(conn, &master_key, material).map_err(anyhow::Error::new)
+            })
+            .map_err(transaction_failure)
     }
 
     async fn load_space_material(
