@@ -56,19 +56,19 @@ fn matching_brace(text: &str, open: usize) -> usize {
 }
 
 const INBOUND_HANDLERS: [&str; 8] = [
-    "crates/uc-infra/src/network/iroh/peer_reachability_adapter.rs",
-    "crates/uc-infra/src/network/iroh/clipboard_receiver_adapter.rs",
-    "crates/uc-infra/src/network/iroh/active_clipboard/receiver_adapter.rs",
-    "crates/uc-infra/src/network/iroh/active_clipboard/pull_serve_adapter.rs",
-    "crates/uc-infra/src/network/iroh/transfer_progress_adapter.rs",
-    "crates/uc-infra/src/network/iroh/membership_branch_recovery_adapter.rs",
-    "crates/uc-infra/src/network/iroh/membership_history_exchange_adapter.rs",
-    "crates/uc-infra/src/network/iroh/node.rs",
+    "crates/uc-infra-p2p/src/network/iroh/peer_reachability_adapter.rs",
+    "crates/uc-infra-p2p/src/network/iroh/clipboard_receiver_adapter.rs",
+    "crates/uc-infra-p2p/src/network/iroh/active_clipboard/receiver_adapter.rs",
+    "crates/uc-infra-p2p/src/network/iroh/active_clipboard/pull_serve_adapter.rs",
+    "crates/uc-infra-p2p/src/network/iroh/transfer_progress_adapter.rs",
+    "crates/uc-infra-p2p/src/network/iroh/membership_branch_recovery_adapter.rs",
+    "crates/uc-infra-p2p/src/network/iroh/membership_history_exchange_adapter.rs",
+    "crates/uc-infra-p2p/src/network/iroh/node.rs",
 ];
 
 #[test]
 fn identity_resolution_has_a_single_implementation() {
-    let gate = production("crates/uc-infra/src/network/iroh/inbound_peer.rs");
+    let gate = production("crates/uc-infra-p2p/src/network/iroh/inbound_peer.rs");
     assert!(gate.contains("struct PeerIdentityResolver"));
     assert!(gate.contains("struct InboundPeerGate"));
     for handler in INBOUND_HANDLERS {
@@ -93,11 +93,11 @@ fn identity_resolution_has_a_single_implementation() {
 /// 执行计划 049 S5：入站身份只来自成员状态负责人发布的身份目录，不读取成员读模型。
 #[test]
 fn identity_resolution_reads_the_membership_owner_directory() {
-    let gate = production("crates/uc-infra/src/network/iroh/inbound_peer.rs");
+    let gate = production("crates/uc-infra-p2p/src/network/iroh/inbound_peer.rs");
     assert!(gate.contains("PeerIdentityDirectoryPort"));
     for handler in INBOUND_HANDLERS
         .into_iter()
-        .chain(["crates/uc-infra/src/network/iroh/inbound_peer.rs"])
+        .chain(["crates/uc-infra-p2p/src/network/iroh/inbound_peer.rs"])
     {
         assert!(
             !production(handler).contains("MemberRepositoryPort"),
@@ -124,12 +124,12 @@ fn inbound_paths_do_not_log_peer_identifiers() {
 fn network_admission_rule_lives_only_in_the_membership_ledger() {
     assert!(
         !workspace()
-            .join("crates/uc-infra/src/space/security/peer_admission.rs")
+            .join("crates/uc-infra-profile/src/space/security/peer_admission.rs")
             .exists(),
         "the Infra copy of the admission rule must be deleted"
     );
     for relative in [
-        "crates/uc-infra/src/space/mod.rs",
+        "crates/uc-infra-profile/src/space/mod.rs",
         "crates/uc-infra-security/src/lib.rs",
         "crates/uc-infra-security/src/access.rs",
         "crates/uc-engine/src/assembly/wire/infra.rs",
@@ -146,7 +146,7 @@ fn network_admission_rule_lives_only_in_the_membership_ledger() {
 
 #[test]
 fn joiner_activation_checks_the_sponsor_identity() {
-    let activation = production("crates/uc-infra/src/space/admission/joiner/activation.rs");
+    let activation = production("crates/uc-infra-profile/src/space/admission/joiner/activation.rs");
     assert!(
         activation.contains("verify_sponsor_route_identity("),
         "prepare() must verify the sponsor facts against its continuation endpoint"

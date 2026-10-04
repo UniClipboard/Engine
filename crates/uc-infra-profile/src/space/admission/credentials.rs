@@ -15,6 +15,7 @@ use uc_core::membership::{
     ActiveSpaceGenerationManifestV2, AdmissionContinuationCredential, InvitationId,
     SpaceAdmissionId,
 };
+use uc_observability_contract::diagnostics::connectivity::CredentialFailure;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::security::{
@@ -686,30 +687,35 @@ fn map_store_error(error: anyhow::Error) -> SpaceAdmissionCredentialStoreError {
 fn map_channel_error(
     error: SpaceAdmissionCredentialStoreError,
 ) -> SpaceAdmissionChannelCredentialError {
-    let unavailable = matches!(
-        &error,
-        SpaceAdmissionCredentialStoreError::Locked { .. }
-            | SpaceAdmissionCredentialStoreError::Unavailable { .. }
-    );
-    let source = anyhow::Error::new(error);
-    if unavailable {
-        SpaceAdmissionChannelCredentialError::Unavailable { source }
-    } else {
-        SpaceAdmissionChannelCredentialError::Rejected { source }
-    }
+    let failure = match &error {
+        SpaceAdmissionCredentialStoreError::Locked { .. } => CredentialFailure::Locked,
+        SpaceAdmissionCredentialStoreError::RecoveryRequired { .. } => {
+            CredentialFailure::RecoveryRequired
+        }
+        SpaceAdmissionCredentialStoreError::Unavailable { .. } => CredentialFailure::Unavailable,
+    };
+    channel_error(failure, anyhow::Error::new(error))
 }
 
 fn map_admission_state_error(error: CredentialLoadError) -> SpaceAdmissionChannelCredentialError {
-    use uc_observability_contract::diagnostics::connectivity::CredentialFailure;
-    let unavailable = matches!(
-        error.diagnostic_failure(),
-        CredentialFailure::Locked | CredentialFailure::Unavailable
-    );
-    let source = anyhow::Error::new(error);
-    if unavailable {
-        SpaceAdmissionChannelCredentialError::Unavailable { source }
-    } else {
-        SpaceAdmissionChannelCredentialError::Rejected { source }
+    channel_error(error.diagnostic_failure(), anyhow::Error::new(error))
+}
+
+/// 凭据负责人在构造时写入脱敏分类，网络侧只读取分类，不对来源做向下转型。
+fn channel_error(
+    failure: CredentialFailure,
+    source: anyhow::Error,
+) -> SpaceAdmissionChannelCredentialError {
+    match failure {
+        CredentialFailure::Locked | CredentialFailure::Unavailable => {
+            SpaceAdmissionChannelCredentialError::Unavailable { failure, source }
+        }
+        CredentialFailure::RecordMissing
+        | CredentialFailure::CredentialMissing
+        | CredentialFailure::Corrupt
+        | CredentialFailure::RecoveryRequired => {
+            SpaceAdmissionChannelCredentialError::Rejected { failure, source }
+        }
     }
 }
 

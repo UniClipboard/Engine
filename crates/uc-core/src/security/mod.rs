@@ -1,8 +1,7 @@
-//! Core security domain types shared across pairing / membership / trust.
+//! 配对、成员与信任共享的 Core 安全领域类型。
 //!
-//! Only algorithm-agnostic value objects live here. Concrete cryptographic
-//! derivations (SHA-256, Base32 encoding of public keys, KDFs) belong in
-//! `uc-infra`.
+//! 这里只放与算法无关的值对象。具体密码学派生（SHA-256、公钥的 Base32 编码、KDF）
+//! 属于 Infra 层的 `uc-infra-crypto`。
 
 pub mod identity_fingerprint;
 

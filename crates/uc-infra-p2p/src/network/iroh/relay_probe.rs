@@ -378,7 +378,7 @@ mod tests {
     /// relay);本地排查 iroh-relay 升级 / 网络栈变更时:
     ///
     ///   RELAY_PROBE_TARGET=https://your-relay.example.com \
-    ///     cargo test -p uc-infra relay_probe::tests \
+    ///     cargo test -p uc-infra-p2p relay_probe::tests \
     ///     probe_succeeds_against_real_relay -- --ignored --nocapture
     ///
     /// 不设环境变量则默认尝试 n0 公共 relay。若选定 relay 因 ISP / 区域

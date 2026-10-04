@@ -1,8 +1,7 @@
-//! SearchIndexMaintenancePort — one-shot storage maintenance for the search index.
+//! SearchIndexMaintenancePort——搜索索引的一次性存储维护。
 //!
-//! Implemented by uc-infra. Kept separate from `SearchIndexPort` (query/index
-//! surface) because it is a background-only, storage-level concern with a
-//! different lifecycle: it runs once after a schema-changing rebuild.
+//! 由 `uc-infra-storage` 实现。它与 `SearchIndexPort`（查询/索引接口）分开，
+//! 因为它只在后台运行、属于存储层关注点且生命周期不同：只在改变 schema 的重建后运行一次。
 
 use crate::search::SearchError;
 use async_trait::async_trait;

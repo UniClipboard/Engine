@@ -6,6 +6,6 @@ This directory is `iroh-mdns-address-lookup` 0.6.0 from crates.io, unchanged exc
 - the example target and dev-dependencies are removed, and the package is detached from the Engine workspace.
 
 Why it exists: `[patch]` entries are only read from the root manifest of the build, so repositories that depend on Engine
-(Desktop) would otherwise have to repeat the `swarm-discovery` patch. With this vendored crate, `uc-infra` depends on both
+(Desktop) would otherwise have to repeat the `swarm-discovery` patch. With this vendored crate, `uc-infra-p2p` depends on both
 by path and no downstream `[patch]` is needed. Drop this directory when `swarm-discovery` ships the fix upstream.
 Source sources and licence: crates.io `iroh-mdns-address-lookup` 0.6.0, `MIT OR Apache-2.0`.

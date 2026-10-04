@@ -54,7 +54,7 @@ A Port belongs to the layer that directly needs the capability:
 
 - A domain rule directly using a capability defines its Port in `uc-core`.
 - An application workflow directly using a capability defines its Port in `uc-application`.
-- `uc-infra` implements those Ports; implementation location never decides ownership.
+- The `uc-infra-*` crates implement those Ports; implementation location never decides ownership.
 
 Keeping domain models in `uc-core` does not require their repository or workflow Ports to live there. An application-owned repository Port may use core-owned state types while preserving the dependency direction `infra -> application -> core`.
 

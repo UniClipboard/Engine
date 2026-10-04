@@ -111,7 +111,9 @@ fn sanitized_backtrace() -> Vec<String> {
         .map(str::trim)
         .filter(|line| is_relationship_diagnostic_frame(line))
         .take(8)
-        .map(|line| line.chars().take(160).collect())
+        // 内联的组合子帧（如 `map<…>`）只在泛型参数里带模块路径；上限须容纳完整的
+        // `uc_infra_storage::db::repositories::relationship_store` 路径，否则导出帧丢失定位信息。
+        .map(|line| line.chars().take(256).collect())
         .collect()
 }
 

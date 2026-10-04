@@ -341,10 +341,9 @@ async fn failures_keep_stable_classification_and_a_source() {
 
 // `inline_and_ucbl_v3_remain_readable_after_the_active_space_switches` 和
 // `ucbl_v3_path_ingest_preserves_plaintext_identity_and_delete_is_idempotent`
-// 迁到 `uc-infra` 的 `security::content_protection::tests`：它们要用
-// `ProfilePayloadAdapters`/`V3EncryptedBlobStore`，这两个仍留在 `uc-infra`
-// （content/profile 未拆分前），不能再和这个 crate 内的其余纯 security 测试
-// 共享模块。
+// 位于 `uc-infra-content` 的 `content_protection::tests`：它们要用
+// `ProfilePayloadAdapters`/`V3EncryptedBlobStore`，这两个属于 `uc-infra-content`，
+// 本 crate 不能反向依赖，因此不和这里的其余纯 security 测试共享模块。
 
 #[tokio::test]
 async fn inline_v3_errors_keep_stable_classification_and_source() {

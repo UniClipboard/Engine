@@ -78,7 +78,7 @@ CI 原先用 sccache 的 GitHub Actions 缓存后端（`SCCACHE_GHA_ENABLED=true
 | 条目损坏 | sccache 读不出的条目按未命中重编；系统性问题通过代际号整体失效 |
 | 多个 job 并发写同一键 | 同一键内容由同一输入决定，后写覆盖先写，结果等价 |
 | 跨平台 | 键含编译器与目标三元组，且前缀按 os-arch 分开，不会命中其他平台的产物 |
-| 覆盖率插桩 | `-C instrument-coverage` 与 `uc-infra` profile 覆盖都进入参数哈希，与普通构建分开存储 |
+| 覆盖率插桩 | `-C instrument-coverage` 与 `uc-infra-*` profile 覆盖都进入参数哈希，与普通构建分开存储 |
 
 sccache 只在存储读探测通过后才监听端口，脚本据此判断就绪，并再以 `--show-stats` 的缓存位置核对后端类型；
 报告的后端（`UC_COMPILE_CACHE_BACKEND` 与 step summary）总是正在监听的那个服务。

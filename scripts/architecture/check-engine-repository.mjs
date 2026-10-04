@@ -259,6 +259,25 @@ function checkWorkspaceShape(metadata) {
   return problems
 }
 
+function checkPackageSelectors(metadata, sources) {
+  const problems = []
+  const members = new Set(
+    metadata.workspace_members
+      .map(id => metadata.packages.find(candidate => candidate.id === id)?.name)
+      .filter(Boolean),
+  )
+  const selector = /package\(([A-Za-z0-9_-]+)\)|(?:\s-p|--package)[ =](uc-[A-Za-z0-9_-]+)/g
+  for (const { path, text } of sources.packageSelectors) {
+    for (const match of text.matchAll(selector)) {
+      const name = match[1] ?? match[2]
+      if (!members.has(name)) {
+        addProblem(problems, 'package selectors', `${path} selects ${name}, which is not a workspace package`)
+      }
+    }
+  }
+  return problems
+}
+
 function checkOpenMlsValidation(metadata) {
   const problems = []
   const validation = packageByName(metadata, 'openmls-validation')
@@ -2172,8 +2191,22 @@ function checkMembershipHistoryOwnership(sources) {
   return problems
 }
 
+// CI、测试脚本与 nextest 配置按包名选择测试；包改名或删除后旧名字只会让过滤静默落空。
+function packageSelectorSources() {
+  const files = execFileSync(
+    'git',
+    ['ls-files', '--', '.github', 'scripts', '.config/nextest.toml'],
+    { cwd: REPOSITORY_ROOT, encoding: 'utf8' },
+  )
+    .split('\n')
+    // 本检查自身含有负面用例文本，不作为选择器来源。
+    .filter(path => /\.(ya?ml|sh|mjs|toml)$/.test(path) && path !== 'scripts/architecture/check-engine-repository.mjs')
+  return files.map(path => ({ path, text: read(path) }))
+}
+
 function repositorySources() {
   return {
+    packageSelectors: packageSelectorSources(),
     monolithicMembershipHistoryPresent: existsSync(join(REPOSITORY_ROOT, 'crates/uc-core/src/membership/versioned_membership_history.rs')),
     membershipHistoryRoot: read('crates/uc-core/src/membership/versioned_membership_history/mod.rs'),
     membershipHistoryCore: readSourceTree('crates/uc-core/src/membership/versioned_membership_history'),
@@ -2296,6 +2329,7 @@ function repositorySources() {
 function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
   return [
     ...checkWorkspaceShape(metadata),
+    ...checkPackageSelectors(metadata, sources),
     ...checkOpenMlsValidation(metadata),
     ...checkLocalDependencies(metadata),
     ...checkTestkitBoundary(metadata),
@@ -2354,6 +2388,12 @@ function runNegativeFixtures(metadata, sources) {
   }, metadata, sources)
   expectRejected('public membership history implementation modules', (_metadata, changed) => {
     changed.membershipHistoryRoot += '\npub mod archive;\n'
+  }, metadata, sources)
+  expectRejected('test selector naming a removed package', (_metadata, changed) => {
+    changed.packageSelectors = [
+      ...changed.packageSelectors,
+      { path: 'scripts/testing/fixture.sh', text: "cargo nextest run -p uc-infra -E 'package(uc-infra)'\n" },
+    ]
   }, metadata, sources)
   expectRejected('repository-external local dependency', changed => {
     packageByName(changed, 'uc-engine').dependencies.push({

@@ -78,7 +78,7 @@ const PARALLEL_COMPRESSION_THRESHOLD: usize = 1024 * 1024; // 1 MiB
 
 /// Errors that can occur during chunked transfer encoding or decoding.
 ///
-/// These are wire-format implementation details, internal to uc-infra.
+/// These are wire-format implementation details, internal to uc-infra-content.
 /// Adapters map these to `TransferCipherError` at the port boundary.
 #[derive(Debug, thiserror::Error)]
 pub enum ChunkedTransferError {
@@ -435,7 +435,7 @@ fn compress_zstd(data: &[u8], level: i32) -> std::io::Result<Vec<u8>> {
 
 /// `TransferCipherPort` 的基础设施适配器。
 ///
-/// 端到端会话管理: 内部持有 uc-infra 的 `InMemorySession` 具体类型,
+/// 端到端会话管理: 内部持有 uc-infra-security 的 `InMemorySession` 具体类型,
 /// 自己完成"会话就绪检查 + 取出 MasterKey",调用方只需提交字节。
 ///
 /// wire format / 压缩 / AEAD 细节复用 `ChunkedEncoder` / `ChunkedDecoder`——

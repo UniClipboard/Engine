@@ -3391,7 +3391,7 @@ mod tests {
     /// Manual P95 harness (excluded from CI). Seeds N=100k and prints browse +
     /// tag-filtered latency percentiles. Targets: browse P95 ≤ 100ms, filtered
     /// P95 ≤ 200ms. Run with:
-    ///   `cargo test -p uc-infra --lib filter_only_pushdown_p95 -- --ignored --nocapture`
+    ///   `cargo test -p uc-infra-storage --lib filter_only_pushdown_p95 -- --ignored --nocapture`
     #[tokio::test]
     #[ignore = "perf harness; run manually with --ignored --nocapture"]
     async fn filter_only_pushdown_p95_harness() {

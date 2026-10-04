@@ -1,4 +1,4 @@
-//! V1 加密原语集中点（uc-infra-crypto 内的 pub API，供 uc-infra 消费）。
+//! V1 加密原语集中点（uc-infra-crypto 内的 pub API，供其他 `uc-infra-*` crate 消费）。
 //!
 //! 把 KEK 派生 / MasterKey 包装拆解 / blob AEAD 三组算法封装成纯函数,
 //! 供 `BlobCipherAdapter` / `EncryptedBlobStore` / 后续 SpaceAccessAdapter

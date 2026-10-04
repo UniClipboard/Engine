@@ -1,4 +1,4 @@
-//! 运行时密钥物料类型(`MasterKey` / `Kek`)——uc-infra 内部。
+//! 运行时密钥物料类型(`MasterKey` / `Kek`)——Infra 层内部(位于 uc-infra-crypto)。
 //!
 //! Slice 4 (B.4.5) 起从 uc-core 物理下沉:这两个 newtype 只在 adapter 层
 //! 存在(KeyMaterialStore / InMemorySession / v1_aead / chunked_transfer / ...),

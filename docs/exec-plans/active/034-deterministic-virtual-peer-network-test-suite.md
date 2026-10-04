@@ -456,21 +456,21 @@ Relationship: Iroh 与 virtual 是这些既有 seam 上的两个 adapter；034 �
 
 ```text
 Component: Iroh membership adapters
-Path: crates/uc-infra/src/network/iroh/membership_history_exchange_adapter.rs, crates/uc-infra/src/network/iroh/group_update_adapter.rs, crates/uc-infra/src/network/iroh/membership_branch_recovery_adapter.rs
+Path: crates/uc-infra-p2p/src/network/iroh/membership_history_exchange_adapter.rs, crates/uc-infra-p2p/src/network/iroh/group_update_adapter.rs, crates/uc-infra-p2p/src/network/iroh/membership_branch_recovery_adapter.rs
 Responsibility: 地址解析、ALPN、认证来源、codec、frame bounds、timeout、ACK 与 endpoint dispatch。
 Relationship: 继续作为生产 adapter；独立 contract 验证 port 到 Iroh 的映射，virtual suite 不复制 wire 实现。
 ```
 
 ```text
 Component: IrohNetworkPartitionGate
-Path: crates/uc-infra/src/network/iroh/network_partition.rs
+Path: crates/uc-infra-p2p/src/network/iroh/network_partition.rs
 Responsibility: 在连接前和握手后拒绝 blocked endpoint，并关闭已建立连接。
 Relationship: `VirtualPeerNetwork::partition` 只阻断动作边界后的新领域调用，不能替代真实 gate contract。
 ```
 
 ```text
 Component: Membership persistence and branch transition integration tests
-Path: crates/uc-infra/tests/membership_ledger.rs, crates/uc-infra/src/security/v3_membership_branch_transition/tests.rs
+Path: crates/uc-infra-profile/tests/membership_record.rs, crates/uc-infra-profile/src/security/v3_membership_branch_transition/tests.rs
 Responsibility: 验证真实 SQLite、MasterKey AEAD、CAS、nonce、control-generation 阶段与崩溃恢复。
 Relationship: virtual node restart 只验证 Application 重新组装和恢复决策；介质与安全原子性继续由这些测试证明。
 ```
@@ -533,7 +533,7 @@ suite 只替换“领域 port 到远端 endpoint”这一段，前后的 Applica
 
 ### Iroh membership provider contract
 
-- **位置**：`crates/uc-infra/src/network/iroh/membership_provider_contract_tests.rs`
+- **位置**：`crates/uc-infra-p2p/src/network/iroh/membership_provider_contract_tests.rs`
 - **职责**：用真实 loopback endpoint 验证 Iroh adapters 对既有领域 ports 的实现，包括认证 source、codec、frame
   bounds、ACK、拒绝、timeout 分类、两阶段 recovery 和 partition gate。
 - **输入**：真实 Iroh endpoints 与最小 endpoint fakes。
@@ -754,7 +754,7 @@ Risk: 逐字复制 Engine 轮询会保留慢测试；断言必须改为稳定业
 
 ```text
 Step 5
-Files: crates/uc-infra/src/network/iroh/mod.rs, crates/uc-infra/src/network/iroh/membership_provider_contract_tests.rs
+Files: crates/uc-infra-p2p/src/network/iroh/mod.rs, crates/uc-infra-p2p/src/network/iroh/membership_provider_contract_tests.rs
 Change: 汇总或补齐真实 loopback contract：history codec/source、group ACK、branch recovery 两阶段和 partition close/reject/heal。
 Risk: 只测成功 round trip 会漏掉认证来源和已有连接关闭，这些正是 virtual 无法覆盖的差异。
 ```
@@ -922,7 +922,8 @@ port 后才可断言；fixture 直接赋值的 epoch 不得计为通过。
 ```bash
 cargo metadata --locked --format-version 1
 cargo test -p uc-application --locked
-cargo test -p uc-infra --locked
+cargo test -p uc-infra-p2p --locked
+cargo test -p uc-infra-profile --locked
 cargo test -p uc-engine --all-targets --locked
 cargo check --workspace --all-targets --locked
 cargo fmt --all -- --check

@@ -3,7 +3,8 @@
 //!
 //! 历史上这是 `InMemoryEncryptionSessionPort`（uc-platform 的 trait 实现);
 //! Slice 3 - C8 把 `EncryptionSessionPort` trait 删除后,这个类型下沉到
-//! uc-infra 作为具体类型——所有 uc-infra 内部 adapter 共用同一个 Arc,
+//! Infra 层作为具体类型(现位于 uc-infra-security)——所有 Infra adapter
+//! (跨 uc-infra-security / uc-infra-content) 共用同一个 Arc,
 //! 不再走 dyn trait 间接层。
 
 use std::collections::HashMap;

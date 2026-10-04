@@ -1,11 +1,11 @@
 //! Stable, human-readable fingerprint identifying a device across transports
 //! and restarts. Used to answer "is this still the same peer?".
 //!
-//! Carries 16 Base32 characters grouped as `ABCD-EFGH-IJKL-MNOP`. The exact
-//! derivation (domain separator + SHA-256 over the Ed25519 public key + Base32
-//! truncation) lives in `uc-infra::security` and goes through
-//! `IdentityFingerprintFactoryPort`. This value object only validates shape
-//! and exposes display/raw/verify accessors.
+//! Carries 16 Base32 characters grouped as `ABCD-EFGH-IJKL-MNOP`.
+//!
+//! 精确派生（域分隔符 + 对 Ed25519 公钥做 SHA-256 + Base32 截断）位于 `uc-infra-crypto`
+//! 的 `Sha256IdentityFingerprintFactory`，经 `IdentityFingerprintFactoryPort` 调用。
+//! 本值对象只校验形状，并提供 display/raw/verify 访问方法。
 
 use std::fmt;
 use std::str::FromStr;

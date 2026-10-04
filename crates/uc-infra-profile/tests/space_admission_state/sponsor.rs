@@ -145,7 +145,7 @@ async fn sponsor_state_load_is_correlated_in_standard_log_file() {
     );
     assert!(refusal.get("error.chain").is_none(), "{refusal}");
     let location = refusal["location"].as_str().expect("location");
-    assert!(location.starts_with("uc-infra/src/"), "{location}");
+    assert!(location.starts_with("uc-infra-profile/src/"), "{location}");
     assert!(refusal["spans"]
         .as_array()
         .expect("spans")

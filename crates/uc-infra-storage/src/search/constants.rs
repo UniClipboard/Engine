@@ -1,4 +1,4 @@
-//! Authoritative search schema and tokenizer constants for `uc-infra`.
+//! Authoritative search schema and tokenizer constants for `uc-infra-storage`.
 //!
 //! `CURRENT_INDEX_VERSION` must be bumped whenever normalization or derived
 //! projection rules change. A version mismatch triggers a full index rebuild in

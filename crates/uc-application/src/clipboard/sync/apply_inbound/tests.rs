@@ -60,7 +60,7 @@ use uc_core::ports::atomic_publish::{AtomicPublishPort, PublishError};
 /// A publisher with the port's real semantics: it performs the move, and it
 /// refuses a destination that already exists.
 ///
-/// The native primitives are exercised against real filesystems in `uc-infra`.
+/// The native primitives are exercised against real filesystems in `uc-infra-local`.
 /// This double exists so the orchestration above them — pre-flight, suffix
 /// retry, multi-root rollback — can be driven through failures no real
 /// filesystem produces on demand.

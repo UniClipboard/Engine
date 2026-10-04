@@ -5,8 +5,9 @@
 //! Lives in `uc-core` because the contract is purely domain-semantic
 //! (`BlobId` in, `Vec<u8>` out) — no storage paths, sizes, or implementation
 //! details leak across the boundary. Use cases in `uc-app` depend on this
-//! trait; concrete implementations (filesystem, encrypted-decorator) live
-//! in `uc-infra`.
+//! trait.
+//!
+//! 具体实现：文件系统读取位于 `uc-infra-local`，加密装饰器位于 `uc-infra-content`。
 
 use anyhow::Result;
 use async_trait::async_trait;

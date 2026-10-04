@@ -99,7 +99,7 @@ pub struct PlatformLayer {
     /// 所有 profile persistence adapter 共用的唯一版本选择。
     pub(crate) payload_runtime: ProfilePayloadRuntime,
 
-    // 进程内会话——uc-infra 内部 adapter (SpaceAccessAdapter / BlobCipherAdapter /
+    // 进程内会话——uc-infra-security / uc-infra-content 的 adapter (SpaceAccessAdapter / BlobCipherAdapter /
     // TransferCipherAdapter / EncryptedBlobStore) 共享同一份 Arc。具体类型,
     // 不再走 EncryptionSessionPort trait dyn 间接层。
     pub session: Arc<InMemorySession>,
@@ -222,7 +222,7 @@ pub fn create_platform_layer(
     let representation_normalizer: Arc<dyn ClipboardRepresentationNormalizerPort> =
         Arc::new(ClipboardRepresentationNormalizer::new(storage_config));
 
-    // 进程内会话: uc-infra adapter 共享的具体类型,替换历史
+    // 进程内会话: uc-infra-security 提供、各 Infra adapter 共享的具体类型,替换历史
     // InMemoryEncryptionSessionPort + EncryptionSessionPort trait dyn 间接层。
     let session = Arc::new(InMemorySession::new());
 

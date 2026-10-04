@@ -19,8 +19,8 @@
 - 有界 W3C trace 载体 `WireTraceContext`（只含载体，不含 span 注入与父 span 设置）；
 - 每个帧的 golden 字节向量，作为线上兼容回归。
 
-依赖方向为 `uc-infra → uc-sync-protocol → uc-core`。`encode_header` 与 `write_frame` 由调用方传入
-trace 上下文，注入当前 span 留在 `uc-infra` 的传输适配层。
+依赖方向为 `uc-infra-p2p`/`uc-infra-profile → uc-sync-protocol → uc-core`。`encode_header` 与 `write_frame` 由调用方传入
+trace 上下文，注入当前 span 留在 `uc-infra-p2p` 的传输适配层。
 
 不进入本 crate：拨号、重试、准入判断、OPAQUE/MLS、存储、Iroh 类型、流程编排。
 `group-update`、成员历史交换与 presence 的帧处理仍内嵌在各自适配器中，需要先从适配器抽出，不在本次范围。
@@ -35,5 +35,6 @@ trace 上下文，注入当前 span 留在 `uc-infra` 的传输适配层。
 
 - 是否继续抽出 `uc-transport-iroh` 取决于构建耗时测量：仓库目前没有 `cargo --timings` 数据，
   任何构建收益都只是估算。本决策不声称构建加速。
-- `uc-infra` 与 `network/iroh` 之间的双向依赖（OPAQUE、会话、rendezvous、路由编解码）需要先拆开，
-  才可能进一步分离传输适配器。
+- ~~`uc-infra` 与 `network/iroh` 之间的双向依赖（OPAQUE、会话、rendezvous、路由编解码）需要先拆开，
+  才可能进一步分离传输适配器。~~ 已在 issue #144 S4 解决：网络、配对与 rendezvous 抽为
+  `uc-infra-p2p`，邀请编解码移入本 crate，`uc-infra-p2p` 不依赖存储或 Profile 实现。

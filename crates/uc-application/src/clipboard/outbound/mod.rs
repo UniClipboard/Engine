@@ -948,7 +948,7 @@ fn manifest_line_path(original_text: &str) -> Option<PathBuf> {
 /// 几 MB PNG）走 blob_refs 路径，receiver 端的 materialize 阶段才有真实的
 /// 时间窗口承载 placeholder。
 ///
-/// 64 KiB 仍给 `inline_threshold_bytes = 16 KB`（uc-infra `clipboard_storage_config`）
+/// 64 KiB 仍给 `inline_threshold_bytes = 16 KB`（uc-infra-content `clipboard_storage_config`）
 /// 的纯文本 rep 留出 4× 缓冲：emoji / 小 icon 之类的 < 64 KB 图片继续 inline，
 /// 不为它们多一次 iroh-blobs round-trip。
 pub const MAX_INLINE_OUTBOUND_REPRESENTATION_BYTES: usize = 64 * 1024;

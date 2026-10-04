@@ -28,7 +28,7 @@
 
 - [`uc-core`](layers/core.md)
 - [`uc-application`](layers/application.md)
-- [`uc-infra`](layers/infrastructure.md)
+- [Infra 层（`uc-infra-*`）](layers/infrastructure.md)
 
 ## 功能设计
 

@@ -4,7 +4,7 @@
 - **日期**：2026-10-01
 - **范围**：Engine 的 relay 路由决策、`QueryRelayOverview` 查询、iroh 依赖栈升级到 1.3
 - **相关文件**：[`relay_routing.rs`](../../../crates/uc-core/src/settings/relay_routing.rs)、
-  [`node.rs`](../../../crates/uc-infra/src/network/iroh/node.rs)、
+  [`node.rs`](../../../crates/uc-infra-p2p/src/network/iroh/node.rs)、
   [`network.rs`](../../../crates/uc-engine/src/assembly/network.rs)、
   [执行计划 042](../../exec-plans/active/042-iroh-1-3-upgrade-and-builtin-relays.md)
 
@@ -36,6 +36,6 @@
 
 ## 补充：依赖补丁不依赖下游 `[patch]`
 
-`[patch]` 只读取构建根清单，不会传给依赖 Engine 的仓库。因此 Engine 不再使用 `[patch]`：iroh-blobs fork 是 `uc-infra` 的直接 git 依赖（固定 rev），
-打过补丁的 `swarm-discovery` 与随仓库副本 `iroh-mdns-address-lookup`（仅把其 swarm-discovery 依赖指向本地路径）是 `uc-infra` 的 `third_party` 路径依赖，
+`[patch]` 只读取构建根清单，不会传给依赖 Engine 的仓库。因此 Engine 不再使用 `[patch]`：iroh-blobs fork 是 `uc-infra-p2p` 的直接 git 依赖（固定 rev），
+打过补丁的 `swarm-discovery` 与随仓库副本 `iroh-mdns-address-lookup`（仅把其 swarm-discovery 依赖指向本地路径）是 `uc-infra-p2p` 的 `third_party` 路径依赖，
 并在根清单 `exclude`。依赖防火墙脚本只放行这两个路径依赖。下游仓库不需要任何补丁；上游接受修复后删除对应副本。

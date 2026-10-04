@@ -52,16 +52,16 @@
 
 ```text
 Component: ProfileStorageUpgrade
-Path: crates/uc-infra/src/security/profile_storage_upgrade/
+Path: crates/uc-infra-profile/src/security/profile_storage_upgrade/
 Responsibility: V1/V2 到 V3 资料转换、校验、切换和中断恢复。
 Relationship: 只有资料格式升级范围，没有产品安装包和软件版本回退职责。
 ```
 
 ```text
 Component: UpgradePersistence / TargetGenerationStager / cleanup
-Path: crates/uc-infra/src/security/profile_storage_upgrade/persistence.rs
-Path: crates/uc-infra/src/security/profile_storage_upgrade/target.rs
-Path: crates/uc-infra/src/security/profile_storage_upgrade/cleanup.rs
+Path: crates/uc-infra-profile/src/security/profile_storage_upgrade/persistence.rs
+Path: crates/uc-infra-profile/src/security/profile_storage_upgrade/target.rs
+Path: crates/uc-infra-profile/src/security/profile_storage_upgrade/cleanup.rs
 Responsibility: 资料升级排他锁、加密恢复记录、目标副本和旧来源清理。
 Relationship: 当前锁只覆盖升级调用，不能证明其他进程在整个版本回退期间都停止写入。
 ```
@@ -77,7 +77,7 @@ Relationship: 旧目录收养、导入及安全资料准备可能发生在 ensur
 
 ```text
 Component: Config migration
-Path: crates/uc-infra/src/config_migration/
+Path: crates/uc-infra-profile/src/config_migration/
 Responsibility: 用户主动导出与导入，包含数据库快照、加密封装和资料收集。
 Relationship: 当前单库、内存 archive 和 secret 清单不足以证明完整版本回退；可复用能力需逐项核对。
 ```
@@ -261,7 +261,7 @@ rollback_to_previous_version(backup_id, confirmation)
 
 1. **版本对与安装接入核对**：产品仓定位更新器、常驻进程、安装渠道和旧产物获取方式。输出平台矩阵、精确版本对及完整回退负责人；具体文件路径经核对补充。
 2. **先完成最小闭环**：在一个可验证的桌面安装渠道，用真实旧版生成资料，执行备份、新版升级、确认回退、旧版启动读取。以此证明安装与数据协调，再扩平台。
-3. **共享数据能力**：核对 `crates/uc-infra/src/config_migration/` 的快照、加密及清单；补齐旧版布局、全部必需安全资料、流式处理和原始错误。导出行为回归测试必须通过。
+3. **共享数据能力**：核对 `crates/uc-infra-profile/src/config_migration/` 的快照、加密及清单；补齐旧版布局、全部必需安全资料、流式处理和原始错误。导出行为回归测试必须通过。
 4. **升级前接线**：调整 `profile_storage_upgrade/`、`assembly/host.rs` 和 `assembly/wire/mod.rs`，在首次修改来源之前验证备份；避免普通启动产生重复备份。
 5. **完整恢复能力**：实现资料停写、当前版本安全副本、耐久恢复、旧格式回读和明确删除。维护工具自身不依赖即将被替换的应用生命周期。
 6. **产品完整回退**：安装更新器实现版本绑定、原子替换能力的组合、中断续接、旧版验证和更新抑制；通过 `uc-engine` 调用核心完整动作。

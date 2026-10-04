@@ -15,7 +15,7 @@
 ## 范围
 
 1. 依赖栈一次性升级：iroh/iroh-base/iroh-relay/iroh-dns 1.3.0、iroh-tickets 1.0.0、noq 系 1.3.0、iroh-blobs 0.103.0（保留 UniClipboard fork 的三项补丁，rebase 到上游 `v0.103.0`，无冲突；fork 分支 `uniclipboard/0.103.0-patched`，`124780fb69768b8506565b2760c435182f9e2d20`）、iroh-mdns-address-lookup 0.6.0；`swarm-discovery` 本地补丁不变；`tests/hosts/connectivity-relay` 同步。
-   依赖来源：iroh-blobs fork 是 `uc-infra` 的直接 git 依赖；打过补丁的 `swarm-discovery` 与随仓库副本 `iroh-mdns-address-lookup`（仅把 swarm-discovery 依赖指向本地路径）是 `uc-infra` 的 `third_party` 路径依赖，Engine 不再有 `[patch]`，依赖本仓的下游（Desktop）不需要重复任何补丁。
+   依赖来源：iroh-blobs fork 是 `uc-infra-p2p` 的直接 git 依赖；打过补丁的 `swarm-discovery` 与随仓库副本 `iroh-mdns-address-lookup`（仅把 swarm-discovery 依赖指向本地路径）是 `uc-infra-p2p` 的 `third_party` 路径依赖，Engine 不再有 `[patch]`，依赖本仓的下游（Desktop）不需要重复任何补丁。
 2. 内置 relay 列表进入 Core，脱离 `RelayMode::Default` 的隐含上游列表；节点总是绑定显式列表。
 3. `QueryRelayOverview`（Engine、UniFFI、HarmonyOS napi）；下游契约见 `downstream-contract-handoff.md`。
 

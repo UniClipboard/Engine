@@ -1,6 +1,6 @@
 //! Profile 口令恢复的 port 定义——住在真正的消费者（security）这一侧。
 //!
-//! 实现（`ProfileKeyRecoveryStore`）仍在 `uc-infra` 的 profile 相关模块，
+//! 实现（`ProfileKeyRecoveryStore`）位于 `uc-infra-profile`（`security::profile_key_recovery`），
 //! 因为它需要 app 目录布局等 profile 专属上下文；但 trait 定义和其错误类型
 //! 必须住在消费者这一侧,否则 security 就要反向依赖 profile。
 //! 见 Engine issue #144 第 5 节"依赖切断"第 1 条。
