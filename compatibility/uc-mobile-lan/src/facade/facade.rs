@@ -200,7 +200,7 @@ pub struct MobileSyncFacadeDeps {
     pub incoming_buffer: Arc<IncomingMobileBuffer>,
     /// `MobileFileStagingPort` 实例(P5a.3.5):File 类型入站时把裸字节物
     /// 化到 cache_dir,产出可拼 file-list rep 的 `file:///...` URI。
-    /// daemon / CLI fallback 都注入 `FilesystemMobileFileStaging`(uc-infra),
+    /// daemon / CLI fallback 都注入 [`crate::mobile_sync::FilesystemMobileFileStaging`]，
     /// 测试场景可注入内存 fake。
     pub file_staging: Arc<dyn MobileFileStagingPort>,
     pub snapshot_ports: MobileSyncSnapshotPorts,

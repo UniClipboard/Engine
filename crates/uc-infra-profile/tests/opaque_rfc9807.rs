@@ -7,7 +7,7 @@ use opaque_ke::{
 };
 use sha2::Sha512;
 use static_assertions::assert_not_impl_any;
-use uc_infra::security::{
+use uc_infra_profile::security::{
     SpaceAdmissionClientState, SpaceAdmissionContinuationCredential, SpaceAdmissionKe1,
     SpaceAdmissionKe2, SpaceAdmissionKe3, SpaceAdmissionPasswordEquivalent,
     SpaceAdmissionRegistration, SpaceAdmissionRegistrationEncoding, SpaceAdmissionServerSetup,

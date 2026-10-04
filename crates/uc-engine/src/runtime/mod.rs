@@ -51,7 +51,7 @@ const OPERATION_UNAVAILABLE_CODE: u32 = 1103;
 
 pub(crate) struct ProductionRuntime {
     app_version: String,
-    security_lifecycle: Arc<uc_infra::space::RuntimeSpaceAccessAdapter>,
+    security_lifecycle: Arc<uc_infra_profile::space::RuntimeSpaceAccessAdapter>,
     session_supervisor: Arc<SessionSupervisor>,
     profile_reset: Arc<ProfileFactoryResetFacade>,
     network_recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
@@ -74,7 +74,7 @@ pub(crate) struct ProductionRuntime {
 }
 
 // 启动过程中还没有 ProductionRuntime；失败或取消也要封口已有安全会话。
-struct StartupSecurityGuard(Option<Arc<uc_infra::space::RuntimeSpaceAccessAdapter>>);
+struct StartupSecurityGuard(Option<Arc<uc_infra_profile::space::RuntimeSpaceAccessAdapter>>);
 impl Drop for StartupSecurityGuard {
     fn drop(&mut self) {
         if let Some(access) = &self.0 {
@@ -163,7 +163,7 @@ impl ProductionRuntime {
         paths: uc_core::app_dirs::AppPaths,
         events: EventSender,
         progress: Arc<crate::engine::startup::StartupProgressStore>,
-        profile_key_recovery: Arc<uc_infra::security::ProfileKeyRecoveryStore>,
+        profile_key_recovery: Arc<uc_infra_profile::security::ProfileKeyRecoveryStore>,
     ) -> Result<Self, EngineError> {
         let app_version = config.app_version().to_string();
         let rendezvous_base_url = config.rendezvous_base_url_override();
@@ -422,7 +422,9 @@ fn startup_error(
         io_error_kind = io_kind,
         "engine startup failed"
     );
-    if error_chain_contains::<uc_infra::security::ProfileUpgradeBackupRecordKeyMissing>(&error) {
+    if error_chain_contains::<uc_infra_profile::security::ProfileUpgradeBackupRecordKeyMissing>(
+        &error,
+    ) {
         return EngineError::new(
             PROFILE_UPGRADE_BACKUP_KEY_MISSING_CODE,
             EngineErrorCategory::Unavailable,
@@ -524,7 +526,7 @@ mod tests {
     fn missing_upgrade_backup_key_has_a_stable_non_retryable_startup_result() {
         let error = startup_error(
             "dependency wiring",
-            uc_infra::security::ProfileUpgradeBackupRecordKeyMissing,
+            uc_infra_profile::security::ProfileUpgradeBackupRecordKeyMissing,
         );
         assert_eq!(
             error.code(),

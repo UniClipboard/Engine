@@ -28,8 +28,8 @@ use uc_core::membership::{
 };
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
 use uc_core::security::IdentityFingerprint;
-use uc_infra::security::{ActiveSpaceGenerationManifestStore, AdmissionKeyManager};
-use uc_infra::space::SqliteSpaceAdmissionState;
+use uc_infra_profile::security::{ActiveSpaceGenerationManifestStore, AdmissionKeyManager};
+use uc_infra_profile::space::SqliteSpaceAdmissionState;
 use uc_infra_storage::db::executor::DieselSqliteExecutor;
 use uc_infra_storage::db::pool::init_db_pool;
 

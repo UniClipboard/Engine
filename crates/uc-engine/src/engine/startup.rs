@@ -186,7 +186,7 @@ impl Drop for StartupProgressInput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uc_infra::security::{
+    use uc_infra_profile::security::{
         StorageUpgradeObserver, StorageUpgradeProgressOutcome, StorageUpgradeSnapshot,
         StorageUpgradeStep, StorageUpgradeUnit,
     };
@@ -199,7 +199,7 @@ mod tests {
             StorageUpgradeSnapshot {
                 required: true,
                 current_step: Some(StorageUpgradeStep::Verifying),
-                steps: vec![uc_infra::security::StorageUpgradeStepProgress {
+                steps: vec![uc_infra_profile::security::StorageUpgradeStepProgress {
                     step: StorageUpgradeStep::Verifying,
                     processed: 0,
                     total: None,
@@ -239,7 +239,7 @@ mod tests {
             StorageUpgradeSnapshot {
                 required: true,
                 current_step: Some(StorageUpgradeStep::Checking),
-                steps: vec![uc_infra::security::StorageUpgradeStepProgress {
+                steps: vec![uc_infra_profile::security::StorageUpgradeStepProgress {
                     step: StorageUpgradeStep::Checking,
                     processed: 0,
                     total: None,
@@ -320,7 +320,7 @@ mod tests {
                 required: true,
                 recovering: true,
                 current_step: Some(StorageUpgradeStep::Preparing),
-                steps: vec![uc_infra::security::StorageUpgradeStepProgress {
+                steps: vec![uc_infra_profile::security::StorageUpgradeStepProgress {
                     step: StorageUpgradeStep::LargeContents,
                     processed: 3,
                     total: Some(3),

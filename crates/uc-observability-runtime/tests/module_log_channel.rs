@@ -70,7 +70,7 @@ fn module_rows(directory: &std::path::Path) -> Vec<serde_json::Value> {
 
 /// 同一个记录点：限速按记录点计。
 fn hot_event() {
-    tracing::info!(target: "uc_infra::module_log_channel", step = "hot", "hot event");
+    tracing::info!(target: "uc_infra_profile::module_log_channel", step = "hot", "hot event");
 }
 
 fn flush() {
@@ -82,7 +82,7 @@ fn flush() {
 
 macro_rules! distinct_callsites {
     ($($index:literal)+) => {
-        $(tracing::info!(target: "uc_infra::module_log_channel", step = "budget_fill", "budget fill {}", $index);)+
+        $(tracing::info!(target: "uc_infra_profile::module_log_channel", step = "budget_fill", "budget fill {}", $index);)+
     };
 }
 
@@ -110,10 +110,10 @@ fn module_log_channel_records_renders_limits_and_exports_with_visible_counts() {
         kind: "outer",
         source: Some(anyhow::Error::new(io).context("fixed action phrase")),
     };
-    tracing::warn!(target: "uc_infra::module_log_channel", error = &chained as &dyn Error, "chain rendering");
+    tracing::warn!(target: "uc_infra_profile::module_log_channel", error = &chained as &dyn Error, "chain rendering");
     let parse = serde_json::from_str::<serde_json::Value>("{ not json").expect_err("invalid json");
-    tracing::warn!(target: "uc_infra::module_log_channel", error = &parse as &dyn Error, "serde rendering");
-    tracing::warn!(target: "uc_infra::module_log_channel", error = &Unregistered as &dyn Error, "unregistered rendering");
+    tracing::warn!(target: "uc_infra_profile::module_log_channel", error = &parse as &dyn Error, "serde rendering");
+    tracing::warn!(target: "uc_infra_profile::module_log_channel", error = &Unregistered as &dyn Error, "unregistered rendering");
     flush();
     let rows_after_chain = module_rows(directory.path());
     let chain_row = rows_after_chain
@@ -158,7 +158,7 @@ fn module_log_channel_records_renders_limits_and_exports_with_visible_counts() {
     // 阶段二：自由文本字段默认拒绝，审定过的固定词字段保留（失败方式 2、8）。
     let path = directory.path().join("secret-file.txt");
     tracing::info!(
-        target: "uc_infra::module_log_channel",
+        target: "uc_infra_profile::module_log_channel",
         path = %path.display(),
         device_name = "MyPhone123",
         peer = %"peer-0123456789abcdef",
@@ -183,7 +183,7 @@ fn module_log_channel_records_renders_limits_and_exports_with_visible_counts() {
     // 阶段二补充：`uc_*!` 宏写出的记录与旧写法落盘结果一致，且错误链照常渲染。
     let typed_io = std::io::Error::from(std::io::ErrorKind::NotFound);
     uc_warn!(
-        target: "uc_infra::module_log_channel",
+        target: "uc_infra_profile::module_log_channel",
         error_kind = "fixed_kind",
         entry_id = log_id(&"entry-typed"),
         io_error_kind = io_error_kind(&typed_io),
@@ -226,22 +226,22 @@ fn module_log_channel_records_renders_limits_and_exports_with_visible_counts() {
     assert!(!all_text.contains(directory.path().to_string_lossy().as_ref()));
 
     // 阶段三：Detailed 窗口的 DEBUG 门（失败方式 3）。
-    tracing::debug!(target: "uc_infra::module_log_channel", step = "before_window", "debug outside window");
+    tracing::debug!(target: "uc_infra_profile::module_log_channel", step = "before_window", "debug outside window");
     let capture = handle
         .start_local_diagnostic_capture(DetailedCaptureRequest {
             duration: Duration::from_secs(30),
         })
         .expect("start capture");
     let capture_id = capture.capture_id.clone().expect("capture id");
-    tracing::debug!(target: "uc_infra::module_log_channel", step = "in_window", "debug inside window");
-    tracing::trace!(target: "uc_infra::module_log_channel", step = "in_window", "trace inside window");
+    tracing::debug!(target: "uc_infra_profile::module_log_channel", step = "in_window", "debug inside window");
+    tracing::trace!(target: "uc_infra_profile::module_log_channel", step = "in_window", "trace inside window");
     assert_eq!(
         handle
             .stop_local_diagnostic_capture(&capture_id)
             .expect("stop capture"),
         StopCaptureResult::Stopped
     );
-    tracing::debug!(target: "uc_infra::module_log_channel", step = "after_window", "debug after window");
+    tracing::debug!(target: "uc_infra_profile::module_log_channel", step = "after_window", "debug after window");
     flush();
     let rows_after_window = module_rows(directory.path());
     let messages: Vec<&str> = rows_after_window
@@ -272,7 +272,7 @@ fn module_log_channel_records_renders_limits_and_exports_with_visible_counts() {
             inner: Some(Box::new(long)),
         };
     }
-    tracing::warn!(target: "uc_infra::module_log_channel", error = &long as &dyn Error, "long chain");
+    tracing::warn!(target: "uc_infra_profile::module_log_channel", error = &long as &dyn Error, "long chain");
     flush();
     let rows_after_long = module_rows(directory.path());
     let long_row = rows_after_long
@@ -285,7 +285,7 @@ fn module_log_channel_records_renders_limits_and_exports_with_visible_counts() {
 
     // 记录整体超过上限：字段被丢弃并标记 truncated，计数加一。
     tracing::warn!(
-        target: "uc_infra::module_log_channel",
+        target: "uc_infra_profile::module_log_channel",
         cause = leaked_text,
         context = leaked_text,
         dependency = leaked_text,

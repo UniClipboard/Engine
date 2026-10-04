@@ -3,7 +3,9 @@ use uc_core::crypto::domain::Passphrase;
 use uc_core::membership::{
     AdmissionChannelPeerId, InvitationId, SpaceAdmissionId, SpaceAdmissionProtocolVersion,
 };
-use uc_infra::security::{SpaceAdmissionAuth, SpaceAdmissionAuthContext, SpaceAdmissionAuthError};
+use uc_infra_profile::security::{
+    SpaceAdmissionAuth, SpaceAdmissionAuthContext, SpaceAdmissionAuthError,
+};
 
 fn authentication_context() -> SpaceAdmissionAuthContext {
     authentication_context_with_ids([0x11; 32], [0x22; 32], [0x33; 32], [0x44; 32])

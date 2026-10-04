@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use uc_infra::security::{ActiveRuntimeManifest, ProfileRuntimeLayout};
+use uc_infra_profile::security::{ActiveRuntimeManifest, ProfileRuntimeLayout};
 
 /// 启动 manifest 已认证后解析出的完整存储选择。
 ///
@@ -119,7 +119,7 @@ impl RuntimeStorageSelection {
 mod tests {
     use uc_core::ids::SpaceId;
     use uc_core::membership::{ActiveRuntimeLayout, ActiveSpaceGenerationManifestV2};
-    use uc_infra::security::{
+    use uc_infra_profile::security::{
         ActiveRuntimeManifest, ActiveRuntimeManifestV3, ProfileRuntimeLayout,
     };
 

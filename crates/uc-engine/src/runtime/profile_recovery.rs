@@ -9,7 +9,7 @@ use uc_application::deps::{LifecycleError, StopProfileRuntimePort};
 use uc_application::facade::ProfileFactoryResetFacade;
 use uc_core::crypto::domain::Passphrase;
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
-use uc_infra::security::{
+use uc_infra_profile::security::{
     ProfileKeyRecoveryError, ProfileKeyRecoveryStore, ProfileRecoveryLosses,
     ProfileRecoveryOutcome, ProfileRecoveryPreparation,
 };

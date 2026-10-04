@@ -3,13 +3,13 @@ members = [
   "crates/uc-engine",
   "crates/uc-core",
   "crates/uc-application",
-  "crates/uc-infra",
   "crates/uc-infra-local",
   "crates/uc-infra-crypto",
   "crates/uc-infra-security",
   "crates/uc-infra-storage",
   "crates/uc-infra-content",
   "crates/uc-infra-p2p",
+  "crates/uc-infra-profile",
   "crates/uc-sync-protocol",
   "crates/uc-content-hash",
   "crates/uc-observability-contract",
@@ -44,8 +44,8 @@ dbg_macro = "warn"
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)"] }
 
 # No [patch] section on purpose: [patch] is only read from the root manifest of a build, so it would not reach
-# repositories that depend on Engine. The iroh-blobs fork is a git dependency of uc-infra, and the patched
-# swarm-discovery (with the vendored iroh-mdns-address-lookup) is a path dependency of uc-infra.
+# repositories that depend on Engine. The iroh-blobs fork is a git dependency of uc-infra-p2p, and the patched
+# swarm-discovery (with the vendored iroh-mdns-address-lookup) is a path dependency of uc-infra-p2p.
 
 [profile.dev]
 debug = "line-tables-only"
@@ -76,7 +76,7 @@ opt-level = 3
 
 # 移动端开发构建会走完整的加密 blob 流程。保持 Infra 优化，避免大图在
 # 仅由开发配置放大的压缩、分块和本地发布阶段耗费数秒。
-[profile.dev.package.uc-infra]
+[profile.dev.package.uc-infra-profile]
 opt-level = 3
 [profile.dev.package.uc-infra-local]
 opt-level = 3

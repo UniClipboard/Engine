@@ -5,7 +5,7 @@
 //! 端类型、LAN 端点等。
 //!
 //! 本模块只定义"是什么";"怎么做"由 [`crate::ports::mobile_sync`] 中的端口
-//! 抽象,以及 `uc-application` / `uc-infra` / `uc-platform` 中的具体实现承担。
+//! 抽象,以及 `uc-application` / `uc-mobile-lan` / `uc-platform` 中的具体实现承担。
 //!
 //! 设计参考 `.context/mobile-sync/SPEC.md` §14(v3 权威章节)。
 

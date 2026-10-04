@@ -13,7 +13,7 @@ use uc_core::ports::{
     InboundReceiveRecord, InboundReceiveSettlement,
 };
 use uc_core::SnapshotHash;
-use uc_infra::security::EncryptingInboundReceiveCommit;
+use uc_infra_profile::security::EncryptingInboundReceiveCommit;
 
 struct RecordingCipher {
     aads: Mutex<Vec<Vec<u8>>>,

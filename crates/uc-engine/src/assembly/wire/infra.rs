@@ -1,7 +1,7 @@
 use super::*;
 
 struct ApplicationSpaceUnlockAdapter {
-    inner: Arc<uc_infra::space::RuntimeSpaceAccessAdapter>,
+    inner: Arc<uc_infra_profile::space::RuntimeSpaceAccessAdapter>,
 }
 
 #[async_trait::async_trait]
@@ -44,7 +44,7 @@ pub(super) fn build_space_access_ports(
     profile_content_key_vault: &Arc<ProfileContentKeyVault>,
 ) -> (
     SpaceAccessPorts,
-    Arc<uc_infra::space::RuntimeSpaceAccessAdapter>,
+    Arc<uc_infra_profile::space::RuntimeSpaceAccessAdapter>,
     Arc<dyn uc_application::deps::CurrentMemberSignaturePort>,
     Arc<dyn uc_core::membership::SpaceSecurityStateResetPort>,
 ) {
@@ -58,7 +58,7 @@ pub(super) fn build_space_access_ports(
         security_repository.clone();
     let space_security_reset: Arc<dyn uc_core::membership::SpaceSecurityStateResetPort> =
         security_repository.clone();
-    let space_access_adapter = Arc::new(uc_infra::space::RuntimeSpaceAccessAdapter::new(
+    let space_access_adapter = Arc::new(uc_infra_profile::space::RuntimeSpaceAccessAdapter::new(
         key_material.clone(),
         current_profile.clone(),
         session.clone(),
@@ -71,9 +71,9 @@ pub(super) fn build_space_access_ports(
     let unlock = Arc::new(ApplicationSpaceUnlockAdapter {
         inner: Arc::clone(&space_access_adapter),
     });
-    let rebind = Arc::new(uc_infra::space::SpaceSessionRebindAdapter::new(Arc::clone(
-        session,
-    )));
+    let rebind = Arc::new(uc_infra_profile::space::SpaceSessionRebindAdapter::new(
+        Arc::clone(session),
+    ));
     let space_access_ports = SpaceAccessPorts {
         adopt_isolated_space: rebind,
         initialize: space_access_adapter.clone(),
@@ -394,9 +394,10 @@ pub(super) fn create_infra_layer(
     let settings_repo: Arc<dyn SettingsPort> = Arc::new(FileSettingsRepository::new(settings_path));
 
     let vault_layout = VaultLayout::new(vault_path.clone());
-    let space_rebuild_progress: Arc<dyn SpaceRebuildProgressPort> = Arc::new(
-        uc_infra::space::FileSpaceRebuildProgress::new(vault_layout.space_rebuild_progress_path()),
-    );
+    let space_rebuild_progress: Arc<dyn SpaceRebuildProgressPort> =
+        Arc::new(uc_infra_profile::space::FileSpaceRebuildProgress::new(
+            vault_layout.space_rebuild_progress_path(),
+        ));
 
     // 升级游标——独立小文件，落在 app_data_root 顶层（与 vault/keyring/settings.json
     // 同级），不污染 vault/。schema_version=1，写入走 tempfile + rename 原子化。

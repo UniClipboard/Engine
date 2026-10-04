@@ -1,9 +1,9 @@
 [package]
-name = "uc-infra"
+name = "uc-infra-profile"
 version.workspace = true
 license.workspace = true
 edition = "2021"
-description = "Infrastructure utilities and shared components for UniClipboard"
+description = "Profile storage upgrade, backup/recovery, and Space admission activation for UniClipboard"
 publish = false
 
 [features]

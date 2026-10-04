@@ -36,20 +36,6 @@ use uc_core::ids::{ProfileId, RepresentationId};
 use uc_core::ports::blob::BlobReferenceRepositoryPort;
 use uc_core::ports::clipboard::{RepresentationCachePort, SelfWriteLedgerPort, SpoolQueuePort};
 use uc_core::ports::*;
-use uc_infra::config_migration::{ConfigMigrationAdapter, ConfigMigrationPaths};
-use uc_infra::security::{
-    ActiveSpaceGenerationManifestStore, AdmissionKeyManager, Blake3Hasher,
-    DecryptingClipboardRepresentationRepository, EncryptingClipboardEventWriter,
-    EncryptingInboundReceiveCommit, ProfileContentKeyVault, ProfileLifecycleRepository,
-    ProfilePassphraseRecoveryPort, ProfileStorageUpgrade, ProfileStorageUpgradeOutcome,
-    Sha256IdentityFingerprintFactory, SpaceControlGeneration, SpaceTransitionActivation,
-    V3AdmissionSpaceTransition, V3DeviceManagementReset, V3InitialSpaceActivation,
-    V3MembershipBranchTransition,
-};
-use uc_infra::space::{
-    InMemorySession, KeyMaterialStore, OpenMlsHistoricalSignatureVerifier,
-    SqliteMembershipRecordStore, SqliteSpaceAdmissionCredentials, SqliteSpaceAdmissionState,
-};
 use uc_infra_content::clipboard::{
     new_in_memory_change_origin, ClipboardPayloadResolver, DurableSpoolQueue,
     InfraThumbnailGenerator, RepresentationCache, SpoolManager,
@@ -60,6 +46,20 @@ use uc_infra_local::fs::VaultLayout;
 use uc_infra_local::settings::repository::FileSettingsRepository;
 use uc_infra_local::{FileAppVersionStateRepository, FileFirstSyncStateRepository, SystemClock};
 use uc_infra_p2p::network::iroh::IrohIdentityStore;
+use uc_infra_profile::config_migration::{ConfigMigrationAdapter, ConfigMigrationPaths};
+use uc_infra_profile::security::{
+    ActiveSpaceGenerationManifestStore, AdmissionKeyManager, Blake3Hasher,
+    DecryptingClipboardRepresentationRepository, EncryptingClipboardEventWriter,
+    EncryptingInboundReceiveCommit, ProfileContentKeyVault, ProfileLifecycleRepository,
+    ProfilePassphraseRecoveryPort, ProfileStorageUpgrade, ProfileStorageUpgradeOutcome,
+    Sha256IdentityFingerprintFactory, SpaceControlGeneration, SpaceTransitionActivation,
+    V3AdmissionSpaceTransition, V3DeviceManagementReset, V3InitialSpaceActivation,
+    V3MembershipBranchTransition,
+};
+use uc_infra_profile::space::{
+    InMemorySession, KeyMaterialStore, OpenMlsHistoricalSignatureVerifier,
+    SqliteMembershipRecordStore, SqliteSpaceAdmissionCredentials, SqliteSpaceAdmissionState,
+};
 use uc_infra_security::key_slot_store::JsonKeySlotStore;
 use uc_infra_storage::db::executor::DieselSqliteExecutor;
 #[cfg(feature = "lan-compat")]
@@ -180,7 +180,7 @@ pub struct CoreWiringInputs {
     pub analytics_sink: Arc<dyn AnalyticsPort>,
     pub analytics_facade: Arc<dyn AnalyticsFacade>,
     pub host_event_emitter: Arc<dyn HostEventEmitterPort>,
-    pub startup_progress: Arc<dyn uc_infra::security::StorageUpgradeObserver>,
+    pub startup_progress: Arc<dyn uc_infra_profile::security::StorageUpgradeObserver>,
     pub profile_key_recovery: Arc<dyn ProfilePassphraseRecoveryPort>,
     pub upgrade_backup_security: Arc<dyn RetireUpgradeBackupSecurityRecordsPort>,
 }
@@ -196,8 +196,8 @@ async fn ensure_profile_storage_v3(
     profile_content_key_vault: Arc<ProfileContentKeyVault>,
     admission_keys: Arc<AdmissionKeyManager>,
     manifests: Arc<ActiveSpaceGenerationManifestStore>,
-    current_space: Arc<uc_infra::space::CurrentSpaceResolver>,
-    progress: Arc<dyn uc_infra::security::StorageUpgradeObserver>,
+    current_space: Arc<uc_infra_profile::space::CurrentSpaceResolver>,
+    progress: Arc<dyn uc_infra_profile::security::StorageUpgradeObserver>,
 ) -> WiringResult<RuntimeStorageSelection> {
     let upgrade = ProfileStorageUpgrade::for_runtime(
         profile_root.to_path_buf(),
@@ -363,7 +363,7 @@ pub async fn wire_dependencies_from_inputs(
         vault_path.clone(),
         Arc::clone(&admission_keys),
     ));
-    let current_space_resolver = Arc::new(uc_infra::space::CurrentSpaceResolver::new(
+    let current_space_resolver = Arc::new(uc_infra_profile::space::CurrentSpaceResolver::new(
         Arc::clone(&active_generation_manifest_store),
         VaultLayout::new(vault_path.clone()).legacy_current_space_id_path(),
         Arc::clone(&admission_keys),
@@ -372,7 +372,7 @@ pub async fn wire_dependencies_from_inputs(
     let portable_current_space_identity: Arc<dyn PortableCurrentSpaceIdentityPort> =
         current_space_resolver.clone();
     let re_pairing_state_store: Arc<dyn RePairingStateStorePort> =
-        Arc::new(uc_infra::space::EncryptedRePairingStateStore::new(
+        Arc::new(uc_infra_profile::space::EncryptedRePairingStateStore::new(
             VaultLayout::new(vault_path.clone()).re_pairing_state_path(),
             Arc::clone(&admission_keys),
         ));
@@ -500,12 +500,13 @@ pub async fn wire_dependencies_from_inputs(
         Arc::clone(&membership_ledger) as Arc<dyn uc_application::deps::MembershipRecordStorePort>,
         Arc::clone(&admission_state),
     ));
-    let encryption_passphrase_change = Arc::new(uc_infra::space::EncryptionPassphraseChange::new(
-        Arc::clone(&space_access_adapter),
-        Arc::clone(&admission_credentials),
-        Arc::clone(&active_generation_manifest_store),
-        Arc::clone(&profile_key_recovery),
-    ));
+    let encryption_passphrase_change =
+        Arc::new(uc_infra_profile::space::EncryptionPassphraseChange::new(
+            Arc::clone(&space_access_adapter),
+            Arc::clone(&admission_credentials),
+            Arc::clone(&active_generation_manifest_store),
+            Arc::clone(&profile_key_recovery),
+        ));
     encryption_passphrase_change
         .recover_pending()
         .await
@@ -853,7 +854,7 @@ pub async fn wire_dependencies_from_inputs(
     // create_infra_layer.
     let profile_reset = ProfileResetDeps {
         lifecycle_repository: profile_lifecycle_repository,
-        keys: Arc::new(uc_infra::security::ProfileKeyWiper::new(
+        keys: Arc::new(uc_infra_profile::security::ProfileKeyWiper::new(
             admission_keys.as_ref().clone(),
             profile_reset_secure_storage,
             vault_path.clone(),
@@ -862,7 +863,7 @@ pub async fn wire_dependencies_from_inputs(
             profile_reset_identity_dir,
         )),
         backup_security: upgrade_backup_security,
-        state: Arc::new(uc_infra::security::ProfileStateCleaner::new(
+        state: Arc::new(uc_infra_profile::security::ProfileStateCleaner::new(
             db_pool_for_profile_reset,
             profile_reset_paths,
             db_path.clone(),

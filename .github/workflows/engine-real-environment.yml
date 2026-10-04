@@ -210,7 +210,7 @@ jobs:
         shell: bash
         run: |
           started_at=$(date +%s)
-          cargo nextest run --profile ci --no-run -p uc-infra \
+          cargo nextest run --profile ci --no-run -p uc-infra-profile \
             --test profile_storage_upgrade \
             --test profile_storage_upgrade_crash
           echo "seconds=$(( $(date +%s) - started_at ))" >> "$GITHUB_OUTPUT"
@@ -220,7 +220,7 @@ jobs:
           started_at=$(date +%s)
           set +e
           timeout --signal=TERM --kill-after=30s 30m \
-            cargo nextest run --profile ci -p uc-infra \
+            cargo nextest run --profile ci -p uc-infra-profile \
               --test profile_storage_upgrade \
               --test profile_storage_upgrade_crash
           result=$?

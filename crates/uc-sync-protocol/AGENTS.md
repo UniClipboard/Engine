@@ -6,8 +6,9 @@
 ## 范围
 
 - 只放同步协议的线上格式：帧结构、magic 与版本常量、大小上限，以及基于 `AsyncRead` / `AsyncWrite` 的编解码。
-- 依赖方向是 `uc-infra → uc-sync-protocol → uc-core`。
-- 不放拨号、重试、准入判断、密钥、存储、span 注入或任何传输库类型；流程负责人仍在 `uc-application`，传输适配器仍在 `uc-infra`。
+- 依赖方向是 `uc-infra-profile`/`uc-infra-p2p` → `uc-sync-protocol` → `uc-core`。
+- 不放拨号、重试、准入判断、密钥、存储、span 注入或任何传输库类型；流程负责人仍在 `uc-application`，传输适配器仍在
+  `uc-infra-profile`（admission）/`uc-infra-p2p`（pairing/rendezvous）。
 
 ## 硬约束
 

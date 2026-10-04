@@ -28,7 +28,7 @@
 //! postcard does not natively describe "arbitrary bytes followed by more
 //! arbitrary bytes with a terminator." Explicit length prefixes are
 //! simpler, testable in isolation, and align with the pairing wire codec's
-//! length-prefixed framing (see `uc-infra/src/pairing/wire.rs`).
+//! length-prefixed framing (see `uc-infra-p2p/src/pairing/wire.rs`).
 //!
 //! ## Stream I/O
 //!

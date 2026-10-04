@@ -178,14 +178,14 @@ async fn stop_session_and_transfers(
 }
 
 pub(super) struct ProfileRuntimeStopper {
-    security_lifecycle: Arc<uc_infra::space::RuntimeSpaceAccessAdapter>,
+    security_lifecycle: Arc<uc_infra_profile::space::RuntimeSpaceAccessAdapter>,
     session_supervisor: Arc<SessionSupervisor>,
     tasks: Arc<TaskRegistry>,
 }
 
 impl ProfileRuntimeStopper {
     pub(super) fn new(
-        security_lifecycle: Arc<uc_infra::space::RuntimeSpaceAccessAdapter>,
+        security_lifecycle: Arc<uc_infra_profile::space::RuntimeSpaceAccessAdapter>,
         session_supervisor: Arc<SessionSupervisor>,
         tasks: Arc<TaskRegistry>,
     ) -> Self {

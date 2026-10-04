@@ -52,7 +52,7 @@ impl UpgradeDiagnostics {
         });
         let io = find_io_source(error);
         uc_error!(
-            target: "uc_infra::security::profile_storage_upgrade",
+            target: "uc_infra_profile::security::profile_storage_upgrade",
             upgrade_phase = phase,
             upgrade_action = self.action,
             target_activated = self.target_activated,
