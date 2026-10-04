@@ -34,14 +34,16 @@ use codec::RepositoryReadCache;
 #[cfg(feature = "test-util")]
 pub use benchmark::AdmissionRepositoryBenchmark;
 
+#[derive(Clone)]
 pub struct SqliteSpaceAdmissionState<E> {
     pub(super) executor: E,
     pub(super) keys: Arc<AdmissionKeyManager>,
     pub(super) manifests: Arc<ActiveSpaceGenerationManifestStore>,
     pub(super) membership: Arc<dyn MembershipRecordStorePort>,
-    read_cache: Mutex<Option<RepositoryReadCache>>,
+    /// 用 `Arc` 包裹以便异步入口整体克隆到 `spawn_blocking` 时仍共享同一份缓存。
+    read_cache: Arc<Mutex<Option<RepositoryReadCache>>>,
     #[cfg(test)]
-    record_reads: std::sync::atomic::AtomicUsize,
+    record_reads: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl<E> SqliteSpaceAdmissionState<E> {
@@ -56,9 +58,9 @@ impl<E> SqliteSpaceAdmissionState<E> {
             keys,
             manifests,
             membership,
-            read_cache: Mutex::new(None),
+            read_cache: Arc::new(Mutex::new(None)),
             #[cfg(test)]
-            record_reads: std::sync::atomic::AtomicUsize::new(0),
+            record_reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 }
