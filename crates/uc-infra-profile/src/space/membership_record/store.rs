@@ -61,15 +61,28 @@ impl<E> SqliteMembershipRecordStore<E> {
 }
 
 impl<E: DbExecutor> SqliteMembershipRecordStore<E> {
-    /// 读取成员记录。旧格式在同一事务内迁移并写回 V5；迁移失败时原行保持不变。
+    /// 读取成员记录。当前格式只在读取密文时短暂访问数据库，解密与校验不持有写锁；读到旧格式时
+    /// 进入写事务重新读取并迁移写回 V5，迁移失败时原行保持不变。
     pub fn load(&self) -> Result<MembershipRecord, MembershipLedgerError> {
-        self.executor
-            .run(|conn| {
-                conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
-                    self.load_on(conn).map_err(anyhow::Error::new)
+        let row = self
+            .executor
+            .run(|conn| read_record_row(conn).map_err(anyhow::Error::new))
+            .map_err(map_executor_error)?;
+        let Some(row) = row else {
+            return Ok(MembershipRecord::NoSpace { revision: 0 });
+        };
+        match self.decode_row(&row)? {
+            Decoded::Current(record) => Ok(record),
+            // 写回必须基于写事务内重新读取的同一行，不能覆盖期间的并发写入。
+            Decoded::Migrated(_) => self
+                .executor
+                .run(|conn| {
+                    conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
+                        self.load_on(conn).map_err(anyhow::Error::new)
+                    })
                 })
-            })
-            .map_err(map_executor_error)
+                .map_err(map_executor_error),
+        }
     }
 
     /// 仅当当前修订号等于 `expected_revision` 且替换记录的修订号更大时写入；读模型计划与记录在同一
@@ -106,32 +119,30 @@ impl<E: DbExecutor> SqliteMembershipRecordStore<E> {
         &self,
         conn: &mut SqliteConnection,
     ) -> Result<MembershipRecord, MembershipLedgerError> {
-        let row = sql_query(
-            "SELECT encrypted_payload FROM membership_ledger_state WHERE singleton_id = 1",
-        )
-        .get_result::<EncryptedRecordRow>(conn)
-        .optional()
-        .map_err(MembershipLedgerError::unavailable_from)?;
-        let Some(row) = row else {
+        let Some(row) = read_record_row(conn)? else {
             return Ok(MembershipRecord::NoSpace { revision: 0 });
         };
-        let plaintext = Zeroizing::new(
-            self.keys
-                .open_profile_payload(MEMBERSHIP_RECORD_PURPOSE, &row.encrypted_payload)
-                .map_err(map_key_error)?,
-        );
-        match codec::decode(
-            &plaintext,
-            self.keys.profile_generation(),
-            self.verifier.as_ref(),
-            self.clock.now_ms(),
-        )? {
+        match self.decode_row(&row)? {
             Decoded::Current(record) => Ok(record),
             Decoded::Migrated(record) => {
                 self.save_on(conn, &record)?;
                 Ok(record)
             }
         }
+    }
+
+    fn decode_row(&self, row: &EncryptedRecordRow) -> Result<Decoded, MembershipLedgerError> {
+        let plaintext = Zeroizing::new(
+            self.keys
+                .open_profile_payload(MEMBERSHIP_RECORD_PURPOSE, &row.encrypted_payload)
+                .map_err(map_key_error)?,
+        );
+        codec::decode(
+            &plaintext,
+            self.keys.profile_generation(),
+            self.verifier.as_ref(),
+            self.clock.now_ms(),
+        )
     }
 
     fn save_on(
@@ -242,6 +253,15 @@ impl<E: DbExecutor + Clone + 'static> MembershipRecordStorePort for SqliteMember
         .await
         .map_err(MembershipLedgerError::unavailable_from)?
     }
+}
+
+fn read_record_row(
+    conn: &mut SqliteConnection,
+) -> Result<Option<EncryptedRecordRow>, MembershipLedgerError> {
+    sql_query("SELECT encrypted_payload FROM membership_ledger_state WHERE singleton_id = 1")
+        .get_result::<EncryptedRecordRow>(conn)
+        .optional()
+        .map_err(MembershipLedgerError::unavailable_from)
 }
 
 fn map_key_error(error: AdmissionKeyError) -> MembershipLedgerError {
