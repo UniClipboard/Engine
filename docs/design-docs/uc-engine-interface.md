@@ -182,7 +182,7 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 | `SetHistoryEntryFavorite` | 设置指定记录的收藏状态 |
 | `ListHistoryTags` | 列出本机历史标签及各自关联的条目数，按条目数降序、名称、id 排序；名称无法解密的标签以空名称返回，仍可删除 |
 | `CreateHistoryTag` | 按名称创建本机历史标签；规范化后同名（忽略大小写）时返回已有标签和 `created = false` |
-| `RenameHistoryTag` | 修改标签名称；与另一个标签同名时不写入并返回 `NameConflict { existing_tag_id }` |
+| `RenameHistoryTag` | 修改标签名称；与另一个标签同名时不写入并返回 `NameConflict { existing_tag_id }`；名称密文无法打开的标签不能改名（1404），只能删除 |
 | `AddHistoryTagToEntries` | 把一个标签关联到 1 到 1000 条记录；存在的记录在一个事务内生效，不存在的记录跳过并返回 |
 | `RemoveHistoryTagFromEntries` | 从 1 到 1000 条记录移除一个标签，规则与关联相同 |
 | `SummarizeHistoryEntryTags` | 返回一组记录中仍存在的数量，以及每个标签在其中的携带数量 |

@@ -119,28 +119,24 @@ impl<E> DieselHistoryTagRepository<E> {
             .await
     }
 
-    /// 打开标签载荷；无法打开或内容无效时名称为 `None`、创建时间为 0。
+    /// 打开标签载荷；无法打开或内容无效时返回 `None` 并记录日志，由调用方决定降级或拒绝。
     async fn open_tag(
         &self,
         tag_id: &str,
         ciphertext: &[u8],
-    ) -> Result<(Option<HistoryTagName>, i64), HistoryTagStoreError> {
+    ) -> Result<Option<TagPayload>, HistoryTagStoreError> {
         let payload = self
             .open(format!("{TAG_AAD_PREFIX}{tag_id}"), ciphertext)
             .await?
             .and_then(|bytes| serde_json::from_slice::<TagPayload>(&bytes).ok());
-        let Some(payload) = payload else {
+        if payload.is_none() {
             uc_warn!(
                 tag_id = log_id(&tag_id),
                 error_kind = "history_tag_payload_unreadable",
-                "history tag payload could not be opened; returning it without a name"
+                "history tag payload could not be opened"
             );
-            return Ok((None, 0));
-        };
-        Ok((
-            HistoryTagName::parse(&payload.name).ok(),
-            payload.created_at_ms,
-        ))
+        }
+        Ok(payload)
     }
 
     async fn seal_assignment(
@@ -401,7 +397,14 @@ impl<E: DbExecutor + 'static> HistoryTagStorePort for DieselHistoryTagRepository
         }
         let mut records = Vec::with_capacity(rows.len());
         for (tag_id, payload_ct) in rows {
-            let (name, created_at_ms) = self.open_tag(&tag_id, &payload_ct).await?;
+            // 无法打开的标签仍然列出（名称为 `None`、创建时间为 0），宿主可据此删除它。
+            let (name, created_at_ms) = match self.open_tag(&tag_id, &payload_ct).await? {
+                Some(payload) => (
+                    HistoryTagName::parse(&payload.name).ok(),
+                    payload.created_at_ms,
+                ),
+                None => (None, 0),
+            };
             records.push(HistoryTagRecord {
                 entry_count: count(counts.get(&tag_id).copied().unwrap_or(0)),
                 tag_id: TagId::new(tag_id),
@@ -450,7 +453,12 @@ impl<E: DbExecutor + 'static> HistoryTagStorePort for DieselHistoryTagRepository
             })
             .await?
             .ok_or(HistoryTagStoreError::TagNotFound)?;
-        let (_, created_at_ms) = self.open_tag(&tag_id, &current).await?;
+        // 创建时间无法恢复时拒绝改名，避免把占位值重新密封成持久事实。
+        let created_at_ms = self
+            .open_tag(&tag_id, &current)
+            .await?
+            .ok_or_else(|| storage(anyhow::anyhow!("history tag payload is unreadable")))?
+            .created_at_ms;
         let payload_ct = self.seal_tag(&tag_id, name, created_at_ms).await?;
         let updated = self
             .run(move |conn| {

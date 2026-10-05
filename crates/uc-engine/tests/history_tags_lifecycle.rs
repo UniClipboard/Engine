@@ -18,8 +18,8 @@ use diesel::{Connection, QueryableByName, RunQueryDsl, SqliteConnection};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use uc_engine::error_codes::{
-    HISTORY_INVALID_INPUT_CODE, HISTORY_NOT_FOUND_CODE, HISTORY_TAGS_LOCKED_CODE,
-    SEARCH_INDEX_NOT_READY_CODE, SEARCH_INDEX_REBUILDING_CODE,
+    HISTORY_FAILED_CODE, HISTORY_INVALID_INPUT_CODE, HISTORY_NOT_FOUND_CODE,
+    HISTORY_TAGS_LOCKED_CODE, SEARCH_INDEX_NOT_READY_CODE, SEARCH_INDEX_REBUILDING_CODE,
 };
 use uc_engine::{
     CountSearchEntriesInput, CreateHistoryTagInput, CreateSpaceInput, Engine, EngineConfig,
@@ -349,10 +349,9 @@ fn scalar(conn: &mut SqliteConnection, sql: &str) -> i64 {
         .n
 }
 
-/// 找到正在使用的 profile 数据库（资料目录中可能还有升级暂存副本，按条目数选择）
-/// 并汇总权威表与派生索引中的标签行。
-fn database_summary(root: &Path) -> Value {
-    let database = files_under(root)
+/// 找到正在使用的 profile 数据库（资料目录中可能还有升级暂存副本，按条目数选择）。
+fn profile_database(root: &Path) -> PathBuf {
+    files_under(root)
         .into_iter()
         .filter(|path| {
             path.file_name()
@@ -371,7 +370,12 @@ fn database_summary(root: &Path) -> Value {
         })
         .max_by_key(|(entries, _)| *entries)
         .map(|(_, path)| path)
-        .expect("profile database with history_tag exists");
+        .expect("profile database with history_tag exists")
+}
+
+/// 汇总权威表与派生索引中的标签行。
+fn database_summary(root: &Path) -> Value {
+    let database = profile_database(root);
     let mut conn =
         SqliteConnection::establish(&database.to_string_lossy()).expect("open profile database");
     json!({
@@ -841,6 +845,47 @@ async fn history_tags_survive_merge_delete_restart_and_index_rebuild() {
         assert_eq!(database[leak], 0, "{leak}");
     }
     evidence.step("rebuilt", json!({ "database": database }));
+
+    // 11b. 名称密文无法打开时：列表降级为无名称，改名被拒绝且不改写密文，删除仍可用。
+    let mut conn = SqliteConnection::establish(&profile_database(&root).to_string_lossy())
+        .expect("open profile database");
+    diesel::sql_query(format!(
+        "UPDATE history_tag SET payload_ct = X'00' WHERE tag_id = '{}'",
+        work.tag_id
+    ))
+    .execute(&mut conn)
+    .expect("corrupt tag payload");
+    let unreadable = list_tags(&engine).await;
+    let unreadable = tag_by_id(&unreadable, &work.tag_id).expect("unreadable tag listed");
+    assert_eq!(unreadable.name, None);
+    assert_eq!(unreadable.entry_count, 1);
+    assert_eq!(
+        code(engine.execute(rename(&work.tag_id, "Recovered")).await),
+        HISTORY_FAILED_CODE
+    );
+    assert_eq!(
+        scalar(
+            &mut conn,
+            &format!(
+                "SELECT COUNT(*) AS n FROM history_tag WHERE tag_id = '{}' AND payload_ct = X'00'",
+                work.tag_id
+            ),
+        ),
+        1,
+        "rejected rename must not reseal the unreadable payload"
+    );
+    drop(conn);
+    engine
+        .execute(Operation::DeleteHistoryTag(HistoryTagInput {
+            tag_id: work.tag_id.clone(),
+        }))
+        .await
+        .expect("unreadable tag can be deleted");
+    assert!(tag_by_id(&list_tags(&engine).await, &work.tag_id).is_none());
+    evidence.step(
+        "unreadable_payload",
+        json!({ "rename_code": HISTORY_FAILED_CODE, "deleted": true }),
+    );
 
     engine.shutdown(Duration::from_secs(15)).await.unwrap();
 
