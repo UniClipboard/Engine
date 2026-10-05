@@ -101,8 +101,9 @@ pub(super) fn decode_record(
 impl<E: DbExecutor + Clone + 'static> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
     async fn save_space_material(&self, material: &SpaceKeyMaterial) -> Result<(), KeyEpochError> {
         let master_key = self.session.get_master_key().map_err(backend)?;
-        // 入站组更新处理在生命周期等待范围之外调用这里；移到阻塞线程会让暂停在写入仍等待写锁时
-        // 报告已暂停，因此保持在调用线程执行，直到入站处理纳入暂停等待。
+        // 保持在调用线程执行：邀请方准入激活与分叉恢复发起方经入站处理调用这里，这些处理在会话排空时
+        // 仍会被丢弃且未登记本地工作，移到阻塞线程会让暂停在写入仍等待写锁时报告已暂停。入站组更新
+        // 已作为会话本地工作在阻塞线程中整体执行，经由那里调用时不占用运行线程。
         self.executor
             .run(|conn| {
                 save_space_material_on(conn, &master_key, material).map_err(anyhow::Error::new)
