@@ -170,7 +170,7 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 | `SearchEntries` | 使用关键词、时间、内容类型、来源设备和标签等条件查询加密搜索索引。`tag_match` 取 `any`（默认，命中任一标签）或 `all`（必须同时携带所有标签）；其他维度组内取“或”，维度之间取“且” |
 | `CountSearchEntries` | 批量统计匹配数：每个查询与 `SearchEntries` 走同一套解析与索引路径，`total` 逐项一致，`limit`、`offset` 被忽略；单次最多 32 个查询，按输入顺序返回。加密会话未就绪时返回搜索会话锁定错误，索引重建中返回重建错误，不降级为近似值 |
 | `QueryDailyEntryCounts` | 按调用方给出的严格递增绝对时间戳边界统计条目数，第 `i` 个桶为 `[b[i], b[i+1])`，最多 400 个桶。Engine 不含时区与夏令时规则，日边界由宿主按用户本地时区计算。会话锁定失败关闭，规则与 `CountSearchEntries` 相同 |
-| `QuerySearchTags` | 查询当前索引中的标签和条目数量；本机历史标签以 `is_builtin = false` 出现，只统计已建索引的条目 |
+| `QuerySearchTags` | 查询当前索引中的标签和条目数量；本机历史标签以 `is_builtin = false` 出现，只统计已建索引的条目；会话锁定或索引重建中不返回本机历史标签 |
 | `QuerySearchStatus` | 查询索引是否可用及最近重建时间 |
 | `RebuildSearchIndex` | 请求重建当前加密搜索索引 |
 | `SendText` | 写入加密历史、更新搜索并发送不超过 64 KiB 的文本 |
