@@ -107,6 +107,7 @@ mod tests {
         "rollback_target",
         "source_class",
         "storage_generation",
+        "tag_id",
         "task",
         "trigger",
         "worker",
