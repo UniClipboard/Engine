@@ -240,6 +240,7 @@ __log_field_catalog! {
     preview_rep_id: Identifier(random),
     rep_id: Identifier(random),
     representation_id: Identifier(random),
+    tag_id: Identifier(random),
     transfer_id: Identifier(random),
     // Literal
     cause: Literal,

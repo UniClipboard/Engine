@@ -210,6 +210,7 @@ async fn rebuild_5000_benchmark() {
                 captured_at_ms: i,
                 content_type: ContentType::Text,
                 tags: vec![TagId::new("benchmark")],
+                history_tag_ids: vec![],
                 mime_type: "text/plain".to_owned(),
                 file_extensions: vec![],
                 plain_text: Some(body.clone()),

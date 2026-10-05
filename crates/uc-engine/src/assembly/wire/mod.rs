@@ -682,6 +682,17 @@ pub async fn wire_dependencies_from_inputs(
             ),
         });
 
+    // 本机历史标签：名称以当前 profile 的内容保护密封；旧格式 profile 只能读取关联。
+    let history_tag_repo = Arc::new(match &v3_content_protection {
+        Some(protection) => uc_infra_storage::db::repositories::DieselHistoryTagRepository::new_v3(
+            infra.db_executor.clone(),
+            Arc::clone(protection),
+        ),
+        None => uc_infra_storage::db::repositories::DieselHistoryTagRepository::new_legacy(
+            infra.db_executor.clone(),
+        ),
+    });
+
     let directory_attempt_impl = Arc::new(
         uc_infra_storage::db::repositories::DieselEntryReceiveAttemptRepository::new(
             infra.db_executor.clone(),
@@ -981,6 +992,8 @@ pub async fn wire_dependencies_from_inputs(
             blob_writer: platform.blob_writer,
             blob_content_ingest: platform.blob_content_ingest,
             entry_file_set_repo,
+            history_tag_store: history_tag_repo.clone(),
+            history_entry_tags: history_tag_repo,
             thumbnail_repo: infra.thumbnail_repo,
             thumbnail_generator: infra.thumbnail_generator,
             file_transfer,

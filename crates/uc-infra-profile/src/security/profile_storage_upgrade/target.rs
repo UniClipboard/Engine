@@ -53,6 +53,8 @@ const PROFILE_DATA_TABLES: &[&str] = &[
     "file_transfer",
     "file_transfer_events",
     "file_transfer_privacy_maintenance",
+    "history_tag",
+    "history_tag_assignment",
     "receive_artifact_log",
     "search_document",
     "search_entry_tag",

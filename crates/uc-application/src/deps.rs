@@ -3,6 +3,7 @@
 //! 定义 Application 对象图所需的依赖分组。这些类型只负责打包必需参数，
 //! 不提供分步构建、默认值或隐式装配逻辑，因此不是 Builder。
 
+use crate::clipboard::history_tags::{HistoryEntryTagReaderPort, HistoryTagStorePort};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use uc_core::blob::ports::{BlobContentIngestPort, BlobReaderPort, BlobWriterPort};
@@ -409,6 +410,10 @@ pub struct StoragePorts {
     pub blob_content_ingest: Arc<dyn BlobContentIngestPort>,
     /// 持久化由捕获流程构建的文件类条目逐项清单。
     pub entry_file_set_repo: Arc<dyn EntryFileSetRepositoryPort>,
+    /// 本机历史标签定义与关联的权威存储。
+    pub history_tag_store: Arc<dyn HistoryTagStorePort>,
+    /// 读取条目携带的历史标签 id；与 `history_tag_store` 来自同一个存储。
+    pub history_entry_tags: Arc<dyn HistoryEntryTagReaderPort>,
     /// 持久化与读取条目缩略图的端口。
     pub thumbnail_repo: Arc<dyn ThumbnailRepositoryPort>,
     /// 从剪贴板内容生成缩略图的端口。

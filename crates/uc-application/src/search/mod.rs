@@ -13,13 +13,17 @@ pub(crate) mod runtime;
 pub(crate) mod tagging;
 mod task_scope;
 
-use uc_core::ids::DeviceId;
+use uc_core::ids::{DeviceId, EntryId};
 use uc_core::ports::SearchIndexPort;
 use uc_core::search::tag::TagId;
 use uc_core::search::{
-    ContentType, QueryOperator, SearchError, SearchQuery, TagMatchMode, TimeRangeFilter,
+    ContentType, QueryOperator, SearchError, SearchQuery, SearchResultsPage, TagMatchMode,
+    TimeRangeFilter,
 };
 
+use crate::clipboard::history_tags::{
+    load_history_tag_ids, HistoryEntryTagReaderPort, HistoryTagStoreError,
+};
 use crate::search::query::SearchClipboardEntriesUseCase;
 use crate::space::QuerySpaceAccessStateError;
 
@@ -171,17 +175,43 @@ pub enum SearchFacadeError {
 pub struct SearchFacade {
     query_uc: SearchClipboardEntriesUseCase,
     coordinator: Arc<SearchCoordinator>,
+    /// 本机历史标签的权威关联：结果中的用户标签 id 与标签计数由它补齐。
+    history_entry_tags: Option<Arc<dyn HistoryEntryTagReaderPort>>,
 }
 
 impl SearchFacade {
     fn with_runtime(
         search_index: Arc<dyn SearchIndexPort>,
         coordinator: Arc<SearchCoordinator>,
+        history_entry_tags: Option<Arc<dyn HistoryEntryTagReaderPort>>,
     ) -> Self {
         Self {
             query_uc: SearchClipboardEntriesUseCase::from_port(search_index),
             coordinator,
+            history_entry_tags,
         }
+    }
+
+    /// 为结果页补齐用户历史标签 id。索引只保存不可逆的标签词项，结果中的 id 来自
+    /// 权威关联；会话锁定时失败关闭。
+    async fn with_history_tags(
+        &self,
+        mut page: SearchResultsPage,
+    ) -> Result<SearchResultsPage, SearchFacadeError> {
+        let entry_ids: Vec<EntryId> = page
+            .items
+            .iter()
+            .map(|item| item.entry_id.clone())
+            .collect();
+        let mut tags = load_history_tag_ids(self.history_entry_tags.as_deref(), &entry_ids)
+            .await
+            .map_err(history_tag_error)?;
+        for item in &mut page.items {
+            if let Some(history_tags) = tags.remove(&item.entry_id) {
+                item.tags.extend(history_tags);
+            }
+        }
+        Ok(page)
     }
 
     pub async fn query(
@@ -204,6 +234,7 @@ impl SearchFacade {
                     self.coordinator
                         .schedule_repair(page.corrupted_entry_ids.clone());
                 }
+                let page = self.with_history_tags(page).await?;
                 Ok(search_page_to_view(page, SEARCH_STATE_READY))
             }
             // §4.7: a filter-less browse degrades to a direct main-store read so
@@ -215,6 +246,7 @@ impl SearchFacade {
                     .browse_projection(limit, offset)
                     .await
                     .map_err(map_search_error)?;
+                let page = self.with_history_tags(page).await?;
                 Ok(search_page_to_view(page, SEARCH_STATE_DEGRADED))
             }
             Err(SearchError::IndexNotReady) => Err(SearchFacadeError::IndexRebuilding),
@@ -278,14 +310,45 @@ impl SearchFacade {
     /// tags are hidden while the session is locked, §4.6).
     pub async fn tags(&self) -> Result<Vec<SearchTagView>, SearchFacadeError> {
         let counts = self.query_uc.list_tags().await.map_err(map_search_error)?;
-        Ok(counts
+        let mut views: Vec<SearchTagView> = counts
             .into_iter()
             .map(|c| SearchTagView {
                 is_builtin: c.tag_id.is_builtin(),
                 tag_id: c.tag_id.to_string(),
                 count: c.count,
             })
-            .collect())
+            .collect();
+        views.extend(self.history_tag_counts().await?);
+        Ok(views)
+    }
+
+    /// 用户历史标签在索引中的条目数，与按标签过滤的结果同源。会话锁定或索引未就绪时
+    /// 不返回用户标签（与“锁定时隐藏自定义标签”一致），不影响内置标签。
+    async fn history_tag_counts(&self) -> Result<Vec<SearchTagView>, SearchFacadeError> {
+        let Some(reader) = &self.history_entry_tags else {
+            return Ok(Vec::new());
+        };
+        let tag_ids = reader.tag_ids().await.map_err(history_tag_error)?;
+        let mut views = Vec::with_capacity(tag_ids.len());
+        for tag_id in tag_ids {
+            let query = SearchQuery {
+                tags: vec![tag_id.clone()],
+                ..browse_query_template()
+            };
+            match self.query_uc.count(query).await {
+                Ok(0) => {}
+                Ok(count) => views.push(SearchTagView {
+                    tag_id: tag_id.to_string(),
+                    count,
+                    is_builtin: false,
+                }),
+                Err(SearchError::SessionLocked | SearchError::IndexNotReady) => {
+                    return Ok(Vec::new())
+                }
+                Err(other) => return Err(map_search_error(other)),
+            }
+        }
+        Ok(views)
     }
 
     pub async fn status(&self) -> Result<SearchStatusView, SearchFacadeError> {
@@ -547,6 +610,29 @@ fn parse_source_devices(raw: Option<&str>) -> Vec<DeviceId> {
         .filter(|value| !value.is_empty())
         .map(DeviceId::new)
         .collect()
+}
+
+fn history_tag_error(error: HistoryTagStoreError) -> SearchFacadeError {
+    match error {
+        HistoryTagStoreError::Locked => SearchFacadeError::SessionLocked,
+        other => SearchFacadeError::Internal(SearchError::Internal(Box::new(other))),
+    }
+}
+
+/// 只按标签计数的查询模板：无关键词、无其他筛选、不分页。
+fn browse_query_template() -> SearchQuery {
+    SearchQuery {
+        query_string: String::new(),
+        operator: QueryOperator::And,
+        time_range: None,
+        content_types: Vec::new(),
+        tags: Vec::new(),
+        tag_match: TagMatchMode::Any,
+        extensions: Vec::new(),
+        source_devices: Vec::new(),
+        limit: 0,
+        offset: 0,
+    }
 }
 
 pub fn map_search_error(error: SearchError) -> SearchFacadeError {

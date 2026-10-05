@@ -109,6 +109,14 @@ pub enum OperationKind {
     GetHistoryEntry,
     DeleteHistoryEntry,
     SetHistoryEntryFavorite,
+    ListHistoryTags,
+    CreateHistoryTag,
+    RenameHistoryTag,
+    AddHistoryTagToEntries,
+    RemoveHistoryTagFromEntries,
+    SummarizeHistoryEntryTags,
+    MergeHistoryTags,
+    DeleteHistoryTag,
     QueryHistoryStats,
     GetHistoryEntryResource,
     ReadBlob,
@@ -215,6 +223,14 @@ impl fmt::Display for OperationKind {
             Self::GetHistoryEntry => "get_history_entry",
             Self::DeleteHistoryEntry => "delete_history_entry",
             Self::SetHistoryEntryFavorite => "set_history_entry_favorite",
+            Self::ListHistoryTags => "list_history_tags",
+            Self::CreateHistoryTag => "create_history_tag",
+            Self::RenameHistoryTag => "rename_history_tag",
+            Self::AddHistoryTagToEntries => "add_history_tag_to_entries",
+            Self::RemoveHistoryTagFromEntries => "remove_history_tag_from_entries",
+            Self::SummarizeHistoryEntryTags => "summarize_history_entry_tags",
+            Self::MergeHistoryTags => "merge_history_tags",
+            Self::DeleteHistoryTag => "delete_history_tag",
             Self::QueryHistoryStats => "query_history_stats",
             Self::GetHistoryEntryResource => "get_history_entry_resource",
             Self::ReadBlob => "read_blob",
@@ -365,6 +381,14 @@ pub enum Operation {
     GetHistoryEntry(HistoryEntryInput),
     DeleteHistoryEntry(HistoryEntryInput),
     SetHistoryEntryFavorite(SetHistoryEntryFavoriteInput),
+    ListHistoryTags,
+    CreateHistoryTag(CreateHistoryTagInput),
+    RenameHistoryTag(RenameHistoryTagInput),
+    AddHistoryTagToEntries(HistoryTagEntriesInput),
+    RemoveHistoryTagFromEntries(HistoryTagEntriesInput),
+    SummarizeHistoryEntryTags(HistoryEntryTagsInput),
+    MergeHistoryTags(MergeHistoryTagsInput),
+    DeleteHistoryTag(HistoryTagInput),
     QueryHistoryStats,
     GetHistoryEntryResource(HistoryEntryInput),
     ReadBlob(BlobResourceInput),
@@ -473,6 +497,14 @@ impl Operation {
             Self::GetHistoryEntry(_) => OperationKind::GetHistoryEntry,
             Self::DeleteHistoryEntry(_) => OperationKind::DeleteHistoryEntry,
             Self::SetHistoryEntryFavorite(_) => OperationKind::SetHistoryEntryFavorite,
+            Self::ListHistoryTags => OperationKind::ListHistoryTags,
+            Self::CreateHistoryTag(_) => OperationKind::CreateHistoryTag,
+            Self::RenameHistoryTag(_) => OperationKind::RenameHistoryTag,
+            Self::AddHistoryTagToEntries(_) => OperationKind::AddHistoryTagToEntries,
+            Self::RemoveHistoryTagFromEntries(_) => OperationKind::RemoveHistoryTagFromEntries,
+            Self::SummarizeHistoryEntryTags(_) => OperationKind::SummarizeHistoryEntryTags,
+            Self::MergeHistoryTags(_) => OperationKind::MergeHistoryTags,
+            Self::DeleteHistoryTag(_) => OperationKind::DeleteHistoryTag,
             Self::QueryHistoryStats => OperationKind::QueryHistoryStats,
             Self::GetHistoryEntryResource(_) => OperationKind::GetHistoryEntryResource,
             Self::ReadBlob(_) => OperationKind::ReadBlob,
@@ -835,6 +867,60 @@ pub struct ThumbnailResourceInput {
 pub struct SetHistoryEntryFavoriteInput {
     pub entry_id: String,
     pub is_favorited: bool,
+}
+
+/// 按名称创建历史标签；同名（规范化后忽略大小写）时返回已有标签。
+#[derive(Clone, PartialEq, Eq)]
+pub struct CreateHistoryTagInput {
+    pub name: String,
+}
+
+impl fmt::Debug for CreateHistoryTagInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CreateHistoryTagInput")
+            .field("name", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct RenameHistoryTagInput {
+    pub tag_id: String,
+    pub name: String,
+}
+
+impl fmt::Debug for RenameHistoryTagInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RenameHistoryTagInput")
+            .field("name", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+/// 把一个历史标签关联到一组条目，或从一组条目移除。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryTagEntriesInput {
+    pub tag_id: String,
+    pub entry_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryEntryTagsInput {
+    pub entry_ids: Vec<String>,
+}
+
+/// 把来源标签并入目标标签；来源标签随后删除。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeHistoryTagsInput {
+    pub source_tag_ids: Vec<String>,
+    pub target_tag_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryTagInput {
+    pub tag_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

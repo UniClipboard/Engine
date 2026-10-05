@@ -223,6 +223,7 @@ impl ClipboardAssembly {
                 search_index: Arc::clone(&application.search.search_index),
                 event_repo: Arc::clone(&application.clipboard.clipboard_event_reader_repo),
                 entry_file_set_repo: Arc::clone(&application.storage.entry_file_set_repo),
+                history_entry_tags: Arc::clone(&application.storage.history_entry_tags),
             }));
 
         Self {
@@ -478,6 +479,7 @@ impl ClipboardAssembly {
             device_identity: Arc::clone(&self.deps.device.device_identity),
             clock: Arc::clone(&self.deps.system.clock),
             cache_fs: Arc::clone(&self.deps.system.cache_fs),
+            history_tag_store: Arc::clone(&self.deps.storage.history_tag_store),
         }))
     }
 

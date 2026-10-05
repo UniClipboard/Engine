@@ -21,6 +21,9 @@ pub struct SearchPipelineInput {
     /// Derived tags (e.g. `link`) produced by evaluating tag rules over the
     /// entry's content. Orthogonal to `content_type`; zero or more per entry.
     pub tags: Vec<TagId>,
+    /// 用户手动关联的本机历史标签 id。只以搜索密钥 HMAC 后的词项进入索引，
+    /// 不写入明文标签成员；为空表示条目没有用户标签。
+    pub history_tag_ids: Vec<TagId>,
     pub mime_type: String,
     pub file_extensions: Vec<String>,
     pub plain_text: Option<String>,

@@ -9,6 +9,7 @@ mod event;
 mod file_display_metadata;
 mod file_set;
 mod hash;
+mod history_tag;
 pub mod integration_mode;
 pub mod link_utils;
 mod mime;
@@ -53,6 +54,10 @@ pub use system::{
 
 pub use decision::{ClipboardContentActionDecision, DuplicationHint, RejectReason};
 pub use hash::{ContentHash, HashAlgorithm};
+pub use history_tag::{
+    HistoryTagName, HistoryTagNameError, HISTORY_TAG_MAX_BATCH_ENTRIES, HISTORY_TAG_MAX_COUNT,
+    HISTORY_TAG_MAX_MERGE_SOURCES, HISTORY_TAG_NAME_MAX_CHARS,
+};
 pub use integration_mode::ClipboardIntegrationMode;
 pub use mime::{normalize_wire_mime, ImageKind, MimeClass, MimeType};
 pub use origin::ClipboardOrigin;
