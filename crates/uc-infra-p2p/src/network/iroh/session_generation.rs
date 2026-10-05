@@ -34,6 +34,8 @@ struct GenerationState {
     phase: GenerationPhase,
     handler_leases: HashMap<usize, Connection>,
     connections: HashMap<usize, WeakConnectionHandle>,
+    /// 入站处理已开始、尚未结束的本地持久工作；处理被会话取消丢弃后仍可能在途。
+    local_work: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,6 +77,27 @@ struct SessionProtocolLease {
     generation: Arc<SessionProtocolGeneration>,
     handler: Arc<dyn DynProtocolHandler>,
     lease_id: usize,
+}
+
+tokio::task_local! {
+    /// 当前入站处理所属的会话世代；只由 `SessionProtocolDispatcher` 在处理期间设置。
+    static HANDLING_GENERATION: Arc<SessionProtocolGeneration>;
+}
+
+/// 入站处理登记的一次本地持久工作。持有期间所属世代不算排空，暂停与会话切换等待它结束；
+/// 应随实际执行写入的任务一起持有，处理本身被会话取消丢弃时仍保持登记。
+pub(super) struct SessionLocalWork {
+    /// 不经会话分发器的处理（无所属世代）不受会话排空约束，不登记。
+    generation: Option<Arc<SessionProtocolGeneration>>,
+}
+
+/// 登记一次本地持久工作。所属世代已开始排空（已接受暂停或会话切换）时返回 `None`，调用方不得再
+/// 开始写入。
+pub(super) fn begin_session_local_work() -> Option<SessionLocalWork> {
+    match HANDLING_GENERATION.try_with(Arc::clone) {
+        Ok(generation) => generation.begin_local_work(),
+        Err(_) => Some(SessionLocalWork { generation: None }),
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -278,6 +301,7 @@ impl SessionProtocolGeneration {
                 phase: GenerationPhase::Active,
                 handler_leases: HashMap::new(),
                 connections: HashMap::new(),
+                local_work: 0,
             }),
             cancellation,
             drained: Notify::new(),
@@ -348,17 +372,32 @@ impl SessionProtocolGeneration {
         connections
     }
 
+    fn begin_local_work(self: Arc<Self>) -> Option<SessionLocalWork> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.phase != GenerationPhase::Active {
+            return None;
+        }
+        state.local_work += 1;
+        drop(state);
+        Some(SessionLocalWork {
+            generation: Some(self),
+        })
+    }
+
     async fn wait_until_drained(&self) {
         loop {
             let notified = self.drained.notified();
-            if self
-                .state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .handler_leases
-                .is_empty()
             {
-                return;
+                let state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if state.handler_leases.is_empty() && state.local_work == 0 {
+                    return;
+                }
             }
             notified.await;
         }
@@ -452,7 +491,10 @@ impl ProtocolHandler for SessionProtocolDispatcher {
                 connection.close(0u32.into(), b"session_retired");
                 Err(AcceptError::from_err(SessionProtocolUnavailable { source: None }))
             }
-            result = handler.accept(connection.clone()) => result,
+            result = HANDLING_GENERATION.scope(
+                Arc::clone(&lease.generation),
+                handler.accept(connection.clone()),
+            ) => result,
         }
     }
 }
@@ -500,8 +542,24 @@ impl Drop for SessionProtocolLease {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.handler_leases.remove(&self.lease_id);
-        if state.handler_leases.is_empty() {
+        if state.handler_leases.is_empty() && state.local_work == 0 {
             self.generation.drained.notify_waiters();
+        }
+    }
+}
+
+impl Drop for SessionLocalWork {
+    fn drop(&mut self) {
+        let Some(generation) = self.generation.as_ref() else {
+            return;
+        };
+        let mut state = generation
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.local_work -= 1;
+        if state.handler_leases.is_empty() && state.local_work == 0 {
+            generation.drained.notify_waiters();
         }
     }
 }

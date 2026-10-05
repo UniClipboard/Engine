@@ -23,25 +23,29 @@ mod tests;
 use std::sync::{Arc, Mutex};
 
 use crate::security::{ActiveSpaceGenerationManifestStore, AdmissionKeyManager};
+use tokio::task::spawn_blocking;
 use uc_application::deps::AdmissionReadFailureCategory;
 use uc_application::deps::MembershipRecordStorePort;
 use uc_core::error_class::ErrorClass;
 use uc_core::membership::{AdmissionContinuationCredential, SpaceAdmissionId};
 use uc_infra_storage::db::ports::DbExecutor;
+use uc_observability_contract::diagnostics::connectivity::LocalWorkContext;
 
 use codec::RepositoryReadCache;
 
 #[cfg(feature = "test-util")]
 pub use benchmark::AdmissionRepositoryBenchmark;
 
+#[derive(Clone)]
 pub struct SqliteSpaceAdmissionState<E> {
     pub(super) executor: E,
     pub(super) keys: Arc<AdmissionKeyManager>,
     pub(super) manifests: Arc<ActiveSpaceGenerationManifestStore>,
     pub(super) membership: Arc<dyn MembershipRecordStorePort>,
-    read_cache: Mutex<Option<RepositoryReadCache>>,
+    /// 克隆到阻塞线程执行时仍共享同一份缓存。
+    read_cache: Arc<Mutex<Option<RepositoryReadCache>>>,
     #[cfg(test)]
-    record_reads: std::sync::atomic::AtomicUsize,
+    record_reads: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl<E> SqliteSpaceAdmissionState<E> {
@@ -56,10 +60,24 @@ impl<E> SqliteSpaceAdmissionState<E> {
             keys,
             manifests,
             membership,
-            read_cache: Mutex::new(None),
+            read_cache: Arc::new(Mutex::new(None)),
             #[cfg(test)]
-            record_reads: std::sync::atomic::AtomicUsize::new(0),
+            record_reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
+    }
+}
+
+impl<E: DbExecutor + Clone + Send + Sync + 'static> SqliteSpaceAdmissionState<E> {
+    /// 在阻塞线程完整执行一次同步仓储访问（事务、磁盘与逐条加解密），不占用异步运行线程。
+    /// 调用方等待到事务提交或回滚后才得到结果；生命周期暂停因此仍会等待它结束，不会遗留在途事务。
+    // rust-style: allow-qualified-path -- 仅向相邻准入适配器开放阻塞执行入口，不扩大正式接口
+    pub(in crate::space::admission) async fn run_blocking<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(&Self) -> anyhow::Result<T> + Send + 'static,
+    ) -> anyhow::Result<T> {
+        let state = self.clone();
+        let context = LocalWorkContext::capture();
+        spawn_blocking(move || context.run(|| work(&state))).await?
     }
 }
 

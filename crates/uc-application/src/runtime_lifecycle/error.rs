@@ -69,6 +69,15 @@ impl LifecycleError {
         self.primary.is::<LifecycleSuperseded>()
     }
 
+    /// 全部失败都只是共同期限结束了等待，没有参与者报告实际失败。
+    pub fn is_deadline_elapsed(&self) -> bool {
+        self.primary.is::<LifecycleDeadlineElapsed>()
+            && self
+                .additional
+                .iter()
+                .all(|error| error.is::<LifecycleDeadlineElapsed>())
+    }
+
     pub(super) fn superseded() -> Self {
         Self {
             primary: LifecycleSuperseded.into(),

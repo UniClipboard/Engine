@@ -3,6 +3,7 @@ use diesel::SqliteConnection;
 use crate::db::pool::DbPool;
 use crate::db::ports::DbExecutor;
 
+#[derive(Clone)]
 pub struct DieselSqliteExecutor {
     pool: DbPool,
 }

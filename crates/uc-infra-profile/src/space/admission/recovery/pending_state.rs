@@ -17,16 +17,22 @@ use super::super::repository::token::recovery_token;
 use super::super::repository::{SpaceAdmissionStateStoreError, SqliteSpaceAdmissionState};
 
 #[async_trait]
-impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
+impl<E: DbExecutor + Clone + Send + Sync + 'static> PendingAdmissionRecoveryStatePort
     for SqliteSpaceAdmissionState<E>
 {
     #[tracing::instrument(name = "space_admission.recovery_state.verify", skip_all)]
     async fn verify_readable(&self, now_ms: i64) -> Result<(), PendingAdmissionRecoveryStateError> {
         let result: Result<(), PendingAdmissionRecoveryStateError> = async {
             observe_local_result(LocalWorkStep::JoinerStateLoad, async {
-                self.executor
-                    .run(|conn| self.verify_repository_on(conn, now_ms).map_err(into_anyhow))
-                    .map_err(map_read_error)
+                self.run_blocking(move |state| {
+                    state.executor.run(|conn| {
+                        state
+                            .verify_repository_on(conn, now_ms)
+                            .map_err(into_anyhow)
+                    })
+                })
+                .await
+                .map_err(map_read_error)
             })
             .await
         }
@@ -42,12 +48,12 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
     ) -> Result<LoadedAdmissionRecovery, PendingAdmissionRecoveryStateError> {
         let result: Result<LoadedAdmissionRecovery, PendingAdmissionRecoveryStateError> = async {
             observe_local_result(LocalWorkStep::JoinerStateLoad, async {
-                self.executor
-                    .run(|conn| {
-                        let index = self
+                self.run_blocking(move |state| {
+                    state.executor.run(|conn| {
+                        let index = state
                             .load_recovery_index_on(conn, now_ms)
                             .map_err(into_anyhow)?;
-                        let profile_generation = self.keys.profile_generation();
+                        let profile_generation = state.keys.profile_generation();
                         let pending = index
                             .joiners
                             .into_iter()
@@ -81,7 +87,9 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
                             index.needs_attention,
                         ))
                     })
-                    .map_err(map_read_error)
+                })
+                .await
+                .map_err(map_read_error)
             })
             .await
         }
@@ -98,10 +106,10 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
         let result: Result<LoadedPendingAdmission, PendingAdmissionRecoveryStateError> = async {
             observe_local_result(LocalWorkStep::JoinerStateCommit, async {
                 let replacement = transition.into_replacement();
-                self.executor
-                    .run(|conn| {
+                self.run_blocking(move |store| {
+                    store.executor.run(|conn| {
                         conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
-                            let mut state = self
+                            let mut state = store
                                 .load_state_in_transaction_on(conn)
                                 .map_err(into_anyhow)?;
                             let admission_id = *replacement.admission_id().as_bytes();
@@ -109,7 +117,7 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
                                 state.records.get(&admission_id).cloned().ok_or_else(|| {
                                     into_anyhow(SpaceAdmissionStateStoreError::conflict())
                                 })?;
-                            let current = self
+                            let current = store
                                 .open_record(admission_id, &stored)
                                 .map_err(into_anyhow)?;
                             let expected_token = recovery_token(state.profile_generation, &current);
@@ -122,7 +130,7 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
                             {
                                 return Err(into_anyhow(SpaceAdmissionStateStoreError::conflict()));
                             }
-                            let sealed = self
+                            let sealed = store
                                 .seal_record(&replacement, stored.wrapped_data_key)
                                 .map_err(into_anyhow)?;
                             state.records.insert(admission_id, sealed);
@@ -131,7 +139,7 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
                             {
                                 state.current_local_join_id = None;
                             }
-                            self.save_state_on(conn, &state).map_err(into_anyhow)?;
+                            store.save_state_on(conn, &state).map_err(into_anyhow)?;
                             let next_token = AdmissionRecoveryCommitToken::from_bytes(
                                 recovery_token(state.profile_generation, &replacement),
                             )
@@ -139,8 +147,10 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
                             Ok(LoadedPendingAdmission::new(replacement, next_token))
                         })
                     })
-                    .map_err(map_executor_error)
-                    .map_err(map_recovery_error)
+                })
+                .await
+                .map_err(map_executor_error)
+                .map_err(map_recovery_error)
             })
             .await
         }
@@ -155,10 +165,10 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
     ) -> Result<LoadedSponsorDeadline, PendingAdmissionRecoveryStateError> {
         observe_local_result(LocalWorkStep::SponsorStateCommit, async {
             let replacement = transition.into_replacement();
-            self.executor
-                .run(|conn| {
+            self.run_blocking(move |store| {
+                store.executor.run(|conn| {
                     conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
-                        let mut state = self
+                        let mut state = store
                             .load_state_in_transaction_on(conn)
                             .map_err(into_anyhow)?;
                         let admission_id = *replacement.admission_id().as_bytes();
@@ -166,7 +176,7 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
                             state.records.get(&admission_id).cloned().ok_or_else(|| {
                                 into_anyhow(SpaceAdmissionStateStoreError::conflict())
                             })?;
-                        let current = self
+                        let current = store
                             .open_record(admission_id, &stored)
                             .map_err(into_anyhow)?;
                         let expected_token = recovery_token(state.profile_generation, &current);
@@ -179,11 +189,11 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
                         {
                             return Err(into_anyhow(SpaceAdmissionStateStoreError::conflict()));
                         }
-                        let sealed = self
+                        let sealed = store
                             .seal_record(&replacement, stored.wrapped_data_key)
                             .map_err(into_anyhow)?;
                         state.records.insert(admission_id, sealed);
-                        self.save_state_on(conn, &state).map_err(into_anyhow)?;
+                        store.save_state_on(conn, &state).map_err(into_anyhow)?;
                         let next_token = AdmissionRecoveryCommitToken::from_bytes(recovery_token(
                             state.profile_generation,
                             &replacement,
@@ -192,8 +202,10 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
                         Ok(LoadedSponsorDeadline::new(replacement, next_token))
                     })
                 })
-                .map_err(map_executor_error)
-                .map_err(map_recovery_error)
+            })
+            .await
+            .map_err(map_executor_error)
+            .map_err(map_recovery_error)
         })
         .await
     }
@@ -205,10 +217,10 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
     ) -> Result<LoadedSponsorAbandonment, PendingAdmissionRecoveryStateError> {
         observe_local_result(LocalWorkStep::SponsorStateCommit, async {
             let replacement = transition.into_replacement();
-            self.executor
-                .run(|conn| {
+            self.run_blocking(move |store| {
+                store.executor.run(|conn| {
                     conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
-                        let mut state = self
+                        let mut state = store
                             .load_state_in_transaction_on(conn)
                             .map_err(into_anyhow)?;
                         let admission_id = *replacement.admission_id().as_bytes();
@@ -216,7 +228,7 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
                             state.records.get(&admission_id).cloned().ok_or_else(|| {
                                 into_anyhow(SpaceAdmissionStateStoreError::conflict())
                             })?;
-                        let current = self
+                        let current = store
                             .open_record(admission_id, &stored)
                             .map_err(into_anyhow)?;
                         let expected_token = recovery_token(state.profile_generation, &current);
@@ -229,11 +241,11 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
                         {
                             return Err(into_anyhow(SpaceAdmissionStateStoreError::conflict()));
                         }
-                        let sealed = self
+                        let sealed = store
                             .seal_record(&replacement, stored.wrapped_data_key)
                             .map_err(into_anyhow)?;
                         state.records.insert(admission_id, sealed);
-                        self.save_state_on(conn, &state).map_err(into_anyhow)?;
+                        store.save_state_on(conn, &state).map_err(into_anyhow)?;
                         let next_token = AdmissionRecoveryCommitToken::from_bytes(recovery_token(
                             state.profile_generation,
                             &replacement,
@@ -242,8 +254,10 @@ impl<E: DbExecutor + Send + Sync> PendingAdmissionRecoveryStatePort
                         Ok(LoadedSponsorAbandonment::new(replacement, next_token))
                     })
                 })
-                .map_err(map_executor_error)
-                .map_err(map_recovery_error)
+            })
+            .await
+            .map_err(map_executor_error)
+            .map_err(map_recovery_error)
         })
         .await
     }

@@ -8,11 +8,14 @@ use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointAddr};
 use serde::{Deserialize, Serialize};
 
+use tokio::runtime::Handle;
+use tokio::task::spawn_blocking;
 use uc_core::membership::{
-    GroupRevocationPort, GroupUpdateDispatchError, GroupUpdateDispatchPort, KeyEpochError,
-    PendingGroupUpdate,
+    GroupEpoch, GroupRevocationPort, GroupUpdateDispatchError, GroupUpdateDispatchPort,
+    KeyEpochError, PendingGroupUpdate,
 };
 use uc_core::ports::PeerAddressRepositoryPort;
+use uc_observability_contract::diagnostics::connectivity::LocalWorkContext;
 use uc_observability_contract::diagnostics::{
     complete_operation, operation_span, DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation,
     DiagnosticRole, DiagnosticSpanKind, OperationCompletion, OperationContext,
@@ -20,6 +23,7 @@ use uc_observability_contract::diagnostics::{
 
 use super::connect_with_staggered_retry;
 use super::peer_address_resolver::PeerAddressResolver;
+use super::session_generation::{begin_session_local_work, SessionLocalWork};
 use super::trace_context::{inject_current, set_remote_parent};
 use uc_infra_security::group_update_failure_detail;
 use uc_observability_contract::{uc_debug, uc_warn};
@@ -148,6 +152,29 @@ impl GroupUpdateDispatchPort for IrohGroupUpdateAdapter {
     }
 }
 
+/// 整个入站应用（读取、MLS 计算、保存与安装）在阻塞线程执行，并由该任务持有会话本地工作：
+/// 移动绑定的单线程运行期不再等待控制库写锁；处理被会话取消丢弃时，排空仍等待真实写入结束。
+/// 阻塞任务未执行即随运行期关闭被取消时返回 `None`，与登记被拒一样不回复确认。
+async fn apply_as_local_work(
+    state: Arc<HandlerState>,
+    payload: Vec<u8>,
+    local_work: SessionLocalWork,
+) -> Option<Result<GroupEpoch, KeyEpochError>> {
+    let runtime = Handle::current();
+    let context = LocalWorkContext::capture();
+    let applied = spawn_blocking(move || {
+        let _local_work = local_work;
+        context.run(|| runtime.block_on(state.group_revocation.apply_group_epoch_update(&payload)))
+    })
+    .await;
+    match applied {
+        Ok(applied) => Some(applied),
+        // 应用中的 panic 照旧终止本次入站处理：不回复确认，发送方按传输失败重新投递，不被记为拒收。
+        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+        Err(_) => None,
+    }
+}
+
 #[derive(Clone)]
 pub struct IrohGroupUpdateHandler {
     state: Arc<HandlerState>,
@@ -217,11 +244,19 @@ impl ProtocolHandler for IrohGroupUpdateHandler {
             kind: DiagnosticSpanKind::Server,
         });
         let started = Instant::now();
-        let applied = self
-            .state
-            .group_revocation
-            .apply_group_epoch_update(&request.payload)
-            .await;
+        // 已接受暂停或会话切换后不再开始本地写入；不回复确认，发送方按传输失败退避后重新投递。
+        let Some(local_work) = begin_session_local_work() else {
+            uc_debug!("group update deferred while the session drains");
+            connection.close(0u32.into(), b"session_retired");
+            return Ok(());
+        };
+        let Some(applied) =
+            apply_as_local_work(Arc::clone(&self.state), request.payload.clone(), local_work).await
+        else {
+            uc_debug!("group update deferred because local work was cancelled");
+            connection.close(0u32.into(), b"session_retired");
+            return Ok(());
+        };
         if applied.is_ok() {
             let _ = set_remote_parent(&span, request.trace_context.as_ref());
         }

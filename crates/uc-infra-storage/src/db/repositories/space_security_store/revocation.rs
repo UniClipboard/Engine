@@ -98,9 +98,12 @@ pub(super) fn decode_record(
 }
 
 #[async_trait]
-impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
+impl<E: DbExecutor + Clone + 'static> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
     async fn save_space_material(&self, material: &SpaceKeyMaterial) -> Result<(), KeyEpochError> {
         let master_key = self.session.get_master_key().map_err(backend)?;
+        // 保持在调用线程执行：邀请方准入激活与分叉恢复发起方经入站处理调用这里，这些处理在会话排空时
+        // 仍会被丢弃且未登记本地工作，移到阻塞线程会让暂停在写入仍等待写锁时报告已暂停。入站组更新
+        // 已作为会话本地工作在阻塞线程中整体执行，经由那里调用时不占用运行线程。
         self.executor
             .run(|conn| {
                 save_space_material_on(conn, &master_key, material).map_err(anyhow::Error::new)
@@ -128,9 +131,16 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
         online_peer: Option<DeviceId>,
     ) -> Result<Vec<PendingGroupUpdate>, KeyEpochError> {
         let key = self.session.get_master_key().map_err(backend)?;
-        self.executor
-            .run(|conn| Ok(self.load_due_updates_on(conn, &key, space_id, now_ms, online_peer)))
-            .map_err(transaction_failure)?
+        let space_id = space_id.clone();
+        self.run_blocking(move |store| {
+            store
+                .executor
+                .run(|conn| {
+                    Ok(store.load_due_updates_on(conn, &key, &space_id, now_ms, online_peer))
+                })
+                .map_err(transaction_failure)?
+        })
+        .await
     }
 
     async fn record_group_update_failures(
@@ -140,9 +150,26 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
         now_ms: i64,
     ) -> Result<usize, KeyEpochError> {
         let key = self.session.get_master_key().map_err(backend)?;
-        self.executor
-            .run(|conn| Ok(self.save_delivery_failures_on(conn, &key, space_id, failures, now_ms)))
-            .map_err(transaction_failure)?
+        let space_id = space_id.clone();
+        // 持久化只区分是否被拒；投递错误本身及其来源仍由调用方持有。
+        let failures = failures
+            .iter()
+            .map(|(update_id, error)| {
+                (
+                    update_id.clone(),
+                    matches!(error, GroupUpdateDispatchError::Rejected),
+                )
+            })
+            .collect::<Vec<_>>();
+        self.run_blocking(move |store| {
+            store
+                .executor
+                .run(|conn| {
+                    Ok(store.save_delivery_failures_on(conn, &key, &space_id, &failures, now_ms))
+                })
+                .map_err(transaction_failure)?
+        })
+        .await
     }
 
     async fn group_update_delivery_status(
@@ -177,84 +204,88 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
         )?;
         let prepared = prepared.clone();
         let lookup_token = space_lookup_token(&master_key, prepared.space_id())?;
-        self.executor
-            .run(move |conn| {
-                conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
-                    let rows = diesel::sql_query(
-                        "SELECT revocation_id, space_lookup_token, previous_epoch, next_epoch, status, \
-                         encrypted_record, encrypted_stage, created_at_ms, updated_at_ms \
-                         FROM member_revocation_log WHERE space_lookup_token = ? AND status <> 'complete'",
-                    )
-                    .bind::<Text, _>(&lookup_token)
-                    .load::<RevocationRow>(conn)?;
-                    let mut has_incomplete = false;
-                    for row in rows {
-                        let existing = decode_record(&master_key, &row)
-                            .map_err(anyhow::Error::new)?;
-                        if existing.status() == RevocationStatus::Prepared
-                            && existing.previous_epoch() < prepared.previous_epoch()
-                        {
-                            let affected = diesel::sql_query(
-                                "DELETE FROM member_revocation_log \
-                                 WHERE revocation_id = ? AND status = 'prepared' \
-                                 AND previous_epoch = ?",
-                            )
-                            .bind::<Text, _>(existing.revocation_id().as_str())
-                            .bind::<BigInt, _>(epoch_to_i64(existing.previous_epoch().value())?)
-                            .execute(conn)?;
-                            if affected != 1 {
-                                return Err(anyhow::anyhow!(
-                                    "obsolete prepared revocation could not be replaced"
-                                ));
+        self.run_blocking(move |store| {
+            store
+                .executor
+                .run(move |conn| {
+                    conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
+                        let rows = diesel::sql_query(
+                            "SELECT revocation_id, space_lookup_token, previous_epoch, next_epoch, status, \
+                             encrypted_record, encrypted_stage, created_at_ms, updated_at_ms \
+                             FROM member_revocation_log WHERE space_lookup_token = ? AND status <> 'complete'",
+                        )
+                        .bind::<Text, _>(&lookup_token)
+                        .load::<RevocationRow>(conn)?;
+                        let mut has_incomplete = false;
+                        for row in rows {
+                            let existing = decode_record(&master_key, &row)
+                                .map_err(anyhow::Error::new)?;
+                            if existing.status() == RevocationStatus::Prepared
+                                && existing.previous_epoch() < prepared.previous_epoch()
+                            {
+                                let affected = diesel::sql_query(
+                                    "DELETE FROM member_revocation_log \
+                                     WHERE revocation_id = ? AND status = 'prepared' \
+                                     AND previous_epoch = ?",
+                                )
+                                .bind::<Text, _>(existing.revocation_id().as_str())
+                                .bind::<BigInt, _>(epoch_to_i64(existing.previous_epoch().value())?)
+                                .execute(conn)?;
+                                if affected != 1 {
+                                    return Err(anyhow::anyhow!(
+                                        "obsolete prepared revocation could not be replaced"
+                                    ));
+                                }
+                                uc_warn!(
+                                    event = "member_revocation.obsolete_prepared_replaced",
+                                    previous_epoch = existing.previous_epoch().value(),
+                                    current_epoch = prepared.previous_epoch().value(),
+                                    "obsolete prepared member revocation was replaced"
+                                );
+                                continue;
                             }
-                            uc_warn!(
-                                event = "member_revocation.obsolete_prepared_replaced",
-                                previous_epoch = existing.previous_epoch().value(),
-                                current_epoch = prepared.previous_epoch().value(),
-                                "obsolete prepared member revocation was replaced"
+                            // 本地安全状态已提交后的远端确认不能阻塞下一次本地移除。
+                            // 旧记录和 outbox 继续保留，由原恢复流程负责投递与确认。
+                            has_incomplete |= !matches!(
+                                existing.status(),
+                                RevocationStatus::Activated | RevocationStatus::Distributing
                             );
-                            continue;
+                            if existing.target_device_id() == prepared.target_device_id() {
+                                return Ok(BeginRevocationOutcome::Existing(existing));
+                            }
                         }
-                        // 本地安全状态已提交后的远端确认不能阻塞下一次本地移除。
-                        // 旧记录和 outbox 继续保留，由原恢复流程负责投递与确认。
-                        has_incomplete |= !matches!(
-                            existing.status(),
-                            RevocationStatus::Activated | RevocationStatus::Distributing
-                        );
-                        if existing.target_device_id() == prepared.target_device_id() {
-                            return Ok(BeginRevocationOutcome::Existing(existing));
+                        if has_incomplete {
+                            return Err(anyhow::anyhow!(
+                                "another member revocation is already in progress"
+                            ));
                         }
-                    }
-                    if has_incomplete {
-                        return Err(anyhow::anyhow!(
-                            "another member revocation is already in progress"
-                        ));
-                    }
-                    diesel::sql_query(
-                        "INSERT INTO member_revocation_log \
-                         (revocation_id, space_lookup_token, previous_epoch, next_epoch, status, \
-                          encrypted_record, encrypted_stage, created_at_ms, updated_at_ms) \
-                         VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)",
-                    )
-                    .bind::<Text, _>(prepared.revocation_id().as_str())
-                    .bind::<Text, _>(&lookup_token)
-                    .bind::<BigInt, _>(
-                        epoch_to_i64(prepared.previous_epoch().value())
-                            .map_err(anyhow::Error::new)?,
-                    )
-                    .bind::<BigInt, _>(
-                        epoch_to_i64(prepared.next_epoch().value())
-                            .map_err(anyhow::Error::new)?,
-                    )
-                    .bind::<Text, _>(status_name(prepared.status()))
-                    .bind::<Binary, _>(&encrypted)
-                    .bind::<BigInt, _>(prepared.created_at_ms())
-                    .bind::<BigInt, _>(prepared.updated_at_ms())
-                    .execute(conn)?;
-                    Ok(BeginRevocationOutcome::Begun(prepared))
+                        diesel::sql_query(
+                            "INSERT INTO member_revocation_log \
+                             (revocation_id, space_lookup_token, previous_epoch, next_epoch, status, \
+                              encrypted_record, encrypted_stage, created_at_ms, updated_at_ms) \
+                             VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+                        )
+                        .bind::<Text, _>(prepared.revocation_id().as_str())
+                        .bind::<Text, _>(&lookup_token)
+                        .bind::<BigInt, _>(
+                            epoch_to_i64(prepared.previous_epoch().value())
+                                .map_err(anyhow::Error::new)?,
+                        )
+                        .bind::<BigInt, _>(
+                            epoch_to_i64(prepared.next_epoch().value())
+                                .map_err(anyhow::Error::new)?,
+                        )
+                        .bind::<Text, _>(status_name(prepared.status()))
+                        .bind::<Binary, _>(&encrypted)
+                        .bind::<BigInt, _>(prepared.created_at_ms())
+                        .bind::<BigInt, _>(prepared.updated_at_ms())
+                        .execute(conn)?;
+                        Ok(BeginRevocationOutcome::Begun(prepared))
+                    })
                 })
-            })
-            .map_err(transaction_failure)
+                .map_err(transaction_failure)
+        })
+        .await
     }
 
     async fn get_revocation(
@@ -305,23 +336,30 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
             stage,
             &stage_aad(record.revocation_id().as_str()),
         )?;
+        let status = status_name(record.status());
+        let updated_at_ms = record.updated_at_ms();
+        let revocation_id = record.revocation_id().as_str().to_owned();
         let affected = self
-            .executor
-            .run(|conn| {
-                diesel::sql_query(
-                    "UPDATE member_revocation_log SET status = ?, encrypted_record = ?, \
-                     encrypted_stage = ?, updated_at_ms = ? \
-                     WHERE revocation_id = ? AND status = 'prepared'",
-                )
-                .bind::<Text, _>(status_name(record.status()))
-                .bind::<Binary, _>(encrypted_record)
-                .bind::<Binary, _>(encrypted_stage)
-                .bind::<BigInt, _>(record.updated_at_ms())
-                .bind::<Text, _>(record.revocation_id().as_str())
-                .execute(conn)
-                .map_err(anyhow::Error::from)
+            .run_blocking(move |store| {
+                store
+                    .executor
+                    .run(|conn| {
+                        diesel::sql_query(
+                            "UPDATE member_revocation_log SET status = ?, encrypted_record = ?, \
+                             encrypted_stage = ?, updated_at_ms = ? \
+                             WHERE revocation_id = ? AND status = 'prepared'",
+                        )
+                        .bind::<Text, _>(status)
+                        .bind::<Binary, _>(encrypted_record)
+                        .bind::<Binary, _>(encrypted_stage)
+                        .bind::<BigInt, _>(updated_at_ms)
+                        .bind::<Text, _>(&revocation_id)
+                        .execute(conn)
+                        .map_err(anyhow::Error::from)
+                    })
+                    .map_err(transaction_failure)
             })
-            .map_err(transaction_failure)?;
+            .await?;
         if affected != 1 {
             return Err(KeyEpochError::StateIssue(
                 uc_core::membership::KeyEpochStateIssue::InvalidStage,
@@ -367,117 +405,121 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
     ) -> Result<RevocationRecord, KeyEpochError> {
         let master_key = self.session.get_master_key().map_err(backend)?;
         let revocation_id = revocation_id.as_str().to_owned();
-        self.executor
-            .run(move |conn| {
-                conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
-                    let row = load_revocation_row(conn, &revocation_id)?
-                        .ok_or_else(|| anyhow::anyhow!("revocation not found"))?;
-                    if row.encrypted_stage.is_some() {
-                        return Err(anyhow::anyhow!(
-                            "prepared revocation already has a staged payload"
-                        ));
-                    }
-                    let mut record = decode_record(&master_key, &row)
-                        .map_err(anyhow::Error::new)?;
-                    if record.status() != RevocationStatus::Prepared {
-                        return Err(anyhow::anyhow!("revocation is not prepared"));
-                    }
-                    let (status, verified_material, staged_payload) = match resolution {
-                        PreparedRevocationResolution::TargetAbsent(material) => {
-                            (RevocationStatus::Complete, Some(material), None)
-                        }
-                        PreparedRevocationResolution::TargetPresent {
-                            current_material,
-                            stage,
-                        } => (RevocationStatus::Staged, Some(current_material), Some(stage)),
-                        PreparedRevocationResolution::RecoveryRequired(material) => {
-                            (RevocationStatus::RecoveryRequired, material, None)
-                        }
-                    };
-                    if let Some(verified_material) = verified_material {
-                        if verified_material.state().space_id() != record.space_id()
-                            || verified_material.state().epoch() < record.previous_epoch()
-                        {
+        self.run_blocking(move |store| {
+            store
+                .executor
+                .run(move |conn| {
+                    conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
+                        let row = load_revocation_row(conn, &revocation_id)?
+                            .ok_or_else(|| anyhow::anyhow!("revocation not found"))?;
+                        if row.encrypted_stage.is_some() {
                             return Err(anyhow::anyhow!(
-                                "prepared revocation verification epoch mismatch"
+                                "prepared revocation already has a staged payload"
                             ));
                         }
-                        let persisted_material =
-                            load_space_material_on(conn, &master_key, record.space_id())
-                                .map_err(anyhow::Error::new)?;
-                        if persisted_material.as_ref() != Some(&verified_material) {
-                            return Err(anyhow::anyhow!(
-                                "prepared revocation verification state changed"
-                            ));
+                        let mut record = decode_record(&master_key, &row)
+                            .map_err(anyhow::Error::new)?;
+                        if record.status() != RevocationStatus::Prepared {
+                            return Err(anyhow::anyhow!("revocation is not prepared"));
                         }
-                        if let Some(stage) = staged_payload.as_ref() {
-                            let staged_record = stage.record();
-                            if staged_record.status() != RevocationStatus::Staged
-                                || staged_record.revocation_id() != record.revocation_id()
-                                || staged_record.space_id() != record.space_id()
-                                || staged_record.target_device_id() != record.target_device_id()
-                                || staged_record.retained_recipients()
-                                    != record.retained_recipients()
-                                || staged_record.previous_epoch()
-                                    != verified_material.state().epoch()
-                                || staged_record.next_epoch()
-                                    != verified_material.state().epoch().next().map_err(anyhow::Error::new)?
-                                || stage.next_space_state().space_id() != record.space_id()
-                                || stage.next_space_state().epoch() != staged_record.next_epoch()
+                        let (status, verified_material, staged_payload) = match resolution {
+                            PreparedRevocationResolution::TargetAbsent(material) => {
+                                (RevocationStatus::Complete, Some(material), None)
+                            }
+                            PreparedRevocationResolution::TargetPresent {
+                                current_material,
+                                stage,
+                            } => (RevocationStatus::Staged, Some(current_material), Some(stage)),
+                            PreparedRevocationResolution::RecoveryRequired(material) => {
+                                (RevocationStatus::RecoveryRequired, material, None)
+                            }
+                        };
+                        if let Some(verified_material) = verified_material {
+                            if verified_material.state().space_id() != record.space_id()
+                                || verified_material.state().epoch() < record.previous_epoch()
                             {
                                 return Err(anyhow::anyhow!(
-                                    "prepared revocation restage validation failed"
+                                    "prepared revocation verification epoch mismatch"
                                 ));
                             }
-                            record = staged_record.clone();
+                            let persisted_material =
+                                load_space_material_on(conn, &master_key, record.space_id())
+                                    .map_err(anyhow::Error::new)?;
+                            if persisted_material.as_ref() != Some(&verified_material) {
+                                return Err(anyhow::anyhow!(
+                                    "prepared revocation verification state changed"
+                                ));
+                            }
+                            if let Some(stage) = staged_payload.as_ref() {
+                                let staged_record = stage.record();
+                                if staged_record.status() != RevocationStatus::Staged
+                                    || staged_record.revocation_id() != record.revocation_id()
+                                    || staged_record.space_id() != record.space_id()
+                                    || staged_record.target_device_id() != record.target_device_id()
+                                    || staged_record.retained_recipients()
+                                        != record.retained_recipients()
+                                    || staged_record.previous_epoch()
+                                        != verified_material.state().epoch()
+                                    || staged_record.next_epoch()
+                                        != verified_material.state().epoch().next().map_err(anyhow::Error::new)?
+                                    || stage.next_space_state().space_id() != record.space_id()
+                                    || stage.next_space_state().epoch() != staged_record.next_epoch()
+                                {
+                                    return Err(anyhow::anyhow!(
+                                        "prepared revocation restage validation failed"
+                                    ));
+                                }
+                                record = staged_record.clone();
+                            }
+                        } else if status != RevocationStatus::RecoveryRequired {
+                            return Err(anyhow::anyhow!(
+                                "prepared revocation completion requires verified material"
+                            ));
                         }
-                    } else if status != RevocationStatus::RecoveryRequired {
-                        return Err(anyhow::anyhow!(
-                            "prepared revocation completion requires verified material"
-                        ));
-                    }
-                    if staged_payload.is_none() {
-                        record
-                            .transition_to(status, now_ms)
+                        if staged_payload.is_none() {
+                            record
+                                .transition_to(status, now_ms)
+                                .map_err(anyhow::Error::new)?;
+                        }
+                        let encrypted_record = seal(
+                            &master_key,
+                            &record,
+                            &record_aad(&revocation_id, status_name(status)),
+                        )
+                        .map_err(anyhow::Error::new)?;
+                        let encrypted_stage = staged_payload
+                            .as_ref()
+                            .map(|stage| seal(&master_key, stage, &stage_aad(&revocation_id)))
+                            .transpose()
                             .map_err(anyhow::Error::new)?;
-                    }
-                    let encrypted_record = seal(
-                        &master_key,
-                        &record,
-                        &record_aad(&revocation_id, status_name(status)),
-                    )
-                    .map_err(anyhow::Error::new)?;
-                    let encrypted_stage = staged_payload
-                        .as_ref()
-                        .map(|stage| seal(&master_key, stage, &stage_aad(&revocation_id)))
-                        .transpose()
-                        .map_err(anyhow::Error::new)?;
-                    let previous_epoch = epoch_to_i64(record.previous_epoch().value())
-                        .map_err(anyhow::Error::new)?;
-                    let next_epoch = epoch_to_i64(record.next_epoch().value())
-                        .map_err(anyhow::Error::new)?;
-                    let affected = diesel::sql_query(
-                        "UPDATE member_revocation_log SET previous_epoch = ?, next_epoch = ?, \
-                         status = ?, encrypted_record = ?, encrypted_stage = ?, updated_at_ms = ? \
-                         WHERE revocation_id = ? AND status = 'prepared' AND encrypted_stage IS NULL",
-                    )
-                    .bind::<BigInt, _>(previous_epoch)
-                    .bind::<BigInt, _>(next_epoch)
-                    .bind::<Text, _>(status_name(status))
-                    .bind::<Binary, _>(encrypted_record)
-                    .bind::<Nullable<Binary>, _>(encrypted_stage)
-                    .bind::<BigInt, _>(record.updated_at_ms())
-                    .bind::<Text, _>(&revocation_id)
-                    .execute(conn)?;
-                    if affected != 1 {
-                        return Err(anyhow::anyhow!(
-                            "prepared revocation resolution lost atomic race"
-                        ));
-                    }
-                    Ok(record)
+                        let previous_epoch = epoch_to_i64(record.previous_epoch().value())
+                            .map_err(anyhow::Error::new)?;
+                        let next_epoch = epoch_to_i64(record.next_epoch().value())
+                            .map_err(anyhow::Error::new)?;
+                        let affected = diesel::sql_query(
+                            "UPDATE member_revocation_log SET previous_epoch = ?, next_epoch = ?, \
+                             status = ?, encrypted_record = ?, encrypted_stage = ?, updated_at_ms = ? \
+                             WHERE revocation_id = ? AND status = 'prepared' AND encrypted_stage IS NULL",
+                        )
+                        .bind::<BigInt, _>(previous_epoch)
+                        .bind::<BigInt, _>(next_epoch)
+                        .bind::<Text, _>(status_name(status))
+                        .bind::<Binary, _>(encrypted_record)
+                        .bind::<Nullable<Binary>, _>(encrypted_stage)
+                        .bind::<BigInt, _>(record.updated_at_ms())
+                        .bind::<Text, _>(&revocation_id)
+                        .execute(conn)?;
+                        if affected != 1 {
+                            return Err(anyhow::anyhow!(
+                                "prepared revocation resolution lost atomic race"
+                            ));
+                        }
+                        Ok(record)
+                    })
                 })
-            })
-            .map_err(transaction_failure)
+                .map_err(transaction_failure)
+        })
+        .await
     }
 
     async fn commit_revocation_recovery(
@@ -588,69 +630,73 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
     ) -> Result<RevocationRecord, KeyEpochError> {
         let master_key = self.session.get_master_key().map_err(backend)?;
         let revocation_id = revocation_id.as_str().to_owned();
-        self.executor
-            .run(move |conn| {
-                conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
-                    let row = load_revocation_row(conn, &revocation_id)?
-                        .ok_or_else(|| anyhow::anyhow!("revocation not found"))?;
-                    let encrypted_stage = row
-                        .encrypted_stage
-                        .as_ref()
-                        .ok_or_else(|| anyhow::anyhow!("revocation has no staged payload"))?;
-                    let stage: RevocationStage =
-                        open(&master_key, encrypted_stage, &stage_aad(&revocation_id))
+        self.run_blocking(move |store| {
+            store
+                .executor
+                .run(move |conn| {
+                    conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
+                        let row = load_revocation_row(conn, &revocation_id)?
+                            .ok_or_else(|| anyhow::anyhow!("revocation not found"))?;
+                        let encrypted_stage = row
+                            .encrypted_stage
+                            .as_ref()
+                            .ok_or_else(|| anyhow::anyhow!("revocation has no staged payload"))?;
+                        let stage: RevocationStage =
+                            open(&master_key, encrypted_stage, &stage_aad(&revocation_id))
+                                .map_err(anyhow::Error::new)?;
+                        let mut record =
+                            decode_record(&master_key, &row).map_err(anyhow::Error::new)?;
+                        record
+                            .transition_to(RevocationStatus::Activated, now_ms)
                             .map_err(anyhow::Error::new)?;
-                    let mut record =
-                        decode_record(&master_key, &row).map_err(anyhow::Error::new)?;
-                    record
-                        .transition_to(RevocationStatus::Activated, now_ms)
+                        let mut stage = stage;
+                        stage
+                            .transition_to(RevocationStatus::Activated, now_ms)
+                            .map_err(anyhow::Error::new)?;
+                        let current_material =
+                            load_space_material_on(conn, &master_key, stage.record().space_id())
+                                .map_err(anyhow::Error::new)?
+                                .ok_or_else(|| anyhow::anyhow!("space key material not found"))?;
+                        let material = SpaceKeyMaterial::new(
+                            stage.next_space_state().clone(),
+                            stage.group_state().to_vec(),
+                            stage.key_catalog().to_vec(),
+                            now_ms,
+                        )
+                        .with_pending_group_updates_from_excluding(
+                            &current_material,
+                            stage.record().target_device_id(),
+                        );
+                        save_space_material_on(conn, &master_key, &material)
+                            .map_err(anyhow::Error::new)?;
+                        let encrypted_record = seal(
+                            &master_key,
+                            &record,
+                            &record_aad(&revocation_id, status_name(record.status())),
+                        )
                         .map_err(anyhow::Error::new)?;
-                    let mut stage = stage;
-                    stage
-                        .transition_to(RevocationStatus::Activated, now_ms)
-                        .map_err(anyhow::Error::new)?;
-                    let current_material =
-                        load_space_material_on(conn, &master_key, stage.record().space_id())
-                            .map_err(anyhow::Error::new)?
-                            .ok_or_else(|| anyhow::anyhow!("space key material not found"))?;
-                    let material = SpaceKeyMaterial::new(
-                        stage.next_space_state().clone(),
-                        stage.group_state().to_vec(),
-                        stage.key_catalog().to_vec(),
-                        now_ms,
-                    )
-                    .with_pending_group_updates_from_excluding(
-                        &current_material,
-                        stage.record().target_device_id(),
-                    );
-                    save_space_material_on(conn, &master_key, &material)
-                        .map_err(anyhow::Error::new)?;
-                    let encrypted_record = seal(
-                        &master_key,
-                        &record,
-                        &record_aad(&revocation_id, status_name(record.status())),
-                    )
-                    .map_err(anyhow::Error::new)?;
-                    let encrypted_stage = seal(&master_key, &stage, &stage_aad(&revocation_id))
-                        .map_err(anyhow::Error::new)?;
-                    let affected = diesel::sql_query(
-                        "UPDATE member_revocation_log SET status = ?, encrypted_record = ?, \
+                        let encrypted_stage = seal(&master_key, &stage, &stage_aad(&revocation_id))
+                            .map_err(anyhow::Error::new)?;
+                        let affected = diesel::sql_query(
+                            "UPDATE member_revocation_log SET status = ?, encrypted_record = ?, \
                          encrypted_stage = ?, updated_at_ms = ? \
                          WHERE revocation_id = ? AND status = 'staged'",
-                    )
-                    .bind::<Text, _>(status_name(record.status()))
-                    .bind::<Binary, _>(encrypted_record)
-                    .bind::<Binary, _>(encrypted_stage)
-                    .bind::<BigInt, _>(record.updated_at_ms())
-                    .bind::<Text, _>(&revocation_id)
-                    .execute(conn)?;
-                    if affected != 1 {
-                        return Err(anyhow::anyhow!("revocation is not staged"));
-                    }
-                    Ok(record)
+                        )
+                        .bind::<Text, _>(status_name(record.status()))
+                        .bind::<Binary, _>(encrypted_record)
+                        .bind::<Binary, _>(encrypted_stage)
+                        .bind::<BigInt, _>(record.updated_at_ms())
+                        .bind::<Text, _>(&revocation_id)
+                        .execute(conn)?;
+                        if affected != 1 {
+                            return Err(anyhow::anyhow!("revocation is not staged"));
+                        }
+                        Ok(record)
+                    })
                 })
-            })
-            .map_err(transaction_failure)
+                .map_err(transaction_failure)
+        })
+        .await
     }
 
     async fn start_distribution(
@@ -660,75 +706,79 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
     ) -> Result<RevocationRecord, KeyEpochError> {
         let master_key = self.session.get_master_key().map_err(backend)?;
         let revocation_id = revocation_id.as_str().to_owned();
-        self.executor
-            .run(move |conn| {
-                conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
-                    let row = load_revocation_row(conn, &revocation_id)?
-                        .ok_or_else(|| anyhow::anyhow!("revocation not found"))?;
-                    let mut record =
-                        decode_record(&master_key, &row).map_err(anyhow::Error::new)?;
-                    if matches!(
-                        record.status(),
-                        RevocationStatus::Distributing | RevocationStatus::Complete
-                    ) {
-                        return Ok(record);
-                    }
-                    if record.status() != RevocationStatus::Activated {
-                        return Err(anyhow::anyhow!("revocation is not activated"));
-                    }
-                    let encrypted_stage = row
-                        .encrypted_stage
-                        .as_ref()
-                        .ok_or_else(|| anyhow::anyhow!("revocation has no staged payload"))?;
-                    let mut stage: RevocationStage =
-                        open(&master_key, encrypted_stage, &stage_aad(&revocation_id))
-                            .map_err(anyhow::Error::new)?;
-                    record
-                        .transition_to(RevocationStatus::Distributing, now_ms)
-                        .map_err(anyhow::Error::new)?;
-                    stage
-                        .transition_to(RevocationStatus::Distributing, now_ms)
-                        .map_err(anyhow::Error::new)?;
-                    if stage.all_recipients_confirmed() {
+        self.run_blocking(move |store| {
+            store
+                .executor
+                .run(move |conn| {
+                    conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
+                        let row = load_revocation_row(conn, &revocation_id)?
+                            .ok_or_else(|| anyhow::anyhow!("revocation not found"))?;
+                        let mut record =
+                            decode_record(&master_key, &row).map_err(anyhow::Error::new)?;
+                        if matches!(
+                            record.status(),
+                            RevocationStatus::Distributing | RevocationStatus::Complete
+                        ) {
+                            return Ok(record);
+                        }
+                        if record.status() != RevocationStatus::Activated {
+                            return Err(anyhow::anyhow!("revocation is not activated"));
+                        }
+                        let encrypted_stage = row
+                            .encrypted_stage
+                            .as_ref()
+                            .ok_or_else(|| anyhow::anyhow!("revocation has no staged payload"))?;
+                        let mut stage: RevocationStage =
+                            open(&master_key, encrypted_stage, &stage_aad(&revocation_id))
+                                .map_err(anyhow::Error::new)?;
                         record
-                            .transition_to(RevocationStatus::Complete, now_ms)
+                            .transition_to(RevocationStatus::Distributing, now_ms)
                             .map_err(anyhow::Error::new)?;
                         stage
-                            .transition_to(RevocationStatus::Complete, now_ms)
+                            .transition_to(RevocationStatus::Distributing, now_ms)
                             .map_err(anyhow::Error::new)?;
-                    }
-                    let encrypted_record = seal(
-                        &master_key,
-                        &record,
-                        &record_aad(&revocation_id, status_name(record.status())),
-                    )
-                    .map_err(anyhow::Error::new)?;
-                    let encrypted_stage = if record.status() == RevocationStatus::Complete {
-                        None
-                    } else {
-                        Some(
-                            seal(&master_key, &stage, &stage_aad(&revocation_id))
-                                .map_err(anyhow::Error::new)?,
+                        if stage.all_recipients_confirmed() {
+                            record
+                                .transition_to(RevocationStatus::Complete, now_ms)
+                                .map_err(anyhow::Error::new)?;
+                            stage
+                                .transition_to(RevocationStatus::Complete, now_ms)
+                                .map_err(anyhow::Error::new)?;
+                        }
+                        let encrypted_record = seal(
+                            &master_key,
+                            &record,
+                            &record_aad(&revocation_id, status_name(record.status())),
                         )
-                    };
-                    let affected = diesel::sql_query(
-                        "UPDATE member_revocation_log SET status = ?, encrypted_record = ?, \
+                        .map_err(anyhow::Error::new)?;
+                        let encrypted_stage = if record.status() == RevocationStatus::Complete {
+                            None
+                        } else {
+                            Some(
+                                seal(&master_key, &stage, &stage_aad(&revocation_id))
+                                    .map_err(anyhow::Error::new)?,
+                            )
+                        };
+                        let affected = diesel::sql_query(
+                            "UPDATE member_revocation_log SET status = ?, encrypted_record = ?, \
                          encrypted_stage = ?, updated_at_ms = ? \
                          WHERE revocation_id = ? AND status = 'activated'",
-                    )
-                    .bind::<Text, _>(status_name(record.status()))
-                    .bind::<Binary, _>(encrypted_record)
-                    .bind::<Nullable<Binary>, _>(encrypted_stage)
-                    .bind::<BigInt, _>(record.updated_at_ms())
-                    .bind::<Text, _>(&revocation_id)
-                    .execute(conn)?;
-                    if affected != 1 {
-                        return Err(anyhow::anyhow!("revocation distribution did not start"));
-                    }
-                    Ok(record)
+                        )
+                        .bind::<Text, _>(status_name(record.status()))
+                        .bind::<Binary, _>(encrypted_record)
+                        .bind::<Nullable<Binary>, _>(encrypted_stage)
+                        .bind::<BigInt, _>(record.updated_at_ms())
+                        .bind::<Text, _>(&revocation_id)
+                        .execute(conn)?;
+                        if affected != 1 {
+                            return Err(anyhow::anyhow!("revocation distribution did not start"));
+                        }
+                        Ok(record)
+                    })
                 })
-            })
-            .map_err(transaction_failure)
+                .map_err(transaction_failure)
+        })
+        .await
     }
 
     async fn acknowledge_recipient(
@@ -740,69 +790,75 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
         let master_key = self.session.get_master_key().map_err(backend)?;
         let revocation_id = revocation_id.as_str().to_owned();
         let recipient = recipient.clone();
-        self.executor
-            .run(move |conn| {
-                conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
-                    let row = load_revocation_row(conn, &revocation_id)?
-                        .ok_or_else(|| anyhow::anyhow!("revocation not found"))?;
-                    let mut record =
-                        decode_record(&master_key, &row).map_err(anyhow::Error::new)?;
-                    if record.status() == RevocationStatus::Complete {
-                        return Ok(record);
-                    }
-                    if record.status() != RevocationStatus::Distributing {
-                        return Err(anyhow::anyhow!("revocation is not distributing"));
-                    }
-                    let encrypted_stage = row
-                        .encrypted_stage
-                        .as_ref()
-                        .ok_or_else(|| anyhow::anyhow!("revocation has no staged payload"))?;
-                    let mut stage: RevocationStage =
-                        open(&master_key, encrypted_stage, &stage_aad(&revocation_id))
-                            .map_err(anyhow::Error::new)?;
-                    stage
-                        .acknowledge_recipient(&recipient, now_ms)
-                        .map_err(anyhow::Error::new)?;
-                    if stage.all_recipients_confirmed() {
-                        record
-                            .transition_to(RevocationStatus::Complete, now_ms)
-                            .map_err(anyhow::Error::new)?;
+        self.run_blocking(move |store| {
+            store
+                .executor
+                .run(move |conn| {
+                    conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
+                        let row = load_revocation_row(conn, &revocation_id)?
+                            .ok_or_else(|| anyhow::anyhow!("revocation not found"))?;
+                        let mut record =
+                            decode_record(&master_key, &row).map_err(anyhow::Error::new)?;
+                        if record.status() == RevocationStatus::Complete {
+                            return Ok(record);
+                        }
+                        if record.status() != RevocationStatus::Distributing {
+                            return Err(anyhow::anyhow!("revocation is not distributing"));
+                        }
+                        let encrypted_stage = row
+                            .encrypted_stage
+                            .as_ref()
+                            .ok_or_else(|| anyhow::anyhow!("revocation has no staged payload"))?;
+                        let mut stage: RevocationStage =
+                            open(&master_key, encrypted_stage, &stage_aad(&revocation_id))
+                                .map_err(anyhow::Error::new)?;
                         stage
-                            .transition_to(RevocationStatus::Complete, now_ms)
+                            .acknowledge_recipient(&recipient, now_ms)
                             .map_err(anyhow::Error::new)?;
-                    }
-                    let encrypted_record = seal(
-                        &master_key,
-                        &record,
-                        &record_aad(&revocation_id, status_name(record.status())),
-                    )
-                    .map_err(anyhow::Error::new)?;
-                    let encrypted_stage = if record.status() == RevocationStatus::Complete {
-                        None
-                    } else {
-                        Some(
-                            seal(&master_key, &stage, &stage_aad(&revocation_id))
-                                .map_err(anyhow::Error::new)?,
+                        if stage.all_recipients_confirmed() {
+                            record
+                                .transition_to(RevocationStatus::Complete, now_ms)
+                                .map_err(anyhow::Error::new)?;
+                            stage
+                                .transition_to(RevocationStatus::Complete, now_ms)
+                                .map_err(anyhow::Error::new)?;
+                        }
+                        let encrypted_record = seal(
+                            &master_key,
+                            &record,
+                            &record_aad(&revocation_id, status_name(record.status())),
                         )
-                    };
-                    let affected = diesel::sql_query(
-                        "UPDATE member_revocation_log SET status = ?, encrypted_record = ?, \
+                        .map_err(anyhow::Error::new)?;
+                        let encrypted_stage = if record.status() == RevocationStatus::Complete {
+                            None
+                        } else {
+                            Some(
+                                seal(&master_key, &stage, &stage_aad(&revocation_id))
+                                    .map_err(anyhow::Error::new)?,
+                            )
+                        };
+                        let affected = diesel::sql_query(
+                            "UPDATE member_revocation_log SET status = ?, encrypted_record = ?, \
                          encrypted_stage = ?, updated_at_ms = ? \
                          WHERE revocation_id = ? AND status = 'distributing'",
-                    )
-                    .bind::<Text, _>(status_name(record.status()))
-                    .bind::<Binary, _>(encrypted_record)
-                    .bind::<Nullable<Binary>, _>(encrypted_stage)
-                    .bind::<BigInt, _>(record.updated_at_ms())
-                    .bind::<Text, _>(&revocation_id)
-                    .execute(conn)?;
-                    if affected != 1 {
-                        return Err(anyhow::anyhow!("revocation acknowledgement was not saved"));
-                    }
-                    Ok(record)
+                        )
+                        .bind::<Text, _>(status_name(record.status()))
+                        .bind::<Binary, _>(encrypted_record)
+                        .bind::<Nullable<Binary>, _>(encrypted_stage)
+                        .bind::<BigInt, _>(record.updated_at_ms())
+                        .bind::<Text, _>(&revocation_id)
+                        .execute(conn)?;
+                        if affected != 1 {
+                            return Err(anyhow::anyhow!(
+                                "revocation acknowledgement was not saved"
+                            ));
+                        }
+                        Ok(record)
+                    })
                 })
-            })
-            .map_err(transaction_failure)
+                .map_err(transaction_failure)
+        })
+        .await
     }
 
     async fn settle_obsolete_revocation_recipients(
@@ -814,69 +870,73 @@ impl<E: DbExecutor> RevocationRepositoryPort for DieselSpaceSecurityStore<E> {
         let master_key = self.session.get_master_key().map_err(backend)?;
         let revocation_id = revocation_id.as_str().to_owned();
         let retained_recipients = retained_recipients.to_vec();
-        self.executor
-            .run(move |conn| {
-                conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
-                    let Some(row) = load_revocation_row(conn, &revocation_id)? else {
-                        return Ok(0);
-                    };
-                    let mut record =
-                        decode_record(&master_key, &row).map_err(anyhow::Error::new)?;
-                    // 只有分发阶段持有待投递的 outbox；其余阶段没有可结清的投递。
-                    if record.status() != RevocationStatus::Distributing {
-                        return Ok(0);
-                    }
-                    let encrypted_stage = row
-                        .encrypted_stage
-                        .as_ref()
-                        .ok_or_else(|| anyhow::anyhow!("revocation has no staged payload"))?;
-                    let mut stage: RevocationStage =
-                        open(&master_key, encrypted_stage, &stage_aad(&revocation_id))
-                            .map_err(anyhow::Error::new)?;
-                    let settled = stage.settle_obsolete_recipients(&retained_recipients);
-                    if settled == 0 {
-                        return Ok(0);
-                    }
-                    if stage.all_recipients_confirmed() {
-                        record
-                            .transition_to(RevocationStatus::Complete, now_ms)
-                            .map_err(anyhow::Error::new)?;
-                        stage
-                            .transition_to(RevocationStatus::Complete, now_ms)
-                            .map_err(anyhow::Error::new)?;
-                    }
-                    let encrypted_record = seal(
-                        &master_key,
-                        &record,
-                        &record_aad(&revocation_id, status_name(record.status())),
-                    )
-                    .map_err(anyhow::Error::new)?;
-                    let encrypted_stage = if record.status() == RevocationStatus::Complete {
-                        None
-                    } else {
-                        Some(
-                            seal(&master_key, &stage, &stage_aad(&revocation_id))
-                                .map_err(anyhow::Error::new)?,
+        self.run_blocking(move |store| {
+            store
+                .executor
+                .run(move |conn| {
+                    conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
+                        let Some(row) = load_revocation_row(conn, &revocation_id)? else {
+                            return Ok(0);
+                        };
+                        let mut record =
+                            decode_record(&master_key, &row).map_err(anyhow::Error::new)?;
+                        // 只有分发阶段持有待投递的 outbox；其余阶段没有可结清的投递。
+                        if record.status() != RevocationStatus::Distributing {
+                            return Ok(0);
+                        }
+                        let encrypted_stage = row
+                            .encrypted_stage
+                            .as_ref()
+                            .ok_or_else(|| anyhow::anyhow!("revocation has no staged payload"))?;
+                        let mut stage: RevocationStage =
+                            open(&master_key, encrypted_stage, &stage_aad(&revocation_id))
+                                .map_err(anyhow::Error::new)?;
+                        let settled = stage.settle_obsolete_recipients(&retained_recipients);
+                        if settled == 0 {
+                            return Ok(0);
+                        }
+                        if stage.all_recipients_confirmed() {
+                            record
+                                .transition_to(RevocationStatus::Complete, now_ms)
+                                .map_err(anyhow::Error::new)?;
+                            stage
+                                .transition_to(RevocationStatus::Complete, now_ms)
+                                .map_err(anyhow::Error::new)?;
+                        }
+                        let encrypted_record = seal(
+                            &master_key,
+                            &record,
+                            &record_aad(&revocation_id, status_name(record.status())),
                         )
-                    };
-                    let affected = diesel::sql_query(
-                        "UPDATE member_revocation_log SET status = ?, encrypted_record = ?, \
+                        .map_err(anyhow::Error::new)?;
+                        let encrypted_stage = if record.status() == RevocationStatus::Complete {
+                            None
+                        } else {
+                            Some(
+                                seal(&master_key, &stage, &stage_aad(&revocation_id))
+                                    .map_err(anyhow::Error::new)?,
+                            )
+                        };
+                        let affected = diesel::sql_query(
+                            "UPDATE member_revocation_log SET status = ?, encrypted_record = ?, \
                          encrypted_stage = ?, updated_at_ms = ? \
                          WHERE revocation_id = ? AND status = 'distributing'",
-                    )
-                    .bind::<Text, _>(status_name(record.status()))
-                    .bind::<Binary, _>(encrypted_record)
-                    .bind::<Nullable<Binary>, _>(encrypted_stage)
-                    .bind::<BigInt, _>(record.updated_at_ms())
-                    .bind::<Text, _>(&revocation_id)
-                    .execute(conn)?;
-                    if affected != 1 {
-                        return Err(anyhow::anyhow!("revocation settlement was not saved"));
-                    }
-                    Ok(settled)
+                        )
+                        .bind::<Text, _>(status_name(record.status()))
+                        .bind::<Binary, _>(encrypted_record)
+                        .bind::<Nullable<Binary>, _>(encrypted_stage)
+                        .bind::<BigInt, _>(record.updated_at_ms())
+                        .bind::<Text, _>(&revocation_id)
+                        .execute(conn)?;
+                        if affected != 1 {
+                            return Err(anyhow::anyhow!("revocation settlement was not saved"));
+                        }
+                        Ok(settled)
+                    })
                 })
-            })
-            .map_err(transaction_failure)
+                .map_err(transaction_failure)
+        })
+        .await
     }
 }
 

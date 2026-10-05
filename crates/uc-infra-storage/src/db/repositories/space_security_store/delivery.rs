@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
-    GroupEpoch, GroupUpdateDeliveryStatus, GroupUpdateDispatchError, KeyEpochError,
-    PendingGroupUpdate, RevocationStage, RevocationStatus,
+    GroupEpoch, GroupUpdateDeliveryStatus, KeyEpochError, PendingGroupUpdate, RevocationStage,
+    RevocationStatus,
 };
 
 use super::encrypted_payload::{open, seal, space_lookup_token};
@@ -339,7 +339,7 @@ impl<E: DbExecutor> DieselSpaceSecurityStore<E> {
         conn: &mut SqliteConnection,
         key: &MasterKey,
         space_id: &SpaceId,
-        failures: &[(String, GroupUpdateDispatchError)],
+        failures: &[(String, bool)],
         now_ms: i64,
     ) -> Result<usize, KeyEpochError> {
         conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
@@ -349,12 +349,12 @@ impl<E: DbExecutor> DieselSpaceSecurityStore<E> {
                 if state.space_id != *space_id {
                     continue;
                 }
-                let Some((id, failure)) = failures.iter().find(|(id, _)| *id == state.update_id)
+                let Some((id, rejected)) = failures.iter().find(|(id, _)| *id == state.update_id)
                 else {
                     continue;
                 };
                 state.attempts = state.attempts.saturating_add(1);
-                state.rejected = matches!(failure, GroupUpdateDispatchError::Rejected);
+                state.rejected = *rejected;
                 let delay = 30_000_i64
                     .saturating_mul(1_i64 << state.attempts.saturating_sub(1).min(7))
                     .min(3_600_000);

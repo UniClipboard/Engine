@@ -299,6 +299,52 @@ pub fn observe_local_result<T, E>(
     }
 }
 
+/// 同步本地工作移到阻塞线程执行时携带当前观测上下文，使其中的嵌套步骤与在原任务中执行时记录一致。
+pub struct LocalWorkContext {
+    span: tracing::Span,
+    continuation: ObservationContext,
+    maintenance: Option<MaintenanceContext>,
+    pairing: Option<PairingWork>,
+    work_active: bool,
+}
+
+impl LocalWorkContext {
+    pub fn capture() -> Self {
+        Self {
+            span: tracing::Span::current(),
+            continuation: ObservationContext::capture(),
+            maintenance: MaintenanceContext::capture(),
+            pairing: PAIRING_WORK.try_with(|value| *value).ok(),
+            work_active: WORK_ACTIVE.try_with(|_| ()).is_ok(),
+        }
+    }
+
+    pub fn run<T>(self, work: impl FnOnce() -> T) -> T {
+        let Self {
+            span,
+            continuation,
+            maintenance,
+            pairing,
+            work_active,
+        } = self;
+        span.in_scope(|| {
+            continuation.sync_scope(|| {
+                MaintenanceContext::sync_scope(maintenance, || {
+                    let work = || match pairing {
+                        Some(pairing) => PAIRING_WORK.sync_scope(pairing, work),
+                        None => work(),
+                    };
+                    if work_active {
+                        WORK_ACTIVE.sync_scope((), work)
+                    } else {
+                        work()
+                    }
+                })
+            })
+        })
+    }
+}
+
 pub fn observe_local_sync_result<T, E>(
     step: LocalWorkStep,
     work: impl FnOnce() -> Result<T, E>,
