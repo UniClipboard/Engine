@@ -23,6 +23,7 @@ const ENGINE_GIT_URL = 'https://github.com/UniClipboard/Engine.git'
 const RELEASE_TAG = /^v1\.\d+\.\d+(-(alpha|beta|rc)\.\d+)?$/
 const ENGINE_PIN = /^uc-engine\s*=\s*\{[^}]*git\s*=\s*"([^"]+)"[^}]*rev\s*=\s*"([0-9a-f]{40})"/m
 const DIMENSIONS = ['d1', 'd2', 'd3', 'd4']
+const FETCH_ATTEMPTS = 3
 
 function gh(args) {
   return execFileSync('gh', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 << 20 })
@@ -132,14 +133,40 @@ function expectationsFor(anchors, previous) {
   return { schema_version: 1, cells }
 }
 
+function hasCommit(rev) {
+  try {
+    execFileSync('git', ['-C', REPOSITORY_ROOT, 'cat-file', '-e', `${rev}^{commit}`], { stdio: 'ignore' })
+    return true
+  } catch {
+    return false
+  }
+}
+
+// 本地缺少的 rev 按 SHA 从 origin 补取：Desktop 可能锁定只被 PR 引用（refs/pull/*）可达的提交，完整克隆只含分支与
+// tag，取不到它们。网络抖动只让该次尝试失败，退避后重试；与 build-upgrade-anchors.sh 的补取一致。
+function fetchRevision(rev) {
+  for (let attempt = 1; attempt <= FETCH_ATTEMPTS; attempt++) {
+    try {
+      execFileSync('git', ['-C', REPOSITORY_ROOT, 'fetch', '--no-tags', '--quiet', 'origin', rev], {
+        stdio: ['ignore', 'ignore', 'inherit'],
+      })
+      return hasCommit(rev)
+    } catch {
+      if (attempt < FETCH_ATTEMPTS) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, attempt * 5000)
+    }
+  }
+  return false
+}
+
 function verifyRevisions(anchors) {
   const missing = []
   for (const anchor of anchors.anchors) {
-    try {
-      execFileSync('git', ['-C', REPOSITORY_ROOT, 'cat-file', '-e', `${anchor.engine_rev}^{commit}`], { stdio: 'ignore' })
-    } catch {
-      missing.push(`${anchor.id} ${anchor.engine_rev}`)
+    if (hasCommit(anchor.engine_rev)) continue
+    if (fetchRevision(anchor.engine_rev)) {
+      process.stderr.write(`${anchor.id} ${anchor.engine_rev}: fetched by SHA from origin\n`)
+      continue
     }
+    missing.push(`${anchor.id} ${anchor.engine_rev}`)
   }
   return missing
 }
@@ -158,7 +185,9 @@ function main() {
   const expectations = expectationsFor(anchors, readJson(EXPECTATIONS_PATH))
   const missing = verifyRevisions(anchors)
   if (missing.length) {
-    process.stderr.write(`Engine revisions not present locally (fetch them first): ${missing.join(', ')}\n`)
+    process.stderr.write(
+      `Engine revisions missing locally and not fetchable from origin after ${FETCH_ATTEMPTS} attempts: ${missing.join(', ')}\n`,
+    )
     process.exitCode = 1
   }
   const counts = Object.fromEntries(
