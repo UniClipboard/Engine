@@ -78,6 +78,9 @@ export MBX_TARGET_VIEWS=0 MBX_TARGET_SEED=0
 export MBX_LEARNED_INCREMENTAL=0
 export MBX_GC_MAX_SIZE="${MBX_GC_MAX_SIZE:-20GiB}"
 export MBX_DISPLAY="${MBX_DISPLAY:-plain}"
+# 可选本地入口限制为四个编译任务；普通 Cargo 仍采用仓库的保守默认。
+# 保留调用方的环境值，Cargo 命令行 -j 仍具有最高优先级；实测与资源边界见本地构建指南。
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
 # cargo -> mbx 垫片放在 PATH 最前，mbx 再调用其后的 cargo。
 export PATH="$MBX_ROOT/shim:$PATH"
 
