@@ -648,7 +648,7 @@ impl CurrentJoinAdmissionStatePort for RecordingJoinerStartState {
         let Some(admission) = stored.as_ref() else {
             return Ok(None);
         };
-        if admission.join_id() != join_id {
+        if admission.join_id() != Some(join_id) {
             return Ok(None);
         }
         let persisted = admission

@@ -267,7 +267,7 @@ async fn rejected_join_remains_queryable_after_it_becomes_terminal() {
     .unwrap()
     .into_pending_admissions();
     let (joiner, token) = pending.into_iter().next().unwrap().into_parts();
-    let join_id = *joiner.join_id().as_bytes();
+    let join_id = *joiner.join_id().unwrap().as_bytes();
     let rejected = joiner
         .reject_before_authentication(SpaceAdmissionRejectionReason::InvitationUnavailable)
         .unwrap();
@@ -321,7 +321,7 @@ fn unrecoverable_activation_remains_queryable_as_a_failed_join_after_restart() {
                     .unwrap()
                     .into_pending_admissions();
                     let (joiner, token) = pending.into_iter().next().unwrap().into_parts();
-                    let join_id = *joiner.join_id().as_bytes();
+                    let join_id = *joiner.join_id().unwrap().as_bytes();
                     let failed = joiner
                         .reject_activation(SpaceAdmissionRejectionReason::HistoryConflict)
                         .unwrap();
@@ -519,7 +519,7 @@ async fn recovery_commit_preserves_repository_read_failure_classification() {
 #[tokio::test]
 async fn recovery_required_record_reports_captured_join_id_after_restart() {
     // 覆盖 `project_current_join()` 和 cancellation 查找两个真正会在
-    // `RecoveryRequired` 终态上调用 `recovery_join_id()` 的调用点：构造一条真实
+    // `RecoveryRequired` 终态上调用 `join_id()` 的调用点：构造一条真实
     // 经过 SQLite 落盘再重新打开的续传恢复记录，证明两条路径都不会 panic，
     // 并且都能用转换时捕获的 join_id 正确关联到这次加入会话。
     let fixture = Fixture::new();
@@ -533,7 +533,7 @@ async fn recovery_required_record_reports_captured_join_id_after_restart() {
     .unwrap()
     .into_pending_admissions();
     let (aggregate, token) = pending.pop().unwrap().into_parts();
-    let join_id = aggregate.join_id();
+    let join_id = aggregate.join_id().unwrap();
     let transition = aggregate
         .require_recovery(AdmissionRecoveryCategory::MissingKey)
         .unwrap();
@@ -560,7 +560,7 @@ async fn recovery_required_record_reports_captured_join_id_after_restart() {
         .await
         .unwrap()
         .expect("cancellation lookup finds the recovery-required join by its captured join_id");
-    assert_eq!(loaded.into_parts().0.recovery_join_id(), Some(join_id));
+    assert_eq!(loaded.into_parts().0.join_id(), Some(join_id));
 }
 
 #[tokio::test]

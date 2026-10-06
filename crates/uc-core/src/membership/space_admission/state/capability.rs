@@ -122,18 +122,6 @@ impl JoinerAdmission {
         }
     }
 
-    /// 仅当处于 `RecoveryRequired` 终态且转换时成功捕获了 join_id 才返回；
-    /// 旧格式只保存了类别的记录重新打开后为 `None`。不要在这个终态下改用通用
-    /// `join_id()`——那个入口假定角色始终带有可展示的 join_id，对这一类历史记录会拒绝。
-    pub const fn recovery_join_id(&self) -> Option<JoinId> {
-        match &self.record.state {
-            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::RecoveryRequired(
-                state,
-            )) => state.join_id,
-            _ => None,
-        }
-    }
-
     /// 仅供测试模拟本次改动之前写入的历史记录（只有类别，没有 join_id）。
     #[cfg(test)]
     pub(crate) fn forget_recovery_join_id_for_test(mut self) -> Self {
@@ -203,59 +191,67 @@ impl JoinerAdmission {
         self.record.admission_id()
     }
 
-    /// 返回本机加入动作的稳定标识，不暴露内部阶段表示。
-    pub fn join_id(&self) -> JoinId {
+    /// 返回本机加入动作的稳定标识，不暴露内部阶段表示。`RecoveryRequired` 终态只在
+    /// 转换时成功捕获了 join_id 才返回 `Some`；旧格式只保存了类别的历史记录没有
+    /// 可还原的 join_id，返回 `None` 而不是编造一个值或 panic。
+    pub fn join_id(&self) -> Option<JoinId> {
         match &self.record.state {
             SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::ResolvingInvitation(
                 state,
-            )) => state.join_id,
+            )) => Some(state.join_id),
             SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::ResolvedInvitation(
                 state,
-            )) => state.join_id,
+            )) => Some(state.join_id),
             SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Initiated(state)) => {
-                state.join_id
+                Some(state.join_id)
             }
             SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Candidate(state)) => {
-                state.join_id
+                Some(state.join_id)
             }
             SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Prepared(state)) => {
-                state.join_id
+                Some(state.join_id)
             }
             SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Committed(state)) => {
-                state.join_id
+                Some(state.join_id)
             }
             SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Applied(state)) => {
-                state.join_id
+                Some(state.join_id)
             }
             SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Activating(state)) => {
-                state.join_id
+                Some(state.join_id)
             }
             SpaceAdmissionRecordState::Joiner(SpaceAdmissionJoinerState::Cancelling(state)) => {
-                state.join_id
+                Some(state.join_id)
             }
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Active(
                 SpaceAdmissionActiveState::PendingSettlement(state),
-            )) => state.join_id,
+            )) => Some(state.join_id),
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Active(
                 SpaceAdmissionActiveState::Settled(state),
-            )) => state.join_id,
+            )) => Some(state.join_id),
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Superseded(state)) => {
-                match state {
+                Some(match state {
                     SpaceAdmissionSupersededState::Initiated { join_id }
                     | SpaceAdmissionSupersededState::Authenticated { join_id, .. } => *join_id,
                     SpaceAdmissionSupersededState::Candidate(state) => state.join_id,
-                }
+                })
             }
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
                 SpaceAdmissionRejectedState::LocalJoiner(state),
-            )) => state.join_id,
+            )) => Some(state.join_id),
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
                 SpaceAdmissionRejectedState::Joiner(state),
-            )) => state.join_id,
+            )) => Some(state.join_id),
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(state)) => {
-                state.join_id
+                Some(state.join_id)
             }
-            _ => unreachable!("JoinerAdmission only contains joiner-owned states"),
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::RecoveryRequired(
+                state,
+            )) => state.join_id,
+            // Sponsor 专属状态在 `JoinerAdmission` 上永远不可达（由 `try_from_record` 的
+            // 角色校验保证），这里返回 `None` 而不是 `unreachable!()`，不给这个公开入口
+            // 留下任何可被未来新状态打破的 panic 分支。
+            _ => None,
         }
     }
 

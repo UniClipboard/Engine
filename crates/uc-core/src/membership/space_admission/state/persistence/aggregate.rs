@@ -345,7 +345,9 @@ fn decode_record_v1(
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::RecoveryRequired(
                 SpaceAdmissionRecoveryRequiredTerminal {
                     category: decode_recovery_category(category)?,
-                    join_id: JoinId::from_bytes(join_id),
+                    // 这个变体总是写在转换时成功捕获的 join_id；字节无效说明payload本身
+                    // 被破坏，必须报错而不是悄悄降级成"没有捕获到"的合法旧格式状态。
+                    join_id: Some(decode_join_id(join_id)?),
                 },
             ))
         }

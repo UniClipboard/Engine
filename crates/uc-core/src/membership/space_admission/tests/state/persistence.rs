@@ -349,16 +349,16 @@ fn recovery_required_joiner_reopens_through_the_public_joiner_role() {
         reopened.recovery_category(),
         Some(AdmissionRecoveryCategory::MissingKey)
     );
-    // 转换时的 join_id 必须完整保留下来，display 层才能在不调用会 panic 的通用
-    // `join_id()` 的情况下，为这个终态展示一个真实、可关联的 join_id。
-    assert_eq!(reopened.recovery_join_id(), Some(original_join_id));
+    // 转换时的 join_id 必须完整保留下来，display 层才能用通用 `join_id()`
+    // 为这个终态展示一个真实、可关联的 join_id，不需要专门的旁路入口。
+    assert_eq!(reopened.join_id(), original_join_id);
 }
 
 #[test]
 fn recovery_required_without_a_captured_join_id_decodes_without_panicking() {
     // 复现历史格式：只保存了类别、没有 join_id 的 `RecoveryRequired` 记录
     // （本次改动之前产生的记录就是这个形状）。读取路径必须优雅降级，
-    // 不能通过通用 `join_id()` 去读一个它假定一定存在的字段。
+    // `join_id()` 对这类记录返回 `None` 而不是编造一个值或 panic。
     let legacy = JoinerAdmission::try_from_record(joiner_candidate_aggregate_fixture())
         .expect("Candidate aggregate is a Joiner record")
         .require_recovery(AdmissionRecoveryCategory::MissingKey)
@@ -371,5 +371,5 @@ fn recovery_required_without_a_captured_join_id_decodes_without_panicking() {
     let reopened = JoinerAdmission::decode_persisted(&encoded)
         .expect("legacy category-only record must still reopen as Joiner");
     assert!(reopened.needs_attention());
-    assert_eq!(reopened.recovery_join_id(), None);
+    assert_eq!(reopened.join_id(), None);
 }

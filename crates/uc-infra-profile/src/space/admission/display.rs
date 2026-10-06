@@ -224,19 +224,14 @@ impl<E: DbExecutor + Clone + Send + Sync + 'static> SqliteSpaceAdmissionState<E>
     ) -> Result<CurrentJoinStatus, QueryDeviceTrustError> {
         let peer_upgrade_required = admission.peer_upgrade_required();
         if admission.needs_attention() {
-            // `RecoveryRequired` 终态不保证有可展示的 join_id（旧格式记录只保存了类别）；
-            // 通用 `join_id()` 对这个终态会拒绝，这里必须改走 `recovery_join_id()`，
-            // 不能对 `RecoveryRequired` 调用 `join_id()`。晚到加入（is_unbounded_late_join）
-            // 仍是普通 Joiner 子状态，照常使用通用 `join_id()`。
-            let recovery_category = admission.recovery_category();
-            let join_id = match recovery_category {
-                Some(_) => admission
-                    .recovery_join_id()
-                    .map(|id| *id.as_bytes())
-                    .unwrap_or([0u8; 16]),
-                None => *admission.join_id().as_bytes(),
-            };
-            let (reason, recovery) = match recovery_category {
+            // `join_id()` 对 `RecoveryRequired` 终态只在转换时成功捕获过才返回 `Some`；
+            // 旧格式只保存了类别的历史记录没有可还原的 join_id，报成需要恢复，
+            // 不编造一个展示值。
+            let join_id = *admission
+                .join_id()
+                .ok_or_else(QueryDeviceTrustError::recovery_required)?
+                .as_bytes();
+            let (reason, recovery) = match admission.recovery_category() {
                 // 对端确认续传凭据不可用（记录缺失或校验失败）；本机此前已经完成过一次完整
                 // 密码校验，不是密码错误，但这次加入会话已经无法续传，只能换新邀请码重开。
                 Some(AdmissionRecoveryCategory::MissingKey) => (
@@ -256,8 +251,11 @@ impl<E: DbExecutor + Clone + Send + Sync + 'static> SqliteSpaceAdmissionState<E>
             });
         }
         // `needs_attention()` 已经在上面处理并返回；这里之后的所有分支都不是
-        // `RecoveryRequired`，通用 `join_id()` 可以安全调用。
-        let join_id = *admission.join_id().as_bytes();
+        // `RecoveryRequired`，`join_id()` 在这些状态下恒为 `Some`。
+        let join_id = *admission
+            .join_id()
+            .ok_or_else(QueryDeviceTrustError::recovery_required)?
+            .as_bytes();
         if let Some(reason) = admission.rejection_reason() {
             return Ok(CurrentJoinStatus::Rejected { join_id, reason });
         }
