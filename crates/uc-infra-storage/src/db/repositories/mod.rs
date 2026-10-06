@@ -14,6 +14,7 @@ mod entry_file_set_repo;
 mod entry_receive_attempt_repo;
 mod entry_replace_repo;
 mod file_transfer_repo;
+mod history_tag_repo;
 mod inbound_receive_commit_repo;
 mod migration_repo;
 #[cfg(feature = "lan-compat")]
@@ -46,6 +47,7 @@ pub use entry_receive_attempt_repo::*;
 pub use entry_replace_repo::*;
 pub use file_transfer_repo::*;
 pub use history_file_references::*;
+pub use history_tag_repo::*;
 pub use inbound_receive_commit_repo::*;
 pub use migration_repo::*;
 #[cfg(feature = "lan-compat")]

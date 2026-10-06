@@ -170,7 +170,7 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 | `SearchEntries` | 使用关键词、时间、内容类型、来源设备和标签等条件查询加密搜索索引。`tag_match` 取 `any`（默认，命中任一标签）或 `all`（必须同时携带所有标签）；其他维度组内取“或”，维度之间取“且” |
 | `CountSearchEntries` | 批量统计匹配数：每个查询与 `SearchEntries` 走同一套解析与索引路径，`total` 逐项一致，`limit`、`offset` 被忽略；单次最多 32 个查询，按输入顺序返回。加密会话未就绪时返回搜索会话锁定错误，索引重建中返回重建错误，不降级为近似值 |
 | `QueryDailyEntryCounts` | 按调用方给出的严格递增绝对时间戳边界统计条目数，第 `i` 个桶为 `[b[i], b[i+1])`，最多 400 个桶。Engine 不含时区与夏令时规则，日边界由宿主按用户本地时区计算。会话锁定失败关闭，规则与 `CountSearchEntries` 相同 |
-| `QuerySearchTags` | 查询当前索引中的标签和条目数量 |
+| `QuerySearchTags` | 查询当前索引中的标签和条目数量；本机历史标签以 `is_builtin = false` 出现，只统计已建索引的条目；会话锁定或索引重建中不返回本机历史标签 |
 | `QuerySearchStatus` | 查询索引是否可用及最近重建时间 |
 | `RebuildSearchIndex` | 请求重建当前加密搜索索引 |
 | `SendText` | 写入加密历史、更新搜索并发送不超过 64 KiB 的文本 |
@@ -180,6 +180,14 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 | `GetHistoryEntry` | 返回指定文本记录的完整详情 |
 | `DeleteHistoryEntry` | 删除指定记录及其关联选择、文件、搜索和 blob 引用 |
 | `SetHistoryEntryFavorite` | 设置指定记录的收藏状态 |
+| `ListHistoryTags` | 列出本机历史标签及各自关联的条目数，按条目数降序、名称、id 排序；名称无法解密的标签以空名称返回，仍可删除 |
+| `CreateHistoryTag` | 按名称创建本机历史标签；规范化后同名（忽略大小写）时返回已有标签和 `created = false` |
+| `RenameHistoryTag` | 修改标签名称；与另一个标签同名时不写入并返回 `NameConflict { existing_tag_id }`；名称密文无法打开的标签不能改名（1404），只能删除 |
+| `AddHistoryTagToEntries` | 把一个标签关联到 1 到 1000 条记录；存在的记录在一个事务内生效，不存在的记录跳过并返回 |
+| `RemoveHistoryTagFromEntries` | 从 1 到 1000 条记录移除一个标签，规则与关联相同 |
+| `SummarizeHistoryEntryTags` | 返回一组记录中仍存在的数量，以及每个标签在其中的携带数量 |
+| `MergeHistoryTags` | 把 1 到 100 个来源标签的关联并入目标标签并去重，随后删除来源标签；记录内容不变 |
+| `DeleteHistoryTag` | 删除标签及其关联，返回解除的关联数；记录内容不变 |
 | `QueryHistoryStats` | 返回历史记录总数和总大小 |
 | `GetHistoryEntryResource` | 返回指定记录的资源标识、类型、大小及可用读取方式 |
 | `ReadBlob` | 读取指定 blob 的完整字节和媒体类型 |
@@ -342,6 +350,8 @@ HarmonyOS 绑定必须公开相同字段、结果、错误和提醒。
 `ListHistoryEntries` 是旧桌面列表接口迁移期间使用的完整投影，每次必须请求 1 到 1000 条，并保留预览、收藏、标签、链接、文件大小、图片尺寸和内容可用状态。它不替代带稳定分页标记的 `QueryHistory`，新宿主仍应优先使用搜索或 `QueryHistory`。列表、详情和资源结果可以正常携带用户内容，但调试输出不得包含预览、正文、链接、缩略图地址或内联字节。
 
 `GetHistoryEntry` 只适用于可读取为文本的记录；记录不存在返回 `NotFound`，内容不支持文本详情返回 `Conflict`。`SetHistoryEntryFavorite` 对不存在记录同样返回 `NotFound`，不能把未修改任何记录当作成功。
+
+本机历史标签是每台设备自己的历史元数据，不进入任何同步载荷，也不随配对传播。标签 id 是与名称无关的不透明 id，内置标签 id 保持不变并以 `is_builtin` 区分；用户手动关联不是规则标签。名称规则为：去掉首尾空白后转为 NFC，不能为空、不能含控制字符、最多 64 个 Unicode 标量；同名判断忽略大小写，展示保留用户输入；单个 profile 最多 1000 个标签。所有标签操作在加密会话锁定时返回 1405，旧格式 profile 返回 1406；未知标签返回 `NotFound`，合并的来源与目标相同返回输入错误，重复合并或删除因来源已不存在返回 `NotFound`。标签名称、创建时间与记录关联只以 MasterKey AEAD 密文保存；搜索索引中的用户标签成员只以搜索密钥 HMAC 后的词项保存，由权威关联派生，因此索引重建会恢复用户标签过滤。搜索结果的 `tags` 中的用户标签 id 由权威关联补齐；会话锁定时 `QuerySearchTags` 不返回用户标签。删除记录时其关联随之删除。调试输出与日志不包含名称。
 
 `DeleteHistoryEntry` 和 `ClearHistory` 由核心统一清理数据库记录、选择、缓存文件、搜索索引和 blob 引用，宿主不得自行复制清理顺序。批量清空发生部分失败时只返回失败条目标识，不返回底层异常、文件路径或用户内容。
 

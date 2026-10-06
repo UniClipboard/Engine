@@ -128,6 +128,10 @@ pub const HISTORY_INVALID_INPUT_CODE: u32 = 1401;
 pub const HISTORY_NOT_FOUND_CODE: u32 = 1402;
 pub const HISTORY_UNSUPPORTED_CONTENT_CODE: u32 = 1403;
 pub const HISTORY_FAILED_CODE: u32 = 1404;
+/// 加密会话未解锁，历史标签操作失败关闭。
+pub const HISTORY_TAGS_LOCKED_CODE: u32 = 1405;
+/// 当前 profile 尚未升级到可加密保存标签名称的存储格式。
+pub const HISTORY_TAGS_UNAVAILABLE_CODE: u32 = 1406;
 pub const QUERY_UPGRADE_STATUS_FAILED_CODE: u32 = 1401;
 pub const ACKNOWLEDGE_UPGRADE_FAILED_CODE: u32 = 1402;
 
@@ -213,6 +217,14 @@ mod tests {
                 FACTORY_RESET_STORAGE_FAILED_CODE,
                 FACTORY_RESET_FAILED_CODE,
                 FACTORY_RESET_RESTART_REQUIRED_CODE,
+            ],
+            &[
+                HISTORY_INVALID_INPUT_CODE,
+                HISTORY_NOT_FOUND_CODE,
+                HISTORY_UNSUPPORTED_CONTENT_CODE,
+                HISTORY_FAILED_CODE,
+                HISTORY_TAGS_LOCKED_CODE,
+                HISTORY_TAGS_UNAVAILABLE_CODE,
             ],
             &[
                 PROFILE_RECOVERY_REQUIRED_CODE,

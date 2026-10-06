@@ -53,6 +53,8 @@ const PROFILE_DATA_TABLES: &[&str] = &[
     "file_transfer",
     "file_transfer_events",
     "file_transfer_privacy_maintenance",
+    "history_tag",
+    "history_tag_assignment",
     "receive_artifact_log",
     "search_document",
     "search_entry_tag",
@@ -101,6 +103,8 @@ const TABLES_ADDED_AFTER_EARLY_V3: &[&str] = &[
     "group_update_source",
     "admission_recovery_summary",
     "admission_repository_record",
+    "history_tag",
+    "history_tag_assignment",
 ];
 
 /// 行归属核验针对的库代次：暂存库由本次升级建成，表必须齐全；已提升的活动库可能来自早期 V3。

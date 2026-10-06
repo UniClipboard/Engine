@@ -32,6 +32,8 @@ thiserror = "2.0.17"
 serde_with = "3.16.1"
 hex = "0.4.3"
 url = "2"
+# 历史标签名称的 NFC 规范化。
+unicode-normalization = "0.1"
 
 # Deterministic digest derivation for removal intents and convergence state.
 sha2 = "0.10"

@@ -1,5 +1,6 @@
 //! 搜索重建协调器。拥有重建状态、原因码、启动检查和进度事件。
 
+use crate::clipboard::history_tags::{load_history_tag_ids, HistoryEntryTagReaderPort};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -97,6 +98,8 @@ pub struct SearchCoordinatorDeps {
     pub event_repo: Arc<dyn ClipboardEventRepositoryPort>,
     /// Loads the persisted file manifest used by the directory tag rule.
     pub entry_file_set_repo: Arc<dyn EntryFileSetRepositoryPort>,
+    /// 本机历史标签关联；重建与修复从权威存储补齐用户标签成员。
+    pub(crate) history_entry_tags: Option<Arc<dyn HistoryEntryTagReaderPort>>,
 }
 
 impl SearchCoordinatorDeps {
@@ -126,7 +129,16 @@ impl SearchCoordinatorDeps {
             selection_repo,
             event_repo,
             entry_file_set_repo,
+            history_entry_tags: None,
         }
+    }
+
+    pub(crate) fn with_history_tags(
+        mut self,
+        history_entry_tags: Arc<dyn HistoryEntryTagReaderPort>,
+    ) -> Self {
+        self.history_entry_tags = Some(history_entry_tags);
+        self
     }
 
     pub(crate) fn with_rebuild_coordination(
@@ -549,12 +561,28 @@ impl SearchCoordinator {
             };
 
             let batch_len = batch.len();
+            let batch_ids: Vec<EntryId> =
+                batch.iter().map(|entry| entry.entry_id.clone()).collect();
+            let mut history_tags =
+                match load_history_tag_ids(deps.history_entry_tags.as_deref(), &batch_ids).await {
+                    Ok(tags) => tags,
+                    Err(e) => {
+                        uc_warn!(
+                            error_kind = "history_tag_load",
+                            io_error_kind = io_error_kind(&e),
+                            reason = log_vocab(&reason),
+                            "search coordinator: failed to load history tags during rebuild"
+                        );
+                        list_failed = true;
+                        break;
+                    }
+                };
 
             for entry in &batch {
                 if cancel.is_cancelled() {
                     return;
                 }
-                let pipeline_input = match project_persisted_entry(
+                let mut pipeline_input = match project_persisted_entry(
                     deps.representation_repo.as_ref(),
                     deps.selection_repo.as_ref(),
                     deps.event_repo.as_ref(),
@@ -569,6 +597,8 @@ impl SearchCoordinator {
                         continue;
                     }
                 };
+                pipeline_input.history_tag_ids =
+                    history_tags.remove(&entry.entry_id).unwrap_or_default();
 
                 match deps.search_pipeline.build(&pipeline_input, &search_key) {
                     Ok((doc, postings)) => {
@@ -940,7 +970,7 @@ async fn repair_entry(deps: &SearchCoordinatorDeps, entry_id: &EntryId) {
         }
     };
 
-    let input = match project_persisted_entry(
+    let mut input = match project_persisted_entry(
         deps.representation_repo.as_ref(),
         deps.selection_repo.as_ref(),
         deps.event_repo.as_ref(),
@@ -958,6 +988,24 @@ async fn repair_entry(deps: &SearchCoordinatorDeps, entry_id: &EntryId) {
             return;
         }
     };
+
+    match load_history_tag_ids(
+        deps.history_entry_tags.as_deref(),
+        std::slice::from_ref(entry_id),
+    )
+    .await
+    {
+        Ok(mut tags) => input.history_tag_ids = tags.remove(entry_id).unwrap_or_default(),
+        Err(e) => {
+            uc_warn!(
+                entry_id = log_id(&entry_id),
+                error_kind = "history_tag_load",
+                io_error_kind = io_error_kind(&e),
+                "search repair: failed to load history tags"
+            );
+            return;
+        }
+    }
 
     let search_key = match deps.search_key_derivation.derive_search_key().await {
         Ok(k) => k,

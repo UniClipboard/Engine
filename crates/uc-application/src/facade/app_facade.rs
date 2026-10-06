@@ -113,6 +113,10 @@ mod device_group_choice_error_tests {
 }
 use crate::clipboard::active::ActiveClipboardFacade;
 use crate::clipboard::history::maintenance_runtime::HistoryMaintenanceRuntime;
+use crate::clipboard::history_tags::{
+    HistoryEntryTagSummaryView, HistoryTagBatchView, HistoryTagCreatedView, HistoryTagError,
+    HistoryTagMergeView, HistoryTagRenameView, HistoryTagView, HistoryTags,
+};
 use crate::device::query_local_device::QueryLocalDeviceUseCase;
 use crate::facade::settings::{
     GeneralSettingsPatch, RelayConfigurationEntry, RelayConfigurationMutation,
@@ -294,6 +298,92 @@ impl AppFacade {
     ) -> Result<bool, crate::facade::ClipboardHistoryError> {
         self.clipboard_history
             .toggle_favorite(entry_id, is_favorited)
+            .await
+    }
+
+    /// 本机历史标签动作的共同前置条件：加密会话已解锁，否则失败关闭。
+    async fn require_history_tag_session(&self) -> Result<&HistoryTags, HistoryTagError> {
+        let state = self
+            .space
+            .query_space_access_state()
+            .await
+            .map_err(|source| HistoryTagError::Internal(source.into()))?;
+        if state.session_ready {
+            Ok(self.clipboard_history.history_tags())
+        } else {
+            Err(HistoryTagError::Locked)
+        }
+    }
+
+    pub async fn list_history_tags(&self) -> Result<Vec<HistoryTagView>, HistoryTagError> {
+        self.require_history_tag_session().await?.list().await
+    }
+
+    pub async fn create_history_tag(
+        &self,
+        name: &str,
+    ) -> Result<HistoryTagCreatedView, HistoryTagError> {
+        self.require_history_tag_session().await?.create(name).await
+    }
+
+    pub async fn rename_history_tag(
+        &self,
+        tag_id: &str,
+        name: &str,
+    ) -> Result<HistoryTagRenameView, HistoryTagError> {
+        self.require_history_tag_session()
+            .await?
+            .rename(tag_id, name)
+            .await
+    }
+
+    pub async fn add_history_tag_to_entries(
+        &self,
+        tag_id: &str,
+        entry_ids: &[String],
+    ) -> Result<HistoryTagBatchView, HistoryTagError> {
+        self.require_history_tag_session()
+            .await?
+            .add_to_entries(tag_id, entry_ids)
+            .await
+    }
+
+    pub async fn remove_history_tag_from_entries(
+        &self,
+        tag_id: &str,
+        entry_ids: &[String],
+    ) -> Result<HistoryTagBatchView, HistoryTagError> {
+        self.require_history_tag_session()
+            .await?
+            .remove_from_entries(tag_id, entry_ids)
+            .await
+    }
+
+    pub async fn summarize_history_entry_tags(
+        &self,
+        entry_ids: &[String],
+    ) -> Result<HistoryEntryTagSummaryView, HistoryTagError> {
+        self.require_history_tag_session()
+            .await?
+            .summarize_entries(entry_ids)
+            .await
+    }
+
+    pub async fn merge_history_tags(
+        &self,
+        source_tag_ids: &[String],
+        target_tag_id: &str,
+    ) -> Result<HistoryTagMergeView, HistoryTagError> {
+        self.require_history_tag_session()
+            .await?
+            .merge(source_tag_ids, target_tag_id)
+            .await
+    }
+
+    pub async fn delete_history_tag(&self, tag_id: &str) -> Result<u32, HistoryTagError> {
+        self.require_history_tag_session()
+            .await?
+            .delete(tag_id)
             .await
     }
 

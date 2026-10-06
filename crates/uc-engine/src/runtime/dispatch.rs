@@ -39,6 +39,11 @@ use crate::operations::history::search::{
     execute_query_search_tags, execute_rebuild_search_index, execute_search_entries,
     history_page_result, history_search_input, map_query_history_error,
 };
+use crate::operations::history::tags::{
+    execute_add_history_tag_to_entries, execute_create_history_tag, execute_delete_history_tag,
+    execute_list_history_tags, execute_merge_history_tags, execute_remove_history_tag_from_entries,
+    execute_rename_history_tag, execute_summarize_history_entry_tags,
+};
 use crate::operations::settings::config_migration::{
     execute_export_config, execute_preview_config_import, execute_stage_config_import,
 };
@@ -491,6 +496,39 @@ impl EngineRuntime for ProductionRuntime {
                 Operation::SetHistoryEntryFavorite(input) => {
                     execute_set_history_entry_favorite(self.current_facade().await?.as_ref(), input)
                         .await
+                }
+                Operation::ListHistoryTags => {
+                    execute_list_history_tags(self.current_facade().await?.as_ref()).await
+                }
+                Operation::CreateHistoryTag(input) => {
+                    execute_create_history_tag(self.current_facade().await?.as_ref(), input).await
+                }
+                Operation::RenameHistoryTag(input) => {
+                    execute_rename_history_tag(self.current_facade().await?.as_ref(), input).await
+                }
+                Operation::AddHistoryTagToEntries(input) => {
+                    execute_add_history_tag_to_entries(self.current_facade().await?.as_ref(), input)
+                        .await
+                }
+                Operation::RemoveHistoryTagFromEntries(input) => {
+                    execute_remove_history_tag_from_entries(
+                        self.current_facade().await?.as_ref(),
+                        input,
+                    )
+                    .await
+                }
+                Operation::SummarizeHistoryEntryTags(input) => {
+                    execute_summarize_history_entry_tags(
+                        self.current_facade().await?.as_ref(),
+                        input,
+                    )
+                    .await
+                }
+                Operation::MergeHistoryTags(input) => {
+                    execute_merge_history_tags(self.current_facade().await?.as_ref(), input).await
+                }
+                Operation::DeleteHistoryTag(input) => {
+                    execute_delete_history_tag(self.current_facade().await?.as_ref(), input).await
                 }
                 Operation::QueryHistoryStats => {
                     execute_query_history_stats(self.current_facade().await?.as_ref()).await

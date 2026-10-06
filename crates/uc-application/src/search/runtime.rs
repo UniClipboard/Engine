@@ -15,10 +15,12 @@ pub(super) struct SearchRuntime {
 impl SearchRuntime {
     pub(super) fn start(deps: SearchCoordinatorDeps) -> Self {
         let search_index = Arc::clone(&deps.search_index);
+        let history_entry_tags = deps.history_entry_tags.clone();
         let coordinator = Arc::new(SearchCoordinator::new(deps));
         let facade = Arc::new(SearchFacade::with_runtime(
             search_index,
             Arc::clone(&coordinator),
+            history_entry_tags,
         ));
         let cancel = CancellationToken::new();
         let task_cancel = cancel.clone();

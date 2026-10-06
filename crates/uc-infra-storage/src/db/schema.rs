@@ -154,6 +154,20 @@ diesel::table! {
 }
 
 diesel::table! {
+    history_tag (tag_id) {
+        tag_id -> Text,
+        payload_ct -> Binary,
+    }
+}
+
+diesel::table! {
+    history_tag_assignment (entry_id) {
+        entry_id -> Text,
+        tags_ct -> Binary,
+    }
+}
+
+diesel::table! {
     clipboard_entry_delivery (entry_id, target_device_id) {
         entry_id -> Text,
         target_device_id -> Text,
@@ -329,6 +343,7 @@ diesel::joinable!(clipboard_selection -> clipboard_entry (entry_id));
 diesel::joinable!(clipboard_snapshot_representation -> blob (blob_id));
 diesel::joinable!(clipboard_snapshot_representation -> clipboard_event (event_id));
 diesel::joinable!(entry_file_set -> clipboard_entry (entry_id));
+diesel::joinable!(history_tag_assignment -> clipboard_entry (entry_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     blob,
@@ -346,6 +361,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     file_transfer,
     file_transfer_events,
     file_transfer_privacy_maintenance,
+    history_tag,
+    history_tag_assignment,
     mobile_device,
     legacy_upgrade_pending_join,
     legacy_space_bootstrap_log,

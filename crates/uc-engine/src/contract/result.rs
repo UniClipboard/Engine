@@ -593,6 +593,13 @@ pub enum OperationResult {
     HistoryEntry(HistoryEntryDetailSummary),
     HistoryEntryDeleted,
     HistoryEntryFavoriteSet,
+    HistoryTags(Vec<HistoryTagSummary>),
+    HistoryTagCreated(HistoryTagCreatedSummary),
+    HistoryTagRenamed(HistoryTagRenameSummary),
+    HistoryTagEntriesChanged(HistoryTagBatchSummary),
+    HistoryEntryTags(HistoryEntryTagSummary),
+    HistoryTagsMerged(HistoryTagMergeSummary),
+    HistoryTagDeleted(HistoryTagDeletedSummary),
     HistoryStats(HistoryStatsSummary),
     HistoryEntryResource(HistoryEntryResourceSummary),
     BlobRead(BinaryResourceSummary),
@@ -913,6 +920,29 @@ impl fmt::Debug for OperationResult {
             Self::HistoryEntry(_) => debug.field("kind", &"history_entry"),
             Self::HistoryEntryDeleted => debug.field("kind", &"history_entry_deleted"),
             Self::HistoryEntryFavoriteSet => debug.field("kind", &"history_entry_favorite_set"),
+            Self::HistoryTags(tags) => debug
+                .field("kind", &"history_tags")
+                .field("tag_count", &tags.len()),
+            Self::HistoryTagCreated(created) => debug
+                .field("kind", &"history_tag_created")
+                .field("created", &created.created),
+            Self::HistoryTagRenamed(renamed) => debug.field("kind", &"history_tag_renamed").field(
+                "conflict",
+                &matches!(renamed, HistoryTagRenameSummary::NameConflict { .. }),
+            ),
+            Self::HistoryTagEntriesChanged(batch) => debug
+                .field("kind", &"history_tag_entries_changed")
+                .field("batch", batch),
+            Self::HistoryEntryTags(summary) => debug
+                .field("kind", &"history_entry_tags")
+                .field("selected", &summary.selected)
+                .field("tag_count", &summary.tags.len()),
+            Self::HistoryTagsMerged(merged) => debug
+                .field("kind", &"history_tags_merged")
+                .field("merged", merged),
+            Self::HistoryTagDeleted(deleted) => debug
+                .field("kind", &"history_tag_deleted")
+                .field("deleted", deleted),
             Self::HistoryStats(stats) => {
                 debug.field("kind", &"history_stats").field("stats", stats)
             }
@@ -1658,6 +1688,82 @@ impl fmt::Debug for SearchResultSummary {
             .field("has_payload_state", &self.payload_state.is_some())
             .finish()
     }
+}
+
+/// 一个本机历史标签。`name` 为 `None` 表示名称无法解密，该标签只能删除。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryTagSummary {
+    pub tag_id: String,
+    pub name: Option<String>,
+    pub created_at_ms: i64,
+    pub entry_count: u32,
+}
+
+impl fmt::Debug for HistoryTagSummary {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HistoryTagSummary")
+            .field("has_name", &self.name.is_some())
+            .field("entry_count", &self.entry_count)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryTagCreatedSummary {
+    pub tag: HistoryTagSummary,
+    /// `false` 表示同名标签已存在，`tag` 是已有标签。
+    pub created: bool,
+}
+
+/// 改名结果：新名称与另一个标签同名时不写入，返回冲突标签 id。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HistoryTagRenameSummary {
+    Renamed(HistoryTagSummary),
+    NameConflict { existing_tag_id: String },
+}
+
+/// 批量关联或移除结果：存在的条目在一个事务内生效，不存在的条目被跳过。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryTagBatchSummary {
+    pub changed: u32,
+    pub unchanged: u32,
+    pub missing_entry_ids: Vec<String>,
+}
+
+impl fmt::Debug for HistoryTagBatchSummary {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HistoryTagBatchSummary")
+            .field("changed", &self.changed)
+            .field("unchanged", &self.unchanged)
+            .field("missing_count", &self.missing_entry_ids.len())
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryTagApplicationSummary {
+    pub tag_id: String,
+    pub applied: u32,
+}
+
+/// 一组条目的标签汇总；`applied == selected` 表示全部携带。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryEntryTagSummary {
+    pub selected: u32,
+    pub tags: Vec<HistoryTagApplicationSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryTagMergeSummary {
+    pub moved: u32,
+    pub already_on_target: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryTagDeletedSummary {
+    pub detached: u32,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]

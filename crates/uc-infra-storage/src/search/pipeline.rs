@@ -16,8 +16,8 @@ use uc_core::search::document::{SearchDocument, SearchPosting};
 use uc_core::search::key::SearchKeyContext;
 
 use crate::search::constants::{
-    CURRENT_INDEX_VERSION, SEARCH_FIELD_BODY, SEARCH_FIELD_FILE_NAME, SEARCH_FIELD_FILE_PATH,
-    SEARCH_FIELD_HTML, SEARCH_FIELD_URL,
+    history_tag_token, CURRENT_INDEX_VERSION, SEARCH_FIELD_BODY, SEARCH_FIELD_FILE_NAME,
+    SEARCH_FIELD_FILE_PATH, SEARCH_FIELD_HISTORY_TAG, SEARCH_FIELD_HTML, SEARCH_FIELD_URL,
 };
 use crate::search::search_key_derivation::term_tag;
 use crate::search::text_extractor::{SearchPipelineInput, SearchTextExtractor};
@@ -127,6 +127,14 @@ impl SearchPipelinePort for SearchPipeline {
                     entry.1 += freq;
                 }
             }
+        }
+
+        // 用户历史标签成员：保留词项只以 HMAC 落盘，独立的 field bit 便于单独替换。
+        for tag_id in &input.history_tag_ids {
+            let tag = term_tag(search_key.key(), &history_tag_token(tag_id.as_str()))?;
+            let entry = aggregated.entry(tag).or_insert((0u8, 0u32));
+            entry.0 |= SEARCH_FIELD_HISTORY_TAG;
+            entry.1 = 1;
         }
 
         // Build sorted Vec<SearchPosting>

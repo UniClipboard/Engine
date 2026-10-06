@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use uc_core::ids::EntryId;
 use uc_core::ports::SearchIndexPort;
-use uc_core::search::tag::SearchTagCount;
+use uc_core::search::tag::{SearchTagCount, TagId};
 use uc_core::search::{
     RebuildProgress, SearchDocument, SearchError, SearchIndexMeta, SearchPosting, SearchQuery,
     SearchResultsPage,
@@ -81,6 +81,15 @@ impl SearchIndexPort for CoordinatedSearchIndex {
     ) -> Result<(), SearchError> {
         let _guard = self.gate.begin_update().await;
         self.inner.set_entry_favorite_tag(entry_id, favorited).await
+    }
+
+    async fn set_entry_history_tags(
+        &self,
+        entry_id: &EntryId,
+        tag_ids: &[TagId],
+    ) -> Result<(), SearchError> {
+        let _guard = self.gate.begin_update().await;
+        self.inner.set_entry_history_tags(entry_id, tag_ids).await
     }
 
     async fn list_tags(&self) -> Result<Vec<SearchTagCount>, SearchError> {

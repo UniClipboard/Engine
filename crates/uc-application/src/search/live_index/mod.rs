@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::clipboard::history_tags::{load_history_tag_ids, HistoryEntryTagReaderPort};
 use async_trait::async_trait;
 use thiserror::Error;
 
@@ -58,6 +59,8 @@ pub struct ClipboardLiveIndexDeps {
     /// Loads the persisted file manifest so live and rebuild indexing use the
     /// same directory-structure authority.
     pub entry_file_set_repo: Arc<dyn EntryFileSetRepositoryPort>,
+    /// 用户历史标签的权威关联：同一条目被替换内容后重新索引时保留其标签成员。
+    pub history_entry_tags: Arc<dyn HistoryEntryTagReaderPort>,
 }
 
 pub struct ClipboardLiveIndexer {
@@ -137,7 +140,7 @@ impl ClipboardLiveIndexPort for ClipboardLiveIndexer {
             false
         };
 
-        let Some(pipeline_input) = SearchProjectionBuilder::build_from_capture(
+        let Some(mut pipeline_input) = SearchProjectionBuilder::build_from_capture(
             &entry,
             input.snapshot.as_ref(),
             &selection,
@@ -148,6 +151,16 @@ impl ClipboardLiveIndexPort for ClipboardLiveIndexer {
                 reason: "no_searchable_content".to_string(),
             });
         };
+
+        // 失败关闭：读不到权威标签时不写入缺少标签的索引行，由重建补齐。
+        pipeline_input.history_tag_ids = load_history_tag_ids(
+            Some(self.deps.history_entry_tags.as_ref()),
+            std::slice::from_ref(&entry_id),
+        )
+        .await
+        .map_err(|err| ClipboardLiveIndexError::Internal(anyhow::Error::from(err)))?
+        .remove(&entry_id)
+        .unwrap_or_default();
 
         let search_key = match self.deps.search_key_derivation.derive_search_key().await {
             Ok(search_key) => search_key,

@@ -67,3 +67,13 @@ pub const SEARCH_FIELD_FILE_PATH: u8 = 0b0000_1000;
 
 /// Field-mask bit: term was extracted from a file name (display name / stem).
 pub const SEARCH_FIELD_FILE_NAME: u8 = 0b0001_0000;
+
+/// Field-mask bit: 用户历史标签成员。该 posting 的词项是 [`history_tag_token`]，
+/// 与正文词项一样只以搜索密钥 HMAC 保存，从不出现在关键词匹配中。
+pub const SEARCH_FIELD_HISTORY_TAG: u8 = 0b0010_0000;
+
+/// 用户历史标签成员的保留词项。前缀含控制字符，分词器不会产生它，因此不会与
+/// 关键词碰撞；标签 id 本身是随机 id，词项只以 HMAC 形式落盘。
+pub fn history_tag_token(tag_id: &str) -> String {
+    format!("\u{1}history_tag\u{1}{tag_id}")
+}

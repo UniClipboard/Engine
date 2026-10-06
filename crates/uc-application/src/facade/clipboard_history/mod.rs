@@ -42,6 +42,14 @@ pub use crate::clipboard::history::views::{
     ClipboardStatsView, EntryDetailView, EntryProjectionView, EntryResourceView,
     ReconcileResultView, RetentionEnforcementResultView,
 };
+use crate::clipboard::history_tags::HistoryTags;
+pub use crate::clipboard::history_tags::{
+    HistoryEntryTagReaderPort, HistoryEntryTagSummary, HistoryEntryTagSummaryView,
+    HistoryTagApplicationView, HistoryTagBatchOutcome, HistoryTagBatchView, HistoryTagCreatedView,
+    HistoryTagDeleteOutcome, HistoryTagError, HistoryTagMergeOutcome, HistoryTagMergeView,
+    HistoryTagRecord, HistoryTagRenameView, HistoryTagStoreError, HistoryTagStorePort,
+    HistoryTagView,
+};
 
 /// Dependency bundle for `ClipboardHistoryFacade`.
 ///
@@ -80,6 +88,8 @@ pub struct ClipboardHistoryFacadeDeps {
     /// cache 目录及其下路径是否真实存在；走 port 而不是 `std::fs`，让 uc-app
     /// 保持基础设施无关。
     pub cache_fs: Arc<dyn CacheFsPort>,
+    /// 本机历史标签定义与关联的权威存储。
+    pub history_tag_store: Arc<dyn HistoryTagStorePort>,
 }
 
 pub struct ClipboardHistoryFacade {
@@ -92,6 +102,7 @@ pub struct ClipboardHistoryFacade {
     cleanup_uc: Option<CleanupExpiredFilesUseCase>,
     reconcile_uc: Option<ReconcileMissingFilesUseCase>,
     retention_uc: EnforceRetentionPolicyUseCase,
+    history_tags: HistoryTags,
     /// debug seed 路径需要的额外 ports，常态业务不直接消费。
     seed_event_writer: Arc<dyn ClipboardEventWriterPort>,
     seed_entry_repo: Arc<dyn SaveClipboardEntryPort>,
@@ -119,6 +130,7 @@ impl ClipboardHistoryFacade {
             device_identity,
             clock,
             cache_fs,
+            history_tag_store,
         } = deps;
         let ClipboardEntryPorts {
             get: entry_get,
@@ -145,6 +157,8 @@ impl ClipboardHistoryFacade {
         let seed_entry_repo = Arc::clone(&entry_save);
         let seed_device_identity = Arc::clone(&device_identity);
         let seed_clock = Arc::clone(&clock);
+        let history_tags =
+            HistoryTags::new(history_tag_store, Arc::clone(&clock), search_index.clone());
         // device_identity / clock 在常态 use case 里目前不消费，避免出现
         // 未使用 binding 警告——下面的 _ 让 clippy 闭嘴；后续 use case 真
         // 用上时再展开。
@@ -284,6 +298,7 @@ impl ClipboardHistoryFacade {
             cleanup_uc,
             reconcile_uc,
             retention_uc,
+            history_tags,
             seed_event_writer,
             seed_entry_repo,
             seed_device_identity,
@@ -410,6 +425,11 @@ impl ClipboardHistoryFacade {
             .execute(&parsed_id)
             .await
             .map_err(map_history_error)
+    }
+
+    /// 本机历史标签流程负责人。
+    pub(crate) fn history_tags(&self) -> &HistoryTags {
+        &self.history_tags
     }
 
     pub async fn toggle_favorite(

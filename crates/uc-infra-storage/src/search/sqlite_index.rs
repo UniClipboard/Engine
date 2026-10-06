@@ -10,7 +10,7 @@
 //!
 //! Phase 92 will wire this adapter into daemon routes.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -38,7 +38,9 @@ use uc_observability_contract::{
 
 use crate::db::pool::DbPool;
 use crate::db::schema::{search_document, search_entry_tag, search_index_meta, search_posting};
-use crate::search::constants::{CURRENT_INDEX_VERSION, V3_INDEX_VERSION};
+use crate::search::constants::{
+    history_tag_token, CURRENT_INDEX_VERSION, SEARCH_FIELD_HISTORY_TAG, V3_INDEX_VERSION,
+};
 use crate::search::error::internal;
 use crate::search::render_payload::{RenderFields, RenderPayloadCodec};
 use crate::search::rows::{
@@ -58,6 +60,9 @@ struct FilterParams {
     /// 已去重的标签 id；顺序保持首次出现。
     tags: Vec<String>,
     tag_match: TagMatchMode,
+    /// 用户历史标签 id → 其在索引各保护组中的 HMAC 词项。旧格式 profile 为空集合，
+    /// 因而匹配不到任何条目。
+    history_tags: HashMap<String, Vec<Vec<u8>>>,
     extensions: Vec<String>,
     source_devices: Vec<String>,
     time_range: Option<TimeRangeFilter>,
@@ -121,6 +126,19 @@ impl ActiveRebuild {
 // ──────────────────────────────────────────────────────────────────────────────
 // Public adapter struct
 // ──────────────────────────────────────────────────────────────────────────────
+
+/// 收集一组标签 id 中用户历史标签对应的全部 HMAC 词项。
+fn history_tag_terms(
+    history_tags: &HashMap<String, Vec<Vec<u8>>>,
+    tag_ids: &[String],
+) -> Vec<Vec<u8>> {
+    tag_ids
+        .iter()
+        .filter_map(|tag_id| history_tags.get(tag_id))
+        .flatten()
+        .cloned()
+        .collect()
+}
 
 /// SQLite adapter implementing `SearchIndexPort`.
 ///
@@ -807,11 +825,26 @@ impl SqliteSearchIndex {
                         }
                     };
                     for group in groups {
+                        // 用户历史标签只以 HMAC posting 存在；只含内置标签的分组保持
+                        // 原有单子查询计划。
+                        let history_terms = history_tag_terms(&filters.history_tags, &group);
                         let members = search_entry_tag::table
                             .filter(search_entry_tag::profile_id.eq(profile_id))
                             .filter(search_entry_tag::tag_id.eq_any(group))
                             .select(search_entry_tag::entry_id);
-                        q = q.filter(search_document::entry_id.eq_any(members));
+                        if history_terms.is_empty() {
+                            q = q.filter(search_document::entry_id.eq_any(members));
+                        } else {
+                            let history_members = search_posting::table
+                                .filter(search_posting::profile_id.eq(profile_id))
+                                .filter(search_posting::term_tag.eq_any(history_terms))
+                                .select(search_posting::entry_id);
+                            q = q.filter(
+                                search_document::entry_id
+                                    .eq_any(members)
+                                    .or(search_document::entry_id.eq_any(history_members)),
+                            );
+                        }
                     }
                 }
                 if let Some((from_ms, to_ms)) = time_bounds {
@@ -896,6 +929,7 @@ impl SqliteSearchIndex {
                 conn,
                 profile_id,
                 &filters.tags,
+                &filters.history_tags,
                 filters.tag_match,
             )?)
         };
@@ -1096,16 +1130,39 @@ impl SqliteSearchIndex {
         conn: &mut SqliteConnection,
         profile_id: &str,
         tag_ids: &[String],
+        history_tags: &HashMap<String, Vec<Vec<u8>>>,
         mode: TagMatchMode,
     ) -> Result<HashSet<String>, SearchError> {
         use crate::db::schema::search_entry_tag::dsl;
 
-        let rows = dsl::search_entry_tag
+        let mut rows = dsl::search_entry_tag
             .filter(dsl::profile_id.eq(profile_id))
             .filter(dsl::tag_id.eq_any(tag_ids))
             .select((dsl::entry_id, dsl::tag_id))
             .load::<(String, String)>(conn)
             .map_err(internal("load_entry_ids_for_tags failed"))?;
+        let history_terms = history_tag_terms(history_tags, tag_ids);
+        if !history_terms.is_empty() {
+            let tag_by_term: HashMap<&[u8], &str> = history_tags
+                .iter()
+                .flat_map(|(tag_id, terms)| {
+                    terms
+                        .iter()
+                        .map(move |term| (term.as_slice(), tag_id.as_str()))
+                })
+                .collect();
+            let history_rows = search_posting::table
+                .filter(search_posting::profile_id.eq(profile_id))
+                .filter(search_posting::term_tag.eq_any(&history_terms))
+                .select((search_posting::entry_id, search_posting::term_tag))
+                .load::<(String, Vec<u8>)>(conn)
+                .map_err(internal("load_entry_ids_for_tags history tags failed"))?;
+            rows.extend(history_rows.into_iter().filter_map(|(entry_id, term)| {
+                tag_by_term
+                    .get(term.as_slice())
+                    .map(|tag_id| (entry_id, (*tag_id).to_string()))
+            }));
+        }
 
         match mode {
             TagMatchMode::Any => Ok(rows.into_iter().map(|(entry_id, _)| entry_id).collect()),
@@ -1122,6 +1179,59 @@ impl SqliteSearchIndex {
                     .collect())
             }
         }
+    }
+
+    /// 为查询中的用户历史标签派生各保护组的 HMAC 词项（内置标签不参与）。
+    ///
+    /// 旧格式 profile 没有用户标签，返回空词项，使这些标签匹配不到任何条目；
+    /// 会话锁定时失败关闭。
+    async fn history_tag_terms_for_query(
+        &self,
+        pool: &DbPool,
+        profile_id: &str,
+        tags: &[TagId],
+    ) -> Result<HashMap<String, Vec<Vec<u8>>>, SearchError> {
+        let tag_ids: Vec<String> = tags
+            .iter()
+            .filter(|tag| !tag.is_builtin())
+            .map(|tag| tag.as_str().to_string())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if tag_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let SearchProtectionStrategy::V3(protection) = &self.protection else {
+            return Ok(tag_ids
+                .into_iter()
+                .map(|tag_id| (tag_id, Vec::new()))
+                .collect());
+        };
+        let refs = {
+            let pool = pool.clone();
+            let profile_id = profile_id.to_string();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = pool.get().map_err(internal("pool error"))?;
+                Self::load_v3_group_refs(&mut conn, &profile_id)
+            })
+            .await
+            .map_err(internal("spawn_blocking error"))??
+        };
+        let tokens: Vec<String> = tag_ids.iter().map(|id| history_tag_token(id)).collect();
+        let terms = protection
+            .query_terms(&refs, &tokens)
+            .await
+            .map_err(|error| match error {
+                V3SearchProtectionError::InvalidGroupReferences { .. } => {
+                    SearchError::IndexNotReady
+                }
+                other if other.runtime_closed() => SearchError::SessionLocked,
+                other => internal("prepare history tag query failed")(other),
+            })?;
+        Ok(tag_ids
+            .into_iter()
+            .zip(terms.alternatives_by_term().iter().cloned())
+            .collect())
     }
 
     /// 查询前的保护准备：派生关键词 term tag、渲染解密器，并在会话锁定时返回
@@ -1675,8 +1785,12 @@ impl SearchIndexPort for SqliteSearchIndex {
             .map(|ct| serde_json::to_string(ct).map(|s| s.trim_matches('"').to_string()))
             .collect::<Result<Vec<_>, _>>()
             .map_err(internal("content_type encode failed"))?;
+        let history_tags = self
+            .history_tag_terms_for_query(&pool, &profile_id, &query.tags)
+            .await?;
         let filters = FilterParams {
             content_types,
+            history_tags,
             tags: {
                 let mut seen = HashSet::new();
                 query
@@ -2117,6 +2231,94 @@ impl SearchIndexPort for SqliteSearchIndex {
             }
 
             Ok(())
+        })
+        .await
+        .map_err(internal("spawn_blocking error"))?
+    }
+
+    async fn set_entry_history_tags(
+        &self,
+        entry_id: &EntryId,
+        tag_ids: &[TagId],
+    ) -> Result<(), SearchError> {
+        // 旧格式 profile 不保存用户标签，索引中也就没有可替换的成员。
+        let SearchProtectionStrategy::V3(protection) = &self.protection else {
+            return Ok(());
+        };
+        let profile_id = self.current_profile_id().await?.into_inner();
+        let entry_id = entry_id.to_string();
+        let group_ref = {
+            let pool = self.pool.clone();
+            let profile_id = profile_id.clone();
+            let entry_id = entry_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = pool.get().map_err(internal("pool error"))?;
+                search_document::table
+                    .filter(search_document::profile_id.eq(&profile_id))
+                    .filter(search_document::entry_id.eq(&entry_id))
+                    .select(search_document::protection_group_ref)
+                    .first::<Option<Vec<u8>>>(&mut conn)
+                    .optional()
+                    .map_err(internal("load entry protection group failed"))
+            })
+            .await
+            .map_err(internal("spawn_blocking error"))??
+        };
+        // 条目尚未建立索引：之后的索引写入会从权威关联补齐。
+        let Some(group_ref) = group_ref else {
+            return Ok(());
+        };
+        let group_ref = group_ref
+            .as_deref()
+            .ok_or(SearchError::IndexNotReady)
+            .and_then(|bytes| {
+                SearchGroupRef::from_bytes(bytes).map_err(|_| SearchError::IndexNotReady)
+            })?;
+        let tokens: Vec<String> = tag_ids
+            .iter()
+            .map(|tag_id| history_tag_token(tag_id.as_str()))
+            .collect();
+        let terms: Vec<Vec<u8>> = if tokens.is_empty() {
+            Vec::new()
+        } else {
+            protection
+                .query_terms(std::slice::from_ref(&group_ref), &tokens)
+                .await
+                .map_err(|error| match error {
+                    other if other.runtime_closed() => SearchError::SessionLocked,
+                    other => internal("derive history tag terms failed")(other),
+                })?
+                .alternatives_by_term()
+                .iter()
+                .flatten()
+                .cloned()
+                .collect()
+        };
+        let pool = self.pool.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = pool.get().map_err(internal("pool error"))?;
+            conn.immediate_transaction(|conn| {
+                diesel::delete(
+                    search_posting::table
+                        .filter(search_posting::profile_id.eq(&profile_id))
+                        .filter(search_posting::entry_id.eq(&entry_id))
+                        .filter(search_posting::field_mask.eq(i32::from(SEARCH_FIELD_HISTORY_TAG))),
+                )
+                .execute(conn)?;
+                for term in terms {
+                    diesel::insert_or_ignore_into(search_posting::table)
+                        .values(NewSearchPostingRow {
+                            profile_id: profile_id.clone(),
+                            term_tag: term,
+                            entry_id: entry_id.clone(),
+                            field_mask: i32::from(SEARCH_FIELD_HISTORY_TAG),
+                            term_freq: 1,
+                        })
+                        .execute(conn)?;
+                }
+                Ok::<_, diesel::result::Error>(())
+            })
+            .map_err(internal("replace history tag postings failed"))
         })
         .await
         .map_err(internal("spawn_blocking error"))?
