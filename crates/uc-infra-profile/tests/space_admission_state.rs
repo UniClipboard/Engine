@@ -7,24 +7,28 @@ use diesel::sql_query;
 use diesel::sql_types::Binary;
 use tempfile::TempDir;
 use uc_application::deps::{
-    AdmissionReadFailureCategory, AdmissionRecoveryTrigger, JoinerStartMutation,
-    JoinerStartStateError, JoinerStartStatePort, LoadCurrentJoinStatusPort, MembershipLedgerError,
-    MembershipRecord, MembershipRecordCommit, MembershipRecordStorePort,
+    AdmissionReadFailureCategory, AdmissionRecoveryTrigger, CurrentJoinAdmissionStatePort,
+    JoinerStartMutation, JoinerStartStateError, JoinerStartStatePort, LoadCurrentJoinStatusPort,
+    MembershipLedgerError, MembershipRecord, MembershipRecordCommit, MembershipRecordStorePort,
     PendingAdmissionRecoveryStateError, PendingAdmissionRecoveryStatePort,
 };
-use uc_application::facade::{AdmissionRecoveryAction, AdmissionRecoveryStage};
+use uc_application::facade::{
+    AdmissionRecoveryAction, AdmissionRecoveryStage, CurrentJoinStatus, JoinSpaceAttentionReason,
+    JoinSpaceAttentionRecovery,
+};
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
     ActiveSpaceGenerationManifestV2, AdmissionAttemptContractV2, AdmissionChangeFacts,
     AdmissionChannelPeerId, AdmissionContinuationCredential, AdmissionEncryptedPasswordEquivalent,
     AdmissionIdentitySignature, AdmissionJoinRequestV1, AdmissionJoinerPrivateState,
     AdmissionJoinerStartContext, AdmissionKeyPackage, AdmissionPeerBinding,
-    AdmissionRecordPersistence, AdmissionRecoveryPublicKey, AdmissionRetryState, AdmissionRole,
-    AdmissionShortInvitationCode, AdmissionSourceSnapshot, InvitationId, JoinId, JoinerAdmission,
-    JoinerAdmissionTransition, JoinerInvitationResolution, MembershipCredential,
-    PendingAdmissionExchange, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId,
-    SpaceAdmissionMessageKind, SpaceAdmissionProtocolVersion, SpaceAdmissionRejectionReason,
-    SpaceAdmissionRoute, SponsorAdmission, SponsorAdmissionTransition, UnreadableHistoryPolicy,
+    AdmissionRecordPersistence, AdmissionRecoveryCategory, AdmissionRecoveryPublicKey,
+    AdmissionRetryState, AdmissionRole, AdmissionShortInvitationCode, AdmissionSourceSnapshot,
+    InvitationId, JoinId, JoinerAdmission, JoinerAdmissionTransition, JoinerInvitationResolution,
+    MembershipCredential, PendingAdmissionExchange, SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1,
+    SpaceAdmissionId, SpaceAdmissionMessageKind, SpaceAdmissionProtocolVersion,
+    SpaceAdmissionRejectionReason, SpaceAdmissionRoute, SponsorAdmission,
+    SponsorAdmissionTransition, UnreadableHistoryPolicy,
 };
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
 use uc_core::security::IdentityFingerprint;
@@ -510,6 +514,53 @@ async fn recovery_commit_preserves_repository_read_failure_classification() {
     );
     let source = std::error::Error::source(&error).expect("store error source");
     assert!(source.source().is_some(), "repository source chain");
+}
+
+#[tokio::test]
+async fn recovery_required_record_reports_captured_join_id_after_restart() {
+    // 覆盖 `project_current_join()` 和 cancellation 查找两个真正会在
+    // `RecoveryRequired` 终态上调用 `recovery_join_id()` 的调用点：构造一条真实
+    // 经过 SQLite 落盘再重新打开的续传恢复记录，证明两条路径都不会 panic，
+    // 并且都能用转换时捕获的 join_id 正确关联到这次加入会话。
+    let fixture = Fixture::new();
+    commit_fresh_join(&fixture, 0x51, 0x52).await;
+    let mut pending = PendingAdmissionRecoveryStatePort::load(
+        &fixture.store,
+        AdmissionRecoveryTrigger::Startup,
+        0,
+    )
+    .await
+    .unwrap()
+    .into_pending_admissions();
+    let (aggregate, token) = pending.pop().unwrap().into_parts();
+    let join_id = aggregate.join_id();
+    let transition = aggregate
+        .require_recovery(AdmissionRecoveryCategory::MissingKey)
+        .unwrap();
+    PendingAdmissionRecoveryStatePort::commit(&fixture.store, token, transition)
+        .await
+        .unwrap();
+
+    let reopened = fixture.reopen();
+    let status = LoadCurrentJoinStatusPort::load_current_join(&reopened)
+        .await
+        .unwrap()
+        .expect("recovery-required join remains queryable after restart");
+    assert!(matches!(
+        status,
+        CurrentJoinStatus::NeedsAttention {
+            join_id: reported_join_id,
+            reason: JoinSpaceAttentionReason::ContinuationUnavailable,
+            recovery: JoinSpaceAttentionRecovery::RestartWithNewInvitation,
+            ..
+        } if reported_join_id == *join_id.as_bytes()
+    ));
+
+    let loaded = CurrentJoinAdmissionStatePort::load(&fixture.reopen(), join_id)
+        .await
+        .unwrap()
+        .expect("cancellation lookup finds the recovery-required join by its captured join_id");
+    assert_eq!(loaded.into_parts().0.recovery_join_id(), Some(join_id));
 }
 
 #[tokio::test]
