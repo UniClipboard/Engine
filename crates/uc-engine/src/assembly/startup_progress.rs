@@ -1,4 +1,3 @@
-use std::future::Future;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -116,12 +115,10 @@ impl StartupProfileUpgradeBackup {
         Self { inner, progress }
     }
 
-    async fn track(
+    fn settle(
         &self,
-        operation: impl Future<Output = Result<(), ProfileUpgradeBackupError>>,
+        result: Result<(), ProfileUpgradeBackupError>,
     ) -> Result<(), ProfileUpgradeBackupError> {
-        self.progress.backup_started();
-        let result = operation.await;
         if result.is_ok() {
             self.progress.backup_completed();
         } else if let Err(error) = &result {
@@ -151,32 +148,22 @@ impl ProfileUpgradeBackupPort for StartupProfileUpgradeBackup {
         self.inner.read_source()
     }
 
-    fn read_prepared_target(
-        &self,
-    ) -> Result<Option<ProfileUpgradeVersions>, ProfileUpgradeBackupError> {
-        self.inner.read_prepared_target()
-    }
-
     async fn capture_verified(
         &self,
         target: &ProfileUpgradeVersions,
     ) -> Result<(), ProfileUpgradeBackupError> {
-        self.track(self.inner.capture_verified(target)).await
-    }
-
-    async fn verify_prepared(
-        &self,
-        target: &ProfileUpgradeVersions,
-    ) -> Result<(), ProfileUpgradeBackupError> {
-        self.track(self.inner.verify_prepared(target)).await
+        self.progress.backup_started();
+        let result = self.inner.capture_verified(target).await;
+        self.settle(result)
     }
 
     async fn preserve_security_materials(
         &self,
         target: &ProfileUpgradeVersions,
     ) -> Result<(), ProfileUpgradeBackupError> {
-        self.track(self.inner.preserve_security_materials(target))
-            .await
+        self.progress.backup_started();
+        let result = self.inner.preserve_security_materials(target).await;
+        self.settle(result)
     }
 }
 
@@ -216,18 +203,7 @@ mod tests {
                 source_engine: None,
             })
         }
-        fn read_prepared_target(
-            &self,
-        ) -> Result<Option<ProfileUpgradeVersions>, ProfileUpgradeBackupError> {
-            Ok(None)
-        }
         async fn capture_verified(
-            &self,
-            _: &ProfileUpgradeVersions,
-        ) -> Result<(), ProfileUpgradeBackupError> {
-            Ok(())
-        }
-        async fn verify_prepared(
             &self,
             _: &ProfileUpgradeVersions,
         ) -> Result<(), ProfileUpgradeBackupError> {

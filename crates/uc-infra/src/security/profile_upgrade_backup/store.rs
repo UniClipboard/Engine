@@ -20,12 +20,14 @@ use crate::security::profile_backup_archive::{
     sync_directory,
     tree::{create_private_directory, require_disjoint_destination, resolve_source_root},
 };
-use crate::security::{ProfileArchiveReceipt, ProfileBackupArchive, ProfileBackupSource};
+use crate::security::{
+    ProfileArchiveReceipt, ProfileBackupArchive, ProfileBackupArchiveError, ProfileBackupSource,
+};
 
 use super::diagnostics::{record_backup_failure, with_backup_action};
 use super::inventory::{excluded_paths, has_profile};
 use super::record::{
-    publish_file_record, read_file_record, read_file_record_path, read_record_path,
+    publish_file_record, read_file_record, read_file_record_path, read_record, read_record_path,
     FileBackupRecord, RECORD_KEY,
 };
 
@@ -151,14 +153,6 @@ impl ProfileUpgradeBackupPort for ProfileUpgradeBackupStore {
         )
     }
 
-    fn read_prepared_target(
-        &self,
-    ) -> Result<Option<ProfileUpgradeVersions>, ProfileUpgradeBackupError> {
-        let result =
-            read_file_record(&self.directory()).map(|record| record.map(|record| record.target()));
-        Self::record_result("read_prepared_target", result)
-    }
-
     async fn capture_verified(
         &self,
         target: &ProfileUpgradeVersions,
@@ -170,19 +164,6 @@ impl ProfileUpgradeBackupPort for ProfileUpgradeBackupStore {
             Err(error) => Err(backup_error(error)),
         };
         Self::record_result("capture_profile", result)
-    }
-
-    async fn verify_prepared(
-        &self,
-        target: &ProfileUpgradeVersions,
-    ) -> Result<(), ProfileUpgradeBackupError> {
-        let store = self.clone();
-        let target = target.clone();
-        let result = match tokio::task::spawn_blocking(move || store.verify(&target)).await {
-            Ok(result) => result,
-            Err(error) => Err(backup_error(error)),
-        };
-        Self::record_result("verify_profile", result)
     }
 
     async fn preserve_security_materials(
@@ -239,10 +220,18 @@ impl ProfileUpgradeBackupStore {
     fn capture(&self, target: &ProfileUpgradeVersions) -> Result<(), ProfileUpgradeBackupError> {
         let _lease = Self::record_action("acquire_lease", self.lease())?;
         // 取消后的旧任务可能刚完成发布；持锁重新读取，不覆盖它保留的原始资料。
-        if Self::record_action("read_prepared_record", read_file_record(&self.directory()))?
-            .is_some_and(|record| &record.target() == target)
+        if let Some(prepared) =
+            Self::record_action("read_prepared_record", read_file_record(&self.directory()))?
+                .filter(|record| &record.target() == target)
         {
-            return Self::record_action("verify_prepared_profile", self.verify(target));
+            Self::record_action("verify_prepared_profile", self.verify(target))?;
+            if !Self::record_action(
+                "check_prepared_freshness",
+                self.prepared_backup_is_stale(&prepared),
+            )? {
+                return Ok(());
+            }
+            // 副本尚无安全记录且来源已变：升级写入还没开始，原副本保留在目录中，重新捕获当前资料。
         }
         let root = Self::record_action(
             "resolve_profile_root",
@@ -273,9 +262,7 @@ impl ProfileUpgradeBackupStore {
         if Self::record_action("confirm_source_versions", self.source())? != source {
             return Self::record_action(
                 "confirm_source_versions",
-                Err(backup_error(io::Error::other(
-                    "profile backup source changed",
-                ))),
+                Err(backup_error(ProfileBackupArchiveError::SourceChanged)),
             );
         }
         Self::record_action(
@@ -291,6 +278,43 @@ impl ProfileUpgradeBackupStore {
                 },
             ),
         )
+    }
+
+    /// 已准备副本是否应当丢弃重捕获。
+    ///
+    /// 安全记录一旦属于这份副本，后续升级写入可能已经开始，来源资料不再等于升级前状态，
+    /// 绝不能再捕获；读不出安全记录时同样按“可能已发布”保守复用。只有确认没有属于它的
+    /// 安全记录、且来源摘要不再匹配时才判定过期；其他校验失败照常上报。
+    fn prepared_backup_is_stale(
+        &self,
+        prepared: &FileBackupRecord,
+    ) -> Result<bool, ProfileUpgradeBackupError> {
+        let published = match read_record(&self.directory(), self.secure_storage.as_ref()) {
+            Ok(Some(security)) => {
+                security.files.receipt == prepared.receipt
+                    && security.files.spool_receipt == prepared.spool_receipt
+                    && security.files.target() == prepared.target()
+            }
+            Ok(None) => false,
+            Err(_) => true,
+        };
+        if published {
+            return Ok(false);
+        }
+        match self.verify_source_files(prepared) {
+            Ok(()) => Ok(false),
+            Err(error)
+                if error.source.chain().any(|source| {
+                    matches!(
+                        source.downcast_ref::<ProfileBackupArchiveError>(),
+                        Some(ProfileBackupArchiveError::SourceChanged)
+                    )
+                }) =>
+            {
+                Ok(true)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub(super) fn prune_locked(&self) -> Result<(), ProfileUpgradeBackupError> {
