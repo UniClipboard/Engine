@@ -32,6 +32,9 @@ python3 scripts/build-cache/benchmark-local.py \
 `check --workspace --all-targets --locked --timings`。依次记录一次冷构建、多次热构建、
 `uc-core` 注释微改后的重建、恢复源码后的重建，以及同一 target 中两条命令的锁竞争。
 微改不改变业务行为，正常退出与异常退出时恢复原始字节；运行期间不得有其他进程编辑该文件。
+单次构建默认限时 3600 秒，可用 `--timeout` 覆盖；工具信息采集限时 30 秒。
+超时记录 `timed_out=true` 与退出码 124，先终止本次独立构建进程组（含 Cargo/rustc）再恢复源码。
+两个锁竞争样本分别记录 `lock_wait_observed` 与匹配原文；未实际等待时不能据标签宣称竞争。
 
 工件包含源码 HEAD/状态、机器和工具版本、非敏感构建环境、完整命令/耗时/退出码、原始日志、
 Cargo timing HTML 和中位数表。冷构建只指空 target/动作缓存，不包含清空 Cargo 下载或 OS 页面缓存。
