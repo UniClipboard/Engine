@@ -128,3 +128,10 @@ R2 令牌在 Cloudflare 仪表盘 → R2 → Manage API tokens 以 Account API t
 - 升级 sccache 时同时更新 action 的 `version` 与脚本中的版本号和二进制 sha256，并重跑基准。
 - 收益必须以 `compile-cache-benchmark.yml` 在同一提交、同一 runner 类别上的冷/暖对照为准；缓存只减少可缓存的
   rustc 编译，链接、build script、proc-macro 与测试执行不受影响，不承诺固定加速。
+
+## MBX 共用桶补充（2026-10-07）
+
+现有 CI sccache 路线保持本决定的格式、命名空间和服务凭据装配。新增的可选 MBX R2 流程使用
+`engine/mbx/v1/`，只共用桶与 GitHub 读写环境，不共用 sccache 条目。主线 MBX 发布还要求真实受保护
+分支 push；本机与 PR 为只读。完整接入与验收规则只在[本地构建指南](../local-builds.md#r2-分布式动作缓存)维护。
+为 `engine/mbx/` 配置独立对象过期规则并确认容量；不得覆盖现有 sccache 生命周期规则。

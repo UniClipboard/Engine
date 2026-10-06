@@ -6,9 +6,30 @@
 #   mbx.sh --exec <命令...>     让命令内部的 cargo 调用也经由 mbx（如 scripts/testing/run-test-group.sh）
 #   mbx.sh --mbx <子命令...>    以同一配置运行 mbx 自身命令（如 cache stats、gc --dry-run）
 #   mbx.sh --install            只下载并校验固定版本
+#   mbx.sh --r2 <上述参数...>    使用 R2 分布式动作缓存（凭据由调用方提供）
 #
 # 缓存位置由调用方环境的 MBX_CACHE_DIR 决定（未设置时使用 mbx 平台默认位置）；仓库不写入机器路径。
 set -euo pipefail
+
+# 仅当前命令配置原生 S3 后端；本地与 PR 的写入限制继续由 mbx 和桶级权限决定。
+if [[ "${1:-}" == --r2 ]]; then
+  shift
+  for required in BUILD_CACHE_R2_ENDPOINT BUILD_CACHE_R2_ACCESS_KEY_ID BUILD_CACHE_R2_SECRET_ACCESS_KEY; do
+    if [[ -z "${!required:-}" ]]; then
+      printf 'mbx: R2 缺少 %s；未启动构建\n' "$required" >&2
+      exit 1
+    fi
+  done
+  export MBX_REMOTE_URL=s3://uniclipboard-build-cache
+  export MBX_REMOTE_NAMESPACE=engine/mbx
+  export MBX_REMOTE_S3_ENDPOINT="$BUILD_CACHE_R2_ENDPOINT"
+  export MBX_REMOTE_S3_REGION=auto
+  export MBX_REMOTE_MODE="${MBX_REMOTE_MODE:-read-only}"
+  export AWS_ACCESS_KEY_ID="$BUILD_CACHE_R2_ACCESS_KEY_ID"
+  export AWS_SECRET_ACCESS_KEY="$BUILD_CACHE_R2_SECRET_ACCESS_KEY"
+  # R2 固定访问密钥不用会话令牌，不能继承另一套 AWS 身份的令牌。
+  unset AWS_SESSION_TOKEN MBX_REMOTE_TOKEN MBX_REMOTE_TOKEN_FILE MBX_REMOTE_OIDC_AUDIENCE
+fi
 
 MBX_VERSION=1.18.0
 
@@ -88,6 +109,6 @@ case "${1:-}" in
   --install) printf 'mbx %s: %s\n' "$MBX_VERSION" "$MBX_BIN" ;;
   --exec) shift; exec "$@" ;;
   --mbx) shift; exec "$MBX_BIN" "$@" ;;
-  "" | -h | --help) sed -n '2,10p' "$0" ;;
+  "" | -h | --help) sed -n '2,11p' "$0" ;;
   *) exec "$MBX_BIN" "$@" ;;
 esac

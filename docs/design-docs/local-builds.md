@@ -19,6 +19,37 @@ MBX 不接管或回收 target。外置路径由本机既有配置或调用方提
 仍需调用方安排；内存紧张时通过 `CARGO_BUILD_JOBS=2` 收紧，命令行 `-j N` 优先于环境默认。
 不要通过关闭必要 features、降低 Infra 优化级别或改变发布 profile 换取无法比较的耗时。
 
+## R2 分布式动作缓存
+
+使用固定 MBX 原生 S3 后端：`just mbx --r2 <Cargo 参数>`。每个 worker 仍有独立 target 和本地
+动作缓存；远端对象位于 `uniclipboard-build-cache` 桶的 `engine/mbx/v1/`，与 sccache 前缀隔离。
+R2 共享编译结果，不提供跨机器编译锁或调度，也不会把 sccache 对象转换为 MBX 对象。
+
+调用方从安全凭据管理器提供 `BUILD_CACHE_R2_ENDPOINT`、`BUILD_CACHE_R2_ACCESS_KEY_ID` 与
+`BUILD_CACHE_R2_SECRET_ACCESS_KEY`，不要在仓库、命令行参数或日志中保存值。端点是账户的 HTTPS R2
+S3 端点；访问密钥仅限该桶。缺少任一项时入口报错，不会启动本地构建冒充远端使用。
+入口只在当前子进程映射为原生 AWS 凭据，region 为 `auto`，默认 `MBX_REMOTE_MODE=read-only`；
+本机和 PR 应使用只读令牌。凭据会进入本次构建的环境，原生 MBX 不是对 build script 的凭据隔离机制。
+
+可信 main 的受保护分支 push CI 才使用写令牌与 `read-write`；写令牌仍放在仅允许 main 的
+`engine-build-cache-writer` 环境，PR 使用 `engine-build-cache-reader`。MBX 1.18.0 会将本地、PR、
+未保护分支和手工触发收紧为只读，不能靠只写 `read-write` 启用发布，也不得伪造 GitHub 环境。
+主线必须真实受保护；接入前应核对实际规则。本机尚需独立配置只读凭据，GitHub secrets 无法读回。
+正式 release/tag 不接入共享缓存。主线发布与 PR 只读验收由
+[`mbx-r2-cache.yml`](../../.github/workflows/mbx-r2-cache.yml) 运行，工件包含诊断及原生统计；主线还必须
+运行独立空 target/动作缓存的消费者并确认下载、命中、无远端错误与零上传。
+
+R2 诊断使用 `just mbx --r2 --mbx doctor --json`；预取使用
+`just mbx --r2 --mbx prefetch check --workspace --all-targets --locked`。空 manifest 不等于连接故障，
+但诊断成功也不等于编译命中。用 `MBX_STATS_REPORT` 保存原生统计，并在独立空 target/本地动作缓存
+消费者中确认 `downloaded_bytes`、恢复输出与 hits；远端错误和上传失败也必须保留。
+
+R2 的桶级令牌不能按前缀隔离信任；只有可信构建可以拿到写令牌。MBX 原生内容校验、请求期限、
+读失败后本地编译与异步上传负责缓存失败恢复，不另实现网络缓存层。R2 的真实共享命中及耗时须另行
+验收，先前的 2/4 任务基准不是远端缓存收益。配置语义见
+[MBX 固定版本远端缓存文档](https://github.com/jdx/mr-boxington/blob/v1.18.0/docs/remote-cache.md)
+与 [Cloudflare R2 S3 接入](https://developers.cloudflare.com/r2/get-started/s3/)。
+
 ## 可重复测量
 
 从仓库根目录运行，`--scratch` 指向已存在的外置可再生目录，`--output` 必须是新的日志目录：

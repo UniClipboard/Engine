@@ -138,6 +138,7 @@ just mbx-tool cache stats
 - 缓存位置由环境变量 `MBX_CACHE_DIR` 决定，未设置时使用 mbx 的平台默认位置。
 - 可选 MBX 入口默认 4 个编译任务，可用 `CARGO_BUILD_JOBS` 或 `-j` 覆盖；普通 `cargo`、sccache 和 CI 不受影响。
 - 同一个 worktree 请只使用一条路线（`just mbx` 或普通 `cargo`）；来回切换会重编工作区 crate。
+- 使用 R2 分布式缓存时执行 `just mbx --r2 <Cargo 参数>`，本地 worker 与 PR 只读、可信受保护 main CI 写入；凭据与验证条件见[本地构建指南](docs/design-docs/local-builds.md#r2-分布式动作缓存)。
 
 取舍与实测数据见 [ADR-028](docs/design-docs/decisions/028-optional-mbx-build-cache.md)。
 多 worktree 的输出隔离、并行度和复跑基准见 [本地构建指南](docs/design-docs/local-builds.md)。
