@@ -752,6 +752,9 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
                     uc_engine::JoinSpaceAttentionReasonSummary::OutcomeCannotBeProven => {
                         "outcome_cannot_be_proven"
                     }
+                    uc_engine::JoinSpaceAttentionReasonSummary::ContinuationUnavailable => {
+                        "continuation_unavailable"
+                    }
                 }
                 .to_owned(),
             ),
@@ -759,6 +762,9 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
                 match recovery {
                     uc_engine::JoinSpaceAttentionRecoverySummary::PreserveDataAndContactSupport => {
                         "preserve_data_and_contact_support"
+                    }
+                    uc_engine::JoinSpaceAttentionRecoverySummary::RestartWithNewInvitation => {
+                        "restart_with_new_invitation"
                     }
                 }
                 .to_owned(),

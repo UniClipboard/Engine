@@ -41,11 +41,15 @@ pub enum JoinSpaceTerminationReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinSpaceAttentionReason {
     OutcomeCannotBeProven,
+    /// 本机已经完成一次完整密码校验，但对端确认续传凭据不可用；不是密码错误。
+    ContinuationUnavailable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinSpaceAttentionRecovery {
     PreserveDataAndContactSupport,
+    /// 当前邀请码对应的加入会话已经无法续传，只能用一个全新邀请码重新开始。
+    RestartWithNewInvitation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

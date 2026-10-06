@@ -230,9 +230,11 @@ impl SpaceAdmissionAggregate {
                 SpaceAdmissionRejectedState::LocalJoiner(_)
                 | SpaceAdmissionRejectedState::Joiner(_),
             )) => Some(AdmissionRole::Joiner),
+            // 目前只有 JoinerAdmission 暴露 `require_recovery`；SponsorAdmission 尚无对应入口。
+            // 这里与可公开调用的转换保持一致，否则持久化记录重新打开时会被判定为无角色而拒绝解码。
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::RecoveryRequired(
                 _,
-            )) => None,
+            )) => Some(AdmissionRole::Joiner),
         }
     }
 

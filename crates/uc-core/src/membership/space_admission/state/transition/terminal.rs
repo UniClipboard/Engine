@@ -168,18 +168,23 @@ impl SpaceAdmissionAggregate {
         mut self,
         category: AdmissionRecoveryCategory,
     ) -> Result<AdmissionTransition, SpaceAdmissionAggregateError> {
-        if matches!(self.state, SpaceAdmissionRecordState::Terminal(_)) {
-            return Err(SpaceAdmissionAggregateError::InvalidTransition);
-        }
+        // 目前只有 JoinerAdmission 公开 `require_recovery`，到这里时必然还是未终结的
+        // Joiner 子状态；借此机会把 join_id 保留下来，供恢复终态展示时复用。
+        let join_id = match &self.state {
+            SpaceAdmissionRecordState::Joiner(joiner_state) => joiner_state.join_id(),
+            _ => return Err(SpaceAdmissionAggregateError::InvalidTransition),
+        };
         let record_version = self
             .record_version
             .checked_add(1)
             .ok_or(SpaceAdmissionAggregateError::RecordVersionOverflow)?;
         self.record_version = record_version;
-        self.state =
-            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::RecoveryRequired(
-                SpaceAdmissionRecoveryRequiredTerminal { category },
-            ));
+        self.state = SpaceAdmissionRecordState::Terminal(
+            SpaceAdmissionTerminalState::RecoveryRequired(SpaceAdmissionRecoveryRequiredTerminal {
+                category,
+                join_id: Some(join_id),
+            }),
+        );
         Ok(AdmissionTransition::new(self, &[]))
     }
 

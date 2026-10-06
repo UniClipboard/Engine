@@ -326,3 +326,50 @@ fn persistence_round_trips_superseded_rejected_and_recovery_states() {
             .into_replacement(),
     );
 }
+
+#[test]
+fn recovery_required_joiner_reopens_through_the_public_joiner_role() {
+    // `require_recovery` 只在 JoinerAdmission 上公开；记录角色必须保持 Joiner，
+    // 否则 `JoinerAdmission::decode_persisted` 会把持久化的 RecoveryRequired 记录
+    // 误判为无角色而拒绝重新打开——这正是加入方重启或续传恢复时真实发生的路径。
+    let candidate = JoinerAdmission::try_from_record(joiner_candidate_aggregate_fixture())
+        .expect("Candidate aggregate is a Joiner record");
+    let original_join_id = candidate.join_id();
+    let recovered = candidate
+        .require_recovery(AdmissionRecoveryCategory::MissingKey)
+        .expect("Candidate Joiner can require recovery")
+        .into_replacement();
+    let encoded = recovered
+        .encode_persisted()
+        .expect("recovery-required Joiner must be persistable");
+    let reopened =
+        JoinerAdmission::decode_persisted(&encoded).expect("Joiner record must reopen as Joiner");
+    assert!(reopened.needs_attention());
+    assert_eq!(
+        reopened.recovery_category(),
+        Some(AdmissionRecoveryCategory::MissingKey)
+    );
+    // 转换时的 join_id 必须完整保留下来，display 层才能用通用 `join_id()`
+    // 为这个终态展示一个真实、可关联的 join_id，不需要专门的旁路入口。
+    assert_eq!(reopened.join_id(), original_join_id);
+}
+
+#[test]
+fn recovery_required_without_a_captured_join_id_decodes_without_panicking() {
+    // 复现历史格式：只保存了类别、没有 join_id 的 `RecoveryRequired` 记录
+    // （本次改动之前产生的记录就是这个形状）。读取路径必须优雅降级，
+    // `join_id()` 对这类记录返回 `None` 而不是编造一个值或 panic。
+    let legacy = JoinerAdmission::try_from_record(joiner_candidate_aggregate_fixture())
+        .expect("Candidate aggregate is a Joiner record")
+        .require_recovery(AdmissionRecoveryCategory::MissingKey)
+        .expect("Candidate Joiner can require recovery")
+        .into_replacement()
+        .forget_recovery_join_id_for_test();
+    let encoded = legacy
+        .encode_persisted()
+        .expect("category-only recovery-required Joiner must still be persistable");
+    let reopened = JoinerAdmission::decode_persisted(&encoded)
+        .expect("legacy category-only record must still reopen as Joiner");
+    assert!(reopened.needs_attention());
+    assert_eq!(reopened.join_id(), None);
+}
