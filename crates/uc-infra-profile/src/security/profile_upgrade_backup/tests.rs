@@ -398,11 +398,7 @@ async fn competing_backup_attempt_fails_without_publishing_or_adopting() {
     );
     drop(lease);
     fixture.prepare().await.unwrap();
-    fixture
-        .backup
-        .verify_prepared(&fixture.target())
-        .await
-        .unwrap();
+    fixture.backup.verify(&fixture.target()).unwrap();
 }
 
 #[cfg(unix)]
@@ -482,7 +478,7 @@ async fn inaccessible_keychain_still_leaves_files_restorable_after_userdata_dele
 }
 
 #[tokio::test]
-async fn file_backup_survives_security_failure_and_retry_does_not_replace_it() {
+async fn stale_prepared_backup_is_recaptured_before_any_upgrade_write_and_keeps_the_old_copy() {
     let fixture = Fixture::new();
     fixture.seed();
     fixture
@@ -495,7 +491,62 @@ async fn file_backup_survives_security_failure_and_retry_does_not_replace_it() {
         .unwrap()
         .receipt;
     fs::write(&fixture.paths.settings_path, b"changed-after-files").unwrap();
-    assert!(fixture.prepare().await.is_err());
+
+    fixture.prepare().await.unwrap();
+
+    let published = fixture.record();
+    assert_ne!(published.files.receipt.archive_id, first.archive_id);
+    assert_eq!(
+        read_file_record(&fixture.backup.directory())
+            .unwrap()
+            .unwrap()
+            .receipt,
+        published.files.receipt
+    );
+    // 作废的旧副本与来源资料都不被改动。
+    ProfileBackupArchive::new(fixture.backup.directory())
+        .verify(&first)
+        .unwrap();
+    assert_eq!(
+        fs::read(&fixture.paths.settings_path).unwrap(),
+        b"changed-after-files"
+    );
+}
+
+#[tokio::test]
+async fn stale_prepared_backup_is_recaptured_when_an_older_target_has_a_security_record() {
+    let fixture = Fixture::new();
+    fixture.seed();
+    fixture.prepare().await.unwrap();
+    let older = fixture.record().files.receipt;
+    let newer = ProfileUpgradeVersions {
+        product: "2.1.0".into(),
+        engine: "3.0.0".into(),
+    };
+    fixture.backup.capture_verified(&newer).await.unwrap();
+    fs::write(&fixture.paths.settings_path, b"changed-after-files").unwrap();
+
+    fixture.workflow(newer.clone()).execute().await.unwrap();
+
+    let published = fixture.record();
+    assert_eq!(published.files.target(), newer);
+    assert_ne!(published.files.receipt.archive_id, older.archive_id);
+}
+
+#[tokio::test]
+async fn published_security_record_forbids_recapture_after_the_source_changes() {
+    let fixture = Fixture::new();
+    fixture.seed();
+    fixture.prepare().await.unwrap();
+    let first = fixture.record().files.receipt;
+    fs::write(&fixture.paths.settings_path, b"already-upgraded").unwrap();
+
+    fixture
+        .backup
+        .capture_verified(&fixture.target())
+        .await
+        .unwrap();
+
     assert_eq!(
         read_file_record(&fixture.backup.directory())
             .unwrap()
@@ -503,6 +554,30 @@ async fn file_backup_survives_security_failure_and_retry_does_not_replace_it() {
             .receipt,
         first
     );
+    assert_eq!(fixture.backup.list_backups().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn source_change_between_capture_and_security_record_is_classified_as_source_changed() {
+    let fixture = Fixture::new();
+    fixture.seed();
+    fixture
+        .backup
+        .capture_verified(&fixture.target())
+        .await
+        .unwrap();
+    fs::write(&fixture.paths.settings_path, b"changed-after-files").unwrap();
+
+    let error = fixture
+        .backup
+        .preserve_security_materials(&fixture.target())
+        .await
+        .unwrap_err();
+
+    assert!(error.source.chain().any(|source| matches!(
+        source.downcast_ref::<crate::security::ProfileBackupArchiveError>(),
+        Some(crate::security::ProfileBackupArchiveError::SourceChanged)
+    )));
     assert!(!fixture.backup.directory().join("security-current").exists());
 }
 
@@ -531,11 +606,7 @@ async fn missing_security_record_key_does_not_prevent_file_verification_or_resto
     fixture.prepare().await.unwrap();
     let receipt = fixture.record().files.receipt;
     fixture.storage.delete(record::RECORD_KEY).unwrap();
-    fixture
-        .backup
-        .verify_prepared(&fixture.target())
-        .await
-        .unwrap();
+    fixture.backup.verify(&fixture.target()).unwrap();
     // 安全记录只是文件副本的派生物；缺钥时重建它，不能让启动永久失败。
     fixture.prepare().await.unwrap();
     assert!(fixture.storage.get(record::RECORD_KEY).unwrap().is_some());
@@ -807,11 +878,10 @@ async fn retiring_security_records_keeps_file_backups_restorable_and_is_repeatab
     assert!(fixture.storage.get(record::RECORD_KEY).unwrap().is_none());
     fixture
         .backup
-        .verify_prepared(&ProfileUpgradeVersions {
+        .verify(&ProfileUpgradeVersions {
             product: "2.1.0".into(),
             engine: "3.0.0".into(),
         })
-        .await
         .unwrap();
     let destination = fixture.temporary.path().join("after-retirement");
     ProfileBackupArchive::new(fixture.backup.directory())

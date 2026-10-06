@@ -15,6 +15,7 @@ use super::record::{
 };
 use super::store::{backup_error, ProfileUpgradeBackupStore};
 use crate::security::profile_backup_archive::tree::{resolve_source_root, write_selected_tree};
+use crate::security::ProfileBackupArchiveError;
 
 #[async_trait]
 impl RetireUpgradeBackupSecurityRecordsPort for ProfileUpgradeBackupStore {
@@ -127,7 +128,7 @@ impl ProfileUpgradeBackupStore {
         Self::record_action("prune_backups", self.prune_locked())
     }
 
-    fn verify_source_files(
+    pub(super) fn verify_source_files(
         &self,
         record: &FileBackupRecord,
     ) -> Result<(), ProfileUpgradeBackupError> {
@@ -141,9 +142,7 @@ impl ProfileUpgradeBackupStore {
         )
         .map_err(backup_error)?;
         if source != record.receipt.source || digest != record.receipt.archive_digest {
-            return Err(backup_error(io::Error::other(
-                "profile backup source changed",
-            )));
+            return Err(backup_error(ProfileBackupArchiveError::SourceChanged));
         }
         match (
             &record.spool_receipt,
@@ -154,18 +153,12 @@ impl ProfileUpgradeBackupStore {
                     write_selected_tree(io::sink(), &self.paths.spool_dir, &source, &[])
                         .map_err(backup_error)?;
                 if digest != receipt.archive_digest {
-                    return Err(backup_error(io::Error::other(
-                        "profile backup spool changed",
-                    )));
+                    return Err(backup_error(ProfileBackupArchiveError::SourceChanged));
                 }
             }
             (None, Err(error)) if error.kind() == io::ErrorKind::NotFound => {}
             (_, Err(error)) => return Err(backup_error(error)),
-            _ => {
-                return Err(backup_error(io::Error::other(
-                    "profile backup spool changed",
-                )))
-            }
+            _ => return Err(backup_error(ProfileBackupArchiveError::SourceChanged)),
         }
         Ok(())
     }

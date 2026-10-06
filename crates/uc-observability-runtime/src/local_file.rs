@@ -444,13 +444,14 @@ impl BoundedDailyMakeWriter {
         let mut state = lock(&self.state);
         state.rotate_if_needed()?;
         let additional = u64::try_from(buffer.len()).unwrap_or(u64::MAX);
-        if state.total_bytes.saturating_add(additional) > state.max_bytes {
+        if !state.make_room(additional)? {
             increment(&self.dropped_records);
             increment(&self.statistics.source(source).quota_dropped);
             return Ok(());
         }
         state.file.write_all(buffer)?;
         state.total_bytes = state.total_bytes.saturating_add(additional);
+        state.current_bytes = state.current_bytes.saturating_add(additional);
         increment(&self.statistics.source(source).written);
         if let Ok(timestamp) = u64::try_from(chrono::Utc::now().timestamp_millis()) {
             self.statistics
@@ -479,6 +480,8 @@ struct WriterState {
     date: NaiveDate,
     file: File,
     total_bytes: u64,
+    /// 当天文件的字节数；它始终包含在 `total_bytes` 内。
+    current_bytes: u64,
     retention_days: u64,
     max_bytes: u64,
 }
@@ -492,6 +495,7 @@ impl WriterState {
     ) -> io::Result<Self> {
         let path = directory.join(file_name(date));
         let file = open_managed_file(&path)?;
+        let current_bytes = file.metadata()?.len();
         let total_bytes =
             managed_files(&directory)?
                 .into_iter()
@@ -506,9 +510,35 @@ impl WriterState {
             date,
             file,
             total_bytes,
+            current_bytes,
             retention_days,
             max_bytes,
         })
+    }
+
+    /// 为新记录腾出配额：从最旧的受管文件起淘汰，永不触碰当天文件，使新的诊断总能写入。
+    ///
+    /// 即使淘汰全部旧文件也放不下（单条超额或当天文件独占配额）时不删除任何文件，返回
+    /// `false` 由调用方丢弃该条。只处理受管文件名，宿主放在同目录的其他文件不受影响。
+    fn make_room(&mut self, additional: u64) -> io::Result<bool> {
+        if self.total_bytes.saturating_add(additional) <= self.max_bytes {
+            return Ok(true);
+        }
+        if self.current_bytes.saturating_add(additional) > self.max_bytes {
+            return Ok(false);
+        }
+        for entry in managed_files(&self.directory)? {
+            if self.total_bytes.saturating_add(additional) <= self.max_bytes {
+                break;
+            }
+            if entry.date >= self.date {
+                continue;
+            }
+            let size = entry.path.metadata()?.len();
+            std::fs::remove_file(&entry.path)?;
+            self.total_bytes = self.total_bytes.saturating_sub(size);
+        }
+        Ok(self.total_bytes.saturating_add(additional) <= self.max_bytes)
     }
 
     fn rotate_if_needed(&mut self) -> io::Result<()> {
@@ -714,6 +744,68 @@ mod tests {
 
         let files = managed_log_files(directory.path()).expect("files");
         assert_eq!(std::fs::metadata(&files[0]).expect("metadata").len(), 8);
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+    }
+
+    fn managed_file(directory: &Path, date: &str, bytes: usize) -> PathBuf {
+        let path = directory.join(format!("engine.{date}.jsonl"));
+        std::fs::write(&path, vec![b'x'; bytes]).expect("managed file");
+        path
+    }
+
+    #[test]
+    fn full_quota_evicts_the_oldest_managed_file_for_a_new_record() {
+        let directory = tempdir().expect("temp dir");
+        let oldest = managed_file(directory.path(), "2000-01-01", 4);
+        let newer = managed_file(directory.path(), "2000-01-02", 5);
+        let unmanaged = directory.path().join("keep.txt");
+        std::fs::write(&unmanaged, b"private host file").expect("unmanaged");
+        let (mut writer, dropped) =
+            BoundedDailyMakeWriter::new_with_limits(directory.path(), 36_500, 10)
+                .expect("bounded writer");
+
+        writer.write_all(b"12345").expect("new record");
+        writer.flush().expect("flush");
+
+        assert!(!oldest.exists());
+        assert!(newer.exists());
+        assert!(unmanaged.exists());
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+        let today = directory.path().join(file_name(Utc::now().date_naive()));
+        assert_eq!(std::fs::read(today).expect("today"), b"12345");
+    }
+
+    #[test]
+    fn record_larger_than_the_whole_quota_is_dropped_without_evicting_anything() {
+        let directory = tempdir().expect("temp dir");
+        let old = managed_file(directory.path(), "2000-01-01", 4);
+        let (mut writer, dropped) =
+            BoundedDailyMakeWriter::new_with_limits(directory.path(), 36_500, 10)
+                .expect("bounded writer");
+
+        writer
+            .write_all(&[b'y'; 11])
+            .expect("dropped record is non-fatal");
+
+        assert!(old.exists());
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn current_day_file_is_never_evicted_to_make_room() {
+        let directory = tempdir().expect("temp dir");
+        let (mut writer, dropped) =
+            BoundedDailyMakeWriter::new_with_limits(directory.path(), 36_500, 10)
+                .expect("bounded writer");
+
+        writer.write_all(b"12345678").expect("first record");
+        writer
+            .write_all(b"abcd")
+            .expect("dropped record is non-fatal");
+        writer.flush().expect("flush");
+
+        let today = directory.path().join(file_name(Utc::now().date_naive()));
+        assert_eq!(std::fs::read(today).expect("today"), b"12345678");
         assert_eq!(dropped.load(Ordering::Relaxed), 1);
     }
 
