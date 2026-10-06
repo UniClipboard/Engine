@@ -157,6 +157,9 @@ impl ProfileUpgradeBackupStore {
                 }
             }
             (None, Err(error)) if error.kind() == io::ErrorKind::NotFound => {}
+            (Some(_), Err(error)) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(backup_error(ProfileBackupArchiveError::SourceChanged))
+            }
             (_, Err(error)) => return Err(backup_error(error)),
             _ => return Err(backup_error(ProfileBackupArchiveError::SourceChanged)),
         }

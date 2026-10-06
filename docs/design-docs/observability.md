@@ -490,7 +490,7 @@ UniFFI 的导出准备是同步入口，宿主必须使用已有后台执行队�
 `docs/generated/observability-inventory.md`，但不因此获得输出许可。
 
 本地文件固定为 `engine.YYYY-MM-DD.jsonl`，保留 7 天，总量不超过十进制 100,000,000 bytes。owner 只枚举这一严格命名，启动和
-跨日时按最旧优先清理；单条记录会使总量超限时整条丢弃。目录不可写时降级到其余输出，不影响业务。文件名解析只有诊断合同一份
+跨日时按最旧优先清理，写入超额时同样先淘汰最旧的受管文件，不删除当天文件；只有单条记录超过整个配额，或当天文件独占配额时才整条丢弃。目录不可写时降级到其余输出，不影响业务。文件名解析只有诊断合同一份
 事实来源；诊断导出先有界刷新当前文件队列，再识别该严格命名。
 
 Resource 中 namespace、service name 和 schema version 固定；environment、OS 与 app channel 使用固定枚举。app channel 只接受

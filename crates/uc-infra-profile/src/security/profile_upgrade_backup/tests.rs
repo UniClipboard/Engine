@@ -558,6 +558,30 @@ async fn published_security_record_forbids_recapture_after_the_source_changes() 
 }
 
 #[tokio::test]
+async fn prepared_backup_with_a_vanished_pending_spool_is_recaptured() {
+    let fixture = Fixture::new();
+    fixture.seed();
+    fs::create_dir_all(&fixture.paths.spool_dir).unwrap();
+    fs::write(fixture.paths.spool_dir.join("pending.bin"), [5; 64]).unwrap();
+    fixture
+        .backup
+        .capture_verified(&fixture.target())
+        .await
+        .unwrap();
+    let first = read_file_record(&fixture.backup.directory())
+        .unwrap()
+        .unwrap();
+    assert!(first.spool_receipt.is_some());
+    fs::remove_dir_all(&fixture.paths.spool_dir).unwrap();
+
+    fixture.prepare().await.unwrap();
+
+    let published = fixture.record();
+    assert_ne!(published.files.receipt.archive_id, first.receipt.archive_id);
+    assert!(published.files.spool_receipt.is_none());
+}
+
+#[tokio::test]
 async fn source_change_between_capture_and_security_record_is_classified_as_source_changed() {
     let fixture = Fixture::new();
     fixture.seed();
