@@ -155,6 +155,92 @@
           "published_at": "2026-09-19T23:23:50Z"
         }
       ]
+    },
+    {
+      "id": "a14",
+      "engine_rev": "348a69eba66e8459384358964965edad9d563f3d",
+      "desktop_releases": [
+        {
+          "tag": "v1.0.0-alpha.18",
+          "commit": "0c8db1b9026b28553873a55b279079740b94dbee",
+          "published_at": "2026-09-27T16:33:35Z"
+        }
+      ]
+    },
+    {
+      "id": "a15",
+      "engine_rev": "3f3eef7450e06013c3178b716eee9d5a3c419349",
+      "desktop_releases": [
+        {
+          "tag": "v1.0.0-alpha.19",
+          "commit": "dde28826818c0ae1fc39be01129ea8d1f99ad5ae",
+          "published_at": "2026-09-28T14:09:14Z"
+        },
+        {
+          "tag": "v1.0.0",
+          "commit": "dd1bf4875b26facded60c772330d421debbeec67",
+          "published_at": "2026-09-28T15:45:52Z"
+        },
+        {
+          "tag": "v1.0.1-alpha.1",
+          "commit": "9446d06585442b860cfd675f1975f6cd913b1f80",
+          "published_at": "2026-09-29T06:00:16Z"
+        },
+        {
+          "tag": "v1.0.1",
+          "commit": "d1b9fa6224b136ae2d7333339c62873c71703594",
+          "published_at": "2026-09-29T07:07:53Z"
+        }
+      ]
+    },
+    {
+      "id": "a16",
+      "engine_rev": "4ece7ac475a3b9fc4fe73e46ceb0371eabe17b2b",
+      "desktop_releases": [
+        {
+          "tag": "v1.1.0-alpha.2",
+          "commit": "e6b261276c409441e15fc8e5afc68a8adcc97665",
+          "published_at": "2026-10-01T14:47:48Z"
+        }
+      ]
+    },
+    {
+      "id": "a17",
+      "engine_rev": "7d64e5dc2435603d6ed4d98571abd18f19e77bb6",
+      "desktop_releases": [
+        {
+          "tag": "v1.1.0-alpha.3",
+          "commit": "f72af166a5b1bd4d192f7dcb33bb4b131b6a63b1",
+          "published_at": "2026-10-02T13:18:53Z"
+        }
+      ]
+    },
+    {
+      "id": "a18",
+      "engine_rev": "7b92ba8461293d95c04b9c2230307a5bb8e2d183",
+      "desktop_releases": [
+        {
+          "tag": "v1.1.0-alpha.4",
+          "commit": "0dc2e7da85e3f4ac4d4f27cf17bdd28dfc4b7265",
+          "published_at": "2026-10-03T07:29:24Z"
+        }
+      ]
+    },
+    {
+      "id": "a19",
+      "engine_rev": "18415aa83a47bd3870c2a1f114b268fc3ed0495a",
+      "desktop_releases": [
+        {
+          "tag": "v1.1.0",
+          "commit": "9fef9ff272db62adfbabef4be88ecb3eff6ad135",
+          "published_at": "2026-10-04T03:24:58Z"
+        },
+        {
+          "tag": "v1.1.1",
+          "commit": "31a5727d01129d53e1150eabf047faa9fb87f07f",
+          "published_at": "2026-10-04T16:22:31Z"
+        }
+      ]
     }
   ]
 }

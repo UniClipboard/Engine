@@ -68,6 +68,30 @@
       "expected": "pass"
     },
     {
+      "cell": "d1-a14-head",
+      "expected": "pass"
+    },
+    {
+      "cell": "d1-a15-head",
+      "expected": "pass"
+    },
+    {
+      "cell": "d1-a16-head",
+      "expected": "pass"
+    },
+    {
+      "cell": "d1-a17-head",
+      "expected": "pass"
+    },
+    {
+      "cell": "d1-a18-head",
+      "expected": "pass"
+    },
+    {
+      "cell": "d1-a19-head",
+      "expected": "pass"
+    },
+    {
       "cell": "d1-chain",
       "expected": "pass",
       "excluded_points": [
@@ -142,6 +166,30 @@
     },
     {
       "cell": "d2-a13-head",
+      "expected": "pass"
+    },
+    {
+      "cell": "d2-a14-head",
+      "expected": "pass"
+    },
+    {
+      "cell": "d2-a15-head",
+      "expected": "pass"
+    },
+    {
+      "cell": "d2-a16-head",
+      "expected": "pass"
+    },
+    {
+      "cell": "d2-a17-head",
+      "expected": "pass"
+    },
+    {
+      "cell": "d2-a18-head",
+      "expected": "pass"
+    },
+    {
+      "cell": "d2-a19-head",
       "expected": "pass"
     },
     {
@@ -349,6 +397,54 @@
       "link": "docs/exec-plans/active/051-upgrade-compatibility-matrix.md#已确认的决定"
     },
     {
+      "cell": "d3-a14-head-old-inviter",
+      "expected": "pass"
+    },
+    {
+      "cell": "d3-a14-head-new-inviter",
+      "expected": "pass"
+    },
+    {
+      "cell": "d3-a15-head-old-inviter",
+      "expected": "pass"
+    },
+    {
+      "cell": "d3-a15-head-new-inviter",
+      "expected": "pass"
+    },
+    {
+      "cell": "d3-a16-head-old-inviter",
+      "expected": "pass"
+    },
+    {
+      "cell": "d3-a16-head-new-inviter",
+      "expected": "pass"
+    },
+    {
+      "cell": "d3-a17-head-old-inviter",
+      "expected": "pass"
+    },
+    {
+      "cell": "d3-a17-head-new-inviter",
+      "expected": "pass"
+    },
+    {
+      "cell": "d3-a18-head-old-inviter",
+      "expected": "pass"
+    },
+    {
+      "cell": "d3-a18-head-new-inviter",
+      "expected": "pass"
+    },
+    {
+      "cell": "d3-a19-head-old-inviter",
+      "expected": "pass"
+    },
+    {
+      "cell": "d3-a19-head-new-inviter",
+      "expected": "pass"
+    },
+    {
       "cell": "d4-a01-head",
       "expected": "skip",
       "condition": "local-network-unavailable",
@@ -428,6 +524,30 @@
     },
     {
       "cell": "d4-a13-head",
+      "expected": "pass"
+    },
+    {
+      "cell": "d4-a14-head",
+      "expected": "pass"
+    },
+    {
+      "cell": "d4-a15-head",
+      "expected": "pass"
+    },
+    {
+      "cell": "d4-a16-head",
+      "expected": "pass"
+    },
+    {
+      "cell": "d4-a17-head",
+      "expected": "pass"
+    },
+    {
+      "cell": "d4-a18-head",
+      "expected": "pass"
+    },
+    {
+      "cell": "d4-a19-head",
       "expected": "pass"
     }
   ]
