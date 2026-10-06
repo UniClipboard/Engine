@@ -15,6 +15,7 @@ from threading import Event
 
 
 def capture(command):
+    """限时采集工具身份；缺失证据显式记为超时。"""
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=30)
         return {"command": command, "exit": result.returncode,
@@ -25,17 +26,20 @@ def capture(command):
 
 
 def execute_build(command, env, log, timeout, cancelled=None):
+    """执行真实构建；超时或取消时先清理本次进程组，再返回结果。"""
     # 单次构建拥有独立进程组；仅杀掉 MBX 父进程会留下仍在读取源码的 Cargo/rustc。
     process = subprocess.Popen(command, env=env, stdout=log, stderr=log,
                                start_new_session=True)
 
     def group_active():
+        """只识别本次进程组的活进程，区分已退出但未回收的进程。"""
         listing = subprocess.run(["ps", "-axo", "pgid=,stat="], capture_output=True,
                                  text=True, check=True, timeout=30)
         return any(parts[0] == str(process.pid) and not parts[1].startswith("Z")
                    for line in listing.stdout.splitlines() if len(parts := line.split()) == 2)
 
     def stop():
+        """终止整条构建并回收直接子进程，避免编译器继续读取待恢复源码。"""
         try:
             os.killpg(process.pid, signal.SIGTERM)
             try:
@@ -71,6 +75,7 @@ def execute_build(command, env, log, timeout, cancelled=None):
 
 
 def main():
+    """统一管理独立输出、临时源码修改与可重放的基准证据。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scratch", type=Path, required=True,
                         help="已存在的外置可再生目录；每次在其中创建独立子目录")
@@ -118,6 +123,7 @@ def main():
     results = []
 
     def run(label, jobs, target, cache):
+        """保存单个构建样本及 timing；失败样本不进入收益统计。"""
         build_env = dict(env, CARGO_TARGET_DIR=str(target), MBX_CACHE_DIR=str(cache),
                          CARGO_BUILD_JOBS=str(jobs))
         start = time.monotonic()
@@ -138,12 +144,14 @@ def main():
             raise RuntimeError(f"构建失败，完整日志：{output / (label + '.log')}")
 
     def lock_pair(jobs, target, cache):
+        """尝试共享输出争用，保留双方结果和实际观测到的锁等待。"""
         build_env = dict(env, CARGO_TARGET_DIR=str(target), MBX_CACHE_DIR=str(cache),
                          CARGO_BUILD_JOBS=str(jobs))
 
         cancelled = Event()
 
         def worker(index):
+            """执行一方构建并从其日志提取 Cargo 锁等待原文。"""
             label = f"j{jobs}-lock-{index}"
             start = time.monotonic()
             with (output / (label + ".log")).open("w") as log:
