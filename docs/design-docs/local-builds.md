@@ -37,7 +37,9 @@ S3 端点；访问密钥仅限该桶。缺少任一项时入口报错，不会�
 主线必须真实受保护；接入前应核对实际规则。本机尚需独立配置只读凭据，GitHub secrets 无法读回。
 正式 release/tag 不接入共享缓存。主线发布与 PR 只读验收由
 [`mbx-r2-cache.yml`](../../.github/workflows/mbx-r2-cache.yml) 运行，工件包含诊断及原生统计；主线还必须
-运行独立空 target/动作缓存的消费者并确认下载、命中、无远端错误与零上传。
+运行独立空 target/动作缓存的消费者并确认下载、命中、无远端错误与零上传。主线分别播种
+`check --workspace --all-targets --locked` 与迁移测试构建的 manifest；消费者按同一命令读取，
+不能用测试构建的种子代替常用 check 的种子。
 
 R2 诊断使用 `just mbx --r2 --mbx doctor --json`；预取使用
 `just mbx --r2 --mbx prefetch check --workspace --all-targets --locked`。空 manifest 不等于连接故障，

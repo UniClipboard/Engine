@@ -83,6 +83,48 @@ jobs:
               assert report['uploaded_bytes'] == 0, report
           PY
 
+      # check 与测试构建的 rustc 输出/manifest 不同，主线也播种 worker 常用的完整检查命令。
+      - name: Publish workspace check actions
+        if: github.event_name == 'push'
+        env:
+          BUILD_CACHE_R2_ENDPOINT: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          BUILD_CACHE_R2_ACCESS_KEY_ID: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          BUILD_CACHE_R2_SECRET_ACCESS_KEY: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+          MBX_REMOTE_MODE: read-write
+          MBX_CACHE_DIR: ${{ runner.temp }}/mbx-r2-producer-cache
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/mbx-r2-producer
+          MBX_STATS_REPORT: ${{ runner.temp }}/mbx-r2-evidence/producer-check.json
+        run: |
+          bash scripts/build-cache/mbx.sh --r2 check --workspace --all-targets --locked
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          report = json.loads(Path(os.environ['MBX_STATS_REPORT']).read_text())
+          assert report['remote_failures'] == 0, report
+          assert report['background_upload_failures'] == 0, report
+          PY
+
+      - name: Verify independent workspace check consumer
+        if: github.event_name == 'push'
+        env:
+          BUILD_CACHE_R2_ENDPOINT: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          BUILD_CACHE_R2_ACCESS_KEY_ID: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          BUILD_CACHE_R2_SECRET_ACCESS_KEY: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+          MBX_REMOTE_MODE: read-only
+          MBX_CACHE_DIR: ${{ runner.temp }}/mbx-r2-consumer-cache
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/mbx-r2-consumer
+          MBX_STATS_REPORT: ${{ runner.temp }}/mbx-r2-evidence/consumer-check.json
+        run: |
+          bash scripts/build-cache/mbx.sh --r2 check --workspace --all-targets --locked
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          report = json.loads(Path(os.environ['MBX_STATS_REPORT']).read_text())
+          assert report['downloaded_bytes'] > 0 and report['hits'] > 0, report
+          assert report['remote_failures'] == 0, report
+          assert report['uploaded_bytes'] == 0, report
+          PY
+
       # 主线发布后用另一套空 target/动作缓存读取，避免把本地热缓存误认成远端命中。
       - name: Verify independent R2 consumer
         if: github.event_name == 'push'
