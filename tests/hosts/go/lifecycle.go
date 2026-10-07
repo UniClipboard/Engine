@@ -79,8 +79,9 @@ func runLifecycle(result *report, root, manifest string) {
 	_, running := drainStates(eng, engine.StateRunning)
 	result.record("resume_emits_state_changed", resumeErr == nil && running, errString(resumeErr))
 
+	closeStarted := time.Now()
 	closeErr := eng.Close(15 * time.Second)
-	result.record("shutdown_with_deadline_and_join", closeErr == nil, errString(closeErr))
+	result.record("shutdown_with_deadline_and_join", closeErr == nil, map[string]any{"error": errString(closeErr), "close_ms": time.Since(closeStarted).Milliseconds()})
 	_, afterErr := eng.LocalDevice(ctx)
 	result.record("call_after_close_is_rejected", errors.Is(afterErr, engine.ErrClosed), errString(afterErr))
 	result.record("close_is_idempotent", eng.Close(time.Second) == nil, nil)

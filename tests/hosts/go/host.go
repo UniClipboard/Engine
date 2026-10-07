@@ -29,6 +29,8 @@ type fileHost struct {
 	storedKeys map[string]bool
 	// failSet 非空时，安全存储写入返回该错误，用于验证宿主错误往返。
 	failSet error
+	// failDirectory 非空时，三个目录能力返回该错误。
+	failDirectory error
 	// secrets 记录 Rust 写入的全部密文字节，供日志扫描使用。
 	secrets [][]byte
 }
@@ -43,16 +45,25 @@ func newFileHost(root string) (*fileHost, error) {
 }
 
 func (h *fileHost) PrivateDataDirectory() (string, error) {
+	if h.failDirectory != nil {
+		return "", h.failDirectory
+	}
 	h.privateCalls.Add(1)
 	return filepath.Join(h.root, "private"), nil
 }
 
 func (h *fileHost) CacheDirectory() (string, error) {
+	if h.failDirectory != nil {
+		return "", h.failDirectory
+	}
 	h.cacheCalls.Add(1)
 	return filepath.Join(h.root, "cache"), nil
 }
 
 func (h *fileHost) TemporaryDirectory() (string, error) {
+	if h.failDirectory != nil {
+		return "", h.failDirectory
+	}
 	h.tempCalls.Add(1)
 	return filepath.Join(h.root, "temp"), nil
 }

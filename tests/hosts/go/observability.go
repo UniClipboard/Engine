@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 
 	ffi "github.com/UniClipboard/Engine/bindings/go/uc_engine_uniffi"
 )

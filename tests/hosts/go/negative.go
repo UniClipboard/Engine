@@ -33,11 +33,19 @@ func runNegative(result *report, root, manifest string) {
 	result.record("open_rejects_digest_mismatch", errors.Is(err, native.ErrMismatch), errString(err))
 	result.record("no_engine_started_by_rejected_open", host.counters()["private_data_directory"] == 0, host.counters())
 
-	// 宿主错误往返：安全存储写入被拒绝，Open 返回同一稳定分类。
+	// 宿主错误：目录能力失败以同一稳定分类原样返回；安全存储失败发生在启动内部，
+	// 由 Engine 归类为稳定的启动失败（1101），宿主回调确实被调用过。
+	denied, _ := newFileHost(filepath.Join(root, "denied"))
+	denied.failDirectory = engine.ErrHostPermissionDenied
+	_, err = openEngine(denied, manifest)
+	result.record("host_directory_error_roundtrip", errors.Is(err, engine.ErrHostPermissionDenied), errString(err))
 	failing, _ := newFileHost(filepath.Join(root, "failing"))
-	failing.failSet = engine.ErrHostPermissionDenied
+	failing.failSet = engine.ErrHostIO
 	_, err = openEngine(failing, manifest)
-	result.record("host_error_roundtrip", errors.Is(err, engine.ErrHostPermissionDenied), errString(err))
+	var startup *engine.EngineError
+	result.record("host_secure_storage_failure_is_stable_startup_error",
+		errors.As(err, &startup) && startup.Code == 1101 && failing.setCalls.Load() > 0,
+		map[string]any{"error": errString(err), "set_calls": failing.setCalls.Load()})
 
 	eng, err := openEngine(host, manifest)
 	if !result.record("open_for_negative_checks", err == nil, errString(err)) {
@@ -49,8 +57,11 @@ func runNegative(result *report, root, manifest string) {
 	result.record("valid_enum_accepted", eng.NotifyConnectivityOpportunity(ctx, engine.OpportunityNetworkChanged) == nil, nil)
 
 	// context 取消只停止等待：Engine 之后仍可用。
-	short, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
-	_, err = eng.NextEvent(short)
+	// 先取尽已排队的事件，之后 NextEvent 只能等到 ctx 期限。
+	short, cancel := context.WithTimeout(ctx, 600*time.Millisecond)
+	for err = nil; err == nil; {
+		_, err = eng.NextEvent(short)
+	}
 	cancel()
 	result.record("context_deadline_stops_waiting", errors.Is(err, context.DeadlineExceeded), errString(err))
 	_, err = eng.LocalDevice(ctx)
@@ -71,7 +82,7 @@ func runNegative(result *report, root, manifest string) {
 					mu.Unlock()
 				}
 			}()
-			for j := 0; j < 50; j++ {
+			for j := 0; j < 100000; j++ {
 				var err error
 				if i%4 == 0 {
 					short, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
@@ -89,6 +100,9 @@ func runNegative(result *report, root, manifest string) {
 					outcomes["ok"]++
 				case errors.Is(err, engine.ErrClosed):
 					outcomes["closed"]++
+				case isShutdownRace(err):
+					// 调用在 Close 之前已进入 Rust，与关闭竞争，得到 Engine 的稳定 InvalidState 错误。
+					outcomes["engine_invalid_state_during_shutdown"]++
 				default:
 					outcomes["other:"+err.Error()]++
 				}
@@ -143,4 +157,9 @@ func tamperedManifest(path, root string) (string, error) {
 	}
 	target := filepath.Join(root, "tampered-manifest.json")
 	return target, os.WriteFile(target, out, 0o600)
+}
+
+func isShutdownRace(err error) bool {
+	var typed *engine.EngineError
+	return errors.As(err, &typed) && typed.Category == engine.CategoryInvalidState
 }
