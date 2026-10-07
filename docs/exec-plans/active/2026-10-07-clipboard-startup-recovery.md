@@ -43,7 +43,7 @@ Application 在 OS 读取失败时先清除 register，再允许启动；加载/
 
 先用未修改生产代码的基线运行新进程验收，复现 code 1101；修复后九项故障矩阵通过，覆盖源打开/消失/中途读取、平台读取、metadata、空块、多 representation、目标创建和单次目录创建。实际 SQLite DELETE trigger 拒绝清除时仍返回 1101，移除故障后可重启恢复；空 register 跳过读取、匹配文本保留 register、正常文件/文本捕获与其他成功导入目录保留均已验收。标准 ZIP 含具体 PermissionDenied/NotFound/UnexpectedEof 来源，隐私哨兵未出现。
 
-隔离 Desktop checkout 的实际适配器进程验收通过，来源为真实文件 metadata/open 错误和平台故障。真实 `uniclipd` 进一步通过私有命名 NSPasteboard、HTTP、SQLite/profile 与实际文件 I/O 验收：chmod 拒绝、只针对测试源文件的 ENOENT/EIO 注入、同故障再次启动、后续文本同步与正常文件捕获。标准导出实际包含 PermissionDenied/os code 13、NotFound/2 和 Uncategorized/5。Desktop 原有文件 DEBUG 记录的路径字段也纳入最小跨仓修复；完成后需重新检查标准 ZIP 的 Engine 和宿主两类日志。
+隔离 Desktop checkout 的实际适配器进程验收通过，来源为真实文件 metadata/open 错误和平台故障。真实 `uniclipd` 进一步通过私有命名 NSPasteboard、HTTP、SQLite/profile 与实际文件 I/O 验收：chmod 拒绝、只针对测试源文件的 ENOENT/EIO 注入、同故障再次启动、后续文本同步与正常文件捕获。标准导出实际包含 PermissionDenied/os code 13、NotFound/2 和 Uncategorized/5。Desktop 原有文件 DEBUG 记录的路径字段也纳入最小跨仓修复；重新构建真实 daemon 后，标准 ZIP 的 Engine 和宿主两类日志均通过源文件名哨兵检查。
 
 根目录 metadata、workspace/all-targets check、fmt、Rust 风格、仓库所有权检查和 diff 检查已通过。实际证据索引、PID、命令、退出码、源码状态和 ZIP 留在本任务交付报告及独立工件目录；此文档只维护长期契约，不记录绝对开发路径。
 
