@@ -214,3 +214,9 @@ func mustHost(root string) *fileHost {
 	}
 	return host
 }
+
+// runVerify 只核对原生库来源，不启动 Engine；供没有沙箱的平台（Linux CI）确认库身份解析正确。
+func runVerify(result *report, manifest string) {
+	_, err := native.Verify(manifest)
+	result.record("native_verify_loaded_library", err == nil, errString(err))
+}

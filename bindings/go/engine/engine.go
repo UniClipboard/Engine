@@ -134,7 +134,11 @@ func call[T any](ctx context.Context, e *Engine, fn func(*ffi.MobileEngine) (T, 
 		// 生成层的 panic（例如对象已释放）不能终止宿主进程；Rust 侧的 abort 不在此列。
 		defer func() {
 			if recover() != nil {
-				done <- outcome{err: ErrUnexpectedResult}
+				// 缓冲只有一格：结果可能已写入，恢复分支不得阻塞，否则 end() 永不执行、Close 一直等到期限。
+				select {
+				case done <- outcome{err: ErrUnexpectedResult}:
+				default:
+				}
 			}
 		}()
 		value, err := fn(e.inner)

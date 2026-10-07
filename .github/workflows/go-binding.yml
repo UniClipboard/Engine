@@ -27,7 +27,11 @@ on:
       - crates/uc-engine/**
       - Cargo.toml
       - Cargo.lock
+      - rust-toolchain.toml
+      - scripts/build-cache/**
+      - scripts/architecture/check-go-binding.mjs
       - tests/hosts/go/**
+      - .github/workflows/go-binding.yml
 
 permissions:
   contents: read
@@ -77,6 +81,7 @@ jobs:
         run: |
           bash bindings/go/generator/generate.sh "$RUNNER_TEMP/generator/bin/uniffi-bindgen-go" target/debug/libuc_engine_uniffi.dylib
           git diff --exit-code -- bindings/go/uc_engine_uniffi
+          test -z "$(git status --porcelain --untracked-files=all -- bindings/go/uc_engine_uniffi)"
 
       - name: Build release library and stage with provenance manifest
         run: |
@@ -161,6 +166,11 @@ jobs:
           (cd bindings/go && go vet ./... && go build ./...)
           (cd tests/hosts/go && go build -o "$RUNNER_TEMP/go-engine-host" .)
           ldd "$RUNNER_TEMP/go-engine-host" | grep libuc_engine_uniffi
+
+      # 只运行来源校验（不启动 Engine）：证明 Linux 上 dladdr 解析到的是共享库而不是可执行文件。
+      - name: Verify native library identity at runtime
+        run: |
+          "$RUNNER_TEMP/go-engine-host" --phase verify --root "$RUNNER_TEMP/verify-root" --manifest "$RUNNER_TEMP/native/native-manifest.json"
 
       - name: Retain MBX compiler evidence
         if: always()

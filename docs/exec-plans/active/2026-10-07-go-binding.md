@@ -40,7 +40,7 @@ Engine 仓库拥有一个可重复生成、可 `import` 的版本化 Go module�
 | F17 | 并发调用过载 | Engine 命令队列无界；本片不引入限流，文档声明并发调用语义，调用方负责背压 |
 | F18 | 跨目标构建被当作原生验证 | 仅 macOS arm64 做本机链接与真实进程；其他目标只记录实际执行的生成/编译/link 检查，交叉编译不记通过 |
 | F19 | 公共 UniFFI 表面变化破坏 Swift/Kotlin | 第一片不改 Rust 表面。任何后续新增必须加性，并运行 `bindings/uc-engine-uniffi` 契约测试 |
-| F20 | 生成物许可证头丢失 | 生成包保留模板 MPL header，并随附生成器 LICENSE；检查脚本断言存在 |
+| F20 | 生成物许可证义务丢失 | 生成器不在输出文件中写入许可证头；MPL-2.0 许可证文本随生成包保留为 `LICENSE-uniffi-bindgen-go`，静态检查断言其存在，生成文件的来源与补丁记录在 `generator/PIN.env`。生成文件本身不带 MPL 头，这是上游模板的行为 |
 
 ## 验收契约
 

@@ -1,6 +1,6 @@
 // 命令 go-engine-host 是 Go 绑定的真实进程验收宿主，不承载产品功能。
 //
-//	go-engine-host --phase lifecycle|restart|negative --root <隔离目录> --manifest <native-manifest.json>
+//	go-engine-host --phase lifecycle|restart|negative|verify --root <隔离目录> --manifest <native-manifest.json>
 //
 // 每个阶段是一次独立进程：向 stdout 输出一个 JSON 结果，任一步失败则退出码为 1。
 // 隔离目录之外不读写任何文件；网络隔离由外部驱动脚本（沙箱）保证。
@@ -36,7 +36,7 @@ func (r *report) record(name string, ok bool, detail any) bool {
 }
 
 func main() {
-	phase := flag.String("phase", "", "lifecycle, restart or negative")
+	phase := flag.String("phase", "", "lifecycle, restart, negative or verify")
 	root := flag.String("root", "", "isolated root directory")
 	manifest := flag.String("manifest", "", "native-manifest.json path")
 	flag.Parse()
@@ -52,6 +52,8 @@ func main() {
 		runRestart(result, *root, *manifest)
 	case "negative":
 		runNegative(result, *root, *manifest)
+	case "verify":
+		runVerify(result, *manifest)
 	default:
 		fmt.Fprintln(os.Stderr, "unknown phase")
 		os.Exit(2)
