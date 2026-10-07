@@ -120,7 +120,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: mbx-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          name: mbx-${{ github.job }}-${{ matrix.mode }}-${{ runner.os }}-${{ runner.arch }}
           path: ${{ runner.temp }}/mbx-evidence
           if-no-files-found: warn
 
@@ -461,7 +461,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: mbx-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          name: mbx-${{ github.job }}-${{ matrix.dimension }}-${{ runner.os }}-${{ runner.arch }}
           path: ${{ runner.temp }}/mbx-evidence
           if-no-files-found: warn
 

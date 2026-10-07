@@ -131,7 +131,8 @@ R2 令牌在 Cloudflare 仪表盘 → R2 → Manage API tokens 以 Account API t
 
 ## MBX 共用桶补充（2026-10-07）
 
-现有 CI sccache 路线保持本决定的格式、命名空间和服务凭据装配。新增的可选 MBX R2 流程使用
+本决定记录历史 CI sccache 路线的格式、命名空间与凭据装配；当前仓库统一 MBX 方案见
+[ADR-033](033-unified-mbx-rust-builds.md)。MBX R2 流程使用
 `engine/mbx/v1/`，只共用桶与 GitHub 读写环境，不共用 sccache 条目。主线 MBX 发布还要求真实受保护
 分支 push；本机与 PR 为只读。完整接入与验收规则只在[本地构建指南](../local-builds.md#r2-分布式动作缓存)维护。
 为 `engine/mbx/` 配置独立对象过期规则并确认容量；不得覆盖现有 sccache 生命周期规则。

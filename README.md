@@ -112,7 +112,7 @@ cargo install cargo-ndk --locked
 ```bash
 just cargo metadata --locked --format-version 1
 just cargo check --workspace --all-targets --locked
-cargo test --workspace --locked
+just cargo test --workspace --locked
 just cargo fmt --all -- --check
 node scripts/architecture/check-engine-repository.mjs
 git diff --check
