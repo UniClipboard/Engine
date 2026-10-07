@@ -42,5 +42,10 @@ mkdir -p "$RUNNER_TEMP/mbx-evidence"
   echo "CARGO_BUILD_JOBS=$cpus"
   echo "UC_COMPILE_CACHE_BACKEND=$backend"
 } >> "$GITHUB_ENV"
-printf '%s\n' "$root/scripts/build-cache/bin" >> "$GITHUB_PATH"
+# 保留本次 workflow 的工具快照，后续 checkout 历史源码不能将缓存入口退回旧实现。
+tools=$(mktemp -d "$RUNNER_TEMP/engine-mbx-tools.XXXXXX")
+mkdir -p "$tools/scripts/build-cache/bin"
+cp "$root/scripts/build-cache/mbx.sh" "$root/scripts/build-cache/env.sh" "$tools/scripts/build-cache/"
+cp "$root/scripts/build-cache/bin/cargo" "$tools/scripts/build-cache/bin/"
+printf '%s\n' "$tools/scripts/build-cache/bin" >> "$GITHUB_PATH"
 printf 'MBX cache backend: %s; native protected-push policy determines effective write access\n' "$backend"

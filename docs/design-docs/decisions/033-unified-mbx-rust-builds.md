@@ -12,7 +12,7 @@
 
 R2 使用现有私有桶的 `engine/mbx/v1/`，本地/PR 只读。CI 三项凭据在装配步骤写入 runner 临时目录的 0600 文件，后续只有仓库 Cargo 入口在调用时加载；GITHUB_ENV 只保存路径及非敏感配置，原始值不进入日志或第三方 action 环境。该文件和原生子进程不是同用户可信代码之间的隔离；build script 能接触本次凭据，因此 writer 环境只允许可信 main。无凭据使用本地 MBX，部分凭据或非 HTTPS 端点拒绝装配。缓存远端故障由原生 MBX 处理，实际错误统计保留。
 
-正式 release/tag 同样通过 MBX 编译，但只复用本次 job 内的可信本地 CAS，不获取 R2 凭据，也不从 Actions 档案恢复编译产物。release 请求 `write-only`，原生 tag/手工策略关闭远端读写；目标、profile、路径重映射、签名、不可变源码和包校验保持原契约。不能把生产发布信任换成远端缓存命中承诺。
+正式 release/tag 同样通过 MBX 编译，但只复用本次 job 内的可信本地 CAS，不获取 R2 凭据，也不从 Actions 档案恢复编译产物。release 请求 `write-only`，原生 tag/手工策略关闭远端读写；job 先保留 workflow 当前版本的三个入口文件，再 checkout 不可变发布源码并记录其实际 HEAD，历史版本重验也不能退回旧 sccache 装配。目标、profile、路径重映射、签名、不可变源码和包校验保持原契约。不能把生产发布信任换成远端缓存命中承诺。
 
 ## 命中和验收语义
 

@@ -128,7 +128,6 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ needs.prepare.outputs.commit }}
           fetch-depth: 0
 
       - name: Prepare local MBX cache
@@ -136,6 +135,20 @@ jobs:
         with:
           cache-key: release-local
           dependency-cache: 'false'
+
+      - name: Check out immutable release source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          fetch-depth: 0
+
+      - name: Record immutable build provenance
+        shell: bash
+        run: |
+          {
+            echo "UC_ENGINE_SOURCE_COMMIT=$(git rev-parse HEAD)"
+            echo 'UC_ENGINE_SOURCE_STATE=clean'
+          } >> "$GITHUB_ENV"
 
       - name: Install iOS targets
         shell: bash
@@ -174,7 +187,6 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ needs.prepare.outputs.commit }}
           fetch-depth: 0
 
       - name: Prepare local MBX cache
@@ -182,6 +194,20 @@ jobs:
         with:
           cache-key: release-local
           dependency-cache: 'false'
+
+      - name: Check out immutable release source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          fetch-depth: 0
+
+      - name: Record immutable build provenance
+        shell: bash
+        run: |
+          {
+            echo "UC_ENGINE_SOURCE_COMMIT=$(git rev-parse HEAD)"
+            echo 'UC_ENGINE_SOURCE_STATE=clean'
+          } >> "$GITHUB_ENV"
 
       - name: Install Android targets
         shell: bash
@@ -223,7 +249,6 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ needs.prepare.outputs.commit }}
           fetch-depth: 0
 
       - name: Prepare local MBX cache
@@ -231,6 +256,20 @@ jobs:
         with:
           cache-key: release-local
           dependency-cache: 'false'
+
+      - name: Check out immutable release source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          fetch-depth: 0
+
+      - name: Record immutable build provenance
+        shell: bash
+        run: |
+          {
+            echo "UC_ENGINE_SOURCE_COMMIT=$(git rev-parse HEAD)"
+            echo 'UC_ENGINE_SOURCE_STATE=clean'
+          } >> "$GITHUB_ENV"
 
       - name: Install HarmonyOS Rust target
         shell: bash
@@ -274,7 +313,6 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ needs.prepare.outputs.commit }}
           fetch-depth: 0
 
       - name: Prepare local MBX cache
@@ -282,6 +320,20 @@ jobs:
         with:
           cache-key: release-local
           dependency-cache: 'false'
+
+      - name: Check out immutable release source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          fetch-depth: 0
+
+      - name: Record immutable build provenance
+        shell: bash
+        run: |
+          {
+            echo "UC_ENGINE_SOURCE_COMMIT=$(git rev-parse HEAD)"
+            echo 'UC_ENGINE_SOURCE_STATE=clean'
+          } >> "$GITHUB_ENV"
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
