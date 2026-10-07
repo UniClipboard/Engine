@@ -140,8 +140,38 @@ func runNegative(result *report, root, manifest string) {
 		second := slow.Close(20 * time.Second)
 		_, after := slow.LocalDevice(ctx)
 		result.record("close_deadline_then_retry_succeeds",
-			second == nil && errors.Is(during, engine.ErrClosed) && errors.Is(after, engine.ErrClosed),
-			map[string]any{"first_close": errString(first), "second_close": errString(second)})
+			second == nil && errors.Is(during, engine.ErrClosed) && errors.Is(after, engine.ErrClosed) &&
+				(first == nil || errors.Is(first, engine.ErrCloseIncomplete)),
+			map[string]any{"first_close": errString(first), "second_close": errString(second), "retry_path_exercised": first != nil})
+	}
+
+	// 多个 goroutine 同时 Close：全部返回，至多一个真正执行关闭，没有 panic。
+	multi, err := openEngine(mustHost(filepath.Join(root, "multi-close")), manifest)
+	if result.record("open_for_concurrent_close", err == nil, errString(err)) {
+		var group sync.WaitGroup
+		results := make([]error, 8)
+		panics := 0
+		var panicMu sync.Mutex
+		for i := range results {
+			group.Add(1)
+			go func(i int) {
+				defer group.Done()
+				defer func() {
+					if recover() != nil {
+						panicMu.Lock()
+						panics++
+						panicMu.Unlock()
+					}
+				}()
+				results[i] = multi.Close(20 * time.Second)
+			}(i)
+		}
+		group.Wait()
+		allNil := true
+		for _, closeErr := range results {
+			allNil = allNil && closeErr == nil
+		}
+		result.record("concurrent_close_is_serialized", panics == 0 && allNil, map[string]any{"panics": panics})
 	}
 
 	hits, scanErr := scanForLeaks(root, []string{profileID}, host.secrets)
@@ -175,4 +205,12 @@ func tamperedManifest(path, root string) (string, error) {
 func isShutdownRace(err error) bool {
 	var typed *engine.EngineError
 	return errors.As(err, &typed) && typed.Category == engine.CategoryInvalidState
+}
+
+func mustHost(root string) *fileHost {
+	host, err := newFileHost(root)
+	if err != nil {
+		panic(err)
+	}
+	return host
 }

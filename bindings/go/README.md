@@ -48,14 +48,16 @@ for { event, err := eng.NextEvent(ctx); … }
 
 ## 契约摘要
 
-- **来源校验**：`Open` 读取清单，核对 `core_version`、动态链接器实际映射的库文件名与 sha256/size。清单缺失、字段不符或库被替换返回 `native.ErrMismatch`；
-  没有跳过校验的模式。Windows 暂无加载路径解析，返回 `native.ErrUnsupported`。
-- **关闭**：`Close(deadline)` 先拒绝新调用，再请求 Rust 在期限内关闭并 join，排空在途调用后释放对象。期限内未完成返回 `ErrCloseIncomplete` 或 Rust 的 `DeadlineExceeded` 稳定错误，可用新期限重试直至成功。
-  `Close` 后调用返回 `ErrClosed`；与 `Close` 竞争的在途调用可能得到 Engine 的 `InvalidState` 稳定错误。
+- **来源校验**：`Open` 读取清单，要求关键字段齐全，并核对目标与当前 `GOOS/GOARCH`、清单中的生成源摘要与已编译绑定一致、`core_version`、动态链接器报告的库文件名与该文件的 sha256/size。
+  清单缺失、字段不符、版本错配或库与清单不一致返回 `native.ErrMismatch`；没有跳过校验的模式。这是完整性与一致性自检，用于发现错配和陈旧库，
+  **不是认证**：清单与库通常在同一目录，它不防御有本地写权限的攻击者。静态链接（库不是独立文件）时库名比较失败，按错配拒绝。Windows 暂无加载路径解析，返回 `native.ErrUnsupported`。
+- **关闭**：`Close(deadline)` 先拒绝新调用，再请求 Rust 在期限内关闭并 join，排空在途调用后释放对象。期限内未完成返回 `ErrCloseIncomplete`（Rust 的可重试等待超时，实测 `1108`，被包装为它并保留原始 `EngineError`），可用新期限重试直至成功。
+  `Close` 后调用返回 `ErrClosed`（`NextEvent` 也是，关闭期间已入队的事件不再可见）；并发的 `Close` 被串行化；与 `Close` 竞争的在途调用可能得到 Engine 的 `InvalidState` 稳定错误。
+  负载下 `Close` 要排空积压的在途调用（实测 32 个并发调用方时约 5 秒，空闲时约 1 秒），期限应按负载放宽。
 - **取消**：`context` 取消只让调用方停止等待，Rust 调用继续，`Close` 仍等待其结束。
 - **事件**：Rust 队列容量 256，溢出时丢最旧事件并给出 `RefreshRequired(ConsumerLagged)`，收到后重新查询。门面不再缓冲。未映射的事件只报告种类，不携带载荷。
 - **输入**：零值或越界枚举、空配置在进入 Rust 之前返回 `ErrInvalidInput`。
-- **宿主回调**：只能返回能力结果，不得在回调内调用同一个 Engine（同步请求会等待正在执行回调的线程）。目录回调失败原样映射为 `ErrHost*`；启动期间安全存储失败由 Engine 归类为稳定的启动错误 `1101`。
+- **宿主回调**：只能返回能力结果，不得在回调内调用同一个 Engine（同步请求会等待正在执行回调的线程；本片未提供能触发该情形的真实进程用例，仅作文档约束）。回调 panic 被门面转为 `ErrHostIO`，不终止进程。目录回调失败原样映射为 `ErrHost*`；启动期间安全存储失败由 Engine 归类为稳定的启动错误 `1101`。
 - **崩溃隔离**：发布构建 `panic=abort`，Rust 崩溃会终止整个宿主进程，Go 的 `recover` 无效。嵌入后宿主与 Engine 同生共死，Engine 不再有进程隔离；
   GUI/CLI 若仍是独立进程经 HTTP 连接 daemon，则它们不受 daemon 崩溃影响。这是 daemon 重写评审时需要明确讨论的取舍。
 - **敏感信息**：错误与事件不含内容、路径或设备信息；`Invitation` 的 `String` 固定脱敏。
@@ -75,7 +77,7 @@ git diff --exit-code bindings/go/uc_engine_uniffi
 
 | 目标 | 状态 |
 |---|---|
-| macOS arm64（本机） | 构建、链接、真实进程验收已实测，见执行计划证据 |
+| macOS arm64（本机） | 构建、链接、真实进程验收已实测（Go 1.24.0 与 1.27.1），证据见本任务报告与 CI 工件 `go-binding-macos-arm64-evidence` |
 | Linux amd64/arm64 | CI 做原生构建与 Go 编译/链接检查；真实进程验收未覆盖 |
 | macOS amd64、Windows amd64/arm64 | 未验证；Windows 需要与 Go C 链接器匹配的导入库，且尚无库身份校验 |
 

@@ -11,6 +11,11 @@ on:
     paths:
       - bindings/go/**
       - bindings/uc-engine-uniffi/**
+      - crates/uc-engine/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - scripts/build-cache/**
       - tests/hosts/go/**
       - scripts/architecture/check-go-binding.mjs
       - .github/workflows/go-binding.yml
@@ -19,6 +24,9 @@ on:
     paths:
       - bindings/go/**
       - bindings/uc-engine-uniffi/**
+      - crates/uc-engine/**
+      - Cargo.toml
+      - Cargo.lock
       - tests/hosts/go/**
 
 permissions:
@@ -57,7 +65,7 @@ jobs:
       - name: Static checks
         run: |
           node scripts/architecture/check-go-binding.mjs
-          test -z "$(gofmt -l bindings/go/engine bindings/go/native tests/hosts/go)"
+          test -z "$(gofmt -l bindings/go/engine bindings/go/native bindings/go/uc_engine_uniffi/link.go bindings/go/uc_engine_uniffi/generated_sources.go tests/hosts/go)"
 
       - name: Build pinned generator
         run: bash bindings/go/generator/build-generator.sh "$RUNNER_TEMP/generator"
@@ -76,14 +84,14 @@ jobs:
           bash bindings/go/native/stage-native.sh release "$RUNNER_TEMP/native"
 
       - name: Real-process acceptance (Go 1.24)
-        run: node tests/hosts/go/run-e2e.mjs --native "$RUNNER_TEMP/native" --evidence "$RUNNER_TEMP/e2e-go124"
+        run: node tests/hosts/go/run-e2e.mjs --native "$RUNNER_TEMP/native" --evidence "$RUNNER_TEMP/e2e-go124" --require-network-positive-control
 
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
         with:
           go-version: "1.27.1"
 
       - name: Real-process acceptance (Go 1.27)
-        run: node tests/hosts/go/run-e2e.mjs --native "$RUNNER_TEMP/native" --evidence "$RUNNER_TEMP/e2e-go127"
+        run: node tests/hosts/go/run-e2e.mjs --native "$RUNNER_TEMP/native" --evidence "$RUNNER_TEMP/e2e-go127" --require-network-positive-control
 
       - name: Retain acceptance evidence
         if: always()

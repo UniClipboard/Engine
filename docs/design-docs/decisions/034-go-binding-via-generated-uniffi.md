@@ -12,7 +12,7 @@
 - 复用现有 UniFFI（`=0.31.1`）元数据，用 NordSecurity `uniffi-bindgen-go` 固定 revision 生成 Go/cgo 包；生成器自身 `Cargo.lock` 与模板补丁的 sha256 固定在 `bindings/go/generator/PIN.env`，不进入本仓 workspace 和 `Cargo.lock`。
 - 上游模板的局部变量与用户方法参数同名时生成物无法编译；修复只通过生成器源码补丁交付，禁止手改生成文件。生成物提交入库，CI 重新生成要求零差异。
 - Go 门面只做 Go 侧所有权：一次 `Open`、调用 `uc-engine` 既有动作、读取事件、确定性 `Close`、稳定错误与输入校验。业务流程、恢复与重试仍由 Rust 负责。
-- 原生库不进入 Go module。`stage-native.sh` 为库生成来源清单（Engine revision、`Cargo.lock` sha256、目标、profile、工具链、生成器 pin、库 sha256/size），`Open` 强制核对动态链接器实际映射的库，没有跳过模式。
+- 原生库不进入 Go module。`stage-native.sh` 为库生成来源清单（Engine revision、`Cargo.lock` sha256、目标、profile、工具链、生成器 pin、库 sha256/size），`Open` 强制核对清单与动态链接器报告的库文件（完整性自检，不防御有本地写权限的攻击者），没有跳过模式。
 - 第一片不修改 Rust 源码与公共 UniFFI 表面，因此 Swift/Kotlin 契约与移动 pin 不受影响。
 
 ## 取舍与代价

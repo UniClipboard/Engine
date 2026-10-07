@@ -25,8 +25,16 @@ type Host interface {
 }
 
 // hostAdapter 把 Host 适配为生成层的回调接口，并把 Go 错误映射为稳定的宿主错误分类。
+// 宿主回调的 panic 发生在 Rust 线程调用 Go 的栈上，无法被调用方 recover；这里统一转为 ErrHostIO，
+// 不携带 panic 值，避免宿主自身的缺陷终止整个进程。
 type hostAdapter struct {
 	host Host
+}
+
+func guard(err *error) {
+	if recover() != nil {
+		*err = ffi.NewHostBindingErrorIo()
+	}
 }
 
 func hostError(err error) error {
@@ -44,22 +52,26 @@ func hostError(err error) error {
 	}
 }
 
-func (a hostAdapter) PrivateDataDirectory() (string, error) {
-	value, err := a.host.PrivateDataDirectory()
+func (a hostAdapter) PrivateDataDirectory() (value string, err error) {
+	defer guard(&err)
+	value, err = a.host.PrivateDataDirectory()
 	return value, hostError(err)
 }
 
-func (a hostAdapter) CacheDirectory() (string, error) {
-	value, err := a.host.CacheDirectory()
+func (a hostAdapter) CacheDirectory() (value string, err error) {
+	defer guard(&err)
+	value, err = a.host.CacheDirectory()
 	return value, hostError(err)
 }
 
-func (a hostAdapter) TemporaryDirectory() (string, error) {
-	value, err := a.host.TemporaryDirectory()
+func (a hostAdapter) TemporaryDirectory() (value string, err error) {
+	defer guard(&err)
+	value, err = a.host.TemporaryDirectory()
 	return value, hostError(err)
 }
 
-func (a hostAdapter) SecureStorageGet(key string) (*[]byte, error) {
+func (a hostAdapter) SecureStorageGet(key string) (result *[]byte, err error) {
+	defer guard(&err)
 	value, err := a.host.SecureStorageGet(key)
 	if err != nil {
 		return nil, hostError(err)
@@ -70,11 +82,13 @@ func (a hostAdapter) SecureStorageGet(key string) (*[]byte, error) {
 	return &value, nil
 }
 
-func (a hostAdapter) SecureStorageSet(key string, value []byte) error {
+func (a hostAdapter) SecureStorageSet(key string, value []byte) (err error) {
+	defer guard(&err)
 	return hostError(a.host.SecureStorageSet(key, value))
 }
 
-func (a hostAdapter) SecureStorageDelete(key string) error {
+func (a hostAdapter) SecureStorageDelete(key string) (err error) {
+	defer guard(&err)
 	return hostError(a.host.SecureStorageDelete(key))
 }
 

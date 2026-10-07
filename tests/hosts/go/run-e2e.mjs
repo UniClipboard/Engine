@@ -1,6 +1,6 @@
 // Go 绑定真实进程验收驱动。
 //
-//   node tests/hosts/go/run-e2e.mjs --native <stage-native.sh 输出目录> --evidence <新的证据目录> [--go <go 可执行文件>]
+//   node tests/hosts/go/run-e2e.mjs --native <stage-native.sh 输出目录> --evidence <新的证据目录> [--go <go 可执行文件>] [--require-network-positive-control]
 //
 // 在 macOS 沙箱（拒绝全部网络）内依次运行三个独立进程：lifecycle（启动→查询→类型化错误→宿主回调→事件→
 // 关闭）、restart（同一 profile 重启并核对身份）、negative（输入校验、清单错配、并发关闭等）。
@@ -8,16 +8,19 @@
 // 只读写 --evidence 与其下的隔离根目录，不触碰真实 profile、钥匙串、剪贴板或网络。
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
 const options = new Map()
-for (let index = 2; index < process.argv.length; index += 2) {
-  options.set(process.argv[index], process.argv[index + 1])
+const args = process.argv.slice(2).filter((arg) => arg !== '--require-network-positive-control')
+for (let index = 0; index < args.length; index += 2) {
+  options.set(args[index], args[index + 1])
 }
 const native = resolve(options.get('--native') ?? '')
 const evidence = resolve(options.get('--evidence') ?? '')
 const go = options.get('--go') ?? 'go'
+// CI 加此开关：沙箱外同一访问必须成功，才能证明“拒绝”来自沙箱而不是机器本身离线。
+const requirePositiveControl = process.argv.includes('--require-network-positive-control')
 if (!options.has('--native') || !options.has('--evidence')) {
   console.error('usage: run-e2e.mjs --native DIR --evidence DIR [--go PATH]')
   process.exit(2)
@@ -74,23 +77,50 @@ const build = run('go-build', go, ['build', '-o', binary, '.'], {
   env: { CGO_ENABLED: '1', CGO_LDFLAGS: `-L${native} -Wl,-rpath,${native}` },
 })
 
+const evidenceReal = realpathSync(evidence)
+const isolatedHome = join(evidenceReal, 'home')
+const isolatedTmp = join(evidenceReal, 'tmp')
+mkdirSync(isolatedHome, { recursive: true, mode: 0o700 })
+mkdirSync(isolatedTmp, { recursive: true, mode: 0o700 })
+const realHome = process.env.HOME ?? ''
+
 // 启动会绑定本机 P2P 套接字，因此允许 bind 与回环；其余入站/出站（含 DNS、中继、局域网发现）一律拒绝。
+// 文件写入只允许证据目录与 /dev，读取拒绝真实用户的钥匙串目录；HOME 与 TMPDIR 改指证据目录。
 const sandboxProfile = [
   '(version 1)(allow default)(deny network*)',
   '(allow network-bind)',
   '(allow network* (local ip "localhost:*") (remote ip "localhost:*"))',
+  `(deny file-write* (require-not (require-any (subpath "${evidenceReal}") (subpath "/dev"))))`,
+  realHome ? `(deny file-read* (subpath "${realHome}/Library/Keychains"))` : '',
 ].join('')
-const sandboxed = (name, args, extra) =>
-  run(name, '/usr/bin/sandbox-exec', ['-p', sandboxProfile, ...args], extra)
+const sandboxed = (name, args, extra = {}) =>
+  run(name, '/usr/bin/sandbox-exec', ['-p', sandboxProfile, ...args], {
+    ...extra,
+    env: { HOME: isolatedHome, TMPDIR: `${isolatedTmp}/`, ...(extra.env ?? {}) },
+  })
 
-// 控制实验：同一沙箱下真实网络访问必须失败，否则“离线”不成立。
-const control = sandboxed('network-control', ['/usr/bin/curl', '-sS', '--max-time', '5', 'https://example.com/'], {
+// 控制实验。正控制：沙箱外同一访问应成功，否则无法区分“沙箱拒绝”与“本机离线”。
+// 负控制：沙箱内域名 TCP、IP 字面量 TCP、UDP 与越界文件写入都必须被拒绝。
+const curlArgs = (url) => ['/usr/bin/curl', '-sS', '--max-time', '5', '-o', '/dev/null', url]
+const outside = run('network-positive-control-outside-sandbox', curlArgs('https://example.com/')[0], curlArgs('https://example.com/').slice(1), {
   timeoutMs: 20_000,
 })
-const networkDenied = control.exit !== 0
+const controlDns = sandboxed('network-control-dns', curlArgs('https://example.com/'), { timeoutMs: 20_000 })
+const controlIp = sandboxed('network-control-ip-tcp', curlArgs('https://1.1.1.1/'), { timeoutMs: 20_000 })
+const udpProbe =
+  "import socket,sys\ns=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\ns.settimeout(2)\ntry:\n s.sendto(b'x',('1.1.1.1',53))\nexcept OSError:\n sys.exit(0)\nsys.exit(1)"
+const controlUdp = sandboxed('network-control-ip-udp', ['python3', '-c', udpProbe], { timeoutMs: 20_000 })
+const writeProbe = join(realpathSync('/private/tmp'), `uc-go-binding-write-probe-${process.pid}`)
+const controlWrite = sandboxed('file-write-control', ['/usr/bin/touch', writeProbe], { timeoutMs: 20_000 })
+const writeEscaped = existsSync(writeProbe)
+if (writeEscaped) rmSync(writeProbe)
+const networkDenied =
+  controlDns.exit !== 0 && controlIp.exit !== 0 && controlUdp.exit === 0 && controlWrite.exit !== 0 && !writeEscaped
+const positiveControl = outside.exit === 0
+const isolationProven = networkDenied && positiveControl
 
 const phases = []
-if (build.exit === 0 && networkDenied) {
+if (build.exit === 0 && networkDenied && (!requirePositiveControl || positiveControl)) {
   const root = join(evidence, 'root')
   const negativeRoot = join(evidence, 'root-negative')
   mkdirSync(root, { recursive: true, mode: 0o700 })
@@ -144,13 +174,28 @@ const sourceIdentity = {
 const allOk =
   build.exit === 0 &&
   networkDenied &&
+  (!requirePositiveControl || positiveControl) &&
   sourceIdentity.matches &&
   phases.length === 3 &&
   phases.every((phase) => phase.ok)
 const summary = {
   ok: allOk,
   source_identity: sourceIdentity,
-  network_isolation: { mechanism: 'sandbox-exec (deny network*; allow bind and loopback only)', profile: sandboxProfile, control_exit: control.exit, denied: networkDenied },
+  isolation: {
+    mechanism: 'sandbox-exec: network denied except bind and loopback; file writes limited to the evidence directory; real Keychains directory unreadable; HOME/TMPDIR redirected',
+    profile: sandboxProfile.replace(realHome, '<HOME>'),
+    controls: {
+      outside_sandbox_exit: outside.exit,
+      sandbox_dns_tcp_exit: controlDns.exit,
+      sandbox_ip_tcp_exit: controlIp.exit,
+      sandbox_udp_denied: controlUdp.exit === 0,
+      sandbox_out_of_tree_write_exit: controlWrite.exit,
+      out_of_tree_file_created: writeEscaped,
+    },
+    denied: networkDenied,
+    positive_control_succeeded: positiveControl,
+    isolation_proven: isolationProven,
+  },
   tools: toolVersions,
   native: {
     manifest: manifest,

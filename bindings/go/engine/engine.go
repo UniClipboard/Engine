@@ -14,6 +14,8 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -68,6 +70,7 @@ const (
 type Engine struct {
 	inner *ffi.MobileEngine
 
+	closeMu  sync.Mutex // 串行化 Close，避免第二个 Close 对已释放的对象调用 Shutdown
 	mu       sync.Mutex
 	inflight int
 	closing  bool
@@ -128,6 +131,12 @@ func call[T any](ctx context.Context, e *Engine, fn func(*ffi.MobileEngine) (T, 
 	done := make(chan outcome, 1)
 	go func() {
 		defer e.end()
+		// 生成层的 panic（例如对象已释放）不能终止宿主进程；Rust 侧的 abort 不在此列。
+		defer func() {
+			if recover() != nil {
+				done <- outcome{err: ErrUnexpectedResult}
+			}
+		}()
 		value, err := fn(e.inner)
 		done <- outcome{value, convertError(err)}
 	}()
@@ -192,6 +201,10 @@ type Invitation struct {
 
 func (Invitation) String() string   { return "Invitation(REDACTED)" }
 func (Invitation) GoString() string { return "Invitation(REDACTED)" }
+
+// MarshalJSON 与 LogValue 同样固定脱敏，避免序列化或结构化日志意外带出邀请内容。
+func (Invitation) MarshalJSON() ([]byte, error) { return []byte(`"REDACTED"`), nil }
+func (Invitation) LogValue() slog.Value         { return slog.StringValue("REDACTED") }
 
 // IssueInvitation 为当前空间签发邀请；没有可邀请的空间时返回 EngineError。
 func (e *Engine) IssueInvitation(ctx context.Context) (Invitation, error) {
@@ -274,12 +287,16 @@ func (e *Engine) NextEvent(ctx context.Context) (Event, error) {
 
 // Close 请求 Rust 在 deadline 内关闭并 join，排空在途调用后释放对象。
 //
-// 期限内未完成时返回 ErrCloseIncomplete（或 Rust 的 DeadlineExceeded EngineError），
-// 此后新调用仍被拒绝，可再次调用 Close 继续收尾。Close 成功后重复调用返回 nil。
+// 期限内未完成时返回 ErrCloseIncomplete（Rust 的可重试等待超时同样包装为它，并保留原始 EngineError），
+// 此后新调用仍被拒绝，可再次调用 Close 继续收尾。Close 成功后重复调用返回 nil；并发的 Close 被串行化。
+// 关闭期间已入队的事件对消费者不再可见：NextEvent 在 Close 开始后立即返回 ErrClosed。
+// 负载下 Close 需要排空积压的在途调用（实测 32 个并发调用方时约 5 秒），期限应按负载放宽。
 func (e *Engine) Close(deadline time.Duration) error {
 	if deadline <= 0 {
 		return ErrInvalidInput
 	}
+	e.closeMu.Lock()
+	defer e.closeMu.Unlock()
 	started := time.Now()
 	e.mu.Lock()
 	if e.closed {
@@ -301,16 +318,25 @@ func (e *Engine) Close(deadline time.Duration) error {
 			converted = nil
 		}
 		if converted != nil {
+			var engineErr *EngineError
+			if errors.As(converted, &engineErr) && engineErr.Retryable {
+				// Rust 的等待超时（实测 1108）可重试：统一为可判定的 ErrCloseIncomplete，同时保留原始稳定错误。
+				return fmt.Errorf("%w: %w", ErrCloseIncomplete, converted)
+			}
 			return converted
 		}
 	}
 
-	timer := time.NewTimer(max(deadline-time.Since(started), 0))
-	defer timer.Stop()
 	select {
 	case <-e.idle:
-	case <-timer.C:
-		return ErrCloseIncomplete
+	default:
+		timer := time.NewTimer(max(deadline-time.Since(started), 0))
+		defer timer.Stop()
+		select {
+		case <-e.idle:
+		case <-timer.C:
+			return ErrCloseIncomplete
+		}
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()

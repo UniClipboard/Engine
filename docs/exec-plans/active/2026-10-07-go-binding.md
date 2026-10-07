@@ -1,6 +1,6 @@
 # Go binding 基础
 
-状态：失败模型与验收契约已先行；实现按本文顺序分片。关联研究：t-0196。基线：main `e86f94cebcec46c1b3a6f49f88cce7a833777640`。
+状态：失败模型与验收契约已先行；实现按本文顺序分片。关联研究：Engine Go binding 调研（生成器可行性、失败边界与 API 清单）。基线：main `e86f94cebcec46c1b3a6f49f88cce7a833777640`。
 
 ## 目标与边界
 
@@ -22,20 +22,20 @@ Engine 仓库拥有一个可重复生成、可 `import` 的版本化 Go module�
 | # | 失败 | 契约 |
 |---|---|---|
 | F1 | 上游原样生成器因局部变量撞名无法编译 | 原失败证据保留；补丁只通过生成器源码补丁交付，禁止手改生成后的 Go 文件；重新生成必须字节一致 |
-| F2 | 补丁只修已知撞名，其他模板局部变量仍可能与用户参数同名 | 审计 VTableImpl/callback/async 模板的全部局部名；验收为完整组件编译，不称通用卫生修复 |
+| F2 | 补丁只修已知撞名，其他模板局部变量仍可能与用户参数同名 | 模板引入的局部名统一加 `_uniffi` 前缀；验收为完整组件编译，不称通用卫生修复。回调分发函数的 `uniffi*`/`callStatus` 形参仍未加前缀；async 回调分支当前组件不含，未被编译覆盖 |
 | F3 | 生成物与 native 库错配（版本、UniFFI contract、API checksum） | 生成包 init 的 checksum 检查必须失败即 panic；facade 另在 Open 时核对 `core_version` 与来源清单 |
-| F4 | 加载了非预期的动态库（路径、替换、旧库） | facade 通过 `dladdr` 取实际加载路径，对其计算 sha256 并与来源清单比对；不一致返回 `ErrNativeMismatch`。Windows 暂不支持该校验，明确返回不支持而非静默通过 |
-| F5 | 来源清单缺失或字段不符 | 校验失败即拒绝启动，不降级为未验证模式；清单含 Engine revision、`Cargo.lock` sha256、目标、profile、toolchain、features、生成器 revision 与补丁 hash、库 sha256/size |
+| F4 | 加载了非预期的动态库（路径、替换、旧库） | facade 通过 `dladdr` 取动态链接器报告的文件路径，对该文件计算 sha256 并与来源清单比对；不一致返回 `native.ErrMismatch`。这是完整性自检而非认证，不防御有本地写权限的攻击者。Windows 暂不支持，明确返回不支持而非静默通过 |
+| F5 | 来源清单缺失或字段不符 | 校验失败即拒绝启动，不降级为未验证模式；清单含 Engine revision、`Cargo.lock` sha256、目标、profile、toolchain、features、生成器 revision 与补丁 hash、生成源摘要、库 sha256/size。运行期要求关键字段齐全，并比较目标、生成源摘要、`core_version` 与库文件；`Cargo.lock`、profile、生成器字段与工具链字段只记录，由构建流程与 CI 保证 |
 | F6 | Go 零值枚举/必填字段转 Rust 时 panic | facade 在越界前校验所有输入枚举与必填字段，返回 `ErrInvalidInput`；不得依赖生成层 panic |
 | F7 | Rust release `panic=abort`、段错误或 OOM | Go `recover` 无效，进程直接退出；契约明确声明。嵌入后宿主与 Engine 同生共死，不再有进程隔离。崩溃隔离作为 daemon 重写评审时的显式取舍，不默认嵌入更优。GUI 仍可保持为独立进程经 HTTP 连接 daemon |
 | F8 | Close 与进行中的调用并发 | Close 先标记关闭，不持锁调用 `shutdown(deadline)`（这会关闭事件队列并唤醒 `next_event`），再取写锁等待在途调用排空，最后 Destroy。重复 Close 幂等；Close 后调用返回 `ErrClosed`，不 panic |
 | F9 | Go `context` 取消被误当作 Rust 取消 | 只让调用方停止等待；Rust 调用继续，Close 仍等待被放弃的调用。文档与测试明确 |
 | F10 | `Destroy` 被误当作 shutdown | `Destroy` 只释放引用。唯一关闭边界是 `shutdown(deadline)` 成功返回与 worker join；deadline 超时返回错误且不声称已停止，可重试 |
 | F11 | 事件消费者落后 | Rust 侧容量 256，丢最旧并给出 `RefreshRequired(ConsumerLagged)`；Go 不再设第二层丢弃缓冲。消费者收到后重新查询权威状态 |
-| F12 | 宿主回调重入同一 Engine 的阻塞 API 造成环形等待 | 回调只能返回能力结果；facade 文档禁止在回调内调用同一实例。E2E 用带超时的真实进程断言重入被拒绝或有界失败，不允许无限挂起 |
-| F13 | 回调返回的类型化宿主错误丢失 | 往返断言 `PermissionDenied`、`Unavailable` 映射到 `BindingError` 且 `errors.Is` 成立 |
+| F12 | 宿主回调重入同一 Engine 的阻塞 API 造成环形等待 | 回调只能返回能力结果；facade 文档禁止在回调内调用同一实例。本片的 facade 没有能在 Open 之后触发宿主回调的操作，因此不提供真实进程用例，仅作文档约束；随首个会回调宿主的能力补入时同步补验收 |
+| F13 | 回调返回的类型化宿主错误丢失 | 目录回调的 `PermissionDenied` 往返为同一稳定错误；启动期间安全存储失败由 Engine 归类为稳定的 `1101`；回调 panic 转为 `ErrHostIO` |
 | F14 | 重启后加密 profile 不可读 | 安全存储以临时文件持久化，第二个进程用同一 profile 重启并断言同一本地设备身份 |
-| F15 | 测试触碰真实 profile、钥匙串、剪贴板或网络 | 全部使用临时目录和内存/文件 host；剪贴板与文件回调返回 Unavailable；E2E 在 macOS `sandbox-exec` 的拒绝网络配置下运行，网络不可达本身即证据 |
+| F15 | 测试触碰真实 profile、钥匙串、剪贴板或网络 | 全部使用临时目录和文件 host；剪贴板与文件回调返回 Unavailable；E2E 在 macOS `sandbox-exec` 内运行：外网（含 IP 字面量与 UDP）被拒，只允许 bind 与回环；文件写入限于证据目录，真实钥匙串目录不可读，HOME/TMPDIR 指向证据目录。负控制与沙箱外正控制（CI 强制）一并记录，正控制失败时报告 `isolation_proven: false` |
 | F16 | 日志泄露内容或秘密 | 观测只写本地文件到临时目录；E2E 在日志与 stdout/stderr 中扫描哨兵字符串，必须零命中 |
 | F17 | 并发调用过载 | Engine 命令队列无界；本片不引入限流，文档声明并发调用语义，调用方负责背压 |
 | F18 | 跨目标构建被当作原生验证 | 仅 macOS arm64 做本机链接与真实进程；其他目标只记录实际执行的生成/编译/link 检查，交叉编译不记通过 |

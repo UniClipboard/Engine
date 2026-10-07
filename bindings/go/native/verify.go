@@ -13,6 +13,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 
 	ffi "github.com/UniClipboard/Engine/bindings/go/uc_engine_uniffi"
@@ -60,6 +62,10 @@ var (
 )
 
 // Verify 读取清单并核对实际加载的原生库；同一路径在进程内只做一次完整校验。
+//
+// 这是完整性与一致性自检：能发现版本错配、陈旧库、目标不符和与已编译绑定不一致的清单，
+// 但清单与库通常在同一目录，它不是认证，也不防御有本地写权限的攻击者。校验对象是动态链接器
+// 报告的文件路径上的内容；静态链接（库不是独立文件）时库名比较失败，按错配拒绝。
 func Verify(manifestPath string) (*Manifest, error) {
 	absolute, err := filepath.Abs(manifestPath)
 	if err != nil {
@@ -94,10 +100,16 @@ func readManifest(path string) (*Manifest, error) {
 		return nil, fmt.Errorf("%w: manifest schema %d", ErrMismatch, manifest.Schema)
 	}
 	for field, value := range map[string]string{
-		"engine_revision": manifest.EngineRevision,
-		"engine_version":  manifest.EngineVersion,
-		"library.file":    manifest.Library.File,
-		"library.sha256":  manifest.Library.SHA256,
+		"engine_revision":          manifest.EngineRevision,
+		"engine_version":           manifest.EngineVersion,
+		"cargo_lock_sha256":        manifest.CargoLockSHA256,
+		"target":                   manifest.Target,
+		"profile":                  manifest.Profile,
+		"generator.revision":       manifest.Generator.Revision,
+		"generator.patch_sha256":   manifest.Generator.PatchSHA256,
+		"generated_sources_sha256": manifest.GeneratedSourcesSHA256,
+		"library.file":             manifest.Library.File,
+		"library.sha256":           manifest.Library.SHA256,
 	} {
 		if value == "" {
 			return nil, fmt.Errorf("%w: manifest field %s is empty", ErrMismatch, field)
@@ -106,7 +118,21 @@ func readManifest(path string) (*Manifest, error) {
 	return &manifest, nil
 }
 
+// targetMatches 判断清单的 Rust 目标三元组是否对应当前 Go 进程的 GOOS/GOARCH。
+func targetMatches(target string) bool {
+	arch := map[string]string{"arm64": "aarch64", "amd64": "x86_64"}[runtime.GOARCH]
+	osName := map[string]string{"darwin": "apple-darwin", "linux": "linux", "windows": "windows"}[runtime.GOOS]
+	return arch != "" && osName != "" &&
+		strings.HasPrefix(target, arch+"-") && strings.Contains(target, osName)
+}
+
 func checkLoadedLibrary(manifest *Manifest) error {
+	if !targetMatches(manifest.Target) {
+		return fmt.Errorf("%w: manifest target does not match this process", ErrMismatch)
+	}
+	if manifest.GeneratedSourcesSHA256 != ffi.GeneratedSourcesSHA256 {
+		return fmt.Errorf("%w: manifest was produced for different generated bindings", ErrMismatch)
+	}
 	if got, want := ffi.CoreVersion(), "v"+manifest.EngineVersion; got != want {
 		return fmt.Errorf("%w: core version %s, manifest %s", ErrMismatch, got, want)
 	}

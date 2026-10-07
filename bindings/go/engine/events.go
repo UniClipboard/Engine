@@ -10,6 +10,9 @@ import (
 // State 是 Engine 的生命周期状态。
 type State int
 
+// StateUnknown 表示 Rust 返回了本门面尚不认识的状态变体；消费者不得把它当作已停止。
+const StateUnknown State = 0
+
 const (
 	StateRunning State = iota + 1
 	StateQuiescing
@@ -61,8 +64,10 @@ func stateFrom(state ffi.BindingEngineState) State {
 		return StateSuspended
 	case ffi.BindingEngineStateShuttingDown:
 		return StateShuttingDown
-	default:
+	case ffi.BindingEngineStateStopped:
 		return StateStopped
+	default:
+		return StateUnknown
 	}
 }
 

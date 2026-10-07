@@ -26,10 +26,10 @@ assert.equal(
 const generated = join(goDir, 'uc_engine_uniffi')
 assert.ok(existsSync(join(generated, 'uc_engine_uniffi.go')) && existsSync(join(generated, 'uc_engine_uniffi.h')))
 assert.match(readFileSync(join(generated, 'LICENSE-uniffi-bindgen-go'), 'utf8'), /Mozilla Public License Version 2\.0/)
-// 生成目录只允许两个生成文件、手写 link.go 与许可证；其余入口说明有人把手写代码混入生成包。
+// 生成目录只允许生成文件、手写 link.go 与许可证；其余入口说明有人把手写代码混入生成包。
 assert.deepEqual(
   readdirSync(generated).sort(),
-  ['LICENSE-uniffi-bindgen-go', 'link.go', 'uc_engine_uniffi.go', 'uc_engine_uniffi.h'],
+  ['LICENSE-uniffi-bindgen-go', 'generated_sources.go', 'link.go', 'uc_engine_uniffi.go', 'uc_engine_uniffi.h'],
 )
 
 // go 指令不得高于 Desktop 声明的 1.26，避免把消费者工具链强行抬高。
