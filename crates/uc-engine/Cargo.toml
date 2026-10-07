@@ -58,6 +58,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uc-infra-profile = { path = "../uc-infra-profile", features = ["test-util"] }
 uc-testkit = { path = "../../tests/uc-testkit" }
 wiremock = "0.6"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [lints]
 workspace = true

@@ -420,6 +420,7 @@ fn startup_error(
     uc_error!(
         context = context,
         io_error_kind = io_kind,
+        error = &error as &dyn std::error::Error,
         "engine startup failed"
     );
     if error_chain_contains::<uc_infra_profile::security::ProfileUpgradeBackupRecordKeyMissing>(
