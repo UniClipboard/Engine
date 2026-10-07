@@ -71,7 +71,16 @@ jobs:
           node scripts/architecture/check-go-binding.mjs
           test -z "$(gofmt -l bindings/go/engine bindings/go/native bindings/go/uc_engine_uniffi/link.go bindings/go/uc_engine_uniffi/generated_sources.go tests/hosts/go)"
 
+      # 生成器按固定 revision 与补丁构建，输入不变时复用（无缓存的构建约 45 分钟）。
+      - name: Restore pinned generator
+        id: generator-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/generator
+          key: uniffi-bindgen-go-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bindings/go/generator/PIN.env', 'bindings/go/generator/template-local-names.patch', 'bindings/go/generator/build-generator.sh', 'rust-toolchain.toml') }}
+
       - name: Build pinned generator
+        if: steps.generator-cache.outputs.cache-hit != 'true'
         run: bash bindings/go/generator/build-generator.sh "$RUNNER_TEMP/generator"
 
       - name: Build development library for interface metadata

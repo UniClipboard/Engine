@@ -31,5 +31,14 @@ case "$(uname -s)" in
   *) echo "unsupported host: $(uname -s)" >&2; exit 1 ;;
 esac
 [[ -f "$library" ]] || { echo "missing $library" >&2; exit 1; }
-verify_release_paths "$library"
+if ! (verify_release_paths "$library") 2>/dev/null; then
+  # 构建机路径不是秘密；列出命中的前缀与样例，便于定位新的路径来源。
+  for prefix in ${RELEASE_PATH_REMAP_PREFIXES[@]+"${RELEASE_PATH_REMAP_PREFIXES[@]}"}; do
+    if LC_ALL=C grep -a -F -q -- "$prefix" "$library"; then
+      echo "leaked prefix: $prefix" >&2
+      LC_ALL=C strings -a "$library" | grep -F -- "$prefix" | sort | uniq -c | sort -rn | head -5 >&2
+    fi
+  done
+  exit 1
+fi
 echo "built $library"
