@@ -100,7 +100,7 @@ rustup target add \
   x86_64-linux-android \
   aarch64-unknown-linux-ohos
 
-cargo install cargo-ndk --locked
+just cargo install cargo-ndk --locked
 ```
 
 只开发 Rust 核心时不需要安装全部移动工具链。

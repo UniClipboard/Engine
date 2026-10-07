@@ -8,7 +8,7 @@
 
 | 需要证明什么 | 首选层级 | 是否使用 testkit |
 | --- | --- | --- |
-| 单个纯函数、值对象、状态转换 | Core/Application 普通单元测试 | 否。直接使用 `cargo test` |
+| 单个纯函数、值对象、状态转换 | Core/Application 普通单元测试 | 否。使用 `just cargo test` |
 | 一个 Application 完整负责人，使用内存 port、可控消息或可控时间 | Application 场景测试 | 仅在需要阶段、等待、资源或结构化失败证据时使用 |
 | SQLite、文件、密码、codec、provider 合同 | Infra integration/provider | 有多阶段、资源或失败分类时使用 |
 | 稳定 `uc-engine` 公开入口的短链路 | Engine smoke/contract | 有跨阶段诊断需要时使用 |
@@ -45,15 +45,15 @@ testkit 不解释 admission、membership、provider 或存储状态，也不复�
 从仓库根目录执行：
 
 ```bash
-cargo test -p uc-testkit --test scenario_demo --locked
+just cargo test -p uc-testkit --test scenario_demo --locked
 ```
 
 运行成功和受控失败示范，并把两次工件写到同一根目录：
 
 ```bash
 export UC_TEST_ARTIFACTS_DIR=target/test-artifacts/guide
-cargo run --quiet --locked -p uc-testkit --example scenario_demo -- success
-cargo run --quiet --locked -p uc-testkit --example scenario_demo -- failure
+just cargo run --quiet --locked -p uc-testkit --example scenario_demo -- success
+just cargo run --quiet --locked -p uc-testkit --example scenario_demo -- failure
 find "$UC_TEST_ARTIFACTS_DIR" -name result.json -o -name summary.txt
 ```
 
@@ -225,7 +225,7 @@ Active 状态和最终确认。fixture 内部调用真实 `SpaceAdmissionProtoco
 Candidate/Commit/Complete/ACK 或固定恢复轮次。当前示范可直接运行：
 
 ```bash
-cargo nextest run -p uc-application \
+just cargo nextest run -p uc-application \
   -E 'test(joiner_pairing_fixture_reaches_active_settled)' --locked
 ```
 
@@ -248,7 +248,7 @@ expect_confirmed(nodes.exchange().await?);
 并把节点准备、分区、恢复和 exchange 结果写入通用 `Scenario`；后者负责时间预算、阶段、清理和报告。单独运行：
 
 ```bash
-cargo nextest run --profile ci --locked -p uc-application \
+just cargo nextest run --profile ci --locked -p uc-application \
   -E 'test(two_member_nodes_partition_and_heal)'
 ```
 
