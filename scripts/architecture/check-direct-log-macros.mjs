@@ -50,7 +50,8 @@ export function violationSites(jsonLines) {
 }
 
 function runClippy(extraArgs) {
-  const result = spawnSync('cargo', [...BASE_ARGS, ...extraArgs, '--', ...CLIPPY_LINT_ARGS], {
+  const result = spawnSync(
+    resolve(import.meta.dirname, '../build-cache/bin/cargo'), [...BASE_ARGS, ...extraArgs, '--', ...CLIPPY_LINT_ARGS], {
     cwd: REPOSITORY_ROOT,
     encoding: 'utf8',
     maxBuffer: 1024 * 1024 * 1024,

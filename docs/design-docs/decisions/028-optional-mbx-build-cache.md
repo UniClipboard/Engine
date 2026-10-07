@@ -1,6 +1,6 @@
 # ADR-028：本地构建可选使用 mbx 跨 worktree 编译缓存
 
-- **状态**：已采纳
+- **状态**：已被 [ADR-033](033-unified-mbx-rust-builds.md) 取代；下文保留历史决定
 - **日期**：2026-09-27
 - **范围**：本地开发构建入口；不改变 CI、发布构建、全局 Cargo 配置或默认的 `cargo` 行为
 - **相关文件**：[`justfile`](../../../justfile)、[`scripts/build-cache/mbx.sh`](../../../scripts/build-cache/mbx.sh)

@@ -102,7 +102,7 @@ def main():
     env = dict(os.environ)
     env.pop("CARGO_BUILD_BUILD_DIR", None)
     commands = [["git", "rev-parse", "HEAD"], ["git", "status", "--porcelain"],
-                ["rustc", "-Vv"], ["cargo", "-V"], ["uname", "-a"]]
+                ["rustc", "-Vv"], ["bash", "scripts/build-cache/mbx.sh", "--cargo", "-V"], ["uname", "-a"]]
     if os.uname().sysname == "Darwin":
         commands += [["sysctl", "-n", "machdep.cpu.brand_string", "hw.memsize", "hw.ncpu"],
                      ["xcrun", "ld", "-v"]]

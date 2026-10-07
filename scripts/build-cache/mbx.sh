@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# 可选的跨 worktree 编译缓存入口：只让本次命令经由 mbx（mr-boxington），不改全局 Cargo、RUSTC_WRAPPER 或 CI。
+# 统一 Rust 编译缓存负责人：当前进程树经由 MBX，不修改全局 Cargo 配置。
 # 取舍与实测依据见 docs/design-docs/decisions/028-optional-mbx-build-cache.md。
 #
 #   mbx.sh <cargo 参数...>      例：mbx.sh check --workspace --all-targets --locked
+#   mbx.sh --cargo <参数...>    保留原生 Cargo shim 的命令/工具查询语义
 #   mbx.sh --exec <命令...>     让命令内部的 cargo 调用也经由 mbx（如 scripts/testing/run-test-group.sh）
 #   mbx.sh --mbx <子命令...>    以同一配置运行 mbx 自身命令（如 cache stats、gc --dry-run）
 #   mbx.sh --install            只下载并校验固定版本
@@ -97,9 +98,10 @@ unset RUSTC_WRAPPER CARGO_BUILD_RUSTC_WRAPPER
 export MBX_TARGET_VIEWS=0 MBX_TARGET_SEED=0
 # 默认的 learned incremental 在 Engine 上使改动后重建变慢，并使缓存每次增长约 1.8 GiB。
 export MBX_LEARNED_INCREMENTAL=0
+export CARGO_INCREMENTAL=0
 export MBX_GC_MAX_SIZE="${MBX_GC_MAX_SIZE:-20GiB}"
 export MBX_DISPLAY="${MBX_DISPLAY:-plain}"
-# 可选本地入口限制为四个编译任务；普通 Cargo 仍采用仓库的保守默认。
+# 统一入口在本地默认四个编译任务；CI 由 runner 装配数字并行度。
 # 保留调用方的环境值，Cargo 命令行 -j 仍具有最高优先级；实测与资源边界见本地构建指南。
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
 # cargo -> mbx 垫片放在 PATH 最前，mbx 再调用其后的 cargo。
@@ -107,8 +109,9 @@ export PATH="$MBX_ROOT/shim:$PATH"
 
 case "${1:-}" in
   --install) printf 'mbx %s: %s\n' "$MBX_VERSION" "$MBX_BIN" ;;
+  --cargo) shift; exec "$MBX_ROOT/shim/cargo" "$@" ;;
   --exec) shift; exec "$@" ;;
   --mbx) shift; exec "$MBX_BIN" "$@" ;;
-  "" | -h | --help) sed -n '2,11p' "$0" ;;
+  "" | -h | --help) sed -n '2,12p' "$0" ;;
   *) exec "$MBX_BIN" "$@" ;;
 esac

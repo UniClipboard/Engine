@@ -146,6 +146,12 @@ jobs:
             sudo chmod g+rX "$tool_path"
             sudo ln -sf "$tool_path" "/usr/local/bin/$tool"
           done
+          # audit 用户也通过仓库入口编译；真实 Cargo 路径固定，避免 /usr/local/bin shim 递归。
+          real_cargo="$(rustup which cargo)"
+          printf '#!/bin/bash\nexport CARGO=%q\nexec %q "$@"\n' \
+            "$real_cargo" "$GITHUB_WORKSPACE/scripts/build-cache/bin/cargo" > "$RUNNER_TEMP/audit-cargo"
+          sudo rm /usr/local/bin/cargo
+          sudo install -m 755 "$RUNNER_TEMP/audit-cargo" /usr/local/bin/cargo
           sudo -u uni-auditor -- cargo --version
 
       - name: Run ${{ matrix.skill }} (attempt 1)

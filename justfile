@@ -6,6 +6,10 @@ set positional-arguments
 default:
     @just --list
 
+# 默认 Cargo 入口：构建、检查与测试统一使用 MBX
+cargo *args:
+    @scripts/build-cache/bin/cargo "$@"
+
 # 经由 mbx 跨 worktree 编译缓存运行一条 Cargo 命令，例如：just mbx check --workspace --all-targets --locked
 mbx *args:
     @bash scripts/build-cache/mbx.sh "$@"

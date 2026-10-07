@@ -70,7 +70,7 @@ if (benchmarkFilter) {
   cargoArguments.push("--", benchmarkFilter);
 }
 execFileSync(
-  "cargo",
+  resolve(root, "scripts/build-cache/bin/cargo"),
   cargoArguments,
   { cwd: root, env: environment, stdio: "inherit" },
 );

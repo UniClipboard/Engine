@@ -1,13 +1,13 @@
 # ADR-029：CI 编译缓存使用 Cloudflare R2
 
-- **状态**：已采纳（R2 凭据配置与实测见“未验证项”）
+- **状态**：已被 [ADR-033](033-unified-mbx-rust-builds.md) 取代；下文保留历史决定（R2 凭据配置与实测见“未验证项”）
 - **日期**：2026-09-28
 - **范围**：经 `.github/actions/rust-ci-setup` 的 CI Rust job（`pr-check.yml`、`engine-real-environment.yml`）
   与手工基准 `compile-cache-benchmark.yml`；不改变发布工作流、本地构建与 [ADR-028](028-optional-mbx-build-cache.md) 的 mbx 入口
 - **相关文件**：[`rust-ci-setup`](../../../.github/actions/rust-ci-setup/action.yml)、
-  [`start-ci-sccache.sh`](../../../scripts/build-cache/start-ci-sccache.sh)、
-  [`measure-ci-sccache.mjs`](../../../scripts/build-cache/measure-ci-sccache.mjs)、
-  [`ci-compile-cache.test.mjs`](../../../scripts/build-cache/ci-compile-cache.test.mjs)
+  `scripts/build-cache/start-ci-sccache.sh`（历史实现，已移除）、
+  `scripts/build-cache/measure-ci-sccache.mjs`（历史实现，已移除）、
+  `scripts/build-cache/ci-compile-cache.test.mjs`（历史实现，已移除）
 
 ## 背景
 

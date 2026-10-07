@@ -30,3 +30,5 @@ ADR 记录重要取舍的背景、备选方案和后果。编号保持历史稳�
 - [ADR-030：类型化日志事件与工具链强制](030-typed-log-events-and-enforcement.md)
 - [ADR-031：内置 relay 列表由产品持有](031-product-owned-builtin-relay-list.md)
 - [ADR-032：传输无关的同步线上格式独立为 uc-sync-protocol](032-transport-independent-sync-wire-crate.md)
+
+- [ADR-033：Rust 构建与测试统一使用 MBX](033-unified-mbx-rust-builds.md)

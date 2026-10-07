@@ -1,9 +1,9 @@
 # 本地多 worktree 构建
 
 本地构建的完整负责人是 [`mbx.sh`](../../scripts/build-cache/mbx.sh)；调用方只需执行
-`just mbx <Cargo 参数>` 或 `just mbx-exec <命令>`。失败保留命令退出码，重试仍由调用方发起。
-默认 Cargo 和 CI 的编译缓存职责见 [ADR-028](decisions/028-optional-mbx-build-cache.md) 与
-[ADR-029](decisions/029-ci-r2-compile-cache.md)。
+`just cargo <Cargo 参数>`；仓库测试/平台构建脚本自动接入。当前 shell 直接执行 Cargo 前先
+`source scripts/build-cache/env.sh`，任意外部命令可用 `just mbx-exec <命令>`。失败保留命令退出码，重试仍由调用方发起。
+本地、CI、E2E 与发布的唯一缓存决定见 [ADR-033](decisions/033-unified-mbx-rust-builds.md)。
 
 ## 输出、缓存与并行度
 
@@ -12,7 +12,7 @@ MBX 动作缓存，不能共用同一个 Cargo 输出目录：锁等待会串行
 MBX 不接管或回收 target。外置路径由本机既有配置或调用方提供，仓库不包含机器绝对路径。
 不要改变全局 Cargo、sccache 或系统配置，也不要回收其他工作树的输出。
 
-可选 MBX 入口默认 `CARGO_BUILD_JOBS=4`，已有环境值与命令行 `-j` 可以覆盖；普通 Cargo
+统一 MBX 入口默认 `CARGO_BUILD_JOBS=4`，已有环境值与命令行 `-j` 可以覆盖；普通 Cargo
 继续使用 `.cargo/config.toml` 的 2，CI 已按 runner 核数单独覆盖。
 
 编译并行度是 Cargo 的任务数上限，不是 rustc 内部线程或峰值内存的硬限制。多 worker 的总资源消耗
@@ -22,7 +22,7 @@ MBX 不接管或回收 target。外置路径由本机既有配置或调用方提
 ## R2 分布式动作缓存
 
 使用固定 MBX 原生 S3 后端：`just mbx --r2 <Cargo 参数>`。每个 worker 仍有独立 target 和本地
-动作缓存；远端对象位于 `uniclipboard-build-cache` 桶的 `engine/mbx/v1/`，与 sccache 前缀隔离。
+动作缓存；远端对象位于 `uniclipboard-build-cache` 桶的 `engine/mbx/v1/`，不读取历史 sccache 对象。
 R2 共享编译结果，不提供跨机器编译锁或调度，也不会把 sccache 对象转换为 MBX 对象。
 
 调用方从安全凭据管理器提供 `BUILD_CACHE_R2_ENDPOINT`、`BUILD_CACHE_R2_ACCESS_KEY_ID` 与
@@ -35,7 +35,7 @@ S3 端点；访问密钥仅限该桶。缺少任一项时入口报错，不会�
 `engine-build-cache-writer` 环境，PR 使用 `engine-build-cache-reader`。MBX 1.18.0 会将本地、PR、
 未保护分支和手工触发收紧为只读，不能靠只写 `read-write` 启用发布，也不得伪造 GitHub 环境。
 主线必须真实受保护；接入前应核对实际规则。本机尚需独立配置只读凭据，GitHub secrets 无法读回。
-正式 release/tag 不接入共享缓存。主线发布与 PR 只读验收由
+正式 release/tag 经 MBX 只复用本次 job 的可信本地动作缓存，不接入共享编译档案。主线发布与 PR 只读验收由
 [`mbx-r2-cache.yml`](../../.github/workflows/mbx-r2-cache.yml) 运行，工件包含诊断及原生统计；主线还必须
 运行独立空 target/动作缓存的消费者并确认下载、命中、无远端错误与零上传。主线分别播种
 `check --workspace --all-targets --locked` 与迁移测试构建的 manifest；消费者按同一命令读取，
@@ -90,7 +90,13 @@ macOS 的 `/usr/bin/time -l` 同时记录 CPU 时间与最大 RSS，不能把其
 - MBX 的 `share_workspace_root` 会改变 `file!()`、panic 与调试信息中的路径，本次不开启。
 - Apple 产物继续使用 Apple ld；文章的 Linux 链接器比较不能直接证明 macOS 收益。
 - 不重格式化磁盘、不安装 ZFS、不迁移编译宿主；当前问题先用已有 Cargo 任务并行度解决。
-- CI 已按逻辑核数设置并行度，并使用依赖缓存与 R2 sccache；本地实测不代表 CI 提速。
+- CI 按逻辑核数设置并行度，编译动作统一经 MBX；本地实测不代表 CI 提速。
 
 MBX 参数语义以 [固定版本文档](https://github.com/jdx/mr-boxington/blob/v1.18.0/docs/configuration.md)
 为准；Cargo 并行度优先级见 [Cargo configuration](https://doc.rust-lang.org/cargo/reference/config.html#buildjobs)。
+
+## 测试与命中边界
+
+`just cargo test`、`just cargo nextest` 与各测试分组脚本都经过 MBX。MBX 只恢复编译产物；测试、网络交互与工件断言仍实际执行。metadata/fmt/审计不是可命中的 rustc 动作，第一次编译和不支持的原生 bypass 也不能记为命中。
+
+CI 保存每次 Cargo 调用的原生 JSON 到 runner 的 `mbx-evidence`；R2 凭据通过临时 0600 文件在入口加载，GITHUB_ENV 只含路径。fork 无凭据使用本地 CAS 与 ref 隔离的 Actions 后备，真实 R2 不因环境缺失而伪装成功。`compile-cache-benchmark.yml` 手工运行只读 R2，使用两个独立空 target 和本次本地 CAS 验证恢复，不模拟主线发布。

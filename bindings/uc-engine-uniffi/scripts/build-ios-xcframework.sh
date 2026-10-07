@@ -2,6 +2,9 @@
 
 set -euo pipefail
 
+# 当前脚本与所有嵌套 Cargo 调用统一经由 MBX。
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../scripts/build-cache/env.sh"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 REPO_ROOT="$(cd "${1:-$REPO_ROOT}" && pwd)"

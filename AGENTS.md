@@ -47,7 +47,7 @@
 - 保持单一事实来源，不长期保留新旧两套实现或文档入口。
 - 文档中的仓库路径使用相对路径。
 - 使用 planning-with-files 时，`task_plan.md`、`findings.md`、`progress.md` 统一存放在 `.planning/<YYYY-MM-DD>-<任务短名>/` 下，不得创建在仓库根目录；继续已有任务时复用其原目录。
-- Rust 命令从仓库根目录运行。
+- Rust 命令从仓库根目录运行，统一通过 `just cargo`；直接运行 Cargo 前 source `scripts/build-cache/env.sh`。
 - Cargo 构建默认复用仓库 `target`；该路径不可用时先停止并修复，不得把任务命名的 `CARGO_TARGET_DIR` 改到 `/tmp` 或 `/private/tmp` 继续构建。
 - 多 Agent 可以并行读代码和修改互不重叠的文件，但 Cargo 验证由一个负责人通过共享 `target` 串行执行；不得让每个 Agent 各建一套完整构建目录。
 - 默认保留环境中的共享编译缓存；除非任务就是诊断缓存本身，不得通过清空 `RUSTC_WRAPPER` 绕过它。
@@ -70,9 +70,9 @@
 不涉及行为改动时至少运行：
 
 ```bash
-cargo metadata --locked --format-version 1
-cargo check --workspace --all-targets --locked
-cargo fmt --all -- --check
+just cargo metadata --locked --format-version 1
+just cargo check --workspace --all-targets --locked
+just cargo fmt --all -- --check
 node scripts/architecture/check-rust-style.mjs
 node scripts/architecture/check-engine-repository.mjs
 git diff --check

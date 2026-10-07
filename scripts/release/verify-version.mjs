@@ -2,6 +2,7 @@
 
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import process from 'node:process'
 
 const [tag, packageName = 'uc-engine'] = process.argv.slice(2)
@@ -19,7 +20,8 @@ function parseJson(input, source) {
 }
 
 const metadata = parseJson(
-  execFileSync('cargo', ['metadata', '--no-deps', '--locked', '--format-version', '1'], {
+  execFileSync(
+    resolve(import.meta.dirname, '../build-cache/bin/cargo'), ['metadata', '--no-deps', '--locked', '--format-version', '1'], {
     encoding: 'utf8',
   }),
   'cargo metadata'

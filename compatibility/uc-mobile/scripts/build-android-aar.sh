@@ -34,6 +34,9 @@
 
 set -euo pipefail
 
+# 当前脚本与所有嵌套 Cargo 调用统一经由 MBX。
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../scripts/build-cache/env.sh"
+
 echo "build-android-aar.sh is a DESIGN PLACEHOLDER — Android delivery is not implemented yet." >&2
 echo "See the header comment for the intended pipeline, and docs/packaging/mobile-core-build-release.md." >&2
 exit 64  # EX_USAGE: not runnable by design

@@ -116,6 +116,14 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      - name: Retain MBX compiler evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mbx-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/mbx-evidence
+          if-no-files-found: warn
+
   manual:
     name: Manual real Engine scenario
     if: github.event_name == 'workflow_dispatch' && inputs.mode != 'profile-upgrade' && inputs.mode != 'membership-e2e' && inputs.mode != 'upgrade-matrix'
@@ -183,6 +191,14 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      - name: Retain MBX compiler evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mbx-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/mbx-evidence
+          if-no-files-found: warn
+
   profile-upgrade:
     name: Nightly profile upgrade evidence
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'profile-upgrade')
@@ -247,6 +263,14 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Retain MBX compiler evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mbx-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/mbx-evidence
+          if-no-files-found: warn
+
   membership-e2e:
     name: Membership multi-device scenarios
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'membership-e2e')
@@ -308,6 +332,15 @@ jobs:
 
   # 升级兼容矩阵（各锚点到当前源码与 D1 完整链）：先按 rev 构建并缓存全部旧版宿主，再按维度分片运行，最后合并
   # 矩阵表。夜间、锚点定义变化的 PR 与手动触发运行同一矩阵。
+
+      - name: Retain MBX compiler evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mbx-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/mbx-evidence
+          if-no-files-found: warn
+
   upgrade-anchors:
     name: Upgrade matrix anchor hosts
     if: github.event_name == 'schedule' || github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'upgrade-matrix')
@@ -354,6 +387,14 @@ jobs:
             target/upgrade-anchors/*/build.log
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Retain MBX compiler evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mbx-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/mbx-evidence
+          if-no-files-found: warn
 
   upgrade-matrix:
     name: Upgrade matrix (${{ matrix.dimension }})
@@ -415,6 +456,14 @@ jobs:
             target/test-artifacts/ci/upgrade-matrix
           if-no-files-found: error
           retention-days: 14
+
+      - name: Retain MBX compiler evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mbx-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/mbx-evidence
+          if-no-files-found: warn
 
   upgrade-matrix-report:
     name: Upgrade matrix report

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# 当前脚本与所有嵌套 Cargo 调用统一经由 MBX。
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../build-cache/env.sh"
+
 readonly NEXTEST_VERSION="0.9.145"
 readonly GROUP="${1:-}"
 readonly BUILD_SCOPE="${UC_TEST_BUILD_SCOPE:-group}"

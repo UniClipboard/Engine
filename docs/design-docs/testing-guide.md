@@ -280,3 +280,7 @@ runner 工件中的 `timings.prepare_ms`、`scenario_ms`、`cleanup_ms` 和 `tot
 四个工件均记录 `failed=false`、`cleaned=true` 和 `plaintext_clean=true`，因此当前 runner 的单 mode
 准备、场景和清理满足 30 分钟目标。新增 workflow 尚未进入默认分支，scheduled 与 `profile-upgrade` 的首次远程样本
 仍须在合并后取得；这不影响上述 runner 实测，也不能把它写成 nightly 已持续稳定。
+
+## 编译缓存入口
+
+测试分组与连接恢复脚本自动使用仓库固定的 MBX。直接 Cargo 命令用 `just cargo …`，或先 `source scripts/build-cache/env.sh`；不要从绝对路径绕过仓库入口。缓存只恢复编译产物，测试仍每次实际运行并生成自己的工件。统一缓存与 CI/发布信任边界见 [ADR-033](decisions/033-unified-mbx-rust-builds.md)。

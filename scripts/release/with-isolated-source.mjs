@@ -38,7 +38,7 @@ try {
     cwd: source,
     stdio: 'inherit',
     detached: true,
-    env: { ...process.env, CARGO_HOME: cargoHome, CARGO_TARGET_DIR: join(source, 'target'), UC_OHOS_TARGET_DIR: join(source, 'target') },
+    env: { ...process.env, PATH: `${join(repository, 'scripts/build-cache/bin')}:${process.env.PATH}`, CARGO_HOME: cargoHome, CARGO_TARGET_DIR: join(source, 'target'), UC_OHOS_TARGET_DIR: join(source, 'target') },
   })
   const stop = signal => {
     if (child.pid) {

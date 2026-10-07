@@ -89,7 +89,8 @@ function main() {
   if (process.exitCode) return
   if (explicitTarget && explicitBuild) return
 
-  const metadata = spawnSync('cargo', ['metadata', '--no-deps', '--offline', '--format-version', '1'], {
+  const metadata = spawnSync(
+    resolve(import.meta.dirname, '../build-cache/bin/cargo'), ['metadata', '--no-deps', '--offline', '--format-version', '1'], {
     cwd: REPOSITORY_ROOT,
     encoding: 'utf8',
   })
