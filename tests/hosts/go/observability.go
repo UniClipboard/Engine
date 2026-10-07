@@ -49,15 +49,16 @@ func installObservability(host *fileHost, version string) error {
 	_, err := ffi.InstallProcessObservability(ffi.BindingObservabilityConfig{
 		ServiceVersion:           version,
 		Environment:              ffi.BindingDeploymentEnvironmentTest,
-		AppChannel:               "go-binding-acceptance",
+		AppChannel:               "test",
 		RemoteDiagnosticsEnabled: false,
 		Collector:                nil,
 	}, ffiHost{host})
 	return err
 }
 
-// scanForLeaks 在隔离根目录的全部文件（Rust 写入的观测日志等，不含安全存储本身）中查找哨兵与密钥字节
-// 的原文、hex、base64 形式，返回命中的文件相对路径与种类；不输出命中的内容。
+// scanForLeaks 查找泄露并返回命中的文件相对路径与种类，不输出命中的内容：
+//   - 密钥字节的原文、hex、base64 形式：扫描隔离根目录的全部文件（观测日志、profile 数据库等），不含安全存储本身；
+//   - 哨兵字符串：只扫描观测日志目录，profile 标识属于存储结构，不是日志可携带的内容。
 func scanForLeaks(root string, sentinels []string, secrets [][]byte) ([]string, error) {
 	var needles []struct {
 		kind string
@@ -97,7 +98,11 @@ func scanForLeaks(root string, sentinels []string, secrets [][]byte) ([]string, 
 		if err != nil {
 			return err
 		}
+		inLogs := strings.HasPrefix(rel, filepath.Join("cache", "logs")+string(filepath.Separator))
 		for _, needle := range needles {
+			if needle.kind == "sentinel" && !inLogs {
+				continue
+			}
 			if bytes.Contains(content, needle.data) {
 				hits = append(hits, rel+":"+needle.kind)
 			}

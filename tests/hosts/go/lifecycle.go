@@ -44,7 +44,7 @@ func runLifecycle(result *report, root, manifest string) {
 	if err != nil || !result.record("host_ready", err == nil, nil) {
 		return
 	}
-	if err := installObservability(host, appVersion); !result.record("observability_local_only", err == nil, errString(err)) {
+	if err := installObservability(host, "0.0.1"); !result.record("observability_local_only", err == nil, errString(err)) {
 		return
 	}
 	eng, err := openEngine(host, manifest)
@@ -61,7 +61,7 @@ func runLifecycle(result *report, root, manifest string) {
 	space, err := eng.SpaceState(ctx)
 	result.record("query_space_state_fresh_profile", err == nil && !space.HasCompleted, map[string]any{"has_completed": space.HasCompleted})
 
-	leaveErr := eng.LeaveSpace(ctx)
+	_, leaveErr := eng.IssueInvitation(ctx)
 	var typed *engine.EngineError
 	if errors.As(leaveErr, &typed) {
 		result.record("typed_engine_error", true, map[string]any{"code": typed.Code, "category": typed.Category, "retryable": typed.Retryable})

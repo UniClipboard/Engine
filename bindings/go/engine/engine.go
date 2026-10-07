@@ -183,6 +183,24 @@ func (e *Engine) Devices(ctx context.Context) ([]Device, error) {
 	})
 }
 
+// Invitation 是一次性邀请。内容属于敏感信息：String 与 GoString 固定脱敏，调用方不得记录其字段。
+type Invitation struct {
+	Code        string
+	Full        string
+	ExpiresAtMs int64
+}
+
+func (Invitation) String() string   { return "Invitation(REDACTED)" }
+func (Invitation) GoString() string { return "Invitation(REDACTED)" }
+
+// IssueInvitation 为当前空间签发邀请；没有可邀请的空间时返回 EngineError。
+func (e *Engine) IssueInvitation(ctx context.Context) (Invitation, error) {
+	return call(ctx, e, func(inner *ffi.MobileEngine) (Invitation, error) {
+		issued, err := inner.IssueInvitation()
+		return Invitation{Code: issued.InvitationCode, Full: issued.FullInvitation, ExpiresAtMs: issued.ExpiresAtMs}, err
+	})
+}
+
 // LeaveSpace 退出当前空间；没有可退出的空间时返回 EngineError。
 func (e *Engine) LeaveSpace(ctx context.Context) error {
 	_, err := call(ctx, e, func(inner *ffi.MobileEngine) (struct{}, error) {

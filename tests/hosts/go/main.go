@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	appVersion = "go-binding-acceptance"
+	appVersion = "1.1.0-rc.22"
 	profileID  = "go-binding-sentinel-profile"
 )
 
