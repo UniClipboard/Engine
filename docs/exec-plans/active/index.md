@@ -32,3 +32,4 @@
 计划完成时先更新稳定设计/ADR 和验收证据，再移入 `../completed/`。
 
 - [剪贴板启动核对与宿主导入恢复](2026-10-07-clipboard-startup-recovery.md)（实施中，关联 #1886）
+- [Go binding 基础](2026-10-07-go-binding.md)（失败模型与验收契约已定，实施中）
