@@ -89,7 +89,8 @@ const realHome = process.env.HOME ?? ''
 const sandboxProfile = [
   '(version 1)(allow default)(deny network*)',
   '(allow network-bind)',
-  '(allow network* (local ip "localhost:*") (remote ip "localhost:*"))',
+  '(allow network-outbound (remote ip "localhost:*"))',
+  '(allow network-inbound (local ip "localhost:*"))',
   `(deny file-write* (require-not (require-any (subpath "${evidenceReal}") (subpath "/dev"))))`,
   realHome ? `(deny file-read* (subpath "${realHome}/Library/Keychains"))` : '',
 ].join('')
