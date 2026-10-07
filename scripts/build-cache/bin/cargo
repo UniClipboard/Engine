@@ -6,7 +6,9 @@ shim="$root/scripts/build-cache/bin"
 remaining=""
 IFS=: read -r -a entries <<< "$PATH"
 for entry in "${entries[@]}"; do
-  if [[ "$entry" != "$shim" ]]; then remaining="${remaining:+$remaining:}$entry"; fi
+  if [[ "$entry" != "$shim" && "$entry" != "${UC_ENGINE_MBX_BIN:-}" ]]; then
+    remaining="${remaining:+$remaining:}$entry"
+  fi
 done
 export PATH="$remaining"
 # CI 只传递 runner 专属 0600 文件的路径；密钥不写 GITHUB_ENV 或日志。

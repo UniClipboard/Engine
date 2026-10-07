@@ -47,5 +47,6 @@ tools=$(mktemp -d "$RUNNER_TEMP/engine-mbx-tools.XXXXXX")
 mkdir -p "$tools/scripts/build-cache/bin"
 cp "$root/scripts/build-cache/mbx.sh" "$root/scripts/build-cache/env.sh" "$tools/scripts/build-cache/"
 cp "$root/scripts/build-cache/bin/cargo" "$tools/scripts/build-cache/bin/"
+echo "UC_ENGINE_MBX_BIN=$tools/scripts/build-cache/bin" >> "$GITHUB_ENV"
 printf '%s\n' "$tools/scripts/build-cache/bin" >> "$GITHUB_PATH"
 printf 'MBX cache backend: %s; native protected-push policy determines effective write access\n' "$backend"
