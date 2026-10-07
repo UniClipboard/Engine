@@ -1,13 +1,13 @@
 # ADR-029：CI 编译缓存使用 Cloudflare R2
 
-- **状态**：已采纳（R2 凭据配置与实测见“未验证项”）
+- **状态**：已被 [ADR-033](033-unified-mbx-rust-builds.md) 取代；下文保留历史决定（R2 凭据配置与实测见“未验证项”）
 - **日期**：2026-09-28
 - **范围**：经 `.github/actions/rust-ci-setup` 的 CI Rust job（`pr-check.yml`、`engine-real-environment.yml`）
   与手工基准 `compile-cache-benchmark.yml`；不改变发布工作流、本地构建与 [ADR-028](028-optional-mbx-build-cache.md) 的 mbx 入口
 - **相关文件**：[`rust-ci-setup`](../../../.github/actions/rust-ci-setup/action.yml)、
-  [`start-ci-sccache.sh`](../../../scripts/build-cache/start-ci-sccache.sh)、
-  [`measure-ci-sccache.mjs`](../../../scripts/build-cache/measure-ci-sccache.mjs)、
-  [`ci-compile-cache.test.mjs`](../../../scripts/build-cache/ci-compile-cache.test.mjs)
+  `scripts/build-cache/start-ci-sccache.sh`（历史实现，已移除）、
+  `scripts/build-cache/measure-ci-sccache.mjs`（历史实现，已移除）、
+  `scripts/build-cache/ci-compile-cache.test.mjs`（历史实现，已移除）
 
 ## 背景
 
@@ -128,3 +128,11 @@ R2 令牌在 Cloudflare 仪表盘 → R2 → Manage API tokens 以 Account API t
 - 升级 sccache 时同时更新 action 的 `version` 与脚本中的版本号和二进制 sha256，并重跑基准。
 - 收益必须以 `compile-cache-benchmark.yml` 在同一提交、同一 runner 类别上的冷/暖对照为准；缓存只减少可缓存的
   rustc 编译，链接、build script、proc-macro 与测试执行不受影响，不承诺固定加速。
+
+## MBX 共用桶补充（2026-10-07）
+
+本决定记录历史 CI sccache 路线的格式、命名空间与凭据装配；当前仓库统一 MBX 方案见
+[ADR-033](033-unified-mbx-rust-builds.md)。MBX R2 流程使用
+`engine/mbx/v1/`，只共用桶与 GitHub 读写环境，不共用 sccache 条目。主线 MBX 发布还要求真实受保护
+分支 push；本机与 PR 为只读。完整接入与验收规则只在[本地构建指南](../local-builds.md#r2-分布式动作缓存)维护。
+为 `engine/mbx/` 配置独立对象过期规则并确认容量；不得覆盖现有 sccache 生命周期规则。

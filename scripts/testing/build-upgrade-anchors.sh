@@ -13,6 +13,9 @@
 # .cargo/config.toml 的 jobs，CI 由 rust-ci-setup 设置 CARGO_BUILD_JOBS），并关闭增量编译。
 set -euo pipefail
 
+# 当前脚本与所有嵌套 Cargo 调用统一经由 MBX。
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../build-cache/env.sh"
+
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$repo"
 anchors_json=tests/upgrade-matrix/anchors.json

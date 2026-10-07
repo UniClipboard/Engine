@@ -28,6 +28,10 @@ function run(
   const bin = join(fixture, 'bin')
   mkdirSync(scripts, { recursive: true })
   mkdirSync(bin)
+  // 打包夹具携带新增的环境入口；Cargo 仍由下方既有工具替身提供。
+  const cache = join(fixture, 'scripts/build-cache')
+  mkdirSync(join(cache, 'bin'), { recursive: true })
+  copyFileSync(join(root, 'scripts/build-cache/env.sh'), join(cache, 'env.sh'))
   const name = platform === 'ios' ? 'build-ios-xcframework.sh' : 'build-android-aar.sh'
   for (const file of [name, 'release-path-remap.sh']) {
     copyFileSync(join(root, 'bindings/uc-engine-uniffi/scripts', file), join(scripts, file))

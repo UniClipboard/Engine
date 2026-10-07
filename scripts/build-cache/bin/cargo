@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# 仓库 Cargo 入口；嵌套调用由 MBX 原生 shim 接管，先移除本入口避免递归。
+set -euo pipefail
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+shim="$root/scripts/build-cache/bin"
+remaining=""
+IFS=: read -r -a entries <<< "$PATH"
+for entry in "${entries[@]}"; do
+  if [[ "$entry" != "$shim" && "$entry" != "${UC_ENGINE_MBX_BIN:-}" ]]; then
+    remaining="${remaining:+$remaining:}$entry"
+  fi
+done
+export PATH="$remaining"
+# CI 只传递 runner 专属 0600 文件的路径；密钥不写 GITHUB_ENV 或日志。
+if [[ -n "${UC_ENGINE_MBX_ENV_FILE:-}" ]]; then
+  source "$UC_ENGINE_MBX_ENV_FILE"
+fi
+if [[ -n "${UC_ENGINE_MBX_STATS_DIR:-}" && -z "${MBX_STATS_REPORT:-}" ]]; then
+  mkdir -p "$UC_ENGINE_MBX_STATS_DIR"
+  report_dir=$(mktemp -d "$UC_ENGINE_MBX_STATS_DIR/session.XXXXXX")
+  export MBX_STATS_REPORT="$report_dir/stats.json"
+fi
+if [[ -n "${BUILD_CACHE_R2_ENDPOINT:-}" ]]; then
+  exec bash "$root/scripts/build-cache/mbx.sh" --r2 --cargo "$@"
+fi
+exec bash "$root/scripts/build-cache/mbx.sh" --cargo "$@"

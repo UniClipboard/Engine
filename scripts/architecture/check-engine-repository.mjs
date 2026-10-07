@@ -178,7 +178,7 @@ function parseJson(input, source) {
 
 function cargoMetadata() {
   const output = execFileSync(
-    'cargo',
+    resolve(import.meta.dirname, '../build-cache/bin/cargo'),
     ['metadata', '--no-deps', '--format-version', '1', '--locked'],
     { cwd: REPOSITORY_ROOT, encoding: 'utf8' }
   )
@@ -296,7 +296,7 @@ function checkOpenMlsValidation(metadata) {
 
 function runOpenMlsValidation() {
   const result = spawnSync(
-    'cargo',
+    resolve(import.meta.dirname, '../build-cache/bin/cargo'),
     ['test', '-p', 'openmls-validation', '--test', 'revocation', '--locked'],
     { cwd: REPOSITORY_ROOT, encoding: 'utf8' }
   )

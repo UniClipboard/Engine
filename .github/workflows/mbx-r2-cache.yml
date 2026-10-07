@@ -1,0 +1,156 @@
+name: MBX R2 cache
+
+# 只在主线保护与 writer 环境同时成立时发布；PR 使用现有只读环境，不接入 release/tag。
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    paths:
+      - scripts/build-cache/**
+      - .github/workflows/mbx-r2-cache.yml
+      - docs/design-docs/local-builds.md
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mbx-r2-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cache:
+    name: MBX R2 (${{ matrix.runner }})
+    # fork/Dependabot 没有凭据，明确跳过而不是报告远端验收通过。
+    if: github.event_name == 'push' || (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, macos-14]
+    environment:
+      name: ${{ github.event_name == 'push' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
+      deployment: false
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Require protected main for publication
+        if: github.event_name == 'push'
+        env:
+          REF_PROTECTED: ${{ github.ref_protected }}
+        run: |
+          if [[ "$REF_PROTECTED" != true ]]; then
+            echo '::error::MBX publication requires a genuinely protected main branch'
+            exit 1
+          fi
+
+      - name: Install Linux build tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev cmake
+
+      - name: Prepare isolated outputs
+        run: |
+          rustup show active-toolchain
+          mkdir -p "$RUNNER_TEMP/mbx-r2-evidence"
+          {
+            echo "CARGO_INCREMENTAL=0"
+            echo "UC_ENGINE_SOURCE_COMMIT=$(git rev-parse HEAD)"
+            echo "UC_ENGINE_SOURCE_STATE=clean"
+          } >> "$GITHUB_ENV"
+
+      - name: Exercise R2 and Engine migration
+        env:
+          BUILD_CACHE_R2_ENDPOINT: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          BUILD_CACHE_R2_ACCESS_KEY_ID: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          BUILD_CACHE_R2_SECRET_ACCESS_KEY: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+          MBX_REMOTE_MODE: ${{ github.event_name == 'push' && 'read-write' || 'read-only' }}
+          MBX_CACHE_DIR: ${{ runner.temp }}/mbx-r2-producer-cache
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/mbx-r2-producer
+          MBX_STATS_REPORT: ${{ runner.temp }}/mbx-r2-evidence/producer.json
+        run: |
+          bash scripts/build-cache/mbx.sh --r2 --mbx doctor --json > "$RUNNER_TEMP/mbx-r2-evidence/doctor.json"
+          bash scripts/build-cache/mbx.sh --r2 test -p uc-engine --test config_migration_round_trip_e2e --locked
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          report = json.loads(Path(os.environ['MBX_STATS_REPORT']).read_text())
+          assert report['remote_failures'] == 0, report
+          assert report['background_upload_failures'] == 0, report
+          if os.environ['MBX_REMOTE_MODE'] == 'read-only':
+              assert report['uploaded_bytes'] == 0, report
+          PY
+
+      # check 与测试构建的 rustc 输出/manifest 不同，主线也播种 worker 常用的完整检查命令。
+      - name: Publish workspace check actions
+        if: github.event_name == 'push'
+        env:
+          BUILD_CACHE_R2_ENDPOINT: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          BUILD_CACHE_R2_ACCESS_KEY_ID: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          BUILD_CACHE_R2_SECRET_ACCESS_KEY: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+          MBX_REMOTE_MODE: read-write
+          MBX_CACHE_DIR: ${{ runner.temp }}/mbx-r2-producer-cache
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/mbx-r2-producer
+          MBX_STATS_REPORT: ${{ runner.temp }}/mbx-r2-evidence/producer-check.json
+        run: |
+          bash scripts/build-cache/mbx.sh --r2 check --workspace --all-targets --locked
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          report = json.loads(Path(os.environ['MBX_STATS_REPORT']).read_text())
+          assert report['remote_failures'] == 0, report
+          assert report['background_upload_failures'] == 0, report
+          PY
+
+      - name: Verify independent workspace check consumer
+        if: github.event_name == 'push'
+        env:
+          BUILD_CACHE_R2_ENDPOINT: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          BUILD_CACHE_R2_ACCESS_KEY_ID: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          BUILD_CACHE_R2_SECRET_ACCESS_KEY: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+          MBX_REMOTE_MODE: read-only
+          MBX_CACHE_DIR: ${{ runner.temp }}/mbx-r2-consumer-cache
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/mbx-r2-consumer
+          MBX_STATS_REPORT: ${{ runner.temp }}/mbx-r2-evidence/consumer-check.json
+        run: |
+          bash scripts/build-cache/mbx.sh --r2 check --workspace --all-targets --locked
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          report = json.loads(Path(os.environ['MBX_STATS_REPORT']).read_text())
+          assert report['downloaded_bytes'] > 0 and report['hits'] > 0, report
+          assert report['remote_failures'] == 0, report
+          assert report['uploaded_bytes'] == 0, report
+          PY
+
+      # 主线发布后用另一套空 target/动作缓存读取，避免把本地热缓存误认成远端命中。
+      - name: Verify independent R2 consumer
+        if: github.event_name == 'push'
+        env:
+          BUILD_CACHE_R2_ENDPOINT: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          BUILD_CACHE_R2_ACCESS_KEY_ID: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          BUILD_CACHE_R2_SECRET_ACCESS_KEY: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+          MBX_REMOTE_MODE: read-only
+          MBX_CACHE_DIR: ${{ runner.temp }}/mbx-r2-consumer-cache
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/mbx-r2-consumer
+          MBX_STATS_REPORT: ${{ runner.temp }}/mbx-r2-evidence/consumer.json
+        run: |
+          bash scripts/build-cache/mbx.sh --r2 test -p uc-engine --test config_migration_round_trip_e2e --locked
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          report = json.loads(Path(os.environ['MBX_STATS_REPORT']).read_text())
+          assert report['downloaded_bytes'] > 0 and report['hits'] > 0, report
+          assert report['remote_failures'] == 0, report
+          assert report['uploaded_bytes'] == 0, report
+          PY
+
+      - name: Retain R2 evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mbx-r2-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/mbx-r2-evidence
+          if-no-files-found: warn

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# 当前脚本与所有嵌套 Cargo 调用统一经由 MBX。
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../build-cache/env.sh"
+
 usage() {
   echo "Usage: $0 [--suite all|local|network] [--repeat N] [--mode all|direct|known-peer|relay|legacy] [--case PREFIX] [--prebuilt] [--peer-host PATH --peer-side 0|1] [--relay-binary PATH] [--relay-b PATH]"
   echo "  --repeat applies to the network scenarios only; the local suite always runs once."

@@ -78,7 +78,7 @@ jobs:
       - name: Check mobile build profiles and CI compile cache boundaries
         run: >-
           node --test scripts/architecture/check-mobile-build-profile.test.mjs scripts/release/build-profile.test.mjs
-          scripts/build-cache/ci-compile-cache.test.mjs scripts/architecture/check-direct-log-macros.test.mjs
+          scripts/architecture/check-direct-log-macros.test.mjs
           scripts/testing/relay-recovery-support.test.mjs
 
       - name: Check patch whitespace
@@ -89,6 +89,15 @@ jobs:
         run: cargo test -p uc-infra-profile --test peer_address_read_diagnostics --locked
 
   # 升级兼容冒烟：上一个 Desktop 锚点到当前源码的 5 个单元；旧版宿主按 rev 与宿主摘要缓存，命中时不重建。
+
+      - name: Retain MBX compiler evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mbx-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/mbx-evidence
+          if-no-files-found: warn
+
   upgrade-matrix-smoke:
     name: Upgrade compatibility smoke
     if: github.event.action != 'labeled'
@@ -143,6 +152,14 @@ jobs:
             target/test-artifacts/ci/upgrade-matrix
             target/upgrade-anchors/*/host.json
           if-no-files-found: error
+
+      - name: Retain MBX compiler evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mbx-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/mbx-evidence
+          if-no-files-found: warn
 
   tests:
     name: Engine tests
@@ -228,6 +245,14 @@ jobs:
             target/connection-recovery-evidence
           if-no-files-found: error
 
+      - name: Retain MBX compiler evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mbx-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/mbx-evidence
+          if-no-files-found: warn
+
   coverage:
     name: Rust coverage
     if: >-
@@ -277,6 +302,14 @@ jobs:
           files: lcov.info
           token: ${{ secrets.CODECOV_TOKEN }}
 
+      - name: Retain MBX compiler evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mbx-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/mbx-evidence
+          if-no-files-found: warn
+
   connection-recovery:
     # 名称不引用矩阵变量：job 级 if 先于矩阵展开求值，被跳过时引用无法展开；运行时 GitHub 自动追加矩阵值。
     name: Connection recovery on isolated Linux networks
@@ -319,4 +352,12 @@ jobs:
         with:
           name: connection-recovery-evidence-${{ matrix.mode }}
           path: target/connection-recovery-evidence
+          if-no-files-found: warn
+
+      - name: Retain MBX compiler evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mbx-${{ github.job }}-${{ matrix.mode }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/mbx-evidence
           if-no-files-found: warn
