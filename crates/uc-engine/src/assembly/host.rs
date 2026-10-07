@@ -169,55 +169,67 @@ impl HostClipboardAdapter {
     ) -> anyhow::Result<Option<PathBuf>> {
         let mut operation_dir: Option<PathBuf> = None;
         for representation in host_representations {
-            let result = match representation {
-                HostClipboardRepresentation::Inline {
-                    format,
-                    mime_type,
-                    bytes,
-                } => {
-                    representations.push(ObservedClipboardRepresentation::new(
-                        RepresentationId::new(),
-                        FormatId::from(format),
-                        normalize_wire_mime(mime_type),
+            let result = (|| -> anyhow::Result<()> {
+                match representation {
+                    HostClipboardRepresentation::Inline {
+                        format,
+                        mime_type,
                         bytes,
-                    ));
-                    Ok(())
-                }
-                HostClipboardRepresentation::File {
-                    format,
-                    handle,
-                    display_name,
-                    mime_type,
-                    size_bytes,
-                } => {
-                    let directory = match operation_dir.as_ref() {
-                        Some(directory) => directory.clone(),
-                        None => {
-                            let directory =
-                                self.import_root.join(RepresentationId::new().to_string());
-                            std::fs::create_dir_all(&directory)?;
-                            operation_dir = Some(directory.clone());
-                            directory
-                        }
-                    };
-                    let storage_name = RepresentationId::new().to_string();
-                    let path = directory.join(&storage_name);
-                    copy_host_clipboard_file(self.files.as_ref(), &handle, size_bytes, &path)?;
-                    representations.push(ObservedClipboardRepresentation::new_local_file(
-                        RepresentationId::new(),
-                        FormatId::from(format),
-                        normalize_wire_mime(mime_type),
-                        path,
-                        size_bytes,
-                    ));
-                    file_metadata.push(FileDisplayMetadataEntry {
-                        storage_name,
+                    } => {
+                        representations.push(ObservedClipboardRepresentation::new(
+                            RepresentationId::new(),
+                            FormatId::from(format),
+                            normalize_wire_mime(mime_type),
+                            bytes,
+                        ));
+                        Ok(())
+                    }
+                    HostClipboardRepresentation::File {
+                        format,
+                        handle,
                         display_name,
-                    });
-                    Ok(())
+                        mime_type,
+                        size_bytes,
+                    } => {
+                        let directory = match operation_dir.as_ref() {
+                            Some(directory) => directory.clone(),
+                            None => {
+                                let directory =
+                                    self.import_root.join(RepresentationId::new().to_string());
+                                // 先创建共享根，再原子取得唯一目录的所有权；失败时不得清理已有目录。
+                                std::fs::create_dir_all(&self.import_root)
+                                    .context("create host clipboard import root")?;
+                                std::fs::create_dir(&directory)
+                                    .context("create host clipboard import directory")?;
+                                operation_dir = Some(directory.clone());
+                                directory
+                            }
+                        };
+                        let storage_name = RepresentationId::new().to_string();
+                        let path = directory.join(&storage_name);
+                        copy_host_clipboard_file(self.files.as_ref(), &handle, size_bytes, &path)?;
+                        representations.push(ObservedClipboardRepresentation::new_local_file(
+                            RepresentationId::new(),
+                            FormatId::from(format),
+                            normalize_wire_mime(mime_type),
+                            path,
+                            size_bytes,
+                        ));
+                        file_metadata.push(FileDisplayMetadataEntry {
+                            storage_name,
+                            display_name,
+                        });
+                        Ok(())
+                    }
                 }
-            };
+            })();
             if let Err(error) = result {
+                uc_warn!(
+                    error_kind = "host_clipboard_import",
+                    io_error_kind = io_error_kind(error.as_ref()),
+                    error = error.as_ref(),
+                    "host clipboard import failed; removing this import only"
+                );
                 cleanup_import_directory(operation_dir.as_deref());
                 return Err(error);
             }
@@ -234,27 +246,36 @@ fn copy_host_clipboard_file(
     size_bytes: u64,
     destination: &Path,
 ) -> anyhow::Result<()> {
-    let metadata = files.metadata(handle)?;
+    let metadata = files
+        .metadata(handle)
+        .context("read host clipboard file metadata")?;
     if metadata.size_bytes != size_bytes {
         return Err(anyhow::anyhow!("host clipboard file size changed"));
     }
     let mut output = OpenOptions::new()
         .create_new(true)
         .write(true)
-        .open(destination)?;
+        .open(destination)
+        .context("create host clipboard import file")?;
     let mut offset = 0_u64;
     while offset < size_bytes {
         let requested = (size_bytes - offset).min(HOST_CLIPBOARD_FILE_CHUNK_SIZE as u64) as u32;
-        let chunk = files.read_chunk(handle, offset, requested)?;
+        let chunk = files
+            .read_chunk(handle, offset, requested)
+            .context("read host clipboard file chunk")?;
         if chunk.is_empty() || chunk.len() > requested as usize {
             return Err(anyhow::anyhow!("host clipboard file read was incomplete"));
         }
-        output.write_all(&chunk)?;
+        output
+            .write_all(&chunk)
+            .context("write host clipboard import file")?;
         offset = offset
             .checked_add(chunk.len() as u64)
             .ok_or_else(|| anyhow::anyhow!("host clipboard file offset overflow"))?;
     }
-    output.sync_all()?;
+    output
+        .sync_all()
+        .context("flush host clipboard import file")?;
     Ok(())
 }
 
@@ -266,6 +287,7 @@ fn cleanup_import_directory(directory: Option<&Path>) {
         uc_warn!(
             error_kind = "clipboard_import_cleanup",
             io_error_kind = io_error_kind(&error),
+            error = &error as &dyn std::error::Error,
             "failed to remove incomplete host clipboard import"
         );
     }
