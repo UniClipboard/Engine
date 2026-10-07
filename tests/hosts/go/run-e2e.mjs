@@ -112,10 +112,44 @@ if (build.exit === 0 && networkDenied) {
   }
 }
 
+// 链接进产物的来源身份：Rust 观测日志的每条记录携带构建时嵌入的 source_commit/source_state，
+// 必须与来源清单的 revision 一致且工作区干净，证明被执行的库就是清单所述的源码。
+const sourceCommits = new Set()
+const sourceStates = new Set()
+const logDir = join(evidence, 'root', 'cache', 'logs')
+if (existsSync(logDir)) {
+  for (const name of readdirSync(logDir)) {
+    for (const line of readFileSync(join(logDir, name), 'utf8').split('\n')) {
+      try {
+        const record = JSON.parse(line)
+        if (record.source_commit) sourceCommits.add(record.source_commit)
+        if (record.source_state) sourceStates.add(record.source_state)
+      } catch {
+        // 非 JSON 行不含来源字段。
+      }
+    }
+  }
+}
+const sourceIdentity = {
+  manifest_revision: manifest.engine_revision,
+  embedded_source_commits: [...sourceCommits],
+  embedded_source_states: [...sourceStates],
+  matches:
+    sourceCommits.size === 1 &&
+    sourceCommits.has(manifest.engine_revision) &&
+    sourceStates.size === 1 &&
+    sourceStates.has('clean'),
+}
+
 const allOk =
-  build.exit === 0 && networkDenied && phases.length === 3 && phases.every((phase) => phase.ok)
+  build.exit === 0 &&
+  networkDenied &&
+  sourceIdentity.matches &&
+  phases.length === 3 &&
+  phases.every((phase) => phase.ok)
 const summary = {
   ok: allOk,
+  source_identity: sourceIdentity,
   network_isolation: { mechanism: 'sandbox-exec (deny network*; allow bind and loopback only)', profile: sandboxProfile, control_exit: control.exit, denied: networkDenied },
   tools: toolVersions,
   native: {
