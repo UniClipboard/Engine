@@ -4,7 +4,7 @@
 #   build-native.sh <dev|release>
 #
 # release 与移动包使用同一发布配置（panic=abort、LTO、符号剥离）并重映射构建机路径，
-# 构建后断言产物不含本机路径。随后用 stage-native.sh 整理交付目录并写入来源清单。
+# 路径检查在 stage-native.sh 改写 install_name 之后进行。随后用 stage-native.sh 整理交付目录并写入来源清单。
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,14 +31,6 @@ case "$(uname -s)" in
   *) echo "unsupported host: $(uname -s)" >&2; exit 1 ;;
 esac
 [[ -f "$library" ]] || { echo "missing $library" >&2; exit 1; }
-if ! (verify_release_paths "$library") 2>/dev/null; then
-  # 构建机路径不是秘密；列出命中的前缀与样例，便于定位新的路径来源。
-  for prefix in ${RELEASE_PATH_REMAP_PREFIXES[@]+"${RELEASE_PATH_REMAP_PREFIXES[@]}"}; do
-    if LC_ALL=C grep -a -F -q -- "$prefix" "$library"; then
-      echo "leaked prefix: $prefix" >&2
-      LC_ALL=C strings -a "$library" | grep -F -- "$prefix" | sort | uniq -c | sort -rn | head -5 >&2
-    fi
-  done
-  exit 1
-fi
+# cdylib 自带指向构建目录的 install_name（LC_ID_DYLIB），属于预期；路径检查在 stage-native.sh
+# 改写 install_name 之后对交付库执行。
 echo "built $library"

@@ -54,6 +54,14 @@ else
   patchelf --set-soname libuc_engine_uniffi.so "$staged"
 fi
 
+# 交付库不得含构建机路径。cargo 产物的 install_name 指向构建目录，上面已改写为 @rpath；
+# 其余来源（panic 位置、调试信息）由发布构建的路径重映射消除，这里与移动包使用同一检查。
+REPO_ROOT="$repo_root"
+TARGET_DIR="$target_dir"
+BUILD_PROFILE="$profile"
+source "$repo_root/bindings/uc-engine-uniffi/scripts/release-path-remap.sh"
+verify_release_paths "$staged"
+
 version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
 uniffi_version="$(sed -n 's/^uniffi = "=\(.*\)"/\1/p' bindings/uc-engine-uniffi/Cargo.toml)"
 revision="$(git rev-parse HEAD)"
