@@ -55,7 +55,9 @@ jobs:
           go-version: "1.24.0"
 
       - name: Static checks
-        run: node scripts/architecture/check-go-binding.mjs
+        run: |
+          node scripts/architecture/check-go-binding.mjs
+          test -z "$(gofmt -l bindings/go/engine bindings/go/native tests/hosts/go)"
 
       - name: Build pinned generator
         run: bash bindings/go/generator/build-generator.sh "$RUNNER_TEMP/generator"

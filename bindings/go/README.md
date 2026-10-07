@@ -50,7 +50,7 @@ for { event, err := eng.NextEvent(ctx); … }
 
 - **来源校验**：`Open` 读取清单，核对 `core_version`、动态链接器实际映射的库文件名与 sha256/size。清单缺失、字段不符或库被替换返回 `native.ErrMismatch`；
   没有跳过校验的模式。Windows 暂无加载路径解析，返回 `native.ErrUnsupported`。
-- **关闭**：`Close(deadline)` 先拒绝新调用，再请求 Rust 在期限内关闭并 join，排空在途调用后释放对象。期限内未完成返回 `ErrCloseIncomplete`，可重试。
+- **关闭**：`Close(deadline)` 先拒绝新调用，再请求 Rust 在期限内关闭并 join，排空在途调用后释放对象。期限内未完成返回 `ErrCloseIncomplete` 或 Rust 的 `DeadlineExceeded` 稳定错误，可用新期限重试直至成功。
   `Close` 后调用返回 `ErrClosed`；与 `Close` 竞争的在途调用可能得到 Engine 的 `InvalidState` 稳定错误。
 - **取消**：`context` 取消只让调用方停止等待，Rust 调用继续，`Close` 仍等待其结束。
 - **事件**：Rust 队列容量 256，溢出时丢最旧事件并给出 `RefreshRequired(ConsumerLagged)`，收到后重新查询。门面不再缓冲。未映射的事件只报告种类，不携带载荷。

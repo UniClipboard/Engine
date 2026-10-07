@@ -37,3 +37,8 @@
 # setup does not add "ruby" and then fail finalize with "no source code seen"
 # (the brew cask added in #1086 is the only Ruby in the repo).
 packaging/**/*.rb linguist-detectable=false
+
+# Go binding：生成文件由 bindings/go/generator 重写，评审时折叠
+bindings/go/uc_engine_uniffi/uc_engine_uniffi.go linguist-generated=true text eol=lf
+bindings/go/uc_engine_uniffi/uc_engine_uniffi.h linguist-generated=true text eol=lf
+*.go text eol=lf

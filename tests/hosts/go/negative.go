@@ -131,6 +131,19 @@ func runNegative(result *report, root, manifest string) {
 	_, err = eng.NextEvent(ctx)
 	result.record("next_event_after_close_is_rejected", errors.Is(err, engine.ErrClosed), errString(err))
 
+	// 期限极短的 Close：未完成时返回明确错误、仍拒绝新调用，并可用新期限继续收尾直至成功。
+	slowHost, _ := newFileHost(filepath.Join(root, "deadline"))
+	slow, err := openEngine(slowHost, manifest)
+	if result.record("open_for_deadline_retry", err == nil, errString(err)) {
+		first := slow.Close(time.Millisecond)
+		_, during := slow.LocalDevice(ctx)
+		second := slow.Close(20 * time.Second)
+		_, after := slow.LocalDevice(ctx)
+		result.record("close_deadline_then_retry_succeeds",
+			second == nil && errors.Is(during, engine.ErrClosed) && errors.Is(after, engine.ErrClosed),
+			map[string]any{"first_close": errString(first), "second_close": errString(second)})
+	}
+
 	hits, scanErr := scanForLeaks(root, []string{profileID}, host.secrets)
 	result.record("no_secret_in_logs_or_profile", scanErr == nil && len(hits) == 0, map[string]any{"hits": hits})
 }
