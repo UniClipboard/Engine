@@ -1,0 +1,118 @@
+name: Consumer Validation (scratch, never merge)
+
+# Validation-only: builds the real Desktop uniclipd on Windows against an UNMERGED Engine SHA through a
+# Cargo [patch] in CARGO_HOME, then runs a minimal isolated-process check. Not a product pin.
+on:
+  push:
+    branches: [hp/uni/t-0202-consumer-validation]
+
+permissions:
+  contents: read
+
+env:
+  ENGINE_SHA: a243892974a8ab51e76851e98affa1f6ec7ee15d
+  DESKTOP_SHA: 4fe5da071c869332ba5f5d28e0d57ad0635e8fa9
+
+jobs:
+  uniclipd:
+    name: uniclipd Windows ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x64, runner: windows-2025 }
+          - { arch: arm64, runner: windows-11-arm }
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: never
+    steps:
+      - name: Fetch exact Engine and Desktop sources
+        run: |
+          mkdir -p "$RUNNER_TEMP/ev"
+          git clone -q https://github.com/UniClipboard/Engine.git "$RUNNER_TEMP/engine"
+          git -C "$RUNNER_TEMP/engine" fetch -q origin hp/uni/t-0202-engine-windows-storage
+          git -C "$RUNNER_TEMP/engine" checkout -q "$ENGINE_SHA"
+          git clone -q https://github.com/UniClipboard/UniClipboard.git "$RUNNER_TEMP/desktop"
+          git -C "$RUNNER_TEMP/desktop" checkout -q "$DESKTOP_SHA"
+          {
+            echo "engine=$(git -C "$RUNNER_TEMP/engine" rev-parse HEAD)"
+            echo "desktop=$(git -C "$RUNNER_TEMP/desktop" rev-parse HEAD)"
+            grep -n 'uc-engine = ' "$RUNNER_TEMP/desktop/Cargo.toml"
+          } | tee "$RUNNER_TEMP/ev/sources.txt"
+
+      - name: Install Desktop pinned toolchain
+        working-directory: ${{ runner.temp }}/desktop
+        run: |
+          cat rust-toolchain.toml 2>/dev/null | tee "$RUNNER_TEMP/ev/desktop-toolchain.txt"
+          channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal --no-self-update
+          rustc -vV | tee -a "$RUNNER_TEMP/ev/desktop-toolchain.txt"
+
+      - name: Override Engine by path (validation only)
+        run: |
+          python - "$RUNNER_TEMP/engine" "${CARGO_HOME:-$HOME/.cargo}/config.toml" <<'PY'
+          import re, sys, pathlib
+          root, cfg = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+          out = ['\n[patch."https://github.com/UniClipboard/Engine.git"]']
+          for toml in sorted(root.glob('**/Cargo.toml')):
+              m = re.search(r'^\[package\][^\[]*?^name\s*=\s*"([^"]+)"', toml.read_text(encoding='utf-8'), re.M | re.S)
+              if m and 'target' not in toml.relative_to(root).parts:
+                  out.append(f'{m.group(1)} = {{ path = "{toml.parent.as_posix()}" }}')
+          cfg.parent.mkdir(parents=True, exist_ok=True)
+          with cfg.open('a') as f:
+              f.write('\n'.join(out) + '\n')
+          PY
+
+      - name: Build uniclipd (Desktop stage-daemon entry)
+        working-directory: ${{ runner.temp }}/desktop
+        run: node scripts/stage-daemon.mjs 2>&1 | tee "$RUNNER_TEMP/ev/build.log" | tail -30
+
+      - name: Hash binary
+        working-directory: ${{ runner.temp }}/desktop
+        run: |
+          ls target/sidecar-staging
+          sha256sum target/sidecar-staging/uniclipd-*.exe | tee "$RUNNER_TEMP/ev/uniclipd.sha256"
+          git status --short | tee "$RUNNER_TEMP/ev/desktop-dirty.txt"
+
+      # Isolated process check: portable mode keeps all data beside a temp copy of the binary.
+      - name: Start isolated daemon twice and probe /health
+        run: |
+          set -u
+          iso="$RUNNER_TEMP/iso"; mkdir -p "$iso"
+          cp "$RUNNER_TEMP"/desktop/target/sidecar-staging/uniclipd-*.exe "$iso/uniclipd.exe"
+          export UC_PORTABLE=1 UC_PROFILE=engine-ci UNICLIPBOARD_ENV=development
+          for round in 1 2; do
+            "$iso/uniclipd.exe" > "$RUNNER_TEMP/ev/daemon-$round.out" 2>&1 &
+            pid=$!
+            conn=""
+            for i in $(seq 1 60); do
+              conn=$(find "$iso" -name daemon.conn | head -1)
+              [ -n "$conn" ] && break
+              kill -0 $pid 2>/dev/null || { echo "daemon exited early in round $round"; cat "$RUNNER_TEMP/ev/daemon-$round.out"; exit 1; }
+              sleep 1
+            done
+            [ -n "$conn" ] || { echo "no daemon.conn in round $round"; exit 1; }
+            port=$(python -c "import json,sys;print(json.load(open(sys.argv[1]))['port'])" "$conn")
+            for i in $(seq 1 30); do
+              code=$(curl -s -o "$RUNNER_TEMP/ev/health-$round.json" -w '%{http_code}' "http://127.0.0.1:$port/health" || true)
+              [ "$code" = 200 ] && break; sleep 1
+            done
+            echo "round $round /health http=$code"; cat "$RUNNER_TEMP/ev/health-$round.json"; echo
+            [ "$code" = 200 ] || exit 1
+            kill $pid 2>/dev/null || true; taskkill //F //PID "$(ps -p $pid -o winpid= 2>/dev/null | tr -d ' ')" >/dev/null 2>&1 || true
+            sleep 3
+          done
+          find "$iso" -type f | sed "s|$iso/||" | sort | tee "$RUNNER_TEMP/ev/iso-files.txt"
+
+      - name: Retain evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: consumer-uniclipd-${{ matrix.arch }}
+          path: ${{ runner.temp }}/ev
+          if-no-files-found: warn
