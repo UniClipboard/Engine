@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 env:
-  ENGINE_SHA: a243892974a8ab51e76851e98affa1f6ec7ee15d
+  ENGINE_SHA: e5763ddec0ac1539093be0f7632c8490a39300d2
   DESKTOP_SHA: 4fe5da071c869332ba5f5d28e0d57ad0635e8fa9
 
 jobs:
@@ -87,6 +87,8 @@ jobs:
           cp "$RUNNER_TEMP"/desktop/target/sidecar-staging/uniclipd-*.exe "$iso/uniclipd.exe"
           export UC_PORTABLE=1 UC_PROFILE=engine-ci UNICLIPBOARD_ENV=development
           for round in 1 2; do
+            # A force-killed daemon leaves its daemon.conn behind; drop it so round 2 cannot probe a stale port.
+            find "$iso" -name daemon.conn -delete
             "$iso/uniclipd.exe" > "$RUNNER_TEMP/ev/daemon-$round.out" 2>&1 &
             pid=$!
             conn=""
