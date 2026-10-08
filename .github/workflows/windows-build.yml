@@ -1,0 +1,95 @@
+name: Windows Build
+
+# Windows 门禁：MBX 没有 Windows 固定包，Windows 主机不进入 rust-ci-setup，
+# 仅用 rust-toolchain.toml 固定的工具链与 Cargo 依赖缓存，原生 cargo 执行。
+# 构建证据（cargo check）与运行证据（Windows 专属存储测试）分步记录，
+# arm64 只有在 windows-11-arm 主机上实际执行才记为通过。
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main, migration/initial-core-import]
+  merge_group:
+  push:
+    branches: [main, migration/initial-core-import]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Windows ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2025
+          - arch: arm64
+            runner: windows-11-arm
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: never
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        run: |
+          channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal --no-self-update
+          rustup show active-toolchain
+
+      - name: Cache Cargo downloads and build outputs
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          workspaces: . -> target
+          shared-key: windows-${{ matrix.arch }}
+          # 只有 main 写缓存，其余运行只读。
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Record build provenance
+        run: |
+          state=clean
+          if [[ -n "$(git status --porcelain)" ]]; then state=modified; fi
+          {
+            echo "UC_ENGINE_SOURCE_COMMIT=$(git rev-parse HEAD)"
+            echo "UC_ENGINE_SOURCE_STATE=$state"
+          } >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/windows-evidence"
+          {
+            echo "source=$(git rev-parse HEAD)"
+            echo "runner=${{ matrix.runner }} arch=${{ matrix.arch }}"
+            rustc -vV
+            cargo -V
+          } | tee "$RUNNER_TEMP/windows-evidence/toolchain.txt"
+
+      - name: Validate workspace metadata
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
+      # 构建证据：编译全部工作区目标，包括 cfg(windows) 专属代码。
+      - name: Check all workspace targets
+        run: cargo check --workspace --all-targets --locked 2>&1 | tee "$RUNNER_TEMP/windows-evidence/check.log"
+
+      # 运行证据：在 Windows 主机上真实执行 MoveFileExW 替换路径，只使用临时目录。
+      - name: Run Windows storage durability tests
+        run: |
+          cargo test --locked -p uc-infra-storage --lib active_space_generation_manifest_store 2>&1 | tee "$RUNNER_TEMP/windows-evidence/storage-tests.log"
+          cargo test --locked -p uc-infra-local --lib fs::durability 2>&1 | tee -a "$RUNNER_TEMP/windows-evidence/storage-tests.log"
+
+      - name: Retain Windows evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-build-${{ matrix.arch }}
+          path: ${{ runner.temp }}/windows-evidence
+          if-no-files-found: warn

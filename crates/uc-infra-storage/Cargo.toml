@@ -63,6 +63,12 @@ diesel_migrations = { version = "2.2.0", features = ["sqlite"] }
 version = "1.10.0"
 features = ["v4"]
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+] }
+
 [dev-dependencies]
 criterion = { version = "0.8", features = ["async_tokio"] }
 uc-observability-runtime = { path = "../uc-observability-runtime" }
