@@ -30,7 +30,7 @@
 ## 目录地图
 
 - `crates/`：Core 规则、Application 流程、Infra 实现与 Engine 稳定入口。
-- `bindings/`：iOS、Android、HarmonyOS 薄绑定。
+- `bindings/`：iOS、Android、HarmonyOS 薄绑定，以及 Go module（`bindings/go`）。
 - `compatibility/`：独立版本、独立发布的 LAN 兼容线。
 - `tests/hosts/`：移动平台验收宿主，不承载产品功能。
 - `scripts/architecture/`：所有权、依赖方向和发布来源检查。
