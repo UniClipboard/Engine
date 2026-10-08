@@ -20,7 +20,7 @@ R2 使用现有私有桶的 `engine/mbx/v1/`，本地/PR 只读。CI 三项凭�
 
 独立空 target 的第二次构建必须以原生 `hits`、`restored_output_files` 与实际 E2E 结果证明复用；真实 R2 还须有 `downloaded_bytes`。本地 CAS 命中与 S3 回环实验不能代替真实 R2 发布/共享命中。`measure-ci-mbx.mjs` 保存每轮原生统计、命令与耗时，不清理现有 target、不缓存测试结果。
 
-固定平台是 Linux x86_64/arm64 和 macOS arm64；其他宿主没有固定包时明确失败。移动交叉目标可经这些宿主编译，但只有实际执行过的目标才能记为通过。全部工具行为与 raw Cargo 绝对路径调用无法由仓库改变全局环境；唯一受支持调用路径见[构建指南](../local-builds.md)。
+固定平台是 Linux x86_64/arm64 和 macOS arm64；其他宿主没有固定包时明确失败。移动交叉目标可经这些宿主编译，但只有实际执行过的目标才能记为通过。Windows x64/arm64 没有固定 MBX 包，由 `.github/workflows/windows-build.yml` 在 GitHub 托管主机上用原生 Cargo 执行全工作区 `cargo check` 与 Windows 专属存储测试；构建结果与运行结果分步记录，不经 MBX 缓存。全部工具行为与 raw Cargo 绝对路径调用无法由仓库改变全局环境；唯一受支持调用路径见[构建指南](../local-builds.md)。
 
 ## 被放弃的方案
 
