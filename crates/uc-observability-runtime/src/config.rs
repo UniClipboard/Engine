@@ -2,6 +2,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::module_log::DEFAULT_RUN_BUDGET_BYTES;
 use url::Url;
 use zeroize::Zeroize;
 
@@ -79,7 +80,7 @@ impl ObservabilityResource {
 }
 
 fn validated_service_version(value: &str) -> Result<String, ConfigError> {
-    // 宿主提供的配置输入校验，拒绝原因已完整表达。
+    // discarded-source[input-validation]: `semver::Error`: the rejection reason is fully expressed by the target classification
     let version = semver::Version::parse(value).map_err(|_| ConfigError::InvalidServiceVersion)?;
     if version.major > 99_999 || version.minor > 99_999 || version.patch > 99_999 {
         return Err(ConfigError::InvalidServiceVersion);
@@ -251,7 +252,7 @@ impl fmt::Debug for OtlpHttpConfig {
 }
 
 fn parse_endpoint(value: &str, allow_loopback_http: bool) -> Result<Url, ConfigError> {
-    // 宿主提供的配置输入校验，拒绝原因已完整表达。
+    // discarded-source[input-validation]: `url::ParseError`: the rejection reason is fully expressed by the target classification
     let endpoint = Url::parse(value).map_err(|_| ConfigError::InvalidEndpoint)?;
     let secure = endpoint.scheme() == "https";
     let local_http = allow_loopback_http
@@ -276,13 +277,21 @@ fn parse_endpoint(value: &str, allow_loopback_http: bool) -> Result<Url, ConfigE
 #[derive(Clone, PartialEq, Eq)]
 pub struct LocalLogConfig {
     pub(crate) directory: PathBuf,
+    pub(crate) module_log_budget_bytes: u64,
 }
 
 impl LocalLogConfig {
     pub fn new(directory: impl Into<PathBuf>) -> Self {
         Self {
             directory: directory.into(),
+            module_log_budget_bytes: DEFAULT_RUN_BUDGET_BYTES,
         }
+    }
+
+    /// 模块日志在一次进程运行期内可写入的字节预算；耗尽后丢弃并计数。默认 32 MiB。
+    pub fn with_module_log_budget_bytes(mut self, bytes: u64) -> Self {
+        self.module_log_budget_bytes = bytes;
+        self
     }
 }
 

@@ -113,10 +113,14 @@ mod device_group_choice_error_tests {
 }
 use crate::clipboard::active::ActiveClipboardFacade;
 use crate::clipboard::history::maintenance_runtime::HistoryMaintenanceRuntime;
+use crate::clipboard::history_tags::{
+    HistoryEntryTagSummaryView, HistoryTagBatchView, HistoryTagCreatedView, HistoryTagError,
+    HistoryTagMergeView, HistoryTagRenameView, HistoryTagView, HistoryTags,
+};
 use crate::device::query_local_device::QueryLocalDeviceUseCase;
 use crate::facade::settings::{
     GeneralSettingsPatch, RelayConfigurationEntry, RelayConfigurationMutation,
-    RelayConfigurationRejection, SettingsPatch,
+    RelayConfigurationRejection, RelayOverview, SettingsPatch,
 };
 use crate::facade::space_setup::{
     InitializeSpaceError, InitializeSpaceInput, InitializeSpaceResult, IssuePairingInvitationError,
@@ -294,6 +298,92 @@ impl AppFacade {
     ) -> Result<bool, crate::facade::ClipboardHistoryError> {
         self.clipboard_history
             .toggle_favorite(entry_id, is_favorited)
+            .await
+    }
+
+    /// 本机历史标签动作的共同前置条件：加密会话已解锁，否则失败关闭。
+    async fn require_history_tag_session(&self) -> Result<&HistoryTags, HistoryTagError> {
+        let state = self
+            .space
+            .query_space_access_state()
+            .await
+            .map_err(|source| HistoryTagError::Internal(source.into()))?;
+        if state.session_ready {
+            Ok(self.clipboard_history.history_tags())
+        } else {
+            Err(HistoryTagError::Locked)
+        }
+    }
+
+    pub async fn list_history_tags(&self) -> Result<Vec<HistoryTagView>, HistoryTagError> {
+        self.require_history_tag_session().await?.list().await
+    }
+
+    pub async fn create_history_tag(
+        &self,
+        name: &str,
+    ) -> Result<HistoryTagCreatedView, HistoryTagError> {
+        self.require_history_tag_session().await?.create(name).await
+    }
+
+    pub async fn rename_history_tag(
+        &self,
+        tag_id: &str,
+        name: &str,
+    ) -> Result<HistoryTagRenameView, HistoryTagError> {
+        self.require_history_tag_session()
+            .await?
+            .rename(tag_id, name)
+            .await
+    }
+
+    pub async fn add_history_tag_to_entries(
+        &self,
+        tag_id: &str,
+        entry_ids: &[String],
+    ) -> Result<HistoryTagBatchView, HistoryTagError> {
+        self.require_history_tag_session()
+            .await?
+            .add_to_entries(tag_id, entry_ids)
+            .await
+    }
+
+    pub async fn remove_history_tag_from_entries(
+        &self,
+        tag_id: &str,
+        entry_ids: &[String],
+    ) -> Result<HistoryTagBatchView, HistoryTagError> {
+        self.require_history_tag_session()
+            .await?
+            .remove_from_entries(tag_id, entry_ids)
+            .await
+    }
+
+    pub async fn summarize_history_entry_tags(
+        &self,
+        entry_ids: &[String],
+    ) -> Result<HistoryEntryTagSummaryView, HistoryTagError> {
+        self.require_history_tag_session()
+            .await?
+            .summarize_entries(entry_ids)
+            .await
+    }
+
+    pub async fn merge_history_tags(
+        &self,
+        source_tag_ids: &[String],
+        target_tag_id: &str,
+    ) -> Result<HistoryTagMergeView, HistoryTagError> {
+        self.require_history_tag_session()
+            .await?
+            .merge(source_tag_ids, target_tag_id)
+            .await
+    }
+
+    pub async fn delete_history_tag(&self, tag_id: &str) -> Result<u32, HistoryTagError> {
+        self.require_history_tag_session()
+            .await?
+            .delete(tag_id)
             .await
     }
 
@@ -772,6 +862,38 @@ impl AppFacade {
         self.search.query(input).await
     }
 
+    /// 批量统计与搜索同过滤语义的匹配数。加密会话未就绪时失败关闭，不泄露数量。
+    pub async fn search_count(
+        &self,
+        inputs: Vec<SearchQueryInput>,
+    ) -> Result<Vec<u32>, SearchFacadeError> {
+        self.require_search_session().await?;
+        self.search.count(inputs).await
+    }
+
+    /// 按调用方给出的桶边界统计条目数。加密会话未就绪时失败关闭，不泄露数量。
+    pub async fn search_daily_counts(
+        &self,
+        boundaries_ms: Vec<i64>,
+    ) -> Result<Vec<u32>, SearchFacadeError> {
+        self.require_search_session().await?;
+        self.search.daily_counts(boundaries_ms).await
+    }
+
+    /// 聚合查询的会话前置条件：索引即使仍持有后台可用的密钥，用户主动锁定后也不得回答数量类问题。
+    async fn require_search_session(&self) -> Result<(), SearchFacadeError> {
+        let state = self
+            .space
+            .query_space_access_state()
+            .await
+            .map_err(SearchFacadeError::SessionStateUnavailable)?;
+        if state.session_ready {
+            Ok(())
+        } else {
+            Err(SearchFacadeError::SessionLocked)
+        }
+    }
+
     pub async fn search_tags(
         &self,
     ) -> Result<Vec<crate::facade::SearchTagView>, SearchFacadeError> {
@@ -827,6 +949,10 @@ impl AppFacade {
         edit: crate::facade::settings::RelayCredentialEdit,
     ) -> Result<crate::facade::settings::RelaySaveView, SettingsFacadeError> {
         self.settings.save_relay(patch, edit).await
+    }
+
+    pub async fn relay_overview(&self) -> Result<RelayOverview, SettingsFacadeError> {
+        self.settings.relay_overview().await
     }
 
     pub async fn list_relays(&self) -> Result<Vec<RelayConfigurationEntry>, SettingsFacadeError> {

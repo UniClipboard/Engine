@@ -8,6 +8,7 @@ use tokio::time::timeout;
 
 use super::tests::FakeRuntime;
 use super::Engine;
+use crate::testing::TaskJoinFailures;
 use crate::{EngineErrorCategory, EngineEvent, EngineState, Operation, OperationTerminal};
 
 #[tokio::test]
@@ -288,4 +289,27 @@ async fn abandoned_waiter_during_operation_drain_keeps_resources_until_actual_ex
         None
     );
     assert_eq!(runtime.shutdown_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_panicked_shutdown_task_is_recorded_once_per_waiter_and_keeps_its_stable_code() {
+    for bounded in [false, true] {
+        let failures = TaskJoinFailures::default();
+        let _capture = failures.install();
+        let runtime = Arc::new(FakeRuntime::default());
+        runtime.panic_shutdown.store(true, Ordering::SeqCst);
+        let (engine, _events) = Engine::from_runtime(Arc::clone(&runtime), 16);
+
+        let error = if bounded {
+            engine.shutdown(Duration::from_secs(1)).await
+        } else {
+            engine.shutdown_until_complete().await
+        }
+        .unwrap_err();
+
+        assert_eq!(error.code(), 1108);
+        assert_eq!(error.category(), EngineErrorCategory::Internal);
+        assert!(!format!("{error:?}").contains("private-shutdown-panic"));
+        assert_eq!(failures.kinds(), ["engine_lifecycle_transition"]);
+    }
 }

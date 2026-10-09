@@ -78,15 +78,6 @@ impl ProfileUpgradeBackupPort for Fixture {
             .then(|| target().engine),
         })
     }
-    fn read_prepared_target(
-        &self,
-    ) -> Result<Option<ProfileUpgradeVersions>, ProfileUpgradeBackupError> {
-        assert!(!matches!(
-            self.mode,
-            BackupMode::Fresh | BackupMode::Current | BackupMode::CurrentEngineOnly
-        ));
-        Ok((self.mode == BackupMode::Retry).then(target))
-    }
     async fn capture_verified(
         &self,
         _: &ProfileUpgradeVersions,
@@ -99,13 +90,6 @@ impl ProfileUpgradeBackupPort for Fixture {
             BackupMode::Pending => std::future::pending().await,
             _ => Ok(()),
         }
-    }
-    async fn verify_prepared(
-        &self,
-        _: &ProfileUpgradeVersions,
-    ) -> Result<(), ProfileUpgradeBackupError> {
-        self.event("verify existing backup");
-        Ok(())
     }
     async fn preserve_security_materials(
         &self,
@@ -231,7 +215,7 @@ async fn cancelled_backup_wait_cannot_adopt_import_or_create_lifecycle() {
 }
 
 #[tokio::test]
-async fn retry_verifies_original_backup_and_reuses_lifecycle() {
+async fn retry_ensures_backup_through_the_single_capture_step_and_reuses_lifecycle() {
     let fixture = Fixture::new(BackupMode::Retry);
     let existing = ProfileLifecycle::new(ProfileGeneration::new());
     *fixture.lifecycle.lock().unwrap() = Some(existing.clone());
@@ -241,7 +225,7 @@ async fn retry_verifies_original_backup_and_reuses_lifecycle() {
         *fixture.events.lock().unwrap(),
         [
             "read backup state",
-            "verify existing backup",
+            "capture and verify",
             "read lifecycle",
             "preserve security materials",
             "adopt old layout",

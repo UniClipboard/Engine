@@ -294,20 +294,11 @@ mod tests {
     }
 
     #[test]
-    fn history_exchange_diagnostics_keep_a_safe_stage_and_call_path() {
+    fn history_exchange_diagnostics_keep_a_safe_stage() {
         let detail = LocalCompletionDetail::MembershipHistory(history_failure_detail(
             &MembershipHistoryExchangeError::transport(),
         ));
 
         assert_eq!(detail.local_fields(), ("exchange_history", "transport"));
-        assert_eq!(
-            detail.source_chain(),
-            Some([
-                "space_device_update",
-                "membership_history",
-                "exchange_history",
-                "transport",
-            ])
-        );
     }
 }

@@ -15,7 +15,7 @@ use crate::{
     MobileDeviceSummary, MobileDeviceUpdateOutcome, MobileFileUploadHandle,
     MobileLanInterfaceSummary, MobileSyncDocument, MobileSyncDocumentApplyOutcome,
     MobileSyncFileReadOutcome, MobileSyncSettingsSummary, MobileSyncSettingsUpdateOutcome,
-    RelayCredentialStatus, RelayProbeOutcome, SaveRelayOutcome, SettingsSummary,
+    RelayCredentialStatus, RelayOverview, RelayProbeOutcome, SaveRelayOutcome, SettingsSummary,
     SettingsUpdateOutcome, UpgradeStatusSummary,
 };
 
@@ -412,12 +412,16 @@ pub enum JoinSpaceRejectionReasonSummary {
 #[serde(rename_all = "snake_case")]
 pub enum JoinSpaceAttentionReasonSummary {
     OutcomeCannotBeProven,
+    /// 本机已经完成一次完整密码校验，但对端确认续传凭据不可用；不是密码错误。
+    ContinuationUnavailable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JoinSpaceAttentionRecoverySummary {
     PreserveDataAndContactSupport,
+    /// 当前邀请码对应的加入会话已经无法续传，只能用一个全新邀请码重新开始。
+    RestartWithNewInvitation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -519,6 +523,7 @@ pub enum OperationResult {
     NetworkRecoveryStatus(NetworkRecoveryStatusSummary),
     Settings(Box<SettingsSummary>),
     CustomRelays(Vec<CustomRelaySummary>),
+    RelayOverview(RelayOverview),
     CustomRelayMutated(CustomRelayMutationOutcome),
     SettingsUpdated(SettingsUpdateOutcome),
     RelaySaved(SaveRelayOutcome),
@@ -576,6 +581,8 @@ pub enum OperationResult {
     MembershipDiagnostics(MembershipDiagnosticsSummary),
     SpaceProtection(SpaceProtectionSummary),
     SearchPage(SearchPageSummary),
+    SearchCounts(Vec<u32>),
+    DailyEntryCounts(Vec<u32>),
     SearchTags(Vec<SearchTagSummary>),
     SearchStatus(SearchStatusSummary),
     SearchRebuildAccepted {
@@ -590,6 +597,13 @@ pub enum OperationResult {
     HistoryEntry(HistoryEntryDetailSummary),
     HistoryEntryDeleted,
     HistoryEntryFavoriteSet,
+    HistoryTags(Vec<HistoryTagSummary>),
+    HistoryTagCreated(HistoryTagCreatedSummary),
+    HistoryTagRenamed(HistoryTagRenameSummary),
+    HistoryTagEntriesChanged(HistoryTagBatchSummary),
+    HistoryEntryTags(HistoryEntryTagSummary),
+    HistoryTagsMerged(HistoryTagMergeSummary),
+    HistoryTagDeleted(HistoryTagDeletedSummary),
     HistoryStats(HistoryStatsSummary),
     HistoryEntryResource(HistoryEntryResourceSummary),
     BlobRead(BinaryResourceSummary),
@@ -745,6 +759,9 @@ impl fmt::Debug for OperationResult {
             Self::CustomRelays(relays) => debug
                 .field("kind", &"custom_relays")
                 .field("relay_count", &relays.len()),
+            Self::RelayOverview(overview) => debug
+                .field("kind", &"relay_overview")
+                .field("overview", overview),
             Self::CustomRelayMutated(outcome) => debug
                 .field("kind", &"custom_relay_mutated")
                 .field("outcome", outcome),
@@ -878,6 +895,12 @@ impl fmt::Debug for OperationResult {
                 .field("kind", &"space_protection")
                 .field("summary", summary),
             Self::SearchPage(page) => debug.field("kind", &"search_page").field("page", page),
+            Self::SearchCounts(counts) => debug
+                .field("kind", &"search_counts")
+                .field("count_len", &counts.len()),
+            Self::DailyEntryCounts(counts) => debug
+                .field("kind", &"daily_entry_counts")
+                .field("bucket_count", &counts.len()),
             Self::SearchTags(tags) => debug
                 .field("kind", &"search_tags")
                 .field("tag_count", &tags.len()),
@@ -901,6 +924,29 @@ impl fmt::Debug for OperationResult {
             Self::HistoryEntry(_) => debug.field("kind", &"history_entry"),
             Self::HistoryEntryDeleted => debug.field("kind", &"history_entry_deleted"),
             Self::HistoryEntryFavoriteSet => debug.field("kind", &"history_entry_favorite_set"),
+            Self::HistoryTags(tags) => debug
+                .field("kind", &"history_tags")
+                .field("tag_count", &tags.len()),
+            Self::HistoryTagCreated(created) => debug
+                .field("kind", &"history_tag_created")
+                .field("created", &created.created),
+            Self::HistoryTagRenamed(renamed) => debug.field("kind", &"history_tag_renamed").field(
+                "conflict",
+                &matches!(renamed, HistoryTagRenameSummary::NameConflict { .. }),
+            ),
+            Self::HistoryTagEntriesChanged(batch) => debug
+                .field("kind", &"history_tag_entries_changed")
+                .field("batch", batch),
+            Self::HistoryEntryTags(summary) => debug
+                .field("kind", &"history_entry_tags")
+                .field("selected", &summary.selected)
+                .field("tag_count", &summary.tags.len()),
+            Self::HistoryTagsMerged(merged) => debug
+                .field("kind", &"history_tags_merged")
+                .field("merged", merged),
+            Self::HistoryTagDeleted(deleted) => debug
+                .field("kind", &"history_tag_deleted")
+                .field("deleted", deleted),
             Self::HistoryStats(stats) => {
                 debug.field("kind", &"history_stats").field("stats", stats)
             }
@@ -1646,6 +1692,82 @@ impl fmt::Debug for SearchResultSummary {
             .field("has_payload_state", &self.payload_state.is_some())
             .finish()
     }
+}
+
+/// 一个本机历史标签。`name` 为 `None` 表示名称无法解密，该标签只能删除。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryTagSummary {
+    pub tag_id: String,
+    pub name: Option<String>,
+    pub created_at_ms: i64,
+    pub entry_count: u32,
+}
+
+impl fmt::Debug for HistoryTagSummary {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HistoryTagSummary")
+            .field("has_name", &self.name.is_some())
+            .field("entry_count", &self.entry_count)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryTagCreatedSummary {
+    pub tag: HistoryTagSummary,
+    /// `false` 表示同名标签已存在，`tag` 是已有标签。
+    pub created: bool,
+}
+
+/// 改名结果：新名称与另一个标签同名时不写入，返回冲突标签 id。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HistoryTagRenameSummary {
+    Renamed(HistoryTagSummary),
+    NameConflict { existing_tag_id: String },
+}
+
+/// 批量关联或移除结果：存在的条目在一个事务内生效，不存在的条目被跳过。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryTagBatchSummary {
+    pub changed: u32,
+    pub unchanged: u32,
+    pub missing_entry_ids: Vec<String>,
+}
+
+impl fmt::Debug for HistoryTagBatchSummary {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HistoryTagBatchSummary")
+            .field("changed", &self.changed)
+            .field("unchanged", &self.unchanged)
+            .field("missing_count", &self.missing_entry_ids.len())
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryTagApplicationSummary {
+    pub tag_id: String,
+    pub applied: u32,
+}
+
+/// 一组条目的标签汇总；`applied == selected` 表示全部携带。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryEntryTagSummary {
+    pub selected: u32,
+    pub tags: Vec<HistoryTagApplicationSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryTagMergeSummary {
+    pub moved: u32,
+    pub already_on_target: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryTagDeletedSummary {
+    pub detached: u32,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]

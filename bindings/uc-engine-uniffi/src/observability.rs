@@ -3,15 +3,16 @@ use std::time::Duration;
 
 use uc_engine::observability::{
     DeploymentEnvironment, LocalLogConfig, ObservabilityConfig, ObservabilityInstallError,
-    ObservabilityInstallOutcome, ObservabilityResource, ObservabilitySetupStatus,
-    ObservabilitySignalResult, OperatingSystem, OtlpHttpConfig, ProcessObservabilityHandle,
-    ProcessObservabilityRuntime, SecretHeaderValue,
+    ObservabilityInstallOutcome, ObservabilityRemoteSetupFailure, ObservabilityResource,
+    ObservabilitySetupStatus, ObservabilitySignalResult, OperatingSystem, OtlpHttpConfig,
+    ProcessObservabilityHandle, ProcessObservabilityRuntime, SecretHeaderValue,
 };
 use uc_engine::HostDirectories;
 
 use crate::{
     BindingCollectorConfig, BindingDeploymentEnvironment, BindingError, BindingObservabilityConfig,
-    BindingObservabilityFlushSummary, BindingObservabilityHealth, BindingObservabilitySetup,
+    BindingObservabilityFlushSummary, BindingObservabilityHealth,
+    BindingObservabilityRemoteSetupFailure, BindingObservabilitySetup,
     BindingObservabilitySetupStatus, BindingObservabilityShutdownSummary,
     BindingObservabilitySignalResult,
 };
@@ -48,6 +49,7 @@ pub(crate) fn health() -> Result<BindingObservabilityHealth, BindingError> {
         .health();
     Ok(BindingObservabilityHealth {
         remote: map_setup_status(health.remote),
+        remote_setup_failure: health.remote_setup_failure.map(map_remote_setup_failure),
         local_file: map_setup_status(health.local_file),
         dropped_local_records: health.dropped_local_records,
         dropped_remote_spans: health.dropped_remote_spans,
@@ -107,7 +109,7 @@ fn runtime_config(
         operating_system(),
         config.app_channel,
     )
-    // 宿主输入校验：无法解析的输入按固定错误码拒绝，拒绝原因已完整表达。
+    // discarded-source[input-validation]: the rejection reason is fully expressed by the target classification
     .map_err(|_| BindingError::ObservabilityConfigInvalid)?;
     let runtime =
         ObservabilityConfig::new(resource).with_local_logs(LocalLogConfig::new(directories.logs()));
@@ -124,12 +126,12 @@ fn runtime_config(
 
 fn remote_config(config: BindingCollectorConfig) -> Result<OtlpHttpConfig, BindingError> {
     let remote = OtlpHttpConfig::new(&config.trace_endpoint, &config.log_endpoint)
-        // 宿主输入校验：无法解析的输入按固定错误码拒绝，拒绝原因已完整表达。
+        // discarded-source[input-validation]: the rejection reason is fully expressed by the target classification
         .map_err(|_| BindingError::ObservabilityConfigInvalid)?;
     match (config.auth_header_name, config.auth_header_value) {
         (Some(name), Some(value)) => remote
             .with_header(name, SecretHeaderValue::new(value))
-            // 宿主输入校验：无法解析的输入按固定错误码拒绝，拒绝原因已完整表达。
+            // discarded-source[input-validation]: the rejection reason is fully expressed by the target classification
             .map_err(|_| BindingError::ObservabilityConfigInvalid),
         (None, None) => Ok(remote),
         _ => Err(BindingError::ObservabilityConfigInvalid),
@@ -170,6 +172,22 @@ fn map_setup_status(status: ObservabilitySetupStatus) -> BindingObservabilitySet
         ObservabilitySetupStatus::Disabled => BindingObservabilitySetupStatus::Disabled,
         ObservabilitySetupStatus::Ready => BindingObservabilitySetupStatus::Ready,
         ObservabilitySetupStatus::Unavailable => BindingObservabilitySetupStatus::Unavailable,
+    }
+}
+
+fn map_remote_setup_failure(
+    failure: ObservabilityRemoteSetupFailure,
+) -> BindingObservabilityRemoteSetupFailure {
+    match failure {
+        ObservabilityRemoteSetupFailure::HttpClient => {
+            BindingObservabilityRemoteSetupFailure::HttpClient
+        }
+        ObservabilityRemoteSetupFailure::TraceExporter => {
+            BindingObservabilityRemoteSetupFailure::TraceExporter
+        }
+        ObservabilityRemoteSetupFailure::LogExporter => {
+            BindingObservabilityRemoteSetupFailure::LogExporter
+        }
     }
 }
 

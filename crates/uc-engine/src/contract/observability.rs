@@ -7,7 +7,11 @@ pub use uc_observability_contract::analytics::{
     AdoptOutcome, AnalyticsEventContext, AnalyticsIdentityError, AnalyticsIdentityPort,
     AnalyticsPort, DeviceType, Event, GroupIdentifyPayload, IdentifyPayload, Os, ReleaseOutcome,
 };
-pub use uc_observability_contract::{analytics, diagnostics};
+pub use uc_observability_contract::error_source::io_error_kind;
+pub use uc_observability_contract::log_fields::{log_id, log_vocab, log_vocab_debug};
+pub use uc_observability_contract::{
+    analytics, diagnostics, uc_debug, uc_error, uc_info, uc_trace, uc_warn,
+};
 pub use uc_observability_runtime::{
     managed_log_files, CaptureEndReason, ConfigError as ObservabilityConfigError,
     DeploymentEnvironment, DetailedCaptureRequest, FileSourceCounts,
@@ -19,7 +23,8 @@ pub use uc_observability_runtime::{
     LocalDiagnosticError, LocalDiagnosticExportReport, LocalDiagnosticSource,
     LocalDiagnosticStatus, LocalLogConfig, ObservabilityConfig, ObservabilityHealth,
     ObservabilityResource, OperatingSystem, OtlpHttpConfig, ProcessObservabilityHandle,
-    ProcessObservabilityRuntime, SecretHeaderValue, SetupStatus as ObservabilitySetupStatus,
+    ProcessObservabilityRuntime, RemoteSetupFailure as ObservabilityRemoteSetupFailure,
+    SecretHeaderValue, SetupStatus as ObservabilitySetupStatus,
     ShutdownSummary as ObservabilityShutdownSummary, SignalResult as ObservabilitySignalResult,
     SourceCapability, SourceCollection, SourceCoverage, StopCaptureResult, LOCAL_LOG_MAX_BYTES,
     LOCAL_LOG_RETENTION_DAYS,

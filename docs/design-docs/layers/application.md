@@ -37,15 +37,15 @@ uc-core
    ↑
 uc-application
    ↑
-uc-infra
+uc-infra-*
 ```
 
 严禁：
 
 ```text
 uc-core        → uc-application
-uc-core        → uc-infra
-uc-application → uc-infra
+uc-core        → uc-infra-*
+uc-application → uc-infra-*
 ```
 
 这是第一条检查项。

@@ -58,8 +58,7 @@ impl ActiveClipboardReconcileFacade {
     /// Keeps the persisted row when it still matches the OS clipboard, clears
     /// it otherwise (an untrusted/stale row must not act as the active
     /// baseline). Never writes the OS clipboard and never broadcasts;
-    /// Storage/OS failures stop startup so workers never observe an untrusted
-    /// register.
+    /// OS 读取失败时先清除 register 再继续；存储失败仍阻止启动，worker 不得读取未经确认的状态。
     /// Drive this once at startup, before any worker reads or broadcasts the
     /// register.
     pub async fn reconcile(&self) -> Result<ReconcileOutcome, ReconcileActiveClipboardError> {

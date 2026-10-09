@@ -12,7 +12,7 @@
 
 ## 责任与行为
 
-这是配对 Infra 适配器的接口选择缺陷。`MdnsInterfaceSnapshot` 是发布端与解析端
+这是 `uc-infra-p2p` 配对适配器的接口选择缺陷。`MdnsInterfaceSnapshot` 是发布端与解析端
 共同的本机地址筛选入口，消除分别枚举或只配置一侧造成的差异。
 
 - 每次开始发布或解析时重新捕获本机接口，去重并排除回环、未指定和组播地址。
@@ -41,8 +41,10 @@
 `1.0.0-alpha.17` 自定义包交付。用户于 2026-10-01 确认原 Windows/macOS
 直连多网卡场景测试通过。该结论不自动覆盖后续版本或未测试拓扑。
 
-本次迁移以桌面 `v1.0.1` 锁定的 Engine
+首次正式版迁移以桌面 `v1.0.1` 锁定的 Engine
 `3f3eef7450e06013c3178b716eee9d5a3c419349` 为基线。
+提交上游时适配主线的 `uc-infra-p2p` 模块拆分与类型化日志规范；
+原正式版验证不能替代主线集成后的测试或设备验收。
 回归测试保留默认网络及直连网络地址、去重和无效源地址过滤；
 已有发布/解析测试检查启动及无匹配超时。真实双机验收与安装包来源记录在
 [桌面修复记录](https://github.com/lolinyaanyaamoe/UniClipboard/blob/build/v1.0.1-multinic-fix/docs/specs/2026-10-01-multinic-pairing-fix.md)。

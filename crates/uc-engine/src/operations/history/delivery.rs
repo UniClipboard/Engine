@@ -2,7 +2,6 @@
 
 use crate::error_codes::*;
 
-use tracing::error;
 use uc_application::facade::{
     AppFacade, EntryDeliveryStatusView, EntryDeliveryTargetView, EntryDeliveryView, EntrySource,
     GetEntryDeliveryViewError,
@@ -14,6 +13,7 @@ use crate::{
     EntryDeliveryTargetSummary, EntryDeliveryViewSummary, EntrySourceSummary, HistoryEntryInput,
     OperationResult,
 };
+use uc_observability_contract::uc_error;
 
 pub async fn execute_query_entry_delivery(
     facade: &AppFacade,
@@ -90,7 +90,7 @@ fn map_delivery_error(error: GetEntryDeliveryViewError) -> EngineError {
             false,
         ),
         GetEntryDeliveryViewError::Storage(_) => {
-            error!("entry delivery view failed");
+            uc_error!("entry delivery view failed");
             EngineError::new(
                 ENTRY_DELIVERY_FAILED_CODE,
                 EngineErrorCategory::Internal,

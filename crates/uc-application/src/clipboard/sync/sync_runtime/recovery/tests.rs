@@ -477,6 +477,7 @@ struct RecordingDispatch {
 enum DispatchResult {
     Delivered,
     PayloadLost,
+    StorageFailure,
 }
 
 #[async_trait]
@@ -499,6 +500,9 @@ impl RecoveryDeliveryPort for RecordingDispatch {
                 entry_id: EntryId::from("offline-entry"),
                 reason: crate::facade::NotResendableReason::PayloadLost,
             }),
+            DispatchResult::StorageFailure => Err(ResendEntryError::Storage(anyhow::anyhow!(
+                "PRIVATE_STORAGE_DETAIL"
+            ))),
         }
     }
 }
@@ -1047,7 +1051,47 @@ async fn disabled_global_sync_never_dispatches_a_saved_offline_delivery() {
 }
 
 #[tokio::test]
+async fn a_dispatch_failure_is_recorded_with_its_fixed_variant_and_no_error_text() {
+    let logs = uc_testkit::log_capture::CapturedLogs::default();
+    let _guard = logs.install();
+    let pending_entry = entry("offline-entry", "local-event");
+    let target = DeviceId::new("recovered");
+    let deliveries = Arc::new(Deliveries {
+        records: Mutex::new(HashMap::from([(
+            pending_entry.entry_id.clone(),
+            vec![EntryDeliveryRecord {
+                entry_id: pending_entry.entry_id.clone(),
+                target_device_id: target.clone(),
+                status: EntryDeliveryStatus::Unreachable,
+                reason_detail: None,
+                updated_at_ms: 1,
+            }],
+        )])),
+    });
+    let delivery = Arc::new(RecordingDispatch {
+        commands: Mutex::new(Vec::new()),
+        result: DispatchResult::StorageFailure,
+    });
+    let deps = recovery_deps(
+        true,
+        vec![pending_entry.clone()],
+        HashMap::from([(pending_entry.event_id.clone(), DeviceId::new("local"))]),
+        Arc::clone(&deliveries),
+        delivery,
+    );
+
+    recover_for_target(&deps, target, &CancellationToken::new()).await;
+
+    assert_eq!(logs.count("clipboard delivery recovery skipped entry"), 1);
+    assert!(logs.output().contains("reason=\"storage\""));
+    assert!(logs.output().contains("WARN"));
+    assert!(!logs.output().contains("PRIVATE"));
+}
+
+#[tokio::test]
 async fn payload_lost_stops_future_automatic_recovery_for_that_entry() {
+    let logs = uc_testkit::log_capture::CapturedLogs::default();
+    let _guard = logs.install();
     let pending_entry = entry("offline-entry", "local-event");
     let target = DeviceId::new("recovered");
     let deliveries = Arc::new(Deliveries {
@@ -1087,4 +1131,6 @@ async fn payload_lost_stops_future_automatic_recovery_for_that_entry() {
         }
     ));
     assert_eq!(stored[0].target_device_id, target);
+    assert_eq!(logs.count("entry payload is gone"), 1);
+    assert!(logs.output().contains("reason=\"payload_lost\""));
 }

@@ -125,11 +125,15 @@ impl JoinerAdmissionService {
                     report.recovery_required_count += 1;
                     return;
                 };
+                let Some(aggregate_join_id) = aggregate.join_id() else {
+                    report.recovery_required_count += 1;
+                    return;
+                };
                 let material = self
                     .start_material
                     .create_resolved(
                         aggregate.admission_id(),
-                        aggregate.join_id(),
+                        aggregate_join_id,
                         full_invitation,
                         start_context,
                     )
@@ -153,7 +157,7 @@ impl JoinerAdmissionService {
                     private_state,
                     encrypted_password_equivalent,
                 ) = material.into_parts();
-                if admission_id != aggregate.admission_id() || join_id != aggregate.join_id() {
+                if admission_id != aggregate.admission_id() || join_id != aggregate_join_id {
                     report.recovery_required_count += 1;
                     return;
                 }

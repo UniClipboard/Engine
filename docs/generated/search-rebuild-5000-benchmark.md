@@ -1,6 +1,6 @@
 # 5000 条搜索重建性能对照
 
-日期：2026-09-10。数据来源：[真实 V3 重建测试](../../crates/uc-infra/src/search/sqlite_v3_tests.rs) 中的 `rebuild_5000_benchmark`。本文件记录本次输出，后续复测应以新输出为准。
+日期：2026-09-10。数据来源：[真实 V3 重建测试](../../crates/uc-infra-storage/src/search/sqlite_v3_tests.rs) 中的 `rebuild_5000_benchmark`。本文件记录本次输出，后续复测应以新输出为准。
 
 ## 环境与范围
 
@@ -39,7 +39,7 @@
 从仓库根目录运行：
 
 ```bash
-cargo test -p uc-infra --lib rebuild_5000_benchmark --locked -- --ignored --nocapture
+cargo test -p uc-infra-storage --lib rebuild_5000_benchmark --locked -- --ignored --nocapture
 ```
 
 命令每次运行三轮并输出 JSON 计时行，测试结束自动删除生成的临时数据库。Cargo 继续复用仓库 `target`，不另建编译目录。对照时使用相同测试、相同 profile 和同一台机器；先测优化前实现，再测优化后实现，不把编译耗时或结果验证耗时计入重建。

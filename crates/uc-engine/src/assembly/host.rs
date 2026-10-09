@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context;
-use tracing::warn;
+
 use uc_application::deps::{
     PrepareProfileStartupUseCase, ProfileUpgradeBackupPort, ProfileUpgradeVersions,
 };
@@ -18,12 +18,14 @@ use uc_core::ids::{FormatId, RepresentationId};
 use uc_core::ports::{
     ClipboardHostEvent, ClipboardOriginKind, DeliveryHostEvent, EmitError, HostEvent,
     HostEventEmitterPort, MembershipHostEvent, PlatformClipboardPort, SecureStorageError,
-    SecureStoragePort, SystemClipboardPort, TransferHostEvent,
+    SecureStoragePort, SettingsHostEvent, SettingsSection, SystemClipboardPort, TransferHostEvent,
 };
-use uc_infra::security::{
+use uc_infra_profile::security::{
     ProfileLifecycleRepository, ProfileStartupStorage, ProfileUpgradeBackupStore,
 };
-use uc_observability_contract::analytics::DefaultAnalyticsFacade;
+use uc_observability_contract::{
+    analytics::DefaultAnalyticsFacade, error_source::io_error_kind, uc_warn,
+};
 
 use crate::assembly::deps::{WiredDependencies, WiringError, WiringResult};
 use crate::assembly::platform::SystemClipboardLayer;
@@ -33,7 +35,8 @@ use crate::engine::startup::StartupProgressStore;
 use crate::{
     EngineConfig, EngineEvent, HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory,
     HostClipboard, HostClipboardChangeStream, HostClipboardRepresentation, HostDirectories,
-    HostFileAccess, HostSecureStorage, RefreshReason, TransferProgress,
+    HostFileAccess, HostSecureStorage, RefreshReason, SettingsChanged, SettingsSectionSummary,
+    TransferProgress,
 };
 
 struct HostSecureStorageAdapter {
@@ -166,55 +169,67 @@ impl HostClipboardAdapter {
     ) -> anyhow::Result<Option<PathBuf>> {
         let mut operation_dir: Option<PathBuf> = None;
         for representation in host_representations {
-            let result = match representation {
-                HostClipboardRepresentation::Inline {
-                    format,
-                    mime_type,
-                    bytes,
-                } => {
-                    representations.push(ObservedClipboardRepresentation::new(
-                        RepresentationId::new(),
-                        FormatId::from(format),
-                        normalize_wire_mime(mime_type),
+            let result = (|| -> anyhow::Result<()> {
+                match representation {
+                    HostClipboardRepresentation::Inline {
+                        format,
+                        mime_type,
                         bytes,
-                    ));
-                    Ok(())
-                }
-                HostClipboardRepresentation::File {
-                    format,
-                    handle,
-                    display_name,
-                    mime_type,
-                    size_bytes,
-                } => {
-                    let directory = match operation_dir.as_ref() {
-                        Some(directory) => directory.clone(),
-                        None => {
-                            let directory =
-                                self.import_root.join(RepresentationId::new().to_string());
-                            std::fs::create_dir_all(&directory)?;
-                            operation_dir = Some(directory.clone());
-                            directory
-                        }
-                    };
-                    let storage_name = RepresentationId::new().to_string();
-                    let path = directory.join(&storage_name);
-                    copy_host_clipboard_file(self.files.as_ref(), &handle, size_bytes, &path)?;
-                    representations.push(ObservedClipboardRepresentation::new_local_file(
-                        RepresentationId::new(),
-                        FormatId::from(format),
-                        normalize_wire_mime(mime_type),
-                        path,
-                        size_bytes,
-                    ));
-                    file_metadata.push(FileDisplayMetadataEntry {
-                        storage_name,
+                    } => {
+                        representations.push(ObservedClipboardRepresentation::new(
+                            RepresentationId::new(),
+                            FormatId::from(format),
+                            normalize_wire_mime(mime_type),
+                            bytes,
+                        ));
+                        Ok(())
+                    }
+                    HostClipboardRepresentation::File {
+                        format,
+                        handle,
                         display_name,
-                    });
-                    Ok(())
+                        mime_type,
+                        size_bytes,
+                    } => {
+                        let directory = match operation_dir.as_ref() {
+                            Some(directory) => directory.clone(),
+                            None => {
+                                let directory =
+                                    self.import_root.join(RepresentationId::new().to_string());
+                                // 先创建共享根，再原子取得唯一目录的所有权；失败时不得清理已有目录。
+                                std::fs::create_dir_all(&self.import_root)
+                                    .context("create host clipboard import root")?;
+                                std::fs::create_dir(&directory)
+                                    .context("create host clipboard import directory")?;
+                                operation_dir = Some(directory.clone());
+                                directory
+                            }
+                        };
+                        let storage_name = RepresentationId::new().to_string();
+                        let path = directory.join(&storage_name);
+                        copy_host_clipboard_file(self.files.as_ref(), &handle, size_bytes, &path)?;
+                        representations.push(ObservedClipboardRepresentation::new_local_file(
+                            RepresentationId::new(),
+                            FormatId::from(format),
+                            normalize_wire_mime(mime_type),
+                            path,
+                            size_bytes,
+                        ));
+                        file_metadata.push(FileDisplayMetadataEntry {
+                            storage_name,
+                            display_name,
+                        });
+                        Ok(())
+                    }
                 }
-            };
+            })();
             if let Err(error) = result {
+                uc_warn!(
+                    error_kind = "host_clipboard_import",
+                    io_error_kind = io_error_kind(error.as_ref()),
+                    error = error.as_ref(),
+                    "host clipboard import failed; removing this import only"
+                );
                 cleanup_import_directory(operation_dir.as_deref());
                 return Err(error);
             }
@@ -231,27 +246,36 @@ fn copy_host_clipboard_file(
     size_bytes: u64,
     destination: &Path,
 ) -> anyhow::Result<()> {
-    let metadata = files.metadata(handle)?;
+    let metadata = files
+        .metadata(handle)
+        .context("read host clipboard file metadata")?;
     if metadata.size_bytes != size_bytes {
         return Err(anyhow::anyhow!("host clipboard file size changed"));
     }
     let mut output = OpenOptions::new()
         .create_new(true)
         .write(true)
-        .open(destination)?;
+        .open(destination)
+        .context("create host clipboard import file")?;
     let mut offset = 0_u64;
     while offset < size_bytes {
         let requested = (size_bytes - offset).min(HOST_CLIPBOARD_FILE_CHUNK_SIZE as u64) as u32;
-        let chunk = files.read_chunk(handle, offset, requested)?;
+        let chunk = files
+            .read_chunk(handle, offset, requested)
+            .context("read host clipboard file chunk")?;
         if chunk.is_empty() || chunk.len() > requested as usize {
             return Err(anyhow::anyhow!("host clipboard file read was incomplete"));
         }
-        output.write_all(&chunk)?;
+        output
+            .write_all(&chunk)
+            .context("write host clipboard import file")?;
         offset = offset
             .checked_add(chunk.len() as u64)
             .ok_or_else(|| anyhow::anyhow!("host clipboard file offset overflow"))?;
     }
-    output.sync_all()?;
+    output
+        .sync_all()
+        .context("flush host clipboard import file")?;
     Ok(())
 }
 
@@ -259,8 +283,13 @@ fn cleanup_import_directory(directory: Option<&Path>) {
     let Some(directory) = directory else {
         return;
     };
-    if std::fs::remove_dir_all(directory).is_err() {
-        warn!("failed to remove incomplete host clipboard import");
+    if let Err(error) = std::fs::remove_dir_all(directory) {
+        uc_warn!(
+            error_kind = "clipboard_import_cleanup",
+            io_error_kind = io_error_kind(&error),
+            error = &error as &dyn std::error::Error,
+            "failed to remove incomplete host clipboard import"
+        );
     }
 }
 
@@ -289,9 +318,9 @@ pub(crate) fn profile_key_recovery_store(
     config: &EngineConfig,
     paths: &AppPaths,
     host: &HostCapabilities,
-) -> Arc<uc_infra::security::ProfileKeyRecoveryStore> {
+) -> Arc<uc_infra_profile::security::ProfileKeyRecoveryStore> {
     let backing = adapt_shared_secure_storage(Arc::clone(&host.secure_storage));
-    Arc::new(uc_infra::security::ProfileKeyRecoveryStore::new(
+    Arc::new(uc_infra_profile::security::ProfileKeyRecoveryStore::new(
         paths.clone(),
         config.profile_id().to_owned(),
         backing,
@@ -416,6 +445,29 @@ impl HostEventEmitterPort for EngineHostEventEmitter {
                 attempt_id,
                 state,
             }),
+            HostEvent::Settings(SettingsHostEvent::Changed { sections }) => {
+                EngineEvent::SettingsChanged(SettingsChanged {
+                    sections: sections
+                        .into_iter()
+                        .map(|section| match section {
+                            SettingsSection::General => SettingsSectionSummary::General,
+                            SettingsSection::Sync => SettingsSectionSummary::Sync,
+                            SettingsSection::RetentionPolicy => {
+                                SettingsSectionSummary::RetentionPolicy
+                            }
+                            SettingsSection::Security => SettingsSectionSummary::Security,
+                            SettingsSection::Pairing => SettingsSectionSummary::Pairing,
+                            SettingsSection::KeyboardShortcuts => {
+                                SettingsSectionSummary::KeyboardShortcuts
+                            }
+                            SettingsSection::FileSync => SettingsSectionSummary::FileSync,
+                            SettingsSection::Network => SettingsSectionSummary::Network,
+                            SettingsSection::MobileSync => SettingsSectionSummary::MobileSync,
+                            SettingsSection::QuickPanel => SettingsSectionSummary::QuickPanel,
+                        })
+                        .collect(),
+                })
+            }
             HostEvent::Membership(MembershipHostEvent::LedgerCommitted { revision }) => {
                 EngineEvent::DeviceTrustChanged { revision }
             }
@@ -466,18 +518,18 @@ pub(crate) async fn wire_host_capabilities_with_emitter(
     paths: AppPaths,
     host_event_emitter: Arc<dyn HostEventEmitterPort>,
     startup_progress: Arc<StartupProgressStore>,
-    profile_key_recovery: Arc<uc_infra::security::ProfileKeyRecoveryStore>,
+    profile_key_recovery: Arc<uc_infra_profile::security::ProfileKeyRecoveryStore>,
 ) -> WiringResult<HostWiring> {
     let (directories, secure_storage, mut clipboard, files, analytics) = host.into_parts();
     let secure_storage = adapt_shared_secure_storage(secure_storage);
     let app_data_root = paths.app_data_root_dir.clone();
-    let profile_upgrade_backups: Arc<dyn ProfileUpgradeBackupPort> =
-        Arc::new(ProfileUpgradeBackupStore::new(
-            paths.clone(),
-            config.profile_id().to_owned(),
-            Arc::clone(&secure_storage),
-            directories.upgrade_backups().to_path_buf(),
-        ));
+    let upgrade_backup_store = Arc::new(ProfileUpgradeBackupStore::new(
+        paths.clone(),
+        config.profile_id().to_owned(),
+        Arc::clone(&secure_storage),
+        directories.upgrade_backups().to_path_buf(),
+    ));
+    let profile_upgrade_backups: Arc<dyn ProfileUpgradeBackupPort> = upgrade_backup_store.clone();
     let profile_lifecycle = PrepareProfileStartupUseCase::new(
         Arc::new(super::startup_progress::StartupProfileUpgradeBackup::new(
             Arc::clone(&profile_upgrade_backups),
@@ -517,7 +569,6 @@ pub(crate) async fn wire_host_capabilities_with_emitter(
             anyhow::Error::from(error).context("failed to create host clipboard import directory"),
         )
     })?;
-    let files: Arc<dyn HostFileAccess> = Arc::from(files);
     let wired = wire_dependencies_from_inputs(CoreWiringInputs {
         profile_lifecycle,
         paths: paths.clone(),
@@ -544,6 +595,7 @@ pub(crate) async fn wire_host_capabilities_with_emitter(
         host_event_emitter,
         startup_progress,
         profile_key_recovery,
+        upgrade_backup_security: upgrade_backup_store,
     })
     .await?;
 
@@ -856,7 +908,7 @@ mod tests {
             .write(true)
             .open(upgrade_directory.join(".lease"))
             .unwrap();
-        uc_infra::fs::file_lock::try_lock_exclusive(&lease).unwrap();
+        uc_infra_local::fs::file_lock::try_lock_exclusive(&lease).unwrap();
         let host = HostCapabilities::new(
             HostDirectories::new(
                 private.clone(),
@@ -941,13 +993,15 @@ mod tests {
             .await
             .unwrap();
         let membership_history_reachable = network
-            .accepts_protocol_for_test(uc_infra::network::iroh::MEMBERSHIP_HISTORY_EXCHANGE_ALPN)
+            .accepts_protocol_for_test(
+                uc_infra_p2p::network::iroh::MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
+            )
             .await;
         let membership_branch_recovery_reachable = network
-            .accepts_protocol_for_test(uc_infra::network::iroh::MEMBERSHIP_BRANCH_RECOVERY_ALPN)
+            .accepts_protocol_for_test(uc_infra_p2p::network::iroh::MEMBERSHIP_BRANCH_RECOVERY_ALPN)
             .await;
         let space_admission_reachable = network
-            .accepts_protocol_for_test(uc_infra::network::iroh::SPACE_ADMISSION_ALPN)
+            .accepts_protocol_for_test(uc_infra_p2p::network::iroh::SPACE_ADMISSION_ALPN)
             .await;
         let (exchange, late, notice) = tokio::join!(
             network.accepts_protocol_for_test(b"uniclipboard/removal-exchange/1"),
@@ -1193,5 +1247,49 @@ mod tests {
                 }
             ))
         );
+    }
+}
+
+#[cfg(test)]
+mod import_cleanup_tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_cleanup_records_its_io_kind_without_the_directory_path() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let directory = tempfile::tempdir().expect("temp dir");
+        let missing = directory.path().join("PRIVATE_IMPORT_DIR");
+
+        cleanup_import_directory(Some(&missing));
+
+        assert_eq!(
+            logs.count("failed to remove incomplete host clipboard import"),
+            1,
+            "{}",
+            logs.output()
+        );
+        let output = logs.output();
+        assert!(
+            output.contains("error_kind=\"clipboard_import_cleanup\""),
+            "{output}"
+        );
+        assert!(output.contains("io_error_kind=NotFound"), "{output}");
+        assert!(!output.contains("PRIVATE_IMPORT_DIR"), "{output}");
+    }
+
+    #[test]
+    fn a_successful_or_absent_cleanup_stays_silent() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let directory = tempfile::tempdir().expect("temp dir");
+        let existing = directory.path().join("import");
+        std::fs::create_dir(&existing).expect("create import dir");
+
+        cleanup_import_directory(Some(&existing));
+        cleanup_import_directory(None);
+
+        assert!(!existing.exists());
+        assert_eq!(logs.count("failed to remove"), 0, "{}", logs.output());
     }
 }

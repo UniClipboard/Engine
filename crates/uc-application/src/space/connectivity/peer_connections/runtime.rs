@@ -3,6 +3,7 @@ use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, StreamExt}
 use tokio::sync::broadcast;
 use tokio::time::Instant;
 use uc_core::ports::PeerReachabilityChanged;
+use uc_observability_contract::{error_source::io_error_kind, uc_info, uc_warn};
 
 const MAX_CONCURRENT: usize = 4;
 // Bound the complete target operation, including qualification and admission.
@@ -110,6 +111,8 @@ impl ConnectionRuntime {
         let mut scope_open = true;
         let mut peer_reachability_open = true;
         let mut hints_open = true;
+        // 当前连续失败的分类：同一分类只在开始时记录一次，恢复时再记录一次。
+        let mut scope_failure: Option<&'static str> = None;
         loop {
             if self.cancel.is_cancelled() {
                 break;
@@ -191,7 +194,7 @@ impl ConnectionRuntime {
                     Some(Ok(ConnectionHint::CommunicationFailed(device))) if !self.paused => self.opportunity(Some(device), "communication_failed"),
                     Some(Err(source)) => {
                         let failure = PeerConnectionError::Environment(source);
-                        tracing::warn!(error.type = "unavailable", "peer connection environment observation failed");
+                        uc_warn!(error_kind = "unavailable", "peer connection environment observation failed");
                         drop(failure);
                         next_scope = Instant::now();
                     }
@@ -206,7 +209,27 @@ impl ConnectionRuntime {
                 },
                 _ = tokio::time::sleep_until(next) => {
                     if !self.paused && Instant::now() >= next_scope {
-                        let _ = self.reconcile().await;
+                        match self.reconcile().await {
+                            Ok(()) => {
+                                if scope_failure.take().is_some() {
+                                    uc_info!("peer connection scope recovered");
+                                }
+                            }
+                            Err(error) => {
+                                let kind = match error {
+                                    PeerConnectionError::Scope(_) => "scope_unavailable",
+                                    PeerConnectionError::ScopeTimeout(_) => "scope_timeout",
+                                    _ => "internal",
+                                };
+                                if scope_failure.replace(kind) != Some(kind) {
+                                    uc_warn!(
+                                        error_kind = kind,
+                                        io_error_kind = io_error_kind(&error),
+                                        "peer connection scope reconcile failed; peers cleared"
+                                    );
+                                }
+                            }
+                        }
                         next_scope = Instant::now() + SCOPE_RECHECK;
                     }
                 }
@@ -439,10 +462,10 @@ impl ConnectionRuntime {
             DialResult::Error(source) => ("error", source.kind()),
             DialResult::Cancelled => ("cancelled", "none"),
         };
-        tracing::info!(
+        uc_info!(
             trigger = peer.active_trigger,
-            outcome,
-            error_kind,
+            outcome = outcome,
+            error_kind = error_kind,
             "peer connection recovery attempt finished"
         );
         if matches!(result, DialResult::State(ReachabilityState::Online)) {

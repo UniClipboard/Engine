@@ -5,12 +5,12 @@ use async_trait::async_trait;
 use thiserror::Error;
 use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
 
 use crate::clipboard::history::views::{
     CleanupResultView, ClipboardHistoryError, ReconcileResultView, RetentionEnforcementResultView,
 };
 use crate::facade::clipboard_history::ClipboardHistoryFacade;
+use uc_observability_contract::{error_source::io_error_kind, uc_info, uc_warn};
 
 #[cfg(test)]
 #[path = "maintenance_runtime_tests.rs"]
@@ -101,7 +101,7 @@ async fn run_history_maintenance_loop(
     interval: Duration,
     cancel: CancellationToken,
 ) {
-    info!("history maintenance started");
+    uc_info!("history maintenance started");
     loop {
         tokio::select! {
             biased;
@@ -110,7 +110,7 @@ async fn run_history_maintenance_loop(
         }
         run_history_maintenance_once(maintenance.as_ref(), &cancel).await;
     }
-    info!("history maintenance stopped");
+    uc_info!("history maintenance stopped");
 }
 
 #[derive(Default)]
@@ -128,7 +128,7 @@ impl HistoryMaintenanceSummary {
         let reconcile = self.reconcile.as_ref().cloned().unwrap_or_default();
         let cleanup = self.cleanup.as_ref().cloned().unwrap_or_default();
         let retention = self.retention.as_ref().cloned().unwrap_or_default();
-        info!(
+        uc_info!(
             reconcile_failed = self.reconcile_failed,
             cleanup_failed = self.cleanup_failed,
             retention_failed = self.retention_failed,
@@ -163,9 +163,13 @@ async fn reconcile_history_once(maintenance: &dyn HistoryMaintenance) -> History
     let mut summary = HistoryMaintenanceSummary::default();
     match maintenance.reconcile_missing_files().await {
         Ok(result) => summary.reconcile = Some(result),
-        Err(_) => {
+        Err(error) => {
             summary.reconcile_failed = true;
-            warn!("history reconciliation failed; skipping remaining maintenance passes");
+            uc_warn!(
+                error_kind = "history_reconcile",
+                io_error_kind = io_error_kind(&error),
+                "history reconciliation failed; skipping remaining maintenance passes"
+            );
         }
     }
     summary
@@ -182,9 +186,13 @@ async fn complete_history_maintenance(
     }
     match maintenance.cleanup_expired_files().await {
         Ok(result) => summary.cleanup = Some(result),
-        Err(_) => {
+        Err(error) => {
             summary.cleanup_failed = true;
-            warn!("history file cache cleanup failed");
+            uc_warn!(
+                error_kind = "history_cleanup",
+                io_error_kind = io_error_kind(&error),
+                "history file cache cleanup failed"
+            );
         }
     }
 
@@ -194,9 +202,13 @@ async fn complete_history_maintenance(
     }
     match maintenance.enforce_retention_policy().await {
         Ok(result) => summary.retention = Some(result),
-        Err(_) => {
+        Err(error) => {
             summary.retention_failed = true;
-            warn!("history retention policy enforcement failed");
+            uc_warn!(
+                error_kind = "history_retention",
+                io_error_kind = io_error_kind(&error),
+                "history retention policy enforcement failed"
+            );
         }
     }
     summary.log();

@@ -236,29 +236,79 @@ fn run() -> Result<(), StoreError> {
   for (const line of [3, 4, 6, 10, 13]) assert.match(result.stderr, new RegExp(`fixture\\.rs:${line} .*#\\[source\\]`))
 })
 
-test('拒绝无理由丢弃下层错误', () => {
+test('拒绝没有类别标签的丢弃来源', () => {
   const result = check(`
 fn run() -> Result<(), StoreError> {
     load().map_err(|_| StoreError::Storage)?;
     save().map_err(|_error| StoreError::Storage)?;
+    // A reason without a category tag is not accepted
+    parse().map_err(|_| StoreError::Storage)?;
     Ok(())
 }
 `)
   assert.equal(result.status, 1)
-  assert.match(result.stderr, /fixture\.rs:3 .*中文注释/)
+  assert.match(result.stderr, /fixture\.rs:3 .*discarded-source\[category\]/)
   assert.match(result.stderr, /fixture\.rs:4 /)
+  assert.match(result.stderr, /fixture\.rs:6 /)
 })
 
-test('接受写明中文理由的丢弃来源例外', () => {
+test('拒绝不在清单内的丢弃来源类别', () => {
+  const result = check(`
+fn run() -> Result<(), StoreError> {
+    // discarded-source[whatever]: looks fine
+    load().map_err(|_| StoreError::Storage)?;
+    Ok(())
+}
+`)
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /fixture\.rs:4 .*is not allowed/)
+})
+
+test('接受带类别标签的丢弃来源例外', () => {
   const result = check(`
 fn run(bytes: &[u8]) -> Result<[u8; 32], KeyError> {
-    // TryFromSliceError 只表示长度不符，目标分类已完整表达
+    // discarded-source[int-conversion]: TryFromSliceError only means a length mismatch
     let key = bytes.try_into().map_err(|_| KeyError::Length)?;
-    let guard = lock.lock().map_err(|_| KeyError::Poisoned)?; // 锁中毒持有 guard，不能保存
+    let guard = lock.lock().map_err(|_| KeyError::Poisoned)?; // discarded-source[lock-poisoned]: holds the guard
+    // discarded-source[contract-boundary]: the public error carries a stable code only,
+    // the owner records the failure classification.
+    store.delete().await.map_err(|_| EngineError::new(CODE))?;
     Ok(key)
 }
 `)
   assert.equal(result.status, 0, result.stderr)
+})
+
+test('测试专用函数里的丢弃来源不检查', () => {
+  const result = check(`
+fn run() {}
+
+#[cfg(test)]
+fn helper() -> Result<(), StoreError> {
+    load().map_err(|_| StoreError::Storage)?;
+    Ok(())
+}
+`)
+  assert.equal(result.status, 0, result.stderr)
+})
+
+test('接受 error-handling.md 列出的每个丢弃来源类别', () => {
+  const categories = ['lock-poisoned', 'int-conversion', 'timeout', 'channel', 'no-information', 'input-validation', 'core-pure-validation', 'observability-init', 'business-outcome', 'contract-boundary', 'in-memory-encoding']
+  const body = categories
+    .map(category => `    // discarded-source[${category}]: reason\n    step().map_err(|_| StoreError::Storage)?;`)
+    .join('\n')
+  const result = check(`fn run() -> Result<(), StoreError> {\n${body}\n    Ok(())\n}\n`)
+  assert.equal(result.status, 0, result.stderr)
+})
+
+test('丢弃来源检查扫描整个文件而不只是新增行', () => {
+  const result = check(`
+fn untouched() -> Result<(), StoreError> {
+    load().map_err(|_| StoreError::Storage)?;
+    Ok(())
+}
+`)
+  assert.equal(result.status, 1)
 })
 
 test('拒绝日志输出错误正文', () => {
@@ -290,9 +340,9 @@ test('接受固定分类的日志字段', () => {
   const result = check(`
 fn run() {
     if let Err(err) = load() {
-        warn!(error_kind = "load", io_error_kind = io_error_kind(&err), "load failed");
+        uc_warn!(error_kind = "load", io_error_kind = io_error_kind(&err), "load failed");
     }
-    warn!(source = %source_label, reason = ?reason, error_kind = ?callback_error, "skipped");
+    uc_warn!(source = log_vocab(&source_label), reason = log_vocab_debug(&reason), "skipped");
 }
 `)
   assert.equal(result.status, 0, result.stderr)
@@ -341,6 +391,141 @@ mod tests {
         load().map_err(|_| StoreError::Storage)?;
         Ok(())
     }
+}
+`)
+  assert.equal(result.status, 0, result.stderr)
+})
+
+test('拒绝没有 skip_all 或显式字段的 instrument', () => {
+  const result = check(`
+#[tracing::instrument(name = "space.load")]
+async fn load(value: Value) {}
+
+#[instrument]
+fn bare() {}
+
+#[tracing::instrument(
+    name = "space.multi",
+    level = "info"
+)]
+fn multi() {}
+`)
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /fixture\.rs:2/)
+  assert.match(result.stderr, /fixture\.rs:5/)
+  assert.match(result.stderr, /fixture\.rs:8/)
+})
+
+test('拒绝 instrument 使用 err、ret 与未登记的 span 字段', () => {
+  const result = check(`
+#[instrument(skip_all, err)]
+async fn fallible() -> Result<(), Error> {}
+
+#[instrument(skip_all, ret)]
+fn returns() -> u8 {}
+
+#[instrument(skip_all, fields(selected_ip = %ip))]
+fn address(ip: IpAddr) {}
+`)
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /fixture\.rs:2.*err 或 ret/)
+  assert.match(result.stderr, /fixture\.rs:5.*err 或 ret/)
+  assert.match(result.stderr, /fixture\.rs:8.*selected_ip 未登记/)
+})
+
+test('接受字段目录内的 instrument 字段，包括多行写法', () => {
+  const result = check(`
+#[instrument(
+    skip_all,
+    fields(
+        operation = "load",
+        entry_id = %entry_id,
+        limit = 10,
+    )
+)]
+async fn load(entry_id: &EntryId) {}
+`)
+  assert.equal(result.status, 0, result.stderr)
+})
+
+test('接受 skip_all 或显式 fields 的 instrument 与带链的错误日志', () => {
+  const result = check(`
+#[tracing::instrument(name = "space.load", skip_all)]
+async fn load() {}
+
+#[tracing::instrument(name = "space.save", skip(self), fields(step = "save"))]
+fn save(&self) {}
+
+fn log(e: anyhow::Error) {
+    uc_warn!(error = e.as_ref() as &dyn std::error::Error, "load failed");
+}
+
+#[derive(Debug, thiserror::Error)]
+enum Refused {
+    #[error("refused {reason}")]
+    Fixed { reason: &'static str },
+}
+`)
+  assert.equal(result.status, 0, result.stderr)
+})
+
+test('拒绝错误文本内插未包装的字符串与路径字段', () => {
+  const result = check(`
+#[derive(Debug, thiserror::Error)]
+enum LoadError {
+    #[error("cannot open {path}")]
+    Open { path: std::path::PathBuf },
+    #[error("bad name {0}")]
+    Name(String),
+    #[error("bad label {label}")]
+    Label { label: Sensitive<String> },
+    #[error("bad kind {kind:?}")]
+    Kind { kind: Kind },
+}
+`)
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /fixture\.rs:4/)
+  assert.match(result.stderr, /fixture\.rs:6/)
+  assert.doesNotMatch(result.stderr, /fixture\.rs:8/)
+  assert.doesNotMatch(result.stderr, /fixture\.rs:10/)
+})
+
+test('宏展开使用 $crate 路径不算正文完整路径', () => {
+  const result = check(`
+macro_rules! forward {
+    ($($t:tt)*) => { $crate::inner!($($t)*) };
+}
+`)
+  assert.equal(result.status, 0, result.stderr)
+})
+
+test('拒绝观测 crate 之外直接使用 tracing::event!', () => {
+  const result = check(`
+fn log() {
+    tracing::event!(tracing::Level::WARN, error_kind = "fixed", "sync stopped");
+}
+`)
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /不得直接使用 tracing::event!/)
+})
+
+test('拒绝直接使用 tracing 日志宏', () => {
+  const result = check(`
+fn run() {
+    tracing::warn!(error_kind = "fixed", "sync stopped");
+    info!("started");
+}
+`)
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /fixture\.rs:3 .*不得直接使用 tracing 日志宏/)
+  assert.match(result.stderr, /fixture\.rs:4 .*不得直接使用 tracing 日志宏/)
+})
+
+test('接受 uc_* 日志宏与 span 宏', () => {
+  const result = check(`
+fn run() {
+    uc_warn!(error_kind = "fixed", "sync stopped");
+    let _span = tracing::info_span!("sync");
 }
 `)
   assert.equal(result.status, 0, result.stderr)

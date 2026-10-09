@@ -59,7 +59,7 @@ const benchmarkFilter =
 const cargoArguments = [
   "bench",
   "-p",
-  "uc-infra",
+  "uc-infra-profile",
   "--locked",
   "--features",
   "test-util",
@@ -70,7 +70,7 @@ if (benchmarkFilter) {
   cargoArguments.push("--", benchmarkFilter);
 }
 execFileSync(
-  "cargo",
+  resolve(root, "scripts/build-cache/bin/cargo"),
   cargoArguments,
   { cwd: root, env: environment, stdio: "inherit" },
 );

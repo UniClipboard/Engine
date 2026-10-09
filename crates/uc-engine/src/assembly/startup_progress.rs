@@ -1,4 +1,3 @@
-use std::future::Future;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -6,10 +5,12 @@ use uc_application::deps::{
     ProfileUpgradeBackupError, ProfileUpgradeBackupPort, ProfileUpgradeSource,
     ProfileUpgradeVersions,
 };
-use uc_infra::security::{
-    StorageUpgradeFailure, StorageUpgradeObserver, StorageUpgradeProgressOutcome,
-    StorageUpgradeSnapshot, StorageUpgradeStep, StorageUpgradeUnit,
+use uc_infra_profile::security::{
+    ProfileUpgradeBackupRecordKeyMissing, StorageUpgradeFailure, StorageUpgradeObserver,
+    StorageUpgradeProgressOutcome, StorageUpgradeSnapshot, StorageUpgradeStep, StorageUpgradeUnit,
 };
+
+use uc_observability_contract::error_source::find_source;
 
 use crate::engine::startup::StartupProgressStore;
 use crate::{
@@ -114,16 +115,17 @@ impl StartupProfileUpgradeBackup {
         Self { inner, progress }
     }
 
-    async fn track(
+    fn settle(
         &self,
-        operation: impl Future<Output = Result<(), ProfileUpgradeBackupError>>,
+        result: Result<(), ProfileUpgradeBackupError>,
     ) -> Result<(), ProfileUpgradeBackupError> {
-        self.progress.backup_started();
-        let result = operation.await;
         if result.is_ok() {
             self.progress.backup_completed();
-        } else {
-            self.progress.backup_failed();
+        } else if let Err(error) = &result {
+            // 与启动错误一致：记录密钥缺失不会因重试而恢复，不能提示可重试。
+            self.progress.backup_failed(
+                find_source::<ProfileUpgradeBackupRecordKeyMissing>(error).is_none(),
+            );
         }
         result
     }
@@ -146,32 +148,22 @@ impl ProfileUpgradeBackupPort for StartupProfileUpgradeBackup {
         self.inner.read_source()
     }
 
-    fn read_prepared_target(
-        &self,
-    ) -> Result<Option<ProfileUpgradeVersions>, ProfileUpgradeBackupError> {
-        self.inner.read_prepared_target()
-    }
-
     async fn capture_verified(
         &self,
         target: &ProfileUpgradeVersions,
     ) -> Result<(), ProfileUpgradeBackupError> {
-        self.track(self.inner.capture_verified(target)).await
-    }
-
-    async fn verify_prepared(
-        &self,
-        target: &ProfileUpgradeVersions,
-    ) -> Result<(), ProfileUpgradeBackupError> {
-        self.track(self.inner.verify_prepared(target)).await
+        self.progress.backup_started();
+        let result = self.inner.capture_verified(target).await;
+        self.settle(result)
     }
 
     async fn preserve_security_materials(
         &self,
         target: &ProfileUpgradeVersions,
     ) -> Result<(), ProfileUpgradeBackupError> {
-        self.track(self.inner.preserve_security_materials(target))
-            .await
+        self.progress.backup_started();
+        let result = self.inner.preserve_security_materials(target).await;
+        self.settle(result)
     }
 }
 
@@ -183,5 +175,75 @@ fn upgrade_step(step: StorageUpgradeStep) -> StartupUpgradeStep {
         StorageUpgradeStep::RelatedRecords => StartupUpgradeStep::ConvertingRelatedRecords,
         StorageUpgradeStep::Verifying => StartupUpgradeStep::Verifying,
         StorageUpgradeStep::Preparing => StartupUpgradeStep::Preparing,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::StartupProgress;
+
+    struct FailingPreserve(fn() -> anyhow::Error);
+
+    #[async_trait]
+    impl ProfileUpgradeBackupPort for FailingPreserve {
+        async fn list_backups(
+            &self,
+        ) -> Result<Vec<uc_application::deps::ProfileUpgradeBackupEntry>, ProfileUpgradeBackupError>
+        {
+            Ok(Vec::new())
+        }
+        async fn delete_backup(&self, _: &str) -> Result<(), ProfileUpgradeBackupError> {
+            Ok(())
+        }
+        fn read_source(&self) -> Result<ProfileUpgradeSource, ProfileUpgradeBackupError> {
+            Ok(ProfileUpgradeSource {
+                has_data: false,
+                source_product: None,
+                source_engine: None,
+            })
+        }
+        async fn capture_verified(
+            &self,
+            _: &ProfileUpgradeVersions,
+        ) -> Result<(), ProfileUpgradeBackupError> {
+            Ok(())
+        }
+        async fn preserve_security_materials(
+            &self,
+            _: &ProfileUpgradeVersions,
+        ) -> Result<(), ProfileUpgradeBackupError> {
+            Err(ProfileUpgradeBackupError { source: (self.0)() })
+        }
+    }
+
+    async fn failed_retryable(source: fn() -> anyhow::Error) -> bool {
+        let (input, progress) = StartupProgress::channel();
+        let backup = StartupProfileUpgradeBackup::new(
+            Arc::new(FailingPreserve(source)),
+            Arc::clone(&input.store),
+        );
+        let target = ProfileUpgradeVersions {
+            product: "1".into(),
+            engine: "1".into(),
+        };
+        backup
+            .preserve_security_materials(&target)
+            .await
+            .unwrap_err();
+        input.finish(&Err::<(), _>(crate::EngineError::new(
+            1101,
+            crate::EngineErrorCategory::Unavailable,
+            true,
+        )));
+        progress.snapshot().failure.unwrap().retryable
+    }
+
+    #[tokio::test]
+    async fn missing_record_key_is_reported_as_a_permanent_backup_failure() {
+        assert!(
+            !failed_retryable(|| anyhow::Error::new(ProfileUpgradeBackupRecordKeyMissing)).await
+        );
+        assert!(failed_retryable(|| anyhow::anyhow!("transient")).await);
     }
 }

@@ -26,8 +26,8 @@ use uc_application::deps::{
     ConfigMigrationDeps, CurrentSpaceIdentityPort, DevicePorts, DirectoryReceivePorts,
     FileTransferPorts, InitialSpaceActivationPort, PortableCurrentSpaceIdentityPort,
     ProfileLifecycle, ProfileLifecycleRepositoryPort, ProfileLifecycleState,
-    RePairingStateStorePort, SearchPorts, SecurityPorts, SpaceAccessPorts,
-    SpaceRebuildProgressPort, StoragePorts, SystemPorts,
+    RePairingStateStorePort, RetireUpgradeBackupSecurityRecordsPort, SearchPorts, SecurityPorts,
+    SpaceAccessPorts, SpaceRebuildProgressPort, StoragePorts, SystemPorts,
 };
 use uc_application::facade::HostEventEmitterPort;
 use uc_core::app_dirs::AppPaths;
@@ -36,41 +36,18 @@ use uc_core::ids::{ProfileId, RepresentationId};
 use uc_core::ports::blob::BlobReferenceRepositoryPort;
 use uc_core::ports::clipboard::{RepresentationCachePort, SelfWriteLedgerPort, SpoolQueuePort};
 use uc_core::ports::*;
-use uc_infra::blob::BlobRepositoryPort;
-use uc_infra::clipboard::{
+use uc_infra_content::clipboard::{
     new_in_memory_change_origin, ClipboardPayloadResolver, DurableSpoolQueue,
     InfraThumbnailGenerator, RepresentationCache, SpoolManager,
 };
-use uc_infra::config::ClipboardStorageConfig;
-use uc_infra::config_migration::{ConfigMigrationAdapter, ConfigMigrationPaths};
-use uc_infra::db::executor::DieselSqliteExecutor;
-#[cfg(feature = "lan-compat")]
-use uc_infra::db::mappers::mobile_device_mapper::MobileDeviceRowMapper;
-use uc_infra::db::mappers::{
-    blob_mapper::BlobRowMapper, clipboard_entry_mapper::ClipboardEntryRowMapper,
-    clipboard_event_mapper::ClipboardEventRowMapper,
-    clipboard_selection_mapper::ClipboardSelectionRowMapper,
-    snapshot_representation_mapper::RepresentationRowMapper,
-};
-use uc_infra::db::pool::{init_db_pool, DbPool};
-#[cfg(feature = "lan-compat")]
-use uc_infra::db::repositories::DieselMobileDeviceRepository;
-use uc_infra::db::repositories::{
-    DieselBlobReferenceRepository, DieselBlobRepository, DieselClipboardEntryReplaceRepository,
-    DieselClipboardEntryRepository, DieselClipboardEventRepository,
-    DieselClipboardRepresentationRepository, DieselClipboardSelectionRepository,
-    DieselEntryAvailabilityRepository, DieselFileTransferRepository,
-    DieselInboundReceiveCommitRepository, DieselPeerAddressRepository,
-    DieselReceiveArtifactLogRepository, DieselSpaceMemberRepository, DieselSpaceSecurityStore,
-    DieselThumbnailRepository, DieselTrustedPeerRepository, EncryptedRelationshipStore,
-};
-use uc_infra::fs::key_slot_store::JsonKeySlotStore;
-use uc_infra::fs::VaultLayout;
-use uc_infra::network::iroh::IrohIdentityStore;
-use uc_infra::search::{
-    HkdfSearchKeyDerivation, SearchPipeline, SqliteSearchIndex, V3SearchKeyDerivation,
-};
-use uc_infra::security::{
+use uc_infra_content::config::ClipboardStorageConfig;
+use uc_infra_local::blob::BlobRepositoryPort;
+use uc_infra_local::fs::VaultLayout;
+use uc_infra_local::settings::repository::FileSettingsRepository;
+use uc_infra_local::{FileAppVersionStateRepository, FileFirstSyncStateRepository, SystemClock};
+use uc_infra_p2p::network::iroh::IrohIdentityStore;
+use uc_infra_profile::config_migration::{ConfigMigrationAdapter, ConfigMigrationPaths};
+use uc_infra_profile::security::{
     ActiveSpaceGenerationManifestStore, AdmissionKeyManager, Blake3Hasher,
     DecryptingClipboardRepresentationRepository, EncryptingClipboardEventWriter,
     EncryptingInboundReceiveCommit, ProfileContentKeyVault, ProfileLifecycleRepository,
@@ -79,12 +56,35 @@ use uc_infra::security::{
     V3AdmissionSpaceTransition, V3DeviceManagementReset, V3InitialSpaceActivation,
     V3MembershipBranchTransition,
 };
-use uc_infra::settings::repository::FileSettingsRepository;
-use uc_infra::space::{
+use uc_infra_profile::space::{
     InMemorySession, KeyMaterialStore, OpenMlsHistoricalSignatureVerifier,
     SqliteMembershipRecordStore, SqliteSpaceAdmissionCredentials, SqliteSpaceAdmissionState,
 };
-use uc_infra::{FileAppVersionStateRepository, FileFirstSyncStateRepository, SystemClock};
+use uc_infra_security::key_slot_store::JsonKeySlotStore;
+use uc_infra_storage::db::executor::DieselSqliteExecutor;
+#[cfg(feature = "lan-compat")]
+use uc_infra_storage::db::mappers::mobile_device_mapper::MobileDeviceRowMapper;
+use uc_infra_storage::db::mappers::{
+    blob_mapper::BlobRowMapper, clipboard_entry_mapper::ClipboardEntryRowMapper,
+    clipboard_event_mapper::ClipboardEventRowMapper,
+    clipboard_selection_mapper::ClipboardSelectionRowMapper,
+    snapshot_representation_mapper::RepresentationRowMapper,
+};
+use uc_infra_storage::db::pool::{init_db_pool, DbPool};
+#[cfg(feature = "lan-compat")]
+use uc_infra_storage::db::repositories::DieselMobileDeviceRepository;
+use uc_infra_storage::db::repositories::{
+    DieselBlobReferenceRepository, DieselBlobRepository, DieselClipboardEntryReplaceRepository,
+    DieselClipboardEntryRepository, DieselClipboardEventRepository,
+    DieselClipboardRepresentationRepository, DieselClipboardSelectionRepository,
+    DieselEntryAvailabilityRepository, DieselFileTransferRepository,
+    DieselInboundReceiveCommitRepository, DieselPeerAddressRepository,
+    DieselReceiveArtifactLogRepository, DieselSpaceMemberRepository, DieselSpaceSecurityStore,
+    DieselThumbnailRepository, DieselTrustedPeerRepository, EncryptedRelationshipStore,
+};
+use uc_infra_storage::search::{
+    HkdfSearchKeyDerivation, SearchPipeline, SqliteSearchIndex, V3SearchKeyDerivation,
+};
 use uc_observability_contract::analytics::{AnalyticsFacade, AnalyticsPort};
 
 #[cfg(feature = "lan-compat")]
@@ -96,7 +96,9 @@ use crate::assembly::deps::{
 use crate::assembly::maintenance_space_transition::MaintenanceOnlySpaceTransitionPorts;
 use crate::assembly::platform::{create_platform_layer, ProfilePayloadMode, SystemClipboardLayer};
 use crate::assembly::runtime_storage::RuntimeStorageSelection;
+use crate::assembly::settings_notification::NotifyingSettings;
 use infra::*;
+use uc_observability_contract::uc_info;
 
 /// Infrastructure layer implementations
 struct InfraLayer {
@@ -161,7 +163,8 @@ struct InfraLayer {
     // 持有具体类型是为了让 daemon 拿到写入面;同一份 Arc 通过 unsizing
     // coercion 也能 share 给 ApplicationDeps.mobile_sync.endpoint_info。
     #[cfg(feature = "lan-compat")]
-    mobile_sync_endpoint_info: Arc<uc_infra::mobile_sync::InMemoryMobileSyncEndpointInfoAdapter>,
+    mobile_sync_endpoint_info:
+        Arc<uc_mobile_lan::mobile_sync::InMemoryMobileSyncEndpointInfoAdapter>,
 }
 
 pub struct CoreWiringInputs {
@@ -177,8 +180,9 @@ pub struct CoreWiringInputs {
     pub analytics_sink: Arc<dyn AnalyticsPort>,
     pub analytics_facade: Arc<dyn AnalyticsFacade>,
     pub host_event_emitter: Arc<dyn HostEventEmitterPort>,
-    pub startup_progress: Arc<dyn uc_infra::security::StorageUpgradeObserver>,
+    pub startup_progress: Arc<dyn uc_infra_profile::security::StorageUpgradeObserver>,
     pub profile_key_recovery: Arc<dyn ProfilePassphraseRecoveryPort>,
+    pub upgrade_backup_security: Arc<dyn RetireUpgradeBackupSecurityRecordsPort>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -192,8 +196,8 @@ async fn ensure_profile_storage_v3(
     profile_content_key_vault: Arc<ProfileContentKeyVault>,
     admission_keys: Arc<AdmissionKeyManager>,
     manifests: Arc<ActiveSpaceGenerationManifestStore>,
-    current_space: Arc<uc_infra::space::CurrentSpaceResolver>,
-    progress: Arc<dyn uc_infra::security::StorageUpgradeObserver>,
+    current_space: Arc<uc_infra_profile::space::CurrentSpaceResolver>,
+    progress: Arc<dyn uc_infra_profile::security::StorageUpgradeObserver>,
 ) -> WiringResult<RuntimeStorageSelection> {
     let upgrade = ProfileStorageUpgrade::for_runtime(
         profile_root.to_path_buf(),
@@ -334,6 +338,7 @@ pub async fn wire_dependencies_from_inputs(
         host_event_emitter,
         startup_progress,
         profile_key_recovery,
+        upgrade_backup_security,
     } = inputs;
     let profile_reset_paths = paths.clone();
     let profile_reset_profile_id = profile_id.inner().to_owned();
@@ -358,7 +363,7 @@ pub async fn wire_dependencies_from_inputs(
         vault_path.clone(),
         Arc::clone(&admission_keys),
     ));
-    let current_space_resolver = Arc::new(uc_infra::space::CurrentSpaceResolver::new(
+    let current_space_resolver = Arc::new(uc_infra_profile::space::CurrentSpaceResolver::new(
         Arc::clone(&active_generation_manifest_store),
         VaultLayout::new(vault_path.clone()).legacy_current_space_id_path(),
         Arc::clone(&admission_keys),
@@ -367,11 +372,11 @@ pub async fn wire_dependencies_from_inputs(
     let portable_current_space_identity: Arc<dyn PortableCurrentSpaceIdentityPort> =
         current_space_resolver.clone();
     let re_pairing_state_store: Arc<dyn RePairingStateStorePort> =
-        Arc::new(uc_infra::space::EncryptedRePairingStateStore::new(
+        Arc::new(uc_infra_profile::space::EncryptedRePairingStateStore::new(
             VaultLayout::new(vault_path.clone()).re_pairing_state_path(),
             Arc::clone(&admission_keys),
         ));
-    tracing::info!(
+    uc_info!(
         profile_ready = profile_lifecycle.state() == ProfileLifecycleState::Ready,
         "profile storage 启动 gate 开始"
     );
@@ -402,7 +407,7 @@ pub async fn wire_dependencies_from_inputs(
                 .context("open maintenance-only profile runtime layout"),
         })?
     };
-    tracing::info!(
+    uc_info!(
         storage_generation = if storage.is_v3() { "v3" } else { "legacy" },
         "空间存储 generation 已选择"
     );
@@ -424,7 +429,7 @@ pub async fn wire_dependencies_from_inputs(
     // off its own pooled connection; clone before infra consumes the pool.
     let db_pool_for_config_migration = db_pool.clone();
 
-    let infra = create_infra_layer(
+    let mut infra = create_infra_layer(
         db_pool,
         control_db_pool,
         &vault_path,
@@ -432,6 +437,11 @@ pub async fn wire_dependencies_from_inputs(
         &app_data_root,
         secure_storage.clone(),
     )?;
+    // 唯一的设置保存出口：所有写入路径共享同一个变更通知。
+    infra.settings_repo = Arc::new(NotifyingSettings::new(
+        infra.settings_repo,
+        Arc::clone(&host_event_emitter),
+    ));
     let storage_config = Arc::new(ClipboardStorageConfig::defaults());
     let profile_salt = profile_id.inner().as_bytes().to_vec();
     let platform = create_platform_layer(
@@ -490,12 +500,13 @@ pub async fn wire_dependencies_from_inputs(
         Arc::clone(&membership_ledger) as Arc<dyn uc_application::deps::MembershipRecordStorePort>,
         Arc::clone(&admission_state),
     ));
-    let encryption_passphrase_change = Arc::new(uc_infra::space::EncryptionPassphraseChange::new(
-        Arc::clone(&space_access_adapter),
-        Arc::clone(&admission_credentials),
-        Arc::clone(&active_generation_manifest_store),
-        Arc::clone(&profile_key_recovery),
-    ));
+    let encryption_passphrase_change =
+        Arc::new(uc_infra_profile::space::EncryptionPassphraseChange::new(
+            Arc::clone(&space_access_adapter),
+            Arc::clone(&admission_credentials),
+            Arc::clone(&active_generation_manifest_store),
+            Arc::clone(&profile_key_recovery),
+        ));
     encryption_passphrase_change
         .recover_pending()
         .await
@@ -620,7 +631,7 @@ pub async fn wire_dependencies_from_inputs(
         ),
     });
     let file_transfer_privacy_maintenance = Arc::new(
-        uc_infra::file_transfer::SqliteFileTransferPrivacyMaintenance::new(
+        uc_infra_storage::file_transfer::SqliteFileTransferPrivacyMaintenance::new(
             infra.db_executor.clone(),
         ),
     );
@@ -639,11 +650,13 @@ pub async fn wire_dependencies_from_inputs(
         cancel_attempt: Arc::clone(&file_transfer_adapter) as _,
     };
     let file_transfer_store_arc = Arc::new(match &v3_content_protection {
-        Some(protection) => uc_infra::file_transfer::SqliteReceiverFileTransferStore::new_v3(
-            infra.db_executor.clone(),
-            Arc::clone(protection),
-        ),
-        None => uc_infra::file_transfer::SqliteReceiverFileTransferStore::new(
+        Some(protection) => {
+            uc_infra_storage::file_transfer::SqliteReceiverFileTransferStore::new_v3(
+                infra.db_executor.clone(),
+                Arc::clone(protection),
+            )
+        }
+        None => uc_infra_storage::file_transfer::SqliteReceiverFileTransferStore::new(
             infra.db_executor.clone(),
             space_access_ports.derive_subkey.clone(),
             platform.current_profile.clone(),
@@ -656,30 +669,43 @@ pub async fn wire_dependencies_from_inputs(
     // reusing the shared executor.
     let entry_file_set_repo: Arc<dyn uc_core::ports::clipboard::EntryFileSetRepositoryPort> =
         Arc::new(match &v3_content_protection {
-            Some(protection) => uc_infra::db::repositories::DieselEntryFileSetRepository::new_v3(
-                infra.db_executor.clone(),
-                Arc::clone(protection),
-            ),
-            None => uc_infra::db::repositories::DieselEntryFileSetRepository::new(
+            Some(protection) => {
+                uc_infra_storage::db::repositories::DieselEntryFileSetRepository::new_v3(
+                    infra.db_executor.clone(),
+                    Arc::clone(protection),
+                )
+            }
+            None => uc_infra_storage::db::repositories::DieselEntryFileSetRepository::new(
                 infra.db_executor.clone(),
                 space_access_ports.derive_subkey.clone(),
                 platform.current_profile.clone(),
             ),
         });
 
+    // 本机历史标签：名称以当前 profile 的内容保护密封；旧格式 profile 只能读取关联。
+    let history_tag_repo = Arc::new(match &v3_content_protection {
+        Some(protection) => uc_infra_storage::db::repositories::DieselHistoryTagRepository::new_v3(
+            infra.db_executor.clone(),
+            Arc::clone(protection),
+        ),
+        None => uc_infra_storage::db::repositories::DieselHistoryTagRepository::new_legacy(
+            infra.db_executor.clone(),
+        ),
+    });
+
     let directory_attempt_impl = Arc::new(
-        uc_infra::db::repositories::DieselEntryReceiveAttemptRepository::new(
+        uc_infra_storage::db::repositories::DieselEntryReceiveAttemptRepository::new(
             infra.db_executor.clone(),
         ),
     );
     let directory_publish_impl = Arc::new(match &v3_content_protection {
         Some(protection) => {
-            uc_infra::db::repositories::DieselDirectoryPublishLogRepository::new_v3(
+            uc_infra_storage::db::repositories::DieselDirectoryPublishLogRepository::new_v3(
                 infra.db_executor.clone(),
                 Arc::clone(protection),
             )
         }
-        None => uc_infra::db::repositories::DieselDirectoryPublishLogRepository::new(
+        None => uc_infra_storage::db::repositories::DieselDirectoryPublishLogRepository::new(
             infra.db_executor.clone(),
             space_access_ports.derive_subkey.clone(),
             platform.current_profile.clone(),
@@ -728,12 +754,12 @@ pub async fn wire_dependencies_from_inputs(
     // write, current-read, mobile-read, backfill, and reset ports.
     let active_clipboard_register_impl = Arc::new(match &v3_content_protection {
         Some(protection) => {
-            uc_infra::db::repositories::DieselActiveClipboardRegisterRepository::new_v3(
+            uc_infra_storage::db::repositories::DieselActiveClipboardRegisterRepository::new_v3(
                 infra.db_executor.clone(),
                 Arc::clone(protection),
             )
         }
-        None => uc_infra::db::repositories::DieselActiveClipboardRegisterRepository::new(
+        None => uc_infra_storage::db::repositories::DieselActiveClipboardRegisterRepository::new(
             infra.db_executor.clone(),
             space_access_ports.derive_subkey.clone(),
             platform.current_profile.clone(),
@@ -744,7 +770,7 @@ pub async fn wire_dependencies_from_inputs(
         uc_core::clipboard::ActiveClipboardState,
     >(ACTIVE_CLIPBOARD_SSE_CAPACITY);
     let active_clipboard_register: Arc<dyn uc_core::ports::clipboard::AdvanceActiveClipboardPort> =
-        Arc::new(uc_infra::clipboard::BroadcastingAdvance::new(
+        Arc::new(uc_infra_content::clipboard::BroadcastingAdvance::new(
             active_clipboard_register_impl.clone(),
             active_clipboard_sse_source.clone(),
         ));
@@ -828,7 +854,7 @@ pub async fn wire_dependencies_from_inputs(
     // The network identity remains in its dedicated file storage so upgrades
     // preserve the endpoint identity paired by earlier releases.
     let iroh_identity_storage: Arc<dyn SecureStoragePort> = Arc::new(
-        uc_infra::FileSecureStorage::with_base_dir(iroh_identity_dir.clone()),
+        uc_infra_local::FileSecureStorage::with_base_dir(iroh_identity_dir.clone()),
     );
     // The remaining bypass repos are `Arc::clone`d directly from `infra` at the
     // `WiredDependencies` construction site below (infra retains ownership).
@@ -839,7 +865,7 @@ pub async fn wire_dependencies_from_inputs(
     // create_infra_layer.
     let profile_reset = ProfileResetDeps {
         lifecycle_repository: profile_lifecycle_repository,
-        keys: Arc::new(uc_infra::security::ProfileKeyWiper::new(
+        keys: Arc::new(uc_infra_profile::security::ProfileKeyWiper::new(
             admission_keys.as_ref().clone(),
             profile_reset_secure_storage,
             vault_path.clone(),
@@ -847,7 +873,8 @@ pub async fn wire_dependencies_from_inputs(
             profile_reset_paths.vault_dir.join("keyslot.json"),
             profile_reset_identity_dir,
         )),
-        state: Arc::new(uc_infra::security::ProfileStateCleaner::new(
+        backup_security: upgrade_backup_security,
+        state: Arc::new(uc_infra_profile::security::ProfileStateCleaner::new(
             db_pool_for_profile_reset,
             profile_reset_paths,
             db_path.clone(),
@@ -882,36 +909,40 @@ pub async fn wire_dependencies_from_inputs(
     let host_event_bus: Arc<uc_application::facade::HostEventBus> =
         Arc::new(uc_application::facade::HostEventBus::new());
     host_event_bus.register("logging", host_event_emitter);
-    let clipboard_background = Arc::new(uc_infra::clipboard::ClipboardBackgroundRuntime::new(
-        representation_cache,
-        spool_manager,
-        worker_rx,
-        spool_dir,
-        storage_config.spool_ttl_days,
-        storage_config.worker_retry_max_attempts,
-        storage_config.worker_retry_backoff_ms,
-        Arc::clone(&decrypting_rep_repo),
-        worker_tx.clone(),
-        Arc::clone(&platform.blob_writer),
-        Arc::clone(&infra.hash),
-        Arc::clone(&infra.clock),
-        Arc::clone(&infra.thumbnail_repo),
-        Arc::clone(&infra.thumbnail_generator),
-    ));
+    let clipboard_background = Arc::new(
+        uc_infra_content::clipboard::ClipboardBackgroundRuntime::new(
+            representation_cache,
+            spool_manager,
+            worker_rx,
+            spool_dir,
+            storage_config.spool_ttl_days,
+            storage_config.worker_retry_max_attempts,
+            storage_config.worker_retry_backoff_ms,
+            Arc::clone(&decrypting_rep_repo),
+            worker_tx.clone(),
+            Arc::clone(&platform.blob_writer),
+            Arc::clone(&infra.hash),
+            Arc::clone(&infra.clock),
+            Arc::clone(&infra.thumbnail_repo),
+            Arc::clone(&infra.thumbnail_generator),
+        ),
+    );
 
     let mut deps = ApplicationDeps {
         paths: paths.clone(),
         relay_diagnostic: build_relay_diagnostic(),
         host_event_bus: Arc::clone(&host_event_bus),
         file_transfer_event_store: file_transfer_store_arc,
-        receive_artifact_cleanup: Arc::new(uc_infra::fs::FsReceiveArtifactCleaner),
-        receive_save_dir: uc_infra::fs::FsInboundFileTarget::new(Arc::clone(&infra.settings_repo)),
+        receive_artifact_cleanup: Arc::new(uc_infra_local::fs::FsReceiveArtifactCleaner),
+        receive_save_dir: uc_infra_local::fs::FsInboundFileTarget::new(Arc::clone(
+            &infra.settings_repo,
+        )),
         clipboard_background,
         trusted_peer_repo: Arc::clone(&trusted_peer_repo),
         entry_delivery_repo: Arc::clone(&infra.entry_delivery_repo),
         clipboard: ClipboardPorts {
             history_file_references: Arc::new(
-                uc_infra::db::repositories::DieselHistoryFileReferences::new(
+                uc_infra_storage::db::repositories::DieselHistoryFileReferences::new(
                     infra.db_executor.clone(),
                     blob_cipher.clone(),
                 ),
@@ -961,6 +992,8 @@ pub async fn wire_dependencies_from_inputs(
             blob_writer: platform.blob_writer,
             blob_content_ingest: platform.blob_content_ingest,
             entry_file_set_repo,
+            history_tag_store: history_tag_repo.clone(),
+            history_entry_tags: history_tag_repo,
             thumbnail_repo: infra.thumbnail_repo,
             thumbnail_generator: infra.thumbnail_generator,
             file_transfer,
@@ -970,7 +1003,7 @@ pub async fn wire_dependencies_from_inputs(
         system: SystemPorts {
             clock: infra.clock,
             hash: infra.hash,
-            cache_fs: Arc::new(uc_infra::fs::TokioCacheFsAdapter::new()),
+            cache_fs: Arc::new(uc_infra_local::fs::TokioCacheFsAdapter::new()),
         },
         search: SearchPorts::new(
             search_index,

@@ -2,7 +2,6 @@
 
 use crate::error_codes::*;
 
-use tracing::error;
 use uc_application::facade::{
     AppFacade, NotResendableReason, ResendEntryCommand, ResendEntryError, ResendReport,
 };
@@ -11,6 +10,7 @@ use crate::{
     EngineError, EngineErrorCategory, EntryNotResendableReason, OperationResult, ResendEntryInput,
     ResendEntryOutcome, ResendReportSummary,
 };
+use uc_observability_contract::uc_error;
 
 pub async fn execute_resend_entry(
     facade: &AppFacade,
@@ -65,7 +65,7 @@ fn map_resend_result(
         }
         Err(ResendEntryError::NoEligibleTargets) => ResendEntryOutcome::NoEligibleTargets,
         Err(ResendEntryError::Storage(_)) => {
-            error!("resend storage operation failed");
+            uc_error!("resend storage operation failed");
             return Err(EngineError::new(
                 RESEND_STORAGE_FAILED_CODE,
                 EngineErrorCategory::Internal,
@@ -73,7 +73,7 @@ fn map_resend_result(
             ));
         }
         Err(ResendEntryError::Dispatch(_)) => {
-            error!("resend dispatch failed");
+            uc_error!("resend dispatch failed");
             return Err(EngineError::new(
                 RESEND_DISPATCH_FAILED_CODE,
                 EngineErrorCategory::Internal,

@@ -4,7 +4,7 @@
 //! IP 直连、公网中继、还是没在线？" 实现侧（infra）通过 iroh
 //! `Endpoint::remote_info` snapshot 推导，禁止应用层基于 IP 段自己猜
 //! （Tailscale / Clash TUN / Docker bridge 都会让 IP 段判断翻车，参见
-//! `uc-infra/src/network/iroh/node.rs` 已有的 `is_virtual_nic_ip` filter）。
+//! `uc-infra-p2p/src/network/iroh/addr_filter.rs` 已有的 `is_virtual_nic_ip` filter）。
 //!
 //! ## 4 态语义
 //!

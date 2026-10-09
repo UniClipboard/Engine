@@ -2,7 +2,6 @@
 
 use crate::error_codes::*;
 
-use tracing::error;
 use uc_application::facade::{
     AppFacade, ClipboardRestoreError, ClipboardRestoreMode as AppClipboardRestoreMode,
 };
@@ -11,6 +10,7 @@ use crate::{
     ClipboardRestoreMode, ClipboardRestoreOutcome, EngineError, EngineErrorCategory,
     OperationResult, RestoreClipboardInput,
 };
+use uc_observability_contract::uc_error;
 
 pub async fn execute_restore_clipboard(
     facade: &AppFacade,
@@ -53,7 +53,7 @@ fn map_restore_result(
             OperationResult::ClipboardRestored(ClipboardRestoreOutcome::NotApplicable { reason }),
         ),
         Err(ClipboardRestoreError::Internal(_)) => {
-            error!("clipboard restore failed");
+            uc_error!("clipboard restore failed");
             Err(EngineError::new(
                 RESTORE_CLIPBOARD_FAILED_CODE,
                 EngineErrorCategory::Internal,
@@ -70,9 +70,9 @@ mod tests {
     #[test]
     fn restore_failures_keep_stable_categories_without_details() {
         let not_found = map_restore_result(Err(ClipboardRestoreError::NotFound)).unwrap_err();
-        let internal = map_restore_result(Err(ClipboardRestoreError::Internal(
-            "/private/path/clipboard-cache".into(),
-        )))
+        let internal = map_restore_result(Err(ClipboardRestoreError::Internal(anyhow::anyhow!(
+            "/private/path/clipboard-cache"
+        ))))
         .unwrap_err();
 
         assert_eq!(not_found.category(), EngineErrorCategory::NotFound);

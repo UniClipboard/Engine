@@ -36,7 +36,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tracing::{debug, info, instrument};
+use tracing::instrument;
 
 use uc_core::ids::EntryId;
 use uc_core::ports::clipboard::{
@@ -45,7 +45,9 @@ use uc_core::ports::clipboard::{
 };
 use uc_core::ports::security::{TransferCipherError, TransferCipherPort};
 use uc_core::ports::SettingsPort;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_id, uc_debug, uc_info,
+};
 
 use crate::clipboard::outbound::{
     assemble_outbound_payload, OutboundBlobPublishGateway, OutboundPayload, OutboundPayloadError,
@@ -95,7 +97,7 @@ impl ActiveClipboardPullServeUseCase {
     /// the content is not held / not materializable, and
     /// [`ActiveClipboardPullServeError::NotUnlocked`] when the session is
     /// locked.
-    #[instrument(name = "active_state.serve_pull", skip_all, fields(snapshot_hash = %snapshot_hash))]
+    #[instrument(name = "active_state.serve_pull", skip_all)]
     pub(crate) async fn serve(
         &self,
         snapshot_hash: &str,
@@ -109,7 +111,7 @@ impl ActiveClipboardPullServeUseCase {
         {
             Ok(Some(id)) => id,
             Ok(None) => {
-                debug!("pull serve: content not held locally");
+                uc_debug!("pull serve: content not held locally");
                 return Err(ActiveClipboardPullServeError::NotAvailable);
             }
             Err(err) => {
@@ -151,7 +153,7 @@ impl ActiveClipboardPullServeUseCase {
         } = match payload {
             Ok(parts) => parts,
             Err(OutboundPayloadError::Unavailable) => {
-                debug!("pull serve: payload not reproducible on this holder; not available");
+                uc_debug!("pull serve: payload not reproducible on this holder; not available");
                 return Err(ActiveClipboardPullServeError::NotAvailable);
             }
             Err(OutboundPayloadError::Publish(err)) => {
@@ -195,7 +197,7 @@ impl ActiveClipboardPullServeUseCase {
         //    here as NotUnlocked — the holder cannot serve while locked.
         match self.cipher.encrypt(&plaintext).await {
             Ok(ciphertext) => {
-                info!(
+                uc_info!(
                     envelope_len = ciphertext.len(),
                     blob_ref_count = blob_refs.len(),
                     "pull serve: produced transfer envelope"
@@ -203,7 +205,7 @@ impl ActiveClipboardPullServeUseCase {
                 Ok(ciphertext)
             }
             Err(TransferCipherError::NotUnlocked) => {
-                debug!("pull serve: session locked; cannot encrypt");
+                uc_debug!("pull serve: session locked; cannot encrypt");
                 Err(ActiveClipboardPullServeError::NotUnlocked)
             }
             Err(err) => Err(ActiveClipboardPullServeError::Internal(
@@ -234,10 +236,10 @@ fn map_reconstruct_error(
             inner.context("reconstruct pull snapshot").into(),
         ),
         other => {
-            debug!(
+            uc_debug!(
                 error_kind = "content_not_materializable",
                 io_error_kind = io_error_kind(&other),
-                entry_id = %entry_id,
+                entry_id = log_id(&entry_id),
                 "pull serve: content not materializable"
             );
             ActiveClipboardPullServeError::NotAvailable

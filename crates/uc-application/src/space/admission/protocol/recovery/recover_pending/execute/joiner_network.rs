@@ -182,6 +182,7 @@ impl AdmissionRecoveryService {
         Box::pin(self.exchange_pending_request(
             joiner,
             observation_material,
+            channel,
             loaded,
             exchange,
             report,
@@ -255,6 +256,7 @@ impl AdmissionRecoveryService {
         &self,
         joiner: &JoinerAdmissionService,
         observation_material: [u8; 32],
+        channel: RecoveryChannel,
         loaded: LoadedPendingAdmission,
         exchange: Box<dyn AuthenticatedAdmissionExchangePort>,
         report: &mut AdmissionRecoveryReport,
@@ -303,6 +305,26 @@ impl AdmissionRecoveryService {
                     JoinerReplyHandlingOutcome::NoImmediateWork,
                     Some(RecoveryDecision::Rejected(Some(
                         RejectionCause::PeerUpgradeRequired,
+                    ))),
+                )
+            }
+            Err(SpaceAdmissionTransportError::AuthenticationRejected { .. })
+                if matches!(channel, RecoveryChannel::Continuation) =>
+            {
+                // 续传通道的认证被拒绝时，对端的续传凭据已经确认不可用（记录缺失或校验失败）；
+                // 本端此前已经完成过一次完整密码校验，不是密码错误，继续按续传重试只会永久卡死。
+                // 同一个 admission 不会再退回全新握手，必须暴露成可区分的终态，提示用户换新邀请码。
+                self.save_recovery_required(
+                    report,
+                    aggregate,
+                    commit_token,
+                    AdmissionRecoveryCategory::MissingKey,
+                )
+                .await;
+                (
+                    JoinerReplyHandlingOutcome::NoImmediateWork,
+                    Some(RecoveryDecision::RequiresRecovery(Some(
+                        RecoveryProblem::MissingCredential,
                     ))),
                 )
             }

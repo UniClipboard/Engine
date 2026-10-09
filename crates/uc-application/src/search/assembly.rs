@@ -31,7 +31,8 @@ impl SearchAssembly {
             Arc::clone(&deps.clipboard.clipboard_event_reader_repo),
             Arc::clone(&deps.storage.entry_file_set_repo),
         )
-        .with_rebuild_coordination(rebuild_index, mutation_gate);
+        .with_rebuild_coordination(rebuild_index, mutation_gate)
+        .with_history_tags(Arc::clone(&deps.storage.history_entry_tags));
         let runtime = SearchRuntime::start(coordinator_deps);
         Self { runtime }
     }

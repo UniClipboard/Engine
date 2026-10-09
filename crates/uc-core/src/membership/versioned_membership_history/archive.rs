@@ -75,7 +75,7 @@ impl VersionedMembershipHistory {
                 .clone()
                 .map(PersistedActivationBaselineV2::from),
         )
-        .map_err(|_| MembershipHistoryV2Error::InvalidPersistedHistory)
+        .map_err(MembershipHistoryV2Error::invalid_persisted_history_from)
     }
 
     pub fn encode_persisted_v2(&self) -> Result<Vec<u8>, MembershipHistoryV2Error> {
@@ -93,7 +93,7 @@ impl VersionedMembershipHistory {
             known_head: self.known_head,
         };
         postcard::to_stdvec(&persisted)
-            .map_err(|_| MembershipHistoryV2Error::InvalidPersistedHistory)
+            .map_err(MembershipHistoryV2Error::invalid_persisted_history_from)
     }
 
     pub fn decode_persisted_v2(
@@ -101,7 +101,7 @@ impl VersionedMembershipHistory {
         verifier: &(impl HistoricalMembershipSignatureVerifier + ?Sized),
     ) -> Result<Self, MembershipHistoryV2Error> {
         let mut persisted: PersistedMembershipHistoryV2 = postcard::from_bytes(bytes)
-            .map_err(|_| MembershipHistoryV2Error::InvalidPersistedHistory)?;
+            .map_err(MembershipHistoryV2Error::invalid_persisted_history_from)?;
         if persisted.format_version != PERSISTED_MEMBERSHIP_HISTORY_FORMAT_V2 {
             return Err(MembershipHistoryV2Error::UpgradeRequired);
         }
@@ -152,7 +152,7 @@ impl VersionedMembershipHistory {
                         .is_some_and(|baseline| baseline.head_and_depth().0 == head)
             })
         {
-            return Err(MembershipHistoryV2Error::InvalidPersistedHistory);
+            return Err(MembershipHistoryV2Error::invalid_persisted_history());
         }
         history.known_head = persisted.known_head;
         history.rebuild_snapshots()?;

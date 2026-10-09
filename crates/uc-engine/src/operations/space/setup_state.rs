@@ -2,12 +2,12 @@
 
 use crate::error_codes::*;
 
-use tracing::{error, info};
 use uc_application::facade::{AppFacade, QuerySetupStateError};
 
 use crate::{
     EngineError, EngineErrorCategory, OperationResult, SetupInvitationSummary, SetupStateSummary,
 };
+use uc_observability_contract::{uc_error, uc_info};
 
 pub async fn execute_query_setup_state(facade: &AppFacade) -> Result<OperationResult, EngineError> {
     let state = facade
@@ -19,9 +19,9 @@ pub async fn execute_query_setup_state(facade: &AppFacade) -> Result<OperationRe
                     QuerySetupStateError::StorageFailed(_) => "storage",
                     QuerySetupStateError::Internal(_) => "internal",
                 };
-                error!(
+                uc_error!(
                     operation = "query_setup_state",
-                    source,
+                    source = source,
                     error_code = QUERY_SETUP_STATE_FAILED_CODE,
                     error_category = "internal",
                     retryable = false,
@@ -48,7 +48,7 @@ pub async fn execute_query_setup_state(facade: &AppFacade) -> Result<OperationRe
         device_name: state.device_name,
         re_pairing_required: state.re_pairing_required,
     };
-    info!(
+    uc_info!(
         operation = "query_setup_state",
         has_completed = summary.has_completed,
         has_space = summary.space_id.is_some(),

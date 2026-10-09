@@ -2,9 +2,8 @@
 
 use crate::error_codes::*;
 
-use tracing::error;
 use uc_application::facade::AppFacade;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_error};
 
 use crate::{EncryptionStateSummary, EngineError, EngineErrorCategory, OperationResult};
 
@@ -12,7 +11,7 @@ pub async fn execute_query_encryption_state(
     facade: &AppFacade,
 ) -> Result<OperationResult, EngineError> {
     let state = facade.encryption_state().await.map_err(|error| {
-        error!(
+        uc_error!(
             error_kind = "query_encryption_state",
             io_error_kind = io_error_kind(&error),
             "query encryption state failed"
@@ -28,7 +27,7 @@ pub async fn execute_query_encryption_state(
 
 pub async fn execute_lock_encryption(facade: &AppFacade) -> Result<OperationResult, EngineError> {
     facade.lock_space_session().await.map_err(|error| {
-        error!(
+        uc_error!(
             error_kind = "lock_session",
             io_error_kind = io_error_kind(&error),
             "lock encryption session failed"
@@ -46,7 +45,7 @@ pub async fn execute_verify_secure_storage_access(
         .verify_secure_storage_access()
         .await
         .map_err(|error| {
-            error!(
+            uc_error!(
                 error_kind = "verify_secure_storage",
                 io_error_kind = io_error_kind(&error),
                 "verify secure storage access failed"

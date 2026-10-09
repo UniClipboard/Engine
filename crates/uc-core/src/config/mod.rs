@@ -3,7 +3,6 @@
 //! ## Responsibilities / 职责
 //!
 //! - ✅ Define configuration data structures / 定义配置数据结构
-//! - ✅ Provide TOML → DTO mapping / 提供 TOML → DTO 的映射
 //!
 //! ## Prohibited / 禁止事项
 //!
@@ -48,54 +47,6 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
-    /// Create AppConfig from TOML value
-    /// 从 TOML 值创建 AppConfig
-    ///
-    /// **Prohibited / 禁止**: This method must NOT contain any validation
-    /// or default value logic. Empty strings are valid "facts".
-    /// 此方法必须不包含任何验证或默认值逻辑。空字符串是合法的"事实"。
-    pub fn from_toml(toml_value: &toml::Value) -> anyhow::Result<Self> {
-        Ok(Self {
-            device_name: toml_value
-                .get("general")
-                .and_then(|g| g.get("device_name"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            vault_key_path: PathBuf::from(
-                toml_value
-                    .get("security")
-                    .and_then(|s| s.get("vault_key_path"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(""),
-            ),
-            vault_snapshot_path: PathBuf::from(
-                toml_value
-                    .get("security")
-                    .and_then(|s| s.get("vault_snapshot_path"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(""),
-            ),
-            webserver_port: toml_value
-                .get("network")
-                .and_then(|n| n.get("webserver_port"))
-                .and_then(|v| v.as_integer())
-                .unwrap_or(0) as u16,
-            database_path: PathBuf::from(
-                toml_value
-                    .get("storage")
-                    .and_then(|s| s.get("database_path"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(""),
-            ),
-            silent_start: toml_value
-                .get("general")
-                .and_then(|g| g.get("silent_start"))
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-        })
-    }
-
     /// Create empty AppConfig (all empty/default values)
     /// 创建空的 AppConfig（所有字段为空/默认值）
     ///

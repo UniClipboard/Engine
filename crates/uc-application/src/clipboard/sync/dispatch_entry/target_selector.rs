@@ -18,12 +18,11 @@
 
 use std::sync::Arc;
 
-use tracing::{info, warn};
 use uc_core::clipboard::ClipboardContentCategorySet;
 use uc_core::ids::DeviceId;
 use uc_core::ports::PeerAddressRepositoryPort;
 use uc_core::MemberRepositoryPort;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_info, uc_warn};
 
 use crate::deps::CurrentSpaceMemberScopePort;
 
@@ -124,14 +123,14 @@ impl TargetSelector {
         match self.member_repo.get(device_id).await {
             Ok(Some(member)) => {
                 if !member.sync_preferences.send_enabled {
-                    info!(
+                    uc_info!(
                         reason = "send_disabled_by_user",
                         "dispatch: skipping peer per per-device sync preferences"
                     );
                     return false;
                 }
                 if !categories.allowed_by(&member.sync_preferences.send_content_types) {
-                    info!(
+                    uc_info!(
                         reason = "content_type_disabled_by_user",
                         "dispatch: skipping peer per per-device content_types filter"
                     );
@@ -140,11 +139,11 @@ impl TargetSelector {
                 true
             }
             Ok(None) => {
-                warn!("dispatch: peer in addr repo but missing from member repo; failing open");
+                uc_warn!("dispatch: peer in addr repo but missing from member repo; failing open");
                 true
             }
             Err(err) => {
-                warn!(
+                uc_warn!(
                     error_kind = "member_lookup",
                     io_error_kind = io_error_kind(&err),
                     "dispatch: member repo lookup failed; failing open"

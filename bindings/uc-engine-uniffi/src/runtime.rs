@@ -1,12 +1,12 @@
 use std::collections::VecDeque;
 use std::future::{pending, Future};
+use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use tracing::warn;
 use uc_engine::observability::{
     AdoptOutcome, AnalyticsEventContext, AnalyticsIdentityError, AnalyticsIdentityPort,
     AnalyticsPort, DeviceType, Event, GroupIdentifyPayload, IdentifyPayload, Os, ReleaseOutcome,
@@ -24,15 +24,19 @@ use uc_engine::{
 use zeroize::Zeroizing;
 
 use crate::{
-    BindingAnalyticsContext, BindingAnalyticsDeviceType, BindingAnalyticsHost, BindingAnalyticsOs,
-    BindingClipboardOrigin, BindingClipboardRepresentation, BindingClipboardRestoreMode,
-    BindingClipboardRestoreOutcome, BindingClipboardSnapshot, BindingConfig, BindingEngineState,
-    BindingError, BindingErrorCategory, BindingEvent, BindingFailure, BindingFileMetadata,
-    BindingHost, BindingLifecycleAction, BindingOperationTerminal, BindingRePairingScope,
-    BindingRefreshReason, BindingTransferDirection, HostBindingError,
+    BindingAnalyticsContext, BindingAnalyticsDeviceType, BindingAnalyticsHost,
+    BindingAnalyticsHostError, BindingAnalyticsOs, BindingClipboardOrigin,
+    BindingClipboardRepresentation, BindingClipboardRestoreMode, BindingClipboardRestoreOutcome,
+    BindingClipboardSnapshot, BindingConfig, BindingEngineState, BindingError,
+    BindingErrorCategory, BindingEvent, BindingFailure, BindingFileMetadata, BindingHost,
+    BindingLifecycleAction, BindingOperationTerminal, BindingRePairingScope, BindingRefreshReason,
+    BindingTransferDirection, HostBindingError,
 };
+use uc_engine::observability::{io_error_kind, log_vocab_debug, uc_warn};
 
 const LIFECYCLE_TRANSITION_DEADLINE: Duration = Duration::from_secs(10);
+#[cfg(test)]
+mod event_recorder;
 mod lifecycle;
 mod shutdown;
 mod startup_lifecycle;
@@ -43,92 +47,131 @@ pub use startup_lifecycle::MobileStartupLifecycle;
 use worker_join::WorkerJoin;
 use worker_lifecycle::LifecycleCommand;
 
-fn log_mobile_query_failure(operation: &'static str, error: &BindingError) {
+fn log_mobile_failure(operation: &'static str, error: &BindingError) {
     match error {
         BindingError::Engine {
             code,
             category,
             retryable,
-        } => warn!(
-            operation,
+        } => uc_warn!(
+            operation = operation,
             error_kind = "engine",
             error_code = *code,
-            error_category = ?category,
+            error_category = log_vocab_debug(&category),
             retryable = *retryable,
-            "mobile query failed"
+            "mobile operation failed"
         ),
         BindingError::HostUnavailable => {
-            warn!(
-                operation,
+            uc_warn!(
+                operation = operation,
                 error_kind = "host_unavailable",
-                "mobile query failed"
+                "mobile operation failed"
             )
         }
         BindingError::HostPermissionDenied => {
-            warn!(
-                operation,
+            uc_warn!(
+                operation = operation,
                 error_kind = "host_permission_denied",
-                "mobile query failed"
+                "mobile operation failed"
             )
         }
         BindingError::HostInvalidHandle => {
-            warn!(
-                operation,
+            uc_warn!(
+                operation = operation,
                 error_kind = "host_invalid_handle",
-                "mobile query failed"
+                "mobile operation failed"
             )
         }
-        BindingError::HostIo => warn!(operation, error_kind = "host_io", "mobile query failed"),
+        BindingError::HostIo => uc_warn!(
+            operation = operation,
+            error_kind = "host_io",
+            "mobile operation failed"
+        ),
         BindingError::RuntimeUnavailable => {
-            warn!(
-                operation,
+            uc_warn!(
+                operation = operation,
                 error_kind = "runtime_unavailable",
-                "mobile query failed"
+                "mobile operation failed"
             )
         }
         BindingError::AlreadyStopped => {
-            warn!(
-                operation,
+            uc_warn!(
+                operation = operation,
                 error_kind = "already_stopped",
-                "mobile query failed"
+                "mobile operation failed"
             )
         }
         BindingError::ObservabilityConfigInvalid => {
-            warn!(
-                operation,
+            uc_warn!(
+                operation = operation,
                 error_kind = "observability_config_invalid",
-                "mobile query failed"
+                "mobile operation failed"
             )
         }
         BindingError::ObservabilityConfigConflict => {
-            warn!(
-                operation,
+            uc_warn!(
+                operation = operation,
                 error_kind = "observability_config_conflict",
-                "mobile query failed"
+                "mobile operation failed"
             )
         }
         BindingError::ObservabilityRuntimeUnavailable => {
-            warn!(
-                operation,
+            uc_warn!(
+                operation = operation,
                 error_kind = "observability_runtime_unavailable",
-                "mobile query failed"
+                "mobile operation failed"
             )
         }
         BindingError::ObservabilityNotInstalled => {
-            warn!(
-                operation,
+            uc_warn!(
+                operation = operation,
                 error_kind = "observability_not_installed",
-                "mobile query failed"
+                "mobile operation failed"
             )
         }
         BindingError::UnexpectedResult => {
-            warn!(
-                operation,
+            uc_warn!(
+                operation = operation,
                 error_kind = "unexpected_result",
-                "mobile query failed"
+                "mobile operation failed"
             )
         }
     }
+}
+
+/// 引擎 worker 线程无法创建；宿主只收到稳定错误码，失败分类在此记录。
+fn thread_spawn_failed(error: io::Error) -> BindingError {
+    uc_warn!(
+        operation = "thread_spawn",
+        error_kind = "runtime_unavailable",
+        io_error_kind = io_error_kind(&error),
+        "mobile operation failed"
+    );
+    BindingError::RuntimeUnavailable
+}
+
+/// 宿主目录无法创建；宿主只收到稳定错误码，路径不进入记录。
+fn host_directory_create_failed(error: io::Error) -> BindingError {
+    uc_warn!(
+        operation = "host_directory_create",
+        error_kind = "host_io",
+        io_error_kind = io_error_kind(&error),
+        "mobile operation failed"
+    );
+    BindingError::HostIo
+}
+
+/// 结果摘要序列化为 JSON 的失败点；只记录固定分类，调用方收到稳定错误码。
+fn summary_json(serialized: serde_json::Result<String>) -> Result<String, BindingError> {
+    // discarded-source[business-outcome]: the failure becomes a business outcome and is recorded once here with a fixed classification
+    serialized.map_err(|_| {
+        uc_warn!(
+            operation = "summary_serialize",
+            error_kind = "unexpected_result",
+            "mobile operation failed"
+        );
+        BindingError::UnexpectedResult
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -221,11 +264,13 @@ pub enum JoinSpaceTerminationReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum JoinSpaceAttentionReason {
     OutcomeCannotBeProven,
+    ContinuationUnavailable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum JoinSpaceAttentionRecovery {
     PreserveDataAndContactSupport,
+    RestartWithNewInvitation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
@@ -424,6 +469,60 @@ impl std::fmt::Debug for CustomRelay {
     }
 }
 
+/// Relay 路由方式。优先级：`Disabled`（仅局域网）> `Custom`（替换内置列表）> `BuiltIn`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum RelayRoutingMode {
+    BuiltIn,
+    Custom,
+    Disabled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum RelayEntrySource {
+    BuiltIn,
+    Custom,
+}
+
+/// `in_effect` 表示运行中的节点按此地址配置，不代表已经连通。
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
+pub struct RelayOverviewEntry {
+    pub source: RelayEntrySource,
+    pub region_id: Option<String>,
+    pub url: String,
+    pub credential_configured: bool,
+    pub in_effect: bool,
+}
+
+impl std::fmt::Debug for RelayOverviewEntry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RelayOverviewEntry")
+            .field("source", &self.source)
+            .field("in_effect", &self.in_effect)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
+pub struct RelayOverview {
+    pub saved_mode: RelayRoutingMode,
+    pub applied_mode: Option<RelayRoutingMode>,
+    pub change_pending: bool,
+    pub entries: Vec<RelayOverviewEntry>,
+}
+
+impl std::fmt::Debug for RelayOverview {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RelayOverview")
+            .field("saved_mode", &self.saved_mode)
+            .field("applied_mode", &self.applied_mode)
+            .field("change_pending", &self.change_pending)
+            .field("entry_count", &self.entries.len())
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum CustomRelayMutationRejection {
     InvalidUrl,
@@ -487,6 +586,9 @@ enum WorkerCommand {
     },
     QueryCustomRelays {
         response: mpsc::Sender<Result<Vec<CustomRelay>, BindingError>>,
+    },
+    QueryRelayOverview {
+        response: mpsc::Sender<Result<RelayOverview, BindingError>>,
     },
     MutateCustomRelay {
         mutation: CustomRelayMutation,
@@ -638,11 +740,11 @@ impl BindingAnalyticsAdapter {
         change: crate::BindingAnalyticsIdentityChange,
         expected_new_id: uuid::Uuid,
     ) -> Result<AdoptOutcome, AnalyticsIdentityError> {
-        // 宿主输入校验：无法解析的输入按固定错误码拒绝，拒绝原因已完整表达。
+        // discarded-source[input-validation]: `uuid::Error`: the rejection reason is fully expressed by the target classification
         let previous_distinct_id = change.previous_distinct_id.parse().map_err(|_| {
             Self::map_identity_error(crate::BindingAnalyticsHostError::InvalidIdentity)
         })?;
-        // 宿主输入校验：无法解析的输入按固定错误码拒绝，拒绝原因已完整表达。
+        // discarded-source[input-validation]: `uuid::Error`: the rejection reason is fully expressed by the target classification
         let new_distinct_id = change.new_distinct_id.parse().map_err(|_| {
             Self::map_identity_error(crate::BindingAnalyticsHostError::InvalidIdentity)
         })?;
@@ -660,11 +762,11 @@ impl BindingAnalyticsAdapter {
     fn parse_release_outcome(
         change: crate::BindingAnalyticsIdentityChange,
     ) -> Result<ReleaseOutcome, AnalyticsIdentityError> {
-        // 宿主输入校验：无法解析的输入按固定错误码拒绝，拒绝原因已完整表达。
+        // discarded-source[input-validation]: `uuid::Error`: the rejection reason is fully expressed by the target classification
         let previous_distinct_id = change.previous_distinct_id.parse().map_err(|_| {
             Self::map_identity_error(crate::BindingAnalyticsHostError::InvalidIdentity)
         })?;
-        // 宿主输入校验：无法解析的输入按固定错误码拒绝，拒绝原因已完整表达。
+        // discarded-source[input-validation]: `uuid::Error`: the rejection reason is fully expressed by the target classification
         let new_distinct_id = change.new_distinct_id.parse().map_err(|_| {
             Self::map_identity_error(crate::BindingAnalyticsHostError::InvalidIdentity)
         })?;
@@ -674,9 +776,19 @@ impl BindingAnalyticsAdapter {
         })
     }
 
-    fn warn_callback(scope: &'static str, error: &crate::BindingAnalyticsHostError) {
+    fn warn_callback(scope: &'static str, error: &BindingAnalyticsHostError) {
         // 宿主回调错误是无字段的固定枚举，变体名即完整分类。
-        tracing::warn!(scope, error_kind = ?error, "mobile analytics callback failed");
+        let error_kind = match error {
+            BindingAnalyticsHostError::ContextUnavailable => "ContextUnavailable",
+            BindingAnalyticsHostError::DeliveryFailed => "DeliveryFailed",
+            BindingAnalyticsHostError::PersistenceFailed => "PersistenceFailed",
+            BindingAnalyticsHostError::InvalidIdentity => "InvalidIdentity",
+        };
+        uc_warn!(
+            scope = scope,
+            error_kind = error_kind,
+            "mobile analytics callback failed"
+        );
     }
 }
 
@@ -857,8 +969,7 @@ impl MobileEngine {
                     startup_lifecycle,
                 )
             })
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
-            .map_err(|_| BindingError::RuntimeUnavailable)?;
+            .map_err(thread_spawn_failed)?;
 
         match start_result.recv() {
             Ok(Ok(())) => Ok(Arc::new(Self {
@@ -931,11 +1042,11 @@ impl MobileEngine {
                 allow_secure_storage_unlock,
                 response,
             })
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: `std::sync::mpsc::RecvError`: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
@@ -944,11 +1055,11 @@ impl MobileEngine {
         let (response, result) = mpsc::channel();
         commands
             .send(WorkerCommand::QueryLocalDevice { response })
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: `std::sync::mpsc::RecvError`: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
@@ -964,11 +1075,11 @@ impl MobileEngine {
         let (response, result) = mpsc::channel();
         commands
             .send(WorkerCommand::RefreshPeerConnections { response })
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: `std::sync::mpsc::RecvError`: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
@@ -988,6 +1099,10 @@ impl MobileEngine {
 
     pub fn query_custom_relays(&self) -> Result<Vec<CustomRelay>, BindingError> {
         self.request(|response| WorkerCommand::QueryCustomRelays { response })
+    }
+
+    pub fn query_relay_overview(&self) -> Result<RelayOverview, BindingError> {
+        self.request(|response| WorkerCommand::QueryRelayOverview { response })
     }
 
     pub fn add_custom_relay(
@@ -1088,7 +1203,7 @@ impl MobileEngine {
         let (response, result) = mpsc::channel();
         commands
             .send(LifecycleCommand::LifecycleState { response })
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         receive_lifecycle_result(result, LIFECYCLE_TRANSITION_DEADLINE)
     }
@@ -1107,11 +1222,11 @@ impl MobileEngine {
                 passphrase,
                 response,
             })
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: `std::sync::mpsc::RecvError`: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
@@ -1120,11 +1235,11 @@ impl MobileEngine {
         let (response, result) = mpsc::channel();
         commands
             .send(WorkerCommand::IssueInvitation { response })
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: `std::sync::mpsc::RecvError`: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
@@ -1143,11 +1258,11 @@ impl MobileEngine {
                 passphrase_confirmation,
                 response,
             })
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: `std::sync::mpsc::RecvError`: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
@@ -1168,11 +1283,11 @@ impl MobileEngine {
                 preserve_unreadable_history,
                 response,
             })
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: `std::sync::mpsc::RecvError`: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
@@ -1181,11 +1296,11 @@ impl MobileEngine {
         let (response, result) = mpsc::channel();
         commands
             .send(WorkerCommand::CancelJoinSpace { join_id, response })
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: `std::sync::mpsc::RecvError`: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
@@ -1202,11 +1317,11 @@ impl MobileEngine {
                 target_devices,
                 response,
             })
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: `std::sync::mpsc::RecvError`: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
@@ -1225,11 +1340,11 @@ impl MobileEngine {
                 target_devices,
                 response,
             })
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: `std::sync::mpsc::RecvError`: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
@@ -1246,11 +1361,11 @@ impl MobileEngine {
                 target_devices,
                 response,
             })
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: `std::sync::mpsc::RecvError`: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
@@ -1259,11 +1374,11 @@ impl MobileEngine {
         let (response, result) = mpsc::channel();
         commands
             .send(WorkerCommand::CaptureCurrentClipboard { response })
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: `std::sync::mpsc::RecvError`: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
@@ -1275,11 +1390,11 @@ impl MobileEngine {
         let (response, result) = mpsc::channel();
         commands
             .send(WorkerCommand::ObserveClipboardChange { dispatch, response })
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: `std::sync::mpsc::RecvError`: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
@@ -1296,11 +1411,11 @@ impl MobileEngine {
                 mode,
                 response,
             })
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: `std::sync::mpsc::RecvError`: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
@@ -1321,11 +1436,11 @@ impl MobileEngine {
                 destination_handle: Zeroizing::new(destination_handle),
                 response,
             })
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: `std::sync::mpsc::RecvError`: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
@@ -1346,7 +1461,7 @@ impl MobileEngine {
         let (response, result) = mpsc::channel();
         commands
             .send(LifecycleCommand::Resume { response })
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         receive_lifecycle_result(result, LIFECYCLE_TRANSITION_DEADLINE)?
     }
@@ -1365,11 +1480,11 @@ impl MobileEngine {
         let (response, result) = mpsc::channel();
         commands
             .send(command(response))
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         result
             .recv()
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: `std::sync::mpsc::RecvError`: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
@@ -1394,8 +1509,12 @@ impl MobileEngine {
 
 impl Drop for MobileEngine {
     fn drop(&mut self) {
-        if self.shutdown_inner(Duration::from_secs(5), true).is_err() {
-            let _ = self.join_worker(Duration::ZERO);
+        if let Err(error) = self.shutdown_inner(Duration::from_secs(5), true) {
+            log_mobile_failure("drop_shutdown_failed", &error);
+            // 已无调用方可重试：worker 线程若仍在运行即被泄漏，这是唯一留痕的机会。
+            if let Err(error) = self.join_worker(Duration::ZERO) {
+                log_mobile_failure("drop_worker_leaked", &error);
+            }
         }
     }
 }
@@ -1415,6 +1534,7 @@ fn run_worker(
     {
         Ok(runtime) => runtime,
         Err(_) => {
+            log_mobile_failure("runtime_build", &BindingError::RuntimeUnavailable);
             let _ = started.send(Err(BindingError::RuntimeUnavailable));
             return Err(BindingError::RuntimeUnavailable);
         }
@@ -1450,6 +1570,7 @@ async fn run_worker_loop(
         Ok(started_engine) => started_engine,
         Err(error) => {
             let error = BindingError::from(error);
+            log_mobile_failure("engine_start", &error);
             let _ = started.send(Err(error.clone()));
             return Err(error);
         }
@@ -1601,6 +1722,14 @@ async fn run_operations(
                     .and_then(map_custom_relays);
                 let _ = response.send(result);
             }
+            WorkerCommand::QueryRelayOverview { response } => {
+                let result = engine
+                    .execute(Operation::QueryRelayOverview)
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(map_relay_overview);
+                let _ = response.send(result);
+            }
             WorkerCommand::MutateCustomRelay { mutation, response } => {
                 let result = engine
                     .execute(Operation::MutateCustomRelay(mutation))
@@ -1632,7 +1761,7 @@ async fn run_operations(
                     .map_err(BindingError::from)
                     .and_then(map_space_state);
                 if let Err(error) = &result {
-                    log_mobile_query_failure("query_space_state", error);
+                    log_mobile_failure("query_space_state", error);
                 }
                 let _ = response.send(result);
             }
@@ -1643,7 +1772,7 @@ async fn run_operations(
                     .map_err(BindingError::from)
                     .and_then(map_devices);
                 if let Err(error) = &result {
-                    log_mobile_query_failure("list_devices", error);
+                    log_mobile_failure("list_devices", error);
                 }
                 let _ = response.send(result);
             }
@@ -1900,7 +2029,7 @@ fn receive_lifecycle_result<T>(
 ) -> Result<T, BindingError> {
     result
         .recv_timeout(deadline)
-        // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+        // discarded-source[channel]: the error only means the peer is gone or carries the unsent payload, which must not outlive it
         .map_err(|_| BindingError::RuntimeUnavailable)
 }
 
@@ -2152,8 +2281,7 @@ fn map_workspace_convergence_summary(
 fn map_device_group_choices(result: OperationResult) -> Result<String, BindingError> {
     match result {
         OperationResult::DeviceGroupChoices(summary) => {
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
-            serde_json::to_string(&summary).map_err(|_| BindingError::UnexpectedResult)
+            summary_json(serde_json::to_string(&summary))
         }
         _ => Err(BindingError::UnexpectedResult),
     }
@@ -2162,8 +2290,7 @@ fn map_device_group_choices(result: OperationResult) -> Result<String, BindingEr
 fn map_device_group_choice_result(result: OperationResult) -> Result<String, BindingError> {
     match result {
         OperationResult::DeviceGroupChosen(summary) => {
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
-            serde_json::to_string(&summary).map_err(|_| BindingError::UnexpectedResult)
+            summary_json(serde_json::to_string(&summary))
         }
         _ => Err(BindingError::UnexpectedResult),
     }
@@ -2302,10 +2429,16 @@ fn map_join_space_status(result: OperationResult) -> Result<JoinSpaceStatus, Bin
                 uc_engine::JoinSpaceAttentionReasonSummary::OutcomeCannotBeProven => {
                     JoinSpaceAttentionReason::OutcomeCannotBeProven
                 }
+                uc_engine::JoinSpaceAttentionReasonSummary::ContinuationUnavailable => {
+                    JoinSpaceAttentionReason::ContinuationUnavailable
+                }
             },
             recovery: match recovery {
                 uc_engine::JoinSpaceAttentionRecoverySummary::PreserveDataAndContactSupport => {
                     JoinSpaceAttentionRecovery::PreserveDataAndContactSupport
+                }
+                uc_engine::JoinSpaceAttentionRecoverySummary::RestartWithNewInvitation => {
+                    JoinSpaceAttentionRecovery::RestartWithNewInvitation
                 }
             },
             next_retry_at_ms,
@@ -2414,6 +2547,39 @@ fn map_custom_relays(result: OperationResult) -> Result<Vec<CustomRelay>, Bindin
                 credential_configured: relay.credential_configured,
             })
             .collect()),
+        _ => Err(BindingError::UnexpectedResult),
+    }
+}
+
+fn map_relay_routing_mode(mode: uc_engine::RelayRoutingMode) -> RelayRoutingMode {
+    match mode {
+        uc_engine::RelayRoutingMode::BuiltIn => RelayRoutingMode::BuiltIn,
+        uc_engine::RelayRoutingMode::Custom => RelayRoutingMode::Custom,
+        uc_engine::RelayRoutingMode::Disabled => RelayRoutingMode::Disabled,
+    }
+}
+
+fn map_relay_overview(result: OperationResult) -> Result<RelayOverview, BindingError> {
+    match result {
+        OperationResult::RelayOverview(overview) => Ok(RelayOverview {
+            saved_mode: map_relay_routing_mode(overview.saved_mode),
+            applied_mode: overview.applied_mode.map(map_relay_routing_mode),
+            change_pending: overview.change_pending,
+            entries: overview
+                .entries
+                .into_iter()
+                .map(|entry| RelayOverviewEntry {
+                    source: match entry.source {
+                        uc_engine::RelayEntrySource::BuiltIn => RelayEntrySource::BuiltIn,
+                        uc_engine::RelayEntrySource::Custom => RelayEntrySource::Custom,
+                    },
+                    region_id: entry.region_id,
+                    url: entry.url,
+                    credential_configured: entry.credential_configured,
+                    in_effect: entry.in_effect,
+                })
+                .collect(),
+        }),
         _ => Err(BindingError::UnexpectedResult),
     }
 }
@@ -2559,7 +2725,7 @@ fn map_entry_exported(result: OperationResult) -> Result<(), BindingError> {
 }
 
 fn count_to_u64(value: usize) -> Result<u64, BindingError> {
-    // TryFromIntError：目标分类完整表达数值范围不符。
+    // discarded-source[int-conversion]: `core::num::TryFromIntError`: the target classification already expresses the range or length mismatch
     u64::try_from(value).map_err(|_| BindingError::UnexpectedResult)
 }
 
@@ -2585,8 +2751,7 @@ fn host_capabilities(
         directories.cache(),
         directories.temporary(),
     ] {
-        // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
-        std::fs::create_dir_all(directory).map_err(|_| BindingError::HostIo)?;
+        std::fs::create_dir_all(directory).map_err(host_directory_create_failed)?;
     }
     let capabilities = HostCapabilities::new(
         directories,
@@ -2822,6 +2987,69 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn host_io_and_serialization_failures_are_recorded_without_paths_or_values() {
+        let recorder = event_recorder::EventRecorder::default();
+        let dispatch = tracing::Dispatch::new(recorder.clone());
+        let (spawn, directory, summary) = tracing::dispatcher::with_default(&dispatch, || {
+            (
+                thread_spawn_failed(io::Error::new(io::ErrorKind::WouldBlock, "/secret/thread")),
+                host_directory_create_failed(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "/secret/dir",
+                )),
+                summary_json(Err(serde_json::from_str::<u8>("secret value").unwrap_err())),
+            )
+        });
+
+        assert_eq!(spawn, BindingError::RuntimeUnavailable);
+        assert_eq!(directory, BindingError::HostIo);
+        assert_eq!(summary, Err(BindingError::UnexpectedResult));
+        let lines = recorder.lines();
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(lines[0].contains("operation=thread_spawn"), "{lines:?}");
+        assert!(lines[0].contains("io_error_kind=WouldBlock"), "{lines:?}");
+        assert!(
+            lines[1].contains("operation=host_directory_create"),
+            "{lines:?}"
+        );
+        assert!(lines[1].contains("error_kind=host_io"), "{lines:?}");
+        assert!(
+            lines[1].contains("io_error_kind=PermissionDenied"),
+            "{lines:?}"
+        );
+        assert!(
+            lines[2].contains("error_kind=unexpected_result"),
+            "{lines:?}"
+        );
+        assert!(!lines.join("\n").contains("secret"), "{lines:?}");
+    }
+
+    #[test]
+    fn worker_start_failures_are_recorded_with_phase_and_stable_codes_only() {
+        let recorder = event_recorder::EventRecorder::default();
+        let dispatch = tracing::Dispatch::new(recorder.clone());
+        tracing::dispatcher::with_default(&dispatch, || {
+            log_mobile_failure("runtime_build", &BindingError::RuntimeUnavailable);
+            log_mobile_failure(
+                "engine_start",
+                &BindingError::Engine {
+                    code: 1108,
+                    category: crate::BindingErrorCategory::Internal,
+                    retryable: true,
+                },
+            );
+        });
+
+        let lines = recorder.lines();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("operation=runtime_build"));
+        assert!(lines[0].contains("error_kind=runtime_unavailable"));
+        assert!(lines[1].contains("operation=engine_start"));
+        assert!(lines[1].contains("error_code=1108"));
+        assert!(lines[1].contains("retryable=true"));
+    }
+
     use super::*;
 
     #[tokio::test]

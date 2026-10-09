@@ -1,3 +1,7 @@
+// 本文件故意直接使用 tracing 日志宏：它验证运行期对未登记字段、内插消息和非 `uc_*` target 的处理，
+// `uc_*!` 宏在编译期就拒绝这些写法，无法构造这些输入。clippy 只认 crate 级 allow（ADR-030）。
+#![allow(clippy::disallowed_macros)]
+
 use std::time::Duration;
 
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
@@ -360,7 +364,9 @@ async fn real_otlp_http_carries_correlated_trace_and_log_with_one_resource() {
     let jsonl = std::fs::read_to_string(&files[0]).expect("JSONL output");
     assert!(jsonl.contains("uc.operation.completed"));
     assert!(jsonl.contains("uc.task.join_failed"));
+    // Engine 自有目标的普通事件只以模块日志形式留在本地文件，自由文本字段必须被占位替代。
     assert!(!jsonl.contains("/private/sensitive-path"));
+    assert!(jsonl.contains("unapproved event"));
     assert!(!jsonl.contains("PRIVATE_APPROVED_TARGET_BODY"));
     assert!(!jsonl.contains("phc_private-span"));
     assert!(!jsonl.contains("MyPhone123"));

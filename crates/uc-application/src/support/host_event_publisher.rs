@@ -3,7 +3,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use tracing::{debug, warn};
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_id, uc_debug, uc_warn,
+};
 
 /// 显式恢复 poisoned mutex 守卫,并 log 警告。
 ///
@@ -13,8 +15,8 @@ use tracing::{debug, warn};
 /// grep。
 #[inline]
 fn recover_poisoned<T>(poisoned: PoisonError<T>, context: &'static str) -> T {
-    warn!(
-        context,
+    uc_warn!(
+        context = context,
         "host event publisher: lock poisoned, recovering inner state (a prior panic likely left invariants broken)"
     );
     poisoned.into_inner()
@@ -23,7 +25,6 @@ use uc_core::file_transfer::{
     FileTransferEvent, FileTransferEventPublisherPort, FileTransferFailureReason,
 };
 use uc_core::ports::{FindAttemptIdForTransferPort, FindEntryIdForTransferPort};
-use uc_observability_contract::error_source::io_error_kind;
 
 use crate::facade::host_event::HostEventBus;
 use crate::support::outbound_entry_cache::OutboundEntryIdCache;
@@ -66,10 +67,10 @@ impl FileTransferHostEventPublisher {
             Ok(Some(entry_id)) => Some(entry_id),
             Ok(None) => None,
             Err(err) => {
-                warn!(
+                uc_warn!(
                     error_kind = "entry_id_resolve",
                     io_error_kind = io_error_kind(&err),
-                    transfer_id,
+                    transfer_id = log_id(&transfer_id),
                     "failed to resolve entry_id from projection"
                 );
                 None
@@ -87,10 +88,10 @@ impl FileTransferHostEventPublisher {
         {
             Ok(attempt_id) => attempt_id,
             Err(error) => {
-                warn!(
+                uc_warn!(
                     error_kind = "attempt_id_resolve",
                     io_error_kind = io_error_kind(&error),
-                    transfer_id,
+                    transfer_id = log_id(&transfer_id),
                     "failed to resolve attempt_id from projection"
                 );
                 None
@@ -123,8 +124,8 @@ impl FileTransferEventPublisherPort for FileTransferHostEventPublisher {
                         .lock()
                         .unwrap_or_else(|p| recover_poisoned(p, "progress_no_entry_warned"));
                     if warned.insert(transfer_id.clone()) {
-                        debug!(
-                            transfer_id = %transfer_id,
+                        uc_debug!(
+                            transfer_id = log_id(&transfer_id),
                             "buffered-phase progress: no real entry_id; front-end indexes via transferId only"
                         );
                     }
@@ -177,8 +178,8 @@ impl FileTransferHostEventPublisher {
     ) {
         let entry_id = self.resolve_entry_id(transfer_id).await;
         if entry_id.is_none() {
-            debug!(
-                event_kind,
+            uc_debug!(
+                event_kind = event_kind,
                 "publishing provisional transfer status without entry ownership"
             );
         }

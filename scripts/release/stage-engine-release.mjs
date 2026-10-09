@@ -106,7 +106,8 @@ execFileSync(
 )
 
 const metadata = parseJson(
-  execFileSync('cargo', ['metadata', '--locked', '--format-version', '1'], {
+  execFileSync(
+    resolve(import.meta.dirname, '../build-cache/bin/cargo'), ['metadata', '--locked', '--format-version', '1'], {
     cwd: repositoryRoot,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,

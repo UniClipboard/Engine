@@ -36,7 +36,7 @@
 # 3. Non-Goals
 
 - 不修改配对协议、重试次数、连接超时、P2P/LAN 选择或成员更新回执。
-- 不全量放开 `iroh`、`uc_infra` 等普通 target，不从原始错误字符串猜阶段。
+- 不全量放开 `iroh`、`uc_infra_*` 等普通 target，不从原始错误字符串猜阶段。
 - 不新增可让 Engine 编排 Application 内部步骤的 facade、port 或业务结果字段。
 - 不将每个网络尝试提升为独立业务 trace；跨层整体耗时与结果只由既有 Engine port decorator 记录。
 - 不在首版提供跨重启或跨设备通用身份匹配，不新增可回查设备的持久匿名映射。
@@ -57,14 +57,14 @@ Responsibility: 进程安装、分层过滤、本地队列、关联编码、远�
 Relationship: uc.connectivity 已独立进入本地文件；普通 target 仍拒绝。健康 fmt 层无 span 列表，不表示 SDK 完成日志没有关联。
 
 Component: 连接、地址与恢复
-Path: crates/uc-infra/src/network/iroh/{connect,peer_address_resolver,node,addr_filter,conn_path,net_recovery,peer_reachability_adapter}.rs
+Path: crates/uc-infra-p2p/src/network/iroh/{connect,peer_address_resolver,node,addr_filter,conn_path,net_recovery,peer_reachability_adapter}.rs
 Responsibility: 真实地址选择、连接尝试、路径查询和运行恢复。
 Relationship: connect 仍有字符串化错误和含原始地址的历史日志；resolver 只读存储，不能代表所有发现来源。
 
 Component: 成员更新及安全存储
-Path: crates/uc-infra/src/network/iroh/group_update_adapter.rs
-Path: crates/uc-infra/src/space/security/access.rs
-Path: crates/uc-infra/src/db/repositories/space_security_store/
+Path: crates/uc-infra-p2p/src/network/iroh/group_update_adapter.rs
+Path: crates/uc-infra-security/src/access.rs
+Path: crates/uc-infra-storage/src/db/repositories/space_security_store/
 Path: crates/uc-core/src/membership/revocation.rs
 Responsibility: 接收更新、执行安全状态变更及持久化。
 Relationship: KeyEpochError::Repository(String) 已在上游丢失错误类型；接收端最后只编码 storage，不能靠末端加日志还原。

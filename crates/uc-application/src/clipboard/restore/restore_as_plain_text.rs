@@ -25,7 +25,6 @@
 
 use anyhow::Result;
 use std::sync::Arc;
-use tracing::{debug, info, warn};
 
 use uc_core::{
     blob::ports::BlobReaderPort,
@@ -43,7 +42,9 @@ use uc_core::{
         ClipboardSelectionRepositoryPort,
     },
 };
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_id, uc_debug, uc_info, uc_warn,
+};
 
 use crate::clipboard::write::{
     ClipboardWriteCoordinator, ClipboardWriteIntent, LocalActiveRegisterAdvancer,
@@ -134,8 +135,12 @@ impl RestoreClipboardEntryAsPlainTextUseCase {
         self
     }
 
+    #[tracing::instrument(name = "usecase.restore_as_plain_text.execute", skip_all)]
     pub(crate) async fn execute(&self, entry_id: &EntryId) -> Result<PlainRestoreOutcome> {
-        info!(entry_id = %entry_id, "restore_plain.execute requested");
+        uc_info!(
+            entry_id = log_id(&entry_id),
+            "restore_plain.execute requested"
+        );
 
         if !self.mode.allow_os_write() {
             return Err(anyhow::anyhow!(
@@ -146,8 +151,8 @@ impl RestoreClipboardEntryAsPlainTextUseCase {
         let snapshot = match self.build_plain_snapshot(entry_id).await? {
             Some(snapshot) => snapshot,
             None => {
-                info!(
-                    entry_id = %entry_id,
+                uc_info!(
+                    entry_id = log_id(&entry_id),
                     "restore_plain.execute: no text/plain representation available — caller should fall back"
                 );
                 return Ok(PlainRestoreOutcome::NoPlainTextAvailable);
@@ -160,6 +165,7 @@ impl RestoreClipboardEntryAsPlainTextUseCase {
         Ok(PlainRestoreOutcome::Done)
     }
 
+    #[tracing::instrument(name = "usecase.restore_as_plain_text.execute_file_paths", skip_all)]
     pub(crate) async fn execute_file_paths(&self, entry_id: &EntryId) -> Result<()> {
         if !self.mode.allow_os_write() {
             return Err(anyhow::anyhow!(
@@ -229,9 +235,9 @@ impl RestoreClipboardEntryAsPlainTextUseCase {
             let bytes = match self.resolve_bytes(&rep).await {
                 Ok(bytes) => bytes,
                 Err(err) => {
-                    warn!(
-                        entry_id = %entry_id,
-                        rep_id = %rep.id,
+                    uc_warn!(
+                        entry_id = log_id(&entry_id),
+                        rep_id = log_id(&rep.id),
                         error_kind = "representation_resolve",
                         io_error_kind = io_error_kind(err.as_ref()),
                         "restore_file_paths: skipping uri-list rep due to resolve failure"
@@ -323,14 +329,14 @@ impl RestoreClipboardEntryAsPlainTextUseCase {
                     trigger.offer(state, categories);
                 }
             }
-            Ok(None) => info!(
-                entry_id = %entry_id,
-                op,
+            Ok(None) => uc_info!(
+                entry_id = log_id(&entry_id),
+                op = op,
                 "restore: no persisted snapshot_hash for entry; skipping active-register advance"
             ),
-            Err(err) => warn!(
-                entry_id = %entry_id,
-                op,
+            Err(err) => uc_warn!(
+                entry_id = log_id(&entry_id),
+                op = op,
                 error_kind = "snapshot_hash_lookup",
                 io_error_kind = io_error_kind(&err),
                 "restore: snapshot_hash lookup failed; skipping active-register advance"
@@ -350,7 +356,10 @@ impl RestoreClipboardEntryAsPlainTextUseCase {
         &self,
         entry_id: &EntryId,
     ) -> Result<Option<SystemClipboardSnapshot>> {
-        debug!(entry_id = %entry_id, "restore_plain.build_snapshot start");
+        uc_debug!(
+            entry_id = log_id(&entry_id),
+            "restore_plain.build_snapshot start"
+        );
 
         let entry = self
             .clipboard_repo
@@ -389,10 +398,10 @@ impl RestoreClipboardEntryAsPlainTextUseCase {
                         bytes,
                     );
 
-                    debug!(
-                        entry_id = %entry_id,
-                        event_id = %entry.event_id,
-                        plain_rep_id = %rep.id,
+                    uc_debug!(
+                        entry_id = log_id(&entry_id),
+                        event_id = log_id(&entry.event_id),
+                        plain_rep_id = log_id(&rep.id),
                         size_bytes = observed.size_bytes(),
                         "restore_plain.build_snapshot packed plain representation"
                     );
@@ -408,9 +417,9 @@ impl RestoreClipboardEntryAsPlainTextUseCase {
                     // 候选 plain rep 解析失败，继续尝试下一个候选。常见原因：
                     // Staged 状态下 cache+spool 都拿不到字节（与多格式恢复对
                     // secondary rep 的处理对称——跳过 + warn，不打断流程）。
-                    warn!(
-                        entry_id = %entry_id,
-                        rep_id = %rep.id,
+                    uc_warn!(
+                        entry_id = log_id(&entry_id),
+                        rep_id = log_id(&rep.id),
                         error_kind = "representation_resolve",
                         io_error_kind = io_error_kind(err.as_ref()),
                         "restore_plain.build_snapshot: skipping plain rep due to resolve failure"

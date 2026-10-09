@@ -1,7 +1,14 @@
 use std::{fmt, sync::Arc};
 
 use tokio::sync::Mutex;
-use uc_core::{ports::SettingsPort, settings::model::Settings};
+use uc_core::{
+    ports::SettingsPort,
+    settings::{
+        model::Settings,
+        relay_routing::{RelayRouting, BUILTIN_RELAYS},
+    },
+};
+use uc_observability_contract::{error_source::io_error_kind, uc_info, uc_warn};
 
 use super::{
     models::{apply_settings_patch, validate_settings, NetworkSettingsPatch, SettingsPatch},
@@ -61,12 +68,71 @@ pub enum RelayConfigurationError {
     Load(#[source] anyhow::Error),
     #[error("failed to save settings")]
     Save(#[source] anyhow::Error),
-    #[error("invalid settings: {0}")]
+    #[error("invalid settings")]
     Invalid(String),
     #[error("relay credentials are unavailable")]
     CredentialsUnavailable,
     #[error(transparent)]
     Credentials(#[from] RelayCredentialsError),
+}
+
+impl RelayConfigurationError {
+    /// 日志用的固定分类，只反映变体，不含设置值或下层错误正文。
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Load(_) => "load",
+            Self::Save(_) => "save",
+            Self::Invalid(_) => "invalid",
+            Self::CredentialsUnavailable => "credentials_unavailable",
+            Self::Credentials(_) => "credentials",
+        }
+    }
+}
+
+/// 运行中网络节点绑定时采用的 relay 路由。由网络装配在每次构建节点时记录，
+/// 用来区分“已保存的配置”和“实际生效的配置”。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppliedRelayRouting {
+    pub routing: RelayRouting,
+    pub urls: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayEntrySource {
+    BuiltIn,
+    Custom,
+}
+
+/// Relay 概览中的一条记录。`in_effect` 只说明运行中的节点是否使用该地址配置，
+/// 不代表已经连通。
+#[derive(Clone, PartialEq, Eq)]
+pub struct RelayOverviewEntry {
+    pub source: RelayEntrySource,
+    /// 内置 relay 的稳定区域标识；自定义条目为空。
+    pub region: Option<&'static str>,
+    pub url: String,
+    pub credential_configured: bool,
+    pub in_effect: bool,
+}
+
+impl fmt::Debug for RelayOverviewEntry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RelayOverviewEntry")
+            .field("source", &self.source)
+            .field("in_effect", &self.in_effect)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayOverview {
+    pub saved_routing: RelayRouting,
+    /// 节点尚未构建时为空。
+    pub applied_routing: Option<RelayRouting>,
+    /// 已保存配置与运行中节点的 relay 列表不一致，需要重新构建节点后才生效。
+    pub change_pending: bool,
+    pub entries: Vec<RelayOverviewEntry>,
 }
 
 pub(crate) struct RelayConfigurationUpdate {
@@ -158,7 +224,7 @@ impl RelayConfiguration {
 
         if let Err(error) = self.settings.save(&merged).await {
             if transaction_started {
-                self.recover_locked().await?;
+                self.recover_after_failed_write("save_settings").await?;
             }
             return Err(RelayConfigurationError::Save(anyhow::Error::from(error)));
         }
@@ -168,7 +234,8 @@ impl RelayConfiguration {
                 return Err(RelayConfigurationError::CredentialsUnavailable);
             };
             if let Err(error) = credentials.complete_settings_transaction() {
-                self.recover_locked().await?;
+                self.recover_after_failed_write("complete_transaction")
+                    .await?;
                 return Err(error.into());
             }
         }
@@ -192,6 +259,62 @@ impl RelayConfiguration {
             .as_ref()
             .ok_or(RelayConfigurationError::CredentialsUnavailable)?;
         canonical_entries(&settings.network.custom_relay_urls, credentials)
+    }
+
+    pub async fn overview(
+        &self,
+        applied: Option<&AppliedRelayRouting>,
+    ) -> Result<RelayOverview, RelayConfigurationError> {
+        let _guard = self.mutation_gate.lock().await;
+        self.recover_locked().await?;
+        let settings = self
+            .settings
+            .load()
+            .await
+            .map_err(|error| RelayConfigurationError::Load(anyhow::Error::from(error)))?;
+        let credentials = self
+            .credentials
+            .as_ref()
+            .ok_or(RelayConfigurationError::CredentialsUnavailable)?;
+        let custom = canonical_entries(&settings.network.custom_relay_urls, credentials)?;
+        let custom_urls: Vec<String> = custom.iter().map(|entry| entry.url.clone()).collect();
+        let saved_routing =
+            RelayRouting::resolve(settings.network.allow_relay_fallback, &custom_urls);
+        let saved_urls = saved_routing.effective_urls(&custom_urls);
+        let applied_urls: Vec<String> = applied
+            .map(|applied| {
+                applied
+                    .urls
+                    .iter()
+                    .filter_map(|url| canonical_url(url).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let in_effect = |url: &str| applied_urls.iter().any(|applied| applied == url);
+
+        let mut entries = Vec::with_capacity(BUILTIN_RELAYS.len() + custom.len());
+        entries.extend(BUILTIN_RELAYS.iter().map(|relay| RelayOverviewEntry {
+            source: RelayEntrySource::BuiltIn,
+            region: Some(relay.region),
+            url: relay.url.to_owned(),
+            credential_configured: false,
+            in_effect: in_effect(relay.url),
+        }));
+        entries.extend(custom.into_iter().map(|entry| RelayOverviewEntry {
+            source: RelayEntrySource::Custom,
+            region: None,
+            in_effect: in_effect(&entry.url),
+            credential_configured: entry.credential_configured,
+            url: entry.url,
+        }));
+        Ok(RelayOverview {
+            saved_routing,
+            applied_routing: applied.map(|applied| applied.routing),
+            change_pending: applied.is_some_and(|applied| {
+                applied.routing != saved_routing || applied_urls != saved_urls
+            }),
+            entries,
+        })
     }
 
     pub async fn mutate(
@@ -331,6 +454,24 @@ impl RelayConfiguration {
         self.credentials.as_ref()
     }
 
+    /// 写入失败后回滚；回滚本身失败时其错误会替换原错误，因此在此留痕，不含 URL 或凭据。
+    async fn recover_after_failed_write(
+        &self,
+        stage: &'static str,
+    ) -> Result<(), RelayConfigurationError> {
+        let result = self.recover_locked().await;
+        if let Err(error) = &result {
+            uc_warn!(
+                stage = stage,
+                error_kind = "relay_recovery",
+                reason = error.kind(),
+                io_error_kind = io_error_kind(error),
+                "relay settings recovery failed after a failed write; the original error is replaced"
+            );
+        }
+        result
+    }
+
     async fn recover_locked(&self) -> Result<(), RelayConfigurationError> {
         let Some(credentials) = self.credentials() else {
             return Ok(());
@@ -343,12 +484,13 @@ impl RelayConfiguration {
             .await
             .map_err(|error| RelayConfigurationError::Save(anyhow::Error::from(error)))?;
         credentials.complete_settings_transaction()?;
+        uc_info!("relay settings transaction recovered");
         Ok(())
     }
 }
 
 fn canonical_url(raw: &str) -> Result<String, RelayConfigurationRejection> {
-    // 用户输入的 URL 解析失败只作输入校验，拒绝原因已完整表达。
+    // discarded-source[input-validation]: `url::ParseError`: the rejection reason is fully expressed by the target classification
     let url = url::Url::parse(raw.trim()).map_err(|_| RelayConfigurationRejection::InvalidUrl)?;
     if !matches!(url.scheme(), "http" | "https")
         || url.host_str().is_none()
@@ -376,7 +518,7 @@ fn canonical_entries(
     credentials: &RelayCredentials,
 ) -> Result<Vec<RelayConfigurationEntry>, RelayConfigurationError> {
     let urls = canonical_urls(urls)
-        // 用户输入的 URL 解析失败只作输入校验，拒绝原因已完整表达。
+        // discarded-source[input-validation]: the rejection reason is fully expressed by the target classification
         .map_err(|_| RelayConfigurationError::Invalid("invalid custom relay URL".to_string()))?;
     urls.into_iter()
         .map(|url| {
@@ -451,6 +593,8 @@ mod tests {
 
     #[tokio::test]
     async fn recovery_restores_settings_and_tokens_after_interrupted_commit() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
         let old_relay = "https://old-relay.example.com/";
         let new_relay = "https://new-relay.example.com/";
         let mut previous = Settings::default();
@@ -497,6 +641,45 @@ mod tests {
             "old-relay-token"
         );
         assert!(credentials.load(new_relay).unwrap().is_none());
+        assert_eq!(logs.count("relay settings transaction recovered"), 1);
+        assert!(!logs.output().contains("relay.example.com"));
+    }
+
+    struct FailingSaveSettings;
+
+    #[async_trait]
+    impl uc_core::ports::SettingsPort for FailingSaveSettings {
+        async fn load(&self) -> anyhow::Result<Settings> {
+            Ok(Settings::default())
+        }
+
+        async fn save(&self, _settings: &Settings) -> anyhow::Result<()> {
+            Err(anyhow::anyhow!("PRIVATE_SAVE_DETAIL"))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_rollback_that_replaces_the_original_error_is_recorded() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let configuration = RelayConfiguration::new(Arc::new(FailingSaveSettings))
+            .with_credentials(RelayCredentials::new(Arc::new(
+                InMemorySecureStorage::default(),
+            )));
+
+        let result = configuration
+            .mutate(RelayConfigurationMutation::Add {
+                url: "https://private-relay.example.com/".to_string(),
+                access_token: None,
+            })
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(logs.count("relay settings recovery failed"), 1);
+        assert!(logs.output().contains("stage=\"save_settings\""));
+        assert!(logs.output().contains("error_kind=\"relay_recovery\""));
+        assert!(!logs.output().contains("private-relay"));
+        assert!(!logs.output().contains("PRIVATE"));
     }
 
     #[tokio::test]

@@ -94,14 +94,14 @@ Relationship: 该两阶段构造已经提供“先准备处理能力、后启动
 
 ```text
 Component: IrohNodeBuilder / IrohNode
-Path: crates/uc-infra/src/network/iroh/node.rs
+Path: crates/uc-infra-p2p/src/network/iroh/node.rs
 Responsibility: 绑定唯一身份和 endpoint，构造 adapter，安装固定 ALPN handler，启动 Router、地址发现、连接观测与中继恢复，并在最终关闭时安全排空。
 Relationship: Router 启动后不能替换 handler；现有 install_* 全部要求在 spawn 前完成。
 ```
 
 ```text
 Component: ProtocolRouterBuilder
-Path: crates/uc-infra/src/network/iroh/protocol_router.rs
+Path: crates/uc-infra-p2p/src/network/iroh/protocol_router.rs
 Responsibility: 注册固定协议并按兼容优先级启动 Iroh Router。
 Relationship: 当前把具体 handler 永久放入 Router；需要改为永久注册固定 dispatcher，再由 dispatcher 选择当前完整代际。
 ```
@@ -116,7 +116,7 @@ Relationship: 只覆盖经 Engine 操作入口取得 lease 的本机操作，不
 ```text
 Component: PeerReachabilityPort / IrohPeerReachabilityAdapter
 Path: crates/uc-core/src/ports/peer_reachability.rs
-Path: crates/uc-infra/src/network/iroh/peer_reachability_adapter.rs
+Path: crates/uc-infra-p2p/src/network/iroh/peer_reachability_adapter.rs
 Responsibility: 管理长期在线连接和本机缓存；disconnect_all 已能递增内部代际、拒绝新入站、关闭旧连接并清除状态，activate 恢复接收。
 Relationship: 会话交接必须复用该现有能力，不能再建立第二套在线状态生命周期。
 ```
@@ -341,9 +341,9 @@ SessionSupervisor::recover_current_session() -> Result<(), EngineError>
 
 **File:** `crates/uc-engine/tests/space_membership_auto_pairing_e2e.rs`
 
-**File:** `crates/uc-infra/src/network/iroh/protocol_router.rs`
+**File:** `crates/uc-infra-p2p/src/network/iroh/protocol_router.rs`
 
-**File:** `crates/uc-infra/src/network/iroh/node.rs`
+**File:** `crates/uc-infra-p2p/src/network/iroh/node.rs`
 
 **Change:** 保留当前可重复失败的配对时间测试；增加仅在 `test-util` / `dev-tools` 存在的进程内网络运行探针，记录 bind、完整 close、活动 endpoint 数量和会话代际发布次数。探针不得进入公开 Engine/绑定，不记录 endpoint identity。建立当前所有生产 ALPN、无 ALPN adapter、长期任务、入站/出站连接和关闭责任清单，并由测试固定清单完整性。
 
@@ -358,13 +358,13 @@ SessionSupervisor::recover_current_session() -> Result<(), EngineError>
 
 ## Slice 1：建立固定 Router 与代际注册表的最小端到端版本
 
-**File:** `crates/uc-infra/src/network/iroh/protocol_router.rs`
+**File:** `crates/uc-infra-p2p/src/network/iroh/protocol_router.rs`
 
-**File:** `crates/uc-infra/src/network/iroh/node.rs`
+**File:** `crates/uc-infra-p2p/src/network/iroh/node.rs`
 
-**File:** `crates/uc-infra/src/network/iroh/session_generation.rs`（新增）
+**File:** `crates/uc-infra-p2p/src/network/iroh/session_generation.rs`（新增）
 
-**File:** `crates/uc-infra/src/network/iroh/mod.rs`
+**File:** `crates/uc-infra-p2p/src/network/iroh/mod.rs`
 
 **Change:** 增加 `SessionProtocolRegistry`、`SessionNetworkGeneration`、lease、连接登记与稳定 dispatcher。先用测试专用协议跑通“空注册拒绝、发布后处理、封口后拒绝、旧在途取消、新代际处理”；生产 ALPN 注册和生产会话路径在本片保持原样，不形成部分生产协议走新门、部分协议走旧门的中间架构。
 
@@ -382,17 +382,17 @@ SessionSupervisor::recover_current_session() -> Result<(), EngineError>
 
 ## Slice 2：迁移全部协议和出站 adapter，形成完整会话代际
 
-**File:** `crates/uc-infra/src/network/iroh/node.rs`
+**File:** `crates/uc-infra-p2p/src/network/iroh/node.rs`
 
-**File:** `crates/uc-infra/src/network/iroh/connect.rs`
+**File:** `crates/uc-infra-p2p/src/network/iroh/connect.rs`
 
-**File:** `crates/uc-infra/src/network/iroh/space_admission/`
+**File:** `crates/uc-infra-p2p/src/network/iroh/space_admission/`
 
-**File:** `crates/uc-infra/src/network/iroh/peer_reachability_adapter.rs`
+**File:** `crates/uc-infra-p2p/src/network/iroh/peer_reachability_adapter.rs`
 
-**File:** `crates/uc-infra/src/network/iroh/{group_update_adapter.rs,clipboard_dispatch_adapter.rs,clipboard_receiver_adapter.rs,membership_history_exchange_adapter.rs,membership_branch_recovery_adapter.rs,transfer_progress_adapter.rs,blobs.rs}`
+**File:** `crates/uc-infra-p2p/src/network/iroh/{group_update_adapter.rs,clipboard_dispatch_adapter.rs,clipboard_receiver_adapter.rs,membership_history_exchange_adapter.rs,membership_branch_recovery_adapter.rs,transfer_progress_adapter.rs,blobs.rs}`
 
-**File:** `crates/uc-infra/src/network/iroh/active_clipboard/`
+**File:** `crates/uc-infra-p2p/src/network/iroh/active_clipboard/`
 
 **Change:** 一次性把所有生产 handler 迁入一个封闭 `SessionProtocolHandlers`；把现有 `install_*` 的“构造 adapter”和“注册 Router”分开，形成 `IrohSessionBuilder`。`IrohNodeBuilder` 在首次构造时一次注册全部固定 dispatcher，并在 spawn 前发布第一代完整 handler；此时 endpoint 仍随 `ProductionSession` 重建，用户可见生命周期不变。所有入站协议经固定 dispatcher，所有出站拨号和请求取得同一代际 lease。复用 `PeerReachabilityPort::disconnect_all()` / `activate()`；Blob handler 和官方 store 仍由当前节点持有，但每条 Blob 连接受代际取消控制。邀请和 connection hints 从当前会话 builder 取得同一个 endpoint 句柄，不注册第二套 Router。
 

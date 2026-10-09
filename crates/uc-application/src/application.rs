@@ -6,6 +6,8 @@
 use crate::clipboard::inbound::ClipboardReceiverPort;
 use std::sync::Arc;
 use tokio::time::Instant;
+use uc_core::error_class::ErrorClass;
+use uc_observability_contract::uc_warn;
 
 use uc_core::clipboard::ClipboardIntegrationMode;
 use uc_core::file_transfer::OutboundProgressReporterPort;
@@ -42,7 +44,7 @@ use crate::runtime_lifecycle::{
     TransitionContext,
 };
 use crate::search::{SearchAssembly, SearchShutdownError};
-use crate::settings::SettingsAssembly;
+use crate::settings::{AppliedRelayRouting, SettingsAssembly};
 use crate::space::{
     AdmissionReadFailureCategory, KnownPeerContact, PendingAdmissionRecoveryStateError,
     SpaceAdmissionDeps, SpaceAdmissionObservationRegistry, SpaceFacade, SpaceFacadeDeps,
@@ -239,6 +241,36 @@ impl ApplicationStartError {
     }
 }
 
+/// 启动失败后的回滚本身失败时留痕：回滚结果只保存在 `ApplicationStartError` 的字段里，不在 source 链上，
+/// 遗留的运行中 search 或 space 运行时否则无人知晓。
+fn record_rollback_failures(
+    search: Option<&SearchShutdownError>,
+    active_clipboard: Option<&LifecycleError>,
+    space: Option<&Arc<LifecycleError>>,
+) {
+    if let Some(error) = search {
+        uc_warn!(
+            rollback_target = "search",
+            error_class = error.class(),
+            "application start rollback failed"
+        );
+    }
+    if let Some(error) = active_clipboard {
+        uc_warn!(
+            rollback_target = "active_clipboard",
+            error_class = error.class(),
+            "application start rollback failed"
+        );
+    }
+    if let Some(error) = space {
+        uc_warn!(
+            rollback_target = "space",
+            error_class = error.class(),
+            "application start rollback failed"
+        );
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ApplicationUpgradeError {
     #[error("application upgrade detection failed")]
@@ -328,6 +360,10 @@ impl ApplicationAssembly {
         &self,
     ) -> Result<crate::settings::PreparedNetworkSettings, crate::facade::SettingsFacadeError> {
         self.settings.prepare_network().await
+    }
+
+    pub fn record_applied_relays(&self, applied: Option<AppliedRelayRouting>) {
+        self.settings.record_applied_relays(applied);
     }
 
     pub async fn ensure_current_version(
@@ -572,6 +608,11 @@ impl ApplicationAssembly {
             Err(source) => {
                 let (search_rollback, space_rollback) =
                     tokio::join!(search.shutdown(), space.on_shutdown());
+                record_rollback_failures(
+                    search_rollback.as_ref().err(),
+                    None,
+                    space_rollback.as_ref().err(),
+                );
                 return Err(ApplicationStartError::ActiveClipboard {
                     source,
                     search_rollback: search_rollback.err(),
@@ -585,6 +626,11 @@ impl ApplicationAssembly {
                 active_clipboard.shutdown(),
                 search.shutdown(),
                 space.on_shutdown(),
+            );
+            record_rollback_failures(
+                search_rollback.as_ref().err(),
+                active_clipboard_rollback.as_ref().err(),
+                space_rollback.as_ref().err(),
             );
             return Err(ApplicationStartError::ActiveClipboardRestore {
                 source,
@@ -601,6 +647,11 @@ impl ApplicationAssembly {
                 active_clipboard.shutdown(),
                 search.shutdown(),
                 space.on_shutdown(),
+            );
+            record_rollback_failures(
+                search_rollback.as_ref().err(),
+                active_clipboard_rollback.as_ref().err(),
+                space_rollback.as_ref().err(),
             );
             return Err(ApplicationStartError::SpaceActivityAlreadyBound {
                 search_rollback: search_rollback.err(),
@@ -782,6 +833,23 @@ mod tests {
         assert!(error.source().is_some());
         assert_eq!(error.to_string(), "local clipboard processing failed");
         assert!(!error.to_string().contains("clipboard.txt"));
+    }
+
+    #[test]
+    fn a_failed_rollback_is_recorded_with_its_target() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let space = Arc::new(LifecycleError {
+            primary: anyhow::anyhow!("space shutdown failed"),
+            additional: Vec::new(),
+        });
+
+        record_rollback_failures(None, None, Some(&space));
+
+        assert_eq!(logs.count("application start rollback failed"), 1);
+        assert!(logs.output().contains("rollback_target=\"space\""));
+        assert!(logs.output().contains("error_class=\"incomplete\""));
+        assert!(!logs.output().contains("space shutdown failed"));
     }
 
     #[test]

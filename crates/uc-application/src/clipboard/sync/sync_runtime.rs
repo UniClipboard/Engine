@@ -8,8 +8,6 @@ mod shutdown;
 
 use recovery::{OfflineDeliveryRecovery, OfflineDeliveryRecoveryDeps, RecoveryDeliveryPort};
 
-use tracing::warn;
-
 use uc_core::ids::{DeviceId, EntryId};
 use uc_core::ports::clipboard::{ClipboardEventRepositoryPort, ListClipboardEntriesPort};
 use uc_core::ports::{
@@ -27,6 +25,7 @@ use crate::clipboard::outbound::{
 };
 use crate::deps::CurrentSpaceMemberScopePort;
 use crate::runtime_lifecycle::LifecycleError;
+use uc_observability_contract::uc_warn;
 
 /// 自动出站的完整生命周期。调用方只提交本地捕获；手动重发使用独立
 /// facade，离线恢复保持为本运行期的内部责任。
@@ -132,7 +131,7 @@ async fn automatic_sync_enabled(settings: &dyn SettingsPort) -> bool {
     match result {
         Ok(settings) => settings.sync.sync_enabled && settings.sync.auto_sync_enabled,
         Err(_) => {
-            warn!(
+            uc_warn!(
                 error_kind = "settings_load",
                 "clipboard sync: automatic delivery skipped"
             );

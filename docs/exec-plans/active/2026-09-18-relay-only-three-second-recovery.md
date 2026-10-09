@@ -61,28 +61,28 @@ Relationship: 当前把所有网络变化交给同一个 opportunity 路径；�
 
 ```text
 Component: 本机中转状态观察
-Path: crates/uc-infra/src/network/iroh/net_recovery.rs
+Path: crates/uc-infra-p2p/src/network/iroh/net_recovery.rs
 Responsibility: 观察 Iroh home relay 状态；从不可用转为可用时发布 LocalRelayRecovered。
 Relationship: 该事实真实且已接入，但下游目前把它折叠成普通 NetworkChanged，丢失“旧拨号应被替换”的语义。
 ```
 
 ```text
 Component: 连接提示装配
-Path: crates/uc-infra/src/network/iroh/node.rs
+Path: crates/uc-infra-p2p/src/network/iroh/node.rs
 Responsibility: 把本机地址、已知设备发现和网络恢复观察转换为 Application 的 ConnectionHint 流。
 Relationship: LocalRelayRecovered 当前映射为 ConnectionHint::NetworkChanged。
 ```
 
 ```text
 Component: 真实可达性确认
-Path: crates/uc-infra/src/network/iroh/peer_reachability_adapter.rs
+Path: crates/uc-infra-p2p/src/network/iroh/peer_reachability_adapter.rs
 Responsibility: 核对成员准入、检查既有连接或建立候选连接，完成确认后维护连接证据并发布 Online/Offline。
 Relationship: 修复继续调用同一 verify_reachable，不增加“中转在线即设备在线”的捷径。
 ```
 
 ```text
 Component: 分批连接能力
-Path: crates/uc-infra/src/network/iroh/connect.rs
+Path: crates/uc-infra-p2p/src/network/iroh/connect.rs
 Responsibility: 使用现有地址在有界时间内分批发起连接，成功即停止其余尝试。
 Relationship: 本计划先复用现有 0、500、1500 毫秒分批尝试和三秒单次预算；不预先改写公共拨号策略。
 ```
@@ -177,7 +177,7 @@ proof
 
 ## Step 2：保留中转恢复语义
 
-- **File**：`crates/uc-application/src/space/connectivity/peer_connections/mod.rs`、`crates/uc-infra/src/network/iroh/node.rs`
+- **File**：`crates/uc-application/src/space/connectivity/peer_connections/mod.rs`、`crates/uc-infra-p2p/src/network/iroh/node.rs`
 - **Change**：增加内部 `RelayRecovered` 提示并替换现有泛化映射；更新所有穷尽匹配和测试构造。
 - **Risk**：不能把该提示公开给产品，也不能让它直接修改在线状态。
 - **Exit**：单元测试证明中转恢复与普通网络变化可区分，提示丢失仍由既有周期重试兜底。
@@ -198,7 +198,7 @@ proof
 
 ## Step 5：真实连接与中转恢复回归
 
-- **File**：`crates/uc-infra/src/network/iroh/net_recovery.rs`、`crates/uc-infra/src/network/iroh/peer_reachability_adapter/tests/liveness_tests.rs`（仅在现有测试入口需要补证时修改）
+- **File**：`crates/uc-infra-p2p/src/network/iroh/net_recovery.rs`、`crates/uc-infra-p2p/src/network/iroh/peer_reachability_adapter/tests/liveness_tests.rs`（仅在现有测试入口需要补证时修改）
 - **Change**：证明中转恢复边沿只发一次；被替换后的新尝试仍经过成员准入和真实回应；无需修改 `connect.rs` 预算时不改拨号策略。
 - **Risk**：若三秒门仍失败，必须先依据现有连接诊断区分中转尚未可路由、连接准备、握手或准入确认，不能直接缩短安全确认预算或堆叠更多并发尝试。
 - **Exit**：真实两个 endpoint 的恢复测试通过，未知或已移除设备不能因中转恢复变成 Online。
@@ -302,7 +302,7 @@ proof
 
 ```bash
 cargo test -p uc-application space::connectivity::peer_connections --locked
-cargo test -p uc-infra peer_reachability --locked
+cargo test -p uc-infra-p2p peer_reachability --locked
 bash scripts/testing/run-connection-recovery-e2e.sh --suite network --repeat 3
 ```
 

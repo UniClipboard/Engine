@@ -50,13 +50,14 @@
 use std::sync::Arc;
 
 use thiserror::Error;
-use tracing::{debug, instrument, warn};
+use tracing::instrument;
 
 use uc_core::ports::mobile_sync::{LatestClipboardSnapshotError, LatestClipboardSnapshotPort};
 
 use crate::usecases::clipboard_doc::{SyncClipboardItemType, SyncClipboardMeta};
 
 use super::sync_clipboard_mapping::{classify_for_sync, derive_data_name, profile_hash_for_sync};
+use uc_observability_contract::{log_fields::log_id, uc_debug, uc_warn};
 
 /// 出站 `GET /SyncClipboard.json` 的应用层动作。
 pub(crate) struct GetLatestMobileSyncDocUseCase {
@@ -112,15 +113,12 @@ impl GetLatestMobileSyncDocUseCase {
             // Image/File 分支返回 Some。两条 unreachable 兜底维持 enum
             // 全覆盖编译期可验证, 真实命中则记录 warn 后退化成 Text 语义。
             (SyncClipboardItemType::Image, None) | (SyncClipboardItemType::File, None) => {
-                warn!(
-                    item_type = ?item_type,
-                    "derive_data_name returned None for non-Text type; degrading to Text"
-                );
+                uc_warn!("derive_data_name returned None for non-Text type; degrading to Text");
                 let text = String::from_utf8_lossy(&rep.bytes).into_owned();
                 (text, false, rep.bytes.len() as u64)
             }
             (SyncClipboardItemType::Group, _) => {
-                warn!("classify_for_sync produced Group unexpectedly; degrading to Text");
+                uc_warn!("classify_for_sync produced Group unexpectedly; degrading to Text");
                 let text = String::from_utf8_lossy(&rep.bytes).into_owned();
                 (text, false, rep.bytes.len() as u64)
             }
@@ -130,10 +128,8 @@ impl GetLatestMobileSyncDocUseCase {
         // 文件名也纳入 hash,与官方客户端的历史记录去重规则一致。
         let hash = profile_hash_for_sync(item_type, data_name.as_deref(), &rep.bytes);
 
-        debug!(
-            entry_id = %rep.entry_id,
-            item_type = ?item_type,
-            data_name = ?data_name,
+        uc_debug!(
+            entry_id = log_id(&rep.entry_id),
             size = size,
             "mobile_sync get_latest_doc: resolved meta"
         );

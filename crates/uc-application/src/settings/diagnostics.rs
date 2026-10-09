@@ -8,7 +8,9 @@ use anyhow::{anyhow, Context};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tracing::instrument;
+use uc_core::error_class::ErrorClass;
 use uc_core::ports::SettingsPort;
+use uc_observability_contract::{error_source::io_error_kind, uc_warn};
 use zip::write::SimpleFileOptions;
 
 #[derive(Clone)]
@@ -50,6 +52,35 @@ pub enum DiagnosticsFacadeError {
     Export(#[source] anyhow::Error),
 }
 
+impl ErrorClass for DiagnosticsFacadeError {
+    fn class(&self) -> &'static str {
+        match self {
+            Self::LoadSettings(_) => "load_settings",
+            Self::SaveSettings(_) => "save_settings",
+            Self::DownloadsUnavailable => "downloads_unavailable",
+            Self::Export(_) => "export",
+        }
+    }
+}
+
+/// 调试模式状态与开关失败的记录：失败原样返回，由本负责人记录一次固定分类
+/// （公开契约边界会丢弃来源）。
+fn record_debug_mode_failure<T>(
+    operation: &'static str,
+    result: &Result<T, DiagnosticsFacadeError>,
+) {
+    if let Err(error) = result {
+        uc_warn!(
+            operation = operation,
+            outcome = "failed",
+            error_kind = "debug_mode_settings",
+            error_class = error.class(),
+            io_error_kind = io_error_kind(error),
+            "diagnostics debug mode operation failed"
+        );
+    }
+}
+
 pub struct DiagnosticsFacade {
     deps: DiagnosticsFacadeDeps,
 }
@@ -61,6 +92,12 @@ impl DiagnosticsFacade {
 
     #[instrument(skip_all)]
     pub async fn debug_status(&self) -> Result<DebugStatusView, DiagnosticsFacadeError> {
+        let result = self.read_debug_status().await;
+        record_debug_mode_failure("debug_status", &result);
+        result
+    }
+
+    async fn read_debug_status(&self) -> Result<DebugStatusView, DiagnosticsFacadeError> {
         let settings = self
             .deps
             .settings
@@ -76,6 +113,15 @@ impl DiagnosticsFacade {
 
     #[instrument(skip_all, fields(enabled))]
     pub async fn set_debug_mode(
+        &self,
+        enabled: bool,
+    ) -> Result<UpdateDebugModeView, DiagnosticsFacadeError> {
+        let result = self.write_debug_mode(enabled).await;
+        record_debug_mode_failure("set_debug_mode", &result);
+        result
+    }
+
+    async fn write_debug_mode(
         &self,
         enabled: bool,
     ) -> Result<UpdateDebugModeView, DiagnosticsFacadeError> {
@@ -376,6 +422,111 @@ mod tests {
             logs_dir: temp.path().join("logs"),
             app_version: "test-version".to_string(),
         })
+    }
+
+    struct FailingSettings {
+        fail_load: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl SettingsPort for FailingSettings {
+        async fn load(&self) -> anyhow::Result<Settings> {
+            if self.fail_load {
+                return Err(io_failure());
+            }
+            Ok(Settings::default())
+        }
+
+        async fn save(&self, _settings: &Settings) -> anyhow::Result<()> {
+            Err(io_failure())
+        }
+    }
+
+    fn io_failure() -> anyhow::Error {
+        anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "SECRET_SETTINGS_PATH",
+        ))
+        .context("access settings")
+    }
+
+    fn failing_facade(temp: &tempfile::TempDir, fail_load: bool) -> DiagnosticsFacade {
+        DiagnosticsFacade::new(DiagnosticsFacadeDeps {
+            settings: Arc::new(FailingSettings { fail_load }),
+            logs_dir: temp.path().join("logs"),
+            app_version: "test-version".to_string(),
+        })
+    }
+
+    #[tokio::test]
+    async fn a_failed_status_read_records_only_fixed_classification() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let temp = tempfile::TempDir::new().expect("temp");
+
+        let error = failing_facade(&temp, true)
+            .debug_status()
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, DiagnosticsFacadeError::LoadSettings(_)));
+        let output = logs.output();
+        assert_eq!(
+            logs.count("diagnostics debug mode operation failed"),
+            1,
+            "{output}"
+        );
+        assert!(output.contains("operation=\"debug_status\""), "{output}");
+        assert!(
+            output.contains("error_kind=\"debug_mode_settings\""),
+            "{output}"
+        );
+        assert!(output.contains("error_class=\"load_settings\""), "{output}");
+        assert!(
+            output.contains("io_error_kind=PermissionDenied"),
+            "{output}"
+        );
+        assert!(!output.contains("SECRET_SETTINGS_PATH"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_debug_mode_write_records_the_failing_step_class() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let temp = tempfile::TempDir::new().expect("temp");
+
+        let error = failing_facade(&temp, false)
+            .set_debug_mode(true)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, DiagnosticsFacadeError::SaveSettings(_)));
+        let output = logs.output();
+        assert_eq!(
+            logs.count("diagnostics debug mode operation failed"),
+            1,
+            "{output}"
+        );
+        assert!(output.contains("operation=\"set_debug_mode\""), "{output}");
+        assert!(output.contains("error_class=\"save_settings\""), "{output}");
+        assert!(
+            output.contains("io_error_kind=PermissionDenied"),
+            "{output}"
+        );
+        assert!(!output.contains("SECRET_SETTINGS_PATH"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn successful_debug_mode_operations_write_no_failure_record() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let temp = tempfile::TempDir::new().expect("temp");
+        let facade = facade(&temp);
+
+        facade.set_debug_mode(true).await.expect("set debug");
+        facade.debug_status().await.expect("status");
+
+        assert_eq!(logs.count("diagnostics debug mode operation failed"), 0);
     }
 
     #[tokio::test]

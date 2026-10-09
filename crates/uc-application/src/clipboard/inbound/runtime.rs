@@ -9,7 +9,7 @@ use thiserror::Error;
 use tokio::sync::broadcast;
 use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, instrument, warn};
+use tracing::instrument;
 
 use uc_core::clipboard::ClipboardContentCategorySet;
 use uc_core::ids::DeviceId;
@@ -29,6 +29,7 @@ use crate::clipboard::write::ClipboardWriteIntent;
 use crate::deps::CurrentSpaceMemberScopePort;
 
 use super::{InboundClipboardApplyInput, InboundClipboardApplyOutcome, InboundClipboardApplyPort};
+use uc_observability_contract::{log_fields::log_id, uc_debug, uc_info, uc_warn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClipboardInboundEventAction {
@@ -136,10 +137,10 @@ impl ClipboardInboundRuntime {
                             inbound.observation.scope(processor.handle_one(inbound.message))
                         ).await,
                         Err(broadcast::error::RecvError::Lagged(missed)) => {
-                            warn!(missed, "clipboard inbound receiver lagged; dropped frames");
+                            uc_warn!(missed = missed, "clipboard inbound receiver lagged; dropped frames");
                         }
                         Err(broadcast::error::RecvError::Closed) => {
-                            info!("clipboard inbound receiver closed; exiting runtime");
+                            uc_info!("clipboard inbound receiver closed; exiting runtime");
                             return;
                         }
                     }
@@ -187,7 +188,7 @@ impl InboundProcessor {
             .await;
         let (action, disposition) = match &result {
             Ok(InboundClipboardApplyOutcome::Applied { entry_id }) => {
-                info!(entry_id = %entry_id, "inbound clipboard applied");
+                uc_info!(entry_id = log_id(&entry_id), "inbound clipboard applied");
                 (
                     ClipboardInboundEventAction::NewEntry,
                     InboundClipboardDisposition::Applied,
@@ -198,9 +199,9 @@ impl InboundProcessor {
                 os_write_succeeded,
                 ..
             }) => {
-                debug!(
-                    entry_id = %existing_entry_id,
-                    os_write_succeeded,
+                uc_debug!(
+                    entry_id = log_id(&existing_entry_id),
+                    os_write_succeeded = os_write_succeeded,
                     "inbound clipboard resurfaced"
                 );
                 (
@@ -209,7 +210,7 @@ impl InboundProcessor {
                 )
             }
             Ok(InboundClipboardApplyOutcome::DuplicateSkipped { .. }) => {
-                debug!("inbound clipboard duplicate skipped");
+                uc_debug!("inbound clipboard duplicate skipped");
                 (
                     ClipboardInboundEventAction::DuplicateIgnored,
                     InboundClipboardDisposition::Duplicate,
@@ -217,7 +218,7 @@ impl InboundProcessor {
             }
             Ok(InboundClipboardApplyOutcome::DecodeFailed { .. }) => {
                 describe_clipboard_receive_failure(ClipboardReceiveFailure::DecodeFailed);
-                debug!("inbound clipboard decode failed");
+                uc_debug!("inbound clipboard decode failed");
                 (
                     ClipboardInboundEventAction::NewEntry,
                     InboundClipboardDisposition::Rejected,
@@ -225,7 +226,7 @@ impl InboundProcessor {
             }
             Err(error) => {
                 describe_clipboard_receive_failure(classify_apply_failure(error));
-                warn!(
+                uc_warn!(
                     error_kind = "inbound_clipboard_apply_failed",
                     "inbound clipboard apply failed"
                 );
@@ -274,8 +275,7 @@ impl InboundProcessor {
                     }
                 };
                 describe_clipboard_receive_failure(failure);
-                warn!(
-                    snapshot_hash = %inbound.header.snapshot_hash,
+                uc_warn!(
                     error_kind = "inbound_clipboard_decrypt_failed",
                     "inbound clipboard decrypt failed"
                 );
@@ -286,8 +286,7 @@ impl InboundProcessor {
         let categories = match decode_v3_bytes_to_snapshot(plaintext.as_ref()) {
             Ok(snapshot) => ClipboardContentCategorySet::from_snapshot(&snapshot),
             Err(_) => {
-                warn!(
-                    snapshot_hash = %inbound.header.snapshot_hash,
+                uc_warn!(
                     error_kind = "inbound_clipboard_classification_failed",
                     "inbound clipboard classification failed open"
                 );
@@ -335,7 +334,7 @@ async fn inbound_sync_enabled(settings: &dyn SettingsPort) -> bool {
         Ok(settings) if settings.sync.sync_enabled => true,
         Ok(_) => {
             describe_clipboard_receive_failure(ClipboardReceiveFailure::SyncDisabled);
-            info!(
+            uc_info!(
                 reason = "sync_disabled",
                 "clipboard inbound: delivery rejected by global sync setting"
             );
@@ -343,7 +342,7 @@ async fn inbound_sync_enabled(settings: &dyn SettingsPort) -> bool {
         }
         Err(_) => {
             describe_clipboard_receive_failure(ClipboardReceiveFailure::SettingsUnavailable);
-            warn!(
+            uc_warn!(
                 error_kind = "settings_load",
                 "clipboard inbound: delivery rejected"
             );

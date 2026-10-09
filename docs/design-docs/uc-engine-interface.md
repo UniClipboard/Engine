@@ -16,7 +16,7 @@ crate 根只保留稳定名称的统一导出，内部按职责分为七层：
 | `assembly/` | 宿主适配、数据库、网络、加密、搜索、剪贴板和传输组装 |
 | `compatibility/mobile_lan/` | 与完整 P2P 主路径隔离的 LAN 兼容能力 |
 
-开发与验收操作单独位于 `dev/`，且只在显式启用 `dev-tools` feature 时编译；正式宿主和发布产物不得启用它。内部宿主契约检查位于 `testing/`。`runtime/mod.rs` 只拥有生产会话的建立、后台任务挂接和生命周期资源，具体路由、宿主剪贴板、文件操作与移动上传各自由独立内部模块拥有。`uc-infra` 具体类型只允许出现在 `assembly/`；业务操作和生产路由只能接收已经组装好的能力。完整导航见 `crates/uc-engine/README.md`。
+开发与验收操作单独位于 `dev/`，且只在显式启用 `dev-tools` feature 时编译；正式宿主和发布产物不得启用它。内部宿主契约检查位于 `testing/`。`runtime/mod.rs` 只拥有生产会话的建立、后台任务挂接和生命周期资源，具体路由、宿主剪贴板、文件操作与移动上传各自由独立内部模块拥有。`uc-infra-*` 具体类型只允许出现在 `assembly/`；业务操作和生产路由只能接收已经组装好的能力。完整导航见 `crates/uc-engine/README.md`。
 
 外部 crate 只能使用 crate 根导出的稳定名称和 `error_codes`，不得依赖内部模块路径或源码文件位置。
 
@@ -52,6 +52,7 @@ crate 根只保留稳定名称的统一导出，内部按职责分为七层：
 | `WorkspaceConvergenceChanged` | 仅 `dev-tools` 的内部收敛诊断事件；不进入正式宿主和发布产物 |
 | `NetworkRecoveryChanged` | 网络会话恢复开始、等待下一次尝试、成功或最终失败的稳定状态变化 |
 | `ProfileRecoveryChanged` | 资料密钥恢复状态发生变化；宿主仍可通过查询重新取得完整快照 |
+| `SettingsChanged { sections }` | 一次成功保存使持久化设置发生变化，只列出变化的分区（`general`、`sync`、`retention_policy`、`security`、`pairing`、`keyboard_shortcuts`、`file_sync`、`network`、`mobile_sync`、`quick_panel`），不携带设置值；宿主重新调用 `QuerySettings`。所有写入路径共享同一个通知出口，内容没有变化的保存和被拒绝的更新不产生事件 |
 | `RePairingRequired { scope }` | 旧资料独立化完成，需要产品提示重新配对；`all_devices` 表示全部旧设备关系均须重新建立 |
 | `RefreshRequired` | 宿主必须重新查询当前状态 |
 | `OperationFinished` | 一次操作进入成功、失败或取消终态 |
@@ -77,6 +78,7 @@ Engine 前构造 `ObservabilityResource` 和 `ObservabilityConfig`，再调用 `
 
 Rust 宿主需要实现产品分析能力或识别受管诊断文件时，通过 `uc_engine::observability::analytics` 和
 `uc_engine::observability::diagnostics` 使用完整合同；不得直接依赖 Engine 内部的 `uc-observability-contract` 包。
+绑定与宿主写日志时使用同一入口再导出的 `uc_trace!`、`uc_debug!`、`uc_info!`、`uc_warn!`、`uc_error!` 与 `log_id`、`log_vocab`、`log_vocab_debug`（见[运行期观测](observability.md)），它们只是日志写入口，不暴露 Application 或 Core 的内部阶段、状态或标识。
 
 需要保留宿主自身日志层的 Rust 宿主，可在首次安装时调用 `ProcessObservabilityRuntime::install_with_host_layers`，
 传入标准 `HostLogLayer`。共同运行时负责分组过滤：核心诊断及底层原始网络输出不会绕行到宿主层。
@@ -131,7 +133,7 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 | `IssueInvitation` | 签发一次配对邀请，同时返回指向同一邀请身份的短码与完整长邀请 |
 | `CancelInvitation` | 取消当前尚未兑换的配对邀请 |
 | `ResetSpace` | 保留本机资料、设置、身份和解锁能力，废弃全部旧设备关系并建立只含本机的新空间 |
-| `FactoryResetSpace` | 停止旧运行入口后依次清除密钥材料、空间状态和邀请，使设备可重新初始化 |
+| `FactoryResetSpace` | 停止旧运行入口后依次清除密钥材料、空间状态和邀请，并在同一 Engine 内重建全新运行期，使设备可立即重新初始化 |
 | `QuerySetupState` | 查询设置是否完成、当前邀请和已保存设备名 |
 | `QueryStorageStats` | 查询数据库、密钥库、缓存和日志占用大小，不返回本机目录 |
 | `ClearStorageCache` | 清理核心缓存并返回实际释放的字节数 |
@@ -165,8 +167,10 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 | `QueryDeviceGroupChoices` | 返回 revision、完整设备信任快照，以及当前所有待处理设备组问题与可选设备组 |
 | `ChooseDeviceGroup` | 按问题编号、选择编号和预期 revision 选择设备组；本机将被移除时要求明确确认 |
 | `QueryMembershipDiagnostics` | 仅 `dev-tools`：返回内部成员分支、epoch、冲突、待执行效果和过渡阶段诊断 |
-| `SearchEntries` | 使用关键词、时间、内容类型、来源设备和标签等条件查询加密搜索索引 |
-| `QuerySearchTags` | 查询当前索引中的标签和条目数量 |
+| `SearchEntries` | 使用关键词、时间、内容类型、来源设备和标签等条件查询加密搜索索引。`tag_match` 取 `any`（默认，命中任一标签）或 `all`（必须同时携带所有标签）；其他维度组内取“或”，维度之间取“且” |
+| `CountSearchEntries` | 批量统计匹配数：每个查询与 `SearchEntries` 走同一套解析与索引路径，`total` 逐项一致，`limit`、`offset` 被忽略；单次最多 32 个查询，按输入顺序返回。加密会话未就绪时返回搜索会话锁定错误，索引重建中返回重建错误，不降级为近似值 |
+| `QueryDailyEntryCounts` | 按调用方给出的严格递增绝对时间戳边界统计条目数，第 `i` 个桶为 `[b[i], b[i+1])`，最多 400 个桶。Engine 不含时区与夏令时规则，日边界由宿主按用户本地时区计算。会话锁定失败关闭，规则与 `CountSearchEntries` 相同 |
+| `QuerySearchTags` | 查询当前索引中的标签和条目数量；本机历史标签以 `is_builtin = false` 出现，只统计已建索引的条目；会话锁定或索引重建中不返回本机历史标签 |
 | `QuerySearchStatus` | 查询索引是否可用及最近重建时间 |
 | `RebuildSearchIndex` | 请求重建当前加密搜索索引 |
 | `SendText` | 写入加密历史、更新搜索并发送不超过 64 KiB 的文本 |
@@ -176,6 +180,14 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 | `GetHistoryEntry` | 返回指定文本记录的完整详情 |
 | `DeleteHistoryEntry` | 删除指定记录及其关联选择、文件、搜索和 blob 引用 |
 | `SetHistoryEntryFavorite` | 设置指定记录的收藏状态 |
+| `ListHistoryTags` | 列出本机历史标签及各自关联的条目数，按条目数降序、名称、id 排序；名称无法解密的标签以空名称返回，仍可删除 |
+| `CreateHistoryTag` | 按名称创建本机历史标签；规范化后同名（忽略大小写）时返回已有标签和 `created = false` |
+| `RenameHistoryTag` | 修改标签名称；与另一个标签同名时不写入并返回 `NameConflict { existing_tag_id }`；名称密文无法打开的标签不能改名（1404），只能删除 |
+| `AddHistoryTagToEntries` | 把一个标签关联到 1 到 1000 条记录；存在的记录在一个事务内生效，不存在的记录跳过并返回 |
+| `RemoveHistoryTagFromEntries` | 从 1 到 1000 条记录移除一个标签，规则与关联相同 |
+| `SummarizeHistoryEntryTags` | 返回一组记录中仍存在的数量，以及每个标签在其中的携带数量 |
+| `MergeHistoryTags` | 把 1 到 100 个来源标签的关联并入目标标签并去重，随后删除来源标签；记录内容不变 |
+| `DeleteHistoryTag` | 删除标签及其关联，返回解除的关联数；记录内容不变 |
 | `QueryHistoryStats` | 返回历史记录总数和总大小 |
 | `GetHistoryEntryResource` | 返回指定记录的资源标识、类型、大小及可用读取方式 |
 | `ReadBlob` | 读取指定 blob 的完整字节和媒体类型 |
@@ -196,7 +208,7 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 
 `RecoverSession` 的 `allow_secure_storage_unlock` 由宿主根据当前运行环境决定。值为 `false` 时核心不得尝试从系统安全存储恢复密钥；值为 `true` 时，核心统一完成加密会话、空间会话、搜索和接收能力恢复。
 
-当资料和 keyslot 仍在，但自动解锁材料缺失或错误时，`Engine::start` 返回可用的受限实例，启动进度为 `RecoveryAvailable`。此时 `QueryProfileRecovery`、`QueryEncryptionState`、`UnlockSpace` 和生命周期关闭可用，业务数据库、网络、搜索、收发与历史操作返回 `PROFILE_RECOVERY_REQUIRED`；`session_ready` 必须为 `false`。宿主继续用 `UnlockSpace` 提交原口令。错误口令返回 `UNLOCK_SPACE_UNAUTHORIZED_CODE` 且不写入；正确口令恢复原密钥、启动完整后台并报告 `Recovered`。缺少旧独立密钥副本时报告 `PartiallyRecoverable` 及稳定影响类别，不返回已经解锁。损坏、不支持格式和保存失败分别使用原损坏分类、`PROFILE_RECOVERY_UNSUPPORTED_CODE` 和 `PROFILE_RECOVERY_PERSISTENCE_FAILED_CODE`，其他启动错误保持原分类。恢复口令通过后若完整后台启动或后续解锁失败，状态必须进入 `Failed`，`can_submit_passphrase=false`、`restart_required=true`；同一进程不得复用已经消费的宿主能力，宿主重启 Engine 后继续。旧升级备份存在但其保护材料在 userdata 与系统安全存储中都永久缺失时返回稳定的 `PROFILE_UPGRADE_BACKUP_KEY_MISSING_CODE`，不得生成替代材料或绕过备份门槛。
+当资料和 keyslot 仍在，但自动解锁材料缺失或错误时，`Engine::start` 返回可用的受限实例，启动进度为 `RecoveryAvailable`。此时 `QueryProfileRecovery`、`QueryEncryptionState`、`UnlockSpace` 和生命周期关闭可用，业务数据库、网络、搜索、收发与历史操作返回 `PROFILE_RECOVERY_REQUIRED`；`session_ready` 必须为 `false`。宿主继续用 `UnlockSpace` 提交原口令。错误口令返回 `UNLOCK_SPACE_UNAUTHORIZED_CODE` 且不写入；正确口令恢复原密钥、启动完整后台并报告 `Recovered`。缺少旧独立密钥副本时报告 `PartiallyRecoverable` 及稳定影响类别，不返回已经解锁。损坏、不支持格式和保存失败分别使用原损坏分类、`PROFILE_RECOVERY_UNSUPPORTED_CODE` 和 `PROFILE_RECOVERY_PERSISTENCE_FAILED_CODE`，其他启动错误保持原分类。恢复口令通过后若完整后台启动或后续解锁失败，状态必须进入 `Failed`，`can_submit_passphrase=false`、`restart_required=true`；同一进程不得复用已经消费的宿主能力，宿主重启 Engine 后继续。升级备份的安全记录（`security-current` 与各代 `*.record`）只是文件副本的派生物，与其记录密钥共用一个生命周期。出厂重置在清除密钥后、清除资料前作废本 profile 的全部安全记录与记录密钥（文件副本保留且仍可恢复）；升级准备发现记录密钥确定不存在时，把旧安全记录视为不可用，作废后按“尚无记录”重新建立，文件副本校验门槛不变、不被绕过。只有读取安全记录内容的严格路径（删除备份时核对记录、恢复安全材料）在密钥缺失时仍返回稳定的 `PROFILE_UPGRADE_BACKUP_KEY_MISSING_CODE`（1224，`Unavailable`，不可重试），不生成替代材料；存储读取失败、记录损坏或无法解密不属于“密钥缺失”，照常失败。该错误码与邀请域 `INVITATION_FAILED_CODE`（1224）同号，宿主必须按“启动或备份操作上下文 + `Unavailable` + 不可重试”匹配，不得按数字全局判断。
 
 本机已有空间、网络身份文件却缺失时，`Engine::start` 同样返回受限实例：状态为 `PartiallyRecoverable`，损失类别为 `DeviceIdentity`，`can_submit_passphrase=false`。此时不绑定网络，也不生成替代身份；成员历史只认原身份，补发新身份会让其他设备永久拒绝本机。旧版身份目录待改名或存在待应用的配置导入时，身份将在装配阶段写入，不作此判定。受限实例在资料密钥仍可自动打开时接受 `FactoryResetSpace`：只装配重置所需依赖，不启动后台，完成后报告 `restart_required=true`，宿主重启 Engine 后以全新资料启动；资料密钥无法自动打开时该操作返回 `PROFILE_RECOVERY_REQUIRED`。
 
@@ -211,8 +223,16 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 迁移到只含本机的新空间，并保存全部设备需要重新配对的状态。它不等待网络，不清除一般设置、设备身份、
 解锁材料或本机资料；中断和重复调用继续同一个目标空间。`FactoryResetSpace` 则停止
 全部旧运行入口，先清除并确认密钥材料不存在，再清除数据库、空间世代、设置、邀请、关系、准入记录、
-导入暂存和受管缓存。完成后旧 Engine 会话失效，宿主必须重新创建 Engine；启动遇到未完成清理时会续完
-清理并返回可重试的 unavailable，宿主随后再次创建 Engine。`QuerySetupState` 不返回内部服务状态。
+导入暂存和受管缓存。成功结果表示同一个 Engine 已按全新资料重建运行期：随后可直接查询空空间、创建或
+加入空间，再次离开仍然成功，宿主不需要重新创建 Engine；仍然“关闭后重新创建”的宿主结果相同。重建由
+恢复运行期统一负责，全程持有运行期写锁，其间到达的其他操作排队后面对新运行期；宿主级资源（剪贴板变化流）
+在运行期之间归还复用，只在 Engine 最终关闭时关闭。重置本身失败时保持原运行期并返回对应的重置错误码，
+业务操作在完成前返回 `1103`，同一实例再次调用 `FactoryResetSpace` 会从已持久的阶段续做。资料已清除但
+新运行期无法装配时，不报告成功：返回不可重试的 `FACTORY_RESET_RESTART_REQUIRED_CODE`（1375，
+`Unavailable`），发布 `restart_required=true` 的 `ProfileRecoveryChanged`，此后除 `QueryProfileRecovery`
+与生命周期关闭外的操作都返回同一错误码，宿主重新创建 Engine 后以全新资料启动。与离开并发的在途操作
+可能在旧运行期上以 `1103` 结束，重试即可。启动遇到未完成清理时会续完清理并返回可重试的 unavailable，宿主
+随后再次创建 Engine。`QuerySetupState` 不返回内部服务状态。
 
 规格 023 的稳定产品外形已经接入：`JoinSpace` 返回 Active、Pending、Processing、Rejected 四类结果并公开稳定
 `join_id`。Pending 表示加入已经保存但尚未完成本机准备，Processing 表示本机准备完成并等待最终确认收尾；两者跨重启和重复查询都返回同一个 `join_id`，宿主不另存加入编号或推断后台阶段。Pending、Processing 与 Active 的 `peer_upgrade_required` 表示这次加入仍需对端升级，首次请求不兼容则以 Rejected 的稳定原因明确返回。
@@ -330,6 +350,8 @@ HarmonyOS 绑定必须公开相同字段、结果、错误和提醒。
 `ListHistoryEntries` 是旧桌面列表接口迁移期间使用的完整投影，每次必须请求 1 到 1000 条，并保留预览、收藏、标签、链接、文件大小、图片尺寸和内容可用状态。它不替代带稳定分页标记的 `QueryHistory`，新宿主仍应优先使用搜索或 `QueryHistory`。列表、详情和资源结果可以正常携带用户内容，但调试输出不得包含预览、正文、链接、缩略图地址或内联字节。
 
 `GetHistoryEntry` 只适用于可读取为文本的记录；记录不存在返回 `NotFound`，内容不支持文本详情返回 `Conflict`。`SetHistoryEntryFavorite` 对不存在记录同样返回 `NotFound`，不能把未修改任何记录当作成功。
+
+本机历史标签是每台设备自己的历史元数据，不进入任何同步载荷，也不随配对传播。标签 id 是与名称无关的不透明 id，内置标签 id 保持不变并以 `is_builtin` 区分；用户手动关联不是规则标签。名称规则为：去掉首尾空白后转为 NFC，不能为空、不能含控制字符、最多 64 个 Unicode 标量；同名判断忽略大小写，展示保留用户输入；单个 profile 最多 1000 个标签。所有标签操作在加密会话锁定时返回 1405，旧格式 profile 返回 1406；未知标签返回 `NotFound`，合并的来源与目标相同返回输入错误，重复合并或删除因来源已不存在返回 `NotFound`。标签名称、创建时间与记录关联只以 MasterKey AEAD 密文保存；搜索索引中的用户标签成员只以搜索密钥 HMAC 后的词项保存，由权威关联派生，因此索引重建会恢复用户标签过滤。搜索结果的 `tags` 中的用户标签 id 由权威关联补齐；会话锁定时 `QuerySearchTags` 不返回用户标签。删除记录时其关联随之删除。调试输出与日志不包含名称。
 
 `DeleteHistoryEntry` 和 `ClearHistory` 由核心统一清理数据库记录、选择、缓存文件、搜索索引和 blob 引用，宿主不得自行复制清理顺序。批量清空发生部分失败时只返回失败条目标识，不返回底层异常、文件路径或用户内容。
 

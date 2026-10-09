@@ -18,6 +18,11 @@ pub enum ProfileFactoryResetError {
         #[source]
         source: Option<anyhow::Error>,
     },
+    #[error("upgrade backup security records could not be retired")]
+    RetireUpgradeBackupSecurity {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("profile state could not be cleared")]
     ClearState {
         #[source]
@@ -33,6 +38,12 @@ impl ProfileFactoryResetError {
 
     pub fn wipe_keys_from(source: impl Into<anyhow::Error>) -> Self {
         Self::WipeKeys {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn retire_upgrade_backup_security_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::RetireUpgradeBackupSecurity {
             source: Some(source.into()),
         }
     }

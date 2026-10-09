@@ -40,6 +40,7 @@ impl DecideDeviceTrustChangeUseCase {
         }
     }
 
+    #[tracing::instrument(name = "usecase.decide_device_trust_change.execute", skip_all)]
     pub(crate) async fn execute(
         &self,
         input: DecideDeviceTrustChange,

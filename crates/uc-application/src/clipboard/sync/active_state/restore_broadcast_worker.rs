@@ -25,12 +25,12 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, instrument, warn};
+use tracing::instrument;
 
 use uc_core::ports::clipboard::ActiveClipboardDispatchPort;
 use uc_core::ports::{PeerAddressRepositoryPort, PeerReachabilityPort, SettingsPort};
 use uc_core::MemberRepositoryPort;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_debug, uc_warn};
 
 use crate::clipboard::write::RestoreBroadcastRequest;
 use crate::deps::CurrentSpaceMemberScopePort;
@@ -90,7 +90,7 @@ impl RestoreBroadcastWorker {
             let mut latest = match latest {
                 Some(req) => req,
                 None => {
-                    debug!("restore broadcast worker: all senders dropped; exiting");
+                    uc_debug!("restore broadcast worker: all senders dropped; exiting");
                     return;
                 }
             };
@@ -132,7 +132,7 @@ impl RestoreBroadcastWorker {
                 // Fail closed: if we can't confirm the user opted in, don't
                 // announce. A restore that should have broadcast is recovered
                 // by the next restore or a peer-online resync.
-                warn!(
+                uc_warn!(
                     error_kind = "settings_load",
                     io_error_kind = io_error_kind(err.as_ref()),
                     "restore broadcast skipped: settings load failed"
@@ -141,10 +141,7 @@ impl RestoreBroadcastWorker {
             }
         };
         if !sync_on_restore {
-            debug!(
-                snapshot_hash = %request.state.snapshot_hash,
-                "restore broadcast skipped: sync_on_restore disabled"
-            );
+            uc_debug!("restore broadcast skipped: sync_on_restore disabled");
             return;
         }
 

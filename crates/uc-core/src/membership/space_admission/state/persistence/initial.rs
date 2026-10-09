@@ -42,6 +42,7 @@ impl PersistedJoinerInitiatedV1 {
                 encrypted_password_equivalent: AdmissionEncryptedPasswordEquivalent::from_bytes(
                     encrypted_password_equivalent,
                 )
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             },
             PersistedJoinerChannelStateV1::Authenticated {
@@ -59,6 +60,7 @@ impl PersistedJoinerInitiatedV1 {
                 continuation_credential: AdmissionContinuationCredential::from_bytes(
                     continuation_credential,
                 )
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             },
         };
@@ -67,8 +69,10 @@ impl PersistedJoinerInitiatedV1 {
                 .ok_or(SpaceAdmissionPersistenceError::InvalidState)?,
             local_join_ordinal: self.local_join_ordinal,
             source_snapshot: AdmissionSourceSnapshot::from_bytes(self.source_snapshot)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             private_state: AdmissionJoinerPrivateState::from_bytes(self.private_state)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             channel_state,
             pending_exchange: self.pending_exchange.into_domain(admission_id)?,
@@ -112,15 +116,18 @@ impl PersistedJoinerCandidateV1 {
                 .ok_or(SpaceAdmissionPersistenceError::InvalidState)?,
             local_join_ordinal: self.local_join_ordinal,
             source_snapshot: AdmissionSourceSnapshot::from_bytes(self.source_snapshot)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             peer_binding: self.peer_binding.into_domain()?,
             continuation_credential: AdmissionContinuationCredential::from_bytes(
                 self.continuation_credential,
             )
+            // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
             .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             candidate,
             candidate_evidence,
             staged_target_input: AdmissionStagedTargetInput::from_bytes(self.staged_target_input)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
         })
     }
@@ -160,16 +167,20 @@ impl PersistedJoinerPreparedV1 {
                 .ok_or(SpaceAdmissionPersistenceError::InvalidState)?,
             local_join_ordinal: self.local_join_ordinal,
             source_snapshot: AdmissionSourceSnapshot::from_bytes(self.source_snapshot)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             peer_binding: self.peer_binding.into_domain()?,
             continuation_credential: AdmissionContinuationCredential::from_bytes(
                 self.continuation_credential,
             )
+            // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
             .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             candidate_evidence,
             verified_history: AdmissionSignedMembershipHistory::from_bytes(self.verified_history)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             staged_target: AdmissionStagedTarget::from_bytes(self.staged_target)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             pending_exchange,
         })
@@ -206,15 +217,18 @@ impl PersistedSponsorAcceptedV1 {
         }
         Ok(SpaceAdmissionSponsorAccepted {
             invitation_claim: AdmissionInvitationClaim::from_bytes(self.invitation_claim)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             join_request,
             join_request_evidence,
             base_snapshot: AdmissionBaseSnapshot::from_bytes(self.base_snapshot)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             peer_binding: self.peer_binding.into_domain()?,
             continuation_credential: AdmissionContinuationCredential::from_bytes(
                 self.continuation_credential,
             )
+            // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
             .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
         })
     }
@@ -242,15 +256,19 @@ impl PersistedSponsorCandidateV1 {
     ) -> Result<SpaceAdmissionSponsorCandidate, SpaceAdmissionPersistenceError> {
         Ok(SpaceAdmissionSponsorCandidate {
             invitation_claim: AdmissionInvitationClaim::from_bytes(self.invitation_claim)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             base_snapshot: AdmissionBaseSnapshot::from_bytes(self.base_snapshot)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             peer_binding: self.peer_binding.into_domain()?,
             continuation_credential: AdmissionContinuationCredential::from_bytes(
                 self.continuation_credential,
             )
+            // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
             .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             staged_security: AdmissionStagedSecurityState::from_bytes(self.staged_security)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             saved_reply: self.saved_reply.into_domain(admission_id)?,
         })

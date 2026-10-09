@@ -4,10 +4,10 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio::task::{JoinError, JoinHandle};
 use tokio::time::{timeout_at, Instant};
-use tracing::warn;
 
 use super::facade::FileTransferFacade;
 use crate::transfer::blob::facade::BlobTransferFacade;
+use uc_observability_contract::uc_warn;
 
 pub(crate) struct FileTransferTimeoutRuntime {
     cancel: watch::Sender<bool>,
@@ -31,7 +31,7 @@ impl FileTransferTimeoutRuntime {
             Ok(result) => result,
             Err(_) => {
                 // 正在等待的磁盘线程不能靠取消异步等待结束，必须保留原任务到动作完成。
-                warn!(
+                uc_warn!(
                     event = "task.shutdown_slow",
                     task = "file_transfer.timeout_sweep",
                     "file transfer timeout cleanup exceeded shutdown deadline"

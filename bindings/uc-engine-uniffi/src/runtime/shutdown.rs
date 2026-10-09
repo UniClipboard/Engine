@@ -41,7 +41,7 @@ impl MobileEngine {
         let (response, result) = mpsc::channel();
         commands
             .send(LifecycleCommand::Shutdown { deadline, response })
-            // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+            // discarded-source[channel]: `tokio::sync::mpsc::error::SendError<LifecycleCommand>`: the error only means the peer is gone or carries the unsent payload, which must not outlive it
             .map_err(|_| BindingError::RuntimeUnavailable)?;
         match result.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok(result) => result.map(|()| false),
@@ -207,6 +207,41 @@ mod tests {
         assert!(!engine
             .shutdown_pending
             .load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[test]
+    fn a_failed_drop_shutdown_and_a_leaked_worker_are_recorded() {
+        let recorder = crate::runtime::event_recorder::EventRecorder::default();
+        let dispatch = tracing::Dispatch::new(recorder.clone());
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+        let (commands, requests) = tokio::sync::mpsc::unbounded_channel();
+        let (lifecycle_commands, lifecycle_requests) = tokio::sync::mpsc::unbounded_channel();
+        drop(requests);
+        drop(lifecycle_requests);
+        let (release, released) = mpsc::channel::<()>();
+        let worker = std::thread::spawn(move || {
+            let _ = released.recv();
+            Ok(())
+        });
+        let engine = MobileEngine {
+            commands: Mutex::new(Some(commands)),
+            lifecycle_commands: Mutex::new(Some(lifecycle_commands)),
+            shutdown_pending: AtomicBool::new(false),
+            events: Arc::new(EventQueue::new(1)),
+            worker: WorkerJoin::new(worker),
+        };
+
+        drop(engine);
+
+        let lines = recorder.lines().join("\n");
+        assert_eq!(
+            lines.matches("mobile operation failed").count(),
+            2,
+            "{lines}"
+        );
+        assert!(lines.contains("drop_shutdown_failed"), "{lines}");
+        assert!(lines.contains("drop_worker_leaked"), "{lines}");
+        release.send(()).unwrap();
     }
 
     #[test]

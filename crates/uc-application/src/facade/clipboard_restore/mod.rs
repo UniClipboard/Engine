@@ -8,7 +8,9 @@ use uc_core::ports::{
     clipboard::{AdvanceActiveClipboardPort, ClipboardPayloadResolverPort, PayloadResolveError},
     ClipboardSelectionRepositoryPort, ClockPort, DeviceIdentityPort,
 };
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_id, uc_info, uc_warn,
+};
 
 use crate::deps::{ClipboardEntryPorts, ClipboardRepresentationPorts};
 
@@ -43,11 +45,11 @@ pub enum ClipboardRestoreError {
     /// restore was asked for an entry that carries no restorable file paths.
     /// A client-side request problem, not a server fault: the API layer should
     /// map this to 400 Bad Request, **not** 500.
-    #[error("clipboard restore not applicable: {0}")]
+    #[error("clipboard restore not applicable")]
     NotApplicable(String),
 
-    #[error("clipboard restore failed: {0}")]
-    Internal(String),
+    #[error("clipboard restore failed")]
+    Internal(#[source] anyhow::Error),
 }
 
 /// Dependency bundle for `ClipboardRestoreFacade`. Composition roots build
@@ -215,8 +217,8 @@ impl ClipboardRestoreFacade {
                 Ok(())
             }
             PlainRestoreOutcome::NoPlainTextAvailable => {
-                tracing::info!(
-                    entry_id = %entry_id,
+                uc_info!(
+                    entry_id = log_id(&entry_id),
                     "restore_entry_as_plain_text: no plain rep available, falling back to multi-format restore"
                 );
                 self.restore_uc
@@ -245,10 +247,10 @@ impl ClipboardRestoreFacade {
 
     async fn touch_after_restore(&self, parsed_id: &EntryId, entry_id: &str) {
         if let Err(err) = self.touch_uc.execute(parsed_id).await {
-            tracing::warn!(
+            uc_warn!(
                 error_kind = "entry_touch",
                 io_error_kind = io_error_kind(err.as_ref()),
-                entry_id = %entry_id,
+                entry_id = log_id(&entry_id),
                 "touch_clipboard_entry failed after restore"
             );
         }
@@ -286,11 +288,10 @@ fn map_restore_error(err: anyhow::Error, entry_id: &str) -> ClipboardRestoreErro
         return ClipboardRestoreError::NotApplicable(no_paths.to_string());
     }
 
-    let message = err.to_string();
-    if message.to_lowercase().contains("not found") {
+    if err.to_string().to_lowercase().contains("not found") {
         ClipboardRestoreError::NotFound
     } else {
-        ClipboardRestoreError::Internal(message)
+        ClipboardRestoreError::Internal(err)
     }
 }
 
@@ -339,7 +340,8 @@ mod tests {
 
         let mapped = map_restore_error(err, "entry-3");
         match mapped {
-            ClipboardRestoreError::Internal(msg) => {
+            ClipboardRestoreError::Internal(source) => {
+                let msg = source.to_string();
                 assert!(msg.to_lowercase().contains("integrity") || msg.contains("corrupt"));
             }
             other => panic!("expected Internal, got {other:?}"),
@@ -365,8 +367,8 @@ mod tests {
         let err = anyhow::anyhow!("write coordinator deadlocked");
         let mapped = map_restore_error(err, "entry-6");
         match mapped {
-            ClipboardRestoreError::Internal(msg) => {
-                assert_eq!(msg, "write coordinator deadlocked");
+            ClipboardRestoreError::Internal(source) => {
+                assert_eq!(source.to_string(), "write coordinator deadlocked");
             }
             other => panic!("expected Internal, got {other:?}"),
         }

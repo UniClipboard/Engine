@@ -10,13 +10,14 @@ use tokio::sync::{
 };
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
 
 use super::{resurface_entry, ActiveClipboardConvergedEvent, ActiveClipboardFacade};
 use crate::clipboard::sync::active_state::peer_online_resync_worker::PeerOnlineResyncWorker;
 use crate::clipboard::sync::active_state::restore_broadcast_worker::RestoreBroadcastWorker;
 use crate::clipboard::write::RestoreBroadcastRequest;
 use crate::runtime_lifecycle::LifecycleError;
+use uc_observability_contract::diagnostics::{record_task_join_failure, DiagnosticTaskKind};
+use uc_observability_contract::{uc_debug, uc_warn};
 
 impl ActiveClipboardFacade {
     /// 启动并持有当前剪贴板的全部后台工作，装配方只通过返回值管理其生命周期。
@@ -113,7 +114,7 @@ impl ActiveClipboardFacade {
                     .await;
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
-                    debug!(
+                    uc_debug!(
                         missed = n,
                         "resurface worker lagged; some entries may not resurface immediately"
                     );
@@ -280,10 +281,16 @@ impl ActiveClipboardWorkerSupervisor {
                 joined = workers.join_next(), if !workers.is_empty() => {
                     match joined {
                         Some(Ok(worker)) => {
+                            uc_warn!(
+                                error_kind = "required_worker_stopped",
+                                worker = worker,
+                                "required active clipboard worker stopped; stopping the group"
+                            );
                             errors.push(RequiredActiveClipboardWorkerStopped { worker }.into());
                             self.cancel.cancel();
                         }
                         Some(Err(source)) => {
+                            record_task_join_failure(DiagnosticTaskKind::ActiveClipboardWorker);
                             errors.push(source.into());
                             self.cancel.cancel();
                         }
@@ -294,6 +301,7 @@ impl ActiveClipboardWorkerSupervisor {
         }
         while let Some(joined) = workers.join_next().await {
             if let Err(source) = joined {
+                record_task_join_failure(DiagnosticTaskKind::ActiveClipboardWorker);
                 errors.push(source.into());
             }
         }
@@ -403,6 +411,51 @@ mod lifecycle_tests {
             .unwrap()
             .is_panic());
         assert!(!format!("{error:?} {error}").contains("PRIVATE"));
+    }
+
+    fn lifecycle_with_worker(
+        worker: impl std::future::Future<Output = &'static str> + Send + 'static,
+    ) -> (ActiveClipboardLifecycle, CancellationToken) {
+        let mut workers = JoinSet::new();
+        workers.spawn(worker);
+        let starter: RestoreWorkerStarter =
+            Arc::new(|_rx, cancel| Box::pin(async move { cancel.cancelled().await }));
+        let cancel = CancellationToken::new();
+        let (commands, receiver) = mpsc::unbounded_channel();
+        let lifecycle =
+            ActiveClipboardLifecycle::start(workers, starter, commands, receiver, cancel.clone());
+        (lifecycle, cancel)
+    }
+
+    #[tokio::test]
+    async fn required_worker_stopping_early_is_recorded_with_its_fixed_name() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let (lifecycle, cancel) = lifecycle_with_worker(async { "inbound" });
+        cancel.cancelled().await;
+        lifecycle.shutdown().await.unwrap_err();
+
+        assert_eq!(logs.count("required active clipboard worker stopped"), 1);
+        assert!(logs
+            .output()
+            .contains("error_kind=\"required_worker_stopped\""));
+        assert!(logs.output().contains("worker=\"inbound\""));
+    }
+
+    #[tokio::test]
+    async fn panicked_required_worker_is_recorded_as_a_task_join_failure() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let (lifecycle, cancel) = lifecycle_with_worker(async {
+            assert!(false, "PRIVATE_WORKER_FAILURE");
+            "unreachable"
+        });
+        cancel.cancelled().await;
+        lifecycle.shutdown().await.unwrap_err();
+
+        assert_eq!(logs.count("uc.task.join_failed"), 1);
+        assert_eq!(logs.count("active_clipboard_worker"), 1);
+        assert!(!logs.output().contains("PRIVATE"));
     }
 
     #[tokio::test]

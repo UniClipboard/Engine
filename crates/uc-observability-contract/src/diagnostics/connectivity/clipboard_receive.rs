@@ -110,16 +110,4 @@ impl ClipboardReceiveFailure {
             Self::ApplyIoFailed => ("apply", "io_failed"),
         }
     }
-
-    pub(super) fn source_chain(self) -> Option<[&'static str; 4]> {
-        match self {
-            Self::ApplyPermissionDenied
-            | Self::ApplyStorageFull
-            | Self::ApplyReadOnly
-            | Self::ApplyIoFailed => {
-                Some(["clipboard_receive", "apply", "io", self.local_fields().1])
-            }
-            _ => None,
-        }
-    }
 }

@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tokio::sync::{Mutex, RwLock};
-use tracing::warn;
+
 use uc_core::mobile_sync::{MobileDeviceId, StagedFile, StagingHandle};
 use uc_core::ports::MobileFileStagingPort;
 use uc_core::{FileTransferCancellationReason, FileTransferFailureReason};
@@ -16,6 +16,7 @@ use crate::usecases::apply_incoming::{
 use uc_application::facade::file_transfer::{
     BeginReceiverTransfer, FileTransferFacade, ReceiverTransferHandle, ReceiverTransferRegistration,
 };
+use uc_observability_contract::uc_warn;
 
 const MOBILE_UPLOAD_PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 const MOBILE_UPLOAD_HANDLE_PREFIX: &str = "uc-mobile-upload-v1:";
@@ -263,7 +264,7 @@ impl MobileFileUploadCoordinator {
     ) -> Result<(), MobileFileUploadError> {
         let _operation = self.lifecycle_gate.read().await;
         let appended_bytes =
-            // TryFromIntError：目标分类完整表达数值范围不符。
+            // discarded-source[int-conversion]: `TryFromIntError`: the target classification already expresses the range or length mismatch
             u64::try_from(chunk.len()).map_err(|_| MobileFileUploadError::InvalidInput)?;
         let upload = self
             .registry
@@ -418,7 +419,7 @@ impl MobileFileUploadCoordinator {
                 .is_err()
             {
                 failed = true;
-                warn!("mobile file upload close could not settle one transfer");
+                uc_warn!("mobile file upload close could not settle one transfer");
             }
         }
         if failed {
@@ -472,7 +473,7 @@ impl MobileFileUploadCoordinator {
             .await
             .is_err()
         {
-            warn!("mobile file upload failure could not settle transfer");
+            uc_warn!("mobile file upload failure could not settle transfer");
         }
     }
 }
@@ -502,7 +503,7 @@ mod tests {
         SeedProvisionalReceivePort,
     };
     use uc_core::{FileTransferCancellationReason, FileTransferEvent, FileTransferFailureReason};
-    use uc_infra::file_transfer::{InMemoryEventPublisher, InMemoryEventStore};
+    use uc_infra_storage::file_transfer::{InMemoryEventPublisher, InMemoryEventStore};
 
     use crate::usecases::apply_incoming::{
         ApplyIncomingMobileClipError, ApplyIncomingMobileClipOutcome,

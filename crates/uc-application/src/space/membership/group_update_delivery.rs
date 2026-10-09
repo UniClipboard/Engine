@@ -1,8 +1,10 @@
 use std::collections::HashSet;
 use std::sync::Arc;
+use uc_core::error_class::ErrorClass;
 use uc_observability_contract::diagnostics::connectivity::{
     record_pending_group_updates, LocalWorkObservation, LocalWorkOutcome, LocalWorkStep,
 };
+use uc_observability_contract::{uc_debug, uc_warn};
 
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
@@ -226,6 +228,7 @@ impl DeliverPendingGroupUpdatesUseCase {
 
 #[async_trait::async_trait]
 impl DeliverPendingGroupUpdatesPort for DeliverPendingGroupUpdatesUseCase {
+    #[tracing::instrument(name = "usecase.deliver_pending_group_updates.deliver", skip_all)]
     async fn deliver_pending_group_updates(
         &self,
         _trigger: &MembershipMaintenanceTrigger,
@@ -255,8 +258,21 @@ fn classify_store_error(error: &KeyEpochError) -> MembershipMaintenanceStepOutco
         KeyEpochError::Repository(_)
         | KeyEpochError::StateIssue(_)
         | KeyEpochError::SecurityState { .. }
-        | KeyEpochError::SpaceNotReady => MembershipMaintenanceStepOutcome::Deferred,
-        _ => MembershipMaintenanceStepOutcome::Corrupt,
+        | KeyEpochError::SpaceNotReady => {
+            uc_debug!(
+                error_class = error.class(),
+                "group update store unavailable; delivery deferred"
+            );
+            MembershipMaintenanceStepOutcome::Deferred
+        }
+        _ => {
+            uc_warn!(
+                error_kind = "group_update_store",
+                error_class = error.class(),
+                "group update store is corrupt; delivery stopped"
+            );
+            MembershipMaintenanceStepOutcome::Corrupt
+        }
     }
 }
 
@@ -748,5 +764,31 @@ mod tests {
             .iter()
             .all(|update_id| acknowledged.contains(update_id)));
         assert_eq!(acknowledged.len(), MAX_UPDATES_PER_ROUND);
+    }
+}
+
+#[cfg(test)]
+mod store_error_log_tests {
+    use uc_core::membership::KeyEpochError;
+
+    use super::*;
+
+    #[test]
+    fn a_corrupt_store_error_is_recorded_and_a_transient_one_stays_out_of_warnings() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+
+        assert_eq!(
+            classify_store_error(&KeyEpochError::InvalidRevocationRecord),
+            MembershipMaintenanceStepOutcome::Corrupt
+        );
+        assert_eq!(
+            classify_store_error(&KeyEpochError::SpaceNotReady),
+            MembershipMaintenanceStepOutcome::Deferred
+        );
+
+        assert_eq!(logs.count("group update store is corrupt"), 1);
+        assert!(logs.output().contains("error_kind=\"group_update_store\""));
+        assert_eq!(logs.count("WARN"), 1);
     }
 }

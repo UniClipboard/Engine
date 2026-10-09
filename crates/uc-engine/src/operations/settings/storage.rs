@@ -2,10 +2,10 @@
 
 use crate::error_codes::*;
 
-use tracing::error;
 use uc_application::facade::{AppFacade, StorageFacadeError, StorageStatsView};
 
 use crate::{EngineError, EngineErrorCategory, OperationResult, StorageStatsSummary};
+use uc_observability_contract::uc_error;
 
 pub async fn execute_query_storage_stats(
     facade: &AppFacade,
@@ -44,6 +44,6 @@ pub(crate) fn map_storage_error(error: StorageFacadeError) -> EngineError {
         StorageFacadeError::Stats(_) => QUERY_STORAGE_STATS_FAILED_CODE,
         StorageFacadeError::ClearCache(_) => CLEAR_STORAGE_CACHE_FAILED_CODE,
     };
-    error!(code, "engine storage operation failed");
+    uc_error!(code = code, "engine storage operation failed");
     EngineError::new(code, EngineErrorCategory::Internal, false)
 }

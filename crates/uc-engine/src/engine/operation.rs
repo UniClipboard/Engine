@@ -2,7 +2,7 @@ use std::future::Future;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use tokio::task::JoinHandle;
+use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, Span};
 use uc_observability_contract::diagnostics::{record_task_join_failure, DiagnosticTaskKind};
@@ -102,7 +102,12 @@ pub(super) async fn await_operation_completion<T>(
     tokio::select! {
         biased;
         _ = cancellation.cancelled() => Err(operation_cancelled_error()),
-        // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
-        result = task => result.map_err(|_| EngineError::new(1108, EngineErrorCategory::Internal, true))?,
+        result = task => result.map_err(operation_task_failed)?,
     }
+}
+
+/// JoinError 只区分 panic 与中止，任务类别即完整分类；宿主只收到稳定错误码。
+fn operation_task_failed(_: JoinError) -> EngineError {
+    record_task_join_failure(DiagnosticTaskKind::EngineOperation);
+    EngineError::new(1108, EngineErrorCategory::Internal, true)
 }

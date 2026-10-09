@@ -57,19 +57,8 @@ fn member_update_detail_is_consumed_once_into_the_actual_local_file() {
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0]["fields"]["error.phase"], "persist_state");
     assert_eq!(rows[0]["fields"]["error.reason"], "permission_denied");
-    assert_eq!(
-        rows[0]["fields"]["error.chain"],
-        serde_json::json!([
-            "space_device_update",
-            "persist_state",
-            "io",
-            "permission_denied"
-        ])
-    );
-    assert_eq!(
-        rows[0]["fields"]["error.call_path"],
-        rows[0]["fields"]["error.chain"]
-    );
+    assert!(rows[0]["fields"].get("error.chain").is_none());
+    assert!(rows[0]["fields"].get("error.call_path").is_none());
     assert!(rows[1]["fields"].get("error.phase").is_none());
     assert_eq!(rows[0]["run_id"], rows[1]["run_id"]);
     handle.shutdown(Duration::from_secs(2));

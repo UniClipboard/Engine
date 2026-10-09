@@ -37,7 +37,7 @@
 use std::sync::Arc;
 
 use thiserror::Error;
-use tracing::{debug, instrument, warn};
+use tracing::instrument;
 
 use uc_core::ports::mobile_sync::{
     LatestClipboardSnapshotError, LatestClipboardSnapshotPort, MobileFileStagingError,
@@ -48,6 +48,10 @@ use crate::usecases::clipboard_doc::SyncClipboardItemType;
 
 use super::sync_clipboard_mapping::{
     classify_for_sync, derive_data_name, effective_image_mime_for_sync,
+};
+use uc_observability_contract::{
+    log_fields::{log_id, log_vocab},
+    uc_debug, uc_warn,
 };
 
 /// File 类型出站时,wire mime 的 fallback。SyncClipboard 协议对 file 字节
@@ -116,9 +120,8 @@ impl GetMobileSyncFileUseCase {
         let derived_name = match derived {
             Some(name) => name,
             None => {
-                debug!(
-                    entry_id = %rep.entry_id,
-                    item_type = ?item_type,
+                uc_debug!(
+                    entry_id = log_id(&rep.entry_id),
                     "mobile_sync get_file: rep has no dataName, returning NotFound"
                 );
                 return Err(GetMobileSyncFileError::NotFound);
@@ -126,10 +129,8 @@ impl GetMobileSyncFileUseCase {
         };
 
         if derived_name != requested {
-            debug!(
-                entry_id = %rep.entry_id,
-                derived = %derived_name,
-                requested = %requested,
+            uc_debug!(
+                entry_id = log_id(&rep.entry_id),
                 "mobile_sync get_file: dataName mismatch, returning NotFound"
             );
             return Err(GetMobileSyncFileError::NotFound);
@@ -138,8 +139,8 @@ impl GetMobileSyncFileUseCase {
         // Group 不应该走到这里(classify_for_sync 不产 Group),保留 warn
         // 兜底 + 当 NotFound 拒绝, 避免泄露语义不明的字节。
         if matches!(item_type, SyncClipboardItemType::Group) {
-            warn!(
-                entry_id = %rep.entry_id,
+            uc_warn!(
+                entry_id = log_id(&rep.entry_id),
                 "mobile_sync get_file: classify produced Group unexpectedly, refusing"
             );
             return Err(GetMobileSyncFileError::NotFound);
@@ -149,8 +150,8 @@ impl GetMobileSyncFileUseCase {
         // 自带字节,直接返。
         if matches!(item_type, SyncClipboardItemType::File) {
             let uri = parse_first_uri_from_uri_list(&rep.bytes).ok_or_else(|| {
-                debug!(
-                    entry_id = %rep.entry_id,
+                uc_debug!(
+                    entry_id = log_id(&rep.entry_id),
                     "mobile_sync get_file: file rep has no parseable URI in body, returning NotFound"
                 );
                 GetMobileSyncFileError::NotFound
@@ -162,8 +163,8 @@ impl GetMobileSyncFileUseCase {
                 .await
                 .map_err(|err| match err {
                     MobileFileStagingError::NotFound => {
-                        debug!(
-                            entry_id = %rep.entry_id,
+                        uc_debug!(
+                            entry_id = log_id(&rep.entry_id),
                             "mobile_sync get_file: staging read_by_uri NotFound"
                         );
                         GetMobileSyncFileError::NotFound
@@ -172,16 +173,16 @@ impl GetMobileSyncFileUseCase {
                     // adapter 不应在 read_by_uri 路径返这个变体, 防御式翻成
                     // Staging IO 错误便于排障。
                     error @ MobileFileStagingError::InvalidDataName(_) => {
-                        warn!(
-                            entry_id = %rep.entry_id,
+                        uc_warn!(
+                            entry_id = log_id(&rep.entry_id),
                             "mobile_sync get_file: unexpected InvalidDataName from read_by_uri"
                         );
                         GetMobileSyncFileError::Staging(error)
                     }
                 })?;
 
-            debug!(
-                entry_id = %rep.entry_id,
+            uc_debug!(
+                entry_id = log_id(&rep.entry_id),
                 bytes_len = bytes.len(),
                 "mobile_sync get_file: served staged file bytes"
             );
@@ -197,10 +198,9 @@ impl GetMobileSyncFileUseCase {
             .or_else(|| rep.mime.as_ref().map(|m| m.as_str().to_string()))
             .unwrap_or_else(|| FILE_OUTBOUND_MIME_FALLBACK.to_string());
 
-        debug!(
-            entry_id = %rep.entry_id,
-            item_type = ?item_type,
-            mime = %mime,
+        uc_debug!(
+            entry_id = log_id(&rep.entry_id),
+            mime = log_vocab(&mime),
             bytes_len = rep.bytes.len(),
             "mobile_sync get_file: serving preview rep bytes"
         );

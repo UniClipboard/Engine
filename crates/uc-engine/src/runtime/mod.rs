@@ -7,6 +7,7 @@ mod lan_compatibility;
 #[cfg(feature = "lan-compat")]
 mod mobile_upload;
 mod profile_recovery;
+mod reusable_host;
 mod session_supervisor;
 mod shutdown;
 mod task_shutdown;
@@ -18,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
-use tracing::{error, warn};
+
 use uc_application::deps::{LifecycleError, ProfileUpgradeBackupPort};
 use uc_application::facade::{
     AppFacade, ApplicationRuntime, NetworkRecoveryEvent, ProfileFactoryResetFacade,
@@ -26,7 +27,7 @@ use uc_application::facade::{
 };
 use uc_core::ports::ClockPort;
 use uc_core::TaskRegistry;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_error, uc_warn};
 
 use crate::assembly::host::{
     wire_host_capabilities_with_emitter, EngineHostEventEmitter, HostWiring,
@@ -50,7 +51,7 @@ const OPERATION_UNAVAILABLE_CODE: u32 = 1103;
 
 pub(crate) struct ProductionRuntime {
     app_version: String,
-    security_lifecycle: Arc<uc_infra::space::RuntimeSpaceAccessAdapter>,
+    security_lifecycle: Arc<uc_infra_profile::space::RuntimeSpaceAccessAdapter>,
     session_supervisor: Arc<SessionSupervisor>,
     profile_reset: Arc<ProfileFactoryResetFacade>,
     network_recovery: Arc<uc_application::facade::NetworkRecoveryFacade>,
@@ -67,13 +68,13 @@ pub(crate) struct ProductionRuntime {
     clipboard_change_runtime: HostClipboardChangeRuntime,
     events: EventSender,
     #[cfg(feature = "dev-tools")]
-    network_partition_gate: uc_infra::network::iroh::IrohNetworkPartitionGate,
+    network_partition_gate: uc_infra_p2p::network::iroh::IrohNetworkPartitionGate,
     #[cfg(feature = "dev-tools")]
     joiner_final_confirmation_gate: Arc<JoinerFinalConfirmationGate>,
 }
 
 // 启动过程中还没有 ProductionRuntime；失败或取消也要封口已有安全会话。
-struct StartupSecurityGuard(Option<Arc<uc_infra::space::RuntimeSpaceAccessAdapter>>);
+struct StartupSecurityGuard(Option<Arc<uc_infra_profile::space::RuntimeSpaceAccessAdapter>>);
 impl Drop for StartupSecurityGuard {
     fn drop(&mut self) {
         if let Some(access) = &self.0 {
@@ -162,14 +163,15 @@ impl ProductionRuntime {
         paths: uc_core::app_dirs::AppPaths,
         events: EventSender,
         progress: Arc<crate::engine::startup::StartupProgressStore>,
-        profile_key_recovery: Arc<uc_infra::security::ProfileKeyRecoveryStore>,
+        profile_key_recovery: Arc<uc_infra_profile::security::ProfileKeyRecoveryStore>,
     ) -> Result<Self, EngineError> {
         let app_version = config.app_version().to_string();
         let rendezvous_base_url = config.rendezvous_base_url_override();
         let relay_fallback_override = config.test_relay_fallback_override();
         let iroh_bind_port_override = config.test_iroh_bind_port_override();
         #[cfg(feature = "dev-tools")]
-        let network_partition_gate = uc_infra::network::iroh::IrohNetworkPartitionGate::default();
+        let network_partition_gate =
+            uc_infra_p2p::network::iroh::IrohNetworkPartitionGate::default();
         #[cfg(feature = "dev-tools")]
         let joiner_final_confirmation_gate = Arc::new(JoinerFinalConfirmationGate::default());
         let emitter = Arc::new(EngineHostEventEmitter::new(events.clone()));
@@ -215,6 +217,7 @@ impl ProductionRuntime {
             Arc::clone(&wired.profile_reset.lifecycle_repository),
             profile_runtime_port,
             Arc::clone(&wired.profile_reset.keys),
+            Arc::clone(&wired.profile_reset.backup_security),
             Arc::clone(&wired.profile_reset.state),
         ));
         if profile_reset
@@ -379,7 +382,7 @@ async fn spawn_space_transition_watcher(
                     }
                     Ok(None) => {}
                     Err(error) => {
-                        warn!(
+                        uc_warn!(
                             error_code = error.code(),
                             retryable = error.is_retryable(),
                             "runtime Space transition attempt failed"
@@ -414,8 +417,15 @@ fn startup_error(
         std::io::stderr().lock(),
         "uc-engine startup failed [{context}] io_error_kind={io_kind:?}"
     );
-    error!(context, io_error_kind = io_kind, "engine startup failed");
-    if error_chain_contains::<uc_infra::security::ProfileUpgradeBackupRecordKeyMissing>(&error) {
+    uc_error!(
+        context = context,
+        io_error_kind = io_kind,
+        error = &error as &dyn std::error::Error,
+        "engine startup failed"
+    );
+    if error_chain_contains::<uc_infra_profile::security::ProfileUpgradeBackupRecordKeyMissing>(
+        &error,
+    ) {
         return EngineError::new(
             PROFILE_UPGRADE_BACKUP_KEY_MISSING_CODE,
             EngineErrorCategory::Unavailable,
@@ -462,8 +472,8 @@ fn operation_error_with_code(
     error: impl Into<Box<dyn Error + Send + Sync>>,
 ) -> EngineError {
     let error = error.into();
-    error!(
-        context,
+    uc_error!(
+        context = context,
         io_error_kind = io_error_kind(error.as_ref()),
         "engine operation failed"
     );
@@ -478,8 +488,8 @@ fn retryable_operation_error_with_code(
     error: impl Into<Box<dyn Error + Send + Sync>>,
 ) -> EngineError {
     let error = error.into();
-    error!(
-        context,
+    uc_error!(
+        context = context,
         io_error_kind = io_error_kind(error.as_ref()),
         "engine operation temporarily unavailable"
     );
@@ -517,7 +527,7 @@ mod tests {
     fn missing_upgrade_backup_key_has_a_stable_non_retryable_startup_result() {
         let error = startup_error(
             "dependency wiring",
-            uc_infra::security::ProfileUpgradeBackupRecordKeyMissing,
+            uc_infra_profile::security::ProfileUpgradeBackupRecordKeyMissing,
         );
         assert_eq!(
             error.code(),

@@ -76,7 +76,7 @@ Relationship: `AuthenticatedPeer` 已能对单一当前成员跳过周期退避�
 
 ```text
 Component: Iroh 普通成员入站处理
-Path: crates/uc-infra/src/network/iroh/peer_reachability_adapter.rs
+Path: crates/uc-infra-p2p/src/network/iroh/peer_reachability_adapter.rs
 Responsibility: 从连接公钥派生指纹、映射本机成员、检查准入、维护已验证连接和发布 Online/Offline。
 Relationship: 它是最早同时拥有传输身份和本机成员映射的边界；适合报告联系事实，但不得决定成员恢复流程。
 ```
@@ -90,7 +90,7 @@ Relationship: 只创建并传递联系事件通道，不读取事件、不选择
 
 ```text
 Component: 已配对设备地址仓储
-Path: crates/uc-core/src/ports/peer_address.rs, crates/uc-infra/src/db/repositories/peer_address_repo.rs
+Path: crates/uc-core/src/ports/peer_address.rs, crates/uc-infra-storage/src/db/repositories/peer_address_repo.rs
 Responsibility: 以加密关系记录保存 adapter 定义的地址提示。
 Relationship: 当前配对和成员材料会保存 `to_persistable_addr` 结果；有 relay 时剥离动态直连地址，无 relay 时仍保留直连地址。后续切片只写回经过身份和成功交换共同验证的稳定 relay。
 ```
@@ -205,7 +205,7 @@ KnownPeerContact
 
 ### Step 4
 
-- **File**：`crates/uc-infra/src/network/iroh/peer_reachability_adapter.rs`、`node.rs`
+- **File**：`crates/uc-infra-p2p/src/network/iroh/peer_reachability_adapter.rs`、`node.rs`
 - **Change**：已知身份在准入检查前报告联系；增加已知未准入会报告、未知不会报告、报告后仍不 Online 的测试。
 - **Risk**：成员仓储可能包含已经不在当前同步范围的旧事实；Application 定向同步必须再次核对当前范围并失败关闭。
 
@@ -225,7 +225,7 @@ KnownPeerContact
 
 ### Step 7
 
-- **File**：`crates/uc-infra/src/network/iroh/persistable_addr.rs` 及完成身份与成员验证的协议 adapter
+- **File**：`crates/uc-infra-p2p/src/network/iroh/persistable_addr.rs` 及完成身份与成员验证的协议 adapter
 - **Change**：定义“可长期保存”的唯一转换：NodeId 加已验证 relay；无 relay 时返回无稳定提示，不用新观察覆盖已有稳定 relay。
 - **Risk**：当前 LAN-only 依赖直连地址；该模式不能被 P2P 稳定地址规则误伤，需单独保留用户明确选择的 LAN 语义。
 
@@ -353,7 +353,7 @@ Implementation: 不增加 frame 字段、ALPN 或版本协商。
 2. 现有 PeerOnline 维护仍执行原完整顺序，剪贴板与成员更新投递行为不变。
 3. 暂停期间不开始联系驱动的网络工作；恢复后运行原 Resume 全轮。
 4. `cargo test -p uc-application --lib --locked space::membership::`。
-5. `cargo test -p uc-infra --lib --locked peer_reachability -- --test-threads=1`。
+5. `cargo test -p uc-infra-p2p --lib --locked peer_reachability -- --test-threads=1`。
 6. 第一切片接线后运行 `cargo check --workspace --all-targets --locked` 与仓库交付门禁。
 7. 第三切片在 Linux 串行运行 `bash scripts/testing/run-connection-recovery-e2e.sh --suite network --repeat 3`。
 
@@ -420,3 +420,11 @@ Windows 实机验收还需要可控的防火墙或隔离网络环境，以证明
 - 恢复前没有调用手动刷新、宿主机会通知或正文发送；恢复后双向正文传输均成功。
 - 证据导出已确认清理完成、未包含测试正文，运行结果无失败。
 - Windows 实机与真实公网验收未执行，继续登记为跳过。
+
+### 2026-10-03 单向联系验收前提修正
+
+- Linux CI 与本地独立网络均复现：A、C 已经 Online，但连接方向为 A 出站、C 入站，原方向断言在 20 秒截止点失败。
+- 旧规则只丢弃 UDP `ct state new`。同一 UDP 流双向通信后，conntrack 状态不能继续证明 QUIC 的 client/server 角色；此前的 ping 丢包计数也不能证明 reachability 拨号被禁止。因此上面的历史通过记录不构成可靠的单向发起证明。
+- 验收宿主改为复用 Engine 已有 `RejectNewConnections` dev-tools 能力，仅阻止 A 对 C 的新 reachability 拨号。成员历史交换、入站响应和已有连接仍正常工作，不修改产品恢复流程，也不增加手动恢复触发。
+- 旧端口关闭、新端口监听、本地发现阻断、20 秒自动 Online、C 出站/A 入站与双向正文传输断言保持；工件额外保存方向计数变化和实际拒绝拨号次数，失败时同样保留方向证据。
+- 本地 ARM Linux 隔离网络连续三轮通过，自动 Online 分别为 1578、1524、2176 毫秒；A 实际拒绝拨号分别为 2、2、1 次。每轮双向传输通过，清理与测试正文持久化明文扫描通过；GitHub 的 x86_64 runner 和 Windows/移动实机本次未执行。

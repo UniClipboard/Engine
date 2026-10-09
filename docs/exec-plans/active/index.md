@@ -3,6 +3,7 @@
 这里包含设计中、实施中、待实现或暂时阻塞的工作。状态以各文件开头为准。
 
 - [034 确定性虚拟 Peer Network 测试套件](034-deterministic-virtual-peer-network-test-suite.md)
+- [144 `uc-infra` 拆成 7 个 crate](144-uc-infra-crate-split.md)（收尾中：S1–S6 实施完成并归档实施记录；main coverage 已转绿，验收中仍有部分满足与未测项）
 - [038 双设备配对本机耗时压缩到一秒](038-pairing-local-latency-budget.md)（实施中）
 - [039 历史本地调试记录逐项收口](039-local-debug-inventory-cleanup.md)
 - [041 可导出的连接故障调查记录](041-exportable-connection-diagnostics.md)（含 Engine、手机、桌面宿主及联合验收，进度见正文）
@@ -25,6 +26,9 @@
 - [Peer Address 读取失败的准确诊断](2026-09-22-peer-address-read-diagnostics.md)（实施完成，等待下游现场诊断）
 - [Core 边界收口](2026-09-23-core-boundary-remediation.md)（提议：违规清单已完成第一轮盘点，修复未开始）
 - [大图发送前本地准备性能与诊断](2026-09-18-large-image-publish-latency.md)（实施中）
+- [本机历史标签](2026-10-04-local-history-tags.md)（本地实现与端到端验收完成，等待合并）
 - [统一暂停、恢复与中断恢复](2026-09-12-unified-runtime-lifecycle.md)（实施中，剩余设备与产品宿主验收未完成；包含已有后台问题修复记录入口）
 
 计划完成时先更新稳定设计/ADR 和验收证据，再移入 `../completed/`。
+
+- [剪贴板启动核对与宿主导入恢复](2026-10-07-clipboard-startup-recovery.md)（实施中，关联 #1886）

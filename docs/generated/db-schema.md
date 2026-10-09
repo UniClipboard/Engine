@@ -2,7 +2,7 @@
 
 > 生成日期：2026-09-01
 >
-> 权威来源：`crates/uc-infra/src/db/schema.rs` 与 `crates/uc-infra/migrations/`
+> 权威来源：`crates/uc-infra-storage/src/db/schema.rs` 与 `crates/uc-infra-storage/migrations/`
 > 本文件是导航快照；字段、约束和迁移顺序以源码为准。
 
 当前 Diesel schema 声明 28 张表：

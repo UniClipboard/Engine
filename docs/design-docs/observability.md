@@ -34,6 +34,9 @@
   网络往返只是其中的工作，不默认成为新的业务入口。
 - Application 完整流程负责人持有不透明关联上下文；Engine 只装饰既有完整能力，不能新增业务步骤查询、读取内部状态或编排流程。
   Core 不增加观测字段。运行期恢复和关闭由其现有生命周期负责人承担，不把技术生命周期伪装成业务流程。
+- 业务动作的完成记录由流程负责人写（例如移除成员、取消加入在 Application 用例内记录成功、可预期拒绝与失败），Engine
+  只把结果映射为稳定错误码，不再为同一结果写第二条边界日志。Engine 与 Application 在同一任务内调用，父子关系由 span 自然成立，
+  不需要额外的观测上下文类型。Infra 端口的能力提供者（例如配置迁移）在端口边界记录自己的失败，不冒充业务流程。
 - 离线等待、延期或进程重启结束当前在线执行；后续重试或恢复建立新 trace，不让配对或同步无限挂起。跨尝试关联只能使用当前合同
   已批准的 owner 材料，不能临时增加持久观测标识，也不能用内容摘要、设备身份或时间相近来拼接记录。
 - 后台系统剪贴板写入可以是原复制的异步后续节点，但不得延长已结束的网络操作。发送方收到保存确认不等于对方已能粘贴，写入失败
@@ -50,7 +53,8 @@
   不额外制造一串独立的“生命周期成功”。
 - 关闭超时、任务异常退出等进入运行诊断，必须说明具体动作和失败类别，不能只写 `session_lifecycle`。
   任务异常退出统一由等待该任务的负责人调用 `record_task_join_failure`，以固定 `task.kind` 写入健康记录；
-  Engine 操作、生命周期转换与会话挂起交接分别为 `engine_operation`、`engine_lifecycle_transition`、`session_suspend`。
+  剪贴板投递记录、入站系统写入、活跃剪贴板收敛、延后排空、配对 mDNS 转发与移动端出站分发分别为 `clipboard_delivery_record`、`clipboard_inbound_os_write`、`active_clipboard_converge`、`clipboard_deferred_drain`、`pairing_mdns_forward`、`mobile_outbound_dispatch`；
+  Engine 操作、生命周期转换与会话挂起交接分别为 `engine_operation`、`engine_lifecycle_transition`、`session_suspend`；成员维护的一轮动作为 `membership_maintenance_round`，活跃剪贴板必需 worker 为 `active_clipboard_worker`，移动端绑定的引擎 worker 线程为 `mobile_worker`，Engine 启动任务为 `engine_startup`，出站进度翻译任务为 `outbound_progress_translator`。
 - 真正执行的后台恢复可以成为独立动作，但要说明上线、重启、重试等固定触发原因，以及实际恢复结果。
 - 隐藏例行噪声不能丢失业务动作中的失败证据，不能单独过滤必要父节点、导致完整记录变成孤儿片段。
 - 测试记录与实际产品记录明确隔离。测试可以显式导出整批诊断用于验收，但不能让这些记录默认混入实际产品的业务视图。
@@ -160,6 +164,9 @@ handler 创建。强行交给 Engine 会迫使 Core/Application message 增加 c
 容量门与 exporter wrapper 只统计发送前丢弃总数和最终发送失败，不复制官方批处理、线程或刷新逻辑。发送前丢弃包括格式拒绝、
 锁争用、队列已满和运行时已关闭，首个原因使用不同固定分类记录；累计字段不冒充单独的队列满计数。`health()` 还返回失败批次数
 和本地文件丢弃数；每类首次故障写一条无正文的本地健康记录，且不递归进入远程 exporter。
+远端导出器构建失败（`http_client`、`trace_exporter`、`log_exporter` 三个固定阶段之一）时，`remote` 为 `Unavailable`，`health()` 的
+`remote_setup_failure` 携带该阶段，并在全局 subscriber 安装后写一条 `uc.observability.setup_degraded` 健康记录（`error.type` 为同一固定阶段）；
+不含 endpoint、header 或底层错误正文。本地目录失败没有本地 sink，只体现在 `local_file` 状态。
 直接 Rust、Apple/Android UniFFI 与 HarmonyOS N-API 都公开同一份当前累计健康查询；初始安装结果只表示安装时状态，不能代替
 运行一段时间后的查询。
 
@@ -325,14 +332,20 @@ decorator 负责。Sponsor 在等待执行锁之前确定已认证消息的固�
 
 ### 错误来源与日志字段
 
-日志中的失败原因只能是固定分类，这些分类由记录点沿 source chain 逐层 `downcast` 得到，例如 `error_kind`、
-`io_error_kind`、`io_error_code`、SQLite 错误码类别。因此日志能否说清原因，取决于上游错误转换是否保留了具体类型。
+本节区分两类输出，规则不同：
+
+- **合同记录**（`uc.telemetry` 等合同 target，远程与本地共用）：失败原因只能是固定分类，由记录点沿 source chain 逐层
+  `downcast` 得到，例如 `error_kind`、`io_error_kind`、`io_error_code`、SQLite 错误码类别。
+- **模块日志**（`uc_*` 目标的普通 `tracing` 事件，见[模块日志](#模块日志)）：只写本地文件与诊断导出，可以写出经过登记的
+  错误链，但仍不写未识别错误层的正文。
+
+因此日志能否说清原因，取决于上游错误转换是否保留了具体类型。
 
 - **上游不得字符串化。** `anyhow!(error.to_string())`、`anyhow!("动作: {error}")`、`Error::X(error.to_string())`
   和丢弃来源的 `map_err(|_| ..)` 会让分类器只能记 `unknown`。049 S3.a 中组密钥投递状态读取失败只记下
   `source="storage" reason="unknown"`，原因就是存储层把 SQLite 错误字符串化，`BUSY` 无法被识别，只能推断。
   转换写法与允许例外见[错误处理与转换](error-handling.md#字符串化的常见形式)。
-- **日志不输出错误正文。** `error = %error` 只有最外层文本，丢掉整条来源；`error = ?error` 或 `{:#}` 会输出整条链，
+- **合同记录不输出错误正文。** `error = %error` 只有最外层文本，丢掉整条来源；`error = ?error` 或 `{:#}` 会输出整条链，
   可能带出路径、标识、标签值或内容片段。两者都不合规。记录点应提取固定分类字段；无法识别时省略该字段或记为
   固定的 `unknown`，不回退到正文。
 - **分类提取放在记录点。** 在完整负责人已有的完成或失败记录处提取一次，读取层与错误转换只保留 source，不各自记录同一失败。
@@ -343,10 +356,55 @@ decorator 负责。Sponsor 在等待执行锁之前确定已认证消息的固�
   `scripts/architecture/check-rust-style.mjs` 拒绝新增的 `error = %e`、`error = ?e`、`%error` 简写与日志格式串内插错误变量。
 - **记录后原样返回的失败不重复记录。** 失败随来源返回给调用方时由完整负责人记录，读取层删除自己的日志；只有返回值丢弃
   来源（公开契约边界、固定分类）或错误被吞掉降级时，才在当地记录分类。
-- **普通 target 同样适用。** 运行时只导出合同 target，核心模块的普通 `tracing` 事件在产品中既不进入本地文件，也不进入
-  宿主日志层，只在测试与开发订阅者中可见；隐私规则不因输出范围而放宽。
 - **新增分类前先确认来源可达。** 为某类失败新增固定原因时，用测试构造真实下层错误，经完整转换路径后断言分类值，
   而不是直接构造上层错误；这能发现中途被字符串化的转换。
+
+### 模块日志
+
+`uc-observability-runtime` 的模块日志层接收 `uc_*` 目标的普通 `tracing` 事件，写入与合同记录相同的本地 JSONL
+（`source = "engine_module"`），随诊断导出一并带出。它从不进入远程遥测、宿主日志层或系统日志层。
+
+- **等级与范围。** 标准模式记录 INFO 及以上；Detailed 采集窗口内提升到 DEBUG，TRACE 不记录。这不是“所有日志”：
+  等级过滤、按记录点限速、本次运行字节预算和单条 4096 字节上限都会丢弃或裁剪内容，全部计入
+  `LocalDiagnosticExportReport.module_logs`（`emitted`、`rate_limited`、`budget_dropped`、`truncated`、`rejected`、
+  `opaque_error_layers`），不承诺无限无损。被限速的条数在下一条放行记录的 `suppressed` 字段给出。
+- **启用范围。** 所有构建（含发布）在配置了本地日志目录时都启用，没有编译期开关；关闭只能通过不配置本地日志目录。
+- **记录字段。** 在既有字段之外增加 `source`、`location`（crate 相对 `file:line`）、`spans`（span 名路径）、`message`、
+  `fields`、`error.chain`（由外到内）、`error.root`、`error.opaque_layers`。`trace_id/span_id` 取最近的 OpenTelemetry
+  祖先，与合同记录一致。
+- **三种“路径”严格区分。** `error.chain` 是 `Error::source` 链；`spans` 是 tracing span 名路径；`location` 是日志宏所在源码位置。
+  三者都不是 backtrace。移动端发布构建未符号化，因此不采集 backtrace。
+- **错误链渲染。** 记录点写 `error = &e as &dyn std::error::Error`（anyhow 用 `e.as_ref()`），层逐个渲染，绝不对整个错误使用 `Debug`。
+  稳定版 Rust 只能对已知具体类型 `downcast`：`std::io::Error` 与 `serde_json::Error` 内置结构化提取；其余层，包括仓库自有错误、
+  anyhow 的 context 层与第三方错误，一律写 `<opaque>` 并累计 `opaque_error_layers`，不回退到 `Display`。
+  **仓库自有错误的原因用固定分类记录**：类型实现 `uc_core::error_class::ErrorClass`，记录点写 `error_class = e.class()`（本层变体级分类），
+  需要下层细节时再写 `source_class`（由持有具体类型的记录点从来源链取得，例如准入状态端口错误的仓储来源）。不再有按类型登记的入口。
+- **自由文本字段默认拒绝。** 数字与布尔字段原样记录；文本字段只有登记在字段目录
+  （`crates/uc-observability-contract/src/log_fields.rs`）且类别为文本时才写出取值，其余一律记为 `<omitted>`。
+  文本类别有三种：`Literal`（`&'static str` 字面量）、`Identifier(random)`（应用生成的随机标识，经 `log_id(&x)` 适配）和
+  `Vocabulary(reviewed)`（已审定的词表类文本，如枚举名、表名，字面量直接接受，其余经 `log_vocab` 或 `log_vocab_debug` 适配），
+  另有 `IoKind`（`io_error_kind(..)` 的结果）。目录按字段名审定，适配器表示调用点断言“该取值属于这个类别”，并不由类型证明；
+  取值仍须遵守下条敏感值规则。设备名、路径、地址、对端与节点标识、指纹、空间/资料标识、会话与连接标识、标签名、内容派生的哈希
+  均不在目录内，因此不能出现在 `uc_*!` 记录点里。
+- **消息正文只能是字面量。** 取值放进字段，不得写进格式串；`uc_*!` 宏只接受字面量消息，内插在编译期失败。
+- **敏感值。** 设备名、路径、地址、节点或对端标识、邀请、令牌、密钥、剪贴板内容、文件名若可能进入日志字段、span 字段或错误文本，
+  必须用 `Sensitive<T>` 包装；`Sensitive` 的 `Debug` 与 `Display` 只输出 `<redacted>`。任意 `Display` 不因“只是字符串”而视为安全。
+- **写入口与字段目录（ADR-030）。** 日志一律使用 `uc_trace!`、`uc_debug!`、`uc_info!`、`uc_warn!`、`uc_error!`
+  （`uc_observability_contract::log_event`；绑定经 `uc_engine::observability` 使用同一组宏与适配器）。字段名必须登记在
+  `log_fields` 目录，值必须是该字段声明类别接受的类型，`error = &e as &dyn Error` 是唯一特例；`target:` 只接受字面量。
+  未登记字段与类别不符是编译错误，取代运行期 `<omitted>`。新增字段先在目录登记并说明类别，`Identifier` 与 `Vocabulary`
+  必须写明确认记号（`random`、`reviewed`），漏写是编译错误。运行期文本字段白名单直接由目录得出，
+  只保留为绕过宏的调用（观测运行期自己的集成测试、第三方 crate 事件）的最后一道防线。
+- **直接使用 tracing 日志宏被禁止。** `node scripts/architecture/check-direct-log-macros.mjs`（PR Check）用 clippy 的
+  `disallowed_macros` 在默认特性与 `lan-compat` 下各检查一轮，任何直接使用 `tracing::{trace,debug,info,warn,error}!` 都失败；
+  `tracing::event!` 只有观测 crate 自己可以直接使用。clippy 只认 crate 级 allow，因此确需保留原始 tracing 的文件
+  （观测运行期验证未登记字段处理的三个集成测试）在文件顶部用 `#![allow(clippy::disallowed_macros)]` 并写明理由。
+- **use case 的本地 span。** 独立业务动作（会改写状态或触发外部工作）的入口方法带
+  `#[tracing::instrument(name = "usecase.<动作>.<方法>", skip_all)]`，使该动作内部写出的模块日志在 `spans` 路径里带上动作名。
+  它只是本地诊断 span，不是业务入口：查询、检查、`shutdown`、只委托给另一个已带 span 的方法的包装方法、已有手写 span 的方法不加。
+  新增独立业务动作时按同一规则补，字段只能取自日志字段目录。
+- **规则检查。** `check-rust-style.mjs` 对新增行要求 `#[instrument]` 带 `skip_all` 或显式 `fields(..)`，`fields(..)` 的名称必须登记在日志字段目录，且不得使用 `err`、`ret`，拒绝直接使用日志宏，并拒绝 `#[error]` 文本内插
+  `String`、`PathBuf`、`Vec<u8>`、`&str` 等未包装字段（文本启发式，需要人工复核）。
 
 现有代码中的字符串化与日志正文清单见[错误来源保留执行计划](../exec-plans/completed/2026-09-24-error-source-preservation.md)。
 
@@ -396,6 +454,7 @@ SDK TraceId/SpanId 位于顶层，缺失时省略。远程关闭不影响本地�
   次请求；已有关联由完整负责人通过不透明 ObservationContext 延续，不扩大 Engine facade 或 Core 模型。
 
 日志队列满、磁盘不可写和序列化拒收不能改变业务结果；分别统计策略过滤、格式拒收、队列丢弃、配额丢弃及写入失败，不递归写日志。
+本地日志总量超过 7 天/100 MB 上限时，写入路径从最旧的受管日志文件起淘汰，永不删除当天文件与非受管文件，使新的诊断总能写入；单条超过整个配额，或当天文件独占配额时才计为配额丢弃。
 文件刷新与最终关闭仍由进程运行时统一执行，SDK 处理器不提前关闭 health 共用的 writer。
 
 进程运行时拥有 standard/detailed 模式、随机 run/capture 编号和有界匿名映射。详细采集默认 600 秒，
@@ -431,7 +490,7 @@ UniFFI 的导出准备是同步入口，宿主必须使用已有后台执行队�
 `docs/generated/observability-inventory.md`，但不因此获得输出许可。
 
 本地文件固定为 `engine.YYYY-MM-DD.jsonl`，保留 7 天，总量不超过十进制 100,000,000 bytes。owner 只枚举这一严格命名，启动和
-跨日时按最旧优先清理；单条记录会使总量超限时整条丢弃。目录不可写时降级到其余输出，不影响业务。文件名解析只有诊断合同一份
+跨日时按最旧优先清理，写入超额时同样先淘汰最旧的受管文件，不删除当天文件；只有单条记录超过整个配额，或当天文件独占配额时才整条丢弃。目录不可写时降级到其余输出，不影响业务。文件名解析只有诊断合同一份
 事实来源；诊断导出先有界刷新当前文件队列，再识别该严格命名。
 
 Resource 中 namespace、service name 和 schema version 固定；environment、OS 与 app channel 使用固定枚举。app channel 只接受
@@ -449,6 +508,20 @@ metadata 定位并打包维护库提供的 Java 组件，同时附带消费者�
 
 任何输出都不得包含剪贴板内容、密码、密钥、完整令牌、邀请、设备名、地址、文件名、路径、profile/Space/member/device/entry/
 transfer 原始 ID、摘要、原始错误正文或可恢复派生值。
+
+### 构建来源
+
+本地记录的 `source_commit`/`source_state` 与诊断状态的 `source_commit` 描述产物实际编译的 Engine 源码，
+运行期不读取 git。`uc-observability-runtime` 的 build script 取显式输入 `UC_ENGINE_SOURCE_COMMIT`/
+`UC_ENGINE_SOURCE_STATE`，缺失或不是完整提交号时读取所在源码树的 git；仍无法确定时记为 `unknown`，
+不从版本号推断。
+
+来源不以编译期常量编入 rlib。build script 把来源编译为独立原生静态库（固定长度只读数组），默认打包进
+rlib，所有产物（包括 Desktop 等下游 crate 生成的静态库）与以往一样自带来源。显式提供来源的托管构建（CI 经
+`rust-ci-setup`）改为以 `static:-bundle` 声明：rlib 不随提交变化，`uc-observability-runtime` 与
+`uc-engine` 跨提交可命中编译缓存，来源由 Cargo 在最终链接可执行文件、测试与动态库时加入，缺少定义时链接失败。
+这类构建顺带生成的非 iOS 静态库不含来源，不作为交付物；iOS 交付的是静态库，始终打包。
+读取端逐项校验格式，不合格时记为 `unknown`。Engine facade、port 与宿主接口不因来源而变化。
 
 ## 验证
 

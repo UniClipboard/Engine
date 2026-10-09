@@ -7,8 +7,8 @@
 //! - 后端 = `network.allow_relay_fallback = false`
 //! - infra (iroh) = `IrohNodeConfig.disable_relays = true`
 //!
-//! 三层语义两次反转。**全工程除本模块 + `uc-infra/src/network/iroh/node.rs:153-162`
-//! 字段定义 + 测试文件外，严禁在其他位置出现 `disable_relays = !allow_relay_fallback`
+//! 三层语义两次反转。**全工程除本模块 + `uc-infra-p2p/src/network/iroh/node.rs`
+//! `IrohNodeConfig.disable_relays` 字段定义 + 测试文件外，严禁在其他位置出现 `disable_relays = !allow_relay_fallback`
 //! 类的取反**。DTO ↔ View ↔ core 三层只搬运 `allow_relay_fallback` 业务正向语义。
 //!
 //! ## OTLP 不联动（Pitfall 6 防御）
@@ -24,9 +24,11 @@ use std::net::SocketAddr;
 
 use uc_application::facade::settings::RelayCredentials;
 use uc_core::settings::model::CongestionController;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_vocab, uc_info, uc_warn,
+};
 
-use uc_infra::network::iroh::{IrohNodeConfig, IrohRelayAccessToken};
+use uc_infra_p2p::network::iroh::{IrohNodeConfig, IrohRelayAccessToken};
 
 /// 把业务侧 `Settings.network` 翻译为 infra 侧 `IrohNodeConfig`。
 ///
@@ -38,20 +40,21 @@ use uc_infra::network::iroh::{IrohNodeConfig, IrohRelayAccessToken};
 ///
 /// `allow_overlay_network_addrs` 为正向同名字段，直接传递不取反。
 ///
-/// `custom_relay_urls` 为正向同名列表，空列表表示继续使用 iroh 默认 relay；
-/// 非空列表由 infra 翻译为 `RelayMode::Custom`。
+/// `relay_urls` 是节点实际使用的 relay 列表，由调用方按 Core 的 relay 路由决策
+/// （内置默认或用户自定义）算好后传入；infra 总是把它翻译为 `RelayMode::Custom`，
+/// 不再隐含任何上游默认列表。
 ///
 /// 参数：
 /// - `allow_relay_fallback`：业务正向语义，由 `uc-core::Settings.network` 透传
 /// - `allow_overlay_network_addrs`：业务正向语义，由 `uc-core::Settings.network`
 ///   透传；专业用户开关，控制是否把 VPN/overlay 类虚拟网卡 IP 作为 iroh 直连候选
-/// - `custom_relay_urls`：用户配置的 relay URL 列表；空列表沿用默认 relay
+/// - `relay_urls`：节点实际使用的 relay URL 列表（LAN-only 时不参与 bind）
 /// - `rendezvous_base_url`：`None` 走 `RENDEZVOUS_BASE_URL` 默认；production 调
 ///   用方传 `None`；集成测试覆盖 override
 pub fn relay_policy_to_iroh_config(
     allow_relay_fallback: bool,
     allow_overlay_network_addrs: bool,
-    custom_relay_urls: Vec<String>,
+    relay_urls: Vec<String>,
     congestion_controller: CongestionController,
     rendezvous_base_url: Option<String>,
 ) -> IrohNodeConfig {
@@ -60,7 +63,7 @@ pub fn relay_policy_to_iroh_config(
         disable_relays: !allow_relay_fallback,
         // ↓ 正向同名字段，直接搬运不取反。
         allow_overlay_network_addrs,
-        custom_relay_urls,
+        relay_urls,
         relay_access_tokens: Default::default(),
         congestion_controller,
         rendezvous_base_url,
@@ -74,12 +77,12 @@ pub fn relay_policy_to_iroh_config(
 
 pub fn load_relay_access_tokens(config: &mut IrohNodeConfig, credentials: &RelayCredentials) {
     config.relay_access_tokens.clear();
-    for relay_url in &config.custom_relay_urls {
+    for relay_url in &config.relay_urls {
         let token = match credentials.load(relay_url) {
             Ok(Some(token)) => token,
             Ok(None) => continue,
             Err(error) => {
-                tracing::warn!(
+                uc_warn!(
                     error_kind = "relay_credential_unavailable",
                     io_error_kind = io_error_kind(&error),
                     "relay credential unavailable during startup; continuing without it"
@@ -90,7 +93,7 @@ pub fn load_relay_access_tokens(config: &mut IrohNodeConfig, credentials: &Relay
         let token = match IrohRelayAccessToken::new(token.expose_secret().to_string()) {
             Ok(token) => token,
             Err(error) => {
-                tracing::warn!(
+                uc_warn!(
                     error_kind = "relay_credential_unusable",
                     io_error_kind = io_error_kind(&error),
                     "stored relay credential cannot be used; continuing without it"
@@ -128,16 +131,14 @@ pub(crate) fn parse_iroh_direct_reachability(
         .filter(|raw| !raw.is_empty())
         .and_then(|raw| match raw.parse::<u16>() {
             Ok(0) => {
-                tracing::warn!(
-                    uc_iroh_bind_port = %raw,
+                uc_warn!(
                     "UC_IROH_BIND_PORT=0 is the ephemeral-port sentinel; ignoring (use a non-zero fixed port)",
                 );
                 None
             }
             Ok(port) => Some(port),
             Err(err) => {
-                tracing::warn!(
-                    uc_iroh_bind_port = %raw,
+                uc_warn!(
                     error_kind = "invalid_bind_port",
                     io_error_kind = io_error_kind(&err),
                     "invalid UC_IROH_BIND_PORT; ignoring (expected an integer 1..=65535)",
@@ -152,7 +153,7 @@ pub(crate) fn parse_iroh_direct_reachability(
         .and_then(|raw| match raw.parse::<SocketAddr>() {
             Ok(addr) => Some(addr),
             Err(err) => {
-                tracing::warn!(
+                uc_warn!(
                     error_kind = "invalid_public_addr",
                     io_error_kind = io_error_kind(&err),
                     "invalid UC_IROH_PUBLIC_ADDR; ignoring (expected ip:port, e.g. 203.0.113.7:51820)",
@@ -178,10 +179,8 @@ pub fn apply_iroh_direct_reachability_from_env(cfg: &mut IrohNodeConfig) {
         std::env::var("UC_IROH_PUBLIC_ADDR").ok().as_deref(),
     );
     if reach.bind_port.is_some() || reach.public_addr.is_some() {
-        tracing::info!(
+        uc_info!(
             target: "settings.network",
-            bind_port = ?reach.bind_port,
-            public_addr = ?reach.public_addr,
             "iroh direct-reachability configured from env (UC_IROH_BIND_PORT / UC_IROH_PUBLIC_ADDR)",
         );
     }
@@ -199,16 +198,16 @@ pub fn apply_congestion_controller_from_env(cfg: &mut IrohNodeConfig) {
         }
         match trimmed.parse::<CongestionController>() {
             Ok(cc) => {
-                tracing::info!(
+                uc_info!(
                     target: "settings.network",
-                    congestion_controller = %cc,
+                    congestion_controller = log_vocab(&cc),
                     "congestion controller overridden from env (UC_CONGESTION_CONTROLLER)",
                 );
                 cfg.congestion_controller = cc;
             }
             Err(_) => {
-                tracing::warn!(
-                    uc_congestion_controller = %raw,
+                uc_warn!(
+                    uc_congestion_controller = log_vocab(&raw),
                     error_kind = "invalid_congestion_controller",
                     "invalid UC_CONGESTION_CONTROLLER; ignoring (expected cubic or bbr3)",
                 );
@@ -343,9 +342,9 @@ mod tests {
         assert!(cfg.allow_overlay_network_addrs);
     }
 
-    /// custom_relay_urls 正向列表搬运，空列表/非空列表都不参与取反。
+    /// relay_urls 列表原样搬运，空列表/非空列表都不参与取反。
     #[test]
-    fn custom_relay_urls_pass_through() {
+    fn relay_urls_pass_through() {
         let cfg = relay_policy_to_iroh_config(
             true,
             false,
@@ -354,7 +353,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            cfg.custom_relay_urls,
+            cfg.relay_urls,
             vec!["https://relay.example.com.".to_string()]
         );
     }

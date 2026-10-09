@@ -4,7 +4,7 @@
 # 用法（CI 中由 .github/workflows/upgrade-matrix-anchors.yml 调用）：
 #   bash scripts/testing/propose-upgrade-anchors.sh [--dry-run]
 #
-# 需要已认证的 gh（CI 中为 GH_TOKEN）与包含全部 Engine rev 的完整克隆。
+# 需要已认证的 gh（CI 中为 GH_TOKEN）与可按 SHA 补取 Engine rev 的 origin；只被 PR 引用可达的 rev 由解析脚本补取。
 # - 已有打开的锚点 PR 时在其分支上追加提交，保留审阅者补充的宿主能力等改动；否则从 main 重新开分支。
 # - 解析结果与分支内容一致时什么也不做。
 # - GITHUB_TOKEN 的推送与 PR 不触发其他工作流；由审阅者关闭再重新打开 PR，触发 PR 检查与锚点定义变化时的升级兼容矩阵。

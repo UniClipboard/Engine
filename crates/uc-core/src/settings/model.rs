@@ -6,17 +6,17 @@ use serde_with::{serde_as, DurationSeconds};
 
 /// v1 -> v2: one-time rewrite of a stock v1-default `retention_policy`
 /// (`ByAge(30d) + ByCount(500)`) to the new default (`ByAge(180d)`, no count
-/// cap). See `uc_infra::settings::migration::MigrationV1ToV2`.
+/// cap). See `uc_infra_local::settings::migration::MigrationV1ToV2`.
 ///
 /// v2 -> v3: one-time rewrite of the legacy `silent_start` /
 /// `lightweight_start` booleans into the mutually-exclusive `startup_mode`
-/// enum. See `uc_infra::settings::migration::MigrationV2ToV3`.
+/// enum. See `uc_infra_local::settings::migration::MigrationV2ToV3`.
 pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 // 所有 settings struct 统一使用 `#[serde(default)]`：缺字段时回退到
 // `Default::default()`（在 `defaults.rs` 中实现），保证向后兼容。
 // 详见 issue #581：旧版本 settings.json 缺新增字段会让 daemon 启动失败。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct GeneralSettings {
     pub auto_start: bool,
@@ -235,7 +235,7 @@ pub struct RetentionPolicy {
     pub evaluation: RuleEvaluation,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, rename_all = "snake_case")]
 pub struct SecuritySettings {
     /// 是否启用本地数据加密
@@ -255,7 +255,7 @@ pub struct SecuritySettings {
 }
 
 #[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct PairingSettings {
     #[serde_as(as = "DurationSeconds<u64>")]
@@ -357,7 +357,7 @@ impl std::str::FromStr for CongestionController {
 /// `#[serde(default)]` 让缺字段时回退到 `Default::default()`：
 /// - `allow_relay_fallback = true`（允许 fallback，breaking change 警惕）
 /// - `allow_overlay_network_addrs = false`（默认过滤虚拟网卡候选）
-/// - `custom_relay_urls = []`（空列表继续使用 iroh 默认中继）
+/// - `custom_relay_urls = []`（空列表使用产品内置 relay，见 `relay_routing`）
 ///
 /// 修改默认值前请先 grep `LAN-only Mode` 文档与 changelog。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -384,8 +384,8 @@ pub struct NetworkSettings {
 
     /// 自定义 iroh relay 节点 URL 列表。
     ///
-    /// 空列表表示沿用 iroh 默认 n0 relay；非空时由 bootstrap/infra 翻译为
-    /// `RelayMode::Custom`，只使用这些用户配置的 relay 节点。仅在
+    /// 空列表表示使用产品内置 relay（`relay_routing::BUILTIN_RELAYS`，不写入本字段）；
+    /// 非空时只使用这些用户配置的 relay 节点，整体替换内置列表。仅在
     /// `allow_relay_fallback = true` 时生效；LAN-only 模式下 relay 整体禁用，
     /// 但列表仍会被保留，方便用户稍后重新开启 relay fallback。
     ///
@@ -510,7 +510,7 @@ pub struct MobileSyncSettings {
     pub lan_port: Option<u16>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Settings {
     #[serde(default = "oldest_known_schema_version")]
     pub schema_version: u32,

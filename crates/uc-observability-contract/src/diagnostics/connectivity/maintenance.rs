@@ -24,6 +24,12 @@ impl MaintenanceContext {
     pub(super) fn capture() -> Option<Self> {
         ROUND.try_with(|value| *value).ok()
     }
+    pub(super) fn sync_scope<T>(context: Option<Self>, work: impl FnOnce() -> T) -> T {
+        match context {
+            Some(context) => ROUND.sync_scope(context, work),
+            None => work(),
+        }
+    }
     pub(super) fn fields(self, fields: &mut Map<String, Value>) {
         fields.insert("maintenance_round".into(), json!(self.round));
         fields.insert("trigger".into(), json!(self.trigger));

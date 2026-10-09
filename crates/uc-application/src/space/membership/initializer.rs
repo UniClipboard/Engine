@@ -42,6 +42,7 @@ impl InitializeSpaceMembershipUseCase {
         }
     }
 
+    #[tracing::instrument(name = "usecase.initialize_space_membership.execute", skip_all)]
     async fn execute(&self) -> Result<(), MembershipInitializationError> {
         let local_device_id = self.device_identity.current_device_id();
         let bootstrap = self

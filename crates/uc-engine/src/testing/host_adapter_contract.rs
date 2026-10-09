@@ -1868,6 +1868,84 @@ async fn host_clipboard_change_is_processed_by_the_engine_and_stops_on_shutdown(
     assert!(stopped.load(Ordering::SeqCst));
 }
 
+#[tokio::test]
+async fn host_clipboard_change_while_the_space_is_locked_is_recorded_and_not_captured() {
+    let logs = uc_testkit::log_capture::CapturedLogs::default();
+    let _log_guard = logs.install();
+    let _guard = ENGINE_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let private = temp.path().join("private");
+    let cache = temp.path().join("cache");
+    let temporary = temp.path().join("temporary");
+    for directory in [&private, &cache, &temporary] {
+        std::fs::create_dir_all(directory).unwrap();
+    }
+    let probe = "locked space clipboard change must not be captured".to_string();
+    let (change_tx, change_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stopped = Arc::new(AtomicBool::new(false));
+    let host = HostCapabilities::new(
+        HostDirectories::new(private, cache, temporary, temp.path().join("logs")),
+        Box::new(MemoryHostSecureStorage::default()),
+        Box::new(NotifyingHostClipboard {
+            snapshot: HostClipboardSnapshot {
+                observed_at_ms: 103,
+                representations: vec![HostClipboardRepresentation::Inline {
+                    format: "text".into(),
+                    mime_type: Some("text/plain".into()),
+                    bytes: probe.as_bytes().to_vec(),
+                }],
+            },
+            changes: Mutex::new(Some(Box::new(ChannelClipboardChanges {
+                receiver: change_rx,
+                stopped: Arc::clone(&stopped),
+            }))),
+        }),
+        Box::new(EmptyHostFiles),
+    );
+    let (engine, _events) = Engine::start(EngineConfig::new("1.2.3"), host)
+        .await
+        .unwrap();
+    engine
+        .execute(crate::Operation::CreateSpace(crate::CreateSpaceInput {
+            device_name: Some("Locked Clipboard Device".into()),
+            passphrase: crate::SecretString::new("correct horse"),
+            passphrase_confirmation: crate::SecretString::new("correct horse"),
+        }))
+        .await
+        .unwrap();
+    assert_eq!(
+        engine
+            .execute(crate::Operation::LockEncryption)
+            .await
+            .unwrap(),
+        crate::OperationResult::EncryptionLocked
+    );
+
+    change_tx.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while logs.count("host clipboard change skipped: space is locked") == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("a locked space must leave a skip record");
+
+    let record = logs
+        .output()
+        .lines()
+        .find(|line| line.contains("host clipboard change skipped: space is locked"))
+        .unwrap()
+        .to_owned();
+    assert!(record.contains("reason=\"space_locked\""), "{record}");
+    assert!(!record.contains(&probe), "{record}");
+
+    engine
+        .shutdown(std::time::Duration::from_secs(15))
+        .await
+        .unwrap();
+    assert!(stopped.load(Ordering::SeqCst));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn suspend_waits_for_a_started_host_clipboard_change_to_finish() {
     let _guard = ENGINE_TEST_LOCK.lock().await;
@@ -3264,6 +3342,7 @@ async fn engine_start_builds_a_resumable_real_session() {
             extensions: None,
             source_devices: None,
             tags: None,
+            tag_match: None,
             limit: 25,
             offset: 0,
         }))
@@ -3483,14 +3562,16 @@ async fn engine_start_builds_a_resumable_real_session() {
             .unwrap(),
         crate::OperationResult::SpaceFactoryReset
     );
-    let invalidated = engine
-        .execute(crate::Operation::QueryEncryptionState)
-        .await
-        .unwrap_err();
-    assert_eq!(invalidated.code(), 1103);
+    // 离开空间后同一实例已是空空间的新运行期；宿主仍然可以关闭并重启，结果相同。
     assert_eq!(
-        invalidated.category(),
-        crate::EngineErrorCategory::Unavailable
+        engine
+            .execute(crate::Operation::QueryEncryptionState)
+            .await
+            .unwrap(),
+        crate::OperationResult::EncryptionState(crate::EncryptionStateSummary {
+            initialized: false,
+            session_ready: false,
+        })
     );
     engine
         .shutdown(std::time::Duration::from_secs(15))
@@ -3849,9 +3930,9 @@ async fn engine_start_finishes_an_interrupted_factory_reset_before_opening_a_new
         crate::assembly::host::profile_key_recovery_store(&config, &paths, &recovery_host);
     assert_eq!(
         recovery_storage.prepare_startup().await.unwrap(),
-        uc_infra::security::ProfileRecoveryPreparation::Ready
+        uc_infra_profile::security::ProfileRecoveryPreparation::Ready
     );
-    let lifecycle = uc_infra::security::ProfileLifecycleRepository::new(recovery_storage);
+    let lifecycle = uc_infra_profile::security::ProfileLifecycleRepository::new(recovery_storage);
     let initial = uc_application::deps::ProfileLifecycleRepositoryPort::load(&lifecycle)
         .unwrap()
         .unwrap();
@@ -4967,7 +5048,7 @@ async fn production_engine_reuses_v019_file_network_identity() {
         assert!(
             secure_storage
                 .values()
-                .get(uc_infra::network::iroh::IDENTITY_STORE_KEY)
+                .get(uc_infra_p2p::network::iroh::IDENTITY_STORE_KEY)
                 .is_none(),
             "network identity leaked into primary secure storage on cycle {cycle}"
         );

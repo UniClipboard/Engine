@@ -27,6 +27,12 @@ jobs:
     name: Engine repository checks
     if: github.event.action != 'labeled'
     runs-on: macos-14
+    # 编译缓存凭据：只有 main 上的可信运行绑定限定 main 分支的写入环境，其余运行（PR、合并队列、其他分支）用只读令牌；
+    # fork 与 Dependabot 拿不到任何 secret，回退为按 ref 隔离的 GitHub Actions 缓存。
+    # 本文件其余 Rust job 使用相同绑定；详见 docs/design-docs/decisions/029-ci-r2-compile-cache.md。
+    environment:
+      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
+      deployment: false
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -37,6 +43,10 @@ jobs:
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: rust-checks-macos
+          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
+          compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
 
       - name: Validate workspace metadata
         run: cargo metadata --locked --format-version 1 > /dev/null
@@ -52,21 +62,49 @@ jobs:
         env:
           RUST_STYLE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
 
-      - name: Check mobile build profiles
-        run: node --test scripts/architecture/check-mobile-build-profile.test.mjs scripts/release/build-profile.test.mjs
+      - name: Check no direct tracing log macros
+        run: node scripts/architecture/check-direct-log-macros.mjs
+
+      # 公告库在运行时拉取最新版本，工具版本固定并与本地 cargo audit 一致。漏洞与 unsound 公告都会阻断，
+      # 当前锁无需任何例外；新增公告必须通过升级修复，不得以忽略方式放行。
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
+        with:
+          tool: cargo-audit@0.22.2
+
+      - name: Audit locked dependencies
+        run: cargo audit --deny unsound
+
+      - name: Check mobile build profiles and CI compile cache boundaries
+        run: >-
+          node --test scripts/architecture/check-mobile-build-profile.test.mjs scripts/release/build-profile.test.mjs
+          scripts/architecture/check-direct-log-macros.test.mjs
+          scripts/testing/relay-recovery-support.test.mjs
 
       - name: Check patch whitespace
         run: git diff --check
 
       # 未插桩构建必须能解析出真实符号；Linux 的内联帧只有短名称，该项只在 macOS 校验。
       - name: Validate captured diagnostic stacks
-        run: cargo test -p uc-infra --test peer_address_read_diagnostics --locked
+        run: cargo test -p uc-infra-profile --test peer_address_read_diagnostics --locked
 
   # 升级兼容冒烟：上一个 Desktop 锚点到当前源码的 5 个单元；旧版宿主按 rev 与宿主摘要缓存，命中时不重建。
+
+      - name: Retain MBX compiler evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mbx-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/mbx-evidence
+          if-no-files-found: warn
+
   upgrade-matrix-smoke:
     name: Upgrade compatibility smoke
     if: github.event.action != 'labeled'
     runs-on: ubuntu-24.04
+    environment:
+      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
+      deployment: false
     timeout-minutes: 60
     env:
       UC_TEST_ARTIFACTS_DIR: target/test-artifacts/ci
@@ -82,6 +120,10 @@ jobs:
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: rust-upgrade-matrix-linux
+          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
+          compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
 
       - name: Cache anchor hosts
         uses: actions/cache@v4
@@ -111,10 +153,21 @@ jobs:
             target/upgrade-anchors/*/host.json
           if-no-files-found: error
 
+      - name: Retain MBX compiler evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mbx-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/mbx-evidence
+          if-no-files-found: warn
+
   tests:
     name: Engine tests
     if: github.event.action != 'labeled'
     runs-on: ubuntu-24.04
+    environment:
+      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
+      deployment: false
     timeout-minutes: 60
     env:
       # 所有测试组共用同一次全工作区构建，只编译一次。
@@ -130,6 +183,10 @@ jobs:
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: rust-tests-linux
+          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
+          compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
@@ -142,8 +199,8 @@ jobs:
       - name: Run workspace tests
         run: bash scripts/testing/run-test-group.sh workspace
         env:
-          # Linux 内联帧只有短名称，诊断栈按符号丢失口径校验；真实符号由 macOS checks job 校验。
-          UC_EXPECT_DIAGNOSTIC_STACK: release
+          # Linux 内联帧可能只有短名称；校验实际可用符号，完整符号由 macOS checks job 校验。
+          UC_EXPECT_DIAGNOSTIC_STACK: available
 
       - name: Keep workspace test report
         if: always()
@@ -188,6 +245,14 @@ jobs:
             target/connection-recovery-evidence
           if-no-files-found: error
 
+      - name: Retain MBX compiler evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mbx-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/mbx-evidence
+          if-no-files-found: warn
+
   coverage:
     name: Rust coverage
     if: >-
@@ -195,6 +260,9 @@ jobs:
       || (contains(github.event.pull_request.labels.*.name, 'full-ci')
       && (github.event.action != 'labeled' || github.event.label.name == 'full-ci'))
     runs-on: ubuntu-24.04
+    environment:
+      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
+      deployment: false
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -204,13 +272,17 @@ jobs:
         with:
           cache-key: rust-coverage-linux
           fast-compile-infra: "true"
+          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
+          compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
 
       - name: Install coverage tools
         uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
         with:
           tool: cargo-llvm-cov,cargo-nextest@0.9.145
 
-      # 插桩改变内联，部分符号按设计报告 unresolved；完整符号栈由 tests job 的未插桩构建验证。
+      # 插桩可能改变内联，允许 unresolved，但不要求符号必须丢失；完整符号由 checks job 验证。
       # 升级兼容矩阵依赖先构建的旧版宿主，只经 upgrade-matrix 分组运行，不计入覆盖率。
       - name: Generate Rust coverage
         run: >-
@@ -220,7 +292,7 @@ jobs:
           -E 'not kind(bench) & not package(uc-upgrade-matrix)'
         env:
           NEXTEST_PROFILE: ci
-          UC_EXPECT_DIAGNOSTIC_STACK: release
+          UC_EXPECT_DIAGNOSTIC_STACK: available
 
       - name: Upload Rust coverage to Codecov
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f
@@ -230,6 +302,14 @@ jobs:
           files: lcov.info
           token: ${{ secrets.CODECOV_TOKEN }}
 
+      - name: Retain MBX compiler evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mbx-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/mbx-evidence
+          if-no-files-found: warn
+
   connection-recovery:
     # 名称不引用矩阵变量：job 级 if 先于矩阵展开求值，被跳过时引用无法展开；运行时 GitHub 自动追加矩阵值。
     name: Connection recovery on isolated Linux networks
@@ -238,6 +318,9 @@ jobs:
       || (contains(github.event.pull_request.labels.*.name, 'full-ci')
       && (github.event.action != 'labeled' || github.event.label.name == 'full-ci'))
     runs-on: ubuntu-24.04
+    environment:
+      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
+      deployment: false
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -255,6 +338,10 @@ jobs:
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: connection-recovery-linux
+          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
+          compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
 
       - name: Validate connection liveness and recovery
         run: bash scripts/testing/run-connection-recovery-e2e.sh --suite network --repeat 1 --mode "${{ matrix.mode }}"
@@ -265,4 +352,12 @@ jobs:
         with:
           name: connection-recovery-evidence-${{ matrix.mode }}
           path: target/connection-recovery-evidence
+          if-no-files-found: warn
+
+      - name: Retain MBX compiler evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mbx-${{ github.job }}-${{ matrix.mode }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/mbx-evidence
           if-no-files-found: warn

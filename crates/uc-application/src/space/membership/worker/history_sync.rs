@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
+use uc_core::error_class::ErrorClass;
 
 use async_trait::async_trait;
 use futures::{stream, StreamExt};
@@ -12,7 +13,8 @@ use uc_core::membership::{
     LedgerInput, LedgerMemberStatus, MembershipConflictEvidenceV3, MembershipHistoryAckV3,
     MembershipHistoryExchangeError, MembershipHistoryExchangePort, MembershipHistoryMessage,
     MembershipHistoryRelationship, MembershipHistorySuffixPageV4, MembershipHistorySuffixRequestV3,
-    MembershipHistorySummaryV3, PeerLink, PeerRelation, PeerSyncResult, VersionedMembershipHistory,
+    MembershipHistorySummaryV3, MembershipHistoryV2Error, PeerLink, PeerRelation, PeerSyncResult,
+    VersionedMembershipHistory,
 };
 use uc_observability_contract::diagnostics::{
     describe_membership_conflict, MembershipRecoveryObservation, MembershipRecoveryOutcome,
@@ -21,6 +23,7 @@ use uc_observability_contract::diagnostics::{
 use crate::space::membership::{
     ledger_error, MembershipLedgerError, MembershipOwner, ReconcileMembershipEvidenceUseCase,
 };
+use uc_observability_contract::{uc_debug, uc_info, uc_warn};
 
 /// 一轮同步的固定总预算，不按对端数量叠加。
 const TOTAL_SYNC_BUDGET: Duration = Duration::from_secs(10);
@@ -199,7 +202,7 @@ impl HistorySynchronizer {
                 PeerExchange::DivergenceRecorded => report.stable_failure_count += 1,
             }
         }
-        tracing::debug!(
+        uc_debug!(
             completed_peer_count = report.completed_peer_count,
             deferred_peer_count = report.deferred_peer_count,
             stable_failure_count = report.stable_failure_count,
@@ -239,7 +242,10 @@ impl HistorySynchronizer {
                 MembershipHistoryExchangeError::Rejected => PeerSyncResult::Rejected,
             }),
             // 对端回复不符合协议：保留同步欠账并按退避重试，不把一次异常回复当作稳定结论。
-            Err(ExchangeFailure::Unexpected) => PeerExchange::Finished(PeerSyncResult::Deferred),
+            Err(ExchangeFailure::Unexpected(unexpected)) => {
+                unexpected.record();
+                PeerExchange::Finished(PeerSyncResult::Deferred)
+            }
         };
         if matches!(exchange, PeerExchange::Finished(PeerSyncResult::Confirmed)) {
             self.address_refresh
@@ -268,7 +274,7 @@ impl HistorySynchronizer {
             )
             .await
             .map_err(ExchangeFailure::Transport)?;
-        tracing::debug!(
+        uc_debug!(
             reply_kind = membership_message_kind(&reply),
             "成员历史摘要收到回复"
         );
@@ -297,9 +303,8 @@ impl HistorySynchronizer {
                 let pages = context
                     .history
                     .export_suffix_pages_v4(context.sender.clone(), known_position)
-                    // 导出失败只决定本轮交换延期（PeerSyncResult::Deferred），没有向上传递的调用方。
-                    .map_err(|_| ExchangeFailure::Unexpected)?;
-                tracing::debug!(page_count = pages.len(), "成员历史后缀已导出");
+                    .map_err(UnexpectedExchange::Export)?;
+                uc_debug!(page_count = pages.len(), "成员历史后缀已导出");
                 self.send_suffix_pages(peer, pages, context).await
             }
             MembershipHistoryMessage::RequestConflictEvidenceV3(request)
@@ -308,8 +313,8 @@ impl HistorySynchronizer {
                 self.exchange_complete_evidence(peer, context).await
             }
             _ => {
-                tracing::debug!("成员历史摘要收到不匹配的回复");
-                Err(ExchangeFailure::Unexpected)
+                uc_debug!("成员历史摘要收到不匹配的回复");
+                Err(UnexpectedExchange::PeerReply("summary_reply_mismatch").into())
             }
         }
     }
@@ -322,8 +327,7 @@ impl HistorySynchronizer {
         let pages = context
             .history
             .export_conflict_evidence_pages_v2(context.sender.clone())
-            // 导出失败只决定本轮交换延期（PeerSyncResult::Deferred），没有向上传递的调用方。
-            .map_err(|_| ExchangeFailure::Unexpected)?;
+            .map_err(UnexpectedExchange::Export)?;
         let reply = self
             .transport
             .exchange_membership_history(
@@ -367,23 +371,23 @@ impl HistorySynchronizer {
         let transfer_id = pages
             .first()
             .map(|page| page.transfer_id())
-            .ok_or(ExchangeFailure::Unexpected)?;
+            .ok_or(UnexpectedExchange::PeerReply("empty_suffix_pages"))?;
         let mut next_page_index = 0u32;
         for _ in 0..=pages.len() {
             let page = pages
                 .get(next_page_index as usize)
                 .cloned()
-                .ok_or(ExchangeFailure::Unexpected)?;
+                .ok_or(UnexpectedExchange::PeerReply("suffix_page_missing"))?;
             let reply = self
                 .transport
                 .exchange_membership_history(peer, MembershipHistoryMessage::SuffixPageV4(page))
                 .await
                 .map_err(ExchangeFailure::Transport)?;
             let MembershipHistoryMessage::AckV3(ack) = reply else {
-                tracing::debug!("成员历史后缀页收到非 ACK 回复");
-                return Err(ExchangeFailure::Unexpected);
+                uc_debug!("成员历史后缀页收到非 ACK 回复");
+                return Err(UnexpectedExchange::PeerReply("suffix_page_reply_not_ack").into());
             };
-            tracing::debug!(
+            uc_debug!(
                 page_number = next_page_index.saturating_add(1),
                 page_count = pages.len(),
                 ack_kind = membership_ack_kind(&ack),
@@ -431,11 +435,11 @@ impl HistorySynchronizer {
                 | MembershipHistoryAckV3::Confirmed { .. }
                 | MembershipHistoryAckV3::RestrictedApplied
                 | MembershipHistoryAckV3::RestrictedConsistent => {
-                    return Err(ExchangeFailure::Unexpected);
+                    return Err(UnexpectedExchange::PeerReply("suffix_page_ack_mismatch").into());
                 }
             }
         }
-        Err(ExchangeFailure::Unexpected)
+        Err(UnexpectedExchange::PeerReply("suffix_page_sequence_exhausted").into())
     }
 }
 
@@ -448,7 +452,45 @@ fn confirms_an_ancestor(context: &SyncContext, confirmed: &BaseMembershipHistory
 enum ExchangeFailure {
     Transport(MembershipHistoryExchangeError),
     Ledger(MembershipLedgerError),
-    Unexpected,
+    Unexpected(UnexpectedExchange),
+}
+
+impl From<UnexpectedExchange> for ExchangeFailure {
+    fn from(unexpected: UnexpectedExchange) -> Self {
+        Self::Unexpected(unexpected)
+    }
+}
+
+/// 本轮交换未能得出结论的固定分类：只带枚举与固定原因，不带成员、设备或摘要。
+enum UnexpectedExchange {
+    /// 本机导出证据失败。对端给出的位置未知属于对端驱动，其余属于本机历史不变量。
+    Export(MembershipHistoryV2Error),
+    /// 对端回复不符合协议。
+    PeerReply(&'static str),
+}
+
+impl UnexpectedExchange {
+    /// 每个失败的对端交换只在此记录一次；调用方随后把本轮标为延期。
+    fn record(&self) {
+        match self {
+            Self::Export(
+                MembershipHistoryV2Error::UnknownParent
+                | MembershipHistoryV2Error::InvalidParentDepth,
+            ) => uc_info!(
+                reject_reason = "peer_position_unknown",
+                "membership history exchange deferred: peer position is unknown"
+            ),
+            Self::Export(error) => uc_warn!(
+                error_kind = "history_export",
+                error_class = error.class(),
+                "membership history export failed; peer sync deferred"
+            ),
+            Self::PeerReply(reject_reason) => uc_info!(
+                reject_reason = *reject_reason,
+                "membership history exchange deferred: peer reply did not match the protocol"
+            ),
+        }
+    }
 }
 
 fn membership_message_kind(message: &MembershipHistoryMessage) -> &'static str {

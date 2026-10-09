@@ -9,17 +9,26 @@ use uc_engine::{
     HostFileHandle, HostFileMetadata, HostSecureStorage,
 };
 
+#[path = "host_contract/clipboard_startup.rs"]
+mod clipboard_startup;
+
 #[path = "host_contract/key_loss.rs"]
 mod key_loss;
 
 #[path = "host_contract/startup.rs"]
 mod startup;
 
+#[path = "host_contract/space_leave.rs"]
+mod space_leave;
+
 #[path = "host_contract/lease.rs"]
 mod lease;
 
 #[path = "host_contract/stale_callback.rs"]
 mod stale_callback;
+
+#[path = "host_contract/search_compound_words.rs"]
+mod search_compound_words;
 
 use lease::{find_lease, open_lease};
 
@@ -127,6 +136,7 @@ struct MemorySecureStorage {
     kek_reads: Arc<AtomicUsize>,
     fail_kek_read_at: Arc<AtomicUsize>,
     fail_kek_writes: Arc<AtomicBool>,
+    fail_deletes: Arc<AtomicBool>,
 }
 
 impl MemorySecureStorage {
@@ -177,6 +187,12 @@ impl HostSecureStorage for MemorySecureStorage {
     }
 
     fn delete(&self, key: &str) -> Result<(), HostCapabilityError> {
+        if self.fail_deletes.load(Ordering::SeqCst) {
+            return Err(HostCapabilityError::new(
+                HostCapabilityErrorCategory::Unavailable,
+                "secure storage delete failure injected by reset test",
+            ));
+        }
         if let Some(value) = self.values().remove(key) {
             self.removed_values().insert(key.to_owned(), value);
         }

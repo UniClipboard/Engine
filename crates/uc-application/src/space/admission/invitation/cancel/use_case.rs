@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use tracing::info;
 use uc_core::ports::{ConsumeInvitationError, PairingInvitationPort};
 
 use super::CancelInvitationError;
 use crate::space::admission::invitation::InMemoryPairingInvitationHolder;
 use crate::space::lifecycle::RetirePairingInvitationsPort;
+use uc_observability_contract::uc_info;
 
 /// 清除当前全部待处理配对邀请；没有邀请时返回明确冲突。
 pub(crate) struct CancelPairingInvitationUseCase {
@@ -24,6 +24,7 @@ impl CancelPairingInvitationUseCase {
         }
     }
 
+    #[tracing::instrument(name = "usecase.cancel_invitation.execute", skip_all)]
     pub(crate) async fn execute(&self) -> Result<(), CancelInvitationError> {
         if self.execute_if_any().await? == 0 {
             return Err(CancelInvitationError::NotIssued);
@@ -50,7 +51,7 @@ impl CancelPairingInvitationUseCase {
             }
         }
         let removed = self.invitation_holder.cancel_all().await;
-        info!(count = removed, "cancelled in-flight pairing invitations");
+        uc_info!(count = removed, "cancelled in-flight pairing invitations");
         Ok(removed)
     }
 }

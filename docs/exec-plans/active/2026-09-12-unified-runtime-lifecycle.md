@@ -43,7 +43,7 @@ Responsibility: 完整业务流程与各自工作生命周期。
 Relationship: 不同所有者已有不同停止入口，不能仅枚举新加的 Clipboard 工作者就视为覆盖全部。
 
 Component: 安全及磁盘能力
-Path: `crates/uc-infra/src/security/profile_content_key_vault/`、`space/security/active_space_security_session/`、`clipboard/background_runtime.rs`
+Path: `crates/uc-infra-security/src/profile_content_key_vault/`、`crates/uc-infra-security/src/active_space_security_session/`、`crates/uc-infra-content/src/clipboard/background_runtime.rs`
 Responsibility: 读写许可、租约、缓存及实际后台磁盘动作。
 Relationship: 必须等使用者退出才可释放共享资源；永久 close 不能代替可恢复 suspend。
 
@@ -306,15 +306,15 @@ impl RuntimeLifecycleCoordinator {
 | 生命周期命令与启动交接 | `crates/uc-engine/src/engine/lifecycle/queue.rs`、`crates/uc-engine/src/engine/startup_owner.rs` | 单一队列保存顺序与最新目标；启动前后转交同一运行期，等待方离开不取消收尾 | 专用 iOS 宿主已证明安全存储读取阻塞期间收到的暂停会在启动完成前落实；50 毫秒期限到期明确报告未完成，启动交接后仍保留暂停目标；其他启动资源和平台仍需核对 | Engine 生命周期、启动所有者、UniFFI 公开合同及 iOS 启动中切换测试 |
 | 会话重建 | `crates/uc-engine/src/runtime/session_supervisor/` | 关闭操作门，完整停止旧会话；本地资料成功恢复后才开门，失败时反向回收 | 整次构造中不可中断步骤仍需设备上界 | 会话生命周期、启动回收及真实宿主离线恢复测试 |
 | Application 领域工作 | `crates/uc-application/src/application/shutdown/owners.rs` | 同时停止历史、文件超时、搜索、Space、普通剪贴板和活动剪贴板，等待全部结果并汇总异常 | 每项内部磁盘动作仍需共同期限证据 | Application shutdown、各领域 lifecycle 测试 |
-| 内容物化与 spool | `crates/uc-infra/src/clipboard/background_runtime.rs`、`crates/uc-infra/src/clipboard/background_activity.rs` | 进程 `TaskRegistry` 持有工作；暂停门等待当前完整磁盘动作后交接，暂停前或暂停期间到点的旧清理批次不在恢复后补跑 | 大内容读写及目录扫描最坏时长未证明 | background activity、blob worker 与真实保存后重开测试 |
+| 内容物化与 spool | `crates/uc-infra-content/src/clipboard/background_runtime.rs`、`crates/uc-infra-content/src/clipboard/background_activity.rs` | 进程 `TaskRegistry` 持有工作；暂停门等待当前完整磁盘动作后交接，暂停前或暂停期间到点的旧清理批次不在恢复后补跑 | 大内容读写及目录扫描最坏时长未证明 | background activity、blob worker 与真实保存后重开测试 |
 | 搜索重建及修复 | `crates/uc-application/src/search/runtime.rs`、`crates/uc-application/src/search/coordinator.rs` | Search runtime 持有任务范围；停止后等待已经开始的索引动作真正退出 | SQLite 索引完整写入的最坏时长未证明 | 搜索协调器阻塞线程与 Application 关闭测试 |
 | 剪贴板发送、接收与活动广播 | `crates/uc-application/src/clipboard/sync/`、`crates/uc-application/src/clipboard/inbound/`、`crates/uc-application/src/clipboard/active/` | 各自私有工作负责人登记完整动作，`ClipboardSession` 统一通知并排空 | iOS 专用宿主已证明阻塞读取或写入结束前暂停不成功；生产拉取和保存的最坏时长仍未证明 | 发送、接收、活动剪贴板关闭、离线恢复及 iOS 阻塞读写真机测试 |
 | 历史维护 | `crates/uc-application/src/clipboard/history/maintenance_runtime.rs` | Application 拥有；当前动作完整结算，后续动作在停止边界退出 | 核对和清理单轮最坏时长未证明 | history maintenance 生命周期测试 |
 | 文件接收与超时清理 | `crates/uc-application/src/transfer/file/session.rs`、`crates/uc-application/src/transfer/file/shutdown.rs`、`crates/uc-application/src/transfer/file/timeout_runtime.rs` | 接收会话由私有关闭负责人逐项完整取消；超时工作由 Application 停止并等待 | 文件发布与清理的最坏时长仍待设备验收 | 文件关闭、超时工作、离线重启补送及传输中进程终止测试 |
 | 成员维护与自动连接 | `crates/uc-application/src/space/membership/maintenance/runtime.rs`、`crates/uc-application/src/space/connectivity/` | Space runtime 拥有；停止当前完整轮次并保留异常，不再使用独立五秒后放弃 | 单轮持久访问最坏时长未证明 | membership maintenance、peer connections 与 Space shutdown 测试 |
-| Iroh Router、协议处理器与下载 | `crates/uc-infra/src/network/iroh/node/shutdown.rs`、`crates/uc-infra/src/network/iroh/blobs.rs` | `SyncEngineAssembly` 先停进度工作，再关闭 Router、endpoint 和观测任务；慢收尾继续由原所有者等待，下载取消关闭对应连接 | 真实弱网和大文件下 Router/下载退出上界仍待设备验证 | Iroh 多异常关闭、慢处理器资源释放及文件传输测试 |
-| 本地安全资料与租约 | `crates/uc-infra/src/security/profile_content_key_vault/`、`crates/uc-infra/src/space/security/` | 安装、冷读取、文件租约和系统安全存储访问均由私有所有者持有；使用者全部退出后才清缓存和交还租约 | 系统安全存储及目录同步的设备上界未证明 | Vault 锁竞争、阻塞安全存储、暂停交接及进程重开测试 |
-| SQLite 连接及事务 | `crates/uc-infra/src/db/executor.rs`、`crates/uc-infra/src/db/pool.rs` 及各 repository 私有阻塞所有者 | 业务负责人等待完整数据库调用；资料切换只在上层工作全部结束后替换连接池 | 5 秒 busy timeout 不是事务总上界；全库设备耗时仍待测量 | 发送记录、活动登记真实锁竞争及各 repository 回归测试 |
+| Iroh Router、协议处理器与下载 | `crates/uc-infra-p2p/src/network/iroh/node/shutdown.rs`、`crates/uc-infra-p2p/src/network/iroh/blobs.rs` | `SyncEngineAssembly` 先停进度工作，再关闭 Router、endpoint 和观测任务；慢收尾继续由原所有者等待，下载取消关闭对应连接 | 真实弱网和大文件下 Router/下载退出上界仍待设备验证 | Iroh 多异常关闭、慢处理器资源释放及文件传输测试 |
+| 本地安全资料与租约 | `crates/uc-infra-security/src/`（含 `profile_content_key_vault/`） | 安装、冷读取、文件租约和系统安全存储访问均由私有所有者持有；使用者全部退出后才清缓存和交还租约 | 系统安全存储及目录同步的设备上界未证明 | Vault 锁竞争、阻塞安全存储、暂停交接及进程重开测试 |
+| SQLite 连接及事务 | `crates/uc-infra-storage/src/db/executor.rs`、`crates/uc-infra-storage/src/db/pool.rs` 及各 repository 私有阻塞所有者 | 业务负责人等待完整数据库调用；资料切换只在上层工作全部结束后替换连接池 | 5 秒 busy timeout 不是事务总上界；全库设备耗时仍待测量 | 发送记录、活动登记真实锁竞争及各 repository 回归测试 |
 | 进程任务与诊断线程 | `crates/uc-engine/src/runtime/task_shutdown.rs`、`crates/uc-core/src/task_registry.rs`、`crates/uc-observability-runtime/src/local_file.rs` | Engine 最终关闭等待任务登记实际退出；诊断线程以有界队列刷新并在最终关闭时 join | 普通暂停保留进程级诊断能力；文件刷新最坏时长待测 | TaskRegistry 取消/异常测试、Engine 最终关闭及 local file 刷新/关闭测试 |
 | 移动绑定与兼容线命令 | `bindings/uc-engine-uniffi/src/runtime/`、`bindings/uc-ohos-napi/`、`compatibility/uc-mobile*/` | 绑定线程只负责命令转交；生命周期在普通调用阻塞时仍可入队，已接收收尾不随等待超时丢失 | iOS、Android、HarmonyOS 的真实系统回调和期限仍待设备矩阵 | UniFFI 单线程宿主、公开合同及兼容线检查 |
 
@@ -1210,6 +1210,22 @@ impl RuntimeLifecycleCoordinator {
 
 - 完成标准：所有已有结果都指出真实宿主或模拟器边界；当前无法执行的设备、系统动作和产品接入逐项写为跳过，不把构建成功、安装成功或模拟器结果记作实体设备通过。完整设备矩阵继续保持未完成。
 
+
+### 2026-10-04：期限后已接受暂停完成本地资源交接
+
+- 两条既有记录存在缺口：2026-09-13 要求已接受暂停在等待方超时后由原负责人继续收尾、工作结束后无需第二次请求；
+  2026-09-17 起统一负责人在共同期限到达时结束参与者调用并记为未完成，本地资源（含资料内容文件租约）只在后续暂停请求时交还。
+  真实双 Engine 场景实测：写事务停住期间期限到达，事务结束后 SQLite 写锁随即释放，但 Engine 停在 Quiesced，租约持续持有，
+  直到宿主再次暂停。移动宿主期限即剩余后台时间，往往没有余量发出第二次请求。
+- Engine 生命周期转换在本次暂停仅因共同期限未完成时，由同一已接受转换不带期限再执行一次 Application 暂停：
+  等在途工作实际退出后交还本地资源并发布 Suspended。宿主等待仍按原期限返回；统一负责人对每次带期限调用的约束不变；
+  其他失败照旧报告并保持 Quiesced。仅由期限造成的生命周期失败改为 DeadlineExceeded，不再归为内部错误。
+- 边界：在途同步工作持续超过系统后台时间时，进程挂起时仍持有该工作的 SQLite 锁及尚未交还的租约，本修改不能消除；
+  参与者永不结束时转换与生命周期门一直等待，恢复与关闭在其后排队（与会话停止任务已持有会话生命周期锁的现状一致）。
+  宿主若在完成前回到前台且只从 Suspended 恢复，Engine 会在前台进入 Suspended；宿主须同时从 Quiesced 恢复，恢复请求排在已接受暂停之后。
+- 验证（隔离副本注入写事务闸门，不进入产品）：修改前事务结束后 10 秒仍为 Quiesced 且租约持有；修改后无需第二次请求即到达
+  Suspended，写锁与租约均已释放；期限后的前台恢复等待暂停完成后进入 Running；期限后的第二次暂停等待并确认同一结果；
+  超出预算的宿主重放中，结束后台任务时写锁与租约仍被持有（作为剩余风险记录），停住结束后自动完成暂停。真机未验证。
 
 # 7. Edge Cases
 

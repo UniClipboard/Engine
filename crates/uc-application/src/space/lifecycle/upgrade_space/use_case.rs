@@ -68,6 +68,7 @@ impl UpgradeSpaceUseCase {
         Ok(Some(EngineVersionTransition { previous, current }))
     }
 
+    #[tracing::instrument(name = "usecase.upgrade_space.execute", skip_all)]
     pub(crate) async fn execute(&self) -> Result<(), UpgradeSpaceError> {
         let Some(transition) = self.pending_transition().await? else {
             return Ok(());

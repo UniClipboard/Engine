@@ -24,8 +24,10 @@ use std::sync::Arc;
 
 use tracing::instrument;
 
+use uc_core::error_class::ErrorClass;
 use uc_core::mobile_sync::LanInterface;
 use uc_core::ports::{LanInterfaceProbeError, LanInterfaceProbePort};
+use uc_observability_contract::{error_source::io_error_kind, uc_warn};
 
 // ─── public-shaped (output / error) ─────────────────────────────────────
 
@@ -47,6 +49,14 @@ pub enum ListLanInterfacesError {
     ProbeFailed(#[source] LanInterfaceProbeError),
 }
 
+impl ErrorClass for ListLanInterfacesError {
+    fn class(&self) -> &'static str {
+        match self {
+            Self::ProbeFailed(_) => "probe_failed",
+        }
+    }
+}
+
 // ─── use case ───────────────────────────────────────────────────────────
 
 pub(crate) struct ListLanInterfacesUseCase {
@@ -58,13 +68,24 @@ impl ListLanInterfacesUseCase {
         Self { probe }
     }
 
+    /// 探测失败原样返回，同时由本负责人记录一次固定分类（公开契约边界会丢弃来源）。
     #[instrument(skip(self))]
     pub(crate) async fn execute(&self) -> Result<Vec<LanInterfaceOption>, ListLanInterfacesError> {
-        let raw = self
-            .probe
-            .list_interfaces()
-            .await
-            .map_err(translate_probe_error)?;
+        let raw = match self.probe.list_interfaces().await {
+            Ok(raw) => raw,
+            Err(error) => {
+                let error = translate_probe_error(error);
+                uc_warn!(
+                    operation = "list_lan_interfaces",
+                    outcome = "failed",
+                    error_kind = "lan_interface_probe",
+                    error_class = error.class(),
+                    io_error_kind = io_error_kind(&error),
+                    "lan interface listing failed"
+                );
+                return Err(error);
+            }
+        };
 
         // 排序时需要数值序（"100.64" < "100.127"），而 `LanInterfaceOption`
         // 对外只保留字符串形式。保留原始 `Ipv4Addr` 作为排序 key，排完再丢。
@@ -315,6 +336,53 @@ mod tests {
             vec!["192.168.1.200", "100.64.0.5", "100.127.255.254"],
             "real LAN must come before Tailscale CGNAT"
         );
+    }
+
+    #[tokio::test]
+    async fn a_failed_probe_records_only_fixed_classification() {
+        struct PermissionDeniedProbe;
+        #[async_trait]
+        impl LanInterfaceProbePort for PermissionDeniedProbe {
+            async fn list_interfaces(&self) -> Result<Vec<LanInterface>, LanInterfaceProbeError> {
+                Err(LanInterfaceProbeError::Probe(Box::new(
+                    std::io::Error::new(std::io::ErrorKind::PermissionDenied, "SECRET_IFACE_en0"),
+                )))
+            }
+        }
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let uc = ListLanInterfacesUseCase::new(Arc::new(PermissionDeniedProbe));
+
+        let error = uc.execute().await.unwrap_err();
+
+        assert!(matches!(error, ListLanInterfacesError::ProbeFailed(_)));
+        let output = logs.output();
+        assert_eq!(logs.count("lan interface listing failed"), 1, "{output}");
+        assert!(
+            output.contains("error_kind=\"lan_interface_probe\""),
+            "{output}"
+        );
+        assert!(output.contains("error_class=\"probe_failed\""), "{output}");
+        assert!(
+            output.contains("io_error_kind=PermissionDenied"),
+            "{output}"
+        );
+        assert!(!output.contains("SECRET_IFACE_en0"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn a_successful_listing_writes_no_failure_record() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let uc = ListLanInterfacesUseCase::new(Arc::new(FixedProbe(vec![make(
+            "en0",
+            [192, 168, 1, 5],
+            false,
+        )])));
+
+        uc.execute().await.expect("ok");
+
+        assert_eq!(logs.count("lan interface listing failed"), 0);
     }
 
     #[tokio::test]

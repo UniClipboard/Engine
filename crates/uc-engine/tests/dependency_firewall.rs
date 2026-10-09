@@ -3,7 +3,7 @@ use std::path::Path;
 
 use cargo_metadata::{DependencyKind, MetadataCommand, PackageId};
 
-const CORE_PACKAGES: [&str; 3] = ["uc-application", "uc-infra", "uc-engine"];
+const CORE_PACKAGES: [&str; 3] = ["uc-application", "uc-infra-profile", "uc-engine"];
 const DESKTOP_ONLY_PACKAGES: [&str; 7] = [
     "uc-app-paths",
     "uc-bootstrap",
@@ -102,20 +102,20 @@ fn engine_default_dependency_contract_excludes_lan_compat_dependencies() {
     let metadata = workspace_metadata();
     let engine = package(&metadata, "uc-engine");
     let application = package(&metadata, "uc-application");
-    let infra = package(&metadata, "uc-infra");
+    let storage = package(&metadata, "uc-infra-storage");
     let mobile_lan = package(&metadata, "uc-mobile-lan");
 
     assert_default_does_not_enable(engine, "lan-compat");
     assert_default_does_not_enable(application, "lan-compat");
-    assert_default_does_not_enable(infra, "lan-compat");
+    assert_default_does_not_enable(storage, "lan-compat");
 
     let application_dependency = normal_dependency(engine, "uc-application");
-    let infra_dependency = normal_dependency(engine, "uc-infra");
+    let storage_dependency = normal_dependency(engine, "uc-infra-storage");
     let mobile_lan_dependency = normal_dependency(engine, "uc-mobile-lan");
     assert!(!application_dependency
         .features
         .contains(&"lan-compat".to_string()));
-    assert!(!infra_dependency
+    assert!(!storage_dependency
         .features
         .contains(&"lan-compat".to_string()));
     assert!(
@@ -133,16 +133,15 @@ fn engine_default_dependency_contract_excludes_lan_compat_dependencies() {
         !application_has_mobile_proto,
         "uc-application must not depend on uc-mobile-proto (moved to uc-mobile-lan)"
     );
-    let network_interface = normal_dependency(infra, "network-interface");
+    let network_interface = normal_dependency(mobile_lan, "network-interface");
     assert!(
-        network_interface.optional,
-        "network-interface must remain optional in uc-infra"
+        !network_interface.optional,
+        "network-interface must be a normal dependency of uc-mobile-lan"
     );
 
-    assert_feature_enables(infra, "lan-compat", "dep:network-interface");
     assert_feature_enables(engine, "lan-compat", "dep:uc-mobile-lan");
     assert_feature_enables(engine, "lan-compat", "dep:uc-mobile-proto");
-    assert_feature_enables(engine, "lan-compat", "uc-infra/lan-compat");
+    assert_feature_enables(engine, "lan-compat", "uc-infra-storage/lan-compat");
     assert_default_does_not_enable(mobile_lan, "lan-compat");
 }
 
@@ -837,6 +836,60 @@ fn normal_dependency<'a>(
                 package.name
             )
         })
+}
+
+/// 七个 Infra 能力 crate 都继承原 uc-infra 的 dev opt-level 3：移动端开发构建走完整加密 blob、
+/// 网络与存储流程，且拆分前后的构建对照只允许改变 crate 边界（issue #144）。
+#[test]
+fn every_infra_capability_crate_keeps_the_dev_optimization_override() {
+    let metadata = workspace_metadata();
+    let infra = metadata
+        .workspace_packages()
+        .into_iter()
+        .map(|package| package.name.to_string())
+        .filter(|name| name.starts_with("uc-infra-"))
+        .collect::<Vec<_>>();
+    let manifest = std::fs::read_to_string(metadata.workspace_root.join("Cargo.toml"))
+        .expect("root manifest must be readable");
+    assert_eq!(
+        dev_opt_level_problems(&manifest, &infra),
+        Vec::<String>::new()
+    );
+
+    let removed = manifest.replace("[profile.dev.package.uc-infra-p2p]\nopt-level = 3\n", "");
+    assert_ne!(removed, manifest);
+    assert_eq!(
+        dev_opt_level_problems(&removed, &infra),
+        vec!["uc-infra-p2p: None".to_owned()]
+    );
+    let lowered = manifest.replace(
+        "[profile.dev.package.uc-infra-storage]\nopt-level = 3",
+        "[profile.dev.package.uc-infra-storage]\nopt-level = 1",
+    );
+    assert_ne!(lowered, manifest);
+    assert_eq!(
+        dev_opt_level_problems(&lowered, &infra),
+        vec!["uc-infra-storage: Some(Integer(1))".to_owned()]
+    );
+}
+
+fn dev_opt_level_problems(manifest: &str, packages: &[String]) -> Vec<String> {
+    let manifest = manifest
+        .parse::<toml::Table>()
+        .expect("root manifest must be valid TOML");
+    let overrides = manifest
+        .get("profile")
+        .and_then(|profile| profile.get("dev"))
+        .and_then(|dev| dev.get("package"));
+    packages
+        .iter()
+        .filter_map(|name| {
+            let level = overrides
+                .and_then(|packages| packages.get(name))
+                .and_then(|package| package.get("opt-level"));
+            (level != Some(&toml::Value::Integer(3))).then(|| format!("{name}: {level:?}"))
+        })
+        .collect()
 }
 
 fn assert_default_does_not_enable(package: &cargo_metadata::Package, feature: &str) {

@@ -35,8 +35,14 @@ use crate::operations::history::resource::{
     execute_read_blob, execute_read_entry_file, execute_read_thumbnail,
 };
 use crate::operations::history::search::{
-    execute_query_search_status, execute_query_search_tags, execute_rebuild_search_index,
-    execute_search_entries, history_page_result, history_search_input, map_query_history_error,
+    execute_count_search_entries, execute_query_daily_entry_counts, execute_query_search_status,
+    execute_query_search_tags, execute_rebuild_search_index, execute_search_entries,
+    history_page_result, history_search_input, map_query_history_error,
+};
+use crate::operations::history::tags::{
+    execute_add_history_tag_to_entries, execute_create_history_tag, execute_delete_history_tag,
+    execute_list_history_tags, execute_merge_history_tags, execute_remove_history_tag_from_entries,
+    execute_rename_history_tag, execute_summarize_history_entry_tags,
 };
 use crate::operations::settings::config_migration::{
     execute_export_config, execute_preview_config_import, execute_stage_config_import,
@@ -49,8 +55,8 @@ use crate::operations::settings::encryption::{
 };
 use crate::operations::settings::settings::{
     execute_mutate_custom_relay, execute_probe_relay, execute_query_custom_relays,
-    execute_query_relay_credential, execute_query_settings, execute_save_relay,
-    execute_update_settings,
+    execute_query_relay_credential, execute_query_relay_overview, execute_query_settings,
+    execute_save_relay, execute_update_settings,
 };
 use crate::operations::settings::storage::{
     execute_clear_storage_cache, execute_query_storage_stats,
@@ -84,7 +90,7 @@ use crate::{
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use uc_application::facade::NetworkRecoveryRequestError;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_warn};
 
 #[async_trait]
 impl EngineRuntime for ProductionRuntime {
@@ -256,7 +262,7 @@ impl EngineRuntime for ProductionRuntime {
                     self.current_facade()
                         .await?
                         .notify_connectivity_opportunity(reason)
-                        // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+                        // discarded-source[no-information]: the error value carries no usable diagnostic information
                         .map_err(|_| super::operation_unavailable_error())?;
                     Ok(OperationResult::ConnectivityOpportunityAccepted)
                 }
@@ -268,6 +274,9 @@ impl EngineRuntime for ProductionRuntime {
                 }
                 Operation::QueryCustomRelays => {
                     execute_query_custom_relays(self.current_facade().await?.as_ref()).await
+                }
+                Operation::QueryRelayOverview => {
+                    execute_query_relay_overview(self.current_facade().await?.as_ref()).await
                 }
                 Operation::MutateCustomRelay(mutation) => {
                     execute_mutate_custom_relay(self.current_facade().await?.as_ref(), mutation)
@@ -447,6 +456,13 @@ impl EngineRuntime for ProductionRuntime {
                 Operation::SearchEntries(input) => {
                     execute_search_entries(self.current_facade().await?.as_ref(), input).await
                 }
+                Operation::CountSearchEntries(input) => {
+                    execute_count_search_entries(self.current_facade().await?.as_ref(), input).await
+                }
+                Operation::QueryDailyEntryCounts(input) => {
+                    execute_query_daily_entry_counts(self.current_facade().await?.as_ref(), input)
+                        .await
+                }
                 Operation::QuerySearchTags => {
                     execute_query_search_tags(self.current_facade().await?.as_ref()).await
                 }
@@ -480,6 +496,39 @@ impl EngineRuntime for ProductionRuntime {
                 Operation::SetHistoryEntryFavorite(input) => {
                     execute_set_history_entry_favorite(self.current_facade().await?.as_ref(), input)
                         .await
+                }
+                Operation::ListHistoryTags => {
+                    execute_list_history_tags(self.current_facade().await?.as_ref()).await
+                }
+                Operation::CreateHistoryTag(input) => {
+                    execute_create_history_tag(self.current_facade().await?.as_ref(), input).await
+                }
+                Operation::RenameHistoryTag(input) => {
+                    execute_rename_history_tag(self.current_facade().await?.as_ref(), input).await
+                }
+                Operation::AddHistoryTagToEntries(input) => {
+                    execute_add_history_tag_to_entries(self.current_facade().await?.as_ref(), input)
+                        .await
+                }
+                Operation::RemoveHistoryTagFromEntries(input) => {
+                    execute_remove_history_tag_from_entries(
+                        self.current_facade().await?.as_ref(),
+                        input,
+                    )
+                    .await
+                }
+                Operation::SummarizeHistoryEntryTags(input) => {
+                    execute_summarize_history_entry_tags(
+                        self.current_facade().await?.as_ref(),
+                        input,
+                    )
+                    .await
+                }
+                Operation::MergeHistoryTags(input) => {
+                    execute_merge_history_tags(self.current_facade().await?.as_ref(), input).await
+                }
+                Operation::DeleteHistoryTag(input) => {
+                    execute_delete_history_tag(self.current_facade().await?.as_ref(), input).await
                 }
                 Operation::QueryHistoryStats => {
                     execute_query_history_stats(self.current_facade().await?.as_ref()).await
@@ -575,7 +624,7 @@ impl EngineRuntime for ProductionRuntime {
                         }
                     }
                     Err(error) => {
-                        tracing::warn!(
+                        uc_warn!(
                             error_kind = "repairing_notification_deferred",
                             io_error_kind = io_error_kind(&error),
                             "re-pairing notification deferred to setup-state recovery query"
@@ -586,7 +635,7 @@ impl EngineRuntime for ProductionRuntime {
                     }
                 },
                 Err(error) => {
-                    tracing::warn!(
+                    uc_warn!(
                         error_kind = "facade_unavailable",
                         io_error_kind = io_error_kind(&error),
                         "re-pairing notification deferred because the facade is unavailable"
@@ -838,11 +887,11 @@ impl EngineRuntime for ProductionRuntime {
             } => {
                 let alpns = if peer_reachability {
                     vec![
-                        uc_infra::network::iroh::LEGACY_PEER_REACHABILITY_ALPN.to_vec(),
-                        uc_infra::network::iroh::PEER_REACHABILITY_ALPN.to_vec(),
+                        uc_infra_p2p::network::iroh::LEGACY_PEER_REACHABILITY_ALPN.to_vec(),
+                        uc_infra_p2p::network::iroh::PEER_REACHABILITY_ALPN.to_vec(),
                     ]
                 } else {
-                    vec![uc_infra::network::iroh::CLIPBOARD_ALPN.to_vec()]
+                    vec![uc_infra_p2p::network::iroh::CLIPBOARD_ALPN.to_vec()]
                 };
                 Ok(DevOperationResult::NetworkPartitionUpdated {
                     blocked_peer_count: self

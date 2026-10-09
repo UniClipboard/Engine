@@ -9,7 +9,7 @@ pub enum GroupUpdatePhase {
     InstallSecurityState,
     Unknown,
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum GroupUpdateReason {
     Unavailable,
     Locked,
@@ -76,5 +76,38 @@ impl GroupUpdateSource {
             Self::State => "state",
             Self::Unknown => "unknown",
         }
+    }
+}
+
+/// 存储层在真实错误转换处（而非诊断读取处）附加的固定分类。
+///
+/// 持久化实现（例如 SQLite/Diesel）在这里把具体库错误类型翻译成
+/// [`GroupUpdateReason`]，并保留原错误作为 `source`。读取方（security、p2p）
+/// 只需识别这个类型即可得到 `GroupUpdateSource::Storage` + 对应 reason，
+/// 不需要也不允许直接认识任何存储库的错误类型。
+#[derive(Debug)]
+pub struct ClassifiedGroupUpdateStorageFailure {
+    pub reason: GroupUpdateReason,
+    source: anyhow::Error,
+}
+
+impl ClassifiedGroupUpdateStorageFailure {
+    pub fn new(reason: GroupUpdateReason, source: impl Into<anyhow::Error>) -> Self {
+        Self {
+            reason,
+            source: source.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for ClassifiedGroupUpdateStorageFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("classified storage failure")
+    }
+}
+
+impl std::error::Error for ClassifiedGroupUpdateStorageFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
     }
 }

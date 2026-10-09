@@ -21,7 +21,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use tracing::{info, warn};
 
 use uc_core::ids::{EntryId, RepresentationId};
 use uc_core::ports::blob::BlobTransferPort;
@@ -30,7 +29,9 @@ use uc_core::ports::clipboard::{
 };
 use uc_core::ports::search::search_index::SearchIndexPort;
 use uc_core::ports::{CacheFsPort, ClipboardEventWriterPort, ClipboardSelectionRepositoryPort};
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_id, uc_info, uc_warn,
+};
 
 use super::delete_entry::DeleteClipboardEntryUseCase;
 use super::file_references::HistoryFileReferencePort;
@@ -100,10 +101,10 @@ impl ReconcileMissingFilesUseCase {
         self
     }
 
-    #[tracing::instrument(name = "usecase.reconcile_missing_files.execute", skip(self))]
+    #[tracing::instrument(name = "usecase.reconcile_missing_files.execute", skip_all)]
     pub(crate) async fn execute(&self) -> Result<ReconcileResult> {
         if !self.cache_fs.exists(&self.file_cache_dir).await {
-            info!("File cache directory does not exist, nothing to reconcile");
+            uc_info!("File cache directory does not exist, nothing to reconcile");
             return Ok(ReconcileResult::default());
         }
 
@@ -163,14 +164,14 @@ impl ReconcileMissingFilesUseCase {
             match delete_uc.execute(entry_id).await {
                 Ok(()) => {
                     result.entries_deleted += 1;
-                    info!(
-                        entry_id = %entry_id,
+                    uc_info!(
+                        entry_id = log_id(&entry_id),
                         "Reconcile: dropped entry whose cache file no longer exists"
                     );
                 }
                 Err(e) => {
-                    warn!(
-                        entry_id = %entry_id,
+                    uc_warn!(
+                        entry_id = log_id(&entry_id),
                         error_kind = "entry_delete",
                         io_error_kind = io_error_kind(e.as_ref()),
                         "Reconcile: delete_entry failed for stale entry"
@@ -180,7 +181,7 @@ impl ReconcileMissingFilesUseCase {
             }
         }
 
-        info!(
+        uc_info!(
             entries_scanned = result.entries_scanned,
             entries_deleted = result.entries_deleted,
             errors = result.errors,

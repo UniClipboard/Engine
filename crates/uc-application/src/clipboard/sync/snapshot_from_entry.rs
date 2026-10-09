@@ -32,7 +32,6 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use thiserror::Error;
-use tracing::{debug, info, warn};
 
 use uc_core::{
     blob::ports::BlobReaderPort,
@@ -48,7 +47,11 @@ use uc_core::{
     },
     BlobId,
 };
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind,
+    log_fields::{log_id, log_vocab, log_vocab_debug},
+    uc_debug, uc_info, uc_warn,
+};
 
 /// Typed errors returned by [`reconstruct_snapshot_from_entry`].
 ///
@@ -125,7 +128,10 @@ pub(crate) async fn reconstruct_snapshot_from_entry(
     blob_store: &dyn BlobReaderPort,
     entry_id: &EntryId,
 ) -> Result<SystemClipboardSnapshot, BuildSnapshotError> {
-    debug!(entry_id = %entry_id, "snapshot_from_entry.reconstruct start");
+    uc_debug!(
+        entry_id = log_id(&entry_id),
+        "snapshot_from_entry.reconstruct start"
+    );
 
     let entry = entry_repo
         .get_entry(entry_id)
@@ -207,10 +213,10 @@ pub(crate) async fn reconstruct_snapshot_from_entry(
                         });
                     }
                     Err(err) => {
-                        warn!(
-                            entry_id = %entry_id,
-                            rep_id = %rep.id,
-                            blob_id = %blob_id,
+                        uc_warn!(
+                            entry_id = log_id(&entry_id),
+                            rep_id = log_id(&rep.id),
+                            blob_id = log_id(&blob_id),
                             error_kind = "blob_fetch",
                             io_error_kind = io_error_kind(err.as_ref()),
                             "snapshot_from_entry.reconstruct: skipping rep, blob fetch failed"
@@ -230,11 +236,11 @@ pub(crate) async fn reconstruct_snapshot_from_entry(
                 return Err(BuildSnapshotError::PasteRepUnavailable(resolver_err));
             }
             Err(err) => {
-                warn!(
-                    entry_id = %entry_id,
-                    rep_id = %rep.id,
-                    format_id = %rep.format_id,
-                    payload_state = ?rep.payload_state,
+                uc_warn!(
+                    entry_id = log_id(&entry_id),
+                    rep_id = log_id(&rep.id),
+                    format_id = log_vocab(&rep.format_id),
+                    payload_state = log_vocab_debug(&rep.payload_state),
                     error_kind = "representation_resolve",
                     io_error_kind = io_error_kind(&err),
                     "snapshot_from_entry.reconstruct: skipping rep, resolver failed (likely Staged without cache/spool bytes)"
@@ -265,13 +271,16 @@ pub(crate) async fn reconstruct_snapshot_from_entry(
         });
     }
 
-    debug!(
-        entry_id = %entry_id,
-        event_id = %entry.event_id,
-        paste_rep_id = %paste_rep.id,
+    uc_debug!(
+        entry_id = log_id(&entry_id),
+        event_id = log_id(&entry.event_id),
+        paste_rep_id = log_id(&paste_rep.id),
         packed_rep_count = representations.len(),
-        packed_rep_ids = ?packed_rep_ids,
-        total_size_bytes = representations.iter().map(|r| r.size_bytes() as usize).sum::<usize>(),
+        packed_rep_ids = log_vocab_debug(&packed_rep_ids),
+        total_size_bytes = representations
+            .iter()
+            .map(|r| r.size_bytes() as usize)
+            .sum::<usize>(),
         "snapshot_from_entry.reconstruct packed representations"
     );
 
@@ -323,28 +332,28 @@ pub(crate) async fn demote_orphaned_to_lost(
         .await
     {
         Ok(ProcessingUpdateOutcome::Updated(_)) => {
-            info!(
-                representation_id = %rep_id,
-                payload_state = ?state,
+            uc_info!(
+                representation_id = log_id(&rep_id),
+                payload_state = log_vocab_debug(&state),
                 "Demoted orphaned representation to Lost (cache+spool miss)"
             );
         }
         Ok(ProcessingUpdateOutcome::StateMismatch) => {
-            warn!(
-                representation_id = %rep_id,
-                payload_state = ?state,
+            uc_warn!(
+                representation_id = log_id(&rep_id),
+                payload_state = log_vocab_debug(&state),
                 "Skipped Lost demotion due to state mismatch (likely already updated)"
             );
         }
         Ok(ProcessingUpdateOutcome::NotFound) => {
-            warn!(
-                representation_id = %rep_id,
+            uc_warn!(
+                representation_id = log_id(&rep_id),
                 "Skipped Lost demotion: representation missing from DB"
             );
         }
         Err(err) => {
-            warn!(
-                representation_id = %rep_id,
+            uc_warn!(
+                representation_id = log_id(&rep_id),
                 error_kind = "representation_demote",
                 io_error_kind = io_error_kind(&err),
                 "Failed to demote orphaned representation to Lost"

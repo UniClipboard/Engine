@@ -12,16 +12,18 @@ use uc_core::blob::ports::{BlobContentIngestPort, BlobReaderPort, BlobWriterPort
 use uc_core::ids::ProfileId;
 use uc_core::ports::clipboard::ClipboardRepresentationNormalizerPort;
 use uc_core::ports::*;
-use uc_infra::blob::{
+use uc_infra_content::clipboard::ClipboardRepresentationNormalizer;
+use uc_infra_content::config::ClipboardStorageConfig;
+use uc_infra_local::blob::{
     BlobRepositoryPort, BlobStorePort, BlobWriter, SwitchableFilesystemBlobStore,
 };
-use uc_infra::clipboard::ClipboardRepresentationNormalizer;
-use uc_infra::config::ClipboardStorageConfig;
-use uc_infra::device::LocalDeviceIdentity;
-use uc_infra::search::V3SearchProtection;
-use uc_infra::security::{ContentProtection, ProfileContentKeyVault, ProfilePayloadAdapters};
-use uc_infra::space::InMemorySession;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_infra_local::device::LocalDeviceIdentity;
+use uc_infra_profile::security::{
+    ContentProtection, ProfileContentKeyVault, ProfilePayloadAdapters,
+};
+use uc_infra_profile::space::InMemorySession;
+use uc_infra_storage::search::V3SearchProtection;
+use uc_observability_contract::{error_source::io_error_kind, uc_info, uc_warn};
 
 /// 已由启动 manifest/gate 选择的 profile primary payload 格式。
 ///
@@ -97,7 +99,7 @@ pub struct PlatformLayer {
     /// 所有 profile persistence adapter 共用的唯一版本选择。
     pub(crate) payload_runtime: ProfilePayloadRuntime,
 
-    // 进程内会话——uc-infra 内部 adapter (SpaceAccessAdapter / BlobCipherAdapter /
+    // 进程内会话——uc-infra-security / uc-infra-content 的 adapter (SpaceAccessAdapter / BlobCipherAdapter /
     // TransferCipherAdapter / EncryptedBlobStore) 共享同一份 Arc。具体类型,
     // 不再走 EncryptionSessionPort trait dyn 间接层。
     pub session: Arc<InMemorySession>,
@@ -153,7 +155,7 @@ pub fn create_platform_layer(
                     let entry = match entry_result {
                         Ok(e) => e,
                         Err(e) => {
-                            tracing::warn!(
+                            uc_warn!(
                                 error_kind = "dir_entry_read",
                                 io_error_kind = io_error_kind(&e),
                                 "Failed to read directory entry during V2 migration"
@@ -171,7 +173,7 @@ pub fn create_platform_layer(
                             continue;
                         }
                         if let Err(e) = std::fs::remove_file(&path) {
-                            tracing::warn!(
+                            uc_warn!(
                                 error_kind = "old_blob_purge",
                                 io_error_kind = io_error_kind(&e),
                                 "Failed to purge old blob file"
@@ -183,7 +185,7 @@ pub fn create_platform_layer(
                     }
                 }
                 if purged > 0 {
-                    tracing::info!(
+                    uc_info!(
                         count = purged,
                         "Purged old blob files (V2 format migration)"
                     );
@@ -191,22 +193,21 @@ pub fn create_platform_layer(
 
                 if errors == 0 {
                     if let Err(e) = std::fs::File::create(&sentinel) {
-                        tracing::warn!(
+                        uc_warn!(
                             error_kind = "sentinel_create",
                             io_error_kind = io_error_kind(&e),
                             "Failed to create V2 migration sentinel"
                         );
                     }
                 } else {
-                    tracing::warn!(
+                    uc_warn!(
                         errors = errors,
-                        "Skipping V2 migration sentinel: {} errors during cleanup, will retry next startup",
-                        errors
+                        "Skipping V2 migration sentinel after cleanup errors, will retry next startup"
                     );
                 }
             }
             Err(e) => {
-                tracing::warn!(
+                uc_warn!(
                     error_kind = "blob_dir_read",
                     io_error_kind = io_error_kind(&e),
                     "Failed to read blob directory for cleanup"
@@ -221,7 +222,7 @@ pub fn create_platform_layer(
     let representation_normalizer: Arc<dyn ClipboardRepresentationNormalizerPort> =
         Arc::new(ClipboardRepresentationNormalizer::new(storage_config));
 
-    // 进程内会话: uc-infra adapter 共享的具体类型,替换历史
+    // 进程内会话: uc-infra-security 提供、各 Infra adapter 共享的具体类型,替换历史
     // InMemoryEncryptionSessionPort + EncryptionSessionPort trait dyn 间接层。
     let session = Arc::new(InMemorySession::new());
 
@@ -284,9 +285,7 @@ pub fn create_platform_layer(
 pub fn current_profile_for(
     profile_id: impl Into<ProfileId>,
 ) -> Arc<dyn uc_core::ports::security::current_profile::CurrentProfilePort> {
-    Arc::new(uc_infra::security::DefaultCurrentProfile::for_profile(
-        profile_id.into(),
-    ))
+    Arc::new(uc_infra_profile::security::DefaultCurrentProfile::for_profile(profile_id.into()))
 }
 
 /// Check if a file starts with the UCBL binary format magic bytes.

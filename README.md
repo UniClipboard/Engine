@@ -64,7 +64,7 @@ LAN HTTP 同步位于 `compatibility/`，拥有独立版本和 `uc-mobile-v*` �
 | `crates/uc-engine/` | 唯一稳定入口，负责启动、操作、事件和生命周期 |
 | `crates/uc-core/` | 领域模型和平台能力约定 |
 | `crates/uc-application/` | 业务流程编排 |
-| `crates/uc-infra/` | 数据库、加密、文件和 P2P 实现 |
+| `crates/uc-infra-*/` | 数据库、加密、文件和 P2P 实现（7 个能力 crate，见 [`ARCHITECTURE.md`](ARCHITECTURE.md)） |
 | `bindings/uc-engine-uniffi/` | iOS 与 Android 绑定及打包脚本 |
 | `bindings/uc-ohos-napi/` | HarmonyOS N-API 绑定与 ArkTS 声明 |
 | `compatibility/` | 独立版本的 LAN 兼容线 |
@@ -100,7 +100,7 @@ rustup target add \
   x86_64-linux-android \
   aarch64-unknown-linux-ohos
 
-cargo install cargo-ndk --locked
+just cargo install cargo-ndk --locked
 ```
 
 只开发 Rust 核心时不需要安装全部移动工具链。
@@ -110,25 +110,25 @@ cargo install cargo-ndk --locked
 所有 Rust 命令都从仓库根目录运行：
 
 ```bash
-cargo metadata --locked --format-version 1
-cargo check --workspace --all-targets --locked
-cargo test --workspace --locked
-cargo fmt --all -- --check
+just cargo metadata --locked --format-version 1
+just cargo check --workspace --all-targets --locked
+just cargo test --workspace --locked
+just cargo fmt --all -- --check
 node scripts/architecture/check-engine-repository.mjs
 git diff --check
 ```
 
 仓库检查会验证目录归属、依赖方向、唯一公开入口、绑定版本、产物来源、密文持久化规则和 LAN 隔离。
 
-### 可选：跨 worktree 编译缓存
+### 统一 Rust 编译缓存
 
-新建 worktree 后，可以用 [just](https://github.com/casey/just) 调用仓库固定版本的 mbx，
+新建 worktree 后，使用 [just](https://github.com/casey/just) 调用仓库固定版本的 mbx，
 复用其他 worktree 已编译的结果：
 
 ```bash
-just mbx check --workspace --all-targets --locked
-just mbx nextest run --profile ci --locked --workspace --all-targets --no-run
-just mbx-exec bash scripts/testing/run-test-group.sh evidence
+just cargo check --workspace --all-targets --locked
+just cargo nextest run --profile ci --locked --workspace --all-targets --no-run
+bash scripts/testing/run-test-group.sh evidence
 just mbx-tool cache stats
 ```
 
@@ -136,10 +136,12 @@ just mbx-tool cache stats
 
 - 首次运行会下载固定版本的 mbx 并校验 sha256。
 - 缓存位置由环境变量 `MBX_CACHE_DIR` 决定，未设置时使用 mbx 的平台默认位置。
-- 默认的 `cargo`、sccache 和 CI 不受影响。
-- 同一个 worktree 请只使用一条路线（`just mbx` 或普通 `cargo`）；来回切换会重编工作区 crate。
+- 仓库 Rust 构建、测试、E2E 与 CI 统一使用 MBX；本地默认 4 个编译任务，环境值与 `-j` 可覆盖。
+- 当前 shell 直接运行 Cargo 前执行 `source scripts/build-cache/env.sh`；不修改全局配置。
+- 使用 R2 分布式缓存时执行 `just mbx --r2 <Cargo 参数>`，本地 worker 与 PR 只读、可信受保护 main CI 写入；凭据与验证条件见[本地构建指南](docs/design-docs/local-builds.md#r2-分布式动作缓存)。
 
-取舍与实测数据见 [ADR-028](docs/design-docs/decisions/028-optional-mbx-build-cache.md)。
+统一入口、信任与命中边界见 [ADR-033](docs/design-docs/decisions/033-unified-mbx-rust-builds.md)。
+多 worktree 的输出隔离、并行度和复跑基准见 [本地构建指南](docs/design-docs/local-builds.md)。
 
 ## 统一集成流程
 
@@ -217,7 +219,7 @@ uc-engine = {
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
-不要直接依赖 `uc-core`、`uc-application` 或 `uc-infra`。只有明确接入 LAN 兼容通道时才启用 `uc-engine/lan-compat`，正式产品不得启用 `dev-tools`。
+不要直接依赖 `uc-core`、`uc-application` 或任何 `uc-infra-*` crate。只有明确接入 LAN 兼容通道时才启用 `uc-engine/lan-compat`，正式产品不得启用 `dev-tools`。
 
 ### 最小启动流程
 

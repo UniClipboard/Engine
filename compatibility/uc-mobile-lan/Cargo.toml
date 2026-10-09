@@ -15,11 +15,15 @@ uc-application = { path = "../../crates/uc-application" }
 uc-core = { path = "../../crates/uc-core" }
 uc-observability-contract = { path = "../../crates/uc-observability-contract" }
 uc-mobile-proto = { path = "../uc-mobile-proto" }
+anyhow = "1.0"
+argon2 = { version = "0.5.3", features = ["std"] }
 async-trait = "0.1"
 base64 = "0.22"
 hex = "0.4"
 image = { version = "0.25", default-features = false, features = ["png"] }
+network-interface = "2.0"
 qrcode = { version = "0.14", default-features = false, features = ["image"] }
+rand = "0.9.2"
 sha2 = "0.10"
 thiserror = "2.0"
 tokio = { version = "1", features = ["full"] }
@@ -29,10 +33,11 @@ uuid = { version = "1.10.0", features = ["v4"] }
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-anyhow = "1.0"
 mockall = "0.13"
+tempfile = "3"
 tokio = { version = "1", features = ["full"] }
-uc-infra = { path = "../../crates/uc-infra" }
+uc-infra-storage = { path = "../../crates/uc-infra-storage" }
+uc-testkit = { path = "../../tests/uc-testkit" }
 uc-application = { path = "../../crates/uc-application", features = ["test-support"] }
 
 [lints]

@@ -72,6 +72,7 @@ export interface OhObservabilitySetup {
 
 export interface OhObservabilityHealth {
   remote: 'disabled' | 'ready' | 'unavailable'
+  remoteSetupFailure?: 'http_client' | 'trace_exporter' | 'log_exporter'
   localFile: 'disabled' | 'ready' | 'unavailable'
   droppedLocalRecords: number
   droppedRemoteSpans: number
@@ -104,6 +105,24 @@ export interface OhNetworkRecoveryStatus {
   phase: 'idle' | 'recovering' | 'retry_scheduled' | 'failed'
   retryable: boolean
   nextRetryInMs?: number
+}
+
+export type OhRelayMode = 'built_in' | 'custom' | 'disabled'
+
+export interface OhRelayOverviewEntry {
+  source: 'built_in' | 'custom'
+  regionId?: string
+  url: string
+  credentialConfigured: boolean
+  /** The running node is configured with this relay. It does not mean the relay is connected. */
+  inEffect: boolean
+}
+
+export interface OhRelayOverview {
+  savedMode: OhRelayMode
+  appliedMode?: OhRelayMode
+  changePending: boolean
+  entries: OhRelayOverviewEntry[]
 }
 
 export interface OhLocalDevice {
@@ -226,6 +245,7 @@ export interface OhEngine {
   recoverSession(allowSecureStorageUnlock: boolean): Promise<OhSessionRecovery>
   recoverNetwork(): Promise<void>
   queryNetworkRecoveryStatus(): Promise<OhNetworkRecoveryStatus>
+  queryRelayOverview(): Promise<OhRelayOverview>
   queryLocalDevice(): Promise<OhLocalDevice>
   queryDeviceGroupChoices(): Promise<string>
   queryMembershipConvergence(): Promise<OhMembershipConvergence>

@@ -104,6 +104,10 @@ impl ObservationContext {
     pub async fn scope<F: Future>(self, future: F) -> F::Output {
         CONTINUATION.scope(self.0, future).await
     }
+
+    fn sync_scope<T>(self, work: impl FnOnce() -> T) -> T {
+        CONTINUATION.sync_scope(self.0, work)
+    }
 }
 
 pub const TELEMETRY_SCHEMA_VERSION: u16 = 1;
@@ -531,36 +535,52 @@ pub enum DiagnosticErrorType {
     Internal,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DiagnosticTaskKind {
-    ClipboardDeliveryRecord,
-    ClipboardInboundOsWrite,
-    ActiveClipboardConverge,
-    ClipboardDeferredDrain,
-    PairingMdnsForward,
-    MobileOutboundDispatch,
-    /// Engine 公开操作的执行任务异常退出；调用方只收到稳定错误码 1108。
-    EngineOperation,
-    /// Engine 生命周期转换的执行任务异常退出。
-    EngineLifecycleTransition,
-    /// 会话挂起交接给独立任务后，该任务异常退出。
-    SessionSuspend,
+/// 声明诊断任务类别：变体、线上取值与 `ALL` 由同一份列表生成，新增类别只改这一处。
+macro_rules! diagnostic_task_kinds {
+    ($($(#[$doc:meta])* $variant:ident => $wire:literal,)+) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum DiagnosticTaskKind {
+            $($(#[$doc])* $variant,)+
+        }
+
+        impl DiagnosticTaskKind {
+            /// 全部类别，供合同测试与文档核对遍历。
+            #[cfg(test)]
+            const ALL: &'static [Self] = &[$(Self::$variant,)+];
+
+            /// 写入 `task.kind` 的固定取值。
+            fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $wire,)+
+                }
+            }
+        }
+    };
 }
 
-impl DiagnosticTaskKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::ClipboardDeliveryRecord => "clipboard_delivery_record",
-            Self::ClipboardInboundOsWrite => "clipboard_inbound_os_write",
-            Self::ActiveClipboardConverge => "active_clipboard_converge",
-            Self::ClipboardDeferredDrain => "clipboard_deferred_drain",
-            Self::PairingMdnsForward => "pairing_mdns_forward",
-            Self::MobileOutboundDispatch => "mobile_outbound_dispatch",
-            Self::EngineOperation => "engine_operation",
-            Self::EngineLifecycleTransition => "engine_lifecycle_transition",
-            Self::SessionSuspend => "session_suspend",
-        }
-    }
+diagnostic_task_kinds! {
+    ClipboardDeliveryRecord => "clipboard_delivery_record",
+    ClipboardInboundOsWrite => "clipboard_inbound_os_write",
+    ActiveClipboardConverge => "active_clipboard_converge",
+    ClipboardDeferredDrain => "clipboard_deferred_drain",
+    PairingMdnsForward => "pairing_mdns_forward",
+    MobileOutboundDispatch => "mobile_outbound_dispatch",
+    /// Engine 公开操作的执行任务异常退出；调用方只收到稳定错误码 1108。
+    EngineOperation => "engine_operation",
+    /// Engine 生命周期转换的执行任务异常退出。
+    EngineLifecycleTransition => "engine_lifecycle_transition",
+    /// 会话挂起交接给独立任务后，该任务异常退出。
+    SessionSuspend => "session_suspend",
+    /// 成员维护的一轮完整动作异常退出；此后收敛、副作用与群更新投递都会停止。
+    MembershipMaintenanceRound => "membership_maintenance_round",
+    /// 活跃剪贴板必需 worker 的任务异常退出（panic 或被取消）。
+    ActiveClipboardWorker => "active_clipboard_worker",
+    /// 移动端绑定的引擎 worker 线程异常退出；宿主只收到稳定错误码。
+    MobileWorker => "mobile_worker",
+    /// Engine 启动任务异常退出；调用方只收到稳定错误码 1108，启动请求与进度都不会收尾。
+    EngineStartup => "engine_startup",
+    /// 出站进度翻译任务异常退出；此后出站传输状态不再更新。
+    OutboundProgressTranslator => "outbound_progress_translator",
 }
 
 pub fn record_task_join_failure(task: DiagnosticTaskKind) {
@@ -1047,4 +1067,38 @@ fn record_unassociated_non_error_completion(
         uc.outcome = outcome,
         duration_ms,
     );
+}
+
+#[cfg(test)]
+mod task_kind_tests {
+    use std::collections::HashSet;
+
+    use super::DiagnosticTaskKind;
+
+    #[test]
+    fn wire_names_are_unique_snake_case() {
+        let mut seen = HashSet::new();
+        for kind in DiagnosticTaskKind::ALL {
+            let name = kind.as_str();
+            assert!(!name.is_empty());
+            assert!(
+                name.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+                "{name}"
+            );
+            assert!(seen.insert(name), "duplicate task kind {name}");
+        }
+    }
+
+    #[test]
+    fn every_task_kind_is_documented() {
+        let document = include_str!("../../../../docs/design-docs/observability.md");
+        for kind in DiagnosticTaskKind::ALL {
+            let name = kind.as_str();
+            assert!(
+                document.contains(&format!("`{name}`")),
+                "observability.md 缺少任务类别 `{name}`"
+            );
+        }
+    }
 }

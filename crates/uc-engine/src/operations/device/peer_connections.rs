@@ -7,6 +7,7 @@ use crate::{
     EngineError, EngineErrorCategory, OperationResult, PeerConnectionChannelSummary,
     PeerConnectionRefreshSummary, PeerConnectionSummary,
 };
+use uc_observability_contract::{log_fields::log_vocab_debug, uc_info, uc_warn};
 
 pub(crate) async fn execute_query_peer_connections(
     facade: &AppFacade,
@@ -35,7 +36,7 @@ pub(crate) async fn execute_query_peer_connections(
 pub(crate) async fn execute_refresh_peer_connections(
     facade: &AppFacade,
 ) -> Result<OperationResult, EngineError> {
-    // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+    // discarded-source[contract-boundary]: the public error carries a stable code only, the owner records the failure classification
     let report = facade.refresh_peer_reachability().await.map_err(|_| {
         EngineError::new(
             REFRESH_PEER_CONNECTIONS_FAILED_CODE,
@@ -65,8 +66,8 @@ async fn log_relay_connections(facade: &AppFacade) {
         }
         Err(error) => {
             let category = map_query_error(error).category();
-            tracing::warn!(
-                error_category = ?category,
+            uc_warn!(
+                error_category = log_vocab_debug(&category),
                 "relay log unavailable after peer refresh"
             );
         }
@@ -74,8 +75,8 @@ async fn log_relay_connections(facade: &AppFacade) {
 }
 
 fn log_relay_connection(peer: &PeerSnapshotView) {
-    if let Some((device_id, relay_url)) = relay_connected_peer(peer) {
-        tracing::info!(device_id, relay_url, "peer connected via relay");
+    if relay_connected_peer(peer).is_some() {
+        uc_info!("peer connected via relay");
     }
 }
 
@@ -227,7 +228,7 @@ mod tests {
     }
 
     #[test]
-    fn relay_log_records_only_connected_relay_peers_with_address() {
+    fn relay_log_records_only_connected_relay_peers_without_identifiers() {
         let writer = CapturedWriter::default();
         let subscriber = tracing_subscriber::fmt()
             .with_ansi(false)
@@ -255,11 +256,16 @@ mod tests {
         });
 
         let output = writer.output();
-        assert!(output.contains("peer connected via relay"));
-        assert!(output.contains("device_id=\"relay-peer\""));
-        assert!(output.contains("relay_url=\"https://relay.example.com/\""));
-        assert!(!output.contains("relay-no-address"));
-        assert!(!output.contains("direct-peer"));
-        assert!(!output.contains("offline-relay-peer"));
+        // 只有在线且活跃通道为中继、带中继地址的对端产生一条记录；标识与地址不写入日志。
+        assert_eq!(output.matches("peer connected via relay").count(), 1);
+        for leaked in [
+            "relay-peer",
+            "relay.example.com",
+            "relay-no-address",
+            "direct-peer",
+            "offline-relay-peer",
+        ] {
+            assert!(!output.contains(leaked), "log leaked {leaked}: {output}");
+        }
     }
 }

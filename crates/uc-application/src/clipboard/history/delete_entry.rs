@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{info, info_span, warn, Instrument};
+use tracing::{info_span, Instrument};
 use uc_core::ids::EntryId;
 use uc_core::ports::blob::{BlobTransferPort, TagReason};
 use uc_core::ports::clipboard::{
@@ -9,7 +9,9 @@ use uc_core::ports::clipboard::{
     ListRepresentationsForEventPort,
 };
 use uc_core::ports::{ClipboardEventWriterPort, ClipboardSelectionRepositoryPort, SearchIndexPort};
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_id, uc_info, uc_warn,
+};
 
 /// Use case for deleting clipboard entries with all associated data.
 pub(crate) struct DeleteClipboardEntryUseCase {
@@ -137,8 +139,8 @@ impl DeleteClipboardEntryUseCase {
                     .untag(TagReason::ClipboardEntry(entry_id.clone()))
                     .await
                 {
-                    warn!(
-                        entry_id = %entry_id,
+                    uc_warn!(
+                        entry_id = log_id(&entry_id),
                         error_kind = "blob_untag",
                         io_error_kind = io_error_kind(&e),
                         "blob untag failed during entry delete; iroh-blobs GC will reclaim metadata on its next sweep"
@@ -177,20 +179,20 @@ impl DeleteClipboardEntryUseCase {
                             };
 
                             if !path.starts_with(cache_dir) {
-                                info!(
+                                uc_info!(
                                     "Skipping file deletion — path is outside the managed file-cache directory (user-owned file)"
                                 );
                                 continue;
                             }
 
                             if let Err(e) = tokio::fs::remove_file(&path).await {
-                                warn!(
+                                uc_warn!(
                                     error_kind = "cache_file_remove",
                                     io_error_kind = io_error_kind(&e),
                                     "Failed to delete cache file during entry cleanup"
                                 );
                             } else {
-                                info!("Deleted cache file during entry cleanup");
+                                uc_info!("Deleted cache file during entry cleanup");
                                 if let Some(parent) = path.parent() {
                                     if parent != cache_dir.as_path() && parent.starts_with(cache_dir)
                                     {
@@ -209,10 +211,10 @@ impl DeleteClipboardEntryUseCase {
         if let Some(search_index) = self.search_index.as_ref() {
             async {
                 if let Err(e) = search_index.remove_entry(entry_id).await {
-                    warn!(
+                    uc_warn!(
                         error_kind = "search_index_remove",
                         io_error_kind = io_error_kind(&e),
-                        entry_id = %entry_id,
+                        entry_id = log_id(&entry_id),
                         "search index cleanup failed, continuing delete"
                     );
                 }
@@ -221,9 +223,9 @@ impl DeleteClipboardEntryUseCase {
             .await;
         }
 
-        info!(
-            entry_id = %entry_id,
-            event_id = %event_id,
+        uc_info!(
+            entry_id = log_id(&entry_id),
+            event_id = log_id(&event_id),
             "Deleted clipboard entry successfully"
         );
         Ok(())

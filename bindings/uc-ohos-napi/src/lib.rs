@@ -13,6 +13,7 @@ use napi::bindgen_prelude::{Buffer, External};
 use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunction};
 use napi::Env;
 use napi_derive::napi;
+use uc_engine::observability::uc_warn;
 
 pub use runtime::OhEngine;
 
@@ -69,6 +70,7 @@ pub struct OhObservabilitySetup {
 #[napi(object)]
 pub struct OhObservabilityHealth {
     pub remote: String,
+    pub remote_setup_failure: Option<String>,
     pub local_file: String,
     pub dropped_local_records: f64,
     pub dropped_remote_spans: f64,
@@ -134,6 +136,25 @@ pub struct OhNetworkRecoveryStatus {
     pub phase: String,
     pub retryable: bool,
     pub next_retry_in_ms: Option<f64>,
+}
+
+/// `source` 为 `built_in` 或 `custom`；`in_effect` 表示运行中的节点按此地址配置，不代表已连通。
+#[napi(object)]
+pub struct OhRelayOverviewEntry {
+    pub source: String,
+    pub region_id: Option<String>,
+    pub url: String,
+    pub credential_configured: bool,
+    pub in_effect: bool,
+}
+
+/// `saved_mode` / `applied_mode` 取值 `built_in`、`custom`、`disabled`。
+#[napi(object)]
+pub struct OhRelayOverview {
+    pub saved_mode: String,
+    pub applied_mode: Option<String>,
+    pub change_pending: bool,
+    pub entries: Vec<OhRelayOverviewEntry>,
 }
 
 #[napi(object)]
@@ -259,8 +280,15 @@ pub async fn flush_process_observability(
         observability::force_flush(std::time::Duration::from_millis(u64::from(deadline_ms)))
     })
     .await
-    // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
-    .map_err(|_| observability::runtime_unavailable())?
+    // discarded-source[business-outcome]: the failure becomes a business outcome and is recorded once here with a fixed classification
+    .map_err(|_| {
+        uc_warn!(
+            operation = "process_observability_flush",
+            error_kind = "blocking_task_join_failed",
+            "observability operation failed"
+        );
+        observability::runtime_unavailable()
+    })?
 }
 
 #[napi]
@@ -271,8 +299,15 @@ pub async fn shutdown_process_observability(
         observability::shutdown(std::time::Duration::from_millis(u64::from(deadline_ms)))
     })
     .await
-    // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
-    .map_err(|_| observability::runtime_unavailable())?
+    // discarded-source[business-outcome]: the failure becomes a business outcome and is recorded once here with a fixed classification
+    .map_err(|_| {
+        uc_warn!(
+            operation = "process_observability_shutdown",
+            error_kind = "blocking_task_join_failed",
+            "observability operation failed"
+        );
+        observability::runtime_unavailable()
+    })?
 }
 
 #[napi]

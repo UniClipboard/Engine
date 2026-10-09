@@ -3,7 +3,7 @@
 use crate::error_codes::*;
 
 use base64::Engine as _;
-use tracing::{error, info};
+
 use uc_application::facade::{
     AppFacade, ContentTypesPatch as AppContentTypesPatch, CurrentJoinStatus, DeviceTrustMembership,
     DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, InboundPairingStatus,
@@ -28,18 +28,11 @@ use crate::{
     QueryMemberSyncPreferencesInput, RemoveMemberInput, SpaceProtectionModeSummary,
     SpaceProtectionSummary, UpdateMemberSyncPreferencesInput,
 };
+use uc_observability_contract::{log_fields::log_vocab, uc_error, uc_info};
 
 pub async fn execute_list_devices(facade: &AppFacade) -> Result<OperationResult, EngineError> {
-    // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+    // discarded-source[contract-boundary]: the public error carries a stable code only, the owner records the failure classification
     let encryption = facade.encryption_state().await.map_err(|_| {
-        error!(
-            operation = "list_devices",
-            source = "encryption_state",
-            error_code = MEMBER_REPOSITORY_FAILED_CODE,
-            error_category = "internal",
-            retryable = false,
-            "device list query failed"
-        );
         EngineError::new(
             MEMBER_REPOSITORY_FAILED_CODE,
             EngineErrorCategory::Internal,
@@ -47,7 +40,7 @@ pub async fn execute_list_devices(facade: &AppFacade) -> Result<OperationResult,
         )
     })?;
     if !encryption.initialized {
-        info!(
+        uc_info!(
             operation = "list_devices",
             encryption_initialized = false,
             device_count = 0,
@@ -68,7 +61,7 @@ pub async fn execute_list_devices(facade: &AppFacade) -> Result<OperationResult,
             online: entry.is_local || entry.state == ReachabilityState::Online,
         })
         .collect::<Vec<_>>();
-    info!(
+    uc_info!(
         operation = "list_devices",
         encryption_initialized = true,
         device_count = devices.len(),
@@ -375,10 +368,16 @@ pub(crate) fn join_space_status(status: CurrentJoinStatus) -> JoinSpaceStatusSum
                 uc_application::facade::JoinSpaceAttentionReason::OutcomeCannotBeProven => {
                     JoinSpaceAttentionReasonSummary::OutcomeCannotBeProven
                 }
+                uc_application::facade::JoinSpaceAttentionReason::ContinuationUnavailable => {
+                    JoinSpaceAttentionReasonSummary::ContinuationUnavailable
+                }
             },
             recovery: match recovery {
                 uc_application::facade::JoinSpaceAttentionRecovery::PreserveDataAndContactSupport => {
                     JoinSpaceAttentionRecoverySummary::PreserveDataAndContactSupport
+                }
+                uc_application::facade::JoinSpaceAttentionRecovery::RestartWithNewInvitation => {
+                    JoinSpaceAttentionRecoverySummary::RestartWithNewInvitation
                 }
             },
             next_retry_at_ms,
@@ -596,64 +595,86 @@ fn map_roster_error(error: RosterError) -> EngineError {
             "space_protection",
         ),
     };
-    error!(
+    uc_error!(
         operation = "member_roster",
-        variant,
+        variant = variant,
         error_code = code,
-        error_category = %category,
-        retryable,
+        error_category = log_vocab(&category),
+        retryable = retryable,
         "member roster operation failed"
     );
     EngineError::new(code, category, retryable)
 }
 
 fn map_remove_space_member_error(error: RemoveSpaceMemberError) -> EngineError {
-    match error {
-        RemoveSpaceMemberError::Locked => EngineError::new(
+    // 结果记录由 RemoveSpaceMemberUseCase 负责；这里只做稳定错误码映射。
+    let (code, category, retryable) = match error {
+        RemoveSpaceMemberError::Locked => (
             QUERY_WORKSPACE_CONVERGENCE_UNAVAILABLE_CODE,
             EngineErrorCategory::Unavailable,
             false,
         ),
         // 成员状态或本机签名暂时不可用（例如加入后仍在切换 Space 会话）：稍后重试即可完成。
-        RemoveSpaceMemberError::Unavailable => EngineError::new(
+        RemoveSpaceMemberError::Unavailable => (
             QUERY_WORKSPACE_CONVERGENCE_UNAVAILABLE_CODE,
             EngineErrorCategory::Unavailable,
             true,
         ),
-        RemoveSpaceMemberError::RecoveryRequired { .. } => EngineError::new(
+        RemoveSpaceMemberError::RecoveryRequired { .. } => (
             QUERY_WORKSPACE_CONVERGENCE_CORRUPT_CODE,
             EngineErrorCategory::InvalidState,
             false,
         ),
-        RemoveSpaceMemberError::StateChanged => EngineError::new(
+        RemoveSpaceMemberError::StateChanged => (
             QUERY_WORKSPACE_CONVERGENCE_FAILED_CODE,
             EngineErrorCategory::InvalidState,
             true,
         ),
         RemoveSpaceMemberError::TargetNotFound => {
-            EngineError::new(MEMBER_NOT_FOUND_CODE, EngineErrorCategory::NotFound, false)
+            (MEMBER_NOT_FOUND_CODE, EngineErrorCategory::NotFound, false)
         }
-        RemoveSpaceMemberError::SelfTarget => EngineError::new(
+        RemoveSpaceMemberError::SelfTarget => (
             MEMBER_INVALID_INPUT_CODE,
             EngineErrorCategory::InvalidInput,
             false,
         ),
-        RemoveSpaceMemberError::LocalMemberRemoved => EngineError::new(
+        RemoveSpaceMemberError::LocalMemberRemoved => (
             QUERY_WORKSPACE_CONVERGENCE_FAILED_CODE,
             EngineErrorCategory::InvalidState,
             false,
         ),
-        RemoveSpaceMemberError::CommittedButPending { .. } => EngineError::new(
+        // 本机已提交移除，但其他成员尚未确认；与 StateChanged 的错误码相同，二者由完成记录的 error_class 区分。
+        RemoveSpaceMemberError::CommittedButPending { .. } => (
             QUERY_WORKSPACE_CONVERGENCE_FAILED_CODE,
             EngineErrorCategory::InvalidState,
             true,
         ),
-    }
+    };
+    EngineError::new(code, category, retryable)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remove_member_mapping_does_not_write_a_second_record() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+
+        for error in [
+            RemoveSpaceMemberError::Unavailable,
+            RemoveSpaceMemberError::StateChanged,
+            RemoveSpaceMemberError::recovery_required(),
+            RemoveSpaceMemberError::LocalMemberRemoved,
+            RemoveSpaceMemberError::SelfTarget,
+        ] {
+            map_remove_space_member_error(error);
+        }
+
+        assert_eq!(logs.count("member removal"), 0, "{}", logs.output());
+    }
+
     use uc_core::membership::MembershipError;
 
     fn handoff_pending_removal(includes_local_device: bool) -> DeviceTrustStatus {

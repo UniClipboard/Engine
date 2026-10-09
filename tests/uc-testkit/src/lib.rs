@@ -4,6 +4,7 @@ mod budget;
 mod event;
 mod failure;
 mod identity;
+pub mod log_capture;
 mod process;
 mod report;
 mod resource;

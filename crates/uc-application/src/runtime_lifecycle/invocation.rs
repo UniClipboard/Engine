@@ -24,7 +24,7 @@ pub(super) async fn invoke(
         match deadline {
             Some(deadline) => timeout_at(deadline, invocation)
                 .await
-                // 超时本身就是分类。
+                // discarded-source[timeout]: `tokio::time::error::Elapsed`: the timeout itself is the classification
                 .map_err(|_| deadline_elapsed())?,
             None => invocation.await,
         }

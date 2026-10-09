@@ -1,0 +1,269 @@
+pub(super) mod codec;
+mod persisted;
+// rust-style: allow-qualified-path -- 仅向相邻准入实现开放内部仓储格式，不扩大正式接口
+pub(in crate::space::admission) use persisted::PersistedSpaceAdmissionRepositoryV2;
+#[cfg(test)]
+// rust-style: allow-qualified-path -- 仅向相邻准入测试开放内部仓储夹具，不扩大正式接口
+pub(in crate::space::admission) fn fresh_test_repository_state(
+    profile_generation: [u8; 16],
+) -> PersistedSpaceAdmissionRepositoryV2 {
+    PersistedSpaceAdmissionRepositoryV2::fresh(profile_generation)
+}
+mod recovery_index;
+mod refusal;
+pub(super) mod token;
+pub(super) use refusal::AdmissionRefusal;
+
+#[cfg(feature = "test-util")]
+mod benchmark;
+
+#[cfg(test)]
+mod tests;
+
+use std::sync::{Arc, Mutex};
+
+use crate::security::{ActiveSpaceGenerationManifestStore, AdmissionKeyManager};
+use tokio::task::spawn_blocking;
+use uc_application::deps::AdmissionReadFailureCategory;
+use uc_application::deps::MembershipRecordStorePort;
+use uc_core::error_class::ErrorClass;
+use uc_core::membership::{AdmissionContinuationCredential, SpaceAdmissionId};
+use uc_infra_storage::db::ports::DbExecutor;
+use uc_observability_contract::diagnostics::connectivity::LocalWorkContext;
+
+use codec::RepositoryReadCache;
+
+#[cfg(feature = "test-util")]
+pub use benchmark::AdmissionRepositoryBenchmark;
+
+#[derive(Clone)]
+pub struct SqliteSpaceAdmissionState<E> {
+    pub(super) executor: E,
+    pub(super) keys: Arc<AdmissionKeyManager>,
+    pub(super) manifests: Arc<ActiveSpaceGenerationManifestStore>,
+    pub(super) membership: Arc<dyn MembershipRecordStorePort>,
+    /// 克隆到阻塞线程执行时仍共享同一份缓存。
+    read_cache: Arc<Mutex<Option<RepositoryReadCache>>>,
+    #[cfg(test)]
+    record_reads: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl<E> SqliteSpaceAdmissionState<E> {
+    pub fn new(
+        executor: E,
+        keys: Arc<AdmissionKeyManager>,
+        manifests: Arc<ActiveSpaceGenerationManifestStore>,
+        membership: Arc<dyn MembershipRecordStorePort>,
+    ) -> Self {
+        Self {
+            executor,
+            keys,
+            manifests,
+            membership,
+            read_cache: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            record_reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+}
+
+impl<E: DbExecutor + Clone + Send + Sync + 'static> SqliteSpaceAdmissionState<E> {
+    /// 在阻塞线程完整执行一次同步仓储访问（事务、磁盘与逐条加解密），不占用异步运行线程。
+    /// 调用方等待到事务提交或回滚后才得到结果；生命周期暂停因此仍会等待它结束，不会遗留在途事务。
+    // rust-style: allow-qualified-path -- 仅向相邻准入适配器开放阻塞执行入口，不扩大正式接口
+    pub(in crate::space::admission) async fn run_blocking<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(&Self) -> anyhow::Result<T> + Send + 'static,
+    ) -> anyhow::Result<T> {
+        let state = self.clone();
+        let context = LocalWorkContext::capture();
+        spawn_blocking(move || context.run(|| work(&state))).await?
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(super) enum SpaceAdmissionStateStoreError {
+    #[error("space admission state is locked")]
+    Locked,
+    #[error("space admission state is corrupt")]
+    Corrupt {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
+    #[error("space admission repository read requires recovery")]
+    ReadInvalid {
+        category: AdmissionReadFailureCategory,
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("space admission state changed")]
+    Conflict {
+        /// 业务拒绝的固定原因；纯版本或令牌不符没有更细的原因。
+        #[source]
+        reason: Option<AdmissionRefusal>,
+    },
+    #[error("space admission state storage is unavailable")]
+    Unavailable {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
+}
+
+impl ErrorClass for SpaceAdmissionStateStoreError {
+    fn class(&self) -> &'static str {
+        match self {
+            Self::Locked => "locked",
+            Self::Corrupt { .. } => "corrupt",
+            Self::ReadInvalid { .. } => "read_invalid",
+            Self::Conflict {
+                reason: Some(reason),
+            } => reason.class(),
+            Self::Conflict { reason: None } => "conflict",
+            Self::Unavailable { .. } => "unavailable",
+        }
+    }
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl SpaceAdmissionStateStoreError {
+    pub fn corrupt() -> Self {
+        Self::Corrupt { source: None }
+    }
+
+    pub fn corrupt_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Corrupt {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn conflict() -> Self {
+        Self::Conflict { reason: None }
+    }
+
+    pub(super) fn refused(reason: AdmissionRefusal) -> Self {
+        Self::Conflict {
+            reason: Some(reason),
+        }
+    }
+
+    pub fn unavailable() -> Self {
+        Self::Unavailable { source: None }
+    }
+
+    pub fn unavailable_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Unavailable {
+            source: Some(source.into()),
+        }
+    }
+}
+
+impl SpaceAdmissionStateStoreError {
+    pub(super) fn read_invalid(
+        category: AdmissionReadFailureCategory,
+        source: impl Into<anyhow::Error>,
+    ) -> Self {
+        Self::ReadInvalid {
+            category,
+            source: source.into(),
+        }
+    }
+
+    // rust-style: allow-qualified-path -- 方法需由相邻 recovery 模块读取，限制在 admission 范围
+    pub(in crate::space::admission) fn read_category(&self) -> AdmissionReadFailureCategory {
+        match self {
+            Self::ReadInvalid { category, .. } => *category,
+            Self::Locked
+            | Self::Corrupt { .. }
+            | Self::Conflict { .. }
+            | Self::Unavailable { .. } => AdmissionReadFailureCategory::OtherStorageError,
+        }
+    }
+}
+
+impl From<diesel::result::Error> for SpaceAdmissionStateStoreError {
+    fn from(error: diesel::result::Error) -> Self {
+        Self::unavailable_from(error)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(super) enum CredentialLoadError {
+    #[error("admission record is absent")]
+    RecordMissing,
+    #[error("continuation credential is absent")]
+    CredentialMissing,
+    #[error(transparent)]
+    State(#[from] SpaceAdmissionStateStoreError),
+    #[error("continuation credential is invalid")]
+    Invalid {
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("continuation credential could not be read")]
+    Storage {
+        #[source]
+        source: anyhow::Error,
+    },
+}
+
+impl CredentialLoadError {
+    pub(super) fn diagnostic_failure(
+        &self,
+    ) -> uc_observability_contract::diagnostics::connectivity::CredentialFailure {
+        use uc_observability_contract::diagnostics::connectivity::CredentialFailure;
+        match self {
+            Self::RecordMissing => CredentialFailure::RecordMissing,
+            Self::CredentialMissing => CredentialFailure::CredentialMissing,
+            Self::State(SpaceAdmissionStateStoreError::Locked) => CredentialFailure::Locked,
+            Self::State(
+                SpaceAdmissionStateStoreError::Corrupt { .. }
+                | SpaceAdmissionStateStoreError::ReadInvalid { .. },
+            )
+            | Self::Invalid { .. } => CredentialFailure::Corrupt,
+            Self::State(SpaceAdmissionStateStoreError::Conflict { .. }) => {
+                CredentialFailure::RecoveryRequired
+            }
+            Self::State(SpaceAdmissionStateStoreError::Unavailable { .. })
+            | Self::Storage { .. } => CredentialFailure::Unavailable,
+        }
+    }
+
+    fn from_executor(error: anyhow::Error) -> Self {
+        match error.downcast::<Self>() {
+            Ok(error) => error,
+            Err(error) => Self::Storage { source: error },
+        }
+    }
+}
+
+impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
+    pub(in crate::space::admission) fn load_continuation_credential(
+        &self,
+        admission_id: SpaceAdmissionId,
+    ) -> Result<AdmissionContinuationCredential, CredentialLoadError> {
+        self.executor
+            .run(|conn| {
+                let state = self
+                    .load_state_on(conn)
+                    .map_err(CredentialLoadError::from)?;
+                let stored = state
+                    .records
+                    .get(admission_id.as_bytes())
+                    .ok_or(CredentialLoadError::RecordMissing)?;
+                let aggregate = self
+                    .open_record(*admission_id.as_bytes(), stored)
+                    .map_err(CredentialLoadError::from)?;
+                let credential = aggregate
+                    .sponsor_continuation_credential()
+                    .ok_or(CredentialLoadError::CredentialMissing)?;
+                AdmissionContinuationCredential::from_bytes(credential.as_bytes().to_vec()).map_err(
+                    |source| {
+                        anyhow::Error::new(CredentialLoadError::Invalid {
+                            source: anyhow::Error::new(source),
+                        })
+                    },
+                )
+            })
+            .map_err(CredentialLoadError::from_executor)
+    }
+}

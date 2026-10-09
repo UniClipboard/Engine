@@ -35,7 +35,24 @@ Application 对依赖、存储、网络、系统或密码能力失败进行稳�
 
 ### 允许丢弃来源的情形
 
-以下来源不含可用诊断信息，或不能作为 source 保存，可以使用 `map_err(|_| ..)`，但必须在同一行或前一行用中文注释写明理由：
+以下来源不含可用诊断信息，或不能作为 source 保存，可以使用 `map_err(|_| ..)`。每一处都必须在同一行或紧邻上方的注释里写英文标签
+`discarded-source[category]: reason`，category 只能取下列固定标签，清单之外的理由不被接受：
+
+| 标签 | 对应情形 |
+| --- | --- |
+| `lock-poisoned` | `PoisonError<Guard>` |
+| `int-conversion` | `TryFromIntError`、`TryFromSliceError` |
+| `timeout` | `tokio::time::error::Elapsed` |
+| `channel` | `SendError<T>`、`TrySendError<T>`、`RecvError` 等只表示对端已退出或携带负载的通道错误 |
+| `no-information` | 错误类型为 `()`、panic 载荷、只回显原值的错误、未启用 `std` 而不实现 `Error` 的错误等 |
+| `input-validation` | 宿主或用户输入的纯格式校验 |
+| `core-pure-validation` | `uc-core` 内部纯校验结果改分类，下层同样是纯校验 |
+| `observability-init` | 观测运行时自身的初始化失败 |
+| `business-outcome` | 失败落为业务结果、不向上传递，吞错处已按固定分类记录一次 |
+| `contract-boundary` | 公开契约边界映射，且负责人已有完成记录 |
+| `in-memory-encoding` | 对内存中已校验数据的 postcard 编码，失败只可能是序列化实现缺陷，错误值只含固定种类 |
+
+各情形的细则：
 
 - 锁中毒 `PoisonError<Guard>`：持有 guard，不能跨线程保存；
 - `TryFromIntError`、`TryFromSliceError`：目标分类已完整表达长度或范围不符；
@@ -59,9 +76,11 @@ Application 对依赖、存储、网络、系统或密码能力失败进行稳�
 
 读取持久数据、对端输入或外部系统时，即使只是解析失败，也必须保留来源。
 
-`scripts/architecture/check-rust-style.mjs` 对新增的非测试代码行执行上表检查：拒绝前三种写法，以及同一行和前一行都没有中文注释的
-`map_err(|_| ..)`。检查基于文本规则，错误变量按 `e`、`err`、`error`、`source`、`cause` 及 `*_err`、`*_error` 命名识别；
-经其他变量名转手的写法仍需审查发现。
+`scripts/architecture/check-rust-style.mjs` 对新增的非测试代码行执行上表检查，拒绝前三种写法。`map_err(|_| ..)` 不只检查新增行，
+而是**全量扫描**所有非测试代码（`#[cfg(test)]` 模块与函数、`tests/` 目录除外）：没有 `discarded-source[category]` 标签、或类别不在上表清单内的一律失败，
+存量代码没有豁免；`node scripts/architecture/check-rust-style.mjs --list-discarded` 列出全部站点与类别。标签必须与真实错误类型相符，
+是否相符由评审判断，脚本只保证标签存在且类别受控。其余规则基于文本，错误变量按 `e`、`err`、`error`、`source`、`cause` 及
+`*_err`、`*_error` 命名识别；经其他变量名转手的写法仍需审查发现。`.ok()`、`let _ =` 等其他丢弃形式不在本检查范围内。
 现有代码的逐项清理见[错误来源保留执行计划](../exec-plans/completed/2026-09-24-error-source-preservation.md)。
 
 ## 安全上下文
@@ -70,8 +89,17 @@ Application 对依赖、存储、网络、系统或密码能力失败进行稳�
 `with_context`、`anyhow!`、`bail!`、`panic!` 与 serde `custom` 错误文本中出现 `.display()` 路径。不得加入剪贴板内容、密码、密钥、
 令牌、设备名、地址、邀请、文件名、文件路径或其他敏感负载。
 
-保留下来的 source chain 只供类型判断与固定分类提取使用，不以 `%error`、`{:#}` 或 `?error` 输出到日志；
-日志字段要求见[运行期观测](observability.md#错误来源与日志字段)。
+保留下来的 source chain 供类型判断、固定分类提取和模块日志的错误链使用。合同记录仍不以 `%error`、`{:#}` 或 `?error`
+输出错误正文。仓库自有错误类型实现 `uc_core::error_class::ErrorClass`，在完整负责人处以 `error_class = e.class()` 记录变体级固定分类；
+第三方与 anyhow 错误在记录点用 `error = &e as &dyn std::error::Error`，模块日志只渲染其中的 `io::Error` 与 `serde_json::Error`
+摘要，其余层写 `<opaque>`（规则见[运行期观测](observability.md#模块日志)）。日志字段要求见[运行期观测](observability.md#错误来源与日志字段)。
+
+表示业务拒绝的错误不得是没有原因的单元变体：变体携带 `#[source]` 指向一个固定原因类型，其 `#[error]` 文本只含固定文字与枚举变体名，
+使错误链能说明拒绝原因（例：`SpaceAdmissionStateStoreError::Conflict` 的来源 `AdmissionRefusal::UnsettledAttempt`，
+文本 `space admission refused: unsettled_attempt <记录角色> <义务>`）。`ErrorClass::class` 对变体穷举匹配（不写通配分支），
+新增变体时由编译器要求补充分类；拒绝原因等下层细节由持有具体类型的记录点用 `source_class` 另行写出（例：准入状态仓储的
+`SpaceAdmissionStateStoreError` 分类含 `AdmissionRefusal` 原因）。分类名是字面量 snake_case，不携带运行期值。
+`#[error]` 文本不得内插 `String`、`PathBuf`、`Vec<u8>` 等自由文本字段，需要时用 `Sensitive<T>` 包装。
 
 ## 测试
 

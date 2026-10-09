@@ -2,6 +2,7 @@
 
 #[cfg(target_os = "android")]
 mod android;
+mod build_source;
 mod config;
 mod file_statistics;
 mod host_diagnostics;
@@ -16,11 +17,14 @@ mod local_file;
 pub use file_statistics::{FileSourceCounts, LocalDiagnosticSource};
 mod local_log_processor;
 mod local_recording;
+mod module_log;
+mod module_log_fields;
 pub use local_capture::{
     CaptureEndReason, DetailedCaptureRequest, LocalCaptureMode, LocalCaptureStatus,
     LocalDiagnosticError, LocalDiagnosticExportReport, LocalDiagnosticStatus, SourceCapability,
     SourceCollection, SourceCoverage, StopCaptureResult,
 };
+pub use module_log::ModuleLogCounts;
 mod remote_health;
 mod runtime;
 mod status;

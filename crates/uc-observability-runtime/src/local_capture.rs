@@ -10,6 +10,7 @@ pub use uc_observability_contract::diagnostics::connectivity::{
 use uuid::Uuid;
 
 use crate::host_diagnostics::HostPending;
+use crate::module_log::ModuleLogCounts;
 use crate::{
     FileSourceCounts, HostDiagnosticSource, HostLifecycleState, SetupStatus, SignalResult,
 };
@@ -123,6 +124,8 @@ pub struct LocalDiagnosticExportReport {
     pub completed_at_utc: String,
     pub other_processes_flushed: bool,
     pub files: Vec<FileSourceCounts>,
+    /// 模块日志的提交、限速、限额与裁剪计数。
+    pub module_logs: ModuleLogCounts,
 }
 
 pub(crate) fn source_for(record: &Value) -> LocalDiagnosticSource {
@@ -224,6 +227,11 @@ impl CapturePolicy {
         }
     }
 
+    pub(crate) fn active_capture_id(&mut self, now: Instant) -> Option<Uuid> {
+        self.expire(now);
+        self.active.as_ref().map(|session| session.id)
+    }
+
     pub(crate) fn start(
         &mut self,
         request: DetailedCaptureRequest,
@@ -256,7 +264,7 @@ impl CapturePolicy {
         id: &str,
         now: Instant,
     ) -> Result<StopCaptureResult, LocalDiagnosticError> {
-        // 宿主提供的配置输入校验，拒绝原因已完整表达。
+        // discarded-source[input-validation]: `uuid::Error`: the rejection reason is fully expressed by the target classification
         let id = Uuid::parse_str(id).map_err(|_| LocalDiagnosticError::InvalidCaptureId)?;
         self.expire(now);
         match &self.active {

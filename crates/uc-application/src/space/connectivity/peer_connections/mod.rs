@@ -1,5 +1,6 @@
 //! 已配对设备连接的唯一调度与恢复负责人。
 
+mod record;
 mod runtime;
 #[cfg(test)]
 mod tests;
@@ -113,9 +114,18 @@ impl PeerConnectionCoordinator {
         Ok(())
     }
 
+    /// 失败原样返回，同时由协调器记录一次固定分类。
     pub(crate) async fn refresh(
         &self,
     ) -> Result<PeerReachabilityRefreshReport, PeerConnectionError> {
+        let result = self.request_refresh().await;
+        if let Err(error) = &result {
+            record::record_refresh_failure(error);
+        }
+        result
+    }
+
+    async fn request_refresh(&self) -> Result<PeerReachabilityRefreshReport, PeerConnectionError> {
         let (send, receive) = oneshot::channel();
         self.send(Command::Refresh(send))?;
         receive.await.map_err(PeerConnectionError::Response)?

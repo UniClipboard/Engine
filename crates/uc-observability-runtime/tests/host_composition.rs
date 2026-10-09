@@ -1,3 +1,7 @@
+// 本文件故意直接使用 tracing 日志宏：它验证运行期对未登记字段、内插消息和非 `uc_*` target 的处理，
+// `uc_*!` 宏在编译期就拒绝这些写法，无法构造这些输入。clippy 只认 crate 级 allow（ADR-030）。
+#![allow(clippy::disallowed_macros)]
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use uc_observability_contract::diagnostics::connectivity::*;
@@ -46,7 +50,7 @@ fn one_process_can_keep_host_logs_and_route_engine_records_only_to_the_common_ru
             .expect("install")
             .handle();
     tracing::info!(target: "host.test", "host event");
-    tracing::info!(target: "uc_infra::private", "PRIVATE_ENGINE_PAYLOAD");
+    tracing::info!(target: "uc_infra_profile::private", "PRIVATE_ENGINE_PAYLOAD");
     tracing::info!(target: "iroh::private", "PRIVATE_NETWORK_PAYLOAD");
     let host_span = tracing::info_span!(target: "host.test", "host_request");
     let entered = host_span.enter();
@@ -59,6 +63,7 @@ fn one_process_can_keep_host_logs_and_route_engine_records_only_to_the_common_ru
         "permission_denied",
         Some("PermissionDenied"),
         Some(5),
+        true,
     );
     drop(entered);
     drop(host_span);
@@ -82,10 +87,13 @@ fn one_process_can_keep_host_logs_and_route_engine_records_only_to_the_common_ru
         engine_output
             .lines()
             .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON"))
-            .filter(|row| row["target"] != "uc.diagnostics")
+            .filter(|row| row["target"] != "uc.diagnostics" && row["source"] != "engine_module")
             .count(),
         2
     );
+    // 模块日志只进入本地文件：Engine 自有目标的普通事件写入文件，但从不进入宿主日志层。
+    assert!(engine_output.contains("PRIVATE_ENGINE_PAYLOAD"));
+    assert!(!engine_output.contains("PRIVATE_NETWORK_PAYLOAD"));
     assert!(engine_output.contains("record_missing"));
     assert!(engine_output.contains("profile_upgrade.backup.failed"));
     assert!(engine_output.contains("capture_profile_files"));

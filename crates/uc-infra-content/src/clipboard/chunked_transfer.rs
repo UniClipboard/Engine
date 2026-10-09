@@ -1,0 +1,988 @@
+//! Chunk-level AEAD streaming encoder and decoder for clipboard wire transfer.
+//!
+//! V3-only wire format with zstd compression for payloads exceeding `COMPRESSION_THRESHOLD`.
+//!
+//! # Memory Contract
+//! Memory usage is bounded by CHUNK_SIZE x 2 regardless of total payload size:
+//! - Encoder: one plaintext chunk slice (no copy) + one ciphertext Vec<u8> per iteration.
+//! - Decoder: one ciphertext Vec<u8> + one plaintext Vec<u8> per chunk, appended to output.
+//!
+//! # V3 Wire Format (37-byte header)
+//! ```text
+//! [4 bytes]  magic: 0x55 0x43 0x33 0x00 ("UC3\0")
+//! [1 byte]   compression_algo (0=none, 1=zstd)
+//! [4 bytes]  uncompressed_len (u32 LE)
+//! [16 bytes] transfer_id (UUID v4 raw bytes)
+//! [4 bytes]  total_chunks (u32 LE)
+//! [4 bytes]  chunk_size_hint (u32 LE)
+//! [4 bytes]  total_plaintext_len (u32 LE) -- compressed size when compression active
+//! then for each chunk i in 0..total_chunks:
+//!   [4 bytes]  chunk_ciphertext_len (u32 LE)
+//!   [N bytes]  ciphertext (plaintext_chunk + 16-byte Poly1305 tag)
+//! ```
+
+use std::io::{Cursor, Read, Write};
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use chacha20poly1305::{
+    aead::{Aead, Payload},
+    KeyInit, XChaCha20Poly1305, XNonce,
+};
+use tracing::info_span;
+use uc_core::config::RECEIVE_PLAINTEXT_CAP;
+use uc_core::crypto::aad;
+use uc_core::crypto::model::EncryptionError;
+use uc_core::membership::{ContentKeyId, ContentKeyPurpose, GroupEpoch};
+use uc_core::ports::{TransferCipherError, TransferCipherPort};
+use uc_observability_contract::diagnostics::connectivity::{
+    describe_clipboard_receive_failure, observe_blob_publish_sync_result, ClipboardReceiveFailure,
+    LocalWorkStep,
+};
+use uuid::Uuid;
+
+use uc_infra_crypto::key_epoch_aad;
+use uc_infra_crypto::secrets::MasterKey;
+use uc_infra_security::InMemorySession;
+
+/// Nominal chunk size: 256 KB.
+/// Peak memory per encode or decode call: ~2 x CHUNK_SIZE.
+pub const CHUNK_SIZE: usize = 256 * 1024;
+
+/// Magic bytes identifying a V3 chunked clipboard payload ("UC3\0").
+pub const V3_MAGIC: [u8; 4] = [0x55, 0x43, 0x33, 0x00];
+pub const V4_MAGIC: [u8; 4] = [0x55, 0x43, 0x34, 0x00];
+
+/// V3 header size in bytes: magic(4) + compression_algo(1) + uncompressed_len(4)
+/// + transfer_id(16) + total_chunks(4) + chunk_size_hint(4) + total_plaintext_len(4).
+pub const V3_HEADER_SIZE: usize = 37;
+
+/// Payloads larger than this threshold are compressed with zstd before encryption.
+pub const COMPRESSION_THRESHOLD: usize = 8 * 1024;
+
+/// Maximum allowed decompressed size (128 MiB).
+///
+/// Bounds the allocation hint passed to `zstd::bulk::decompress` so that a
+/// malicious header cannot trigger a multi-gigabyte allocation via a forged
+/// `uncompressed_len` field.  128 MiB is generous for any realistic clipboard
+/// content (text, images, rich-text) while keeping the OOM surface small.
+pub const MAX_DECOMPRESSED_SIZE: usize = RECEIVE_PLAINTEXT_CAP;
+
+/// Zstd compression level (consistent with Phase 4 blob at-rest choice).
+pub const ZSTD_LEVEL: i32 = 3;
+
+/// Payloads larger than this use multi-threaded zstd compression.
+/// Below this threshold, single-threaded `zstd::bulk::compress` is used to
+/// avoid thread-pool startup overhead for small payloads.
+const PARALLEL_COMPRESSION_THRESHOLD: usize = 1024 * 1024; // 1 MiB
+
+/// Errors that can occur during chunked transfer encoding or decoding.
+///
+/// These are wire-format implementation details, internal to uc-infra-content.
+/// Adapters map these to `TransferCipherError` at the port boundary.
+#[derive(Debug, thiserror::Error)]
+pub enum ChunkedTransferError {
+    #[error("space session is not unlocked")]
+    NotUnlocked,
+    /// First 4 bytes do not match V3_MAGIC.
+    #[error("invalid magic bytes")]
+    InvalidMagic,
+    /// Stream ended before the fixed-size header was fully read.
+    #[error("stream ended before header was complete")]
+    TruncatedHeader {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
+    /// Stream ended before a chunk's ciphertext was fully read.
+    #[error("stream ended before chunk ciphertext was complete")]
+    TruncatedChunk {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
+    /// AEAD tag verification failed for the given chunk index.
+    #[error("AEAD decryption failed for chunk {chunk_index}")]
+    DecryptFailed {
+        chunk_index: u32,
+        #[source]
+        source: chacha20poly1305::Error,
+    },
+    /// Ciphertext length from wire is outside valid range.
+    #[error("chunk {chunk_index}: ciphertext_len {ciphertext_len} outside valid range")]
+    InvalidCiphertextLen {
+        chunk_index: u32,
+        ciphertext_len: usize,
+    },
+    /// Header declares a total_plaintext_len inconsistent with chunk count.
+    #[error("header validation failed: {reason}")]
+    InvalidHeader {
+        reason: String,
+        #[source]
+        source: Option<anyhow::Error>,
+    },
+    /// AEAD encryption failed (key size error).
+    #[error("encryption failed")]
+    EncryptFailed(#[source] anyhow::Error),
+    /// Zstd compression failed.
+    #[error("compression failed")]
+    CompressionFailed(#[source] std::io::Error),
+    /// Zstd decompression failed.
+    #[error("decompression failed")]
+    DecompressionFailed(#[source] std::io::Error),
+    /// Unknown compression algorithm in V3 header.
+    #[error("invalid compression algorithm: {algo}")]
+    InvalidCompressionAlgo { algo: u8 },
+    /// Underlying IO error while reading or writing.
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl ChunkedTransferError {
+    pub fn invalid_header(reason: impl Into<String>) -> Self {
+        Self::InvalidHeader {
+            reason: reason.into(),
+            source: None,
+        }
+    }
+
+    pub fn invalid_header_from(
+        reason: impl Into<String>,
+        source: impl Into<anyhow::Error>,
+    ) -> Self {
+        Self::InvalidHeader {
+            reason: reason.into(),
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn truncated_header() -> Self {
+        Self::TruncatedHeader { source: None }
+    }
+
+    pub fn truncated_header_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::TruncatedHeader {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn truncated_chunk() -> Self {
+        Self::TruncatedChunk { source: None }
+    }
+
+    pub fn truncated_chunk_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::TruncatedChunk {
+            source: Some(source.into()),
+        }
+    }
+}
+
+/// Streaming encoder for V3 chunked clipboard transfers with compression support.
+pub struct ChunkedEncoder;
+
+/// Streaming decoder for V3 chunked clipboard transfers with decompression support.
+pub struct ChunkedDecoder;
+
+impl ChunkedEncoder {
+    /// Encode `plaintext` in V3 streaming wire format, writing directly to `writer`.
+    ///
+    /// The caller decides compression: pass `compression_algo=1` with pre-compressed data,
+    /// or `compression_algo=0` with raw plaintext. `uncompressed_len` is always the
+    /// original (uncompressed) plaintext length.
+    ///
+    /// # Arguments
+    /// * `writer`           -- destination implementing `std::io::Write`
+    /// * `master_key`       -- 32-byte XChaCha20-Poly1305 key
+    /// * `transfer_id`      -- 16-byte transfer identifier (UUID v4 raw bytes)
+    /// * `plaintext`        -- input bytes to chunk and encrypt (possibly compressed)
+    /// * `compression_algo` -- 0=none, 1=zstd
+    /// * `uncompressed_len` -- original plaintext length before compression
+    pub fn encode_to<W: Write>(
+        mut writer: W,
+        master_key: &MasterKey,
+        transfer_id: &[u8; 16],
+        plaintext: &[u8],
+        compression_algo: u8,
+        uncompressed_len: u32,
+    ) -> Result<(), ChunkedTransferError> {
+        let cipher = XChaCha20Poly1305::new_from_slice(master_key.as_bytes())
+            .map_err(|e| ChunkedTransferError::EncryptFailed(anyhow::Error::from(e)))?;
+
+        let total_plaintext_len = u32::try_from(plaintext.len()).map_err(|error| {
+            ChunkedTransferError::EncryptFailed(
+                anyhow::Error::new(error).context("plaintext length exceeds u32::MAX"),
+            )
+        })?;
+        let total_chunks = if plaintext.is_empty() {
+            0u32
+        } else {
+            plaintext.len().div_ceil(CHUNK_SIZE) as u32
+        };
+
+        // Write V3 header (37 bytes total):
+        //   [0..4]   magic
+        //   [4]      compression_algo
+        //   [5..9]   uncompressed_len
+        //   [9..25]  transfer_id
+        //   [25..29] total_chunks
+        //   [29..33] chunk_size_hint
+        //   [33..37] total_plaintext_len
+        writer.write_all(&V3_MAGIC)?;
+        writer.write_all(&[compression_algo])?;
+        writer.write_all(&uncompressed_len.to_le_bytes())?;
+        writer.write_all(transfer_id)?;
+        writer.write_all(&total_chunks.to_le_bytes())?;
+        writer.write_all(&(CHUNK_SIZE as u32).to_le_bytes())?;
+        writer.write_all(&total_plaintext_len.to_le_bytes())?;
+
+        // Write chunks incrementally -- at most one ciphertext Vec<u8> in memory at a time
+        for (chunk_index, plaintext_chunk) in plaintext.chunks(CHUNK_SIZE).enumerate() {
+            let chunk_index = chunk_index as u32;
+            let nonce_bytes = derive_chunk_nonce(transfer_id, chunk_index);
+            let aad_bytes = aad::for_chunk_transfer(transfer_id, chunk_index);
+
+            let ciphertext = cipher
+                .encrypt(
+                    XNonce::from_slice(&nonce_bytes),
+                    Payload {
+                        msg: plaintext_chunk,
+                        aad: &aad_bytes,
+                    },
+                )
+                .map_err(|e| ChunkedTransferError::EncryptFailed(anyhow::Error::from(e)))?;
+
+            writer.write_all(&(ciphertext.len() as u32).to_le_bytes())?;
+            writer.write_all(&ciphertext)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl ChunkedDecoder {
+    /// Decode a V3 streaming wire format from `reader`, returning assembled plaintext.
+    ///
+    /// If the V3 header indicates compression (compression_algo=1), the decrypted data
+    /// is decompressed with zstd using the `uncompressed_len` from the header.
+    ///
+    /// # Arguments
+    /// * `reader`     -- source implementing `std::io::Read`
+    /// * `master_key` -- 32-byte XChaCha20-Poly1305 key
+    pub fn decode_from<R: Read>(
+        mut reader: R,
+        master_key: &MasterKey,
+    ) -> Result<Vec<u8>, ChunkedTransferError> {
+        // Read V3 header: 4 + 1 + 4 + 16 + 4 + 4 + 4 = 37 bytes
+        let mut header = [0u8; V3_HEADER_SIZE];
+        reader
+            .read_exact(&mut header)
+            .map_err(ChunkedTransferError::truncated_header_from)?;
+
+        if header[0..4] != V3_MAGIC {
+            return Err(ChunkedTransferError::InvalidMagic);
+        }
+
+        let compression_algo = header[4];
+        let uncompressed_len = u32::from_le_bytes(
+            header[5..9]
+                .try_into()
+                .map_err(ChunkedTransferError::truncated_header_from)?,
+        ) as usize;
+        let transfer_id: [u8; 16] = header[9..25]
+            .try_into()
+            .map_err(ChunkedTransferError::truncated_header_from)?;
+        let total_chunks = u32::from_le_bytes(
+            header[25..29]
+                .try_into()
+                .map_err(ChunkedTransferError::truncated_header_from)?,
+        );
+        // chunk_size_hint at [29..33] -- not needed for decode
+        let total_plaintext_len = u32::from_le_bytes(
+            header[33..37]
+                .try_into()
+                .map_err(ChunkedTransferError::truncated_header_from)?,
+        ) as usize;
+
+        // Validate header consistency
+        if total_chunks > 0 && total_plaintext_len == 0 {
+            return Err(ChunkedTransferError::invalid_header(
+                "total_chunks > 0 but total_plaintext_len is 0",
+            ));
+        }
+        let max_capacity = (total_chunks as usize)
+            .checked_mul(CHUNK_SIZE)
+            .ok_or_else(|| {
+                ChunkedTransferError::invalid_header(format!(
+                    "total_chunks {} * CHUNK_SIZE {} overflows usize",
+                    total_chunks, CHUNK_SIZE
+                ))
+            })?;
+        if total_plaintext_len > max_capacity {
+            return Err(ChunkedTransferError::invalid_header(format!(
+                    "total_plaintext_len {} exceeds maximum capacity {} (total_chunks {} * CHUNK_SIZE {})",
+                    total_plaintext_len, max_capacity, total_chunks, CHUNK_SIZE
+                )));
+        }
+        if total_plaintext_len > MAX_DECOMPRESSED_SIZE {
+            return Err(ChunkedTransferError::invalid_header(format!(
+                "total_plaintext_len {} exceeds MAX_DECOMPRESSED_SIZE {}",
+                total_plaintext_len, MAX_DECOMPRESSED_SIZE
+            )));
+        }
+
+        // Validate uncompressed_len against safe ceiling to prevent OOM from
+        // forged headers.
+        match compression_algo {
+            0
+                // No compression: uncompressed_len must equal total_plaintext_len.
+                if uncompressed_len != total_plaintext_len => {
+                    return Err(ChunkedTransferError::invalid_header(format!(
+                            "compression_algo=0 but uncompressed_len {} != total_plaintext_len {}",
+                            uncompressed_len, total_plaintext_len
+                        )));
+                }
+            1
+                if uncompressed_len > MAX_DECOMPRESSED_SIZE => {
+                    return Err(ChunkedTransferError::invalid_header(format!(
+                            "uncompressed_len {} exceeds MAX_DECOMPRESSED_SIZE {}",
+                            uncompressed_len, MAX_DECOMPRESSED_SIZE
+                        )));
+                }
+            _ => {} // handled later by the match on compression_algo
+        }
+
+        let cipher = XChaCha20Poly1305::new_from_slice(master_key.as_bytes())
+            .map_err(|e| ChunkedTransferError::EncryptFailed(anyhow::Error::from(e)))?;
+
+        let bounded_prealloc = total_plaintext_len.min(MAX_DECOMPRESSED_SIZE);
+        let mut decrypted = Vec::with_capacity(bounded_prealloc);
+
+        for chunk_index in 0..total_chunks {
+            let mut len_buf = [0u8; 4];
+            reader
+                .read_exact(&mut len_buf)
+                .map_err(ChunkedTransferError::truncated_chunk_from)?;
+            let ciphertext_len = u32::from_le_bytes(len_buf) as usize;
+
+            const TAG_SIZE: usize = 16;
+            let max_ciphertext = CHUNK_SIZE + TAG_SIZE;
+            if ciphertext_len < TAG_SIZE || ciphertext_len > max_ciphertext {
+                return Err(ChunkedTransferError::InvalidCiphertextLen {
+                    chunk_index,
+                    ciphertext_len,
+                });
+            }
+
+            let mut ciphertext = vec![0u8; ciphertext_len];
+            reader
+                .read_exact(&mut ciphertext)
+                .map_err(ChunkedTransferError::truncated_chunk_from)?;
+
+            let nonce_bytes = derive_chunk_nonce(&transfer_id, chunk_index);
+            let aad_bytes = aad::for_chunk_transfer(&transfer_id, chunk_index);
+
+            let chunk_plaintext = cipher
+                .decrypt(
+                    XNonce::from_slice(&nonce_bytes),
+                    Payload {
+                        msg: &ciphertext,
+                        aad: &aad_bytes,
+                    },
+                )
+                .map_err(|source| ChunkedTransferError::DecryptFailed {
+                    chunk_index,
+                    source,
+                })?;
+
+            decrypted.extend_from_slice(&chunk_plaintext);
+        }
+
+        if decrypted.len() != total_plaintext_len {
+            return Err(ChunkedTransferError::invalid_header(format!(
+                "decoded {} bytes but header declared {}",
+                decrypted.len(),
+                total_plaintext_len
+            )));
+        }
+
+        // Post-decrypt decompression
+        match compression_algo {
+            0 => Ok(decrypted),
+            1 => zstd::bulk::decompress(&decrypted, uncompressed_len)
+                .map_err(|e| ChunkedTransferError::DecompressionFailed(e)),
+            other => Err(ChunkedTransferError::InvalidCompressionAlgo { algo: other }),
+        }
+    }
+}
+
+/// Compress `data` with zstd, using multi-threaded mode for large payloads.
+///
+/// Payloads above `PARALLEL_COMPRESSION_THRESHOLD` (1 MiB) use zstd's
+/// built-in worker pool (one thread per core), which significantly reduces
+/// wall-clock time for multi-megabyte clipboard content. Smaller payloads
+/// use single-threaded `zstd::bulk::compress` to avoid thread-pool overhead.
+fn compress_zstd(data: &[u8], level: i32) -> std::io::Result<Vec<u8>> {
+    if data.len() < PARALLEL_COMPRESSION_THRESHOLD {
+        return zstd::bulk::compress(data, level).map_err(std::io::Error::other);
+    }
+    let n_workers = std::thread::available_parallelism()
+        .map(|n| n.get() as u32)
+        .unwrap_or(1);
+    let mut encoder = zstd::Encoder::new(Vec::new(), level)?;
+    encoder.multithread(n_workers)?;
+    encoder.write_all(data)?;
+    encoder.finish()
+}
+
+/// `TransferCipherPort` 的基础设施适配器。
+///
+/// 端到端会话管理: 内部持有 uc-infra-security 的 `InMemorySession` 具体类型,
+/// 自己完成"会话就绪检查 + 取出 MasterKey",调用方只需提交字节。
+///
+/// wire format / 压缩 / AEAD 细节复用 `ChunkedEncoder` / `ChunkedDecoder`——
+/// 字节级行为与历史一致,保证用户既有密文可解、设备间协议兼容。
+pub struct TransferCipherAdapter {
+    session: Arc<InMemorySession>,
+}
+
+impl TransferCipherAdapter {
+    pub fn new(session: Arc<InMemorySession>) -> Self {
+        Self { session }
+    }
+
+    /// 内部: 从会话取 MasterKey,未就绪时返回 `NotUnlocked`。
+    fn legacy_master_key(&self) -> Result<MasterKey, TransferCipherError> {
+        if !self.session.is_ready() {
+            return Err(TransferCipherError::NotUnlocked);
+        }
+        self.session
+            .legacy_content_key()
+            .map_err(|e| TransferCipherError::Internal(e.into()))
+    }
+}
+
+#[async_trait]
+impl TransferCipherPort for TransferCipherAdapter {
+    async fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, TransferCipherError> {
+        let space_id = self
+            .session
+            .current_space_id()
+            .map_err(map_session_error_for_transfer)?;
+        let resolved = self
+            .session
+            .current_content_key(&space_id, ContentKeyPurpose::Transport)
+            .map_err(map_session_error_for_transfer)?;
+
+        let transfer_id: [u8; 16] = *Uuid::new_v4().as_bytes();
+        let uncompressed_len = u32::try_from(plaintext.len()).map_err(|error| {
+            TransferCipherError::Internal(
+                anyhow::Error::new(error)
+                    .context("plaintext length exceeds u32::MAX")
+                    .into(),
+            )
+        })?;
+
+        let (data_to_encrypt, compression_algo) = if plaintext.len() > COMPRESSION_THRESHOLD {
+            let _guard = info_span!("transfer.compress", input_len = plaintext.len()).entered();
+            let compressed = observe_blob_publish_sync_result(LocalWorkStep::BlobCompress, || {
+                compress_zstd(plaintext, ZSTD_LEVEL)
+            })
+            .map_err(|e| {
+                TransferCipherError::Internal(
+                    anyhow::Error::from(e).context("compression failed").into(),
+                )
+            })?;
+
+            if compressed.len() < plaintext.len() {
+                (compressed, 1u8)
+            } else {
+                (plaintext.to_vec(), 0u8)
+            }
+        } else {
+            (plaintext.to_vec(), 0u8)
+        };
+
+        let mut buf = Vec::new();
+        {
+            let _guard =
+                info_span!("transfer.chunked_encrypt", data_len = data_to_encrypt.len()).entered();
+            observe_blob_publish_sync_result(LocalWorkStep::BlobEncrypt, || {
+                encode_v4_to(
+                    &mut buf,
+                    resolved.key(),
+                    &space_id,
+                    resolved.content_key_id(),
+                    resolved.epoch(),
+                    &transfer_id,
+                    &data_to_encrypt,
+                    compression_algo,
+                    uncompressed_len,
+                )
+            })
+            .map_err(map_chunked_error_for_encrypt)?;
+        }
+        Ok(buf)
+    }
+
+    async fn decrypt(&self, encrypted: &[u8]) -> Result<Vec<u8>, TransferCipherError> {
+        if encrypted.len() < 4 {
+            return Err(TransferCipherError::InvalidFormat);
+        }
+        if encrypted[0..4] == V3_MAGIC {
+            let master_key = self.legacy_master_key()?;
+            return ChunkedDecoder::decode_from(Cursor::new(encrypted), &master_key)
+                .map_err(map_chunked_error_for_decrypt);
+        }
+        if encrypted[0..4] == V4_MAGIC {
+            return decode_v4(encrypted, &self.session).map_err(map_chunked_error_for_decrypt);
+        }
+        Err(TransferCipherError::InvalidFormat)
+    }
+}
+
+fn encode_v4_to<W: Write>(
+    mut writer: W,
+    key: &MasterKey,
+    space_id: &uc_core::ids::SpaceId,
+    content_key_id: &ContentKeyId,
+    epoch: GroupEpoch,
+    transfer_id: &[u8; 16],
+    plaintext: &[u8],
+    compression_algo: u8,
+    uncompressed_len: u32,
+) -> Result<(), ChunkedTransferError> {
+    let key_id = content_key_id.as_str().as_bytes();
+    let total_plaintext_len = u32::try_from(plaintext.len()).map_err(|error| {
+        ChunkedTransferError::EncryptFailed(
+            anyhow::Error::new(error).context("plaintext length exceeds u32::MAX"),
+        )
+    })?;
+    let total_chunks = if plaintext.is_empty() {
+        0
+    } else {
+        plaintext.len().div_ceil(CHUNK_SIZE) as u32
+    };
+    let cipher = XChaCha20Poly1305::new_from_slice(key.as_bytes())
+        .map_err(|error| ChunkedTransferError::EncryptFailed(anyhow::Error::from(error)))?;
+
+    writer.write_all(&V4_MAGIC)?;
+    writer.write_all(&epoch.value().to_le_bytes())?;
+    writer.write_all(&[key_id.len() as u8])?;
+    writer.write_all(key_id)?;
+    writer.write_all(&[compression_algo])?;
+    writer.write_all(&uncompressed_len.to_le_bytes())?;
+    writer.write_all(transfer_id)?;
+    writer.write_all(&total_chunks.to_le_bytes())?;
+    writer.write_all(&(CHUNK_SIZE as u32).to_le_bytes())?;
+    writer.write_all(&total_plaintext_len.to_le_bytes())?;
+
+    for (chunk_index, plaintext_chunk) in plaintext.chunks(CHUNK_SIZE).enumerate() {
+        let chunk_index = chunk_index as u32;
+        let nonce_bytes = derive_chunk_nonce(transfer_id, chunk_index);
+        let business_aad = aad::for_chunk_transfer(transfer_id, chunk_index);
+        let aad_bytes = key_epoch_aad::bind(
+            b"chunk-transfer-v4",
+            space_id,
+            epoch,
+            content_key_id,
+            ContentKeyPurpose::Transport,
+            &business_aad,
+        );
+        let ciphertext = cipher
+            .encrypt(
+                XNonce::from_slice(&nonce_bytes),
+                Payload {
+                    msg: plaintext_chunk,
+                    aad: &aad_bytes,
+                },
+            )
+            .map_err(|error| ChunkedTransferError::EncryptFailed(anyhow::Error::from(error)))?;
+        writer.write_all(&(ciphertext.len() as u32).to_le_bytes())?;
+        writer.write_all(&ciphertext)?;
+    }
+    Ok(())
+}
+
+fn decode_v4(encrypted: &[u8], session: &InMemorySession) -> Result<Vec<u8>, ChunkedTransferError> {
+    const PREFIX_SIZE: usize = 4 + 8 + 1;
+    if encrypted.len() < PREFIX_SIZE {
+        return Err(ChunkedTransferError::truncated_header());
+    }
+    let epoch = GroupEpoch::new(u64::from_le_bytes(
+        encrypted[4..12]
+            .try_into()
+            .map_err(ChunkedTransferError::truncated_header_from)?,
+    ));
+    let key_id_len = encrypted[12] as usize;
+    let metadata_start = PREFIX_SIZE + key_id_len;
+    const METADATA_SIZE: usize = 1 + 4 + 16 + 4 + 4 + 4;
+    if key_id_len == 0 || encrypted.len() < metadata_start + METADATA_SIZE {
+        return Err(ChunkedTransferError::truncated_header());
+    }
+    let key_id = std::str::from_utf8(&encrypted[PREFIX_SIZE..metadata_start]).map_err(|error| {
+        ChunkedTransferError::invalid_header_from("content key id is not utf-8", error)
+    })?;
+    let content_key_id = ContentKeyId::from_string(key_id).map_err(|error| {
+        ChunkedTransferError::invalid_header_from("invalid content key id", error)
+    })?;
+    let compression_algo = encrypted[metadata_start];
+    let uncompressed_len = u32::from_le_bytes(
+        encrypted[metadata_start + 1..metadata_start + 5]
+            .try_into()
+            .map_err(ChunkedTransferError::truncated_header_from)?,
+    ) as usize;
+    let transfer_id: [u8; 16] = encrypted[metadata_start + 5..metadata_start + 21]
+        .try_into()
+        .map_err(ChunkedTransferError::truncated_header_from)?;
+    let total_chunks = u32::from_le_bytes(
+        encrypted[metadata_start + 21..metadata_start + 25]
+            .try_into()
+            .map_err(ChunkedTransferError::truncated_header_from)?,
+    );
+    let total_plaintext_len = u32::from_le_bytes(
+        encrypted[metadata_start + 29..metadata_start + 33]
+            .try_into()
+            .map_err(ChunkedTransferError::truncated_header_from)?,
+    ) as usize;
+    validate_lengths(
+        compression_algo,
+        uncompressed_len,
+        total_chunks,
+        total_plaintext_len,
+    )?;
+
+    let space_id = session
+        .current_space_id()
+        .map_err(map_session_error_for_v4)?;
+    let resolved = session
+        .content_key(&space_id, &content_key_id, ContentKeyPurpose::Transport)
+        .map_err(map_session_error_for_v4)?;
+    if resolved.epoch() != epoch {
+        describe_clipboard_receive_failure(ClipboardReceiveFailure::ContentKeyEpochMismatch);
+        return Err(ChunkedTransferError::invalid_header(
+            "content key epoch mismatch",
+        ));
+    }
+    let cipher = XChaCha20Poly1305::new_from_slice(resolved.key().as_bytes())
+        .map_err(|error| ChunkedTransferError::EncryptFailed(anyhow::Error::from(error)))?;
+    let mut cursor = Cursor::new(&encrypted[metadata_start + METADATA_SIZE..]);
+    let mut decrypted = Vec::with_capacity(total_plaintext_len);
+    for chunk_index in 0..total_chunks {
+        let mut len_buf = [0u8; 4];
+        cursor
+            .read_exact(&mut len_buf)
+            .map_err(ChunkedTransferError::truncated_chunk_from)?;
+        let ciphertext_len = u32::from_le_bytes(len_buf) as usize;
+        if !(16..=CHUNK_SIZE + 16).contains(&ciphertext_len) {
+            return Err(ChunkedTransferError::InvalidCiphertextLen {
+                chunk_index,
+                ciphertext_len,
+            });
+        }
+        let mut ciphertext = vec![0u8; ciphertext_len];
+        cursor
+            .read_exact(&mut ciphertext)
+            .map_err(ChunkedTransferError::truncated_chunk_from)?;
+        let nonce_bytes = derive_chunk_nonce(&transfer_id, chunk_index);
+        let business_aad = aad::for_chunk_transfer(&transfer_id, chunk_index);
+        let aad_bytes = key_epoch_aad::bind(
+            b"chunk-transfer-v4",
+            &space_id,
+            epoch,
+            &content_key_id,
+            ContentKeyPurpose::Transport,
+            &business_aad,
+        );
+        let plaintext = cipher
+            .decrypt(
+                XNonce::from_slice(&nonce_bytes),
+                Payload {
+                    msg: &ciphertext,
+                    aad: &aad_bytes,
+                },
+            )
+            .map_err(|source| ChunkedTransferError::DecryptFailed {
+                chunk_index,
+                source,
+            })?;
+        decrypted.extend_from_slice(&plaintext);
+    }
+    if decrypted.len() != total_plaintext_len {
+        return Err(ChunkedTransferError::invalid_header(
+            "decoded length does not match header",
+        ));
+    }
+    match compression_algo {
+        0 => Ok(decrypted),
+        1 => zstd::bulk::decompress(&decrypted, uncompressed_len)
+            .map_err(|error| ChunkedTransferError::DecompressionFailed(error)),
+        other => Err(ChunkedTransferError::InvalidCompressionAlgo { algo: other }),
+    }
+}
+
+fn validate_lengths(
+    compression_algo: u8,
+    uncompressed_len: usize,
+    total_chunks: u32,
+    total_plaintext_len: usize,
+) -> Result<(), ChunkedTransferError> {
+    let max_capacity = (total_chunks as usize)
+        .checked_mul(CHUNK_SIZE)
+        .ok_or_else(|| ChunkedTransferError::invalid_header("chunk capacity overflow"))?;
+    if (total_chunks > 0 && total_plaintext_len == 0)
+        || total_plaintext_len > max_capacity
+        || total_plaintext_len > MAX_DECOMPRESSED_SIZE
+        || uncompressed_len > MAX_DECOMPRESSED_SIZE
+        || (compression_algo == 0 && uncompressed_len != total_plaintext_len)
+    {
+        return Err(ChunkedTransferError::invalid_header(
+            "invalid transfer lengths",
+        ));
+    }
+    Ok(())
+}
+
+fn map_chunked_error_for_encrypt(e: ChunkedTransferError) -> TransferCipherError {
+    match e {
+        ChunkedTransferError::NotUnlocked => TransferCipherError::NotUnlocked,
+        ChunkedTransferError::EncryptFailed(_) => TransferCipherError::EncryptionFailed,
+        ChunkedTransferError::Io(err) => {
+            TransferCipherError::Internal(anyhow::Error::from(err).context("IO error").into())
+        }
+        other => TransferCipherError::Internal(other.into()),
+    }
+}
+
+fn map_chunked_error_for_decrypt(e: ChunkedTransferError) -> TransferCipherError {
+    match e {
+        ChunkedTransferError::NotUnlocked => TransferCipherError::NotUnlocked,
+        ChunkedTransferError::DecryptFailed { .. } => TransferCipherError::DecryptionFailed,
+        ChunkedTransferError::DecompressionFailed(_)
+        | ChunkedTransferError::InvalidCompressionAlgo { .. }
+        | ChunkedTransferError::InvalidMagic
+        | ChunkedTransferError::TruncatedHeader { .. }
+        | ChunkedTransferError::TruncatedChunk { .. }
+        | ChunkedTransferError::InvalidCiphertextLen { .. }
+        | ChunkedTransferError::InvalidHeader { .. } => TransferCipherError::InvalidFormat,
+        ChunkedTransferError::EncryptFailed(_) => TransferCipherError::DecryptionFailed,
+        other @ (ChunkedTransferError::Io(_) | ChunkedTransferError::CompressionFailed(_)) => {
+            TransferCipherError::Internal(other.into())
+        }
+    }
+}
+
+fn map_session_error_for_transfer(error: EncryptionError) -> TransferCipherError {
+    match error {
+        EncryptionError::NotInitialized => TransferCipherError::NotUnlocked,
+        other => TransferCipherError::Internal(other.into()),
+    }
+}
+
+fn map_session_error_for_v4(error: EncryptionError) -> ChunkedTransferError {
+    if matches!(error, EncryptionError::KeyNotFound) {
+        describe_clipboard_receive_failure(ClipboardReceiveFailure::ContentKeyMissing);
+    }
+    match error {
+        EncryptionError::NotInitialized => ChunkedTransferError::NotUnlocked,
+        other => ChunkedTransferError::invalid_header_from("content key unavailable", other),
+    }
+}
+
+/// Derive a 24-byte XChaCha20 nonce for a given chunk.
+///
+/// `nonce = blake3("uc:chunk-nonce:v1|" || transfer_id || chunk_index_le)[0..24]`
+fn derive_chunk_nonce(transfer_id: &[u8; 16], chunk_index: u32) -> [u8; 24] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"uc:chunk-nonce:v1|");
+    hasher.update(transfer_id);
+    hasher.update(&chunk_index.to_le_bytes());
+    let hash = hasher.finalize();
+    let mut nonce = [0u8; 24];
+    nonce.copy_from_slice(&hash.as_bytes()[..24]);
+    nonce
+}
+
+#[cfg(test)]
+mod tests {
+    use uc_core::ids::SpaceId;
+
+    use super::*;
+
+    #[test]
+    fn truncated_header_keeps_the_read_error_as_source() {
+        let key = MasterKey::from_bytes(&[3u8; 32]).unwrap();
+        let error = ChunkedDecoder::decode_from(Cursor::new(vec![0u8; 4]), &key).unwrap_err();
+
+        let ChunkedTransferError::TruncatedHeader {
+            source: Some(source),
+        } = &error
+        else {
+            panic!("expected TruncatedHeader with a source, got {error:?}");
+        };
+        let io = source
+            .downcast_ref::<std::io::Error>()
+            .expect("read error stays in the chain");
+        assert_eq!(io.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    mod blob_publish_observability_tests {
+        include!("chunked_transfer/blob_publish_observability_tests.rs");
+    }
+
+    fn ready_session() -> (Arc<InMemorySession>, MasterKey) {
+        let root = MasterKey::from_bytes(&[11u8; 32]).unwrap();
+        let space_id = SpaceId::from_str("transfer-space");
+        let session = Arc::new(InMemorySession::new());
+        session.set_master_key_for_space(space_id.clone(), root.clone());
+        let material = session
+            .create_migrated_space_material(&space_id, 100)
+            .unwrap();
+        session.install_space_material(&material).unwrap();
+        (session, root)
+    }
+
+    #[tokio::test]
+    async fn new_transfer_is_v4_and_round_trips() {
+        let (session, _root) = ready_session();
+        let adapter = TransferCipherAdapter::new(session);
+
+        let encrypted = adapter.encrypt(b"secret").await.unwrap();
+
+        assert_eq!(&encrypted[..4], b"UC4\0");
+        assert_eq!(adapter.decrypt(&encrypted).await.unwrap(), b"secret");
+    }
+
+    #[tokio::test]
+    async fn legacy_v3_transfer_remains_readable() {
+        let (session, root) = ready_session();
+        let adapter = TransferCipherAdapter::new(session);
+        let mut legacy = Vec::new();
+        ChunkedEncoder::encode_to(&mut legacy, &root, Uuid::nil().as_bytes(), b"legacy", 0, 6)
+            .unwrap();
+
+        assert_eq!(adapter.decrypt(&legacy).await.unwrap(), b"legacy");
+    }
+
+    #[tokio::test]
+    async fn missing_v4_key_does_not_fall_back_to_v3_key() {
+        let (writer_session, root) = ready_session();
+        let writer = TransferCipherAdapter::new(writer_session);
+        let encrypted = writer.encrypt(b"secret").await.unwrap();
+
+        let reader_session = Arc::new(InMemorySession::new());
+        reader_session.set_master_key_for_space(SpaceId::from_str("transfer-space"), root);
+        let reader = TransferCipherAdapter::new(reader_session);
+
+        assert!(reader.decrypt(&encrypted).await.is_err());
+    }
+
+    #[test]
+    fn missing_key_and_epoch_mismatch_have_distinct_local_rejection_reasons() {
+        use std::sync::Mutex;
+        use tracing_subscriber::{layer::SubscriberExt, Layer};
+        use uc_observability_contract::diagnostics::connectivity::{
+            take_local_completion_detail, ClipboardReceiveFailure, ClipboardReceiveObservation,
+        };
+        use uc_observability_contract::diagnostics::{
+            DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation, DiagnosticRole,
+            OperationCompletion,
+        };
+        #[derive(Clone)]
+        struct Details(Arc<Mutex<Vec<(&'static str, &'static str)>>>);
+        impl<S: tracing::Subscriber> Layer<S> for Details {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if event.metadata().target() == "uc.telemetry" {
+                    if let Some(detail) = take_local_completion_detail(
+                        "clipboard",
+                        "clipboard_receive",
+                        "server",
+                        "error",
+                    ) {
+                        self.0.lock().expect("details").push(detail.local_fields());
+                    }
+                }
+            }
+        }
+        let details = Details(Arc::new(Mutex::new(Vec::new())));
+        let subscriber = tracing_subscriber::registry().with(details.clone());
+        let executor = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        tracing::subscriber::with_default(subscriber, || {
+            executor.block_on(async {
+                let (session, root) = ready_session();
+                let writer = TransferCipherAdapter::new(session);
+                let encrypted = writer
+                    .encrypt(b"private-content-sentinel")
+                    .await
+                    .expect("encrypt");
+                let missing = Arc::new(InMemorySession::new());
+                missing.set_master_key_for_space(SpaceId::from_str("transfer-space"), root);
+                let reader = TransferCipherAdapter::new(missing);
+                for mismatch in [false, true] {
+                    let observation = ClipboardReceiveObservation::default();
+                    let mut input = encrypted.clone();
+                    if mismatch {
+                        input[4] ^= 1;
+                    }
+                    observation
+                        .scope(async {
+                            let adapter = if mismatch { &writer } else { &reader };
+                            assert!(adapter.decrypt(&input).await.is_err());
+                        })
+                        .await;
+                    observation.finish_failure(
+                        ClipboardReceiveFailure::ApplicationRejected,
+                        OperationCompletion::failed(
+                            DiagnosticDomain::Clipboard,
+                            DiagnosticOperation::ClipboardReceive,
+                            DiagnosticRole::Server,
+                            DiagnosticErrorType::Unavailable,
+                            std::time::Duration::from_millis(1),
+                        ),
+                    );
+                }
+            })
+        });
+        assert_eq!(
+            *details.0.lock().expect("details"),
+            vec![
+                ("decrypt", "content_key_missing"),
+                ("decrypt", "content_key_epoch_mismatch"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn tampered_v4_epoch_is_rejected() {
+        let (session, _root) = ready_session();
+        let adapter = TransferCipherAdapter::new(session);
+        let mut encrypted = adapter.encrypt(b"secret").await.unwrap();
+        encrypted[4] ^= 1;
+
+        assert!(adapter.decrypt(&encrypted).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn locked_session_is_reported_for_v4_encrypt_and_decrypt() {
+        let (ready, _root) = ready_session();
+        let encrypted = TransferCipherAdapter::new(ready)
+            .encrypt(b"secret")
+            .await
+            .unwrap();
+        let locked = TransferCipherAdapter::new(Arc::new(InMemorySession::new()));
+
+        assert!(matches!(
+            locked.encrypt(b"secret").await,
+            Err(TransferCipherError::NotUnlocked)
+        ));
+        assert!(matches!(
+            locked.decrypt(&encrypted).await,
+            Err(TransferCipherError::NotUnlocked)
+        ));
+    }
+}

@@ -16,18 +16,20 @@ use uc_application::facade::{
 #[cfg(feature = "lan-compat")]
 use uc_application::facade::{AppPaths, ClipboardOutboundFacade};
 #[cfg(feature = "lan-compat")]
-use uc_infra::fs::FsInboundFileTarget;
+use uc_infra_local::fs::FsInboundFileTarget;
+use uc_infra_p2p::network::iroh::{
+    IrohRelayProbeAdapter, IrohRelayProbeError, IrohRelayProbeReport,
+};
 #[cfg(feature = "lan-compat")]
-use uc_infra::mobile_sync::{
+use uc_mobile_lan::mobile_sync::{
     Argon2idPasswordHasher, FilesystemMobileFileStaging, NetworkInterfaceLanProbe,
     OsRngCredentialsMinter,
 };
-use uc_infra::network::iroh::{IrohRelayProbeAdapter, IrohRelayProbeError, IrohRelayProbeReport};
 #[cfg(feature = "lan-compat")]
 use uc_mobile_lan::{
     IncomingMobileBuffer, MobileSyncFacade, MobileSyncFacadeDeps, MobileSyncSnapshotPorts,
 };
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_warn};
 
 // ---------------------------------------------------------------------------
 // IrohRelayDiagnosticAdapter
@@ -79,7 +81,7 @@ pub(crate) fn build_relay_diagnostic() -> Option<Arc<dyn RelayDiagnosticPort>> {
             inner: Arc::new(probe),
         }) as Arc<dyn RelayDiagnosticPort>),
         Err(error) => {
-            tracing::warn!(
+            uc_warn!(
                 target: "bootstrap.network",
                 error_kind = "relay_probe_unavailable",
                 io_error_kind = io_error_kind(&error),

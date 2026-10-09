@@ -2,8 +2,9 @@
 //!
 //! Abstracts the build step that converts a clipboard-entry snapshot
 //! (`SearchPipelineInput`) into a `SearchDocument` and the matching
-//! aggregated `SearchPosting` rows. Concrete implementation (text
-//! extraction + tokenization + HMAC term tagging) lives in `uc-infra`.
+//! aggregated `SearchPosting` rows.
+//!
+//! 具体实现（文本提取、分词与 HMAC 词项标记）位于 `uc-infra-storage`。
 //!
 //! The port is synchronous because the underlying work is pure CPU
 //! (no IO). Implementations must be `Send + Sync` so a single instance

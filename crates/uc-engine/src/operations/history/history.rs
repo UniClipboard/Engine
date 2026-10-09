@@ -2,7 +2,6 @@
 
 use crate::error_codes::*;
 
-use tracing::error;
 use uc_application::facade::{
     AppFacade, ClipboardHistoryError, ClipboardListInput, EntryDetailView, EntryProjectionView,
     EntryResourceView,
@@ -13,6 +12,7 @@ use crate::{
     HistoryEntryInput, HistoryEntryResourceSummary, HistoryEntrySummary, HistoryStatsSummary,
     ListHistoryEntriesInput, OperationResult, SetHistoryEntryFavoriteInput,
 };
+use uc_observability_contract::uc_error;
 
 const MAX_HISTORY_LIST_SIZE: u32 = 1000;
 
@@ -23,7 +23,7 @@ pub async fn execute_list_history_entries(
     if input.limit == 0 || input.limit > MAX_HISTORY_LIST_SIZE {
         return Err(invalid_input_error());
     }
-    // TryFromIntError：目标分类完整表达数值范围不符。
+    // discarded-source[int-conversion]: `TryFromIntError`: the target classification already expresses the range or length mismatch
     let offset = usize::try_from(input.offset).map_err(|_| invalid_input_error())?;
     let entries = facade
         .list_history_entries(ClipboardListInput {
@@ -187,7 +187,7 @@ fn map_history_error(error: ClipboardHistoryError) -> EngineError {
             false,
         ),
         ClipboardHistoryError::Internal(_) => {
-            error!("clipboard history operation failed");
+            uc_error!("clipboard history operation failed");
             EngineError::new(HISTORY_FAILED_CODE, EngineErrorCategory::Internal, false)
         }
     }

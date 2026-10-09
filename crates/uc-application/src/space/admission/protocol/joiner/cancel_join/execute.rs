@@ -6,6 +6,8 @@ use crate::space::admission::{
 };
 use uc_core::membership::{JoinId, SpaceAdmissionAggregateError};
 use uc_observability_contract::diagnostics::SpaceAdmissionObservationOutcome;
+use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{uc_info, uc_warn};
 
 impl SpaceAdmissionProtocol {
     pub(crate) async fn cancel_join(
@@ -18,7 +20,32 @@ impl SpaceAdmissionProtocol {
         if result.is_ok() {
             self.recovery.interrupt_current();
         }
+        record_cancellation_outcome(&result);
         result
+    }
+}
+
+/// 取消加入的完成记录由流程负责人写；Engine 只映射错误码。找不到加入属于调用方输入，不记录。
+fn record_cancellation_outcome(result: &Result<CurrentJoinStatus, CancelSpaceJoinError>) {
+    match result {
+        Ok(CurrentJoinStatus::Pending { .. }) => uc_info!(
+            operation = "cancel_join",
+            outcome = "requested",
+            "join cancellation requested"
+        ),
+        Ok(_) => uc_info!(
+            operation = "cancel_join",
+            outcome = "completed",
+            "join cancellation completed"
+        ),
+        Err(CancelSpaceJoinError::NotFound) => {}
+        Err(error @ CancelSpaceJoinError::State { .. }) => uc_warn!(
+            operation = "cancel_join",
+            outcome = "failed",
+            error_kind = "cancel_join_space",
+            io_error_kind = io_error_kind(error),
+            "join cancellation failed"
+        ),
     }
 }
 

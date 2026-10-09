@@ -22,10 +22,8 @@
 
 use std::sync::{Arc, RwLock};
 
-use tracing::warn;
-
 use uc_core::ports::host_event::{EmitError, HostEvent, HostEventEmitterPort};
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_warn};
 
 /// 一个挂在 bus 上的 emitter,带名字便于排障与精准注销。
 struct Registered {
@@ -68,7 +66,7 @@ impl HostEventBus {
             // emit 自身永远返回 Ok(每个 downstream 的失败已在内部 warn 过),
             // 这一支理论上不会进入;留 warn 是防御性 —— 真有变体进入说明
             // 上游契约被破坏。
-            warn!(
+            uc_warn!(
                 error_kind = "emit_unexpected_error",
                 io_error_kind = io_error_kind(&err),
                 "host event bus emit returned Err unexpectedly"
@@ -95,7 +93,7 @@ impl HostEventEmitterPort for HostEventBus {
         };
         for entry in snapshot.iter() {
             if let Err(err) = entry.emitter.emit(event.clone()) {
-                warn!(
+                uc_warn!(
                     emitter = entry.name,
                     error_kind = "downstream_emit",
                     io_error_kind = io_error_kind(&err),

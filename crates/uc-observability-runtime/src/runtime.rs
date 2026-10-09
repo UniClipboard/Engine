@@ -14,6 +14,8 @@ use uc_observability_contract::diagnostics::{
 use crate::config::ObservabilityConfig;
 use crate::filter::local_sink_enabled;
 use crate::local_file::LocalFileRuntime;
+use crate::module_log::{is_engine_source, module_metadata, ModuleLogLayer, ModuleLogStats};
+use crate::remote_health::record_remote_setup_degraded;
 use crate::status::{
     FlushSummary, ObservabilityHealth, SetupStatus, ShutdownSummary, SignalResult,
 };
@@ -56,13 +58,16 @@ impl ProcessObservabilityRuntime {
 
         let (state, subscriber) = build_runtime(config, host_layers);
         tracing::subscriber::set_global_default(subscriber)
-            // 错误只表示全局状态已被设置（或携带待写入的状态值），没有其他诊断信息。
+            // discarded-source[no-information]: the error value carries no usable diagnostic information
             .map_err(|_| InstallError::SubscriberAlreadyInstalled)?;
         let _ = tracing_log::LogTracer::init();
         INSTALLED
             .set(Arc::clone(&state))
-            // 错误只表示全局状态已被设置（或携带待写入的状态值），没有其他诊断信息。
+            // discarded-source[no-information]: the error value carries no usable diagnostic information
             .map_err(|_| InstallError::AlreadyInstalled)?;
+        if let Some(failure) = state.health.remote_setup_failure {
+            record_remote_setup_degraded(failure);
+        }
         state.telemetry.recording.checkpoint(
             "diagnostics.run.started",
             serde_json::json!({ "capture_mode": "standard" }),
@@ -241,6 +246,7 @@ impl ProcessObservabilityHandle {
                 .local_file
                 .as_ref()
                 .map_or_else(Vec::new, |file| file.statistics()),
+            module_logs: self.state.module_log.snapshot(),
         })
     }
     pub fn health(&self) -> ObservabilityHealth {
@@ -347,6 +353,7 @@ struct RuntimeState {
     shutdown: Arc<ShutdownCoordinator>,
     lifecycle: Arc<LifecycleGate>,
     health_accepting: Arc<AtomicBool>,
+    module_log: Arc<ModuleLogStats>,
 }
 
 fn build_runtime(
@@ -366,7 +373,7 @@ fn build_runtime(
         None => (SetupStatus::Disabled, None),
     };
 
-    let (telemetry, remote) = TelemetryRuntime::new(&config, local_file.clone());
+    let (telemetry, remote_setup) = TelemetryRuntime::new(&config, local_file.clone());
     let telemetry_accepting = telemetry.accepting();
     layers.extend(telemetry.layers());
     layers.push(system_layer());
@@ -381,6 +388,26 @@ fn build_runtime(
         accepting.load(Ordering::Acquire) && local_sink_enabled(metadata)
     }));
     let mut all_layers: Vec<HostLogLayer> = vec![Box::new(engine_layer)];
+    let module_log = Arc::new(ModuleLogStats::default());
+    if let (Some(file), Some(local)) = (local_file.as_ref(), config.local_logs.as_ref()) {
+        let budget_bytes = local.module_log_budget_bytes;
+        let recording = Arc::clone(&telemetry.recording);
+        let gate = Arc::clone(&recording);
+        let layer = ModuleLogLayer::new(
+            Arc::clone(file),
+            recording,
+            Arc::clone(&module_log),
+            budget_bytes,
+        );
+        // 合同 span 只用于取得关联上下文，事件与模块 span 才会被记录。
+        all_layers.push(Box::new(layer.with_filter(dynamic_filter_fn(
+            move |metadata, _| {
+                module_metadata(metadata)
+                    && (metadata.is_span()
+                        || ModuleLogLayer::level_enabled(&gate, metadata.level()))
+            },
+        ))));
+    }
     if !host_layers.is_empty() {
         all_layers.push(Box::new(host_layers.with_filter(
             tracing_subscriber::filter::filter_fn(host_metadata_enabled),
@@ -391,7 +418,8 @@ fn build_runtime(
         config,
         telemetry,
         health: ObservabilityHealth {
-            remote,
+            remote: remote_setup.status,
+            remote_setup_failure: remote_setup.failure,
             local_file: local_file_status,
             dropped_local_records: 0,
             dropped_remote_spans: 0,
@@ -403,6 +431,7 @@ fn build_runtime(
         shutdown: Arc::new(ShutdownCoordinator::default()),
         lifecycle: Arc::new(LifecycleGate::default()),
         health_accepting,
+        module_log,
     });
     (state, subscriber)
 }
@@ -414,24 +443,6 @@ fn host_metadata_enabled(metadata: &tracing::Metadata<'_>) -> bool {
     ) {
         return false;
     }
-    let engine_source = |name: &str| {
-        [
-            "uc_core",
-            "uc_application",
-            "uc_infra",
-            "uc_engine",
-            "uc_observability_contract",
-            "uc_observability_runtime",
-            "uc_mobile",
-            "uc_mobile_lan",
-            "uc_mobile_proto",
-        ]
-        .iter()
-        .any(|prefix| {
-            name.strip_prefix(prefix)
-                .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
-        })
-    };
     // 网络依赖的原始地址、标识和错误正文也不能绕行到宿主输出。
     let network_source = |name: &str| {
         [
@@ -455,8 +466,8 @@ fn host_metadata_enabled(metadata: &tracing::Metadata<'_>) -> bool {
             })
         })
     };
-    !engine_source(metadata.target())
-        && !metadata.module_path().is_some_and(engine_source)
+    !is_engine_source(metadata.target())
+        && !metadata.module_path().is_some_and(is_engine_source)
         && !network_source(metadata.target())
         && !metadata.module_path().is_some_and(network_source)
 }
@@ -531,7 +542,7 @@ fn run_reserved_with_deadline<T: Send + 'static>(
         .spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));
             worker_gate.release();
-            // panic 载荷不是 Error，结果只用于判定任务是否正常结束。
+            // discarded-source[no-information]: the error value carries no usable diagnostic information
             let _ = sender.send(result.map_err(|_| ()));
         })
         .is_err()
@@ -755,10 +766,44 @@ mod tests {
     use std::sync::Barrier;
 
     use super::*;
+    use crate::status::RemoteSetupFailure;
     use crate::{
         CaptureEndReason, DeploymentEnvironment, LocalCaptureMode, LocalLogConfig,
         ObservabilityResource, OperatingSystem,
     };
+
+    #[test]
+    fn remote_setup_failure_is_written_to_the_local_sink_as_a_closed_category() {
+        let directory = tempfile::tempdir().expect("日志目录");
+        let config = ObservabilityConfig::new(
+            ObservabilityResource::new(
+                "1.1.0",
+                DeploymentEnvironment::Test,
+                OperatingSystem::Macos,
+                "test",
+            )
+            .expect("资源配置"),
+        )
+        .with_local_logs(LocalLogConfig::new(directory.path()));
+        let (state, subscriber) = build_runtime(config, Vec::new());
+        let handle = ProcessObservabilityHandle { state };
+
+        tracing::subscriber::with_default(subscriber, || {
+            record_remote_setup_degraded(RemoteSetupFailure::TraceExporter);
+        });
+        assert_eq!(
+            handle.shutdown(Duration::from_secs(2)).logs,
+            SignalResult::Completed
+        );
+
+        let written = crate::managed_log_files(directory.path())
+            .expect("日志文件")
+            .into_iter()
+            .map(|path| std::fs::read_to_string(path).expect("读取日志"))
+            .collect::<String>();
+        assert!(written.contains("uc.observability.setup_degraded"));
+        assert!(written.contains("trace_exporter"));
+    }
 
     #[test]
     fn shutdown_rejects_capture_that_passed_the_outer_check_before_closing() {

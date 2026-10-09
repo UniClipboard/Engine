@@ -1,3 +1,5 @@
+use uc_core::error_class::ErrorClass;
+
 #[derive(Debug, thiserror::Error)]
 pub enum CurrentSpaceIdentityError {
     #[error("current Space identity is unavailable")]
@@ -32,6 +34,15 @@ impl CurrentSpaceIdentityError {
     pub fn inconsistent_from(source: impl Into<anyhow::Error>) -> Self {
         Self::Inconsistent {
             source: Some(source.into()),
+        }
+    }
+}
+
+impl ErrorClass for CurrentSpaceIdentityError {
+    fn class(&self) -> &'static str {
+        match self {
+            Self::Unavailable { .. } => "unavailable",
+            Self::Inconsistent { .. } => "inconsistent",
         }
     }
 }

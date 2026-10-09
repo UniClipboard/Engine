@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::sync::{Mutex, Notify};
 use tokio::time::{timeout_at, Instant};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, Instrument};
+use tracing::Instrument;
 use uc_application::deps::LifecycleError;
 use uc_application::facade::{
     AppFacade, ApplicationAssembly, ApplicationRuntime, ClipboardInboundEvent,
@@ -19,9 +19,9 @@ use uc_application::facade::{
     RecoverSpaceSessionError, RuntimeLifecycle,
 };
 use uc_core::{FileTransferCancellationReason, TaskRegistry};
-use uc_infra::fs::{FsAtomicPublisher, FsHiddenPathMarker, FsInboundFileTarget};
-use uc_infra::network::iroh::{IrohNode, IrohSessionBuilder, PreparedIrohSession};
-use uc_infra::space::RuntimeSpaceAccessAdapter;
+use uc_infra_local::fs::{FsAtomicPublisher, FsHiddenPathMarker, FsInboundFileTarget};
+use uc_infra_p2p::network::iroh::{IrohNode, IrohSessionBuilder, PreparedIrohSession};
+use uc_infra_profile::space::RuntimeSpaceAccessAdapter;
 use uc_observability_contract::diagnostics::connectivity::{
     observe_local_result, record_session_lock_wait, LocalWorkStep, SessionTransition,
     SessionTransitionResult,
@@ -30,7 +30,9 @@ use uc_observability_contract::diagnostics::{
     complete_operation, operation_span, DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation,
     DiagnosticRole, DiagnosticSpanKind, OperationCompletion, OperationContext,
 };
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_vocab_debug, uc_error, uc_warn,
+};
 
 use crate::assembly::deps::WiredDependencies;
 #[cfg(feature = "lan-compat")]
@@ -122,13 +124,28 @@ pub(super) struct SessionHandoverDiagnostics {
     pub(super) session_activation_failure_count: usize,
 }
 
+/// 会话激活未完成时回收已准备好的会话；清理失败只记分类，不改变激活失败的结果。
+async fn cleanup_prepared_session(session: ProductionSession, stage: &'static str) {
+    if let Err(error) = session
+        .shutdown(uc_core::FileTransferCancellationReason::Unknown, None)
+        .await
+    {
+        uc_warn!(
+            error_kind = "prepared_session_cleanup",
+            stage = stage,
+            io_error_kind = io_error_kind(&error),
+            "prepared session cleanup failed"
+        );
+    }
+}
+
 fn session_runtime_error(
     context: &'static str,
     error: impl Into<Box<dyn Error + Send + Sync>>,
 ) -> EngineError {
     let error = error.into();
-    error!(
-        context,
+    uc_error!(
+        context = context,
         io_error_kind = io_error_kind(error.as_ref()),
         "engine session lifecycle failed"
     );
@@ -145,8 +162,8 @@ fn retryable_space_transition_runtime_error(
     error: impl Into<Box<dyn Error + Send + Sync>>,
 ) -> EngineError {
     let error = error.into();
-    error!(
-        context,
+    uc_error!(
+        context = context,
         io_error_kind = io_error_kind(error.as_ref()),
         "engine Space transition failed"
     );
@@ -157,8 +174,8 @@ fn space_transition_error(
     context: &'static str,
     error: CompletePendingSpaceTransitionError,
 ) -> EngineError {
-    error!(
-        context,
+    uc_error!(
+        context = context,
         error_kind = "space_transition",
         io_error_kind = io_error_kind(&error),
         "engine Space transition failed"
@@ -189,7 +206,7 @@ struct ProductionSessionFactory {
     relay_fallback_override: Option<bool>,
     iroh_bind_port_override: Option<u16>,
     #[cfg(feature = "dev-tools")]
-    network_partition_gate: uc_infra::network::iroh::IrohNetworkPartitionGate,
+    network_partition_gate: uc_infra_p2p::network::iroh::IrohNetworkPartitionGate,
     #[cfg(feature = "dev-tools")]
     joiner_final_confirmation_gate: Arc<JoinerFinalConfirmationGate>,
     #[cfg(feature = "dev-tools")]
@@ -388,7 +405,7 @@ impl SessionSupervisor {
         relay_fallback_override: Option<bool>,
         iroh_bind_port_override: Option<u16>,
         #[cfg(feature = "dev-tools")]
-        network_partition_gate: uc_infra::network::iroh::IrohNetworkPartitionGate,
+        network_partition_gate: uc_infra_p2p::network::iroh::IrohNetworkPartitionGate,
         #[cfg(feature = "dev-tools")] joiner_final_confirmation_gate: Arc<
             JoinerFinalConfirmationGate,
         >,
@@ -835,14 +852,7 @@ impl SessionSupervisor {
             .consume()
         {
             prepared.network_session.shutdown().await;
-            if prepared
-                .session
-                .shutdown(uc_core::FileTransferCancellationReason::Unknown, None)
-                .await
-                .is_err()
-            {
-                tracing::warn!("prepared session cleanup failed after injected activation failure");
-            }
+            cleanup_prepared_session(prepared.session, "activation_failed").await;
             return Err(session_runtime_error(
                 "activate p2p session",
                 "injected session activation failure",
@@ -852,14 +862,7 @@ impl SessionSupervisor {
         let Some(network) = runtime.network.as_mut() else {
             drop(runtime);
             prepared.network_session.shutdown().await;
-            if prepared
-                .session
-                .shutdown(uc_core::FileTransferCancellationReason::Unknown, None)
-                .await
-                .is_err()
-            {
-                tracing::warn!("prepared session cleanup failed after network became unavailable");
-            }
+            cleanup_prepared_session(prepared.session, "network_unavailable").await;
             return Err(operation_unavailable_error());
         };
         let activation = network
@@ -868,14 +871,7 @@ impl SessionSupervisor {
             .map_err(|error| session_runtime_error("activate p2p session", error));
         if let Err(error) = activation {
             drop(runtime);
-            if prepared
-                .session
-                .shutdown(uc_core::FileTransferCancellationReason::Unknown, None)
-                .await
-                .is_err()
-            {
-                tracing::warn!("prepared session cleanup failed after activation failure");
-            }
+            cleanup_prepared_session(prepared.session, "activation_failed").await;
             return Err(error);
         }
         runtime.session = Some(prepared.session);
@@ -1060,9 +1056,9 @@ impl ProductionSessionFactory {
                 let primary = match error.admission_failure() {
                     Some(category) => {
                         let summary = AdmissionRecoverySummary::from(category);
-                        error!(
-                            category = ?summary.category,
-                            stage = ?summary.stage,
+                        uc_error!(
+                            category = log_vocab_debug(&summary.category),
+                            stage = log_vocab_debug(&summary.stage),
                             "application runtime requires admission recovery"
                         );
                         profile_recovery_required_error().with_admission_recovery(summary)
@@ -1259,7 +1255,7 @@ impl SessionOperationGate {
                 .await
                 .is_err()
                 {
-                    tracing::warn!(
+                    uc_warn!(
                         error_kind = "session_operation_drain_timeout",
                         "session operation did not stop after cancellation"
                     );

@@ -13,7 +13,6 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use thiserror::Error;
-use tracing::info;
 
 use crate::deps::CurrentSpaceMemberScopePort;
 use uc_core::blob::ports::BlobReaderPort;
@@ -34,6 +33,10 @@ use crate::clipboard::sync::dispatch_entry::DispatchEntryRunner;
 
 use super::existing_local_entry_delivery::ExistingLocalEntryDelivery;
 pub(crate) use super::existing_local_entry_delivery::ExistingLocalEntryDeliveryRunner;
+use uc_observability_contract::{
+    log_fields::{log_id, log_vocab},
+    uc_info,
+};
 
 /// 用户主动 resend 的命令。
 #[derive(Debug, Clone)]
@@ -108,6 +111,21 @@ pub enum ResendEntryError {
     /// 败、V3 envelope 编码失败等)。
     #[error("dispatch failure")]
     Dispatch(#[source] anyhow::Error),
+}
+
+impl ResendEntryError {
+    /// 日志用的固定分类，只反映变体，不含条目、设备标识或下层错误正文。
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::SynchronizationDisabled => "synchronization_disabled",
+            Self::EntryNotFound(_) => "entry_not_found",
+            Self::EntryNotResendable { .. } => "entry_not_resendable",
+            Self::TargetNotTrusted(_) => "target_not_trusted",
+            Self::NoEligibleTargets => "no_eligible_targets",
+            Self::Storage(_) => "storage",
+            Self::Dispatch(_) => "dispatch",
+        }
+    }
 }
 
 /// resend 失败时的细分原因。UI 据此选不同的英文文案 / i18n key。
@@ -210,13 +228,20 @@ impl ResendEntryUseCase {
 
     /// Chooses the user-authorized targets, then delegates all existing-entry
     /// delivery work to the shared private module.
+    #[tracing::instrument(name = "usecase.resend_entry.execute", skip_all)]
     pub(crate) async fn execute(
         &self,
         cmd: ResendEntryCommand,
     ) -> Result<ResendReport, ResendEntryError> {
-        info!(
-            entry_id = %cmd.entry_id,
-            filter_kind = if cmd.target_filter.is_some() { "explicit" } else { "diff_set" },
+        uc_info!(
+            entry_id = log_id(&cmd.entry_id),
+            filter_kind = log_vocab(
+                &(if cmd.target_filter.is_some() {
+                    "explicit"
+                } else {
+                    "diff_set"
+                })
+            ),
             "resend.execute start"
         );
 

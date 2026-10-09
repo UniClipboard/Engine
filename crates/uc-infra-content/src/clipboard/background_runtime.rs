@@ -1,0 +1,193 @@
+//! Clipboard spool/blob 的具体 Infra runtime adapter。
+//!
+//! Application 决定启动顺序；本 adapter 只实现具体磁盘恢复与 worker。
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use tokio::sync::{mpsc, Mutex};
+
+use uc_application::deps::{ClipboardBackgroundError, ClipboardBackgroundPort};
+use uc_core::ids::RepresentationId;
+use uc_core::ports::clipboard::{
+    ClipboardRepresentationStore, ThumbnailGeneratorPort, ThumbnailRepositoryPort,
+};
+use uc_core::ports::{ClockPort, ContentHashPort};
+use uc_core::TaskRegistry;
+use uc_observability_contract::{error_source::io_error_kind, uc_info, uc_warn};
+
+use super::background_activity::BackgroundActivity;
+use uc_infra_local::blob::BlobWriterPort;
+
+use super::{
+    BackgroundBlobWorker, RepresentationCache, SpoolJanitor, SpoolManager, SpoolScanner,
+    StagedReconciler,
+};
+
+const SPOOL_JANITOR_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+pub struct ClipboardBackgroundRuntime {
+    activity: Arc<BackgroundActivity>,
+    representation_cache: Arc<RepresentationCache>,
+    spool_manager: Arc<SpoolManager>,
+    worker_rx: Mutex<Option<mpsc::Receiver<RepresentationId>>>,
+    spool_dir: PathBuf,
+    spool_ttl_days: u64,
+    worker_retry_max_attempts: u32,
+    worker_retry_backoff: Duration,
+    representation_repo: Arc<dyn ClipboardRepresentationStore>,
+    worker_tx: mpsc::Sender<RepresentationId>,
+    blob_writer: Arc<dyn BlobWriterPort>,
+    hasher: Arc<dyn ContentHashPort>,
+    clock: Arc<dyn ClockPort>,
+    thumbnail_repo: Arc<dyn ThumbnailRepositoryPort>,
+    thumbnail_generator: Arc<dyn ThumbnailGeneratorPort>,
+}
+
+impl ClipboardBackgroundRuntime {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        representation_cache: Arc<RepresentationCache>,
+        spool_manager: Arc<SpoolManager>,
+        worker_rx: mpsc::Receiver<RepresentationId>,
+        spool_dir: PathBuf,
+        spool_ttl_days: u64,
+        worker_retry_max_attempts: u32,
+        worker_retry_backoff_ms: u64,
+        representation_repo: Arc<dyn ClipboardRepresentationStore>,
+        worker_tx: mpsc::Sender<RepresentationId>,
+        blob_writer: Arc<dyn BlobWriterPort>,
+        hasher: Arc<dyn ContentHashPort>,
+        clock: Arc<dyn ClockPort>,
+        thumbnail_repo: Arc<dyn ThumbnailRepositoryPort>,
+        thumbnail_generator: Arc<dyn ThumbnailGeneratorPort>,
+    ) -> Self {
+        Self {
+            activity: Arc::new(BackgroundActivity::new()),
+            representation_cache,
+            spool_manager,
+            worker_rx: Mutex::new(Some(worker_rx)),
+            spool_dir,
+            spool_ttl_days,
+            worker_retry_max_attempts,
+            worker_retry_backoff: Duration::from_millis(worker_retry_backoff_ms),
+            representation_repo,
+            worker_tx,
+            blob_writer,
+            hasher,
+            clock,
+            thumbnail_repo,
+            thumbnail_generator,
+        }
+    }
+}
+
+#[async_trait]
+impl ClipboardBackgroundPort for ClipboardBackgroundRuntime {
+    async fn start(
+        &self,
+        task_registry: Arc<TaskRegistry>,
+    ) -> Result<(), ClipboardBackgroundError> {
+        let worker_rx = self
+            .worker_rx
+            .lock()
+            .await
+            .take()
+            .ok_or(ClipboardBackgroundError::AlreadyStarted)?;
+
+        let scanner = SpoolScanner::new(
+            self.spool_dir.clone(),
+            Arc::clone(&self.representation_repo),
+            self.worker_tx.clone(),
+        );
+        let recovered = scanner
+            .scan_and_recover()
+            .await
+            .map_err(|source| ClipboardBackgroundError::SpoolRecovery { source })?;
+        if recovered > 0 {
+            uc_info!(
+                recovered = recovered,
+                "recovered staged clipboard representations from spool"
+            );
+        }
+
+        let reconciler = StagedReconciler::new(
+            Arc::clone(&self.representation_repo),
+            Arc::clone(&self.spool_manager),
+        );
+        let demoted = reconciler
+            .run_once()
+            .await
+            .map_err(|source| ClipboardBackgroundError::SpoolRecovery { source })?;
+        if demoted > 0 {
+            uc_info!(
+                demoted = demoted,
+                "demoted orphaned staged clipboard representations"
+            );
+        }
+
+        let worker = BackgroundBlobWorker::new(
+            worker_rx,
+            Arc::clone(&self.representation_cache),
+            Arc::clone(&self.spool_manager),
+            Arc::clone(&self.representation_repo),
+            Arc::clone(&self.blob_writer),
+            Arc::clone(&self.hasher),
+            Arc::clone(&self.thumbnail_repo),
+            Arc::clone(&self.thumbnail_generator),
+            Arc::clone(&self.clock),
+            self.worker_retry_max_attempts,
+            self.worker_retry_backoff,
+        );
+        let activity = Arc::clone(&self.activity);
+        let _ = task_registry
+            .spawn(|cancel| async move {
+                worker
+                    .run_until_cancelled(activity, cancel.cancelled_owned())
+                    .await;
+                uc_info!("background clipboard blob worker stopped");
+            })
+            .await;
+
+        let janitor = SpoolJanitor::new(
+            Arc::clone(&self.spool_manager),
+            Arc::clone(&self.representation_repo),
+            Arc::clone(&self.clock),
+            self.spool_ttl_days,
+        );
+        let activity = Arc::clone(&self.activity);
+        let _ = task_registry
+            .spawn(|cancel| async move {
+                let mut interval = tokio::time::interval(SPOOL_JANITOR_INTERVAL);
+                loop {
+                    let ticket = activity.timer_ticket();
+                    tokio::select! {
+                    biased;
+                        _ = cancel.cancelled() => return,
+                        _ = interval.tick() => {
+                            let Some(_permit) = activity.enter_timer(ticket).await else {
+                                continue;
+                            };
+                            match janitor.run_once().await {
+                            Ok(removed) if removed > 0 => uc_info!(removed = removed, "removed expired spool entries"),
+                            Ok(_) => {}
+                            Err(error) => uc_warn!(error_kind = "spool_janitor_sweep", io_error_kind = io_error_kind(error.as_ref()), "spool janitor sweep failed"),
+                            }
+                        }
+                    }
+                }
+            })
+            .await;
+        Ok(())
+    }
+
+    async fn suspend(&self) {
+        self.activity.suspend().await;
+    }
+
+    async fn resume(&self) {
+        self.activity.resume().await;
+    }
+}

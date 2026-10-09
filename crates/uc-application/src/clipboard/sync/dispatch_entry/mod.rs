@@ -46,7 +46,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use tokio::task::JoinSet;
-use tracing::info;
+use uc_observability_contract::{error_source::io_error_kind, uc_info, uc_warn};
 
 /// 主流程等 fan-out join 的硬上限。超过此时长后,剩余仍在跑的 peer task 会被
 /// move 到后台 spawn 继续 join,delivery 写盘与 host event emit 都在后台完成
@@ -88,7 +88,7 @@ use per_peer::PerPeerDispatcher;
 use target_selector::TargetSelector;
 
 use crate::facade::blob_transfer::SharedHostEventEmitter;
-use tracing::warn;
+
 use uc_core::clipboard::{
     ClipboardContentCategory, ClipboardContentCategorySet, EntryDeliveryRecord,
 };
@@ -103,7 +103,6 @@ use uc_core::MemberRepositoryPort;
 use uc_observability_contract::analytics::{
     AnalyticsPort, FailureReason, PayloadSizeBucket, PayloadType, SyncFailureStage, TransportType,
 };
-use uc_observability_contract::error_source::io_error_kind;
 
 /// One fanned-out peer's settled result: the device plus the wire outcome.
 pub(crate) type PeerDispatchResult = (DeviceId, Result<DispatchAck, ClipboardDispatchError>);
@@ -481,7 +480,7 @@ impl DispatchClipboardEntryUseCase {
         let header = self.header_factory.build(&input, &local_device).await;
 
         if candidates.is_empty() {
-            info!("dispatch: no paired peers; skipping fan-out");
+            uc_info!("dispatch: no paired peers; skipping fan-out");
             return Ok(DispatchOutcome {
                 snapshot_hash: input.snapshot_hash,
                 per_target: Vec::new(),
@@ -513,7 +512,7 @@ impl DispatchClipboardEntryUseCase {
                     .record_pending(entry_id, *device_id, self.clock.now_ms())
                     .await
                 {
-                    warn!(
+                    uc_warn!(
                         error_kind = "delivery_intent_record",
                         io_error_kind = io_error_kind(&error),
                         "dispatch: delivery intent persistence failed"
@@ -599,7 +598,6 @@ impl DispatchClipboardEntryUseCase {
                 entry_id,
                 Arc::clone(&self.clock),
                 Arc::clone(&self.recorder),
-                input.snapshot_hash.clone(),
             );
         }
 

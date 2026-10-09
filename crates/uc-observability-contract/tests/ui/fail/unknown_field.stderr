@@ -1,0 +1,5 @@
+error[E0433]: cannot find `not_in_catalog` in `fields`
+ --> tests/ui/fail/unknown_field.rs:4:14
+  |
+4 |     uc_warn!(not_in_catalog = "value", "unknown field name");
+  |              ^^^^^^^^^^^^^^ could not find `not_in_catalog` in `fields`

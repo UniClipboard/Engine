@@ -18,14 +18,18 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use tracing::{info, info_span, warn, Instrument};
+use tracing::{info_span, Instrument};
 
 use uc_core::clipboard::ClipboardEntry;
 use uc_core::ids::EntryId;
 use uc_core::ports::clipboard::ListClipboardEntriesPort;
 use uc_core::ports::SettingsPort;
 use uc_core::settings::model::{RetentionRule, RuleEvaluation};
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind,
+    log_fields::{log_id, log_vocab_debug},
+    uc_info, uc_warn,
+};
 
 use super::delete_entry::DeleteClipboardEntryUseCase;
 
@@ -58,13 +62,13 @@ impl EnforceRetentionPolicyUseCase {
         }
     }
 
-    #[tracing::instrument(name = "usecase.enforce_retention_policy.execute", skip(self))]
+    #[tracing::instrument(name = "usecase.enforce_retention_policy.execute", skip_all)]
     pub(crate) async fn execute(&self) -> Result<RetentionEnforcementResult> {
         let settings = self.settings.load().await?;
         let policy = settings.retention_policy;
 
         if !policy.enabled {
-            info!("Retention policy disabled, skipping");
+            uc_info!("Retention policy disabled, skipping");
             return Ok(RetentionEnforcementResult::default());
         }
 
@@ -88,9 +92,9 @@ impl EnforceRetentionPolicyUseCase {
             })
             .collect();
         if !unsupported_rules.is_empty() {
-            warn!(
-                rules = ?unsupported_rules,
-                evaluation = ?policy.evaluation,
+            uc_warn!(
+                rules = log_vocab_debug(&unsupported_rules),
+                evaluation = log_vocab_debug(&policy.evaluation),
                 "Retention policy contains unsupported rule variants; skipping enforcement entirely"
             );
             return Ok(RetentionEnforcementResult::default());
@@ -108,7 +112,7 @@ impl EnforceRetentionPolicyUseCase {
 
         let mut result = RetentionEnforcementResult::default();
         if victims.is_empty() {
-            info!("Retention policy: nothing to evict");
+            uc_info!("Retention policy: nothing to evict");
             return Ok(result);
         }
 
@@ -117,14 +121,19 @@ impl EnforceRetentionPolicyUseCase {
             match self.delete_uc.execute(entry_id).await {
                 Ok(()) => result.entries_deleted += 1,
                 Err(e) => {
-                    warn!(entry_id = %entry_id, error_kind = "entry_delete", io_error_kind = io_error_kind(e.as_ref()), "Retention delete failed");
+                    uc_warn!(
+                        entry_id = log_id(&entry_id),
+                        error_kind = "entry_delete",
+                        io_error_kind = io_error_kind(e.as_ref()),
+                        "Retention delete failed"
+                    );
                     result.errors += 1;
                 }
             }
         }
 
-        info!(
-            candidates,
+        uc_info!(
+            candidates = candidates,
             entries_deleted = result.entries_deleted,
             errors = result.errors,
             "Retention policy enforcement complete"

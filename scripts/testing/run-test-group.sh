@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# 当前脚本与所有嵌套 Cargo 调用统一经由 MBX。
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../build-cache/env.sh"
+
 readonly NEXTEST_VERSION="0.9.145"
 readonly GROUP="${1:-}"
 readonly BUILD_SCOPE="${UC_TEST_BUILD_SCOPE:-group}"
@@ -127,8 +130,8 @@ case "${GROUP}" in
     fi
     artifact_root="$(artifact_root)"
     export UC_TEST_ARTIFACTS_DIR="${artifact_root}"
-    run_group 6 -p uc-testkit -p uc-application -p uc-infra \
-      'package(uc-testkit) | package(uc-application) & (test(admission_recovery_scenarios) | test(device_trust_recovery_scenario) | test(legacy_candidate_convergence_scenario) | test(virtual_membership_network) | test(file_transfer_completion_scenario_reports_final_state) | test(text_transfer_scenario)) | package(uc-infra) & (test(provider_dependency_evidence) | binary(profile_storage_upgrade_crash))'
+    run_group 8 -p uc-testkit -p uc-application -p uc-infra-p2p -p uc-infra-profile \
+      'package(uc-testkit) | package(uc-application) & (test(admission_recovery_scenarios) | test(device_trust_recovery_scenario) | test(legacy_candidate_convergence_scenario) | test(virtual_membership_network) | test(file_transfer_completion_scenario_reports_final_state) | test(text_transfer_scenario)) | package(uc-infra-p2p) & test(provider_dependency_evidence) | package(uc-infra-profile) & binary(profile_storage_upgrade_crash)'
     require_scenario_result "${artifact_root}" "text-transfer-dispatch"
     require_scenario_result "${artifact_root}" "file-transfer-completion"
     run_testkit_demo success
@@ -139,8 +142,8 @@ case "${GROUP}" in
     printf 'nextest JUnit: target/nextest/ci/junit.xml\n'
     ;;
   persistence-provider)
-    run_group 2 -p uc-infra \
-      'package(uc-infra) & (binary(membership_record) | binary(profile_storage_upgrade) | binary(space_admission_state) | test(provider_dependency_evidence))' \
+    run_group 4 -p uc-infra-profile -p uc-infra-p2p \
+      'package(uc-infra-profile) & (binary(membership_record) | binary(profile_storage_upgrade) | binary(space_admission_state)) | package(uc-infra-p2p) & test(provider_dependency_evidence)' \
       "$@"
     ;;
   engine-smoke)
@@ -149,8 +152,8 @@ case "${GROUP}" in
       "$@"
     ;;
   process)
-    run_group 4 -p uc-engine -p uc-infra \
-      'package(uc-engine) & binary(host_contract) | package(uc-infra) & binary(profile_storage_upgrade_crash)' \
+    run_group 4 -p uc-engine -p uc-infra-profile \
+      'package(uc-engine) & binary(host_contract) | package(uc-infra-profile) & binary(profile_storage_upgrade_crash)' \
       "$@"
     ;;
   membership-e2e)

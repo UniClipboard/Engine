@@ -17,7 +17,7 @@ impl SearchProtectionRef {
     pub const LEN: usize = 32;
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, SearchError> {
-        // TryFromSliceError：切片范围已固定，目标分类完整表达长度不符。
+        // discarded-source[int-conversion]: `core::array::TryFromSliceError`: the target classification already expresses the range or length mismatch
         let value = bytes.try_into().map_err(|_| {
             SearchError::Internal("invalid search protection reference length".into())
         })?;
@@ -48,7 +48,7 @@ impl SearchKey {
     /// Length of a SearchKey in bytes.
     pub const LEN: usize = 32;
 
-    /// Access the raw key bytes — for use by uc-infra HMAC adapters only.
+    /// 访问原始密钥字节——仅供 `uc-infra-storage` 的 HMAC adapter 使用。
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
@@ -131,7 +131,7 @@ impl RenderKey {
     /// Length of a RenderKey in bytes.
     pub const LEN: usize = 32;
 
-    /// Access the raw key bytes — for use by uc-infra AEAD adapters only.
+    /// 访问原始密钥字节——仅供 `uc-infra-storage` 的 AEAD adapter 使用。
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }

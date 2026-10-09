@@ -3,7 +3,9 @@ use std::sync::Arc;
 use uc_core::ids::EntryId;
 use uc_core::ports::clipboard::SetClipboardEntryFavoritePort;
 use uc_core::ports::search::search_index::SearchIndexPort;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_id, uc_info, uc_warn,
+};
 
 /// Set the favorite state of a clipboard entry.
 ///
@@ -39,7 +41,11 @@ impl ToggleFavoriteClipboardEntryUseCase {
     /// Persist `is_favorited` for the entry. Returns `Ok(true)` when the entry
     /// exists and the flag was stored, `Ok(false)` when no entry matches
     /// `entry_id`, and `Err` on repository failures.
-    #[tracing::instrument(name = "usecase.toggle_favorite_clipboard_entry.execute", skip(self))]
+    #[tracing::instrument(
+        name = "usecase.toggle_favorite_clipboard_entry.execute",
+        skip_all,
+        fields(is_favorited)
+    )]
     pub(crate) async fn execute(
         &self,
         entry_id: &EntryId,
@@ -58,20 +64,24 @@ impl ToggleFavoriteClipboardEntryUseCase {
             // later rebuild reconciles the tag from the stored state.
             if let Some(mirror) = &self.search_mirror {
                 if let Err(e) = mirror.set_entry_favorite_tag(entry_id, is_favorited).await {
-                    tracing::warn!(
-                        entry_id = %entry_id,
-                        is_favorited,
+                    uc_warn!(
+                        entry_id = log_id(&entry_id),
+                        is_favorited = is_favorited,
                         error_kind = "search_favorite_tag",
                         io_error_kind = io_error_kind(&e),
                         "favorite persisted but search tag mirror failed; rebuild will reconcile"
                     );
                 }
             }
-            tracing::info!(entry_id = %entry_id, is_favorited, "Favorite state persisted");
+            uc_info!(
+                entry_id = log_id(&entry_id),
+                is_favorited = is_favorited,
+                "Favorite state persisted"
+            );
         } else {
-            tracing::warn!(
-                entry_id = %entry_id,
-                is_favorited,
+            uc_warn!(
+                entry_id = log_id(&entry_id),
+                is_favorited = is_favorited,
                 "Favorite toggle ignored: no entry matches the id"
             );
         }
@@ -99,6 +109,12 @@ mod tests {
 
     #[async_trait]
     impl SearchIndexPort for RecordingMirror {
+        async fn count_by_active_time(
+            &self,
+            _boundaries_ms: &[i64],
+        ) -> Result<Vec<u32>, SearchError> {
+            Err(SearchError::IndexUnavailable)
+        }
         async fn index_entry(
             &self,
             _document: SearchDocument,

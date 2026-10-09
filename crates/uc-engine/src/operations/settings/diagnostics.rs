@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use uc_application::facade::{AppFacade, DiagnosticsFacadeError};
 use uc_core::ids::RepresentationId;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_warn};
 
 use crate::runtime::host_file::{copy_path_to_host, HostFileCopyError};
 use crate::{
@@ -20,7 +20,7 @@ pub(crate) async fn execute_query_diagnostics(
     let status = facade
         .diagnostics_status()
         .await
-        // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+        // discarded-source[contract-boundary]: the public error carries a stable code only, the owner records the failure classification
         .map_err(|_| internal_error(QUERY_DIAGNOSTICS_FAILED_CODE))?;
     Ok(OperationResult::DiagnosticsStatus(
         DiagnosticsStatusSummary {
@@ -38,7 +38,7 @@ pub(crate) async fn execute_update_debug_mode(
     let result = facade
         .update_debug_mode(input.enabled)
         .await
-        // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
+        // discarded-source[contract-boundary]: the public error carries a stable code only, the owner records the failure classification
         .map_err(|_| internal_error(UPDATE_DEBUG_MODE_FAILED_CODE))?;
     Ok(OperationResult::DebugModeUpdated(DebugModeUpdateSummary {
         debug_mode: result.debug_mode,
@@ -58,10 +58,7 @@ pub(crate) async fn execute_export_diagnostic_logs(
     ) {
         return Err(internal_error(EXPORT_DIAGNOSTIC_LOGS_FAILED_CODE));
     }
-    let export_dir = temporary_root.join(format!("diagnostic-export-{}", RepresentationId::new()));
-    std::fs::create_dir_all(&export_dir)
-        // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
-        .map_err(|_| internal_error(EXPORT_DIAGNOSTIC_LOGS_FAILED_CODE))?;
+    let export_dir = create_export_dir(&temporary_root)?;
 
     let exported = facade
         .export_diagnostic_logs(input.since_hours, export_dir.clone())
@@ -69,7 +66,10 @@ pub(crate) async fn execute_export_diagnostic_logs(
     let result = match exported {
         Ok(exported) => copy_path_to_host(files, &input.destination, Path::new(&exported.path))
             .await
-            .map_err(map_copy_error)
+            .map_err(|error| {
+                error.record();
+                map_copy_error(error)
+            })
             .map(|()| {
                 OperationResult::DiagnosticLogsExported(DiagnosticLogsExportSummary {
                     included_files: exported.included_files,
@@ -80,13 +80,26 @@ pub(crate) async fn execute_export_diagnostic_logs(
     };
 
     if let Err(error) = std::fs::remove_dir_all(&export_dir) {
-        tracing::warn!(
+        uc_warn!(
             error_kind = "temp_dir_remove",
             io_error_kind = io_error_kind(&error),
             "failed to remove diagnostic export temporary directory"
         );
     }
     result
+}
+
+fn create_export_dir(temporary_root: &Path) -> Result<std::path::PathBuf, EngineError> {
+    let export_dir = temporary_root.join(format!("diagnostic-export-{}", RepresentationId::new()));
+    std::fs::create_dir_all(&export_dir).map_err(|error| {
+        uc_warn!(
+            error_kind = "temp_dir_create",
+            io_error_kind = io_error_kind(&error),
+            "failed to create diagnostic export temporary directory"
+        );
+        internal_error(EXPORT_DIAGNOSTIC_LOGS_FAILED_CODE)
+    })?;
+    Ok(export_dir)
 }
 
 fn map_diagnostics_error(error: DiagnosticsFacadeError) -> EngineError {
@@ -100,7 +113,9 @@ fn map_diagnostics_error(error: DiagnosticsFacadeError) -> EngineError {
 
 fn map_copy_error(error: HostFileCopyError) -> EngineError {
     match error {
-        HostFileCopyError::SourceIo => internal_error(EXPORT_DIAGNOSTIC_LOGS_FAILED_CODE),
+        HostFileCopyError::LocalRead(_)
+        | HostFileCopyError::LocalWrite(_)
+        | HostFileCopyError::HostChunkInvalid => internal_error(EXPORT_DIAGNOSTIC_LOGS_FAILED_CODE),
         HostFileCopyError::Host(error) => match error.category() {
             HostCapabilityErrorCategory::InvalidHandle => EngineError::new(
                 EXPORT_DIAGNOSTIC_LOGS_INVALID_TARGET_CODE,
@@ -128,4 +143,30 @@ fn map_copy_error(error: HostFileCopyError) -> EngineError {
 
 fn internal_error(code: u32) -> EngineError {
     EngineError::new(code, EngineErrorCategory::Internal, false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_export_dir_creation_is_recorded_without_the_path_and_keeps_its_code() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let root = tempfile::tempdir().unwrap();
+        let blocker = root.path().join("PRIVATE_BLOCKER");
+        std::fs::write(&blocker, b"file").unwrap();
+
+        let error = create_export_dir(&blocker).unwrap_err();
+
+        assert_eq!(error.code(), EXPORT_DIAGNOSTIC_LOGS_FAILED_CODE);
+        assert_eq!(
+            logs.count("error_kind=\"temp_dir_create\""),
+            1,
+            "{}",
+            logs.output()
+        );
+        assert!(logs.output().contains("io_error_kind"), "{}", logs.output());
+        assert!(!logs.output().contains("PRIVATE"), "{}", logs.output());
+    }
 }

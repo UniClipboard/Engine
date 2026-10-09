@@ -191,14 +191,21 @@ impl SpaceAdmissionAggregate {
             }
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::RecoveryRequired(
                 state,
-            )) => PersistedSpaceAdmissionStateV1::RecoveryRequired(encode_recovery_category(
-                state.category,
-            )),
+            )) => match state.join_id {
+                Some(join_id) => PersistedSpaceAdmissionStateV1::RecoveryRequiredWithJoinId {
+                    category: encode_recovery_category(state.category),
+                    join_id: *join_id.as_bytes(),
+                },
+                // 只有重新打开一条没有捕获到 join_id 的历史记录、再原样保存时才会落到这里。
+                None => PersistedSpaceAdmissionStateV1::RecoveryRequired(encode_recovery_category(
+                    state.category,
+                )),
+            },
         };
         if self.format_version == SPACE_ADMISSION_RECORD_FORMAT_V2 {
             // V2 复用已验证的 V1 状态编码，并只为新增状态提供专属变体。
             let encoded_state = postcard::to_stdvec(&state)
-                .map_err(|_| SpaceAdmissionPersistenceError::InvalidEncoding)?;
+                .map_err(SpaceAdmissionPersistenceError::invalid_encoding_from)?;
             encode_record_v2(
                 self,
                 PersistedSpaceAdmissionStateV2::Existing(encoded_state),
@@ -210,14 +217,14 @@ impl SpaceAdmissionAggregate {
                 admission_id: *self.admission_id.as_bytes(),
                 state,
             })
-            .map_err(|_| SpaceAdmissionPersistenceError::InvalidEncoding)
+            .map_err(SpaceAdmissionPersistenceError::invalid_encoding_from)
         }
     }
 
     /// Reconstructs a validated aggregate from a decrypted persisted payload.
     pub fn decode_persisted(bytes: &[u8]) -> Result<Self, SpaceAdmissionPersistenceError> {
         let (format_version, _) = postcard::take_from_bytes::<u16>(bytes)
-            .map_err(|_| SpaceAdmissionPersistenceError::InvalidEncoding)?;
+            .map_err(SpaceAdmissionPersistenceError::invalid_encoding_from)?;
         if format_version == SPACE_ADMISSION_RECORD_FORMAT_V2 {
             return decode_record_v2(bytes);
         }
@@ -329,6 +336,18 @@ fn decode_record_v1(
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::RecoveryRequired(
                 SpaceAdmissionRecoveryRequiredTerminal {
                     category: decode_recovery_category(category)?,
+                    // 旧格式只保存了类别；没有 join_id 可以还原。
+                    join_id: None,
+                },
+            ))
+        }
+        PersistedSpaceAdmissionStateV1::RecoveryRequiredWithJoinId { category, join_id } => {
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::RecoveryRequired(
+                SpaceAdmissionRecoveryRequiredTerminal {
+                    category: decode_recovery_category(category)?,
+                    // 这个变体总是写在转换时成功捕获的 join_id；字节无效说明payload本身
+                    // 被破坏，必须报错而不是悄悄降级成"没有捕获到"的合法旧格式状态。
+                    join_id: Some(decode_join_id(join_id)?),
                 },
             ))
         }
@@ -359,7 +378,7 @@ fn encode_record_v2(
         attempt_digest: aggregate.attempt_digest,
         state,
     })
-    .map_err(|_| SpaceAdmissionPersistenceError::InvalidEncoding)
+    .map_err(SpaceAdmissionPersistenceError::invalid_encoding_from)
 }
 
 fn decode_record_v2(
@@ -367,9 +386,9 @@ fn decode_record_v2(
 ) -> Result<SpaceAdmissionAggregate, SpaceAdmissionPersistenceError> {
     let (persisted, remaining): (PersistedSpaceAdmissionRecordV2, _) =
         postcard::take_from_bytes(bytes)
-            .map_err(|_| SpaceAdmissionPersistenceError::InvalidEncoding)?;
+            .map_err(SpaceAdmissionPersistenceError::invalid_encoding_from)?;
     if !remaining.is_empty() {
-        return Err(SpaceAdmissionPersistenceError::InvalidEncoding);
+        return Err(SpaceAdmissionPersistenceError::invalid_encoding());
     }
     if persisted.format_version != SPACE_ADMISSION_RECORD_FORMAT_V2 {
         return Err(SpaceAdmissionPersistenceError::UnsupportedVersion);
@@ -378,6 +397,7 @@ fn decode_record_v2(
         .ok_or(SpaceAdmissionPersistenceError::InvalidState)?;
     let attempt_timeline =
         AdmissionAttemptTimeline::new(persisted.started_at_ms, persisted.expires_at_ms)
+            // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
             .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?;
     if persisted.attempt_digest == Some([0; 32]) {
         return Err(SpaceAdmissionPersistenceError::InvalidState);
@@ -386,9 +406,9 @@ fn decode_record_v2(
         PersistedSpaceAdmissionStateV2::Existing(encoded_state) => {
             let (state, remaining): (PersistedSpaceAdmissionStateV1, _) =
                 postcard::take_from_bytes(&encoded_state)
-                    .map_err(|_| SpaceAdmissionPersistenceError::InvalidEncoding)?;
+                    .map_err(SpaceAdmissionPersistenceError::invalid_encoding_from)?;
             if !remaining.is_empty() {
-                return Err(SpaceAdmissionPersistenceError::InvalidEncoding);
+                return Err(SpaceAdmissionPersistenceError::invalid_encoding());
             }
             let aggregate = decode_record_v1(PersistedSpaceAdmissionRecordV1 {
                 format_version: SPACE_ADMISSION_RECORD_FORMAT_V1,
@@ -529,7 +549,7 @@ fn decode_sponsor_abandonment_cleanup(
         PersistedSponsorAbandonmentCleanupV2::Known(binding) => {
             Ok(SponsorAbandonmentCleanup::Known(
                 AdmissionMemberBindingV2::decode_canonical(&binding)
-                    .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
+                    .map_err(SpaceAdmissionPersistenceError::InvalidMemberBinding)?,
             ))
         }
         PersistedSponsorAbandonmentCleanupV2::Unknown {
@@ -667,6 +687,7 @@ fn decode_cleanup_obligation(
         .local_space_transition
         .map(AdmissionSpaceTransition::from_bytes)
         .transpose()
+        // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
         .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?;
     let commit_knowledge = match persisted.commit_knowledge {
         0 if persisted.member_binding.is_none() => AdmissionCommitKnowledge::Unknown,
@@ -677,7 +698,7 @@ fn decode_cleanup_obligation(
         .member_binding
         .map(|encoded| AdmissionMemberBindingV2::decode_canonical(&encoded))
         .transpose()
-        .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?;
+        .map_err(SpaceAdmissionPersistenceError::InvalidMemberBinding)?;
     let peer_binding = AdmissionPeerBinding::new(
         AdmissionChannelPeerId::from_bytes(persisted.local_peer_id)
             .ok_or(SpaceAdmissionPersistenceError::InvalidState)?,
@@ -687,6 +708,7 @@ fn decode_cleanup_obligation(
     .ok_or(SpaceAdmissionPersistenceError::InvalidState)?;
     let continuation_credential =
         AdmissionContinuationCredential::from_bytes(persisted.continuation_credential)
+            // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
             .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?;
     Ok(AdmissionCleanupObligation {
         commit_knowledge,
@@ -761,7 +783,7 @@ fn decode_record_with_legacy_pending_exchange(
     }
 
     let (format_version, _) = postcard::take_from_bytes::<u16>(bytes)
-        .map_err(|_| SpaceAdmissionPersistenceError::InvalidEncoding)?;
+        .map_err(SpaceAdmissionPersistenceError::invalid_encoding_from)?;
     if format_version != SPACE_ADMISSION_RECORD_FORMAT_V1 {
         return Err(SpaceAdmissionPersistenceError::UnsupportedVersion);
     }
@@ -791,7 +813,7 @@ fn decode_record_with_legacy_pending_exchange(
         _ => false,
     };
     if !is_legacy_pending {
-        return Err(SpaceAdmissionPersistenceError::InvalidEncoding);
+        return Err(SpaceAdmissionPersistenceError::invalid_encoding());
     }
     Ok(persisted)
 }
@@ -800,9 +822,9 @@ fn decode_exact_record(
     bytes: &[u8],
 ) -> Result<PersistedSpaceAdmissionRecordV1, SpaceAdmissionPersistenceError> {
     let (persisted, remaining) = postcard::take_from_bytes(bytes)
-        .map_err(|_| SpaceAdmissionPersistenceError::InvalidEncoding)?;
+        .map_err(SpaceAdmissionPersistenceError::invalid_encoding_from)?;
     if !remaining.is_empty() {
-        return Err(SpaceAdmissionPersistenceError::InvalidEncoding);
+        return Err(SpaceAdmissionPersistenceError::invalid_encoding());
     }
     Ok(persisted)
 }

@@ -43,7 +43,7 @@ pub struct FileResourceView {
 pub enum ResourceFacadeError {
     #[error("resource not found")]
     NotFound,
-    #[error("resource mismatch: {0}")]
+    #[error("resource mismatch")]
     Mismatch(String),
     #[error("failed to resolve resource")]
     Internal(#[source] anyhow::Error),

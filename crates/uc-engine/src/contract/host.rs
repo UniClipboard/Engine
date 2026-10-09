@@ -1,3 +1,4 @@
+use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -17,10 +18,11 @@ pub enum HostCapabilityErrorCategory {
     Io,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct HostCapabilityError {
     category: HostCapabilityErrorCategory,
     detail: String,
+    source: Option<Arc<dyn Error + Send + Sync>>,
 }
 
 impl HostCapabilityError {
@@ -28,7 +30,14 @@ impl HostCapabilityError {
         Self {
             category,
             detail: detail.into(),
+            source: None,
         }
+    }
+
+    /// 保存宿主的具体来源供固定分类与安全诊断链读取；不得直接格式化来源正文。
+    pub fn with_source(mut self, source: Box<dyn Error + Send + Sync>) -> Self {
+        self.source = Some(Arc::from(source));
+        self
     }
 
     pub fn category(&self) -> HostCapabilityErrorCategory {
@@ -52,7 +61,20 @@ impl fmt::Display for HostCapabilityError {
     }
 }
 
-impl std::error::Error for HostCapabilityError {}
+impl Error for HostCapabilityError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.source.as_deref().map(|source| source as &dyn Error)
+    }
+}
+
+// 相等比较保留既有宿主分类与说明语义；诊断来源不参与值比较。
+impl PartialEq for HostCapabilityError {
+    fn eq(&self, other: &Self) -> bool {
+        self.category == other.category && self.detail == other.detail
+    }
+}
+
+impl Eq for HostCapabilityError {}
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct HostDirectories {
@@ -250,10 +272,11 @@ pub struct HostCapabilities {
     directories: HostDirectories,
     pub(crate) secure_storage: Arc<dyn HostSecureStorage>,
     clipboard: Box<dyn HostClipboard>,
-    files: Box<dyn HostFileAccess>,
+    files: Arc<dyn HostFileAccess>,
     analytics: HostAnalyticsCapabilities,
 }
 
+#[derive(Clone)]
 pub(crate) struct HostAnalyticsCapabilities {
     pub(crate) sink: Arc<dyn AnalyticsPort>,
     pub(crate) identity: Arc<dyn AnalyticsIdentityPort>,
@@ -279,8 +302,25 @@ impl HostCapabilities {
             directories,
             secure_storage: Arc::from(secure_storage),
             clipboard,
-            files,
+            files: Arc::from(files),
             analytics: HostAnalyticsCapabilities::default(),
+        }
+    }
+
+    /// 用已共享的能力重新组装一份宿主能力；同一进程内重建运行期时复用宿主已交出的实现。
+    pub(crate) fn from_shared_parts(
+        directories: HostDirectories,
+        secure_storage: Arc<dyn HostSecureStorage>,
+        clipboard: Box<dyn HostClipboard>,
+        files: Arc<dyn HostFileAccess>,
+        analytics: HostAnalyticsCapabilities,
+    ) -> Self {
+        Self {
+            directories,
+            secure_storage,
+            clipboard,
+            files,
+            analytics,
         }
     }
 
@@ -322,7 +362,7 @@ impl HostCapabilities {
         HostDirectories,
         Arc<dyn HostSecureStorage>,
         Box<dyn HostClipboard>,
-        Box<dyn HostFileAccess>,
+        Arc<dyn HostFileAccess>,
         HostAnalyticsCapabilities,
     ) {
         (

@@ -4,20 +4,36 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     HistoricalMembershipSignatureError, HistoricalMembershipSignatureVerifier, MemberInstanceId,
-    MembershipBranchId, MembershipConflictId, MembershipConflictPolicy, VersionedMembershipHistory,
+    MembershipBranchId, MembershipConflictId, MembershipConflictPolicy, MembershipHistoryV2Error,
+    VersionedMembershipHistory,
 };
 
 pub const MEMBERSHIP_BRANCH_RECOVERY_PACKAGE_FORMAT_V1: u16 = 1;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MembershipBranchRecoveryError {
     InvalidPackage,
     Expired,
     WrongRecipient,
     WrongConflict,
     WrongBranch,
-    InvalidHistory,
+    /// 历史字节无法还原时保留历史错误作为来源；其余校验失败没有下层错误。
+    InvalidHistory {
+        source: Option<MembershipHistoryV2Error>,
+    },
     Unauthorized,
+}
+
+impl MembershipBranchRecoveryError {
+    pub fn invalid_history() -> Self {
+        Self::InvalidHistory { source: None }
+    }
+
+    pub fn invalid_history_from(source: MembershipHistoryV2Error) -> Self {
+        Self::InvalidHistory {
+            source: Some(source),
+        }
+    }
 }
 
 impl fmt::Display for MembershipBranchRecoveryError {
@@ -28,13 +44,22 @@ impl fmt::Display for MembershipBranchRecoveryError {
             Self::WrongRecipient => "membership branch recovery recipient does not match",
             Self::WrongConflict => "membership branch recovery conflict does not match",
             Self::WrongBranch => "membership branch recovery target does not match",
-            Self::InvalidHistory => "membership branch recovery history is invalid",
+            Self::InvalidHistory { .. } => "membership branch recovery history is invalid",
             Self::Unauthorized => "membership branch recovery authorization is invalid",
         })
     }
 }
 
-impl std::error::Error for MembershipBranchRecoveryError {}
+impl std::error::Error for MembershipBranchRecoveryError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidHistory {
+                source: Some(source),
+            } => Some(source),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MembershipBranchRecoveryPackageV1 {
@@ -155,11 +180,10 @@ impl MembershipBranchRecoveryPackageV1 {
             &self.target_membership_history,
             verifier,
         )
-        // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
-        .map_err(|_| MembershipBranchRecoveryError::InvalidHistory)?;
+        .map_err(MembershipBranchRecoveryError::invalid_history_from)?;
         if !MembershipConflictPolicy::matches_persisted_branch(&history, self.target_branch_id)
-            // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
-            .map_err(|_| MembershipBranchRecoveryError::InvalidHistory)?
+            // discarded-source[in-memory-encoding]: postcard encoding of already validated in-memory data, failure is a serializer defect and the error value only carries a fixed kind
+            .map_err(|_| MembershipBranchRecoveryError::invalid_history())?
         {
             return Err(MembershipBranchRecoveryError::WrongBranch);
         }

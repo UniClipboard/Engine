@@ -2,11 +2,10 @@
 
 use crate::error_codes::*;
 
-use tracing::error;
 use uc_application::facade::{
     ProfileFactoryResetError, ProfileFactoryResetFacade, ProfileFactoryResetRequest,
 };
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_error};
 
 use crate::{EngineError, EngineErrorCategory, OperationResult};
 
@@ -23,14 +22,17 @@ pub async fn execute_factory_reset_space(
 pub(crate) fn map_profile_factory_reset_error(error: ProfileFactoryResetError) -> EngineError {
     let code = match error {
         ProfileFactoryResetError::StopRuntime { .. } => FACTORY_RESET_UNAVAILABLE_CODE,
-        ProfileFactoryResetError::WipeKeys { .. } => FACTORY_RESET_KEY_MATERIAL_FAILED_CODE,
+        ProfileFactoryResetError::WipeKeys { .. }
+        | ProfileFactoryResetError::RetireUpgradeBackupSecurity { .. } => {
+            FACTORY_RESET_KEY_MATERIAL_FAILED_CODE
+        }
         ProfileFactoryResetError::ClearState { .. } => FACTORY_RESET_STORAGE_FAILED_CODE,
         ProfileFactoryResetError::Lifecycle(_)
         | ProfileFactoryResetError::Repository(_)
         | ProfileFactoryResetError::LifecycleMissing => FACTORY_RESET_FAILED_CODE,
     };
-    error!(
-        code,
+    uc_error!(
+        code = code,
         error_kind = "factory_reset",
         io_error_kind = io_error_kind(&error),
         "factory reset space failed"

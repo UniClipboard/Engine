@@ -42,7 +42,7 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, instrument, warn};
+use tracing::instrument;
 
 use uc_core::clipboard::ClipboardContentCategorySet;
 use uc_core::ids::DeviceId;
@@ -50,7 +50,9 @@ use uc_core::ports::clipboard::{ActiveClipboardDispatchPort, LoadActiveClipboard
 use uc_core::ports::peer_reachability::{PeerReachabilityChanged, ReachabilityState};
 use uc_core::ports::PeerReachabilityPort;
 use uc_core::MemberRepositoryPort;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_id, uc_debug, uc_info, uc_warn,
+};
 
 use crate::deps::CurrentSpaceMemberScopePort;
 
@@ -113,7 +115,7 @@ impl PeerOnlineResyncWorker {
             let first = match first {
                 Some(device) => device,
                 None => {
-                    info!("peer-online resync worker: presence subscription closed; exiting");
+                    uc_info!("peer-online resync worker: presence subscription closed; exiting");
                     return;
                 }
             };
@@ -163,7 +165,10 @@ impl PeerOnlineResyncWorker {
                 Err(broadcast::error::RecvError::Lagged(missed)) => {
                     // A missed online transition self-heals: peer_reachability
                     // re-emits, or the peer's own resync reaches us.
-                    warn!(missed, "peer-online resync: presence receiver lagged");
+                    uc_warn!(
+                        missed = missed,
+                        "peer-online resync: presence receiver lagged"
+                    );
                     continue;
                 }
                 Err(broadcast::error::RecvError::Closed) => return None,
@@ -186,11 +191,11 @@ impl PeerOnlineResyncWorker {
         let state = match self.load_register.load().await {
             Ok(Some(state)) => state,
             Ok(None) => {
-                debug!("peer-online resync: register empty; nothing to resend");
+                uc_debug!("peer-online resync: register empty; nothing to resend");
                 return;
             }
             Err(err) => {
-                warn!(
+                uc_warn!(
                     error_kind = "register_load",
                     io_error_kind = io_error_kind(&err),
                     "peer-online resync skipped: register load failed"
@@ -206,10 +211,10 @@ impl PeerOnlineResyncWorker {
         let categories = match self.reconstructor.reconstruct(&state.entry_id).await {
             Ok(snapshot) => ClipboardContentCategorySet::from_snapshot(&snapshot),
             Err(err) => {
-                warn!(
+                uc_warn!(
                     error_kind = "snapshot_reconstruct",
                     io_error_kind = io_error_kind(&err),
-                    entry_id = %state.entry_id,
+                    entry_id = log_id(&state.entry_id),
                     "peer-online resync skipped: snapshot reconstruct failed"
                 );
                 return;
@@ -218,7 +223,14 @@ impl PeerOnlineResyncWorker {
 
         let scope = match self.peer_scope.snapshot().await {
             Ok(scope) => scope,
-            Err(_) => return,
+            Err(err) => {
+                uc_warn!(
+                    error_kind = "peer_scope_unavailable",
+                    io_error_kind = io_error_kind(&err),
+                    "peer-online resync skipped: current peer scope unavailable"
+                );
+                return;
+            }
         };
         for target in targets {
             // Never resend the state to the device that activated it: it is
@@ -363,6 +375,17 @@ mod tests {
         }
         async fn remove(&self, _device_id: &DeviceId) -> Result<bool, MembershipError> {
             Ok(false)
+        }
+    }
+
+    struct UnavailablePeerScope;
+
+    #[async_trait]
+    impl CurrentSpaceMemberScopePort for UnavailablePeerScope {
+        async fn snapshot(&self) -> Result<CurrentSpaceMemberScope, CurrentSpaceMemberScopeError> {
+            Err(CurrentSpaceMemberScopeError::RecoveryRequired {
+                source: Some(anyhow::Error::new(std::io::Error::other("PRIVATE_SCOPE"))),
+            })
         }
     }
 
@@ -575,6 +598,36 @@ mod tests {
         assert_eq!(sent.len(), 1, "the online peer gets exactly one resync");
         assert_eq!(sent[0], ("peer-1".to_string(), "blake3v1:aa".to_string()));
         drop(sent);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn unavailable_peer_scope_skips_the_resync_and_is_recorded() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let (peer_reachability, peer_reachability_tx) = FakePeerReachability::new();
+        let dispatch = Arc::new(DispatchSpy::default());
+        let worker = PeerOnlineResyncWorker::new(
+            peer_reachability,
+            Arc::new(FixedRegister(Some(state("blake3v1:aa", "self")))),
+            reconstructor(),
+            Arc::clone(&dispatch) as Arc<dyn ActiveClipboardDispatchPort>,
+            Arc::new(UnavailablePeerScope),
+            Arc::new(AllowAllMembers),
+        );
+        let handle = worker.spawn();
+        tokio::task::yield_now().await;
+
+        peer_reachability_tx.send(online("peer-1")).unwrap();
+        tokio::time::sleep(past_window()).await;
+
+        assert!(dispatch.sent.lock().unwrap().is_empty());
+        assert_eq!(logs.count("current peer scope unavailable"), 1);
+        assert!(logs
+            .output()
+            .contains("error_kind=\"peer_scope_unavailable\""));
+        assert!(logs.output().contains("io_error_kind=Other"));
+        assert!(!logs.output().contains("PRIVATE"));
         handle.abort();
     }
 

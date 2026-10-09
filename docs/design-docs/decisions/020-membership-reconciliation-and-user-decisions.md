@@ -84,7 +84,7 @@ UniClipboard 的个人设备会休眠、关机、断网或永久丢失。设备�
 Component: WorkspaceConvergence
 Path: crates/uc-application/src/space/convergence/
 Responsibility: 成员加入、移除、重新加入、交接、恢复、查询和通知的唯一流程负责人。
-Relationship: 调用 uc-core 规则和 uc-infra 能力，由 uc-engine 组装；产品端不得编排核对步骤。
+Relationship: 调用 uc-core 规则和 uc-infra-* 能力，由 uc-engine 组装；产品端不得编排核对步骤。
 ```
 
 ```text
@@ -96,7 +96,7 @@ Relationship: 不创建网络连接，不安排后台任务，不依赖具体持
 
 ```text
 Component: Infrastructure adapters
-Path: crates/uc-infra/src/
+Path: crates/uc-infra-*/src/
 Responsibility: 加密持久化、已认证 P2P 传输、OpenMLS 安全状态和地址解析。
 Relationship: 提供能力，不决定自动应用、等待用户、分叉或移除。
 ```
@@ -407,7 +407,7 @@ Relationship: 不保存第二份成员状态，不逐消息编排核对协议。
 
 ### Step 3：接入已认证 P2P 消息
 
-- **File**：`crates/uc-infra/src/`
+- **File**：`crates/uc-infra-p2p/src/`
 - **Change**：实现有界问候、摘要、事件请求/响应、决定和确认；复用已认证连接身份，不重复发送公钥。
 - **Risk**：无界历史和并发上线可消耗资源，必须限制条数、字节、并发和无效请求次数。
 

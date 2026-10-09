@@ -1,4 +1,4 @@
-use std::sync::{mpsc, Arc, Barrier};
+use std::sync::{mpsc, Arc, Barrier, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -7,11 +7,12 @@ use super::{
     MemoryHost, MobileEngine, ENGINE_SHUTDOWN_DEADLINE_MS,
 };
 
+#[derive(Clone)]
 pub(super) struct ReadGate {
     pub(super) key_prefix: &'static str,
     pub(super) matches_before_wait: usize,
     pub(super) entered: mpsc::Sender<()>,
-    pub(super) release: mpsc::Receiver<()>,
+    pub(super) release: Arc<(Mutex<bool>, Condvar)>,
 }
 
 impl ReadGate {
@@ -27,15 +28,22 @@ impl ReadGate {
     }
 
     pub(super) fn wait(self) {
+        let (released, changed) = self.release.as_ref();
+        let released = lock(released);
+        if *released {
+            return;
+        }
         self.entered.send(()).unwrap();
-        let _ = self.release.recv_timeout(Duration::from_secs(15));
+        let (released, _) = changed
+            .wait_timeout_while(released, Duration::from_secs(15), |released| !*released)
+            .unwrap();
+        assert!(*released, "secure storage gate was not released");
     }
 }
 
 #[test]
 fn a_pause_reaches_the_engine_while_the_previous_mobile_resume_is_waiting() {
-    // The first KEK read opens the encrypted profile-secret file. The second
-    // restores the space session used by the previous mobile runtime.
+    // 首次 KEK 读取打开资料密文；后续会话恢复及成员维护可能并发再次读取。
     pause_during_key_read("kek:v1:", 1);
 }
 
@@ -64,12 +72,12 @@ fn pause_during_key_read(key_prefix: &'static str, matches_before_wait: usize) {
         .unwrap();
     engine.suspend().unwrap();
     let (entered, waiting) = mpsc::channel();
-    let (release, proceed) = mpsc::channel();
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
     *lock(&host.secure_read_gate) = Some(ReadGate {
         key_prefix,
         matches_before_wait,
         entered,
-        release: proceed,
+        release: release.clone(),
     });
     let resuming = thread::spawn({
         let engine = engine.clone();
@@ -79,14 +87,25 @@ fn pause_during_key_read(key_prefix: &'static str, matches_before_wait: usize) {
     let suspend_started = Instant::now();
     assert!(engine.suspend_with_deadline(0).is_err());
     assert!(suspend_started.elapsed() < Duration::from_secs(1));
-    release.send(()).unwrap();
-    assert!(matches!(
-        resuming.join().unwrap(),
-        Err(BindingError::Engine {
-            category: BindingErrorCategory::InvalidState,
-            ..
-        })
-    ));
+    // 零期限只保证通知已入队；同一生命周期通道的查询返回后，暂停才已转交 Engine。
+    // 密钥读取继续保持阻塞，确保这里验证的是暂停打断恢复，而非两者抢跑。
+    assert_eq!(
+        engine.lifecycle_state().unwrap(),
+        BindingEngineState::Quiesced
+    );
+    *lock(&release.0) = true;
+    release.1.notify_all();
+    let resume_result = resuming.join().unwrap();
+    assert!(
+        matches!(
+            resume_result,
+            Err(BindingError::Engine {
+                category: BindingErrorCategory::InvalidState,
+                ..
+            })
+        ),
+        "unexpected resume result: {resume_result:?}"
+    );
     engine
         .suspend_with_deadline(ENGINE_SHUTDOWN_DEADLINE_MS)
         .unwrap();

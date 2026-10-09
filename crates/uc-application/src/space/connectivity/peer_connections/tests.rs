@@ -2,6 +2,7 @@ use super::*;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::broadcast;
 use uc_core::ports::{PeerReachabilityChanged, PeerReachabilityError};
+use uc_testkit::log_capture::CapturedLogs;
 
 struct Scope {
     peers: Mutex<Vec<DeviceId>>,
@@ -879,4 +880,85 @@ async fn incoming_success_does_not_strand_a_queued_manual_refresh() {
         .unwrap();
     assert_eq!((report.total, report.online, report.errors), (5, 5, 0));
     owner.shutdown().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn scope_failures_are_recorded_once_per_streak_and_recovery_is_recorded() {
+    let logs = CapturedLogs::default();
+    let _guard = logs.install();
+    let (owner, scope, _) = fixture();
+    scope.unavailable.store(true, Ordering::SeqCst);
+    owner.start().await;
+    settle().await;
+    for _ in 0..3 {
+        tokio::time::advance(Duration::from_secs(61)).await;
+        settle().await;
+    }
+    assert_eq!(logs.count("peer connection scope reconcile failed"), 1);
+    assert!(logs.output().contains("error_kind=\"scope_unavailable\""));
+
+    scope.unavailable.store(false, Ordering::SeqCst);
+    tokio::time::advance(Duration::from_secs(61)).await;
+    settle().await;
+    assert_eq!(logs.count("peer connection scope recovered"), 1);
+    owner.shutdown().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_manual_refresh_records_only_its_error_class() {
+    let logs = CapturedLogs::default();
+    let _guard = logs.install();
+    let (owner, scope, _) = fixture();
+    scope.unavailable.store(true, Ordering::SeqCst);
+    owner.start().await;
+    settle().await;
+
+    let error = owner.refresh().await.unwrap_err();
+
+    assert!(matches!(error, PeerConnectionError::Scope(_)));
+    let output = logs.output();
+    assert_eq!(
+        logs.count("peer reachability refresh failed"),
+        1,
+        "{output}"
+    );
+    assert!(output.contains("error_kind=\"refresh\""), "{output}");
+    assert!(output.contains("error_class=\"scope\""), "{output}");
+    assert!(
+        output.contains("operation=\"refresh_peer_reachability\""),
+        "{output}"
+    );
+    owner.shutdown().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn refreshing_a_closed_or_paused_coordinator_is_a_rejection_not_a_failure() {
+    let logs = CapturedLogs::default();
+    let _guard = logs.install();
+    let (owner, _, _) = fixture();
+    owner.start().await;
+    owner.pause().await.unwrap();
+    assert!(matches!(
+        owner.refresh().await,
+        Err(PeerConnectionError::Paused)
+    ));
+    owner.shutdown().await.unwrap();
+    assert!(matches!(
+        owner.refresh().await,
+        Err(PeerConnectionError::Closed)
+    ));
+
+    let output = logs.output();
+    assert_eq!(
+        logs.count("peer reachability refresh rejected"),
+        2,
+        "{output}"
+    );
+    assert!(output.contains("error_class=\"paused\""), "{output}");
+    assert!(output.contains("error_class=\"closed\""), "{output}");
+    assert_eq!(
+        logs.count("peer reachability refresh failed"),
+        0,
+        "{output}"
+    );
 }

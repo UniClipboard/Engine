@@ -36,18 +36,22 @@
 //!
 //! Hard invariants (D8): this **never writes the OS clipboard** and **never
 //! broadcasts**. It only repairs the local register's relationship to reality.
-//! 存储或 OS 读取失败会阻止 Clipboard runtime 启动。只有确认 register
+//! OS 读取失败时清除无法确认的 register；存储加载或清除失败仍阻止 runtime 启动。只有确认 register
 //! 为空、仍然匹配，或已成功清除 stale/corrupt 状态后，相关 worker 才能启动。
 
 use std::sync::Arc;
 
 use thiserror::Error;
-use tracing::{debug, info, instrument};
+use tracing::instrument;
 
+use uc_core::error_class::ErrorClass;
 use uc_core::ports::clipboard::{
-    LoadActiveClipboardPort, ResetActiveClipboardPort, SystemClipboardPort,
+    ActiveClipboardRegisterError, LoadActiveClipboardPort, ResetActiveClipboardPort,
+    SystemClipboardPort,
 };
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_id, uc_debug, uc_info, uc_warn,
+};
 
 use super::super::snapshot_from_entry::SnapshotReconstructor;
 
@@ -69,17 +73,12 @@ pub enum ReconcileActiveClipboardError {
     #[error("failed to load active clipboard register")]
     LoadRegister {
         #[source]
-        source: uc_core::ports::clipboard::ActiveClipboardRegisterError,
-    },
-    #[error("failed to read the system clipboard during active reconciliation")]
-    ReadSystemClipboard {
-        #[source]
-        source: anyhow::Error,
+        source: ActiveClipboardRegisterError,
     },
     #[error("failed to reset an untrusted active clipboard register")]
     ResetRegister {
         #[source]
-        source: uc_core::ports::clipboard::ActiveClipboardRegisterError,
+        source: ActiveClipboardRegisterError,
     },
 }
 
@@ -110,8 +109,7 @@ impl ReconcileActiveClipboardStateUseCase {
         }
     }
 
-    /// Run one reconcile pass. I/O failures are startup gates; workers must not
-    /// observe or broadcast an unverified register.
+    /// 启动核对必须先确认或清除 register；存储失败不能绕过该门禁。
     #[instrument(name = "active_state.reconcile", skip_all)]
     pub(crate) async fn run(&self) -> Result<ReconcileOutcome, ReconcileActiveClipboardError> {
         // Load the persisted baseline first. An empty register already satisfies
@@ -120,10 +118,18 @@ impl ReconcileActiveClipboardStateUseCase {
         let stored = match self.load_register.load().await {
             Ok(Some(state)) => state,
             Ok(None) => {
-                debug!("active state reconcile: register empty; nothing to reconcile");
+                uc_debug!("active state reconcile: register empty; nothing to reconcile");
                 return Ok(ReconcileOutcome::AlreadyEmpty);
             }
-            Err(source) => return Err(ReconcileActiveClipboardError::LoadRegister { source }),
+            Err(source) => {
+                uc_warn!(
+                    error_kind = "active_clipboard_register_load",
+                    error_class = source.class(),
+                    error = &source as &dyn std::error::Error,
+                    "active state reconcile: register load failed; startup remains blocked"
+                );
+                return Err(ReconcileActiveClipboardError::LoadRegister { source });
+            }
         };
 
         // Rebuild the entry the row points at into the snapshot a restore would
@@ -137,10 +143,10 @@ impl ReconcileActiveClipboardStateUseCase {
         let reconstructed_hash = match self.reconstructor.reconstruct(&stored.entry_id).await {
             Ok(snapshot) => snapshot.snapshot_hash().to_string(),
             Err(err) => {
-                info!(
+                uc_info!(
                     error_kind = "snapshot_reconstruct",
                     io_error_kind = io_error_kind(&err),
-                    entry_id = %stored.entry_id,
+                    entry_id = log_id(&stored.entry_id),
                     "active state reconcile: stored entry not reconstructable; clearing as untrusted"
                 );
                 self.clear().await?;
@@ -154,26 +160,27 @@ impl ReconcileActiveClipboardStateUseCase {
         let os_hash = match self.system_clipboard.read_snapshot() {
             Ok(snapshot) => snapshot.snapshot_hash().to_string(),
             Err(source) => {
-                return Err(ReconcileActiveClipboardError::ReadSystemClipboard { source })
+                uc_warn!(
+                    error_kind = "active_clipboard_os_read",
+                    io_error_kind = io_error_kind(source.as_ref()),
+                    error = source.as_ref(),
+                    "active state reconcile: OS clipboard unreadable; clearing untrusted register"
+                );
+                self.clear().await?;
+                return Ok(ReconcileOutcome::Cleared);
             }
         };
 
         if reconstructed_hash == os_hash {
             // The reconstructed entry still matches the OS clipboard: the
             // invariant holds, keep the row as the baseline.
-            debug!(
-                snapshot_hash = %stored.snapshot_hash,
-                "active state reconcile: stored register matches OS clipboard; kept"
-            );
+            uc_debug!("active state reconcile: stored register matches OS clipboard; kept");
             Ok(ReconcileOutcome::Kept)
         } else {
             // Stale/untrusted: the OS clipboard holds different content (or is
             // empty) than the row's entry reconstructs to. Clear so the row can
             // neither win LWW against a real later activation nor be resynced.
-            info!(
-                stored_hash = %stored.snapshot_hash,
-                reconstructed_hash = %reconstructed_hash,
-                os_hash = %os_hash,
+            uc_info!(
                 "active state reconcile: stored register does not match OS clipboard; clearing"
             );
             self.clear().await?;
@@ -182,10 +189,15 @@ impl ReconcileActiveClipboardStateUseCase {
     }
 
     async fn clear(&self) -> Result<(), ReconcileActiveClipboardError> {
-        self.reset_register
-            .reset()
-            .await
-            .map_err(|source| ReconcileActiveClipboardError::ResetRegister { source })
+        self.reset_register.reset().await.map_err(|source| {
+            uc_warn!(
+                error_kind = "active_clipboard_register_reset",
+                error_class = source.class(),
+                error = &source as &dyn std::error::Error,
+                "active state reconcile: register reset failed; startup remains blocked"
+            );
+            ReconcileActiveClipboardError::ResetRegister { source }
+        })
     }
 }
 
@@ -489,17 +501,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unreadable_os_clipboard_blocks_startup_without_mutating_register() {
+    async fn unreadable_os_clipboard_clears_untrusted_register_before_startup() {
         let (uc, reset) = build(
             FakeClipboard::ReadError,
             Some(state_matching("stored")),
             Some("stored"),
         );
-        assert!(matches!(
-            uc.run().await,
-            Err(ReconcileActiveClipboardError::ReadSystemClipboard { .. })
-        ));
-        assert_eq!(reset.calls.load(Ordering::SeqCst), 0);
+        assert!(matches!(uc.run().await, Ok(ReconcileOutcome::Cleared)));
+        assert_eq!(reset.calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

@@ -30,6 +30,7 @@ impl PersistedJoinerResolvingInvitationV1 {
             PersistedInvitationResolutionV1::Ready { short_code } => {
                 SpaceAdmissionInvitationResolutionState::Ready {
                     short_code: AdmissionShortInvitationCode::from_bytes(short_code)
+                        // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                         .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
                 }
             }
@@ -42,8 +43,10 @@ impl PersistedJoinerResolvingInvitationV1 {
                 .ok_or(SpaceAdmissionPersistenceError::InvalidState)?,
             local_join_ordinal: self.local_join_ordinal,
             source_snapshot: AdmissionSourceSnapshot::from_bytes(self.source_snapshot)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             start_context: AdmissionJoinerStartContext::from_bytes(self.start_context)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             resolution,
         })
@@ -71,10 +74,13 @@ impl PersistedJoinerResolvedInvitationV1 {
                 .ok_or(SpaceAdmissionPersistenceError::InvalidState)?,
             local_join_ordinal: self.local_join_ordinal,
             source_snapshot: AdmissionSourceSnapshot::from_bytes(self.source_snapshot)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             start_context: AdmissionJoinerStartContext::from_bytes(self.start_context)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             full_invitation: FullInvitation::new(self.full_invitation)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
         })
     }

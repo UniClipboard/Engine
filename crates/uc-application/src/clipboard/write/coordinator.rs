@@ -21,13 +21,15 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::spawn_blocking;
 use tracing::Instrument;
-use tracing::{error, info, info_span, warn, Span};
+use tracing::{info_span, Span};
 
 use uc_core::clipboard::SystemClipboardSnapshot;
 use uc_core::ports::clipboard::{
     SelfWriteAttribution, SelfWriteLedgerPort, SelfWriteMatch, SystemClipboardPort,
 };
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_vocab_debug, uc_error, uc_info, uc_warn,
+};
 
 use super::timing::{LOCAL_ECHO_RTT_MAX, REMOTE_ECHO_RTT_MAX};
 
@@ -153,7 +155,7 @@ impl ClipboardWriteCoordinator {
                 let now = Instant::now();
                 if now >= until {
                     *guard = None;
-                    info!(
+                    uc_info!(
                         event = "circuit_recovered",
                         reason = "cooldown_elapsed",
                         "clipboard_write_coordinator: circuit breaker closed after cooldown"
@@ -180,7 +182,7 @@ impl ClipboardWriteCoordinator {
             let until = Instant::now() + self.cooldown;
             *self.circuit_open_until.lock().expect("poisoned") = Some(until);
             self.consecutive_failures.store(0, Ordering::Release);
-            warn!(
+            uc_warn!(
                 event = "circuit_tripped",
                 error_kind = "circuit_tripped",
                 consecutive_failures = new_count,
@@ -202,7 +204,7 @@ impl ClipboardWriteCoordinator {
         let prev = self.consecutive_failures.swap(0, Ordering::AcqRel);
         if prev > 0 {
             *self.circuit_open_until.lock().expect("poisoned") = None;
-            info!(
+            uc_info!(
                 event = "circuit_recovered",
                 reason = "success_after_failure",
                 recovered_after_failures = prev,
@@ -277,12 +279,11 @@ impl ClipboardWriteCoordinator {
         // watcher won't fire, so leftover guards would just mis-attribute
         // a future unrelated change.
         if let Some(remaining) = self.circuit_check() {
-            warn!(
+            uc_warn!(
                 event = "circuit_open_skip",
                 error_kind = "circuit_open",
                 remaining_secs = remaining.as_secs(),
-                intent = ?intent,
-                origin_guard_key = %origin_guard_key,
+                intent = log_vocab_debug(&intent),
                 "clipboard_write_coordinator: circuit breaker open — skipping OS write"
             );
             anyhow::bail!(
@@ -337,15 +338,14 @@ impl ClipboardWriteCoordinator {
                 // immediately whether this is the Nth failure in a row.
                 let consecutive_failures = self.record_failure();
                 let circuit_tripped = consecutive_failures >= CIRCUIT_FAILURE_THRESHOLD;
-                error!(
+                uc_error!(
                     event = "os_write_failed",
                     error_kind = "os_write_failed",
                     io_error_kind = io_error_kind(err.as_ref()),
-                    intent = ?intent,
-                    origin_guard_key = %origin_guard_key,
-                    consecutive_failures,
+                    intent = log_vocab_debug(&intent),
+                    consecutive_failures = consecutive_failures,
                     threshold = CIRCUIT_FAILURE_THRESHOLD,
-                    circuit_tripped,
+                    circuit_tripped = circuit_tripped,
                     "clipboard_write_coordinator: OS clipboard write failed"
                 );
                 return Err(err);

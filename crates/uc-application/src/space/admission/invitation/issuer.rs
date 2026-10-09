@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use tracing::warn;
+
 use uc_core::membership::MembershipAdmissionDecision;
 use uc_core::pairing::invitation::PairingInvitation;
 use uc_core::ports::pairing_invitation::{CodeOrigin, InvitationError, IssuedInvitation};
@@ -15,6 +15,7 @@ use crate::space::facade::{
     InvitationAvailability, IssuePairingInvitationError, IssuePairingInvitationResult,
 };
 use crate::space::membership::QueryMembershipAdmissionPort;
+use uc_observability_contract::uc_warn;
 
 pub(crate) struct PairingInvitationIssuer {
     device_identity: Arc<dyn DeviceIdentityPort>,
@@ -106,7 +107,7 @@ impl PairingInvitationIssuer {
     fn now_utc(&self) -> Result<DateTime<Utc>, IssuePairingInvitationError> {
         let ms = self.clock.now_ms();
         DateTime::<Utc>::from_timestamp_millis(ms).ok_or_else(|| {
-            warn!(ms, "clock returned a timestamp outside chrono's range");
+            uc_warn!(ms = ms, "clock returned a timestamp outside chrono's range");
             IssuePairingInvitationError::Internal(anyhow::anyhow!(
                 "clock returned invalid timestamp"
             ))

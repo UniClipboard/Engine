@@ -22,7 +22,7 @@
 
 use std::sync::Arc;
 
-use tracing::{info, instrument, warn};
+use tracing::instrument;
 
 use uc_core::mobile_sync::{
     LanInterface, MintedCredentials, MobileClientType, MobileDevice, MobileDeviceError,
@@ -34,7 +34,7 @@ use uc_core::ports::{
 };
 use uc_core::settings::model::MobileSyncSettings;
 use uc_observability_contract::analytics::{AnalyticsPort, Event};
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_info, uc_warn};
 
 use super::list_lan_interfaces::may_advertise_interface;
 use uc_mobile_proto::{build_mobile_sync_connect_uri, ConnectUriError, ConnectUriOther};
@@ -290,7 +290,7 @@ impl RegisterMobileShortcutDeviceUseCase {
                 );
             }
             Err(err) if !candidates.is_empty() => {
-                warn!(
+                uc_warn!(
                     error_kind = "lan_interface_probe",
                     io_error_kind = io_error_kind(&err),
                     "lan interface probe failed; QR will only carry configured advertise entries"
@@ -310,8 +310,7 @@ impl RegisterMobileShortcutDeviceUseCase {
 
         // 截断不得静默（规格 §5.4）。
         if candidates.len() > MAX_ADVERTISE_URLS {
-            warn!(
-                dropped = candidates.len() - MAX_ADVERTISE_URLS,
+            uc_warn!(
                 max = MAX_ADVERTISE_URLS,
                 "advertise url candidates exceed cap; truncating"
             );
@@ -619,13 +618,10 @@ fn render_qr_code(content: &str) -> Result<(Vec<u8>, String), RegisterMobileShor
 
 fn translate_device_error(err: MobileDeviceError) -> RegisterMobileShortcutDeviceError {
     match err {
-        MobileDeviceError::AlreadyExists(id) => {
+        MobileDeviceError::AlreadyExists(_) => {
             // device_id 由 minter 一次性生成,碰撞理论上不可能;走到这里
             // 说明 minter 实现有缺陷 —— 提示运维 + 翻译为 persistence 错误。
-            warn!(
-                ?id,
-                "minter produced colliding device id; this should not happen"
-            );
+            uc_warn!("minter produced colliding device id; this should not happen");
             RegisterMobileShortcutDeviceError::PersistenceFailed(
                 "device id collision (minter contract violated)".into(),
             )
@@ -634,7 +630,7 @@ fn translate_device_error(err: MobileDeviceError) -> RegisterMobileShortcutDevic
             // 自动模式下 minter 8 hex 碰撞概率极低;custom 模式下我们已
             // 在 save 之前 check 过 find_by_username,这里只可能是 race
             // (并发 register)—— 翻译为 UsernameTaken 让 UI 提示用户换名。
-            info!("username collision at save time (likely concurrent register race)");
+            uc_info!("username collision at save time (likely concurrent register race)");
             RegisterMobileShortcutDeviceError::UsernameTaken(
                 "username taken at save time (concurrent registration)".to_string(),
             )

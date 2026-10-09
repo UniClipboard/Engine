@@ -49,6 +49,7 @@ pub enum OperationKind {
     QueryNetworkRecoveryStatus,
     QuerySettings,
     QueryCustomRelays,
+    QueryRelayOverview,
     MutateCustomRelay,
     UpdateSettings,
     SaveRelay,
@@ -95,6 +96,8 @@ pub enum OperationKind {
     QueryMembershipDiagnostics,
     QuerySpaceProtection,
     SearchEntries,
+    CountSearchEntries,
+    QueryDailyEntryCounts,
     QuerySearchTags,
     QuerySearchStatus,
     RebuildSearchIndex,
@@ -106,6 +109,14 @@ pub enum OperationKind {
     GetHistoryEntry,
     DeleteHistoryEntry,
     SetHistoryEntryFavorite,
+    ListHistoryTags,
+    CreateHistoryTag,
+    RenameHistoryTag,
+    AddHistoryTagToEntries,
+    RemoveHistoryTagFromEntries,
+    SummarizeHistoryEntryTags,
+    MergeHistoryTags,
+    DeleteHistoryTag,
     QueryHistoryStats,
     GetHistoryEntryResource,
     ReadBlob,
@@ -152,6 +163,7 @@ impl fmt::Display for OperationKind {
             Self::QueryNetworkRecoveryStatus => "query_network_recovery_status",
             Self::QuerySettings => "query_settings",
             Self::QueryCustomRelays => "query_custom_relays",
+            Self::QueryRelayOverview => "query_relay_overview",
             Self::MutateCustomRelay => "mutate_custom_relay",
             Self::UpdateSettings => "update_settings",
             Self::SaveRelay => "save_relay",
@@ -198,6 +210,8 @@ impl fmt::Display for OperationKind {
             Self::QueryMembershipDiagnostics => "query_membership_diagnostics",
             Self::QuerySpaceProtection => "query_space_protection",
             Self::SearchEntries => "search_entries",
+            Self::CountSearchEntries => "count_search_entries",
+            Self::QueryDailyEntryCounts => "query_daily_entry_counts",
             Self::QuerySearchTags => "query_search_tags",
             Self::QuerySearchStatus => "query_search_status",
             Self::RebuildSearchIndex => "rebuild_search_index",
@@ -209,6 +223,14 @@ impl fmt::Display for OperationKind {
             Self::GetHistoryEntry => "get_history_entry",
             Self::DeleteHistoryEntry => "delete_history_entry",
             Self::SetHistoryEntryFavorite => "set_history_entry_favorite",
+            Self::ListHistoryTags => "list_history_tags",
+            Self::CreateHistoryTag => "create_history_tag",
+            Self::RenameHistoryTag => "rename_history_tag",
+            Self::AddHistoryTagToEntries => "add_history_tag_to_entries",
+            Self::RemoveHistoryTagFromEntries => "remove_history_tag_from_entries",
+            Self::SummarizeHistoryEntryTags => "summarize_history_entry_tags",
+            Self::MergeHistoryTags => "merge_history_tags",
+            Self::DeleteHistoryTag => "delete_history_tag",
             Self::QueryHistoryStats => "query_history_stats",
             Self::GetHistoryEntryResource => "get_history_entry_resource",
             Self::ReadBlob => "read_blob",
@@ -299,6 +321,7 @@ pub enum Operation {
     QueryNetworkRecoveryStatus,
     QuerySettings,
     QueryCustomRelays,
+    QueryRelayOverview,
     MutateCustomRelay(CustomRelayMutation),
     UpdateSettings(Box<SettingsPatch>),
     SaveRelay(Box<SaveRelayInput>),
@@ -345,6 +368,8 @@ pub enum Operation {
     QueryMembershipDiagnostics,
     QuerySpaceProtection,
     SearchEntries(SearchEntriesInput),
+    CountSearchEntries(CountSearchEntriesInput),
+    QueryDailyEntryCounts(DailyEntryCountsInput),
     QuerySearchTags,
     QuerySearchStatus,
     RebuildSearchIndex,
@@ -356,6 +381,14 @@ pub enum Operation {
     GetHistoryEntry(HistoryEntryInput),
     DeleteHistoryEntry(HistoryEntryInput),
     SetHistoryEntryFavorite(SetHistoryEntryFavoriteInput),
+    ListHistoryTags,
+    CreateHistoryTag(CreateHistoryTagInput),
+    RenameHistoryTag(RenameHistoryTagInput),
+    AddHistoryTagToEntries(HistoryTagEntriesInput),
+    RemoveHistoryTagFromEntries(HistoryTagEntriesInput),
+    SummarizeHistoryEntryTags(HistoryEntryTagsInput),
+    MergeHistoryTags(MergeHistoryTagsInput),
+    DeleteHistoryTag(HistoryTagInput),
     QueryHistoryStats,
     GetHistoryEntryResource(HistoryEntryInput),
     ReadBlob(BlobResourceInput),
@@ -404,6 +437,7 @@ impl Operation {
             Self::QueryNetworkRecoveryStatus => OperationKind::QueryNetworkRecoveryStatus,
             Self::QuerySettings => OperationKind::QuerySettings,
             Self::QueryCustomRelays => OperationKind::QueryCustomRelays,
+            Self::QueryRelayOverview => OperationKind::QueryRelayOverview,
             Self::MutateCustomRelay(_) => OperationKind::MutateCustomRelay,
             Self::UpdateSettings(_) => OperationKind::UpdateSettings,
             Self::SaveRelay(_) => OperationKind::SaveRelay,
@@ -450,6 +484,8 @@ impl Operation {
             Self::QueryMembershipDiagnostics => OperationKind::QueryMembershipDiagnostics,
             Self::QuerySpaceProtection => OperationKind::QuerySpaceProtection,
             Self::SearchEntries(_) => OperationKind::SearchEntries,
+            Self::CountSearchEntries(_) => OperationKind::CountSearchEntries,
+            Self::QueryDailyEntryCounts(_) => OperationKind::QueryDailyEntryCounts,
             Self::QuerySearchTags => OperationKind::QuerySearchTags,
             Self::QuerySearchStatus => OperationKind::QuerySearchStatus,
             Self::RebuildSearchIndex => OperationKind::RebuildSearchIndex,
@@ -461,6 +497,14 @@ impl Operation {
             Self::GetHistoryEntry(_) => OperationKind::GetHistoryEntry,
             Self::DeleteHistoryEntry(_) => OperationKind::DeleteHistoryEntry,
             Self::SetHistoryEntryFavorite(_) => OperationKind::SetHistoryEntryFavorite,
+            Self::ListHistoryTags => OperationKind::ListHistoryTags,
+            Self::CreateHistoryTag(_) => OperationKind::CreateHistoryTag,
+            Self::RenameHistoryTag(_) => OperationKind::RenameHistoryTag,
+            Self::AddHistoryTagToEntries(_) => OperationKind::AddHistoryTagToEntries,
+            Self::RemoveHistoryTagFromEntries(_) => OperationKind::RemoveHistoryTagFromEntries,
+            Self::SummarizeHistoryEntryTags(_) => OperationKind::SummarizeHistoryEntryTags,
+            Self::MergeHistoryTags(_) => OperationKind::MergeHistoryTags,
+            Self::DeleteHistoryTag(_) => OperationKind::DeleteHistoryTag,
             Self::QueryHistoryStats => OperationKind::QueryHistoryStats,
             Self::GetHistoryEntryResource(_) => OperationKind::GetHistoryEntryResource,
             Self::ReadBlob(_) => OperationKind::ReadBlob,
@@ -633,6 +677,8 @@ pub struct SearchEntriesInput {
     pub extensions: Option<String>,
     pub source_devices: Option<String>,
     pub tags: Option<String>,
+    /// 标签维度的组合方式：`any`（默认）或 `all`。
+    pub tag_match: Option<String>,
     pub limit: u32,
     pub offset: u32,
 }
@@ -652,8 +698,40 @@ impl fmt::Debug for SearchEntriesInput {
             .field("has_extensions", &self.extensions.is_some())
             .field("has_source_devices", &self.source_devices.is_some())
             .field("has_tags", &self.tags.is_some())
+            .field("has_tag_match", &self.tag_match.is_some())
             .field("limit", &self.limit)
             .field("offset", &self.offset)
+            .finish()
+    }
+}
+
+/// 批量计数请求：每个查询与 `SearchEntries` 使用同一套过滤语义，`limit` 与 `offset` 被忽略。
+#[derive(Clone, PartialEq, Eq)]
+pub struct CountSearchEntriesInput {
+    pub queries: Vec<SearchEntriesInput>,
+}
+
+impl fmt::Debug for CountSearchEntriesInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CountSearchEntriesInput")
+            .field("query_count", &self.queries.len())
+            .finish()
+    }
+}
+
+/// 按日统计请求。`boundaries_ms` 是严格递增的本地日边界（毫秒时间戳），
+/// 第 `i` 个桶为 `[boundaries[i], boundaries[i+1])`。边界由调用方按其时区计算。
+#[derive(Clone, PartialEq, Eq)]
+pub struct DailyEntryCountsInput {
+    pub boundaries_ms: Vec<i64>,
+}
+
+impl fmt::Debug for DailyEntryCountsInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DailyEntryCountsInput")
+            .field("boundary_count", &self.boundaries_ms.len())
             .finish()
     }
 }
@@ -789,6 +867,60 @@ pub struct ThumbnailResourceInput {
 pub struct SetHistoryEntryFavoriteInput {
     pub entry_id: String,
     pub is_favorited: bool,
+}
+
+/// 按名称创建历史标签；同名（规范化后忽略大小写）时返回已有标签。
+#[derive(Clone, PartialEq, Eq)]
+pub struct CreateHistoryTagInput {
+    pub name: String,
+}
+
+impl fmt::Debug for CreateHistoryTagInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CreateHistoryTagInput")
+            .field("name", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct RenameHistoryTagInput {
+    pub tag_id: String,
+    pub name: String,
+}
+
+impl fmt::Debug for RenameHistoryTagInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RenameHistoryTagInput")
+            .field("name", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+/// 把一个历史标签关联到一组条目，或从一组条目移除。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryTagEntriesInput {
+    pub tag_id: String,
+    pub entry_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryEntryTagsInput {
+    pub entry_ids: Vec<String>,
+}
+
+/// 把来源标签并入目标标签；来源标签随后删除。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeHistoryTagsInput {
+    pub source_tag_ids: Vec<String>,
+    pub target_tag_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryTagInput {
+    pub tag_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

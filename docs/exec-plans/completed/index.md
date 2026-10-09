@@ -2,6 +2,9 @@
 
 这里保留已完成、已由后续方案取代或仅供历史追溯的实施记录。它们不自动代表当前架构事实。
 
+- [144 `uc-infra` 拆成 7 个 crate：S1–S6 实施记录](144-uc-infra-crate-split-record.md)（拆分、回归修复、SQL 所有权决策、构建性能对照与 coverage 失败修复；未闭环事项见 active 计划）
+- [144 `uc-infra` 拆分：失败矩阵（事后对照）](144-uc-infra-crate-split-failure-matrix.md)（收尾时补写，把 issue §7 九类失败情形对应到现有证据；不代替事前矩阵与 S0 基线）
+
 - [049 成员状态单一负责人重写](049-single-owner-space-membership-rewrite.md)（S0–S6 完成：Core 成员账本、唯一写入者 Owner、V5 成员记录与遗留成员模块删除；实体双 Desktop 验收跳过）
 
 - [044 Engine testkit、测试分组与结构化报告基础](044-engine-testkit-foundation.md)（框架、nextest 分组、结构化工件与非破坏 CI 入口完成；真实网络、设备和远程 CI 跳过）
@@ -48,3 +51,5 @@
 - [037 OpenTelemetry tracing 与结构化日志 clean cutover](037-opentelemetry-tracing-and-structured-logs.md)
 - [移动端日志文件层与连接中继日志](mobile-log-file-layer.md)（保留、导出和远程发送由 037 取代）
 - [Profile 内容密钥运行期复用](profile-content-key-runtime-reuse.md)（实现完成；含已知全量测试失败与 GUI 验收跳过记录）
+- [模块日志通道与错误链](2026-09-29-module-log-channel.md)（已完成；错误层登记已由 `ErrorClass` 取代）
+- [类型化日志事件与工具链强制](2026-09-29-typed-log-events.md)（已完成；Windows 与 Android 编译、CI 真实耗时记为跳过）

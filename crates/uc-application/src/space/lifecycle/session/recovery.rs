@@ -8,6 +8,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::{SpaceActivityError, SpaceSessionActivityPort};
+use uc_observability_contract::{error_source::io_error_kind, uc_info, uc_warn};
 
 #[async_trait]
 pub(crate) trait SpaceSessionRecoveryPort: Send + Sync {
@@ -118,18 +119,30 @@ impl SpaceSessionRecoveryPort for SpaceSessionRecovery {
                     _ = task_cancel.cancelled() => return false,
                     result = activity.resume_after_session_ready() => result,
                 };
-                if activation.is_ok() {
-                    return true;
-                }
-                tracing::warn!(
-                    attempt,
-                    "space session background activation failed; retrying"
-                );
+                let error = match activation {
+                    Ok(()) => {
+                        if attempt > 0 {
+                            uc_info!(
+                                attempt = attempt,
+                                "space session background activation recovered"
+                            );
+                        }
+                        return true;
+                    }
+                    Err(error) => error,
+                };
                 let delay = retry_delays
                     .get(attempt)
                     .or_else(|| retry_delays.last())
                     .copied()
                     .unwrap_or(Duration::ZERO);
+                uc_warn!(
+                    error_kind = error.kind(),
+                    io_error_kind = io_error_kind(&error),
+                    attempt = attempt,
+                    backoff_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                    "space session background activation failed; retrying"
+                );
                 attempt = attempt.saturating_add(1);
                 tokio::select! {
                     biased;
@@ -303,6 +316,36 @@ mod tests {
         })
         .await
         .unwrap();
+        recovery.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn background_activation_failures_and_recovery_are_recorded() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let activity = Arc::new(RecordingActivity {
+            activations: AtomicUsize::new(0),
+            failures_before_success: 2,
+            pauses: AtomicUsize::new(0),
+            restores: AtomicUsize::new(0),
+            block_activation: false,
+            entered: Notify::new(),
+        });
+        let recovery =
+            SpaceSessionRecovery::new_with_retry_delays(activity.clone(), vec![Duration::ZERO]);
+
+        recovery.request_activation().await.unwrap();
+        timeout(Duration::from_secs(1), async {
+            while logs.count("space session background activation recovered") == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(logs.count("space session background activation failed"), 2);
+        assert_eq!(logs.count("error_kind=\"unavailable\""), 2);
+        assert_eq!(logs.count("attempt=2"), 1);
         recovery.shutdown().await.unwrap();
     }
 

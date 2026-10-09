@@ -5,9 +5,9 @@ use std::time::Duration;
 use napi::Status;
 use uc_engine::observability::{
     DeploymentEnvironment, LocalLogConfig, ObservabilityConfig, ObservabilityInstallError,
-    ObservabilityInstallOutcome, ObservabilityResource, ObservabilitySetupStatus,
-    ObservabilitySignalResult, OperatingSystem, OtlpHttpConfig, ProcessObservabilityHandle,
-    ProcessObservabilityRuntime, SecretHeaderValue,
+    ObservabilityInstallOutcome, ObservabilityRemoteSetupFailure, ObservabilityResource,
+    ObservabilitySetupStatus, ObservabilitySignalResult, OperatingSystem, OtlpHttpConfig,
+    ProcessObservabilityHandle, ProcessObservabilityRuntime, SecretHeaderValue,
 };
 use uc_engine::HostDirectories;
 
@@ -46,6 +46,9 @@ pub(crate) fn health() -> napi::Result<OhObservabilityHealth> {
     let health = PROCESS_HANDLE.get().ok_or_else(not_installed)?.health();
     Ok(OhObservabilityHealth {
         remote: setup_status(health.remote).to_owned(),
+        remote_setup_failure: health
+            .remote_setup_failure
+            .map(|failure| remote_setup_failure(failure).to_owned()),
         local_file: setup_status(health.local_file).to_owned(),
         dropped_local_records: health.dropped_local_records as f64,
         dropped_remote_spans: health.dropped_remote_spans as f64,
@@ -114,7 +117,7 @@ fn runtime_config(
         OperatingSystem::Ohos,
         config.app_channel,
     )
-    // 宿主输入校验：无法解析的输入按固定错误码拒绝，拒绝原因已完整表达。
+    // discarded-source[input-validation]: the rejection reason is fully expressed by the target classification
     .map_err(|_| config_invalid())?;
     let runtime =
         ObservabilityConfig::new(resource).with_local_logs(LocalLogConfig::new(directories.logs()));
@@ -127,12 +130,12 @@ fn runtime_config(
 
 fn remote_config(config: OhCollectorConfig) -> napi::Result<OtlpHttpConfig> {
     let remote = OtlpHttpConfig::new(&config.trace_endpoint, &config.log_endpoint)
-        // 宿主输入校验：无法解析的输入按固定错误码拒绝，拒绝原因已完整表达。
+        // discarded-source[input-validation]: the rejection reason is fully expressed by the target classification
         .map_err(|_| config_invalid())?;
     match (config.auth_header_name, config.auth_header_value) {
         (Some(name), Some(value)) => remote
             .with_header(name, SecretHeaderValue::new(value))
-            // 宿主输入校验：无法解析的输入按固定错误码拒绝，拒绝原因已完整表达。
+            // discarded-source[input-validation]: the rejection reason is fully expressed by the target classification
             .map_err(|_| config_invalid()),
         (None, None) => Ok(remote),
         _ => Err(config_invalid()),
@@ -178,6 +181,14 @@ fn setup_status(status: ObservabilitySetupStatus) -> &'static str {
         ObservabilitySetupStatus::Disabled => "disabled",
         ObservabilitySetupStatus::Ready => "ready",
         ObservabilitySetupStatus::Unavailable => "unavailable",
+    }
+}
+
+fn remote_setup_failure(failure: ObservabilityRemoteSetupFailure) -> &'static str {
+    match failure {
+        ObservabilityRemoteSetupFailure::HttpClient => "http_client",
+        ObservabilityRemoteSetupFailure::TraceExporter => "trace_exporter",
+        ObservabilityRemoteSetupFailure::LogExporter => "log_exporter",
     }
 }
 

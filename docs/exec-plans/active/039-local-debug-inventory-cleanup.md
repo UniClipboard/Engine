@@ -103,7 +103,7 @@ Relationship: 普通历史调用点当前默认不输出，本计划不能放宽
 
 ## Slice 2：Infra 领域（可多 Agent 按 Network、Storage、Security 独占目录并行）
 
-**File**：`crates/uc-infra/src/<domain>/` 与 compatibility 实现。
+**File**：`crates/uc-infra-*/src/<domain>/` 与 compatibility 实现。
 
 **Change**：移除地址、路径、错误正文和身份字段；认证失败只保留固定类别。
 

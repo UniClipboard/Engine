@@ -31,8 +31,8 @@ pub use models::{
     SyncSettingsPatch, SyncSettingsView, ThemeView, UpdateChannelView,
 };
 pub use relay_configuration::{
-    RelayConfiguration, RelayConfigurationEntry, RelayConfigurationMutation,
-    RelayConfigurationRejection,
+    AppliedRelayRouting, RelayConfiguration, RelayConfigurationEntry, RelayConfigurationMutation,
+    RelayConfigurationRejection, RelayEntrySource, RelayOverview, RelayOverviewEntry,
 };
 pub use relay_credentials::{
     RelayAccessToken, RelayCredentialEdit, RelayCredentials, RelayCredentialsError,

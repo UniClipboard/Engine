@@ -38,7 +38,12 @@ libc = "0.2"
 [target.'cfg(target_vendor = "apple")'.dependencies]
 tracing-oslog = "0.3"
 
+[build-dependencies]
+# 把构建来源编译为只在最终链接时加入的原生静态库；工作区已通过 ring 使用同一版本。
+cc = "1.2"
+
 [dev-dependencies]
+anyhow = "1"
 opentelemetry-proto = { version = "=0.32.0", default-features = false, features = ["gen-tonic-messages", "trace", "logs"] }
 opentelemetry_sdk = { version = "=0.32.1", default-features = false, features = ["trace", "logs", "testing"] }
 prost = "0.14"

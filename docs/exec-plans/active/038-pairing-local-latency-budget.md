@@ -55,14 +55,14 @@ Relationship: 性能改造的业务 owner；调用方不能看到内部轮次。
 
 ```text
 Component: 准入加密状态仓库
-Path: crates/uc-infra/src/space/admission/repository/ 及 joiner/sponsor/recovery 状态适配器
+Path: crates/uc-infra-profile/src/space/admission/repository/ 及 joiner/sponsor/recovery 状态适配器
 Responsibility: 在 SQLite 事务内读取加密单例、打开记录、校验提交令牌、保存新状态。
 Relationship: 当前每次提交重新读取整库，保存后再次读取并解密整个单例。
 ```
 
 ```text
 Component: Iroh 准入传输
-Path: crates/uc-infra/src/network/iroh/space_admission/（client、server、connection、exchange）
+Path: crates/uc-infra-p2p/src/network/iroh/space_admission/（client、server、connection、exchange）
 Responsibility: 连接、认证、消息完整性、收发和回执。
 Relationship: 当前 network_transport 外层包含部分本机编码与认证，不能直接代表纯网络等待。
 ```
@@ -143,7 +143,7 @@ Relationship: 当前网络扣除值只作粗估，不能作为本机耗时上界
 
 ## Slice 0：可信门禁与基线（串行）
 
-**File**：`crates/uc-infra/src/network/iroh/space_admission/` 下的 `client.rs`、`server.rs`、`connection.rs`、`exchange.rs`，以及 `crates/uc-engine/tests/space_membership_auto_pairing_e2e.rs`、观测固定枚举与接收测试。
+**File**：`crates/uc-infra-p2p/src/network/iroh/space_admission/` 下的 `client.rs`、`server.rs`、`connection.rs`、`exchange.rs`，以及 `crates/uc-engine/tests/space_membership_auto_pairing_e2e.rs`、观测固定枚举与接收测试。
 
 **Change**：在 Infra 私有 dev-tools 证据中记录 `endpoint.connect` 和 `open_bi/accept_bi` 的总耗时用于诊断，但只有序列化完成后的 write-complete 到已配对 read-ready/read-complete 区间可进入网络扣除。Iroh 本机握手、执行器调度和无法证明来源的 await 墙钟一律留在本机；用可控虚拟传输时钟和固定延迟校准，延迟只允许增加 network。匹配区间在完整窗口内取并集，缺失、重叠错误、关系错误或窗口外数据使本次样本无效。测试等待改为事件驱动或记录轮询上界，不能把当前 100ms/10ms 轮询误差归给业务。每片预热后先运行 5 次，最终运行不少于 20 次，记录 p50/p95、整库打开次数、提交次数和维护次数。
 
@@ -151,7 +151,7 @@ Relationship: 当前网络扣除值只作粗估，不能作为本机耗时上界
 
 ## Slice 1：删除提交内重复整库回读（可与 Slice 2 分 Agent 并行）
 
-**File**：`crates/uc-infra/src/space/admission/repository/codec.rs` 及各状态适配器测试。
+**File**：`crates/uc-infra-profile/src/space/admission/repository/codec.rs` 及各状态适配器测试。
 
 **Change**：一次提交只打开当前状态一次；写入成功以事务提交为准，不在同一事务内再次读取、解密和逐值比较。补充下一次读取损坏、写入失败回滚、错误密钥、代际不符和并发令牌冲突测试。
 
@@ -171,7 +171,7 @@ Relationship: 当前网络扣除值只作粗估，不能作为本机耗时上界
 
 ## Slice 3：按准入记录原子存储（串行，依赖 Slices 1-2）
 
-**File**：`crates/uc-infra/src/space/admission/repository/`、数据库 migration、profile upgrade fixture 与各状态适配器。
+**File**：`crates/uc-infra-profile/src/space/admission/repository/`、数据库 migration、profile upgrade fixture 与各状态适配器。
 
 **Change**：只有 Slices 1-2 后的测量仍指向整库加解密时才实施。把现有整张记录 map 的双层密文改为“加密索引 + 每 attempt 独立密文行”；SQLite 事务同时更新索引和目标行，CAS 继续使用现有 token 与 record version。旧真实 fixture 通过一次性升级进入唯一新格式，不保留双 writer 或长期双 reader。
 

@@ -1,0 +1,689 @@
+//! Import staging layout and the `pending-import.json` marker.
+//!
+//! Staging writes an unpacked, validated bundle under the data root so a later
+//! restart can adopt it. This module owns the on-disk contract consumed by the
+//! boot-time apply step: the directory layout, the marker schema, and the
+//! `secrets.json` format. Those are persistence invariants — bump
+//! [`PENDING_IMPORT_SCHEMA_VER`] before changing them.
+//!
+//! Layout under the data root:
+//!
+//! ```text
+//! import-staging/
+//!   manifest.json          # copied verbatim from the bundle archive
+//!   db/uniclipboard.db     # consistent snapshot to install as the live db
+//!   vault/keyslot.json     # keyslot to install into the vault dir
+//!   vault/device_id.txt
+//!   vault/.current-space-id-v1    # "is initialized" marker; copy back into vault dir
+//!   vault/profile-secrets-v1      # encrypted independent profile secrets
+//!   iroh-identity/*        # 0600 device-identity files; copy into identity dir
+//!   settings.json
+//!   secrets.json           # { "secrets": { "<key>": "<base64>" , ... } }; KEK only
+//!   ui-state/*.json        # optional
+//! pending-import.json      # marker at the data root (sibling of import-staging/)
+//! ```
+//!
+//! The marker is a *sibling* of the staging directory (not inside it) so its
+//! presence/absence is the single boot-time signal, independent of the staging
+//! contents.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use base64::Engine;
+use serde::{Deserialize, Serialize};
+
+use uc_core::ports::SecureStoragePort;
+use uc_observability_contract::{error_source::io_error_kind, uc_error, uc_info};
+
+use crate::security::PROFILE_SECRET_FILE_NAME;
+
+use super::archive::BundleArchive;
+use super::secret_keys::SECRETS_MEMBER;
+
+/// Directory name (under the data root) holding the unpacked bundle.
+pub const STAGING_DIR_NAME: &str = "import-staging";
+
+/// Marker file name (under the data root) signalling a pending import.
+pub const PENDING_IMPORT_MARKER: &str = "pending-import.json";
+
+/// Schema version of the marker + staging layout contract.
+pub const PENDING_IMPORT_SCHEMA_VER: u32 = 1;
+
+/// Boot-time marker written next to the staging directory.
+///
+/// Field names are the on-disk contract read by the boot-time apply step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingImportMarker {
+    /// Marker/staging-layout schema version.
+    pub schema_ver: u32,
+    /// Staging directory name, relative to the data root (always
+    /// [`STAGING_DIR_NAME`]). Recorded explicitly so the apply step never has
+    /// to assume it.
+    pub staging_dir: String,
+    /// Whether the staged bundle carried a KEK. When `false`, applying still
+    /// installs the device identity but the operator must unlock with the
+    /// passphrase afterwards.
+    pub has_kek: bool,
+    /// When the import was staged, milliseconds since the Unix epoch (from the
+    /// staging operation, not the bundle's own creation time).
+    pub staged_at_unix_ms: i64,
+}
+
+/// The `secrets.json` member: secure-storage key → base64-encoded raw value.
+///
+/// Wrapped in a struct (rather than a bare map) so the format can grow a
+/// version/envelope later without breaking the member shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretsFile {
+    /// Map of secure-storage key string → standard base64 of the raw secret
+    /// bytes.
+    pub secrets: BTreeMap<String, String>,
+}
+
+impl SecretsFile {
+    /// Build a secrets file from raw key→bytes pairs (base64-encodes values).
+    pub fn from_raw(entries: impl IntoIterator<Item = (String, Vec<u8>)>) -> Self {
+        let engine = base64::engine::general_purpose::STANDARD;
+        let secrets = entries
+            .into_iter()
+            .map(|(k, v)| (k, engine.encode(v)))
+            .collect();
+        Self { secrets }
+    }
+
+    /// Serialize to pretty JSON bytes.
+    pub fn to_json_bytes(&self) -> Result<Vec<u8>, StagingError> {
+        serde_json::to_vec_pretty(self).map_err(StagingError::serialize_from)
+    }
+}
+
+/// Staging-side failures (path/IO/serialization). The adapter maps these onto
+/// the domain error.
+#[derive(Debug, thiserror::Error)]
+pub enum StagingError {
+    /// Filesystem write/cleanup failed.
+    #[error("staging io failed")]
+    Io {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
+    /// Marker or member serialization failed.
+    #[error("staging serialize failed")]
+    Serialize {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl StagingError {
+    pub fn io() -> Self {
+        Self::Io { source: None }
+    }
+
+    pub fn io_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Io {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn serialize() -> Self {
+        Self::Serialize { source: None }
+    }
+
+    pub fn serialize_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Serialize {
+            source: Some(source.into()),
+        }
+    }
+}
+
+/// Filesystem layout helper for the staging area, rooted at the data root.
+pub struct StagingLayout {
+    data_root: PathBuf,
+}
+
+impl StagingLayout {
+    pub fn new(data_root: impl Into<PathBuf>) -> Self {
+        Self {
+            data_root: data_root.into(),
+        }
+    }
+
+    /// The staging directory: `<data_root>/import-staging/`.
+    pub fn staging_dir(&self) -> PathBuf {
+        self.data_root.join(STAGING_DIR_NAME)
+    }
+
+    /// The pending-import marker path: `<data_root>/pending-import.json`.
+    pub fn marker_path(&self) -> PathBuf {
+        self.data_root.join(PENDING_IMPORT_MARKER)
+    }
+
+    /// Write an unpacked archive into a *fresh* staging directory, then write
+    /// the marker last so a crash mid-extraction never leaves a marker pointing
+    /// at a half-written staging area.
+    ///
+    /// Any pre-existing staging directory or marker is cleared first so a
+    /// retried import starts clean.
+    pub fn write(
+        &self,
+        archive: &BundleArchive,
+        marker: &PendingImportMarker,
+    ) -> Result<(), StagingError> {
+        let staging = self.staging_dir();
+        let marker_path = self.marker_path();
+
+        // Clear any prior attempt: marker first (so a crash here leaves no
+        // marker), then the directory.
+        if marker_path.exists() {
+            std::fs::remove_file(&marker_path).map_err(StagingError::io_from)?;
+        }
+        if staging.exists() {
+            std::fs::remove_dir_all(&staging).map_err(StagingError::io_from)?;
+        }
+        std::fs::create_dir_all(&staging).map_err(StagingError::io_from)?;
+
+        for (member, bytes) in archive.iter() {
+            let dest = staging.join(member);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent).map_err(StagingError::io_from)?;
+            }
+            std::fs::write(&dest, bytes).map_err(StagingError::io_from)?;
+        }
+
+        // Marker written last and atomically (tmp + rename) so its presence
+        // implies a fully-written staging directory.
+        let marker_json =
+            serde_json::to_vec_pretty(marker).map_err(StagingError::serialize_from)?;
+        let tmp = marker_path.with_extension("json.tmp");
+        std::fs::write(&tmp, &marker_json).map_err(StagingError::io_from)?;
+        std::fs::rename(&tmp, &marker_path).map_err(StagingError::io_from)?;
+
+        Ok(())
+    }
+}
+
+/// Decode a base64 secret value from a [`SecretsFile`] entry.
+///
+/// Exposed so the boot-time apply step shares the exact decoding contract used
+/// by the writer.
+pub fn decode_secret_value(b64: &str) -> Result<Vec<u8>, StagingError> {
+    base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(StagingError::serialize_from)
+}
+
+/// Member path of the keyslot inside the bundle / staging area.
+pub const KEYSLOT_MEMBER: &str = "vault/keyslot.json";
+
+/// Member path of the device id inside the bundle / staging area.
+pub const DEVICE_ID_MEMBER: &str = "vault/device_id.txt";
+
+/// Member path of the current-Space identity inside the bundle / staging area.
+///
+/// The encrypted portable current-Space identity travels with the bundle so an
+/// imported installation retains the same Space identity without copying a
+/// generation manifest that points at source-only generation directories.
+pub const CURRENT_SPACE_ID_MEMBER: &str = "vault/.current-space-id-v1";
+
+/// Member path of the encrypted independent profile-secret store.
+pub const PROFILE_SECRETS_MEMBER: &str = "vault/profile-secrets-v1";
+
+/// Member path of settings inside the bundle / staging area.
+pub const SETTINGS_MEMBER: &str = "settings.json";
+
+/// Member path of the db snapshot inside the bundle / staging area.
+pub const DB_MEMBER: &str = "db/uniclipboard.db";
+
+/// Prefix for optional UI-state members.
+pub const UI_STATE_PREFIX: &str = "ui-state/";
+
+/// Prefix for iroh device-identity files.
+///
+/// The iroh identity is *not* a user secret kept in the credential store; it is
+/// persisted as `0600` files in a dedicated directory (a `FileSecureStorage`
+/// backend) so startup never prompts a keychain dialog. It therefore migrates
+/// as files (like `vault/`), not as a `secrets.json` entry: every file in the
+/// source identity directory is carried under this prefix and the boot step
+/// copies them back into the target identity directory.
+pub const IROH_IDENTITY_PREFIX: &str = "iroh-identity/";
+
+/// Resolve a staging-relative member to an absolute path under `data_root`'s
+/// staging directory. Used by tests and by the boot-time apply step.
+pub fn staged_member_path(data_root: &Path, member: &str) -> PathBuf {
+    data_root.join(STAGING_DIR_NAME).join(member)
+}
+
+/// Apply a staged configuration import before any live database connection opens.
+pub fn apply_pending_import(
+    app_data_root: &Path,
+    db_path: &Path,
+    vault_dir: &Path,
+    settings_path: &Path,
+    iroh_identity_dir: &Path,
+    secure_storage: &dyn SecureStoragePort,
+) -> Result<(), PendingImportError> {
+    let layout = StagingLayout::new(app_data_root);
+    let marker_path = layout.marker_path();
+    if !marker_path.exists() {
+        return Ok(());
+    }
+
+    uc_info!("pending config import detected; applying staged bundle on boot");
+    let marker_bytes = std::fs::read(&marker_path).map_err(PendingImportError::read_marker_from)?;
+    let marker: PendingImportMarker =
+        serde_json::from_slice(&marker_bytes).map_err(PendingImportError::parse_marker_from)?;
+    if marker.schema_ver != PENDING_IMPORT_SCHEMA_VER {
+        uc_error!(
+            found_schema_ver = marker.schema_ver,
+            expected_schema_ver = PENDING_IMPORT_SCHEMA_VER,
+            "staged import schema version mismatch; skipping apply and preserving staging"
+        );
+        return Ok(());
+    }
+
+    let staging_dir = layout.staging_dir();
+    let secrets_bytes = std::fs::read(staging_dir.join(SECRETS_MEMBER))
+        .map_err(PendingImportError::read_secrets_from)?;
+    let secrets: SecretsFile =
+        serde_json::from_slice(&secrets_bytes).map_err(PendingImportError::parse_secrets_from)?;
+    uc_info!(
+        secret_count = secrets.secrets.len(),
+        has_kek = marker.has_kek,
+        "writing staged secrets into current secure-storage backend"
+    );
+
+    for (key, encoded) in &secrets.secrets {
+        let bytes = match decode_secret_value(encoded) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                uc_error!(
+                    key_class = classify_secret_key(key),
+                    "staged secret value failed to decode; aborting import apply, staging preserved"
+                );
+                return Ok(());
+            }
+        };
+        if let Err(error) = secure_storage.set(key, &bytes) {
+            uc_error!(
+                key_class = classify_secret_key(key),
+                error_kind = "staged_secret_write",
+                io_error_kind = io_error_kind(&error),
+                "writing staged secret into secure storage failed; aborting import apply, staging preserved"
+            );
+            return Ok(());
+        }
+    }
+
+    uc_info!("staged secrets written; copying staged files into live locations");
+    copy_member(&staging_dir, DB_MEMBER, db_path)?;
+    remove_stale_db_sidecars(db_path)?;
+    copy_member(
+        &staging_dir,
+        KEYSLOT_MEMBER,
+        &vault_dir.join("keyslot.json"),
+    )?;
+    copy_member(
+        &staging_dir,
+        DEVICE_ID_MEMBER,
+        &vault_dir.join("device_id.txt"),
+    )?;
+    copy_member(
+        &staging_dir,
+        CURRENT_SPACE_ID_MEMBER,
+        &vault_dir.join(".current-space-id-v1"),
+    )?;
+    copy_member_or_remove(
+        &staging_dir,
+        PROFILE_SECRETS_MEMBER,
+        &vault_dir.join(PROFILE_SECRET_FILE_NAME),
+    )?;
+    copy_dir_members(&staging_dir, IROH_IDENTITY_PREFIX, iroh_identity_dir)?;
+    copy_member_if_present(&staging_dir, SETTINGS_MEMBER, settings_path)?;
+    copy_dir_members(
+        &staging_dir,
+        UI_STATE_PREFIX,
+        &app_data_root.join(UI_STATE_PREFIX.trim_end_matches('/')),
+    )?;
+
+    std::fs::remove_dir_all(&staging_dir).map_err(PendingImportError::cleanup_from)?;
+    std::fs::remove_file(&marker_path).map_err(PendingImportError::cleanup_from)?;
+    uc_info!("staged config import applied; staging cleaned up");
+    Ok(())
+}
+
+fn copy_member(staging_dir: &Path, member: &str, dest: &Path) -> Result<(), PendingImportError> {
+    ensure_parent(dest)?;
+    std::fs::copy(staging_dir.join(member), dest).map_err(PendingImportError::copy_member_from)?;
+    Ok(())
+}
+
+fn copy_member_if_present(
+    staging_dir: &Path,
+    member: &str,
+    dest: &Path,
+) -> Result<(), PendingImportError> {
+    let source = staging_dir.join(member);
+    if !source.exists() {
+        return Ok(());
+    }
+    ensure_parent(dest)?;
+    std::fs::copy(source, dest).map_err(PendingImportError::copy_member_from)?;
+    Ok(())
+}
+
+fn copy_member_or_remove(
+    staging_dir: &Path,
+    member: &str,
+    dest: &Path,
+) -> Result<(), PendingImportError> {
+    let source = staging_dir.join(member);
+    if source.exists() {
+        ensure_parent(dest)?;
+        return match std::fs::copy(source, dest) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(PendingImportError::copy_member()),
+        };
+    }
+    match std::fs::remove_file(dest) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(PendingImportError::copy_member()),
+    }
+}
+
+fn copy_dir_members(
+    staging_dir: &Path,
+    prefix: &str,
+    dest_dir: &Path,
+) -> Result<(), PendingImportError> {
+    let source_dir = staging_dir.join(prefix.trim_end_matches('/'));
+    if !source_dir.is_dir() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(dest_dir).map_err(PendingImportError::copy_member_from)?;
+    for entry in std::fs::read_dir(source_dir).map_err(PendingImportError::copy_member_from)? {
+        let entry = entry.map_err(PendingImportError::copy_member_from)?;
+        if !entry
+            .file_type()
+            .map(|kind| kind.is_file())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        std::fs::copy(entry.path(), dest_dir.join(entry.file_name()))
+            .map_err(PendingImportError::copy_member_from)?;
+    }
+    Ok(())
+}
+
+fn ensure_parent(dest: &Path) -> Result<(), PendingImportError> {
+    if let Some(parent) = dest.parent().filter(|path| !path.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(PendingImportError::copy_member_from)?;
+    }
+    Ok(())
+}
+
+fn remove_stale_db_sidecars(db_path: &Path) -> Result<(), PendingImportError> {
+    for suffix in ["-wal", "-shm"] {
+        let mut name = db_path.as_os_str().to_os_string();
+        name.push(suffix);
+        match std::fs::remove_file(PathBuf::from(name)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(PendingImportError::copy_member()),
+        }
+    }
+    Ok(())
+}
+
+fn classify_secret_key(key: &str) -> &'static str {
+    ["iroh-identity:", "kek:v1:"]
+        .into_iter()
+        .find(|prefix| key.starts_with(prefix))
+        .unwrap_or("unknown")
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PendingImportError {
+    #[error("failed to read pending-import marker")]
+    ReadMarker {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
+    #[error("failed to parse pending-import marker")]
+    ParseMarker {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
+    #[error("failed to read staged secrets")]
+    ReadSecrets {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
+    #[error("failed to parse staged secrets")]
+    ParseSecrets {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
+    #[error("failed to copy a staged member into its live location")]
+    CopyMember {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
+    #[error("failed to clean up staging after applying import")]
+    Cleanup {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
+}
+
+/// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。
+impl PendingImportError {
+    pub fn read_marker() -> Self {
+        Self::ReadMarker { source: None }
+    }
+
+    pub fn read_marker_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::ReadMarker {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn parse_marker() -> Self {
+        Self::ParseMarker { source: None }
+    }
+
+    pub fn parse_marker_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::ParseMarker {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn read_secrets() -> Self {
+        Self::ReadSecrets { source: None }
+    }
+
+    pub fn read_secrets_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::ReadSecrets {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn parse_secrets() -> Self {
+        Self::ParseSecrets { source: None }
+    }
+
+    pub fn parse_secrets_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::ParseSecrets {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn copy_member() -> Self {
+        Self::CopyMember { source: None }
+    }
+
+    pub fn copy_member_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::CopyMember {
+            source: Some(source.into()),
+        }
+    }
+
+    pub fn cleanup() -> Self {
+        Self::Cleanup { source: None }
+    }
+
+    pub fn cleanup_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Cleanup {
+            source: Some(source.into()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+
+    use uc_core::ports::{SecureStorageError, SecureStoragePort};
+
+    use super::*;
+
+    #[derive(Default)]
+    struct MemorySecureStorage(Mutex<BTreeMap<String, Vec<u8>>>);
+
+    impl SecureStoragePort for MemorySecureStorage {
+        fn get(&self, key: &str) -> Result<Option<Vec<u8>>, SecureStorageError> {
+            Ok(self.0.lock().unwrap().get(key).cloned())
+        }
+
+        fn set(&self, key: &str, value: &[u8]) -> Result<(), SecureStorageError> {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(key.to_owned(), value.to_vec());
+            Ok(())
+        }
+
+        fn delete(&self, key: &str) -> Result<(), SecureStorageError> {
+            self.0.lock().unwrap().remove(key);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn secrets_file_round_trips_base64() {
+        // Arbitrary key strings — this exercises the generic container; the only
+        // real secret carried today is the current-profile KEK.
+        let file = SecretsFile::from_raw([
+            ("kek:v1:profile:default".to_string(), vec![9u8, 8, 7]),
+            ("kek:v1:profile:other".to_string(), vec![1u8, 2, 3]),
+        ]);
+        let json = file.to_json_bytes().unwrap();
+        let back: SecretsFile = serde_json::from_slice(&json).unwrap();
+
+        let kek = back.secrets.get("kek:v1:profile:default").unwrap();
+        assert_eq!(decode_secret_value(kek).unwrap(), vec![9u8, 8, 7]);
+        let other = back.secrets.get("kek:v1:profile:other").unwrap();
+        assert_eq!(decode_secret_value(other).unwrap(), vec![1u8, 2, 3]);
+    }
+
+    #[test]
+    fn write_lays_out_staging_and_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StagingLayout::new(dir.path());
+
+        let mut archive = BundleArchive::new();
+        archive.insert("manifest.json", b"{}".to_vec());
+        archive.insert(DB_MEMBER, vec![0u8; 8]);
+        archive.insert(KEYSLOT_MEMBER, b"{\"version\":\"V1\"}".to_vec());
+
+        let marker = PendingImportMarker {
+            schema_ver: PENDING_IMPORT_SCHEMA_VER,
+            staging_dir: STAGING_DIR_NAME.to_string(),
+            has_kek: true,
+            staged_at_unix_ms: 1_700_000_000_000,
+        };
+
+        layout.write(&archive, &marker).unwrap();
+
+        assert!(layout.marker_path().exists());
+        assert!(staged_member_path(dir.path(), "manifest.json").exists());
+        assert!(staged_member_path(dir.path(), DB_MEMBER).exists());
+        assert!(staged_member_path(dir.path(), KEYSLOT_MEMBER).exists());
+
+        let read_marker: PendingImportMarker =
+            serde_json::from_slice(&std::fs::read(layout.marker_path()).unwrap()).unwrap();
+        assert_eq!(read_marker, marker);
+    }
+
+    #[test]
+    fn write_clears_prior_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StagingLayout::new(dir.path());
+
+        // Seed a stale staging dir with a file that should not survive.
+        std::fs::create_dir_all(layout.staging_dir()).unwrap();
+        std::fs::write(layout.staging_dir().join("stale.txt"), b"old").unwrap();
+
+        let mut archive = BundleArchive::new();
+        archive.insert("manifest.json", b"{}".to_vec());
+        let marker = PendingImportMarker {
+            schema_ver: PENDING_IMPORT_SCHEMA_VER,
+            staging_dir: STAGING_DIR_NAME.to_string(),
+            has_kek: false,
+            staged_at_unix_ms: 1,
+        };
+        layout.write(&archive, &marker).unwrap();
+
+        assert!(!staged_member_path(dir.path(), "stale.txt").exists());
+        assert!(staged_member_path(dir.path(), "manifest.json").exists());
+    }
+
+    #[test]
+    fn apply_removes_live_profile_secrets_when_bundle_omits_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_root = dir.path().join("data");
+        let vault_dir = dir.path().join("vault");
+        let db_path = dir.path().join("db.sqlite");
+        let settings_path = dir.path().join("settings.json");
+        let identity_dir = dir.path().join("identity");
+        let live_profile_secrets = vault_dir.join(PROFILE_SECRET_FILE_NAME);
+        std::fs::create_dir_all(&vault_dir).unwrap();
+        std::fs::write(&live_profile_secrets, b"stale").unwrap();
+
+        let mut archive = BundleArchive::new();
+        archive.insert(DB_MEMBER, b"database".to_vec());
+        archive.insert(KEYSLOT_MEMBER, b"keyslot".to_vec());
+        archive.insert(DEVICE_ID_MEMBER, b"device".to_vec());
+        archive.insert(CURRENT_SPACE_ID_MEMBER, b"space".to_vec());
+        archive.insert(
+            SECRETS_MEMBER,
+            SecretsFile::from_raw(Vec::new()).to_json_bytes().unwrap(),
+        );
+        let marker = PendingImportMarker {
+            schema_ver: PENDING_IMPORT_SCHEMA_VER,
+            staging_dir: STAGING_DIR_NAME.to_owned(),
+            has_kek: false,
+            staged_at_unix_ms: 1,
+        };
+        StagingLayout::new(&data_root)
+            .write(&archive, &marker)
+            .unwrap();
+
+        apply_pending_import(
+            &data_root,
+            &db_path,
+            &vault_dir,
+            &settings_path,
+            &identity_dir,
+            &MemorySecureStorage::default(),
+        )
+        .unwrap();
+
+        assert!(!live_profile_secrets.exists());
+    }
+}

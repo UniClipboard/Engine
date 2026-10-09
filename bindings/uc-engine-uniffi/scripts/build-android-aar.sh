@@ -2,6 +2,9 @@
 
 set -euo pipefail
 
+# 当前脚本与所有嵌套 Cargo 调用统一经由 MBX。
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../scripts/build-cache/env.sh"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 REPO_ROOT="$(cd "${1:-$REPO_ROOT}" && pwd)"
@@ -25,6 +28,26 @@ case "$BUILD_PROFILE" in
   release) PROFILE_DIR=release; GRADLE_TASK=assembleRelease ;;
   *) echo "UC_ENGINE_UNIFFI_BUILD_PROFILE must be dev or release" >&2; exit 1 ;;
 esac
+# 开发和发布默认只构建 ARM64；需要其他 ABI 时显式指定。
+ANDROID_ABIS="${UC_ENGINE_UNIFFI_ANDROID_ABIS-arm64-v8a}"
+read -r -a ABI_LIST <<< "$ANDROID_ABIS"
+if [[ ${#ABI_LIST[@]} -eq 0 ]]; then
+  echo "UC_ENGINE_UNIFFI_ANDROID_ABIS must not be empty" >&2; exit 1
+fi
+NDK_TARGET_ARGS=()
+SEEN_ABIS=" "
+for abi in "${ABI_LIST[@]}"; do
+  case "$abi" in
+    arm64-v8a|x86_64) ;;
+    *) echo "Unsupported Android ABI: $abi" >&2; exit 1 ;;
+  esac
+  if [[ "$SEEN_ABIS" == *" $abi "* ]]; then
+    echo "Duplicate Android ABI: $abi" >&2; exit 1
+  fi
+  SEEN_ABIS+="$abi "
+  NDK_TARGET_ARGS+=(-t "$abi")
+done
+
 if [[ -n "${UC_ENGINE_UNIFFI_BUILD_LOCKED:-}" ]]; then
   CARGO_LOCKED_FLAG="--locked"
 fi
@@ -51,17 +74,18 @@ cargo run -p uc-engine-uniffi --profile dev --features bindgen-cli \
   --out-dir "$BINDINGS_DIR" --no-format
 
 echo "==> Build Android native libraries"
-with_release_path_remap cargo ndk -t arm64-v8a -t x86_64 \
+with_release_path_remap cargo ndk "${NDK_TARGET_ARGS[@]}" \
   build -p uc-engine-uniffi --profile "$BUILD_PROFILE" $CARGO_LOCKED_FLAG
-mkdir -p "$JNI_DIR/arm64-v8a" "$JNI_DIR/x86_64"
-cp "$TARGET_DIR/aarch64-linux-android/$PROFILE_DIR/libuc_engine_uniffi.so" \
-  "$JNI_DIR/arm64-v8a/"
-cp "$TARGET_DIR/x86_64-linux-android/$PROFILE_DIR/libuc_engine_uniffi.so" \
-  "$JNI_DIR/x86_64/"
-verify_release_paths "$JNI_DIR/arm64-v8a/libuc_engine_uniffi.so"
-verify_release_paths "$JNI_DIR/x86_64/libuc_engine_uniffi.so"
-cp "$JNI_DIR/arm64-v8a/libuc_engine_uniffi.so" "$DEBUG_DIR/arm64-v8a.so"
-cp "$JNI_DIR/x86_64/libuc_engine_uniffi.so" "$DEBUG_DIR/x86_64.so"
+for abi in "${ABI_LIST[@]}"; do
+  case "$abi" in
+    arm64-v8a) rust_target=aarch64-linux-android ;;
+    x86_64) rust_target=x86_64-linux-android ;;
+  esac
+  mkdir -p "$JNI_DIR/$abi"
+  cp "$TARGET_DIR/$rust_target/$PROFILE_DIR/libuc_engine_uniffi.so" "$JNI_DIR/$abi/"
+  verify_release_paths "$JNI_DIR/$abi/libuc_engine_uniffi.so"
+  cp "$JNI_DIR/$abi/libuc_engine_uniffi.so" "$DEBUG_DIR/$abi.so"
+done
 
 RUSTLS_ANDROID_MANIFEST="$(cargo metadata --locked --format-version 1 --filter-platform aarch64-linux-android \
   --manifest-path crates/uc-observability-runtime/Cargo.toml \
@@ -111,6 +135,7 @@ COMMIT="$(git rev-parse HEAD)"
 printf 'v%s\n' "$VERSION" > "$DIST_DIR/version.txt"
 printf '%s\n' "$COMMIT" > "$DIST_DIR/source-commit.txt"
 printf '%s\n' "$BUILD_PROFILE" > "$DIST_DIR/build-profile.txt"
+printf '%s\n' "${ABI_LIST[@]}" > "$DIST_DIR/android-abis.txt"
 printf '%s\n' \
   'net.java.dev.jna:jna:5.14.0@aar' \
   'org.jetbrains.kotlin:kotlin-stdlib:2.1.20' \

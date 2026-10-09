@@ -44,7 +44,7 @@ sha2 = "0.10"
 rand = "0.9.2"
 blake3 = "1"
 # Slice 2 Phase 2: carry ciphertext bytes across use case / facade / port
-# boundaries without extra clones. Matches uc-core + uc-infra.
+# boundaries without extra clones. Matches uc-core + uc-infra-profile.
 bytes = "1.7"
 url = "2"
 unicode-normalization = "0.1"

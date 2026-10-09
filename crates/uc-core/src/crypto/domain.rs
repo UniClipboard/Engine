@@ -2,7 +2,7 @@
 //!
 //! 这里只放**领域概念**——不涉及任何具体密码学算法、密钥层级、持久化格式。
 //! 所有基础设施细节（具体 KDF/AEAD 实现、密钥物料、元数据持久化）
-//! 位于 `uc-infra/src/security/`。
+//! 位于 `uc-infra-crypto` 与 `uc-infra-security`。
 //!
 //! 本模块暂不定义任何 port trait；port 形状由后续 usecase 实现反向驱动。
 

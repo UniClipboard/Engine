@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict'
 import { spawn, execFileSync } from 'node:child_process'
 import { once } from 'node:events'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readdirSync, readFileSync } from 'node:fs'
+import { cpSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, readdirSync, readFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { resolve, join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { setTimeout as delay } from 'node:timers/promises'
 import { createHash } from 'node:crypto'
+import { ONLINE_DEADLINE_MESSAGE, measureRecoveryMs, terminateRelay } from './relay-recovery-support.mjs'
 
 const options = new Map()
 for (let i = 2; i < process.argv.length; i += 2) options.set(process.argv[i], process.argv[i + 1])
@@ -17,8 +18,32 @@ const mode = options.get('--mode') ?? 'direct'
 assert(['direct', 'known-peer', 'legacy', 'relay'].includes(mode))
 const legacySide = Number(options.get('--legacy-side') ?? 1)
 const relayBinary = options.get('--relay')
+// 两端使用不同的 home relay（升级后新旧设备分别位于不同 relay 的真实拓扑）：
+// 第二个节点连接 --relay-b 指定的 relay 服务端，监听另一端口。
+const relayBinaryB = options.get('--relay-b')
+assert(!relayBinaryB || mode === 'relay')
+const relayPorts = [19090, relayBinaryB ? 19092 : 19090]
 const legacyBinary = options.get('--legacy-host')
-let relay
+// 混合版本：direct / known-peer / relay 场景中，指定一侧改用另一个版本的测试宿主，
+// 配对、互传与断线恢复的断言与同版本完全一致。
+// 诊断：relay-only 恢复未在三秒内完成时继续观察，记录实际恢复耗时（仍按原断言判失败），并保留节点日志。
+const convergeProbe = options.get('--converge-probe') === '1'
+const keepNodeLogs = options.get('--keep-node-logs') === '1'
+// 测量：relay 重启后记录双方重新在线的耗时（最长 40 秒），不断言三秒预算；
+// --demand-nudge 1 时，每秒从 A 向 B 发起一次发送（真实的出站需求），观察需求触发的网络通知能否加速恢复。
+const measureRecovery = options.get('--measure-recovery') === '1'
+// 让 relay 额外停机一段时间再启动，使重连退避增长到上限（毫秒）。
+const relayExtraDownMs = Number(options.get('--relay-extra-down-ms') ?? 0)
+const demandNudge = options.get('--demand-nudge') === '1'
+// 触发方式：send（出站发送需求）或 recover（宿主的网络恢复请求，公开的 RecoverNetwork）。
+const nudgeCommand = options.get('--nudge-command') ?? 'send'
+// 隔离 iroh 层：relay 启动后只发一次网络恢复请求，并记录双方与 relay 建立 TCP 连接的耗时。
+const singleNudge = options.get('--single-nudge') === '1'
+const tcpProbe = singleNudge || options.get('--tcp-probe') === '1'
+const peerBinary = options.get('--peer-host')
+const peerSide = Number(options.get('--peer-side') ?? 1)
+assert(!peerBinary || mode !== 'legacy')
+let relays = []
 const repeat = Number(options.get('--repeat') ?? 3)
 assert(Number.isInteger(repeat) && repeat > 0)
 // 多进程状态读取会跨过截止点少量时间；只给观测过程留余量，不改变 Engine 的二十秒预算。
@@ -84,7 +109,9 @@ class Host {
     this.commands = []
   }
   async start() {
-    const selected = mode === 'legacy' && this.label === String.fromCharCode(65 + legacySide) ? resolve(legacyBinary) : binary
+    const selected = mode === 'legacy' && this.label === String.fromCharCode(65 + legacySide)
+      ? resolve(legacyBinary)
+      : peerBinary && this.label === String.fromCharCode(65 + peerSide) ? resolve(peerBinary) : binary
     this.child = spawn('ip', ['netns', 'exec', this.namespace, selected], { stdio: ['pipe', 'pipe', 'pipe'] })
     this.child.stderr.resume()
     createInterface({ input: this.child.stdout }).on('line', line => {
@@ -219,7 +246,7 @@ async function online(group, budget) {
       if (!group.filter(peer => peer !== node).every(peer => peers.some(row => row.peer_id === peer.id && row.connected))) return false
     }
     return true
-  }, budget, 'automatic connection exceeded its deadline')
+  }, budget, ONLINE_DEADLINE_MESSAGE)
 }
 
 async function transfer(left, right, marker) {
@@ -351,22 +378,19 @@ function unblockPeerPair(left, right) {
   faults.push({ node: `${left.label}-${right.label}`, action: 'peer_pair_restored', at_ms: Math.round(performance.now()) })
 }
 
-function blockOutboundInitiation(node, peer) {
-  const peerIp = `10.233.0.${peer.index + 11}`
-  nft(node, 'add', 'table', 'inet', 'uc_initiator')
-  nft(node, 'add', 'chain', 'inet', 'uc_initiator', 'output', '{ type filter hook output priority -90; policy accept; }')
-  nft(node, 'add', 'rule', 'inet', 'uc_initiator', 'output', 'ip', 'daddr', peerIp, 'ct', 'state', 'new', 'counter', 'drop')
-  try { net(node, 'ping', '-c', '1', '-W', '1', peerIp); assert.fail('outbound initiation rule did not block the probe') }
-  catch (error) { if (error.code === 'ERR_ASSERTION') throw error }
-  const rules = JSON.parse(net(node, 'nft', '-j', 'list', 'table', 'inet', 'uc_initiator'))
-  const dropped = rules.nftables.flatMap(row => row.rule?.expr ?? []).reduce((total, expr) => total + (expr.counter?.packets ?? 0), 0)
-  assert(dropped > 0, 'outbound initiation counters remained empty')
-  faults.push({ node: `${node.label}->${peer.label}`, action: 'outbound_initiation_blocked', at_ms: Math.round(performance.now()), verified_dropped_packets: dropped })
+// UDP conntrack 的双向流量不能限定 QUIC 发起方向；在真实 connect 入口阻断新 reachability 拨号。
+// 成员历史交换、已建立连接和入站响应仍走正常网络，不引入恢复触发。
+async function blockReachabilityInitiation(node, peer) {
+  const endpoint = await peer.call('network_endpoint')
+  const result = await node.call('reject_reachability_dials', { endpoint_ids: [endpoint] })
+  assert.equal(result.blocked_peer_count, 1, 'reachability dial rejection did not select the peer')
+  faults.push({ node: `${node.label}->${peer.label}`, action: 'reachability_outbound_blocked', at_ms: Math.round(performance.now()), blocked_peer_count: result.blocked_peer_count })
 }
 
-function unblockOutboundInitiation(node, peer) {
-  net(node, 'nft', 'delete', 'table', 'inet', 'uc_initiator')
-  faults.push({ node: `${node.label}->${peer.label}`, action: 'outbound_initiation_restored', at_ms: Math.round(performance.now()) })
+async function unblockReachabilityInitiation(node, peer) {
+  const result = await node.call('reject_reachability_dials', { endpoint_ids: [] })
+  assert.equal(result.blocked_peer_count, 0, 'reachability dial rejection remained enabled')
+  faults.push({ node: `${node.label}->${peer.label}`, action: 'reachability_outbound_restored', at_ms: Math.round(performance.now()) })
 }
 
 async function scenario(id, action) {
@@ -434,9 +458,9 @@ async function knownPeerRecoveryScenarios(a, b, c) {
     }, 120_000, 'isolated new member did not become a known pending peer')
 
     const oldPort = c.bindPort
+    await blockReachabilityInitiation(a, c)
     await c.stop()
     await until(async () => (await b.call('peers')).some(peer => peer.peer_id === c.id && !peer.connected), 20_000, 'third member did not disconnect before the directed recovery')
-    blockOutboundInitiation(a, c)
     unblockPeerPair(a, c)
 
     blockDiscovery(a)
@@ -462,6 +486,12 @@ async function knownPeerRecoveryScenarios(a, b, c) {
             c.call('connections'),
             a.call('connections'),
           ])
+          const observations = records.at(-1).connection_directions ??= []
+          const sample = { initiator_incoming: cConnections.incoming, initiator_outgoing: cConnections.outgoing,
+            receiver_incoming: aConnections.incoming, receiver_outgoing: aConnections.outgoing }
+          if (JSON.stringify(observations.at(-1)?.counts) !== JSON.stringify(sample)) {
+            observations.push({ after_ms: Math.round(performance.now() - contactStarted), counts: sample })
+          }
           return cConnections.outgoing > 0 && aConnections.incoming > 0
         }, deadline - performance.now(), 'the recovered connection direction did not become observable')
         const forbidden = new Set(['opportunity', 'recover', 'send', 'suspend', 'resume'])
@@ -475,6 +505,7 @@ async function knownPeerRecoveryScenarios(a, b, c) {
           public_discovery_disabled: true,
           initiator_outbound: true,
           receiver_inbound: true,
+          receiver_rejected_outbound_dials: await a.call('rejected_dials'),
           automatic_online_within_ms: Math.round(onlineAt - contactStarted),
           forbidden_triggers_used: false,
         }
@@ -487,7 +518,7 @@ async function knownPeerRecoveryScenarios(a, b, c) {
         discoveryBlocked = false
       }
       if (outboundInitiationBlocked) {
-        unblockOutboundInitiation(a, c)
+        await unblockReachabilityInitiation(a, c)
         outboundInitiationBlocked = false
       }
     }
@@ -526,7 +557,7 @@ async function run() {
     net(node, 'ip', 'link', 'set', 'eth0', 'up')
     await node.start()
     if (mode === 'relay') {
-      await node.call('relay_config', { url: 'http://10.233.0.1:19090' })
+      await node.call('relay_config', { url: `http://10.233.0.1:${relayPorts[nodes.indexOf(node)]}` })
       await node.stop()
       await node.start()
     }
@@ -537,7 +568,7 @@ async function run() {
     for (const node of nodes) await node.stop()
     return
   }
-  if (mode === 'relay') await until(async () => nodes.every(node => net(node, 'ss', '-Hnt', 'state', 'established').includes(':19090')), 20_000, 'test hosts did not connect to the configured relay')
+  if (mode === 'relay') await until(async () => nodes.every(node => net(node, 'ss', '-Hnt', 'state', 'established').includes(`:${relayPorts[nodes.indexOf(node)]}`)), 20_000, 'test hosts did not connect to the configured relay')
   if (mode === 'legacy') {
     await legacyPairingIsRejected(nodes[0], nodes[1])
     for (const node of nodes) await node.stop()
@@ -676,19 +707,21 @@ async function legacyPairingIsRejected(sponsor, joiner) {
 
 async function startRelay() {
   assert(relayBinary, 'a locally built relay is required')
-  relay = spawn(resolve(relayBinary), ['10.233.0.1:19090'], { stdio: ['ignore', 'pipe', 'pipe'] })
-  relay.stderr.resume()
-  await Promise.race([
-    once(createInterface({ input: relay.stdout }), 'line').then(([line]) => assert.equal(line, 'ready')),
-    once(relay, 'exit').then(() => { throw new Error('local relay failed to start') }),
-    delay(5000).then(() => { throw new Error('relay startup deadline exceeded') }),
-  ])
+  const servers = [[relayBinary, relayPorts[0]]]
+  if (relayBinaryB) servers.push([relayBinaryB, relayPorts[1]])
+  relays = servers.map(([binary, port]) => spawn(resolve(binary), [`10.233.0.1:${port}`], { stdio: ['ignore', 'pipe', 'pipe'] }))
+  await Promise.all(relays.map(relay => {
+    relay.stderr.resume()
+    return Promise.race([
+      once(createInterface({ input: relay.stdout }), 'line').then(([line]) => assert.equal(line, 'ready')),
+      once(relay, 'exit').then(() => { throw new Error('local relay failed to start') }),
+      delay(5000).then(() => { throw new Error('relay startup deadline exceeded') }),
+    ])
+  }))
 }
 
 async function stopRelay() {
-  relay.kill('SIGINT')
-  await once(relay, 'exit')
-  assert.equal(relay.exitCode, 0, 'local relay failed to shut down')
+  for (const relay of relays) await terminateRelay(relay)
 }
 
 function blockDirect(node) {
@@ -722,7 +755,7 @@ async function relayScenarios(a, b) {
   for (const node of nodes) await node.stop()
   const directDropPackets = nodes.reduce((total, node) => total + blockDirect(node), 0)
   for (const node of nodes) await node.start()
-  await until(async () => nodes.every(node => net(node, 'ss', '-Hnt', 'state', 'established').includes(':19090')), 20_000, 'test hosts did not connect to the local relay')
+  await until(async () => nodes.every(node => net(node, 'ss', '-Hnt', 'state', 'established').includes(`:${relayPorts[nodes.indexOf(node)]}`)), 20_000, 'test hosts did not connect to the local relay')
   await online(nodes, 20_000)
   await transfer(a, b, 'relay-only-baseline')
   for (let iteration = 0; iteration < repeat; iteration++) {
@@ -737,14 +770,46 @@ async function relayScenarios(a, b) {
       }
       await stopRelay()
       await offline(b, 20_000)
+      if (relayExtraDownMs > 0) await delay(relayExtraDownMs)
       await startRelay()
-      await until(async () => nodes.every(node => net(node, 'ss', '-Hnt', 'state', 'established').includes(':19090')), 20_000, 'test hosts did not reconnect to the local relay')
-      const relayReadyAt = performance.now()
+      const relayStartedAt = performance.now()
+      if (!measureRecovery) await until(async () => nodes.every(node => net(node, 'ss', '-Hnt', 'state', 'established').includes(`:${relayPorts[nodes.indexOf(node)]}`)), 20_000, 'test hosts did not reconnect to the local relay')
+      const relayReadyAt = measureRecovery ? relayStartedAt : performance.now()
       proof.both_relay_transports_ready = true
+      if (measureRecovery) {
+        if (tcpProbe) {
+          const tcpStarted = performance.now()
+          const tcp = {}
+          const watcher = (async () => { while (Object.keys(tcp).length < nodes.length && performance.now() - tcpStarted < 40_000) { for (const node of nodes) { if (!(node.label in tcp) && net(node, 'ss', '-Hnt', 'state', 'established').includes(`:${relayPorts[nodes.indexOf(node)]}`)) tcp[node.label] = Math.round(performance.now() - tcpStarted) } await delay(50) } })()
+          if (singleNudge) { await delay(300); try { await a.call('recover'); await b.call('recover') } catch {} }
+          await watcher
+          proof.relay_tcp_ready_ms = tcp
+          proof.single_nudge = singleNudge
+        }
+        let nudging = demandNudge
+        const nudger = (async () => { let count = 0; while (nudging) { try { await (nudgeCommand === 'recover' ? a.call('recover') : a.call('send', { peer: b.id, text: `nudge-${iteration}-${count++}` })) } catch { count++ } await delay(1000) } return count })()
+        // 只有预期的 40 秒期限超时记为 null；宿主退出、命令错误等其他失败直接让场景失败。
+        proof.recovery_ms = await measureRecoveryMs(() => online(nodes, 40_000), relayReadyAt)
+        nudging = false
+        proof.nudge_sends = await nudger
+        proof.demand_nudge = demandNudge
+        proof.nudge_command = nudgeCommand
+        return
+      }
       const deadline = relayReadyAt + 3000
       const remaining = deadline - performance.now()
       assert(remaining > 0, 'relay transport observation exhausted the three-second recovery budget')
-      await online(nodes, remaining)
+      try { await online(nodes, remaining) }
+      catch (error) {
+        if (convergeProbe) {
+          const missedAt = performance.now()
+          proof.converged_after_deadline_ms = await measureRecoveryMs(() => online(nodes, 90_000), relayReadyAt)
+          if (proof.converged_after_deadline_ms === null) proof.not_converged_within_ms = Math.round(performance.now() - relayReadyAt)
+          proof.deadline_missed_at_ms = Math.round(missedAt - relayReadyAt)
+          proof.peer_state_after_probe = await Promise.all(nodes.map(async node => ({ node: node.label, peers: (await node.call('peers')).map(row => ({ connected: row.connected })) })))
+        }
+        throw error
+      }
       const onlineAt = performance.now()
       proof.relay_transport_ready_to_online_ms = Math.round(onlineAt - relayReadyAt)
       await transfer(a, b, `relay-only-healed-${iteration}`)
@@ -805,7 +870,7 @@ finally {
       if (node.child.exitCode === null && node.child.signalCode === null) { node.child.kill('SIGKILL'); await once(node.child, 'exit') }
     }
   }
-  if (relay?.exitCode === null && relay.signalCode === null) { relay.kill('SIGINT'); await once(relay, 'exit') }
+  for (const relay of relays) if (relay.exitCode === null && relay.signalCode === null) { relay.kill('SIGINT'); await once(relay, 'exit') }
   server?.close()
   let plaintextClean = false
   if (nodes.length) {
@@ -819,8 +884,11 @@ finally {
   let cleaned = true
   for (const namespace of namespaces.reverse()) { try { ip('netns', 'del', namespace) } catch { cleaned = false } }
   try { ip('link', 'del', bridge) } catch { cleaned = false }
+  if (keepNodeLogs) {
+    for (const node of nodes) { try { cpSync(join(node.root, 'logs'), join(evidence, 'node-logs', `${mode}-${node.label}`), { recursive: true }) } catch {} }
+  }
   rmSync(root, { recursive: true, force: true })
-  const binaries = [binary, legacyBinary, relayBinary].filter(Boolean).map(path => ({ sha256: createHash('sha256').update(readFileSync(path)).digest('hex') }))
+  const binaries = [binary, legacyBinary, peerBinary, relayBinary, relayBinaryB].filter(Boolean).map(path => ({ sha256: createHash('sha256').update(readFileSync(path)).digest('hex') }))
   if (!cleaned) failed = true
   const reproduction = `bash scripts/testing/run-connection-recovery-e2e.sh --suite network --repeat ${repeat} --mode ${mode}${only ? ` --case ${only}` : ''}`
   const timingCompletedAt = performance.now()
@@ -831,6 +899,6 @@ finally {
     cleanup_ms: Math.round(timingCompletedAt - cleanupStartedAt),
     total_ms: Math.round(timingCompletedAt - timingStartedAt),
   }
-  writeFileSync(join(evidence, `${mode}${mode === 'legacy' ? `-${legacySide}` : ''}.json`), JSON.stringify({ sequence: 'fixed-short-long-heal-v2', reproduction, binaries, faults, records, timings, cleaned, plaintext_clean: plaintextClean, failed, nodes: nodes.map(node => ({ label: node.label, version: node.version, events: node.timeline, resources: node.resources, failure_reasons: node.failureReasons, network_facts: node.networkFacts })) }, null, 2), { mode: 0o600 })
+  writeFileSync(join(evidence, `${mode}${mode === 'legacy' ? `-${legacySide}` : ''}${peerBinary ? `-mixed-${peerSide}` : ''}${relayBinaryB ? '-split-relays' : ''}.json`), JSON.stringify({ sequence: 'fixed-short-long-heal-v2', reproduction, binaries, faults, records, timings, cleaned, plaintext_clean: plaintextClean, failed, nodes: nodes.map(node => ({ label: node.label, version: node.version, events: node.timeline, resources: node.resources, failure_reasons: node.failureReasons, network_facts: node.networkFacts })) }, null, 2), { mode: 0o600 })
 }
 process.exitCode = failed ? 1 : 0

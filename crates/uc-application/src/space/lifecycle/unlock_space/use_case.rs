@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tracing::{debug, info, instrument};
+use tracing::instrument;
 use uc_core::crypto::domain::Passphrase;
 use uc_core::ids::SpaceId;
 use uc_core::ports::space::SpaceAccessError;
@@ -13,6 +13,7 @@ use crate::space::lifecycle::{
 use super::error::UnlockSpaceError;
 use super::ports::UnlockSpacePort;
 use super::readiness::LocalSessionReadiness;
+use uc_observability_contract::{uc_debug, uc_info};
 
 pub(crate) struct UnlockSpaceUseCase {
     space_access: Arc<dyn UnlockSpacePort>,
@@ -69,7 +70,7 @@ impl UnlockSpaceUseCase {
         let space_id = match self.current_space_identity.current_space_id().await {
             Ok(Some(space_id)) => space_id,
             Ok(None) => {
-                debug!("unlock rejected: current Space is absent");
+                uc_debug!("unlock rejected: current Space is absent");
                 return Err(UnlockSpaceError::SetupNotCompleted);
             }
             Err(error) => {
@@ -82,7 +83,7 @@ impl UnlockSpaceUseCase {
 
         match self.space_access.unlock(&space_id, passphrase).await {
             Ok(_) => {
-                info!("space unlocked");
+                uc_info!("space unlocked");
                 self.analytics.capture(Event::SpaceUnlocked);
                 Ok(space_id)
             }

@@ -126,7 +126,7 @@ fn install_test_observability(remote: Option<OtlpHttpConfig>) -> bool {
         .and_then(|worker| {
             worker
                 .join()
-                // panic 载荷不是 Error，结果只用于判定任务是否正常结束。
+                // discarded-source[no-information]: the error value carries no usable diagnostic information
                 .map_err(|_| std::io::Error::other("observability install panicked"))
         })
     else {

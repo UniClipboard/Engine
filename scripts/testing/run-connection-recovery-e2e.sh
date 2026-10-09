@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# 当前脚本与所有嵌套 Cargo 调用统一经由 MBX。
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../build-cache/env.sh"
+
 usage() {
-  echo "Usage: $0 [--suite all|local|network] [--repeat N] [--mode all|direct|known-peer|relay|legacy] [--case PREFIX] [--prebuilt]"
+  echo "Usage: $0 [--suite all|local|network] [--repeat N] [--mode all|direct|known-peer|relay|legacy] [--case PREFIX] [--prebuilt] [--peer-host PATH --peer-side 0|1] [--relay-binary PATH] [--relay-b PATH]"
   echo "  --repeat applies to the network scenarios only; the local suite always runs once."
+  echo "  --peer-host runs one side of the direct, known-peer or relay scenarios with another version's test host; --relay-binary replaces the relay server; --relay-b gives the second node its own relay server (different home relays)."
   echo "  --prebuilt reuses the test host already built in the cargo target directory, such as by the workspace test build."
 }
 
@@ -12,6 +16,10 @@ repeat=3
 mode=all
 case_prefix=
 prebuilt=0
+peer_host=
+peer_side=1
+relay_binary=
+relay_b=
 while (($#)); do
   case "$1" in
     --suite) suite=$2; shift 2 ;;
@@ -19,6 +27,10 @@ while (($#)); do
     --mode) mode=$2; shift 2 ;;
     --case) case_prefix=$2; shift 2 ;;
     --prebuilt) prebuilt=1; shift ;;
+    --peer-host) peer_host=$2; shift 2 ;;
+    --peer-side) peer_side=$2; shift 2 ;;
+    --relay-binary) relay_binary=$2; shift 2 ;;
+    --relay-b) relay_b=$2; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -34,9 +46,9 @@ cd "$repo"
 # 三个包的测试在一次构建中完成特性解析，避免分次调用时按不同特性组合重复编译共同依赖。
 if [[ "$suite" != network ]]; then
   cargo nextest run --profile ci --locked --test-threads 1 \
-    -p uc-infra -p uc-application -p uc-engine --features uc-engine/dev-tools \
+    -p uc-infra-p2p -p uc-application -p uc-engine --features uc-engine/dev-tools \
     --lib --test space_membership_auto_pairing_e2e \
-    -E '(package(uc-infra) & kind(lib) & (test(peer_reachability) | test(protocol_router) | test(rejecting_new_dials_keeps_established_streams_usable)))
+    -E '(package(uc-infra-p2p) & kind(lib) & (test(peer_reachability) | test(protocol_router) | test(rejecting_new_dials_keeps_established_streams_usable)))
       | (package(uc-application) & kind(lib) & test(space::connectivity))
       | (package(uc-engine) & binary(space_membership_auto_pairing_e2e)
         & (test(=automatic_connections::existing_connections_survive_rejected_new_dials)
@@ -89,10 +101,14 @@ rustc --version > "$evidence/rust-version.txt"
 node --version > "$evidence/node-version.txt"
 runner=(node "$repo/scripts/testing/connection-recovery-network.mjs" --host "$target/debug/uc-connectivity-host" --repeat "$repeat" --evidence "$evidence")
 if [[ -n "$case_prefix" ]]; then runner+=(--case "$case_prefix"); fi
+if [[ -n "$peer_host" ]]; then
+  [[ "$mode" != all && "$mode" != legacy && -x "$peer_host" && "$peer_side" =~ ^[01]$ ]] || { echo "--peer-host needs an executable, --peer-side 0|1 and a single non-legacy --mode." >&2; exit 2; }
+  runner+=(--peer-host "$peer_host" --peer-side "$peer_side")
+fi
 if ((EUID != 0)); then runner=(sudo -- "${runner[@]}"); fi
 if [[ "$mode" == all || "$mode" == direct ]]; then "${runner[@]}" --mode direct; fi
 if [[ "$mode" == all || "$mode" == known-peer ]]; then "${runner[@]}" --mode known-peer; fi
-if [[ "$mode" == all || "$mode" == relay ]]; then "${runner[@]}" --mode relay --relay "$target/debug/uc-connectivity-relay"; fi
+if [[ "$mode" == all || "$mode" == relay ]]; then "${runner[@]}" --mode relay --relay "${relay_binary:-$target/debug/uc-connectivity-relay}" ${relay_b:+--relay-b "$relay_b"}; fi
 if [[ "$mode" == all || "$mode" == legacy ]]; then
   "${runner[@]}" --mode legacy --legacy-host "$target/upgrade-anchors/$legacy_revision/bin/uc-connectivity-host" --legacy-side 0
 fi

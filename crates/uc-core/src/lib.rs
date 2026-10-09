@@ -10,6 +10,7 @@ pub mod blob;
 pub mod clipboard;
 pub mod config;
 pub mod crypto;
+pub mod error_class;
 pub mod file_transfer;
 pub mod ids;
 pub mod membership;

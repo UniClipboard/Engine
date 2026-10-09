@@ -8,6 +8,7 @@
 //!   broadcast;
 //! - `history` — cleanup, retention, delete, detail, resource, favorite and
 //!   file reconciliation;
+//! - `history_tags` — local user tags and their manual entry associations;
 //! - `restore` — restore selection, plain text and file paths;
 //! - `sync` — inbound materialization, codec, dispatch, resend, receive
 //!   gate, active state and the outbound plan;
@@ -19,6 +20,7 @@ pub(crate) mod capture;
 pub(crate) mod entry_identity;
 pub(crate) mod file_set_query;
 pub(crate) mod history;
+pub(crate) mod history_tags;
 pub(crate) mod inbound;
 pub(crate) mod local;
 pub(crate) mod outbound;

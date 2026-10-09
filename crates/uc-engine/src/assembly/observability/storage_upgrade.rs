@@ -1,7 +1,7 @@
 use std::time::Instant;
 use tracing::Instrument;
 
-use uc_infra::security::{ProfileStorageUpgradeError, ProfileStorageUpgradeOutcome};
+use uc_infra_profile::security::{ProfileStorageUpgradeError, ProfileStorageUpgradeOutcome};
 use uc_observability_contract::diagnostics::{
     complete_operation, complete_unassociated_operation, operation_span, DiagnosticDomain,
     DiagnosticErrorType, DiagnosticOperation, DiagnosticRole, DiagnosticSpanKind,
@@ -174,7 +174,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
-    use uc_infra::security::{ProfileStorageUpgradeError, ProfileStorageUpgradeOutcome};
+    use uc_infra_profile::security::{ProfileStorageUpgradeError, ProfileStorageUpgradeOutcome};
 
     use super::{profile_storage_upgrade_span, record_profile_storage_upgrade};
 

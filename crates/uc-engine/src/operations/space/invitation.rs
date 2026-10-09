@@ -3,10 +3,9 @@
 //! The daemon uses this internal seam only while its remaining callers migrate
 //! to `Engine`. Do not re-export it from the crate root.
 
-use tracing::error;
 use uc_application::facade::{AppFacade, IssuePairingInvitationError};
 use uc_observability_contract::analytics::{AnalyticsFacade, Event, InvitationIssueErrorCategory};
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_error};
 
 use crate::error_codes::{
     INVITATION_DIRECTORY_INVALID_RESPONSE_CODE, INVITATION_DIRECTORY_REJECTED_CODE,
@@ -124,7 +123,7 @@ fn map_issue_invitation_error(error: IssuePairingInvitationError) -> EngineError
             true,
         ),
         IssuePairingInvitationError::PassphraseChangeRecovery { .. } => {
-            error!(
+            uc_error!(
                 error_kind = "invitation_recovery_required",
                 io_error_kind = io_error_kind(&error),
                 "issue invitation requires passphrase change recovery"
@@ -136,7 +135,7 @@ fn map_issue_invitation_error(error: IssuePairingInvitationError) -> EngineError
             )
         }
         IssuePairingInvitationError::Internal(_) => {
-            error!(
+            uc_error!(
                 error_kind = "issue_invitation",
                 io_error_kind = io_error_kind(&error),
                 "issue invitation failed"

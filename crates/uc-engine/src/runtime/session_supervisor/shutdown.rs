@@ -1,9 +1,7 @@
 use std::time::Duration;
 
 use tokio::time::Instant;
-use tracing::info;
-#[cfg(feature = "lan-compat")]
-use tracing::warn;
+
 use uc_application::deps::LifecycleError;
 use uc_core::FileTransferCancellationReason;
 use uc_observability_contract::diagnostics::connectivity::{
@@ -13,6 +11,9 @@ use uc_observability_contract::diagnostics::connectivity::{
 use super::{lifecycle_error, ProductionSession, SessionSupervisor};
 use crate::runtime::task_shutdown::shutdown_tasks;
 use crate::EngineError;
+use uc_observability_contract::uc_info;
+#[cfg(feature = "lan-compat")]
+use uc_observability_contract::uc_warn;
 
 impl ProductionSession {
     pub(super) async fn shutdown(
@@ -23,10 +24,10 @@ impl ProductionSession {
         let task_deadline =
             deadline.or_else(|| Instant::now().checked_add(Duration::from_millis(500)));
         let mut errors = Vec::new();
-        info!("Engine session 开始关闭");
+        uc_info!("Engine session 开始关闭");
         #[cfg(feature = "lan-compat")]
         if let Err(error) = self.mobile_sync.shutdown_mobile_file_uploads().await {
-            warn!("mobile file upload shutdown finished with an error");
+            uc_warn!("mobile file upload shutdown finished with an error");
             errors.push(anyhow::Error::new(error).context("stop mobile file uploads"));
         }
         let stopping = LocalWorkObservation::begin(LocalWorkStep::SessionStopTasks);
@@ -41,7 +42,7 @@ impl ProductionSession {
         if let Err(error) = stopped.into_result() {
             errors.push(error.into());
         }
-        info!("Engine session 网络观测任务已停止");
+        uc_info!("Engine session 网络观测任务已停止");
         let stopping = LocalWorkObservation::begin(LocalWorkStep::SessionStopApplication);
         let application_shutdown = self.application.shutdown(deadline).await;
         stopping.finish(if application_shutdown.is_ok() {
@@ -52,7 +53,7 @@ impl ProductionSession {
         if let Err(error) = application_shutdown {
             errors.push(error.into());
         }
-        info!("Engine session Application runtime 已停止");
+        uc_info!("Engine session Application runtime 已停止");
         let stopping = LocalWorkObservation::begin(LocalWorkStep::SessionStopNetwork);
         let network_shutdown = self.sync_session.shutdown(transfer_reason, deadline).await;
         stopping.finish(if network_shutdown.is_ok() {
@@ -63,7 +64,7 @@ impl ProductionSession {
         if let Err(error) = network_shutdown {
             errors.push(error.into());
         }
-        info!("Engine session 网络会话任务已停止");
+        uc_info!("Engine session 网络会话任务已停止");
         LifecycleError::from_errors(errors)
     }
 }

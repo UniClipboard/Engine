@@ -126,7 +126,7 @@ impl MembershipLedger {
         membership.peers.remove(&membership.local_device_id);
         membership
             .normalize()
-            // Core 内部纯校验改分类：下层同样是 Core 领域校验，没有外部失败。
+            // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
             .map_err(|_| LedgerTransitionError::InvalidSnapshot)?;
         membership.validate()?;
         Ok(membership)

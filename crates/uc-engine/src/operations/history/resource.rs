@@ -2,13 +2,13 @@
 
 use crate::error_codes::*;
 
-use tracing::error;
 use uc_application::facade::{AppFacade, ResourceFacadeError};
 
 use crate::{
     BinaryResourceSummary, BlobResourceInput, EngineError, EngineErrorCategory,
     EntryFileResourceSummary, HistoryEntryInput, OperationResult, ThumbnailResourceInput,
 };
+use uc_observability_contract::uc_error;
 
 pub async fn execute_read_blob(
     facade: &AppFacade,
@@ -65,7 +65,7 @@ fn map_resource_error(error: ResourceFacadeError, not_found_code: u32) -> Engine
             EngineError::new(not_found_code, EngineErrorCategory::NotFound, false)
         }
         ResourceFacadeError::Mismatch(_) | ResourceFacadeError::Internal(_) => {
-            error!("binary resource read failed");
+            uc_error!("binary resource read failed");
             EngineError::new(
                 RESOURCE_READ_FAILED_CODE,
                 EngineErrorCategory::Internal,

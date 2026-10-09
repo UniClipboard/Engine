@@ -33,6 +33,7 @@ impl ResolveMembershipConflictUseCase {
         }
     }
 
+    #[tracing::instrument(name = "usecase.resolve_membership_conflict.execute", skip_all)]
     pub(crate) async fn execute(
         &self,
         input: ResolveMembershipConflictInput,

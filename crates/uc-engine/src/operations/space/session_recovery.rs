@@ -7,9 +7,8 @@ use std::error::Error;
 
 use crate::error_codes::*;
 
-use tracing::error;
 use uc_application::facade::{AppFacade, RecoverSpaceSessionError, SpaceActivityError};
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_error};
 
 use crate::{EngineError, EngineErrorCategory, OperationResult, RecoverSessionInput};
 
@@ -59,8 +58,8 @@ fn recover_session_error(
     error: impl Into<Box<dyn Error + Send + Sync>>,
 ) -> EngineError {
     let error = error.into();
-    error!(
-        context,
+    uc_error!(
+        context = context,
         io_error_kind = io_error_kind(error.as_ref()),
         "engine session recovery failed"
     );

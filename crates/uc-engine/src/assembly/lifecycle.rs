@@ -8,14 +8,23 @@ use std::sync::Arc;
 use anyhow::Context as _;
 
 use crate::assembly::deps::SyncEngineDeps;
+use crate::assembly::network::load_relay_access_tokens;
 use crate::assembly::sync_engine::{prepare_sync_session, PreparedSyncSession};
 #[cfg(feature = "dev-tools")]
 use crate::dev::JoinerFinalConfirmationGate;
 use crate::subsystems::reconcile::{reconcile_peer_addresses, reconcile_trusted_peers};
+use uc_application::facade::settings::AppliedRelayRouting;
 use uc_application::facade::ApplicationAssembly;
-use uc_infra::network::iroh::{IrohIdentityStore, IrohNode, IrohNodeBuilder, IrohSessionBuilder};
-use uc_infra::security::Sha256IdentityFingerprintFactory;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_core::settings::relay_routing::RelayRouting;
+use uc_infra_p2p::network::iroh::{
+    IrohIdentityStore, IrohNode, IrohNodeBuilder, IrohSessionBuilder,
+};
+use uc_infra_profile::security::Sha256IdentityFingerprintFactory;
+use uc_observability_contract::{
+    error_source::io_error_kind,
+    log_fields::{log_vocab, log_vocab_debug},
+    uc_info, uc_warn,
+};
 
 /// 建立一次 Engine 活跃期内唯一的长期网络节点。
 pub async fn build_network_runtime(
@@ -24,7 +33,7 @@ pub async fn build_network_runtime(
     rendezvous_base_url: Option<String>,
     relay_fallback_override: Option<bool>,
     iroh_bind_port_override: Option<u16>,
-    network_partition_gate: Option<uc_infra::network::iroh::IrohNetworkPartitionGate>,
+    network_partition_gate: Option<uc_infra_p2p::network::iroh::IrohNetworkPartitionGate>,
 ) -> anyhow::Result<IrohNode> {
     let prepared_network = application
         .prepare_network()
@@ -33,19 +42,27 @@ pub async fn build_network_runtime(
     let allow_relay_fallback =
         relay_fallback_override.unwrap_or(prepared_network.allow_relay_fallback);
     let allow_overlay_network_addrs = prepared_network.allow_overlay_network_addrs;
-    let custom_relay_urls = prepared_network.custom_relay_urls;
+    let relay_routing =
+        RelayRouting::resolve(allow_relay_fallback, &prepared_network.custom_relay_urls);
+    let relay_urls = relay_routing.effective_urls(&prepared_network.custom_relay_urls);
+    // 绑定成功前不得声称任何 relay 已生效；上一个节点的记录也不再有效。
+    application.record_applied_relays(None);
+    let applied_relays = AppliedRelayRouting {
+        routing: relay_routing,
+        urls: relay_urls.clone(),
+    };
     let congestion_controller = prepared_network.congestion_controller;
     let mut iroh_config = crate::assembly::network::relay_policy_to_iroh_config(
         allow_relay_fallback,
         allow_overlay_network_addrs,
-        custom_relay_urls,
+        relay_urls,
         congestion_controller,
         rendezvous_base_url,
     );
-    crate::assembly::network::load_relay_access_tokens(
-        &mut iroh_config,
-        &prepared_network.relay_credentials,
-    );
+    // 内置 relay 不携带凭据；只有用户自定义路由才读取安全存储。
+    if relay_routing == RelayRouting::Custom {
+        load_relay_access_tokens(&mut iroh_config, &prepared_network.relay_credentials);
+    }
     crate::assembly::network::apply_iroh_direct_reachability_from_env(&mut iroh_config);
     if let Some(port) = iroh_bind_port_override {
         iroh_config.bind_port = Some(port);
@@ -53,19 +70,15 @@ pub async fn build_network_runtime(
     iroh_config.network_partition_gate = network_partition_gate;
     crate::assembly::network::apply_congestion_controller_from_env(&mut iroh_config);
 
-    tracing::info!(
+    uc_info!(
         target: "settings.network",
-        allow_relay_fallback,
+        allow_relay_fallback = allow_relay_fallback,
         disable_relays = iroh_config.disable_relays,
         allow_overlay_network_addrs = iroh_config.allow_overlay_network_addrs,
-        custom_relay_count = iroh_config.custom_relay_urls.len(),
-        congestion_controller = %iroh_config.congestion_controller,
-        "applying network settings: allow_relay_fallback={} → disable_relays={}, allow_overlay_network_addrs={}, custom_relay_count={}, cc={}",
-        allow_relay_fallback,
-        iroh_config.disable_relays,
-        iroh_config.allow_overlay_network_addrs,
-        iroh_config.custom_relay_urls.len(),
-        iroh_config.congestion_controller,
+        mode = log_vocab_debug(&relay_routing),
+        relay_count = iroh_config.relay_urls.len(),
+        congestion_controller = log_vocab(&iroh_config.congestion_controller),
+        "applying network settings"
     );
 
     let identity_store = IrohIdentityStore::new(
@@ -75,6 +88,7 @@ pub async fn build_network_runtime(
     let builder = IrohNodeBuilder::bind(&identity_store, iroh_config)
         .await
         .context("Iroh network bind failed")?;
+    application.record_applied_relays(Some(applied_relays));
     Ok(builder.spawn())
 }
 
@@ -115,7 +129,7 @@ pub async fn reconcile_session_peers(space_setup: &SyncEngineDeps) {
     )
     .await
     {
-        tracing::warn!(
+        uc_warn!(
             error_kind = "peer_addr_reconcile",
             io_error_kind = io_error_kind(err.as_ref()),
             "peer_addr reconcile failed at boot; daemon continues with whatever orphans remain"
@@ -127,7 +141,7 @@ pub async fn reconcile_session_peers(space_setup: &SyncEngineDeps) {
     )
     .await
     {
-        tracing::warn!(
+        uc_warn!(
             error_kind = "trusted_peer_reconcile",
             io_error_kind = io_error_kind(err.as_ref()),
             "trusted_peer reconcile failed at boot; daemon continues with whatever orphans remain"

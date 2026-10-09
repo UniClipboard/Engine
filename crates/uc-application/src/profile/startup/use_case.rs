@@ -31,6 +31,7 @@ impl PrepareProfileStartupUseCase {
         }
     }
 
+    #[tracing::instrument(name = "usecase.profile_startup.execute", skip_all)]
     pub async fn execute(&self) -> Result<ProfileLifecycle, ProfileStartupError> {
         let backed_up = self.ensure_backup().await?;
         let existing = self.lifecycle.load()?;
@@ -69,11 +70,7 @@ impl PrepareProfileStartupUseCase {
         if !state.has_data || (has_known_version && known_versions_are_current) {
             return Ok(false);
         }
-        if self.backup.read_prepared_target()?.as_ref() == Some(&self.target) {
-            self.backup.verify_prepared(&self.target).await?;
-        } else {
-            self.backup.capture_verified(&self.target).await?;
-        }
+        self.backup.capture_verified(&self.target).await?;
         Ok(true)
     }
 }

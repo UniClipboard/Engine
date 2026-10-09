@@ -1,0 +1,34 @@
+//! `uc-infra-storage::search` — persistence foundation for local encrypted search.
+//!
+//! This module owns:
+//! - `constants`: authoritative `CURRENT_INDEX_VERSION` and field-mask bit positions.
+//! - `rows`: adapter-owned Diesel row types with `profile_id` and domain conversion helpers.
+//!
+//! Profile scoping (`profile_id`) is a persistence concern owned here.
+//! It is NOT added to `uc-core` search domain structs.
+
+pub mod constants;
+pub(crate) mod error;
+pub mod pipeline;
+pub mod render_payload;
+pub mod rows;
+pub mod search_key_derivation;
+pub mod sqlite_index;
+pub mod text_extractor;
+pub mod tokenizer;
+mod v3_protection;
+
+#[cfg(test)]
+mod sqlite_v3_tests;
+#[cfg(test)]
+mod v3_protection_tests;
+
+pub use constants::*;
+pub use pipeline::*;
+pub use render_payload::*;
+pub use rows::*;
+pub use search_key_derivation::*;
+pub use sqlite_index::*;
+pub use text_extractor::*;
+pub use tokenizer::*;
+pub use v3_protection::*;

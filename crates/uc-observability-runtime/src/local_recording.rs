@@ -1,4 +1,5 @@
 //! 进程运行时的本地关联元数据；对端映射有界且只驻留内存。
+use crate::build_source::build_source;
 use crate::config::ObservabilityResource;
 use crate::local_capture::CapturePolicy;
 use crate::local_file::LocalFileRuntime;
@@ -154,8 +155,9 @@ impl LocalRecordingState {
         record["platform"] = json!(self.resource.os.as_str());
         record["environment"] = json!(self.resource.environment.as_str());
         record["app_channel"] = json!(self.resource.app_channel);
-        record["source_commit"] = json!(env!("UC_OBSERVABILITY_SOURCE_COMMIT"));
-        record["source_state"] = json!(env!("UC_OBSERVABILITY_SOURCE_STATE"));
+        let source = build_source();
+        record["source_commit"] = json!(source.commit);
+        record["source_state"] = json!(source.state);
         if let Some(peer) =
             uc_observability_contract::diagnostics::connectivity::local_connection_peer()
         {
@@ -179,6 +181,43 @@ impl LocalRecordingState {
         self.annotate_stored(record);
     }
 
+    /// 是否处于 Detailed 采集窗口；用于模块日志的 DEBUG 等级门。
+    pub(crate) fn detailed_active(&self) -> bool {
+        self.capture
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active_capture_id(Instant::now())
+            .is_some()
+    }
+
+    /// 给模块日志记录补充运行与采集元数据；不接触连接、对端等合同记录才有的关联。
+    pub(crate) fn module_metadata(&self, record: &mut Value) {
+        record["local_schema_version"] = json!(2);
+        record["run_id"] = json!(self.run_id.to_string());
+        record["monotonic_offset_ms"] =
+            json!(u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX));
+        record["engine_version"] = json!(env!("CARGO_PKG_VERSION"));
+        record["host_version"] = json!(self.resource.service_version);
+        record["platform"] = json!(self.resource.os.as_str());
+        record["environment"] = json!(self.resource.environment.as_str());
+        record["app_channel"] = json!(self.resource.app_channel);
+        let source = build_source();
+        record["source_commit"] = json!(source.commit);
+        record["source_state"] = json!(source.state);
+        let capture = self
+            .capture
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active_capture_id(Instant::now());
+        match capture {
+            Some(id) => {
+                record["capture_mode"] = json!("detailed");
+                record["capture_id"] = json!(id.to_string());
+            }
+            None => record["capture_mode"] = json!("standard"),
+        }
+    }
+
     pub(crate) fn status(&self, local_file: SetupStatus, closed: bool) -> LocalDiagnosticStatus {
         let mut policy = self
             .capture
@@ -194,7 +233,7 @@ impl LocalRecordingState {
             schema_rejected_records: policy.rejected,
             correlation_limited_records: policy.limited,
             engine_version: env!("CARGO_PKG_VERSION").into(),
-            source_commit: env!("UC_OBSERVABILITY_SOURCE_COMMIT").into(),
+            source_commit: build_source().commit.into(),
             counter_scope: "typed_events_only",
             sources: policy.coverage(),
             local_file,

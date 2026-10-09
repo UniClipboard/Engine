@@ -1,0 +1,7 @@
+error: no rules expected `value`
+ --> tests/ui/fail/interpolated_message.rs:5:48
+  |
+5 |     uc_warn!(error_kind = "fixed", "value {}", value);
+  |                                                ^^^^^ no rules expected this token in macro call
+  |
+  = note: while trying to match sequence end

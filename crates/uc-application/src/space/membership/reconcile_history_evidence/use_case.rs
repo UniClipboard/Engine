@@ -21,6 +21,7 @@ impl ReconcileMembershipEvidenceUseCase {
         Self { owner }
     }
 
+    #[tracing::instrument(name = "usecase.reconcile_history_evidence.execute", skip_all)]
     pub(crate) async fn execute(
         &self,
         source_device_id: &uc_core::ids::DeviceId,

@@ -1,4 +1,5 @@
 use crate::error::anyhow_error_constructor;
+use uc_core::error_class::ErrorClass;
 
 #[derive(Debug, thiserror::Error)]
 pub enum JoinerActivationStateError {
@@ -22,6 +23,17 @@ pub enum JoinerActivationStateError {
         #[source]
         source: anyhow::Error,
     },
+}
+
+impl ErrorClass for JoinerActivationStateError {
+    fn class(&self) -> &'static str {
+        match self {
+            Self::Locked { .. } => "locked",
+            Self::StateChanged { .. } => "state_changed",
+            Self::RecoveryRequired { .. } => "recovery_required",
+            Self::Unavailable { .. } => "unavailable",
+        }
+    }
 }
 
 impl JoinerActivationStateError {

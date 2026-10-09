@@ -259,6 +259,8 @@ pub struct SpaceAdmissionSupersededTerminal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpaceAdmissionRecoveryRequiredTerminal {
     pub(super) category: AdmissionRecoveryCategory,
+    /// 从发生转换时的 Joiner 状态捕获；旧格式只保存类别，重新打开时为 `None`。
+    pub(super) join_id: Option<JoinId>,
 }
 
 #[cfg(test)]

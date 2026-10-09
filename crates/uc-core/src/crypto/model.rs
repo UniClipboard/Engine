@@ -2,9 +2,9 @@
 //!
 //! 本模块最终保留的跨 crate 领域符号:
 //! - `Passphrase`: 用户提供的解锁口令;uc-application / cli 等领域输入类型
-//! - `EncryptionError`: 跨 crate 错误类型(uc-infra `KeySlotStore` port 等返回)
+//! - `EncryptionError`: 跨 crate 错误类型(uc-infra-security `KeySlotStore` port 等返回)
 //!
-//! 其余符号已物理下沉到 `uc-infra/src/security/`:
+//! 其余符号已物理下沉到 `uc-infra-crypto/src/`:
 //! - `Kek` / `MasterKey`  → `secrets.rs`(Slice 4 B.4.5)
 //! - `KdfParams` / `KdfParamsV1` / `KeySlot` / `WrappedMasterKey` /
 //!   `EncryptedBlob` / `KeySlotFile` / `KeySlotConvertError` / `KeyScope`

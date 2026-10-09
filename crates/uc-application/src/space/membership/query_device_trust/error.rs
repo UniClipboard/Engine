@@ -1,3 +1,5 @@
+use uc_core::error_class::ErrorClass;
+
 use crate::space::membership::MembershipLedgerError;
 
 #[derive(Debug, thiserror::Error)]
@@ -16,6 +18,17 @@ pub enum QueryDeviceTrustError {
         #[source]
         source: anyhow::Error,
     },
+}
+
+impl ErrorClass for QueryDeviceTrustError {
+    fn class(&self) -> &'static str {
+        match self {
+            Self::Locked => "locked",
+            Self::RecoveryRequired { .. } => "recovery_required",
+            Self::Unavailable => "unavailable",
+            Self::Dependency { .. } => "dependency",
+        }
+    }
 }
 
 /// 纯状态或输入校验失败时 `source` 为空；有下层错误时保留为来源。

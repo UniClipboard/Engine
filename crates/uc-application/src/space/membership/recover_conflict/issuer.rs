@@ -92,6 +92,7 @@ impl IssueMembershipBranchRecoveryUseCase {
 
 #[async_trait::async_trait]
 impl IssueMembershipBranchRecoveryPort for IssueMembershipBranchRecoveryUseCase {
+    #[tracing::instrument(name = "usecase.issue_membership_branch_recovery.begin", skip_all)]
     async fn begin_membership_branch_recovery(
         &self,
         input: BeginMembershipBranchRecoveryInput,

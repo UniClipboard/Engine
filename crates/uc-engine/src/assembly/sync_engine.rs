@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::time::Instant;
 
-use tracing::{info, instrument};
+use tracing::instrument;
 
 use outbound_progress::OutboundProgressRuntime;
 
@@ -34,16 +34,16 @@ use uc_core::ports::{
     ActiveClipboardDispatchPort, ActiveClipboardReceiverPort, ClipboardDispatchPort,
     ConnectionChannelPort, LocalIdentityPort, PeerReachabilityPort,
 };
-use uc_infra::fs::{
+use uc_infra_local::fs::{
     FsAtomicPublisher, FsDirectoryStagingCleaner, FsHiddenPathMarker, FsInboundFileTarget,
 };
-use uc_infra::network::iroh::{
+use uc_infra_p2p::network::iroh::{
     encode_space_admission_route, ActiveClipboardHandlers, ActiveClipboardPullHandlers,
     BlobHandlers, ClipboardHandlers, GroupUpdateHandlers, IrohIdentityStore, IrohNodeError,
     IrohSessionBuilder, PreparedIrohSession, TransferProgressHandlers,
 };
-use uc_infra::security::Sha256IdentityFingerprintFactory;
-use uc_infra::space::{
+use uc_infra_profile::security::Sha256IdentityFingerprintFactory;
+use uc_infra_profile::space::{
     DefaultJoinerActivationExecutor, DefaultJoinerActivationPreparation,
     DefaultJoinerAppliedPreparation, DefaultJoinerCancellationPreparation,
     DefaultJoinerCandidatePreparation, DefaultJoinerInvitationPreparation,
@@ -55,6 +55,7 @@ use uc_infra::space::{
     MembershipActivationAdapter, MembershipMemberFactsAdapter, MembershipNetworkGate,
     OpenMlsHistoricalSignatureVerifier,
 };
+use uc_observability_contract::uc_info;
 
 struct CurrentMemberContentGate {
     scope: Arc<dyn CurrentSpaceMemberScopePort>,
@@ -497,7 +498,7 @@ pub async fn prepare_sync_session(
             application_network.space_admission_endpoint(),
         ),
         space_setup.admission_credentials.clone()
-            as Arc<dyn uc_infra::network::iroh::SpaceAdmissionChannelCredentialPort>,
+            as Arc<dyn uc_infra_p2p::network::iroh::SpaceAdmissionChannelCredentialPort>,
     )?;
     builder.install_membership_history_exchange(
         &membership_history_exchange_adapter,
@@ -541,7 +542,7 @@ pub async fn prepare_sync_session(
         Arc::clone(&application.host_event_bus()),
     );
 
-    info!("Iroh adapters registered against the Application network binding");
+    uc_info!("Iroh adapters registered against the Application network binding");
     Ok(PreparedSyncSession {
         session: SyncSessionAssembly {
             outbound_progress_translator,

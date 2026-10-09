@@ -474,6 +474,67 @@ impl fmt::Debug for CustomRelaySummary {
     }
 }
 
+/// Relay 路由方式。优先级：`Disabled`（仅局域网）> `Custom`（替换内置列表）> `BuiltIn`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RelayRoutingMode {
+    BuiltIn,
+    Custom,
+    Disabled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RelayEntrySource {
+    BuiltIn,
+    Custom,
+}
+
+/// Relay 概览中的一条记录。`in_effect` 表示运行中的节点按此地址配置，
+/// 不代表已经连通；连通状态由网络状态查询给出。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayOverviewEntry {
+    pub source: RelayEntrySource,
+    /// 内置 relay 的稳定区域标识（`na-east`、`na-west`、`eu`、`asia-pacific`），
+    /// 展示名称由宿主本地化；自定义条目为空。
+    pub region_id: Option<String>,
+    pub url: String,
+    pub credential_configured: bool,
+    pub in_effect: bool,
+}
+
+impl fmt::Debug for RelayOverviewEntry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RelayOverviewEntry")
+            .field("source", &self.source)
+            .field("in_effect", &self.in_effect)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayOverview {
+    /// 已保存设置决定的路由方式。
+    pub saved_mode: RelayRoutingMode,
+    /// 运行中节点绑定时采用的路由方式；节点尚未构建时为空。
+    pub applied_mode: Option<RelayRoutingMode>,
+    /// 已保存设置与运行中节点不一致，节点重新构建后才会生效。
+    pub change_pending: bool,
+    /// 先内置后自定义；内置条目始终列出，即使被自定义列表替换或被禁用。
+    pub entries: Vec<RelayOverviewEntry>,
+}
+
+impl fmt::Debug for RelayOverview {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RelayOverview")
+            .field("saved_mode", &self.saved_mode)
+            .field("applied_mode", &self.applied_mode)
+            .field("change_pending", &self.change_pending)
+            .field("entry_count", &self.entries.len())
+            .finish()
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub enum CustomRelayMutation {
     Add {

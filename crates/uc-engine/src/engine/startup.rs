@@ -129,11 +129,11 @@ impl StartupProgressStore {
         });
     }
 
-    pub(crate) fn backup_failed(&self) {
+    pub(crate) fn backup_failed(&self, retryable: bool) {
         self.update(|snapshot| {
             snapshot.failure = Some(StartupFailure {
                 reason: StartupFailureReason::BackupFailed,
-                retryable: true,
+                retryable,
             });
         });
     }
@@ -186,7 +186,7 @@ impl Drop for StartupProgressInput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uc_infra::security::{
+    use uc_infra_profile::security::{
         StorageUpgradeObserver, StorageUpgradeProgressOutcome, StorageUpgradeSnapshot,
         StorageUpgradeStep, StorageUpgradeUnit,
     };
@@ -199,7 +199,7 @@ mod tests {
             StorageUpgradeSnapshot {
                 required: true,
                 current_step: Some(StorageUpgradeStep::Verifying),
-                steps: vec![uc_infra::security::StorageUpgradeStepProgress {
+                steps: vec![uc_infra_profile::security::StorageUpgradeStepProgress {
                     step: StorageUpgradeStep::Verifying,
                     processed: 0,
                     total: None,
@@ -239,7 +239,7 @@ mod tests {
             StorageUpgradeSnapshot {
                 required: true,
                 current_step: Some(StorageUpgradeStep::Checking),
-                steps: vec![uc_infra::security::StorageUpgradeStepProgress {
+                steps: vec![uc_infra_profile::security::StorageUpgradeStepProgress {
                     step: StorageUpgradeStep::Checking,
                     processed: 0,
                     total: None,
@@ -273,7 +273,7 @@ mod tests {
     fn backup_failure_keeps_the_failed_step_and_allows_retry() {
         let (input, progress) = StartupProgress::channel();
         input.store.backup_started();
-        input.store.backup_failed();
+        input.store.backup_failed(true);
         input.finish(&Err::<(), _>(crate::EngineError::new(
             1101,
             crate::EngineErrorCategory::Unavailable,
@@ -293,6 +293,25 @@ mod tests {
     }
 
     #[test]
+    fn permanent_backup_failure_keeps_the_step_but_does_not_offer_retry() {
+        let (input, progress) = StartupProgress::channel();
+        input.store.backup_started();
+        input.store.backup_failed(false);
+        input.finish(&Err::<(), _>(crate::EngineError::new(
+            crate::error_codes::PROFILE_UPGRADE_BACKUP_KEY_MISSING_CODE,
+            crate::EngineErrorCategory::Unavailable,
+            false,
+        )));
+        let failed = progress.snapshot();
+        let failure = failed.failure.unwrap();
+        assert_eq!(failed.state, StartupState::Failed);
+        assert_eq!(failure.reason, StartupFailureReason::BackupFailed);
+        assert!(!failure.retryable);
+        assert!(!failed.allowed_actions.retry);
+        assert!(failed.allowed_actions.export_diagnostics);
+    }
+
+    #[test]
     fn upgrade_completion_preserves_records_but_does_not_finish_startup() {
         let (input, progress) = StartupProgress::channel();
         StorageUpgradeObserver::update(
@@ -301,7 +320,7 @@ mod tests {
                 required: true,
                 recovering: true,
                 current_step: Some(StorageUpgradeStep::Preparing),
-                steps: vec![uc_infra::security::StorageUpgradeStepProgress {
+                steps: vec![uc_infra_profile::security::StorageUpgradeStepProgress {
                     step: StorageUpgradeStep::LargeContents,
                     processed: 3,
                     total: Some(3),

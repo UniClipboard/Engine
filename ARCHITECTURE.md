@@ -18,7 +18,7 @@ host / bindings
        ↓
    uc-engine          稳定契约、生命周期、组装
        ↓
-    uc-infra          数据库、密码、文件、P2P adapter
+  uc-infra-*          数据库、密码、文件、P2P adapter（7 个能力 crate，见下表）
        ↓
  uc-application       完整业务流程、恢复与稳定分类
        ↓
@@ -34,7 +34,14 @@ Port 归需要能力的层所有，因此 Infra 既可以实现 Core port，也�
 | --- | --- |
 | `crates/uc-core/` | 与平台无关的领域规则、状态机和值对象 |
 | `crates/uc-application/` | 用户/系统动作的完整流程、持久恢复和能力 port |
-| `crates/uc-infra/` | SQLite、加密、文件、搜索、Iroh 和系统能力实现 |
+| `crates/uc-infra-local/` | 本机文件原语、文件布局、时钟与本机标识 |
+| `crates/uc-infra-crypto/` | 无数据库/网络/会话生命周期的密码算法与算法格式 |
+| `crates/uc-infra-security/` | 唯一进程安全会话、Profile 密钥目录与内容保护上下文 |
+| `crates/uc-infra-storage/` | SQLite 密文仓储、搜索、数据库迁移与原子提交 |
+| `crates/uc-infra-content/` | 剪贴板表示、缩略图、spool 与 blob 负载保护 |
+| `crates/uc-infra-p2p/` | Iroh 节点、连接、发现、配对与准入网络交换 |
+| `crates/uc-infra-profile/` | Profile 升级/备份/恢复、配置迁移与跨存储的 Space 准入激活 |
+| `crates/uc-sync-protocol/` | 传输无关的同步线上格式（帧、版本、上限、编解码与 golden 向量），只依赖 `uc-core`，被 `uc-infra-p2p`/`uc-infra-profile` 使用 |
 | `crates/uc-engine/` | 唯一稳定 Rust 入口、生命周期、运行期与依赖组装 |
 | `bindings/` | iOS、Android、HarmonyOS 的薄语言绑定 |
 | `compatibility/` | 用户显式启用、独立版本与发布的 LAN 兼容线 |

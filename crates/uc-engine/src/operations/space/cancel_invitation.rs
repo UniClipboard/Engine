@@ -2,9 +2,8 @@
 
 use crate::error_codes::*;
 
-use tracing::error;
 use uc_application::facade::{AppFacade, CancelInvitationError};
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_error};
 
 use crate::{EngineError, EngineErrorCategory, OperationResult};
 
@@ -24,7 +23,7 @@ pub async fn execute_cancel_invitation(facade: &AppFacade) -> Result<OperationRe
                 true,
             ),
             CancelInvitationError::Internal { .. } => {
-                error!(
+                uc_error!(
                     error_kind = "cancel_invitation",
                     io_error_kind = io_error_kind(&error),
                     "cancel invitation failed"

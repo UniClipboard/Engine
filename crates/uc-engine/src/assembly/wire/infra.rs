@@ -1,7 +1,7 @@
 use super::*;
 
 struct ApplicationSpaceUnlockAdapter {
-    inner: Arc<uc_infra::space::RuntimeSpaceAccessAdapter>,
+    inner: Arc<uc_infra_profile::space::RuntimeSpaceAccessAdapter>,
 }
 
 #[async_trait::async_trait]
@@ -44,7 +44,7 @@ pub(super) fn build_space_access_ports(
     profile_content_key_vault: &Arc<ProfileContentKeyVault>,
 ) -> (
     SpaceAccessPorts,
-    Arc<uc_infra::space::RuntimeSpaceAccessAdapter>,
+    Arc<uc_infra_profile::space::RuntimeSpaceAccessAdapter>,
     Arc<dyn uc_application::deps::CurrentMemberSignaturePort>,
     Arc<dyn uc_core::membership::SpaceSecurityStateResetPort>,
 ) {
@@ -58,7 +58,7 @@ pub(super) fn build_space_access_ports(
         security_repository.clone();
     let space_security_reset: Arc<dyn uc_core::membership::SpaceSecurityStateResetPort> =
         security_repository.clone();
-    let space_access_adapter = Arc::new(uc_infra::space::RuntimeSpaceAccessAdapter::new(
+    let space_access_adapter = Arc::new(uc_infra_profile::space::RuntimeSpaceAccessAdapter::new(
         key_material.clone(),
         current_profile.clone(),
         session.clone(),
@@ -71,9 +71,9 @@ pub(super) fn build_space_access_ports(
     let unlock = Arc::new(ApplicationSpaceUnlockAdapter {
         inner: Arc::clone(&space_access_adapter),
     });
-    let rebind = Arc::new(uc_infra::space::SpaceSessionRebindAdapter::new(Arc::clone(
-        session,
-    )));
+    let rebind = Arc::new(uc_infra_profile::space::SpaceSessionRebindAdapter::new(
+        Arc::clone(session),
+    ));
     let space_access_ports = SpaceAccessPorts {
         adopt_isolated_space: rebind,
         initialize: space_access_adapter.clone(),
@@ -157,7 +157,7 @@ pub(super) fn build_cipher_decorators(
     // TransferCipherPort — uc-application clipboard_sync encrypts/decrypts V3
     // network bytes through this port, sharing the same InMemorySession.
     let transfer_cipher: Arc<dyn uc_core::ports::security::TransferCipherPort> = Arc::new(
-        uc_infra::clipboard::TransferCipherAdapter::new(session.clone()),
+        uc_infra_content::clipboard::TransferCipherAdapter::new(session.clone()),
     );
 
     // Wrap ports with encryption decorators.
@@ -351,7 +351,9 @@ pub(super) fn create_infra_layer(
     let representation_repo: Arc<dyn ClipboardRepresentationStore> = Arc::new(rep_repo);
 
     let entry_delivery_repo: Arc<dyn uc_core::ports::EntryDeliveryRepositoryPort> = Arc::new(
-        uc_infra::db::repositories::DieselEntryDeliveryRepository::new(Arc::clone(&db_executor)),
+        uc_infra_storage::db::repositories::DieselEntryDeliveryRepository::new(Arc::clone(
+            &db_executor,
+        )),
     );
 
     // NOTE: the entry-file-set repo seals its path columns with a per-session
@@ -381,7 +383,7 @@ pub(super) fn create_infra_layer(
     let secure_storage_for_key_material = Arc::clone(&secure_storage);
 
     let keyslot_store = JsonKeySlotStore::new(vault_path.clone());
-    let keyslot_store: Arc<dyn uc_infra::fs::key_slot_store::KeySlotStore> =
+    let keyslot_store: Arc<dyn uc_infra_security::key_slot_store::KeySlotStore> =
         Arc::new(keyslot_store);
 
     let key_material = Arc::new(KeyMaterialStore::new(
@@ -392,9 +394,10 @@ pub(super) fn create_infra_layer(
     let settings_repo: Arc<dyn SettingsPort> = Arc::new(FileSettingsRepository::new(settings_path));
 
     let vault_layout = VaultLayout::new(vault_path.clone());
-    let space_rebuild_progress: Arc<dyn SpaceRebuildProgressPort> = Arc::new(
-        uc_infra::space::FileSpaceRebuildProgress::new(vault_layout.space_rebuild_progress_path()),
-    );
+    let space_rebuild_progress: Arc<dyn SpaceRebuildProgressPort> =
+        Arc::new(uc_infra_profile::space::FileSpaceRebuildProgress::new(
+            vault_layout.space_rebuild_progress_path(),
+        ));
 
     // 升级游标——独立小文件，落在 app_data_root 顶层（与 vault/keyring/settings.json
     // 同级），不污染 vault/。schema_version=1，写入走 tempfile + rename 原子化。
@@ -402,7 +405,7 @@ pub(super) fn create_infra_layer(
         FileAppVersionStateRepository::with_defaults(app_data_root.clone()),
     );
     let engine_version_state: Arc<dyn uc_core::ports::EngineVersionStatePort> = Arc::new(
-        uc_infra::FileEngineVersionStateRepository::with_defaults(app_data_root.clone()),
+        uc_infra_local::FileEngineVersionStateRepository::with_defaults(app_data_root.clone()),
     );
 
     // 首次同步事件去重 flag——独立小文件 first-sync-state.json，与升级游标同级。
@@ -443,7 +446,7 @@ pub(super) fn create_infra_layer(
     // new 一份就足够。
     #[cfg(feature = "lan-compat")]
     let mobile_sync_endpoint_info =
-        Arc::new(uc_infra::mobile_sync::InMemoryMobileSyncEndpointInfoAdapter::new());
+        Arc::new(uc_mobile_lan::mobile_sync::InMemoryMobileSyncEndpointInfoAdapter::new());
 
     let infra = InfraLayer {
         clipboard_entry_ports,

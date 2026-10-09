@@ -11,7 +11,6 @@ publish = false
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 postcard = { version = "1", features = ["use-std"] }
-toml = "0.8"
 
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }
@@ -30,9 +29,11 @@ tokio = { version = "1", features = ["sync"] }
 # Task registry needs rt + time; activated only via `task-registry` feature.
 tokio-util = { version = "0.7", optional = true }
 thiserror = "2.0.17"
-serde_with = { version = "3.16.1", features = ["base64"] }
+serde_with = "3.16.1"
 hex = "0.4.3"
 url = "2"
+# 历史标签名称的 NFC 规范化。
+unicode-normalization = "0.1"
 
 # Deterministic digest derivation for removal intents and convergence state.
 sha2 = "0.10"

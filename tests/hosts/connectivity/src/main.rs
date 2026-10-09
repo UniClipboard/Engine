@@ -4,6 +4,8 @@
 //! 划分的 feature 表达，锚点与 feature 的对应关系见 `tests/upgrade-matrix/host-features.json`。
 
 mod content;
+#[cfg(feature = "current-engine")]
+mod network_faults;
 mod observe;
 
 use std::collections::HashMap;
@@ -219,6 +221,10 @@ async fn operation(
 ) -> Result<Value> {
     let command = string(request, "command")?;
     match command {
+        #[cfg(feature = "current-engine")]
+        "network_endpoint" | "reject_reachability_dials" | "rejected_dials" => {
+            return network_faults::execute(engine, command, request).await;
+        }
         "capture" => return content::capture(engine, clipboard, files, request).await,
         "observe" => return observe::observe(engine).await,
         _ => {}

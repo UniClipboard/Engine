@@ -12,13 +12,15 @@ use std::sync::Arc;
 
 use tokio::sync::oneshot;
 use tokio::task::{JoinError, JoinSet};
-use tracing::{debug, info, warn, Instrument};
+use tracing::Instrument;
 
 use uc_core::clipboard::{DeliveryFailureReason, EntryDeliveryRecord, EntryDeliveryStatus};
 use uc_core::ids::{DeviceId, EntryId};
 use uc_core::ports::{ClipboardDispatchError, ClockPort, DispatchAck, EntryDeliveryRepositoryPort};
 use uc_observability_contract::diagnostics::{DiagnosticTaskKind, ObservationContext};
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind, log_fields::log_id, uc_debug, uc_info, uc_warn,
+};
 
 use crate::facade::blob_transfer::SharedHostEventEmitter;
 use crate::facade::host_event::{DeliveryHostEvent, HostEvent};
@@ -67,7 +69,7 @@ pub(crate) fn classify_dispatch_result(
 ) -> ProcessedDispatchResult {
     match joined {
         Ok((device_id, Ok(DispatchAck::Accepted))) => {
-            debug!("dispatch accepted");
+            uc_debug!("dispatch accepted");
             let delivery_record = entry_id.map(|eid| EntryDeliveryRecord {
                 entry_id: eid.clone(),
                 target_device_id: device_id,
@@ -85,7 +87,7 @@ pub(crate) fn classify_dispatch_result(
             }
         }
         Ok((device_id, Ok(DispatchAck::DuplicateIgnored))) => {
-            debug!("dispatch duplicate ignored");
+            uc_debug!("dispatch duplicate ignored");
             let delivery_record = entry_id.map(|eid| EntryDeliveryRecord {
                 entry_id: eid.clone(),
                 target_device_id: device_id,
@@ -103,7 +105,7 @@ pub(crate) fn classify_dispatch_result(
             }
         }
         Ok((device_id, Err(ClipboardDispatchError::Offline))) => {
-            debug!("dispatch deferred because peer is offline");
+            uc_debug!("dispatch deferred because peer is offline");
             let delivery_record = entry_id.map(|eid| EntryDeliveryRecord {
                 entry_id: eid.clone(),
                 target_device_id: device_id,
@@ -121,7 +123,7 @@ pub(crate) fn classify_dispatch_result(
             }
         }
         Ok((device_id, Err(err))) => {
-            warn!(
+            uc_warn!(
                 error_kind = "dispatch_failed",
                 io_error_kind = io_error_kind(&err),
                 "dispatch failed"
@@ -168,7 +170,7 @@ pub(crate) fn classify_dispatch_result(
             }
         }
         Err(err) => {
-            warn!(
+            uc_warn!(
                 error_kind = "dispatch_task_join",
                 io_error_kind = io_error_kind(&err),
                 "dispatch task panicked or cancelled"
@@ -249,10 +251,10 @@ impl DeliveryRecorder {
     pub(crate) async fn flush(&self, records: &[EntryDeliveryRecord]) {
         for record in records {
             if let Err(err) = self.entry_delivery_repo.record_attempt(record).await {
-                warn!(
+                uc_warn!(
                     error_kind = "delivery_record",
                     io_error_kind = io_error_kind(&err),
-                    entry_id = %record.entry_id,
+                    entry_id = log_id(&record.entry_id),
                     "failed to record entry delivery"
                 );
                 continue;
@@ -275,7 +277,6 @@ pub(super) fn spawn_deferred_drain(
     entry_id: Option<EntryId>,
     clock: Arc<dyn ClockPort>,
     recorder: Arc<DeliveryRecorder>,
-    snapshot_hash: String,
 ) {
     let deferred_count = set.len();
     let observation = ObservationContext::capture();
@@ -298,13 +299,12 @@ pub(super) fn spawn_deferred_drain(
                     recorder.flush(std::slice::from_ref(&rec)).await;
                 }
             }
-            info!(
-                snapshot_hash = %snapshot_hash,
-                deferred_count,
-                accepted,
-                duplicate,
-                offline,
-                errored,
+            uc_info!(
+                deferred_count = deferred_count,
+                accepted = accepted,
+                duplicate = duplicate,
+                offline = offline,
+                errored = errored,
                 "dispatch: deferred fan-out completed"
             );
         }),
@@ -377,7 +377,6 @@ mod tests {
                 Some(eid()),
                 Arc::new(super::super::test_support::FixedClock(0)),
                 recorder,
-                "test".into(),
             )
         });
         drop(root);

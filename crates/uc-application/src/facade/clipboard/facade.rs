@@ -351,7 +351,7 @@ impl ClipboardSyncFacade {
     /// don't carry the snapshot structure needed to classify; daemon goes through
     /// [`Self::dispatch_snapshot`] / [`Self::dispatch_snapshot_with_blob_refs`]
     /// which preserve the snapshot and apply the filter.
-    #[instrument(skip_all, fields(snapshot_hash = %input.snapshot_hash))]
+    #[instrument(skip_all)]
     pub async fn dispatch_entry(
         &self,
         input: DispatchEntryInput,

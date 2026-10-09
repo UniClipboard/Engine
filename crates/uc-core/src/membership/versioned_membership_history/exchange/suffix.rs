@@ -65,7 +65,7 @@ impl VersionedMembershipHistory {
             records.push(MembershipHistorySuffixRecordV4::ProofOnly);
         }
         if records.len() > MAX_MEMBERSHIP_HISTORY_SUFFIX_PAGES {
-            return Err(MembershipHistoryV2Error::InvalidPersistedHistory);
+            return Err(MembershipHistoryV2Error::invalid_persisted_history());
         }
         let transfer_id = suffix_transfer_id_v4(
             &self.lineage_id,
@@ -76,7 +76,8 @@ impl VersionedMembershipHistory {
             &proof,
         )?;
         let page_count = u32::try_from(records.len())
-            .map_err(|_| MembershipHistoryV2Error::InvalidPersistedHistory)?;
+            // discarded-source[int-conversion]: `TryFromIntError`: the target classification already expresses the range or length mismatch
+            .map_err(|_| MembershipHistoryV2Error::invalid_persisted_history())?;
         records
             .into_iter()
             .enumerate()
@@ -99,7 +100,8 @@ impl VersionedMembershipHistory {
                     format_version: MEMBERSHIP_HISTORY_SUFFIX_FORMAT_V4,
                     transfer_id,
                     page_index: u32::try_from(index)
-                        .map_err(|_| MembershipHistoryV2Error::InvalidPersistedHistory)?,
+                        // discarded-source[int-conversion]: `TryFromIntError`: the target classification already expresses the range or length mismatch
+                        .map_err(|_| MembershipHistoryV2Error::invalid_persisted_history())?,
                     page_count,
                     lineage_id: self.lineage_id.clone(),
                     base_position: base_position.clone(),
@@ -124,12 +126,12 @@ impl VersionedMembershipHistory {
     ) -> Result<VersionedMembershipHistory, MembershipHistoryV2Error> {
         let first = pages
             .first()
-            .ok_or(MembershipHistoryV2Error::InvalidPersistedHistory)?;
+            .ok_or_else(MembershipHistoryV2Error::invalid_persisted_history)?;
         if pages.len() != first.page_count as usize
             || pages.len() > MAX_MEMBERSHIP_HISTORY_SUFFIX_PAGES
             || self.lineage_id != first.lineage_id
         {
-            return Err(MembershipHistoryV2Error::InvalidPersistedHistory);
+            return Err(MembershipHistoryV2Error::invalid_persisted_history());
         }
         if self.current_position()? != first.base_position {
             return Err(MembershipHistoryV2Error::HistoryPositionChanged);
@@ -137,7 +139,7 @@ impl VersionedMembershipHistory {
         let proof = first
             .sender_proof
             .as_ref()
-            .ok_or(MembershipHistoryV2Error::InvalidPersistedHistory)?;
+            .ok_or_else(MembershipHistoryV2Error::invalid_persisted_history)?;
         let mut ordered = pages.iter().collect::<Vec<_>>();
         ordered.sort_by_key(|page| page.page_index);
         let mut records = Vec::with_capacity(ordered.len());
@@ -153,7 +155,7 @@ impl VersionedMembershipHistory {
                 || page.target_position != first.target_position
                 || page.sender_admission != first.sender_admission
             {
-                return Err(MembershipHistoryV2Error::InvalidPersistedHistory);
+                return Err(MembershipHistoryV2Error::invalid_persisted_history());
             }
             if let Some(event) = page.events.first() {
                 records.push(MembershipHistorySuffixRecordV4::Event(event.clone()));
@@ -191,10 +193,10 @@ impl VersionedMembershipHistory {
             proof,
         )? != first.transfer_id
         {
-            return Err(MembershipHistoryV2Error::InvalidPersistedHistory);
+            return Err(MembershipHistoryV2Error::invalid_persisted_history());
         }
         if records.iter().any(|record| !proof.covers(record)) {
-            return Err(MembershipHistoryV2Error::InvalidPersistedHistory);
+            return Err(MembershipHistoryV2Error::invalid_persisted_history());
         }
         let sender_projection =
             proof.verify(&sender_projection, &first.target_position, verifier)?;
@@ -238,7 +240,7 @@ pub(super) fn suffix_transfer_id_v4(
         records,
         proof,
     ))
-    .map_err(|_| MembershipHistoryV2Error::InvalidPersistedHistory)?;
+    .map_err(MembershipHistoryV2Error::invalid_persisted_history_from)?;
     let mut hasher = Sha256::new();
     hasher.update(b"uniclipboard/membership-history-suffix/v4\0");
     hasher.update((encoded.len() as u64).to_be_bytes());

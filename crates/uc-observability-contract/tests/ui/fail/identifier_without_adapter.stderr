@@ -1,0 +1,37 @@
+error[E0277]: this value is not accepted by the log field's declared class
+ --> tests/ui/fail/identifier_without_adapter.rs:5:25
+  |
+5 |     uc_warn!(entry_id = entry, "identifier must go through log_id()");
+  |     --------------------^^^^^----------------------------------------
+  |     |                   |
+  |     |                   not accepted here
+  |     required by a bound introduced by this call
+  |
+  = help: the trait `Accept<uc_observability_contract::log_fields::Identifier>` is not implemented for `String`
+  = note: fixed-vocabulary fields take literals or closed enums; identifier fields take `log_id(&value)`; see `uc_observability_contract::log_fields`
+help: the following other types implement trait `Accept<Class>`
+ --> src/log_fields.rs
+  |
+  | impl Accept<Literal> for &'static str {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&str` implements `Accept<uc_observability_contract::log_fields::Literal>`
+...
+  | impl Accept<Vocabulary> for &'static str {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&str` implements `Accept<uc_observability_contract::log_fields::Vocabulary>`
+
+error[E0277]: this value is not accepted by the log field's declared class
+ --> tests/ui/fail/identifier_without_adapter.rs:5:5
+  |
+5 |     uc_warn!(entry_id = entry, "identifier must go through log_id()");
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not accepted here
+  |
+  = help: the trait `Accept<uc_observability_contract::log_fields::Identifier>` is not implemented for `String`
+  = note: fixed-vocabulary fields take literals or closed enums; identifier fields take `log_id(&value)`; see `uc_observability_contract::log_fields`
+help: the following other types implement trait `Accept<Class>`
+ --> src/log_fields.rs
+  |
+  | impl Accept<Literal> for &'static str {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&str` implements `Accept<uc_observability_contract::log_fields::Literal>`
+...
+  | impl Accept<Vocabulary> for &'static str {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&str` implements `Accept<uc_observability_contract::log_fields::Vocabulary>`
+  = note: this error originates in the macro `$crate::__uc_log` which comes from the expansion of the macro `uc_warn` (in Nightly builds, run with -Z macro-backtrace for more info)

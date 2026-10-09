@@ -14,14 +14,13 @@
 
 use std::sync::Arc;
 
-use tracing::warn;
-
 use uc_core::clipboard::ActiveClipboardState;
 use uc_core::ids::EntryId;
 use uc_core::ports::clipboard::AdvanceActiveClipboardPort;
 use uc_core::ports::{ClockPort, DeviceIdentityPort};
 
 use super::MobileConsumabilityProbe;
+use uc_observability_contract::{uc_debug, uc_warn};
 
 /// Advances the active-clipboard register on behalf of locally-originated
 /// writes, stamping `(now, this_device)` as the activation key.
@@ -75,7 +74,7 @@ impl LocalActiveRegisterAdvancer {
             .await;
         match self.register.advance(&state, mobile_consumable).await {
             Ok(advanced) => {
-                tracing::debug!(advanced, "active register: local advance");
+                uc_debug!(advanced = advanced, "active register: local advance");
             }
             Err(e) => {
                 let error_kind = match e {
@@ -86,8 +85,8 @@ impl LocalActiveRegisterAdvancer {
                         "storage"
                     }
                 };
-                warn!(
-                    error_kind,
+                uc_warn!(
+                    error_kind = error_kind,
                     "active register: local advance failed (best-effort, ignored)"
                 );
             }

@@ -55,7 +55,7 @@ impl VersionedMembershipHistory {
         let persisted_bytes = self.encode_persisted_v2()?;
         let transfer_id = history_transfer_id(&persisted_bytes);
         let persisted: PersistedMembershipHistoryV2 = postcard::from_bytes(&persisted_bytes)
-            .map_err(|_| MembershipHistoryV2Error::InvalidPersistedHistory)?;
+            .map_err(MembershipHistoryV2Error::invalid_persisted_history_from)?;
         let metadata = MembershipHistoryPageMetadata {
             transfer_id,
             lineage_id: &persisted.lineage_id,
@@ -85,7 +85,8 @@ impl VersionedMembershipHistory {
             append_history_page_record(&mut pages, &metadata, record)?;
         }
         let page_count = u32::try_from(pages.len())
-            .map_err(|_| MembershipHistoryV2Error::InvalidPersistedHistory)?;
+            // discarded-source[int-conversion]: `TryFromIntError`: the target classification already expresses the range or length mismatch
+            .map_err(|_| MembershipHistoryV2Error::invalid_persisted_history())?;
         for page in &mut pages {
             page.page_count = page_count;
             page.validate_envelope()?;
@@ -99,9 +100,9 @@ impl VersionedMembershipHistory {
     ) -> Result<Self, MembershipHistoryV2Error> {
         let first = pages
             .first()
-            .ok_or(MembershipHistoryV2Error::InvalidPersistedHistory)?;
+            .ok_or_else(MembershipHistoryV2Error::invalid_persisted_history)?;
         if first.page_count == 0 || pages.len() != first.page_count as usize {
-            return Err(MembershipHistoryV2Error::InvalidPersistedHistory);
+            return Err(MembershipHistoryV2Error::invalid_persisted_history());
         }
         let mut ordered = pages.iter().collect::<Vec<_>>();
         ordered.sort_by_key(|page| page.page_index);
@@ -114,7 +115,7 @@ impl VersionedMembershipHistory {
                 || page.position != first.position
                 || page.sender_admission != first.sender_admission
             {
-                return Err(MembershipHistoryV2Error::InvalidPersistedHistory);
+                return Err(MembershipHistoryV2Error::invalid_persisted_history());
             }
         }
         let mut persisted = PersistedMembershipHistoryV2 {
@@ -136,9 +137,9 @@ impl VersionedMembershipHistory {
                 .extend(page.decisions.iter().cloned());
         }
         let encoded = postcard::to_stdvec(&persisted)
-            .map_err(|_| MembershipHistoryV2Error::InvalidPersistedHistory)?;
+            .map_err(MembershipHistoryV2Error::invalid_persisted_history_from)?;
         if history_transfer_id(&encoded) != first.transfer_id {
-            return Err(MembershipHistoryV2Error::InvalidPersistedHistory);
+            return Err(MembershipHistoryV2Error::invalid_persisted_history());
         }
         let history = Self::decode_persisted_v2(&encoded, verifier)?;
         let sender_member = first.sender_admission.member_instance;
@@ -152,7 +153,7 @@ impl VersionedMembershipHistory {
             || (!history.active_members().contains(&sender_member)
                 && !history.has_removal_decision_by(sender_member))
         {
-            return Err(MembershipHistoryV2Error::InvalidPersistedHistory);
+            return Err(MembershipHistoryV2Error::invalid_persisted_history());
         }
         verify_signature(
             verifier,
@@ -215,8 +216,9 @@ pub(super) fn empty_history_page(
     metadata: &MembershipHistoryPageMetadata<'_>,
     page_index: usize,
 ) -> Result<MembershipHistoryPageV2, MembershipHistoryV2Error> {
-    let page_index =
-        u32::try_from(page_index).map_err(|_| MembershipHistoryV2Error::InvalidPersistedHistory)?;
+    let page_index = u32::try_from(page_index)
+        // discarded-source[int-conversion]: `TryFromIntError`: the target classification already expresses the range or length mismatch
+        .map_err(|_| MembershipHistoryV2Error::invalid_persisted_history())?;
     let page = MembershipHistoryPageV2 {
         exchange_format_version: MEMBERSHIP_HISTORY_EXCHANGE_FORMAT_V2,
         transfer_id: metadata.transfer_id,
@@ -234,7 +236,7 @@ pub(super) fn empty_history_page(
         known_head: (page_index == 0).then_some(metadata.known_head).flatten(),
     };
     if page.encoded_frame_size()? > MAX_MEMBERSHIP_HISTORY_FRAME_SIZE {
-        return Err(MembershipHistoryV2Error::InvalidPersistedHistory);
+        return Err(MembershipHistoryV2Error::invalid_persisted_history());
     }
     Ok(page)
 }
@@ -246,7 +248,7 @@ pub(super) fn append_history_page_record(
 ) -> Result<(), MembershipHistoryV2Error> {
     let current = pages
         .last_mut()
-        .ok_or(MembershipHistoryV2Error::InvalidPersistedHistory)?;
+        .ok_or_else(MembershipHistoryV2Error::invalid_persisted_history)?;
     if record.count_in(current) == MAX_MEMBERSHIP_HISTORY_RECORDS_PER_PAGE {
         let next_page_index = pages.len();
         pages.push(empty_history_page(metadata, next_page_index)?);
@@ -254,25 +256,25 @@ pub(super) fn append_history_page_record(
 
     let current = pages
         .last_mut()
-        .ok_or(MembershipHistoryV2Error::InvalidPersistedHistory)?;
+        .ok_or_else(MembershipHistoryV2Error::invalid_persisted_history)?;
     record.push_onto(current);
     if current.encoded_frame_size()? <= MAX_MEMBERSHIP_HISTORY_FRAME_SIZE {
         return Ok(());
     }
     record.pop_from(current);
     if current.record_counts().total() == 0 {
-        return Err(MembershipHistoryV2Error::InvalidPersistedHistory);
+        return Err(MembershipHistoryV2Error::invalid_persisted_history());
     }
 
     let next_page_index = pages.len();
     pages.push(empty_history_page(metadata, next_page_index)?);
     let current = pages
         .last_mut()
-        .ok_or(MembershipHistoryV2Error::InvalidPersistedHistory)?;
+        .ok_or_else(MembershipHistoryV2Error::invalid_persisted_history)?;
     record.push_onto(current);
     if current.encoded_frame_size()? > MAX_MEMBERSHIP_HISTORY_FRAME_SIZE {
         record.pop_from(current);
-        return Err(MembershipHistoryV2Error::InvalidPersistedHistory);
+        return Err(MembershipHistoryV2Error::invalid_persisted_history());
     }
     Ok(())
 }

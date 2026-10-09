@@ -66,6 +66,7 @@ impl PersistedCompletionHelperAppliedV1 {
             verified_commit,
             activation_receipt: self.activation_receipt,
             helper_security: AdmissionHelperSecurityState::from_bytes(self.helper_security)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             saved_reply,
         })
@@ -108,6 +109,7 @@ impl PersistedActivePendingSettlementV1 {
             continuation_credential: decode_continuation_credential(self.continuation_credential)?,
             completion_evidence,
             transition_result: AdmissionSpaceTransitionResult::from_bytes(self.transition_result)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             pending_exchange,
         })

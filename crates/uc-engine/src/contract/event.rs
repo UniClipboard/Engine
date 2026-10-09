@@ -43,6 +43,7 @@ pub enum EngineEvent {
     },
     ActiveClipboardChanged(ActiveClipboardChanged),
     MobileLanSettingsChanged(MobileLanSettingsChanged),
+    SettingsChanged(SettingsChanged),
     NetworkRecoveryChanged(NetworkRecoveryStatusSummary),
     ProfileRecoveryChanged(ProfileRecoverySummary),
     RePairingRequired {
@@ -81,6 +82,7 @@ impl EngineEvent {
             Self::DeviceTrustChanged { .. } => "device_trust_changed",
             Self::ActiveClipboardChanged(_) => "active_clipboard_changed",
             Self::MobileLanSettingsChanged(_) => "mobile_lan_settings_changed",
+            Self::SettingsChanged(_) => "settings_changed",
             Self::NetworkRecoveryChanged(_) => "network_recovery_changed",
             Self::ProfileRecoveryChanged(_) => "profile_recovery_changed",
             Self::RePairingRequired { .. } => "re_pairing_required",
@@ -302,6 +304,31 @@ impl fmt::Debug for ActiveClipboardChanged {
             .field("has_activated_by", &!self.activated_by.is_empty())
             .finish()
     }
+}
+
+/// 设置分区，与 `SettingsPatch` 的字段一一对应。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingsSectionSummary {
+    General,
+    Sync,
+    RetentionPolicy,
+    Security,
+    Pairing,
+    KeyboardShortcuts,
+    FileSync,
+    Network,
+    MobileSync,
+    QuickPanel,
+}
+
+/// 持久化设置已在一次成功保存后发生变化。
+///
+/// 只指出变化的分区，不携带设置值；订阅方通过 `QuerySettings` 重新读取。内容没有变化的保存
+/// 不产生事件。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingsChanged {
+    pub sections: Vec<SettingsSectionSummary>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

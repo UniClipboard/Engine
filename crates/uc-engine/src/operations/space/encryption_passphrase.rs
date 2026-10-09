@@ -1,7 +1,6 @@
-use tracing::error;
 use uc_application::facade::{AppFacade, ChangeEncryptionPassphraseError};
 use uc_core::crypto::domain::Passphrase;
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_error};
 
 use crate::error_codes::*;
 use crate::{ChangeEncryptionPassphraseInput, EngineError, EngineErrorCategory, OperationResult};
@@ -45,7 +44,7 @@ fn map_error(error: ChangeEncryptionPassphraseError) -> EngineError {
         ChangeEncryptionPassphraseError::MembershipUnavailable
         | ChangeEncryptionPassphraseError::Invitation { .. }
         | ChangeEncryptionPassphraseError::Unavailable { .. } => {
-            error!(
+            uc_error!(
                 error_kind = "passphrase_change_unavailable",
                 io_error_kind = io_error_kind(&error),
                 "encryption passphrase change is unavailable"
@@ -57,7 +56,7 @@ fn map_error(error: ChangeEncryptionPassphraseError) -> EngineError {
             )
         }
         ChangeEncryptionPassphraseError::RecoveryRequired { .. } => {
-            error!(
+            uc_error!(
                 error_kind = "passphrase_change_recovery",
                 io_error_kind = io_error_kind(&error),
                 "encryption passphrase change requires recovery"

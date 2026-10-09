@@ -390,3 +390,118 @@ fn append_active_peer(
     fixture.owner.reload_for_test();
     member.unwrap()
 }
+
+#[tokio::test]
+async fn a_completed_removal_writes_one_completion_record() {
+    let logs = uc_testkit::log_capture::CapturedLogs::default();
+    let _guard = logs.install();
+    let (fixture, signer) = active_space();
+    let remove = remove_case(&fixture, signer, Arc::new(NoopEffects));
+
+    remove.execute(&DeviceId::new("device-b")).await.unwrap();
+
+    assert_eq!(
+        logs.count("member removal completed"),
+        1,
+        "{}",
+        logs.output()
+    );
+    let output = logs.output();
+    assert!(output.contains("operation=\"remove_member\""), "{output}");
+    assert!(output.contains("outcome=\"completed\""), "{output}");
+    assert!(!output.contains("device-b"), "{output}");
+}
+
+#[tokio::test]
+async fn a_rejected_removal_records_only_its_error_class() {
+    let logs = uc_testkit::log_capture::CapturedLogs::default();
+    let _guard = logs.install();
+    let (fixture, signer) = active_space();
+    let remove = remove_case(&fixture, signer, Arc::new(NoopEffects));
+
+    remove
+        .execute(&DeviceId::new("device-a"))
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        logs.count("member removal rejected"),
+        1,
+        "{}",
+        logs.output()
+    );
+    let output = logs.output();
+    assert!(output.contains("error_class=\"self_target\""), "{output}");
+    assert!(output.contains("outcome=\"rejected\""), "{output}");
+    assert!(!output.contains("device-a"), "{output}");
+}
+
+#[tokio::test]
+async fn an_admission_revocation_writes_its_own_outcome_record() {
+    let logs = uc_testkit::log_capture::CapturedLogs::default();
+    let _guard = logs.install();
+    let (fixture, signer, member, add_event_id) = admitted_peer();
+    let remove = remove_case(&fixture, signer, Arc::new(NoopEffects));
+    let binding = AdmissionMemberBindingV2::new(
+        [0x63; 32],
+        SpaceId::from_str("space-a"),
+        member,
+        add_event_id,
+    )
+    .unwrap();
+
+    remove
+        .revoke_admission(AdmissionRevocationTarget::new(
+            SpaceAdmissionId::from_bytes([0x64; 32]).unwrap(),
+            binding,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        logs.count("member removal completed"),
+        1,
+        "{}",
+        logs.output()
+    );
+    assert!(
+        logs.output().contains("operation=\"revoke_admission\""),
+        "{}",
+        logs.output()
+    );
+}
+
+#[tokio::test]
+async fn a_failed_admission_revocation_records_only_its_error_class() {
+    let logs = uc_testkit::log_capture::CapturedLogs::default();
+    let _guard = logs.install();
+    let (fixture, mut signer, member, add_event_id) = admitted_peer();
+    signer.credential = MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, vec![0x7a; 32]);
+    let remove = remove_case(&fixture, signer, Arc::new(NoopEffects));
+    let binding = AdmissionMemberBindingV2::new(
+        [0x65; 32],
+        SpaceId::from_str("space-a"),
+        member,
+        add_event_id,
+    )
+    .unwrap();
+
+    remove
+        .revoke_admission(AdmissionRevocationTarget::new(
+            SpaceAdmissionId::from_bytes([0x66; 32]).unwrap(),
+            binding,
+        ))
+        .await
+        .unwrap_err();
+
+    assert_eq!(logs.count("member removal failed"), 1, "{}", logs.output());
+    let output = logs.output();
+    assert!(
+        output.contains("error_class=\"recovery_required\""),
+        "{output}"
+    );
+    assert!(
+        output.contains("operation=\"revoke_admission\""),
+        "{output}"
+    );
+}

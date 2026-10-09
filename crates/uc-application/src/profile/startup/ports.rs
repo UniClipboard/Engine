@@ -13,14 +13,11 @@ pub trait ProfileUpgradeBackupPort: Send + Sync {
     ) -> Result<Vec<ProfileUpgradeBackupEntry>, ProfileUpgradeBackupError>;
     async fn delete_backup(&self, id: &str) -> Result<(), ProfileUpgradeBackupError>;
     fn read_source(&self) -> Result<ProfileUpgradeSource, ProfileUpgradeBackupError>;
-    fn read_prepared_target(
-        &self,
-    ) -> Result<Option<ProfileUpgradeVersions>, ProfileUpgradeBackupError>;
+    /// 确保存在针对目标版本、经过验证且对应当前来源资料的升级前副本。
+    ///
+    /// 已有副本只在未发布安全记录且来源未变时复用；来源已变而升级写入尚未开始时，
+    /// 由实现重新捕获并保留旧副本。调用方不区分复用与重捕获。
     async fn capture_verified(
-        &self,
-        target: &ProfileUpgradeVersions,
-    ) -> Result<(), ProfileUpgradeBackupError>;
-    async fn verify_prepared(
         &self,
         target: &ProfileUpgradeVersions,
     ) -> Result<(), ProfileUpgradeBackupError>;

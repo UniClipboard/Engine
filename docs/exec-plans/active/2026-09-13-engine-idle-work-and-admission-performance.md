@@ -12,7 +12,7 @@
 | `428c86f5` | 配对内部工作、维护排队与会话切换诊断 | 不改变检查频率或业务调度 |
 | `d8f7df64` | 有界复用已认证的准入仓库解码结果 | 仍读取整份密文，未消除首次解码、100 ms 检查与成员历史重复验证 |
 
-当前没有正式、可持续对比的 benchmark 套件：未配置 Cargo benchmark target 或 Criterion 等依赖。已有[历史搜索测量报告](../../generated/search-rebuild-5000-benchmark.md)和[准入仓储忽略测试](../../../crates/uc-infra/src/space/admission/repository/tests.rs)属于单次测量或回归探针，不能视为完整性能基线。
+当前没有正式、可持续对比的 benchmark 套件：未配置 Cargo benchmark target 或 Criterion 等依赖。已有[历史搜索测量报告](../../generated/search-rebuild-5000-benchmark.md)和[准入仓储忽略测试](../../../crates/uc-infra-profile/src/space/admission/repository/tests.rs)属于单次测量或回归探针，不能视为完整性能基线。
 
 ## 2. 已确认事实与待补证据
 
@@ -20,7 +20,7 @@
 
 - [运行期观察任务](../../../crates/uc-engine/src/runtime/mod.rs)按 100 ms 间隔调用完整会话切换检查，使用串行等待及 `MissedTickBehavior::Skip`。间隔不是实际每秒完成十次，也不能按十次并发读取估算流量。
 - [会话负责人](../../../crates/uc-engine/src/runtime/session_supervisor.rs)经现有 facade 检查是否需要切换；[检查实现](../../../crates/uc-application/src/space/admission/protocol/joiner/activate_complete/execute.rs)调用激活状态读取，再只判断是否存在结果。
-- [激活状态读取](../../../crates/uc-infra/src/space/admission/joiner/activation_state.rs)首先加载整个准入仓库，即使最终没有当前加入也会读取大包。一次检查很慢时，任务可能长期处于持续工作状态。
+- [激活状态读取](../../../crates/uc-infra-profile/src/space/admission/joiner/activation_state.rs)首先加载整个准入仓库，即使最终没有当前加入也会读取大包。一次检查很慢时，任务可能长期处于持续工作状态。
 - 现场只读统计得到 10 条准入记录：9 条 Completed 很小，1 条 SponsorCommitted 占绝大部分。不能将本次问题归为已完成记录数量失控。
 - 未完成记录明文编码为 7,157,622 bytes；其独立密文文本为 25,553,814 bytes；仓库整体密文文本为 91,295,926 bytes，约 87.1 MiB。两层数字数组文本表示是约 13 倍膨胀的来源，AEAD 本身不是这个膨胀量的原因。
 - 大记录包括成员历史 684,503 bytes、安全状态 3,399,710 bytes、保留回复 3,073,238 bytes。保留这些数据参与恢复或重放，不能未经协议证明删除。
@@ -65,7 +65,7 @@
 
 | 位置 | 职责 |
 | --- | --- |
-| `crates/uc-infra/benches/` | 真实加密存储、按需读取、写入与格式升级性能 |
+| `crates/uc-infra-profile/benches/` | 真实加密存储、按需读取、写入与格式升级性能 |
 | `crates/uc-core/benches/` | 已有历史解码与规则校验算法的规模曲线；仅必要的纯规则场景 |
 | `crates/uc-engine/benches/` | 从稳定 Engine 入口进入的完整查询与生命周期场景 |
 | `scripts/performance/` | 串行运行、环境登记、独立进程资源测量、结果对比和失败退出 |

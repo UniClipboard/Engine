@@ -2,12 +2,16 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use uc_core::ids::DeviceId;
-use uc_core::membership::{LedgerWork, MemberEffectPhase, PeerLink, DEPARTURE_WINDOW_MS};
+use uc_core::membership::{
+    LedgerWork, MemberEffectPhase, MembershipHistoryAckV3, MembershipHistoryExchangeError,
+    MembershipHistoryExchangePort, MembershipHistoryMessage, PeerLink, DEPARTURE_WINDOW_MS,
+};
 use uc_core::ports::{ClockPort, ReachabilityState};
 
+use super::history_sync::HistorySynchronizer;
 use crate::space::membership::query_device_trust::NoCurrentJoinStatus;
 use crate::space::membership::testing::{
-    EstablishedSpace, OwnerFixture, TestSigner, WorkerFixture, WorkerPorts,
+    EstablishedSpace, NoopAddressRefresh, OwnerFixture, TestSigner, WorkerFixture, WorkerPorts,
 };
 use crate::space::membership::{
     DeviceTrustObservation, LoadDeviceTrustObservationsPort, MembershipEffectExecutionError,
@@ -271,4 +275,43 @@ async fn concurrent_effect_recovery_runs_each_phase_once() {
         vec!["member_facts", "security", "activation"]
     );
     assert_eq!(case.owner.records.ledger().unfinished_effects().count(), 0);
+}
+
+/// 对端对任何请求都回复与协议不符的确认。
+struct MismatchedReplyPeer;
+
+#[async_trait]
+impl MembershipHistoryExchangePort for MismatchedReplyPeer {
+    async fn exchange_membership_history(
+        &self,
+        _peer: &DeviceId,
+        _message: MembershipHistoryMessage,
+    ) -> Result<MembershipHistoryMessage, MembershipHistoryExchangeError> {
+        Ok(MembershipHistoryMessage::AckV3(
+            MembershipHistoryAckV3::Invalid,
+        ))
+    }
+}
+
+#[tokio::test]
+async fn a_peer_reply_outside_the_protocol_defers_the_sync_and_is_recorded_with_a_fixed_reason() {
+    let logs = uc_testkit::log_capture::CapturedLogs::default();
+    let _guard = logs.install();
+    let space = EstablishedSpace::new(&["device-a", "device-b"]);
+    let owner = OwnerFixture::new(space.record("device-a", 1));
+    let synchronizer = HistorySynchronizer::new(
+        owner.owner.clone(),
+        Arc::new(MismatchedReplyPeer),
+        Arc::new(NoopAddressRefresh),
+    );
+
+    let report = synchronizer.synchronize(vec![device_b()]).await.unwrap();
+
+    assert_eq!(report.deferred_peer_count, 1);
+    assert_eq!(report.stable_failure_count, 0);
+    assert_eq!(logs.count("peer reply did not match the protocol"), 1);
+    assert!(logs
+        .output()
+        .contains("reject_reason=\"summary_reply_mismatch\""));
+    assert!(!logs.output().contains("device-"));
 }

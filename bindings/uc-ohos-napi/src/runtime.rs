@@ -5,6 +5,7 @@ use crate::observability::schedule_flush_after_success;
 use napi::bindgen_prelude::Buffer;
 use napi::Status;
 use napi_derive::napi;
+use uc_engine::observability::uc_warn;
 use uc_engine::{
     CancelJoinSpaceInput, ChangeEncryptionPassphraseInput, ChooseDeviceGroupInput,
     ClipboardRestoreMode, ClipboardRestoreOutcome, CreateSpaceInput, Engine, EngineConfig,
@@ -18,8 +19,8 @@ use zeroize::Zeroizing;
 
 use crate::{
     host, OhActiveClipboard, OhEngineConfig, OhEngineEvent, OhHost, OhInvitationIssued,
-    OhJoinSpaceStatus, OhJoinedSpace, OhLocalDevice, OhNetworkRecoveryStatus, OhSendReport,
-    OhSessionRecovery, OhSpaceCreated, OhWorkspaceConvergence,
+    OhJoinSpaceStatus, OhJoinedSpace, OhLocalDevice, OhNetworkRecoveryStatus, OhRelayOverview,
+    OhRelayOverviewEntry, OhSendReport, OhSessionRecovery, OhSpaceCreated, OhWorkspaceConvergence,
 };
 
 #[napi]
@@ -200,6 +201,40 @@ impl OhEngine {
     }
 
     #[napi]
+    pub async fn query_relay_overview(&self) -> napi::Result<OhRelayOverview> {
+        match self
+            .engine
+            .execute(Operation::QueryRelayOverview)
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::RelayOverview(overview) => Ok(OhRelayOverview {
+                saved_mode: relay_mode_name(overview.saved_mode).to_string(),
+                applied_mode: overview
+                    .applied_mode
+                    .map(|mode| relay_mode_name(mode).to_string()),
+                change_pending: overview.change_pending,
+                entries: overview
+                    .entries
+                    .into_iter()
+                    .map(|entry| OhRelayOverviewEntry {
+                        source: match entry.source {
+                            uc_engine::RelayEntrySource::BuiltIn => "built_in",
+                            uc_engine::RelayEntrySource::Custom => "custom",
+                        }
+                        .to_string(),
+                        region_id: entry.region_id,
+                        url: entry.url,
+                        credential_configured: entry.credential_configured,
+                        in_effect: entry.in_effect,
+                    })
+                    .collect(),
+            }),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
     pub async fn query_local_device(&self) -> napi::Result<OhLocalDevice> {
         let result = self
             .engine
@@ -224,8 +259,7 @@ impl OhEngine {
             .map_err(engine_error)?
         {
             OperationResult::DeviceGroupChoices(summary) => {
-                // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
-                serde_json::to_string(&summary).map_err(|_| unexpected_result())
+                summary_json(serde_json::to_string(&summary))
             }
             _ => Err(unexpected_result()),
         }
@@ -240,7 +274,7 @@ impl OhEngine {
         confirm_local_removal: bool,
     ) -> napi::Result<String> {
         let expected_revision = u64::try_from(expected_revision)
-            // TryFromIntError：目标分类完整表达数值范围不符。
+            // discarded-source[int-conversion]: `core::num::TryFromIntError`: the target classification already expresses the range or length mismatch
             .map_err(|_| napi::Error::new(Status::InvalidArg, "invalid revision"))?;
         match self
             .engine
@@ -254,8 +288,7 @@ impl OhEngine {
             .map_err(engine_error)?
         {
             OperationResult::DeviceGroupChosen(result) => {
-                // 公开契约边界：只产出稳定错误码，失败分类由完整负责人的完成记录提取（见错误处理规范）。
-                serde_json::to_string(&result).map_err(|_| unexpected_result())
+                summary_json(serde_json::to_string(&result))
             }
             _ => Err(unexpected_result()),
         }
@@ -719,6 +752,9 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
                     uc_engine::JoinSpaceAttentionReasonSummary::OutcomeCannotBeProven => {
                         "outcome_cannot_be_proven"
                     }
+                    uc_engine::JoinSpaceAttentionReasonSummary::ContinuationUnavailable => {
+                        "continuation_unavailable"
+                    }
                 }
                 .to_owned(),
             ),
@@ -726,6 +762,9 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
                 match recovery {
                     uc_engine::JoinSpaceAttentionRecoverySummary::PreserveDataAndContactSupport => {
                         "preserve_data_and_contact_support"
+                    }
+                    uc_engine::JoinSpaceAttentionRecoverySummary::RestartWithNewInvitation => {
+                        "restart_with_new_invitation"
                     }
                 }
                 .to_owned(),
@@ -848,12 +887,12 @@ fn send_report(report: SendReportSummary) -> napi::Result<OhSendReport> {
 }
 
 fn count(value: usize) -> napi::Result<u32> {
-    // TryFromIntError：目标分类完整表达数值范围不符。
+    // discarded-source[int-conversion]: `core::num::TryFromIntError`: the target classification already expresses the range or length mismatch
     u32::try_from(value).map_err(|_| unexpected_result())
 }
 
 fn count_u64(value: u64) -> napi::Result<u32> {
-    // TryFromIntError：目标分类完整表达数值范围不符。
+    // discarded-source[int-conversion]: `core::num::TryFromIntError`: the target classification already expresses the range or length mismatch
     u32::try_from(value).map_err(|_| unexpected_result())
 }
 
@@ -961,6 +1000,19 @@ fn map_event_error(error: EngineError, mapped: &mut OhEngineEvent) {
     mapped.error_code = Some(error.code());
     mapped.error_category = Some(error.category().to_string());
     mapped.retryable = Some(error.is_retryable());
+}
+
+/// 结果摘要序列化为 JSON 的失败点；只记录固定分类，JS 侧收到稳定错误码。
+fn summary_json(serialized: serde_json::Result<String>) -> napi::Result<String> {
+    // discarded-source[business-outcome]: the failure becomes a business outcome and is recorded once here with a fixed classification
+    serialized.map_err(|_| {
+        uc_warn!(
+            operation = "summary_serialize",
+            error_kind = "unexpected_result",
+            "engine operation failed"
+        );
+        unexpected_result()
+    })
 }
 
 fn unexpected_result() -> napi::Error {
@@ -1229,5 +1281,13 @@ mod tests {
             assert!(json.contains("blocked_reason"));
             assert!(json.contains(&format!("\"pairing_confirmation\":\"{expected}\"")));
         }
+    }
+}
+
+fn relay_mode_name(mode: uc_engine::RelayRoutingMode) -> &'static str {
+    match mode {
+        uc_engine::RelayRoutingMode::BuiltIn => "built_in",
+        uc_engine::RelayRoutingMode::Custom => "custom",
+        uc_engine::RelayRoutingMode::Disabled => "disabled",
     }
 }

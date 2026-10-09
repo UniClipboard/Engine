@@ -62,6 +62,7 @@ impl RebuildSpaceUseCase {
         }
     }
 
+    #[tracing::instrument(name = "usecase.rebuild_space.execute", skip_all)]
     pub(crate) async fn execute(&self) -> Result<SpaceId, RebuildSpaceError> {
         let _guard = self.execution_lock.lock().await;
         // 重建改写成员账本、关系与控制库并在提交时计算目标摘要；成员维护若同时写入，

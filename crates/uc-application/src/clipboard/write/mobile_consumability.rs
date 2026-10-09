@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tracing::warn;
+
 use uc_core::clipboard::MobileConsumableRef;
 use uc_core::ids::EntryId;
 use uc_core::ports::clipboard::{
     ActiveClipboardRegisterError, BackfillMobileConsumableClipboardPort,
     EntryFileSetRepositoryPort, LoadActiveClipboardPort,
 };
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, log_fields::log_id, uc_warn};
 
 /// Applies the domain file-set rule to mobile clipboard consumption.
 #[derive(Clone)]
@@ -28,10 +28,10 @@ impl MobileConsumabilityProbe {
             Ok(None) => true,
             Ok(Some(file_set)) => !file_set.has_directory_structure(),
             Err(err) => {
-                warn!(
+                uc_warn!(
                     error_kind = "file_set_load",
                     io_error_kind = io_error_kind(&err),
-                    entry_id = %entry_id,
+                    entry_id = log_id(&entry_id),
                     "mobile consumability probe failed; treating entry as non-consumable"
                 );
                 false
@@ -58,7 +58,7 @@ pub trait MobileConsumableBackfill: Send + Sync {
     /// never blocks the unlock itself.
     async fn backfill_best_effort(&self) {
         if let Err(err) = self.backfill().await {
-            warn!(
+            uc_warn!(
                 error_kind = "reference_backfill",
                 io_error_kind = io_error_kind(&err),
                 "mobile-consumable reference backfill failed"

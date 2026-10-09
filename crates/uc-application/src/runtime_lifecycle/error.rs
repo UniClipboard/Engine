@@ -2,6 +2,7 @@ use std::fmt;
 
 use thiserror::Error;
 use tokio::task::JoinError;
+use uc_core::error_class::ErrorClass;
 
 #[derive(Debug, Error)]
 #[error("runtime lifecycle has been stopped")]
@@ -41,6 +42,24 @@ impl fmt::Debug for LifecycleError {
     }
 }
 
+impl ErrorClass for LifecycleError {
+    fn class(&self) -> &'static str {
+        if self.primary.is::<LifecycleStopped>() {
+            "stopped"
+        } else if self.primary.is::<LifecycleSuperseded>() {
+            "superseded"
+        } else if self.primary.is::<LifecycleDeadlineElapsed>() {
+            "deadline_elapsed"
+        } else {
+            match self.primary.downcast_ref::<LifecycleTaskFailure>() {
+                Some(LifecycleTaskFailure::Panicked) => "task_panicked",
+                Some(LifecycleTaskFailure::Cancelled) => "task_cancelled",
+                None => "incomplete",
+            }
+        }
+    }
+}
+
 impl LifecycleError {
     pub fn is_stopped(&self) -> bool {
         self.primary.is::<LifecycleStopped>()
@@ -48,6 +67,15 @@ impl LifecycleError {
 
     pub fn is_superseded(&self) -> bool {
         self.primary.is::<LifecycleSuperseded>()
+    }
+
+    /// 全部失败都只是共同期限结束了等待，没有参与者报告实际失败。
+    pub fn is_deadline_elapsed(&self) -> bool {
+        self.primary.is::<LifecycleDeadlineElapsed>()
+            && self
+                .additional
+                .iter()
+                .all(|error| error.is::<LifecycleDeadlineElapsed>())
     }
 
     pub(super) fn superseded() -> Self {
@@ -93,4 +121,20 @@ pub(super) fn sanitize_task_failure(source: JoinError) -> anyhow::Error {
 
 pub(super) fn deadline_elapsed() -> anyhow::Error {
     LifecycleDeadlineElapsed.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lifecycle_errors_have_a_fixed_class_per_primary_cause() {
+        assert_eq!(LifecycleError::stopped().class(), "stopped");
+        assert_eq!(LifecycleError::superseded().class(), "superseded");
+        let other = LifecycleError {
+            primary: anyhow::anyhow!("PRIVATE_DETAIL"),
+            additional: Vec::new(),
+        };
+        assert_eq!(other.class(), "incomplete");
+    }
 }

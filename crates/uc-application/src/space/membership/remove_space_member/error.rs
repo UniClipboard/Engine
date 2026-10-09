@@ -1,3 +1,4 @@
+use uc_core::error_class::ErrorClass;
 use uc_core::membership::MembershipEventId;
 
 #[derive(Debug, thiserror::Error)]
@@ -33,5 +34,27 @@ impl RemoveSpaceMemberError {
         Self::RecoveryRequired {
             source: Some(source.into()),
         }
+    }
+}
+
+impl ErrorClass for RemoveSpaceMemberError {
+    fn class(&self) -> &'static str {
+        match self {
+            Self::Locked => "locked",
+            Self::RecoveryRequired { .. } => "recovery_required",
+            Self::LocalMemberRemoved => "local_member_removed",
+            Self::TargetNotFound => "target_not_found",
+            Self::SelfTarget => "self_target",
+            Self::StateChanged => "state_changed",
+            Self::Unavailable => "unavailable",
+            Self::CommittedButPending { .. } => "committed_but_pending",
+        }
+    }
+}
+
+impl RemoveSpaceMemberError {
+    /// 调用方可预期的结果（被锁定、输入类失败）；其余是需要排查的状态或本机问题。
+    pub(crate) const fn is_expected(&self) -> bool {
+        matches!(self, Self::Locked | Self::TargetNotFound | Self::SelfTarget)
     }
 }

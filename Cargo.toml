@@ -3,7 +3,14 @@ members = [
   "crates/uc-engine",
   "crates/uc-core",
   "crates/uc-application",
-  "crates/uc-infra",
+  "crates/uc-infra-local",
+  "crates/uc-infra-crypto",
+  "crates/uc-infra-security",
+  "crates/uc-infra-storage",
+  "crates/uc-infra-content",
+  "crates/uc-infra-p2p",
+  "crates/uc-infra-profile",
+  "crates/uc-sync-protocol",
   "crates/uc-content-hash",
   "crates/uc-observability-contract",
   "crates/uc-observability-runtime",
@@ -19,10 +26,11 @@ members = [
   "tests/uc-testkit",
   "tests/upgrade-matrix",
 ]
+exclude = ["third_party/swarm-discovery", "third_party/iroh-mdns-address-lookup"]
 resolver = "2"
 
 [workspace.package]
-version = "1.1.0-rc.20"
+version = "1.1.0-rc.22"
 license = "Apache-2.0"
 
 [workspace.lints.clippy]
@@ -35,11 +43,9 @@ dbg_macro = "warn"
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)"] }
 
-# Keep the audited UniClipboard fix for HashContext::persist().
-[patch.crates-io]
-iroh-blobs = { git = "https://github.com/UniClipboard/iroh-blobs.git", rev = "b33af91e8a4bd189cc0f954fc6584feb5ffd1823" }
-# A closed discovery actor must terminate its delayed GC task instead of retrying indefinitely.
-swarm-discovery = { path = "third_party/swarm-discovery" }
+# No [patch] section on purpose: [patch] is only read from the root manifest of a build, so it would not reach
+# repositories that depend on Engine. The iroh-blobs fork is a git dependency of uc-infra-p2p, and the patched
+# swarm-discovery (with the vendored iroh-mdns-address-lookup) is a path dependency of uc-infra-p2p.
 
 [profile.dev]
 debug = "line-tables-only"
@@ -70,7 +76,19 @@ opt-level = 3
 
 # 移动端开发构建会走完整的加密 blob 流程。保持 Infra 优化，避免大图在
 # 仅由开发配置放大的压缩、分块和本地发布阶段耗费数秒。
-[profile.dev.package.uc-infra]
+[profile.dev.package.uc-infra-profile]
+opt-level = 3
+[profile.dev.package.uc-infra-local]
+opt-level = 3
+[profile.dev.package.uc-infra-crypto]
+opt-level = 3
+[profile.dev.package.uc-infra-security]
+opt-level = 3
+[profile.dev.package.uc-infra-storage]
+opt-level = 3
+[profile.dev.package.uc-infra-content]
+opt-level = 3
+[profile.dev.package.uc-infra-p2p]
 opt-level = 3
 
 [profile.release]

@@ -15,7 +15,7 @@ use uc_engine_uniffi::{
     BindingError, BindingErrorCategory, BindingEvent, BindingFileMetadata, BindingHost,
     BindingObservabilityConfig, BindingObservabilitySetupStatus, BindingObservabilitySignalResult,
     BindingOperationTerminal, CustomRelayMutationRejection, HostBindingError, InvitationIssued,
-    MobileEngine, MobileStartupLifecycle, SendReport,
+    MobileEngine, MobileStartupLifecycle, RelayEntrySource, RelayRoutingMode, SendReport,
 };
 
 static ENGINE_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -111,6 +111,7 @@ fn process_observability_is_host_owned_reused_and_lifecycle_safe() {
     let _ = flush_process_observability(25).expect("bounded flush");
     let health = query_process_observability_health().expect("observable process health");
     assert!(health.failed_remote_span_batches > 0 || health.failed_remote_log_batches > 0);
+    assert_eq!(health.remote_setup_failure, None);
     let _ = shutdown_process_observability(250).expect("process shutdown");
     let after_shutdown = flush_process_observability(25).expect("closed runtime summary");
     assert_eq!(
@@ -288,7 +289,8 @@ impl BindingHost for MemoryHost {
         let gate = {
             let mut gate = lock(&self.secure_read_gate);
             if gate.as_mut().is_some_and(|gate| gate.matches(&key)) {
-                gate.take()
+                // 同一受控密钥的并发读取都等待放行，不能被成员维护抢走唯一阻塞机会。
+                gate.clone()
             } else {
                 None
             }
@@ -702,10 +704,26 @@ fn space_management_preserves_state_devices_resend_outcomes_and_local_history() 
     engine
         .leave_space()
         .expect("binding must leave the local space");
-    assert!(matches!(
-        engine.query_space_state(),
-        Err(BindingError::Engine { code: 1103, .. })
-    ));
+    // 离开成功意味着同一实例已回到可查询的空空间，宿主不需要先重启。
+    let emptied = engine
+        .query_space_state()
+        .expect("the instance must stay queryable after leaving");
+    assert!(!emptied.has_completed);
+    assert!(emptied.space_id.is_none());
+    assert!(
+        engine
+            .list_devices()
+            .expect("the instance must list devices after leaving")
+            .is_empty(),
+        "leaving a space must not retain its member roster"
+    );
+    engine
+        .query_device_group_choices()
+        .expect("the join page must be able to read device group choices after leaving");
+    engine
+        .leave_space()
+        .expect("leaving an already empty space must stay successful");
+    // 仍然兼容“离开后关闭并重启”的宿主。
     engine
         .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
         .expect("reset binding engine must shut down within the deadline");
@@ -981,6 +999,51 @@ fn pairing_methods_return_invitation_data_and_stable_join_errors() {
         .expect("binding engine must shut down within the deadline");
 }
 
+/// 保存的自定义 relay 在节点重新构建后才生效：概览必须经过“已保存未生效”再到“已生效”。
+#[test]
+fn relay_overview_reports_applied_relays_after_the_node_is_rebuilt() {
+    let _test_guard = engine_test_guard();
+    let root = tempfile::tempdir().expect("temporary host root must be available");
+    let config = || BindingConfig {
+        app_version: "1.2.3".to_owned(),
+        profile_id: "binding-relay-overview-rebuild".to_owned(),
+    };
+    let host = Arc::new(MemoryHost::new(root.path()));
+    let engine = MobileEngine::start(config(), host.clone()).expect("binding engine must start");
+    engine
+        .add_custom_relay("https://relay-rebuild.example".to_owned(), String::new())
+        .expect("add relay");
+    let pending = engine
+        .query_relay_overview()
+        .expect("overview before rebuild");
+    assert_eq!(pending.saved_mode, RelayRoutingMode::Custom);
+    assert_eq!(pending.applied_mode, Some(RelayRoutingMode::BuiltIn));
+    assert!(pending.change_pending);
+    engine
+        .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
+        .expect("first engine must shut down");
+
+    let rebuilt = MobileEngine::start(config(), host).expect("rebuilt engine must start");
+    let applied = rebuilt
+        .query_relay_overview()
+        .expect("overview after rebuild");
+    assert_eq!(applied.saved_mode, RelayRoutingMode::Custom);
+    assert_eq!(applied.applied_mode, Some(RelayRoutingMode::Custom));
+    assert!(!applied.change_pending);
+    assert_eq!(applied.entries.len(), 5);
+    assert!(applied
+        .entries
+        .iter()
+        .filter(|entry| entry.source == RelayEntrySource::BuiltIn)
+        .all(|entry| !entry.in_effect));
+    let custom = &applied.entries[4];
+    assert_eq!(custom.source, RelayEntrySource::Custom);
+    assert!(custom.in_effect);
+    rebuilt
+        .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
+        .expect("rebuilt engine must shut down");
+}
+
 #[test]
 fn custom_relay_methods_preserve_authoritative_results_and_stable_errors() {
     let _test_guard = engine_test_guard();
@@ -1000,6 +1063,31 @@ fn custom_relay_methods_preserve_authoritative_results_and_stable_errors() {
         .expect("default relay list")
         .is_empty());
 
+    // 内置列表是产品默认值：不进入用户的自定义列表，但概览必须列出并标明实际生效。
+    let overview = engine.query_relay_overview().expect("relay overview");
+    assert_eq!(overview.saved_mode, RelayRoutingMode::BuiltIn);
+    assert_eq!(overview.applied_mode, Some(RelayRoutingMode::BuiltIn));
+    assert!(!overview.change_pending);
+    let regions: Vec<_> = overview
+        .entries
+        .iter()
+        .map(|entry| entry.region_id.as_deref())
+        .collect();
+    assert_eq!(
+        regions,
+        [
+            Some("na-east"),
+            Some("na-west"),
+            Some("eu"),
+            Some("asia-pacific")
+        ]
+    );
+    assert!(overview
+        .entries
+        .iter()
+        .all(|entry| entry.source == RelayEntrySource::BuiltIn && entry.in_effect));
+    assert!(!format!("{overview:?}").contains("iroh.link"));
+
     let added = engine
         .add_custom_relay(
             "  https://relay-a.example  ".to_owned(),
@@ -1008,6 +1096,24 @@ fn custom_relay_methods_preserve_authoritative_results_and_stable_errors() {
         .expect("add relay with credential");
     assert_eq!(added.rejection, None);
     assert_eq!(added.relays.len(), 1);
+    // 已保存但运行中的节点仍用内置列表：概览必须区分，不能把保存当成生效。
+    let pending = engine
+        .query_relay_overview()
+        .expect("relay overview after add");
+    assert_eq!(pending.saved_mode, RelayRoutingMode::Custom);
+    assert_eq!(pending.applied_mode, Some(RelayRoutingMode::BuiltIn));
+    assert!(pending.change_pending);
+    assert_eq!(pending.entries.len(), 5);
+    assert!(pending
+        .entries
+        .iter()
+        .filter(|entry| entry.source == RelayEntrySource::BuiltIn)
+        .all(|entry| entry.in_effect));
+    let custom_entry = &pending.entries[4];
+    assert_eq!(custom_entry.source, RelayEntrySource::Custom);
+    assert_eq!(custom_entry.url, "https://relay-a.example/");
+    assert!(custom_entry.credential_configured);
+    assert!(!custom_entry.in_effect);
     assert_eq!(added.relays[0].url, "https://relay-a.example/");
     assert!(added.relays[0].credential_configured);
     let added_debug = format!("{added:?}");
@@ -1525,6 +1631,12 @@ fn active_clipboard_query_survives_session_recovery() {
         .query_local_device()
         .expect("first binding engine must expose the local device")
         .device_id;
+    let active_before_shutdown = first
+        .query_active_clipboard()
+        .expect("first binding engine must query the active clipboard")
+        .expect("captured clipboard must be active before shutdown");
+    assert_eq!(active_before_shutdown.entry_id, entry_id);
+    assert_eq!(active_before_shutdown.activated_by, activated_by);
     first
         .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
         .expect("first binding engine must shut down");

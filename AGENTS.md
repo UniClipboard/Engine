@@ -47,7 +47,7 @@
 - 保持单一事实来源，不长期保留新旧两套实现或文档入口。
 - 文档中的仓库路径使用相对路径。
 - 使用 planning-with-files 时，`task_plan.md`、`findings.md`、`progress.md` 统一存放在 `.planning/<YYYY-MM-DD>-<任务短名>/` 下，不得创建在仓库根目录；继续已有任务时复用其原目录。
-- Rust 命令从仓库根目录运行。
+- Rust 命令从仓库根目录运行，统一通过 `just cargo`；直接运行 Cargo 前 source `scripts/build-cache/env.sh`。
 - Cargo 构建默认复用仓库 `target`；该路径不可用时先停止并修复，不得把任务命名的 `CARGO_TARGET_DIR` 改到 `/tmp` 或 `/private/tmp` 继续构建。
 - 多 Agent 可以并行读代码和修改互不重叠的文件，但 Cargo 验证由一个负责人通过共享 `target` 串行执行；不得让每个 Agent 各建一套完整构建目录。
 - 默认保留环境中的共享编译缓存；除非任务就是诊断缓存本身，不得通过清空 `RUSTC_WRAPPER` 绕过它。
@@ -58,6 +58,7 @@
 - 跨层功能必须有唯一完整负责人；Core 保存规则、Application 负责流程、Infra 提供能力、Engine 只组装。
 - “一个流程负责人”指流程顺序、成功/失败结果及重启/重试责任由同一个业务模块统一承担，不是要求所有定义塞进一个文件或一个类型。模块内部应按职责组织流程实现、专属 port、数据模型、错误与测试；不得以统一负责人为由将这些内容全部堆进 `mod.rs`。`mod.rs` 应保持为清晰的模块入口，以模块声明和必要导出为主；拆分文件不应扩大公开接口，也不得把内部步骤交给调用方拼接。
 - 跨层持续计时与结果分类只通过 Engine 组装层的领域 port decorator 实现。
+- 日志使用 `uc_*!` 宏（字段名与值类别由字段目录在编译期约束，见 [ADR-030](docs/design-docs/decisions/030-typed-log-events-and-enforcement.md)）；直接使用 `tracing` 日志宏会被 `scripts/architecture/check-direct-log-macros.mjs` 拒绝。
 - 独立业务记录必须说明触发原因、完整动作和最终结果；不得把底层调用或正常清理自动提升为业务入口。业务动作与运行诊断分开，测试与产品记录隔离；关联、结束和验收细则只在[业务记录组织标准](docs/design-docs/observability.md#业务记录组织标准)维护。
 - 为日志、tracing 或流程关联增加观测时，不得向 Engine 新增暴露 Application/Core 内部阶段、状态对象、业务标识或步骤查询，也不得为观测扩大 facade、port 或结果接口。Engine 只能装饰既有完整能力的输入与输出；跨步骤关联必须由完整流程负责人通过不透明观测上下文提供，且不得让 Engine 据此编排业务步骤。
 - 新功能开工前写清完整负责人、调用方唯一动作、成功/失败结果及重启/重试责任。
@@ -69,9 +70,9 @@
 不涉及行为改动时至少运行：
 
 ```bash
-cargo metadata --locked --format-version 1
-cargo check --workspace --all-targets --locked
-cargo fmt --all -- --check
+just cargo metadata --locked --format-version 1
+just cargo check --workspace --all-targets --locked
+just cargo fmt --all -- --check
 node scripts/architecture/check-rust-style.mjs
 node scripts/architecture/check-engine-repository.mjs
 git diff --check

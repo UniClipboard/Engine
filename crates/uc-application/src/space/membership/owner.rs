@@ -29,6 +29,7 @@ use super::{
 use crate::space::lifecycle::{SpaceMembershipRebuildError, SpaceMembershipResetPort};
 
 pub(crate) use draft::MembershipDraft;
+use uc_observability_contract::uc_warn;
 pub(crate) use view::{pause_reason, MembershipView};
 
 pub(crate) struct MembershipOwner {
@@ -146,7 +147,7 @@ impl MembershipOwner {
                         ))
                         .is_err()
                     {
-                        tracing::warn!("成员设备信任变化事件发布失败");
+                        uc_warn!("成员设备信任变化事件发布失败");
                     }
                 }
                 LedgerFollowUp::WakeWorker => self.worker_wake.wake(),
@@ -248,7 +249,7 @@ impl MembershipOwner {
     ) -> Result<std::sync::MutexGuard<'_, Option<Published>>, MembershipLedgerError> {
         self.published
             .lock()
-            // 锁中毒：PoisonError 持有 guard，不能作为来源保存。
+            // discarded-source[lock-poisoned]: `std::sync::PoisonError<Guard>`: the poison error holds the guard and cannot be stored across threads
             .map_err(|_| MembershipLedgerError::unavailable())
     }
 

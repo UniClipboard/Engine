@@ -1,8 +1,10 @@
 use std::sync::Arc;
+use uc_core::error_class::ErrorClass;
 
 use uc_core::membership::{
     HistoricalMembershipSignatureVerifier, LedgerInput, LedgerOutcome, MemberInstanceId,
-    MembershipBranchTransitionPhaseV1, MembershipBranchTransitionV1, VersionedMembershipHistory,
+    MembershipBranchTransitionPhaseV1, MembershipBranchTransitionV1, MembershipHistoryV2Error,
+    VersionedMembershipHistory,
 };
 use uc_core::ports::ClockPort;
 
@@ -20,6 +22,7 @@ use super::{
     PrepareMembershipBranchRecoveryRecipientPort, PrepareMembershipBranchTransitionError,
     PrepareMembershipBranchTransitionInput, PrepareMembershipBranchTransitionPort,
 };
+use uc_observability_contract::{log_fields::log_vocab_debug, uc_debug, uc_warn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RecoverMembershipConflictOutcome {
@@ -80,6 +83,7 @@ impl RecoverMembershipConflictUseCase {
         }
     }
 
+    #[tracing::instrument(name = "usecase.recover_membership_conflict.execute", skip_all)]
     pub(crate) async fn execute(&self) -> RecoverMembershipConflictOutcome {
         let _guard = self.execution_lock.lock().await;
         let view = match self.owner.load().await {
@@ -176,7 +180,7 @@ impl RecoverMembershipConflictUseCase {
                 prepared.external_commit.clone(),
                 prepared.staged_mls_state,
             ) else {
-                return RecoverMembershipConflictOutcome::StableFailure;
+                return stable_failure("recipient_session", "invalid_session");
             };
             let persisted = self
                 .owner
@@ -227,7 +231,7 @@ impl RecoverMembershipConflictUseCase {
             )
             .is_err()
         {
-            return RecoverMembershipConflictOutcome::StableFailure;
+            return stable_failure("package_validation", "invalid");
         }
         let nonce = *package.nonce();
         let prepared = match self
@@ -245,7 +249,7 @@ impl RecoverMembershipConflictUseCase {
                 return RecoverMembershipConflictOutcome::Deferred;
             }
             Err(PrepareMembershipBranchTransitionError::Invalid { .. }) => {
-                return RecoverMembershipConflictOutcome::StableFailure;
+                return stable_failure("prepare_transition", "invalid");
             }
         };
         if !prepared.validate()
@@ -254,7 +258,7 @@ impl RecoverMembershipConflictUseCase {
             || prepared.conflict_id() != conflict_id
             || prepared.target_branch_id() != target_branch_id
         {
-            return RecoverMembershipConflictOutcome::StableFailure;
+            return stable_failure("prepare_transition", "mismatch");
         }
 
         match self
@@ -293,7 +297,6 @@ impl RecoverMembershipConflictUseCase {
             .await
         {
             Ok(_) => RecoverMembershipConflictOutcome::Completed,
-            Err(MembershipLedgerError::Conflict) => RecoverMembershipConflictOutcome::StableFailure,
             Err(error) => map_ledger_error(error),
         }
     }
@@ -313,7 +316,7 @@ impl RecoverMembershipConflictUseCase {
                     self.verifier.as_ref(),
                 ) {
                     Ok(history) => history,
-                    Err(_) => return RecoverMembershipConflictOutcome::StableFailure,
+                    Err(error) => return decode_target_failed(&error),
                 };
             let staged_membership =
                 if transition.phase() == MembershipBranchTransitionPhaseV1::TargetVerified {
@@ -327,9 +330,6 @@ impl RecoverMembershipConflictUseCase {
                         .await
                     {
                         Ok(staged) => Some(staged),
-                        Err(MembershipLedgerError::Conflict) => {
-                            return RecoverMembershipConflictOutcome::StableFailure;
-                        }
                         Err(error) => return map_ledger_error(error),
                     }
                 } else {
@@ -351,14 +351,19 @@ impl RecoverMembershipConflictUseCase {
                     return RecoverMembershipConflictOutcome::Deferred;
                 }
                 Err(AdvanceMembershipBranchTransitionError::Invalid { .. }) => {
-                    return RecoverMembershipConflictOutcome::StableFailure;
+                    return stable_failure("advance_transition", "invalid");
                 }
                 Err(AdvanceMembershipBranchTransitionError::RecoveryRequired { .. }) => {
+                    uc_warn!(
+                        stage = "advance_transition",
+                        error_kind = "recovery_required",
+                        "membership conflict recovery needs manual recovery"
+                    );
                     return RecoverMembershipConflictOutcome::Corrupt;
                 }
             };
             if transition.advance(next.phase()).as_ref() != Some(&next) {
-                return RecoverMembershipConflictOutcome::StableFailure;
+                return stable_failure("advance_transition", "phase_mismatch");
             }
             // 提升后当前控制世代已换成目标世代，Owner 按数据库代号的变化读取其中已暂存的成员记录。
             if let Err(error) = self.owner.load().await {
@@ -400,15 +405,20 @@ impl RecoverMembershipConflictUseCase {
                 .await
             {
                 Ok(_) if completed => {
-                    tracing::debug!(?previous_phase, ?next_phase, "成员分支转换阶段已持久化");
+                    uc_debug!(
+                        previous_phase = log_vocab_debug(&previous_phase),
+                        next_phase = log_vocab_debug(&next_phase),
+                        "成员分支转换阶段已持久化"
+                    );
                     return RecoverMembershipConflictOutcome::Completed;
                 }
                 Ok(_) => {
-                    tracing::debug!(?previous_phase, ?next_phase, "成员分支转换阶段已持久化");
+                    uc_debug!(
+                        previous_phase = log_vocab_debug(&previous_phase),
+                        next_phase = log_vocab_debug(&next_phase),
+                        "成员分支转换阶段已持久化"
+                    );
                     transition = next;
-                }
-                Err(MembershipLedgerError::Conflict) => {
-                    return RecoverMembershipConflictOutcome::StableFailure;
                 }
                 Err(error) => return map_ledger_error(error),
             }
@@ -484,7 +494,7 @@ impl RecoverMembershipConflictUseCase {
             )
             .is_err()
         {
-            return Err(RecoverMembershipConflictOutcome::StableFailure);
+            return Err(stable_failure("package_validation", "invalid"));
         }
         let persisted_package = package.clone();
         self.owner
@@ -512,9 +522,11 @@ fn map_channel_error(
         MembershipBranchRecoveryChannelError::Unavailable { .. } => {
             RecoverMembershipConflictOutcome::Deferred
         }
-        MembershipBranchRecoveryChannelError::Rejected { .. }
-        | MembershipBranchRecoveryChannelError::Invalid { .. } => {
-            RecoverMembershipConflictOutcome::StableFailure
+        MembershipBranchRecoveryChannelError::Rejected { .. } => {
+            stable_failure("channel", "rejected")
+        }
+        MembershipBranchRecoveryChannelError::Invalid { .. } => {
+            stable_failure("channel", "invalid")
         }
     }
 }
@@ -527,7 +539,7 @@ fn map_recipient_error(
             RecoverMembershipConflictOutcome::Deferred
         }
         PrepareMembershipBranchRecoveryRecipientError::Invalid { .. } => {
-            RecoverMembershipConflictOutcome::StableFailure
+            stable_failure("recipient", "invalid")
         }
     }
 }
@@ -537,9 +549,32 @@ fn map_ledger_error(error: MembershipLedgerError) -> RecoverMembershipConflictOu
         MembershipLedgerError::Locked | MembershipLedgerError::Unavailable { .. } => {
             RecoverMembershipConflictOutcome::Deferred
         }
-        MembershipLedgerError::Conflict => RecoverMembershipConflictOutcome::StableFailure,
+        MembershipLedgerError::Conflict => stable_failure("ledger", "conflict"),
         MembershipLedgerError::Corrupt { .. } | MembershipLedgerError::RecoveryRequired => {
             RecoverMembershipConflictOutcome::Corrupt
         }
     }
+}
+
+/// 冲突恢复在此阶段得出不会自行重试的结论：只记录固定阶段与分类，不含冲突、转换或成员标识。
+fn stable_failure(
+    stage: &'static str,
+    error_kind: &'static str,
+) -> RecoverMembershipConflictOutcome {
+    uc_warn!(
+        stage = stage,
+        error_kind = error_kind,
+        "membership conflict recovery stopped with a stable failure"
+    );
+    RecoverMembershipConflictOutcome::StableFailure
+}
+
+fn decode_target_failed(error: &MembershipHistoryV2Error) -> RecoverMembershipConflictOutcome {
+    uc_warn!(
+        stage = "decode_target",
+        error_kind = "decode",
+        error_class = error.class(),
+        "membership conflict recovery stopped with a stable failure"
+    );
+    RecoverMembershipConflictOutcome::StableFailure
 }

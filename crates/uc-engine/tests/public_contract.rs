@@ -156,6 +156,7 @@ fn every_public_operation_has_a_stable_kind() {
                 extensions: None,
                 source_devices: None,
                 tags: None,
+                tag_match: None,
                 limit: 50,
                 offset: 0,
             }),
@@ -284,9 +285,59 @@ fn history_management_contract_preserves_results_without_debugging_user_content(
             uc_engine::Operation::ClearHistory,
             uc_engine::OperationKind::ClearHistory,
         ),
+        (
+            uc_engine::Operation::ListHistoryTags,
+            uc_engine::OperationKind::ListHistoryTags,
+        ),
+        (
+            uc_engine::Operation::CreateHistoryTag(uc_engine::CreateHistoryTagInput {
+                name: "private tag name".into(),
+            }),
+            uc_engine::OperationKind::CreateHistoryTag,
+        ),
+        (
+            uc_engine::Operation::RenameHistoryTag(uc_engine::RenameHistoryTagInput {
+                tag_id: "tag-1".into(),
+                name: "private tag name".into(),
+            }),
+            uc_engine::OperationKind::RenameHistoryTag,
+        ),
+        (
+            uc_engine::Operation::AddHistoryTagToEntries(uc_engine::HistoryTagEntriesInput {
+                tag_id: "tag-1".into(),
+                entry_ids: vec!["entry-1".into()],
+            }),
+            uc_engine::OperationKind::AddHistoryTagToEntries,
+        ),
+        (
+            uc_engine::Operation::RemoveHistoryTagFromEntries(uc_engine::HistoryTagEntriesInput {
+                tag_id: "tag-1".into(),
+                entry_ids: vec!["entry-1".into()],
+            }),
+            uc_engine::OperationKind::RemoveHistoryTagFromEntries,
+        ),
+        (
+            uc_engine::Operation::SummarizeHistoryEntryTags(uc_engine::HistoryEntryTagsInput {
+                entry_ids: vec!["entry-1".into()],
+            }),
+            uc_engine::OperationKind::SummarizeHistoryEntryTags,
+        ),
+        (
+            uc_engine::Operation::MergeHistoryTags(uc_engine::MergeHistoryTagsInput {
+                source_tag_ids: vec!["tag-2".into()],
+                target_tag_id: "tag-1".into(),
+            }),
+            uc_engine::OperationKind::MergeHistoryTags,
+        ),
+        (
+            uc_engine::Operation::DeleteHistoryTag(uc_engine::HistoryTagInput {
+                tag_id: "tag-1".into(),
+            }),
+            uc_engine::OperationKind::DeleteHistoryTag,
+        ),
     ];
-    for (operation, expected) in operations {
-        assert_eq!(operation.kind(), expected);
+    for (operation, expected) in &operations {
+        assert_eq!(operation.kind(), *expected);
     }
 
     let results = [
@@ -329,8 +380,25 @@ fn history_management_contract_preserves_results_without_debugging_user_content(
             inline_data: Some(b"private inline content".to_vec()),
         }),
     ];
-    let debug = format!("{results:?}");
+    let tag = uc_engine::HistoryTagSummary {
+        tag_id: "tag-1".into(),
+        name: Some("private tag name".into()),
+        created_at_ms: 1,
+        entry_count: 2,
+    };
+    let tag_results = [
+        uc_engine::OperationResult::HistoryTags(vec![tag.clone()]),
+        uc_engine::OperationResult::HistoryTagCreated(uc_engine::HistoryTagCreatedSummary {
+            tag: tag.clone(),
+            created: true,
+        }),
+        uc_engine::OperationResult::HistoryTagRenamed(uc_engine::HistoryTagRenameSummary::Renamed(
+            tag,
+        )),
+    ];
+    let debug = format!("{results:?} {tag_results:?} {operations:?}");
     for secret in [
+        "private tag name",
         "private preview",
         "private-tag",
         "private.example",
@@ -1236,6 +1304,7 @@ fn search_contract_preserves_fields_without_debugging_user_content() {
         extensions: Some("private-extension".into()),
         source_devices: Some("device-1".into()),
         tags: Some("private-tag".into()),
+        tag_match: Some("all".into()),
         limit: 50,
         offset: 0,
     };

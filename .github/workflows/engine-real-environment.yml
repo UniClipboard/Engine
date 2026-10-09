@@ -52,6 +52,12 @@ jobs:
     name: Nightly real Engine
     if: github.event_name == 'schedule'
     runs-on: ubuntu-24.04
+    # 编译缓存凭据：只有 main 上的可信运行绑定限定 main 分支的写入环境，其余运行（PR、合并队列、其他分支）用只读令牌；
+    # fork 与 Dependabot 拿不到任何 secret，回退为按 ref 隔离的 GitHub Actions 缓存。
+    # 本文件其余 Rust job 使用相同绑定；详见 docs/design-docs/decisions/029-ci-r2-compile-cache.md。
+    environment:
+      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
+      deployment: false
     timeout-minutes: 40
     strategy:
       fail-fast: false
@@ -67,6 +73,10 @@ jobs:
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: engine-real-environment-${{ matrix.mode }}
+          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
+          compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
       - name: Build real Engine hosts
         id: build
         shell: bash
@@ -106,10 +116,21 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      - name: Retain MBX compiler evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mbx-${{ github.job }}-${{ matrix.mode }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/mbx-evidence
+          if-no-files-found: warn
+
   manual:
     name: Manual real Engine scenario
     if: github.event_name == 'workflow_dispatch' && inputs.mode != 'profile-upgrade' && inputs.mode != 'membership-e2e' && inputs.mode != 'upgrade-matrix'
     runs-on: ubuntu-24.04
+    environment:
+      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
+      deployment: false
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -121,6 +142,10 @@ jobs:
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: engine-real-environment-${{ inputs.mode }}
+          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
+          compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
       - name: Build real Engine hosts
         id: build
         shell: bash
@@ -166,10 +191,21 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      - name: Retain MBX compiler evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mbx-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/mbx-evidence
+          if-no-files-found: warn
+
   profile-upgrade:
     name: Nightly profile upgrade evidence
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'profile-upgrade')
     runs-on: ubuntu-24.04
+    environment:
+      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
+      deployment: false
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -177,6 +213,10 @@ jobs:
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: engine-real-environment-profile-upgrade
+          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
+          compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
       - name: Install cargo-nextest
         uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
         with:
@@ -186,7 +226,7 @@ jobs:
         shell: bash
         run: |
           started_at=$(date +%s)
-          cargo nextest run --profile ci --no-run -p uc-infra \
+          cargo nextest run --profile ci --no-run -p uc-infra-profile \
             --test profile_storage_upgrade \
             --test profile_storage_upgrade_crash
           echo "seconds=$(( $(date +%s) - started_at ))" >> "$GITHUB_OUTPUT"
@@ -196,7 +236,7 @@ jobs:
           started_at=$(date +%s)
           set +e
           timeout --signal=TERM --kill-after=30s 30m \
-            cargo nextest run --profile ci -p uc-infra \
+            cargo nextest run --profile ci -p uc-infra-profile \
               --test profile_storage_upgrade \
               --test profile_storage_upgrade_crash
           result=$?
@@ -223,10 +263,21 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Retain MBX compiler evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mbx-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/mbx-evidence
+          if-no-files-found: warn
+
   membership-e2e:
     name: Membership multi-device scenarios
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'membership-e2e')
     runs-on: ubuntu-24.04
+    environment:
+      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
+      deployment: false
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -234,6 +285,10 @@ jobs:
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: engine-real-environment-membership-e2e
+          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
+          compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
       - name: Install cargo-nextest
         uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
         with:
@@ -277,10 +332,22 @@ jobs:
 
   # 升级兼容矩阵（各锚点到当前源码与 D1 完整链）：先按 rev 构建并缓存全部旧版宿主，再按维度分片运行，最后合并
   # 矩阵表。夜间、锚点定义变化的 PR 与手动触发运行同一矩阵。
+
+      - name: Retain MBX compiler evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mbx-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/mbx-evidence
+          if-no-files-found: warn
+
   upgrade-anchors:
     name: Upgrade matrix anchor hosts
     if: github.event_name == 'schedule' || github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'upgrade-matrix')
     runs-on: ubuntu-24.04
+    environment:
+      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
+      deployment: false
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -292,6 +359,10 @@ jobs:
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: engine-real-environment-upgrade-matrix
+          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
+          compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
       - name: Cache anchor hosts
         uses: actions/cache@v4
         with:
@@ -317,10 +388,21 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      - name: Retain MBX compiler evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mbx-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/mbx-evidence
+          if-no-files-found: warn
+
   upgrade-matrix:
     name: Upgrade matrix (${{ matrix.dimension }})
     needs: upgrade-anchors
     runs-on: ubuntu-24.04
+    environment:
+      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
+      deployment: false
     timeout-minutes: 240
     strategy:
       fail-fast: false
@@ -336,6 +418,10 @@ jobs:
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: engine-real-environment-upgrade-matrix
+          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
+          compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
       - name: Cache anchor hosts
         uses: actions/cache@v4
         with:
@@ -370,6 +456,14 @@ jobs:
             target/test-artifacts/ci/upgrade-matrix
           if-no-files-found: error
           retention-days: 14
+
+      - name: Retain MBX compiler evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mbx-${{ github.job }}-${{ matrix.dimension }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/mbx-evidence
+          if-no-files-found: warn
 
   upgrade-matrix-report:
     name: Upgrade matrix report

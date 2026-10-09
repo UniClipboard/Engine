@@ -5,10 +5,9 @@
 
 use std::sync::Arc;
 
-use tracing::warn;
 use uc_core::ids::DeviceId;
 use uc_core::ports::{ClipboardHeader, ClockPort, LocalIdentityPort, SettingsPort};
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{error_source::io_error_kind, uc_warn};
 
 use super::DispatchClipboardEntryInput;
 
@@ -62,7 +61,7 @@ impl OutboundHeaderFactory {
                 }
             }
             Err(err) => {
-                warn!(
+                uc_warn!(
                     error_kind = "settings_load",
                     io_error_kind = io_error_kind(err.as_ref()),
                     "dispatch: settings load failed; using fingerprint fallback"

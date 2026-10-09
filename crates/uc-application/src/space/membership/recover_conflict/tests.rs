@@ -693,3 +693,30 @@ async fn target_recovery_retry_returns_the_cached_package_without_reapplying_com
     assert_eq!(material.calls.load(Ordering::SeqCst), 1);
     assert_eq!(material.commit_calls.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn a_stable_failure_is_recorded_once_with_its_stage_and_no_identifiers() {
+    let logs = uc_testkit::log_capture::CapturedLogs::default();
+    let _guard = logs.install();
+    let fixture = fixture();
+    let nonce = fixture.nonce;
+    fixture.repository.edit(|space| {
+        space
+            .branch_recovery
+            .consumed_recovery_nonces
+            .insert(nonce, MembershipConflictId::from_bytes([0x61; 32]));
+    });
+
+    assert_eq!(
+        fixture.use_case.execute().await,
+        RecoverMembershipConflictOutcome::StableFailure
+    );
+
+    assert_eq!(
+        logs.count("membership conflict recovery stopped with a stable failure"),
+        1
+    );
+    assert!(logs.output().contains("stage=\"ledger\""));
+    assert!(logs.output().contains("error_kind=\"conflict\""));
+    assert!(!logs.output().contains("0x61"));
+}

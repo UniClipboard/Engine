@@ -54,6 +54,7 @@ async fn one_authentication_completion_has_local_detail_but_only_the_v1_remote_s
         "permission_denied",
         Some("PermissionDenied"),
         Some(5),
+        true,
     );
     assert_eq!(
         handle.force_flush(Duration::from_secs(5)).logs,

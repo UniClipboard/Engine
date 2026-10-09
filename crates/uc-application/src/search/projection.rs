@@ -217,6 +217,8 @@ impl SearchableContent {
             captured_at_ms: entry.created_at_ms,
             content_type,
             tags,
+            // 用户历史标签来自独立的权威存储，由索引写入方在构建后补齐。
+            history_tag_ids: Vec::new(),
             mime_type,
             file_extensions,
             plain_text: self.plain_text,

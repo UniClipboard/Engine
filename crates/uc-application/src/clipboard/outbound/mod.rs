@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 use thiserror::Error;
-use tracing::{debug, info, warn};
+
 use uc_core::blob::ports::BlobReaderPort;
 use uc_core::clipboard::{
     is_file_mime_or_format, ClipboardPayloadSource, EntryFileSetExcludeReason,
@@ -26,7 +26,11 @@ use uc_core::{ClipboardChangeOrigin, SystemClipboardSnapshot};
 use uc_observability_contract::diagnostics::connectivity::{
     LocalWorkObservation, LocalWorkOutcome, LocalWorkStep,
 };
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind,
+    log_fields::{log_id, log_vocab},
+    uc_debug, uc_info, uc_warn,
+};
 
 use crate::clipboard::sync::apply_inbound::{
     compute_file_set_component, InboundFileSetManifest, InboundFileSetMember,
@@ -222,8 +226,8 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
                 .snapshot
                 .representations
                 .retain(|rep| !matches!(rep.source(), ClipboardPayloadSource::LocalFile { .. }));
-            info!(
-                entry_id = %input.entry_id,
+            uc_info!(
+                entry_id = log_id(&input.entry_id),
                 stripped_count = stripped,
                 "outbound: stripped LocalFile reps before envelope construction (already in blob store; \
                  peers receive bytes via files rep + iroh-blobs)"
@@ -270,11 +274,11 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
                 // Publishing the readable subset would key the receiver's copy
                 // on content digests — a diverged identity and a duplicate
                 // entry on the next copy of the same set.
-                warn!(
-                    entry_id = %entry_id_str,
-                    ingest_failed,
-                    size_cap_exceeded,
-                    unsupported_member,
+                uc_warn!(
+                    entry_id = log_id(&entry_id_str),
+                    ingest_failed = ingest_failed,
+                    size_cap_exceeded = size_cap_exceeded,
+                    unsupported_member = unsupported_member,
                     "outbound: file-set manifest has excluded lines; skipping dispatch (all-or-nothing)"
                 );
                 return Ok(ClipboardOutboundOutcome::Skipped {
@@ -304,10 +308,10 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
                     // A manifest member vanished between capture and dispatch.
                     // Same all-or-nothing rule as above: never sync a subset of
                     // a set whose identity covers all members.
-                    warn!(
+                    uc_warn!(
                         error_kind = "file_set_member_unreadable",
                         io_error_kind = io_error_kind(&err),
-                        entry_id = %entry_id_str,
+                        entry_id = log_id(&entry_id_str),
                         "outbound: file-set member unreadable at dispatch; skipping dispatch (all-or-nothing)"
                     );
                     if let Some(observation) = metadata_observation.take() {
@@ -317,7 +321,7 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
                         reason: "file_set_member_unavailable".to_string(),
                     });
                 }
-                Err(err) => warn!(
+                Err(err) => uc_warn!(
                     error_kind = "file_metadata_unreadable",
                     io_error_kind = io_error_kind(&err),
                     "排除无法读取元数据的剪贴板文件"
@@ -340,8 +344,8 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
             .await;
         planning_observation.finish(LocalWorkOutcome::Ok);
         let Some(mut clipboard_intent) = plan.clipboard else {
-            info!(
-                entry_id = %entry_id_str,
+            uc_info!(
+                entry_id = log_id(&entry_id_str),
                 "outbound: dispatch_capture skipped (planner suppressed)"
             );
             return Ok(ClipboardOutboundOutcome::Skipped {
@@ -349,10 +353,10 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
             });
         };
 
-        info!(
-            entry_id = %entry_id_str,
-            snapshot_rep_count,
-            extracted_paths_count,
+        uc_info!(
+            entry_id = log_id(&entry_id_str),
+            snapshot_rep_count = snapshot_rep_count,
+            extracted_paths_count = extracted_paths_count,
             file_paths_source = if from_manifest { "manifest" } else { "reps" },
             file_candidate_count = plan.files.len(),
             total_file_bytes = total_file_metadata_bytes,
@@ -377,8 +381,8 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
             let mut capture_digests = expected_digests;
             capture_digests.dedup();
             if wire_digests != capture_digests {
-                warn!(
-                    entry_id = %entry_id_str,
+                uc_warn!(
+                    entry_id = log_id(&entry_id_str),
                     "outbound: file content drifted between capture and dispatch; wire identity keyed on current bytes"
                 );
             }
@@ -396,10 +400,12 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
 
         let file_set_manifest = match directory_members {
             Some(members) => {
-                if plan.files.len() != extracted_paths_count {
-                    return Ok(ClipboardOutboundOutcome::Skipped {
-                        reason: "file_set_member_unavailable".to_string(),
-                    });
+                if let Some(skipped) = skip_when_planner_excluded_member(
+                    &entry_id_str,
+                    plan.files.len(),
+                    extracted_paths_count,
+                ) {
+                    return Ok(skipped);
                 }
                 Some(build_transfer_manifest(&members, &plan.files)?)
             }
@@ -455,9 +461,9 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
                 .await
         }
         .map_err(|err| ClipboardOutboundError::Internal(anyhow::Error::from(err)))?;
-        info!(
-            entry_id = %entry_id_str,
-            blob_ref_count,
+        uc_info!(
+            entry_id = log_id(&entry_id_str),
+            blob_ref_count = blob_ref_count,
             accepted = dispatch_result.total_accepted,
             offline = dispatch_result.total_offline,
             errored = dispatch_result.total_errored,
@@ -673,6 +679,28 @@ pub(crate) struct DirectoryMemberSource {
     pub root_is_file: bool,
 }
 
+/// 目录集成员被 planner 丢弃时整组不发送：此时 blob 已发布，但传输清单无法完整描述目录，
+/// 写一条只带数量的记录，返回值里的原因字符串是既有的公开取值。
+fn skip_when_planner_excluded_member(
+    entry_id: &str,
+    file_candidate_count: usize,
+    extracted_paths_count: usize,
+) -> Option<ClipboardOutboundOutcome> {
+    if file_candidate_count == extracted_paths_count {
+        return None;
+    }
+    uc_warn!(
+        entry_id = log_id(&entry_id),
+        reason = "planner_excluded_member",
+        file_candidate_count = file_candidate_count,
+        extracted_paths_count = extracted_paths_count,
+        "outbound: directory set skipped because the planner excluded a member"
+    );
+    Some(ClipboardOutboundOutcome::Skipped {
+        reason: "file_set_member_unavailable".to_string(),
+    })
+}
+
 /// Resolve the member path list for an outbound file-class send, preferring
 /// the persisted file-set manifest over re-parsing raw reps.
 ///
@@ -699,8 +727,8 @@ pub(crate) async fn resolve_outbound_file_set(
             // Expected for every pre-manifest (legacy) file entry, so keep it
             // at debug: during the migration window this fires on each dispatch
             // /resend of an old file entry and would otherwise flood info.
-            debug!(
-                entry_id = %entry_id.as_str(),
+            uc_debug!(
+                entry_id = log_id(&entry_id.as_str()),
                 "outbound: no file-set manifest for file-class entry; falling back to rep parsing"
             );
             return OutboundFileSetResolution::Fallback {
@@ -708,8 +736,8 @@ pub(crate) async fn resolve_outbound_file_set(
             };
         }
         Err(err) => {
-            warn!(
-                entry_id = %entry_id.as_str(),
+            uc_warn!(
+                entry_id = log_id(&entry_id.as_str()),
                 error_kind = "file_set_manifest_load",
                 io_error_kind = io_error_kind(&err),
                 "outbound: file-set manifest load failed; falling back to rep parsing"
@@ -811,8 +839,8 @@ pub(crate) async fn resolve_outbound_file_set(
                 // shrink the published set — never publish a subset. Degrade
                 // to the legacy fallback instead (no worse than pre-manifest
                 // behavior).
-                warn!(
-                    entry_id = %entry_id.as_str(),
+                uc_warn!(
+                    entry_id = log_id(&entry_id.as_str()),
                     line_index = line.line_index,
                     "outbound: could not recover path from file-set manifest line; falling back to rep parsing"
                 );
@@ -858,7 +886,7 @@ pub(crate) fn build_transfer_manifest(
         .iter()
         .enumerate()
         .map(|(index, file)| {
-            // TryFromIntError：目标分类完整表达数值范围不符。
+            // discarded-source[int-conversion]: `core::num::TryFromIntError`: the target classification already expresses the range or length mismatch
             let index = u32::try_from(index).map_err(|_| {
                 ClipboardOutboundError::Internal(anyhow::anyhow!("file-set index cannot fit u32"))
             })?;
@@ -877,7 +905,7 @@ pub(crate) fn build_transfer_manifest(
                 None => None,
             };
             Ok(InboundFileSetMember {
-                // TryFromIntError：目标分类完整表达数值范围不符。
+                // discarded-source[int-conversion]: `core::num::TryFromIntError`: the target classification already expresses the range or length mismatch
                 root_index: u32::try_from(member.location.root_index).map_err(|_| {
                     ClipboardOutboundError::Internal(anyhow::anyhow!(
                         "negative directory root index"
@@ -920,7 +948,7 @@ fn manifest_line_path(original_text: &str) -> Option<PathBuf> {
 /// 几 MB PNG）走 blob_refs 路径，receiver 端的 materialize 阶段才有真实的
 /// 时间窗口承载 placeholder。
 ///
-/// 64 KiB 仍给 `inline_threshold_bytes = 16 KB`（uc-infra `clipboard_storage_config`）
+/// 64 KiB 仍给 `inline_threshold_bytes = 16 KB`（uc-infra-content `clipboard_storage_config`）
 /// 的纯文本 rep 留出 4× 缓冲：emoji / 小 icon 之类的 < 64 KB 图片继续 inline，
 /// 不为它们多一次 iroh-blobs round-trip。
 pub const MAX_INLINE_OUTBOUND_REPRESENTATION_BYTES: usize = 64 * 1024;
@@ -991,16 +1019,16 @@ pub(crate) async fn publish_oversized_inline_blob_refs(
             })
             .await
             .map_err(|err| ClipboardOutboundError::Internal(anyhow::Error::from(err)))?;
-        info!(
-            entry_id = %entry_id.as_str(),
+        uc_info!(
+            entry_id = log_id(&entry_id.as_str()),
             representation_index = idx,
-            size_bytes,
-            mime = mime_str.as_deref().unwrap_or("?"),
+            size_bytes = size_bytes,
+            mime = log_vocab(&mime_str.as_deref().unwrap_or("?")),
             reused_existing = result.reused_existing,
             "outbound: oversized inline rep published as blob"
         );
 
-        // TryFromIntError：目标分类完整表达数值范围不符。
+        // discarded-source[int-conversion]: `core::num::TryFromIntError`: the target classification already expresses the range or length mismatch
         let representation_index = u32::try_from(idx).map_err(|_| {
             ClipboardOutboundError::Internal(anyhow::anyhow!(
                 "representation index {idx} cannot fit u32"
@@ -1040,8 +1068,8 @@ pub(crate) async fn publish_file_blob_refs(
             })
             .await
             .map_err(|err| ClipboardOutboundError::Internal(anyhow::Error::from(err)))?;
-        info!(
-            entry_id = %entry_id.as_str(),
+        uc_info!(
+            entry_id = log_id(&entry_id.as_str()),
             size_bytes = file.size,
             reused_existing = result.reused_existing,
             "outbound: file blob published (streaming)"
@@ -1659,5 +1687,41 @@ mod tests {
                 .map(|v| v.iter().map(|d| d.as_str().to_string()).collect::<Vec<_>>()),
             Some(vec!["peer-a".to_string(), "peer-b".to_string()])
         );
+    }
+
+    #[test]
+    fn a_planner_that_drops_a_directory_member_skips_the_set_with_a_counted_record() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+
+        let skipped = skip_when_planner_excluded_member("entry-1", 2, 3);
+
+        assert!(matches!(
+            skipped,
+            Some(ClipboardOutboundOutcome::Skipped { ref reason })
+                if reason == "file_set_member_unavailable"
+        ));
+        assert_eq!(
+            logs.count("planner excluded a member"),
+            1,
+            "{}",
+            logs.output()
+        );
+        let output = logs.output();
+        assert!(
+            output.contains("reason=\"planner_excluded_member\""),
+            "{output}"
+        );
+        assert!(output.contains("file_candidate_count=2"), "{output}");
+        assert!(output.contains("extracted_paths_count=3"), "{output}");
+    }
+
+    #[test]
+    fn a_complete_plan_does_not_skip_or_log() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+
+        assert!(skip_when_planner_excluded_member("entry-1", 3, 3).is_none());
+        assert_eq!(logs.count("planner excluded"), 0, "{}", logs.output());
     }
 }

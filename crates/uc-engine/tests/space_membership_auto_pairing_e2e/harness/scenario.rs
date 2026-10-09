@@ -9,6 +9,7 @@ use super::*;
 use std::path::PathBuf;
 use std::sync::PoisonError;
 
+use uc_observability_contract::uc_error;
 use uc_testkit::{
     FailureKind, Scenario, ScenarioBudget, ScenarioConfig, ScenarioFailure, StageGuard,
     TempDirLease,
@@ -88,7 +89,7 @@ impl Drop for TestScenario {
                         failure.failure()
                     );
                 }
-                tracing::error!(summary = %summary, "membership e2e scenario failed");
+                uc_error!("membership e2e scenario failed");
             }
         }
     }

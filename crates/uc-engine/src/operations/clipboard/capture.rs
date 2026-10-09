@@ -2,10 +2,10 @@
 
 use crate::error_codes::*;
 
-use tracing::error;
 use uc_application::facade::{AppFacade, ClipboardCaptureFacadeError};
 
 use crate::{EngineError, EngineErrorCategory, OperationResult};
+use uc_observability_contract::uc_error;
 
 pub async fn execute_capture_current_clipboard(
     facade: &AppFacade,
@@ -19,7 +19,7 @@ pub async fn execute_capture_current_clipboard(
 }
 
 fn map_capture_error(_error: ClipboardCaptureFacadeError) -> EngineError {
-    error!("current clipboard capture failed");
+    uc_error!("current clipboard capture failed");
     EngineError::new(
         CAPTURE_CURRENT_CLIPBOARD_FAILED_CODE,
         EngineErrorCategory::Internal,

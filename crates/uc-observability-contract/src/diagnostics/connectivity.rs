@@ -19,7 +19,8 @@ pub use admission_network::{
 pub use local_identity::{record_local_identity_changed, LocalIdentityState};
 pub use local_work::{
     observe_blob_publish_sync_result, observe_local_result, observe_local_sync_result,
-    scope_blob_publish, scope_pairing_work, LocalWorkObservation, LocalWorkOutcome, LocalWorkStep,
+    scope_blob_publish, scope_pairing_work, LocalWorkContext, LocalWorkObservation,
+    LocalWorkOutcome, LocalWorkStep,
 };
 pub use maintenance::{
     record_pending_group_updates, MaintenanceDisposition, MaintenanceObservation,
@@ -47,7 +48,8 @@ pub use source::{LocalDiagnosticSource, SourceCapability, SourceCollection};
 pub use authentication::complete_group_update_failure;
 pub use authentication::complete_membership_history_failure;
 pub use group_update::{
-    GroupUpdateFailureDetail, GroupUpdatePhase, GroupUpdateReason, GroupUpdateSource,
+    ClassifiedGroupUpdateStorageFailure, GroupUpdateFailureDetail, GroupUpdatePhase,
+    GroupUpdateReason, GroupUpdateSource,
 };
 pub use inbound_peer::{
     record_inbound_peer_rejection, InboundPeerProtocol, InboundPeerRejectionReason,

@@ -33,6 +33,7 @@ impl PersistedJoinerContextV1 {
             JoinId::from_bytes(self.join_id).ok_or(SpaceAdmissionPersistenceError::InvalidState)?,
             self.local_join_ordinal,
             AdmissionSourceSnapshot::from_bytes(self.source_snapshot)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
             self.peer_binding.into_domain()?,
             decode_continuation_credential(self.continuation_credential)?,
@@ -196,6 +197,7 @@ impl PersistedJoinerActivatingV1 {
             completion,
             completion_evidence,
             space_transition: AdmissionSpaceTransition::from_bytes(self.space_transition)
+                // discarded-source[core-pure-validation]: pure validation inside uc-core, the lower layer has no external failure
                 .map_err(|_| SpaceAdmissionPersistenceError::InvalidState)?,
         })
     }

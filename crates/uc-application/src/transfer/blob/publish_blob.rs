@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use bytes::Bytes;
-use tracing::info;
 
 use uc_core::ids::EntryId;
 use uc_core::ports::blob::{
@@ -14,6 +13,7 @@ use uc_core::ports::ContentHashPort;
 use uc_observability_contract::diagnostics::connectivity::{
     scope_blob_publish, LocalWorkObservation, LocalWorkOutcome, LocalWorkStep,
 };
+use uc_observability_contract::{log_fields::log_id, uc_info};
 
 /// Input variants for publishing in-memory content and files from disk.
 ///
@@ -57,6 +57,7 @@ impl PublishBlobUseCase {
         }
     }
 
+    #[tracing::instrument(name = "usecase.publish_blob.execute", skip_all)]
     pub async fn execute(
         &self,
         input: PublishBlobInput,
@@ -150,14 +151,14 @@ impl PublishBlobUseCase {
             ticket_result.map_err(|e| PublishBlobError::Transfer(anyhow::Error::from(e)))?;
         let ticket_ms = ticket_start.elapsed().as_millis() as u64;
 
-        info!(
-            entry_id = %entry_id.as_str(),
-            bytes,
+        uc_info!(
+            entry_id = log_id(&entry_id.as_str()),
+            bytes = bytes,
             reused_existing = false,
-            hash_ms,
-            publish_ms,
-            save_ref_ms,
-            ticket_ms,
+            hash_ms = hash_ms,
+            publish_ms = publish_ms,
+            save_ref_ms = save_ref_ms,
+            ticket_ms = ticket_ms,
             "publish_blob: new blob added"
         );
 
@@ -215,11 +216,11 @@ impl PublishBlobUseCase {
             .map_err(|e| PublishBlobError::Transfer(anyhow::Error::from(e)))?;
         let ticket_ms = ticket_start.elapsed().as_millis() as u64;
 
-        info!(
-            entry_id = %entry_id.as_str(),
-            publish_ms,
-            save_ref_ms,
-            ticket_ms,
+        uc_info!(
+            entry_id = log_id(&entry_id.as_str()),
+            publish_ms = publish_ms,
+            save_ref_ms = save_ref_ms,
+            ticket_ms = ticket_ms,
             "publish_blob: streamed from path"
         );
 

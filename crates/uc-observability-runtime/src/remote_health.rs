@@ -19,6 +19,8 @@ use opentelemetry_sdk::Resource;
 use uc_observability_contract::diagnostics::connectivity::CONNECTIVITY_TARGET;
 use uc_observability_contract::diagnostics::{LOCAL_DIAGNOSTIC_TARGET, TELEMETRY_TARGET};
 
+use crate::status::RemoteSetupFailure;
+
 const REMOTE_QUEUE_CAPACITY: usize = 2_048;
 const REMOTE_BATCH_SIZE: usize = 512;
 const LOG_EVENT_NAME: &str = "uc.diagnostic";
@@ -130,6 +132,17 @@ impl RemoteHealthCounters {
             );
         }
     }
+}
+
+/// 远端导出器装配失败后在日志通道建立时记录一次；只写固定阶段分类，不含 endpoint 与底层错误。
+pub(crate) fn record_remote_setup_degraded(failure: RemoteSetupFailure) {
+    tracing::event!(
+        target: "observability.health",
+        parent: None,
+        tracing::Level::WARN,
+        event.name = "uc.observability.setup_degraded",
+        error.type = failure.as_str(),
+    );
 }
 
 #[derive(Debug, Clone)]

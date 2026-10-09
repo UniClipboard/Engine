@@ -29,6 +29,17 @@ pub trait WipeProfileKeysPort: Send + Sync {
     ) -> Result<(), ProfileFactoryResetCapabilityError>;
 }
 
+/// 作废本 profile 升级备份的安全记录（密文与其密钥），文件备份保持有效。
+///
+/// 安全记录是用被清除的密钥保护的派生副本，重置后不应继续留在备份目录。
+/// 实现必须可重复执行：目录或记录不存在也算完成。
+#[async_trait]
+pub trait RetireUpgradeBackupSecurityRecordsPort: Send + Sync {
+    async fn retire_upgrade_backup_security_records(
+        &self,
+    ) -> Result<(), ProfileFactoryResetCapabilityError>;
+}
+
 #[async_trait]
 pub trait ClearProfileStatePort: Send + Sync {
     async fn clear_and_verify_profile_state(

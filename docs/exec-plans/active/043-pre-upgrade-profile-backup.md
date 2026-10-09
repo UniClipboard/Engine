@@ -6,7 +6,7 @@
 
 - 完整准备仍由 Application 的一个流程负责：停止写入由宿主保证；流程先创建并验证原样文件副本，然后读取生命周期与安全存储、保留必要安全材料，最后才允许目录整理、导入和数据升级。Engine 只调用一次，不编排这些步骤。
 - 原样副本不解密旧文件、不访问钥匙串、不新增备份加密密钥；采用已有 tar 和完整内容校验，压缩不是成功条件。用户明确批准在本机私有备份中保留原文件既有的保护状态，包含历史明文；不扩展到日志、网络、可分享导出或从钥匙串导出的明文密钥。
-- 原样副本只证明文件被保留，不证明密钥完整或旧软件可用。后续安全材料读取/保存失败时，保留文件副本并停止升级；重试验证原副本，不拿已经变化的资料覆盖它。
+- 原样副本只证明文件被保留，不证明密钥完整或旧软件可用。后续安全材料读取/保存失败时，保留文件副本并停止升级；重试验证原副本；仅当安全材料记录尚未发布、来源已变时才另存新副本，旧副本保留，不覆盖。
 - 备份根必须独立于 userdata、安装目录、缓存和临时目录，宿主负责给出与安装器清理范围隔离的私有目录；底层拒绝与来源重叠及链接重定向。清除 userdata、普通恢复出厂、卸载及升级成功不自动删除备份。删除备份需独立明确操作；尚未实现的删除入口不得通过自动清理代替。
 - 失败和取消不推进后续修改，允许保留明确未完成副本。重启和重试由同一个准备流程负责；多目录归档完成后发布文件备份记录，安全材料另行加密绑定该副本，不使文件恢复依赖钥匙串。
 - 验收先证明钥匙串完全不可用时文件仍有完整副本，删除模拟 userdata 后仍可在新目录读取，再验证 macOS `0.19.3 → 接入改动的当前版本 → 0.19.3`。Windows 安装器实际删除及恢复验证单独记录，不用 macOS 文件测试冒充。
@@ -52,16 +52,16 @@
 
 ```text
 Component: ProfileStorageUpgrade
-Path: crates/uc-infra/src/security/profile_storage_upgrade/
+Path: crates/uc-infra-profile/src/security/profile_storage_upgrade/
 Responsibility: V1/V2 到 V3 资料转换、校验、切换和中断恢复。
 Relationship: 只有资料格式升级范围，没有产品安装包和软件版本回退职责。
 ```
 
 ```text
 Component: UpgradePersistence / TargetGenerationStager / cleanup
-Path: crates/uc-infra/src/security/profile_storage_upgrade/persistence.rs
-Path: crates/uc-infra/src/security/profile_storage_upgrade/target.rs
-Path: crates/uc-infra/src/security/profile_storage_upgrade/cleanup.rs
+Path: crates/uc-infra-profile/src/security/profile_storage_upgrade/persistence.rs
+Path: crates/uc-infra-profile/src/security/profile_storage_upgrade/target.rs
+Path: crates/uc-infra-profile/src/security/profile_storage_upgrade/cleanup.rs
 Responsibility: 资料升级排他锁、加密恢复记录、目标副本和旧来源清理。
 Relationship: 当前锁只覆盖升级调用，不能证明其他进程在整个版本回退期间都停止写入。
 ```
@@ -77,7 +77,7 @@ Relationship: 旧目录收养、导入及安全资料准备可能发生在 ensur
 
 ```text
 Component: Config migration
-Path: crates/uc-infra/src/config_migration/
+Path: crates/uc-infra-profile/src/config_migration/
 Responsibility: 用户主动导出与导入，包含数据库快照、加密封装和资料收集。
 Relationship: 当前单库、内存 archive 和 secret 清单不足以证明完整版本回退；可复用能力需逐项核对。
 ```
@@ -226,7 +226,7 @@ rollback_to_previous_version(backup_id, confirmation)
 - 原样副本保留原目录布局、SQLite 与 WAL、各代资料、附件、设置及文件身份；缓存中的待处理内容单独归档，重试同时验证。排除已知运行文件、日志、可重建缓存、WebView 运行资料和历史嵌套备份区，拒绝未知链接及特殊文件。Windows 的 WebView 运行资料由图形界面持续占用且可由系统重建，不属于用户资料备份范围。
 - 备份根由 HostDirectories 提供，默认是资料根的同级独立目录，也支持宿主明确指定。底层拒绝与活动资料、缓存和日志重叠；Unix 新建目录/文件限制为当前用户，已有宽松权限目录拒绝使用。宿主仍须验证安装及临时目录边界；Windows 访问权限与实际安装清理尚未验收。
 - 普通恢复出厂不删除独立备份和安全材料记录保护密钥，升级成功不清理旧恢复点。独立用户删除入口未实现，不以自动清理代替。
-- 同目标重试不覆盖原副本；已完成的安全材料记录随原副本复用，不拿新密钥重新配旧数据。尚未保留安全材料时来源变化会停止升级；新的目标版本另存，旧归档及记录保留。
+- 同目标重试不覆盖原副本；已完成的安全材料记录随原副本复用，不拿新密钥重新配旧数据。安全材料记录一旦属于某份副本，升级写入可能已经开始，来源变化不得再触发重新捕获；尚未发布时（升级写入必然尚未开始）若来源摘要已变，则在同一把租约内重新捕获当前资料并把 `current` 指向新副本，旧归档及记录保留并由保留清理淘汰，不删除。这种来源变化归类为 `source_changed`，不再显示为 `storage`。新的目标版本另存，旧归档及记录保留。
 - 还原仅支持完全验证后写入尚不存在的隔离目录；不覆盖现用资料、不写回系统安全存储、不安装旧程序。未完成副本与还原目录不作为成功结果。
 - 当前安全材料清单覆盖 profile KEK、准入主密钥、历史内容保护密钥、生命周期、身份及可定位的历史迁移密钥，缺失项显式记录。尚未证明所有历史版本的必需密钥完整性，不能据此宣称已有完整回退资格。
 - 版本判定使用既有产品与 Engine 游标，缺失来源保留未知；这不是签名安装记录，不冒充精确软件版本绑定。
@@ -261,7 +261,7 @@ rollback_to_previous_version(backup_id, confirmation)
 
 1. **版本对与安装接入核对**：产品仓定位更新器、常驻进程、安装渠道和旧产物获取方式。输出平台矩阵、精确版本对及完整回退负责人；具体文件路径经核对补充。
 2. **先完成最小闭环**：在一个可验证的桌面安装渠道，用真实旧版生成资料，执行备份、新版升级、确认回退、旧版启动读取。以此证明安装与数据协调，再扩平台。
-3. **共享数据能力**：核对 `crates/uc-infra/src/config_migration/` 的快照、加密及清单；补齐旧版布局、全部必需安全资料、流式处理和原始错误。导出行为回归测试必须通过。
+3. **共享数据能力**：核对 `crates/uc-infra-profile/src/config_migration/` 的快照、加密及清单；补齐旧版布局、全部必需安全资料、流式处理和原始错误。导出行为回归测试必须通过。
 4. **升级前接线**：调整 `profile_storage_upgrade/`、`assembly/host.rs` 和 `assembly/wire/mod.rs`，在首次修改来源之前验证备份；避免普通启动产生重复备份。
 5. **完整恢复能力**：实现资料停写、当前版本安全副本、耐久恢复、旧格式回读和明确删除。维护工具自身不依赖即将被替换的应用生命周期。
 6. **产品完整回退**：安装更新器实现版本绑定、原子替换能力的组合、中断续接、旧版验证和更新抑制；通过 `uc-engine` 调用核心完整动作。

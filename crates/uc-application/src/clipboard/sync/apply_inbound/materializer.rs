@@ -15,13 +15,13 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use tracing::{debug, info, warn};
+
 use url::Url;
 
 use uc_core::clipboard::{
     ContentHash, EntryFileSet, EntryFileSetLine, EntryFileSetLineKind, FileDisplayMetadata,
     FileDisplayMetadataEntry, FileSetMemberKind, FileSetMemberLocation, HashAlgorithm,
-    FILE_DISPLAY_METADATA_FORMAT, FILE_DISPLAY_METADATA_MIME,
+    FILE_DISPLAY_METADATA_FORMAT, FILE_DISPLAY_METADATA_MIME, IMAGE_FROM_FILE_FORMAT,
 };
 use uc_core::ids::{DeviceId, EntryId, FormatId, RepresentationId};
 use uc_core::ports::atomic_publish::{AtomicPublishPort, PublishError};
@@ -36,7 +36,11 @@ use uc_core::ports::{
     DIRECTORY_RECEIVE_STAGING_PREFIX,
 };
 use uc_core::{MimeType, ObservedClipboardRepresentation, SystemClipboardSnapshot};
-use uc_observability_contract::error_source::io_error_kind;
+use uc_observability_contract::{
+    error_source::io_error_kind,
+    log_fields::{log_id, log_vocab},
+    uc_debug, uc_info, uc_warn,
+};
 
 use crate::clipboard::sync::payload_codec::V3BlobRef;
 use crate::facade::blob_transfer::{
@@ -391,7 +395,7 @@ pub async fn sweep_inbound_staging(dirs: &[PathBuf]) -> usize {
                     match tokio::fs::remove_dir_all(entry.path()).await {
                         Ok(()) => swept += 1,
                         Err(err) => {
-                            warn!(
+                            uc_warn!(
                                 error_kind = "staging_area_sweep",
                                 io_error_kind = io_error_kind(&err),
                                 "failed to sweep an inbound staging area"
@@ -401,7 +405,7 @@ pub async fn sweep_inbound_staging(dirs: &[PathBuf]) -> usize {
                 }
                 Ok(None) => break,
                 Err(err) => {
-                    warn!(
+                    uc_warn!(
                         error_kind = "staging_dir_list",
                         io_error_kind = io_error_kind(&err),
                         "failed to enumerate a directory while sweeping"
@@ -412,7 +416,7 @@ pub async fn sweep_inbound_staging(dirs: &[PathBuf]) -> usize {
         }
     }
     if swept > 0 {
-        info!(count = swept, "swept inbound staging areas left by a crash");
+        uc_info!(count = swept, "swept inbound staging areas left by a crash");
     }
     swept
 }
@@ -528,7 +532,7 @@ impl DirectoryPublication {
             if let Err(err) =
                 publish_via(self.publisher.as_ref(), self.mode, final_path, staged_from).await
             {
-                warn!(
+                uc_warn!(
                     error_kind = "directory_root_withdraw",
                     io_error_kind = io_error_kind(&err),
                     "failed to withdraw a published directory root"
@@ -539,13 +543,13 @@ impl DirectoryPublication {
         discard_staging(&self.staging).await;
 
         if stuck == 0 {
-            debug!(
+            uc_debug!(
                 root_count = self.published.len(),
                 "withdrew every published directory root"
             );
             RollbackOutcome::Clean
         } else {
-            warn!(
+            uc_warn!(
                 visible_roots = stuck,
                 "some published directory roots could not be withdrawn and remain visible"
             );
@@ -562,7 +566,7 @@ impl Drop for DirectoryPublication {
             // Nothing can be undone from here: withdrawal is async and Drop is
             // not. Make the omission visible instead of hiding it — the roots
             // stay visible to the user with no entry behind them.
-            warn!(
+            uc_warn!(
                 root_count = self.published.len(),
                 "directory publication dropped without commit or rollback; roots remain visible"
             );
@@ -575,7 +579,7 @@ async fn discard_staging(staging: &std::path::Path) {
     match tokio::fs::remove_dir_all(staging).await {
         Ok(()) => {}
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-        Err(err) => warn!(
+        Err(err) => uc_warn!(
             error_kind = "staging_area_discard",
             io_error_kind = io_error_kind(&err),
             "failed to discard an inbound staging area"
@@ -862,11 +866,11 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
             let idx = blob_ref
                 .representation_index
                 .ok_or_else(|| anyhow!("representation blob is missing its index"))?;
-            debug!(
-                entry_id = %entry_id,
+            uc_debug!(
+                entry_id = log_id(&entry_id),
                 size_bytes = advertised_size,
                 representation_index = idx,
-                mime = blob_ref.mime.as_deref().unwrap_or(""),
+                mime = log_vocab(&blob_ref.mime.as_deref().unwrap_or("")),
                 "materialize: fetching representation-bound blob"
             );
 
@@ -916,8 +920,8 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                 Err(e) if is_cancel_error(&e) => {
                     // Cancel:当前 + 后续 rep_refs 都没 fetch,把这部分 idx 全数
                     // 标记为 incomplete,稍后倒序从 snapshot.representations 删除。
-                    warn!(
-                        entry_id = %entry_id,
+                    uc_warn!(
+                        entry_id = log_id(&entry_id),
                         representation_index = idx,
                         "materialize: representation-bound blob fetch cancelled, marking partial"
                     );
@@ -927,8 +931,8 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                     break;
                 }
                 Err(e) => {
-                    warn!(
-                        entry_id = %entry_id,
+                    uc_warn!(
+                        entry_id = log_id(&entry_id),
                         size_bytes = advertised_size,
                         representation_index = idx,
                         error_kind = "blob_fetch",
@@ -951,8 +955,8 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
             let fetched_len = fetched.plaintext.len();
             rep.set_inline_bytes(fetched.plaintext.to_vec())
                 .context("materialize: failed to set inline bytes")?;
-            info!(
-                entry_id = %entry_id,
+            uc_info!(
+                entry_id = log_id(&entry_id),
                 representation_index = idx,
                 bytes_written = fetched_len,
                 "materialize: blob inlined back into representation"
@@ -1024,10 +1028,10 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
             let entry_id = blob_ref.entry_id.clone();
             let advertised_size = blob_ref.size_bytes;
             let declared_name = blob_ref.filename.clone();
-            debug!(
-                idx,
+            uc_debug!(
+                idx = idx,
                 total = blob_ref_total,
-                entry_id = %entry_id,
+                entry_id = log_id(&entry_id),
                 size_bytes = advertised_size,
                 "materialize: fetching blob"
             );
@@ -1170,10 +1174,10 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                                 &receive_artifacts,
                             )
                             .await?;
-                        warn!(
-                            idx,
+                        uc_warn!(
+                            idx = idx,
                             total = blob_ref_total,
-                            entry_id = %entry_id,
+                            entry_id = log_id(&entry_id),
                             "materialize: blob fetch cancelled, marking partial"
                         );
                         for remaining in &file_refs[idx..] {
@@ -1205,10 +1209,10 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                                 &receive_artifacts,
                             )
                             .await?;
-                        warn!(
-                            idx,
+                        uc_warn!(
+                            idx = idx,
                             total = blob_ref_total,
-                            entry_id = %entry_id,
+                            entry_id = log_id(&entry_id),
                             size_bytes = advertised_size,
                             error_kind = "blob_fetch",
                             io_error_kind = io_error_kind(e.as_ref()),
@@ -1227,10 +1231,10 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                     }
                 };
 
-            info!(
-                idx,
+            uc_info!(
+                idx = idx,
                 total = blob_ref_total,
-                entry_id = %entry_id,
+                entry_id = log_id(&entry_id),
                 bytes_written = fetched.bytes_written,
                 "materialize: blob cached to local path (streaming)"
             );
@@ -1278,13 +1282,13 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                     Some(MimeType("text/uri-list".to_string())),
                     uri_list.into_bytes(),
                 ));
-            info!(
+            uc_info!(
                 local_path_count = local_paths.len(),
                 "materialize: appended synthetic files rep (no file-list rep in payload)"
             );
         } else {
-            info!(
-                rewritten_rep_count,
+            uc_info!(
+                rewritten_rep_count = rewritten_rep_count,
                 local_path_count = local_paths.len(),
                 "materialize: rewrote file-list reps with local paths"
             );
@@ -1319,12 +1323,12 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                     .representations
                     .push(ObservedClipboardRepresentation::new_local_file(
                         RepresentationId::new(),
-                        FormatId::from("image-from-file"),
+                        FormatId::from(IMAGE_FROM_FILE_FORMAT),
                         Some(MimeType(image_mime.to_string())),
                         path.clone(),
                         meta.len(),
                     ));
-                info!(
+                uc_info!(
                     size_bytes = meta.len(),
                     mime = image_mime,
                     "materialize: synthesized LocalFile image rep for inbound image file \
@@ -1516,13 +1520,13 @@ impl FileCacheBlobMaterializer {
                         // the content still lands, just not where the user
                         // asked. This is the same fallback the reserver's
                         // `None` already expresses for free-standing files.
-                        info!(
+                        uc_info!(
                             "auto-save volume cannot publish without replacing; \
                              using managed storage for this directory"
                         );
                     }
                     Err(err) => {
-                        warn!(
+                        uc_warn!(
                             error_kind = "auto_save_staging_open",
                             io_error_kind = io_error_kind(err.as_ref()),
                             "could not open a staging area in the auto-save dir; \
@@ -1912,7 +1916,7 @@ impl FileCacheBlobMaterializer {
                                             )
                                             .await
                                         {
-                                            warn!(
+                                            uc_warn!(
                                                 error_kind = "partial_publication_record",
                                                 io_error_kind = io_error_kind(&record_error),
                                                 "failed to record partial directory publication"
@@ -1920,7 +1924,7 @@ impl FileCacheBlobMaterializer {
                                         }
                                     }
                                     Err(error) => {
-                                        warn!(
+                                        uc_warn!(
                                             error_kind = "root_count_overflow",
                                             io_error_kind = io_error_kind(&error),
                                             "partial directory root count exceeds u32"
@@ -2341,9 +2345,10 @@ fn rewrite_file_list(
                 uri_list.into_bytes(),
             ));
     }
-    debug!(
-        rewritten,
-        local_path_count, "materialize: rewrote directory roots"
+    uc_debug!(
+        rewritten = rewritten,
+        local_path_count = local_path_count,
+        "materialize: rewrote directory roots"
     );
     Ok(())
 }
@@ -2438,10 +2443,10 @@ fn finalize_partial(
                 Some(MimeType("text/plain".to_string())),
                 body.into_bytes(),
             ));
-        info!("materialize: minted fallback text/plain rep for empty partial snapshot");
+        uc_info!("materialize: minted fallback text/plain rep for empty partial snapshot");
     }
 
-    info!(
+    uc_info!(
         missing = missing_files.len(),
         completed = completed_paths.len(),
         dropped_reps = sorted_idxs.len(),
@@ -2622,7 +2627,7 @@ fn position_in_batch(idx: usize, total: usize) -> BatchPosition {
 async fn remove_reserved_placeholder(path: &std::path::Path) {
     if let Err(err) = tokio::fs::remove_file(path).await {
         if err.kind() != std::io::ErrorKind::NotFound {
-            warn!(
+            uc_warn!(
                 error_kind = "reserved_placeholder_remove",
                 io_error_kind = io_error_kind(&err),
                 "materialize: failed to remove reserved placeholder after fetch failure"
@@ -2649,7 +2654,7 @@ fn local_file_uri_list(paths: &[PathBuf]) -> Result<String> {
     let mut out = String::new();
     for path in paths {
         let url = Url::from_file_path(path)
-            // 下层错误类型是 ()，没有可保存的来源。
+            // discarded-source[no-information]: `()`: the error value carries no usable diagnostic information
             .map_err(|_| anyhow!("failed to convert cache path to file URL"))?;
         out.push_str(url.as_str());
         out.push('\n');

@@ -1,11 +1,11 @@
-//! SearchIndexPort — async trait implemented by uc-infra (Phase 91).
+//! SearchIndexPort——由 `uc-infra-storage` 实现的异步 trait（Phase 91）。
 //!
 //! All methods return Result<_, SearchError> to preserve typed error info
 //! across the port boundary (per D-03, D-04, D-05). Infra adapters may use
 //! anyhow::Error internally but MUST map to SearchError at method return.
 
 use crate::ids::EntryId;
-use crate::search::tag::SearchTagCount;
+use crate::search::tag::{SearchTagCount, TagId};
 use crate::search::{
     RebuildProgress, SearchDocument, SearchError, SearchIndexMeta, SearchPosting, SearchQuery,
     SearchResultsPage,
@@ -15,8 +15,8 @@ use tokio::sync::mpsc::Sender;
 
 /// Port for indexing and querying the local encrypted search index.
 ///
-/// Implemented by uc-infra (Phase 91). Injected as `Arc<dyn SearchIndexPort + Send + Sync>`
-/// into use cases and daemon state.
+/// 由 `uc-infra-storage` 实现（Phase 91），以 `Arc<dyn SearchIndexPort + Send + Sync>`
+/// 注入用例与 daemon 状态。
 #[async_trait]
 pub trait SearchIndexPort: Send + Sync {
     /// Index (insert or replace) a clipboard entry's document and its postings.
@@ -71,6 +71,20 @@ pub trait SearchIndexPort: Send + Sync {
         Ok(())
     }
 
+    /// 用条目当前的全部用户历史标签替换其在索引中的标签成员。
+    ///
+    /// 成员只以搜索密钥派生的不透明词项保存，不写入明文标签 id；条目尚未建立
+    /// 索引时为无操作，之后的索引写入会从权威关联补齐。不维护标签成员的适配器
+    /// 保留默认无操作实现。
+    async fn set_entry_history_tags(
+        &self,
+        entry_id: &EntryId,
+        tag_ids: &[TagId],
+    ) -> Result<(), SearchError> {
+        let _ = (entry_id, tag_ids);
+        Ok(())
+    }
+
     /// List every tag present in the index with the count of entries carrying
     /// it. Filter-only over the membership table: it needs no search key and is
     /// available while the session is locked. Lock-based visibility of custom
@@ -78,4 +92,27 @@ pub trait SearchIndexPort: Send + Sync {
     async fn list_tags(&self) -> Result<Vec<SearchTagCount>, SearchError> {
         Ok(Vec::new())
     }
+
+    /// 统计与 [`search`](Self::search) 过滤语义完全一致的匹配条目数。
+    ///
+    /// 默认实现取零条数的一页的 `total`，因此关键词、标签“或/且”、时间、类型、来源等
+    /// 语义与会话锁定行为都与 `search` 同源，不会分叉。分页字段被忽略。
+    async fn count(&self, query: SearchQuery) -> Result<u32, SearchError> {
+        let page = self
+            .search(SearchQuery {
+                limit: 0,
+                offset: 0,
+                ..query
+            })
+            .await?;
+        Ok(page.total)
+    }
+
+    /// 按活跃时间分桶统计条目数。
+    ///
+    /// `boundaries_ms` 是严格递增的桶边界，第 `i` 个桶为 `[boundaries[i], boundaries[i+1])`，
+    /// 返回长度为 `boundaries.len() - 1`。边界本身已经是绝对时间戳，因此本契约不含时区与
+    /// 夏令时规则。会话锁定时与 `search` 一样返回 `SessionLocked`。
+    /// 没有默认实现：包装适配器必须显式转发，不能悄悄退化成“不可用”。
+    async fn count_by_active_time(&self, boundaries_ms: &[i64]) -> Result<Vec<u32>, SearchError>;
 }

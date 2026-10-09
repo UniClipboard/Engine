@@ -38,6 +38,7 @@ concurrency:
 # 仓库 .cargo/config.toml 的两路并行限制只约束本地构建；发布构建使用 runner 的全部逻辑核。
 env:
   CARGO_BUILD_JOBS: default
+  MBX_REMOTE_MODE: write-only
 
 jobs:
   prepare:
@@ -53,6 +54,12 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
+
+      - name: Prepare local MBX cache
+        uses: ./.github/actions/rust-ci-setup
+        with:
+          cache-key: release-local
+          dependency-cache: 'false'
 
       - id: release
         name: Resolve immutable release inputs
@@ -104,6 +111,14 @@ jobs:
             exit 1
           fi
 
+      - name: Retain MBX compiler evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mbx-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/mbx-evidence
+          if-no-files-found: warn
+
   ios:
     name: Build iOS
     needs: prepare
@@ -113,8 +128,27 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          fetch-depth: 0
+
+      - name: Prepare local MBX cache
+        uses: ./.github/actions/rust-ci-setup
+        with:
+          cache-key: release-local
+          dependency-cache: 'false'
+
+      - name: Check out immutable release source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
           ref: ${{ needs.prepare.outputs.commit }}
           fetch-depth: 0
+
+      - name: Record immutable build provenance
+        shell: bash
+        run: |
+          {
+            echo "UC_ENGINE_SOURCE_COMMIT=$(git rev-parse HEAD)"
+            echo 'UC_ENGINE_SOURCE_STATE=clean'
+          } >> "$GITHUB_ENV"
 
       - name: Install iOS targets
         shell: bash
@@ -122,11 +156,6 @@ jobs:
           toolchain=$(rustup show active-toolchain | awk '{print $1}')
           rustup target add --toolchain "$toolchain" \
             aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
-
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
-        with:
-          workspaces: . -> target
-          shared-key: engine-release-ios-dev-host
 
       - name: Build iOS assets
         env:
@@ -141,6 +170,14 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Retain MBX compiler evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mbx-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/mbx-evidence
+          if-no-files-found: warn
+
   android:
     name: Build Android
     needs: prepare
@@ -150,8 +187,27 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          fetch-depth: 0
+
+      - name: Prepare local MBX cache
+        uses: ./.github/actions/rust-ci-setup
+        with:
+          cache-key: release-local
+          dependency-cache: 'false'
+
+      - name: Check out immutable release source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
           ref: ${{ needs.prepare.outputs.commit }}
           fetch-depth: 0
+
+      - name: Record immutable build provenance
+        shell: bash
+        run: |
+          {
+            echo "UC_ENGINE_SOURCE_COMMIT=$(git rev-parse HEAD)"
+            echo 'UC_ENGINE_SOURCE_STATE=clean'
+          } >> "$GITHUB_ENV"
 
       - name: Install Android targets
         shell: bash
@@ -159,11 +215,6 @@ jobs:
           toolchain=$(rustup show active-toolchain | awk '{print $1}')
           rustup target add --toolchain "$toolchain" \
             aarch64-linux-android x86_64-linux-android
-
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
-        with:
-          workspaces: . -> target
-          shared-key: engine-release-android-dev-host
 
       - name: Install Android build helper
         run: cargo install cargo-ndk --version 4.1.2 --locked
@@ -181,6 +232,14 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Retain MBX compiler evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mbx-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/mbx-evidence
+          if-no-files-found: warn
+
   harmonyos:
     name: Build HarmonyOS
     needs: prepare
@@ -190,8 +249,27 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          fetch-depth: 0
+
+      - name: Prepare local MBX cache
+        uses: ./.github/actions/rust-ci-setup
+        with:
+          cache-key: release-local
+          dependency-cache: 'false'
+
+      - name: Check out immutable release source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
           ref: ${{ needs.prepare.outputs.commit }}
           fetch-depth: 0
+
+      - name: Record immutable build provenance
+        shell: bash
+        run: |
+          {
+            echo "UC_ENGINE_SOURCE_COMMIT=$(git rev-parse HEAD)"
+            echo 'UC_ENGINE_SOURCE_STATE=clean'
+          } >> "$GITHUB_ENV"
 
       - name: Install HarmonyOS Rust target
         shell: bash
@@ -201,7 +279,6 @@ jobs:
 
       - name: Build HarmonyOS assets and signed acceptance HAP
         env:
-          RUSTC_WRAPPER: sccache
           UC_OHOS_DIST_DIR: ${{ runner.temp }}/engine-dist/ohos
         run: >-
           node scripts/release/with-isolated-source.mjs
@@ -214,6 +291,14 @@ jobs:
           path: ${{ runner.temp }}/engine-dist/
           if-no-files-found: error
           retention-days: 7
+
+      - name: Retain MBX compiler evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mbx-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/mbx-evidence
+          if-no-files-found: warn
 
   assemble:
     name: Verify and publish one release bundle
@@ -228,8 +313,27 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          fetch-depth: 0
+
+      - name: Prepare local MBX cache
+        uses: ./.github/actions/rust-ci-setup
+        with:
+          cache-key: release-local
+          dependency-cache: 'false'
+
+      - name: Check out immutable release source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
           ref: ${{ needs.prepare.outputs.commit }}
           fetch-depth: 0
+
+      - name: Record immutable build provenance
+        shell: bash
+        run: |
+          {
+            echo "UC_ENGINE_SOURCE_COMMIT=$(git rev-parse HEAD)"
+            echo 'UC_ENGINE_SOURCE_STATE=clean'
+          } >> "$GITHUB_ENV"
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
@@ -278,6 +382,14 @@ jobs:
             "${prerelease_flag[@]}" \
             "$ASSET_DIR"/*
           echo "published=true" >> "$GITHUB_OUTPUT"
+
+      - name: Retain MBX compiler evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mbx-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/mbx-evidence
+          if-no-files-found: warn
 
   notify-consumers:
     name: Notify desktop and mobile consumers

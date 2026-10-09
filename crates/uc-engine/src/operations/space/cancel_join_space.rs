@@ -1,4 +1,5 @@
 use base64::Engine as _;
+use uc_application::facade::CancelSpaceJoinError;
 
 use crate::error_codes::{CANCEL_JOIN_SPACE_NOT_FOUND_CODE, JOIN_SPACE_FAILED_CODE};
 use crate::operations::device::member::join_space_status;
@@ -10,18 +11,25 @@ pub async fn execute_cancel_join_space(
 ) -> Result<OperationResult, EngineError> {
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(input.join_id)
-        // 宿主输入校验：无法解码的加入标识按不存在处理，拒绝原因已完整表达。
+        // discarded-source[input-validation]: `base64::DecodeError`: the rejection reason is fully expressed by the target classification
         .map_err(|_| not_found())?;
-    // 宿主输入校验：长度不符的加入标识按不存在处理（错误值只是原字节）。
+    // discarded-source[no-information]: the error value carries no usable diagnostic information
     let join_id: [u8; 16] = bytes.try_into().map_err(|_| not_found())?;
     facade
         .cancel_space_join(join_id)
         .await
         .map(|status| OperationResult::JoinSpace(join_space_status(status)))
-        .map_err(|error| match error {
-            uc_application::facade::CancelSpaceJoinError::NotFound => not_found(),
-            _ => EngineError::new(JOIN_SPACE_FAILED_CODE, EngineErrorCategory::Internal, false),
-        })
+        .map_err(map_cancel_join_error)
+}
+
+fn map_cancel_join_error(error: CancelSpaceJoinError) -> EngineError {
+    match error {
+        CancelSpaceJoinError::NotFound => not_found(),
+        // 失败记录由取消加入的流程负责人写；这里只做稳定错误码映射。
+        CancelSpaceJoinError::State { .. } => {
+            EngineError::new(JOIN_SPACE_FAILED_CODE, EngineErrorCategory::Internal, false)
+        }
+    }
 }
 
 fn not_found() -> EngineError {
@@ -30,4 +38,24 @@ fn not_found() -> EngineError {
         EngineErrorCategory::NotFound,
         false,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_state_failure_maps_to_a_stable_code_without_a_second_record() {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+
+        let missing = map_cancel_join_error(CancelSpaceJoinError::NotFound);
+        let failed = map_cancel_join_error(CancelSpaceJoinError::State {
+            source: anyhow::Error::new(std::io::Error::other("PRIVATE_STATE")),
+        });
+
+        assert_eq!(missing.code(), CANCEL_JOIN_SPACE_NOT_FOUND_CODE);
+        assert_eq!(failed.code(), JOIN_SPACE_FAILED_CODE);
+        assert_eq!(logs.count("cancel"), 0, "{}", logs.output());
+    }
 }

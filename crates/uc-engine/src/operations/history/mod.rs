@@ -4,3 +4,4 @@ pub(crate) mod receive;
 pub(crate) mod resend;
 pub(crate) mod resource;
 pub(crate) mod search;
+pub(crate) mod tags;

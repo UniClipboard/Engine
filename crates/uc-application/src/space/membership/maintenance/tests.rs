@@ -78,6 +78,38 @@ async fn failed_round_is_retained_by_pause_resume_shutdown_and_application_repor
     }
 }
 
+#[tokio::test]
+async fn panicked_round_is_recorded_once_as_a_task_join_failure() {
+    let logs = uc_testkit::log_capture::CapturedLogs::default();
+    let _guard = logs.install();
+    let maintain = Arc::new(MaintainSpaceMembershipUseCase::new(
+        MaintainSpaceMembershipDeps {
+            admissions: Arc::new(PanickingAdmission),
+            work: Arc::new(RecordingStep {
+                name: "work",
+                calls: Arc::new(Mutex::new(Vec::new())),
+                outcome: MembershipMaintenanceStepOutcome::Completed,
+            }),
+        },
+    ));
+    let (_presence_tx, presence_rx) = tokio::sync::broadcast::channel(4);
+    let runtime = SpaceMembershipMaintenanceRuntime::start(
+        maintain,
+        presence_rx,
+        inactive_known_peer_contacts(),
+        std::time::Duration::from_secs(3600),
+        Arc::new(NoopNetworkActivity),
+    );
+    let activity = runtime.activity();
+    activity.pause().await.unwrap_err();
+    activity.resume().await.unwrap_err();
+    runtime.shutdown().await.unwrap_err();
+
+    assert_eq!(logs.count("uc.task.join_failed"), 1);
+    assert_eq!(logs.count("membership_maintenance_round"), 1);
+    assert!(!logs.output().contains("PRIVATE"));
+}
+
 #[derive(Clone)]
 pub(super) struct RecordingStep {
     pub(super) name: &'static str,

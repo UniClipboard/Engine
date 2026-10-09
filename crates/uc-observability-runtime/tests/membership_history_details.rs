@@ -53,19 +53,9 @@ fn history_failure_exports_a_safe_stage_error_chain_and_call_path() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["fields"]["error.phase"], "exchange_history");
     assert_eq!(rows[0]["fields"]["error.reason"], "transport");
-    assert_eq!(
-        rows[0]["fields"]["error.chain"],
-        serde_json::json!([
-            "space_device_update",
-            "membership_history",
-            "exchange_history",
-            "transport"
-        ])
-    );
-    assert_eq!(
-        rows[0]["fields"]["error.call_path"],
-        rows[0]["fields"]["error.chain"]
-    );
+    // 单次失败的链由模块日志承担，本地完成记录只保留固定阶段与原因。
+    assert!(rows[0]["fields"].get("error.chain").is_none());
+    assert!(rows[0]["fields"].get("error.call_path").is_none());
     let serialized = serde_json::to_string(&rows).expect("serialize rows");
     for forbidden in [
         "device_id",

@@ -1,0 +1,65 @@
+name: Compile cache benchmark
+
+# 手工测量 R2 编译缓存的两个独立空 target 的动作缓存恢复：同一 job、同一提交、工具链与 runner 类别，
+# 每轮从空 target 开始构建全工作区测试二进制，不运行测试。
+# 手工触发只读 R2；本次专属本地 CAS 在首轮填充、次轮恢复，不伪造主线发布身份。
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: Runner category to measure
+        type: choice
+        default: ubuntu-24.04
+        options: [ubuntu-24.04, macos-14]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compile-cache-benchmark-${{ inputs.runner }}
+  cancel-in-progress: false
+
+jobs:
+  measure:
+    name: Cold and warm compile cache
+    runs-on: ${{ inputs.runner }}
+    environment:
+      name: engine-build-cache-reader
+      deployment: false
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Install build tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev cmake
+
+      - name: Prepare Rust build
+        uses: ./.github/actions/rust-ci-setup
+        with:
+          cache-key: compile-cache-benchmark
+          # 空 target 对照不能先由 rust-cache 恢复第三方编译产物。
+          dependency-cache: "false"
+          compile-cache-access: read
+          compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
+        with:
+          tool: cargo-nextest@0.9.145
+
+      - name: Measure cold and warm builds
+        run: >-
+          node scripts/build-cache/measure-ci-mbx.mjs
+          --out "$RUNNER_TEMP/compile-cache-benchmark" --
+          cargo nextest run --profile ci --locked --workspace --all-targets --no-run
+
+      - name: Retain benchmark statistics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: compile-cache-benchmark-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/compile-cache-benchmark
+          if-no-files-found: warn
