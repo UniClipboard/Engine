@@ -1,6 +1,6 @@
 # 1. Overview
 
-状态：实施中。问题 1、2 已按先红后绿完成并提交；问题 4、5 待做；问题 3 另开 issue。基线：`193e9d27f0be4157a28d9bc065507e753d8188aa`；依赖 iroh 1.3.0。
+状态：实施中。问题 1、2 已按先红后绿完成并提交；问题 4 的地址刷新部分经复现测试判定不成立，成员移除删除地址记录已完成；问题 5 待做；问题 3 另开 issue。基线：`193e9d27f0be4157a28d9bc065507e753d8188aa`；依赖 iroh 1.3.0。
 
 本规格处理连接生命周期中的五个已识别问题，其中问题 3（内容发送复用连接）已确定移出本分支，另开 issue，本分支实际处理四项。它们来自对连接实现的调研与只读代码审查，其中单飞拨号与传输进度的缺陷已由代码阅读确认，其余结论是否成立由各自的复现测试决定。
 
@@ -116,10 +116,9 @@ Step 3（问题 3）：移出本分支。
 Change: 另开 issue，附上第 5 节的约束与握手次数基线测试思路；本分支不改动。
 
 Step 4（问题 4）：
-File: `peer_connections` 与 `membership_history_exchange_adapter.rs` 的 E2E 测试；随后 `runtime.rs` 与写回路径。
-Change: 测试让对端 endpoint 以同一密钥在新端口重启，发送方存储旧地址；触发 `NetworkChanged` 后，期望存储地址被刷新并能重新连通。基线预期：不刷新。若发现 iroh 自身发现机制已经使该场景通过，则说明问题不成立，按“测试通过则降级”处理。
-另加一条清理案例：移除成员后，其地址记录仍存在于仓库，基线预期失败；修复后记录被删除，重复应用移除效果仍成功。
-Risk: 写回错误地址会让可达的 peer 变得不可达；仍只保存经验证的活跃 relay。删除地址记录不得影响仍在 Space 内的成员。
+File: `connect.rs` 与 `membership_member_facts.rs` 的测试。
+Change: 两条复现。（一）成员移除后地址记录仍在：`removal_deletes_only_the_removed_members_address_record`，基线失败，已修复为 `apply_remove` 一并删除，且可重放。（二）存储地址失效后拨号：`dial_with_a_stale_stored_address_follows_address_lookup`，对端以同一密钥换端口重启，存储地址与现址无交集，地址发现仍给出新地址。基线通过，原因是 iroh 在没有 selected path 时总会并行启动地址发现，并与传入地址合并（`iroh-1.3.0/src/socket/remote_map/remote_state.rs` 的 `trigger_address_lookup`）。按本规格的规则，该部分问题不成立，不实现“网络变化时刷新存储地址”。
+Risk: 剩下的真实缺口是发现不可用（关闭公共发现、mDNS 不通）且 relay 提示也已过期，此时唯一的新地址来源是对端自己，需要已认证通道，属于调研报告的 P2-1，需要新协议，不在本分支。
 
 Step 5（问题 5）：
 File: 带计数接收端的 E2E 测试；随后 `runtime.rs`、`connect.rs`、`recovery/mod.rs`。
@@ -176,7 +175,7 @@ Implementation: 复用 `ConnectionRuntime` 的代际围栏。
 * [x] 问题 1：复现测试在基线上失败；修复后传输进度、等待结算的剪贴板入站连接，以及在途出站发送在成员移除后都被关闭或中止（`node.rs` 的 `removed_member_connections`）。活动剪贴板、pull、group update 未补案例。
 * [x] 问题 2：leader 被丢弃与无回执两个复现测试在基线上失败（`clipboard_dispatch_adapter.rs`）；修复后均返回。回执等待上限为 75 秒，由接收端 60 秒结算上限加余量得出；写帧阶段与拨号的超时预算仍待隔离网络实测，保留现状。
 * [x] 问题 3：已确定移出本分支，另开 [issue #170](https://github.com/UniClipboard/Engine/issues/170)。
-* [ ] 问题 4：复现测试在基线上失败或被证明不成立；成立则修复后地址刷新并重新连通。
+* [x] 问题 4：成员移除时删除地址记录已完成（基线失败后修复）；“网络变化时刷新存储地址”经复现测试在基线通过，判定不成立，不实施。发现不可用时的缺口留给 P2-1。
 * [ ] 问题 5：尝试计数测试在基线上失败；修复后移除、暂停、关闭之后不再有拨号尝试，一次失败的发送最多 3 次拨号尝试。
 * [ ] 既有成员恢复本机套件、`uc-infra-p2p` 全量测试与仓库交付门禁通过。
 * [ ] Linux 网络矩阵有 CI 证据，或明确保留未执行状态。

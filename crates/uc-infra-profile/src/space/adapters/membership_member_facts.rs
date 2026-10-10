@@ -110,6 +110,11 @@ impl MembershipMemberFactsAdapter {
                 .remove(device_id)
                 .await
                 .map_err(dependency)?;
+            // 已移除成员的传输地址不再有用，一并删除；记录不存在时删除仍成功，重放安全。
+            self.peer_addresses
+                .remove(device_id)
+                .await
+                .map_err(dependency)?;
         }
         Ok(())
     }
@@ -259,6 +264,110 @@ pub(crate) mod tests {
                 Vec::new(),
             )),
         )
+    }
+
+    #[derive(Default)]
+    struct RecordedPeerAddresses(std::sync::Mutex<Vec<PeerAddressRecord>>);
+
+    #[async_trait]
+    impl PeerAddressRepositoryPort for RecordedPeerAddresses {
+        async fn get(
+            &self,
+            device: &DeviceId,
+        ) -> Result<Option<PeerAddressRecord>, PeerAddressError> {
+            Ok(self
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|record| &record.device_id == device)
+                .cloned())
+        }
+
+        async fn upsert(&self, record: &PeerAddressRecord) -> Result<(), PeerAddressError> {
+            self.0.lock().unwrap().push(record.clone());
+            Ok(())
+        }
+
+        async fn list(&self) -> Result<Vec<PeerAddressRecord>, PeerAddressError> {
+            Ok(self.0.lock().unwrap().clone())
+        }
+
+        async fn remove(&self, device: &DeviceId) -> Result<(), PeerAddressError> {
+            self.0
+                .lock()
+                .unwrap()
+                .retain(|record| &record.device_id != device);
+            Ok(())
+        }
+    }
+
+    struct AcceptingTrustedPeers;
+
+    #[async_trait]
+    impl TrustedPeerRepositoryPort for AcceptingTrustedPeers {
+        async fn get(
+            &self,
+            _peer_device_id: &DeviceId,
+        ) -> Result<Option<TrustedPeer>, TrustedPeerError> {
+            Ok(None)
+        }
+
+        async fn list(&self) -> Result<Vec<TrustedPeer>, TrustedPeerError> {
+            Ok(Vec::new())
+        }
+
+        async fn save(&self, _trusted_peer: &TrustedPeer) -> Result<(), TrustedPeerError> {
+            Ok(())
+        }
+
+        async fn remove(&self, _peer_device_id: &DeviceId) -> Result<bool, TrustedPeerError> {
+            Ok(true)
+        }
+    }
+
+    fn address_record(device: &str) -> PeerAddressRecord {
+        PeerAddressRecord {
+            device_id: DeviceId::new(device),
+            addr_blob: vec![1, 2, 3],
+            observed_at: Utc::now(),
+        }
+    }
+
+    /// 移除成员的效果只删除该成员的地址记录，其余成员保留；重复应用同一效果仍成功。
+    #[tokio::test]
+    async fn removal_deletes_only_the_removed_members_address_record() {
+        let addresses = Arc::new(RecordedPeerAddresses::default());
+        addresses.upsert(&address_record("removed")).await.unwrap();
+        addresses.upsert(&address_record("kept")).await.unwrap();
+        let adapter = MembershipMemberFactsAdapter::new(
+            Arc::new(PassiveMembers),
+            Arc::new(AcceptingTrustedPeers),
+            addresses.clone(),
+            Arc::new(FixedDeviceIdentity),
+            Arc::new(FixedClock),
+        );
+        let effect = removal_effect(DeviceId::new("removed"));
+
+        adapter.apply_member_facts(&effect).await.expect("remove");
+        adapter
+            .apply_member_facts(&effect)
+            .await
+            .expect("replaying the same removal stays successful");
+
+        assert!(
+            addresses
+                .get(&DeviceId::new("removed"))
+                .await
+                .unwrap()
+                .is_none(),
+            "the removed member's address record is still stored"
+        );
+        assert!(addresses
+            .get(&DeviceId::new("kept"))
+            .await
+            .unwrap()
+            .is_some());
     }
 
     #[tokio::test]
