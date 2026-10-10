@@ -47,8 +47,17 @@ pub(crate) struct DeliverPendingGroupUpdatesUseCase {
     recipients: Arc<dyn RetainedGroupUpdateRecipientsPort>,
     host_events: Arc<HostEventBus>,
     clock: Arc<dyn ClockPort>,
-    /// 构造时订阅的上线事件：对端通过准入重新上线是重新认证的证据，每轮取走自上一轮以来的事件。
-    peer_online: Mutex<broadcast::Receiver<PeerReachabilityChanged>>,
+    /// 构造时订阅的上线事件：对端通过准入重新上线是重新认证的证据。
+    peer_online: Mutex<OnlineEvidence>,
+}
+
+/// 订阅的上线事件与尚未用掉的重新认证证据。
+///
+/// 证据一直保留到该对端的队首更新真正被尝试投递，或对端离线；
+/// 退避未到期或超出单轮上限时不得丢失，否则对端持续在线却再无重新评估机会。
+struct OnlineEvidence {
+    events: broadcast::Receiver<PeerReachabilityChanged>,
+    peers: HashSet<DeviceId>,
 }
 
 #[async_trait::async_trait]
@@ -134,27 +143,45 @@ impl DeliverPendingGroupUpdatesUseCase {
             recipients,
             host_events,
             clock,
-            peer_online: Mutex::new(peer_online),
+            peer_online: Mutex::new(OnlineEvidence {
+                events: peer_online,
+                peers: HashSet::new(),
+            }),
         }
     }
 
-    /// 取走自上一轮以来重新上线的对端；事件积压溢出只丢失更早的证据，之后的上线事件仍会带来新证据。
-    fn take_online_peers(&self) -> Vec<DeviceId> {
-        let mut receiver = self
+    /// 汇总自上一轮以来的上线/离线事件，返回当前保留的上线证据；事件积压溢出只丢失更早的证据。
+    fn online_evidence(&self) -> Vec<DeviceId> {
+        let mut evidence = self
             .peer_online
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let mut peers = Vec::new();
         loop {
-            match receiver.try_recv() {
-                Ok(event) if event.state == ReachabilityState::Online => {
-                    peers.push(event.device_id)
-                }
-                Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) => {}
+            match evidence.events.try_recv() {
+                Ok(event) => match event.state {
+                    ReachabilityState::Online => {
+                        evidence.peers.insert(event.device_id);
+                    }
+                    ReachabilityState::Offline | ReachabilityState::Unknown => {
+                        evidence.peers.remove(&event.device_id);
+                    }
+                },
+                Err(broadcast::error::TryRecvError::Lagged(_)) => {}
                 Err(
                     broadcast::error::TryRecvError::Empty | broadcast::error::TryRecvError::Closed,
-                ) => return peers,
+                ) => return evidence.peers.iter().copied().collect(),
             }
+        }
+    }
+
+    /// 已对这些收件人尝试投递：其上线证据已兑现，不再保留。
+    fn spend_online_evidence<'a>(&self, attempted: impl Iterator<Item = &'a DeviceId>) {
+        let mut evidence = self
+            .peer_online
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for peer in attempted {
+            evidence.peers.remove(peer);
         }
     }
 
@@ -298,7 +325,7 @@ impl DeliverPendingGroupUpdatesPort for DeliverPendingGroupUpdatesUseCase {
         }
         // 重新认证的证据：刚确认成员历史的对端，以及上一轮以来通过准入重新上线的对端。
         let mut reauthenticated = reachable_peers.to_vec();
-        for peer in self.take_online_peers() {
+        for peer in self.online_evidence() {
             if !reauthenticated.contains(&peer) {
                 reauthenticated.push(peer);
             }
@@ -309,6 +336,12 @@ impl DeliverPendingGroupUpdatesPort for DeliverPendingGroupUpdatesUseCase {
         };
         let mut delivery_changed = false;
         let outcome = self.dispatch_updates(&pending, &mut delivery_changed).await;
+        self.spend_online_evidence(
+            pending
+                .iter()
+                .take(MAX_UPDATES_PER_ROUND)
+                .map(PendingGroupUpdate::recipient),
+        );
         // 确认与退避都会改变宿主可见的设备更新状态，且不推进成员账本修订号，必须单独通知重读。
         if delivery_changed {
             self.host_events.emit_or_warn(HostEvent::Membership(

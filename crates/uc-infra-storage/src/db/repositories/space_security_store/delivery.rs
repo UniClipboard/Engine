@@ -419,10 +419,12 @@ impl<E: DbExecutor> DieselSpaceSecurityStore<E> {
                         state.receiver_unavailable = false;
                     }
                     // 已认证接收方的最新说明取代更早的拒绝：此后按退避自动重试，直到得到确认或明确裁决。
+                    // 接收方明确的安全拒绝不会被“暂时不可用”取代。
                     DeliveryFailure::ReceiverUnavailable => {
-                        state.rejected = false;
-                        state.rejected_by_receiver = false;
-                        state.receiver_unavailable = true;
+                        if !state.rejected_by_receiver {
+                            state.rejected = false;
+                            state.receiver_unavailable = true;
+                        }
                     }
                     // 不可达没有关于更新本身的新证据：已有拒绝保持原样，只有确认才能清除。
                     DeliveryFailure::Unreachable => {
