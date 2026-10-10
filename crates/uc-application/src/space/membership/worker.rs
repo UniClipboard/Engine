@@ -326,7 +326,10 @@ impl RunMembershipWorkPort for MembershipWorker {
             MembershipMaintenanceTrigger::Startup => MembershipRecoveryTrigger::Startup,
             MembershipMaintenanceTrigger::Resume => MembershipRecoveryTrigger::Resume,
             MembershipMaintenanceTrigger::Periodic => MembershipRecoveryTrigger::Retry,
-            MembershipMaintenanceTrigger::StateChanged => MembershipRecoveryTrigger::StateChanged,
+            MembershipMaintenanceTrigger::StateChanged
+            | MembershipMaintenanceTrigger::PeerOnline(_) => {
+                MembershipRecoveryTrigger::StateChanged
+            }
         };
         // 顺序：先落实本机效果，再恢复分叉与投递组密钥更新，最后执行网络待办与历史同步，使对端在看到
         // 新历史之前已能收到对应的组密钥更新。

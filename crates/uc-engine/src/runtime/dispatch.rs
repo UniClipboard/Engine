@@ -856,6 +856,12 @@ impl EngineRuntime for ProductionRuntime {
                     .arm_group_update_tamper(count);
                 Ok(DevOperationResult::GroupUpdateTamperArmed)
             }
+            DevOperation::ArmLegacyReceiverRejection { count } => {
+                self.joiner_final_confirmation_gate
+                    .space_work_control()
+                    .arm_legacy_receiver_rejection(count);
+                Ok(DevOperationResult::LegacyReceiverRejectionArmed)
+            }
             DevOperation::WaitForSpaceWorkEvent {
                 after_sequence,
                 kind,

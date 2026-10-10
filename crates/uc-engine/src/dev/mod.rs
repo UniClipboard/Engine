@@ -48,6 +48,7 @@ pub enum DevSpaceWorkEventKind {
     GroupUpdateReceiveFaultInjected,
     GroupUpdateApplied,
     GroupUpdateTampered,
+    LegacyReceiverRejectionInjected,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -246,6 +247,10 @@ pub enum DevOperation {
     ArmGroupUpdateTamper {
         count: usize,
     },
+    /// 让本机作为发送方的后续 `count` 次组密钥更新直接得到旧协议接收方式的无原因拒绝，不联系接收方。
+    ArmLegacyReceiverRejection {
+        count: usize,
+    },
     WaitForSpaceWorkEvent {
         after_sequence: u64,
         kind: DevSpaceWorkEventKind,
@@ -295,6 +300,7 @@ impl fmt::Debug for DevOperation {
             Self::ClearMembershipHistoryFailures => "clear_membership_history_failures",
             Self::SetGroupUpdateReceiveFault { .. } => "set_group_update_receive_fault",
             Self::ArmGroupUpdateTamper { .. } => "arm_group_update_tamper",
+            Self::ArmLegacyReceiverRejection { .. } => "arm_legacy_receiver_rejection",
             Self::WaitForSpaceWorkEvent { .. } => "wait_for_space_work_event",
             Self::QuerySpaceWorkEvents => "query_space_work_events",
             Self::FailNextSessionHandover { .. } => "fail_next_session_handover",
@@ -449,6 +455,7 @@ pub enum DevOperationResult {
     },
     GroupUpdateReceiveFaultSet,
     GroupUpdateTamperArmed,
+    LegacyReceiverRejectionArmed,
     SpaceWorkEvent(DevSpaceWorkEvent),
     SpaceWorkEvents(Vec<DevSpaceWorkEvent>),
     SessionHandoverFailureArmed,
@@ -501,6 +508,7 @@ impl fmt::Debug for DevOperationResult {
             Self::MembershipHistoryFailuresCleared { .. } => "membership_history_failures_cleared",
             Self::GroupUpdateReceiveFaultSet => "group_update_receive_fault_set",
             Self::GroupUpdateTamperArmed => "group_update_tamper_armed",
+            Self::LegacyReceiverRejectionArmed => "legacy_receiver_rejection_armed",
             Self::SpaceWorkEvent(_) => "space_work_event",
             Self::SpaceWorkEvents(_) => "space_work_events",
             Self::SessionHandoverFailureArmed => "session_handover_failure_armed",

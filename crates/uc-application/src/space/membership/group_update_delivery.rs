@@ -262,13 +262,20 @@ impl DeliverPendingGroupUpdatesPort for DeliverPendingGroupUpdatesUseCase {
     #[tracing::instrument(name = "usecase.deliver_pending_group_updates.deliver", skip_all)]
     async fn deliver_pending_group_updates(
         &self,
-        _trigger: &MembershipMaintenanceTrigger,
+        trigger: &MembershipMaintenanceTrigger,
         reachable_peers: &[DeviceId],
     ) -> MembershipMaintenanceStepOutcome {
         if let Err(outcome) = self.settle_obsolete_updates().await {
             return outcome;
         }
-        let pending = match self.deliverable_updates(reachable_peers).await {
+        // 重新认证的证据：刚确认成员历史的对端，以及刚通过准入重新上线的对端。
+        let mut reauthenticated = reachable_peers.to_vec();
+        if let MembershipMaintenanceTrigger::PeerOnline(peer) = trigger {
+            if !reauthenticated.contains(peer) {
+                reauthenticated.push(*peer);
+            }
+        }
+        let pending = match self.deliverable_updates(&reauthenticated).await {
             Ok(pending) => pending,
             Err(error) => return classify_store_error(&error),
         };

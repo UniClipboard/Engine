@@ -200,6 +200,9 @@ fn space_work_event_json(event: uc_engine::DevSpaceWorkEvent) -> Value {
         }
         uc_engine::DevSpaceWorkEventKind::GroupUpdateApplied => "group_update_applied",
         uc_engine::DevSpaceWorkEventKind::GroupUpdateTampered => "group_update_tampered",
+        uc_engine::DevSpaceWorkEventKind::LegacyReceiverRejectionInjected => {
+            "legacy_receiver_rejection_injected"
+        }
     };
     json!({ "sequence": event.sequence, "kind": kind })
 }

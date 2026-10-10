@@ -11,9 +11,10 @@ use uc_core::membership::{
     AdmissionAttemptTimeline, AdmissionContinuationCredential,
     AdmissionEncryptedPasswordEquivalent, AdmissionPeerBinding, GroupEpoch, GroupRevocationPort,
     GroupRevocationResult, GroupUpdateDispatchError, GroupUpdateDispatchPort,
-    GroupUpdateRecipientDelivery, KeyEpochError, MembershipHistoryExchangeError,
-    MembershipHistoryExchangePort, MembershipHistoryMessage, PendingGroupUpdate, RevocationId,
-    SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionMessageKind, SpaceAdmissionRoute,
+    GroupUpdateRecipientDelivery, GroupUpdateRejection, KeyEpochError,
+    MembershipHistoryExchangeError, MembershipHistoryExchangePort, MembershipHistoryMessage,
+    PendingGroupUpdate, RevocationId, SpaceAdmissionEnvelopeV1, SpaceAdmissionId,
+    SpaceAdmissionMessageKind, SpaceAdmissionRoute,
 };
 use uc_observability_contract::diagnostics::connectivity::{
     ClassifiedGroupUpdateStorageFailure, GroupUpdateReason,
@@ -40,6 +41,7 @@ struct State {
     membership_history_failure: Option<MembershipHistoryFailurePlan>,
     group_update_receive_fault: Option<DevGroupUpdateReceiveFault>,
     group_update_tamper_remaining: usize,
+    legacy_rejection_remaining: usize,
     next_sequence: u64,
     events: Vec<DevSpaceWorkEvent>,
 }
@@ -51,6 +53,7 @@ impl Default for State {
             membership_history_failure: None,
             group_update_receive_fault: None,
             group_update_tamper_remaining: 0,
+            legacy_rejection_remaining: 0,
             next_sequence: 1,
             events: Vec::new(),
         }
@@ -89,6 +92,19 @@ impl SpaceWorkTestControl {
 
     pub(crate) fn arm_group_update_tamper(&self, count: usize) {
         self.lock_state().group_update_tamper_remaining = count;
+    }
+
+    pub(crate) fn arm_legacy_receiver_rejection(&self, count: usize) {
+        self.lock_state().legacy_rejection_remaining = count;
+    }
+
+    fn take_legacy_receiver_rejection(&self) -> bool {
+        let mut state = self.lock_state();
+        if state.legacy_rejection_remaining == 0 {
+            return false;
+        }
+        state.legacy_rejection_remaining -= 1;
+        true
     }
 
     fn group_update_receive_fault(&self) -> Option<DevGroupUpdateReceiveFault> {
@@ -423,6 +439,13 @@ impl GroupUpdateDispatchPort for RecordedGroupUpdateDispatch {
     ) -> Result<(), GroupUpdateDispatchError> {
         self.control
             .record(DevSpaceWorkEventKind::OrdinaryMemberUpdateStarted);
+        if self.control.take_legacy_receiver_rejection() {
+            self.control
+                .record(DevSpaceWorkEventKind::LegacyReceiverRejectionInjected);
+            return Err(GroupUpdateDispatchError::Rejected(
+                GroupUpdateRejection::Unclassified,
+            ));
+        }
         if self.control.take_group_update_tamper() {
             if let Some(tampered) = tampered_update(update) {
                 self.control
