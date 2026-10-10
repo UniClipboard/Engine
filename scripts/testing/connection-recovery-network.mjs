@@ -191,8 +191,8 @@ async function until(predicate, milliseconds, description) {
   }
 }
 
-async function paired(group) {
-  const created = await group[0].call('create', { name: group[0].label })
+async function paired(group, existingSpace) {
+  const created = existingSpace ?? await group[0].call('create', { name: group[0].label })
   group[0].id = created.device
   for (const node of group.slice(1)) {
     const invitation = await group[0].call('invite')
@@ -724,6 +724,65 @@ async function stopRelay() {
   for (const relay of relays) await terminateRelay(relay)
 }
 
+function localDiagnostics(node) {
+  return readdirSync(join(node.root, 'logs'))
+    .filter(name => /^engine\..*\.jsonl$/.test(name))
+    .flatMap(name => readFileSync(join(node.root, 'logs', name), 'utf8').split('\n').filter(Boolean).map(JSON.parse))
+}
+
+// 在同一真实 Relay-only 拓扑中，先组装双方会话，再让 Relay 就绪并实际配对。
+// 首次持久地址与每次准入路由都必须已经含 Relay，不能依赖后来学习到的地址掩盖快照。
+async function pairingCurrentAddressScenario(a, b) {
+  await scenario('E15-pairing-current-address', async () => {
+    const proof = records.at(-1).proof = { bidirectional_baseline: false, bidirectional_after_restart: false }
+    await stopRelay()
+    for (const node of nodes) {
+      await node.reset()
+      await node.call('relay_config', { url: `http://10.233.0.1:${relayPorts[nodes.indexOf(node)]}` })
+      await node.stop()
+      await node.start()
+    }
+    const created = await a.call('create', { name: a.label })
+    await delay(5000)
+    for (const node of nodes) await node.call('flush')
+    proof.startup_without_relay = nodes.every(node => localDiagnostics(node).some(row => row.fields?.['event.name'] === 'address.publish_requested' && row.fields.relay_count === 0))
+    assert(proof.startup_without_relay, 'delayed-relay startup precondition was not observed')
+    await startRelay()
+    await until(async () => {
+      for (const node of nodes) await node.call('flush')
+      return nodes.every(node => localDiagnostics(node).some(row => row.fields?.['event.name'] === 'relay.status.observed' && row.fields.connected_count > 0))
+    }, 35_000, 'delayed relay did not become ready before pairing')
+    proof.relay_ready_before_pairing = true
+    const pairingStartedAt = Date.now()
+    await paired(nodes, created)
+    for (const node of nodes) await node.call('flush')
+    const addressCounts = row => ({ direct_count: row.fields.direct_count, relay_count: row.fields.relay_count, other_count: row.fields.other_count })
+    const stored = localDiagnostics(a).find(row => row.fields?.['event.name'] === 'address.loaded' && Date.parse(row.timestamp) >= pairingStartedAt)
+    const routes = localDiagnostics(b).filter(row => row.fields?.['event.name'] === 'address.used' && row.fields.source === 'admission_route' && Date.parse(row.timestamp) >= pairingStartedAt)
+    proof.joiner_initial_stored_address = stored ? addressCounts(stored) : null
+    proof.sponsor_admission_routes = routes.map(addressCounts)
+    await transfer(a, b, 'pairing-current-address-baseline')
+    proof.bidirectional_baseline = true
+    const endpointBefore = await a.call('network_endpoint')
+    await a.stop()
+    await a.start()
+    await a.call('unlock')
+    proof.restarted_endpoint_identity_preserved = JSON.stringify(endpointBefore) === JSON.stringify(await a.call('network_endpoint'))
+    assert(proof.restarted_endpoint_identity_preserved, 'endpoint identity changed across process restart')
+    await online(nodes, 25_000)
+    await transfer(a, b, 'pairing-current-address-restart')
+    proof.bidirectional_after_restart = true
+    for (const node of nodes) await node.call('flush')
+    const connections = localDiagnostics(a).filter(row => row.fields?.['event.name'] === 'connection.established')
+    proof.relay_connection_count = connections.filter(row => row.fields.initial_path === 'relay').length
+    proof.direct_connection_count = connections.filter(row => row.fields.initial_path === 'direct').length
+    assert(proof.relay_connection_count > 0 && proof.direct_connection_count === 0, 'pairing address scenario did not stay relay-only')
+    assert(stored && stored.fields.relay_count > 0, 'Joiner pairing persisted a startup address without the ready relay')
+    assert(routes.length >= 2 && routes.every(row => row.fields.relay_count > 0), 'Sponsor continuation route reused a startup address without the ready relay')
+    return proof
+  })
+}
+
 function blockDirect(node) {
   nft(node, 'add', 'table', 'inet', 'uc_direct')
   nft(node, 'add', 'chain', 'inet', 'uc_direct', 'output', '{ type filter hook output priority -50; policy accept; }')
@@ -825,6 +884,7 @@ async function relayScenarios(a, b) {
       assert(transferAt <= deadline, 'relay-only bidirectional recovery exceeded three seconds')
     })
   }
+  await pairingCurrentAddressScenario(a, b)
 }
 
 let failed = false

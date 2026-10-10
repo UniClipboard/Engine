@@ -37,7 +37,7 @@ use super::session_generation::{
 use iroh::address_lookup::AddrFilter;
 use iroh::endpoint::{presets, QuicTransportConfig, VarInt};
 use iroh::protocol::Router;
-use iroh::{Endpoint, EndpointAddr, RelayConfig, RelayMode, RelayUrl, TransportAddr};
+use iroh::{Endpoint, RelayConfig, RelayMode, RelayUrl, TransportAddr};
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 use noq_proto::congestion::{Bbr3Config, CubicConfig};
 use tracing::instrument;
@@ -750,18 +750,9 @@ impl IrohSessionBuilder {
         Box::pin(hints)
     }
 
-    /// 返回当前节点将写入准入候选资料的认证传输身份与地址。
-    pub fn local_endpoint_addr(&self) -> EndpointAddr {
-        self.context.endpoint.addr()
-    }
-
-    /// 返回成员投影可直接保存的认证传输地址编码。
-    pub fn local_endpoint_addr_blob(&self) -> Result<Vec<u8>, IrohNodeError> {
-        postcard::to_stdvec(&self.context.endpoint.addr()).map_err(|source| {
-            IrohNodeError::AdmissionInstall {
-                source: anyhow::Error::new(source),
-            }
-        })
+    /// 向材料 adapter 提供同一节点，让材料生成时读取当前地址。
+    pub fn local_endpoint(&self) -> Arc<Endpoint> {
+        Arc::clone(&self.context.endpoint)
     }
 
     fn install_session_handler<I, A>(

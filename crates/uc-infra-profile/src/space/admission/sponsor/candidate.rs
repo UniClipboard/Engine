@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use iroh::Endpoint;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -20,6 +21,8 @@ use uc_core::membership::{
 };
 use uc_observability_contract::diagnostics::connectivity::{observe_local_result, LocalWorkStep};
 
+use uc_infra_p2p::network::iroh::encode_space_admission_route;
+
 use super::base_snapshot::decode_sponsor_base_snapshot;
 use crate::space::admission::recovery_material::seal_recovery_material;
 
@@ -27,7 +30,7 @@ const SPONSOR_CANDIDATE_STAGED_FORMAT_V1: u16 = 1;
 
 pub struct DefaultSponsorCandidatePreparation {
     local_device_id: DeviceId,
-    continuation_route: Vec<u8>,
+    endpoint: Arc<Endpoint>,
     signatures: Arc<dyn CurrentMemberSignaturePort>,
     history_verifier: Arc<dyn HistoricalMembershipSignatureVerifier>,
     security: Arc<dyn PrepareSponsorAdmissionSecurityPort>,
@@ -36,14 +39,14 @@ pub struct DefaultSponsorCandidatePreparation {
 impl DefaultSponsorCandidatePreparation {
     pub fn new(
         local_device_id: DeviceId,
-        continuation_route: Vec<u8>,
+        endpoint: Arc<Endpoint>,
         signatures: Arc<dyn CurrentMemberSignaturePort>,
         history_verifier: Arc<dyn HistoricalMembershipSignatureVerifier>,
         security: Arc<dyn PrepareSponsorAdmissionSecurityPort>,
     ) -> Self {
         Self {
             local_device_id,
-            continuation_route,
+            endpoint,
             signatures,
             history_verifier,
             security,
@@ -238,6 +241,9 @@ impl PrepareSponsorCandidatePort for DefaultSponsorCandidatePreparation {
                 })?;
             // Candidate 是发给 Joiner 的公开协议材料：基础历史、已签名事件、MLS
             // Commit/Welcome 和后续路由。它不包含 Sponsor 尚未提交的私有 MLS 状态。
+            // 路由在 Candidate 生成时采样，不复用会话组装时尚未就绪的地址。
+            let continuation_route = encode_space_admission_route(&self.endpoint.addr(), None)
+                .map_err(PrepareSponsorCandidateError::unavailable)?;
             let candidate = AdmissionCandidateV1::new(
                 uc_core::membership::AdmissionSignedMembershipHistory::from_bytes(
                     snapshot.membership_history,
@@ -253,9 +259,9 @@ impl PrepareSponsorCandidatePort for DefaultSponsorCandidatePreparation {
                 AdmissionMlsWelcome::from_bytes(security.welcome).map_err(|error| {
                     PrepareSponsorCandidateError::invalid(anyhow::Error::new(error))
                 })?,
-                AdmissionContinuationRoute::from_bytes(self.continuation_route.clone()).map_err(
-                    |error| PrepareSponsorCandidateError::invalid(anyhow::Error::new(error)),
-                )?,
+                AdmissionContinuationRoute::from_bytes(continuation_route).map_err(|error| {
+                    PrepareSponsorCandidateError::invalid(anyhow::Error::new(error))
+                })?,
             )
             .map_err(|error| PrepareSponsorCandidateError::invalid(anyhow::Error::new(error)))?;
             let candidate_reply = SpaceAdmissionEnvelopeV1::reply_to(
@@ -325,6 +331,8 @@ fn mint_message_id() -> uc_core::membership::AdmissionMessageId {
 
 #[cfg(test)]
 mod tests {
+    use iroh::endpoint::presets;
+    use iroh::{Endpoint, RelayMode};
     use uc_application::deps::{
         AdmissionSecurityTransitionError, CurrentMemberSignatureError, PrepareSponsorCommitPort,
         PrepareSponsorCompletePort, SponsorPreparedAdmissionSecurity,
@@ -524,9 +532,15 @@ mod tests {
         )
         .expect("Sponsor accepts request")
         .into_replacement();
+        let endpoint = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup()
+            .bind()
+            .await
+            .expect("bind isolated endpoint");
         let adapter = DefaultSponsorCandidatePreparation::new(
             sponsor_device,
-            b"continuation-route".to_vec(),
+            Arc::new(endpoint),
             signatures.clone(),
             signatures.clone(),
             Arc::new(FixedSecurity),

@@ -38,9 +38,9 @@ use uc_infra_local::fs::{
     FsAtomicPublisher, FsDirectoryStagingCleaner, FsHiddenPathMarker, FsInboundFileTarget,
 };
 use uc_infra_p2p::network::iroh::{
-    encode_space_admission_route, ActiveClipboardHandlers, ActiveClipboardPullHandlers,
-    BlobHandlers, ClipboardHandlers, GroupUpdateHandlers, IrohIdentityStore, IrohNodeError,
-    IrohSessionBuilder, PreparedIrohSession, TransferProgressHandlers,
+    ActiveClipboardHandlers, ActiveClipboardPullHandlers, BlobHandlers, ClipboardHandlers,
+    GroupUpdateHandlers, IrohIdentityStore, IrohNodeError, IrohSessionBuilder, PreparedIrohSession,
+    TransferProgressHandlers,
 };
 use uc_infra_profile::security::Sha256IdentityFingerprintFactory;
 use uc_infra_profile::space::{
@@ -142,11 +142,6 @@ pub enum SyncSessionPreparationError {
     IrohNode(#[from] IrohNodeError),
     #[error(transparent)]
     ApplicationUpgrade(#[from] uc_application::facade::ApplicationUpgradeError),
-    #[error("failed to assemble the Space application")]
-    ApplicationAssembly {
-        #[source]
-        source: anyhow::Error,
-    },
 }
 
 /// 从已完成的 Application factory 与 Engine adapter 构造共享 Iroh 网络。
@@ -261,20 +256,7 @@ pub async fn prepare_sync_session(
 
     // Application 先构造认证 endpoint；Space 持续维护要等 Router 就绪后
     // 才由 ApplicationRuntime 启动。
-    let endpoint_addr = builder.local_endpoint_addr();
-    let endpoint_addr_blob = builder.local_endpoint_addr_blob()?;
-    let continuation_route =
-        encode_space_admission_route(&endpoint_addr, None).map_err(|source| {
-            SyncSessionPreparationError::ApplicationAssembly {
-                source: anyhow::Error::new(source).context("failed to encode the admission route"),
-            }
-        })?;
-    let identity_fingerprint = space_setup
-        .fingerprint
-        .from_public_key(endpoint_addr.id.as_bytes())
-        .map_err(|source| SyncSessionPreparationError::ApplicationAssembly {
-            source: source.context("failed to derive the endpoint identity fingerprint"),
-        })?;
+    let endpoint = builder.local_endpoint();
     let historical_signatures = Arc::new(OpenMlsHistoricalSignatureVerifier);
     let membership_network_gate = MembershipNetworkGate::active();
     let admission_transport: Arc<dyn uc_application::deps::SpaceAdmissionTransportPort> =
@@ -313,9 +295,8 @@ pub async fn prepare_sync_session(
         joiner_start_material: Arc::new(DefaultJoinerStartMaterial::new(
             local_device_id,
             Arc::clone(&space_setup.settings),
-            identity_fingerprint,
-            endpoint_addr.id.as_bytes().to_vec(),
-            endpoint_addr_blob,
+            Arc::clone(&space_setup.fingerprint),
+            Arc::clone(&endpoint),
         )),
         joiner_start_state: space_setup.admission_state.clone()
             as Arc<dyn uc_application::deps::JoinerStartStatePort>,
@@ -329,7 +310,7 @@ pub async fn prepare_sync_session(
             as Arc<dyn uc_application::deps::SponsorAdmissionStatePort>,
         prepare_sponsor_candidate: Arc::new(DefaultSponsorCandidatePreparation::new(
             local_device_id,
-            continuation_route,
+            Arc::clone(&endpoint),
             Arc::clone(&space_setup.current_member_signatures),
             historical_signatures.clone(),
             Arc::clone(&space_setup.space_access.prepare_sponsor_admission_security),

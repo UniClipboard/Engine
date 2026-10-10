@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use iroh::Endpoint;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use uc_application::deps::{
@@ -17,8 +18,8 @@ use uc_core::membership::{
     UnreadableHistoryPolicy, ED25519_SIGNATURE_ALGORITHM_V1,
 };
 use uc_core::pairing::InvitationCode;
+use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::SettingsPort;
-use uc_core::security::IdentityFingerprint;
 use uc_observability_contract::diagnostics::connectivity::{observe_local_result, LocalWorkStep};
 use uc_sync_protocol::full_invitation::decode_invitation_entry;
 use x25519_dalek::{PublicKey as RecoveryPublicKey, StaticSecret as RecoverySecret};
@@ -28,29 +29,26 @@ use uc_infra_crypto::mls_group::MlsGroupEngine;
 
 const JOINER_PRIVATE_STATE_FORMAT_V2: u16 = 2;
 
-/// Infra owns the complete, one-shot construction of a Joiner's initial admission material.
+/// Infra 一次性生成 Joiner 准入材料，并在签名前采样当前传输地址。
 pub struct DefaultJoinerStartMaterial {
     device_id: DeviceId,
     settings: Arc<dyn SettingsPort>,
-    identity_fingerprint: IdentityFingerprint,
-    transport_public_key: Vec<u8>,
-    transport_address_blob: Vec<u8>,
+    fingerprints: Arc<dyn IdentityFingerprintFactoryPort>,
+    endpoint: Arc<Endpoint>,
 }
 
 impl DefaultJoinerStartMaterial {
     pub fn new(
         device_id: DeviceId,
         settings: Arc<dyn SettingsPort>,
-        identity_fingerprint: IdentityFingerprint,
-        transport_public_key: Vec<u8>,
-        transport_address_blob: Vec<u8>,
+        fingerprints: Arc<dyn IdentityFingerprintFactoryPort>,
+        endpoint: Arc<Endpoint>,
     ) -> Self {
         Self {
             device_id,
             settings,
-            identity_fingerprint,
-            transport_public_key,
-            transport_address_blob,
+            fingerprints,
+            endpoint,
         }
     }
 }
@@ -119,13 +117,25 @@ impl DefaultJoinerStartMaterial {
             };
             let credential =
                 MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, signing_public_key);
+            // 同一次快照提供身份公钥和当前地址；签名后由准入恢复流程重放原材料。
+            let endpoint_addr = self.endpoint.addr();
+            let identity_fingerprint =
+                self.fingerprints
+                    .from_public_key(endpoint_addr.id.as_bytes())
+                    .map_err(|source| {
+                        JoinerStartMaterialError::unavailable(source.context(
+                            "derive the endpoint identity fingerprint for Space admission",
+                        ))
+                    })?;
+            let transport_address_blob = postcard::to_stdvec(&endpoint_addr)
+                .map_err(JoinerStartMaterialError::unavailable)?;
             let mut identity_facts = AdmissionChangeFacts {
                 member_instance: credential.member_instance_id(&self.device_id),
                 device_id: self.device_id.clone(),
                 device_name,
-                identity_fingerprint: self.identity_fingerprint.clone(),
-                transport_public_key: self.transport_public_key.clone(),
-                transport_address_blob: self.transport_address_blob.clone(),
+                identity_fingerprint,
+                transport_public_key: endpoint_addr.id.as_bytes().to_vec(),
+                transport_address_blob,
                 identity_signature: Vec::new(),
             };
             let identity_signature = MlsGroupEngine::sign_pending_member_payload(
@@ -277,11 +287,14 @@ fn mint_message_id() -> AdmissionMessageId {
 mod tests {
 
     use async_trait::async_trait;
+    use iroh::endpoint::presets;
+    use iroh::{Endpoint, RelayMode};
     use uc_core::crypto::domain::Passphrase;
     use uc_core::pairing::InvitationCode;
     use uc_core::settings::model::Settings;
 
     use super::*;
+    use crate::security::Sha256IdentityFingerprintFactory;
     use uc_sync_protocol::full_invitation::encode_full_invitation;
 
     #[tokio::test]
@@ -291,7 +304,7 @@ mod tests {
         let encoded_route = b"opaque-sponsor-route";
         let invitation = encode_full_invitation(invitation_id, encoded_route, 1_900_000_000_000)
             .expect("valid full invitation fixture");
-        let adapter = adapter();
+        let adapter = adapter().await;
 
         let material = adapter
             .create(&JoinSpaceInput {
@@ -309,7 +322,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_full_invitation_is_rejected_without_a_dependency_error() {
-        let adapter = adapter();
+        let adapter = adapter().await;
         let error = adapter
             .create(&JoinSpaceInput {
                 invitation_code: InvitationCode::new("ucspace1_invalid"),
@@ -333,16 +346,20 @@ mod tests {
             .is_some());
     }
 
-    fn adapter() -> DefaultJoinerStartMaterial {
+    async fn adapter() -> DefaultJoinerStartMaterial {
         let mut settings = Settings::default();
         settings.general.device_name = Some("Joining device".to_owned());
+        let endpoint = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup()
+            .bind()
+            .await
+            .expect("bind isolated endpoint");
         DefaultJoinerStartMaterial::new(
             DeviceId::new("joining-device"),
             Arc::new(FixedSettings(settings)),
-            IdentityFingerprint::from_display_string("ABCD-EFGH-IJKL-MNOP")
-                .expect("valid fingerprint fixture"),
-            vec![0x71; 32],
-            vec![0x72; 32],
+            Arc::new(Sha256IdentityFingerprintFactory),
+            Arc::new(endpoint),
         )
     }
 
