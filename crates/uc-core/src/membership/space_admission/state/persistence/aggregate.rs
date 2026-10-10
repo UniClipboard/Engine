@@ -189,6 +189,11 @@ impl SpaceAdmissionAggregate {
             ) => {
                 return Err(SpaceAdmissionPersistenceError::InvalidState);
             }
+            SpaceAdmissionRecordState::Terminal(
+                SpaceAdmissionTerminalState::SponsorLegacyClosed(state),
+            ) => PersistedSpaceAdmissionStateV1::SponsorLegacyClosed {
+                confirmation: state.confirmation.map(encode_sponsor_confirmation),
+            },
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::RecoveryRequired(
                 state,
             )) => match state.join_id {
@@ -338,6 +343,15 @@ fn decode_record_v1(
                     category: decode_recovery_category(category)?,
                     // 旧格式只保存了类别；没有 join_id 可以还原。
                     join_id: None,
+                },
+            ))
+        }
+        PersistedSpaceAdmissionStateV1::SponsorLegacyClosed { confirmation } => {
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::SponsorLegacyClosed(
+                SpaceAdmissionSponsorLegacyClosed {
+                    confirmation: confirmation
+                        .map(|summary| decode_sponsor_confirmation(summary, admission_id))
+                        .transpose()?,
                 },
             ))
         }

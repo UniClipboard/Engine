@@ -186,6 +186,10 @@ enum PersistedSpaceAdmissionStateV1 {
         category: u8,
         join_id: [u8; 16],
     },
+    /// 旧格式邀请方记录收尾后的终态；追加在末尾以保持既有变体序号稳定。
+    SponsorLegacyClosed {
+        confirmation: Option<PersistedSponsorPairingConfirmationV2>,
+    },
 }
 
 #[derive(Serialize, Deserialize)]

@@ -4,7 +4,7 @@ use uc_core::membership::{JoinerAdmissionTransition, SponsorAdmissionTransition}
 use uc_core::ports::ClockPort;
 
 use crate::facade::HostEventBus;
-use crate::space::membership::AdmissionRevocationPort;
+use crate::space::membership::{AdmissionRevocationPort, MembershipOwner};
 
 mod recover_pending;
 
@@ -23,6 +23,7 @@ pub(crate) struct AdmissionRecoveryService {
     host_events: Arc<HostEventBus>,
     pub(super) clock: Arc<dyn ClockPort>,
     pub(super) admission_revocation: Arc<dyn AdmissionRevocationPort>,
+    pub(super) membership: Arc<MembershipOwner>,
     pub(super) execution_lock: tokio::sync::Mutex<()>,
     interrupt_generation: tokio::sync::watch::Sender<u64>,
 }
@@ -34,6 +35,7 @@ impl AdmissionRecoveryService {
         host_events: Arc<HostEventBus>,
         clock: Arc<dyn ClockPort>,
         admission_revocation: Arc<dyn AdmissionRevocationPort>,
+        membership: Arc<MembershipOwner>,
     ) -> Self {
         let (interrupt_generation, _) = tokio::sync::watch::channel(0);
         Self {
@@ -42,6 +44,7 @@ impl AdmissionRecoveryService {
             host_events,
             clock,
             admission_revocation,
+            membership,
             execution_lock: tokio::sync::Mutex::new(()),
             interrupt_generation,
         }

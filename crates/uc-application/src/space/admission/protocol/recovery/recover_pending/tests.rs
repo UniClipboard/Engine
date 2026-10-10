@@ -1085,3 +1085,40 @@ fn abandonment_attempts(pair: &SpaceAdmissionProtocolTestPair) -> usize {
         .filter(|event| matches!(event, ProtocolEvent::JoinerAbandonmentExchanged))
         .count()
 }
+
+/// 早于尝试期限格式写入的邀请方记录（合成字节，经真实 Core 编码器生成）。
+fn legacy_sponsor(hex: &str) -> uc_core::membership::SponsorAdmission {
+    let hex = hex.trim();
+    let bytes: Vec<u8> = (0..hex.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).expect("hex fixture"))
+        .collect();
+    uc_core::membership::SponsorAdmission::decode_persisted(&bytes)
+        .expect("legacy sponsor fixture decodes")
+}
+
+#[tokio::test]
+async fn legacy_sponsor_without_deadline_is_closed_when_the_ledger_has_no_member() {
+    for hex in [
+        include_str!("fixtures/legacy_sponsor_candidate.hex"),
+        include_str!("fixtures/legacy_sponsor_committed.hex"),
+        include_str!("fixtures/legacy_sponsor_applied.hex"),
+    ] {
+        let pair = SpaceAdmissionProtocolTestPair::fresh().await;
+        let legacy = legacy_sponsor(hex);
+        assert!(legacy.is_legacy_unbounded());
+        pair.seed_sponsor(legacy);
+
+        let report = pair.recover_sponsor().await;
+
+        assert_eq!(report.advanced_count, 1);
+        assert_eq!(report.recovery_required_count, 0);
+        assert_eq!(report.deferred_count, 0);
+        assert!(pair.sponsor_is_terminal());
+        let again = pair.recover_sponsor().await;
+        assert_eq!(
+            again.advanced_count, 0,
+            "a closed record is not closed twice"
+        );
+    }
+}

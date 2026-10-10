@@ -381,6 +381,7 @@ impl SpaceApplication {
             host_event_bus,
             Arc::clone(&clock),
             remove_space_member.clone(),
+            Arc::clone(&owner),
         );
         let space_admission = Arc::new(SpaceAdmissionProtocol::new(
             joiner_admission,

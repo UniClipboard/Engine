@@ -261,9 +261,10 @@ impl SpaceAdmissionAggregate {
             | SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(_)) => {
                 (None, None)
             }
-            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::SponsorExpired(_)) => {
-                (None, None)
-            }
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::SponsorExpired(_))
+            | SpaceAdmissionRecordState::Terminal(
+                SpaceAdmissionTerminalState::SponsorLegacyClosed(_),
+            ) => (None, None),
         }
     }
 }

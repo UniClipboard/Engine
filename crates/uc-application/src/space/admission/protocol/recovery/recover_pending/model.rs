@@ -68,6 +68,7 @@ pub struct LoadedSponsorAbandonment {
 #[derive(Default)]
 pub struct LoadedAdmissionRecovery {
     pending_admissions: Vec<LoadedPendingAdmission>,
+    /// 到期的邀请方记录，以及没有期限、需要按证据收尾的旧格式邀请方记录。
     sponsor_deadlines: Vec<LoadedSponsorDeadline>,
     sponsor_abandonments: Vec<LoadedSponsorAbandonment>,
     next_deadline_ms: Option<i64>,

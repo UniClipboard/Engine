@@ -486,6 +486,11 @@ UniFFI 的导出准备是同步入口，宿主必须使用已有后台执行队�
 当前 tracing-opentelemetry 版本不更新已启动节点的名称；Sponsor 完整请求负责人通过固定的 `uc.display.name` 内部字段描述动作，
 共同运行时在结束编码时转换为 name 并移除该字段，再执行严格名称与角色校验。Collector 不接受该内部字段；禁止借此传入任意文本。
 
+旧格式 Sponsor 记录收尾（没有尝试期限的未终结记录，见 [配对生命周期](pairing-lifecycle.md)）由 Application 的准入恢复服务记录一条业务结果：
+触发原因 `trigger`、记录阶段 `state`（accepted、candidate、committed、applied）、原因 `reason=legacy_no_deadline`，以及结果 `outcome`
+（`closed_without_member`、`closed_unconfirmed_member`、`deferred_member_evidence`、`commit_not_saved`、`invalid_record`）。只使用固定字段，
+不含准入、成员、设备或邀请标识。
+
 设备侧系统日志、JSONL 和远程层均默认拒绝普通模块 target。历史 local debug 调用点保留在
 `docs/generated/observability-inventory.md`，但不因此获得输出许可。
 

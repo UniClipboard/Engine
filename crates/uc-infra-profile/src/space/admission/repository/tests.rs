@@ -1099,3 +1099,70 @@ async fn recovery_summary_rejects_corruption_and_locked_keys() {
         })
     ));
 }
+
+/// 早于尝试期限格式写入的邀请方记录没有期限，恢复必须仍能选出并关闭它，重启后保持关闭。
+#[tokio::test]
+async fn legacy_sponsor_record_without_deadline_is_selected_closed_and_stays_closed() {
+    use uc_application::deps::{AdmissionRecoveryTrigger, PendingAdmissionRecoveryStatePort};
+    use uc_core::membership::{
+        AdmissionRecordPersistence, LegacySponsorMembership, SpaceAdmissionAggregate,
+    };
+
+    let hex = include_str!("fixtures/legacy_sponsor_candidate.hex").trim();
+    let bytes: Vec<u8> = (0..hex.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).expect("hex fixture"))
+        .collect();
+    let aggregate = SpaceAdmissionAggregate::decode_persisted(&bytes).expect("legacy fixture");
+    let id = *aggregate.admission_id().as_bytes();
+    let mut fixture = Fixture::new();
+    let mut state = PersistedSpaceAdmissionRepositoryV2::fresh([0x31; 16]);
+    state.records.insert(
+        id,
+        fixture
+            .repository
+            .seal_new_record(&aggregate)
+            .expect("legacy record is sealed"),
+    );
+    fixture
+        .repository
+        .save_state_on(&mut fixture.connection, &state)
+        .expect("legacy record is saved");
+
+    let loaded = PendingAdmissionRecoveryStatePort::load(
+        &fixture.repository,
+        AdmissionRecoveryTrigger::Startup,
+        0,
+    )
+    .await
+    .expect("recovery index loads");
+    let (_, mut deadlines, _, _, _, _) = loaded.into_parts();
+    assert_eq!(deadlines.len(), 1, "the legacy sponsor record is selected");
+    let (sponsor, token) = deadlines.remove(0).into_parts();
+    assert!(sponsor.is_legacy_unbounded());
+    let transition = sponsor
+        .close_legacy(LegacySponsorMembership::Absent)
+        .expect("candidate closes without a member")
+        .expect("a legacy record produces a transition");
+    let closed = PendingAdmissionRecoveryStatePort::commit_sponsor_deadline(
+        &fixture.repository,
+        token,
+        transition,
+    )
+    .await
+    .expect("the closed record is saved");
+    let (closed, _) = closed.into_parts();
+    assert!(closed.is_terminal());
+
+    let reloaded = PendingAdmissionRecoveryStatePort::load(
+        &fixture.repository,
+        AdmissionRecoveryTrigger::Startup,
+        10_000_000_000_000,
+    )
+    .await
+    .expect("recovery index reloads");
+    let (_, deadlines, abandonments, next_deadline, _, needs_attention) = reloaded.into_parts();
+    assert!(deadlines.is_empty() && abandonments.is_empty());
+    assert_eq!(next_deadline, None);
+    assert!(!needs_attention);
+}

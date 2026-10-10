@@ -43,13 +43,14 @@ pub use state::{
     AdmissionOutstandingWork, AdmissionPendingRecovery, AdmissionRecordPersistence,
     AdmissionRecoveryCategory, AdmissionRecoveryStep, JoinerActivationPreparation, JoinerAdmission,
     JoinerAdmissionTransition, JoinerAppliedPreparation, JoinerCandidatePreparation,
-    JoinerCompletePreparation, JoinerInvitationResolution, SpaceAdmissionAggregate,
-    SpaceAdmissionAggregateError, SpaceAdmissionPersistenceError, SpaceAdmissionTerminationReason,
-    SponsorAbandonmentCleanup, SponsorAdmission, SponsorAdmissionTransition,
-    SponsorCandidatePreparation, SponsorCommitPreparation, SponsorCompletePreparation,
-    SponsorPairingConfirmationStatus, SponsorPairingConfirmationSummary,
-    SponsorSettlementPreparation, StartedJoinerInvitationResolution,
-    SPACE_ADMISSION_RECORD_FORMAT_V1, SPACE_ADMISSION_RECORD_FORMAT_V2,
+    JoinerCompletePreparation, JoinerInvitationResolution, LegacySponsorMemberQuery,
+    LegacySponsorMembership, SpaceAdmissionAggregate, SpaceAdmissionAggregateError,
+    SpaceAdmissionPersistenceError, SpaceAdmissionTerminationReason, SponsorAbandonmentCleanup,
+    SponsorAdmission, SponsorAdmissionTransition, SponsorCandidatePreparation,
+    SponsorCommitPreparation, SponsorCompletePreparation, SponsorPairingConfirmationStatus,
+    SponsorPairingConfirmationSummary, SponsorRecordStage, SponsorSettlementPreparation,
+    StartedJoinerInvitationResolution, SPACE_ADMISSION_RECORD_FORMAT_V1,
+    SPACE_ADMISSION_RECORD_FORMAT_V2,
 };
 #[cfg(test)]
 pub(crate) use state::{

@@ -77,6 +77,7 @@ struct RecoverySummary {
 
 pub(crate) struct LoadedRecoveryIndex {
     pub(crate) joiners: Vec<JoinerAdmission>,
+    /// 到期的邀请方记录，以及没有期限的旧格式邀请方记录（后者由恢复流程按证据收尾）。
     pub(crate) sponsor_deadlines: Vec<SponsorAdmission>,
     pub(crate) sponsor_abandonments: Vec<SponsorAdmission>,
     pub(crate) next_deadline_ms: Option<i64>,
@@ -140,7 +141,15 @@ impl RecoverySummary {
             .is_some_and(|deadline| now_ms >= deadline)
     }
 
+    /// 早于尝试期限格式写入、至今没有期限的邀请方记录；恢复流程按成员账本证据收尾，不等任何计时。
+    fn is_legacy_sponsor(&self) -> bool {
+        self.role == RecoveryRecordRole::Sponsor && self.legacy_no_deadline
+    }
+
     fn needs_body(&self, now_ms: i64) -> bool {
+        if self.is_legacy_sponsor() {
+            return true;
+        }
         match self.action {
             RecoveryAction::JoinerNetwork => true,
             RecoveryAction::JoinerExpiry => self.is_due(now_ms),
@@ -244,6 +253,15 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
                         Some(aggregate) => aggregate,
                         None => self.load_recovery_aggregate(conn, row)?,
                     };
+                    if summary.is_legacy_sponsor() {
+                        let sponsor = SponsorAdmission::try_from_record(aggregate)
+                            .ok_or_else(SpaceAdmissionStateStoreError::corrupt)?;
+                        // 摘要来自 Core 的结论；加载后仍以记录本身确认，避免陈旧摘要误选其他记录。
+                        if sponsor.is_legacy_unbounded() {
+                            sponsor_deadlines.push(sponsor);
+                        }
+                        continue;
+                    }
                     match summary.action {
                         RecoveryAction::JoinerNetwork | RecoveryAction::JoinerExpiry => joiners
                             .push(
