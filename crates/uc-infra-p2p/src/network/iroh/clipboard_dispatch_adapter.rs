@@ -375,6 +375,9 @@ impl ClipboardDispatchPort for IrohClipboardDispatchAdapter {
             };
         }
 
+        // 成员在拨号期间被移除时，迟到的连接不得再用来发送。
+        let revocation_epoch = self.connections.epoch(target);
+
         // 2. Resolve address; missing / bad record = offline. No dial, so
         //    no path established → transport Unknown.
         let started = Instant::now();
@@ -438,7 +441,17 @@ impl ClipboardDispatchPort for IrohClipboardDispatchAdapter {
         // 4. Write the frame + read the ack on a fresh bi-stream. The
         //    registration lets a member removal close this connection and
         //    abort the send instead of waiting for the ack timeout.
-        let _registration = self.connections.register(target, &connection);
+        let Some(_registration) =
+            self.connections
+                .register_since(target, &connection, revocation_epoch)
+        else {
+            // 拨号期间成员已被移除：丢弃刚建立的连接，不发送内容。
+            drop(connection);
+            return DispatchReport {
+                transport: ConnectionChannel::Unknown,
+                outcome: Err(ClipboardDispatchError::Offline),
+            };
+        };
         let outcome = self.send_and_ack(&connection, header, &payload).await;
 
         // 5. Classify the path this connection selected while it is still
@@ -1073,6 +1086,182 @@ mod tests {
         .await
         .expect("dispatch must give up when no ack arrives");
         assert!(matches!(report.outcome, Err(ClipboardDispatchError::Io(_))));
+        peer_router.shutdown().await.expect("router shutdown");
+    }
+
+    /// 在 `before_connect` 处计数并可暂停拨号，用来观察拨号尝试并在中途撤销成员。
+    #[derive(Debug, Clone)]
+    struct GatedDials {
+        started: Arc<std::sync::atomic::AtomicUsize>,
+        open: tokio::sync::watch::Receiver<bool>,
+    }
+
+    impl iroh::endpoint::EndpointHooks for GatedDials {
+        fn before_connect<'a>(
+            &'a self,
+            _: &'a EndpointAddr,
+            _: &'a [u8],
+        ) -> impl std::future::Future<Output = iroh::endpoint::BeforeConnectOutcome> + Send + 'a
+        {
+            async move {
+                self.started
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut open = self.open.clone();
+                let _ = open.wait_for(|open| *open).await;
+                iroh::endpoint::BeforeConnectOutcome::Accept
+            }
+        }
+    }
+
+    async fn bind_gated_sender(gate: GatedDials) -> Arc<Endpoint> {
+        let endpoint = Arc::new(
+            Endpoint::builder(iroh::endpoint::presets::N0)
+                .alpns(vec![CLIPBOARD_ALPN.to_vec()])
+                .relay_mode(RelayMode::Disabled)
+                .hooks(gate)
+                .bind()
+                .await
+                .expect("bind sender"),
+        );
+        wait_for_direct_addrs(&endpoint).await;
+        endpoint
+    }
+
+    /// 一次发送到不可达对端最多产生 3 次拨号尝试（现有错峰拨号的次数）。
+    #[tokio::test]
+    async fn failed_dispatch_makes_at_most_three_dial_attempts() {
+        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (_open_tx, open) = tokio::sync::watch::channel(true);
+        let sender = bind_gated_sender(GatedDials {
+            started: Arc::clone(&started),
+            open,
+        })
+        .await;
+        let dead_addr = EndpointAddr::new(iroh::SecretKey::generate().public());
+        let target = DeviceId::new("unreachable-target");
+        let repo = Arc::new(MemRepo::default());
+        seed_addr(&repo, &target, &dead_addr).await;
+        let adapter = IrohClipboardDispatchAdapter::new(
+            sender,
+            repo,
+            Arc::new(CountingPeerReachability::new()),
+        );
+
+        let report = adapter
+            .dispatch(
+                &target,
+                &sample_header(),
+                SyncPayload {
+                    ciphertext: Bytes::from_static(b"unreachable"),
+                },
+            )
+            .await;
+
+        assert!(matches!(
+            report.outcome,
+            Err(ClipboardDispatchError::Offline)
+        ));
+        let attempts = started.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            (1..=3).contains(&attempts),
+            "one failed send made {attempts} dial attempts"
+        );
+    }
+
+    /// 拨号进行到一半时成员被移除：拨号即使随后成功，也不能把内容发给已移除的成员。
+    #[tokio::test]
+    async fn dial_finishing_after_member_removal_sends_nothing() {
+        #[derive(Clone)]
+        struct CountingAckHandler(Arc<std::sync::atomic::AtomicUsize>);
+        impl std::fmt::Debug for CountingAckHandler {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("CountingAckHandler").finish()
+            }
+        }
+        impl ProtocolHandler for CountingAckHandler {
+            async fn accept(
+                &self,
+                connection: iroh::endpoint::Connection,
+            ) -> Result<(), AcceptError> {
+                let (mut send, mut recv) = connection
+                    .accept_bi()
+                    .await
+                    .map_err(|err| AcceptError::from_err(err))?;
+                if clipboard_wire::read_frame(&mut recv).await.is_ok() {
+                    self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                send.write_all(&[AckCode::Accepted.as_byte()])
+                    .await
+                    .map_err(|err| AcceptError::from_err(err))?;
+                send.finish().map_err(|err| AcceptError::from_err(err))?;
+                let _ = connection.closed().await;
+                Ok(())
+            }
+        }
+
+        let frames = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let peer_endpoint = bind_endpoint().await;
+        wait_for_direct_addrs(&peer_endpoint).await;
+        let peer_router = Router::builder((*peer_endpoint).clone())
+            .accept(CLIPBOARD_ALPN, CountingAckHandler(Arc::clone(&frames)))
+            .spawn();
+
+        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (open_tx, open) = tokio::sync::watch::channel(false);
+        let sender = bind_gated_sender(GatedDials {
+            started: Arc::clone(&started),
+            open,
+        })
+        .await;
+        let target = DeviceId::new("removed-during-dial");
+        let repo = Arc::new(MemRepo::default());
+        seed_addr(&repo, &target, &peer_endpoint.addr()).await;
+        let connections = AdmittedConnections::default();
+        let adapter = Arc::new(
+            IrohClipboardDispatchAdapter::new(sender, repo, peer_reachability_mock())
+                .with_connections(connections.clone()),
+        );
+
+        let sending = tokio::spawn({
+            let adapter = Arc::clone(&adapter);
+            let target = target.clone();
+            async move {
+                adapter
+                    .dispatch(
+                        &target,
+                        &sample_header(),
+                        SyncPayload {
+                            ciphertext: Bytes::from_static(b"must not arrive"),
+                        },
+                    )
+                    .await
+            }
+        });
+        for _ in 0..200 {
+            if started.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            started.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            "the dial never started"
+        );
+
+        // 成员在拨号中途被移除（连接 owner 的 `forget` 即调用这一入口），随后拨号放行。
+        connections.close_device(&target, b"forgotten");
+        open_tx.send(true).expect("open the dial gate");
+
+        let report = tokio::time::timeout(Duration::from_secs(10), sending)
+            .await
+            .expect("dispatch settles")
+            .expect("dispatch task joins");
+        assert!(report.outcome.is_err(), "a removed member was sent to");
+        assert_eq!(
+            frames.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the removed member received the frame"
+        );
         peer_router.shutdown().await.expect("router shutdown");
     }
 
