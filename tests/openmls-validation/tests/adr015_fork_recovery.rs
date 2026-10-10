@@ -80,6 +80,7 @@ fn export_secret(group: &MlsGroup, provider: &OpenMlsRustCrypto) -> Result<Vec<u
             b"",
             32,
         )
+        .map(|secret| secret.as_slice().to_vec())
         .map_err(|_| ())
 }
 
@@ -400,6 +401,7 @@ fn chained_offline_removal_converges_on_the_executor() {
             b"",
             32,
         )
+        .map(|secret| secret.as_slice().to_vec())
         .unwrap();
     assert_ne!(alice_secret, bob_fork_secret);
 }
@@ -682,6 +684,7 @@ fn recovery_is_deterministic_regardless_of_delivery_order() {
             b"",
             32,
         )
+        .map(|secret| secret.as_slice().to_vec())
         .unwrap();
     let bob_fork_secret = bob_group
         .export_secret(
@@ -690,6 +693,7 @@ fn recovery_is_deterministic_regardless_of_delivery_order() {
             b"",
             32,
         )
+        .map(|secret| secret.as_slice().to_vec())
         .unwrap();
 
     // 执行者 A 通过恢复资料重建统一状态（这里 B 重新加入）。

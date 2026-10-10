@@ -38,9 +38,9 @@ pub use handle_complete::{
 pub use resolve_invitation::{ResolveJoinerInvitationError, ResolveJoinerInvitationPort};
 pub use start_join::{
     JoinerStartMaterial, JoinerStartMaterialError, JoinerStartMaterialPort, JoinerStartMutation,
-    JoinerStartStateError, JoinerStartStatePort, LoadedJoinerStartState,
-    PrepareJoinerInvitationError, PrepareJoinerInvitationPort, PreparedJoinerInvitation,
-    SpaceAdmissionCommitToken,
+    JoinerStartStateError, JoinerStartStatePort, JoinerTransportMaterial,
+    JoinerTransportMaterialPort, LoadedJoinerStartState, PrepareJoinerInvitationError,
+    PrepareJoinerInvitationPort, PreparedJoinerInvitation, SpaceAdmissionCommitToken,
 };
 
 pub(crate) struct JoinerAdmissionService {

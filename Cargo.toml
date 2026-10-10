@@ -33,6 +33,14 @@ resolver = "2"
 version = "1.1.0-rc.22"
 license = "Apache-2.0"
 
+# 生产与验证共用不可变上游密码依赖；下游消费 Engine 时同样生效。
+[workspace.dependencies]
+openmls = { git = "https://github.com/openmls/openmls", rev = "e0b21a70a55a9014b8de2772b36bf3d638adad51", features = ["fork-resolution"] }
+openmls_basic_credential = { git = "https://github.com/openmls/openmls", rev = "e0b21a70a55a9014b8de2772b36bf3d638adad51" }
+openmls_memory_storage = { git = "https://github.com/openmls/openmls", rev = "e0b21a70a55a9014b8de2772b36bf3d638adad51", features = ["test-utils"] }
+openmls_rust_crypto = { git = "https://github.com/openmls/openmls", rev = "e0b21a70a55a9014b8de2772b36bf3d638adad51" }
+openmls_traits = { git = "https://github.com/openmls/openmls", rev = "e0b21a70a55a9014b8de2772b36bf3d638adad51" }
+
 [workspace.lints.clippy]
 unwrap_used = "warn"
 expect_used = "warn"

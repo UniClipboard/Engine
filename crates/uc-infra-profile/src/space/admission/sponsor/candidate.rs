@@ -8,14 +8,15 @@ use uc_application::deps::{
     CurrentMemberSignaturePort, PrepareSponsorAdmissionSecurityPort, PrepareSponsorCandidateError,
     PrepareSponsorCandidatePort, PreparedMemberSecurityDelivery, PreparedSponsorCandidate,
     SponsorAdmissionSecurityRecipient, SponsorAdmissionSecurityRequest,
+    SponsorContinuationRoutePort,
 };
 use uc_core::ids::{DeviceId, SpaceId};
 #[cfg(test)]
 use uc_core::membership::MembershipOperationV2;
 use uc_core::membership::{
-    AdmissionCandidateV1, AdmissionContinuationRoute, AdmissionMlsCommit, AdmissionMlsWelcome,
-    AdmissionRole, AdmissionStagedSecurityState, HistoricalMembershipSignatureVerifier,
-    SpaceAdmissionBodyV1, SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SponsorCandidatePreparation,
+    AdmissionCandidateV1, AdmissionMlsCommit, AdmissionMlsWelcome, AdmissionRole,
+    AdmissionStagedSecurityState, HistoricalMembershipSignatureVerifier, SpaceAdmissionBodyV1,
+    SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SponsorCandidatePreparation,
     VersionedMembershipHistory,
 };
 use uc_observability_contract::diagnostics::connectivity::{observe_local_result, LocalWorkStep};
@@ -25,18 +26,20 @@ use crate::space::admission::recovery_material::seal_recovery_material;
 
 const SPONSOR_CANDIDATE_STAGED_FORMAT_V1: u16 = 1;
 
+/// 一次完成 Sponsor 候选、安全材料与当前继续路由的准备。
 pub struct DefaultSponsorCandidatePreparation {
     local_device_id: DeviceId,
-    continuation_route: Vec<u8>,
+    continuation_route: Arc<dyn SponsorContinuationRoutePort>,
     signatures: Arc<dyn CurrentMemberSignaturePort>,
     history_verifier: Arc<dyn HistoricalMembershipSignatureVerifier>,
     security: Arc<dyn PrepareSponsorAdmissionSecurityPort>,
 }
 
 impl DefaultSponsorCandidatePreparation {
+    /// 注入当前继续路由能力；候选生成与安全材料仍由本 adapter 负责。
     pub fn new(
         local_device_id: DeviceId,
-        continuation_route: Vec<u8>,
+        continuation_route: Arc<dyn SponsorContinuationRoutePort>,
         signatures: Arc<dyn CurrentMemberSignaturePort>,
         history_verifier: Arc<dyn HistoricalMembershipSignatureVerifier>,
         security: Arc<dyn PrepareSponsorAdmissionSecurityPort>,
@@ -64,6 +67,7 @@ pub(in crate::space::admission) struct SponsorCandidateStagedV1 {
 
 #[async_trait]
 impl PrepareSponsorCandidatePort for DefaultSponsorCandidatePreparation {
+    /// 在安全材料准备后生成当前路由，再固定完整 Candidate。
     async fn prepare(
         &self,
         admission_id: SpaceAdmissionId,
@@ -238,6 +242,8 @@ impl PrepareSponsorCandidatePort for DefaultSponsorCandidatePreparation {
                 })?;
             // Candidate 是发给 Joiner 的公开协议材料：基础历史、已签名事件、MLS
             // Commit/Welcome 和后续路由。它不包含 Sponsor 尚未提交的私有 MLS 状态。
+            // 路由在 Candidate 生成时采样，不复用会话组装时尚未就绪的地址。
+            let continuation_route = self.continuation_route.prepare()?;
             let candidate = AdmissionCandidateV1::new(
                 uc_core::membership::AdmissionSignedMembershipHistory::from_bytes(
                     snapshot.membership_history,
@@ -253,9 +259,7 @@ impl PrepareSponsorCandidatePort for DefaultSponsorCandidatePreparation {
                 AdmissionMlsWelcome::from_bytes(security.welcome).map_err(|error| {
                     PrepareSponsorCandidateError::invalid(anyhow::Error::new(error))
                 })?,
-                AdmissionContinuationRoute::from_bytes(self.continuation_route.clone()).map_err(
-                    |error| PrepareSponsorCandidateError::invalid(anyhow::Error::new(error)),
-                )?,
+                continuation_route,
             )
             .map_err(|error| PrepareSponsorCandidateError::invalid(anyhow::Error::new(error)))?;
             let candidate_reply = SpaceAdmissionEnvelopeV1::reply_to(
@@ -313,6 +317,7 @@ impl PrepareSponsorCandidatePort for DefaultSponsorCandidatePreparation {
     }
 }
 
+/// 生成有效的随机候选消息标识。
 fn mint_message_id() -> uc_core::membership::AdmissionMessageId {
     loop {
         let mut bytes = [0u8; 32];
@@ -329,6 +334,7 @@ mod tests {
         AdmissionSecurityTransitionError, CurrentMemberSignatureError, PrepareSponsorCommitPort,
         PrepareSponsorCompletePort, SponsorPreparedAdmissionSecurity,
     };
+    use uc_core::membership::AdmissionContinuationRoute;
     use uc_core::membership::{
         AdmissionActivationReceipt, AdmissionAppliedV1, AdmissionBaseSnapshot,
         AdmissionChangeFacts, AdmissionChannelPeerId, AdmissionContentKeyCatalogV1,
@@ -419,6 +425,16 @@ mod tests {
         }
     }
 
+    struct FixedContinuationRoute;
+
+    impl SponsorContinuationRoutePort for FixedContinuationRoute {
+        /// 提供已有 fixture 使用的固定继续路由。
+        fn prepare(&self) -> Result<AdmissionContinuationRoute, PrepareSponsorCandidateError> {
+            AdmissionContinuationRoute::from_bytes(b"continuation-route".to_vec())
+                .map_err(PrepareSponsorCandidateError::invalid)
+        }
+    }
+
     struct FixedSecurity;
 
     #[async_trait]
@@ -476,6 +492,7 @@ mod tests {
         }
     }
 
+    /// 验证已有完整候选流程，包括后续提交和完成。
     #[tokio::test]
     async fn production_sponsor_candidate_prepares_one_complete_reply() {
         let sponsor_device = DeviceId::new("sponsor-device");
@@ -526,7 +543,7 @@ mod tests {
         .into_replacement();
         let adapter = DefaultSponsorCandidatePreparation::new(
             sponsor_device,
-            b"continuation-route".to_vec(),
+            Arc::new(FixedContinuationRoute),
             signatures.clone(),
             signatures.clone(),
             Arc::new(FixedSecurity),

@@ -1,6 +1,6 @@
 use super::model::{
-    JoinerStartMaterial, JoinerStartMutation, LoadedJoinerStartState, PreparedJoinerInvitation,
-    SpaceAdmissionCommitToken,
+    JoinerStartMaterial, JoinerStartMutation, JoinerTransportMaterial, LoadedJoinerStartState,
+    PreparedJoinerInvitation, SpaceAdmissionCommitToken,
 };
 use uc_core::error_class::ErrorClass;
 
@@ -171,4 +171,10 @@ pub trait JoinerStartStatePort: Send + Sync {
         token: SpaceAdmissionCommitToken,
         mutation: JoinerStartMutation,
     ) -> Result<(), JoinerStartStateError>;
+}
+
+/// 在签名前取得同一快照的完整传输材料，不暴露网络库类型。
+pub trait JoinerTransportMaterialPort: Send + Sync {
+    /// 每次调用采样当前地址；失败保留底层 source。
+    fn prepare(&self) -> Result<JoinerTransportMaterial, JoinerStartMaterialError>;
 }

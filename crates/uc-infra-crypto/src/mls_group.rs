@@ -1022,7 +1022,8 @@ fn export_external_recovery_wrapping_key(
     let bytes = group
         .export_secret(provider.crypto(), EXPORT_LABEL, b"", 32)
         .map_err(|source| recovery_protocol(anyhow::Error::new(source)))?;
-    MasterKey::from_bytes(&bytes).map_err(|source| recovery_protocol(anyhow::Error::new(source)))
+    MasterKey::from_bytes(bytes.as_slice())
+        .map_err(|source| recovery_protocol(anyhow::Error::new(source)))
 }
 
 fn domain_digest(domain: &[u8], value: &[u8]) -> [u8; 32] {
@@ -1112,7 +1113,7 @@ fn export_wrapping_key(
     let bytes = group
         .export_secret(provider.crypto(), EXPORT_LABEL, b"", 32)
         .map_err(MlsGroupError::protocol_from)?;
-    MasterKey::from_bytes(&bytes).map_err(MlsGroupError::protocol_from)
+    MasterKey::from_bytes(bytes.as_slice()).map_err(MlsGroupError::protocol_from)
 }
 
 #[cfg(test)]

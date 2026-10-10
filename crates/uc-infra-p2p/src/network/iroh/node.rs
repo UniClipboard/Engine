@@ -37,7 +37,7 @@ use super::session_generation::{
 use iroh::address_lookup::AddrFilter;
 use iroh::endpoint::{presets, QuicTransportConfig, VarInt};
 use iroh::protocol::Router;
-use iroh::{Endpoint, EndpointAddr, RelayConfig, RelayMode, RelayUrl, TransportAddr};
+use iroh::{Endpoint, RelayConfig, RelayMode, RelayUrl, TransportAddr};
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 use noq_proto::congestion::{Bbr3Config, CubicConfig};
 use tracing::instrument;
@@ -79,6 +79,7 @@ use super::active_clipboard::{
     ACTIVE_CLIPBOARD_PULL_ALPN,
 };
 use super::addr_filter::{apply_addr_filter, enumerate_local_lan_v4};
+use super::admission_transport_material::IrohAdmissionTransportMaterial;
 use super::blobs::{IrohBlobTransferAdapter, BLOBS_ALPN};
 #[cfg(test)]
 use super::clipboard_dispatch_adapter::LEGACY_CLIPBOARD_ALPN;
@@ -750,18 +751,15 @@ impl IrohSessionBuilder {
         Box::pin(hints)
     }
 
-    /// 返回当前节点将写入准入候选资料的认证传输身份与地址。
-    pub fn local_endpoint_addr(&self) -> EndpointAddr {
-        self.context.endpoint.addr()
-    }
-
-    /// 返回成员投影可直接保存的认证传输地址编码。
-    pub fn local_endpoint_addr_blob(&self) -> Result<Vec<u8>, IrohNodeError> {
-        postcard::to_stdvec(&self.context.endpoint.addr()).map_err(|source| {
-            IrohNodeError::AdmissionInstall {
-                source: anyhow::Error::new(source),
-            }
-        })
+    /// 提供当前准入材料能力，具体 Endpoint 留在 Iroh adapter 内部。
+    pub fn admission_transport_material(
+        &self,
+        fingerprints: Arc<dyn IdentityFingerprintFactoryPort>,
+    ) -> Arc<IrohAdmissionTransportMaterial> {
+        Arc::new(IrohAdmissionTransportMaterial::new(
+            Arc::clone(&self.context.endpoint),
+            fingerprints,
+        ))
     }
 
     fn install_session_handler<I, A>(

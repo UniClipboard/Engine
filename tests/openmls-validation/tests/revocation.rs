@@ -151,11 +151,13 @@ fn removed_member_cannot_use_the_new_epoch() {
 
     let old_secret = charlie_group
         .export_secret(charlie_provider.crypto(), "content-key", b"", 32)
+        .map(|secret| secret.as_slice().to_vec())
         .unwrap();
     assert_eq!(
         old_secret,
         alice_group
             .export_secret(alice_provider.crypto(), "content-key", b"", 32)
+            .map(|secret| secret.as_slice().to_vec())
             .unwrap()
     );
 
@@ -169,15 +171,18 @@ fn removed_member_cannot_use_the_new_epoch() {
 
     let alice_new_secret = alice_group
         .export_secret(alice_provider.crypto(), "content-key", b"", 32)
+        .map(|secret| secret.as_slice().to_vec())
         .unwrap();
     let bob_new_secret = bob_group
         .export_secret(bob_provider.crypto(), "content-key", b"", 32)
+        .map(|secret| secret.as_slice().to_vec())
         .unwrap();
     assert_eq!(alice_new_secret, bob_new_secret);
     assert_ne!(old_secret, alice_new_secret);
     assert!(!charlie_group.is_active());
     assert!(charlie_group
         .export_secret(charlie_provider.crypto(), "content-key", b"", 32)
+        .map(|secret| secret.as_slice().to_vec())
         .is_err());
 
     let new_message = alice_group
@@ -198,6 +203,7 @@ fn removed_member_cannot_use_the_new_epoch() {
     assert_eq!(
         restored
             .export_secret(alice_provider.crypto(), "content-key", b"", 32)
+            .map(|secret| secret.as_slice().to_vec())
             .unwrap(),
         bob_new_secret
     );
@@ -295,9 +301,11 @@ fn retained_offline_member_catches_up_in_epoch_order() {
     assert_eq!(
         alice_group
             .export_secret(alice_provider.crypto(), "content-key", b"", 32)
+            .map(|secret| secret.as_slice().to_vec())
             .unwrap(),
         bob_group
             .export_secret(bob_provider.crypto(), "content-key", b"", 32)
+            .map(|secret| secret.as_slice().to_vec())
             .unwrap()
     );
 }
@@ -376,9 +384,11 @@ fn new_member_can_relay_the_sponsors_commit_to_an_offline_existing_member() {
     assert_eq!(
         alice_group
             .export_secret(alice_provider.crypto(), "content-key", b"", 32)
+            .map(|secret| secret.as_slice().to_vec())
             .unwrap(),
         charlie_group
             .export_secret(charlie_provider.crypto(), "content-key", b"", 32)
+            .map(|secret| secret.as_slice().to_vec())
             .unwrap()
     );
 }
@@ -434,6 +444,7 @@ fn a_gapped_commit_cannot_be_applied_directly() {
     alice_group.merge_pending_commit(&alice_provider).unwrap();
     let epoch_two_secret = alice_group
         .export_secret(alice_provider.crypto(), "content-key", b"", 32)
+        .map(|secret| secret.as_slice().to_vec())
         .unwrap();
     let later_commit = alice_group
         .self_update(
@@ -470,6 +481,7 @@ fn a_gapped_commit_cannot_be_applied_directly() {
         epoch_two_secret,
         bob_group
             .export_secret(bob_provider.crypto(), "content-key", b"", 32)
+            .map(|secret| secret.as_slice().to_vec())
             .unwrap()
     );
 }
@@ -581,17 +593,20 @@ fn concurrent_membership_fork_recovers_to_one_group() {
 
     let alice_secret = alice_group
         .export_secret(alice_provider.crypto(), "content-key", b"", 32)
+        .map(|secret| secret.as_slice().to_vec())
         .unwrap();
     assert_eq!(
         alice_secret,
         bob_group
             .export_secret(bob_provider.crypto(), "content-key", b"", 32)
+            .map(|secret| secret.as_slice().to_vec())
             .unwrap()
     );
     assert_eq!(
         alice_secret,
         charlie_group
             .export_secret(charlie_provider.crypto(), "content-key", b"", 32)
+            .map(|secret| secret.as_slice().to_vec())
             .unwrap()
     );
 }
@@ -614,6 +629,7 @@ fn group_state_survives_a_cold_storage_round_trip() {
     let group_id = group.group_id().clone();
     let expected_secret = group
         .export_secret(provider.crypto(), "content-key", b"", 32)
+        .map(|secret| secret.as_slice().to_vec())
         .unwrap();
 
     let mut snapshot = Vec::new();
@@ -634,6 +650,7 @@ fn group_state_survives_a_cold_storage_round_trip() {
     assert_eq!(
         restored_group
             .export_secret(restarted_provider.crypto(), "content-key", b"", 32)
+            .map(|secret| secret.as_slice().to_vec())
             .unwrap(),
         expected_secret
     );

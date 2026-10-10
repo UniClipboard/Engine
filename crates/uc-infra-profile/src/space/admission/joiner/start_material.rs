@@ -5,6 +5,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use uc_application::deps::{
     JoinerStartMaterial, JoinerStartMaterialError, JoinerStartMaterialPort,
+    JoinerTransportMaterialPort,
 };
 use uc_application::facade::JoinSpaceInput;
 use uc_core::crypto::domain::Passphrase;
@@ -18,7 +19,6 @@ use uc_core::membership::{
 };
 use uc_core::pairing::InvitationCode;
 use uc_core::ports::SettingsPort;
-use uc_core::security::IdentityFingerprint;
 use uc_observability_contract::diagnostics::connectivity::{observe_local_result, LocalWorkStep};
 use uc_sync_protocol::full_invitation::decode_invitation_entry;
 use x25519_dalek::{PublicKey as RecoveryPublicKey, StaticSecret as RecoverySecret};
@@ -28,29 +28,24 @@ use uc_infra_crypto::mls_group::MlsGroupEngine;
 
 const JOINER_PRIVATE_STATE_FORMAT_V2: u16 = 2;
 
-/// Infra owns the complete, one-shot construction of a Joiner's initial admission material.
+/// Infra 一次性生成 Joiner 准入材料，并在签名前采样当前传输地址。
 pub struct DefaultJoinerStartMaterial {
     device_id: DeviceId,
     settings: Arc<dyn SettingsPort>,
-    identity_fingerprint: IdentityFingerprint,
-    transport_public_key: Vec<u8>,
-    transport_address_blob: Vec<u8>,
+    transport_material: Arc<dyn JoinerTransportMaterialPort>,
 }
 
 impl DefaultJoinerStartMaterial {
+    /// 注入当前材料采样能力；完整准入材料仍由本 adapter 生成。
     pub fn new(
         device_id: DeviceId,
         settings: Arc<dyn SettingsPort>,
-        identity_fingerprint: IdentityFingerprint,
-        transport_public_key: Vec<u8>,
-        transport_address_blob: Vec<u8>,
+        transport_material: Arc<dyn JoinerTransportMaterialPort>,
     ) -> Self {
         Self {
             device_id,
             settings,
-            identity_fingerprint,
-            transport_public_key,
-            transport_address_blob,
+            transport_material,
         }
     }
 }
@@ -64,6 +59,7 @@ pub(super) struct JoinerPrivateStateV1<'a> {
 }
 
 impl DefaultJoinerStartMaterial {
+    /// 在签名前取得当前材料；恢复调用使用已解析的准入标识。
     async fn create_with_ids(
         &self,
         input: &JoinSpaceInput,
@@ -119,13 +115,15 @@ impl DefaultJoinerStartMaterial {
             };
             let credential =
                 MembershipCredential::new(ED25519_SIGNATURE_ALGORITHM_V1, signing_public_key);
+            // 同一次快照提供身份公钥和当前地址；签名后由准入恢复流程重放原材料。
+            let transport = self.transport_material.prepare()?;
             let mut identity_facts = AdmissionChangeFacts {
                 member_instance: credential.member_instance_id(&self.device_id),
                 device_id: self.device_id.clone(),
                 device_name,
-                identity_fingerprint: self.identity_fingerprint.clone(),
-                transport_public_key: self.transport_public_key.clone(),
-                transport_address_blob: self.transport_address_blob.clone(),
+                identity_fingerprint: transport.identity_fingerprint,
+                transport_public_key: transport.transport_public_key,
+                transport_address_blob: transport.transport_address_blob,
                 identity_signature: Vec::new(),
             };
             let identity_signature = MlsGroupEngine::sign_pending_member_payload(
@@ -212,6 +210,7 @@ impl JoinerStartMaterialPort for DefaultJoinerStartMaterial {
             .await
     }
 
+    /// 为已解析邀请生成签名材料，沿用已有准入标识。
     async fn create_resolved(
         &self,
         admission_id: SpaceAdmissionId,
@@ -236,6 +235,7 @@ impl JoinerStartMaterialPort for DefaultJoinerStartMaterial {
     }
 }
 
+/// 保留邀请携带的路由并通过领域校验。
 fn preserve_admission_route(
     encoded_route: &[u8],
 ) -> Result<SpaceAdmissionRoute, JoinerStartMaterialError> {
@@ -243,6 +243,7 @@ fn preserve_admission_route(
         .map_err(JoinerStartMaterialError::invalid_invitation_from)
 }
 
+/// 生成有效的随机准入标识。
 fn mint_admission_id() -> SpaceAdmissionId {
     loop {
         let mut bytes = [0u8; 32];
@@ -253,6 +254,7 @@ fn mint_admission_id() -> SpaceAdmissionId {
     }
 }
 
+/// 生成有效的随机加入标识。
 fn mint_join_id() -> JoinId {
     loop {
         let mut bytes = [0u8; 16];
@@ -263,6 +265,7 @@ fn mint_join_id() -> JoinId {
     }
 }
 
+/// 生成有效的随机消息标识。
 fn mint_message_id() -> AdmissionMessageId {
     loop {
         let mut bytes = [0u8; 32];
@@ -277,13 +280,16 @@ fn mint_message_id() -> AdmissionMessageId {
 mod tests {
 
     use async_trait::async_trait;
+    use uc_application::deps::JoinerTransportMaterial;
     use uc_core::crypto::domain::Passphrase;
     use uc_core::pairing::InvitationCode;
+    use uc_core::security::IdentityFingerprint;
     use uc_core::settings::model::Settings;
 
     use super::*;
     use uc_sync_protocol::full_invitation::encode_full_invitation;
 
+    /// 验证完整邀请生成完整准入材料。
     #[tokio::test]
     async fn complete_joiner_start_material_is_created_from_a_full_invitation() {
         let invitation_id = uc_core::membership::InvitationId::from_bytes([0x61; 32])
@@ -307,6 +313,7 @@ mod tests {
         assert_eq!(preserved.as_bytes(), encoded_route);
     }
 
+    /// 验证非法邀请保持原有错误分类与来源。
     #[tokio::test]
     async fn invalid_full_invitation_is_rejected_without_a_dependency_error() {
         let adapter = adapter();
@@ -333,17 +340,31 @@ mod tests {
             .is_some());
     }
 
+    /// 为已有材料测试提供确定性的传输材料。
     fn adapter() -> DefaultJoinerStartMaterial {
         let mut settings = Settings::default();
         settings.general.device_name = Some("Joining device".to_owned());
         DefaultJoinerStartMaterial::new(
             DeviceId::new("joining-device"),
             Arc::new(FixedSettings(settings)),
-            IdentityFingerprint::from_display_string("ABCD-EFGH-IJKL-MNOP")
-                .expect("valid fingerprint fixture"),
-            vec![0x71; 32],
-            vec![0x72; 32],
+            Arc::new(FixedTransportMaterial),
         )
+    }
+
+    struct FixedTransportMaterial;
+
+    impl JoinerTransportMaterialPort for FixedTransportMaterial {
+        /// 提供已有 fixture 使用的固定传输身份与地址。
+        fn prepare(&self) -> Result<JoinerTransportMaterial, JoinerStartMaterialError> {
+            Ok(JoinerTransportMaterial {
+                identity_fingerprint: IdentityFingerprint::from_display_string(
+                    "ABCD-EFGH-IJKL-MNOP",
+                )
+                .expect("valid fingerprint"),
+                transport_public_key: vec![0x11; 32],
+                transport_address_blob: vec![0x12; 32],
+            })
+        }
     }
 
     struct FixedSettings(Settings);

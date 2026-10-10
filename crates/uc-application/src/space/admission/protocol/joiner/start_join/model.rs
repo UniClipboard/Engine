@@ -3,6 +3,7 @@ use uc_core::membership::{
     AdmissionShortInvitationCode, AdmissionSourceSnapshot, JoinId, JoinerAdmission,
     JoinerAdmissionTransition, SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionRoute,
 };
+use uc_core::security::IdentityFingerprint;
 
 pub enum PreparedJoinerInvitation {
     Full,
@@ -28,6 +29,13 @@ impl PreparedJoinerInvitation {
             short_code,
         }
     }
+}
+
+/// 同一次当前地址采样得到的 Joiner 传输身份与地址材料。
+pub struct JoinerTransportMaterial {
+    pub identity_fingerprint: IdentityFingerprint,
+    pub transport_public_key: Vec<u8>,
+    pub transport_address_blob: Vec<u8>,
 }
 
 pub struct JoinerStartMaterial {

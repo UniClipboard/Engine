@@ -40,6 +40,9 @@ const nudgeCommand = options.get('--nudge-command') ?? 'send'
 // 隔离 iroh 层：relay 启动后只发一次网络恢复请求，并记录双方与 relay 建立 TCP 连接的耗时。
 const singleNudge = options.get('--single-nudge') === '1'
 const tcpProbe = singleNudge || options.get('--tcp-probe') === '1'
+// E15 升级验收：配对后将 Sponsor 的真实独立进程换成修订宿主，沿用原加密 profile。
+const restartBinary = options.get('--restart-host')
+assert(!restartBinary || only === 'E15-pairing-current-address')
 const peerBinary = options.get('--peer-host')
 const peerSide = Number(options.get('--peer-side') ?? 1)
 assert(!peerBinary || mode !== 'legacy')
@@ -109,9 +112,9 @@ class Host {
     this.commands = []
   }
   async start() {
-    const selected = mode === 'legacy' && this.label === String.fromCharCode(65 + legacySide)
+    const selected = this.binaryOverride ?? (mode === 'legacy' && this.label === String.fromCharCode(65 + legacySide)
       ? resolve(legacyBinary)
-      : peerBinary && this.label === String.fromCharCode(65 + peerSide) ? resolve(peerBinary) : binary
+      : peerBinary && this.label === String.fromCharCode(65 + peerSide) ? resolve(peerBinary) : binary)
     this.child = spawn('ip', ['netns', 'exec', this.namespace, selected], { stdio: ['pipe', 'pipe', 'pipe'] })
     this.child.stderr.resume()
     createInterface({ input: this.child.stdout }).on('line', line => {
@@ -191,8 +194,9 @@ async function until(predicate, milliseconds, description) {
   }
 }
 
-async function paired(group) {
-  const created = await group[0].call('create', { name: group[0].label })
+/** 完成独立进程配对，可复用延迟 Relay 前已创建的 Space。 */
+async function paired(group, existingSpace) {
+  const created = existingSpace ?? await group[0].call('create', { name: group[0].label })
   group[0].id = created.device
   for (const node of group.slice(1)) {
     const invitation = await group[0].call('invite')
@@ -724,6 +728,71 @@ async function stopRelay() {
   for (const relay of relays) await terminateRelay(relay)
 }
 
+/** 读取当前节点的本地诊断工件，用于核对地址采样时间。 */
+function localDiagnostics(node) {
+  return readdirSync(join(node.root, 'logs'))
+    .filter(name => /^engine\..*\.jsonl$/.test(name))
+    .flatMap(name => readFileSync(join(node.root, 'logs', name), 'utf8').split('\n').filter(Boolean).map(JSON.parse))
+}
+
+// 在同一真实 Relay-only 拓扑中，先组装双方会话，再让 Relay 就绪并实际配对。
+// 首次持久地址与每次准入路由都必须已经含 Relay，不能依赖后来学习到的地址掩盖快照。
+/** 验证延迟 Relay 后的签名地址材料与完整进程重建后的双向同步。 */
+async function pairingCurrentAddressScenario(a, b) {
+  await scenario('E15-pairing-current-address', async () => {
+    const proof = records.at(-1).proof = { bidirectional_baseline: false, bidirectional_after_restart: false }
+    await stopRelay()
+    for (const node of nodes) {
+      await node.reset()
+      await node.call('relay_config', { url: `http://10.233.0.1:${relayPorts[nodes.indexOf(node)]}` })
+      await node.stop()
+      await node.start()
+    }
+    const created = await a.call('create', { name: a.label })
+    await delay(5000)
+    for (const node of nodes) await node.call('flush')
+    proof.startup_without_relay = nodes.every(node => localDiagnostics(node).some(row => row.fields?.['event.name'] === 'address.publish_requested' && row.fields.relay_count === 0))
+    assert(proof.startup_without_relay, 'delayed-relay startup precondition was not observed')
+    await startRelay()
+    await until(async () => {
+      for (const node of nodes) await node.call('flush')
+      return nodes.every(node => localDiagnostics(node).some(row => row.fields?.['event.name'] === 'relay.status.observed' && row.fields.connected_count > 0))
+    }, 35_000, 'delayed relay did not become ready before pairing')
+    proof.relay_ready_before_pairing = true
+    const pairingStartedAt = Date.now()
+    await paired(nodes, created)
+    for (const node of nodes) await node.call('flush')
+    const addressCounts = row => ({ direct_count: row.fields.direct_count, relay_count: row.fields.relay_count, other_count: row.fields.other_count })
+    const stored = localDiagnostics(a).find(row => row.fields?.['event.name'] === 'address.loaded' && Date.parse(row.timestamp) >= pairingStartedAt)
+    const routes = localDiagnostics(b).filter(row => row.fields?.['event.name'] === 'address.used' && row.fields.source === 'admission_route' && Date.parse(row.timestamp) >= pairingStartedAt)
+    proof.joiner_initial_stored_address = stored ? addressCounts(stored) : null
+    proof.sponsor_admission_routes = routes.map(addressCounts)
+    await transfer(a, b, 'pairing-current-address-baseline')
+    proof.bidirectional_baseline = true
+    const endpointBefore = await a.call('network_endpoint')
+    await a.stop()
+    if (restartBinary) {
+      a.binaryOverride = resolve(restartBinary)
+      proof.sponsor_upgraded_at_restart = true
+    }
+    await a.start()
+    await a.call('unlock')
+    proof.restarted_endpoint_identity_preserved = JSON.stringify(endpointBefore) === JSON.stringify(await a.call('network_endpoint'))
+    assert(proof.restarted_endpoint_identity_preserved, 'endpoint identity changed across process restart')
+    await online(nodes, 25_000)
+    await transfer(a, b, 'pairing-current-address-restart')
+    proof.bidirectional_after_restart = true
+    for (const node of nodes) await node.call('flush')
+    const connections = localDiagnostics(a).filter(row => row.fields?.['event.name'] === 'connection.established')
+    proof.relay_connection_count = connections.filter(row => row.fields.initial_path === 'relay').length
+    proof.direct_connection_count = connections.filter(row => row.fields.initial_path === 'direct').length
+    assert(proof.relay_connection_count > 0 && proof.direct_connection_count === 0, 'pairing address scenario did not stay relay-only')
+    assert(stored && stored.fields.relay_count > 0, 'Joiner pairing persisted a startup address without the ready relay')
+    assert(routes.length >= 2 && routes.every(row => row.fields.relay_count > 0), 'Sponsor continuation route reused a startup address without the ready relay')
+    return proof
+  })
+}
+
 function blockDirect(node) {
   nft(node, 'add', 'table', 'inet', 'uc_direct')
   nft(node, 'add', 'chain', 'inet', 'uc_direct', 'output', '{ type filter hook output priority -50; policy accept; }')
@@ -736,6 +805,7 @@ function blockDirect(node) {
   return dropped
 }
 
+/** 执行隔离 Relay 场景，保留网络故障和持久内容读回证据。 */
 async function relayScenarios(a, b) {
   for (let iteration = 0; iteration < repeat; iteration++) {
     for (const node of nodes) { await node.drain(); node.events = [] }
@@ -825,6 +895,7 @@ async function relayScenarios(a, b) {
       assert(transferAt <= deadline, 'relay-only bidirectional recovery exceeded three seconds')
     })
   }
+  await pairingCurrentAddressScenario(a, b)
 }
 
 let failed = false
@@ -888,7 +959,7 @@ finally {
     for (const node of nodes) { try { cpSync(join(node.root, 'logs'), join(evidence, 'node-logs', `${mode}-${node.label}`), { recursive: true }) } catch {} }
   }
   rmSync(root, { recursive: true, force: true })
-  const binaries = [binary, legacyBinary, peerBinary, relayBinary, relayBinaryB].filter(Boolean).map(path => ({ sha256: createHash('sha256').update(readFileSync(path)).digest('hex') }))
+  const binaries = [binary, legacyBinary, peerBinary, relayBinary, relayBinaryB, restartBinary].filter(Boolean).map(path => ({ sha256: createHash('sha256').update(readFileSync(path)).digest('hex') }))
   if (!cleaned) failed = true
   const reproduction = `bash scripts/testing/run-connection-recovery-e2e.sh --suite network --repeat ${repeat} --mode ${mode}${only ? ` --case ${only}` : ''}`
   const timingCompletedAt = performance.now()

@@ -33,11 +33,11 @@ opaque-ke = { version = "=4.0.1", features = ["argon2", "ristretto255"] }
 # so `OsRng` only exists when some crate enables its `getrandom` feature; see
 # uc-infra-profile/Cargo.toml's matching comment for the full rationale.
 rand_opaque = { package = "rand", version = "0.8", default-features = false, features = ["getrandom"] }
-openmls = { version = "=0.9.0", features = ["fork-resolution"] }
-openmls_basic_credential = "=0.6.0"
-openmls_memory_storage = { version = "=0.6.0", features = ["test-utils"] }
-openmls_rust_crypto = "=0.6.0"
-openmls_traits = "=0.6.0"
+openmls.workspace = true
+openmls_basic_credential.workspace = true
+openmls_memory_storage.workspace = true
+openmls_rust_crypto.workspace = true
+openmls_traits.workspace = true
 uc-observability-contract = { path = "../uc-observability-contract" }
 
 [lints]
