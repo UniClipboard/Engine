@@ -27,7 +27,7 @@
 - 规则（只用记录与账本事实）：
   - `Accepted`、`Candidate`：不会写账本，直接关闭，无成员。
   - `Committed`、`Applied`：账本里没有候选事件则关闭，无成员；已有则关闭为 `Unconfirmed`；账本不可读则延期。
-- 证据由 `recover_pending/ports.rs` 的能力提供，语义是“这次准入的成员是否已经提交”，由 Engine 用成员所有者实现，不暴露账本历史。
+- 证据由 `AdmissionRecoveryService` 直接持有的成员所有者（`Arc<MembershipOwner>`，由 Application 装配注入）提供：`execute/legacy_sponsor.rs` 读取其视图，用 `history().contains_event_id(..)` 判断该次准入的候选事件是否已在账本中；账本不可读时延期，不新增 port，也不扩大 Engine 接口。
 
 ## 切片
 
