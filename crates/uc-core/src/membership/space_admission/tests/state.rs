@@ -9,3 +9,4 @@ include!("state/replay.rs");
 include!("state/helper.rs");
 include!("state/recovery.rs");
 include!("state/persistence.rs");
+include!("state/legacy_sponsor.rs");

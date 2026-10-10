@@ -178,6 +178,7 @@ pub enum SpaceAdmissionTerminalState {
     Rejected(SpaceAdmissionRejectedState),
     Terminated(SpaceAdmissionLocalJoinerTerminated),
     SponsorExpired(SpaceAdmissionSponsorExpired),
+    SponsorLegacyClosed(SpaceAdmissionSponsorLegacyClosed),
     RecoveryRequired(SpaceAdmissionRecoveryRequiredTerminal),
 }
 
@@ -268,6 +269,9 @@ impl std::fmt::Debug for SpaceAdmissionAggregate {
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::SponsorExpired(_)) => {
                 "Terminal::SponsorExpired"
             }
+            SpaceAdmissionRecordState::Terminal(
+                SpaceAdmissionTerminalState::SponsorLegacyClosed(_),
+            ) => "Terminal::SponsorLegacyClosed",
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::RecoveryRequired(
                 _,
             )) => "Terminal::RecoveryRequired",

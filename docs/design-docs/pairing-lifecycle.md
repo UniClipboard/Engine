@@ -107,7 +107,14 @@ flowchart TD
 
 图中的阶段集合不是“任意状态都能转换”：精确守卫以 Core 转换为准。特别是 `Active` 不在普通本机终止集合，
 正式提交后的 `Completed` 不因配对时钟到期回滚。
-没有 `attempt_timeline` 的旧 Sponsor 记录不会进入 `SponsorExpired`，需按收尾表中的恢复规则处理。`Superseded` 保留 `Initiated`、`Authenticated`、`Candidate` 子类；
+没有 `attempt_timeline` 的旧 Sponsor 记录不会进入 `SponsorExpired`：它没有期限，计时永远不会结束它，却仍然阻止所有新的准入。
+恢复流程按记录与成员账本事实把它收尾为 `Terminal.SponsorLegacyClosed`（不使用时间猜测，不删除记录，邀请占用保持已消费）：
+
+- `Accepted`、`Candidate` 不会写账本，直接关闭，无成员；
+- `Committed`、`Applied`：账本里没有该次准入的候选事件则关闭，无成员；已有则关闭并带 `Unconfirmed` 确认摘要，成员保留；
+- 账本暂不可读时保持原记录，下一轮恢复重新评估。
+
+`SponsorLegacyClosed` 不重用 `Completed` 或 `Rejected(Sponsor)`，因为二者都需要旧记录里不存在的真实回复证据。它以追加变体写入 V1 状态枚举，不新增记录版本。`Superseded` 保留 `Initiated`、`Authenticated`、`Candidate` 子类；
 取代按 `attempt_digest` 分流，而不是按是否有期限：
 
 - 无期限且无 digest 的旧记录，在 `Prepared`、`Committed`、`Applied`、`Activating` 或 `Cancelling` 时保存为 `Terminated`，原因是 `Cancelled`；

@@ -287,6 +287,84 @@ impl SpaceAdmissionAggregate {
         ))
     }
 
+    /// 早于尝试期限格式写入、至今没有期限的未终结邀请方记录。
+    pub(crate) const fn is_legacy_unbounded_sponsor(&self) -> bool {
+        self.attempt_timeline.is_none()
+            && matches!(self.state, SpaceAdmissionRecordState::Sponsor(_))
+    }
+
+    /// 旧记录可能已经写入成员账本时，返回需要核对的成员事实。
+    ///
+    /// `Accepted` 与 `Candidate` 从不写账本，返回 `None`；`Committed` 取自 Commit 回复里的候选事件，
+    /// `Applied` 取自激活回执。
+    pub(crate) fn legacy_sponsor_member_query(
+        &self,
+    ) -> Result<Option<LegacySponsorMemberQuery>, SpaceAdmissionAggregateError> {
+        if !self.is_legacy_unbounded_sponsor() {
+            return Ok(None);
+        }
+        match &self.state {
+            SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Committed(state)) => {
+                let SpaceAdmissionBodyV1::Commit(commit) =
+                    state.saved_reply.exact_reply_envelope().body()
+                else {
+                    return Err(SpaceAdmissionAggregateError::InvalidAbandonmentRequest);
+                };
+                let event = commit.exact_candidate().candidate_event();
+                let MembershipOperationV2::AddDevice { admission } = &event.operation else {
+                    return Err(SpaceAdmissionAggregateError::InvalidAbandonmentRequest);
+                };
+                Ok(Some(LegacySponsorMemberQuery {
+                    member_instance_id: admission.facts.member_instance,
+                    add_event_id: event.event_id(),
+                }))
+            }
+            SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Applied(state)) => {
+                Ok(Some(LegacySponsorMemberQuery {
+                    member_instance_id: state.activation_receipt.joiner_member_instance_id,
+                    add_event_id: state.activation_receipt.event_id,
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// 按成员账本的证据收尾旧格式邀请方记录；记录不属于这一类时不产生变化。
+    pub(crate) fn close_legacy_sponsor(
+        mut self,
+        membership: LegacySponsorMembership,
+    ) -> Result<Option<AdmissionTransition>, SpaceAdmissionAggregateError> {
+        if !self.is_legacy_unbounded_sponsor() {
+            return Ok(None);
+        }
+        let query = self.legacy_sponsor_member_query()?;
+        let confirmation = match (query, membership) {
+            // `Accepted` 与 `Candidate` 没有写过账本；账本里出现成员说明证据与记录矛盾。
+            (None, LegacySponsorMembership::Absent) => None,
+            (None, LegacySponsorMembership::Present) => {
+                return Err(SpaceAdmissionAggregateError::InvalidTransition);
+            }
+            (Some(_), LegacySponsorMembership::Absent) => None,
+            (Some(query), LegacySponsorMembership::Present) => {
+                Some(SponsorPairingConfirmationSummary {
+                    status: SponsorPairingConfirmationStatus::Unconfirmed,
+                    admission_id: self.admission_id,
+                    member_instance_id: query.member_instance_id,
+                    add_event_id: query.add_event_id,
+                })
+            }
+        };
+        self.record_version = self
+            .record_version
+            .checked_add(1)
+            .ok_or(SpaceAdmissionAggregateError::RecordVersionOverflow)?;
+        self.state =
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::SponsorLegacyClosed(
+                SpaceAdmissionSponsorLegacyClosed { confirmation },
+            ));
+        Ok(Some(AdmissionTransition::new(self, &[])))
+    }
+
     pub(crate) fn mark_sponsor_confirmation_unconfirmed(
         mut self,
         now_ms: i64,

@@ -1356,6 +1356,23 @@ impl PendingAdmissionRecoveryStatePort for RecordingSponsorState {
                 self.needs_attention.load(Ordering::SeqCst),
             ));
         };
+        if current.is_legacy_unbounded() {
+            let persisted = current
+                .encode_persisted()
+                .map_err(|_| PendingAdmissionRecoveryStateError::RecoveryRequired)?;
+            let reopened = SponsorAdmission::decode_persisted(&persisted)
+                .map_err(|_| PendingAdmissionRecoveryStateError::RecoveryRequired)?;
+            let token =
+                AdmissionRecoveryCommitToken::from_bytes([0xd1; 32]).expect("valid recovery token");
+            return Ok(LoadedAdmissionRecovery::new(
+                Vec::new(),
+                vec![LoadedSponsorDeadline::new(reopened, token)],
+                Vec::new(),
+                None,
+                false,
+                self.needs_attention.load(Ordering::SeqCst),
+            ));
+        }
         let is_abandonment = current.abandonment_cleanup().is_some_and(|cleanup| {
             !matches!(
                 cleanup,
@@ -2060,6 +2077,7 @@ impl SpaceAdmissionProtocolTestPair {
                     Arc::clone(&host_events),
                     clock.clone(),
                     Arc::new(UnusedSponsorPorts),
+                    joiner_members.owner.clone(),
                 ),
             ),
             sponsor: SpaceAdmissionProtocol::new(
@@ -2116,6 +2134,7 @@ impl SpaceAdmissionProtocolTestPair {
                     Arc::new(RecordingAdmissionRevocation {
                         events: Arc::clone(&events),
                     }),
+                    sponsor_members.owner.clone(),
                 ),
             ),
             state,

@@ -26,6 +26,7 @@ use uc_observability_contract::diagnostics::{
 };
 
 mod joiner_network;
+mod legacy_sponsor;
 
 #[derive(Clone, Copy)]
 enum RecoveryChannel {
@@ -177,6 +178,11 @@ impl AdmissionRecoveryService {
         }
         for loaded in sponsor_deadlines {
             let (aggregate, token) = loaded.into_parts();
+            if aggregate.is_legacy_unbounded() {
+                self.close_legacy_sponsor(aggregate, token, trigger, &mut report)
+                    .await;
+                continue;
+            }
             let transition = aggregate.terminate_if_expired(now_ms);
             match transition {
                 Ok(Some(transition)) => {

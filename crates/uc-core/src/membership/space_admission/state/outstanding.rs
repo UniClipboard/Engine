@@ -176,6 +176,8 @@ impl SpaceAdmissionAggregate {
                         obligations.push(AdmissionObligation::SponsorRevocation);
                     }
                 }
+                // 旧记录已经按证据收尾，不再欠任何工作；对端确认无法证实也不阻止新的准入。
+                SpaceAdmissionTerminalState::SponsorLegacyClosed(_) => {}
                 SpaceAdmissionTerminalState::RecoveryRequired(_) => {
                     obligations.push(AdmissionObligation::RecoveryRequired);
                 }

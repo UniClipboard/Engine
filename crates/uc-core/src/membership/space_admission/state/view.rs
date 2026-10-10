@@ -213,6 +213,9 @@ impl SpaceAdmissionAggregate {
             }
             SpaceAdmissionRecordState::Sponsor(_)
             | SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::SponsorExpired(_))
+            | SpaceAdmissionRecordState::Terminal(
+                SpaceAdmissionTerminalState::SponsorLegacyClosed(_),
+            )
             | SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Rejected(
                 SpaceAdmissionRejectedState::Sponsor(_),
             )) => Some(AdmissionRole::Sponsor),
@@ -253,6 +256,9 @@ impl SpaceAdmissionAggregate {
             SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Completed(state)) => {
                 state.confirmation
             }
+            SpaceAdmissionRecordState::Terminal(
+                SpaceAdmissionTerminalState::SponsorLegacyClosed(state),
+            ) => state.confirmation,
             _ => None,
         }
     }
@@ -654,9 +660,10 @@ impl SpaceAdmissionAggregate {
             | SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::Terminated(_)) => {
                 None
             }
-            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::SponsorExpired(_)) => {
-                None
-            }
+            SpaceAdmissionRecordState::Terminal(SpaceAdmissionTerminalState::SponsorExpired(_))
+            | SpaceAdmissionRecordState::Terminal(
+                SpaceAdmissionTerminalState::SponsorLegacyClosed(_),
+            ) => None,
         }
     }
 

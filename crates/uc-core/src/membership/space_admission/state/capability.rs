@@ -891,6 +891,47 @@ impl SponsorAdmission {
             .map(|transition| transition.map(SponsorAdmissionTransition::from_transition))
     }
 
+    /// 早于尝试期限格式写入、至今没有期限的未终结记录；恢复流程据此选择收尾。
+    pub const fn is_legacy_unbounded(&self) -> bool {
+        self.record.is_legacy_unbounded_sponsor()
+    }
+
+    /// 未终结记录所处的阶段；已经终结的记录没有阶段。
+    pub const fn stage(&self) -> Option<SponsorRecordStage> {
+        match &self.record.state {
+            SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Accepted(_)) => {
+                Some(SponsorRecordStage::Accepted)
+            }
+            SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Candidate(_)) => {
+                Some(SponsorRecordStage::Candidate)
+            }
+            SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Committed(_)) => {
+                Some(SponsorRecordStage::Committed)
+            }
+            SpaceAdmissionRecordState::Sponsor(SpaceAdmissionSponsorState::Applied(_)) => {
+                Some(SponsorRecordStage::Applied)
+            }
+            _ => None,
+        }
+    }
+
+    /// 需要向成员账本核对的这次准入的成员事实；`None` 表示这个状态从不写账本。
+    pub fn legacy_member_query(
+        &self,
+    ) -> Result<Option<LegacySponsorMemberQuery>, SpaceAdmissionAggregateError> {
+        self.record.legacy_sponsor_member_query()
+    }
+
+    /// 按成员账本的证据收尾旧记录；不属于旧格式未终结记录时不产生变化。
+    pub fn close_legacy(
+        self,
+        membership: LegacySponsorMembership,
+    ) -> Result<Option<SponsorAdmissionTransition>, SpaceAdmissionAggregateError> {
+        self.record
+            .close_legacy_sponsor(membership)
+            .map(|transition| transition.map(SponsorAdmissionTransition::from_transition))
+    }
+
     pub fn terminate_if_expired(
         self,
         now_ms: i64,

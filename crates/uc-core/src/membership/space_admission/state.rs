@@ -63,17 +63,18 @@ pub use outstanding::{AdmissionObligation, AdmissionOutstandingWork, AdmissionRe
 pub use persistence::SpaceAdmissionPersistenceError;
 pub(crate) use persistence::{decode_envelope_v1, encode_envelope_v1};
 pub use sponsor::{
-    SpaceAdmissionSponsorAccepted, SpaceAdmissionSponsorApplied, SpaceAdmissionSponsorCandidate,
-    SpaceAdmissionSponsorCommitted, SpaceAdmissionSponsorState, SponsorPairingConfirmationStatus,
-    SponsorPairingConfirmationSummary,
+    LegacySponsorMemberQuery, LegacySponsorMembership, SpaceAdmissionSponsorAccepted,
+    SpaceAdmissionSponsorApplied, SpaceAdmissionSponsorCandidate, SpaceAdmissionSponsorCommitted,
+    SpaceAdmissionSponsorState, SponsorPairingConfirmationStatus,
+    SponsorPairingConfirmationSummary, SponsorRecordStage,
 };
 pub use terminal::{
     AdmissionCleanupObligation, AdmissionCommitKnowledge, SpaceAdmissionActivePendingSettlement,
     SpaceAdmissionActiveSettled, SpaceAdmissionActiveState, SpaceAdmissionCompletedTerminal,
     SpaceAdmissionJoinerRejected, SpaceAdmissionLocalJoinerRejected,
     SpaceAdmissionLocalJoinerTerminated, SpaceAdmissionRecoveryRequiredTerminal,
-    SpaceAdmissionRejectedState, SpaceAdmissionSponsorExpired, SpaceAdmissionSponsorRejected,
-    SpaceAdmissionSupersededState, SpaceAdmissionSupersededTerminal,
+    SpaceAdmissionRejectedState, SpaceAdmissionSponsorExpired, SpaceAdmissionSponsorLegacyClosed,
+    SpaceAdmissionSponsorRejected, SpaceAdmissionSupersededState, SpaceAdmissionSupersededTerminal,
     SpaceAdmissionTerminationReason, SponsorAbandonmentCleanup,
 };
 pub use view::{

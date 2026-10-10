@@ -43,6 +43,47 @@ impl std::fmt::Debug for SponsorPairingConfirmationSummary {
     }
 }
 
+/// 恢复流程对旧格式邀请方记录核对成员账本的结论。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegacySponsorMembership {
+    /// 账本里没有这次准入的成员。
+    Absent,
+    /// 账本里已经有这次准入的成员。
+    Present,
+}
+
+/// 未终结邀请方记录所处的阶段，供恢复诊断区分旧记录停在哪里。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SponsorRecordStage {
+    Accepted,
+    Candidate,
+    Committed,
+    Applied,
+}
+
+/// 需要向成员账本核对的这次准入的成员事实。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct LegacySponsorMemberQuery {
+    pub(super) member_instance_id: MemberInstanceId,
+    pub(super) add_event_id: MembershipEventId,
+}
+
+impl LegacySponsorMemberQuery {
+    pub const fn member_instance_id(self) -> MemberInstanceId {
+        self.member_instance_id
+    }
+
+    pub const fn add_event_id(self) -> MembershipEventId {
+        self.add_event_id
+    }
+}
+
+impl std::fmt::Debug for LegacySponsorMemberQuery {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("LegacySponsorMemberQuery([REDACTED])")
+    }
+}
+
 #[derive(PartialEq, Eq)]
 pub struct SpaceAdmissionSponsorAccepted {
     pub(super) invitation_claim: AdmissionInvitationClaim,
