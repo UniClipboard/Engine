@@ -93,10 +93,28 @@ pub fn group_update_apply_verdict(error: &KeyEpochError) -> GroupUpdateVerdict {
                     | GroupUpdateAction::ApplySecurityUpdate
                     | GroupUpdateAction::ValidateUpdate
             );
-        } else if error.is::<std::io::Error>()
-            || error.is::<uc_observability_contract::diagnostics::connectivity::ClassifiedGroupUpdateStorageFailure>()
-        {
-            environmental = true;
+        } else if let Some(error) = error.downcast_ref::<std::io::Error>() {
+            environmental |= matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::Interrupted
+                    | std::io::ErrorKind::ResourceBusy
+                    | std::io::ErrorKind::StorageFull
+                    | std::io::ErrorKind::NotConnected
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+            );
+        } else if let Some(classified) = error.downcast_ref::<uc_observability_contract::diagnostics::connectivity::ClassifiedGroupUpdateStorageFailure>() {
+            // 数据库忙/锁等暂时失败在存储层只能归为 Unknown（不能从库错误正文推断），所以 Unknown 也算暂时；
+            // 约束、损坏、权限与缺失说明存储本身有待处理的问题，不当作稍后会好的暂时失败。
+            use uc_observability_contract::diagnostics::connectivity::GroupUpdateReason as Reason;
+            environmental |= matches!(
+                classified.reason,
+                Reason::Unavailable | Reason::Locked | Reason::Conflict | Reason::Unknown
+            );
         } else if let Some(error) = error.downcast_ref::<uc_core::crypto::EncryptionError>() {
             environmental |= matches!(
                 error,
