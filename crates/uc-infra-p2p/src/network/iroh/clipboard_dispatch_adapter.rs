@@ -1171,6 +1171,26 @@ mod tests {
     /// 拨号进行到一半时成员被移除：拨号即使随后成功，也不能把内容发给已移除的成员。
     #[tokio::test]
     async fn dial_finishing_after_member_removal_sends_nothing() {
+        dial_revoked_midway_sends_nothing(|connections, target| {
+            // 连接 owner 的 `forget` 即调用这一入口。
+            connections.close_device(target, b"forgotten");
+        })
+        .await;
+    }
+
+    /// 拨号进行到一半时暂停或离开 Space：同样不能发出内容。
+    #[tokio::test]
+    async fn dial_finishing_after_all_connections_closed_sends_nothing() {
+        dial_revoked_midway_sends_nothing(|connections, _| {
+            // 连接 owner 的 `disconnect_all` 即调用这一入口。
+            connections.close_all(b"space_left");
+        })
+        .await;
+    }
+
+    async fn dial_revoked_midway_sends_nothing(
+        revoke: impl FnOnce(&AdmittedConnections, &DeviceId),
+    ) {
         #[derive(Clone)]
         struct CountingAckHandler(Arc<std::sync::atomic::AtomicUsize>);
         impl std::fmt::Debug for CountingAckHandler {
@@ -1248,8 +1268,7 @@ mod tests {
             "the dial never started"
         );
 
-        // 成员在拨号中途被移除（连接 owner 的 `forget` 即调用这一入口），随后拨号放行。
-        connections.close_device(&target, b"forgotten");
+        revoke(&connections, &target);
         open_tx.send(true).expect("open the dial gate");
 
         let report = tokio::time::timeout(Duration::from_secs(10), sending)

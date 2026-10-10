@@ -123,7 +123,7 @@ Risk: 剩下的真实缺口是发现不可用（关闭公共发现、mDNS 不通
 Step 5（问题 5）：
 File: `clipboard_dispatch_adapter.rs` 的测试（用 `before_connect` 钩子计数并暂停拨号）。
 Change: 两条复现。（一）`failed_dispatch_makes_at_most_three_dial_attempts`：一次失败发送最多 3 次拨号尝试，基线通过，现状已满足。（二）`dial_finishing_after_member_removal_sends_nothing`：成员在拨号中途被移除，随后拨号成功，基线上内容仍被发给已移除的成员；这是真实缺陷。修复：登记表记录撤销次数，发送开始前取撤销快照，拨号完成后若期间发生过撤销则丢弃连接、不发送（返回既有的 Offline）。`close_device` 与 `close_all` 都会使进行中的拨号失效。
-Risk: 3 次只约束一次发送自己的尝试；`ConnectionRuntime` 之后的退避重试单独计数。暂停与关闭之后其他负责人不再拨号，这部分只有应用层既有测试覆盖，尚未在本分支补端到端案例。
+Risk: 3 次只约束一次发送自己的尝试；`ConnectionRuntime` 之后的退避重试单独计数。暂停与关闭之后 `ConnectionRuntime` 不再拨号，由应用层既有测试 `pause_stops_retries_and_resume_restarts_them`、`shutdown_cancels_work_and_rejects_late_opportunities`、`removed_target_cancels_in_flight_dial_without_late_online` 覆盖；暂停走 `clear()` → `disconnect_all` → `close_all`，由新增的 `dial_finishing_after_all_connections_closed_sends_nothing` 覆盖在途内容发送（去掉整体撤销计数时该测试失败）。成员变更由成员账本每次提交发出变更信号，`reconcile()` 随即执行 `forget` 并取消在途拨号，不等待 60 秒复查。
 
 Step 6：文档与交付检查
 Change: 回写稳定结论到相关 Design Doc；运行根 `AGENTS.md` 交付前检查；已通过项勾选，未执行项标“跳过”。
@@ -176,7 +176,7 @@ Implementation: 复用 `ConnectionRuntime` 的代际围栏。
 * [x] 问题 2：leader 被丢弃与无回执两个复现测试在基线上失败（`clipboard_dispatch_adapter.rs`）；修复后均返回。回执等待上限为 75 秒，由接收端 60 秒结算上限加余量得出；写帧阶段与拨号的超时预算仍待隔离网络实测，保留现状。
 * [x] 问题 3：已确定移出本分支，另开 [issue #170](https://github.com/UniClipboard/Engine/issues/170)。
 * [x] 问题 4：成员移除时删除地址记录已完成（基线失败后修复）；“网络变化时刷新存储地址”经复现测试在基线通过，判定不成立，不实施。发现不可用时的缺口留给 P2-1。
-* [ ] 问题 5：发送侧完成——一次失败的发送最多 3 次拨号尝试（基线已满足），移除发生在拨号中途时不再发送（基线失败后修复）。暂停与关闭之后不再有拨号尝试，尚未补端到端案例。
+* [x] 问题 5：发送侧完成——一次失败的发送最多 3 次拨号尝试（基线已满足），移除发生在拨号中途时不再发送（基线失败后修复）。暂停、关闭、移除之后不再有拨号尝试，由应用层测试与 `dial_finishing_after_*` 两个发送侧测试共同覆盖。
 * [ ] 既有成员恢复本机套件、`uc-infra-p2p` 全量测试与仓库交付门禁通过。
 * [ ] Linux 网络矩阵有 CI 证据，或明确保留未执行状态。
 * [ ] 实体设备切网、睡眠唤醒有双向内容证据，或明确保留未执行状态。
