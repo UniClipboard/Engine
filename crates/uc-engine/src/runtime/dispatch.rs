@@ -844,6 +844,18 @@ impl EngineRuntime for ProductionRuntime {
                     .clear_membership_history_failures();
                 Ok(DevOperationResult::MembershipHistoryFailuresCleared { remaining })
             }
+            DevOperation::SetGroupUpdateReceiveFault { fault } => {
+                self.joiner_final_confirmation_gate
+                    .space_work_control()
+                    .set_group_update_receive_fault(fault);
+                Ok(DevOperationResult::GroupUpdateReceiveFaultSet)
+            }
+            DevOperation::ArmGroupUpdateTamper { count } => {
+                self.joiner_final_confirmation_gate
+                    .space_work_control()
+                    .arm_group_update_tamper(count);
+                Ok(DevOperationResult::GroupUpdateTamperArmed)
+            }
             DevOperation::WaitForSpaceWorkEvent {
                 after_sequence,
                 kind,

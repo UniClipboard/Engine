@@ -64,7 +64,9 @@ pub use clipboard_dispatch_adapter::{IrohClipboardDispatchAdapter, CLIPBOARD_ALP
 pub use clipboard_receiver_adapter::{IrohClipboardReceiverAdapter, IrohClipboardReceiverHandler};
 pub(crate) use connect::connect_with_staggered_retry;
 pub use connection_channel_adapter::IrohConnectionChannelAdapter;
-pub use group_update_adapter::{IrohGroupUpdateAdapter, IrohGroupUpdateHandler, GROUP_UPDATE_ALPN};
+pub use group_update_adapter::{
+    IrohGroupUpdateAdapter, IrohGroupUpdateHandler, GROUP_UPDATE_ALPN, LEGACY_GROUP_UPDATE_ALPN,
+};
 pub use identity_store::{IrohIdentityStore, IDENTITY_STORE_KEY};
 pub use membership_branch_recovery_adapter::IrohMembershipBranchRecoveryChannel;
 pub use membership_history_exchange_adapter::{

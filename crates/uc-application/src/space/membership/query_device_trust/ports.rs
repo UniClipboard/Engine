@@ -3,7 +3,7 @@ use uc_core::ids::DeviceId;
 
 use super::{
     AdmissionDisplayStatus, DeviceTrustObservation, PairingConfirmationTarget,
-    QueryDeviceTrustError, SpaceDeviceUpdateStatus,
+    QueryDeviceTrustError, SecurityDeviceUpdates,
 };
 use crate::space::admission::CurrentJoinStatus;
 
@@ -17,9 +17,9 @@ pub trait LoadDeviceTrustObservationsPort: Send + Sync {
 
 #[async_trait]
 pub(crate) trait LoadSecurityDeviceUpdateStatusPort: Send + Sync {
-    async fn load_security_device_update_status(
+    async fn load_security_device_updates(
         &self,
-    ) -> Result<SpaceDeviceUpdateStatus, QueryDeviceTrustError>;
+    ) -> Result<SecurityDeviceUpdates, QueryDeviceTrustError>;
 }
 
 #[async_trait]

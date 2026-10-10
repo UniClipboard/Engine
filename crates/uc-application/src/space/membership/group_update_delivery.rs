@@ -8,16 +8,18 @@ use uc_observability_contract::{uc_debug, uc_warn};
 
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    GroupRevocationPort, GroupUpdateDeliveryStatus, GroupUpdateDispatchError,
-    GroupUpdateDispatchPort, KeyEpochError, PendingGroupUpdate,
+    GroupRevocationPort, GroupUpdateDeliveryCondition, GroupUpdateDeliveryStatus,
+    GroupUpdateDispatchError, GroupUpdateDispatchPort, GroupUpdateRecipientDelivery,
+    GroupUpdateRejection, KeyEpochError, PendingGroupUpdate,
 };
 use uc_core::ports::{ClockPort, HostEvent, MembershipHostEvent};
 
 use crate::support::host_event_bus::HostEventBus;
 
 use super::{
-    DeliverPendingGroupUpdatesPort, LoadSecurityDeviceUpdateStatusPort,
-    MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger, QueryDeviceTrustError,
+    DeliverPendingGroupUpdatesPort, DeviceGroupUpdate, DeviceGroupUpdateState,
+    LoadSecurityDeviceUpdateStatusPort, MembershipMaintenanceStepOutcome,
+    MembershipMaintenanceTrigger, QueryDeviceTrustError, SecurityDeviceUpdates,
     SpaceDeviceUpdateProblem, SpaceDeviceUpdateRecovery, SpaceDeviceUpdateStatus,
 };
 
@@ -45,15 +47,15 @@ pub(crate) struct DeliverPendingGroupUpdatesUseCase {
 
 #[async_trait::async_trait]
 impl LoadSecurityDeviceUpdateStatusPort for DeliverPendingGroupUpdatesUseCase {
-    async fn load_security_device_update_status(
+    async fn load_security_device_updates(
         &self,
-    ) -> Result<SpaceDeviceUpdateStatus, QueryDeviceTrustError> {
-        let status = self
+    ) -> Result<SecurityDeviceUpdates, QueryDeviceTrustError> {
+        let deliveries = self
             .store
-            .space_group_update_delivery_status()
+            .space_group_update_deliveries()
             .await
             .map_err(map_query_error)?;
-        Ok(match status {
+        let status = match GroupUpdateDeliveryStatus::summarize(&deliveries) {
             GroupUpdateDeliveryStatus::Completed => SpaceDeviceUpdateStatus::completed(),
             GroupUpdateDeliveryStatus::Pending { next_attempt_at_ms }
                 if next_attempt_at_ms > self.clock.now_ms() =>
@@ -65,8 +67,38 @@ impl LoadSecurityDeviceUpdateStatusPort for DeliverPendingGroupUpdatesUseCase {
                 SpaceDeviceUpdateProblem::DeviceSecurityUpdateRejected,
                 SpaceDeviceUpdateRecovery::ReviewDevices,
             ),
+        };
+        Ok(SecurityDeviceUpdates {
+            status,
+            devices: deliveries.iter().map(device_group_update).collect(),
         })
     }
+}
+
+fn device_group_update(delivery: &GroupUpdateRecipientDelivery) -> (DeviceId, DeviceGroupUpdate) {
+    let state = match delivery.condition {
+        GroupUpdateDeliveryCondition::NotAttempted | GroupUpdateDeliveryCondition::Unreachable => {
+            DeviceGroupUpdateState::Waiting
+        }
+        GroupUpdateDeliveryCondition::ReceiverUnavailable => {
+            DeviceGroupUpdateState::ReceiverUnavailable
+        }
+        GroupUpdateDeliveryCondition::Rejected(GroupUpdateRejection::Unclassified) => {
+            DeviceGroupUpdateState::RejectedUnclassified
+        }
+        GroupUpdateDeliveryCondition::Rejected(GroupUpdateRejection::ByReceiver) => {
+            DeviceGroupUpdateState::RejectedByReceiver
+        }
+    };
+    (
+        delivery.recipient,
+        DeviceGroupUpdate {
+            epoch: delivery.epoch,
+            state,
+            attempts: delivery.attempts,
+            next_attempt_at_ms: delivery.next_attempt_at_ms,
+        },
+    )
 }
 
 fn map_query_error(error: KeyEpochError) -> QueryDeviceTrustError {
@@ -168,9 +200,10 @@ impl DeliverPendingGroupUpdatesUseCase {
                 Ok(()) => LocalWorkOutcome::Ok,
                 Err(
                     GroupUpdateDispatchError::Offline { .. }
-                    | GroupUpdateDispatchError::Transport { .. },
+                    | GroupUpdateDispatchError::Transport { .. }
+                    | GroupUpdateDispatchError::ReceiverUnavailable,
                 ) => LocalWorkOutcome::Deferred,
-                Err(GroupUpdateDispatchError::Rejected) => LocalWorkOutcome::Rejected,
+                Err(GroupUpdateDispatchError::Rejected(_)) => LocalWorkOutcome::Rejected,
             });
             match dispatched {
                 Ok(()) => match self
@@ -184,17 +217,15 @@ impl DeliverPendingGroupUpdatesUseCase {
                 },
                 Err(
                     error @ (GroupUpdateDispatchError::Offline { .. }
-                    | GroupUpdateDispatchError::Transport { .. }),
+                    | GroupUpdateDispatchError::Transport { .. }
+                    | GroupUpdateDispatchError::ReceiverUnavailable),
                 ) => {
                     failures.push((update.update_id().to_owned(), error));
                     unavailable_peers.insert(*update.recipient());
                     outcome = MembershipMaintenanceStepOutcome::Deferred;
                 }
-                Err(GroupUpdateDispatchError::Rejected) => {
-                    failures.push((
-                        update.update_id().to_owned(),
-                        GroupUpdateDispatchError::Rejected,
-                    ));
+                Err(error @ GroupUpdateDispatchError::Rejected(_)) => {
+                    failures.push((update.update_id().to_owned(), error));
                     unavailable_peers.insert(*update.recipient());
                     if outcome != MembershipMaintenanceStepOutcome::Deferred {
                         outcome = MembershipMaintenanceStepOutcome::StableFailure;
@@ -390,10 +421,10 @@ mod tests {
             Ok(count)
         }
 
-        async fn space_group_update_delivery_status(
+        async fn space_group_update_deliveries(
             &self,
-        ) -> Result<GroupUpdateDeliveryStatus, KeyEpochError> {
-            Ok(GroupUpdateDeliveryStatus::Completed)
+        ) -> Result<Vec<GroupUpdateRecipientDelivery>, KeyEpochError> {
+            Ok(Vec::new())
         }
 
         async fn acknowledge_space_group_update(

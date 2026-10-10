@@ -4,10 +4,10 @@ use tempfile::{tempdir, TempDir};
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
     BeginRevocationOutcome, BootstrapId, ContentKeyId, GroupEpoch, GroupUpdateDeliveryStatus,
-    GroupUpdateDispatchError, LegacyBootstrapRecord, LegacyBootstrapRepositoryPort,
-    LegacyBootstrapStage, LegacyBootstrapStatus, PendingGroupUpdate, PreparedRevocationResolution,
-    RevocationId, RevocationOutboxMessage, RevocationRecord, RevocationRepositoryPort,
-    RevocationStage, RevocationStatus, SpaceKeyMaterial, SpaceKeyState,
+    GroupUpdateDispatchError, GroupUpdateRejection, LegacyBootstrapRecord,
+    LegacyBootstrapRepositoryPort, LegacyBootstrapStage, LegacyBootstrapStatus, PendingGroupUpdate,
+    PreparedRevocationResolution, RevocationId, RevocationOutboxMessage, RevocationRecord,
+    RevocationRepositoryPort, RevocationStage, RevocationStatus, SpaceKeyMaterial, SpaceKeyState,
     SpaceSecurityStateResetPort,
 };
 
@@ -381,7 +381,9 @@ async fn delivery_failures_survive_restart_without_rewriting_space_material() {
     repo.save_space_material(&material).await.unwrap();
 
     assert_eq!(
-        repo.group_update_delivery_status(&space_id).await.unwrap(),
+        GroupUpdateDeliveryStatus::summarize(
+            &repo.group_update_deliveries(&space_id).await.unwrap()
+        ),
         GroupUpdateDeliveryStatus::Pending {
             next_attempt_at_ms: 0
         }
@@ -423,7 +425,9 @@ async fn delivery_failures_survive_restart_without_rewriting_space_material() {
     };
     assert_eq!(before_failure, after_failure);
     assert_eq!(
-        repo.group_update_delivery_status(&space_id).await.unwrap(),
+        GroupUpdateDeliveryStatus::summarize(
+            &repo.group_update_deliveries(&space_id).await.unwrap()
+        ),
         GroupUpdateDeliveryStatus::Pending {
             next_attempt_at_ms: 0
         }
@@ -466,7 +470,9 @@ async fn delivery_status_exposes_the_persisted_retry_deadline() {
     .unwrap();
 
     assert_eq!(
-        repo.group_update_delivery_status(&space_id).await.unwrap(),
+        GroupUpdateDeliveryStatus::summarize(
+            &repo.group_update_deliveries(&space_id).await.unwrap()
+        ),
         GroupUpdateDeliveryStatus::Pending {
             next_attempt_at_ms: 30_100
         }
@@ -488,7 +494,7 @@ async fn rejected_delivery_stays_out_of_the_queue_after_unrelated_changes_and_re
         &space_id,
         &[(
             rejected.update_id().to_owned(),
-            GroupUpdateDispatchError::Rejected,
+            GroupUpdateDispatchError::Rejected(GroupUpdateRejection::Unclassified),
         )],
         100,
     )
@@ -496,7 +502,9 @@ async fn rejected_delivery_stays_out_of_the_queue_after_unrelated_changes_and_re
     .unwrap();
 
     assert_eq!(
-        repo.group_update_delivery_status(&space_id).await.unwrap(),
+        GroupUpdateDeliveryStatus::summarize(
+            &repo.group_update_deliveries(&space_id).await.unwrap()
+        ),
         GroupUpdateDeliveryStatus::Rejected
     );
 
@@ -1375,7 +1383,9 @@ async fn settled_update_disappears_from_the_delivery_index_and_status() {
         "结清后仍被当作待投递项"
     );
     assert_eq!(
-        repo.group_update_delivery_status(&space_id).await.unwrap(),
+        GroupUpdateDeliveryStatus::summarize(
+            &repo.group_update_deliveries(&space_id).await.unwrap()
+        ),
         GroupUpdateDeliveryStatus::Completed,
         "结清后设备更新状态仍未完成"
     );
@@ -1473,7 +1483,7 @@ async fn delivery_status_read_survives_concurrent_space_material_writes() {
         let space_id = space_id.clone();
         tokio::spawn(async move {
             for _ in 0..200 {
-                repo.group_update_delivery_status(&space_id).await?;
+                repo.group_update_deliveries(&space_id).await?;
             }
             Ok::<_, uc_core::membership::KeyEpochError>(())
         })

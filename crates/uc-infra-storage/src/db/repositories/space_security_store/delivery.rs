@@ -12,8 +12,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
-    GroupEpoch, GroupUpdateDeliveryStatus, KeyEpochError, PendingGroupUpdate, RevocationStage,
-    RevocationStatus,
+    GroupEpoch, GroupUpdateDeliveryCondition, GroupUpdateDispatchError,
+    GroupUpdateRecipientDelivery, GroupUpdateRejection, KeyEpochError, PendingGroupUpdate,
+    RevocationStage, RevocationStatus,
 };
 
 use super::encrypted_payload::{open, seal, space_lookup_token};
@@ -64,7 +65,59 @@ struct DeliveryState {
     payload_digest: [u8; 32],
     attempts: u32,
     next_attempt_ms: i64,
+    /// 粘性拒绝：只有收件人的确认才会清除；升级前写入的拒绝记录没有下面两个新字段。
     rejected: bool,
+    /// 拒绝来自新协议接收方的明确裁决；缺省（含升级前的拒绝记录）表示原因未知。
+    #[serde(default)]
+    rejected_by_receiver: bool,
+    /// 最近一次失败是已认证接收方的暂时不可用，而不是不可达。
+    #[serde(default)]
+    receiver_unavailable: bool,
+}
+
+impl DeliveryState {
+    fn condition(&self) -> GroupUpdateDeliveryCondition {
+        if self.rejected {
+            GroupUpdateDeliveryCondition::Rejected(if self.rejected_by_receiver {
+                GroupUpdateRejection::ByReceiver
+            } else {
+                GroupUpdateRejection::Unclassified
+            })
+        } else if self.attempts == 0 {
+            GroupUpdateDeliveryCondition::NotAttempted
+        } else if self.receiver_unavailable {
+            GroupUpdateDeliveryCondition::ReceiverUnavailable
+        } else {
+            GroupUpdateDeliveryCondition::Unreachable
+        }
+    }
+
+    /// 无原因拒绝只在收件人重新通过认证、且距上次评估已过退避时再评估一次。
+    fn due_for_reevaluation(&self, now_ms: i64, online_peer: Option<DeviceId>) -> bool {
+        self.rejected
+            && !self.rejected_by_receiver
+            && online_peer == Some(self.recipient)
+            && self.next_attempt_ms <= now_ms
+    }
+}
+
+/// 一次投递失败落库的类别；只保留调度需要的区别。
+#[derive(Clone, Copy)]
+pub(super) enum DeliveryFailure {
+    Unreachable,
+    ReceiverUnavailable,
+    Rejected(GroupUpdateRejection),
+}
+
+impl From<&GroupUpdateDispatchError> for DeliveryFailure {
+    fn from(error: &GroupUpdateDispatchError) -> Self {
+        match error {
+            GroupUpdateDispatchError::Offline { .. }
+            | GroupUpdateDispatchError::Transport { .. } => Self::Unreachable,
+            GroupUpdateDispatchError::ReceiverUnavailable => Self::ReceiverUnavailable,
+            GroupUpdateDispatchError::Rejected(rejection) => Self::Rejected(*rejection),
+        }
+    }
 }
 
 fn aad(kind: &str, token: &[u8]) -> Vec<u8> {
@@ -195,6 +248,8 @@ fn reconcile_source(
             attempts: 0,
             next_attempt_ms: 0,
             rejected: false,
+            rejected_by_receiver: false,
+            receiver_unavailable: false,
         };
         let metadata = seal(key, &state, &aad("state", &token))?;
         let payload = seal(key, &update, &aad("payload", &token))?;
@@ -217,30 +272,28 @@ fn reconcile_source(
 }
 
 impl<E: DbExecutor> DieselSpaceSecurityStore<E> {
-    pub(super) fn load_group_update_delivery_status_on(
+    /// 各收件人队首（最早 epoch）的未确认更新状况。
+    pub(super) fn load_group_update_deliveries_on(
         &self,
         conn: &mut SqliteConnection,
         key: &MasterKey,
         space_id: &SpaceId,
-    ) -> Result<GroupUpdateDeliveryStatus, KeyEpochError> {
+    ) -> Result<Vec<GroupUpdateRecipientDelivery>, KeyEpochError> {
         let scope = space_lookup_token(key, space_id)?;
         let mut states = read_states(conn, key, &scope)?;
         states.sort_by_key(|(_, state)| (state.epoch, state.next_attempt_ms));
         let mut recipients = HashSet::new();
-        let active = states
+        Ok(states
             .into_iter()
             .filter_map(|(_, state)| recipients.insert(state.recipient).then_some(state))
-            .collect::<Vec<_>>();
-        if active.iter().any(|state| state.rejected) {
-            return Ok(GroupUpdateDeliveryStatus::Rejected);
-        }
-        Ok(active
-            .into_iter()
-            .map(|state| state.next_attempt_ms)
-            .min()
-            .map_or(GroupUpdateDeliveryStatus::Completed, |next_attempt_at_ms| {
-                GroupUpdateDeliveryStatus::Pending { next_attempt_at_ms }
-            }))
+            .map(|state| GroupUpdateRecipientDelivery {
+                recipient: state.recipient,
+                epoch: state.epoch,
+                condition: state.condition(),
+                attempts: state.attempts,
+                next_attempt_at_ms: state.next_attempt_ms,
+            })
+            .collect())
     }
 
     pub(super) fn load_due_updates_on(
@@ -316,7 +369,12 @@ impl<E: DbExecutor> DieselSpaceSecurityStore<E> {
             for (token, state) in states {
                 // 同设备必须先完成前序，不能跳过等待或拒绝状态发送后序。
                 if held_peers.contains(&state.recipient) { continue; }
-                if state.rejected || (state.next_attempt_ms > now_ms && online_peer != Some(state.recipient)) {
+                let blocked = if state.rejected {
+                    !state.due_for_reevaluation(now_ms, online_peer)
+                } else {
+                    state.next_attempt_ms > now_ms && online_peer != Some(state.recipient)
+                };
+                if blocked {
                     held_peers.insert(state.recipient);
                     continue;
                 }
@@ -339,7 +397,7 @@ impl<E: DbExecutor> DieselSpaceSecurityStore<E> {
         conn: &mut SqliteConnection,
         key: &MasterKey,
         space_id: &SpaceId,
-        failures: &[(String, bool)],
+        failures: &[(String, DeliveryFailure)],
         now_ms: i64,
     ) -> Result<usize, KeyEpochError> {
         conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
@@ -349,12 +407,30 @@ impl<E: DbExecutor> DieselSpaceSecurityStore<E> {
                 if state.space_id != *space_id {
                     continue;
                 }
-                let Some((id, rejected)) = failures.iter().find(|(id, _)| *id == state.update_id)
+                let Some((id, failure)) = failures.iter().find(|(id, _)| *id == state.update_id)
                 else {
                     continue;
                 };
                 state.attempts = state.attempts.saturating_add(1);
-                state.rejected = *rejected;
+                match failure {
+                    DeliveryFailure::Rejected(rejection) => {
+                        state.rejected = true;
+                        state.rejected_by_receiver = *rejection == GroupUpdateRejection::ByReceiver;
+                        state.receiver_unavailable = false;
+                    }
+                    // 已认证接收方的最新说明取代更早的拒绝：此后按退避自动重试，直到得到确认或明确裁决。
+                    DeliveryFailure::ReceiverUnavailable => {
+                        state.rejected = false;
+                        state.rejected_by_receiver = false;
+                        state.receiver_unavailable = true;
+                    }
+                    // 不可达没有关于更新本身的新证据：已有拒绝保持原样，只有确认才能清除。
+                    DeliveryFailure::Unreachable => {
+                        if !state.rejected {
+                            state.receiver_unavailable = false;
+                        }
+                    }
+                }
                 let delay = 30_000_i64
                     .saturating_mul(1_i64 << state.attempts.saturating_sub(1).min(7))
                     .min(3_600_000);

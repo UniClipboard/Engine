@@ -74,11 +74,12 @@ pub use membership::{
     ResolveMembershipConflictInput, ResolveMembershipConflictResult,
 };
 pub use membership::{
-    DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership, DeviceTrustObservation,
-    DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState,
-    PairingConfirmationObservation, PairingConfirmationStatus, PairingConfirmationTarget,
-    PendingDeviceTrustChange, QueryDeviceTrustError, SpaceDeviceUpdatePhase,
-    SpaceDeviceUpdateProblem, SpaceDeviceUpdateRecovery, SpaceDeviceUpdateStatus,
+    DeviceGroupUpdate, DeviceGroupUpdateRecovery, DeviceGroupUpdateState, DeviceTrustDevice,
+    DeviceTrustImpact, DeviceTrustMembership, DeviceTrustObservation, DeviceTrustRelationship,
+    DeviceTrustStatus, DeviceTrustSyncState, PairingConfirmationObservation,
+    PairingConfirmationStatus, PairingConfirmationTarget, PendingDeviceTrustChange,
+    QueryDeviceTrustError, SpaceDeviceUpdatePhase, SpaceDeviceUpdateProblem,
+    SpaceDeviceUpdateRecovery, SpaceDeviceUpdateStatus,
 };
 pub use membership::{
     MembershipBranchRecoveryRecord, MembershipHistoryExchangeRecord, MembershipRecord,

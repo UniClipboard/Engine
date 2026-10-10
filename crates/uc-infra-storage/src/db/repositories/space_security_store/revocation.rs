@@ -3,15 +3,16 @@ use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Binary, Nullable, Text};
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
-    BeginRevocationOutcome, GroupUpdateDispatchError, KeyEpochError, PendingGroupUpdate,
-    PreparedRevocationResolution, RevocationId, RevocationRecord, RevocationRepositoryPort,
-    RevocationStage, RevocationStatus, SpaceKeyMaterial, SpaceSecurityStateResetError,
-    SpaceSecurityStateResetPort,
+    BeginRevocationOutcome, GroupUpdateDispatchError, GroupUpdateRecipientDelivery, KeyEpochError,
+    PendingGroupUpdate, PreparedRevocationResolution, RevocationId, RevocationRecord,
+    RevocationRepositoryPort, RevocationStage, RevocationStatus, SpaceKeyMaterial,
+    SpaceSecurityStateResetError, SpaceSecurityStateResetPort,
 };
 
 use crate::db::ports::DbExecutor;
 use uc_infra_security::MasterKey;
 
+use super::delivery::DeliveryFailure;
 use super::encrypted_payload::{open, seal, space_lookup_token};
 use super::space_material::{load_space_material_on, save_space_material_on};
 use super::{backend, epoch_to_i64, transaction_failure, DieselSpaceSecurityStore};
@@ -151,15 +152,10 @@ impl<E: DbExecutor + Clone + 'static> RevocationRepositoryPort for DieselSpaceSe
     ) -> Result<usize, KeyEpochError> {
         let key = self.session.get_master_key().map_err(backend)?;
         let space_id = space_id.clone();
-        // 持久化只区分是否被拒；投递错误本身及其来源仍由调用方持有。
+        // 持久化只保留投递结果类别；投递错误本身及其来源仍由调用方持有。
         let failures = failures
             .iter()
-            .map(|(update_id, error)| {
-                (
-                    update_id.clone(),
-                    matches!(error, GroupUpdateDispatchError::Rejected),
-                )
-            })
+            .map(|(update_id, error)| (update_id.clone(), DeliveryFailure::from(error)))
             .collect::<Vec<_>>();
         self.run_blocking(move |store| {
             store
@@ -172,15 +168,15 @@ impl<E: DbExecutor + Clone + 'static> RevocationRepositoryPort for DieselSpaceSe
         .await
     }
 
-    async fn group_update_delivery_status(
+    async fn group_update_deliveries(
         &self,
         space_id: &SpaceId,
-    ) -> Result<uc_core::membership::GroupUpdateDeliveryStatus, KeyEpochError> {
-        // 先复用投递读取维护同一份加密索引，再只读取其汇总状态。
+    ) -> Result<Vec<GroupUpdateRecipientDelivery>, KeyEpochError> {
+        // 先复用投递读取维护同一份加密索引，再只读取各收件人的队首状况。
         self.due_group_updates(space_id, i64::MIN, None).await?;
         let key = self.session.get_master_key().map_err(backend)?;
         self.executor
-            .run(|conn| Ok(self.load_group_update_delivery_status_on(conn, &key, space_id)?))
+            .run(|conn| Ok(self.load_group_update_deliveries_on(conn, &key, space_id)?))
             .map_err(transaction_failure)
     }
 

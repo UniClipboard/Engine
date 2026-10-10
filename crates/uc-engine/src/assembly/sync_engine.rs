@@ -18,8 +18,8 @@ use outbound_progress::OutboundProgressRuntime;
 use crate::assembly::deps::SyncEngineDeps;
 #[cfg(feature = "dev-tools")]
 use crate::dev::{
-    ControlledSpaceAdmissionTransport, GatedJoinerActivation, JoinerFinalConfirmationGate,
-    RecordedGroupUpdateDispatch, RecordedMembershipHistoryExchange,
+    ControlledSpaceAdmissionTransport, FaultableGroupUpdateReceiver, GatedJoinerActivation,
+    JoinerFinalConfirmationGate, RecordedGroupUpdateDispatch, RecordedMembershipHistoryExchange,
 };
 use uc_application::deps::{
     ApplicationClipboardAdapters, ApplicationNetworkAdapters, ApplicationNetworkBinding,
@@ -29,6 +29,8 @@ use uc_application::deps::{
 };
 use uc_application::facade::ApplicationAssembly;
 use uc_core::file_transfer::FileTransferCancellationReason;
+#[cfg(feature = "dev-tools")]
+use uc_core::membership::GroupRevocationPort;
 use uc_core::membership::{ContentExchangeGatePort, PeerAdmissionPort};
 use uc_core::ports::{
     ActiveClipboardDispatchPort, ActiveClipboardReceiverPort, ClipboardDispatchPort,
@@ -196,10 +198,16 @@ pub async fn prepare_sync_session(
         builder.install_connection_channel(Arc::clone(&space_setup.peer_addr_repo));
     let GroupUpdateHandlers {
         dispatch: group_update_dispatch,
-    } = builder.install_group_updates(
-        Arc::clone(&space_setup.peer_addr_repo),
-        Arc::clone(&space_setup.space_access.group_revocation),
-    )?;
+    } = builder.install_group_updates(Arc::clone(&space_setup.peer_addr_repo), {
+        #[cfg(feature = "dev-tools")]
+        let receiver: Arc<dyn GroupRevocationPort> = Arc::new(FaultableGroupUpdateReceiver::new(
+            Arc::clone(&space_setup.space_access.group_revocation),
+            joiner_final_confirmation_gate.space_work_control(),
+        ));
+        #[cfg(not(feature = "dev-tools"))]
+        let receiver = Arc::clone(&space_setup.space_access.group_revocation);
+        receiver
+    })?;
     // Slice 2 Phase 2 · T10:同一节点装第三个 ALPN(剪切板同步)。dispatch
     // 复用 endpoint + peer_addr_repo,与 peer_reachability 共享 NAT/relay 映射;
     // receiver handler 通过身份目录把 `Connection::remote_id()` 反查

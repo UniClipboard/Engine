@@ -86,7 +86,9 @@ use super::clipboard_dispatch_adapter::LEGACY_CLIPBOARD_ALPN;
 use super::clipboard_dispatch_adapter::{IrohClipboardDispatchAdapter, CLIPBOARD_ALPN};
 use super::clipboard_receiver_adapter::IrohClipboardReceiverAdapter;
 use super::connection_channel_adapter::IrohConnectionChannelAdapter;
-use super::group_update_adapter::{IrohGroupUpdateAdapter, GROUP_UPDATE_ALPN};
+use super::group_update_adapter::{
+    IrohGroupUpdateAdapter, GROUP_UPDATE_ALPN, LEGACY_GROUP_UPDATE_ALPN,
+};
 use super::identity_store::IrohIdentityStore;
 use super::inbound_peer::{PeerIdentityError, PeerIdentityResolver};
 use super::membership_branch_recovery_adapter::IrohMembershipBranchRecoveryHandler;
@@ -992,6 +994,7 @@ impl IrohNodeBuilder {
             LEGACY_PEER_REACHABILITY_ALPN,
             CLIPBOARD_ALPN,
             GROUP_UPDATE_ALPN,
+            LEGACY_GROUP_UPDATE_ALPN,
             MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
             MEMBERSHIP_BRANCH_RECOVERY_ALPN,
             ACTIVE_CLIPBOARD_ALPN,
@@ -1199,7 +1202,10 @@ impl IrohSessionBuilder {
             peer_addr_repo,
             group_revocation,
         ));
-        self.install_session_handler([GROUP_UPDATE_ALPN], adapter.handler())?;
+        self.install_session_handler(
+            [GROUP_UPDATE_ALPN, LEGACY_GROUP_UPDATE_ALPN],
+            adapter.handler(),
+        )?;
         Ok(GroupUpdateHandlers { dispatch: adapter })
     }
 

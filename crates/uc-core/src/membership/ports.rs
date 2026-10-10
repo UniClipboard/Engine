@@ -10,7 +10,7 @@ use super::error::{
 use super::member::SpaceMember;
 use super::membership_history::MembershipHistoryMessage;
 use super::revocation::{
-    GroupEpoch, GroupRevocationResult, GroupUpdateDeliveryStatus, KeyEpochError,
+    GroupEpoch, GroupRevocationResult, GroupUpdateRecipientDelivery, KeyEpochError,
     PendingGroupUpdate, PreparedRevocationResolution, RevocationId, RevocationRecord,
     RevocationStage, SpaceKeyMaterial,
 };
@@ -106,7 +106,8 @@ pub trait RevocationRepositoryPort: Send + Sync {
         space_id: &SpaceId,
     ) -> Result<Option<SpaceKeyMaterial>, KeyEpochError>;
 
-    /// 按到期时间读取投递任务；恢复机会只唤醒匹配设备，不能释放拒绝状态。
+    /// 按到期时间读取投递任务。恢复机会（`online_peer`）只唤醒该设备的退避；明确拒绝不会被释放，
+    /// 无原因拒绝仅在该设备重新通过认证且重新评估间隔已过时再次可投。
     async fn due_group_updates(
         &self,
         space_id: &SpaceId,
@@ -122,10 +123,10 @@ pub trait RevocationRepositoryPort: Send + Sync {
         now_ms: i64,
     ) -> Result<usize, KeyEpochError>;
 
-    async fn group_update_delivery_status(
+    async fn group_update_deliveries(
         &self,
         space_id: &SpaceId,
-    ) -> Result<GroupUpdateDeliveryStatus, KeyEpochError>;
+    ) -> Result<Vec<GroupUpdateRecipientDelivery>, KeyEpochError>;
 
     async fn begin_revocation(
         &self,
@@ -252,9 +253,9 @@ pub trait GroupRevocationPort: Send + Sync {
         now_ms: i64,
     ) -> Result<usize, KeyEpochError>;
 
-    async fn space_group_update_delivery_status(
+    async fn space_group_update_deliveries(
         &self,
-    ) -> Result<GroupUpdateDeliveryStatus, KeyEpochError>;
+    ) -> Result<Vec<GroupUpdateRecipientDelivery>, KeyEpochError>;
 
     async fn acknowledge_space_group_update(
         &self,

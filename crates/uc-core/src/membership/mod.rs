@@ -49,9 +49,9 @@ pub use cross_space_transition::{
     SAME_SPACE_TRANSITION_FORMAT_V1,
 };
 pub use error::{
-    CurrentMembershipIdentityError, GroupUpdateDispatchError, MembershipError,
-    MembershipHistoryExchangeError, MembershipInitializationError, RelationshipStateResetError,
-    SpaceSecurityStateResetError,
+    CurrentMembershipIdentityError, GroupUpdateDispatchError, GroupUpdateRejection,
+    MembershipError, MembershipHistoryExchangeError, MembershipInitializationError,
+    RelationshipStateResetError, SpaceSecurityStateResetError,
 };
 pub use ledger::{
     DepartingLink, DepartingLinkSnapshot, LedgerDeliveryKind, LedgerDeliveryResult,
@@ -102,10 +102,11 @@ pub use protection::{
 };
 pub use revocation::{
     AdmissionReplayId, ContentKeyId, ContentKeyPurpose, GroupEpoch, GroupRevocationResult,
-    GroupUpdateDeliveryStatus, KeyEpochError, KeyEpochStateIssue, PendingGroupUpdate,
-    PreparedRevocationResolution, ProtectionGroupAdmission, ProtectionGroupId, RevocationId,
-    RevocationOutboxMessage, RevocationRecord, RevocationStage, RevocationStatus, SpaceKeyMaterial,
-    SpaceKeyState, SpaceSecurityMode,
+    GroupUpdateDeliveryCondition, GroupUpdateDeliveryStatus, GroupUpdateRecipientDelivery,
+    KeyEpochError, KeyEpochStateIssue, PendingGroupUpdate, PreparedRevocationResolution,
+    ProtectionGroupAdmission, ProtectionGroupId, RevocationId, RevocationOutboxMessage,
+    RevocationRecord, RevocationStage, RevocationStatus, SpaceKeyMaterial, SpaceKeyState,
+    SpaceSecurityMode,
 };
 pub use settlement_window::{SettlementWindow, SettlementWindowState};
 pub use space_admission::{
