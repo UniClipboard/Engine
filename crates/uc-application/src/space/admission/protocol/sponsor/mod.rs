@@ -22,7 +22,7 @@ pub use handle_complete_ack::{
 };
 pub use handle_join_request::{
     AuthenticatedSpaceAdmissionMessage, PrepareSponsorCandidateError, PrepareSponsorCandidatePort,
-    PreparedSponsorCandidate, SpaceAdmissionMessageReply,
+    PreparedSponsorCandidate, SpaceAdmissionMessageReply, SponsorContinuationRoutePort,
 };
 pub use handle_prepared::{
     PrepareSponsorCommitError, PrepareSponsorCommitPort, PreparedSponsorCommit,

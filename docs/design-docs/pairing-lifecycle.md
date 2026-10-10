@@ -11,7 +11,7 @@ Core 只产生新记录与副作用清单；Application 执行能力并保存推
 
 Joiner 初始材料在身份事实签名前，从当前 Iroh endpoint 采样地址；身份公钥和地址来自同一次快照。
 Sponsor 在生成 Candidate 时从自身 endpoint 采样 continuation route。两者都不缓存会话组装时的地址，
-因此配对前才就绪的 Relay 可以进入协议材料。Engine 只提供同一 endpoint 依赖，不编排采样步骤。
+因此配对前才就绪的 Relay 可以进入协议材料。Engine 只注入动作专属材料 port，不编排采样步骤。Iroh Endpoint、地址快照和编码均封装在 P2P adapter 中；Profile 的完整材料能力只消费不透明传输材料。
 
 Relay 尚未就绪时使用当前已有地址，显式 LAN-only 不需等待 Relay；材料生成不新增无界等待。
 编码失败保留 source chain，由材料能力返回失败，不回落旧快照。签名或持久化后的材料保持不变，

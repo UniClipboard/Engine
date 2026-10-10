@@ -9,4 +9,4 @@ pub use error::PrepareSponsorCandidateError;
 pub use model::{
     AuthenticatedSpaceAdmissionMessage, PreparedSponsorCandidate, SpaceAdmissionMessageReply,
 };
-pub use ports::PrepareSponsorCandidatePort;
+pub use ports::{PrepareSponsorCandidatePort, SponsorContinuationRoutePort};

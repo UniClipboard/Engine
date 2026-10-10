@@ -256,7 +256,8 @@ pub async fn prepare_sync_session(
 
     // Application 先构造认证 endpoint；Space 持续维护要等 Router 就绪后
     // 才由 ApplicationRuntime 启动。
-    let endpoint = builder.local_endpoint();
+    let transport_material =
+        builder.admission_transport_material(Arc::clone(&space_setup.fingerprint));
     let historical_signatures = Arc::new(OpenMlsHistoricalSignatureVerifier);
     let membership_network_gate = MembershipNetworkGate::active();
     let admission_transport: Arc<dyn uc_application::deps::SpaceAdmissionTransportPort> =
@@ -295,8 +296,7 @@ pub async fn prepare_sync_session(
         joiner_start_material: Arc::new(DefaultJoinerStartMaterial::new(
             local_device_id,
             Arc::clone(&space_setup.settings),
-            Arc::clone(&space_setup.fingerprint),
-            Arc::clone(&endpoint),
+            transport_material.clone(),
         )),
         joiner_start_state: space_setup.admission_state.clone()
             as Arc<dyn uc_application::deps::JoinerStartStatePort>,
@@ -310,7 +310,7 @@ pub async fn prepare_sync_session(
             as Arc<dyn uc_application::deps::SponsorAdmissionStatePort>,
         prepare_sponsor_candidate: Arc::new(DefaultSponsorCandidatePreparation::new(
             local_device_id,
-            Arc::clone(&endpoint),
+            transport_material.clone(),
             Arc::clone(&space_setup.current_member_signatures),
             historical_signatures.clone(),
             Arc::clone(&space_setup.space_access.prepare_sponsor_admission_security),

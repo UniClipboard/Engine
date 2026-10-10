@@ -14,14 +14,14 @@ pub use joiner::{
     JoinerActivationStatePort, JoinerCancellationCommitToken, JoinerCancellationMaterial,
     JoinerCancellationMaterialError, JoinerCancellationMutation, JoinerCancellationStateError,
     JoinerMembershipStart, JoinerStartMaterial, JoinerStartMaterialError, JoinerStartMaterialPort,
-    JoinerStartMutation, JoinerStartStateError, JoinerStartStatePort, LoadedCurrentJoin,
-    LoadedJoinerActivation, LoadedJoinerStartState, PrepareJoinerActivationError,
-    PrepareJoinerActivationPort, PrepareJoinerAppliedError, PrepareJoinerAppliedPort,
-    PrepareJoinerCancellationPort, PrepareJoinerCandidateError, PrepareJoinerCandidatePort,
-    PrepareJoinerInvitationError, PrepareJoinerInvitationPort, PreparedJoinerActivation,
-    PreparedJoinerAppliedMaterial, PreparedJoinerCandidateMaterial, PreparedJoinerInvitation,
-    ResolveJoinerInvitationError, ResolveJoinerInvitationPort, SpaceAdmissionCommitToken,
-    ValidateJoinerActivationIntentPort,
+    JoinerStartMutation, JoinerStartStateError, JoinerStartStatePort, JoinerTransportMaterial,
+    JoinerTransportMaterialPort, LoadedCurrentJoin, LoadedJoinerActivation, LoadedJoinerStartState,
+    PrepareJoinerActivationError, PrepareJoinerActivationPort, PrepareJoinerAppliedError,
+    PrepareJoinerAppliedPort, PrepareJoinerCancellationPort, PrepareJoinerCandidateError,
+    PrepareJoinerCandidatePort, PrepareJoinerInvitationError, PrepareJoinerInvitationPort,
+    PreparedJoinerActivation, PreparedJoinerAppliedMaterial, PreparedJoinerCandidateMaterial,
+    PreparedJoinerInvitation, ResolveJoinerInvitationError, ResolveJoinerInvitationPort,
+    SpaceAdmissionCommitToken, ValidateJoinerActivationIntentPort,
 };
 pub(crate) use joiner::{JoinerAdmissionService, JoinerReplyHandlingOutcome};
 pub(crate) use protocol::SpaceAdmissionProtocol;
@@ -45,5 +45,5 @@ pub use sponsor::{
     PreparedSponsorCandidate, PreparedSponsorCommit, PreparedSponsorComplete,
     PreparedSponsorSettled, SpaceAdmissionMessageReply, SponsorAdmissionCommitToken,
     SponsorAdmissionMutation, SponsorAdmissionState, SponsorAdmissionStateError,
-    SponsorAdmissionStatePort,
+    SponsorAdmissionStatePort, SponsorContinuationRoutePort,
 };

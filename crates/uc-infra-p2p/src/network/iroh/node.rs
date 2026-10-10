@@ -79,6 +79,7 @@ use super::active_clipboard::{
     ACTIVE_CLIPBOARD_PULL_ALPN,
 };
 use super::addr_filter::{apply_addr_filter, enumerate_local_lan_v4};
+use super::admission_transport_material::IrohAdmissionTransportMaterial;
 use super::blobs::{IrohBlobTransferAdapter, BLOBS_ALPN};
 #[cfg(test)]
 use super::clipboard_dispatch_adapter::LEGACY_CLIPBOARD_ALPN;
@@ -750,9 +751,15 @@ impl IrohSessionBuilder {
         Box::pin(hints)
     }
 
-    /// 向材料 adapter 提供同一节点，让材料生成时读取当前地址。
-    pub fn local_endpoint(&self) -> Arc<Endpoint> {
-        Arc::clone(&self.context.endpoint)
+    /// 提供当前准入材料能力，具体 Endpoint 留在 Iroh adapter 内部。
+    pub fn admission_transport_material(
+        &self,
+        fingerprints: Arc<dyn IdentityFingerprintFactoryPort>,
+    ) -> Arc<IrohAdmissionTransportMaterial> {
+        Arc::new(IrohAdmissionTransportMaterial::new(
+            Arc::clone(&self.context.endpoint),
+            fingerprints,
+        ))
     }
 
     fn install_session_handler<I, A>(
