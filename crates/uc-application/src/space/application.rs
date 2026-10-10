@@ -290,6 +290,7 @@ impl SpaceApplication {
             Arc::clone(&owner) as Arc<dyn RetainedGroupUpdateRecipientsPort>,
             Arc::clone(&host_event_bus),
             Arc::clone(&clock),
+            peer_reachability_changed_events.resubscribe(),
         ));
         let query_device_trust = Arc::new(QueryDeviceTrustUseCase::new(
             Arc::clone(&owner),

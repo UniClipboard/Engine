@@ -310,9 +310,7 @@ impl SpaceMembershipMaintenanceRuntime {
                                 &maintain,
                                 &mut active_round,
                                 &mut queued_triggers,
-                                ScheduledRound::new(MembershipMaintenanceTrigger::PeerOnline(
-                                    event.device_id,
-                                )),
+                                ScheduledRound::new(MembershipMaintenanceTrigger::StateChanged),
                             );
                         }
                         Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
@@ -440,8 +438,7 @@ impl ScheduledRound {
             MembershipMaintenanceTrigger::Startup => RecoveryTrigger::Startup,
             MembershipMaintenanceTrigger::Resume => RecoveryTrigger::Resume,
             MembershipMaintenanceTrigger::Periodic => RecoveryTrigger::Periodic,
-            MembershipMaintenanceTrigger::StateChanged
-            | MembershipMaintenanceTrigger::PeerOnline(_) => RecoveryTrigger::StateChanged,
+            MembershipMaintenanceTrigger::StateChanged => RecoveryTrigger::StateChanged,
         };
         Self {
             trigger,

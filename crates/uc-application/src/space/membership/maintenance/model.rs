@@ -11,8 +11,6 @@ pub enum MembershipMaintenanceTrigger {
     Resume,
     Periodic,
     StateChanged,
-    /// 已认证并被当前空间接纳的成员设备刚刚上线；它是重新认证的证据，可加速发给它的待投递更新。
-    PeerOnline(DeviceId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

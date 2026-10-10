@@ -887,8 +887,7 @@ impl RecoverSpaceAdmissionsPort for SpaceAdmissionProtocol {
             MembershipMaintenanceTrigger::Startup => AdmissionRecoveryTrigger::Startup,
             MembershipMaintenanceTrigger::Resume => AdmissionRecoveryTrigger::Resume,
             MembershipMaintenanceTrigger::Periodic => AdmissionRecoveryTrigger::Periodic,
-            MembershipMaintenanceTrigger::StateChanged
-            | MembershipMaintenanceTrigger::PeerOnline(_) => AdmissionRecoveryTrigger::StateChanged,
+            MembershipMaintenanceTrigger::StateChanged => AdmissionRecoveryTrigger::StateChanged,
         };
         let report = self.recover_pending(trigger).await;
         let outcome = if report.recovery_required_count > 0 {

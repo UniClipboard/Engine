@@ -1,5 +1,7 @@
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
+
+use tokio::sync::broadcast;
 use uc_core::error_class::ErrorClass;
 use uc_observability_contract::diagnostics::connectivity::{
     record_pending_group_updates, LocalWorkObservation, LocalWorkOutcome, LocalWorkStep,
@@ -12,7 +14,9 @@ use uc_core::membership::{
     GroupUpdateDispatchError, GroupUpdateDispatchPort, GroupUpdateRecipientDelivery,
     GroupUpdateRejection, KeyEpochError, PendingGroupUpdate,
 };
-use uc_core::ports::{ClockPort, HostEvent, MembershipHostEvent};
+use uc_core::ports::{
+    ClockPort, HostEvent, MembershipHostEvent, PeerReachabilityChanged, ReachabilityState,
+};
 
 use crate::support::host_event_bus::HostEventBus;
 
@@ -43,6 +47,8 @@ pub(crate) struct DeliverPendingGroupUpdatesUseCase {
     recipients: Arc<dyn RetainedGroupUpdateRecipientsPort>,
     host_events: Arc<HostEventBus>,
     clock: Arc<dyn ClockPort>,
+    /// 构造时订阅的上线事件：对端通过准入重新上线是重新认证的证据，每轮取走自上一轮以来的事件。
+    peer_online: Mutex<broadcast::Receiver<PeerReachabilityChanged>>,
 }
 
 #[async_trait::async_trait]
@@ -120,6 +126,7 @@ impl DeliverPendingGroupUpdatesUseCase {
         recipients: Arc<dyn RetainedGroupUpdateRecipientsPort>,
         host_events: Arc<HostEventBus>,
         clock: Arc<dyn ClockPort>,
+        peer_online: broadcast::Receiver<PeerReachabilityChanged>,
     ) -> Self {
         Self {
             store,
@@ -127,6 +134,27 @@ impl DeliverPendingGroupUpdatesUseCase {
             recipients,
             host_events,
             clock,
+            peer_online: Mutex::new(peer_online),
+        }
+    }
+
+    /// 取走自上一轮以来重新上线的对端；事件积压溢出只丢失更早的证据，之后的上线事件仍会带来新证据。
+    fn take_online_peers(&self) -> Vec<DeviceId> {
+        let mut receiver = self
+            .peer_online
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut peers = Vec::new();
+        loop {
+            match receiver.try_recv() {
+                Ok(event) if event.state == ReachabilityState::Online => {
+                    peers.push(event.device_id)
+                }
+                Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) => {}
+                Err(
+                    broadcast::error::TryRecvError::Empty | broadcast::error::TryRecvError::Closed,
+                ) => return peers,
+            }
         }
     }
 
@@ -262,17 +290,17 @@ impl DeliverPendingGroupUpdatesPort for DeliverPendingGroupUpdatesUseCase {
     #[tracing::instrument(name = "usecase.deliver_pending_group_updates.deliver", skip_all)]
     async fn deliver_pending_group_updates(
         &self,
-        trigger: &MembershipMaintenanceTrigger,
+        _trigger: &MembershipMaintenanceTrigger,
         reachable_peers: &[DeviceId],
     ) -> MembershipMaintenanceStepOutcome {
         if let Err(outcome) = self.settle_obsolete_updates().await {
             return outcome;
         }
-        // 重新认证的证据：刚确认成员历史的对端，以及刚通过准入重新上线的对端。
+        // 重新认证的证据：刚确认成员历史的对端，以及上一轮以来通过准入重新上线的对端。
         let mut reauthenticated = reachable_peers.to_vec();
-        if let MembershipMaintenanceTrigger::PeerOnline(peer) = trigger {
-            if !reauthenticated.contains(peer) {
-                reauthenticated.push(*peer);
+        for peer in self.take_online_peers() {
+            if !reauthenticated.contains(&peer) {
+                reauthenticated.push(peer);
             }
         }
         let pending = match self.deliverable_updates(&reauthenticated).await {
@@ -523,6 +551,7 @@ mod tests {
             retaining(&["peer-still-member"]),
             bus,
             Arc::new(FixedClock),
+            broadcast::channel(1).1,
         );
 
         let outcome = use_case
@@ -553,6 +582,7 @@ mod tests {
             retaining(&["peer-a"]),
             bus,
             Arc::new(FixedClock),
+            broadcast::channel(1).1,
         );
 
         let outcome = use_case
@@ -589,6 +619,7 @@ mod tests {
             retaining(&["peer-returning", "peer-offline"]),
             bus,
             Arc::new(FixedClock),
+            broadcast::channel(1).1,
         );
 
         let waiting = use_case
@@ -623,6 +654,7 @@ mod tests {
             Arc::new(FixedRecipients(None)),
             bus,
             Arc::new(FixedClock),
+            broadcast::channel(1).1,
         );
 
         let outcome = use_case
@@ -678,6 +710,7 @@ mod tests {
             retaining_all(&store),
             refresh_events().0,
             Arc::new(FixedClock),
+            broadcast::channel(1).1,
         );
 
         let outcome = use_case
@@ -703,6 +736,7 @@ mod tests {
             retaining_all(&store),
             refresh_events().0,
             Arc::new(FixedClock),
+            broadcast::channel(1).1,
         );
 
         let outcome = use_case
@@ -734,6 +768,7 @@ mod tests {
             retaining_all(&store),
             refresh_events().0,
             Arc::new(FixedClock),
+            broadcast::channel(1).1,
         );
 
         let outcome = use_case
@@ -777,6 +812,7 @@ mod tests {
             retaining_all(&store),
             refresh_events().0,
             Arc::new(FixedClock),
+            broadcast::channel(1).1,
         );
 
         assert_eq!(
