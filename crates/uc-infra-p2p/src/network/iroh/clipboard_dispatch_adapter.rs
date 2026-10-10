@@ -48,7 +48,7 @@ use uc_observability_contract::diagnostics::{
 };
 use uc_observability_contract::{error_source::io_error_kind, uc_debug, uc_warn};
 
-use super::conn_path::{path_for, OnMissing};
+use super::conn_path::connection_channel;
 use super::connect::{connect_with_staggered_retry, StaggeredDialError};
 use super::peer_address_resolver::PeerAddressResolver;
 use super::trace_context::inject_current;
@@ -321,10 +321,6 @@ impl ClipboardDispatchPort for IrohClipboardDispatchAdapter {
                 }
             }
         };
-        // Keep the peer id to probe the actual path once the dial settles;
-        // `addr` itself is moved into the single-flight dial below.
-        let addr_id = addr.id;
-
         // 3. Dial via the per-peer single-flight slot so a concurrent
         //    dispatch storm against the same offline peer collapses to one
         //    staggered-retry batch + one `report_communication_failure`. Dial failure =
@@ -365,14 +361,10 @@ impl ClipboardDispatchPort for IrohClipboardDispatchAdapter {
         // 4. Write the frame + read the ack on a fresh bi-stream.
         let outcome = self.send_and_ack(&connection, header, &payload).await;
 
-        // 5. Probe the path that actually served this attempt while the
-        //    connection is still alive. Sampling right after the send/ack
-        //    settles reflects the route the frame took (direct vs relay);
-        //    `None` means the snapshot momentarily lags the just-settled
-        //    dial, reported as Unknown.
-        let transport = path_for(&self.endpoint, addr_id, OnMissing::Unknown)
-            .await
-            .channel;
+        // 5. Classify the path this connection selected while it is still
+        //    alive; the snapshot is taken after the send/ack settles and does
+        //    not prove the path stayed unchanged during the exchange.
+        let transport = connection_channel(&connection);
 
         // 6. Close the connection. Adapter owns the lifecycle — dropping
         //    here signals `Connection::closed` on the peer. The Q4

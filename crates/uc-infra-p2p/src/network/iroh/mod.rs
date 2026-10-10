@@ -7,6 +7,7 @@
 pub mod active_clipboard;
 mod addr_filter;
 mod admission_transport_material;
+pub(crate) mod admitted_connections;
 pub mod blobs;
 pub mod clipboard_dispatch_adapter;
 pub mod clipboard_receiver_adapter;

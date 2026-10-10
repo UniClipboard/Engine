@@ -42,7 +42,6 @@ use uc_observability_contract::{error_source::io_error_kind, uc_debug, uc_warn};
 use async_trait::async_trait;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
-use iroh::Endpoint;
 use tokio::sync::broadcast;
 use tracing::{instrument, Instrument};
 
@@ -60,7 +59,8 @@ use uc_observability_contract::diagnostics::{
     DiagnosticRole, DiagnosticSpanKind, OperationCompletion, OperationContext,
 };
 
-use super::conn_path::{path_for, OnMissing};
+use super::admitted_connections::AdmittedConnections;
+use super::conn_path::connection_channel;
 use super::inbound_peer::InboundPeerGate;
 use super::trace_context::set_remote_parent;
 use uc_sync_protocol::clipboard::{self as clipboard_wire, AckCode};
@@ -82,21 +82,35 @@ pub struct IrohClipboardReceiverAdapter {
 }
 
 struct HandlerState {
-    endpoint: Arc<Endpoint>,
+    connections: AdmittedConnections,
     gate: InboundPeerGate,
     event_tx: broadcast::Sender<ClipboardDelivery>,
 }
 
 impl IrohClipboardReceiverAdapter {
     pub fn new(
-        endpoint: Arc<Endpoint>,
         identities: Arc<dyn PeerIdentityDirectoryPort>,
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
     ) -> Self {
+        Self::with_connections(
+            identities,
+            peer_admission,
+            fingerprint_factory,
+            AdmittedConnections::default(),
+        )
+    }
+
+    /// 与会话内其他协议共享已授权连接登记，撤销成员时由登记统一关闭。
+    pub(crate) fn with_connections(
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
+        peer_admission: Arc<dyn PeerAdmissionPort>,
+        fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
+        connections: AdmittedConnections,
+    ) -> Self {
         let (event_tx, _) = broadcast::channel(INBOUND_CHANNEL_CAPACITY);
         let handler_state = Arc::new(HandlerState {
-            endpoint,
+            connections,
             gate: InboundPeerGate::new(
                 InboundPeerProtocol::Clipboard,
                 identities,
@@ -152,6 +166,11 @@ impl ProtocolHandler for IrohClipboardReceiverHandler {
         // 1. Resolve the remote endpoint's public key back to a known
         //    SpaceMember.
         let resolved = self.state.gate.identify(&remote_bytes).await;
+        // 先登记再授权：成员被移除时，登记会关闭这条仍在等待帧或应用结算的连接。
+        let _registration = resolved
+            .as_ref()
+            .ok()
+            .map(|device| self.state.connections.register(device, &connection));
 
         // 2. Open the bi-stream even for rejected peers — we still want to
         //    send a `Rejected` ack so the sender does not stall on its
@@ -243,9 +262,7 @@ impl ProtocolHandler for IrohClipboardReceiverHandler {
 
             // 认证后的任务通过原有广播交接；没有消费者时拒绝，绝不伪报保存成功。
             let (receipt, result) = InboundClipboardReceipt::pending();
-            let transport = path_for(&self.state.endpoint, remote, OnMissing::Unknown)
-                .await
-                .channel;
+            let transport = connection_channel(&connection);
             let inbound = InboundClipboard {
                 peer_device_id,
                 header: decoded.header,
@@ -597,7 +614,6 @@ mod tests {
         wait_for_direct_addrs(&receiver_endpoint).await;
 
         let adapter = IrohClipboardReceiverAdapter::new(
-            Arc::clone(&receiver_endpoint),
             crate::network::iroh::inbound_peer::member_table_directory(member_repo),
             Arc::new(crate::network::iroh::StaticPeerAdmission(admitted)),
             Arc::new(Sha256IdentityFingerprintFactory),
@@ -1050,6 +1066,79 @@ mod tests {
         }
         seen.sort();
         assert_eq!(seen, vec!["sender-0", "sender-1", "sender-2"]);
+
+        harness.receiver_router.shutdown().await.ok();
+    }
+
+    /// 一次真实投递的两端都报告该次连接 selected 的路径：回环上只有直连，
+    /// 发送报告与入站消息必须一致且为 Direct，且回执确认内容已被应用。
+    #[tokio::test]
+    async fn delivery_reports_the_connection_selected_path_on_both_sides() {
+        let sender_seed = [0x71u8; 32];
+        let receiver_seed = [0x72u8; 32];
+        let member_repo: Arc<dyn MemberRepositoryPort> = Arc::new(MemMemberRepo::default());
+        member_repo
+            .save(&make_member(sender_seed, "path-sender"))
+            .await
+            .unwrap();
+        let harness = spawn_receiver(receiver_seed, member_repo).await;
+        let receiver_addr = harness.receiver_endpoint.addr();
+
+        let sender_endpoint = bind_endpoint_with(sender_seed).await;
+        wait_for_direct_addrs(&sender_endpoint).await;
+        let peer_addr_repo = Arc::new(MemPeerAddrRepo::default());
+        peer_addr_repo
+            .upsert(&PeerAddressRecord {
+                device_id: DeviceId::new("path-receiver"),
+                addr_blob: postcard::to_stdvec(&receiver_addr).expect("encode EndpointAddr"),
+                observed_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+        let dispatch = IrohClipboardDispatchAdapter::new(
+            sender_endpoint,
+            peer_addr_repo,
+            peer_reachability_mock(),
+        );
+
+        let payload = Bytes::from(vec![0x5A; 64]);
+        let expected_payload = payload.clone();
+        let dispatch_task = tokio::spawn(async move {
+            dispatch
+                .dispatch(
+                    &DeviceId::new("path-receiver"),
+                    &sample_header(),
+                    SyncPayload {
+                        ciphertext: expected_payload,
+                    },
+                )
+                .await
+        });
+
+        let mut inbound_rx = harness.inbound_rx;
+        let inbound = tokio::time::timeout(Duration::from_secs(3), inbound_rx.recv())
+            .await
+            .expect("broadcast arrives within timeout")
+            .expect("subscriber sees the frame");
+        assert_eq!(inbound.message.ciphertext, payload);
+        assert_eq!(
+            inbound.message.transport,
+            uc_core::ports::connection_channel::ConnectionChannel::Direct
+        );
+        assert!(inbound
+            .message
+            .receipt
+            .finish(InboundClipboardDisposition::Applied));
+
+        let report = dispatch_task.await.expect("dispatch task joins");
+        assert_eq!(
+            report.outcome.expect("dispatch succeeds"),
+            uc_core::ports::DispatchAck::Accepted
+        );
+        assert_eq!(
+            report.transport,
+            uc_core::ports::connection_channel::ConnectionChannel::Direct
+        );
 
         harness.receiver_router.shutdown().await.ok();
     }

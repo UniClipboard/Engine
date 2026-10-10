@@ -44,6 +44,7 @@ use uc_observability_contract::{
     log_fields::log_id, uc_debug, uc_trace, uc_warn,
 };
 
+use super::admitted_connections::AdmittedConnections;
 use super::connect::{connect_with_staggered_retry, StaggeredDialError};
 use super::inbound_peer::InboundPeerGate;
 use super::peer_address_resolver::PeerAddressResolver;
@@ -92,6 +93,7 @@ pub struct IrohTransferProgressAdapter {
 }
 
 struct HandlerState {
+    connections: AdmittedConnections,
     gate: InboundPeerGate,
     event_tx: broadcast::Sender<InboundProgressEvent>,
 }
@@ -104,10 +106,30 @@ impl IrohTransferProgressAdapter {
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
     ) -> Self {
+        Self::with_connections(
+            endpoint,
+            peer_addr_repo,
+            identities,
+            peer_admission,
+            fingerprint_factory,
+            AdmittedConnections::default(),
+        )
+    }
+
+    /// 与会话内其他协议共享已授权连接登记，撤销成员时由登记统一关闭。
+    pub(crate) fn with_connections(
+        endpoint: Arc<Endpoint>,
+        peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
+        peer_admission: Arc<dyn PeerAdmissionPort>,
+        fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
+        connections: AdmittedConnections,
+    ) -> Self {
         let (event_tx, _) = broadcast::channel(PROGRESS_BROADCAST_CAPACITY);
         Self {
             event_tx: event_tx.clone(),
             handler_state: Arc::new(HandlerState {
+                connections,
                 gate: InboundPeerGate::new(
                     InboundPeerProtocol::TransferProgress,
                     identities,
@@ -167,13 +189,19 @@ impl ProtocolHandler for IrohTransferProgressHandler {
         // 1. Resolve remote identity. Unknown peer → drop the connection
         //    silently. We deliberately don't write any response (this is a
         //    push-only direction: receiver doesn't expect any data back).
-        let from_device = match self.state.gate.admit(&remote_bytes).await {
+        let from_device = match self.state.gate.identify(&remote_bytes).await {
             Ok(device) => device,
             Err(rejection) => {
                 self.state.gate.record_rejection(rejection);
                 return Ok(());
             }
         };
+        // 先登记再授权：进度连接会保持到 QUIC 空闲超时，成员被移除时由登记关闭。
+        let _registration = self.state.connections.register(&from_device, &connection);
+        if let Err(rejection) = self.state.gate.authorize(&from_device).await {
+            self.state.gate.record_rejection(rejection);
+            return Ok(());
+        }
 
         uc_debug!("transfer progress: accepted connection from admitted peer",);
 
