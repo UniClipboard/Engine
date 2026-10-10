@@ -28,13 +28,13 @@
 //!   to route via blob ref / file transfer instead of retrying this peer.
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use iroh::endpoint::Connection;
 use iroh::{Endpoint, EndpointAddr};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::broadcast;
 use tracing::{instrument, Instrument};
 
 use uc_core::ids::DeviceId;
@@ -48,6 +48,7 @@ use uc_observability_contract::diagnostics::{
 };
 use uc_observability_contract::{error_source::io_error_kind, uc_debug, uc_warn};
 
+use super::admitted_connections::AdmittedConnections;
 use super::conn_path::connection_channel;
 use super::connect::{connect_with_staggered_retry, StaggeredDialError};
 use super::peer_address_resolver::PeerAddressResolver;
@@ -67,6 +68,44 @@ pub const LEGACY_CLIPBOARD_ALPN: &[u8] = b"uniclipboard/clipboard/0";
 /// connection); the failure branch shares the leader's typed dial error so
 /// followers keep the same root cause the leader observed.
 type DialResult = Result<Connection, Arc<StaggeredDialError>>;
+
+/// 回执等待上限：接收端在应用结算前不会回执，其结算上限是 60 秒，
+/// 这里在其上留出余量，只兜住对端永不回执的情况。
+const ACK_TIMEOUT: Duration = Duration::from_secs(75);
+
+type DialSlots = HashMap<DeviceId, broadcast::Sender<DialResult>>;
+
+/// 领头方持有的单飞条目。领头方的 future 在拨号中途被丢弃时，条目随之移除，
+/// 跟随方因此收到“领头方丢失”并重新竞争，而不是永远等一个不会再有的结果。
+struct LeaderSlot {
+    slots: Arc<Mutex<DialSlots>>,
+    target: DeviceId,
+    armed: bool,
+}
+
+impl LeaderSlot {
+    fn remove(&self) {
+        self.slots
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.target);
+    }
+
+    /// 正常收尾：先移除条目再广播结果，之后的调用方会开启新一轮拨号。
+    fn release(&mut self) {
+        if std::mem::take(&mut self.armed) {
+            self.remove();
+        }
+    }
+}
+
+impl Drop for LeaderSlot {
+    fn drop(&mut self) {
+        if self.armed {
+            self.remove();
+        }
+    }
+}
 
 /// 单飞拨号的失败：领头方的拨号失败，或跟随方没有收到领头方的结果。
 #[derive(Debug, thiserror::Error)]
@@ -98,7 +137,11 @@ pub struct IrohClipboardDispatchAdapter {
     /// peer kicked off N parallel staggered-retry loops (3·N raw `iroh
     /// connect` attempts) and N `report_communication_failure` calls; single-flight cuts
     /// both to 1.
-    in_flight_dials: Mutex<HashMap<DeviceId, broadcast::Sender<DialResult>>>,
+    in_flight_dials: Arc<Mutex<DialSlots>>,
+    /// 写完帧之后等待对端回执的上限。
+    ack_timeout: Duration,
+    /// 出站连接按目标设备登记；成员被移除时关闭它们，中止在途的发送。
+    connections: AdmittedConnections,
 }
 
 impl IrohClipboardDispatchAdapter {
@@ -111,8 +154,22 @@ impl IrohClipboardDispatchAdapter {
             endpoint,
             peer_address_resolver: PeerAddressResolver::new(peer_addr_repo),
             peer_reachability,
-            in_flight_dials: Mutex::new(HashMap::new()),
+            in_flight_dials: Arc::new(Mutex::new(HashMap::new())),
+            ack_timeout: ACK_TIMEOUT,
+            connections: AdmittedConnections::default(),
         }
+    }
+
+    /// 与会话内其他协议共享连接登记，撤销成员时由登记统一关闭。
+    pub(crate) fn with_connections(mut self, connections: AdmittedConnections) -> Self {
+        self.connections = connections;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_ack_timeout(mut self, ack_timeout: Duration) -> Self {
+        self.ack_timeout = ack_timeout;
+        self
     }
 
     /// Dial `target` with at most one staggered-retry batch in flight per
@@ -134,68 +191,77 @@ impl IrohClipboardDispatchAdapter {
         addr: EndpointAddr,
     ) -> Result<Connection, SingleFlightDialError> {
         enum Role {
-            Leader(broadcast::Sender<DialResult>),
+            Leader(broadcast::Sender<DialResult>, LeaderSlot),
             Follower(broadcast::Receiver<DialResult>),
         }
 
-        // Capacity 8 is well above the expected fan-out (per-peer roster
-        // size ≤ 10 in Slice 2; concurrent dispatches per peer realistically
-        // ≤ 3) — broadcast slow-receiver lag is not in the failure modes
-        // this slot needs to defend against.
-        let role = {
-            let mut map = self.in_flight_dials.lock().await;
-            match map.get(target) {
-                Some(tx) => Role::Follower(tx.subscribe()),
-                None => {
-                    let (tx, _) = broadcast::channel::<DialResult>(8);
-                    map.insert(*target, tx.clone());
-                    Role::Leader(tx)
+        loop {
+            // Capacity 8 is well above the expected fan-out (per-peer roster
+            // size ≤ 10 in Slice 2; concurrent dispatches per peer realistically
+            // ≤ 3) — broadcast slow-receiver lag is not in the failure modes
+            // this slot needs to defend against.
+            let role = {
+                let mut map = self
+                    .in_flight_dials
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                match map.get(target) {
+                    Some(tx) => Role::Follower(tx.subscribe()),
+                    None => {
+                        let (tx, _) = broadcast::channel::<DialResult>(8);
+                        map.insert(*target, tx.clone());
+                        let slot = LeaderSlot {
+                            slots: Arc::clone(&self.in_flight_dials),
+                            target: *target,
+                            armed: true,
+                        };
+                        Role::Leader(tx, slot)
+                    }
                 }
+            };
+
+            match role {
+                Role::Leader(tx, mut slot) => {
+                    let result = connect_with_staggered_retry(
+                        Arc::clone(&self.endpoint),
+                        addr,
+                        CLIPBOARD_ALPN,
+                        "clipboard",
+                        uc_observability_contract::diagnostics::connectivity::AddressInputSource::Stored,
+                    )
+                    .await
+                    .map_err(Arc::new);
+
+                    // First-hand dial verdict — fold report_communication_failure into the
+                    // leader's tail so concurrent followers piling on the
+                    // same dead peer collapse to a single side-effect rather
+                    // than each calling `peer_reachability.report_communication_failure` on their own
+                    // failure return.
+                    if let Err(ref err) = result {
+                        uc_debug!(
+                            error_kind = "dial_failed",
+                            io_error_kind = io_error_kind(err),
+                            "clipboard dispatch: single-flight dial failed; marking offline"
+                        );
+                        self.peer_reachability
+                            .report_communication_failure(target)
+                            .await;
+                    }
+
+                    // Remove the slot before broadcasting so any caller that
+                    // races back in after we send sees an empty map and
+                    // starts a fresh dial cycle.
+                    slot.release();
+                    let _ = tx.send(result.clone());
+                    return result.map_err(SingleFlightDialError::Dial);
+                }
+                Role::Follower(mut rx) => match rx.recv().await {
+                    Ok(result) => return result.map_err(SingleFlightDialError::Dial),
+                    // 领头方的 future 被丢弃，没有结果可继承：重新竞争成为领头方。
+                    Err(broadcast::error::RecvError::Closed) => continue,
+                    Err(err) => return Err(SingleFlightDialError::LeaderLost(err)),
+                },
             }
-        };
-
-        match role {
-            Role::Leader(tx) => {
-                let result = connect_with_staggered_retry(
-                    Arc::clone(&self.endpoint),
-                    addr,
-                    CLIPBOARD_ALPN,
-            "clipboard",
-            uc_observability_contract::diagnostics::connectivity::AddressInputSource::Stored,
-                )
-                .await
-                .map_err(Arc::new);
-
-                // First-hand dial verdict — fold report_communication_failure into the
-                // leader's tail so concurrent followers piling on the
-                // same dead peer collapse to a single side-effect rather
-                // than each calling `peer_reachability.report_communication_failure` on their own
-                // failure return.
-                if let Err(ref err) = result {
-                    uc_debug!(
-                        error_kind = "dial_failed",
-                        io_error_kind = io_error_kind(err),
-                        "clipboard dispatch: single-flight dial failed; marking offline"
-                    );
-                    self.peer_reachability
-                        .report_communication_failure(target)
-                        .await;
-                }
-
-                // Remove the slot before broadcasting so any caller that
-                // races back in after we send sees an empty map and
-                // starts a fresh dial cycle.
-                {
-                    let mut map = self.in_flight_dials.lock().await;
-                    map.remove(target);
-                }
-                let _ = tx.send(result.clone());
-                result.map_err(SingleFlightDialError::Dial)
-            }
-            Role::Follower(mut rx) => match rx.recv().await {
-                Ok(result) => result.map_err(SingleFlightDialError::Dial),
-                Err(err) => Err(SingleFlightDialError::LeaderLost(err)),
-            },
         }
     }
 
@@ -249,10 +315,21 @@ impl IrohClipboardDispatchAdapter {
         frame_write?;
 
         let mut ack_buf = [0u8; 1];
-        let ack_read = recv.read_exact(&mut ack_buf).await;
-        ack_read.map_err(|err| {
-            ClipboardDispatchError::Io(anyhow::Error::from(err).context("ack read").into())
-        })?;
+        match tokio::time::timeout(self.ack_timeout, recv.read_exact(&mut ack_buf)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                return Err(ClipboardDispatchError::Io(
+                    anyhow::Error::from(err).context("ack read").into(),
+                ));
+            }
+            Err(elapsed) => {
+                return Err(ClipboardDispatchError::Io(
+                    anyhow::Error::from(elapsed)
+                        .context("ack read timed out")
+                        .into(),
+                ));
+            }
+        }
 
         // Any unknown code is adapter-level rejection rather than an ignored
         // success.
@@ -358,7 +435,10 @@ impl ClipboardDispatchPort for IrohClipboardDispatchAdapter {
             }
         };
 
-        // 4. Write the frame + read the ack on a fresh bi-stream.
+        // 4. Write the frame + read the ack on a fresh bi-stream. The
+        //    registration lets a member removal close this connection and
+        //    abort the send instead of waiting for the ack timeout.
+        let _registration = self.connections.register(target, &connection);
         let outcome = self.send_and_ack(&connection, header, &payload).await;
 
         // 5. Classify the path this connection selected while it is still
@@ -446,8 +526,6 @@ fn map_encode_err(err: WireEncodeError) -> ClipboardDispatchError {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use std::time::Duration;
 
     use async_trait::async_trait;
     use bytes::Bytes;
@@ -880,9 +958,122 @@ mod tests {
         // Slot must be empty after the leader finishes so a later
         // dispatch starts a fresh dial cycle (no stale in-flight entry).
         assert!(
-            adapter.in_flight_dials.lock().await.is_empty(),
+            adapter.in_flight_dials.lock().unwrap().is_empty(),
             "in_flight_dials slot must be released after the leader broadcasts",
         );
+    }
+
+    /// 领头方的 future 在拨号中途被丢弃后，同一目标的后续发送不能永远等一个
+    /// 不会再有结果的广播，而应重新竞争并给出自己的结果。
+    #[tokio::test]
+    async fn dropped_dial_leader_does_not_block_later_dispatches() {
+        let sender_endpoint = bind_endpoint().await;
+        wait_for_direct_addrs(&sender_endpoint).await;
+        let dead_addr = EndpointAddr::new(iroh::SecretKey::generate().public());
+        let target = DeviceId::new("dropped-leader-target");
+        let repo = Arc::new(MemRepo::default());
+        seed_addr(&repo, &target, &dead_addr).await;
+        let adapter = Arc::new(IrohClipboardDispatchAdapter::new(
+            sender_endpoint,
+            repo,
+            Arc::new(CountingPeerReachability::new()),
+        ));
+
+        let leader = {
+            let adapter = Arc::clone(&adapter);
+            let target = target.clone();
+            tokio::spawn(async move {
+                adapter
+                    .dispatch(
+                        &target,
+                        &sample_header(),
+                        SyncPayload {
+                            ciphertext: Bytes::from_static(b"leader"),
+                        },
+                    )
+                    .await
+            })
+        };
+        // 等领头方登记了单飞条目、进入拨号后再丢弃它。
+        for _ in 0..200 {
+            if !adapter.in_flight_dials.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            !adapter.in_flight_dials.lock().unwrap().is_empty(),
+            "leader never registered its dial"
+        );
+        leader.abort();
+        let _ = leader.await;
+
+        let later = tokio::time::timeout(
+            Duration::from_secs(12),
+            adapter.dispatch(
+                &target,
+                &sample_header(),
+                SyncPayload {
+                    ciphertext: Bytes::from_static(b"later"),
+                },
+            ),
+        )
+        .await
+        .expect("a later dispatch must not wait on a dropped leader");
+        assert!(matches!(
+            later.outcome,
+            Err(ClipboardDispatchError::Offline)
+        ));
+    }
+
+    /// 对端收下帧却永不回执时，发送必须在回执上限内以 I/O 失败返回。
+    #[tokio::test]
+    async fn dispatch_returns_when_the_peer_never_acks() {
+        #[derive(Debug, Clone)]
+        struct SilentHandler;
+        impl ProtocolHandler for SilentHandler {
+            async fn accept(
+                &self,
+                connection: iroh::endpoint::Connection,
+            ) -> Result<(), AcceptError> {
+                let (_send, mut recv) = connection
+                    .accept_bi()
+                    .await
+                    .map_err(|err| AcceptError::from_err(err))?;
+                let _ = clipboard_wire::read_frame(&mut recv).await;
+                let _ = connection.closed().await;
+                Ok(())
+            }
+        }
+
+        let peer_endpoint = bind_endpoint().await;
+        wait_for_direct_addrs(&peer_endpoint).await;
+        let peer_router = Router::builder((*peer_endpoint).clone())
+            .accept(CLIPBOARD_ALPN, SilentHandler)
+            .spawn();
+        let sender_endpoint = bind_endpoint().await;
+        wait_for_direct_addrs(&sender_endpoint).await;
+        let repo = Arc::new(MemRepo::default());
+        let target = DeviceId::new("silent-target");
+        seed_addr(&repo, &target, &peer_endpoint.addr()).await;
+        let adapter =
+            IrohClipboardDispatchAdapter::new(sender_endpoint, repo, peer_reachability_mock())
+                .with_ack_timeout(Duration::from_millis(500));
+
+        let report = tokio::time::timeout(
+            Duration::from_secs(8),
+            adapter.dispatch(
+                &target,
+                &sample_header(),
+                SyncPayload {
+                    ciphertext: Bytes::from_static(b"never acked"),
+                },
+            ),
+        )
+        .await
+        .expect("dispatch must give up when no ack arrives");
+        assert!(matches!(report.outcome, Err(ClipboardDispatchError::Io(_))));
+        peer_router.shutdown().await.expect("router shutdown");
     }
 
     /// Verdict 4 — oversized payload. The adapter short-circuits before

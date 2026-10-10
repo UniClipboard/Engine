@@ -1,8 +1,8 @@
-//! 已授权入站连接的登记：成员被移除或离开 Space 时按设备统一关闭。
+//! 成员连接的登记：成员被移除或离开 Space 时按设备统一关闭。
 //!
-//! 授权只在连接开始时判定一次，长连接（进度回传、等待应用结算的剪贴板帧）
-//! 之后不会再被检查。登记让会话的成员连接负责人在撤销时一并关闭这些连接，
-//! 而不是由每个协议 handler 各自轮询授权。
+//! 入站连接的授权只在开始时判定一次，长连接（进度回传、等待应用结算的剪贴板帧）
+//! 之后不会再被检查；出站内容发送则可能停在等待回执。登记让会话的成员连接
+//! 负责人在撤销时一并关闭这些连接，而不是由每个协议各自轮询授权。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -15,7 +15,7 @@ struct Tracked {
     connection: Connection,
 }
 
-/// 同一会话内各协议 handler 共享的登记表，克隆共享同一份状态。
+/// 同一会话内各协议共享的登记表（入站 handler 与出站发送），克隆共享同一份状态。
 #[derive(Clone, Default)]
 pub(crate) struct AdmittedConnections {
     entries: Arc<Mutex<HashMap<DeviceId, Vec<Tracked>>>>,
@@ -29,7 +29,7 @@ pub(crate) struct ConnectionRegistration {
 }
 
 impl AdmittedConnections {
-    /// 登记 `connection`。先登记再授权，保证撤销与授权并发时至少一方生效。
+    /// 登记 `connection`。入站先登记再授权，保证撤销与授权并发时至少一方生效。
     pub(crate) fn register(
         &self,
         device: &DeviceId,

@@ -1171,11 +1171,14 @@ impl IrohSessionBuilder {
 
         self.install_session_handler([CLIPBOARD_ALPN], handler)?;
 
-        let dispatch = Arc::new(IrohClipboardDispatchAdapter::new(
-            Arc::clone(&self.context.endpoint),
-            peer_addr_repo,
-            peer_reachability,
-        ));
+        let dispatch = Arc::new(
+            IrohClipboardDispatchAdapter::new(
+                Arc::clone(&self.context.endpoint),
+                peer_addr_repo,
+                peer_reachability,
+            )
+            .with_connections(self.admitted_connections.clone()),
+        );
 
         Ok(ClipboardHandlers {
             dispatch,
@@ -2617,6 +2620,7 @@ mod tests {
             SpaceMember,
         };
         use uc_core::ports::security::IdentityFingerprintFactoryPort;
+        use uc_core::ports::PeerAddressRecord;
         use uc_core::MemberSyncPreferences;
         use uc_sync_protocol::clipboard as clipboard_wire;
         use uc_sync_protocol::transfer_progress::{self as progress_wire, ProgressFrame};
@@ -2656,6 +2660,42 @@ mod tests {
             }
         }
 
+        #[derive(Default)]
+        struct PeerAddresses(StdMutex<Vec<PeerAddressRecord>>);
+        #[async_trait]
+        impl PeerAddressRepositoryPort for PeerAddresses {
+            async fn get(
+                &self,
+                device: &DeviceId,
+            ) -> Result<Option<PeerAddressRecord>, uc_core::ports::PeerAddressError> {
+                Ok(self
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|record| &record.device_id == device)
+                    .cloned())
+            }
+            async fn upsert(
+                &self,
+                record: &PeerAddressRecord,
+            ) -> Result<(), uc_core::ports::PeerAddressError> {
+                self.0.lock().unwrap().push(record.clone());
+                Ok(())
+            }
+            async fn list(
+                &self,
+            ) -> Result<Vec<PeerAddressRecord>, uc_core::ports::PeerAddressError> {
+                Ok(self.0.lock().unwrap().clone())
+            }
+            async fn remove(
+                &self,
+                _device: &DeviceId,
+            ) -> Result<(), uc_core::ports::PeerAddressError> {
+                Ok(())
+            }
+        }
+
         struct Admission(AtomicBool);
         #[async_trait]
         impl PeerAdmissionPort for Admission {
@@ -2677,6 +2717,16 @@ mod tests {
             clipboard: ClipboardHandlers,
         }
 
+        async fn wait_for_addrs(endpoint: &Endpoint) {
+            for _ in 0..100 {
+                if !endpoint.addr().addrs.is_empty() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("endpoint never published direct addresses");
+        }
+
         impl Fixture {
             async fn start() -> Self {
                 let peer_key = iroh::SecretKey::from_bytes(&[0x61; 32]);
@@ -2695,6 +2745,22 @@ mod tests {
                     .await
                     .expect("save member");
                 let admission = Arc::new(Admission(AtomicBool::new(true)));
+                let peer = Endpoint::builder(iroh::endpoint::presets::N0)
+                    .secret_key(peer_key)
+                    .relay_mode(RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind peer");
+                wait_for_addrs(&peer).await;
+                let peer_addresses = Arc::new(PeerAddresses::default());
+                peer_addresses
+                    .upsert(&PeerAddressRecord {
+                        device_id: peer_device.clone(),
+                        addr_blob: postcard::to_stdvec(&peer.addr()).expect("encode address"),
+                        observed_at: chrono::Utc::now(),
+                    })
+                    .await
+                    .expect("seed peer address");
                 let identities: Arc<dyn PeerIdentityDirectoryPort> =
                     crate::network::iroh::inbound_peer::member_table_directory(members.clone());
                 let fingerprints: Arc<dyn IdentityFingerprintFactoryPort> =
@@ -2706,8 +2772,7 @@ mod tests {
                     .expect("bind");
                 let node_endpoint = Arc::clone(&network.session_context.endpoint);
                 let mut builder = network.prepare_session();
-                let peer_addr_repo: Arc<dyn PeerAddressRepositoryPort> =
-                    Arc::new(EmptyPeerAddressRepo);
+                let peer_addr_repo: Arc<dyn PeerAddressRepositoryPort> = peer_addresses;
                 let reachability = builder
                     .install_peer_reachability(
                         Arc::clone(&peer_addr_repo),
@@ -2737,18 +2802,7 @@ mod tests {
                     .expect("install transfer progress");
                 let node = spawn_session(network, builder).await;
 
-                let peer = Endpoint::builder(iroh::endpoint::presets::N0)
-                    .secret_key(peer_key)
-                    .relay_mode(RelayMode::Disabled)
-                    .bind()
-                    .await
-                    .expect("bind peer");
-                for _ in 0..100 {
-                    if !node_endpoint.addr().addrs.is_empty() {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
+                wait_for_addrs(&node_endpoint).await;
                 Self {
                     node,
                     peer,
@@ -2812,6 +2866,71 @@ mod tests {
             fixture.remove_member().await;
 
             Fixture::assert_closed(&connection, "transfer-progress").await;
+            fixture.node.shutdown().await.unwrap();
+        }
+
+        /// 对端收下帧但不回执；成员被移除后，在途的出站发送必须被中止并返回失败。
+        #[tokio::test]
+        async fn in_flight_dispatch_is_aborted_when_the_member_is_removed() {
+            use iroh::protocol::{AcceptError, ProtocolHandler};
+
+            #[derive(Debug, Clone)]
+            struct SilentHandler(Arc<tokio::sync::Notify>);
+            impl ProtocolHandler for SilentHandler {
+                async fn accept(
+                    &self,
+                    connection: iroh::endpoint::Connection,
+                ) -> Result<(), AcceptError> {
+                    let (_send, mut recv) = connection
+                        .accept_bi()
+                        .await
+                        .map_err(|err| AcceptError::from_err(err))?;
+                    let _ = clipboard_wire::read_frame(&mut recv).await;
+                    self.0.notify_one();
+                    let _ = connection.closed().await;
+                    Ok(())
+                }
+            }
+
+            let fixture = Fixture::start().await;
+            let frame_received = Arc::new(tokio::sync::Notify::new());
+            let peer_router = iroh::protocol::Router::builder(fixture.peer.clone())
+                .accept(CLIPBOARD_ALPN, SilentHandler(Arc::clone(&frame_received)))
+                .spawn();
+
+            let dispatch = Arc::clone(&fixture.clipboard.dispatch);
+            let target = fixture.peer_device.clone();
+            let sending = tokio::spawn(async move {
+                dispatch
+                    .dispatch(
+                        &target,
+                        &uc_core::ports::ClipboardHeader {
+                            version: uc_core::ports::ClipboardHeader::CURRENT_VERSION,
+                            snapshot_hash: "9".repeat(64),
+                            captured_at_ms: 1_700_000_000_000,
+                            origin_device_id: "local".to_string(),
+                            origin_device_name: "Local".to_string(),
+                            payload_version: 3,
+                        },
+                        uc_core::ports::SyncPayload {
+                            ciphertext: bytes::Bytes::from_static(b"in-flight"),
+                        },
+                    )
+                    .await
+            });
+            // 对照：帧已到对端，发送停在等待回执。
+            tokio::time::timeout(STEP, frame_received.notified())
+                .await
+                .expect("peer receives the frame");
+
+            fixture.remove_member().await;
+
+            let report = tokio::time::timeout(CLOSE_BUDGET, sending)
+                .await
+                .expect("the in-flight dispatch of a removed member is still waiting")
+                .expect("dispatch task joins");
+            assert!(report.outcome.is_err());
+            peer_router.shutdown().await.ok();
             fixture.node.shutdown().await.unwrap();
         }
 
