@@ -494,7 +494,7 @@ async fn rejected_delivery_stays_out_of_the_queue_after_unrelated_changes_and_re
         &space_id,
         &[(
             rejected.update_id().to_owned(),
-            GroupUpdateDispatchError::Rejected(GroupUpdateRejection::Unclassified),
+            GroupUpdateDispatchError::Rejected(GroupUpdateRejection::ByReceiver),
         )],
         100,
     )

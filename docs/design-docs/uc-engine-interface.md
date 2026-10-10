@@ -307,6 +307,16 @@ device id 与 display name，但这些字段不得进入日志或调试输出。
 “设备组尚未确认一致”，不能按正常关系展示；有效确认到达后自动恢复为 `consistent`。离线、超时、重启或
 失去通信路径都不能自行清除该状态，它也不等同于已经取得两份不可比较历史的 `diverged`。
 
+每个设备关系的可选 `group_update` 给出本机对该设备尚未确认的队首组密钥更新：`epoch`、`state`
+（`waiting`、`receiver_unavailable`、`rejected_unclassified`、`rejected_by_receiver`）、`attempts`，以及仅在
+`recovery=automatic` 时出现的 `next_retry_at_ms`。`recovery` 表示 Engine 自己是否会推进：`automatic` 按退避自动重试；
+`automatic_on_reconnect` 在该设备重新通过认证后自动重新评估一次（有频率上限，成功应用才清除）；`review_device`
+不会自动重发，需要核对该设备。缺省表示本机对它没有未确认的更新，该事实与成员保护状态（`QuerySpaceProtection`
+的 MLS 成员关系）相互独立，宿主不得把“受保护”读成“已确认收到最新 epoch”。`automatic` 和 `automatic_on_reconnect`
+时宿主的“重新检查”不会改变结果，不应提供；字段缺省或为旧值的宿主按原 `space_device_update` 展示。
+整体状态 `space_device_update` 的取值不变：任何设备的拒绝（含原因未知的旧拒绝）仍使整体进入
+`needs_attention/device_security_update_rejected`，原因与设备由 `group_update` 说明。
+
 产品调用 `ChooseDeviceGroup` 时必须原样回传同一次查询中的 `issue_id`、`choice_id` 和 `expected_revision`。
 结果明确区分完成、仍在等待、需要重新配对、已经完成、状态已变化和需要确认移除本机；状态已变化时重新
 查询，不得用旧选择覆盖新事实。本机将被移除时，只有在产品取得用户明确确认后才传入
