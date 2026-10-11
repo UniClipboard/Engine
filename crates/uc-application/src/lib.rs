@@ -12,6 +12,7 @@ pub(crate) mod profile;
 pub(crate) mod runtime_lifecycle;
 
 pub(crate) mod clipboard;
+pub(crate) mod connectivity;
 pub(crate) mod device;
 pub(crate) mod discovery;
 pub(crate) mod search;

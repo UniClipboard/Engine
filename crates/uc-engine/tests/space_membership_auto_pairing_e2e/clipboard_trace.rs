@@ -172,13 +172,17 @@ async fn clipboard_trace_case(
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+        wait_for_peer_refresh(&source, "all source targets ready before partition").await;
+        wait_for_peer_refresh(&target, "all receiver targets ready before partition").await;
         offline
             .shutdown(SHUTDOWN_TIMEOUT)
             .await
             .expect("stop one target");
     }
-    wait_for_peer_refresh(&source, "source ready").await;
-    wait_for_peer_refresh(&target, "target ready").await;
+    if !partial_target {
+        wait_for_peer_refresh(&source, "source ready").await;
+        wait_for_peer_refresh(&target, "target ready").await;
+    }
     let text = "private clipboard trace acceptance";
     *source_clipboard.lock().expect("source clipboard") = HostClipboardSnapshot {
         observed_at_ms: (unix_time_ns(SystemTime::now()) / 1_000_000) as i64,

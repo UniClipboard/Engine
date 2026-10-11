@@ -8,9 +8,10 @@
 //! follow-up read must observe the DB write — reordering or batching
 //! emit-before-write surfaces a stale snapshot to the detail view.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Weak};
 
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, Mutex};
 use tokio::task::{JoinError, JoinSet};
 use tracing::Instrument;
 
@@ -188,15 +189,43 @@ pub(crate) fn classify_dispatch_result(
 pub(crate) struct DeliveryRecorder {
     entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
     host_event_bus: SharedHostEventEmitter,
+    current: Arc<Mutex<HashMap<(EntryId, DeviceId), Weak<()>>>>,
+    attempt: Option<Arc<()>>,
 }
 
 impl DeliveryRecorder {
+    /// 每个完整发送持有自己的尝试；同目标新尝试取代旧结果写入权，不取消远端提交。
+    pub(super) async fn begin_attempt(self: &Arc<Self>) -> Arc<Self> {
+        let attempt = Arc::new(());
+        let mut current = self.current.lock().await;
+        current.retain(|_, token| token.strong_count() > 0);
+        Arc::new(Self {
+            entry_delivery_repo: self.entry_delivery_repo.clone(),
+            host_event_bus: self.host_event_bus.clone(),
+            current: self.current.clone(),
+            attempt: Some(attempt),
+        })
+    }
+    fn is_current(
+        &self,
+        current: &HashMap<(EntryId, DeviceId), Weak<()>>,
+        entry: &EntryId,
+        target: DeviceId,
+    ) -> bool {
+        self.attempt.as_ref().is_none_or(|attempt| {
+            current
+                .get(&(entry.clone(), target))
+                .and_then(Weak::upgrade)
+                .is_some_and(|active| Arc::ptr_eq(attempt, &active))
+        })
+    }
     pub(super) async fn record_pending(
         &self,
         entry_id: &EntryId,
         target_device_id: DeviceId,
         now_ms: i64,
     ) -> Result<(), uc_core::clipboard::EntryDeliveryError> {
+        let mut current = self.current.lock().await;
         self.entry_delivery_repo
             .record_attempt(&EntryDeliveryRecord {
                 entry_id: entry_id.clone(),
@@ -205,7 +234,15 @@ impl DeliveryRecorder {
                 reason_detail: None,
                 updated_at_ms: now_ms,
             })
-            .await
+            .await?;
+        // 意图提交成功后才转交结果写入权；失败时原在途尝试仍可结算。
+        if let Some(attempt) = &self.attempt {
+            current.insert(
+                (entry_id.clone(), target_device_id),
+                Arc::downgrade(attempt),
+            );
+        }
+        Ok(())
     }
 
     pub(super) async fn flush_owned(
@@ -240,6 +277,8 @@ impl DeliveryRecorder {
         Self {
             entry_delivery_repo,
             host_event_bus,
+            current: Arc::new(Mutex::new(HashMap::new())),
+            attempt: None,
         }
     }
 
@@ -250,6 +289,11 @@ impl DeliveryRecorder {
     /// side-effect that must not mask dispatch's real success/failure.
     pub(crate) async fn flush(&self, records: &[EntryDeliveryRecord]) {
         for record in records {
+            // 与新尝试登记共用写锁，检查及落库不可被另一尝试穿插。
+            let current = self.current.lock().await;
+            if !self.is_current(&current, &record.entry_id, record.target_device_id) {
+                continue;
+            }
             if let Err(err) = self.entry_delivery_repo.record_attempt(record).await {
                 uc_warn!(
                     error_kind = "delivery_record",
@@ -390,6 +434,94 @@ mod tests {
             "background settlement must not extend the returned operation"
         );
     }
+    /// 旧在途结果不能覆盖后来恢复成功，但未被新尝试覆盖的目标仍要结算。
+    #[tokio::test]
+    async fn older_deferred_attempt_cannot_overwrite_newer_delivery_for_same_target() {
+        #[derive(Default)]
+        struct Repo(tokio::sync::Mutex<Vec<EntryDeliveryRecord>>);
+        #[async_trait::async_trait]
+        impl EntryDeliveryRepositoryPort for Repo {
+            async fn record_attempt(
+                &self,
+                record: &EntryDeliveryRecord,
+            ) -> Result<(), uc_core::clipboard::EntryDeliveryError> {
+                if record.updated_at_ms == 99 {
+                    return Err(uc_core::clipboard::EntryDeliveryError::InvalidStatus);
+                }
+                let mut rows = self.0.lock().await;
+                rows.retain(|row| {
+                    row.entry_id != record.entry_id
+                        || row.target_device_id != record.target_device_id
+                });
+                rows.push(record.clone());
+                Ok(())
+            }
+            async fn list_by_entry(
+                &self,
+                _: &EntryId,
+            ) -> Result<Vec<EntryDeliveryRecord>, uc_core::clipboard::EntryDeliveryError>
+            {
+                Ok(self.0.lock().await.clone())
+            }
+        }
+        let repo = Arc::new(Repo::default());
+        let owner = Arc::new(DeliveryRecorder::new(
+            repo.clone(),
+            Arc::new(crate::facade::HostEventBus::new()),
+        ));
+        let entry = eid();
+        let first = dev("peer-one");
+        let other = dev("peer-two");
+        let old = owner.begin_attempt().await;
+        old.record_pending(&entry, first, 0).await.unwrap();
+        old.record_pending(&entry, other, 0).await.unwrap();
+        let new = owner.begin_attempt().await;
+        new.record_pending(&entry, first, 1).await.unwrap();
+        let record = |target, status| EntryDeliveryRecord {
+            entry_id: entry.clone(),
+            target_device_id: target,
+            status,
+            reason_detail: None,
+            updated_at_ms: 0,
+        };
+        new.flush(&[record(first, EntryDeliveryStatus::Delivered)])
+            .await;
+        old.flush(&[
+            record(first, EntryDeliveryStatus::Unreachable),
+            record(other, EntryDeliveryStatus::Delivered),
+        ])
+        .await;
+        let before_failed_intent = repo.list_by_entry(&entry).await.unwrap();
+        assert_eq!(
+            before_failed_intent
+                .iter()
+                .find(|row| row.target_device_id == first)
+                .unwrap()
+                .status,
+            EntryDeliveryStatus::Delivered
+        );
+        let failed = owner.begin_attempt().await;
+        assert!(failed.record_pending(&entry, first, 99).await.is_err());
+        // 新意图写入失败时，现有尝试仍有权保存自己的最后回执。
+        new.flush(&[record(first, EntryDeliveryStatus::Duplicate)])
+            .await;
+        let rows = repo.list_by_entry(&entry).await.unwrap();
+        assert_eq!(
+            rows.iter()
+                .find(|row| row.target_device_id == first)
+                .unwrap()
+                .status,
+            EntryDeliveryStatus::Duplicate
+        );
+        assert_eq!(
+            rows.iter()
+                .find(|row| row.target_device_id == other)
+                .unwrap()
+                .status,
+            EntryDeliveryStatus::Delivered
+        );
+    }
+
     use uc_core::ids::DeviceId;
 
     fn dev(id: &str) -> DeviceId {

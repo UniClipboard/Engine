@@ -502,13 +502,13 @@ impl DispatchClipboardEntryUseCase {
         let payload_size_bucket = PayloadSizeBucket::from_bytes(input.plaintext.len() as u64);
         let header = Arc::new(header);
         let entry_id = input.entry_id.clone();
+        let recorder = self.recorder.begin_attempt().await;
         let mut set: JoinSet<PeerDispatchResult> = JoinSet::new();
         let mut dispatch_candidates = Vec::with_capacity(candidates.len());
         let mut intent_failures = Vec::new();
         for device_id in &candidates {
             if let Some(entry_id) = entry_id.as_ref() {
-                if let Err(error) = self
-                    .recorder
+                if let Err(error) = recorder
                     .record_pending(entry_id, *device_id, self.clock.now_ms())
                     .await
                 {
@@ -597,12 +597,12 @@ impl DispatchClipboardEntryUseCase {
                 leftover,
                 entry_id,
                 Arc::clone(&self.clock),
-                Arc::clone(&self.recorder),
+                Arc::clone(&recorder),
             );
         }
 
         // 每条结果仍先持久化再通知；前台许可保留到自己的记录结束。
-        self.recorder
+        recorder
             .flush_owned(work.continuation(), delivery_records)
             .await;
 

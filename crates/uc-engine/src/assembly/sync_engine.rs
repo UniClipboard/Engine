@@ -23,9 +23,9 @@ use crate::dev::{
 };
 use uc_application::deps::{
     ApplicationClipboardAdapters, ApplicationNetworkAdapters, ApplicationNetworkBinding,
-    ApplicationSpaceAdapters, ClipboardReceiverPort, CurrentSpaceMemberScopePort, LifecycleError,
-    PeerIdentityDirectoryPort, SpaceAdmissionAdapters, SpaceMembershipAdapters,
-    SpaceRuntimeAdapters,
+    ApplicationSpaceAdapters, ClipboardReceiverPort, ConnectivityManager, ConnectivityPolicy,
+    CurrentSpaceMemberScopePort, LifecycleError, PeerIdentityDirectoryPort, SpaceAdmissionAdapters,
+    SpaceMembershipAdapters, SpaceRuntimeAdapters,
 };
 use uc_application::facade::ApplicationAssembly;
 use uc_core::file_transfer::FileTransferCancellationReason;
@@ -208,20 +208,23 @@ pub async fn prepare_sync_session(
         let receiver = Arc::clone(&space_setup.space_access.group_revocation);
         receiver
     })?;
-    // Slice 2 Phase 2 · T10:同一节点装第三个 ALPN(剪切板同步)。dispatch
-    // 复用 endpoint + peer_addr_repo,与 peer_reachability 共享 NAT/relay 映射;
-    // receiver handler 通过身份目录把 `Connection::remote_id()` 反查
-    // 成 DeviceId 再喂给应用层 broadcast。同样必须在 `spawn` 前装。
-    let ClipboardHandlers {
-        dispatch: clipboard_dispatch,
-        receiver: clipboard_receiver,
-    } = builder.install_clipboard(
+    // Engine 组装完整连接负责人；业务调用方只持有发送与接收意图端口。
+    let connectivity = builder.clipboard_connectivity_deps(
         Arc::clone(&space_setup.peer_addr_repo),
         Arc::clone(&space_setup.peer_access) as Arc<dyn PeerIdentityDirectoryPort>,
         Arc::clone(&space_setup.peer_access) as Arc<dyn PeerAdmissionPort>,
         Arc::clone(&space_setup.fingerprint),
         Arc::clone(&peer_reachability),
-    )?;
+    );
+    let manager = ConnectivityManager::new(
+        connectivity.backend,
+        connectivity.admission,
+        ConnectivityPolicy::default(),
+    );
+    let ClipboardHandlers {
+        dispatch: clipboard_dispatch,
+        receiver: clipboard_receiver,
+    } = builder.install_clipboard(manager)?;
     let clipboard_dispatch: Arc<dyn ClipboardDispatchPort> = clipboard_dispatch;
     let clipboard_receiver: Arc<dyn ClipboardReceiverPort> = clipboard_receiver;
     // Install the active-clipboard state ALPN (0xC3) as an independent

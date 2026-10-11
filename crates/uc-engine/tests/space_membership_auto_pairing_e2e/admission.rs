@@ -478,6 +478,9 @@ async fn pending_join_is_not_published_before_final_confirmation() {
         .await
         .expect("shutdown Sponsor before final confirmation");
     let restarted_sponsor = Arc::new(sponsor_harness.start().await);
+    // 先确认重启后同一成员账本已恢复，避免首次冷读取落入连接刷新的一秒预算。
+    // Joiner 仍停在最终确认前，既有两名正式成员和后续禁止提前发布断言保持。
+    wait_for_active_member_count(&restarted_sponsor, 2).await;
     restarted_sponsor
         .execute(Operation::NotifyConnectivityOpportunity {
             reason: uc_engine::ConnectivityOpportunity::Foreground,

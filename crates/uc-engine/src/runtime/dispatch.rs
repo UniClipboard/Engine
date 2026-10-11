@@ -4,6 +4,8 @@ use crate::{
     DevOperationResult,
 };
 use tokio::time::Instant;
+#[cfg(feature = "dev-tools")]
+use uc_infra_p2p::network::iroh::{CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN};
 
 #[cfg(feature = "dev-tools")]
 use super::operation_error_with_code;
@@ -909,7 +911,7 @@ impl EngineRuntime for ProductionRuntime {
                         uc_infra_p2p::network::iroh::PEER_REACHABILITY_ALPN.to_vec(),
                     ]
                 } else {
-                    vec![uc_infra_p2p::network::iroh::CLIPBOARD_ALPN.to_vec()]
+                    vec![MULTIPLEXED_CLIPBOARD_ALPN.to_vec(), CLIPBOARD_ALPN.to_vec()]
                 };
                 Ok(DevOperationResult::NetworkPartitionUpdated {
                     blocked_peer_count: self

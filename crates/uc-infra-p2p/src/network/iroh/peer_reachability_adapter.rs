@@ -473,9 +473,8 @@ impl IrohPeerReachabilityAdapter {
     /// publishing it as `Arc<dyn PeerReachabilityPort>` so shutdown semantics match
     /// the rest of the iroh adapter family.
     ///
-    /// `identities` and `fingerprint_factory` are needed by the inbound
-    /// handler to reverse-resolve a remote `EndpointId` into a known
-    /// `DeviceId`; the same pair is consumed by `IrohClipboardReceiverAdapter`.
+    /// `identities` 和 `fingerprint_factory` 供入站 handler 将远端
+    /// `EndpointId` 反查为已知 `DeviceId`；普通剪贴板的 Iroh 准入也使用同一能力。
     pub fn new(
         endpoint: Arc<Endpoint>,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,

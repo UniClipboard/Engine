@@ -6,7 +6,7 @@ use opentelemetry_sdk::propagation::TraceContextPropagator;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uc_sync_protocol::WireTraceContext;
 
-pub(super) fn inject_current() -> Option<WireTraceContext> {
+pub(crate) fn inject_current() -> Option<WireTraceContext> {
     let mut carrier = TraceCarrier::default();
     TraceContextPropagator::new().inject_context(&tracing::Span::current().context(), &mut carrier);
     let context = WireTraceContext {
@@ -16,7 +16,7 @@ pub(super) fn inject_current() -> Option<WireTraceContext> {
 }
 
 /// 仅在业务身份确认后调用，并且必须在 span 第一次进入前设置。
-pub(super) fn set_remote_parent(span: &tracing::Span, wire: Option<&WireTraceContext>) -> bool {
+pub(crate) fn set_remote_parent(span: &tracing::Span, wire: Option<&WireTraceContext>) -> bool {
     let Some(wire) = wire.filter(|value| value.is_bounded()) else {
         return false;
     };

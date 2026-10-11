@@ -105,7 +105,8 @@ impl ObservationContext {
         CONTINUATION.scope(self.0, future).await
     }
 
-    fn sync_scope<T>(self, work: impl FnOnce() -> T) -> T {
+    /// 将既有不透明关联延续到同步或阻塞工作，不读取内部状态。
+    pub fn sync_scope<T>(self, work: impl FnOnce() -> T) -> T {
         CONTINUATION.sync_scope(self.0, work)
     }
 }
@@ -559,6 +560,8 @@ macro_rules! diagnostic_task_kinds {
 }
 
 diagnostic_task_kinds! {
+    /// 普通剪贴板共享拨号任务异常退出。
+    ClipboardConnectivityWorker => "clipboard_connectivity_worker",
     ClipboardDeliveryRecord => "clipboard_delivery_record",
     ClipboardInboundOsWrite => "clipboard_inbound_os_write",
     ActiveClipboardConverge => "active_clipboard_converge",

@@ -16,4 +16,8 @@
 | 新会话发布前的出站连接被本机拒绝，每次加入的最终确认多等约 1 秒 | 已定位，候选方案因暴露重启补传问题暂缓 | 先修复同身份重启后握手超时及投递恢复只尝试一次的问题；`interrupted_file_transfer_recovers_after_receiver_process_restart` 连续 10 次通过，且最终确认首连不再 `locally_rejected` | [发现记录](../../.planning/2026-09-26-session-outbound-before-publish/findings.md) |
 | 接收方以同一身份、同一端口重启后，文件续传偶发等不到投递 | 已复现，原因即上一行记录的两个既有问题；该测试已进入 PR 必需门禁 | 本机 nextest 全工作区构建下 `interrupted_file_transfer_recovers_after_receiver_process_restart` 失败 2/10（1381 修复前）与 3/10（修复后），单包构建 1/10，均为等待投递超时；网络与投递恢复负责人修复同身份重启握手超时及投递恢复只尝试一次，之后连续 10 次通过 | [发现记录](../../.planning/2026-09-26-session-outbound-before-publish/findings.md) |
 
+| 跨内容自动替换的迟到投递结果可覆盖 Superseded | 静态审查确认既有写入断点，未做独立故障复现 | Application 发送与恢复负责人把 supersede/停止恢复直接写入纳入同一尝试围栏；阻塞旧 deferred、标记 Superseded 后释放旧结果，状态仍终止自动恢复；新意图写失败不得丢失旧有效回执 | [审查记录](completed/2026-10-11-clipboard-connectivity-review.md) |
+
+| 成员 G2 密码学拒绝场景偶发未投影拒绝 | 最新全套失败一次、同源码隔离与此前全套通过；实际原因未证实 | 成员验收负责人记录 tamper 消费、投递结果及接收方 epoch 顺序；以确定性 gate 保证真实拒绝边界，原拒绝/重启/后序 epoch 断言在完整并发全套稳定通过；不增加篡改次数或超时掩盖 | [审查记录](completed/2026-10-11-clipboard-connectivity-review.md) |
+
 关闭项目时记录验证证据，更新稳定文档，并将对应计划移入 `completed/`。

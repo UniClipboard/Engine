@@ -10,7 +10,7 @@
 //!
 //! ## 身份验证
 //!
-//! 与 [`super::clipboard_receiver_adapter`] 一致:sender 端 handler 用
+//! 与普通剪贴板的连接准入一致：sender 端 handler 用
 //! `Connection::remote_id()` 拿到对端 Ed25519 公钥,经
 //! `IdentityFingerprintFactoryPort` 派生出 fingerprint,在
 //! 成员状态负责人发布的身份目录中查匹配的设备。陌生 peer 的连接被

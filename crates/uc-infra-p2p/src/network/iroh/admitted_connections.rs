@@ -1,6 +1,6 @@
 //! 成员连接的登记：成员被移除或离开 Space 时按设备统一关闭。
 //!
-//! 入站连接的授权只在开始时判定一次，长连接（进度回传、等待应用结算的剪贴板帧）
+//! 既有协议在连接开始时授权，普通剪贴板还在开流及交接前重检。长连接（进度回传、等待应用结算的剪贴板帧）
 //! 之后不会再被检查；出站内容发送则可能停在拨号或等待回执。登记让会话的成员连接
 //! 负责人在撤销时一并关闭这些连接，并让进行中的拨号失效，而不是由每个协议各自轮询授权。
 
@@ -8,11 +8,17 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use iroh::endpoint::Connection;
+use uc_application::deps::PeerConnection;
 use uc_core::ids::DeviceId;
+
+enum CloseHandle {
+    Native(Connection),
+    Managed(Arc<dyn PeerConnection>),
+}
 
 struct Tracked {
     stable_id: usize,
-    connection: Connection,
+    connection: CloseHandle,
 }
 
 #[derive(Default)]
@@ -41,7 +47,7 @@ impl RevocationEpoch {
 
 /// 同一会话内各协议共享的登记表（入站 handler 与出站发送），克隆共享同一份状态。
 #[derive(Clone, Default)]
-pub(crate) struct AdmittedConnections {
+pub struct AdmittedConnections {
     state: Arc<Mutex<State>>,
 }
 
@@ -69,18 +75,30 @@ impl AdmittedConnections {
         RevocationEpoch::of(&state, device)
     }
 
-    /// 拨号完成后登记；若拨号期间 `device` 被撤销过，返回 `None`，调用方丢弃连接。
-    pub(crate) fn register_since(
+    pub(crate) fn current(&self, device: &DeviceId, epoch: RevocationEpoch) -> bool {
+        RevocationEpoch::of(&self.lock(), device) == epoch
+    }
+
+    pub(crate) fn register_managed_since(
         &self,
         device: &DeviceId,
-        connection: &Connection,
+        connection: Arc<dyn PeerConnection>,
         epoch: RevocationEpoch,
     ) -> Option<ConnectionRegistration> {
         let mut state = self.lock();
         if RevocationEpoch::of(&state, device) != epoch {
             return None;
         }
-        Some(self.insert(&mut state, device, connection))
+        let stable_id = connection.id();
+        state.connections.entry(*device).or_default().push(Tracked {
+            stable_id,
+            connection: CloseHandle::Managed(connection),
+        });
+        Some(ConnectionRegistration {
+            owner: self.clone(),
+            device: *device,
+            stable_id,
+        })
     }
 
     /// 关闭并移除 `device` 的全部登记连接，并使进行中的拨号失效。
@@ -116,7 +134,7 @@ impl AdmittedConnections {
         let stable_id = connection.stable_id();
         state.connections.entry(*device).or_default().push(Tracked {
             stable_id,
-            connection: connection.clone(),
+            connection: CloseHandle::Native(connection.clone()),
         });
         ConnectionRegistration {
             owner: self.clone(),
@@ -127,7 +145,10 @@ impl AdmittedConnections {
 
     fn close(tracked: Vec<Tracked>, reason: &'static [u8]) {
         for entry in tracked {
-            entry.connection.close(0u32.into(), reason);
+            match entry.connection {
+                CloseHandle::Native(connection) => connection.close(0u32.into(), reason),
+                CloseHandle::Managed(connection) => connection.close(),
+            }
         }
     }
 

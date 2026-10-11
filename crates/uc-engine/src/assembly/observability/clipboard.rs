@@ -19,7 +19,7 @@ use uc_core::ports::{
 use uc_core::SystemClipboardSnapshot;
 use uc_observability_contract::diagnostics::{
     complete_operation, operation_span, DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation,
-    DiagnosticRole, DiagnosticSpanKind, OperationCompletion, OperationContext,
+    DiagnosticRole, DiagnosticSpanKind, ObservationContext, OperationCompletion, OperationContext,
 };
 
 pub(crate) fn observe_clipboard(
@@ -160,7 +160,8 @@ pub(crate) async fn observe_resend(
         started,
         finished: false,
     };
-    let result = action.instrument(span.clone()).await;
+    let observation = span.in_scope(ObservationContext::capture);
+    let result = observation.scope(action.instrument(span.clone())).await;
     cancellation.finished = true;
     span.in_scope(|| {
         let domain = DiagnosticDomain::Clipboard;
