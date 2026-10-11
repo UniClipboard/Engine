@@ -39,6 +39,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use uc_application::facade::InboundActivationOwner;
 
 use thiserror::Error;
 use tracing::instrument;
@@ -565,6 +566,17 @@ impl ApplyIncomingMobileClipUseCase {
                         Some(ReceiveItemRole::File)
                     )
                 );
+                self.maybe_emit_inbound_synced(&dispatch_outcome, payload_bytes);
+                self.maybe_fan_out_to_paired_peers(
+                    &source_device_id,
+                    &dispatch_outcome,
+                    snapshot_for_fanout,
+                );
+                self.maybe_announce_activation(&dispatch_outcome, snapshot_for_announce)
+                    .await;
+                self.finalize_transfer_lifecycle(transfer_id, &dispatch_outcome)
+                    .await;
+                // 已接受内容的激活与传播必须先完成，临时文件清理失败仍原样返回。
                 if !keep_staged_file {
                     if let Some(staged_file) = staged_file.as_ref() {
                         self.file_staging
@@ -578,16 +590,6 @@ impl ApplyIncomingMobileClipUseCase {
                             })?;
                     }
                 }
-                self.maybe_emit_inbound_synced(&dispatch_outcome, payload_bytes);
-                self.maybe_fan_out_to_paired_peers(
-                    &source_device_id,
-                    &dispatch_outcome,
-                    snapshot_for_fanout,
-                );
-                self.maybe_announce_activation(&dispatch_outcome, snapshot_for_announce)
-                    .await;
-                self.finalize_transfer_lifecycle(transfer_id, &dispatch_outcome)
-                    .await;
                 dispatch_outcome
             }
         }
@@ -944,18 +946,26 @@ impl ApplyIncomingMobileClipUseCase {
             "mobile_sync apply_incoming: dispatching to ApplyInbound"
         );
 
+        let (resurface_intent, activation_owner) = if self.announce.is_some() {
+            (
+                ClipboardWriteIntent::RemotePush,
+                InboundActivationOwner::Caller,
+            )
+        } else {
+            (
+                ClipboardWriteIntent::LocalRestore,
+                InboundActivationOwner::Inbound,
+            )
+        };
         let input = InboundClipboardApplyInput {
             from_device: pseudo_from.to_string(),
             snapshot_hash: snapshot_hash.clone(),
             plaintext,
             provisional: provisional
                 .map(|(transfer_id, role)| InboundProvisionalReceive { transfer_id, role }),
-            // The phone reached exactly one desktop, so re-activating held
-            // content is *this* device's activation: `LocalRestore` lets the
-            // watcher pick the write up and carry it to the other desktops.
-            // (The fresh-content branch needs no such help — it propagates
-            // through `maybe_fan_out_to_paired_peers`.)
-            resurface_intent: ClipboardWriteIntent::LocalRestore,
+            // 兼容层负责本地激活与传播；系统写入回声不能再触发一次捕获。
+            resurface_intent,
+            activation_owner,
         };
         let outcome = self
             .inbound
@@ -2336,11 +2346,11 @@ mod tests {
         assert_eq!(new_calls[0].1.representations.len(), 1);
     }
 
-    /// 已有内容命中 → 入站管线重激活 (`Resurfaced`) → `announce_new` 一次,
-    /// entry_id 用 `existing_entry_id`。写 OS 用 `LocalRestore` —— 手机推给
-    /// 单台桌面, 本机是激活者, watcher 要接手转播给其他桌面。
+    /// 已有内容命中 → 入站管线写回 OS (`Resurfaced`) → `announce_new` 一次。
+    /// entry_id 用 `existing_entry_id`；兼容公告负责登记与传播，OS 写入使用
+    /// `RemotePush` 抑制 watcher 回声，避免第二次激活。
     #[tokio::test]
-    async fn resurfaced_invokes_announce_new_with_local_restore_intent() {
+    async fn resurfaced_invokes_announce_new_with_remote_push_echo_suppression() {
         let mut repo = MockEntryRepo::new();
         let existing = EntryId::from("entry-existing");
         let existing_clone = existing.clone();
@@ -2358,7 +2368,7 @@ mod tests {
         write
             .expect_write()
             .times(1)
-            .withf(|_, intent| *intent == ClipboardWriteIntent::LocalRestore)
+            .withf(|_, intent| *intent == ClipboardWriteIntent::RemotePush)
             .returning(|_, _| Ok(()));
         let mut touch = MockTouchEntry::new();
         touch

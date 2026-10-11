@@ -16,7 +16,7 @@ impl MobileEngine {
             })?;
         // 停止普通请求，但失败或等待超时后仍保留生命周期通道供继续收尾。
         lock(&self.commands).take();
-        if !lock(&self.events.state).closed && !self.shutdown_pending.swap(true, Ordering::AcqRel) {
+        if !lock(&self.events.state).closed {
             match self.request_shutdown(deadline) {
                 Ok(false) => {}
                 Ok(true) => return Err(wait_timeout()),
@@ -37,7 +37,14 @@ impl MobileEngine {
 
     /// `true` 表示请求已接受，但调用方的等待预算先耗尽。
     fn request_shutdown(&self, deadline: Instant) -> Result<bool, BindingError> {
-        let commands = self.lifecycle_sender()?;
+        let commands = {
+            let commands = lock(&self.lifecycle_commands);
+            // 在同一临界区确定关闭请求所有者并保留发送者，避免并发等待者提前释放通道。
+            if self.shutdown_pending.swap(true, Ordering::AcqRel) {
+                return Ok(false);
+            }
+            commands.clone().ok_or(BindingError::AlreadyStopped)?
+        };
         let (response, result) = mpsc::channel();
         commands
             .send(LifecycleCommand::Shutdown { deadline, response })
