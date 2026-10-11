@@ -1,4 +1,5 @@
 use crate::clipboard::inbound::ClipboardReceiverPort;
+use crate::clipboard::sync::apply_inbound::InboundActivationOwner;
 use std::error::Error as StdError;
 use std::fmt;
 use std::io::{Error as IoError, ErrorKind};
@@ -184,6 +185,7 @@ impl InboundProcessor {
                 plaintext: prepared.plaintext.clone(),
                 provisional: None,
                 resurface_intent: ClipboardWriteIntent::RemotePush,
+                activation_owner: InboundActivationOwner::Inbound,
             })
             .await;
         let (action, disposition) = match &result {

@@ -39,6 +39,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use uc_application::facade::InboundActivationOwner;
 
 use thiserror::Error;
 use tracing::instrument;
@@ -944,18 +945,26 @@ impl ApplyIncomingMobileClipUseCase {
             "mobile_sync apply_incoming: dispatching to ApplyInbound"
         );
 
+        let (resurface_intent, activation_owner) = if self.announce.is_some() {
+            (
+                ClipboardWriteIntent::RemotePush,
+                InboundActivationOwner::Caller,
+            )
+        } else {
+            (
+                ClipboardWriteIntent::LocalRestore,
+                InboundActivationOwner::Inbound,
+            )
+        };
         let input = InboundClipboardApplyInput {
             from_device: pseudo_from.to_string(),
             snapshot_hash: snapshot_hash.clone(),
             plaintext,
             provisional: provisional
                 .map(|(transfer_id, role)| InboundProvisionalReceive { transfer_id, role }),
-            // The phone reached exactly one desktop, so re-activating held
-            // content is *this* device's activation: `LocalRestore` lets the
-            // watcher pick the write up and carry it to the other desktops.
-            // (The fresh-content branch needs no such help — it propagates
-            // through `maybe_fan_out_to_paired_peers`.)
-            resurface_intent: ClipboardWriteIntent::LocalRestore,
+            // 兼容层负责本地激活与传播；系统写入回声不能再触发一次捕获。
+            resurface_intent,
+            activation_owner,
         };
         let outcome = self
             .inbound

@@ -1,3 +1,4 @@
+use crate::clipboard::sync::apply_inbound::InboundActivationOwner;
 use async_trait::async_trait;
 use bytes::Bytes;
 use thiserror::Error;
@@ -64,6 +65,7 @@ pub struct InboundClipboardApplyInput {
     /// See [`ApplyInboundInput::resurface_intent`] — only consulted when the
     /// delivery resolves to an already-held entry.
     pub resurface_intent: ClipboardWriteIntent,
+    pub activation_owner: InboundActivationOwner,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +86,7 @@ impl InboundClipboardApplyPort for ApplyInboundClipboardUseCase {
             snapshot_hash: input.snapshot_hash,
             plaintext: input.plaintext,
             resurface_intent: input.resurface_intent,
+            activation_owner: input.activation_owner,
         };
         let outcome = match provisional {
             Some(provisional) => {

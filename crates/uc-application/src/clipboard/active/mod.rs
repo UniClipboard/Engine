@@ -18,6 +18,7 @@ pub use reconcile::{
     ActiveClipboardReconcileOutcome,
 };
 
+use crate::clipboard::sync::apply_inbound::InboundActivationOwner;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -419,6 +420,7 @@ impl InboundPulledContentStore for PulledContentStore {
                 // the intent never reaches the clipboard. `RemotePush` states
                 // the truth of where the content came from.
                 resurface_intent: ClipboardWriteIntent::RemotePush,
+                activation_owner: InboundActivationOwner::Inbound,
             })
             .await
             .map_err(|err| InboundPulledContentStoreError::Store(anyhow::Error::from(err)))?;

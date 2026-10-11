@@ -94,7 +94,8 @@ pub use crate::clipboard::outbound::{
 };
 pub use crate::clipboard::sync::apply_inbound::{
     ApplyInboundError, ApplyInboundInput, ApplyOutcome, FileCacheBlobMaterializer,
-    InboundBlobFetcher, InboundCapture, InboundSnapshotRebuild, InboundWrite,
+    InboundActivationOwner, InboundBlobFetcher, InboundCapture, InboundSnapshotRebuild,
+    InboundWrite,
 };
 pub use crate::clipboard::sync::payload_codec::{self, encode_snapshot_to_v3_bytes};
 pub use crate::clipboard::sync::{

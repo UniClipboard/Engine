@@ -55,7 +55,7 @@ use super::materializer::{
 };
 use super::ports::{InboundCapture, InboundSnapshotRebuild, InboundWrite};
 use super::timing::{RAPID_DUPLICATE_WINDOW, VISIBLE_DUPLICATE_WINDOW};
-use super::{ApplyInboundError, ApplyInboundInput, ApplyOutcome};
+use super::{ApplyInboundError, ApplyInboundInput, ApplyOutcome, InboundActivationOwner};
 
 const RECENT_INBOUND_MAX_RECORDS: u64 = 128;
 
@@ -483,7 +483,11 @@ impl ApplyInboundClipboardUseCase {
         entry_id: EntryId,
         activated_by: uc_core::ids::DeviceId,
         activated_at_ms: i64,
+        owner: InboundActivationOwner,
     ) {
+        if owner == InboundActivationOwner::Caller {
+            return;
+        }
         let Some((register, mobile_consumability)) = self.active_registration() else {
             return;
         };
@@ -908,6 +912,7 @@ impl ApplyInboundClipboardUseCase {
             existing_id.clone(),
             input.from_device,
             activated_at_ms,
+            input.activation_owner,
         )
         .await;
 
@@ -1599,6 +1604,7 @@ impl ApplyInboundClipboardUseCase {
                 entry_id.clone(),
                 input.from_device,
                 snapshot_for_write.ts_ms,
+                input.activation_owner,
             )
             .await;
 

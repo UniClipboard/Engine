@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 
 mod lifecycle;
 
+use crate::clipboard::sync::apply_inbound::InboundActivationOwner;
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -702,6 +703,7 @@ fn fixture_input(text: &str) -> (ApplyInboundInput, String) {
             snapshot_hash: snapshot_hash.clone(),
             plaintext,
             resurface_intent: ClipboardWriteIntent::RemotePush,
+            activation_owner: InboundActivationOwner::Inbound,
         },
         snapshot_hash,
     )
@@ -729,6 +731,7 @@ fn fixture_input_from_snapshot(snapshot: SystemClipboardSnapshot) -> (ApplyInbou
             snapshot_hash: snapshot_hash.clone(),
             plaintext,
             resurface_intent: ClipboardWriteIntent::RemotePush,
+            activation_owner: InboundActivationOwner::Inbound,
         },
         snapshot_hash,
     )
@@ -1295,6 +1298,7 @@ async fn decode_failed_on_truncated_envelope() {
         snapshot_hash: "blake3v1:00".to_string(),
         plaintext: Bytes::from_static(b"not a valid V3 envelope"),
         resurface_intent: ClipboardWriteIntent::RemotePush,
+        activation_owner: InboundActivationOwner::Inbound,
     };
 
     let mut repo = MockEntryRepo::new();
@@ -1467,6 +1471,7 @@ async fn materializes_blob_refs_before_capture_and_write() {
         snapshot_hash: snapshot_hash.clone(),
         plaintext,
         resurface_intent: ClipboardWriteIntent::RemotePush,
+        activation_owner: InboundActivationOwner::Inbound,
     };
 
     let mut repo = MockEntryRepo::new();
@@ -1564,6 +1569,7 @@ async fn partial_materialize_persists_entry_but_skips_os_write() {
         snapshot_hash,
         plaintext,
         resurface_intent: ClipboardWriteIntent::RemotePush,
+        activation_owner: InboundActivationOwner::Inbound,
     };
 
     let mut repo = MockEntryRepo::new();
@@ -1655,12 +1661,14 @@ async fn partial_materialize_does_not_register_dedup_entry() {
         snapshot_hash: snapshot_hash.clone(),
         plaintext: plaintext.clone(),
         resurface_intent: ClipboardWriteIntent::RemotePush,
+        activation_owner: InboundActivationOwner::Inbound,
     };
     let input2 = ApplyInboundInput {
         from_device: DeviceId::new("peer-sender"),
         snapshot_hash,
         plaintext,
         resurface_intent: ClipboardWriteIntent::RemotePush,
+        activation_owner: InboundActivationOwner::Inbound,
     };
 
     let mut repo = MockEntryRepo::new();
@@ -2267,6 +2275,7 @@ async fn apply_inbound_materializes_and_commits_mixed_directory_payload() {
             snapshot_hash,
             plaintext,
             resurface_intent: ClipboardWriteIntent::RemotePush,
+            activation_owner: InboundActivationOwner::Inbound,
         })
         .await
         .expect("directory payload should apply");
@@ -3253,6 +3262,7 @@ fn file_blob_input() -> ApplyInboundInput {
         snapshot_hash,
         plaintext,
         resurface_intent: ClipboardWriteIntent::RemotePush,
+        activation_owner: InboundActivationOwner::Inbound,
     }
 }
 
@@ -4582,6 +4592,7 @@ async fn apply_inbound_does_not_replace_an_existing_nonterminal_attempt() {
             snapshot_hash,
             plaintext,
             resurface_intent: ClipboardWriteIntent::RemotePush,
+            activation_owner: InboundActivationOwner::Inbound,
         })
         .await
         .expect_err("a nonterminal attempt cannot be replaced");
@@ -4632,6 +4643,7 @@ async fn explicit_directory_cancellation_emits_cancelled_not_failed() {
             snapshot_hash,
             plaintext,
             resurface_intent: ClipboardWriteIntent::RemotePush,
+            activation_owner: InboundActivationOwner::Inbound,
         })
         .await;
     assert!(result.is_err());
@@ -4700,6 +4712,7 @@ async fn apply_inbound_rejects_identity_mismatch_before_publication() {
             snapshot_hash,
             plaintext,
             resurface_intent: ClipboardWriteIntent::RemotePush,
+            activation_owner: InboundActivationOwner::Inbound,
         })
         .await
         .expect_err("identity mismatch must fail the delivery");
@@ -4753,6 +4766,7 @@ async fn apply_inbound_withdraws_published_roots_when_persistence_fails() {
             snapshot_hash,
             plaintext,
             resurface_intent: ClipboardWriteIntent::RemotePush,
+            activation_owner: InboundActivationOwner::Inbound,
         })
         .await
         .expect_err("a failed receipt must fail the delivery");

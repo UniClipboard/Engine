@@ -90,6 +90,15 @@ pub(crate) use usecase::{
     InboundApplyCommonDeps, InboundReceiveAttemptDeps, InteractiveReceiveDeps, StoreOnlyPullDeps,
 };
 
+/// 一次入站落地由哪个流程负责登记激活；不影响内容存储和系统写入。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InboundActivationOwner {
+    /// P2P 等入站流程登记发送者的激活。
+    Inbound,
+    /// 移动兼容流程在落地后登记并传播本机激活。
+    Caller,
+}
+
 /// Caller-supplied input mapped from the facade's public `InboundNotice`.
 ///
 /// Keeping this struct separate from `crate::facade::clipboard::InboundNotice`
@@ -103,20 +112,12 @@ pub struct ApplyInboundInput {
     /// Write intent for the [`ApplyOutcome::Resurfaced`] branch only — the
     /// fresh-content branch always writes as `RemotePush`.
     ///
-    /// The two inbound channels re-activate held content under different
-    /// identities, and the intent is what encodes that difference to the
-    /// watcher (see [`ClipboardWriteIntent`]):
-    ///
-    /// * **P2P bulk sync** → `RemotePush`. The sending peer already broadcast
-    ///   this clip to the whole space, so the watcher must short-circuit on our
-    ///   own write rather than re-dispatch it (loop defence).
-    /// * **Mobile LAN sync** → `LocalRestore`. The phone reached exactly one
-    ///   desktop; this device is the one activating the content, so the watcher
-    ///   is expected to pick the write up and propagate it to the remaining
-    ///   desktops.
+    /// P2P 和移动兼容入站均抑制系统写入回声。移动兼容层负责
+    /// 显式传播本地激活，不依赖 watcher 再次捕获。
     ///
     /// [`ClipboardWriteIntent`]: crate::clipboard::write::ClipboardWriteIntent
     pub resurface_intent: ClipboardWriteIntent,
+    pub activation_owner: InboundActivationOwner,
 }
 
 /// Result of one `execute` call. Daemon's worker maps each variant to a
