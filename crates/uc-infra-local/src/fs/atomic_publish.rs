@@ -160,9 +160,9 @@ fn rename_no_replace(source: &Path, destination: &Path) -> Result<(), PublishErr
     rename_no_replace_io(source, destination).map_err(classify_os_error)
 }
 
-/// 同步文件流程复用相同原子操作，并保留系统错误来源。
+/// 跨 Infra crate 的同步文件流程复用相同原子操作，并保留系统错误来源。
 #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
-pub(crate) fn rename_no_replace_io(source: &Path, destination: &Path) -> std::io::Result<()> {
+pub fn rename_no_replace_io(source: &Path, destination: &Path) -> std::io::Result<()> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
