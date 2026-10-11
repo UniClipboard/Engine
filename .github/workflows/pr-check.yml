@@ -26,7 +26,10 @@ jobs:
   checks:
     name: Engine repository checks
     if: github.event.action != 'labeled'
-    runs-on: macos-14
+    # 保持 Apple Silicon 宿主；固定 Xcode，避免镜像默认工具链漂移。
+    runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
     # 编译缓存凭据：只有 main 上的可信运行绑定限定 main 分支的写入环境，其余运行（PR、合并队列、其他分支）用只读令牌；
     # fork 与 Dependabot 拿不到任何 secret，回退为按 ref 隔离的 GitHub Actions 缓存。
     # 本文件其余 Rust job 使用相同绑定；详见 docs/design-docs/decisions/029-ci-r2-compile-cache.md。

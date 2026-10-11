@@ -36,7 +36,10 @@ env:
 jobs:
   build:
     name: Build isolated LAN compatibility assets
-    runs-on: macos-14
+    # 保持 Apple Silicon 宿主；固定 Xcode，避免镜像默认工具链漂移。
+    runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
     steps:
       - uses: actions/checkout@v4
         with:

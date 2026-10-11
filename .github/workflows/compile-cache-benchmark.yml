@@ -10,7 +10,7 @@ on:
         description: Runner category to measure
         type: choice
         default: ubuntu-24.04
-        options: [ubuntu-24.04, macos-14]
+        options: [ubuntu-24.04, macos-15]
 
 permissions:
   contents: read
@@ -29,6 +29,11 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      # 与 PR 检查及移动端发布使用同一 Apple 工具链。
+      - name: Select Xcode 16.4
+        if: runner.os == 'macOS'
+        run: echo "DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer" >> "$GITHUB_ENV"
 
       - name: Install build tools
         if: runner.os == 'Linux'
