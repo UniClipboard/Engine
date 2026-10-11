@@ -27,7 +27,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, macos-14]
+        runner: [ubuntu-24.04, macos-15]
     environment:
       name: ${{ github.event_name == 'push' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
       deployment: false
@@ -46,6 +46,11 @@ jobs:
             echo '::error::MBX publication requires a genuinely protected main branch'
             exit 1
           fi
+
+      # 与 PR 检查及移动端发布使用同一 Apple 工具链。
+      - name: Select Xcode 16.4
+        if: runner.os == 'macOS'
+        run: echo "DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer" >> "$GITHUB_ENV"
 
       - name: Install Linux build tools
         if: runner.os == 'Linux'

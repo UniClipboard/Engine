@@ -122,7 +122,10 @@ jobs:
   ios:
     name: Build iOS
     needs: prepare
-    runs-on: macos-14
+    # 保持 Apple Silicon 宿主；固定 Xcode，避免镜像默认工具链漂移。
+    runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
     permissions:
       contents: read
     steps:
@@ -181,7 +184,10 @@ jobs:
   android:
     name: Build Android
     needs: prepare
-    runs-on: macos-14
+    # 保持 Apple Silicon 宿主；固定 Xcode，避免镜像默认工具链漂移。
+    runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
     permissions:
       contents: read
     steps:
