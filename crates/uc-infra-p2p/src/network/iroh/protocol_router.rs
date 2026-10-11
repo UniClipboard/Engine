@@ -1,4 +1,4 @@
-//! Preserve registration ownership while selecting the current wire version first.
+//! 保持协议登记所有权，并优先协商当前版本。
 
 use iroh::protocol::{DynProtocolHandler, IncomingFilterOutcome, Router, RouterBuilder};
 use iroh::Endpoint;
@@ -8,6 +8,7 @@ use std::sync::{
 };
 
 use super::PEER_REACHABILITY_ALPN;
+use uc_sync_protocol::clipboard::MULTIPLEXED_CLIPBOARD_ALPN;
 
 pub(super) struct ProtocolRouterBuilder {
     inner: RouterBuilder,
@@ -36,9 +37,16 @@ impl ProtocolRouterBuilder {
     }
 
     pub(super) fn spawn(mut self) -> Router {
-        // Router sorts ALPNs lexically, but TLS uses the server's preference order.
-        self.alpns
-            .sort_by_key(|alpn| alpn.as_slice() != PEER_REACHABILITY_ALPN);
+        // Router 默认按字典排序；TLS 使用服务端偏好，显式优先 presence 当前版与 clipboard 多流版。
+        self.alpns.sort_by_key(|alpn| {
+            if alpn.as_slice() == PEER_REACHABILITY_ALPN {
+                0
+            } else if alpn.as_slice() == MULTIPLEXED_CLIPBOARD_ALPN {
+                1
+            } else {
+                2
+            }
+        });
         let ready = Arc::new(AtomicBool::new(false));
         self.inner = self.inner.incoming_filter(Arc::new({
             let ready = ready.clone();
@@ -99,6 +107,51 @@ mod tests {
         async fn shutdown(&self) {
             self.shutdowns.fetch_add(1, AtomicOrdering::SeqCst);
         }
+    }
+
+    #[tokio::test]
+    async fn clipboard_negotiation_prefers_multiplexed_and_preserves_old_peers() {
+        use uc_sync_protocol::clipboard::CLIPBOARD_ALPN;
+        let server = Endpoint::builder(iroh::endpoint::presets::N0)
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup()
+            .bind()
+            .await
+            .unwrap();
+        let client = Endpoint::builder(iroh::endpoint::presets::N0)
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup()
+            .bind()
+            .await
+            .unwrap();
+        let router = ProtocolRouterBuilder::new(server)
+            .accept(CLIPBOARD_ALPN, Hold)
+            .accept(MULTIPLEXED_CLIPBOARD_ALPN, Hold)
+            .spawn();
+        for offers in [
+            vec![CLIPBOARD_ALPN.to_vec(), MULTIPLEXED_CLIPBOARD_ALPN.to_vec()],
+            vec![CLIPBOARD_ALPN.to_vec()],
+        ] {
+            let expected = if offers.len() == 2 {
+                MULTIPLEXED_CLIPBOARD_ALPN
+            } else {
+                CLIPBOARD_ALPN
+            };
+            let connection = client
+                .connect_with_opts(
+                    router.endpoint().addr(),
+                    offers[0].as_slice(),
+                    ConnectOptions::new().with_additional_alpns(offers[1..].to_vec()),
+                )
+                .await
+                .unwrap()
+                .await
+                .unwrap();
+            assert_eq!(connection.alpn(), expected);
+            connection.close(0u32.into(), b"test_complete");
+        }
+        client.close().await;
+        router.shutdown().await.unwrap();
     }
 
     #[tokio::test]

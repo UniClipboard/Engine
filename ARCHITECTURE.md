@@ -61,6 +61,7 @@ Port 归需要能力的层所有，因此 Infra 既可以实现 Core port，也�
 
 - [设计文档索引](docs/design-docs/index.md)
 - [核心信念](docs/design-docs/core-beliefs.md)
+- [普通剪贴板连接与独立交换](docs/design-docs/clipboard-connectivity.md)
 - [Space Application 设计与代码地图](docs/design-docs/space-application.md)
 - [执行计划](docs/PLANS.md)
 - [可靠性](docs/RELIABILITY.md)

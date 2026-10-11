@@ -89,10 +89,9 @@ use super::addr_filter::apply_addr_filter;
 use super::admission_transport_material::IrohAdmissionTransportMaterial;
 use super::blobs::{IrohBlobTransferAdapter, BLOBS_ALPN};
 #[cfg(test)]
-use super::clipboard_dispatch_adapter::LEGACY_CLIPBOARD_ALPN;
-use super::clipboard_dispatch_adapter::{IrohClipboardDispatchAdapter, CLIPBOARD_ALPN};
-use super::clipboard_receiver_adapter::IrohClipboardReceiverAdapter;
+const LEGACY_CLIPBOARD_ALPN: &[u8] = b"uniclipboard/clipboard/0";
 use super::connection_channel_adapter::IrohConnectionChannelAdapter;
+use super::connectivity::{IrohClipboardHandler, IrohConnectionAdmission, IrohConnectivityBackend};
 use super::group_update_adapter::{
     IrohGroupUpdateAdapter, GROUP_UPDATE_ALPN, LEGACY_GROUP_UPDATE_ALPN,
 };
@@ -116,6 +115,13 @@ use super::space_admission::{
 use super::transfer_progress_adapter::{
     InboundProgressEvent, IrohTransferProgressAdapter, TRANSFER_PROGRESS_ALPN,
 };
+use crate::network::clipboard::{ClipboardDispatchAdapter, ClipboardReceiverAdapter};
+#[cfg(test)]
+use uc_application::deps::ConnectivityPolicy;
+use uc_application::deps::{
+    ConnectivityBackend, ConnectivityManager, SessionConnectionAdmissionPort,
+};
+use uc_sync_protocol::clipboard::{CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN};
 use uc_sync_protocol::membership_branch_recovery::MEMBERSHIP_BRANCH_RECOVERY_ALPN;
 
 #[cfg(test)]
@@ -138,12 +144,13 @@ pub struct PairingInvitationHandlers {
     pub invitation_by_address: Arc<dyn PairingInvitationByAddressPort>,
 }
 
-/// The two clipboard ports produced by [`IrohSessionBuilder::install_clipboard`].
-///
-/// `dispatch` opens a fresh bi-stream per message; `receiver` exposes the
-/// broadcast of inbound payloads. Both share the endpoint — the receiver
-/// handler is also registered under [`CLIPBOARD_ALPN`] on the same
-/// `RouterBuilder`.
+/// 组装普通剪贴板连接负责人所需的完整能力；不暴露准入步骤。
+pub struct ClipboardConnectivityDeps {
+    pub backend: Arc<dyn ConnectivityBackend>,
+    pub admission: Arc<dyn SessionConnectionAdmissionPort>,
+}
+
+/// 普通剪贴板双向能力；同一 endpoint 同时服务 /2 多流和 /1 单次交换。
 pub struct ClipboardHandlers {
     pub dispatch: Arc<dyn ClipboardDispatchPort>,
     pub receiver: Arc<dyn ClipboardReceiverPort>,
@@ -983,6 +990,7 @@ impl IrohNodeBuilder {
             SPACE_ADMISSION_ALPN,
             PEER_REACHABILITY_ALPN,
             LEGACY_PEER_REACHABILITY_ALPN,
+            MULTIPLEXED_CLIPBOARD_ALPN,
             CLIPBOARD_ALPN,
             GROUP_UPDATE_ALPN,
             LEGACY_GROUP_UPDATE_ALPN,
@@ -1141,53 +1149,43 @@ impl IrohSessionBuilder {
         ))
     }
 
-    /// Install the clipboard sync transport (Slice 2 Phase 2):
-    ///
-    /// * Registers [`IrohClipboardReceiverHandler`] as the
-    ///   [`CLIPBOARD_ALPN`] `ProtocolHandler`. Unknown peers are rejected
-    ///   at the ack boundary, not at bind time — see the receiver adapter
-    ///   for identity resolution via `remote_id()` + fingerprint.
-    /// * Returns both clipboard ports as trait objects. The dispatch
-    ///   adapter shares the same `Endpoint` and `PeerAddressRepositoryPort`
-    ///   as peer_reachability — reusing the stored `addr_blob` per peer so a
-    ///   dispatch flows through the same NAT/relay mapping the peer_reachability
-    ///   watchdog already established.
-    ///
-    /// Must be called before [`spawn`](Self::spawn). Coexists with
-    /// invitation discovery / [`install_peer_reachability`] — all transports share
-    /// a single router.
-    ///
-    /// [`IrohClipboardReceiverHandler`]: super::clipboard_receiver_adapter::IrohClipboardReceiverHandler
-    pub fn install_clipboard(
-        &mut self,
+    /// 提供同一 endpoint、会话登记和权威身份目录下的连接能力，供 Engine 组装负责人。
+    pub fn clipboard_connectivity_deps(
+        &self,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         identities: Arc<dyn PeerIdentityDirectoryPort>,
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         peer_reachability: Arc<dyn PeerReachabilityPort>,
-    ) -> Result<ClipboardHandlers, IrohNodeError> {
-        let receiver = IrohClipboardReceiverAdapter::with_connections(
-            identities,
-            peer_admission,
-            fingerprint_factory,
-            self.admitted_connections.clone(),
-        );
-        let handler = receiver.handler();
-
-        self.install_session_handler([CLIPBOARD_ALPN], handler)?;
-
-        let dispatch = Arc::new(
-            IrohClipboardDispatchAdapter::new(
-                Arc::clone(&self.context.endpoint),
+    ) -> ClipboardConnectivityDeps {
+        ClipboardConnectivityDeps {
+            backend: Arc::new(IrohConnectivityBackend::new(
+                self.context.endpoint.clone(),
                 peer_addr_repo,
                 peer_reachability,
-            )
-            .with_connections(self.admitted_connections.clone()),
-        );
+            )),
+            admission: Arc::new(IrohConnectionAdmission::new(
+                identities,
+                peer_admission,
+                fingerprint_factory,
+                self.admitted_connections.clone(),
+            )),
+        }
+    }
 
+    /// 安装普通剪贴板完整交换能力；两种 ALPN 共享同一会话负责人。
+    pub fn install_clipboard(
+        &mut self,
+        manager: ConnectivityManager,
+    ) -> Result<ClipboardHandlers, IrohNodeError> {
+        let receiver = Arc::new(ClipboardReceiverAdapter::new(manager.clone()));
+        self.install_session_handler(
+            [MULTIPLEXED_CLIPBOARD_ALPN, CLIPBOARD_ALPN],
+            IrohClipboardHandler::new(receiver.clone()),
+        )?;
         Ok(ClipboardHandlers {
-            dispatch,
-            receiver: Arc::new(receiver),
+            dispatch: Arc::new(ClipboardDispatchAdapter::new(manager)),
+            receiver,
         })
     }
 
@@ -2046,13 +2044,22 @@ mod tests {
             .expect("install peer reachability");
 
         let ClipboardHandlers { dispatch, receiver } = builder
-            .install_clipboard(
-                peer_addr_repo,
-                Arc::new(EmptyMemberRepo),
-                Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
-                Arc::new(uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory),
-                peer_reachability,
-            )
+            .install_clipboard({
+                let deps = builder.clipboard_connectivity_deps(
+                    peer_addr_repo,
+                    Arc::new(EmptyMemberRepo),
+                    Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
+                    Arc::new(
+                        uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory,
+                    ),
+                    peer_reachability,
+                );
+                ConnectivityManager::new(
+                    deps.backend,
+                    deps.admission,
+                    ConnectivityPolicy::default(),
+                )
+            })
             .expect("install clipboard");
 
         // Dispatch against an unknown device — the repo is empty so we
@@ -2114,13 +2121,22 @@ mod tests {
             .expect("install peer reachability");
 
         let _clipboard = builder
-            .install_clipboard(
-                peer_addr_repo,
-                Arc::new(EmptyMemberRepo),
-                Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
-                Arc::new(uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory),
-                peer_reachability,
-            )
+            .install_clipboard({
+                let deps = builder.clipboard_connectivity_deps(
+                    peer_addr_repo,
+                    Arc::new(EmptyMemberRepo),
+                    Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
+                    Arc::new(
+                        uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory,
+                    ),
+                    peer_reachability,
+                );
+                ConnectivityManager::new(
+                    deps.backend,
+                    deps.admission,
+                    ConnectivityPolicy::default(),
+                )
+            })
             .expect("install clipboard");
 
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -2624,6 +2640,7 @@ mod tests {
     mod removed_member_connections {
         use super::*;
         use std::sync::atomic::{AtomicBool, Ordering};
+        use uc_application::deps::ClipboardDelivery;
         use uc_core::membership::{
             MemberRepositoryPort, MembershipError, PeerAdmissionError, PeerAdmissionPort,
             SpaceMember,
@@ -2793,13 +2810,20 @@ mod tests {
                     )
                     .expect("install peer reachability");
                 let clipboard = builder
-                    .install_clipboard(
-                        Arc::clone(&peer_addr_repo),
-                        identities.clone(),
-                        admission.clone(),
-                        fingerprints.clone(),
-                        reachability.clone(),
-                    )
+                    .install_clipboard({
+                        let deps = builder.clipboard_connectivity_deps(
+                            Arc::clone(&peer_addr_repo),
+                            identities.clone(),
+                            admission.clone(),
+                            fingerprints.clone(),
+                            reachability.clone(),
+                        );
+                        ConnectivityManager::new(
+                            deps.backend,
+                            deps.admission,
+                            ConnectivityPolicy::default(),
+                        )
+                    })
                     .expect("install clipboard");
                 let progress = builder
                     .install_transfer_progress(
@@ -2940,6 +2964,72 @@ mod tests {
                 .expect("dispatch task joins");
             assert!(report.outcome.is_err());
             peer_router.shutdown().await.ok();
+            fixture.node.shutdown().await.unwrap();
+        }
+
+        async fn pending_multiplexed_deliveries(
+            fixture: &Fixture,
+        ) -> (iroh::endpoint::Connection, Vec<ClipboardDelivery>) {
+            let mut inbound = fixture.clipboard.receiver.subscribe();
+            let connection = fixture
+                .peer
+                .connect(fixture.node_addr.clone(), MULTIPLEXED_CLIPBOARD_ALPN)
+                .await
+                .unwrap();
+            assert_eq!(connection.alpn(), MULTIPLEXED_CLIPBOARD_ALPN);
+            for payload in [b"first".as_slice(), b"second".as_slice()] {
+                let (mut send, _recv) = connection.open_bi().await.unwrap();
+                clipboard_wire::write_frame(
+                    &mut send,
+                    &uc_core::ports::ClipboardHeader {
+                        version: uc_core::ports::ClipboardHeader::CURRENT_VERSION,
+                        snapshot_hash: "8".repeat(64),
+                        captured_at_ms: 1_700_000_000_000,
+                        origin_device_id: "peer".into(),
+                        origin_device_name: "Peer".into(),
+                        payload_version: 3,
+                    },
+                    None,
+                    &bytes::Bytes::copy_from_slice(payload),
+                )
+                .await
+                .unwrap();
+                send.finish().unwrap();
+            }
+            let mut deliveries = Vec::new();
+            for _ in 0..2 {
+                deliveries.push(
+                    tokio::time::timeout(STEP, inbound.recv())
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                );
+            }
+            (connection, deliveries)
+        }
+
+        #[tokio::test]
+        async fn multiplexed_streams_close_together_when_the_member_is_removed() {
+            let fixture = Fixture::start().await;
+            let (connection, deliveries) = pending_multiplexed_deliveries(&fixture).await;
+            fixture.remove_member().await;
+            Fixture::assert_closed(&connection, "multiplexed-clipboard").await;
+            drop(deliveries);
+            fixture.node.shutdown().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn multiplexed_streams_quiesce_without_rebinding_the_endpoint() {
+            let mut fixture = Fixture::start().await;
+            let endpoint_id = fixture.node.session_context.endpoint.id();
+            let (connection, deliveries) = pending_multiplexed_deliveries(&fixture).await;
+            tokio::time::timeout(CLOSE_BUDGET, fixture.node.quiesce_session())
+                .await
+                .unwrap()
+                .unwrap();
+            Fixture::assert_closed(&connection, "retired-multiplexed-clipboard").await;
+            assert_eq!(fixture.node.session_context.endpoint.id(), endpoint_id);
+            drop(deliveries);
             fixture.node.shutdown().await.unwrap();
         }
 

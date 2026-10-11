@@ -2,9 +2,12 @@
 //!
 //! 使用真实 iroh 连接和现有公开构造入口驱动 presence 与剪贴板接收入站；每次拒绝恰好留下一条
 //! `peer.inbound.rejected`，对端看到的拒绝字节保持不变，导出不含设备标识或名称。
+#[path = "support/clipboard.rs"]
+mod clipboard_support;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use uc_application::deps::{KnownPeerIdentity, MembershipLedgerError, PeerIdentityDirectoryPort};
+use uc_infra_p2p::network::iroh::connectivity::IrohClipboardHandler;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -23,8 +26,7 @@ use uc_core::ports::{
 use uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory;
 use uc_infra_local::SystemClock;
 use uc_infra_p2p::network::iroh::{
-    IrohClipboardReceiverAdapter, IrohPeerReachabilityAdapter, CLIPBOARD_ALPN,
-    PEER_REACHABILITY_ALPN,
+    IrohPeerReachabilityAdapter, CLIPBOARD_ALPN, PEER_REACHABILITY_ALPN,
 };
 use uc_observability_runtime::*;
 use uc_sync_protocol::clipboard as clipboard_wire;
@@ -221,13 +223,13 @@ async fn presence(
 /// 发送一帧剪贴板内容，返回接收方的回执字节。
 async fn clipboard(dialer: &Endpoint, members: Members, admission: Arc<Admission>) -> u8 {
     let receiver = endpoint().await;
-    let adapter = IrohClipboardReceiverAdapter::new(
+    let adapter = clipboard_support::receiver(
         Arc::new(members),
         admission,
         Arc::new(Sha256IdentityFingerprintFactory),
     );
     let router = Router::builder((*receiver).clone())
-        .accept(CLIPBOARD_ALPN, adapter.handler())
+        .accept(CLIPBOARD_ALPN, IrohClipboardHandler::new(adapter.clone()))
         .spawn();
     let connection = dialer
         .connect(receiver.addr(), CLIPBOARD_ALPN)

@@ -3,6 +3,8 @@
 //! 同一份源码也被覆盖到升级兼容矩阵的各个旧版 Engine rev 上构建；旧版公开接口的差异由按能力
 //! 划分的 feature 表达，锚点与 feature 的对应关系见 `tests/upgrade-matrix/host-features.json`。
 
+#[cfg(feature = "current-engine")]
+mod concurrent_send;
 mod content;
 #[cfg(feature = "current-engine")]
 mod network_faults;
@@ -229,6 +231,8 @@ async fn operation(
 ) -> Result<Value> {
     let command = string(request, "command")?;
     match command {
+        #[cfg(feature = "current-engine")]
+        "send_concurrent" => return concurrent_send::send(engine, request).await,
         #[cfg(feature = "current-engine")]
         "network_endpoint" | "reject_reachability_dials" | "rejected_dials" => {
             return network_faults::execute(engine, command, request).await;

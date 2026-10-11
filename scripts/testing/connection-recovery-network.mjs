@@ -272,6 +272,23 @@ async function transfer(left, right, marker) {
   }
 }
 
+// 稳定 Engine 入口的并发意图与 SQLite 内容读回；同连接证据由真实连接合同测试提供。
+async function concurrentClipboard(sender, receiver) {
+  const texts = Array.from({ length: 4 }, (_, index) => `synthetic-concurrent-${sender.label}-${index}`)
+  const reports = await sender.call('send_concurrent', { peer: receiver.id, texts })
+  assert.equal(reports.length, 4)
+  for (const report of reports) assert.equal(report.total_accepted, 1, 'concurrent content not accepted')
+  await until(async () => {
+    const found = new Set()
+    for (const entry of await receiver.call('history')) {
+      const value = (await receiver.call('entry', { entry: entry.entry_id })).content
+      if (texts.includes(value)) found.add(value)
+    }
+    return found.size === texts.length
+  }, 20_000, 'concurrent exact content did not arrive')
+  return { independent_intents: 4, exact_persisted_contents: 4 }
+}
+
 async function transferFile(left, right, marker) {
   for (const [sender, receiver] of [[left, right], [right, left]]) {
     const handle = `managed-${marker}-${sender.label}`
@@ -594,6 +611,11 @@ async function run() {
       return { exact_bytes_verified: true, direction_count: 2 }
     })
   }
+  if (mode === 'direct') await scenario('E14-concurrent-clipboard', async () => {
+    const sender = peerBinary && peerSide === 0 ? b : a
+    const receiver = sender === a ? b : a
+    return concurrentClipboard(sender, receiver)
+  })
   if (mode === 'relay') { await relayScenarios(a, b); for (const node of nodes) await node.stop(); return }
   for (let iteration = 0; iteration < repeat; iteration++) {
     for (const node of nodes) { await node.drain(); node.events = [] }
@@ -827,7 +849,19 @@ async function relayScenarios(a, b) {
   for (const node of nodes) await node.start()
   await until(async () => nodes.every(node => net(node, 'ss', '-Hnt', 'state', 'established').includes(`:${relayPorts[nodes.indexOf(node)]}`)), 20_000, 'test hosts did not connect to the local relay')
   await online(nodes, 20_000)
-  await transfer(a, b, 'relay-only-baseline')
+  await requiredScenario('E02-relay-only-text-transfer', async () => {
+    await transfer(a, b, 'relay-only-baseline')
+    return { direct_paths_blocked: directDropPackets > 0, exact_text_verified: true, direction_count: 2 }
+  })
+  await requiredScenario('E02-relay-only-file-transfer', async () => {
+    await transferFile(a, b, 'relay-only-baseline')
+    return { direct_paths_blocked: directDropPackets > 0, exact_bytes_verified: true, direction_count: 2 }
+  })
+  await scenario('E14-concurrent-clipboard-relay-only', async () => {
+    const sender = peerBinary && peerSide === 0 ? b : a
+    const receiver = sender === a ? b : a
+    return { ...await concurrentClipboard(sender, receiver), direct_paths_blocked: directDropPackets > 0 }
+  })
   for (let iteration = 0; iteration < repeat; iteration++) {
     for (const node of nodes) { await node.drain(); node.events = [] }
     await scenario(`E10-relay-only-${iteration}`, async () => {

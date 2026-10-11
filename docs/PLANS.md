@@ -17,3 +17,7 @@
 
 每份 active plan 必须写明状态、完整负责人、唯一调用、成功/失败结果、恢复责任和验收条件。
 未执行的设备或发布矩阵项只能标为“跳过”。
+
+## 当前专项计划
+
+- Issue #34 第二切片：[普通剪贴板连接边界执行计划](exec-plans/completed/2026-10-11-clipboard-connectivity-plan.md)，对应[实现规格](exec-plans/completed/2026-10-11-clipboard-connectivity-spec.md)。状态为完成；切片验收及根门禁通过，完整 workspace 的成员 G2 一项失败与隔离通过均保留记录，原因待查；平台与历史发布矩阵明确跳过。

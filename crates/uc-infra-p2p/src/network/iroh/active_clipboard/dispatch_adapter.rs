@@ -9,7 +9,7 @@
 //! application layer; this adapter stays single-target.
 //!
 //! Failure mapping mirrors the bulk
-//! [`IrohClipboardDispatchAdapter`](super::clipboard_dispatch_adapter::IrohClipboardDispatchAdapter):
+//! 普通剪贴板发送适配器:
 //!
 //! * Missing / undecodable stored address, or dial failure →
 //!   [`ActiveClipboardDispatchError::Offline`]. The record is stale or the

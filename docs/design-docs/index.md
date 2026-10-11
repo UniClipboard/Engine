@@ -35,6 +35,7 @@
 - [配对生命周期与终态收尾](pairing-lifecycle.md)
 - [已配对设备自动连接](automatic-peer-connections.md)
 - [设备发现与候选目录](peer-discovery.md)
+- [普通剪贴板连接与独立交换](clipboard-connectivity.md)
 - [本地加密搜索](features/001-local-encrypted-search.md)
 - [主动刷新共享设备](features/012-automatic-shared-device-refresh.md)
 - [按设备公开等待状态](features/019-device-specific-convergence-waiting-status.md)

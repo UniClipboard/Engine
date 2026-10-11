@@ -7,14 +7,13 @@
 pub mod active_clipboard;
 mod addr_filter;
 mod admission_transport_material;
-pub(crate) mod admitted_connections;
+pub mod admitted_connections;
 pub mod blobs;
-pub mod clipboard_dispatch_adapter;
-pub mod clipboard_receiver_adapter;
 mod conn_path;
 mod connect;
 pub mod connection_channel_adapter;
 mod connection_diagnostics;
+pub mod connectivity;
 mod discovery;
 pub mod group_update_adapter;
 pub mod identity_store;
@@ -62,8 +61,6 @@ pub use active_clipboard::{
 pub(crate) use addr_filter::filter_endpoint_addr;
 pub use admission_transport_material::IrohAdmissionTransportMaterial;
 pub use blobs::{IrohBlobTransferAdapter, BLOBS_ALPN};
-pub use clipboard_dispatch_adapter::{IrohClipboardDispatchAdapter, CLIPBOARD_ALPN};
-pub use clipboard_receiver_adapter::{IrohClipboardReceiverAdapter, IrohClipboardReceiverHandler};
 pub(crate) use connect::connect_with_staggered_retry;
 pub use connection_channel_adapter::IrohConnectionChannelAdapter;
 pub use group_update_adapter::{
@@ -95,4 +92,5 @@ pub use space_admission::{
     SpaceAdmissionChannelCredentialError, SpaceAdmissionChannelCredentialPort,
     SponsorOpaqueMaterial, SPACE_ADMISSION_ALPN,
 };
+pub use uc_sync_protocol::clipboard::{CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN};
 pub use uc_sync_protocol::membership_branch_recovery::MEMBERSHIP_BRANCH_RECOVERY_ALPN;

@@ -16,6 +16,9 @@ mod removal_convergence;
 #[path = "space_membership_auto_pairing_e2e/clipboard_trace.rs"]
 mod clipboard_trace;
 
+#[path = "space_membership_auto_pairing_e2e/clipboard_connectivity.rs"]
+mod clipboard_connectivity;
+
 #[path = "space_membership_auto_pairing_e2e/pairing.rs"]
 mod pairing;
 

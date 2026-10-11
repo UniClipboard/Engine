@@ -1,21 +1,47 @@
-use super::*;
+use crate::network::iroh::admitted_connections::AdmittedConnections;
+use crate::network::iroh::connectivity::{IrohClipboardHandler, IrohConnectivityBackend};
+use crate::network::iroh::inbound_peer::{member_table_directory, member_table_identity_directory};
+use crate::network::iroh::StaticPeerAdmission;
+use tokio::sync::broadcast;
+use tracing::Instrument;
+use uc_application::deps::ConnectivityPolicy;
+use uc_application::deps::{
+    AdmissionAttempt, AdmissionGrant, ConnectionMode, ConnectivityBackend, ConnectivityError,
+    PeerConnection, SessionConnectionAdmissionPort,
+};
+use uc_observability_contract::diagnostics::{
+    operation_span, DiagnosticDomain, DiagnosticOperation, DiagnosticRole, DiagnosticSpanKind,
+    OperationContext,
+};
+
+use super::test_support::{dispatch_fixture, EpochOnlyAdmission, ReceiverFixture};
+use uc_application::deps::ClipboardDelivery;
+use uc_core::ids::DeviceId;
 use uc_core::membership::MemberRepositoryPort;
+use uc_core::ports::security::IdentityFingerprintFactoryPort;
+use uc_sync_protocol::clipboard::{
+    self as clipboard_wire, AckCode, CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN,
+};
 
 use std::collections::HashMap;
+use std::net::Ipv4Addr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::Utc;
-use iroh::protocol::Router;
-use iroh::{Endpoint, RelayMode, SecretKey};
+use futures_util::StreamExt;
+use iroh::endpoint::Connection;
+use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 use opentelemetry::trace::TraceContextExt;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_sdk::logs::{InMemoryLogExporter, SdkLoggerProvider};
 use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify, Semaphore};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::layer::SubscriberExt;
@@ -23,15 +49,12 @@ use tracing_subscriber::Layer;
 
 use uc_core::membership::{MembershipError, SpaceMember};
 use uc_core::ports::{
-    ClipboardDispatchPort, ClipboardHeader, InboundClipboardDisposition,
+    ClipboardDispatchPort, ClipboardHeader, DispatchAck, InboundClipboardDisposition,
     PeerReachabilityChanged, PeerReachabilityError, PeerReachabilityPort, ReachabilityState,
     SyncPayload,
 };
 use uc_core::MemberSyncPreferences;
 
-use crate::network::iroh::clipboard_dispatch_adapter::{
-    IrohClipboardDispatchAdapter, CLIPBOARD_ALPN,
-};
 use uc_core::ports::{PeerAddressError, PeerAddressRecord, PeerAddressRepositoryPort};
 use uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory;
 
@@ -58,15 +81,12 @@ fn test_telemetry() -> &'static TestTelemetry {
             .with_context_activation(true)
             .with_filter(filter_fn(|metadata| {
                 metadata.is_span()
-                    && metadata.target()
-                        == uc_observability_contract::diagnostics::TELEMETRY_TARGET
+                    && metadata.target() == uc_observability_contract::diagnostics::TELEMETRY_TARGET
             }));
-        let log_layer =
-            OpenTelemetryTracingBridge::new(&logs).with_filter(filter_fn(|metadata| {
-                metadata.is_event()
-                    && metadata.target()
-                        == uc_observability_contract::diagnostics::TELEMETRY_TARGET
-            }));
+        let log_layer = OpenTelemetryTracingBridge::new(&logs).with_filter(filter_fn(|metadata| {
+            metadata.is_event()
+                && metadata.target() == uc_observability_contract::diagnostics::TELEMETRY_TARGET
+        }));
         tracing::subscriber::set_global_default(
             tracing_subscriber::registry()
                 .with(trace_layer)
@@ -107,7 +127,12 @@ mockall::mock! {
 }
 
 fn peer_reachability_mock() -> Arc<dyn PeerReachabilityPort> {
-    Arc::new(MockPeerReachability::new())
+    let mut reachability = MockPeerReachability::new();
+    let (events, _) = broadcast::channel(64);
+    reachability
+        .expect_subscribe()
+        .returning(move || events.subscribe());
+    Arc::new(reachability)
 }
 
 // ----- test doubles ------------------------------------------------------
@@ -116,7 +141,7 @@ fn peer_reachability_mock() -> Arc<dyn PeerReachabilityPort> {
 struct MemMemberRepo {
     inner: Mutex<HashMap<String, SpaceMember>>,
 }
-crate::network::iroh::inbound_peer::member_table_identity_directory!(MemMemberRepo);
+member_table_identity_directory!(MemMemberRepo);
 #[async_trait]
 impl MemberRepositoryPort for MemMemberRepo {
     async fn get(&self, device_id: &DeviceId) -> Result<Option<SpaceMember>, MembershipError> {
@@ -143,10 +168,7 @@ struct MemPeerAddrRepo {
 }
 #[async_trait]
 impl PeerAddressRepositoryPort for MemPeerAddrRepo {
-    async fn get(
-        &self,
-        device: &DeviceId,
-    ) -> Result<Option<PeerAddressRecord>, PeerAddressError> {
+    async fn get(&self, device: &DeviceId) -> Result<Option<PeerAddressRecord>, PeerAddressError> {
         Ok(self.inner.lock().await.get(device.as_str()).cloned())
     }
     async fn upsert(&self, record: &PeerAddressRecord) -> Result<(), PeerAddressError> {
@@ -240,21 +262,559 @@ async fn spawn_receiver_with_admission(
     let receiver_endpoint = bind_endpoint_with(seed).await;
     wait_for_direct_addrs(&receiver_endpoint).await;
 
-    let adapter = IrohClipboardReceiverAdapter::new(
-        crate::network::iroh::inbound_peer::member_table_directory(member_repo),
-        Arc::new(crate::network::iroh::StaticPeerAdmission(admitted)),
+    let adapter = ReceiverFixture::new(
+        member_table_directory(member_repo),
+        Arc::new(StaticPeerAdmission(admitted)),
         Arc::new(Sha256IdentityFingerprintFactory),
     );
     let inbound_rx = adapter.subscribe();
     let router = Router::builder((*receiver_endpoint).clone())
         .accept(CLIPBOARD_ALPN, adapter.handler())
+        .accept(MULTIPLEXED_CLIPBOARD_ALPN, adapter.handler())
         .spawn();
 
+    router.endpoint().set_alpns(vec![
+        MULTIPLEXED_CLIPBOARD_ALPN.to_vec(),
+        CLIPBOARD_ALPN.to_vec(),
+    ]);
     ReceiverHarness {
         receiver_endpoint,
         receiver_router: router,
         inbound_rx,
     }
+}
+
+/// 同一条真实连接的第二条流不应等待第一份内容的应用结算。
+#[tokio::test]
+async fn receives_two_streams_before_first_receipt_settles() {
+    let telemetry = test_telemetry();
+    let contexts = [
+        uc_sync_protocol::WireTraceContext {
+            traceparent: "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1-1111111111111111-01".into(),
+        },
+        uc_sync_protocol::WireTraceContext {
+            traceparent: "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2-2222222222222222-01".into(),
+        },
+    ];
+    let sender_seed = [0x31; 32];
+    let members: Arc<dyn MemberRepositoryPort> = Arc::new(MemMemberRepo::default());
+    members
+        .save(&make_member(sender_seed, "sender"))
+        .await
+        .unwrap();
+    let mut harness = spawn_receiver([0x32; 32], members).await;
+    let sender = bind_endpoint_with(sender_seed).await;
+    let connection = sender
+        .connect(harness.receiver_endpoint.addr(), MULTIPLEXED_CLIPBOARD_ALPN)
+        .await
+        .unwrap();
+    let mut replies = Vec::new();
+    for (payload, context) in [b"first".as_slice(), b"second".as_slice()]
+        .into_iter()
+        .zip(contexts.iter())
+    {
+        let (mut send, recv) = connection.open_bi().await.unwrap();
+        clipboard_wire::write_frame(
+            &mut send,
+            &sample_header(),
+            Some(context.clone()),
+            &Bytes::copy_from_slice(payload),
+        )
+        .await
+        .unwrap();
+        send.finish().unwrap();
+        replies.push(recv);
+    }
+    let first = tokio::time::timeout(Duration::from_secs(3), harness.inbound_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let second = tokio::time::timeout(Duration::from_secs(1), harness.inbound_rx.recv())
+        .await
+        .expect("second stream must arrive before the first receipt settles")
+        .unwrap();
+    assert_eq!(first.message.ciphertext.as_ref(), b"first");
+    assert_eq!(second.message.ciphertext.as_ref(), b"second");
+    assert!(second
+        .message
+        .receipt
+        .finish(InboundClipboardDisposition::Applied));
+    let mut ack = [0];
+    tokio::time::timeout(Duration::from_secs(3), replies[1].read_exact(&mut ack))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ack, [AckCode::Accepted.as_byte()]);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), replies[0].read_exact(&mut ack))
+            .await
+            .is_err()
+    );
+    assert!(first
+        .message
+        .receipt
+        .finish(InboundClipboardDisposition::Duplicate));
+    tokio::time::timeout(Duration::from_secs(3), replies[0].read_exact(&mut ack))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ack, [AckCode::DuplicateIgnored.as_byte()]);
+    connection.close(0u32.into(), b"test_complete");
+    harness.receiver_router.shutdown().await.unwrap();
+    sender.close().await;
+    telemetry.traces.force_flush().unwrap();
+    let spans = telemetry.span_exporter.get_finished_spans().unwrap();
+    for (trace_id, parent_id) in [
+        ("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1", "1111111111111111"),
+        ("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2", "2222222222222222"),
+    ] {
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.span_context.trace_id().to_string() == trace_id
+                    && span.parent_span_id.to_string() == parent_id
+                    && span
+                        .attributes
+                        .iter()
+                        .any(|attr| attr.key.as_str() == "uc.operation"
+                            && attr.value.as_str() == "clipboard_receive")),
+            "each stream must preserve its own remote parent"
+        );
+    }
+}
+
+/// 错误帧只拒绝本流；同连接后续正常帧仍能持久接受。
+#[tokio::test]
+async fn malformed_stream_does_not_close_the_multiplexed_connection() {
+    let seed = [0x41; 32];
+    let sender = bind_endpoint_with(seed).await;
+    let members = Arc::new(MemMemberRepo::default());
+    members.save(&make_member(seed, "known")).await.unwrap();
+    let mut harness = spawn_receiver([0x42; 32], members).await;
+    let connection = sender
+        .connect(harness.receiver_endpoint.addr(), MULTIPLEXED_CLIPBOARD_ALPN)
+        .await
+        .unwrap();
+    assert_eq!(connection.alpn(), MULTIPLEXED_CLIPBOARD_ALPN);
+    let (mut bad_send, mut bad_reply) = connection.open_bi().await.unwrap();
+    bad_send.write_all(&[0xff]).await.unwrap();
+    bad_send.finish().unwrap();
+    let mut ack = [0];
+    tokio::time::timeout(Duration::from_secs(2), bad_reply.read_exact(&mut ack))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ack, [AckCode::Rejected.as_byte()]);
+    let (mut good_send, mut good_reply) = connection.open_bi().await.unwrap();
+    clipboard_wire::write_frame(
+        &mut good_send,
+        &sample_header(),
+        None,
+        &Bytes::from_static(b"healthy"),
+    )
+    .await
+    .unwrap();
+    good_send.finish().unwrap();
+    let delivery = tokio::time::timeout(Duration::from_secs(2), harness.inbound_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(delivery.message.ciphertext, Bytes::from_static(b"healthy"));
+    delivery
+        .message
+        .receipt
+        .finish(InboundClipboardDisposition::Applied);
+    tokio::time::timeout(Duration::from_secs(2), good_reply.read_exact(&mut ack))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ack, [AckCode::Accepted.as_byte()]);
+    assert!(connection.close_reason().is_none());
+    connection.close(0u32.into(), b"test_complete");
+    harness.receiver_router.shutdown().await.unwrap();
+    sender.close().await;
+}
+
+struct RecordingBackend {
+    calls: AtomicUsize,
+    native: IrohConnectivityBackend,
+    connections: std::sync::Mutex<Vec<(usize, ConnectionMode)>>,
+}
+#[async_trait]
+impl ConnectivityBackend for RecordingBackend {
+    async fn connect(
+        &self,
+        target: DeviceId,
+    ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let connection = self.native.connect(target).await?;
+        self.connections
+            .lock()
+            .unwrap()
+            .push((connection.id(), connection.mode()));
+        Ok(connection)
+    }
+}
+
+/// 取消一个发送只终止自己的半流；同一目标的另一个发送保留活动连接。
+#[tokio::test]
+async fn cancelling_one_dispatch_preserves_another_active_exchange() {
+    let seed = [0x51; 32];
+    let sender = bind_endpoint_with(seed).await;
+    let members = Arc::new(MemMemberRepo::default());
+    members.save(&make_member(seed, "known")).await.unwrap();
+    let mut harness = spawn_receiver([0x52; 32], members).await;
+    let target = DeviceId::new("receiver");
+    let addresses = Arc::new(MemPeerAddrRepo::default());
+    addresses
+        .upsert(&PeerAddressRecord {
+            device_id: target,
+            addr_blob: postcard::to_stdvec(&harness.receiver_endpoint.addr()).unwrap(),
+            observed_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+    let backend = Arc::new(RecordingBackend {
+        calls: AtomicUsize::new(0),
+        native: IrohConnectivityBackend::new(sender.clone(), addresses, peer_reachability_mock()),
+        connections: std::sync::Mutex::new(Vec::new()),
+    });
+    let dispatch = Arc::new(super::test_support::dispatch_with_backend(
+        backend.clone(),
+        Arc::new(EpochOnlyAdmission(AdmittedConnections::default())),
+        ConnectivityPolicy::default(),
+    ));
+    let start = |payload: &'static [u8]| {
+        let dispatch = dispatch.clone();
+        tokio::spawn(async move {
+            dispatch
+                .dispatch(
+                    &target,
+                    &sample_header(),
+                    SyncPayload {
+                        ciphertext: Bytes::from_static(payload),
+                    },
+                )
+                .await
+        })
+    };
+    let first = start(b"first");
+    let first_delivery = tokio::time::timeout(Duration::from_secs(2), harness.inbound_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let second = start(b"second");
+    let second_delivery = tokio::time::timeout(Duration::from_secs(2), harness.inbound_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    first.abort();
+    let _ = first.await;
+    second_delivery
+        .message
+        .receipt
+        .finish(InboundClipboardDisposition::Applied);
+    assert!(second.await.unwrap().outcome.is_ok());
+    let connections = backend.connections.lock().unwrap().clone();
+    assert_eq!(
+        connections.len(),
+        1,
+        "both exchanges must use one real connection"
+    );
+    assert_eq!(
+        connections[0].1,
+        ConnectionMode::Multiplexed,
+        "actual negotiated ALPN must support multiplexing"
+    );
+    // 发送取消不撤销已交给业务负责人的持久接受。
+    assert!(first_delivery
+        .message
+        .receipt
+        .finish(InboundClipboardDisposition::Applied));
+    harness.receiver_router.shutdown().await.unwrap();
+    sender.close().await;
+}
+
+struct DelayedAdmission {
+    inner: EpochOnlyAdmission,
+    adopting: Arc<Notify>,
+    release: Arc<Semaphore>,
+    begins: Arc<Semaphore>,
+    adoptions: Arc<AtomicUsize>,
+}
+struct DelayedAttempt {
+    inner: Box<dyn AdmissionAttempt>,
+    adopting: Arc<Notify>,
+    release: Arc<Semaphore>,
+    adoptions: Arc<AtomicUsize>,
+}
+#[async_trait]
+impl AdmissionAttempt for DelayedAttempt {
+    async fn check_current(&self) -> Result<(), ConnectivityError> {
+        self.inner.check_current().await
+    }
+    async fn adopt(
+        &self,
+        connection: Arc<dyn PeerConnection>,
+    ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError> {
+        if self.adoptions.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.adopting.notify_one();
+            self.release.acquire().await.unwrap().forget();
+        }
+        self.inner.adopt(connection).await
+    }
+}
+#[async_trait]
+impl SessionConnectionAdmissionPort for DelayedAdmission {
+    fn begin(&self, target: DeviceId) -> Box<dyn AdmissionAttempt> {
+        self.begins.add_permits(1);
+        Box::new(DelayedAttempt {
+            inner: self.inner.begin(target),
+            adopting: self.adopting.clone(),
+            release: self.release.clone(),
+            adoptions: self.adoptions.clone(),
+        })
+    }
+    async fn adopt_inbound(
+        &self,
+        connection: Arc<dyn PeerConnection>,
+    ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError> {
+        self.inner.adopt_inbound(connection).await
+    }
+}
+
+/// 准入等待期间的离线/在线不能让最新调用停在旧 flight 的失败上。
+#[tokio::test]
+async fn offline_during_adoption_refreshes_connection_before_any_payload_is_sent() {
+    verify_liveness_recovery(true).await;
+}
+
+/// 确认离线结束旧 native 交换；新调用重新建连，连接层不自行重发旧内容。
+#[tokio::test]
+async fn confirmed_offline_closes_old_exchange_and_next_dispatch_dials_fresh() {
+    verify_liveness_recovery(false).await;
+}
+
+async fn verify_liveness_recovery(delayed: bool) {
+    let seed = [0x61; 32];
+    let sender = bind_endpoint_with(seed).await;
+    let members = Arc::new(MemMemberRepo::default());
+    members.save(&make_member(seed, "known")).await.unwrap();
+    let mut harness = spawn_receiver([0x62; 32], members).await;
+    let target = DeviceId::new("receiver");
+    let addresses = Arc::new(MemPeerAddrRepo::default());
+    addresses
+        .upsert(&PeerAddressRecord {
+            device_id: target,
+            addr_blob: postcard::to_stdvec(&harness.receiver_endpoint.addr()).unwrap(),
+            observed_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+    let (events, _) = broadcast::channel(64);
+    let mut reachability = MockPeerReachability::new();
+    let subscriptions = events.clone();
+    reachability
+        .expect_subscribe()
+        .returning(move || subscriptions.subscribe());
+    let backend = Arc::new(RecordingBackend {
+        calls: AtomicUsize::new(0),
+        native: IrohConnectivityBackend::new(sender.clone(), addresses, Arc::new(reachability)),
+        connections: std::sync::Mutex::new(Vec::new()),
+    });
+    let adopting = Arc::new(Notify::new());
+    let release = Arc::new(Semaphore::new(if delayed { 0 } else { 1 }));
+    let begins = Arc::new(Semaphore::new(0));
+    let dispatch = Arc::new(super::test_support::dispatch_with_backend(
+        backend.clone(),
+        Arc::new(DelayedAdmission {
+            inner: EpochOnlyAdmission(AdmittedConnections::default()),
+            adopting: adopting.clone(),
+            release: release.clone(),
+            begins: begins.clone(),
+            adoptions: Arc::new(AtomicUsize::new(0)),
+        }),
+        ConnectivityPolicy::default(),
+    ));
+    let start = |payload: &'static [u8]| {
+        let dispatch = dispatch.clone();
+        tokio::spawn(async move {
+            dispatch
+                .dispatch(
+                    &target,
+                    &sample_header(),
+                    SyncPayload {
+                        ciphertext: Bytes::from_static(payload),
+                    },
+                )
+                .await
+        })
+    };
+    let first = start(b"first");
+    tokio::time::timeout(Duration::from_secs(2), adopting.notified())
+        .await
+        .unwrap();
+    let first_delivery = if delayed {
+        None
+    } else {
+        let delivery = tokio::time::timeout(Duration::from_secs(2), harness.inbound_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(delivery.message.ciphertext, Bytes::from_static(b"first"));
+        // 及时消费的其他 peer 事件不能积压同步游标、误关健康活动连接。
+        for _ in 0..80 {
+            events
+                .send(PeerReachabilityChanged {
+                    device_id: DeviceId::new("unrelated-peer"),
+                    state: ReachabilityState::Online,
+                    at: Utc::now(),
+                })
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while events.len() > 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("both liveness observers must advance while the connection remains healthy");
+        }
+        let healthy = start(b"healthy");
+        let healthy_delivery =
+            tokio::time::timeout(Duration::from_secs(2), harness.inbound_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            healthy_delivery.message.ciphertext,
+            Bytes::from_static(b"healthy")
+        );
+        healthy_delivery
+            .message
+            .receipt
+            .finish(InboundClipboardDisposition::Applied);
+        assert_eq!(
+            healthy.await.unwrap().outcome.unwrap(),
+            DispatchAck::Accepted
+        );
+        assert!(!first.is_finished());
+        assert_eq!(backend.connections.lock().unwrap().len(), 1);
+        Some(delivery)
+    };
+    events
+        .send(PeerReachabilityChanged {
+            device_id: target,
+            state: ReachabilityState::Offline,
+            at: Utc::now(),
+        })
+        .unwrap();
+    events
+        .send(PeerReachabilityChanged {
+            device_id: target,
+            state: ReachabilityState::Online,
+            at: Utc::now(),
+        })
+        .unwrap();
+    // 不先等待监督任务处理离线；获取租约必须同步消费已排队的失效证据。
+    let second = start(b"second");
+    if delayed {
+        tokio::time::timeout(Duration::from_secs(2), begins.acquire_many(2))
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.connections.lock().unwrap().len(), 1);
+        assert!(!first.is_finished());
+        assert!(!second.is_finished());
+        assert!(matches!(
+            harness.inbound_rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        release.add_permits(1);
+        // 两个调用尚未写过负载；更新连接后各自收到自己的业务回执。
+        let mut payloads = Vec::new();
+        for _ in 0..2 {
+            let delivery = tokio::time::timeout(Duration::from_secs(2), harness.inbound_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            payloads.push(delivery.message.ciphertext);
+            delivery
+                .message
+                .receipt
+                .finish(InboundClipboardDisposition::Applied);
+        }
+        payloads.sort();
+        assert_eq!(
+            payloads,
+            vec![Bytes::from_static(b"first"), Bytes::from_static(b"second")]
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), first)
+                .await
+                .unwrap()
+                .unwrap()
+                .outcome
+                .unwrap(),
+            DispatchAck::Accepted
+        );
+    } else {
+        let failed = tokio::time::timeout(Duration::from_secs(2), first)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            failed.outcome,
+            Err(uc_core::ports::ClipboardDispatchError::Offline)
+        ));
+        let delivery = tokio::time::timeout(Duration::from_secs(2), harness.inbound_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(delivery.message.ciphertext, Bytes::from_static(b"second"));
+        delivery
+            .message
+            .receipt
+            .finish(InboundClipboardDisposition::Applied);
+    }
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), second)
+            .await
+            .unwrap()
+            .unwrap()
+            .outcome
+            .unwrap(),
+        DispatchAck::Accepted
+    );
+    assert!(matches!(
+        harness.inbound_rx.try_recv(),
+        Err(broadcast::error::TryRecvError::Empty)
+    ));
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
+    let connections = backend.connections.lock().unwrap().clone();
+    assert_eq!(
+        connections.len(),
+        2,
+        "recovery must establish a fresh connection after confirmed offline"
+    );
+    assert_eq!(
+        connections[0].1,
+        ConnectionMode::Multiplexed,
+        "actual negotiated ALPN must support multiplexing"
+    );
+    assert_eq!(connections[1].1, ConnectionMode::Multiplexed);
+    assert_ne!(connections[0].0, connections[1].0);
+    // 连接失效不撤销已交给业务负责人的持久接受。
+    if let Some(first_delivery) = first_delivery {
+        // 业务已经持有这份内容；连接结束可以丢弃旧 ACK 等待，不承诺回送通道仍在。
+        let _ = first_delivery
+            .message
+            .receipt
+            .finish(InboundClipboardDisposition::Applied);
+    }
+    harness.receiver_router.shutdown().await.unwrap();
+    sender.close().await;
 }
 
 // ----- verdicts ----------------------------------------------------------
@@ -282,16 +842,17 @@ async fn accepts_single_inbound_frame_from_known_peer() {
     peer_addr_repo
         .upsert(&PeerAddressRecord {
             device_id: DeviceId::new("receiver-b"),
-            addr_blob: postcard::to_stdvec(&receiver_addr)
-                .expect("postcard encode EndpointAddr"),
+            addr_blob: postcard::to_stdvec(&receiver_addr).expect("postcard encode EndpointAddr"),
             observed_at: Utc::now(),
         })
         .await
         .unwrap();
-    let dispatch = IrohClipboardDispatchAdapter::new(
+    let dispatch = dispatch_fixture(
         sender_endpoint,
         peer_addr_repo,
         peer_reachability_mock(),
+        Arc::new(EpochOnlyAdmission(AdmittedConnections::default())),
+        ConnectivityPolicy::default(),
     );
 
     let payload = Bytes::from(vec![0xAB; 128]);
@@ -455,10 +1016,12 @@ async fn rejects_unknown_peer_with_ack_rejected() {
         })
         .await
         .unwrap();
-    let dispatch = IrohClipboardDispatchAdapter::new(
+    let dispatch = dispatch_fixture(
         sender_endpoint,
         peer_addr_repo,
         peer_reachability_mock(),
+        Arc::new(EpochOnlyAdmission(AdmittedConnections::default())),
+        ConnectivityPolicy::default(),
     );
 
     let client_span = operation_span(OperationContext {
@@ -536,10 +1099,12 @@ async fn rejects_known_but_unadmitted_peer_with_ack_rejected() {
         })
         .await
         .unwrap();
-    let dispatch = IrohClipboardDispatchAdapter::new(
+    let dispatch = dispatch_fixture(
         sender_endpoint,
         peer_addr_repo,
         peer_reachability_mock(),
+        Arc::new(EpochOnlyAdmission(AdmittedConnections::default())),
+        ConnectivityPolicy::default(),
     );
 
     let result = dispatch
@@ -650,10 +1215,12 @@ async fn processes_concurrent_inbound_connections() {
                 })
                 .await
                 .unwrap();
-            let dispatch = IrohClipboardDispatchAdapter::new(
+            let dispatch = dispatch_fixture(
                 sender_endpoint,
                 peer_addr_repo,
                 peer_reachability_mock(),
+                Arc::new(EpochOnlyAdmission(AdmittedConnections::default())),
+                ConnectivityPolicy::default(),
             );
 
             let mut header = sample_header();
@@ -697,8 +1264,48 @@ async fn processes_concurrent_inbound_connections() {
     harness.receiver_router.shutdown().await.ok();
 }
 
+async fn bind_loopback_endpoint(seed: [u8; 32]) -> Arc<Endpoint> {
+    Arc::new(
+        Endpoint::builder(iroh::endpoint::presets::N0)
+            .secret_key(SecretKey::from_bytes(&seed))
+            .alpns(vec![CLIPBOARD_ALPN.to_vec()])
+            .relay_mode(RelayMode::Disabled)
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))
+            .expect("loopback bind address")
+            .bind()
+            .await
+            .expect("loopback endpoint"),
+    )
+}
+
+#[derive(Debug)]
+struct SelectedPathReceiver(IrohClipboardHandler);
+impl ProtocolHandler for SelectedPathReceiver {
+    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let mut updates = connection.paths_stream();
+            loop {
+                let paths = updates.next().await.expect("live native path stream");
+                if paths.iter().any(|path| path.is_selected()) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("native selected path must be published");
+        self.0.accept(connection).await
+    }
+    async fn shutdown(&self) {
+        self.0.shutdown().await;
+    }
+}
+
 /// 一次真实投递的两端都报告该次连接 selected 的路径：回环上只有直连，
 /// 发送报告与入站消息必须一致且为 Direct，且回执确认内容已被应用。
+/// 路径快照允许 Unknown；仅该路径断言用例先等待真实 selected path 发布，
+/// 不把地址候选/握手完成推断为已选择 Direct，也不改变生产接收策略。
+/// 路径验收固定真实 loopback，避免本机虚拟网卡 fake-IP 被按生产规则分类为 Unknown。
+
 #[tokio::test]
 async fn delivery_reports_the_connection_selected_path_on_both_sides() {
     let sender_seed = [0x71u8; 32];
@@ -708,10 +1315,35 @@ async fn delivery_reports_the_connection_selected_path_on_both_sides() {
         .save(&make_member(sender_seed, "path-sender"))
         .await
         .unwrap();
-    let harness = spawn_receiver(receiver_seed, member_repo).await;
-    let receiver_addr = harness.receiver_endpoint.addr();
+    let receiver_endpoint = bind_loopback_endpoint(receiver_seed).await;
+    wait_for_direct_addrs(&receiver_endpoint).await;
+    let adapter = ReceiverFixture::new(
+        member_table_directory(member_repo),
+        Arc::new(StaticPeerAdmission(true)),
+        Arc::new(Sha256IdentityFingerprintFactory),
+    );
+    let inbound_rx = adapter.subscribe();
+    let receiver_router = Router::builder((*receiver_endpoint).clone())
+        .accept(
+            MULTIPLEXED_CLIPBOARD_ALPN,
+            SelectedPathReceiver(adapter.handler()),
+        )
+        .accept(CLIPBOARD_ALPN, SelectedPathReceiver(adapter.handler()))
+        .spawn();
+    let harness = ReceiverHarness {
+        receiver_endpoint,
+        receiver_router,
+        inbound_rx,
+    };
+    let socket = harness
+        .receiver_endpoint
+        .bound_sockets()
+        .into_iter()
+        .find(|socket| socket.ip() == Ipv4Addr::LOCALHOST)
+        .expect("loopback socket");
+    let receiver_addr = EndpointAddr::new(harness.receiver_endpoint.id()).with_ip_addr(socket);
 
-    let sender_endpoint = bind_endpoint_with(sender_seed).await;
+    let sender_endpoint = bind_loopback_endpoint(sender_seed).await;
     wait_for_direct_addrs(&sender_endpoint).await;
     let peer_addr_repo = Arc::new(MemPeerAddrRepo::default());
     peer_addr_repo
@@ -722,10 +1354,12 @@ async fn delivery_reports_the_connection_selected_path_on_both_sides() {
         })
         .await
         .unwrap();
-    let dispatch = IrohClipboardDispatchAdapter::new(
+    let dispatch = dispatch_fixture(
         sender_endpoint,
         peer_addr_repo,
         peer_reachability_mock(),
+        Arc::new(EpochOnlyAdmission(AdmittedConnections::default())),
+        ConnectivityPolicy::default(),
     );
 
     let payload = Bytes::from(vec![0x5A; 64]);

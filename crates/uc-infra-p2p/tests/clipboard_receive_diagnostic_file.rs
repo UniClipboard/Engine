@@ -1,7 +1,10 @@
 //! 真实协议拒收必须在普通采集的实际文件中保留原因。
+#[path = "support/clipboard.rs"]
+mod clipboard_support;
 use std::sync::Arc;
 use std::time::Duration;
 use uc_application::deps::{KnownPeerIdentity, MembershipLedgerError, PeerIdentityDirectoryPort};
+use uc_infra_p2p::network::iroh::connectivity::IrohClipboardHandler;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -15,7 +18,7 @@ use uc_core::membership::{
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::ClipboardHeader;
 use uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory;
-use uc_infra_p2p::network::iroh::{IrohClipboardReceiverAdapter, CLIPBOARD_ALPN};
+use uc_infra_p2p::network::iroh::CLIPBOARD_ALPN;
 use uc_observability_runtime::*;
 use uc_sync_protocol::clipboard as clipboard_wire;
 
@@ -105,13 +108,13 @@ async fn receipt_failures_remain_distinct_in_standard_and_detailed_exports() {
         joined_at: chrono::Utc::now(),
         sync_preferences: MemberSyncPreferences::default(),
     }));
-    let adapter = IrohClipboardReceiverAdapter::new(
+    let adapter = clipboard_support::receiver(
         members,
         Arc::new(Admitted),
         Arc::new(Sha256IdentityFingerprintFactory),
     );
     let router = Router::builder((*receiver).clone())
-        .accept(CLIPBOARD_ALPN, adapter.handler())
+        .accept(CLIPBOARD_ALPN, IrohClipboardHandler::new(adapter.clone()))
         .spawn();
     for detailed in [false, true] {
         if detailed {

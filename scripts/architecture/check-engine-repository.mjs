@@ -2249,7 +2249,7 @@ function repositorySources() {
       'crates/uc-infra-p2p/src/network/iroh/peer_address_resolver.rs'
     ),
     irohAddressConsumers: [
-      'clipboard_dispatch_adapter.rs',
+      'connectivity/backend.rs',
       'connection_channel_adapter.rs',
       'group_update_adapter.rs',
       'membership_branch_recovery_adapter.rs',

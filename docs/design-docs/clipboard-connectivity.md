@@ -1,0 +1,84 @@
+# 普通剪贴板连接与独立交换
+
+## 完整负责人和调用方式
+
+业务调用方仍只调用 `ClipboardDispatchPort::dispatch(DeviceId, ClipboardHeader, SyncPayload)`，
+发送密文并得到持久接受、重复、拒绝、不兼容或连接/交换失败。`uc-engine` 稳定入口及移动绑定不增加连接步骤。
+
+Application 的 [`connectivity`](../../crates/uc-application/src/connectivity/) 负责一次完整连接获取、
+共享拨号、请求撤销围栏、模式分配、租约、有限排队和关闭；它不选择发送内容，不重发内容。
+普通剪贴板协议模块 [`network/clipboard`](../../crates/uc-infra-p2p/src/network/clipboard/) 只消费 Uni 连接和流，
+负责原帧、每流接收交接及原 ACK。Iroh bridge 负责地址解析、密码握手、实际协商能力、原生半流、
+现有成员准入与唯一连接登记。Engine 只把完整对象装配到现有节点。
+
+重试仍由原业务发送/恢复负责人决定。P2P 失败不自动切换 LAN；presence、文件、组更新与成员恢复不共享本切片连接。
+
+## 连接与撤销
+
+同会话、同目标并且实际协商为多流的并发请求共用一个 flight 和活动连接。每个等待者有独立绝对截止时间；
+首等待者退出不取消其他人的拨号，最后等待者退出才取消 flight，manager 的监督任务等待拨号结束。
+manager 只弱引用活动连接；最后一个连接/流租约释放即关闭，不存在空闲连接池。
+
+每次发送在任何排队前捕获自身 `AdmissionAttempt` 撤销快照。共用建连者的连接不替换调用者的快照：
+开流前先检查请求快照，再检查连接 grant 的当前成员权威。旧请求不能借用移除再添加之后的新连接，
+拒绝旧请求也不会关闭仍有效的新世代连接。当前成员拒绝、读取异常或连接授权失效由 grant 关闭整个连接。
+
+Iroh admission 复用原身份目录、成员权威和同一 `AdmittedConnections`，不创建第二份授权表。
+登记与撤销 epoch 保持原子围栏，迟到拨号和待排队请求都不能跨越撤销。
+
+bridge 对出站连接在握手后订阅既有确认离线事件；已排队的 Offline 即便随后 Online，获取租约及原生开流前仍同步判旧连接失效；后台观察同时推进同步游标，其他 peer 的健康事件不积压成假失活。消息尚未发送时，准入后已确认失活的连接最多更新一次，仍用原准入快照和原 deadline；迟到共同结果已关闭时有界重新获取，不重发已写出的内容。manager 的原 JoinSet 监督连接结束并在 shutdown join，监督只持原生能力，不保活租约。Offline/Lagged 关闭本条连接，不推进成员 epoch、不复用 presence 连接、不自行重发内容；明确不可达的网络 I/O 返回原 Offline，本地授权来源保持 Io source。
+
+原 Application 发送 owner 内部按内容/目标围栏在途尝试：新 Pending 持久成功后才能取代旧写入权，旧 deferred 不覆盖同条内容的新结果；失败的新意图不丢失旧回执。私有 token 只存内存且弱表可回收，不改变持久格式。跨内容 Superseded 的既有竞态见[技术债](../exec-plans/tech-debt-tracker.md)。
+
+## 协商和回执
+
+| 实际协商 | 能力 | 连接分配 |
+| --- | --- | --- |
+| `uniclipboard/clipboard-applied/2` | 多条独立 bi stream | 共用活动连接，每份内容独立结算 |
+| `uniclipboard/clipboard-applied/1` | 原单次交换 | 每连接仅一次交换；共同拨号结果仅一人领取，其余有界独占拨号 |
+
+双方同时 offer 时生产 Router 优先 `/2`；与修改前只支持 `/1` 的端点协商 `/1`。
+只在实际握手选择旧协议时采用旧模式；不能在坏帧、拒绝、超时后改协议重发。`/clipboard/0` 仍不支持。
+帧、header 和 ACK 字节没有改动，也没有新持久化格式。
+
+`Accepted` 表示 Application 已持久接受；`DuplicateIgnored` 表示重复内容已被确认。
+两者都不承诺宿主已写入系统剪贴板。每条流持有自己的 receipt，兄弟流不等待它的应用结算。
+广播交接仍有界且由原 Application 接收运行期处理，没有消费者、丢失 receipt 或应用拒绝均不能伪报成功。
+
+## 有限资源和失败
+
+初始 policy：每目标 4 条活动出站流、每连接 4 条活动入站流、每会话 16 个活动入站交换；
+每目标 32 个等待者、每会话 128 个等待者与入站连接处理、64 个 flight。
+等待槽满返回固定 `Busy`；已有槽位公平等待，取消释放排队位置，不复制额外密文。
+
+接收等待先持本连接额度，拿到原生流后再等待全局交换额度；空闲连接不占全局活动交换额度。
+同一连接至多一条已接收流等待全局额度，未取得额度前不读取/分配负载。
+未经准入的连接也只允许一次有限拒绝处理；过载直接关闭。
+
+出站从 dispatch 开始共用 75 秒绝对 deadline，覆盖地址、准入、排队、开流、写帧与 ACK；
+上层原 5 秒 fan-out 取消仍可更早结束本请求。原生错峰拨号使用原来更短的预算。
+入站一次接受/准入等待最多 60 秒，帧与负载后的准入重检共用 60 秒读帧 deadline，
+应用 receipt 最多等待 60 秒，ACK 写入另有 60 秒有限预算。
+慢读、坏帧、超限、RESET、单个发送取消或 ACK 流控挂起只结束该流，Drop RESET/STOP 未完成的半流。
+已确认失活、观测历史丢失、成员撤销、Space 退休和节点关闭结束整体连接。
+
+地址缺失与已诊断的建立失败保留业务 `Offline` 分类；地址能力读取或成员能力读取异常、
+排队/超时/流/任务异常保留带 source 的 `Io`。共享失败保留同一来源；错误采用穷举 `ErrorClass`
+与固定公开文本，不输出原生错误正文、身份、地址或业务负载。
+
+## 世代、观测和关闭
+
+多流接收使用同一个 generation scope 中的 `FuturesUnordered`，不为各流 spawn 任务，
+所以原 dispatcher task-local 世代自然延续。接受 future 持续 pin 到完成/超时，
+兄弟流完成不能取消已经接收但正在准入的流，不能重置公平排位或截止时间。
+每流认证之后设自己的远端 trace parent，并在该 scope 中捕获 `ClipboardDelivery`；
+共享拨号监督任务不继承首条消息的业务父 span。
+原写入 owner 在自己的异步任务与阻塞线程分别恢复不透明 ObservationContext；
+手动重发的完整观测入口也延续该上下文，技术 span 不进入 OT 层时仍归属本次业务记录。
+计时和结果分类保持在原 Engine port decorator，不新增业务阶段读取。
+
+会话/节点关闭停止新获取、关闭所有登记的活动连接并取消、等待所有 flight。
+拨号任务 panic 保留 `JoinError` 并通过固定 `clipboard_connectivity_worker` task.kind 上报；
+重复 shutdown 仍返回已记录的任务失败。正常释放不新增业务记录。
+
+实施与验证历史见[执行计划](../exec-plans/completed/2026-10-11-clipboard-connectivity-plan.md)。

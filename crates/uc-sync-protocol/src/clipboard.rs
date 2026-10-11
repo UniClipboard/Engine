@@ -37,6 +37,11 @@
 //! bounds so the adapter hands raw stream halves in; the tests here use
 //! [`tokio::io::duplex`] bidirectional pipes for the same contract.
 
+/// 原有单交换剪贴板协议；帧和应用确认语义保持。
+pub const CLIPBOARD_ALPN: &[u8] = b"uniclipboard/clipboard-applied/1";
+/// 明确承诺同连接独立多流交换；不改变帧或 ACK。
+pub const MULTIPLEXED_CLIPBOARD_ALPN: &[u8] = b"uniclipboard/clipboard-applied/2";
+
 use std::convert::TryFrom;
 
 use bytes::Bytes;

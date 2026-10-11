@@ -560,6 +560,8 @@ macro_rules! diagnostic_task_kinds {
 }
 
 diagnostic_task_kinds! {
+    /// 普通剪贴板共享拨号任务异常退出。
+    ClipboardConnectivityWorker => "clipboard_connectivity_worker",
     ClipboardDeliveryRecord => "clipboard_delivery_record",
     ClipboardInboundOsWrite => "clipboard_inbound_os_write",
     ActiveClipboardConverge => "active_clipboard_converge",

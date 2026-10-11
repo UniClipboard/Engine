@@ -1,4 +1,16 @@
-use super::*;
+use super::test_support::{dispatch_fixture, EpochOnlyAdmission};
+use crate::network::iroh::admitted_connections::AdmittedConnections;
+use iroh::EndpointAddr;
+use std::sync::Arc;
+use std::time::Duration;
+use uc_application::deps::ConnectivityPolicy;
+use uc_core::ids::DeviceId;
+use uc_core::ports::{
+    ClipboardDispatchError, ClipboardDispatchPort, ClipboardHeader, DispatchAck,
+    PeerAddressRepositoryPort, PeerReachabilityPort, SyncPayload,
+};
+use uc_sync_protocol::clipboard::{self as clipboard_wire, AckCode, CLIPBOARD_ALPN};
+const LEGACY_CLIPBOARD_ALPN: &[u8] = b"uniclipboard/clipboard/0";
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -38,7 +50,12 @@ mockall::mock! {
 }
 
 fn peer_reachability_mock() -> Arc<dyn PeerReachabilityPort> {
-    Arc::new(MockPeerReachability::new())
+    let mut reachability = MockPeerReachability::new();
+    let (events, _) = broadcast::channel(64);
+    reachability
+        .expect_subscribe()
+        .returning(move || events.subscribe());
+    Arc::new(reachability)
 }
 
 /// In-memory peer_addr_repo the tests use to inject an address blob
@@ -51,10 +68,7 @@ struct MemRepo {
 
 #[async_trait]
 impl PeerAddressRepositoryPort for MemRepo {
-    async fn get(
-        &self,
-        device: &DeviceId,
-    ) -> Result<Option<PeerAddressRecord>, PeerAddressError> {
+    async fn get(&self, device: &DeviceId) -> Result<Option<PeerAddressRecord>, PeerAddressError> {
         Ok(self.inner.lock().await.get(device.as_str()).cloned())
     }
     async fn upsert(&self, record: &PeerAddressRecord) -> Result<(), PeerAddressError> {
@@ -176,8 +190,13 @@ async fn dispatch_returns_accepted_on_peer_ack_0x01() {
     let target = DeviceId::new("target-alpha");
     seed_addr(&repo, &target, &peer_addr).await;
 
-    let adapter =
-        IrohClipboardDispatchAdapter::new(sender_endpoint, repo, peer_reachability_mock());
+    let adapter = dispatch_fixture(
+        sender_endpoint,
+        repo,
+        peer_reachability_mock(),
+        Arc::new(EpochOnlyAdmission(AdmittedConnections::default())),
+        ConnectivityPolicy::default(),
+    );
     let payload = SyncPayload {
         ciphertext: Bytes::from(vec![0x11, 0x22, 0x33, 0x44]),
     };
@@ -207,8 +226,13 @@ async fn dispatch_returns_duplicate_on_peer_ack_0x02() {
     let target = DeviceId::new("target-beta");
     seed_addr(&repo, &target, &peer_addr).await;
 
-    let adapter =
-        IrohClipboardDispatchAdapter::new(sender_endpoint, repo, peer_reachability_mock());
+    let adapter = dispatch_fixture(
+        sender_endpoint,
+        repo,
+        peer_reachability_mock(),
+        Arc::new(EpochOnlyAdmission(AdmittedConnections::default())),
+        ConnectivityPolicy::default(),
+    );
     let payload = SyncPayload {
         ciphertext: Bytes::from(vec![0xAA; 16]),
     };
@@ -225,16 +249,20 @@ async fn dispatch_returns_duplicate_on_peer_ack_0x02() {
 
 #[tokio::test]
 async fn dispatch_maps_incompatible_ack_to_the_public_upgrade_error() {
-    let (peer_endpoint, peer_router) =
-        spawn_ack_endpoint(AckCode::Incompatible.as_byte()).await;
+    let (peer_endpoint, peer_router) = spawn_ack_endpoint(AckCode::Incompatible.as_byte()).await;
     let peer_addr = peer_endpoint.addr();
     let sender_endpoint = bind_endpoint().await;
     wait_for_direct_addrs(&sender_endpoint).await;
     let repo = Arc::new(MemRepo::default());
     let target = DeviceId::new("old-engine-target");
     seed_addr(&repo, &target, &peer_addr).await;
-    let adapter =
-        IrohClipboardDispatchAdapter::new(sender_endpoint, repo, peer_reachability_mock());
+    let adapter = dispatch_fixture(
+        sender_endpoint,
+        repo,
+        peer_reachability_mock(),
+        Arc::new(EpochOnlyAdmission(AdmittedConnections::default())),
+        ConnectivityPolicy::default(),
+    );
 
     let outcome = adapter
         .dispatch(
@@ -275,8 +303,13 @@ async fn dispatch_does_not_fall_back_to_the_v019_clipboard_endpoint() {
     let target = DeviceId::new("legacy-target");
     seed_addr(&repo, &target, &peer_addr).await;
 
-    let adapter =
-        IrohClipboardDispatchAdapter::new(sender_endpoint, repo, peer_reachability_mock());
+    let adapter = dispatch_fixture(
+        sender_endpoint,
+        repo,
+        peer_reachability_mock(),
+        Arc::new(EpochOnlyAdmission(AdmittedConnections::default())),
+        ConnectivityPolicy::default(),
+    );
     let result = adapter
         .dispatch(
             &target,
@@ -298,8 +331,13 @@ async fn dispatch_does_not_fall_back_to_the_v019_clipboard_endpoint() {
 async fn dispatch_returns_offline_when_peer_addr_missing() {
     let sender_endpoint = bind_endpoint().await;
     let repo = Arc::new(MemRepo::default());
-    let adapter =
-        IrohClipboardDispatchAdapter::new(sender_endpoint, repo, peer_reachability_mock());
+    let adapter = dispatch_fixture(
+        sender_endpoint,
+        repo,
+        peer_reachability_mock(),
+        Arc::new(EpochOnlyAdmission(AdmittedConnections::default())),
+        ConnectivityPolicy::default(),
+    );
 
     let result = adapter
         .dispatch(
@@ -378,13 +416,14 @@ async fn concurrent_dispatch_to_offline_peer_reports_communication_failure_once(
     seed_addr(&repo, &target, &dead_addr).await;
 
     let peer_reachability = Arc::new(CountingPeerReachability::new());
-    let communication_failure_calls =
-        Arc::clone(&peer_reachability.communication_failure_calls);
+    let communication_failure_calls = Arc::clone(&peer_reachability.communication_failure_calls);
 
-    let adapter = Arc::new(IrohClipboardDispatchAdapter::new(
+    let adapter = Arc::new(dispatch_fixture(
         sender_endpoint.clone(),
         repo,
         peer_reachability,
+        Arc::new(EpochOnlyAdmission(AdmittedConnections::default())),
+        ConnectivityPolicy::default(),
     ));
 
     let header = sample_header();
@@ -427,29 +466,30 @@ async fn concurrent_dispatch_to_offline_peer_reports_communication_failure_once(
         calls, 1,
         "single-flight must collapse report_communication_failure to one call; got {calls}",
     );
-
-    // Slot must be empty after the leader finishes so a later
-    // dispatch starts a fresh dial cycle (no stale in-flight entry).
-    assert!(
-        adapter.in_flight_dials.lock().unwrap().is_empty(),
-        "in_flight_dials slot must be released after the leader broadcasts",
-    );
 }
 
 /// 领头方的 future 在拨号中途被丢弃后，同一目标的后续发送不能永远等一个
 /// 不会再有结果的广播，而应重新竞争并给出自己的结果。
 #[tokio::test]
 async fn dropped_dial_leader_does_not_block_later_dispatches() {
-    let sender_endpoint = bind_endpoint().await;
+    let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (_open_tx, open) = tokio::sync::watch::channel(true);
+    let sender_endpoint = bind_gated_sender(GatedDials {
+        started: started.clone(),
+        open,
+    })
+    .await;
     wait_for_direct_addrs(&sender_endpoint).await;
     let dead_addr = EndpointAddr::new(iroh::SecretKey::generate().public());
     let target = DeviceId::new("dropped-leader-target");
     let repo = Arc::new(MemRepo::default());
     seed_addr(&repo, &target, &dead_addr).await;
-    let adapter = Arc::new(IrohClipboardDispatchAdapter::new(
+    let adapter = Arc::new(dispatch_fixture(
         sender_endpoint,
         repo,
         Arc::new(CountingPeerReachability::new()),
+        Arc::new(EpochOnlyAdmission(AdmittedConnections::default())),
+        ConnectivityPolicy::default(),
     ));
 
     let leader = {
@@ -469,13 +509,13 @@ async fn dropped_dial_leader_does_not_block_later_dispatches() {
     };
     // 等领头方登记了单飞条目、进入拨号后再丢弃它。
     for _ in 0..200 {
-        if !adapter.in_flight_dials.lock().unwrap().is_empty() {
+        if started.load(std::sync::atomic::Ordering::SeqCst) > 0 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(
-        !adapter.in_flight_dials.lock().unwrap().is_empty(),
+        started.load(std::sync::atomic::Ordering::SeqCst) > 0,
         "leader never registered its dial"
     );
     leader.abort();
@@ -505,10 +545,7 @@ async fn dispatch_returns_when_the_peer_never_acks() {
     #[derive(Debug, Clone)]
     struct SilentHandler;
     impl ProtocolHandler for SilentHandler {
-        async fn accept(
-            &self,
-            connection: iroh::endpoint::Connection,
-        ) -> Result<(), AcceptError> {
+        async fn accept(&self, connection: iroh::endpoint::Connection) -> Result<(), AcceptError> {
             let (_send, mut recv) = connection
                 .accept_bi()
                 .await
@@ -529,9 +566,14 @@ async fn dispatch_returns_when_the_peer_never_acks() {
     let repo = Arc::new(MemRepo::default());
     let target = DeviceId::new("silent-target");
     seed_addr(&repo, &target, &peer_endpoint.addr()).await;
-    let adapter =
-        IrohClipboardDispatchAdapter::new(sender_endpoint, repo, peer_reachability_mock())
-            .with_ack_timeout(Duration::from_millis(500));
+    let adapter = dispatch_fixture(
+        sender_endpoint,
+        repo,
+        peer_reachability_mock(),
+        Arc::new(EpochOnlyAdmission(AdmittedConnections::default())),
+        ConnectivityPolicy::default(),
+    )
+    .with_ack_timeout(Duration::from_millis(500));
 
     let report = tokio::time::timeout(
         Duration::from_secs(8),
@@ -561,8 +603,7 @@ impl iroh::endpoint::EndpointHooks for GatedDials {
         &'a self,
         _: &'a EndpointAddr,
         _: &'a [u8],
-    ) -> impl std::future::Future<Output = iroh::endpoint::BeforeConnectOutcome> + Send + 'a
-    {
+    ) -> impl std::future::Future<Output = iroh::endpoint::BeforeConnectOutcome> + Send + 'a {
         async move {
             self.started
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -601,10 +642,12 @@ async fn failed_dispatch_makes_at_most_three_dial_attempts() {
     let target = DeviceId::new("unreachable-target");
     let repo = Arc::new(MemRepo::default());
     seed_addr(&repo, &target, &dead_addr).await;
-    let adapter = IrohClipboardDispatchAdapter::new(
+    let adapter = dispatch_fixture(
         sender,
         repo,
         Arc::new(CountingPeerReachability::new()),
+        Arc::new(EpochOnlyAdmission(AdmittedConnections::default())),
+        ConnectivityPolicy::default(),
     );
 
     let report = adapter
@@ -648,9 +691,7 @@ async fn dial_finishing_after_all_connections_closed_sends_nothing() {
     .await;
 }
 
-async fn dial_revoked_midway_sends_nothing(
-    revoke: impl FnOnce(&AdmittedConnections, &DeviceId),
-) {
+async fn dial_revoked_midway_sends_nothing(revoke: impl FnOnce(&AdmittedConnections, &DeviceId)) {
     #[derive(Clone)]
     struct CountingAckHandler(Arc<std::sync::atomic::AtomicUsize>);
     impl std::fmt::Debug for CountingAckHandler {
@@ -659,10 +700,7 @@ async fn dial_revoked_midway_sends_nothing(
         }
     }
     impl ProtocolHandler for CountingAckHandler {
-        async fn accept(
-            &self,
-            connection: iroh::endpoint::Connection,
-        ) -> Result<(), AcceptError> {
+        async fn accept(&self, connection: iroh::endpoint::Connection) -> Result<(), AcceptError> {
             let (mut send, mut recv) = connection
                 .accept_bi()
                 .await
@@ -697,10 +735,13 @@ async fn dial_revoked_midway_sends_nothing(
     let repo = Arc::new(MemRepo::default());
     seed_addr(&repo, &target, &peer_endpoint.addr()).await;
     let connections = AdmittedConnections::default();
-    let adapter = Arc::new(
-        IrohClipboardDispatchAdapter::new(sender, repo, peer_reachability_mock())
-            .with_connections(connections.clone()),
-    );
+    let adapter = Arc::new(dispatch_fixture(
+        sender,
+        repo,
+        peer_reachability_mock(),
+        Arc::new(EpochOnlyAdmission(connections.clone())),
+        ConnectivityPolicy::default(),
+    ));
 
     let sending = tokio::spawn({
         let adapter = Arc::clone(&adapter);
@@ -756,8 +797,13 @@ async fn dispatch_rejects_oversized_payload_locally_without_dialing() {
     // we would hit Offline first.
     let sender_endpoint = bind_endpoint().await;
     let repo = Arc::new(MemRepo::default());
-    let adapter =
-        IrohClipboardDispatchAdapter::new(sender_endpoint, repo, peer_reachability_mock());
+    let adapter = dispatch_fixture(
+        sender_endpoint,
+        repo,
+        peer_reachability_mock(),
+        Arc::new(EpochOnlyAdmission(AdmittedConnections::default())),
+        ConnectivityPolicy::default(),
+    );
 
     let oversized = vec![0u8; clipboard_wire::MAX_PAYLOAD_SIZE as usize + 1];
     let result = adapter
@@ -778,5 +824,54 @@ async fn dispatch_rejects_oversized_payload_locally_without_dialing() {
             );
         }
         other => panic!("expected LocalPolicyExceeded, got {other:?}"),
+    }
+}
+
+/// 地址读取和准入能力异常不能被稳定 Offline 映射吞掉来源。
+#[tokio::test]
+async fn acquisition_capability_failures_keep_their_source_in_dispatch_reports() {
+    use std::error::Error;
+    use uc_application::deps::{ConnectivityBackend, ConnectivityError, PeerConnection};
+    struct FailingBackend(bool);
+    #[async_trait]
+    impl ConnectivityBackend for FailingBackend {
+        async fn connect(&self, _: DeviceId) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
+            let source = Box::new(std::io::Error::other("private-capability-sentinel"));
+            Err(if self.0 {
+                ConnectivityError::AddressLookup(source)
+            } else {
+                ConnectivityError::Admission(source)
+            })
+        }
+    }
+    for address_lookup in [true, false] {
+        let adapter = super::test_support::dispatch_with_backend(
+            Arc::new(FailingBackend(address_lookup)),
+            Arc::new(EpochOnlyAdmission(AdmittedConnections::default())),
+            ConnectivityPolicy::default(),
+        );
+        let error = adapter
+            .dispatch(
+                &DeviceId::new("peer"),
+                &sample_header(),
+                SyncPayload {
+                    ciphertext: Bytes::from_static(b"unused"),
+                },
+            )
+            .await
+            .outcome
+            .unwrap_err();
+        assert!(matches!(error, ClipboardDispatchError::Io(_)));
+        assert!(!format!("{error}").contains("private-capability-sentinel"));
+        let mut current: &(dyn Error + 'static) = &error;
+        let mut found = false;
+        while let Some(source) = current.source() {
+            found |= source.is::<std::io::Error>();
+            current = source;
+        }
+        assert!(
+            found,
+            "dispatch mapping must retain the original capability failure"
+        );
     }
 }
