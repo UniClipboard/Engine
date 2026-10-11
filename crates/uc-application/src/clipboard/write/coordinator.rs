@@ -27,6 +27,7 @@ use uc_core::clipboard::SystemClipboardSnapshot;
 use uc_core::ports::clipboard::{
     SelfWriteAttribution, SelfWriteLedgerPort, SelfWriteMatch, SystemClipboardPort,
 };
+use uc_observability_contract::diagnostics::ObservationContext;
 use uc_observability_contract::{
     error_source::io_error_kind, log_fields::log_vocab_debug, uc_error, uc_info, uc_warn,
 };
@@ -250,15 +251,17 @@ impl ClipboardWriteCoordinator {
         intent: ClipboardWriteIntent,
     ) -> Result<()> {
         let owner = self.clone();
+        let observation = ObservationContext::capture();
         // 调用方停止等待后，已接受的写入仍持有顺序锁，直到来源记录清理完成。
         tokio::spawn(
-            async move {
-                let _serial = owner.serial.lock().await;
-                owner.writing.store(true, Ordering::Release);
-                let _writing = WritingGuard(&owner.writing);
-                owner.write_inner(snapshot, intent).await
-            }
-            .in_current_span(),
+            observation
+                .scope(async move {
+                    let _serial = owner.serial.lock().await;
+                    owner.writing.store(true, Ordering::Release);
+                    let _writing = WritingGuard(&owner.writing);
+                    owner.write_inner(snapshot, intent).await
+                })
+                .in_current_span(),
         )
         .await
         .map_err(|source| Error::new(source).context("clipboard write worker failed"))?
@@ -320,11 +323,13 @@ impl ClipboardWriteCoordinator {
             // instead of being hidden in the `Err` bubbling back up the call chain).
             let clipboard = Arc::clone(&self.system_clipboard);
             let span = Span::current();
-            let written =
-                spawn_blocking(move || span.in_scope(|| clipboard.write_snapshot(snapshot)))
-                    .await
-                    .map_err(|source| Error::new(source).context("system clipboard writer failed"))
-                    .and_then(|result| result);
+            let observation = ObservationContext::capture();
+            let written = spawn_blocking(move || {
+                observation.sync_scope(|| span.in_scope(|| clipboard.write_snapshot(snapshot)))
+            })
+            .await
+            .map_err(|source| Error::new(source).context("system clipboard writer failed"))
+            .and_then(|result| result);
             if let Err(err) = written {
                 // Unwind the just-armed content record so a later unrelated
                 // change is not mis-attributed to this failed write.

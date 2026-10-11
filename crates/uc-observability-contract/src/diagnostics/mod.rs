@@ -105,7 +105,8 @@ impl ObservationContext {
         CONTINUATION.scope(self.0, future).await
     }
 
-    fn sync_scope<T>(self, work: impl FnOnce() -> T) -> T {
+    /// 将既有不透明关联延续到同步或阻塞工作，不读取内部状态。
+    pub fn sync_scope<T>(self, work: impl FnOnce() -> T) -> T {
         CONTINUATION.sync_scope(self.0, work)
     }
 }
