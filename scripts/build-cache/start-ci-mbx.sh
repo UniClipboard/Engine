@@ -5,7 +5,6 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 : "${RUNNER_TEMP:?RUNNER_TEMP is required}"
 : "${GITHUB_ENV:?GITHUB_ENV is required}"
 : "${GITHUB_PATH:?GITHUB_PATH is required}"
-bash "$root/scripts/build-cache/prepare-ci-network.sh"
 bash "$root/scripts/build-cache/mbx.sh" --install
 umask 077
 config=$(mktemp "$RUNNER_TEMP/engine-mbx-env.XXXXXX")
@@ -15,6 +14,7 @@ key_id=${BUILD_CACHE_R2_ACCESS_KEY_ID:-}
 secret=${BUILD_CACHE_R2_SECRET_ACCESS_KEY:-}
 if [[ -n "$endpoint" && -n "$key_id" && -n "$secret" ]]; then
   [[ "$endpoint" == https://* ]] || { echo 'MBX R2 endpoint must use HTTPS' >&2; exit 1; }
+  bash "$root/scripts/build-cache/prepare-ci-network.sh"
   mode=read-only
   if [[ "${BUILD_CACHE_ACCESS:-read}" == write ]]; then mode=read-write; fi
   {
