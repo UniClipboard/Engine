@@ -16,12 +16,16 @@
 //! [`install_peer_reachability`]: IrohSessionBuilder::install_peer_reachability
 //! [`install_clipboard`]: IrohSessionBuilder::install_clipboard
 
+use super::discovery::endpoint_id;
+use futures_util::{stream, stream::BoxStream, StreamExt};
+use iroh::Watcher as _;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 #[cfg(not(any(test, feature = "test-util")))]
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use uc_application::deps::ClipboardReceiverPort;
 use uc_application::deps::PeerIdentityDirectoryPort;
@@ -30,6 +34,7 @@ use uc_observability_contract::{
 };
 
 use super::admitted_connections::AdmittedConnections;
+use super::discovery::{DirectoryAddressLookupBuilder, DiscoveryRuntime};
 use super::protocol_router::ProtocolRouterBuilder;
 use super::session_generation::{
     SessionProtocolGenerationHandle, SessionProtocolHandlers, SessionProtocolHandlersBuilder,
@@ -43,6 +48,7 @@ use iroh_mdns_address_lookup::MdnsAddressLookup;
 use noq_proto::congestion::{Bbr3Config, CubicConfig};
 use tracing::instrument;
 use tracing::instrument::WithSubscriber;
+use uc_application::deps::{ConnectionHint, DiscoveryError, DiscoveryManager};
 use uc_application::deps::{IssueMembershipBranchRecoveryPort, KnownPeerContact};
 use uc_core::settings::model::CongestionController;
 use uc_core::settings::relay_routing::RelayRouting;
@@ -112,6 +118,8 @@ use super::transfer_progress_adapter::{
 };
 use uc_sync_protocol::membership_branch_recovery::MEMBERSHIP_BRANCH_RECOVERY_ALPN;
 
+#[cfg(test)]
+mod discovery_tests;
 mod shutdown;
 pub use shutdown::IrohNodeShutdownError;
 
@@ -204,6 +212,7 @@ pub struct IrohNode {
     ///
     /// [`shutdown`]: IrohNode::shutdown
     net_recovery: Option<tokio::task::JoinHandle<()>>,
+    discovery_runtime: DiscoveryRuntime,
     /// Keeps the process-wide single-node reservation until shutdown is
     /// complete. Dropping a partially-built or live node releases it too.
     _run_lease: NodeRunLease,
@@ -631,10 +640,11 @@ pub struct IrohNodeBuilder {
     router_builder: ProtocolRouterBuilder,
     session_protocols: Arc<SessionProtocolRegistry>,
     run_lease: NodeRunLease,
+    discovery_runtime: DiscoveryRuntime,
 }
 
 struct IrohSessionContext {
-    mdns: MdnsAddressLookup,
+    discovery: Arc<DiscoveryManager>,
     endpoint: Arc<Endpoint>,
     demand_recovery: Arc<DemandRecoveryCoordinator>,
     network_recovery_observations: Arc<NetworkRecoveryObservationSource>,
@@ -674,51 +684,46 @@ impl IrohSessionBuilder {
         }
     }
 
-    /// 复用同一个本机地址 watcher 和 mDNS 实例，不创建额外后台任务。
+    /// 订阅设备级发现负责人；每次提示使用当前会话身份目录，不缓存 DeviceId 绑定。
     pub async fn connection_hints(
         &self,
         identities: Arc<dyn PeerIdentityDirectoryPort>,
         fingerprints: Arc<dyn IdentityFingerprintFactoryPort>,
-    ) -> futures_util::stream::BoxStream<
-        'static,
-        Result<uc_application::deps::ConnectionHint, anyhow::Error>,
-    > {
-        use futures_util::{stream, StreamExt};
-        use iroh::Watcher as _;
+    ) -> BoxStream<'static, Result<ConnectionHint, anyhow::Error>> {
         let local = self
             .context
             .endpoint
             .watch_addr()
             .stream()
             .skip(1)
-            .map(|_| Ok(uc_application::deps::ConnectionHint::NetworkChanged));
+            .map(|_| Ok(ConnectionHint::NetworkChanged));
         let identity = Arc::new(PeerIdentityResolver::new(identities, fingerprints));
-        let discovered = self
-            .context
-            .mdns
-            .subscribe()
-            .await
-            .filter_map(move |event| {
-                let identity = Arc::clone(&identity);
-                async move {
-                    let iroh_mdns_address_lookup::DiscoveryEvent::Discovered {
-                        endpoint_info, ..
-                    } = event
-                    else {
-                        return None;
-                    };
-                    match identity.resolve(endpoint_info.endpoint_id.as_bytes()).await {
-                        Ok(device) => Some(Ok(
-                            uc_application::deps::ConnectionHint::PeerAddressChanged(device),
-                        )),
-                        Err(PeerIdentityError::Unresolved | PeerIdentityError::Ambiguous) => None,
-                        Err(
-                            error @ (PeerIdentityError::MemberRead(_)
-                            | PeerIdentityError::Fingerprint(_)),
-                        ) => Some(Err(anyhow::Error::new(error))),
-                    }
+        let changes = self.context.discovery.subscribe_changes();
+        let discovered = stream::unfold(changes, |mut changes| async move {
+            match changes.recv().await {
+                Ok(peer) => Some((Some(peer), changes)),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => Some((None, changes)),
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
+            }
+        })
+        .filter_map(move |event| {
+            let identity = Arc::clone(&identity);
+            async move {
+                let peer = match event {
+                    Some(peer) => peer,
+                    None => return Some(Ok(ConnectionHint::NetworkChanged)),
+                };
+                let endpoint = endpoint_id(&peer)?;
+                match identity.resolve(endpoint.as_bytes()).await {
+                    Ok(device) => Some(Ok(ConnectionHint::PeerAddressChanged(device))),
+                    Err(PeerIdentityError::Unresolved | PeerIdentityError::Ambiguous) => None,
+                    Err(
+                        error @ (PeerIdentityError::MemberRead(_)
+                        | PeerIdentityError::Fingerprint(_)),
+                    ) => Some(Err(anyhow::Error::new(error))),
                 }
-            });
+            }
+        });
         let observations = self.context.network_recovery_observations.subscribe();
         let recovery = stream::unfold(observations, |mut receiver| async move {
             use super::net_recovery::NetworkRecoveryObservation;
@@ -847,17 +852,11 @@ impl IrohNodeBuilder {
         if !config.disable_relays {
             use super::observed_address_lookup::ObservedAddressLookupBuilder;
             use uc_observability_contract::diagnostics::connectivity::DiscoverySource;
-            endpoint_builder = endpoint_builder
-                .address_lookup(ObservedAddressLookupBuilder::new(
-                    iroh::address_lookup::PkarrPublisher::n0_dns(),
-                    DiscoverySource::Pkarr,
-                    recorder.clone(),
-                ))
-                .address_lookup(ObservedAddressLookupBuilder::new(
-                    iroh::address_lookup::DnsAddressLookup::n0_dns(),
-                    DiscoverySource::Dns,
-                    recorder.clone(),
-                ));
+            endpoint_builder = endpoint_builder.address_lookup(ObservedAddressLookupBuilder::new(
+                iroh::address_lookup::PkarrPublisher::n0_dns(),
+                DiscoverySource::Pkarr,
+                recorder.clone(),
+            ));
         }
         if let Some(gate) = &config.network_partition_gate {
             endpoint_builder = endpoint_builder.hooks(gate.clone());
@@ -922,20 +921,15 @@ impl IrohNodeBuilder {
             );
         }
 
+        let discovery_slot = Arc::new(OnceLock::new());
         let endpoint = endpoint_builder
-            // UniClipboard#486 §三 B: enable mDNS LAN discovery. 在非 LAN-only
-            // 路径下与 N0 preset 的 pkarr DHT lookup 并存（mDNS 同子网更快，
-            // pkarr 兜底跨网段）；在 LAN-only 路径下是**唯一**的发现来源。
-            // The `addr_filter` above also runs over what mDNS publishes,
-            // so a Clash `198.18.0.1` won't leak into the LAN announcement
-            // even if magicsock surfaces it locally.
-            .address_lookup(
-                super::observed_address_lookup::ObservedAddressLookupBuilder::new(
-                    mdns.clone(),
-                    uc_observability_contract::diagnostics::connectivity::DiscoverySource::Mdns,
-                    recorder.clone(),
-                ),
-            )
+            // 统一候选入口；mDNS 发布及所有结果仍经过原地址过滤。
+            .address_lookup(DirectoryAddressLookupBuilder {
+                mdns: mdns.clone(),
+                cloud_enabled: !config.disable_relays,
+                recorder: recorder.clone(),
+                manager: discovery_slot.clone(),
+            })
             .bind()
             // Endpoint 的长期驱动不能持有启动/恢复操作的 span。
             .with_subscriber(tracing::Dispatch::new(
@@ -1009,8 +1003,15 @@ impl IrohNodeBuilder {
             "iroh node bound; ready to install transport handlers"
         );
         log_publish_addrs(&endpoint, "post-bind");
+        let discovery = discovery_slot
+            .get()
+            .cloned()
+            .ok_or_else(|| IrohNodeError::Discovery {
+                source: DiscoveryError::NotInitialized.into(),
+            })?;
+        let discovery_runtime = DiscoveryRuntime::start(discovery.clone(), mdns);
         let session_context = Arc::new(IrohSessionContext {
-            mdns,
+            discovery,
             endpoint,
             demand_recovery,
             network_recovery_observations,
@@ -1023,6 +1024,7 @@ impl IrohNodeBuilder {
             router_builder,
             session_protocols,
             run_lease,
+            discovery_runtime,
         })
     }
 }
@@ -1523,6 +1525,7 @@ impl IrohNodeBuilder {
             session_generation: None,
             connection_observations: self.connection_observations,
             net_recovery,
+            discovery_runtime: self.discovery_runtime,
             _run_lease: self.run_lease,
         }
     }

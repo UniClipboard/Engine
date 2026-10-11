@@ -564,6 +564,8 @@ diagnostic_task_kinds! {
     ActiveClipboardConverge => "active_clipboard_converge",
     ClipboardDeferredDrain => "clipboard_deferred_drain",
     PairingMdnsForward => "pairing_mdns_forward",
+    /// 设备发现订阅或其共用 mDNS 服务的任务异常退出。
+    PeerDiscovery => "peer_discovery",
     MobileOutboundDispatch => "mobile_outbound_dispatch",
     /// Engine 公开操作的执行任务异常退出；调用方只收到稳定错误码 1108。
     EngineOperation => "engine_operation",
