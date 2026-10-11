@@ -45,6 +45,11 @@ R2 诊断使用 `just mbx --r2 --mbx doctor --json`；预取使用
 `just mbx --r2 --mbx prefetch check --workspace --all-targets --locked`。空 manifest 不等于连接故障，
 但诊断成功也不等于编译命中。用 `MBX_STATS_REPORT` 保存原生统计，并在独立空 target/本地动作缓存
 消费者中确认 `downloaded_bytes`、恢复输出与 hits；远端错误和上传失败也必须保留。
+MBX 1.18.0 的 `remote_failures` 不覆盖全部预取失败：PR #174 的 macOS 原始日志已有
+`remote cache blob prefetch failed` 与 `No buffer space available (os error 55)`，但统计验收仍通过。
+R2 工作流通过 `verify-r2-build.py` 同时检查原生统计与固定错误分类；诊断工件只保存分类计数，
+不保存含端点的原始日志。macOS 另外保留构建前后资源计数，用于区分系统资源不足与远端故障；
+`ENOBUFS` 的具体触发原因尚待验证，不能据此归因为凭据或 runner 版本。
 
 R2 的桶级令牌不能按前缀隔离信任；只有可信构建可以拿到写令牌。MBX 原生内容校验、请求期限、
 读失败后本地编译与异步上传负责缓存失败恢复，不另实现网络缓存层。R2 的真实共享命中及耗时须另行
