@@ -76,9 +76,14 @@ jobs:
           {
             ulimit -a
             sysctl kern.ipc.maxsockbuf kern.maxfiles kern.maxfilesperproc
+            sysctl net.inet.tcp.autorcvbufmax net.inet.tcp.autosndbufmax
             netstat -m
             vm_stat
           } | tee "$RUNNER_TEMP/mbx-r2-evidence/resources-before.txt"
+
+      - name: Bound macOS TCP buffer growth
+        if: runner.os == 'macOS'
+        run: bash scripts/build-cache/prepare-ci-network.sh
 
       - name: Exercise R2 and Engine migration
         env:
@@ -139,6 +144,17 @@ jobs:
             netstat -m
             vm_stat
           } | tee "$RUNNER_TEMP/mbx-r2-evidence/resources-after.txt"
+          python3 - <<'PYCODE'
+          import os, re
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'mbx-r2-evidence'
+          def denied(name):
+              matches = re.findall(r'^(\d+) requests for memory denied$', (root / name).read_text(), re.M)
+              return int(matches[0]) if matches else 0
+          before, after = denied('resources-before.txt'), denied('resources-after.txt')
+          print(f'mbuf allocation denials: {before} -> {after}')
+          assert after == before, 'macOS network buffer allocation failures increased'
+          PYCODE
 
       - name: Retain R2 evidence
         if: always()

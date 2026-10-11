@@ -50,7 +50,12 @@ MBX 1.18.0 的 `remote_failures` 不覆盖全部预取失败：PR #174 的 macOS
 `remote cache blob prefetch failed` 与 `No buffer space available (os error 55)`，但统计验收仍通过。
 R2 工作流通过 `verify-r2-build.py` 同时检查原生统计与固定错误分类；诊断工件只保存分类计数，
 不保存含端点的原始日志。macOS 另外保留构建前后资源计数，用于区分系统资源不足与远端故障；
-`ENOBUFS` 的具体触发原因尚待验证，不能据此归因为凭据或 runner 版本。
+本次 macOS 失败样本的网络内存分配拒绝数从 0 增至 34,206，证实共享 mbuf 池耗尽；
+不是仅凭 `ENOBUFS` 推测凭据或 runner 版本问题。`prepare-ci-network.sh` 仅在临时 GitHub
+托管 macOS runner 上将 TCP 每方向自动缓冲增长限制到 256 KiB（已有更小限制保持不变），
+为 MBX 的最多 64 个并发远端传输及本机 IPC 保留共享缓冲余量。不关闭缓存、预取、TCP
+自动调节或修改持久系统配置；本机和 self-hosted runner 不作系统修改。真实主线读写验证仍
+须在受保护 main push 完成，PR 只读验证不能替代。
 
 R2 的桶级令牌不能按前缀隔离信任；只有可信构建可以拿到写令牌。MBX 原生内容校验、请求期限、
 读失败后本地编译与异步上传负责缓存失败恢复，不另实现网络缓存层。R2 的真实共享命中及耗时须另行

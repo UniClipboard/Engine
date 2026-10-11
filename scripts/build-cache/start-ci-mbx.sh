@@ -5,6 +5,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 : "${RUNNER_TEMP:?RUNNER_TEMP is required}"
 : "${GITHUB_ENV:?GITHUB_ENV is required}"
 : "${GITHUB_PATH:?GITHUB_PATH is required}"
+bash "$root/scripts/build-cache/prepare-ci-network.sh"
 bash "$root/scripts/build-cache/mbx.sh" --install
 umask 077
 config=$(mktemp "$RUNNER_TEMP/engine-mbx-env.XXXXXX")
