@@ -2345,11 +2345,11 @@ mod tests {
         assert_eq!(new_calls[0].1.representations.len(), 1);
     }
 
-    /// 已有内容命中 → 入站管线重激活 (`Resurfaced`) → `announce_new` 一次,
-    /// entry_id 用 `existing_entry_id`。写 OS 用 `LocalRestore` —— 手机推给
-    /// 单台桌面, 本机是激活者, watcher 要接手转播给其他桌面。
+    /// 已有内容命中 → 入站管线写回 OS (`Resurfaced`) → `announce_new` 一次。
+    /// entry_id 用 `existing_entry_id`；兼容公告负责登记与传播，OS 写入使用
+    /// `RemotePush` 抑制 watcher 回声，避免第二次激活。
     #[tokio::test]
-    async fn resurfaced_invokes_announce_new_with_local_restore_intent() {
+    async fn resurfaced_invokes_announce_new_with_remote_push_echo_suppression() {
         let mut repo = MockEntryRepo::new();
         let existing = EntryId::from("entry-existing");
         let existing_clone = existing.clone();
@@ -2367,7 +2367,7 @@ mod tests {
         write
             .expect_write()
             .times(1)
-            .withf(|_, intent| *intent == ClipboardWriteIntent::LocalRestore)
+            .withf(|_, intent| *intent == ClipboardWriteIntent::RemotePush)
             .returning(|_, _| Ok(()));
         let mut touch = MockTouchEntry::new();
         touch
