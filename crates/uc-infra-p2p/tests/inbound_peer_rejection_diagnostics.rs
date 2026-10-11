@@ -222,7 +222,6 @@ async fn presence(
 async fn clipboard(dialer: &Endpoint, members: Members, admission: Arc<Admission>) -> u8 {
     let receiver = endpoint().await;
     let adapter = IrohClipboardReceiverAdapter::new(
-        Arc::clone(&receiver),
         Arc::new(members),
         admission,
         Arc::new(Sha256IdentityFingerprintFactory),

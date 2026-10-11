@@ -106,7 +106,6 @@ async fn receipt_failures_remain_distinct_in_standard_and_detailed_exports() {
         sync_preferences: MemberSyncPreferences::default(),
     }));
     let adapter = IrohClipboardReceiverAdapter::new(
-        receiver.clone(),
         members,
         Arc::new(Admitted),
         Arc::new(Sha256IdentityFingerprintFactory),

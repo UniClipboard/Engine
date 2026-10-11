@@ -8,13 +8,12 @@
 //!
 //! 1. 从 `peer_addr_repo` 拿 `addr_blob` 解码出 `EndpointAddr.id`（iroh
 //!    `EndpointId`）。
-//! 2. 交给 `conn_path::path_for(endpoint, id, OnMissing::Offline)` —— 由它
+//! 2. 交给 `conn_path::path_for(endpoint, id)` —— 由它
 //!    探测 `remote_info` snapshot 并裁决 Direct / Relay / Unknown / Offline。
 //!
-//! 裁决逻辑（`Direct > Relay` 优先级、`Active` 与候选判定、不可用地址过滤）
-//! 和 per-sync 埋点共用同一份 `conn_path`，单一真相源——细节看那个模块，
-//! 不在此重复。本处选 `OnMissing::Offline`：没有 `RemoteInfo` 意味着 magicsock
-//! 从未观察到该 peer。
+//! 这是 peer 级汇总：Direct 与 Relay 同时 Active 时返回 Unknown，裁决细节看
+//! `conn_path`，不在此重复。没有 `RemoteInfo` 意味着 magicsock 从未观察到该
+//! peer，返回 Offline。单次内容投递改用该次连接的 selected 路径，不走这里。
 //!
 //! 一处仍需当心：`conn_path` 的不可用地址过滤**只影响显示判定**，与节点级
 //! `addr_filter::is_virtual_nic_ip`（决定 outbound dial / ticket 候选）是
@@ -47,7 +46,7 @@ use uc_core::ids::DeviceId;
 use uc_core::ports::connection_channel::{ConnectionChannelPort, ConnectionPath};
 use uc_core::ports::peer_address::PeerAddressRepositoryPort;
 
-use super::conn_path::{path_for, OnMissing};
+use super::conn_path::path_for;
 use super::peer_address_resolver::PeerAddressResolver;
 use uc_observability_contract::uc_debug;
 
@@ -89,7 +88,7 @@ impl ConnectionChannelPort for IrohConnectionChannelAdapter {
         };
 
         // Step 2: snapshot magicsock state and classify. No `RemoteInfo` at
-        // all ⇒ peer never observed by magicsock ⇒ Offline (see `OnMissing`).
-        path_for(&self.endpoint, endpoint_addr.id, OnMissing::Offline).await
+        // all ⇒ peer never observed by magicsock ⇒ Offline .
+        path_for(&self.endpoint, endpoint_addr.id).await
     }
 }

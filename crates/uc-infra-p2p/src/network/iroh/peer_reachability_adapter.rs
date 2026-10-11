@@ -30,6 +30,7 @@ use uc_observability_contract::diagnostics::connectivity::{
     ConfirmationFailure, InboundPeerProtocol, PresenceCheckObservation, PresenceCheckResult,
 };
 
+use super::admitted_connections::AdmittedConnections;
 use super::connect::connect_with_staggered_retry_classified;
 use super::inbound_peer::{InboundPeerGate, InboundPeerRejection};
 use super::net_recovery::{
@@ -430,6 +431,8 @@ pub struct IrohPeerReachabilityAdapter {
     network_recovery_observations: Option<Arc<NetworkRecoveryObservationSource>>,
     peer_address_resolver: PeerAddressResolver,
     clock: Arc<dyn ClockPort>,
+    /// 其他协议 handler 登记的已授权入站连接；撤销成员时与 presence 连接一并关闭。
+    admitted_connections: AdmittedConnections,
     /// Live iroh connections keyed by `DeviceId`. `DeviceId` is `Copy +
     /// Hash` (a 64-byte inline `ArrayString`), so it can be used directly
     /// as a map key without a stringified projection.
@@ -492,6 +495,7 @@ impl IrohPeerReachabilityAdapter {
             known_peer_contact_tx,
             None,
             None,
+            AdmittedConnections::default(),
         )
     }
 
@@ -505,6 +509,7 @@ impl IrohPeerReachabilityAdapter {
         known_peer_contact_tx: broadcast::Sender<KnownPeerContact>,
         demand_recovery: Arc<DemandRecoveryCoordinator>,
         network_recovery_observations: Arc<NetworkRecoveryObservationSource>,
+        admitted_connections: AdmittedConnections,
     ) -> Self {
         Self::build(
             endpoint,
@@ -516,6 +521,7 @@ impl IrohPeerReachabilityAdapter {
             known_peer_contact_tx,
             Some(demand_recovery),
             Some(network_recovery_observations),
+            admitted_connections,
         )
     }
 
@@ -529,6 +535,7 @@ impl IrohPeerReachabilityAdapter {
         known_peer_contact_tx: broadcast::Sender<KnownPeerContact>,
         demand_recovery: Option<Arc<DemandRecoveryCoordinator>>,
         network_recovery_observations: Option<Arc<NetworkRecoveryObservationSource>>,
+        admitted_connections: AdmittedConnections,
     ) -> Self {
         let (event_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let last_state = Arc::new(Mutex::new(HashMap::new()));
@@ -558,6 +565,7 @@ impl IrohPeerReachabilityAdapter {
             network_recovery_observations,
             peer_address_resolver: PeerAddressResolver::new(peer_addr_repo),
             clock,
+            admitted_connections,
             observations,
             peers,
             last_state,
@@ -921,6 +929,7 @@ impl PeerReachabilityPort for IrohPeerReachabilityAdapter {
             observation.verified.remove(&stale.connection.stable_id());
             stale.connection.close(0u32.into(), b"forgotten");
         }
+        self.admitted_connections.close_device(device, b"forgotten");
         self.last_state.lock().await.remove(device);
     }
 
@@ -954,6 +963,7 @@ impl PeerReachabilityPort for IrohPeerReachabilityAdapter {
             connection.close(0u32.into(), b"space_left");
         }
 
+        self.admitted_connections.close_all(b"space_left");
         self.last_state.lock().await.clear();
     }
 

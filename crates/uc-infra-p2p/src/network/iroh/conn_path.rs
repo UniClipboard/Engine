@@ -2,81 +2,84 @@
 //! peer on right now?".
 //!
 //! [`path_for`] is the one place that probes `endpoint.remote_info(id)` and
-//! turns the snapshot into a [`ConnectionPath`] verdict (direct / relay /
-//! unknown / offline). Both the connection-channel adapter (UI polling) and
-//! the clipboard dispatch adapter (per-sync transport telemetry) call it, so
-//! the verdict — and the `remote_info` probe itself — lives here once instead
-//! of being re-derived at each site. The only thing the two callers vary is
-//! the [`OnMissing`] policy for "the endpoint has no `RemoteInfo` at all".
+//! turns the snapshot into a peer-level [`ConnectionPath`] verdict (direct /
+//! relay / unknown / offline) for the device list. [`connection_channel`]
+//! classifies one `Connection` by its selected path and is what clipboard
+//! delivery reports for a single send or receive.
 //!
 //! The classification step [`derive_path_from_addrs`] is a pure function over
-//! a borrowed `TransportAddrInfo` iterator, kept private so the probe can't be
-//! bypassed; its IP truth-table is unit-testable without standing up an
+//! [`KnownAddr`] values, a minimal view of iroh's `TransportAddrInfo` (whose
+//! fields only iroh can construct), kept private so the probe can't be
+//! bypassed; the truth-table is unit-testable without standing up an
 //! endpoint.
 
 use std::net::IpAddr;
 
-use iroh::{Endpoint, EndpointId, TransportAddr};
+use iroh::{endpoint::Connection, Endpoint, EndpointId, TransportAddr};
 
 use uc_core::ports::connection_channel::{ConnectionChannel, ConnectionPath};
-
-/// What [`path_for`] reports when `remote_info(id)` returns `None` — the
-/// endpoint has no [`iroh::endpoint::RemoteInfo`] for the peer at all. This is
-/// the *only* point the two callers legitimately diverge, so it is an explicit
-/// parameter rather than a default buried in each call site:
-///
-/// - [`OnMissing::Offline`] — UI device list: no `RemoteInfo` means magicsock
-///   has never observed this peer, so it is genuinely offline.
-/// - [`OnMissing::Unknown`] — post-dispatch telemetry probe: the send just
-///   succeeded, so the peer is reachable; a `None` only means the snapshot
-///   momentarily lags the just-settled dial, not "offline".
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum OnMissing {
-    Offline,
-    Unknown,
-}
-
-impl OnMissing {
-    fn channel(self) -> ConnectionChannel {
-        match self {
-            OnMissing::Offline => ConnectionChannel::Offline,
-            OnMissing::Unknown => ConnectionChannel::Unknown,
-        }
-    }
-}
 
 /// Probe `endpoint` for the peer's current [`ConnectionPath`].
 ///
 /// Snapshots `remote_info(id)` once and classifies it via
-/// [`derive_path_from_addrs`]; falls back to `on_missing` when there is no
-/// `RemoteInfo` for the peer (see [`OnMissing`]). Cheap — `remote_info` is a
-/// snapshot read, not a watcher subscription — so callers sample it at the
-/// exact moment they care about (UI poll tick / right after a send settles).
-pub(crate) async fn path_for(
-    endpoint: &Endpoint,
-    id: EndpointId,
-    on_missing: OnMissing,
-) -> ConnectionPath {
+/// [`derive_path_from_addrs`]. No `RemoteInfo` means magicsock has never
+/// observed this peer, so it is reported as `Offline`. This is the peer-level
+/// summary for the device list; it must not be used as evidence of which path
+/// a single connection used — see [`connection_channel`].
+pub(crate) async fn path_for(endpoint: &Endpoint, id: EndpointId) -> ConnectionPath {
     match endpoint.remote_info(id).await {
-        Some(info) => derive_path_from_addrs(info.addrs()),
+        Some(info) => derive_path_from_addrs(info.addrs().map(KnownAddr::from_iroh)),
         None => ConnectionPath {
-            channel: on_missing.channel(),
+            channel: ConnectionChannel::Offline,
             address: None,
         },
+    }
+}
+
+/// Classify the path the given connection has selected right now.
+///
+/// `Active` addresses in `remote_info` only prove a path is open, not that
+/// this connection sends over it, so content delivery reads the connection's
+/// own selected path instead. No selected path (or an already closed
+/// connection) is `Unknown`. The result is a snapshot at call time and does
+/// not prove the path stayed unchanged for the whole exchange.
+pub(crate) fn connection_channel(connection: &Connection) -> ConnectionChannel {
+    let paths = connection.paths();
+    match paths.iter().find(|path| path.is_selected()) {
+        Some(path) if path.is_relay() => ConnectionChannel::Relay,
+        Some(path) if path.is_ip() => match path.remote_addr() {
+            TransportAddr::Ip(socket) if is_filtered_ip(socket.ip()) => ConnectionChannel::Unknown,
+            _ => ConnectionChannel::Direct,
+        },
+        _ => ConnectionChannel::Unknown,
+    }
+}
+
+/// One address of a peer plus whether iroh reports it as `Active`.
+struct KnownAddr<'a> {
+    addr: &'a TransportAddr,
+    active: bool,
+}
+
+impl<'a> KnownAddr<'a> {
+    fn from_iroh(info: &'a iroh::endpoint::TransportAddrInfo) -> Self {
+        Self {
+            addr: info.addr(),
+            active: matches!(info.usage(), iroh::endpoint::TransportAddrUsage::Active),
+        }
     }
 }
 
 /// Derive the active [`ConnectionPath`] from a peer's `remote_info` address
 /// snapshot.
 ///
-/// Priority `Direct > Relay`: an established IP path is the route traffic
-/// actually takes, so when both are `Active` it is reported as `Direct`
-/// (relay is only a fallback candidate). Having a `RemoteInfo` but no
-/// `Active` path ⇒ `Unknown` (mid-handshake / probing); nothing known ⇒
-/// `Offline`.
+/// `Active` only means a path is open, not that traffic uses it, so when a
+/// direct and a relay path are both `Active` the summary is `Unknown`. Having
+/// a `RemoteInfo` but no `Active` path ⇒ `Unknown` (mid-handshake / probing);
+/// nothing known ⇒ `Offline`.
 fn derive_path_from_addrs<'a, I>(addrs: I) -> ConnectionPath
 where
-    I: IntoIterator<Item = &'a iroh::endpoint::TransportAddrInfo>,
+    I: IntoIterator<Item = KnownAddr<'a>>,
 {
     let mut saw_any = false;
     let mut active_direct: Option<String> = None;
@@ -84,15 +87,11 @@ where
 
     for a in addrs {
         saw_any = true;
-        match (a.usage(), a.addr()) {
-            (iroh::endpoint::TransportAddrUsage::Active, TransportAddr::Ip(s))
-                if !is_filtered_ip(s.ip()) && active_direct.is_none() =>
-            {
+        match (a.active, a.addr) {
+            (true, TransportAddr::Ip(s)) if !is_filtered_ip(s.ip()) && active_direct.is_none() => {
                 active_direct = Some(s.to_string());
             }
-            (iroh::endpoint::TransportAddrUsage::Active, TransportAddr::Relay(u))
-                if active_relay.is_none() =>
-            {
+            (true, TransportAddr::Relay(u)) if active_relay.is_none() => {
                 active_relay = Some(u.to_string());
             }
             // Inactive / discovery candidates: do not promote, but keep
@@ -102,9 +101,13 @@ where
         }
     }
 
-    if let Some(address) = active_direct {
-        // 多条同时活跃时优先汇报 Direct —— IP 直连一旦建立就是当前流量
-        // 路径,relay 退化为可选 fallback。
+    if active_direct.is_some() && active_relay.is_some() {
+        // Direct 与 Relay 同时打开不能证明流量走哪条，保守汇报 Unknown。
+        ConnectionPath {
+            channel: ConnectionChannel::Unknown,
+            address: None,
+        }
+    } else if let Some(address) = active_direct {
         ConnectionPath {
             channel: ConnectionChannel::Direct,
             address: Some(address),
@@ -160,6 +163,53 @@ mod tests {
     use super::*;
     use std::net::Ipv4Addr;
     use std::net::Ipv6Addr;
+
+    fn ip(text: &str) -> TransportAddr {
+        TransportAddr::Ip(text.parse().unwrap())
+    }
+
+    fn relay() -> TransportAddr {
+        TransportAddr::Relay("https://relay.example.invalid".parse().unwrap())
+    }
+
+    fn derive(addrs: &[(&TransportAddr, bool)]) -> ConnectionPath {
+        derive_path_from_addrs(
+            addrs
+                .iter()
+                .map(|&(addr, active)| KnownAddr { addr, active }),
+        )
+    }
+
+    #[test]
+    fn peer_summary_is_unknown_when_direct_and_relay_are_both_active() {
+        let (direct, relay) = (ip("203.0.113.10:4242"), relay());
+        let path = derive(&[(&direct, true), (&relay, true)]);
+        assert_eq!(path.channel, ConnectionChannel::Unknown);
+        assert_eq!(path.address, None);
+    }
+
+    #[test]
+    fn peer_summary_reports_the_single_active_path() {
+        let (direct, relay) = (ip("203.0.113.10:4242"), relay());
+        let only_direct = derive(&[(&direct, true), (&relay, false)]);
+        assert_eq!(only_direct.channel, ConnectionChannel::Direct);
+        assert_eq!(only_direct.address.as_deref(), Some("203.0.113.10:4242"));
+        let only_relay = derive(&[(&direct, false), (&relay, true)]);
+        assert_eq!(only_relay.channel, ConnectionChannel::Relay);
+    }
+
+    #[test]
+    fn peer_summary_ignores_unusable_direct_and_handles_empty_or_inactive() {
+        let (fake_ip, relay) = (ip("198.18.0.1:4242"), relay());
+        // 不可用的直连地址不参与汇总，不会把单独的 Relay 变成 Unknown。
+        let path = derive(&[(&fake_ip, true), (&relay, true)]);
+        assert_eq!(path.channel, ConnectionChannel::Relay);
+        assert_eq!(
+            derive(&[(&relay, false)]).channel,
+            ConnectionChannel::Unknown
+        );
+        assert_eq!(derive(&[]).channel, ConnectionChannel::Offline);
+    }
 
     #[test]
     fn ipv4_filter_truth_table() {

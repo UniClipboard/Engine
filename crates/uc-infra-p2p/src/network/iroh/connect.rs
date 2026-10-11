@@ -308,6 +308,82 @@ mod tests {
             .collect()
     }
 
+    /// 存储的对端地址已经失效（对端以同一密钥换了端口重启），而地址发现仍能给出新地址时，
+    /// 拨号应沿发现结果连通，不依赖存储记录被先刷新。
+    #[tokio::test]
+    async fn dial_with_a_stale_stored_address_follows_address_lookup() {
+        const ALPN: &[u8] = b"uniclipboard/test-stale-address/1";
+        let key = iroh::SecretKey::from_bytes(&[0x51; 32]);
+        let bind = |lookup: Option<iroh::address_lookup::MemoryLookup>| {
+            let key = key.clone();
+            async move {
+                let mut builder = Endpoint::builder(iroh::endpoint::presets::N0)
+                    .secret_key(key)
+                    .alpns(vec![ALPN.to_vec()])
+                    .relay_mode(iroh::RelayMode::Disabled);
+                if let Some(lookup) = lookup {
+                    builder = builder.address_lookup(lookup);
+                }
+                let endpoint = builder.bind().await.expect("bind");
+                for _ in 0..100 {
+                    if !endpoint.addr().addrs.is_empty() {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                endpoint
+            }
+        };
+
+        let old = bind(None).await;
+        let stale = old.addr();
+        old.close().await;
+        let current = bind(None).await;
+        let acceptor = tokio::spawn({
+            let current = current.clone();
+            async move {
+                let incoming = current.accept().await?;
+                let connection = incoming.await.ok()?;
+                connection.closed().await;
+                Some(())
+            }
+        });
+
+        // 对照：存储地址与对端现在的地址没有交集，拨通只能来自地址发现。
+        let current_addrs: Vec<_> = current.addr().ip_addrs().copied().collect();
+        assert!(
+            stale.ip_addrs().all(|addr| !current_addrs.contains(addr)),
+            "the stored address must be stale"
+        );
+
+        let lookup = iroh::address_lookup::MemoryLookup::new();
+        lookup.add_endpoint_info(current.addr());
+        let dialer = Arc::new(
+            Endpoint::builder(iroh::endpoint::presets::N0)
+                .address_lookup(lookup)
+                .relay_mode(iroh::RelayMode::Disabled)
+                .bind()
+                .await
+                .expect("bind dialer"),
+        );
+
+        let connection = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            connect_with_staggered_retry(
+                dialer,
+                stale,
+                ALPN,
+                "clipboard",
+                uc_observability_contract::diagnostics::connectivity::AddressInputSource::Stored,
+            ),
+        )
+        .await
+        .expect("dial finishes")
+        .expect("dial follows address lookup past the stale stored address");
+        drop(connection);
+        acceptor.abort();
+    }
+
     #[tokio::test]
     async fn staggered_failure_and_cancellation_account_only_for_started_attempts() {
         let exporter = InMemoryLogExporter::default();

@@ -196,16 +196,29 @@ async fn counts(engine: &Engine, queries: Vec<SearchEntriesInput>) -> Vec<u32> {
 }
 
 async fn daily(engine: &Engine, boundaries_ms: Vec<i64>) -> Result<Vec<u32>, u32> {
-    match engine
-        .execute(Operation::QueryDailyEntryCounts(DailyEntryCountsInput {
-            boundaries_ms,
-        }))
-        .await
-    {
-        Ok(OperationResult::DailyEntryCounts(counts)) => Ok(counts),
-        Ok(other) => panic!("unexpected daily result: {other:?}"),
-        Err(error) => Err(error.code()),
+    // 与批量计数一致：解锁后的异步索引重建不代表统计语义失败。
+    // 只等待索引状态，锁定与非法输入仍立即返回，保留失败关闭断言。
+    let mut last = None;
+    for _ in 0..100 {
+        match engine
+            .execute(Operation::QueryDailyEntryCounts(DailyEntryCountsInput {
+                boundaries_ms: boundaries_ms.clone(),
+            }))
+            .await
+        {
+            Ok(OperationResult::DailyEntryCounts(counts)) => return Ok(counts),
+            Err(error)
+                if error.code() == SEARCH_INDEX_REBUILDING_CODE
+                    || error.code() == SEARCH_INDEX_NOT_READY_CODE =>
+            {
+                last = Some(error.code());
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Ok(other) => panic!("unexpected daily result: {other:?}"),
+            Err(error) => return Err(error.code()),
+        }
     }
+    panic!("index stayed unavailable for daily counts: {last:?}");
 }
 
 /// 索引在保存后异步追上；轮询直到条目数达到预期。

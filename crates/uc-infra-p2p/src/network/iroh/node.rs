@@ -29,6 +29,7 @@ use uc_observability_contract::{
     error_source::io_error_kind, log_fields::log_vocab, uc_debug, uc_info, uc_warn,
 };
 
+use super::admitted_connections::AdmittedConnections;
 use super::protocol_router::ProtocolRouterBuilder;
 use super::session_generation::{
     SessionProtocolGenerationHandle, SessionProtocolHandlers, SessionProtocolHandlersBuilder,
@@ -78,7 +79,7 @@ use super::active_clipboard::{
     IrohActiveClipboardPullServeAdapter, IrohActiveClipboardReceiverAdapter, ACTIVE_CLIPBOARD_ALPN,
     ACTIVE_CLIPBOARD_PULL_ALPN,
 };
-use super::addr_filter::{apply_addr_filter, enumerate_local_lan_v4};
+use super::addr_filter::apply_addr_filter;
 use super::admission_transport_material::IrohAdmissionTransportMaterial;
 use super::blobs::{IrohBlobTransferAdapter, BLOBS_ALPN};
 #[cfg(test)]
@@ -534,14 +535,7 @@ fn build_transport_config(cc: CongestionController) -> QuicTransportConfig {
 /// `Settings.network.allow_overlay_network_addrs` requires a daemon restart
 /// (the same constraint as `disable_relays`).
 fn build_addr_filter(allow_overlay: bool) -> AddrFilter {
-    // Snapshot local LAN subnets ONCE at endpoint-bind time. The closure
-    // captures the result for the lifetime of the endpoint; switching
-    // wifi/LAN at runtime won't be picked up (same constraint as
-    // `allow_overlay`). See `enumerate_local_lan_v4` doc for rationale.
-    let local_lan_v4 = enumerate_local_lan_v4();
-    AddrFilter::new(move |addrs: &Vec<TransportAddr>| {
-        apply_addr_filter(addrs, allow_overlay, &local_lan_v4)
-    })
+    AddrFilter::new(move |addrs: &Vec<TransportAddr>| apply_addr_filter(addrs, allow_overlay))
 }
 
 fn relay_mode_from_config(config: &IrohNodeConfig) -> Result<RelayMode, IrohNodeError> {
@@ -650,6 +644,8 @@ struct IrohSessionContext {
 pub struct IrohSessionBuilder {
     context: Arc<IrohSessionContext>,
     handlers: SessionProtocolHandlersBuilder,
+    /// 本会话各协议 handler 共享的已授权入站连接登记。
+    admitted_connections: AdmittedConnections,
 }
 
 pub struct PreparedIrohSession {
@@ -667,6 +663,7 @@ impl IrohSessionBuilder {
         Self {
             context,
             handlers: SessionProtocolHandlersBuilder::new(),
+            admitted_connections: AdmittedConnections::default(),
         }
     }
 
@@ -1109,6 +1106,7 @@ impl IrohSessionBuilder {
             known_peer_contact_tx,
             Arc::clone(&self.context.demand_recovery),
             Arc::clone(&self.context.network_recovery_observations),
+            self.admitted_connections.clone(),
         );
         let handler = adapter.handler();
 
@@ -1166,21 +1164,24 @@ impl IrohSessionBuilder {
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         peer_reachability: Arc<dyn PeerReachabilityPort>,
     ) -> Result<ClipboardHandlers, IrohNodeError> {
-        let receiver = IrohClipboardReceiverAdapter::new(
-            Arc::clone(&self.context.endpoint),
+        let receiver = IrohClipboardReceiverAdapter::with_connections(
             identities,
             peer_admission,
             fingerprint_factory,
+            self.admitted_connections.clone(),
         );
         let handler = receiver.handler();
 
         self.install_session_handler([CLIPBOARD_ALPN], handler)?;
 
-        let dispatch = Arc::new(IrohClipboardDispatchAdapter::new(
-            Arc::clone(&self.context.endpoint),
-            peer_addr_repo,
-            peer_reachability,
-        ));
+        let dispatch = Arc::new(
+            IrohClipboardDispatchAdapter::new(
+                Arc::clone(&self.context.endpoint),
+                peer_addr_repo,
+                peer_reachability,
+            )
+            .with_connections(self.admitted_connections.clone()),
+        );
 
         Ok(ClipboardHandlers {
             dispatch,
@@ -1377,12 +1378,13 @@ impl IrohSessionBuilder {
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
     ) -> Result<TransferProgressHandlers, IrohNodeError> {
-        let adapter = IrohTransferProgressAdapter::new(
+        let adapter = IrohTransferProgressAdapter::with_connections(
             Arc::clone(&self.context.endpoint),
             peer_addr_repo,
             identities,
             peer_admission,
             fingerprint_factory,
+            self.admitted_connections.clone(),
         );
         let handler = adapter.handler();
         let reporter = adapter.reporter();
@@ -1600,7 +1602,7 @@ impl IrohNodeError {
 
 #[cfg(test)]
 mod tests {
-    use super::super::addr_filter::{is_virtual_nic_ip, LocalLanV4};
+    use super::super::addr_filter::is_virtual_nic_ip;
     use super::*;
 
     use std::collections::HashMap;
@@ -2241,7 +2243,7 @@ mod tests {
                 4242,
             ))),
         ];
-        let kept = apply_addr_filter(&addrs, false, &[]);
+        let kept = apply_addr_filter(&addrs, false);
         assert_eq!(
             kept.len(),
             addrs.len(),
@@ -2272,7 +2274,7 @@ mod tests {
                 4242,
             ))), // Clash — always dropped
         ];
-        let kept: Vec<TransportAddr> = apply_addr_filter(&addrs, false, &[]).into_owned();
+        let kept: Vec<TransportAddr> = apply_addr_filter(&addrs, false).into_owned();
         assert_eq!(kept.len(), 1, "only the real LAN IP should survive");
         match &kept[0] {
             TransportAddr::Ip(s) => assert_eq!(s.ip().to_string(), "192.168.1.1"),
@@ -2308,7 +2310,7 @@ mod tests {
                 4242,
             ))), // link-local — always dropped
         ];
-        let kept: Vec<TransportAddr> = apply_addr_filter(&addrs, true, &[]).into_owned();
+        let kept: Vec<TransportAddr> = apply_addr_filter(&addrs, true).into_owned();
         assert_eq!(kept.len(), 3, "real LAN + 2 overlay candidates kept");
         let ips: Vec<String> = kept
             .iter()
@@ -2324,141 +2326,110 @@ mod tests {
         assert!(!ips.iter().any(|s| s == "169.254.0.5"));
     }
 
-    // ──────────────────────────────────────────────────────────────────
-    // Hairpin filter — drops peer's public IPv4 candidates when peer is
-    // reachable via our local LAN. See `apply_addr_filter` and
-    // `peer_reachable_in_local_lan` in `addr_filter.rs`.
-    // ──────────────────────────────────────────────────────────────────
-
-    /// Helper: build a fake "we live on 192.168.31.0/24" snapshot.
-    fn lan_31() -> Vec<LocalLanV4> {
-        vec![LocalLanV4 {
-            ip: "192.168.31.72".parse().unwrap(),
-            netmask: "255.255.255.0".parse().unwrap(),
-        }]
+    /// 记录经过地址过滤后真正到达发布服务的数据。
+    #[derive(Debug, Clone, Default)]
+    struct RecordingLookup {
+        published: Arc<StdMutex<Vec<Vec<TransportAddr>>>>,
     }
 
-    fn v4_socket(ip: &str, port: u16) -> TransportAddr {
-        TransportAddr::Ip(SocketAddr::V4(SocketAddrV4::new(ip.parse().unwrap(), port)))
-    }
-
-    /// Same-LAN scenario: peer advertises both its LAN IP (192.168.31.224,
-    /// in our /24) and its public NAT-egress IP. The public one is a hairpin
-    /// candidate — drop it. The mac↔win case from the production decay logs.
-    #[test]
-    fn hairpin_filter_drops_public_when_peer_lan_in_our_subnet() {
-        let addrs = vec![
-            v4_socket("192.168.31.224", 60053), // peer LAN — keep
-            v4_socket("180.164.125.95", 58279), // peer public NAT — drop (hairpin)
-        ];
-        let kept: Vec<TransportAddr> = apply_addr_filter(&addrs, false, &lan_31()).into_owned();
-        assert_eq!(kept.len(), 1, "only peer LAN should survive");
-        match &kept[0] {
-            TransportAddr::Ip(s) => assert_eq!(s.ip().to_string(), "192.168.31.224"),
-            _ => panic!("expected Ip variant"),
+    impl iroh::address_lookup::AddressLookup for RecordingLookup {
+        fn publish(&self, data: &iroh::address_lookup::EndpointData) {
+            self.published
+                .lock()
+                .unwrap()
+                .push(data.addrs().cloned().collect());
         }
     }
 
-    /// Cross-LAN scenario: peer's RFC1918 IP (192.168.1.5) is NOT in our
-    /// /24. We can't reach it directly — keep the public IP as the only
-    /// usable fallback.
-    #[test]
-    fn hairpin_filter_keeps_public_when_peer_lan_in_other_subnet() {
-        let addrs = vec![
-            v4_socket("192.168.1.5", 60053),  // peer LAN — NOT our subnet
-            v4_socket("203.0.113.42", 58279), // peer public — must keep
-        ];
-        let kept: Vec<TransportAddr> = apply_addr_filter(&addrs, false, &lan_31()).into_owned();
-        assert_eq!(
-            kept.len(),
-            2,
-            "cross-LAN: both peer LAN candidate AND public IP retained"
+    fn publish_through_production_filter(
+        allow_overlay: bool,
+        sets: &[Vec<TransportAddr>],
+    ) -> Vec<Vec<TransportAddr>> {
+        let recorder = RecordingLookup::default();
+        let lookup = iroh::address_lookup::FilteredAddressLookup::new(
+            recorder.clone(),
+            build_addr_filter(allow_overlay),
         );
+        for set in sets {
+            iroh::address_lookup::AddressLookup::publish(
+                &lookup,
+                &iroh::address_lookup::EndpointData::new(set.clone()),
+            );
+        }
+        let published = recorder.published.lock().unwrap().clone();
+        published
     }
 
-    /// No-LAN-candidate scenario: peer only advertises public IPs (plus
-    /// maybe a relay). Even though we have a LAN of our own, we have no
-    /// signal that this peer is reachable via our LAN — keep public.
-    #[test]
-    fn hairpin_filter_keeps_public_when_peer_has_no_rfc1918() {
-        let addrs = vec![v4_socket("203.0.113.42", 58279)];
-        let kept: Vec<TransportAddr> = apply_addr_filter(&addrs, false, &lan_31()).into_owned();
-        assert_eq!(
-            kept.len(),
-            1,
-            "no LAN candidate → no hairpin signal → keep public"
-        );
+    fn mixed_candidates() -> Vec<TransportAddr> {
+        let ip = |text: &str| TransportAddr::Ip(text.parse().unwrap());
+        vec![
+            ip("203.0.113.10:4242"),
+            ip("[2001:db8::7]:4242"),
+            ip("192.168.31.72:4242"),
+            ip("100.64.0.7:4242"),
+            ip("[fd7a:115c:a1e0::1]:4242"),
+            ip("198.18.0.1:4242"),
+            ip("169.254.0.5:4242"),
+            TransportAddr::Relay("https://relay.example.invalid".parse().unwrap()),
+        ]
     }
 
-    /// Degraded scenario: if_addrs enumeration failed (empty local_lan_v4).
-    /// Filter must degrade to off (= pre-patch behaviour) and keep public IPs.
+    /// 公网 IPv4、IPv6、私网与 relay 同时存在时，发布只移除虚拟网卡候选，
+    /// 且 ticket 过滤保留同一组 IP；overlay 开关只改变 overlay 候选。
     #[test]
-    fn hairpin_filter_disabled_when_local_lan_empty() {
-        let addrs = vec![
-            v4_socket("192.168.31.224", 60053),
-            v4_socket("180.164.125.95", 58279), // would be dropped if hairpin filter active
-        ];
-        let kept: Vec<TransportAddr> = apply_addr_filter(&addrs, false, &[]).into_owned();
-        assert_eq!(
-            kept.len(),
-            2,
-            "no local LAN snapshot → no hairpin filter → keep public"
-        );
+    fn publish_keeps_public_private_and_relay_and_matches_ticket() {
+        for allow_overlay in [false, true] {
+            let published = publish_through_production_filter(allow_overlay, &[mixed_candidates()]);
+            let kept = &published[0];
+            let ips: Vec<String> = kept
+                .iter()
+                .filter_map(|addr| match addr {
+                    TransportAddr::Ip(socket) => Some(socket.to_string()),
+                    _ => None,
+                })
+                .collect();
+            for expected in [
+                "203.0.113.10:4242",
+                "[2001:db8::7]:4242",
+                "192.168.31.72:4242",
+            ] {
+                assert!(ips.iter().any(|ip| ip == expected), "{expected} must stay");
+            }
+            assert_eq!(
+                kept.iter()
+                    .filter(|addr| matches!(addr, TransportAddr::Relay(_)))
+                    .count(),
+                1
+            );
+            for dropped in ["198.18.0.1:4242", "169.254.0.5:4242"] {
+                assert!(!ips.iter().any(|ip| ip == dropped), "{dropped} must go");
+            }
+            for overlay in ["100.64.0.7:4242", "[fd7a:115c:a1e0::1]:4242"] {
+                assert_eq!(ips.iter().any(|ip| ip == overlay), allow_overlay);
+            }
+
+            let secret = iroh::SecretKey::from_bytes(&[0x41; 32]);
+            let ticket = crate::network::iroh::addr_filter::filter_endpoint_addr(
+                iroh::EndpointAddr::from_parts(secret.public(), mixed_candidates()),
+                allow_overlay,
+            );
+            let mut ticket_addrs: Vec<_> = ticket.addrs.iter().cloned().collect();
+            let mut published_addrs = kept.clone();
+            ticket_addrs.sort();
+            published_addrs.sort();
+            assert_eq!(ticket_addrs, published_addrs);
+        }
     }
 
-    /// Peer advertises multiple LAN IPs, one in our subnet + one not.
-    /// At least one matches → hairpin filter activates → drop public.
+    /// 同一过滤器连续收到切网前后的两组地址，新公网候选照常发布，
+    /// 不依赖创建过滤器时的网络状态。
     #[test]
-    fn hairpin_filter_activates_if_any_peer_lan_matches_our_subnet() {
-        let addrs = vec![
-            v4_socket("192.168.31.224", 60053), // matches our /24 → triggers filter
-            v4_socket("10.0.0.5", 60053),       // peer's other LAN (different subnet)
-            v4_socket("180.164.125.95", 58279), // public — drop
-        ];
-        let kept: Vec<TransportAddr> = apply_addr_filter(&addrs, false, &lan_31()).into_owned();
-        let kept_ips: Vec<String> = kept
-            .iter()
-            .filter_map(|a| match a {
-                TransportAddr::Ip(s) => Some(s.ip().to_string()),
-                _ => None,
-            })
-            .collect();
-        assert!(kept_ips.contains(&"192.168.31.224".to_string()));
-        assert!(kept_ips.contains(&"10.0.0.5".to_string()));
-        assert!(
-            !kept_ips.contains(&"180.164.125.95".to_string()),
-            "public must be dropped"
-        );
-    }
-
-    /// Hairpin filter must NOT drop Relay candidates — those are the
-    /// fallback when direct paths fail/churn.
-    #[test]
-    fn hairpin_filter_does_not_touch_relays() {
-        use iroh::RelayUrl;
-        let relay_url: RelayUrl = "https://relay.example.com/".parse().unwrap();
-        let addrs = vec![
-            v4_socket("192.168.31.224", 60053),
-            v4_socket("180.164.125.95", 58279), // dropped
-            TransportAddr::Relay(relay_url),    // must survive
-        ];
-        let kept: Vec<TransportAddr> = apply_addr_filter(&addrs, false, &lan_31()).into_owned();
-        let relay_count = kept
-            .iter()
-            .filter(|a| matches!(a, TransportAddr::Relay(_)))
-            .count();
-        assert_eq!(
-            relay_count, 1,
-            "relay candidate must survive hairpin filter"
-        );
-    }
-
-    /// Real-world enumeration: if_addrs at least returns *something* on
-    /// every CI/dev machine we run on (loopback if nothing else, which is
-    /// filtered out). Make sure the call doesn't panic.
-    #[test]
-    fn enumerate_local_lan_v4_does_not_panic() {
-        let _ = enumerate_local_lan_v4();
+    fn publish_follows_address_changes_on_the_same_filter() {
+        let ip = |text: &str| TransportAddr::Ip(text.parse().unwrap());
+        let before = vec![ip("192.168.31.72:4242"), ip("203.0.113.10:4242")];
+        let after = vec![ip("10.20.30.40:4242"), ip("198.51.100.9:4242")];
+        let published = publish_through_production_filter(false, &[before.clone(), after.clone()]);
+        assert_eq!(published, vec![before, after]);
     }
 
     #[test]
@@ -2644,5 +2615,368 @@ mod tests {
         .await
         .expect("endpoint did not connect to protected relay");
         builder.session_context.endpoint.close().await;
+    }
+
+    /// 成员被移除后，生产装配下所有已授权的长连接都必须被关闭。
+    mod removed_member_connections {
+        use super::*;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use uc_core::membership::{
+            MemberRepositoryPort, MembershipError, PeerAdmissionError, PeerAdmissionPort,
+            SpaceMember,
+        };
+        use uc_core::ports::security::IdentityFingerprintFactoryPort;
+        use uc_core::ports::PeerAddressRecord;
+        use uc_core::MemberSyncPreferences;
+        use uc_sync_protocol::clipboard as clipboard_wire;
+        use uc_sync_protocol::transfer_progress::{self as progress_wire, ProgressFrame};
+
+        const STEP: Duration = Duration::from_secs(5);
+        const CLOSE_BUDGET: Duration = Duration::from_secs(3);
+
+        #[derive(Default)]
+        struct Members(StdMutex<Vec<SpaceMember>>);
+        crate::network::iroh::inbound_peer::member_table_identity_directory!(Members);
+        #[async_trait]
+        impl MemberRepositoryPort for Members {
+            async fn get(
+                &self,
+                device_id: &DeviceId,
+            ) -> Result<Option<SpaceMember>, MembershipError> {
+                Ok(self
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|member| &member.device_id == device_id)
+                    .cloned())
+            }
+            async fn list(&self) -> Result<Vec<SpaceMember>, MembershipError> {
+                Ok(self.0.lock().unwrap().clone())
+            }
+            async fn save(&self, member: &SpaceMember) -> Result<(), MembershipError> {
+                self.0.lock().unwrap().push(member.clone());
+                Ok(())
+            }
+            async fn remove(&self, device_id: &DeviceId) -> Result<bool, MembershipError> {
+                let mut members = self.0.lock().unwrap();
+                let before = members.len();
+                members.retain(|member| &member.device_id != device_id);
+                Ok(members.len() != before)
+            }
+        }
+
+        #[derive(Default)]
+        struct PeerAddresses(StdMutex<Vec<PeerAddressRecord>>);
+        #[async_trait]
+        impl PeerAddressRepositoryPort for PeerAddresses {
+            async fn get(
+                &self,
+                device: &DeviceId,
+            ) -> Result<Option<PeerAddressRecord>, uc_core::ports::PeerAddressError> {
+                Ok(self
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|record| &record.device_id == device)
+                    .cloned())
+            }
+            async fn upsert(
+                &self,
+                record: &PeerAddressRecord,
+            ) -> Result<(), uc_core::ports::PeerAddressError> {
+                self.0.lock().unwrap().push(record.clone());
+                Ok(())
+            }
+            async fn list(
+                &self,
+            ) -> Result<Vec<PeerAddressRecord>, uc_core::ports::PeerAddressError> {
+                Ok(self.0.lock().unwrap().clone())
+            }
+            async fn remove(
+                &self,
+                _device: &DeviceId,
+            ) -> Result<(), uc_core::ports::PeerAddressError> {
+                Ok(())
+            }
+        }
+
+        struct Admission(AtomicBool);
+        #[async_trait]
+        impl PeerAdmissionPort for Admission {
+            async fn is_admitted(&self, _device: &DeviceId) -> Result<bool, PeerAdmissionError> {
+                Ok(self.0.load(Ordering::SeqCst))
+            }
+        }
+
+        /// 生产装配的节点 A、一个已加入的成员 B（普通 endpoint），以及撤销成员所需的句柄。
+        struct Fixture {
+            node: IrohNode,
+            peer: Endpoint,
+            node_addr: iroh::EndpointAddr,
+            members: Arc<Members>,
+            admission: Arc<Admission>,
+            peer_device: DeviceId,
+            reachability: Arc<dyn PeerReachabilityPort>,
+            progress: TransferProgressHandlers,
+            clipboard: ClipboardHandlers,
+        }
+
+        async fn wait_for_addrs(endpoint: &Endpoint) {
+            for _ in 0..100 {
+                if !endpoint.addr().addrs.is_empty() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("endpoint never published direct addresses");
+        }
+
+        impl Fixture {
+            async fn start() -> Self {
+                let peer_key = iroh::SecretKey::from_bytes(&[0x61; 32]);
+                let peer_device = DeviceId::new("removed-member");
+                let members = Arc::new(Members::default());
+                members
+                    .save(&SpaceMember {
+                        device_id: peer_device.clone(),
+                        device_name: "Peer".to_string(),
+                        identity_fingerprint: Sha256IdentityFingerprintFactory
+                            .from_public_key(peer_key.public().as_bytes())
+                            .expect("fingerprint"),
+                        joined_at: chrono::Utc::now(),
+                        sync_preferences: MemberSyncPreferences::default(),
+                    })
+                    .await
+                    .expect("save member");
+                let admission = Arc::new(Admission(AtomicBool::new(true)));
+                let peer = Endpoint::builder(iroh::endpoint::presets::N0)
+                    .secret_key(peer_key)
+                    .relay_mode(RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind peer");
+                wait_for_addrs(&peer).await;
+                let peer_addresses = Arc::new(PeerAddresses::default());
+                peer_addresses
+                    .upsert(&PeerAddressRecord {
+                        device_id: peer_device.clone(),
+                        addr_blob: postcard::to_stdvec(&peer.addr()).expect("encode address"),
+                        observed_at: chrono::Utc::now(),
+                    })
+                    .await
+                    .expect("seed peer address");
+                let identities: Arc<dyn PeerIdentityDirectoryPort> =
+                    crate::network::iroh::inbound_peer::member_table_directory(members.clone());
+                let fingerprints: Arc<dyn IdentityFingerprintFactoryPort> =
+                    Arc::new(Sha256IdentityFingerprintFactory);
+
+                let store = identity_store();
+                let network = IrohNodeBuilder::bind(&store, IrohNodeConfig::default())
+                    .await
+                    .expect("bind");
+                let node_endpoint = Arc::clone(&network.session_context.endpoint);
+                let mut builder = network.prepare_session();
+                let peer_addr_repo: Arc<dyn PeerAddressRepositoryPort> = peer_addresses;
+                let reachability = builder
+                    .install_peer_reachability(
+                        Arc::clone(&peer_addr_repo),
+                        identities.clone(),
+                        admission.clone(),
+                        fingerprints.clone(),
+                        Arc::new(FixedClock(1_700_000_000_000)),
+                        tokio::sync::broadcast::channel(1).0,
+                    )
+                    .expect("install peer reachability");
+                let clipboard = builder
+                    .install_clipboard(
+                        Arc::clone(&peer_addr_repo),
+                        identities.clone(),
+                        admission.clone(),
+                        fingerprints.clone(),
+                        reachability.clone(),
+                    )
+                    .expect("install clipboard");
+                let progress = builder
+                    .install_transfer_progress(
+                        peer_addr_repo,
+                        identities,
+                        admission.clone(),
+                        fingerprints,
+                    )
+                    .expect("install transfer progress");
+                let node = spawn_session(network, builder).await;
+
+                wait_for_addrs(&node_endpoint).await;
+                Self {
+                    node,
+                    peer,
+                    node_addr: node_endpoint.addr(),
+                    members,
+                    admission,
+                    peer_device,
+                    reachability,
+                    progress,
+                    clipboard,
+                }
+            }
+
+            /// 成员被移除：成员表与准入同时撤销，随后由连接 owner 调用 `forget`。
+            async fn remove_member(&self) {
+                self.members
+                    .remove(&self.peer_device)
+                    .await
+                    .expect("remove member");
+                self.admission.0.store(false, Ordering::SeqCst);
+                self.reachability.forget(&self.peer_device).await;
+            }
+
+            async fn assert_closed(connection: &iroh::endpoint::Connection, alpn: &str) {
+                assert!(
+                    tokio::time::timeout(CLOSE_BUDGET, connection.closed())
+                        .await
+                        .is_ok(),
+                    "{alpn} connection of a removed member is still open"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn transfer_progress_connection_is_closed_when_the_member_is_removed() {
+            let mut fixture = Fixture::start().await;
+            let connection = fixture
+                .peer
+                .connect(fixture.node_addr.clone(), TRANSFER_PROGRESS_ALPN)
+                .await
+                .expect("connect");
+            let mut send = connection.open_uni().await.expect("open stream");
+            progress_wire::write_frame(
+                &mut send,
+                &ProgressFrame {
+                    transfer_id_bytes: [7; 16],
+                    bytes_transferred: 1,
+                    total_bytes: Some(2),
+                    status: uc_core::file_transfer::OutboundProgressStatus::InProgress,
+                },
+            )
+            .await
+            .expect("write frame");
+            send.finish().expect("finish");
+            // 对照：成员有效时事件被投递，证明连接已通过授权。
+            tokio::time::timeout(STEP, fixture.progress.inbound_events.recv())
+                .await
+                .expect("event arrives")
+                .expect("event");
+
+            fixture.remove_member().await;
+
+            Fixture::assert_closed(&connection, "transfer-progress").await;
+            fixture.node.shutdown().await.unwrap();
+        }
+
+        /// 对端收下帧但不回执；成员被移除后，在途的出站发送必须被中止并返回失败。
+        #[tokio::test]
+        async fn in_flight_dispatch_is_aborted_when_the_member_is_removed() {
+            use iroh::protocol::{AcceptError, ProtocolHandler};
+
+            #[derive(Debug, Clone)]
+            struct SilentHandler(Arc<tokio::sync::Notify>);
+            impl ProtocolHandler for SilentHandler {
+                async fn accept(
+                    &self,
+                    connection: iroh::endpoint::Connection,
+                ) -> Result<(), AcceptError> {
+                    let (_send, mut recv) = connection
+                        .accept_bi()
+                        .await
+                        .map_err(|err| AcceptError::from_err(err))?;
+                    let _ = clipboard_wire::read_frame(&mut recv).await;
+                    self.0.notify_one();
+                    let _ = connection.closed().await;
+                    Ok(())
+                }
+            }
+
+            let fixture = Fixture::start().await;
+            let frame_received = Arc::new(tokio::sync::Notify::new());
+            let peer_router = iroh::protocol::Router::builder(fixture.peer.clone())
+                .accept(CLIPBOARD_ALPN, SilentHandler(Arc::clone(&frame_received)))
+                .spawn();
+
+            let dispatch = Arc::clone(&fixture.clipboard.dispatch);
+            let target = fixture.peer_device.clone();
+            let sending = tokio::spawn(async move {
+                dispatch
+                    .dispatch(
+                        &target,
+                        &uc_core::ports::ClipboardHeader {
+                            version: uc_core::ports::ClipboardHeader::CURRENT_VERSION,
+                            snapshot_hash: "9".repeat(64),
+                            captured_at_ms: 1_700_000_000_000,
+                            origin_device_id: "local".to_string(),
+                            origin_device_name: "Local".to_string(),
+                            payload_version: 3,
+                        },
+                        uc_core::ports::SyncPayload {
+                            ciphertext: bytes::Bytes::from_static(b"in-flight"),
+                        },
+                    )
+                    .await
+            });
+            // 对照：帧已到对端，发送停在等待回执。
+            tokio::time::timeout(STEP, frame_received.notified())
+                .await
+                .expect("peer receives the frame");
+
+            fixture.remove_member().await;
+
+            let report = tokio::time::timeout(CLOSE_BUDGET, sending)
+                .await
+                .expect("the in-flight dispatch of a removed member is still waiting")
+                .expect("dispatch task joins");
+            assert!(report.outcome.is_err());
+            peer_router.shutdown().await.ok();
+            fixture.node.shutdown().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn unsettled_clipboard_connection_is_closed_when_the_member_is_removed() {
+            let fixture = Fixture::start().await;
+            let mut inbound = fixture.clipboard.receiver.subscribe();
+            let connection = fixture
+                .peer
+                .connect(fixture.node_addr.clone(), CLIPBOARD_ALPN)
+                .await
+                .expect("connect");
+            let (mut send, _recv) = connection.open_bi().await.expect("open stream");
+            clipboard_wire::write_frame(
+                &mut send,
+                &uc_core::ports::ClipboardHeader {
+                    version: uc_core::ports::ClipboardHeader::CURRENT_VERSION,
+                    snapshot_hash: "9".repeat(64),
+                    captured_at_ms: 1_700_000_000_000,
+                    origin_device_id: "removed-member".to_string(),
+                    origin_device_name: "Peer".to_string(),
+                    payload_version: 3,
+                },
+                None,
+                &bytes::Bytes::from_static(b"in-flight"),
+            )
+            .await
+            .expect("write frame");
+            send.finish().expect("finish");
+            // 对照：帧已通过授权并交给应用，但尚未结算。
+            let delivery = tokio::time::timeout(STEP, inbound.recv())
+                .await
+                .expect("frame arrives")
+                .expect("delivery");
+
+            fixture.remove_member().await;
+
+            Fixture::assert_closed(&connection, "clipboard").await;
+            drop(delivery);
+            fixture.node.shutdown().await.unwrap();
+        }
     }
 }

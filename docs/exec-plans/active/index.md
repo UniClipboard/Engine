@@ -2,6 +2,9 @@
 
 这里包含设计中、实施中、待实现或暂时阻塞的工作。状态以各文件开头为准。
 
+- [连接候选发布、网络恢复与路径观测](2026-10-10-connection-path-and-network-recovery.md)（实施中：地址过滤与连接路径改动已落地，端到端与网络矩阵验收待执行）
+- [连接生命周期加固：关闭移除成员的连接、可取消发送、连接复用、地址刷新、重试负责人](2026-10-10-connection-lifecycle-hardening.md)（草案：四项在本分支，每项先写复现测试；连接复用另开 issue）
+
 - [034 确定性虚拟 Peer Network 测试套件](034-deterministic-virtual-peer-network-test-suite.md)
 - [144 `uc-infra` 拆成 7 个 crate](144-uc-infra-crate-split.md)（收尾中：S1–S6 实施完成并归档实施记录；main coverage 已转绿，验收中仍有部分满足与未测项）
 - [038 双设备配对本机耗时压缩到一秒](038-pairing-local-latency-budget.md)（实施中）
