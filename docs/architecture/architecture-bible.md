@@ -4,6 +4,8 @@
 
 ## 文档维护记录
 
+- 2026-10-11：基于 main c0351c0e 撰写 Issue #34 第三切片[组更新规格](../exec-plans/active/2026-10-11-group-update-connectivity-spec.md)与[执行计划](../exec-plans/active/2026-10-11-group-update-connectivity-plan.md)。核对当前授权、历史 ACK、材料安装及 v5 格式；发现历史 /4 逐页限制，批量范围等待选择。只新增待实施设计，当前生产架构未变化。
+
 - 2026-10-11：Issue #34 第一切片检查发现、连接与授权边界。发现目录、来源生命周期、陌生设备身份和生产 lookup 接入的唯一事实来源为[设备发现与候选目录](../design-docs/peer-discovery.md)，已完成的实施验证与跳过项保留于[执行计划](../exec-plans/completed/2026-10-11-peer-discovery-slice.md)。
 
 - 2026-10-11：将纯 trace carrier helper 移到 network 共同模块，供现有协议与后续传输无关剪贴板交换使用；只改变 crate 内可见范围，线上格式和行为不变。

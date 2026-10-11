@@ -6,7 +6,6 @@ use async_trait::async_trait;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointAddr};
-use serde::{Deserialize, Serialize};
 
 use tokio::runtime::Handle;
 use tokio::task::spawn_blocking;
@@ -29,26 +28,13 @@ use uc_infra_security::{
     group_update_apply_verdict, group_update_failure_detail, GroupUpdateVerdict,
 };
 use uc_observability_contract::{uc_debug, uc_warn};
-use uc_sync_protocol::WireTraceContext;
+use uc_sync_protocol::group_update::{
+    decode_request, encode_request, GroupUpdateAck, GroupUpdateVersion, MAX_UPDATE_SIZE,
+    MAX_WIRE_SIZE,
+};
+pub use uc_sync_protocol::group_update::{GROUP_UPDATE_ALPN, LEGACY_GROUP_UPDATE_ALPN};
 
-/// 当前协议：确认字节区分接受、接收方明确拒绝与接收方暂时不可用。
-pub const GROUP_UPDATE_ALPN: &[u8] = b"uniclipboard/group-update/2";
-/// 旧协议：确认字节只有接受与拒绝；新发送方拨号时作为协商回退，新接收方继续接受它。
-pub const LEGACY_GROUP_UPDATE_ALPN: &[u8] = b"uniclipboard/group-update/1";
-const MAX_UPDATE_SIZE: usize = 4 * 1024 * 1024;
-const MAX_WIRE_SIZE: usize = MAX_UPDATE_SIZE + 1024;
-const WIRE_LAYOUT_MARKER: &[u8; 4] = b"UCT1";
 const GROUP_UPDATE_IO_TIMEOUT: Duration = Duration::from_secs(10);
-const ACK_ACCEPTED: u8 = 1;
-const ACK_REJECTED: u8 = 2;
-/// 仅当前协议使用：接收方已认证连接但本机暂时无法应用，发送方应延后重试。
-const ACK_UNAVAILABLE: u8 = 3;
-
-#[derive(Serialize, Deserialize)]
-struct WireGroupUpdateRequest {
-    trace_context: Option<WireTraceContext>,
-    payload: Vec<u8>,
-}
 
 async fn run_outbound_io_phase<T, E>(
     timeout: Duration,
@@ -123,7 +109,8 @@ impl GroupUpdateDispatchPort for IrohGroupUpdateAdapter {
         if update.payload().len() > MAX_UPDATE_SIZE {
             return Err(GroupUpdateDispatchError::transport());
         }
-        let request = encode_request(update.payload())?;
+        let request = encode_request(update.payload(), inject_current())
+            .map_err(GroupUpdateDispatchError::transport_from)?;
         let addr = self
             .resolve_addr(update)
             .await
@@ -152,20 +139,23 @@ impl GroupUpdateDispatchPort for IrohGroupUpdateAdapter {
             .map_err(GroupUpdateDispatchError::transport_from)?;
         let mut ack = [0u8; 1];
         run_outbound_io_phase(GROUP_UPDATE_IO_TIMEOUT, recv.read_exact(&mut ack)).await?;
-        let current_protocol = connection.alpn() == GROUP_UPDATE_ALPN;
-        match ack[0] {
-            ACK_ACCEPTED => Ok(()),
-            // 旧协议接收方对任何失败都回这个字节，真实原因未知，不能当作明确裁决。
-            ACK_REJECTED if current_protocol => Err(GroupUpdateDispatchError::Rejected(
-                GroupUpdateRejection::ByReceiver,
+        let version = if connection.alpn() == GROUP_UPDATE_ALPN {
+            GroupUpdateVersion::Current
+        } else {
+            GroupUpdateVersion::Legacy
+        };
+        match GroupUpdateAck::decode(ack[0], version)
+            .map_err(GroupUpdateDispatchError::transport_from)?
+        {
+            GroupUpdateAck::Applied => Ok(()),
+            GroupUpdateAck::Rejected => Err(GroupUpdateDispatchError::Rejected(
+                if version == GroupUpdateVersion::Current {
+                    GroupUpdateRejection::ByReceiver
+                } else {
+                    GroupUpdateRejection::Unclassified
+                },
             )),
-            ACK_REJECTED => Err(GroupUpdateDispatchError::Rejected(
-                GroupUpdateRejection::Unclassified,
-            )),
-            ACK_UNAVAILABLE if current_protocol => {
-                Err(GroupUpdateDispatchError::ReceiverUnavailable)
-            }
-            _ => Err(GroupUpdateDispatchError::transport()),
+            GroupUpdateAck::Unavailable => Err(GroupUpdateDispatchError::ReceiverUnavailable),
         }
     }
 }
@@ -234,7 +224,12 @@ impl ProtocolHandler for IrohGroupUpdateHandler {
         }
         let length = u32::from_be_bytes(length) as usize;
         if length == 0 || length > MAX_WIRE_SIZE {
-            emit_ack(&mut send, ACK_REJECTED).await;
+            emit_ack(
+                &mut send,
+                GroupUpdateAck::Rejected,
+                connection.alpn() == GROUP_UPDATE_ALPN,
+            )
+            .await;
             let _ = connection.closed().await;
             return Ok(());
         }
@@ -249,7 +244,12 @@ impl ProtocolHandler for IrohGroupUpdateHandler {
         let request = match decode_request(&request) {
             Ok(request) => request,
             Err(_) => {
-                emit_ack(&mut send, ACK_REJECTED).await;
+                emit_ack(
+                    &mut send,
+                    GroupUpdateAck::Rejected,
+                    connection.alpn() == GROUP_UPDATE_ALPN,
+                )
+                .await;
                 let _ = connection.closed().await;
                 return Ok(());
             }
@@ -279,16 +279,18 @@ impl ProtocolHandler for IrohGroupUpdateHandler {
         }
         let current_protocol = connection.alpn() == GROUP_UPDATE_ALPN;
         let ack = match &applied {
-            Ok(_) => Some(ACK_ACCEPTED),
+            Ok(_) => Some(GroupUpdateAck::Applied),
             Err(error) => match group_update_apply_verdict(error) {
-                GroupUpdateVerdict::Rejected => Some(ACK_REJECTED),
-                GroupUpdateVerdict::Unavailable if current_protocol => Some(ACK_UNAVAILABLE),
+                GroupUpdateVerdict::Rejected => Some(GroupUpdateAck::Rejected),
+                GroupUpdateVerdict::Unavailable if current_protocol => {
+                    Some(GroupUpdateAck::Unavailable)
+                }
                 // 旧协议没有表达“暂时不可用”的确认：不回确认，旧发送方按传输失败退避重发。
                 GroupUpdateVerdict::Unavailable => None,
             },
         };
         match ack {
-            Some(ack) => emit_ack(&mut send, ack).await,
+            Some(ack) => emit_ack(&mut send, ack, current_protocol).await,
             None => connection.close(0u32.into(), b"temporarily_unavailable"),
         }
         span.in_scope(|| {
@@ -345,39 +347,21 @@ fn group_update_apply_error_type(error: &KeyEpochError) -> DiagnosticErrorType {
     }
 }
 
-fn encode_request(payload: &[u8]) -> Result<Vec<u8>, GroupUpdateDispatchError> {
-    if payload.is_empty() || payload.len() > MAX_UPDATE_SIZE {
-        return Err(GroupUpdateDispatchError::transport());
-    }
-    let mut encoded = WIRE_LAYOUT_MARKER.to_vec();
-    encoded.extend(
-        postcard::to_stdvec(&WireGroupUpdateRequest {
-            trace_context: inject_current(),
-            payload: payload.to_vec(),
-        })
-        .map_err(GroupUpdateDispatchError::transport_from)?,
-    );
-    if encoded.len() > MAX_WIRE_SIZE {
-        return Err(GroupUpdateDispatchError::transport());
-    }
-    Ok(encoded)
-}
-
-fn decode_request(encoded: &[u8]) -> Result<WireGroupUpdateRequest, GroupUpdateDispatchError> {
-    let body = encoded
-        .strip_prefix(WIRE_LAYOUT_MARKER)
-        .ok_or_else(GroupUpdateDispatchError::transport)?;
-    let request: WireGroupUpdateRequest =
-        postcard::from_bytes(body).map_err(GroupUpdateDispatchError::transport_from)?;
-    if request.payload.is_empty() || request.payload.len() > MAX_UPDATE_SIZE {
-        return Err(GroupUpdateDispatchError::transport());
-    }
-    Ok(request)
-}
-
-async fn emit_ack(send: &mut iroh::endpoint::SendStream, ack: u8) {
+async fn emit_ack(
+    send: &mut iroh::endpoint::SendStream,
+    ack: GroupUpdateAck,
+    current_protocol: bool,
+) {
+    let version = if current_protocol {
+        GroupUpdateVersion::Current
+    } else {
+        GroupUpdateVersion::Legacy
+    };
+    let Some(byte) = ack.encode(version) else {
+        return;
+    };
     if matches!(
-        tokio::time::timeout(GROUP_UPDATE_IO_TIMEOUT, send.write_all(&[ack])).await,
+        tokio::time::timeout(GROUP_UPDATE_IO_TIMEOUT, send.write_all(&[byte])).await,
         Ok(Ok(()))
     ) {
         let _ = send.finish();
@@ -403,6 +387,10 @@ mod tests {
     use uc_core::ports::{PeerAddressError, PeerAddressRecord};
 
     use super::*;
+
+    const ACK_ACCEPTED: u8 = 1;
+    const ACK_REJECTED: u8 = 2;
+    const ACK_UNAVAILABLE: u8 = 3;
 
     mock! {
         GroupRevocation {}
@@ -480,9 +468,9 @@ mod tests {
 
     #[test]
     fn group_update_request_has_an_explicit_private_layout() {
-        let encoded = encode_request(b"MLS").expect("request encodes");
+        let encoded = encode_request(b"MLS", inject_current()).expect("request encodes");
 
-        assert!(encoded.starts_with(WIRE_LAYOUT_MARKER));
+        assert!(encoded.starts_with(b"UCT1"));
         let decoded = decode_request(&encoded).expect("request decodes");
         assert_eq!(decoded.payload, b"MLS");
         assert!(decoded.trace_context.is_none());
@@ -515,7 +503,7 @@ mod tests {
                 kind: DiagnosticSpanKind::Client,
             });
             let _client_entered = client.enter();
-            let encoded = encode_request(b"MLS").expect("request encodes");
+            let encoded = encode_request(b"MLS", inject_current()).expect("request encodes");
             let request = decode_request(&encoded).expect("request decodes");
             let server = operation_span(OperationContext {
                 domain: DiagnosticDomain::SpaceMembership,
@@ -621,7 +609,7 @@ mod tests {
             .await
             .expect("dial receiver");
         let (mut send, mut recv) = connection.open_bi().await.expect("open stream");
-        let request = encode_request(b"MLS").expect("encode request");
+        let request = encode_request(b"MLS", inject_current()).expect("encode request");
         send.write_all(&(request.len() as u32).to_be_bytes())
             .await
             .expect("write length");
@@ -668,7 +656,7 @@ mod tests {
             .await
             .expect("dial receiver");
         let (mut send, mut recv) = connection.open_bi().await.expect("open stream");
-        let request = encode_request(b"MLS").expect("encode request");
+        let request = encode_request(b"MLS", inject_current()).expect("encode request");
         send.write_all(&(request.len() as u32).to_be_bytes())
             .await
             .expect("write length");
@@ -711,7 +699,7 @@ mod tests {
             .await
             .expect("dial receiver");
         let (mut send, mut recv) = connection.open_bi().await.expect("open stream");
-        let request = encode_request(b"MLS").expect("encode request");
+        let request = encode_request(b"MLS", inject_current()).expect("encode request");
         send.write_all(&(request.len() as u32).to_be_bytes())
             .await
             .expect("write length");
@@ -776,7 +764,7 @@ mod tests {
     ) -> Result<u8, ()> {
         let connection = sender.connect(receiver.addr(), alpn).await.expect("dial");
         let (mut send, mut recv) = connection.open_bi().await.expect("open stream");
-        let request = encode_request(b"MLS").expect("encode request");
+        let request = encode_request(b"MLS", inject_current()).expect("encode request");
         send.write_all(&(request.len() as u32).to_be_bytes())
             .await
             .expect("write length");
