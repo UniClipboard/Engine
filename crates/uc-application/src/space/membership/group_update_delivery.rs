@@ -1,5 +1,7 @@
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
+
+use tokio::sync::broadcast;
 use uc_core::error_class::ErrorClass;
 use uc_observability_contract::diagnostics::connectivity::{
     record_pending_group_updates, LocalWorkObservation, LocalWorkOutcome, LocalWorkStep,
@@ -8,16 +10,20 @@ use uc_observability_contract::{uc_debug, uc_warn};
 
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    GroupRevocationPort, GroupUpdateDeliveryStatus, GroupUpdateDispatchError,
-    GroupUpdateDispatchPort, KeyEpochError, PendingGroupUpdate,
+    GroupRevocationPort, GroupUpdateDeliveryCondition, GroupUpdateDeliveryStatus,
+    GroupUpdateDispatchError, GroupUpdateDispatchPort, GroupUpdateRecipientDelivery,
+    GroupUpdateRejection, KeyEpochError, PendingGroupUpdate,
 };
-use uc_core::ports::{ClockPort, HostEvent, MembershipHostEvent};
+use uc_core::ports::{
+    ClockPort, HostEvent, MembershipHostEvent, PeerReachabilityChanged, ReachabilityState,
+};
 
 use crate::support::host_event_bus::HostEventBus;
 
 use super::{
-    DeliverPendingGroupUpdatesPort, LoadSecurityDeviceUpdateStatusPort,
-    MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger, QueryDeviceTrustError,
+    DeliverPendingGroupUpdatesPort, DeviceGroupUpdate, DeviceGroupUpdateState,
+    LoadSecurityDeviceUpdateStatusPort, MembershipMaintenanceStepOutcome,
+    MembershipMaintenanceTrigger, QueryDeviceTrustError, SecurityDeviceUpdates,
     SpaceDeviceUpdateProblem, SpaceDeviceUpdateRecovery, SpaceDeviceUpdateStatus,
 };
 
@@ -41,19 +47,30 @@ pub(crate) struct DeliverPendingGroupUpdatesUseCase {
     recipients: Arc<dyn RetainedGroupUpdateRecipientsPort>,
     host_events: Arc<HostEventBus>,
     clock: Arc<dyn ClockPort>,
+    /// 构造时订阅的上线事件：对端通过准入重新上线是重新认证的证据。
+    peer_online: Mutex<OnlineEvidence>,
+}
+
+/// 订阅的上线事件与尚未用掉的重新认证证据。
+///
+/// 证据一直保留到该对端的队首更新真正被尝试投递，或对端离线；
+/// 退避未到期或超出单轮上限时不得丢失，否则对端持续在线却再无重新评估机会。
+struct OnlineEvidence {
+    events: broadcast::Receiver<PeerReachabilityChanged>,
+    peers: HashSet<DeviceId>,
 }
 
 #[async_trait::async_trait]
 impl LoadSecurityDeviceUpdateStatusPort for DeliverPendingGroupUpdatesUseCase {
-    async fn load_security_device_update_status(
+    async fn load_security_device_updates(
         &self,
-    ) -> Result<SpaceDeviceUpdateStatus, QueryDeviceTrustError> {
-        let status = self
+    ) -> Result<SecurityDeviceUpdates, QueryDeviceTrustError> {
+        let deliveries = self
             .store
-            .space_group_update_delivery_status()
+            .space_group_update_deliveries()
             .await
             .map_err(map_query_error)?;
-        Ok(match status {
+        let status = match GroupUpdateDeliveryStatus::summarize(&deliveries) {
             GroupUpdateDeliveryStatus::Completed => SpaceDeviceUpdateStatus::completed(),
             GroupUpdateDeliveryStatus::Pending { next_attempt_at_ms }
                 if next_attempt_at_ms > self.clock.now_ms() =>
@@ -65,8 +82,38 @@ impl LoadSecurityDeviceUpdateStatusPort for DeliverPendingGroupUpdatesUseCase {
                 SpaceDeviceUpdateProblem::DeviceSecurityUpdateRejected,
                 SpaceDeviceUpdateRecovery::ReviewDevices,
             ),
+        };
+        Ok(SecurityDeviceUpdates {
+            status,
+            devices: deliveries.iter().map(device_group_update).collect(),
         })
     }
+}
+
+fn device_group_update(delivery: &GroupUpdateRecipientDelivery) -> (DeviceId, DeviceGroupUpdate) {
+    let state = match delivery.condition {
+        GroupUpdateDeliveryCondition::NotAttempted | GroupUpdateDeliveryCondition::Unreachable => {
+            DeviceGroupUpdateState::Waiting
+        }
+        GroupUpdateDeliveryCondition::ReceiverUnavailable => {
+            DeviceGroupUpdateState::ReceiverUnavailable
+        }
+        GroupUpdateDeliveryCondition::Rejected(GroupUpdateRejection::Unclassified) => {
+            DeviceGroupUpdateState::RejectedUnclassified
+        }
+        GroupUpdateDeliveryCondition::Rejected(GroupUpdateRejection::ByReceiver) => {
+            DeviceGroupUpdateState::RejectedByReceiver
+        }
+    };
+    (
+        delivery.recipient,
+        DeviceGroupUpdate {
+            epoch: delivery.epoch,
+            state,
+            attempts: delivery.attempts,
+            next_attempt_at_ms: delivery.next_attempt_at_ms,
+        },
+    )
 }
 
 fn map_query_error(error: KeyEpochError) -> QueryDeviceTrustError {
@@ -88,6 +135,7 @@ impl DeliverPendingGroupUpdatesUseCase {
         recipients: Arc<dyn RetainedGroupUpdateRecipientsPort>,
         host_events: Arc<HostEventBus>,
         clock: Arc<dyn ClockPort>,
+        peer_online: broadcast::Receiver<PeerReachabilityChanged>,
     ) -> Self {
         Self {
             store,
@@ -95,6 +143,45 @@ impl DeliverPendingGroupUpdatesUseCase {
             recipients,
             host_events,
             clock,
+            peer_online: Mutex::new(OnlineEvidence {
+                events: peer_online,
+                peers: HashSet::new(),
+            }),
+        }
+    }
+
+    /// 汇总自上一轮以来的上线/离线事件，返回当前保留的上线证据；事件积压溢出只丢失更早的证据。
+    fn online_evidence(&self) -> Vec<DeviceId> {
+        let mut evidence = self
+            .peer_online
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        loop {
+            match evidence.events.try_recv() {
+                Ok(event) => match event.state {
+                    ReachabilityState::Online => {
+                        evidence.peers.insert(event.device_id);
+                    }
+                    ReachabilityState::Offline | ReachabilityState::Unknown => {
+                        evidence.peers.remove(&event.device_id);
+                    }
+                },
+                Err(broadcast::error::TryRecvError::Lagged(_)) => {}
+                Err(
+                    broadcast::error::TryRecvError::Empty | broadcast::error::TryRecvError::Closed,
+                ) => return evidence.peers.iter().copied().collect(),
+            }
+        }
+    }
+
+    /// 已对这些收件人尝试投递：其上线证据已兑现，不再保留。
+    fn spend_online_evidence<'a>(&self, attempted: impl Iterator<Item = &'a DeviceId>) {
+        let mut evidence = self
+            .peer_online
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for peer in attempted {
+            evidence.peers.remove(peer);
         }
     }
 
@@ -168,9 +255,10 @@ impl DeliverPendingGroupUpdatesUseCase {
                 Ok(()) => LocalWorkOutcome::Ok,
                 Err(
                     GroupUpdateDispatchError::Offline { .. }
-                    | GroupUpdateDispatchError::Transport { .. },
+                    | GroupUpdateDispatchError::Transport { .. }
+                    | GroupUpdateDispatchError::ReceiverUnavailable,
                 ) => LocalWorkOutcome::Deferred,
-                Err(GroupUpdateDispatchError::Rejected) => LocalWorkOutcome::Rejected,
+                Err(GroupUpdateDispatchError::Rejected(_)) => LocalWorkOutcome::Rejected,
             });
             match dispatched {
                 Ok(()) => match self
@@ -184,17 +272,15 @@ impl DeliverPendingGroupUpdatesUseCase {
                 },
                 Err(
                     error @ (GroupUpdateDispatchError::Offline { .. }
-                    | GroupUpdateDispatchError::Transport { .. }),
+                    | GroupUpdateDispatchError::Transport { .. }
+                    | GroupUpdateDispatchError::ReceiverUnavailable),
                 ) => {
                     failures.push((update.update_id().to_owned(), error));
                     unavailable_peers.insert(*update.recipient());
                     outcome = MembershipMaintenanceStepOutcome::Deferred;
                 }
-                Err(GroupUpdateDispatchError::Rejected) => {
-                    failures.push((
-                        update.update_id().to_owned(),
-                        GroupUpdateDispatchError::Rejected,
-                    ));
+                Err(error @ GroupUpdateDispatchError::Rejected(_)) => {
+                    failures.push((update.update_id().to_owned(), error));
                     unavailable_peers.insert(*update.recipient());
                     if outcome != MembershipMaintenanceStepOutcome::Deferred {
                         outcome = MembershipMaintenanceStepOutcome::StableFailure;
@@ -237,12 +323,25 @@ impl DeliverPendingGroupUpdatesPort for DeliverPendingGroupUpdatesUseCase {
         if let Err(outcome) = self.settle_obsolete_updates().await {
             return outcome;
         }
-        let pending = match self.deliverable_updates(reachable_peers).await {
+        // 重新认证的证据：刚确认成员历史的对端，以及上一轮以来通过准入重新上线的对端。
+        let mut reauthenticated = reachable_peers.to_vec();
+        for peer in self.online_evidence() {
+            if !reauthenticated.contains(&peer) {
+                reauthenticated.push(peer);
+            }
+        }
+        let pending = match self.deliverable_updates(&reauthenticated).await {
             Ok(pending) => pending,
             Err(error) => return classify_store_error(&error),
         };
         let mut delivery_changed = false;
         let outcome = self.dispatch_updates(&pending, &mut delivery_changed).await;
+        self.spend_online_evidence(
+            pending
+                .iter()
+                .take(MAX_UPDATES_PER_ROUND)
+                .map(PendingGroupUpdate::recipient),
+        );
         // 确认与退避都会改变宿主可见的设备更新状态，且不推进成员账本修订号，必须单独通知重读。
         if delivery_changed {
             self.host_events.emit_or_warn(HostEvent::Membership(
@@ -390,10 +489,10 @@ mod tests {
             Ok(count)
         }
 
-        async fn space_group_update_delivery_status(
+        async fn space_group_update_deliveries(
             &self,
-        ) -> Result<GroupUpdateDeliveryStatus, KeyEpochError> {
-            Ok(GroupUpdateDeliveryStatus::Completed)
+        ) -> Result<Vec<GroupUpdateRecipientDelivery>, KeyEpochError> {
+            Ok(Vec::new())
         }
 
         async fn acknowledge_space_group_update(
@@ -485,6 +584,7 @@ mod tests {
             retaining(&["peer-still-member"]),
             bus,
             Arc::new(FixedClock),
+            broadcast::channel(1).1,
         );
 
         let outcome = use_case
@@ -515,6 +615,7 @@ mod tests {
             retaining(&["peer-a"]),
             bus,
             Arc::new(FixedClock),
+            broadcast::channel(1).1,
         );
 
         let outcome = use_case
@@ -551,6 +652,7 @@ mod tests {
             retaining(&["peer-returning", "peer-offline"]),
             bus,
             Arc::new(FixedClock),
+            broadcast::channel(1).1,
         );
 
         let waiting = use_case
@@ -585,6 +687,7 @@ mod tests {
             Arc::new(FixedRecipients(None)),
             bus,
             Arc::new(FixedClock),
+            broadcast::channel(1).1,
         );
 
         let outcome = use_case
@@ -640,6 +743,7 @@ mod tests {
             retaining_all(&store),
             refresh_events().0,
             Arc::new(FixedClock),
+            broadcast::channel(1).1,
         );
 
         let outcome = use_case
@@ -665,6 +769,7 @@ mod tests {
             retaining_all(&store),
             refresh_events().0,
             Arc::new(FixedClock),
+            broadcast::channel(1).1,
         );
 
         let outcome = use_case
@@ -696,6 +801,7 @@ mod tests {
             retaining_all(&store),
             refresh_events().0,
             Arc::new(FixedClock),
+            broadcast::channel(1).1,
         );
 
         let outcome = use_case
@@ -739,6 +845,7 @@ mod tests {
             retaining_all(&store),
             refresh_events().0,
             Arc::new(FixedClock),
+            broadcast::channel(1).1,
         );
 
         assert_eq!(

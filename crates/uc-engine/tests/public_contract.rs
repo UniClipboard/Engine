@@ -1535,6 +1535,7 @@ fn device_trust_debug_output_redacts_device_facts_and_change_ids() {
             compatibility: uc_engine::DeviceCompatibilitySummary::Compatible,
             sync_relationship: uc_engine::DeviceSyncRelationshipSummary::Usable,
             pairing_confirmation: None,
+            group_update: None,
             available_actions: Vec::new(),
             blocked_reason: None,
         });
@@ -1556,6 +1557,7 @@ fn pairing_confirmation_is_optional_and_uses_stable_names() {
         compatibility: uc_engine::DeviceCompatibilitySummary::Compatible,
         sync_relationship: uc_engine::DeviceSyncRelationshipSummary::Usable,
         pairing_confirmation: None,
+        group_update: None,
         available_actions: Vec::new(),
         blocked_reason: None,
     };

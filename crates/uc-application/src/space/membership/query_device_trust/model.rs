@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use uc_core::ids::DeviceId;
 use uc_core::membership::{MemberInstanceId, MembershipEventId};
 use uc_core::ports::ReachabilityState;
@@ -141,6 +143,53 @@ impl SpaceDeviceUpdateStatus {
     }
 }
 
+/// 某设备队首的未确认组密钥更新。没有该字段表示本机对它没有未确认的更新；
+/// 它与成员保护状态（MLS 成员关系）是两件事：保护说明设备在组内，投递说明它是否已确认收到最新 epoch。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceGroupUpdate {
+    pub epoch: u64,
+    pub state: DeviceGroupUpdateState,
+    pub attempts: u32,
+    pub next_attempt_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceGroupUpdateState {
+    /// 尚未送达（未尝试或设备不可达），按退避自动重试。
+    Waiting,
+    /// 设备在线但暂时无法应用，按退避自动重试。
+    ReceiverUnavailable,
+    /// 设备拒绝且原因未知（旧版设备或升级前遗留）；设备重新通过认证后自动重新评估。
+    RejectedUnclassified,
+    /// 设备明确拒绝；不会自动重发，需要核对该设备。
+    RejectedByReceiver,
+}
+
+impl DeviceGroupUpdateState {
+    pub const fn recovery(self) -> DeviceGroupUpdateRecovery {
+        match self {
+            Self::Waiting | Self::ReceiverUnavailable => DeviceGroupUpdateRecovery::Automatic,
+            Self::RejectedUnclassified => DeviceGroupUpdateRecovery::AutomaticOnReconnect,
+            Self::RejectedByReceiver => DeviceGroupUpdateRecovery::ReviewDevice,
+        }
+    }
+}
+
+/// Engine 自身是否会推进该更新；`Automatic*` 时宿主的“重新检查”不会改变任何结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceGroupUpdateRecovery {
+    Automatic,
+    AutomaticOnReconnect,
+    ReviewDevice,
+}
+
+/// 组密钥投递给设备更新状态与逐设备投影提供的事实。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecurityDeviceUpdates {
+    pub status: SpaceDeviceUpdateStatus,
+    pub devices: BTreeMap<DeviceId, DeviceGroupUpdate>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceTrustObservation {
     pub device_id: DeviceId,
@@ -158,6 +207,7 @@ pub struct DeviceTrustDevice {
     pub relationship: DeviceTrustRelationship,
     pub sync_state: DeviceTrustSyncState,
     pub pairing_confirmation: Option<PairingConfirmationStatus>,
+    pub group_update: Option<DeviceGroupUpdate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

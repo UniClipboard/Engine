@@ -54,10 +54,13 @@ struct SecurityUpdates(SpaceDeviceUpdateStatus);
 
 #[async_trait]
 impl LoadSecurityDeviceUpdateStatusPort for SecurityUpdates {
-    async fn load_security_device_update_status(
+    async fn load_security_device_updates(
         &self,
-    ) -> Result<SpaceDeviceUpdateStatus, QueryDeviceTrustError> {
-        Ok(self.0)
+    ) -> Result<SecurityDeviceUpdates, QueryDeviceTrustError> {
+        Ok(SecurityDeviceUpdates {
+            status: self.0,
+            devices: Default::default(),
+        })
     }
 }
 

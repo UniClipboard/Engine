@@ -62,6 +62,75 @@ pub(super) fn tag_action(action: GroupUpdateAction, error: KeyEpochError) -> Key
     }
 }
 
+/// 接收方应用组密钥更新失败后，对发送方可见的裁决。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GroupUpdateVerdict {
+    /// 更新未通过密码学、授权、版本或顺序校验，或失败无法确认只与本机环境有关。
+    Rejected,
+    /// 失败只与本机暂时状态有关（会话未就绪、存储不可用），稍后重发同一更新可能成功。
+    Unavailable,
+}
+
+/// 把应用失败归为裁决。只有明确识别为本机环境故障的失败才是 `Unavailable`，其余一律按拒绝处理：
+/// 未知失败不会被自动当成暂时错误。
+pub fn group_update_apply_verdict(error: &KeyEpochError) -> GroupUpdateVerdict {
+    use uc_core::membership::KeyEpochStateIssue as State;
+    match error {
+        KeyEpochError::SpaceNotReady | KeyEpochError::StateIssue(State::MissingMaterial) => {
+            return GroupUpdateVerdict::Unavailable;
+        }
+        KeyEpochError::Repository(_) | KeyEpochError::SecurityState { .. } => {}
+        _ => return GroupUpdateVerdict::Rejected,
+    }
+    let mut environmental = false;
+    let mut judges_update = false;
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(error) = current {
+        if let Some(context) = error.downcast_ref::<GroupUpdateFailure>() {
+            judges_update |= matches!(
+                context.action,
+                GroupUpdateAction::DecodeUpdate
+                    | GroupUpdateAction::ApplySecurityUpdate
+                    | GroupUpdateAction::ValidateUpdate
+            );
+        } else if let Some(error) = error.downcast_ref::<std::io::Error>() {
+            environmental |= matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::Interrupted
+                    | std::io::ErrorKind::ResourceBusy
+                    | std::io::ErrorKind::StorageFull
+                    | std::io::ErrorKind::NotConnected
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+            );
+        } else if let Some(classified) = error.downcast_ref::<uc_observability_contract::diagnostics::connectivity::ClassifiedGroupUpdateStorageFailure>() {
+            // 数据库忙/锁等暂时失败在存储层只能归为 Unknown（不能从库错误正文推断），所以 Unknown 也算暂时；
+            // 约束、损坏、权限与缺失说明存储本身有待处理的问题，不当作稍后会好的暂时失败。
+            use uc_observability_contract::diagnostics::connectivity::GroupUpdateReason as Reason;
+            environmental |= matches!(
+                classified.reason,
+                Reason::Unavailable | Reason::Locked | Reason::Conflict | Reason::Unknown
+            );
+        } else if let Some(error) = error.downcast_ref::<uc_core::crypto::EncryptionError>() {
+            environmental |= matches!(
+                error,
+                uc_core::crypto::EncryptionError::Locked
+                    | uc_core::crypto::EncryptionError::NotInitialized
+            );
+        }
+        current = error.source();
+    }
+    if environmental && !judges_update {
+        GroupUpdateVerdict::Unavailable
+    } else {
+        GroupUpdateVerdict::Rejected
+    }
+}
+
 pub fn group_update_failure_detail(
     error: &KeyEpochError,
 ) -> uc_observability_contract::diagnostics::connectivity::GroupUpdateFailureDetail {

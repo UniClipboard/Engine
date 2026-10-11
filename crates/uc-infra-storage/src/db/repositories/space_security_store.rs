@@ -141,5 +141,10 @@ mod failure_contract_tests {
         );
         assert!(!error.to_string().contains("PRIVATE_"));
         assert!(!format!("{error:?}").contains("PRIVATE_"));
+        // 真实数据库失败（忙、锁等）无法从库错误正文推断原因，但对发送方是接收方的暂时不可用，不是对更新的裁决。
+        assert_eq!(
+            uc_infra_security::group_update_apply_verdict(&error),
+            uc_infra_security::GroupUpdateVerdict::Unavailable
+        );
     }
 }

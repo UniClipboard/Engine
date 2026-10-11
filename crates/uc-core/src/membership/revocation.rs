@@ -3,6 +3,7 @@ use std::{collections::HashSet, fmt};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use super::error::GroupUpdateRejection;
 use crate::error_class::ErrorClass;
 use crate::ids::{DeviceId, SpaceId};
 use crate::space_access::GroupAdmission;
@@ -405,6 +406,50 @@ pub enum GroupUpdateDeliveryStatus {
     Completed,
     Pending { next_attempt_at_ms: i64 },
     Rejected,
+}
+
+/// 某收件人队首更新目前的投递状况。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupUpdateDeliveryCondition {
+    /// 尚未尝试。
+    NotAttempted,
+    /// 上次尝试时收件人不可达或传输失败，按退避自动重试。
+    Unreachable,
+    /// 上次尝试时收件人已认证连接但暂时无法应用，按退避自动重试。
+    ReceiverUnavailable,
+    /// 收件人拒绝；`ByReceiver` 不会自动重发，`Unclassified` 仅在收件人重新通过认证后重新评估。
+    Rejected(GroupUpdateRejection),
+}
+
+/// 某收件人的队首（最早 epoch）未确认更新；已确认的更新不再出现。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupUpdateRecipientDelivery {
+    pub recipient: DeviceId,
+    pub epoch: u64,
+    pub condition: GroupUpdateDeliveryCondition,
+    pub attempts: u32,
+    pub next_attempt_at_ms: i64,
+}
+
+impl GroupUpdateDeliveryStatus {
+    /// 按各收件人队首状况汇总空间级状态：任何拒绝优先，其余取最早的下次尝试时间。
+    pub fn summarize(deliveries: &[GroupUpdateRecipientDelivery]) -> Self {
+        if deliveries.iter().any(|delivery| {
+            matches!(
+                delivery.condition,
+                GroupUpdateDeliveryCondition::Rejected(_)
+            )
+        }) {
+            return Self::Rejected;
+        }
+        deliveries
+            .iter()
+            .map(|delivery| delivery.next_attempt_at_ms)
+            .min()
+            .map_or(Self::Completed, |next_attempt_at_ms| Self::Pending {
+                next_attempt_at_ms,
+            })
+    }
 }
 
 impl PendingGroupUpdate {

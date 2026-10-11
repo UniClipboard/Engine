@@ -255,7 +255,10 @@ impl GroupUpdateDispatchPort for ObservedGroupUpdateDispatch {
                         GroupUpdateDispatchError::Offline { .. } => {
                             MembershipCompletionKind::Failed(DiagnosticErrorType::Unavailable)
                         }
-                        GroupUpdateDispatchError::Rejected => MembershipCompletionKind::Rejected,
+                        GroupUpdateDispatchError::Rejected(_) => MembershipCompletionKind::Rejected,
+                        GroupUpdateDispatchError::ReceiverUnavailable => {
+                            MembershipCompletionKind::Failed(DiagnosticErrorType::Unavailable)
+                        }
                         GroupUpdateDispatchError::Transport { .. } => {
                             MembershipCompletionKind::Failed(DiagnosticErrorType::StreamFailed)
                         }

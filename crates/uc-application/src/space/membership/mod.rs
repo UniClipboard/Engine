@@ -51,12 +51,13 @@ pub use projection::MembershipProjectionPlan;
 pub(crate) use query_device_group_choices::QueryDeviceGroupChoicesUseCase;
 pub use query_device_group_choices::{DeviceGroupChoicesView, QueryDeviceGroupChoicesError};
 pub use query_device_trust::{
-    AdmissionDisplayStatus, DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership,
-    DeviceTrustObservation, DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState,
-    LoadCurrentJoinStatusPort, LoadDeviceTrustObservationsPort, PairingConfirmationObservation,
-    PairingConfirmationStatus, PairingConfirmationTarget, PendingDeviceTrustChange,
-    QueryDeviceTrustError, SpaceDeviceUpdatePhase, SpaceDeviceUpdateProblem,
-    SpaceDeviceUpdateRecovery, SpaceDeviceUpdateStatus,
+    AdmissionDisplayStatus, DeviceGroupUpdate, DeviceGroupUpdateRecovery, DeviceGroupUpdateState,
+    DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership, DeviceTrustObservation,
+    DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, LoadCurrentJoinStatusPort,
+    LoadDeviceTrustObservationsPort, PairingConfirmationObservation, PairingConfirmationStatus,
+    PairingConfirmationTarget, PendingDeviceTrustChange, QueryDeviceTrustError,
+    SpaceDeviceUpdatePhase, SpaceDeviceUpdateProblem, SpaceDeviceUpdateRecovery,
+    SpaceDeviceUpdateStatus,
 };
 pub(super) use query_diagnostics::QueryMembershipDiagnosticsUseCase;
 pub use query_diagnostics::{MembershipDiagnosticsView, QueryMembershipDiagnosticsError};
@@ -122,8 +123,8 @@ pub(crate) use owner::{ledger_error, pause_reason, MembershipOwner, MembershipVi
 #[cfg(test)]
 pub(super) use query_admission::{MembershipAdmissionSnapshot, QueryMembershipAdmissionError};
 pub(super) use query_admission::{QueryMembershipAdmissionPort, QueryMembershipAdmissionUseCase};
-pub(crate) use query_device_trust::LoadSecurityDeviceUpdateStatusPort;
 pub(super) use query_device_trust::QueryDeviceTrustUseCase;
+pub(crate) use query_device_trust::{LoadSecurityDeviceUpdateStatusPort, SecurityDeviceUpdates};
 pub(super) use re_pairing::{RePairingState, ResolveRePairingPort};
 pub(super) use recover_conflict::IssueMembershipBranchRecoveryUseCase;
 pub(super) use recover_conflict::RecoverMembershipConflictUseCase;

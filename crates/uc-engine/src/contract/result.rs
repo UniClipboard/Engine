@@ -1378,8 +1378,47 @@ pub struct DeviceTrustRelationshipSummary {
     pub sync_relationship: DeviceSyncRelationshipSummary,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pairing_confirmation: Option<PairingConfirmationSummary>,
+    /// 本机对该设备尚未确认的组密钥更新；缺省表示没有未确认的更新。它与成员保护状态相互独立。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_update: Option<DeviceGroupUpdateSummary>,
     pub available_actions: Vec<DeviceTrustActionSummary>,
     pub blocked_reason: Option<DeviceTrustUnavailableReasonSummary>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceGroupUpdateStateSummary {
+    /// 尚未送达（未尝试或设备不可达）。
+    Waiting,
+    /// 设备在线但暂时无法应用。
+    ReceiverUnavailable,
+    /// 设备拒绝且原因未知（旧版设备或升级前遗留）。
+    RejectedUnclassified,
+    /// 设备明确拒绝。
+    RejectedByReceiver,
+}
+
+/// Engine 自己会不会推进该更新。`automatic*` 时宿主的“重新检查”不会改变结果，不应提供。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceGroupUpdateRecoverySummary {
+    /// 按退避自动重试。
+    Automatic,
+    /// 设备重新通过认证后自动重新评估一次（有频率上限）。
+    AutomaticOnReconnect,
+    /// 不会自动重发，需要核对该设备（例如更新其应用或重新配对）。
+    ReviewDevice,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceGroupUpdateSummary {
+    pub epoch: u64,
+    pub state: DeviceGroupUpdateStateSummary,
+    pub recovery: DeviceGroupUpdateRecoverySummary,
+    pub attempts: u32,
+    /// 仅在 `recovery` 为 `automatic` 时给出。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_retry_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

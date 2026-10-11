@@ -3092,6 +3092,7 @@ mod tests {
                 pairing_confirmation: Some(
                     uc_engine::PairingConfirmationSummary::AwaitingPeerConfirmation,
                 ),
+                group_update: None,
                 available_actions: Vec::new(),
                 blocked_reason: None,
             });

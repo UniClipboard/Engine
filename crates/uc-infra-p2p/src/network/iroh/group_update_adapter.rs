@@ -12,7 +12,7 @@ use tokio::runtime::Handle;
 use tokio::task::spawn_blocking;
 use uc_core::membership::{
     GroupEpoch, GroupRevocationPort, GroupUpdateDispatchError, GroupUpdateDispatchPort,
-    KeyEpochError, PendingGroupUpdate,
+    GroupUpdateRejection, KeyEpochError, PendingGroupUpdate,
 };
 use uc_core::ports::PeerAddressRepositoryPort;
 use uc_observability_contract::diagnostics::connectivity::LocalWorkContext;
@@ -21,21 +21,28 @@ use uc_observability_contract::diagnostics::{
     DiagnosticRole, DiagnosticSpanKind, OperationCompletion, OperationContext,
 };
 
-use super::connect_with_staggered_retry;
+use super::connect::connect_with_staggered_retry_classified;
 use super::peer_address_resolver::PeerAddressResolver;
 use super::session_generation::{begin_session_local_work, SessionLocalWork};
 use super::trace_context::{inject_current, set_remote_parent};
-use uc_infra_security::group_update_failure_detail;
+use uc_infra_security::{
+    group_update_apply_verdict, group_update_failure_detail, GroupUpdateVerdict,
+};
 use uc_observability_contract::{uc_debug, uc_warn};
 use uc_sync_protocol::WireTraceContext;
 
-pub const GROUP_UPDATE_ALPN: &[u8] = b"uniclipboard/group-update/1";
+/// 当前协议：确认字节区分接受、接收方明确拒绝与接收方暂时不可用。
+pub const GROUP_UPDATE_ALPN: &[u8] = b"uniclipboard/group-update/2";
+/// 旧协议：确认字节只有接受与拒绝；新发送方拨号时作为协商回退，新接收方继续接受它。
+pub const LEGACY_GROUP_UPDATE_ALPN: &[u8] = b"uniclipboard/group-update/1";
 const MAX_UPDATE_SIZE: usize = 4 * 1024 * 1024;
 const MAX_WIRE_SIZE: usize = MAX_UPDATE_SIZE + 1024;
 const WIRE_LAYOUT_MARKER: &[u8; 4] = b"UCT1";
 const GROUP_UPDATE_IO_TIMEOUT: Duration = Duration::from_secs(10);
 const ACK_ACCEPTED: u8 = 1;
 const ACK_REJECTED: u8 = 2;
+/// 仅当前协议使用：接收方已认证连接但本机暂时无法应用，发送方应延后重试。
+const ACK_UNAVAILABLE: u8 = 3;
 
 #[derive(Serialize, Deserialize)]
 struct WireGroupUpdateRequest {
@@ -121,10 +128,11 @@ impl GroupUpdateDispatchPort for IrohGroupUpdateAdapter {
             .resolve_addr(update)
             .await
             .ok_or_else(GroupUpdateDispatchError::offline)?;
-        let connection = connect_with_staggered_retry(
+        let connection = connect_with_staggered_retry_classified(
             Arc::clone(&self.endpoint),
             addr,
             GROUP_UPDATE_ALPN,
+            vec![LEGACY_GROUP_UPDATE_ALPN.to_vec()],
             "group-update",
             uc_observability_contract::diagnostics::connectivity::AddressInputSource::Stored,
         )
@@ -144,9 +152,19 @@ impl GroupUpdateDispatchPort for IrohGroupUpdateAdapter {
             .map_err(GroupUpdateDispatchError::transport_from)?;
         let mut ack = [0u8; 1];
         run_outbound_io_phase(GROUP_UPDATE_IO_TIMEOUT, recv.read_exact(&mut ack)).await?;
+        let current_protocol = connection.alpn() == GROUP_UPDATE_ALPN;
         match ack[0] {
             ACK_ACCEPTED => Ok(()),
-            ACK_REJECTED => Err(GroupUpdateDispatchError::Rejected),
+            // 旧协议接收方对任何失败都回这个字节，真实原因未知，不能当作明确裁决。
+            ACK_REJECTED if current_protocol => Err(GroupUpdateDispatchError::Rejected(
+                GroupUpdateRejection::ByReceiver,
+            )),
+            ACK_REJECTED => Err(GroupUpdateDispatchError::Rejected(
+                GroupUpdateRejection::Unclassified,
+            )),
+            ACK_UNAVAILABLE if current_protocol => {
+                Err(GroupUpdateDispatchError::ReceiverUnavailable)
+            }
             _ => Err(GroupUpdateDispatchError::transport()),
         }
     }
@@ -206,12 +224,12 @@ impl ProtocolHandler for IrohGroupUpdateHandler {
                 }
             };
         let mut length = [0u8; 4];
+        // 读取超时或中断是传输失败，不是对更新的裁决：不回确认，发送方按传输失败退避重发。
         if !matches!(
             tokio::time::timeout(GROUP_UPDATE_IO_TIMEOUT, recv.read_exact(&mut length)).await,
             Ok(Ok(_))
         ) {
-            emit_ack(&mut send, ACK_REJECTED).await;
-            let _ = connection.closed().await;
+            connection.close(0u32.into(), b"incomplete_request");
             return Ok(());
         }
         let length = u32::from_be_bytes(length) as usize;
@@ -225,8 +243,7 @@ impl ProtocolHandler for IrohGroupUpdateHandler {
             tokio::time::timeout(GROUP_UPDATE_IO_TIMEOUT, recv.read_exact(&mut request)).await,
             Ok(Ok(_))
         ) {
-            emit_ack(&mut send, ACK_REJECTED).await;
-            let _ = connection.closed().await;
+            connection.close(0u32.into(), b"incomplete_request");
             return Ok(());
         }
         let request = match decode_request(&request) {
@@ -260,12 +277,20 @@ impl ProtocolHandler for IrohGroupUpdateHandler {
         if applied.is_ok() {
             let _ = set_remote_parent(&span, request.trace_context.as_ref());
         }
-        let ack = if applied.is_ok() {
-            ACK_ACCEPTED
-        } else {
-            ACK_REJECTED
+        let current_protocol = connection.alpn() == GROUP_UPDATE_ALPN;
+        let ack = match &applied {
+            Ok(_) => Some(ACK_ACCEPTED),
+            Err(error) => match group_update_apply_verdict(error) {
+                GroupUpdateVerdict::Rejected => Some(ACK_REJECTED),
+                GroupUpdateVerdict::Unavailable if current_protocol => Some(ACK_UNAVAILABLE),
+                // 旧协议没有表达“暂时不可用”的确认：不回确认，旧发送方按传输失败退避重发。
+                GroupUpdateVerdict::Unavailable => None,
+            },
         };
-        emit_ack(&mut send, ack).await;
+        match ack {
+            Some(ack) => emit_ack(&mut send, ack).await,
+            None => connection.close(0u32.into(), b"temporarily_unavailable"),
+        }
         span.in_scope(|| {
             let completion = match &applied {
                 Ok(_) => OperationCompletion::succeeded(
@@ -372,7 +397,8 @@ mod tests {
     use tracing_subscriber::layer::SubscriberExt;
     use uc_core::ids::DeviceId;
     use uc_core::membership::{
-        GroupEpoch, GroupRevocationResult, GroupUpdateDeliveryStatus, KeyEpochError, RevocationId,
+        GroupEpoch, GroupRevocationResult, GroupUpdateRecipientDelivery, KeyEpochError,
+        RevocationId,
     };
     use uc_core::ports::{PeerAddressError, PeerAddressRecord};
 
@@ -391,7 +417,7 @@ mod tests {
             async fn resume_group_revocations(&self, now_ms: i64) -> Result<Vec<GroupRevocationResult>, KeyEpochError>;
             async fn due_space_group_updates(&self, now_ms: i64, online_peer: Option<DeviceId>) -> Result<Vec<PendingGroupUpdate>, KeyEpochError>;
             async fn record_space_group_update_failures(&self, failures: &[(String, GroupUpdateDispatchError)], now_ms: i64) -> Result<usize, KeyEpochError>;
-            async fn space_group_update_delivery_status(&self) -> Result<GroupUpdateDeliveryStatus, KeyEpochError>;
+            async fn space_group_update_deliveries(&self) -> Result<Vec<GroupUpdateRecipientDelivery>, KeyEpochError>;
             async fn acknowledge_space_group_update(&self, update_id: &str, now_ms: i64) -> Result<bool, KeyEpochError>;
             async fn settle_obsolete_space_group_updates(&self, retained_recipients: &[DeviceId], now_ms: i64) -> Result<usize, KeyEpochError>;
         }
@@ -696,6 +722,221 @@ mod tests {
         assert_eq!(ack[0], ACK_ACCEPTED);
 
         router.shutdown().await.ok();
+        sender.close().await;
+    }
+
+    /// 仅登记一台设备地址的仓储：让真实拨号路径走到指定接收端点。
+    struct SingleAddress(EndpointAddr);
+
+    #[async_trait]
+    impl PeerAddressRepositoryPort for SingleAddress {
+        async fn get(
+            &self,
+            _device: &DeviceId,
+        ) -> Result<Option<PeerAddressRecord>, PeerAddressError> {
+            Ok(Some(PeerAddressRecord {
+                device_id: DeviceId::new("receiver"),
+                addr_blob: postcard::to_stdvec(&self.0).expect("encode address"),
+                observed_at: chrono::Utc::now(),
+            }))
+        }
+        async fn upsert(&self, _record: &PeerAddressRecord) -> Result<(), PeerAddressError> {
+            Ok(())
+        }
+        async fn list(&self) -> Result<Vec<PeerAddressRecord>, PeerAddressError> {
+            Ok(Vec::new())
+        }
+        async fn remove(&self, _device: &DeviceId) -> Result<(), PeerAddressError> {
+            Ok(())
+        }
+    }
+
+    /// 旧版（group-update/1）接收方：只接受旧 ALPN，对任何失败都回单字节拒绝。
+    #[derive(Clone, Debug)]
+    struct LegacyReceiver;
+
+    impl ProtocolHandler for LegacyReceiver {
+        async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+            let (mut send, mut recv) = connection.accept_bi().await?;
+            let mut length = [0u8; 4];
+            let _ = recv.read_exact(&mut length).await;
+            let mut request = vec![0u8; u32::from_be_bytes(length) as usize];
+            let _ = recv.read_exact(&mut request).await;
+            let _ = send.write_all(&[ACK_REJECTED]).await;
+            let _ = send.finish();
+            let _ = connection.closed().await;
+            Ok(())
+        }
+    }
+
+    async fn dial_and_send(
+        sender: &Endpoint,
+        receiver: &Endpoint,
+        alpn: &'static [u8],
+    ) -> Result<u8, ()> {
+        let connection = sender.connect(receiver.addr(), alpn).await.expect("dial");
+        let (mut send, mut recv) = connection.open_bi().await.expect("open stream");
+        let request = encode_request(b"MLS").expect("encode request");
+        send.write_all(&(request.len() as u32).to_be_bytes())
+            .await
+            .expect("write length");
+        send.write_all(&request).await.expect("write payload");
+        send.finish().expect("finish request");
+        let mut ack = [0u8; 1];
+        recv.read_exact(&mut ack)
+            .await
+            .map(|_| ack[0])
+            .map_err(|_| ())
+    }
+
+    fn receiver_failing_with(error: fn() -> KeyEpochError) -> MockGroupRevocation {
+        let mut group_revocation = MockGroupRevocation::new();
+        group_revocation
+            .expect_apply_group_epoch_update()
+            .times(1)
+            .returning(move |_| Err(error()));
+        group_revocation
+    }
+
+    async fn new_receiver(
+        seed: u8,
+        group_revocation: MockGroupRevocation,
+    ) -> (Arc<Endpoint>, iroh::protocol::Router) {
+        let receiver = endpoint([seed; 32]).await;
+        wait_for_direct_addrs(&receiver).await;
+        let adapter = IrohGroupUpdateAdapter::new(
+            Arc::clone(&receiver),
+            Arc::new(NoPeerAddresses),
+            Arc::new(group_revocation),
+        );
+        let router = iroh::protocol::Router::builder((*receiver).clone())
+            .accept(GROUP_UPDATE_ALPN, adapter.handler())
+            .accept(LEGACY_GROUP_UPDATE_ALPN, adapter.handler())
+            .spawn();
+        (receiver, router)
+    }
+
+    // 线上兼容（真实 QUIC，仅覆盖适配器，不含完整 Engine 进程）：新接收方对当前协议发送方区分暂时不可用。
+    #[tokio::test]
+    async fn current_protocol_receiver_reports_a_transient_failure_as_unavailable() {
+        let (receiver, router) =
+            new_receiver(0x50, receiver_failing_with(|| KeyEpochError::SpaceNotReady)).await;
+        let sender = endpoint([0x51; 32]).await;
+        assert_eq!(
+            dial_and_send(&sender, &receiver, GROUP_UPDATE_ALPN).await,
+            Ok(ACK_UNAVAILABLE)
+        );
+        router.shutdown().await.ok();
+        sender.close().await;
+    }
+
+    // 旧发送方永远不会收到暂时失败的“拒绝”：新接收方不回确认，旧发送方按传输失败退避。
+    #[tokio::test]
+    async fn legacy_protocol_sender_gets_no_rejection_for_a_transient_failure() {
+        let (receiver, router) =
+            new_receiver(0x52, receiver_failing_with(|| KeyEpochError::SpaceNotReady)).await;
+        let sender = endpoint([0x53; 32]).await;
+        assert_eq!(
+            dial_and_send(&sender, &receiver, LEGACY_GROUP_UPDATE_ALPN).await,
+            Err(())
+        );
+        router.shutdown().await.ok();
+        sender.close().await;
+    }
+
+    // 真实拒绝对旧发送方保持原有的单字节拒绝。
+    #[tokio::test]
+    async fn legacy_protocol_sender_still_gets_the_rejection_for_a_genuine_failure() {
+        let (receiver, router) = new_receiver(
+            0x54,
+            receiver_failing_with(|| {
+                KeyEpochError::StateIssue(uc_core::membership::KeyEpochStateIssue::OutOfOrderUpdate)
+            }),
+        )
+        .await;
+        let sender = endpoint([0x55; 32]).await;
+        assert_eq!(
+            dial_and_send(&sender, &receiver, LEGACY_GROUP_UPDATE_ALPN).await,
+            Ok(ACK_REJECTED)
+        );
+        router.shutdown().await.ok();
+        sender.close().await;
+    }
+
+    // 新发送方遇到只会说旧协议的接收方：协商回退到旧 ALPN，旧的单字节拒绝只能归为“原因未知”，不是明确裁决。
+    #[tokio::test]
+    async fn current_sender_treats_a_legacy_receivers_rejection_as_unclassified() {
+        let receiver = endpoint([0x56; 32]).await;
+        wait_for_direct_addrs(&receiver).await;
+        let router = iroh::protocol::Router::builder((*receiver).clone())
+            .accept(LEGACY_GROUP_UPDATE_ALPN, LegacyReceiver)
+            .spawn();
+        let sender = endpoint([0x57; 32]).await;
+        wait_for_direct_addrs(&sender).await;
+        let adapter = IrohGroupUpdateAdapter::new(
+            Arc::clone(&sender),
+            Arc::new(SingleAddress(receiver.addr())),
+            Arc::new(MockGroupRevocation::new()),
+        );
+
+        let update = PendingGroupUpdate::persistent(DeviceId::new("receiver"), b"MLS".to_vec());
+        let error = adapter
+            .dispatch_group_update(&update)
+            .await
+            .expect_err("legacy receiver rejects");
+        assert!(matches!(
+            error,
+            GroupUpdateDispatchError::Rejected(GroupUpdateRejection::Unclassified)
+        ));
+        router.shutdown().await.ok();
+        sender.close().await;
+    }
+
+    // 新发送方对新接收方：暂时不可用与明确拒绝分别得到各自的结果。
+    #[tokio::test]
+    async fn current_sender_distinguishes_unavailable_from_a_receiver_verdict() {
+        let sender = endpoint([0x58; 32]).await;
+        wait_for_direct_addrs(&sender).await;
+        for (seed, failure, expect_unavailable) in [
+            (
+                0x59u8,
+                (|| KeyEpochError::SpaceNotReady) as fn() -> KeyEpochError,
+                true,
+            ),
+            (
+                0x5a,
+                || {
+                    KeyEpochError::StateIssue(
+                        uc_core::membership::KeyEpochStateIssue::OutOfOrderUpdate,
+                    )
+                },
+                false,
+            ),
+        ] {
+            let (receiver, router) = new_receiver(seed, receiver_failing_with(failure)).await;
+            let adapter = IrohGroupUpdateAdapter::new(
+                Arc::clone(&sender),
+                Arc::new(SingleAddress(receiver.addr())),
+                Arc::new(MockGroupRevocation::new()),
+            );
+            let update = PendingGroupUpdate::persistent(DeviceId::new("receiver"), b"MLS".to_vec());
+            let error = adapter
+                .dispatch_group_update(&update)
+                .await
+                .expect_err("receiver cannot apply");
+            if expect_unavailable {
+                assert!(matches!(
+                    error,
+                    GroupUpdateDispatchError::ReceiverUnavailable
+                ));
+            } else {
+                assert!(matches!(
+                    error,
+                    GroupUpdateDispatchError::Rejected(GroupUpdateRejection::ByReceiver)
+                ));
+            }
+            router.shutdown().await.ok();
+        }
         sender.close().await;
     }
 }

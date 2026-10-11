@@ -69,6 +69,15 @@ pub enum RelationshipStateResetError {
     Repository(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
+/// 接收方拒绝组密钥更新的可信程度。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupUpdateRejection {
+    /// 新协议接收方的明确裁决：更新未通过密码学、授权或顺序校验。
+    ByReceiver,
+    /// 旧协议接收方的无原因拒绝，或升级前遗留的拒绝记录；真实原因未知。
+    Unclassified,
+}
+
 #[derive(Debug, Error)]
 pub enum GroupUpdateDispatchError {
     #[error("group update recipient is offline")]
@@ -77,7 +86,10 @@ pub enum GroupUpdateDispatchError {
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
     #[error("group update was rejected")]
-    Rejected,
+    Rejected(GroupUpdateRejection),
+    /// 接收方已认证连接，但本地暂时无法应用（未就绪、存储不可用）；不是对更新内容的裁决。
+    #[error("group update recipient is temporarily unable to apply it")]
+    ReceiverUnavailable,
     #[error("group update transport failed")]
     Transport {
         #[source]

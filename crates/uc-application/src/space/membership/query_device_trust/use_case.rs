@@ -20,7 +20,7 @@ use super::{
     DeviceTrustDevice, DeviceTrustImpact, DeviceTrustMembership, DeviceTrustObservation,
     DeviceTrustRelationship, DeviceTrustStatus, DeviceTrustSyncState, LoadCurrentJoinStatusPort,
     LoadDeviceTrustObservationsPort, LoadSecurityDeviceUpdateStatusPort, PairingConfirmationTarget,
-    PendingDeviceTrustChange, QueryDeviceTrustError, SpaceDeviceUpdatePhase,
+    PendingDeviceTrustChange, QueryDeviceTrustError, SecurityDeviceUpdates, SpaceDeviceUpdatePhase,
     SpaceDeviceUpdateProblem, SpaceDeviceUpdateRecovery, SpaceDeviceUpdateStatus,
 };
 
@@ -138,9 +138,12 @@ impl QueryDeviceTrustUseCase {
                 return Err(QueryDeviceTrustError::recovery_required());
             }
         }
-        let security_updates = self
+        let SecurityDeviceUpdates {
+            status: security_updates,
+            devices: mut group_updates,
+        } = self
             .security_updates
-            .load_security_device_update_status()
+            .load_security_device_updates()
             .await
             .map_err(|error| TrustDependency::SecurityUpdateStatus.diagnose(error))?;
         let presented = ledger
@@ -208,6 +211,7 @@ impl QueryDeviceTrustUseCase {
                             })
                     })
                     .and_then(|target| pairing_confirmations.get(&target).copied()),
+                group_update: group_updates.remove(&device.device_id),
             });
         }
 
@@ -342,10 +346,13 @@ struct CompletedSecurityUpdates;
 #[cfg(test)]
 #[async_trait::async_trait]
 impl LoadSecurityDeviceUpdateStatusPort for CompletedSecurityUpdates {
-    async fn load_security_device_update_status(
+    async fn load_security_device_updates(
         &self,
-    ) -> Result<SpaceDeviceUpdateStatus, QueryDeviceTrustError> {
-        Ok(SpaceDeviceUpdateStatus::completed())
+    ) -> Result<SecurityDeviceUpdates, QueryDeviceTrustError> {
+        Ok(SecurityDeviceUpdates {
+            status: SpaceDeviceUpdateStatus::completed(),
+            devices: Default::default(),
+        })
     }
 }
 

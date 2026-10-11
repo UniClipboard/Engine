@@ -31,6 +31,9 @@ mod space_switch;
 #[path = "space_membership_auto_pairing_e2e/membership_history.rs"]
 mod membership_history;
 
+#[path = "space_membership_auto_pairing_e2e/group_update_delivery.rs"]
+mod group_update_delivery;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};

@@ -6,7 +6,9 @@ mod blob_cipher_adapter;
 mod content_protection;
 mod default_current_profile;
 mod group_update_error;
-pub use group_update_error::group_update_failure_detail;
+pub use group_update_error::{
+    group_update_apply_verdict, group_update_failure_detail, GroupUpdateVerdict,
+};
 mod key_material;
 pub mod key_migration_adapter;
 pub mod key_slot_store;

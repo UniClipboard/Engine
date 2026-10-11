@@ -8,7 +8,7 @@ publish = false
 
 [features]
 default = []
-dev-tools = ["dep:tracing-subscriber", "uc-infra-profile/test-util"]
+dev-tools = ["dep:serde_json", "dep:tracing-subscriber", "uc-infra-profile/test-util"]
 lan-compat = [
   "dep:uc-mobile-lan",
   "dep:uc-mobile-proto",
@@ -21,6 +21,7 @@ anyhow = "1.0"
 async-trait = "0.1"
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", optional = true }
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 tokio-util = "0.7"
 tracing = "0.1"
