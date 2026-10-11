@@ -566,6 +566,17 @@ impl ApplyIncomingMobileClipUseCase {
                         Some(ReceiveItemRole::File)
                     )
                 );
+                self.maybe_emit_inbound_synced(&dispatch_outcome, payload_bytes);
+                self.maybe_fan_out_to_paired_peers(
+                    &source_device_id,
+                    &dispatch_outcome,
+                    snapshot_for_fanout,
+                );
+                self.maybe_announce_activation(&dispatch_outcome, snapshot_for_announce)
+                    .await;
+                self.finalize_transfer_lifecycle(transfer_id, &dispatch_outcome)
+                    .await;
+                // 已接受内容的激活与传播必须先完成，临时文件清理失败仍原样返回。
                 if !keep_staged_file {
                     if let Some(staged_file) = staged_file.as_ref() {
                         self.file_staging
@@ -579,16 +590,6 @@ impl ApplyIncomingMobileClipUseCase {
                             })?;
                     }
                 }
-                self.maybe_emit_inbound_synced(&dispatch_outcome, payload_bytes);
-                self.maybe_fan_out_to_paired_peers(
-                    &source_device_id,
-                    &dispatch_outcome,
-                    snapshot_for_fanout,
-                );
-                self.maybe_announce_activation(&dispatch_outcome, snapshot_for_announce)
-                    .await;
-                self.finalize_transfer_lifecycle(transfer_id, &dispatch_outcome)
-                    .await;
                 dispatch_outcome
             }
         }
