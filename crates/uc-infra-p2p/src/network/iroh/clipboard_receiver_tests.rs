@@ -1,0 +1,771 @@
+use super::*;
+use uc_core::membership::MemberRepositoryPort;
+
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
+
+use async_trait::async_trait;
+use bytes::Bytes;
+use chrono::Utc;
+use iroh::protocol::Router;
+use iroh::{Endpoint, RelayMode, SecretKey};
+use opentelemetry::trace::TraceContextExt;
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+use opentelemetry_sdk::logs::{InMemoryLogExporter, SdkLoggerProvider};
+use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+use tokio::sync::Mutex;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
+use tracing_subscriber::filter::filter_fn;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::Layer;
+
+use uc_core::membership::{MembershipError, SpaceMember};
+use uc_core::ports::{
+    ClipboardDispatchPort, ClipboardHeader, InboundClipboardDisposition,
+    PeerReachabilityChanged, PeerReachabilityError, PeerReachabilityPort, ReachabilityState,
+    SyncPayload,
+};
+use uc_core::MemberSyncPreferences;
+
+use crate::network::iroh::clipboard_dispatch_adapter::{
+    IrohClipboardDispatchAdapter, CLIPBOARD_ALPN,
+};
+use uc_core::ports::{PeerAddressError, PeerAddressRecord, PeerAddressRepositoryPort};
+use uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory;
+
+struct TestTelemetry {
+    traces: SdkTracerProvider,
+    logs: SdkLoggerProvider,
+    span_exporter: InMemorySpanExporter,
+    log_exporter: InMemoryLogExporter,
+}
+
+fn test_telemetry() -> &'static TestTelemetry {
+    static TELEMETRY: OnceLock<TestTelemetry> = OnceLock::new();
+    TELEMETRY.get_or_init(|| {
+        let span_exporter = InMemorySpanExporter::default();
+        let log_exporter = InMemoryLogExporter::default();
+        let traces = SdkTracerProvider::builder()
+            .with_simple_exporter(span_exporter.clone())
+            .build();
+        let logs = SdkLoggerProvider::builder()
+            .with_simple_exporter(log_exporter.clone())
+            .build();
+        let trace_layer = tracing_opentelemetry::layer()
+            .with_tracer(traces.tracer("clipboard-trace-test"))
+            .with_context_activation(true)
+            .with_filter(filter_fn(|metadata| {
+                metadata.is_span()
+                    && metadata.target()
+                        == uc_observability_contract::diagnostics::TELEMETRY_TARGET
+            }));
+        let log_layer =
+            OpenTelemetryTracingBridge::new(&logs).with_filter(filter_fn(|metadata| {
+                metadata.is_event()
+                    && metadata.target()
+                        == uc_observability_contract::diagnostics::TELEMETRY_TARGET
+            }));
+        tracing::subscriber::set_global_default(
+            tracing_subscriber::registry()
+                .with(trace_layer)
+                .with(log_layer),
+        )
+        .expect("install clipboard trace test subscriber");
+        TestTelemetry {
+            traces,
+            logs,
+            span_exporter,
+            log_exporter,
+        }
+    })
+}
+
+// PeerReachabilityPort mock. Receiver-side tests use the dispatch adapter only
+// as a wire-driver against the receiver under test; the dispatch path
+// never hits dial failure in these scenarios, so `report_communication_failure` is
+// never invoked. The mock therefore needs no expectations — any
+// unexpected call surfaces as a mockall panic.
+//
+// `report_communication_failure` is intentionally omitted from the mock so the trait's
+// default noop impl is in play; if a future test does exercise the
+// dial-failure path, mockall will catch any accidental peer_reachability-side
+// assumption it makes.
+mockall::mock! {
+    PeerReachability {}
+
+    #[async_trait]
+    impl PeerReachabilityPort for PeerReachability {
+        async fn ensure_reachable(
+            &self,
+            device: &DeviceId,
+        ) -> Result<ReachabilityState, PeerReachabilityError>;
+        async fn current_state(&self, device: &DeviceId) -> ReachabilityState;
+        fn subscribe(&self) -> broadcast::Receiver<PeerReachabilityChanged>;
+    }
+}
+
+fn peer_reachability_mock() -> Arc<dyn PeerReachabilityPort> {
+    Arc::new(MockPeerReachability::new())
+}
+
+// ----- test doubles ------------------------------------------------------
+
+#[derive(Default)]
+struct MemMemberRepo {
+    inner: Mutex<HashMap<String, SpaceMember>>,
+}
+crate::network::iroh::inbound_peer::member_table_identity_directory!(MemMemberRepo);
+#[async_trait]
+impl MemberRepositoryPort for MemMemberRepo {
+    async fn get(&self, device_id: &DeviceId) -> Result<Option<SpaceMember>, MembershipError> {
+        Ok(self.inner.lock().await.get(device_id.as_str()).cloned())
+    }
+    async fn list(&self) -> Result<Vec<SpaceMember>, MembershipError> {
+        Ok(self.inner.lock().await.values().cloned().collect())
+    }
+    async fn save(&self, member: &SpaceMember) -> Result<(), MembershipError> {
+        self.inner
+            .lock()
+            .await
+            .insert(member.device_id.as_str().to_string(), member.clone());
+        Ok(())
+    }
+    async fn remove(&self, device_id: &DeviceId) -> Result<bool, MembershipError> {
+        Ok(self.inner.lock().await.remove(device_id.as_str()).is_some())
+    }
+}
+
+#[derive(Default)]
+struct MemPeerAddrRepo {
+    inner: Mutex<HashMap<String, PeerAddressRecord>>,
+}
+#[async_trait]
+impl PeerAddressRepositoryPort for MemPeerAddrRepo {
+    async fn get(
+        &self,
+        device: &DeviceId,
+    ) -> Result<Option<PeerAddressRecord>, PeerAddressError> {
+        Ok(self.inner.lock().await.get(device.as_str()).cloned())
+    }
+    async fn upsert(&self, record: &PeerAddressRecord) -> Result<(), PeerAddressError> {
+        self.inner
+            .lock()
+            .await
+            .insert(record.device_id.as_str().to_string(), record.clone());
+        Ok(())
+    }
+    async fn list(&self) -> Result<Vec<PeerAddressRecord>, PeerAddressError> {
+        Ok(self.inner.lock().await.values().cloned().collect())
+    }
+    async fn remove(&self, device: &DeviceId) -> Result<(), PeerAddressError> {
+        self.inner.lock().await.remove(device.as_str());
+        Ok(())
+    }
+}
+
+// ----- harness -----------------------------------------------------------
+
+async fn bind_endpoint_with(seed: [u8; 32]) -> Arc<Endpoint> {
+    Arc::new(
+        Endpoint::builder(iroh::endpoint::presets::N0)
+            .secret_key(SecretKey::from_bytes(&seed))
+            .alpns(vec![CLIPBOARD_ALPN.to_vec()])
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("bind endpoint"),
+    )
+}
+
+async fn wait_for_direct_addrs(endpoint: &Endpoint) {
+    for _ in 0..100 {
+        if !endpoint.addr().addrs.is_empty() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("endpoint never published direct addresses");
+}
+
+fn make_member(seed: [u8; 32], device_id: &str) -> SpaceMember {
+    let factory = Sha256IdentityFingerprintFactory;
+    let sk = SecretKey::from_bytes(&seed);
+    let fp = factory
+        .from_public_key(sk.public().as_bytes())
+        .expect("derive fingerprint for test member");
+    SpaceMember {
+        device_id: DeviceId::new(device_id),
+        device_name: "Test Device".to_string(),
+        identity_fingerprint: fp,
+        joined_at: Utc::now(),
+        sync_preferences: MemberSyncPreferences::default(),
+    }
+}
+
+fn sample_header() -> ClipboardHeader {
+    ClipboardHeader {
+        version: ClipboardHeader::CURRENT_VERSION,
+        snapshot_hash: "9".repeat(64),
+        captured_at_ms: 1_700_000_000_000,
+        origin_device_id: "sender-001".to_string(),
+        origin_device_name: "Alice".to_string(),
+        payload_version: 3,
+    }
+}
+
+/// Spin up a receiver router around a fresh adapter and return the
+/// handles the test needs: the router (to shut down), the receiver's
+/// endpoint addr (for the dialer to connect to), and a subscriber to
+/// the inbound stream.
+struct ReceiverHarness {
+    receiver_endpoint: Arc<Endpoint>,
+    receiver_router: Router,
+    inbound_rx: broadcast::Receiver<ClipboardDelivery>,
+}
+
+async fn spawn_receiver(
+    seed: [u8; 32],
+    member_repo: Arc<dyn MemberRepositoryPort>,
+) -> ReceiverHarness {
+    spawn_receiver_with_admission(seed, member_repo, true).await
+}
+
+async fn spawn_receiver_with_admission(
+    seed: [u8; 32],
+    member_repo: Arc<dyn MemberRepositoryPort>,
+    admitted: bool,
+) -> ReceiverHarness {
+    let receiver_endpoint = bind_endpoint_with(seed).await;
+    wait_for_direct_addrs(&receiver_endpoint).await;
+
+    let adapter = IrohClipboardReceiverAdapter::new(
+        crate::network::iroh::inbound_peer::member_table_directory(member_repo),
+        Arc::new(crate::network::iroh::StaticPeerAdmission(admitted)),
+        Arc::new(Sha256IdentityFingerprintFactory),
+    );
+    let inbound_rx = adapter.subscribe();
+    let router = Router::builder((*receiver_endpoint).clone())
+        .accept(CLIPBOARD_ALPN, adapter.handler())
+        .spawn();
+
+    ReceiverHarness {
+        receiver_endpoint,
+        receiver_router: router,
+        inbound_rx,
+    }
+}
+
+// ----- verdicts ----------------------------------------------------------
+
+/// Verdict 1 — single frame delivered. Sender is in member_repo, frame
+/// reaches the broadcast stream with ciphertext + header intact, and
+/// the sender sees `Accepted`.
+#[tokio::test]
+async fn accepts_single_inbound_frame_from_known_peer() {
+    let telemetry = test_telemetry();
+    let sender_seed = [0x11u8; 32];
+    let receiver_seed = [0x22u8; 32];
+
+    let member_repo: Arc<dyn MemberRepositoryPort> = Arc::new(MemMemberRepo::default());
+    let sender_member = make_member(sender_seed, "sender-a");
+    member_repo.save(&sender_member).await.unwrap();
+
+    let harness = spawn_receiver(receiver_seed, Arc::clone(&member_repo)).await;
+    let receiver_addr = harness.receiver_endpoint.addr();
+
+    // Build the sender side.
+    let sender_endpoint = bind_endpoint_with(sender_seed).await;
+    wait_for_direct_addrs(&sender_endpoint).await;
+    let peer_addr_repo = Arc::new(MemPeerAddrRepo::default());
+    peer_addr_repo
+        .upsert(&PeerAddressRecord {
+            device_id: DeviceId::new("receiver-b"),
+            addr_blob: postcard::to_stdvec(&receiver_addr)
+                .expect("postcard encode EndpointAddr"),
+            observed_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+    let dispatch = IrohClipboardDispatchAdapter::new(
+        sender_endpoint,
+        peer_addr_repo,
+        peer_reachability_mock(),
+    );
+
+    let payload = Bytes::from(vec![0xAB; 128]);
+    let expected_payload = payload.clone();
+    let client_span = operation_span(OperationContext {
+        domain: DiagnosticDomain::Clipboard,
+        operation: DiagnosticOperation::ClipboardDispatch,
+        role: DiagnosticRole::Client,
+        kind: DiagnosticSpanKind::Client,
+    });
+    let expected_context = client_span.context().span().span_context().clone();
+    let mut dispatch_task = tokio::spawn(
+        async move {
+            dispatch
+                .dispatch(
+                    &DeviceId::new("receiver-b"),
+                    &sample_header(),
+                    SyncPayload {
+                        ciphertext: expected_payload,
+                    },
+                )
+                .await
+                .outcome
+                .expect("dispatch succeeds")
+        }
+        .instrument(client_span),
+    );
+
+    let mut inbound_rx = harness.inbound_rx;
+    let inbound = tokio::time::timeout(Duration::from_secs(3), inbound_rx.recv())
+        .await
+        .expect("broadcast arrives within timeout")
+        .expect("subscriber sees the frame");
+
+    assert_eq!(inbound.message.peer_device_id.as_str(), "sender-a");
+    assert_eq!(inbound.message.header, sample_header());
+    assert_eq!(inbound.message.ciphertext, payload);
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut dispatch_task)
+            .await
+            .is_err(),
+        "sender must wait for application settlement"
+    );
+    assert!(inbound
+        .message
+        .receipt
+        .finish(InboundClipboardDisposition::Applied));
+    let ack = dispatch_task.await.expect("dispatch task joins");
+    assert_eq!(ack, uc_core::ports::DispatchAck::Accepted);
+
+    harness.receiver_router.shutdown().await.ok();
+    telemetry.traces.force_flush().expect("trace flush");
+    telemetry.logs.force_flush().expect("log flush");
+    let spans = telemetry
+        .span_exporter
+        .get_finished_spans()
+        .expect("finished spans");
+    let client = spans
+        .iter()
+        .rev()
+        .find(|span| {
+            span.span_context.trace_id() == expected_context.trace_id()
+                && span.span_context.span_id() == expected_context.span_id()
+                && span.attributes.iter().any(|attribute| {
+                    attribute.key.as_str() == "uc.operation"
+                        && attribute.value.as_str() == "clipboard_dispatch"
+                })
+        })
+        .expect("client span");
+    let server = spans
+        .iter()
+        .rev()
+        .find(|span| {
+            span.span_context.trace_id() == expected_context.trace_id()
+                && span.parent_span_id == expected_context.span_id()
+                && span.attributes.iter().any(|attribute| {
+                    attribute.key.as_str() == "uc.operation"
+                        && attribute.value.as_str() == "clipboard_receive"
+                })
+        })
+        .expect("server span");
+    assert_eq!(
+        server.span_context.trace_id(),
+        client.span_context.trace_id()
+    );
+    assert_eq!(server.parent_span_id, client.span_context.span_id());
+    let logs = telemetry
+        .log_exporter
+        .get_emitted_logs()
+        .expect("emitted logs");
+    assert!(logs.iter().any(|log| {
+        log.record.trace_context().is_some_and(|context| {
+            context.trace_id == server.span_context.trace_id()
+                && context.span_id == server.span_context.span_id()
+        })
+    }));
+}
+
+#[tokio::test]
+async fn old_header_layout_receives_an_explicit_incompatible_ack() {
+    let sender_seed = [0x31_u8; 32];
+    let receiver_seed = [0x32_u8; 32];
+    let member_repo: Arc<dyn MemberRepositoryPort> = Arc::new(MemMemberRepo::default());
+    member_repo
+        .save(&make_member(sender_seed, "old-layout-sender"))
+        .await
+        .expect("save member");
+    let harness = spawn_receiver(receiver_seed, member_repo).await;
+    let sender_endpoint = bind_endpoint_with(sender_seed).await;
+    wait_for_direct_addrs(&sender_endpoint).await;
+    let connection = sender_endpoint
+        .connect(harness.receiver_endpoint.addr(), CLIPBOARD_ALPN)
+        .await
+        .expect("connect");
+    let (mut send, mut recv) = connection.open_bi().await.expect("open stream");
+
+    send.write_all(&[clipboard_wire::CLIPBOARD_MAGIC])
+        .await
+        .expect("magic");
+    send.write_all(&1_u32.to_be_bytes()).await.expect("length");
+    send.write_all(&[ClipboardHeader::CURRENT_VERSION])
+        .await
+        .expect("old header prefix");
+    send.finish().expect("finish old frame");
+
+    let mut ack = [0_u8; 1];
+    recv.read_exact(&mut ack).await.expect("incompatible ack");
+    assert_eq!(ack[0], AckCode::Incompatible.as_byte());
+    let mut inbound_rx = harness.inbound_rx;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), inbound_rx.recv())
+            .await
+            .is_err()
+    );
+    drop(connection);
+    harness.receiver_router.shutdown().await.ok();
+}
+
+/// Verdict 2 — unknown peer. The receiver emits `Rejected` and does
+/// not push anything into the broadcast stream.
+#[tokio::test]
+async fn rejects_unknown_peer_with_ack_rejected() {
+    let telemetry = test_telemetry();
+    let sender_seed = [0x33u8; 32];
+    let receiver_seed = [0x44u8; 32];
+
+    // member_repo is empty — sender's fingerprint is unknown.
+    let member_repo: Arc<dyn MemberRepositoryPort> = Arc::new(MemMemberRepo::default());
+    let harness = spawn_receiver(receiver_seed, Arc::clone(&member_repo)).await;
+    let receiver_addr = harness.receiver_endpoint.addr();
+
+    let sender_endpoint = bind_endpoint_with(sender_seed).await;
+    wait_for_direct_addrs(&sender_endpoint).await;
+    let peer_addr_repo = Arc::new(MemPeerAddrRepo::default());
+    peer_addr_repo
+        .upsert(&PeerAddressRecord {
+            device_id: DeviceId::new("receiver-c"),
+            addr_blob: postcard::to_stdvec(&receiver_addr).unwrap(),
+            observed_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+    let dispatch = IrohClipboardDispatchAdapter::new(
+        sender_endpoint,
+        peer_addr_repo,
+        peer_reachability_mock(),
+    );
+
+    let client_span = operation_span(OperationContext {
+        domain: DiagnosticDomain::Clipboard,
+        operation: DiagnosticOperation::ClipboardDispatch,
+        role: DiagnosticRole::Client,
+        kind: DiagnosticSpanKind::Client,
+    });
+    let client_trace_id = client_span.context().span().span_context().trace_id();
+    let result = dispatch
+        .dispatch(
+            &DeviceId::new("receiver-c"),
+            &sample_header(),
+            SyncPayload {
+                ciphertext: Bytes::from_static(b"irrelevant"),
+            },
+        )
+        .instrument(client_span)
+        .await
+        .outcome;
+
+    match result {
+        Err(uc_core::ports::ClipboardDispatchError::PeerRejected(msg)) => {
+            assert!(
+                msg.contains("Rejected ack"),
+                "unexpected reject message: {msg}"
+            );
+        }
+        other => panic!("expected PeerRejected, got {other:?}"),
+    }
+
+    // Subscriber never receives anything.
+    let mut inbound_rx = harness.inbound_rx;
+    let fast_poll = tokio::time::timeout(Duration::from_millis(200), inbound_rx.recv()).await;
+    assert!(fast_poll.is_err(), "unknown peer must not publish");
+
+    harness.receiver_router.shutdown().await.ok();
+    telemetry.traces.force_flush().expect("trace flush");
+    let spans = telemetry
+        .span_exporter
+        .get_finished_spans()
+        .expect("finished spans");
+    assert!(!spans.iter().any(|span| {
+        span.span_context.trace_id() == client_trace_id
+            && span.attributes.iter().any(|attribute| {
+                attribute.key.as_str() == "uc.operation"
+                    && attribute.value.as_str() == "clipboard_receive"
+            })
+    }));
+}
+
+/// Verdict 3 — a roster-resolved peer rejected by the current MLS group
+/// receives a rejection ACK and cannot publish clipboard content.
+#[tokio::test]
+async fn rejects_known_but_unadmitted_peer_with_ack_rejected() {
+    let sender_seed = [0x45u8; 32];
+    let receiver_seed = [0x46u8; 32];
+    let member_repo: Arc<dyn MemberRepositoryPort> = Arc::new(MemMemberRepo::default());
+    member_repo
+        .save(&make_member(sender_seed, "revoked-sender"))
+        .await
+        .unwrap();
+    let harness =
+        spawn_receiver_with_admission(receiver_seed, Arc::clone(&member_repo), false).await;
+    let receiver_addr = harness.receiver_endpoint.addr();
+
+    let sender_endpoint = bind_endpoint_with(sender_seed).await;
+    wait_for_direct_addrs(&sender_endpoint).await;
+    let peer_addr_repo = Arc::new(MemPeerAddrRepo::default());
+    peer_addr_repo
+        .upsert(&PeerAddressRecord {
+            device_id: DeviceId::new("receiver-d"),
+            addr_blob: postcard::to_stdvec(&receiver_addr).unwrap(),
+            observed_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+    let dispatch = IrohClipboardDispatchAdapter::new(
+        sender_endpoint,
+        peer_addr_repo,
+        peer_reachability_mock(),
+    );
+
+    let result = dispatch
+        .dispatch(
+            &DeviceId::new("receiver-d"),
+            &sample_header(),
+            SyncPayload {
+                ciphertext: Bytes::from_static(b"must-not-publish"),
+            },
+        )
+        .await
+        .outcome;
+    assert!(matches!(
+        result,
+        Err(uc_core::ports::ClipboardDispatchError::PeerRejected(_))
+    ));
+
+    let mut inbound_rx = harness.inbound_rx;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), inbound_rx.recv())
+            .await
+            .is_err(),
+        "an unadmitted peer must not publish"
+    );
+    harness.receiver_router.shutdown().await.ok();
+}
+
+/// Verdict 4 — bad magic byte from a malicious / out-of-protocol peer.
+/// The handler rejects the frame with `Rejected` ack and drops the
+/// connection without touching the broadcast stream. Uses a raw
+/// sender that writes garbage bytes to ensure the handler tolerates
+/// misbehaved peers even if they otherwise pass identity resolution.
+#[tokio::test]
+async fn rejects_bad_magic_without_touching_broadcast_stream() {
+    let sender_seed = [0x55u8; 32];
+    let receiver_seed = [0x66u8; 32];
+
+    let member_repo: Arc<dyn MemberRepositoryPort> = Arc::new(MemMemberRepo::default());
+    let sender_member = make_member(sender_seed, "known-bad-actor");
+    member_repo.save(&sender_member).await.unwrap();
+
+    let harness = spawn_receiver(receiver_seed, Arc::clone(&member_repo)).await;
+    let receiver_addr = harness.receiver_endpoint.addr();
+
+    // Raw-ish sender: bypass the dispatch adapter so we can write
+    // wrong bytes on purpose.
+    let sender_endpoint = bind_endpoint_with(sender_seed).await;
+    wait_for_direct_addrs(&sender_endpoint).await;
+    let conn = sender_endpoint
+        .connect(receiver_addr, CLIPBOARD_ALPN)
+        .await
+        .expect("dial receiver");
+    let (mut send, mut recv) = conn.open_bi().await.expect("open_bi");
+    // Bad magic + garbage; receiver should bail out at the magic check.
+    send.write_all(&[0x00, 0x00, 0x00, 0x00, 0x05])
+        .await
+        .expect("write garbage");
+    send.finish().expect("finish");
+
+    // Receiver must respond with Rejected, not hang.
+    let mut ack_buf = [0u8; 1];
+    recv.read_exact(&mut ack_buf).await.expect("ack read");
+    assert_eq!(ack_buf[0], AckCode::Rejected.as_byte());
+
+    let mut inbound_rx = harness.inbound_rx;
+    let fast_poll = tokio::time::timeout(Duration::from_millis(200), inbound_rx.recv()).await;
+    assert!(
+        fast_poll.is_err(),
+        "bad magic must not publish to broadcast"
+    );
+
+    harness.receiver_router.shutdown().await.ok();
+}
+
+/// Verdict 4 — multiple concurrent inbound connections are processed
+/// in parallel, and every frame shows up on the broadcast stream.
+/// This is the guard against a handler that accidentally serializes
+/// connections (e.g. by holding a lock across the whole `accept`
+/// body).
+#[tokio::test]
+async fn processes_concurrent_inbound_connections() {
+    let receiver_seed = [0x77u8; 32];
+    let member_repo: Arc<dyn MemberRepositoryPort> = Arc::new(MemMemberRepo::default());
+
+    // Three senders with distinct identities.
+    let sender_seeds: [[u8; 32]; 3] = [[0xA0; 32], [0xA1; 32], [0xA2; 32]];
+    for (i, seed) in sender_seeds.iter().enumerate() {
+        let member = make_member(*seed, &format!("sender-{i}"));
+        member_repo.save(&member).await.unwrap();
+    }
+
+    let harness = spawn_receiver(receiver_seed, Arc::clone(&member_repo)).await;
+    let receiver_addr = harness.receiver_endpoint.addr();
+
+    let mut tasks = Vec::new();
+    for (i, seed) in sender_seeds.iter().enumerate() {
+        let addr = receiver_addr.clone();
+        let seed = *seed;
+        tasks.push(tokio::spawn(async move {
+            let sender_endpoint = bind_endpoint_with(seed).await;
+            wait_for_direct_addrs(&sender_endpoint).await;
+            let peer_addr_repo = Arc::new(MemPeerAddrRepo::default());
+            peer_addr_repo
+                .upsert(&PeerAddressRecord {
+                    device_id: DeviceId::new("rcv"),
+                    addr_blob: postcard::to_stdvec(&addr).unwrap(),
+                    observed_at: Utc::now(),
+                })
+                .await
+                .unwrap();
+            let dispatch = IrohClipboardDispatchAdapter::new(
+                sender_endpoint,
+                peer_addr_repo,
+                peer_reachability_mock(),
+            );
+
+            let mut header = sample_header();
+            header.origin_device_id = format!("sender-{i}");
+            let payload = Bytes::from(vec![i as u8; 32]);
+            let ack = dispatch
+                .dispatch(
+                    &DeviceId::new("rcv"),
+                    &header,
+                    SyncPayload {
+                        ciphertext: payload.clone(),
+                    },
+                )
+                .await
+                .outcome
+                .expect("concurrent dispatch ok");
+            assert_eq!(ack, uc_core::ports::DispatchAck::Accepted);
+        }));
+    }
+
+    // Collect three inbound frames; order is not asserted (concurrency).
+    let mut inbound_rx = harness.inbound_rx;
+    let mut seen: Vec<String> = Vec::new();
+    for _ in 0..3 {
+        let inbound = tokio::time::timeout(Duration::from_secs(3), inbound_rx.recv())
+            .await
+            .expect("broadcast arrives in time")
+            .expect("subscriber sees frame");
+        seen.push(inbound.message.peer_device_id.as_str().to_string());
+        assert!(inbound
+            .message
+            .receipt
+            .finish(InboundClipboardDisposition::Applied));
+    }
+    for task in tasks {
+        task.await.expect("sender task");
+    }
+    seen.sort();
+    assert_eq!(seen, vec!["sender-0", "sender-1", "sender-2"]);
+
+    harness.receiver_router.shutdown().await.ok();
+}
+
+/// 一次真实投递的两端都报告该次连接 selected 的路径：回环上只有直连，
+/// 发送报告与入站消息必须一致且为 Direct，且回执确认内容已被应用。
+#[tokio::test]
+async fn delivery_reports_the_connection_selected_path_on_both_sides() {
+    let sender_seed = [0x71u8; 32];
+    let receiver_seed = [0x72u8; 32];
+    let member_repo: Arc<dyn MemberRepositoryPort> = Arc::new(MemMemberRepo::default());
+    member_repo
+        .save(&make_member(sender_seed, "path-sender"))
+        .await
+        .unwrap();
+    let harness = spawn_receiver(receiver_seed, member_repo).await;
+    let receiver_addr = harness.receiver_endpoint.addr();
+
+    let sender_endpoint = bind_endpoint_with(sender_seed).await;
+    wait_for_direct_addrs(&sender_endpoint).await;
+    let peer_addr_repo = Arc::new(MemPeerAddrRepo::default());
+    peer_addr_repo
+        .upsert(&PeerAddressRecord {
+            device_id: DeviceId::new("path-receiver"),
+            addr_blob: postcard::to_stdvec(&receiver_addr).expect("encode EndpointAddr"),
+            observed_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+    let dispatch = IrohClipboardDispatchAdapter::new(
+        sender_endpoint,
+        peer_addr_repo,
+        peer_reachability_mock(),
+    );
+
+    let payload = Bytes::from(vec![0x5A; 64]);
+    let expected_payload = payload.clone();
+    let dispatch_task = tokio::spawn(async move {
+        dispatch
+            .dispatch(
+                &DeviceId::new("path-receiver"),
+                &sample_header(),
+                SyncPayload {
+                    ciphertext: expected_payload,
+                },
+            )
+            .await
+    });
+
+    let mut inbound_rx = harness.inbound_rx;
+    let inbound = tokio::time::timeout(Duration::from_secs(3), inbound_rx.recv())
+        .await
+        .expect("broadcast arrives within timeout")
+        .expect("subscriber sees the frame");
+    assert_eq!(inbound.message.ciphertext, payload);
+    assert_eq!(
+        inbound.message.transport,
+        uc_core::ports::connection_channel::ConnectionChannel::Direct
+    );
+    assert!(inbound
+        .message
+        .receipt
+        .finish(InboundClipboardDisposition::Applied));
+
+    let report = dispatch_task.await.expect("dispatch task joins");
+    assert_eq!(
+        report.outcome.expect("dispatch succeeds"),
+        uc_core::ports::DispatchAck::Accepted
+    );
+    assert_eq!(
+        report.transport,
+        uc_core::ports::connection_channel::ConnectionChannel::Direct
+    );
+
+    harness.receiver_router.shutdown().await.ok();
+}
