@@ -36,7 +36,7 @@ pub mod relay_probe;
 pub(crate) mod runtime_consts;
 mod session_generation;
 pub mod space_admission;
-mod trace_context;
+pub(crate) use super::trace_context;
 pub mod transfer_progress_adapter;
 
 #[cfg(test)]
