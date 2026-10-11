@@ -78,7 +78,7 @@ jobs:
             sysctl kern.ipc.maxsockbuf kern.maxfiles kern.maxfilesperproc
             netstat -m
             vm_stat
-          } > "$RUNNER_TEMP/mbx-r2-evidence/resources-before.txt"
+          } | tee "$RUNNER_TEMP/mbx-r2-evidence/resources-before.txt"
 
       - name: Exercise R2 and Engine migration
         env:
@@ -108,7 +108,6 @@ jobs:
           python3 scripts/build-cache/verify-r2-build.py -- bash scripts/build-cache/mbx.sh --r2 check --workspace --all-targets --locked
 
       - name: Verify independent workspace check consumer
-        if: github.event_name == 'push'
         env:
           BUILD_CACHE_R2_ENDPOINT: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           BUILD_CACHE_R2_ACCESS_KEY_ID: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
@@ -120,9 +119,8 @@ jobs:
         run: |
           python3 scripts/build-cache/verify-r2-build.py --consumer -- bash scripts/build-cache/mbx.sh --r2 check --workspace --all-targets --locked
 
-      # 主线发布后用另一套空 target/动作缓存读取，避免把本地热缓存误认成远端命中。
+      # 使用独立 target/动作缓存；PR 只读既有种子，不能声称验证了本次主线发布。
       - name: Verify independent R2 consumer
-        if: github.event_name == 'push'
         env:
           BUILD_CACHE_R2_ENDPOINT: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           BUILD_CACHE_R2_ACCESS_KEY_ID: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
@@ -140,7 +138,7 @@ jobs:
           {
             netstat -m
             vm_stat
-          } > "$RUNNER_TEMP/mbx-r2-evidence/resources-after.txt"
+          } | tee "$RUNNER_TEMP/mbx-r2-evidence/resources-after.txt"
 
       - name: Retain R2 evidence
         if: always()
