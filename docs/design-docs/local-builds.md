@@ -39,12 +39,23 @@ S3 端点；访问密钥仅限该桶。缺少任一项时入口报错，不会�
 [`mbx-r2-cache.yml`](../../.github/workflows/mbx-r2-cache.yml) 运行，工件包含诊断及原生统计；主线还必须
 运行独立空 target/动作缓存的消费者并确认下载、命中、无远端错误与零上传。主线分别播种
 `check --workspace --all-targets --locked` 与迁移测试构建的 manifest；消费者按同一命令读取，
-不能用测试构建的种子代替常用 check 的种子。
+不能用测试构建的种子代替常用 check 的种子。PR 也运行独立只读消费者，读取既有主线种子；
+这不证明本次 PR 的代码已经由主线发布，真实读写发布仍须单独验收。
 
 R2 诊断使用 `just mbx --r2 --mbx doctor --json`；预取使用
 `just mbx --r2 --mbx prefetch check --workspace --all-targets --locked`。空 manifest 不等于连接故障，
 但诊断成功也不等于编译命中。用 `MBX_STATS_REPORT` 保存原生统计，并在独立空 target/本地动作缓存
 消费者中确认 `downloaded_bytes`、恢复输出与 hits；远端错误和上传失败也必须保留。
+MBX 1.18.0 的 `remote_failures` 不覆盖全部预取失败：PR #174 的 macOS 原始日志已有
+`remote cache blob prefetch failed` 与 `No buffer space available (os error 55)`，但统计验收仍通过。
+R2 工作流通过 `verify-r2-build.py` 同时检查原生统计与固定错误分类；诊断工件只保存分类计数，
+不保存含端点的原始日志。macOS 另外保留构建前后资源计数，用于区分系统资源不足与远端故障；
+本次 macOS 失败样本的网络内存分配拒绝数从 0 增至 34,206，证实共享 mbuf 池耗尽；
+不是仅凭 `ENOBUFS` 推测凭据或 runner 版本问题。`prepare-ci-network.sh` 仅在临时 GitHub
+托管 macOS runner 上将 TCP 每方向自动缓冲增长限制到 256 KiB（已有更小限制保持不变），
+为 MBX 的最多 64 个并发远端传输及本机 IPC 保留共享缓冲余量。不关闭缓存、预取、TCP
+自动调节或修改持久系统配置；本机和 self-hosted runner 不作系统修改。真实主线读写验证仍
+须在受保护 main push 完成，PR 只读验证不能替代。
 
 R2 的桶级令牌不能按前缀隔离信任；只有可信构建可以拿到写令牌。MBX 原生内容校验、请求期限、
 读失败后本地编译与异步上传负责缓存失败恢复，不另实现网络缓存层。R2 的真实共享命中及耗时须另行

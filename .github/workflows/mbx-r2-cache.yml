@@ -56,6 +56,9 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y clang libclang-dev cmake
 
+      - name: Test R2 verification
+        run: python3 scripts/build-cache/verify-r2-build.test.py
+
       - name: Prepare isolated outputs
         run: |
           rustup show active-toolchain
@@ -65,6 +68,22 @@ jobs:
             echo "UC_ENGINE_SOURCE_COMMIT=$(git rev-parse HEAD)"
             echo "UC_ENGINE_SOURCE_STATE=clean"
           } >> "$GITHUB_ENV"
+
+      # 只采集资源计数，不列连接、进程环境或文件路径；不修改 runner 的系统配置。
+      - name: Record macOS resource baseline
+        if: runner.os == 'macOS'
+        run: |
+          {
+            ulimit -a
+            sysctl kern.ipc.maxsockbuf kern.maxfiles kern.maxfilesperproc
+            sysctl net.inet.tcp.autorcvbufmax net.inet.tcp.autosndbufmax
+            netstat -m
+            vm_stat
+          } | tee "$RUNNER_TEMP/mbx-r2-evidence/resources-before.txt"
+
+      - name: Bound macOS TCP buffer growth
+        if: runner.os == 'macOS'
+        run: bash scripts/build-cache/prepare-ci-network.sh
 
       - name: Exercise R2 and Engine migration
         env:
@@ -77,16 +96,7 @@ jobs:
           MBX_STATS_REPORT: ${{ runner.temp }}/mbx-r2-evidence/producer.json
         run: |
           bash scripts/build-cache/mbx.sh --r2 --mbx doctor --json > "$RUNNER_TEMP/mbx-r2-evidence/doctor.json"
-          bash scripts/build-cache/mbx.sh --r2 test -p uc-engine --test config_migration_round_trip_e2e --locked
-          python3 - <<'PY'
-          import json, os
-          from pathlib import Path
-          report = json.loads(Path(os.environ['MBX_STATS_REPORT']).read_text())
-          assert report['remote_failures'] == 0, report
-          assert report['background_upload_failures'] == 0, report
-          if os.environ['MBX_REMOTE_MODE'] == 'read-only':
-              assert report['uploaded_bytes'] == 0, report
-          PY
+          python3 scripts/build-cache/verify-r2-build.py -- bash scripts/build-cache/mbx.sh --r2 test -p uc-engine --test config_migration_round_trip_e2e --locked
 
       # check 与测试构建的 rustc 输出/manifest 不同，主线也播种 worker 常用的完整检查命令。
       - name: Publish workspace check actions
@@ -100,17 +110,9 @@ jobs:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/mbx-r2-producer
           MBX_STATS_REPORT: ${{ runner.temp }}/mbx-r2-evidence/producer-check.json
         run: |
-          bash scripts/build-cache/mbx.sh --r2 check --workspace --all-targets --locked
-          python3 - <<'PY'
-          import json, os
-          from pathlib import Path
-          report = json.loads(Path(os.environ['MBX_STATS_REPORT']).read_text())
-          assert report['remote_failures'] == 0, report
-          assert report['background_upload_failures'] == 0, report
-          PY
+          python3 scripts/build-cache/verify-r2-build.py -- bash scripts/build-cache/mbx.sh --r2 check --workspace --all-targets --locked
 
       - name: Verify independent workspace check consumer
-        if: github.event_name == 'push'
         env:
           BUILD_CACHE_R2_ENDPOINT: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           BUILD_CACHE_R2_ACCESS_KEY_ID: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
@@ -120,19 +122,10 @@ jobs:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/mbx-r2-consumer
           MBX_STATS_REPORT: ${{ runner.temp }}/mbx-r2-evidence/consumer-check.json
         run: |
-          bash scripts/build-cache/mbx.sh --r2 check --workspace --all-targets --locked
-          python3 - <<'PY'
-          import json, os
-          from pathlib import Path
-          report = json.loads(Path(os.environ['MBX_STATS_REPORT']).read_text())
-          assert report['downloaded_bytes'] > 0 and report['hits'] > 0, report
-          assert report['remote_failures'] == 0, report
-          assert report['uploaded_bytes'] == 0, report
-          PY
+          python3 scripts/build-cache/verify-r2-build.py --consumer -- bash scripts/build-cache/mbx.sh --r2 check --workspace --all-targets --locked
 
-      # 主线发布后用另一套空 target/动作缓存读取，避免把本地热缓存误认成远端命中。
+      # 使用独立 target/动作缓存；PR 只读既有种子，不能声称验证了本次主线发布。
       - name: Verify independent R2 consumer
-        if: github.event_name == 'push'
         env:
           BUILD_CACHE_R2_ENDPOINT: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           BUILD_CACHE_R2_ACCESS_KEY_ID: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
@@ -142,15 +135,26 @@ jobs:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/mbx-r2-consumer
           MBX_STATS_REPORT: ${{ runner.temp }}/mbx-r2-evidence/consumer.json
         run: |
-          bash scripts/build-cache/mbx.sh --r2 test -p uc-engine --test config_migration_round_trip_e2e --locked
-          python3 - <<'PY'
-          import json, os
+          python3 scripts/build-cache/verify-r2-build.py --consumer -- bash scripts/build-cache/mbx.sh --r2 test -p uc-engine --test config_migration_round_trip_e2e --locked
+
+      - name: Record macOS resource outcome
+        if: always() && runner.os == 'macOS'
+        run: |
+          {
+            netstat -m
+            vm_stat
+          } | tee "$RUNNER_TEMP/mbx-r2-evidence/resources-after.txt"
+          python3 - <<'PYCODE'
+          import os, re
           from pathlib import Path
-          report = json.loads(Path(os.environ['MBX_STATS_REPORT']).read_text())
-          assert report['downloaded_bytes'] > 0 and report['hits'] > 0, report
-          assert report['remote_failures'] == 0, report
-          assert report['uploaded_bytes'] == 0, report
-          PY
+          root = Path(os.environ['RUNNER_TEMP']) / 'mbx-r2-evidence'
+          def denied(name):
+              matches = re.findall(r'^(\d+) requests for memory denied$', (root / name).read_text(), re.M)
+              return int(matches[0]) if matches else 0
+          before, after = denied('resources-before.txt'), denied('resources-after.txt')
+          print(f'mbuf allocation denials: {before} -> {after}')
+          assert after == before, 'macOS network buffer allocation failures increased'
+          PYCODE
 
       - name: Retain R2 evidence
         if: always()

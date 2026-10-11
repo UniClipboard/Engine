@@ -14,6 +14,7 @@ key_id=${BUILD_CACHE_R2_ACCESS_KEY_ID:-}
 secret=${BUILD_CACHE_R2_SECRET_ACCESS_KEY:-}
 if [[ -n "$endpoint" && -n "$key_id" && -n "$secret" ]]; then
   [[ "$endpoint" == https://* ]] || { echo 'MBX R2 endpoint must use HTTPS' >&2; exit 1; }
+  bash "$root/scripts/build-cache/prepare-ci-network.sh"
   mode=read-only
   if [[ "${BUILD_CACHE_ACCESS:-read}" == write ]]; then mode=read-write; fi
   {
