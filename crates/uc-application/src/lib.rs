@@ -13,6 +13,7 @@ pub(crate) mod runtime_lifecycle;
 
 pub(crate) mod clipboard;
 pub(crate) mod device;
+pub(crate) mod discovery;
 pub(crate) mod search;
 pub(crate) mod settings;
 pub(crate) mod space;

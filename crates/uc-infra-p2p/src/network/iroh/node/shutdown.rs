@@ -74,6 +74,10 @@ impl IrohNode {
             failures.push(anyhow::Error::new(source).context("quiesce network session"));
         }
 
+        if let Err(source) = self.discovery_runtime.shutdown().await {
+            failures.push(source.context("stop peer discovery runtime"));
+        }
+
         if self.router.is_shutdown() {
             // 当前库不会再返回提前结束的 Router 结果，不能把这条路径当作正常关闭。
             failures.push(RouterStoppedBeforeShutdown.into());

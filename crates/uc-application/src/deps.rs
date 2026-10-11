@@ -29,6 +29,11 @@ use uc_core::ports::*;
 use uc_core::MemberRepositoryPort;
 use uc_observability_contract::analytics::AnalyticsPort;
 
+pub use crate::discovery::{
+    BackendId, ConnectionCandidate, DiscoveredPeer, DiscoveryError, DiscoveryEvent,
+    DiscoveryManager, DiscoveryPeerId, DiscoveryProvider, DiscoveryProviderId, DiscoveryStream,
+    PeerDirectory,
+};
 pub use crate::space::{KnownPeerIdentity, PeerAccess, PeerIdentityDirectoryPort};
 
 pub use crate::application::{

@@ -15,6 +15,7 @@ mod conn_path;
 mod connect;
 pub mod connection_channel_adapter;
 mod connection_diagnostics;
+mod discovery;
 pub mod group_update_adapter;
 pub mod identity_store;
 pub(crate) mod inbound_peer;
