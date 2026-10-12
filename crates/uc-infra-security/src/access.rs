@@ -21,6 +21,7 @@ use async_trait::async_trait;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tokio::sync::MutexGuard;
 use tracing::{info_span, Instrument};
 use zeroize::Zeroize;
 
@@ -1354,13 +1355,14 @@ impl RuntimeSpaceAccessAdapter {
         Self::group_revocation_result(repository, &record).await
     }
 
+    // 两个完整能力入口先持有同一应用锁；内部实现只接受持锁调用。
     async fn apply_group_epoch_update_with_proof(
         &self,
         payload: &[u8],
         proof: Option<&VerifiedHistoryGroupUpdate>,
         connection: Option<&ConnectionLease>,
+        _applying: &MutexGuard<'_, ()>,
     ) -> Result<GroupEpoch, KeyEpochError> {
-        let _applying = self.group_update_apply.lock().await;
         let update: GroupEpochUpdate = serde_json::from_slice(payload)
             .map_err(|source| failed_action(GroupUpdateAction::DecodeUpdate, source))?;
         if update.version != 1 {
@@ -2654,7 +2656,8 @@ impl GroupRevocationPort for RuntimeSpaceAccessAdapter {
     }
 
     async fn apply_group_epoch_update(&self, payload: &[u8]) -> Result<GroupEpoch, KeyEpochError> {
-        self.apply_group_epoch_update_with_proof(payload, None, None)
+        let applying = self.group_update_apply.lock().await;
+        self.apply_group_epoch_update_with_proof(payload, None, None, &applying)
             .await
     }
 
@@ -7288,8 +7291,9 @@ impl ApplyGroupUpdatePort for RuntimeSpaceAccessAdapter {
         proof: Option<&VerifiedHistoryGroupUpdate>,
         connection: Option<&ConnectionLease>,
     ) -> Result<GroupEpoch, GroupUpdateApplyError> {
+        let applying = self.group_update_apply.lock().await;
         match self
-            .apply_group_epoch_update_with_proof(payload, proof, connection)
+            .apply_group_epoch_update_with_proof(payload, proof, connection, &applying)
             .await
         {
             Ok(epoch) => Ok(epoch),

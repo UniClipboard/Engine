@@ -20,6 +20,7 @@ use tracing::instrument;
 use outbound_progress::OutboundProgressRuntime;
 
 use crate::assembly::deps::SyncEngineDeps;
+use crate::assembly::observability;
 #[cfg(feature = "dev-tools")]
 use crate::dev::{
     ControlledSpaceAdmissionTransport, FaultableGroupUpdateReceiver, FaultableGroupUpdateWire,
@@ -408,7 +409,7 @@ pub async fn prepare_sync_session(
         current_join_status: space_setup.admission_state.clone()
             as Arc<dyn uc_application::deps::LoadCurrentJoinStatusPort>,
     };
-    let (membership, observed_group_receiver) = crate::assembly::observability::observe_membership(
+    let (membership, observed_group_receiver) = observability::observe_membership(
         SpaceMembershipAdapters {
             membership_records: space_setup.membership_ledger.clone()
                 as Arc<dyn uc_application::deps::MembershipRecordStorePort>,

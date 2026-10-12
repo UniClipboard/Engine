@@ -207,3 +207,9 @@ git diff --check
 - code-review 技能缺失，最终差异按仓库所有权、加密、格式迁移、错误来源、准入/世代围栏、取消收束及唯一生产接线约束自审。审查修正及回归均如上记录，没有用失败重试或忽略断言替代修复。
 - 桌面产品与 iOS/Android/HarmonyOS 真机、跨网络切换、休眠及前后台矩阵跳过；Linux 本机 QUIC/SQLite/MLS 和独立进程通过不替代这些项目。完整历史发布升级矩阵、macOS 符号模式和发布打包跳过，本次没有发布操作。
 - 长期事实回写成员历史职责文档，spec/plan 归档 completed；Issue #34 其余切片与批量优化保持后续任务。共享 target 和编译缓存保留，固定旧端 worktree 已回收。
+
+## PR #179 的 CI 修正（2026-10-12）
+
+- CI 的 Rust 风格检查按 PR 基线比较全部已提交差异，此前本地默认只比较 HEAD 与未提交工作区，漏掉 9 处正文完整路径和 1 个内部纯转调方法。用 `RUST_STYLE_BASE_SHA=c0351c0eb48ac87abb93d9fc3941bdee5dc3a005 node scripts/architecture/check-rust-style.mjs` 本地复现同一组 10 条错误。
+- 集中引入连接类型与唯一 `observe_membership`；两个组更新能力入口显式持有同一技术互斥锁，内部应用实现要求持锁参数，保存与安装仍在同一锁范围内。不扩大公开接口，不改变协议或持久格式。
+- 修正后安全模块全套 119 项、Application 完整装配测试 1 项及 workspace all-targets check 通过。按 PR 基线执行的 Rust 风格检查与 Engine repository preflight 均通过；日志分别为 ci-fix-security.log、ci-fix-application.log、ci-fix-workspace-check.log 和 ci-fix-repository.log。

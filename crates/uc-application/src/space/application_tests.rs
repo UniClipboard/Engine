@@ -10,6 +10,7 @@ use super::adapters::{SpaceAdmissionAdapters, SpaceMembershipAdapters, SpaceRunt
 use super::admission::*;
 use super::application::SpaceApplication;
 use super::membership::*;
+use crate::connectivity::{ConnectionLease, ConnectionProtocol, ConnectivityError, StreamLease};
 
 fn join_request_identity_facts(
     device_id: DeviceId,
@@ -905,7 +906,7 @@ impl ApplyGroupUpdatePort for PassivePorts {
         &self,
         _: &[u8],
         _: Option<&VerifiedHistoryGroupUpdate>,
-        _: Option<&crate::connectivity::ConnectionLease>,
+        _: Option<&ConnectionLease>,
     ) -> Result<GroupEpoch, GroupUpdateApplyError> {
         unreachable!("passive assembly does not apply updates")
     }
@@ -921,32 +922,26 @@ impl GroupUpdateLocalWorkPort for PassivePorts {
 }
 #[async_trait]
 impl GroupUpdateWirePort for PassivePorts {
-    async fn read(
-        &self,
-        _: &mut crate::connectivity::StreamLease,
-    ) -> Result<GroupUpdateIncoming, anyhow::Error> {
+    async fn read(&self, _: &mut StreamLease) -> Result<GroupUpdateIncoming, anyhow::Error> {
         unreachable!()
     }
     async fn acknowledge(
         &self,
-        _: &mut crate::connectivity::StreamLease,
-        _: crate::connectivity::ConnectionProtocol,
+        _: &mut StreamLease,
+        _: ConnectionProtocol,
         _: &GroupUpdateReceiveOutcome,
     ) -> Result<bool, anyhow::Error> {
         unreachable!()
     }
     async fn send(
         &self,
-        _: &mut crate::connectivity::StreamLease,
-        _: crate::connectivity::ConnectionProtocol,
+        _: &mut StreamLease,
+        _: ConnectionProtocol,
         _: &[u8],
     ) -> Result<(), GroupUpdateDispatchError> {
         unreachable!()
     }
-    fn is_supported(
-        &self,
-        _: crate::connectivity::ConnectionProtocol,
-    ) -> Result<(), crate::connectivity::ConnectivityError> {
+    fn is_supported(&self, _: ConnectionProtocol) -> Result<(), ConnectivityError> {
         unreachable!()
     }
 }
