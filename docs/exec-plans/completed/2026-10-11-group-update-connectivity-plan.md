@@ -228,3 +228,12 @@ git diff --check
 - 三进程场景单跑 16.5 秒、两个 CPU 的串行对照 16.0 秒通过；与真实大历史场景并行时增至 32.9 秒，但未稳定复现 CI 的同一失败，因此不把资源竞争记为已完整证实的具体失败根因。两个 CPU 压力下的大历史激活回执测试超过其原 120 秒限制，压力组合不记为全通过，亦不为此修改 Core 测试期限。
 - 原 process 组 max-threads=1 只排除同组并行，不能排除其它 Engine 与大历史组。为整个 space_device_update_recovery 宿主组预留全部 nextest 槽位，建立其真实交换预算所需的独占验收环境；保持原 10/30/60/120 秒各层期限和全部实际拒绝/ACK 断言。失败时另输出已查询的公开组更新摘要，区分不可达、暂不可用与拒绝，不输出设备标识。
 - 本地宿主组连续三轮均通过，15 次执行、每轮 2 项原配置跳过（ci-three-isolated-suite.log，249.4 秒）。该调整最终仍需远端完整 workspace 验证，不能以压力对照中单个场景通过替代整轮 CI。
+
+### 按 CI 完整命令在本地验证
+
+- 用户要求先完整通过本地门禁再推送。此前仅做定向测试、根检查与压力对照，未完整执行 workflow 的全部必需步骤；停止新增推送，改为同一工作区特性组合、CI profile 和默认并发执行完整门禁，各步骤独立记录退出码和 JUnit，不以继续执行下一步推断前一步成功。
+- 本地首轮 workspace：4180 通过、2 失败、24 跳过（local-ci/workspace-first.log、workspace-first.xml）。真实复现三进程等待 needs_attention 却为 retryable_failure 且公开设备待办为空的失败；另一个剪贴板合同测试在 shutdown 返回 1108。第二轮三进程通过，但剪贴板合同超时，六轮离开资源采样的句柄断言失败。单独选择失败项、保留 workspace 构建范围的三轮对照全通过，不据此把完整门禁标成通过。
+- 收紧拒绝场景的前置条件：先等待 A/B 同一可信分支及全部本地效果完成；暂时双向隔离 A/B，等 C 加入且 A/C 的新分支和本地效果完成后，才启用一次真实 wire 篡改并解除隔离、触发机会。测试仍验证真实拒绝、重启与重新认证不能消除拒绝，以及正确历史和实际 ACK 才能结清；不改变生产拒绝分类、退避、协议或持久格式。禁用 relay 的 B 重启沿用相同直接端口。原场景的具体失败来源尚未被完整证实，不能把时序隔离调整描述为生产根因修复。
+- 剪贴板传输/关闭合同与离开资源采样改为占用全部 nextest 槽位；保留原超时及任务/句柄断言。这两项不以并行负载作为验收目标，不增加自动重试或跳过。
+- 调整后的三个场景连续三轮全部通过，共 9 次执行（local-ci/stabilized-stress.log，188.8 秒）。随后删除临时复制宿主日志的诊断代码，完整门禁仍须另行完成，不能由这 9 次执行代替。
+- 本地门禁按 PR Check 执行：workspace 构建与测试、evidence、成员 smoke、direct/E02 隔离网络 smoke、metadata、all-targets check、fmt、按 PR 基线的仓库检查、直接日志宏 AST 检查、固定 cargo-audit 0.22.2 审计、CI 脚本测试、diff check、Linux available 模式诊断栈，以及上一个锚点到 HEAD 的升级 smoke。日志和步骤结果位于 target/group-update-connectivity-spec-evidence/local-ci。隔离网络在独立 user/mount/net namespace 内执行，不修改主机网络；macOS 完整符号和 Windows 两架构原生验证不能记为本地通过。

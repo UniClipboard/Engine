@@ -188,6 +188,15 @@ test-group = "process"
 threads-required = "num-test-threads"
 slow-timeout = { period = "30s", terminate-after = 2 }
 
+# 完整双节点传输与关闭使用真实期限，独占执行，避免把其它重场景负载计入关闭验收。
+[[profile.default.overrides]]
+filter = "package(uc-engine) & kind(lib) & test(=testing::host_adapter_contract::engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behavior)"
+threads-required = "num-test-threads"
+
+[[profile.ci.overrides]]
+filter = "package(uc-engine) & kind(lib) & test(=testing::host_adapter_contract::engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behavior)"
+threads-required = "num-test-threads"
+
 [[profile.default.overrides]]
 filter = "package(uc-engine) & kind(lib) & test(/^testing::host_adapter_contract::/)"
 test-group = "engine-host-contract"
@@ -266,13 +275,16 @@ filter = "package(uc-engine) & binary(host_contract) & test(clipboard_startup_re
 test-group = "process"
 slow-timeout = { period = "60s", terminate-after = 4 }
 
-# 六轮完整加密创建/离开并取资源样本，独立执行约 35 秒；期限覆盖完整流程，保留任务/句柄无累积断言。
+# 六轮完整加密创建/离开并取资源样本，独立执行约 35 秒；独占执行排除其它重场景的调度干扰，
+# 期限覆盖完整流程，保留任务/句柄无累积断言。
 [[profile.default.overrides]]
 filter = "package(uc-engine) & binary(host_contract) & test(repeated_leaves_do_not_accumulate_tasks_or_descriptors)"
+threads-required = "num-test-threads"
 slow-timeout = { period = "60s", terminate-after = 1 }
 
 [[profile.ci.overrides]]
 filter = "package(uc-engine) & binary(host_contract) & test(repeated_leaves_do_not_accumulate_tasks_or_descriptors)"
+threads-required = "num-test-threads"
 slow-timeout = { period = "60s", terminate-after = 1 }
 
 # 本机直接执行同一二进制约 21 秒；完整配对、离线保存、重启与文件读回需覆盖默认 20 秒之外的流程。

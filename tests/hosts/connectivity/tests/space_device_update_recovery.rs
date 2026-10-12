@@ -481,7 +481,16 @@ fn wait_for_active_join(host: &mut HostProcess) {
 async fn three_process_group_rejection_recovers_only_after_verified_history() {
     let rendezvous = mount_rendezvous().await;
     let mut a = HostProcess::start(&rendezvous.uri());
-    let mut b = HostProcess::start(&rendezvous.uri());
+    // 场景只验证拒绝与历史恢复；禁用 relay 时，重启继续使用同一直接地址。
+    let port_probe = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("reserve receiver port");
+    let port = port_probe.local_addr().expect("receiver port").port();
+    drop(port_probe);
+    let mut b = HostProcess::start_binary(
+        &rendezvous.uri(),
+        PathBuf::from(env!("CARGO_BIN_EXE_uc-connectivity-host")),
+        false,
+        Some(port),
+    );
     let mut c = HostProcess::start(&rendezvous.uri());
     a.request(json!({"command": "create", "name": "A"}));
     let invitation = a.request(json!({"command": "invite"}))["invitation"].clone();
@@ -489,16 +498,26 @@ async fn three_process_group_rejection_recovers_only_after_verified_history() {
     wait_for_active_join(&mut b);
     wait_for_phase(&mut a, "completed");
     wait_for_phase(&mut b, "completed");
+    wait_for_branch(&mut [&mut a, &mut b], 2);
     let peer =
         b.request(json!({"command": "eligibility"}))["device_trust"]["local_device_id"].clone();
     assert!(peer.is_string());
     for host in [&mut a, &mut c] {
         host.request(json!({"command": "set_membership_history_held", "held": true, "peer": peer}));
     }
-    a.request(json!({"command": "arm_group_update_tamper", "count": 1}));
+    // 先形成完整的新分支，再让一次性篡改进入真实交换；不把准入期间的连接变化算作安全拒绝。
+    let a_endpoint = a.request(json!({"command": "network_endpoint"}));
+    let b_endpoint = b.request(json!({"command": "network_endpoint"}));
+    a.request(json!({"command": "set_network_partition", "endpoint_ids": [b_endpoint]}));
+    b.request(json!({"command": "set_network_partition", "endpoint_ids": [a_endpoint]}));
     let invitation = a.request(json!({"command": "invite"}))["invitation"].clone();
     c.request(json!({"command": "join", "name": "C", "invitation": invitation}));
     wait_for_active_join(&mut c);
+    wait_for_branch(&mut [&mut a, &mut c], 3);
+    a.request(json!({"command": "arm_group_update_tamper", "count": 1}));
+    b.request(json!({"command": "set_network_partition", "endpoint_ids": []}));
+    a.request(json!({"command": "set_network_partition", "endpoint_ids": []}));
+    a.request(json!({"command": "opportunity"}));
     a.request(json!({"command": "wait_space_work_event", "kind": "group_update_tampered", "after_sequence": 0}));
     let rejected = wait_for_phase(&mut a, "needs_attention");
     assert_eq!(rejected["reason"], "device_security_update_rejected");
