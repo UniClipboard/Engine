@@ -16,7 +16,6 @@ use crate::space::admission::{
     SpaceAdmissionProtocol, SponsorAdmissionService,
 };
 use crate::space::membership::DecideDeviceTrustChangeUseCase;
-use crate::space::membership::DeliverPendingGroupUpdatesUseCase;
 use crate::space::membership::HandleMembershipHistoryMessageUseCase;
 use crate::space::membership::IssueMembershipBranchRecoveryUseCase;
 use crate::space::membership::PreparedSpaceMembershipMaintenanceRuntime;
@@ -33,6 +32,9 @@ use crate::space::membership::{
     LoadSecurityDeviceUpdateStatusPort, MembershipOwner, MembershipWorker, MembershipWorkerDeps,
     RePairingAwareMembershipActivation, RecoverMembershipEffectsPort,
     RetainedGroupUpdateRecipientsPort,
+};
+use crate::space::membership::{
+    DeliverPendingGroupUpdatesUseCase, GroupUpdateApplyCoordinator, HistorySynchronizer,
 };
 use crate::space::membership::{
     ExcludeMembershipMaintenancePort, MaintainSpaceMembershipDeps, MaintainSpaceMembershipUseCase,
@@ -270,6 +272,10 @@ impl SpaceApplication {
             activate_membership_effect,
             restricted_membership_delivery,
             group_update_store,
+            group_update_apply,
+            group_update_receiver,
+            group_update_wire,
+            group_update_local_work,
             group_update_dispatch,
             membership_network_activity,
         } = membership;
@@ -284,6 +290,17 @@ impl SpaceApplication {
             deferred_maintenance_wake.clone(),
         ));
         peer_access.bind(Arc::clone(&owner));
+        let history = Arc::new(HistorySynchronizer::new(
+            owner.clone(),
+            membership_history_transport,
+            verified_peer_address_refresh,
+        ));
+        let group_apply = Arc::new(GroupUpdateApplyCoordinator::new(
+            owner.clone(),
+            group_update_apply,
+            apply_membership_security,
+            history.clone(),
+        ));
         let deliver_group_updates = Arc::new(DeliverPendingGroupUpdatesUseCase::new(
             group_update_store,
             group_update_dispatch,
@@ -327,14 +344,14 @@ impl SpaceApplication {
             Arc::clone(&owner),
             MembershipWorkerDeps {
                 member_facts: apply_membership_member_facts,
-                security: apply_membership_security,
+                security: group_apply.clone(),
                 activation: Arc::new(RePairingAwareMembershipActivation::new(
                     activate_membership_effect,
                     Arc::clone(&re_pairing),
                 )),
                 restricted_delivery: restricted_membership_delivery,
-                history_transport: membership_history_transport,
-                address_refresh: verified_peer_address_refresh,
+                history,
+                group_recovery: group_apply.clone(),
                 conflicts: recover_membership_conflicts,
                 group_updates: deliver_group_updates,
             },
@@ -345,6 +362,7 @@ impl SpaceApplication {
             Arc::clone(&current_member_signatures),
             Arc::clone(&query_device_trust),
             Arc::clone(&effects),
+            group_apply.clone(),
         ));
         let joiner_admission = JoinerAdmissionService::new(
             settings,
@@ -408,6 +426,12 @@ impl SpaceApplication {
         ));
         let maintenance_exclusion: Arc<dyn ExcludeMembershipMaintenancePort> =
             Arc::clone(&maintain) as _;
+        group_update_receiver.bind(
+            group_apply,
+            group_update_wire,
+            group_update_local_work,
+            space_admission.clone(),
+        );
         let prepared_runtime = SpaceMembershipMaintenanceRuntime::prepare(
             maintain,
             peer_reachability_changed_events,

@@ -1,7 +1,7 @@
 use super::manager::PeerState;
 use super::{
-    AdmissionAttempt, AdmissionGrant, ConnectionMode, ConnectivityError, PeerConnection,
-    StreamLease,
+    AdmissionAttempt, AdmissionGrant, ConnectionMode, ConnectionProtocol, ConnectivityError,
+    PeerConnection, StreamLease,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -40,6 +40,9 @@ impl ConnectionLease {
     }
     pub fn mode(&self) -> ConnectionMode {
         self.record.connection.mode()
+    }
+    pub fn protocol(&self) -> ConnectionProtocol {
+        self.record.connection.protocol()
     }
     pub fn channel(&self) -> ConnectionChannel {
         self.record.connection.channel()

@@ -130,6 +130,7 @@ impl<E: DbExecutor + Clone + 'static> RevocationRepositoryPort for DieselSpaceSe
         space_id: &SpaceId,
         now_ms: i64,
         online_peer: Option<DeviceId>,
+        verified_history_peer: Option<DeviceId>,
     ) -> Result<Vec<PendingGroupUpdate>, KeyEpochError> {
         let key = self.session.get_master_key().map_err(backend)?;
         let space_id = space_id.clone();
@@ -137,7 +138,14 @@ impl<E: DbExecutor + Clone + 'static> RevocationRepositoryPort for DieselSpaceSe
             store
                 .executor
                 .run(|conn| {
-                    Ok(store.load_due_updates_on(conn, &key, &space_id, now_ms, online_peer))
+                    Ok(store.load_due_updates_on(
+                        conn,
+                        &key,
+                        &space_id,
+                        now_ms,
+                        online_peer,
+                        verified_history_peer,
+                    ))
                 })
                 .map_err(transaction_failure)?
         })
@@ -173,7 +181,8 @@ impl<E: DbExecutor + Clone + 'static> RevocationRepositoryPort for DieselSpaceSe
         space_id: &SpaceId,
     ) -> Result<Vec<GroupUpdateRecipientDelivery>, KeyEpochError> {
         // 先复用投递读取维护同一份加密索引，再只读取各收件人的队首状况。
-        self.due_group_updates(space_id, i64::MIN, None).await?;
+        self.due_group_updates(space_id, i64::MIN, None, None)
+            .await?;
         let key = self.session.get_master_key().map_err(backend)?;
         self.executor
             .run(|conn| Ok(self.load_group_update_deliveries_on(conn, &key, space_id)?))

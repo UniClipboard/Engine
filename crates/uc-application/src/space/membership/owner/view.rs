@@ -1,13 +1,14 @@
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
     MemberInstanceId, MembershipLedger, PeerPauseReason, VersionedMembershipHistory,
 };
 
 use crate::space::membership::{
-    CurrentSpaceMemberScope, CurrentSpaceMemberScopeError, MembershipBranchRecoveryRecord,
-    MembershipHistoryExchangeRecord, MembershipLedgerError, MembershipRecord, PausedSpaceMember,
-    SpaceMemberPauseReason, SpaceMembershipRecord,
+    CurrentSpaceMemberScope, CurrentSpaceMemberScopeError, GroupUpdateRecoveryRecord,
+    MembershipBranchRecoveryRecord, MembershipHistoryExchangeRecord, MembershipLedgerError,
+    MembershipRecord, PausedSpaceMember, SpaceMemberPauseReason, SpaceMembershipRecord,
 };
 
 /// Owner 发布的只读成员状态。读取方只能观察，不能改写；改写只经 [`super::MembershipOwner`]。
@@ -23,6 +24,8 @@ pub(crate) struct SpaceMembershipView {
     pub(super) ledger: MembershipLedger,
     pub(super) history_exchange: MembershipHistoryExchangeRecord,
     pub(super) branch_recovery: MembershipBranchRecoveryRecord,
+    pub(super) group_update_recovery: Option<GroupUpdateRecoveryRecord>,
+    pub(super) prepared_group_updates: BTreeMap<[u8; 32], Vec<u8>>,
 }
 
 impl MembershipView {
@@ -39,6 +42,8 @@ impl MembershipView {
                     ledger,
                     history_exchange,
                     branch_recovery,
+                    group_update_recovery,
+                    prepared_group_updates,
                 } = *space;
                 let ledger = MembershipLedger::restore(ledger)
                     .map_err(MembershipLedgerError::corrupt_from)?;
@@ -64,6 +69,8 @@ impl MembershipView {
                         ledger,
                         history_exchange,
                         branch_recovery,
+                        group_update_recovery,
+                        prepared_group_updates,
                     }),
                 ))
             }
@@ -79,6 +86,8 @@ impl MembershipView {
                 ledger: space.ledger.snapshot(),
                 history_exchange: space.history_exchange.clone(),
                 branch_recovery: space.branch_recovery.clone(),
+                group_update_recovery: space.group_update_recovery.clone(),
+                prepared_group_updates: space.prepared_group_updates.clone(),
             })),
         }
     }
@@ -153,6 +162,14 @@ impl SpaceMembershipView {
 
     pub(crate) fn branch_recovery(&self) -> &MembershipBranchRecoveryRecord {
         &self.branch_recovery
+    }
+
+    pub(crate) fn prepared_group_updates(&self) -> &BTreeMap<[u8; 32], Vec<u8>> {
+        &self.prepared_group_updates
+    }
+
+    pub(crate) fn group_update_recovery(&self) -> Option<&GroupUpdateRecoveryRecord> {
+        self.group_update_recovery.as_ref()
     }
 
     /// 已提交历史归档的摘要，作为公开提交回执的一部分。

@@ -24,6 +24,10 @@ use sha2::{Digest, Sha256};
 use tracing::{info_span, Instrument};
 use zeroize::Zeroize;
 
+use super::group_update_error::{
+    failed_action, group_update_apply_verdict, tag_action, GroupUpdateAction, GroupUpdateVerdict,
+};
+use super::{prepared_group_material, prepared_recovery_recipient};
 use uc_application::deps::{
     ActivateCompletionHelperAdmissionSecurityPort,
     ActivateCompletionHelperAdmissionSecurityRequest, ActivateSponsorAdmissionSecurityPort,
@@ -37,7 +41,10 @@ use uc_application::deps::{
     ProfileKeyAccessProbePortError, SponsorAdmissionSecurityRequest,
     SponsorPreparedAdmissionSecurity,
 };
-use uc_application::deps::{RuntimeLifecyclePort, TransitionContext};
+use uc_application::deps::{
+    ApplyGroupUpdatePort, ConnectionLease, GroupUpdateApplyError, PreparedGroupUpdate,
+    RuntimeLifecyclePort, TransitionContext, VerifiedHistoryGroupUpdate,
+};
 use uc_core::crypto::domain::{ActiveSpace, Passphrase as DomainPassphrase};
 use uc_core::crypto::model::{EncryptionError, Passphrase as LegacyPassphrase};
 use uc_observability_contract::{
@@ -51,12 +58,12 @@ use uc_core::membership::{AdmissionReplayId, ProtectionGroupAdmission};
 use uc_core::membership::{
     BeginRevocationOutcome, BootstrapError, BootstrapId, GroupBootstrapPort, GroupBootstrapResult,
     GroupEpoch, GroupRevocationPort, GroupRevocationResult, GroupUpdateDispatchError,
-    KeyEpochError, LegacyBootstrapRecord, LegacyBootstrapRepositoryPort, LegacyBootstrapStage,
-    LegacyBootstrapStatus, MemberProtection, MemberProtectionStatus, MembershipCredential,
-    PendingGroupUpdate, PreparedRevocationResolution, ProtectionGroupId, RevocationId,
-    RevocationOutboxMessage, RevocationRecord, RevocationRepositoryPort, RevocationStage,
-    RevocationStatus, SpaceKeyMaterial, SpaceKeyState, SpaceProtectionError, SpaceProtectionMode,
-    SpaceProtectionSnapshot, SpaceProtectionStatusPort, SpaceSecurityMode,
+    KeyEpochError, KeyEpochStateIssue, LegacyBootstrapRecord, LegacyBootstrapRepositoryPort,
+    LegacyBootstrapStage, LegacyBootstrapStatus, MemberProtection, MemberProtectionStatus,
+    MembershipCredential, PendingGroupUpdate, PreparedRevocationResolution, ProtectionGroupId,
+    RevocationId, RevocationOutboxMessage, RevocationRecord, RevocationRepositoryPort,
+    RevocationStage, RevocationStatus, SpaceKeyMaterial, SpaceKeyState, SpaceProtectionError,
+    SpaceProtectionMode, SpaceProtectionSnapshot, SpaceProtectionStatusPort, SpaceSecurityMode,
 };
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::space::{SpaceAccessError, SpaceAccessStore};
@@ -84,14 +91,6 @@ const MAX_STALLED_REVOCATION_ITERATIONS: usize = 3;
 const SESSION_TRANSACTION_SETTLE_LIMIT: Duration = Duration::from_secs(2);
 
 #[derive(Serialize, Deserialize)]
-struct StagedMembershipBranchRecoveryRecipientV1 {
-    version: u8,
-    mls_state: Vec<u8>,
-    wrapping_key: Vec<u8>,
-    epoch: u64,
-}
-
-#[derive(Serialize, Deserialize)]
 struct MembershipBranchRecoveryConfirmationV1 {
     version: u8,
     epoch: u64,
@@ -116,6 +115,7 @@ pub struct RuntimeSpaceAccessAdapter {
     /// profile key access probe → `unlock.store_kek refresh` 三次独立访问
     /// 而连弹三次）。
     kek_observed: AtomicBool,
+    group_update_apply: tokio::sync::Mutex<()>,
 }
 
 /// 只用于旧配置初始化的最小访问器，不具备运行期安全端口。
@@ -217,6 +217,7 @@ impl RuntimeSpaceAccessAdapter {
             key_epoch_repository,
             legacy_bootstrap_repository,
             kek_observed: AtomicBool::new(false),
+            group_update_apply: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -916,6 +917,8 @@ impl RuntimeSpaceAccessAdapter {
             encrypted_key_catalog: encrypted_key_catalog.clone(),
         })
         .map_err(SpaceAccessError::corrupted_key_material_from)?;
+        next.record_applied_group_update(epoch, Sha256::digest(&existing_member_update).into())
+            .map_err(SpaceAccessError::corrupted_key_material_from)?;
         let existing_member_updates = existing_member_ids
             .iter()
             .cloned()
@@ -1096,6 +1099,7 @@ impl RuntimeSpaceAccessAdapter {
         retained_recipients: &[DeviceId],
         now_ms: i64,
     ) -> Result<GroupRevocationResult, KeyEpochError> {
+        let _applying = self.group_update_apply.lock().await;
         let repository = self.key_epoch_repository.as_ref();
         let space_id = self
             .session
@@ -1109,7 +1113,7 @@ impl RuntimeSpaceAccessAdapter {
         }
         if current.group_state().is_empty() {
             return Err(KeyEpochError::StateIssue(
-                uc_core::membership::KeyEpochStateIssue::CorruptMaterial,
+                KeyEpochStateIssue::CorruptMaterial,
             ));
         }
         if retained_recipients
@@ -1142,9 +1146,7 @@ impl RuntimeSpaceAccessAdapter {
                         .load_space_material(&space_id)
                         .await?
                         .ok_or_else(|| {
-                            KeyEpochError::StateIssue(
-                                uc_core::membership::KeyEpochStateIssue::MissingMaterial,
-                            )
+                            KeyEpochError::StateIssue(KeyEpochStateIssue::MissingMaterial)
                         })?;
                     if base.state().epoch() < record.previous_epoch() {
                         if rebuilding_prepared {
@@ -1161,9 +1163,7 @@ impl RuntimeSpaceAccessAdapter {
                                 .await?;
                             return Self::group_revocation_result(repository, &record).await;
                         }
-                        return Err(KeyEpochError::StateIssue(
-                            uc_core::membership::KeyEpochStateIssue::EpochMismatch,
-                        ));
+                        return Err(KeyEpochError::StateIssue(KeyEpochStateIssue::EpochMismatch));
                     }
                     if rebuilding_prepared && base.state().epoch() > record.previous_epoch() {
                         record.rebase_prepared(base.state().epoch(), now_ms)?;
@@ -1207,9 +1207,7 @@ impl RuntimeSpaceAccessAdapter {
                     )
                     .map_err(|error| KeyEpochError::Repository(error.into()))?;
                     if GroupEpoch::new(removal.epoch) != record.next_epoch() {
-                        return Err(KeyEpochError::StateIssue(
-                            uc_core::membership::KeyEpochStateIssue::EpochMismatch,
-                        ));
+                        return Err(KeyEpochError::StateIssue(KeyEpochStateIssue::EpochMismatch));
                     }
                     let next = self
                         .session
@@ -1273,9 +1271,7 @@ impl RuntimeSpaceAccessAdapter {
                             .get_revocation(record.revocation_id())
                             .await?
                             .ok_or_else(|| {
-                                KeyEpochError::StateIssue(
-                                    uc_core::membership::KeyEpochStateIssue::MissingRevocation,
-                                )
+                                KeyEpochError::StateIssue(KeyEpochStateIssue::MissingRevocation)
                             })?;
                         if persisted.status() == RevocationStatus::Prepared {
                             record = repository
@@ -1297,9 +1293,7 @@ impl RuntimeSpaceAccessAdapter {
                         .load_space_material(&space_id)
                         .await?
                         .ok_or_else(|| {
-                            KeyEpochError::StateIssue(
-                                uc_core::membership::KeyEpochStateIssue::MissingMaterial,
-                            )
+                            KeyEpochError::StateIssue(KeyEpochStateIssue::MissingMaterial)
                         })?;
                     self.active_security_session
                         .install_current_material(&activated)
@@ -1311,9 +1305,7 @@ impl RuntimeSpaceAccessAdapter {
                         .load_space_material(&space_id)
                         .await?
                         .ok_or_else(|| {
-                            KeyEpochError::StateIssue(
-                                uc_core::membership::KeyEpochStateIssue::MissingMaterial,
-                            )
+                            KeyEpochError::StateIssue(KeyEpochStateIssue::MissingMaterial)
                         })?;
                     self.active_security_session
                         .install_current_material(&activated)
@@ -1328,23 +1320,19 @@ impl RuntimeSpaceAccessAdapter {
                 }
                 RevocationStatus::RecoveryRequired => {
                     return Err(KeyEpochError::StateIssue(
-                        uc_core::membership::KeyEpochStateIssue::RecoveryRequired,
+                        KeyEpochStateIssue::RecoveryRequired,
                     ));
                 }
             }
             record = repository
                 .get_revocation(record.revocation_id())
                 .await?
-                .ok_or_else(|| {
-                    KeyEpochError::StateIssue(
-                        uc_core::membership::KeyEpochStateIssue::MissingRevocation,
-                    )
-                })?;
+                .ok_or_else(|| KeyEpochError::StateIssue(KeyEpochStateIssue::MissingRevocation))?;
             if record.status() == previous_status {
                 stalled_iterations += 1;
                 if stalled_iterations >= MAX_STALLED_REVOCATION_ITERATIONS {
                     return Err(KeyEpochError::StateIssue(
-                        uc_core::membership::KeyEpochStateIssue::RecoveryRequired,
+                        KeyEpochStateIssue::RecoveryRequired,
                     ));
                 }
             } else {
@@ -1366,50 +1354,188 @@ impl RuntimeSpaceAccessAdapter {
         Self::group_revocation_result(repository, &record).await
     }
 
-    async fn apply_group_epoch_update(&self, payload: &[u8]) -> Result<GroupEpoch, KeyEpochError> {
-        use super::group_update_error::{failed_action, tag_action, GroupUpdateAction as Action};
+    async fn apply_group_epoch_update_with_proof(
+        &self,
+        payload: &[u8],
+        proof: Option<&VerifiedHistoryGroupUpdate>,
+        connection: Option<&ConnectionLease>,
+    ) -> Result<GroupEpoch, KeyEpochError> {
+        let _applying = self.group_update_apply.lock().await;
         let update: GroupEpochUpdate = serde_json::from_slice(payload)
-            .map_err(|source| failed_action(Action::DecodeUpdate, source))?;
+            .map_err(|source| failed_action(GroupUpdateAction::DecodeUpdate, source))?;
         if update.version != 1 {
             return Err(KeyEpochError::StateIssue(
-                uc_core::membership::KeyEpochStateIssue::UnsupportedUpdate,
+                KeyEpochStateIssue::UnsupportedUpdate,
             ));
         }
         let repository = self.key_epoch_repository.as_ref();
         let space_id = self
             .session
             .current_space_id()
-            .map_err(|error| failed_action(Action::LoadState, error))?;
+            .map_err(|error| failed_action(GroupUpdateAction::LoadState, error))?;
         let current = repository
             .load_space_material(&space_id)
             .await
-            .map_err(|error| tag_action(Action::LoadState, error))?
-            .ok_or_else(|| {
-                KeyEpochError::StateIssue(uc_core::membership::KeyEpochStateIssue::MissingMaterial)
-            })?;
+            .map_err(|error| tag_action(GroupUpdateAction::LoadState, error))?
+            .ok_or_else(|| KeyEpochError::StateIssue(KeyEpochStateIssue::MissingMaterial))?;
         let update_epoch = GroupEpoch::new(update.group_epoch);
+        MlsGroupEngine::validate_commit_envelope(
+            &update.commit,
+            space_id.as_ref().as_bytes(),
+            update.group_epoch,
+        )
+        .map_err(|source| failed_action(GroupUpdateAction::ValidateUpdate, source))?;
+        if current.group_state().is_empty() {
+            return Err(KeyEpochError::StateIssue(
+                KeyEpochStateIssue::CorruptMaterial,
+            ));
+        }
+        // 本机 MLS 存档先独立校验；损坏材料不是对端提交的密码学拒绝。
+        let actual_epoch = MlsGroupEngine::current_epoch(&MlsClientState::from_bytes(
+            current.group_state().to_vec(),
+        ))
+        .map_err(|source| failed_action(GroupUpdateAction::LoadState, source))?;
+        if actual_epoch != current.state().epoch().value() {
+            return Err(KeyEpochError::StateIssue(
+                KeyEpochStateIssue::CorruptMaterial,
+            ));
+        }
+        let digest: [u8; 32] = Sha256::digest(payload).into();
         if current.state().epoch() >= update_epoch {
-            // Already at or beyond the update: a member that joined later
-            // (or already applied the commit) skips older updates from the
-            // continuous change chain. Idempotent and safe: applying an old
-            // commit to a newer group state would be out of order.
+            let known = current.applied_group_update_digest(update_epoch).copied();
+            if known.is_some_and(|known| known != digest) {
+                return Err(KeyEpochError::StateIssue(KeyEpochStateIssue::EpochMismatch));
+            }
+            let historical = proof
+                .is_some_and(|proof| proof.payload() == payload && proof.space_id() == &space_id);
+            if known.is_none() && !historical {
+                return Err(KeyEpochError::StateIssue(
+                    KeyEpochStateIssue::UnverifiedReplay,
+                ));
+            }
+            if let Some(connection) = connection {
+                connection
+                    .check_current()
+                    .await
+                    .map_err(|source| failed_action(GroupUpdateAction::ValidateUpdate, source))?;
+            }
+            if known.is_none() {
+                let proof = proof.ok_or(KeyEpochError::StateIssue(
+                    KeyEpochStateIssue::UnverifiedReplay,
+                ))?;
+                let catalog_updates = proof
+                    .catalog_payloads()
+                    .iter()
+                    .map(|payload| serde_json::from_slice::<GroupEpochUpdate>(payload))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|source| failed_action(GroupUpdateAction::ValidateUpdate, source))?;
+                let latest = catalog_updates
+                    .iter()
+                    .find(|update| update.group_epoch == current.state().epoch().value())
+                    .ok_or(KeyEpochError::StateIssue(
+                        KeyEpochStateIssue::UnverifiedReplay,
+                    ))?;
+                let wrapping = MlsGroupEngine::current_wrapping_key(&MlsClientState::from_bytes(
+                    current.group_state().to_vec(),
+                ))
+                .map_err(|source| failed_action(GroupUpdateAction::LoadState, source))?;
+                let catalog = open_group_catalog(
+                    &wrapping,
+                    &space_id,
+                    latest.group_epoch,
+                    &latest.encrypted_key_catalog,
+                )
+                .map_err(|source| failed_action(GroupUpdateAction::ValidateUpdate, source))?;
+                if catalog.state != *current.state() || catalog.key_catalog != current.key_catalog()
+                {
+                    return Err(KeyEpochError::StateIssue(
+                        KeyEpochStateIssue::CorruptMaterial,
+                    ));
+                }
+            }
+            let validator = InMemorySession::new();
+            validator.set_master_key_for_space(
+                space_id.clone(),
+                self.session
+                    .get_master_key()
+                    .map_err(|source| failed_action(GroupUpdateAction::LoadState, source))?,
+            );
+            validator
+                .install_space_material(&current)
+                .map_err(|source| failed_action(GroupUpdateAction::LoadState, source))?;
+            let mut current = current;
+            if known.is_none() {
+                current.record_applied_group_update(update_epoch, digest)?;
+                repository
+                    .save_space_material(&current)
+                    .await
+                    .map_err(|source| tag_action(GroupUpdateAction::PersistState, source))?;
+            }
+            self.active_security_session
+                .install_current_material(&current)
+                .await
+                .map_err(map_key_epoch_security_session_error)
+                .map_err(|source| tag_action(GroupUpdateAction::InstallSecurityState, source))?;
             return Ok(update_epoch);
         }
-        if current.state().epoch().next()? != update_epoch || current.group_state().is_empty() {
-            return Err(KeyEpochError::StateIssue(
-                uc_core::membership::KeyEpochStateIssue::OutOfOrderUpdate,
-            ));
+        if let Some(prepared) = proof.and_then(VerifiedHistoryGroupUpdate::prepared_material) {
+            let staged = prepared_group_material::decode(prepared)
+                .map_err(|source| failed_action(GroupUpdateAction::LoadState, source))?;
+            if staged.state().space_id() != &space_id
+                || staged.state().epoch() != update_epoch
+                || staged.state().protection_group_id() != current.state().protection_group_id()
+                || current.state().epoch().next()? != update_epoch
+                || staged.applied_group_update_digest(update_epoch) != Some(&digest)
+            {
+                return Err(KeyEpochError::StateIssue(KeyEpochStateIssue::StateChanged));
+            }
+            let wrapping = MlsGroupEngine::current_wrapping_key(&MlsClientState::from_bytes(
+                staged.group_state().to_vec(),
+            ))
+            .map_err(|source| failed_action(GroupUpdateAction::LoadState, source))?;
+            let catalog = open_group_catalog(
+                &wrapping,
+                &space_id,
+                update.group_epoch,
+                &update.encrypted_key_catalog,
+            )
+            .map_err(|source| failed_action(GroupUpdateAction::LoadState, source))?;
+            if catalog.state != *staged.state() || catalog.key_catalog != staged.key_catalog() {
+                return Err(KeyEpochError::StateIssue(
+                    KeyEpochStateIssue::CorruptMaterial,
+                ));
+            }
+            repository
+                .save_space_material(&staged)
+                .await
+                .map_err(|source| tag_action(GroupUpdateAction::PersistState, source))?;
+            self.active_security_session
+                .install_current_material(&staged)
+                .await
+                .map_err(map_key_epoch_security_session_error)
+                .map_err(|source| tag_action(GroupUpdateAction::InstallSecurityState, source))?;
+            return Ok(update_epoch);
+        }
+        if current.state().epoch().next()? != update_epoch {
+            let issue = if update_epoch
+                .value()
+                .saturating_sub(current.state().epoch().value())
+                <= 64
+            {
+                KeyEpochStateIssue::MissingPredecessor
+            } else {
+                KeyEpochStateIssue::OutOfOrderUpdate
+            };
+            return Err(KeyEpochError::StateIssue(issue));
         }
         let completed = MlsGroupEngine::apply_commit(
             &MlsClientState::from_bytes(current.group_state().to_vec()),
             space_id.as_ref().as_bytes(),
             &update.commit,
         )
-        .map_err(|error| failed_action(Action::ApplySecurityUpdate, error))?;
+        .map_err(|error| failed_action(GroupUpdateAction::ApplySecurityUpdate, error))?;
         if GroupEpoch::new(completed.epoch) != update_epoch {
-            return Err(KeyEpochError::StateIssue(
-                uc_core::membership::KeyEpochStateIssue::EpochMismatch,
-            ));
+            return Err(KeyEpochError::StateIssue(KeyEpochStateIssue::EpochMismatch));
         }
         let portable = open_group_catalog(
             &completed.wrapping_key,
@@ -1417,8 +1543,8 @@ impl RuntimeSpaceAccessAdapter {
             update.group_epoch,
             &update.encrypted_key_catalog,
         )
-        .map_err(|error| failed_action(Action::ApplySecurityUpdate, error))?;
-        let material = SpaceKeyMaterial::new(
+        .map_err(|error| failed_action(GroupUpdateAction::ApplySecurityUpdate, error))?;
+        let mut material = SpaceKeyMaterial::new(
             portable.state,
             completed.client_state.into_bytes(),
             portable.key_catalog,
@@ -1430,20 +1556,27 @@ impl RuntimeSpaceAccessAdapter {
             space_id,
             self.session
                 .get_master_key()
-                .map_err(|error| failed_action(Action::LoadState, error))?,
+                .map_err(|error| failed_action(GroupUpdateAction::LoadState, error))?,
         );
         validator
             .install_space_material(&material)
-            .map_err(|error| failed_action(Action::ValidateUpdate, error))?;
+            .map_err(|error| failed_action(GroupUpdateAction::ValidateUpdate, error))?;
+        material.record_applied_group_update(update_epoch, digest)?;
+        if let Some(connection) = connection {
+            connection
+                .check_current()
+                .await
+                .map_err(|source| failed_action(GroupUpdateAction::ValidateUpdate, source))?;
+        }
         repository
             .save_space_material(&material)
             .await
-            .map_err(|error| tag_action(Action::PersistState, error))?;
+            .map_err(|error| tag_action(GroupUpdateAction::PersistState, error))?;
         self.active_security_session
             .install_current_material(&material)
             .await
             .map_err(map_key_epoch_security_session_error)
-            .map_err(|error| tag_action(Action::InstallSecurityState, error))?;
+            .map_err(|error| tag_action(GroupUpdateAction::InstallSecurityState, error))?;
         Ok(update_epoch)
     }
 
@@ -1516,20 +1649,14 @@ impl RuntimeSpaceAccessAdapter {
         let record = repository
             .get_revocation(revocation_id)
             .await?
-            .ok_or_else(|| {
-                KeyEpochError::StateIssue(
-                    uc_core::membership::KeyEpochStateIssue::MissingRevocation,
-                )
-            })?;
+            .ok_or_else(|| KeyEpochError::StateIssue(KeyEpochStateIssue::MissingRevocation))?;
         if record.status() == RevocationStatus::Complete {
             return Self::group_revocation_result(repository, &record).await;
         }
         let mut stage = repository
             .load_staged_revocation(revocation_id)
             .await?
-            .ok_or_else(|| {
-                KeyEpochError::StateIssue(uc_core::membership::KeyEpochStateIssue::MissingStage)
-            })?;
+            .ok_or_else(|| KeyEpochError::StateIssue(KeyEpochStateIssue::MissingStage))?;
         let pending = stage.pending_recipient_device_ids();
         let mut unique = HashSet::new();
         if permanently_lost_device_ids.is_empty()
@@ -1542,9 +1669,7 @@ impl RuntimeSpaceAccessAdapter {
         let mut material = repository
             .load_space_material(record.space_id())
             .await?
-            .ok_or_else(|| {
-                KeyEpochError::StateIssue(uc_core::membership::KeyEpochStateIssue::MissingMaterial)
-            })?;
+            .ok_or_else(|| KeyEpochError::StateIssue(KeyEpochStateIssue::MissingMaterial))?;
         let mut already_absent = Vec::new();
         let mut still_in_group = Vec::new();
         for lost_device_id in permanently_lost_device_ids {
@@ -1577,9 +1702,7 @@ impl RuntimeSpaceAccessAdapter {
             )
             .map_err(|error| KeyEpochError::Repository(error.into()))?;
             if GroupEpoch::new(removal.epoch) != material.state().epoch().next()? {
-                return Err(KeyEpochError::StateIssue(
-                    uc_core::membership::KeyEpochStateIssue::EpochMismatch,
-                ));
+                return Err(KeyEpochError::StateIssue(KeyEpochStateIssue::EpochMismatch));
             }
             let next = self
                 .session
@@ -2531,7 +2654,8 @@ impl GroupRevocationPort for RuntimeSpaceAccessAdapter {
     }
 
     async fn apply_group_epoch_update(&self, payload: &[u8]) -> Result<GroupEpoch, KeyEpochError> {
-        RuntimeSpaceAccessAdapter::apply_group_epoch_update(self, payload).await
+        self.apply_group_epoch_update_with_proof(payload, None, None)
+            .await
     }
 
     async fn pending_group_updates(
@@ -2580,13 +2704,14 @@ impl GroupRevocationPort for RuntimeSpaceAccessAdapter {
         &self,
         now_ms: i64,
         online_peer: Option<DeviceId>,
+        verified_history_peer: Option<DeviceId>,
     ) -> Result<Vec<PendingGroupUpdate>, KeyEpochError> {
         let space_id = self
             .session
             .current_space_id()
             .map_err(|source| KeyEpochError::Repository(source.into()))?;
         self.key_epoch_repository
-            .due_group_updates(&space_id, now_ms, online_peer)
+            .due_group_updates(&space_id, now_ms, online_peer, verified_history_peer)
             .await
     }
 
@@ -3010,6 +3135,7 @@ impl PrepareSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
         &self,
         mut request: SponsorAdmissionSecurityRequest,
     ) -> Result<SponsorPreparedAdmissionSecurity, AdmissionSecurityTransitionError> {
+        let _applying = self.group_update_apply.lock().await;
         let repository = self.key_epoch_repository.as_ref();
         let current = repository
             .load_space_material(&request.space_id)
@@ -3059,6 +3185,8 @@ impl PrepareSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
             encrypted_key_catalog,
         };
         let update_payload = serde_json::to_vec(&group_update)
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
+        next.record_applied_group_update(target_epoch, Sha256::digest(&update_payload).into())
             .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         let existing_member_deliveries = request
             .existing_recipients
@@ -3126,7 +3254,7 @@ impl PrepareSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
             .to_owned();
 
         Ok(SponsorPreparedAdmissionSecurity {
-            staged_state: postcard::to_stdvec(&next)
+            staged_state: prepared_group_material::encode(&next)
                 .map_err(AdmissionSecurityTransitionError::invalid_state_from)?,
             commit: admission.commit,
             welcome: admission.welcome,
@@ -3144,8 +3272,9 @@ impl ActivateSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
         &self,
         request: ActivateSponsorAdmissionSecurityRequest,
     ) -> Result<(), AdmissionSecurityTransitionError> {
+        let _applying = self.group_update_apply.lock().await;
         let repository = self.key_epoch_repository.as_ref();
-        let staged: SpaceKeyMaterial = postcard::from_bytes(&request.staged_state)
+        let staged: SpaceKeyMaterial = prepared_group_material::decode(&request.staged_state)
             .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         if staged.state().space_id() != &request.space_id
             || staged.state().epoch().value() != request.expected_commitment.target_epoch
@@ -3169,23 +3298,36 @@ impl ActivateSponsorAdmissionSecurityPort for RuntimeSpaceAccessAdapter {
         if &rederived != expected {
             return Err(AdmissionSecurityTransitionError::CommitmentMismatch);
         }
-        if repository
+        let current = repository
             .load_space_material(&request.space_id)
             .await
             .map_err(AdmissionSecurityTransitionError::invalid_state_from)?
-            .as_ref()
-            .is_some_and(|current| current == &staged)
-        {
-            uc_info!(
-                group_epoch = staged.state().epoch().value(),
-                pending_group_update_count = staged.pending_group_updates().len(),
-                "Sponsor 安全状态激活命中幂等持久状态"
-            );
+            .ok_or_else(AdmissionSecurityTransitionError::invalid_state)?;
+        let same_material = current.state() == staged.state()
+            && current.group_state() == staged.group_state()
+            && current.key_catalog() == staged.key_catalog();
+        let staged_digest = staged.applied_group_update_digest(staged.state().epoch());
+        let verified_descendant = current.state().space_id() == staged.state().space_id()
+            && current.state().protection_group_id() == staged.state().protection_group_id()
+            && current.state().epoch() >= staged.state().epoch()
+            && staged_digest.is_some()
+            && current.applied_group_update_digest(staged.state().epoch()) == staged_digest;
+        if same_material || verified_descendant {
+            // 结清后的队列与后续 epoch 属于当前材料；重复激活不能回写旧私有快照。
             self.active_security_session
-                .install_current_material(&staged)
+                .install_current_material(&current)
                 .await
                 .map_err(map_admission_security_session_error)?;
             return Ok(());
+        }
+        if current
+            .state()
+            .epoch()
+            .next()
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?
+            != staged.state().epoch()
+        {
+            return Err(AdmissionSecurityTransitionError::invalid_state());
         }
         repository
             .save_space_material(&staged)
@@ -3214,6 +3356,7 @@ impl ActivateCompletionHelperAdmissionSecurityPort for RuntimeSpaceAccessAdapter
         &self,
         request: ActivateCompletionHelperAdmissionSecurityRequest,
     ) -> Result<(), AdmissionSecurityTransitionError> {
+        let _applying = self.group_update_apply.lock().await;
         let repository = self.key_epoch_repository.as_ref();
         let delivery = request
             .existing_member_deliveries
@@ -3254,7 +3397,7 @@ impl ActivateCompletionHelperAdmissionSecurityPort for RuntimeSpaceAccessAdapter
             .map_err(AdmissionSecurityTransitionError::invalid_state_from)?
             .ok_or_else(AdmissionSecurityTransitionError::invalid_state)?;
         let target_epoch = GroupEpoch::new(expected.target_epoch);
-        let material = if current.state().epoch() == target_epoch {
+        let mut material = if current.state().epoch() == target_epoch {
             current
         } else {
             if current
@@ -3326,6 +3469,9 @@ impl ActivateCompletionHelperAdmissionSecurityPort for RuntimeSpaceAccessAdapter
         validator
             .install_space_material(&material)
             .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
+        material
+            .record_applied_group_update(target_epoch, Sha256::digest(&delivery[0].payload).into())
+            .map_err(AdmissionSecurityTransitionError::invalid_state_from)?;
         repository
             .save_space_material(&material)
             .await
@@ -3393,14 +3539,13 @@ impl PrepareMembershipBranchRecoveryRecipientPort for RuntimeSpaceAccessAdapter 
             &group_info,
         )
         .map_err(|source| recovery_recipient_invalid(anyhow::Error::new(source)))?;
-        let staged = StagedMembershipBranchRecoveryRecipientV1 {
-            version: 1,
-            mls_state: prepared.recipient_state.into_bytes(),
-            wrapping_key: prepared.wrapping_key.as_bytes().to_vec(),
-            epoch: prepared.epoch,
-        };
-        let staged_mls_state = postcard::to_stdvec(&staged)
-            .map_err(|source| recovery_recipient_invalid(anyhow::Error::new(source)))?;
+        let staged_mls_state = prepared_recovery_recipient::encode(
+            prepared.recipient_state.into_bytes(),
+            prepared.wrapping_key.as_bytes().to_vec(),
+            prepared.epoch,
+            prepared.commit.clone(),
+        )
+        .map_err(recovery_recipient_invalid)?;
         Ok(PreparedMembershipBranchRecoveryRecipient {
             external_commit: prepared.commit,
             staged_mls_state,
@@ -3427,18 +3572,19 @@ impl PrepareMembershipBranchRecoveryMaterialPort for RuntimeSpaceAccessAdapter {
         PreparedMembershipBranchRecoveryMaterial,
         PrepareMembershipBranchRecoveryMaterialError,
     > {
+        let _applying = self.group_update_apply.lock().await;
         let (space_id, material) = self.load_membership_branch_recovery_material().await?;
         let completed = MlsGroupEngine::apply_commit(
             &MlsClientState::from_bytes(material.group_state().to_vec()),
             space_id.as_ref().as_bytes(),
             &input.external_commit,
         )
-        .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+        .map_err(recovery_material_invalid)?;
         let expected_epoch = material
             .state()
             .epoch()
             .next()
-            .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+            .map_err(recovery_material_invalid)?;
         if completed.epoch != expected_epoch.value() {
             return Err(recovery_material_invalid(anyhow::anyhow!(
                 "MLS recovery epoch does not advance current space material"
@@ -3447,7 +3593,7 @@ impl PrepareMembershipBranchRecoveryMaterialPort for RuntimeSpaceAccessAdapter {
         let local_signing_public = MlsGroupEngine::signing_public_key(&MlsClientState::from_bytes(
             material.group_state().to_vec(),
         ))
-        .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+        .map_err(recovery_material_invalid)?;
         let mut next = self
             .session
             .rotate_space_material(
@@ -3456,16 +3602,18 @@ impl PrepareMembershipBranchRecoveryMaterialPort for RuntimeSpaceAccessAdapter {
                 expected_epoch,
                 chrono::Utc::now().timestamp_millis(),
             )
-            .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+            .map_err(recovery_material_invalid)?;
         let encrypted_content_key_catalog = seal_group_catalog(&completed.wrapping_key, &next)
-            .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+            .map_err(recovery_material_invalid)?;
         let group_update = serde_json::to_vec(&GroupEpochUpdate {
             version: 1,
             group_epoch: completed.epoch,
             commit: input.external_commit.clone(),
             encrypted_key_catalog: encrypted_content_key_catalog.clone(),
         })
-        .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+        .map_err(recovery_material_invalid)?;
+        next.record_applied_group_update(expected_epoch, Sha256::digest(&group_update).into())
+            .map_err(recovery_material_invalid)?;
         let mut recipients = Vec::new();
         for member in input.target_history.active_members() {
             if member == input.recipient_member {
@@ -3503,9 +3651,9 @@ impl PrepareMembershipBranchRecoveryMaterialPort for RuntimeSpaceAccessAdapter {
             &space_id,
             &confirmation,
         )
-        .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
-        let target_staged_space_material = postcard::to_stdvec(&next)
-            .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+        .map_err(recovery_material_invalid)?;
+        let target_staged_space_material =
+            prepared_group_material::encode(&next).map_err(recovery_material_invalid)?;
 
         Ok(PreparedMembershipBranchRecoveryMaterial {
             target_staged_space_material,
@@ -3518,8 +3666,10 @@ impl PrepareMembershipBranchRecoveryMaterialPort for RuntimeSpaceAccessAdapter {
         &self,
         target_staged_space_material: Vec<u8>,
     ) -> Result<(), PrepareMembershipBranchRecoveryMaterialError> {
-        let staged: SpaceKeyMaterial = postcard::from_bytes(&target_staged_space_material)
-            .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+        let _applying = self.group_update_apply.lock().await;
+        let staged: SpaceKeyMaterial =
+            prepared_group_material::decode(&target_staged_space_material)
+                .map_err(recovery_material_invalid)?;
         validate_membership_branch_recovery_material(&staged)?;
         let space_id = self
             .session
@@ -3549,7 +3699,7 @@ impl PrepareMembershipBranchRecoveryMaterialPort for RuntimeSpaceAccessAdapter {
             .state()
             .epoch()
             .next()
-            .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+            .map_err(recovery_material_invalid)?;
         if staged.state().epoch() != expected_epoch {
             return Err(recovery_material_invalid(anyhow::anyhow!(
                 "staged recovery material is stale or conflicts with current state"
@@ -3564,7 +3714,7 @@ impl PrepareMembershipBranchRecoveryMaterialPort for RuntimeSpaceAccessAdapter {
         );
         validator
             .install_space_material(&staged)
-            .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+            .map_err(recovery_material_invalid)?;
         repository
             .save_space_material(&staged)
             .await
@@ -3583,12 +3733,7 @@ impl RuntimeSpaceAccessAdapter {
         sealed_mls_recovery_material: &[u8],
         encrypted_content_key_catalog: &[u8],
     ) -> Result<SpaceKeyMaterial, EncryptionError> {
-        let staged: StagedMembershipBranchRecoveryRecipientV1 =
-            postcard::from_bytes(recipient_staged_mls_state)
-                .map_err(EncryptionError::key_material_corrupt_from)?;
-        if staged.version != 1 || staged.epoch == 0 {
-            return Err(EncryptionError::key_material_corrupt());
-        }
+        let staged = prepared_recovery_recipient::decode(recipient_staged_mls_state)?;
         let space_id = self.session.current_space_id()?;
         let wrapping_key = MasterKey::from_bytes(&staged.wrapping_key)?;
         open_membership_branch_recovery_confirmation(
@@ -3603,7 +3748,7 @@ impl RuntimeSpaceAccessAdapter {
             staged.epoch,
             encrypted_content_key_catalog,
         )?;
-        let material = SpaceKeyMaterial::new(
+        let mut material = SpaceKeyMaterial::new(
             portable.state,
             staged.mls_state,
             portable.key_catalog,
@@ -3615,7 +3760,33 @@ impl RuntimeSpaceAccessAdapter {
             space_id.as_ref().as_bytes(),
         )
         .map_err(EncryptionError::key_material_corrupt_from)?;
+        let recovered_state = MlsClientState::from_bytes(material.group_state().to_vec());
+        let recovered_epoch = MlsGroupEngine::current_epoch(&recovered_state)
+            .map_err(EncryptionError::key_material_corrupt_from)?;
+        let recovered_wrapping = MlsGroupEngine::current_wrapping_key(&recovered_state)
+            .map_err(EncryptionError::key_material_corrupt_from)?;
+        if recovered_epoch != staged.epoch
+            || material.state().epoch().value() != staged.epoch
+            || recovered_wrapping != wrapping_key
+        {
+            return Err(EncryptionError::key_material_corrupt());
+        }
         uc_infra_crypto::content_key_catalog::export_admission_content_key_catalog(&material)?;
+        if let Some(commit) = staged.external_commit {
+            let payload = serde_json::to_vec(&GroupEpochUpdate {
+                version: 1,
+                group_epoch: staged.epoch,
+                commit,
+                encrypted_key_catalog: encrypted_content_key_catalog.to_vec(),
+            })
+            .map_err(EncryptionError::key_material_corrupt_from)?;
+            material
+                .record_applied_group_update(
+                    GroupEpoch::new(staged.epoch),
+                    Sha256::digest(&payload).into(),
+                )
+                .map_err(EncryptionError::key_material_corrupt_from)?;
+        }
         Ok(material)
     }
 
@@ -3651,9 +3822,9 @@ fn validate_membership_branch_recovery_material(
         &MlsClientState::from_bytes(material.group_state().to_vec()),
         material.state().space_id().as_ref().as_bytes(),
     )
-    .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+    .map_err(recovery_material_invalid)?;
     uc_infra_crypto::content_key_catalog::export_admission_content_key_catalog(material)
-        .map_err(|source| recovery_material_invalid(anyhow::Error::new(source)))?;
+        .map_err(recovery_material_invalid)?;
     Ok(())
 }
 
@@ -3664,9 +3835,11 @@ fn recovery_material_unavailable(
 }
 
 fn recovery_material_invalid(
-    source: anyhow::Error,
+    source: impl Into<anyhow::Error>,
 ) -> PrepareMembershipBranchRecoveryMaterialError {
-    PrepareMembershipBranchRecoveryMaterialError::Invalid { source }
+    PrepareMembershipBranchRecoveryMaterialError::Invalid {
+        source: source.into(),
+    }
 }
 
 fn recovery_recipient_unavailable(
@@ -3944,7 +4117,8 @@ mod admission_tests {
                 space_id: &SpaceId,
                 now_ms: i64,
                 online_peer: Option<DeviceId>,
-            ) -> Result<Vec<PendingGroupUpdate>, KeyEpochError>;
+                    verified_history_peer: Option<DeviceId>,
+    ) -> Result<Vec<PendingGroupUpdate>, KeyEpochError>;
             async fn record_group_update_failures(
                 &self,
                 space_id: &SpaceId,
@@ -4120,15 +4294,13 @@ mod admission_tests {
                     .as_mut()
                     .filter(|record| record.revocation_id() == revocation_id)
                     .ok_or_else(|| {
-                        KeyEpochError::StateIssue(
-                            uc_core::membership::KeyEpochStateIssue::MissingRevocation,
-                        )
+                        KeyEpochError::StateIssue(KeyEpochStateIssue::MissingRevocation)
                     })?;
                 match resolution {
                     PreparedRevocationResolution::TargetAbsent(verified) => {
                         if resolution_material.lock().unwrap().as_ref() != Some(&verified) {
                             return Err(KeyEpochError::StateIssue(
-                                uc_core::membership::KeyEpochStateIssue::StateChanged,
+                                KeyEpochStateIssue::StateChanged,
                             ));
                         }
                         record.transition_to(RevocationStatus::Complete, now_ms)?;
@@ -4139,7 +4311,7 @@ mod admission_tests {
                     } => {
                         if resolution_material.lock().unwrap().as_ref() != Some(&current_material) {
                             return Err(KeyEpochError::StateIssue(
-                                uc_core::membership::KeyEpochStateIssue::StateChanged,
+                                KeyEpochStateIssue::StateChanged,
                             ));
                         }
                         resolved_stage_calls.fetch_add(1, Ordering::AcqRel);
@@ -4182,11 +4354,7 @@ mod admission_tests {
                 let value = current
                     .as_mut()
                     .filter(|value| value.record().revocation_id() == revocation_id)
-                    .ok_or_else(|| {
-                        KeyEpochError::StateIssue(
-                            uc_core::membership::KeyEpochStateIssue::MissingStage,
-                        )
-                    })?;
+                    .ok_or_else(|| KeyEpochError::StateIssue(KeyEpochStateIssue::MissingStage))?;
                 value.transition_to(RevocationStatus::Activated, now_ms)?;
                 let activated = value.record().clone();
                 *activate_material.lock().unwrap() = Some(SpaceKeyMaterial::new(
@@ -4207,11 +4375,7 @@ mod admission_tests {
                 let value = current
                     .as_mut()
                     .filter(|value| value.record().revocation_id() == revocation_id)
-                    .ok_or_else(|| {
-                        KeyEpochError::StateIssue(
-                            uc_core::membership::KeyEpochStateIssue::MissingStage,
-                        )
-                    })?;
+                    .ok_or_else(|| KeyEpochError::StateIssue(KeyEpochStateIssue::MissingStage))?;
                 value.transition_to(RevocationStatus::Distributing, now_ms)?;
                 if value.all_recipients_confirmed() {
                     value.transition_to(RevocationStatus::Complete, now_ms)?;
@@ -4261,11 +4425,7 @@ mod admission_tests {
                 let value = current
                     .as_mut()
                     .filter(|value| value.record().revocation_id() == revocation_id)
-                    .ok_or_else(|| {
-                        KeyEpochError::StateIssue(
-                            uc_core::membership::KeyEpochStateIssue::MissingStage,
-                        )
-                    })?;
+                    .ok_or_else(|| KeyEpochError::StateIssue(KeyEpochStateIssue::MissingStage))?;
                 value.acknowledge_recipient(recipient, now_ms)?;
                 if value.all_recipients_confirmed() {
                     value.transition_to(RevocationStatus::Complete, now_ms)?;
@@ -4614,6 +4774,183 @@ mod admission_tests {
         let (adapter, session, repository, space_id, directory, _) =
             sponsor_fixture_with_stage_persistence(true);
         (adapter, session, repository, space_id, directory)
+    }
+
+    #[tokio::test]
+    async fn saved_material_requires_real_installation_before_duplicate_success() {
+        let (sponsor, _, _, space_id, _sponsor_dir) = sponsor_fixture();
+        let bob_dir = tempdir().unwrap();
+        let bob_session = Arc::new(InMemorySession::new());
+        let (repository, _) = memory_revocation_repository(None);
+        let key_material = local_key_material(&bob_dir, memory_secure_storage());
+        let vault_storage = memory_secure_storage();
+        let vault = Arc::new(ProfileContentKeyVault::new(
+            bob_dir.path().join("install-break-vault"),
+            vault_storage.clone(),
+            [0x61; 16],
+        ));
+        let bob = adapter_with_existing_vault(
+            key_material.clone(),
+            bob_session.clone(),
+            repository.clone(),
+            &vault,
+        );
+        let pending = bob.prepare_group_join(&DeviceId::new("bob")).await.unwrap();
+        let admission = sponsor
+            .admit_group_member(
+                &space_id,
+                &DeviceId::new("alice"),
+                &DeviceId::new("bob"),
+                &[],
+                &pending.key_package,
+            )
+            .await
+            .unwrap();
+        bob.install_group_join(
+            &space_id,
+            &Passphrase::new("shared test passphrase"),
+            pending,
+            &admission.welcome,
+            &admission.encrypted_key_catalog,
+            admission.group_epoch,
+        )
+        .await
+        .unwrap();
+        let before = bob_session
+            .current_content_protection_key()
+            .unwrap()
+            .epoch();
+        let pending = sponsor
+            .prepare_group_join(&DeviceId::new("charlie"))
+            .await
+            .unwrap();
+        let admitted = sponsor
+            .admit_group_member(
+                &space_id,
+                &DeviceId::new("alice"),
+                &DeviceId::new("charlie"),
+                &[DeviceId::new("bob")],
+                &pending.key_package,
+            )
+            .await
+            .unwrap();
+        let payload = admitted.existing_member_updates[0].payload();
+        // 真实 vault 停止安装；MLS 与材料保存照常执行，不注入假的保存成功。
+        vault.close();
+        let source = bob.apply_group_epoch_update(payload).await.unwrap_err();
+        assert_ne!(
+            group_update_apply_verdict(&source),
+            GroupUpdateVerdict::Rejected
+        );
+        let saved = repository
+            .load_space_material(&space_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.state().epoch().value(), admitted.group_epoch);
+        assert_eq!(
+            MlsGroupEngine::current_epoch(&MlsClientState::from_bytes(
+                saved.group_state().to_vec()
+            ))
+            .unwrap(),
+            admitted.group_epoch
+        );
+        assert_eq!(
+            saved.applied_group_update_digest(saved.state().epoch()),
+            Some(&<[u8; 32]>::from(Sha256::digest(payload)))
+        );
+        assert_eq!(
+            bob_session
+                .current_content_protection_key()
+                .unwrap()
+                .epoch(),
+            before
+        );
+        assert!(
+            bob.apply_group_epoch_update(payload).await.is_err(),
+            "saved epoch alone must never ACK while install is unavailable"
+        );
+        assert_eq!(
+            repository
+                .load_space_material(&space_id)
+                .await
+                .unwrap()
+                .unwrap(),
+            saved
+        );
+        // 确切包的证据仍在，损坏的是本机保存的目录；不能把本机损坏裁决成远端拒绝。
+        let corrupt = SpaceKeyMaterial::new(
+            saved.state().clone(),
+            saved.group_state().to_vec(),
+            vec![0xff],
+            saved.updated_at_ms(),
+        )
+        .with_pending_group_updates_from(&saved);
+        repository.save_space_material(&corrupt).await.unwrap();
+        let source = bob.apply_group_epoch_update(payload).await.unwrap_err();
+        assert_eq!(
+            group_update_apply_verdict(&source),
+            GroupUpdateVerdict::LocalFailure
+        );
+        assert!(std::error::Error::source(&source).is_some());
+        repository.save_space_material(&saved).await.unwrap();
+        let reopened_vault = Arc::new(ProfileContentKeyVault::new(
+            bob_dir.path().join("install-break-vault"),
+            vault_storage,
+            [0x61; 16],
+        ));
+        let restarted = adapter_with_existing_vault(
+            key_material,
+            bob_session.clone(),
+            repository.clone(),
+            &reopened_vault,
+        );
+        assert_eq!(
+            restarted
+                .apply_group_epoch_update(payload)
+                .await
+                .unwrap()
+                .value(),
+            admitted.group_epoch
+        );
+        assert_eq!(
+            bob_session
+                .current_content_protection_key()
+                .unwrap()
+                .epoch()
+                .value(),
+            admitted.group_epoch
+        );
+        assert_eq!(
+            repository
+                .load_space_material(&space_id)
+                .await
+                .unwrap()
+                .unwrap(),
+            saved,
+            "retry must install without advancing MLS again"
+        );
+    }
+
+    #[tokio::test]
+    async fn same_epoch_unverified_update_must_not_be_acknowledged() {
+        let (receiver, _session, repository, space_id, _directory) = sponsor_fixture();
+        let epoch = repository
+            .load_space_material(&space_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state()
+            .epoch()
+            .value();
+        let forged = serde_json::to_vec(&GroupEpochUpdate {
+            version: 1,
+            group_epoch: epoch,
+            commit: vec![0xff],
+            encrypted_key_catalog: vec![0xff],
+        })
+        .unwrap();
+        assert!(receiver.apply_group_epoch_update(&forged).await.is_err());
     }
 
     #[tokio::test]
@@ -5177,6 +5514,58 @@ mod admission_tests {
                 .epoch(),
             GroupEpoch::new(prepared.public_commitment.target_epoch)
         );
+        // 同一准入的迟到激活不得恢复已经结清的 outbox，也不得回退后续真实 epoch。
+        let activation = || ActivateSponsorAdmissionSecurityRequest {
+            space_id: space_id.clone(),
+            staged_state: prepared.staged_state.clone(),
+            commit: prepared.commit.clone(),
+            expected_commitment: prepared.public_commitment.clone(),
+        };
+        adapter
+            .activate_sponsor_admission_security(activation())
+            .await
+            .unwrap();
+        assert!(repository
+            .load_space_material(&space_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .pending_group_updates()
+            .is_empty());
+        let next_device = DeviceId::new("next-device");
+        let next_join = adapter.prepare_group_join(&next_device).await.unwrap();
+        adapter
+            .admit_group_member(
+                &space_id,
+                &sponsor,
+                &next_device,
+                &[],
+                &next_join.key_package,
+            )
+            .await
+            .unwrap();
+        let advanced = repository
+            .load_space_material(&space_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(advanced.state().epoch().value() > prepared.public_commitment.target_epoch);
+        adapter
+            .activate_sponsor_admission_security(activation())
+            .await
+            .unwrap();
+        assert_eq!(
+            repository
+                .load_space_material(&space_id)
+                .await
+                .unwrap()
+                .unwrap(),
+            advanced
+        );
+        assert_eq!(
+            session.current_content_protection_key().unwrap().epoch(),
+            advanced.state().epoch()
+        );
     }
 
     #[tokio::test]
@@ -5330,7 +5719,7 @@ mod admission_tests {
 
         assert!(matches!(
             error,
-            KeyEpochError::StateIssue(uc_core::membership::KeyEpochStateIssue::CorruptMaterial)
+            KeyEpochError::StateIssue(KeyEpochStateIssue::CorruptMaterial)
         ));
     }
 
@@ -6120,7 +6509,7 @@ mod admission_tests {
 
         assert!(matches!(
             error,
-            KeyEpochError::StateIssue(uc_core::membership::KeyEpochStateIssue::RecoveryRequired)
+            KeyEpochError::StateIssue(KeyEpochStateIssue::RecoveryRequired)
         ));
         assert_eq!(stage_calls.load(Ordering::Acquire), 3);
     }
@@ -6230,6 +6619,15 @@ mod admission_tests {
                         .unwrap(),
                     GroupEpoch::new(charlie_admission.group_epoch)
                 );
+                let mut tampered: GroupEpochUpdate =
+                    serde_json::from_slice(admission_update).unwrap();
+                tampered.commit[0] ^= 0xff;
+                let tampered = serde_json::to_vec(&tampered).unwrap();
+                let rejected = bob.apply_group_epoch_update(&tampered).await.unwrap_err();
+                assert_eq!(
+                    group_update_apply_verdict(&rejected),
+                    GroupUpdateVerdict::Rejected
+                );
                 assert_eq!(
                     bob_repository
                         .load_space_material(&space_id)
@@ -6279,7 +6677,7 @@ mod admission_tests {
                     bob.apply_group_epoch_update(stage.outbox()[0].payload())
                         .await,
                     Err(KeyEpochError::StateIssue(
-                        uc_core::membership::KeyEpochStateIssue::OutOfOrderUpdate
+                        KeyEpochStateIssue::MissingPredecessor
                     ))
                 ));
                 bob.apply_group_epoch_update(admission_update)
@@ -6615,7 +7013,7 @@ mod admission_tests {
         assert!(!prepared.sealed_mls_recovery_material.is_empty());
         assert!(!prepared.encrypted_content_key_catalog.is_empty());
         let staged: SpaceKeyMaterial =
-            postcard::from_bytes(&prepared.target_staged_space_material).unwrap();
+            prepared_group_material::decode(&prepared.target_staged_space_material).unwrap();
         assert_eq!(
             staged.pending_group_updates().len(),
             before.pending_group_updates().len() + 1
@@ -6636,6 +7034,41 @@ mod admission_tests {
             before.state().epoch().next().unwrap()
         );
         assert_ne!(recovered.group_state(), before.group_state());
+
+        let recovery_update = staged
+            .pending_group_updates()
+            .iter()
+            .find(|update| update.recipient() == &contender_device)
+            .unwrap();
+        assert_eq!(
+            recovered.applied_group_update_digest(recovered.state().epoch()),
+            Some(&<[u8; 32]>::from(Sha256::digest(recovery_update.payload())))
+        );
+        recipient_repository
+            .save_space_material(&recovered)
+            .await
+            .unwrap();
+        recipient
+            .active_security_session
+            .install_current_material(&recovered)
+            .await
+            .unwrap();
+        assert_eq!(
+            recipient
+                .apply_group_epoch_update(recovery_update.payload())
+                .await
+                .unwrap(),
+            recovered.state().epoch()
+        );
+        assert_eq!(
+            recipient_repository
+                .load_space_material(&space_id)
+                .await
+                .unwrap()
+                .unwrap(),
+            recovered,
+            "branch recovery duplicate must install without advancing MLS"
+        );
 
         sponsor
             .commit_membership_branch_recovery_material(
@@ -6786,5 +7219,85 @@ mod migration_initialize_tests {
             "{output}"
         );
         assert!(!output.contains("PRIVATE_"), "{output}");
+    }
+}
+
+#[async_trait]
+impl ApplyGroupUpdatePort for RuntimeSpaceAccessAdapter {
+    async fn prepare_removal(
+        &self,
+        target: &DeviceId,
+        retained: &[DeviceId],
+        now_ms: i64,
+    ) -> Result<Option<PreparedGroupUpdate>, anyhow::Error> {
+        let _applying = self.group_update_apply.lock().await;
+        let space_id = self.session.current_space_id()?;
+        let Some(current) = self
+            .key_epoch_repository
+            .load_space_material(&space_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        if current.state().mode() != SpaceSecurityMode::Ready {
+            return Ok(None);
+        }
+        anyhow::ensure!(
+            !retained.contains(target),
+            "removed member appears in recipients"
+        );
+        let removal = MlsGroupEngine::remove_member(
+            &MlsClientState::from_bytes(current.group_state().to_vec()),
+            target.as_str().as_bytes(),
+        )?;
+        let mut next = self
+            .session
+            .rotate_space_material(
+                &current,
+                removal.sponsor_state.into_bytes(),
+                GroupEpoch::new(removal.epoch),
+                now_ms,
+            )?
+            .with_pending_group_updates_from(&current);
+        let encrypted_key_catalog = seal_group_catalog(&removal.wrapping_key, &next)?;
+        let payload = serde_json::to_vec(&GroupEpochUpdate {
+            version: 1,
+            group_epoch: removal.epoch,
+            commit: removal.commit,
+            encrypted_key_catalog,
+        })?;
+        next.record_applied_group_update(
+            GroupEpoch::new(removal.epoch),
+            Sha256::digest(&payload).into(),
+        )?;
+        next.add_pending_group_updates(
+            retained
+                .iter()
+                .map(|recipient| PendingGroupUpdate::persistent(*recipient, payload.clone())),
+            now_ms,
+        );
+        let private_material = prepared_group_material::encode(&next)?;
+        Ok(Some(PreparedGroupUpdate {
+            payload,
+            private_material,
+        }))
+    }
+    async fn apply(
+        &self,
+        payload: &[u8],
+        proof: Option<&VerifiedHistoryGroupUpdate>,
+        connection: Option<&ConnectionLease>,
+    ) -> Result<GroupEpoch, GroupUpdateApplyError> {
+        match self
+            .apply_group_epoch_update_with_proof(payload, proof, connection)
+            .await
+        {
+            Ok(epoch) => Ok(epoch),
+            Err(source) => match group_update_apply_verdict(&source) {
+                GroupUpdateVerdict::Unavailable => Err(GroupUpdateApplyError::Unavailable(source)),
+                GroupUpdateVerdict::Rejected => Err(GroupUpdateApplyError::Rejected(source)),
+                GroupUpdateVerdict::LocalFailure => Err(GroupUpdateApplyError::Local(source)),
+            },
+        }
     }
 }

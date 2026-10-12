@@ -14,7 +14,6 @@ use super::admission::{
     PrepareSponsorSettledPort, ResolveJoinerInvitationPort, SpaceAdmissionTransportPort,
     SponsorAdmissionStatePort,
 };
-use super::membership::RePairingStateStorePort;
 use super::membership::{
     ActivateMembershipEffectPort, AdvanceMembershipBranchTransitionPort,
     ApplyMembershipMemberFactsPort, ApplyMembershipSecurityPort, CurrentMemberSignaturePort,
@@ -23,6 +22,10 @@ use super::membership::{
     PeerAccess, PrepareMembershipBranchRecoveryMaterialPort,
     PrepareMembershipBranchRecoveryRecipientPort, PrepareMembershipBranchTransitionPort,
     RefreshVerifiedPeerAddressPort, RestrictedMembershipDeliveryPort,
+};
+use super::membership::{
+    ApplyGroupUpdatePort, GroupUpdateEndpoint, GroupUpdateLocalWorkPort, GroupUpdateWirePort,
+    RePairingStateStorePort,
 };
 
 /// Engine 一次提交给 Space admission owner 的完整 adapter 集合。
@@ -76,6 +79,10 @@ pub struct SpaceMembershipAdapters {
     pub activate_membership_effect: Arc<dyn ActivateMembershipEffectPort>,
     pub restricted_membership_delivery: Arc<dyn RestrictedMembershipDeliveryPort>,
     pub group_update_store: Arc<dyn GroupRevocationPort>,
+    pub group_update_apply: Arc<dyn ApplyGroupUpdatePort>,
+    pub group_update_receiver: Arc<GroupUpdateEndpoint>,
+    pub group_update_wire: Arc<dyn GroupUpdateWirePort>,
+    pub group_update_local_work: Arc<dyn GroupUpdateLocalWorkPort>,
     pub group_update_dispatch: Arc<dyn GroupUpdateDispatchPort>,
     pub membership_network_activity: Arc<dyn MembershipNetworkActivityPort>,
 }

@@ -17,19 +17,24 @@ pub(crate) fn inject_current() -> Option<WireTraceContext> {
 
 /// 仅在业务身份确认后调用，并且必须在 span 第一次进入前设置。
 pub(crate) fn set_remote_parent(span: &tracing::Span, wire: Option<&WireTraceContext>) -> bool {
-    let Some(wire) = wire.filter(|value| value.is_bounded()) else {
+    let Some(context) = authenticated_parent(wire) else {
         return false;
     };
+    span.set_parent(context).is_ok()
+}
+
+pub(crate) fn authenticated_parent(
+    wire: Option<&WireTraceContext>,
+) -> Option<opentelemetry::Context> {
+    let wire = wire.filter(|value| value.is_bounded())?;
     let carrier = TraceCarrier(HashMap::from([(
         "traceparent".to_owned(),
         wire.traceparent.clone(),
     )]));
     let context = TraceContextPropagator::new()
         .extract_with_context(&opentelemetry::Context::new(), &carrier);
-    if !context.span().span_context().is_valid() || !context.span().span_context().is_remote() {
-        return false;
-    }
-    span.set_parent(context).is_ok()
+    (context.span().span_context().is_valid() && context.span().span_context().is_remote())
+        .then_some(context)
 }
 
 #[derive(Default)]
@@ -92,6 +97,59 @@ mod tests {
             .iter()
             .find(|span| span.name == "server")
             .expect("server");
+        assert_eq!(
+            server.span_context.trace_id(),
+            client.span_context.trace_id()
+        );
+        assert_eq!(server.parent_span_id, client.span_context.span_id());
+    }
+
+    #[test]
+    fn authenticated_request_binds_pending_receive_before_first_enter() {
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_opentelemetry::layer()
+                .with_tracer(provider.tracer("pending-inbound-test"))
+                .with_context_activation(true),
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        tracing::subscriber::with_default(subscriber, || {
+            runtime.block_on(async {
+                let client = tracing::info_span!("pending-client");
+                let wire = client.in_scope(|| inject_current().unwrap());
+                let server = tracing::info_span!(parent: None, "pending-server");
+                uc_observability_contract::diagnostics::scope_pending_inbound(server, async {
+                    let parent = authenticated_parent(Some(&wire)).unwrap();
+                    assert!(
+                        uc_observability_contract::diagnostics::bind_authenticated_inbound_parent(
+                            parent
+                        )
+                    );
+                    uc_observability_contract::diagnostics::scope_authenticated_inbound(async {
+                        let _observation =
+                            uc_observability_contract::diagnostics::capture_inbound_observation();
+                    })
+                    .await;
+                })
+                .await;
+            })
+        });
+        provider.force_flush().unwrap();
+        let spans = exporter.get_finished_spans().unwrap();
+        let client = spans
+            .iter()
+            .find(|span| span.name == "pending-client")
+            .unwrap();
+        let server = spans
+            .iter()
+            .find(|span| span.name == "pending-server")
+            .unwrap();
         assert_eq!(
             server.span_context.trace_id(),
             client.span_context.trace_id()

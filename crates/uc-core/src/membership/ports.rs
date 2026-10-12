@@ -107,12 +107,14 @@ pub trait RevocationRepositoryPort: Send + Sync {
     ) -> Result<Option<SpaceKeyMaterial>, KeyEpochError>;
 
     /// 按到期时间读取投递任务。恢复机会（`online_peer`）只唤醒该设备的退避；明确拒绝不会被释放，
-    /// 无原因拒绝仅在该设备重新通过认证且重新评估间隔已过时再次可投。
+    /// 无原因拒绝仅在该设备重新通过认证且重新评估间隔已过时再次可投。`verified_history_peer`
+    /// 是当前可信历史位置的新确认，仅允许一次验证后重试；拒绝状态仍保留到真实应用 ACK。
     async fn due_group_updates(
         &self,
         space_id: &SpaceId,
         now_ms: i64,
         online_peer: Option<DeviceId>,
+        verified_history_peer: Option<DeviceId>,
     ) -> Result<Vec<PendingGroupUpdate>, KeyEpochError>;
 
     /// 记录发送失败，不更改安全事实或确认结果。
@@ -245,6 +247,7 @@ pub trait GroupRevocationPort: Send + Sync {
         &self,
         now_ms: i64,
         online_peer: Option<DeviceId>,
+        verified_history_peer: Option<DeviceId>,
     ) -> Result<Vec<PendingGroupUpdate>, KeyEpochError>;
 
     async fn record_space_group_update_failures(

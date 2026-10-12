@@ -11,10 +11,10 @@ use uc_core::membership::{
 
 use crate::space::membership::{
     ActivateMembershipEffectPort, ApplyMembershipMemberFactsPort, ApplyMembershipSecurityPort,
-    DeliverPendingGroupUpdatesPort, MembershipEffectExecutionError,
+    DeliverPendingGroupUpdatesPort, HistorySynchronizer, MembershipEffectExecutionError,
     MembershipMaintenanceStepOutcome, MembershipMaintenanceTrigger, MembershipOwner,
-    MembershipWorker, MembershipWorkerDeps, RecoverMembershipConflictsPort,
-    RefreshVerifiedPeerAddressPort, RestrictedMembershipDelivery,
+    MembershipWorker, MembershipWorkerDeps, RecoverGroupUpdatesPort,
+    RecoverMembershipConflictsPort, RefreshVerifiedPeerAddressPort, RestrictedMembershipDelivery,
     RestrictedMembershipDeliveryError, RestrictedMembershipDeliveryPort,
 };
 
@@ -192,14 +192,18 @@ impl WorkerFixture {
         let effects = Arc::new(RecordingEffects::default());
         let delivery = Arc::new(RecordingDelivery::default());
         let worker = Arc::new(MembershipWorker::new(
-            owner,
+            owner.clone(),
             MembershipWorkerDeps {
                 member_facts: effects.clone(),
                 security: effects.clone(),
                 activation: effects.clone(),
                 restricted_delivery: delivery.clone(),
-                history_transport: ports.history,
-                address_refresh: Arc::new(NoopAddressRefresh),
+                history: Arc::new(HistorySynchronizer::new(
+                    owner,
+                    ports.history,
+                    Arc::new(NoopAddressRefresh),
+                )),
+                group_recovery: Arc::new(CompletedStep),
                 conflicts: ports.conflicts,
                 group_updates: ports.group_updates,
             },
@@ -209,5 +213,16 @@ impl WorkerFixture {
             effects,
             delivery,
         }
+    }
+}
+
+#[async_trait]
+impl RecoverGroupUpdatesPort for CompletedStep {
+    async fn recover(
+        &self,
+        _: &MembershipMaintenanceTrigger,
+        _: bool,
+    ) -> MembershipMaintenanceStepOutcome {
+        MembershipMaintenanceStepOutcome::Completed
     }
 }

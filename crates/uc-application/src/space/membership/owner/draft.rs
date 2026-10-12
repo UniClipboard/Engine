@@ -1,11 +1,14 @@
+use std::collections::BTreeMap;
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
     LedgerEffect, LedgerFollowUp, LedgerInput, LedgerOutcome, LedgerTransitionError,
-    MemberInstanceId, MembershipLedger, PeerEvidence, PeerSyncResult, VersionedMembershipHistory,
+    MemberInstanceId, MembershipLedger, PeerEvidence, PeerLink, PeerSyncResult,
+    VersionedMembershipHistory,
 };
 
 use crate::space::membership::{
-    MembershipBranchRecoveryRecord, MembershipHistoryExchangeRecord, MembershipLedgerError,
+    GroupUpdateRecoveryRecord, MembershipBranchRecoveryRecord, MembershipHistoryExchangeRecord,
+    MembershipLedgerError,
 };
 
 use super::view::{MembershipView, SpaceMembershipView};
@@ -63,23 +66,48 @@ impl MembershipDraft {
             .space
             .as_mut()
             .ok_or(LedgerTransitionError::InputMismatch)?;
+        let branch_recovered = matches!(&input, LedgerInput::BranchRecovered { .. });
         let confirmed_peer = match &input {
             LedgerInput::HistorySyncFinished {
                 peer,
+                synced_position,
                 result: PeerSyncResult::Confirmed,
-                ..
-            } => Some(*peer),
+            } if match space.ledger.peer(peer) {
+                Some(PeerLink::Member(link)) => link.confirmed_position() != Some(synced_position),
+                _ => false,
+            } =>
+            {
+                Some(*peer)
+            }
             LedgerInput::PeerEvidenceReconciled {
                 source,
                 evidence: PeerEvidence::Confirmed,
-                ..
-            } => Some(*source),
+                history,
+            } if match space.ledger.peer(source) {
+                Some(PeerLink::Member(link)) => {
+                    link.confirmed_position()
+                        .and_then(|position| position.event_id)
+                        != history
+                            .as_ref()
+                            .unwrap_or_else(|| space.history())
+                            .current_head()
+                }
+                _ => false,
+            } =>
+            {
+                Some(*source)
+            }
             _ => None,
         };
         let (ledger, outcome, effects) =
             space.ledger.clone().apply(input, self.now_ms)?.into_parts();
         if outcome == LedgerOutcome::Applied {
             space.ledger = ledger;
+            if branch_recovered {
+                // 新分支的安全恢复替代旧需求；旧私有移除暂存不能跨分支继续应用。
+                space.group_update_recovery = None;
+                space.prepared_group_updates.clear();
+            }
             self.revision = space.ledger.revision();
             self.revised = true;
             for LedgerEffect::AfterCommit(follow_up) in effects {
@@ -112,6 +140,25 @@ impl MembershipDraft {
             .ok_or(MembershipLedgerError::RecoveryRequired)
     }
 
+    pub(crate) fn prepared_group_updates_mut(
+        &mut self,
+    ) -> Result<&mut BTreeMap<[u8; 32], Vec<u8>>, MembershipLedgerError> {
+        Ok(&mut self
+            .space
+            .as_mut()
+            .ok_or(MembershipLedgerError::RecoveryRequired)?
+            .prepared_group_updates)
+    }
+
+    pub(crate) fn group_update_recovery_mut(
+        &mut self,
+    ) -> Result<&mut Option<GroupUpdateRecoveryRecord>, MembershipLedgerError> {
+        self.space
+            .as_mut()
+            .map(|space| &mut space.group_update_recovery)
+            .ok_or(MembershipLedgerError::RecoveryRequired)
+    }
+
     /// 新建 Space 或以新的单成员起点重建：只能从没有当前 Space 的状态开始。
     pub(crate) fn start_space(
         &mut self,
@@ -132,6 +179,8 @@ impl MembershipDraft {
             ledger,
             history_exchange: MembershipHistoryExchangeRecord::default(),
             branch_recovery: MembershipBranchRecoveryRecord::default(),
+            group_update_recovery: None,
+            prepared_group_updates: BTreeMap::new(),
         });
         self.revision = revision;
         self.revised = true;
@@ -192,7 +241,9 @@ impl MembershipDraft {
     pub(super) fn finish(mut self) -> Result<Option<FinishedDraft>, MembershipLedgerError> {
         let (exchange_changed, branch_changed) = match (self.base.space(), self.space.as_ref()) {
             (Some(before), Some(after)) => (
-                before.history_exchange != after.history_exchange,
+                before.history_exchange != after.history_exchange
+                    || before.group_update_recovery != after.group_update_recovery
+                    || before.prepared_group_updates != after.prepared_group_updates,
                 before.branch_recovery != after.branch_recovery,
             ),
             _ => (false, false),

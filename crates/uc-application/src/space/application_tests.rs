@@ -124,6 +124,7 @@ impl GroupRevocationPort for PassivePorts {
         &self,
         _: i64,
         _: Option<DeviceId>,
+        _verified_history_peer: Option<DeviceId>,
     ) -> Result<Vec<PendingGroupUpdate>, KeyEpochError> {
         Ok(Vec::new())
     }
@@ -854,6 +855,10 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
                 activate_membership_effect: passive.clone(),
                 restricted_membership_delivery: passive.clone(),
                 group_update_store: passive.clone(),
+                group_update_apply: passive.clone(),
+                group_update_receiver: GroupUpdateEndpoint::unbound(),
+                group_update_wire: passive.clone(),
+                group_update_local_work: passive.clone(),
                 group_update_dispatch: passive.clone(),
                 membership_network_activity: passive.clone(),
             },
@@ -892,4 +897,56 @@ async fn complete_application_exposes_endpoints_before_runtime_starts() {
     assert!(application.start_runtime());
     assert!(!application.start_runtime());
     application.shutdown().await.unwrap();
+}
+
+#[async_trait]
+impl ApplyGroupUpdatePort for PassivePorts {
+    async fn apply(
+        &self,
+        _: &[u8],
+        _: Option<&VerifiedHistoryGroupUpdate>,
+        _: Option<&crate::connectivity::ConnectionLease>,
+    ) -> Result<GroupEpoch, GroupUpdateApplyError> {
+        unreachable!("passive assembly does not apply updates")
+    }
+}
+#[async_trait]
+impl GroupUpdateLocalWorkPort for PassivePorts {
+    async fn execute(
+        &self,
+        _: GroupUpdateWork,
+    ) -> Result<GroupUpdateReceiveOutcome, anyhow::Error> {
+        unreachable!("passive assembly does not receive exchanges")
+    }
+}
+#[async_trait]
+impl GroupUpdateWirePort for PassivePorts {
+    async fn read(
+        &self,
+        _: &mut crate::connectivity::StreamLease,
+    ) -> Result<GroupUpdateIncoming, anyhow::Error> {
+        unreachable!()
+    }
+    async fn acknowledge(
+        &self,
+        _: &mut crate::connectivity::StreamLease,
+        _: crate::connectivity::ConnectionProtocol,
+        _: &GroupUpdateReceiveOutcome,
+    ) -> Result<bool, anyhow::Error> {
+        unreachable!()
+    }
+    async fn send(
+        &self,
+        _: &mut crate::connectivity::StreamLease,
+        _: crate::connectivity::ConnectionProtocol,
+        _: &[u8],
+    ) -> Result<(), GroupUpdateDispatchError> {
+        unreachable!()
+    }
+    fn is_supported(
+        &self,
+        _: crate::connectivity::ConnectionProtocol,
+    ) -> Result<(), crate::connectivity::ConnectivityError> {
+        unreachable!()
+    }
 }

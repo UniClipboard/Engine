@@ -12,6 +12,7 @@ pub enum InboundPeerProtocol {
     ActiveClipboard,
     ActiveClipboardPull,
     TransferProgress,
+    GroupUpdate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

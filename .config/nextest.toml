@@ -158,6 +158,20 @@ slow-timeout = { period = "30s", terminate-after = 3 }
 filter = "package(uc-observability-runtime) & binary(collector_slow)"
 threads-required = "num-test-threads"
 
+# 连续缺口验收同时持有五个真实进程并 kill 接收者；第二次传输失败的原有退避为 60 秒。
+# 外层 120 秒覆盖准备、重启与该退避；场景内部等待预算及实际成功 ACK 断言不变，并独占并发槽。
+[[profile.default.overrides]]
+filter = "package(uc-connectivity-host) & binary(space_device_update_recovery) & test(/^separate_process_missing_predecessor/)"
+test-group = "process"
+threads-required = "num-test-threads"
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-connectivity-host) & binary(space_device_update_recovery) & test(/^separate_process_missing_predecessor/)"
+test-group = "process"
+threads-required = "num-test-threads"
+slow-timeout = { period = "30s", terminate-after = 4 }
+
 # 每项启动多个真实 Engine 宿主进程，单独运行约 5–10 秒；满载并行时会被拖过 20 秒。测试自身等待上限为 30 秒，
 # 期限需大于它，且同组多进程场景之间不并发。
 [[profile.default.overrides]]

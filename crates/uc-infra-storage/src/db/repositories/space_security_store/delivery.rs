@@ -93,11 +93,19 @@ impl DeliveryState {
     }
 
     /// 无原因拒绝只在收件人重新通过认证、且距上次评估已过退避时再评估一次。
-    fn due_for_reevaluation(&self, now_ms: i64, online_peer: Option<DeviceId>) -> bool {
-        self.rejected
-            && !self.rejected_by_receiver
-            && online_peer == Some(self.recipient)
-            && self.next_attempt_ms <= now_ms
+    fn due_for_reevaluation(
+        &self,
+        now_ms: i64,
+        online_peer: Option<DeviceId>,
+        verified_history_peer: Option<DeviceId>,
+    ) -> bool {
+        (self.rejected
+            && self.rejected_by_receiver
+            && verified_history_peer == Some(self.recipient))
+            || (self.rejected
+                && !self.rejected_by_receiver
+                && online_peer == Some(self.recipient)
+                && self.next_attempt_ms <= now_ms)
     }
 }
 
@@ -303,6 +311,7 @@ impl<E: DbExecutor> DieselSpaceSecurityStore<E> {
         space_id: &SpaceId,
         now_ms: i64,
         online_peer: Option<DeviceId>,
+        verified_history_peer: Option<DeviceId>,
     ) -> Result<Vec<PendingGroupUpdate>, KeyEpochError> {
         conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
             let scope = space_lookup_token(key, space_id)?;
@@ -370,7 +379,7 @@ impl<E: DbExecutor> DieselSpaceSecurityStore<E> {
                 // 同设备必须先完成前序，不能跳过等待或拒绝状态发送后序。
                 if held_peers.contains(&state.recipient) { continue; }
                 let blocked = if state.rejected {
-                    !state.due_for_reevaluation(now_ms, online_peer)
+                    !state.due_for_reevaluation(now_ms, online_peer, verified_history_peer)
                 } else {
                     state.next_attempt_ms > now_ms && online_peer != Some(state.recipient)
                 };

@@ -9,7 +9,7 @@ use uc_core::membership::PeerAdmissionPort;
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_infra_p2p::network::clipboard::ClipboardReceiverAdapter;
 use uc_infra_p2p::network::iroh::admitted_connections::AdmittedConnections;
-use uc_infra_p2p::network::iroh::connectivity::IrohConnectionAdmission;
+use uc_infra_p2p::network::iroh::connectivity::{ConnectivityProfile, IrohConnectionAdmission};
 struct InboundOnly;
 #[async_trait]
 impl ConnectivityBackend for InboundOnly {
@@ -27,6 +27,7 @@ pub fn receiver(
         admission,
         fingerprint,
         AdmittedConnections::default(),
+        ConnectivityProfile::Clipboard,
     ));
     Arc::new(ClipboardReceiverAdapter::new(ConnectivityManager::new(
         Arc::new(InboundOnly),

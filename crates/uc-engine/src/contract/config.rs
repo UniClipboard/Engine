@@ -19,6 +19,9 @@ pub struct EngineConfig {
     #[cfg(feature = "dev-tools")]
     #[serde(skip)]
     test_iroh_bind_port: Option<u16>,
+    #[cfg(feature = "dev-tools")]
+    #[serde(skip)]
+    test_legacy_group_updates: bool,
 }
 
 impl EngineConfig {
@@ -33,6 +36,8 @@ impl EngineConfig {
             test_relay_fallback: None,
             #[cfg(feature = "dev-tools")]
             test_iroh_bind_port: None,
+            #[cfg(feature = "dev-tools")]
+            test_legacy_group_updates: false,
         }
     }
 
@@ -74,6 +79,17 @@ impl EngineConfig {
     pub fn with_test_iroh_bind_port(mut self, port: u16) -> Self {
         self.test_iroh_bind_port = Some(port);
         self
+    }
+
+    /// 只用于真实旧版协议互通验收，生产仍优先协商 /2。
+    #[cfg(feature = "dev-tools")]
+    pub fn with_test_legacy_group_updates(mut self, enabled: bool) -> Self {
+        self.test_legacy_group_updates = enabled;
+        self
+    }
+    #[cfg(feature = "dev-tools")]
+    pub(crate) fn uses_test_legacy_group_updates(&self) -> bool {
+        self.test_legacy_group_updates
     }
 
     pub(crate) fn rendezvous_base_url_override(&self) -> Option<String> {

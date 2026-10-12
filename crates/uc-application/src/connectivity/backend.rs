@@ -11,6 +11,16 @@ pub enum ConnectionMode {
     Multiplexed,
 }
 
+/// 本连接实际协商的有限协议能力，不包含传输库协议字节。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConnectionProtocol {
+    Unsupported,
+    Clipboard,
+    MultiplexedClipboard,
+    GroupUpdate,
+    LegacyGroupUpdate,
+}
+
 #[async_trait]
 pub trait ConnectivityBackend: Send + Sync {
     async fn connect(&self, target: DeviceId)
@@ -23,6 +33,7 @@ pub trait PeerConnection: Send + Sync {
     fn id(&self) -> usize;
     fn authenticated_key(&self) -> [u8; 32];
     fn mode(&self) -> ConnectionMode;
+    fn protocol(&self) -> ConnectionProtocol;
     fn channel(&self) -> ConnectionChannel;
     fn is_closed(&self) -> bool;
     /// 明确的连接级不可达证据；本地授权/任务失败不能冒充离线。

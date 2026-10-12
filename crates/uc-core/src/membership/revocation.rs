@@ -1,4 +1,7 @@
-use std::{collections::HashSet, fmt};
+use std::{
+    collections::{BTreeMap, HashSet},
+    fmt,
+};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -942,6 +945,8 @@ pub struct SpaceKeyMaterial {
     pending_group_updates: Vec<PendingGroupUpdate>,
     #[serde(default)]
     pending_group_admission_replays: Vec<PendingGroupAdmissionReplay>,
+    #[serde(default)]
+    applied_group_updates: BTreeMap<u64, [u8; 32]>,
     updated_at_ms: i64,
 }
 
@@ -965,6 +970,7 @@ impl SpaceKeyMaterial {
             key_catalog,
             pending_group_updates: Vec::new(),
             pending_group_admission_replays: Vec::new(),
+            applied_group_updates: BTreeMap::new(),
             updated_at_ms,
         }
     }
@@ -986,6 +992,28 @@ impl SpaceKeyMaterial {
 
     pub fn key_catalog(&self) -> &[u8] {
         &self.key_catalog
+    }
+    pub fn applied_group_update_digest(&self, epoch: GroupEpoch) -> Option<&[u8; 32]> {
+        self.applied_group_updates.get(&epoch.value())
+    }
+    /// 只在真实 MLS 更新已经验证且材料形成后记入，随该材料一起保存。
+    pub fn record_applied_group_update(
+        &mut self,
+        epoch: GroupEpoch,
+        digest: [u8; 32],
+    ) -> Result<(), KeyEpochError> {
+        if epoch > self.state.epoch() {
+            return Err(KeyEpochError::StateIssue(KeyEpochStateIssue::EpochMismatch));
+        }
+        if self
+            .applied_group_updates
+            .get(&epoch.value())
+            .is_some_and(|known| known != &digest)
+        {
+            return Err(KeyEpochError::StateIssue(KeyEpochStateIssue::EpochMismatch));
+        }
+        self.applied_group_updates.insert(epoch.value(), digest);
+        Ok(())
     }
 
     pub fn pending_group_updates(&self) -> &[PendingGroupUpdate] {
@@ -1030,6 +1058,11 @@ impl SpaceKeyMaterial {
     pub fn with_pending_group_updates_from(mut self, previous: &Self) -> Self {
         self.pending_group_updates = previous.pending_group_updates.clone();
         self.pending_group_admission_replays = previous.pending_group_admission_replays.clone();
+        if self.state.space_id() == previous.state.space_id()
+            && self.state.protection_group_id() == previous.state.protection_group_id()
+        {
+            self.applied_group_updates = previous.applied_group_updates.clone();
+        }
         self
     }
 
@@ -1038,6 +1071,11 @@ impl SpaceKeyMaterial {
         previous: &Self,
         excluded_recipient: &DeviceId,
     ) -> Self {
+        if self.state.space_id() == previous.state.space_id()
+            && self.state.protection_group_id() == previous.state.protection_group_id()
+        {
+            self.applied_group_updates = previous.applied_group_updates.clone();
+        }
         self.pending_group_updates = previous
             .pending_group_updates
             .iter()
@@ -1058,6 +1096,11 @@ impl SpaceKeyMaterial {
         previous: &Self,
         excluded_recipients: &[DeviceId],
     ) -> Self {
+        if self.state.space_id() == previous.state.space_id()
+            && self.state.protection_group_id() == previous.state.protection_group_id()
+        {
+            self.applied_group_updates = previous.applied_group_updates.clone();
+        }
         self.pending_group_updates = previous
             .pending_group_updates
             .iter()
@@ -1387,6 +1430,8 @@ pub enum KeyEpochStateIssue {
     RecoveryRequired,
     UnsupportedUpdate,
     OutOfOrderUpdate,
+    MissingPredecessor,
+    UnverifiedReplay,
     UnsupportedOperation,
     InvalidStage,
     StateChanged,

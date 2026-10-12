@@ -1,3 +1,4 @@
+use crate::space::membership::group_update::NoSecurityRemoval;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -69,7 +70,13 @@ fn remove_case(
         Arc::new(OfflineObservations),
         Arc::new(crate::space::membership::query_device_trust::NoCurrentJoinStatus),
     ));
-    RemoveSpaceMemberUseCase::new(fixture.owner.clone(), Arc::new(signer), query, effects)
+    RemoveSpaceMemberUseCase::new(
+        fixture.owner.clone(),
+        Arc::new(signer),
+        query,
+        effects,
+        Arc::new(NoSecurityRemoval),
+    )
 }
 
 fn active_space() -> (OwnerFixture, TestSigner) {

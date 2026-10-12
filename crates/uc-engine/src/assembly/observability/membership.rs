@@ -4,9 +4,97 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use tracing::Instrument;
 use uc_application::deps::{
+    ConnectionLease, GroupUpdateReceiveOutcome, GroupUpdateReceiverPort,
     RestrictedMembershipDelivery, RestrictedMembershipDeliveryError,
     RestrictedMembershipDeliveryPort, SpaceMembershipAdapters,
 };
+use uc_core::membership::KeyEpochError;
+use uc_infra_security::group_update_failure_detail;
+use uc_observability_contract::diagnostics::connectivity::{
+    complete_group_update_failure, GroupUpdatePhase,
+};
+
+fn observe_group_update_receive(
+    inner: Arc<dyn GroupUpdateReceiverPort>,
+) -> Arc<dyn GroupUpdateReceiverPort> {
+    Arc::new(ObservedGroupUpdateReceive { inner })
+}
+struct ObservedGroupUpdateReceive {
+    inner: Arc<dyn GroupUpdateReceiverPort>,
+}
+#[async_trait]
+impl GroupUpdateReceiverPort for ObservedGroupUpdateReceive {
+    async fn receive(
+        &self,
+        connection: ConnectionLease,
+    ) -> Result<GroupUpdateReceiveOutcome, anyhow::Error> {
+        let started = Instant::now();
+        let span = operation_span(OperationContext {
+            domain: DiagnosticDomain::SpaceMembership,
+            operation: DiagnosticOperation::MembershipGroupUpdate,
+            role: DiagnosticRole::Member,
+            kind: DiagnosticSpanKind::Server,
+        });
+        let result = self.inner.receive(connection);
+        let result =
+            uc_observability_contract::diagnostics::scope_pending_inbound(span.clone(), result)
+                .await;
+        span.in_scope(|| {
+            let domain = DiagnosticDomain::SpaceMembership;
+            let operation = DiagnosticOperation::MembershipGroupUpdate;
+            let role = DiagnosticRole::Member;
+            let elapsed = started.elapsed();
+            let completion = match &result {
+                Ok(GroupUpdateReceiveOutcome::Applied) => {
+                    OperationCompletion::succeeded(domain, operation, role, elapsed)
+                }
+                Ok(GroupUpdateReceiveOutcome::Rejected(_)) => {
+                    OperationCompletion::rejected(domain, operation, role, elapsed)
+                }
+                Ok(GroupUpdateReceiveOutcome::Unavailable(_)) => OperationCompletion::failed(
+                    domain,
+                    operation,
+                    role,
+                    DiagnosticErrorType::Unavailable,
+                    elapsed,
+                ),
+                Err(source) => OperationCompletion::failed(
+                    domain,
+                    operation,
+                    role,
+                    match source
+                        .downcast_ref::<KeyEpochError>()
+                        .map(group_update_failure_detail)
+                    {
+                        Some(detail) => match detail.phase {
+                            GroupUpdatePhase::LoadState | GroupUpdatePhase::PersistState => {
+                                DiagnosticErrorType::Storage
+                            }
+                            GroupUpdatePhase::InstallSecurityState => DiagnosticErrorType::Security,
+                            _ => DiagnosticErrorType::Internal,
+                        },
+                        None => DiagnosticErrorType::StreamFailed,
+                    },
+                    elapsed,
+                ),
+            };
+            let failure = match &result {
+                Ok(
+                    GroupUpdateReceiveOutcome::Unavailable(source)
+                    | GroupUpdateReceiveOutcome::Rejected(source),
+                ) => Some(source),
+                Err(source) => source.downcast_ref::<KeyEpochError>(),
+                _ => None,
+            };
+            if let Some(source) = failure {
+                complete_group_update_failure(group_update_failure_detail(source), completion);
+            } else {
+                complete_operation(completion);
+            }
+        });
+        result
+    }
+}
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
     GroupUpdateDispatchError, GroupUpdateDispatchPort, MembershipHistoryExchangeError,
@@ -39,8 +127,11 @@ impl MembershipOperation {
     }
 }
 
-pub(crate) fn observe_membership(adapters: SpaceMembershipAdapters) -> SpaceMembershipAdapters {
-    SpaceMembershipAdapters {
+pub(crate) fn observe_membership(
+    adapters: SpaceMembershipAdapters,
+    receiver: Arc<dyn GroupUpdateReceiverPort>,
+) -> (SpaceMembershipAdapters, Arc<dyn GroupUpdateReceiverPort>) {
+    let adapters = SpaceMembershipAdapters {
         membership_history_transport: Arc::new(ObservedMembershipHistoryExchange {
             inner: adapters.membership_history_transport,
         }),
@@ -51,7 +142,8 @@ pub(crate) fn observe_membership(adapters: SpaceMembershipAdapters) -> SpaceMemb
             inner: adapters.group_update_dispatch,
         }),
         ..adapters
-    }
+    };
+    (adapters, observe_group_update_receive(receiver))
 }
 
 fn membership_span(operation: MembershipOperation) -> tracing::Span {

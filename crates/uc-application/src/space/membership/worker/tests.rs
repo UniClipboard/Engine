@@ -1,3 +1,4 @@
+use crate::space::membership::group_update::NoSecurityRemoval;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -73,6 +74,7 @@ async fn removed_peer() -> Case {
         Arc::new(signer),
         query,
         Arc::new(LeaveEffectsToWorker),
+        Arc::new(NoSecurityRemoval),
     )
     .execute(&device_b())
     .await

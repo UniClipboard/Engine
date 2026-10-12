@@ -238,15 +238,27 @@ async fn g1_receiver_not_ready_defers_then_applies_after_recovery() {
 }
 
 // G2：接收方的真实密码学拒绝（线上提交字节被篡改）保持阻塞、原因与设备可见；重连不会绕过，
-// 同一收件人的后序 epoch 不越过它；移除该设备后欠账结清。
+// 同一收件人的后序 epoch 不越过它；正确历史抵达并实际安装后由真实 ACK 结清。
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn g2_genuine_rejection_stays_blocked_and_visible_until_the_device_is_removed() {
+async fn g2_genuine_rejection_requires_verified_history_and_real_ack() {
     let _scenario = TestScenario::start();
     uc_engine::init_test_tracing();
     let rendezvous = mount_rendezvous().await;
     let mut topology =
         space_with_members(rendezvous.uri(), &["A", "B", "C", "D"], &["A", "B"]).await;
 
+    // 双方向门同时阻止后缀与完整证据；摘要仍可证明重新联系。
+    for node in ["A", "C", "D"] {
+        arm_dev(
+            topology.engine(node),
+            DevOperation::SetMembershipHistoryHeld {
+                held: true,
+                peer: Some(topology.device_ids["B"].clone()),
+            },
+        )
+        .await;
+    }
+    let applied_before = applied_updates(topology.engine("B")).await;
     arm_dev(
         topology.engine("A"),
         DevOperation::ArmGroupUpdateTamper { count: 1 },
@@ -283,9 +295,11 @@ async fn g2_genuine_rejection_stays_blocked_and_visible_until_the_device_is_remo
         Some(SpaceDeviceUpdateProblemSummary::DeviceSecurityUpdateRejected)
     );
 
+    assert_eq!(applied_updates(topology.engine("B")).await, applied_before);
     // 重新认证（B 重启）不是放行证据：不重发，也不应用。
     topology.restart("B").await;
     topology.wait_for_connected_peer("A", "B").await;
+    let applied_before = applied_updates(topology.engine("B")).await;
     // 后序 epoch 不越过队首的拒绝。
     topology
         .run(&[TopologyAction::Join {
@@ -313,14 +327,31 @@ async fn g2_genuine_rejection_stays_blocked_and_visible_until_the_device_is_remo
         "a genuine rejection must never be resent"
     );
 
-    // 移除被拒绝的设备：它不再是收件人，欠账结清。
-    topology
-        .run(&[TopologyAction::Remove {
-            sponsor: "A",
-            target: "B",
-        }])
+    assert_eq!(applied_updates(topology.engine("B")).await, applied_before);
+    assert_eq!(
+        query_space_work_events(topology.engine("A"))
+            .await
+            .iter()
+            .filter(|event| event.kind == DevSpaceWorkEventKind::GroupUpdateTampered)
+            .count(),
+        1
+    );
+    // 释放正确历史，等待真正的保存、安装与发送结清，不手动清拒绝标记。
+    for node in ["A", "C", "D"] {
+        arm_dev(
+            topology.engine(node),
+            DevOperation::SetMembershipHistoryHeld {
+                held: false,
+                peer: None,
+            },
+        )
         .await;
-    wait_for_no_delivery(&topology, "A", "B").await;
+    }
+    tokio::time::timeout(RECOVERY_TIMEOUT, wait_for_no_delivery(&topology, "A", "B"))
+        .await
+        .expect("verified history restores B and actual ACK settles A");
+    assert!(applied_updates(topology.engine("B")).await > 0);
+    wait_for_stable_phase(&topology, "A", SpaceDeviceUpdatePhaseSummary::Completed).await;
     topology.shutdown().await;
 }
 
@@ -460,5 +491,96 @@ async fn g4_healthy_recipients_are_unaffected_and_epochs_arrive_in_order() {
     let text = "g4 content to B after ordered recovery";
     assert_eq!(topology.send("A", "B", text).await.total_accepted, 1);
     wait_for_received_text(topology.engine("B"), text).await;
+    topology.shutdown().await;
+}
+
+// 真实缺前置：A 的 epoch 4 无法到达 B，C 的 epoch 5 仍通过已认证 Uni 到达。
+// B 重启后从仍在线的 C 恢复签名历史与连续 MLS；A 已停止，不能靠原发送者重发补齐。
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn missing_predecessor_recovers_from_another_member_after_receiver_restart() {
+    let _scenario = TestScenario::start();
+    uc_engine::init_test_tracing();
+    let rendezvous = mount_rendezvous().await;
+    let mut topology = space_with_members(
+        rendezvous.uri(),
+        &["A", "B", "C", "D", "E"],
+        &["A", "B", "C"],
+    )
+    .await;
+    topology
+        .wait_for_equivalent_branch(&["A", "B", "C"], 3)
+        .await;
+    let before = topology.diagnostics("B").await.group_epoch;
+    let b_peer = topology.device_ids["B"].clone();
+    topology.partition(&["A"], &["B"]).await;
+    arm_dev(
+        topology.engine("B"),
+        DevOperation::SetMembershipHistoryHeld {
+            held: true,
+            peer: None,
+        },
+    )
+    .await;
+    for node in ["C", "D", "E"] {
+        arm_dev(
+            topology.engine(node),
+            DevOperation::SetMembershipHistoryHeld {
+                held: true,
+                peer: Some(b_peer.clone()),
+            },
+        )
+        .await;
+    }
+    topology
+        .run(&[TopologyAction::Join {
+            sponsor: "A",
+            joiner: "D",
+        }])
+        .await;
+    topology
+        .wait_for_equivalent_branch(&["A", "C", "D"], 4)
+        .await;
+    topology
+        .run(&[TopologyAction::Join {
+            sponsor: "C",
+            joiner: "E",
+        }])
+        .await;
+    topology
+        .wait_for_equivalent_branch(&["C", "D", "E"], 5)
+        .await;
+    wait_for_space_work_event(
+        topology.engine("B"),
+        0,
+        DevSpaceWorkEventKind::GroupUpdateMissingPredecessorObserved,
+    )
+    .await;
+    assert_eq!(topology.diagnostics("B").await.group_epoch, before);
+    assert!(
+        delivery_to(&topology, "C", "B").await.is_some(),
+        "unavailable must not settle sender pending"
+    );
+    topology.stop("A").await;
+    topology.restart("B").await;
+    assert_eq!(topology.diagnostics("B").await.group_epoch, before);
+    for node in ["C", "D", "E"] {
+        arm_dev(
+            topology.engine(node),
+            DevOperation::SetMembershipHistoryHeld {
+                held: false,
+                peer: None,
+            },
+        )
+        .await;
+    }
+    let target = topology.diagnostics("C").await.group_epoch;
+    topology
+        .wait_for_equivalent_branch(&["B", "C", "D", "E"], 5)
+        .await;
+    assert_eq!(topology.diagnostics("B").await.group_epoch, target);
+    wait_for_no_delivery(&topology, "C", "B").await;
+    let text = "content after continuous MLS recovery from C";
+    assert_eq!(topology.send("B", "C", text).await.total_accepted, 1);
+    wait_for_received_text(topology.engine("C"), text).await;
     topology.shutdown().await;
 }

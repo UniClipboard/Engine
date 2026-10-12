@@ -10,7 +10,7 @@ mod stream;
 pub use admission::{
     AdmissionAttempt, AdmissionGrant, InboundConnectionError, SessionConnectionAdmissionPort,
 };
-pub use backend::{ConnectionMode, ConnectivityBackend, PeerConnection};
+pub use backend::{ConnectionMode, ConnectionProtocol, ConnectivityBackend, PeerConnection};
 pub use connection::ConnectionLease;
 pub use error::ConnectivityError;
 pub use manager::{ConnectivityManager, ConnectivityPolicy};

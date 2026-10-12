@@ -68,6 +68,12 @@ pub use membership::{
     DecideDeviceTrustChangeResult, DeviceTrustChangeChoice,
 };
 pub use membership::{
+    ApplyGroupUpdatePort, GroupUpdateApplyError, GroupUpdateEndpoint, GroupUpdateIncoming,
+    GroupUpdateLocalWorkPort, GroupUpdateReceiveOutcome, GroupUpdateReceiverPort,
+    GroupUpdateRecoveryRecord, GroupUpdateWirePort, GroupUpdateWork, PreparedGroupUpdate,
+    VerifiedHistoryGroupUpdate,
+};
+pub use membership::{
     DeviceGroupChoiceImpact, MembershipConflictBranchView, MembershipConflictStatus,
     MembershipConflictView, MembershipConflictsView, MembershipDiagnosticsView,
     QueryMembershipConflictsError, QueryMembershipDiagnosticsError, ResolveMembershipConflictError,

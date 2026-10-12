@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
     LedgerDeliveryKind, LedgerDeliveryResult, LedgerInput, LedgerWork, MemberEffectPhase,
-    MembershipEventId, MembershipHistoryExchangePort, ScheduledLedgerWork,
+    MembershipEventId, ScheduledLedgerWork,
 };
 use uc_observability_contract::diagnostics::connectivity::{
     LocalWorkObservation, LocalWorkOutcome, LocalWorkStep,
@@ -31,16 +31,17 @@ use super::{
     ledger_error, ActivateMembershipEffectPort, ApplyMembershipMemberFactsPort,
     ApplyMembershipSecurityPort, DeliverPendingGroupUpdatesPort, MembershipEffectExecutionError,
     MembershipLedgerError, MembershipMaintenanceReport, MembershipMaintenanceStepOutcome,
-    MembershipMaintenanceTrigger, MembershipOwner, RecoverMembershipConflictsPort,
-    RecoverMembershipEffectsPort, RestrictedMembershipDelivery, RestrictedMembershipDeliveryError,
-    RestrictedMembershipDeliveryPort, RunMembershipWorkPort,
+    MembershipMaintenanceTrigger, MembershipOwner, RecoverGroupUpdatesPort,
+    RecoverMembershipConflictsPort, RecoverMembershipEffectsPort, RestrictedMembershipDelivery,
+    RestrictedMembershipDeliveryError, RestrictedMembershipDeliveryPort, RunMembershipWorkPort,
 };
 
 pub(crate) use effects::RePairingAwareMembershipActivation;
 pub use history_sync::RefreshVerifiedPeerAddressPort;
 
 use effects::MembershipEffectSteps;
-use history_sync::{HistorySynchronizer, MAX_PEERS_PER_ROUND};
+pub(crate) use history_sync::HistorySynchronizer;
+use history_sync::MAX_PEERS_PER_ROUND;
 use uc_observability_contract::{uc_debug, uc_warn};
 
 /// 单次运行最多推进的轮数；每轮至少完成一项新待办，上限只防止异常状态下的无界循环。
@@ -51,8 +52,8 @@ pub(crate) struct MembershipWorkerDeps {
     pub(crate) security: Arc<dyn ApplyMembershipSecurityPort>,
     pub(crate) activation: Arc<dyn ActivateMembershipEffectPort>,
     pub(crate) restricted_delivery: Arc<dyn RestrictedMembershipDeliveryPort>,
-    pub(crate) history_transport: Arc<dyn MembershipHistoryExchangePort>,
-    pub(crate) address_refresh: Arc<dyn RefreshVerifiedPeerAddressPort>,
+    pub(crate) history: Arc<HistorySynchronizer>,
+    pub(crate) group_recovery: Arc<dyn RecoverGroupUpdatesPort>,
     pub(crate) conflicts: Arc<dyn RecoverMembershipConflictsPort>,
     pub(crate) group_updates: Arc<dyn DeliverPendingGroupUpdatesPort>,
 }
@@ -61,7 +62,8 @@ pub(crate) struct MembershipWorker {
     owner: Arc<MembershipOwner>,
     effects: MembershipEffectSteps,
     restricted_delivery: Arc<dyn RestrictedMembershipDeliveryPort>,
-    history: HistorySynchronizer,
+    history: Arc<HistorySynchronizer>,
+    group_recovery: Arc<dyn RecoverGroupUpdatesPort>,
     conflicts: Arc<dyn RecoverMembershipConflictsPort>,
     group_updates: Arc<dyn DeliverPendingGroupUpdatesPort>,
     ledger_work: tokio::sync::Mutex<()>,
@@ -90,11 +92,8 @@ impl MembershipWorker {
         Self {
             effects: MembershipEffectSteps::new(deps.member_facts, deps.security, deps.activation),
             restricted_delivery: deps.restricted_delivery,
-            history: HistorySynchronizer::new(
-                Arc::clone(&owner),
-                deps.history_transport,
-                deps.address_refresh,
-            ),
+            history: deps.history,
+            group_recovery: deps.group_recovery,
             conflicts: deps.conflicts,
             group_updates: deps.group_updates,
             owner,
@@ -339,6 +338,7 @@ impl RunMembershipWorkPort for MembershipWorker {
         )
         .await;
         record_outcome(&mut report, effects);
+        let reachable_peers = self.owner.take_reachable_peers();
         record_outcome(
             &mut report,
             observed(
@@ -352,9 +352,15 @@ impl RunMembershipWorkPort for MembershipWorker {
             observed(
                 LocalWorkStep::MaintenanceGroupUpdates,
                 self.group_updates
-                    .deliver_pending_group_updates(trigger, &self.owner.take_reachable_peers()),
+                    .deliver_pending_group_updates(trigger, &reachable_peers),
             )
             .await,
+        );
+        record_outcome(
+            &mut report,
+            self.group_recovery
+                .recover(trigger, !reachable_peers.is_empty())
+                .await,
         );
         let network = scope_membership_recovery_trigger(
             recovery_trigger,

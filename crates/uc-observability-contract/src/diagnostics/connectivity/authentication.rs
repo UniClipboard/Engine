@@ -185,7 +185,11 @@ pub fn take_local_completion_detail(
                 "space_membership",
                 "membership_group_update",
                 "member",
-                "error",
+                if outcome == "rejected" {
+                    "rejected"
+                } else {
+                    "error"
+                },
             ),
             LocalCompletionDetail::MembershipHistory(detail) => (
                 "space_membership",

@@ -1,5 +1,6 @@
 mod access;
 mod decide_device_trust_change;
+mod group_update;
 mod group_update_delivery;
 mod handle_history_message;
 mod initializer;
@@ -30,6 +31,12 @@ pub use decide_device_trust_change::{
     DecideDeviceTrustChange, DecideDeviceTrustChangeError, DecideDeviceTrustChangeResult,
     DeviceTrustChangeChoice,
 };
+pub use group_update::{
+    ApplyGroupUpdatePort, GroupUpdateApplyError, GroupUpdateEndpoint, GroupUpdateIncoming,
+    GroupUpdateLocalWorkPort, GroupUpdateReceiveOutcome, GroupUpdateReceiverPort,
+    GroupUpdateWirePort, GroupUpdateWork, PreparedGroupUpdate, VerifiedHistoryGroupUpdate,
+};
+pub(crate) use group_update::{GroupUpdateApplyCoordinator, RecoverGroupUpdatesPort};
 #[cfg(test)]
 pub(crate) use maintenance::MembershipMaintenanceExclusion;
 pub use maintenance::{
@@ -68,10 +75,11 @@ pub use query_readiness::{MembershipReadiness, QueryMembershipReadinessError};
 pub use re_pairing::{RePairingStateError, RePairingStateStorePort};
 pub(crate) use reconcile_history_evidence::ReconcileMembershipEvidenceUseCase;
 pub use record::{
-    InboundMembershipTransfer, MembershipBranchRecoveryRecord, MembershipBranchRecoverySession,
-    MembershipBranchRecoverySessionState, MembershipConflictMember, MembershipConflictPresentation,
-    MembershipConflictRecord, MembershipConflictStatus, MembershipHistoryExchangeRecord,
-    MembershipRecord, SpaceMembershipRecord,
+    GroupUpdateRecoveryRecord, InboundMembershipTransfer, MembershipBranchRecoveryRecord,
+    MembershipBranchRecoverySession, MembershipBranchRecoverySessionState,
+    MembershipConflictMember, MembershipConflictPresentation, MembershipConflictRecord,
+    MembershipConflictStatus, MembershipHistoryExchangeRecord, MembershipRecord,
+    SpaceMembershipRecord,
 };
 pub use recover_conflict::{
     AdvanceMembershipBranchTransitionError, AdvanceMembershipBranchTransitionInput,
@@ -132,5 +140,7 @@ pub(super) use remove_space_member::RemoveSpaceMemberUseCase;
 pub(crate) use resolve_conflict::QueryMembershipConflictStatusPort;
 pub(super) use resolve_conflict::ResolveMembershipConflictUseCase;
 pub(crate) use worker::{
-    MembershipWorker, MembershipWorkerDeps, RePairingAwareMembershipActivation,
+    HistorySynchronizer, MembershipWorker, MembershipWorkerDeps, RePairingAwareMembershipActivation,
 };
+
+pub(crate) use group_update::PrepareMembershipRemovalPort;

@@ -281,6 +281,8 @@ async fn v3_membership_branch_replays_every_control_phase_after_crash() {
         ledger: ledger.snapshot(),
         history_exchange: Default::default(),
         branch_recovery: Default::default(),
+        group_update_recovery: None,
+        prepared_group_updates: Default::default(),
     };
     record
         .branch_recovery
@@ -456,6 +458,8 @@ fn staged_branch_membership(
             ledger: ledger.snapshot(),
             history_exchange: Default::default(),
             branch_recovery,
+            group_update_recovery: None,
+            prepared_group_updates: Default::default(),
         })),
     }
 }

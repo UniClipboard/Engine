@@ -3,18 +3,20 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use async_trait::async_trait;
 use tokio::sync::Notify;
 use uc_application::deps::{
-    AuthenticatedAdmissionExchangePort, AuthenticatedAdmissionReply, SpaceAdmissionTransportError,
-    SpaceAdmissionTransportPort,
+    ApplyGroupUpdatePort, AuthenticatedAdmissionExchangePort, AuthenticatedAdmissionReply,
+    ConnectionLease, ConnectionProtocol, ConnectivityError, GroupUpdateApplyError,
+    GroupUpdateIncoming, GroupUpdateReceiveOutcome, GroupUpdateWirePort, PreparedGroupUpdate,
+    SpaceAdmissionTransportError, SpaceAdmissionTransportPort, StreamLease,
+    VerifiedHistoryGroupUpdate,
 };
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
     AdmissionAttemptTimeline, AdmissionContinuationCredential,
-    AdmissionEncryptedPasswordEquivalent, AdmissionPeerBinding, GroupEpoch, GroupRevocationPort,
-    GroupRevocationResult, GroupUpdateDispatchError, GroupUpdateDispatchPort,
-    GroupUpdateRecipientDelivery, GroupUpdateRejection, KeyEpochError,
-    MembershipHistoryExchangeError, MembershipHistoryExchangePort, MembershipHistoryMessage,
-    PendingGroupUpdate, RevocationId, SpaceAdmissionEnvelopeV1, SpaceAdmissionId,
-    SpaceAdmissionMessageKind, SpaceAdmissionRoute,
+    AdmissionEncryptedPasswordEquivalent, AdmissionPeerBinding, GroupEpoch,
+    GroupUpdateDispatchError, GroupUpdateDispatchPort, GroupUpdateRejection, KeyEpochError,
+    KeyEpochStateIssue, MembershipHistoryExchangeEndpointPort, MembershipHistoryExchangeError,
+    MembershipHistoryExchangePort, MembershipHistoryMessage, PendingGroupUpdate,
+    SpaceAdmissionEnvelopeV1, SpaceAdmissionId, SpaceAdmissionMessageKind, SpaceAdmissionRoute,
 };
 use uc_observability_contract::diagnostics::connectivity::{
     ClassifiedGroupUpdateStorageFailure, GroupUpdateReason,
@@ -41,6 +43,9 @@ struct State {
     membership_history_failure: Option<MembershipHistoryFailurePlan>,
     group_update_receive_fault: Option<DevGroupUpdateReceiveFault>,
     group_update_tamper_remaining: usize,
+    history_held: bool,
+    legacy_group_protocol: bool,
+    history_held_peer: Option<DeviceId>,
     legacy_rejection_remaining: usize,
     next_sequence: u64,
     events: Vec<DevSpaceWorkEvent>,
@@ -53,6 +58,9 @@ impl Default for State {
             membership_history_failure: None,
             group_update_receive_fault: None,
             group_update_tamper_remaining: 0,
+            history_held: false,
+            legacy_group_protocol: false,
+            history_held_peer: None,
             legacy_rejection_remaining: 0,
             next_sequence: 1,
             events: Vec::new(),
@@ -88,6 +96,47 @@ impl SpaceWorkTestControl {
 
     pub(crate) fn set_group_update_receive_fault(&self, fault: Option<DevGroupUpdateReceiveFault>) {
         self.lock_state().group_update_receive_fault = fault;
+    }
+
+    pub(crate) fn set_legacy_group_protocol(&self, legacy: bool) {
+        self.lock_state().legacy_group_protocol = legacy;
+    }
+    pub(crate) fn uses_legacy_group_protocol(&self) -> bool {
+        self.lock_state().legacy_group_protocol
+    }
+    fn record_group_wire(&self, protocol: ConnectionProtocol, acknowledged: bool) {
+        let kind = match (protocol, acknowledged) {
+            (ConnectionProtocol::LegacyGroupUpdate, false) => {
+                DevSpaceWorkEventKind::GroupUpdateLegacyWireSent
+            }
+            (ConnectionProtocol::GroupUpdate, false) => {
+                DevSpaceWorkEventKind::GroupUpdateCurrentWireSent
+            }
+            (ConnectionProtocol::LegacyGroupUpdate, true) => {
+                DevSpaceWorkEventKind::GroupUpdateLegacyWireAcknowledged
+            }
+            (ConnectionProtocol::GroupUpdate, true) => {
+                DevSpaceWorkEventKind::GroupUpdateCurrentWireAcknowledged
+            }
+            _ => return,
+        };
+        self.record(kind);
+    }
+    pub(crate) fn set_history_held(&self, held: bool, peer: Option<DeviceId>) {
+        let mut state = self.lock_state();
+        state.history_held = held;
+        state.history_held_peer = peer;
+    }
+    fn history_is_held(&self, peer: &DeviceId, message: &MembershipHistoryMessage) -> bool {
+        let state = self.lock_state();
+        state.history_held
+            && state
+                .history_held_peer
+                .is_none_or(|held_peer| held_peer == *peer)
+            && !matches!(
+                message,
+                MembershipHistoryMessage::SummaryV3(_) | MembershipHistoryMessage::AckV3(_)
+            )
     }
 
     pub(crate) fn arm_group_update_tamper(&self, count: usize) {
@@ -446,38 +495,82 @@ impl GroupUpdateDispatchPort for RecordedGroupUpdateDispatch {
                 GroupUpdateRejection::Unclassified,
             ));
         }
-        if self.control.take_group_update_tamper() {
-            if let Some(tampered) = tampered_update(update) {
-                self.control
-                    .record(DevSpaceWorkEventKind::GroupUpdateTampered);
-                return self.inner.dispatch_group_update(&tampered).await;
-            }
-        }
         self.inner.dispatch_group_update(update).await
     }
 }
 
 /// 只改线上副本的 MLS 提交字节：接收方的真实校验会拒绝它，保存的原件不变。
-fn tampered_update(update: &PendingGroupUpdate) -> Option<PendingGroupUpdate> {
-    let mut body: serde_json::Value = serde_json::from_slice(update.payload()).ok()?;
+fn tampered_payload(payload: &[u8]) -> Option<Vec<u8>> {
+    let mut body: serde_json::Value = serde_json::from_slice(payload).ok()?;
     let commit = body.get_mut("commit")?.as_array_mut()?;
     let last = commit.last_mut()?;
     *last = serde_json::Value::from(last.as_u64()? ^ 0xff);
-    let payload = serde_json::to_vec(&body).ok()?;
-    let mut record = serde_json::to_value(update).ok()?;
-    record["payload"] = serde_json::to_value(payload).ok()?;
-    serde_json::from_value(record).ok()
+    serde_json::to_vec(&body).ok()
 }
 
-/// 包装接收方使用的组密钥端口：只在 `apply_group_epoch_update` 注入本地失败，其余原样转交。
+pub(crate) struct FaultableGroupUpdateWire {
+    inner: Arc<dyn GroupUpdateWirePort>,
+    control: Arc<SpaceWorkTestControl>,
+}
+impl FaultableGroupUpdateWire {
+    pub(crate) fn new(
+        inner: Arc<dyn GroupUpdateWirePort>,
+        control: Arc<SpaceWorkTestControl>,
+    ) -> Self {
+        Self { inner, control }
+    }
+}
+#[async_trait]
+impl GroupUpdateWirePort for FaultableGroupUpdateWire {
+    fn is_supported(&self, protocol: ConnectionProtocol) -> Result<(), ConnectivityError> {
+        self.inner.is_supported(protocol)
+    }
+    async fn read(&self, stream: &mut StreamLease) -> Result<GroupUpdateIncoming, anyhow::Error> {
+        self.inner.read(stream).await
+    }
+    async fn acknowledge(
+        &self,
+        stream: &mut StreamLease,
+        protocol: ConnectionProtocol,
+        outcome: &GroupUpdateReceiveOutcome,
+    ) -> Result<bool, anyhow::Error> {
+        let acknowledged = self.inner.acknowledge(stream, protocol, outcome).await?;
+        if acknowledged {
+            self.control.record_group_wire(protocol, true);
+        }
+        Ok(acknowledged)
+    }
+    async fn send(
+        &self,
+        stream: &mut StreamLease,
+        protocol: ConnectionProtocol,
+        payload: &[u8],
+    ) -> Result<(), GroupUpdateDispatchError> {
+        // 此端口只在 Uni 已授权并取得真实 stream 后调用，拨号失败不消费一次性篡改。
+        if self.control.take_group_update_tamper() {
+            if let Some(tampered) = tampered_payload(payload) {
+                self.control
+                    .record(DevSpaceWorkEventKind::GroupUpdateTampered);
+                return self.inner.send(stream, protocol, &tampered).await;
+            }
+        }
+        let result = self.inner.send(stream, protocol, payload).await;
+        if result.is_ok() {
+            self.control.record_group_wire(protocol, false);
+        }
+        result
+    }
+}
+
+/// 在经过完整接收 owner 的直接入站应用注入失败，历史效果不消费接收故障。
 pub(crate) struct FaultableGroupUpdateReceiver {
-    inner: Arc<dyn GroupRevocationPort>,
+    inner: Arc<dyn ApplyGroupUpdatePort>,
     control: Arc<SpaceWorkTestControl>,
 }
 
 impl FaultableGroupUpdateReceiver {
     pub(crate) fn new(
-        inner: Arc<dyn GroupRevocationPort>,
+        inner: Arc<dyn ApplyGroupUpdatePort>,
         control: Arc<SpaceWorkTestControl>,
     ) -> Self {
         Self { inner, control }
@@ -485,133 +578,54 @@ impl FaultableGroupUpdateReceiver {
 }
 
 #[async_trait]
-impl GroupRevocationPort for FaultableGroupUpdateReceiver {
-    async fn revoke_group_member(
+impl ApplyGroupUpdatePort for FaultableGroupUpdateReceiver {
+    async fn prepare_removal(
         &self,
         target: &DeviceId,
-        retained_recipients: &[DeviceId],
+        retained: &[DeviceId],
         now_ms: i64,
-    ) -> Result<GroupRevocationResult, KeyEpochError> {
-        self.inner
-            .revoke_group_member(target, retained_recipients, now_ms)
-            .await
+    ) -> Result<Option<PreparedGroupUpdate>, anyhow::Error> {
+        self.inner.prepare_removal(target, retained, now_ms).await
     }
-
-    async fn acknowledge_group_update(
+    async fn apply(
         &self,
-        revocation_id: &RevocationId,
-        recipient: &DeviceId,
-        now_ms: i64,
-    ) -> Result<GroupRevocationResult, KeyEpochError> {
-        self.inner
-            .acknowledge_group_update(revocation_id, recipient, now_ms)
-            .await
-    }
-
-    async fn apply_group_epoch_update(&self, payload: &[u8]) -> Result<GroupEpoch, KeyEpochError> {
-        if let Some(fault) = self.control.group_update_receive_fault() {
-            self.control
-                .record(DevSpaceWorkEventKind::GroupUpdateReceiveFaultInjected);
-            return Err(match fault {
-                DevGroupUpdateReceiveFault::NotReady => KeyEpochError::SpaceNotReady,
-                DevGroupUpdateReceiveFault::StorageUnavailable => KeyEpochError::Repository(
-                    anyhow::Error::new(ClassifiedGroupUpdateStorageFailure::new(
-                        GroupUpdateReason::Unavailable,
-                        std::io::Error::other("injected storage failure"),
-                    )),
-                ),
-            });
+        payload: &[u8],
+        proof: Option<&VerifiedHistoryGroupUpdate>,
+        connection: Option<&ConnectionLease>,
+    ) -> Result<GroupEpoch, GroupUpdateApplyError> {
+        if connection.is_some() {
+            if let Some(fault) = self.control.group_update_receive_fault() {
+                self.control
+                    .record(DevSpaceWorkEventKind::GroupUpdateReceiveFaultInjected);
+                let source = match fault {
+                    DevGroupUpdateReceiveFault::NotReady => KeyEpochError::SpaceNotReady,
+                    DevGroupUpdateReceiveFault::StorageUnavailable => KeyEpochError::Repository(
+                        anyhow::Error::new(ClassifiedGroupUpdateStorageFailure::new(
+                            GroupUpdateReason::Unavailable,
+                            std::io::Error::other("injected storage failure"),
+                        )),
+                    ),
+                };
+                return Err(GroupUpdateApplyError::Unavailable(source));
+            }
         }
-        let applied = self.inner.apply_group_epoch_update(payload).await;
-        if applied.is_ok() {
+        let result = self.inner.apply(payload, proof, connection).await;
+        if connection.is_some()
+            && matches!(
+                &result,
+                Err(GroupUpdateApplyError::Unavailable(
+                    KeyEpochError::StateIssue(KeyEpochStateIssue::MissingPredecessor)
+                ))
+            )
+        {
+            self.control
+                .record(DevSpaceWorkEventKind::GroupUpdateMissingPredecessorObserved);
+        }
+        if result.is_ok() && connection.is_some() {
             self.control
                 .record(DevSpaceWorkEventKind::GroupUpdateApplied);
         }
-        applied
-    }
-
-    async fn pending_group_updates(
-        &self,
-        revocation_id: &RevocationId,
-    ) -> Result<Vec<PendingGroupUpdate>, KeyEpochError> {
-        self.inner.pending_group_updates(revocation_id).await
-    }
-
-    async fn query_group_revocation(
-        &self,
-        revocation_id: &RevocationId,
-    ) -> Result<Option<GroupRevocationResult>, KeyEpochError> {
-        self.inner.query_group_revocation(revocation_id).await
-    }
-
-    async fn current_group_revocation(
-        &self,
-    ) -> Result<Option<GroupRevocationResult>, KeyEpochError> {
-        self.inner.current_group_revocation().await
-    }
-
-    async fn continue_group_revocation(
-        &self,
-        revocation_id: &RevocationId,
-        permanently_lost_device_ids: &[DeviceId],
-        now_ms: i64,
-    ) -> Result<GroupRevocationResult, KeyEpochError> {
-        self.inner
-            .continue_group_revocation(revocation_id, permanently_lost_device_ids, now_ms)
-            .await
-    }
-
-    async fn resume_group_revocations(
-        &self,
-        now_ms: i64,
-    ) -> Result<Vec<GroupRevocationResult>, KeyEpochError> {
-        self.inner.resume_group_revocations(now_ms).await
-    }
-
-    async fn due_space_group_updates(
-        &self,
-        now_ms: i64,
-        online_peer: Option<DeviceId>,
-    ) -> Result<Vec<PendingGroupUpdate>, KeyEpochError> {
-        self.inner
-            .due_space_group_updates(now_ms, online_peer)
-            .await
-    }
-
-    async fn record_space_group_update_failures(
-        &self,
-        failures: &[(String, GroupUpdateDispatchError)],
-        now_ms: i64,
-    ) -> Result<usize, KeyEpochError> {
-        self.inner
-            .record_space_group_update_failures(failures, now_ms)
-            .await
-    }
-
-    async fn space_group_update_deliveries(
-        &self,
-    ) -> Result<Vec<GroupUpdateRecipientDelivery>, KeyEpochError> {
-        self.inner.space_group_update_deliveries().await
-    }
-
-    async fn acknowledge_space_group_update(
-        &self,
-        update_id: &str,
-        now_ms: i64,
-    ) -> Result<bool, KeyEpochError> {
-        self.inner
-            .acknowledge_space_group_update(update_id, now_ms)
-            .await
-    }
-
-    async fn settle_obsolete_space_group_updates(
-        &self,
-        retained_recipients: &[DeviceId],
-        now_ms: i64,
-    ) -> Result<usize, KeyEpochError> {
-        self.inner
-            .settle_obsolete_space_group_updates(retained_recipients, now_ms)
-            .await
+        result
     }
 }
 
@@ -636,6 +650,9 @@ impl MembershipHistoryExchangePort for RecordedMembershipHistoryExchange {
         recipient: &DeviceId,
         message: MembershipHistoryMessage,
     ) -> Result<MembershipHistoryMessage, MembershipHistoryExchangeError> {
+        if self.control.history_is_held(recipient, &message) {
+            return Err(MembershipHistoryExchangeError::offline());
+        }
         self.control
             .record(DevSpaceWorkEventKind::MembershipHistorySyncStarted);
         if let Some(failure) = self.control.take_membership_history_failure() {
@@ -828,5 +845,33 @@ mod tests {
         assert!(control
             .arm_membership_history_failures(DevMembershipHistoryFailure::Retryable, 0)
             .is_none());
+    }
+}
+
+pub(crate) struct GatedMembershipHistoryEndpoint {
+    inner: Arc<dyn MembershipHistoryExchangeEndpointPort>,
+    control: Arc<SpaceWorkTestControl>,
+}
+impl GatedMembershipHistoryEndpoint {
+    pub(crate) fn new(
+        inner: Arc<dyn MembershipHistoryExchangeEndpointPort>,
+        control: Arc<SpaceWorkTestControl>,
+    ) -> Self {
+        Self { inner, control }
+    }
+}
+#[async_trait]
+impl MembershipHistoryExchangeEndpointPort for GatedMembershipHistoryEndpoint {
+    async fn handle_membership_history_exchange(
+        &self,
+        peer: &DeviceId,
+        message: MembershipHistoryMessage,
+    ) -> Result<MembershipHistoryMessage, MembershipHistoryExchangeError> {
+        if self.control.history_is_held(peer, &message) {
+            return Err(MembershipHistoryExchangeError::offline());
+        }
+        self.inner
+            .handle_membership_history_exchange(peer, message)
+            .await
     }
 }

@@ -103,6 +103,8 @@ pub(super) fn migrate(
             completed_inbound_transfers: legacy.completed_inbound_transfers,
         },
         branch_recovery: legacy.branch_recovery.into_record()?,
+        group_update_recovery: None,
+        prepared_group_updates: Default::default(),
     })))
 }
 

@@ -4,7 +4,9 @@
 
 ## 文档维护记录
 
-- 2026-10-11：基于 main c0351c0e 撰写 Issue #34 第三切片[组更新规格](../exec-plans/active/2026-10-11-group-update-connectivity-spec.md)与[执行计划](../exec-plans/active/2026-10-11-group-update-connectivity-plan.md)。核对当前授权、历史 ACK、材料安装及 v5 格式；发现历史 /4 逐页限制，批量范围等待选择。只新增待实施设计，当前生产架构未变化。
+- 2026-10-12：Issue #34 第三切片完成。组更新完整收发进入 Uni，Application 成员模块统一应用与主动 /4 恢复，成员记录唯一写 v6；Engine 保留唯一成员观测组装入口。长期事实见[成员历史职责](../design-docs/membership-history-ownership.md)，验证、失败与跳过项见[已归档计划](../exec-plans/completed/2026-10-11-group-update-connectivity-plan.md)。批量版本不在本次范围，整个 #34 保持开放。
+
+- 2026-10-11：基于 main c0351c0e 撰写 Issue #34 第三切片[组更新规格](../exec-plans/completed/2026-10-11-group-update-connectivity-spec.md)与[执行计划](../exec-plans/completed/2026-10-11-group-update-connectivity-plan.md)。核对当前授权、历史 ACK、材料安装及 v5 格式；发现历史 /4 逐页限制，批量范围等待选择。只新增待实施设计，当前生产架构未变化。
 
 - 2026-10-11：Issue #34 第一切片检查发现、连接与授权边界。发现目录、来源生命周期、陌生设备身份和生产 lookup 接入的唯一事实来源为[设备发现与候选目录](../design-docs/peer-discovery.md)，已完成的实施验证与跳过项保留于[执行计划](../exec-plans/completed/2026-10-11-peer-discovery-slice.md)。
 

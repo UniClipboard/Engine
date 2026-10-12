@@ -4,6 +4,7 @@ use super::super::admitted_connections::{
 use super::super::inbound_peer::{
     record_inbound_rejection, InboundPeerRejection, PeerIdentityResolver,
 };
+use super::backend::ConnectivityProfile;
 use async_trait::async_trait;
 use std::sync::Arc;
 use uc_application::deps::{
@@ -20,6 +21,7 @@ pub struct IrohConnectionAdmission {
     identities: Arc<PeerIdentityResolver>,
     admission: Arc<dyn PeerAdmissionPort>,
     connections: AdmittedConnections,
+    protocol: InboundPeerProtocol,
 }
 impl IrohConnectionAdmission {
     pub fn new(
@@ -27,11 +29,18 @@ impl IrohConnectionAdmission {
         admission: Arc<dyn PeerAdmissionPort>,
         fingerprint: Arc<dyn IdentityFingerprintFactoryPort>,
         connections: AdmittedConnections,
+        profile: ConnectivityProfile,
     ) -> Self {
         Self {
             identities: Arc::new(PeerIdentityResolver::new(identities, fingerprint)),
             admission,
             connections,
+            protocol: match profile {
+                ConnectivityProfile::Clipboard => InboundPeerProtocol::Clipboard,
+                ConnectivityProfile::GroupUpdate | ConnectivityProfile::LegacyGroupUpdate => {
+                    InboundPeerProtocol::GroupUpdate
+                }
+            },
         }
     }
     async fn check(&self, peer: DeviceId, epoch: RevocationEpoch) -> Result<(), ConnectivityError> {
@@ -144,7 +153,7 @@ impl SessionConnectionAdmissionPort for IrohConnectionAdmission {
             .resolve(&connection.authenticated_key())
             .await
             .map_err(|error| {
-                record_inbound_rejection(InboundPeerProtocol::Clipboard, error.rejection());
+                record_inbound_rejection(self.protocol, error.rejection());
                 ConnectivityError::Admission(Box::new(error))
             })?;
         // 识别之后冻结撤销基线，登记与准入保持原有原子护栏。
@@ -157,7 +166,7 @@ impl SessionConnectionAdmissionPort for IrohConnectionAdmission {
             } else {
                 InboundPeerRejection::LedgerUnavailable
             };
-            record_inbound_rejection(InboundPeerProtocol::Clipboard, rejection);
+            record_inbound_rejection(self.protocol, rejection);
         }
         result
     }

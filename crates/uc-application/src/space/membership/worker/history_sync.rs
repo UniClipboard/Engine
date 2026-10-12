@@ -37,10 +37,10 @@ pub trait RefreshVerifiedPeerAddressPort: Send + Sync {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct HistorySyncReport {
-    pub(super) completed_peer_count: usize,
-    pub(super) deferred_peer_count: usize,
-    pub(super) stable_failure_count: usize,
+pub(crate) struct HistorySyncReport {
+    pub(crate) completed_peer_count: usize,
+    pub(crate) deferred_peer_count: usize,
+    pub(crate) stable_failure_count: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -57,7 +57,7 @@ enum PeerExchange {
     DivergenceRecorded,
 }
 
-pub(super) struct HistorySynchronizer {
+pub(crate) struct HistorySynchronizer {
     owner: Arc<MembershipOwner>,
     evidence: ReconcileMembershipEvidenceUseCase,
     transport: Arc<dyn MembershipHistoryExchangePort>,
@@ -72,7 +72,7 @@ struct SyncContext {
 }
 
 impl HistorySynchronizer {
-    pub(super) fn new(
+    pub(crate) fn new(
         owner: Arc<MembershipOwner>,
         transport: Arc<dyn MembershipHistoryExchangePort>,
         address_refresh: Arc<dyn RefreshVerifiedPeerAddressPort>,
@@ -87,7 +87,7 @@ impl HistorySynchronizer {
     }
 
     /// 同步已到期的对端。选定结果先落盘（游标与待同步标记），再发起网络交换。
-    pub(super) async fn synchronize(
+    pub(crate) async fn synchronize(
         &self,
         peers: Vec<DeviceId>,
     ) -> Result<HistorySyncReport, MembershipLedgerError> {
