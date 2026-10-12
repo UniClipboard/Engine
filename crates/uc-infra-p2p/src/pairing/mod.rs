@@ -13,6 +13,7 @@
 pub mod code_mint;
 pub mod discovery_constants;
 pub mod invitation_resolver;
+mod mdns_interfaces;
 pub mod mdns_publisher;
 pub mod mdns_resolver;
 
