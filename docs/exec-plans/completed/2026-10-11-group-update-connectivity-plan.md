@@ -213,3 +213,11 @@ git diff --check
 - CI 的 Rust 风格检查按 PR 基线比较全部已提交差异，此前本地默认只比较 HEAD 与未提交工作区，漏掉 9 处正文完整路径和 1 个内部纯转调方法。用 `RUST_STYLE_BASE_SHA=c0351c0eb48ac87abb93d9fc3941bdee5dc3a005 node scripts/architecture/check-rust-style.mjs` 本地复现同一组 10 条错误。
 - 集中引入连接类型与唯一 `observe_membership`；两个组更新能力入口显式持有同一技术互斥锁，内部应用实现要求持锁参数，保存与安装仍在同一锁范围内。不扩大公开接口，不改变协议或持久格式。
 - 修正后安全模块全套 119 项、Application 完整装配测试 1 项及 workspace all-targets check 通过。按 PR 基线执行的 Rust 风格检查与 Engine repository preflight 均通过；日志分别为 ci-fix-security.log、ci-fix-application.log、ci-fix-workspace-check.log 和 ci-fix-repository.log。
+
+### CI 独立进程缺口场景修正
+
+- `2a8921ce` 的远端仓库规则、Windows x64/arm64、升级兼容、成员 smoke 和隔离网络 smoke 均通过；workspace 实际为 4181 项通过、1 项超时、24 项跳过。后续 smoke 设置为 `success() || failure()`，不能用进入后续步骤推断 workspace 成功。超时场景为独立进程缺前置与强杀重启，原始日志保留于 ci-fix-remote-engine-failed.log。
+- 原场景本地 48.4 秒通过；受控历史暂停后随机端口重启出现真实目标已安装、发送待办转为不可达、尝试次数增加的失败（ci-gap-delivery-probe.log，169.5 秒）。暂停期间的预算实验也分别触发 120 秒与 240 秒外层超时，不能称为通过；仅延长期限不能解决地址变化。
+- 宿主显式关闭 relay，而原接收方重启随机更换 UDP 端口，混入了地址重新发现的不确定性。本次只给该缺口场景的接收方固定重启端口，沿用既有 test bind port 配置和宿主启动通道；保持真实 kill/wait、SQLite 重开、原发送者离线、第三方 `/4`、实际 epoch 与 ACK 断言。真实网络地址变化仍由网络恢复矩阵验收，本场景不替代它。
+- 相同 30 秒受控暂停，固定端口后恢复与实际 ACK 在 51.4 秒内完成（ci-gap-fixed-address.log），原 120 秒外层限制通过。最终删除所有临时暂停及 DEBUG-CI-GAP 标记，未修改 nextest 超时或生产退避；只保留固定阶段、耗时及公开发送摘要的测试诊断。
+- 最终宿主组 5 项通过、2 项原 ignored 跳过，缺口场景 35.9 秒（ci-gap-final-suite.log）；固定旧端 `/1`、`/2` 双方向另行执行，2 项均通过（ci-gap-old-interop.log），没有将默认跳过记为通过。场景固定端口只使用既有测试配置，不新增生产能力、地址持久化例外或网络降级路径。

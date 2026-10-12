@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
+use std::net::{Ipv4Addr, UdpSocket};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
@@ -93,6 +94,7 @@ struct HostProcess {
     rendezvous: String,
     binary: PathBuf,
     legacy_group_updates: bool,
+    bind_port: Option<u16>,
 }
 
 impl HostProcess {
@@ -101,12 +103,24 @@ impl HostProcess {
             rendezvous,
             PathBuf::from(env!("CARGO_BIN_EXE_uc-connectivity-host")),
             false,
+            None,
         )
     }
-    fn start_binary(rendezvous: &str, binary: PathBuf, legacy_group_updates: bool) -> Self {
+    fn start_binary(
+        rendezvous: &str,
+        binary: PathBuf,
+        legacy_group_updates: bool,
+        bind_port: Option<u16>,
+    ) -> Self {
         let root = TempDir::new().expect("host root");
-        let (child, input, replies, reader) =
-            Self::spawn(root.path(), rendezvous, None, &binary, legacy_group_updates);
+        let (child, input, replies, reader) = Self::spawn(
+            root.path(),
+            rendezvous,
+            None,
+            &binary,
+            legacy_group_updates,
+            bind_port,
+        );
         Self {
             child,
             input,
@@ -116,6 +130,7 @@ impl HostProcess {
             rendezvous: rendezvous.to_owned(),
             binary,
             legacy_group_updates,
+            bind_port,
         }
     }
 
@@ -125,6 +140,7 @@ impl HostProcess {
         secure_storage: Option<Value>,
         binary: &PathBuf,
         legacy_group_updates: bool,
+        bind_port: Option<u16>,
     ) -> (Child, ChildStdin, Receiver<Value>, JoinHandle<()>) {
         let mut child = Command::new(binary)
             .stdin(Stdio::piped())
@@ -139,6 +155,7 @@ impl HostProcess {
             "rendezvous": rendezvous,
             "relay": false,
             "legacy_group_updates": legacy_group_updates,
+            "bind_port": bind_port,
         });
         if let Some(secure_storage) = secure_storage {
             start["secure_storage"] = secure_storage;
@@ -223,6 +240,7 @@ impl HostProcess {
             Some(secure_storage),
             &self.binary,
             self.legacy_group_updates,
+            self.bind_port,
         );
         self.child = child;
         self.input = input;
@@ -506,10 +524,10 @@ async fn fixed_main_group_interop(legacy: bool) {
             .expect("fixed main host binary must be provided"),
     );
     let current = PathBuf::from(env!("CARGO_BIN_EXE_uc-connectivity-host"));
-    let mut a = HostProcess::start_binary(&rendezvous.uri(), old, false);
-    let mut b = HostProcess::start_binary(&rendezvous.uri(), current.clone(), legacy);
-    let mut c = HostProcess::start_binary(&rendezvous.uri(), current.clone(), legacy);
-    let mut d = HostProcess::start_binary(&rendezvous.uri(), current, legacy);
+    let mut a = HostProcess::start_binary(&rendezvous.uri(), old, false, None);
+    let mut b = HostProcess::start_binary(&rendezvous.uri(), current.clone(), legacy, None);
+    let mut c = HostProcess::start_binary(&rendezvous.uri(), current.clone(), legacy, None);
+    let mut d = HostProcess::start_binary(&rendezvous.uri(), current, legacy, None);
     a.request(json!({"command": "create", "name": "OldA"}));
     let invitation = a.request(json!({"command": "invite"}))["invitation"].clone();
     b.request(json!({"command": "join", "name": "NewB", "invitation": invitation}));
@@ -600,9 +618,23 @@ fn wait_for_branch(hosts: &mut [&mut HostProcess], count: u32) -> u64 {
 /// 独立进程重现真实 3→5 缺口、持久需求重启、原发送者离线与第三方连续恢复。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn separate_process_missing_predecessor_survives_restart_and_source_shutdown() {
+    let started = Instant::now();
+    let record_stage =
+        |name: &str| eprintln!("缺口恢复验收阶段：{name}，耗时 {:?}", started.elapsed());
+    record_stage("开始");
     let rendezvous = mount_rendezvous().await;
     let mut a = HostProcess::start(&rendezvous.uri());
-    let mut b = HostProcess::start(&rendezvous.uri());
+    // 本场景关闭 relay；固定重启端口，隔离地址重新发现与密钥缺口恢复两种验收责任。
+    // nextest 独占场景，接收方强杀并 wait 后再绑定同一 UDP 端口。
+    let port_probe = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("reserve receiver port");
+    let port = port_probe.local_addr().expect("receiver port").port();
+    drop(port_probe);
+    let mut b = HostProcess::start_binary(
+        &rendezvous.uri(),
+        PathBuf::from(env!("CARGO_BIN_EXE_uc-connectivity-host")),
+        false,
+        Some(port),
+    );
     let mut c = HostProcess::start(&rendezvous.uri());
     let mut d = HostProcess::start(&rendezvous.uri());
     let mut e = HostProcess::start(&rendezvous.uri());
@@ -633,8 +665,10 @@ async fn separate_process_missing_predecessor_survives_restart_and_source_shutdo
         b.request(json!({"command": "membership_diagnostics"}))["group_epoch"],
         before
     );
+    record_stage("缺口需求已持久化并确认");
     a.shutdown();
     b.restart_with_crash(true);
+    record_stage("接收方强杀后重启");
     assert_eq!(
         b.request(json!({"command": "membership_diagnostics"}))["group_epoch"],
         before
@@ -646,6 +680,8 @@ async fn separate_process_missing_predecessor_survives_restart_and_source_shutdo
         wait_for_branch(&mut [&mut b, &mut c, &mut d, &mut e], 5),
         target
     );
+    record_stage("真实目标 epoch 已安装");
+    let mut previous = Value::Null;
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let choices = c.request(json!({"command": "eligibility"}));
@@ -655,6 +691,14 @@ async fn separate_process_missing_predecessor_survives_restart_and_source_shutdo
             .iter()
             .find(|device| device["device_id"] == b_peer)
             .expect("B remains a current member");
+        if peer["group_update"] != previous {
+            eprintln!(
+                "缺口恢复验收发送待办：{}，耗时 {:?}",
+                peer["group_update"],
+                started.elapsed()
+            );
+            previous = peer["group_update"].clone();
+        }
         if peer["group_update"].is_null() {
             break;
         }
@@ -664,6 +708,7 @@ async fn separate_process_missing_predecessor_survives_restart_and_source_shutdo
         );
         std::thread::sleep(Duration::from_millis(100));
     }
+    record_stage("发送方实际 ACK 已结清");
     b.request(json!({"command": "wait_space_work_event", "kind": "group_update_applied", "after_sequence": 0}));
     b.shutdown();
     c.shutdown();
