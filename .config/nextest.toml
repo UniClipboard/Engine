@@ -172,18 +172,20 @@ test-group = "process"
 threads-required = "num-test-threads"
 slow-timeout = { period = "30s", terminate-after = 4 }
 
-# 每项启动多个真实 Engine 宿主进程，单独运行约 5–10 秒；满载并行时会被拖过 20 秒。测试自身等待上限为 30 秒，
-# 期限需大于它，且同组多进程场景之间不并发。
+# 每项启动多个真实 Engine 宿主进程，交换与场景等待期限按独占运行验收。
+# process 组只限制同组并发；占用全部 nextest 槽位，防止其它组的重场景争抢真实交换预算。
 [[profile.default.overrides]]
 filter = "package(uc-connectivity-host) & binary(space_device_update_recovery)"
 test-group = "process"
+threads-required = "num-test-threads"
 slow-timeout = { period = "30s", terminate-after = 2 }
 
-# 每项启动多个真实 Engine 宿主进程，单独运行约 5–10 秒；满载并行时会被拖过 20 秒。测试自身等待上限为 30 秒，
-# 期限需大于它，且同组多进程场景之间不并发。
+# 每项启动多个真实 Engine 宿主进程，交换与场景等待期限按独占运行验收。
+# process 组只限制同组并发；占用全部 nextest 槽位，防止其它组的重场景争抢真实交换预算。
 [[profile.ci.overrides]]
 filter = "package(uc-connectivity-host) & binary(space_device_update_recovery)"
 test-group = "process"
+threads-required = "num-test-threads"
 slow-timeout = { period = "30s", terminate-after = 2 }
 
 [[profile.default.overrides]]

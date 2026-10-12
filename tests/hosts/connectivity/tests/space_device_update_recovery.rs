@@ -278,7 +278,15 @@ fn wait_for_phase(host: &mut HostProcess, expected: &str) -> Value {
         }
         assert!(
             Instant::now() < deadline,
-            "space device update did not reach {expected}: {update}"
+            "space device update did not reach {expected}: {update}; deliveries: {:?}",
+            status["device_trust"]["devices"]
+                .as_array()
+                .map(|devices| devices
+                    .iter()
+                    .filter_map(|device| device
+                        .get("group_update")
+                        .filter(|update| !update.is_null()))
+                    .collect::<Vec<_>>())
         );
         std::thread::yield_now();
     }
