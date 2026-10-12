@@ -60,7 +60,7 @@ impl GroupUpdateDeliveryBenchmark {
     pub async fn load_due(&self) -> anyhow::Result<()> {
         let due = self
             .repository
-            .due_group_updates(&self.space_id, 3, None)
+            .due_group_updates(&self.space_id, 3, None, None)
             .await?;
         if due.len() != 8 {
             return Err(anyhow::anyhow!(

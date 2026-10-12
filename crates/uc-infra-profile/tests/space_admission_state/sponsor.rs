@@ -551,6 +551,8 @@ fn membership_ledger() -> MembershipRecord {
         },
         history_exchange: Default::default(),
         branch_recovery: Default::default(),
+        group_update_recovery: None,
+        prepared_group_updates: Default::default(),
     }))
 }
 

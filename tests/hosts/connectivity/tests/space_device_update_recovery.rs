@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
+use std::net::{Ipv4Addr, UdpSocket};
+use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -90,12 +92,35 @@ struct HostProcess {
     reader: Option<JoinHandle<()>>,
     root: TempDir,
     rendezvous: String,
+    binary: PathBuf,
+    legacy_group_updates: bool,
+    bind_port: Option<u16>,
 }
 
 impl HostProcess {
     fn start(rendezvous: &str) -> Self {
+        Self::start_binary(
+            rendezvous,
+            PathBuf::from(env!("CARGO_BIN_EXE_uc-connectivity-host")),
+            false,
+            None,
+        )
+    }
+    fn start_binary(
+        rendezvous: &str,
+        binary: PathBuf,
+        legacy_group_updates: bool,
+        bind_port: Option<u16>,
+    ) -> Self {
         let root = TempDir::new().expect("host root");
-        let (child, input, replies, reader) = Self::spawn(root.path(), rendezvous, None);
+        let (child, input, replies, reader) = Self::spawn(
+            root.path(),
+            rendezvous,
+            None,
+            &binary,
+            legacy_group_updates,
+            bind_port,
+        );
         Self {
             child,
             input,
@@ -103,6 +128,9 @@ impl HostProcess {
             reader: Some(reader),
             root,
             rendezvous: rendezvous.to_owned(),
+            binary,
+            legacy_group_updates,
+            bind_port,
         }
     }
 
@@ -110,8 +138,11 @@ impl HostProcess {
         root: &std::path::Path,
         rendezvous: &str,
         secure_storage: Option<Value>,
+        binary: &PathBuf,
+        legacy_group_updates: bool,
+        bind_port: Option<u16>,
     ) -> (Child, ChildStdin, Receiver<Value>, JoinHandle<()>) {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_uc-connectivity-host"))
+        let mut child = Command::new(binary)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -123,6 +154,8 @@ impl HostProcess {
             "root": root,
             "rendezvous": rendezvous,
             "relay": false,
+            "legacy_group_updates": legacy_group_updates,
+            "bind_port": bind_port,
         });
         if let Some(secure_storage) = secure_storage {
             start["secure_storage"] = secure_storage;
@@ -136,13 +169,38 @@ impl HostProcess {
     }
 
     fn request(&mut self, request: Value) -> Value {
-        writeln!(self.input, "{request}").expect("write host request");
-        self.input.flush().expect("flush host request");
-        let response = self.read_response();
-        response
-            .get("ok")
-            .cloned()
-            .unwrap_or_else(|| panic!("host request failed: {response}"))
+        let deadline = Instant::now() + WAIT_TIMEOUT;
+        let command = request["command"].as_str().unwrap_or("missing");
+        loop {
+            writeln!(self.input, "{request}").expect("write host request");
+            self.input.flush().expect("flush host request");
+            let response = self.read_response();
+            if let Some(ok) = response.get("ok") {
+                return ok.clone();
+            }
+            // runtime 世代切换的 1103 在动作前返回；只读查询的 1211/1212 按原期限等待可用。
+            if (response["code"] == 1103
+                || (response["code"] == 1211
+                    && matches!(command, "eligibility" | "membership_diagnostics"))
+                || (response["code"] == 1212 && command == "membership_diagnostics"))
+                && matches!(
+                    command,
+                    "invite"
+                        | "eligibility"
+                        | "set_membership_history_held"
+                        | "arm_group_update_tamper"
+                        | "opportunity"
+                        | "membership_diagnostics"
+                        | "set_network_partition"
+                        | "network_endpoint"
+                )
+                && Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+            panic!("host request {command} failed: {response}");
+        }
     }
 
     fn read_response(&mut self) -> Value {
@@ -156,13 +214,34 @@ impl HostProcess {
     }
 
     fn restart(&mut self) {
+        self.restart_with_crash(false);
+    }
+
+    fn restart_with_crash(&mut self, crash: bool) {
         let secure_storage = self.request(json!({ "command": "secure_storage" }));
-        let _ = self.request(json!({ "command": "shutdown" }));
+        if crash {
+            // 不执行 Engine shutdown；模拟进程丢失，恢复只能依赖已提交的 SQLite 与宿主密钥。
+            self.child
+                .kill()
+                .expect("kill host at durable recovery boundary");
+        } else {
+            let _ = self.request(json!({ "command": "shutdown" }));
+        }
         let status = self.child.wait().expect("wait for stopped host");
-        assert!(status.success(), "host exit before restart: {status}");
+        assert_eq!(
+            status.success(),
+            !crash,
+            "host exit before restart: {status}"
+        );
         self.join_reader();
-        let (child, input, replies, reader) =
-            Self::spawn(self.root.path(), &self.rendezvous, Some(secure_storage));
+        let (child, input, replies, reader) = Self::spawn(
+            self.root.path(),
+            &self.rendezvous,
+            Some(secure_storage),
+            &self.binary,
+            self.legacy_group_updates,
+            self.bind_port,
+        );
         self.child = child;
         self.input = input;
         self.replies = replies;
@@ -199,7 +278,15 @@ fn wait_for_phase(host: &mut HostProcess, expected: &str) -> Value {
         }
         assert!(
             Instant::now() < deadline,
-            "space device update did not reach {expected}: {update}"
+            "space device update did not reach {expected}: {update}; deliveries: {:?}",
+            status["device_trust"]["devices"]
+                .as_array()
+                .map(|devices| devices
+                    .iter()
+                    .filter_map(|device| device
+                        .get("group_update")
+                        .filter(|update| !update.is_null()))
+                    .collect::<Vec<_>>())
         );
         std::thread::yield_now();
     }
@@ -371,4 +458,287 @@ fn next_reply(replies: &Receiver<Value>) -> Value {
     replies
         .recv_timeout(WAIT_TIMEOUT)
         .expect("host must reply before the wait deadline")
+}
+
+fn wait_for_active_join(host: &mut HostProcess) {
+    let deadline = Instant::now() + WAIT_TIMEOUT;
+    loop {
+        let choices = host.request(json!({"command": "eligibility"}));
+        let status = &choices["device_trust"]["current_join"]["status"];
+        if status == "active" {
+            return;
+        }
+        assert!(
+            status != "rejected" && status != "terminated" && Instant::now() < deadline,
+            "join must complete before membership recovery starts: {status}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// 三个独立 Engine 进程、真实 SQLite/MLS/QUIC：纯联系不能解除拒绝，正确历史和实际 ACK 才能。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn three_process_group_rejection_recovers_only_after_verified_history() {
+    let rendezvous = mount_rendezvous().await;
+    let mut a = HostProcess::start(&rendezvous.uri());
+    // 场景只验证拒绝与历史恢复；禁用 relay 时，重启继续使用同一直接地址。
+    let port_probe = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("reserve receiver port");
+    let port = port_probe.local_addr().expect("receiver port").port();
+    drop(port_probe);
+    let mut b = HostProcess::start_binary(
+        &rendezvous.uri(),
+        PathBuf::from(env!("CARGO_BIN_EXE_uc-connectivity-host")),
+        false,
+        Some(port),
+    );
+    let mut c = HostProcess::start(&rendezvous.uri());
+    a.request(json!({"command": "create", "name": "A"}));
+    let invitation = a.request(json!({"command": "invite"}))["invitation"].clone();
+    b.request(json!({"command": "join", "name": "B", "invitation": invitation}));
+    wait_for_active_join(&mut b);
+    wait_for_phase(&mut a, "completed");
+    wait_for_phase(&mut b, "completed");
+    wait_for_branch(&mut [&mut a, &mut b], 2);
+    let peer =
+        b.request(json!({"command": "eligibility"}))["device_trust"]["local_device_id"].clone();
+    assert!(peer.is_string());
+    for host in [&mut a, &mut c] {
+        host.request(json!({"command": "set_membership_history_held", "held": true, "peer": peer}));
+    }
+    // 先形成完整的新分支，再让一次性篡改进入真实交换；不把准入期间的连接变化算作安全拒绝。
+    let a_endpoint = a.request(json!({"command": "network_endpoint"}));
+    let b_endpoint = b.request(json!({"command": "network_endpoint"}));
+    a.request(json!({"command": "set_network_partition", "endpoint_ids": [b_endpoint]}));
+    b.request(json!({"command": "set_network_partition", "endpoint_ids": [a_endpoint]}));
+    let invitation = a.request(json!({"command": "invite"}))["invitation"].clone();
+    c.request(json!({"command": "join", "name": "C", "invitation": invitation}));
+    wait_for_active_join(&mut c);
+    wait_for_branch(&mut [&mut a, &mut c], 3);
+    a.request(json!({"command": "arm_group_update_tamper", "count": 1}));
+    b.request(json!({"command": "set_network_partition", "endpoint_ids": []}));
+    a.request(json!({"command": "set_network_partition", "endpoint_ids": []}));
+    a.request(json!({"command": "opportunity"}));
+    a.request(json!({"command": "wait_space_work_event", "kind": "group_update_tampered", "after_sequence": 0}));
+    let rejected = wait_for_phase(&mut a, "needs_attention");
+    assert_eq!(rejected["reason"], "device_security_update_rejected");
+    b.restart();
+    b.request(json!({"command": "opportunity"}));
+    // 摘要与实际重新认证允许完成，但没有正确后缀的阶段仍持续可见。
+    for _ in 0..5 {
+        assert_eq!(
+            a.request(json!({"command": "eligibility"}))["device_trust"]["space_device_update"]
+                ["phase"],
+            "needs_attention"
+        );
+        std::thread::sleep(Duration::from_millis(400));
+    }
+    for host in [&mut a, &mut c] {
+        host.request(json!({"command": "set_membership_history_held", "held": false}));
+    }
+    a.request(json!({"command": "opportunity"}));
+    b.request(json!({"command": "opportunity"}));
+    wait_for_phase(&mut a, "completed");
+    b.request(json!({"command": "wait_space_work_event", "kind": "group_update_applied", "after_sequence": 0}));
+    a.shutdown();
+    b.shutdown();
+    c.shutdown();
+}
+
+async fn fixed_main_group_interop(legacy: bool) {
+    let rendezvous = mount_rendezvous().await;
+    let old = PathBuf::from(
+        std::env::var_os("UC_GROUP_UPDATE_OLD_HOST")
+            .expect("fixed main host binary must be provided"),
+    );
+    let current = PathBuf::from(env!("CARGO_BIN_EXE_uc-connectivity-host"));
+    let mut a = HostProcess::start_binary(&rendezvous.uri(), old, false, None);
+    let mut b = HostProcess::start_binary(&rendezvous.uri(), current.clone(), legacy, None);
+    let mut c = HostProcess::start_binary(&rendezvous.uri(), current.clone(), legacy, None);
+    let mut d = HostProcess::start_binary(&rendezvous.uri(), current, legacy, None);
+    a.request(json!({"command": "create", "name": "OldA"}));
+    let invitation = a.request(json!({"command": "invite"}))["invitation"].clone();
+    b.request(json!({"command": "join", "name": "NewB", "invitation": invitation}));
+    wait_for_active_join(&mut b);
+    wait_for_phase(&mut a, "completed");
+    wait_for_phase(&mut b, "completed");
+    // 新 B 生成更新，保留旧 A：真实新→旧发送和旧 ACK。
+    let invitation = b.request(json!({"command": "invite"}))["invitation"].clone();
+    c.request(json!({"command": "join", "name": "NewC", "invitation": invitation}));
+    wait_for_active_join(&mut c);
+    wait_for_phase(&mut b, "completed");
+    wait_for_phase(&mut a, "completed");
+    // 旧 A 再生成更新，保留新 B/C：真实旧→新发送与新 ACK。
+    let invitation = a.request(json!({"command": "invite"}))["invitation"].clone();
+    d.request(json!({"command": "join", "name": "NewD", "invitation": invitation}));
+    wait_for_active_join(&mut d);
+    wait_for_phase(&mut a, "completed");
+    wait_for_phase(&mut b, "completed");
+    let events = b.request(json!({"command": "space_work_events"}));
+    let kinds = if legacy {
+        [
+            "group_update_legacy_wire_sent",
+            "group_update_legacy_wire_acknowledged",
+        ]
+    } else {
+        [
+            "group_update_current_wire_sent",
+            "group_update_current_wire_acknowledged",
+        ]
+    };
+    for kind in kinds {
+        assert!(
+            events
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|event| event["kind"] == kind),
+            "actual wire must prove each direction of the selected group protocol: {kind}"
+        );
+    }
+    a.shutdown();
+    b.shutdown();
+    c.shutdown();
+    d.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要固定 main 二进制 UC_GROUP_UPDATE_OLD_HOST；独立兼容验收显式执行"]
+async fn fixed_main_group_update_v2_interoperates_both_directions() {
+    fixed_main_group_interop(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要固定 main 二进制 UC_GROUP_UPDATE_OLD_HOST；独立兼容验收显式执行"]
+async fn fixed_main_group_update_v1_interoperates_both_directions() {
+    fixed_main_group_interop(true).await;
+}
+
+fn join_host(sponsor: &mut HostProcess, joiner: &mut HostProcess, name: &str) {
+    let invitation = sponsor.request(json!({"command": "invite"}))["invitation"].clone();
+    joiner.request(json!({"command": "join", "name": name, "invitation": invitation}));
+    wait_for_active_join(joiner);
+}
+
+fn wait_for_branch(hosts: &mut [&mut HostProcess], count: u32) -> u64 {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let snapshots = hosts
+            .iter_mut()
+            .map(|host| host.request(json!({"command": "membership_diagnostics"})))
+            .collect::<Vec<_>>();
+        if snapshots.iter().all(|snapshot| {
+            snapshot["head_event_id"] == snapshots[0]["head_event_id"]
+                && snapshot["branch_id"] == snapshots[0]["branch_id"]
+                && snapshot["effective_member_count"] == count
+                && snapshot["pending_effect_count"] == 0
+        }) {
+            return snapshots[0]["group_epoch"].as_u64().unwrap();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "separate processes must finish verified branch and actual local effects"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// 独立进程重现真实 3→5 缺口、持久需求重启、原发送者离线与第三方连续恢复。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn separate_process_missing_predecessor_survives_restart_and_source_shutdown() {
+    let started = Instant::now();
+    let record_stage =
+        |name: &str| eprintln!("缺口恢复验收阶段：{name}，耗时 {:?}", started.elapsed());
+    record_stage("开始");
+    let rendezvous = mount_rendezvous().await;
+    let mut a = HostProcess::start(&rendezvous.uri());
+    // 本场景关闭 relay；固定重启端口，隔离地址重新发现与密钥缺口恢复两种验收责任。
+    // nextest 独占场景，接收方强杀并 wait 后再绑定同一 UDP 端口。
+    let port_probe = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("reserve receiver port");
+    let port = port_probe.local_addr().expect("receiver port").port();
+    drop(port_probe);
+    let mut b = HostProcess::start_binary(
+        &rendezvous.uri(),
+        PathBuf::from(env!("CARGO_BIN_EXE_uc-connectivity-host")),
+        false,
+        Some(port),
+    );
+    let mut c = HostProcess::start(&rendezvous.uri());
+    let mut d = HostProcess::start(&rendezvous.uri());
+    let mut e = HostProcess::start(&rendezvous.uri());
+    a.request(json!({"command": "create", "name": "A"}));
+    join_host(&mut a, &mut b, "B");
+    join_host(&mut a, &mut c, "C");
+    let before = wait_for_branch(&mut [&mut a, &mut b, &mut c], 3);
+    let b_peer =
+        b.request(json!({"command": "eligibility"}))["device_trust"]["local_device_id"].clone();
+    let a_endpoint = a.request(json!({"command": "network_endpoint"}));
+    let b_endpoint = b.request(json!({"command": "network_endpoint"}));
+    a.request(json!({"command": "set_network_partition", "endpoint_ids": [b_endpoint]}));
+    b.request(json!({"command": "set_network_partition", "endpoint_ids": [a_endpoint]}));
+    b.request(json!({"command": "set_membership_history_held", "held": true}));
+    for host in [&mut c, &mut d, &mut e] {
+        host.request(
+            json!({"command": "set_membership_history_held", "held": true, "peer": b_peer}),
+        );
+    }
+    join_host(&mut a, &mut d, "D");
+    wait_for_branch(&mut [&mut a, &mut c, &mut d], 4);
+    join_host(&mut c, &mut e, "E");
+    let target = wait_for_branch(&mut [&mut c, &mut d, &mut e], 5);
+    let missing = b.request(json!({"command": "wait_space_work_event", "kind": "group_update_missing_predecessor_observed", "after_sequence": 0}));
+    // ACK 3 在恢复需求持久提交之后发送；跨过这个边界再 kill，而不是只看到下层缺口错误。
+    b.request(json!({"command": "wait_space_work_event", "kind": "group_update_current_wire_acknowledged", "after_sequence": missing["sequence"]}));
+    assert_eq!(
+        b.request(json!({"command": "membership_diagnostics"}))["group_epoch"],
+        before
+    );
+    record_stage("缺口需求已持久化并确认");
+    a.shutdown();
+    b.restart_with_crash(true);
+    record_stage("接收方强杀后重启");
+    assert_eq!(
+        b.request(json!({"command": "membership_diagnostics"}))["group_epoch"],
+        before
+    );
+    for host in [&mut c, &mut d, &mut e] {
+        host.request(json!({"command": "set_membership_history_held", "held": false}));
+    }
+    assert_eq!(
+        wait_for_branch(&mut [&mut b, &mut c, &mut d, &mut e], 5),
+        target
+    );
+    record_stage("真实目标 epoch 已安装");
+    let mut previous = Value::Null;
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let choices = c.request(json!({"command": "eligibility"}));
+        let peer = choices["device_trust"]["devices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|device| device["device_id"] == b_peer)
+            .expect("B remains a current member");
+        if peer["group_update"] != previous {
+            eprintln!(
+                "缺口恢复验收发送待办：{}，耗时 {:?}",
+                peer["group_update"],
+                started.elapsed()
+            );
+            previous = peer["group_update"].clone();
+        }
+        if peer["group_update"].is_null() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "C must receive actual ACK for B's recovered update"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    record_stage("发送方实际 ACK 已结清");
+    b.request(json!({"command": "wait_space_work_event", "kind": "group_update_applied", "after_sequence": 0}));
+    b.shutdown();
+    c.shutdown();
+    d.shutdown();
+    e.shutdown();
 }

@@ -16,8 +16,9 @@ mod space_work;
 
 pub(crate) use admission_settlement::{GatedJoinerActivation, JoinerFinalConfirmationGate};
 pub(crate) use space_work::{
-    ControlledSpaceAdmissionTransport, FaultableGroupUpdateReceiver, RecordedGroupUpdateDispatch,
-    RecordedMembershipHistoryExchange, SpaceWorkTestControl,
+    ControlledSpaceAdmissionTransport, FaultableGroupUpdateReceiver, FaultableGroupUpdateWire,
+    GatedMembershipHistoryEndpoint, RecordedGroupUpdateDispatch, RecordedMembershipHistoryExchange,
+    SpaceWorkTestControl,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,7 +48,12 @@ pub enum DevSpaceWorkEventKind {
     MembershipHistorySyncReplyReceived,
     GroupUpdateReceiveFaultInjected,
     GroupUpdateApplied,
+    GroupUpdateMissingPredecessorObserved,
     GroupUpdateTampered,
+    GroupUpdateCurrentWireSent,
+    GroupUpdateLegacyWireSent,
+    GroupUpdateCurrentWireAcknowledged,
+    GroupUpdateLegacyWireAcknowledged,
     LegacyReceiverRejectionInjected,
 }
 
@@ -239,6 +245,11 @@ pub enum DevOperation {
         count: usize,
     },
     ClearMembershipHistoryFailures,
+    /// 阻止正确后缀/证据抵达，保留摘要联系；释放后走真实历史应用。
+    SetMembershipHistoryHeld {
+        held: bool,
+        peer: Option<String>,
+    },
     /// 持续让本机作为接收方的组密钥更新应用以指定的本地失败结束，直到传入 `None`。
     SetGroupUpdateReceiveFault {
         fault: Option<DevGroupUpdateReceiveFault>,
@@ -299,6 +310,7 @@ impl fmt::Debug for DevOperation {
             Self::ArmMembershipHistoryFailures { .. } => "arm_membership_history_failures",
             Self::ClearMembershipHistoryFailures => "clear_membership_history_failures",
             Self::SetGroupUpdateReceiveFault { .. } => "set_group_update_receive_fault",
+            Self::SetMembershipHistoryHeld { .. } => "set_membership_history_held",
             Self::ArmGroupUpdateTamper { .. } => "arm_group_update_tamper",
             Self::ArmLegacyReceiverRejection { .. } => "arm_legacy_receiver_rejection",
             Self::WaitForSpaceWorkEvent { .. } => "wait_for_space_work_event",
@@ -455,6 +467,7 @@ pub enum DevOperationResult {
     },
     GroupUpdateReceiveFaultSet,
     GroupUpdateTamperArmed,
+    MembershipHistoryHoldSet,
     LegacyReceiverRejectionArmed,
     SpaceWorkEvent(DevSpaceWorkEvent),
     SpaceWorkEvents(Vec<DevSpaceWorkEvent>),
@@ -507,6 +520,7 @@ impl fmt::Debug for DevOperationResult {
             Self::MembershipHistoryFailuresArmed { .. } => "membership_history_failures_armed",
             Self::MembershipHistoryFailuresCleared { .. } => "membership_history_failures_cleared",
             Self::GroupUpdateReceiveFaultSet => "group_update_receive_fault_set",
+            Self::MembershipHistoryHoldSet => "membership_history_hold_set",
             Self::GroupUpdateTamperArmed => "group_update_tamper_armed",
             Self::LegacyReceiverRejectionArmed => "legacy_receiver_rejection_armed",
             Self::SpaceWorkEvent(_) => "space_work_event",

@@ -11,6 +11,7 @@ use tokio::io::{
     AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf, ReadHalf, WriteHalf,
 };
 use tokio::sync::{mpsc, watch, Mutex, Semaphore};
+use uc_application::deps::ConnectionProtocol;
 use uc_application::deps::{
     AdmissionAttempt, AdmissionGrant, ClipboardReceiverPort, ConnectionMode, ConnectivityBackend,
     ConnectivityError, ConnectivityManager, ConnectivityPolicy, PeerConnection, PeerReceiveStream,
@@ -84,6 +85,9 @@ impl PeerConnection for MemoryConnection {
     }
     fn mode(&self) -> ConnectionMode {
         ConnectionMode::Multiplexed
+    }
+    fn protocol(&self) -> ConnectionProtocol {
+        ConnectionProtocol::MultiplexedClipboard
     }
     fn channel(&self) -> ConnectionChannel {
         ConnectionChannel::Unknown
@@ -398,6 +402,9 @@ impl PeerConnection for LoopbackConnection {
     }
     fn mode(&self) -> ConnectionMode {
         ConnectionMode::Multiplexed
+    }
+    fn protocol(&self) -> ConnectionProtocol {
+        ConnectionProtocol::MultiplexedClipboard
     }
     fn channel(&self) -> ConnectionChannel {
         ConnectionChannel::Unknown

@@ -5,6 +5,8 @@ use crate::{
 };
 use tokio::time::Instant;
 #[cfg(feature = "dev-tools")]
+use uc_core::ids::DeviceId;
+#[cfg(feature = "dev-tools")]
 use uc_infra_p2p::network::iroh::{CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN};
 
 #[cfg(feature = "dev-tools")]
@@ -851,6 +853,23 @@ impl EngineRuntime for ProductionRuntime {
                     .space_work_control()
                     .set_group_update_receive_fault(fault);
                 Ok(DevOperationResult::GroupUpdateReceiveFaultSet)
+            }
+            DevOperation::SetMembershipHistoryHeld { held, peer } => {
+                let peer = peer
+                    .map(|peer| {
+                        DeviceId::try_new(peer).ok_or_else(|| {
+                            operation_error_with_code(
+                                1912,
+                                "set history test gate",
+                                anyhow::anyhow!("invalid test peer"),
+                            )
+                        })
+                    })
+                    .transpose()?;
+                self.joiner_final_confirmation_gate
+                    .space_work_control()
+                    .set_history_held(held, peer);
+                Ok(DevOperationResult::MembershipHistoryHoldSet)
             }
             DevOperation::ArmGroupUpdateTamper { count } => {
                 self.joiner_final_confirmation_gate

@@ -212,13 +212,21 @@ impl DeliverPendingGroupUpdatesUseCase {
     async fn deliverable_updates(
         &self,
         reachable_peers: &[DeviceId],
+        verified_peers: &[DeviceId],
     ) -> Result<Vec<PendingGroupUpdate>, KeyEpochError> {
         let now_ms = self.clock.now_ms();
-        let mut pending = self.store.due_space_group_updates(now_ms, None).await?;
+        let mut pending = self
+            .store
+            .due_space_group_updates(now_ms, None, None)
+            .await?;
         for peer in reachable_peers {
             let expedited = self
                 .store
-                .due_space_group_updates(now_ms, Some(*peer))
+                .due_space_group_updates(
+                    now_ms,
+                    Some(*peer),
+                    verified_peers.contains(peer).then_some(*peer),
+                )
                 .await?;
             for update in expedited {
                 if update.recipient() == peer
@@ -330,7 +338,10 @@ impl DeliverPendingGroupUpdatesPort for DeliverPendingGroupUpdatesUseCase {
                 reauthenticated.push(peer);
             }
         }
-        let pending = match self.deliverable_updates(&reauthenticated).await {
+        let pending = match self
+            .deliverable_updates(&reauthenticated, reachable_peers)
+            .await
+        {
             Ok(pending) => pending,
             Err(error) => return classify_store_error(&error),
         };
@@ -446,9 +457,10 @@ mod tests {
             &self,
             _: i64,
             online_peer: Option<DeviceId>,
+            verified_history_peer: Option<DeviceId>,
         ) -> Result<Vec<PendingGroupUpdate>, KeyEpochError> {
             let mut due = self.pending.lock().unwrap().clone();
-            if let Some(peer) = online_peer {
+            if let Some(peer) = online_peer.or(verified_history_peer) {
                 due.extend(
                     self.backed_off
                         .lock()

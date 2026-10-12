@@ -5,10 +5,13 @@ use iroh::endpoint::Connection;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::broadcast;
-use uc_application::deps::{ConnectionMode, ConnectivityError, PeerConnection, StreamPair};
+use uc_application::deps::{
+    ConnectionMode, ConnectionProtocol, ConnectivityError, PeerConnection, StreamPair,
+};
 use uc_core::ids::DeviceId;
 use uc_core::ports::{ConnectionChannel, PeerReachabilityChanged, ReachabilityState};
-use uc_sync_protocol::clipboard::MULTIPLEXED_CLIPBOARD_ALPN;
+use uc_sync_protocol::clipboard::{CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN};
+use uc_sync_protocol::group_update::{GROUP_UPDATE_ALPN, LEGACY_GROUP_UPDATE_ALPN};
 
 pub(crate) struct IrohPeerConnection {
     native: Connection,
@@ -77,6 +80,16 @@ impl PeerConnection for IrohPeerConnection {
             ConnectionMode::SingleExchange
         }
     }
+    fn protocol(&self) -> ConnectionProtocol {
+        match self.native.alpn() {
+            MULTIPLEXED_CLIPBOARD_ALPN => ConnectionProtocol::MultiplexedClipboard,
+            CLIPBOARD_ALPN => ConnectionProtocol::Clipboard,
+            GROUP_UPDATE_ALPN => ConnectionProtocol::GroupUpdate,
+            LEGACY_GROUP_UPDATE_ALPN => ConnectionProtocol::LegacyGroupUpdate,
+            // 只在四种固定协议 handler/backend 中构造；未知连接不提供新协议能力。
+            _ => ConnectionProtocol::Unsupported,
+        }
+    }
     fn channel(&self) -> ConnectionChannel {
         connection_channel(&self.native)
     }
@@ -89,7 +102,7 @@ impl PeerConnection for IrohPeerConnection {
         self.unreachable.load(Ordering::Acquire)
     }
     fn close(&self) {
-        self.native.close(0u32.into(), b"clipboard exchange ended");
+        self.native.close(0u32.into(), b"exchange ended");
     }
     async fn closed(&self) {
         if let Some((target, events)) = &self.liveness {

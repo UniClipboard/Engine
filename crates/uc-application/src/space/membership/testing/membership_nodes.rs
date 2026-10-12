@@ -1,6 +1,8 @@
 //! 多节点成员测试台：每个节点是一套完整的成员状态负责人、待办执行器与用户动作，节点之间经虚拟
 //! 网络交换成员历史与受限投递。时钟由全部节点共享，由场景推进。
+use crate::space::membership::group_update::NoSecurityRemoval;
 
+use crate::space::membership::HistorySynchronizer;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -204,8 +206,12 @@ impl VirtualNode {
                 security: effects.clone(),
                 activation: effects,
                 restricted_delivery: transport.clone(),
-                history_transport: transport.clone(),
-                address_refresh: Arc::new(NoopAddressRefresh),
+                history: Arc::new(HistorySynchronizer::new(
+                    owner.clone(),
+                    transport.clone(),
+                    Arc::new(NoopAddressRefresh),
+                )),
+                group_recovery: Arc::new(CompletedStep),
                 conflicts: Arc::new(CompletedStep),
                 group_updates: Arc::new(CompletedStep),
             },
@@ -221,6 +227,7 @@ impl VirtualNode {
                 signer.clone(),
                 query.clone(),
                 worker.clone(),
+                Arc::new(NoSecurityRemoval),
             ),
             decide: DecideDeviceTrustChangeUseCase::new(
                 owner.clone(),

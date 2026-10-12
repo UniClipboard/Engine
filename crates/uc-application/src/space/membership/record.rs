@@ -12,8 +12,8 @@ use std::collections::BTreeMap;
 
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    MembershipBranchTransitionV1, MembershipConflictId, MembershipHistoryAckV3,
-    MembershipLedgerSnapshot,
+    BaseMembershipHistoryPosition, MembershipBranchTransitionV1, MembershipConflictId,
+    MembershipHistoryAckV3, MembershipLedgerSnapshot,
 };
 
 pub use branch_recovery::{
@@ -46,6 +46,16 @@ pub struct SpaceMembershipRecord {
     pub ledger: MembershipLedgerSnapshot,
     pub history_exchange: MembershipHistoryExchangeRecord,
     pub branch_recovery: MembershipBranchRecoveryRecord,
+    pub group_update_recovery: Option<GroupUpdateRecoveryRecord>,
+    pub prepared_group_updates: BTreeMap<[u8; 32], Vec<u8>>,
+}
+
+/// 当前 Space 连续分支上的单一恢复需求；敏感字段随完整成员记录加密保存。
+#[derive(Clone, PartialEq, Eq)]
+pub struct GroupUpdateRecoveryRecord {
+    pub base_position: BaseMembershipHistoryPosition,
+    pub target_epoch: u64,
+    pub payload_digest: [u8; 32],
 }
 
 /// 历史交换协议的工作存储：未收齐的入站分页与已完成传输的回执。

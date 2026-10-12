@@ -4,7 +4,7 @@ mod backend;
 mod connection;
 mod stream;
 pub use admission::IrohConnectionAdmission;
-pub use backend::IrohConnectivityBackend;
+pub use backend::{ConnectivityProfile, IrohConnectivityBackend};
 pub(crate) use connection::IrohPeerConnection;
 
 mod clipboard_handler;

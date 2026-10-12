@@ -563,10 +563,16 @@ pub struct ApplicationDeps {
     pub analytics: Arc<dyn AnalyticsPort>,
 }
 pub use crate::space::MembershipProjectionPlan;
+pub use crate::space::{
+    ApplyGroupUpdatePort, GroupUpdateApplyError, GroupUpdateEndpoint, GroupUpdateIncoming,
+    GroupUpdateLocalWorkPort, GroupUpdateReceiveOutcome, GroupUpdateReceiverPort,
+    GroupUpdateRecoveryRecord, GroupUpdateWirePort, GroupUpdateWork, PreparedGroupUpdate,
+    VerifiedHistoryGroupUpdate,
+};
 
 pub use crate::connectivity::{
-    AdmissionAttempt, AdmissionGrant, ConnectionLease, ConnectionMode, ConnectivityBackend,
-    ConnectivityError, ConnectivityManager, ConnectivityPolicy, InboundConnectionError,
-    PeerConnection, PeerReceiveStream, PeerSendStream, SessionConnectionAdmissionPort, StreamLease,
-    StreamPair,
+    AdmissionAttempt, AdmissionGrant, ConnectionLease, ConnectionMode, ConnectionProtocol,
+    ConnectivityBackend, ConnectivityError, ConnectivityManager, ConnectivityPolicy,
+    InboundConnectionError, PeerConnection, PeerReceiveStream, PeerSendStream,
+    SessionConnectionAdmissionPort, StreamLease, StreamPair,
 };

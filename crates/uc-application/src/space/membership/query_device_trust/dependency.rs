@@ -64,6 +64,8 @@ fn cause_of(source: &anyhow::Error) -> &'static str {
             KeyEpochStateIssue::UnsupportedOperation => "key_epoch_unsupported_operation",
             KeyEpochStateIssue::InvalidStage => "key_epoch_invalid_stage",
             KeyEpochStateIssue::StateChanged => "key_epoch_state_changed",
+            KeyEpochStateIssue::MissingPredecessor => "key_epoch_missing_predecessor",
+            KeyEpochStateIssue::UnverifiedReplay => "key_epoch_unverified_replay",
         },
         _ => "key_epoch_other",
     }

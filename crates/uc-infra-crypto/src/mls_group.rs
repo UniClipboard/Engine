@@ -829,6 +829,38 @@ impl MlsGroupEngine {
         Ok(group.epoch().as_u64())
     }
 
+    /// 从冷恢复后的当前 MLS 状态导出本 epoch 的目录封装密钥，用于核对持久材料与可信更新。
+    pub fn current_wrapping_key(client_state: &MlsClientState) -> Result<MasterKey, MlsGroupError> {
+        let (provider, stored) = restore(client_state)?;
+        let group_id = stored.group_id.ok_or_else(MlsGroupError::invalid_state)?;
+        let group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&group_id))
+            .map_err(MlsGroupError::protocol_from)?
+            .ok_or_else(MlsGroupError::invalid_state)?;
+        if !group.is_active() {
+            return Err(MlsGroupError::invalid_state());
+        }
+        export_wrapping_key(&group, &provider)
+    }
+
+    /// 在顺序/重放判定之前核对消息类别、Space 与声明 epoch；本方法不代替 MLS 密码验证。
+    pub fn validate_commit_envelope(
+        commit: &[u8],
+        expected_space_id: &[u8],
+        target_epoch: u64,
+    ) -> Result<(), MlsGroupError> {
+        let message = MlsMessageIn::tls_deserialize_exact(commit.to_vec())
+            .map_err(MlsGroupError::invalid_message_from)?
+            .try_into_protocol_message()
+            .map_err(MlsGroupError::invalid_message_from)?;
+        if message.content_type() != ContentType::Commit
+            || message.group_id().as_slice() != expected_space_id
+            || target_epoch.checked_sub(1) != Some(message.epoch().as_u64())
+        {
+            return Err(MlsGroupError::invalid_message());
+        }
+        Ok(())
+    }
+
     pub fn current_member_instance(
         client_state: &MlsClientState,
         device_identity: &[u8],

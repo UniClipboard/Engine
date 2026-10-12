@@ -65,28 +65,38 @@ pub(super) fn tag_action(action: GroupUpdateAction, error: KeyEpochError) -> Key
 /// 接收方应用组密钥更新失败后，对发送方可见的裁决。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GroupUpdateVerdict {
-    /// 更新未通过密码学、授权、版本或顺序校验，或失败无法确认只与本机环境有关。
+    /// 更新未通过密码学、授权、版本或顺序校验；失败属于裁决更新的验证动作。
     Rejected,
     /// 失败只与本机暂时状态有关（会话未就绪、存储不可用），稍后重发同一更新可能成功。
     Unavailable,
+    /// 本机持久化、材料损坏、权限或安装失败；关闭交换并保留来源，不拒绝远端更新。
+    LocalFailure,
 }
 
-/// 把应用失败归为裁决。只有明确识别为本机环境故障的失败才是 `Unavailable`，其余一律按拒绝处理：
-/// 未知失败不会被自动当成暂时错误。
+/// 根据完整 source 与动作分类：可识别暂时环境故障为 `Unavailable`，本机能力失败为
+/// `LocalFailure`，验证更新的失败才为 `Rejected`；未知失败不会被自动当成暂时错误。
 pub fn group_update_apply_verdict(error: &KeyEpochError) -> GroupUpdateVerdict {
     use uc_core::membership::KeyEpochStateIssue as State;
     match error {
-        KeyEpochError::SpaceNotReady | KeyEpochError::StateIssue(State::MissingMaterial) => {
+        KeyEpochError::SpaceNotReady
+        | KeyEpochError::StateIssue(
+            State::MissingMaterial | State::MissingPredecessor | State::UnverifiedReplay,
+        ) => {
             return GroupUpdateVerdict::Unavailable;
         }
         KeyEpochError::Repository(_) | KeyEpochError::SecurityState { .. } => {}
+        KeyEpochError::StateIssue(State::CorruptMaterial | State::StateChanged) => {
+            return GroupUpdateVerdict::LocalFailure;
+        }
         _ => return GroupUpdateVerdict::Rejected,
     }
     let mut environmental = false;
     let mut judges_update = false;
+    let mut local_operation = false;
     let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error);
     while let Some(error) = current {
         if let Some(context) = error.downcast_ref::<GroupUpdateFailure>() {
+            local_operation |= matches!(context.action, GroupUpdateAction::LoadState | GroupUpdateAction::PersistState | GroupUpdateAction::InstallSecurityState);
             judges_update |= matches!(
                 context.action,
                 GroupUpdateAction::DecodeUpdate
@@ -126,6 +136,8 @@ pub fn group_update_apply_verdict(error: &KeyEpochError) -> GroupUpdateVerdict {
     }
     if environmental && !judges_update {
         GroupUpdateVerdict::Unavailable
+    } else if local_operation || !judges_update {
+        GroupUpdateVerdict::LocalFailure
     } else {
         GroupUpdateVerdict::Rejected
     }
@@ -150,11 +162,13 @@ pub fn group_update_failure_detail(
             State::MissingMaterial | State::MissingRevocation | State::MissingStage => {
                 (Phase::LoadState, Reason::NotFound)
             }
-            State::CorruptMaterial => (Phase::ValidateUpdate, Reason::Corrupt),
+            State::CorruptMaterial => (Phase::LoadState, Reason::Corrupt),
             State::UnsupportedUpdate => (Phase::ValidateUpdate, Reason::UnsupportedVersion),
-            State::OutOfOrderUpdate | State::StateChanged | State::InvalidStage => {
-                (Phase::ValidateUpdate, Reason::Conflict)
-            }
+            State::OutOfOrderUpdate
+            | State::MissingPredecessor
+            | State::UnverifiedReplay
+            | State::StateChanged
+            | State::InvalidStage => (Phase::ValidateUpdate, Reason::Conflict),
             State::EpochMismatch => (Phase::ApplySecurityUpdate, Reason::Conflict),
             _ => (Phase::Unknown, Reason::Unknown),
         };
@@ -218,6 +232,35 @@ mod tests {
     use uc_observability_contract::diagnostics::connectivity::{
         ClassifiedGroupUpdateStorageFailure, GroupUpdateReason,
     };
+
+    #[test]
+    fn local_permission_corruption_and_install_failures_do_not_reject_remote_updates() {
+        for action in [
+            GroupUpdateAction::LoadState,
+            GroupUpdateAction::PersistState,
+            GroupUpdateAction::InstallSecurityState,
+        ] {
+            for kind in [
+                std::io::ErrorKind::PermissionDenied,
+                std::io::ErrorKind::InvalidData,
+            ] {
+                let error = failed_action(action, std::io::Error::from(kind));
+                assert_eq!(
+                    group_update_apply_verdict(&error),
+                    GroupUpdateVerdict::LocalFailure
+                );
+                assert!(std::error::Error::source(&error).is_some());
+            }
+        }
+        let invalid = failed_action(
+            GroupUpdateAction::ApplySecurityUpdate,
+            std::io::Error::from(std::io::ErrorKind::InvalidData),
+        );
+        assert_eq!(
+            group_update_apply_verdict(&invalid),
+            GroupUpdateVerdict::Rejected
+        );
+    }
 
     /// 本 crate 不接触任何存储库的具体错误类型；真实 Diesel/SQLite 失败如何
     /// 被翻译成 `ClassifiedGroupUpdateStorageFailure` 由存储层的转换处验证

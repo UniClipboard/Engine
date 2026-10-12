@@ -97,6 +97,8 @@ fn single_member_space(revision: u64) -> SpaceMembershipRecord {
         ledger: ledger.snapshot(),
         history_exchange: Default::default(),
         branch_recovery: Default::default(),
+        group_update_recovery: None,
+        prepared_group_updates: Default::default(),
     }
 }
 

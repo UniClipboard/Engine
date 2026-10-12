@@ -34,7 +34,7 @@ struct MembershipLedgerRecordV5 {
 }
 
 #[derive(Serialize, Deserialize)]
-struct SpaceRecordV5 {
+pub(super) struct SpaceRecordV5 {
     history: Vec<u8>,
     local_device_id: DeviceId,
     local_member: MemberInstanceId,
@@ -120,7 +120,8 @@ enum MemberEffectMaterialV5 {
     Decision(MembershipDecisionV2),
 }
 
-pub(super) fn encode(
+#[cfg(test)]
+pub(crate) fn encode(
     record: &MembershipRecord,
     generation: [u8; 16],
 ) -> Result<Vec<u8>, MembershipLedgerError> {
@@ -157,7 +158,9 @@ pub(super) fn decode(
 }
 
 impl SpaceRecordV5 {
-    fn from_record(record: &SpaceMembershipRecord) -> Result<Self, MembershipLedgerError> {
+    pub(super) fn from_record(
+        record: &SpaceMembershipRecord,
+    ) -> Result<Self, MembershipLedgerError> {
         let ledger = &record.ledger;
         Ok(Self {
             history: ledger
@@ -191,7 +194,7 @@ impl SpaceRecordV5 {
         })
     }
 
-    fn into_record(
+    pub(super) fn into_record(
         self,
         revision: u64,
         verifier: &dyn HistoricalMembershipSignatureVerifier,
@@ -230,6 +233,8 @@ impl SpaceRecordV5 {
                 completed_inbound_transfers: self.completed_inbound_transfers,
             },
             branch_recovery: self.branch_recovery.into_record()?,
+            group_update_recovery: None,
+            prepared_group_updates: Default::default(),
         })
     }
 }

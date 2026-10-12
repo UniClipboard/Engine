@@ -148,13 +148,13 @@ fn legacy_v4_fixtures_migrate_according_to_the_mapping_table() {
             legacy_revision(bytes) + 1,
             "{name}: migration is one write"
         );
-        // 迁移结果满足聚合不变量，且 V5 往返不变。
+        // 迁移结果满足聚合不变量，且 V6 往返不变。
         restored(&record);
         let space = MembershipRecord::Space(Box::new(record));
         let encoded = codec::encode(&space, FIXTURE_GENERATION).unwrap();
         match codec::decode(&encoded, FIXTURE_GENERATION, &AcceptingVerifier, NOW + 1) {
-            Ok(Decoded::Current(decoded)) => assert_eq!(decoded, space, "{name}: V5 round trip"),
-            _ => panic!("{name}: V5 must decode as current"),
+            Ok(Decoded::Current(decoded)) => assert_eq!(decoded, space, "{name}: V6 round trip"),
+            _ => panic!("{name}: V6 must decode as current"),
         }
     }
 
@@ -335,12 +335,12 @@ impl Profile {
 }
 
 #[test]
-fn unlock_read_migrates_once_and_rereads_the_same_v5_record() {
+fn unlock_read_migrates_once_and_rereads_the_same_v6_record() {
     let profile = Profile::new(FIXTURE_GENERATION);
     profile.write_plaintext(NOTICE_PENDING);
 
     let migrated = profile.store(AcceptingVerifier, NOW).load().unwrap();
-    assert_eq!(profile.stored_version(), 5);
+    assert_eq!(profile.stored_version(), 6);
     // 再次读取时不再迁移：离开窗口起点保持首次迁移时刻。
     let reread = profile
         .store(AcceptingVerifier, NOW + 60_000)
@@ -371,7 +371,7 @@ fn failed_migration_leaves_the_original_row_untouched() {
 }
 
 #[test]
-fn legacy_rows_without_a_space_migrate_to_an_empty_v5_record() {
+fn legacy_rows_without_a_space_migrate_to_an_empty_v6_record() {
     for (version, empty_fields) in [(1u8, 9), (2, 14), (3, 15), (4, 15)] {
         let profile = Profile::new([0x71; 16]);
         // 固定旧布局字节：版本、generation、修订号 7，其余字段全部为空。
@@ -387,7 +387,7 @@ fn legacy_rows_without_a_space_migrate_to_an_empty_v5_record() {
             MembershipRecord::NoSpace { revision: 8 },
             "V{version}"
         );
-        assert_eq!(profile.stored_version(), 5, "V{version}");
+        assert_eq!(profile.stored_version(), 6, "V{version}");
         assert_eq!(
             store.load().unwrap(),
             MembershipRecord::NoSpace { revision: 8 }
@@ -517,4 +517,44 @@ async fn a_read_model_plan_without_a_read_model_store_writes_nothing() {
         store.load().unwrap(),
         MembershipRecord::NoSpace { revision: 0 }
     );
+}
+
+#[test]
+fn legacy_v5_records_migrate_without_inventing_recovery_or_application_evidence() {
+    let legacy = migrate("two members", FIXTURES[0].1);
+    let record = MembershipRecord::Space(Box::new(legacy));
+    let bytes = codec::encode_legacy_v5(&record, FIXTURE_GENERATION).unwrap();
+    assert_eq!(postcard::take_from_bytes::<u16>(&bytes).unwrap().0, 5);
+    let restored = match codec::decode(&bytes, FIXTURE_GENERATION, &AcceptingVerifier, NOW).unwrap()
+    {
+        Decoded::Migrated(record) => record,
+        Decoded::Current(_) => panic!("V5 must migrate"),
+    };
+    assert_eq!(record, restored);
+    let current = codec::encode(&restored, FIXTURE_GENERATION).unwrap();
+    assert_eq!(postcard::take_from_bytes::<u16>(&current).unwrap().0, 6);
+}
+
+#[test]
+fn v6_recovery_appendix_roundtrips_with_the_existing_member_facts() {
+    let mut space = migrate("two members", FIXTURES[0].1);
+    let base_position = space.ledger.history.current_position().unwrap();
+    space.group_update_recovery = Some(uc_application::deps::GroupUpdateRecoveryRecord {
+        base_position,
+        target_epoch: 5,
+        payload_digest: [0x41; 32],
+    });
+    space
+        .prepared_group_updates
+        .insert([0x42; 32], vec![0x53, 0x54]);
+    let expected = MembershipRecord::Space(Box::new(space));
+    let bytes = codec::encode(&expected, FIXTURE_GENERATION).unwrap();
+    match codec::decode(&bytes, FIXTURE_GENERATION, &AcceptingVerifier, NOW).unwrap() {
+        Decoded::Current(actual) => assert_eq!(actual, expected),
+        _ => panic!("V6 is current"),
+    }
+    assert!(codec::decode(&bytes, [0; 16], &AcceptingVerifier, NOW).is_err());
+    let mut trailing = bytes.clone();
+    trailing.push(0xff);
+    assert!(codec::decode(&trailing, FIXTURE_GENERATION, &AcceptingVerifier, NOW).is_err());
 }

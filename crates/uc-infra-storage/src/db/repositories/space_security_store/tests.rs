@@ -3,12 +3,12 @@ use diesel::sql_types::{BigInt, Binary, Nullable, Text};
 use tempfile::{tempdir, TempDir};
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
-    BeginRevocationOutcome, BootstrapId, ContentKeyId, GroupEpoch, GroupUpdateDeliveryStatus,
-    GroupUpdateDispatchError, GroupUpdateRejection, LegacyBootstrapRecord,
-    LegacyBootstrapRepositoryPort, LegacyBootstrapStage, LegacyBootstrapStatus, PendingGroupUpdate,
-    PreparedRevocationResolution, RevocationId, RevocationOutboxMessage, RevocationRecord,
-    RevocationRepositoryPort, RevocationStage, RevocationStatus, SpaceKeyMaterial, SpaceKeyState,
-    SpaceSecurityStateResetPort,
+    BeginRevocationOutcome, BootstrapId, ContentKeyId, GroupEpoch, GroupUpdateDeliveryCondition,
+    GroupUpdateDeliveryStatus, GroupUpdateDispatchError, GroupUpdateRejection,
+    LegacyBootstrapRecord, LegacyBootstrapRepositoryPort, LegacyBootstrapStage,
+    LegacyBootstrapStatus, PendingGroupUpdate, PreparedRevocationResolution, RevocationId,
+    RevocationOutboxMessage, RevocationRecord, RevocationRepositoryPort, RevocationStage,
+    RevocationStatus, SpaceKeyMaterial, SpaceKeyState, SpaceSecurityStateResetPort,
 };
 
 use super::DieselSpaceSecurityStore;
@@ -389,7 +389,10 @@ async fn delivery_failures_survive_restart_without_rewriting_space_material() {
         }
     );
 
-    let initial = repo.due_group_updates(&space_id, 100, None).await.unwrap();
+    let initial = repo
+        .due_group_updates(&space_id, 100, None, None)
+        .await
+        .unwrap();
     assert_eq!(initial.len(), 3);
 
     let before_failure = {
@@ -435,13 +438,13 @@ async fn delivery_failures_survive_restart_without_rewriting_space_material() {
 
     let reopened = reopen_repo(&pool);
     let waiting = reopened
-        .due_group_updates(&space_id, 101, None)
+        .due_group_updates(&space_id, 101, None, None)
         .await
         .unwrap();
     assert_eq!(waiting, vec![available.clone()]);
 
     let peer_online = reopened
-        .due_group_updates(&space_id, 101, Some(DeviceId::new("offline-peer")))
+        .due_group_updates(&space_id, 101, Some(DeviceId::new("offline-peer")), None)
         .await
         .unwrap();
     assert!(peer_online.contains(&first));
@@ -456,7 +459,9 @@ async fn delivery_status_exposes_the_persisted_retry_deadline() {
     let pending = pending_update("offline-peer", 1);
     material.add_pending_group_updates([pending.clone()], 100);
     repo.save_space_material(&material).await.unwrap();
-    repo.due_group_updates(&space_id, 100, None).await.unwrap();
+    repo.due_group_updates(&space_id, 100, None, None)
+        .await
+        .unwrap();
 
     repo.record_group_update_failures(
         &space_id,
@@ -489,7 +494,9 @@ async fn rejected_delivery_stays_out_of_the_queue_after_unrelated_changes_and_re
     let available = pending_update("available-peer", 1);
     material.add_pending_group_updates([rejected.clone(), later.clone(), available.clone()], 100);
     repo.save_space_material(&material).await.unwrap();
-    repo.due_group_updates(&space_id, 100, None).await.unwrap();
+    repo.due_group_updates(&space_id, 100, None, None)
+        .await
+        .unwrap();
     repo.record_group_update_failures(
         &space_id,
         &[(
@@ -515,13 +522,39 @@ async fn rejected_delivery_stays_out_of_the_queue_after_unrelated_changes_and_re
 
     let reopened = reopen_repo(&pool);
     let due = reopened
-        .due_group_updates(&space_id, i64::MAX, Some(DeviceId::new("rejected-peer")))
+        .due_group_updates(
+            &space_id,
+            i64::MAX,
+            Some(DeviceId::new("rejected-peer")),
+            None,
+        )
         .await
         .unwrap();
     assert!(!due.contains(&rejected));
     assert!(!due.contains(&later));
     assert!(due.contains(&available));
     assert!(due.contains(&unrelated));
+    let verified = reopened
+        .due_group_updates(&space_id, 201, None, Some(DeviceId::new("rejected-peer")))
+        .await
+        .unwrap();
+    assert!(verified.contains(&rejected));
+    assert!(verified.contains(&later));
+    assert!(reopened
+        .group_update_deliveries(&space_id)
+        .await
+        .unwrap()
+        .iter()
+        .any(|delivery| delivery.condition
+            == GroupUpdateDeliveryCondition::Rejected(GroupUpdateRejection::ByReceiver)));
+    let after_notification = reopened
+        .due_group_updates(&space_id, i64::MAX, None, None)
+        .await
+        .unwrap();
+    assert!(
+        !after_notification.contains(&rejected),
+        "history must not clear sticky rejection without actual ACK"
+    );
 }
 
 #[tokio::test]
@@ -545,7 +578,7 @@ async fn delivery_reads_only_the_requested_space() {
         material.add_pending_group_updates([pending_update(recipient, 1)], 2);
         repo.save_space_material(&material).await.unwrap();
         assert_eq!(
-            repo.due_group_updates(&space_id, 3, None)
+            repo.due_group_updates(&space_id, 3, None, None)
                 .await
                 .unwrap()
                 .len(),
@@ -569,14 +602,14 @@ async fn delivery_reads_only_the_requested_space() {
     drop(conn);
 
     assert_eq!(
-        repo.due_group_updates(&first_space, 4, None)
+        repo.due_group_updates(&first_space, 4, None, None)
             .await
             .unwrap()
             .len(),
         1
     );
     assert!(repo
-        .due_group_updates(&second_space, 4, None)
+        .due_group_updates(&second_space, 4, None, None)
         .await
         .is_err());
 }
@@ -1363,7 +1396,7 @@ async fn settled_update_disappears_from_the_delivery_index_and_status() {
 
     // 先让索引按当前 material 建立起来，与真实运行顺序一致。
     assert_eq!(
-        repo.due_group_updates(&space_id, 100, None)
+        repo.due_group_updates(&space_id, 100, None, None)
             .await
             .unwrap()
             .len(),
@@ -1376,7 +1409,7 @@ async fn settled_update_disappears_from_the_delivery_index_and_status() {
     repo.save_space_material(&settled).await.unwrap();
 
     assert!(
-        repo.due_group_updates(&space_id, 300, None)
+        repo.due_group_updates(&space_id, 300, None, None)
             .await
             .unwrap()
             .is_empty(),

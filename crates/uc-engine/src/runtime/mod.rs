@@ -174,6 +174,10 @@ impl ProductionRuntime {
             uc_infra_p2p::network::iroh::IrohNetworkPartitionGate::default();
         #[cfg(feature = "dev-tools")]
         let joiner_final_confirmation_gate = Arc::new(JoinerFinalConfirmationGate::default());
+        #[cfg(feature = "dev-tools")]
+        joiner_final_confirmation_gate
+            .space_work_control()
+            .set_legacy_group_protocol(config.uses_test_legacy_group_updates());
         let emitter = Arc::new(EngineHostEventEmitter::new(events.clone()));
         let wiring = wire_host_capabilities_with_emitter(
             &config,

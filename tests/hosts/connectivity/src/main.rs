@@ -148,6 +148,23 @@ fn space_work_event_kind(value: &str) -> Result<uc_engine::DevSpaceWorkEventKind
         "ordinary_member_update_started" => {
             Ok(uc_engine::DevSpaceWorkEventKind::OrdinaryMemberUpdateStarted)
         }
+        "group_update_missing_predecessor_observed" => {
+            Ok(uc_engine::DevSpaceWorkEventKind::GroupUpdateMissingPredecessorObserved)
+        }
+        "group_update_tampered" => Ok(uc_engine::DevSpaceWorkEventKind::GroupUpdateTampered),
+        "group_update_applied" => Ok(uc_engine::DevSpaceWorkEventKind::GroupUpdateApplied),
+        "group_update_current_wire_sent" => {
+            Ok(uc_engine::DevSpaceWorkEventKind::GroupUpdateCurrentWireSent)
+        }
+        "group_update_current_wire_acknowledged" => {
+            Ok(uc_engine::DevSpaceWorkEventKind::GroupUpdateCurrentWireAcknowledged)
+        }
+        "group_update_legacy_wire_sent" => {
+            Ok(uc_engine::DevSpaceWorkEventKind::GroupUpdateLegacyWireSent)
+        }
+        "group_update_legacy_wire_acknowledged" => {
+            Ok(uc_engine::DevSpaceWorkEventKind::GroupUpdateLegacyWireAcknowledged)
+        }
         "membership_history_sync_started" => {
             Ok(uc_engine::DevSpaceWorkEventKind::MembershipHistorySyncStarted)
         }
@@ -200,10 +217,25 @@ fn space_work_event_json(event: uc_engine::DevSpaceWorkEvent) -> Value {
         uc_engine::DevSpaceWorkEventKind::GroupUpdateReceiveFaultInjected => {
             "group_update_receive_fault_injected"
         }
+        uc_engine::DevSpaceWorkEventKind::GroupUpdateMissingPredecessorObserved => {
+            "group_update_missing_predecessor_observed"
+        }
         uc_engine::DevSpaceWorkEventKind::GroupUpdateApplied => "group_update_applied",
         uc_engine::DevSpaceWorkEventKind::GroupUpdateTampered => "group_update_tampered",
         uc_engine::DevSpaceWorkEventKind::LegacyReceiverRejectionInjected => {
             "legacy_receiver_rejection_injected"
+        }
+        uc_engine::DevSpaceWorkEventKind::GroupUpdateCurrentWireSent => {
+            "group_update_current_wire_sent"
+        }
+        uc_engine::DevSpaceWorkEventKind::GroupUpdateLegacyWireSent => {
+            "group_update_legacy_wire_sent"
+        }
+        uc_engine::DevSpaceWorkEventKind::GroupUpdateCurrentWireAcknowledged => {
+            "group_update_current_wire_acknowledged"
+        }
+        uc_engine::DevSpaceWorkEventKind::GroupUpdateLegacyWireAcknowledged => {
+            "group_update_legacy_wire_acknowledged"
         }
     };
     json!({ "sequence": event.sequence, "kind": kind })
@@ -234,7 +266,10 @@ async fn operation(
         #[cfg(feature = "current-engine")]
         "send_concurrent" => return concurrent_send::send(engine, request).await,
         #[cfg(feature = "current-engine")]
-        "network_endpoint" | "reject_reachability_dials" | "rejected_dials" => {
+        "network_endpoint"
+        | "reject_reachability_dials"
+        | "rejected_dials"
+        | "set_network_partition" => {
             return network_faults::execute(engine, command, request).await;
         }
         "capture" => return content::capture(engine, clipboard, files, request).await,
@@ -327,6 +362,30 @@ async fn operation(
         return Ok(json!({ "remaining": remaining }));
     }
     #[cfg(feature = "current-engine")]
+    if command == "set_membership_history_held" {
+        let held = request["held"]
+            .as_bool()
+            .context("missing history hold state")?;
+        engine
+            .execute_dev(uc_engine::DevOperation::SetMembershipHistoryHeld {
+                held,
+                peer: request["peer"].as_str().map(str::to_owned),
+            })
+            .await?;
+        return Ok(json!(true));
+    }
+    #[cfg(feature = "current-engine")]
+    if command == "arm_group_update_tamper" {
+        let count = request["count"]
+            .as_u64()
+            .and_then(|count| usize::try_from(count).ok())
+            .context("invalid tamper count")?;
+        engine
+            .execute_dev(uc_engine::DevOperation::ArmGroupUpdateTamper { count })
+            .await?;
+        return Ok(json!(true));
+    }
+    #[cfg(feature = "current-engine")]
     if command == "wait_space_work_event" {
         let after_sequence = request["after_sequence"]
             .as_u64()
@@ -406,6 +465,8 @@ async fn operation(
         "peers" => Operation::QueryPeerConnections,
         #[cfg(feature = "device-group-choices")]
         "eligibility" => Operation::QueryDeviceGroupChoices,
+        #[cfg(feature = "current-engine")]
+        "membership_diagnostics" => Operation::QueryMembershipDiagnostics,
         #[cfg(feature = "connectivity-opportunity")]
         "opportunity" => Operation::NotifyConnectivityOpportunity {
             reason: ConnectivityOpportunity::NetworkChanged,
@@ -472,6 +533,8 @@ async fn operation(
         OperationResult::PeerConnections(peers) => serde_json::to_value(peers)?,
         #[cfg(feature = "device-group-choices")]
         OperationResult::DeviceGroupChoices(choices) => serde_json::to_value(choices)?,
+        #[cfg(feature = "current-engine")]
+        OperationResult::MembershipDiagnostics(summary) => serde_json::to_value(summary)?,
         OperationResult::EntrySent(report) => serde_json::to_value(report)?,
         OperationResult::SettingsUpdated(outcome) => serde_json::to_value(outcome)?,
         OperationResult::HistoryEntries(entries) => serde_json::to_value(entries)?,
@@ -579,6 +642,9 @@ async fn main() -> Result<()> {
         EngineConfig::new(app_version).with_rendezvous_base_url(string(&start, "rendezvous")?);
     #[cfg(feature = "test-network-config")]
     let config = config.with_test_relay_fallback(start["relay"].as_bool().unwrap_or(false));
+    #[cfg(feature = "current-engine")]
+    let config = config
+        .with_test_legacy_group_updates(start["legacy_group_updates"].as_bool().unwrap_or(false));
     #[cfg(feature = "test-network-config")]
     let config = match start["bind_port"].as_u64() {
         Some(port) => config.with_test_iroh_bind_port(

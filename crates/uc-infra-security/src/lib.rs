@@ -13,6 +13,8 @@ mod key_material;
 pub mod key_migration_adapter;
 pub mod key_slot_store;
 mod membership_update;
+mod prepared_group_material;
+mod prepared_recovery_recipient;
 pub mod profile_content_key_vault;
 pub mod profile_passphrase_recovery;
 mod scope_identifier;

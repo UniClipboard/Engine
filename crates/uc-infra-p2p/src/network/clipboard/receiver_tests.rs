@@ -1,4 +1,5 @@
 use crate::network::iroh::admitted_connections::AdmittedConnections;
+use crate::network::iroh::connectivity::ConnectivityProfile;
 use crate::network::iroh::connectivity::{IrohClipboardHandler, IrohConnectivityBackend};
 use crate::network::iroh::inbound_peer::{member_table_directory, member_table_identity_directory};
 use crate::network::iroh::StaticPeerAdmission;
@@ -476,7 +477,12 @@ async fn cancelling_one_dispatch_preserves_another_active_exchange() {
         .unwrap();
     let backend = Arc::new(RecordingBackend {
         calls: AtomicUsize::new(0),
-        native: IrohConnectivityBackend::new(sender.clone(), addresses, peer_reachability_mock()),
+        native: IrohConnectivityBackend::new(
+            sender.clone(),
+            addresses,
+            peer_reachability_mock(),
+            ConnectivityProfile::Clipboard,
+        ),
         connections: std::sync::Mutex::new(Vec::new()),
     });
     let dispatch = Arc::new(super::test_support::dispatch_with_backend(
@@ -619,7 +625,12 @@ async fn verify_liveness_recovery(delayed: bool) {
         .returning(move || subscriptions.subscribe());
     let backend = Arc::new(RecordingBackend {
         calls: AtomicUsize::new(0),
-        native: IrohConnectivityBackend::new(sender.clone(), addresses, Arc::new(reachability)),
+        native: IrohConnectivityBackend::new(
+            sender.clone(),
+            addresses,
+            Arc::new(reachability),
+            ConnectivityProfile::Clipboard,
+        ),
         connections: std::sync::Mutex::new(Vec::new()),
     });
     let adopting = Arc::new(Notify::new());

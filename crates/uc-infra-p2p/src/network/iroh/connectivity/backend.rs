@@ -9,22 +9,35 @@ use uc_core::ids::DeviceId;
 use uc_core::ports::{PeerAddressRepositoryPort, PeerReachabilityPort};
 use uc_observability_contract::diagnostics::connectivity::AddressInputSource;
 use uc_sync_protocol::clipboard::{CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN};
+use uc_sync_protocol::group_update::{GROUP_UPDATE_ALPN, LEGACY_GROUP_UPDATE_ALPN};
+
+/// 同一 endpoint 上的独立协议连接池只使用各自固定的协商配置。
+#[derive(Clone, Copy)]
+pub enum ConnectivityProfile {
+    Clipboard,
+    GroupUpdate,
+    /// 仅供固定旧端互通验收；实际能力仍由协商结果决定。
+    LegacyGroupUpdate,
+}
 
 pub struct IrohConnectivityBackend {
     endpoint: Arc<Endpoint>,
     addresses: PeerAddressResolver,
     reachability: Arc<dyn PeerReachabilityPort>,
+    profile: ConnectivityProfile,
 }
 impl IrohConnectivityBackend {
     pub fn new(
         endpoint: Arc<Endpoint>,
         addresses: Arc<dyn PeerAddressRepositoryPort>,
         reachability: Arc<dyn PeerReachabilityPort>,
+        profile: ConnectivityProfile,
     ) -> Self {
         Self {
             endpoint,
             addresses: PeerAddressResolver::new(addresses),
             reachability,
+            profile,
         }
     }
 }
@@ -40,12 +53,25 @@ impl ConnectivityBackend for IrohConnectivityBackend {
             .await
             .map_err(|error| ConnectivityError::AddressLookup(Box::new(error)))?
             .ok_or(ConnectivityError::Offline)?;
+        let (preferred, fallback, label) = match self.profile {
+            ConnectivityProfile::Clipboard => {
+                (MULTIPLEXED_CLIPBOARD_ALPN, CLIPBOARD_ALPN, "clipboard")
+            }
+            ConnectivityProfile::LegacyGroupUpdate => (
+                LEGACY_GROUP_UPDATE_ALPN,
+                LEGACY_GROUP_UPDATE_ALPN,
+                "group-update",
+            ),
+            ConnectivityProfile::GroupUpdate => {
+                (GROUP_UPDATE_ALPN, LEGACY_GROUP_UPDATE_ALPN, "group-update")
+            }
+        };
         match connect_with_staggered_retry_classified(
             self.endpoint.clone(),
             address,
-            MULTIPLEXED_CLIPBOARD_ALPN,
-            vec![CLIPBOARD_ALPN.to_vec()],
-            "clipboard",
+            preferred,
+            vec![fallback.to_vec()],
+            label,
             AddressInputSource::Stored,
         )
         .await
@@ -67,3 +93,6 @@ impl ConnectivityBackend for IrohConnectivityBackend {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

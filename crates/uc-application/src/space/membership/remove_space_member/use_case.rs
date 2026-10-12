@@ -14,7 +14,7 @@ use uc_observability_contract::{uc_info, uc_warn};
 use crate::space::membership::{
     ledger_error, CurrentMemberSignatureError, CurrentMemberSignaturePort, DeviceTrustStatus,
     MembershipLedgerError, MembershipMaintenanceStepOutcome, MembershipOwner, MembershipView,
-    QueryDeviceTrustUseCase, RecoverMembershipEffectsPort,
+    PrepareMembershipRemovalPort, QueryDeviceTrustUseCase, RecoverMembershipEffectsPort,
 };
 
 use super::{
@@ -55,6 +55,7 @@ pub(crate) struct RemoveSpaceMemberUseCase {
     signer: Arc<dyn CurrentMemberSignaturePort>,
     query: Arc<QueryDeviceTrustUseCase>,
     effects: Arc<dyn RecoverMembershipEffectsPort>,
+    group_updates: Arc<dyn PrepareMembershipRemovalPort>,
     execution_lock: tokio::sync::Mutex<()>,
 }
 
@@ -90,12 +91,14 @@ impl RemoveSpaceMemberUseCase {
         signer: Arc<dyn CurrentMemberSignaturePort>,
         query: Arc<QueryDeviceTrustUseCase>,
         effects: Arc<dyn RecoverMembershipEffectsPort>,
+        group_updates: Arc<dyn PrepareMembershipRemovalPort>,
     ) -> Self {
         Self {
             owner,
             signer,
             query,
             effects,
+            group_updates,
             execution_lock: tokio::sync::Mutex::new(()),
         }
     }
@@ -216,6 +219,27 @@ impl RemoveSpaceMemberUseCase {
                 history_digest,
             )
             .map_err(RemoveSpaceMemberError::recovery_required_from)?;
+        let retained = history
+            .effective_members()
+            .into_iter()
+            .filter(|member| *member != target.member_instance_id && *member != local_member)
+            .filter_map(|member| history.admission_facts_for(member))
+            .map(|facts| facts.device_id)
+            .collect::<Vec<_>>();
+        let target_device = history
+            .admission_facts_for(target.member_instance_id)
+            .ok_or(RemoveSpaceMemberError::TargetNotFound)?
+            .device_id;
+        // 保持应用协调锁直到正式历史与私有暂存材料同一 CAS 提交。
+        let mut prepared = self
+            .group_updates
+            .prepare(&target_device, &retained, self.owner.now_ms())
+            .await
+            .map_err(RemoveSpaceMemberError::recovery_required_from)?;
+        let staged = prepared.update.take();
+        if let Some(update) = &staged {
+            event.security_update_payload = update.payload.clone();
+        }
         event.signature = self
             .signer
             .sign_current_member_payload(&event.signing_payload())
@@ -248,6 +272,12 @@ impl RemoveSpaceMemberUseCase {
                     .filter_map(|member| history.admission_facts_for(member))
                     .map(|facts| facts.device_id)
                     .collect::<Vec<_>>();
+                if let Some(staged) = &staged {
+                    draft.prepared_group_updates_mut()?.insert(
+                        Sha256::digest(&staged.payload).into(),
+                        staged.private_material.clone(),
+                    );
+                }
                 draft
                     .apply(LedgerInput::LocalRemovalSigned {
                         history,

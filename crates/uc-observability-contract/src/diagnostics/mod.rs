@@ -24,7 +24,38 @@ pub use profile_upgrade_backup::{record_profile_upgrade_backup_failure, LOCAL_DI
 
 tokio::task_local! {
     static CONTINUATION: opentelemetry::Context;
+    static PENDING_INBOUND: tracing::Span;
     static OPERATION_FAILURE: std::cell::Cell<Option<DiagnosticErrorType>>;
+}
+
+/// Engine 提供尚未进入的完整能力 span；协议边界认证后才绑定远端关联。
+pub async fn scope_pending_inbound<F: Future>(span: tracing::Span, future: F) -> F::Output {
+    PENDING_INBOUND.scope(span, future).await
+}
+
+pub fn bind_authenticated_inbound_parent(parent: opentelemetry::Context) -> bool {
+    PENDING_INBOUND
+        .try_with(|span| span.set_parent(parent).is_ok())
+        .unwrap_or(false)
+}
+
+pub fn capture_inbound_observation() -> ObservationContext {
+    PENDING_INBOUND
+        .try_with(|span| {
+            let current = span.context();
+            ObservationContext(
+                opentelemetry::Context::new()
+                    .with_remote_span_context(current.span().span_context().clone()),
+            )
+        })
+        .unwrap_or_else(|_| ObservationContext::capture())
+}
+
+pub async fn scope_authenticated_inbound<F: Future>(future: F) -> F::Output {
+    match PENDING_INBOUND.try_with(Clone::clone) {
+        Ok(span) => future.instrument(span).await,
+        Err(_) => future.await,
+    }
 }
 
 /// 完整能力调用的诊断作用域；不改变业务错误或接口。

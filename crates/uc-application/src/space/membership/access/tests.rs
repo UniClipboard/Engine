@@ -190,6 +190,8 @@ fn space_record(ledger: &MembershipLedger) -> MembershipRecord {
         ledger: ledger.snapshot(),
         history_exchange: Default::default(),
         branch_recovery: Default::default(),
+        group_update_recovery: None,
+        prepared_group_updates: Default::default(),
     }))
 }
 

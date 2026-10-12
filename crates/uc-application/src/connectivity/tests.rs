@@ -1,7 +1,7 @@
 use super::{
-    AdmissionAttempt, AdmissionGrant, ConnectionMode, ConnectivityBackend, ConnectivityError,
-    ConnectivityManager, ConnectivityPolicy, PeerConnection, PeerReceiveStream, PeerSendStream,
-    SessionConnectionAdmissionPort, StreamPair,
+    AdmissionAttempt, AdmissionGrant, ConnectionMode, ConnectionProtocol, ConnectivityBackend,
+    ConnectivityError, ConnectivityManager, ConnectivityPolicy, PeerConnection, PeerReceiveStream,
+    PeerSendStream, SessionConnectionAdmissionPort, StreamPair,
 };
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -34,6 +34,12 @@ impl PeerConnection for TestConnection {
     }
     fn mode(&self) -> ConnectionMode {
         self.mode
+    }
+    fn protocol(&self) -> ConnectionProtocol {
+        match self.mode {
+            ConnectionMode::SingleExchange => ConnectionProtocol::Clipboard,
+            ConnectionMode::Multiplexed => ConnectionProtocol::MultiplexedClipboard,
+        }
     }
     fn channel(&self) -> ConnectionChannel {
         ConnectionChannel::Unknown

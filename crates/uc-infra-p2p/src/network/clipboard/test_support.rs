@@ -3,6 +3,7 @@ use super::{ClipboardDispatchAdapter, ClipboardReceiverAdapter};
 use crate::network::iroh::admitted_connections::{
     AdmittedConnections, ConnectionRegistration, RevocationEpoch,
 };
+use crate::network::iroh::connectivity::ConnectivityProfile;
 use crate::network::iroh::connectivity::{
     IrohClipboardHandler, IrohConnectionAdmission, IrohConnectivityBackend,
 };
@@ -99,6 +100,7 @@ pub(super) fn dispatch_fixture(
             endpoint,
             addresses,
             reachability,
+            ConnectivityProfile::Clipboard,
         )),
         admission,
         policy,
@@ -123,6 +125,7 @@ impl ReceiverFixture {
             admission,
             fingerprint,
             AdmittedConnections::default(),
+            ConnectivityProfile::Clipboard,
         ));
         Self(Arc::new(ClipboardReceiverAdapter::new(
             ConnectivityManager::new(

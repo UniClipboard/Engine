@@ -28,6 +28,7 @@ use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use uc_application::deps::ClipboardReceiverPort;
+use uc_application::deps::GroupUpdateReceiverPort;
 use uc_application::deps::PeerIdentityDirectoryPort;
 use uc_observability_contract::{
     error_source::io_error_kind, log_fields::log_vocab, uc_debug, uc_info, uc_warn,
@@ -61,8 +62,7 @@ use uc_application::deps::{
 
 use uc_core::file_transfer::OutboundProgressReporterPort;
 use uc_core::membership::{
-    ContentExchangeGatePort, GroupRevocationPort, GroupUpdateDispatchPort,
-    MembershipHistoryExchangeEndpointPort, PeerAdmissionPort,
+    ContentExchangeGatePort, MembershipHistoryExchangeEndpointPort, PeerAdmissionPort,
 };
 use uc_core::ports::blob::BlobTransferPort;
 use uc_core::ports::pairing_invitation::{
@@ -91,9 +91,11 @@ use super::blobs::{IrohBlobTransferAdapter, BLOBS_ALPN};
 #[cfg(test)]
 const LEGACY_CLIPBOARD_ALPN: &[u8] = b"uniclipboard/clipboard/0";
 use super::connection_channel_adapter::IrohConnectionChannelAdapter;
-use super::connectivity::{IrohClipboardHandler, IrohConnectionAdmission, IrohConnectivityBackend};
+use super::connectivity::{
+    ConnectivityProfile, IrohClipboardHandler, IrohConnectionAdmission, IrohConnectivityBackend,
+};
 use super::group_update_adapter::{
-    IrohGroupUpdateAdapter, GROUP_UPDATE_ALPN, LEGACY_GROUP_UPDATE_ALPN,
+    IrohGroupUpdateHandler, GROUP_UPDATE_ALPN, LEGACY_GROUP_UPDATE_ALPN,
 };
 use super::identity_store::IrohIdentityStore;
 use super::inbound_peer::{PeerIdentityError, PeerIdentityResolver};
@@ -145,7 +147,7 @@ pub struct PairingInvitationHandlers {
 }
 
 /// 组装普通剪贴板连接负责人所需的完整能力；不暴露准入步骤。
-pub struct ClipboardConnectivityDeps {
+pub struct ConnectivityDeps {
     pub backend: Arc<dyn ConnectivityBackend>,
     pub admission: Arc<dyn SessionConnectionAdmissionPort>,
 }
@@ -154,10 +156,6 @@ pub struct ClipboardConnectivityDeps {
 pub struct ClipboardHandlers {
     pub dispatch: Arc<dyn ClipboardDispatchPort>,
     pub receiver: Arc<dyn ClipboardReceiverPort>,
-}
-
-pub struct GroupUpdateHandlers {
-    pub dispatch: Arc<dyn GroupUpdateDispatchPort>,
 }
 
 /// The active-clipboard state ports produced by
@@ -808,6 +806,24 @@ impl IrohSessionBuilder {
     }
 }
 
+fn session_protocol_alpns() -> [&'static [u8]; 13] {
+    [
+        SPACE_ADMISSION_ALPN,
+        PEER_REACHABILITY_ALPN,
+        LEGACY_PEER_REACHABILITY_ALPN,
+        MULTIPLEXED_CLIPBOARD_ALPN,
+        CLIPBOARD_ALPN,
+        GROUP_UPDATE_ALPN,
+        LEGACY_GROUP_UPDATE_ALPN,
+        MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
+        MEMBERSHIP_BRANCH_RECOVERY_ALPN,
+        ACTIVE_CLIPBOARD_ALPN,
+        ACTIVE_CLIPBOARD_PULL_ALPN,
+        TRANSFER_PROGRESS_ALPN,
+        BLOBS_ALPN,
+    ]
+}
+
 impl IrohNodeBuilder {
     /// 创建一套尚未发布的空间会话能力。
     pub fn prepare_session(&self) -> IrohSessionBuilder {
@@ -986,21 +1002,7 @@ impl IrohNodeBuilder {
         ));
         let network_recovery_observations = Arc::new(NetworkRecoveryObservationSource::new());
         let mut router_builder = ProtocolRouterBuilder::new((*endpoint).clone());
-        for alpn in [
-            SPACE_ADMISSION_ALPN,
-            PEER_REACHABILITY_ALPN,
-            LEGACY_PEER_REACHABILITY_ALPN,
-            MULTIPLEXED_CLIPBOARD_ALPN,
-            CLIPBOARD_ALPN,
-            GROUP_UPDATE_ALPN,
-            LEGACY_GROUP_UPDATE_ALPN,
-            MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
-            MEMBERSHIP_BRANCH_RECOVERY_ALPN,
-            ACTIVE_CLIPBOARD_ALPN,
-            ACTIVE_CLIPBOARD_PULL_ALPN,
-            TRANSFER_PROGRESS_ALPN,
-            BLOBS_ALPN,
-        ] {
+        for alpn in session_protocol_alpns() {
             router_builder = router_builder.accept(alpn, session_protocols.dispatcher(alpn));
         }
         uc_debug!(
@@ -1150,25 +1152,28 @@ impl IrohSessionBuilder {
     }
 
     /// 提供同一 endpoint、会话登记和权威身份目录下的连接能力，供 Engine 组装负责人。
-    pub fn clipboard_connectivity_deps(
+    pub fn connectivity_deps(
         &self,
+        profile: ConnectivityProfile,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         identities: Arc<dyn PeerIdentityDirectoryPort>,
         peer_admission: Arc<dyn PeerAdmissionPort>,
         fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
         peer_reachability: Arc<dyn PeerReachabilityPort>,
-    ) -> ClipboardConnectivityDeps {
-        ClipboardConnectivityDeps {
+    ) -> ConnectivityDeps {
+        ConnectivityDeps {
             backend: Arc::new(IrohConnectivityBackend::new(
                 self.context.endpoint.clone(),
                 peer_addr_repo,
                 peer_reachability,
+                profile,
             )),
             admission: Arc::new(IrohConnectionAdmission::new(
                 identities,
                 peer_admission,
                 fingerprint_factory,
                 self.admitted_connections.clone(),
+                profile,
             )),
         }
     }
@@ -1195,19 +1200,39 @@ impl IrohSessionBuilder {
     /// still accepts protocol handlers.
     pub fn install_group_updates(
         &mut self,
-        peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-        group_revocation: Arc<dyn GroupRevocationPort>,
-    ) -> Result<GroupUpdateHandlers, IrohNodeError> {
-        let adapter = Arc::new(IrohGroupUpdateAdapter::new(
-            Arc::clone(&self.context.endpoint),
-            peer_addr_repo,
-            group_revocation,
-        ));
+        manager: ConnectivityManager,
+        receiver: Arc<dyn GroupUpdateReceiverPort>,
+        legacy_only: bool,
+    ) -> Result<(), IrohNodeError> {
+        if legacy_only {
+            // 固定 Router 为全部世代预登记路由；只少装 handler 不会使 TLS 拒绝 /2。
+            // 互通验收必须同时限制握手公告，才能验证旧发送方的真实 /1 回退。
+            let mut advertised: Vec<Vec<u8>> = session_protocol_alpns()
+                .into_iter()
+                .filter(|alpn| *alpn != GROUP_UPDATE_ALPN)
+                .map(<[u8]>::to_vec)
+                .collect();
+            advertised.sort_by_key(|alpn| {
+                if alpn.as_slice() == PEER_REACHABILITY_ALPN {
+                    0
+                } else if alpn.as_slice() == MULTIPLEXED_CLIPBOARD_ALPN {
+                    1
+                } else {
+                    2
+                }
+            });
+            self.context.endpoint.set_alpns(advertised);
+        }
+        let protocols = if legacy_only {
+            vec![LEGACY_GROUP_UPDATE_ALPN]
+        } else {
+            vec![GROUP_UPDATE_ALPN, LEGACY_GROUP_UPDATE_ALPN]
+        };
         self.install_session_handler(
-            [GROUP_UPDATE_ALPN, LEGACY_GROUP_UPDATE_ALPN],
-            adapter.handler(),
+            protocols,
+            IrohGroupUpdateHandler::new(manager.clone(), receiver),
         )?;
-        Ok(GroupUpdateHandlers { dispatch: adapter })
+        Ok(())
     }
 
     pub fn install_membership_history_exchange(
@@ -2045,7 +2070,8 @@ mod tests {
 
         let ClipboardHandlers { dispatch, receiver } = builder
             .install_clipboard({
-                let deps = builder.clipboard_connectivity_deps(
+                let deps = builder.connectivity_deps(
+                    ConnectivityProfile::Clipboard,
                     peer_addr_repo,
                     Arc::new(EmptyMemberRepo),
                     Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
@@ -2122,7 +2148,8 @@ mod tests {
 
         let _clipboard = builder
             .install_clipboard({
-                let deps = builder.clipboard_connectivity_deps(
+                let deps = builder.connectivity_deps(
+                    ConnectivityProfile::Clipboard,
                     peer_addr_repo,
                     Arc::new(EmptyMemberRepo),
                     Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
@@ -2811,7 +2838,8 @@ mod tests {
                     .expect("install peer reachability");
                 let clipboard = builder
                     .install_clipboard({
-                        let deps = builder.clipboard_connectivity_deps(
+                        let deps = builder.connectivity_deps(
+                            ConnectivityProfile::Clipboard,
                             Arc::clone(&peer_addr_repo),
                             identities.clone(),
                             admission.clone(),
