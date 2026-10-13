@@ -109,4 +109,4 @@ FIN 后最多等待 3 秒，且不能超过入口剩余时间。通知完成只�
 同进程连接匿名编号与实际终态或完整接收的原连接 channel，不按跨端内容哈希或时间猜测关系。
 日志丢弃与关联缺口仍按原有限输出统计；路径已验证不等于整条诊断记录无丢失。
 
-实施验收见[当前剪贴板执行计划](../exec-plans/active/2026-10-14-active-clipboard-connectivity-plan.md)。
+实施验收见[当前剪贴板执行计划](../exec-plans/completed/2026-10-14-active-clipboard-connectivity-plan.md)。

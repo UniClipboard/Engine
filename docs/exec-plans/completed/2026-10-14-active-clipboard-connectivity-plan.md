@@ -1,9 +1,9 @@
 # Issue #34 第五切片：当前剪贴板状态与按需拉取执行计划
 
-状态：**本地实现与验收完成，待线上当前 head 检查**（2026-10-14）。
+状态：**完成：实现、本地验收与代码提交线上门禁通过**（2026-10-14）。
 唯一设计来源：[实现规格](2026-10-14-active-clipboard-connectivity-spec.md)。
 前置切片：[PR #180](https://github.com/UniClipboard/Engine/pull/180) 已合并；审计基线为
-`main 2f9afc9956b0cda82e65c912f0c0f6dc6aa51256`。本地实现与功能验收已完成；线上最终 head 未通过前不归档。
+`main 2f9afc9956b0cda82e65c912f0c0f6dc6aa51256`。完整实现、本地验收与代码提交线上门禁已完成；验收范围与跳过项见下文。
 
 ## 完整负责人
 
@@ -128,11 +128,11 @@ Cargo 由一个负责人串行执行，复用根 target 与 MBX。`check-engine-
 
 ## 阶段 6：交付与归档
 
-* [ ] 用 spec §9 逐项核对，不以 PR 合并或单条测试通过代替完整验收。
-* [ ] 更新[剪贴板连接长期设计](../../design-docs/clipboard-connectivity.md)中本片已实现事实，明确状态无 ACK、封套/文件边界与有限资源。
-* [ ] 按实际变更更新 Application/观测/安全主题，仅链接既有标准，不复制新的规范正文。
-* [ ] 记录最终源码、构建摘要、本地结果与线上当前 head 结果；保留首次失败证据与范围外问题。
-* [ ] 本 plan/spec 移入 completed，更新所有入口；Issue #34 保持剩余范围，不扩大本片完成声明。
+* [x] 用 spec §9 逐项核对，不以 PR 合并或单条测试通过代替完整验收。
+* [x] 更新[剪贴板连接长期设计](../../design-docs/clipboard-connectivity.md)中本片已实现事实，明确状态无 ACK、封套/文件边界与有限资源。
+* [x] 按实际变更更新 Application/观测/安全主题，仅链接既有标准，不复制新的规范正文。
+* [x] 记录最终源码、构建摘要、本地结果与线上当前 head 结果；保留首次失败证据与范围外问题。
+* [x] 本 plan/spec 移入 completed，更新所有入口；Issue #34 保持剩余范围，不扩大本片完成声明。
 
 ## 设计文档检查记录
 
@@ -174,10 +174,21 @@ Cargo 由一个负责人串行执行，复用根 target 与 MBX。`check-engine-
 
 目录首次完整读回及旧新两角色通过。目录再次激活的既有可用性/重复存储失败单列[技术债](../tech-debt-tracker.md)；已有内容不重复拉取由文本、图片和单文件验证，不预记目录二次行为通过。稳定锁定会退休接收世代；此场景验证不写入，Locked 字节另由原 codec 与真实 handler 合同验证。
 
-线上最终 head：待推送并完成 required checks，之后移入 completed、更新索引；不关闭整个 Issue #34。
+线上代码验收已通过，记录见下文；本 plan/spec 已移入 completed、更新索引。不关闭整个 Issue #34。
 
 线上首次检查：Windows x64/arm64 与仓库检查通过；升级 smoke 在新增脚本调用 `just` 时以 127 失败（runner 未安装，场景尚未开始）。日志 `online-upgrade-first.log` 保留。脚本已在加载构建环境后调用 Cargo；修正后的固定旧端 12 场景、Direct/Relay 各四类与根门禁全部通过，证据 `ci-command-*`。最终线上检查仍待完成。
 
 旧线上工作区文本用例内容读回通过，但快速状态连接在 4–7ms 内关闭，三条原生 `initial_path=unknown`，接收 channel 也为 Unknown；原始工件保存于 `online-first-artifacts`，不推断 Direct。普通未隔离宿主只验内容/交换，JSON 将路径验收记为 `skipped-uncontrolled-network`；隔离脚本显式要求 Direct/Relay 且空记录必失败。固定旧新矩阵也迁入同一隔离 Direct 环境，12 场景及真实路径通过（61.44 秒）。首次拉取连接计数必须大于零，再比较已有内容不重复拉取。
 
 - 线上 67b210a：Windows 双架构和仓库检查通过；固定旧新隔离 Direct 矩阵实际通过 67.33 秒，后置零测试检查因 runner 无 rg 失败。原始 online-upgrade-isolated-first.log 与 online-isolated-upgrade-artifacts 保留。改用标准 grep -qF；真实互通及 Direct/Relay 日志全部匹配，空输出/零测试必须拒绝；metadata/check/fmt/style/repository/diff 再次通过。
+
+## 线上验收与归档
+
+代码 head `88717719d63abd9b14eacfbc6059e4c2c2deeffe` 的 [PR Check](https://github.com/UniClipboard/Engine/actions/runs/38472686042) 与 [Windows Build](https://github.com/UniClipboard/Engine/actions/runs/38472686056) 全部必需作业通过。
+线上 workspace 4234/4234（25 配置跳过）、evidence 18/18、成员 smoke 16/16；原历史 Relay、原 E02 与本片 Direct/Relay 均通过。
+已下载并逐项核对 `engine-test-evidence` 中八个内容 JSON，均含实际状态及 pull 的相应路径。升级 smoke、原固定历史双向及本片固定 main 隔离 Direct 双角色通过。
+coverage 与额外完整网络矩阵按原工作流条件跳过，物理设备与更早历史完整矩阵仍跳过。
+
+无内容拒绝的普通宿主等待已同样区分实际拒绝/真实连接与路径记录；未知路径不推断直连，隔离环境仍须真实路径。失败断言前保存拒绝网络记录，本地单用例、隔离旧新矩阵（60.52 秒）及根门禁通过。
+最终归档提交沿用相同线上门禁，交付时核对 [PR #181 的当前 head 检查](https://github.com/UniClipboard/Engine/pull/181/checks)。
+唯一长期事实入口为[剪贴板连接设计](../../design-docs/clipboard-connectivity.md)；首次失败和范围外目录债务保留。

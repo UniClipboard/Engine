@@ -89,3 +89,4 @@
 
 - 无内容拒绝用例的普通宿主等待也混入路径非空条件；将实际固定拒绝与真实 pull 连接作为业务条件，路径仅在隔离环境另行严格断言，并在拒绝/路径断言前保存原始记录。单用例通过 4.18 秒，隔离旧新矩阵通过 60.52 秒，根门禁通过。
 - 88717719 当前源码的线上五项必需检查全部通过：PR Check 38472686042、Windows Build 38472686056。实际 workspace 4234/4234、evidence 18/18、成员 smoke 16/16；下载工件逐项核验隔离 Direct/Relay 八个 JSON 均有真实状态/pull 路径并通过。在线记录与工件见 online-code-*、online-tests-portable.log、online-upgrade-portable.log。
+- 实现 spec/plan 已移入 completed，PLANS、active/completed 双索引与长期设计入口更新；112 个相对链接可解析。归档根 metadata/check/fmt/style/repository/diff 全部通过。归档提交推送后继续核对最终 head，结果保存在 online-final-checks.json，文档使用 PR 当前 head 检查链接而不自引用提交摘要。
