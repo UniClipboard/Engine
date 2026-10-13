@@ -20,10 +20,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::mpsc::UnboundedReceiver;
 #[cfg(test)]
 use tokio::task::JoinHandle;
-use tokio::time::sleep;
+use tokio::time::sleep_until;
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 
@@ -32,18 +31,18 @@ use uc_core::ports::{PeerAddressRepositoryPort, PeerReachabilityPort, SettingsPo
 use uc_core::MemberRepositoryPort;
 use uc_observability_contract::{error_source::io_error_kind, uc_debug, uc_warn};
 
-use crate::clipboard::write::RestoreBroadcastRequest;
+use crate::clipboard::write::{RestoreBroadcastReceiver, RestoreBroadcastRequest};
 use crate::deps::CurrentSpaceMemberScopePort;
 
 use super::super::send_gate::MemberSendGate;
-use super::fanout::fan_out_active_state;
+use super::fanout::{fan_out_active_state, ActiveStateBroadcastTrigger};
 
 /// Debounce window for coalescing rapid restores into one broadcast (D7).
 const RESTORE_BROADCAST_DEBOUNCE: Duration = Duration::from_millis(300);
 
 /// Dependencies for the restore-broadcast worker.
 pub(crate) struct RestoreBroadcastWorker {
-    rx: UnboundedReceiver<RestoreBroadcastRequest>,
+    rx: RestoreBroadcastReceiver,
     settings: Arc<dyn SettingsPort>,
     dispatch: Arc<dyn ActiveClipboardDispatchPort>,
     peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
@@ -54,7 +53,7 @@ pub(crate) struct RestoreBroadcastWorker {
 
 impl RestoreBroadcastWorker {
     pub(crate) fn new(
-        rx: UnboundedReceiver<RestoreBroadcastRequest>,
+        rx: RestoreBroadcastReceiver,
         settings: Arc<dyn SettingsPort>,
         dispatch: Arc<dyn ActiveClipboardDispatchPort>,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
@@ -105,8 +104,7 @@ impl RestoreBroadcastWorker {
                     _ = cancel.cancelled() => return,
                     maybe = self.rx.recv() => match maybe {
                         Some(req) => {
-                            latest = req;
-                            // loop again — window restarts
+                            if req.version != latest.version { latest = req; }
                         }
                         None => {
                             // Senders gone mid-window: emit what we have, then
@@ -114,11 +112,12 @@ impl RestoreBroadcastWorker {
                             break;
                         }
                     },
-                    _ = sleep(RESTORE_BROADCAST_DEBOUNCE) => break,
+                    _ = sleep_until(latest.arrived_at + RESTORE_BROADCAST_DEBOUNCE) => break,
                 }
             }
 
-            self.emit(latest).await;
+            let context = latest.request.context.clone();
+            tokio::select! { _ = cancel.cancelled() => return, _ = context.scope(self.emit(latest.request)) => {} }
         }
     }
 
@@ -153,6 +152,7 @@ impl RestoreBroadcastWorker {
             &self.send_gate,
             &request.state,
             &request.categories,
+            ActiveStateBroadcastTrigger::HistoryRestore,
         )
         .await;
     }
@@ -164,9 +164,9 @@ mod tests {
 
     use std::sync::Mutex;
 
+    use crate::clipboard::write::{restore_broadcast_channel, RestoreBroadcastTrigger};
     use async_trait::async_trait;
     use chrono::Utc;
-    use tokio::sync::mpsc::unbounded_channel;
 
     use crate::deps::{
         CurrentSpaceMemberScope, CurrentSpaceMemberScopeError, CurrentSpaceMemberScopePort,
@@ -308,6 +308,13 @@ mod tests {
         }
     }
 
+    fn offer(trigger: &RestoreBroadcastTrigger, request: RestoreBroadcastRequest) {
+        trigger.offer(request.state, request.categories);
+    }
+
+    static NEXT_ACTIVATION: std::sync::atomic::AtomicI64 =
+        std::sync::atomic::AtomicI64::new(10_000);
+
     fn request(snapshot_hash: &str) -> RestoreBroadcastRequest {
         let mut categories = ClipboardContentCategorySet::empty();
         categories.insert(ClipboardContentCategory::Text);
@@ -315,10 +322,11 @@ mod tests {
             state: ActiveClipboardState::new(
                 snapshot_hash,
                 EntryId::new(),
-                1_000,
+                NEXT_ACTIVATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                 DeviceId::new("self"),
             ),
             categories,
+            context: uc_observability_contract::diagnostics::ObservationContext::capture(),
         }
     }
 
@@ -327,10 +335,10 @@ mod tests {
         peer_reachability: ReachabilityState,
     ) -> (
         RestoreBroadcastWorker,
-        tokio::sync::mpsc::UnboundedSender<RestoreBroadcastRequest>,
+        RestoreBroadcastTrigger,
         Arc<DispatchSpy>,
     ) {
-        let (tx, rx) = unbounded_channel();
+        let (tx, rx) = restore_broadcast_channel();
         let dispatch = Arc::new(DispatchSpy::default());
         let worker = RestoreBroadcastWorker::new(
             rx,
@@ -348,7 +356,7 @@ mod tests {
 
     #[tokio::test]
     async fn removed_peer_with_stale_address_does_not_receive_restore_broadcast() {
-        let (tx, rx) = unbounded_channel();
+        let (tx, rx) = restore_broadcast_channel();
         let dispatch = Arc::new(DispatchSpy::default());
         let worker = RestoreBroadcastWorker::new(
             rx,
@@ -365,7 +373,7 @@ mod tests {
         );
         let handle = worker.spawn();
 
-        tx.send(request("blake3v1:aa")).unwrap();
+        offer(&tx, request("blake3v1:aa"));
         tokio::time::sleep(RESTORE_BROADCAST_DEBOUNCE + Duration::from_millis(80)).await;
 
         assert!(dispatch.sent.lock().unwrap().is_empty());
@@ -376,7 +384,7 @@ mod tests {
     async fn cancellation_during_debounce_does_not_broadcast_pending_restore() {
         let (worker, tx, dispatch) = build_worker(true, ReachabilityState::Online);
         let cancel = CancellationToken::new();
-        tx.send(request("blake3v1:aa")).unwrap();
+        offer(&tx, request("blake3v1:aa"));
         let task = tokio::spawn(worker.run(cancel.clone()));
         tokio::task::yield_now().await;
         cancel.cancel();
@@ -392,7 +400,7 @@ mod tests {
         let (worker, tx, dispatch) = build_worker(false, ReachabilityState::Online);
         let handle = worker.spawn();
 
-        tx.send(request("blake3v1:aa")).unwrap();
+        offer(&tx, request("blake3v1:aa"));
         // Give the worker past the debounce window + a slice of slack.
         tokio::time::sleep(RESTORE_BROADCAST_DEBOUNCE + Duration::from_millis(80)).await;
 
@@ -408,7 +416,7 @@ mod tests {
         let (worker, tx, dispatch) = build_worker(true, ReachabilityState::Online);
         let handle = worker.spawn();
 
-        tx.send(request("blake3v1:aa")).unwrap();
+        offer(&tx, request("blake3v1:aa"));
         tokio::time::sleep(RESTORE_BROADCAST_DEBOUNCE + Duration::from_millis(80)).await;
 
         let sent = dispatch.sent.lock().unwrap();
@@ -420,7 +428,7 @@ mod tests {
 
     #[tokio::test]
     async fn upgrade_required_peer_does_not_receive_restore_broadcast() {
-        let (tx, rx) = unbounded_channel();
+        let (tx, rx) = restore_broadcast_channel();
         let dispatch = Arc::new(DispatchSpy::default());
         let worker = RestoreBroadcastWorker::new(
             rx,
@@ -437,7 +445,7 @@ mod tests {
         );
         let handle = worker.spawn();
 
-        tx.send(request("blake3v1:aa")).unwrap();
+        offer(&tx, request("blake3v1:aa"));
         tokio::time::sleep(RESTORE_BROADCAST_DEBOUNCE + Duration::from_millis(80)).await;
 
         assert!(
@@ -453,11 +461,11 @@ mod tests {
         let handle = worker.spawn();
 
         // Three offers inside the debounce window — only the last should win.
-        tx.send(request("blake3v1:aa")).unwrap();
+        offer(&tx, request("blake3v1:aa"));
         tokio::time::sleep(Duration::from_millis(40)).await;
-        tx.send(request("blake3v1:bb")).unwrap();
+        offer(&tx, request("blake3v1:bb"));
         tokio::time::sleep(Duration::from_millis(40)).await;
-        tx.send(request("blake3v1:cc")).unwrap();
+        offer(&tx, request("blake3v1:cc"));
 
         tokio::time::sleep(RESTORE_BROADCAST_DEBOUNCE + Duration::from_millis(120)).await;
 
@@ -478,7 +486,7 @@ mod tests {
         let (worker, tx, dispatch) = build_worker(true, ReachabilityState::Offline);
         let handle = worker.spawn();
 
-        tx.send(request("blake3v1:aa")).unwrap();
+        offer(&tx, request("blake3v1:aa"));
         tokio::time::sleep(RESTORE_BROADCAST_DEBOUNCE + Duration::from_millis(80)).await;
 
         assert!(
@@ -486,5 +494,167 @@ mod tests {
             "a peer known offline must be skipped, not dialed"
         );
         handle.abort();
+    }
+    struct SixPeerAddresses;
+    #[async_trait]
+    impl PeerAddressRepositoryPort for SixPeerAddresses {
+        async fn get(&self, _: &DeviceId) -> Result<Option<PeerAddressRecord>, PeerAddressError> {
+            Ok(None)
+        }
+        async fn upsert(&self, _: &PeerAddressRecord) -> Result<(), PeerAddressError> {
+            Ok(())
+        }
+        async fn remove(&self, _: &DeviceId) -> Result<(), PeerAddressError> {
+            Ok(())
+        }
+        async fn list(&self) -> Result<Vec<PeerAddressRecord>, PeerAddressError> {
+            Ok((0..6)
+                .map(|n| PeerAddressRecord {
+                    device_id: DeviceId::new(format!("peer-{n}")),
+                    addr_blob: vec![],
+                    observed_at: Utc::now(),
+                })
+                .collect())
+        }
+    }
+    struct SlowDispatch {
+        started: tokio::sync::mpsc::UnboundedSender<DeviceId>,
+        release: Arc<tokio::sync::Semaphore>,
+    }
+    #[async_trait]
+    impl ActiveClipboardDispatchPort for SlowDispatch {
+        async fn dispatch(
+            &self,
+            target: &DeviceId,
+            _: &ActiveClipboardState,
+        ) -> Result<(), ActiveClipboardDispatchError> {
+            self.started.send(target.clone()).unwrap();
+            self.release.acquire().await.unwrap().forget();
+            Ok(())
+        }
+    }
+    /// 首个慢目标不能阻止健康目标开始，且每轮最多四个在途调用。
+    #[tokio::test]
+    async fn broadcast_starts_four_targets_before_waiting_for_slow_peer() {
+        let (started_tx, mut started) = tokio::sync::mpsc::unbounded_channel();
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let dispatch: Arc<dyn ActiveClipboardDispatchPort> = Arc::new(SlowDispatch {
+            started: started_tx,
+            release: release.clone(),
+        });
+        let addresses: Arc<dyn PeerAddressRepositoryPort> = Arc::new(SixPeerAddresses);
+        let scope: Arc<dyn CurrentSpaceMemberScopePort> = Arc::new(FixedPeerScope(
+            (0..6).map(|n| DeviceId::new(format!("peer-{n}"))).collect(),
+        ));
+        let reachability: Arc<dyn PeerReachabilityPort> =
+            Arc::new(StaticPeerReachability(ReachabilityState::Online));
+        let task = tokio::spawn(async move {
+            let request = request("blake3v1:concurrency");
+            fan_out_active_state(
+                &dispatch,
+                &addresses,
+                &scope,
+                &reachability,
+                &MemberSendGate::new(Arc::new(AllowAllMembers)),
+                &request.state,
+                &request.categories,
+                ActiveStateBroadcastTrigger::HistoryRestore,
+            )
+            .await;
+        });
+        let four = tokio::time::timeout(Duration::from_secs(1), async {
+            for _ in 0..4 {
+                started.recv().await.unwrap();
+            }
+        })
+        .await;
+        assert!(
+            started.try_recv().is_err(),
+            "only four targets may start before a slot is free"
+        );
+        release.add_permits(6);
+        task.await.unwrap();
+        assert!(
+            four.is_ok(),
+            "slow first target must not serialize the entire round"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn late_old_restore_does_not_replace_newer_activation() {
+        let (worker, tx, dispatch) = build_worker(true, ReachabilityState::Online);
+        let handle = worker.spawn();
+        let mut newer = request("blake3v1:newer");
+        newer.state.activated_at_ms = 2_000;
+        let mut older = request("blake3v1:older");
+        older.state.activated_at_ms = 1_000;
+        offer(&tx, newer);
+        offer(&tx, older);
+        tokio::time::sleep(RESTORE_BROADCAST_DEBOUNCE + Duration::from_millis(1)).await;
+        assert_eq!(
+            dispatch.sent.lock().unwrap()[0].1,
+            "blake3v1:newer",
+            "arrival order must not override activation order"
+        );
+        handle.abort();
+    }
+
+    struct HeldRoundDispatch {
+        started: tokio::sync::mpsc::UnboundedSender<String>,
+        release: Arc<tokio::sync::Semaphore>,
+    }
+    #[async_trait]
+    impl ActiveClipboardDispatchPort for HeldRoundDispatch {
+        async fn dispatch(
+            &self,
+            _: &DeviceId,
+            state: &ActiveClipboardState,
+        ) -> Result<(), ActiveClipboardDispatchError> {
+            self.started.send(state.snapshot_hash.clone()).unwrap();
+            self.release.acquire().await.unwrap().forget();
+            Ok(())
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn current_round_finishes_and_only_latest_waiting_restore_starts_without_extra_debounce()
+    {
+        let (mut worker, trigger, _) = build_worker(true, ReachabilityState::Online);
+        let (started, mut calls) = tokio::sync::mpsc::unbounded_channel();
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        worker.dispatch = Arc::new(HeldRoundDispatch {
+            started,
+            release: release.clone(),
+        });
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(worker.run(cancel.clone()));
+        offer(&trigger, request("A"));
+        assert_eq!(calls.recv().await.unwrap(), "A");
+        let older = request("B");
+        offer(&trigger, older.clone());
+        offer(&trigger, request("C"));
+        let latest = request("D");
+        offer(&trigger, latest.clone());
+        tokio::time::advance(Duration::from_millis(350)).await;
+        offer(&trigger, older);
+        offer(&trigger, latest);
+        assert!(
+            calls.try_recv().is_err(),
+            "new restore must not preempt current round"
+        );
+        let finished_at = tokio::time::Instant::now();
+        release.add_permits(1);
+        assert_eq!(calls.recv().await.unwrap(), "D");
+        assert_eq!(
+            finished_at,
+            tokio::time::Instant::now(),
+            "elapsed quiet window must not restart after round completion"
+        );
+        release.add_permits(1);
+        drop(trigger);
+        task.await.unwrap();
+        assert!(
+            calls.try_recv().is_err(),
+            "B and C are coalesced, never separate rounds"
+        );
     }
 }

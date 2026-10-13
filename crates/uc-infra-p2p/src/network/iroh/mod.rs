@@ -53,10 +53,7 @@ impl uc_core::membership::PeerAdmissionPort for StaticPeerAdmission {
 }
 
 pub use active_clipboard::{
-    IrohActiveClipboardDispatchAdapter, IrohActiveClipboardPullClientAdapter,
-    IrohActiveClipboardPullServeAdapter, IrohActiveClipboardPullServeHandler,
-    IrohActiveClipboardReceiverAdapter, IrohActiveClipboardReceiverHandler, ACTIVE_CLIPBOARD_ALPN,
-    ACTIVE_CLIPBOARD_PULL_ALPN,
+    ActiveClipboardWire, IrohActivePullHandler, IrohActiveStateHandler, SessionActivePullLocalWork,
 };
 pub(crate) use addr_filter::filter_endpoint_addr;
 pub use admission_transport_material::IrohAdmissionTransportMaterial;

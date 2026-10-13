@@ -13,37 +13,96 @@
 //! step: `send_enabled` ∧ `send_content_types`, threaded via the activation's
 //! content category set.
 
+use futures::{stream, StreamExt};
 use std::sync::Arc;
 
 use uc_core::clipboard::{ActiveClipboardState, ClipboardContentCategorySet};
 use uc_core::ids::DeviceId;
 use uc_core::ports::clipboard::ActiveClipboardDispatchPort;
 use uc_core::ports::{PeerAddressRepositoryPort, PeerReachabilityPort, ReachabilityState};
-use uc_observability_contract::{error_source::io_error_kind, uc_debug, uc_warn};
+use uc_observability_contract::{error_source::io_error_kind, uc_debug, uc_info, uc_warn};
 
 use crate::deps::{CurrentSpaceMemberScope, CurrentSpaceMemberScopePort};
 
 use super::super::send_gate::MemberSendGate;
 
-pub(crate) async fn send_active_state_to_with_scope(
+/// 触发来自完整业务入口，不以网络方法名推断原因。
+#[derive(Clone, Copy)]
+pub(crate) enum ActiveStateBroadcastTrigger {
+    HistoryRestore,
+    PeerOnline,
+    InboundConvergence,
+    LocalActivation,
+}
+impl ActiveStateBroadcastTrigger {
+    fn name(self) -> &'static str {
+        match self {
+            Self::HistoryRestore => "history_restore",
+            Self::PeerOnline => "peer_online",
+            Self::InboundConvergence => "inbound_convergence",
+            Self::LocalActivation => "local_activation",
+        }
+    }
+}
+
+/// 每轮只轮询四个目标 future，不为尚未开始的目标分配网络预算或后台任务。
+pub(crate) async fn send_active_state_to_targets(
     dispatch: &Arc<dyn ActiveClipboardDispatchPort>,
     send_gate: &MemberSendGate,
-    target: &DeviceId,
+    targets: impl IntoIterator<Item = DeviceId>,
     state: &ActiveClipboardState,
     categories: &ClipboardContentCategorySet,
     scope: &CurrentSpaceMemberScope,
+    trigger: ActiveStateBroadcastTrigger,
 ) {
-    if !send_gate
-        .is_send_allowed_with_scope(target, categories, scope)
-        .await
-    {
-        return;
-    }
-    if let Err(err) = dispatch.dispatch(target, state).await {
+    let outcomes = stream::iter(
+        targets
+            .into_iter()
+            .filter(|target| *target != state.activated_by),
+    )
+    .map(|target| async move {
+        if !send_gate
+            .is_send_allowed_with_scope(&target, categories, scope)
+            .await
+        {
+            return (0usize, 0usize, 1usize);
+        }
+        if let Err(error) = dispatch.dispatch(&target, state).await {
+            uc_debug!(
+                error_kind = "peer_dispatch",
+                io_error_kind = io_error_kind(&error),
+                "active state send: per-peer dispatch failed (isolated)"
+            );
+            (0, 1, 0)
+        } else {
+            (1, 0, 0)
+        }
+    })
+    .buffer_unordered(4)
+    .collect::<Vec<_>>()
+    .await;
+    let (sent, failed, skipped) = outcomes
+        .into_iter()
+        .fold((0, 0, 0), |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2));
+    if sent + failed > 0 {
+        uc_info!(
+            trigger = trigger.name(),
+            outcome = if failed == 0 {
+                "sent_locally"
+            } else {
+                "partial_failure"
+            },
+            success = sent,
+            failed = failed,
+            skipped = skipped,
+            total = sent + failed + skipped,
+            "active clipboard broadcast settled locally; remote application is unconfirmed"
+        );
+    } else {
         uc_debug!(
-            error_kind = "peer_dispatch",
-            io_error_kind = io_error_kind(&err),
-            "active state send: per-peer dispatch failed (isolated)"
+            trigger = trigger.name(),
+            skipped = skipped,
+            "active clipboard broadcast had no network work"
         );
     }
 }
@@ -67,12 +126,14 @@ pub(crate) async fn fan_out_active_state(
     send_gate: &MemberSendGate,
     state: &ActiveClipboardState,
     categories: &ClipboardContentCategorySet,
+    trigger: ActiveStateBroadcastTrigger,
 ) {
     let scope = match peer_scope.snapshot().await {
         Ok(snapshot) => snapshot,
         Err(err) => {
             uc_warn!(
                 error_kind = "peer_scope_unavailable",
+                trigger = trigger.name(),
                 io_error_kind = io_error_kind(&err),
                 "active state fan-out skipped: current peer scope unavailable"
             );
@@ -84,6 +145,7 @@ pub(crate) async fn fan_out_active_state(
         Err(err) => {
             uc_warn!(
                 error_kind = "peer_address_list",
+                trigger = trigger.name(),
                 io_error_kind = io_error_kind(&err),
                 "active state fan-out skipped: peer_addr_repo.list failed"
             );
@@ -91,6 +153,7 @@ pub(crate) async fn fan_out_active_state(
         }
     };
 
+    let mut targets = Vec::new();
     for record in records {
         let target = record.device_id;
         if !scope.usable_peer_device_ids.contains(&target) {
@@ -113,7 +176,10 @@ pub(crate) async fn fan_out_active_state(
             uc_debug!("active state fan-out: skipping peer known offline (deferred)");
             continue;
         }
-        send_active_state_to_with_scope(dispatch, send_gate, &target, state, categories, &scope)
-            .await;
+        targets.push(target);
     }
+    send_active_state_to_targets(
+        dispatch, send_gate, targets, state, categories, &scope, trigger,
+    )
+    .await;
 }

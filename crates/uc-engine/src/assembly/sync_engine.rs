@@ -10,6 +10,8 @@ use uc_infra_p2p::network::iroh::{
     group_update_adapter::{GroupUpdateWire, IrohGroupUpdateAdapter, SessionGroupUpdateLocalWork},
 };
 mod outbound_progress;
+#[cfg(all(test, feature = "dev-tools"))]
+use crate::testing::active_pull_publication::{decorate_blob, decorate_preparation};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,15 +33,14 @@ use crate::dev::{
 use uc_application::deps::{
     ApplicationClipboardAdapters, ApplicationNetworkAdapters, ApplicationNetworkBinding,
     ApplicationSpaceAdapters, ApplyGroupUpdatePort, ClipboardReceiverPort, ConnectivityManager,
-    ConnectivityPolicy, CurrentSpaceMemberScopePort, GroupUpdateEndpoint, GroupUpdateLocalWorkPort,
-    GroupUpdateReceiverPort, GroupUpdateWirePort, HistoryWirePort, IdleRetentionPolicy,
-    LifecycleError, MembershipHistoryReceiver, MembershipHistoryTransport,
-    PeerIdentityDirectoryPort, SpaceAdmissionAdapters, SpaceMembershipAdapters,
-    SpaceRuntimeAdapters,
+    ConnectivityPolicy, GroupUpdateEndpoint, GroupUpdateLocalWorkPort, GroupUpdateReceiverPort,
+    GroupUpdateWirePort, HistoryWirePort, IdleRetentionPolicy, LifecycleError,
+    MembershipHistoryReceiver, MembershipHistoryTransport, PeerIdentityDirectoryPort,
+    SpaceAdmissionAdapters, SpaceMembershipAdapters, SpaceRuntimeAdapters,
 };
 use uc_application::facade::ApplicationAssembly;
 use uc_core::file_transfer::FileTransferCancellationReason;
-use uc_core::membership::{ContentExchangeGatePort, GroupUpdateDispatchPort, PeerAdmissionPort};
+use uc_core::membership::{GroupUpdateDispatchPort, PeerAdmissionPort};
 use uc_core::ports::{
     ActiveClipboardDispatchPort, ActiveClipboardReceiverPort, ClipboardDispatchPort,
     ConnectionChannelPort, LocalIdentityPort, PeerReachabilityPort,
@@ -67,26 +68,6 @@ use uc_infra_profile::space::{
     OpenMlsHistoricalSignatureVerifier,
 };
 use uc_observability_contract::{diagnostics::DiagnosticTaskKind, uc_info};
-
-struct CurrentMemberContentGate {
-    scope: Arc<dyn CurrentSpaceMemberScopePort>,
-}
-
-impl CurrentMemberContentGate {
-    fn new(scope: Arc<dyn CurrentSpaceMemberScopePort>) -> Self {
-        Self { scope }
-    }
-}
-
-#[async_trait::async_trait]
-impl ContentExchangeGatePort for CurrentMemberContentGate {
-    async fn is_locally_removed(&self, device_id: &uc_core::ids::DeviceId) -> bool {
-        let Ok(scope) = self.scope.snapshot().await else {
-            return true;
-        };
-        !scope.local_member_active || !scope.usable_peer_device_ids.contains(device_id)
-    }
-}
 
 #[cfg(not(feature = "lan-compat"))]
 struct UnavailableMobileDeviceLookup;
@@ -303,15 +284,26 @@ pub async fn prepare_sync_session(
     // both the inbound receiver (broadcast of peer observations) and the
     // outbound dispatch port (re-broadcast of converged state), sharing the
     // endpoint + peer_addr_repo like install_clipboard.
+    let active_connectivity = builder.connectivity_deps(
+        ConnectivityProfile::ActiveClipboardState,
+        space_setup.peer_addr_repo.clone(),
+        space_setup.peer_access.clone(),
+        space_setup.peer_access.clone(),
+        space_setup.fingerprint.clone(),
+        peer_reachability.clone(),
+    );
+    let active_manager = ConnectivityManager::new(
+        active_connectivity.backend,
+        active_connectivity.admission,
+        ConnectivityPolicy {
+            inbound_per_connection: 1,
+            ..ConnectivityPolicy::default()
+        },
+    );
     let ActiveClipboardHandlers {
         dispatch: active_clipboard_dispatch,
         receiver: active_clipboard_receiver,
-    } = builder.install_active_clipboard(
-        Arc::clone(&space_setup.peer_addr_repo),
-        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerIdentityDirectoryPort>,
-        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerAdmissionPort>,
-        Arc::clone(&space_setup.fingerprint),
-    )?;
+    } = builder.install_active_clipboard(active_manager)?;
     let active_clipboard_dispatch: Arc<dyn ActiveClipboardDispatchPort> = active_clipboard_dispatch;
     let active_clipboard_receiver: Arc<dyn ActiveClipboardReceiverPort> = active_clipboard_receiver;
     // 反向"传输进度"通道(receiver → sender):同一节点装第四个 ALPN。
@@ -333,6 +325,8 @@ pub async fn prepare_sync_session(
     let BlobHandlers { blob_transfer } = builder
         .install_blobs(space_setup.iroh_blob_store_dir.clone())
         .await?;
+    #[cfg(all(test, feature = "dev-tools"))]
+    let blob_transfer = decorate_blob(&space_setup.iroh_blob_store_dir, blob_transfer);
 
     // Application 先构造认证 endpoint；Space 持续维护要等 Router 就绪后
     // 才由 ApplicationRuntime 启动。
@@ -591,24 +585,37 @@ pub async fn prepare_sync_session(
         Arc::clone(&space_setup.fingerprint),
         application_network.membership_branch_recovery_endpoint(),
     )?;
-    let content_gate: Arc<dyn ContentExchangeGatePort> = Arc::new(CurrentMemberContentGate::new(
-        application_network.current_member_scope(),
-    ));
 
     // Install the active-clipboard pull ALPN (0xC2, issue #1017 PR8) as a
     // further independent sibling, before `spawn()`. The serve port reuses the
     // resend crypto chain (reconstruct → publish blobs re-signing self-pinned
     // tickets, D3 → encode V3 → encrypt, D4); the returned client port drives
     // the inbound seam's on-demand pull.
+    let pull_connectivity = builder.connectivity_deps(
+        ConnectivityProfile::ActiveClipboardPull,
+        space_setup.peer_addr_repo.clone(),
+        space_setup.peer_access.clone(),
+        space_setup.peer_access.clone(),
+        space_setup.fingerprint.clone(),
+        peer_reachability.clone(),
+    );
+    let pull_manager = ConnectivityManager::new(
+        pull_connectivity.backend,
+        pull_connectivity.admission,
+        ConnectivityPolicy {
+            inbound_per_connection: 1,
+            ..ConnectivityPolicy::default()
+        },
+    );
+    let preparation = application_network.active_clipboard_pull_preparation();
+    #[cfg(all(test, feature = "dev-tools"))]
+    let preparation = decorate_preparation(&space_setup.iroh_blob_store_dir, preparation);
     let ActiveClipboardPullHandlers {
         client: active_clipboard_pull_client,
     } = builder.install_active_clipboard_pull(
-        Arc::clone(&space_setup.peer_addr_repo),
-        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerIdentityDirectoryPort>,
-        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerAdmissionPort>,
-        Arc::clone(&space_setup.fingerprint),
-        application_network.active_clipboard_pull_serve(),
-        content_gate,
+        pull_manager,
+        preparation,
+        application_network.current_member_scope(),
     )?;
 
     let prepared_session = builder.finish();

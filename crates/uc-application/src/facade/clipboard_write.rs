@@ -3,7 +3,8 @@
 //! consolidated; stage 5 removes them from the whitelist.
 
 pub use crate::clipboard::write::{
-    ClipboardWriteCoordinator, ClipboardWriteIntent, LocalActiveRegisterAdvancer,
-    MobileConsumabilityProbe, MobileConsumableBackfill, MobileConsumableRefBackfill,
-    RestoreBroadcastRequest, RestoreBroadcastTrigger,
+    restore_broadcast_channel, ClipboardWriteCoordinator, ClipboardWriteIntent,
+    LocalActiveRegisterAdvancer, MobileConsumabilityProbe, MobileConsumableBackfill,
+    MobileConsumableRefBackfill, RestoreBroadcastReceiver, RestoreBroadcastRequest,
+    RestoreBroadcastTrigger,
 };

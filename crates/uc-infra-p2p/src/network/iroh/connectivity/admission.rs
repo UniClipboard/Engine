@@ -8,8 +8,8 @@ use super::backend::ConnectivityProfile;
 use async_trait::async_trait;
 use std::sync::Arc;
 use uc_application::deps::{
-    AdmissionAttempt, AdmissionGrant, ConnectivityError, PeerConnection, PeerIdentityDirectoryPort,
-    SessionConnectionAdmissionPort,
+    AdmissionAttempt, AdmissionGrant, ConnectivityError, InboundAdmissionFence, PeerConnection,
+    PeerIdentityDirectoryPort, SessionConnectionAdmissionPort,
 };
 use uc_core::ids::DeviceId;
 use uc_core::membership::PeerAdmissionPort;
@@ -36,6 +36,10 @@ impl IrohConnectionAdmission {
             admission,
             connections,
             protocol: match profile {
+                ConnectivityProfile::ActiveClipboardPull => {
+                    InboundPeerProtocol::ActiveClipboardPull
+                }
+                ConnectivityProfile::ActiveClipboardState => InboundPeerProtocol::ActiveClipboard,
                 ConnectivityProfile::Clipboard => InboundPeerProtocol::Clipboard,
                 ConnectivityProfile::MembershipHistory => InboundPeerProtocol::MembershipHistory,
                 ConnectivityProfile::GroupUpdate | ConnectivityProfile::LegacyGroupUpdate => {
@@ -136,8 +140,27 @@ impl AdmissionGrant for Grant {
         result
     }
 }
+struct ContentInboundFence {
+    connections: AdmittedConnections,
+    revision: u64,
+}
+impl InboundAdmissionFence for ContentInboundFence {
+    fn check_current(&self, peer: &DeviceId) -> Result<(), ConnectivityError> {
+        if self.connections.current_since(peer, self.revision) {
+            Ok(())
+        } else {
+            Err(ConnectivityError::Denied)
+        }
+    }
+}
 #[async_trait]
 impl SessionConnectionAdmissionPort for IrohConnectionAdmission {
+    fn inbound_fence(&self) -> Option<Box<dyn InboundAdmissionFence>> {
+        Some(Box::new(ContentInboundFence {
+            connections: self.connections.clone(),
+            revision: self.connections.revision(),
+        }))
+    }
     fn begin(&self, target: DeviceId) -> Box<dyn AdmissionAttempt> {
         Box::new(Attempt {
             owner: self.clone(),

@@ -1,5 +1,6 @@
 //! Recreates and sends an existing local clipboard entry to chosen devices.
 
+use crate::clipboard::active::transport::ActivePullPreparationStop;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -106,6 +107,7 @@ impl ExistingLocalEntryDeliveryRunner for ExistingLocalEntryDelivery {
             Arc::clone(&self.settings),
             &entry_id,
             snapshot,
+            &ActivePullPreparationStop::default(),
         )
         .await
         .map_err(|err| map_outbound_payload_error(err, &entry_id))?;
@@ -191,6 +193,9 @@ fn map_build_snapshot_error(err: BuildSnapshotError, entry_id: &EntryId) -> Rese
 
 fn map_outbound_payload_error(err: OutboundPayloadError, entry_id: &EntryId) -> ResendEntryError {
     match err {
+        OutboundPayloadError::Cancelled(source) => {
+            ResendEntryError::Dispatch(anyhow::Error::new(source))
+        }
         OutboundPayloadError::Unavailable => ResendEntryError::EntryNotResendable {
             entry_id: entry_id.clone(),
             reason: NotResendableReason::PayloadLost,

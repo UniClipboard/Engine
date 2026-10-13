@@ -153,6 +153,9 @@ jobs:
       - name: Validate fixed-main membership history in both directions
         run: bash scripts/testing/run-fixed-main-history-interop.sh
 
+      - name: Validate fixed-main active clipboard in both directions
+        run: bash scripts/testing/run-fixed-main-active-clipboard-interop.sh
+
       - name: Retain upgrade smoke evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -165,6 +168,7 @@ jobs:
             target/upgrade-anchors/*/host.json
             target/fixed-main-history/source-revision.txt
             target/fixed-main-history/binary-sha256.txt
+            target/active-clipboard-connectivity-evidence/fixed-main
           if-no-files-found: error
 
       - name: Retain MBX compiler evidence
@@ -243,6 +247,12 @@ jobs:
       - name: Validate relay-only membership history reuse
         run: bash scripts/testing/run-membership-history-relay.sh
 
+      - name: Validate direct active clipboard complete content
+        run: bash scripts/testing/run-active-clipboard-connectivity.sh direct
+
+      - name: Validate relay-only active clipboard complete content
+        run: bash scripts/testing/run-active-clipboard-connectivity.sh relay
+
       - name: Run isolated network pairing smoke
         if: success() || failure()
         run: >-
@@ -261,6 +271,8 @@ jobs:
             target/test-artifacts/real-dependencies
             target/membership-history-relay
             target/connection-recovery-evidence
+            target/active-clipboard-connectivity-evidence/direct
+            target/active-clipboard-connectivity-evidence/relay
           if-no-files-found: error
 
       - name: Retain MBX compiler evidence

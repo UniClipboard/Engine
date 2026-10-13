@@ -160,20 +160,14 @@ impl NetworkRecorder {
         );
         observation
     }
-    pub fn connection_observer_unavailable(&self, peer: [u8; 32], reason: ObserverFailure) {
-        let context = peer_context(peer);
-        tracing::dispatcher::with_default(&self.dispatcher, || {
-            emit_local(
-                LocalEvent::Physical {
-                    record: PhysicalEvent::Unavailable { reason },
-                },
-                &context,
-            )
-        });
-    }
 }
 
 impl ConnectionLifetimeObservation {
+    /// 观察任务未能登记时保留同一连接关联，不伪造完整关闭观察。
+    pub fn unavailable(mut self, reason: ObserverFailure) {
+        self.finished = true;
+        self.emit(PhysicalEvent::Unavailable { reason }, None);
+    }
     pub fn path(
         &self,
         key: [u8; 32],

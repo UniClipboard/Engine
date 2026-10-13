@@ -35,6 +35,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 // Constants
 // ============================================================================
 
+/// 当前剪贴板协议唯一 ALPN；原生 bridge 与通用连接 profile 共用此常量。
+pub const ACTIVE_CLIPBOARD_PULL_ALPN: &[u8] = b"uniclipboard/active-clipboard-pull/0";
+
 /// Sentinel byte identifying an active-clipboard pull request frame at the
 /// head of the stream. Distinct from the bulk clipboard codec
 /// ([`CLIPBOARD_MAGIC`](crate::clipboard::CLIPBOARD_MAGIC) = `0xC1`) and
@@ -128,7 +131,7 @@ pub enum PullWireError {
     #[error("unknown response status byte 0x{got:02X}")]
     UnknownStatus { got: u8 },
     #[error("stream io: {0}")]
-    Io(std::io::Error),
+    Io(#[source] std::io::Error),
 }
 
 // ============================================================================

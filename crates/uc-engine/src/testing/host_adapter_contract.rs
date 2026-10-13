@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+#[cfg(feature = "dev-tools")]
+mod active_pull_cancellation;
 mod profile_upgrade_backup;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

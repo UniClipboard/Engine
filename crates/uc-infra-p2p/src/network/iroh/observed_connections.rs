@@ -100,27 +100,7 @@ impl EndpointHooks for ObservedConnections {
                 return AfterHandshakeOutcome::accept();
             }
             let peer = *conn.remote_id().as_bytes();
-            let mut state = match self.state.try_lock() {
-                Ok(state) => state,
-                Err(TryLockError::Poisoned(error)) => error.into_inner(),
-                Err(TryLockError::WouldBlock) => {
-                    self.recorder
-                        .connection_observer_unavailable(peer, ObserverFailure::Busy);
-                    return AfterHandshakeOutcome::accept();
-                }
-            };
-            state.reap_finished();
-            if state.closed || state.tasks.len() >= MAX_OBSERVERS {
-                self.recorder.connection_observer_unavailable(
-                    peer,
-                    if state.closed {
-                        ObserverFailure::Stopped
-                    } else {
-                        ObserverFailure::CapacityExceeded
-                    },
-                );
-                return AfterHandshakeOutcome::accept();
-            }
+            // 初始选路是已经完成的传输事实，不依赖后台观察任务能否登记。
             let direction = if conn.side() == Side::Client {
                 ConnectionDirection::Outbound
             } else {
@@ -143,6 +123,23 @@ impl EndpointHooks for ObservedConnections {
                     PathObservationKind::Snapshot,
                     path_kind(path.remote_addr()),
                 );
+            }
+            let mut state = match self.state.try_lock() {
+                Ok(state) => state,
+                Err(TryLockError::Poisoned(error)) => error.into_inner(),
+                Err(TryLockError::WouldBlock) => {
+                    observation.unavailable(ObserverFailure::Busy);
+                    return AfterHandshakeOutcome::accept();
+                }
+            };
+            state.reap_finished();
+            if state.closed || state.tasks.len() >= MAX_OBSERVERS {
+                observation.unavailable(if state.closed {
+                    ObserverFailure::Stopped
+                } else {
+                    ObserverFailure::CapacityExceeded
+                });
+                return AfterHandshakeOutcome::accept();
             }
             // 在 hook 返回前登记关闭通知，确保主调用方立即 drop 也不会丢失原因。
             let closed = conn.weak_handle().closed();
@@ -254,5 +251,57 @@ mod tests {
         assert_eq!(failures.len(), 1);
         assert!(failures[0].is_cancelled());
         assert_eq!(Arc::strong_count(&resource), 1);
+    }
+    /// 观察任务登记锁短暂竞争也不能丢掉已经确定的初始选路事实。
+    #[tokio::test]
+    async fn observer_registration_busy_preserves_actual_selected_path_snapshot() {
+        use iroh::endpoint::EndpointHooks;
+        use iroh::{Endpoint, RelayMode};
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _logs = logs.install();
+        let observers = ObservedConnections::new(NetworkRecorder::current());
+        assert!(observers.recorder.is_enabled());
+        let server = Endpoint::builder(iroh::endpoint::presets::N0)
+            .relay_mode(RelayMode::Disabled)
+            .alpns(vec![b"observer-test".to_vec()])
+            .bind()
+            .await
+            .unwrap();
+        let client = Endpoint::builder(iroh::endpoint::presets::N0)
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+            .unwrap();
+        for _ in 0..100 {
+            if !server.addr().addrs.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let (incoming, outgoing) = tokio::join!(
+            async { server.accept().await.unwrap().await.unwrap() },
+            client.connect(server.addr(), b"observer-test")
+        );
+        let outgoing = outgoing.unwrap();
+        assert!(outgoing.paths().iter().any(|path| path.is_selected()));
+        let locked = observers.state.lock().unwrap();
+        observers.after_handshake(&outgoing).await;
+        drop(locked);
+        outgoing.close(0u32.into(), b"test done");
+        incoming.close(0u32.into(), b"test done");
+        client.close().await;
+        server.close().await;
+        assert_eq!(
+            logs.count("connection.path.observed"),
+            1,
+            "{}",
+            logs.output()
+        );
+        assert_eq!(
+            logs.count("connection.observer.unavailable"),
+            1,
+            "{}",
+            logs.output()
+        );
     }
 }

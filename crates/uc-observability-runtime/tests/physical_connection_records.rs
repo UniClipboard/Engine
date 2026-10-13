@@ -63,6 +63,10 @@ fn completed_dial_before_physical_observer_keeps_the_same_local_connection_alias
         completed["connection_id"].as_str().is_some(),
         "completed native handshake has a local alias"
     );
+    assert_eq!(
+        completed["fields"]["purpose"], "membership_history",
+        "终态必须自带分类，不能依赖开始记录仍在日志中"
+    );
     assert_eq!(completed["connection_id"], established["connection_id"]);
     assert_eq!(completed["connection_id"], closed["connection_id"]);
     assert!(rows.iter().all(|row| row.get("connection_key").is_none()));

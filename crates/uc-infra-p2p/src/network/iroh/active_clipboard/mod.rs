@@ -1,21 +1,13 @@
-//! iroh adapters for the active-clipboard subsystem.
-//!
-//! Groups the dispatch / receiver / pull adapters and their wire codecs
-//! so the active-clipboard transport stays together instead of being
-//! flattened across `network/iroh` with an `active_clipboard_` name
-//! prefix.
-
-pub mod dispatch_adapter;
-pub mod pull_client_adapter;
+//! 当前状态与拉取的 codec/原生 bridge；完整交换归 Application。
+mod local_work;
+#[cfg(test)]
+mod pull_client_adapter;
 pub mod pull_serve_adapter;
 pub mod receiver_adapter;
-
-pub use dispatch_adapter::IrohActiveClipboardDispatchAdapter;
-pub use pull_client_adapter::IrohActiveClipboardPullClientAdapter;
-pub use pull_serve_adapter::{
-    IrohActiveClipboardPullServeAdapter, IrohActiveClipboardPullServeHandler,
-    ACTIVE_CLIPBOARD_PULL_ALPN,
-};
-pub use receiver_adapter::{
-    IrohActiveClipboardReceiverAdapter, IrohActiveClipboardReceiverHandler, ACTIVE_CLIPBOARD_ALPN,
-};
+#[cfg(test)]
+mod testing;
+mod wire;
+pub use local_work::SessionActivePullLocalWork;
+pub use pull_serve_adapter::IrohActivePullHandler;
+pub use receiver_adapter::IrohActiveStateHandler;
+pub use wire::ActiveClipboardWire;

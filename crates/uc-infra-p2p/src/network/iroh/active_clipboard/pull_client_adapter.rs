@@ -1,195 +1,20 @@
-//! Iroh-backed implementation of [`ActiveClipboardPullClientPort`] (requester
-//! side).
-//!
-//! Resolves the target peer's stored address, dials it on
-//! [`ACTIVE_CLIPBOARD_PULL_ALPN`], opens one bi-stream, writes the content-hash
-//! request (per [`pull_wire`]), and awaits the holder's
-//! response. The whole exchange is bounded by [`PULL_TIMEOUT`] (issue #1017
-//! D6, 10s); a peer that is unreachable or slow surfaces as
-//! [`ActiveClipboardPullClientError::Unreachable`].
-//!
-//! Failure mapping:
-//! * Missing / undecodable stored address, dial failure, or deadline →
-//!   [`ActiveClipboardPullClientError::Unreachable`].
-//! * Holder responds `NotAvailable` / `Locked` / `Internal` →
-//!   [`ActiveClipboardPullClientError::NotAvailable`] (the requester cannot
-//!   distinguish these and treats them identically: this peer cannot serve).
-//! * Stream write / read / codec failure →
-//!   [`ActiveClipboardPullClientError::Io`].
-//!
-//! The returned bytes are the opaque transfer envelope the holder produced;
-//! decoding + storing them is the application layer's job.
-
-use std::sync::Arc;
-use std::time::Duration;
-
-use async_trait::async_trait;
-use iroh::{Endpoint, EndpointAddr};
-use tracing::instrument;
-
-use uc_core::ids::DeviceId;
-use uc_core::ports::clipboard::{ActiveClipboardPullClientError, ActiveClipboardPullClientPort};
-use uc_core::ports::PeerAddressRepositoryPort;
-use uc_observability_contract::{error_source::io_error_kind, uc_debug, uc_warn};
-
-use super::super::connect::connect_with_staggered_retry;
-use super::super::peer_address_resolver::PeerAddressResolver;
-use super::pull_serve_adapter::ACTIVE_CLIPBOARD_PULL_ALPN;
-use uc_sync_protocol::active_clipboard_pull::{self as pull_wire, PullResponse};
-
-/// Hard deadline on one pull exchange (dial + request + response). Issue #1017
-/// D6 fixes this at 10s: pull-fail (timeout, offline, holder locked) does not
-/// advance the register or re-broadcast, and there is no retry loop, so this
-/// is the only bound that matters for liveness on the requesting side.
-const PULL_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Requests one active-clipboard pull from a single peer over the pull ALPN.
-/// Reuses the shared endpoint + `peer_addr_repo` so a pull rides the same
-/// NAT/relay mapping peer_reachability already established.
-pub struct IrohActiveClipboardPullClientAdapter {
-    endpoint: Arc<Endpoint>,
-    peer_address_resolver: PeerAddressResolver,
-}
-
-impl IrohActiveClipboardPullClientAdapter {
-    pub fn new(
-        endpoint: Arc<Endpoint>,
-        peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-    ) -> Self {
-        Self {
-            endpoint,
-            peer_address_resolver: PeerAddressResolver::new(peer_addr_repo),
-        }
-    }
-
-    /// Resolve the peer's current [`EndpointAddr`]. `None` (no record,
-    /// undecodable blob, or repo error) maps to `Unreachable`. Mirrors the
-    /// dispatch adapter's `resolve_addr`.
-    async fn resolve_addr(&self, target: &DeviceId) -> Option<EndpointAddr> {
-        match self.peer_address_resolver.resolve(target).await {
-            Ok(address) => address,
-            Err(error) => {
-                uc_warn!(
-                    error_kind = error.kind(),
-                    "active-clipboard pull address resolution failed; treating peer as unreachable"
-                );
-                None
-            }
-        }
-    }
-}
-
-#[async_trait]
-impl ActiveClipboardPullClientPort for IrohActiveClipboardPullClientAdapter {
-    #[instrument(skip_all)]
-    async fn pull(
-        &self,
-        peer: &DeviceId,
-        snapshot_hash: &str,
-    ) -> Result<Vec<u8>, ActiveClipboardPullClientError> {
-        // The whole dial + request + response exchange is bounded by a single
-        // deadline (D6, 10s). A timeout maps to `Unreachable` — pull-fail does
-        // not advance the register, so the caller just logs and drops.
-        match tokio::time::timeout(PULL_TIMEOUT, self.exchange(peer, snapshot_hash)).await {
-            Ok(result) => result,
-            Err(_) => {
-                uc_debug!("active-clipboard pull: exceeded deadline; treating as Unreachable");
-                Err(ActiveClipboardPullClientError::Unreachable)
-            }
-        }
-    }
-}
-
-impl IrohActiveClipboardPullClientAdapter {
-    /// The unbounded inner exchange — wrapped in the pull deadline by `pull`.
-    async fn exchange(
-        &self,
-        peer: &DeviceId,
-        snapshot_hash: &str,
-    ) -> Result<Vec<u8>, ActiveClipboardPullClientError> {
-        // 1. Resolve address; missing / bad record = unreachable.
-        let addr = match self.resolve_addr(peer).await {
-            Some(a) => a,
-            None => return Err(ActiveClipboardPullClientError::Unreachable),
-        };
-
-        // 2. Dial. Dial failure = unreachable (no typed iroh error leaks up).
-        let connection = match connect_with_staggered_retry(
-            Arc::clone(&self.endpoint),
-            addr,
-            ACTIVE_CLIPBOARD_PULL_ALPN,
-            "active-clipboard-pull",
-            uc_observability_contract::diagnostics::connectivity::AddressInputSource::Stored,
-        )
-        .await
-        {
-            Ok(connection) => connection,
-            Err(err) => {
-                uc_debug!(
-                    error_kind = "dial_failed",
-                    io_error_kind = io_error_kind(&err),
-                    "active-clipboard pull: dial failed, treating as Unreachable"
-                );
-                return Err(ActiveClipboardPullClientError::Unreachable);
-            }
-        };
-
-        // 3. Open one bi-stream, write the request, close the send half.
-        let (mut send, mut recv) = connection.open_bi().await.map_err(|err| {
-            ActiveClipboardPullClientError::Io(anyhow::Error::from(err).context("open_bi").into())
-        })?;
-
-        pull_wire::write_request(&mut send, snapshot_hash)
-            .await
-            .map_err(|err| {
-                ActiveClipboardPullClientError::Io(
-                    anyhow::Error::from(err).context("request write").into(),
-                )
-            })?;
-        send.finish().map_err(|err| {
-            ActiveClipboardPullClientError::Io(
-                anyhow::Error::from(err).context("send.finish").into(),
-            )
-        })?;
-
-        // 4. Read the response frame.
-        let response = pull_wire::read_response(&mut recv).await.map_err(|err| {
-            ActiveClipboardPullClientError::Io(
-                anyhow::Error::from(err).context("response read").into(),
-            )
-        })?;
-
-        // 5. Actively close now that the full response frame is read. The
-        //    serve side waits on `connection.closed()` before tearing down (so
-        //    its teardown can't race our read); initiating the close from this
-        //    side resolves that barrier immediately. Previously this side *also*
-        //    waited on `connection.closed()`, so both ends sat idle until the
-        //    serve's 3s close-barrier timeout fired — a fixed ~3s tail on every
-        //    pull, which was the dominant cost of the #1017 restore lag (the
-        //    dial itself completes in ~10ms; the response is one small frame).
-        //    `read_response` has already consumed the whole framed body, so
-        //    closing here cannot truncate anything. Mirrors the asymmetric
-        //    teardown the bulk dispatch path already uses (responder waits,
-        //    requester closes).
-        connection.close(0u32.into(), b"pull-complete");
-
-        match response {
-            PullResponse::Envelope(bytes) => Ok(bytes),
-            PullResponse::NotAvailable | PullResponse::Locked | PullResponse::Internal => {
-                uc_debug!("active-clipboard pull: holder cannot serve the content");
-                Err(ActiveClipboardPullClientError::NotAvailable)
-            }
-        }
-    }
-}
-
-// ============================================================================
-// Tests
-// ============================================================================
+//! 拉取客户端真实 Iroh 合同测试；生产完整流程位于 Application。
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::super::testing::{content_scope, manager};
+    use super::super::{ActiveClipboardWire, IrohActivePullHandler, SessionActivePullLocalWork};
+    use crate::network::iroh::connectivity::ConnectivityProfile;
+    use iroh::{Endpoint, EndpointAddr};
+    use uc_application::deps::{
+        ActivePullClient, ActivePullPreparationError, ActivePullPreparationPort,
+        ActivePullPreparationStop, ActivePullReceiver,
+    };
+    use uc_core::ids::DeviceId;
+    use uc_core::ports::{
+        ActiveClipboardPullClientError, ActiveClipboardPullClientPort, PeerAddressRepositoryPort,
+    };
+    use uc_sync_protocol::active_clipboard_pull::ACTIVE_CLIPBOARD_PULL_ALPN;
 
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -201,25 +26,12 @@ mod tests {
     use iroh::{RelayMode, SecretKey};
     use tokio::sync::Mutex;
 
-    use uc_core::membership::{ContentExchangeGatePort, MembershipError, SpaceMember};
-    use uc_core::ports::clipboard::{ActiveClipboardPullServeError, ActiveClipboardPullServePort};
+    use uc_core::membership::{MembershipError, SpaceMember};
     use uc_core::ports::security::IdentityFingerprintFactoryPort;
     use uc_core::ports::{PeerAddressError, PeerAddressRecord};
     use uc_core::{MemberRepositoryPort, MemberSyncPreferences};
 
-    use super::super::pull_serve_adapter::{
-        IrohActiveClipboardPullServeAdapter, ACTIVE_CLIPBOARD_PULL_ALPN,
-    };
     use uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory;
-
-    struct AllowAllContent;
-
-    #[async_trait]
-    impl ContentExchangeGatePort for AllowAllContent {
-        async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
-            false
-        }
-    }
 
     // ----- in-memory peer_addr_repo -----------------------------------------
 
@@ -279,18 +91,19 @@ mod tests {
     }
 
     /// Serve port returning a canned result.
-    struct StubServe(Mutex<Option<Result<Vec<u8>, ActiveClipboardPullServeError>>>);
+    struct StubServe(Mutex<Option<Result<Vec<u8>, ActivePullPreparationError>>>);
     impl StubServe {
-        fn new(result: Result<Vec<u8>, ActiveClipboardPullServeError>) -> Arc<Self> {
+        fn new(result: Result<Vec<u8>, ActivePullPreparationError>) -> Arc<Self> {
             Arc::new(Self(Mutex::new(Some(result))))
         }
     }
     #[async_trait]
-    impl ActiveClipboardPullServePort for StubServe {
-        async fn serve(
+    impl ActivePullPreparationPort for StubServe {
+        async fn prepare(
             &self,
             _snapshot_hash: &str,
-        ) -> Result<Vec<u8>, ActiveClipboardPullServeError> {
+            _stop: &ActivePullPreparationStop,
+        ) -> Result<Vec<u8>, ActivePullPreparationError> {
             self.0
                 .lock()
                 .await
@@ -352,7 +165,7 @@ mod tests {
         serve_seed: [u8; 32],
         requester_seed: [u8; 32],
         requester_device: &str,
-        serve_result: Result<Vec<u8>, ActiveClipboardPullServeError>,
+        serve_result: Result<Vec<u8>, ActivePullPreparationError>,
     ) -> (EndpointAddr, Router) {
         let member_repo: Arc<dyn MemberRepositoryPort> = Arc::new(MemMemberRepo::default());
         member_repo
@@ -361,17 +174,56 @@ mod tests {
             .unwrap();
         let endpoint = bind_endpoint_with(serve_seed).await;
         wait_for_direct_addrs(&endpoint).await;
-        let adapter = IrohActiveClipboardPullServeAdapter::new(
-            crate::network::iroh::inbound_peer::member_table_directory(member_repo),
-            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
-            Arc::new(Sha256IdentityFingerprintFactory),
+        let adapter = ActivePullReceiver::new(
+            manager(
+                endpoint.clone(),
+                Arc::new(MemRepo::default()),
+                crate::network::iroh::inbound_peer::member_table_directory(member_repo.clone()),
+                true,
+                ConnectivityProfile::ActiveClipboardPull,
+            ),
+            Arc::new(ActiveClipboardWire),
             StubServe::new(serve_result),
-            Arc::new(AllowAllContent),
+            content_scope(member_repo, true),
+            Arc::new(SessionActivePullLocalWork),
         );
         let router = Router::builder((*endpoint).clone())
-            .accept(ACTIVE_CLIPBOARD_PULL_ALPN, adapter.handler())
+            .accept(
+                ACTIVE_CLIPBOARD_PULL_ALPN,
+                IrohActivePullHandler::new(Arc::new(adapter)),
+            )
             .spawn();
         (endpoint.addr(), router)
+    }
+
+    async fn client_for(endpoint: Arc<Endpoint>, addresses: Arc<MemRepo>) -> ActivePullClient {
+        let members = Arc::new(MemMemberRepo::default());
+        for record in addresses.list().await.unwrap() {
+            let address: EndpointAddr = postcard::from_bytes(&record.addr_blob).unwrap();
+            let fingerprint = Sha256IdentityFingerprintFactory
+                .from_public_key(address.id.as_bytes())
+                .unwrap();
+            members
+                .save(&SpaceMember {
+                    device_id: record.device_id,
+                    device_name: "holder".into(),
+                    identity_fingerprint: fingerprint,
+                    joined_at: Utc::now(),
+                    sync_preferences: MemberSyncPreferences::default(),
+                })
+                .await
+                .unwrap();
+        }
+        ActivePullClient::new(
+            manager(
+                endpoint,
+                addresses,
+                crate::network::iroh::inbound_peer::member_table_directory(members),
+                true,
+                ConnectivityProfile::ActiveClipboardPull,
+            ),
+            Arc::new(ActiveClipboardWire),
+        )
     }
 
     // ----- verdicts ----------------------------------------------------------
@@ -398,7 +250,7 @@ mod tests {
         let target = DeviceId::new("holder");
         seed_addr(&repo, &target, &serve_addr).await;
 
-        let client = IrohActiveClipboardPullClientAdapter::new(requester_endpoint, repo);
+        let client = client_for(requester_endpoint, repo).await;
         let hash = format!("blake3v1:{}", "7".repeat(64));
         let got = client.pull(&target, &hash).await.expect("pull succeeds");
         assert_eq!(got, envelope);
@@ -436,7 +288,7 @@ mod tests {
         let target = DeviceId::new("holder");
         seed_addr(&repo, &target, &serve_addr).await;
 
-        let client = IrohActiveClipboardPullClientAdapter::new(requester_endpoint, repo);
+        let client = client_for(requester_endpoint, repo).await;
         let hash = format!("blake3v1:{}", "5".repeat(64));
 
         let started = Instant::now();
@@ -463,7 +315,7 @@ mod tests {
             serve_seed,
             requester_seed,
             "requester-x",
-            Err(ActiveClipboardPullServeError::NotUnlocked),
+            Err(ActivePullPreparationError::NotUnlocked),
         )
         .await;
 
@@ -473,7 +325,7 @@ mod tests {
         let target = DeviceId::new("holder");
         seed_addr(&repo, &target, &serve_addr).await;
 
-        let client = IrohActiveClipboardPullClientAdapter::new(requester_endpoint, repo);
+        let client = client_for(requester_endpoint, repo).await;
         let hash = format!("blake3v1:{}", "7".repeat(64));
         let err = client
             .pull(&target, &hash)
@@ -490,11 +342,34 @@ mod tests {
     async fn pull_returns_unreachable_when_addr_missing() {
         let requester_endpoint = bind_endpoint_with([0x41u8; 32]).await;
         let repo = Arc::new(MemRepo::default());
-        let client = IrohActiveClipboardPullClientAdapter::new(requester_endpoint, repo);
+        let members = Arc::new(MemMemberRepo::default());
+        let fingerprint = Sha256IdentityFingerprintFactory
+            .from_public_key(SecretKey::from_bytes(&[0x42; 32]).public().as_bytes())
+            .unwrap();
+        members
+            .save(&SpaceMember {
+                device_id: DeviceId::new("known-without-address"),
+                device_name: "holder".into(),
+                identity_fingerprint: fingerprint,
+                joined_at: Utc::now(),
+                sync_preferences: MemberSyncPreferences::default(),
+            })
+            .await
+            .unwrap();
+        let client = ActivePullClient::new(
+            manager(
+                requester_endpoint,
+                repo,
+                crate::network::iroh::inbound_peer::member_table_directory(members),
+                true,
+                ConnectivityProfile::ActiveClipboardPull,
+            ),
+            Arc::new(ActiveClipboardWire),
+        );
 
         let err = client
             .pull(
-                &DeviceId::new("never-seen"),
+                &DeviceId::new("known-without-address"),
                 &format!("blake3v1:{}", "7".repeat(64)),
             )
             .await

@@ -25,4 +25,7 @@ pub use coordinator::{ClipboardWriteCoordinator, ClipboardWriteIntent};
 pub use mobile_consumability::{
     MobileConsumabilityProbe, MobileConsumableBackfill, MobileConsumableRefBackfill,
 };
-pub use restore_broadcast::{RestoreBroadcastRequest, RestoreBroadcastTrigger};
+pub use restore_broadcast::{
+    restore_broadcast_channel, RestoreBroadcastReceiver, RestoreBroadcastRequest,
+    RestoreBroadcastTrigger,
+};

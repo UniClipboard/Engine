@@ -4,17 +4,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use thiserror::Error;
-use tokio::sync::{
-    broadcast,
-    mpsc::{self, UnboundedReceiver},
-};
+use tokio::sync::{broadcast, mpsc};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
 use super::{resurface_entry, ActiveClipboardConvergedEvent, ActiveClipboardFacade};
 use crate::clipboard::sync::active_state::peer_online_resync_worker::PeerOnlineResyncWorker;
 use crate::clipboard::sync::active_state::restore_broadcast_worker::RestoreBroadcastWorker;
-use crate::clipboard::write::RestoreBroadcastRequest;
+use crate::clipboard::write::RestoreBroadcastReceiver;
 use crate::runtime_lifecycle::LifecycleError;
 use uc_observability_contract::diagnostics::{record_task_join_failure, DiagnosticTaskKind};
 use uc_observability_contract::{uc_debug, uc_warn};
@@ -77,10 +74,7 @@ impl ActiveClipboardFacade {
         )
     }
 
-    fn restore_broadcast_worker(
-        &self,
-        rx: UnboundedReceiver<RestoreBroadcastRequest>,
-    ) -> RestoreBroadcastWorker {
+    fn restore_broadcast_worker(&self, rx: RestoreBroadcastReceiver) -> RestoreBroadcastWorker {
         RestoreBroadcastWorker::new(
             rx,
             Arc::clone(&self.settings),
@@ -163,7 +157,7 @@ impl ActiveClipboardLifecycle {
     /// 初次装配后接入恢复广播来源，每个生命周期只允许接入一次。
     pub fn attach_restore_broadcast(
         &self,
-        rx: UnboundedReceiver<RestoreBroadcastRequest>,
+        rx: RestoreBroadcastReceiver,
     ) -> Result<(), ActiveClipboardLifecycleError> {
         if self.cancel.is_cancelled() {
             return Err(ActiveClipboardLifecycleError::Stopped);
@@ -224,16 +218,11 @@ struct RequiredActiveClipboardWorkerStopped {
 }
 
 type RestoreWorkerFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
-type RestoreWorkerStarter = Arc<
-    dyn Fn(UnboundedReceiver<RestoreBroadcastRequest>, CancellationToken) -> RestoreWorkerFuture
-        + Send
-        + Sync,
->;
+type RestoreWorkerStarter =
+    Arc<dyn Fn(RestoreBroadcastReceiver, CancellationToken) -> RestoreWorkerFuture + Send + Sync>;
 
 enum ActiveClipboardLifecycleCommand {
-    AttachRestoreBroadcast {
-        rx: UnboundedReceiver<RestoreBroadcastRequest>,
-    },
+    AttachRestoreBroadcast { rx: RestoreBroadcastReceiver },
 }
 
 struct ActiveClipboardWorkerSupervisor {
@@ -311,6 +300,7 @@ impl ActiveClipboardWorkerSupervisor {
 
 #[cfg(test)]
 mod lifecycle_tests {
+    use crate::clipboard::write::restore_broadcast_channel;
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -379,10 +369,10 @@ mod lifecycle_tests {
     async fn worker_failures_wait_for_disk_cleanup_and_keep_all_sources() {
         let (lifecycle, started, release, stopped, cancel) = blocking_lifecycle(true, true);
         started.notified().await;
-        let (_sender, receiver) = mpsc::unbounded_channel();
+        let (_sender, receiver) = restore_broadcast_channel();
         lifecycle.attach_restore_broadcast(receiver).unwrap();
         cancel.cancelled().await;
-        let (_sender, receiver) = mpsc::unbounded_channel();
+        let (_sender, receiver) = restore_broadcast_channel();
         assert_eq!(
             lifecycle.attach_restore_broadcast(receiver),
             Err(ActiveClipboardLifecycleError::Stopped)
@@ -518,7 +508,7 @@ mod lifecycle_tests {
             receiver,
             CancellationToken::new(),
         );
-        let (_sender, receiver) = mpsc::unbounded_channel();
+        let (_sender, receiver) = restore_broadcast_channel();
         lifecycle.attach_restore_broadcast(receiver).unwrap();
         lifecycle.shutdown().await.unwrap();
         assert!(!started.load(Ordering::SeqCst));
@@ -591,7 +581,7 @@ mod lifecycle_tests {
 
         wait_for(&initial_started, "lifecycle should start initial workers").await;
 
-        let (_restore_tx, restore_rx) = mpsc::unbounded_channel();
+        let (_restore_tx, restore_rx) = restore_broadcast_channel();
         assert_eq!(lifecycle.attach_restore_broadcast(restore_rx), Ok(()));
         wait_for(
             &restore_started,
@@ -599,7 +589,7 @@ mod lifecycle_tests {
         )
         .await;
 
-        let (_duplicate_tx, duplicate_rx) = mpsc::unbounded_channel();
+        let (_duplicate_tx, duplicate_rx) = restore_broadcast_channel();
         assert_eq!(
             lifecycle.attach_restore_broadcast(duplicate_rx),
             Err(ActiveClipboardLifecycleError::RestoreBroadcastAlreadyAttached)

@@ -31,12 +31,19 @@ use std::str::FromStr;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::{path::PathBuf, sync::Arc, time::Duration};
+use uc_application::deps::ActivePullPreparationPort;
 use uc_application::deps::ClipboardReceiverPort;
 use uc_application::deps::GroupUpdateReceiverPort;
 use uc_application::deps::PeerIdentityDirectoryPort;
+use uc_application::deps::{
+    ActivePullClient, ActivePullReceiver, ActiveStateReceiver, ActiveStateSender,
+    CurrentSpaceMemberScopePort,
+};
 use uc_observability_contract::{
     error_source::io_error_kind, log_fields::log_vocab, uc_debug, uc_info, uc_warn,
 };
+use uc_sync_protocol::active_clipboard_pull::ACTIVE_CLIPBOARD_PULL_ALPN;
+use uc_sync_protocol::active_clipboard_state::ACTIVE_CLIPBOARD_ALPN;
 
 use super::admitted_connections::AdmittedConnections;
 use super::discovery::{DirectoryAddressLookupBuilder, DiscoveryRuntime};
@@ -65,17 +72,16 @@ use uc_application::deps::{
 };
 
 use uc_core::file_transfer::OutboundProgressReporterPort;
-use uc_core::membership::{ContentExchangeGatePort, PeerAdmissionPort};
+use uc_core::membership::PeerAdmissionPort;
 use uc_core::ports::blob::BlobTransferPort;
 use uc_core::ports::pairing_invitation::{
     PairingInvitationAddressQueryPort, PairingInvitationByAddressPort, PairingInvitationPort,
 };
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::{
-    ActiveClipboardDispatchPort, ActiveClipboardPullClientPort, ActiveClipboardPullServePort,
-    ActiveClipboardReceiverPort, ClipboardDispatchPort, ClockPort, ConnectionChannelPort,
-    DeviceIdentityPort, LocalIdentityError, PeerAddressRepositoryPort, PeerReachabilityPort,
-    SettingsPort,
+    ActiveClipboardDispatchPort, ActiveClipboardPullClientPort, ActiveClipboardReceiverPort,
+    ClipboardDispatchPort, ClockPort, ConnectionChannelPort, DeviceIdentityPort,
+    LocalIdentityError, PeerAddressRepositoryPort, PeerReachabilityPort, SettingsPort,
 };
 
 use crate::pairing::PairingInvitationResolverAdapter;
@@ -83,9 +89,7 @@ use crate::rendezvous::{RendezvousClient, RendezvousPairingInvitationAdapter};
 use uc_infra_security::InMemorySession;
 
 use super::active_clipboard::{
-    IrohActiveClipboardDispatchAdapter, IrohActiveClipboardPullClientAdapter,
-    IrohActiveClipboardPullServeAdapter, IrohActiveClipboardReceiverAdapter, ACTIVE_CLIPBOARD_ALPN,
-    ACTIVE_CLIPBOARD_PULL_ALPN,
+    ActiveClipboardWire, IrohActivePullHandler, IrohActiveStateHandler, SessionActivePullLocalWork,
 };
 use super::addr_filter::apply_addr_filter;
 use super::admission_transport_material::IrohAdmissionTransportMaterial;
@@ -1345,7 +1349,7 @@ impl IrohSessionBuilder {
 
     /// Install the active-clipboard state transport.
     ///
-    /// * Registers [`IrohActiveClipboardReceiverHandler`] as the
+    /// * Registers [`IrohActiveStateHandler`] as the
     ///   [`ACTIVE_CLIPBOARD_ALPN`] `ProtocolHandler`, an independent sibling
     ///   of the bulk clipboard ALPN. Unknown peers are dropped at the
     ///   identity boundary via `remote_id()` + fingerprint resolution.
@@ -1357,37 +1361,26 @@ impl IrohSessionBuilder {
     /// Must be called before [`spawn`](Self::spawn). Coexists with every
     /// other `install_*` — all ALPNs share a single router.
     ///
-    /// [`IrohActiveClipboardReceiverHandler`]: super::active_clipboard::receiver_adapter::IrohActiveClipboardReceiverHandler
+    /// [`IrohActiveStateHandler`]: super::active_clipboard::IrohActiveStateHandler
     pub fn install_active_clipboard(
         &mut self,
-        peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-        identities: Arc<dyn PeerIdentityDirectoryPort>,
-        peer_admission: Arc<dyn PeerAdmissionPort>,
-        fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
+        manager: ConnectivityManager,
     ) -> Result<ActiveClipboardHandlers, IrohNodeError> {
-        let receiver = IrohActiveClipboardReceiverAdapter::new(
-            identities,
-            peer_admission,
-            fingerprint_factory,
-        );
-        let handler = receiver.handler();
-
-        self.install_session_handler([ACTIVE_CLIPBOARD_ALPN], handler)?;
-
-        let dispatch = Arc::new(IrohActiveClipboardDispatchAdapter::new(
-            Arc::clone(&self.context.endpoint),
-            peer_addr_repo,
-        ));
-
+        let wire = Arc::new(ActiveClipboardWire);
+        let receiver = Arc::new(ActiveStateReceiver::new(manager.clone(), wire.clone()));
+        self.install_session_handler(
+            [ACTIVE_CLIPBOARD_ALPN],
+            IrohActiveStateHandler::new(receiver.clone()),
+        )?;
         Ok(ActiveClipboardHandlers {
-            dispatch,
-            receiver: Arc::new(receiver),
+            dispatch: Arc::new(ActiveStateSender::new(manager, wire)),
+            receiver,
         })
     }
 
     /// Install the active-clipboard pull transport (issue #1017 PR8).
     ///
-    /// * Registers [`IrohActiveClipboardPullServeHandler`] as the
+    /// * Registers [`IrohActivePullHandler`] as the
     ///   [`ACTIVE_CLIPBOARD_PULL_ALPN`] `ProtocolHandler`, an independent
     ///   sibling of the active-clipboard state ALPN. Admission is
     ///   member-fingerprint only; the handler delegates content production to
@@ -1401,33 +1394,28 @@ impl IrohSessionBuilder {
     /// Must be called before [`spawn`](Self::spawn). Coexists with every other
     /// `install_*` — all ALPNs share a single router.
     ///
-    /// [`IrohActiveClipboardPullServeHandler`]: super::active_clipboard::pull_serve_adapter::IrohActiveClipboardPullServeHandler
+    /// [`IrohActivePullHandler`]: super::active_clipboard::IrohActivePullHandler
     pub fn install_active_clipboard_pull(
         &mut self,
-        peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-        identities: Arc<dyn PeerIdentityDirectoryPort>,
-        peer_admission: Arc<dyn PeerAdmissionPort>,
-        fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
-        serve: Arc<dyn ActiveClipboardPullServePort>,
-        content_gate: Arc<dyn ContentExchangeGatePort>,
+        manager: ConnectivityManager,
+        prepare: Arc<dyn ActivePullPreparationPort>,
+        content_gate: Arc<dyn CurrentSpaceMemberScopePort>,
     ) -> Result<ActiveClipboardPullHandlers, IrohNodeError> {
-        let serve_adapter = IrohActiveClipboardPullServeAdapter::new(
-            identities,
-            peer_admission,
-            fingerprint_factory,
-            serve,
+        let wire = Arc::new(ActiveClipboardWire);
+        let receiver = Arc::new(ActivePullReceiver::new(
+            manager.clone(),
+            wire.clone(),
+            prepare,
             content_gate,
-        );
-        let handler = serve_adapter.handler();
-
-        self.install_session_handler([ACTIVE_CLIPBOARD_PULL_ALPN], handler)?;
-
-        let client = Arc::new(IrohActiveClipboardPullClientAdapter::new(
-            Arc::clone(&self.context.endpoint),
-            peer_addr_repo,
+            Arc::new(SessionActivePullLocalWork),
         ));
-
-        Ok(ActiveClipboardPullHandlers { client })
+        self.install_session_handler(
+            [ACTIVE_CLIPBOARD_PULL_ALPN],
+            IrohActivePullHandler::new(receiver),
+        )?;
+        Ok(ActiveClipboardPullHandlers {
+            client: Arc::new(ActivePullClient::new(manager, wire)),
+        })
     }
 
     /// 安装"反向传输进度"通道(receiver → sender)。

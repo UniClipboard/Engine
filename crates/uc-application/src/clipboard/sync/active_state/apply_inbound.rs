@@ -59,7 +59,7 @@ use crate::space::IsSpaceUnlockedPort;
 use super::super::receive_gate::{MemberReceiveGate, MemberReceivePermit};
 use super::super::send_gate::MemberSendGate;
 use super::super::snapshot_from_entry::SnapshotReconstructor;
-use super::fanout::fan_out_active_state;
+use super::fanout::{fan_out_active_state, ActiveStateBroadcastTrigger};
 
 /// The fixed space id of the single-space model. Active-clipboard state is
 /// only meaningful while that space is unlocked.
@@ -614,6 +614,7 @@ impl ApplyInboundActiveClipboardStateUseCase {
             &send_gate,
             &state,
             &categories,
+            ActiveStateBroadcastTrigger::InboundConvergence,
         )
         .await;
     }

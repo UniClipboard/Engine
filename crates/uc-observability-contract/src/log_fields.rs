@@ -265,6 +265,8 @@ __log_field_catalog! {
     trigger: Literal,
     worker: Literal,
     // Vocabulary
+    // 完整网络入口只记录 Core ConnectionChannel 的固定枚举，不含地址或身份。
+    channel: Vocabulary(reviewed),
     ack: Vocabulary(reviewed),
     ack_kind: Vocabulary(reviewed),
     alpn: Vocabulary(reviewed),

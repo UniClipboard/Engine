@@ -7,9 +7,11 @@
 //! single lifecycle seam for worker startup, late restore-source attachment,
 //! and coordinated shutdown.
 
+use crate::clipboard::active::transport::ActivePullPreparationPort;
 mod current;
 mod lifecycle;
 mod reconcile;
+pub(crate) mod transport;
 
 pub use lifecycle::{ActiveClipboardLifecycle, ActiveClipboardLifecycleError};
 
@@ -28,11 +30,11 @@ use tracing::instrument;
 use uc_core::clipboard::{ActiveClipboardState, ClipboardContentCategorySet};
 use uc_core::ids::{DeviceId, EntryId};
 use uc_core::ports::clipboard::{
-    ActiveClipboardDispatchPort, ActiveClipboardPullClientPort, ActiveClipboardPullServePort,
-    ActiveClipboardReceiverPort, AdvanceActiveClipboardPort, CheckEntryAvailabilityPort,
-    ClipboardPayloadResolverPort, ClipboardSelectionRepositoryPort, EntryFileSetRepositoryPort,
-    FindEntryIdBySnapshotHashPort, GetClipboardEntryPort, GetRepresentationPort,
-    LoadActiveClipboardPort, TouchClipboardEntryPort, UpdateRepresentationProcessingResultPort,
+    ActiveClipboardDispatchPort, ActiveClipboardPullClientPort, ActiveClipboardReceiverPort,
+    AdvanceActiveClipboardPort, CheckEntryAvailabilityPort, ClipboardPayloadResolverPort,
+    ClipboardSelectionRepositoryPort, EntryFileSetRepositoryPort, FindEntryIdBySnapshotHashPort,
+    GetClipboardEntryPort, GetRepresentationPort, LoadActiveClipboardPort, TouchClipboardEntryPort,
+    UpdateRepresentationProcessingResultPort,
 };
 use uc_core::ports::security::TransferCipherPort;
 use uc_core::ports::{
@@ -55,7 +57,9 @@ use crate::clipboard::sync::active_state::apply_inbound::{
     ActiveClipboardConvergedEvent, ApplyInboundActiveClipboardStateUseCase,
     InboundPulledContentStore, InboundPulledContentStoreError, InboundPulledContentStoreOutcome,
 };
-use crate::clipboard::sync::active_state::fanout::fan_out_active_state;
+use crate::clipboard::sync::active_state::fanout::{
+    fan_out_active_state, ActiveStateBroadcastTrigger,
+};
 use crate::clipboard::sync::active_state::serve_pull::{
     ActiveClipboardPullServeDeps, ActiveClipboardPullServeUseCase,
 };
@@ -154,7 +158,7 @@ pub struct ActiveClipboardDeps {
 }
 
 /// Dependencies for the standalone pull serve port
-/// ([`build_active_clipboard_pull_serve_port`]). Built separately from the
+/// ([`build_active_clipboard_pull_preparation`]). Built separately from the
 /// facade because the serve port must be registered on the pull accept handler
 /// before the node spawns, whereas the facade (which owns the inbound loop) is
 /// assembled after.
@@ -182,9 +186,9 @@ pub struct ActiveClipboardPullServeFacadeDeps {
 ///
 /// Standalone (not a facade method) so bootstrap can register it on the pull
 /// accept handler before the node spawns.
-pub fn build_active_clipboard_pull_serve_port(
+pub fn build_active_clipboard_pull_preparation(
     deps: ActiveClipboardPullServeFacadeDeps,
-) -> Arc<dyn ActiveClipboardPullServePort> {
+) -> Arc<dyn ActivePullPreparationPort> {
     let reconstructor = deps.snapshot.into_reconstructor();
     let blob_publisher: Arc<dyn OutboundBlobPublishGateway> = deps.blob_publisher;
     Arc::new(ActiveClipboardPullServeUseCase::new(
@@ -331,6 +335,7 @@ impl ActiveClipboardFacade {
             &self.send_gate,
             &state,
             &categories,
+            ActiveStateBroadcastTrigger::LocalActivation,
         )
         .await;
     }
