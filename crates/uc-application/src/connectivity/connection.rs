@@ -1,17 +1,25 @@
 use super::manager::PeerState;
+use super::retention::{ActivityGuard, ConnectionActivity};
 use super::{
     AdmissionAttempt, AdmissionGrant, ConnectionMode, ConnectionProtocol, ConnectivityError,
-    PeerConnection, StreamLease,
+    PeerConnection, StreamLease, StreamPair,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::Semaphore;
+use std::time::Duration;
+use tokio::sync::{Mutex, Semaphore};
 use tokio::time::{timeout_at, Instant};
+use tokio_util::sync::CancellationToken;
 use uc_core::ids::DeviceId;
 use uc_core::ports::ConnectionChannel;
 
 pub(super) struct ConnectionRecord {
     pub connection: Arc<dyn PeerConnection>,
+    pub activity: Arc<ConnectionActivity>,
+    pub stop: CancellationToken,
+    pub cache_cancel: CancellationToken,
+    pub accepted_stream_timeout: Option<Duration>,
+    pub pending: Mutex<Option<AcceptedStream>>,
     pub exchange_claimed: AtomicBool,
     pub grant: Box<dyn AdmissionGrant>,
     pub peer: Arc<PeerState>,
@@ -21,20 +29,38 @@ pub(super) struct ConnectionRecord {
     pub _inbound_connection: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
+pub(super) struct AcceptedStream {
+    pair: StreamPair,
+    activity: Arc<ActivityGuard>,
+    accepted_at: Instant,
+}
+
 impl Drop for ConnectionRecord {
     fn drop(&mut self) {
         self.connection.close();
     }
 }
 
-/// 活动使用权；manager 仅保存弱引用，不保留空闲连接。
+/// 连接使用权；出站请求活动随最后一份使用权释放，入站监听本身不算活动。
 #[derive(Clone)]
 pub struct ConnectionLease {
     pub(super) record: Arc<ConnectionRecord>,
     pub(super) request: Option<Arc<dyn AdmissionAttempt>>,
+    pub(super) _activity: Option<Arc<ActivityGuard>>,
 }
 
 impl ConnectionLease {
+    pub(super) fn outbound(
+        record: Arc<ConnectionRecord>,
+        request: Arc<dyn AdmissionAttempt>,
+    ) -> Result<Self, ConnectivityError> {
+        let activity = record.activity.acquire()?;
+        Ok(Self {
+            record,
+            request: Some(request),
+            _activity: Some(activity),
+        })
+    }
     pub fn peer(&self) -> DeviceId {
         self.record.grant.peer()
     }
@@ -47,6 +73,9 @@ impl ConnectionLease {
     pub fn channel(&self) -> ConnectionChannel {
         self.record.connection.channel()
     }
+    pub fn is_closed(&self) -> bool {
+        self.record.connection.is_closed()
+    }
     pub fn is_unreachable(&self) -> bool {
         self.record.connection.is_unreachable()
     }
@@ -57,6 +86,9 @@ impl ConnectionLease {
         self.record.connection.closed().await;
     }
     pub async fn check_current(&self) -> Result<(), ConnectivityError> {
+        if self.record.stop.is_cancelled() {
+            return Err(ConnectivityError::Stopped);
+        }
         if let Some(request) = &self.request {
             request.check_current().await?;
         }
@@ -103,7 +135,7 @@ impl ConnectionLease {
         })
         .await
         .map_err(ConnectivityError::TimedOut)??;
-        Ok(StreamLease::new(result, self.record.clone(), vec![permit]))
+        StreamLease::new(result, self.record.clone(), vec![permit])
     }
     pub async fn accept_bi(&self) -> Result<StreamLease, ConnectivityError> {
         let local = self
@@ -114,20 +146,55 @@ impl ConnectionLease {
             .await
             .map_err(ConnectivityError::ResourceClosed)?;
         self.claim_exchange()?;
-        // 空闲等待仅占本连接额度；每连接至多一条已接收待排队流，不提前读负载。
-        let pair = self.record.connection.accept_bi().await?;
-        let global = self
+        // 已从 transport 取出的流保存在 record，select 取消排队时不丢弃另一请求。
+        let mut pending = self.record.pending.lock().await;
+        if pending.is_none() {
+            let pair = self.record.connection.accept_bi().await?;
+            let activity = self.record.activity.acquire()?;
+            *pending = Some(AcceptedStream {
+                pair,
+                activity,
+                accepted_at: Instant::now(),
+            });
+        }
+        let accepted_at = pending
+            .as_ref()
+            .ok_or(ConnectivityError::Stopped)?
+            .accepted_at;
+        if self
             .record
-            .inbound_global
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(ConnectivityError::ResourceClosed)?;
-        self.check_current().await?;
-        Ok(StreamLease::new(
-            pair,
-            self.record.clone(),
-            vec![local, global],
-        ))
+            .accepted_stream_timeout
+            .is_some_and(|timeout| Instant::now() >= accepted_at + timeout)
+        {
+            pending.take();
+            return Err(ConnectivityError::DeadlineExpired);
+        }
+        let acquiring = self.record.inbound_global.clone().acquire_owned();
+        let acquired = match self.record.accepted_stream_timeout {
+            Some(timeout) => match timeout_at(accepted_at + timeout, acquiring).await {
+                Ok(result) => result,
+                Err(source) => {
+                    pending.take();
+                    return Err(ConnectivityError::TimedOut(source));
+                }
+            },
+            None => acquiring.await,
+        };
+        let global = match acquired {
+            Ok(permit) => permit,
+            Err(source) => {
+                pending.take();
+                return Err(ConnectivityError::ResourceClosed(source));
+            }
+        };
+        if let Err(source) = self.check_current().await {
+            pending.take();
+            return Err(source);
+        }
+        let accepted = pending.take().ok_or(ConnectivityError::Stopped)?;
+        let mut stream = StreamLease::new(accepted.pair, self.record.clone(), vec![local, global])?;
+        stream.received_at = Some(accepted.accepted_at);
+        drop(accepted.activity);
+        Ok(stream)
     }
 }

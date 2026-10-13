@@ -5,15 +5,20 @@ mod backend;
 mod connection;
 mod error;
 mod manager;
+mod pending;
+mod retention;
 mod stream;
 
 pub use admission::{
-    AdmissionAttempt, AdmissionGrant, InboundConnectionError, SessionConnectionAdmissionPort,
+    AdmissionAttempt, AdmissionGrant, InboundAdmissionFence, InboundConnectionError,
+    SessionConnectionAdmissionPort,
 };
 pub use backend::{ConnectionMode, ConnectionProtocol, ConnectivityBackend, PeerConnection};
 pub use connection::ConnectionLease;
 pub use error::ConnectivityError;
 pub use manager::{ConnectivityManager, ConnectivityPolicy};
+pub use pending::PendingInboundLease;
+pub use retention::IdleRetentionPolicy;
 pub use stream::{PeerReceiveStream, PeerSendStream, StreamLease, StreamPair};
 #[cfg(test)]
 mod tests;

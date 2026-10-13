@@ -22,16 +22,6 @@ pub(crate) enum InboundPeerRejection {
 }
 
 impl InboundPeerRejection {
-    pub(crate) fn is_identity_failure(self) -> bool {
-        matches!(
-            self,
-            Self::IdentityUnresolved
-                | Self::IdentityAmbiguous
-                | Self::MemberReadFailed
-                | Self::FingerprintUnavailable
-        )
-    }
-
     fn diagnostic(self) -> InboundPeerRejectionReason {
         match self {
             Self::IdentityUnresolved => InboundPeerRejectionReason::IdentityUnresolved,

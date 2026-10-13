@@ -8,6 +8,7 @@ use uc_application::deps::{
     RestrictedMembershipDelivery, RestrictedMembershipDeliveryError,
     RestrictedMembershipDeliveryPort, SpaceMembershipAdapters,
 };
+use uc_core::ids::DeviceId;
 use uc_core::membership::KeyEpochError;
 use uc_infra_security::group_update_failure_detail;
 use uc_observability_contract::diagnostics::connectivity::{
@@ -95,10 +96,10 @@ impl GroupUpdateReceiverPort for ObservedGroupUpdateReceive {
         result
     }
 }
-use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    GroupUpdateDispatchError, GroupUpdateDispatchPort, MembershipHistoryExchangeError,
-    MembershipHistoryExchangePort, MembershipHistoryMessage, PendingGroupUpdate,
+    GroupUpdateDispatchError, GroupUpdateDispatchPort, MembershipHistoryExchangeEndpointPort,
+    MembershipHistoryExchangeError, MembershipHistoryExchangePort, MembershipHistoryMessage,
+    PendingGroupUpdate,
 };
 use uc_observability_contract::diagnostics::connectivity::{
     complete_membership_history_failure, MembershipHistoryFailureDetail,
@@ -130,7 +131,16 @@ impl MembershipOperation {
 pub(crate) fn observe_membership(
     adapters: SpaceMembershipAdapters,
     receiver: Arc<dyn GroupUpdateReceiverPort>,
-) -> (SpaceMembershipAdapters, Arc<dyn GroupUpdateReceiverPort>) {
+) -> (
+    SpaceMembershipAdapters,
+    Arc<dyn GroupUpdateReceiverPort>,
+    Box<
+        dyn FnOnce(
+                Arc<dyn MembershipHistoryExchangeEndpointPort>,
+            ) -> Arc<dyn MembershipHistoryExchangeEndpointPort>
+            + Send,
+    >,
+) {
     let adapters = SpaceMembershipAdapters {
         membership_history_transport: Arc::new(ObservedMembershipHistoryExchange {
             inner: adapters.membership_history_transport,
@@ -143,7 +153,11 @@ pub(crate) fn observe_membership(
         }),
         ..adapters
     };
-    (adapters, observe_group_update_receive(receiver))
+    (
+        adapters,
+        observe_group_update_receive(receiver),
+        Box::new(observe_history_endpoint),
+    )
 }
 
 fn membership_span(operation: MembershipOperation) -> tracing::Span {
@@ -306,7 +320,7 @@ impl RestrictedMembershipDeliveryPort for ObservedRestrictedMembershipDelivery {
                     MembershipOperation::RestrictedDelivery,
                     started.elapsed(),
                     result.as_ref().copied().map_err(|error| match error {
-                        RestrictedMembershipDeliveryError::Deferred => {
+                        RestrictedMembershipDeliveryError::Deferred { .. } => {
                             MembershipCompletionKind::Deferred
                         }
                         RestrictedMembershipDeliveryError::Rejected => {
@@ -395,5 +409,51 @@ mod tests {
         ));
 
         assert_eq!(detail.local_fields(), ("exchange_history", "transport"));
+    }
+}
+
+fn observe_history_endpoint(
+    inner: Arc<dyn MembershipHistoryExchangeEndpointPort>,
+) -> Arc<dyn MembershipHistoryExchangeEndpointPort> {
+    Arc::new(ObservedHistoryEndpoint { inner })
+}
+struct ObservedHistoryEndpoint {
+    inner: Arc<dyn MembershipHistoryExchangeEndpointPort>,
+}
+#[async_trait]
+impl MembershipHistoryExchangeEndpointPort for ObservedHistoryEndpoint {
+    async fn handle_membership_history_exchange(
+        &self,
+        source: &DeviceId,
+        message: MembershipHistoryMessage,
+    ) -> Result<MembershipHistoryMessage, MembershipHistoryExchangeError> {
+        let started = Instant::now();
+        let span = operation_span(OperationContext {
+            domain: DiagnosticDomain::SpaceMembership,
+            operation: DiagnosticOperation::MembershipHistorySync,
+            role: DiagnosticRole::Member,
+            kind: DiagnosticSpanKind::Server,
+        });
+        let result = self
+            .inner
+            .handle_membership_history_exchange(source, message)
+            .instrument(span.clone())
+            .await;
+        span.in_scope(|| {
+            let completion = membership_completion(
+                MembershipOperation::HistoryExchange,
+                started.elapsed(),
+                result
+                    .as_ref()
+                    .map(|_| ())
+                    .map_err(history_exchange_completion),
+            );
+            if let Err(source) = &result {
+                complete_membership_history_failure(history_failure_detail(source), completion);
+            } else {
+                complete_operation(completion);
+            }
+        });
+        result
     }
 }

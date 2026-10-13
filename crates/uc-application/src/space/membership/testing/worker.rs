@@ -119,7 +119,15 @@ impl RestrictedMembershipDeliveryPort for RecordingDelivery {
             .lock()
             .unwrap()
             .push((*peer, delivery.clone()));
-        *self.result.lock().unwrap()
+        match &*self.result.lock().unwrap() {
+            Ok(()) => Ok(()),
+            Err(RestrictedMembershipDeliveryError::Deferred { .. }) => {
+                Err(RestrictedMembershipDeliveryError::deferred())
+            }
+            Err(RestrictedMembershipDeliveryError::Rejected) => {
+                Err(RestrictedMembershipDeliveryError::Rejected)
+            }
+        }
     }
 }
 

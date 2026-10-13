@@ -19,6 +19,8 @@ pub enum ConnectionProtocol {
     MultiplexedClipboard,
     GroupUpdate,
     LegacyGroupUpdate,
+    MembershipHistory,
+    MultiplexedMembershipHistory,
 }
 
 #[async_trait]

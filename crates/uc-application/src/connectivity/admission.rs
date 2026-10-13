@@ -7,6 +7,10 @@ use uc_core::ids::DeviceId;
 pub trait AdmissionGrant: Send + Sync {
     fn peer(&self) -> DeviceId;
     async fn check_current(&self) -> Result<(), ConnectivityError>;
+    /// 由准入负责人读取当前权威；默认不允许跨轮保留。
+    async fn can_retain(&self) -> Result<bool, ConnectivityError> {
+        Ok(false)
+    }
 }
 
 #[async_trait]
@@ -19,9 +23,17 @@ pub trait AdmissionAttempt: Send + Sync {
     ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError>;
 }
 
+/// 首帧尚未识别 peer 时冻结的撤销围栏；绑定后核对同一请求基线。
+pub trait InboundAdmissionFence: Send + Sync {
+    fn check_current(&self, peer: &DeviceId) -> Result<(), ConnectivityError>;
+}
+
 /// 复用会话唯一身份、准入和撤销登记；不向协议调用方暴露步骤。
 #[async_trait]
 pub trait SessionConnectionAdmissionPort: Send + Sync {
+    fn inbound_fence(&self) -> Option<Box<dyn InboundAdmissionFence>> {
+        None
+    }
     fn begin(&self, target: DeviceId) -> Box<dyn AdmissionAttempt>;
     async fn adopt_inbound(
         &self,

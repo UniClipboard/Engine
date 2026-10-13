@@ -21,6 +21,8 @@ fn version(protocol: ConnectionProtocol) -> Result<GroupUpdateVersion, Connectiv
         ConnectionProtocol::LegacyGroupUpdate => Ok(GroupUpdateVersion::Legacy),
         ConnectionProtocol::Clipboard
         | ConnectionProtocol::MultiplexedClipboard
+        | ConnectionProtocol::MembershipHistory
+        | ConnectionProtocol::MultiplexedMembershipHistory
         | ConnectionProtocol::Unsupported => Err(ConnectivityError::Denied),
     }
 }

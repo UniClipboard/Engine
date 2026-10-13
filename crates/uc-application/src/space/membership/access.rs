@@ -13,7 +13,10 @@ use uc_core::ids::DeviceId;
 use uc_core::membership::{PeerAdmissionError, PeerAdmissionPort};
 use uc_core::security::IdentityFingerprint;
 
-use super::{MembershipLedgerError, MembershipOwner, MembershipProjectionPlan, MembershipView};
+use super::{
+    HistoryConnectionRetentionPort, MembershipLedgerError, MembershipOwner,
+    MembershipProjectionPlan, MembershipView,
+};
 
 /// 入站身份解析可识别的一台设备。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,5 +109,15 @@ fn admission_error(error: MembershipLedgerError) -> PeerAdmissionError {
         MembershipLedgerError::Corrupt { .. } | MembershipLedgerError::RecoveryRequired => {
             PeerAdmissionError::InvalidState
         }
+    }
+}
+
+#[async_trait]
+impl HistoryConnectionRetentionPort for PeerAccess {
+    async fn may_retain(&self, peer: &DeviceId) -> Result<bool, MembershipLedgerError> {
+        let view = self.view().await?;
+        Ok(view
+            .space()
+            .is_some_and(|space| space.history().effective_member_for_device(peer).is_some()))
     }
 }

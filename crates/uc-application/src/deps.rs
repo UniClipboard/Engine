@@ -573,6 +573,13 @@ pub use crate::space::{
 pub use crate::connectivity::{
     AdmissionAttempt, AdmissionGrant, ConnectionLease, ConnectionMode, ConnectionProtocol,
     ConnectivityBackend, ConnectivityError, ConnectivityManager, ConnectivityPolicy,
-    InboundConnectionError, PeerConnection, PeerReceiveStream, PeerSendStream,
-    SessionConnectionAdmissionPort, StreamLease, StreamPair,
+    IdleRetentionPolicy, InboundAdmissionFence, InboundConnectionError, PeerConnection,
+    PeerReceiveStream, PeerSendStream, PendingInboundLease, SessionConnectionAdmissionPort,
+    StreamLease, StreamPair,
+};
+
+pub use crate::space::{
+    membership_history_purpose, HistoryConnectionRetentionPort, HistoryIncoming,
+    HistoryLocalWorkPort, HistoryPeerBindingPort, HistoryReceiverPort, HistoryReply,
+    HistoryWirePort, HistoryWork, MembershipHistoryReceiver, MembershipHistoryTransport,
 };

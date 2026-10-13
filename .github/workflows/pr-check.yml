@@ -145,6 +145,14 @@ jobs:
       - name: Run upgrade compatibility smoke
         run: bash scripts/testing/run-test-group.sh upgrade-matrix --smoke
 
+      - name: Keep upgrade smoke report
+        run: |
+          mkdir -p target/test-reports
+          cp target/nextest/ci/junit.xml target/test-reports/upgrade-smoke.xml
+
+      - name: Validate fixed-main membership history in both directions
+        run: bash scripts/testing/run-fixed-main-history-interop.sh
+
       - name: Retain upgrade smoke evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -153,7 +161,10 @@ jobs:
           path: |
             target/nextest/ci/junit.xml
             target/test-artifacts/ci/upgrade-matrix
+            target/test-reports/upgrade-smoke.xml
             target/upgrade-anchors/*/host.json
+            target/fixed-main-history/source-revision.txt
+            target/fixed-main-history/binary-sha256.txt
           if-no-files-found: error
 
       - name: Retain MBX compiler evidence
@@ -229,6 +240,9 @@ jobs:
         run: mkdir -p target/test-reports && cp target/nextest/ci/junit.xml target/test-reports/membership-e2e-smoke.xml || true
 
       # 在隔离网络中完成三节点配对与文本、文件双向传输；其余场景与重复轮次属于完整检查和 nightly。
+      - name: Validate relay-only membership history reuse
+        run: bash scripts/testing/run-membership-history-relay.sh
+
       - name: Run isolated network pairing smoke
         if: success() || failure()
         run: >-
@@ -245,6 +259,7 @@ jobs:
             target/test-artifacts/ci
             target/test-artifacts/membership-recovery
             target/test-artifacts/real-dependencies
+            target/membership-history-relay
             target/connection-recovery-evidence
           if-no-files-found: error
 

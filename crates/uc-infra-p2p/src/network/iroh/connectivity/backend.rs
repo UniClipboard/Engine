@@ -10,11 +10,15 @@ use uc_core::ports::{PeerAddressRepositoryPort, PeerReachabilityPort};
 use uc_observability_contract::diagnostics::connectivity::AddressInputSource;
 use uc_sync_protocol::clipboard::{CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN};
 use uc_sync_protocol::group_update::{GROUP_UPDATE_ALPN, LEGACY_GROUP_UPDATE_ALPN};
+use uc_sync_protocol::membership_history::{
+    MEMBERSHIP_HISTORY_EXCHANGE_ALPN, MULTIPLEXED_MEMBERSHIP_HISTORY_ALPN,
+};
 
 /// 同一 endpoint 上的独立协议连接池只使用各自固定的协商配置。
 #[derive(Clone, Copy)]
 pub enum ConnectivityProfile {
     Clipboard,
+    MembershipHistory,
     GroupUpdate,
     /// 仅供固定旧端互通验收；实际能力仍由协商结果决定。
     LegacyGroupUpdate,
@@ -54,6 +58,11 @@ impl ConnectivityBackend for IrohConnectivityBackend {
             .map_err(|error| ConnectivityError::AddressLookup(Box::new(error)))?
             .ok_or(ConnectivityError::Offline)?;
         let (preferred, fallback, label) = match self.profile {
+            ConnectivityProfile::MembershipHistory => (
+                MULTIPLEXED_MEMBERSHIP_HISTORY_ALPN,
+                MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
+                "membership-history",
+            ),
             ConnectivityProfile::Clipboard => {
                 (MULTIPLEXED_CLIPBOARD_ALPN, CLIPBOARD_ALPN, "clipboard")
             }

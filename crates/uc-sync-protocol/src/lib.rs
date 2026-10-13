@@ -11,6 +11,7 @@ pub mod clipboard;
 pub mod full_invitation;
 pub mod group_update;
 pub mod membership_branch_recovery;
+pub mod membership_history;
 pub mod space_admission;
 pub mod trace_context;
 pub mod transfer_progress;

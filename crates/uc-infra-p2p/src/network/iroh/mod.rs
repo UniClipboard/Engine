@@ -69,8 +69,9 @@ pub use group_update_adapter::{
 pub use identity_store::{IrohIdentityStore, IDENTITY_STORE_KEY};
 pub use membership_branch_recovery_adapter::IrohMembershipBranchRecoveryChannel;
 pub use membership_history_exchange_adapter::{
-    IrohMembershipHistoryExchangeAdapter, IrohMembershipHistoryExchangeHandler,
-    MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
+    HistoryConnectionAdmission, IrohMembershipHistoryExchangeHandler,
+    IrohVerifiedPeerAddressRefresh, MembershipHistoryWire, SessionMembershipHistoryLocalWork,
+    MEMBERSHIP_HISTORY_EXCHANGE_ALPN, MULTIPLEXED_MEMBERSHIP_HISTORY_ALPN,
 };
 pub use network_partition::IrohNetworkPartitionGate;
 pub use node::{

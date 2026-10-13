@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use uc_application::deps::membership_history_purpose;
 
 use async_trait::async_trait;
 use uc_application::deps::{
@@ -124,12 +125,7 @@ impl MembershipHistoryExchangePort for GatedMembershipHistoryExchange {
         message: MembershipHistoryMessage,
     ) -> Result<MembershipHistoryMessage, MembershipHistoryExchangeError> {
         if !self.gate.permits_network_work() {
-            describe_membership_exchange(
-                uc_infra_p2p::network::iroh::membership_history_exchange_adapter::request_purpose(
-                    &message,
-                ),
-                false,
-            );
+            describe_membership_exchange(membership_history_purpose(&message), false);
             describe_operation_failure(DiagnosticErrorType::NetworkPaused);
             return Err(MembershipHistoryExchangeError::offline());
         }
@@ -158,7 +154,7 @@ impl RestrictedMembershipDeliveryPort for GatedMembershipHistoryExchange {
                 },
                 false,
             );
-            return Err(RestrictedMembershipDeliveryError::Deferred);
+            return Err(RestrictedMembershipDeliveryError::deferred());
         }
         self.restricted
             .deliver_restricted_membership(peer, delivery)

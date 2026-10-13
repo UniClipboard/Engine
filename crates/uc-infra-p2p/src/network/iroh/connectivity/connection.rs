@@ -12,6 +12,9 @@ use uc_core::ids::DeviceId;
 use uc_core::ports::{ConnectionChannel, PeerReachabilityChanged, ReachabilityState};
 use uc_sync_protocol::clipboard::{CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN};
 use uc_sync_protocol::group_update::{GROUP_UPDATE_ALPN, LEGACY_GROUP_UPDATE_ALPN};
+use uc_sync_protocol::membership_history::{
+    MEMBERSHIP_HISTORY_EXCHANGE_ALPN, MULTIPLEXED_MEMBERSHIP_HISTORY_ALPN,
+};
 
 pub(crate) struct IrohPeerConnection {
     native: Connection,
@@ -74,7 +77,10 @@ impl PeerConnection for IrohPeerConnection {
         *self.native.remote_id().as_bytes()
     }
     fn mode(&self) -> ConnectionMode {
-        if self.native.alpn() == MULTIPLEXED_CLIPBOARD_ALPN {
+        if matches!(
+            self.native.alpn(),
+            MULTIPLEXED_CLIPBOARD_ALPN | MULTIPLEXED_MEMBERSHIP_HISTORY_ALPN
+        ) {
             ConnectionMode::Multiplexed
         } else {
             ConnectionMode::SingleExchange
@@ -84,9 +90,11 @@ impl PeerConnection for IrohPeerConnection {
         match self.native.alpn() {
             MULTIPLEXED_CLIPBOARD_ALPN => ConnectionProtocol::MultiplexedClipboard,
             CLIPBOARD_ALPN => ConnectionProtocol::Clipboard,
+            MEMBERSHIP_HISTORY_EXCHANGE_ALPN => ConnectionProtocol::MembershipHistory,
+            MULTIPLEXED_MEMBERSHIP_HISTORY_ALPN => ConnectionProtocol::MultiplexedMembershipHistory,
             GROUP_UPDATE_ALPN => ConnectionProtocol::GroupUpdate,
             LEGACY_GROUP_UPDATE_ALPN => ConnectionProtocol::LegacyGroupUpdate,
-            // 只在四种固定协议 handler/backend 中构造；未知连接不提供新协议能力。
+            // 只在固定协议 handler/backend 中构造；未知连接不提供新协议能力。
             _ => ConnectionProtocol::Unsupported,
         }
     }

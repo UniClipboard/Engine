@@ -18,9 +18,13 @@
 
 use super::discovery::endpoint_id;
 use futures_util::{stream, stream::BoxStream, StreamExt};
+#[cfg(any(test, feature = "test-util"))]
+use iroh::endpoint::BindOpts;
 use iroh::Watcher as _;
 use std::collections::BTreeMap;
 use std::fmt;
+#[cfg(any(test, feature = "test-util"))]
+use std::net::Ipv6Addr;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 #[cfg(not(any(test, feature = "test-util")))]
@@ -61,9 +65,7 @@ use uc_application::deps::{
 };
 
 use uc_core::file_transfer::OutboundProgressReporterPort;
-use uc_core::membership::{
-    ContentExchangeGatePort, MembershipHistoryExchangeEndpointPort, PeerAdmissionPort,
-};
+use uc_core::membership::{ContentExchangeGatePort, PeerAdmissionPort};
 use uc_core::ports::blob::BlobTransferPort;
 use uc_core::ports::pairing_invitation::{
     PairingInvitationAddressQueryPort, PairingInvitationByAddressPort, PairingInvitationPort,
@@ -101,7 +103,9 @@ use super::identity_store::IrohIdentityStore;
 use super::inbound_peer::{PeerIdentityError, PeerIdentityResolver};
 use super::membership_branch_recovery_adapter::IrohMembershipBranchRecoveryHandler;
 use super::membership_history_exchange_adapter::{
-    IrohMembershipHistoryExchangeAdapter, MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
+    HistoryConnectionAdmission, IrohMembershipHistoryExchangeHandler,
+    IrohVerifiedPeerAddressRefresh, MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
+    MULTIPLEXED_MEMBERSHIP_HISTORY_ALPN,
 };
 use super::membership_identity_adapter::IrohMembershipIdentityAdapter;
 use super::net_recovery::DemandRecoveryCoordinator;
@@ -121,7 +125,8 @@ use crate::network::clipboard::{ClipboardDispatchAdapter, ClipboardReceiverAdapt
 #[cfg(test)]
 use uc_application::deps::ConnectivityPolicy;
 use uc_application::deps::{
-    ConnectivityBackend, ConnectivityManager, SessionConnectionAdmissionPort,
+    ConnectivityBackend, ConnectivityManager, HistoryConnectionRetentionPort, HistoryReceiverPort,
+    SessionConnectionAdmissionPort,
 };
 use uc_sync_protocol::clipboard::{CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN};
 use uc_sync_protocol::membership_branch_recovery::MEMBERSHIP_BRANCH_RECOVERY_ALPN;
@@ -150,6 +155,11 @@ pub struct PairingInvitationHandlers {
 pub struct ConnectivityDeps {
     pub backend: Arc<dyn ConnectivityBackend>,
     pub admission: Arc<dyn SessionConnectionAdmissionPort>,
+}
+
+pub struct HistoryConnectivityDeps {
+    pub backend: Arc<dyn ConnectivityBackend>,
+    pub admission: Arc<HistoryConnectionAdmission>,
 }
 
 /// 普通剪贴板双向能力；同一 endpoint 同时服务 /2 多流和 /1 单次交换。
@@ -806,7 +816,7 @@ impl IrohSessionBuilder {
     }
 }
 
-fn session_protocol_alpns() -> [&'static [u8]; 13] {
+fn session_protocol_alpns() -> [&'static [u8]; 14] {
     [
         SPACE_ADMISSION_ALPN,
         PEER_REACHABILITY_ALPN,
@@ -815,6 +825,7 @@ fn session_protocol_alpns() -> [&'static [u8]; 13] {
         CLIPBOARD_ALPN,
         GROUP_UPDATE_ALPN,
         LEGACY_GROUP_UPDATE_ALPN,
+        MULTIPLEXED_MEMBERSHIP_HISTORY_ALPN,
         MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
         MEMBERSHIP_BRANCH_RECOVERY_ALPN,
         ACTIVE_CLIPBOARD_ALPN,
@@ -924,6 +935,16 @@ impl IrohNodeBuilder {
                         anyhow::Error::new(err).context("pin iroh UDP port (UC_IROH_BIND_PORT)"),
                     )
                 })?;
+            #[cfg(any(test, feature = "test-util"))]
+            if config.network_partition_gate.is_some() {
+                // 强杀宿主的“地址不变”前提必须覆盖两个地址族；生产仍保持原 IPv4 设置合同。
+                endpoint_builder = endpoint_builder
+                    .bind_addr_with_opts(
+                        (Ipv6Addr::UNSPECIFIED, port),
+                        BindOpts::default().set_is_required(false),
+                    )
+                    .map_err(|source| IrohNodeError::Bind(anyhow::Error::new(source)))?;
+            }
             uc_info!(
                 target: "iroh.bind",
                 "pinned iroh UDP socket to fixed IPv4 port (UC_IROH_BIND_PORT)"
@@ -1235,16 +1256,40 @@ impl IrohSessionBuilder {
         Ok(())
     }
 
+    pub fn history_connectivity_deps(
+        &self,
+        addresses: Arc<dyn PeerAddressRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
+        retention: Arc<dyn HistoryConnectionRetentionPort>,
+        fingerprint: Arc<dyn IdentityFingerprintFactoryPort>,
+        reachability: Arc<dyn PeerReachabilityPort>,
+    ) -> HistoryConnectivityDeps {
+        HistoryConnectivityDeps {
+            backend: Arc::new(IrohConnectivityBackend::new(
+                self.context.endpoint.clone(),
+                addresses,
+                reachability,
+                ConnectivityProfile::MembershipHistory,
+            )),
+            admission: Arc::new(HistoryConnectionAdmission::new(
+                identities,
+                retention,
+                fingerprint,
+                self.admitted_connections.clone(),
+            )),
+        }
+    }
     pub fn install_membership_history_exchange(
         &mut self,
-        adapter: &IrohMembershipHistoryExchangeAdapter,
-        identities: Arc<dyn PeerIdentityDirectoryPort>,
-        fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
-        endpoint: Arc<dyn MembershipHistoryExchangeEndpointPort>,
+        manager: ConnectivityManager,
+        receiver: Arc<dyn HistoryReceiverPort>,
     ) -> Result<(), IrohNodeError> {
         self.install_session_handler(
-            [MEMBERSHIP_HISTORY_EXCHANGE_ALPN],
-            adapter.handler(identities, fingerprint_factory, endpoint),
+            [
+                MULTIPLEXED_MEMBERSHIP_HISTORY_ALPN,
+                MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
+            ],
+            IrohMembershipHistoryExchangeHandler::new(manager, receiver),
         )
     }
 
@@ -1276,12 +1321,12 @@ impl IrohSessionBuilder {
         ))
     }
 
-    pub fn build_membership_history_exchange_adapter(
+    pub fn build_verified_peer_address_refresh(
         &self,
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         clock: Arc<dyn ClockPort>,
-    ) -> Arc<IrohMembershipHistoryExchangeAdapter> {
-        Arc::new(IrohMembershipHistoryExchangeAdapter::new(
+    ) -> Arc<IrohVerifiedPeerAddressRefresh> {
+        Arc::new(IrohVerifiedPeerAddressRefresh::new(
             Arc::clone(&self.context.endpoint),
             peer_addr_repo,
             clock,
