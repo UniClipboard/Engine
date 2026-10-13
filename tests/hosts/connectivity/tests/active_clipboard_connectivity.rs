@@ -450,14 +450,11 @@ async fn unavailable_holder_does_not_apply(
                 message.contains("holder cannot serve the content")
                     || message.contains("active pull peer cannot serve")
             })
-        }) && !exchange_paths(&records, "clipboard_pull").is_empty()
+        }) && !exchange_connections(&records, "clipboard_pull").is_empty()
+            || Instant::now() >= deadline
         {
             break records;
         }
-        assert!(
-            Instant::now() < deadline,
-            "actual holder refusal must arrive"
-        );
         std::thread::sleep(Duration::from_millis(50));
     };
     assert!(requester.request(json!({ "command": "active" })).is_null());
@@ -471,10 +468,6 @@ async fn unavailable_holder_does_not_apply(
             .unwrap()
             .is_empty()
     );
-    assert!(
-        !exchange_paths(&records, "clipboard_pull").is_empty(),
-        "refusal must follow an actual pull exchange"
-    );
     let evidence = std::env::var_os("UC_TEST_ARTIFACTS_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -482,7 +475,36 @@ async fn unavailable_holder_does_not_apply(
                 .join("../../../target/active-clipboard-connectivity-evidence")
         });
     std::fs::create_dir_all(&evidence).unwrap();
+    std::fs::write(
+        evidence.join(format!("{label}-unavailable-requester-network.json")),
+        serde_json::to_vec_pretty(&records).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        records
+            .iter()
+            .any(|row| row["message"].as_str().is_some_and(|message| {
+                message.contains("holder cannot serve the content")
+                    || message.contains("active pull peer cannot serve")
+            })),
+        "actual holder refusal must arrive"
+    );
+    assert!(
+        !exchange_connections(&records, "clipboard_pull").is_empty(),
+        "refusal must follow an actual pull exchange"
+    );
+    let paths = exchange_paths(&records, "clipboard_pull");
+    let expected = std::env::var("UC_ACTIVE_CLIPBOARD_EXPECTED_PATH").ok();
+    if let Some(expected) = expected.as_deref() {
+        assert!(matches!(expected, "direct" | "relay"));
+        assert!(
+            !paths.is_empty() && paths.iter().all(|path| path == expected),
+            "actual refusal exchange path must be {expected}: {paths:?}"
+        );
+    }
     std::fs::write(evidence.join(format!("{label}-unavailable.json")), serde_json::to_vec_pretty(&json!({
+        "selected_path": expected, "paths": paths,
+        "path_validation": if expected.is_some() { "passed" } else { "skipped-uncontrolled-network" },
         "result": "passed", "holder_entry_deleted": true, "actual_refusal_observed": true,
         "register_unchanged": true, "system_clipboard_unchanged": true, "network_records": records,
     })).unwrap()).unwrap();

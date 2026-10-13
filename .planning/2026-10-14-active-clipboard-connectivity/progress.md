@@ -86,3 +86,6 @@
 - 路径范围修正验收：普通宿主 7/7 通过（1 固定旧端配置忽略），隔离 path-scope-direct 与 path-scope-relay 各 4/4 通过；隔离旧新矩阵 12 子场景通过，根 metadata/check/fmt/style/repository/diff 通过。生产源码未改，仅宿主断言范围及脚本运行环境修正。
 
 - 线上 67b210a：Windows 双架构和仓库检查通过；固定旧新隔离 Direct 矩阵实际通过 67.33 秒，后置零测试检查因 runner 无 rg 失败。原始 online-upgrade-isolated-first.log 与 online-isolated-upgrade-artifacts 保留。改用标准 grep -qF；真实互通及 Direct/Relay 日志全部匹配，空输出/零测试必须拒绝；metadata/check/fmt/style/repository/diff 再次通过。
+
+- 无内容拒绝用例的普通宿主等待也混入路径非空条件；将实际固定拒绝与真实 pull 连接作为业务条件，路径仅在隔离环境另行严格断言，并在拒绝/路径断言前保存原始记录。单用例通过 4.18 秒，隔离旧新矩阵通过 60.52 秒，根门禁通过。
+- 88717719 当前源码的线上五项必需检查全部通过：PR Check 38472686042、Windows Build 38472686056。实际 workspace 4234/4234、evidence 18/18、成员 smoke 16/16；下载工件逐项核验隔离 Direct/Relay 八个 JSON 均有真实状态/pull 路径并通过。在线记录与工件见 online-code-*、online-tests-portable.log、online-upgrade-portable.log。
