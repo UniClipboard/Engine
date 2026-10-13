@@ -78,13 +78,22 @@ else
   unset UC_MEMBERSHIP_HISTORY_TEST_RELAY
 fi
 export UC_TEST_ARTIFACTS_DIR="$out"
+export UC_ACTIVE_CLIPBOARD_EXPECTED_PATH="$mode"
 : > "$out/results.tsv"
 status=0
-for kind in ${UC_ACTIVE_CLIPBOARD_CASES:-text image file directory}; do
-  [[ "$kind" =~ ^(text|image|file|directory)$ ]] || exit 2
+cases=${UC_ACTIVE_CLIPBOARD_CASES:-text image file directory}
+if [[ "${UC_ACTIVE_CLIPBOARD_INTEROP:-}" == 1 ]]; then cases=interop; fi
+for kind in $cases; do
+  [[ "$kind" =~ ^(text|image|file|directory|interop)$ ]] || exit 2
+  test_name="restore_missing_${kind}_reads_back_complete_content"
+  test_flags=()
+  if [[ "$kind" == interop ]]; then
+    test_name=fixed_main_active_clipboard_interoperates_both_roles
+    test_flags=(--ignored)
+  fi
   started=$(date +%s%N)
   case_status=0
-  timeout --kill-after=5s 120 "$3" --exact "restore_missing_${kind}_reads_back_complete_content" --nocapture > "$out/$kind.log" 2>&1 || case_status=$?
+  timeout --kill-after=5s 120 "$3" --exact "$test_name" "${test_flags[@]}" --nocapture > "$out/$kind.log" 2>&1 || case_status=$?
   elapsed=$(( ($(date +%s%N) - started) / 1000000 ))
   # 防止拼错过滤器产生零测试的假通过。
   if ((case_status == 0)) && ! rg -q 'test result: ok. 1 passed;' "$out/$kind.log"; then case_status=1; fi
@@ -107,8 +116,9 @@ from pathlib import Path
 import xml.etree.ElementTree as E
 root=Path(sys.argv[1]); mode=sys.argv[2]
 rows={row.split('\t')[0]: row.split('\t')[1:] for row in (root/'results.tsv').read_text().splitlines()}
-suite=E.Element('testsuite', name=f'active-clipboard-{mode}', tests='4')
-for kind in ['text','image','file','directory']:
+kinds=['interop'] if 'interop' in rows else ['text','image','file','directory']
+suite=E.Element('testsuite', name=f'active-clipboard-{mode}', tests=str(len(kinds)))
+for kind in kinds:
  row=rows.get(kind)
  case=E.SubElement(suite,'testcase', name=f'restore-{kind}', time=str(int(row[1])/1000 if row else 0))
  if not row:E.SubElement(case,'skipped', message='not selected or previous case failed')

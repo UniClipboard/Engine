@@ -268,6 +268,10 @@ async fn complete_restore(
             &network_records(&mut holder),
             &network_records(&mut requester),
         );
+        assert!(
+            initial_pulls > 0,
+            "completed pull must have an actual connection record"
+        );
         let first_event_deadline = Instant::now() + WAIT_TIMEOUT;
         let first_activation = loop {
             let events = requester.request(json!({ "command": "events" }));
@@ -354,21 +358,21 @@ async fn complete_restore(
     state_paths.extend(receiver_paths(&requester_records, "active_state_receive"));
     let mut pull_paths = exchange_paths(&requester_records, "clipboard_pull");
     pull_paths.extend(receiver_paths(&holder_records, "active_pull_receive"));
-    let expected = if std::env::var_os("UC_MEMBERSHIP_HISTORY_TEST_RELAY").is_some() {
-        "relay"
-    } else {
-        "direct"
-    };
-    assert!(
-        !state_paths.is_empty() && state_paths.iter().all(|path| path == expected),
-        "actual state exchange path must be {expected}: {state_paths:?}"
-    );
-    assert!(
-        !pull_paths.is_empty() && pull_paths.iter().all(|path| path == expected),
-        "actual pull exchange path must be {expected}: {pull_paths:?}"
-    );
+    // 路径门禁只在明确约束网络的脚本中启用；普通宿主不把 Unknown 推断为 Direct。
+    let expected = std::env::var("UC_ACTIVE_CLIPBOARD_EXPECTED_PATH").ok();
+    if let Some(expected) = expected.as_deref() {
+        assert!(matches!(expected, "direct" | "relay"));
+        assert!(
+            !state_paths.is_empty() && state_paths.iter().all(|path| path == expected),
+            "actual state exchange path must be {expected}: {state_paths:?}"
+        );
+        assert!(
+            !pull_paths.is_empty() && pull_paths.iter().all(|path| path == expected),
+            "actual pull exchange path must be {expected}: {pull_paths:?}"
+        );
+    }
     std::fs::write(evidence.join(format!("{label}-{kind}.json")), serde_json::to_vec_pretty(&json!({
-        "result": "passed", "kind": kind, "selected_path": expected, "state_paths": state_paths, "pull_paths": pull_paths,
+        "result": "passed", "kind": kind, "selected_path": expected, "path_validation": if expected.is_some() { "passed" } else { "skipped-uncontrolled-network" }, "state_paths": state_paths, "pull_paths": pull_paths,
         "ordinary_push_disabled": true, "existing_content_did_not_pull_again": kind != "directory", "system_clipboard": clipboard,
     })).unwrap()).unwrap();
     holder.shutdown();

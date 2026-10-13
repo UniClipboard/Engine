@@ -82,3 +82,5 @@
 - 根门禁全部通过：metadata/check/fmt/style/repository/diff、直接日志宏 default/LAN 0 违规；cargo-audit 0.22.2 deny unsound 通过，8 条策略允许警告。
 - 实现提交 0b653c7a1c4b4be8a98b924a8704a5888401ed5d 已推送；草稿 PR https://github.com/UniClipboard/Engine/pull/181。线上 PR Check 38466296023 与 Windows Build 38466296011 运行中，未预记通过；待结果后归档。
 - 首次线上结果：Windows x64/arm64 与仓库检查通过；升级 smoke 在新固定旧端脚本入口报 just: command not found（127），旧端构建已成功。原始日志 online-upgrade-first.log 保留。两个新脚本均已 source env，改为直接 cargo，保持根 target/cache；修正后的旧新 12 场景 61.655 秒通过，Direct/Relay 各 4/4 通过；根 metadata/check/fmt/style/repository/diff 再次通过。
+- 首次 Engine 日志还含文本路径断言失败：内容完整，但三条状态原生记录 initial_path=unknown（4–7ms 关闭），接收 Unknown 且无连接别名，不是缺少开始记录。保留 online-tests-first.log 与 online-first-artifacts。普通未隔离宿主不推断路径，路径验收明确跳过；隔离脚本 UC_ACTIVE_CLIPBOARD_EXPECTED_PATH 必须有实际路径，空记录失败。固定旧新 12 场景改为复用隔离 Direct 门禁并通过 61.44 秒。
+- 路径范围修正验收：普通宿主 7/7 通过（1 固定旧端配置忽略），隔离 path-scope-direct 与 path-scope-relay 各 4/4 通过；隔离旧新矩阵 12 子场景通过，根 metadata/check/fmt/style/repository/diff 通过。生产源码未改，仅宿主断言范围及脚本运行环境修正。

@@ -53,10 +53,8 @@ if [[ "${1:-}" == --baseline ]]; then
 else
   status=0
   UC_ACTIVE_CLIPBOARD_OLD_HOST="$root/uc-connectivity-host" \
-  UC_TEST_ARTIFACTS_DIR="$root/results" \
-    cargo nextest run --profile ci --locked -p uc-connectivity-host \
-    --test active_clipboard_connectivity --run-ignored only \
-    -E 'test(fixed_main_active_clipboard_interoperates_both_roles)' || status=$?
-  cp target/nextest/ci/junit.xml "$root/interop-junit.xml"
+  UC_ACTIVE_CLIPBOARD_INTEROP=1 UC_ACTIVE_CLIPBOARD_RUN_LABEL=fixed-main/results \
+    bash scripts/testing/run-active-clipboard-connectivity.sh direct || status=$?
+  cp "$root/results/junit.xml" "$root/interop-junit.xml"
   exit "$status"
 fi

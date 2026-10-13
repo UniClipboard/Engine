@@ -177,3 +177,5 @@ Cargo 由一个负责人串行执行，复用根 target 与 MBX。`check-engine-
 线上最终 head：待推送并完成 required checks，之后移入 completed、更新索引；不关闭整个 Issue #34。
 
 线上首次检查：Windows x64/arm64 与仓库检查通过；升级 smoke 在新增脚本调用 `just` 时以 127 失败（runner 未安装，场景尚未开始）。日志 `online-upgrade-first.log` 保留。脚本已在加载构建环境后调用 Cargo；修正后的固定旧端 12 场景、Direct/Relay 各四类与根门禁全部通过，证据 `ci-command-*`。最终线上检查仍待完成。
+
+旧线上工作区文本用例内容读回通过，但快速状态连接在 4–7ms 内关闭，三条原生 `initial_path=unknown`，接收 channel 也为 Unknown；原始工件保存于 `online-first-artifacts`，不推断 Direct。普通未隔离宿主只验内容/交换，JSON 将路径验收记为 `skipped-uncontrolled-network`；隔离脚本显式要求 Direct/Relay 且空记录必失败。固定旧新矩阵也迁入同一隔离 Direct 环境，12 场景及真实路径通过（61.44 秒）。首次拉取连接计数必须大于零，再比较已有内容不重复拉取。
