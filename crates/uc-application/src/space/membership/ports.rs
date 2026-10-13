@@ -171,12 +171,26 @@ impl std::fmt::Debug for RestrictedMembershipDelivery {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum RestrictedMembershipDeliveryError {
     #[error("restricted membership delivery is deferred")]
-    Deferred,
+    Deferred {
+        #[source]
+        source: Option<anyhow::Error>,
+    },
     #[error("restricted membership delivery was rejected")]
     Rejected,
+}
+
+impl RestrictedMembershipDeliveryError {
+    pub fn deferred() -> Self {
+        Self::Deferred { source: None }
+    }
+    pub fn deferred_from(source: impl Into<anyhow::Error>) -> Self {
+        Self::Deferred {
+            source: Some(source.into()),
+        }
+    }
 }
 
 #[async_trait]

@@ -186,3 +186,9 @@ pub use membership::{CurrentMemberSignatureError, CurrentMemberSignaturePort};
 #[cfg(test)]
 mod application_tests;
 pub use membership::MembershipProjectionPlan;
+
+pub use membership::{
+    membership_history_purpose, HistoryConnectionRetentionPort, HistoryIncoming,
+    HistoryLocalWorkPort, HistoryPeerBindingPort, HistoryReceiverPort, HistoryReply,
+    HistoryWirePort, HistoryWork, MembershipHistoryReceiver, MembershipHistoryTransport,
+};

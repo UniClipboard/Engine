@@ -7,6 +7,8 @@
 //! (跨 uc-infra-security / uc-infra-content) 共用同一个 Arc,
 //! 不再走 dyn trait 间接层。
 
+mod current_material;
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
@@ -557,6 +559,18 @@ impl InMemorySession {
         &self,
         material: &SpaceKeyMaterial,
     ) -> Result<(), EncryptionError> {
+        let mut state = self.lock_state();
+        let material_state = match &mut state.pending_material {
+            Some(pending) => pending,
+            None => &mut state.material,
+        };
+        Self::apply_space_material(material_state, material)
+    }
+
+    fn apply_space_material(
+        state: &mut State,
+        material: &SpaceKeyMaterial,
+    ) -> Result<(), EncryptionError> {
         if material.state().mode() != SpaceSecurityMode::Ready || material.group_state().is_empty()
         {
             return Err(EncryptionError::key_material_corrupt());
@@ -567,11 +581,6 @@ impl InMemorySession {
             return Err(EncryptionError::UnsupportedVersion);
         }
 
-        let mut state = self.lock_state();
-        let state = match &mut state.pending_material {
-            Some(pending) => pending,
-            None => &mut state.material,
-        };
         if state.master_key.is_none()
             || state.space_id.as_ref() != Some(material.state().space_id())
         {

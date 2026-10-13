@@ -27,6 +27,7 @@ struct State {
     /// 每个设备被撤销过的次数，以及整体撤销（离开 Space）的次数。
     revoked: HashMap<DeviceId, u64>,
     revoked_all: u64,
+    revision: u64,
 }
 
 /// 开始拨号前取得的撤销快照；撤销发生过则迟到的连接不得登记。
@@ -75,6 +76,14 @@ impl AdmittedConnections {
         RevocationEpoch::of(&state, device)
     }
 
+    pub(crate) fn revision(&self) -> u64 {
+        self.lock().revision
+    }
+    pub(crate) fn current_since(&self, peer: &DeviceId, revision: u64) -> bool {
+        let state = self.lock();
+        state.revoked_all <= revision
+            && state.revoked.get(peer).copied().unwrap_or_default() <= revision
+    }
     pub(crate) fn current(&self, device: &DeviceId, epoch: RevocationEpoch) -> bool {
         RevocationEpoch::of(&self.lock(), device) == epoch
     }
@@ -105,7 +114,9 @@ impl AdmittedConnections {
     pub(crate) fn close_device(&self, device: &DeviceId, reason: &'static [u8]) {
         let closing = {
             let mut state = self.lock();
-            *state.revoked.entry(*device).or_default() += 1;
+            state.revision += 1;
+            let revision = state.revision;
+            state.revoked.insert(*device, revision);
             state.connections.remove(device).unwrap_or_default()
         };
         Self::close(closing, reason);
@@ -115,7 +126,8 @@ impl AdmittedConnections {
     pub(crate) fn close_all(&self, reason: &'static [u8]) {
         let closing: Vec<Tracked> = {
             let mut state = self.lock();
-            state.revoked_all += 1;
+            state.revision += 1;
+            state.revoked_all = state.revision;
             state
                 .connections
                 .drain()

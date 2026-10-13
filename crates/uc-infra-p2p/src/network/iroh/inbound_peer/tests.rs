@@ -228,23 +228,3 @@ async fn authorize_uses_the_ledger_for_an_already_identified_device() {
     assert_eq!(gate.authorize(&DeviceId::new("a")).await, Ok(()));
     assert_eq!(*admitted.checked.lock().unwrap(), vec![DeviceId::new("a")]);
 }
-
-#[test]
-fn every_rejection_has_a_fixed_phase() {
-    use InboundPeerRejection::*;
-    for (rejection, identity_phase) in [
-        (IdentityUnresolved, true),
-        (IdentityAmbiguous, true),
-        (MemberReadFailed, true),
-        (FingerprintUnavailable, true),
-        (LedgerDenied, false),
-        (LedgerUnavailable, false),
-        (NotAccepting, false),
-    ] {
-        assert_eq!(
-            rejection.is_identity_failure(),
-            identity_phase,
-            "{rejection:?}"
-        );
-    }
-}

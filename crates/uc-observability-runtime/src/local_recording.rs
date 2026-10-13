@@ -406,10 +406,10 @@ impl LocalRecordingState {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let key = (peer, key);
-        if event == "connection.established"
-            && !connections.contains_key(&key)
-            && connections.len() < MAX_CONNECTIONS
-        {
+        // 实际握手完成可能先于异步物理观察器登记；二者使用同一原生编号和有界别名表。
+        let established = event == "connection.established"
+            || (event == "connection.finished" && record["fields"]["outcome"] == "connected");
+        if established && !connections.contains_key(&key) && connections.len() < MAX_CONNECTIONS {
             connections.insert(
                 key,
                 PhysicalRecording {

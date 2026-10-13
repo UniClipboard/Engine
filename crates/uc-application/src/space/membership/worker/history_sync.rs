@@ -21,7 +21,8 @@ use uc_observability_contract::diagnostics::{
 };
 
 use crate::space::membership::{
-    ledger_error, MembershipLedgerError, MembershipOwner, ReconcileMembershipEvidenceUseCase,
+    ledger_error, within_history_budget, MembershipLedgerError, MembershipOwner,
+    ReconcileMembershipEvidenceUseCase,
 };
 use uc_observability_contract::{uc_debug, uc_info, uc_warn};
 
@@ -165,9 +166,15 @@ impl HistorySynchronizer {
                 let result = if remaining.is_zero() {
                     Ok(PeerExchange::Finished(PeerSyncResult::Deferred))
                 } else {
-                    tokio::time::timeout(remaining, self.synchronize_peer(&peer, &context, proof))
-                        .await
-                        .unwrap_or(Ok(PeerExchange::Finished(PeerSyncResult::Deferred)))
+                    tokio::time::timeout(
+                        remaining,
+                        within_history_budget(
+                            deadline,
+                            self.synchronize_peer(&peer, &context, proof),
+                        ),
+                    )
+                    .await
+                    .unwrap_or(Ok(PeerExchange::Finished(PeerSyncResult::Deferred)))
                 };
                 (peer, result)
             }

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{Ipv4Addr, UdpSocket};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -121,7 +121,7 @@ impl HostProcess {
             legacy_group_updates,
             bind_port,
         );
-        Self {
+        let mut host = Self {
             child,
             input,
             replies,
@@ -131,7 +131,25 @@ impl HostProcess {
             binary,
             legacy_group_updates,
             bind_port,
+        };
+        if let Ok(url) = std::env::var("UC_MEMBERSHIP_HISTORY_TEST_RELAY") {
+            host.request(json!({"command":"relay_config", "url":url}));
+            // 与隔离网络宿主相同：持久化 relay 设置后重启，实际 Endpoint 使用新配置。
+            host.restart();
+            let deadline = Instant::now() + WAIT_TIMEOUT;
+            loop {
+                host.request(json!({"command":"flush"}));
+                if relay_connected(host.root.path()) {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "local relay must connect before issuing an invitation"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
         }
+        host
     }
 
     fn spawn(
@@ -153,7 +171,7 @@ impl HostProcess {
         let mut start = json!({
             "root": root,
             "rendezvous": rendezvous,
-            "relay": false,
+            "relay": std::env::var_os("UC_MEMBERSHIP_HISTORY_TEST_RELAY").is_some(),
             "legacy_group_updates": legacy_group_updates,
             "bind_port": bind_port,
         });
@@ -164,7 +182,11 @@ impl HostProcess {
         input.flush().expect("flush start request");
         let (replies, reader) = read_protocol_replies(output);
         let ready = next_reply(&replies);
-        assert_eq!(ready["ready"], true, "host did not start: {ready}");
+        assert_eq!(
+            ready["ready"], true,
+            "host did not start: code={}, state={}",
+            ready["code"], ready["startup"]["state"]
+        );
         (child, input, replies, reader)
     }
 
@@ -254,6 +276,25 @@ impl HostProcess {
             reader.join().expect("host output reader");
         }
     }
+}
+
+/// 只采样既有脱敏诊断，确认自定义 relay 已被实际 Endpoint 使用。
+fn relay_connected(root: &Path) -> bool {
+    std::fs::read_dir(root.join("logs"))
+        .expect("host diagnostic directory")
+        .filter_map(Result::ok)
+        .any(|entry| {
+            std::fs::read_to_string(entry.path())
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .any(|row| {
+                    row["fields"]["event.name"] == "relay.status.observed"
+                        && row["fields"]["connected_count"]
+                            .as_u64()
+                            .is_some_and(|count| count > 0)
+                })
+        })
 }
 
 impl Drop for HostProcess {
@@ -573,6 +614,8 @@ async fn fixed_main_group_interop(legacy: bool) {
     wait_for_active_join(&mut d);
     wait_for_phase(&mut a, "completed");
     wait_for_phase(&mut b, "completed");
+    // 当前 head、分支和真实 MLS 效果共同证明两次增量历史的旧→新、新→旧互通。
+    wait_for_branch(&mut [&mut a, &mut b, &mut c, &mut d], 4);
     let events = b.request(json!({"command": "space_work_events"}));
     let kinds = if legacy {
         [
@@ -665,6 +708,9 @@ async fn separate_process_missing_predecessor_survives_restart_and_source_shutdo
     let mut c = HostProcess::start(&rendezvous.uri());
     let mut d = HostProcess::start(&rendezvous.uri());
     let mut e = HostProcess::start(&rendezvous.uri());
+    for host in [&mut a, &mut b, &mut c, &mut d, &mut e] {
+        host.request(json!({"command": "start_network_capture"}));
+    }
     a.request(json!({"command": "create", "name": "A"}));
     join_host(&mut a, &mut b, "B");
     join_host(&mut a, &mut c, "C");
@@ -693,8 +739,14 @@ async fn separate_process_missing_predecessor_survives_restart_and_source_shutdo
         before
     );
     record_stage("缺口需求已持久化并确认");
+    let old_addresses = b.request(json!({"command":"network_addresses"}));
     a.shutdown();
     b.restart_with_crash(true);
+    let new_addresses = b.request(json!({"command":"network_addresses"}));
+    assert_eq!(
+        old_addresses, new_addresses,
+        "本场景隔离地址发现，重启必须保持广告地址"
+    );
     record_stage("接收方强杀后重启");
     assert_eq!(
         b.request(json!({"command": "membership_diagnostics"}))["group_epoch"],
@@ -721,7 +773,7 @@ async fn separate_process_missing_predecessor_survives_restart_and_source_shutdo
         if peer["group_update"] != previous {
             eprintln!(
                 "缺口恢复验收发送待办：{}，耗时 {:?}",
-                peer["group_update"],
+                json!({"group_update": peer["group_update"], "relationship":peer["group_relationship"], "sync_state":peer["sync_relationship"]}),
                 started.elapsed()
             );
             previous = peer["group_update"].clone();
@@ -741,4 +793,121 @@ async fn separate_process_missing_predecessor_survives_restart_and_source_shutdo
     c.shutdown();
     d.shutdown();
     e.shutdown();
+}
+
+/// 两轮真实成员变化的历史核对复用同方向物理连接；只读既有脱敏诊断，不扩 Engine 查询。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn separate_process_membership_history_reuses_connections_across_rounds() {
+    let rendezvous = mount_rendezvous().await;
+    let mut a = HostProcess::start(&rendezvous.uri());
+    let mut b = HostProcess::start(&rendezvous.uri());
+    let mut c = HostProcess::start(&rendezvous.uri());
+    for host in [&mut a, &mut b, &mut c] {
+        host.request(json!({"command": "start_network_capture"}));
+    }
+    a.request(json!({"command": "create", "name": "A"}));
+    join_host(&mut a, &mut b, "B");
+    wait_for_branch(&mut [&mut a, &mut b], 2);
+    a.request(json!({"command": "wait_space_work_event", "kind": "membership_history_sync_reply_received", "after_sequence": 0}));
+    // 第三成员形成新的真实历史债务，不伪造 ACK 或直接调用同步内部步骤。
+    join_host(&mut a, &mut c, "C");
+    wait_for_branch(&mut [&mut a, &mut b, &mut c], 3);
+    for host in [&mut a, &mut b, &mut c] {
+        host.request(json!({"command": "flush"}));
+    }
+    let mut reports = Vec::new();
+    for host in [&a, &b, &c] {
+        reports.push(history_connection_report(host.root.path()));
+    }
+    // 新成员恢复之前已联系的 peer 至少经历两个历史请求，但每 peer 仅一条物理出站连接。
+    let a_report = &reports[0];
+    assert!(
+        !a_report.is_empty(),
+        "actual history dials must be recorded"
+    );
+    assert!(
+        a_report.values().all(|connections| connections.len() == 1),
+        "history connection reuse: {reports:?}"
+    );
+    assert!(
+        reports[1]
+            .values()
+            .all(|connections| connections.len() == 1),
+        "established member B direction isolation: {reports:?}"
+    );
+    // C 正在介绍身份，远端可能只接受临时交换；这些握手不属于已确认成员的保留池。
+    let evidence = std::env::var_os("UC_TEST_ARTIFACTS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../target/test-artifacts/membership-history-connectivity")
+        });
+    std::fs::create_dir_all(&evidence).unwrap();
+    std::fs::write(
+        evidence.join(
+            if std::env::var_os("UC_MEMBERSHIP_HISTORY_TEST_RELAY").is_some() {
+                "separate-process-relay-reuse.json"
+            } else {
+                "separate-process-reuse.json"
+            },
+        ),
+        serde_json::to_vec_pretty(&reports).unwrap(),
+    )
+    .unwrap();
+    a.shutdown();
+    b.shutdown();
+    c.shutdown();
+}
+
+fn history_connection_report(root: &std::path::Path) -> HashMap<String, Vec<String>> {
+    let mut records = Vec::new();
+    for entry in std::fs::read_dir(root.join("logs")).unwrap() {
+        let path = entry.unwrap().path();
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(data) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        records.extend(
+            data.lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok()),
+        );
+    }
+    let started = records
+        .iter()
+        .filter(|record| {
+            record["fields"]["event.name"] == "connection.started"
+                && record["fields"]["purpose"] == "membership_history"
+        })
+        .filter_map(|record| record["fields"]["connect_id"].as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let mut report = HashMap::<String, Vec<String>>::new();
+    for record in &records {
+        if record["fields"]["event.name"] != "connection.finished"
+            || record["fields"]["outcome"] != "connected"
+        {
+            continue;
+        }
+        let Some(connect) = record["fields"]["connect_id"].as_str() else {
+            continue;
+        };
+        if !started.contains(connect) {
+            continue;
+        }
+        let peer = record["peer_ref"]
+            .as_str()
+            .expect("verified local peer correlation")
+            .to_owned();
+        let connection = record["connection_id"]
+            .as_str()
+            .expect("actual physical connection correlation")
+            .to_owned();
+        report.entry(peer).or_default().push(connection);
+    }
+    for connections in report.values_mut() {
+        connections.sort();
+        connections.dedup();
+    }
+    report
 }

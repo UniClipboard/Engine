@@ -17,7 +17,8 @@ Application 的 [`connectivity`](../../crates/uc-application/src/connectivity/) 
 
 同会话、同目标并且实际协商为多流的并发请求共用一个 flight 和活动连接。每个等待者有独立绝对截止时间；
 首等待者退出不取消其他人的拨号，最后等待者退出才取消 flight，manager 的监督任务等待拨号结束。
-manager 只弱引用活动连接；最后一个连接/流租约释放即关闭，不存在空闲连接池。
+剪贴板 manager 只弱引用活动连接；最后一个连接/流租约释放即关闭，不存在空闲连接池。
+成员历史使用独立 manager，并启用有界跨轮保留，见[成员历史连接边界](membership-history-ownership.md#成员历史连接边界)。
 
 每次发送在任何排队前捕获自身 `AdmissionAttempt` 撤销快照。共用建连者的连接不替换调用者的快照：
 开流前先检查请求快照，再检查连接 grant 的当前成员权威。旧请求不能借用移除再添加之后的新连接，

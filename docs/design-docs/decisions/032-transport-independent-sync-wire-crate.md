@@ -25,7 +25,8 @@ trace 上下文，注入当前 span 留在 `uc-infra-p2p` 的传输适配层。
 不进入本 crate：拨号、重试、准入判断、OPAQUE/MLS、存储、Iroh 类型、流程编排。
 原决策未迁移 `group-update`、成员历史交换与 presence。组更新现已抽为 `group_update` topic，
 保留 `/2`、`/1` 的 `UCT1` + postcard 请求与版本相关 ACK；合法帧字节不变，解码拒绝尾随字节。
-成员历史交换与 presence 的帧处理仍内嵌在各自适配器中。
+成员历史现已抽为 `membership_history` topic：V4 业务体和 `/4` 请求/状态保持，
+新 `/5` 仅增加多流能力与不能复用的关闭提示，未引入批量消息。presence 的帧处理仍在适配器中。
 
 ## 约束与检查
 

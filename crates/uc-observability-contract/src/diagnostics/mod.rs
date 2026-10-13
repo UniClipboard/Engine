@@ -114,12 +114,29 @@ pub fn describe_membership_exchange(purpose: MembershipExchangePurpose, server: 
     );
 }
 
+#[derive(Clone)]
+struct AuthenticatedInboundParent(Arc<AtomicBool>);
+
 /// 只延续在线父关系，不持有原 span，不提供身份或字段读取接口。
 #[derive(Clone)]
 pub struct ObservationContext(opentelemetry::Context);
 
 impl ObservationContext {
+    /// 只封存远端载体；调用方完成身份绑定后才能 scope，构造本身不采纳父关系。
+    pub fn from_remote_parent(parent: opentelemetry::Context) -> Self {
+        let parent = opentelemetry::Context::new()
+            .with_remote_span_context(parent.span().span_context().clone());
+        Self(parent.with_value(AuthenticatedInboundParent(Arc::new(AtomicBool::new(false)))))
+    }
     pub fn capture() -> Self {
+        if let Ok(parent) = CONTINUATION.try_with(Clone::clone) {
+            if parent
+                .get::<AuthenticatedInboundParent>()
+                .is_some_and(|marker| !marker.0.load(Ordering::Acquire))
+            {
+                return Self(parent);
+            }
+        }
         let current = tracing::Span::current().context();
         if current.span().span_context().is_valid() {
             // 只保留不可记录的父身份，避免延长原操作的生命周期。
@@ -593,6 +610,7 @@ macro_rules! diagnostic_task_kinds {
 diagnostic_task_kinds! {
     /// 普通剪贴板共享拨号任务异常退出。
     ClipboardConnectivityWorker => "clipboard_connectivity_worker",
+    MembershipHistoryConnectivityWorker => "membership_history_connectivity_worker",
     ClipboardDeliveryRecord => "clipboard_delivery_record",
     ClipboardInboundOsWrite => "clipboard_inbound_os_write",
     ActiveClipboardConverge => "active_clipboard_converge",
@@ -749,13 +767,19 @@ pub fn operation_span(context: OperationContext) -> tracing::Span {
             error.type = tracing::field::Empty,
         ),
     };
-    if !tracing::Span::current()
-        .context()
-        .span()
-        .span_context()
-        .is_valid()
-    {
-        if let Ok(parent) = CONTINUATION.try_with(Clone::clone) {
+    if let Ok(parent) = CONTINUATION.try_with(Clone::clone) {
+        // 认证远端只在本次完整 server 入口使用一次；内部工作继续自然父子关系。
+        let authenticated_entry = matches!(context.kind, DiagnosticSpanKind::Server)
+            && parent
+                .get::<AuthenticatedInboundParent>()
+                .is_some_and(|marker| !marker.0.swap(true, Ordering::AcqRel));
+        if authenticated_entry
+            || !tracing::Span::current()
+                .context()
+                .span()
+                .span_context()
+                .is_valid()
+        {
             let _ = span.set_parent(parent);
         }
     }

@@ -7,6 +7,9 @@ slow-timeout = { period = "10s", terminate-after = 2 }
 
 [profile.ci]
 inherits = "default"
+# 多个真实 Engine 自带运行时；固定外部并发，避免宿主核数放大负载并改变真实关闭期限的验收条件。
+# 用例内部的并发、超时和零重试合同不变，本地与线上使用同一资源预算。
+test-threads = 2
 fail-fast = false
 junit = { path = "junit.xml" }
 

@@ -3,6 +3,73 @@ use uc_observability_contract::diagnostics::connectivity::*;
 use uc_observability_runtime::*;
 
 #[test]
+fn completed_dial_before_physical_observer_keeps_the_same_local_connection_alias() {
+    let directory = tempfile::tempdir().expect("logs");
+    let handle = ProcessObservabilityRuntime::install(
+        ObservabilityConfig::new(
+            ObservabilityResource::new(
+                "1.1.0",
+                DeploymentEnvironment::Test,
+                OperatingSystem::Macos,
+                "test",
+            )
+            .expect("resource"),
+        )
+        .with_local_logs(LocalLogConfig::new(directory.path())),
+    )
+    .expect("install")
+    .handle();
+    handle
+        .start_local_diagnostic_capture(DetailedCaptureRequest::default())
+        .expect("capture");
+    // 拨号 Future 可先于异步物理观察器返回；使用原生连接编号，不按时间或 peer 猜测关联。
+    ConnectionObservation::begin(ConnectionPurpose::MembershipHistory, [5; 32]).connected(42);
+    NetworkRecorder::current()
+        .connection_established(
+            [5; 32],
+            42,
+            ConnectionDirection::Outbound,
+            NetworkPathKind::Direct,
+        )
+        .closed(ConnectionCloseReason::LocalClosed);
+    assert_eq!(
+        handle.force_flush(Duration::from_secs(2)).logs,
+        SignalResult::Completed
+    );
+    let rows: Vec<serde_json::Value> = managed_log_files(directory.path())
+        .expect("files")
+        .iter()
+        .flat_map(|file| {
+            std::fs::read_to_string(file)
+                .expect("content")
+                .lines()
+                .map(|line| serde_json::from_str(line).expect("JSON"))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let completed = rows
+        .iter()
+        .find(|row| row["fields"]["event.name"] == "connection.finished")
+        .expect("completed dial");
+    let established = rows
+        .iter()
+        .find(|row| row["fields"]["event.name"] == "connection.established")
+        .expect("physical observer");
+    let closed = rows
+        .iter()
+        .find(|row| row["fields"]["event.name"] == "connection.closed")
+        .expect("closed");
+    assert!(
+        completed["connection_id"].as_str().is_some(),
+        "completed native handshake has a local alias"
+    );
+    assert_eq!(completed["connection_id"], established["connection_id"]);
+    assert_eq!(completed["connection_id"], closed["connection_id"]);
+    assert!(rows.iter().all(|row| row.get("connection_key").is_none()));
+    handle.shutdown(Duration::from_secs(2));
+}
+
+#[test]
 fn physical_connection_and_path_aliases_are_local_and_end_with_the_connection() {
     let directory = tempfile::tempdir().expect("logs");
     let handle = ProcessObservabilityRuntime::install(

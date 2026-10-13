@@ -1,3 +1,4 @@
+use futures_util::future::BoxFuture;
 use iroh::endpoint::{RecvStream, SendStream};
 use std::io;
 use std::pin::Pin;
@@ -35,6 +36,15 @@ impl AsyncWrite for SendHalf {
     }
 }
 impl PeerSendStream for SendHalf {
+    fn settled(&mut self) -> BoxFuture<'_, Result<(), ConnectivityError>> {
+        Box::pin(async {
+            self.native
+                .stopped()
+                .await
+                .map_err(|source| ConnectivityError::Stream(Box::new(source)))?;
+            Ok(())
+        })
+    }
     fn finish(&mut self) -> Result<(), ConnectivityError> {
         self.native
             .finish()

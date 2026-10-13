@@ -12,6 +12,7 @@ use uc_infra_p2p::network::iroh::{
 mod outbound_progress;
 
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio::time::Instant;
 
@@ -31,8 +32,10 @@ use uc_application::deps::{
     ApplicationClipboardAdapters, ApplicationNetworkAdapters, ApplicationNetworkBinding,
     ApplicationSpaceAdapters, ApplyGroupUpdatePort, ClipboardReceiverPort, ConnectivityManager,
     ConnectivityPolicy, CurrentSpaceMemberScopePort, GroupUpdateEndpoint, GroupUpdateLocalWorkPort,
-    GroupUpdateReceiverPort, GroupUpdateWirePort, LifecycleError, PeerIdentityDirectoryPort,
-    SpaceAdmissionAdapters, SpaceMembershipAdapters, SpaceRuntimeAdapters,
+    GroupUpdateReceiverPort, GroupUpdateWirePort, HistoryWirePort, IdleRetentionPolicy,
+    LifecycleError, MembershipHistoryReceiver, MembershipHistoryTransport,
+    PeerIdentityDirectoryPort, SpaceAdmissionAdapters, SpaceMembershipAdapters,
+    SpaceRuntimeAdapters,
 };
 use uc_application::facade::ApplicationAssembly;
 use uc_core::file_transfer::FileTransferCancellationReason;
@@ -49,6 +52,7 @@ use uc_infra_p2p::network::iroh::{
     IrohIdentityStore, IrohNodeError, IrohSessionBuilder, PreparedIrohSession,
     TransferProgressHandlers,
 };
+use uc_infra_p2p::network::iroh::{MembershipHistoryWire, SessionMembershipHistoryLocalWork};
 use uc_infra_profile::security::Sha256IdentityFingerprintFactory;
 use uc_infra_profile::space::{
     DefaultJoinerActivationExecutor, DefaultJoinerActivationPreparation,
@@ -62,7 +66,7 @@ use uc_infra_profile::space::{
     MembershipActivationAdapter, MembershipMemberFactsAdapter, MembershipNetworkGate,
     OpenMlsHistoricalSignatureVerifier,
 };
-use uc_observability_contract::uc_info;
+use uc_observability_contract::{diagnostics::DiagnosticTaskKind, uc_info};
 
 struct CurrentMemberContentGate {
     scope: Arc<dyn CurrentSpaceMemberScopePort>,
@@ -180,7 +184,7 @@ pub async fn prepare_sync_session(
         Arc::clone(&space_setup.settings),
         Arc::clone(&space_setup.fingerprint),
     );
-    let membership_history_exchange_adapter = builder.build_membership_history_exchange_adapter(
+    let verified_peer_address_refresh = builder.build_verified_peer_address_refresh(
         Arc::clone(&space_setup.peer_addr_repo),
         Arc::clone(&space_setup.clock),
     );
@@ -197,6 +201,32 @@ pub async fn prepare_sync_session(
         Arc::clone(&space_setup.clock),
         known_peer_contact_tx,
     )?;
+    let history_connectivity = builder.history_connectivity_deps(
+        space_setup.peer_addr_repo.clone(),
+        space_setup.peer_access.clone(),
+        space_setup.peer_access.clone(),
+        space_setup.fingerprint.clone(),
+        peer_reachability.clone(),
+    );
+    let history_binding = history_connectivity.admission.clone();
+    let history_manager = ConnectivityManager::new(
+        history_connectivity.backend,
+        history_connectivity.admission,
+        ConnectivityPolicy {
+            task_kind: DiagnosticTaskKind::MembershipHistoryConnectivityWorker,
+            accepted_stream_timeout: Some(Duration::from_secs(10)),
+            idle_retention: Some(IdleRetentionPolicy {
+                timeout: Duration::from_secs(30),
+                capacity: 16,
+            }),
+            ..ConnectivityPolicy::default()
+        },
+    );
+    let history_wire: Arc<dyn HistoryWirePort> = Arc::new(MembershipHistoryWire);
+    let complete_history_transport = Arc::new(MembershipHistoryTransport::new(
+        history_manager.clone(),
+        history_wire.clone(),
+    ));
     // Phase 96 INDIC-01:连接通道单一真相源。复用同一 endpoint +
     // peer_addr_repo,纯读 adapter 不装 ALPN handler。
     let connection_channel: Arc<dyn ConnectionChannelPort> =
@@ -323,7 +353,7 @@ pub async fn prepare_sync_session(
         ));
     let membership_history_transport = Arc::new(GatedMembershipHistoryExchange::new(
         Arc::clone(&membership_network_gate),
-        Arc::clone(&membership_history_exchange_adapter),
+        Arc::clone(&complete_history_transport),
     ));
     #[cfg(feature = "dev-tools")]
     let membership_history_synchronization_transport =
@@ -409,71 +439,72 @@ pub async fn prepare_sync_session(
         current_join_status: space_setup.admission_state.clone()
             as Arc<dyn uc_application::deps::LoadCurrentJoinStatusPort>,
     };
-    let (membership, observed_group_receiver) = observability::observe_membership(
-        SpaceMembershipAdapters {
-            membership_records: space_setup.membership_ledger.clone()
-                as Arc<dyn uc_application::deps::MembershipRecordStorePort>,
-            peer_access: Arc::clone(&space_setup.peer_access),
-            historical_membership_signatures: historical_signatures.clone(),
-            current_member_signatures: Arc::clone(&space_setup.current_member_signatures),
-            membership_identity: membership_identity.clone(),
-            membership_announcement: membership_identity,
-            device_trust_observations: Arc::new(DeviceTrustObservationsAdapter::new(
-                Arc::clone(&space_setup.member_repo),
-                Arc::clone(&peer_reachability),
-            )),
-            membership_history_transport: membership_history_synchronization_transport,
-            verified_peer_address_refresh: membership_history_exchange_adapter.clone(),
-            membership_branch_recovery_channel,
-            membership_branch_recovery_recipient: Arc::clone(
-                &space_setup
-                    .space_access
-                    .prepare_membership_branch_recovery_recipient,
-            ),
-            membership_branch_transition: Arc::new(
-                DefaultMembershipBranchTransitionPreparation::new(Arc::clone(
-                    &space_setup.active_generation_manifest_store,
+    let (membership, observed_group_receiver, observe_history_endpoint) =
+        observability::observe_membership(
+            SpaceMembershipAdapters {
+                membership_records: space_setup.membership_ledger.clone()
+                    as Arc<dyn uc_application::deps::MembershipRecordStorePort>,
+                peer_access: Arc::clone(&space_setup.peer_access),
+                historical_membership_signatures: historical_signatures.clone(),
+                current_member_signatures: Arc::clone(&space_setup.current_member_signatures),
+                membership_identity: membership_identity.clone(),
+                membership_announcement: membership_identity,
+                device_trust_observations: Arc::new(DeviceTrustObservationsAdapter::new(
+                    Arc::clone(&space_setup.member_repo),
+                    Arc::clone(&peer_reachability),
                 )),
-            ),
-            membership_branch_transition_executor: Arc::clone(
-                &space_setup.membership_branch_transition_executor,
-            ),
-            membership_branch_recovery_material: Arc::clone(
-                &space_setup
-                    .space_access
-                    .prepare_membership_branch_recovery_material,
-            ),
-            apply_membership_member_facts: Arc::new(MembershipMemberFactsAdapter::new(
-                Arc::clone(&space_setup.member_repo),
-                Arc::clone(&space_setup.trusted_peer_repo),
-                Arc::clone(&space_setup.peer_addr_repo),
-                Arc::clone(&space_setup.device_identity),
-                Arc::clone(&space_setup.clock),
-            )),
-            apply_membership_security: membership_security,
-            activate_membership_effect: Arc::new(MembershipActivationAdapter::new(Arc::clone(
-                &peer_reachability,
-            ))),
-            restricted_membership_delivery: membership_history_transport,
-            group_update_store: Arc::clone(&space_setup.space_access.group_revocation),
-            group_update_apply,
-            group_update_receiver,
-            group_update_wire,
-            group_update_local_work,
-            group_update_dispatch: {
-                #[cfg(feature = "dev-tools")]
-                let dispatch = Arc::new(RecordedGroupUpdateDispatch::new(
-                    group_update_dispatch,
-                    joiner_final_confirmation_gate.space_work_control(),
-                ));
-                #[cfg(not(feature = "dev-tools"))]
-                let dispatch = group_update_dispatch;
-                dispatch
+                membership_history_transport: membership_history_synchronization_transport,
+                verified_peer_address_refresh: verified_peer_address_refresh.clone(),
+                membership_branch_recovery_channel,
+                membership_branch_recovery_recipient: Arc::clone(
+                    &space_setup
+                        .space_access
+                        .prepare_membership_branch_recovery_recipient,
+                ),
+                membership_branch_transition: Arc::new(
+                    DefaultMembershipBranchTransitionPreparation::new(Arc::clone(
+                        &space_setup.active_generation_manifest_store,
+                    )),
+                ),
+                membership_branch_transition_executor: Arc::clone(
+                    &space_setup.membership_branch_transition_executor,
+                ),
+                membership_branch_recovery_material: Arc::clone(
+                    &space_setup
+                        .space_access
+                        .prepare_membership_branch_recovery_material,
+                ),
+                apply_membership_member_facts: Arc::new(MembershipMemberFactsAdapter::new(
+                    Arc::clone(&space_setup.member_repo),
+                    Arc::clone(&space_setup.trusted_peer_repo),
+                    Arc::clone(&space_setup.peer_addr_repo),
+                    Arc::clone(&space_setup.device_identity),
+                    Arc::clone(&space_setup.clock),
+                )),
+                apply_membership_security: membership_security,
+                activate_membership_effect: Arc::new(MembershipActivationAdapter::new(Arc::clone(
+                    &peer_reachability,
+                ))),
+                restricted_membership_delivery: membership_history_transport,
+                group_update_store: Arc::clone(&space_setup.space_access.group_revocation),
+                group_update_apply,
+                group_update_receiver,
+                group_update_wire,
+                group_update_local_work,
+                group_update_dispatch: {
+                    #[cfg(feature = "dev-tools")]
+                    let dispatch = Arc::new(RecordedGroupUpdateDispatch::new(
+                        group_update_dispatch,
+                        joiner_final_confirmation_gate.space_work_control(),
+                    ));
+                    #[cfg(not(feature = "dev-tools"))]
+                    let dispatch = group_update_dispatch;
+                    dispatch
+                },
+                membership_network_activity: membership_network_gate,
             },
-            membership_network_activity: membership_network_gate,
-        },
-        complete_group_receiver,
-    );
+            complete_group_receiver,
+        );
     builder.install_group_updates(group_manager, observed_group_receiver, legacy_group_updates)?;
     let admission = build_admission();
     let space_runtime = SpaceRuntimeAdapters {
@@ -541,20 +572,20 @@ pub async fn prepare_sync_session(
         space_setup.admission_credentials.clone()
             as Arc<dyn uc_infra_p2p::network::iroh::SpaceAdmissionChannelCredentialPort>,
     )?;
-    builder.install_membership_history_exchange(
-        &membership_history_exchange_adapter,
-        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerIdentityDirectoryPort>,
-        Arc::clone(&space_setup.fingerprint),
-        {
-            let endpoint = application_network.membership_history_endpoint();
-            #[cfg(feature = "dev-tools")]
-            let endpoint = Arc::new(GatedMembershipHistoryEndpoint::new(
-                endpoint,
-                joiner_final_confirmation_gate.space_work_control(),
-            ));
-            endpoint
-        },
-    )?;
+    let history_endpoint = application_network.membership_history_endpoint();
+    #[cfg(feature = "dev-tools")]
+    let history_endpoint = Arc::new(GatedMembershipHistoryEndpoint::new(
+        history_endpoint,
+        joiner_final_confirmation_gate.space_work_control(),
+    ));
+    let history_receiver = Arc::new(MembershipHistoryReceiver::new(
+        history_manager.clone(),
+        history_wire,
+        history_binding,
+        Arc::new(SessionMembershipHistoryLocalWork),
+        observe_history_endpoint(history_endpoint),
+    ));
+    builder.install_membership_history_exchange(history_manager, history_receiver)?;
     builder.install_membership_branch_recovery(
         Arc::clone(&space_setup.peer_access) as Arc<dyn PeerIdentityDirectoryPort>,
         Arc::clone(&space_setup.fingerprint),

@@ -163,7 +163,7 @@ async fn an_undelivered_notice_is_retried_by_each_later_run_within_the_window() 
     let case = removed_peer().await;
     case.worker
         .delivery
-        .respond_with(Err(RestrictedMembershipDeliveryError::Deferred));
+        .respond_with(Err(RestrictedMembershipDeliveryError::deferred()));
 
     let report = case
         .worker
@@ -216,7 +216,7 @@ async fn the_departure_ends_exactly_when_its_window_elapses() {
     let case = removed_peer().await;
     case.worker
         .delivery
-        .respond_with(Err(RestrictedMembershipDeliveryError::Deferred));
+        .respond_with(Err(RestrictedMembershipDeliveryError::deferred()));
     let removed_at = case.owner.clock.now_ms();
     case.worker
         .worker

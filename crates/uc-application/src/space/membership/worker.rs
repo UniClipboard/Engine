@@ -287,7 +287,7 @@ impl MembershipWorker {
                 tally.completed += 1;
                 LedgerDeliveryResult::Delivered
             }
-            Err(RestrictedMembershipDeliveryError::Deferred) => {
+            Err(RestrictedMembershipDeliveryError::Deferred { .. }) => {
                 tally.deferred += 1;
                 LedgerDeliveryResult::Deferred
             }

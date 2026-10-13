@@ -277,6 +277,19 @@ async fn operation(
         _ => {}
     }
     #[cfg(feature = "current-engine")]
+    if command == "network_addresses" {
+        let uc_engine::DevOperationResult::PairingInvitationAddresses(addresses) = engine
+            .execute_dev(uc_engine::DevOperation::ListPairingInvitationAddresses)
+            .await?
+        else {
+            bail!("network addresses result expected")
+        };
+        return Ok(json!(addresses
+            .iter()
+            .map(|address| (address.ip.to_string(), address.port))
+            .collect::<Vec<_>>()));
+    }
+    #[cfg(feature = "current-engine")]
     if command == "connections" {
         let uc_engine::DevOperationResult::PeerReachabilityConnections {
             incoming,
@@ -733,6 +746,13 @@ async fn main() -> Result<()> {
                 observability.force_flush(Duration::from_secs(2));
                 Ok(json!(true))
             }
+            #[cfg(feature = "current-engine")]
+            "start_network_capture" => observability
+                .start_local_diagnostic_capture(uc_engine::observability::DetailedCaptureRequest {
+                    duration: Duration::from_secs(300),
+                })
+                .map(|status| json!(status))
+                .map_err(anyhow::Error::new),
             "events" => recorded
                 .lock()
                 .map(|mut events| json!(std::mem::take(&mut *events)))

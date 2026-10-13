@@ -121,7 +121,7 @@ impl RestrictedMembershipDeliveryPort for NodeTransport {
                 MembershipHistoryExchangeError::Offline { .. }
                 | MembershipHistoryExchangeError::PairingInProgress
                 | MembershipHistoryExchangeError::Transport { .. },
-            ) => Err(RestrictedMembershipDeliveryError::Deferred),
+            ) => Err(RestrictedMembershipDeliveryError::deferred()),
         }
     }
 }

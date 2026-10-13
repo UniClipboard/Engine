@@ -60,6 +60,9 @@ impl AsyncWrite for SendHalf {
     }
 }
 impl PeerSendStream for SendHalf {
+    fn settled(&mut self) -> futures_util::future::BoxFuture<'_, Result<(), ConnectivityError>> {
+        Box::pin(async { Ok(()) })
+    }
     fn finish(&mut self) -> Result<(), ConnectivityError> {
         Ok(())
     }

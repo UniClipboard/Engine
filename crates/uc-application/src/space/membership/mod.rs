@@ -1,3 +1,10 @@
+pub(crate) use history_transport::within_history_budget;
+mod history_transport;
+pub use history_transport::{
+    membership_history_purpose, HistoryConnectionRetentionPort, HistoryIncoming,
+    HistoryLocalWorkPort, HistoryPeerBindingPort, HistoryReceiverPort, HistoryReply,
+    HistoryWirePort, HistoryWork, MembershipHistoryReceiver, MembershipHistoryTransport,
+};
 mod access;
 mod decide_device_trust_change;
 mod group_update;

@@ -1,12 +1,14 @@
 //! 共同拨号与旧模式独占拨号使用同一连接准入实现。
 use super::connection::ConnectionRecord;
 use super::manager::PeerState;
+use super::retention::ConnectionActivity;
 use super::{
     AdmissionAttempt, ConnectivityBackend, ConnectivityError, ConnectivityPolicy, PeerConnection,
 };
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 use uc_core::ids::DeviceId;
 
 pub(super) struct Acquisition {
@@ -14,6 +16,7 @@ pub(super) struct Acquisition {
     pub policy: ConnectivityPolicy,
     pub inbound: Arc<Semaphore>,
     pub waiting: Arc<Semaphore>,
+    pub stop: CancellationToken,
 }
 struct PendingConnection {
     connection: Arc<dyn PeerConnection>,
@@ -63,6 +66,11 @@ impl Acquisition {
         let connection = pending.connection.clone();
         Ok(Arc::new(ConnectionRecord {
             connection,
+            activity: Arc::new(ConnectionActivity::default()),
+            stop: self.stop.clone(),
+            cache_cancel: CancellationToken::new(),
+            accepted_stream_timeout: self.policy.accepted_stream_timeout,
+            pending: tokio::sync::Mutex::new(None),
             exchange_claimed: AtomicBool::new(false),
             grant,
             peer,

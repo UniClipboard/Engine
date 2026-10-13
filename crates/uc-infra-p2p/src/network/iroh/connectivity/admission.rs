@@ -37,6 +37,7 @@ impl IrohConnectionAdmission {
             connections,
             protocol: match profile {
                 ConnectivityProfile::Clipboard => InboundPeerProtocol::Clipboard,
+                ConnectivityProfile::MembershipHistory => InboundPeerProtocol::MembershipHistory,
                 ConnectivityProfile::GroupUpdate | ConnectivityProfile::LegacyGroupUpdate => {
                     InboundPeerProtocol::GroupUpdate
                 }
