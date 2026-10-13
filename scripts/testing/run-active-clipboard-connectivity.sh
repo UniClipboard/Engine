@@ -96,7 +96,7 @@ for kind in $cases; do
   timeout --kill-after=5s 120 "$3" --exact "$test_name" "${test_flags[@]}" --nocapture > "$out/$kind.log" 2>&1 || case_status=$?
   elapsed=$(( ($(date +%s%N) - started) / 1000000 ))
   # 防止拼错过滤器产生零测试的假通过。
-  if ((case_status == 0)) && ! rg -q 'test result: ok. 1 passed;' "$out/$kind.log"; then case_status=1; fi
+  if ((case_status == 0)) && ! grep -qF 'test result: ok. 1 passed;' "$out/$kind.log"; then case_status=1; fi
   printf '%s\t%s\t%s\n' "$kind" "$case_status" "$elapsed" >> "$out/results.tsv"
   if ((case_status != 0)); then status=$case_status; break; fi
 done
