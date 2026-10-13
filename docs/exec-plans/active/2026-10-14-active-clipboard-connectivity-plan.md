@@ -175,3 +175,5 @@ Cargo 由一个负责人串行执行，复用根 target 与 MBX。`check-engine-
 目录首次完整读回及旧新两角色通过。目录再次激活的既有可用性/重复存储失败单列[技术债](../tech-debt-tracker.md)；已有内容不重复拉取由文本、图片和单文件验证，不预记目录二次行为通过。稳定锁定会退休接收世代；此场景验证不写入，Locked 字节另由原 codec 与真实 handler 合同验证。
 
 线上最终 head：待推送并完成 required checks，之后移入 completed、更新索引；不关闭整个 Issue #34。
+
+线上首次检查：Windows x64/arm64 与仓库检查通过；升级 smoke 在新增脚本调用 `just` 时以 127 失败（runner 未安装，场景尚未开始）。日志 `online-upgrade-first.log` 保留。脚本已在加载构建环境后调用 Cargo；修正后的固定旧端 12 场景、Direct/Relay 各四类与根门禁全部通过，证据 `ci-command-*`。最终线上检查仍待完成。

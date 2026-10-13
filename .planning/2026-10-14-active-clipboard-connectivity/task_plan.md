@@ -4,7 +4,7 @@
 完整落实 active spec/plan，验证后审查并提交当前分支。
 
 ## 当前阶段
-阶段 5：完整场景、兼容、CI 门禁（in_progress）；补齐期限、容量、观测与竞态回归。
+阶段 6：本地实现、审查与门禁完成；提交已推送，等待线上当前 head 检查后归档。
 
 ## 阶段
 - [x] 0 冻结版本、统一旧驱动正常基线、golden、失败信号与真实两文件边界
@@ -16,7 +16,7 @@
 - [ ] 6 审查、文档、提交、线上 head 检查与归档
 
 ## Next Step
-提交并推送本地已验收结果，核实线上最终 head required checks，归档并更新所有入口。
+核实 PR #181 最终 head 的线上必需检查，归档并更新所有入口。
 
 ## 验证与证据
 唯一详细进度见 progress.md，根证据目录 target/active-clipboard-connectivity-evidence。首失败另存，不反复重跑直到绿色。

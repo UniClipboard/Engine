@@ -78,3 +78,7 @@
 - fixed-main-interop-final：最终矩阵 1/1（12 子场景）通过 61.829 秒，旧源码/同一 driver/profile/hash/interop-junit 保留；EXIT 清理源目录并恢复当前宿主。
 - 最终隔离 direct-gate-final：text/image/file/directory 4/4 通过（5.171/6.632/4.986/4.767 秒）。最终 relay-gate-final：4/4 通过（11.375/11.716/11.284/11.120 秒），inet 双栈 UDP drop 实际计数通过。两个目录各有四场景 JUnit、源码树含 untracked 摘要、binaries、原生实际路径及内容证据。
 - root 验收检查串行运行（session 86584）：metadata locked、workspace all-targets check、fmt check、Rust style、repository preflight、diff check；之后 audit + direct-log clippy。生产代码自最后全套未改，只有合法半帧测试输入补正并已单独验收。
+
+- 根门禁全部通过：metadata/check/fmt/style/repository/diff、直接日志宏 default/LAN 0 违规；cargo-audit 0.22.2 deny unsound 通过，8 条策略允许警告。
+- 实现提交 0b653c7a1c4b4be8a98b924a8704a5888401ed5d 已推送；草稿 PR https://github.com/UniClipboard/Engine/pull/181。线上 PR Check 38466296023 与 Windows Build 38466296011 运行中，未预记通过；待结果后归档。
+- 首次线上结果：Windows x64/arm64 与仓库检查通过；升级 smoke 在新固定旧端脚本入口报 just: command not found（127），旧端构建已成功。原始日志 online-upgrade-first.log 保留。两个新脚本均已 source env，改为直接 cargo，保持根 target/cache；修正后的旧新 12 场景 61.655 秒通过，Direct/Relay 各 4/4 通过；根 metadata/check/fmt/style/repository/diff 再次通过。

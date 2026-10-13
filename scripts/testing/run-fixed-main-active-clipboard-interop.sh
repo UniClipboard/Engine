@@ -48,13 +48,13 @@ sha256sum "$root/uc-connectivity-host" > "$root/binary-sha256.txt"
 if [[ -f "$backup" ]]; then cp "$backup" target/debug/uc-connectivity-host; fi
 if [[ "${1:-}" == --baseline ]]; then
   UC_ACTIVE_CLIPBOARD_BASELINE_HOST="$root/uc-connectivity-host" \
-    just cargo test --locked -p uc-connectivity-host --test active_clipboard_connectivity \
+    cargo test --locked -p uc-connectivity-host --test active_clipboard_connectivity \
     active_clipboard_restore_pulls_missing_text_baseline -- --nocapture
 else
   status=0
   UC_ACTIVE_CLIPBOARD_OLD_HOST="$root/uc-connectivity-host" \
   UC_TEST_ARTIFACTS_DIR="$root/results" \
-    just cargo nextest run --profile ci --locked -p uc-connectivity-host \
+    cargo nextest run --profile ci --locked -p uc-connectivity-host \
     --test active_clipboard_connectivity --run-ignored only \
     -E 'test(fixed_main_active_clipboard_interoperates_both_roles)' || status=$?
   cp target/nextest/ci/junit.xml "$root/interop-junit.xml"

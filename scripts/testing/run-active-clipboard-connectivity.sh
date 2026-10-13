@@ -10,8 +10,8 @@ out="$repo/target/active-clipboard-connectivity-evidence/${UC_ACTIVE_CLIPBOARD_R
 mkdir -p "$out"
 if [[ "${2:-}" != --inside ]]; then
   # 命名空间内只运行已构建二进制；共享 target 与编译缓存始终由原构建用户使用。
-  if [[ "$mode" == relay ]]; then just cargo build --locked -p uc-connectivity-relay; fi
-  just cargo test --locked -p uc-connectivity-host --test active_clipboard_connectivity --no-run --message-format=json > "$out/build-artifacts.jsonl"
+  if [[ "$mode" == relay ]]; then cargo build --locked -p uc-connectivity-relay; fi
+  cargo test --locked -p uc-connectivity-host --test active_clipboard_connectivity --no-run --message-format=json > "$out/build-artifacts.jsonl"
   test_binary=$(node --input-type=module - "$out/build-artifacts.jsonl" <<'NODE'
 import { readFileSync } from 'node:fs'
 const rows = readFileSync(process.argv[2], 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line))
