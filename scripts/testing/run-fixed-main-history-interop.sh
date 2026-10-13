@@ -24,7 +24,7 @@ fi
 if ! git cat-file -e "$rev^{commit}"; then git fetch --no-tags origin "$rev"; fi
 git archive "$rev" | tar -x -C "$source_dir"
 # 修改文件时间戳不修改源码，避免共享 target 将其他旧快照误判 fresh。
-rg --files -0 "$source_dir" -g "*.rs" | xargs -0 touch
+find "$source_dir" -type f -name '*.rs' -exec touch {} +
 # 通过不同 debug profile 指纹避免旧/新相同 crate 路径的 mtime 误判；编译缓存继续启用。
 CARGO_TARGET_DIR="$repo/target" CARGO_PROFILE_DEV_DEBUG=0 \
 UC_ENGINE_SOURCE_COMMIT="$rev" UC_ENGINE_SOURCE_STATE=clean \

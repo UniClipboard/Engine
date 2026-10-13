@@ -159,7 +159,7 @@ for id in "${ids[@]}"; do
   log="$out/build.log"
   build_status=0
   # 共享 target 时主动刷新快照时间戳；源码字节不变，不能把另一快照误判 fresh。
-  rg --files -0 "$source" -g "*.rs" | xargs -0 touch
+  find "$source" -type f -name '*.rs' -exec touch {} +
   (
     cd "$source"
     cargo fetch --quiet
