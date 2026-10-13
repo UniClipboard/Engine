@@ -236,3 +236,39 @@ git diff --check
 
 `implement` 所需的 code-review skill 在本机未安装；已完成同范围手工审查，工作记录位于
 `.planning/2026-10-13-membership-history-connectivity/code-review.md`，不声称调用了缺失技能。
+
+
+### PR #180 首轮线上失败与后续修复（2026-10-13）
+
+首轮 Actions `38383389293`：仓库检查、Windows x64/arm64 通过；升级 smoke 在脚本第 162 行因
+`rg: command not found` 退出，工作区 4201/4202，宿主合同的 SendFiles 返回 1252。
+旧源码时间戳刷新改用系统 `find -exec touch`；两个脚本均在无 rg、含空格路径的最小环境 red/green 通过。
+
+本地重复运行精确捕获同一行 1252，其来源为 inline 加密 → ContentProtection::NotActive →
+EncryptionError::NotInitialized。当前 Space 材料更新在 vault I/O 前开启隐藏所有读取的事务，
+导致已就绪会话临时不可读。通过真实 vault 安全存储读取 hook 插入内容加密，旧实现 5 毫秒确定性失败。
+修复由既有 ActiveSpaceSecuritySession 完整承担：私有快照准备、vault 安装、带 generation/Space 围栏的原子发布。
+跨 Space 隔离规则不变；稳定合同见[活动安全材料的发布边界](../../SECURITY.md#活动安全材料的发布边界)。
+
+安全会话、内容保护、清理/关闭和取消回归 33/33 通过。临时诊断已从 Rust 源码全部移除。
+原始日志、诊断及 red/green 位于 `target/pr180-ci-diagnosis/`；其余最终本地门禁与线上结果待追加。
+该结论对应已复现的 SendFiles 捕获失败，不将所有历史 1108、1452 或 E15 失败自动归为同因。
+
+修复后本地完整门禁（日志均位于 `target/pr180-ci-diagnosis/`）：
+
+| 检查 | 结果 |
+| --- | --- |
+| Linux CI 工作区环境 | 4205/4205，24 skipped，495.070 秒；`workspace-final.log` |
+| 故障与真实依赖证据 | 18/18；`evidence.log` |
+| CI 成员 smoke | 16/16，含长分区恢复；`membership-smoke.log` |
+| 隔离直连与完整 Relay | 通过；`direct-smoke.log`、`relay.log`，E15 73.910 秒 |
+| Relay-only 三进程成员历史 | 通过，16.96 秒；`relay-history.log` |
+| 升级 smoke | 5/5，完整矩阵其余 63 格未执行；`upgrade.log` |
+| 固定旧 main 双向互通 | 2/2；`fixed-main.log` |
+| 根门禁 | metadata、all-targets check、fmt、Rust 风格、仓库架构、日志宏均退出 0 |
+| 依赖审计与脚本回归 | audit 退出 0（8 条允许的警告）；JavaScript 24/24；`audit-final.log`、`js.log` |
+
+首轮本地全量遗漏 Linux CI 的 `UC_EXPECT_DIAGNOSTIC_STACK=available`，诊断栈测试按默认完整符号要求失败
+（4204/4205）；已补齐环境完整重跑，未修改该测试或放宽 CI。审计初次因工具不在 PATH 未启动，随后使用
+既有 cargo-audit 0.22.2 完成。以上过程保留原日志，线上修复后结果由 PR #180 的当前 head 检查记录确认。
+macOS/Windows 的修复后运行、物理设备与覆盖率未在本机执行，不计为本地通过。

@@ -115,18 +115,15 @@ impl ActiveSpaceSecuritySession {
                 source: anyhow::anyhow!("security material does not belong to the active space"),
             });
         }
-        let transaction = self
+        let update = self
             .session
-            .begin_transaction(None)
+            .prepare_current_material(material)
             .map_err(session_error)?;
         self.vault
             .install_verified_space_material(material)
             .await
             .map_err(vault_error)?;
-        self.session
-            .install_space_material(material)
-            .map_err(session_error)?;
-        transaction.commit(&self.vault)
+        self.session.commit_current_material(update, &self.vault)
     }
 
     pub(crate) fn close(&self) {

@@ -722,3 +722,160 @@ async fn pending_transaction_wait_is_bounded() {
     );
     assert!(!session.is_ready());
 }
+
+#[tokio::test]
+async fn current_material_update_keeps_committed_content_writable_during_vault_io() {
+    use crate::ContentProtection;
+    use uc_core::crypto::domain::{Aad, Plaintext};
+    let directory = tempdir().unwrap();
+    let storage = Arc::new(MemorySecureStorage::default());
+    let vault = Arc::new(ProfileContentKeyVault::new(
+        directory.path().into(),
+        storage.clone(),
+        [23; 16],
+    ));
+    let session = Arc::new(InMemorySession::new());
+    let active = ActiveSpaceSecuritySession::new(session.clone(), vault.clone());
+    active
+        .activate(
+            &SpaceId::from("space-a"),
+            MasterKey::from_bytes(&[32; 32]).unwrap(),
+            Some(&ready_material("space-a", "group-a", "key-a")),
+        )
+        .await
+        .unwrap();
+    let protection = Arc::new(ContentProtection::for_content(
+        session.clone(),
+        vault.clone(),
+    ));
+    let captured = Arc::new(Mutex::new(None));
+    let result = captured.clone();
+    let writer = protection.clone();
+    // vault 的真实安全存储读取发生在阻塞工作线程；在此精确插入并发的内容保存。
+    *storage.2.lock().unwrap() = Some(Box::new(move || {
+        let ciphertext = tokio::runtime::Handle::current().block_on(writer.seal_for_active(
+            &Plaintext::new(b"concurrent file metadata".to_vec()),
+            &Aad::new(b"fixture".to_vec()),
+        ));
+        *result.lock().unwrap() = Some(ciphertext);
+    }));
+    active
+        .install_current_material(&advanced_material("space-a", "group-a", "key-a", "key-b"))
+        .await
+        .unwrap();
+    let ciphertext = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("storage hook must run")
+        .expect("committed content must remain writable during current-material installation");
+    assert_eq!(
+        session.current_content_protection_key().unwrap().epoch(),
+        GroupEpoch::new(8)
+    );
+    assert_eq!(
+        protection
+            .open(&ciphertext, &Aad::new(b"fixture".to_vec()))
+            .await
+            .unwrap()
+            .as_bytes(),
+        b"concurrent file metadata"
+    );
+}
+
+#[tokio::test]
+async fn current_material_update_cannot_restore_a_session_cleared_during_vault_io() {
+    for close in [false, true] {
+        let directory = tempdir().unwrap();
+        let storage = Arc::new(MemorySecureStorage::default());
+        let vault = Arc::new(ProfileContentKeyVault::new(
+            directory.path().into(),
+            storage.clone(),
+            [24; 16],
+        ));
+        let session = Arc::new(InMemorySession::new());
+        let active = ActiveSpaceSecuritySession::new(session.clone(), vault);
+        active
+            .activate(
+                &SpaceId::from("space-a"),
+                MasterKey::from_bytes(&[32; 32]).unwrap(),
+                Some(&ready_material("space-a", "group-a", "key-a")),
+            )
+            .await
+            .unwrap();
+        let clearing = session.clone();
+        *storage.2.lock().unwrap() = Some(Box::new(move || {
+            if close {
+                clearing.close();
+            } else {
+                clearing.clear();
+            }
+        }));
+        let error = active
+            .install_current_material(&advanced_material("space-a", "group-a", "key-a", "key-b"))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            super::ActiveSpaceSecuritySessionError::Session { .. }
+        ));
+        assert!(std::error::Error::source(&error).is_some());
+        assert!(!session.is_ready());
+        assert!(session.current_content_protection_key().is_err());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_current_material_update_keeps_the_committed_session() {
+    let directory = tempdir().unwrap();
+    let storage = Arc::new(MemorySecureStorage::default());
+    let vault = Arc::new(ProfileContentKeyVault::new(
+        directory.path().into(),
+        storage.clone(),
+        [25; 16],
+    ));
+    let session = Arc::new(InMemorySession::new());
+    let active = Arc::new(ActiveSpaceSecuritySession::new(
+        session.clone(),
+        vault.clone(),
+    ));
+    active
+        .activate(
+            &SpaceId::from("space-a"),
+            MasterKey::from_bytes(&[32; 32]).unwrap(),
+            Some(&ready_material("space-a", "group-a", "key-a")),
+        )
+        .await
+        .unwrap();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    *storage.2.lock().unwrap() = Some(Box::new(move || {
+        entered_tx.send(()).unwrap();
+        release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    }));
+    let updating = active.clone();
+    let task = tokio::spawn(async move {
+        updating
+            .install_current_material(&advanced_material("space-a", "group-a", "key-a", "key-b"))
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), entered_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    release_tx.send(()).unwrap();
+    // vault 已开始的本地持久工作可以结算，但已取消的更新不能发布候选会话。
+    vault
+        .resolve(
+            &ContentKeyId::from_string("key-b").unwrap(),
+            GroupEpoch::new(8),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        session.current_content_protection_key().unwrap().epoch(),
+        GroupEpoch::new(7)
+    );
+}
