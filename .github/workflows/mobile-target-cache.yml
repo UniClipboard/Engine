@@ -45,9 +45,12 @@ jobs:
       - name: Configure owned cache and output roots
         shell: bash
         run: |
-          echo "MBX_CACHE_DIR=$RUNNER_TEMP/mobile-producer-cas" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/mobile-target" >> "$GITHUB_ENV"
-          echo "CARGO_HOME=$RUNNER_TEMP/mobile-target/cargo-home" >> "$GITHUB_ENV"
+          {
+            echo "MBX_CACHE_DIR=$RUNNER_TEMP/mobile-producer-cas"
+            echo "CARGO_TARGET_DIR=$RUNNER_TEMP/mobile-target"
+            echo "CARGO_HOME=$RUNNER_TEMP/mobile-target/cargo-home"
+          } >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/mobile-target/cargo-home/bin" >> "$GITHUB_PATH"
       - name: Prepare pinned Android compiler
         run: |
           mkdir -p "$CARGO_HOME"
