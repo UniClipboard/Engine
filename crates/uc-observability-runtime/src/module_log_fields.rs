@@ -91,6 +91,7 @@ mod tests {
     const NEWLY_VISIBLE: &[&str] = &[
         "ack",
         "addr_kind",
+        "attempt_ref",
         "cause",
         "channel",
         "context",

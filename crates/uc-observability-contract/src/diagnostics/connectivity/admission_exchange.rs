@@ -3,7 +3,10 @@ use super::super::{
     CompletionResult, DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation, DiagnosticRole,
     OperationCompletion,
 };
-use super::{emit_local, millis, record::LocalEvent, ObservationContext};
+use super::{
+    admission_attempt::AdmissionAttemptRef, emit_local, millis, record::LocalEvent,
+    ObservationContext,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::time::Instant;
@@ -122,12 +125,16 @@ pub(super) enum AdmissionExchangeEvent {
     Started {
         side: AdmissionExchangeSide,
         step: AdmissionExchangeStep,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt_ref: Option<AdmissionAttemptRef>,
     },
     Finished {
         side: AdmissionExchangeSide,
         step: AdmissionExchangeStep,
         duration_ms: u64,
         failure: Option<AdmissionExchangeFailure>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt_ref: Option<AdmissionAttemptRef>,
     },
 }
 impl AdmissionExchangeEvent {
@@ -147,11 +154,24 @@ impl AdmissionExchangeEvent {
     }
     pub(super) fn fields(&self) -> Map<String, Value> {
         let mut fields = Map::new();
-        let (side, step) = match self {
-            Self::Started { side, step } | Self::Finished { side, step, .. } => (side, step),
+        let (side, step, attempt_ref) = match self {
+            Self::Started {
+                side,
+                step,
+                attempt_ref,
+            }
+            | Self::Finished {
+                side,
+                step,
+                attempt_ref,
+                ..
+            } => (side, step, attempt_ref),
         };
         fields.insert("uc.role".into(), json!(side));
         fields.insert("step".into(), json!(step));
+        if let Some(attempt_ref) = attempt_ref {
+            fields.insert("attempt_ref".into(), json!(attempt_ref));
+        }
         if let Self::Finished {
             duration_ms,
             failure,
@@ -185,6 +205,8 @@ pub struct AdmissionExchangeObservation {
     finished: bool,
     /// 仅记录步骤：完成记录由调用方自己写，这里不重复结算。
     steps_only: bool,
+    /// 同一次准入尝试在 joiner 与 sponsor 两端共有的关联引用。
+    attempt: Option<AdmissionAttemptRef>,
 }
 impl AdmissionExchangeObservation {
     pub fn begin(side: AdmissionExchangeSide) -> Self {
@@ -197,7 +219,13 @@ impl AdmissionExchangeObservation {
             failure: None,
             finished: false,
             steps_only: false,
+            attempt: None,
         }
+    }
+    /// 给本次交换的步骤记录附上准入尝试引用。
+    pub fn with_attempt(mut self, attempt: AdmissionAttemptRef) -> Self {
+        self.attempt = Some(attempt);
+        self
     }
     /// 只记录步骤，不写完成记录；用于完成记录已由调用方负责的交换（初次 hello 到 `OpaqueFinish`）。
     pub fn begin_steps_only(side: AdmissionExchangeSide) -> Self {
@@ -216,6 +244,7 @@ impl AdmissionExchangeObservation {
         self.emit(AdmissionExchangeEvent::Started {
             side: self.side,
             step,
+            attempt_ref: self.attempt,
         });
     }
     pub fn fail(&mut self, reason: AdmissionExchangeFailure) {
@@ -251,6 +280,7 @@ impl AdmissionExchangeObservation {
                 step,
                 duration_ms: millis(started.elapsed()),
                 failure,
+                attempt_ref: self.attempt,
             });
         }
     }

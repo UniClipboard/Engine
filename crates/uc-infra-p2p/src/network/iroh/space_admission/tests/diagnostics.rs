@@ -480,6 +480,20 @@ async fn a_wrong_passphrase_leaves_one_info_rejection_record() {
     joiner.close().await;
     sponsor.close().await;
     assert_one_info_record(&logs, "Space admission exchange rejected");
+    let expected =
+        uc_observability_contract::diagnostics::connectivity::AdmissionAttemptRef::derive(
+            admission.as_bytes(),
+        );
+    let record = logs
+        .output()
+        .lines()
+        .find(|line| line.contains("Space admission exchange rejected"))
+        .unwrap()
+        .to_owned();
+    assert!(
+        record.contains(&format!("attempt_ref={expected}")),
+        "the rejection carries the attempt ref the joiner derives: {record}"
+    );
 }
 
 #[derive(Debug)]

@@ -15,7 +15,7 @@ use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::Endpoint;
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 use tracing::Instrument;
@@ -25,15 +25,18 @@ use uc_application::deps::{
 };
 use uc_core::membership::{AdmissionChannelPeerId, AdmissionPeerBinding};
 use uc_observability_contract::diagnostics::connectivity::{
-    AdmissionExchangeFailure, AdmissionExchangeObservation, AdmissionExchangeSide,
-    AdmissionExchangeStep, AdmissionNetworkPoint,
+    AdmissionAttemptRef, AdmissionExchangeFailure, AdmissionExchangeObservation,
+    AdmissionExchangeSide, AdmissionExchangeStep, AdmissionNetworkPoint,
 };
 use uc_sync_protocol::space_admission::{
     read_typed, write_envelope, AuthenticatedEnvelopeV1, FrameKind, WireError, AUTH_FRAME_LIMIT,
 };
 mod authentication;
 use authentication::AuthenticatedRequest;
-use uc_observability_contract::{log_fields::log_vocab_debug, uc_info, uc_warn};
+use uc_observability_contract::{
+    log_fields::{log_id, log_vocab_debug},
+    uc_info, uc_warn,
+};
 const EXCHANGE_DEADLINE: Duration = Duration::from_secs(120);
 const MAX_INBOUND_EXCHANGES: usize = 8;
 
@@ -74,7 +77,11 @@ impl IrohSpaceAdmissionHandler {
         self
     }
 
-    async fn run(&self, connection: &Connection) -> Result<(), HandlerError> {
+    async fn run(
+        &self,
+        connection: &Connection,
+        attempt: &OnceLock<AdmissionAttemptRef>,
+    ) -> Result<(), HandlerError> {
         let connection_started = std::time::Instant::now();
         let deadline = tokio::time::Instant::now() + self.exchange_deadline;
         let AuthenticatedRequest {
@@ -89,13 +96,16 @@ impl IrohSpaceAdmissionHandler {
             canonical_digest,
             attempt_contract,
         } = self
-            .authenticate(connection, deadline, connection_started)
+            .authenticate(connection, deadline, connection_started, attempt)
             .await?;
         let span = server_operation_span();
         let _ = set_remote_parent(&span, wire.trace_context.as_ref());
         let started = std::time::Instant::now();
-        let mut progress =
-            span.in_scope(|| AdmissionExchangeObservation::begin(AdmissionExchangeSide::Sponsor));
+        let attempt_ref = AdmissionAttemptRef::derive(admission_id.as_bytes());
+        let mut progress = span.in_scope(|| {
+            AdmissionExchangeObservation::begin(AdmissionExchangeSide::Sponsor)
+                .with_attempt(attempt_ref)
+        });
         let result = tokio::time::timeout_at(deadline, async {
             record_network_snapshot(
                 connection,
@@ -301,7 +311,14 @@ impl ProtocolHandler for IrohSpaceAdmissionHandler {
             connection.close(CLOSE_BUSY.into(), b"admission_busy");
             return Ok(());
         };
-        match self.run(&connection).await {
+        let attempt = OnceLock::new();
+        // 认证之前还不知道准入尝试；已知时每条记录带上同一个引用，便于与 joiner 端对应。
+        let attempt_text = || {
+            attempt
+                .get()
+                .map_or_else(|| "none".to_owned(), ToString::to_string)
+        };
+        match self.run(&connection, &attempt).await {
             Ok(()) => {}
             Err(
                 error @ (HandlerError::Authentication { .. }
@@ -309,6 +326,7 @@ impl ProtocolHandler for IrohSpaceAdmissionHandler {
                 | HandlerError::AuthenticationProof { .. }),
             ) => {
                 uc_info!(
+                    attempt_ref = log_id(&attempt_text()),
                     error_type = log_vocab_debug(&server_error_type(&error)),
                     "Space admission exchange rejected"
                 );
@@ -316,6 +334,7 @@ impl ProtocolHandler for IrohSpaceAdmissionHandler {
             }
             Err(error @ HandlerError::PeerUpgradeRequired) => {
                 uc_info!(
+                    attempt_ref = log_id(&attempt_text()),
                     error_type = log_vocab_debug(&server_error_type(&error)),
                     "Space admission peer upgrade required"
                 );
@@ -323,12 +342,14 @@ impl ProtocolHandler for IrohSpaceAdmissionHandler {
             }
             Err(error @ HandlerError::Acknowledgement) => {
                 uc_info!(
+                    attempt_ref = log_id(&attempt_text()),
                     error_type = log_vocab_debug(&server_error_type(&error)),
                     "Space admission reply completed without peer acknowledgement"
                 );
             }
             Err(error @ HandlerError::Timeout) => {
                 uc_info!(
+                    attempt_ref = log_id(&attempt_text()),
                     error_type = log_vocab_debug(&server_error_type(&error)),
                     "Space admission exchange timed out"
                 );
@@ -336,6 +357,7 @@ impl ProtocolHandler for IrohSpaceAdmissionHandler {
             }
             Err(error) => {
                 uc_info!(
+                    attempt_ref = log_id(&attempt_text()),
                     error_type = log_vocab_debug(&server_error_type(&error)),
                     "Space admission exchange rejected"
                 );

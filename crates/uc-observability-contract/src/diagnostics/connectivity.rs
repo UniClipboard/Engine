@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 mod address;
 mod address_record;
+mod admission_attempt;
 mod admission_exchange;
 mod admission_network;
 mod admission_response;
@@ -11,6 +12,7 @@ mod invitation_resolution;
 mod local_identity;
 mod local_work;
 mod maintenance;
+pub use admission_attempt::AdmissionAttemptRef;
 pub use admission_exchange::{
     AdmissionExchangeFailure, AdmissionExchangeFailureDetail, AdmissionExchangeObservation,
     AdmissionExchangeSide, AdmissionExchangeStep,
