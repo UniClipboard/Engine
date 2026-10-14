@@ -1,8 +1,8 @@
 //! Joiner 负责建立初次或恢复连接，并交付已认证交换。
 use super::connection::{connect, open_stream};
 use super::crypto::{calculate_mac, copy_credential, peer_id, random_nonce};
-use super::diagnostics::record_client_completion;
-use super::errors::initial_hello_close_error;
+use super::diagnostics::{client_completion, record_client_completion, response_failure};
+use super::errors::{application_close_code, map_initial_hello_close_code};
 use super::exchange::EstablishedExchange;
 use super::route::decode_route;
 use async_trait::async_trait;
@@ -21,7 +21,9 @@ use uc_core::membership::{
 use uc_infra_crypto::space_admission_auth::{
     SpaceAdmissionAuth, SpaceAdmissionAuthContext, SpaceAdmissionKe2,
 };
-use uc_observability_contract::diagnostics::connectivity::complete_admission_connection_failure;
+use uc_observability_contract::diagnostics::connectivity::{
+    complete_admission_connection_failure, complete_admission_response_failure,
+};
 use uc_observability_contract::diagnostics::{
     operation_span, DiagnosticDomain, DiagnosticOperation, DiagnosticRole, DiagnosticSpanKind,
     OperationContext,
@@ -58,6 +60,7 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
             kind: DiagnosticSpanKind::Client,
         });
         let mut connection_failure = None;
+        let mut read_failure = None;
         let result = async {
             let route = decode_route(route, true)?;
             let invitation_id = route
@@ -115,9 +118,12 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
             let response: OpaqueResponseV1 =
                 match read_typed(&mut receive, FrameKind::OpaqueResponse, AUTH_FRAME_LIMIT).await {
                     Ok(response) => response,
-                    Err(_) => {
-                        return Err(initial_hello_close_error(&connection)
-                            .await
+                    Err(error) => {
+                        // 公开结果保持原样；具体失败类别只用于本地诊断。
+                        let close_code = application_close_code(&connection).await;
+                        read_failure = Some(response_failure(&error, close_code));
+                        return Err(close_code
+                            .and_then(map_initial_hello_close_code)
                             .unwrap_or(SpaceAdmissionTransportError::authentication_rejected()));
                     }
                 };
@@ -161,11 +167,21 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
                 complete_admission_connection_failure(failure, started.elapsed());
                 return;
             }
-            record_client_completion(
-                DiagnosticOperation::SpaceAdmission,
-                started.elapsed(),
-                result.as_ref().err(),
-            )
+            match read_failure {
+                Some(failure) => complete_admission_response_failure(
+                    failure,
+                    client_completion(
+                        DiagnosticOperation::SpaceAdmission,
+                        started.elapsed(),
+                        result.as_ref().err(),
+                    ),
+                ),
+                None => record_client_completion(
+                    DiagnosticOperation::SpaceAdmission,
+                    started.elapsed(),
+                    result.as_ref().err(),
+                ),
+            }
         });
         result
     }

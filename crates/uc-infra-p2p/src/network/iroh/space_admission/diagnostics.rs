@@ -5,15 +5,19 @@ use std::time::Duration;
 use uc_application::deps::SpaceAdmissionTransportError;
 use uc_observability_contract::diagnostics::connectivity::{
     record_admission_network_snapshot, AdmissionExchangeFailure, AdmissionExchangeSide,
-    AdmissionNetworkPoint, AdmissionNetworkSnapshot, AuthenticationFailure, AuthenticationStage,
-    CredentialFailure, IdentityCheck, NetworkPathKind, ProofFailure, ReadFailure,
+    AdmissionNetworkPoint, AdmissionNetworkSnapshot, AdmissionResponseFailure,
+    ApplicationCloseClass, AuthenticationFailure, AuthenticationStage, CredentialFailure,
+    IdentityCheck, NetworkPathKind, ProofFailure, ReadFailure,
 };
 use uc_observability_contract::diagnostics::{
     complete_operation, operation_span, DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation,
     DiagnosticRole, DiagnosticSpanKind, OperationCompletion, OperationContext,
 };
 
-use super::errors::HandlerError;
+use super::errors::{
+    HandlerError, CLOSE_AUTHENTICATION, CLOSE_BUSY, CLOSE_PEER_UPGRADE_REQUIRED, CLOSE_PROTOCOL,
+    LEGACY_CLOSE_PROTOCOL,
+};
 use uc_sync_protocol::space_admission::WireError;
 
 pub(super) fn record_client_completion(
@@ -131,6 +135,61 @@ pub(super) fn io_failure(error: &IoError) -> AdmissionExchangeFailure {
         | ErrorKind::NotConnected => AdmissionExchangeFailure::ConnectionClosed,
         ErrorKind::TimedOut => AdmissionExchangeFailure::TimedOut,
         _ => AdmissionExchangeFailure::IoFailed,
+    }
+}
+
+/// Joiner 读 `OpaqueResponse` 失败的具体类别；`close_code` 是读失败后观察到的对端应用层关闭码。
+pub(super) fn response_failure(
+    error: &WireError,
+    close_code: Option<u64>,
+) -> AdmissionResponseFailure {
+    if let Some(code) = close_code {
+        return AdmissionResponseFailure::ApplicationClosed(close_class(code));
+    }
+    match error {
+        WireError::Timeout => AdmissionResponseFailure::ResponseTimeout,
+        WireError::Io(source) => io_response_failure(source),
+        _ => AdmissionResponseFailure::Decode,
+    }
+}
+
+fn close_class(code: u64) -> ApplicationCloseClass {
+    match code {
+        0 => ApplicationCloseClass::SessionUnavailable,
+        code if code == u64::from(CLOSE_AUTHENTICATION) => {
+            ApplicationCloseClass::AuthenticationRejected
+        }
+        code if code == u64::from(CLOSE_BUSY) => ApplicationCloseClass::Busy,
+        code if code == u64::from(CLOSE_PEER_UPGRADE_REQUIRED)
+            || code == u64::from(LEGACY_CLOSE_PROTOCOL) =>
+        {
+            ApplicationCloseClass::PeerUpgradeRequired
+        }
+        code if code == u64::from(CLOSE_PROTOCOL) => ApplicationCloseClass::Protocol,
+        _ => ApplicationCloseClass::Other,
+    }
+}
+
+fn io_response_failure(error: &IoError) -> AdmissionResponseFailure {
+    if let Some(read) = error
+        .get_ref()
+        .and_then(|source| source.downcast_ref::<ReadError>())
+    {
+        return match read {
+            ReadError::Reset(_) => AdmissionResponseFailure::StreamReset,
+            ReadError::ConnectionLost(ConnectionError::ApplicationClosed(close)) => {
+                AdmissionResponseFailure::ApplicationClosed(close_class(
+                    close.error_code.into_inner(),
+                ))
+            }
+            ReadError::ConnectionLost(_) => AdmissionResponseFailure::ConnectionLost,
+            _ => AdmissionResponseFailure::StreamReset,
+        };
+    }
+    match error.kind() {
+        // 对端提前结束了响应流。
+        ErrorKind::UnexpectedEof => AdmissionResponseFailure::StreamReset,
+        _ => AdmissionResponseFailure::ConnectionLost,
     }
 }
 
