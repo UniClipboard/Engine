@@ -1,7 +1,6 @@
 name: Windows Build
 
-# Windows 门禁：MBX 没有 Windows 固定包，Windows 主机不进入 rust-ci-setup，
-# 仅用 rust-toolchain.toml 固定的工具链与 Cargo 依赖缓存，原生 cargo 执行。
+# Windows 门禁：固定原生 MBX 入口复用统一只读缓存装配，不恢复整个 target。
 # 构建证据（cargo check）与运行证据（Windows 专属存储测试）分步记录，
 # arm64 只有在 windows-11-arm 主机上实际执行才记为通过。
 on:
@@ -24,6 +23,9 @@ jobs:
     name: Windows ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
+    environment:
+      name: engine-build-cache-reader
+      deployment: false
     strategy:
       fail-fast: false
       matrix:
@@ -49,13 +51,13 @@ jobs:
           rustup toolchain install "$channel" --profile minimal --no-self-update
           rustup show active-toolchain
 
-      - name: Cache Cargo downloads and build outputs
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+      - name: Start shared Engine compiler cache
+        uses: ./.github/actions/rust-ci-setup
         with:
-          workspaces: . -> target
-          shared-key: windows-${{ matrix.arch }}
-          # 只有 main 写缓存，其余运行只读。
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-key: windows-${{ matrix.arch }}
+          compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
 
       - name: Record build provenance
         run: |
@@ -78,18 +80,20 @@ jobs:
 
       # 构建证据：编译全部工作区目标，包括 cfg(windows) 专属代码。
       - name: Check all workspace targets
-        run: cargo check --workspace --all-targets --locked 2>&1 | tee "$RUNNER_TEMP/windows-evidence/check.log"
+        run: bash scripts/build-cache/mbx.sh --cargo check --workspace --all-targets --locked 2>&1 | tee "$RUNNER_TEMP/windows-evidence/check.log"
 
       # 运行证据：在 Windows 主机上真实执行 MoveFileExW 替换路径，只使用临时目录。
       - name: Run Windows storage durability tests
         run: |
-          cargo test --locked -p uc-infra-storage --lib active_space_generation_manifest_store 2>&1 | tee "$RUNNER_TEMP/windows-evidence/storage-tests.log"
-          cargo test --locked -p uc-infra-local --lib fs::durability 2>&1 | tee -a "$RUNNER_TEMP/windows-evidence/storage-tests.log"
+          bash scripts/build-cache/mbx.sh --cargo test --locked -p uc-infra-storage --lib active_space_generation_manifest_store 2>&1 | tee "$RUNNER_TEMP/windows-evidence/storage-tests.log"
+          bash scripts/build-cache/mbx.sh --cargo test --locked -p uc-infra-local --lib fs::durability 2>&1 | tee -a "$RUNNER_TEMP/windows-evidence/storage-tests.log"
 
       - name: Retain Windows evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: windows-build-${{ matrix.arch }}
-          path: ${{ runner.temp }}/windows-evidence
+          path: |
+            ${{ runner.temp }}/windows-evidence
+            ${{ runner.temp }}/mbx-evidence
           if-no-files-found: warn

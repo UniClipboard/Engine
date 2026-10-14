@@ -1,0 +1,39 @@
+name: Windows compiler cache validation
+# 独立手动验收；不替换正式 Windows 门禁，不接收远端凭据。
+on:
+  workflow_dispatch:
+  push:
+    branches: [ci/windows-mbx-entry]
+    paths:
+      - scripts/build-cache/mbx.sh
+      - scripts/build-cache/verify-windows-cache.py
+      - .github/workflows/windows-cache-validation.yml
+permissions:
+  contents: read
+jobs:
+  native-cache:
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-2025, windows-11-arm]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install repository toolchain
+        shell: bash
+        run: |
+          channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal --no-self-update
+      - name: Build and execute with isolated native cache
+        shell: pwsh
+        run: python scripts/build-cache/verify-windows-cache.py --out "$env:RUNNER_TEMP/cache-evidence"
+      - name: Preserve native evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-cache-${{ matrix.runner }}
+          path: ${{ runner.temp }}/cache-evidence
+          if-no-files-found: error
