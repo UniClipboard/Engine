@@ -19,7 +19,7 @@ use crate::remote_health::record_remote_setup_degraded;
 use crate::status::{
     FlushSummary, ObservabilityHealth, SetupStatus, ShutdownSummary, SignalResult,
 };
-use crate::subscriber::{local_health_layer, system_layer};
+use crate::subscriber::{local_health_layer, system_layer, HealthRecording};
 use crate::telemetry::TelemetryRuntime;
 use crate::{
     DetailedCaptureRequest, HostDiagnosticEvent, HostDiagnosticReceipt, HostDiagnosticRecordStatus,
@@ -369,9 +369,14 @@ fn build_runtime(
     host_layers: Vec<HostLogLayer>,
 ) -> (Arc<RuntimeState>, impl tracing::Subscriber + Send + Sync) {
     let health_accepting = Arc::new(AtomicBool::new(true));
+    let health_recording = HealthRecording::default();
     let mut layers = Vec::new();
     let (local_file_status, local_file) = match config.local_logs.as_ref() {
-        Some(local) => match local_health_layer(&local.directory, Arc::clone(&health_accepting)) {
+        Some(local) => match local_health_layer(
+            &local.directory,
+            Arc::clone(&health_accepting),
+            Arc::clone(&health_recording),
+        ) {
             Ok((layer, local_file)) => {
                 layers.push(layer);
                 (SetupStatus::Ready, Some(local_file))
@@ -382,6 +387,7 @@ fn build_runtime(
     };
 
     let (telemetry, remote_setup) = TelemetryRuntime::new(&config, local_file.clone());
+    let _ = health_recording.set(Arc::clone(&telemetry.recording));
     let telemetry_accepting = telemetry.accepting();
     layers.extend(telemetry.layers());
     layers.push(system_layer());
