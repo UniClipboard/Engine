@@ -12,6 +12,22 @@
 # 缓存位置由调用方环境的 MBX_CACHE_DIR 决定（未设置时使用 mbx 平台默认位置）；仓库不写入机器路径。
 set -euo pipefail
 
+# 同时支持 shell Cargo 与原生 Node/Python 子进程；配置只在构建进程树加载。
+if [[ "${1:-}" != --install ]]; then
+  if [[ -n "${UC_ENGINE_MBX_ENV_FILE:-}" ]]; then
+    # shellcheck source=/dev/null
+    source "$UC_ENGINE_MBX_ENV_FILE"
+  fi
+  if [[ -n "${UC_ENGINE_MBX_STATS_DIR:-}" && -z "${MBX_STATS_REPORT:-}" ]]; then
+    mkdir -p "$UC_ENGINE_MBX_STATS_DIR"
+    report_dir=$(mktemp -d "$UC_ENGINE_MBX_STATS_DIR/session.XXXXXX")
+    export MBX_STATS_REPORT="$report_dir/stats.json"
+  fi
+  if [[ "${1:-}" != --r2 && -n "${BUILD_CACHE_R2_ENDPOINT:-}" ]]; then
+    set -- --r2 "$@"
+  fi
+fi
+
 # 仅当前命令配置原生 S3 后端；本地与 PR 的写入限制继续由 mbx 和桶级权限决定。
 if [[ "${1:-}" == --r2 ]]; then
   shift

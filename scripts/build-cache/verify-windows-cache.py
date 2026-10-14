@@ -52,6 +52,22 @@ rustc = subprocess.check_output(['rustc', '-Vv'], text=True)
 expected_host = {'AMD64': 'x86_64', 'ARM64': 'aarch64'}[platform.machine().upper()]
 assert 'host: ' + expected_host + '-pc-windows-msvc' in rustc, rustc
 try:
+    # 运行实际 CI 装配并使用它的不可变脚本快照，验证配置文件/原生子进程边界。
+    ci_env = root / 'github.env'
+    ci_path = root / 'github.path'
+    ci_env.touch()
+    ci_path.touch()
+    env.update(RUNNER_TEMP=str(root), GITHUB_ENV=str(ci_env), GITHUB_PATH=str(ci_path))
+    with (out / 'setup.log').open('w') as log:
+        subprocess.run([bash, (engine / 'scripts/build-cache/start-ci-mbx.sh').as_posix()],
+                       env=env, check=True, stdout=log, stderr=subprocess.STDOUT)
+    for line in ci_env.read_text().splitlines():
+        key, value = line.split('=', 1)
+        env[key] = value
+    env['CARGO_BUILD_JOBS'] = '2'
+    wrapper = Path(env['UC_ENGINE_MBX_BIN']).parent / 'mbx.sh'
+    with Path(env['UC_ENGINE_MBX_ENV_FILE']).open('a') as config:
+        config.write('export UC_CACHE_CONFIG_LOADED=1\n')
     for name in ('engine', 'desktop', 'mobile'):
         repo = root / name
         (repo / 'src').mkdir(parents=True)
@@ -64,7 +80,7 @@ try:
     (out / 'fixture.rs').write_text(source)
     (out / 'fixture.toml').write_text(manifest)
     # --exec 内由原生 Python CreateProcess 找 cargo.exe；不是 Bash 的 cargo 替身。
-    child = 'import subprocess,sys; subprocess.run(["cargo"]+sys.argv[1:],check=True)'
+    child = 'import os,subprocess,sys; assert os.environ.get("UC_CACHE_CONFIG_LOADED")=="1"; subprocess.run(["cargo"]+sys.argv[1:],check=True)'
     for label, repo, extra in (
         ('cold', 'engine', []), ('warm-desktop', 'desktop', []),
         ('warm-mobile', 'mobile', []), ('feature', 'mobile', ['--features', 'alternate']),
