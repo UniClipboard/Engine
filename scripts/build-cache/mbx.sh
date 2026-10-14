@@ -45,9 +45,9 @@ pinned_release() {
   case "$(uname -s)-$(uname -m)" in
     MINGW* | MSYS* | CYGWIN*)
       # 查询原生系统架构，避免 ARM64 Windows 上 x64 Git Bash 误选包。
-      case "$(powershell.exe -NoProfile -NonInteractive -Command '[System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()' | tr -d '\r\n')" in
-        X64) echo x86_64-pc-windows-msvc 6f3e761a18946b7d17ab54d4021773144ff7b9203b99b2df1ccddbebed6e1828 ;;
-        Arm64) echo aarch64-pc-windows-msvc 1208ec2f61af53d76c892c1ad4603294f49e62ad4c50ad1f8401aa5f3567b1b8 ;;
+      case "$(powershell.exe -NoProfile -NonInteractive -Command 'Get-CimInstance Win32_Processor | Select-Object -First 1 -ExpandProperty Architecture' | tr -d '\r\n')" in
+        9) echo x86_64-pc-windows-msvc 6f3e761a18946b7d17ab54d4021773144ff7b9203b99b2df1ccddbebed6e1828 ;;
+        12) echo aarch64-pc-windows-msvc 1208ec2f61af53d76c892c1ad4603294f49e62ad4c50ad1f8401aa5f3567b1b8 ;;
         *) fail "无法识别 Windows 原生架构" ;;
       esac ;;
 
@@ -59,11 +59,12 @@ pinned_release() {
   esac
 }
 
+# 从 stdin 计算，避免 GNU sha256sum 为含反斜杠的 Windows 文件名添加转义前缀。
 sha256_of() {
   if command -v sha256sum >/dev/null; then
-    sha256sum "$1" | cut -d' ' -f1
+    sha256sum < "$1" | cut -d' ' -f1
   else
-    shasum -a 256 "$1" | cut -d' ' -f1
+    shasum -a 256 < "$1" | cut -d' ' -f1
   fi
 }
 
@@ -85,11 +86,7 @@ install_mbx() {
     archive="$staging/mbx-$triple.$extension"
     curl -fsSL --retry 3 -o "$archive" \
       "https://github.com/jdx/mr-boxington/releases/download/v$MBX_VERSION/mbx-$triple.$extension"
-    local actual
-    actual=$(sha256_of "$archive")
-    if [[ "$actual" != "$expected" ]]; then
-      printf 'mbx checksum: target=%s expected=%q actual=%q\n' "$triple" "$expected" "$actual" >&2
-      if command -v sha256sum >/dev/null; then sha256sum < "$archive" >&2; fi
+    if [[ "$(sha256_of "$archive")" != "$expected" ]]; then
       rm -rf "$staging"
       fail "下载的 mbx $MBX_VERSION 校验失败，已停止"
     fi
@@ -118,7 +115,6 @@ install_mbx() {
 }
 
 install_mbx
-
 
 if [[ -n "${MBX_CACHE_DIR:-}" && ! -d "$(dirname "$MBX_CACHE_DIR")" ]]; then
   # 例如外置盘未挂载：不自动建出上级目录，避免缓存悄悄落到其他磁盘。
