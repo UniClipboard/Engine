@@ -310,17 +310,6 @@ pub trait MembershipHistoryExchangeEndpointPort: Send + Sync {
     ) -> Result<MembershipHistoryMessage, MembershipHistoryExchangeError>;
 }
 
-/// 成员历史对内容发送的最小限制查询。
-///
-/// 待本机决定、分叉或无效的对端不得接收新的业务内容。发送流程只需要知道某个
-/// 设备是否已被本机阻断，不能读取成员历史或收敛状态。
-#[async_trait]
-pub trait ContentExchangeGatePort: Send + Sync {
-    /// 返回 `true` 时，调用方不得再向该设备发送新的业务内容。
-    /// 实现无法安全判断时必须返回 `true`，保持失败关闭。
-    async fn is_locally_removed(&self, device_id: &DeviceId) -> bool;
-}
-
 /// 准入前由成员历史负责人给出的唯一决定。
 ///
 /// 邀请创建和使用都必须读取这一结果，不能自行根据成员列表、在线状态或

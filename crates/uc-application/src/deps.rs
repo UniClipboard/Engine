@@ -583,3 +583,19 @@ pub use crate::space::{
     HistoryLocalWorkPort, HistoryPeerBindingPort, HistoryReceiverPort, HistoryReply,
     HistoryWirePort, HistoryWork, MembershipHistoryReceiver, MembershipHistoryTransport,
 };
+
+// 当前剪贴板仅向内部组装导出完整网络能力。
+pub use crate::clipboard::active::transport::{
+    ActiveClipboardTransportError, ActiveClipboardWirePort, ActiveStateMessage,
+    ActiveStateReceiver, ActiveStateReceiverPort, ActiveStateSender, ACTIVE_EXCHANGE_TIMEOUT,
+};
+
+pub use crate::clipboard::active::transport::{
+    ActivePullPreparationCancelled, ActivePullPreparationError, ActivePullPreparationPort,
+    ActivePullPreparationStop,
+};
+
+pub use crate::clipboard::active::transport::{
+    ActivePullClient, ActivePullLocalWorkPort, ActivePullReceiver, ActivePullReceiverPort,
+    ActivePullResponse, ActivePullWork,
+};

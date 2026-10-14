@@ -24,25 +24,25 @@
 //! 5. [`TransferCipherPort::encrypt`] — wrap it with a fresh transfer identity.
 //!
 //! A locked session cannot decrypt at step 2, so it cannot serve: the use case
-//! returns [`ActiveClipboardPullServeError::NotUnlocked`] without ever touching
+//! returns [`ActivePullPreparationError::NotUnlocked`] without ever touching
 //! plaintext. Content not held locally returns
-//! [`ActiveClipboardPullServeError::NotAvailable`].
+//! [`ActivePullPreparationError::NotAvailable`].
 //!
 //! The downstream fan-out (`DispatchEntryRunner`) that `ResendEntryUseCase`
 //! drives is intentionally **not** part of this chain — a pull serve produces
 //! one envelope for one requester, so the use case stops at the encrypted
 //! bytes.
 
+use crate::clipboard::active::transport::{
+    ActivePullPreparationError, ActivePullPreparationPort, ActivePullPreparationStop,
+};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use tracing::instrument;
 
 use uc_core::ids::EntryId;
-use uc_core::ports::clipboard::{
-    ActiveClipboardPullServeError, ActiveClipboardPullServePort, EntryFileSetRepositoryPort,
-    FindEntryIdBySnapshotHashPort,
-};
+use uc_core::ports::clipboard::{EntryFileSetRepositoryPort, FindEntryIdBySnapshotHashPort};
 use uc_core::ports::security::{TransferCipherError, TransferCipherPort};
 use uc_core::ports::SettingsPort;
 use uc_observability_contract::{
@@ -91,17 +91,17 @@ impl ActiveClipboardPullServeUseCase {
             cipher: deps.cipher,
         }
     }
+}
 
-    /// Build the transfer envelope for `snapshot_hash`. See the module docs for
-    /// the chain. Returns [`ActiveClipboardPullServeError::NotAvailable`] when
-    /// the content is not held / not materializable, and
-    /// [`ActiveClipboardPullServeError::NotUnlocked`] when the session is
-    /// locked.
-    #[instrument(name = "active_state.serve_pull", skip_all)]
-    pub(crate) async fn serve(
+#[async_trait]
+impl ActivePullPreparationPort for ActiveClipboardPullServeUseCase {
+    #[instrument(name = "active_state.prepare_pull", skip_all)]
+    async fn prepare(
         &self,
         snapshot_hash: &str,
-    ) -> Result<Vec<u8>, ActiveClipboardPullServeError> {
+        stop: &ActivePullPreparationStop,
+    ) -> Result<Vec<u8>, ActivePullPreparationError> {
+        stop.check()?;
         // 1. Resolve the local entry by cross-device content hash. No match →
         //    not available (the observing peer should ask another holder).
         let entry_id = match self
@@ -112,10 +112,10 @@ impl ActiveClipboardPullServeUseCase {
             Ok(Some(id)) => id,
             Ok(None) => {
                 uc_debug!("pull serve: content not held locally");
-                return Err(ActiveClipboardPullServeError::NotAvailable);
+                return Err(ActivePullPreparationError::NotAvailable);
             }
             Err(err) => {
-                return Err(ActiveClipboardPullServeError::Internal(
+                return Err(ActivePullPreparationError::Internal(
                     anyhow::Error::from(err)
                         .context("look up entry by snapshot hash")
                         .into(),
@@ -127,6 +127,7 @@ impl ActiveClipboardPullServeUseCase {
         //    reconstruction failure means the payload is lost / unavailable →
         //    NotAvailable, so the requester treats this holder as unable to
         //    serve rather than retrying a permanently-gone payload.
+        stop.check()?;
         let snapshot = match self.reconstructor.reconstruct(&entry_id).await {
             Ok(s) => s,
             Err(err) => return Err(map_reconstruct_error(err, &entry_id)),
@@ -144,6 +145,7 @@ impl ActiveClipboardPullServeUseCase {
             Arc::clone(&self.settings),
             &entry_id,
             snapshot,
+            stop,
         )
         .await;
         let OutboundPayload {
@@ -152,19 +154,20 @@ impl ActiveClipboardPullServeUseCase {
             file_set_manifest,
         } = match payload {
             Ok(parts) => parts,
+            Err(OutboundPayloadError::Cancelled(source)) => return Err(source.into()),
             Err(OutboundPayloadError::Unavailable) => {
                 uc_debug!("pull serve: payload not reproducible on this holder; not available");
-                return Err(ActiveClipboardPullServeError::NotAvailable);
+                return Err(ActivePullPreparationError::NotAvailable);
             }
             Err(OutboundPayloadError::Publish(err)) => {
-                return Err(ActiveClipboardPullServeError::Internal(
+                return Err(ActivePullPreparationError::Internal(
                     anyhow::Error::from(err)
                         .context("publish pull blobs")
                         .into(),
                 ));
             }
             Err(OutboundPayloadError::Internal(source)) => {
-                return Err(ActiveClipboardPullServeError::Internal(
+                return Err(ActivePullPreparationError::Internal(
                     source.context("assemble pull payload").into(),
                 ));
             }
@@ -176,6 +179,7 @@ impl ActiveClipboardPullServeUseCase {
         //    header version gate — an old puller's strict trailing-byte check
         //    fails loudly on the UCDS trailer, which is the intended failure
         //    shape (issue #1327 §4.2: no pull-side version negotiation).
+        stop.check()?;
         let encoded = match &file_set_manifest {
             Some(manifest) => encode_snapshot_with_blob_refs_and_file_set_to_v3_bytes(
                 &snapshot, &blob_refs, manifest,
@@ -185,7 +189,7 @@ impl ActiveClipboardPullServeUseCase {
         let (plaintext, _snapshot_hash) = match encoded {
             Ok(encoded) => encoded,
             Err(err) => {
-                return Err(ActiveClipboardPullServeError::Internal(
+                return Err(ActivePullPreparationError::Internal(
                     anyhow::Error::from(err)
                         .context("encode pull envelope")
                         .into(),
@@ -195,8 +199,10 @@ impl ActiveClipboardPullServeUseCase {
 
         // 5. Encrypt with a fresh transfer identity. A locked session surfaces
         //    here as NotUnlocked — the holder cannot serve while locked.
+        stop.check()?;
         match self.cipher.encrypt(&plaintext).await {
             Ok(ciphertext) => {
+                stop.check()?;
                 uc_info!(
                     envelope_len = ciphertext.len(),
                     blob_ref_count = blob_refs.len(),
@@ -206,21 +212,14 @@ impl ActiveClipboardPullServeUseCase {
             }
             Err(TransferCipherError::NotUnlocked) => {
                 uc_debug!("pull serve: session locked; cannot encrypt");
-                Err(ActiveClipboardPullServeError::NotUnlocked)
+                Err(ActivePullPreparationError::NotUnlocked)
             }
-            Err(err) => Err(ActiveClipboardPullServeError::Internal(
+            Err(err) => Err(ActivePullPreparationError::Internal(
                 anyhow::Error::from(err)
                     .context("encrypt pull envelope")
                     .into(),
             )),
         }
-    }
-}
-
-#[async_trait]
-impl ActiveClipboardPullServePort for ActiveClipboardPullServeUseCase {
-    async fn serve(&self, snapshot_hash: &str) -> Result<Vec<u8>, ActiveClipboardPullServeError> {
-        ActiveClipboardPullServeUseCase::serve(self, snapshot_hash).await
     }
 }
 
@@ -230,11 +229,11 @@ impl ActiveClipboardPullServePort for ActiveClipboardPullServeUseCase {
 fn map_reconstruct_error(
     err: BuildSnapshotError,
     entry_id: &EntryId,
-) -> ActiveClipboardPullServeError {
+) -> ActivePullPreparationError {
     match err {
-        BuildSnapshotError::Repository(inner) => ActiveClipboardPullServeError::Internal(
-            inner.context("reconstruct pull snapshot").into(),
-        ),
+        BuildSnapshotError::Repository(inner) => {
+            ActivePullPreparationError::Internal(inner.context("reconstruct pull snapshot").into())
+        }
         other => {
             uc_debug!(
                 error_kind = "content_not_materializable",
@@ -242,7 +241,7 @@ fn map_reconstruct_error(
                 entry_id = log_id(&entry_id),
                 "pull serve: content not materializable"
             );
-            ActiveClipboardPullServeError::NotAvailable
+            ActivePullPreparationError::NotAvailable
         }
     }
 }
@@ -723,7 +722,10 @@ mod tests {
             Arc::clone(&cipher) as _,
         );
 
-        let envelope = uc.serve("blake3v1:whatever").await.expect("serve ok");
+        let envelope = uc
+            .prepare("blake3v1:whatever", &ActivePullPreparationStop::default())
+            .await
+            .expect("serve ok");
         assert_eq!(envelope, b"CIPHERTEXT");
 
         // The cipher was handed the V3 envelope *plaintext* (the
@@ -753,10 +755,10 @@ mod tests {
         );
 
         let err = uc
-            .serve("blake3v1:missing")
+            .prepare("blake3v1:missing", &ActivePullPreparationStop::default())
             .await
             .expect_err("missing content must not serve");
-        assert!(matches!(err, ActiveClipboardPullServeError::NotAvailable));
+        assert!(matches!(err, ActivePullPreparationError::NotAvailable));
         assert!(cipher.seen_plaintext.lock().unwrap().is_none());
     }
 
@@ -772,10 +774,10 @@ mod tests {
         );
 
         let err = uc
-            .serve("blake3v1:whatever")
+            .prepare("blake3v1:whatever", &ActivePullPreparationStop::default())
             .await
             .expect_err("locked session must not serve");
-        assert!(matches!(err, ActiveClipboardPullServeError::NotUnlocked));
+        assert!(matches!(err, ActivePullPreparationError::NotUnlocked));
     }
 
     /// 加密失败归入 Internal，且下层 `TransferCipherError` 仍可沿 source chain 取回。
@@ -789,10 +791,10 @@ mod tests {
         );
 
         let err = uc
-            .serve("blake3v1:whatever")
+            .prepare("blake3v1:whatever", &ActivePullPreparationStop::default())
             .await
             .expect_err("cipher failure must not serve");
-        assert!(matches!(err, ActiveClipboardPullServeError::Internal(_)));
+        assert!(matches!(err, ActivePullPreparationError::Internal(_)));
         let mut source = std::error::Error::source(&err);
         let mut found = false;
         while let Some(current) = source {
@@ -817,10 +819,10 @@ mod tests {
         );
 
         let err = uc
-            .serve("blake3v1:whatever")
+            .prepare("blake3v1:whatever", &ActivePullPreparationStop::default())
             .await
             .expect_err("lost payload must not serve");
-        assert!(matches!(err, ActiveClipboardPullServeError::NotAvailable));
+        assert!(matches!(err, ActivePullPreparationError::NotAvailable));
         assert!(cipher.seen_plaintext.lock().unwrap().is_none());
     }
 
@@ -861,7 +863,10 @@ mod tests {
             Arc::clone(&cipher) as _,
         );
 
-        let envelope = uc.serve("blake3v1:whatever").await.expect("serve ok");
+        let envelope = uc
+            .prepare("blake3v1:whatever", &ActivePullPreparationStop::default())
+            .await
+            .expect("serve ok");
         assert_eq!(envelope, b"CIPHERTEXT");
 
         // Assertion 1 — the D3 re-publish ran: the gateway was asked to
@@ -930,7 +935,10 @@ mod tests {
             Arc::clone(&cipher) as _,
         );
 
-        let envelope = uc.serve("blake3v1:whatever").await.expect("serve ok");
+        let envelope = uc
+            .prepare("blake3v1:whatever", &ActivePullPreparationStop::default())
+            .await
+            .expect("serve ok");
         assert_eq!(envelope, b"CIPHERTEXT");
 
         // The publish set is the manifest-resolved member, not the raw rep's
@@ -1005,7 +1013,9 @@ mod tests {
             Arc::clone(&cipher) as _,
         );
 
-        uc.serve("blake3v1:whatever").await.expect("serve ok");
+        uc.prepare("blake3v1:whatever", &ActivePullPreparationStop::default())
+            .await
+            .expect("serve ok");
 
         // The legacy-peer decoder (hard-errors on any bytes after the UCBS
         // section) accepts the plaintext — i.e. no UCDS trailer traveled for
@@ -1050,10 +1060,10 @@ mod tests {
         );
 
         let err = uc
-            .serve("blake3v1:whatever")
+            .prepare("blake3v1:whatever", &ActivePullPreparationStop::default())
             .await
             .expect_err("excluded manifest must not serve");
-        assert!(matches!(err, ActiveClipboardPullServeError::NotAvailable));
+        assert!(matches!(err, ActivePullPreparationError::NotAvailable));
         assert!(cipher.seen_plaintext.lock().unwrap().is_none());
     }
 
@@ -1079,10 +1089,10 @@ mod tests {
         );
 
         let err = uc
-            .serve("blake3v1:whatever")
+            .prepare("blake3v1:whatever", &ActivePullPreparationStop::default())
             .await
             .expect_err("unreadable member must not serve");
-        assert!(matches!(err, ActiveClipboardPullServeError::NotAvailable));
+        assert!(matches!(err, ActivePullPreparationError::NotAvailable));
         assert!(cipher.seen_plaintext.lock().unwrap().is_none());
     }
 
@@ -1131,10 +1141,10 @@ mod tests {
         );
 
         let err = uc
-            .serve("blake3v1:whatever")
+            .prepare("blake3v1:whatever", &ActivePullPreparationStop::default())
             .await
             .expect_err("a flat manifest with an unreadable member must not serve a subset");
-        assert!(matches!(err, ActiveClipboardPullServeError::NotAvailable));
+        assert!(matches!(err, ActivePullPreparationError::NotAvailable));
         assert!(cipher.seen_plaintext.lock().unwrap().is_none());
     }
 
@@ -1177,10 +1187,10 @@ mod tests {
         );
 
         let err = uc
-            .serve("blake3v1:whatever")
+            .prepare("blake3v1:whatever", &ActivePullPreparationStop::default())
             .await
             .expect_err("file sync disabled must not serve a manifest-backed file entry");
-        assert!(matches!(err, ActiveClipboardPullServeError::NotAvailable));
+        assert!(matches!(err, ActivePullPreparationError::NotAvailable));
         assert!(cipher.seen_plaintext.lock().unwrap().is_none());
     }
 }

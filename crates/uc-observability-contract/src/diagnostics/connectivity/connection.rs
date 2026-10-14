@@ -77,6 +77,7 @@ pub(super) enum ConnectionEvent {
     },
     Finished {
         connect_id: Uuid,
+        purpose: ConnectionPurpose,
         outcome: ConnectionOutcome,
         duration_ms: u64,
         attempt_count: u32,
@@ -88,6 +89,7 @@ pub(super) enum ConnectionEvent {
     },
     AttemptFinished {
         connect_id: Uuid,
+        purpose: ConnectionPurpose,
         attempt_index: u32,
         outcome: AttemptOutcome,
         duration_ms: u64,
@@ -133,11 +135,13 @@ impl ConnectionEvent {
             }
             Self::Finished {
                 connect_id,
+                purpose,
                 outcome,
                 duration_ms,
                 attempt_count,
             } => {
                 fields.insert("connect_id".into(), json!(connect_id));
+                fields.insert("purpose".into(), json!(purpose));
                 fields.insert("duration_ms".into(), json!(duration_ms));
                 fields.insert("attempt_count".into(), json!(attempt_count));
                 append_outcome(&mut fields, *outcome);
@@ -153,11 +157,13 @@ impl ConnectionEvent {
             }
             Self::AttemptFinished {
                 connect_id,
+                purpose,
                 attempt_index,
                 outcome,
                 duration_ms,
             } => {
                 fields.insert("connect_id".into(), json!(connect_id));
+                fields.insert("purpose".into(), json!(purpose));
                 fields.insert("attempt_index".into(), json!(attempt_index));
                 fields.insert("duration_ms".into(), json!(duration_ms));
                 match outcome {
@@ -210,6 +216,8 @@ pub fn local_connection_peer() -> Option<[u8; 32]> {
 
 struct ConnectionShared {
     connect_id: Uuid,
+    // 终态自足：开始记录可能因有限非阻塞输出丢失，分类仍由原连接负责人保留。
+    purpose: ConnectionPurpose,
     context: ObservationContext,
     attempt_count: AtomicU32,
     won: AtomicBool,
@@ -245,6 +253,7 @@ impl ConnectionObservation {
         let observation = Self {
             shared: Arc::new(ConnectionShared {
                 connect_id: Uuid::new_v4(),
+                purpose,
                 context,
                 attempt_count: AtomicU32::new(0),
                 won: AtomicBool::new(false),
@@ -274,6 +283,7 @@ impl ConnectionObservation {
         self.shared.emit_connected(
             ConnectionEvent::Finished {
                 connect_id: self.shared.connect_id,
+                purpose: self.shared.purpose,
                 outcome: ConnectionOutcome::Connected,
                 duration_ms: millis(self.started.elapsed()),
                 attempt_count: self.shared.attempt_count.load(Ordering::Acquire),
@@ -305,6 +315,7 @@ impl ConnectionObservation {
     fn emit_finish(&self, outcome: ConnectionOutcome) {
         self.shared.emit(ConnectionEvent::Finished {
             connect_id: self.shared.connect_id,
+            purpose: self.shared.purpose,
             outcome,
             duration_ms: millis(self.started.elapsed()),
             attempt_count: self.shared.attempt_count.load(Ordering::Acquire),
@@ -351,6 +362,7 @@ impl ConnectionAttemptObservation {
         self.shared.emit_connected(
             ConnectionEvent::AttemptFinished {
                 connect_id: self.shared.connect_id,
+                purpose: self.shared.purpose,
                 attempt_index: self.index,
                 outcome: AttemptOutcome::Result(ConnectionOutcome::Connected),
                 duration_ms: millis(self.started.elapsed()),
@@ -366,6 +378,7 @@ impl ConnectionAttemptObservation {
     fn emit_finish(&self, outcome: AttemptOutcome) {
         self.shared.emit(ConnectionEvent::AttemptFinished {
             connect_id: self.shared.connect_id,
+            purpose: self.shared.purpose,
             attempt_index: self.index,
             outcome,
             duration_ms: millis(self.started.elapsed()),

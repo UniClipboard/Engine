@@ -4,6 +4,7 @@
 //! capture、history、restore、resource 与 live-index 入口。Engine 只选择
 //! 平台/存储 adapter，不再逐项拼装 Clipboard use case。
 
+use crate::clipboard::active::transport::ActivePullPreparationPort;
 use crate::clipboard::inbound::ClipboardReceiverPort;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,16 +17,15 @@ use uc_core::ports::blob::BlobTransferPort;
 use uc_core::ports::hidden_path::MarkHiddenPort;
 use uc_core::ports::inbound_file_target::ReserveInboundFileTargetPort;
 use uc_core::ports::{
-    ActiveClipboardDispatchPort, ActiveClipboardPullClientPort, ActiveClipboardPullServePort,
-    ActiveClipboardReceiverPort, EntryDeliveryRepositoryPort, PeerAddressRepositoryPort,
-    PeerReachabilityPort,
+    ActiveClipboardDispatchPort, ActiveClipboardPullClientPort, ActiveClipboardReceiverPort,
+    EntryDeliveryRepositoryPort, PeerAddressRepositoryPort, PeerReachabilityPort,
 };
 use uc_core::TaskRegistry;
 use uc_core::TrustedPeerRepositoryPort;
 
 use crate::clipboard::active::ClipboardSnapshotDeps;
 use crate::clipboard::active::{
-    build_active_clipboard_pull_serve_port, ActiveClipboardDeps, ActiveClipboardFacade,
+    build_active_clipboard_pull_preparation, ActiveClipboardDeps, ActiveClipboardFacade,
     ActiveClipboardLifecycle, ActiveClipboardLifecycleError, ActiveClipboardPullServeFacadeDeps,
     ActiveClipboardReconcileDeps, ActiveClipboardReconcileError, ActiveClipboardReconcileFacade,
 };
@@ -45,7 +45,8 @@ use crate::clipboard::sync::apply_inbound::{
 };
 use crate::clipboard::sync::sync_runtime::{ClipboardSyncRuntime, ClipboardSyncRuntimeDeps};
 use crate::clipboard::write::{
-    ClipboardWriteCoordinator, LocalActiveRegisterAdvancer, RestoreBroadcastTrigger,
+    ClipboardWriteCoordinator, LocalActiveRegisterAdvancer, RestoreBroadcastReceiver,
+    RestoreBroadcastTrigger,
 };
 use crate::deps::{ApplicationDeps, CurrentSpaceMemberScopePort, IsSpaceUnlockedPort};
 use crate::facade::clipboard_history::ClipboardHistoryFacadeDeps;
@@ -368,8 +369,8 @@ impl ClipboardAssembly {
     pub fn active_pull_serve(
         &self,
         blob_publisher: Arc<BlobTransferFacade>,
-    ) -> Arc<dyn ActiveClipboardPullServePort> {
-        build_active_clipboard_pull_serve_port(ActiveClipboardPullServeFacadeDeps {
+    ) -> Arc<dyn ActivePullPreparationPort> {
+        build_active_clipboard_pull_preparation(ActiveClipboardPullServeFacadeDeps {
             entry_lookup: Arc::clone(&self.deps.clipboard.entry_ports.find_by_snapshot_hash),
             settings: Arc::clone(&self.deps.settings),
             transfer_cipher: Arc::clone(&self.deps.security.transfer_cipher),
@@ -551,7 +552,7 @@ impl ActiveClipboardSession {
 
     pub fn attach_restore_broadcast(
         &self,
-        rx: tokio::sync::mpsc::UnboundedReceiver<crate::clipboard::write::RestoreBroadcastRequest>,
+        rx: RestoreBroadcastReceiver,
     ) -> Result<(), ActiveClipboardLifecycleError> {
         self.lifecycle.attach_restore_broadcast(rx)
     }

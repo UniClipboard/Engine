@@ -108,7 +108,7 @@ function read(relativePath) {
 }
 
 /// 排除测试文件与测试台目录后的 Rust 源码；`excludedPaths` 为另需排除的仓库相对路径。
-function productionSources(relativeRoot, excludedPaths = []) {
+function productionSources(relativeRoot, excludedPaths = [], stripInlineTests = false) {
   const root = join(REPOSITORY_ROOT, relativeRoot)
   const excluded = new Set(excludedPaths)
   const sources = []
@@ -124,7 +124,8 @@ function productionSources(relativeRoot, excludedPaths = []) {
         !/(^tests\.rs|_tests?\.rs)$/.test(entry.name) &&
         !excluded.has(relative(REPOSITORY_ROOT, path))
       ) {
-        sources.push(readFileSync(path, 'utf8'))
+        const source = readFileSync(path, 'utf8')
+        sources.push(stripInlineTests ? source.split('#[cfg(test)]')[0] : source)
       }
     }
   }
@@ -2256,9 +2257,9 @@ function repositorySources() {
       'membership_history_exchange_adapter.rs',
       'peer_reachability_adapter.rs',
       'transfer_progress_adapter.rs',
-      'active_clipboard/dispatch_adapter.rs',
-      'active_clipboard/pull_client_adapter.rs',
     ].map(path => read(`crates/uc-infra-p2p/src/network/iroh/${path}`)).join('\n'),
+    activeClipboardTransport: productionSources('crates/uc-application/src/clipboard/active/transport'),
+    activeClipboardInfra: productionSources('crates/uc-infra-p2p/src/network/iroh/active_clipboard', ['crates/uc-infra-p2p/src/network/iroh/active_clipboard/testing.rs'], true),
     runtimeModule: read('crates/uc-engine/src/runtime/mod.rs'),
     sessionSupervisor: read('crates/uc-engine/src/runtime/session_supervisor.rs'),
     runtimeLifecycleModule: read('crates/uc-application/src/runtime_lifecycle/mod.rs'),
@@ -2326,6 +2327,18 @@ function repositorySources() {
   }
 }
 
+// 当前状态与 pull 的完整流程只能消费通用连接；原生 bridge 不能自行拨号或编排半流。
+function checkActiveClipboardTransportOwnership(sources) {
+  const problems = []
+  if (/\b(?:use\s+iroh|iroh::|Endpoint)\b/.test(sources.activeClipboardTransport))
+    problems.push('active clipboard Application transport must remain backend independent')
+  if (/\.(?:connect|open_bi|accept_bi)\s*\(/.test(sources.activeClipboardInfra))
+    problems.push('active clipboard native bridge must delegate complete exchanges to Application')
+  if (/ActiveClipboardPullServePort/.test(sources.core))
+    problems.push('retired active clipboard Core serve port must not return')
+  return problems
+}
+
 function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
   return [
     ...checkWorkspaceShape(metadata),
@@ -2353,6 +2366,7 @@ function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
     ...checkRetiredLegacySpaceTransition(sources),
     ...checkRetiredMembershipPersistence(sources),
     ...checkIrohPeerAddressResolution(sources),
+    ...checkActiveClipboardTransportOwnership(sources),
     ...checkSessionSupervisorOwnership(sources),
     ...checkRuntimeLifecycleOwnership(sources),
     ...checkSpaceAccessConstructionModes(sources),
@@ -2380,6 +2394,13 @@ function expectRejected(name, mutate, metadata, sources) {
 }
 
 function runNegativeFixtures(metadata, sources) {
+  expectRejected('active clipboard native dialing bypass', (_metadata, changed) => {
+    changed.activeClipboardInfra += '\nasync fn bypass() { endpoint.connect(peer, alpn).await; }\n'
+  }, metadata, sources)
+  expectRejected('active clipboard native Application dependency', (_metadata, changed) => {
+    changed.activeClipboardTransport += '\nuse iroh::Endpoint;\n'
+  }, metadata, sources)
+
   expectRejected('membership workflow returned to Core', (_metadata, changed) => {
     changed.membershipHistoryCore += '\nasync fn reconcile_evidence() {}\n'
   }, metadata, sources)

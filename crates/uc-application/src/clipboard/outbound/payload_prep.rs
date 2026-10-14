@@ -14,6 +14,9 @@
 //! per-phase latency instrumentation for GH#487, `Skipped { reason }`
 //! outcomes), and folding it in would turn this into a leaky mega-helper.
 
+use crate::clipboard::active::transport::{
+    ActivePullPreparationCancelled, ActivePullPreparationStop,
+};
 use std::sync::Arc;
 
 use uc_core::ids::EntryId;
@@ -45,6 +48,7 @@ pub(crate) struct OutboundPayload {
 /// Failure surface of [`assemble_outbound_payload`]. Details are logged at the
 /// failure site; callers only map the class onto their own error enums.
 pub(crate) enum OutboundPayloadError {
+    Cancelled(ActivePullPreparationCancelled),
     /// This device cannot reproduce the payload in full: the manifest has
     /// excluded lines, a manifest member is unreadable, the planner dropped a
     /// directory member, or every referenced file is gone (all-or-nothing).
@@ -68,7 +72,9 @@ pub(crate) async fn assemble_outbound_payload(
     settings: Arc<dyn SettingsPort>,
     entry_id: &EntryId,
     snapshot: SystemClipboardSnapshot,
+    stop: &ActivePullPreparationStop,
 ) -> Result<OutboundPayload, OutboundPayloadError> {
+    stop.check().map_err(OutboundPayloadError::Cancelled)?;
     let display_metadata = file_display_metadata(&snapshot);
     // 1. Member path list from the persisted file-set manifest — the single
     //    source of truth shared with the dispatch path.
@@ -132,6 +138,7 @@ pub(crate) async fn assemble_outbound_payload(
     // 3. Plan. The only branch that drops `clipboard` for a Resend-origin plan
     //    is `all_files_excluded` (every referenced file gone / over caps).
     let planner = OutboundSyncPlanner::new(settings);
+    stop.check().map_err(OutboundPayloadError::Cancelled)?;
     let plan = planner
         .plan(
             snapshot,
@@ -165,9 +172,9 @@ pub(crate) async fn assemble_outbound_payload(
 
     // 4. Publish file blobs (re-issues tickets pinned to this device).
     let (mut blob_refs, file_content_digests) =
-        publish_file_blob_refs(blob_publisher, &plan.files, entry_id)
+        publish_file_blob_refs(blob_publisher, &plan.files, entry_id, stop)
             .await
-            .map_err(OutboundPayloadError::Publish)?;
+            .map_err(OutboundPayloadError::from)?;
 
     // Capture→send drift observability (flat manifests only — directory sets
     // carry no flat digest contribution): the manifest digests are the
@@ -188,6 +195,7 @@ pub(crate) async fn assemble_outbound_payload(
         }
     }
 
+    stop.check().map_err(OutboundPayloadError::Cancelled)?;
     // 5. Directory sets: the transfer manifest + structured identity component
     //    replace the flat digest contribution (member completeness is already
     //    guaranteed by the all-or-nothing guard above).
@@ -224,14 +232,25 @@ pub(crate) async fn assemble_outbound_payload(
         blob_publisher,
         &mut clipboard_intent.snapshot,
         entry_id,
+        stop,
     )
     .await
-    .map_err(OutboundPayloadError::Publish)?;
+    .map_err(OutboundPayloadError::from)?;
     blob_refs.append(&mut image_blob_refs);
 
+    stop.check().map_err(OutboundPayloadError::Cancelled)?;
     Ok(OutboundPayload {
         snapshot: clipboard_intent.snapshot,
         blob_refs,
         file_set_manifest,
     })
+}
+
+impl From<ClipboardOutboundError> for OutboundPayloadError {
+    fn from(source: ClipboardOutboundError) -> Self {
+        match source {
+            ClipboardOutboundError::Cancelled(source) => Self::Cancelled(source),
+            source => Self::Publish(source),
+        }
+    }
 }

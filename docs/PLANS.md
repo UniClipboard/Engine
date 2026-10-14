@@ -20,6 +20,8 @@
 
 ## 当前专项计划
 
+- Issue #34 第五切片：[当前剪贴板状态与按需拉取执行计划](exec-plans/completed/2026-10-14-active-clipboard-connectivity-plan.md)，对应[实现规格](exec-plans/completed/2026-10-14-active-clipboard-connectivity-spec.md)。状态为完成，本地验收与代码提交线上必需检查通过；四向 Uni 迁移、每次网络交换 10 秒、每轮 4 目标、最新待发状态与独立容量；保留原恢复语义和文件本体链路。
+
 - Issue #34 第四切片：[成员历史完整迁移与连接复用执行计划](exec-plans/active/2026-10-12-membership-history-connectivity-plan.md)，对应[实现规格](exec-plans/active/2026-10-12-membership-history-connectivity-spec.md)。状态为本地实现与验收完成、待线上检查；成员历史独占连接池、新多流 ALPN 与旧 `/4` fallback、每方向一条、当前成员 30 秒空闲保留；不新增批量协议。
 
 - Issue #34 第三切片：[组更新收发与主动恢复执行计划](exec-plans/completed/2026-10-11-group-update-connectivity-plan.md)，对应[实现规格](exec-plans/completed/2026-10-11-group-update-connectivity-spec.md)。状态为完成；完整 Uni 收发、统一应用与 /4 主动逐页恢复落地，最终 workspace、成员、真实 SQLite/MLS 强杀断点、独立宿主和固定 main 双方向互通通过；物理设备与跨网络矩阵跳过，不新增批量协议，不关闭整个 #34。

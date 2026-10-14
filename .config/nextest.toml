@@ -298,3 +298,21 @@ slow-timeout = { period = "60s", terminate-after = 1 }
 [[profile.ci.overrides]]
 filter = "package(uc-engine) & kind(lib) & test(peer_restart_does_not_block_local_work_and_recovers_an_offline_file)"
 slow-timeout = { period = "60s", terminate-after = 1 }
+
+# 当前剪贴板宿主每例使用两个真实 Engine；双向旧新矩阵包含四类完整内容，独占执行。
+[[profile.default.overrides]]
+filter = "package(uc-connectivity-host) & binary(active_clipboard_connectivity)"
+test-group = "process"
+threads-required = "num-test-threads"
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-connectivity-host) & binary(active_clipboard_connectivity)"
+test-group = "process"
+threads-required = "num-test-threads"
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+# 不开流与半帧各使用真实 10 秒期限；两次交换共享一个测试进程，不修改协议期限。
+[[profile.default.overrides]]
+filter = "package(uc-infra-p2p) & test(silent_and_partial_request_close_within_entry_deadline)"
+slow-timeout = { period = "15s", terminate-after = 2 }

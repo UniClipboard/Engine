@@ -58,7 +58,7 @@ use crate::deps::CurrentSpaceMemberScopePort;
 
 use super::super::send_gate::MemberSendGate;
 use super::super::snapshot_from_entry::SnapshotReconstructor;
-use super::fanout::send_active_state_to_with_scope;
+use super::fanout::{send_active_state_to_targets, ActiveStateBroadcastTrigger};
 
 /// Debounce window for coalescing a burst of peer-online transitions into one
 /// resync per device (D7). Distinct from the restore broadcast's 300ms window:
@@ -145,7 +145,7 @@ impl PeerOnlineResyncWorker {
                 }
             }
 
-            self.emit(pending).await;
+            tokio::select! { _ = cancel.cancelled() => return, _ = self.emit(pending) => {} }
         }
     }
 
@@ -232,22 +232,16 @@ impl PeerOnlineResyncWorker {
                 return;
             }
         };
-        for target in targets {
-            // Never resend the state to the device that activated it: it is
-            // already the source of truth for this activation.
-            if target == state.activated_by {
-                continue;
-            }
-            send_active_state_to_with_scope(
-                &self.dispatch,
-                &self.send_gate,
-                &target,
-                &state,
-                &categories,
-                &scope,
-            )
-            .await;
-        }
+        send_active_state_to_targets(
+            &self.dispatch,
+            &self.send_gate,
+            targets,
+            &state,
+            &categories,
+            &scope,
+            ActiveStateBroadcastTrigger::PeerOnline,
+        )
+        .await;
     }
 }
 

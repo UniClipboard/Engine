@@ -7217,6 +7217,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "uc-engine",
+ "url",
  "wiremock",
 ]
 

@@ -2,6 +2,7 @@
 
 这里包含设计中、实施中、待实现或暂时阻塞的工作。状态以各文件开头为准。
 
+
 - [Issue #34 第四切片：成员历史完整迁移与连接复用](2026-10-12-membership-history-connectivity-plan.md)（本地实现与验收完成，待线上检查；[实现规格](2026-10-12-membership-history-connectivity-spec.md)）
 
 - [连接候选发布、网络恢复与路径观测](2026-10-10-connection-path-and-network-recovery.md)（实施中：地址过滤与连接路径改动已落地，端到端与网络矩阵验收待执行）

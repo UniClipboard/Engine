@@ -256,9 +256,9 @@ CurrentWorkspacePeerScopePort
 对产品公开的操作和结果不新增步骤：`QueryPeerConnections`、设备信任查询、移除和决定仍使用现有
 Engine 入口。内部错误按现有稳定类别映射；列表和后台任务不能在错误时返回未过滤旧记录。
 
-现有 `ContentExchangeGatePort` 继续表达待决定、分叉、无效和版本等普通内容关系限制，但应改为先验证
-设备位于当前范围。`DeviceVisibilityGatePort` 在所有调用方迁移后删除，避免同一成员规则同时存在为
-“范围查询”和“隐藏判断”。低层 `PeerAdmissionPort` 继续验证安全组接纳，但不能替代当前范围授权。
+Application 使用 `CurrentSpaceMemberScopePort` 的最终范围表达待决定、分叉、无效和版本等内容关系限制。
+当前剪贴板 pull 的最后消费者迁移后，Core `ContentExchangeGatePort` 及 Engine 转接器已删除；范围读取失败
+仍拒绝提供内容，本机结果保留读取来源。低层 `PeerAdmissionPort` 继续验证安全组接纳，不能替代当前范围授权。
 
 ## Workflow
 

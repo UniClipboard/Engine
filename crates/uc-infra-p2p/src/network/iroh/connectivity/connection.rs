@@ -10,6 +10,8 @@ use uc_application::deps::{
 };
 use uc_core::ids::DeviceId;
 use uc_core::ports::{ConnectionChannel, PeerReachabilityChanged, ReachabilityState};
+use uc_sync_protocol::active_clipboard_pull::ACTIVE_CLIPBOARD_PULL_ALPN;
+use uc_sync_protocol::active_clipboard_state::ACTIVE_CLIPBOARD_ALPN;
 use uc_sync_protocol::clipboard::{CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN};
 use uc_sync_protocol::group_update::{GROUP_UPDATE_ALPN, LEGACY_GROUP_UPDATE_ALPN};
 use uc_sync_protocol::membership_history::{
@@ -89,6 +91,8 @@ impl PeerConnection for IrohPeerConnection {
     fn protocol(&self) -> ConnectionProtocol {
         match self.native.alpn() {
             MULTIPLEXED_CLIPBOARD_ALPN => ConnectionProtocol::MultiplexedClipboard,
+            ACTIVE_CLIPBOARD_PULL_ALPN => ConnectionProtocol::ActiveClipboardPull,
+            ACTIVE_CLIPBOARD_ALPN => ConnectionProtocol::ActiveClipboardState,
             CLIPBOARD_ALPN => ConnectionProtocol::Clipboard,
             MEMBERSHIP_HISTORY_EXCHANGE_ALPN => ConnectionProtocol::MembershipHistory,
             MULTIPLEXED_MEMBERSHIP_HISTORY_ALPN => ConnectionProtocol::MultiplexedMembershipHistory,

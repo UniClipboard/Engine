@@ -24,10 +24,9 @@ mod thumbnail_repository;
 
 pub use active_clipboard::{
     ActiveClipboardDispatchError, ActiveClipboardDispatchPort, ActiveClipboardPullClientError,
-    ActiveClipboardPullClientPort, ActiveClipboardPullServeError, ActiveClipboardPullServePort,
-    ActiveClipboardReceiverPort, ActiveClipboardRegisterError, AdvanceActiveClipboardPort,
-    BackfillMobileConsumableClipboardPort, InboundActiveClipboardState, LoadActiveClipboardPort,
-    LoadMobileConsumableClipboardPort, ResetActiveClipboardPort,
+    ActiveClipboardPullClientPort, ActiveClipboardReceiverPort, ActiveClipboardRegisterError,
+    AdvanceActiveClipboardPort, BackfillMobileConsumableClipboardPort, InboundActiveClipboardState,
+    LoadActiveClipboardPort, LoadMobileConsumableClipboardPort, ResetActiveClipboardPort,
 };
 pub use blob_migration_repo::{BlobMigrationRepoError, BlobMigrationRepoPort, MigrationRecord};
 pub use clipboard_entry_repository::ClipboardEntryStore;

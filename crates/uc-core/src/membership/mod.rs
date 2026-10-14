@@ -88,7 +88,7 @@ pub use membership_history::{
     MembershipHistorySuffixRequestV3, MembershipHistorySummaryV3, RemovalDecision,
 };
 pub use ports::{
-    BeginRevocationOutcome, ContentExchangeGatePort, CurrentMembershipAnnouncementMaterial,
+    BeginRevocationOutcome, CurrentMembershipAnnouncementMaterial,
     CurrentMembershipAnnouncementPort, CurrentMembershipIdentity, CurrentMembershipIdentityPort,
     GroupRevocationPort, GroupUpdateDispatchPort, MemberRepositoryPort,
     MembershipAdmissionDecision, MembershipHistoryExchangeEndpointPort,

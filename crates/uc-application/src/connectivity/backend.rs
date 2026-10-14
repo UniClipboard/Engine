@@ -15,6 +15,8 @@ pub enum ConnectionMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConnectionProtocol {
     Unsupported,
+    ActiveClipboardState,
+    ActiveClipboardPull,
     Clipboard,
     MultiplexedClipboard,
     GroupUpdate,

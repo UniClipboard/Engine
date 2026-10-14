@@ -1,210 +1,110 @@
-//! Iroh-backed implementation of [`ActiveClipboardReceiverPort`].
-//!
-//! The adapter publishes an [`InboundActiveClipboardState`] broadcast stream
-//! that the application layer subscribes to. Inbound connections are handled
-//! by [`IrohActiveClipboardReceiverHandler`] — the same `ProtocolHandler`
-//! split pattern used for the bulk clipboard / peer_reachability / pairing transports
-//! (see `docs/design-docs/layers/infrastructure.md` §4.3): the adapter owns the broadcast `Sender`
-//! and the domain dependencies, and the handler is a cheap `Clone` that
-//! iroh's `Router` registers under [`ACTIVE_CLIPBOARD_ALPN`].
-//!
-//! ## Identity resolution
-//!
-//! Each inbound connection's `Connection::remote_id()` is the peer's iroh
-//! `EndpointId` (a newtype over the 32-byte Ed25519 public key). The receiver
-//! feeds those bytes into the same [`IdentityFingerprintFactoryPort`] used
-//! when persisting the local fingerprint, recovers the remote's
-//! `IdentityFingerprint`, and looks it up in [`PeerIdentityDirectoryPort`].
-//! Unknown peers (fingerprint not in the identity directory) are dropped without
-//! reaching the broadcast stream.
-//!
-//! ## Why no ack
-//!
-//! Active-clipboard state is a fire-and-forget last-writer-wins broadcast:
-//! the sender does not wait for a reply, so the handler reads one frame,
-//! publishes it, and returns. There is no rejection ack (contrast the bulk
-//! codec, where the sender blocks on a per-frame ack). Convergence is the
-//! responsibility of the LWW register, not of per-frame acknowledgement.
-
-use std::sync::Arc;
-use uc_application::deps::PeerIdentityDirectoryPort;
-
-use async_trait::async_trait;
+//! 原生 Router 只转换连接并调用一次完整接收能力。
+use super::super::connectivity::IrohPeerConnection;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
-use tokio::sync::broadcast;
-
-use uc_core::ids::DeviceId;
-use uc_core::membership::PeerAdmissionPort;
-use uc_core::ports::security::IdentityFingerprintFactoryPort;
-use uc_core::ports::{ActiveClipboardReceiverPort, InboundActiveClipboardState};
-use uc_observability_contract::{
-    diagnostics::connectivity::InboundPeerProtocol, error_source::io_error_kind, uc_debug, uc_warn,
-};
-
-use super::super::inbound_peer::InboundPeerGate;
-use uc_sync_protocol::active_clipboard_state as wire;
-
-/// ALPN identifier for the active-clipboard state protocol. An independent
-/// sibling of the bulk clipboard / peer_reachability / pairing ALPNs so the Router can
-/// multiplex every transport on the same endpoint.
-pub const ACTIVE_CLIPBOARD_ALPN: &[u8] = b"uniclipboard/active-clipboard/0";
-
-/// Capacity of the `InboundActiveClipboardState` broadcast channel. Matches
-/// the bulk clipboard receiver so both inbound streams share the same burst
-/// tolerance. Lagging subscribers drop frames per broadcast semantics — the
-/// register is convergent, so a dropped observation is recovered by the next
-/// one a peer reports.
-const INBOUND_CHANNEL_CAPACITY: usize = 64;
-
-/// Receiver-side adapter. Holds the broadcast sender and the domain
-/// dependencies needed to resolve `endpoint_id → DeviceId`. See
-/// [`IrohActiveClipboardReceiverAdapter::handler`] for the paired
-/// `ProtocolHandler`.
-pub struct IrohActiveClipboardReceiverAdapter {
-    event_tx: broadcast::Sender<InboundActiveClipboardState>,
-    handler_state: Arc<HandlerState>,
-}
-
-struct HandlerState {
-    gate: InboundPeerGate,
-    event_tx: broadcast::Sender<InboundActiveClipboardState>,
-}
-
-impl IrohActiveClipboardReceiverAdapter {
-    pub fn new(
-        identities: Arc<dyn PeerIdentityDirectoryPort>,
-        peer_admission: Arc<dyn PeerAdmissionPort>,
-        fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
-    ) -> Self {
-        let (event_tx, _) = broadcast::channel(INBOUND_CHANNEL_CAPACITY);
-        let handler_state = Arc::new(HandlerState {
-            gate: InboundPeerGate::new(
-                InboundPeerProtocol::ActiveClipboard,
-                identities,
-                peer_admission,
-                fingerprint_factory,
-            ),
-            event_tx: event_tx.clone(),
-        });
-        Self {
-            event_tx,
-            handler_state,
-        }
-    }
-
-    /// Cheap clone-able handle registered with iroh's `RouterBuilder`. Each
-    /// inbound connection runs [`IrohActiveClipboardReceiverHandler::accept`],
-    /// which shares the adapter's broadcast `Sender` via `Arc`.
-    pub fn handler(&self) -> IrohActiveClipboardReceiverHandler {
-        IrohActiveClipboardReceiverHandler {
-            state: Arc::clone(&self.handler_state),
-        }
-    }
-}
-
-#[async_trait]
-impl ActiveClipboardReceiverPort for IrohActiveClipboardReceiverAdapter {
-    fn subscribe(&self) -> broadcast::Receiver<InboundActiveClipboardState> {
-        self.event_tx.subscribe()
-    }
-}
-
-// ============================================================================
-// ProtocolHandler (accept side)
-// ============================================================================
+use std::sync::Arc;
+use tokio::time::Instant;
+use uc_application::deps::{ActiveStateReceiverPort, ACTIVE_EXCHANGE_TIMEOUT};
+use uc_observability_contract::diagnostics::{connectivity::NetworkRecorder, ObservationContext};
+use uc_observability_contract::{error_source::io_error_kind, uc_warn};
 
 #[derive(Clone)]
-pub struct IrohActiveClipboardReceiverHandler {
-    state: Arc<HandlerState>,
+pub struct IrohActiveStateHandler {
+    receiver: Arc<dyn ActiveStateReceiverPort>,
 }
-
-impl std::fmt::Debug for IrohActiveClipboardReceiverHandler {
+impl IrohActiveStateHandler {
+    pub fn new(receiver: Arc<dyn ActiveStateReceiverPort>) -> Self {
+        Self { receiver }
+    }
+}
+impl std::fmt::Debug for IrohActiveStateHandler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IrohActiveClipboardReceiverHandler")
+        f.debug_struct("IrohActiveStateHandler")
             .finish_non_exhaustive()
     }
 }
-
-impl ProtocolHandler for IrohActiveClipboardReceiverHandler {
+impl ProtocolHandler for IrohActiveStateHandler {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        let remote = connection.remote_id();
-        let remote_bytes: [u8; 32] = *remote.as_bytes();
+        let deadline = Instant::now() + ACTIVE_EXCHANGE_TIMEOUT;
+        // 已有不透明物理上下文只关联本次完整接收，不传出原生编号或业务阶段。
+        let context = NetworkRecorder::current().in_connection_scope(
+            *connection.remote_id().as_bytes(),
+            connection.stable_id() as u64,
+            ObservationContext::capture,
+        );
+        context
+            .scope(async {
+                if let Err(error) = self
+                    .receiver
+                    .receive(IrohPeerConnection::wrap(connection), deadline)
+                    .await
+                {
+                    uc_warn!(
+                        error_kind = "active_state_receive",
+                        io_error_kind = io_error_kind(&error),
+                        "active clipboard receive failed"
+                    );
+                }
+                Ok(())
+            })
+            .await
+    }
 
-        // 1. Resolve the remote endpoint's public key back to a known
-        //    SpaceMember. Unknown peers never reach the broadcast stream.
-        let peer_device_id = match self.state.gate.admit(&remote_bytes).await {
-            Ok(device) => device,
-            Err(rejection) => {
-                self.state.gate.record_rejection(rejection);
-                return Ok(());
-            }
-        };
-
-        // 2. Accept the inbound stream. The sender opens a bi-stream and
-        //    finishes its send half after the frame; we only read.
-        let (_send, mut recv) = match connection.accept_bi().await {
-            Ok(pair) => pair,
-            Err(err) => {
-                uc_warn!(
-                    error_kind = "accept_bi",
-                    io_error_kind = io_error_kind(&err),
-                    "active-clipboard receiver: accept_bi failed; dropping connection"
-                );
-                return Ok(());
-            }
-        };
-
-        // 3. Read the single state frame. Any codec-level failure drops the
-        //    connection — fire-and-forget means there is nothing to ack.
-        let msg = match wire::read_frame(&mut recv).await {
-            Ok(m) => m,
-            Err(err) => {
-                uc_warn!(
-                    error_kind = "frame_decode",
-                    io_error_kind = io_error_kind(&err),
-                    "active-clipboard receiver: frame decode failed; dropping connection"
-                );
-                return Ok(());
-            }
-        };
-
-        // 4. Decode the activator device id off the wire. `try_new` rejects
-        //    an over-long value instead of panicking the accept task — the
-        //    field is untrusted peer input, so a malformed id drops the
-        //    frame like any other codec failure.
-        let Some(activated_by) = DeviceId::try_new(&msg.activated_by) else {
+    async fn shutdown(&self) {
+        if let Err(error) = self.receiver.shutdown().await {
             uc_warn!(
-                "active-clipboard receiver: activated_by exceeds device id bound; dropping frame"
+                error_kind = "active_state_shutdown",
+                io_error_kind = io_error_kind(&error),
+                "active clipboard connectivity shutdown failed"
             );
-            return Ok(());
-        };
-
-        // 5. Publish to subscribers. A `SendError` means no subscriber is
-        //    attached; dropping the observation is acceptable — the register
-        //    converges on the next observation a peer reports.
-        let inbound = InboundActiveClipboardState {
-            peer_device_id,
-            snapshot_hash: msg.snapshot_hash,
-            sender_entry_id: msg.entry_id,
-            activated_at_ms: msg.activated_at_ms,
-            activated_by,
-        };
-        if self.state.event_tx.send(inbound).is_err() {
-            uc_debug!("active-clipboard receiver: no subscribers attached; observation dropped");
         }
-
-        Ok(())
     }
 }
-
-// ============================================================================
-// Tests
-// ============================================================================
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::network::iroh::admitted_connections::AdmittedConnections;
+    use crate::network::iroh::connectivity::{ConnectivityProfile, IrohConnectionAdmission};
+    use tokio::sync::broadcast;
+    use uc_application::deps::{
+        ActiveStateReceiver, ConnectivityBackend, ConnectivityError, ConnectivityManager,
+        ConnectivityPolicy, PeerConnection,
+    };
+    use uc_core::ids::DeviceId;
+    use uc_core::ports::security::IdentityFingerprintFactoryPort;
+    use uc_core::ports::{ActiveClipboardReceiverPort, InboundActiveClipboardState};
+    use uc_sync_protocol::active_clipboard_state::ACTIVE_CLIPBOARD_ALPN;
+
+    struct InboundOnlyBackend;
+    #[async_trait]
+    impl ConnectivityBackend for InboundOnlyBackend {
+        async fn connect(&self, _: DeviceId) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
+            Err(ConnectivityError::Offline)
+        }
+    }
+    fn test_manager(
+        endpoint: Arc<Endpoint>,
+        members: Arc<dyn MemberRepositoryPort>,
+        admitted: bool,
+    ) -> ConnectivityManager {
+        // 该夹具仅接收入站；身份与准入仍走真实 Iroh bridge，出站能力显式拒绝。
+        let _endpoint = endpoint;
+        ConnectivityManager::new(
+            Arc::new(InboundOnlyBackend),
+            Arc::new(IrohConnectionAdmission::new(
+                crate::network::iroh::inbound_peer::member_table_directory(members),
+                Arc::new(crate::network::iroh::StaticPeerAdmission(admitted)),
+                Arc::new(Sha256IdentityFingerprintFactory),
+                AdmittedConnections::default(),
+                ConnectivityProfile::ActiveClipboardState,
+            )),
+            ConnectivityPolicy {
+                inbound_per_connection: 1,
+                ..ConnectivityPolicy::default()
+            },
+        )
+    }
+
     use uc_core::membership::MemberRepositoryPort;
 
     use std::collections::HashMap;
@@ -319,14 +219,16 @@ mod tests {
         let receiver_endpoint = bind_endpoint_with(seed).await;
         wait_for_direct_addrs(&receiver_endpoint).await;
 
-        let adapter = IrohActiveClipboardReceiverAdapter::new(
-            crate::network::iroh::inbound_peer::member_table_directory(member_repo),
-            Arc::new(crate::network::iroh::StaticPeerAdmission(admitted)),
-            Arc::new(Sha256IdentityFingerprintFactory),
+        let adapter = ActiveStateReceiver::new(
+            test_manager(receiver_endpoint.clone(), member_repo, admitted),
+            Arc::new(super::super::wire::ActiveClipboardWire),
         );
         let inbound_rx = adapter.subscribe();
         let router = Router::builder((*receiver_endpoint).clone())
-            .accept(ACTIVE_CLIPBOARD_ALPN, adapter.handler())
+            .accept(
+                ACTIVE_CLIPBOARD_ALPN,
+                IrohActiveStateHandler::new(Arc::new(adapter)),
+            )
             .spawn();
 
         ReceiverHarness {
@@ -500,5 +402,29 @@ mod tests {
         );
 
         harness.receiver_router.shutdown().await.ok();
+    }
+    /// 协议入口起算：已认证成员不开流，也必须在总期限内关闭。
+    #[tokio::test]
+    async fn known_peer_without_stream_is_closed_within_exchange_deadline() {
+        let sender_seed = [0x31u8; 32];
+        let members: Arc<dyn MemberRepositoryPort> = Arc::new(MemMemberRepo::default());
+        members
+            .save(&make_member(sender_seed, "deadline-sender"))
+            .await
+            .unwrap();
+        let harness = spawn_receiver([0x32; 32], members).await;
+        let sender = bind_endpoint_with(sender_seed).await;
+        let connection = sender
+            .connect(harness.receiver_endpoint.addr(), ACTIVE_CLIPBOARD_ALPN)
+            .await
+            .unwrap();
+        let closed = tokio::time::timeout(Duration::from_secs(11), connection.closed()).await;
+        connection.close(0u32.into(), b"test complete");
+        harness.receiver_router.shutdown().await.unwrap();
+        sender.close().await;
+        assert!(
+            closed.is_ok(),
+            "no-stream input must not leave an unbounded handler"
+        );
     }
 }

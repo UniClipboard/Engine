@@ -159,10 +159,8 @@ impl InboundPeerGate {
         }
     }
 
-    pub(crate) async fn admit(
-        &self,
-        remote_public_key: &[u8; 32],
-    ) -> Result<DeviceId, InboundPeerRejection> {
+    #[cfg(test)]
+    async fn admit(&self, remote_public_key: &[u8; 32]) -> Result<DeviceId, InboundPeerRejection> {
         let device = self.identify(remote_public_key).await?;
         self.authorize(&device).await?;
         Ok(device)

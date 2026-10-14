@@ -4,7 +4,7 @@ use super::pending::{PendingInboundLease, UnboundConnection};
 use super::retention::{ConnectionActivity, IdleRetentionPolicy};
 use super::{
     AdmissionAttempt, ConnectionLease, ConnectionMode, ConnectivityBackend, ConnectivityError,
-    InboundConnectionError, PeerConnection, SessionConnectionAdmissionPort,
+    InboundConnectionError, PeerConnection, SessionConnectionAdmissionPort, StreamLease,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -408,6 +408,41 @@ impl ConnectivityManager {
     }
     pub(super) fn waiting_capacity(&self) -> Arc<Semaphore> {
         self.inner.waiting.clone()
+    }
+    /// 单次协议从入口起共用额度和期限；准入、开流及交接均不续期。
+    pub async fn accept_exchange(
+        &self,
+        connection: Arc<dyn PeerConnection>,
+        deadline: Instant,
+    ) -> Result<(ConnectionLease, StreamLease), ConnectivityError> {
+        let fence = self.inner.admission.inbound_fence();
+        let raw = UnboundConnection {
+            raw: connection,
+            adopted: false,
+        };
+        let incoming = self
+            .inner
+            .incoming
+            .clone()
+            .try_acquire_owned()
+            .map_err(ConnectivityError::Busy)?;
+        Self::watch_connection(&self.inner, raw.raw.clone());
+        tokio::select! {
+            _ = self.inner.stop.cancelled() => Err(ConnectivityError::Stopped),
+            result = timeout_at(deadline, async {
+                let global = self.inner.inbound.clone().acquire_owned().await
+                    .map_err(ConnectivityError::ResourceClosed)?;
+                let grant = self.inner.admission.adopt_inbound(raw.raw.clone()).await?;
+                if let Some(fence) = &fence { fence.check_current(&grant.peer())?; }
+                grant.check_current().await?;
+                let pair = raw.raw.accept_bi().await?;
+                PendingInboundLease {
+                    send: pair.0, receive: pair.1, deadline,
+                    received_at: Instant::now(), raw, manager: self.clone(),
+                    incoming, global, fence,
+                }.bind(grant).await
+            }) => result.map_err(ConnectivityError::TimedOut)?,
+        }
     }
     pub async fn accept_pending(
         &self,

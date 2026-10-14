@@ -26,10 +26,11 @@ use uc_engine::observability::{
 #[cfg(feature = "connectivity-opportunity")]
 use uc_engine::ConnectivityOpportunity;
 use uc_engine::{
-    CreateSpaceInput, Engine, EngineConfig, EngineEvent, HistoryEntryInput, HostCapabilities,
-    HostCapabilityError, HostCapabilityErrorCategory, HostDirectories, HostFileAccess,
-    HostFileHandle, HostFileMetadata, HostSecureStorage, JoinSpaceInput, ListHistoryEntriesInput,
-    Operation, OperationResult, RemoveMemberInput, SecretString, SendFilesInput, SendTextInput,
+    ClipboardRestoreMode, ClipboardRestoreOutcome, CreateSpaceInput, Engine, EngineConfig,
+    EngineEvent, HistoryEntryInput, HostCapabilities, HostCapabilityError,
+    HostCapabilityErrorCategory, HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata,
+    HostSecureStorage, JoinSpaceInput, ListHistoryEntriesInput, Operation, OperationResult,
+    RemoveMemberInput, RestoreClipboardInput, SecretString, SendFilesInput, SendTextInput,
     SettingsPatch, SyncSettingsPatch, UnlockSpaceInput,
 };
 
@@ -274,6 +275,7 @@ async fn operation(
         }
         "capture" => return content::capture(engine, clipboard, files, request).await,
         "observe" => return observe::observe(engine).await,
+        "clipboard" => return clipboard.observed(),
         _ => {}
     }
     #[cfg(feature = "current-engine")]
@@ -465,6 +467,7 @@ async fn operation(
         }),
         "sync_preference" => Operation::UpdateSettings(Box::new(SettingsPatch {
             sync: Some(SyncSettingsPatch {
+                auto_sync_enabled: request["auto_sync_enabled"].as_bool(),
                 sync_on_restore: Some(
                     request["sync_on_restore"]
                         .as_bool()
@@ -474,6 +477,15 @@ async fn operation(
             }),
             ..Default::default()
         })),
+        "active" => Operation::QueryActiveClipboard,
+        "delete" => Operation::DeleteHistoryEntry(HistoryEntryInput {
+            entry_id: string(request, "entry")?.into(),
+        }),
+        "lock" => Operation::LockEncryption,
+        "restore" => Operation::RestoreClipboard(RestoreClipboardInput {
+            entry_id: string(request, "entry")?.into(),
+            mode: ClipboardRestoreMode::Standard,
+        }),
         "setup" => Operation::QuerySetupState,
         "peers" => Operation::QueryPeerConnections,
         #[cfg(feature = "device-group-choices")]
@@ -550,6 +562,10 @@ async fn operation(
         OperationResult::MembershipDiagnostics(summary) => serde_json::to_value(summary)?,
         OperationResult::EntrySent(report) => serde_json::to_value(report)?,
         OperationResult::SettingsUpdated(outcome) => serde_json::to_value(outcome)?,
+        OperationResult::ActiveClipboard(active) => serde_json::to_value(active)?,
+        OperationResult::ClipboardRestored(outcome) => json!({
+            "restored": matches!(outcome, ClipboardRestoreOutcome::Restored),
+        }),
         OperationResult::HistoryEntries(entries) => serde_json::to_value(entries)?,
         OperationResult::HistoryEntry(entry) => serde_json::to_value(entry)?,
         OperationResult::EntryFileRead(resource) => serde_json::to_value(resource)?,
@@ -559,7 +575,15 @@ async fn operation(
 
 /// 宿主身份：构建所用锚点、Engine rev 与按 feature 编译进来的能力。当前源码构建时锚点为 `head`。
 fn host_identity() -> Value {
-    let mut capabilities = vec!["capture", "observe", "unlock", "sync_preference"];
+    let mut capabilities = vec![
+        "capture",
+        "observe",
+        "unlock",
+        "sync_preference",
+        "restore",
+        "active",
+        "clipboard",
+    ];
     for (enabled, name) in [
         (cfg!(feature = "test-network-config"), "local-network"),
         (cfg!(feature = "network-recovery"), "network-recovery"),
@@ -637,7 +661,7 @@ async fn main() -> Result<()> {
             .map_err(|_| anyhow!("storage unavailable"))? = serde_json::from_value(value.clone())?;
     }
     let files = Files::default();
-    let clipboard = Clipboard::default();
+    let clipboard = Clipboard::new(root.clone());
     let host = HostCapabilities::new(
         HostDirectories::new(
             root.join("private"),
@@ -703,6 +727,9 @@ async fn main() -> Result<()> {
         async move {
             while let Some(event) = events.next().await {
                 let value = match event {
+                    EngineEvent::ActiveClipboardChanged(change) => {
+                        json!({ "kind": "active", "activated_at_ms": change.activated_at_ms })
+                    }
                     EngineEvent::PeerPresenceChanged(change) => {
                         json!({ "kind": "peer", "peer": change.device_id, "state": change.state })
                     }

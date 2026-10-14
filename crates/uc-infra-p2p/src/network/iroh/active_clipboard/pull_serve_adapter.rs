@@ -1,237 +1,78 @@
-//! Iroh-backed accept handler for the active-clipboard pull protocol (holder
-//! side).
-//!
-//! Registered under [`ACTIVE_CLIPBOARD_PULL_ALPN`] as an independent sibling
-//! of the bulk clipboard / peer_reachability / pairing / active-clipboard-state ALPNs
-//! (see `docs/design-docs/layers/infrastructure.md` §4.3). Each inbound connection runs one
-//! request → response exchange: the requester sends a content hash, the
-//! handler resolves it through the application-layer
-//! [`ActiveClipboardPullServePort`], and writes back the transfer envelope (or
-//! a typed no-content status).
-//!
-//! ## Admission
-//!
-//! Admission is **member-fingerprint only** (issue #1017 D2): the inbound
-//! connection's `remote_id()` is resolved to a `SpaceMember` via the shared
-//! [`IdentityFingerprintFactoryPort`] + [`PeerIdentityDirectoryPort`], and unknown
-//! peers are dropped. There is **no** send-preference gate here — a member
-//! whose `send_enabled` is off can still pull. This is the accepted asymmetry
-//! with the active push path: the served content is still the
-//! transfer-encrypted envelope and still requires the holder unlocked, so a
-//! muted member gains nothing it could not already learn from the state
-//! broadcast.
-//!
-//! ## Why the close barrier
-//!
-//! A pull is request → response on a single bi-stream. After writing the
-//! response the handler waits for the requester to drain + close before
-//! dropping the connection, so the QUIC teardown does not race the requester's
-//! final read and silently lose the response.
-
-use std::sync::Arc;
-use std::time::Duration;
-use uc_application::deps::PeerIdentityDirectoryPort;
-
+//! 原生 pull handler 只转换连接并调用完整服务，不编排准备步骤。
+use super::super::connectivity::IrohPeerConnection;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
-
-#[cfg(test)]
-use uc_core::ids::DeviceId;
-use uc_core::membership::{ContentExchangeGatePort, PeerAdmissionPort};
-use uc_core::ports::clipboard::{ActiveClipboardPullServeError, ActiveClipboardPullServePort};
-use uc_core::ports::security::IdentityFingerprintFactoryPort;
-use uc_observability_contract::{
-    diagnostics::connectivity::InboundPeerProtocol, error_source::io_error_kind, uc_debug, uc_warn,
-};
-
-use super::super::inbound_peer::InboundPeerGate;
-use uc_sync_protocol::active_clipboard_pull::{self as pull_wire, PullResponse};
-
-/// ALPN identifier for the active-clipboard pull protocol. An independent
-/// sibling of the bulk clipboard / active-clipboard-state ALPNs so the Router
-/// can multiplex every transport on the same endpoint.
-pub const ACTIVE_CLIPBOARD_PULL_ALPN: &[u8] = b"uniclipboard/active-clipboard-pull/0";
-
-/// Upper bound on waiting for the requester to drain + close after we write
-/// the response. A cooperative requester closes within a couple of round
-/// trips; this only caps the pathological "reads response but never closes"
-/// peer so one bad peer can't pin an accept task.
-const CLOSE_BARRIER_TIMEOUT: Duration = Duration::from_secs(3);
-
-/// Serve-side adapter. Resolves `endpoint_id → DeviceId` for admission and
-/// delegates content production to the application-layer serve port.
-pub struct IrohActiveClipboardPullServeAdapter {
-    state: Arc<HandlerState>,
-}
-
-struct HandlerState {
-    gate: InboundPeerGate,
-    content_gate: Arc<dyn ContentExchangeGatePort>,
-    serve: Arc<dyn ActiveClipboardPullServePort>,
-}
-
-impl IrohActiveClipboardPullServeAdapter {
-    pub fn new(
-        identities: Arc<dyn PeerIdentityDirectoryPort>,
-        peer_admission: Arc<dyn PeerAdmissionPort>,
-        fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
-        serve: Arc<dyn ActiveClipboardPullServePort>,
-        content_gate: Arc<dyn ContentExchangeGatePort>,
-    ) -> Self {
-        Self {
-            state: Arc::new(HandlerState {
-                gate: InboundPeerGate::new(
-                    InboundPeerProtocol::ActiveClipboardPull,
-                    identities,
-                    peer_admission,
-                    fingerprint_factory,
-                ),
-                content_gate,
-                serve,
-            }),
-        }
-    }
-
-    /// Cheap clone-able handle registered with iroh's `RouterBuilder`.
-    pub fn handler(&self) -> IrohActiveClipboardPullServeHandler {
-        IrohActiveClipboardPullServeHandler {
-            state: Arc::clone(&self.state),
-        }
-    }
-}
-
-// ============================================================================
-// ProtocolHandler (accept side)
-// ============================================================================
+use std::sync::Arc;
+use tokio::time::Instant;
+use uc_application::deps::{ActivePullReceiverPort, ACTIVE_EXCHANGE_TIMEOUT};
+use uc_observability_contract::diagnostics::{connectivity::NetworkRecorder, ObservationContext};
+use uc_observability_contract::{error_source::io_error_kind, uc_warn};
 
 #[derive(Clone)]
-pub struct IrohActiveClipboardPullServeHandler {
-    state: Arc<HandlerState>,
+pub struct IrohActivePullHandler {
+    receiver: Arc<dyn ActivePullReceiverPort>,
 }
-
-impl std::fmt::Debug for IrohActiveClipboardPullServeHandler {
+impl IrohActivePullHandler {
+    pub fn new(receiver: Arc<dyn ActivePullReceiverPort>) -> Self {
+        Self { receiver }
+    }
+}
+impl std::fmt::Debug for IrohActivePullHandler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IrohActiveClipboardPullServeHandler")
+        f.debug_struct("IrohActivePullHandler")
             .finish_non_exhaustive()
     }
 }
-
-impl ProtocolHandler for IrohActiveClipboardPullServeHandler {
+impl ProtocolHandler for IrohActivePullHandler {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        let remote = connection.remote_id();
-        let remote_bytes: [u8; 32] = *remote.as_bytes();
-
-        // 1. Member-fingerprint admission ONLY (D2). Unknown peers never reach
-        //    the serve port. No send-preference gate — a muted member can pull.
-        let peer_device_id = match self.state.gate.admit(&remote_bytes).await {
-            Ok(device) => device,
-            Err(rejection) => {
-                self.state.gate.record_rejection(rejection);
-                return Ok(());
-            }
-        };
-
-        // 2. Accept the bi-stream. The requester opens it, writes the request,
-        //    and reads our response on the same stream.
-        let (mut send, mut recv) = match connection.accept_bi().await {
-            Ok(pair) => pair,
-            Err(err) => {
-                uc_warn!(
-                    error_kind = "accept_bi",
-                    io_error_kind = io_error_kind(&err),
-                    "active-clipboard pull serve: accept_bi failed; dropping connection"
-                );
-                return Ok(());
-            }
-        };
-
-        // 3. Read the request frame. A codec failure (bad magic, over-long
-        //    hash, non-UTF8) drops the connection — the field is untrusted
-        //    peer input and the codec validates lengths before allocating.
-        let snapshot_hash = match pull_wire::read_request(&mut recv).await {
-            Ok(h) => h,
-            Err(err) => {
-                uc_warn!(
-                    error_kind = "request_decode",
-                    io_error_kind = io_error_kind(&err),
-                    "active-clipboard pull serve: request decode failed; dropping connection"
-                );
-                return Ok(());
-            }
-        };
-
-        // 4. A peer that cannot exchange content gets the normal no-content
-        // response after its request frame is consumed. This preserves the
-        // transport sequence without reading or producing local content.
-        let response = if self
-            .state
-            .content_gate
-            .is_locally_removed(&peer_device_id)
-            .await
-        {
-            uc_debug!(
-                "active-clipboard pull serve: peer cannot exchange content; responding NotAvailable"
-            );
-            PullResponse::NotAvailable
-        // 5. Resolve the content through the application-layer serve port.
-        //    NotUnlocked / NotAvailable map to typed no-content statuses; a
-        //    locked holder never leaks plaintext.
-        } else {
-            match self.state.serve.serve(&snapshot_hash).await {
-                Ok(envelope) => PullResponse::Envelope(envelope),
-                Err(ActiveClipboardPullServeError::NotAvailable) => {
-                    uc_debug!(
-                        "active-clipboard pull serve: content not held; responding NotAvailable"
-                    );
-                    PullResponse::NotAvailable
-                }
-                Err(ActiveClipboardPullServeError::NotUnlocked) => {
-                    uc_debug!("active-clipboard pull serve: session locked; responding Locked");
-                    PullResponse::Locked
-                }
-                Err(ActiveClipboardPullServeError::Internal(error)) => {
+        let deadline = Instant::now() + ACTIVE_EXCHANGE_TIMEOUT;
+        // 已有不透明物理上下文只关联本次完整接收，不传出原生编号或业务阶段。
+        let context = NetworkRecorder::current().in_connection_scope(
+            *connection.remote_id().as_bytes(),
+            connection.stable_id() as u64,
+            ObservationContext::capture,
+        );
+        context
+            .scope(async {
+                if let Err(error) = self
+                    .receiver
+                    .receive(IrohPeerConnection::wrap(connection), deadline)
+                    .await
+                {
                     uc_warn!(
-                        error_kind = "serve_internal",
-                        io_error_kind = io_error_kind(error.as_ref()),
-                        "active-clipboard pull serve: internal failure; responding Internal"
+                        error_kind = "active_pull_receive",
+                        io_error_kind = io_error_kind(&error),
+                        "active pull receive failed"
                     );
-                    PullResponse::Internal
                 }
-            }
-        };
+                Ok(())
+            })
+            .await
+    }
 
-        // 6. Write the response frame, then close the send half.
-        if let Err(err) = pull_wire::write_response(&mut send, &response).await {
+    async fn shutdown(&self) {
+        if let Err(error) = self.receiver.shutdown().await {
             uc_warn!(
-                error_kind = "response_write",
-                io_error_kind = io_error_kind(&err),
-                "active-clipboard pull serve: response write failed; dropping connection"
-            );
-            return Ok(());
-        }
-        if let Err(err) = send.finish() {
-            uc_debug!(
-                error_kind = "send_finish",
-                io_error_kind = io_error_kind(&err),
-                "active-clipboard pull serve: send.finish failed"
+                error_kind = "active_pull_shutdown",
+                io_error_kind = io_error_kind(&error),
+                "active pull connectivity shutdown failed"
             );
         }
-
-        // 7. Wait for the requester to drain + close before dropping the
-        //    connection, so QUIC teardown does not race its final read.
-        let _ = tokio::time::timeout(CLOSE_BARRIER_TIMEOUT, connection.closed()).await;
-        Ok(())
     }
 }
-
-// ============================================================================
-// Tests
-// ============================================================================
-
 #[cfg(test)]
 mod tests {
+    use super::super::testing::{content_scope, manager, EmptyAddresses};
+    use super::super::{ActiveClipboardWire, SessionActivePullLocalWork};
     use super::*;
+    use crate::network::iroh::connectivity::ConnectivityProfile;
+    use uc_application::deps::{
+        ActivePullPreparationError, ActivePullPreparationPort, ActivePullPreparationStop,
+        ActivePullReceiver,
+    };
+    use uc_core::ids::DeviceId;
     use uc_core::membership::MemberRepositoryPort;
+    use uc_sync_protocol::active_clipboard_pull::ACTIVE_CLIPBOARD_PULL_ALPN;
 
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -243,12 +84,14 @@ mod tests {
     use iroh::{Endpoint, RelayMode, SecretKey};
     use tokio::sync::Mutex;
 
-    use uc_core::membership::ContentExchangeGatePort;
     use uc_core::membership::{MembershipError, SpaceMember};
     use uc_core::MemberSyncPreferences;
 
+    use uc_core::ports::security::IdentityFingerprintFactoryPort;
     use uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory;
-    use uc_sync_protocol::active_clipboard_pull::{read_response, write_request, PullResponse};
+    use uc_sync_protocol::active_clipboard_pull::{
+        read_response, write_request, PullResponse, ACTIVE_PULL_MAGIC,
+    };
 
     // ----- test doubles ------------------------------------------------------
 
@@ -279,11 +122,11 @@ mod tests {
 
     /// Serve port that records the requested hash and returns a canned result.
     struct StubServe {
-        result: Mutex<Option<Result<Vec<u8>, ActiveClipboardPullServeError>>>,
+        result: Mutex<Option<Result<Vec<u8>, ActivePullPreparationError>>>,
         seen_hash: Mutex<Option<String>>,
     }
     impl StubServe {
-        fn new(result: Result<Vec<u8>, ActiveClipboardPullServeError>) -> Arc<Self> {
+        fn new(result: Result<Vec<u8>, ActivePullPreparationError>) -> Arc<Self> {
             Arc::new(Self {
                 result: Mutex::new(Some(result)),
                 seen_hash: Mutex::new(None),
@@ -291,11 +134,12 @@ mod tests {
         }
     }
     #[async_trait]
-    impl ActiveClipboardPullServePort for StubServe {
-        async fn serve(
+    impl ActivePullPreparationPort for StubServe {
+        async fn prepare(
             &self,
             snapshot_hash: &str,
-        ) -> Result<Vec<u8>, ActiveClipboardPullServeError> {
+            _stop: &ActivePullPreparationStop,
+        ) -> Result<Vec<u8>, ActivePullPreparationError> {
             *self.seen_hash.lock().await = Some(snapshot_hash.to_string());
             self.result
                 .lock()
@@ -309,30 +153,13 @@ mod tests {
     /// peer never reaches the serve port.
     struct NeverServe;
     #[async_trait]
-    impl ActiveClipboardPullServePort for NeverServe {
-        async fn serve(
+    impl ActivePullPreparationPort for NeverServe {
+        async fn prepare(
             &self,
             _snapshot_hash: &str,
-        ) -> Result<Vec<u8>, ActiveClipboardPullServeError> {
+            _stop: &ActivePullPreparationStop,
+        ) -> Result<Vec<u8>, ActivePullPreparationError> {
             panic!("serve reached past the admission gate");
-        }
-    }
-
-    struct BlockedUpgradePeer;
-
-    #[async_trait]
-    impl ContentExchangeGatePort for BlockedUpgradePeer {
-        async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
-            true
-        }
-    }
-
-    struct AllowAllContent;
-
-    #[async_trait]
-    impl ContentExchangeGatePort for AllowAllContent {
-        async fn is_locally_removed(&self, _device_id: &DeviceId) -> bool {
-            false
         }
     }
 
@@ -378,29 +205,38 @@ mod tests {
     async fn spawn_serve(
         seed: [u8; 32],
         member_repo: Arc<dyn MemberRepositoryPort>,
-        serve: Arc<dyn ActiveClipboardPullServePort>,
+        serve: Arc<dyn ActivePullPreparationPort>,
     ) -> (Arc<Endpoint>, Router) {
-        spawn_serve_with_admission(seed, member_repo, serve, true, Arc::new(AllowAllContent)).await
+        spawn_serve_with_admission(seed, member_repo, serve, true, true).await
     }
 
     async fn spawn_serve_with_admission(
         seed: [u8; 32],
         member_repo: Arc<dyn MemberRepositoryPort>,
-        serve: Arc<dyn ActiveClipboardPullServePort>,
+        serve: Arc<dyn ActivePullPreparationPort>,
         admitted: bool,
-        content_gate: Arc<dyn ContentExchangeGatePort>,
+        content_allowed: bool,
     ) -> (Arc<Endpoint>, Router) {
         let endpoint = bind_endpoint_with(seed).await;
         wait_for_direct_addrs(&endpoint).await;
-        let adapter = IrohActiveClipboardPullServeAdapter::new(
-            crate::network::iroh::inbound_peer::member_table_directory(member_repo),
-            Arc::new(crate::network::iroh::StaticPeerAdmission(admitted)),
-            Arc::new(Sha256IdentityFingerprintFactory),
+        let adapter = ActivePullReceiver::new(
+            manager(
+                endpoint.clone(),
+                Arc::new(EmptyAddresses),
+                crate::network::iroh::inbound_peer::member_table_directory(member_repo.clone()),
+                admitted,
+                ConnectivityProfile::ActiveClipboardPull,
+            ),
+            Arc::new(ActiveClipboardWire),
             serve,
-            content_gate,
+            content_scope(member_repo, content_allowed),
+            Arc::new(SessionActivePullLocalWork),
         );
         let router = Router::builder((*endpoint).clone())
-            .accept(ACTIVE_CLIPBOARD_PULL_ALPN, adapter.handler())
+            .accept(
+                ACTIVE_CLIPBOARD_PULL_ALPN,
+                IrohActivePullHandler::new(Arc::new(adapter)),
+            )
             .spawn();
         (endpoint, router)
     }
@@ -480,7 +316,7 @@ mod tests {
             .save(&make_member(sender_seed, "member-internal"))
             .await
             .unwrap();
-        let serve = StubServe::new(Err(ActiveClipboardPullServeError::Internal(Box::new(
+        let serve = StubServe::new(Err(ActivePullPreparationError::Internal(Box::new(
             std::io::Error::other("PRIVATE_SERVE_DETAIL"),
         ))));
         let (endpoint, router) = spawn_serve(
@@ -497,7 +333,7 @@ mod tests {
 
         assert_eq!(resp, PullResponse::Internal);
         assert_eq!(
-            logs.count("pull serve: internal failure"),
+            logs.count("active pull local work failed"),
             1,
             "{}",
             logs.output()
@@ -551,7 +387,7 @@ mod tests {
             Arc::clone(&member_repo),
             Arc::new(NeverServe),
             false,
-            Arc::new(AllowAllContent),
+            true,
         )
         .await;
 
@@ -579,7 +415,7 @@ mod tests {
             Arc::clone(&member_repo),
             Arc::new(NeverServe),
             true,
-            Arc::new(BlockedUpgradePeer),
+            false,
         )
         .await;
 
@@ -604,7 +440,7 @@ mod tests {
             .await
             .unwrap();
 
-        let serve = StubServe::new(Err(ActiveClipboardPullServeError::NotUnlocked));
+        let serve = StubServe::new(Err(ActivePullPreparationError::NotUnlocked));
         let (endpoint, router) = spawn_serve(receiver_seed, Arc::clone(&member_repo), serve).await;
 
         let hash = format!("blake3v1:{}", "9".repeat(64));
@@ -629,7 +465,7 @@ mod tests {
             .await
             .unwrap();
 
-        let serve = StubServe::new(Err(ActiveClipboardPullServeError::NotAvailable));
+        let serve = StubServe::new(Err(ActivePullPreparationError::NotAvailable));
         let (endpoint, router) = spawn_serve(receiver_seed, Arc::clone(&member_repo), serve).await;
 
         let hash = format!("blake3v1:{}", "9".repeat(64));
@@ -639,5 +475,44 @@ mod tests {
         assert_eq!(resp, PullResponse::NotAvailable);
 
         router.shutdown().await.ok();
+    }
+    /// 完整服务入口的预算覆盖不开流和只写半个帧头的对端。
+    #[tokio::test]
+    async fn silent_and_partial_request_close_within_entry_deadline() {
+        for partial in [false, true] {
+            let sender_seed = [0x61; 32];
+            let members: Arc<dyn MemberRepositoryPort> = Arc::new(MemMemberRepo::default());
+            members
+                .save(&make_member(sender_seed, "deadline-member"))
+                .await
+                .unwrap();
+            let serve = StubServe::new(Ok(vec![1]));
+            let (endpoint, router) = spawn_serve([0x62; 32], members, serve.clone()).await;
+            let sender = bind_endpoint_with(sender_seed).await;
+            let connection = sender
+                .connect(endpoint.addr(), ACTIVE_CLIPBOARD_PULL_ALPN)
+                .await
+                .unwrap();
+            let held = if partial {
+                let (mut send, receive) = connection.open_bi().await.unwrap();
+                send.write_all(&[ACTIVE_PULL_MAGIC]).await.unwrap();
+                Some((send, receive))
+            } else {
+                None
+            };
+            let closed = tokio::time::timeout(Duration::from_secs(11), connection.closed()).await;
+            drop(held);
+            connection.close(0u32.into(), b"test complete");
+            router.shutdown().await.unwrap();
+            sender.close().await;
+            assert!(
+                closed.is_ok(),
+                "silent or partial request cannot outlive the entry budget"
+            );
+            assert!(
+                serve.seen_hash.lock().await.is_none(),
+                "incomplete frame cannot begin preparation"
+            );
+        }
     }
 }

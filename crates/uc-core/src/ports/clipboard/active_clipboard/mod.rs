@@ -11,10 +11,7 @@ mod receiver;
 mod register;
 
 pub use dispatch::{ActiveClipboardDispatchError, ActiveClipboardDispatchPort};
-pub use pull::{
-    ActiveClipboardPullClientError, ActiveClipboardPullClientPort, ActiveClipboardPullServeError,
-    ActiveClipboardPullServePort,
-};
+pub use pull::{ActiveClipboardPullClientError, ActiveClipboardPullClientPort};
 pub use receiver::{ActiveClipboardReceiverPort, InboundActiveClipboardState};
 pub use register::{
     ActiveClipboardRegisterError, AdvanceActiveClipboardPort,

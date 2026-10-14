@@ -1,3 +1,6 @@
+use crate::clipboard::active::transport::{
+    ActivePullPreparationCancelled, ActivePullPreparationStop,
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -126,6 +129,8 @@ pub enum ClipboardOutboundOutcome {
 
 #[derive(Debug, Error)]
 pub enum ClipboardOutboundError {
+    #[error("clipboard payload preparation cancelled")]
+    Cancelled(#[from] ActivePullPreparationCancelled),
     #[error("clipboard outbound dispatch failed")]
     Internal(#[source] anyhow::Error),
 }
@@ -363,8 +368,13 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
             "outbound: dispatch_capture entering publish phase"
         );
 
-        let (mut blob_refs, file_content_digests) =
-            publish_file_blob_refs(self.blob_transfer.as_ref(), &plan.files, &entry_id).await?;
+        let (mut blob_refs, file_content_digests) = publish_file_blob_refs(
+            self.blob_transfer.as_ref(),
+            &plan.files,
+            &entry_id,
+            &ActivePullPreparationStop::default(),
+        )
+        .await?;
 
         // Capture→dispatch drift observability: the manifest digests are the
         // identity this entry was persisted under; the publish digests are
@@ -392,6 +402,7 @@ impl ClipboardOutboundPort for ClipboardOutboundDispatcher {
             self.blob_transfer.as_ref(),
             &mut clipboard_intent.snapshot,
             &entry_id,
+            &ActivePullPreparationStop::default(),
         )
         .await?;
 
@@ -970,10 +981,12 @@ pub(crate) async fn publish_oversized_inline_blob_refs(
     blob_transfer: &dyn OutboundBlobPublishGateway,
     snapshot: &mut SystemClipboardSnapshot,
     entry_id: &EntryId,
+    stop: &ActivePullPreparationStop,
 ) -> Result<Vec<V3BlobRef>, ClipboardOutboundError> {
     let mut blob_refs = Vec::new();
 
     for (idx, rep) in snapshot.representations.iter_mut().enumerate() {
+        stop.check()?;
         // outbound 路径的 rep 必然 Inline source;LocalFile 在 capture 阶段已物化到 blob,
         // 不会进入 outbound dispatch。
         let Some(rep_bytes) = rep.inline_bytes() else {
@@ -1056,11 +1069,13 @@ pub(crate) async fn publish_file_blob_refs(
     blob_transfer: &dyn OutboundBlobPublishGateway,
     files: &[FileSyncIntent],
     entry_id: &EntryId,
+    stop: &ActivePullPreparationStop,
 ) -> Result<(Vec<V3BlobRef>, Vec<[u8; 32]>), ClipboardOutboundError> {
     let mut blob_refs = Vec::with_capacity(files.len());
     let mut file_content_digests = Vec::with_capacity(files.len());
 
     for file in files {
+        stop.check()?;
         let result = blob_transfer
             .publish_blob_path(PublishBlobPathCommand {
                 path: file.path.clone(),
@@ -1213,6 +1228,7 @@ mod tests {
             &SuccessfulFilePublishGateway,
             &files,
             &EntryId::from("entry-file-log-redaction"),
+            &ActivePullPreparationStop::default(),
         )
         .await
         .expect("file publish should succeed");
@@ -1255,6 +1271,7 @@ mod tests {
             &SuccessfulFilePublishGateway,
             &mut snapshot,
             &EntryId::from("representative-image-entry"),
+            &ActivePullPreparationStop::default(),
         )
         .await
         .expect("representative JPEG should publish");
