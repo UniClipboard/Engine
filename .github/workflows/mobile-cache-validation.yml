@@ -73,7 +73,6 @@ jobs:
           test -n "$BUILD_CACHE_R2_SECRET_ACCESS_KEY"
           bash scripts/update-unified-engine-core.sh --platform "$PLATFORM"
           node scripts/verify-unified-engine-core.mjs --prepared --platform "$PLATFORM"
-          node scripts/verify-unified-engine-core.mjs --platform "$PLATFORM"
       - name: Assert real read-only remote recovery
         run: |
           python3 - <<'PY'

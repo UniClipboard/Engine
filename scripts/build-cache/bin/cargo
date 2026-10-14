@@ -2,14 +2,5 @@
 # 仓库 Cargo 入口；嵌套调用由 MBX 原生 shim 接管，先移除本入口避免递归。
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-shim="$root/scripts/build-cache/bin"
-remaining=""
-IFS=: read -r -a entries <<< "$PATH"
-for entry in "${entries[@]}"; do
-  if [[ "$entry" != "$shim" && "$entry" != "${UC_ENGINE_MBX_BIN:-}" ]]; then
-    remaining="${remaining:+$remaining:}$entry"
-  fi
-done
-export PATH="$remaining"
 # 配置、统计与远端选择统一由原生包装器负责。
 exec bash "$root/scripts/build-cache/mbx.sh" --cargo "$@"

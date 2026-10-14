@@ -64,6 +64,7 @@ try:
     for line in ci_env.read_text().splitlines():
         key, value = line.split('=', 1)
         env[key] = value
+    env['PATH'] = ci_path.read_text().strip() + os.pathsep + env['PATH']
     env['CARGO_BUILD_JOBS'] = '2'
     wrapper = Path(env['UC_ENGINE_MBX_BIN']).parent / 'mbx.sh'
     with Path(env['UC_ENGINE_MBX_ENV_FILE']).open('a') as config:

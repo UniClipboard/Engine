@@ -149,6 +149,16 @@ export MBX_DISPLAY="${MBX_DISPLAY:-plain}"
 # 统一入口在本地默认四个编译任务；CI 由 runner 装配数字并行度。
 # 保留调用方的环境值，Cargo 命令行 -j 仍具有最高优先级；实测与资源边界见本地构建指南。
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
+# CI 的 shell Cargo 入口不能留在原生 shim 后面，否则真实 Cargo 解析会再次进入本包装器。
+script_bin="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bin"
+remaining=""
+IFS=: read -r -a entries <<< "$PATH"
+for entry in "${entries[@]}"; do
+  if [[ "$entry" != "$script_bin" && "$entry" != "${UC_ENGINE_MBX_BIN:-}" ]]; then
+    remaining="${remaining:+$remaining:}$entry"
+  fi
+done
+export PATH="$remaining"
 # cargo -> mbx 垫片放在 PATH 最前，mbx 再调用其后的 cargo。
 # Windows cargo.exe 按 PATH 查找 mbx.exe，必须先于用户另一版本。
 export PATH="$MBX_ROOT/shim:$MBX_ROOT:$PATH"
