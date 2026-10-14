@@ -18,10 +18,40 @@ if [[ "${1:-}" != --install ]]; then
     # shellcheck source=/dev/null
     source "$UC_ENGINE_MBX_ENV_FILE"
   fi
-  if [[ -n "${UC_ENGINE_MBX_STATS_DIR:-}" && -z "${MBX_STATS_REPORT:-}" ]]; then
-    mkdir -p "$UC_ENGINE_MBX_STATS_DIR"
-    report_dir=$(mktemp -d "$UC_ENGINE_MBX_STATS_DIR/session.XXXXXX")
-    export MBX_STATS_REPORT="$report_dir/stats.json"
+  if [[ -n "${MBX_STATS_REPORT:-}" ]]; then
+    report_path="$MBX_STATS_REPORT"
+    if command -v cygpath >/dev/null 2>&1; then
+      report_path=$(cygpath -u "$report_path")
+    fi
+    report_dir=$(dirname "$report_path")
+    report_name=$(basename "$report_path")
+    report_name=${report_name%.*}
+    mkdir -p "$report_dir"
+    report_args="$report_dir/$report_name.cargo-args.txt"
+    report_bypass="$report_dir/$report_name.bypass.txt"
+  elif [[ -n "${UC_ENGINE_MBX_STATS_DIR:-}" ]]; then
+    report_root="$UC_ENGINE_MBX_STATS_DIR"
+    if command -v cygpath >/dev/null 2>&1; then
+      report_root=$(cygpath -u "$report_root")
+    fi
+    mkdir -p "$report_root"
+    report_dir=$(mktemp -d "$report_root/session.XXXXXX")
+    report_path="$report_dir/stats.json"
+    if command -v cygpath >/dev/null 2>&1; then
+      report_path=$(cygpath -w "$report_path")
+    fi
+    export MBX_STATS_REPORT="$report_path"
+    report_args="$report_dir/cargo-args.txt"
+    report_bypass="$report_dir/bypass.txt"
+  fi
+  if [[ -n "${MBX_STATS_REPORT:-}" ]]; then
+    printf '%s\n' "$@" > "$report_args"
+    if [[ -z "${MBX_BYPASS_LOG:-}" ]]; then
+      if command -v cygpath >/dev/null 2>&1; then
+        report_bypass=$(cygpath -w "$report_bypass")
+      fi
+      export MBX_BYPASS_LOG="$report_bypass"
+    fi
   fi
   if [[ "${1:-}" != --r2 && -n "${BUILD_CACHE_R2_ENDPOINT:-}" ]]; then
     set -- --r2 "$@"
@@ -48,29 +78,29 @@ if [[ "${1:-}" == --r2 ]]; then
   unset AWS_SESSION_TOKEN MBX_REMOTE_TOKEN MBX_REMOTE_TOKEN_FILE MBX_REMOTE_OIDC_AUDIENCE
 fi
 
-MBX_VERSION=1.18.0
+MBX_VERSION=1.24.0
 
 fail() {
   printf 'mbx: %s\n' "$1" >&2
   exit 1
 }
 
-# 输出 “<target triple> <发布包 sha256>”；sha256 取自 v1.18.0 的 SHA256SUMS，并经 GitHub 构建来源证明校验。
+# 输出 “<target triple> <发布包 sha256>”；sha256 取自 v1.24.0 的官方 SHA256SUMS；平台验收按实际运行记录。
 # 用 case 而非关联数组，兼容 macOS 自带的 bash 3.2。
 pinned_release() {
   case "$(uname -s)-$(uname -m)" in
     MINGW* | MSYS* | CYGWIN*)
       # 查询原生系统架构，避免 ARM64 Windows 上 x64 Git Bash 误选包。
       case "$(powershell.exe -NoProfile -NonInteractive -Command 'Get-CimInstance Win32_Processor | Select-Object -First 1 -ExpandProperty Architecture' | tr -d '\r\n')" in
-        9) echo x86_64-pc-windows-msvc 6f3e761a18946b7d17ab54d4021773144ff7b9203b99b2df1ccddbebed6e1828 ;;
-        12) echo aarch64-pc-windows-msvc 1208ec2f61af53d76c892c1ad4603294f49e62ad4c50ad1f8401aa5f3567b1b8 ;;
+        9) echo x86_64-pc-windows-msvc ced45f3dfd66649b2cea0b48ad01e13d1d7f7796c1182cc77d56ef4829af1d5b ;;
+        12) echo aarch64-pc-windows-msvc 635089d0dfea0fcdb12b5e4318120de01fd481dc0e122dafc89735a345b13205 ;;
         *) fail "无法识别 Windows 原生架构" ;;
       esac ;;
 
-    Darwin-arm64) echo aarch64-apple-darwin 70ab23933b3745205125174120bd930c0116c1ef3ac38786122e5651636b9aea ;;
-    Linux-x86_64) echo x86_64-unknown-linux-gnu 92833c87261ea0c65fee52898ea67605b152b516fc0a3d8dee5a276601a8924c ;;
+    Darwin-arm64) echo aarch64-apple-darwin 60c646b7ce5ae9cfdb67b1565a4ec81ec3a07290f1e7000a026a6db7fa247440 ;;
+    Linux-x86_64) echo x86_64-unknown-linux-gnu 3e35b12dd105875fa0505c45224eaf7e2fd7103d86199ffca97c0cd4093e708f ;;
     Linux-aarch64 | Linux-arm64)
-      echo aarch64-unknown-linux-gnu ab0f4af3e98295bc35f448d453cfe15931bb02342d48163b2ede94583f937cdc ;;
+      echo aarch64-unknown-linux-gnu 80a2909eff63aaf5b9901f923d68ab8b70056bb11d5fd025535614033e48dfcf ;;
     *) fail "当前平台没有固定的 mbx 版本：$(uname -s)-$(uname -m)" ;;
   esac
 }

@@ -32,7 +32,7 @@ S3 端点；访问密钥仅限该桶。缺少任一项时入口报错，不会�
 本机和 PR 应使用只读令牌。凭据会进入本次构建的环境，原生 MBX 不是对 build script 的凭据隔离机制。
 
 可信 main 的受保护分支 push CI 才使用写令牌与 `read-write`；写令牌仍放在仅允许 main 的
-`engine-build-cache-writer` 环境，PR 使用 `engine-build-cache-reader`。MBX 1.18.0 会将本地、PR、
+`engine-build-cache-writer` 环境，PR 使用 `engine-build-cache-reader`。MBX 1.24.0 会将本地、PR、
 未保护分支和手工触发收紧为只读，不能靠只写 `read-write` 启用发布，也不得伪造 GitHub 环境。
 主线必须真实受保护；接入前应核对实际规则。本机尚需独立配置只读凭据，GitHub secrets 无法读回。
 正式 release/tag 经 MBX 只复用本次 job 的可信本地动作缓存，不接入共享编译档案。主线发布与 PR 只读验收由
@@ -60,7 +60,7 @@ R2 工作流通过 `verify-r2-build.py` 同时检查原生统计与固定错误�
 R2 的桶级令牌不能按前缀隔离信任；只有可信构建可以拿到写令牌。MBX 原生内容校验、请求期限、
 读失败后本地编译与异步上传负责缓存失败恢复，不另实现网络缓存层。R2 的真实共享命中及耗时须另行
 验收，先前的 2/4 任务基准不是远端缓存收益。配置语义见
-[MBX 固定版本远端缓存文档](https://github.com/jdx/mr-boxington/blob/v1.18.0/docs/remote-cache.md)
+[MBX 固定版本远端缓存文档](https://github.com/jdx/mr-boxington/blob/v1.24.0/docs/remote-cache.md)
 与 [Cloudflare R2 S3 接入](https://developers.cloudflare.com/r2/get-started/s3/)。
 
 ## 可重复测量
@@ -103,7 +103,7 @@ macOS 的 `/usr/bin/time -l` 同时记录 CPU 时间与最大 RSS，不能把其
 - 不重格式化磁盘、不安装 ZFS、不迁移编译宿主；当前问题先用已有 Cargo 任务并行度解决。
 - CI 按逻辑核数设置并行度，编译动作统一经 MBX；本地实测不代表 CI 提速。
 
-MBX 参数语义以 [固定版本文档](https://github.com/jdx/mr-boxington/blob/v1.18.0/docs/configuration.md)
+MBX 参数语义以 [固定版本文档](https://github.com/jdx/mr-boxington/blob/v1.24.0/docs/configuration.md)
 为准；Cargo 并行度优先级见 [Cargo configuration](https://doc.rust-lang.org/cargo/reference/config.html#buildjobs)。
 
 ## 测试与命中边界

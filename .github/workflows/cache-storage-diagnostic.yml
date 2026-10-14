@@ -1,0 +1,140 @@
+name: Cache storage diagnostic
+
+# 分支专用只读存储诊断：保留严格失败门禁，不发布，不改共享缓存。
+on:
+  push:
+    branches: [ci/mbx-124-mobile-adapter]
+    paths: [.github/workflows/cache-storage-diagnostic.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cache-storage-diagnostic-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cache:
+    name: MBX R2 (${{ matrix.runner }})
+    # fork/Dependabot 没有凭据，明确跳过而不是报告远端验收通过。
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15]
+    environment:
+      name: engine-build-cache-reader
+      deployment: false
+    timeout-minutes: 45
+    env:
+      MBX_GC_MIN_FREE_SIZE: 8GiB
+      MBX_LOG: mbx_cache_core::agent::prefetch=debug
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      # 与 PR 检查及移动端发布使用同一 Apple 工具链。
+      - name: Select Xcode 16.4
+        if: runner.os == 'macOS'
+        run: echo "DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer" >> "$GITHUB_ENV"
+
+      - name: Install Linux build tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev cmake
+
+      - name: Test R2 verification
+        run: python3 scripts/build-cache/verify-r2-build.test.py
+
+      - name: Prepare isolated outputs
+        run: |
+          rustup show active-toolchain
+          mkdir -p "$RUNNER_TEMP/mbx-r2-evidence"
+          {
+            echo "CARGO_INCREMENTAL=0"
+            echo "UC_ENGINE_SOURCE_COMMIT=$(git rev-parse HEAD)"
+            echo "UC_ENGINE_SOURCE_STATE=clean"
+          } >> "$GITHUB_ENV"
+
+      # 只采集资源计数，不列连接、进程环境或文件路径；不修改 runner 的系统配置。
+      - name: Record macOS resource baseline
+        if: runner.os == 'macOS'
+        run: |
+          {
+            ulimit -a
+            sysctl kern.ipc.maxsockbuf kern.maxfiles kern.maxfilesperproc
+            sysctl net.inet.tcp.autorcvbufmax net.inet.tcp.autosndbufmax
+            netstat -m
+            vm_stat
+          } | tee "$RUNNER_TEMP/mbx-r2-evidence/resources-before.txt"
+
+      - name: Bound macOS TCP buffer growth
+        if: runner.os == 'macOS'
+        run: bash scripts/build-cache/prepare-ci-network.sh
+
+      - name: Exercise R2 and Engine migration
+        env:
+          BUILD_CACHE_R2_ENDPOINT: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          BUILD_CACHE_R2_ACCESS_KEY_ID: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          BUILD_CACHE_R2_SECRET_ACCESS_KEY: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+          MBX_REMOTE_MODE: read-only
+          MBX_CACHE_DIR: ${{ runner.temp }}/mbx-r2-producer-cache
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/mbx-r2-producer
+          MBX_STATS_REPORT: ${{ runner.temp }}/mbx-r2-evidence/producer.json
+        run: |
+          bash scripts/build-cache/mbx.sh --r2 --mbx doctor --json > "$RUNNER_TEMP/mbx-r2-evidence/doctor.json"
+          python3 scripts/build-cache/verify-r2-build.py -- bash scripts/build-cache/mbx.sh --r2 test -p uc-engine --test config_migration_round_trip_e2e --locked
+
+      - name: Verify independent workspace check consumer
+        env:
+          BUILD_CACHE_R2_ENDPOINT: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          BUILD_CACHE_R2_ACCESS_KEY_ID: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          BUILD_CACHE_R2_SECRET_ACCESS_KEY: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+          MBX_REMOTE_MODE: read-only
+          MBX_CACHE_DIR: ${{ runner.temp }}/mbx-r2-consumer-cache
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/mbx-r2-consumer
+          MBX_STATS_REPORT: ${{ runner.temp }}/mbx-r2-evidence/consumer-check.json
+        run: |
+          python3 scripts/build-cache/verify-r2-build.py --consumer -- bash scripts/build-cache/mbx.sh --r2 check --workspace --all-targets --locked
+
+      # 使用独立 target/动作缓存；PR 只读既有种子，不能声称验证了本次主线发布。
+      - name: Verify independent R2 consumer
+        env:
+          BUILD_CACHE_R2_ENDPOINT: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          BUILD_CACHE_R2_ACCESS_KEY_ID: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          BUILD_CACHE_R2_SECRET_ACCESS_KEY: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+          MBX_REMOTE_MODE: read-only
+          MBX_CACHE_DIR: ${{ runner.temp }}/mbx-r2-consumer-cache
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/mbx-r2-consumer
+          MBX_STATS_REPORT: ${{ runner.temp }}/mbx-r2-evidence/consumer.json
+        run: |
+          python3 scripts/build-cache/verify-r2-build.py --consumer -- bash scripts/build-cache/mbx.sh --r2 test -p uc-engine --test config_migration_round_trip_e2e --locked
+
+      - name: Record macOS resource outcome
+        if: always() && runner.os == 'macOS'
+        run: |
+          {
+            netstat -m
+            vm_stat
+          } | tee "$RUNNER_TEMP/mbx-r2-evidence/resources-after.txt"
+          python3 - <<'PYCODE'
+          import os, re
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'mbx-r2-evidence'
+          def denied(name):
+              matches = re.findall(r'^(\d+) requests for memory denied$', (root / name).read_text(), re.M)
+              return int(matches[0]) if matches else 0
+          before, after = denied('resources-before.txt'), denied('resources-after.txt')
+          print(f'mbuf allocation denials: {before} -> {after}')
+          assert after == before, 'macOS network buffer allocation failures increased'
+          PYCODE
+
+      - name: Retain R2 evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mbx-r2-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/mbx-r2-evidence
+          if-no-files-found: warn
