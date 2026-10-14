@@ -5,7 +5,7 @@
 
 use uc_application::facade::{AppFacade, IssuePairingInvitationError};
 use uc_observability_contract::analytics::{AnalyticsFacade, Event, InvitationIssueErrorCategory};
-use uc_observability_contract::{error_source::io_error_kind, uc_error};
+use uc_observability_contract::{error_source::io_error_kind, uc_error, uc_warn};
 
 use crate::error_codes::{
     INVITATION_DIRECTORY_INVALID_RESPONSE_CODE, INVITATION_DIRECTORY_REJECTED_CODE,
@@ -24,6 +24,7 @@ pub async fn execute_issue_invitation(
     let invitation = match facade.issue_pairing_invitation().await {
         Ok(invitation) => invitation,
         Err(source) => {
+            record_issue_failure(&source);
             let error = map_issue_invitation_error(source);
             capture_invitation_failure(analytics, &error);
             return Err(error);
@@ -42,6 +43,39 @@ pub async fn execute_issue_invitation(
             }
         },
     })
+}
+
+/// 生成邀请失败的 issue 记录：保留每个失败类别，而不是只剩一个对外错误码。
+/// 内部失败与口令变更恢复已在 `map_issue_invitation_error` 里按 ERROR 记录，这里不重复。
+fn record_issue_failure(error: &IssuePairingInvitationError) {
+    let kind = match error {
+        IssuePairingInvitationError::NetworkNotStarted => "network_not_started",
+        IssuePairingInvitationError::NoPublishableAddress { .. } => "no_publishable_address",
+        IssuePairingInvitationError::LocalPublicationFailed { .. } => "local_publication_failed",
+        IssuePairingInvitationError::DirectoryTransportFailed { .. } => {
+            "directory_transport_failed"
+        }
+        IssuePairingInvitationError::DirectoryRejected { .. } => "directory_rejected",
+        IssuePairingInvitationError::DirectoryInvalidResponse { .. } => {
+            "directory_invalid_response"
+        }
+        IssuePairingInvitationError::MembershipReconciliationInProgress => {
+            "reconciliation_in_progress"
+        }
+        IssuePairingInvitationError::MembershipReconciliationRequired => "reconciliation_required",
+        IssuePairingInvitationError::MembershipReconciliationUnavailable => {
+            "reconciliation_unavailable"
+        }
+        IssuePairingInvitationError::AddressNotAvailable(_) => "address_not_available",
+        IssuePairingInvitationError::ServiceUnavailable => "service_unavailable",
+        IssuePairingInvitationError::PassphraseChangeRecovery { .. }
+        | IssuePairingInvitationError::Internal(_) => return,
+    };
+    uc_warn!(
+        error_kind = kind,
+        io_error_kind = io_error_kind(error),
+        "issue invitation failed"
+    );
 }
 
 fn capture_invitation_failure(analytics: &dyn AnalyticsFacade, error: &EngineError) {
@@ -305,5 +339,91 @@ mod tests {
                 retryable: false,
             }]
         );
+    }
+
+    /// 每个此前没有任何记录的失败类别都留下一条 WARN，并且不带地址、来源正文或邀请内容。
+    #[test]
+    fn every_unlogged_issue_failure_leaves_one_warning_with_its_class() {
+        let private = || anyhow::anyhow!("PRIVATE_SOURCE_TEXT");
+        let cases = vec![
+            (
+                IssuePairingInvitationError::NetworkNotStarted,
+                "network_not_started",
+            ),
+            (
+                IssuePairingInvitationError::NoPublishableAddress { source: private() },
+                "no_publishable_address",
+            ),
+            (
+                IssuePairingInvitationError::LocalPublicationFailed { source: private() },
+                "local_publication_failed",
+            ),
+            (
+                IssuePairingInvitationError::DirectoryTransportFailed { source: private() },
+                "directory_transport_failed",
+            ),
+            (
+                IssuePairingInvitationError::DirectoryRejected { source: private() },
+                "directory_rejected",
+            ),
+            (
+                IssuePairingInvitationError::DirectoryInvalidResponse { source: private() },
+                "directory_invalid_response",
+            ),
+            (
+                IssuePairingInvitationError::MembershipReconciliationInProgress,
+                "reconciliation_in_progress",
+            ),
+            (
+                IssuePairingInvitationError::MembershipReconciliationRequired,
+                "reconciliation_required",
+            ),
+            (
+                IssuePairingInvitationError::MembershipReconciliationUnavailable,
+                "reconciliation_unavailable",
+            ),
+            (
+                IssuePairingInvitationError::AddressNotAvailable(std::net::IpAddr::from([
+                    203, 0, 113, 7,
+                ])),
+                "address_not_available",
+            ),
+            (
+                IssuePairingInvitationError::ServiceUnavailable,
+                "service_unavailable",
+            ),
+        ];
+        for (error, kind) in cases {
+            let logs = uc_testkit::log_capture::CapturedLogs::default();
+            let _guard = logs.install();
+            record_issue_failure(&error);
+            let records: Vec<_> = logs
+                .output()
+                .lines()
+                .filter(|line| line.contains("issue invitation failed"))
+                .map(str::to_owned)
+                .collect();
+            assert_eq!(records.len(), 1, "{kind}: {}", logs.output());
+            assert!(records[0].contains(" WARN "), "{}", records[0]);
+            assert!(
+                records[0].contains(&format!("error_kind=\"{kind}\"")),
+                "{}",
+                records[0]
+            );
+            assert!(!logs.output().contains("PRIVATE"));
+            assert!(!logs.output().contains("203.0.113.7"));
+        }
+        // 这两类已经在映射处按 ERROR 记录，这里不再写第二条。
+        for error in [
+            IssuePairingInvitationError::Internal(anyhow::anyhow!("PRIVATE")),
+            IssuePairingInvitationError::PassphraseChangeRecovery {
+                source: anyhow::anyhow!("PRIVATE"),
+            },
+        ] {
+            let logs = uc_testkit::log_capture::CapturedLogs::default();
+            let _guard = logs.install();
+            record_issue_failure(&error);
+            assert!(logs.output().is_empty(), "{}", logs.output());
+        }
     }
 }

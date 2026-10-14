@@ -46,6 +46,11 @@ struct PreparedCredentialsV1 {
     registration: Vec<u8>,
 }
 
+/// 当前空间还没有准入注册记录：有意义的稳定类别，不是存储不可用。
+#[derive(Debug, thiserror::Error)]
+#[error("space admission registration is missing")]
+struct RegistrationMissing;
+
 #[derive(Debug, thiserror::Error)]
 pub enum SpaceAdmissionCredentialStoreError {
     #[error("space admission credentials are locked")]
@@ -566,7 +571,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionCredentials<E> {
         self.executor
             .run(|conn| {
                 self.load_on(conn, &scope)?
-                    .ok_or_else(|| anyhow::anyhow!("space admission registration is missing"))
+                    .ok_or_else(|| anyhow::Error::new(RegistrationMissing))
             })
             .map_err(map_store_error)
     }
@@ -699,6 +704,12 @@ fn map_channel_error(
         SpaceAdmissionCredentialStoreError::Locked { .. } => CredentialFailure::Locked,
         SpaceAdmissionCredentialStoreError::RecoveryRequired { .. } => {
             CredentialFailure::RecoveryRequired
+        }
+        // 缺少准入注册记录是明确的“记录缺失”（被拒绝），不是可重试的存储故障。
+        SpaceAdmissionCredentialStoreError::Unavailable { source }
+            if source.downcast_ref::<RegistrationMissing>().is_some() =>
+        {
+            CredentialFailure::RecordMissing
         }
         SpaceAdmissionCredentialStoreError::Unavailable { .. } => CredentialFailure::Unavailable,
     };
@@ -996,6 +1007,52 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    /// 空间还没有准入注册记录时，sponsor 的凭据解析必须报告“记录缺失”（被拒绝），
+    /// 而不是把它折叠成“存储不可用”（可重试）：两者的处理责任不同。
+    #[tokio::test]
+    async fn a_missing_registration_is_reported_as_a_missing_record_not_as_unavailable() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("credentials.sqlite");
+        let secure_storage = Arc::new(MemorySecureStorage::default());
+        let keys = Arc::new(AdmissionKeyManager::new(secure_storage, [0x77; 16]));
+        let manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
+            temp.path().join("vault"),
+            Arc::clone(&keys),
+        ));
+        let executor = Arc::new(DieselSqliteExecutor::new(
+            init_db_pool(db_path.to_str().unwrap()).unwrap(),
+        ));
+        let admissions = Arc::new(SqliteSpaceAdmissionState::new(
+            Arc::clone(&executor),
+            Arc::clone(&keys),
+            Arc::clone(&manifests),
+            lineage_only_records("missing-space"),
+        ));
+        let credentials = SqliteSpaceAdmissionCredentials::new(
+            executor,
+            keys,
+            manifests,
+            lineage_only_records("missing-space"),
+            admissions,
+        );
+
+        let error = credentials
+            .resolve_initial(
+                InvitationId::from_bytes([0x78; 32]).unwrap(),
+                SpaceAdmissionId::from_bytes([0x79; 32]).unwrap(),
+            )
+            .await
+            .err()
+            .expect("no registration exists yet");
+
+        assert_eq!(error.diagnostic_failure(), CredentialFailure::RecordMissing);
+        assert!(
+            matches!(error, SpaceAdmissionChannelCredentialError::Rejected { .. }),
+            "a missing record is a rejection, not a retryable outage"
+        );
+        assert!(std::error::Error::source(&error).is_some());
     }
 
     #[tokio::test]
