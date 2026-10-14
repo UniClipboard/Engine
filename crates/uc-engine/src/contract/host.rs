@@ -76,6 +76,8 @@ impl PartialEq for HostCapabilityError {
 
 impl Eq for HostCapabilityError {}
 
+const MOBILE_LOGS_DIRECTORY: &str = "logs";
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct HostDirectories {
     private_data: PathBuf,
@@ -98,6 +100,20 @@ impl HostDirectories {
             logs,
             upgrade_backups,
         }
+    }
+
+    /// 移动端布局：日志放在私有数据目录的 `logs` 下，与缓存、临时目录互不包含。
+    ///
+    /// 缓存会在离开空间、清理缓存时整体删除；进程级日志写入器持有当天文件，日志若在缓存内
+    /// 就会被删掉，之后的记录写进已脱离目录的文件。
+    pub fn mobile(private_data: PathBuf, cache: PathBuf, temporary: PathBuf) -> Self {
+        let logs = private_data.join(MOBILE_LOGS_DIRECTORY);
+        Self::new(private_data, cache, temporary, logs)
+    }
+
+    /// 旧版移动端布局曾把日志放在缓存目录内；只用于安装观测运行期时的一次性迁移。
+    pub fn legacy_mobile_logs(&self) -> PathBuf {
+        self.cache.join(MOBILE_LOGS_DIRECTORY)
     }
 
     pub fn private_data(&self) -> &Path {

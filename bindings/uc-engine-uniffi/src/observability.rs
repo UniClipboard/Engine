@@ -2,10 +2,10 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use uc_engine::observability::{
-    DeploymentEnvironment, LocalLogConfig, ObservabilityConfig, ObservabilityInstallError,
-    ObservabilityInstallOutcome, ObservabilityRemoteSetupFailure, ObservabilityResource,
-    ObservabilitySetupStatus, ObservabilitySignalResult, OperatingSystem, OtlpHttpConfig,
-    ProcessObservabilityHandle, ProcessObservabilityRuntime, SecretHeaderValue,
+    migrate_legacy_mobile_logs, DeploymentEnvironment, LocalLogConfig, ObservabilityConfig,
+    ObservabilityInstallError, ObservabilityInstallOutcome, ObservabilityRemoteSetupFailure,
+    ObservabilityResource, ObservabilitySetupStatus, ObservabilitySignalResult, OperatingSystem,
+    OtlpHttpConfig, ProcessObservabilityHandle, ProcessObservabilityRuntime, SecretHeaderValue,
 };
 use uc_engine::HostDirectories;
 
@@ -29,9 +29,11 @@ pub(crate) fn install(
     directories: &HostDirectories,
 ) -> Result<BindingObservabilitySetup, BindingError> {
     let config = runtime_config(config, directories)?;
+    let migration = migrate_legacy_mobile_logs(directories);
     let outcome = ProcessObservabilityRuntime::install(config).map_err(map_install_error)?;
     let reused = matches!(outcome, ObservabilityInstallOutcome::Reused(_));
     let handle = outcome.handle();
+    migration.record();
     let health = handle.health();
     let _ = PROCESS_HANDLE.set(handle);
     Ok(BindingObservabilitySetup {
@@ -209,11 +211,10 @@ mod tests {
     use uc_engine::{emit_test_diagnostic_completion, TestDiagnosticCompletion};
 
     fn directories() -> HostDirectories {
-        HostDirectories::new(
+        HostDirectories::mobile(
             PathBuf::from("private"),
             PathBuf::from("cache"),
             PathBuf::from("temporary"),
-            PathBuf::from("cache/logs"),
         )
     }
 
@@ -284,11 +285,10 @@ mod tests {
     #[test]
     fn scheduled_flush_keeps_one_host_log_across_suspend_and_resume() {
         let root = tempfile::tempdir().expect("temporary directory");
-        let directories = HostDirectories::new(
+        let directories = HostDirectories::mobile(
             root.path().join("private"),
             root.path().join("cache"),
             root.path().join("temporary"),
-            root.path().join("cache/logs"),
         );
         let mut config = config(false);
         config.collector = None;

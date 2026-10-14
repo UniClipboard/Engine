@@ -495,6 +495,7 @@ SDK TraceId/SpanId 位于顶层，缺失时省略。远程关闭不影响本地�
 设备侧系统日志、JSONL 和远程层均默认拒绝普通模块 target。历史 local debug 调用点保留在
 `docs/generated/observability-inventory.md`，但不因此获得输出许可。
 
+移动端绑定（UniFFI、N-API）用 `HostDirectories::mobile` 把日志目录固定为 `<private_data_directory>/logs`，不放在缓存目录内：离开空间与清理缓存会整体删除缓存，日志在缓存里就会被一并删掉；该目录也不在升级备份的复制范围。旧布局的 `<cache_directory>/logs` 只在安装观测运行期之前由 `migrate_legacy_mobile_logs` 一次性迁入新目录（同名文件两边都保留，失败时旧文件留在原处并写一条 `legacy_log_migration` 记录），之后宿主应只读新目录。
 本地文件固定为 `engine.YYYY-MM-DD.jsonl`，保留 7 天，总量不超过十进制 100,000,000 bytes。owner 只枚举这一严格命名，启动和
 跨日时按最旧优先清理，写入超额时同样先淘汰最旧的受管文件，不删除当天文件；只有单条记录超过整个配额，或当天文件独占配额时才整条丢弃。目录不可写时降级到其余输出，不影响业务。写入前核对打开的文件仍是目录里的当天文件：目录或文件在运行期间被删除或替换时，写入端重建目录、重新打开并重新统计配额，记录不会落入已脱离目录的文件；跨日轮转同样先重建缺失的目录。
 本地文件写入失败不是永久状态：文件线程按 100 ms 起、最长 5 s 的退避重试，退避内到达的记录计入 `write_failed` 与丢弃数，显式刷新则立即重试重新打开；任一次成功即恢复。`health().local_file` 随当前状态在 `Ready` 与 `Unavailable` 间变化，状态变化时各写一条固定健康记录 `uc.observability.local_file_failed`（`error.type` 为 `write_failed` 或 `flush_failed`）和 `uc.observability.local_file_recovered`；失败记录本身可能因存储仍不可用而丢失。文件名解析只有诊断合同一份

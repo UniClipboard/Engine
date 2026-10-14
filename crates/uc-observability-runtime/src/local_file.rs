@@ -752,6 +752,44 @@ fn cleanup(
     Ok(())
 }
 
+/// 把旧目录里的受管日志文件一次性迁入新目录，返回迁入的文件数。
+///
+/// 只处理严格命名的日志文件；新目录已有同名文件时保留两份，不覆盖也不合并。必须在写入器打开新目录之前调用。
+/// 同一文件系统内用重命名，跨文件系统时复制后删除源文件；任一文件失败即返回错误，已迁入的文件保留在新目录，
+/// 重复调用会继续迁移剩余文件。
+pub fn migrate_managed_log_files(from: &Path, to: &Path) -> io::Result<usize> {
+    if from == to {
+        return Ok(0);
+    }
+    let files = match managed_files(from) {
+        Ok(files) => files,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    if files.is_empty() {
+        return Ok(0);
+    }
+    std::fs::create_dir_all(to)?;
+    let mut moved = 0;
+    for entry in files {
+        let Some(name) = entry.path.file_name() else {
+            continue;
+        };
+        let destination = to.join(name);
+        if destination.try_exists()? {
+            continue;
+        }
+        if std::fs::rename(&entry.path, &destination).is_err() {
+            std::fs::copy(&entry.path, &destination)?;
+            std::fs::remove_file(&entry.path)?;
+        }
+        moved += 1;
+    }
+    // 旧目录已空时顺带移除；非空（宿主放了其他文件）则保持不动。
+    let _ = std::fs::remove_dir(from);
+    Ok(moved)
+}
+
 pub fn managed_log_files(directory: &Path) -> io::Result<Vec<PathBuf>> {
     managed_files(directory).map(|files| files.into_iter().map(|entry| entry.path).collect())
 }
