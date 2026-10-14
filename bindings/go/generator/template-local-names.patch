@@ -1,0 +1,139 @@
+diff --git a/bindgen/templates/VTableImpl.go b/bindgen/templates/VTableImpl.go
+index 3c55cee..6beec99 100644
+--- a/bindgen/templates/VTableImpl.go
++++ b/bindgen/templates/VTableImpl.go
+@@ -14,48 +14,48 @@ func {{ callback_name }}(
+ 	    callStatus *C.RustCallStatus,
+ 	    {%- endif -%}	
+ 	) {
+-	handle := uint64(uniffiHandle)
+-	uniffiObj, ok := {{ ffi_converter_instance }}.handleMap.tryGet(handle)
+-	if !ok {
+-		panic(fmt.Errorf("no callback in handle map: %d", handle))
++	_uniffiCallbackHandle := uint64(uniffiHandle)
++	_uniffiObj, _uniffiOk := {{ ffi_converter_instance }}.handleMap.tryGet(_uniffiCallbackHandle)
++	if !_uniffiOk {
++		panic(fmt.Errorf("no callback in handle map: %d", _uniffiCallbackHandle))
+ 	}
+ 	
+ 	{% if meth.is_async() %}
+ 	{%- let result_struct = meth.foreign_future_ffi_result_struct().name()|ffi_struct_name %}
+-	result := make(chan C.{{ result_struct }}, 1)
+-	cancel := make(chan struct{}, 1)
+-	guardHandle := cgo.NewHandle(cancel)
++	_uniffiResult := make(chan C.{{ result_struct }}, 1)
++	_uniffiCancel := make(chan struct{}, 1)
++	_uniffiGuardHandle := cgo.NewHandle(_uniffiCancel)
+ 	*uniffiOutDroppedCallback = C.UniffiForeignFutureDroppedCallbackStruct {
+-		handle: C.uint64_t(guardHandle),
++		handle: C.uint64_t(_uniffiGuardHandle),
+ 		free: C.UniffiForeignFutureDroppedCallback(C.{{ config|free_gorutine_callback }}),
+ 	}
+ 	
+ 	// Wait for compleation or cancel
+ 	go func() {
+ 		select {
+-			case <-cancel:
+-			case res := <-result:
++			case <-_uniffiCancel:
++			case _uniffiRes := <-_uniffiResult:
+ 				{{ ffi_callback|find_ffi_callback_helper -}}
+-					(uniffiFutureCallback, uniffiCallbackData, res)
++					(uniffiFutureCallback, uniffiCallbackData, _uniffiRes)
+ 		}
+ 	}()
+ 
+ 	// Eval callback asynchroniously
+ 	go func() {
+-        asyncResult := &C.{{ result_struct }}{};
++        _uniffiAsyncResult := &C.{{ result_struct }}{};
+     	{%- if meth.return_type().is_some() %}
+-    	uniffiOutReturn := &asyncResult.returnValue
++    	uniffiOutReturn := &_uniffiAsyncResult.returnValue
+     	{%- endif %}
+     	{%- if meth.throws_type().is_some() %}
+-    	callStatus := &asyncResult.callStatus
++    	callStatus := &_uniffiAsyncResult.callStatus
+     	{%- endif %}
+     	defer func() {
+-    		result <- *asyncResult
++    		_uniffiResult <- *_uniffiAsyncResult
+     	}()
+ 	{% endif %}
+ 
+ 	{% call go::func_return_vars(meth, suffix = ":=") %}
+-    uniffiObj.{{ meth.name()|fn_name }}(
++    _uniffiObj.{{ meth.name()|fn_name }}(
+         {%- for arg in meth.arguments() %}
+         {%- let var = arg.name()|var_name %}
+         {{ arg|lift_fn(ci) }}({% call go::remap_ffi_val(arg.as_type(), var) %}),
+@@ -64,12 +64,12 @@ func {{ callback_name }}(
+ 	
+     {% if let Some(error_type) = meth.throws_type() -%}
+ 	{{- self.add_import("errors") }}
+-	if err != nil {
+-		var actualError {{ error_type|type_name(ci) }}
+-		if errors.As(err, &actualError) {
++	if _uniffiErr != nil {
++		var _uniffiActualError {{ error_type|type_name(ci) }}
++		if errors.As(_uniffiErr, &_uniffiActualError) {
+ 			*callStatus = C.RustCallStatus {
+ 				code: C.int8_t(uniffiCallbackResultError),
+-				errorBuf: {{ error_type|lower_fn(ci) }}(actualError),
++				errorBuf: {{ error_type|lower_fn(ci) }}(_uniffiActualError),
+ 			}
+ 		} else {
+ 			*callStatus = C.RustCallStatus {
+@@ -82,7 +82,7 @@ func {{ callback_name }}(
+ 
+ 
+ 	{% if let Some(return_type) = meth.return_type() -%}
+-	*uniffiOutReturn = {{ return_type|lower_fn(ci) }}(res)
++	*uniffiOutReturn = {{ return_type|lower_fn(ci) }}(_uniffiRes)
+ 	{%- endif %}
+ 
+ 	{%- if meth.is_async() %}
+diff --git a/bindgen/templates/macros.go b/bindgen/templates/macros.go
+index 4ede2df..a3638b6 100644
+--- a/bindgen/templates/macros.go
++++ b/bindgen/templates/macros.go
+@@ -121,18 +121,18 @@
+ 
+ {%- macro func_return_vars_pairs(func, prefix = "", suffix = "") -%}
+     {%- match (func.return_type(), func.throws_type()) -%}
+-    {%- when (Some(_), Some(_)) -%} {{ prefix }} res, err {{ suffix }}
+-    {%- when (None, Some(_)) -%} {{ prefix }} _, err {{ suffix }}
+-    {%- when (Some(_), None) -%} {{ prefix }} res, _ {{ suffix }}
++    {%- when (Some(_), Some(_)) -%} {{ prefix }} _uniffiRes, _uniffiErr {{ suffix }}
++    {%- when (None, Some(_)) -%} {{ prefix }} _, _uniffiErr {{ suffix }}
++    {%- when (Some(_), None) -%} {{ prefix }} _uniffiRes, _ {{ suffix }}
+     {%- when (None, None) -%}
+     {%- endmatch -%} {# space -#}
+ {%- endmacro -%}
+ 
+ {%- macro func_return_vars(func, prefix = "", suffix = "") -%}
+     {% match (func.return_type(), func.throws_type()) -%}
+-    {%- when (Some(_), Some(_)) -%} {{ prefix }} res, err {{ suffix }}
+-    {%- when (None, Some(_)) -%} {{ prefix }} err {{ suffix }}
+-    {%- when (Some(_), None) -%} {{ prefix }} res {{ suffix }}
++    {%- when (Some(_), Some(_)) -%} {{ prefix }} _uniffiRes, _uniffiErr {{ suffix }}
++    {%- when (None, Some(_)) -%} {{ prefix }} _uniffiErr {{ suffix }}
++    {%- when (Some(_), None) -%} {{ prefix }} _uniffiRes {{ suffix }}
+     {%- when (None, None) -%}
+     {%- endmatch -%}
+ {%- endmacro -%}
+@@ -140,11 +140,11 @@
+ {%- macro func_nil_err_check(func) -%}
+     {% match (func.return_type(), func.throws_type()) -%}
+     {%- when (Some(_), Some(_)) -%}
+-	if err == nil {
+-		return res, nil
++	if _uniffiErr == nil {
++		return _uniffiRes, nil
+ 	}
+     {%- when (None, Some(_)) -%}
+-	if err == nil {
++	if _uniffiErr == nil {
+ 		return nil
+ 	}
+     {%- when (Some(_), None) -%}

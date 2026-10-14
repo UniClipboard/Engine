@@ -43,7 +43,7 @@ Port 归需要能力的层所有，因此 Infra 既可以实现 Core port，也�
 | `crates/uc-infra-profile/` | Profile 升级/备份/恢复、配置迁移与跨存储的 Space 准入激活 |
 | `crates/uc-sync-protocol/` | 传输无关的同步线上格式（帧、版本、上限、编解码与 golden 向量），只依赖 `uc-core`，被 `uc-infra-p2p`/`uc-infra-profile` 使用 |
 | `crates/uc-engine/` | 唯一稳定 Rust 入口、生命周期、运行期与依赖组装 |
-| `bindings/` | iOS、Android、HarmonyOS 的薄语言绑定 |
+| `bindings/` | iOS、Android、HarmonyOS 的薄语言绑定，以及 Go module（`bindings/go`） |
 | `compatibility/` | 用户显式启用、独立版本与发布的 LAN 兼容线 |
 | `tests/hosts/` | 平台验收宿主，不承载产品业务 |
 

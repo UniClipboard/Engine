@@ -1,0 +1,190 @@
+name: Go binding
+
+# Go module（bindings/go）的生成、原生构建与真实进程验收。
+# - macOS arm64：重新生成并要求零差异；构建发布配置原生库；Go 1.24 与 1.27 编译、链接；在拒绝外网的沙箱里运行三个验收进程。
+# - Linux amd64 / arm64：在对应原生 runner 上构建发布配置原生库并编译、链接 Go 门面与验收宿主。
+#   Linux 与 Windows 的真实进程验收、macOS amd64、Windows 均未覆盖，见 bindings/go/README.md。
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - bindings/go/**
+      - bindings/uc-engine-uniffi/**
+      - crates/uc-engine/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - scripts/build-cache/**
+      - tests/hosts/go/**
+      - scripts/architecture/check-go-binding.mjs
+      - .github/workflows/go-binding.yml
+  push:
+    branches: [main]
+    paths:
+      - bindings/go/**
+      - bindings/uc-engine-uniffi/**
+      - crates/uc-engine/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - scripts/build-cache/**
+      - scripts/architecture/check-go-binding.mjs
+      - tests/hosts/go/**
+      - .github/workflows/go-binding.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: go-binding-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos-arm64:
+    name: Go binding (macOS arm64)
+    runs-on: macos-14
+    environment:
+      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
+      deployment: false
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Prepare Rust build
+        uses: ./.github/actions/rust-ci-setup
+        with:
+          cache-key: go-binding-macos
+          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
+          compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: "1.24.0"
+
+      - name: Static checks
+        run: |
+          node scripts/architecture/check-go-binding.mjs
+          test -z "$(gofmt -l bindings/go/engine bindings/go/native bindings/go/uc_engine_uniffi/link.go bindings/go/uc_engine_uniffi/generated_sources.go tests/hosts/go)"
+
+      # 生成器按固定 revision 与补丁构建，输入不变时复用（无缓存的构建约 45 分钟）。
+      - name: Restore pinned generator
+        id: generator-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/generator
+          key: uniffi-bindgen-go-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bindings/go/generator/PIN.env', 'bindings/go/generator/template-local-names.patch', 'bindings/go/generator/build-generator.sh', 'rust-toolchain.toml') }}
+
+      - name: Build pinned generator
+        if: steps.generator-cache.outputs.cache-hit != 'true'
+        run: bash bindings/go/generator/build-generator.sh "$RUNNER_TEMP/generator"
+
+      - name: Build development library for interface metadata
+        run: bash bindings/go/native/build-native.sh dev
+
+      - name: Regenerate and require zero drift
+        run: |
+          bash bindings/go/generator/generate.sh "$RUNNER_TEMP/generator/bin/uniffi-bindgen-go" target/debug/libuc_engine_uniffi.dylib
+          git diff --exit-code -- bindings/go/uc_engine_uniffi
+          test -z "$(git status --porcelain --untracked-files=all -- bindings/go/uc_engine_uniffi)"
+
+      - name: Build release library and stage with provenance manifest
+        run: |
+          bash bindings/go/native/build-native.sh release
+          bash bindings/go/native/stage-native.sh release "$RUNNER_TEMP/native"
+
+      - name: Real-process acceptance (Go 1.24)
+        run: node tests/hosts/go/run-e2e.mjs --native "$RUNNER_TEMP/native" --evidence "$RUNNER_TEMP/e2e-go124" --require-network-positive-control
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: "1.27.1"
+
+      - name: Real-process acceptance (Go 1.27)
+        run: node tests/hosts/go/run-e2e.mjs --native "$RUNNER_TEMP/native" --evidence "$RUNNER_TEMP/e2e-go127" --require-network-positive-control
+
+      - name: Retain acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: go-binding-macos-arm64-evidence
+          path: |
+            ${{ runner.temp }}/e2e-go124
+            ${{ runner.temp }}/e2e-go127
+            ${{ runner.temp }}/native/native-manifest.json
+          if-no-files-found: warn
+
+      - name: Retain MBX compiler evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mbx-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/mbx-evidence
+          if-no-files-found: warn
+
+  linux-native-link:
+    name: Go binding link check (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux amd64
+            runner: ubuntu-24.04
+          - name: linux arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    environment:
+      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
+      deployment: false
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev cmake patchelf
+
+      - name: Prepare Rust build
+        uses: ./.github/actions/rust-ci-setup
+        with:
+          cache-key: go-binding-${{ matrix.runner }}
+          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
+          compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: "1.24.0"
+
+      - name: Build release library and stage with provenance manifest
+        run: |
+          bash bindings/go/native/build-native.sh release
+          bash bindings/go/native/stage-native.sh release "$RUNNER_TEMP/native"
+
+      - name: Compile and link the facade and acceptance host
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          export CGO_LDFLAGS="-L$RUNNER_TEMP/native -Wl,-rpath,$RUNNER_TEMP/native"
+          (cd bindings/go && go vet ./... && go build ./...)
+          (cd tests/hosts/go && go build -o "$RUNNER_TEMP/go-engine-host" .)
+          ldd "$RUNNER_TEMP/go-engine-host" | grep libuc_engine_uniffi
+
+      # 只运行来源校验（不启动 Engine）：证明 Linux 上 dladdr 解析到的是共享库而不是可执行文件。
+      - name: Verify native library identity at runtime
+        run: |
+          "$RUNNER_TEMP/go-engine-host" --phase verify --root "$RUNNER_TEMP/verify-root" --manifest "$RUNNER_TEMP/native/native-manifest.json"
+
+      - name: Retain MBX compiler evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mbx-${{ github.job }}-${{ matrix.runner }}
+          path: ${{ runner.temp }}/mbx-evidence
+          if-no-files-found: warn
