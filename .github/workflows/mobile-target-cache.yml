@@ -1,0 +1,142 @@
+name: Mobile target cache producer
+# 仅真实受保护main push预热产品pin的编译，不打包或发布。
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/build-cache/**
+      - .github/workflows/mobile-target-cache.yml
+permissions:
+  contents: read
+concurrency:
+  group: mobile-target-cache-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  android:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, ubuntu-latest]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    environment:
+      name: engine-build-cache-writer
+      deployment: false
+    env:
+      CARGO_BUILD_JOBS: '3'
+      CARGO_INCREMENTAL: '0'
+      MBX_GC_MAX_SIZE: 20GiB
+      MBX_REMOTE_MODE: read-write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require protected main publication
+        env:
+          REF_PROTECTED: ${{ github.ref_protected }}
+        run: test "$REF_PROTECTED" = true
+      - name: Select consumer Apple SDK
+        if: runner.os == 'macOS'
+        run: echo 'DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer' >> "$GITHUB_ENV"
+      - name: Install Linux compiler dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev cmake
+      - name: Configure owned cache and output roots
+        shell: bash
+        run: |
+          echo "MBX_CACHE_DIR=$RUNNER_TEMP/mobile-producer-cas" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/mobile-target" >> "$GITHUB_ENV"
+          echo "CARGO_HOME=$RUNNER_TEMP/mobile-target/cargo-home" >> "$GITHUB_ENV"
+      - name: Prepare pinned Android compiler
+        run: |
+          mkdir -p "$CARGO_HOME"
+          rustup toolchain install 1.95.0 --profile minimal
+          rustup target add --toolchain 1.95.0 aarch64-linux-android
+          cargo +1.95.0 install cargo-ndk --version 4.1.2 --locked
+      - name: Stage immutable product and cache automation
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Mobile core-source.json的已验收产品pin；变更此pin需重新匹配消费者。
+          product_ref=2f9afc9956b0cda82e65c912f0c0f6dc6aa51256
+          scratch=$(mktemp -d /tmp/mobile-engine-pin.XXXXXX)
+          product="$scratch/source"
+          git worktree add --detach "$product" "$product_ref"
+          echo "PRODUCT_ROOT=$product" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/mobile-producer-evidence"
+          for file in mbx.sh env.sh bin/cargo start-ci-mbx.sh prepare-ci-network.sh; do
+            cp "scripts/build-cache/$file" "$product/scripts/build-cache/$file"
+          done
+          chmod +x "$product/scripts/build-cache/bin/cargo"
+          git rev-parse HEAD > "$RUNNER_TEMP/mobile-producer-evidence/automation-source.txt"
+          git -C "$product" rev-parse HEAD > "$RUNNER_TEMP/mobile-producer-evidence/product-source.txt"
+          git -C "$product" diff --name-only > "$RUNNER_TEMP/mobile-producer-evidence/modified-cache-files.txt"
+          cp "$product/Cargo.lock" "$RUNNER_TEMP/mobile-producer-evidence/Cargo.lock"
+          python3 - "$product" "$GITHUB_SHA" "$RUNNER_TEMP/mobile-producer-evidence/cache-entry.json" <<'PYCODE'
+          import hashlib, json, re, subprocess, sys
+          from pathlib import Path
+          product, automation, output = sys.argv[1:]
+          root = Path(product)
+          files = ['mbx.sh', 'env.sh', 'bin/cargo', 'start-ci-mbx.sh', 'prepare-ci-network.sh']
+          changed = subprocess.check_output(['git', 'diff', '--name-only'], cwd=root, text=True).splitlines()
+          assert all(path in ['scripts/build-cache/' + file for file in files] for path in changed)
+          hashes = {file: hashlib.sha256((root / 'scripts/build-cache' / file).read_bytes()).hexdigest() for file in files}
+          version = re.search(r'^MBX_VERSION=([0-9.]+)$', (root / 'scripts/build-cache/mbx.sh').read_text(), re.M).group(1)
+          Path(output).write_text(json.dumps({'productSource': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip(), 'automationSource': automation, 'mbxVersion': version, 'cacheScriptHashes': hashes, 'modifiedCacheEntryFiles': changed, 'productTreeClean': not changed}, indent=2))
+          PYCODE
+      - name: Publish Android release compilation actions
+        shell: bash
+        env:
+          BUILD_CACHE_R2_ENDPOINT: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          BUILD_CACHE_R2_ACCESS_KEY_ID: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          BUILD_CACHE_R2_SECRET_ACCESS_KEY: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+          MBX_STATS_REPORT: ${{ runner.temp }}/mobile-producer-evidence/android-stats.json
+          MBX_BYPASS_LOG: ${{ runner.temp }}/mobile-producer-evidence/android-bypass.txt
+        run: |
+          set -euo pipefail
+          automation="$GITHUB_WORKSPACE/scripts/build-cache"
+          bash "$automation/prepare-ci-network.sh"
+          cd "$PRODUCT_ROOT"
+          export REPO_ROOT="$PRODUCT_ROOT" TARGET_DIR="$CARGO_TARGET_DIR" BUILD_PROFILE=release
+          source scripts/build-cache/env.sh
+          source bindings/uc-engine-uniffi/scripts/release-path-remap.sh
+          producer_build() {
+            with_release_path_remap cargo ndk -t arm64-v8a build -p uc-engine-uniffi --profile release --locked
+          }
+          export -f producer_build with_release_path_remap
+          # 重映射参数含bash数组，在同一shell运行；验证器只分类日志，不保存secret。
+          command_file="$RUNNER_TEMP/mobile-producer-command.sh"
+          {
+            echo '#!/usr/bin/env bash'
+            echo 'set -euo pipefail'
+            declare -p RELEASE_PATH_REMAP_ENV RELEASE_PATH_REMAP_CARGO_ARGS
+            declare -f with_release_path_remap producer_build
+            echo producer_build
+          } > "$command_file"
+          python3 "$automation/verify-r2-build.py" -- bash "$command_file"
+          python3 - <<'PYCODE'
+          import json, os
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'mobile-producer-evidence'
+          stats = json.loads((root / 'android-stats.json').read_text())
+          assert stats['bypasses'].get('unknown-codegen-option', 0) == 0
+          assert stats['uploaded_bytes'] > 0 or stats['restored_output_files'] > 0
+          PYCODE
+      - name: Preserve producer evidence and library
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mobile-producer-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            ${{ runner.temp }}/mobile-producer-evidence/
+            ${{ runner.temp }}/mobile-target/aarch64-linux-android/release/libuc_engine_uniffi.so
+          if-no-files-found: warn
+      - name: Remove owned temporary product tree
+        if: always() && env.PRODUCT_ROOT != ''
+        shell: bash
+        run: |
+          case "$PRODUCT_ROOT" in
+            /tmp/mobile-engine-pin.*/source) git worktree remove --force "$PRODUCT_ROOT"; rmdir "$(dirname "$PRODUCT_ROOT")" ;;
+            *) echo 'Unexpected temporary product path' >&2; exit 1 ;;
+          esac
