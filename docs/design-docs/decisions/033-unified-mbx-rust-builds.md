@@ -6,7 +6,7 @@
 
 ## 决定
 
-仓库使用固定 MBX 1.18.0 作为唯一编译动作缓存。`scripts/build-cache/mbx.sh` 负责下载完整性、编译配置与原生命令；`scripts/build-cache/bin/cargo` 保留 Cargo 命令语义，移除自己的 PATH 条目后进入原生 Cargo shim，避免递归。`just cargo` 是本地直接入口；测试、平台绑定、验收宿主、升级锚点、架构检查与性能脚本自动进入同一入口。当前 shell 需要直接执行 Cargo 时，先 source `scripts/build-cache/env.sh`，不运行全局 setup，不修改其他仓库。
+仓库使用固定 MBX 1.24.0 作为唯一编译动作缓存。`scripts/build-cache/mbx.sh` 负责下载完整性、编译配置与原生命令；`scripts/build-cache/bin/cargo` 保留 Cargo 命令语义，移除自己的 PATH 条目后进入原生 Cargo shim，避免递归。`just cargo` 是本地直接入口；测试、平台绑定、验收宿主、升级锚点、架构检查与性能脚本自动进入同一入口。当前 shell 需要直接执行 Cargo 时，先 source `scripts/build-cache/env.sh`，不运行全局 setup，不修改其他仓库。
 
 常规 CI 通过 `rust-ci-setup` 将该入口加入 job PATH，涵盖 nextest、clippy、llvm-cov、cargo-ndk 及脚本内嵌套 Cargo。只缓存下载和无 R2 时 ref 隔离的本地 CAS，不恢复 target；不叠用 sccache。主线、PR、fork、手工运行全部使用 MBX，但写入权限仍由原生受保护分支 push 策略与桶级令牌共同约束。main 未保护时真实 R2 不会发布，不能伪造 CI 身份。
 
@@ -20,7 +20,7 @@ R2 使用现有私有桶的 `engine/mbx/v1/`，本地/PR 只读。CI 三项凭�
 
 独立空 target 的第二次构建必须以原生 `hits`、`restored_output_files` 与实际 E2E 结果证明复用；真实 R2 还须有 `downloaded_bytes`。本地 CAS 命中与 S3 回环实验不能代替真实 R2 发布/共享命中。`measure-ci-mbx.mjs` 保存每轮原生统计、命令与耗时，不清理现有 target、不缓存测试结果。
 
-固定包覆盖 Linux x86_64/arm64、macOS arm64 与 Windows x64/arm64；其他宿主没有固定包时明确失败。移动交叉目标可经这些宿主编译，但只有实际执行过的目标才能记为通过。Windows 使用固定 MBX 1.18.0 ZIP 与 Git Bash 原生入口。独立手动 `.github/workflows/windows-cache-validation.yml` 在临时目录用原生 Python → cargo.exe → rustc → exe 验证冷/热与失效，保存统计和源码身份；它不接收 R2 凭据。原生双架构验收 [run 38535044908](https://github.com/UniClipboard/Engine/actions/runs/38535044908) 已通过，但 fixture 不代替产品调用链验收。
+固定包覆盖 Linux x86_64/arm64、macOS arm64 与 Windows x64/arm64；其他宿主没有固定包时明确失败。移动交叉目标可经这些宿主编译，但只有实际执行过的目标才能记为通过。Windows 使用固定 MBX 1.24.0 ZIP 与 Git Bash 原生入口。独立手动 `.github/workflows/windows-cache-validation.yml` 在临时目录用原生 Python → cargo.exe → rustc → exe 验证冷/热与失效，保存统计和源码身份；它不接收 R2 凭据。原生双架构验收 [run 38535044908](https://github.com/UniClipboard/Engine/actions/runs/38535044908) 已通过，但 fixture 不代替产品调用链验收。
 
 正式 Windows 路径 `.github/workflows/windows-build.yml` 已通过共享 `rust-ci-setup` 和 MBX 执行全工作区 `cargo check` 与 Windows 专属存储测试；构建结果与运行结果分步记录。[run 38535418627](https://github.com/UniClipboard/Engine/actions/runs/38535418627) 双架构通过，没有远端下载证据，不能宣称 Windows R2 加速已验收。全部工具行为与 raw Cargo 绝对路径调用无法由仓库改变全局环境；唯一受支持调用路径见[构建指南](../local-builds.md)。
 
@@ -35,3 +35,9 @@ R2 使用现有私有桶的 `engine/mbx/v1/`，本地/PR 只读。CI 三项凭�
 在已有且获准使用的原生 Windows 非 GUI 环境，运行 `python scripts/build-cache/verify-windows-cache.py --out <证据目录>`，并提供任务独占的 `RUNNER_TEMP`。验收限制两个编译任务、1 GiB CAS，每轮使用空 target；三份 fixture 目录代表独立消费者，不代表 Desktop/Mobile 产品构建。它继承不存在的 wrapper 来确认清除冲突，并实际运行每轮 exe；feature/source/profile/RUSTFLAGS 变化必须产生正确行为。无远端验收要求上传/下载/错误均为零。
 
 成功或失败均保留 fixture、锁文件、日志、原生统计和 scratch 所有权；失败/超时不杀共享进程、不清理目录。托管 runner 由平台销毁，其他环境须在检查任务进程结束后由所有者清理。正式 Windows workflow、下游固定 Engine 脚本版本与 R2 路径只能在原生验收后迁移；本地 ZIP/语法检查不是迁移门槛的替代品。
+
+## 显式 linker 的版本更新
+
+MBX 1.18 对显式 linker 下的 rlib/check 绕过，cargo-ndk 会触发；1.24 已包含上游 #694 的支持。最小真实 Android 诊断 run38556938965 在不改 release 参数的情况下验证：1.18 无宏依赖热构建0hits，1.24独立空target恢复1hit/3files。packed debug 的宿主宏链接两版仍绕过，不能删除正式debug参数换取命中。该最小结果不证明完整Android/R2或Windows1.24验收完成；上文既有Windows运行是1.18证据，新版本平台验收须独立记录。
+
+Cargo调用参数与完整bypass理由随每次原生统计保留，宿主生成工具的命中不能充当移动目标命中。下游产品源码pin与缓存自动化pin独立；临时树覆盖缓存工具时必须记录真实dirty文件、各脚本哈希和两份来源，不将它标成完全clean源码构建。
