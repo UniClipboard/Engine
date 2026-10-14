@@ -33,7 +33,7 @@ use uc_sync_protocol::space_admission::{
 };
 mod authentication;
 use authentication::AuthenticatedRequest;
-use uc_observability_contract::{log_fields::log_vocab_debug, uc_debug, uc_info, uc_warn};
+use uc_observability_contract::{log_fields::log_vocab_debug, uc_info, uc_warn};
 const EXCHANGE_DEADLINE: Duration = Duration::from_secs(120);
 const MAX_INBOUND_EXCHANGES: usize = 8;
 
@@ -286,6 +286,10 @@ impl ProtocolHandler for IrohSpaceAdmissionHandler {
 
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         if !self.accepting.load(Ordering::Acquire) {
+            uc_info!(
+                reason = "stopping",
+                "Space admission connection closed because the sponsor is stopping"
+            );
             connection.close(CLOSE_BUSY.into(), b"admission_stopping");
             return Ok(());
         }
@@ -304,34 +308,34 @@ impl ProtocolHandler for IrohSpaceAdmissionHandler {
                 | HandlerError::Credential(_)
                 | HandlerError::AuthenticationProof { .. }),
             ) => {
-                uc_debug!(
+                uc_info!(
                     error_type = log_vocab_debug(&server_error_type(&error)),
                     "Space admission exchange rejected"
                 );
                 connection.close(CLOSE_AUTHENTICATION.into(), b"authentication_rejected");
             }
             Err(error @ HandlerError::PeerUpgradeRequired) => {
-                uc_debug!(
+                uc_info!(
                     error_type = log_vocab_debug(&server_error_type(&error)),
                     "Space admission peer upgrade required"
                 );
                 connection.close(CLOSE_PEER_UPGRADE_REQUIRED.into(), b"peer_upgrade_required");
             }
             Err(error @ HandlerError::Acknowledgement) => {
-                uc_debug!(
+                uc_info!(
                     error_type = log_vocab_debug(&server_error_type(&error)),
                     "Space admission reply completed without peer acknowledgement"
                 );
             }
             Err(error @ HandlerError::Timeout) => {
-                uc_debug!(
+                uc_info!(
                     error_type = log_vocab_debug(&server_error_type(&error)),
                     "Space admission exchange timed out"
                 );
                 connection.close(CLOSE_PROTOCOL.into(), b"protocol_timeout");
             }
             Err(error) => {
-                uc_debug!(
+                uc_info!(
                     error_type = log_vocab_debug(&server_error_type(&error)),
                     "Space admission exchange rejected"
                 );

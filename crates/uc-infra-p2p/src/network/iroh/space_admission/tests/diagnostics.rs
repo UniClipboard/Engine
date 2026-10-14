@@ -328,6 +328,160 @@ async fn server_handshake_outcomes_are_recorded_without_peer_identity() {
     }
 }
 
+/// 标准采集模式（未开启详细窗口）下，某条 sponsor 准入记录必须恰好出现一次且为 INFO。
+fn assert_one_info_record(logs: &uc_testkit::log_capture::CapturedLogs, message: &str) {
+    let lines: Vec<_> = logs
+        .output()
+        .lines()
+        .filter(|line| line.contains(message))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(lines.len(), 1, "{message}: {}", logs.output());
+    assert!(lines[0].contains(" INFO "), "{}", lines[0]);
+}
+
+async fn sponsor_with_handler(
+    setup: impl FnOnce(IrohSpaceAdmissionHandler) -> IrohSpaceAdmissionHandler,
+) -> (
+    Arc<Endpoint>,
+    Arc<Endpoint>,
+    Arc<IrohSpaceAdmissionHandler>,
+    Router,
+    Arc<HangingLoopbackEndpoint>,
+    Arc<LoopbackCredentials>,
+) {
+    let sponsor = bound_endpoint().await;
+    wait_for_direct_addrs(&sponsor).await;
+    let joiner = bound_endpoint().await;
+    wait_for_direct_addrs(&joiner).await;
+    let endpoint = Arc::new(HangingLoopbackEndpoint {
+        calls: AtomicUsize::new(0),
+        entered: Notify::new(),
+    });
+    let credentials = Arc::new(LoopbackCredentials {
+        initial: Mutex::new(None),
+        continuation: Mutex::new(None),
+    });
+    let handler = Arc::new(setup(
+        IrohSpaceAdmissionHandler::new(&sponsor, endpoint.clone(), credentials.clone())
+            .expect("handler"),
+    ));
+    let router = Router::builder((*sponsor).clone())
+        .accept(SPACE_ADMISSION_ALPN, handler.clone())
+        .spawn();
+    (sponsor, joiner, handler, router, endpoint, credentials)
+}
+
+#[tokio::test]
+async fn a_stopping_sponsor_records_why_it_closed_the_connection() {
+    let logs = uc_testkit::log_capture::CapturedLogs::default();
+    let _guard = logs.install();
+    let (sponsor, joiner, handler, router, endpoint, _) =
+        sponsor_with_handler(|handler| handler).await;
+    handler.shutdown().await;
+    let connection = connect(&joiner, sponsor.addr()).await.expect("connect");
+    tokio::time::timeout(Duration::from_secs(2), connection.closed())
+        .await
+        .expect("a stopping sponsor closes the connection");
+    assert_eq!(endpoint.calls.load(Ordering::SeqCst), 0);
+    router.shutdown().await.expect("router shutdown");
+    joiner.close().await;
+    sponsor.close().await;
+    assert_one_info_record(&logs, "closed because the sponsor is stopping");
+}
+
+#[tokio::test]
+async fn a_stalled_peer_leaves_one_info_timeout_record() {
+    let logs = uc_testkit::log_capture::CapturedLogs::default();
+    let _guard = logs.install();
+    let (sponsor, joiner, _, router, _, _) =
+        sponsor_with_handler(|handler| handler.with_exchange_deadline(Duration::from_millis(100)))
+            .await;
+    let connection = connect(&joiner, sponsor.addr()).await.expect("connect");
+    let (_send, _receive) = open_stream(&connection).await.expect("open stream");
+    tokio::time::timeout(Duration::from_secs(2), connection.closed())
+        .await
+        .expect("the deadline closes the stalled peer");
+    router.shutdown().await.expect("router shutdown");
+    joiner.close().await;
+    sponsor.close().await;
+    assert_one_info_record(&logs, "Space admission exchange timed out");
+}
+
+#[tokio::test]
+async fn an_old_layout_joiner_leaves_one_info_peer_upgrade_record() {
+    let logs = uc_testkit::log_capture::CapturedLogs::default();
+    let _guard = logs.install();
+    let (sponsor, joiner, _, router, _, _) = sponsor_with_handler(|handler| handler).await;
+    let connection = connect(&joiner, sponsor.addr()).await.expect("connect");
+    let (mut send, mut receive) = open_stream(&connection).await.expect("open stream");
+    write_typed(
+        &mut send,
+        FrameKind::InitialHello,
+        &InitialHelloV2 {
+            protocol_version: SpaceAdmissionProtocolVersion::V2.as_u16(),
+            admission_id: [0x65; 32],
+            invitation_id: [0x66; 32],
+            joiner_peer_id: *peer_id(joiner.id().as_bytes())
+                .expect("joiner peer")
+                .as_bytes(),
+            attempt_started_at_ms: 1_000,
+            attempt_expires_at_ms: 301_000,
+            ke1: vec![0x67],
+        },
+        AUTH_FRAME_LIMIT,
+    )
+    .await
+    .expect("legacy hello");
+    let _ = read_typed::<_, OpaqueResponseV1>(
+        &mut receive,
+        FrameKind::OpaqueResponse,
+        AUTH_FRAME_LIMIT,
+    )
+    .await;
+    connection.closed().await;
+    router.shutdown().await.expect("router shutdown");
+    joiner.close().await;
+    sponsor.close().await;
+    assert_one_info_record(&logs, "Space admission peer upgrade required");
+}
+
+#[tokio::test]
+async fn a_wrong_passphrase_leaves_one_info_rejection_record() {
+    let logs = uc_testkit::log_capture::CapturedLogs::default();
+    let _guard = logs.install();
+    let (sponsor, joiner, _, router, _, credentials) =
+        sponsor_with_handler(|handler| handler).await;
+    let invitation = InvitationId::from_bytes([0x6b; 32]).expect("invitation id");
+    let admission = SpaceAdmissionId::from_bytes([0x6c; 32]).expect("admission id");
+    let registered = SpaceAdmissionAuth::derive_password_equivalent(b"right-pass", invitation);
+    let setup = SpaceAdmissionAuth::generate_server_setup();
+    let registration = SpaceAdmissionAuth::register_password_equivalent(&setup, &registered)
+        .expect("registration");
+    *credentials.initial.lock().await = Some(SponsorOpaqueMaterial::new(setup, registration));
+    let wrong = SpaceAdmissionAuth::derive_password_equivalent(b"wrong-pass", invitation);
+    let password = AdmissionEncryptedPasswordEquivalent::from_bytes(wrong.as_bytes().to_vec())
+        .expect("password equivalent");
+    let route = SpaceAdmissionRoute::from_bytes(
+        encode_space_admission_route(&sponsor.addr(), Some(invitation)).expect("route encoding"),
+    )
+    .expect("route");
+
+    let result = IrohSpaceAdmissionTransport::new(joiner.clone())
+        .establish_initial(
+            admission,
+            AdmissionAttemptTimeline::start(1_000).expect("valid attempt timeline"),
+            &route,
+            &password,
+        )
+        .await;
+    assert!(result.is_err(), "a wrong passphrase must not authenticate");
+    router.shutdown().await.expect("router shutdown");
+    joiner.close().await;
+    sponsor.close().await;
+    assert_one_info_record(&logs, "Space admission exchange rejected");
+}
+
 #[derive(Debug)]
 struct DetailProbe(Arc<std::sync::Mutex<Vec<(&'static str, &'static str)>>>);
 impl opentelemetry_sdk::logs::LogProcessor for DetailProbe {
