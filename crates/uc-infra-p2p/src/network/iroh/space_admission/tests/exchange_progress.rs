@@ -62,6 +62,7 @@ enum ReplyScenario {
     Delayed,
     Missing,
     Closed,
+    SessionRetired,
     Invalid,
     WrongProof,
     StalledFinish,
@@ -74,6 +75,7 @@ async fn actual_client_exchange_reports_reply_failures_and_preserves_trace_resul
         ReplyScenario::Delayed,
         ReplyScenario::Missing,
         ReplyScenario::Closed,
+        ReplyScenario::SessionRetired,
         ReplyScenario::Invalid,
         ReplyScenario::WrongProof,
         ReplyScenario::StalledFinish,
@@ -145,7 +147,13 @@ async fn actual_client_exchange_reports_reply_failures_and_preserves_trace_resul
                     std::future::pending::<()>().await;
                 }
                 ReplyScenario::Closed => {
-                    server_connection.close(0u32.into(), b"");
+                    // 不属于本协议的应用层关闭码：按连接被关闭处理。
+                    server_connection.close(0x7fu32.into(), b"");
+                    return;
+                }
+                ReplyScenario::SessionRetired => {
+                    // 会话门在交换中途关闭连接：sponsor 暂时没有可用会话，应延期而不是协议失败。
+                    server_connection.close(0u32.into(), b"session_retired");
                     return;
                 }
                 ReplyScenario::Invalid => {
@@ -253,6 +261,7 @@ async fn actual_client_exchange_reports_reply_failures_and_preserves_trace_resul
                 Some("connection_closed"),
                 Some("channel_closed"),
             ),
+            ReplyScenario::SessionRetired => ("receive_reply", Some("connection_closed"), None),
             ReplyScenario::Invalid => (
                 "receive_reply",
                 Some("invalid_message"),
