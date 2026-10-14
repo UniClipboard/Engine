@@ -8,7 +8,7 @@ use iroh::endpoint::{
 };
 use iroh::protocol::{AcceptError, DynProtocolHandler, ProtocolHandler};
 use tokio::sync::{watch, Notify};
-use uc_observability_contract::{uc_info, uc_warn};
+use uc_observability_contract::{uc_info, uc_warn, wire_enum};
 
 use super::peer_reachability_adapter::{LEGACY_PEER_REACHABILITY_ALPN, PEER_REACHABILITY_ALPN};
 use super::space_admission::SPACE_ADMISSION_ALPN;
@@ -274,21 +274,14 @@ impl SessionProtocolRegistry {
     }
 }
 
-/// 会话门拒绝入站连接的原因；只有这两个固定词表。
-#[derive(Clone, Copy)]
-enum GateRejection {
-    /// 当前没有可用的会话世代。
-    SessionUnavailable,
-    /// 连接已被接受，但所属会话世代随后退出。
-    SessionRetired,
-}
-
-impl GateRejection {
-    fn reason(self) -> &'static str {
-        match self {
-            Self::SessionUnavailable => "session_unavailable",
-            Self::SessionRetired => "session_retired",
-        }
+wire_enum! {
+    /// 会话门拒绝入站连接的原因；只有这两个固定词表。
+    #[derive(Clone, Copy)]
+    enum GateRejection: &'static str {
+        /// 当前没有可用的会话世代。
+        SessionUnavailable => "session_unavailable",
+        /// 连接已被接受，但所属会话世代随后退出。
+        SessionRetired => "session_retired",
     }
 }
 
@@ -309,7 +302,7 @@ fn alpn_class(alpn: &[u8]) -> &'static str {
 /// 同一记录点由模块日志的令牌桶限速，不会被反复重连的对端放大。
 fn record_gate_rejection(rejection: GateRejection, alpn: &[u8]) {
     uc_info!(
-        reason = rejection.reason(),
+        reason = rejection.wire(),
         alpn = alpn_class(alpn),
         "connection.rejected by the session gate"
     );
