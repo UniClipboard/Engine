@@ -420,7 +420,7 @@ decorator 负责。Sponsor 在等待执行锁之前确定已认证消息的固�
 JSONL 保留 timestamp、level、target、fields，当前使用 `local_schema_version=2`；旧版文件仍可导出。有效的
 SDK TraceId/SpanId 位于顶层，缺失时省略。远程关闭不影响本地关联能力。普通完成日志退出旧 fmt 文件
 路径；health 仍通过独立接受门与只接受 HEALTH_TARGET 的格式层写入同一队列，在 SDK 收尾和遥测
-抑制时仍能记录健康结果。两个入口的 target 集合互斥，不会重复写入同一记录。
+抑制时仍能记录健康结果。两个入口的 target 集合互斥，不会重复写入同一记录。健康记录经同一份本地关联信封标注，带 `local_schema_version`、`run_id`、`source_commit` 等运行字段，可与同一次运行的其他记录对应。
 
 桌面等已有日志输出的宿主使用 `ProcessObservabilityRuntime::install_with_host_layers` 在一次安装中
 提交标准 tracing Layer。共同运行时将核心记录与宿主记录分组过滤；宿主层不能接收核心合同事件、

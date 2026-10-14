@@ -8,7 +8,8 @@
 //! 1. 故障期间 `health().local_file` 仍是 `Ready`，或故障期间的刷新报告成功；
 //! 2. 故障期间的丢弃没有计数；
 //! 3. 存储恢复后刷新仍然失败、新记录没有落盘，或健康状态没有回到 `Ready`；
-//! 4. 状态变化没有各留一条健康记录（失败一条、恢复一条）。
+//! 4. 恢复时没有留下健康记录，或该记录缺少 `run_id`、`local_schema_version`、`source_commit` 信封，
+//!    导致无法与同一次运行的其他记录对应。
 //!
 //! 运行期只能安装一次，所以所有阶段放在同一个测试里依次执行。
 use std::path::Path;
@@ -96,4 +97,24 @@ fn writer_recovers_after_storage_failure_and_health_follows() {
         event_count(&directory, "uc.observability.local_file_recovered"),
         1
     );
+    let all = rows(&directory);
+    let recovered = all
+        .iter()
+        .find(|row| row["fields"]["event.name"] == "uc.observability.local_file_recovered")
+        .expect("recovered record");
+    let marker = all
+        .iter()
+        .find(|row| row["fields"]["error_kind"] == "after_recovery")
+        .expect("marker record");
+    assert_eq!(recovered["local_schema_version"], 2);
+    assert!(
+        recovered["run_id"].is_string(),
+        "health record carries run_id"
+    );
+    assert_eq!(
+        recovered["run_id"], marker["run_id"],
+        "same run as ordinary records"
+    );
+    assert_eq!(recovered["source_commit"], marker["source_commit"]);
+    assert_eq!(recovered["engine_version"], marker["engine_version"]);
 }
