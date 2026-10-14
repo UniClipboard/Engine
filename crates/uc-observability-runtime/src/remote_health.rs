@@ -145,6 +145,27 @@ pub(crate) fn record_remote_setup_degraded(failure: RemoteSetupFailure) {
     );
 }
 
+/// 本地文件由可用转为失败时记录一次；`class` 是固定的失败动作分类，不含路径或系统错误正文。
+pub(crate) fn record_local_file_failed(class: &'static str) {
+    tracing::event!(
+        target: "observability.health",
+        parent: None,
+        tracing::Level::WARN,
+        event.name = "uc.observability.local_file_failed",
+        error.type = class,
+    );
+}
+
+/// 本地文件失败后首次再次写入成功时记录一次。
+pub(crate) fn record_local_file_recovered() {
+    tracing::event!(
+        target: "observability.health",
+        parent: None,
+        tracing::Level::INFO,
+        event.name = "uc.observability.local_file_recovered",
+    );
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct CapacityGate {
     state: Arc<Mutex<CapacityState>>,

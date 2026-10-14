@@ -256,6 +256,14 @@ impl ProcessObservabilityHandle {
             .local_file
             .as_ref()
             .map_or(0, |local_file| local_file.dropped_records());
+        if self
+            .state
+            .local_file
+            .as_ref()
+            .is_some_and(|local_file| local_file.unavailable())
+        {
+            health.local_file = SetupStatus::Unavailable;
+        }
         let remote = self.state.telemetry.health();
         health.dropped_remote_spans = remote.dropped_spans;
         health.dropped_remote_logs = remote.dropped_logs;
