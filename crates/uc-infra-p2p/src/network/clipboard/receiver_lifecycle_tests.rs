@@ -131,6 +131,8 @@ impl ConnectivityBackend for MemoryBackend {
 }
 struct Admission {
     calls: AtomicUsize,
+    /// 第几次复核返回“已不再准入”；0 表示从不拒绝。
+    deny_at: AtomicUsize,
     block_at: usize,
     blocked: AtomicBool,
     gate: Semaphore,
@@ -145,6 +147,9 @@ impl AdmissionGrant for Grant {
     }
     async fn check_current(&self) -> Result<(), ConnectivityError> {
         let call = self.0.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if call == self.0.deny_at.load(Ordering::SeqCst) {
+            return Err(ConnectivityError::Denied);
+        }
         if call == self.0.block_at {
             self.0.blocked.store(true, Ordering::SeqCst);
             self.0.gate.acquire().await.unwrap().forget();
@@ -179,6 +184,7 @@ impl SessionConnectionAdmissionPort for InboundAdmission {
 fn receiver(block_at: usize, global: usize) -> (Arc<ClipboardReceiverAdapter>, Arc<Admission>) {
     let admission = Arc::new(Admission {
         calls: AtomicUsize::new(0),
+        deny_at: AtomicUsize::new(0),
         block_at,
         blocked: AtomicBool::new(false),
         gate: Semaphore::new(0),
@@ -501,4 +507,67 @@ async fn unchanged_clipboard_exchange_runs_on_a_second_backend() {
     server.close();
     receiver_task.await.unwrap();
     receiver.shutdown().await.unwrap();
+}
+
+/// 收完内容后的准入复核失败：这次接收已经开始，必须有且只有一条带结果的完成记录，
+/// 不能静默消失（旧实现用 `?` 提前返回，调用方又丢弃结果，连接上留下一个没有结局的 span）。
+#[tokio::test]
+async fn failed_admission_check_after_the_payload_completes_the_receive_once() {
+    use opentelemetry::logs::AnyValue;
+    use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+    use opentelemetry_sdk::logs::{InMemoryLogExporter, SdkLoggerProvider};
+    use tracing_subscriber::filter::filter_fn;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::Layer;
+
+    let exporter = InMemoryLogExporter::default();
+    let logs = SdkLoggerProvider::builder()
+        .with_simple_exporter(exporter.clone())
+        .build();
+    let subscriber =
+        tracing_subscriber::registry().with(OpenTelemetryTracingBridge::new(&logs).with_filter(
+            filter_fn(|metadata| matches!(metadata.target(), "uc.telemetry" | "uc.connectivity")),
+        ));
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let (receiver, admission) = receiver(usize::MAX, 4);
+    // 第 1 次复核是连接准入，第 2 次才是收完内容后的复核。
+    admission.deny_at.store(2, Ordering::SeqCst);
+    let mut deliveries = receiver.subscribe();
+    let (connection, tx) = connection_pair(1);
+    let task = run(&receiver, connection.clone());
+    let (_client, _dropped) = stream(&tx, b"revoked", false).await;
+    spin_until(|| admission.calls.load(Ordering::SeqCst) >= 2).await;
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    connection.close();
+    task.await.unwrap();
+    receiver.shutdown().await.unwrap();
+    logs.force_flush().expect("flush");
+
+    assert!(
+        deliveries.try_recv().is_err(),
+        "a revoked connection hands nothing to the application"
+    );
+    let text = |record: &opentelemetry_sdk::logs::SdkLogRecord, name: &str| {
+        record
+            .attributes_iter()
+            .find_map(|(key, value)| match value {
+                AnyValue::String(value) if key.as_str() == name => Some(value.as_str().to_owned()),
+                _ => None,
+            })
+    };
+    let completed: Vec<_> = exporter
+        .get_emitted_logs()
+        .unwrap()
+        .into_iter()
+        .filter(|entry| {
+            text(&entry.record, "event.name").as_deref() == Some("uc.operation.completed")
+        })
+        .collect();
+    assert_eq!(completed.len(), 1, "exactly one completion record");
+    let record = &completed[0].record;
+    assert_eq!(text(record, "error.type").as_deref(), Some("peer_rejected"));
+    assert_eq!(text(record, "uc.outcome").as_deref(), Some("error"));
 }
