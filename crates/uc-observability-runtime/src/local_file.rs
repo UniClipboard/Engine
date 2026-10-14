@@ -443,6 +443,7 @@ impl BoundedDailyMakeWriter {
     fn write_record(&self, buffer: &[u8], source: LocalDiagnosticSource) -> io::Result<()> {
         let mut state = lock(&self.state);
         state.rotate_if_needed()?;
+        state.ensure_current()?;
         let additional = u64::try_from(buffer.len()).unwrap_or(u64::MAX);
         if !state.make_room(additional)? {
             increment(&self.dropped_records);
@@ -471,7 +472,9 @@ impl Write for BoundedDailyWriter {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        lock(&self.owner.state).file.flush()
+        let mut state = lock(&self.owner.state);
+        state.ensure_current()?;
+        state.file.flush()
     }
 }
 
@@ -493,6 +496,7 @@ impl WriterState {
         retention_days: u64,
         max_bytes: u64,
     ) -> io::Result<Self> {
+        std::fs::create_dir_all(&directory)?;
         let path = directory.join(file_name(date));
         let file = open_managed_file(&path)?;
         let current_bytes = file.metadata()?.len();
@@ -546,6 +550,7 @@ impl WriterState {
         if today == self.date {
             return Ok(());
         }
+        std::fs::create_dir_all(&self.directory)?;
         cleanup(&self.directory, today, self.retention_days, self.max_bytes)?;
         *self = Self::open(
             self.directory.clone(),
@@ -555,6 +560,37 @@ impl WriterState {
         )?;
         Ok(())
     }
+
+    /// 打开的文件仍是目录里的当天文件；目录或文件被外部删除、替换后重建并重新统计配额。
+    ///
+    /// 已打开的描述符在文件被删除后依旧可写，记录会静默落入不可达的文件，所以每次写入前都核对路径。
+    fn ensure_current(&mut self) -> io::Result<()> {
+        let path = self.directory.join(file_name(self.date));
+        if std::fs::symlink_metadata(&path).is_ok_and(|metadata| same_file(&metadata, &self.file)) {
+            return Ok(());
+        }
+        *self = Self::open(
+            self.directory.clone(),
+            self.date,
+            self.retention_days,
+            self.max_bytes,
+        )?;
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn same_file(path_metadata: &std::fs::Metadata, file: &File) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    file.metadata().is_ok_and(|opened| {
+        opened.dev() == path_metadata.dev() && opened.ino() == path_metadata.ino()
+    })
+}
+
+#[cfg(not(unix))]
+fn same_file(path_metadata: &std::fs::Metadata, _file: &File) -> bool {
+    path_metadata.is_file()
 }
 
 fn open_managed_file(path: &Path) -> io::Result<File> {
@@ -839,6 +875,29 @@ mod tests {
 
         assert!(!older.exists());
         assert!(current.exists());
+    }
+
+    #[test]
+    fn day_rollover_recreates_a_directory_removed_while_the_writer_was_open() {
+        let root = tempdir().expect("temp dir");
+        let directory = root.path().join("logs");
+        std::fs::create_dir(&directory).expect("log directory");
+        let yesterday = Utc::now()
+            .date_naive()
+            .checked_sub_days(Days::new(1))
+            .expect("date");
+        let mut state =
+            WriterState::open(directory.clone(), yesterday, 7, 1_024).expect("yesterday file");
+        std::fs::remove_dir_all(&directory).expect("remove directory");
+
+        state
+            .rotate_if_needed()
+            .expect("rotation recreates the directory");
+        state.ensure_current().expect("current file");
+
+        state.file.write_all(b"after-rollover\n").expect("write");
+        let today = directory.join(file_name(Utc::now().date_naive()));
+        assert_eq!(std::fs::read(today).expect("today"), b"after-rollover\n");
     }
 
     #[test]
