@@ -22,6 +22,8 @@ if [[ "${1:-}" != --install ]]; then
     mkdir -p "$UC_ENGINE_MBX_STATS_DIR"
     report_dir=$(mktemp -d "$UC_ENGINE_MBX_STATS_DIR/session.XXXXXX")
     export MBX_STATS_REPORT="$report_dir/stats.json"
+    printf '%s\n' "$@" > "$report_dir/cargo-args.txt"
+    export MBX_BYPASS_LOG="$report_dir/bypass.txt"
   fi
   if [[ "${1:-}" != --r2 && -n "${BUILD_CACHE_R2_ENDPOINT:-}" ]]; then
     set -- --r2 "$@"
