@@ -44,6 +44,19 @@ fn stable_initial_authentication_failure_is_saved_as_local_rejection() {
 }
 
 #[test]
+fn an_unresponsive_sponsor_is_saved_as_its_own_local_rejection() {
+    let rejected = initiated_joiner_aggregate_fixture()
+        .reject_before_authentication(SpaceAdmissionRejectionReason::SponsorUnresponsive)
+        .expect("an unauthenticated Joiner can save that the sponsor never answered");
+
+    assert!(rejected.is_terminal());
+    assert_eq!(
+        rejected.rejection_reason(),
+        Some(SpaceAdmissionRejectionReason::SponsorUnresponsive)
+    );
+}
+
+#[test]
 fn authenticated_joiner_exposes_continuation_recovery_for_the_same_request() {
     let aggregate = initiated_joiner_aggregate_fixture()
         .with_authenticated_channel(

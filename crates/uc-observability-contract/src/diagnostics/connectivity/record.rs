@@ -27,6 +27,7 @@ pub enum ExchangeFailure {
     AuthenticationRejected,
     ProtocolRejected,
     InvitationUnavailable,
+    SponsorUnresponsive,
     PeerUpgradeRequired,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,6 +49,7 @@ pub enum RecoveryDeferral {
 pub enum RejectionCause {
     InvitationUnavailable,
     AuthenticationRejected,
+    SponsorUnresponsive,
     PeerUpgradeRequired,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -321,6 +323,7 @@ impl LocalEvent {
                                     RejectionCause::AuthenticationRejected => {
                                         "authentication_rejected"
                                     }
+                                    RejectionCause::SponsorUnresponsive => "sponsor_unresponsive",
                                     RejectionCause::PeerUpgradeRequired => "peer_upgrade_required",
                                 },
                             )
@@ -446,6 +449,7 @@ fn exchange_reason(reason: ExchangeFailure) -> &'static str {
         ExchangeFailure::AuthenticationRejected => "authentication_rejected",
         ExchangeFailure::ProtocolRejected => "protocol_rejected",
         ExchangeFailure::InvitationUnavailable => "invitation_unavailable",
+        ExchangeFailure::SponsorUnresponsive => "sponsor_unresponsive",
         ExchangeFailure::PeerUpgradeRequired => "peer_upgrade_required",
     }
 }

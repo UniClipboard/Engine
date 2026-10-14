@@ -640,6 +640,19 @@ async fn joiner_distinguishes_why_the_opaque_response_never_arrived() {
                 .collect::<Vec<_>>(),
             "{behavior:?}"
         );
+        // 只有读响应超时有独立结果；其余失败（含真实的认证关闭）仍是认证被拒绝，busy 是延期。
+        let busy = matches!(behavior, ResponseBehavior::Close(code) if code == CLOSE_BUSY);
+        assert!(
+            if busy {
+                matches!(error, SpaceAdmissionTransportError::Deferred { .. })
+            } else {
+                matches!(
+                    error,
+                    SpaceAdmissionTransportError::AuthenticationRejected { .. }
+                )
+            },
+            "{behavior:?}: {error:?}"
+        );
     }
 }
 
@@ -648,11 +661,11 @@ async fn joiner_distinguishes_why_the_opaque_response_never_arrived() {
 async fn silent_sponsor_is_recorded_as_response_timeout_not_authentication_failure() {
     let (error, details, error_types) =
         joiner_response_failure(MisbehavingSponsor(ResponseBehavior::Silent)).await;
-    // 公开结果保持不变：Application 仍看到认证被拒绝。
-    assert!(matches!(
-        error,
-        SpaceAdmissionTransportError::AuthenticationRejected { .. }
-    ));
+    // 沉默的 sponsor 有自己的公开结果，不再是认证被拒绝（口令错误）。
+    assert!(
+        matches!(error, SpaceAdmissionTransportError::SponsorUnresponsive),
+        "{error:?}"
+    );
     assert_eq!(details, vec![("receive_response", "response_timeout")]);
     assert_eq!(error_types, vec!["timeout".to_owned()]);
 }

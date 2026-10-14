@@ -243,6 +243,8 @@ impl std::fmt::Debug for SpaceAdmissionEnvelopeHeaderV1 {
 pub enum SpaceAdmissionRejectionReason {
     InvitationUnavailable,
     AuthenticationRejected,
+    /// Sponsor 收下初次请求后在截止内没有任何应答；不是认证失败。
+    SponsorUnresponsive,
     IdentityConflict,
     BaseHistoryChanged,
     JoinerHistoryAhead,
