@@ -38,6 +38,11 @@ pub enum AdmissionExchangeStep {
     PrepareReply,
     SendReply,
     ReceiveAcknowledgement,
+    /// Joiner 初次交换：打开流、发出初次 hello、等待 `OpaqueResponse`、发出 `OpaqueFinish`。
+    OpenStream,
+    SendInitialHello,
+    ReceiveOpaqueResponse,
+    SendOpaqueFinish,
 }
 impl AdmissionExchangeStep {
     pub(super) fn as_str(self) -> &'static str {
@@ -53,6 +58,10 @@ impl AdmissionExchangeStep {
             Self::PrepareReply => "prepare_reply",
             Self::SendReply => "send_reply",
             Self::ReceiveAcknowledgement => "receive_acknowledgement",
+            Self::OpenStream => "open_stream",
+            Self::SendInitialHello => "send_initial_hello",
+            Self::ReceiveOpaqueResponse => "receive_opaque_response",
+            Self::SendOpaqueFinish => "send_opaque_finish",
         }
     }
 }
@@ -174,6 +183,8 @@ pub struct AdmissionExchangeObservation {
     active: Option<(AdmissionExchangeStep, Instant)>,
     failure: Option<AdmissionExchangeFailureDetail>,
     finished: bool,
+    /// 仅记录步骤：完成记录由调用方自己写，这里不重复结算。
+    steps_only: bool,
 }
 impl AdmissionExchangeObservation {
     pub fn begin(side: AdmissionExchangeSide) -> Self {
@@ -185,7 +196,19 @@ impl AdmissionExchangeObservation {
             active: None,
             failure: None,
             finished: false,
+            steps_only: false,
         }
+    }
+    /// 只记录步骤，不写完成记录；用于完成记录已由调用方负责的交换（初次 hello 到 `OpaqueFinish`）。
+    pub fn begin_steps_only(side: AdmissionExchangeSide) -> Self {
+        let mut observation = Self::begin(side);
+        observation.steps_only = true;
+        observation
+    }
+    /// 结束步骤记录；最后一步按已记录的失败结算。
+    pub fn end_steps(mut self) {
+        self.finished = true;
+        self.end_step(self.failure.map(|detail| detail.reason));
     }
     pub fn start_step(&mut self, step: AdmissionExchangeStep) {
         self.end_step(None);
@@ -238,6 +261,16 @@ impl AdmissionExchangeObservation {
 impl Drop for AdmissionExchangeObservation {
     fn drop(&mut self) {
         if !self.finished {
+            if self.steps_only {
+                // 提前返回的错误已经记下失败原因；没有记录失败才是被取消。
+                let failure = self
+                    .failure
+                    .map_or(AdmissionExchangeFailure::Interrupted, |detail| {
+                        detail.reason
+                    });
+                self.end_step(Some(failure));
+                return;
+            }
             self.end_step(Some(AdmissionExchangeFailure::Interrupted));
             self.span.in_scope(|| {
                 super::super::complete_operation(OperationCompletion::cancelled(

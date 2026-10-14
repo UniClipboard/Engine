@@ -687,3 +687,69 @@ async fn session_gate_close_before_the_response_defers_the_joiner() {
     );
     assert!(error_types.is_empty(), "a deferral is not an error");
 }
+
+/// 失败时步骤记录停在等待 `OpaqueResponse` 的那一步，并带粗分类原因。
+#[tokio::test]
+async fn failed_initial_exchange_stops_the_step_records_at_the_response() {
+    let exporter = InMemoryLogExporter::default();
+    let logs = SdkLoggerProvider::builder()
+        .with_simple_exporter(exporter.clone())
+        .build();
+    let subscriber = tracing_subscriber::registry().with(
+        OpenTelemetryTracingBridge::new(&logs)
+            .with_filter(filter_fn(|metadata| metadata.target() == "uc.connectivity")),
+    );
+    let _subscriber = tracing::subscriber::set_default(subscriber);
+    let sponsor = bound_endpoint().await;
+    wait_for_direct_addrs(&sponsor).await;
+    let joiner = bound_endpoint().await;
+    wait_for_direct_addrs(&joiner).await;
+    let router = Router::builder((*sponsor).clone())
+        .accept(
+            SPACE_ADMISSION_ALPN,
+            MisbehavingSponsor(ResponseBehavior::ResetStream),
+        )
+        .spawn();
+    let invitation = InvitationId::from_bytes([0x73; 32]).expect("invitation id");
+    let derived = SpaceAdmissionAuth::derive_password_equivalent(b"step-failure", invitation);
+    let password = AdmissionEncryptedPasswordEquivalent::from_bytes(derived.as_bytes().to_vec())
+        .expect("password equivalent");
+    let route = SpaceAdmissionRoute::from_bytes(
+        encode_space_admission_route(&sponsor.addr(), Some(invitation)).expect("route"),
+    )
+    .expect("route");
+    let result = IrohSpaceAdmissionTransport::new(joiner.clone())
+        .establish_initial(
+            SpaceAdmissionId::from_bytes([0x74; 32]).expect("admission id"),
+            AdmissionAttemptTimeline::start(1_000).expect("timeline"),
+            &route,
+            &password,
+        )
+        .await;
+    assert!(result.is_err());
+    logs.force_flush().expect("flush");
+    let finished: Vec<_> = exchange_progress::step_records(&exporter)
+        .into_iter()
+        .filter(|record| record["duration_ms"].is_number())
+        .map(|record| {
+            (
+                record["step"].as_str().expect("step").to_owned(),
+                record["error.reason"].as_str().map(str::to_owned),
+            )
+        })
+        .collect();
+    assert_eq!(
+        finished,
+        [
+            ("open_stream".to_owned(), None),
+            ("send_initial_hello".to_owned(), None),
+            (
+                "receive_opaque_response".to_owned(),
+                Some("connection_closed".to_owned())
+            ),
+        ]
+    );
+    router.shutdown().await.expect("router");
+    joiner.close().await;
+    sponsor.close().await;
+}

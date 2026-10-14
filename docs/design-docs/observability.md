@@ -299,6 +299,8 @@ Joiner 发出初次 hello 后读取 `OpaqueResponse` 失败时，完成记录的
 `peer_upgrade_required`、`protocol`、`other`，不记录原始数值）。完成记录的 `error.type` 随之为 `timeout`、`channel_closed`、
 `decode_failed`，应用层关闭保持按公开结果得出的类别；其中关闭码 0（会话门的 `session_unavailable` / `session_retired`，sponsor 当前没有可用会话）与 busy 一样映射为延期，不再被当作认证被拒绝；读响应超时（sponsor 收下请求后无应答）的公开结果是独立的 `SponsorUnresponsive`（Engine 的 `JoinSpaceRejectionReasonSummary::SponsorUnresponsive`，两套绑定的同名枚举值），不再是认证被拒绝；它与认证被拒绝一样是终态拒绝，重试策略不变。其余返回给 Application 的公开结果不变。
 
+Joiner 初次交换（hello 到 `OpaqueFinish`）同样记录步骤：`open_stream`、`send_initial_hello`、`receive_opaque_response`、`validate_reply`、`send_opaque_finish`，成功时每步各一条完成记录，失败时停在出问题的那一步并带粗分类 `error.reason`（具体类别见上文完成记录的本地详情）；这些步骤不写第二条完成记录。读响应失败时另取一次 `ExchangeFinished` 网络快照（仍只在详细模式落盘）。
+
 `pairing.exchange.network.snapshot` 只在详细模式落盘，在连接建立后、交换开始及正常返回或失败返回时各取一次，
 不增加后台采样任务。只保留当前选中路径的固定类型、可用时的往返延迟微秒数，以及连接累计丢包和收发数据报数量。
 丢包计数包含此前路径，不视为本步骤新增丢包；路径或延迟不可取得时明确标为 unknown/unavailable，
