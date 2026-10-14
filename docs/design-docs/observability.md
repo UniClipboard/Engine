@@ -319,6 +319,8 @@ Blob 拉取失败按既有错误类型落成稳定原因，不再统一记为 `U
 
 离线投递恢复的每一轮（启动扫描 `trigger = startup` 或设备上线 `trigger = peer_online`）以一条 INFO 模块记录 `clipboard delivery recovery round finished` 收尾，字段为 `trigger` 与固定的 `outcome`：`dispatched`、`nothing_to_recover`、`cancelled`、`sync_disabled`、`member_inactive`、`scope_unavailable`、`target_paused`、`target_not_current`、`listing_failed`、`supersede_failed`、`status_changed`、`payload_lost`、`not_resendable`、`delivery_failed`、`delivery_skipped`。此前关闭同步、本机成员失效、成员范围读取失败等提前返回不留任何痕迹；现在每个返回路径都对应一个类别，不记录条目、设备或错误正文。按 Application 约束，这里用完成记录而不是在调用点增加 span；正常“无需恢复”由模块日志令牌桶限速，不单独占据业务主列表。
 
+选择设备组（`query_device_group_choices`、`choose_device_group`）的结果在标准采集模式下就可见，不再只在详细窗口里：查询或选择失败为 WARN（`error_kind`、`error_stage` 沿用既有词表）；宿主传来的议题或选项标识无法解析、或应用层判定选择无效时，为带固定 `reason`（`invalid_issue`、`invalid_choice`、`choice_rejected`）的 WARN；每次选择的结局为一条 INFO `device group choice settled`，`outcome` 为 `completed`、`pending`、`re_pairing_required`、`already_completed`、`state_changed`、`local_device_confirmation_required`。记录不含议题、选项、设备或成员标识，对外错误码与摘要不变。
+
 会话门拒绝入站连接时（握手后没有可用会话世代、分发器取不到世代，或已接受的连接因世代退出被取消）留下一条 INFO 模块记录 `connection.rejected by the session gate`，字段只有 `reason`（`session_unavailable`、`session_retired`）和 `alpn`（`space_admission`、`presence`、`transfer_progress`、`other` 的固定类别）；不含对端标识、地址或原始 ALPN。记录点沿用模块日志的令牌桶限速，反复重连的对端不会放大日志量。
 
 Joiner 解析短邀请码的 `runtime.work.finished`（`step = joiner_resolve_invitation`）附带来源摘要：`winner`（`cloud`、`mdns`、`full_invitation`；全部失败时省略）、`cloud_outcome` 与 `mdns_outcome`。来源结果是固定类别：`not_run`（完整邀请或仅局域网模式未启动）、`pending`（对方先成功时该来源尚无结果）、`found`、`not_found`、`expired`、`conflict`、`transport_failed`、`service_unavailable`、`invalid_response`、`invalid_invitation`、`local_unavailable`。记录不含邀请码、票据、URL、地址或服务端文本；原先被丢弃的云端错误现在以类别保留，完整错误链仍随返回值传给调用方。

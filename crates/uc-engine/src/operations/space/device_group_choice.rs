@@ -11,17 +11,13 @@ use crate::{
     DeviceGroupChoiceResultSummary, DeviceGroupChoicesSummary, EngineError, EngineErrorCategory,
     OperationResult,
 };
-use uc_observability_contract::uc_debug;
+use uc_observability_contract::{uc_info, uc_warn};
 
 pub async fn execute_query_device_group_choices(
     facade: &uc_application::facade::AppFacade,
 ) -> Result<OperationResult, EngineError> {
     let view = facade.query_device_group_choices().await.map_err(|error| {
-        uc_debug!(
-            error_kind = query_error_kind(&error),
-            error_stage = "load_space_device_state",
-            "device group choice query failed"
-        );
+        record_query_failure(&error);
         query_error(&error)
     })?;
     let local = view
@@ -66,25 +62,7 @@ pub async fn execute_choose_device_group(
     facade: &uc_application::facade::AppFacade,
     input: ChooseDeviceGroupInput,
 ) -> Result<OperationResult, EngineError> {
-    let issue = if let Some(value) = input.issue_id.strip_prefix("p:") {
-        DeviceGroupIssue::PendingChange(
-            uc_core::membership::MembershipEventId::from_hex(value).ok_or_else(invalid_input)?,
-        )
-    } else if let Some(value) = input.issue_id.strip_prefix("c:") {
-        DeviceGroupIssue::BranchConflict(MembershipConflictId::from_bytes(
-            decode(value).ok_or_else(invalid_input)?,
-        ))
-    } else {
-        return Err(invalid_input());
-    };
-    let choice = match input.choice_id.as_str() {
-        "apply" => DeviceGroupChoice::ApplyPendingChange,
-        "keep" => DeviceGroupChoice::KeepCurrentGroup,
-        value if value.starts_with("b:") => DeviceGroupChoice::Branch(
-            MembershipBranchId::from_bytes(decode(&value[2..]).ok_or_else(invalid_input)?),
-        ),
-        _ => return Err(invalid_input()),
-    };
+    let (issue, choice) = parse_request(&input)?;
     let result = facade
         .choose_device_group(ChooseDeviceGroup {
             issue,
@@ -94,19 +72,92 @@ pub async fn execute_choose_device_group(
         })
         .await
         .map_err(|error| {
-            uc_debug!(
-                error_kind = choose_error_kind(&error),
-                "device group choice failed"
-            );
+            record_choose_failure(&error);
             unavailable()
         })?;
-    let (outcome, current_revision) = outcome(result).ok_or_else(invalid_input)?;
+    settle(result)
+}
+
+/// 宿主传来的议题与选项标识必须可解析；无法解析是宿主的输入错误，留下固定原因而不是静默拒绝。
+fn parse_request(
+    input: &ChooseDeviceGroupInput,
+) -> Result<(DeviceGroupIssue, DeviceGroupChoice), EngineError> {
+    let issue = if let Some(value) = input.issue_id.strip_prefix("p:") {
+        DeviceGroupIssue::PendingChange(
+            uc_core::membership::MembershipEventId::from_hex(value)
+                .ok_or_else(|| invalid_request("invalid_issue"))?,
+        )
+    } else if let Some(value) = input.issue_id.strip_prefix("c:") {
+        DeviceGroupIssue::BranchConflict(MembershipConflictId::from_bytes(
+            decode(value).ok_or_else(|| invalid_request("invalid_issue"))?,
+        ))
+    } else {
+        return Err(invalid_request("invalid_issue"));
+    };
+    let choice = match input.choice_id.as_str() {
+        "apply" => DeviceGroupChoice::ApplyPendingChange,
+        "keep" => DeviceGroupChoice::KeepCurrentGroup,
+        value if value.starts_with("b:") => {
+            DeviceGroupChoice::Branch(MembershipBranchId::from_bytes(
+                decode(&value[2..]).ok_or_else(|| invalid_request("invalid_choice"))?,
+            ))
+        }
+        _ => return Err(invalid_request("invalid_choice")),
+    };
+    Ok((issue, choice))
+}
+
+/// 把应用层结果映射为公开摘要，并为这次选择的结局留下一条 INFO 记录。
+fn settle(result: ChooseDeviceGroupResult) -> Result<OperationResult, EngineError> {
+    let Some((outcome, current_revision)) = outcome(result) else {
+        return Err(invalid_request("choice_rejected"));
+    };
+    uc_info!(
+        outcome = outcome_label(outcome),
+        "device group choice settled"
+    );
     Ok(OperationResult::DeviceGroupChosen(
         DeviceGroupChoiceResultSummary {
             outcome,
             current_revision,
         },
     ))
+}
+
+fn outcome_label(outcome: DeviceGroupChoiceOutcomeSummary) -> &'static str {
+    match outcome {
+        DeviceGroupChoiceOutcomeSummary::Completed => "completed",
+        DeviceGroupChoiceOutcomeSummary::Pending => "pending",
+        DeviceGroupChoiceOutcomeSummary::RePairingRequired => "re_pairing_required",
+        DeviceGroupChoiceOutcomeSummary::AlreadyCompleted => "already_completed",
+        DeviceGroupChoiceOutcomeSummary::StateChanged => "state_changed",
+        DeviceGroupChoiceOutcomeSummary::LocalDeviceConfirmationRequired => {
+            "local_device_confirmation_required"
+        }
+    }
+}
+
+fn record_query_failure(error: &uc_application::facade::QueryDeviceGroupChoicesError) {
+    uc_warn!(
+        error_kind = query_error_kind(error),
+        error_stage = "load_space_device_state",
+        "device group choice query failed"
+    );
+}
+
+fn record_choose_failure(error: &uc_application::facade::ChooseDeviceGroupError) {
+    uc_warn!(
+        error_kind = choose_error_kind(error),
+        "device group choice failed"
+    );
+}
+
+fn invalid_request(reason: &'static str) -> EngineError {
+    uc_warn!(
+        reason = reason,
+        "device group choice request was not accepted"
+    );
+    invalid_input()
 }
 
 fn outcome(
@@ -296,5 +347,114 @@ mod tests {
         let locked = query_error(&locked);
         assert_eq!(locked.code(), 1212);
         assert!(!locked.is_retryable());
+    }
+
+    fn captured() -> (
+        uc_testkit::log_capture::CapturedLogs,
+        tracing::subscriber::DefaultGuard,
+    ) {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let guard = logs.install();
+        (logs, guard)
+    }
+
+    fn lines(logs: &uc_testkit::log_capture::CapturedLogs, needle: &str) -> Vec<String> {
+        logs.output()
+            .lines()
+            .filter(|line| line.contains(needle))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn request(issue: &str, choice: &str) -> ChooseDeviceGroupInput {
+        ChooseDeviceGroupInput {
+            issue_id: issue.to_owned(),
+            choice_id: choice.to_owned(),
+            expected_revision: 1,
+            confirm_local_removal: false,
+        }
+    }
+
+    #[test]
+    fn unparseable_requests_leave_one_warning_with_a_fixed_reason() {
+        for (issue, choice, reason) in [
+            ("x:1", "keep", "invalid_issue"),
+            ("p:not-hex", "keep", "invalid_issue"),
+            (&format!("c:{}", "0".repeat(10)), "keep", "invalid_issue"),
+            (&format!("p:{}", "0".repeat(64)), "bogus", "invalid_choice"),
+            (&format!("p:{}", "0".repeat(64)), "b:zz", "invalid_choice"),
+        ] {
+            let (logs, _guard) = captured();
+            let error = parse_request(&request(issue, choice)).expect_err("rejected");
+            assert_eq!(error.code(), 1210);
+            let records = lines(&logs, "device group choice request was not accepted");
+            assert_eq!(records.len(), 1, "{issue} {choice}: {}", logs.output());
+            assert!(records[0].contains(" WARN "), "{}", records[0]);
+            assert!(
+                records[0].contains(&format!("reason=\"{reason}\"")),
+                "{}",
+                records[0]
+            );
+            assert!(!logs.output().contains(issue) || issue.is_empty());
+        }
+        let (logs, _guard) = captured();
+        assert!(parse_request(&request(&format!("p:{}", "0".repeat(64)), "keep")).is_ok());
+        assert!(lines(&logs, "was not accepted").is_empty());
+    }
+
+    #[test]
+    fn every_settled_outcome_leaves_one_info_record() {
+        use uc_application::facade::ResolveMembershipConflictResult as R;
+        let cases = [
+            (
+                ChooseDeviceGroupResult::StateChanged {
+                    current_revision: 4,
+                },
+                "state_changed",
+            ),
+            (
+                ChooseDeviceGroupResult::BranchConflict(R::RePairingRequired {
+                    conflict_id: MembershipConflictId::from_bytes([1; 32]),
+                }),
+                "re_pairing_required",
+            ),
+        ];
+        for (result, expected) in cases {
+            let (logs, _guard) = captured();
+            assert!(settle(result).is_ok());
+            let records = lines(&logs, "device group choice settled");
+            assert_eq!(records.len(), 1, "{}", logs.output());
+            assert!(records[0].contains(" INFO "), "{}", records[0]);
+            assert!(
+                records[0].contains(&format!("outcome=\"{expected}\"")),
+                "{}",
+                records[0]
+            );
+        }
+        let (logs, _guard) = captured();
+        assert!(settle(ChooseDeviceGroupResult::InvalidChoice).is_err());
+        assert_eq!(
+            lines(&logs, "choice_rejected").len(),
+            1,
+            "{}",
+            logs.output()
+        );
+    }
+
+    #[test]
+    fn failures_that_reach_the_host_are_warnings_not_debug() {
+        use uc_application::facade::{ChooseDeviceGroupError, DecideDeviceTrustChangeError};
+        let (logs, _guard) = captured();
+        record_query_failure(&QueryDeviceGroupChoicesError::DeviceTrust {
+            source: QueryDeviceTrustError::Unavailable,
+        });
+        record_choose_failure(&ChooseDeviceGroupError::PendingChange {
+            source: DecideDeviceTrustChangeError::StateChanged,
+        });
+        let query = lines(&logs, "device group choice query failed");
+        let choose = lines(&logs, "device group choice failed");
+        assert_eq!((query.len(), choose.len()), (1, 1), "{}", logs.output());
+        assert!(query[0].contains(" WARN ") && query[0].contains("device_trust_unavailable"));
+        assert!(choose[0].contains(" WARN ") && choose[0].contains("pending_change_state_changed"));
     }
 }
