@@ -307,6 +307,8 @@ Sponsor 的准入处理器实现 `on_accepting`，在 QUIC 握手结束时留下
 
 Sponsor 准入处理器的结局在标准采集模式下就可见：因停止服务关闭连接（`reason = stopping`）、认证被拒绝、对端需升级、对端未确认回复、交换超时，各留下一条 INFO 模块记录并带 `error_type`（既有词表），不再依赖详细窗口。这些记录是本地分支证据，不重复既有的契约 ERROR 记录；记录点由模块日志令牌桶限速。
 
+Sponsor 解析准入凭据（`resolve_initial`、`load_continuation`）经 `runtime.work.started/finished` 计时，步骤为 `sponsor_credential_initial`、`sponsor_credential_continuation`，带 `duration_ms` 与 `uc.outcome`。钥匙串或存储变慢时，这段耗时不再混进 sponsor 的总耗时；失败类别仍由既有的认证完成记录（`CredentialFailure`）承担，这里不重复。
+
 会话门拒绝入站连接时（握手后没有可用会话世代、分发器取不到世代，或已接受的连接因世代退出被取消）留下一条 INFO 模块记录 `connection.rejected by the session gate`，字段只有 `reason`（`session_unavailable`、`session_retired`）和 `alpn`（`space_admission`、`presence`、`transfer_progress`、`other` 的固定类别）；不含对端标识、地址或原始 ALPN。记录点沿用模块日志的令牌桶限速，反复重连的对端不会放大日志量。
 
 Joiner 解析短邀请码的 `runtime.work.finished`（`step = joiner_resolve_invitation`）附带来源摘要：`winner`（`cloud`、`mdns`、`full_invitation`；全部失败时省略）、`cloud_outcome` 与 `mdns_outcome`。来源结果是固定类别：`not_run`（完整邀请或仅局域网模式未启动）、`pending`（对方先成功时该来源尚无结果）、`found`、`not_found`、`expired`、`conflict`、`transport_failed`、`service_unavailable`、`invalid_response`、`invalid_invitation`、`local_unavailable`。记录不含邀请码、票据、URL、地址或服务端文本；原先被丢弃的云端错误现在以类别保留，完整错误链仍随返回值传给调用方。
