@@ -2,6 +2,12 @@ name: Windows compiler cache validation
 # 独立手动验收；不替换正式 Windows 门禁，不接收远端凭据。
 on:
   workflow_dispatch:
+  push:
+    branches: [ci/windows-mbx-entry]
+    paths:
+      - scripts/build-cache/mbx.sh
+      - scripts/build-cache/verify-windows-cache.py
+      - .github/workflows/windows-cache-validation.yml
 permissions:
   contents: read
 jobs:
