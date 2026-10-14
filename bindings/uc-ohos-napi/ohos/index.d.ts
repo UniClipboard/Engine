@@ -313,6 +313,14 @@ export interface OhFileSourceCounts {
   writeFailedCount: string
   lastWrittenAtMs?: string
 }
+export interface OhModuleLogCounts {
+  emitted: string
+  rateLimited: string
+  budgetDropped: string
+  truncated: string
+  rejected: string
+  opaqueErrorLayers: string
+}
 export interface OhLocalDiagnosticStatus {
   runId: string
   capture: OhLocalCaptureStatus
@@ -334,6 +342,7 @@ export interface OhLocalDiagnosticExportReport {
   completedAtUtc: string
   otherProcessesFlushed: boolean
   files: OhFileSourceCounts[]
+  moduleLogs: OhModuleLogCounts
 }
 export interface OhHostDiagnosticReceipt {
   status: string

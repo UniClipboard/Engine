@@ -323,6 +323,26 @@ mod tests {
         assert!(!report.other_processes_flushed);
         crate::stop_local_diagnostic_capture(capture.capture_id.expect("id")).expect("stop");
 
+        // 同一记录点连发会被限速；导出报告必须把模块日志的丢弃数交给宿主。
+        for _ in 0..100 {
+            uc_engine::observability::uc_warn!(
+                target: "uc_infra_profile::export_report_counters",
+                error_kind = "burst",
+                "module log counter probe"
+            );
+        }
+        let counted = crate::prepare_local_diagnostic_export(1000).expect("counted report");
+        assert!(
+            counted.module_logs.emitted >= 1,
+            "{:?}",
+            counted.module_logs
+        );
+        assert!(
+            counted.module_logs.rate_limited >= 50,
+            "{:?}",
+            counted.module_logs
+        );
+
         emit_test_diagnostic_completion(TestDiagnosticCompletion::ProfileStorageUpgrade);
         schedule_flush_after_lifecycle();
         let first = wait_for_log(&directories, "profile_storage_upgrade");

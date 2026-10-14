@@ -304,6 +304,29 @@ impl From<engine::LocalDiagnosticStatus> for BindingLocalDiagnosticStatus {
     }
 }
 
+/// 模块日志（`uc_*!`）的运行期计数；与文件写入计数分开，丢弃发生在写入之前。
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct BindingModuleLogCounts {
+    pub emitted: u64,
+    pub rate_limited: u64,
+    pub budget_dropped: u64,
+    pub truncated: u64,
+    pub rejected: u64,
+    pub opaque_error_layers: u64,
+}
+impl From<engine::ModuleLogCounts> for BindingModuleLogCounts {
+    fn from(value: engine::ModuleLogCounts) -> Self {
+        Self {
+            emitted: value.emitted,
+            rate_limited: value.rate_limited,
+            budget_dropped: value.budget_dropped,
+            truncated: value.truncated,
+            rejected: value.rejected,
+            opaque_error_layers: value.opaque_error_layers,
+        }
+    }
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct BindingLocalDiagnosticExportReport {
     pub flush: BindingObservabilitySignalResult,
@@ -312,6 +335,7 @@ pub struct BindingLocalDiagnosticExportReport {
     pub completed_at_utc: String,
     pub other_processes_flushed: bool,
     pub files: Vec<BindingFileSourceCounts>,
+    pub module_logs: BindingModuleLogCounts,
 }
 impl From<engine::LocalDiagnosticExportReport> for BindingLocalDiagnosticExportReport {
     fn from(value: engine::LocalDiagnosticExportReport) -> Self {
@@ -335,6 +359,7 @@ impl From<engine::LocalDiagnosticExportReport> for BindingLocalDiagnosticExportR
             completed_at_utc: value.completed_at_utc,
             other_processes_flushed: value.other_processes_flushed,
             files: value.files.into_iter().map(Into::into).collect(),
+            module_logs: value.module_logs.into(),
         }
     }
 }

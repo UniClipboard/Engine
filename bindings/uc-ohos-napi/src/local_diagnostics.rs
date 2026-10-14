@@ -178,6 +178,29 @@ impl From<engine::LocalDiagnosticStatus> for OhLocalDiagnosticStatus {
     }
 }
 
+/// 模块日志（`uc_*!`）的运行期计数；与文件写入计数分开，丢弃发生在写入之前。
+#[napi(object)]
+pub struct OhModuleLogCounts {
+    pub emitted: String,
+    pub rate_limited: String,
+    pub budget_dropped: String,
+    pub truncated: String,
+    pub rejected: String,
+    pub opaque_error_layers: String,
+}
+impl From<engine::ModuleLogCounts> for OhModuleLogCounts {
+    fn from(value: engine::ModuleLogCounts) -> Self {
+        Self {
+            emitted: value.emitted.to_string(),
+            rate_limited: value.rate_limited.to_string(),
+            budget_dropped: value.budget_dropped.to_string(),
+            truncated: value.truncated.to_string(),
+            rejected: value.rejected.to_string(),
+            opaque_error_layers: value.opaque_error_layers.to_string(),
+        }
+    }
+}
+
 #[napi(object)]
 pub struct OhLocalDiagnosticExportReport {
     pub flush: String,
@@ -186,6 +209,7 @@ pub struct OhLocalDiagnosticExportReport {
     pub completed_at_utc: String,
     pub other_processes_flushed: bool,
     pub files: Vec<OhFileSourceCounts>,
+    pub module_logs: OhModuleLogCounts,
 }
 impl From<engine::LocalDiagnosticExportReport> for OhLocalDiagnosticExportReport {
     fn from(value: engine::LocalDiagnosticExportReport) -> Self {
@@ -196,6 +220,7 @@ impl From<engine::LocalDiagnosticExportReport> for OhLocalDiagnosticExportReport
             completed_at_utc: value.completed_at_utc,
             other_processes_flushed: value.other_processes_flushed,
             files: value.files.into_iter().map(Into::into).collect(),
+            module_logs: value.module_logs.into(),
         }
     }
 }

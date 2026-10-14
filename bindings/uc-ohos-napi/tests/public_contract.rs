@@ -76,6 +76,8 @@ async fn process_observability_health_is_public_and_current() {
         .files
         .iter()
         .any(|source| source.written_count != "0"));
+    assert!(report.module_logs.emitted.parse::<u64>().is_ok());
+    assert!(report.module_logs.budget_dropped.parse::<u64>().is_ok());
     assert_eq!(
         stop_local_diagnostic_capture(capture.capture_id.expect("capture id")).expect("stop"),
         "stopped"
