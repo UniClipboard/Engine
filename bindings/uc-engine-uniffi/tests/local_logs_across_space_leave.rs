@@ -1,6 +1,7 @@
-//! 移动端把 Engine 日志放在宿主缓存目录下（`<cache>/logs`），离开空间会清理缓存。
-//! 进程级日志写入器只在安装时打开当天文件，因此离开空间不能删掉正在写入的日志：
-//! 否则之后的记录写进已删除的文件，诊断导出报告已写入却找不到任何文件。
+//! 移动端 Engine 日志放在私有数据目录下的 `logs`，不在缓存目录内：离开空间会清理整个缓存，
+//! 进程级日志写入器持有当天文件直到进程退出，日志若在缓存里就会被一并删除，
+//! 之后的记录写进已删除的文件，诊断导出报告已写入却找不到任何文件。
+//! 旧版本把日志放在 `<cache>/logs`；安装观测运行期时一次性迁入新目录，旧记录不丢。
 //! 独立测试二进制：进程级 observability 每个进程只能安装一次。
 
 use std::collections::HashMap;
@@ -17,6 +18,28 @@ use uc_engine_uniffi::{
 
 const PASSPHRASE: &str = "correct horse battery staple";
 const SHUTDOWN_DEADLINE_MS: u64 = 30_000;
+/// 迁入的旧布局日志里的记录数；不是本次运行写入的，不计入 `written_count`。
+const LEGACY_RECORDS: u64 = 1;
+
+/// 公历日期（UTC），仅用于生成受管日志文件名。
+fn utc_date(time: std::time::SystemTime) -> String {
+    let days = time
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("after epoch")
+        .as_secs()
+        / 86_400;
+    // Howard Hinnant 的 civil_from_days。
+    let z = i64::try_from(days).expect("days") + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}")
+}
 
 struct DirectoryHost {
     private_data: PathBuf,
@@ -137,7 +160,18 @@ fn export_written_and_on_disk(logs: &Path) -> (u64, u64) {
 fn leaving_a_space_keeps_the_active_engine_log_exportable() {
     let root = tempfile::tempdir().expect("temporary host root");
     let host = Arc::new(DirectoryHost::new(root.path()));
-    let logs = host.cache.join("logs");
+    let logs = host.private_data.join("logs");
+    assert!(
+        !logs.starts_with(&host.cache),
+        "the log directory must not live inside the cache"
+    );
+    // 旧布局遗留的日志：安装时迁入新目录，缓存里不再保留。
+    let legacy = host.cache.join("logs");
+    fs::create_dir_all(&legacy).expect("legacy log directory");
+    // 迁入后仍在保留期内，所以用 UTC 昨天的日期命名。
+    let yesterday = utc_date(std::time::SystemTime::now() - std::time::Duration::from_secs(86_400));
+    let legacy_name = format!("engine.{yesterday}.jsonl");
+    fs::write(legacy.join(&legacy_name), b"{\"legacy\":true}\n").expect("legacy log file");
     let setup = install_process_observability(
         BindingObservabilityConfig {
             service_version: "1.2.3".to_owned(),
@@ -150,6 +184,14 @@ fn leaving_a_space_keeps_the_active_engine_log_exportable() {
     )
     .expect("observability install");
     assert_eq!(setup.local_file, BindingObservabilitySetupStatus::Ready);
+    assert_eq!(
+        fs::read(logs.join(&legacy_name)).expect("migrated legacy log"),
+        b"{\"legacy\":true}\n"
+    );
+    assert!(
+        !legacy.join(&legacy_name).exists(),
+        "the legacy copy is moved, not duplicated"
+    );
 
     let engine = MobileEngine::start(
         BindingConfig {
@@ -164,7 +206,7 @@ fn leaving_a_space_keeps_the_active_engine_log_exportable() {
         .expect("create space");
     let (written_before, on_disk_before) = export_written_and_on_disk(&logs);
     assert!(written_before > 0, "the engine must have written records");
-    assert_eq!(on_disk_before, written_before);
+    assert_eq!(on_disk_before, written_before + LEGACY_RECORDS);
 
     engine.leave_space().expect("leave space");
     engine
@@ -177,7 +219,8 @@ fn leaving_a_space_keeps_the_active_engine_log_exportable() {
         "records must keep being written after leaving"
     );
     assert_eq!(
-        on_disk_after, written_after,
+        on_disk_after,
+        written_after + LEGACY_RECORDS,
         "every record the engine reports as written must still be exportable after leaving"
     );
 

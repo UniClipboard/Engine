@@ -37,8 +37,8 @@ fn process_observability_is_host_owned_reused_and_lifecycle_safe() {
     let _guard = lock(&ENGINE_TEST_LOCK);
     let directory = tempfile::tempdir().expect("temporary directory");
     let host = Arc::new(MemoryHost::new(directory.path()));
-    fs::create_dir_all(&host.cache).expect("cache directory");
-    fs::write(host.cache.join("logs"), b"blocks log directory").expect("blocking log file");
+    fs::create_dir_all(&host.private_data).expect("private data directory");
+    fs::write(host.private_data.join("logs"), b"blocks log directory").expect("blocking log file");
     let config = BindingObservabilityConfig {
         service_version: "1.2.3".to_owned(),
         environment: BindingDeploymentEnvironment::Test,

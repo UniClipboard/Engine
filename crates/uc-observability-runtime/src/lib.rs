@@ -34,7 +34,7 @@ mod telemetry;
 #[cfg(target_os = "android")]
 pub use android::*;
 pub use config::*;
-pub use local_file::managed_log_files;
+pub use local_file::{managed_log_files, migrate_managed_log_files};
 pub use runtime::*;
 pub use status::*;
 pub use subscriber::HostLogLayer;
