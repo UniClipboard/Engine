@@ -344,4 +344,71 @@ mod tests {
         client.close().await;
         router.shutdown().await.unwrap();
     }
+
+    /// 会话门拒绝的真实路径：无世代时握手后被拒绝，世代退出时已接受的连接被取消，各留下一条记录。
+    #[tokio::test]
+    async fn session_gate_rejections_leave_exactly_one_record_each() {
+        const TEST_ALPN: &[u8] = b"uniclipboard/test-gate-record/1";
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+
+        let registry = Arc::new(SessionProtocolRegistry::new());
+        let dispatcher = registry.dispatcher(TEST_ALPN);
+        let server = Endpoint::builder(iroh::endpoint::presets::N0)
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup()
+            .hooks(registry.endpoint_hooks())
+            .bind()
+            .await
+            .unwrap();
+        let client = Endpoint::builder(iroh::endpoint::presets::N0)
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup()
+            .bind()
+            .await
+            .unwrap();
+        let router = ProtocolRouterBuilder::new(server.clone())
+            .accept(TEST_ALPN, dispatcher)
+            .spawn();
+
+        let unavailable = client.connect(server.addr(), TEST_ALPN).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), unavailable.closed())
+            .await
+            .unwrap();
+        let rejected = "connection.rejected by the session gate";
+        assert_eq!(logs.count(rejected), 1, "{}", logs.output());
+        assert_eq!(logs.count("reason=\"session_unavailable\""), 1);
+        assert_eq!(logs.count("alpn=\"other\""), 1);
+
+        let started = Arc::new(Notify::new());
+        let mut handlers = SessionProtocolHandlersBuilder::new();
+        handlers
+            .install(
+                [TEST_ALPN],
+                CountAndHold {
+                    accepted: Arc::new(AtomicUsize::new(0)),
+                    shutdowns: Arc::new(AtomicUsize::new(0)),
+                    started: Arc::clone(&started),
+                },
+            )
+            .unwrap();
+        let generation = registry.publish(handlers.build()).await.unwrap();
+        let connection = client.connect(server.addr(), TEST_ALPN).await.unwrap();
+        started.notified().await;
+        assert_eq!(
+            logs.count(rejected),
+            1,
+            "a served connection is not a rejection"
+        );
+
+        registry.quiesce(&generation).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), connection.closed())
+            .await
+            .unwrap();
+        assert_eq!(logs.count(rejected), 2, "{}", logs.output());
+        assert_eq!(logs.count("reason=\"session_retired\""), 1);
+
+        client.close().await;
+        router.shutdown().await.unwrap();
+    }
 }

@@ -8,7 +8,11 @@ use iroh::endpoint::{
 };
 use iroh::protocol::{AcceptError, DynProtocolHandler, ProtocolHandler};
 use tokio::sync::{watch, Notify};
-use uc_observability_contract::uc_warn;
+use uc_observability_contract::{uc_info, uc_warn};
+
+use super::peer_reachability_adapter::{LEGACY_PEER_REACHABILITY_ALPN, PEER_REACHABILITY_ALPN};
+use super::space_admission::SPACE_ADMISSION_ALPN;
+use super::transfer_progress_adapter::TRANSFER_PROGRESS_ALPN;
 
 #[derive(Debug)]
 pub(super) struct SessionProtocolRegistry {
@@ -270,6 +274,47 @@ impl SessionProtocolRegistry {
     }
 }
 
+/// 会话门拒绝入站连接的原因；只有这两个固定词表。
+#[derive(Clone, Copy)]
+enum GateRejection {
+    /// 当前没有可用的会话世代。
+    SessionUnavailable,
+    /// 连接已被接受，但所属会话世代随后退出。
+    SessionRetired,
+}
+
+impl GateRejection {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::SessionUnavailable => "session_unavailable",
+            Self::SessionRetired => "session_retired",
+        }
+    }
+}
+
+/// ALPN 的固定类别；不记录原始 ALPN 字节，也不含对端标识或地址。
+fn alpn_class(alpn: &[u8]) -> &'static str {
+    if alpn == SPACE_ADMISSION_ALPN {
+        "space_admission"
+    } else if alpn == PEER_REACHABILITY_ALPN || alpn == LEGACY_PEER_REACHABILITY_ALPN {
+        "presence"
+    } else if alpn == TRANSFER_PROGRESS_ALPN {
+        "transfer_progress"
+    } else {
+        "other"
+    }
+}
+
+/// 会话门拒绝连接时的业务记录：对端看到的只是关闭码 0，本机侧需要知道拒绝的原因与协议类别。
+/// 同一记录点由模块日志的令牌桶限速，不会被反复重连的对端放大。
+fn record_gate_rejection(rejection: GateRejection, alpn: &[u8]) {
+    uc_info!(
+        reason = rejection.reason(),
+        alpn = alpn_class(alpn),
+        "connection.rejected by the session gate"
+    );
+}
+
 /// 退出会话世代的每个无界等待阶段允许的静默时长；超过后只记录卡在哪一阶段，等待与资源所有权不变。
 const QUIESCE_STALL_BUDGET: Duration = Duration::from_secs(15);
 
@@ -478,6 +523,7 @@ impl ProtocolHandler for SessionProtocolDispatcher {
             .registry
             .acquire(&self.alpn, &connection)
             .map_err(|error| {
+                record_gate_rejection(GateRejection::SessionUnavailable, &self.alpn);
                 AcceptError::from_err(SessionProtocolUnavailable {
                     source: Some(error),
                 })
@@ -488,6 +534,7 @@ impl ProtocolHandler for SessionProtocolDispatcher {
         tokio::select! {
             biased;
             _ = cancellation => {
+                record_gate_rejection(GateRejection::SessionRetired, &self.alpn);
                 connection.close(0u32.into(), b"session_retired");
                 Err(AcceptError::from_err(SessionProtocolUnavailable { source: None }))
             }
@@ -516,6 +563,7 @@ impl EndpointHooks for SessionProtocolEndpointHooks {
         if self.registry.register_connection(connection) {
             AfterHandshakeOutcome::Accept
         } else {
+            record_gate_rejection(GateRejection::SessionUnavailable, connection.alpn());
             AfterHandshakeOutcome::Reject {
                 error_code: 0u32.into(),
                 reason: b"session_unavailable".to_vec(),
