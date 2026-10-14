@@ -243,6 +243,8 @@ __log_field_catalog! {
     tag_id: Identifier(random),
     transfer_id: Identifier(random),
     // Literal
+    // 入站连接来源只记录 ip / relay / other 三类，不含地址值。
+    addr_kind: Literal,
     cause: Literal,
     context: Literal,
     dependency: Literal,
