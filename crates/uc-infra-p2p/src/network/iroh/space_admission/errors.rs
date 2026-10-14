@@ -107,6 +107,8 @@ pub(super) fn map_reply_wire_error(error: WireError) -> SpaceAdmissionTransportE
     }
 }
 
+/// 会话门关闭连接的关闭码（`session_unavailable` / `session_retired`）：sponsor 当前没有可用会话。
+pub(super) const CLOSE_SESSION_UNAVAILABLE: u32 = 0;
 pub(super) const LEGACY_CLOSE_PROTOCOL: u32 = 0x51;
 pub(super) const CLOSE_AUTHENTICATION: u32 = 0x52;
 pub(super) const CLOSE_BUSY: u32 = 0x53;
@@ -123,7 +125,9 @@ pub(super) fn map_application_close_code(code: u64) -> Option<SpaceAdmissionTran
         code if code == u64::from(CLOSE_AUTHENTICATION) => {
             Some(SpaceAdmissionTransportError::authentication_rejected())
         }
-        code if code == u64::from(CLOSE_BUSY) => Some(SpaceAdmissionTransportError::deferred()),
+        code if code == u64::from(CLOSE_BUSY) || code == u64::from(CLOSE_SESSION_UNAVAILABLE) => {
+            Some(SpaceAdmissionTransportError::deferred())
+        }
         _ => None,
     }
 }

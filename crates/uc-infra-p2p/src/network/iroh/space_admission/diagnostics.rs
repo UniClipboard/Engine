@@ -16,7 +16,7 @@ use uc_observability_contract::diagnostics::{
 
 use super::errors::{
     HandlerError, CLOSE_AUTHENTICATION, CLOSE_BUSY, CLOSE_PEER_UPGRADE_REQUIRED, CLOSE_PROTOCOL,
-    LEGACY_CLOSE_PROTOCOL,
+    CLOSE_SESSION_UNAVAILABLE, LEGACY_CLOSE_PROTOCOL,
 };
 use uc_sync_protocol::space_admission::WireError;
 
@@ -155,7 +155,9 @@ pub(super) fn response_failure(
 
 fn close_class(code: u64) -> ApplicationCloseClass {
     match code {
-        0 => ApplicationCloseClass::SessionUnavailable,
+        code if code == u64::from(CLOSE_SESSION_UNAVAILABLE) => {
+            ApplicationCloseClass::SessionUnavailable
+        }
         code if code == u64::from(CLOSE_AUTHENTICATION) => {
             ApplicationCloseClass::AuthenticationRejected
         }

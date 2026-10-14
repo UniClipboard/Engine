@@ -656,3 +656,21 @@ async fn silent_sponsor_is_recorded_as_response_timeout_not_authentication_failu
     assert_eq!(details, vec![("receive_response", "response_timeout")]);
     assert_eq!(error_types, vec!["timeout".to_owned()]);
 }
+
+/// 会话门关闭（`session_unavailable` / `session_retired`，关闭码 0）说明 sponsor 当前没有可用会话，
+/// 不是认证失败：joiner 应当延期重试，而不是被当作口令错误。
+#[tokio::test]
+async fn session_gate_close_before_the_response_defers_the_joiner() {
+    let (error, details, error_types) =
+        joiner_response_failure(MisbehavingSponsor(ResponseBehavior::Close(0))).await;
+
+    assert!(
+        matches!(error, SpaceAdmissionTransportError::Deferred { .. }),
+        "{error:?}"
+    );
+    assert_eq!(
+        details,
+        vec![("receive_response", "app_close_session_unavailable")]
+    );
+    assert!(error_types.is_empty(), "a deferral is not an error");
+}

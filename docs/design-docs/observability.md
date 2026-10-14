@@ -297,7 +297,7 @@ Joiner 发出初次 hello 后读取 `OpaqueResponse` 失败时，完成记录的
 `response_timeout`（读响应总截止内无应答）、`stream_reset`（响应流被重置或被对端提前结束）、`connection_lost`（连接在应答前丢失）、
 `decode`（响应帧无法解码）或 `app_close_*`（对端以应用层关闭码关闭，类别为 `session_unavailable`、`authentication`、`busy`、
 `peer_upgrade_required`、`protocol`、`other`，不记录原始数值）。完成记录的 `error.type` 随之为 `timeout`、`channel_closed`、
-`decode_failed`，应用层关闭保持按公开结果得出的类别；返回给 Application 的公开结果不变。
+`decode_failed`，应用层关闭保持按公开结果得出的类别；其中关闭码 0（会话门的 `session_unavailable` / `session_retired`，sponsor 当前没有可用会话）与 busy 一样映射为延期，不再被当作认证被拒绝；其余返回给 Application 的公开结果不变。
 
 `pairing.exchange.network.snapshot` 只在详细模式落盘，在连接建立后、交换开始及正常返回或失败返回时各取一次，
 不增加后台采样任务。只保留当前选中路径的固定类型、可用时的往返延迟微秒数，以及连接累计丢包和收发数据报数量。
