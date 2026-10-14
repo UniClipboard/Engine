@@ -23,7 +23,8 @@ use uc_observability_contract::{
 
 use crate::facade::host_event::{HostEvent, HostEventBus, TransferHostEvent};
 use crate::transfer::blob::{
-    FetchBlobInput, FetchBlobPathInput, FetchBlobUseCase, PublishBlobInput, PublishBlobUseCase,
+    fetch_failure_reason, FetchBlobInput, FetchBlobPathInput, FetchBlobUseCase, PublishBlobInput,
+    PublishBlobUseCase,
 };
 use crate::transfer::file::facade::{
     BeginReceiverTransfer, FileTransferFacade, ReceiverTransferRegistration,
@@ -351,13 +352,14 @@ impl BlobTransferFacade {
             })
     }
 
-    pub async fn record_unfetched_failure(&self, ctx: FetchTransferContext, detail: String) {
+    pub async fn record_unfetched_failure(
+        &self,
+        ctx: FetchTransferContext,
+        reason: FileTransferFailureReason,
+    ) {
         match self.begin_lifecycle(&ctx, String::new()).await {
             Ok(Some(session)) => {
-                if let Err(error) = session
-                    .fail(FileTransferFailureReason::Unknown, Some(detail))
-                    .await
-                {
+                if let Err(error) = session.fail(reason, None).await {
                     uc_warn!(
                         error_kind = "unfetched_failure_finish",
                         io_error_kind = io_error_kind(&error),
@@ -699,10 +701,7 @@ impl BlobTransferFacade {
             Err(BlobTransferError::Fetch(msg)) => {
                 if let Some(ctx) = command.transfer_context.as_ref() {
                     if let Some(session) = lifecycle_session.as_ref() {
-                        if let Err(error) = session
-                            .fail(FileTransferFailureReason::Unknown, Some(msg.to_string()))
-                            .await
-                        {
+                        if let Err(error) = session.fail(fetch_failure_reason(&msg), None).await {
                             uc_warn!(
                                 transfer_id = log_id(&ctx.transfer_id),
                                 error_kind = "session_failure_settle",
@@ -880,13 +879,11 @@ impl BlobTransferFacade {
                 Err(BlobTransferError::Cancelled)
             }
             Err(e) => {
-                let msg = e.to_string();
+                let failure = anyhow::Error::from(e);
+                let reason = fetch_failure_reason(&failure);
                 if let Some(ctx) = command.transfer_context.as_ref() {
                     if let Some(session) = lifecycle_session.as_ref() {
-                        if let Err(error) = session
-                            .fail(FileTransferFailureReason::Unknown, Some(msg))
-                            .await
-                        {
+                        if let Err(error) = session.fail(reason, None).await {
                             uc_warn!(
                                 transfer_id = log_id(&ctx.transfer_id),
                                 error_kind = "session_failure_settle",
@@ -903,7 +900,7 @@ impl BlobTransferFacade {
                     )
                     .await;
                 }
-                Err(BlobTransferError::Fetch(anyhow::Error::from(e)))
+                Err(BlobTransferError::Fetch(failure))
             }
         }
     }
