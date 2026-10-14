@@ -316,3 +316,13 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 [[profile.default.overrides]]
 filter = "package(uc-infra-p2p) & test(silent_and_partial_request_close_within_entry_deadline)"
 slow-timeout = { period = "15s", terminate-after = 2 }
+
+# 静默 sponsor 用例真实等待 30 秒的读响应期限，才能验证超时类别；默认 20 秒终止线不够。
+[[profile.default.overrides]]
+filter = "package(uc-infra-p2p) & test(silent_sponsor_is_recorded_as_response_timeout_not_authentication_failure)"
+slow-timeout = { period = "20s", terminate-after = 3 }
+
+# 静默 sponsor 用例真实等待 30 秒的读响应期限，才能验证超时类别；默认 20 秒终止线不够。
+[[profile.ci.overrides]]
+filter = "package(uc-infra-p2p) & test(silent_sponsor_is_recorded_as_response_timeout_not_authentication_failure)"
+slow-timeout = { period = "20s", terminate-after = 3 }
