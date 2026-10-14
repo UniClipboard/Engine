@@ -85,7 +85,11 @@ install_mbx() {
     archive="$staging/mbx-$triple.$extension"
     curl -fsSL --retry 3 -o "$archive" \
       "https://github.com/jdx/mr-boxington/releases/download/v$MBX_VERSION/mbx-$triple.$extension"
-    if [[ "$(sha256_of "$archive")" != "$expected" ]]; then
+    local actual
+    actual=$(sha256_of "$archive")
+    if [[ "$actual" != "$expected" ]]; then
+      printf 'mbx checksum: target=%s expected=%q actual=%q\n' "$triple" "$expected" "$actual" >&2
+      if command -v sha256sum >/dev/null; then sha256sum < "$archive" >&2; fi
       rm -rf "$staging"
       fail "下载的 mbx $MBX_VERSION 校验失败，已停止"
     fi
