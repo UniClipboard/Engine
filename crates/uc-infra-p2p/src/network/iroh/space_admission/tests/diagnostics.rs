@@ -211,6 +211,124 @@ async fn a_sponsor_at_capacity_records_one_busy_warning_without_peer_identity() 
 }
 
 #[derive(Debug)]
+struct RejectEveryConnection;
+impl iroh::endpoint::EndpointHooks for RejectEveryConnection {
+    async fn after_handshake(
+        &self,
+        _connection: &Connection,
+    ) -> iroh::endpoint::AfterHandshakeOutcome {
+        iroh::endpoint::AfterHandshakeOutcome::Reject {
+            error_code: 0u32.into(),
+            reason: b"test_reject".to_vec(),
+        }
+    }
+}
+
+fn accepting_records(logs: &uc_testkit::log_capture::CapturedLogs) -> Vec<String> {
+    logs.output()
+        .lines()
+        .filter(|line| line.contains("connection.accepting.finished for space admission"))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[tokio::test]
+async fn server_handshake_outcomes_are_recorded_without_peer_identity() {
+    let logs = uc_testkit::log_capture::CapturedLogs::default();
+    let _guard = logs.install();
+    let joiner = bound_endpoint().await;
+    wait_for_direct_addrs(&joiner).await;
+
+    // 握手成功：用容量为 0 的 sponsor，进入 accept 后立即关闭，只验证握手记录。
+    let sponsor = bound_endpoint().await;
+    wait_for_direct_addrs(&sponsor).await;
+    let endpoint = Arc::new(HangingLoopbackEndpoint {
+        calls: AtomicUsize::new(0),
+        entered: Notify::new(),
+    });
+    let credentials = Arc::new(LoopbackCredentials {
+        initial: Mutex::new(None),
+        continuation: Mutex::new(None),
+    });
+    let handler = Arc::new(
+        IrohSpaceAdmissionHandler::new(&sponsor, endpoint, credentials)
+            .expect("handler")
+            .with_capacity(0),
+    );
+    let router = Router::builder((*sponsor).clone())
+        .accept(SPACE_ADMISSION_ALPN, handler)
+        .spawn();
+    let connection = connect(&joiner, sponsor.addr()).await.expect("connect");
+    tokio::time::timeout(Duration::from_secs(2), connection.closed())
+        .await
+        .expect("closed");
+    router.shutdown().await.expect("router shutdown");
+    sponsor.close().await;
+    let connected = accepting_records(&logs);
+    assert_eq!(connected.len(), 1, "{}", logs.output());
+    assert!(
+        connected[0].contains("outcome=\"connected\""),
+        "{}",
+        connected[0]
+    );
+    assert!(connected[0].contains("elapsed_ms="), "{}", connected[0]);
+    assert!(!connected[0].contains("error_class"), "{}", connected[0]);
+
+    // 握手失败：sponsor 在握手完成时本地拒绝，没有任何连接到达 accept。
+    let rejecting = Arc::new(
+        Endpoint::builder(presets::N0)
+            .alpns(vec![SPACE_ADMISSION_ALPN.to_vec()])
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup()
+            .hooks(RejectEveryConnection)
+            .bind()
+            .await
+            .expect("bind rejecting endpoint"),
+    );
+    wait_for_direct_addrs(&rejecting).await;
+    let endpoint = Arc::new(HangingLoopbackEndpoint {
+        calls: AtomicUsize::new(0),
+        entered: Notify::new(),
+    });
+    let credentials = Arc::new(LoopbackCredentials {
+        initial: Mutex::new(None),
+        continuation: Mutex::new(None),
+    });
+    let handler = Arc::new(
+        IrohSpaceAdmissionHandler::new(&rejecting, endpoint.clone(), credentials).expect("handler"),
+    );
+    let router = Router::builder((*rejecting).clone())
+        .accept(SPACE_ADMISSION_ALPN, handler)
+        .spawn();
+    let _ = connect(&joiner, rejecting.addr()).await;
+    for _ in 0..100 {
+        if accepting_records(&logs).len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    router.shutdown().await.expect("router shutdown");
+    rejecting.close().await;
+    joiner.close().await;
+    let records = accepting_records(&logs);
+    assert_eq!(records.len(), 2, "{}", logs.output());
+    assert!(
+        records[1].contains("outcome=\"handshake_failed\""),
+        "{}",
+        records[1]
+    );
+    assert!(
+        records[1].contains("error_class=\"locally_rejected\""),
+        "{}",
+        records[1]
+    );
+    assert_eq!(endpoint.calls.load(Ordering::SeqCst), 0);
+    for record in &records {
+        assert!(!record.contains(&joiner.id().to_string()), "{record}");
+    }
+}
+
+#[derive(Debug)]
 struct DetailProbe(Arc<std::sync::Mutex<Vec<(&'static str, &'static str)>>>);
 impl opentelemetry_sdk::logs::LogProcessor for DetailProbe {
     fn emit(

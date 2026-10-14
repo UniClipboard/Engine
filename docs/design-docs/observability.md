@@ -303,6 +303,8 @@ Joiner 初次交换（hello 到 `OpaqueFinish`）同样记录步骤：`open_stre
 
 路由器的入站过滤器在 QUIC 握手之前为每次入站尝试留下一条 INFO 模块记录 `connection.incoming.observed at the router filter`，字段只有 `addr_kind`（`ip`、`relay`、`other`）与 `outcome`（`accept`、`retry`，路由器尚未就绪时为 `retry`）；不含地址值、端点标识或中继 URL，记录点由模块日志令牌桶限速。
 
+Sponsor 的准入处理器实现 `on_accepting`，在 QUIC 握手结束时留下一条 INFO 模块记录 `connection.accepting.finished for space admission`：`outcome`（`connected`、`handshake_failed`、`timed_out`）、失败时的 `error_class`（`connection_timed_out`、`connection_error`、`authentication`、`locally_rejected`、`other`）和 `elapsed_ms`。握手失败的连接不会进入 `accept`，此前没有本地痕迹；记录不含对端标识或地址，也不增加握手超时（沿用传输层的空闲超时）。
+
 会话门拒绝入站连接时（握手后没有可用会话世代、分发器取不到世代，或已接受的连接因世代退出被取消）留下一条 INFO 模块记录 `connection.rejected by the session gate`，字段只有 `reason`（`session_unavailable`、`session_retired`）和 `alpn`（`space_admission`、`presence`、`transfer_progress`、`other` 的固定类别）；不含对端标识、地址或原始 ALPN。记录点沿用模块日志的令牌桶限速，反复重连的对端不会放大日志量。
 
 Joiner 解析短邀请码的 `runtime.work.finished`（`step = joiner_resolve_invitation`）附带来源摘要：`winner`（`cloud`、`mdns`、`full_invitation`；全部失败时省略）、`cloud_outcome` 与 `mdns_outcome`。来源结果是固定类别：`not_run`（完整邀请或仅局域网模式未启动）、`pending`（对方先成功时该来源尚无结果）、`found`、`not_found`、`expired`、`conflict`、`transport_failed`、`service_unavailable`、`invalid_response`、`invalid_invitation`、`local_unavailable`。记录不含邀请码、票据、URL、地址或服务端文本；原先被丢弃的云端错误现在以类别保留，完整错误链仍随返回值传给调用方。

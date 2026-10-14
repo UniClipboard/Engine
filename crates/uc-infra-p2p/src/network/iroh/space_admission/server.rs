@@ -10,13 +10,13 @@ use super::errors::{
     map_server_wire_error, HandlerError, CLOSE_AUTHENTICATION, CLOSE_BUSY,
     CLOSE_PEER_UPGRADE_REQUIRED, CLOSE_PROTOCOL,
 };
-use iroh::endpoint::Connection;
+use iroh::endpoint::{Accepting, ConnectingError, Connection, ConnectionError};
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::Endpoint;
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 use tracing::Instrument;
 use uc_application::deps::{
@@ -33,7 +33,7 @@ use uc_sync_protocol::space_admission::{
 };
 mod authentication;
 use authentication::AuthenticatedRequest;
-use uc_observability_contract::{log_fields::log_vocab_debug, uc_debug, uc_warn};
+use uc_observability_contract::{log_fields::log_vocab_debug, uc_debug, uc_info, uc_warn};
 const EXCHANGE_DEADLINE: Duration = Duration::from_secs(120);
 const MAX_INBOUND_EXCHANGES: usize = 8;
 
@@ -244,7 +244,46 @@ impl std::fmt::Debug for IrohSpaceAdmissionHandler {
     }
 }
 
+/// 服务端握手失败的固定类别；只有词表，不含对端标识或地址。
+fn handshake_failure(error: &ConnectingError) -> (&'static str, &'static str) {
+    let timed_out = |source: &ConnectionError| matches!(source, ConnectionError::TimedOut);
+    match error {
+        ConnectingError::ConnectionError { source, .. } if timed_out(source) => {
+            ("timed_out", "connection_timed_out")
+        }
+        ConnectingError::ConnectionError { .. } => ("handshake_failed", "connection_error"),
+        ConnectingError::HandshakeFailure { .. } => ("handshake_failed", "authentication"),
+        ConnectingError::LocallyRejected { .. } => ("handshake_failed", "locally_rejected"),
+        _ => ("handshake_failed", "other"),
+    }
+}
+
 impl ProtocolHandler for IrohSpaceAdmissionHandler {
+    /// 记录 QUIC 握手在 sponsor 侧的结果；握手失败时不会进入 `accept`，此前没有任何本地痕迹。
+    async fn on_accepting(&self, accepting: Accepting) -> Result<Connection, AcceptError> {
+        let started = Instant::now();
+        match accepting.await {
+            Ok(connection) => {
+                uc_info!(
+                    outcome = "connected",
+                    elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    "connection.accepting.finished for space admission"
+                );
+                Ok(connection)
+            }
+            Err(error) => {
+                let (outcome, error_class) = handshake_failure(&error);
+                uc_info!(
+                    outcome = outcome,
+                    error_class = error_class,
+                    elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    "connection.accepting.finished for space admission"
+                );
+                Err(error.into())
+            }
+        }
+    }
+
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         if !self.accepting.load(Ordering::Acquire) {
             connection.close(CLOSE_BUSY.into(), b"admission_stopping");
