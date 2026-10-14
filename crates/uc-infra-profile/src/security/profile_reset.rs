@@ -198,7 +198,7 @@ impl ProfileStateCleaner {
     }
 
     fn clear_files(&self) -> Result<(), ProfileFactoryResetCapabilityError> {
-        for path in self.profile_state_paths() {
+        for path in self.profile_state_paths()? {
             remove_path_if_present(&path)?;
         }
         Ok(())
@@ -218,18 +218,46 @@ impl ProfileStateCleaner {
     }
 
     fn verify_files_absent(&self) -> Result<(), ProfileFactoryResetCapabilityError> {
-        if self.profile_state_paths().iter().any(|path| path.exists()) {
+        if self.profile_state_paths()?.iter().any(|path| path.exists()) {
             return Err(capability_error());
         }
         Ok(())
     }
 
-    fn profile_state_paths(&self) -> Vec<PathBuf> {
-        vec![
+    /// 移动端宿主把日志目录放在缓存目录内；进程级日志写入器持有当天文件直到进程退出，
+    /// 删除它会让之后的诊断记录写进已删除的文件。此时只清理缓存中日志目录以外的内容。
+    fn cache_state_paths(&self) -> Result<Vec<PathBuf>, ProfileFactoryResetCapabilityError> {
+        let cache = &self.paths.cache_dir;
+        let Some(retained) = self
+            .paths
+            .logs_dir
+            .strip_prefix(cache)
+            .ok()
+            .and_then(|nested| nested.components().next())
+            .map(|first| cache.join(first))
+        else {
+            return Ok(vec![cache.clone()]);
+        };
+        let entries = match std::fs::read_dir(cache) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(capability_error_from(error)),
+        };
+        let mut paths = Vec::new();
+        for entry in entries {
+            let path = entry.map_err(capability_error_from)?.path();
+            if path != retained {
+                paths.push(path);
+            }
+        }
+        Ok(paths)
+    }
+
+    fn profile_state_paths(&self) -> Result<Vec<PathBuf>, ProfileFactoryResetCapabilityError> {
+        let mut paths = vec![
             self.paths.vault_dir.clone(),
             self.paths.settings_path.clone(),
             self.paths.file_cache_dir.clone(),
-            self.paths.cache_dir.clone(),
             self.paths.app_data_root_dir.join("space-generations"),
             self.paths
                 .app_data_root_dir
@@ -249,7 +277,9 @@ impl ProfileStateCleaner {
             self.paths.last_notified_update_path(),
             self.paths.skipped_version_path(),
             self.paths.update_prompt_throttle_path(),
-        ]
+        ];
+        paths.extend(self.cache_state_paths()?);
+        Ok(paths)
     }
 }
 
@@ -303,7 +333,7 @@ mod tests {
 
     use diesel::{Connection, RunQueryDsl, SqliteConnection};
     use uc_application::deps::{ClearProfileStatePort, WipeProfileKeysPort};
-    use uc_core::app_dirs::AppPaths;
+    use uc_core::app_dirs::{AppDirs, AppPaths};
     use uc_core::ports::security::secure_storage::{SecureStorageError, SecureStoragePort};
     use uc_core::ports::security::MigrationRunId;
 
@@ -481,5 +511,35 @@ mod tests {
         .get_result::<CountRow>(&mut reopened)
         .unwrap();
         assert_eq!(remaining.count, 0);
+    }
+
+    /// 移动端布局：日志目录位于缓存目录内，重置清理缓存业务内容但保留正在写入的日志。
+    #[tokio::test]
+    async fn profile_state_clear_keeps_a_log_directory_nested_in_the_cache() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = directory.path().join("cache");
+        let paths = AppPaths::from_app_dirs(&AppDirs {
+            app_data_root: directory.path().join("data"),
+            app_cache_root: cache.clone(),
+            app_log_dir: cache.join("logs"),
+        });
+        std::fs::create_dir_all(&paths.logs_dir).unwrap();
+        std::fs::create_dir_all(paths.cache_dir.join("spool")).unwrap();
+        std::fs::write(paths.cache_dir.join("spool/pending"), b"spool").unwrap();
+        std::fs::write(paths.cache_dir.join("search-state"), b"search").unwrap();
+        std::fs::write(paths.logs_dir.join("engine.2026-10-14.jsonl"), b"{}\n").unwrap();
+        std::fs::create_dir_all(paths.db_path.parent().unwrap()).unwrap();
+        let pool =
+            uc_infra_storage::db::pool::init_db_pool(paths.db_path.to_str().unwrap()).unwrap();
+        let cleaner = ProfileStateCleaner::new(pool, paths.clone(), paths.db_path.clone());
+
+        cleaner.clear_and_verify_profile_state().await.unwrap();
+
+        assert!(!paths.cache_dir.join("spool").exists());
+        assert!(!paths.cache_dir.join("search-state").exists());
+        assert_eq!(
+            std::fs::read(paths.logs_dir.join("engine.2026-10-14.jsonl")).unwrap(),
+            b"{}\n"
+        );
     }
 }
