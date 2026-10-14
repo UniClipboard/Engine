@@ -1,6 +1,6 @@
 name: Windows Build
 
-# Windows 门禁：MBX 没有 Windows 固定包，Windows 主机不进入 rust-ci-setup，
+# Windows 门禁：MBX Windows 入口尚待独立原生验收，主机不进入 rust-ci-setup，
 # 仅用 rust-toolchain.toml 固定的工具链与 Cargo 依赖缓存，原生 cargo 执行。
 # 构建证据（cargo check）与运行证据（Windows 专属存储测试）分步记录，
 # arm64 只有在 windows-11-arm 主机上实际执行才记为通过。
