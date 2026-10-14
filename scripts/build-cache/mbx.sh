@@ -18,12 +18,40 @@ if [[ "${1:-}" != --install ]]; then
     # shellcheck source=/dev/null
     source "$UC_ENGINE_MBX_ENV_FILE"
   fi
-  if [[ -n "${UC_ENGINE_MBX_STATS_DIR:-}" && -z "${MBX_STATS_REPORT:-}" ]]; then
-    mkdir -p "$UC_ENGINE_MBX_STATS_DIR"
-    report_dir=$(mktemp -d "$UC_ENGINE_MBX_STATS_DIR/session.XXXXXX")
-    export MBX_STATS_REPORT="$report_dir/stats.json"
-    printf '%s\n' "$@" > "$report_dir/cargo-args.txt"
-    export MBX_BYPASS_LOG="$report_dir/bypass.txt"
+  if [[ -n "${MBX_STATS_REPORT:-}" ]]; then
+    report_path="$MBX_STATS_REPORT"
+    if command -v cygpath >/dev/null 2>&1; then
+      report_path=$(cygpath -u "$report_path")
+    fi
+    report_dir=$(dirname "$report_path")
+    report_name=$(basename "$report_path")
+    report_name=${report_name%.*}
+    mkdir -p "$report_dir"
+    report_args="$report_dir/$report_name.cargo-args.txt"
+    report_bypass="$report_dir/$report_name.bypass.txt"
+  elif [[ -n "${UC_ENGINE_MBX_STATS_DIR:-}" ]]; then
+    report_root="$UC_ENGINE_MBX_STATS_DIR"
+    if command -v cygpath >/dev/null 2>&1; then
+      report_root=$(cygpath -u "$report_root")
+    fi
+    mkdir -p "$report_root"
+    report_dir=$(mktemp -d "$report_root/session.XXXXXX")
+    report_path="$report_dir/stats.json"
+    if command -v cygpath >/dev/null 2>&1; then
+      report_path=$(cygpath -w "$report_path")
+    fi
+    export MBX_STATS_REPORT="$report_path"
+    report_args="$report_dir/cargo-args.txt"
+    report_bypass="$report_dir/bypass.txt"
+  fi
+  if [[ -n "${MBX_STATS_REPORT:-}" ]]; then
+    printf '%s\n' "$@" > "$report_args"
+    if [[ -z "${MBX_BYPASS_LOG:-}" ]]; then
+      if command -v cygpath >/dev/null 2>&1; then
+        report_bypass=$(cygpath -w "$report_bypass")
+      fi
+      export MBX_BYPASS_LOG="$report_bypass"
+    fi
   fi
   if [[ "${1:-}" != --r2 && -n "${BUILD_CACHE_R2_ENDPOINT:-}" ]]; then
     set -- --r2 "$@"

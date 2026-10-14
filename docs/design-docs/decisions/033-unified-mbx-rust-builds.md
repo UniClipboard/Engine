@@ -42,6 +42,8 @@ MBX 1.18 对显式 linker 下的 rlib/check 绕过，cargo-ndk 会触发；1.24 
 
 Cargo调用参数与完整bypass理由随每次原生统计保留，宿主生成工具的命中不能充当移动目标命中。下游产品源码pin与缓存自动化pin独立；临时树覆盖缓存工具时必须记录真实dirty文件、各脚本哈希和两份来源，不将它标成完全clean源码构建。
 
+自动统计session保持`stats.json`、`cargo-args.txt`、`bypass.txt`。调用方显式指定`MBX_STATS_REPORT=producer.json`时，同目录生成`producer.cargo-args.txt`及默认`producer.bypass.txt`，避免多个阶段覆盖证据；显式`MBX_BYPASS_LOG`保持调用方路径。参数按调用前原值逐行记录，不记录环境或凭据。
+
 Android目标的首次可缓存动作需要生产者填充，宿主命中不能代替。`mobile-target-cache.yml`只在真实protected-main push使用既有writer环境，编译固定Mobile产品pin的Android release库；macOS与Ubuntu分别覆盖实际消费者宿主，不打包、签名或发布。与消费者同样记录临时工具覆盖及真实脚本哈希；Mobile产品pin改变时同步预热pin，不允许手动任意源码进入writer。
 
 1.24候选macOS R2检查出现已验证元数据路径读取ENOENT，随后报incomplete_prefetch；不能将它降为普通miss。8GiB空闲水位的分支诊断仅用于检验GC/临时文件竞争假设，保留20GiB动作预算和严格门禁，不据此单独声称根因修复。
