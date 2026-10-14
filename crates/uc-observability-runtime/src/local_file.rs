@@ -11,6 +11,7 @@ use tracing_subscriber::fmt::MakeWriter;
 use uc_observability_contract::diagnostics::{managed_log_file_date, managed_log_file_name};
 
 use crate::file_statistics::{increment, FileSourceCounts, FileStatistics, LocalDiagnosticSource};
+use crate::remote_health::{record_local_file_failed, record_local_file_recovered};
 use crate::{SignalResult, LOCAL_LOG_MAX_BYTES, LOCAL_LOG_RETENTION_DAYS};
 
 const ASYNC_QUEUE_CAPACITY: usize = 4_096;
@@ -20,6 +21,8 @@ pub(crate) struct BoundedDailyMakeWriter {
     state: Arc<Mutex<WriterState>>,
     dropped_records: Arc<AtomicU64>,
     statistics: Arc<FileStatistics>,
+    /// 最近一次落盘是否失败；由文件线程在状态变化时更新，`health()` 据此动态报告。
+    unavailable: Arc<AtomicBool>,
 }
 
 impl BoundedDailyMakeWriter {
@@ -38,6 +41,7 @@ impl BoundedDailyMakeWriter {
                 state: Arc::new(Mutex::new(state)),
                 dropped_records: Arc::clone(&dropped_records),
                 statistics: Arc::new(FileStatistics::default()),
+                unavailable: Arc::new(AtomicBool::new(false)),
             },
             dropped_records,
         ))
@@ -87,6 +91,7 @@ pub(crate) struct LocalFileRuntime {
     writer: AsyncFileWriter,
     worker: Arc<LocalFileWorker>,
     dropped_records: Arc<AtomicU64>,
+    unavailable: Arc<AtomicBool>,
 }
 
 struct LocalFileWorker {
@@ -143,11 +148,13 @@ impl LocalFileRuntime {
     fn new_internal(directory: &Path, retention_days: u64, max_bytes: u64) -> io::Result<Self> {
         let (writer, dropped_records) =
             BoundedDailyMakeWriter::new_with_limits(directory, retention_days, max_bytes)?;
+        let unavailable = Arc::clone(&writer.unavailable);
         let (writer, worker) = non_blocking_file_writer(writer, Arc::clone(&dropped_records))?;
         Ok(Self {
             writer,
             worker,
             dropped_records,
+            unavailable,
         })
     }
 
@@ -165,6 +172,11 @@ impl LocalFileRuntime {
 
     pub(crate) fn dropped_records(&self) -> u64 {
         self.dropped_records.load(Ordering::Relaxed)
+    }
+
+    /// 最近一次写入或刷新失败且尚未恢复。
+    pub(crate) fn unavailable(&self) -> bool {
+        self.unavailable.load(Ordering::Acquire)
     }
 
     pub(crate) fn flush(&self, deadline: Duration) -> bool {
@@ -404,39 +416,96 @@ impl FileShutdownCoordinator {
     }
 }
 
+/// 失败后的重试退避；在退避内到达的记录直接丢弃并计数，不再反复触碰失败的存储。
+const RETRY_BACKOFF_MIN: Duration = Duration::from_millis(100);
+const RETRY_BACKOFF_MAX: Duration = Duration::from_secs(5);
+
+/// 文件线程内的恢复状态：写入或刷新失败进入失败态，任一次成功即恢复，不存在永久失败。
+struct WorkerHealth {
+    unavailable: Arc<AtomicBool>,
+    failed_since: Option<Instant>,
+    retry_at: Instant,
+    backoff: Duration,
+}
+
+impl WorkerHealth {
+    fn new(unavailable: Arc<AtomicBool>) -> Self {
+        Self {
+            unavailable,
+            failed_since: None,
+            retry_at: Instant::now(),
+            backoff: RETRY_BACKOFF_MIN,
+        }
+    }
+
+    fn in_backoff(&self) -> bool {
+        self.failed_since.is_some() && Instant::now() < self.retry_at
+    }
+
+    fn failed(&mut self, class: &'static str) {
+        if self.failed_since.is_none() {
+            self.failed_since = Some(Instant::now());
+            self.backoff = RETRY_BACKOFF_MIN;
+            self.unavailable.store(true, Ordering::Release);
+            record_local_file_failed(class);
+        } else {
+            self.backoff = (self.backoff * 2).min(RETRY_BACKOFF_MAX);
+        }
+        self.retry_at = Instant::now() + self.backoff;
+    }
+
+    fn succeeded(&mut self) {
+        if self.failed_since.take().is_some() {
+            self.backoff = RETRY_BACKOFF_MIN;
+            self.unavailable.store(false, Ordering::Release);
+            record_local_file_recovered();
+        }
+    }
+
+    fn is_failed(&self) -> bool {
+        self.failed_since.is_some()
+    }
+}
+
 fn run_file_worker(
     mut writer: BoundedDailyMakeWriter,
     receiver: mpsc::Receiver<FileMessage>,
     dropped_records: Arc<AtomicU64>,
 ) {
-    let mut healthy = true;
+    let mut health = WorkerHealth::new(Arc::clone(&writer.unavailable));
     while let Ok(message) = receiver.recv() {
         match message {
             FileMessage::Line(bytes, source) => {
-                if !healthy {
+                if health.in_backoff() {
                     increment(&dropped_records);
                     increment(&writer.statistics.source(source).write_failed);
                 } else if writer.write_record(&bytes, source).is_err() {
                     increment(&dropped_records);
                     increment(&writer.statistics.source(source).write_failed);
-                    healthy = false;
+                    health.failed("write_failed");
+                } else {
+                    health.succeeded();
                 }
             }
             FileMessage::Flush(reply) => {
-                if healthy && writer.flush().is_err() {
-                    healthy = false;
-                }
-                let _ = reply.send(healthy);
+                // 刷新是明确的重试点：失败态下也尝试重新打开，不受退避限制。
+                let _ = reply.send(settle_flush(&mut writer, &mut health));
             }
             FileMessage::Shutdown(reply) => {
-                if healthy && writer.flush().is_err() {
-                    healthy = false;
-                }
-                let _ = reply.send(healthy);
+                let _ = reply.send(settle_flush(&mut writer, &mut health));
                 return;
             }
         }
     }
+}
+
+fn settle_flush(writer: &mut BoundedDailyMakeWriter, health: &mut WorkerHealth) -> bool {
+    if writer.flush().is_ok() {
+        health.succeeded();
+    } else {
+        health.failed("flush_failed");
+    }
+    !health.is_failed()
 }
 
 impl BoundedDailyMakeWriter {
