@@ -50,8 +50,14 @@ fn an_unresponsive_sponsor_is_saved_as_its_own_local_rejection() {
         .expect("an unauthenticated Joiner can save that the sponsor never answered");
 
     assert!(rejected.is_terminal());
+    // 保存后重新读取：原因经持久化往返仍是独立的 SponsorUnresponsive。
+    let encoded = rejected
+        .into_replacement()
+        .encode_persisted()
+        .expect("the rejection encodes");
+    let reloaded = JoinerAdmission::decode_persisted(&encoded).expect("the rejection decodes");
     assert_eq!(
-        rejected.rejection_reason(),
+        reloaded.rejection_reason(),
         Some(SpaceAdmissionRejectionReason::SponsorUnresponsive)
     );
 }
