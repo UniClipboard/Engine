@@ -171,7 +171,7 @@ handler 创建。强行交给 Engine 会迫使 Core/Application message 增加 c
 直接 Rust、Apple/Android UniFFI 与 HarmonyOS N-API 都公开同一份当前累计健康查询；初始安装结果只表示安装时状态，不能代替
 运行一段时间后的查询。
 
-移动 `suspend` 在 Engine 暂停成功后做有界 flush，`resume` 继续使用同一 provider。单个 Engine shutdown 只 flush；只有宿主确认
+移动 `suspend` 与 Engine shutdown 返回后无论成败都做有界 flush（失败的暂停同样需要把已有记录落盘），`resume` 继续使用同一 provider。单个 Engine shutdown 只 flush；只有宿主确认
 进程最终退出时才 shutdown provider。flush 与 shutdown 通过同一生命周期门串行；调用方截止时间到达后旧操作可在后台收尾，
 但不会与后续刷新或最终关闭重叠。最终关闭先拒绝普通记录，排空期间仍允许固定健康记录，排空完成后再关闭所有输出。只有关闭
 线程未启动或本地清理仍未结束时才能重试；已完成但失败的结果必须原样保留，不能被第二次调用改写成成功。shutdown 后不在同一

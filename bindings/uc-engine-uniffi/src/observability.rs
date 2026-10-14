@@ -85,10 +85,8 @@ pub(crate) fn shutdown(
     })
 }
 
-pub(crate) fn schedule_flush_after_success<T, E>(result: &Result<T, E>) {
-    if result.is_err() {
-        return;
-    }
+/// 暂停或关闭调用返回后（无论成败）异步刷新一次：失败的暂停同样需要把已有记录落盘，进程可能随后被系统挂起或终止。
+pub(crate) fn schedule_flush_after_lifecycle() {
     let Some(handle) = PROCESS_HANDLE.get().cloned() else {
         return;
     };
@@ -326,12 +324,12 @@ mod tests {
         crate::stop_local_diagnostic_capture(capture.capture_id.expect("id")).expect("stop");
 
         emit_test_diagnostic_completion(TestDiagnosticCompletion::ProfileStorageUpgrade);
-        schedule_flush_after_success(&Ok::<(), ()>(()));
+        schedule_flush_after_lifecycle();
         let first = wait_for_log(&directories, "profile_storage_upgrade");
         assert!(first.contains("profile_storage_upgrade"));
 
         emit_test_diagnostic_completion(TestDiagnosticCompletion::SessionLifecycle);
-        schedule_flush_after_success(&Ok::<(), ()>(()));
+        schedule_flush_after_lifecycle();
         let resumed = wait_for_log(&directories, "session_lifecycle");
         assert!(resumed.contains("profile_storage_upgrade"));
         assert!(resumed.contains("session_lifecycle"));

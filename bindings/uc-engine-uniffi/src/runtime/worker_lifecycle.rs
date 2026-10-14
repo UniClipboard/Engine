@@ -8,7 +8,7 @@ use tokio::task::JoinSet;
 use uc_engine::Engine;
 
 use super::map_engine_state;
-use crate::observability::schedule_flush_after_success;
+use crate::observability::schedule_flush_after_lifecycle;
 use crate::{BindingEngineState, BindingError};
 
 type ShutdownReply = mpsc::Sender<Result<(), BindingError>>;
@@ -92,7 +92,7 @@ async fn dispatch(engine: Arc<Engine>, command: LifecycleCommand) -> Option<Shut
                 .suspend_with_deadline(deadline.saturating_duration_since(Instant::now()))
                 .await
                 .map_err(BindingError::from);
-            schedule_flush_after_success(&result);
+            schedule_flush_after_lifecycle();
             let _ = response.send(result);
         }
         LifecycleCommand::Resume { response } => {
@@ -106,7 +106,7 @@ async fn dispatch(engine: Arc<Engine>, command: LifecycleCommand) -> Option<Shut
                 .shutdown(deadline.saturating_duration_since(Instant::now()))
                 .await
                 .map_err(BindingError::from);
-            schedule_flush_after_success(&result);
+            schedule_flush_after_lifecycle();
             if result.is_ok() {
                 return Some(response);
             }
