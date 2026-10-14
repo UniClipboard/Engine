@@ -24,6 +24,81 @@ mod tests;
 
 const RECOVERY_PAGE_SIZE: usize = 256;
 
+/// 一轮恢复为什么开始：固定词表。
+#[derive(Clone, Copy)]
+enum RecoveryTrigger {
+    /// 订阅可达性之后对已在线设备的启动扫描。
+    Startup,
+    /// 设备刚刚上线。
+    PeerOnline,
+}
+
+impl RecoveryTrigger {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Startup => "startup",
+            Self::PeerOnline => "peer_online",
+        }
+    }
+}
+
+/// 一轮恢复的结局：每个提前返回都对应一个固定类别，不记录条目、设备或错误正文。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RecoveryOutcome {
+    /// 向目标补发了一条待恢复内容，并拿到派送汇总。
+    Dispatched,
+    /// 没有需要恢复的条目。
+    NothingToRecover,
+    /// 恢复被停止信号打断。
+    Cancelled,
+    /// 自动同步已关闭。
+    SyncDisabled,
+    /// 本机已不是当前空间的有效成员。
+    MemberInactive,
+    /// 读取当前成员范围失败。
+    ScopeUnavailable,
+    /// 目标设备被暂时暂停，保留其待发送内容。
+    TargetPaused,
+    /// 目标已不在成员范围内，待发送内容被标记为已取代。
+    TargetNotCurrent,
+    /// 列举条目失败，扫描中止。
+    ListingFailed,
+    /// 无法让旧内容失效，因此不补发。
+    SupersedeFailed,
+    /// 内容的投递状态在扫描期间已变为终态。
+    StatusChanged,
+    /// 条目内容已不存在，自动恢复被终止。
+    PayloadLost,
+    /// 条目当前不可重发（不是内容丢失）。
+    NotResendable,
+    /// 补发时存储或派送失败。
+    DeliveryFailed,
+    /// 补发被拒绝的其他固定原因。
+    DeliverySkipped,
+}
+
+impl RecoveryOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Dispatched => "dispatched",
+            Self::NothingToRecover => "nothing_to_recover",
+            Self::Cancelled => "cancelled",
+            Self::SyncDisabled => "sync_disabled",
+            Self::MemberInactive => "member_inactive",
+            Self::ScopeUnavailable => "scope_unavailable",
+            Self::TargetPaused => "target_paused",
+            Self::TargetNotCurrent => "target_not_current",
+            Self::ListingFailed => "listing_failed",
+            Self::SupersedeFailed => "supersede_failed",
+            Self::StatusChanged => "status_changed",
+            Self::PayloadLost => "payload_lost",
+            Self::NotResendable => "not_resendable",
+            Self::DeliveryFailed => "delivery_failed",
+            Self::DeliverySkipped => "delivery_skipped",
+        }
+    }
+}
+
 fn is_recovery_eligible(record: &EntryDeliveryRecord, target: &DeviceId) -> bool {
     record.target_device_id == *target
         && matches!(
@@ -88,7 +163,13 @@ impl OfflineDeliveryRecovery {
                     _ = task_cancel.cancelled() => return,
                     event = events.recv() => match event {
                         Ok(event) if event.state == ReachabilityState::Online => {
-                            recover_online_target(&task_deps, event.device_id, &task_cancel).await;
+                            recover_online_target(
+                                &task_deps,
+                                event.device_id,
+                                RecoveryTrigger::PeerOnline,
+                                &task_cancel,
+                            )
+                            .await;
                         }
                         Ok(_) => {}
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
@@ -159,36 +240,54 @@ async fn recover_currently_online(deps: &OfflineDeliveryRecoveryDeps, cancel: &C
         }
         if deps.peer_reachability.current_state(&peer.device_id).await == ReachabilityState::Online
         {
-            recover_online_target(deps, peer.device_id, cancel).await;
+            recover_online_target(deps, peer.device_id, RecoveryTrigger::Startup, cancel).await;
         }
     }
 }
 
+/// 一轮恢复的完整动作：触发原因由调用方给出，结局由 `recover_for_target` 返回，这里写唯一的一条记录。
 async fn recover_online_target(
     deps: &OfflineDeliveryRecoveryDeps,
     target: DeviceId,
+    trigger: RecoveryTrigger,
     cancel: &CancellationToken,
 ) {
     let _gate = tokio::select! {
         biased;
-        _ = cancel.cancelled() => return,
+        _ = cancel.cancelled() => {
+            record_recovery(trigger, RecoveryOutcome::Cancelled);
+            return;
+        }
         gate = deps.delivery_gate.lock() => gate,
     };
-    recover_for_target(deps, target, cancel).await;
+    let outcome = recover_for_target(deps, target, cancel).await;
+    record_recovery(trigger, outcome);
+}
+
+fn record_recovery(trigger: RecoveryTrigger, outcome: RecoveryOutcome) {
+    uc_info!(
+        trigger = trigger.as_str(),
+        outcome = outcome.as_str(),
+        "clipboard delivery recovery round finished"
+    );
 }
 
 async fn recover_for_target(
     deps: &OfflineDeliveryRecoveryDeps,
     target: DeviceId,
     cancel: &CancellationToken,
-) {
-    if cancel.is_cancelled() || !automatic_sync_enabled(deps.settings.as_ref()).await {
-        return;
+) -> RecoveryOutcome {
+    if cancel.is_cancelled() {
+        return RecoveryOutcome::Cancelled;
+    }
+    if !automatic_sync_enabled(deps.settings.as_ref()).await {
+        return RecoveryOutcome::SyncDisabled;
     }
 
     let scope = match deps.member_scope.snapshot().await {
         Ok(scope) if scope.local_member_active => scope,
-        Ok(_) | Err(_) => return,
+        Ok(_) => return RecoveryOutcome::MemberInactive,
+        Err(_) => return RecoveryOutcome::ScopeUnavailable,
     };
     let target_is_current = scope.usable_peer_device_ids.contains(&target);
     if !target_is_current
@@ -197,14 +296,14 @@ async fn recover_for_target(
             .iter()
             .any(|peer| peer.device_id == target)
     {
-        return;
+        return RecoveryOutcome::TargetPaused;
     }
 
     let local_device = deps.device_identity.current_device_id();
     let mut offset = 0;
     loop {
         if cancel.is_cancelled() {
-            return;
+            return RecoveryOutcome::Cancelled;
         }
         let entries = match deps.entries.list_entries(RECOVERY_PAGE_SIZE, offset).await {
             Ok(entries) => entries,
@@ -213,16 +312,16 @@ async fn recover_for_target(
                     error_kind = "entry_listing",
                     "clipboard delivery recovery: scan stopped"
                 );
-                return;
+                return RecoveryOutcome::ListingFailed;
             }
         };
         if entries.is_empty() {
-            return;
+            return RecoveryOutcome::NothingToRecover;
         }
         let count = entries.len();
         for entry in entries {
             if cancel.is_cancelled() {
-                return;
+                return RecoveryOutcome::Cancelled;
             }
             if !entry.delivery_tracked {
                 continue;
@@ -238,7 +337,7 @@ async fn recover_for_target(
                 }
             };
             if cancel.is_cancelled() {
-                return;
+                return RecoveryOutcome::Cancelled;
             }
             if source.as_ref() != Some(&local_device) {
                 continue;
@@ -254,7 +353,7 @@ async fn recover_for_target(
                 }
             };
             if cancel.is_cancelled() {
-                return;
+                return RecoveryOutcome::Cancelled;
             }
             let Some(record) = records
                 .iter()
@@ -264,7 +363,7 @@ async fn recover_for_target(
             };
             if !target_is_current {
                 supersede_delivery(deps, &entry.entry_id, &target).await;
-                return;
+                return RecoveryOutcome::TargetNotCurrent;
             }
             // 旧内容失效是一项完整动作，必须完成后才处理停止，避免重启后补发旧内容。
             if !supersede_older_recoverable_entries(deps, &entry.entry_id, &target).await {
@@ -272,33 +371,40 @@ async fn recover_for_target(
                     entry_id = log_id(&entry.entry_id),
                     "clipboard delivery recovery: unable to replace older offline content"
                 );
-                return;
+                return RecoveryOutcome::SupersedeFailed;
             }
-            if cancel.is_cancelled()
-                || !matches!(
-                    record.status,
-                    EntryDeliveryStatus::Pending | EntryDeliveryStatus::Unreachable
-                )
-            {
-                return;
+            if cancel.is_cancelled() {
+                return RecoveryOutcome::Cancelled;
             }
-            if !automatic_sync_enabled(deps.settings.as_ref()).await || cancel.is_cancelled() {
-                return;
+            if !matches!(
+                record.status,
+                EntryDeliveryStatus::Pending | EntryDeliveryStatus::Unreachable
+            ) {
+                return RecoveryOutcome::StatusChanged;
             }
-            match deps
+            if !automatic_sync_enabled(deps.settings.as_ref()).await {
+                return RecoveryOutcome::SyncDisabled;
+            }
+            if cancel.is_cancelled() {
+                return RecoveryOutcome::Cancelled;
+            }
+            return match deps
                 .delivery
                 .deliver_existing_local_entry(entry.entry_id.clone(), vec![target.clone()])
                 .await
             {
-                Ok(report) => uc_info!(
-                    entry_id = log_id(&entry.entry_id),
-                    accepted = report.accepted,
-                    duplicate = report.duplicate,
-                    offline = report.offline,
-                    errored = report.errored,
-                    pending = report.pending,
-                    "clipboard delivery recovery dispatched"
-                ),
+                Ok(report) => {
+                    uc_info!(
+                        entry_id = log_id(&entry.entry_id),
+                        accepted = report.accepted,
+                        duplicate = report.duplicate,
+                        offline = report.offline,
+                        errored = report.errored,
+                        pending = report.pending,
+                        "clipboard delivery recovery dispatched"
+                    );
+                    RecoveryOutcome::Dispatched
+                }
                 Err(ResendEntryError::EntryNotResendable { reason, .. }) => {
                     if matches!(reason, NotResendableReason::PayloadLost) {
                         uc_info!(
@@ -307,6 +413,9 @@ async fn recover_for_target(
                             "clipboard delivery recovery stopped: entry payload is gone"
                         );
                         stop_automatic_recovery(deps, &entry.entry_id, &target).await;
+                        RecoveryOutcome::PayloadLost
+                    } else {
+                        RecoveryOutcome::NotResendable
                     }
                 }
                 Err(error @ (ResendEntryError::Storage(_) | ResendEntryError::Dispatch(_))) => {
@@ -316,6 +425,7 @@ async fn recover_for_target(
                         entry_id = log_id(&entry.entry_id),
                         "clipboard delivery recovery skipped entry"
                     );
+                    RecoveryOutcome::DeliveryFailed
                 }
                 Err(error) => {
                     uc_debug!(
@@ -324,12 +434,12 @@ async fn recover_for_target(
                         entry_id = log_id(&entry.entry_id),
                         "clipboard delivery recovery skipped entry"
                     );
+                    RecoveryOutcome::DeliverySkipped
                 }
-            }
-            return;
+            };
         }
         if count < RECOVERY_PAGE_SIZE {
-            return;
+            return RecoveryOutcome::NothingToRecover;
         }
         offset += count;
     }
