@@ -394,6 +394,8 @@ pub struct JoinedSpaceSummary {
 pub enum JoinSpaceRejectionReasonSummary {
     InvitationUnavailable,
     AuthenticationRejected,
+    /// Sponsor 收下初次请求后在截止内没有任何应答；不是认证失败，也不是口令错误。
+    SponsorUnresponsive,
     IdentityConflict,
     BaseHistoryChanged,
     JoinerHistoryAhead,

@@ -65,6 +65,7 @@ pub(super) const fn encode_rejection_reason(reason: SpaceAdmissionRejectionReaso
         SpaceAdmissionRejectionReason::SecurityMaterialInvalid => 12,
         SpaceAdmissionRejectionReason::RelationshipConflict => 13,
         SpaceAdmissionRejectionReason::ActivationStateInvalid => 14,
+        SpaceAdmissionRejectionReason::SponsorUnresponsive => 15,
     }
 }
 
@@ -86,6 +87,7 @@ pub(super) fn decode_rejection_reason(
         12 => Ok(SpaceAdmissionRejectionReason::SecurityMaterialInvalid),
         13 => Ok(SpaceAdmissionRejectionReason::RelationshipConflict),
         14 => Ok(SpaceAdmissionRejectionReason::ActivationStateInvalid),
+        15 => Ok(SpaceAdmissionRejectionReason::SponsorUnresponsive),
         _ => Err(SpaceAdmissionPersistenceError::InvalidState),
     }
 }

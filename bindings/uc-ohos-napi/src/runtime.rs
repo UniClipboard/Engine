@@ -788,6 +788,9 @@ fn join_space_status(result: OperationResult) -> napi::Result<OhJoinSpaceStatus>
                     uc_engine::JoinSpaceRejectionReasonSummary::AuthenticationRejected => {
                         "authentication_rejected"
                     }
+                    uc_engine::JoinSpaceRejectionReasonSummary::SponsorUnresponsive => {
+                        "sponsor_unresponsive"
+                    }
                     uc_engine::JoinSpaceRejectionReasonSummary::IdentityConflict => {
                         "identity_conflict"
                     }

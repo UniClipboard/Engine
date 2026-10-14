@@ -424,6 +424,9 @@ pub(crate) fn join_space_status(status: CurrentJoinStatus) -> JoinSpaceStatusSum
                 uc_core::membership::SpaceAdmissionRejectionReason::AuthenticationRejected => {
                     JoinSpaceRejectionReasonSummary::AuthenticationRejected
                 }
+                uc_core::membership::SpaceAdmissionRejectionReason::SponsorUnresponsive => {
+                    JoinSpaceRejectionReasonSummary::SponsorUnresponsive
+                }
                 uc_core::membership::SpaceAdmissionRejectionReason::IdentityConflict => {
                     JoinSpaceRejectionReasonSummary::IdentityConflict
                 }

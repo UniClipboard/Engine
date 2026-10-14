@@ -49,6 +49,13 @@ pub(super) fn client_completion(
                 elapsed,
             )
         }
+        Some(SpaceAdmissionTransportError::SponsorUnresponsive) => OperationCompletion::failed(
+            DiagnosticDomain::SpaceAdmission,
+            operation,
+            DiagnosticRole::Joiner,
+            DiagnosticErrorType::Timeout,
+            elapsed,
+        ),
         Some(SpaceAdmissionTransportError::PeerUpgradeRequired) => OperationCompletion::failed(
             DiagnosticDomain::SpaceAdmission,
             operation,

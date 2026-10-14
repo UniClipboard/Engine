@@ -23,6 +23,7 @@ use uc_infra_crypto::space_admission_auth::{
 };
 use uc_observability_contract::diagnostics::connectivity::{
     complete_admission_connection_failure, complete_admission_response_failure,
+    AdmissionResponseFailure,
 };
 use uc_observability_contract::diagnostics::{
     operation_span, DiagnosticDomain, DiagnosticOperation, DiagnosticRole, DiagnosticSpanKind,
@@ -119,9 +120,13 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
                 match read_typed(&mut receive, FrameKind::OpaqueResponse, AUTH_FRAME_LIMIT).await {
                     Ok(response) => response,
                     Err(error) => {
-                        // 公开结果保持原样；具体失败类别只用于本地诊断。
+                        // 只有读响应超时才是 sponsor 无应答；其余失败的公开结果保持原样。
                         let close_code = application_close_code(&connection).await;
-                        read_failure = Some(response_failure(&error, close_code));
+                        let failure = response_failure(&error, close_code);
+                        read_failure = Some(failure);
+                        if failure == AdmissionResponseFailure::ResponseTimeout {
+                            return Err(SpaceAdmissionTransportError::SponsorUnresponsive);
+                        }
                         return Err(close_code
                             .and_then(map_initial_hello_close_code)
                             .unwrap_or(SpaceAdmissionTransportError::authentication_rejected()));

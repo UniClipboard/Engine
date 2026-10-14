@@ -240,6 +240,8 @@ pub struct JoinedSpace {
 pub enum JoinSpaceRejectionReason {
     InvitationUnavailable,
     AuthenticationRejected,
+    /// Sponsor 收下请求后在截止内没有应答；不是口令错误。
+    SponsorUnresponsive,
     IdentityConflict,
     BaseHistoryChanged,
     JoinerHistoryAhead,
@@ -2452,6 +2454,9 @@ fn map_join_space_status(result: OperationResult) -> Result<JoinSpaceStatus, Bin
                     }
                     uc_engine::JoinSpaceRejectionReasonSummary::AuthenticationRejected => {
                         JoinSpaceRejectionReason::AuthenticationRejected
+                    }
+                    uc_engine::JoinSpaceRejectionReasonSummary::SponsorUnresponsive => {
+                        JoinSpaceRejectionReason::SponsorUnresponsive
                     }
                     uc_engine::JoinSpaceRejectionReasonSummary::IdentityConflict => {
                         JoinSpaceRejectionReason::IdentityConflict

@@ -183,6 +183,7 @@ impl SpaceAdmissionAggregate {
             reason,
             SpaceAdmissionRejectionReason::InvitationUnavailable
                 | SpaceAdmissionRejectionReason::AuthenticationRejected
+                | SpaceAdmissionRejectionReason::SponsorUnresponsive
                 | SpaceAdmissionRejectionReason::PeerUpgradeRequired
         ) {
             return Err(SpaceAdmissionAggregateError::InvalidTransition);
