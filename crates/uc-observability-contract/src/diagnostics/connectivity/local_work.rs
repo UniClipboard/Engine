@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use super::super::AdmissionObservationAction;
+use super::invitation_resolution::InvitationResolution;
 use super::maintenance::MaintenanceContext;
 use super::{emit_local, millis, record::LocalEvent, AdmissionExchangeSide, ObservationContext};
 
@@ -144,6 +145,8 @@ pub(super) enum LocalWorkEvent {
         maintenance: Option<MaintenanceContext>,
         duration_ms: u64,
         outcome: LocalWorkOutcome,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolution: Option<InvitationResolution>,
     },
 }
 
@@ -208,11 +211,15 @@ impl LocalWorkEvent {
         if let Self::Finished {
             duration_ms,
             outcome,
+            resolution,
             ..
         } = self
         {
             fields.insert("duration_ms".into(), json!(duration_ms));
             fields.insert("uc.outcome".into(), json!(outcome));
+            if let Some(resolution) = resolution {
+                resolution.fields(&mut fields);
+            }
         }
         fields
     }
@@ -248,7 +255,11 @@ impl LocalWorkObservation {
         observation
     }
 
-    pub fn finish(mut self, outcome: LocalWorkOutcome) {
+    pub fn finish(self, outcome: LocalWorkOutcome) {
+        self.finish_with(outcome, None);
+    }
+
+    fn finish_with(mut self, outcome: LocalWorkOutcome, resolution: Option<InvitationResolution>) {
         self.finished = true;
         self.emit(LocalWorkEvent::Finished {
             step: self.step,
@@ -256,6 +267,7 @@ impl LocalWorkObservation {
             maintenance: self.maintenance,
             duration_ms: millis(self.started.elapsed()),
             outcome,
+            resolution,
         });
     }
 
@@ -276,6 +288,7 @@ impl Drop for LocalWorkObservation {
                 maintenance: self.maintenance,
                 duration_ms: millis(self.started.elapsed()),
                 outcome: LocalWorkOutcome::Interrupted,
+                resolution: None,
             });
         }
     }
@@ -295,6 +308,26 @@ pub fn observe_local_result<T, E>(
         } else {
             LocalWorkOutcome::Error
         });
+        result
+    }
+}
+
+/// 观测邀请解析：与 `observe_local_result` 相同，并在完成记录上附带来源摘要。
+pub fn observe_invitation_resolution<T, E>(
+    work: impl Future<Output = (Result<T, E>, InvitationResolution)>,
+) -> impl Future<Output = Result<T, E>> {
+    let work = Box::pin(work);
+    async move {
+        let observation = LocalWorkObservation::begin(LocalWorkStep::JoinerResolveInvitation);
+        let (result, resolution) = WORK_ACTIVE.scope((), work).await;
+        observation.finish_with(
+            if result.is_ok() {
+                LocalWorkOutcome::Ok
+            } else {
+                LocalWorkOutcome::Error
+            },
+            Some(resolution),
+        );
         result
     }
 }

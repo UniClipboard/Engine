@@ -301,6 +301,8 @@ Joiner 发出初次 hello 后读取 `OpaqueResponse` 失败时，完成记录的
 
 Joiner 初次交换（hello 到 `OpaqueFinish`）同样记录步骤：`open_stream`、`send_initial_hello`、`receive_opaque_response`、`validate_reply`、`send_opaque_finish`，成功时每步各一条完成记录，失败时停在出问题的那一步并带粗分类 `error.reason`（具体类别见上文完成记录的本地详情）；这些步骤不写第二条完成记录。读响应失败时另取一次 `ExchangeFinished` 网络快照（仍只在详细模式落盘）。
 
+Joiner 解析短邀请码的 `runtime.work.finished`（`step = joiner_resolve_invitation`）附带来源摘要：`winner`（`cloud`、`mdns`、`full_invitation`；全部失败时省略）、`cloud_outcome` 与 `mdns_outcome`。来源结果是固定类别：`not_run`（完整邀请或仅局域网模式未启动）、`pending`（对方先成功时该来源尚无结果）、`found`、`not_found`、`expired`、`conflict`、`transport_failed`、`service_unavailable`、`invalid_response`、`invalid_invitation`、`local_unavailable`。记录不含邀请码、票据、URL、地址或服务端文本；原先被丢弃的云端错误现在以类别保留，完整错误链仍随返回值传给调用方。
+
 `pairing.exchange.network.snapshot` 只在详细模式落盘，在连接建立后、交换开始及正常返回或失败返回时各取一次，
 不增加后台采样任务。只保留当前选中路径的固定类型、可用时的往返延迟微秒数，以及连接累计丢包和收发数据报数量。
 丢包计数包含此前路径，不视为本步骤新增丢包；路径或延迟不可取得时明确标为 unknown/unavailable，
