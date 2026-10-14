@@ -148,15 +148,7 @@ pub(super) async fn application_close_error(
         .and_then(map_application_close_code)
 }
 
-pub(super) async fn initial_hello_close_error(
-    connection: &iroh::endpoint::Connection,
-) -> Option<SpaceAdmissionTransportError> {
-    application_close_code(connection)
-        .await
-        .and_then(map_initial_hello_close_code)
-}
-
-async fn application_close_code(connection: &iroh::endpoint::Connection) -> Option<u64> {
+pub(super) async fn application_close_code(connection: &iroh::endpoint::Connection) -> Option<u64> {
     let close_reason = match connection.close_reason() {
         Some(reason) => Some(reason),
         None => tokio::time::timeout(Duration::from_millis(100), connection.closed())

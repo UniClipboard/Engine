@@ -6,6 +6,7 @@ mod address;
 mod address_record;
 mod admission_exchange;
 mod admission_network;
+mod admission_response;
 mod local_identity;
 mod local_work;
 mod maintenance;
@@ -15,6 +16,9 @@ pub use admission_exchange::{
 };
 pub use admission_network::{
     record_admission_network_snapshot, AdmissionNetworkPoint, AdmissionNetworkSnapshot,
+};
+pub use admission_response::{
+    complete_admission_response_failure, AdmissionResponseFailure, ApplicationCloseClass,
 };
 pub use local_identity::{record_local_identity_changed, LocalIdentityState};
 pub use local_work::{

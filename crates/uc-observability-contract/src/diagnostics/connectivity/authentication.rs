@@ -74,9 +74,9 @@ pub fn complete_admission_authentication_failure(
     ));
 }
 
-struct PendingCompletionDetail {
-    detail: LocalCompletionDetail,
-    consumed: std::sync::atomic::AtomicBool,
+pub(super) struct PendingCompletionDetail {
+    pub(super) detail: LocalCompletionDetail,
+    pub(super) consumed: std::sync::atomic::AtomicBool,
 }
 
 impl CredentialFailure {
@@ -208,6 +208,17 @@ pub fn take_local_completion_detail(
             LocalCompletionDetail::AdmissionConnection(_) => {
                 ("space_admission", "space_admission", "joiner", "deferred")
             }
+            // 对端以 busy 等关闭码应答时公开结果是延期，完成记录不是错误。
+            LocalCompletionDetail::AdmissionResponse(_) => (
+                "space_admission",
+                "space_admission",
+                "joiner",
+                if outcome == "deferred" {
+                    "deferred"
+                } else {
+                    "error"
+                },
+            ),
         };
         if (domain, operation, role, outcome) != expected {
             return None;
@@ -225,6 +236,7 @@ pub enum LocalCompletionDetail {
     ClipboardReceive(ClipboardReceiveFailure),
     Authentication(AuthenticationFailure),
     AdmissionConnection(DialFailure),
+    AdmissionResponse(super::AdmissionResponseFailure),
     GroupUpdate(super::GroupUpdateFailureDetail),
     MembershipHistory(super::MembershipHistoryFailureDetail),
 }
@@ -235,6 +247,7 @@ impl LocalCompletionDetail {
             Self::ClipboardReceive(failure) => failure.local_fields(),
             Self::Authentication(failure) => failure.local_fields(),
             Self::AdmissionConnection(reason) => ("connect", dial_reason(reason)),
+            Self::AdmissionResponse(failure) => failure.local_fields(),
             Self::GroupUpdate(detail) => (detail.phase.as_str(), detail.reason.as_str()),
             Self::MembershipHistory(detail) => (detail.phase.as_str(), detail.reason.as_str()),
         }

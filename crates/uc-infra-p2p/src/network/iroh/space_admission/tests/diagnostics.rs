@@ -501,3 +501,158 @@ fn authenticated_context_builds_a_real_client_server_parent() {
     );
     assert_eq!(server.parent_span_id, client.span_context.span_id());
 }
+
+/// 对真实 joiner 客户端回放一个在 `OpaqueResponse` 之前就出问题的 sponsor，返回本地详情与完成记录的错误类别。
+async fn joiner_response_failure(
+    handler: impl ProtocolHandler,
+) -> (
+    SpaceAdmissionTransportError,
+    Vec<(&'static str, &'static str)>,
+    Vec<String>,
+) {
+    let exporter = InMemoryLogExporter::default();
+    let details = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let logs = SdkLoggerProvider::builder()
+        .with_simple_exporter(exporter.clone())
+        .with_log_processor(DetailProbe(details.clone()))
+        .build();
+    let subscriber = tracing_subscriber::registry().with(
+        OpenTelemetryTracingBridge::new(&logs)
+            .with_filter(filter_fn(|metadata| metadata.target() == "uc.telemetry")),
+    );
+    let _subscriber = tracing::subscriber::set_default(subscriber);
+    let sponsor = bound_endpoint().await;
+    wait_for_direct_addrs(&sponsor).await;
+    let joiner = bound_endpoint().await;
+    wait_for_direct_addrs(&joiner).await;
+    let router = Router::builder((*sponsor).clone())
+        .accept(SPACE_ADMISSION_ALPN, handler)
+        .spawn();
+    let invitation = InvitationId::from_bytes([0x71; 32]).expect("invitation id");
+    let derived = SpaceAdmissionAuth::derive_password_equivalent(b"response-failure", invitation);
+    let password = AdmissionEncryptedPasswordEquivalent::from_bytes(derived.as_bytes().to_vec())
+        .expect("password equivalent");
+    let route = SpaceAdmissionRoute::from_bytes(
+        encode_space_admission_route(&sponsor.addr(), Some(invitation)).expect("route encoding"),
+    )
+    .expect("route");
+    let transport = IrohSpaceAdmissionTransport::new(joiner.clone());
+    let attempt = transport.establish_initial(
+        SpaceAdmissionId::from_bytes([0x72; 32]).expect("admission id"),
+        AdmissionAttemptTimeline::start(1_000).expect("valid attempt timeline"),
+        &route,
+        &password,
+    );
+    let error = match attempt.await {
+        Ok(_) => panic!("the sponsor never completes the response"),
+        Err(error) => error,
+    };
+    router.shutdown().await.expect("router shutdown");
+    joiner.close().await;
+    sponsor.close().await;
+    logs.force_flush().expect("flush");
+    let error_types = exporter
+        .get_emitted_logs()
+        .expect("records")
+        .iter()
+        .filter_map(|entry| {
+            entry.record.attributes_iter().find_map(|(key, value)| {
+                (key.as_str() == "error.type").then(|| match value {
+                    AnyValue::String(value) => value.as_str().to_owned(),
+                    _ => String::new(),
+                })
+            })
+        })
+        .collect();
+    let details = details.lock().expect("details").clone();
+    (error, details, error_types)
+}
+
+/// 读到 hello 后的 sponsor 行为：不回应、重置发送流、发出损坏帧、以关闭码关闭。
+#[derive(Debug, Clone, Copy)]
+enum ResponseBehavior {
+    Silent,
+    ResetStream,
+    GarbageFrame,
+    Close(u32),
+}
+
+#[derive(Debug)]
+struct MisbehavingSponsor(ResponseBehavior);
+
+impl ProtocolHandler for MisbehavingSponsor {
+    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+        let (mut send, mut receive) = connection.accept_bi().await.expect("sponsor stream");
+        read_raw_with_limit(&mut receive, AUTH_FRAME_LIMIT)
+            .await
+            .expect("initial hello");
+        match self.0 {
+            ResponseBehavior::Silent => std::future::pending().await,
+            ResponseBehavior::ResetStream => {
+                send.reset(0_u8.into()).expect("reset");
+                connection.closed().await;
+            }
+            ResponseBehavior::GarbageFrame => {
+                send.write_all(&[0xff; 16]).await.expect("garbage");
+                connection.closed().await;
+            }
+            ResponseBehavior::Close(code) => {
+                connection.close(code.into(), b"test");
+            }
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn joiner_distinguishes_why_the_opaque_response_never_arrived() {
+    for (behavior, expected, error_type) in [
+        (
+            ResponseBehavior::ResetStream,
+            "stream_reset",
+            Some("channel_closed"),
+        ),
+        (
+            ResponseBehavior::GarbageFrame,
+            "decode",
+            Some("decode_failed"),
+        ),
+        (
+            ResponseBehavior::Close(CLOSE_AUTHENTICATION),
+            "app_close_authentication",
+            Some("authentication_failed"),
+        ),
+        // busy 的公开结果是延期，完成记录没有错误类别。
+        (ResponseBehavior::Close(CLOSE_BUSY), "app_close_busy", None),
+    ] {
+        let (error, details, error_types) =
+            joiner_response_failure(MisbehavingSponsor(behavior)).await;
+        assert_eq!(
+            details,
+            vec![("receive_response", expected)],
+            "{behavior:?}: {error:?}"
+        );
+        assert_eq!(
+            error_types,
+            error_type
+                .map(str::to_owned)
+                .into_iter()
+                .collect::<Vec<_>>(),
+            "{behavior:?}"
+        );
+    }
+}
+
+/// 真实等待读响应的 30 秒截止：沉默的 sponsor 必须被记录为响应超时，而不是认证失败。
+#[tokio::test]
+async fn silent_sponsor_is_recorded_as_response_timeout_not_authentication_failure() {
+    let (error, details, error_types) =
+        joiner_response_failure(MisbehavingSponsor(ResponseBehavior::Silent)).await;
+    // 公开结果保持不变：Application 仍看到认证被拒绝。
+    assert!(matches!(
+        error,
+        SpaceAdmissionTransportError::AuthenticationRejected { .. }
+    ));
+    assert_eq!(details, vec![("receive_response", "response_timeout")]);
+    assert_eq!(error_types, vec!["timeout".to_owned()]);
+}
