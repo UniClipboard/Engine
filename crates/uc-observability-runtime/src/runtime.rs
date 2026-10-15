@@ -19,6 +19,7 @@ use crate::network_log::{
     NetworkCaptureStatus, NetworkLogError, NetworkLogExportReport, NetworkLogRuntime,
     NetworkLogStatus,
 };
+use crate::process_census::ProcessCensus;
 use crate::remote_health::record_remote_setup_degraded;
 use crate::status::{
     FlushSummary, ObservabilityHealth, SetupStatus, ShutdownSummary, SignalResult,
@@ -76,6 +77,12 @@ impl ProcessObservabilityRuntime {
             "diagnostics.run.started",
             serde_json::json!({ "capture_mode": "standard" }),
         );
+        // 周期资源记录只写进本地模块日志；没有本地日志目录时没有读者，不启动线程。
+        if state.local_file.is_some() {
+            if let Some(census) = ProcessCensus::start() {
+                let _ = state.census.set(census);
+            }
+        }
         Ok(InstallOutcome::Installed(ProcessObservabilityHandle {
             state,
         }))
@@ -360,6 +367,10 @@ impl ProcessObservabilityHandle {
         if let Some(network) = &self.state.network {
             network.shutdown_detached(deadline);
         }
+        // 资源记录线程只在周期等待中，停止是立即的；先停，避免关闭后继续写记录。
+        if let Some(census) = self.state.census.get() {
+            census.stop();
+        }
         self.state.health_accepting.store(true, Ordering::Release);
         self.state.telemetry.recording.finish_run();
         self.state.telemetry.seal();
@@ -415,6 +426,8 @@ struct RuntimeState {
     module_log: Arc<ModuleLogStats>,
     /// 独立的网络日志；与业务日志互不依赖，没有配置时为空。
     network: Option<Arc<NetworkLogRuntime>>,
+    /// 进程资源周期记录；安装成功且有本地日志目录时设置，关闭时停止。
+    census: OnceLock<ProcessCensus>,
 }
 
 fn build_runtime(
@@ -509,6 +522,7 @@ fn build_runtime(
         health_accepting,
         module_log,
         network,
+        census: OnceLock::new(),
     });
     (state, subscriber)
 }

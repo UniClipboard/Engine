@@ -20,6 +20,7 @@ mod local_recording;
 mod module_log;
 mod module_log_fields;
 mod network_log;
+mod process_census;
 pub use local_capture::{
     CaptureEndReason, DetailedCaptureRequest, LocalCaptureMode, LocalCaptureStatus,
     LocalDiagnosticError, LocalDiagnosticExportReport, LocalDiagnosticStatus, SourceCapability,

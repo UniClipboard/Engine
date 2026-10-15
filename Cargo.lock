@@ -2908,8 +2908,7 @@ checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
 [[package]]
 name = "iroh"
 version = "1.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "885787b892b5e2507c701f132ecbd45d2bad4bbb75157a19427087c16dadb833"
+source = "git+https://github.com/n0-computer/iroh?rev=43e232fbcbf11aa9cf03a78ac83f52296f01d6b3#43e232fbcbf11aa9cf03a78ac83f52296f01d6b3"
 dependencies = [
  "backon",
  "blake3",
@@ -2958,8 +2957,7 @@ dependencies = [
 [[package]]
 name = "iroh-base"
 version = "1.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ae9092be76c9f5429776ab3394f5a5a78dc19dc2524267e884a5b9781546c3f"
+source = "git+https://github.com/n0-computer/iroh?rev=43e232fbcbf11aa9cf03a78ac83f52296f01d6b3#43e232fbcbf11aa9cf03a78ac83f52296f01d6b3"
 dependencies = [
  "curve25519-dalek 5.0.0",
  "data-encoding",
@@ -3017,8 +3015,7 @@ dependencies = [
 [[package]]
 name = "iroh-dns"
 version = "1.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80276761b56e904e26ea71d0863beef0bb8d5ab6b639cbd1338e4b615209e3a1"
+source = "git+https://github.com/n0-computer/iroh?rev=43e232fbcbf11aa9cf03a78ac83f52296f01d6b3#43e232fbcbf11aa9cf03a78ac83f52296f01d6b3"
 dependencies = [
  "arc-swap",
  "cfg_aliases",
@@ -3106,8 +3103,7 @@ dependencies = [
 [[package]]
 name = "iroh-relay"
 version = "1.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee116a8233f84980574bb8d11e4517503080cd2c3605bafca04ee9c35d708bd9"
+source = "git+https://github.com/n0-computer/iroh?rev=43e232fbcbf11aa9cf03a78ac83f52296f01d6b3#43e232fbcbf11aa9cf03a78ac83f52296f01d6b3"
 dependencies = [
  "blake3",
  "bytes",

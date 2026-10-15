@@ -60,6 +60,16 @@ impl IrohNode {
         let watchdog = started + ROUTER_WATCHDOG;
         let watchdog = deadline.map_or(watchdog, |deadline| deadline.min(watchdog));
         let mut failures = Vec::new();
+        if let Some(handle) = self.connection_census.take() {
+            handle.abort();
+            match handle.await {
+                Ok(()) => {}
+                Err(error) if error.is_cancelled() => {}
+                Err(error) => {
+                    failures.push(anyhow::Error::new(error).context("stop connection census"))
+                }
+            }
+        }
         if let Some(handle) = self.net_recovery.take() {
             handle.abort();
             match handle.await {

@@ -36,6 +36,8 @@
 
 ## 补充：依赖补丁不依赖下游 `[patch]`
 
+> iroh 例外：自 [ADR-034](034-pin-iroh-to-unreleased-upstream-commit.md) 起，根清单为 iroh 使用 `[patch.crates-io]` 固定上游提交，下游需要重复；下面的原则对 iroh-blobs 与 swarm-discovery 仍然成立。
+
 `[patch]` 只读取构建根清单，不会传给依赖 Engine 的仓库。因此 Engine 不再使用 `[patch]`：iroh-blobs fork 是 `uc-infra-p2p` 的直接 git 依赖（固定 rev），
 打过补丁的 `swarm-discovery` 与随仓库副本 `iroh-mdns-address-lookup`（仅把其 swarm-discovery 依赖指向本地路径）是 `uc-infra-p2p` 的 `third_party` 路径依赖，
 并在根清单 `exclude`。依赖防火墙脚本只放行这两个路径依赖。下游仓库不需要任何补丁；上游接受修复后删除对应副本。
