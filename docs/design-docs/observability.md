@@ -301,6 +301,28 @@ Joiner 发出初次 hello 后读取 `OpaqueResponse` 失败时，完成记录的
 
 Joiner 初次交换（hello 到 `OpaqueFinish`）同样记录步骤：`open_stream`、`send_initial_hello`、`receive_opaque_response`、`validate_reply`、`send_opaque_finish`，成功时每步各一条完成记录，失败时停在出问题的那一步并带粗分类 `error.reason`（具体类别见上文完成记录的本地详情）；这些步骤不写第二条完成记录。读响应失败时另取一次 `ExchangeFinished` 网络快照（仍只在详细模式落盘）。
 
+路由器的入站过滤器在 QUIC 握手之前为每次入站尝试留下一条 INFO 模块记录 `connection.incoming.observed at the router filter`，字段只有 `addr_kind`（`ip`、`relay`、`other`）与 `outcome`（`accept`、`retry`，路由器尚未就绪时为 `retry`）；不含地址值、端点标识或中继 URL，记录点由模块日志令牌桶限速。
+
+Sponsor 的准入处理器实现 `on_accepting`，在 QUIC 握手结束时留下一条 INFO 模块记录 `connection.accepting.finished for space admission`：`outcome`（`connected`、`handshake_failed`、`timed_out`）、失败时的 `error_class`（`connection_timed_out`、`connection_error`、`authentication`、`locally_rejected`、`other`）和 `elapsed_ms`。握手失败的连接不会进入 `accept`，此前没有本地痕迹；记录不含对端标识或地址，也不增加握手超时（沿用传输层的空闲超时）。
+
+Sponsor 准入处理器的结局在标准采集模式下就可见：因停止服务关闭连接（`reason = stopping`）、认证被拒绝、对端需升级、对端未确认回复、交换超时，各留下一条 INFO 模块记录并带 `error_type`（既有词表），不再依赖详细窗口。这些记录是本地分支证据，不重复既有的契约 ERROR 记录；记录点由模块日志令牌桶限速。
+
+Sponsor 解析准入凭据（`resolve_initial`、`load_continuation`）经 `runtime.work.started/finished` 计时，步骤为 `sponsor_credential_initial`、`sponsor_credential_continuation`，带 `duration_ms` 与 `uc.outcome`。钥匙串或存储变慢时，这段耗时不再混进 sponsor 的总耗时；失败类别仍由既有的认证完成记录（`CredentialFailure`）承担，这里不重复。
+
+一次准入尝试在 joiner 与 sponsor 两端共用同一个关联引用 `attempt_ref`：对 `admission_id` 做带域名的 SHA-256 并截取 8 字节（16 位小写十六进制，`AdmissionAttemptRef`），两端各自从已有的 `admission_id` 派生，不新增线上字段、也不扩大 Engine 接口。引用只随单次尝试变化，换一次尝试就不同，因此不能用来跨尝试、跨邀请识别设备或空间，也无法还原 `admission_id`；原始 `admission_id` 不进入任何记录。携带引用的记录是两端的 `pairing.exchange.step.*` 步骤记录（含 joiner 的初次交换步骤），以及 sponsor 准入处理器的 INFO 结局记录（认证成功解析到 hello 之前为 `none`）。预先握手阶段（尚无 `admission_id`）的记录不带该引用，由按邀请的带密钥引用（E19）承担。
+
+本机复制与显式发送（`clipboard.copy_and_sync`、`clipboard.send`）的失败完成记录按既有错误类型分类，不再统一记为 `internal`：运行时不可用为 `unavailable`，派送失败为 `delivery_failed`，派送准备被取消记为 `cancelled`（不是失败）。捕获失败的下层来源是未分类的 `anyhow` 链，类别仍为 `internal`；细分需要 Application 先提供类型化的捕获错误。错误来源链原样返回给调用方，记录里不含底层文本。
+
+Blob 拉取失败按既有错误类型落成稳定原因，不再统一记为 `Unknown`，也不再持久化 `to_string()` 文本：传输不可达为 `network_unavailable`，I/O 超时为 `timed_out`，权限不足为 `access_denied`，本地存储不可用或写引用失败为 `storage_unavailable`，解密失败为 `integrity_check_failed`，其余为 `unknown`。目录成员因另一成员失败而未拉取时沿用失败成员的原因类别。失败事件的 `detail` 不再携带自由文本；错误来源链仍原样返回给调用方。
+
+剪贴板接收端在收完内容后会复核该连接是否仍被准入。复核失败不再让这次接收静默结束：它以一条 `clipboard_receive` 失败完成记录收尾，`error.type` 为 `peer_rejected`（连接已不再准入）、`timeout`（复核超过接收期限）或 `unavailable`（其余失败），本地详情阶段为 `admission`，原因 `revoked`、`check_timed_out`、`check_failed`。接收流程不再把结果返回给被丢弃的调用点，也不向对端补发确认（连接本身已被关闭）。
+
+离线投递恢复的每一轮（启动扫描 `trigger = startup` 或设备上线 `trigger = peer_online`）以一条 INFO 模块记录 `clipboard delivery recovery round finished` 收尾，字段为 `trigger` 与固定的 `outcome`：`dispatched`、`nothing_to_recover`、`cancelled`、`sync_disabled`、`member_inactive`、`scope_unavailable`、`target_paused`、`target_not_current`、`listing_failed`、`supersede_failed`、`status_changed`、`payload_lost`、`not_resendable`、`delivery_failed`、`delivery_skipped`。此前关闭同步、本机成员失效、成员范围读取失败等提前返回不留任何痕迹；现在每个返回路径都对应一个类别，不记录条目、设备或错误正文。按 Application 约束，这里用完成记录而不是在调用点增加 span；正常“无需恢复”由模块日志令牌桶限速，不单独占据业务主列表。
+
+选择设备组（`query_device_group_choices`、`choose_device_group`）的结果在标准采集模式下就可见，不再只在详细窗口里：查询或选择失败为 WARN（`error_kind`、`error_stage` 沿用既有词表）；宿主传来的议题或选项标识无法解析、或应用层判定选择无效时，为带固定 `reason`（`invalid_issue`、`invalid_choice`、`choice_rejected`）的 WARN；每次选择的结局为一条 INFO `device group choice settled`，`outcome` 为 `completed`、`pending`、`re_pairing_required`、`already_completed`、`state_changed`、`local_device_confirmation_required`。记录不含议题、选项、设备或成员标识，对外错误码与摘要不变。
+
+生成配对邀请失败时，除内部失败与口令变更恢复（已按 ERROR 记录）外的每个类别各留下一条 WARN `issue invitation failed`，`error_kind` 为 `network_not_started`、`no_publishable_address`、`local_publication_failed`、`directory_transport_failed`、`directory_rejected`、`directory_invalid_response`、`reconciliation_in_progress`、`reconciliation_required`、`reconciliation_unavailable`、`address_not_available`、`service_unavailable`，不含地址、来源正文或邀请内容；对外错误码不变。Sponsor 在没有准入注册记录时解析凭据，类别为 `record_missing`（被拒绝），不再折叠成 `unavailable`（可重试的存储故障）：两者的处理责任不同。
+
 会话门拒绝入站连接时（握手后没有可用会话世代、分发器取不到世代，或已接受的连接因世代退出被取消）留下一条 INFO 模块记录 `connection.rejected by the session gate`，字段只有 `reason`（`session_unavailable`、`session_retired`）和 `alpn`（`space_admission`、`presence`、`transfer_progress`、`other` 的固定类别）；不含对端标识、地址或原始 ALPN。记录点沿用模块日志的令牌桶限速，反复重连的对端不会放大日志量。
 
 Joiner 解析短邀请码的 `runtime.work.finished`（`step = joiner_resolve_invitation`）附带来源摘要：`winner`（`cloud`、`mdns`、`full_invitation`；全部失败时省略）、`cloud_outcome` 与 `mdns_outcome`。来源结果是固定类别：`not_run`（完整邀请或仅局域网模式未启动）、`pending`（对方先成功时该来源尚无结果）、`found`、`not_found`、`expired`、`conflict`、`transport_failed`、`service_unavailable`、`invalid_response`、`invalid_invitation`、`local_unavailable`。记录不含邀请码、票据、URL、地址或服务端文本；原先被丢弃的云端错误现在以类别保留，完整错误链仍随返回值传给调用方。

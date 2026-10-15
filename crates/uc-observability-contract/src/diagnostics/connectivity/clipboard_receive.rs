@@ -79,6 +79,12 @@ pub enum ClipboardReceiveFailure {
     ApplyStorageFull,
     ApplyReadOnly,
     ApplyIoFailed,
+    /// 收完内容后的准入复核发现该连接已不再被准入（成员被移除或世代已退出）。
+    AdmissionRevoked,
+    /// 准入复核在接收期限内没有给出结果。
+    AdmissionCheckTimedOut,
+    /// 准入复核因其他原因失败（连接所有者已停止等）。
+    AdmissionCheckFailed,
 }
 
 impl ClipboardReceiveFailure {
@@ -108,6 +114,31 @@ impl ClipboardReceiveFailure {
             Self::ApplyStorageFull => ("apply", "storage_full"),
             Self::ApplyReadOnly => ("apply", "read_only_filesystem"),
             Self::ApplyIoFailed => ("apply", "io_failed"),
+            Self::AdmissionRevoked => ("admission", "revoked"),
+            Self::AdmissionCheckTimedOut => ("admission", "check_timed_out"),
+            Self::AdmissionCheckFailed => ("admission", "check_failed"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn admission_check_failures_have_fixed_local_fields() {
+        for (failure, expected) in [
+            (ClipboardReceiveFailure::AdmissionRevoked, "revoked"),
+            (
+                ClipboardReceiveFailure::AdmissionCheckTimedOut,
+                "check_timed_out",
+            ),
+            (
+                ClipboardReceiveFailure::AdmissionCheckFailed,
+                "check_failed",
+            ),
+        ] {
+            assert_eq!(failure.local_fields(), ("admission", expected));
         }
     }
 }

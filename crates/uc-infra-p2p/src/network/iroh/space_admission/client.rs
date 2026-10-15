@@ -26,8 +26,8 @@ use uc_infra_crypto::space_admission_auth::{
 };
 use uc_observability_contract::diagnostics::connectivity::{
     complete_admission_connection_failure, complete_admission_response_failure,
-    AdmissionExchangeFailure, AdmissionExchangeObservation, AdmissionExchangeSide,
-    AdmissionExchangeStep, AdmissionNetworkPoint, AdmissionResponseFailure,
+    AdmissionAttemptRef, AdmissionExchangeFailure, AdmissionExchangeObservation,
+    AdmissionExchangeSide, AdmissionExchangeStep, AdmissionNetworkPoint, AdmissionResponseFailure,
 };
 use uc_observability_contract::diagnostics::{
     operation_span, DiagnosticDomain, DiagnosticOperation, DiagnosticRole, DiagnosticSpanKind,
@@ -104,7 +104,8 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
                         SpaceAdmissionTransportError::deferred()
                     })?;
             let mut progress =
-                AdmissionExchangeObservation::begin_steps_only(AdmissionExchangeSide::Joiner);
+                AdmissionExchangeObservation::begin_steps_only(AdmissionExchangeSide::Joiner)
+                    .with_attempt(AdmissionAttemptRef::derive(admission_id.as_bytes()));
             progress.start_step(AdmissionExchangeStep::OpenStream);
             let (mut send, mut receive) = open_stream(&connection)
                 .await

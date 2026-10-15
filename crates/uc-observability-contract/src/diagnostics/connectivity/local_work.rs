@@ -71,6 +71,8 @@ pub enum LocalWorkStep {
     SponsorPrepareComplete,
     SponsorPrepareSettled,
     SponsorActivate,
+    SponsorCredentialInitial,
+    SponsorCredentialContinuation,
     RePairingStateCommit,
     JoinerStateLoad,
     JoinerStateCommit,

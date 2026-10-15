@@ -5,7 +5,8 @@ use async_trait::async_trait;
 use tracing::Instrument;
 use uc_application::deps::ApplicationClipboardAdapters;
 use uc_application::facade::{
-    ClipboardOutboundOutcome, LocalClipboardOutcome, ResendEntryError, ResendReport,
+    ApplicationRuntimeError, ClipboardOutboundError, ClipboardOutboundOutcome,
+    LocalClipboardOutcome, LocalClipboardProcessError, ResendEntryError, ResendReport,
 };
 use uc_core::clipboard::{ClipboardEntry, ClipboardRepositoryError, ClipboardSelectionDecision};
 use uc_core::ids::DeviceId;
@@ -45,22 +46,22 @@ pub(crate) fn observe_clipboard_dependencies(deps: &mut uc_application::deps::Ap
 }
 
 /// 包装已有完整本机复制调用；不读取内容、条目身份或业务步骤。
-pub(crate) async fn observe_local_copy<E>(
-    action: impl std::future::Future<Output = Result<LocalClipboardOutcome, E>>,
-) -> Result<LocalClipboardOutcome, E> {
+pub(crate) async fn observe_local_copy(
+    action: impl std::future::Future<Output = Result<LocalClipboardOutcome, ApplicationRuntimeError>>,
+) -> Result<LocalClipboardOutcome, ApplicationRuntimeError> {
     observe_local_clipboard(DiagnosticOperation::ClipboardCopyAndSync, action).await
 }
 
-pub(crate) async fn observe_explicit_send<E>(
-    action: impl std::future::Future<Output = Result<LocalClipboardOutcome, E>>,
-) -> Result<LocalClipboardOutcome, E> {
+pub(crate) async fn observe_explicit_send(
+    action: impl std::future::Future<Output = Result<LocalClipboardOutcome, ApplicationRuntimeError>>,
+) -> Result<LocalClipboardOutcome, ApplicationRuntimeError> {
     observe_local_clipboard(DiagnosticOperation::ClipboardSend, action).await
 }
 
-async fn observe_local_clipboard<E>(
+async fn observe_local_clipboard(
     operation: DiagnosticOperation,
-    action: impl std::future::Future<Output = Result<LocalClipboardOutcome, E>>,
-) -> Result<LocalClipboardOutcome, E> {
+    action: impl std::future::Future<Output = Result<LocalClipboardOutcome, ApplicationRuntimeError>>,
+) -> Result<LocalClipboardOutcome, ApplicationRuntimeError> {
     let started = Instant::now();
     let span = clipboard_local_span(operation);
     let mut cancellation = ClipboardOperationCancellation {
@@ -74,17 +75,36 @@ async fn observe_local_clipboard<E>(
     span.in_scope(|| {
         let completion = match &result {
             Ok(outcome) => copy_completion(operation, outcome, started.elapsed()),
-            Err(_) => OperationCompletion::failed(
-                DiagnosticDomain::Clipboard,
-                operation,
-                DiagnosticRole::Local,
-                DiagnosticErrorType::Internal,
-                started.elapsed(),
-            ),
+            Err(error) => failure_completion(operation, error, started.elapsed()),
         };
         complete_operation(completion);
     });
     result
+}
+
+/// 只按既有错误类型分类：运行时不可用、派送取消和派送失败各有自己的类别。
+/// 捕获失败的下层来源是未分类的 `anyhow` 链，类别保持 `internal`，细分需要 Application 先提供类型化错误。
+fn failure_completion(
+    operation: DiagnosticOperation,
+    error: &ApplicationRuntimeError,
+    elapsed: std::time::Duration,
+) -> OperationCompletion {
+    let domain = DiagnosticDomain::Clipboard;
+    let role = DiagnosticRole::Local;
+    let class = match error {
+        ApplicationRuntimeError::Unavailable => DiagnosticErrorType::Unavailable,
+        ApplicationRuntimeError::LocalClipboard {
+            source:
+                LocalClipboardProcessError::Dispatch {
+                    source: ClipboardOutboundError::Cancelled(_),
+                },
+        } => return OperationCompletion::cancelled(domain, operation, role, elapsed),
+        ApplicationRuntimeError::LocalClipboard {
+            source: LocalClipboardProcessError::Dispatch { .. },
+        } => DiagnosticErrorType::DeliveryFailed,
+        ApplicationRuntimeError::LocalClipboard { .. } => DiagnosticErrorType::Internal,
+    };
+    OperationCompletion::failed(domain, operation, role, class, elapsed)
 }
 
 /// 只解释既有派送汇总，不读取目标身份，不改变派送或恢复策略。
@@ -516,10 +536,11 @@ mod tests {
                 .with_ansi(false)
                 .with_writer(writer.clone()),
         );
-        let result = observe_local_copy(async { Ok::<_, ()>(outcome.clone()) })
-            .with_subscriber(subscriber)
-            .await;
-        assert_eq!(result, Ok(outcome));
+        let result =
+            observe_local_copy(async { Ok::<_, ApplicationRuntimeError>(outcome.clone()) })
+                .with_subscriber(subscriber)
+                .await;
+        assert_eq!(result.ok(), Some(outcome));
         let output = String::from_utf8(writer.0.lock().expect("logs").clone()).expect("utf8");
         assert!(
             output.contains(&format!("uc.outcome=\"{expected}\"")),
@@ -536,33 +557,88 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn copy_failure_preserves_source_without_recording_private_error() {
-        let writer = CapturedWriter::default();
-        let subscriber = tracing_subscriber::registry().with(
-            tracing_subscriber::fmt::layer()
-                .without_time()
-                .with_ansi(false)
-                .with_writer(writer.clone()),
-        );
-        let error = anyhow::Error::new(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "PRIVATE_CAPTURE_ERROR",
-        ))
-        .context("PRIVATE_CAPTURE_CONTEXT");
-        let result = observe_local_copy(async { Err::<LocalClipboardOutcome, _>(error) })
-            .with_subscriber(subscriber)
-            .await;
-        let error = result.expect_err("failure unchanged");
-        assert_eq!(
-            error
-                .downcast_ref::<std::io::Error>()
-                .expect("source preserved")
-                .kind(),
-            std::io::ErrorKind::PermissionDenied
-        );
-        let output = String::from_utf8(writer.0.lock().expect("logs").clone()).expect("utf8");
-        assert!(output.contains("uc.outcome=\"error\""));
-        assert!(!output.contains("PRIVATE_"));
+    async fn copy_failures_get_a_class_per_error_variant_and_keep_their_source() {
+        use std::error::Error as _;
+        use uc_application::deps::ActivePullPreparationCancelled;
+        let private = || {
+            anyhow::Error::new(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "PRIVATE_CAPTURE_ERROR",
+            ))
+            .context("PRIVATE_CAPTURE_CONTEXT")
+        };
+        let cases: Vec<(ApplicationRuntimeError, &str, Option<&str>)> = vec![
+            (
+                ApplicationRuntimeError::Unavailable,
+                "error",
+                Some("unavailable"),
+            ),
+            (
+                ApplicationRuntimeError::LocalClipboard {
+                    source: LocalClipboardProcessError::Capture {
+                        source: uc_application::facade::ClipboardCaptureFacadeError::Internal(
+                            private(),
+                        ),
+                    },
+                },
+                "error",
+                Some("internal"),
+            ),
+            (
+                ApplicationRuntimeError::LocalClipboard {
+                    source: LocalClipboardProcessError::Dispatch {
+                        source: ClipboardOutboundError::Internal(private()),
+                    },
+                },
+                "error",
+                Some("delivery_failed"),
+            ),
+            (
+                ApplicationRuntimeError::LocalClipboard {
+                    source: LocalClipboardProcessError::Dispatch {
+                        source: ClipboardOutboundError::Cancelled(ActivePullPreparationCancelled),
+                    },
+                },
+                "cancelled",
+                None,
+            ),
+        ];
+        for (error, outcome, error_type) in cases {
+            let writer = CapturedWriter::default();
+            let subscriber = tracing_subscriber::registry().with(
+                tracing_subscriber::fmt::layer()
+                    .without_time()
+                    .with_ansi(false)
+                    .with_writer(writer.clone()),
+            );
+            let result = observe_local_copy(async { Err::<LocalClipboardOutcome, _>(error) })
+                .with_subscriber(subscriber)
+                .await;
+            let error = result.expect_err("failure unchanged");
+            if error_type == Some("internal") || error_type == Some("delivery_failed") {
+                assert!(error.source().is_some(), "typed source is preserved");
+            }
+            let output = String::from_utf8(writer.0.lock().expect("logs").clone()).expect("utf8");
+            assert!(
+                output.contains(&format!("uc.outcome=\"{outcome}\"")),
+                "{output}"
+            );
+            match error_type {
+                Some(class) => assert!(
+                    output.contains(&format!("error.type=\"{class}\"")),
+                    "expected {class}: {output}"
+                ),
+                None => assert!(!output.contains("error.type=\""), "{output}"),
+            }
+            assert_eq!(
+                output
+                    .lines()
+                    .filter(|line| line.contains("event.name=\"uc.operation.completed\""))
+                    .count(),
+                1
+            );
+            assert!(!output.contains("PRIVATE_"));
+        }
     }
     use std::io::Write;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -635,7 +711,9 @@ mod tests {
         let _subscriber = tracing::subscriber::set_default(subscriber);
         let result = tokio::time::timeout(
             std::time::Duration::from_millis(10),
-            observe_local_copy(std::future::pending::<Result<LocalClipboardOutcome, ()>>()),
+            observe_local_copy(std::future::pending::<
+                Result<LocalClipboardOutcome, ApplicationRuntimeError>,
+            >()),
         )
         .await;
         assert!(result.is_err());

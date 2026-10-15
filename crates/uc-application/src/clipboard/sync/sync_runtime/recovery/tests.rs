@@ -335,7 +335,7 @@ async fn recovery_stop_finishes_storage_and_started_replacement_without_dispatch
         let cancel = CancellationToken::new();
         let task_cancel = cancel.clone();
         let task = tokio::spawn(async move {
-            recover_online_target(&deps, target, &task_cancel).await;
+            recover_online_target(&deps, target, RecoveryTrigger::PeerOnline, &task_cancel).await;
         });
         tokio::time::timeout(Duration::from_secs(2), entries.entered.notified())
             .await
@@ -383,7 +383,13 @@ async fn recovery_stop_leaves_the_delivery_queue_without_waiting_for_its_owner()
     let cancel = CancellationToken::new();
     let task_cancel = cancel.clone();
     let task = tokio::spawn(async move {
-        recover_online_target(&deps, DeviceId::new("target"), &task_cancel).await;
+        recover_online_target(
+            &deps,
+            DeviceId::new("target"),
+            RecoveryTrigger::PeerOnline,
+            &task_cancel,
+        )
+        .await;
     });
     tokio::task::yield_now().await;
     cancel.cancel();
@@ -1133,4 +1139,140 @@ async fn payload_lost_stops_future_automatic_recovery_for_that_entry() {
     assert_eq!(stored[0].target_device_id, target);
     assert_eq!(logs.count("entry payload is gone"), 1);
     assert!(logs.output().contains("reason=\"payload_lost\""));
+}
+
+struct InactiveScope;
+
+#[async_trait]
+impl CurrentSpaceMemberScopePort for InactiveScope {
+    async fn snapshot(&self) -> Result<CurrentSpaceMemberScope, CurrentSpaceMemberScopeError> {
+        Ok(CurrentSpaceMemberScope {
+            revision: 1,
+            local_member_active: false,
+            usable_peer_device_ids: Vec::new(),
+            paused_peer_devices: Vec::new(),
+        })
+    }
+}
+
+struct UnavailableScope;
+
+#[async_trait]
+impl CurrentSpaceMemberScopePort for UnavailableScope {
+    async fn snapshot(&self) -> Result<CurrentSpaceMemberScope, CurrentSpaceMemberScopeError> {
+        Err(CurrentSpaceMemberScopeError::Unavailable)
+    }
+}
+
+/// 每一轮恢复都以一条固定结局记录收尾；提前返回不再静默（旧实现里关闭同步、成员失效、
+/// 成员范围读取失败等分支什么都不留下）。
+#[tokio::test]
+async fn every_recovery_round_ends_with_one_fixed_outcome_record() {
+    #[derive(Clone, Copy)]
+    enum Setup {
+        Normal,
+        NoEntries,
+        AutoSyncOff,
+        Paused,
+        NotCurrent,
+        MemberInactive,
+        ScopeUnavailable,
+        PreCancelled,
+        PayloadLost,
+        StorageFailure,
+    }
+    let target = DeviceId::new("recovered");
+    for (setup, expected) in [
+        (Setup::Normal, "dispatched"),
+        (Setup::NoEntries, "nothing_to_recover"),
+        (Setup::AutoSyncOff, "sync_disabled"),
+        (Setup::Paused, "target_paused"),
+        (Setup::NotCurrent, "target_not_current"),
+        (Setup::MemberInactive, "member_inactive"),
+        (Setup::ScopeUnavailable, "scope_unavailable"),
+        (Setup::PreCancelled, "cancelled"),
+        (Setup::PayloadLost, "payload_lost"),
+        (Setup::StorageFailure, "delivery_failed"),
+    ] {
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+        let pending = entry("offline-entry", "local-event");
+        let deliveries = Arc::new(Deliveries {
+            records: Mutex::new(HashMap::from([(
+                pending.entry_id.clone(),
+                vec![EntryDeliveryRecord {
+                    entry_id: pending.entry_id.clone(),
+                    target_device_id: target.clone(),
+                    status: EntryDeliveryStatus::Unreachable,
+                    reason_detail: None,
+                    updated_at_ms: 1,
+                }],
+            )])),
+        });
+        let delivery = Arc::new(RecordingDispatch {
+            commands: Mutex::new(Vec::new()),
+            result: match setup {
+                Setup::PayloadLost => DispatchResult::PayloadLost,
+                Setup::StorageFailure => DispatchResult::StorageFailure,
+                _ => DispatchResult::Delivered,
+            },
+        });
+        let entries = if matches!(setup, Setup::NoEntries) {
+            Vec::new()
+        } else {
+            vec![pending.clone()]
+        };
+        let mut deps = recovery_deps(
+            !matches!(setup, Setup::AutoSyncOff),
+            entries,
+            HashMap::from([(pending.event_id.clone(), DeviceId::new("local"))]),
+            deliveries,
+            delivery,
+        );
+        match setup {
+            Setup::Paused => {
+                deps.member_scope = Arc::new(FixedMemberScope {
+                    usable: Vec::new(),
+                    paused: vec![PausedSpaceMember {
+                        device_id: target.clone(),
+                        reason: SpaceMemberPauseReason::RelationshipUnconfirmed,
+                    }],
+                })
+            }
+            Setup::NotCurrent => {
+                deps.member_scope = Arc::new(FixedMemberScope {
+                    usable: Vec::new(),
+                    paused: Vec::new(),
+                })
+            }
+            Setup::MemberInactive => deps.member_scope = Arc::new(InactiveScope),
+            Setup::ScopeUnavailable => deps.member_scope = Arc::new(UnavailableScope),
+            _ => {}
+        }
+        let cancel = CancellationToken::new();
+        if matches!(setup, Setup::PreCancelled) {
+            cancel.cancel();
+        }
+
+        recover_online_target(&deps, target.clone(), RecoveryTrigger::PeerOnline, &cancel).await;
+
+        let rounds: Vec<_> = logs
+            .output()
+            .lines()
+            .filter(|line| line.contains("clipboard delivery recovery round finished"))
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(rounds.len(), 1, "{expected}: {}", logs.output());
+        assert!(
+            rounds[0].contains(&format!("outcome=\"{expected}\"")),
+            "expected {expected}: {}",
+            rounds[0]
+        );
+        assert!(
+            rounds[0].contains("trigger=\"peer_online\""),
+            "{}",
+            rounds[0]
+        );
+        assert!(!logs.output().contains("PRIVATE"));
+    }
 }

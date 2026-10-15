@@ -1,10 +1,14 @@
 //! 完成身份与请求证明校验后，才允许交接请求并接纳远端关联。
+use std::sync::OnceLock;
+
 use iroh::endpoint::Connection;
 use uc_core::membership::{
     AdmissionAttemptContractV2, AdmissionChannelPeerId, AdmissionContinuationCredential,
     InvitationId, SpaceAdmissionId, SpaceAdmissionProtocolVersion,
 };
-use uc_observability_contract::diagnostics::connectivity::complete_admission_authentication_failure;
+use uc_observability_contract::diagnostics::connectivity::{
+    complete_admission_authentication_failure, AdmissionAttemptRef,
+};
 
 use super::super::crypto::{peer_id, verify_mac};
 use super::super::diagnostics::AuthenticationStep;
@@ -39,6 +43,7 @@ impl IrohSpaceAdmissionHandler {
         connection: &Connection,
         deadline: tokio::time::Instant,
         connection_started: std::time::Instant,
+        attempt: &OnceLock<AdmissionAttemptRef>,
     ) -> Result<AuthenticatedRequest, HandlerError> {
         let mut diagnostic_stage = AuthenticationStep::ReceiveHello;
         let authenticated = tokio::time::timeout_at(deadline, async {
@@ -68,6 +73,7 @@ impl IrohSpaceAdmissionHandler {
                         postcard::from_bytes(&payload).map_err(HandlerError::protocol_from)?;
                     let admission_id = SpaceAdmissionId::from_bytes(hello.admission_id)
                         .ok_or_else(HandlerError::protocol)?;
+                    let _ = attempt.set(AdmissionAttemptRef::derive(admission_id.as_bytes()));
                     let invitation_id = InvitationId::from_bytes(hello.invitation_id)
                         .ok_or_else(HandlerError::protocol)?;
                     diagnostic_stage = AuthenticationStep::InitialIdentity;
@@ -146,6 +152,7 @@ impl IrohSpaceAdmissionHandler {
                         postcard::from_bytes(&payload).map_err(HandlerError::protocol_from)?;
                     let admission_id = SpaceAdmissionId::from_bytes(hello.admission_id)
                         .ok_or_else(HandlerError::protocol)?;
+                    let _ = attempt.set(AdmissionAttemptRef::derive(admission_id.as_bytes()));
                     diagnostic_stage = AuthenticationStep::ContinuationIdentity;
                     if hello.local_peer_id != *remote_peer_id.as_bytes()
                         || hello.remote_peer_id != *self.local_peer_id.as_bytes()

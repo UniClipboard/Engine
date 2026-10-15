@@ -211,6 +211,292 @@ async fn a_sponsor_at_capacity_records_one_busy_warning_without_peer_identity() 
 }
 
 #[derive(Debug)]
+struct RejectEveryConnection;
+impl iroh::endpoint::EndpointHooks for RejectEveryConnection {
+    async fn after_handshake(
+        &self,
+        _connection: &Connection,
+    ) -> iroh::endpoint::AfterHandshakeOutcome {
+        iroh::endpoint::AfterHandshakeOutcome::Reject {
+            error_code: 0u32.into(),
+            reason: b"test_reject".to_vec(),
+        }
+    }
+}
+
+fn accepting_records(logs: &uc_testkit::log_capture::CapturedLogs) -> Vec<String> {
+    logs.output()
+        .lines()
+        .filter(|line| line.contains("connection.accepting.finished for space admission"))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[tokio::test]
+async fn server_handshake_outcomes_are_recorded_without_peer_identity() {
+    let logs = uc_testkit::log_capture::CapturedLogs::default();
+    let _guard = logs.install();
+    let joiner = bound_endpoint().await;
+    wait_for_direct_addrs(&joiner).await;
+
+    // 握手成功：用容量为 0 的 sponsor，进入 accept 后立即关闭，只验证握手记录。
+    let sponsor = bound_endpoint().await;
+    wait_for_direct_addrs(&sponsor).await;
+    let endpoint = Arc::new(HangingLoopbackEndpoint {
+        calls: AtomicUsize::new(0),
+        entered: Notify::new(),
+    });
+    let credentials = Arc::new(LoopbackCredentials {
+        initial: Mutex::new(None),
+        continuation: Mutex::new(None),
+    });
+    let handler = Arc::new(
+        IrohSpaceAdmissionHandler::new(&sponsor, endpoint, credentials)
+            .expect("handler")
+            .with_capacity(0),
+    );
+    let router = Router::builder((*sponsor).clone())
+        .accept(SPACE_ADMISSION_ALPN, handler)
+        .spawn();
+    let connection = connect(&joiner, sponsor.addr()).await.expect("connect");
+    tokio::time::timeout(Duration::from_secs(2), connection.closed())
+        .await
+        .expect("closed");
+    router.shutdown().await.expect("router shutdown");
+    sponsor.close().await;
+    let connected = accepting_records(&logs);
+    assert_eq!(connected.len(), 1, "{}", logs.output());
+    assert!(
+        connected[0].contains("outcome=\"connected\""),
+        "{}",
+        connected[0]
+    );
+    assert!(connected[0].contains("elapsed_ms="), "{}", connected[0]);
+    assert!(!connected[0].contains("error_class"), "{}", connected[0]);
+
+    // 握手失败：sponsor 在握手完成时本地拒绝，没有任何连接到达 accept。
+    let rejecting = Arc::new(
+        Endpoint::builder(presets::N0)
+            .alpns(vec![SPACE_ADMISSION_ALPN.to_vec()])
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup()
+            .hooks(RejectEveryConnection)
+            .bind()
+            .await
+            .expect("bind rejecting endpoint"),
+    );
+    wait_for_direct_addrs(&rejecting).await;
+    let endpoint = Arc::new(HangingLoopbackEndpoint {
+        calls: AtomicUsize::new(0),
+        entered: Notify::new(),
+    });
+    let credentials = Arc::new(LoopbackCredentials {
+        initial: Mutex::new(None),
+        continuation: Mutex::new(None),
+    });
+    let handler = Arc::new(
+        IrohSpaceAdmissionHandler::new(&rejecting, endpoint.clone(), credentials).expect("handler"),
+    );
+    let router = Router::builder((*rejecting).clone())
+        .accept(SPACE_ADMISSION_ALPN, handler)
+        .spawn();
+    let _ = connect(&joiner, rejecting.addr()).await;
+    for _ in 0..100 {
+        if accepting_records(&logs).len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    router.shutdown().await.expect("router shutdown");
+    rejecting.close().await;
+    joiner.close().await;
+    let records = accepting_records(&logs);
+    assert_eq!(records.len(), 2, "{}", logs.output());
+    assert!(
+        records[1].contains("outcome=\"handshake_failed\""),
+        "{}",
+        records[1]
+    );
+    assert!(
+        records[1].contains("error_class=\"locally_rejected\""),
+        "{}",
+        records[1]
+    );
+    assert_eq!(endpoint.calls.load(Ordering::SeqCst), 0);
+    for record in &records {
+        assert!(!record.contains(&joiner.id().to_string()), "{record}");
+    }
+}
+
+/// 标准采集模式（未开启详细窗口）下，某条 sponsor 准入记录必须恰好出现一次且为 INFO。
+fn assert_one_info_record(logs: &uc_testkit::log_capture::CapturedLogs, message: &str) {
+    let lines: Vec<_> = logs
+        .output()
+        .lines()
+        .filter(|line| line.contains(message))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(lines.len(), 1, "{message}: {}", logs.output());
+    assert!(lines[0].contains(" INFO "), "{}", lines[0]);
+}
+
+async fn sponsor_with_handler(
+    setup: impl FnOnce(IrohSpaceAdmissionHandler) -> IrohSpaceAdmissionHandler,
+) -> (
+    Arc<Endpoint>,
+    Arc<Endpoint>,
+    Arc<IrohSpaceAdmissionHandler>,
+    Router,
+    Arc<HangingLoopbackEndpoint>,
+    Arc<LoopbackCredentials>,
+) {
+    let sponsor = bound_endpoint().await;
+    wait_for_direct_addrs(&sponsor).await;
+    let joiner = bound_endpoint().await;
+    wait_for_direct_addrs(&joiner).await;
+    let endpoint = Arc::new(HangingLoopbackEndpoint {
+        calls: AtomicUsize::new(0),
+        entered: Notify::new(),
+    });
+    let credentials = Arc::new(LoopbackCredentials {
+        initial: Mutex::new(None),
+        continuation: Mutex::new(None),
+    });
+    let handler = Arc::new(setup(
+        IrohSpaceAdmissionHandler::new(&sponsor, endpoint.clone(), credentials.clone())
+            .expect("handler"),
+    ));
+    let router = Router::builder((*sponsor).clone())
+        .accept(SPACE_ADMISSION_ALPN, handler.clone())
+        .spawn();
+    (sponsor, joiner, handler, router, endpoint, credentials)
+}
+
+#[tokio::test]
+async fn a_stopping_sponsor_records_why_it_closed_the_connection() {
+    let logs = uc_testkit::log_capture::CapturedLogs::default();
+    let _guard = logs.install();
+    let (sponsor, joiner, handler, router, endpoint, _) =
+        sponsor_with_handler(|handler| handler).await;
+    handler.shutdown().await;
+    let connection = connect(&joiner, sponsor.addr()).await.expect("connect");
+    tokio::time::timeout(Duration::from_secs(2), connection.closed())
+        .await
+        .expect("a stopping sponsor closes the connection");
+    assert_eq!(endpoint.calls.load(Ordering::SeqCst), 0);
+    router.shutdown().await.expect("router shutdown");
+    joiner.close().await;
+    sponsor.close().await;
+    assert_one_info_record(&logs, "closed because the sponsor is stopping");
+}
+
+#[tokio::test]
+async fn a_stalled_peer_leaves_one_info_timeout_record() {
+    let logs = uc_testkit::log_capture::CapturedLogs::default();
+    let _guard = logs.install();
+    let (sponsor, joiner, _, router, _, _) =
+        sponsor_with_handler(|handler| handler.with_exchange_deadline(Duration::from_millis(100)))
+            .await;
+    let connection = connect(&joiner, sponsor.addr()).await.expect("connect");
+    let (_send, _receive) = open_stream(&connection).await.expect("open stream");
+    tokio::time::timeout(Duration::from_secs(2), connection.closed())
+        .await
+        .expect("the deadline closes the stalled peer");
+    router.shutdown().await.expect("router shutdown");
+    joiner.close().await;
+    sponsor.close().await;
+    assert_one_info_record(&logs, "Space admission exchange timed out");
+}
+
+#[tokio::test]
+async fn an_old_layout_joiner_leaves_one_info_peer_upgrade_record() {
+    let logs = uc_testkit::log_capture::CapturedLogs::default();
+    let _guard = logs.install();
+    let (sponsor, joiner, _, router, _, _) = sponsor_with_handler(|handler| handler).await;
+    let connection = connect(&joiner, sponsor.addr()).await.expect("connect");
+    let (mut send, mut receive) = open_stream(&connection).await.expect("open stream");
+    write_typed(
+        &mut send,
+        FrameKind::InitialHello,
+        &InitialHelloV2 {
+            protocol_version: SpaceAdmissionProtocolVersion::V2.as_u16(),
+            admission_id: [0x65; 32],
+            invitation_id: [0x66; 32],
+            joiner_peer_id: *peer_id(joiner.id().as_bytes())
+                .expect("joiner peer")
+                .as_bytes(),
+            attempt_started_at_ms: 1_000,
+            attempt_expires_at_ms: 301_000,
+            ke1: vec![0x67],
+        },
+        AUTH_FRAME_LIMIT,
+    )
+    .await
+    .expect("legacy hello");
+    let _ = read_typed::<_, OpaqueResponseV1>(
+        &mut receive,
+        FrameKind::OpaqueResponse,
+        AUTH_FRAME_LIMIT,
+    )
+    .await;
+    connection.closed().await;
+    router.shutdown().await.expect("router shutdown");
+    joiner.close().await;
+    sponsor.close().await;
+    assert_one_info_record(&logs, "Space admission peer upgrade required");
+}
+
+#[tokio::test]
+async fn a_wrong_passphrase_leaves_one_info_rejection_record() {
+    let logs = uc_testkit::log_capture::CapturedLogs::default();
+    let _guard = logs.install();
+    let (sponsor, joiner, _, router, _, credentials) =
+        sponsor_with_handler(|handler| handler).await;
+    let invitation = InvitationId::from_bytes([0x6b; 32]).expect("invitation id");
+    let admission = SpaceAdmissionId::from_bytes([0x6c; 32]).expect("admission id");
+    let registered = SpaceAdmissionAuth::derive_password_equivalent(b"right-pass", invitation);
+    let setup = SpaceAdmissionAuth::generate_server_setup();
+    let registration = SpaceAdmissionAuth::register_password_equivalent(&setup, &registered)
+        .expect("registration");
+    *credentials.initial.lock().await = Some(SponsorOpaqueMaterial::new(setup, registration));
+    let wrong = SpaceAdmissionAuth::derive_password_equivalent(b"wrong-pass", invitation);
+    let password = AdmissionEncryptedPasswordEquivalent::from_bytes(wrong.as_bytes().to_vec())
+        .expect("password equivalent");
+    let route = SpaceAdmissionRoute::from_bytes(
+        encode_space_admission_route(&sponsor.addr(), Some(invitation)).expect("route encoding"),
+    )
+    .expect("route");
+
+    let result = IrohSpaceAdmissionTransport::new(joiner.clone())
+        .establish_initial(
+            admission,
+            AdmissionAttemptTimeline::start(1_000).expect("valid attempt timeline"),
+            &route,
+            &password,
+        )
+        .await;
+    assert!(result.is_err(), "a wrong passphrase must not authenticate");
+    router.shutdown().await.expect("router shutdown");
+    joiner.close().await;
+    sponsor.close().await;
+    assert_one_info_record(&logs, "Space admission exchange rejected");
+    let expected =
+        uc_observability_contract::diagnostics::connectivity::AdmissionAttemptRef::derive(
+            admission.as_bytes(),
+        );
+    let record = logs
+        .output()
+        .lines()
+        .find(|line| line.contains("Space admission exchange rejected"))
+        .unwrap()
+        .to_owned();
+    assert!(
+        record.contains(&format!("attempt_ref={expected}")),
+        "the rejection carries the attempt ref the joiner derives: {record}"
+    );
+}
+
+#[derive(Debug)]
 struct DetailProbe(Arc<std::sync::Mutex<Vec<(&'static str, &'static str)>>>);
 impl opentelemetry_sdk::logs::LogProcessor for DetailProbe {
     fn emit(

@@ -584,7 +584,7 @@ mockall::mock! {
         async fn record_unfetched_failure(
             &self,
             context: crate::facade::blob_transfer::FetchTransferContext,
-            detail: String,
+            reason: uc_core::file_transfer::FileTransferFailureReason,
         );
     }
 }
@@ -2378,11 +2378,11 @@ async fn directory_materializer_removes_staging_and_exposes_nothing_on_failure()
     fetcher
         .expect_record_unfetched_failure()
         .times(1)
-        .withf(|context, detail| {
+        .withf(|context, reason| {
             context.entry_id == "receiver-failed-directory"
                 && context.filename == "third.txt"
                 && context.individual_lifecycle
-                && detail.contains("network failed")
+                && *reason == uc_core::file_transfer::FileTransferFailureReason::Unknown
         })
         .return_const(());
 
