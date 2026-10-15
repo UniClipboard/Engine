@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::module_log::DEFAULT_RUN_BUDGET_BYTES;
+use crate::network_log::NetworkLogConfig;
 use url::Url;
 use zeroize::Zeroize;
 
@@ -308,6 +309,8 @@ impl fmt::Debug for LocalLogConfig {
 pub struct ObservabilityConfig {
     pub resource: ObservabilityResource,
     pub local_logs: Option<LocalLogConfig>,
+    /// 第三方网络库的独立日志；不配置则整条链路不存在，业务日志不受影响。
+    pub network_logs: Option<NetworkLogConfig>,
     pub remote: Option<OtlpHttpConfig>,
 }
 
@@ -316,12 +319,18 @@ impl ObservabilityConfig {
         Self {
             resource,
             local_logs: None,
+            network_logs: None,
             remote: None,
         }
     }
 
     pub fn with_local_logs(mut self, config: LocalLogConfig) -> Self {
         self.local_logs = Some(config);
+        self
+    }
+
+    pub fn with_network_logs(mut self, config: NetworkLogConfig) -> Self {
+        self.network_logs = Some(config);
         self
     }
 
@@ -337,6 +346,7 @@ impl fmt::Debug for ObservabilityConfig {
             .debug_struct("ObservabilityConfig")
             .field("resource", &self.resource)
             .field("local_logs", &self.local_logs)
+            .field("network_logs", &self.network_logs)
             .field("remote", &self.remote)
             .finish()
     }
@@ -356,6 +366,8 @@ pub enum ConfigError {
     InvalidHeaderValue,
     #[error("OTLP timeout must be non-zero")]
     ZeroTimeout,
+    #[error("network log budget is inconsistent")]
+    InvalidNetworkLogBudget,
 }
 
 #[cfg(test)]

@@ -19,12 +19,18 @@ mod local_log_processor;
 mod local_recording;
 mod module_log;
 mod module_log_fields;
+mod network_log;
 pub use local_capture::{
     CaptureEndReason, DetailedCaptureRequest, LocalCaptureMode, LocalCaptureStatus,
     LocalDiagnosticError, LocalDiagnosticExportReport, LocalDiagnosticStatus, SourceCapability,
     SourceCollection, SourceCoverage, StopCaptureResult,
 };
 pub use module_log::ModuleLogCounts;
+pub use network_log::{
+    NetworkCaptureMode, NetworkCaptureStatus, NetworkLibraryStatus, NetworkLogBudget,
+    NetworkLogConfig, NetworkLogCounters, NetworkLogError, NetworkLogExportReport, NetworkLogFile,
+    NetworkLogState, NetworkLogStatus, NetworkProcessRole, NETWORK_LOG_SCHEMA_VERSION,
+};
 mod remote_health;
 mod runtime;
 mod status;
