@@ -11,6 +11,8 @@ use uc_engine::observability::{
 };
 use uc_engine::HostDirectories;
 
+use crate::network_log::pending_config;
+
 use crate::{
     OhCollectorConfig, OhHostDirectories, OhObservabilityConfig, OhObservabilityHealth,
     OhObservabilitySetup, OhObservabilitySignalSummary,
@@ -117,8 +119,11 @@ fn runtime_config(
     )
     // discarded-source[input-validation]: the rejection reason is fully expressed by the target classification
     .map_err(|_| config_invalid())?;
-    let runtime =
+    let mut runtime =
         ObservabilityConfig::new(resource).with_local_logs(LocalLogConfig::new(directories.logs()));
+    if let Some(network) = pending_config(directories)? {
+        runtime = runtime.with_network_logs(network);
+    }
     if !config.remote_diagnostics_enabled {
         return Ok(runtime);
     }
