@@ -15,11 +15,13 @@ use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 pub mod connectivity;
 mod membership_recovery;
+mod network_scope;
 mod profile_upgrade_backup;
 pub use membership_recovery::{
     describe_membership_conflict, scope_membership_recovery_trigger, MembershipRecoveryObservation,
     MembershipRecoveryOutcome, MembershipRecoveryTrigger,
 };
+pub use network_scope::{within_network_scope, NETWORK_SCOPE_TARGET};
 pub use profile_upgrade_backup::{record_profile_upgrade_backup_failure, LOCAL_DIAGNOSTIC_TARGET};
 
 tokio::task_local! {
