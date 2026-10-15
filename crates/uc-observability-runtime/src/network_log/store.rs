@@ -46,6 +46,8 @@ struct OpenRun {
     _lease: File,
     file: File,
     file_name: String,
+    /// 当前分段文件名所用的 UTC 日期；跨日后新记录落入新日期的分段。
+    segment_date: String,
     next_sequence: u32,
     current_bytes: u64,
     /// 包含当前分段，最旧的在前。
@@ -99,13 +101,15 @@ impl RunStore {
         let manifest = self.manifest();
         write_atomically(&directory.join(MANIFEST_FILE), &manifest)?;
         let sequence = next_sequence(&directory)?;
-        let (file, file_name) = open_segment(&directory, sequence)?;
+        let segment_date = current_date();
+        let (file, file_name) = open_segment(&directory, &segment_date, sequence)?;
         Ok(OpenRun {
             directory,
             _lease: lease,
             file,
             segments: VecDeque::from([(file_name.clone(), 0)]),
             file_name,
+            segment_date,
             next_sequence: sequence.saturating_add(1),
             current_bytes: 0,
             total_bytes: 0,
@@ -181,7 +185,9 @@ impl RecordStore for RunStore {
         let counters = Arc::clone(&self.counters);
         let run = self.ensure_open()?;
         let additional = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        if run.current_bytes.saturating_add(additional) > budget.file_bytes {
+        if run.current_bytes.saturating_add(additional) > budget.file_bytes
+            || run.segment_date != current_date()
+        {
             run.start_segment()?;
         }
         run.make_room(additional, budget.run_bytes, &counters)?;
@@ -203,8 +209,10 @@ impl RecordStore for RunStore {
 
 impl OpenRun {
     fn start_segment(&mut self) -> io::Result<()> {
-        let (file, name) = open_segment(&self.directory, self.next_sequence)?;
+        let date = current_date();
+        let (file, name) = open_segment(&self.directory, &date, self.next_sequence)?;
         self.file = file;
+        self.segment_date = date;
         self.file_name = name.clone();
         self.next_sequence = self.next_sequence.saturating_add(1);
         self.current_bytes = 0;
@@ -284,18 +292,31 @@ fn open_lease(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
-fn open_segment(directory: &Path, sequence: u32) -> io::Result<(File, String)> {
-    let name = format!(
-        "{SEGMENT_PREFIX}{}.{sequence:03}{SEGMENT_SUFFIX}",
-        Utc::now().format("%Y%m%d")
-    );
+fn current_date() -> String {
+    Utc::now().format("%Y%m%d").to_string()
+}
+
+fn open_segment(directory: &Path, date: &str, sequence: u32) -> io::Result<(File, String)> {
+    let name = format!("{SEGMENT_PREFIX}{date}.{sequence:03}{SEGMENT_SUFFIX}");
     let file = open_managed_file(&directory.join(&name))?;
     Ok((file, name))
 }
 
 fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let temporary = path.with_extension("json.tmp");
-    std::fs::write(&temporary, bytes)?;
+    // 先清掉可能残留的临时文件（含符号链接本身），再以独占创建写入，不跟随任何已有路径。
+    match std::fs::remove_file(&temporary) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
     std::fs::rename(&temporary, path)
 }
 

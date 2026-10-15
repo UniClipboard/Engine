@@ -317,25 +317,31 @@ impl ProcessObservabilityHandle {
         }
         let telemetry = self.state.telemetry.clone();
         let local_file = self.state.local_file.clone();
-        let network = self.state.network.clone();
-        match run_reserved_with_deadline(deadline, Arc::clone(&self.state.lifecycle), move || {
-            // 网络日志独立刷新，结果不进入业务摘要；它自己的状态与导出报告说明成败。
-            if let Some(network) = &network {
-                let _ = network.flush(deadline);
-            }
-            let signals = telemetry.force_flush();
-            FlushSummary {
-                traces: signals.traces,
-                logs: combine_local_result(
-                    signals.logs,
-                    local_file.is_none_or(|local_file| local_file.flush(deadline)),
-                ),
-            }
-        }) {
+        let started = Instant::now();
+        let summary = match run_reserved_with_deadline(
+            deadline,
+            Arc::clone(&self.state.lifecycle),
+            move || {
+                let signals = telemetry.force_flush();
+                FlushSummary {
+                    traces: signals.traces,
+                    logs: combine_local_result(
+                        signals.logs,
+                        local_file.is_none_or(|local_file| local_file.flush(deadline)),
+                    ),
+                }
+            },
+        ) {
             DeadlineOutcome::Completed(summary) => summary,
             DeadlineOutcome::TimedOut => FlushSummary::timed_out(),
             DeadlineOutcome::Failed => FlushSummary::failed(),
+        };
+        // 网络日志在业务刷新结束后独立刷新：不占用业务刷新的时限，结果也不进入业务摘要；
+        // 它自己的状态与导出报告说明成败。
+        if let Some(network) = &self.state.network {
+            let _ = network.flush(deadline.saturating_sub(started.elapsed()));
         }
+        summary
     }
 
     pub fn shutdown(&self, deadline: Duration) -> ShutdownSummary {
