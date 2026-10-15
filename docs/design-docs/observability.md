@@ -556,7 +556,7 @@ transfer 原始 ID、摘要、原始错误正文或可恢复派生值。
 第三方网络库（当前启用 iroh 1.3.0、noq-proto 1.3.0 的结构化事件；quinn 不在当前特性路径上，未覆盖）的诊断记录走独立的 network 日志层，与业务、模块和宿主日志互不共享 schema、过滤器、目录、队列、writer、预算和计数。进程仍只有一个全局 subscriber。
 
 - **宿主登记**：宿主在 `install_process_observability` 之前调用 `configure_network_log`（UniFFI）/ `configureNetworkLog`（N-API），显式给出进程角色与容量预算（单条、队列、单文件、单次运行、根目录、保留期）。Engine 不提供默认预算；未登记则整条链路不存在，查询返回 `NotConfigured`，不伪装成零事件。安装之后再登记会被拒绝。
-- **输出边界**：只输出固定事件名、枚举、计数、布尔和单次运行内随机的 `peer_ref`/`conn_ref`（有界映射，不可反推）。ALPN 只在位于 `known_network_alpns()` 之内时输出，否则记为 `unrecognized`。地址、端点标识、文件名、路径、令牌一律不进入文件。规则绑定精确版本目录（`iroh-1.3.0`、`noq-proto-1.3.0`）；库升级后未经评审的 WARN/ERROR 调用点只输出 `unreviewed_callsite` 和库内 `file:line`。
+- **输出边界**：只输出固定事件名、枚举、计数、布尔和单次运行内随机的 `peer_ref`/`conn_ref`（有界映射，不可反推）。ALPN 只在位于 `known_network_alpns()` 之内时输出，否则记为 `unrecognized`。地址、端点标识、文件名、路径、令牌一律不进入文件。规则绑定精确版本目录（`iroh-1.3.0`、`noq-proto-1.3.0`）；iroh 固定到 git 提交时（[ADR-034](decisions/034-pin-iroh-to-unreleased-upstream-commit.md)）按 cargo git 签出目录中允许列表内的提交匹配同一逻辑版本；库升级后未经评审的 WARN/ERROR 调用点只输出 `unreviewed_callsite` 和库内 `file:line`。
 - **业务隔离**：建链调用经 `within_network_scope` 驱动（`uc.network` 作用域，显式无 parent）。库内 spawn 的 driver 因此捕获网络作用域而不是调用方的业务 span，不延长业务 span，业务调用树里没有网络库节点。进程没有安装独立日志时，作用域退回完全静默的 dispatch。宿主日志层排除 `uc.network` 目标和网络库来源，第三方原始日志不会进入宿主或远程出口。
 - **文件布局**：`<logs>/network/<role>/<run_id>/`，含 `run.json`（schema、run_id、角色、pid、OS/架构、启动时间、Engine 来源、规则版本、预算）、`lease.lock`（活动写入者租约）和 `network.<YYYYMMDD>.<seq>.jsonl` 分段。分段超限时先淘汰本次运行最旧的分段；根目录超限或过期时，只在 `.cleanup.lock` 下回收租约可获取（没有活动写入者）的旧运行目录。
 - **详细模式**：`start_network_capture` 开启当前进程的限时窗口（1–900 秒），重复开启不延长，窗口不跨重启，过期惰性生效。当前不包含 raw/qlog/keylog 采集；是否采集、预算数值、是否与业务详细采集联动属于待用户确认的产品决定，Engine 不预设。
@@ -565,6 +565,18 @@ transfer 原始 ID、摘要、原始错误正文或可恢复派生值。
 - **关闭**：network 关闭与业务关闭预算分离（detached），不占用业务的 shutdown 时限。
 
 已知缺口：通过 `log` crate 发出的第三方事件（如 noq-udp）不匹配 target 过滤；编译期级别裁剪未验证；iOS、Android、Windows 平台未实机运行；宿主侧消费由对应产品线接入。
+
+### 周期资源普查
+
+用于在没有修复、没有重现时也能事后判断“哪一类资源在涨”（Engine #214：uniclipd 匿名内存 20–24 小时涨到约 17 GiB）。三条记录都只含计数、字节数和布尔值，不含任何标识、地址、路径或内容，写入模块日志，周期固定为 5 分钟（代码常量，不是用户设置），首条记录在启动后延迟一段时间才写，短生命周期进程和按行数断言的验收不受影响。
+
+- **进程资源**（`process resource census`，`uc-observability-runtime`，仅 Linux/Android，其他平台不启动、不写记录；仅配置了本地日志目录时启动）：`rss_anon_kb`、`rss_file_kb`、`rss_shmem_kb`、`vm_swap_kb`、`vm_size_kb`、`threads`、`fd_total`、`pss_anon_kb`；glibc 上另有 `heap_in_use_kb`、`heap_free_kb`、`heap_mmap_kb`（运行期用 `dlsym` 解析 `mallinfo2`，需要 glibc 2.33 及以上，musl 无此三项）。读不到的值省略，不写 0。
+- **增长告警**（`process anonymous memory grew beyond the alert threshold`，WARN）：同一个线程在 `rss_anon_kb` 相对最近 60 分钟窗口内的最小值增长不小于 512 MiB 时写一条，之后 60 分钟内不再写；附 `growth_kb`、`window_secs` 和当前进程资源值。窗口样本定长（64 个），所以内存占用不随运行时间增长。阈值与窗口是代码里的起始值：按报告的约 740 MB/h 速率约 1 小时触发，健康 daemon 的约 84 MB 不会触发；更慢的泄漏只能从周期记录的趋势里看出，告警不保证覆盖。
+- **运行期**（`engine runtime census`，`uc-engine`，由受管后台任务登记，随 Engine 关闭停止）：`tokio_workers`、`tokio_alive_tasks`、`tokio_queue_depth`（调度器全局队列深度）、`registered_tasks`（受管任务数）。
+- **网络连接**（`network connection census`，`uc-infra-p2p`，由 `IrohNode` 持有，随节点关闭停止）：`conn_total`、`conn_untracked`（登记表满后未能登记的累计数，非零表示 `conn_total` 低估）、`conn_per_peer_max`、`paths_total`、`paths_max`、`paths_direct`、`paths_relay`。登记表只保存弱连接句柄（不延长连接寿命），容量 4096，与连接观测记录是否开启无关；对端身份只在一次快照内部分组，不进入输出。
+- **网络库规则**：`path.open_deferred`（iroh `remote_state.rs` 的 `scheduling open_path` TRACE 调用点，详细档，无字段，限速）。它的出现频率直接说明连接是否进入了 CID/路径号耗尽的重试分支（#214 的 H1）。规则按固定提交的行号绑定，换提交必须重新核对（见 ADR-034）。
+
+验收限制：这些记录只让问题可被观察，不证明 #214 已修复；固定 iroh 提交能否消除增长是未验证的。记录读取通过 Linux（Fedora aarch64）与 macOS 的单元与安装测试；Linux x86_64、musl、Windows 和移动端只做编译或未执行。
 
 ### 构建来源
 

@@ -11,6 +11,7 @@ pub mod admitted_connections;
 pub mod blobs;
 mod conn_path;
 mod connect;
+mod connection_census;
 pub mod connection_channel_adapter;
 mod connection_diagnostics;
 pub mod connectivity;

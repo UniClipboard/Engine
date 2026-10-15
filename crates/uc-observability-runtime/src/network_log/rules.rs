@@ -136,6 +136,11 @@ pub(crate) struct Rule {
 const IROH: &str = "iroh-1.3.0";
 const NOQ_PROTO: &str = "noq-proto-1.3.0";
 
+/// 根 `Cargo.toml` 的 `[patch.crates-io]` 固定的 iroh 提交（前 7 位，即 cargo 签出目录名）。
+/// 固定后的 iroh 不在 `iroh-1.3.0` 这样的注册表目录里，而在 git 签出目录里；规则仍按 `IROH`
+/// 逻辑版本匹配，但只接受这里列出的提交，换提交必须同时评审规则并更新这里。
+const PINNED_IROH_REVS: &[&str] = &["43e232f"];
+
 const CONNECTION_ERROR_VARIANTS: &[&str] = &[
     "VersionMismatch",
     "TransportError",
@@ -466,6 +471,22 @@ pub(crate) const RULES: &[Rule] = &[
         burst: 16,
         refill_ms: 250,
     },
+    // 固定提交 `43e232f` 的 `remote_state.rs:1089`：路径打开因 CID/路径号耗尽被推迟后重试。
+    // 只输出事件本身（原始字段是候选地址，一律丢弃）；出现频率就是 #214 H1 的直接证据。
+    Rule {
+        event: "path.open_deferred",
+        library: Library::Iroh,
+        version_dir: IROH,
+        site: Site::Line {
+            file: "src/socket/remote_map/remote_state.rs",
+            line: 1089,
+        },
+        level: Level::TRACE,
+        tier: CaptureTier::Detailed,
+        fields: &[],
+        burst: 8,
+        refill_ms: 1000,
+    },
     Rule {
         event: "quic.packet_discarded",
         library: Library::NoqProto,
@@ -496,6 +517,9 @@ pub(crate) fn callsite_path(file: Option<&str>) -> CallsitePath<'_> {
             in_crate: None,
         };
     };
+    if let Some(pinned) = pinned_iroh_checkout(file) {
+        return pinned;
+    }
     let mut rest = file;
     while let Some(index) = rest.find('/') {
         let (segment, tail) = rest.split_at(index);
@@ -511,6 +535,29 @@ pub(crate) fn callsite_path(file: Option<&str>) -> CallsitePath<'_> {
         version_dir: None,
         in_crate: None,
     }
+}
+
+/// cargo 的 git 签出路径 `…/iroh-<16 位十六进制>/<提交前 7 位>/iroh/src/…`，且提交在允许列表内时，
+/// 按逻辑版本 `IROH` 匹配；其他 git 来源、其他提交或其他子包都不匹配。
+fn pinned_iroh_checkout(file: &str) -> Option<CallsitePath<'_>> {
+    let mut rest = file;
+    while let Some(index) = rest.find('/') {
+        let (segment, tail) = rest.split_at(index);
+        rest = &tail[1..];
+        let Some(hash) = segment.strip_prefix("iroh-") else {
+            continue;
+        };
+        if hash.len() != 16 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            continue;
+        }
+        let mut parts = rest.splitn(3, '/');
+        let (rev, package, in_crate) = (parts.next()?, parts.next()?, parts.next()?);
+        return (PINNED_IROH_REVS.contains(&rev) && package == "iroh").then_some(CallsitePath {
+            version_dir: Some(IROH),
+            in_crate: Some(in_crate),
+        });
+    }
+    None
 }
 
 /// `iroh-1.3.0`、`noq-proto-1.3.0` 这种“名称-主.次.修订”目录。
@@ -553,4 +600,63 @@ pub(crate) fn rule_index(rule: &Rule) -> usize {
         .iter()
         .position(|candidate| std::ptr::eq(candidate, rule))
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const REGISTRY: &str =
+        "/home/u/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iroh-1.3.0/src/socket.rs";
+    const PINNED: &str =
+        "/home/u/.cargo/git/checkouts/iroh-0123456789abcdef/43e232f/iroh/src/socket.rs";
+
+    #[test]
+    fn registry_layout_keeps_matching_by_version_directory() {
+        let path = callsite_path(Some(REGISTRY));
+        assert_eq!(path.version_dir, Some(IROH));
+        assert_eq!(path.in_crate, Some("src/socket.rs"));
+    }
+
+    #[test]
+    fn pinned_git_checkout_matches_the_logical_version() {
+        let path = callsite_path(Some(PINNED));
+        assert_eq!(path.version_dir, Some(IROH));
+        assert_eq!(path.in_crate, Some("src/socket.rs"));
+    }
+
+    #[test]
+    fn unlisted_revision_package_or_hash_shape_does_not_match() {
+        for file in [
+            "/c/git/checkouts/iroh-0123456789abcdef/1111111/iroh/src/socket.rs",
+            "/c/git/checkouts/iroh-0123456789abcdef/43e232f/iroh-relay/src/lib.rs",
+            "/c/git/checkouts/iroh-0123456789abcde/43e232f/iroh/src/socket.rs",
+            "/c/git/checkouts/iroh-0123456789abcdeg/43e232f/iroh/src/socket.rs",
+            "/c/git/checkouts/iroh-0123456789abcdef/43e232f/iroh",
+        ] {
+            let path = callsite_path(Some(file));
+            assert_eq!(path.version_dir, None, "{file}");
+            assert_eq!(path.in_crate, None, "{file}");
+        }
+    }
+
+    #[test]
+    fn allow_list_contains_the_revision_pinned_in_the_root_manifest() {
+        let manifest = include_str!("../../../../Cargo.toml");
+        let pinned = manifest
+            .lines()
+            .filter(|line| line.starts_with("iroh = { git"))
+            .filter_map(|line| line.split("rev = \"").nth(1)?.split('"').next())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            pinned.len(),
+            1,
+            "root manifest must pin iroh to one revision"
+        );
+        assert!(
+            PINNED_IROH_REVS.contains(&&pinned[0][..7]),
+            "PINNED_IROH_REVS must list {}",
+            &pinned[0][..7]
+        );
+    }
 }
