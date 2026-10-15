@@ -1,16 +1,19 @@
 //! Joiner 等待 `OpaqueResponse` 失败的本地详情：保留读取失败的具体类别，不改变公开结果。
 use super::super::{CompletionResult, DiagnosticErrorType, OperationCompletion};
 use super::authentication::{LocalCompletionDetail, PendingCompletionDetail};
+use crate::wire_enum;
 
-/// Sponsor 在应用层关闭连接时的关闭码类别；只有固定类别，不记录原始数值。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ApplicationCloseClass {
-    SessionUnavailable,
-    AuthenticationRejected,
-    Busy,
-    PeerUpgradeRequired,
-    Protocol,
-    Other,
+wire_enum! {
+    /// Sponsor 在应用层关闭连接时的关闭码类别；只有固定类别，不记录原始数值。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ApplicationCloseClass: &'static str {
+        SessionUnavailable => "app_close_session_unavailable",
+        AuthenticationRejected => "app_close_authentication",
+        Busy => "app_close_busy",
+        PeerUpgradeRequired => "app_close_peer_upgrade_required",
+        Protocol => "app_close_protocol",
+        Other => "app_close_other",
+    }
 }
 
 /// 发出初次 hello 之后、读取 `OpaqueResponse` 失败的具体类别。
@@ -28,26 +31,13 @@ pub enum AdmissionResponseFailure {
     Decode,
 }
 
-impl ApplicationCloseClass {
-    fn reason(self) -> &'static str {
-        match self {
-            Self::SessionUnavailable => "app_close_session_unavailable",
-            Self::AuthenticationRejected => "app_close_authentication",
-            Self::Busy => "app_close_busy",
-            Self::PeerUpgradeRequired => "app_close_peer_upgrade_required",
-            Self::Protocol => "app_close_protocol",
-            Self::Other => "app_close_other",
-        }
-    }
-}
-
 impl AdmissionResponseFailure {
     pub(super) fn local_fields(self) -> (&'static str, &'static str) {
         let reason = match self {
             Self::ResponseTimeout => "response_timeout",
             Self::StreamReset => "stream_reset",
             Self::ConnectionLost => "connection_lost",
-            Self::ApplicationClosed(class) => class.reason(),
+            Self::ApplicationClosed(class) => class.wire(),
             Self::Decode => "decode",
         };
         ("receive_response", reason)

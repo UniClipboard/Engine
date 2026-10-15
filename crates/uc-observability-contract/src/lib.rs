@@ -6,6 +6,7 @@ pub mod error_source;
 pub mod log_event;
 pub mod log_fields;
 pub mod module_log;
+mod wire_enum;
 
 #[doc(hidden)]
 pub use tracing as __tracing;

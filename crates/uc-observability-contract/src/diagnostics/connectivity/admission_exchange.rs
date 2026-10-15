@@ -7,6 +7,7 @@ use super::{
     admission_attempt::AdmissionAttemptRef, emit_local, millis, record::LocalEvent,
     ObservationContext,
 };
+use crate::wire_enum;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::time::Instant;
@@ -27,73 +28,44 @@ impl AdmissionExchangeSide {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AdmissionExchangeStep {
-    PrepareRequest,
-    SendRequest,
-    ReceiveReply,
-    ValidateReply,
-    SendAcknowledgement,
-    FinishSend,
-    WaitPeerFinish,
-    HandleRequest,
-    PrepareReply,
-    SendReply,
-    ReceiveAcknowledgement,
-    /// Joiner 初次交换：打开流、发出初次 hello、等待 `OpaqueResponse`、发出 `OpaqueFinish`。
-    OpenStream,
-    SendInitialHello,
-    ReceiveOpaqueResponse,
-    SendOpaqueFinish,
-}
-impl AdmissionExchangeStep {
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            Self::PrepareRequest => "prepare_request",
-            Self::SendRequest => "send_request",
-            Self::ReceiveReply => "receive_reply",
-            Self::ValidateReply => "validate_reply",
-            Self::SendAcknowledgement => "send_acknowledgement",
-            Self::FinishSend => "finish_send",
-            Self::WaitPeerFinish => "wait_peer_finish",
-            Self::HandleRequest => "handle_request",
-            Self::PrepareReply => "prepare_reply",
-            Self::SendReply => "send_reply",
-            Self::ReceiveAcknowledgement => "receive_acknowledgement",
-            Self::OpenStream => "open_stream",
-            Self::SendInitialHello => "send_initial_hello",
-            Self::ReceiveOpaqueResponse => "receive_opaque_response",
-            Self::SendOpaqueFinish => "send_opaque_finish",
-        }
+wire_enum! {
+    serde
+    #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+    pub enum AdmissionExchangeStep {
+        PrepareRequest => "prepare_request",
+        SendRequest => "send_request",
+        ReceiveReply => "receive_reply",
+        ValidateReply => "validate_reply",
+        SendAcknowledgement => "send_acknowledgement",
+        FinishSend => "finish_send",
+        WaitPeerFinish => "wait_peer_finish",
+        HandleRequest => "handle_request",
+        PrepareReply => "prepare_reply",
+        SendReply => "send_reply",
+        ReceiveAcknowledgement => "receive_acknowledgement",
+        /// Joiner 初次交换：打开流、发出初次 hello、等待 `OpaqueResponse`、发出 `OpaqueFinish`。
+        OpenStream => "open_stream",
+        SendInitialHello => "send_initial_hello",
+        ReceiveOpaqueResponse => "receive_opaque_response",
+        SendOpaqueFinish => "send_opaque_finish",
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AdmissionExchangeFailure {
-    TimedOut,
-    ConnectionClosed,
-    IoFailed,
-    InvalidMessage,
-    AuthenticationRejected,
-    PeerUpgradeRequired,
-    Internal,
-    Interrupted,
+wire_enum! {
+    serde
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum AdmissionExchangeFailure {
+        TimedOut => "timed_out",
+        ConnectionClosed => "connection_closed",
+        IoFailed => "io_failed",
+        InvalidMessage => "invalid_message",
+        AuthenticationRejected => "authentication_rejected",
+        PeerUpgradeRequired => "peer_upgrade_required",
+        Internal => "internal",
+        Interrupted => "interrupted",
+    }
 }
 impl AdmissionExchangeFailure {
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            Self::TimedOut => "timed_out",
-            Self::ConnectionClosed => "connection_closed",
-            Self::IoFailed => "io_failed",
-            Self::InvalidMessage => "invalid_message",
-            Self::AuthenticationRejected => "authentication_rejected",
-            Self::PeerUpgradeRequired => "peer_upgrade_required",
-            Self::Internal => "internal",
-            Self::Interrupted => "interrupted",
-        }
-    }
     fn error_type(self) -> DiagnosticErrorType {
         match self {
             Self::TimedOut => DiagnosticErrorType::Timeout,
@@ -115,7 +87,7 @@ pub struct AdmissionExchangeFailureDetail {
 }
 impl AdmissionExchangeFailureDetail {
     pub(super) fn local_fields(self) -> (&'static str, &'static str) {
-        (self.step.as_str(), self.reason.as_str())
+        (self.step.wire(), self.reason.wire())
     }
 }
 

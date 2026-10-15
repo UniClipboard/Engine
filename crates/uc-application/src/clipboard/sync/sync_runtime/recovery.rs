@@ -17,85 +17,58 @@ use crate::clipboard::outbound::{
     ClipboardOutboundFacade, NotResendableReason, ResendEntryError, ResendReport,
 };
 use crate::deps::CurrentSpaceMemberScopePort;
-use uc_observability_contract::{log_fields::log_id, uc_debug, uc_info, uc_warn};
+use uc_observability_contract::{log_fields::log_id, uc_debug, uc_info, uc_warn, wire_enum};
 
 #[cfg(test)]
 mod tests;
 
 const RECOVERY_PAGE_SIZE: usize = 256;
 
-/// 一轮恢复为什么开始：固定词表。
-#[derive(Clone, Copy)]
-enum RecoveryTrigger {
-    /// 订阅可达性之后对已在线设备的启动扫描。
-    Startup,
-    /// 设备刚刚上线。
-    PeerOnline,
-}
-
-impl RecoveryTrigger {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Startup => "startup",
-            Self::PeerOnline => "peer_online",
-        }
+wire_enum! {
+    /// 一轮恢复为什么开始：固定词表。
+    #[derive(Clone, Copy)]
+    enum RecoveryTrigger: &'static str {
+        /// 订阅可达性之后对已在线设备的启动扫描。
+        Startup => "startup",
+        /// 设备刚刚上线。
+        PeerOnline => "peer_online",
     }
 }
 
-/// 一轮恢复的结局：每个提前返回都对应一个固定类别，不记录条目、设备或错误正文。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum RecoveryOutcome {
-    /// 向目标补发了一条待恢复内容，并拿到派送汇总。
-    Dispatched,
-    /// 没有需要恢复的条目。
-    NothingToRecover,
-    /// 恢复被停止信号打断。
-    Cancelled,
-    /// 自动同步已关闭。
-    SyncDisabled,
-    /// 本机已不是当前空间的有效成员。
-    MemberInactive,
-    /// 读取当前成员范围失败。
-    ScopeUnavailable,
-    /// 目标设备被暂时暂停，保留其待发送内容。
-    TargetPaused,
-    /// 目标已不在成员范围内，待发送内容被标记为已取代。
-    TargetNotCurrent,
-    /// 列举条目失败，扫描中止。
-    ListingFailed,
-    /// 无法让旧内容失效，因此不补发。
-    SupersedeFailed,
-    /// 内容的投递状态在扫描期间已变为终态。
-    StatusChanged,
-    /// 条目内容已不存在，自动恢复被终止。
-    PayloadLost,
-    /// 条目当前不可重发（不是内容丢失）。
-    NotResendable,
-    /// 补发时存储或派送失败。
-    DeliveryFailed,
-    /// 补发被拒绝的其他固定原因。
-    DeliverySkipped,
-}
-
-impl RecoveryOutcome {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Dispatched => "dispatched",
-            Self::NothingToRecover => "nothing_to_recover",
-            Self::Cancelled => "cancelled",
-            Self::SyncDisabled => "sync_disabled",
-            Self::MemberInactive => "member_inactive",
-            Self::ScopeUnavailable => "scope_unavailable",
-            Self::TargetPaused => "target_paused",
-            Self::TargetNotCurrent => "target_not_current",
-            Self::ListingFailed => "listing_failed",
-            Self::SupersedeFailed => "supersede_failed",
-            Self::StatusChanged => "status_changed",
-            Self::PayloadLost => "payload_lost",
-            Self::NotResendable => "not_resendable",
-            Self::DeliveryFailed => "delivery_failed",
-            Self::DeliverySkipped => "delivery_skipped",
-        }
+wire_enum! {
+    /// 一轮恢复的结局：每个提前返回都对应一个固定类别，不记录条目、设备或错误正文。
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum RecoveryOutcome: &'static str {
+        /// 向目标补发了一条待恢复内容，并拿到派送汇总。
+        Dispatched => "dispatched",
+        /// 没有需要恢复的条目。
+        NothingToRecover => "nothing_to_recover",
+        /// 恢复被停止信号打断。
+        Cancelled => "cancelled",
+        /// 自动同步已关闭。
+        SyncDisabled => "sync_disabled",
+        /// 本机已不是当前空间的有效成员。
+        MemberInactive => "member_inactive",
+        /// 读取当前成员范围失败。
+        ScopeUnavailable => "scope_unavailable",
+        /// 目标设备被暂时暂停，保留其待发送内容。
+        TargetPaused => "target_paused",
+        /// 目标已不在成员范围内，待发送内容被标记为已取代。
+        TargetNotCurrent => "target_not_current",
+        /// 列举条目失败，扫描中止。
+        ListingFailed => "listing_failed",
+        /// 无法让旧内容失效，因此不补发。
+        SupersedeFailed => "supersede_failed",
+        /// 内容的投递状态在扫描期间已变为终态。
+        StatusChanged => "status_changed",
+        /// 条目内容已不存在，自动恢复被终止。
+        PayloadLost => "payload_lost",
+        /// 条目当前不可重发（不是内容丢失）。
+        NotResendable => "not_resendable",
+        /// 补发时存储或派送失败。
+        DeliveryFailed => "delivery_failed",
+        /// 补发被拒绝的其他固定原因。
+        DeliverySkipped => "delivery_skipped",
     }
 }
 
@@ -266,8 +239,8 @@ async fn recover_online_target(
 
 fn record_recovery(trigger: RecoveryTrigger, outcome: RecoveryOutcome) {
     uc_info!(
-        trigger = trigger.as_str(),
-        outcome = outcome.as_str(),
+        trigger = trigger.wire(),
+        outcome = outcome.wire(),
         "clipboard delivery recovery round finished"
     );
 }

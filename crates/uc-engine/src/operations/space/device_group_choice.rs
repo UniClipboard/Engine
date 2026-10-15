@@ -112,29 +112,13 @@ fn settle(result: ChooseDeviceGroupResult) -> Result<OperationResult, EngineErro
     let Some((outcome, current_revision)) = outcome(result) else {
         return Err(invalid_request("choice_rejected"));
     };
-    uc_info!(
-        outcome = outcome_label(outcome),
-        "device group choice settled"
-    );
+    uc_info!(outcome = outcome.wire(), "device group choice settled");
     Ok(OperationResult::DeviceGroupChosen(
         DeviceGroupChoiceResultSummary {
             outcome,
             current_revision,
         },
     ))
-}
-
-fn outcome_label(outcome: DeviceGroupChoiceOutcomeSummary) -> &'static str {
-    match outcome {
-        DeviceGroupChoiceOutcomeSummary::Completed => "completed",
-        DeviceGroupChoiceOutcomeSummary::Pending => "pending",
-        DeviceGroupChoiceOutcomeSummary::RePairingRequired => "re_pairing_required",
-        DeviceGroupChoiceOutcomeSummary::AlreadyCompleted => "already_completed",
-        DeviceGroupChoiceOutcomeSummary::StateChanged => "state_changed",
-        DeviceGroupChoiceOutcomeSummary::LocalDeviceConfirmationRequired => {
-            "local_device_confirmation_required"
-        }
-    }
 }
 
 fn record_query_failure(error: &uc_application::facade::QueryDeviceGroupChoicesError) {
