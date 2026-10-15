@@ -229,15 +229,9 @@ fn non_blocking_file_writer(
 impl AsyncFileWriter {
     pub(crate) fn write_record(&self, buffer: &[u8], source: LocalDiagnosticSource) {
         let statistics = self.statistics.source(source);
-        let _submission = match self.submission.try_lock() {
-            Ok(submission) => submission,
-            Err(TryLockError::WouldBlock) => {
-                increment(&self.dropped_records);
-                increment(&statistics.queue_dropped);
-                return;
-            }
-            Err(TryLockError::Poisoned(error)) => error.into_inner(),
-        };
+        // 门只保护封口与入队的先后顺序，持有者只做不阻塞的 `try_send`，所以这里等待锁不会等待磁盘或网络；
+        // 争用本身不得丢记录，只有队列已满或已封口才计入丢弃。
+        let _submission = lock(&self.submission);
         if self.closed.load(Ordering::Acquire)
             || self
                 .sender
@@ -285,30 +279,29 @@ impl LocalFileWorker {
         let started = Instant::now();
         let (sender, receiver) = mpsc::channel();
         let mut message = FileMessage::Flush(sender);
-        {
-            let Some(_submission) = lock_before_deadline(&self.submission, started, deadline)
-            else {
-                return SignalResult::TimedOut;
-            };
-            if started.elapsed() >= deadline {
-                return SignalResult::TimedOut;
-            }
-            if self.closed.load(Ordering::Acquire) {
-                return SignalResult::AlreadyShutdown;
-            }
-            loop {
+        loop {
+            // 队列已满时在两次尝试之间释放提交门，等待期间不阻塞写入方。
+            {
+                let Some(_submission) = lock_before_deadline(&self.submission, started, deadline)
+                else {
+                    return SignalResult::TimedOut;
+                };
+                if started.elapsed() >= deadline {
+                    return SignalResult::TimedOut;
+                }
+                if self.closed.load(Ordering::Acquire) {
+                    return SignalResult::AlreadyShutdown;
+                }
                 match self.sender.try_send(message) {
                     Ok(()) => break,
-                    Err(mpsc::TrySendError::Full(returned)) => {
-                        if started.elapsed() >= deadline {
-                            return SignalResult::TimedOut;
-                        }
-                        message = returned;
-                        std::thread::sleep(Duration::from_millis(1));
-                    }
+                    Err(mpsc::TrySendError::Full(returned)) => message = returned,
                     Err(mpsc::TrySendError::Disconnected(_)) => return SignalResult::Failed,
                 }
             }
+            if started.elapsed() >= deadline {
+                return SignalResult::TimedOut;
+            }
+            std::thread::sleep(Duration::from_millis(1));
         }
         match receiver.recv_timeout(deadline.saturating_sub(started.elapsed())) {
             Ok(true) => SignalResult::Completed,
@@ -1171,23 +1164,38 @@ mod tests {
     }
 
     #[test]
-    fn contended_submission_is_dropped_without_blocking_the_writer() {
-        let (sender, _receiver) = mpsc::sync_channel(1);
-        let dropped_records = Arc::new(AtomicU64::new(0));
-        let submission = Arc::new(Mutex::new(()));
-        let _held = lock(submission.as_ref());
-        let mut writer = AsyncFileWriter {
-            sender,
-            dropped_records: Arc::clone(&dropped_records),
-            closed: Arc::new(AtomicBool::new(false)),
-            submission: Arc::clone(&submission),
-            statistics: Arc::new(FileStatistics::default()),
-        };
+    fn concurrent_producers_never_lose_records_to_gate_contention() {
+        const PRODUCERS: usize = 8;
+        const PER_PRODUCER: usize = 400;
+        let directory = tempdir().expect("temp dir");
+        let runtime = LocalFileRuntime::new_with_limits(directory.path(), 7, 10_000_000)
+            .expect("local file runtime");
+        // 总量低于队列容量，任何丢弃都只能来自提交门争用。
+        assert!(PRODUCERS * PER_PRODUCER < ASYNC_QUEUE_CAPACITY);
+        let start = Arc::new(std::sync::Barrier::new(PRODUCERS));
+        let producers: Vec<_> = (0..PRODUCERS)
+            .map(|_| {
+                let mut writer = runtime.writer();
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    start.wait();
+                    for _ in 0..PER_PRODUCER {
+                        writer.write_all(b"record\n").expect("write");
+                    }
+                })
+            })
+            .collect();
+        for producer in producers {
+            producer.join().expect("producer");
+        }
+        assert!(runtime.flush(Duration::from_secs(5)));
 
-        let started = Instant::now();
-        writer.write_all(b"not-blocked").expect("non-fatal drop");
-
-        assert!(started.elapsed() < Duration::from_millis(50));
-        assert_eq!(dropped_records.load(Ordering::Relaxed), 1);
+        assert_eq!(runtime.dropped_records(), 0);
+        let files = managed_log_files(directory.path()).expect("files");
+        let written = std::fs::read_to_string(&files[0])
+            .expect("file")
+            .lines()
+            .count();
+        assert_eq!(written, PRODUCERS * PER_PRODUCER);
     }
 }
