@@ -90,7 +90,7 @@ pub(crate) enum Kind {
     /// 值包含其中一个片段则输出对应类别；否则 `other`。
     Contains(&'static [(&'static str, &'static str)]),
     /// 传输路径或地址的类别：`ip_v4`、`ip_v6`、`relay`、`custom`、`none`、`other`。
-    PathKind,
+    Transport,
     /// 按分隔符数条目（空集合为 0）。
     CountSeparated(&'static str),
     /// 按片段出现次数计数。
@@ -218,7 +218,7 @@ pub(crate) const RULES: &[Rule] = &[
         site: Site::Target("iroh::_events::conn::incoming"),
         level: Level::DEBUG,
         tier: CaptureTier::Standard,
-        fields: &[field("remote_addr", "addr_kind", Kind::PathKind)],
+        fields: &[field("remote_addr", "addr_kind", Kind::Transport)],
         burst: 16,
         refill_ms: 250,
     },
@@ -246,8 +246,8 @@ pub(crate) const RULES: &[Rule] = &[
         tier: CaptureTier::Standard,
         fields: &[
             field("remote", "peer_ref", Kind::PeerRef),
-            field("network_path", "path_kind", Kind::PathKind),
-            field("prev_network_path", "prev_path_kind", Kind::PathKind),
+            field("network_path", "path_kind", Kind::Transport),
+            field("prev_network_path", "prev_path_kind", Kind::Transport),
         ],
         burst: 16,
         refill_ms: 250,
@@ -263,7 +263,7 @@ pub(crate) const RULES: &[Rule] = &[
             field("remote", "peer_ref", Kind::PeerRef),
             field("conn_id", "conn_ref", Kind::ConnRef),
             field("path_id", "path_id", Kind::Number(64)),
-            field("network_path", "path_kind", Kind::PathKind),
+            field("network_path", "path_kind", Kind::Transport),
             field("reason", "reason", Kind::Variant(PATH_ABANDON_VARIANTS)),
         ],
         burst: 16,
@@ -324,7 +324,7 @@ pub(crate) const RULES: &[Rule] = &[
             field("remote", "peer_ref", Kind::PeerRef),
             field("conn_id", "conn_ref", Kind::ConnRef),
             field("path_id", "path_id", Kind::Number(64)),
-            field("network_path", "path_kind", Kind::PathKind),
+            field("network_path", "path_kind", Kind::Transport),
         ],
         burst: 32,
         refill_ms: 100,
@@ -340,7 +340,7 @@ pub(crate) const RULES: &[Rule] = &[
             field("remote", "peer_ref", Kind::PeerRef),
             field("conn_id", "conn_ref", Kind::ConnRef),
             field("path_id", "path_id", Kind::Number(64)),
-            field("network_path", "path_kind", Kind::PathKind),
+            field("network_path", "path_kind", Kind::Transport),
             field("status", "status", Kind::Variant(PATH_STATUS_VARIANTS)),
             field(
                 "prev_status",

@@ -374,7 +374,7 @@ impl Shared {
                         .map_or("other", |(_, label)| *label),
                 ))
             }
-            Kind::PathKind => Some(Value::from(path_kind(raw))),
+            Kind::Transport => Some(Value::from(path_kind(raw))),
             Kind::CountSeparated(separator) => Some(Value::from(count_separated(raw, separator))),
             Kind::CountToken(token) => Some(Value::from(raw.matches(token).count())),
             Kind::Bool => match raw {
