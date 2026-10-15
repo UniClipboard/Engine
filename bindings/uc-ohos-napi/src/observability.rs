@@ -4,10 +4,10 @@ use std::time::Duration;
 
 use napi::Status;
 use uc_engine::observability::{
-    DeploymentEnvironment, LocalLogConfig, ObservabilityConfig, ObservabilityInstallError,
-    ObservabilityInstallOutcome, ObservabilityRemoteSetupFailure, ObservabilityResource,
-    ObservabilitySetupStatus, ObservabilitySignalResult, OperatingSystem, OtlpHttpConfig,
-    ProcessObservabilityHandle, ProcessObservabilityRuntime, SecretHeaderValue,
+    migrate_legacy_mobile_logs, DeploymentEnvironment, LocalLogConfig, ObservabilityConfig,
+    ObservabilityInstallError, ObservabilityInstallOutcome, ObservabilityRemoteSetupFailure,
+    ObservabilityResource, ObservabilitySetupStatus, ObservabilitySignalResult, OperatingSystem,
+    OtlpHttpConfig, ProcessObservabilityHandle, ProcessObservabilityRuntime, SecretHeaderValue,
 };
 use uc_engine::HostDirectories;
 
@@ -29,9 +29,11 @@ pub(crate) fn install(
 ) -> napi::Result<OhObservabilitySetup> {
     let directories = host_directories(directories);
     let config = runtime_config(config, &directories)?;
+    let migration = migrate_legacy_mobile_logs(&directories);
     let outcome = ProcessObservabilityRuntime::install(config).map_err(map_install_error)?;
     let reused = matches!(outcome, ObservabilityInstallOutcome::Reused(_));
     let handle = outcome.handle();
+    migration.record();
     let health = handle.health();
     let _ = PROCESS_HANDLE.set(handle);
     Ok(OhObservabilitySetup {
@@ -76,10 +78,8 @@ pub(crate) fn shutdown(deadline: Duration) -> napi::Result<OhObservabilitySignal
     })
 }
 
-pub(crate) fn schedule_flush_after_success<T, E>(result: &Result<T, E>) {
-    if result.is_err() {
-        return;
-    }
+/// 暂停或关闭调用返回后（无论成败）异步刷新一次：失败的暂停同样需要把已有记录落盘，进程可能随后被系统挂起或终止。
+pub(crate) fn schedule_flush_after_lifecycle() {
     let Some(handle) = PROCESS_HANDLE.get().cloned() else {
         return;
     };
@@ -98,12 +98,10 @@ pub(crate) fn runtime_unavailable() -> napi::Error {
 }
 
 fn host_directories(directories: OhHostDirectories) -> HostDirectories {
-    let cache = PathBuf::from(directories.cache_directory);
-    HostDirectories::new(
+    HostDirectories::mobile(
         PathBuf::from(directories.private_data_directory),
-        cache.clone(),
+        PathBuf::from(directories.cache_directory),
         PathBuf::from(directories.temporary_directory),
-        cache.join("logs"),
     )
 }
 

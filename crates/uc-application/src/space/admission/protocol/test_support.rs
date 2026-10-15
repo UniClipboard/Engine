@@ -305,6 +305,7 @@ struct FixedJoinerActivation {
 #[derive(Clone, Copy)]
 enum TransportMode {
     DeferInitial,
+    SponsorUnresponsiveInitial,
     AuthenticateThenDefer,
     AuthenticateThenReject,
     AuthenticateThenUpgradeRequired,
@@ -937,6 +938,9 @@ impl SpaceAdmissionTransportPort for RecordingSpaceAdmissionTransport {
             .push(ProtocolEvent::JoinerInitialChannelRequested);
         if matches!(self.mode, TransportMode::DeferInitial) {
             return Err(SpaceAdmissionTransportError::deferred());
+        }
+        if matches!(self.mode, TransportMode::SponsorUnresponsiveInitial) {
+            return Err(SpaceAdmissionTransportError::SponsorUnresponsive);
         }
         Ok(Box::new(ExchangeThenDeferred {
             events: Arc::clone(&self.events),
@@ -1856,6 +1860,11 @@ impl SpaceAdmissionProtocolTestPair {
 
     pub(super) async fn authenticating() -> Self {
         Self::with_mode(None, TransportMode::AuthenticateThenDefer).await
+    }
+
+    /// Sponsor 收下初次请求后在截止内没有任何应答。
+    pub(super) async fn sponsor_unresponsive() -> Self {
+        Self::with_mode(None, TransportMode::SponsorUnresponsiveInitial).await
     }
 
     pub(super) async fn authentication_rejected() -> Self {

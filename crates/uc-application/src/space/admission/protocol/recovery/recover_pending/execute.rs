@@ -363,6 +363,15 @@ impl AdmissionRecoveryService {
                 )
                 .await;
             }
+            (RecoveryChannel::Initial, SpaceAdmissionTransportError::SponsorUnresponsive) => {
+                self.save_initial_rejection(
+                    report,
+                    aggregate,
+                    token,
+                    SpaceAdmissionRejectionReason::SponsorUnresponsive,
+                )
+                .await;
+            }
             (RecoveryChannel::Initial, SpaceAdmissionTransportError::PeerUpgradeRequired) => {
                 self.save_peer_upgrade_result(report, aggregate, token)
                     .await;
@@ -811,6 +820,7 @@ fn exchange_failure(error: &SpaceAdmissionTransportError) -> ExchangeFailure {
         }
         SpaceAdmissionTransportError::Unavailable { .. } => ExchangeFailure::Unavailable,
         SpaceAdmissionTransportError::Deferred { .. } => ExchangeFailure::Deferred,
+        SpaceAdmissionTransportError::SponsorUnresponsive => ExchangeFailure::SponsorUnresponsive,
         SpaceAdmissionTransportError::PeerUpgradeRequired => ExchangeFailure::PeerUpgradeRequired,
     }
 }
@@ -824,6 +834,9 @@ fn connection_decision(
         }
         (RecoveryChannel::Initial, SpaceAdmissionTransportError::InvitationUnavailable) => {
             RecoveryDecision::Rejected(Some(RejectionCause::InvitationUnavailable))
+        }
+        (RecoveryChannel::Initial, SpaceAdmissionTransportError::SponsorUnresponsive) => {
+            RecoveryDecision::Rejected(Some(RejectionCause::SponsorUnresponsive))
         }
         (RecoveryChannel::Initial, SpaceAdmissionTransportError::PeerUpgradeRequired) => {
             RecoveryDecision::Rejected(Some(RejectionCause::PeerUpgradeRequired))

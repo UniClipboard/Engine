@@ -171,7 +171,7 @@ handler 创建。强行交给 Engine 会迫使 Core/Application message 增加 c
 直接 Rust、Apple/Android UniFFI 与 HarmonyOS N-API 都公开同一份当前累计健康查询；初始安装结果只表示安装时状态，不能代替
 运行一段时间后的查询。
 
-移动 `suspend` 在 Engine 暂停成功后做有界 flush，`resume` 继续使用同一 provider。单个 Engine shutdown 只 flush；只有宿主确认
+移动 `suspend` 与 Engine shutdown 返回后无论成败都做有界 flush（失败的暂停同样需要把已有记录落盘），`resume` 继续使用同一 provider。单个 Engine shutdown 只 flush；只有宿主确认
 进程最终退出时才 shutdown provider。flush 与 shutdown 通过同一生命周期门串行；调用方截止时间到达后旧操作可在后台收尾，
 但不会与后续刷新或最终关闭重叠。最终关闭先拒绝普通记录，排空期间仍允许固定健康记录，排空完成后再关闭所有输出。只有关闭
 线程未启动或本地清理仍未结束时才能重试；已完成但失败的结果必须原样保留，不能被第二次调用改写成成功。shutdown 后不在同一
@@ -292,6 +292,12 @@ Space 的 OPAQUE 认证握手保持原布局；认证后的 Request/Reply 使用
 具体原因同时决定该轮 trace 与完成日志的错误摘要，本地完成记录额外携带失败步骤；保持原有业务返回、
 关闭码、确认、超时和恢复语义。总截止时间到达时结算当前步骤为超时，Future 被丢弃时为中断并结算一次取消，
 进程强制终止不伪造结束。普通模式保留所有步骤，详细模式不改变其结果或可见性。
+
+Joiner 发出初次 hello 后读取 `OpaqueResponse` 失败时，完成记录的本地详情为 `error.phase=receive_response`，`error.reason` 取固定值
+`response_timeout`（读响应总截止内无应答）、`stream_reset`（响应流被重置或被对端提前结束）、`connection_lost`（连接在应答前丢失）、
+`decode`（响应帧无法解码）或 `app_close_*`（对端以应用层关闭码关闭，类别为 `session_unavailable`、`authentication`、`busy`、
+`peer_upgrade_required`、`protocol`、`other`，不记录原始数值）。完成记录的 `error.type` 随之为 `timeout`、`channel_closed`、
+`decode_failed`，应用层关闭保持按公开结果得出的类别；其中关闭码 0（会话门的 `session_unavailable` / `session_retired`，sponsor 当前没有可用会话）与 busy 一样映射为延期，不再被当作认证被拒绝；读响应超时（sponsor 收下请求后无应答）的公开结果是独立的 `SponsorUnresponsive`（Engine 的 `JoinSpaceRejectionReasonSummary::SponsorUnresponsive`，两套绑定的同名枚举值），不再是认证被拒绝；它与认证被拒绝一样是终态拒绝，重试策略不变。其余返回给 Application 的公开结果不变。
 
 `pairing.exchange.network.snapshot` 只在详细模式落盘，在连接建立后、交换开始及正常返回或失败返回时各取一次，
 不增加后台采样任务。只保留当前选中路径的固定类型、可用时的往返延迟微秒数，以及连接累计丢包和收发数据报数量。
@@ -420,7 +426,7 @@ decorator 负责。Sponsor 在等待执行锁之前确定已认证消息的固�
 JSONL 保留 timestamp、level、target、fields，当前使用 `local_schema_version=2`；旧版文件仍可导出。有效的
 SDK TraceId/SpanId 位于顶层，缺失时省略。远程关闭不影响本地关联能力。普通完成日志退出旧 fmt 文件
 路径；health 仍通过独立接受门与只接受 HEALTH_TARGET 的格式层写入同一队列，在 SDK 收尾和遥测
-抑制时仍能记录健康结果。两个入口的 target 集合互斥，不会重复写入同一记录。
+抑制时仍能记录健康结果。两个入口的 target 集合互斥，不会重复写入同一记录。健康记录经同一份本地关联信封标注，带 `local_schema_version`、`run_id`、`source_commit` 等运行字段，可与同一次运行的其他记录对应。
 
 桌面等已有日志输出的宿主使用 `ProcessObservabilityRuntime::install_with_host_layers` 在一次安装中
 提交标准 tracing Layer。共同运行时将核心记录与宿主记录分组过滤；宿主层不能接收核心合同事件、
@@ -468,7 +474,7 @@ SDK TraceId/SpanId 位于顶层，缺失时省略。远程关闭不影响本地�
 只等待本进程本地队列，返回完成、失败、超时或已关闭；与远程输出无关。报告包含查询时间窗口、
 来源登记/观察/过滤以及按来源的文件写入计数和最后写入时间。计数不是 ZIP 文件内容快照，业务并发
 继续产生记录，产品仍须报告实际读取、缺失和截断；本进程刷新不代表扩展或其他进程已经刷新。
-UniFFI 的导出准备是同步入口，宿主必须使用已有后台执行队列；HarmonyOS 入口异步等待阻塞工作。
+导出报告的 `module_logs`（`emitted`、`rate_limited`、`budget_dropped`、`truncated`、`rejected`、`opaque_error_layers`）同样由两套绑定原样给出，宿主据此判断模块日志是否被限速或预算丢弃。UniFFI 的导出准备是同步入口，宿主必须使用已有后台执行队列；HarmonyOS 入口异步等待阻塞工作。
 
 原生来源通过固定枚举登记，动作开始返回本进程生成且来源绑定的 token。重复、跨来源和未知结束
 均拒绝；最多保留 1024 个在途动作。未登记来源不能被当作零事件的完整覆盖。发现、路径和中转
@@ -495,6 +501,7 @@ UniFFI 的导出准备是同步入口，宿主必须使用已有后台执行队�
 设备侧系统日志、JSONL 和远程层均默认拒绝普通模块 target。历史 local debug 调用点保留在
 `docs/generated/observability-inventory.md`，但不因此获得输出许可。
 
+移动端绑定（UniFFI、N-API）用 `HostDirectories::mobile` 把日志目录固定为 `<private_data_directory>/logs`，不放在缓存目录内：离开空间与清理缓存会整体删除缓存，日志在缓存里就会被一并删掉；该目录也不在升级备份的复制范围。旧布局的 `<cache_directory>/logs` 只在安装观测运行期之前由 `migrate_legacy_mobile_logs` 一次性迁入新目录（同名文件两边都保留，失败时旧文件留在原处并写一条 `legacy_log_migration` 记录），之后宿主应只读新目录。
 本地文件固定为 `engine.YYYY-MM-DD.jsonl`，保留 7 天，总量不超过十进制 100,000,000 bytes。owner 只枚举这一严格命名，启动和
 跨日时按最旧优先清理，写入超额时同样先淘汰最旧的受管文件，不删除当天文件；只有单条记录超过整个配额，或当天文件独占配额时才整条丢弃。目录不可写时降级到其余输出，不影响业务。写入前核对打开的文件仍是目录里的当天文件：目录或文件在运行期间被删除或替换时，写入端重建目录、重新打开并重新统计配额，记录不会落入已脱离目录的文件；跨日轮转同样先重建缺失的目录。
 本地文件写入失败不是永久状态：文件线程按 100 ms 起、最长 5 s 的退避重试，退避内到达的记录计入 `write_failed` 与丢弃数，显式刷新则立即重试重新打开；任一次成功即恢复。`health().local_file` 随当前状态在 `Ready` 与 `Unavailable` 间变化，状态变化时各写一条固定健康记录 `uc.observability.local_file_failed`（`error.type` 为 `write_failed` 或 `flush_failed`）和 `uc.observability.local_file_recovered`；失败记录本身可能因存储仍不可用而丢失。文件名解析只有诊断合同一份
