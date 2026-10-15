@@ -23,6 +23,7 @@ use uc_core::clipboard::{
     FileDisplayMetadataEntry, FileSetMemberKind, FileSetMemberLocation, HashAlgorithm,
     FILE_DISPLAY_METADATA_FORMAT, FILE_DISPLAY_METADATA_MIME, IMAGE_FROM_FILE_FORMAT,
 };
+use uc_core::file_transfer::FileTransferFailureReason;
 use uc_core::ids::{DeviceId, EntryId, FormatId, RepresentationId};
 use uc_core::ports::atomic_publish::{AtomicPublishPort, PublishError};
 use uc_core::ports::hidden_path::MarkHiddenPort;
@@ -47,6 +48,7 @@ use crate::facade::blob_transfer::{
     BatchPosition, BlobTransferError, BlobTransferFacade, FetchBlobCommand, FetchBlobResult,
     FetchBlobToPathCommand, FetchBlobToPathResult, FetchTransferContext,
 };
+use crate::transfer::blob::fetch_failure_reason;
 
 /// 判断 fetcher 返回的 anyhow 错误是否来自 `BlobTransferError::Cancelled`。
 /// 仅 `BlobTransferFacade` 这一条生产路径保留 thiserror chain;mock 路径
@@ -287,7 +289,12 @@ pub trait InboundBlobFetcher: Send + Sync {
         command: FetchBlobToPathCommand,
     ) -> Result<FetchBlobToPathResult>;
 
-    async fn record_unfetched_failure(&self, _context: FetchTransferContext, _detail: String) {}
+    async fn record_unfetched_failure(
+        &self,
+        _context: FetchTransferContext,
+        _reason: FileTransferFailureReason,
+    ) {
+    }
 }
 
 /// Prefix marking an area where an inbound directory is assembled.
@@ -606,8 +613,12 @@ impl InboundBlobFetcher for BlobTransferFacade {
             .map_err(anyhow::Error::from)
     }
 
-    async fn record_unfetched_failure(&self, context: FetchTransferContext, detail: String) {
-        BlobTransferFacade::record_unfetched_failure(self, context, detail).await;
+    async fn record_unfetched_failure(
+        &self,
+        context: FetchTransferContext,
+        reason: FileTransferFailureReason,
+    ) {
+        BlobTransferFacade::record_unfetched_failure(self, context, reason).await;
     }
 }
 
@@ -1772,7 +1783,7 @@ impl FileCacheBlobMaterializer {
                             if is_cancel_error(&err) {
                                 return Err(err);
                             }
-                            let detail = err.to_string();
+                            let reason = fetch_failure_reason(&err);
                             for (remaining_index, remaining) in
                                 manifest.members.iter().enumerate().skip(member_index + 1)
                             {
@@ -1796,7 +1807,7 @@ impl FileCacheBlobMaterializer {
                                             from_device,
                                             BatchPosition::Middle,
                                         ),
-                                        format!("not fetched after another directory member failed: {detail}"),
+                                        reason,
                                     )
                                     .await;
                             }

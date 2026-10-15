@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use super::super::OperationCompletion;
 use super::complete_clipboard_receive_failure;
+use crate::wire_enum;
 
 tokio::task_local! {
     static RECEIVE: ClipboardReceiveObservation;
@@ -53,61 +54,60 @@ pub fn describe_clipboard_receive_failure(failure: ClipboardReceiveFailure) {
     });
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ClipboardReceiveFailure {
-    NoConsumer,
-    ReceiptDropped,
-    SettlementTimeout,
-    ApplicationRejected,
-    SyncDisabled,
-    SettingsUnavailable,
-    MembershipScopeBlocked,
-    MembershipScopeUnavailable,
-    MemberMissing,
-    MemberLookupFailed,
-    ReceiveDisabled,
-    ContentTypeDisabled,
-    SessionLocked,
-    ContentKeyMissing,
-    ContentKeyEpochMismatch,
-    InvalidTransferFormat,
-    DecryptionFailed,
-    CipherUnavailable,
-    DecodeFailed,
-    ApplyFailed,
-    ApplyPermissionDenied,
-    ApplyStorageFull,
-    ApplyReadOnly,
-    ApplyIoFailed,
+wire_enum! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ClipboardReceiveFailure: (&'static str, &'static str) {
+        NoConsumer => ("handoff", "no_consumer"),
+        ReceiptDropped => ("settlement", "receipt_dropped"),
+        SettlementTimeout => ("settlement", "application_timeout"),
+        ApplicationRejected => ("application", "rejected"),
+        SyncDisabled => ("policy", "sync_disabled"),
+        SettingsUnavailable => ("policy", "settings_unavailable"),
+        MembershipScopeBlocked => ("policy", "membership_scope_blocked"),
+        MembershipScopeUnavailable => ("policy", "membership_scope_unavailable"),
+        MemberMissing => ("policy", "member_missing"),
+        MemberLookupFailed => ("policy", "member_lookup_failed"),
+        ReceiveDisabled => ("policy", "receive_disabled"),
+        ContentTypeDisabled => ("classification", "content_type_disabled"),
+        SessionLocked => ("decrypt", "session_locked"),
+        ContentKeyMissing => ("decrypt", "content_key_missing"),
+        ContentKeyEpochMismatch => ("decrypt", "content_key_epoch_mismatch"),
+        InvalidTransferFormat => ("decrypt", "invalid_transfer_format"),
+        DecryptionFailed => ("decrypt", "decryption_failed"),
+        CipherUnavailable => ("decrypt", "cipher_unavailable"),
+        DecodeFailed => ("decode", "invalid_content"),
+        ApplyFailed => ("apply", "apply_failed"),
+        ApplyPermissionDenied => ("apply", "permission_denied"),
+        ApplyStorageFull => ("apply", "storage_full"),
+        ApplyReadOnly => ("apply", "read_only_filesystem"),
+        ApplyIoFailed => ("apply", "io_failed"),
+        /// 收完内容后的准入复核发现该连接已不再被准入（成员被移除或世代已退出）。
+        AdmissionRevoked => ("admission", "revoked"),
+        /// 准入复核在接收期限内没有给出结果。
+        AdmissionCheckTimedOut => ("admission", "check_timed_out"),
+        /// 准入复核因其他原因失败（连接所有者已停止等）。
+        AdmissionCheckFailed => ("admission", "check_failed"),
+    }
 }
 
-impl ClipboardReceiveFailure {
-    pub(super) fn local_fields(self) -> (&'static str, &'static str) {
-        match self {
-            Self::NoConsumer => ("handoff", "no_consumer"),
-            Self::ReceiptDropped => ("settlement", "receipt_dropped"),
-            Self::SettlementTimeout => ("settlement", "application_timeout"),
-            Self::ApplicationRejected => ("application", "rejected"),
-            Self::SyncDisabled => ("policy", "sync_disabled"),
-            Self::SettingsUnavailable => ("policy", "settings_unavailable"),
-            Self::MembershipScopeBlocked => ("policy", "membership_scope_blocked"),
-            Self::MembershipScopeUnavailable => ("policy", "membership_scope_unavailable"),
-            Self::MemberMissing => ("policy", "member_missing"),
-            Self::MemberLookupFailed => ("policy", "member_lookup_failed"),
-            Self::ReceiveDisabled => ("policy", "receive_disabled"),
-            Self::ContentTypeDisabled => ("classification", "content_type_disabled"),
-            Self::SessionLocked => ("decrypt", "session_locked"),
-            Self::ContentKeyMissing => ("decrypt", "content_key_missing"),
-            Self::ContentKeyEpochMismatch => ("decrypt", "content_key_epoch_mismatch"),
-            Self::InvalidTransferFormat => ("decrypt", "invalid_transfer_format"),
-            Self::DecryptionFailed => ("decrypt", "decryption_failed"),
-            Self::CipherUnavailable => ("decrypt", "cipher_unavailable"),
-            Self::DecodeFailed => ("decode", "invalid_content"),
-            Self::ApplyFailed => ("apply", "apply_failed"),
-            Self::ApplyPermissionDenied => ("apply", "permission_denied"),
-            Self::ApplyStorageFull => ("apply", "storage_full"),
-            Self::ApplyReadOnly => ("apply", "read_only_filesystem"),
-            Self::ApplyIoFailed => ("apply", "io_failed"),
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn admission_check_failures_have_fixed_local_fields() {
+        for (failure, expected) in [
+            (ClipboardReceiveFailure::AdmissionRevoked, "revoked"),
+            (
+                ClipboardReceiveFailure::AdmissionCheckTimedOut,
+                "check_timed_out",
+            ),
+            (
+                ClipboardReceiveFailure::AdmissionCheckFailed,
+                "check_failed",
+            ),
+        ] {
+            assert_eq!(failure.wire(), ("admission", expected));
         }
     }
 }

@@ -1,11 +1,13 @@
 //! 保持协议登记所有权，并优先协商当前版本。
 
+use iroh::endpoint::IncomingAddr;
 use iroh::protocol::{DynProtocolHandler, IncomingFilterOutcome, Router, RouterBuilder};
 use iroh::Endpoint;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
+use uc_observability_contract::uc_info;
 
 use super::PEER_REACHABILITY_ALPN;
 use uc_sync_protocol::clipboard::MULTIPLEXED_CLIPBOARD_ALPN;
@@ -50,12 +52,14 @@ impl ProtocolRouterBuilder {
         let ready = Arc::new(AtomicBool::new(false));
         self.inner = self.inner.incoming_filter(Arc::new({
             let ready = ready.clone();
-            move |_| {
-                if ready.load(Ordering::Acquire) {
-                    IncomingFilterOutcome::Accept
+            move |incoming| {
+                let (outcome, label) = if ready.load(Ordering::Acquire) {
+                    (IncomingFilterOutcome::Accept, "accept")
                 } else {
-                    IncomingFilterOutcome::Retry
-                }
+                    (IncomingFilterOutcome::Retry, "retry")
+                };
+                record_incoming(incoming.remote_addr(), label);
+                outcome
             }
         }));
         let router = self.inner.spawn();
@@ -63,6 +67,21 @@ impl ProtocolRouterBuilder {
         ready.store(true, Ordering::Release);
         router
     }
+}
+
+/// 路由器入口观察：QUIC 握手之前，每个入站连接尝试一条记录。
+/// 只给出来源类别与处理结果，不含地址、端点标识或中继 URL；记录点由模块日志令牌桶限速。
+fn record_incoming(addr: IncomingAddr, outcome: &'static str) {
+    let addr_kind = match addr {
+        IncomingAddr::Ip(_) => "ip",
+        IncomingAddr::Relay { .. } => "relay",
+        _ => "other",
+    };
+    uc_info!(
+        addr_kind = addr_kind,
+        outcome = outcome,
+        "connection.incoming.observed at the router filter"
+    );
 }
 
 #[cfg(test)]
@@ -343,5 +362,116 @@ mod tests {
         assert_eq!(legacy.alpn(), LEGACY_PEER_REACHABILITY_ALPN);
         client.close().await;
         router.shutdown().await.unwrap();
+    }
+
+    /// 会话门拒绝的真实路径：无世代时握手后被拒绝，世代退出时已接受的连接被取消，各留下一条记录。
+    #[tokio::test]
+    async fn session_gate_rejections_leave_exactly_one_record_each() {
+        const TEST_ALPN: &[u8] = b"uniclipboard/test-gate-record/1";
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+
+        let registry = Arc::new(SessionProtocolRegistry::new());
+        let dispatcher = registry.dispatcher(TEST_ALPN);
+        let server = Endpoint::builder(iroh::endpoint::presets::N0)
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup()
+            .hooks(registry.endpoint_hooks())
+            .bind()
+            .await
+            .unwrap();
+        let client = Endpoint::builder(iroh::endpoint::presets::N0)
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup()
+            .bind()
+            .await
+            .unwrap();
+        let router = ProtocolRouterBuilder::new(server.clone())
+            .accept(TEST_ALPN, dispatcher)
+            .spawn();
+
+        let unavailable = client.connect(server.addr(), TEST_ALPN).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), unavailable.closed())
+            .await
+            .unwrap();
+        let rejected = "connection.rejected by the session gate";
+        assert_eq!(logs.count(rejected), 1, "{}", logs.output());
+        assert_eq!(logs.count("reason=\"session_unavailable\""), 1);
+        assert_eq!(logs.count("alpn=\"other\""), 1);
+
+        let started = Arc::new(Notify::new());
+        let mut handlers = SessionProtocolHandlersBuilder::new();
+        handlers
+            .install(
+                [TEST_ALPN],
+                CountAndHold {
+                    accepted: Arc::new(AtomicUsize::new(0)),
+                    shutdowns: Arc::new(AtomicUsize::new(0)),
+                    started: Arc::clone(&started),
+                },
+            )
+            .unwrap();
+        let generation = registry.publish(handlers.build()).await.unwrap();
+        let connection = client.connect(server.addr(), TEST_ALPN).await.unwrap();
+        started.notified().await;
+        assert_eq!(
+            logs.count(rejected),
+            1,
+            "a served connection is not a rejection"
+        );
+
+        registry.quiesce(&generation).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), connection.closed())
+            .await
+            .unwrap();
+        assert_eq!(logs.count(rejected), 2, "{}", logs.output());
+        assert_eq!(logs.count("reason=\"session_retired\""), 1);
+
+        client.close().await;
+        router.shutdown().await.unwrap();
+    }
+
+    /// 路由器入口观察：一次入站拨号留下一条记录，字段仅限来源类别与结果，不含地址。
+    #[tokio::test]
+    async fn incoming_connection_is_observed_once_without_address_values() {
+        const TEST_ALPN: &[u8] = b"uniclipboard/test-incoming-observed/1";
+        let logs = uc_testkit::log_capture::CapturedLogs::default();
+        let _guard = logs.install();
+
+        let server = Endpoint::builder(iroh::endpoint::presets::N0)
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup()
+            .bind()
+            .await
+            .unwrap();
+        let client = Endpoint::builder(iroh::endpoint::presets::N0)
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup()
+            .bind()
+            .await
+            .unwrap();
+        let router = ProtocolRouterBuilder::new(server.clone())
+            .accept(TEST_ALPN, Hold)
+            .spawn();
+
+        let connection = client.connect(server.addr(), TEST_ALPN).await.unwrap();
+        connection.close(0u32.into(), b"test_complete");
+        client.close().await;
+        router.shutdown().await.unwrap();
+
+        let observed = "connection.incoming.observed";
+        assert_eq!(logs.count(observed), 1, "{}", logs.output());
+        let line = logs
+            .output()
+            .lines()
+            .find(|line| line.contains(observed))
+            .unwrap()
+            .to_owned();
+        assert!(line.contains("addr_kind=\"ip\""), "{line}");
+        assert!(line.contains("outcome=\"accept\""), "{line}");
+        assert!(
+            !line.contains("127.0.0.1") && !line.contains("::1"),
+            "{line}"
+        );
     }
 }

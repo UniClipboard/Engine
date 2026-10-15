@@ -15,7 +15,9 @@ use uc_core::membership::{
     ActiveSpaceGenerationManifestV2, AdmissionContinuationCredential, InvitationId,
     SpaceAdmissionId,
 };
-use uc_observability_contract::diagnostics::connectivity::CredentialFailure;
+use uc_observability_contract::diagnostics::connectivity::{
+    observe_local_result, CredentialFailure, LocalWorkStep,
+};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::security::{
@@ -43,6 +45,11 @@ struct PreparedCredentialsV1 {
     server_setup: Vec<u8>,
     registration: Vec<u8>,
 }
+
+/// 当前空间还没有准入注册记录：有意义的稳定类别，不是存储不可用。
+#[derive(Debug, thiserror::Error)]
+#[error("space admission registration is missing")]
+struct RegistrationMissing;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SpaceAdmissionCredentialStoreError {
@@ -564,7 +571,7 @@ impl<E: DbExecutor> SqliteSpaceAdmissionCredentials<E> {
         self.executor
             .run(|conn| {
                 self.load_on(conn, &scope)?
-                    .ok_or_else(|| anyhow::anyhow!("space admission registration is missing"))
+                    .ok_or_else(|| anyhow::Error::new(RegistrationMissing))
             })
             .map_err(map_store_error)
     }
@@ -634,16 +641,22 @@ impl<E: DbExecutor + Send + Sync> SpaceAdmissionChannelCredentialPort
         _invitation_id: InvitationId,
         _admission_id: SpaceAdmissionId,
     ) -> Result<SponsorOpaqueMaterial, SpaceAdmissionChannelCredentialError> {
-        self.load_initial().await.map_err(map_channel_error)
+        observe_local_result(LocalWorkStep::SponsorCredentialInitial, async {
+            self.load_initial().await.map_err(map_channel_error)
+        })
+        .await
     }
 
     async fn load_continuation(
         &self,
         admission_id: SpaceAdmissionId,
     ) -> Result<AdmissionContinuationCredential, SpaceAdmissionChannelCredentialError> {
-        self.admissions
-            .load_continuation_credential(admission_id)
-            .map_err(map_admission_state_error)
+        observe_local_result(LocalWorkStep::SponsorCredentialContinuation, async {
+            self.admissions
+                .load_continuation_credential(admission_id)
+                .map_err(map_admission_state_error)
+        })
+        .await
     }
 }
 
@@ -692,6 +705,12 @@ fn map_channel_error(
         SpaceAdmissionCredentialStoreError::RecoveryRequired { .. } => {
             CredentialFailure::RecoveryRequired
         }
+        // 缺少准入注册记录是明确的“记录缺失”（被拒绝），不是可重试的存储故障。
+        SpaceAdmissionCredentialStoreError::Unavailable { source }
+            if source.downcast_ref::<RegistrationMissing>().is_some() =>
+        {
+            CredentialFailure::RecordMissing
+        }
         SpaceAdmissionCredentialStoreError::Unavailable { .. } => CredentialFailure::Unavailable,
     };
     channel_error(failure, anyhow::Error::new(error))
@@ -724,6 +743,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use crate::space::membership_record::test_support::{lineage_only_records, no_space_records};
     use diesel::sql_query;
@@ -804,6 +824,151 @@ mod tests {
         }
     }
 
+    /// 钥匙串读取变慢时，凭据解析的耗时必须出现在 `runtime.work.finished` 上。
+    struct SlowSecureStorage {
+        inner: MemorySecureStorage,
+        delay: Mutex<Duration>,
+    }
+
+    impl SecureStoragePort for SlowSecureStorage {
+        fn get(&self, key: &str) -> Result<Option<Vec<u8>>, SecureStorageError> {
+            std::thread::sleep(*self.delay.lock().unwrap());
+            self.inner.get(key)
+        }
+
+        fn set(&self, key: &str, value: &[u8]) -> Result<(), SecureStorageError> {
+            self.inner.set(key, value)
+        }
+
+        fn delete(&self, key: &str) -> Result<(), SecureStorageError> {
+            self.inner.delete(key)
+        }
+    }
+
+    #[tokio::test]
+    async fn initial_credential_resolution_is_timed_with_its_duration() {
+        use opentelemetry::logs::AnyValue;
+        use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+        use opentelemetry_sdk::logs::{InMemoryLogExporter, SdkLoggerProvider};
+        use tracing_subscriber::{layer::SubscriberExt, Layer};
+        use uc_observability_contract::diagnostics::connectivity::decode_local_record;
+
+        let exporter = InMemoryLogExporter::default();
+        let logs = SdkLoggerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber = tracing_subscriber::registry().with(
+            OpenTelemetryTracingBridge::new(&logs).with_filter(
+                tracing_subscriber::filter::filter_fn(|metadata| {
+                    metadata.target() == "uc.connectivity"
+                }),
+            ),
+        );
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("credentials.sqlite");
+        let secure_storage = Arc::new(SlowSecureStorage {
+            inner: MemorySecureStorage::default(),
+            delay: Mutex::new(Duration::ZERO),
+        });
+        let keys = Arc::new(AdmissionKeyManager::new(secure_storage.clone(), [0x74; 16]));
+        let manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
+            temp.path().join("vault"),
+            Arc::clone(&keys),
+        ));
+        let executor = Arc::new(DieselSqliteExecutor::new(
+            init_db_pool(db_path.to_str().unwrap()).unwrap(),
+        ));
+        let admissions = Arc::new(SqliteSpaceAdmissionState::new(
+            Arc::clone(&executor),
+            Arc::clone(&keys),
+            Arc::clone(&manifests),
+            lineage_only_records("slow-space"),
+        ));
+        let credentials = SqliteSpaceAdmissionCredentials::new(
+            executor,
+            keys,
+            manifests,
+            lineage_only_records("slow-space"),
+            admissions,
+        );
+        credentials
+            .ensure_registration(&Passphrase::new("slow passphrase"))
+            .await
+            .unwrap();
+
+        // 不同 `AdmissionKeyManager` 会缓存密钥；用慢速存储重新打开一个全新的管理器。
+        *secure_storage.delay.lock().unwrap() = Duration::from_millis(150);
+        let slow_keys = Arc::new(AdmissionKeyManager::new(secure_storage.clone(), [0x74; 16]));
+        let slow_executor = Arc::new(DieselSqliteExecutor::new(
+            init_db_pool(db_path.to_str().unwrap()).unwrap(),
+        ));
+        let slow_manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
+            temp.path().join("vault"),
+            Arc::clone(&slow_keys),
+        ));
+        let slow_admissions = Arc::new(SqliteSpaceAdmissionState::new(
+            Arc::clone(&slow_executor),
+            Arc::clone(&slow_keys),
+            Arc::clone(&slow_manifests),
+            lineage_only_records("slow-space"),
+        ));
+        let slow = SqliteSpaceAdmissionCredentials::new(
+            slow_executor,
+            slow_keys,
+            slow_manifests,
+            lineage_only_records("slow-space"),
+            slow_admissions,
+        );
+        slow.resolve_initial(
+            InvitationId::from_bytes([0x75; 32]).unwrap(),
+            SpaceAdmissionId::from_bytes([0x76; 32]).unwrap(),
+        )
+        .await
+        .unwrap();
+        logs.force_flush().expect("flush");
+
+        let text = |record: &opentelemetry_sdk::logs::SdkLogRecord, name: &str| {
+            record
+                .attributes_iter()
+                .find_map(|(key, value)| match value {
+                    AnyValue::String(value) if key.as_str() == name => {
+                        Some(value.as_str().to_owned())
+                    }
+                    _ => None,
+                })
+        };
+        let mut started = 0;
+        let mut finished = Vec::new();
+        for entry in exporter.get_emitted_logs().unwrap() {
+            let Some(name) = text(&entry.record, "event.name") else {
+                continue;
+            };
+            if !name.starts_with("runtime.work.") {
+                continue;
+            }
+            let payload = text(&entry.record, "payload").unwrap();
+            let fields = decode_local_record(&name, &payload, "INFO").expect("approved record");
+            if fields["step"] != "sponsor_credential_initial" {
+                continue;
+            }
+            if name.ends_with("started") {
+                started += 1;
+            } else {
+                finished.push(fields);
+            }
+        }
+        assert_eq!(started, 1);
+        assert_eq!(finished.len(), 1);
+        assert_eq!(finished[0]["uc.outcome"], "ok");
+        assert!(
+            finished[0]["duration_ms"].as_u64().unwrap() >= 100,
+            "the slow store read must be inside the recorded duration: {:?}",
+            finished[0]
+        );
+    }
+
     #[tokio::test]
     async fn legacy_layout_binds_registration_to_membership_lineage() {
         let temp = tempfile::tempdir().unwrap();
@@ -842,6 +1007,52 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    /// 空间还没有准入注册记录时，sponsor 的凭据解析必须报告“记录缺失”（被拒绝），
+    /// 而不是把它折叠成“存储不可用”（可重试）：两者的处理责任不同。
+    #[tokio::test]
+    async fn a_missing_registration_is_reported_as_a_missing_record_not_as_unavailable() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("credentials.sqlite");
+        let secure_storage = Arc::new(MemorySecureStorage::default());
+        let keys = Arc::new(AdmissionKeyManager::new(secure_storage, [0x77; 16]));
+        let manifests = Arc::new(ActiveSpaceGenerationManifestStore::new(
+            temp.path().join("vault"),
+            Arc::clone(&keys),
+        ));
+        let executor = Arc::new(DieselSqliteExecutor::new(
+            init_db_pool(db_path.to_str().unwrap()).unwrap(),
+        ));
+        let admissions = Arc::new(SqliteSpaceAdmissionState::new(
+            Arc::clone(&executor),
+            Arc::clone(&keys),
+            Arc::clone(&manifests),
+            lineage_only_records("missing-space"),
+        ));
+        let credentials = SqliteSpaceAdmissionCredentials::new(
+            executor,
+            keys,
+            manifests,
+            lineage_only_records("missing-space"),
+            admissions,
+        );
+
+        let error = credentials
+            .resolve_initial(
+                InvitationId::from_bytes([0x78; 32]).unwrap(),
+                SpaceAdmissionId::from_bytes([0x79; 32]).unwrap(),
+            )
+            .await
+            .err()
+            .expect("no registration exists yet");
+
+        assert_eq!(error.diagnostic_failure(), CredentialFailure::RecordMissing);
+        assert!(
+            matches!(error, SpaceAdmissionChannelCredentialError::Rejected { .. }),
+            "a missing record is a rejection, not a retryable outage"
+        );
+        assert!(std::error::Error::source(&error).is_some());
     }
 
     #[tokio::test]

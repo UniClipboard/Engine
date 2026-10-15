@@ -372,3 +372,91 @@ async fn acknowledgement_delays_and_failures_are_distinct() {
         assert_eq!(result.is_ok(), scenario == "delayed");
     }
 }
+
+fn step_names_and_failures(exporter: &InMemoryLogExporter) -> Vec<(String, Option<String>)> {
+    step_records(exporter)
+        .into_iter()
+        .filter(|record| {
+            record
+                .get("duration_ms")
+                .is_some_and(|value| value.is_number())
+        })
+        .map(|record| {
+            (
+                record["step"].as_str().expect("step").to_owned(),
+                record["error.reason"].as_str().map(str::to_owned),
+            )
+        })
+        .collect()
+}
+
+/// Joiner 初次交换（hello 到 OpaqueFinish）的步骤记录：成功时每步各一条完成，失败时停在出问题的那一步。
+#[tokio::test]
+async fn initial_exchange_records_each_step_and_stops_at_the_failing_one() {
+    let exporter = InMemoryLogExporter::default();
+    let logs = SdkLoggerProvider::builder()
+        .with_simple_exporter(exporter.clone())
+        .build();
+    let subscriber = tracing_subscriber::registry().with(
+        OpenTelemetryTracingBridge::new(&logs)
+            .with_filter(filter_fn(|m| m.target() == "uc.connectivity")),
+    );
+    let _subscriber = tracing::subscriber::set_default(subscriber);
+    let sponsor = bound_endpoint().await;
+    wait_for_direct_addrs(&sponsor).await;
+    let joiner = bound_endpoint().await;
+    wait_for_direct_addrs(&joiner).await;
+    let invitation = InvitationId::from_bytes([0x81; 32]).expect("invitation id");
+    let admission = SpaceAdmissionId::from_bytes([0x82; 32]).expect("admission id");
+    let derived = SpaceAdmissionAuth::derive_password_equivalent(b"steps-pass", invitation);
+    let setup = SpaceAdmissionAuth::generate_server_setup();
+    let registration =
+        SpaceAdmissionAuth::register_password_equivalent(&setup, &derived).expect("registration");
+    let credentials = Arc::new(LoopbackCredentials {
+        initial: Mutex::new(Some(SponsorOpaqueMaterial::new(setup, registration))),
+        continuation: Mutex::new(None),
+    });
+    let handler = LegacyLayoutHandler {
+        local_peer_id: peer_id(sponsor.id().as_bytes()).expect("sponsor peer"),
+        credentials,
+    };
+    let router = Router::builder((*sponsor).clone())
+        .accept(SPACE_ADMISSION_ALPN, handler)
+        .spawn();
+    let password = AdmissionEncryptedPasswordEquivalent::from_bytes(derived.as_bytes().to_vec())
+        .expect("password equivalent");
+    let route = SpaceAdmissionRoute::from_bytes(
+        encode_space_admission_route(&sponsor.addr(), Some(invitation)).expect("route"),
+    )
+    .expect("route");
+    let _exchange = IrohSpaceAdmissionTransport::new(joiner.clone())
+        .establish_initial(
+            admission,
+            AdmissionAttemptTimeline::start(1_000).expect("timeline"),
+            &route,
+            &password,
+        )
+        .await
+        .expect("authentication succeeds");
+    logs.force_flush().expect("flush");
+    let names: Vec<_> = step_names_and_failures(&exporter)
+        .into_iter()
+        .map(|(step, failure)| {
+            assert_eq!(failure, None, "{step}");
+            step
+        })
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "open_stream",
+            "send_initial_hello",
+            "receive_opaque_response",
+            "validate_reply",
+            "send_opaque_finish"
+        ]
+    );
+    router.shutdown().await.expect("router");
+    joiner.close().await;
+    sponsor.close().await;
+}
