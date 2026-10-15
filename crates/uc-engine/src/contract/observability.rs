@@ -23,14 +23,25 @@ pub use uc_observability_runtime::{
     HostNetworkKind, InstallError as ObservabilityInstallError,
     InstallOutcome as ObservabilityInstallOutcome, LocalCaptureMode, LocalCaptureStatus,
     LocalDiagnosticError, LocalDiagnosticExportReport, LocalDiagnosticSource,
-    LocalDiagnosticStatus, LocalLogConfig, ModuleLogCounts, ObservabilityConfig,
-    ObservabilityHealth, ObservabilityResource, OperatingSystem, OtlpHttpConfig,
-    ProcessObservabilityHandle, ProcessObservabilityRuntime,
-    RemoteSetupFailure as ObservabilityRemoteSetupFailure, SecretHeaderValue,
-    SetupStatus as ObservabilitySetupStatus, ShutdownSummary as ObservabilityShutdownSummary,
-    SignalResult as ObservabilitySignalResult, SourceCapability, SourceCollection, SourceCoverage,
-    StopCaptureResult, LOCAL_LOG_MAX_BYTES, LOCAL_LOG_RETENTION_DAYS,
+    LocalDiagnosticStatus, LocalLogConfig, ModuleLogCounts, NetworkCaptureMode,
+    NetworkCaptureStatus, NetworkLibraryStatus, NetworkLogBudget, NetworkLogConfig,
+    NetworkLogCounters, NetworkLogError, NetworkLogExportReport, NetworkLogFile, NetworkLogState,
+    NetworkLogStatus, NetworkProcessRole, ObservabilityConfig, ObservabilityHealth,
+    ObservabilityResource, OperatingSystem, OtlpHttpConfig, ProcessObservabilityHandle,
+    ProcessObservabilityRuntime, RemoteSetupFailure as ObservabilityRemoteSetupFailure,
+    SecretHeaderValue, SetupStatus as ObservabilitySetupStatus,
+    ShutdownSummary as ObservabilityShutdownSummary, SignalResult as ObservabilitySignalResult,
+    SourceCapability, SourceCollection, SourceCoverage, StopCaptureResult, LOCAL_LOG_MAX_BYTES,
+    LOCAL_LOG_RETENTION_DAYS, NETWORK_LOG_SCHEMA_VERSION,
 };
+
+/// 产品使用的全部 ALPN，用于登记独立网络日志允许输出的协议取值（见 `NetworkLogConfig::with_known_alpns`）。
+pub fn known_network_alpns() -> Vec<String> {
+    uc_infra_p2p::network::iroh::product_alpns()
+        .into_iter()
+        .map(|alpn| String::from_utf8_lossy(alpn).into_owned())
+        .collect()
+}
 
 /// 旧版移动端布局把日志放在缓存目录内；安装观测运行期之前把它们迁入当前日志目录（一次性，幂等）。
 ///
