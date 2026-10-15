@@ -8,9 +8,11 @@
 //! External callers enter through the facade.
 
 pub(crate) mod facade;
+mod failure;
 mod fetch_blob;
 mod publish_blob;
 
+pub(crate) use failure::fetch_failure_reason;
 pub(crate) use fetch_blob::{FetchBlobInput, FetchBlobPathInput, FetchBlobUseCase};
 pub(crate) use publish_blob::{PublishBlobInput, PublishBlobUseCase};
 

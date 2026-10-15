@@ -72,7 +72,7 @@ impl ClipboardReceiverAdapter {
             if let Ok(Ok(stream)) =
                 tokio::time::timeout(FRAME_READ_TIMEOUT, connection.accept_bi()).await
             {
-                let _ = self.exchange(connection.clone(), stream).await;
+                self.exchange(connection.clone(), stream).await;
                 let _ =
                     tokio::time::timeout(APPLICATION_SETTLEMENT_TIMEOUT, connection.closed()).await;
             }
@@ -102,11 +102,7 @@ impl ClipboardReceiverAdapter {
             }
         }
     }
-    async fn exchange(
-        &self,
-        connection: ConnectionLease,
-        mut stream: StreamLease,
-    ) -> Result<(), ConnectivityError> {
+    async fn exchange(&self, connection: ConnectionLease, mut stream: StreamLease) {
         let peer_device_id = connection.peer();
         let read_deadline = tokio::time::Instant::now() + FRAME_READ_TIMEOUT;
         let decoded = match tokio::time::timeout(
@@ -117,7 +113,7 @@ impl ClipboardReceiverAdapter {
         {
             Err(_) => {
                 emit_ack(&mut stream.send, AckCode::Rejected).await;
-                return Ok(());
+                return;
             }
             Ok(decoded) => match decoded {
                 Ok(decoded) => decoded,
@@ -135,7 +131,7 @@ impl ClipboardReceiverAdapter {
                     };
                     emit_ack(&mut stream.send, ack).await;
 
-                    return Ok(());
+                    return;
                 }
             },
         };
@@ -167,7 +163,7 @@ impl ClipboardReceiverAdapter {
                         started.elapsed(),
                     ));
                     emit_ack(&mut stream.send, AckCode::Rejected).await;
-                    return Ok(());
+                    return;
                 }
                 Ok(payload) => match payload {
                     Ok(ciphertext) => ciphertext,
@@ -185,14 +181,43 @@ impl ClipboardReceiverAdapter {
                             "clipboard receiver: payload read failed; sending Rejected ack"
                         );
                         emit_ack(&mut stream.send, AckCode::Rejected).await;
-                        return Ok(());
+                        return;
                     }
                 },
             };
 
-            tokio::time::timeout_at(read_deadline, connection.check_current())
+            // 复核失败时没有应用层结算可言，但这次接收已经开始：必须以明确结果结束，而不是静默丢弃。
+            let current = tokio::time::timeout_at(read_deadline, connection.check_current())
                 .await
-                .map_err(ConnectivityError::TimedOut)??;
+                .map_err(ConnectivityError::TimedOut)
+                .and_then(|checked| checked);
+            if let Err(error) = current {
+                let (failure, error_type) = match error {
+                    ConnectivityError::Denied => (
+                        ClipboardReceiveFailure::AdmissionRevoked,
+                        DiagnosticErrorType::PeerRejected,
+                    ),
+                    ConnectivityError::TimedOut(_) | ConnectivityError::DeadlineExpired => (
+                        ClipboardReceiveFailure::AdmissionCheckTimedOut,
+                        DiagnosticErrorType::Timeout,
+                    ),
+                    _ => (
+                        ClipboardReceiveFailure::AdmissionCheckFailed,
+                        DiagnosticErrorType::Unavailable,
+                    ),
+                };
+                operation_observation.finish_failure(
+                    failure,
+                    OperationCompletion::failed(
+                        DiagnosticDomain::Clipboard,
+                        DiagnosticOperation::ClipboardReceive,
+                        DiagnosticRole::Server,
+                        error_type,
+                        started.elapsed(),
+                    ),
+                );
+                return;
+            }
             // 认证后的任务通过原有广播交接；没有消费者时拒绝，绝不伪报保存成功。
             let (receipt, result) = InboundClipboardReceipt::pending();
             let transport = connection.channel();
@@ -216,7 +241,7 @@ impl ClipboardReceiverAdapter {
                         started.elapsed(),
                     ),
                 );
-                return Ok(());
+                return;
             }
 
             let settlement =
@@ -258,11 +283,9 @@ impl ClipboardReceiverAdapter {
 
             // 独立流发送持久接受结果；其他流不等待本次结算。
             emit_ack(&mut stream.send, ack).await;
-            Ok(())
         }
         .instrument(span);
-        let result = receive_observation.scope(result).await;
-        result
+        receive_observation.scope(result).await;
     }
 }
 #[async_trait]

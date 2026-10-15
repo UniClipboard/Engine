@@ -10,8 +10,8 @@ use uc_core::membership::{
     SpaceAdmissionId, SpaceAdmissionProtocolVersion,
 };
 use uc_observability_contract::diagnostics::connectivity::{
-    AdmissionExchangeFailure, AdmissionExchangeObservation, AdmissionExchangeSide,
-    AdmissionExchangeStep, AdmissionNetworkPoint,
+    AdmissionAttemptRef, AdmissionExchangeFailure, AdmissionExchangeObservation,
+    AdmissionExchangeSide, AdmissionExchangeStep, AdmissionNetworkPoint,
 };
 use uc_observability_contract::diagnostics::{
     operation_span, DiagnosticDomain, DiagnosticOperation, DiagnosticRole, DiagnosticSpanKind,
@@ -80,8 +80,10 @@ impl AuthenticatedAdmissionExchangePort for EstablishedExchange {
             kind: DiagnosticSpanKind::Client,
         });
         let started = std::time::Instant::now();
-        let mut progress =
-            span.in_scope(|| AdmissionExchangeObservation::begin(AdmissionExchangeSide::Joiner));
+        let mut progress = span.in_scope(|| {
+            AdmissionExchangeObservation::begin(AdmissionExchangeSide::Joiner)
+                .with_attempt(AdmissionAttemptRef::derive(self.admission_id.as_bytes()))
+        });
         let result = async {
             record_network_snapshot(
                 &self.connection,

@@ -535,3 +535,99 @@ async fn real_iroh_loopback_runs_initial_and_continuation_typed_exchanges() {
     joiner.close().await;
     sponsor.close().await;
 }
+
+/// 真实 iroh 回环上跑一次初次交换，返回这次尝试的 admission_id 与双方的步骤记录。
+async fn attempt_step_records(seed: u8) -> (SpaceAdmissionId, Vec<serde_json::Value>) {
+    let log_exporter = InMemoryLogExporter::default();
+    let logs = SdkLoggerProvider::builder()
+        .with_simple_exporter(log_exporter.clone())
+        .build();
+    let subscriber = tracing_subscriber::registry().with(
+        OpenTelemetryTracingBridge::new(&logs)
+            .with_filter(filter_fn(|metadata| metadata.target() == "uc.connectivity")),
+    );
+    let _subscriber = tracing::subscriber::set_default(subscriber);
+
+    let sponsor = bound_endpoint().await;
+    wait_for_direct_addrs(&sponsor).await;
+    let joiner = bound_endpoint().await;
+    wait_for_direct_addrs(&joiner).await;
+    let invitation = InvitationId::from_bytes([seed; 32]).expect("invitation id");
+    let admission = SpaceAdmissionId::from_bytes([seed + 1; 32]).expect("admission id");
+    let derived = SpaceAdmissionAuth::derive_password_equivalent(b"attempt-ref-pass", invitation);
+    let setup = SpaceAdmissionAuth::generate_server_setup();
+    let registration =
+        SpaceAdmissionAuth::register_password_equivalent(&setup, &derived).expect("registration");
+    let credentials = Arc::new(LoopbackCredentials {
+        initial: Mutex::new(Some(SponsorOpaqueMaterial::new(setup, registration))),
+        continuation: Mutex::new(None),
+    });
+    let route_bytes =
+        encode_space_admission_route(&sponsor.addr(), Some(invitation)).expect("route encoding");
+    let route = SpaceAdmissionRoute::from_bytes(route_bytes.clone()).expect("route");
+    let endpoint = Arc::new(PersistingLoopbackEndpoint {
+        credentials: Arc::clone(&credentials),
+        candidate_state: Mutex::new(None),
+        calls: AtomicUsize::new(0),
+        completed: AtomicUsize::new(0),
+        continuation_route: route_bytes,
+    });
+    let handler = Arc::new(
+        IrohSpaceAdmissionHandler::new(&sponsor, endpoint.clone(), credentials).expect("handler"),
+    );
+    let router = Router::builder((*sponsor).clone())
+        .accept(SPACE_ADMISSION_ALPN, handler)
+        .spawn();
+    let password = AdmissionEncryptedPasswordEquivalent::from_bytes(derived.as_bytes().to_vec())
+        .expect("password equivalent");
+    let mut initial = IrohSpaceAdmissionTransport::new(joiner.clone())
+        .establish_initial(
+            admission,
+            AdmissionAttemptTimeline::start(1_000).expect("valid attempt timeline"),
+            &route,
+            &password,
+        )
+        .await
+        .expect("initial OPAQUE");
+    let _ = initial.take_newly_established_continuation();
+    initial
+        .exchange(&join_request(admission, invitation))
+        .await
+        .expect("candidate reply");
+    router.shutdown().await.expect("router shutdown");
+    joiner.close().await;
+    sponsor.close().await;
+    logs.force_flush().expect("log flush");
+    (
+        admission,
+        super::exchange_progress::step_records(&log_exporter),
+    )
+}
+
+#[tokio::test]
+async fn joiner_and_sponsor_step_records_share_one_ref_per_attempt() {
+    use uc_observability_contract::diagnostics::connectivity::AdmissionAttemptRef;
+    let mut seen = Vec::new();
+    for seed in [0x91, 0xa1] {
+        let (admission, records) = attempt_step_records(seed).await;
+        let expected = AdmissionAttemptRef::derive(admission.as_bytes()).to_string();
+        let sides = |side: &str| {
+            records
+                .iter()
+                .filter(|record| record["uc.role"] == side)
+                .collect::<Vec<_>>()
+        };
+        assert!(!sides("joiner").is_empty() && !sides("sponsor").is_empty());
+        for record in &records {
+            assert_eq!(record["attempt_ref"], expected, "{record}");
+        }
+        assert!(
+            !serde_json::to_string(&records)
+                .unwrap()
+                .contains(&hex::encode(admission.as_bytes())),
+            "the raw admission id is never recorded"
+        );
+        seen.push(expected);
+    }
+    assert_ne!(seen[0], seen[1], "refs differ across attempts");
+}

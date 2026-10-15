@@ -230,6 +230,8 @@ macro_rules! __log_field_catalog {
 __log_field_catalog! {
     // Identifier
     attempt_id: Identifier(random),
+    // 准入尝试的关联引用：对随机 admission_id 做带域名的单向派生（见 `AdmissionAttemptRef`），换一次尝试即变。
+    attempt_ref: Identifier(random),
     blob_id: Identifier(random),
     entry_id: Identifier(random),
     entry_id_str: Identifier(random),
@@ -243,6 +245,8 @@ __log_field_catalog! {
     tag_id: Identifier(random),
     transfer_id: Identifier(random),
     // Literal
+    // 入站连接来源只记录 ip / relay / other 三类，不含地址值。
+    addr_kind: Literal,
     cause: Literal,
     context: Literal,
     dependency: Literal,

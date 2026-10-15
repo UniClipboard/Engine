@@ -1,6 +1,6 @@
 //! 认证完成的本地详情：复用一次标准完成事件，来源详情不进入远程属性。
 use super::super::{complete_operation, ObservationContext, OperationCompletion};
-use super::record::{dial_reason, DialFailure};
+use super::record::DialFailure;
 use super::AdmissionExchangeFailureDetail;
 use super::ClipboardReceiveFailure;
 use std::sync::atomic::AtomicBool;
@@ -244,9 +244,9 @@ impl LocalCompletionDetail {
     pub fn local_fields(self) -> (&'static str, &'static str) {
         match self {
             Self::AdmissionExchange(detail) => detail.local_fields(),
-            Self::ClipboardReceive(failure) => failure.local_fields(),
+            Self::ClipboardReceive(failure) => failure.wire(),
             Self::Authentication(failure) => failure.local_fields(),
-            Self::AdmissionConnection(reason) => ("connect", dial_reason(reason)),
+            Self::AdmissionConnection(reason) => ("connect", reason.wire()),
             Self::AdmissionResponse(failure) => failure.local_fields(),
             Self::GroupUpdate(detail) => (detail.phase.as_str(), detail.reason.as_str()),
             Self::MembershipHistory(detail) => (detail.phase.as_str(), detail.reason.as_str()),

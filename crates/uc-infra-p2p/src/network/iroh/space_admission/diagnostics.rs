@@ -160,6 +160,26 @@ pub(super) fn response_failure(
     }
 }
 
+/// 步骤记录里的失败原因（粗分类）；具体类别在完成记录的本地详情里。
+pub(super) fn response_step_failure(failure: AdmissionResponseFailure) -> AdmissionExchangeFailure {
+    match failure {
+        AdmissionResponseFailure::ResponseTimeout => AdmissionExchangeFailure::TimedOut,
+        AdmissionResponseFailure::StreamReset | AdmissionResponseFailure::ConnectionLost => {
+            AdmissionExchangeFailure::ConnectionClosed
+        }
+        AdmissionResponseFailure::Decode => AdmissionExchangeFailure::InvalidMessage,
+        AdmissionResponseFailure::ApplicationClosed(
+            ApplicationCloseClass::AuthenticationRejected,
+        ) => AdmissionExchangeFailure::AuthenticationRejected,
+        AdmissionResponseFailure::ApplicationClosed(ApplicationCloseClass::PeerUpgradeRequired) => {
+            AdmissionExchangeFailure::PeerUpgradeRequired
+        }
+        AdmissionResponseFailure::ApplicationClosed(_) => {
+            AdmissionExchangeFailure::ConnectionClosed
+        }
+    }
+}
+
 fn close_class(code: u64) -> ApplicationCloseClass {
     match code {
         code if code == u64::from(CLOSE_SESSION_UNAVAILABLE) => {
