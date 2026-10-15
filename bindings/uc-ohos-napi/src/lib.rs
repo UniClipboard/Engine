@@ -5,8 +5,10 @@
 
 mod host;
 mod local_diagnostics;
+mod network_log;
 mod observability;
 pub use local_diagnostics::*;
+pub use network_log::*;
 mod runtime;
 
 use napi::bindgen_prelude::{Buffer, External};

@@ -551,6 +551,21 @@ metadata 定位并打包维护库提供的 Java 组件，同时附带消费者�
 任何输出都不得包含剪贴板内容、密码、密钥、完整令牌、邀请、设备名、地址、文件名、路径、profile/Space/member/device/entry/
 transfer 原始 ID、摘要、原始错误正文或可恢复派生值。
 
+### 第三方网络库独立日志
+
+第三方网络库（当前启用 iroh 1.3.0、noq-proto 1.3.0 的结构化事件；quinn 不在当前特性路径上，未覆盖）的诊断记录走独立的 network 日志层，与业务、模块和宿主日志互不共享 schema、过滤器、目录、队列、writer、预算和计数。进程仍只有一个全局 subscriber。
+
+- **宿主登记**：宿主在 `install_process_observability` 之前调用 `configure_network_log`（UniFFI）/ `configureNetworkLog`（N-API），显式给出进程角色与容量预算（单条、队列、单文件、单次运行、根目录、保留期）。Engine 不提供默认预算；未登记则整条链路不存在，查询返回 `NotConfigured`，不伪装成零事件。安装之后再登记会被拒绝。
+- **输出边界**：只输出固定事件名、枚举、计数、布尔和单次运行内随机的 `peer_ref`/`conn_ref`（有界映射，不可反推）。ALPN 只在位于 `known_network_alpns()` 之内时输出，否则记为 `unrecognized`。地址、端点标识、文件名、路径、令牌一律不进入文件。规则绑定精确版本目录（`iroh-1.3.0`、`noq-proto-1.3.0`）；库升级后未经评审的 WARN/ERROR 调用点只输出 `unreviewed_callsite` 和库内 `file:line`。
+- **业务隔离**：建链调用经 `within_network_scope` 驱动（`uc.network` 作用域，显式无 parent）。库内 spawn 的 driver 因此捕获网络作用域而不是调用方的业务 span，不延长业务 span，业务调用树里没有网络库节点。进程没有安装独立日志时，作用域退回完全静默的 dispatch。宿主日志层排除 `uc.network` 目标和网络库来源，第三方原始日志不会进入宿主或远程出口。
+- **文件布局**：`<logs>/network/<role>/<run_id>/`，含 `run.json`（schema、run_id、角色、pid、OS/架构、启动时间、Engine 来源、规则版本、预算）、`lease.lock`（活动写入者租约）和 `network.<YYYYMMDD>.<seq>.jsonl` 分段。分段超限时先淘汰本次运行最旧的分段；根目录超限或过期时，只在 `.cleanup.lock` 下回收租约可获取（没有活动写入者）的旧运行目录。
+- **详细模式**：`start_network_capture` 开启当前进程的限时窗口（1–900 秒），重复开启不延长，窗口不跨重启，过期惰性生效。当前不包含 raw/qlog/keylog 采集；是否采集、预算数值、是否与业务详细采集联动属于待用户确认的产品决定，Engine 不预设。
+- **导出**：`prepare_network_log_export` 有界刷新本进程并返回运行目录与文件的大小和 SHA-256。不代表扩展或其他进程已刷新，也不替宿主决定分享渠道。
+- **计数**：accepted、written、policy_filtered、rate_limited、oversized、queue_dropped、closed_dropped、write_failed、rotated_out_files、path_recovered、unreviewed_callsites。没有日志不等于没有收到数据包，判断须结合这些计数。
+- **关闭**：network 关闭与业务关闭预算分离（detached），不占用业务的 shutdown 时限。
+
+已知缺口：通过 `log` crate 发出的第三方事件（如 noq-udp）不匹配 target 过滤；编译期级别裁剪未验证；iOS、Android、Windows 平台未实机运行；宿主侧消费由对应产品线接入。
+
 ### 构建来源
 
 本地记录的 `source_commit`/`source_state` 与诊断状态的 `source_commit` 描述产物实际编译的 Engine 源码，

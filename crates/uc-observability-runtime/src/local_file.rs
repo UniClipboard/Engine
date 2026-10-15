@@ -78,20 +78,95 @@ pub(crate) struct BoundedDailyWriter {
     owner: BoundedDailyMakeWriter,
 }
 
+/// 文件线程内的落盘策略。Engine 日文件与独立网络日志各实现一份，队列、封口、刷新与恢复共用同一套机制。
+///
+/// `source` 是调用方定义的来源序号，队列只原样透传给计数器与策略。
+pub(crate) trait RecordStore: Send + 'static {
+    /// 线程启动后立即调用一次；失败按写入失败处理并进入退避重试，后续写入或刷新会再次尝试。
+    fn prepare(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn store_record(&mut self, bytes: &[u8], source: usize) -> io::Result<()>;
+    fn settle(&mut self) -> io::Result<()>;
+}
+
+/// 队列侧的按来源计数；写入策略自己的落盘计数不经过这里。
+pub(crate) trait RecordCounters: Send + Sync + 'static {
+    fn accepted(&self, source: usize);
+    fn queue_dropped(&self, source: usize);
+    /// 队列已封口后到达的记录；没有单独统计的计数器把它并入队列丢弃。
+    fn closed_dropped(&self, source: usize) {
+        self.queue_dropped(source);
+    }
+    fn write_failed(&self, source: usize);
+}
+
+/// 文件线程在可用性变化时的通知；Engine 日文件写固定健康记录，网络日志只更新自己的状态。
+#[derive(Clone, Copy)]
+pub(crate) struct HealthHooks {
+    pub(crate) failed: fn(&'static str),
+    pub(crate) recovered: fn(),
+}
+
+impl HealthHooks {
+    pub(crate) const ENGINE: Self = Self {
+        failed: record_local_file_failed,
+        recovered: record_local_file_recovered,
+    };
+}
+
+impl RecordCounters for FileStatistics {
+    fn accepted(&self, source: usize) {
+        increment(&self.source_at(source).accepted);
+    }
+
+    fn queue_dropped(&self, source: usize) {
+        increment(&self.source_at(source).queue_dropped);
+    }
+
+    fn write_failed(&self, source: usize) {
+        increment(&self.source_at(source).write_failed);
+    }
+}
+
+impl RecordStore for BoundedDailyMakeWriter {
+    fn store_record(&mut self, bytes: &[u8], source: usize) -> io::Result<()> {
+        BoundedDailyMakeWriter::write_record(
+            self,
+            bytes,
+            LocalDiagnosticSource::ALL
+                .get(source)
+                .copied()
+                .unwrap_or(LocalDiagnosticSource::Runtime),
+        )
+    }
+
+    fn settle(&mut self) -> io::Result<()> {
+        Write::flush(self)
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct AsyncFileWriter {
     sender: mpsc::SyncSender<FileMessage>,
     dropped_records: Arc<AtomicU64>,
     closed: Arc<AtomicBool>,
     submission: Arc<Mutex<()>>,
-    statistics: Arc<FileStatistics>,
+    counters: Arc<dyn RecordCounters>,
 }
 
-pub(crate) struct LocalFileRuntime {
+/// 一个独立的有界文件队列：写入句柄、工作线程与可用性状态。
+pub(crate) struct FileQueue {
     writer: AsyncFileWriter,
     worker: Arc<LocalFileWorker>,
     dropped_records: Arc<AtomicU64>,
     unavailable: Arc<AtomicBool>,
+}
+
+pub(crate) struct LocalFileRuntime {
+    queue: FileQueue,
+    statistics: Arc<FileStatistics>,
 }
 
 struct LocalFileWorker {
@@ -130,7 +205,7 @@ impl Default for FileShutdownCoordinator {
 }
 
 enum FileMessage {
-    Line(Vec<u8>, LocalDiagnosticSource),
+    Line(Vec<u8>, usize),
     Flush(mpsc::Sender<bool>),
     Shutdown(mpsc::Sender<bool>),
 }
@@ -149,7 +224,77 @@ impl LocalFileRuntime {
         let (writer, dropped_records) =
             BoundedDailyMakeWriter::new_with_limits(directory, retention_days, max_bytes)?;
         let unavailable = Arc::clone(&writer.unavailable);
+        let statistics = Arc::clone(&writer.statistics);
         let (writer, worker) = non_blocking_file_writer(writer, Arc::clone(&dropped_records))?;
+        Ok(Self {
+            queue: FileQueue {
+                writer,
+                worker,
+                dropped_records,
+                unavailable,
+            },
+            statistics,
+        })
+    }
+
+    pub(crate) fn record_rejection(&self) {
+        self.queue.record_rejection();
+    }
+
+    pub(crate) fn statistics(&self) -> Vec<FileSourceCounts> {
+        self.statistics.snapshot()
+    }
+
+    pub(crate) fn writer(&self) -> AsyncFileWriter {
+        self.queue.writer()
+    }
+
+    pub(crate) fn dropped_records(&self) -> u64 {
+        self.queue.dropped_records()
+    }
+
+    /// 最近一次写入或刷新失败且尚未恢复。
+    pub(crate) fn unavailable(&self) -> bool {
+        self.queue.unavailable()
+    }
+
+    pub(crate) fn flush(&self, deadline: Duration) -> bool {
+        self.queue.flush(deadline)
+    }
+
+    pub(crate) fn flush_result(&self, deadline: Duration) -> SignalResult {
+        self.queue.flush_result(deadline)
+    }
+
+    pub(crate) fn shutdown(&self, deadline: Duration) -> bool {
+        self.queue.shutdown(deadline)
+    }
+
+    pub(crate) fn shutdown_cleanup_incomplete(&self) -> bool {
+        self.queue.shutdown_cleanup_incomplete()
+    }
+}
+
+impl FileQueue {
+    /// 在独立线程上启动队列；`store` 与线程只属于这一个队列。
+    pub(crate) fn spawn<S: RecordStore>(
+        store: S,
+        counters: Arc<dyn RecordCounters>,
+        hooks: HealthHooks,
+        thread_name: &str,
+        capacity: usize,
+    ) -> io::Result<Self> {
+        let dropped_records = Arc::new(AtomicU64::new(0));
+        let unavailable = Arc::new(AtomicBool::new(false));
+        let (writer, worker) = spawn_file_queue(
+            store,
+            counters,
+            Arc::clone(&dropped_records),
+            Arc::clone(&unavailable),
+            hooks,
+            thread_name,
+            capacity,
+        )?;
         Ok(Self {
             writer,
             worker,
@@ -162,10 +307,6 @@ impl LocalFileRuntime {
         increment(&self.dropped_records);
     }
 
-    pub(crate) fn statistics(&self) -> Vec<FileSourceCounts> {
-        self.writer.statistics.snapshot()
-    }
-
     pub(crate) fn writer(&self) -> AsyncFileWriter {
         self.writer.clone()
     }
@@ -174,7 +315,6 @@ impl LocalFileRuntime {
         self.dropped_records.load(Ordering::Relaxed)
     }
 
-    /// 最近一次写入或刷新失败且尚未恢复。
     pub(crate) fn unavailable(&self) -> bool {
         self.unavailable.load(Ordering::Acquire)
     }
@@ -200,21 +340,52 @@ fn non_blocking_file_writer(
     writer: BoundedDailyMakeWriter,
     dropped_records: Arc<AtomicU64>,
 ) -> io::Result<(AsyncFileWriter, Arc<LocalFileWorker>)> {
-    let statistics = Arc::clone(&writer.statistics);
-    let (sender, receiver) = mpsc::sync_channel(ASYNC_QUEUE_CAPACITY);
+    let counters: Arc<dyn RecordCounters> = Arc::clone(&writer.statistics) as _;
+    let unavailable = Arc::clone(&writer.unavailable);
+    spawn_file_queue(
+        writer,
+        counters,
+        dropped_records,
+        unavailable,
+        HealthHooks::ENGINE,
+        "uc-observability-file",
+        ASYNC_QUEUE_CAPACITY,
+    )
+}
+
+fn spawn_file_queue<S: RecordStore>(
+    store: S,
+    counters: Arc<dyn RecordCounters>,
+    dropped_records: Arc<AtomicU64>,
+    unavailable: Arc<AtomicBool>,
+    hooks: HealthHooks,
+    thread_name: &str,
+    capacity: usize,
+) -> io::Result<(AsyncFileWriter, Arc<LocalFileWorker>)> {
+    let (sender, receiver) = mpsc::sync_channel(capacity);
     let closed = Arc::new(AtomicBool::new(false));
     let submission = Arc::new(Mutex::new(()));
     let worker_dropped_records = Arc::clone(&dropped_records);
+    let worker_counters = Arc::clone(&counters);
     let thread = std::thread::Builder::new()
-        .name("uc-observability-file".to_owned())
-        .spawn(move || run_file_worker(writer, receiver, worker_dropped_records))?;
+        .name(thread_name.to_owned())
+        .spawn(move || {
+            run_file_worker(
+                store,
+                receiver,
+                worker_dropped_records,
+                worker_counters,
+                unavailable,
+                hooks,
+            )
+        })?;
     Ok((
         AsyncFileWriter {
             sender: sender.clone(),
             dropped_records,
             closed: Arc::clone(&closed),
             submission: Arc::clone(&submission),
-            statistics,
+            counters,
         },
         Arc::new(LocalFileWorker {
             sender,
@@ -228,20 +399,25 @@ fn non_blocking_file_writer(
 
 impl AsyncFileWriter {
     pub(crate) fn write_record(&self, buffer: &[u8], source: LocalDiagnosticSource) {
-        let statistics = self.statistics.source(source);
+        self.write_indexed(buffer, source as usize);
+    }
+
+    pub(crate) fn write_indexed(&self, buffer: &[u8], source: usize) {
         // 门只保护封口与入队的先后顺序，持有者只做不阻塞的 `try_send`，所以这里等待锁不会等待磁盘或网络；
         // 争用本身不得丢记录，只有队列已满或已封口才计入丢弃。
         let _submission = lock(&self.submission);
-        if self.closed.load(Ordering::Acquire)
-            || self
-                .sender
-                .try_send(FileMessage::Line(buffer.to_vec(), source))
-                .is_err()
+        if self.closed.load(Ordering::Acquire) {
+            increment(&self.dropped_records);
+            self.counters.closed_dropped(source);
+        } else if self
+            .sender
+            .try_send(FileMessage::Line(buffer.to_vec(), source))
+            .is_err()
         {
             increment(&self.dropped_records);
-            increment(&statistics.queue_dropped);
+            self.counters.queue_dropped(source);
         } else {
-            increment(&statistics.accepted);
+            self.counters.accepted(source);
         }
     }
 }
@@ -416,15 +592,17 @@ const RETRY_BACKOFF_MAX: Duration = Duration::from_secs(5);
 /// 文件线程内的恢复状态：写入或刷新失败进入失败态，任一次成功即恢复，不存在永久失败。
 struct WorkerHealth {
     unavailable: Arc<AtomicBool>,
+    hooks: HealthHooks,
     failed_since: Option<Instant>,
     retry_at: Instant,
     backoff: Duration,
 }
 
 impl WorkerHealth {
-    fn new(unavailable: Arc<AtomicBool>) -> Self {
+    fn new(unavailable: Arc<AtomicBool>, hooks: HealthHooks) -> Self {
         Self {
             unavailable,
+            hooks,
             failed_since: None,
             retry_at: Instant::now(),
             backoff: RETRY_BACKOFF_MIN,
@@ -440,7 +618,7 @@ impl WorkerHealth {
             self.failed_since = Some(Instant::now());
             self.backoff = RETRY_BACKOFF_MIN;
             self.unavailable.store(true, Ordering::Release);
-            record_local_file_failed(class);
+            (self.hooks.failed)(class);
         } else {
             self.backoff = (self.backoff * 2).min(RETRY_BACKOFF_MAX);
         }
@@ -451,7 +629,7 @@ impl WorkerHealth {
         if self.failed_since.take().is_some() {
             self.backoff = RETRY_BACKOFF_MIN;
             self.unavailable.store(false, Ordering::Release);
-            record_local_file_recovered();
+            (self.hooks.recovered)();
         }
     }
 
@@ -460,21 +638,27 @@ impl WorkerHealth {
     }
 }
 
-fn run_file_worker(
-    mut writer: BoundedDailyMakeWriter,
+fn run_file_worker<S: RecordStore>(
+    mut writer: S,
     receiver: mpsc::Receiver<FileMessage>,
     dropped_records: Arc<AtomicU64>,
+    counters: Arc<dyn RecordCounters>,
+    unavailable: Arc<AtomicBool>,
+    hooks: HealthHooks,
 ) {
-    let mut health = WorkerHealth::new(Arc::clone(&writer.unavailable));
+    let mut health = WorkerHealth::new(unavailable, hooks);
+    if writer.prepare().is_err() {
+        health.failed("open_failed");
+    }
     while let Ok(message) = receiver.recv() {
         match message {
             FileMessage::Line(bytes, source) => {
                 if health.in_backoff() {
                     increment(&dropped_records);
-                    increment(&writer.statistics.source(source).write_failed);
-                } else if writer.write_record(&bytes, source).is_err() {
+                    counters.write_failed(source);
+                } else if writer.store_record(&bytes, source).is_err() {
                     increment(&dropped_records);
-                    increment(&writer.statistics.source(source).write_failed);
+                    counters.write_failed(source);
                     health.failed("write_failed");
                 } else {
                     health.succeeded();
@@ -492,8 +676,8 @@ fn run_file_worker(
     }
 }
 
-fn settle_flush(writer: &mut BoundedDailyMakeWriter, health: &mut WorkerHealth) -> bool {
-    if writer.flush().is_ok() {
+fn settle_flush<S: RecordStore>(writer: &mut S, health: &mut WorkerHealth) -> bool {
+    if writer.settle().is_ok() {
         health.succeeded();
     } else {
         health.failed("flush_failed");
@@ -642,7 +826,7 @@ impl WriterState {
 }
 
 #[cfg(unix)]
-fn same_file(path_metadata: &std::fs::Metadata, file: &File) -> bool {
+pub(crate) fn same_file(path_metadata: &std::fs::Metadata, file: &File) -> bool {
     use std::os::unix::fs::MetadataExt;
 
     file.metadata().is_ok_and(|opened| {
@@ -651,11 +835,11 @@ fn same_file(path_metadata: &std::fs::Metadata, file: &File) -> bool {
 }
 
 #[cfg(not(unix))]
-fn same_file(path_metadata: &std::fs::Metadata, _file: &File) -> bool {
+pub(crate) fn same_file(path_metadata: &std::fs::Metadata, _file: &File) -> bool {
     path_metadata.is_file()
 }
 
-fn open_managed_file(path: &Path) -> io::Result<File> {
+pub(crate) fn open_managed_file(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.create(true).append(true);
     prevent_symlink_follow(&mut options);
@@ -798,7 +982,7 @@ fn file_name(date: NaiveDate) -> String {
     managed_log_file_name(date)
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1041,7 +1225,7 @@ mod tests {
             .sender
             .try_send(FileMessage::Line(
                 b"before-flush\n".to_vec(),
-                LocalDiagnosticSource::Runtime,
+                LocalDiagnosticSource::Runtime as usize,
             ))
             .expect("line accepted before flush");
         drop(submission);

@@ -1,6 +1,5 @@
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::{Endpoint, EndpointAddr};
-use tracing::instrument::WithSubscriber;
 use uc_observability_contract::diagnostics::connectivity::{
     ConnectionFailurePhase, ConnectionFailureReason, ConnectionObservation, ConnectionOutcome,
     ConnectionPurpose, DialFailure,
@@ -11,6 +10,7 @@ use super::SPACE_ADMISSION_ALPN;
 use uc_observability_contract::diagnostics::connectivity::{
     AdmissionExchangeSide, AdmissionNetworkPoint,
 };
+use uc_observability_contract::diagnostics::within_network_scope;
 use uc_sync_protocol::space_admission::IO_DEADLINE;
 
 #[derive(Debug, thiserror::Error)]
@@ -44,11 +44,7 @@ pub(super) async fn connect(
     );
     let attempt = observation.attempts().begin(1, IO_DEADLINE);
     // 底层连接驱动不能延长业务 span，完整调用由外层负责人结算。
-    let connection = endpoint
-        .connect(addr, SPACE_ADMISSION_ALPN)
-        .with_subscriber(tracing::Dispatch::new(
-            tracing::subscriber::NoSubscriber::default(),
-        ));
+    let connection = within_network_scope(endpoint.connect(addr, SPACE_ADMISSION_ALPN));
     let result = tokio::time::timeout(IO_DEADLINE, connection)
         .await
         .map_err(AdmissionConnectError::TimedOut)

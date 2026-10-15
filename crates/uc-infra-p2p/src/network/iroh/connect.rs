@@ -14,6 +14,7 @@ use tokio::task::JoinSet;
 use tokio::time::error::Elapsed;
 use tracing::instrument::WithSubscriber;
 use uc_observability_contract::diagnostics::connectivity::AddressInputSource;
+use uc_observability_contract::diagnostics::within_network_scope;
 
 /// Per-attempt connect timeout.
 ///
@@ -145,21 +146,20 @@ pub(super) async fn connect_with_staggered_retry_classified(
 
                 let attempt_no = idx + 1;
                 let attempt = observations.begin(attempt_no as u32, ATTEMPT_TIMEOUT);
-                let driver = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
                 let options = ConnectOptions::new().with_additional_alpns(additional_alpns);
                 let mut phase = ConnectionFailurePhase::Establish;
                 let connect = async {
-                    let connecting = endpoint
-                        .connect_with_opts(addr, alpn, options)
-                        .with_subscriber(driver.clone())
-                        .await
-                        .map_err(|error| {
-                            let outcome =
-                                super::connection_diagnostics::preparation_failure(&error);
-                            (DialAttemptError::Setup(error), outcome)
-                        })?;
+                    // 底层连接驱动捕获当前 span：在无业务 parent 的网络作用域内驱动，不延长业务 span。
+                    let connecting =
+                        within_network_scope(endpoint.connect_with_opts(addr, alpn, options))
+                            .await
+                            .map_err(|error| {
+                                let outcome =
+                                    super::connection_diagnostics::preparation_failure(&error);
+                                (DialAttemptError::Setup(error), outcome)
+                            })?;
                     phase = ConnectionFailurePhase::Handshake;
-                    connecting.with_subscriber(driver).await.map_err(|error| {
+                    within_network_scope(connecting).await.map_err(|error| {
                         let outcome = super::connection_diagnostics::handshake_failure(&error);
                         (DialAttemptError::Handshake(error), outcome)
                     })
