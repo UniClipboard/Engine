@@ -4,6 +4,7 @@
 use iroh::endpoint::WeakConnectionHandle;
 use iroh::TransportAddr;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::task::JoinHandle;
@@ -16,6 +17,8 @@ const CADENCE: Duration = Duration::from_secs(300);
 #[derive(Clone, Default)]
 pub(super) struct ConnectionCensus {
     tracked: Arc<Mutex<Vec<(WeakConnectionHandle, [u8; 32])>>>,
+    /// 登记表已满而未能登记的连接累计数；非零说明 `conn_total` 低估了实际连接数。
+    untracked: Arc<AtomicU64>,
 }
 
 /// 一次快照的计数结果。
@@ -27,6 +30,7 @@ pub(super) struct CensusSnapshot {
     pub(super) paths_max: u64,
     pub(super) paths_direct: u64,
     pub(super) paths_relay: u64,
+    pub(super) untracked: u64,
 }
 
 impl ConnectionCensus {
@@ -40,6 +44,8 @@ impl ConnectionCensus {
         }
         if tracked.len() < MAX_TRACKED {
             tracked.push((handle, peer));
+        } else {
+            self.untracked.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -60,7 +66,10 @@ impl ConnectionCensus {
             live
         };
         let mut per_peer: HashMap<[u8; 32], u64> = HashMap::new();
-        let mut snapshot = CensusSnapshot::default();
+        let mut snapshot = CensusSnapshot {
+            untracked: self.untracked.load(Ordering::Relaxed),
+            ..CensusSnapshot::default()
+        };
         for (connection, peer) in &live {
             snapshot.connections += 1;
             *per_peer.entry(*peer).or_default() += 1;
@@ -89,6 +98,7 @@ impl ConnectionCensus {
             paths_max = snapshot.paths_max,
             paths_direct = snapshot.paths_direct,
             paths_relay = snapshot.paths_relay,
+            conn_untracked = snapshot.untracked,
             "network connection census"
         );
     }
@@ -161,6 +171,24 @@ mod tests {
         client.close().await;
         server.close().await;
         assert_eq!(census.snapshot(), CensusSnapshot::default());
+    }
+
+    #[tokio::test]
+    async fn registrations_beyond_the_cap_are_counted_not_hidden() {
+        let (server, client, incoming, outgoing) = pair().await;
+        let census = ConnectionCensus::default();
+        for _ in 0..MAX_TRACKED {
+            census.register(outgoing.weak_handle(), [3; 32]);
+        }
+        census.register(incoming.weak_handle(), [3; 32]);
+        census.register(incoming.weak_handle(), [3; 32]);
+        let snapshot = census.snapshot();
+        assert_eq!(snapshot.connections, MAX_TRACKED as u64);
+        assert_eq!(snapshot.untracked, 2);
+        drop(outgoing);
+        drop(incoming);
+        client.close().await;
+        server.close().await;
     }
 
     #[tokio::test]

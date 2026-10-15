@@ -573,7 +573,7 @@ transfer 原始 ID、摘要、原始错误正文或可恢复派生值。
 - **进程资源**（`process resource census`，`uc-observability-runtime`，仅 Linux/Android，其他平台不启动、不写记录；仅配置了本地日志目录时启动）：`rss_anon_kb`、`rss_file_kb`、`rss_shmem_kb`、`vm_swap_kb`、`vm_size_kb`、`threads`、`fd_total`、`pss_anon_kb`；glibc 上另有 `heap_in_use_kb`、`heap_free_kb`、`heap_mmap_kb`（运行期用 `dlsym` 解析 `mallinfo2`，需要 glibc 2.33 及以上，musl 无此三项）。读不到的值省略，不写 0。
 - **增长告警**（`process anonymous memory grew beyond the alert threshold`，WARN）：同一个线程在 `rss_anon_kb` 相对最近 60 分钟窗口内的最小值增长不小于 512 MiB 时写一条，之后 60 分钟内不再写；附 `growth_kb`、`window_secs` 和当前进程资源值。窗口样本定长（64 个），所以内存占用不随运行时间增长。阈值与窗口是代码里的起始值：按报告的约 740 MB/h 速率约 1 小时触发，健康 daemon 的约 84 MB 不会触发；更慢的泄漏只能从周期记录的趋势里看出，告警不保证覆盖。
 - **运行期**（`engine runtime census`，`uc-engine`，由受管后台任务登记，随 Engine 关闭停止）：`tokio_workers`、`tokio_alive_tasks`、`tokio_queue_depth`（调度器全局队列深度）、`registered_tasks`（受管任务数）。
-- **网络连接**（`network connection census`，`uc-infra-p2p`，由 `IrohNode` 持有，随节点关闭停止）：`conn_total`、`conn_per_peer_max`、`paths_total`、`paths_max`、`paths_direct`、`paths_relay`。登记表只保存弱连接句柄（不延长连接寿命），容量 4096，与连接观测记录是否开启无关；对端身份只在一次快照内部分组，不进入输出。
+- **网络连接**（`network connection census`，`uc-infra-p2p`，由 `IrohNode` 持有，随节点关闭停止）：`conn_total`、`conn_untracked`（登记表满后未能登记的累计数，非零表示 `conn_total` 低估）、`conn_per_peer_max`、`paths_total`、`paths_max`、`paths_direct`、`paths_relay`。登记表只保存弱连接句柄（不延长连接寿命），容量 4096，与连接观测记录是否开启无关；对端身份只在一次快照内部分组，不进入输出。
 - **网络库规则**：`path.open_deferred`（iroh `remote_state.rs` 的 `scheduling open_path` TRACE 调用点，详细档，无字段，限速）。它的出现频率直接说明连接是否进入了 CID/路径号耗尽的重试分支（#214 的 H1）。规则按固定提交的行号绑定，换提交必须重新核对（见 ADR-034）。
 
 验收限制：这些记录只让问题可被观察，不证明 #214 已修复；固定 iroh 提交能否消除增长是未验证的。记录读取通过 Linux（Fedora aarch64）与 macOS 的单元与安装测试；Linux x86_64、musl、Windows 和移动端只做编译或未执行。

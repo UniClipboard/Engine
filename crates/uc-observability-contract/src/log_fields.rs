@@ -371,6 +371,7 @@ __log_field_catalog! {
     compressed_size: Scalar,
     conn_per_peer_max: Scalar,
     conn_total: Scalar,
+    conn_untracked: Scalar,
     connect_ms: Scalar,
     consecutive_failures: Scalar,
     converted_size: Scalar,
