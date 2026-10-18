@@ -17,6 +17,7 @@ pub use credential::{
 pub use route::decode_space_admission_continuation_endpoint;
 pub(crate) use route::decode_space_admission_route;
 pub use route::encode_space_admission_route;
+pub(super) use server::observe_space_admission_accepting;
 pub use server::IrohSpaceAdmissionHandler;
 
 pub const SPACE_ADMISSION_ALPN: &[u8] = b"/uniclipboard/space-admission/1";
