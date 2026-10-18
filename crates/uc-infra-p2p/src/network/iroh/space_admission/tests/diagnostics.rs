@@ -926,16 +926,20 @@ async fn joiner_distinguishes_why_the_opaque_response_never_arrived() {
                 .collect::<Vec<_>>(),
             "{behavior:?}"
         );
-        // 只有读响应超时有独立结果；其余失败（含真实的认证关闭）仍是认证被拒绝，busy 是延期。
-        let busy = matches!(behavior, ResponseBehavior::Close(code) if code == CLOSE_BUSY);
+        // A stream reset is transport failure, not evidence that a password was rejected.
         assert!(
-            if busy {
-                matches!(error, SpaceAdmissionTransportError::Deferred { .. })
-            } else {
-                matches!(
+            match behavior {
+                ResponseBehavior::ResetStream => matches!(
+                    &error,
+                    SpaceAdmissionTransportError::Unavailable { source: Some(_) }
+                ),
+                ResponseBehavior::Close(code) if code == CLOSE_BUSY => {
+                    matches!(error, SpaceAdmissionTransportError::Deferred { .. })
+                }
+                _ => matches!(
                     error,
                     SpaceAdmissionTransportError::AuthenticationRejected { .. }
-                )
+                ),
             },
             "{behavior:?}: {error:?}"
         );
