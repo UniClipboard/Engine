@@ -18,6 +18,14 @@ Relay 尚未就绪时使用当前已有地址，显式 LAN-only 不需等待 Rel
 重放与重启继续使用原协议材料；之后的稳定地址补齐仍由已确认成员历史更新负责。
 这不保证在 Relay 后续变化、真实 NAT 或平台挂起条件下永远可达。
 
+## Initial response interruption and recovery
+
+Before `OpaqueResponse`, a response-stream reset or connection loss is a transport failure. It is not evidence that the password was rejected. The P2P adapter returns `SpaceAdmissionTransportError::Unavailable` and preserves the original wire error. Application owns the persisted retry schedule and the existing five-minute admission deadline. A retry does not extend that deadline.
+
+Recognized application close codes take precedence over the transport classification. Explicit authentication rejection, session-unavailable and busy deferral, peer-upgrade results, and the response timeout retain their existing meanings. This rule does not change the existing fallback for malformed responses or unrecognized application close codes.
+
+The production session dispatcher and the directly registered admission handler use the same handshake observation function. It records the sponsor-side handshake result without selecting a session generation before the handshake. Session selection and leases remain in `accept`. A client-side connection result alone does not prove that the sponsor completed its handshake or processed the admission request.
+
 ## 先分清三个完成边界
 
 ```mermaid
