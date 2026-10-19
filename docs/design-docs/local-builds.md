@@ -42,6 +42,13 @@ S3 端点；访问密钥仅限该桶。缺少任一项时入口报错，不会�
 不能用测试构建的种子代替常用 check 的种子。PR 也运行独立只读消费者，读取既有主线种子；
 这不证明本次 PR 的代码已经由主线发布，真实读写发布仍须单独验收。
 
+R2 验收 job 单独设置 `MBX_GC_MAX_SIZE=40GiB`，避免完整 workspace 消费者耗尽默认 20 GiB
+下载预算；统一入口的默认值仍为 20 GiB。MBX 1.24.0 将此值同时用于每次构建的下载预算和
+本地动作缓存 GC，不能当作整个 job 的磁盘上限：producer/consumer 的动作缓存与 target
+分别保留。每次构建前后（包括失败退出）记录两个位置的文件系统余量与四个目录的占用，
+以固定标签和字节/KiB 计数保存到 R2 工件；同一文件系统的容量不能相加。快照不是峰值测量，
+不保证任意构建都有足够磁盘，也不将 metadata 警告归因于下载预算。
+
 R2 诊断使用 `just mbx --r2 --mbx doctor --json`；预取使用
 `just mbx --r2 --mbx prefetch check --workspace --all-targets --locked`。空 manifest 不等于连接故障，
 但诊断成功也不等于编译命中。用 `MBX_STATS_REPORT` 保存原生统计，并在独立空 target/本地动作缓存
