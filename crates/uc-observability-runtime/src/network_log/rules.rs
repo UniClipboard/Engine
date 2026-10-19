@@ -521,7 +521,7 @@ pub(crate) fn callsite_path(file: Option<&str>) -> CallsitePath<'_> {
         return pinned;
     }
     let mut rest = file;
-    while let Some(index) = rest.find('/') {
+    while let Some(index) = rest.find(is_separator) {
         let (segment, tail) = rest.split_at(index);
         if looks_like_versioned_dir(segment) {
             return CallsitePath {
@@ -537,11 +537,25 @@ pub(crate) fn callsite_path(file: Option<&str>) -> CallsitePath<'_> {
     }
 }
 
+/// `file!()` 在 Windows 构建里使用反斜杠，Unix 构建使用正斜杠；两者都是路径分隔符。
+fn is_separator(character: char) -> bool {
+    matches!(character, '/' | '\\')
+}
+
+/// 库内路径与审查登记的路径是否相同，忽略分隔符写法。
+fn same_path(actual: &str, reviewed: &str) -> bool {
+    actual.len() == reviewed.len()
+        && actual
+            .chars()
+            .zip(reviewed.chars())
+            .all(|(a, b)| a == b || (is_separator(a) && is_separator(b)))
+}
+
 /// cargo 的 git 签出路径 `…/iroh-<16 位十六进制>/<提交前 7 位>/iroh/src/…`，且提交在允许列表内时，
 /// 按逻辑版本 `IROH` 匹配；其他 git 来源、其他提交或其他子包都不匹配。
 fn pinned_iroh_checkout(file: &str) -> Option<CallsitePath<'_>> {
     let mut rest = file;
-    while let Some(index) = rest.find('/') {
+    while let Some(index) = rest.find(is_separator) {
         let (segment, tail) = rest.split_at(index);
         rest = &tail[1..];
         let Some(hash) = segment.strip_prefix("iroh-") else {
@@ -550,7 +564,7 @@ fn pinned_iroh_checkout(file: &str) -> Option<CallsitePath<'_>> {
         if hash.len() != 16 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             continue;
         }
-        let mut parts = rest.splitn(3, '/');
+        let mut parts = rest.splitn(3, is_separator);
         let (rev, package, in_crate) = (parts.next()?, parts.next()?, parts.next()?);
         return (PINNED_IROH_REVS.contains(&rev) && package == "iroh").then_some(CallsitePath {
             version_dir: Some(IROH),
@@ -589,7 +603,8 @@ pub(crate) fn rule_for(metadata: &tracing::Metadata<'_>) -> Option<&'static Rule
             && match rule.site {
                 Site::Target(target) => metadata.target() == target,
                 Site::Line { file, line } => {
-                    path.in_crate == Some(file) && metadata.line() == Some(line)
+                    path.in_crate.is_some_and(|actual| same_path(actual, file))
+                        && metadata.line() == Some(line)
                 }
             }
     })
