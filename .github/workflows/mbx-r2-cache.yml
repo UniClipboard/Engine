@@ -32,6 +32,9 @@ jobs:
       name: ${{ github.event_name == 'push' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
       deployment: false
     timeout-minutes: 45
+    env:
+      # MBX 1.24.0 同时用于单次构建下载预算和本地动作缓存 GC；不是整个 job 的磁盘上限。
+      MBX_GC_MAX_SIZE: 40GiB
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -95,6 +98,8 @@ jobs:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/mbx-r2-producer
           MBX_STATS_REPORT: ${{ runner.temp }}/mbx-r2-evidence/producer.json
         run: |
+          python3 scripts/build-cache/record-r2-disk.py before
+          trap 'python3 scripts/build-cache/record-r2-disk.py after' EXIT
           bash scripts/build-cache/mbx.sh --r2 --mbx doctor --json > "$RUNNER_TEMP/mbx-r2-evidence/doctor.json"
           python3 scripts/build-cache/verify-r2-build.py -- bash scripts/build-cache/mbx.sh --r2 test -p uc-engine --test config_migration_round_trip_e2e --locked
 
@@ -110,6 +115,8 @@ jobs:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/mbx-r2-producer
           MBX_STATS_REPORT: ${{ runner.temp }}/mbx-r2-evidence/producer-check.json
         run: |
+          python3 scripts/build-cache/record-r2-disk.py before
+          trap 'python3 scripts/build-cache/record-r2-disk.py after' EXIT
           python3 scripts/build-cache/verify-r2-build.py -- bash scripts/build-cache/mbx.sh --r2 check --workspace --all-targets --locked
 
       - name: Verify independent workspace check consumer
@@ -122,6 +129,8 @@ jobs:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/mbx-r2-consumer
           MBX_STATS_REPORT: ${{ runner.temp }}/mbx-r2-evidence/consumer-check.json
         run: |
+          python3 scripts/build-cache/record-r2-disk.py before
+          trap 'python3 scripts/build-cache/record-r2-disk.py after' EXIT
           python3 scripts/build-cache/verify-r2-build.py --consumer -- bash scripts/build-cache/mbx.sh --r2 check --workspace --all-targets --locked
 
       # 使用独立 target/动作缓存；PR 只读既有种子，不能声称验证了本次主线发布。
@@ -135,6 +144,8 @@ jobs:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/mbx-r2-consumer
           MBX_STATS_REPORT: ${{ runner.temp }}/mbx-r2-evidence/consumer.json
         run: |
+          python3 scripts/build-cache/record-r2-disk.py before
+          trap 'python3 scripts/build-cache/record-r2-disk.py after' EXIT
           python3 scripts/build-cache/verify-r2-build.py --consumer -- bash scripts/build-cache/mbx.sh --r2 test -p uc-engine --test config_migration_round_trip_e2e --locked
 
       - name: Record macOS resource outcome
