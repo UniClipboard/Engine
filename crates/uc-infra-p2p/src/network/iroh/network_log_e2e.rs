@@ -452,6 +452,27 @@ async fn run_client(scenario: &str) {
             tokio::time::sleep(Duration::from_millis(200)).await;
             runtime.stage("recovered");
         }
+        "rotation" => {
+            // 连续建立真实连接，直到 writer 淘汰分段。并发突发可能先耗尽调用点限速，
+            // 此时写入量不足以填满单次运行预算。
+            let handle = runtime.handle.as_ref().expect("runtime");
+            for _ in 0..128 {
+                dial_once(&endpoint, &addr).await;
+                handle
+                    .prepare_network_log_export(Duration::from_secs(2))
+                    .expect("flush rotation input");
+                if handle
+                    .query_network_log_status()
+                    .expect("rotation status")
+                    .counters
+                    .rotated_out_files
+                    > 0
+                {
+                    break;
+                }
+            }
+            runtime.stage("after_rotation");
+        }
         "burst" => {
             let dials = (0..30).map(|_| dial_once(&endpoint, &addr));
             futures_util::future::join_all(dials).await;
@@ -1132,7 +1153,7 @@ fn small_run_budget_rotates_out_the_oldest_segments_only() {
     let out = root.join("budget");
     run_scenario(&Run {
         out: &out,
-        scenario: "burst",
+        scenario: "rotation",
         mode: "runtime",
         network: true,
         extra_env: &[
@@ -1141,7 +1162,7 @@ fn small_run_budget_rotates_out_the_oldest_segments_only() {
         ],
     });
     let report = client_report(&out, "client");
-    let burst = stage(&report, "after_burst");
+    let rotation = stage(&report, "after_rotation");
     let run = network_run_directory(&out, "client");
     let mut sizes = Vec::new();
     for entry in std::fs::read_dir(&run).expect("run dir").flatten() {
@@ -1153,9 +1174,9 @@ fn small_run_budget_rotates_out_the_oldest_segments_only() {
     assert!(sizes.iter().all(|size| *size <= 8192), "{sizes:?}");
     assert!(sizes.iter().sum::<u64>() <= 16384, "{sizes:?}");
     assert!(
-        counter(burst, "rotated_out_files") > 0,
+        counter(rotation, "rotated_out_files") > 0,
         "{:?}",
-        burst["status"]["counters"]
+        rotation["status"]["counters"]
     );
     // 每个保留下来的分段都是完整的行，序号在保留的尾部里连续递增。
     let records = network_records(&run);

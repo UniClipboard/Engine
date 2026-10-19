@@ -133,7 +133,7 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
                 match read_typed(&mut receive, FrameKind::OpaqueResponse, AUTH_FRAME_LIMIT).await {
                     Ok(response) => response,
                     Err(error) => {
-                        // 只有读响应超时才是 sponsor 无应答；其余失败的公开结果保持原样。
+                        // Classify transport interruption separately from explicit authentication rejection.
                         let close_code = application_close_code(&connection).await;
                         let failure = response_failure(&error, close_code);
                         read_failure = Some(failure);
@@ -145,6 +145,13 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
                         );
                         if failure == AdmissionResponseFailure::ResponseTimeout {
                             return Err(SpaceAdmissionTransportError::SponsorUnresponsive);
+                        }
+                        if matches!(
+                            failure,
+                            AdmissionResponseFailure::StreamReset
+                                | AdmissionResponseFailure::ConnectionLost
+                        ) {
+                            return Err(SpaceAdmissionTransportError::unavailable_from(error));
                         }
                         return Err(close_code
                             .and_then(map_initial_hello_close_code)

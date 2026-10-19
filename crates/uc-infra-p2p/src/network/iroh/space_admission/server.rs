@@ -268,30 +268,38 @@ fn handshake_failure(error: &ConnectingError) -> (&'static str, &'static str) {
     }
 }
 
+/// Observe admission handshakes at either supported router registration path.
+// rust-style: allow-qualified-path -- Restricted visibility requires an ancestor module path.
+pub(in crate::network::iroh) async fn observe_space_admission_accepting(
+    accepting: Accepting,
+) -> Result<Connection, AcceptError> {
+    let started = Instant::now();
+    match accepting.await {
+        Ok(connection) => {
+            uc_info!(
+                outcome = "connected",
+                elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                "connection.accepting.finished for space admission"
+            );
+            Ok(connection)
+        }
+        Err(error) => {
+            let (outcome, error_class) = handshake_failure(&error);
+            uc_info!(
+                outcome = outcome,
+                error_class = error_class,
+                elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                "connection.accepting.finished for space admission"
+            );
+            Err(error.into())
+        }
+    }
+}
+
 impl ProtocolHandler for IrohSpaceAdmissionHandler {
     /// 记录 QUIC 握手在 sponsor 侧的结果；握手失败时不会进入 `accept`，此前没有任何本地痕迹。
     async fn on_accepting(&self, accepting: Accepting) -> Result<Connection, AcceptError> {
-        let started = Instant::now();
-        match accepting.await {
-            Ok(connection) => {
-                uc_info!(
-                    outcome = "connected",
-                    elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                    "connection.accepting.finished for space admission"
-                );
-                Ok(connection)
-            }
-            Err(error) => {
-                let (outcome, error_class) = handshake_failure(&error);
-                uc_info!(
-                    outcome = outcome,
-                    error_class = error_class,
-                    elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                    "connection.accepting.finished for space admission"
-                );
-                Err(error.into())
-            }
-        }
+        observe_space_admission_accepting(accepting).await
     }
 
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {

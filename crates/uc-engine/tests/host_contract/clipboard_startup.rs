@@ -507,14 +507,8 @@ fn verify_archive(bytes: &[u8]) {
     let mut records = Vec::new();
     for index in 0..archive.len() {
         let mut file = archive.by_index(index).unwrap();
-        if file
-            .name()
-            .rsplit('/')
-            .next()
-            .unwrap()
-            .starts_with("engine.")
-            && file.name().ends_with(".jsonl")
-        {
+        let name = file.name().expect("valid archive entry name");
+        if name.rsplit('/').next().unwrap().starts_with("engine.") && name.ends_with(".jsonl") {
             let mut log = String::new();
             file.read_to_string(&mut log).unwrap();
             assert!(!log.contains(PRIVATE_SENTINEL));

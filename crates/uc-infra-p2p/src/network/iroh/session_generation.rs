@@ -4,14 +4,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use iroh::endpoint::{
-    AfterHandshakeOutcome, BeforeConnectOutcome, Connection, EndpointHooks, WeakConnectionHandle,
+    Accepting, AfterHandshakeOutcome, BeforeConnectOutcome, Connection, EndpointHooks,
+    WeakConnectionHandle,
 };
 use iroh::protocol::{AcceptError, DynProtocolHandler, ProtocolHandler};
 use tokio::sync::{watch, Notify};
 use uc_observability_contract::{uc_info, uc_warn, wire_enum};
 
 use super::peer_reachability_adapter::{LEGACY_PEER_REACHABILITY_ALPN, PEER_REACHABILITY_ALPN};
-use super::space_admission::SPACE_ADMISSION_ALPN;
+use super::space_admission::{observe_space_admission_accepting, SPACE_ADMISSION_ALPN};
 use super::transfer_progress_adapter::TRANSFER_PROGRESS_ALPN;
 
 #[derive(Debug)]
@@ -511,6 +512,14 @@ impl SessionProtocolHandlersBuilder {
 }
 
 impl ProtocolHandler for SessionProtocolDispatcher {
+    async fn on_accepting(&self, accepting: Accepting) -> Result<Connection, AcceptError> {
+        if self.alpn == SPACE_ADMISSION_ALPN {
+            observe_space_admission_accepting(accepting).await
+        } else {
+            accepting.await.map_err(Into::into)
+        }
+    }
+
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         let lease = self
             .registry

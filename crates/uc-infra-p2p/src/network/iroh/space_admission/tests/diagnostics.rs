@@ -475,10 +475,22 @@ async fn a_wrong_passphrase_leaves_one_info_rejection_record() {
             &password,
         )
         .await;
-    assert!(result.is_err(), "a wrong passphrase must not authenticate");
+    assert!(matches!(
+        result,
+        Err(SpaceAdmissionTransportError::AuthenticationRejected { .. })
+    ));
+    // Router 关闭会取消活动处理任务。先等待 sponsor 观察到流已丢弃并记录拒绝，
+    // 再关闭 Router。
+    let rejection = tokio::time::timeout(Duration::from_secs(2), async {
+        while !logs.output().contains("Space admission exchange rejected") {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
     router.shutdown().await.expect("router shutdown");
     joiner.close().await;
     sponsor.close().await;
+    rejection.expect("sponsor records rejection before shutdown");
     assert_one_info_record(&logs, "Space admission exchange rejected");
     let expected =
         uc_observability_contract::diagnostics::connectivity::AdmissionAttemptRef::derive(
@@ -926,16 +938,20 @@ async fn joiner_distinguishes_why_the_opaque_response_never_arrived() {
                 .collect::<Vec<_>>(),
             "{behavior:?}"
         );
-        // 只有读响应超时有独立结果；其余失败（含真实的认证关闭）仍是认证被拒绝，busy 是延期。
-        let busy = matches!(behavior, ResponseBehavior::Close(code) if code == CLOSE_BUSY);
+        // A stream reset is transport failure, not evidence that a password was rejected.
         assert!(
-            if busy {
-                matches!(error, SpaceAdmissionTransportError::Deferred { .. })
-            } else {
-                matches!(
+            match behavior {
+                ResponseBehavior::ResetStream => matches!(
+                    &error,
+                    SpaceAdmissionTransportError::Unavailable { source: Some(_) }
+                ),
+                ResponseBehavior::Close(code) if code == CLOSE_BUSY => {
+                    matches!(error, SpaceAdmissionTransportError::Deferred { .. })
+                }
+                _ => matches!(
                     error,
                     SpaceAdmissionTransportError::AuthenticationRejected { .. }
-                )
+                ),
             },
             "{behavior:?}: {error:?}"
         );
