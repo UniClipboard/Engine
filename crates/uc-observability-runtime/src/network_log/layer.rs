@@ -302,7 +302,7 @@ impl Shared {
         }
         let path = callsite_path(metadata.file());
         let callsite = match (path.in_crate, metadata.line()) {
-            (Some(file), Some(line)) => Some(format!("{file}:{line}")),
+            (Some(file), Some(line)) => Some(format!("{}:{line}", file.replace('\\', "/"))),
             _ => None,
         };
         self.emit(
