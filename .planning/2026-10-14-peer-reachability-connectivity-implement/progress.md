@@ -112,3 +112,12 @@
 - 以 807e13ea 合入 CI 已验证的 main 2956f3db（rc.23 和 MBX 包装器修复）；整个 committed tree 与合成提交 5c1f0996 完全相同，tree 17db85df3e6ec0b79b605f3178cf9c4416cdb119。已将规格／计划一起归档并更新稳定设计与三个索引；保留 #34 其他范围。归档后的最终 head 检查仍须执行后才对用户交付。
 
 - rc.23 归档根复核全部通过：metadata、workspace all-targets check（86.146 秒）、fmt、相对 2956 main 的架构／风格、继承的 MBX PATH 测试、diff check；归档规格／计划相对链接可解析。再次确认程序输入与已通过九项 CI 的 5c1f0996 一致。即将提交并推送归档，最后一轮 head CI 结算后才交付。
+
+- 归档 head fa3b4e08 第二轮 CI：8 项其他必需 job 成功，网络 job 在 rc.15 Direct receive 的旧 B 再次打开后显式 unlock 报 1213；前置旧旧关闭重开／双向内容通过，新 A 尚未启动。首次失败工件 oct21-pr223-final-matrix 与 job 日志完整保留，未把已结束误记为通过。
+- 驱动与现有 upgrade-matrix/src/device.rs 对照发现 P00 无条件重复 unlock，而 Engine 启动已经调用 recover_space_session。新增公开 observe.session_ready 检查，仅锁定时一次 unlock 并复核就绪；已恢复不重复激活，不重试／吞错，不改旧库。脚本边界回归先以原无条件 unlock 实现得到 red，再得到 3 项 green；原 rc.15 内部 1213 具体 source 不可由稳定 EngineError 获取，不宣称已证明内部根因。并行保存原驱动重复与带就绪观测的对照，完整必需 11 格重新运行。
+
+- 原驱动 15 轮和带公开就绪观测的对照 15 轮均未复现；后三轮观测明确新旧会话均已恢复后仍重复解锁。修正后的原失败场景连续三轮通过，所有 sessions.restored_at_start 为 true，身份／成员／精确内容／方向、cleaned／plaintext_clean 均通过。对照只定位多余调用，未给旧版内部错误添加未经证明的归因。
+- 本次根 metadata、workspace all-targets check、fmt、架构、Rust 风格、29 项脚本测试与 diff check 全部通过，实际输出见 oct21-session-validation.json；Rust 业务源码没有新增变化。完整 11 格仍在运行，尚未提交修正。
+
+- 修正后的完整默认矩阵 oct21-session-final-matrix 全部 11 格通过，已逐格检查工件；新新 Relay 20 轮最慢关闭 19071ms／双向读回 581ms，冻结 main 每角色各三轮读回最慢 531／525ms，rc.15 各一轮关闭 64767／64673ms、读回 508／536ms。所有旧新格记录真实启动恢复结果；身份／关系／精确内容／真实方向、cleaned／plaintext_clean 全通过；旧版配对拒绝仍通过。
+- 根验证及 29 项脚本测试通过；本次运行的 namespace／宿主／relay／Cargo 进程均已结束，临时冻结源码目录已回收。仅验收驱动、脚本测试、CI 接线和执行记录变化，Rust 业务／绑定／宿主源码未改。准备提交与推送；末次 head 九项 CI 仍待实际结算，最终证据写入忽略目录和 PR 描述，避免记录结果本身制造新 head。

@@ -9,6 +9,7 @@ import { createInterface } from 'node:readline'
 import { setTimeout as delay } from 'node:timers/promises'
 import { createHash } from 'node:crypto'
 import { ONLINE_DEADLINE_MESSAGE, measureRecoveryMs, relayTransportReadyAt, terminateRelay } from './relay-recovery-support.mjs'
+import { ensureSessionReady } from './connection-recovery-session.mjs'
 
 const options = new Map()
 for (let i = 2; i < process.argv.length; i += 2) options.set(process.argv[i], process.argv[i + 1])
@@ -766,10 +767,12 @@ async function prepairedUpgrade() {
     if (presenceRole === 'initiate' && other.hostIdentity?.capabilities?.includes('space-work-events')) other.rejectPresenceEndpointIds = [endpoints[upgradeSide]]
     if (presenceRole === 'initiate' && !other.hostIdentity?.capabilities?.includes('space-work-events')) upgraded.rejectInboundPresenceEndpointIds = [endpoints[1 - upgradeSide]]
     const order = presenceRole === 'initiate' ? [upgraded, other] : [other, upgraded]
+    const sessions = []
+    records.at(-1).proof = { sessions }
     for (const node of order) {
       await node.start()
       if (node.rejectInboundPresenceEndpointIds) assert(node.hostIdentity?.capabilities?.includes('inbound-presence-rejection'), 'current test host lacks incoming presence fault control')
-      await node.call('unlock')
+      sessions.push({ node: node.label, restored_at_start: await ensureSessionReady(node) })
     }
     const after = await Promise.all(nodes.map(node => node.call('observe')))
     const endpointsAfter = await Promise.all(nodes.map(node => node.call('network_endpoint')))
@@ -779,7 +782,7 @@ async function prepairedUpgrade() {
       members: JSON.stringify(value.devices) === JSON.stringify(after[index].devices),
       content: JSON.stringify(value.history) === JSON.stringify(after[index].history),
     }))
-    records.at(-1).proof = { upgraded_side: upgradeSide, presence_role: presenceRole, retained, independent_original_copies: true }
+    records.at(-1).proof = { sessions, upgraded_side: upgradeSide, presence_role: presenceRole, retained, independent_original_copies: true }
     assert(retained.every(row => row.identity && row.transport_identity && row.members && row.content), 'original paired state changed during single-side upgrade')
     await online(nodes, 92_000)
     await until(async () => { const facts = await upgraded.call('connections'); records.at(-1).proof.direction = { incoming: facts.incoming, outgoing: facts.outgoing }; return presenceRole === 'receive' ? facts.incoming > 0 && facts.outgoing === 0 : facts.outgoing > 0 }, 35_000, 'the required real presence direction was not established')
