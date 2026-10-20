@@ -20,7 +20,6 @@ pub(super) struct Attempt {
     pub verification_revision: u64,
     pub verification_was_active: bool,
     pub success: Option<u64>,
-    pub display: ReachabilityState,
     pub stop: CancellationToken,
 }
 #[derive(Clone)]
@@ -79,11 +78,6 @@ impl Evidence {
             epoch,
             generation: self.generation,
             success: self.successes.get(&peer).copied(),
-            display: self
-                .states
-                .get(&peer)
-                .copied()
-                .unwrap_or(ReachabilityState::Unknown),
             stop: self.stop.clone(),
         }
     }

@@ -306,7 +306,7 @@ impl Runner {
         while requests.next().await.is_some() {}
     }
     async fn answer(&self, attempt: &Attempt, lease: &ConnectionLease, mut stream: StreamLease) {
-        // 长期监听的 epoch 不变，每个请求分别冻结最后显示与成功修订。
+        // 长期监听的 epoch 不变，每个请求分别冻结成功修订。
         let attempt = {
             let state = self.evidence.lock().unwrap_or_else(PoisonError::into_inner);
             if !state.current(&attempt) {
@@ -314,11 +314,6 @@ impl Runner {
             }
             let mut current = attempt.clone();
             current.success = state.successes.get(&attempt.peer).copied();
-            current.display = state
-                .states
-                .get(&attempt.peer)
-                .copied()
-                .unwrap_or(ReachabilityState::Unknown);
             current
         };
         let deadline = Instant::now() + STEP_BUDGET;

@@ -482,6 +482,41 @@ async fn local_authority_read_failure_preserves_display_and_typed_source_without
     f.owner.shutdown().await.unwrap();
 }
 #[tokio::test]
+async fn delayed_local_read_failure_preserves_the_newer_connection_closed_offline_state() {
+    let f = Fixture::new(ConnectionMode::Multiplexed);
+    assert_eq!(
+        f.owner.verify_reachable(&peer(1)).await.unwrap(),
+        ReachabilityState::Online
+    );
+    let mut changes = f.owner.subscribe();
+    f.authority.blocked.store(true, Ordering::SeqCst);
+    let owner = f.owner.clone();
+    let pending = tokio::spawn(async move { owner.verify_reachable(&peer(1)).await });
+    while f.authority.started.load(Ordering::SeqCst) == 0 {
+        tokio::task::yield_now().await;
+    }
+    f.backend.connections.lock().unwrap()[0].close();
+    let change = tokio::time::timeout(Duration::from_secs(1), changes.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(change.state, ReachabilityState::Offline);
+    assert_eq!(
+        f.owner.current_state(&peer(1)).await,
+        ReachabilityState::Offline
+    );
+    f.authority.fail.store(true, Ordering::SeqCst);
+    f.authority.release.add_permits(1);
+    assert!(pending.await.unwrap().is_err());
+    assert_eq!(
+        f.owner.current_state(&peer(1)).await,
+        ReachabilityState::Offline
+    );
+    assert!(changes.try_recv().is_err());
+    f.owner.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn v1_first_round_is_retained_without_v2_challenge_or_redial() {
     let f = Fixture::new(ConnectionMode::RetainedSingleExchange);
     for _ in 0..3 {

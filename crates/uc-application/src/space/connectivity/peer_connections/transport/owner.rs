@@ -310,9 +310,6 @@ impl Runner {
         if state.current(attempt) && state.successes.get(&attempt.peer).copied() == attempt.success
         {
             state.local_failures.insert(attempt.peer);
-            if attempt.display != ReachabilityState::Unknown {
-                state.states.insert(attempt.peer, attempt.display);
-            }
         }
     }
     pub fn failed(&self, attempt: &Attempt) -> ReachabilityState {
