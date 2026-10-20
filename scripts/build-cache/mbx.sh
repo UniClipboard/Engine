@@ -184,7 +184,8 @@ script_bin="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bin"
 remaining=""
 IFS=: read -r -a entries <<< "$PATH"
 for entry in "${entries[@]}"; do
-  if [[ "$entry" != "$script_bin" && "$entry" != "${UC_ENGINE_MBX_BIN:-}" ]]; then
+  # 隔离源码构建的 PATH 同时含主仓、克隆源码与受信工具三份入口；只移除其中一份会让垫片在它们之间无限互调。
+  if [[ "$entry" != "$script_bin" && "$entry" != "${UC_ENGINE_MBX_BIN:-}" && "$entry" != */scripts/build-cache/bin ]]; then
     remaining="${remaining:+$remaining:}$entry"
   fi
 done
