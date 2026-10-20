@@ -13,7 +13,7 @@ Application peer_connections/transport 拥有准入、唯一观察、长期保�
 - [ ] 阶段 6：稳定文档、审查与提交。
 
 ## Next Step
-native、workspace 和根门禁已通过；最终默认网络矩阵与成员全集运行中。完成升级／前五片／既有网络门禁，核验平台 CI，审查并提交当前分支。所有未执行项仍不勾选，不归档。
+最新 main 已合入；相关 108 项中唯一失败定位为 Collector 回放根路径。修复回放筛选及新复现的迟到读取错误覆盖 Offline 竞态后，重跑相关／完整 workspace、最终默认网络矩阵、升级／前五片／既有网络门禁，核验平台 CI，审查并提交当前分支。所有未执行项仍不勾选，不归档。
 
 ## Decisions
 - 保留用户已有文档和 planning；当前分支按 implement 技能提交，合入最新 main 作为冻结实现基线。

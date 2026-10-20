@@ -45,3 +45,12 @@
 - 真实 clipboard trace 验收 red：入站成员历史完整能力 span 显示 membership_history_sync，旧接收外层命名发生在 decorator 创建 span 之前。将已有用途描述移到 HandleMembershipHistoryMessageUseCase 的完整 endpoint 入口，删掉接收外层命名；不增加 Engine 查询／port／持久格式。等待当前成员全集结算后串行构建回归。
 - 为确保最终二进制对应最终观测实现，oct20-required-matrix 在新新 Relay 第七轮后主动中断并清理；原失败／中断工件保留，后续完整重跑。
 - 主线在暂停期间前进 32 个提交至 f0627a8b0bcc274707035a86ab2df47154d1e536，涉及 Iroh git pin、独立网络日志、配对错误及构建缓存。最终交付前保存本片检查点并合入主线；开工互通锚点 b6fa0ce6 不变。已停止等待中的旧基线 trace 构建，避免编译与合并竞态。
+- 隔离网络完整成员 nextest：56 passed、14 skipped（670 秒），包括原宿主失败的六位码场景。原宿主失败和隔离证明分别保留。
+- 检查点和最新 main 已提交合并，无文本冲突。核对新 ADR-034 与 Rust 固定词表规范；presence 协商协议枚举改用同一 wire_enum! 列表，保持线上取值；主线 Iroh git pin、网络日志与资源普查全部保留。
+- 整合最新 main 后，真实 clipboard trace 的原用途命名 red 已转绿：父子树、完成日志、时长及内容隐私断言通过，并经原 Collector 隐私规则导出到 Jaeger。第一次本机重放收到 404，完整重跑通过；失败工件保留。
+- 浏览器实际打开默认 business/test 列表，点击 clipboard.copy_and_sync 进入详情；截图及 DOM 证据确认两端 persist、dispatch、receive、write_system 完整，正常 presence 检查／清理不出现在业务列表。
+- 整合后的 metadata、workspace 全目标 check、fmt、相对最新 main 的 Rust style、架构门禁与 cargo audit --deny unsound 通过；audit 有既有 yanked/维护状态警告，没有阻断项。开始完整 workspace 构建下的直接相关回归，含 5 项显式真实观测场景。
+- 整合后的直接相关回归 108 项：107 passed、1 failed；失败仅为复制 trace 的 Collector 回放 404。连续真实复现捕获到根路径 `/` 被当成 OTLP 回放，改为仅回放已解码／断言的 POST traces/logs；不改变业务或 Collector 隐私过滤。
+- 完整 owner 第二 backend 新回归 red：资格读取等待期间最后连接关闭已发布 Offline，迟到读取错误却静默恢复旧 Online。删除尝试显示快照及恢复写入，只标记本机故障，保持当时最新有效显示；等待 green 与完整验证。
+- 新竞态回归同一完整 owner 二进制重建后 green（1 passed）；完整相关 109 项仍在链接／执行中。
+- `oct20-final-related.log`：109 passed（41.875 秒），包括新增竞态、7 项原生 presence、Uni／coordinator／codec／隐私以及 5 项真实 clipboard trace；Collector 回放已通过。最终 workspace 已开始，预计 4302 项。

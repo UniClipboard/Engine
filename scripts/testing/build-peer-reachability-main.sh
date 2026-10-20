@@ -24,15 +24,42 @@ find "$source_dir" -type f -name '*.rs' -exec touch {} +
 # 宿主只使用已冻结版本支持的公开操作，源码与当前驱动一致。
 cp tests/hosts/connectivity/src/*.rs "$source_dir/tests/hosts/connectivity/src/"
 cp tests/hosts/connectivity/Cargo.toml "$source_dir/tests/hosts/connectivity/Cargo.toml"
-# 仅为同一宿主补 URL 解析依赖；冻结旧 Engine 的依赖版本不变。
-python3 - "$source_dir/Cargo.lock" <<'PYLOCK'
+# 只补同一宿主在冻结锁中的依赖边；所有依赖必须已有固定版本，旧 Engine 包和版本不变。
+python3 - "$source_dir/Cargo.lock" "$source_dir/tests/hosts/connectivity/Cargo.toml" <<'PYLOCK'
 from pathlib import Path
+import re
 import sys
-p=Path(sys.argv[1]); text=p.read_text()
-a=text.index('name = "uc-connectivity-host"'); b=text.index('\n[[package]]', a)
-block=text[a:b]
-if ' "url",' not in block: block=block.replace(' "uc-engine",', ' "uc-engine",\n "url",')
-p.write_text(text[:a]+block+text[b:])
+import tomllib
+
+p = Path(sys.argv[1])
+text = p.read_text()
+locked = tomllib.loads(text)["package"]
+manifest = tomllib.loads(Path(sys.argv[2]).read_text())
+known = {package["name"] for package in locked}
+original_host = next(package for package in locked if package["name"] == "uc-connectivity-host")
+original_deps = {dependency.split(" ", 1)[0]: dependency for dependency in original_host["dependencies"]}
+deps = set()
+for section in ("dependencies", "dev-dependencies", "build-dependencies"):
+    for name, config in manifest.get(section, {}).items():
+        package = config.get("package", name) if isinstance(config, dict) else name
+        if package not in known:
+            raise SystemExit("host dependency is absent from the frozen lockfile")
+        if package in original_deps:
+            deps.add(original_deps[package])
+        else:
+            if sum(item["name"] == package for item in locked) != 1:
+                raise SystemExit("new host dependency has multiple frozen versions")
+            deps.add(package)
+a = text.index('name = "uc-connectivity-host"')
+b = text.index('\n[[package]]', a)
+block = text[a:b]
+replacement = "dependencies = [\n" + "".join(f' \"{name}\",\n' for name in sorted(deps)) + "]"
+block, count = re.subn(r"dependencies = \[.*?\]", lambda _: replacement, block, count=1, flags=re.S)
+assert count == 1
+updated = text[:a] + block + text[b:]
+unchanged = lambda packages: [item for item in packages if item["name"] != "uc-connectivity-host"]
+assert unchanged(locked) == unchanged(tomllib.loads(updated)["package"])
+p.write_text(updated)
 PYLOCK
 sha256sum "$source_dir/tests/hosts/connectivity/Cargo.toml" "$source_dir/Cargo.lock" > "$root/driver-build-inputs-sha256.txt"
 sha256sum tests/hosts/connectivity/src/*.rs > "$root/driver-sha256.txt"

@@ -206,3 +206,8 @@ Cargo 由一个负责人从根目录通过共享 target 串行运行，保留编
 - `oct20-relay-final` 新新 Relay 20 轮全部通过：Online 最慢 354ms、双向读回最慢 569ms，底层重连观测最慢 18924ms，清理／明文扫描通过。
 - 宿主网络成员全集：55 passed、1 failed、14 skipped。唯一失败为本地六位码 mDNS；同二进制在宿主三轮有一次失败，独立 user/net namespace 三轮全通过。完整隔离网络 nextest 运行中，不延长解析 5 秒期限，不改配对生产逻辑。
 - 真实观测验收发现旧入站成员历史用途描述落在 decorator 创建前的外层，完整 handler 节点仍是通用名称。现有 clipboard trace 测试 red 已保留；用途描述移到 Application 完整处理入口，沿用既有不透明观测能力，不扩大 Engine 接口。最终矩阵在该修正后重建重跑，已中断的运行不记通过。
+- 主线整合：保存迁移检查点 `543d00cc`，以 `a854e895` 合入 `f0627a8b0bcc274707035a86ab2df47154d1e536` 的 32 项更新，包括 ADR-034 的 Iroh 固定 Git 来源、日志及构建缓存。开工旧端互通锚点仍固定 `b6fa0ce6`，不得随 main 前移。
+- 完整隔离网络成员全集通过：56 passed、14 skipped（670 秒）；宿主 mDNS 的首次失败仍保留，未据隔离结果宣称宿主根因已解决。
+- 整合后 metadata、workspace 全目标 check、fmt、相对 main 的 Rust style、架构及 `cargo audit --deny unsound` 通过。相关回归 108 项中 107 通过；唯一失败发生在本机 Collector 回放，根路径探测被一并回放导致 404，已限定仅回放通过隐私断言的 OTLP POST traces/logs，完整重跑待结算。
+- 新增完整 owner 时序回归 red／green：资格读取期间最后连接关闭已发布 Offline，迟到读取错误不得静默恢复旧 Online。删除旧显示快照恢复，保留最新有效状态和原错误来源。
+- 已用真实浏览器打开 Jaeger business/test 列表及 clipboard.copy_and_sync 详情；完整父子动作、根结果及正常轮询／清理不进入业务列表的截图和 DOM 证据保存在本地工件。Docker 无权限时使用已校验摘要的同版本本机 Jaeger／Collector；不修改仓库隐私规则。

@@ -573,7 +573,11 @@ async fn clipboard_trace_case(
                 otlp_string_attribute(&span.attributes, "error.type")
             );
         }
-        for request in &requests {
+        // 捕获服务也可能收到根路径探测；只回放本验收解码并检查过的 OTLP 信号。
+        for request in requests.iter().filter(|request| {
+            request.method.as_str() == "POST"
+                && matches!(request.url.path(), "/v1/traces" | "/v1/logs")
+        }) {
             use std::io::Write;
             use std::process::{Command, Stdio};
             let mut child = Command::new("curl")
