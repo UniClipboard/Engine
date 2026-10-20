@@ -8,7 +8,7 @@ import { resolve, join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { setTimeout as delay } from 'node:timers/promises'
 import { createHash } from 'node:crypto'
-import { ONLINE_DEADLINE_MESSAGE, measureRecoveryMs, terminateRelay } from './relay-recovery-support.mjs'
+import { ONLINE_DEADLINE_MESSAGE, measureRecoveryMs, relayTransportReadyAt, terminateRelay } from './relay-recovery-support.mjs'
 
 const options = new Map()
 for (let i = 2; i < process.argv.length; i += 2) options.set(process.argv[i], process.argv[i + 1])
@@ -140,7 +140,7 @@ class Host {
         pending.reject(new Error('test host exited before replying'))
       }
     })
-    const ready = await this.raw({ root: this.root, rendezvous: `http://10.233.0.1:${server.address().port}`, secure_storage: this.secureStorage, relay: mode === 'relay', bind_port: this.bindPort, reject_presence_endpoint_ids: this.rejectPresenceEndpointIds })
+    const ready = await this.raw({ root: this.root, rendezvous: `http://10.233.0.1:${server.address().port}`, secure_storage: this.secureStorage, relay: mode === 'relay', bind_port: this.bindPort, reject_presence_endpoint_ids: this.rejectPresenceEndpointIds, reject_inbound_presence_endpoint_ids: this.rejectInboundPresenceEndpointIds })
     assert.equal(ready.ready, true)
     this.version = ready.version
     this.hostIdentity = ready.host
@@ -359,7 +359,7 @@ function partition(node, blocked) {
   const rules = JSON.parse(net(node, 'nft', '-j', 'list', 'table', 'inet', 'uc_liveness'))
   assert(rules.nftables.some(row => row.rule?.expr?.some(expr => expr.counter?.packets > 0)), 'drop counters remained empty')
   const dropped = rules.nftables.flatMap(row => row.rule?.expr ?? []).reduce((total, expr) => total + (expr.counter?.packets ?? 0), 0)
-  faults.push({ node: node.label, action: 'drop', at_ms: Math.round(activated), verified_dropped_packets: dropped, ipv4_drop_packets: counters[0], ipv6_drop_packets: counters[1] })
+  faults.push({ node: node.label, action: 'drop', at_ms: Math.round(activated), verified_dropped_packets: dropped })
   return activated
 }
 
@@ -401,7 +401,7 @@ function blockPeerPair(left, right) {
   const rules = JSON.parse(net(left, 'nft', '-j', 'list', 'table', 'inet', 'uc_pair'))
   const dropped = rules.nftables.flatMap(row => row.rule?.expr ?? []).reduce((total, expr) => total + (expr.counter?.packets ?? 0), 0)
   assert(dropped > 0, 'peer isolation counters remained empty')
-  faults.push({ node: `${left.label}-${right.label}`, action: 'peer_pair_blocked', at_ms: Math.round(performance.now()), verified_dropped_packets: dropped, ipv4_drop_packets: counters[0], ipv6_drop_packets: counters[1] })
+  faults.push({ node: `${left.label}-${right.label}`, action: 'peer_pair_blocked', at_ms: Math.round(performance.now()), verified_dropped_packets: dropped })
 }
 
 function unblockPeerPair(left, right) {
@@ -729,9 +729,18 @@ async function run() {
 async function prepairedUpgrade() {
   await scenario('P00-prepaired-upgrade-old-pairing', async () => {
     if (mode === 'relay') for (const node of nodes) blockDirect(node)
-    await paired(nodes)
+    const created = await paired(nodes)
+    // 验收对象是正常关闭后的真实旧资料；由旧库先重开并证明原身份、关系及内容能力。
+    const pairedEndpoints = await Promise.all(nodes.map(node => node.call('network_endpoint')))
+    for (const node of nodes) await node.stop()
+    for (const node of nodes) await node.start()
+    const pairedSetups = await Promise.all(nodes.map(node => node.call('setup')))
+    assert(pairedSetups.every(setup => setup.has_completed && setup.space_id === created.space), 'old profiles did not restore their paired space')
+    assert.deepEqual(await Promise.all(nodes.map(node => node.call('network_endpoint'))), pairedEndpoints, 'old profile restart changed transport identity')
+    await usable(nodes)
+    await online(nodes, 20_000)
     await transfer(nodes[0], nodes[1], 'old-paired-baseline')
-    return { old_pairing: true, exact_bidirectional_content: true, paths: await selectedPaths() }
+    return { old_pairing: true, old_profile_reopen: true, exact_bidirectional_content: true, paths: await selectedPaths() }
   })
   const before = await Promise.all(nodes.map(node => node.call('observe')))
   const endpoints = await Promise.all(nodes.map(node => node.call('network_endpoint')))
@@ -755,9 +764,11 @@ async function prepairedUpgrade() {
     }
     const other = nodes[1 - upgradeSide]
     if (presenceRole === 'initiate' && other.hostIdentity?.capabilities?.includes('space-work-events')) other.rejectPresenceEndpointIds = [endpoints[upgradeSide]]
+    if (presenceRole === 'initiate' && !other.hostIdentity?.capabilities?.includes('space-work-events')) upgraded.rejectInboundPresenceEndpointIds = [endpoints[1 - upgradeSide]]
     const order = presenceRole === 'initiate' ? [upgraded, other] : [other, upgraded]
     for (const node of order) {
       await node.start()
+      if (node.rejectInboundPresenceEndpointIds) assert(node.hostIdentity?.capabilities?.includes('inbound-presence-rejection'), 'current test host lacks incoming presence fault control')
       await node.call('unlock')
     }
     const after = await Promise.all(nodes.map(node => node.call('observe')))
@@ -777,6 +788,11 @@ async function prepairedUpgrade() {
   })
   // 初始角色已经用真实连接证明；故障前恢复默认双向主动能力，不限制旧端的恢复方式。
   for (const node of nodes) {
+    if (node.rejectInboundPresenceEndpointIds) {
+      const cleared = await node.call('reject_inbound_presence', { endpoint_ids: [] })
+      assert.equal(cleared.blocked_peer_count, 0, 'incoming presence restriction remained enabled')
+      node.rejectInboundPresenceEndpointIds = undefined
+    }
     if (node.hostIdentity?.capabilities?.includes('space-work-events')) {
       await node.call('reject_reachability_dials', { endpoint_ids: [] })
       node.rejectPresenceEndpointIds = undefined
@@ -793,14 +809,18 @@ async function prepairedUpgrade() {
         await offline(nodes[1], v1 ? 70_000 : 20_000)
         const offlineAt = performance.now()
         proof.offline_ms = Math.round(offlineAt - interruptedAt)
-        await startRelay()
         const restartedAt = performance.now()
+        const restartedWall = Date.now()
+        await startRelay()
         // 新旧 Iroh 均有底层重连退避；分别记录就绪前等待与就绪后三秒验收。
-        await until(async () => nodes.every(node => net(node, 'ss', '-Hnt', 'state', 'established').includes(`:${relayPorts[nodes.indexOf(node)]}`)), relayReadinessBudget, 'both relay transports did not reconnect')
-        const readyAt = performance.now()
+        const readiness = await relayTransportsReady(restartedWall)
+        const readyAt = readiness.at
+        proof.relay_transports_ready_at = readiness.wall
         proof.relay_restart_to_transports_ready_ms = Math.round(readyAt - restartedAt)
         // 起点后只有状态查询；成功后才开始双向内容验证。
-        await online(nodes, v1 ? 90_000 : 3_000)
+        const remaining = readyAt + (v1 ? 90_000 : 3_000) - performance.now()
+        assert(remaining > 0, 'relay readiness observation exhausted the recovery budget')
+        await online(nodes, remaining)
         const onlineAt = performance.now()
         await transfer(nodes[0], nodes[1], `prepaired-healed-${iteration}`)
         const readbackAt = performance.now()
@@ -892,6 +912,22 @@ function localDiagnostics(node) {
   return readdirSync(join(node.root, 'logs'))
     .filter(name => /^engine\..*\.jsonl$/.test(name))
     .flatMap(name => readFileSync(join(node.root, 'logs', name), 'utf8').split('\n').filter(Boolean).map(JSON.parse))
+}
+
+// HTTP 探测也使用 Relay 端口；同时核对 TCP 与本轮原生 Relay 协议状态。
+// 使用事件发生时间回算单调时钟，刷新和读取日志的耗时也计入原三秒门。
+async function relayTransportsReady(restartedWall) {
+  let readyWall
+  await until(async () => {
+    const tcp = nodes.map(node => net(node, 'ss', '-Hnt', 'state', 'established').includes(`:${relayPorts[nodes.indexOf(node)]}`))
+    if (!tcp.every(Boolean)) return false
+    for (const node of nodes) await node.call('flush')
+    const timestamps = nodes.map((node, index) => relayTransportReadyAt(tcp[index], localDiagnostics(node), restartedWall))
+    if (timestamps.some(at => at === undefined)) return false
+    readyWall = Math.max(...timestamps)
+    return true
+  }, relayReadinessBudget, 'both relay transports did not reconnect')
+  return { at: performance.now() - (Date.now() - readyWall), wall: new Date(readyWall).toISOString() }
 }
 
 // 在同一真实 Relay-only 拓扑中，先组装双方会话，再让 Relay 就绪并实际配对。
@@ -1018,11 +1054,13 @@ async function relayScenarios(a, b) {
       await offline(b, 20_000)
       proof.offline_ms = Math.round(performance.now() - interruptedAt)
       if (relayExtraDownMs > 0) await delay(relayExtraDownMs)
-      await startRelay()
       const relayStartedAt = performance.now()
-      if (!measureRecovery) await until(async () => nodes.every(node => net(node, 'ss', '-Hnt', 'state', 'established').includes(`:${relayPorts[nodes.indexOf(node)]}`)), relayReadinessBudget, 'test hosts did not reconnect to the local relay')
-      const relayReadyAt = measureRecovery ? relayStartedAt : performance.now()
+      const relayRestartedWall = Date.now()
+      await startRelay()
+      const readiness = measureRecovery ? { at: relayStartedAt, wall: new Date(relayRestartedWall).toISOString() } : await relayTransportsReady(relayRestartedWall)
+      const relayReadyAt = readiness.at
       proof.both_relay_transports_ready = true
+      proof.relay_transports_ready_at = readiness.wall
       proof.relay_restart_to_transports_ready_ms = Math.round(relayReadyAt - relayStartedAt)
       if (measureRecovery) {
         if (tcpProbe) {
@@ -1095,6 +1133,7 @@ finally {
   for (const node of nodes) {
     node.failureReasons = []
     node.networkFacts = []
+    node.networkDiagnostics = []
     try {
       for (const name of readdirSync(join(node.root, 'logs')).filter(name => name.includes('.json'))) {
         for (const line of readFileSync(join(node.root, 'logs', name), 'utf8').split('\n')) {
@@ -1103,6 +1142,10 @@ finally {
             const reason = row.fields?.['error.reason']
             if (allowedReasons.has(reason)) node.failureReasons.push({ timestamp: row.timestamp, reason })
             const fields = row.fields ?? {}
+            // 只保留固定事件类别和分类字段；不复制 payload、关联身份或原始错误正文。
+            if (['relay.status.observed', 'presence.check.completed', 'presence.connection.closed', 'connection.started', 'connection.finished', 'connection.attempt.started', 'connection.attempt.finished'].includes(fields['event.name']) || row.message === 'peer connection recovery attempt finished') {
+              node.networkDiagnostics.push({ timestamp: row.timestamp, ...Object.fromEntries(Object.entries(fields).filter(([key]) => ['event.name', 'trigger', 'outcome', 'uc.outcome', 'error.phase', 'error.reason', 'error_kind', 'error_class', 'duration_ms', 'connected_count', 'known_count', 'attempt_index', 'protocol', 'direction', 'reason'].includes(key))) })
+            }
             if (['relay.status.observed', 'address.loaded', 'address.used', 'connection.protocol.negotiated'].includes(fields['event.name'])) {
               node.networkFacts.push(Object.fromEntries(Object.entries(fields).filter(([key]) => ['event.name', 'connected_count', 'known_count', 'direct_count', 'relay_count', 'other_count', 'protocol'].includes(key))))
             }
@@ -1148,6 +1191,6 @@ finally {
     cleanup_ms: Math.round(timingCompletedAt - cleanupStartedAt),
     total_ms: Math.round(timingCompletedAt - timingStartedAt),
   }
-  writeFileSync(join(evidence, `${mode}${prepairedHost ? `-prepaired-${upgradeSide}-${presenceRole}` : ''}${mode === 'legacy' ? `-${legacySide}` : ''}${peerBinary ? `-mixed-${peerSide}` : ''}${relayBinaryB ? '-split-relays' : ''}.json`), JSON.stringify({ sequence: 'fixed-short-long-heal-v2', reproduction, binaries, faults, records, timings, cleaned, plaintext_clean: plaintextClean, failed, nodes: nodes.map(node => ({ label: node.label, version: node.version, events: node.timeline, resources: node.resources, failure_reasons: node.failureReasons, network_facts: node.networkFacts })) }, null, 2), { mode: 0o600 })
+  writeFileSync(join(evidence, `${mode}${prepairedHost ? `-prepaired-${upgradeSide}-${presenceRole}` : ''}${mode === 'legacy' ? `-${legacySide}` : ''}${peerBinary ? `-mixed-${peerSide}` : ''}${relayBinaryB ? '-split-relays' : ''}.json`), JSON.stringify({ sequence: 'fixed-short-long-heal-v2', reproduction, binaries, faults, records, timings, cleaned, plaintext_clean: plaintextClean, failed, nodes: nodes.map(node => ({ label: node.label, version: node.version, events: node.timeline, resources: node.resources, failure_reasons: node.failureReasons, network_facts: node.networkFacts, network_diagnostics: node.networkDiagnostics })) }, null, 2), { mode: 0o600 })
 }
 process.exitCode = failed ? 1 : 0

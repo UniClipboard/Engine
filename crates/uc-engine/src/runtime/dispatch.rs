@@ -7,7 +7,10 @@ use tokio::time::Instant;
 #[cfg(feature = "dev-tools")]
 use uc_core::ids::DeviceId;
 #[cfg(feature = "dev-tools")]
-use uc_infra_p2p::network::iroh::{CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN};
+use uc_infra_p2p::network::iroh::{
+    CLIPBOARD_ALPN, LEGACY_PEER_REACHABILITY_ALPN, MULTIPLEXED_CLIPBOARD_ALPN,
+    PEER_REACHABILITY_ALPN,
+};
 
 #[cfg(feature = "dev-tools")]
 use super::operation_error_with_code;
@@ -926,8 +929,8 @@ impl EngineRuntime for ProductionRuntime {
             } => {
                 let alpns = if peer_reachability {
                     vec![
-                        uc_infra_p2p::network::iroh::LEGACY_PEER_REACHABILITY_ALPN.to_vec(),
-                        uc_infra_p2p::network::iroh::PEER_REACHABILITY_ALPN.to_vec(),
+                        LEGACY_PEER_REACHABILITY_ALPN.to_vec(),
+                        PEER_REACHABILITY_ALPN.to_vec(),
                     ]
                 } else {
                     vec![MULTIPLEXED_CLIPBOARD_ALPN.to_vec(), CLIPBOARD_ALPN.to_vec()]
@@ -936,6 +939,17 @@ impl EngineRuntime for ProductionRuntime {
                     blocked_peer_count: self
                         .network_partition_gate
                         .reject_new_connections(endpoint_ids, alpns),
+                })
+            }
+            DevOperation::RejectInboundPeerReachability { endpoint_ids } => {
+                Ok(DevOperationResult::NetworkPartitionUpdated {
+                    blocked_peer_count: self.network_partition_gate.reject_incoming_connections(
+                        endpoint_ids,
+                        vec![
+                            LEGACY_PEER_REACHABILITY_ALPN.to_vec(),
+                            PEER_REACHABILITY_ALPN.to_vec(),
+                        ],
+                    ),
                 })
             }
             DevOperation::SuppressConnectivityOpportunities { suppressed } => {

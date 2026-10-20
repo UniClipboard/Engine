@@ -1,10 +1,10 @@
 # Issue #34 第六切片：设备可达性、准入与存活检查执行计划
 
-状态：**实现与必需验收进行中，尚未交付**（2026-10-20）。
+状态：**实现与本地必需验收完成，平台／最终 SHA 线上检查待执行，尚未交付**（2026-10-21）。
 唯一设计来源：[实现规格](2026-10-14-peer-reachability-connectivity-spec.md)。
 前置第五切片 [PR #181](https://github.com/UniClipboard/Engine/pull/181) 已合并。
 审计时最新 main 为 `68de511a77dee74b8b6ba0360fa07f9637241c90`；此值不是已冻结的实现／互通锚点，开工时重新确认。
-已完成生产迁移、行为／原生／真实 SQLite 回归及根门禁；完整 workspace 4227 项通过、25 项跳过。必需网络矩阵修复后最终重跑中，平台与线上结果尚未核验。
+已完成生产迁移、行为／原生／真实 SQLite 回归及最终根门禁。workspace 4303 项、成员全集 56 项、必需网络矩阵 11 格、前五切片与既有网络回归全部通过；跳过项、首次失败与 fixture 对照见实际记录。平台与线上结果尚未核验。
 不得从以下阶段 checklist 或纯文档检查推定功能、平台编译和线上检查通过。
 
 ## 完整负责人
@@ -33,16 +33,16 @@
 
 本阶段允许补测试驱动、fixture 管理和失败用例；不修改生产 presence、配对、准入或资料升级规则。
 
-* [ ] 重新读取最近 AGENTS、Rust／错误／安全／观测规范；从开工最新 main 建立实现分支，记录精确 SHA 及相对审计基线的相关差异。
-* [ ] 清点 coordinator、Core port 所有消费者、native adapter／handler、身份与撤销表、generation、恢复能力及实际 shutdown owner。
-* [ ] 冻结旧端：开工最新 main 和 a07 `f6f305d9689e4e79e7ab6d0e4921061f9416e4a6`；实际核对 a07／rc.15 的源码、ALPN 和构建特性。
-* [ ] 同一驱动分别链接两个冻结旧库及当前库，记录驱动源码摘要、Engine rev、构建参数和二进制 SHA256；旧 Engine 库不打补丁。
-* [ ] 两台真实 rc.15 正常配对，正常关闭并保存原始加密资料；先证明旧旧 Direct／Relay 和真实内容基线可运行。
-* [ ] 从原始资料分别复制两套场景，只升级一端；通过既有升级读取原身份、密钥和成员关系，证明新版主动及接收两种角色均可开始真实互通。
-* [ ] 保留 E09 现场新旧配对拒绝测试；核对 `--mode legacy` 的结果仅属于该拒绝合同，不登记为 presence 互通通过。
-* [ ] 冻结修改前准入／challenge golden 向量、FIN／关闭行为，记录原 coordinator 常量及网络恢复门的计时起点。
-* [ ] 建立最小可重复失败信号：无首流 pending 无入口总额、慢查询越过整段期限、本机真实读取故障被发成拒绝／Offline；每项保存输入、命令、固定分类及实际结果。
-* [ ] 核对 CI 网络权限、默认运行入口、旧资料独立副本和必要时长；证明不是靠手动刷新／预发送或模拟 Online 才能执行基线。
+* [x] 重新读取最近 AGENTS、Rust／错误／安全／观测规范；从开工最新 main 建立实现分支，记录精确 SHA 及相对审计基线的相关差异。
+* [x] 清点 coordinator、Core port 所有消费者、native adapter／handler、身份与撤销表、generation、恢复能力及实际 shutdown owner。
+* [x] 冻结旧端：开工最新 main 和 a07 `f6f305d9689e4e79e7ab6d0e4921061f9416e4a6`；实际核对 a07／rc.15 的源码、ALPN 和构建特性。
+* [x] 同一驱动分别链接两个冻结旧库及当前库，记录驱动源码摘要、Engine rev、构建参数和二进制 SHA256；旧 Engine 库不打补丁。
+* [x] 两台真实 rc.15 正常配对，正常关闭并保存原始加密资料；先证明旧旧 Direct／Relay 和真实内容基线可运行。
+* [x] 从原始资料分别复制两套场景，只升级一端；通过既有升级读取原身份、密钥和成员关系，证明新版主动及接收两种角色均可开始真实互通。
+* [x] 保留 E09 现场新旧配对拒绝测试；核对 `--mode legacy` 的结果仅属于该拒绝合同，不登记为 presence 互通通过。
+* [x] 冻结修改前准入／challenge golden 向量、FIN／关闭行为，记录原 coordinator 常量及网络恢复门的计时起点。
+* [x] 建立最小可重复失败信号：无首流 pending 无入口总额、慢查询越过整段期限、本机真实读取故障被发成拒绝／Offline；每项保存输入、命令、固定分类及实际结果。
+* [x] 核对 CI 网络权限、默认运行入口、旧资料独立副本和必要时长；证明不是靠手动刷新／预发送或模拟 Online 才能执行基线。
 
 驱动复用 `tests/hosts/connectivity` 与既有恢复／升级锚点工具。当前 `--peer-host`／`--peer-side` 混合二进制入口默认现场配对，
 不能直接用来验收已配对 rc.15；补明确“真实预配对资料”输入与双方角色控制，禁止手工插入资格或改库。
@@ -106,13 +106,13 @@
 优先扩展已有 `run-connection-recovery-e2e.sh`、`connection-recovery-network.mjs` 及独立宿主，不另建替代网络框架。
 预配对资料选项、presence case 名称和固定旧端包装入口在实现时确定并写回命令清单；当前不得把计划接口写成可运行验收命令。
 
-* [ ] 执行 spec §8 的新新、冻结 main 双角色、rc.15 双角色 × Direct／Relay 全部必需格；各格精确内容读回、实际 ALPN 和路径证据齐全。
-* [ ] 强制 Relay 对 IPv4／IPv6 UDP 的规则与计数有效；验证没有直连绕路，双向内容不是仅发出或仅观察 Online。
-* [ ] 新新 v2 三秒 Relay 自动恢复 20 轮；冻结 main 实际 v2 的每角色至少 3 轮，全部满足同一计时／只查询条件。
-* [ ] v2 静默失联 ≤20 秒、v1 传输关闭 ≤70 秒；旧 v1 正常恢复与内容通过，不为 v1 添加新版三秒条件。
-* [ ] 入站满额、慢帧、真实 SQLite／身份读取错误、成员撤销和在途关闭在真实 Engine 路径通过；有限任务／许可无泄漏。
-* [ ] 保留 E09 现场配对拒绝；完整 workspace、成员 E2E、升级 smoke、前五切片连接验收和网络恢复原场景全部通过。
-* [ ] 将必需矩阵接入 `.github/workflows/pr-check.yml` 默认运行的验证；按需拆分 job，但失败必须阻止本片交付，不能仅靠可选 label 或 nightly。
+* [x] 执行 spec §8 的新新、冻结 main 双角色、rc.15 双角色 × Direct／Relay 全部必需格；各格精确内容读回、实际 ALPN 和路径证据齐全。
+* [x] 强制 Relay 对 IPv4／IPv6 UDP 的规则与计数有效；验证没有直连绕路，双向内容不是仅发出或仅观察 Online。
+* [x] 新新 v2 三秒 Relay 自动恢复 20 轮；冻结 main 实际 v2 的每角色至少 3 轮，全部满足同一计时／只查询条件。
+* [x] v2 静默失联 ≤20 秒、v1 传输关闭 ≤70 秒；旧 v1 正常恢复与内容通过，不为 v1 添加新版三秒条件。
+* [x] 入站满额、慢帧、真实 SQLite／身份读取错误、成员撤销和在途关闭在真实 Engine 路径通过；有限任务／许可无泄漏。
+* [x] 保留 E09 现场配对拒绝；完整 workspace、成员 E2E、升级 smoke、前五切片连接验收和网络恢复原场景全部通过。
+* [x] 将必需矩阵接入 `.github/workflows/pr-check.yml` 默认运行的验证；按需拆分 job，但失败必须阻止本片交付，不能仅靠可选 label 或 nightly。
 * [ ] Linux、macOS、Windows 和现有移动平台编译门禁执行；宿主不因缺 `just`／`rg` 等工具静默跳过必需格，脚本依赖明确安装或采用已有可移植入口。
 * [ ] 每次本地先跑对应全部必需 CI，再推送；核验最终 head 的线上检查，保留第一次失败及修复后的命令／SHA／结果。
 
@@ -128,10 +128,10 @@ bash scripts/testing/run-connection-recovery-e2e.sh --suite network --mode relay
 
 ## 阶段 6：回写稳定合同与收尾
 
-* [ ] 按实现更新 `docs/design-docs/automatic-peer-connections.md`、相关 Uni 设计／ADR 及架构说明；持久规则只维护唯一正文。
-* [ ] 对完整恢复动作检查真实观测导出、失败类别、结束边界和列表／详情；按[唯一标准](../../design-docs/observability.md#业务记录组织标准)记录实际验收及跳过项。
+* [x] 按实现更新 `docs/design-docs/automatic-peer-connections.md`、相关 Uni 设计／ADR 及架构说明；持久规则只维护唯一正文。
+* [x] 对完整恢复动作检查真实观测导出、失败类别、结束边界和列表／详情；按[唯一标准](../../design-docs/observability.md#业务记录组织标准)记录实际验收及跳过项。
 * [ ] 最终实现、本地证据与线上必需检查逐项勾选；未测真机／版本矩阵独立列出，不能从编译推定通过。
-* [ ] 工件 manifest 与首次失败证据完整，敏感资料／密钥无上传；检查进程并回收任务所建临时源码／fixture。
+* [x] 工件 manifest 与首次失败证据完整，敏感资料／密钥无上传；检查进程并回收任务所建临时源码／fixture。
 * [ ] 完成后规格和计划一起移至 `completed/`，更新 `docs/PLANS.md` 与 active／completed 索引、相对链接。
 * [ ] 保留 Issue #34 的文件／blob／进度等剩余范围，不将本片完成写成整个 issue 完成。
 
@@ -139,11 +139,11 @@ bash scripts/testing/run-connection-recovery-e2e.sh --suite network --mode relay
 
 | 层次 | 必需证据 | 当前状态 |
 | --- | --- | --- |
-| 真实旧资料前置 | 两个旧端摘要、正常配对、原资料单端升级、双角色独立副本及实际错误／成功 | 真实 rc.15 旧旧及原资料单端升级前置通过；双角色最终矩阵重跑中 |
+| 真实旧资料前置 | 两个旧端摘要、正常配对、原资料单端升级、双角色独立副本及实际错误／成功 | 真实 rc.15 旧旧及原资料单端升级前置、双角色最终矩阵均通过 |
 | 行为／第二 backend | 额度、绝对期限、v1／v2 生命周期、本机读取故障 source、竞态 | 实现及相关回归已通过；最终网络／平台证据见下文 |
 | 真实 Iroh／SQLite／独立宿主 | 完整路径和内容、本机实际错误、取消与 shutdown 资源回收 | 实现及相关回归已通过；最终网络／平台证据见下文 |
-| Direct／强制 Relay 互通 | spec §8 全部必需格、网络规则／计数、selected path、ALPN、合成内容结果 | 未执行 |
-| 自动恢复 | 计时起点、Online 与双向读回时刻、轮数、无人工触发及首次失败 | 未执行 |
+| Direct／强制 Relay 互通 | spec §8 全部必需格、网络规则／计数、selected path、ALPN、合成内容结果 | 最终默认矩阵 11 格通过；清理与明文扫描通过 |
+| 自动恢复 | 计时起点、Online 与双向读回时刻、轮数、无人工触发及首次失败 | 新新 20 轮、冻结 main 每角色 3 轮、rc.15 每角色 1 轮通过；首次失败分别保留 |
 | 本地／线上门禁 | 对应命令、退出码、最终 commit SHA、检查链接及首次失败 | 根本地门禁通过；最终提交和线上检查待执行 |
 | iOS／Android／HarmonyOS 真机切网／前后台 | 实机、版本、操作和实际结果 | 跳过：当前未执行，不从编译推定 |
 | 额外历史版本／降级矩阵 | 关联原升级矩阵的实际证据 | 跳过：本片不新增其完成义务 |
@@ -211,3 +211,51 @@ Cargo 由一个负责人从根目录通过共享 target 串行运行，保留编
 - 整合后 metadata、workspace 全目标 check、fmt、相对 main 的 Rust style、架构及 `cargo audit --deny unsound` 通过。相关回归 108 项中 107 通过；唯一失败发生在本机 Collector 回放，根路径探测被一并回放导致 404，已限定仅回放通过隐私断言的 OTLP POST traces/logs，完整重跑待结算。
 - 新增完整 owner 时序回归 red／green：资格读取期间最后连接关闭已发布 Offline，迟到读取错误不得静默恢复旧 Online。删除旧显示快照恢复，保留最新有效状态和原错误来源。
 - 已用真实浏览器打开 Jaeger business/test 列表及 clipboard.copy_and_sync 详情；完整父子动作、根结果及正常轮询／清理不进入业务列表的截图和 DOM 证据保存在本地工件。Docker 无权限时使用已校验摘要的同版本本机 Jaeger／Collector；不修改仓库隐私规则。
+- `oct20-final-related.log`：109 项全通过，包含新显示竞态、7 项原生 presence、5 项显式真实 trace 及 Collector 回放。最新浏览器详情展开确认根结果；官方工具摘要与隐私配置一致性证据保留，临时服务／浏览器／下载已回收。
+- 整合 main 后 workspace 首轮为 4300 passed、1 failed、1 timed out、27 skipped（627 秒）。两项为本地 reset 的 20 秒外层超时和 repeated_leaves 资源波动；宿主与独立网络的重复实验显示默认公网 Relay 的后台连接／重试影响完成时刻与资源样本。
+- 两项本地测试使用已有 dev-tools 配置关闭公网 Relay，保持所有原超时与资源阈值；定点两项通过，再各三轮全部通过（reset 3.98–4.59 秒，leave 9.06–9.26 秒）。生产默认 P2P／Relay 行为不变，真实 Relay 仍须完成默认矩阵。完整 workspace 正在 `oct20-final-workspace-fixed.log` 重跑，首次失败和全部对照工件保留。
+- `oct20-final-workspace-fixed.log` 最终为 4302 passed、27 skipped（585.950 秒），原两项失败均通过，JUnit 独立保留。完整默认矩阵在 `oct20-final-required-matrix` 运行；当前仅开始构建，不将尚未完成的互通格登记通过。
+
+### 最终默认网络矩阵（2026-10-20）
+
+`oct20-required-final-incoming-control/matrix-summary.json` 校验 11 个必需格全部通过，所有记录均有非空成功结果，`cleaned` 与 `plaintext_clean` 均为 true。开工冻结 main 仍为 `b6fa0ce6`，rc.15 为 `f6f305d9`，旧库不打补丁。旧旧配对关闭重开后，原 Space／传输身份与双向内容基线全部通过。
+
+| Relay 组合 | 轮数 | 最慢失联识别 | 原生就绪后最慢 Online／双向精确读回 |
+| --- | --- | --- | --- |
+| 新新 v2 | 20 | 17145ms | 372／577ms |
+| 冻结 main v2 接收 | 3 | 15172ms | 330／504ms |
+| 冻结 main v2 主动 | 3 | 14816ms | 370／522ms |
+| rc.15 v1 接收 | 1 | 64802ms | 422／580ms（不作为 v2 三秒门） |
+| rc.15 v1 主动 | 1 | 64718ms | 256／417ms（不作为 v2 三秒门） |
+
+双方底层重连观测另计，新新最慢 19027ms，rc.15 最慢 25712ms；事件发生时间定义和三秒门保持规格原值。纯 TCP 提前计时、旧库刚配对运行态内容失败及固定端口实验的首次工件保留，未计作通过。最终 workspace／成员／升级／原场景回归和平台 CI 仍未结算，计划继续 active。
+
+- 2026-10-21：`oct20-final-workspace-with-incoming.log` 最终 4303 passed、27 skipped，测试执行 633.977 秒，含构建总耗时 1108.291 秒；新增原生 incoming gate 与两项生命周期回归全部通过。JUnit 单独保留；成员全集已开始，其余回归与线上平台门禁仍待结算。
+
+### 成员全集的历史恢复 fixture 对照（2026-10-21）
+
+最终成员全集两轮均为 55 passed、1 failed、14 skipped（746／735 秒含构建）；同一缺失前序恢复场景在 B 已追上 epoch 5 后，C→B 确认未在原 120 秒内完成，投影为 ReceiverUnavailable，第三次尝试的下一重试时刻接近测试结束。日志中的握手超时未按测试节点关联，不能据此把刻意离线的 A 与 C→B 混同。
+
+同一原二进制的隔离／宿主／隔离三轮均通过（36–40 秒），并发 g4 与目标两项也通过；这些结果不替代完整组验收。沿用[既有组更新 CI 缺口 fixture 前置](../completed/2026-10-11-group-update-connectivity-plan.md#ci-独立进程缺口场景修正)，仅目标 B 使用既有测试 bind port 配置固定重启地址，保留真实关闭重开、原发送者离线、第三方历史、epoch、实际 ACK 与内容断言，原 120 秒不变。自动连接与网络换址场景保留原配置。
+
+固定端口目标单项 36.447 秒通过，在完整 ci 二线程组中 36.925 秒通过；最终全集 56 passed、14 skipped（680.799 秒），56 个场景结果工件与独立 JUnit 保存。此项只记录 fixture 前置收敛，不声称已完整证明并修复首次失败的生产根因。原二进制、首次日志和 JUnit 分别保留。
+
+### 最终本地门禁汇总（2026-10-21）
+
+`oct21-local-final-summary.json` 校验 20 个本地阶段均已通过，保留三个首次失败阶段的原记录。最终原网络四种模式共 22 个场景通过，清理与明文扫描全部通过；已知设备换址另跑三轮，自动上线 3597／3587／3758ms，旧端口关闭、新端口绑定、发现阻断和实际双向内容均通过。
+
+| 验证 | 实际结果 |
+| --- | --- |
+| workspace | 4303 passed、27 skipped |
+| 完整成员组 | 56 passed、14 skipped；56 个场景结果均 passed 且 cleanup completed |
+| 升级 smoke | 5 个断言通过；矩阵保留 3 pass、1 rejected、1 known-incompatible，额外历史格未执行 |
+| testkit 证据 | 18 项通过，正／负例工件存在 |
+| 当前剪贴板 Direct／强制 Relay | 各四类完整内容读回通过 |
+| 成员历史 Relay 跨轮复用 | 真实三进程通过，UDP 阻断有计数 |
+| 固定旧主线组更新／剪贴板 | v1／v2 双向两项通过；剪贴板双方角色与完整内容通过 |
+| 原网络／额外换址 | 四模式 22 个场景通过；额外换址三轮通过 |
+| 最终根门禁 | metadata、workspace all-targets check、fmt、Rust style、架构、25 项脚本测试、audit、diff check 均通过 |
+
+原网络首次失败由扩展双栈工件时误把 `counters` 字段加到通用分区与 IPv4 对端隔离造成；已删除这两处无定义且语义不实的字段，强制 Relay 的实际 IPv4／IPv6 计数保留。首次日志不覆盖，不修改 Engine 或任何期限。
+
+确认无本任务活动网络／Cargo 进程后，回收 a07 与 a13 的本次源码快照和临时观测缓存；保留共享 target、编译缓存、旧端二进制、脱敏证据及隔离 runner 源码快照。cleanup 证据为 `oct21-local-cleanup.json`。最终提交／PR、平台 SDK 与线上检查尚待执行，规格和计划继续 active。

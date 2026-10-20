@@ -19,3 +19,12 @@
 - 原 native adapter 的大部分测试使用内部状态表、成员伪表或强制插入 Online；迁移必须改成完整 owner/Uni/native 网络可观察行为，不能把旧实现留下仅让旧测试通过。
 
 - rc.15 旧 Sponsor 的 address.used 为 direct_count=1/relay_count=0，旧 Joiner 保有 Sponsor relay 路由。将“新端接收”机械固定到升级 Joiner 会把历史启动地址缺陷误当成 presence 迁移失败；最终矩阵 receive 升级 Sponsor，initiate 升级 Joiner，均从独立原资料生成，禁止人工补地址。
+
+### 最终待提交差异审查（2026-10-20）
+- 原生 incoming gate 状态、setter 和 Server-side 拒绝均限于 test／test-util；Engine 动作限于 dev-tools，稳定 facade／绑定无新入口。真实原生连接与清除回归、独立进程主动方向证明共同覆盖边界。
+- 同一宿主源通过独立 inbound-network-faults 能力适配旧库；冻结 main 显式关闭默认特性，只启用其既有 current-engine，旧库及非宿主锁包保持冻结。
+- Relay 三秒门从本轮原生协议成功事件发生时间计算，且要求当前 TCP；旧事件、断开后的成功历史及纯 TCP 探测均不满足门起点。日志刷新／读取成本计入原门限，不以 Online 为起点。
+- rc.15 关闭重开基线由旧库读取原 Space／传输身份并完成旧旧精确内容；不补路由、不伪造资格。角色限制在故障前清空，恢复期无刷新／预发送。
+- 两项本地生命周期 fixture 用既有配置关闭公网 Relay，原超时及资源阈值不变；业务生产行为不变，真实中转验收独立完成。
+
+- 2026-10-21 成员失败待证假设（按优先级）：① B 重启换端口后 C 仍使用旧路由，预测握手持续超时且端口／发现观察未更新；② 独立网络 dummy 默认路由或 mDNS 条件，预测同一单项在宿主与 namespace 有可重复差异；③ 全集负载／时序，预测串行单项反复通过而同组并发才失败。新增 incoming gate 默认空集合，失败测试未设置该限制，当前没有证据支持它导致拒绝。需先同二进制复现，不提前写根因。

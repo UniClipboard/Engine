@@ -285,12 +285,13 @@ async fn lifecycle_requests_after_leaving_reach_the_fresh_runtime() {
 async fn repeated_leaves_do_not_accumulate_tasks_or_descriptors() {
     let root = tempfile::tempdir().unwrap();
     let storage = MemorySecureStorage::default();
-    let (engine, _events) = Engine::start(
-        EngineConfig::new("2.0.0"),
-        host(root.path(), Box::new(storage.clone())),
-    )
-    .await
-    .unwrap();
+    let config = EngineConfig::new("2.0.0");
+    // 本地创建／离开的资源样本不包含公网中转的连接、退避与重试波动。
+    #[cfg(feature = "dev-tools")]
+    let config = config.with_test_relay_fallback(false);
+    let (engine, _events) = Engine::start(config, host(root.path(), Box::new(storage.clone())))
+        .await
+        .unwrap();
 
     let mut samples = Vec::new();
     for round in 0..6 {

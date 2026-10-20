@@ -102,10 +102,12 @@ Router 从收到已握手连接起立即获取首流前全局 16 个暂态许可
 原自动连接验收见[原执行记录](../exec-plans/completed/2026-09-11-automatic-peer-connections.md)，活性与恢复改动见[本次执行记录](../exec-plans/completed/2026-09-12-connection-liveness-and-recovery.md)。
 专用入口为 `bash scripts/testing/run-connection-recovery-e2e.sh --suite all --repeat 3`，独立网络部分必须在支持命名空间和 nftables 的 Linux 环境执行。本地确定性测试只跑一轮，`--repeat` 只控制真实网络场景的重复次数。
 只走中转的三秒恢复门使用 `bash scripts/testing/run-connection-recovery-e2e.sh --suite network --mode relay --case E10-relay-only --repeat 20`：测试先用内核规则阻断并计数全部 UDP 直连，中转重启后等两端都重新建立中转连接，再从较晚完成时刻起要求三秒内双方 Online 且完成双向精确内容传送。中转故障期间的离线识别单独计时，不计入三秒。
+底层就绪同时核对 TCP 与本轮原生 Relay 协议连接成功观察；同端口上的 HTTP 探测连接不代表中转传输就绪。计时使用双方较晚的连接成功事件发生时刻，刷新、读取观察的耗时同样计入三秒，不以 Online 或内容发送完成作为起点。
 自动验收只查询在线状态，不能通过刷新或发送促成连接；连接后再验证当前成员资格及实际内容传送。
 其中已知设备联系场景使用三台独立进程：第三台设备经中间成员加入，使等待方已知但尚未确认该成员；随后第三台设备更换固定端口，测试同时阻断等待方的本地发现和主动发起，只允许换址设备主动联系。验收必须独立证明旧端口关闭、防火墙规则实际命中、20 秒内自动上线，并在上线后完成双向传送；默认连续运行三次。
 
 第六切片必需矩阵入口为 `bash scripts/testing/run-peer-reachability-connectivity.sh`：冻结开工 main 与 rc.15，
-旧旧正常配对后每格复制真实加密资料，只升级一端，覆盖双方角色和 Direct／Relay；新新 v2 自动恢复 20 轮，
+旧旧正常配对并关闭后，先由同一旧库重开原资料，验证原 Space、传输身份和双向内容，再关闭并按格复制真实加密资料，只升级一端，覆盖双方角色和 Direct／Relay；新新 v2 自动恢复 20 轮，
 冻结 main 每角色三轮，rc.15 沿用 70 秒关闭识别。底层 Relay 重连按 Iroh 自身退避等待并单独记录（驱动最多观察 90 秒）；三秒门仍从双方底层中转就绪的较晚时刻开始，v1 不套用该门限。驱动只在成功 Online 后发送双向合成内容并精确读回。
+初始主动／接收角色由实际连接方向证明；仅测试宿主按需拒绝新出站或新入站握手，不修改旧库，也不影响已有连接。角色证明完成后、网络故障前清除限制，恢复阶段仍使用默认双向能力和只读查询。
 默认 PR 网络与移动编译 job 属于必需验收；真机行为另列实际状态。实现进度见[执行计划](../exec-plans/active/2026-10-14-peer-reachability-connectivity-plan.md)。

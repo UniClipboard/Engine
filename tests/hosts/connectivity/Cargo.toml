@@ -8,7 +8,9 @@ publish = false
 # 旧版 Engine 公开接口按能力分层：当前源码启用全部能力；旧锚点只启用其 rev 已有的能力，
 # 对应关系见 tests/upgrade-matrix/host-features.json。
 [features]
-default = ["current-engine"]
+# 入站故障控制单独启用，冻结 main 复用源码时仍可选择原 current-engine 能力集。
+default = ["current-engine", "inbound-network-faults"]
+inbound-network-faults = ["current-engine"]
 current-engine = [
   "connectivity-opportunity",
   "device-group-choices",

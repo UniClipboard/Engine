@@ -1149,6 +1149,9 @@ async fn reset_space_rebuilds_device_management_state_and_preserves_local_histor
     let temp = tempfile::tempdir().unwrap();
     let secure_storage = MemoryHostSecureStorage::default();
     let config = EngineConfig::new("1.2.3");
+    // 本例验本地资料和生命周期，使用现有测试开关避免公网中转重连影响完成时刻。
+    #[cfg(feature = "dev-tools")]
+    let config = config.with_test_relay_fallback(false);
     let (engine, _events) = Engine::start(
         config.clone(),
         persistent_engine_host(temp.path(), secure_storage.clone()),

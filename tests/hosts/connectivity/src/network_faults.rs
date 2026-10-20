@@ -42,6 +42,18 @@ pub async fn execute(engine: &Engine, command: &str, request: &Value) -> Result<
             };
             Ok(json!({ "blocked_peer_count": blocked_peer_count }))
         }
+        #[cfg(feature = "inbound-network-faults")]
+        "reject_inbound_presence" => {
+            let endpoint_ids = serde_json::from_value(request["endpoint_ids"].clone())
+                .context("invalid endpoint identifiers")?;
+            let DevOperationResult::NetworkPartitionUpdated { blocked_peer_count } = engine
+                .execute_dev(DevOperation::RejectInboundPeerReachability { endpoint_ids })
+                .await?
+            else {
+                bail!("incoming rejection result expected");
+            };
+            Ok(json!({ "blocked_peer_count": blocked_peer_count }))
+        }
         "rejected_dials" => {
             let DevOperationResult::RejectedConnectionCount { count } = engine
                 .execute_dev(DevOperation::QueryRejectedConnectionCount)

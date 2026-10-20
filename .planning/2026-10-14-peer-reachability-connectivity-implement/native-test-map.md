@@ -14,4 +14,4 @@
 | 最新成功、旧失败、关闭及共享刷新交错 | peer_connections/tests.rs：fresh_online、incoming_success、manual_refresh、removed_target、relay_recovery 系列 |
 | 实际 ALPN、路径、传输关闭、恢复与双向内容 | 默认 run-peer-reachability-connectivity.sh；原 run-connection-recovery-e2e.sh 全场景 |
 
-最后续接原生运行：resume-native.log，7 passed；完整工作区：workspace-final-fixed.log，4227 passed、25 skipped。网络和平台状态以执行计划的最终实际证据为准。
+整合最新 main 后：oct20-final-related.log 的 109 项相关回归（含原生 7 项与真实观测 5 项）全部通过；oct20-final-workspace-with-incoming.log 的完整工作区 4303 passed、27 skipped，包含新增原生入站故障控制。默认网络矩阵 11 格全部通过；其余回归和平台状态以执行计划最终实际证据为准。

@@ -4,7 +4,7 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../build-cache/env.sh"
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$repo"
-out="$repo/target/membership-history-relay"
+out="${UC_MEMBERSHIP_HISTORY_RELAY_EVIDENCE_ROOT:-$repo/target/membership-history-relay}"
 mkdir -p "$out"
 if [[ "${1:-}" != --inside ]]; then
   cargo build --locked -p uc-connectivity-relay

@@ -2,6 +2,8 @@ use std::collections::HashSet;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
+#[cfg(any(test, feature = "test-util"))]
+use iroh::endpoint::Side;
 use iroh::endpoint::{
     AfterHandshakeOutcome, BeforeConnectOutcome, Connection, EndpointHooks, VarInt,
     WeakConnectionHandle,
@@ -20,6 +22,8 @@ struct PartitionState {
     connections: Vec<([u8; 32], WeakConnectionHandle)>,
     #[cfg(any(test, feature = "test-util"))]
     rejected_dials: HashSet<([u8; 32], Vec<u8>)>,
+    #[cfg(any(test, feature = "test-util"))]
+    rejected_incoming: HashSet<([u8; 32], Vec<u8>)>,
     #[cfg(any(test, feature = "test-util"))]
     rejected_dial_count: u64,
     #[cfg(any(test, feature = "test-util"))]
@@ -83,6 +87,15 @@ impl IrohNetworkPartitionGate {
     #[cfg(any(test, feature = "test-util"))]
     pub fn rejected_dial_count(&self) -> u64 {
         self.state().rejected_dial_count
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn reject_incoming_connections(&self, peers: Vec<[u8; 32]>, alpns: Vec<Vec<u8>>) -> usize {
+        self.state().rejected_incoming = peers
+            .iter()
+            .flat_map(|peer| alpns.iter().map(move |alpn| (*peer, alpn.clone())))
+            .collect();
+        peers.len()
     }
 
     pub fn local_endpoint_id(&self) -> Option<[u8; 32]> {
@@ -168,6 +181,17 @@ impl EndpointHooks for IrohNetworkPartitionGate {
             };
         }
         #[cfg(any(test, feature = "test-util"))]
+        if connection.side() == Side::Server
+            && state
+                .rejected_incoming
+                .contains(&(endpoint_id, connection.alpn().to_vec()))
+        {
+            return AfterHandshakeOutcome::Reject {
+                error_code: VarInt::from_u32(0),
+                reason: b"test incoming connection rejected".to_vec(),
+            };
+        }
+        #[cfg(any(test, feature = "test-util"))]
         if [
             super::PEER_REACHABILITY_ALPN,
             super::LEGACY_PEER_REACHABILITY_ALPN,
@@ -188,6 +212,56 @@ mod tests {
     use super::*;
     use iroh::{Endpoint, RelayMode};
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn rejecting_incoming_only_preserves_outbound_and_can_be_cleared() {
+        const ALPN: &[u8] = b"test/incoming-gate";
+        let gate = IrohNetworkPartitionGate::default();
+        let a = Endpoint::builder(iroh::endpoint::presets::N0)
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup()
+            .alpns(vec![ALPN.to_vec()])
+            .bind()
+            .await
+            .unwrap();
+        let b = Endpoint::builder(iroh::endpoint::presets::N0)
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup()
+            .alpns(vec![ALPN.to_vec()])
+            .bind()
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while a.addr().addrs.is_empty() || b.addr().addrs.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let (outgoing, _server_b) = tokio::join!(a.connect(b.addr(), ALPN), async {
+            b.accept().await.unwrap().await.unwrap()
+        });
+        let (_client_b, incoming) = tokio::join!(b.connect(a.addr(), ALPN), async {
+            a.accept().await.unwrap().await.unwrap()
+        });
+        let outgoing = outgoing.unwrap();
+        gate.reject_incoming_connections(vec![*b.id().as_bytes()], vec![ALPN.to_vec()]);
+        assert!(matches!(
+            gate.after_handshake(&outgoing).await,
+            AfterHandshakeOutcome::Accept
+        ));
+        assert!(matches!(
+            gate.after_handshake(&incoming).await,
+            AfterHandshakeOutcome::Reject { .. }
+        ));
+        gate.reject_incoming_connections(Vec::new(), vec![ALPN.to_vec()]);
+        assert!(matches!(
+            gate.after_handshake(&incoming).await,
+            AfterHandshakeOutcome::Accept
+        ));
+        a.close().await;
+        b.close().await;
+    }
 
     #[tokio::test]
     async fn rejecting_new_dials_keeps_established_streams_usable() {

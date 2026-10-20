@@ -4,6 +4,18 @@ import { setTimeout as delay } from 'node:timers/promises'
 // connection-recovery-network.mjs 中等待双方重新在线的预期超时文案；只有这一种失败可以被记录为“未在期限内恢复”。
 export const ONLINE_DEADLINE_MESSAGE = 'automatic connection exceeded its deadline'
 
+/** 返回本轮真正建立 Relay 传输的发生时间；TCP 探测连接不能证明协议就绪。 */
+export function relayTransportReadyAt(tcpEstablished, observations, restartedAt) {
+  if (!tcpEstablished) return undefined
+  const statuses = observations
+    .filter(row => row.fields?.['event.name'] === 'relay.status.observed')
+    .map(row => ({ at: Date.parse(row.timestamp), connected: row.fields.connected_count > 0 }))
+    .filter(row => Number.isFinite(row.at) && row.at >= restartedAt)
+    .sort((left, right) => left.at - right.at)
+  const latest = statuses.at(-1)
+  return latest?.connected ? latest.at : undefined
+}
+
 /**
  * 在期限内等待恢复，返回耗时毫秒；仅当失败正是预期的期限超时才返回 null，
  * 宿主退出、命令错误、中断等其他失败一律继续抛出，避免把环境故障记成“没有恢复”。

@@ -280,6 +280,10 @@ async fn operation(
         "reject_reachability_dials" | "rejected_dials" | "set_network_partition" => {
             return network_faults::execute(engine, command, request).await;
         }
+        #[cfg(feature = "inbound-network-faults")]
+        "reject_inbound_presence" => {
+            return network_faults::execute(engine, command, request).await;
+        }
         "capture" => return content::capture(engine, clipboard, files, request).await,
         "observe" => return observe::observe(engine).await,
         "clipboard" => return clipboard.observed(),
@@ -605,6 +609,10 @@ fn host_identity() -> Value {
         ),
         (cfg!(feature = "startup-progress"), "startup-progress"),
         (cfg!(feature = "current-engine"), "space-work-events"),
+        (
+            cfg!(feature = "inbound-network-faults"),
+            "inbound-presence-rejection",
+        ),
     ] {
         if enabled {
             capabilities.push(name);
@@ -771,6 +779,15 @@ async fn main() -> Result<()> {
         network_faults::execute(
             &engine,
             "reject_reachability_dials",
+            &json!({ "endpoint_ids": endpoint_ids }),
+        )
+        .await?;
+    }
+    #[cfg(feature = "inbound-network-faults")]
+    if let Some(endpoint_ids) = start.get("reject_inbound_presence_endpoint_ids") {
+        network_faults::execute(
+            &engine,
+            "reject_inbound_presence",
             &json!({ "endpoint_ids": endpoint_ids }),
         )
         .await?;
