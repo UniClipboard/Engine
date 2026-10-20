@@ -13,8 +13,8 @@ use sha2::{Digest, Sha256};
 use uc_core::ids::{DeviceId, SpaceId};
 use uc_core::membership::{
     GroupEpoch, GroupUpdateDeliveryCondition, GroupUpdateDispatchError,
-    GroupUpdateRecipientDelivery, GroupUpdateRejection, KeyEpochError, PendingGroupUpdate,
-    RevocationStage, RevocationStatus,
+    GroupUpdateRecipientDelivery, GroupUpdateRejection, GroupUpdateRetryPolicy, KeyEpochError,
+    PendingGroupUpdate, RevocationStage, RevocationStatus,
 };
 
 use super::encrypted_payload::{open, seal, space_lookup_token};
@@ -420,7 +420,12 @@ impl<E: DbExecutor> DieselSpaceSecurityStore<E> {
                 else {
                     continue;
                 };
-                state.attempts = state.attempts.saturating_add(1);
+                let (attempts, next_attempt_ms) = GroupUpdateRetryPolicy::after_failure(
+                    state.attempts,
+                    state.next_attempt_ms,
+                    now_ms,
+                );
+                state.attempts = attempts;
                 match failure {
                     DeliveryFailure::Rejected(rejection) => {
                         state.rejected = true;
@@ -442,10 +447,7 @@ impl<E: DbExecutor> DieselSpaceSecurityStore<E> {
                         }
                     }
                 }
-                let delay = 30_000_i64
-                    .saturating_mul(1_i64 << state.attempts.saturating_sub(1).min(7))
-                    .min(3_600_000);
-                state.next_attempt_ms = now_ms.saturating_add(delay);
+                state.next_attempt_ms = next_attempt_ms;
                 save_state(conn, key, &token, &state)?;
                 found.insert(id);
             }

@@ -121,3 +121,28 @@
 
 - 修正后的完整默认矩阵 oct21-session-final-matrix 全部 11 格通过，已逐格检查工件；新新 Relay 20 轮最慢关闭 19071ms／双向读回 581ms，冻结 main 每角色各三轮读回最慢 531／525ms，rc.15 各一轮关闭 64767／64673ms、读回 508／536ms。所有旧新格记录真实启动恢复结果；身份／关系／精确内容／真实方向、cleaned／plaintext_clean 全通过；旧版配对拒绝仍通过。
 - 根验证及 29 项脚本测试通过；本次运行的 namespace／宿主／relay／Cargo 进程均已结束，临时冻结源码目录已回收。仅验收驱动、脚本测试、CI 接线和执行记录变化，Rust 业务／绑定／宿主源码未改。准备提交与推送；末次 head 九项 CI 仍待实际结算，最终证据写入忽略目录和 PR 描述，避免记录结果本身制造新 head。
+
+- cb52cf97 最终 CI 的 macOS 仓库 job 因 cargo audit 失败，默认／LAN 两轮日志宏检查已通过。新拉取的 RustSec 公告 2026-0382／0383／0381 阻断 rustls-webpki 0.103.15、webpki-root-certs 与 webpki-roots 1.0.7；本地 audit 同样 red（3 个漏洞），原日志及官方数据库公告快照保留。仅精确升级为 0.103.16／1.0.10／1.0.10，Cargo.lock 只有三个版本与 checksum 变化，无 ignore 或门禁弱化；刷新 audit green（0 个漏洞，原允许警告保留）。因运行期 TLS 依赖变化，重新执行完整 workspace、11 格真实矩阵与根门禁，再推送最终提交。
+
+- cb52cf97 的九项 CI 已结算：其余八项全部成功，仅 macOS audit 被三条新公告阻断；完整 presence 网络矩阵和 Linux workspace／成员 smoke／内容验收成功。正在下载并核验本轮网络工件，不能将该提交记为九项全绿。新锁还须在当前串行 workspace→矩阵→根检查结束后复验完整成员组，再提交最终依赖修复。
+
+- cb52cf97 线上 11 格工件已核验：全部记录成功、清理／明文扫描通过，新增 sessions 启动恢复证据完整。一次新新 Relay 状态查询回读为 20023ms；原驱动自 dfa494bc（2026-09-18）已给多进程读取 250ms 观测余量，本次未修改该值或生产 20 秒期限。临时工件校验脚本最初误用裸 20000ms，现按原预算加既有观测余量校验并保留原始读回值，不把查询完成时间冒充业务事件精确时间。
+
+- 新 TLS 锁 workspace 全集通过：4303 passed、27 skipped（测试 606.376 秒，含构建 1213.861 秒），JUnit 与完整输出保存在 oct21-tls-workspace-*；真实独立进程成员恢复、崩溃恢复与绑定契约均在本轮通过。串行流水线现进入新锁的 11 格矩阵，之后根检查／fresh audit，再单独复验完整成员组。
+
+- 新 TLS 锁的完整 11 格矩阵已全部通过并逐格核验，命令 1188.164 秒；协议真实协商、接收／主动方向、两端恢复就绪、身份／成员／精确内容、零整会话恢复以及 cleaned／plaintext_clean 均通过，工件 oct21-tls-final-matrix、核验 oct21-tls-final-matrix-verified.json。根检查正在执行，之后仍须按约复验完整成员组再提交。
+
+- 新锁根门禁（88.538 秒）与最后 fresh audit（3.328 秒）均通过，零漏洞、原 9 项允许警告保留；完整成员组已用同一 workspace 构建范围与既有 rootless runner 启动，串行复用 target。新新 Relay 最慢关闭查询 17201ms／读回 594ms，冻结 main 各三轮读回最慢 492／486ms（一次关闭查询 20042ms，在既有 250ms 观测余量内），rc.15 各一轮关闭 64733／64742ms、读回 594／935ms。
+
+- 新锁完整成员组再次失败：55 passed、1 failed、14 skipped，753.512 秒；仍为 missing_predecessor_recovers_from_another_member_after_receiver_restart（152.958 秒），B 安全 epoch 5／pending effects 0 后 C→B ReceiverUnavailable，3 次真实接收端暂不可用响应在约 7 秒内，将次次重算的 next_retry 推到 120 秒。固定 B 重启端口未消除此失败，不能再把一次 56 项通过当成根因已修复。完整日志、JUnit、failed result／cleanup completed 均保留于 oct21-tls-membership-*。
+- 调度检查：GroupUpdateDelivery 使用持久 next_attempt，却未给已有维护 timer 注册该 deadline；另一方面，上线／历史允许的提前投递失败也会从当前时刻重算并延后原 deadline。先补真实 SQLite 回归（两次提前 ReceiverUnavailable 不得推迟第一次的 30 秒重试；重开数据库后无额外事件仍到期），验证 red 后只改变该 deadline 合并规则，再用原 native 场景与全集验证。尚未提交／推送 TLS 修复，不交付，不加长 120 秒。
+
+- 最小 SQLite red 已证实：第二次提前 ReceiverUnavailable 将 30100ms 推到 60200ms（0.081 秒）；非网络寻址假设。Core 新增纯 GroupUpdateRetryPolicy：每次真实尝试计数，未来 deadline 只能保留／提前，到期失败沿用旧 30 秒至 1 小时退避，并保留原饱和上界。仓储在原密文事务内用结果，无新字段／格式、无 Engine API 或期限放宽。SQLite 32 项 green；含 Core 全集及存储相关 365 项通过（3.037 秒）。当前仅验证此因果断点，不增加新的调度接口；下一步 native 原场景加并发 G4，再完整回归。
+
+- 原 native 缺失前序确认场景与并发 G4 两项均 green；G4 为 66.145 秒（此前完整组约 153 秒），未加长任何期限，完整日志 oct21-retry-native-pair.log；共享 workspace 重建 9 分 14 秒，后续原生／workspace 验证复用同一套二进制。串行流程已进入完整成员组，之后 workspace、11 格、根和 fresh audit；未提前提交／交付。
+
+- 完整成员组在最终期限修正上通过：56 passed、14 skipped，测试 621.239 秒／总 623.347 秒；缺失前序确认在完整负载下 38.016 秒、G4 62.962 秒，未放宽原 120 秒或任何 ACK／内容断言。56 个 result.json outcome=passed 且 cleanup=completed，核验 oct21-retry-membership-verified.json。SQLite 确定性 red／green与 native 并发、全集共同定位提前尝试推迟期限为实际确认延迟根因；固定端口本身不是修复。流水线已继续 workspace（应含新增两项回归）、11 格、根与 fresh audit。
+
+- 最终规则形态的 workspace 全集 green：4305 passed、27 skipped（593.890 秒，含构建 595.076 秒），含新增 Core 时钟／上界与真实 SQLite 提前失败重试两项回归；JUnit 与输出 oct21-retry-workspace-*。完整成员 56 项已先通过；当前进入最后 11 格，之后根门禁／fresh audit。
+
+- 最终全部本地阶段通过：成员 56／14 跳过，workspace 4305／27 跳过，11 格（1128.342 秒），根 93.461 秒与 fresh audit 3.610 秒。新新 Relay 20 轮关闭查询最慢 17367ms／双向读回 620ms；冻结 main 各三轮读回最慢 565／524ms；rc.15 各一轮关闭 64794／64739ms、读回 765／398ms。所有工件核验、清理／明文检查通过。检查无本次 Cargo／宿主／relay／网络驱动进程与临时冻结源码；删除未执行的 main 对照草稿，保留实际证据和共享缓存。将提交独立 TLS 锁修复与 Core 重试规则修复，一次推送，再等待末次 head 九项 CI。
