@@ -226,8 +226,9 @@ Pending 为 partial，Busy 为 deferred。UpToDate 只产生无关联的 skipped
 不提前查询内部阶段，不改变 ensure_v3 的调用、返回、等待或重试行为。
 
 `ProfileStorageUpgrade` 内部另外向本地日志记录失败诊断：固定的 `upgrade_phase`、`upgrade_action`、
-`error_kind`，以及存在时的 `target_activated`、`io_error_kind`、`io_error_code`。只从错误来源提取系统错误类型和数字码，
-不输出错误正文或路径。该事件使用 Infra 本地 target，不属于 `uc.telemetry`，不进入远程 schema v1；
+`error_kind`，以及存在时的 `target_activated`、`io_error_kind`、`io_error_code`、`sqlite_result`。只从错误来源提取系统错误类型和数字码；
+`sqlite_result` 是 SQLite 主结果码的固定分类（如 `busy`、`locked`、`corrupt`、`not_a_database`、`other`），
+由 `uc_infra_storage::db::connection::sqlite_failure_class` 从 diesel 错误得出。不输出错误正文或路径。该事件使用 Infra 本地 target，不属于 `uc.telemetry`，不进入远程 schema v1；
 Engine 仍只记录完整升级结果，不读取或暴露内部阶段。
 
 升级前备份沿用同一隐私边界，在 Infra 本地日志记录固定的 `backup_action`、`error_kind`，以及存在时的
