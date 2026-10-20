@@ -1,5 +1,6 @@
 use super::journal::UpgradePhaseV1;
 use super::ProfileStorageUpgradeError;
+use uc_infra_storage::db::connection::sqlite_failure_class;
 use uc_observability_contract::{error_source::io_error_kind, uc_error};
 
 /// 仅供本地排障，不新增业务 trace，也不把升级内部阶段暴露给调用方。
@@ -59,6 +60,7 @@ impl UpgradeDiagnostics {
             error_kind = error_kind,
             io_error_kind = io_error_kind(error),
             io_error_code = io.and_then(std::io::Error::raw_os_error),
+            sqlite_result = sqlite_failure_class(error),
             "profile storage upgrade step failed"
         );
     }

@@ -15,6 +15,7 @@ use uc_core::membership::ActiveSpaceGenerationManifestV2;
 use uc_infra_storage::db::pool::DbPool;
 
 use super::journal::UpgradeJournalV1;
+use super::validation::{open_connection, validation_failure};
 use super::ProfileStorageUpgradeError;
 
 pub(super) const PRIMARY_OUTPUT_DIRECTORY: &str = "v3-primary";
@@ -449,18 +450,7 @@ fn ensure_tables_empty(
     tables: &[&str],
     optional_missing: &[&str],
 ) -> Result<(), ProfileStorageUpgradeError> {
-    let database = path
-        .to_str()
-        .ok_or_else(|| ProfileStorageUpgradeError::Corrupt {
-            source: anyhow::anyhow!("runtime generation path is invalid"),
-        })?;
-    let mut connection =
-        diesel::sqlite::SqliteConnection::establish(database).map_err(|source| {
-            ProfileStorageUpgradeError::Corrupt {
-                source: anyhow::Error::new(source)
-                    .context("open runtime generation for ownership validation"),
-            }
-        })?;
+    let mut connection = open_connection(path)?;
     let actual = load_table_names(&mut connection)?;
     for table in tables {
         if !actual.contains(*table) {
@@ -473,9 +463,10 @@ fn ensure_tables_empty(
         }
         let row = diesel::sql_query(format!("SELECT COUNT(*) AS count FROM \"{table}\""))
             .get_result::<CountRow>(&mut connection)
-            .map_err(|source| ProfileStorageUpgradeError::Corrupt {
-                source: anyhow::Error::new(source)
-                    .context("validate runtime generation row ownership"),
+            .map_err(|source| {
+                validation_failure(
+                    anyhow::Error::new(source).context("validate runtime generation row ownership"),
+                )
             })?;
         if row.count != 0 {
             return Err(ProfileStorageUpgradeError::Corrupt {

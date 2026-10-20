@@ -2,10 +2,15 @@
 //!
 //! 验证按最终 repository 路由重新打开两库，不复用转换连接；只有完整性、外键、
 //! 业务 row 唯一归属与 schema fingerprint 都稳定时才允许 journal 进入 Verified。
+//!
+//! 验证连接与运行期连接一样先等待锁释放；超过等待上限的锁争用说明另一连接暂时占用运行库
+//! （例如另一进程正在关闭最后一个连接），归为可重试的存储失败，其余 SQLite 失败才判定损坏。
 
 use std::path::Path;
 
-use diesel::{Connection as _, RunQueryDsl as _};
+use diesel::result::Error as DieselError;
+use diesel::RunQueryDsl as _;
+use uc_infra_storage::db::connection::{establish_waiting, is_lock_contention};
 
 use super::journal::UpgradeJournalV1;
 use super::target::{RuntimeTableSet, TargetGenerationStager};
@@ -112,7 +117,7 @@ fn validate_database(path: &Path) -> Result<(), ProfileStorageUpgradeError> {
     let mut connection = open_connection(path)?;
     let integrity = diesel::sql_query("PRAGMA integrity_check")
         .get_result::<IntegrityRow>(&mut connection)
-        .map_err(database_corrupt)?;
+        .map_err(database_failure)?;
     if integrity.integrity_check != "ok" {
         return Err(corrupt(anyhow::anyhow!(
             "runtime generation SQLite integrity check failed"
@@ -121,7 +126,7 @@ fn validate_database(path: &Path) -> Result<(), ProfileStorageUpgradeError> {
     let foreign_key_violations =
         diesel::sql_query("SELECT COUNT(*) AS count FROM pragma_foreign_key_check")
             .get_result::<CountRow>(&mut connection)
-            .map_err(database_corrupt)?;
+            .map_err(database_failure)?;
     if foreign_key_violations.count != 0 {
         return Err(corrupt(anyhow::anyhow!(
             "runtime generation contains foreign-key violations"
@@ -137,7 +142,7 @@ fn schema_digest(path: &Path) -> Result<[u8; 32], ProfileStorageUpgradeError> {
          WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY type, name",
     )
     .load::<SchemaRow>(&mut connection)
-    .map_err(database_corrupt)?;
+    .map_err(database_failure)?;
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"uniclipboard/runtime-generation-schema/v1\0");
     for row in rows {
@@ -153,19 +158,33 @@ fn schema_digest(path: &Path) -> Result<[u8; 32], ProfileStorageUpgradeError> {
     Ok(*hasher.finalize().as_bytes())
 }
 
-fn open_connection(
+/// 打开待验证的 runtime generation；`target` 的行归属检查共用同一连接与失败分类。
+pub(super) fn open_connection(
     path: &Path,
 ) -> Result<diesel::sqlite::SqliteConnection, ProfileStorageUpgradeError> {
     let database = path
         .to_str()
         .ok_or_else(|| corrupt(anyhow::anyhow!("runtime generation path is invalid")))?;
-    diesel::sqlite::SqliteConnection::establish(database).map_err(|source| {
-        corrupt(anyhow::Error::new(source).context("open final runtime generation"))
-    })
+    establish_waiting(database)
+        .map_err(|source| validation_failure(source.context("open final runtime generation")))
 }
 
-fn database_corrupt(source: diesel::result::Error) -> ProfileStorageUpgradeError {
-    corrupt(anyhow::Error::new(source).context("validate final runtime generation"))
+fn database_failure(source: DieselError) -> ProfileStorageUpgradeError {
+    validation_failure(anyhow::Error::new(source).context("validate final runtime generation"))
+}
+
+/// 验证读取失败的唯一分类：锁争用可重试，其余说明最终 generation 不可信。
+pub(super) fn validation_failure(source: anyhow::Error) -> ProfileStorageUpgradeError {
+    let contended = source.chain().any(|cause| {
+        cause
+            .downcast_ref::<DieselError>()
+            .is_some_and(is_lock_contention)
+    });
+    if contended {
+        ProfileStorageUpgradeError::Storage { source }
+    } else {
+        corrupt(source)
+    }
 }
 
 fn corrupt(source: anyhow::Error) -> ProfileStorageUpgradeError {

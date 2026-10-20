@@ -24,14 +24,21 @@ find "$source_dir" -type f -name '*.rs' -exec touch {} +
 # 宿主只使用已冻结版本支持的公开操作，源码与当前驱动一致。
 cp tests/hosts/connectivity/src/*.rs "$source_dir/tests/hosts/connectivity/src/"
 cp tests/hosts/connectivity/Cargo.toml "$source_dir/tests/hosts/connectivity/Cargo.toml"
-# 仅为同一宿主补 URL 解析依赖；冻结旧 Engine 的依赖版本不变。
+# 仅为同一宿主补当前驱动新增的依赖边（URL 解析、测试用 SQLite 锁持有者）；这些包在冻结锁文件中
+# 都只有一个版本，冻结旧 Engine 的依赖版本不变。依赖列表按 Cargo 的名称顺序重排。
 python3 - "$source_dir/Cargo.lock" <<'PYLOCK'
 from pathlib import Path
 import sys
 p=Path(sys.argv[1]); text=p.read_text()
 a=text.index('name = "uc-connectivity-host"'); b=text.index('\n[[package]]', a)
 block=text[a:b]
-if ' "url",' not in block: block=block.replace(' "uc-engine",', ' "uc-engine",\n "url",')
+start=block.index('dependencies = [\n')+len('dependencies = [\n'); end=block.index(']', start)
+entries=[line.strip().strip(',').strip('"') for line in block[start:end].splitlines() if line.strip()]
+for name in ('diesel', 'libsqlite3-sys', 'url'):
+    if name not in entries:
+        entries.append(name)
+entries.sort()
+block=block[:start]+''.join(f' "{entry}",\n' for entry in entries)+block[end:]
 p.write_text(text[:a]+block+text[b:])
 PYLOCK
 sha256sum "$source_dir/tests/hosts/connectivity/Cargo.toml" "$source_dir/Cargo.lock" > "$root/driver-build-inputs-sha256.txt"

@@ -262,6 +262,8 @@ __log_field_catalog! {
     plan: Literal,
     reject_reason: Literal,
     rollback_target: Literal,
+    // SQLite 主结果码的固定分类（busy / locked / corrupt / not_a_database 等），不含 SQLite 正文。
+    sqlite_result: Literal,
     step: Literal,
     storage_generation: Literal,
     strategy: Literal,

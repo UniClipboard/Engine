@@ -619,6 +619,7 @@ fn startup_summary(progress: &uc_engine::StartupProgress) -> Result<Value> {
         "upgrade_required": snapshot["upgrade"]["required"],
         "upgrade_completed": snapshot["upgrade"]["completed"],
         "failure": snapshot["failure"]["reason"],
+        "failure_retryable": snapshot["failure"]["retryable"],
     }))
 }
 

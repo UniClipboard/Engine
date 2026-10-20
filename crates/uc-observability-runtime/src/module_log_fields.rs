@@ -109,6 +109,7 @@ mod tests {
         "reject_reason",
         "rollback_target",
         "source_class",
+        "sqlite_result",
         "storage_generation",
         "tag_id",
         "task",

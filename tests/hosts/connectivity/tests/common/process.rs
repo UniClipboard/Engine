@@ -161,28 +161,14 @@ impl HostProcess {
         legacy_group_updates: bool,
         bind_port: Option<u16>,
     ) -> (Child, ChildStdin, Receiver<Value>, JoinHandle<()>) {
-        let mut child = Command::new(binary)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .expect("start connectivity host");
-        let mut input = child.stdin.take().expect("host input");
-        let output = child.stdout.take().expect("host output");
-        let mut start = json!({
-            "root": root,
-            "rendezvous": rendezvous,
-            "relay": std::env::var_os("UC_MEMBERSHIP_HISTORY_TEST_RELAY").is_some(),
-            "legacy_group_updates": legacy_group_updates,
-            "bind_port": bind_port,
-        });
-        if let Some(secure_storage) = secure_storage {
-            start["secure_storage"] = secure_storage;
-        }
-        writeln!(input, "{start}").expect("start host request");
-        input.flush().expect("flush start request");
-        let (replies, reader) = read_protocol_replies(output);
-        let ready = next_reply(&replies);
+        let (child, input, replies, reader, ready) = spawn_host(
+            root,
+            rendezvous,
+            secure_storage,
+            binary,
+            legacy_group_updates,
+            bind_port,
+        );
         assert_eq!(
             ready["ready"], true,
             "host did not start: code={}, state={}",
@@ -275,6 +261,123 @@ impl HostProcess {
     fn join_reader(&mut self) {
         if let Some(reader) = self.reader.take() {
             reader.join().expect("host output reader");
+        }
+    }
+}
+
+type SpawnedHost = (Child, ChildStdin, Receiver<Value>, JoinHandle<()>, Value);
+
+/// 启动宿主并原样交回首个启动应答，不判定成功与否。
+fn spawn_host(
+    root: &Path,
+    rendezvous: &str,
+    secure_storage: Option<Value>,
+    binary: &PathBuf,
+    legacy_group_updates: bool,
+    bind_port: Option<u16>,
+) -> SpawnedHost {
+    let mut child = Command::new(binary)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("start connectivity host");
+    let mut input = child.stdin.take().expect("host input");
+    let output = child.stdout.take().expect("host output");
+    let mut start = json!({
+        "root": root,
+        "rendezvous": rendezvous,
+        "relay": std::env::var_os("UC_MEMBERSHIP_HISTORY_TEST_RELAY").is_some(),
+        "legacy_group_updates": legacy_group_updates,
+        "bind_port": bind_port,
+    });
+    if let Some(secure_storage) = secure_storage {
+        start["secure_storage"] = secure_storage;
+    }
+    writeln!(input, "{start}").expect("start host request");
+    input.flush().expect("flush start request");
+    let (replies, reader) = read_protocol_replies(output);
+    let ready = next_reply(&replies);
+    (child, input, replies, reader, ready)
+}
+
+/// 在调用方提供的 profile 目录上运行的宿主进程。
+///
+/// 启动应答原样交回（包括失败码）：同一 profile 的多个进程先后或重叠启动时，启动结果本身就是被测对象。
+// 只有 profile 启动重叠场景使用；共用本文件的其他测试二进制不构造它。
+#[allow(dead_code)]
+pub(crate) struct ProfileHost {
+    child: Child,
+    input: Option<ChildStdin>,
+    replies: Receiver<Value>,
+    reader: Option<JoinHandle<()>>,
+}
+
+#[allow(dead_code)]
+#[allow(dead_code)]
+impl ProfileHost {
+    pub(crate) fn launch(
+        root: &Path,
+        rendezvous: &str,
+        secure_storage: Option<Value>,
+    ) -> (Self, Value) {
+        let (child, input, replies, reader, ready) = spawn_host(
+            root,
+            rendezvous,
+            secure_storage,
+            &PathBuf::from(env!("CARGO_BIN_EXE_uc-connectivity-host")),
+            false,
+            None,
+        );
+        let host = Self {
+            child,
+            input: Some(input),
+            replies,
+            reader: Some(reader),
+        };
+        (host, ready)
+    }
+
+    /// 只写出指令，不等待应答；用于让关闭与另一进程的启动重叠。
+    pub(crate) fn send(&mut self, request: Value) {
+        let input = self.input.as_mut().expect("profile host input is open");
+        writeln!(input, "{request}").expect("write host request");
+        input.flush().expect("flush host request");
+    }
+
+    pub(crate) fn reply(&mut self) -> Value {
+        next_reply(&self.replies)
+    }
+
+    pub(crate) fn request(&mut self, request: Value) -> Value {
+        let command = request["command"].as_str().unwrap_or("missing").to_owned();
+        self.send(request);
+        let response = self.reply();
+        match response.get("ok") {
+            Some(ok) => ok.clone(),
+            None => panic!("host request {command} failed: {response}"),
+        }
+    }
+
+    /// 等待进程退出；启动失败的宿主会自行退出，已就绪的宿主须先收到 `shutdown`。
+    pub(crate) fn wait_exit(mut self) -> std::process::ExitStatus {
+        drop(self.input.take());
+        let status = self.child.wait().expect("wait for profile host");
+        if let Some(reader) = self.reader.take() {
+            reader.join().expect("profile host output reader");
+        }
+        status
+    }
+}
+
+impl Drop for ProfileHost {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
         }
     }
 }
