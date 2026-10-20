@@ -30,7 +30,7 @@ exclude = ["third_party/swarm-discovery", "third_party/iroh-mdns-address-lookup"
 resolver = "2"
 
 [workspace.package]
-version = "1.1.0-rc.22"
+version = "1.1.0-rc.23"
 license = "Apache-2.0"
 
 # 生产与验证共用不可变上游密码依赖；下游消费 Engine 时同样生效。
