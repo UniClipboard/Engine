@@ -4492,7 +4492,7 @@ dependencies = [
 
 [[package]]
 name = "openmls-validation"
-version = "1.1.0-rc.22"
+version = "1.1.0-rc.23"
 dependencies = [
  "openmls",
  "openmls_basic_credential",
@@ -7169,7 +7169,7 @@ checksum = "40ce102ab67701b8526c123c1bab5cbe42d7040ccfd0f64af1a385808d2f43de"
 
 [[package]]
 name = "uc-application"
-version = "1.1.0-rc.22"
+version = "1.1.0-rc.23"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7204,7 +7204,7 @@ dependencies = [
 
 [[package]]
 name = "uc-connectivity-host"
-version = "1.1.0-rc.22"
+version = "1.1.0-rc.23"
 dependencies = [
  "anyhow",
  "diesel",
@@ -7220,7 +7220,7 @@ dependencies = [
 
 [[package]]
 name = "uc-connectivity-relay"
-version = "1.1.0-rc.22"
+version = "1.1.0-rc.23"
 dependencies = [
  "anyhow",
  "iroh-relay",
@@ -7229,7 +7229,7 @@ dependencies = [
 
 [[package]]
 name = "uc-content-hash"
-version = "1.1.0-rc.22"
+version = "1.1.0-rc.23"
 dependencies = [
  "blake3",
  "hex",
@@ -7237,7 +7237,7 @@ dependencies = [
 
 [[package]]
 name = "uc-core"
-version = "1.1.0-rc.22"
+version = "1.1.0-rc.23"
 dependencies = [
  "anyhow",
  "arrayvec",
@@ -7262,7 +7262,7 @@ dependencies = [
 
 [[package]]
 name = "uc-engine"
-version = "1.1.0-rc.22"
+version = "1.1.0-rc.23"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7305,7 +7305,7 @@ dependencies = [
 
 [[package]]
 name = "uc-engine-uniffi"
-version = "1.1.0-rc.22"
+version = "1.1.0-rc.23"
 dependencies = [
  "cargo_metadata",
  "jni 0.21.1",
@@ -7323,7 +7323,7 @@ dependencies = [
 
 [[package]]
 name = "uc-infra-content"
-version = "1.1.0-rc.22"
+version = "1.1.0-rc.23"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7352,7 +7352,7 @@ dependencies = [
 
 [[package]]
 name = "uc-infra-crypto"
-version = "1.1.0-rc.22"
+version = "1.1.0-rc.23"
 dependencies = [
  "anyhow",
  "argon2",
@@ -7381,7 +7381,7 @@ dependencies = [
 
 [[package]]
 name = "uc-infra-local"
-version = "1.1.0-rc.22"
+version = "1.1.0-rc.23"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7404,7 +7404,7 @@ dependencies = [
 
 [[package]]
 name = "uc-infra-p2p"
-version = "1.1.0-rc.22"
+version = "1.1.0-rc.23"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7456,7 +7456,7 @@ dependencies = [
 
 [[package]]
 name = "uc-infra-profile"
-version = "1.1.0-rc.22"
+version = "1.1.0-rc.23"
 dependencies = [
  "anyhow",
  "argon2",
@@ -7525,7 +7525,7 @@ dependencies = [
 
 [[package]]
 name = "uc-infra-security"
-version = "1.1.0-rc.22"
+version = "1.1.0-rc.23"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7558,7 +7558,7 @@ dependencies = [
 
 [[package]]
 name = "uc-infra-storage"
-version = "1.1.0-rc.22"
+version = "1.1.0-rc.23"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7625,7 +7625,7 @@ dependencies = [
 
 [[package]]
 name = "uc-mobile-lan"
-version = "1.1.0-rc.22"
+version = "1.1.0-rc.23"
 dependencies = [
  "anyhow",
  "argon2",
@@ -7655,7 +7655,7 @@ dependencies = [
 
 [[package]]
 name = "uc-mobile-probe-core"
-version = "1.1.0-rc.22"
+version = "1.1.0-rc.23"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -7670,7 +7670,7 @@ dependencies = [
 
 [[package]]
 name = "uc-mobile-proto"
-version = "1.1.0-rc.22"
+version = "1.1.0-rc.23"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -7684,7 +7684,7 @@ dependencies = [
 
 [[package]]
 name = "uc-observability-contract"
-version = "1.1.0-rc.22"
+version = "1.1.0-rc.23"
 dependencies = [
  "anyhow",
  "chrono",
@@ -7701,7 +7701,7 @@ dependencies = [
 
 [[package]]
 name = "uc-observability-runtime"
-version = "1.1.0-rc.22"
+version = "1.1.0-rc.23"
 dependencies = [
  "anyhow",
  "cc",
@@ -7739,7 +7739,7 @@ dependencies = [
 
 [[package]]
 name = "uc-ohos-napi"
-version = "1.1.0-rc.22"
+version = "1.1.0-rc.23"
 dependencies = [
  "cargo_metadata",
  "json5",
@@ -7754,7 +7754,7 @@ dependencies = [
 
 [[package]]
 name = "uc-sync-protocol"
-version = "1.1.0-rc.22"
+version = "1.1.0-rc.23"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -7770,7 +7770,7 @@ dependencies = [
 
 [[package]]
 name = "uc-testkit"
-version = "1.1.0-rc.22"
+version = "1.1.0-rc.23"
 dependencies = [
  "serde",
  "serde_json",
@@ -7783,7 +7783,7 @@ dependencies = [
 
 [[package]]
 name = "uc-upgrade-matrix"
-version = "1.1.0-rc.22"
+version = "1.1.0-rc.23"
 dependencies = [
  "serde",
  "serde_json",
