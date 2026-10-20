@@ -49,7 +49,7 @@ printf '%s\n' "$rev" > "$root/engine-revision.txt"
 git archive "$rev" | sha256sum > "$root/engine-archive-sha256.txt"
 CARGO_TARGET_DIR="$repo/target" CARGO_PROFILE_DEV_DEBUG=0 UC_ENGINE_SOURCE_COMMIT="$rev" UC_ENGINE_SOURCE_STATE=clean \
 UC_HOST_ENGINE_REV="$rev" UC_HOST_ANCHOR=active-clipboard-baseline \
-  cargo build --locked --manifest-path "$source_dir/Cargo.toml" -p uc-connectivity-host
+  cargo build --locked --manifest-path "$source_dir/Cargo.toml" -p uc-connectivity-host --no-default-features --features current-engine
 cp target/debug/uc-connectivity-host "$root/uc-connectivity-host"
 sha256sum "$root/uc-connectivity-host" > "$root/binary-sha256.txt"
 if [[ -f "$backup" ]]; then cp "$backup" target/debug/uc-connectivity-host; fi

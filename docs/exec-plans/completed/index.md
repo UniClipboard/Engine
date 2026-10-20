@@ -2,6 +2,8 @@
 
 这里保留已完成、已由后续方案取代或仅供历史追溯的实施记录。它们不自动代表当前架构事实。
 
+- [Issue #34 第六切片：设备可达性、准入与存活检查](2026-10-14-peer-reachability-connectivity-plan.md)（完整 Uni 迁移、20 轮恢复及旧新矩阵完成；本地回归与九项必需 CI 通过，真机和额外历史格跳过；[规格](2026-10-14-peer-reachability-connectivity-spec.md)）
+
 - [Issue #34 第五切片：当前剪贴板状态与按需拉取](2026-10-14-active-clipboard-connectivity-plan.md)（四向 Uni、10 秒交换、4 目标与最新槽完成；本地及代码提交线上门禁通过，设备与完整历史矩阵跳过；[规格](2026-10-14-active-clipboard-connectivity-spec.md)）
 
 - [144 `uc-infra` 拆成 7 个 crate：S1–S6 实施记录](144-uc-infra-crate-split-record.md)（拆分、回归修复、SQL 所有权决策、构建性能对照与 coverage 失败修复；未闭环事项见 active 计划）

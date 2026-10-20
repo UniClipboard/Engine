@@ -102,13 +102,8 @@ pub(crate) fn admits_peer(view: &MembershipView, device_id: &DeviceId) -> bool {
 mod tests;
 
 fn admission_error(error: MembershipLedgerError) -> PeerAdmissionError {
-    match error {
-        MembershipLedgerError::Locked
-        | MembershipLedgerError::Conflict
-        | MembershipLedgerError::Unavailable { .. } => PeerAdmissionError::Unavailable,
-        MembershipLedgerError::Corrupt { .. } | MembershipLedgerError::RecoveryRequired => {
-            PeerAdmissionError::InvalidState
-        }
+    PeerAdmissionError::ReadFailed {
+        source: Box::new(error),
     }
 }
 

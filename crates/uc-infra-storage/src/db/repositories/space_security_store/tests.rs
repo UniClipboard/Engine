@@ -485,6 +485,60 @@ async fn delivery_status_exposes_the_persisted_retry_deadline() {
 }
 
 #[tokio::test]
+async fn early_unavailable_retries_do_not_postpone_the_persisted_retry() {
+    let (repo, pool, _tempdir) = make_repo();
+    let space_id = SpaceId::from_str("space-sensitive");
+    let mut material = seed_current_space(&repo).await;
+    let pending = pending_update("recovering-peer", 1);
+    let peer = *pending.recipient();
+    material.add_pending_group_updates([pending.clone()], 100);
+    repo.save_space_material(&material).await.unwrap();
+    repo.due_group_updates(&space_id, 100, None, None)
+        .await
+        .unwrap();
+
+    // 上线和已认证历史会允许提前尝试，但接收方仍缺前序时不能把原定重试越推越远。
+    for (attempts, now_ms) in [(1, 100), (2, 200), (3, 300)] {
+        assert_eq!(
+            repo.due_group_updates(&space_id, now_ms, Some(peer), None)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        repo.record_group_update_failures(
+            &space_id,
+            &[(
+                pending.update_id().to_owned(),
+                GroupUpdateDispatchError::ReceiverUnavailable,
+            )],
+            now_ms,
+        )
+        .await
+        .unwrap();
+        let delivery = repo.group_update_deliveries(&space_id).await.unwrap();
+        assert_eq!(delivery[0].attempts, attempts);
+        assert_eq!(delivery[0].next_attempt_at_ms, 30_100);
+    }
+
+    // 重启且不再收到上线或历史通知后，原定时间仍必须自然到期。
+    let reopened = reopen_repo(&pool);
+    assert!(reopened
+        .due_group_updates(&space_id, 30_099, None, None)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        reopened
+            .due_group_updates(&space_id, 30_100, None, None)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn rejected_delivery_stays_out_of_the_queue_after_unrelated_changes_and_restart() {
     let (repo, pool, _tempdir) = make_repo();
     let space_id = SpaceId::from_str("space-sensitive");

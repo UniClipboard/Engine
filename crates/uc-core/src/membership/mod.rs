@@ -6,6 +6,7 @@ mod admission_content_key_catalog;
 mod bootstrap;
 mod cross_space_transition;
 mod error;
+mod group_update_retry;
 mod ledger;
 mod member;
 mod member_instance;
@@ -53,6 +54,7 @@ pub use error::{
     MembershipError, MembershipHistoryExchangeError, MembershipInitializationError,
     RelationshipStateResetError, SpaceSecurityStateResetError,
 };
+pub use group_update_retry::GroupUpdateRetryPolicy;
 pub use ledger::{
     DepartingLink, DepartingLinkSnapshot, LedgerDeliveryKind, LedgerDeliveryResult,
     LedgerDeviceView, LedgerEffect, LedgerFollowUp, LedgerInput, LedgerMemberStatus, LedgerOutcome,

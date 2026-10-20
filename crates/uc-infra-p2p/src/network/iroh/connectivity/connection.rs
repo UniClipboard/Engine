@@ -1,7 +1,8 @@
 use super::super::conn_path::connection_channel;
+use super::super::observed_connections::close_reason;
 use super::stream::wrap;
 use async_trait::async_trait;
-use iroh::endpoint::Connection;
+use iroh::endpoint::{Connection, Side};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::broadcast;
@@ -10,6 +11,9 @@ use uc_application::deps::{
 };
 use uc_core::ids::DeviceId;
 use uc_core::ports::{ConnectionChannel, PeerReachabilityChanged, ReachabilityState};
+use uc_observability_contract::diagnostics::connectivity::{
+    record_presence_closed, ConnectionDirection,
+};
 use uc_sync_protocol::active_clipboard_pull::ACTIVE_CLIPBOARD_PULL_ALPN;
 use uc_sync_protocol::active_clipboard_state::ACTIVE_CLIPBOARD_ALPN;
 use uc_sync_protocol::clipboard::{CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN};
@@ -17,10 +21,12 @@ use uc_sync_protocol::group_update::{GROUP_UPDATE_ALPN, LEGACY_GROUP_UPDATE_ALPN
 use uc_sync_protocol::membership_history::{
     MEMBERSHIP_HISTORY_EXCHANGE_ALPN, MULTIPLEXED_MEMBERSHIP_HISTORY_ALPN,
 };
+use uc_sync_protocol::peer_reachability::{LEGACY_PEER_REACHABILITY_ALPN, PEER_REACHABILITY_ALPN};
 
 pub(crate) struct IrohPeerConnection {
     native: Connection,
     unreachable: AtomicBool,
+    close_recorded: AtomicBool,
     liveness: Option<(
         DeviceId,
         Mutex<broadcast::Receiver<PeerReachabilityChanged>>,
@@ -31,6 +37,7 @@ impl IrohPeerConnection {
         Arc::new(Self {
             native: connection,
             unreachable: AtomicBool::new(false),
+            close_recorded: AtomicBool::new(false),
             liveness: None,
         })
     }
@@ -66,6 +73,7 @@ impl IrohPeerConnection {
         Arc::new(Self {
             native: connection,
             unreachable: AtomicBool::new(false),
+            close_recorded: AtomicBool::new(false),
             liveness: Some((target, Mutex::new(events))),
         })
     }
@@ -81,15 +89,21 @@ impl PeerConnection for IrohPeerConnection {
     fn mode(&self) -> ConnectionMode {
         if matches!(
             self.native.alpn(),
-            MULTIPLEXED_CLIPBOARD_ALPN | MULTIPLEXED_MEMBERSHIP_HISTORY_ALPN
+            MULTIPLEXED_CLIPBOARD_ALPN
+                | MULTIPLEXED_MEMBERSHIP_HISTORY_ALPN
+                | PEER_REACHABILITY_ALPN
         ) {
             ConnectionMode::Multiplexed
+        } else if self.native.alpn() == LEGACY_PEER_REACHABILITY_ALPN {
+            ConnectionMode::RetainedSingleExchange
         } else {
             ConnectionMode::SingleExchange
         }
     }
     fn protocol(&self) -> ConnectionProtocol {
         match self.native.alpn() {
+            PEER_REACHABILITY_ALPN => ConnectionProtocol::PeerReachabilityV2,
+            LEGACY_PEER_REACHABILITY_ALPN => ConnectionProtocol::PeerReachabilityV1,
             MULTIPLEXED_CLIPBOARD_ALPN => ConnectionProtocol::MultiplexedClipboard,
             ACTIVE_CLIPBOARD_PULL_ALPN => ConnectionProtocol::ActiveClipboardPull,
             ACTIVE_CLIPBOARD_ALPN => ConnectionProtocol::ActiveClipboardState,
@@ -144,7 +158,19 @@ impl PeerConnection for IrohPeerConnection {
                 }
             }
         }
-        let _ = self.native.closed().await;
+        let reason = self.native.closed().await;
+        if matches!(
+            self.native.alpn(),
+            PEER_REACHABILITY_ALPN | LEGACY_PEER_REACHABILITY_ALPN
+        ) && !self.close_recorded.swap(true, Ordering::AcqRel)
+        {
+            let direction = if self.native.side() == Side::Client {
+                ConnectionDirection::Outbound
+            } else {
+                ConnectionDirection::Inbound
+            };
+            record_presence_closed(direction, close_reason(&reason));
+        }
     }
     async fn open_bi(&self) -> Result<StreamPair, ConnectivityError> {
         self.observe_liveness();

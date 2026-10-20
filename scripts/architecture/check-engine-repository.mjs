@@ -2258,6 +2258,9 @@ function repositorySources() {
       'peer_reachability_adapter.rs',
       'transfer_progress_adapter.rs',
     ].map(path => read(`crates/uc-infra-p2p/src/network/iroh/${path}`)).join('\n'),
+    presenceTransport: productionSources('crates/uc-application/src/space/connectivity/peer_connections/transport'),
+    presenceBridge: read('crates/uc-infra-p2p/src/network/iroh/connectivity/presence_handler.rs'),
+    retiredPresencePresent: ['peer_reachability_adapter/liveness.rs', 'peer_reachability_protocol.rs'].some(path => existsSync(join(REPOSITORY_ROOT, 'crates/uc-infra-p2p/src/network/iroh', path))),
     activeClipboardTransport: productionSources('crates/uc-application/src/clipboard/active/transport'),
     activeClipboardInfra: productionSources('crates/uc-infra-p2p/src/network/iroh/active_clipboard', ['crates/uc-infra-p2p/src/network/iroh/active_clipboard/testing.rs'], true),
     runtimeModule: read('crates/uc-engine/src/runtime/mod.rs'),
@@ -2339,6 +2342,18 @@ function checkActiveClipboardTransportOwnership(sources) {
   return problems
 }
 
+// presence 的业务表和完整交换只能由 backend 无关的 Application owner 管理。
+function checkPresenceOwnership(sources) {
+  const problems = []
+  if (/\b(?:iroh::|Endpoint|RecvStream|SendStream)\b/.test(sources.presenceTransport))
+    problems.push('presence Application transport must remain backend independent')
+  if (/\.(?:connect|open_bi|accept_bi)\s*\(|HashMap|ReachabilityState/.test(sources.presenceBridge))
+    problems.push('presence Router bridge must hand over the complete connection')
+  if (sources.retiredPresencePresent)
+    problems.push('retired native presence workflow or IO codec must not return')
+  return problems
+}
+
 function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
   return [
     ...checkWorkspaceShape(metadata),
@@ -2367,6 +2382,7 @@ function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
     ...checkRetiredMembershipPersistence(sources),
     ...checkIrohPeerAddressResolution(sources),
     ...checkActiveClipboardTransportOwnership(sources),
+    ...checkPresenceOwnership(sources),
     ...checkSessionSupervisorOwnership(sources),
     ...checkRuntimeLifecycleOwnership(sources),
     ...checkSpaceAccessConstructionModes(sources),
@@ -2394,6 +2410,15 @@ function expectRejected(name, mutate, metadata, sources) {
 }
 
 function runNegativeFixtures(metadata, sources) {
+  expectRejected('presence native workflow bypass', (_metadata, changed) => {
+    changed.presenceBridge += '\nasync fn bypass() { connection.accept_bi().await; }\n'
+  }, metadata, sources)
+  expectRejected('presence native Application dependency', (_metadata, changed) => {
+    changed.presenceTransport += '\nuse iroh::Endpoint;\n'
+  }, metadata, sources)
+  expectRejected('retired native presence implementation', (_metadata, changed) => {
+    changed.retiredPresencePresent = true
+  }, metadata, sources)
   expectRejected('active clipboard native dialing bypass', (_metadata, changed) => {
     changed.activeClipboardInfra += '\nasync fn bypass() { endpoint.connect(peer, alpn).await; }\n'
   }, metadata, sources)

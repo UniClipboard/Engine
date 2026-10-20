@@ -192,3 +192,8 @@ pub use membership::{
     HistoryLocalWorkPort, HistoryPeerBindingPort, HistoryReceiverPort, HistoryReply,
     HistoryWirePort, HistoryWork, MembershipHistoryReceiver, MembershipHistoryTransport,
 };
+
+pub use connectivity::{
+    PeerReachabilityEnvironmentPort, PeerReachabilityTransport, PeerReachabilityTransportError,
+    PeerReachabilityTransportPorts, PeerReachabilityWireError, PeerReachabilityWirePort,
+};

@@ -11,6 +11,7 @@ use tokio::io::{
     AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf, ReadHalf, WriteHalf,
 };
 use tokio::sync::{mpsc, watch, Mutex, Semaphore};
+use tokio_util::sync::CancellationToken;
 use uc_application::deps::ConnectionProtocol;
 use uc_application::deps::{
     AdmissionAttempt, AdmissionGrant, ClipboardReceiverPort, ConnectionMode, ConnectivityBackend,
@@ -125,7 +126,11 @@ impl PeerConnection for MemoryConnection {
 struct MemoryBackend;
 #[async_trait]
 impl ConnectivityBackend for MemoryBackend {
-    async fn connect(&self, _: DeviceId) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
+    async fn connect(
+        &self,
+        _: DeviceId,
+        _cancel: CancellationToken,
+    ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
         Err(ConnectivityError::Offline)
     }
 }
@@ -453,7 +458,11 @@ impl PeerConnection for LoopbackConnection {
 struct LoopbackBackend(Arc<LoopbackConnection>);
 #[async_trait]
 impl ConnectivityBackend for LoopbackBackend {
-    async fn connect(&self, _: DeviceId) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
+    async fn connect(
+        &self,
+        _: DeviceId,
+        _cancel: CancellationToken,
+    ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
         Ok(self.0.clone())
     }
 }

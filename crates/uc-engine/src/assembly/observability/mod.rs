@@ -13,3 +13,6 @@ pub(crate) use clipboard::{observe_clipboard_dependencies, observe_local_copy};
 pub(crate) use clipboard::{observe_explicit_send, observe_resend};
 pub(crate) use membership::observe_membership;
 pub(crate) use storage_upgrade::observe_profile_storage_upgrade;
+
+mod peer_reachability;
+pub(crate) use peer_reachability::observe_peer_reachability;

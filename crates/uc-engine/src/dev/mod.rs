@@ -278,6 +278,9 @@ pub enum DevOperation {
         endpoint_ids: Vec<[u8; 32]>,
         peer_reachability: bool,
     },
+    RejectInboundPeerReachability {
+        endpoint_ids: Vec<[u8; 32]>,
+    },
     QueryRejectedConnectionCount,
     QueryPeerReachabilityConnections,
     RetainOnePeerReachabilityConnection,
@@ -319,6 +322,7 @@ impl fmt::Debug for DevOperation {
             Self::QuerySessionHandoverDiagnostics => "query_session_handover_diagnostics",
             Self::SetNetworkPartition { .. } => "set_network_partition",
             Self::RejectNewConnections { .. } => "reject_new_connections",
+            Self::RejectInboundPeerReachability { .. } => "reject_inbound_peer_reachability",
             Self::QueryRejectedConnectionCount => "query_rejected_connection_count",
             Self::QueryPeerReachabilityConnections => "query_peer_reachability_connections",
             Self::RetainOnePeerReachabilityConnection => "retain_one_peer_reachability_connection",

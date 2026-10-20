@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
     ConnectivityBackend, ConnectivityError, ConnectivityManager, ConnectivityPolicy,
     PeerConnection, PeerIdentityDirectoryPort,
@@ -13,7 +14,11 @@ use uc_infra_p2p::network::iroh::connectivity::{ConnectivityProfile, IrohConnect
 struct InboundOnly;
 #[async_trait]
 impl ConnectivityBackend for InboundOnly {
-    async fn connect(&self, _: DeviceId) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
+    async fn connect(
+        &self,
+        _: DeviceId,
+        _cancel: CancellationToken,
+    ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
         panic!("inbound-only test")
     }
 }

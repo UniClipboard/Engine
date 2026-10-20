@@ -2,10 +2,19 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import test from 'node:test'
-import { ONLINE_DEADLINE_MESSAGE, measureRecoveryMs, terminateRelay } from './relay-recovery-support.mjs'
+import { ONLINE_DEADLINE_MESSAGE, measureRecoveryMs, relayTransportReadyAt, terminateRelay } from './relay-recovery-support.mjs'
 
 const ready = child => new Promise(resolve => child.stdout.once('data', resolve))
 const fake = script => spawn(process.execPath, ['-e', script], { stdio: ['ignore', 'pipe', 'ignore'] })
+
+test('a TCP probe or incomplete Relay handshake does not start the recovery budget', () => {
+  const status = (at, count) => ({ timestamp: new Date(at).toISOString(), fields: { 'event.name': 'relay.status.observed', connected_count: count } })
+  assert.equal(relayTransportReadyAt(true, [status(1000, 0)], 1000), undefined)
+  assert.equal(relayTransportReadyAt(true, [status(999, 1)], 1000), undefined)
+  assert.equal(relayTransportReadyAt(false, [status(1100, 1)], 1000), undefined)
+  assert.equal(relayTransportReadyAt(true, [status(1100, 1), status(1200, 0)], 1000), undefined)
+  assert.equal(relayTransportReadyAt(true, [status(1000, 0), status(1100, 1)], 1000), 1100)
+})
 
 test('a recovery measurement records null only for the expected deadline failure', async () => {
   assert.equal(await measureRecoveryMs(async () => {}, 100, () => 350), 250)

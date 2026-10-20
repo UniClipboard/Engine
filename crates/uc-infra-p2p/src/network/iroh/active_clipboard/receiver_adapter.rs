@@ -4,6 +4,8 @@ use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use std::sync::Arc;
 use tokio::time::Instant;
+#[cfg(test)]
+use tokio_util::sync::CancellationToken;
 use uc_application::deps::{ActiveStateReceiverPort, ACTIVE_EXCHANGE_TIMEOUT};
 use uc_observability_contract::diagnostics::{connectivity::NetworkRecorder, ObservationContext};
 use uc_observability_contract::{error_source::io_error_kind, uc_warn};
@@ -78,7 +80,11 @@ mod tests {
     struct InboundOnlyBackend;
     #[async_trait]
     impl ConnectivityBackend for InboundOnlyBackend {
-        async fn connect(&self, _: DeviceId) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
+        async fn connect(
+            &self,
+            _: DeviceId,
+            _cancel: CancellationToken,
+        ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
             Err(ConnectivityError::Offline)
         }
     }

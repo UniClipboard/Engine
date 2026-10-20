@@ -112,6 +112,7 @@ pub(crate) struct MembershipTopology {
     pub(crate) endpoint_ids_by_node: HashMap<String, [u8; 32]>,
     pub(crate) space_ids: HashMap<String, String>,
     pub(crate) device_ids: HashMap<String, String>,
+    pub(crate) bind_ports: HashMap<String, u16>,
 }
 
 impl MembershipTopology {
@@ -123,6 +124,7 @@ impl MembershipTopology {
             endpoint_ids_by_node: HashMap::new(),
             space_ids: HashMap::new(),
             device_ids: HashMap::new(),
+            bind_ports: HashMap::new(),
         }
     }
 
@@ -193,7 +195,8 @@ impl MembershipTopology {
             !self.engines.contains_key(node),
             "node {node} started twice"
         );
-        let harness = DeviceHarness::new(self.rendezvous_base_url.clone());
+        let mut harness = DeviceHarness::new(self.rendezvous_base_url.clone());
+        harness.bind_port = self.bind_ports.get(node).copied();
         let engine = harness.start().await;
         let endpoint_id = query_endpoint_id(&engine, node).await;
         self.harnesses.insert(node.to_owned(), harness);

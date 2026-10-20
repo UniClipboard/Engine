@@ -5,10 +5,7 @@
 //! Clipboard、Blob 与文件传输对象图及其关闭顺序均由 Application 持有；
 //! [`SyncSessionAssembly`] 只拥有当前 Space 会话的进度翻译 worker。
 
-use uc_infra_p2p::network::iroh::{
-    connectivity::ConnectivityProfile,
-    group_update_adapter::{GroupUpdateWire, IrohGroupUpdateAdapter, SessionGroupUpdateLocalWork},
-};
+use super::observability::{self, observe_peer_reachability};
 mod outbound_progress;
 #[cfg(all(test, feature = "dev-tools"))]
 use crate::testing::active_pull_publication::{decorate_blob, decorate_preparation};
@@ -23,7 +20,6 @@ use tracing::instrument;
 use outbound_progress::OutboundProgressRuntime;
 
 use crate::assembly::deps::SyncEngineDeps;
-use crate::assembly::observability;
 #[cfg(feature = "dev-tools")]
 use crate::dev::{
     ControlledSpaceAdmissionTransport, FaultableGroupUpdateReceiver, FaultableGroupUpdateWire,
@@ -36,24 +32,26 @@ use uc_application::deps::{
     ConnectivityPolicy, GroupUpdateEndpoint, GroupUpdateLocalWorkPort, GroupUpdateReceiverPort,
     GroupUpdateWirePort, HistoryWirePort, IdleRetentionPolicy, LifecycleError,
     MembershipHistoryReceiver, MembershipHistoryTransport, PeerIdentityDirectoryPort,
-    SpaceAdmissionAdapters, SpaceMembershipAdapters, SpaceRuntimeAdapters,
+    PeerReachabilityTransport, PeerReachabilityTransportPorts, SpaceAdmissionAdapters,
+    SpaceMembershipAdapters, SpaceRuntimeAdapters,
 };
 use uc_application::facade::ApplicationAssembly;
 use uc_core::file_transfer::FileTransferCancellationReason;
 use uc_core::membership::{GroupUpdateDispatchPort, PeerAdmissionPort};
 use uc_core::ports::{
     ActiveClipboardDispatchPort, ActiveClipboardReceiverPort, ClipboardDispatchPort,
-    ConnectionChannelPort, LocalIdentityPort, PeerReachabilityPort,
+    ConnectionChannelPort, LocalIdentityPort,
 };
 use uc_infra_local::fs::{
     FsAtomicPublisher, FsDirectoryStagingCleaner, FsHiddenPathMarker, FsInboundFileTarget,
 };
 use uc_infra_p2p::network::iroh::{
+    connectivity::{ConnectivityProfile, PeerReachabilityWire},
+    group_update_adapter::{GroupUpdateWire, IrohGroupUpdateAdapter, SessionGroupUpdateLocalWork},
     ActiveClipboardHandlers, ActiveClipboardPullHandlers, BlobHandlers, ClipboardHandlers,
-    IrohIdentityStore, IrohNodeError, IrohSessionBuilder, PreparedIrohSession,
-    TransferProgressHandlers,
+    IrohIdentityStore, IrohNodeError, IrohSessionBuilder, MembershipHistoryWire,
+    PreparedIrohSession, SessionMembershipHistoryLocalWork, TransferProgressHandlers,
 };
-use uc_infra_p2p::network::iroh::{MembershipHistoryWire, SessionMembershipHistoryLocalWork};
 use uc_infra_profile::security::Sha256IdentityFingerprintFactory;
 use uc_infra_profile::space::{
     DefaultJoinerActivationExecutor, DefaultJoinerActivationPreparation,
@@ -174,14 +172,35 @@ pub async fn prepare_sync_session(
     let (known_peer_contact_tx, known_peer_contacts) = broadcast::channel(64);
     // Presence is installed before the convergence owner is assembled so the
     // owner can expose reachability as an independent product fact.
-    let peer_reachability: Arc<dyn PeerReachabilityPort> = builder.install_peer_reachability(
-        Arc::clone(&space_setup.peer_addr_repo),
-        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerIdentityDirectoryPort>,
-        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerAdmissionPort>,
-        Arc::clone(&space_setup.fingerprint),
-        Arc::clone(&space_setup.clock),
+    let (presence_deps, presence_environment) = builder.presence_connectivity_deps(
+        space_setup.peer_addr_repo.clone(),
+        space_setup.peer_access.clone(),
+        space_setup.peer_access.clone(),
+        space_setup.fingerprint.clone(),
+    );
+    let presence_manager = ConnectivityManager::new(
+        presence_deps.backend,
+        presence_deps.admission,
+        ConnectivityPolicy {
+            presence_retention: true,
+            task_kind: DiagnosticTaskKind::PresenceConnectivityWorker,
+            inbound_per_connection: 2,
+            flights_per_session: 4,
+            ..ConnectivityPolicy::default()
+        },
+    );
+    let presence_owner = PeerReachabilityTransport::new(
+        presence_manager,
+        space_setup.peer_access.clone(),
+        PeerReachabilityTransportPorts {
+            wire: Arc::new(PeerReachabilityWire),
+            environment: presence_environment,
+        },
+        space_setup.clock.clone(),
         known_peer_contact_tx,
-    )?;
+    );
+    builder.install_peer_reachability(presence_owner.clone())?;
+    let peer_reachability = observe_peer_reachability(presence_owner);
     let history_connectivity = builder.history_connectivity_deps(
         space_setup.peer_addr_repo.clone(),
         space_setup.peer_access.clone(),

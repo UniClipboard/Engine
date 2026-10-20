@@ -4,6 +4,8 @@
 //! `peer.inbound.rejected`，对端看到的拒绝字节保持不变，导出不含设备标识或名称。
 #[path = "support/clipboard.rs"]
 mod clipboard_support;
+#[path = "support/presence.rs"]
+mod presence_support;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use uc_application::deps::{KnownPeerIdentity, MembershipLedgerError, PeerIdentityDirectoryPort};
@@ -25,9 +27,7 @@ use uc_core::ports::{
 };
 use uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory;
 use uc_infra_local::SystemClock;
-use uc_infra_p2p::network::iroh::{
-    IrohPeerReachabilityAdapter, CLIPBOARD_ALPN, PEER_REACHABILITY_ALPN,
-};
+use uc_infra_p2p::network::iroh::{CLIPBOARD_ALPN, PEER_REACHABILITY_ALPN};
 use uc_observability_runtime::*;
 use uc_sync_protocol::clipboard as clipboard_wire;
 
@@ -186,38 +186,35 @@ async fn presence(
     members: Members,
     admission: Arc<Admission>,
     stop_accepting_first: bool,
-) -> u8 {
-    let receiver = endpoint().await;
-    let adapter = IrohPeerReachabilityAdapter::new(
-        Arc::clone(&receiver),
+) -> Option<u8> {
+    let receiver = presence_support::start(
         Arc::new(NoAddresses),
         Arc::new(members),
         admission,
         Arc::new(Sha256IdentityFingerprintFactory),
         Arc::new(SystemClock),
-    );
+        tokio::sync::broadcast::channel(64).0,
+    )
+    .await;
     if stop_accepting_first {
-        adapter.disconnect_all().await;
+        receiver.owner.disconnect_all().await;
     }
-    let router = Router::builder((*receiver).clone())
-        .accept(PEER_REACHABILITY_ALPN, adapter.handler())
-        .spawn();
     let connection = dialer
-        .connect(receiver.addr(), PEER_REACHABILITY_ALPN)
+        .connect(receiver.address.clone(), PEER_REACHABILITY_ALPN)
         .await
         .expect("connect");
     let (mut send, mut receive) = connection.open_bi().await.expect("stream");
     send.write_all(&[ADMISSION_REQUEST]).await.expect("request");
     send.finish().expect("finish");
     let mut response = [0u8; 1];
-    tokio::time::timeout(Duration::from_secs(5), receive.read_exact(&mut response))
+    let result = tokio::time::timeout(Duration::from_secs(5), receive.read_exact(&mut response))
         .await
         .expect("bounded response")
-        .expect("response");
+        .ok()
+        .map(|_| response[0]);
     connection.close(0u32.into(), b"acceptance");
-    router.shutdown().await.expect("router");
-    receiver.close().await;
-    response[0]
+    receiver.shutdown().await;
+    result
 }
 
 /// 发送一帧剪贴板内容，返回接收方的回执字节。
@@ -293,7 +290,7 @@ async fn inbound_rejections_are_classified_in_the_exported_file() {
         fail_list: true,
     };
 
-    // presence：对端只看到固定拒绝字节，拒绝方本地分出原因。
+    // presence：明确无资格才回复拒绝；本机读取故障不能冒充拒绝。
     let unused = Admission::new(Decision::Admit);
     assert_eq!(
         presence(
@@ -303,11 +300,11 @@ async fn inbound_rejections_are_classified_in_the_exported_file() {
             false
         )
         .await,
-        ADMISSION_REJECTED
+        Some(ADMISSION_REJECTED)
     );
     assert_eq!(
         presence(&dialer, failing(), Arc::clone(&unused), false).await,
-        ADMISSION_REJECTED
+        None
     );
     assert_eq!(
         presence(
@@ -317,7 +314,7 @@ async fn inbound_rejections_are_classified_in_the_exported_file() {
             false
         )
         .await,
-        ADMISSION_REJECTED
+        Some(ADMISSION_REJECTED)
     );
     assert!(
         unused.checked().is_empty(),
@@ -333,7 +330,7 @@ async fn inbound_rejections_are_classified_in_the_exported_file() {
             false
         )
         .await,
-        ADMISSION_REJECTED
+        Some(ADMISSION_REJECTED)
     );
     assert_eq!(denied.checked(), vec![active.device_id.clone()]);
 
@@ -346,7 +343,7 @@ async fn inbound_rejections_are_classified_in_the_exported_file() {
             false
         )
         .await,
-        ADMISSION_REJECTED
+        None
     );
 
     let admitted = Admission::new(Decision::Admit);
@@ -358,8 +355,8 @@ async fn inbound_rejections_are_classified_in_the_exported_file() {
             true
         )
         .await,
-        ADMISSION_REJECTED,
-        "a stopped runtime rejects even an admitted peer"
+        None,
+        "a stopped runtime closes without admission"
     );
     assert_eq!(
         presence(
@@ -369,7 +366,7 @@ async fn inbound_rejections_are_classified_in_the_exported_file() {
             false
         )
         .await,
-        ADMISSION_ACCEPTED
+        Some(ADMISSION_ACCEPTED)
     );
 
     // 剪贴板接收：同一身份规则，回执保持 Rejected。
@@ -452,11 +449,8 @@ async fn inbound_rejections_are_classified_in_the_exported_file() {
     observed.sort();
     let mut expected: Vec<(String, String, String)> = [
         ("presence", "identity", "identity_unresolved"),
-        ("presence", "identity", "member_read_failed"),
         ("presence", "identity", "identity_ambiguous"),
         ("presence", "admission", "ledger_denied"),
-        ("presence", "admission", "ledger_unavailable"),
-        ("presence", "admission", "not_accepting"),
         ("clipboard", "identity", "identity_unresolved"),
         ("clipboard", "identity", "member_read_failed"),
         ("clipboard", "identity", "identity_ambiguous"),

@@ -1,5 +1,10 @@
 //! 已配对设备连接的唯一调度与恢复负责人。
 
+mod transport;
+pub use transport::{
+    PeerReachabilityEnvironmentPort, PeerReachabilityTransport, PeerReachabilityTransportError,
+    PeerReachabilityTransportPorts, PeerReachabilityWireError, PeerReachabilityWirePort,
+};
 mod record;
 mod runtime;
 #[cfg(test)]
@@ -10,8 +15,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::stream::BoxStream;
-use tokio::sync::{mpsc, oneshot, watch, Mutex};
+use tokio::sync::{mpsc, oneshot, watch, Mutex, OwnedSemaphorePermit};
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
+
+// 同一完整负责人内部传递原目标期限，不扩大 Core 或 Engine 契约。
+tokio::task_local! {
+    pub(super) static ATTEMPT_DEADLINE: Instant;
+    pub(super) static ATTEMPT_CAPACITY: Arc<OwnedSemaphorePermit>;
+}
 use tokio_util::sync::CancellationToken;
 use uc_core::ids::DeviceId;
 use uc_core::ports::{PeerReachabilityPort, ReachabilityState};
@@ -66,7 +78,10 @@ pub(crate) struct PeerConnectionCoordinator {
     commands: mpsc::Sender<Command>,
     opportunity: watch::Sender<ConnectivityOpportunity>,
     cancel: CancellationToken,
-    runtime: Mutex<(Option<ConnectionRuntime>, Option<JoinHandle<()>>)>,
+    runtime: Mutex<(
+        Option<ConnectionRuntime>,
+        Option<JoinHandle<Result<(), PeerConnectionError>>>,
+    )>,
 }
 
 impl PeerConnectionCoordinator {
@@ -160,7 +175,7 @@ impl PeerConnectionCoordinator {
         let mut slot = self.runtime.lock().await;
         slot.0.take();
         if let Some(task) = slot.1.take() {
-            task.await.map_err(PeerConnectionError::Task)?;
+            task.await.map_err(PeerConnectionError::Task)??;
         }
         Ok(())
     }

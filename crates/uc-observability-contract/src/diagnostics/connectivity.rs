@@ -1,5 +1,7 @@
 //! 连接与恢复诊断的入口：完整动作负责结果，本模块负责关联和记录生命周期。
 use super::ObservationContext;
+use std::future::Future;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 mod address;
@@ -72,8 +74,8 @@ pub use network_recovery::{
 };
 
 pub use physical::{
-    local_connection_key, local_path_key, ConnectionLifetimeObservation, NetworkPathKind,
-    ObserverFailure, PathObservationKind,
+    local_connection_key, local_path_key, ConnectionLifetimeObservation, NegotiatedProtocol,
+    NetworkPathKind, ObserverFailure, PathObservationKind,
 };
 
 pub use address::{
@@ -202,7 +204,28 @@ fn emit_local(event: LocalEvent, context: &ObservationContext) {
 }
 
 /// 在线检查只在完整返回或被取消时结算，具体分支不各自输出日志。
+
+/// 完整 owner 只能提交固定结局；不提供业务状态或阶段查询。
+#[derive(Clone, Default)]
+pub struct PresenceCheckFeedback(Option<Arc<Mutex<Option<PresenceCheckResult>>>>);
+tokio::task_local! { static PRESENCE_FEEDBACK: PresenceCheckFeedback; }
+impl PresenceCheckFeedback {
+    pub fn capture() -> Self {
+        PRESENCE_FEEDBACK.try_with(Clone::clone).unwrap_or_default()
+    }
+    pub async fn scope<F: Future>(self, future: F) -> F::Output {
+        PRESENCE_FEEDBACK.scope(self, future).await
+    }
+}
+pub fn record_presence_check_result(result: PresenceCheckResult) {
+    let _ = PRESENCE_FEEDBACK.try_with(|feedback| {
+        if let Some(value) = &feedback.0 {
+            *value.lock().unwrap_or_else(PoisonError::into_inner) = Some(result);
+        }
+    });
+}
 pub struct PresenceCheckObservation {
+    feedback: PresenceCheckFeedback,
     context: ObservationContext,
     started: Instant,
     finished: bool,
@@ -210,12 +233,22 @@ pub struct PresenceCheckObservation {
 impl PresenceCheckObservation {
     pub fn begin() -> Self {
         Self {
+            feedback: PresenceCheckFeedback(Some(Arc::new(Mutex::new(None)))),
             context: ObservationContext::capture(),
             started: Instant::now(),
             finished: false,
         }
     }
+    pub async fn scope<F: Future>(&self, future: F) -> F::Output {
+        self.feedback.clone().scope(future).await
+    }
     pub fn finish(mut self, result: PresenceCheckResult) {
+        let result = self
+            .feedback
+            .0
+            .as_ref()
+            .and_then(|value| *value.lock().unwrap_or_else(PoisonError::into_inner))
+            .unwrap_or(result);
         self.finished = true;
         emit_local(
             LocalEvent::PresenceCheck {

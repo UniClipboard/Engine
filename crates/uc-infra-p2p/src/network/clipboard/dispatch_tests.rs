@@ -3,6 +3,7 @@ use crate::network::iroh::admitted_connections::AdmittedConnections;
 use iroh::EndpointAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 use uc_application::deps::ConnectivityPolicy;
 use uc_core::ids::DeviceId;
 use uc_core::ports::{
@@ -835,7 +836,11 @@ async fn acquisition_capability_failures_keep_their_source_in_dispatch_reports()
     struct FailingBackend(bool);
     #[async_trait]
     impl ConnectivityBackend for FailingBackend {
-        async fn connect(&self, _: DeviceId) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
+        async fn connect(
+            &self,
+            _: DeviceId,
+            _cancel: CancellationToken,
+        ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
             let source = Box::new(std::io::Error::other("private-capability-sentinel"));
             Err(if self.0 {
                 ConnectivityError::AddressLookup(source)

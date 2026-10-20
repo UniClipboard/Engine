@@ -124,6 +124,10 @@ struct AuthenticatedInboundParent(Arc<AtomicBool>);
 pub struct ObservationContext(opentelemetry::Context);
 
 impl ObservationContext {
+    /// 长期监听与后续独立请求不继承已经完成的短期动作。
+    pub fn independent() -> Self {
+        Self(opentelemetry::Context::new())
+    }
     /// 只封存远端载体；调用方完成身份绑定后才能 scope，构造本身不采纳父关系。
     pub fn from_remote_parent(parent: opentelemetry::Context) -> Self {
         let parent = opentelemetry::Context::new()
@@ -612,6 +616,8 @@ macro_rules! diagnostic_task_kinds {
 diagnostic_task_kinds! {
     /// 普通剪贴板共享拨号任务异常退出。
     ClipboardConnectivityWorker => "clipboard_connectivity_worker",
+    /// presence 完整收发与保留连接任务异常退出。
+    PresenceConnectivityWorker => "presence_connectivity_worker",
     MembershipHistoryConnectivityWorker => "membership_history_connectivity_worker",
     ClipboardDeliveryRecord => "clipboard_delivery_record",
     ClipboardInboundOsWrite => "clipboard_inbound_os_write",

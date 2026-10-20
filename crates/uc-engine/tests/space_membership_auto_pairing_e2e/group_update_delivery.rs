@@ -4,6 +4,7 @@
 //! 注入；真实拒绝由发送方在线上篡改 MLS 提交字节，接收方走真实校验得到。
 
 use super::*;
+use std::net::UdpSocket;
 
 use uc_engine::{
     DevGroupUpdateReceiveFault, DevOperation, DevOperationResult, DevSpaceWorkEventKind,
@@ -76,9 +77,16 @@ async fn space_with_members(
     rendezvous_base_url: String,
     nodes: &[&'static str],
     members: &[&'static str],
+    stable_restart: Option<&str>,
 ) -> MembershipTopology {
     let mut topology = MembershipTopology::new(rendezvous_base_url);
     for node in nodes {
+        if stable_restart == Some(*node) {
+            // 紧邻首次启动选择端口，重启沿用独立进程历史恢复 fixture 的固定地址前置。
+            let socket = UdpSocket::bind("127.0.0.1:0").expect("reserve restart port");
+            let port = socket.local_addr().expect("reserved restart port").port();
+            topology.bind_ports.insert((*node).to_owned(), port);
+        }
         topology.run(&[TopologyAction::Start { node }]).await;
     }
     topology.run(&[TopologyAction::Create { node: "A" }]).await;
@@ -99,7 +107,7 @@ async fn space_with_members(
 }
 
 async fn space_with_member_b(rendezvous_base_url: String) -> MembershipTopology {
-    space_with_members(rendezvous_base_url, &["A", "B", "C"], &["A", "B"]).await
+    space_with_members(rendezvous_base_url, &["A", "B", "C"], &["A", "B"], None).await
 }
 
 /// 本机对 `peer` 尚未确认的组密钥更新投影。
@@ -245,7 +253,7 @@ async fn g2_genuine_rejection_requires_verified_history_and_real_ack() {
     uc_engine::init_test_tracing();
     let rendezvous = mount_rendezvous().await;
     let mut topology =
-        space_with_members(rendezvous.uri(), &["A", "B", "C", "D"], &["A", "B"]).await;
+        space_with_members(rendezvous.uri(), &["A", "B", "C", "D"], &["A", "B"], None).await;
 
     // 双方向门同时阻止后缀与完整证据；摘要仍可证明重新联系。
     for node in ["A", "C", "D"] {
@@ -432,6 +440,7 @@ async fn g4_healthy_recipients_are_unaffected_and_epochs_arrive_in_order() {
         rendezvous.uri(),
         &["A", "B", "C", "D", "E"],
         &["A", "B", "C"],
+        None,
     )
     .await;
 
@@ -505,6 +514,7 @@ async fn missing_predecessor_recovers_from_another_member_after_receiver_restart
         rendezvous.uri(),
         &["A", "B", "C", "D", "E"],
         &["A", "B", "C"],
+        Some("B"),
     )
     .await;
     topology

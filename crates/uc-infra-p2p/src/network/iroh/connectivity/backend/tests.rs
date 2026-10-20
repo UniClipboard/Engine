@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 use async_trait::async_trait;
 use iroh::endpoint::Connection;
@@ -103,17 +104,23 @@ async fn clipboard_and_group_profiles_negotiate_distinct_connections_to_the_same
     let clipboard = IrohConnectivityBackend::new(
         client.clone(),
         addresses.clone(),
-        reachability.clone(),
+        Some(reachability.clone()),
         ConnectivityProfile::Clipboard,
     );
     let group = IrohConnectivityBackend::new(
         client.clone(),
         addresses,
-        reachability,
+        Some(reachability),
         ConnectivityProfile::GroupUpdate,
     );
-    let clipboard = clipboard.connect(DeviceId::new("receiver")).await.unwrap();
-    let group = group.connect(DeviceId::new("receiver")).await.unwrap();
+    let clipboard = clipboard
+        .connect(DeviceId::new("receiver"), CancellationToken::new())
+        .await
+        .unwrap();
+    let group = group
+        .connect(DeviceId::new("receiver"), CancellationToken::new())
+        .await
+        .unwrap();
     assert_eq!(
         clipboard.protocol(),
         ConnectionProtocol::MultiplexedClipboard
@@ -145,10 +152,13 @@ async fn legacy_only_peer_reports_the_actual_group_protocol_after_negotiation() 
     let backend = IrohConnectivityBackend::new(
         client.clone(),
         Arc::new(Address(server.addr())),
-        Arc::new(Reachability(broadcast::channel(8).0)),
+        Some(Arc::new(Reachability(broadcast::channel(8).0))),
         ConnectivityProfile::GroupUpdate,
     );
-    let connection = backend.connect(DeviceId::new("receiver")).await.unwrap();
+    let connection = backend
+        .connect(DeviceId::new("receiver"), CancellationToken::new())
+        .await
+        .unwrap();
     assert_eq!(connection.protocol(), ConnectionProtocol::LegacyGroupUpdate);
     assert_eq!(connection.mode(), ConnectionMode::SingleExchange);
     assert_eq!(

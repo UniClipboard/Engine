@@ -10,6 +10,7 @@ use crate::network::iroh::connectivity::{
 use async_trait::async_trait;
 use iroh::Endpoint;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
     AdmissionAttempt, AdmissionGrant, ClipboardReceiverPort, ConnectivityBackend,
     ConnectivityError, ConnectivityManager, ConnectivityPolicy, PeerConnection,
@@ -99,7 +100,7 @@ pub(super) fn dispatch_fixture(
         Arc::new(IrohConnectivityBackend::new(
             endpoint,
             addresses,
-            reachability,
+            Some(reachability),
             ConnectivityProfile::Clipboard,
         )),
         admission,
@@ -109,7 +110,11 @@ pub(super) fn dispatch_fixture(
 struct UnusedBackend;
 #[async_trait]
 impl ConnectivityBackend for UnusedBackend {
-    async fn connect(&self, _: DeviceId) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
+    async fn connect(
+        &self,
+        _: DeviceId,
+        _cancel: CancellationToken,
+    ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
         panic!("inbound-only fixture")
     }
 }

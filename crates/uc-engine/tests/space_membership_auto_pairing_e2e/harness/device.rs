@@ -6,6 +6,7 @@ pub(crate) struct DeviceHarness {
     pub(crate) root: uc_testkit::TempDirLease,
     pub(crate) secure_storage: MemorySecureStorage,
     pub(crate) rendezvous_base_url: String,
+    pub(crate) bind_port: Option<u16>,
 }
 
 impl DeviceHarness {
@@ -14,6 +15,7 @@ impl DeviceHarness {
             root: scenario::temp_dir("device-profile"),
             secure_storage: MemorySecureStorage::default(),
             rendezvous_base_url,
+            bind_port: None,
         }
     }
 
@@ -59,6 +61,10 @@ impl DeviceHarness {
         let config = EngineConfig::new("1.1.0")
             .with_rendezvous_base_url(self.rendezvous_base_url.clone())
             .with_test_relay_fallback(false);
+        let config = match self.bind_port {
+            Some(port) => config.with_test_iroh_bind_port(port),
+            None => config,
+        };
         Engine::start(config, host)
             .await
             .expect("start complete engine")

@@ -4,6 +4,7 @@ use crate::network::iroh::connectivity::{IrohClipboardHandler, IrohConnectivityB
 use crate::network::iroh::inbound_peer::{member_table_directory, member_table_identity_directory};
 use crate::network::iroh::StaticPeerAdmission;
 use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use uc_application::deps::ConnectivityPolicy;
 use uc_application::deps::{
@@ -446,9 +447,10 @@ impl ConnectivityBackend for RecordingBackend {
     async fn connect(
         &self,
         target: DeviceId,
+        _cancel: CancellationToken,
     ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        let connection = self.native.connect(target).await?;
+        let connection = self.native.connect(target, _cancel).await?;
         self.connections
             .lock()
             .unwrap()
@@ -480,7 +482,7 @@ async fn cancelling_one_dispatch_preserves_another_active_exchange() {
         native: IrohConnectivityBackend::new(
             sender.clone(),
             addresses,
-            peer_reachability_mock(),
+            Some(peer_reachability_mock()),
             ConnectivityProfile::Clipboard,
         ),
         connections: std::sync::Mutex::new(Vec::new()),
@@ -628,7 +630,7 @@ async fn verify_liveness_recovery(delayed: bool) {
         native: IrohConnectivityBackend::new(
             sender.clone(),
             addresses,
-            Arc::new(reachability),
+            Some(Arc::new(reachability)),
             ConnectivityProfile::Clipboard,
         ),
         connections: std::sync::Mutex::new(Vec::new()),
