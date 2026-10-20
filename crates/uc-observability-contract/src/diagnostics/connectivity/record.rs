@@ -75,6 +75,10 @@ pub enum ConfirmationFailure {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum PresenceCheckResult {
+    Unavailable,
+    CapacityExhausted,
+    AuthorityUnavailable,
+    AuthorityDenied,
     Reachable,
     AddressMissing,
     AddressUnavailable,
@@ -254,7 +258,10 @@ impl LocalEvent {
             | Self::PresenceCheck {
                 result:
                     PresenceCheckResult::Confirmation(ConfirmationFailure::PeerNotAdmitted)
-                    | PresenceCheckResult::AddressUnavailable,
+                    | PresenceCheckResult::AddressUnavailable
+                    | PresenceCheckResult::AuthorityUnavailable
+                    | PresenceCheckResult::AuthorityDenied
+                    | PresenceCheckResult::Unavailable,
                 ..
             }
             | Self::SessionFinished {
@@ -352,6 +359,18 @@ impl LocalEvent {
             } => {
                 let (outcome, failure) = match result {
                     PresenceCheckResult::Reachable => ("ok", None),
+                    PresenceCheckResult::Unavailable => {
+                        ("error", Some(("internal", "unavailable")))
+                    }
+                    PresenceCheckResult::CapacityExhausted => {
+                        ("deferred", Some(("resource", "capacity_exhausted")))
+                    }
+                    PresenceCheckResult::AuthorityUnavailable => {
+                        ("error", Some(("authorization", "read_unavailable")))
+                    }
+                    PresenceCheckResult::AuthorityDenied => {
+                        ("rejected", Some(("authorization", "not_allowed")))
+                    }
                     PresenceCheckResult::AddressMissing => {
                         ("deferred", Some(("address", "address_missing")))
                     }

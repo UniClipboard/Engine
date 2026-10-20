@@ -11,12 +11,13 @@ use uc_core::membership::{
 };
 
 use crate::space::membership::{
-    ledger_error, AcquireSpaceWorkPermitPort, InboundMembershipTransfer,
-    MembershipHistoryExchangeRecord, MembershipLedgerError, MembershipOwner,
-    QuerySpaceWorkModeError, ReconcileMembershipEvidenceUseCase, SpaceWorkMode,
+    ledger_error, membership_history_purpose, AcquireSpaceWorkPermitPort,
+    InboundMembershipTransfer, MembershipHistoryExchangeRecord, MembershipLedgerError,
+    MembershipOwner, QuerySpaceWorkModeError, ReconcileMembershipEvidenceUseCase, SpaceWorkMode,
 };
 
 use super::{AuthenticatedMember, HandleMembershipHistoryMessageError};
+use uc_observability_contract::diagnostics::describe_membership_exchange;
 use uc_observability_contract::{uc_debug, uc_info};
 
 pub(super) const MAX_COMPLETED_INBOUND_TRANSFERS: usize = 256;
@@ -568,6 +569,8 @@ impl MembershipHistoryExchangeEndpointPort for HandleMembershipHistoryMessageUse
         source_device_id: &DeviceId,
         message: MembershipHistoryMessage,
     ) -> Result<MembershipHistoryMessage, MembershipHistoryExchangeError> {
+        // 入口已经处于完整能力 decorator 的 span 内；调用外层命名会落到旧的接收上下文。
+        describe_membership_exchange(membership_history_purpose(&message), true);
         let result = self
             .execute(&AuthenticatedMember::new(*source_device_id), message)
             .await;

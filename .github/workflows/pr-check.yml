@@ -2,7 +2,7 @@ name: PR Check
 
 # 分两层运行：
 # - 必需门禁（每个 PR 都跑）：macOS 编译与仓库规则检查，以及 Linux 上一次构建完成的全工作区测试、
-#   testkit 证据、成员多设备 smoke 与隔离网络配对 smoke。
+#   testkit 证据、成员多设备 smoke、隔离网络配对 smoke、presence 升级／恢复矩阵及移动绑定编译。
 # - 完整检查（合并队列、主线推送、手工触发，或带 full-ci 标签的 PR）：Rust 覆盖率与四种真实网络模式。
 #   各模式的重复轮次与成员多设备全集由 engine-real-environment.yml 的 nightly 负责。
 on:
@@ -282,6 +282,121 @@ jobs:
           name: mbx-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           path: ${{ runner.temp }}/mbx-evidence
           if-no-files-found: warn
+
+  peer-reachability:
+    name: Peer reachability required network and upgrade matrix
+    if: github.event.action != 'labeled'
+    runs-on: ubuntu-24.04
+    environment:
+      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
+      deployment: false
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - name: Install mandatory network and build tools
+        run: sudo apt-get update && sudo apt-get install -y iproute2 nftables iputils-ping file clang libclang-dev cmake ripgrep
+      - name: Prepare Rust build
+        uses: ./.github/actions/rust-ci-setup
+        with:
+          cache-key: peer-reachability-linux
+          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
+          compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+      - name: Install just
+        uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
+        with:
+          tool: just
+      - name: Run complete mandatory presence matrix
+        run: bash scripts/testing/run-peer-reachability-connectivity.sh
+      - name: Retain sanitized matrix evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: peer-reachability-connectivity-evidence
+          path: |
+            target/peer-reachability-connectivity-evidence/**/*.json
+            target/peer-reachability-connectivity-evidence/**/*.txt
+            target/peer-reachability-connectivity-evidence/*.log
+            target/upgrade-anchors/*/host.json
+          if-no-files-found: error
+
+  mobile-bindings:
+    name: Mobile binding compile ${{ matrix.platform }}
+    if: github.event.action != 'labeled'
+    runs-on: macos-15
+    timeout-minutes: 60
+    environment:
+      name: engine-build-cache-reader
+      deployment: false
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [ios, android]
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      UC_ENGINE_UNIFFI_BUILD_LOCKED: '1'
+      UC_ENGINE_UNIFFI_BUILD_PROFILE: dev
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Prepare Rust build
+        uses: ./.github/actions/rust-ci-setup
+        with:
+          cache-key: pr-mobile-${{ matrix.platform }}
+          compile-cache-access: read
+          compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+      - name: Install iOS targets
+        if: matrix.platform == 'ios'
+        run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+      - name: Build iOS binding
+        if: matrix.platform == 'ios'
+        run: bash bindings/uc-engine-uniffi/scripts/build-ios-xcframework.sh
+      - name: Install Android targets and helper
+        if: matrix.platform == 'android'
+        run: |
+          rustup target add aarch64-linux-android x86_64-linux-android
+          source scripts/build-cache/env.sh
+          cargo install cargo-ndk --version 4.1.2 --locked
+      - name: Build Android binding
+        if: matrix.platform == 'android'
+        run: bash bindings/uc-engine-uniffi/scripts/build-android-aar.sh
+
+  harmonyos-binding:
+    name: HarmonyOS binding compile
+    # 外部 fork 不在持有 SDK 的 self-hosted 机器执行源码；其平台验收保留跳过，不登记通过。
+    if: >-
+      github.event.action != 'labeled'
+      && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, macOS, ARM64, deveco]
+    timeout-minutes: 45
+    environment:
+      name: engine-build-cache-reader
+      deployment: false
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Prepare Rust build
+        uses: ./.github/actions/rust-ci-setup
+        with:
+          cache-key: pr-harmonyos
+          compile-cache-access: read
+          compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+      - name: Compile existing HarmonyOS binding with the real SDK
+        shell: bash
+        run: |
+          source scripts/build-cache/env.sh
+          rustup target add aarch64-unknown-linux-ohos
+          native_root="${DEVECO_STUDIO_CONTENTS:-/Applications/DevEco-Studio.app/Contents}/sdk/default/openharmony/native"
+          CC_aarch64_unknown_linux_ohos="$native_root/llvm/bin/aarch64-unknown-linux-ohos-clang" \
+          CXX_aarch64_unknown_linux_ohos="$native_root/llvm/bin/aarch64-unknown-linux-ohos-clang++" \
+          AR_aarch64_unknown_linux_ohos="$native_root/llvm/bin/llvm-ar" \
+          CMAKE="$native_root/build-tools/cmake/bin/cmake" \
+            cargo check --locked -p uc-ohos-napi --target aarch64-unknown-linux-ohos
 
   coverage:
     name: Rust coverage

@@ -10,6 +10,7 @@ use std::time::Duration;
 use tokio::io::{Empty, Sink};
 use tokio::sync::{watch, Semaphore};
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use uc_core::ids::DeviceId;
 use uc_core::ports::ConnectionChannel;
 
@@ -41,6 +42,7 @@ impl PeerConnection for TestConnection {
     fn protocol(&self) -> ConnectionProtocol {
         match self.mode {
             ConnectionMode::SingleExchange => ConnectionProtocol::Clipboard,
+            ConnectionMode::RetainedSingleExchange => ConnectionProtocol::PeerReachabilityV1,
             ConnectionMode::Multiplexed => ConnectionProtocol::MultiplexedClipboard,
         }
     }
@@ -77,7 +79,11 @@ struct Backend {
 }
 #[async_trait]
 impl ConnectivityBackend for Backend {
-    async fn connect(&self, _: DeviceId) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
+    async fn connect(
+        &self,
+        _: DeviceId,
+        _cancel: CancellationToken,
+    ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
         let id = self.calls.fetch_add(1, Ordering::SeqCst);
         let permit = self.gate.acquire().await.unwrap();
         permit.forget();
@@ -417,7 +423,11 @@ async fn backend_panic_reaches_waiter_and_repeated_shutdown_retains_source() {
     struct Panicking;
     #[async_trait]
     impl ConnectivityBackend for Panicking {
-        async fn connect(&self, _: DeviceId) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
+        async fn connect(
+            &self,
+            _: DeviceId,
+            _cancel: CancellationToken,
+        ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
             panic!("private-panic-sentinel")
         }
     }
@@ -1099,5 +1109,209 @@ async fn local_work_keeps_exchange_capacity_after_network_stream_is_dropped() {
     drop(work);
     let following = following.await.unwrap();
     drop(following);
+    manager.shutdown().await.unwrap();
+}
+
+/// 单首轮能力与保留生命周期分开：FIN 后租约继续存活，不能再开第二次首轮流。
+#[tokio::test]
+async fn retained_single_exchange_survives_fin_until_its_owner_releases_it() {
+    let (manager, backend, _) = fixture(
+        ConnectionMode::RetainedSingleExchange,
+        ConnectivityPolicy::default(),
+    );
+    backend.gate.add_permits(1);
+    let lease = manager
+        .connect(
+            DeviceId::new("peer"),
+            Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+    let mut stream = lease
+        .open_bi(Instant::now() + Duration::from_secs(1))
+        .await
+        .unwrap();
+    stream.send.finish().unwrap();
+    drop(stream);
+    assert!(!lease.is_closed());
+    assert!(matches!(
+        lease.open_bi(Instant::now() + Duration::from_secs(1)).await,
+        Err(ConnectivityError::ExchangeAlreadyUsed)
+    ));
+    drop(lease);
+    assert!(backend.connections.lock().unwrap()[0].is_closed());
+    manager.shutdown().await.unwrap();
+}
+
+/// pending 的每端许可必须持有同一 PeerState；长期连接不能占据固定入口总額。
+#[tokio::test]
+async fn presence_pending_capacity_is_shared_per_peer_and_released_after_promotion() {
+    let (manager, _, epoch) = fixture(
+        ConnectionMode::Multiplexed,
+        ConnectivityPolicy {
+            presence_retention: true,
+            ..ConnectivityPolicy::default()
+        },
+    );
+    let raw = |id| {
+        let (closed, _) = watch::channel(false);
+        Arc::new(TestConnection {
+            id,
+            mode: ConnectionMode::Multiplexed,
+            closed,
+        }) as Arc<dyn PeerConnection>
+    };
+    let peer = DeviceId::new("peer");
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let mut first = manager.accept_pending(raw(1), deadline).await.unwrap();
+    first.reserve_peer(peer).unwrap();
+    let mut second = manager.accept_pending(raw(2), deadline).await.unwrap();
+    second.reserve_peer(peer).unwrap();
+    let mut third = manager.accept_pending(raw(3), deadline).await.unwrap();
+    assert!(matches!(
+        third.reserve_peer(peer),
+        Err(ConnectivityError::Busy(_))
+    ));
+    let grant = Box::new(Grant {
+        epoch: 0,
+        current: epoch,
+        peer,
+    });
+    let (long, stream) = first.bind(grant).await.unwrap();
+    drop(stream);
+    third.reserve_peer(peer).unwrap();
+    assert!(!long.is_closed());
+    drop((second, third, long));
+    manager.shutdown().await.unwrap();
+}
+
+/// 逻辑超时不能取消已经开始的本地读取并提前归还活动许可。
+#[tokio::test(start_paused = true)]
+async fn presence_stream_deadline_waits_for_started_local_read_to_settle() {
+    struct SlowGrant {
+        peer: DeviceId,
+        gate: Arc<Semaphore>,
+        started: Arc<AtomicUsize>,
+    }
+    #[async_trait]
+    impl AdmissionGrant for SlowGrant {
+        fn peer(&self) -> DeviceId {
+            self.peer
+        }
+        async fn can_retain(&self) -> Result<bool, ConnectivityError> {
+            Ok(true)
+        }
+        async fn check_current(&self) -> Result<(), ConnectivityError> {
+            if self.started.fetch_add(1, Ordering::SeqCst) > 0 {
+                self.gate.acquire().await.unwrap().forget();
+            }
+            Ok(())
+        }
+    }
+    let (manager, _, _) = fixture(
+        ConnectionMode::Multiplexed,
+        ConnectivityPolicy {
+            presence_retention: true,
+            ..ConnectivityPolicy::default()
+        },
+    );
+    let (closed, _) = watch::channel(false);
+    let raw = Arc::new(TestConnection {
+        id: 1,
+        mode: ConnectionMode::Multiplexed,
+        closed,
+    });
+    let peer = DeviceId::new("peer");
+    let mut pending = manager
+        .accept_pending(raw, Instant::now() + Duration::from_secs(20))
+        .await
+        .unwrap();
+    pending.reserve_peer(peer).unwrap();
+    let gate = Arc::new(Semaphore::new(0));
+    let started = Arc::new(AtomicUsize::new(0));
+    let (lease, first) = pending
+        .bind(Box::new(SlowGrant {
+            peer,
+            gate: gate.clone(),
+            started: started.clone(),
+        }))
+        .await
+        .unwrap();
+    drop(first);
+    let job =
+        tokio::spawn(async move { lease.open_bi(Instant::now() + Duration::from_secs(1)).await });
+    while started.load(Ordering::SeqCst) < 2 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_secs(2)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        !job.is_finished(),
+        "started local work must retain its activity until actual settlement"
+    );
+    gate.add_permits(1);
+    assert!(matches!(
+        job.await.unwrap(),
+        Err(ConnectivityError::AdmissionTimedOut(_))
+    ));
+    manager.shutdown().await.unwrap();
+}
+
+/// 取消停止后续握手；已经开始的第二 backend 本地工作仍占唯一 flight 许可。
+#[tokio::test]
+async fn presence_cancelled_acquisition_waits_for_real_work_before_returning_flight_capacity() {
+    let (manager, backend, _) = fixture(
+        ConnectionMode::Multiplexed,
+        ConnectivityPolicy {
+            presence_retention: true,
+            flights_per_session: 1,
+            ..ConnectivityPolicy::default()
+        },
+    );
+    let cancel = CancellationToken::new();
+    let job = tokio::spawn({
+        let manager = manager.clone();
+        let cancel = cancel.clone();
+        async move {
+            manager
+                .connect_with_cancel(
+                    DeviceId::new("one"),
+                    Instant::now() + Duration::from_secs(20),
+                    &cancel,
+                )
+                .await
+        }
+    });
+    while backend.calls.load(Ordering::SeqCst) == 0 {
+        tokio::task::yield_now().await;
+    }
+    cancel.cancel();
+    tokio::task::yield_now().await;
+    assert!(!job.is_finished());
+    assert!(matches!(
+        manager
+            .connect(
+                DeviceId::new("two"),
+                Instant::now() + Duration::from_secs(1)
+            )
+            .await,
+        Err(ConnectivityError::Busy(_))
+    ));
+    backend.gate.add_permits(1);
+    assert!(matches!(
+        job.await.unwrap(),
+        Err(ConnectivityError::Stopped)
+    ));
+    assert!(backend.connections.lock().unwrap()[0].is_closed());
+    backend.gate.add_permits(1);
+    let lease = manager
+        .connect(
+            DeviceId::new("two"),
+            Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
+    drop(lease);
     manager.shutdown().await.unwrap();
 }

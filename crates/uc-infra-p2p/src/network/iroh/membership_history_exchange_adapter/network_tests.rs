@@ -11,6 +11,7 @@ use iroh::{Endpoint, EndpointAddr, RelayMode};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
     ConnectivityBackend, ConnectivityError, ConnectivityManager, ConnectivityPolicy,
     HistoryConnectionRetentionPort, IdleRetentionPolicy, KnownPeerIdentity,
@@ -46,7 +47,11 @@ struct Dial {
 }
 #[async_trait]
 impl ConnectivityBackend for Dial {
-    async fn connect(&self, _: DeviceId) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
+    async fn connect(
+        &self,
+        _: DeviceId,
+        _cancel: CancellationToken,
+    ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
         let native = self
             .endpoint
             .connect_with_opts(

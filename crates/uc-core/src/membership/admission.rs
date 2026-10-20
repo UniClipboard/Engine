@@ -20,6 +20,9 @@ pub enum PeerAdmissionError {
     #[error("peer admission state is invalid")]
     InvalidState,
 
-    #[error("peer admission check failed: {0}")]
-    Internal(String),
+    #[error("peer admission read failed")]
+    ReadFailed {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }

@@ -8,9 +8,10 @@ use std::time::Duration;
 use tokio::task::{JoinError, JoinSet};
 use tokio::time::{timeout_at, Instant};
 use uc_observability_contract::diagnostics::connectivity::{
-    ConnectionCloseReason, ConnectionDirection, NetworkPathKind, NetworkRecorder, ObserverFailure,
-    PathObservationKind,
+    ConnectionCloseReason, ConnectionDirection, NegotiatedProtocol, NetworkPathKind,
+    NetworkRecorder, ObserverFailure, PathObservationKind,
 };
+use uc_sync_protocol::peer_reachability::{LEGACY_PEER_REACHABILITY_ALPN, PEER_REACHABILITY_ALPN};
 
 const MAX_OBSERVERS: usize = 4096;
 
@@ -117,6 +118,11 @@ impl EndpointHooks for ObservedConnections {
                 direction,
                 initial,
             );
+            observation.negotiated(match conn.alpn() {
+                LEGACY_PEER_REACHABILITY_ALPN => NegotiatedProtocol::PeerReachabilityV1,
+                PEER_REACHABILITY_ALPN => NegotiatedProtocol::PeerReachabilityV2,
+                _ => NegotiatedProtocol::Other,
+            });
             if let Some(path) = selected {
                 observation.path(
                     path_key(path.id()),
@@ -182,7 +188,7 @@ fn path_kind(addr: &TransportAddr) -> NetworkPathKind {
     }
 }
 
-fn close_reason(reason: &iroh::endpoint::ConnectionError) -> ConnectionCloseReason {
+pub(super) fn close_reason(reason: &iroh::endpoint::ConnectionError) -> ConnectionCloseReason {
     use iroh::endpoint::ConnectionError;
     match reason {
         ConnectionError::ApplicationClosed(_) => ConnectionCloseReason::RemoteApplicationClosed,

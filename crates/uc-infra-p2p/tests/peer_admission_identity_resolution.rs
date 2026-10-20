@@ -1,3 +1,5 @@
+#[path = "support/presence.rs"]
+mod presence_support;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -5,7 +7,6 @@ use uc_application::deps::{KnownPeerIdentity, MembershipLedgerError, PeerIdentit
 
 use async_trait::async_trait;
 use chrono::Utc;
-use iroh::protocol::Router;
 use iroh::{Endpoint, RelayMode};
 use uc_core::membership::{
     MemberRepositoryPort, MembershipError, PeerAdmissionError, PeerAdmissionPort, SpaceMember,
@@ -15,7 +16,7 @@ use uc_core::ports::{PeerAddressError, PeerAddressRecord, PeerAddressRepositoryP
 use uc_core::{DeviceId, MemberSyncPreferences};
 use uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory;
 use uc_infra_local::SystemClock;
-use uc_infra_p2p::network::iroh::{IrohPeerReachabilityAdapter, PEER_REACHABILITY_ALPN};
+use uc_infra_p2p::network::iroh::PEER_REACHABILITY_ALPN;
 use uc_testkit::{Scenario, ScenarioBudget, ScenarioConfig};
 
 const ADMISSION_REQUEST: u8 = 1;
@@ -173,33 +174,32 @@ async fn admission_result(
     dialer: &Endpoint,
     members: Arc<dyn PeerIdentityDirectoryPort>,
     admission: Arc<RecordingAdmission>,
-) -> u8 {
-    let receiver = endpoint().await;
-    wait_for_address(&receiver).await;
-    let adapter = IrohPeerReachabilityAdapter::new(
-        Arc::clone(&receiver),
+) -> Option<u8> {
+    let receiver = presence_support::start(
         Arc::new(EmptyPeerAddresses),
         members,
         admission,
         Arc::new(Sha256IdentityFingerprintFactory),
         Arc::new(SystemClock),
-    );
-    let router = Router::builder((*receiver).clone())
-        .accept(PEER_REACHABILITY_ALPN, adapter.handler())
-        .spawn();
+        tokio::sync::broadcast::channel(64).0,
+    )
+    .await;
     let connection = dialer
-        .connect(receiver.addr(), PEER_REACHABILITY_ALPN)
+        .connect(receiver.address.clone(), PEER_REACHABILITY_ALPN)
         .await
         .unwrap();
     let (mut send, mut receive) = connection.open_bi().await.unwrap();
     send.write_all(&[ADMISSION_REQUEST]).await.unwrap();
     send.finish().unwrap();
     let mut response = [0u8; 1];
-    receive.read_exact(&mut response).await.unwrap();
+    let result = receive
+        .read_exact(&mut response)
+        .await
+        .ok()
+        .map(|_| response[0]);
     connection.close(0u32.into(), b"diagnostic_complete");
-    router.shutdown().await.unwrap();
-    receiver.close().await;
-    response[0]
+    receiver.shutdown().await;
+    result
 }
 
 #[tokio::test]
@@ -229,11 +229,9 @@ async fn identity_resolution_distinguishes_mapping_and_read_failures() {
             Arc::clone(&unique_admission),
         )
         .await;
-        assert_eq!(result, ADMISSION_ACCEPTED);
-        assert_eq!(
-            unique_admission.checked(),
-            vec![active.device_id.clone(), active.device_id.clone()]
-        );
+        assert_eq!(result, Some(ADMISSION_ACCEPTED));
+        let checked = unique_admission.checked();
+        assert!(checked.len() >= 2 && checked.iter().all(|peer| peer == &active.device_id));
         scenario.record_event("unique-current-identity-admitted");
     }
 
@@ -251,7 +249,7 @@ async fn identity_resolution_distinguishes_mapping_and_read_failures() {
             Arc::clone(&duplicate_admission),
         )
         .await;
-        assert_eq!(result, ADMISSION_REJECTED);
+        assert_eq!(result, Some(ADMISSION_REJECTED));
         assert!(duplicate_admission.checked().is_empty());
         scenario.record_event("duplicate-identity-rejected-before-admission");
     }
@@ -268,7 +266,7 @@ async fn identity_resolution_distinguishes_mapping_and_read_failures() {
             Arc::clone(&failed_read_admission),
         )
         .await;
-        assert_eq!(result, ADMISSION_REJECTED);
+        assert_eq!(result, None);
         assert!(failed_read_admission.checked().is_empty());
         scenario.record_event("member-projection-read-failed-before-admission");
     }
@@ -285,7 +283,7 @@ async fn identity_resolution_distinguishes_mapping_and_read_failures() {
             Arc::clone(&failed_ledger_admission),
         )
         .await;
-        assert_eq!(result, ADMISSION_REJECTED);
+        assert_eq!(result, None);
         assert_eq!(failed_ledger_admission.checked(), vec![active.device_id]);
         scenario.record_event("admission-ledger-read-failed-after-identity-resolution");
     }

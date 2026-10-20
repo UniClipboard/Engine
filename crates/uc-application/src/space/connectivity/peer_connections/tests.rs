@@ -10,6 +10,8 @@ struct Scope {
     unavailable: AtomicBool,
     reads: AtomicUsize,
     stall_on_read: AtomicUsize,
+    stall_from_read: AtomicUsize,
+    scope_release: tokio::sync::Semaphore,
 }
 
 #[async_trait::async_trait]
@@ -18,8 +20,10 @@ impl CurrentSpaceMemberScopePort for Scope {
         &self,
     ) -> Result<crate::deps::CurrentSpaceMemberScope, CurrentSpaceMemberScopeError> {
         let read = self.reads.fetch_add(1, Ordering::SeqCst) + 1;
-        if self.stall_on_read.load(Ordering::SeqCst) == read {
-            futures::future::pending::<()>().await;
+        if self.stall_on_read.load(Ordering::SeqCst) == read
+            || read >= self.stall_from_read.load(Ordering::SeqCst)
+        {
+            self.scope_release.acquire().await.unwrap().forget();
         }
         if self.unavailable.load(Ordering::SeqCst) {
             return Err(CurrentSpaceMemberScopeError::Unavailable);
@@ -99,6 +103,8 @@ fn dependencies() -> (Arc<Scope>, Arc<PeerReachability>) {
         unavailable: AtomicBool::new(false),
         reads: AtomicUsize::new(0),
         stall_on_read: AtomicUsize::new(0),
+        stall_from_read: AtomicUsize::new(usize::MAX),
+        scope_release: tokio::sync::Semaphore::new(0),
     });
     let peer_reachability = Arc::new(PeerReachability {
         reachable: AtomicBool::new(false),
@@ -837,6 +843,7 @@ async fn fresh_online_does_not_mask_unfinished_qualification() {
         (0, 1),
         "unverified qualification must fail closed"
     );
+    scope.scope_release.add_permits(1);
     owner.shutdown().await.unwrap();
 }
 
@@ -961,4 +968,68 @@ async fn refreshing_a_closed_or_paused_coordinator_is_a_rejection_not_a_failure(
         0,
         "{output}"
     );
+}
+
+/// scope 的逻辑一秒超时不释放完整四尝试额度；退出等待真实读取完成。
+#[tokio::test(start_paused = true)]
+async fn four_timed_out_scope_reads_keep_capacity_until_actual_settlement_and_shutdown_waits() {
+    let (owner, scope, reachability) = fixture();
+    *scope.peers.lock().await = (0..8)
+        .map(|index| DeviceId::new(format!("peer-{index}")))
+        .collect();
+    scope.stall_from_read.store(2, Ordering::SeqCst);
+    owner.start().await;
+    settle().await;
+    assert_eq!(scope.reads.load(Ordering::SeqCst), 5);
+    tokio::time::advance(Duration::from_secs(25)).await;
+    settle().await;
+    assert_eq!(
+        scope.reads.load(Ordering::SeqCst),
+        5,
+        "uncancellable scope reads still own all four real attempt slots"
+    );
+    assert_eq!(reachability.calls.load(Ordering::SeqCst), 0);
+    let shutdown = tokio::spawn({
+        let owner = owner.clone();
+        async move { owner.shutdown().await }
+    });
+    settle().await;
+    assert!(!shutdown.is_finished());
+    scope.scope_release.add_permits(4);
+    shutdown.await.unwrap().unwrap();
+    assert_eq!(
+        reachability.calls.load(Ordering::SeqCst),
+        0,
+        "cancelled qualification must not begin the transport step"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn scope_read_failure_keeps_the_last_display_but_pauses_new_attempts_until_valid_scope_returns(
+) {
+    let (owner, scope, reachability) = fixture();
+    reachability.reachable.store(true, Ordering::SeqCst);
+    owner.start().await;
+    settle().await;
+    let peer = DeviceId::new("peer");
+    assert_eq!(
+        reachability.current_state(&peer).await,
+        ReachabilityState::Online
+    );
+    let calls = reachability.calls.load(Ordering::SeqCst);
+    scope.unavailable.store(true, Ordering::SeqCst);
+    scope.changes.send_replace(());
+    settle().await;
+    assert_eq!(
+        reachability.current_state(&peer).await,
+        ReachabilityState::Online
+    );
+    tokio::time::advance(Duration::from_secs(15)).await;
+    settle().await;
+    assert_eq!(reachability.calls.load(Ordering::SeqCst), calls);
+    scope.unavailable.store(false, Ordering::SeqCst);
+    scope.changes.send_replace(());
+    settle().await;
+    assert!(reachability.calls.load(Ordering::SeqCst) > calls);
+    owner.shutdown().await.unwrap();
 }

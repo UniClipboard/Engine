@@ -36,6 +36,19 @@ fn connectivity_diagnostics_survive_the_export_file_without_private_fields() {
         .finish(SessionTransitionResult::Completed);
     tracing::event!(target: "uc.connectivity", tracing::Level::INFO, event.name = "presence.connection.closed", payload = "PRIVATE_REASON");
     tracing::event!(target: "uc.connectivity", tracing::Level::INFO, device = "PRIVATE_DEVICE", "PRIVATE_BODY");
+    PresenceCheckObservation::begin().finish(PresenceCheckResult::AuthorityUnavailable);
+    PresenceCheckObservation::begin().finish(PresenceCheckResult::CapacityExhausted);
+    PresenceCheckObservation::begin().finish(PresenceCheckResult::Unavailable);
+    let physical = NetworkRecorder::current().connection_established(
+        [7; 32],
+        42,
+        ConnectionDirection::Inbound,
+        NetworkPathKind::Relay,
+    );
+    physical.negotiated(NegotiatedProtocol::PeerReachabilityV2);
+    physical.closed(ConnectionCloseReason::TimedOut);
+    // 网络库的非受控原文不能绕过同一实际导出过滤器。
+    tracing::event!(target: "quinn_proto", tracing::Level::WARN, reason = "PRIVATE_NATIVE_REASON", "PRIVATE_NETWORK_BODY");
     assert_eq!(
         ProcessObservabilityRuntime::flush_local_logs(Duration::from_secs(5)),
         SignalResult::Completed
@@ -50,7 +63,7 @@ fn connectivity_diagnostics_survive_the_export_file_without_private_fields() {
         .map(|l| serde_json::from_str(l).expect("JSON"))
         .filter(|row: &serde_json::Value| row["target"] != "uc.diagnostics")
         .collect();
-    assert_eq!(rows.len(), 5);
+    assert_eq!(rows.len(), 11);
     assert!(rows
         .iter()
         .all(|row| row["environment"] == "test" && row["app_channel"] == "test"));
@@ -72,4 +85,8 @@ fn connectivity_diagnostics_survive_the_export_file_without_private_fields() {
     assert!(rows[3]["fields"].get("duration_ms").is_none());
     assert_eq!(rows[4]["fields"]["uc.outcome"], "ok");
     assert!(rows.iter().all(|r| r["fields"].get("payload").is_none()));
+    assert_eq!(rows[5]["fields"]["error.reason"], "read_unavailable");
+    assert_eq!(rows[6]["fields"]["error.reason"], "capacity_exhausted");
+    assert_eq!(rows[7]["fields"]["error.reason"], "unavailable");
+    assert_eq!(rows[9]["fields"]["protocol"], "peer_reachability_v2");
 }

@@ -45,12 +45,20 @@ const restartBinary = options.get('--restart-host')
 assert(!restartBinary || only === 'E15-pairing-current-address')
 const peerBinary = options.get('--peer-host')
 const peerSide = Number(options.get('--peer-side') ?? 1)
+// P00 前置只使用旧库正常配对产生的资料；每次运行重新配对并复制，不写入人工资格。
+const prepairedHost = options.get('--prepaired-host')
+const upgradeSide = Number(options.get('--upgrade-side'))
+const presenceRole = options.get('--presence-role') ?? (upgradeSide === 0 ? 'receive' : 'initiate')
+assert(['receive', 'initiate'].includes(presenceRole))
+assert(!prepairedHost || (['direct', 'relay'].includes(mode) && [0, 1].includes(upgradeSide) && !peerBinary && only === 'P00-prepaired-upgrade'))
 assert(!peerBinary || mode !== 'legacy')
 let relays = []
 const repeat = Number(options.get('--repeat') ?? 3)
 assert(Number.isInteger(repeat) && repeat > 0)
 // 多进程状态读取会跨过截止点少量时间；只给观测过程留余量，不改变 Engine 的二十秒预算。
 const offlineObservationGrace = 250
+// 底层中转重连包含 Iroh 最长 16 秒退避与 10 秒连接期限；其等待不属于就绪后的三秒门。
+const relayReadinessBudget = 90_000
 const evidence = resolve(options.get('--evidence') ?? 'target/connection-recovery-evidence')
 mkdirSync(evidence, { recursive: true, mode: 0o700 })
 const runId = `ucr${process.pid}`
@@ -132,9 +140,11 @@ class Host {
         pending.reject(new Error('test host exited before replying'))
       }
     })
-    const ready = await this.raw({ root: this.root, rendezvous: `http://10.233.0.1:${server.address().port}`, secure_storage: this.secureStorage, relay: mode === 'relay', bind_port: this.bindPort })
+    const ready = await this.raw({ root: this.root, rendezvous: `http://10.233.0.1:${server.address().port}`, secure_storage: this.secureStorage, relay: mode === 'relay', bind_port: this.bindPort, reject_presence_endpoint_ids: this.rejectPresenceEndpointIds })
     assert.equal(ready.ready, true)
     this.version = ready.version
+    this.hostIdentity = ready.host
+    if (ready.host?.capabilities?.includes('space-work-events')) await this.call('start_network_capture')
   }
   raw(request) {
     if (interrupted || !this.child || this.child.exitCode !== null || this.child.signalCode !== null) return Promise.reject(new Error('test host is not running'))
@@ -349,7 +359,7 @@ function partition(node, blocked) {
   const rules = JSON.parse(net(node, 'nft', '-j', 'list', 'table', 'inet', 'uc_liveness'))
   assert(rules.nftables.some(row => row.rule?.expr?.some(expr => expr.counter?.packets > 0)), 'drop counters remained empty')
   const dropped = rules.nftables.flatMap(row => row.rule?.expr ?? []).reduce((total, expr) => total + (expr.counter?.packets ?? 0), 0)
-  faults.push({ node: node.label, action: 'drop', at_ms: Math.round(activated), verified_dropped_packets: dropped })
+  faults.push({ node: node.label, action: 'drop', at_ms: Math.round(activated), verified_dropped_packets: dropped, ipv4_drop_packets: counters[0], ipv6_drop_packets: counters[1] })
   return activated
 }
 
@@ -391,7 +401,7 @@ function blockPeerPair(left, right) {
   const rules = JSON.parse(net(left, 'nft', '-j', 'list', 'table', 'inet', 'uc_pair'))
   const dropped = rules.nftables.flatMap(row => row.rule?.expr ?? []).reduce((total, expr) => total + (expr.counter?.packets ?? 0), 0)
   assert(dropped > 0, 'peer isolation counters remained empty')
-  faults.push({ node: `${left.label}-${right.label}`, action: 'peer_pair_blocked', at_ms: Math.round(performance.now()), verified_dropped_packets: dropped })
+  faults.push({ node: `${left.label}-${right.label}`, action: 'peer_pair_blocked', at_ms: Math.round(performance.now()), verified_dropped_packets: dropped, ipv4_drop_packets: counters[0], ipv6_drop_packets: counters[1] })
 }
 
 function unblockPeerPair(left, right) {
@@ -564,8 +574,9 @@ async function run() {
   server.listen(0, '10.233.0.1')
   await once(server, 'listening')
   if (mode === 'relay') await startRelay()
-  for (let index = 0; index < (mode === 'direct' || mode === 'known-peer' ? 3 : 2); index++) {
+  for (let index = 0; index < (!prepairedHost && (mode === 'direct' || mode === 'known-peer') ? 3 : 2); index++) {
     const node = new Host(index)
+    if (prepairedHost) node.binaryOverride = resolve(prepairedHost)
     nodes.push(node)
     ip('netns', 'add', node.namespace)
     namespaces.push(node.namespace)
@@ -595,6 +606,11 @@ async function run() {
     for (const node of nodes) await node.stop()
     return
   }
+  if (prepairedHost) {
+    await prepairedUpgrade()
+    for (const node of nodes) await node.stop()
+    return
+  }
   const [a, b, c] = nodes
   await requiredScenario('E01-complete-pairing', async () => {
     const created = await paired(nodes)
@@ -604,7 +620,7 @@ async function run() {
     await requiredScenario('E02-text-transfer', async () => {
       await transfer(a, b, 'baseline')
       if (c) await transfer(a, c, 'baseline')
-      return { exact_text_verified: true, direction_count: c ? 4 : 2 }
+      return { exact_text_verified: true, direction_count: c ? 4 : 2, ...(mode === 'direct' ? { paths: await selectedPaths(), ...await negotiatedPresence(a, 'peer_reachability_v2') } : {}) }
     })
     await requiredScenario('E02-file-transfer', async () => {
       await transferFile(a, b, 'baseline')
@@ -707,6 +723,127 @@ async function run() {
     })
   }
   for (const node of nodes) await node.stop()
+}
+
+/** 阶段 0：旧旧正常配对、原始资料新副本和单端升级，沿用完整宿主与隔离网络。 */
+async function prepairedUpgrade() {
+  await scenario('P00-prepaired-upgrade-old-pairing', async () => {
+    if (mode === 'relay') for (const node of nodes) blockDirect(node)
+    await paired(nodes)
+    await transfer(nodes[0], nodes[1], 'old-paired-baseline')
+    return { old_pairing: true, exact_bidirectional_content: true, paths: await selectedPaths() }
+  })
+  const before = await Promise.all(nodes.map(node => node.call('observe')))
+  const endpoints = await Promise.all(nodes.map(node => node.call('network_endpoint')))
+  for (const node of nodes) await node.stop()
+  // 原始副本与活动副本分离；安全存储仅留在进程内，退出时随私有资料一并回收。
+  const originals = nodes.map(node => {
+    const original = join(root, `original-${node.label}`)
+    cpSync(node.root, original, { recursive: true })
+    return { directory: original, storage: structuredClone(node.secureStorage) }
+  })
+  for (const [index, node] of nodes.entries()) {
+    rmSync(node.root, { recursive: true, force: true })
+    cpSync(originals[index].directory, node.root, { recursive: true })
+    node.secureStorage = structuredClone(originals[index].storage)
+    if (index === upgradeSide) node.binaryOverride = binary
+  }
+  await requiredScenario('P00-prepaired-upgrade', async () => {
+    const upgraded = nodes[upgradeSide]
+    if (presenceRole === 'receive') {
+      upgraded.rejectPresenceEndpointIds = [endpoints[1 - upgradeSide]]
+    }
+    const other = nodes[1 - upgradeSide]
+    if (presenceRole === 'initiate' && other.hostIdentity?.capabilities?.includes('space-work-events')) other.rejectPresenceEndpointIds = [endpoints[upgradeSide]]
+    const order = presenceRole === 'initiate' ? [upgraded, other] : [other, upgraded]
+    for (const node of order) {
+      await node.start()
+      await node.call('unlock')
+    }
+    const after = await Promise.all(nodes.map(node => node.call('observe')))
+    const endpointsAfter = await Promise.all(nodes.map(node => node.call('network_endpoint')))
+    const retained = before.map((value, index) => ({
+      identity: value.local_device.id === after[index].local_device.id,
+      transport_identity: JSON.stringify(endpoints[index]) === JSON.stringify(endpointsAfter[index]),
+      members: JSON.stringify(value.devices) === JSON.stringify(after[index].devices),
+      content: JSON.stringify(value.history) === JSON.stringify(after[index].history),
+    }))
+    records.at(-1).proof = { upgraded_side: upgradeSide, presence_role: presenceRole, retained, independent_original_copies: true }
+    assert(retained.every(row => row.identity && row.transport_identity && row.members && row.content), 'original paired state changed during single-side upgrade')
+    await online(nodes, 92_000)
+    await until(async () => { const facts = await upgraded.call('connections'); records.at(-1).proof.direction = { incoming: facts.incoming, outgoing: facts.outgoing }; return presenceRole === 'receive' ? facts.incoming > 0 && facts.outgoing === 0 : facts.outgoing > 0 }, 35_000, 'the required real presence direction was not established')
+    await transfer(nodes[0], nodes[1], 'single-side-upgrade')
+    return { ...records.at(-1).proof, exact_bidirectional_content: true, paths: await selectedPaths(), hosts: nodes.map(node => node.hostIdentity), ...await negotiatedPresence(upgraded, options.get('--presence-protocol') ?? 'peer_reachability_v1') }
+  })
+  // 初始角色已经用真实连接证明；故障前恢复默认双向主动能力，不限制旧端的恢复方式。
+  for (const node of nodes) {
+    if (node.hostIdentity?.capabilities?.includes('space-work-events')) {
+      await node.call('reject_reachability_dials', { endpoint_ids: [] })
+      node.rejectPresenceEndpointIds = undefined
+    }
+  }
+  if (mode === 'relay') {
+    const v1 = (options.get('--presence-protocol') ?? 'peer_reachability_v1') === 'peer_reachability_v1'
+    for (let iteration = 0; iteration < repeat; iteration++) {
+      await scenario(`P00-prepaired-upgrade-recovery-${iteration}`, async () => {
+        const proof = records.at(-1).proof = { protocol: v1 ? 'peer_reachability_v1' : 'peer_reachability_v2', presence_role: presenceRole }
+        const recoveriesBefore = nodes.reduce((sum, node) => sum + node.recoveries, 0)
+        await stopRelay()
+        const interruptedAt = performance.now()
+        await offline(nodes[1], v1 ? 70_000 : 20_000)
+        const offlineAt = performance.now()
+        proof.offline_ms = Math.round(offlineAt - interruptedAt)
+        await startRelay()
+        const restartedAt = performance.now()
+        // 新旧 Iroh 均有底层重连退避；分别记录就绪前等待与就绪后三秒验收。
+        await until(async () => nodes.every(node => net(node, 'ss', '-Hnt', 'state', 'established').includes(`:${relayPorts[nodes.indexOf(node)]}`)), relayReadinessBudget, 'both relay transports did not reconnect')
+        const readyAt = performance.now()
+        proof.relay_restart_to_transports_ready_ms = Math.round(readyAt - restartedAt)
+        // 起点后只有状态查询；成功后才开始双向内容验证。
+        await online(nodes, v1 ? 90_000 : 3_000)
+        const onlineAt = performance.now()
+        await transfer(nodes[0], nodes[1], `prepaired-healed-${iteration}`)
+        const readbackAt = performance.now()
+        assert(v1 || readbackAt - readyAt <= 3_000, 'v2 relay recovery and bidirectional readback exceeded three seconds')
+        for (const node of nodes) await node.drain()
+        assert.equal(nodes.reduce((sum, node) => sum + node.recoveries, 0), recoveriesBefore, 'presence recovery rebuilt the whole session')
+        return { ...proof, initial_role_control_only: true, default_bidirectional_recovery: true, whole_session_recovery_count: 0, presence_role: presenceRole, protocol: v1 ? 'peer_reachability_v1' : 'peer_reachability_v2', offline_ms: Math.round(offlineAt - interruptedAt), relay_transport_ready_to_online_ms: Math.round(onlineAt - readyAt), relay_transport_ready_to_bidirectional_transfer_ms: Math.round(readbackAt - readyAt), query_only_before_online: true, exact_bidirectional_content: true, paths: await selectedPaths() }
+      })
+    }
+  }
+
+}
+
+async function negotiatedPresence(node, expected) {
+  await node.call('flush')
+  const facts = []
+  for (const name of readdirSync(join(node.root, 'logs')).filter(name => name.includes('.json'))) {
+    for (const line of readFileSync(join(node.root, 'logs', name), 'utf8').split('\n')) {
+      try {
+        const fields = JSON.parse(line).fields ?? {}
+        if (fields['event.name'] === 'connection.protocol.negotiated' && fields.protocol?.startsWith('peer_reachability_')) facts.push(fields.protocol)
+      } catch {}
+    }
+  }
+  assert(facts.includes(expected), 'actual negotiated presence ALPN was not observed')
+  return { negotiated_protocol: expected, actual_handshake_observed: true }
+}
+
+async function selectedPaths() {
+  const expected = mode === 'relay' ? 'relay' : 'direct'
+  const paths = []
+  await until(async () => {
+    paths.length = 0
+    for (const node of nodes) {
+      const peers = await node.call('peers')
+      for (const peer of nodes.filter(peer => peer !== node)) {
+        const row = peers.find(row => row.peer_id === peer.id)
+        paths.push({ node: node.label, peer: peer.label, selected_path: row?.channel })
+      }
+    }
+    return paths.every(row => row.selected_path === expected)
+  }, 5000, 'actual selected path did not match the isolated topology')
+  return paths
 }
 
 async function legacyPairingIsRejected(sponsor, joiner) {
@@ -818,12 +955,16 @@ async function pairingCurrentAddressScenario(a, b) {
 function blockDirect(node) {
   nft(node, 'add', 'table', 'inet', 'uc_direct')
   nft(node, 'add', 'chain', 'inet', 'uc_direct', 'output', '{ type filter hook output priority -50; policy accept; }')
-  nft(node, 'add', 'rule', 'inet', 'uc_direct', 'output', 'meta', 'l4proto', 'udp', 'counter', 'drop')
+  nft(node, 'add', 'rule', 'inet', 'uc_direct', 'output', 'meta', 'nfproto', 'ipv4', 'meta', 'l4proto', 'udp', 'counter', 'drop')
+  nft(node, 'add', 'rule', 'inet', 'uc_direct', 'output', 'meta', 'nfproto', 'ipv6', 'meta', 'l4proto', 'udp', 'counter', 'drop')
   net(node, 'node', '-e', "const s=require('dgram').createSocket('udp4');s.send('probe',19091,'10.233.0.1',()=>s.close())")
+  net(node, 'node', '-e', "const s=require('dgram').createSocket('udp6');s.send('probe',19091,'::1',()=>s.close())")
   const rules = JSON.parse(net(node, 'nft', '-j', 'list', 'table', 'inet', 'uc_direct'))
   const dropped = rules.nftables.flatMap(row => row.rule?.expr ?? []).reduce((total, expr) => total + (expr.counter?.packets ?? 0), 0)
-  assert(dropped > 0, 'direct-path drop rule was not exercised')
-  faults.push({ node: node.label, action: 'direct_paths_blocked', at_ms: Math.round(performance.now()), verified_dropped_packets: dropped })
+  const counters = rules.nftables.filter(row => row.rule).map(row => row.rule.expr.find(expr => expr.counter)?.counter?.packets ?? 0)
+  assert.equal(counters.length, 2)
+  assert(counters.every(count => count > 0), 'IPv4 and IPv6 UDP drop rules must both be exercised')
+  faults.push({ node: node.label, action: 'direct_paths_blocked', at_ms: Math.round(performance.now()), verified_dropped_packets: dropped, ipv4_drop_packets: counters[0], ipv6_drop_packets: counters[1] })
   return dropped
 }
 
@@ -851,7 +992,7 @@ async function relayScenarios(a, b) {
   await online(nodes, 20_000)
   await requiredScenario('E02-relay-only-text-transfer', async () => {
     await transfer(a, b, 'relay-only-baseline')
-    return { direct_paths_blocked: directDropPackets > 0, exact_text_verified: true, direction_count: 2 }
+    return { direct_paths_blocked: directDropPackets > 0, exact_text_verified: true, direction_count: 2, paths: await selectedPaths(), ...await negotiatedPresence(a, 'peer_reachability_v2') }
   })
   await requiredScenario('E02-relay-only-file-transfer', async () => {
     await transferFile(a, b, 'relay-only-baseline')
@@ -873,13 +1014,16 @@ async function relayScenarios(a, b) {
         bidirectional_transfer: false,
       }
       await stopRelay()
+      const interruptedAt = performance.now()
       await offline(b, 20_000)
+      proof.offline_ms = Math.round(performance.now() - interruptedAt)
       if (relayExtraDownMs > 0) await delay(relayExtraDownMs)
       await startRelay()
       const relayStartedAt = performance.now()
-      if (!measureRecovery) await until(async () => nodes.every(node => net(node, 'ss', '-Hnt', 'state', 'established').includes(`:${relayPorts[nodes.indexOf(node)]}`)), 20_000, 'test hosts did not reconnect to the local relay')
+      if (!measureRecovery) await until(async () => nodes.every(node => net(node, 'ss', '-Hnt', 'state', 'established').includes(`:${relayPorts[nodes.indexOf(node)]}`)), relayReadinessBudget, 'test hosts did not reconnect to the local relay')
       const relayReadyAt = measureRecovery ? relayStartedAt : performance.now()
       proof.both_relay_transports_ready = true
+      proof.relay_restart_to_transports_ready_ms = Math.round(relayReadyAt - relayStartedAt)
       if (measureRecovery) {
         if (tcpProbe) {
           const tcpStarted = performance.now()
@@ -959,8 +1103,8 @@ finally {
             const reason = row.fields?.['error.reason']
             if (allowedReasons.has(reason)) node.failureReasons.push({ timestamp: row.timestamp, reason })
             const fields = row.fields ?? {}
-            if (['relay.status.observed', 'address.loaded', 'address.used'].includes(fields['event.name'])) {
-              node.networkFacts.push(Object.fromEntries(Object.entries(fields).filter(([key]) => ['event.name', 'connected_count', 'known_count', 'direct_count', 'relay_count', 'other_count'].includes(key))))
+            if (['relay.status.observed', 'address.loaded', 'address.used', 'connection.protocol.negotiated'].includes(fields['event.name'])) {
+              node.networkFacts.push(Object.fromEntries(Object.entries(fields).filter(([key]) => ['event.name', 'connected_count', 'known_count', 'direct_count', 'relay_count', 'other_count', 'protocol'].includes(key))))
             }
           } catch {}
         }
@@ -993,9 +1137,9 @@ finally {
     for (const node of nodes) { try { cpSync(join(node.root, 'logs'), join(evidence, 'node-logs', `${mode}-${node.label}`), { recursive: true }) } catch {} }
   }
   rmSync(root, { recursive: true, force: true })
-  const binaries = [binary, legacyBinary, peerBinary, relayBinary, relayBinaryB, restartBinary].filter(Boolean).map(path => ({ sha256: createHash('sha256').update(readFileSync(path)).digest('hex') }))
+  const binaries = [binary, prepairedHost, legacyBinary, peerBinary, relayBinary, relayBinaryB, restartBinary].filter(Boolean).map(path => ({ sha256: createHash('sha256').update(readFileSync(path)).digest('hex') }))
   if (!cleaned) failed = true
-  const reproduction = `bash scripts/testing/run-connection-recovery-e2e.sh --suite network --repeat ${repeat} --mode ${mode}${only ? ` --case ${only}` : ''}`
+  const reproduction = `bash scripts/testing/run-connection-recovery-e2e.sh --suite network --repeat ${repeat} --mode ${mode}${only ? ` --case ${only}` : ''}${prepairedHost ? ` --prepaired-host ${prepairedHost} --upgrade-side ${upgradeSide} --presence-role ${presenceRole} --presence-protocol ${options.get('--presence-protocol') ?? 'peer_reachability_v1'}` : ''}${peerBinary ? ` --peer-host ${peerBinary} --peer-side ${peerSide}` : ''}`
   const timingCompletedAt = performance.now()
   const scenarioStartedAt = firstScenarioStartedAt ?? cleanupStartedAt
   const timings = {
@@ -1004,6 +1148,6 @@ finally {
     cleanup_ms: Math.round(timingCompletedAt - cleanupStartedAt),
     total_ms: Math.round(timingCompletedAt - timingStartedAt),
   }
-  writeFileSync(join(evidence, `${mode}${mode === 'legacy' ? `-${legacySide}` : ''}${peerBinary ? `-mixed-${peerSide}` : ''}${relayBinaryB ? '-split-relays' : ''}.json`), JSON.stringify({ sequence: 'fixed-short-long-heal-v2', reproduction, binaries, faults, records, timings, cleaned, plaintext_clean: plaintextClean, failed, nodes: nodes.map(node => ({ label: node.label, version: node.version, events: node.timeline, resources: node.resources, failure_reasons: node.failureReasons, network_facts: node.networkFacts })) }, null, 2), { mode: 0o600 })
+  writeFileSync(join(evidence, `${mode}${prepairedHost ? `-prepaired-${upgradeSide}-${presenceRole}` : ''}${mode === 'legacy' ? `-${legacySide}` : ''}${peerBinary ? `-mixed-${peerSide}` : ''}${relayBinaryB ? '-split-relays' : ''}.json`), JSON.stringify({ sequence: 'fixed-short-long-heal-v2', reproduction, binaries, faults, records, timings, cleaned, plaintext_clean: plaintextClean, failed, nodes: nodes.map(node => ({ label: node.label, version: node.version, events: node.timeline, resources: node.resources, failure_reasons: node.failureReasons, network_facts: node.networkFacts })) }, null, 2), { mode: 0o600 })
 }
 process.exitCode = failed ? 1 : 0

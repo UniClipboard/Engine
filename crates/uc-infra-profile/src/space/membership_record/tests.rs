@@ -558,3 +558,160 @@ fn v6_recovery_appendix_roundtrips_with_the_existing_member_facts() {
     trailing.push(0xff);
     assert!(codec::decode(&trailing, FIXTURE_GENERATION, &AcceptingVerifier, NOW).is_err());
 }
+
+#[path = "../../../../uc-infra-p2p/tests/support/presence.rs"]
+mod presence_support;
+
+struct StoreAuthority {
+    store: SqliteMembershipRecordStore<Arc<DieselSqliteExecutor>>,
+}
+#[async_trait::async_trait]
+impl uc_core::membership::PeerAdmissionPort for StoreAuthority {
+    async fn is_admitted(
+        &self,
+        peer: &DeviceId,
+    ) -> Result<bool, uc_core::membership::PeerAdmissionError> {
+        let record = MembershipRecordStorePort::load(&self.store)
+            .await
+            .map_err(
+                |source| uc_core::membership::PeerAdmissionError::ReadFailed {
+                    source: Box::new(source),
+                },
+            )?;
+        let MembershipRecord::Space(space) = record else {
+            return Ok(false);
+        };
+        let ledger = MembershipLedger::restore(space.ledger).map_err(|source| {
+            uc_core::membership::PeerAdmissionError::ReadFailed {
+                source: Box::new(source),
+            }
+        })?;
+        Ok(ledger.admits_inbound_peer(peer))
+    }
+}
+struct SocketIdentity(uc_application::deps::KnownPeerIdentity);
+#[async_trait::async_trait]
+impl uc_application::deps::PeerIdentityDirectoryPort for SocketIdentity {
+    async fn known_peer_identities(
+        &self,
+    ) -> Result<Vec<uc_application::deps::KnownPeerIdentity>, MembershipLedgerError> {
+        Ok(vec![self.0.clone()])
+    }
+}
+struct EmptyPresenceAddresses;
+#[async_trait::async_trait]
+impl uc_core::ports::PeerAddressRepositoryPort for EmptyPresenceAddresses {
+    async fn get(
+        &self,
+        _: &DeviceId,
+    ) -> Result<Option<uc_core::ports::PeerAddressRecord>, uc_core::ports::PeerAddressError> {
+        Ok(None)
+    }
+    async fn list(
+        &self,
+    ) -> Result<Vec<uc_core::ports::PeerAddressRecord>, uc_core::ports::PeerAddressError> {
+        Ok(Vec::new())
+    }
+    async fn upsert(
+        &self,
+        _: &uc_core::ports::PeerAddressRecord,
+    ) -> Result<(), uc_core::ports::PeerAddressError> {
+        panic!("read-only fixture")
+    }
+    async fn remove(&self, _: &DeviceId) -> Result<(), uc_core::ports::PeerAddressError> {
+        panic!("read-only fixture")
+    }
+}
+
+/// 实际密文仓储读失败经过完整 owner；不能用手写错误替代 SQLite 现场。
+#[tokio::test]
+async fn real_sqlite_read_failure_preserves_online_and_reaches_the_presence_source_chain() {
+    use uc_core::ports::security::IdentityFingerprintFactoryPort;
+    use uc_core::ports::PeerReachabilityPort;
+    let profile = Profile::new(FIXTURE_GENERATION);
+    profile.write_plaintext(TWO_MEMBER_ACTIVE);
+    let client = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
+        .clear_address_lookup()
+        .relay_mode(iroh::RelayMode::Disabled)
+        .bind()
+        .await
+        .unwrap();
+    let fingerprint =
+        Arc::new(uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory);
+    let authority = Arc::new(StoreAuthority {
+        store: profile.store(AcceptingVerifier, NOW),
+    });
+    assert!(
+        uc_core::membership::PeerAdmissionPort::is_admitted(&*authority, &peer())
+            .await
+            .unwrap()
+    );
+    let receiver = presence_support::start(
+        Arc::new(EmptyPresenceAddresses),
+        Arc::new(SocketIdentity(uc_application::deps::KnownPeerIdentity {
+            device_id: peer(),
+            identity_fingerprint: fingerprint.from_public_key(client.id().as_bytes()).unwrap(),
+        })),
+        authority,
+        fingerprint,
+        Arc::new(FixedClock(NOW)),
+        tokio::sync::broadcast::channel(64).0,
+    )
+    .await;
+    let connection = client
+        .connect(
+            receiver.address.clone(),
+            uc_sync_protocol::peer_reachability::PEER_REACHABILITY_ALPN,
+        )
+        .await
+        .unwrap();
+    let (mut send, mut receive) = connection.open_bi().await.unwrap();
+    send.write_all(&[1]).await.unwrap();
+    send.finish().unwrap();
+    assert_eq!(receive.read_to_end(1).await.unwrap(), vec![1]);
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while receiver.owner.current_state(&peer()).await
+            != uc_core::ports::ReachabilityState::Online
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    profile
+        .executor
+        .run(|conn| {
+            sql_query("DROP TABLE membership_ledger_state").execute(conn)?;
+            Ok(())
+        })
+        .unwrap();
+    let failure = receiver.owner.verify_reachable(&peer()).await.unwrap_err();
+    let mut source = Some(&failure as &dyn std::error::Error);
+    let mut sqlite = false;
+    while let Some(error) = source {
+        sqlite |= error.is::<diesel::result::Error>();
+        source = error.source();
+    }
+    assert!(
+        sqlite,
+        "actual SQLite source must survive the complete port"
+    );
+    assert_eq!(
+        receiver.owner.current_state(&peer()).await,
+        uc_core::ports::ReachabilityState::Online
+    );
+    assert!(connection.close_reason().is_none());
+    let (mut send, mut receive) = connection.open_bi().await.unwrap();
+    send.write_all(&[0x10; 17]).await.unwrap();
+    send.finish().unwrap();
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(2), receive.read_to_end(17))
+        .await
+        .unwrap();
+    assert!(
+        !matches!(reply, Ok(ref frame) if frame.first() == Some(&0x12)),
+        "storage failure must not send no-membership"
+    );
+    assert!(connection.close_reason().is_none());
+    receiver.shutdown().await;
+    client.close().await;
+}

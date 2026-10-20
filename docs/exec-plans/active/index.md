@@ -2,6 +2,8 @@
 
 这里包含设计中、实施中、待实现或暂时阻塞的工作。状态以各文件开头为准。
 
+- [Issue #34 第六切片：设备可达性、准入与存活检查](2026-10-14-peer-reachability-connectivity-plan.md)（生产迁移和本地回归完成；完整网络／平台／线上验收进行中；[实现规格](2026-10-14-peer-reachability-connectivity-spec.md)）
+
 
 - [Issue #34 第四切片：成员历史完整迁移与连接复用](2026-10-12-membership-history-connectivity-plan.md)（本地实现与验收完成，待线上检查；[实现规格](2026-10-12-membership-history-connectivity-spec.md)）
 

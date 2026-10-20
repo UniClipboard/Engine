@@ -18,6 +18,7 @@ pub(super) struct ConnectionRecord {
     pub activity: Arc<ConnectionActivity>,
     pub stop: CancellationToken,
     pub cache_cancel: CancellationToken,
+    pub presence_retention: bool,
     pub accepted_stream_timeout: Option<Duration>,
     pub pending: Mutex<Option<AcceptedStream>>,
     pub exchange_claimed: AtomicBool,
@@ -61,6 +62,9 @@ impl ConnectionLease {
             _activity: Some(activity),
         })
     }
+    pub fn connection_id(&self) -> usize {
+        self.record.connection.id()
+    }
     pub fn peer(&self) -> DeviceId {
         self.record.grant.peer()
     }
@@ -95,14 +99,25 @@ impl ConnectionLease {
         self.record.grant.check_current().await
     }
     fn claim_exchange(&self) -> Result<(), ConnectivityError> {
-        if self.mode() == ConnectionMode::SingleExchange
-            && self.record.exchange_claimed.swap(true, Ordering::AcqRel)
+        if matches!(
+            self.mode(),
+            ConnectionMode::SingleExchange | ConnectionMode::RetainedSingleExchange
+        ) && self.record.exchange_claimed.swap(true, Ordering::AcqRel)
         {
             return Err(ConnectivityError::ExchangeAlreadyUsed);
         }
         Ok(())
     }
     pub async fn open_bi(&self, deadline: Instant) -> Result<StreamLease, ConnectivityError> {
+        self.open_bi_with_cancel(deadline, &CancellationToken::new())
+            .await
+    }
+    /// presence 的取消停止网络步骤，已启动的 grant 读取仍持许可直到实际结算。
+    pub async fn open_bi_with_cancel(
+        &self,
+        deadline: Instant,
+        cancel: &CancellationToken,
+    ) -> Result<StreamLease, ConnectivityError> {
         if Instant::now() >= deadline {
             return Err(ConnectivityError::DeadlineExpired);
         }
@@ -119,25 +134,64 @@ impl ConnectionLease {
             .clone()
             .try_acquire_owned()
             .map_err(ConnectivityError::Busy)?;
-        let permit = timeout_at(deadline, self.record.peer.outbound.clone().acquire_owned())
-            .await
-            .map_err(ConnectivityError::TimedOut)?
-            .map_err(ConnectivityError::ResourceClosed)?;
+        let permit = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(ConnectivityError::Stopped),
+            result = timeout_at(deadline, self.record.peer.outbound.clone().acquire_owned()) => result.map_err(ConnectivityError::TimedOut)?.map_err(ConnectivityError::ResourceClosed)?,
+        };
         drop(waiting);
         drop(global_waiting);
         self.claim_exchange()?;
-        let result = timeout_at(deadline, async {
-            self.check_current().await?;
-            if Instant::now() >= deadline {
-                return Err(ConnectivityError::DeadlineExpired);
+        let checking = self.check_current();
+        tokio::pin!(checking);
+        let checked = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                if self.record.presence_retention { let _ = checking.await; }
+                return Err(ConnectivityError::Stopped);
             }
-            self.record.connection.open_bi().await
-        })
-        .await
-        .map_err(ConnectivityError::TimedOut)??;
+            result = timeout_at(deadline, &mut checking) => result,
+        };
+        match checked {
+            Ok(result) => result?,
+            Err(source) => {
+                if self.record.presence_retention {
+                    // 逻辑结束后等待真实本地工作，活动许可不能提前归还。
+                    let _ = checking.await;
+                }
+                return Err(if self.record.presence_retention {
+                    ConnectivityError::AdmissionTimedOut(source)
+                } else {
+                    ConnectivityError::TimedOut(source)
+                });
+            }
+        }
+        if Instant::now() >= deadline || self.record.stop.is_cancelled() || cancel.is_cancelled() {
+            return Err(if self.record.presence_retention {
+                ConnectivityError::AdmissionDeadlineExpired
+            } else {
+                ConnectivityError::DeadlineExpired
+            });
+        }
+        let result = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(ConnectivityError::Stopped),
+            result = timeout_at(deadline, self.record.connection.open_bi()) => result.map_err(ConnectivityError::TimedOut)??,
+        };
         StreamLease::new(result, self.record.clone(), vec![permit])
     }
     pub async fn accept_bi(&self) -> Result<StreamLease, ConnectivityError> {
+        if self.protocol() == ConnectionProtocol::PeerReachabilityV2 {
+            // 先取出请求，再立即判每连接容量；超量仅丢弃当前半流。
+            let pair = self.record.connection.accept_bi().await?;
+            let capacity = self
+                .record
+                .inbound
+                .clone()
+                .try_acquire_owned()
+                .map_err(ConnectivityError::Busy)?;
+            return StreamLease::new(pair, self.record.clone(), vec![capacity]);
+        }
         let local = self
             .record
             .inbound

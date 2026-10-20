@@ -1,8 +1,8 @@
 use super::budget::ensure_live;
 use super::retention::prepare_connection_retention;
 use super::{
-    membership_history_purpose, HistoryIncoming, HistoryLocalWorkPort, HistoryPeerBindingPort,
-    HistoryReceiverPort, HistoryWirePort,
+    HistoryIncoming, HistoryLocalWorkPort, HistoryPeerBindingPort, HistoryReceiverPort,
+    HistoryWirePort,
 };
 use crate::connectivity::{
     ConnectionLease, ConnectionMode, ConnectionProtocol, ConnectivityError, ConnectivityManager,
@@ -15,9 +15,7 @@ use std::time::Duration;
 use tokio::time::{timeout_at, Instant};
 use uc_core::error_class::ErrorClass;
 use uc_core::membership::{MembershipHistoryExchangeEndpointPort, MembershipHistoryExchangeError};
-use uc_observability_contract::diagnostics::{
-    describe_membership_exchange, scope_operation_diagnostics,
-};
+use uc_observability_contract::diagnostics::scope_operation_diagnostics;
 use uc_observability_contract::{error_source::io_error_kind, uc_debug, uc_warn};
 
 pub struct MembershipHistoryReceiver {
@@ -77,7 +75,6 @@ impl MembershipHistoryReceiver {
         incoming
             .observation
             .scope(scope_operation_diagnostics(async {
-                describe_membership_exchange(membership_history_purpose(&incoming.message), true);
                 let endpoint = self.endpoint.clone();
                 let peer = connection.peer();
                 let working_connection = connection.clone();

@@ -1,9 +1,17 @@
 use super::*;
+use super::{ATTEMPT_CAPACITY, ATTEMPT_DEADLINE};
+use crate::space::membership::CurrentSpaceMemberScope;
 use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, StreamExt};
-use tokio::sync::broadcast;
+use std::sync::{Mutex as BlockingMutex, PoisonError};
+use tokio::sync::{broadcast, Semaphore};
+use tokio::task::{JoinError, JoinSet};
 use tokio::time::Instant;
 use uc_core::ports::PeerReachabilityChanged;
-use uc_observability_contract::{error_source::io_error_kind, uc_info, uc_warn};
+use uc_observability_contract::{
+    diagnostics::{record_task_join_failure, DiagnosticTaskKind, ObservationContext},
+    error_source::io_error_kind,
+    uc_info, uc_warn,
+};
 
 const MAX_CONCURRENT: usize = 4;
 // Bound the complete target operation, including qualification and admission.
@@ -37,7 +45,7 @@ struct Refresh {
 #[derive(Debug, thiserror::Error)]
 enum AttemptError {
     #[error("peer scope read failed")]
-    Scope(#[source] CurrentSpaceMemberScopeError),
+    ScopeRead(#[source] PeerConnectionError),
     #[error("peer qualification read timed out")]
     ScopeTimeout(#[source] tokio::time::error::Elapsed),
     #[error("peer reachability check failed")]
@@ -50,7 +58,7 @@ enum AttemptError {
 impl AttemptError {
     fn kind(&self) -> &'static str {
         match self {
-            Self::Scope(_) | Self::ScopeTimeout(_) => "scope_unavailable",
+            Self::ScopeRead(_) | Self::ScopeTimeout(_) => "scope_unavailable",
             Self::PeerReachability(_) => "presence_failed",
             Self::Timeout(_) => "timeout",
             Self::Ineligible => "ineligible",
@@ -64,6 +72,22 @@ enum DialResult {
 }
 type Dial = BoxFuture<'static, (DeviceId, u64, DialResult)>;
 
+struct ScopeWork {
+    reconcile_slot: Arc<Semaphore>,
+    tasks: JoinSet<()>,
+    failure: Option<JoinError>,
+}
+
+impl Default for ScopeWork {
+    fn default() -> Self {
+        Self {
+            reconcile_slot: Arc::new(Semaphore::new(1)),
+            tasks: JoinSet::new(),
+            failure: None,
+        }
+    }
+}
+
 pub(super) struct ConnectionRuntime {
     scope: Arc<dyn CurrentSpaceMemberScopePort>,
     peer_reachability: Arc<dyn PeerReachabilityPort>,
@@ -75,9 +99,13 @@ pub(super) struct ConnectionRuntime {
     cancel: CancellationToken,
     peers: HashMap<DeviceId, Peer>,
     dials: FuturesUnordered<Dial>,
+    attempt_slots: Arc<Semaphore>,
+    scope_work: Arc<BlockingMutex<ScopeWork>>,
+    scope_failure: Option<JoinError>,
     refreshes: Vec<Refresh>,
     generation: u64,
     paused: bool,
+    scope_available: bool,
 }
 
 impl ConnectionRuntime {
@@ -100,13 +128,17 @@ impl ConnectionRuntime {
             cancel,
             peers: HashMap::new(),
             dials: FuturesUnordered::new(),
+            attempt_slots: Arc::new(Semaphore::new(MAX_CONCURRENT)),
+            scope_work: Arc::new(BlockingMutex::new(ScopeWork::default())),
+            scope_failure: None,
             refreshes: vec![],
             generation: 0,
             paused: false,
+            scope_available: false,
         }
     }
 
-    pub(super) async fn run(mut self) {
+    pub(super) async fn run(mut self) -> Result<(), PeerConnectionError> {
         let mut next_scope = Instant::now();
         let mut scope_open = true;
         let mut peer_reachability_open = true;
@@ -127,7 +159,11 @@ impl ConnectionRuntime {
                 .min();
             let next = if self.paused {
                 Instant::now() + SCOPE_RECHECK
-            } else if self.dials.len() >= MAX_CONCURRENT {
+            } else if !self.scope_available {
+                next_scope
+            } else if self.dials.len() >= MAX_CONCURRENT
+                || self.attempt_slots.available_permits() == 0
+            {
                 next_scope
             } else {
                 due.map_or(next_scope, |at| at.min(next_scope))
@@ -225,7 +261,7 @@ impl ConnectionRuntime {
                                     uc_warn!(
                                         error_kind = kind,
                                         io_error_kind = io_error_kind(&error),
-                                        "peer connection scope reconcile failed; peers cleared"
+                                        "peer connection scope reconcile failed; new attempts paused"
                                     );
                                 }
                             }
@@ -234,25 +270,59 @@ impl ConnectionRuntime {
                     }
                 }
             }
-            if !self.paused {
+            if !self.paused && self.scope_available {
                 self.start_due();
             }
         }
         self.clear().await;
+        match self.scope_failure.take() {
+            Some(source) => Err(PeerConnectionError::Task(source)),
+            None => Ok(()),
+        }
     }
 
     async fn reconcile(&mut self) -> Result<(), PeerConnectionError> {
-        let scope = match tokio::time::timeout(SCOPE_BUDGET, self.scope.snapshot()).await {
+        let scope = match tokio::time::timeout(
+            SCOPE_BUDGET,
+            read_scope(self.scope.clone(), self.scope_work.clone()),
+        )
+        .await
+        {
             Ok(Ok(scope)) if scope.local_member_active => scope,
-            other => {
+            Ok(Ok(_)) => {
+                self.scope_available = false;
                 self.clear().await;
+                return Ok(());
+            }
+            Ok(Err(
+                error @ PeerConnectionError::Scope(
+                    CurrentSpaceMemberScopeError::NoCurrentSpace
+                    | CurrentSpaceMemberScopeError::Locked,
+                ),
+            )) => {
+                self.scope_available = false;
+                self.clear().await;
+                return Err(error);
+            }
+            other => {
+                self.scope_available = false;
+                for peer in self.peers.values_mut() {
+                    if let Some(cancel) = &peer.in_flight {
+                        cancel.cancel();
+                    }
+                    peer.due = Some(Instant::now());
+                }
+                for request in self.refreshes.drain(..) {
+                    let _ = request.response.send(Err(PeerConnectionError::Paused));
+                }
                 return match other {
-                    Ok(Ok(_)) => Ok(()),
-                    Ok(Err(error)) => Err(PeerConnectionError::Scope(error)),
+                    Ok(Err(error)) => Err(error),
                     Err(error) => Err(PeerConnectionError::ScopeTimeout(error)),
+                    Ok(Ok(_)) => Ok(()),
                 };
             }
         };
+        self.scope_available = true;
         let current: HashSet<_> = scope.usable_peer_device_ids.into_iter().collect();
         let removed: Vec<_> = self
             .peers
@@ -376,6 +446,10 @@ impl ConnectionRuntime {
             .into_iter()
             .take(MAX_CONCURRENT.saturating_sub(self.dials.len()))
         {
+            let Ok(capacity) = self.attempt_slots.clone().try_acquire_owned() else {
+                break;
+            };
+            let capacity = Arc::new(capacity);
             let Some(peer) = self.peers.get_mut(&device) else {
                 continue;
             };
@@ -387,33 +461,36 @@ impl ConnectionRuntime {
             peer.active_trigger = peer.next_trigger;
             let generation = peer.generation;
             let scope = Arc::clone(&self.scope);
+            let scope_work = self.scope_work.clone();
             let peer_reachability = Arc::clone(&self.peer_reachability);
             self.dials.push(
                 async move {
                     let attempt = async {
-                        let scope = tokio::time::timeout(SCOPE_BUDGET, scope.snapshot())
+                        let scope = tokio::time::timeout(SCOPE_BUDGET, read_scope(scope, scope_work))
                             .await
                             .map_err(AttemptError::ScopeTimeout)?
-                            .map_err(AttemptError::Scope)?;
+                            .map_err(AttemptError::ScopeRead)?;
                         if !scope.local_member_active
                             || !scope.usable_peer_device_ids.contains(&device)
                         {
                             return Err(AttemptError::Ineligible);
                         }
+                        if cancel.is_cancelled() { return Err(AttemptError::Ineligible); }
                         peer_reachability
                             .verify_reachable(&device)
                             .await
                             .map_err(AttemptError::PeerReachability)
                     };
-                    let result = tokio::select! {
+                    let deadline = Instant::now() + DIAL_BUDGET;
+                    let result = ATTEMPT_CAPACITY.scope(capacity, ATTEMPT_DEADLINE.scope(deadline, async { tokio::select! {
                         biased;
                         _ = cancel.cancelled() => DialResult::Cancelled,
-                        result = tokio::time::timeout(DIAL_BUDGET, attempt) => match result {
+                        result = tokio::time::timeout_at(deadline, attempt) => match result {
                             Ok(Ok(state)) => DialResult::State(state),
                             Ok(Err(source)) => DialResult::Error(source),
                             Err(source) => DialResult::Error(AttemptError::Timeout(source)),
                         },
-                    };
+                    } })).await;
                     (device, generation, result)
                 }
                 .boxed(),
@@ -514,11 +591,80 @@ impl ConnectionRuntime {
 
     async fn clear(&mut self) {
         self.generation = self.generation.wrapping_add(1);
+        for peer in self.peers.values() {
+            if let Some(cancel) = &peer.in_flight {
+                cancel.cancel();
+            }
+        }
         self.dials.clear();
         self.peers.clear();
         for request in self.refreshes.drain(..) {
             let _ = request.response.send(Err(PeerConnectionError::Paused));
         }
         self.peer_reachability.disconnect_all().await;
+        let mut work = {
+            let mut work = self
+                .scope_work
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(source) = work.failure.take() {
+                record_task_join_failure(DiagnosticTaskKind::PresenceConnectivityWorker);
+                self.scope_failure.get_or_insert(source);
+            }
+            std::mem::replace(&mut work.tasks, JoinSet::new())
+        };
+        while let Some(result) = work.join_next().await {
+            if let Err(source) = result {
+                record_task_join_failure(DiagnosticTaskKind::PresenceConnectivityWorker);
+                self.scope_failure.get_or_insert(source);
+            }
+        }
     }
+}
+
+/// 查询被逻辑取消后仍由 coordinator 等待真实任务；保留原完整尝试的许可。
+async fn read_scope(
+    scope: Arc<dyn CurrentSpaceMemberScopePort>,
+    work: Arc<BlockingMutex<ScopeWork>>,
+) -> Result<CurrentSpaceMemberScope, PeerConnectionError> {
+    let capacity = ATTEMPT_CAPACITY.try_with(Clone::clone).ok();
+    let (send, receive) = oneshot::channel();
+    {
+        let mut work = work.lock().unwrap_or_else(PoisonError::into_inner);
+        let reconcile_capacity = if capacity.is_none() {
+            Some(
+                work.reconcile_slot
+                    .clone()
+                    .try_acquire_owned()
+                    // discarded-source[business-outcome]: 私有单槽从不关闭，耗尽按既有 Busy 结算，没有 IO 失败来源。
+                    .map_err(|_| PeerConnectionError::Busy)?,
+            )
+        } else {
+            None
+        };
+        while let Some(result) = work.tasks.try_join_next() {
+            if let Err(source) = result {
+                record_task_join_failure(DiagnosticTaskKind::PresenceConnectivityWorker);
+                work.failure.get_or_insert(source);
+            }
+        }
+        let observation = ObservationContext::capture();
+        work.tasks.spawn(observation.scope(async move {
+            let _capacity = capacity;
+            let _reconcile_capacity = reconcile_capacity;
+            let result = scope.snapshot().await;
+            if let Err(Err(source)) = send.send(result) {
+                uc_warn!(
+                    error_kind = "scope_read_settled_after_cancellation",
+                    io_error_kind = io_error_kind(&source),
+                    "peer scope work settled after cancellation"
+                );
+            }
+        }));
+    }
+    // 原始查询错误完整传递；任务通道异常也保留类型来源。
+    receive
+        .await
+        .map_err(PeerConnectionError::Response)?
+        .map_err(PeerConnectionError::Scope)
 }

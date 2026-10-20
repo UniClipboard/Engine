@@ -201,7 +201,7 @@ async fn unbound_access_refuses_every_peer() {
 
     assert!(matches!(
         access.is_admitted(&device("device-b")).await,
-        Err(PeerAdmissionError::Unavailable)
+        Err(PeerAdmissionError::ReadFailed { .. })
     ));
     assert!(matches!(
         access.known_peer_identities().await,

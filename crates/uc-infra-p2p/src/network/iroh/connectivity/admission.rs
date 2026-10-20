@@ -36,6 +36,7 @@ impl IrohConnectionAdmission {
             admission,
             connections,
             protocol: match profile {
+                ConnectivityProfile::Presence => InboundPeerProtocol::Presence,
                 ConnectivityProfile::ActiveClipboardPull => {
                     InboundPeerProtocol::ActiveClipboardPull
                 }
@@ -134,7 +135,10 @@ impl AdmissionGrant for Grant {
     }
     async fn check_current(&self) -> Result<(), ConnectivityError> {
         let result = self.owner.check(self.peer, self.epoch).await;
-        if result.is_err() {
+        if result.is_err()
+            && (self.owner.protocol != InboundPeerProtocol::Presence
+                || matches!(result, Err(ConnectivityError::Denied)))
+        {
             self.connection.close();
         }
         result

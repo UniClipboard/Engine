@@ -60,8 +60,10 @@ use iroh_mdns_address_lookup::MdnsAddressLookup;
 use noq_proto::congestion::{Bbr3Config, CubicConfig};
 use tracing::instrument;
 use tracing::instrument::WithSubscriber;
-use uc_application::deps::{ConnectionHint, DiscoveryError, DiscoveryManager};
-use uc_application::deps::{IssueMembershipBranchRecoveryPort, KnownPeerContact};
+use uc_application::deps::{
+    ConnectionHint, DiscoveryError, DiscoveryManager, IssueMembershipBranchRecoveryPort,
+    PeerReachabilityEnvironmentPort, PeerReachabilityTransport,
+};
 use uc_core::settings::model::CongestionController;
 use uc_core::settings::relay_routing::RelayRouting;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -94,6 +96,8 @@ use super::active_clipboard::{
 use super::addr_filter::apply_addr_filter;
 use super::admission_transport_material::IrohAdmissionTransportMaterial;
 use super::blobs::{IrohBlobTransferAdapter, BLOBS_ALPN};
+use super::connectivity::{IrohPeerReachabilityHandler, PresenceEnvironment};
+use uc_sync_protocol::peer_reachability::{LEGACY_PEER_REACHABILITY_ALPN, PEER_REACHABILITY_ALPN};
 #[cfg(test)]
 const LEGACY_CLIPBOARD_ALPN: &[u8] = b"uniclipboard/clipboard/0";
 use super::connection_channel_adapter::IrohConnectionChannelAdapter;
@@ -115,9 +119,6 @@ use super::membership_identity_adapter::IrohMembershipIdentityAdapter;
 use super::net_recovery::DemandRecoveryCoordinator;
 use super::net_recovery::NetworkRecoveryObservationSource;
 use super::network_partition::IrohNetworkPartitionGate;
-use super::peer_reachability_adapter::{
-    IrohPeerReachabilityAdapter, LEGACY_PEER_REACHABILITY_ALPN, PEER_REACHABILITY_ALPN,
-};
 use super::space_admission::{
     IrohSpaceAdmissionHandler, IrohSpaceAdmissionTransport, SpaceAdmissionChannelCredentialPort,
     SPACE_ADMISSION_ALPN,
@@ -1106,53 +1107,49 @@ impl IrohSessionBuilder {
         }
     }
 
-    /// Install the peer_reachability transport (Slice 2 Phase 1):
-    ///
-    /// * Registers [`IrohPeerReachabilityHandler`] as the [`PEER_REACHABILITY_ALPN`]
-    ///   [`iroh::protocol::ProtocolHandler`] so incoming "is this peer
-    ///   reachable" probes are accepted and held open until the peer closes.
-    /// * Builds [`IrohPeerReachabilityAdapter`] wired to the shared endpoint,
-    ///   [`PeerAddressRepositoryPort`] for stored NodeAddr bytes, and
-    ///   [`ClockPort`] for event timestamps. Returns it as
-    ///   `Arc<dyn PeerReachabilityPort>` so callers depend on the port, not the
-    ///   concrete adapter (`docs/design-docs/layers/infrastructure.md` §4.3).
-    ///
-    /// Must be called before [`spawn`](Self::spawn). Safe to call alongside
-    /// 邀请 discovery 不注册 ALPN；成员与准入 handler 使用互不重叠的 ALPN
-    /// coexist on the same router.
+    /// 同一 Endpoint 的 presence 资源依赖；不构造准入与在线业务对象。
+    pub fn presence_connectivity_deps(
+        &self,
+        addresses: Arc<dyn PeerAddressRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
+        admission: Arc<dyn PeerAdmissionPort>,
+        fingerprint: Arc<dyn IdentityFingerprintFactoryPort>,
+    ) -> (ConnectivityDeps, Arc<dyn PeerReachabilityEnvironmentPort>) {
+        let environment = Arc::new(PresenceEnvironment::new(
+            identities.clone(),
+            fingerprint.clone(),
+            self.admitted_connections.clone(),
+            self.context.demand_recovery.clone(),
+            self.context.network_recovery_observations.clone(),
+        ));
+        (
+            ConnectivityDeps {
+                backend: Arc::new(IrohConnectivityBackend::new(
+                    self.context.endpoint.clone(),
+                    addresses,
+                    None,
+                    ConnectivityProfile::Presence,
+                )),
+                admission: Arc::new(IrohConnectionAdmission::new(
+                    identities,
+                    admission,
+                    fingerprint,
+                    self.admitted_connections.clone(),
+                    ConnectivityProfile::Presence,
+                )),
+            },
+            environment,
+        )
+    }
+    /// 两个协商版本一次转交同一完整 owner。
     pub fn install_peer_reachability(
         &mut self,
-        peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-        identities: Arc<dyn PeerIdentityDirectoryPort>,
-        peer_admission: Arc<dyn PeerAdmissionPort>,
-        fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
-        clock: Arc<dyn ClockPort>,
-        known_peer_contact_tx: tokio::sync::broadcast::Sender<KnownPeerContact>,
-    ) -> Result<Arc<dyn PeerReachabilityPort>, IrohNodeError> {
-        // Build the adapter first so the handler shares its `last_state`
-        // and broadcast `Sender` — that's what makes inbound dials flip a
-        // recovered peer to Online without needing our own keepalive to
-        // dial them again.
-        let adapter = IrohPeerReachabilityAdapter::new_with_recovery(
-            Arc::clone(&self.context.endpoint),
-            peer_addr_repo,
-            identities,
-            peer_admission,
-            fingerprint_factory,
-            clock,
-            known_peer_contact_tx,
-            Arc::clone(&self.context.demand_recovery),
-            Arc::clone(&self.context.network_recovery_observations),
-            self.admitted_connections.clone(),
-        );
-        let handler = adapter.handler();
-
+        owner: Arc<PeerReachabilityTransport>,
+    ) -> Result<(), IrohNodeError> {
         self.install_session_handler(
             [PEER_REACHABILITY_ALPN, LEGACY_PEER_REACHABILITY_ALPN],
-            handler,
-        )?;
-
-        Ok(Arc::new(adapter))
+            IrohPeerReachabilityHandler::new(owner),
+        )
     }
 
     /// Build a [`ConnectionChannelPort`] (Phase 96 INDIC-01).
@@ -1190,7 +1187,7 @@ impl IrohSessionBuilder {
             backend: Arc::new(IrohConnectivityBackend::new(
                 self.context.endpoint.clone(),
                 peer_addr_repo,
-                peer_reachability,
+                Some(peer_reachability),
                 profile,
             )),
             admission: Arc::new(IrohConnectionAdmission::new(
@@ -1272,7 +1269,7 @@ impl IrohSessionBuilder {
             backend: Arc::new(IrohConnectivityBackend::new(
                 self.context.endpoint.clone(),
                 addresses,
-                reachability,
+                Some(reachability),
                 ConnectivityProfile::MembershipHistory,
             )),
             admission: Arc::new(HistoryConnectionAdmission::new(
@@ -1732,6 +1729,45 @@ mod tests {
     /// UniClipboard#900: `bind_port` pins the iroh UDP socket to a fixed
     /// IPv4 port. We grab a currently-free port from the OS, release it, then
     /// assert the endpoint binds exactly that number (stable across restarts).
+    fn install_presence_fixture(
+        builder: &mut IrohSessionBuilder,
+        addresses: Arc<dyn PeerAddressRepositoryPort>,
+        identities: Arc<dyn PeerIdentityDirectoryPort>,
+        authority: Arc<dyn PeerAdmissionPort>,
+        fingerprint: Arc<dyn IdentityFingerprintFactoryPort>,
+        clock: Arc<dyn ClockPort>,
+        contacts: tokio::sync::broadcast::Sender<uc_application::deps::KnownPeerContact>,
+    ) -> Result<Arc<dyn PeerReachabilityPort>, IrohNodeError> {
+        let (deps, environment) = builder.presence_connectivity_deps(
+            addresses,
+            identities,
+            authority.clone(),
+            fingerprint,
+        );
+        let manager = uc_application::deps::ConnectivityManager::new(
+            deps.backend,
+            deps.admission,
+            uc_application::deps::ConnectivityPolicy {
+                presence_retention: true,
+                inbound_per_connection: 2,
+                flights_per_session: 4,
+                ..uc_application::deps::ConnectivityPolicy::default()
+            },
+        );
+        let owner = PeerReachabilityTransport::new(
+            manager,
+            authority,
+            uc_application::deps::PeerReachabilityTransportPorts {
+                wire: Arc::new(super::super::connectivity::PeerReachabilityWire),
+                environment,
+            },
+            clock,
+            contacts,
+        );
+        builder.install_peer_reachability(owner.clone())?;
+        Ok(owner)
+    }
+
     #[tokio::test]
     async fn bind_pins_fixed_udp_port() {
         // Ask the OS for a free UDP port, then drop the probe so iroh can
@@ -1973,16 +2009,16 @@ mod tests {
             Arc::new(InMemorySettings(StdMutex::new(Settings::default()))),
         );
 
-        let peer_reachability: Arc<dyn PeerReachabilityPort> = builder
-            .install_peer_reachability(
-                Arc::new(EmptyPeerAddressRepo),
-                Arc::new(EmptyMemberRepo),
-                Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
-                Arc::new(uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory),
-                Arc::new(FixedClock(1_700_000_000_000)),
-                tokio::sync::broadcast::channel(1).0,
-            )
-            .expect("install peer reachability");
+        let peer_reachability: Arc<dyn PeerReachabilityPort> = install_presence_fixture(
+            &mut builder,
+            Arc::new(EmptyPeerAddressRepo),
+            Arc::new(EmptyMemberRepo),
+            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
+            Arc::new(uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory),
+            Arc::new(FixedClock(1_700_000_000_000)),
+            tokio::sync::broadcast::channel(1).0,
+        )
+        .expect("install peer reachability");
 
         // current_state before any dial is Unknown — proves the adapter
         // survived the type-erasure round trip through install_peer_reachability.
@@ -2004,31 +2040,31 @@ mod tests {
             .await
             .expect("bind");
         let mut first = network.prepare_session();
-        first
-            .install_peer_reachability(
-                Arc::new(EmptyPeerAddressRepo),
-                Arc::new(EmptyMemberRepo),
-                Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
-                Arc::new(uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory),
-                Arc::new(FixedClock(1_700_000_000_000)),
-                tokio::sync::broadcast::channel(1).0,
-            )
-            .expect("install first session");
+        install_presence_fixture(
+            &mut first,
+            Arc::new(EmptyPeerAddressRepo),
+            Arc::new(EmptyMemberRepo),
+            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
+            Arc::new(uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory),
+            Arc::new(FixedClock(1_700_000_000_000)),
+            tokio::sync::broadcast::channel(1).0,
+        )
+        .expect("install first session");
         let mut node = spawn_session(network, first).await;
         let endpoint_id = node.session_context.endpoint.id();
         assert!(node.accepts_protocol_for_test(PEER_REACHABILITY_ALPN).await);
 
         let mut second = node.prepare_session();
-        second
-            .install_peer_reachability(
-                Arc::new(EmptyPeerAddressRepo),
-                Arc::new(EmptyMemberRepo),
-                Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
-                Arc::new(uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory),
-                Arc::new(FixedClock(1_700_000_000_001)),
-                tokio::sync::broadcast::channel(1).0,
-            )
-            .expect("install second session");
+        install_presence_fixture(
+            &mut second,
+            Arc::new(EmptyPeerAddressRepo),
+            Arc::new(EmptyMemberRepo),
+            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
+            Arc::new(uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory),
+            Arc::new(FixedClock(1_700_000_000_001)),
+            tokio::sync::broadcast::channel(1).0,
+        )
+        .expect("install second session");
 
         node.quiesce_session().await.expect("quiesce first session");
         assert!(!node.accepts_protocol_for_test(PEER_REACHABILITY_ALPN).await);
@@ -2090,16 +2126,16 @@ mod tests {
         );
 
         let peer_addr_repo: Arc<dyn PeerAddressRepositoryPort> = Arc::new(EmptyPeerAddressRepo);
-        let peer_reachability = builder
-            .install_peer_reachability(
-                Arc::clone(&peer_addr_repo),
-                Arc::new(EmptyMemberRepo),
-                Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
-                Arc::new(uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory),
-                Arc::new(FixedClock(1_700_000_000_000)),
-                tokio::sync::broadcast::channel(1).0,
-            )
-            .expect("install peer reachability");
+        let peer_reachability = install_presence_fixture(
+            &mut builder,
+            Arc::clone(&peer_addr_repo),
+            Arc::new(EmptyMemberRepo),
+            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
+            Arc::new(uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory),
+            Arc::new(FixedClock(1_700_000_000_000)),
+            tokio::sync::broadcast::channel(1).0,
+        )
+        .expect("install peer reachability");
 
         let ClipboardHandlers { dispatch, receiver } = builder
             .install_clipboard({
@@ -2168,16 +2204,16 @@ mod tests {
         );
 
         let peer_addr_repo: Arc<dyn PeerAddressRepositoryPort> = Arc::new(EmptyPeerAddressRepo);
-        let peer_reachability = builder
-            .install_peer_reachability(
-                Arc::clone(&peer_addr_repo),
-                Arc::new(EmptyMemberRepo),
-                Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
-                Arc::new(uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory),
-                Arc::new(FixedClock(1_700_000_000_000)),
-                tokio::sync::broadcast::channel(1).0,
-            )
-            .expect("install peer reachability");
+        let peer_reachability = install_presence_fixture(
+            &mut builder,
+            Arc::clone(&peer_addr_repo),
+            Arc::new(EmptyMemberRepo),
+            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
+            Arc::new(uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory),
+            Arc::new(FixedClock(1_700_000_000_000)),
+            tokio::sync::broadcast::channel(1).0,
+        )
+        .expect("install peer reachability");
 
         let _clipboard = builder
             .install_clipboard({
@@ -2859,16 +2895,16 @@ mod tests {
                 let node_endpoint = Arc::clone(&network.session_context.endpoint);
                 let mut builder = network.prepare_session();
                 let peer_addr_repo: Arc<dyn PeerAddressRepositoryPort> = peer_addresses;
-                let reachability = builder
-                    .install_peer_reachability(
-                        Arc::clone(&peer_addr_repo),
-                        identities.clone(),
-                        admission.clone(),
-                        fingerprints.clone(),
-                        Arc::new(FixedClock(1_700_000_000_000)),
-                        tokio::sync::broadcast::channel(1).0,
-                    )
-                    .expect("install peer reachability");
+                let reachability = install_presence_fixture(
+                    &mut builder,
+                    Arc::clone(&peer_addr_repo),
+                    identities.clone(),
+                    admission.clone(),
+                    fingerprints.clone(),
+                    Arc::new(FixedClock(1_700_000_000_000)),
+                    tokio::sync::broadcast::channel(1).0,
+                )
+                .expect("install peer reachability");
                 let clipboard = builder
                     .install_clipboard({
                         let deps = builder.connectivity_deps(

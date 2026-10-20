@@ -5,7 +5,7 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../build-cache/env.sh"
 
 usage() {
-  echo "Usage: $0 [--suite all|local|network] [--repeat N] [--mode all|direct|known-peer|relay|legacy] [--case PREFIX] [--prebuilt] [--peer-host PATH --peer-side 0|1] [--relay-binary PATH] [--relay-b PATH]"
+  echo "Usage: $0 [--suite all|local|network] [--repeat N] [--mode all|direct|known-peer|relay|legacy] [--case PREFIX] [--prebuilt] [--peer-host PATH --peer-side 0|1] [--relay-binary PATH] [--relay-b PATH] [--prepaired-host PATH --upgrade-side 0|1 --presence-role receive|initiate --presence-protocol peer_reachability_v1|peer_reachability_v2]"
   echo "  --repeat applies to the network scenarios only; the local suite always runs once."
   echo "  --peer-host runs one side of the direct, known-peer or relay scenarios with another version's test host; --relay-binary replaces the relay server; --relay-b gives the second node its own relay server (different home relays)."
   echo "  --prebuilt reuses the test host already built in the cargo target directory, such as by the workspace test build."
@@ -20,6 +20,10 @@ peer_host=
 peer_side=1
 relay_binary=
 relay_b=
+prepaired_host=
+upgrade_side=
+presence_role=
+presence_protocol=
 while (($#)); do
   case "$1" in
     --suite) suite=$2; shift 2 ;;
@@ -31,6 +35,10 @@ while (($#)); do
     --peer-side) peer_side=$2; shift 2 ;;
     --relay-binary) relay_binary=$2; shift 2 ;;
     --relay-b) relay_b=$2; shift 2 ;;
+    --prepaired-host) prepaired_host=$2; shift 2 ;;
+    --upgrade-side) upgrade_side=$2; shift 2 ;;
+    --presence-role) presence_role=$2; shift 2 ;;
+    --presence-protocol) presence_protocol=$2; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -59,10 +67,10 @@ fi
 
 hosts=(-p uc-connectivity-host)
 if ((prebuilt)); then hosts=(); fi
-if [[ "$mode" == all || "$mode" == relay ]]; then hosts+=(-p uc-connectivity-relay); fi
+if ((!prebuilt)) && [[ "$mode" == all || "$mode" == relay ]]; then hosts+=(-p uc-connectivity-relay); fi
 if ((${#hosts[@]})); then cargo build "${hosts[@]}" --locked; fi
 target=$(cargo metadata --locked --no-deps --format-version 1 | node -e 'let s="";process.stdin.on("data",x=>s+=x).on("end",()=>process.stdout.write(JSON.parse(s).target_directory))')
-evidence="$target/connection-recovery-evidence"
+evidence="${UC_CONNECTION_RECOVERY_EVIDENCE:-$target/connection-recovery-evidence}"
 [[ -x "$target/debug/uc-connectivity-host" ]] || { echo 'The test host has not been built; run without --prebuilt.' >&2; exit 2; }
 mkdir -p "$evidence"
 # 旧版互通使用升级兼容矩阵的 a07 锚点（Desktop v1.0.0-alpha.10，Engine v1.1.0-rc.15），由同一构建脚本按 rev 缓存。
@@ -70,7 +78,7 @@ legacy_anchor=a07
 legacy_revision=f6f305d9689e4e79e7ab6d0e4921061f9416e4a6
 cleanup() {
   local status=$?
-  if ((EUID != 0)); then
+  if ((EUID != 0)) && [[ "${UC_NETWORK_UNPRIVILEGED:-0}" != 1 ]]; then
     sudo chown -R -- "$(id -u):$(id -g)" "$evidence" || status=1
   fi
   exit "$status"
@@ -105,7 +113,19 @@ if [[ -n "$peer_host" ]]; then
   [[ "$mode" != all && "$mode" != legacy && -x "$peer_host" && "$peer_side" =~ ^[01]$ ]] || { echo "--peer-host needs an executable, --peer-side 0|1 and a single non-legacy --mode." >&2; exit 2; }
   runner+=(--peer-host "$peer_host" --peer-side "$peer_side")
 fi
-if ((EUID != 0)); then runner=(sudo -- "${runner[@]}"); fi
+if [[ -n "$prepaired_host" ]]; then
+  [[ "$suite" == network && ( "$mode" == direct || "$mode" == relay ) && -x "$prepaired_host" && "$upgrade_side" =~ ^[01]$ && "$case_prefix" == P00-prepaired-upgrade && -z "$peer_host" ]] || { echo '--prepaired-host requires network direct|relay, --upgrade-side 0|1 and --case P00-prepaired-upgrade.' >&2; exit 2; }
+  runner+=(--prepaired-host "$prepaired_host" --upgrade-side "$upgrade_side")
+  if [[ -n "$presence_role" ]]; then runner+=(--presence-role "$presence_role"); fi
+  if [[ -n "$presence_protocol" ]]; then runner+=(--presence-protocol "$presence_protocol"); fi
+fi
+if ((EUID != 0)); then
+  if [[ "${UC_NETWORK_UNPRIVILEGED:-0}" == 1 ]]; then
+    runner=(unshare --user --map-root-user --mount --net --fork bash -c 'mount -t tmpfs tmpfs /run; exec "$@"' bash "${runner[@]}")
+  else
+    runner=(sudo -- "${runner[@]}")
+  fi
+fi
 if [[ "$mode" == all || "$mode" == direct ]]; then "${runner[@]}" --mode direct; fi
 if [[ "$mode" == all || "$mode" == known-peer ]]; then "${runner[@]}" --mode known-peer; fi
 if [[ "$mode" == all || "$mode" == relay ]]; then "${runner[@]}" --mode relay --relay "${relay_binary:-$target/debug/uc-connectivity-relay}" ${relay_b:+--relay-b "$relay_b"}; fi

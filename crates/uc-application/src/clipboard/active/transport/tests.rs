@@ -20,6 +20,7 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{oneshot, Notify, Semaphore};
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use uc_core::clipboard::ActiveClipboardState;
 use uc_core::ids::{DeviceId, EntryId};
 use uc_core::ports::{
@@ -132,7 +133,11 @@ struct MemoryBackend {
 }
 #[async_trait]
 impl ConnectivityBackend for MemoryBackend {
-    async fn connect(&self, _: DeviceId) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
+    async fn connect(
+        &self,
+        _: DeviceId,
+        _cancel: CancellationToken,
+    ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
         let id = self.calls.fetch_add(1, Ordering::SeqCst);
         tokio::time::sleep(self.delay).await;
         Ok(MemoryConnection::new(id, self.protocol, self.open_delay))

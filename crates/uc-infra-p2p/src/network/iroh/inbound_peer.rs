@@ -18,7 +18,6 @@ pub(crate) enum InboundPeerRejection {
     FingerprintUnavailable,
     LedgerDenied,
     LedgerUnavailable,
-    NotAccepting,
 }
 
 impl InboundPeerRejection {
@@ -30,7 +29,6 @@ impl InboundPeerRejection {
             Self::FingerprintUnavailable => InboundPeerRejectionReason::FingerprintUnavailable,
             Self::LedgerDenied => InboundPeerRejectionReason::LedgerDenied,
             Self::LedgerUnavailable => InboundPeerRejectionReason::LedgerUnavailable,
-            Self::NotAccepting => InboundPeerRejectionReason::NotAccepting,
         }
     }
 }

@@ -7,6 +7,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::time::Instant;
 
+/// 只记录已协商的固定协议种类，不接受任意 ALPN 文本。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NegotiatedProtocol {
+    PeerReachabilityV1,
+    PeerReachabilityV2,
+    Other,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkPathKind {
@@ -41,6 +50,9 @@ pub(super) enum PhysicalEvent {
         direction: ConnectionDirection,
         initial_path: NetworkPathKind,
     },
+    Negotiated {
+        protocol: NegotiatedProtocol,
+    },
     Closed {
         direction: ConnectionDirection,
         reason: ConnectionCloseReason,
@@ -65,6 +77,7 @@ impl PhysicalEvent {
     pub(super) fn name(&self) -> &'static str {
         match self {
             Self::Established { .. } => "connection.established",
+            Self::Negotiated { .. } => "connection.protocol.negotiated",
             Self::Closed { .. } => "connection.closed",
             Self::Path { .. } => "connection.path.observed",
             Self::Lagged { .. } => "connection.path.lagged",
@@ -163,6 +176,9 @@ impl NetworkRecorder {
 }
 
 impl ConnectionLifetimeObservation {
+    pub fn negotiated(&self, protocol: NegotiatedProtocol) {
+        self.emit(PhysicalEvent::Negotiated { protocol }, None);
+    }
     /// 观察任务未能登记时保留同一连接关联，不伪造完整关闭观察。
     pub fn unavailable(mut self, reason: ObserverFailure) {
         self.finished = true;

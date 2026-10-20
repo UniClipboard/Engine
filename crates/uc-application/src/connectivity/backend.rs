@@ -1,6 +1,7 @@
 use super::{ConnectivityError, StreamPair};
 use async_trait::async_trait;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 use uc_core::ids::DeviceId;
 use uc_core::ports::ConnectionChannel;
 
@@ -8,6 +9,8 @@ use uc_core::ports::ConnectionChannel;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConnectionMode {
     SingleExchange,
+    /// 仅首轮开流；完整协议负责人继续持有连接直到关闭。
+    RetainedSingleExchange,
     Multiplexed,
 }
 
@@ -15,6 +18,8 @@ pub enum ConnectionMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConnectionProtocol {
     Unsupported,
+    PeerReachabilityV1,
+    PeerReachabilityV2,
     ActiveClipboardState,
     ActiveClipboardPull,
     Clipboard,
@@ -27,8 +32,11 @@ pub enum ConnectionProtocol {
 
 #[async_trait]
 pub trait ConnectivityBackend: Send + Sync {
-    async fn connect(&self, target: DeviceId)
-        -> Result<Arc<dyn PeerConnection>, ConnectivityError>;
+    async fn connect(
+        &self,
+        target: DeviceId,
+        cancel: CancellationToken,
+    ) -> Result<Arc<dyn PeerConnection>, ConnectivityError>;
 }
 
 /// 已完成密码握手的传输事实；不代表成员准入。

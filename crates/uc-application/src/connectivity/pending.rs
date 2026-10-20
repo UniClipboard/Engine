@@ -1,5 +1,6 @@
 //! 首帧身份介绍需要有限未绑定使用权；不构造虚假的 DeviceId grant。
 use super::connection::ConnectionRecord;
+use super::manager::PeerState;
 use super::retention::ConnectionActivity;
 use super::{
     AdmissionGrant, ConnectionLease, ConnectivityError, ConnectivityManager, InboundAdmissionFence,
@@ -9,6 +10,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
+use uc_core::ids::DeviceId;
 
 pub(super) struct UnboundConnection {
     pub raw: Arc<dyn PeerConnection>,
@@ -32,28 +34,71 @@ pub struct PendingInboundLease {
     pub(super) manager: ConnectivityManager,
     pub(super) incoming: OwnedSemaphorePermit,
     pub(super) global: OwnedSemaphorePermit,
+    pub(super) identified_peer: Option<(DeviceId, Arc<PeerState>)>,
+    pub(super) identified_capacity: Option<OwnedSemaphorePermit>,
     pub(super) fence: Option<Box<dyn InboundAdmissionFence>>,
 }
 impl PendingInboundLease {
     pub fn connection(&self) -> Arc<dyn PeerConnection> {
         self.raw.raw.clone()
     }
+    /// 已识别身份立即占用每端 pending 额度；不排队，也不占长期集合。
+    pub fn reserve_peer(&mut self, peer: DeviceId) -> Result<(), ConnectivityError> {
+        if let Some(fence) = &self.fence {
+            fence.check_current(&peer)?;
+        }
+        let state = self.manager.peer(peer);
+        self.identified_capacity = Some(
+            state
+                .pending_inbound
+                .clone()
+                .try_acquire_owned()
+                .map_err(ConnectivityError::Busy)?,
+        );
+        self.identified_peer = Some((peer, state));
+        Ok(())
+    }
+    /// 取得同一会话准入证明；并非建立第二份成员资格。
+    pub async fn admit(&mut self) -> Result<Box<dyn AdmissionGrant>, ConnectivityError> {
+        self.manager.admit_pending(self.raw.raw.clone()).await
+    }
     pub async fn bind(
         mut self,
         grant: Box<dyn AdmissionGrant>,
     ) -> Result<(ConnectionLease, StreamLease), ConnectivityError> {
+        if Instant::now() >= self.deadline {
+            return Err(ConnectivityError::DeadlineExpired);
+        }
         if let Some(fence) = &self.fence {
             fence.check_current(&grant.peer())?;
         }
         grant.check_current().await?;
+        if Instant::now() >= self.deadline {
+            return Err(ConnectivityError::DeadlineExpired);
+        }
         if let Some(fence) = &self.fence {
             fence.check_current(&grant.peer())?;
         }
+        let presence = self.manager.policy().presence_retention;
+        if presence && self.identified_peer.as_ref().map(|(peer, _)| *peer) != Some(grant.peer()) {
+            return Err(ConnectivityError::Denied);
+        }
+        let mut permits = vec![self.global];
+        let incoming = if presence {
+            permits.push(self.incoming);
+            if let Some(capacity) = self.identified_capacity.take() {
+                permits.push(capacity);
+            }
+            None
+        } else {
+            Some(self.incoming)
+        };
         let record = Arc::new(ConnectionRecord {
             connection: self.raw.raw.clone(),
             activity: Arc::new(ConnectionActivity::default()),
             stop: self.manager.stop_token(),
             cache_cancel: tokio_util::sync::CancellationToken::new(),
+            presence_retention: presence,
             accepted_stream_timeout: self.manager.policy().accepted_stream_timeout,
             pending: tokio::sync::Mutex::new(None),
             exchange_claimed: AtomicBool::new(true),
@@ -62,7 +107,7 @@ impl PendingInboundLease {
             inbound: Arc::new(Semaphore::new(self.manager.policy().inbound_per_connection)),
             inbound_global: self.manager.inbound_capacity(),
             waiting_global: self.manager.waiting_capacity(),
-            _inbound_connection: Some(self.incoming),
+            _inbound_connection: incoming,
         });
         let local = record
             .inbound
@@ -71,11 +116,8 @@ impl PendingInboundLease {
             .map_err(ConnectivityError::Busy)?;
         self.manager.track(&record)?;
         self.raw.adopted = true;
-        let mut stream = StreamLease::new(
-            (self.send, self.receive),
-            record.clone(),
-            vec![local, self.global],
-        )?;
+        permits.push(local);
+        let mut stream = StreamLease::new((self.send, self.receive), record.clone(), permits)?;
         stream.received_at = Some(self.received_at);
         Ok((
             ConnectionLease {

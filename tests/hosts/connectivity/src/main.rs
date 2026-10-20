@@ -264,13 +264,20 @@ async fn operation(
 ) -> Result<Value> {
     let command = string(request, "command")?;
     match command {
+        #[cfg(feature = "connectivity-opportunity")]
+        "network_endpoint" => {
+            let uc_engine::DevOperationResult::NetworkEndpointId(endpoint) = engine
+                .execute_dev(uc_engine::DevOperation::QueryNetworkEndpointId)
+                .await?
+            else {
+                bail!("network endpoint expected");
+            };
+            return Ok(json!(endpoint));
+        }
         #[cfg(feature = "current-engine")]
         "send_concurrent" => return concurrent_send::send(engine, request).await,
         #[cfg(feature = "current-engine")]
-        "network_endpoint"
-        | "reject_reachability_dials"
-        | "rejected_dials"
-        | "set_network_partition" => {
+        "reject_reachability_dials" | "rejected_dials" | "set_network_partition" => {
             return network_faults::execute(engine, command, request).await;
         }
         "capture" => return content::capture(engine, clipboard, files, request).await,
@@ -757,6 +764,16 @@ async fn main() -> Result<()> {
             }
         }
     });
+    // 解锁前配置现有 dev-tools 拨号限制；不修改成员资格或旧库行为。
+    #[cfg(feature = "current-engine")]
+    if let Some(endpoint_ids) = start.get("reject_presence_endpoint_ids") {
+        network_faults::execute(
+            &engine,
+            "reject_reachability_dials",
+            &json!({ "endpoint_ids": endpoint_ids }),
+        )
+        .await?;
+    }
     respond(json!({
         "ready": true,
         "version": env!("CARGO_PKG_VERSION"),

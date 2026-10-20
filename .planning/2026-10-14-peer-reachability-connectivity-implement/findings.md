@@ -1,0 +1,21 @@
+# 发现
+- 开工 origin/main = b6fa0ce6b2efd1c1764e76c0a76537bdeead4e1b，较审计基线增加 profile 日志目录保留修复（PR #184）。
+- 当前分支 feat/active-clipboard-connectivity，HEAD 6bc4d791；用户已有两份规格/计划未跟踪，PLANS 和 active index 已修改。
+- a07 = f6f305d9689e4e79e7ab6d0e4921061f9416e4a6；既有 build-upgrade-anchors 可使用同一宿主源码与共享 target，旧生产库无补丁。
+- 现有 D2 sequential_upgrade 从真实旧旧配对再单端升级，可用其真实故障证据定位前置；当前网络脚本只有现场混合配对。
+- coordinator 常量：MAX_CONCURRENT=4、DIAL_BUDGET=20s、HEALTH_CHECK_INTERVAL=10s、SCOPE_BUDGET=1s、SCOPE_RECHECK=60s、COALESCE=250ms、MIN_START_INTERVAL=1s。
+- 原 codec：/2 优先、/1 fallback；准入 01/01/02；challenge 17 字节，10/11/12 加 16 字节 nonce；read_to_end(17) 等待 FIN。
+- 生产装配在 sync_engine.rs:177 -> node.install_peer_reachability；native adapter 持 observations、inbound/outbound、gate、generation、accepting，gate 复用 admitted_connections。消费者包括 roster、clipboard active/dispatch/recovery、membership activation/trust、其他 connectivity backend；替换应共享同一 owner。
+- 已确认 native 准入首流无总额，重检及 liveness authorize().is_ok() 混同读取故障和拒绝；本阶段只记录，不修改生产。
+- 本机资格来源还有一处必修断点：PeerAccess 的 admission_error 将 MembershipLedgerError 变成无 source 的 Core PeerAdmissionError::Unavailable/InvalidState。需要补带来源 variant；否则即使 transport 保留上层错误也无法追溯 SQLite。该修改只修复既有资格错误转换，不增加资格来源。
+- v1 新能力 RetainedSingleExchange 的 public Uni 生命周期测试 red（类型不存在）→green；Application 全目标编译通过。
+- pending 入口过载 native 失败用例实测失败（17th 未在 1s 内关闭），原始首次失败已保存。
+- 当前实现回归网络 E10 Relay-only 原三秒恢复 1 轮通过（14.954s 场景总时长，不是恢复耗时）；不能冒充 20 轮最终验收。
+- 重点待验证：真实本机故障保留显示（包括存活流失败后的闭合观察）、Owner actor join 失败的持久 source、coordinator scope 本地读取取消后资源计数、最后一条连接关闭与检查新成功交错、第三条入站替换及跨代次 late 原子提升。
+- 改动后的 workspace check 曾通过，但后续预算传播/观测名称等仍需重跑最终门禁。
+- 原 native adapter 与协议目前仍存在，Engine 生产已接新 owner；必须迁移有价值测试并删除原生业务及旧 builder 构造，不能把当前状态写为已完成。
+- 原 Actor private verify 被 style gate 判为 Core trait 纯转调，已改为同步完整 submit（冻结期限、真实 4 许可、监督 task）加 trait 内明确接收结果/错误边界；style gate 通过。
+- 当前成员 owner 的公开有效快照通常命中 published(generation)，真实 SQLite 故障验收必须令其走真实重新读取路径；单纯删表后查询热缓存不能宣称覆盖本机读取故障。
+- 原 native adapter 的大部分测试使用内部状态表、成员伪表或强制插入 Online；迁移必须改成完整 owner/Uni/native 网络可观察行为，不能把旧实现留下仅让旧测试通过。
+
+- rc.15 旧 Sponsor 的 address.used 为 direct_count=1/relay_count=0，旧 Joiner 保有 Sponsor relay 路由。将“新端接收”机械固定到升级 Joiner 会把历史启动地址缺陷误当成 presence 迁移失败；最终矩阵 receive 升级 Sponsor，initiate 升级 Joiner，均从独立原资料生成，禁止人工补地址。

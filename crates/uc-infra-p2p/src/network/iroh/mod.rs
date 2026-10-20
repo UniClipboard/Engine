@@ -28,7 +28,6 @@ mod observed_address_lookup;
 mod observed_connections;
 mod peer_address_resolver;
 pub mod peer_reachability_adapter;
-mod peer_reachability_protocol;
 pub mod persistable_addr;
 mod protocol_router;
 pub mod relay_probe;
@@ -78,8 +77,7 @@ pub use node::{
     TransferProgressHandlers,
 };
 pub use peer_reachability_adapter::{
-    IrohPeerReachabilityAdapter, IrohPeerReachabilityHandler, LEGACY_PEER_REACHABILITY_ALPN,
-    PEER_REACHABILITY_ALPN,
+    IrohPeerReachabilityHandler, LEGACY_PEER_REACHABILITY_ALPN, PEER_REACHABILITY_ALPN,
 };
 pub use relay_probe::{
     IrohRelayProbeAdapter, RelayProbeError as IrohRelayProbeError,

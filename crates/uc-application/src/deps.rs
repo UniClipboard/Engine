@@ -599,3 +599,8 @@ pub use crate::clipboard::active::transport::{
     ActivePullClient, ActivePullLocalWorkPort, ActivePullReceiver, ActivePullReceiverPort,
     ActivePullResponse, ActivePullWork,
 };
+
+pub use crate::space::{
+    PeerReachabilityEnvironmentPort, PeerReachabilityTransport, PeerReachabilityTransportError,
+    PeerReachabilityTransportPorts, PeerReachabilityWireError, PeerReachabilityWirePort,
+};

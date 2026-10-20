@@ -8,3 +8,8 @@ pub use recovery::{
     NetworkRecoveryEvent, NetworkRecoveryFacade, NetworkRecoveryPhase, NetworkRecoveryRequestError,
     NetworkRecoveryStatus, RebuildNetworkSessionError, RebuildNetworkSessionPort,
 };
+
+pub use peer_connections::{
+    PeerReachabilityEnvironmentPort, PeerReachabilityTransport, PeerReachabilityTransportError,
+    PeerReachabilityTransportPorts, PeerReachabilityWireError, PeerReachabilityWirePort,
+};

@@ -17,3 +17,5 @@ pub mod trace_context;
 pub mod transfer_progress;
 
 pub use trace_context::{WireTraceContext, TRACEPARENT_MAX_BYTES};
+
+pub mod peer_reachability;

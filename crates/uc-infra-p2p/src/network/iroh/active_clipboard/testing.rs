@@ -64,7 +64,7 @@ pub(super) fn manager(
         Arc::new(IrohConnectivityBackend::new(
             endpoint,
             addresses,
-            Arc::new(UnknownReachability(events)),
+            Some(Arc::new(UnknownReachability(events))),
             profile,
         )),
         Arc::new(IrohConnectionAdmission::new(

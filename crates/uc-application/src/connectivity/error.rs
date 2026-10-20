@@ -5,6 +5,8 @@ use uc_core::error_class::ErrorClass;
 /// 固定公开分类；底层失败保留完整来源，不格式化身份或地址。
 #[derive(thiserror::Error)]
 pub enum ConnectivityError {
+    #[error("peer has no known address")]
+    AddressMissing,
     #[error("peer has no usable connection")]
     Offline,
     #[error("connection capacity exhausted")]
@@ -25,6 +27,10 @@ pub enum ConnectivityError {
     DeadlineExpired,
     #[error("connection operation timed out")]
     TimedOut(#[source] tokio::time::error::Elapsed),
+    #[error("connection admission read deadline expired")]
+    AdmissionDeadlineExpired,
+    #[error("connection admission read timed out")]
+    AdmissionTimedOut(#[source] tokio::time::error::Elapsed),
     #[error("connection address lookup failed")]
     AddressLookup(#[source] Box<dyn Error + Send + Sync>),
     #[error("connection backend failed")]
@@ -44,9 +50,25 @@ impl fmt::Debug for ConnectivityError {
 }
 impl ConnectivityError {
     /// 稳定业务端口仍把无法取得可用连接归类为离线；资源与任务失败保留来源。
+    pub fn is_admission_read_failure(&self) -> bool {
+        match self {
+            Self::Admission(_) | Self::AdmissionTimedOut(_) | Self::AdmissionDeadlineExpired => {
+                true
+            }
+            Self::Shared(source) => source.is_admission_read_failure(),
+            _ => false,
+        }
+    }
+    pub fn is_address_missing(&self) -> bool {
+        match self {
+            Self::AddressMissing => true,
+            Self::Shared(source) => source.is_address_missing(),
+            _ => false,
+        }
+    }
     pub fn is_unavailable(&self) -> bool {
         match self {
-            Self::Offline | Self::Backend(_) | Self::Denied => true,
+            Self::Offline | Self::AddressMissing | Self::Backend(_) | Self::Denied => true,
             Self::Shared(error) => error.is_unavailable(),
             _ => false,
         }
@@ -56,6 +78,7 @@ impl ConnectivityError {
 impl ErrorClass for ConnectivityError {
     fn class(&self) -> &'static str {
         match self {
+            Self::AddressMissing => "connection_address_missing",
             Self::Offline => "connection_offline",
             Self::Busy(_) => "connection_busy",
             Self::Stopped => "connection_stopped",
@@ -65,6 +88,9 @@ impl ErrorClass for ConnectivityError {
             Self::ExchangeAlreadyUsed => "connection_exchange_already_used",
             Self::Denied => "connection_admission_denied",
             Self::DeadlineExpired | Self::TimedOut(_) => "connection_timeout",
+            Self::AdmissionTimedOut(_) | Self::AdmissionDeadlineExpired => {
+                "connection_admission_timeout"
+            }
             Self::AddressLookup(_) => "connection_address_lookup_failed",
             Self::Backend(_) => "connection_backend_failed",
             Self::Admission(_) => "connection_admission_failed",
