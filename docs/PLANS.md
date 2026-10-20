@@ -20,7 +20,7 @@
 
 ## 当前专项计划
 
-- Issue #34 第六切片：[设备可达性、准入与存活检查执行计划](exec-plans/active/2026-10-14-peer-reachability-connectivity-plan.md)，对应[实现规格](exec-plans/active/2026-10-14-peer-reachability-connectivity-spec.md)。状态为生产迁移及本地行为回归完成、完整网络／平台／线上验收进行中；presence 完整 Uni 迁移，独立 manager、长期 3N 与暂态额度分离、本机读取故障语义；生产改动前先证明真实旧旧配对及原资料单端升级。
+- Issue #34 第六切片：[设备可达性、准入与存活检查执行计划](exec-plans/completed/2026-10-14-peer-reachability-connectivity-plan.md)，对应[实现规格](exec-plans/completed/2026-10-14-peer-reachability-connectivity-spec.md)。状态为完成；完整 Application presence owner、独立 Uni manager、3N 长期保留与暂态额度分离、本机读取故障来源和显示语义落地；本地完整回归、旧新双角色 Direct／Relay 及全部必需平台 CI 通过，真机与额外历史矩阵跳过；文件／blob／进度等剩余范围继续保留。
 
 - Issue #34 第五切片：[当前剪贴板状态与按需拉取执行计划](exec-plans/completed/2026-10-14-active-clipboard-connectivity-plan.md)，对应[实现规格](exec-plans/completed/2026-10-14-active-clipboard-connectivity-spec.md)。状态为完成，本地验收与代码提交线上必需检查通过；四向 Uni 迁移、每次网络交换 10 秒、每轮 4 目标、最新待发状态与独立容量；保留原恢复语义和文件本体链路。
 

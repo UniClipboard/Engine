@@ -104,3 +104,11 @@
 
 - 最终原网络四模式 22 场景全通过（325.316 秒），各模式 cleaned／plaintext_clean 均 true；额外已知设备换址三轮通过（3597／3587／3758ms）。全部根门禁通过，25 项 CI 脚本测试通过，audit 无阻断项、保留既有 9 条允许警告。20 个本地阶段汇总校验通过。
 - 无活动本任务网络／Cargo 进程，已回收本次 a07／a13 源码 src 与观测缓存；共享 target／MBX、旧端二进制和证据保留。隔离 runner 复制到工件目录用于复现，未执行的追加主线对照不记通过。开始最终差异审查及提交／PR，平台线上结果尚未执行，不归档。
+
+- 已提交 42fff70404356472bcdf07b9228d1b68123a7da7 并推送当前分支，创建 draft PR #223。九项必需检查已启动；HarmonyOS 真实 SDK check 成功（aarch64-unknown-linux-ohos，58.01 秒），日志与 job JSON 已保留。其他平台仍未结算，coverage 与可选 isolated-networks job 明确跳过，未计通过。
+- PR 当前 base 为 2956f3dba1ef545132550afa737b2462df96d98f，CI 实际测试合成提交 5c1f09962d5db9dd63379c4d6aa1a03659bc3cc0。相对已合入的 f062 仅新增 rc.23 版本提交与 MBX PATH 包装器修复；本轮全绿后同步这两个已验证主线提交，再做生产输入树等价校验、最终根检查／归档并核验最终 SHA 线上结果，避免把 rc.22 本地版本误写成最终发布版本。开工旧端锚点 b6fa0ce6 不变。
+
+- PR #223 首轮九项必需 CI 全部成功。下载线上网络工件并逐格核对 11 格、20／3／1 轮、旧旧关闭重开、cleaned／plaintext_clean 均通过；新新双向读回最慢 499ms。coverage／额外 isolated-networks 和 CodeRabbit draft 跳过不计作通过。
+- 以 807e13ea 合入 CI 已验证的 main 2956f3db（rc.23 和 MBX 包装器修复）；整个 committed tree 与合成提交 5c1f0996 完全相同，tree 17db85df3e6ec0b79b605f3178cf9c4416cdb119。已将规格／计划一起归档并更新稳定设计与三个索引；保留 #34 其他范围。归档后的最终 head 检查仍须执行后才对用户交付。
+
+- rc.23 归档根复核全部通过：metadata、workspace all-targets check（86.146 秒）、fmt、相对 2956 main 的架构／风格、继承的 MBX PATH 测试、diff check；归档规格／计划相对链接可解析。再次确认程序输入与已通过九项 CI 的 5c1f0996 一致。即将提交并推送归档，最后一轮 head CI 结算后才交付。

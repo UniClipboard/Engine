@@ -1,10 +1,10 @@
 # Issue #34 第六切片：设备可达性、准入与存活检查执行计划
 
-状态：**实现与本地必需验收完成，平台／最终 SHA 线上检查待执行，尚未交付**（2026-10-21）。
+状态：**完成并归档**（2026-10-21）。实现、本地验收与九项线上必需检查通过；归档后最新 head 的复核状态见 [PR #223 检查页](https://github.com/UniClipboard/Engine/pull/223/checks)。
 唯一设计来源：[实现规格](2026-10-14-peer-reachability-connectivity-spec.md)。
 前置第五切片 [PR #181](https://github.com/UniClipboard/Engine/pull/181) 已合并。
 审计时最新 main 为 `68de511a77dee74b8b6ba0360fa07f9637241c90`；此值不是已冻结的实现／互通锚点，开工时重新确认。
-已完成生产迁移、行为／原生／真实 SQLite 回归及最终根门禁。workspace 4303 项、成员全集 56 项、必需网络矩阵 11 格、前五切片与既有网络回归全部通过；跳过项、首次失败与 fixture 对照见实际记录。平台与线上结果尚未核验。
+已完成生产迁移、行为／原生／真实 SQLite 回归及最终根门禁。workspace 4303 项、成员全集 56 项、必需网络矩阵 11 格、前五切片与既有网络回归全部通过；跳过项、首次失败与 fixture 对照见实际记录。Linux、macOS、Windows 两架构及 iOS／Android／HarmonyOS SDK 线上检查通过，物理设备与额外历史格明确跳过。
 不得从以下阶段 checklist 或纯文档检查推定功能、平台编译和线上检查通过。
 
 ## 完整负责人
@@ -104,7 +104,7 @@
 ## 阶段 5：真实网络、旧新互通与必需 CI
 
 优先扩展已有 `run-connection-recovery-e2e.sh`、`connection-recovery-network.mjs` 及独立宿主，不另建替代网络框架。
-预配对资料选项、presence case 名称和固定旧端包装入口在实现时确定并写回命令清单；当前不得把计划接口写成可运行验收命令。
+预配对资料与固定旧端包装入口已落地，完整必需入口如下；原恢复脚本仍用于既有场景回归。
 
 * [x] 执行 spec §8 的新新、冻结 main 双角色、rc.15 双角色 × Direct／Relay 全部必需格；各格精确内容读回、实际 ALPN 和路径证据齐全。
 * [x] 强制 Relay 对 IPv4／IPv6 UDP 的规则与计数有效；验证没有直连绕路，双向内容不是仅发出或仅观察 Online。
@@ -113,12 +113,13 @@
 * [x] 入站满额、慢帧、真实 SQLite／身份读取错误、成员撤销和在途关闭在真实 Engine 路径通过；有限任务／许可无泄漏。
 * [x] 保留 E09 现场配对拒绝；完整 workspace、成员 E2E、升级 smoke、前五切片连接验收和网络恢复原场景全部通过。
 * [x] 将必需矩阵接入 `.github/workflows/pr-check.yml` 默认运行的验证；按需拆分 job，但失败必须阻止本片交付，不能仅靠可选 label 或 nightly。
-* [ ] Linux、macOS、Windows 和现有移动平台编译门禁执行；宿主不因缺 `just`／`rg` 等工具静默跳过必需格，脚本依赖明确安装或采用已有可移植入口。
-* [ ] 每次本地先跑对应全部必需 CI，再推送；核验最终 head 的线上检查，保留第一次失败及修复后的命令／SHA／结果。
+* [x] Linux、macOS、Windows 和现有移动平台编译门禁执行；宿主不因缺 `just`／`rg` 等工具静默跳过必需格，脚本依赖明确安装或采用已有可移植入口。
+* [x] 每次本地先跑对应全部必需 CI，再推送；核验最终 head 的线上检查，保留第一次失败及修复后的命令／SHA／结果。
 
 原已有入口仍有效，新增预配对／混合角色入口落地后补足最终可复制命令：
 
 ```bash
+bash scripts/testing/run-peer-reachability-connectivity.sh
 bash scripts/testing/run-connection-recovery-e2e.sh --suite all --repeat 3
 bash scripts/testing/run-connection-recovery-e2e.sh --suite network --mode relay --case E10-relay-only --repeat 20
 ```
@@ -130,10 +131,10 @@ bash scripts/testing/run-connection-recovery-e2e.sh --suite network --mode relay
 
 * [x] 按实现更新 `docs/design-docs/automatic-peer-connections.md`、相关 Uni 设计／ADR 及架构说明；持久规则只维护唯一正文。
 * [x] 对完整恢复动作检查真实观测导出、失败类别、结束边界和列表／详情；按[唯一标准](../../design-docs/observability.md#业务记录组织标准)记录实际验收及跳过项。
-* [ ] 最终实现、本地证据与线上必需检查逐项勾选；未测真机／版本矩阵独立列出，不能从编译推定通过。
+* [x] 最终实现、本地证据与线上必需检查逐项勾选；未测真机／版本矩阵独立列出，不能从编译推定通过。
 * [x] 工件 manifest 与首次失败证据完整，敏感资料／密钥无上传；检查进程并回收任务所建临时源码／fixture。
-* [ ] 完成后规格和计划一起移至 `completed/`，更新 `docs/PLANS.md` 与 active／completed 索引、相对链接。
-* [ ] 保留 Issue #34 的文件／blob／进度等剩余范围，不将本片完成写成整个 issue 完成。
+* [x] 完成后规格和计划一起移至 `completed/`，更新 `docs/PLANS.md` 与 active／completed 索引、相对链接。
+* [x] 保留 Issue #34 的文件／blob／进度等剩余范围，不将本片完成写成整个 issue 完成。
 
 ## 验证层次与证据清单
 
@@ -144,7 +145,7 @@ bash scripts/testing/run-connection-recovery-e2e.sh --suite network --mode relay
 | 真实 Iroh／SQLite／独立宿主 | 完整路径和内容、本机实际错误、取消与 shutdown 资源回收 | 实现及相关回归已通过；最终网络／平台证据见下文 |
 | Direct／强制 Relay 互通 | spec §8 全部必需格、网络规则／计数、selected path、ALPN、合成内容结果 | 最终默认矩阵 11 格通过；清理与明文扫描通过 |
 | 自动恢复 | 计时起点、Online 与双向读回时刻、轮数、无人工触发及首次失败 | 新新 20 轮、冻结 main 每角色 3 轮、rc.15 每角色 1 轮通过；首次失败分别保留 |
-| 本地／线上门禁 | 对应命令、退出码、最终 commit SHA、检查链接及首次失败 | 根本地门禁通过；最终提交和线上检查待执行 |
+| 本地／线上门禁 | 对应命令、退出码、最终 commit SHA、检查链接及首次失败 | 根本地门禁与九项必需 CI 通过；精确 head／合成树及检查链接见最终记录 |
 | iOS／Android／HarmonyOS 真机切网／前后台 | 实机、版本、操作和实际结果 | 跳过：当前未执行，不从编译推定 |
 | 额外历史版本／降级矩阵 | 关联原升级矩阵的实际证据 | 跳过：本片不新增其完成义务 |
 
@@ -169,7 +170,7 @@ Cargo 由一个负责人从根目录通过共享 target 串行运行，保留编
 ## 实际执行记录
 
 - 2026-10-14：完成设计访谈与本文／规格编写；审核第五切片已合并及审计 main SHA。
-- 本片生产实现、阶段 0 真实升级前置、网络／旧新互通、三秒恢复和实现线上门禁均尚未执行；上表按实际状态登记。
+- 2026-10-14 设计交付时：生产实现、阶段 0 真实升级前置、网络／旧新互通、三秒恢复和实现线上门禁尚未执行。后续实际结果见对应日期记录及最终汇总。
 - 文档交付检查通过：`just cargo metadata --locked --format-version 1`、`just cargo check --workspace --all-targets --locked`、`just cargo fmt --all -- --check`、Rust style、Engine repository preflight 和 `git diff --check` 均通过；新文档单独核对空白及文件结尾。
 - 检查时本地代码 HEAD 为 `6bc4d791cd9606604f29b073b77e6512c6ee05a4`；四个文档入口的 53 条相对链接均存在，规格 11 节完整，实现 checklist 均保持未勾选。Cargo check 仍有既有未使用导入／函数警告。
 - 以上是本轮纯文档交付检查，不能作为阶段 0 或第六切片功能／线上门禁已通过的证据。
@@ -259,3 +260,18 @@ Cargo 由一个负责人从根目录通过共享 target 串行运行，保留编
 原网络首次失败由扩展双栈工件时误把 `counters` 字段加到通用分区与 IPv4 对端隔离造成；已删除这两处无定义且语义不实的字段，强制 Relay 的实际 IPv4／IPv6 计数保留。首次日志不覆盖，不修改 Engine 或任何期限。
 
 确认无本任务活动网络／Cargo 进程后，回收 a07 与 a13 的本次源码快照和临时观测缓存；保留共享 target、编译缓存、旧端二进制、脱敏证据及隔离 runner 源码快照。cleanup 证据为 `oct21-local-cleanup.json`。最终提交／PR、平台 SDK 与线上检查尚待执行，规格和计划继续 active。
+
+## 最终线上验收与归档
+
+[PR #223](https://github.com/UniClipboard/Engine/pull/223) 的实现提交 `42fff70404356472bcdf07b9228d1b68123a7da7` 已通过全部九项必需检查：
+
+- [PR Check](https://github.com/UniClipboard/Engine/actions/runs/39468554241)：macOS 仓库／诊断栈、Linux Engine tests、升级 smoke、完整 presence 矩阵、iOS、Android、HarmonyOS SDK 均成功。
+- [Windows Build](https://github.com/UniClipboard/Engine/actions/runs/39468554023)：x64 与 arm64 全目标编译及原生存储持久性测试均成功。
+
+本轮 CI 的基线为 `2956f3dba1ef545132550afa737b2462df96d98f`，实际合成提交为 `5c1f09962d5db9dd63379c4d6aa1a03659bc3cc0`。本地随后以 `807e13eaad9e866b9d797eea616d9c8fbc5da737` 合入同一主线：仅承接 rc.23 版本与 MBX 包装器修复，整个已提交树与 CI 合成树完全相同，树对象为 `17db85df3e6ec0b79b605f3178cf9c4416cdb119`。本片没有新增持久格式；开工旧端锚点保持原 SHA。
+
+下载的线上矩阵工件逐格校验通过：11 格记录非空且全部成功，cleaned／plaintext_clean 均 true；新新 20 轮双向读回最慢 499ms，冻结 main 两角色各 3 轮最慢 469／439ms，rc.15 两角色各 1 轮也完成原关闭及恢复合同。核验保存在 `oct21-pr223-matrix-verified.json`，任务本地证据只保留脱敏内容。
+
+可选 coverage 与额外 isolated-networks job 未执行，明确记为跳过；原网络四模式已在本地完整执行。CodeRabbit 的 draft 跳过标记不作为审查通过证据；本片已进行完整调用链和最终差异手工审查。物理设备切网／前后台及额外历史矩阵保持跳过。
+
+规格与计划一起移至 completed，稳定设计与索引同步；文件／blob／进度等后续范围继续留在 Issue #34。归档提交与已验证实现的程序输入保持一致，末次提交的线上状态以 [PR 最新 head 检查](https://github.com/UniClipboard/Engine/pull/223/checks)为唯一动态来源，通过后交付。
