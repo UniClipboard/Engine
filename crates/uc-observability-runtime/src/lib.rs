@@ -19,12 +19,19 @@ mod local_log_processor;
 mod local_recording;
 mod module_log;
 mod module_log_fields;
+mod network_log;
+mod process_census;
 pub use local_capture::{
     CaptureEndReason, DetailedCaptureRequest, LocalCaptureMode, LocalCaptureStatus,
     LocalDiagnosticError, LocalDiagnosticExportReport, LocalDiagnosticStatus, SourceCapability,
     SourceCollection, SourceCoverage, StopCaptureResult,
 };
 pub use module_log::ModuleLogCounts;
+pub use network_log::{
+    NetworkCaptureMode, NetworkCaptureStatus, NetworkLibraryStatus, NetworkLogBudget,
+    NetworkLogConfig, NetworkLogCounters, NetworkLogError, NetworkLogExportReport, NetworkLogFile,
+    NetworkLogState, NetworkLogStatus, NetworkProcessRole, NETWORK_LOG_SCHEMA_VERSION,
+};
 mod remote_health;
 mod runtime;
 mod status;
@@ -34,7 +41,7 @@ mod telemetry;
 #[cfg(target_os = "android")]
 pub use android::*;
 pub use config::*;
-pub use local_file::managed_log_files;
+pub use local_file::{managed_log_files, migrate_managed_log_files};
 pub use runtime::*;
 pub use status::*;
 pub use subscriber::HostLogLayer;

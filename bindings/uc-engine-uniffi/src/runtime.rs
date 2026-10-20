@@ -240,6 +240,8 @@ pub struct JoinedSpace {
 pub enum JoinSpaceRejectionReason {
     InvitationUnavailable,
     AuthenticationRejected,
+    /// Sponsor 收下请求后在截止内没有应答；不是口令错误。
+    SponsorUnresponsive,
     IdentityConflict,
     BaseHistoryChanged,
     JoinerHistoryAhead,
@@ -2453,6 +2455,9 @@ fn map_join_space_status(result: OperationResult) -> Result<JoinSpaceStatus, Bin
                     uc_engine::JoinSpaceRejectionReasonSummary::AuthenticationRejected => {
                         JoinSpaceRejectionReason::AuthenticationRejected
                     }
+                    uc_engine::JoinSpaceRejectionReasonSummary::SponsorUnresponsive => {
+                        JoinSpaceRejectionReason::SponsorUnresponsive
+                    }
                     uc_engine::JoinSpaceRejectionReasonSummary::IdentityConflict => {
                         JoinSpaceRejectionReason::IdentityConflict
                     }
@@ -2732,12 +2737,10 @@ fn count_to_u64(value: usize) -> Result<u64, BindingError> {
 pub(crate) fn host_directories(
     host: &Arc<dyn BindingHost>,
 ) -> Result<HostDirectories, BindingError> {
-    let cache_directory = host_path(host.cache_directory())?;
-    Ok(HostDirectories::new(
+    Ok(HostDirectories::mobile(
         host_path(host.private_data_directory())?,
-        cache_directory.clone(),
+        host_path(host.cache_directory())?,
         host_path(host.temporary_directory())?,
-        cache_directory.join("logs"),
     ))
 }
 

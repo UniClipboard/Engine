@@ -1,5 +1,6 @@
 //! 独立动作记录的封闭数据模型、字段编码与校验共用同一事实来源。
 use super::{InboundPeerProtocol, InboundPeerRejectionReason, LocalIdentityState};
+use crate::wire_enum;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
@@ -13,21 +14,26 @@ pub enum RecoveryTrigger {
     PeerContact,
     PeerOnline,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DialFailure {
-    TimedOut,
-    TransportFailed,
+wire_enum! {
+    serde
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum DialFailure {
+        TimedOut => "timed_out",
+        TransportFailed => "transport_failed",
+    }
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExchangeFailure {
-    Deferred,
-    Unavailable,
-    AuthenticationRejected,
-    ProtocolRejected,
-    InvitationUnavailable,
-    PeerUpgradeRequired,
+wire_enum! {
+    serde
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum ExchangeFailure {
+        Deferred => "deferred",
+        Unavailable => "unavailable",
+        AuthenticationRejected => "authentication_rejected",
+        ProtocolRejected => "protocol_rejected",
+        InvitationUnavailable => "invitation_unavailable",
+        SponsorUnresponsive => "sponsor_unresponsive",
+        PeerUpgradeRequired => "peer_upgrade_required",
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -48,6 +54,7 @@ pub enum RecoveryDeferral {
 pub enum RejectionCause {
     InvitationUnavailable,
     AuthenticationRejected,
+    SponsorUnresponsive,
     PeerUpgradeRequired,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -299,12 +306,8 @@ impl LocalEvent {
                         "deferred",
                         "wait_for_recovery_trigger",
                         cause.map(|cause| match cause {
-                            RecoveryDeferral::Connect(reason) => {
-                                ("connect", exchange_reason(reason))
-                            }
-                            RecoveryDeferral::Exchange(reason) => {
-                                ("exchange", exchange_reason(reason))
-                            }
+                            RecoveryDeferral::Connect(reason) => ("connect", reason.wire()),
+                            RecoveryDeferral::Exchange(reason) => ("exchange", reason.wire()),
                             RecoveryDeferral::State(reason) => (
                                 "state",
                                 match reason {
@@ -328,6 +331,7 @@ impl LocalEvent {
                                     RejectionCause::AuthenticationRejected => {
                                         "authentication_rejected"
                                     }
+                                    RejectionCause::SponsorUnresponsive => "sponsor_unresponsive",
                                     RejectionCause::PeerUpgradeRequired => "peer_upgrade_required",
                                 },
                             )
@@ -378,7 +382,7 @@ impl LocalEvent {
                         ("error", Some(("address", "address_unavailable")))
                     }
                     PresenceCheckResult::Dial(reason) => {
-                        ("deferred", Some(("connect", dial_reason(*reason))))
+                        ("deferred", Some(("connect", reason.wire())))
                     }
                     PresenceCheckResult::Confirmation(reason) => (
                         if *reason == ConfirmationFailure::PeerNotAdmitted {
@@ -456,22 +460,6 @@ fn insert_failure(fields: &mut Map<String, Value>, failure: Option<(&'static str
     if let Some((phase, reason)) = failure {
         fields.insert("error.phase".into(), json!(phase));
         fields.insert("error.reason".into(), json!(reason));
-    }
-}
-fn exchange_reason(reason: ExchangeFailure) -> &'static str {
-    match reason {
-        ExchangeFailure::Deferred => "deferred",
-        ExchangeFailure::Unavailable => "unavailable",
-        ExchangeFailure::AuthenticationRejected => "authentication_rejected",
-        ExchangeFailure::ProtocolRejected => "protocol_rejected",
-        ExchangeFailure::InvitationUnavailable => "invitation_unavailable",
-        ExchangeFailure::PeerUpgradeRequired => "peer_upgrade_required",
-    }
-}
-pub(super) fn dial_reason(reason: DialFailure) -> &'static str {
-    match reason {
-        DialFailure::TimedOut => "timed_out",
-        DialFailure::TransportFailed => "transport_failed",
     }
 }
 

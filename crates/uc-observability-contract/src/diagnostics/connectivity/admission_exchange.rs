@@ -3,7 +3,11 @@ use super::super::{
     CompletionResult, DiagnosticDomain, DiagnosticErrorType, DiagnosticOperation, DiagnosticRole,
     OperationCompletion,
 };
-use super::{emit_local, millis, record::LocalEvent, ObservationContext};
+use super::{
+    admission_attempt::AdmissionAttemptRef, emit_local, millis, record::LocalEvent,
+    ObservationContext,
+};
+use crate::wire_enum;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::time::Instant;
@@ -24,64 +28,44 @@ impl AdmissionExchangeSide {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AdmissionExchangeStep {
-    PrepareRequest,
-    SendRequest,
-    ReceiveReply,
-    ValidateReply,
-    SendAcknowledgement,
-    FinishSend,
-    WaitPeerFinish,
-    HandleRequest,
-    PrepareReply,
-    SendReply,
-    ReceiveAcknowledgement,
-}
-impl AdmissionExchangeStep {
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            Self::PrepareRequest => "prepare_request",
-            Self::SendRequest => "send_request",
-            Self::ReceiveReply => "receive_reply",
-            Self::ValidateReply => "validate_reply",
-            Self::SendAcknowledgement => "send_acknowledgement",
-            Self::FinishSend => "finish_send",
-            Self::WaitPeerFinish => "wait_peer_finish",
-            Self::HandleRequest => "handle_request",
-            Self::PrepareReply => "prepare_reply",
-            Self::SendReply => "send_reply",
-            Self::ReceiveAcknowledgement => "receive_acknowledgement",
-        }
+wire_enum! {
+    serde
+    #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+    pub enum AdmissionExchangeStep {
+        PrepareRequest => "prepare_request",
+        SendRequest => "send_request",
+        ReceiveReply => "receive_reply",
+        ValidateReply => "validate_reply",
+        SendAcknowledgement => "send_acknowledgement",
+        FinishSend => "finish_send",
+        WaitPeerFinish => "wait_peer_finish",
+        HandleRequest => "handle_request",
+        PrepareReply => "prepare_reply",
+        SendReply => "send_reply",
+        ReceiveAcknowledgement => "receive_acknowledgement",
+        /// Joiner 初次交换：打开流、发出初次 hello、等待 `OpaqueResponse`、发出 `OpaqueFinish`。
+        OpenStream => "open_stream",
+        SendInitialHello => "send_initial_hello",
+        ReceiveOpaqueResponse => "receive_opaque_response",
+        SendOpaqueFinish => "send_opaque_finish",
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AdmissionExchangeFailure {
-    TimedOut,
-    ConnectionClosed,
-    IoFailed,
-    InvalidMessage,
-    AuthenticationRejected,
-    PeerUpgradeRequired,
-    Internal,
-    Interrupted,
+wire_enum! {
+    serde
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum AdmissionExchangeFailure {
+        TimedOut => "timed_out",
+        ConnectionClosed => "connection_closed",
+        IoFailed => "io_failed",
+        InvalidMessage => "invalid_message",
+        AuthenticationRejected => "authentication_rejected",
+        PeerUpgradeRequired => "peer_upgrade_required",
+        Internal => "internal",
+        Interrupted => "interrupted",
+    }
 }
 impl AdmissionExchangeFailure {
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            Self::TimedOut => "timed_out",
-            Self::ConnectionClosed => "connection_closed",
-            Self::IoFailed => "io_failed",
-            Self::InvalidMessage => "invalid_message",
-            Self::AuthenticationRejected => "authentication_rejected",
-            Self::PeerUpgradeRequired => "peer_upgrade_required",
-            Self::Internal => "internal",
-            Self::Interrupted => "interrupted",
-        }
-    }
     fn error_type(self) -> DiagnosticErrorType {
         match self {
             Self::TimedOut => DiagnosticErrorType::Timeout,
@@ -103,7 +87,7 @@ pub struct AdmissionExchangeFailureDetail {
 }
 impl AdmissionExchangeFailureDetail {
     pub(super) fn local_fields(self) -> (&'static str, &'static str) {
-        (self.step.as_str(), self.reason.as_str())
+        (self.step.wire(), self.reason.wire())
     }
 }
 
@@ -113,12 +97,16 @@ pub(super) enum AdmissionExchangeEvent {
     Started {
         side: AdmissionExchangeSide,
         step: AdmissionExchangeStep,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt_ref: Option<AdmissionAttemptRef>,
     },
     Finished {
         side: AdmissionExchangeSide,
         step: AdmissionExchangeStep,
         duration_ms: u64,
         failure: Option<AdmissionExchangeFailure>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt_ref: Option<AdmissionAttemptRef>,
     },
 }
 impl AdmissionExchangeEvent {
@@ -138,11 +126,24 @@ impl AdmissionExchangeEvent {
     }
     pub(super) fn fields(&self) -> Map<String, Value> {
         let mut fields = Map::new();
-        let (side, step) = match self {
-            Self::Started { side, step } | Self::Finished { side, step, .. } => (side, step),
+        let (side, step, attempt_ref) = match self {
+            Self::Started {
+                side,
+                step,
+                attempt_ref,
+            }
+            | Self::Finished {
+                side,
+                step,
+                attempt_ref,
+                ..
+            } => (side, step, attempt_ref),
         };
         fields.insert("uc.role".into(), json!(side));
         fields.insert("step".into(), json!(step));
+        if let Some(attempt_ref) = attempt_ref {
+            fields.insert("attempt_ref".into(), json!(attempt_ref));
+        }
         if let Self::Finished {
             duration_ms,
             failure,
@@ -174,6 +175,10 @@ pub struct AdmissionExchangeObservation {
     active: Option<(AdmissionExchangeStep, Instant)>,
     failure: Option<AdmissionExchangeFailureDetail>,
     finished: bool,
+    /// 仅记录步骤：完成记录由调用方自己写，这里不重复结算。
+    steps_only: bool,
+    /// 同一次准入尝试在 joiner 与 sponsor 两端共有的关联引用。
+    attempt: Option<AdmissionAttemptRef>,
 }
 impl AdmissionExchangeObservation {
     pub fn begin(side: AdmissionExchangeSide) -> Self {
@@ -185,7 +190,25 @@ impl AdmissionExchangeObservation {
             active: None,
             failure: None,
             finished: false,
+            steps_only: false,
+            attempt: None,
         }
+    }
+    /// 给本次交换的步骤记录附上准入尝试引用。
+    pub fn with_attempt(mut self, attempt: AdmissionAttemptRef) -> Self {
+        self.attempt = Some(attempt);
+        self
+    }
+    /// 只记录步骤，不写完成记录；用于完成记录已由调用方负责的交换（初次 hello 到 `OpaqueFinish`）。
+    pub fn begin_steps_only(side: AdmissionExchangeSide) -> Self {
+        let mut observation = Self::begin(side);
+        observation.steps_only = true;
+        observation
+    }
+    /// 结束步骤记录；最后一步按已记录的失败结算。
+    pub fn end_steps(mut self) {
+        self.finished = true;
+        self.end_step(self.failure.map(|detail| detail.reason));
     }
     pub fn start_step(&mut self, step: AdmissionExchangeStep) {
         self.end_step(None);
@@ -193,6 +216,7 @@ impl AdmissionExchangeObservation {
         self.emit(AdmissionExchangeEvent::Started {
             side: self.side,
             step,
+            attempt_ref: self.attempt,
         });
     }
     pub fn fail(&mut self, reason: AdmissionExchangeFailure) {
@@ -228,6 +252,7 @@ impl AdmissionExchangeObservation {
                 step,
                 duration_ms: millis(started.elapsed()),
                 failure,
+                attempt_ref: self.attempt,
             });
         }
     }
@@ -238,6 +263,16 @@ impl AdmissionExchangeObservation {
 impl Drop for AdmissionExchangeObservation {
     fn drop(&mut self) {
         if !self.finished {
+            if self.steps_only {
+                // 提前返回的错误已经记下失败原因；没有记录失败才是被取消。
+                let failure = self
+                    .failure
+                    .map_or(AdmissionExchangeFailure::Interrupted, |detail| {
+                        detail.reason
+                    });
+                self.end_step(Some(failure));
+                return;
+            }
             self.end_step(Some(AdmissionExchangeFailure::Interrupted));
             self.span.in_scope(|| {
                 super::super::complete_operation(OperationCompletion::cancelled(

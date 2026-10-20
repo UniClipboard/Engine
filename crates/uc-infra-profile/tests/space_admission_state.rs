@@ -248,44 +248,48 @@ async fn bounded_join_expires_persistently_and_releases_the_slot_for_a_new_join(
 
 #[tokio::test]
 async fn rejected_join_remains_queryable_after_it_becomes_terminal() {
-    let fixture = Fixture::new();
-    let loaded = JoinerStartStatePort::load(&fixture.store).await.unwrap();
-    let (ordinal, snapshot, _, _, token) = loaded.into_parts();
-    JoinerStartStatePort::commit(
-        &fixture.store,
-        token,
-        JoinerStartMutation::new(start_join_transition(0x71, 0x72, ordinal, snapshot), None),
-    )
-    .await
-    .unwrap();
-    let pending = PendingAdmissionRecoveryStatePort::load(
-        &fixture.store,
-        AdmissionRecoveryTrigger::StateChanged,
-        0,
-    )
-    .await
-    .unwrap()
-    .into_pending_admissions();
-    let (joiner, token) = pending.into_iter().next().unwrap().into_parts();
-    let join_id = *joiner.join_id().unwrap().as_bytes();
-    let rejected = joiner
-        .reject_before_authentication(SpaceAdmissionRejectionReason::InvitationUnavailable)
-        .unwrap();
-    PendingAdmissionRecoveryStatePort::commit(&fixture.store, token, rejected)
+    // 拒绝原因经真实存储重新打开后必须原样可查；新增的 sponsor 无应答原因不能退化成其他原因。
+    for reason in [
+        SpaceAdmissionRejectionReason::InvitationUnavailable,
+        SpaceAdmissionRejectionReason::SponsorUnresponsive,
+    ] {
+        let fixture = Fixture::new();
+        let loaded = JoinerStartStatePort::load(&fixture.store).await.unwrap();
+        let (ordinal, snapshot, _, _, token) = loaded.into_parts();
+        JoinerStartStatePort::commit(
+            &fixture.store,
+            token,
+            JoinerStartMutation::new(start_join_transition(0x71, 0x72, ordinal, snapshot), None),
+        )
         .await
         .unwrap();
-
-    let status = LoadCurrentJoinStatusPort::load_current_join(&fixture.reopen())
+        let pending = PendingAdmissionRecoveryStatePort::load(
+            &fixture.store,
+            AdmissionRecoveryTrigger::StateChanged,
+            0,
+        )
         .await
-        .unwrap();
+        .unwrap()
+        .into_pending_admissions();
+        let (joiner, token) = pending.into_iter().next().unwrap().into_parts();
+        let join_id = *joiner.join_id().unwrap().as_bytes();
+        let rejected = joiner.reject_before_authentication(reason).unwrap();
+        PendingAdmissionRecoveryStatePort::commit(&fixture.store, token, rejected)
+            .await
+            .unwrap();
 
-    assert!(matches!(
-        status,
-        Some(uc_application::facade::CurrentJoinStatus::Rejected {
-            join_id: actual_join_id,
-            reason: SpaceAdmissionRejectionReason::InvitationUnavailable,
-        }) if actual_join_id == join_id
-    ));
+        let status = LoadCurrentJoinStatusPort::load_current_join(&fixture.reopen())
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            status,
+            Some(uc_application::facade::CurrentJoinStatus::Rejected {
+                join_id: actual_join_id,
+                reason: actual_reason,
+            }) if actual_join_id == join_id && actual_reason == reason
+        ));
+    }
 }
 
 #[test]

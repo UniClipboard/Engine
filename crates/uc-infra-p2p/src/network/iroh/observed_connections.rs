@@ -1,4 +1,5 @@
 //! 节点拥有的有界连接观察任务；只保留弱连接句柄，不参与连接决策。
+use super::connection_census::ConnectionCensus;
 use futures_util::StreamExt;
 use iroh::endpoint::{AfterHandshakeOutcome, Connection, EndpointHooks, PathEvent, Side};
 use iroh::TransportAddr;
@@ -37,6 +38,7 @@ impl State {
 pub(super) struct ObservedConnections {
     state: Arc<Mutex<State>>,
     recorder: NetworkRecorder,
+    census: ConnectionCensus,
 }
 
 impl std::fmt::Debug for ObservedConnections {
@@ -54,7 +56,12 @@ impl ObservedConnections {
                 failures: Vec::new(),
             })),
             recorder,
+            census: ConnectionCensus::default(),
         }
+    }
+
+    pub(super) fn census(&self) -> &ConnectionCensus {
+        &self.census
     }
 
     pub(super) async fn shutdown(&self, deadline: Option<Instant>) -> Vec<JoinError> {
@@ -97,6 +104,9 @@ impl EndpointHooks for ObservedConnections {
         conn: &'a Connection,
     ) -> impl std::future::Future<Output = AfterHandshakeOutcome> + Send + 'a {
         async move {
+            // 普查与观测记录开关无关：连接数量增长是独立的诊断事实。
+            self.census
+                .register(conn.weak_handle(), *conn.remote_id().as_bytes());
             if !self.recorder.is_enabled() {
                 return AfterHandshakeOutcome::accept();
             }

@@ -107,6 +107,8 @@ pub(super) fn map_reply_wire_error(error: WireError) -> SpaceAdmissionTransportE
     }
 }
 
+/// 会话门关闭连接的关闭码（`session_unavailable` / `session_retired`）：sponsor 当前没有可用会话。
+pub(super) const CLOSE_SESSION_UNAVAILABLE: u32 = 0;
 pub(super) const LEGACY_CLOSE_PROTOCOL: u32 = 0x51;
 pub(super) const CLOSE_AUTHENTICATION: u32 = 0x52;
 pub(super) const CLOSE_BUSY: u32 = 0x53;
@@ -123,7 +125,9 @@ pub(super) fn map_application_close_code(code: u64) -> Option<SpaceAdmissionTran
         code if code == u64::from(CLOSE_AUTHENTICATION) => {
             Some(SpaceAdmissionTransportError::authentication_rejected())
         }
-        code if code == u64::from(CLOSE_BUSY) => Some(SpaceAdmissionTransportError::deferred()),
+        code if code == u64::from(CLOSE_BUSY) || code == u64::from(CLOSE_SESSION_UNAVAILABLE) => {
+            Some(SpaceAdmissionTransportError::deferred())
+        }
         _ => None,
     }
 }
@@ -148,15 +152,7 @@ pub(super) async fn application_close_error(
         .and_then(map_application_close_code)
 }
 
-pub(super) async fn initial_hello_close_error(
-    connection: &iroh::endpoint::Connection,
-) -> Option<SpaceAdmissionTransportError> {
-    application_close_code(connection)
-        .await
-        .and_then(map_initial_hello_close_code)
-}
-
-async fn application_close_code(connection: &iroh::endpoint::Connection) -> Option<u64> {
+pub(super) async fn application_close_code(connection: &iroh::endpoint::Connection) -> Option<u64> {
     let close_reason = match connection.close_reason() {
         Some(reason) => Some(reason),
         None => tokio::time::timeout(Duration::from_millis(100), connection.closed())

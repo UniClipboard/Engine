@@ -161,6 +161,7 @@ handler 创建。强行交给 Engine 会迫使 Core/Application message 增加 c
 宿主先安装运行时，再创建任意 Engine。相同配置重复安装返回复用结果，不同配置明确失败。远程构造或发送失败只使远程能力降级，
 不改变 Engine 启动和业务结果。业务线程只尝试把记录放入有界容量门和官方 batch processor；容量门发生争用或队列满时立即丢弃
 并计数，不等待锁或网络。关闭线程串行封口后再等待后台发送，因此关闭后不会接受新记录。
+本地文件队列的提交门只保证封口与入队的先后，持有者只做不阻塞的入队，所以写入方等待它不会等待磁盘或网络；门的争用不丢记录，只有队列已满或已封口才计入本地丢弃。
 容量门与 exporter wrapper 只统计发送前丢弃总数和最终发送失败，不复制官方批处理、线程或刷新逻辑。发送前丢弃包括格式拒绝、
 锁争用、队列已满和运行时已关闭，首个原因使用不同固定分类记录；累计字段不冒充单独的队列满计数。`health()` 还返回失败批次数
 和本地文件丢弃数；每类首次故障写一条无正文的本地健康记录，且不递归进入远程 exporter。
@@ -170,7 +171,7 @@ handler 创建。强行交给 Engine 会迫使 Core/Application message 增加 c
 直接 Rust、Apple/Android UniFFI 与 HarmonyOS N-API 都公开同一份当前累计健康查询；初始安装结果只表示安装时状态，不能代替
 运行一段时间后的查询。
 
-移动 `suspend` 在 Engine 暂停成功后做有界 flush，`resume` 继续使用同一 provider。单个 Engine shutdown 只 flush；只有宿主确认
+移动 `suspend` 与 Engine shutdown 返回后无论成败都做有界 flush（失败的暂停同样需要把已有记录落盘），`resume` 继续使用同一 provider。单个 Engine shutdown 只 flush；只有宿主确认
 进程最终退出时才 shutdown provider。flush 与 shutdown 通过同一生命周期门串行；调用方截止时间到达后旧操作可在后台收尾，
 但不会与后续刷新或最终关闭重叠。最终关闭先拒绝普通记录，排空期间仍允许固定健康记录，排空完成后再关闭所有输出。只有关闭
 线程未启动或本地清理仍未结束时才能重试；已完成但失败的结果必须原样保留，不能被第二次调用改写成成功。shutdown 后不在同一
@@ -225,8 +226,9 @@ Pending 为 partial，Busy 为 deferred。UpToDate 只产生无关联的 skipped
 不提前查询内部阶段，不改变 ensure_v3 的调用、返回、等待或重试行为。
 
 `ProfileStorageUpgrade` 内部另外向本地日志记录失败诊断：固定的 `upgrade_phase`、`upgrade_action`、
-`error_kind`，以及存在时的 `target_activated`、`io_error_kind`、`io_error_code`。只从错误来源提取系统错误类型和数字码，
-不输出错误正文或路径。该事件使用 Infra 本地 target，不属于 `uc.telemetry`，不进入远程 schema v1；
+`error_kind`，以及存在时的 `target_activated`、`io_error_kind`、`io_error_code`、`sqlite_result`。只从错误来源提取系统错误类型和数字码；
+`sqlite_result` 是 SQLite 主结果码的固定分类（如 `busy`、`locked`、`corrupt`、`not_a_database`、`other`），
+由 `uc_infra_storage::db::connection::sqlite_failure_class` 从 diesel 错误得出。不输出错误正文或路径。该事件使用 Infra 本地 target，不属于 `uc.telemetry`，不进入远程 schema v1；
 Engine 仍只记录完整升级结果，不读取或暴露内部阶段。
 
 升级前备份沿用同一隐私边界，在 Infra 本地日志记录固定的 `backup_action`、`error_kind`，以及存在时的
@@ -291,6 +293,40 @@ Space 的 OPAQUE 认证握手保持原布局；认证后的 Request/Reply 使用
 具体原因同时决定该轮 trace 与完成日志的错误摘要，本地完成记录额外携带失败步骤；保持原有业务返回、
 关闭码、确认、超时和恢复语义。总截止时间到达时结算当前步骤为超时，Future 被丢弃时为中断并结算一次取消，
 进程强制终止不伪造结束。普通模式保留所有步骤，详细模式不改变其结果或可见性。
+
+Joiner 发出初次 hello 后读取 `OpaqueResponse` 失败时，完成记录的本地详情为 `error.phase=receive_response`，`error.reason` 取固定值
+`response_timeout`（读响应总截止内无应答）、`stream_reset`（响应流被重置或被对端提前结束）、`connection_lost`（连接在应答前丢失）、
+`decode`（响应帧无法解码）或 `app_close_*`（对端以应用层关闭码关闭，类别为 `session_unavailable`、`authentication`、`busy`、
+`peer_upgrade_required`、`protocol`、`other`，不记录原始数值）。完成记录的 `error.type` 随之为 `timeout`、`channel_closed`、
+`decode_failed`，应用层关闭保持按公开结果得出的类别；其中关闭码 0（会话门的 `session_unavailable` / `session_retired`，sponsor 当前没有可用会话）与 busy 一样映射为延期，不再被当作认证被拒绝；读响应超时（sponsor 收下请求后无应答）的公开结果是独立的 `SponsorUnresponsive`（Engine 的 `JoinSpaceRejectionReasonSummary::SponsorUnresponsive`，两套绑定的同名枚举值），不再是认证被拒绝；它与认证被拒绝一样是终态拒绝，重试策略不变。其余返回给 Application 的公开结果不变。
+
+Joiner 初次交换（hello 到 `OpaqueFinish`）同样记录步骤：`open_stream`、`send_initial_hello`、`receive_opaque_response`、`validate_reply`、`send_opaque_finish`，成功时每步各一条完成记录，失败时停在出问题的那一步并带粗分类 `error.reason`（具体类别见上文完成记录的本地详情）；这些步骤不写第二条完成记录。读响应失败时另取一次 `ExchangeFinished` 网络快照（仍只在详细模式落盘）。
+
+路由器的入站过滤器在 QUIC 握手之前为每次入站尝试留下一条 INFO 模块记录 `connection.incoming.observed at the router filter`，字段只有 `addr_kind`（`ip`、`relay`、`other`）与 `outcome`（`accept`、`retry`，路由器尚未就绪时为 `retry`）；不含地址值、端点标识或中继 URL，记录点由模块日志令牌桶限速。
+
+Sponsor 的准入处理器实现 `on_accepting`，在 QUIC 握手结束时留下一条 INFO 模块记录 `connection.accepting.finished for space admission`：`outcome`（`connected`、`handshake_failed`、`timed_out`）、失败时的 `error_class`（`connection_timed_out`、`connection_error`、`authentication`、`locally_rejected`、`other`）和 `elapsed_ms`。握手失败的连接不会进入 `accept`，此前没有本地痕迹；记录不含对端标识或地址，也不增加握手超时（沿用传输层的空闲超时）。
+
+Sponsor 准入处理器的结局在标准采集模式下就可见：因停止服务关闭连接（`reason = stopping`）、认证被拒绝、对端需升级、对端未确认回复、交换超时，各留下一条 INFO 模块记录并带 `error_type`（既有词表），不再依赖详细窗口。这些记录是本地分支证据，不重复既有的契约 ERROR 记录；记录点由模块日志令牌桶限速。
+
+Sponsor 解析准入凭据（`resolve_initial`、`load_continuation`）经 `runtime.work.started/finished` 计时，步骤为 `sponsor_credential_initial`、`sponsor_credential_continuation`，带 `duration_ms` 与 `uc.outcome`。钥匙串或存储变慢时，这段耗时不再混进 sponsor 的总耗时；失败类别仍由既有的认证完成记录（`CredentialFailure`）承担，这里不重复。
+
+一次准入尝试在 joiner 与 sponsor 两端共用同一个关联引用 `attempt_ref`：对 `admission_id` 做带域名的 SHA-256 并截取 8 字节（16 位小写十六进制，`AdmissionAttemptRef`），两端各自从已有的 `admission_id` 派生，不新增线上字段、也不扩大 Engine 接口。引用只随单次尝试变化，换一次尝试就不同，因此不能用来跨尝试、跨邀请识别设备或空间，也无法还原 `admission_id`；原始 `admission_id` 不进入任何记录。携带引用的记录是两端的 `pairing.exchange.step.*` 步骤记录（含 joiner 的初次交换步骤），以及 sponsor 准入处理器的 INFO 结局记录（认证成功解析到 hello 之前为 `none`）。预先握手阶段（尚无 `admission_id`）的记录不带该引用，由按邀请的带密钥引用（E19）承担。
+
+本机复制与显式发送（`clipboard.copy_and_sync`、`clipboard.send`）的失败完成记录按既有错误类型分类，不再统一记为 `internal`：运行时不可用为 `unavailable`，派送失败为 `delivery_failed`，派送准备被取消记为 `cancelled`（不是失败）。捕获失败的下层来源是未分类的 `anyhow` 链，类别仍为 `internal`；细分需要 Application 先提供类型化的捕获错误。错误来源链原样返回给调用方，记录里不含底层文本。
+
+Blob 拉取失败按既有错误类型落成稳定原因，不再统一记为 `Unknown`，也不再持久化 `to_string()` 文本：传输不可达为 `network_unavailable`，I/O 超时为 `timed_out`，权限不足为 `access_denied`，本地存储不可用或写引用失败为 `storage_unavailable`，解密失败为 `integrity_check_failed`，其余为 `unknown`。目录成员因另一成员失败而未拉取时沿用失败成员的原因类别。失败事件的 `detail` 不再携带自由文本；错误来源链仍原样返回给调用方。
+
+剪贴板接收端在收完内容后会复核该连接是否仍被准入。复核失败不再让这次接收静默结束：它以一条 `clipboard_receive` 失败完成记录收尾，`error.type` 为 `peer_rejected`（连接已不再准入）、`timeout`（复核超过接收期限）或 `unavailable`（其余失败），本地详情阶段为 `admission`，原因 `revoked`、`check_timed_out`、`check_failed`。接收流程不再把结果返回给被丢弃的调用点，也不向对端补发确认（连接本身已被关闭）。
+
+离线投递恢复的每一轮（启动扫描 `trigger = startup` 或设备上线 `trigger = peer_online`）以一条 INFO 模块记录 `clipboard delivery recovery round finished` 收尾，字段为 `trigger` 与固定的 `outcome`：`dispatched`、`nothing_to_recover`、`cancelled`、`sync_disabled`、`member_inactive`、`scope_unavailable`、`target_paused`、`target_not_current`、`listing_failed`、`supersede_failed`、`status_changed`、`payload_lost`、`not_resendable`、`delivery_failed`、`delivery_skipped`。此前关闭同步、本机成员失效、成员范围读取失败等提前返回不留任何痕迹；现在每个返回路径都对应一个类别，不记录条目、设备或错误正文。按 Application 约束，这里用完成记录而不是在调用点增加 span；正常“无需恢复”由模块日志令牌桶限速，不单独占据业务主列表。
+
+选择设备组（`query_device_group_choices`、`choose_device_group`）的结果在标准采集模式下就可见，不再只在详细窗口里：查询或选择失败为 WARN（`error_kind`、`error_stage` 沿用既有词表）；宿主传来的议题或选项标识无法解析、或应用层判定选择无效时，为带固定 `reason`（`invalid_issue`、`invalid_choice`、`choice_rejected`）的 WARN；每次选择的结局为一条 INFO `device group choice settled`，`outcome` 为 `completed`、`pending`、`re_pairing_required`、`already_completed`、`state_changed`、`local_device_confirmation_required`。记录不含议题、选项、设备或成员标识，对外错误码与摘要不变。
+
+生成配对邀请失败时，除内部失败与口令变更恢复（已按 ERROR 记录）外的每个类别各留下一条 WARN `issue invitation failed`，`error_kind` 为 `network_not_started`、`no_publishable_address`、`local_publication_failed`、`directory_transport_failed`、`directory_rejected`、`directory_invalid_response`、`reconciliation_in_progress`、`reconciliation_required`、`reconciliation_unavailable`、`address_not_available`、`service_unavailable`，不含地址、来源正文或邀请内容；对外错误码不变。Sponsor 在没有准入注册记录时解析凭据，类别为 `record_missing`（被拒绝），不再折叠成 `unavailable`（可重试的存储故障）：两者的处理责任不同。
+
+会话门拒绝入站连接时（握手后没有可用会话世代、分发器取不到世代，或已接受的连接因世代退出被取消）留下一条 INFO 模块记录 `connection.rejected by the session gate`，字段只有 `reason`（`session_unavailable`、`session_retired`）和 `alpn`（`space_admission`、`presence`、`transfer_progress`、`other` 的固定类别）；不含对端标识、地址或原始 ALPN。记录点沿用模块日志的令牌桶限速，反复重连的对端不会放大日志量。
+
+Joiner 解析短邀请码的 `runtime.work.finished`（`step = joiner_resolve_invitation`）附带来源摘要：`winner`（`cloud`、`mdns`、`full_invitation`；全部失败时省略）、`cloud_outcome` 与 `mdns_outcome`。来源结果是固定类别：`not_run`（完整邀请或仅局域网模式未启动）、`pending`（对方先成功时该来源尚无结果）、`found`、`not_found`、`expired`、`conflict`、`transport_failed`、`service_unavailable`、`invalid_response`、`invalid_invitation`、`local_unavailable`。记录不含邀请码、票据、URL、地址或服务端文本；原先被丢弃的云端错误现在以类别保留，完整错误链仍随返回值传给调用方。
 
 `pairing.exchange.network.snapshot` 只在详细模式落盘，在连接建立后、交换开始及正常返回或失败返回时各取一次，
 不增加后台采样任务。只保留当前选中路径的固定类型、可用时的往返延迟微秒数，以及连接累计丢包和收发数据报数量。
@@ -419,7 +455,7 @@ decorator 负责。Sponsor 在等待执行锁之前确定已认证消息的固�
 JSONL 保留 timestamp、level、target、fields，当前使用 `local_schema_version=2`；旧版文件仍可导出。有效的
 SDK TraceId/SpanId 位于顶层，缺失时省略。远程关闭不影响本地关联能力。普通完成日志退出旧 fmt 文件
 路径；health 仍通过独立接受门与只接受 HEALTH_TARGET 的格式层写入同一队列，在 SDK 收尾和遥测
-抑制时仍能记录健康结果。两个入口的 target 集合互斥，不会重复写入同一记录。
+抑制时仍能记录健康结果。两个入口的 target 集合互斥，不会重复写入同一记录。健康记录经同一份本地关联信封标注，带 `local_schema_version`、`run_id`、`source_commit` 等运行字段，可与同一次运行的其他记录对应。
 
 桌面等已有日志输出的宿主使用 `ProcessObservabilityRuntime::install_with_host_layers` 在一次安装中
 提交标准 tracing Layer。共同运行时将核心记录与宿主记录分组过滤；宿主层不能接收核心合同事件、
@@ -467,7 +503,7 @@ SDK TraceId/SpanId 位于顶层，缺失时省略。远程关闭不影响本地�
 只等待本进程本地队列，返回完成、失败、超时或已关闭；与远程输出无关。报告包含查询时间窗口、
 来源登记/观察/过滤以及按来源的文件写入计数和最后写入时间。计数不是 ZIP 文件内容快照，业务并发
 继续产生记录，产品仍须报告实际读取、缺失和截断；本进程刷新不代表扩展或其他进程已经刷新。
-UniFFI 的导出准备是同步入口，宿主必须使用已有后台执行队列；HarmonyOS 入口异步等待阻塞工作。
+导出报告的 `module_logs`（`emitted`、`rate_limited`、`budget_dropped`、`truncated`、`rejected`、`opaque_error_layers`）同样由两套绑定原样给出，宿主据此判断模块日志是否被限速或预算丢弃。UniFFI 的导出准备是同步入口，宿主必须使用已有后台执行队列；HarmonyOS 入口异步等待阻塞工作。
 
 原生来源通过固定枚举登记，动作开始返回本进程生成且来源绑定的 token。重复、跨来源和未知结束
 均拒绝；最多保留 1024 个在途动作。未登记来源不能被当作零事件的完整覆盖。发现、路径和中转
@@ -494,8 +530,10 @@ UniFFI 的导出准备是同步入口，宿主必须使用已有后台执行队�
 设备侧系统日志、JSONL 和远程层均默认拒绝普通模块 target。历史 local debug 调用点保留在
 `docs/generated/observability-inventory.md`，但不因此获得输出许可。
 
+移动端绑定（UniFFI、N-API）用 `HostDirectories::mobile` 把日志目录固定为 `<private_data_directory>/logs`，不放在缓存目录内：离开空间与清理缓存会整体删除缓存，日志在缓存里就会被一并删掉；该目录也不在升级备份的复制范围。旧布局的 `<cache_directory>/logs` 只在安装观测运行期之前由 `migrate_legacy_mobile_logs` 一次性迁入新目录（同名文件两边都保留，失败时旧文件留在原处并写一条 `legacy_log_migration` 记录），之后宿主应只读新目录。
 本地文件固定为 `engine.YYYY-MM-DD.jsonl`，保留 7 天，总量不超过十进制 100,000,000 bytes。owner 只枚举这一严格命名，启动和
-跨日时按最旧优先清理，写入超额时同样先淘汰最旧的受管文件，不删除当天文件；只有单条记录超过整个配额，或当天文件独占配额时才整条丢弃。目录不可写时降级到其余输出，不影响业务。文件名解析只有诊断合同一份
+跨日时按最旧优先清理，写入超额时同样先淘汰最旧的受管文件，不删除当天文件；只有单条记录超过整个配额，或当天文件独占配额时才整条丢弃。目录不可写时降级到其余输出，不影响业务。写入前核对打开的文件仍是目录里的当天文件：目录或文件在运行期间被删除或替换时，写入端重建目录、重新打开并重新统计配额，记录不会落入已脱离目录的文件；跨日轮转同样先重建缺失的目录。
+本地文件写入失败不是永久状态：文件线程按 100 ms 起、最长 5 s 的退避重试，退避内到达的记录计入 `write_failed` 与丢弃数，显式刷新则立即重试重新打开；任一次成功即恢复。`health().local_file` 随当前状态在 `Ready` 与 `Unavailable` 间变化，状态变化时各写一条固定健康记录 `uc.observability.local_file_failed`（`error.type` 为 `write_failed` 或 `flush_failed`）和 `uc.observability.local_file_recovered`；失败记录本身可能因存储仍不可用而丢失。文件名解析只有诊断合同一份
 事实来源；诊断导出先有界刷新当前文件队列，再识别该严格命名。
 
 Resource 中 namespace、service name 和 schema version 固定；environment、OS 与 app channel 使用固定枚举。app channel 只接受
@@ -513,6 +551,33 @@ metadata 定位并打包维护库提供的 Java 组件，同时附带消费者�
 
 任何输出都不得包含剪贴板内容、密码、密钥、完整令牌、邀请、设备名、地址、文件名、路径、profile/Space/member/device/entry/
 transfer 原始 ID、摘要、原始错误正文或可恢复派生值。
+
+### 第三方网络库独立日志
+
+第三方网络库（当前启用 iroh 1.3.0、noq-proto 1.3.0 的结构化事件；quinn 不在当前特性路径上，未覆盖）的诊断记录走独立的 network 日志层，与业务、模块和宿主日志互不共享 schema、过滤器、目录、队列、writer、预算和计数。进程仍只有一个全局 subscriber。
+
+- **宿主登记**：宿主在 `install_process_observability` 之前调用 `configure_network_log`（UniFFI）/ `configureNetworkLog`（N-API），显式给出进程角色与容量预算（单条、队列、单文件、单次运行、根目录、保留期）。Engine 不提供默认预算；未登记则整条链路不存在，查询返回 `NotConfigured`，不伪装成零事件。安装之后再登记会被拒绝。
+- **输出边界**：只输出固定事件名、枚举、计数、布尔和单次运行内随机的 `peer_ref`/`conn_ref`（有界映射，不可反推）。ALPN 只在位于 `known_network_alpns()` 之内时输出，否则记为 `unrecognized`。地址、端点标识、文件名、路径、令牌一律不进入文件。规则绑定精确版本目录（`iroh-1.3.0`、`noq-proto-1.3.0`）；iroh 固定到 git 提交时（[ADR-034](decisions/034-pin-iroh-to-unreleased-upstream-commit.md)）按 cargo git 签出目录中允许列表内的提交匹配同一逻辑版本；库升级后未经评审的 WARN/ERROR 调用点只输出 `unreviewed_callsite` 和库内 `file:line`。
+- **业务隔离**：建链调用经 `within_network_scope` 驱动（`uc.network` 作用域，显式无 parent）。库内 spawn 的 driver 因此捕获网络作用域而不是调用方的业务 span，不延长业务 span，业务调用树里没有网络库节点。进程没有安装独立日志时，作用域退回完全静默的 dispatch。宿主日志层排除 `uc.network` 目标和网络库来源，第三方原始日志不会进入宿主或远程出口。
+- **文件布局**：`<logs>/network/<role>/<run_id>/`，含 `run.json`（schema、run_id、角色、pid、OS/架构、启动时间、Engine 来源、规则版本、预算）、`lease.lock`（活动写入者租约）和 `network.<YYYYMMDD>.<seq>.jsonl` 分段。分段超限时先淘汰本次运行最旧的分段；根目录超限或过期时，只在 `.cleanup.lock` 下回收租约可获取（没有活动写入者）的旧运行目录。
+- **详细模式**：`start_network_capture` 开启当前进程的限时窗口（1–900 秒），重复开启不延长，窗口不跨重启，过期惰性生效。当前不包含 raw/qlog/keylog 采集；是否采集、预算数值、是否与业务详细采集联动属于待用户确认的产品决定，Engine 不预设。
+- **导出**：`prepare_network_log_export` 有界刷新本进程并返回运行目录与文件的大小和 SHA-256。不代表扩展或其他进程已刷新，也不替宿主决定分享渠道。
+- **计数**：accepted、written、policy_filtered、rate_limited、oversized、queue_dropped、closed_dropped、write_failed、rotated_out_files、path_recovered、unreviewed_callsites。没有日志不等于没有收到数据包，判断须结合这些计数。
+- **关闭**：network 关闭与业务关闭预算分离（detached），不占用业务的 shutdown 时限。
+
+已知缺口：通过 `log` crate 发出的第三方事件（如 noq-udp）不匹配 target 过滤；编译期级别裁剪未验证；iOS、Android、Windows 平台未实机运行；宿主侧消费由对应产品线接入。
+
+### 周期资源普查
+
+用于在没有修复、没有重现时也能事后判断“哪一类资源在涨”（Engine #214：uniclipd 匿名内存 20–24 小时涨到约 17 GiB）。三条记录都只含计数、字节数和布尔值，不含任何标识、地址、路径或内容，写入模块日志，周期固定为 5 分钟（代码常量，不是用户设置），首条记录在启动后延迟一段时间才写，短生命周期进程和按行数断言的验收不受影响。
+
+- **进程资源**（`process resource census`，`uc-observability-runtime`，仅 Linux/Android，其他平台不启动、不写记录；仅配置了本地日志目录时启动）：`rss_anon_kb`、`rss_file_kb`、`rss_shmem_kb`、`vm_swap_kb`、`vm_size_kb`、`threads`、`fd_total`、`pss_anon_kb`；glibc 上另有 `heap_in_use_kb`、`heap_free_kb`、`heap_mmap_kb`（运行期用 `dlsym` 解析 `mallinfo2`，需要 glibc 2.33 及以上，musl 无此三项）。读不到的值省略，不写 0。
+- **增长告警**（`process anonymous memory grew beyond the alert threshold`，WARN）：同一个线程在 `rss_anon_kb` 相对最近 60 分钟窗口内的最小值增长不小于 512 MiB 时写一条，之后 60 分钟内不再写；附 `growth_kb`、`window_secs` 和当前进程资源值。窗口样本定长（64 个），所以内存占用不随运行时间增长。阈值与窗口是代码里的起始值：按报告的约 740 MB/h 速率约 1 小时触发，健康 daemon 的约 84 MB 不会触发；更慢的泄漏只能从周期记录的趋势里看出，告警不保证覆盖。
+- **运行期**（`engine runtime census`，`uc-engine`，由受管后台任务登记，随 Engine 关闭停止）：`tokio_workers`、`tokio_alive_tasks`、`tokio_queue_depth`（调度器全局队列深度）、`registered_tasks`（受管任务数）。
+- **网络连接**（`network connection census`，`uc-infra-p2p`，由 `IrohNode` 持有，随节点关闭停止）：`conn_total`、`conn_untracked`（登记表满后未能登记的累计数，非零表示 `conn_total` 低估）、`conn_per_peer_max`、`paths_total`、`paths_max`、`paths_direct`、`paths_relay`。登记表只保存弱连接句柄（不延长连接寿命），容量 4096，与连接观测记录是否开启无关；对端身份只在一次快照内部分组，不进入输出。
+- **网络库规则**：`path.open_deferred`（iroh `remote_state.rs` 的 `scheduling open_path` TRACE 调用点，详细档，无字段，限速）。它的出现频率直接说明连接是否进入了 CID/路径号耗尽的重试分支（#214 的 H1）。规则按固定提交的行号绑定，换提交必须重新核对（见 ADR-034）。
+
+验收限制：这些记录只让问题可被观察，不证明 #214 已修复；固定 iroh 提交能否消除增长是未验证的。记录读取通过 Linux（Fedora aarch64）与 macOS 的单元与安装测试；Linux x86_64、musl、Windows 和移动端只做编译或未执行。
 
 ### 构建来源
 

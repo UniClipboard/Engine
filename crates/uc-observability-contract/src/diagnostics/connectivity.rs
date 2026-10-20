@@ -6,11 +6,15 @@ use std::time::{Duration, Instant};
 
 mod address;
 mod address_record;
+mod admission_attempt;
 mod admission_exchange;
 mod admission_network;
+mod admission_response;
+mod invitation_resolution;
 mod local_identity;
 mod local_work;
 mod maintenance;
+pub use admission_attempt::AdmissionAttemptRef;
 pub use admission_exchange::{
     AdmissionExchangeFailure, AdmissionExchangeFailureDetail, AdmissionExchangeObservation,
     AdmissionExchangeSide, AdmissionExchangeStep,
@@ -18,11 +22,15 @@ pub use admission_exchange::{
 pub use admission_network::{
     record_admission_network_snapshot, AdmissionNetworkPoint, AdmissionNetworkSnapshot,
 };
+pub use admission_response::{
+    complete_admission_response_failure, AdmissionResponseFailure, ApplicationCloseClass,
+};
+pub use invitation_resolution::{InvitationResolution, InvitationSource, InvitationSourceOutcome};
 pub use local_identity::{record_local_identity_changed, LocalIdentityState};
 pub use local_work::{
-    observe_blob_publish_sync_result, observe_local_result, observe_local_sync_result,
-    scope_blob_publish, scope_pairing_work, LocalWorkContext, LocalWorkObservation,
-    LocalWorkOutcome, LocalWorkStep,
+    observe_blob_publish_sync_result, observe_invitation_resolution, observe_local_result,
+    observe_local_sync_result, scope_blob_publish, scope_pairing_work, LocalWorkContext,
+    LocalWorkObservation, LocalWorkOutcome, LocalWorkStep,
 };
 pub use maintenance::{
     record_pending_group_updates, MaintenanceDisposition, MaintenanceObservation,

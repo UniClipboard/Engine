@@ -1,6 +1,6 @@
 //! 认证完成的本地详情：复用一次标准完成事件，来源详情不进入远程属性。
 use super::super::{complete_operation, ObservationContext, OperationCompletion};
-use super::record::{dial_reason, DialFailure};
+use super::record::DialFailure;
 use super::AdmissionExchangeFailureDetail;
 use super::ClipboardReceiveFailure;
 use std::sync::atomic::AtomicBool;
@@ -74,9 +74,9 @@ pub fn complete_admission_authentication_failure(
     ));
 }
 
-struct PendingCompletionDetail {
-    detail: LocalCompletionDetail,
-    consumed: std::sync::atomic::AtomicBool,
+pub(super) struct PendingCompletionDetail {
+    pub(super) detail: LocalCompletionDetail,
+    pub(super) consumed: std::sync::atomic::AtomicBool,
 }
 
 impl CredentialFailure {
@@ -208,6 +208,17 @@ pub fn take_local_completion_detail(
             LocalCompletionDetail::AdmissionConnection(_) => {
                 ("space_admission", "space_admission", "joiner", "deferred")
             }
+            // 对端以 busy 等关闭码应答时公开结果是延期，完成记录不是错误。
+            LocalCompletionDetail::AdmissionResponse(_) => (
+                "space_admission",
+                "space_admission",
+                "joiner",
+                if outcome == "deferred" {
+                    "deferred"
+                } else {
+                    "error"
+                },
+            ),
         };
         if (domain, operation, role, outcome) != expected {
             return None;
@@ -225,6 +236,7 @@ pub enum LocalCompletionDetail {
     ClipboardReceive(ClipboardReceiveFailure),
     Authentication(AuthenticationFailure),
     AdmissionConnection(DialFailure),
+    AdmissionResponse(super::AdmissionResponseFailure),
     GroupUpdate(super::GroupUpdateFailureDetail),
     MembershipHistory(super::MembershipHistoryFailureDetail),
 }
@@ -232,9 +244,10 @@ impl LocalCompletionDetail {
     pub fn local_fields(self) -> (&'static str, &'static str) {
         match self {
             Self::AdmissionExchange(detail) => detail.local_fields(),
-            Self::ClipboardReceive(failure) => failure.local_fields(),
+            Self::ClipboardReceive(failure) => failure.wire(),
             Self::Authentication(failure) => failure.local_fields(),
-            Self::AdmissionConnection(reason) => ("connect", dial_reason(reason)),
+            Self::AdmissionConnection(reason) => ("connect", reason.wire()),
+            Self::AdmissionResponse(failure) => failure.local_fields(),
             Self::GroupUpdate(detail) => (detail.phase.as_str(), detail.reason.as_str()),
             Self::MembershipHistory(detail) => (detail.phase.as_str(), detail.reason.as_str()),
         }

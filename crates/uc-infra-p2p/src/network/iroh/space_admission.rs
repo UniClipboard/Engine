@@ -17,9 +17,24 @@ pub use credential::{
 pub use route::decode_space_admission_continuation_endpoint;
 pub(crate) use route::decode_space_admission_route;
 pub use route::encode_space_admission_route;
+pub(super) use server::observe_space_admission_accepting;
 pub use server::IrohSpaceAdmissionHandler;
 
 pub const SPACE_ADMISSION_ALPN: &[u8] = b"/uniclipboard/space-admission/1";
 
 #[cfg(test)]
 mod tests;
+
+/// 独立网络日志的双进程验收直接驱动准入拨号，不经过需要完整邀请材料的传输入口。
+#[cfg(test)]
+pub(super) async fn dial_for_network_log_e2e(
+    endpoint: &iroh::Endpoint,
+    addr: iroh::EndpointAddr,
+) -> Result<
+    iroh::endpoint::Connection,
+    uc_observability_contract::diagnostics::connectivity::DialFailure,
+> {
+    connection::connect(endpoint, addr)
+        .await
+        .map_err(|error| error.category())
+}

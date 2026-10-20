@@ -81,10 +81,14 @@ try:
     (out / 'fixture.rs').write_text(source)
     (out / 'fixture.toml').write_text(manifest)
     # --exec 内由原生 Python CreateProcess 找 cargo.exe；不是 Bash 的 cargo 替身。
-    child = 'import os,subprocess,sys; assert os.environ.get("UC_CACHE_CONFIG_LOADED")=="1"; subprocess.run(["cargo"]+sys.argv[1:],check=True)'
+    child = ('import os,subprocess,sys; assert os.environ.get("UC_CACHE_CONFIG_LOADED")=="1"; '
+             'expected=os.environ.get("UC_CACHE_EXPECTED_BYPASS"); '
+             'assert not expected or os.environ.get("MBX_BYPASS_LOG")==expected; '
+             'subprocess.run(["cargo"]+sys.argv[1:],check=True)')
     for label, repo, extra in (
         ('cold', 'engine', []), ('warm-desktop', 'desktop', []),
-        ('warm-mobile', 'mobile', []), ('feature', 'mobile', ['--features', 'alternate']),
+        ('warm-mobile', 'mobile', []), ('warm-generated', 'mobile', []),
+        ('warm-caller-bypass', 'mobile', []), ('feature', 'mobile', ['--features', 'alternate']),
         ('profile', 'mobile', ['--release']), ('flags', 'mobile', []),
         ('source', 'mobile', []),
     ):
@@ -97,6 +101,12 @@ try:
         runenv = dict(env, CARGO_TARGET_DIR=str(target), MBX_STATS_REPORT=str(stats),
                       RUSTC_WRAPPER=str(root / 'must-not-exist.exe'),
                       CARGO_BUILD_RUSTC_WRAPPER=str(root / 'must-not-exist.exe'))
+        if label == 'warm-generated':
+            runenv.pop('MBX_STATS_REPORT')
+            runenv['UC_ENGINE_MBX_STATS_DIR'] = str(out / 'sessions')
+        if label == 'warm-caller-bypass':
+            runenv['MBX_BYPASS_LOG'] = str(out / 'caller-bypass.txt')
+            runenv['UC_CACHE_EXPECTED_BYPASS'] = runenv['MBX_BYPASS_LOG']
         if label == 'flags':
             runenv['RUSTFLAGS'] = '--cfg cache_input_change'
         cmd = [bash, wrapper.as_posix(), '--exec', shutil.which('python'),
@@ -105,12 +115,24 @@ try:
         with (out / (label + '.log')).open('w') as log:
             subprocess.run(cmd, cwd=root / repo, env=runenv, check=True,
                            stdout=log, stderr=subprocess.STDOUT, timeout=600)
+        if label == 'warm-generated':
+            reports = list((out / 'sessions').glob('session.*/stats.json'))
+            assert len(reports) == 1
+            stats = reports[0]
+            arguments = stats.parent / 'cargo-args.txt'
+            bypass = stats.parent / 'bypass.txt'
+        else:
+            arguments = stats.with_suffix('.cargo-args.txt')
+            bypass = Path(runenv.get('MBX_BYPASS_LOG', stats.with_suffix('.bypass.txt')))
+        assert arguments.read_text().splitlines() == cmd[2:]
         binary = target / ('release' if label == 'profile' else 'debug') / 'cache-consumer.exe'
         output = subprocess.check_output([str(binary)], text=True).strip()
         assert output.startswith(str(label == 'feature').lower() + ':')
         assert 'debug=' + str(label != 'profile').lower() in output
         assert 'flag=' + str(label == 'flags').lower() in output
         report = json.loads(stats.read_text())
+        if sum(report['bypasses'].values()):
+            assert bypass.exists() and bypass.stat().st_size > 0
         if label.startswith('warm-'):
             assert report['hits'] > 0 and report['restored_output_files'] > 0
         for key in ('downloaded_bytes', 'uploaded_bytes', 'remote_failures', 'background_upload_failures'):

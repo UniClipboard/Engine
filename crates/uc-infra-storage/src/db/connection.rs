@@ -1,6 +1,9 @@
+use std::error::Error;
+use std::iter::successors;
+
 use diesel::connection::SimpleConnection as _;
 use diesel::result::Error as DieselError;
-use diesel::{Connection as _, SqliteConnection};
+use diesel::{Connection as _, ConnectionError, SqliteConnection};
 
 pub type DbConn = diesel::SqliteConnection;
 
@@ -26,6 +29,38 @@ pub fn is_lock_contention(error: &DieselError) -> bool {
     message.contains("database is locked")
         || message.contains("database table is locked")
         || message.contains("database is busy")
+}
+
+/// 来源链上第一个 SQLite 失败的主结果码分类，只供诊断字段使用，不输出 SQLite 正文。
+///
+/// diesel 不暴露结果码，只能按 SQLite 为每个主结果码返回的固定消息识别；无法识别时为 `other`。
+/// 链上没有 SQLite 失败时返回 `None`。
+pub fn sqlite_failure_class(error: &(dyn Error + 'static)) -> Option<&'static str> {
+    successors(Some(error), |&current| current.source()).find_map(|current| {
+        if let Some(DieselError::DatabaseError(_, info)) = current.downcast_ref::<DieselError>() {
+            return Some(classify_sqlite_message(info.message()));
+        }
+        if let Some(ConnectionError::BadConnection(message)) =
+            current.downcast_ref::<ConnectionError>()
+        {
+            return Some(classify_sqlite_message(message));
+        }
+        None
+    })
+}
+
+fn classify_sqlite_message(message: &str) -> &'static str {
+    match message.to_ascii_lowercase().as_str() {
+        "database is locked" => "busy",
+        "database table is locked" => "locked",
+        "database disk image is malformed" => "corrupt",
+        "file is not a database" => "not_a_database",
+        "unable to open database file" => "cannot_open",
+        "disk i/o error" => "io_error",
+        "database or disk is full" => "full",
+        "attempt to write a readonly database" => "read_only",
+        _ => "other",
+    }
 }
 
 #[cfg(test)]

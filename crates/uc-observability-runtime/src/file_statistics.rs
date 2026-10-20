@@ -40,6 +40,12 @@ impl FileStatistics {
     pub(crate) fn source(&self, source: LocalDiagnosticSource) -> &SourceCounters {
         &self.0[source as usize]
     }
+    /// 越界序号归入 `Runtime`，计数不会因调用方失误而丢失。
+    pub(crate) fn source_at(&self, index: usize) -> &SourceCounters {
+        self.0
+            .get(index)
+            .unwrap_or(&self.0[LocalDiagnosticSource::Runtime as usize])
+    }
     pub(crate) fn snapshot(&self) -> Vec<FileSourceCounts> {
         LocalDiagnosticSource::ALL
             .into_iter()

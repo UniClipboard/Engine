@@ -394,6 +394,8 @@ pub struct JoinedSpaceSummary {
 pub enum JoinSpaceRejectionReasonSummary {
     InvitationUnavailable,
     AuthenticationRejected,
+    /// Sponsor 收下初次请求后在截止内没有任何应答；不是认证失败，也不是口令错误。
+    SponsorUnresponsive,
     IdentityConflict,
     BaseHistoryChanged,
     JoinerHistoryAhead,
@@ -656,15 +658,17 @@ pub struct DeviceGroupChoiceOptionSummary {
     pub impact: Option<super::DeviceGroupChoiceImpactSummary>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DeviceGroupChoiceOutcomeSummary {
-    Completed,
-    Pending,
-    RePairingRequired,
-    AlreadyCompleted,
-    StateChanged,
-    LocalDeviceConfirmationRequired,
+uc_observability_contract::wire_enum! {
+    serde
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum DeviceGroupChoiceOutcomeSummary {
+        Completed => "completed",
+        Pending => "pending",
+        RePairingRequired => "re_pairing_required",
+        AlreadyCompleted => "already_completed",
+        StateChanged => "state_changed",
+        LocalDeviceConfirmationRequired => "local_device_confirmation_required",
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

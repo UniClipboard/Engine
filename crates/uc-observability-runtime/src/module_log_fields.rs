@@ -90,6 +90,8 @@ mod tests {
     /// `existing_status` 是文件传输状态、`channel` 是 Direct/Relay/Unknown 的已审定枚举词表。
     const NEWLY_VISIBLE: &[&str] = &[
         "ack",
+        "addr_kind",
+        "attempt_ref",
         "cause",
         "channel",
         "context",
@@ -107,6 +109,7 @@ mod tests {
         "reject_reason",
         "rollback_target",
         "source_class",
+        "sqlite_result",
         "storage_generation",
         "tag_id",
         "task",

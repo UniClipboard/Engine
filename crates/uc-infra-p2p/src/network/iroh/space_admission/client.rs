@@ -1,8 +1,11 @@
 //! Joiner 负责建立初次或恢复连接，并交付已认证交换。
 use super::connection::{connect, open_stream};
 use super::crypto::{calculate_mac, copy_credential, peer_id, random_nonce};
-use super::diagnostics::record_client_completion;
-use super::errors::initial_hello_close_error;
+use super::diagnostics::{
+    client_completion, record_client_completion, record_network_snapshot, response_failure,
+    response_step_failure, wire_failure,
+};
+use super::errors::{application_close_code, map_initial_hello_close_code};
 use super::exchange::EstablishedExchange;
 use super::route::decode_route;
 use async_trait::async_trait;
@@ -21,7 +24,11 @@ use uc_core::membership::{
 use uc_infra_crypto::space_admission_auth::{
     SpaceAdmissionAuth, SpaceAdmissionAuthContext, SpaceAdmissionKe2,
 };
-use uc_observability_contract::diagnostics::connectivity::complete_admission_connection_failure;
+use uc_observability_contract::diagnostics::connectivity::{
+    complete_admission_connection_failure, complete_admission_response_failure,
+    AdmissionAttemptRef, AdmissionExchangeFailure, AdmissionExchangeObservation,
+    AdmissionExchangeSide, AdmissionExchangeStep, AdmissionNetworkPoint, AdmissionResponseFailure,
+};
 use uc_observability_contract::diagnostics::{
     operation_span, DiagnosticDomain, DiagnosticOperation, DiagnosticRole, DiagnosticSpanKind,
     OperationContext,
@@ -58,6 +65,7 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
             kind: DiagnosticSpanKind::Client,
         });
         let mut connection_failure = None;
+        let mut read_failure = None;
         let result = async {
             let route = decode_route(route, true)?;
             let invitation_id = route
@@ -95,7 +103,14 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
                         connection_failure = Some(error.category());
                         SpaceAdmissionTransportError::deferred()
                     })?;
-            let (mut send, mut receive) = open_stream(&connection).await?;
+            let mut progress =
+                AdmissionExchangeObservation::begin_steps_only(AdmissionExchangeSide::Joiner)
+                    .with_attempt(AdmissionAttemptRef::derive(admission_id.as_bytes()));
+            progress.start_step(AdmissionExchangeStep::OpenStream);
+            let (mut send, mut receive) = open_stream(&connection)
+                .await
+                .inspect_err(|_| progress.fail(AdmissionExchangeFailure::ConnectionClosed))?;
+            progress.start_step(AdmissionExchangeStep::SendInitialHello);
             write_typed(
                 &mut send,
                 FrameKind::InitialHello,
@@ -111,27 +126,55 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
                 AUTH_FRAME_LIMIT,
             )
             .await
+            .inspect_err(|error| progress.fail(wire_failure(error)))
             .map_err(SpaceAdmissionTransportError::unavailable_from)?;
+            progress.start_step(AdmissionExchangeStep::ReceiveOpaqueResponse);
             let response: OpaqueResponseV1 =
                 match read_typed(&mut receive, FrameKind::OpaqueResponse, AUTH_FRAME_LIMIT).await {
                     Ok(response) => response,
-                    Err(_) => {
-                        return Err(initial_hello_close_error(&connection)
-                            .await
+                    Err(error) => {
+                        // Classify transport interruption separately from explicit authentication rejection.
+                        let close_code = application_close_code(&connection).await;
+                        let failure = response_failure(&error, close_code);
+                        read_failure = Some(failure);
+                        progress.fail(response_step_failure(failure));
+                        record_network_snapshot(
+                            &connection,
+                            AdmissionExchangeSide::Joiner,
+                            AdmissionNetworkPoint::ExchangeFinished,
+                        );
+                        if failure == AdmissionResponseFailure::ResponseTimeout {
+                            return Err(SpaceAdmissionTransportError::SponsorUnresponsive);
+                        }
+                        if matches!(
+                            failure,
+                            AdmissionResponseFailure::StreamReset
+                                | AdmissionResponseFailure::ConnectionLost
+                        ) {
+                            return Err(SpaceAdmissionTransportError::unavailable_from(error));
+                        }
+                        return Err(close_code
+                            .and_then(map_initial_hello_close_code)
                             .unwrap_or(SpaceAdmissionTransportError::authentication_rejected()));
                     }
                 };
+            progress.start_step(AdmissionExchangeStep::ValidateReply);
             if response.sponsor_peer_id != *remote.as_bytes() {
+                progress.fail(AdmissionExchangeFailure::AuthenticationRejected);
                 return Err(SpaceAdmissionTransportError::authentication_rejected());
             }
             let ke2 = SpaceAdmissionKe2::decode_from_transport(&response.ke2)
+                .inspect_err(|_| progress.fail(AdmissionExchangeFailure::InvalidMessage))
                 .map_err(SpaceAdmissionTransportError::authentication_rejected_from)?;
             let (credential, ke3) = client
                 .finish(&context, ke2)
+                .inspect_err(|_| progress.fail(AdmissionExchangeFailure::AuthenticationRejected))
                 .map_err(SpaceAdmissionTransportError::authentication_rejected_from)?;
             let credential = credential
                 .into_core()
+                .inspect_err(|_| progress.fail(AdmissionExchangeFailure::AuthenticationRejected))
                 .map_err(SpaceAdmissionTransportError::authentication_rejected_from)?;
+            progress.start_step(AdmissionExchangeStep::SendOpaqueFinish);
             write_typed(
                 &mut send,
                 FrameKind::OpaqueFinish,
@@ -141,7 +184,9 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
                 AUTH_FRAME_LIMIT,
             )
             .await
+            .inspect_err(|error| progress.fail(wire_failure(error)))
             .map_err(SpaceAdmissionTransportError::unavailable_from)?;
+            progress.end_steps();
             let newly_established = copy_credential(&credential)?;
             Ok(Box::new(EstablishedExchange::new(
                 connection,
@@ -161,11 +206,21 @@ impl SpaceAdmissionTransportPort for IrohSpaceAdmissionTransport {
                 complete_admission_connection_failure(failure, started.elapsed());
                 return;
             }
-            record_client_completion(
-                DiagnosticOperation::SpaceAdmission,
-                started.elapsed(),
-                result.as_ref().err(),
-            )
+            match read_failure {
+                Some(failure) => complete_admission_response_failure(
+                    failure,
+                    client_completion(
+                        DiagnosticOperation::SpaceAdmission,
+                        started.elapsed(),
+                        result.as_ref().err(),
+                    ),
+                ),
+                None => record_client_completion(
+                    DiagnosticOperation::SpaceAdmission,
+                    started.elapsed(),
+                    result.as_ref().err(),
+                ),
+            }
         });
         result
     }

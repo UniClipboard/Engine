@@ -2,10 +2,10 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use uc_engine::observability::{
-    DeploymentEnvironment, LocalLogConfig, ObservabilityConfig, ObservabilityInstallError,
-    ObservabilityInstallOutcome, ObservabilityRemoteSetupFailure, ObservabilityResource,
-    ObservabilitySetupStatus, ObservabilitySignalResult, OperatingSystem, OtlpHttpConfig,
-    ProcessObservabilityHandle, ProcessObservabilityRuntime, SecretHeaderValue,
+    migrate_legacy_mobile_logs, DeploymentEnvironment, LocalLogConfig, ObservabilityConfig,
+    ObservabilityInstallError, ObservabilityInstallOutcome, ObservabilityRemoteSetupFailure,
+    ObservabilityResource, ObservabilitySetupStatus, ObservabilitySignalResult, OperatingSystem,
+    OtlpHttpConfig, ProcessObservabilityHandle, ProcessObservabilityRuntime, SecretHeaderValue,
 };
 use uc_engine::HostDirectories;
 
@@ -29,9 +29,11 @@ pub(crate) fn install(
     directories: &HostDirectories,
 ) -> Result<BindingObservabilitySetup, BindingError> {
     let config = runtime_config(config, directories)?;
+    let migration = migrate_legacy_mobile_logs(directories);
     let outcome = ProcessObservabilityRuntime::install(config).map_err(map_install_error)?;
     let reused = matches!(outcome, ObservabilityInstallOutcome::Reused(_));
     let handle = outcome.handle();
+    migration.record();
     let health = handle.health();
     let _ = PROCESS_HANDLE.set(handle);
     Ok(BindingObservabilitySetup {
@@ -85,10 +87,8 @@ pub(crate) fn shutdown(
     })
 }
 
-pub(crate) fn schedule_flush_after_success<T, E>(result: &Result<T, E>) {
-    if result.is_err() {
-        return;
-    }
+/// 暂停或关闭调用返回后（无论成败）异步刷新一次：失败的暂停同样需要把已有记录落盘，进程可能随后被系统挂起或终止。
+pub(crate) fn schedule_flush_after_lifecycle() {
     let Some(handle) = PROCESS_HANDLE.get().cloned() else {
         return;
     };
@@ -111,8 +111,11 @@ fn runtime_config(
     )
     // discarded-source[input-validation]: the rejection reason is fully expressed by the target classification
     .map_err(|_| BindingError::ObservabilityConfigInvalid)?;
-    let runtime =
+    let mut runtime =
         ObservabilityConfig::new(resource).with_local_logs(LocalLogConfig::new(directories.logs()));
+    if let Some(network) = crate::network_log::pending_config(directories)? {
+        runtime = runtime.with_network_logs(network);
+    }
     if !config.remote_diagnostics_enabled {
         return Ok(runtime);
     }
@@ -211,11 +214,10 @@ mod tests {
     use uc_engine::{emit_test_diagnostic_completion, TestDiagnosticCompletion};
 
     fn directories() -> HostDirectories {
-        HostDirectories::new(
+        HostDirectories::mobile(
             PathBuf::from("private"),
             PathBuf::from("cache"),
             PathBuf::from("temporary"),
-            PathBuf::from("cache/logs"),
         )
     }
 
@@ -286,11 +288,10 @@ mod tests {
     #[test]
     fn scheduled_flush_keeps_one_host_log_across_suspend_and_resume() {
         let root = tempfile::tempdir().expect("temporary directory");
-        let directories = HostDirectories::new(
+        let directories = HostDirectories::mobile(
             root.path().join("private"),
             root.path().join("cache"),
             root.path().join("temporary"),
-            root.path().join("cache/logs"),
         );
         let mut config = config(false);
         config.collector = None;
@@ -325,13 +326,33 @@ mod tests {
         assert!(!report.other_processes_flushed);
         crate::stop_local_diagnostic_capture(capture.capture_id.expect("id")).expect("stop");
 
+        // 同一记录点连发会被限速；导出报告必须把模块日志的丢弃数交给宿主。
+        for _ in 0..100 {
+            uc_engine::observability::uc_warn!(
+                target: "uc_infra_profile::export_report_counters",
+                error_kind = "burst",
+                "module log counter probe"
+            );
+        }
+        let counted = crate::prepare_local_diagnostic_export(1000).expect("counted report");
+        assert!(
+            counted.module_logs.emitted >= 1,
+            "{:?}",
+            counted.module_logs
+        );
+        assert!(
+            counted.module_logs.rate_limited >= 50,
+            "{:?}",
+            counted.module_logs
+        );
+
         emit_test_diagnostic_completion(TestDiagnosticCompletion::ProfileStorageUpgrade);
-        schedule_flush_after_success(&Ok::<(), ()>(()));
+        schedule_flush_after_lifecycle();
         let first = wait_for_log(&directories, "profile_storage_upgrade");
         assert!(first.contains("profile_storage_upgrade"));
 
         emit_test_diagnostic_completion(TestDiagnosticCompletion::SessionLifecycle);
-        schedule_flush_after_success(&Ok::<(), ()>(()));
+        schedule_flush_after_lifecycle();
         let resumed = wait_for_log(&directories, "session_lifecycle");
         assert!(resumed.contains("profile_storage_upgrade"));
         assert!(resumed.contains("session_lifecycle"));

@@ -416,6 +416,29 @@ async fn authenticated_old_layout_is_persisted_as_an_explicit_upgrade_rejection(
     );
 }
 
+/// Sponsor 无应答是独立的拒绝原因，不能被保存成认证失败（口令错误）。
+#[tokio::test]
+async fn an_unresponsive_sponsor_is_saved_as_its_own_rejection_reason() {
+    let pair = SpaceAdmissionProtocolTestPair::sponsor_unresponsive().await;
+    pair.joiner()
+        .start_join_at(join_input("sponsor-unresponsive"), 1_000)
+        .await
+        .expect("the join request should be saved before recovery");
+
+    let report = pair
+        .joiner()
+        .recover_pending(AdmissionRecoveryTrigger::StateChanged)
+        .await;
+
+    assert_eq!(report.rejected_count, 1);
+    assert_eq!(report.deferred_count, 0);
+    assert_eq!(pair.active_joiner_observation_count(), 0);
+    assert_eq!(
+        pair.take_created_join().rejection_reason(),
+        Some(uc_core::membership::SpaceAdmissionRejectionReason::SponsorUnresponsive)
+    );
+}
+
 #[tokio::test]
 async fn prepared_join_expires_instead_of_reopening_after_its_deadline() {
     let pair = SpaceAdmissionProtocolTestPair::upgrade_once_on_prepared().await;

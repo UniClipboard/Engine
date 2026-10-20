@@ -67,6 +67,9 @@ async fn start(config: EngineConfig, host: HostCapabilities) {
 类型化 I/O 的磁盘空间、权限、资料损坏、来源变化和保护材料不可用分别表达。无法从类型化错误证明的情况保守归类，
 不解析英文错误消息，不把保护材料缺失猜成密码错误。
 既有 SQLite/系统 adapter 丢失具体原因时返回 `StorageUnavailable` 或 `ProtectionUnavailable`，不承诺仅凭此摘要定位所有系统失败。
+最终 V3 generation 的验证连接与运行期连接一样使用 `establish_waiting` 的统一锁等待；超过等待上限的 SQLite 锁争用
+（例如同一 profile 的另一进程正在关闭最后一个 WAL 连接）由 `is_lock_contention` 识别为 `StorageUnavailable`，可重试，
+journal 不前进；完整性、外键、行归属与 schema fingerprint 不符及其他 SQLite 失败仍为 `CorruptData`。
 本批没有启动前密码输入通道，也不提供解锁动作。保护材料恢复需在原环境或既有恢复入口完成后重新启动；
 后续密码能力必须验证哪些材料确实可由密码恢复及密码生命周期，不能删除保护记录或生成替代密钥绕过。
 

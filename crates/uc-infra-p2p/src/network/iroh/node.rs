@@ -232,6 +232,8 @@ pub struct IrohNode {
     ///
     /// [`shutdown`]: IrohNode::shutdown
     net_recovery: Option<tokio::task::JoinHandle<()>>,
+    /// 周期性连接/路径数量普查；节点关闭时 abort。
+    connection_census: Option<tokio::task::JoinHandle<()>>,
     discovery_runtime: DiscoveryRuntime,
     /// Keeps the process-wide single-node reservation until shutdown is
     /// complete. Dropping a partially-built or live node releases it too.
@@ -1571,6 +1573,8 @@ impl IrohNodeBuilder {
             )
         });
 
+        let connection_census = Some(self.connection_observations.census().spawn());
+
         IrohNode {
             session_context: self.session_context,
             router,
@@ -1578,6 +1582,7 @@ impl IrohNodeBuilder {
             session_generation: None,
             connection_observations: self.connection_observations,
             net_recovery,
+            connection_census,
             discovery_runtime: self.discovery_runtime,
             _run_lease: self.run_lease,
         }

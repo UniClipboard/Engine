@@ -8,18 +8,23 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::Layer;
 use uc_observability_contract::diagnostics::connectivity::CONNECTIVITY_TARGET;
 use uc_observability_contract::diagnostics::{
-    HEALTH_TARGET, LOCAL_DIAGNOSTIC_TARGET, TELEMETRY_TARGET,
+    HEALTH_TARGET, LOCAL_DIAGNOSTIC_TARGET, NETWORK_SCOPE_TARGET, TELEMETRY_TARGET,
 };
 
 use crate::config::ObservabilityConfig;
 use crate::filter::local_sink_enabled;
 use crate::local_file::LocalFileRuntime;
 use crate::module_log::{is_engine_source, module_metadata, ModuleLogLayer, ModuleLogStats};
+use crate::network_log::{
+    NetworkCaptureStatus, NetworkLogError, NetworkLogExportReport, NetworkLogRuntime,
+    NetworkLogStatus,
+};
+use crate::process_census::ProcessCensus;
 use crate::remote_health::record_remote_setup_degraded;
 use crate::status::{
     FlushSummary, ObservabilityHealth, SetupStatus, ShutdownSummary, SignalResult,
 };
-use crate::subscriber::{local_health_layer, system_layer};
+use crate::subscriber::{local_health_layer, system_layer, HealthRecording};
 use crate::telemetry::TelemetryRuntime;
 use crate::{
     DetailedCaptureRequest, HostDiagnosticEvent, HostDiagnosticReceipt, HostDiagnosticRecordStatus,
@@ -72,6 +77,12 @@ impl ProcessObservabilityRuntime {
             "diagnostics.run.started",
             serde_json::json!({ "capture_mode": "standard" }),
         );
+        // 周期资源记录只写进本地模块日志；没有本地日志目录时没有读者，不启动线程。
+        if state.local_file.is_some() {
+            if let Some(census) = ProcessCensus::start() {
+                let _ = state.census.set(census);
+            }
+        }
         Ok(InstallOutcome::Installed(ProcessObservabilityHandle {
             state,
         }))
@@ -249,6 +260,38 @@ impl ProcessObservabilityHandle {
             module_logs: self.state.module_log.snapshot(),
         })
     }
+    /// 开启当前进程的限时网络详细采集（1–900 秒）。重复开启不延长；窗口只在内存里，重启不恢复。
+    pub fn start_network_capture(
+        &self,
+        duration: Duration,
+    ) -> Result<NetworkCaptureStatus, NetworkLogError> {
+        self.network()?.start_capture(duration)
+    }
+
+    pub fn stop_network_capture(&self, capture_id: &str) -> Result<(), NetworkLogError> {
+        self.network()?.stop_capture(capture_id)
+    }
+
+    /// 网络日志的状态与计数。未配置时返回 `NotConfigured`，不伪装成零事件。
+    pub fn query_network_log_status(&self) -> Result<NetworkLogStatus, NetworkLogError> {
+        Ok(self.network()?.status())
+    }
+
+    /// 有界刷新本进程的网络日志并列出本次运行的文件；不代表扩展或其他进程已经刷新。
+    pub fn prepare_network_log_export(
+        &self,
+        deadline: Duration,
+    ) -> Result<NetworkLogExportReport, NetworkLogError> {
+        self.network()?.prepare_export(deadline)
+    }
+
+    fn network(&self) -> Result<&Arc<NetworkLogRuntime>, NetworkLogError> {
+        self.state
+            .network
+            .as_ref()
+            .ok_or(NetworkLogError::NotConfigured)
+    }
+
     pub fn health(&self) -> ObservabilityHealth {
         let mut health = self.state.health;
         health.dropped_local_records = self
@@ -256,6 +299,14 @@ impl ProcessObservabilityHandle {
             .local_file
             .as_ref()
             .map_or(0, |local_file| local_file.dropped_records());
+        if self
+            .state
+            .local_file
+            .as_ref()
+            .is_some_and(|local_file| local_file.unavailable())
+        {
+            health.local_file = SetupStatus::Unavailable;
+        }
         let remote = self.state.telemetry.health();
         health.dropped_remote_spans = remote.dropped_spans;
         health.dropped_remote_logs = remote.dropped_logs;
@@ -273,20 +324,31 @@ impl ProcessObservabilityHandle {
         }
         let telemetry = self.state.telemetry.clone();
         let local_file = self.state.local_file.clone();
-        match run_reserved_with_deadline(deadline, Arc::clone(&self.state.lifecycle), move || {
-            let signals = telemetry.force_flush();
-            FlushSummary {
-                traces: signals.traces,
-                logs: combine_local_result(
-                    signals.logs,
-                    local_file.is_none_or(|local_file| local_file.flush(deadline)),
-                ),
-            }
-        }) {
+        let started = Instant::now();
+        let summary = match run_reserved_with_deadline(
+            deadline,
+            Arc::clone(&self.state.lifecycle),
+            move || {
+                let signals = telemetry.force_flush();
+                FlushSummary {
+                    traces: signals.traces,
+                    logs: combine_local_result(
+                        signals.logs,
+                        local_file.is_none_or(|local_file| local_file.flush(deadline)),
+                    ),
+                }
+            },
+        ) {
             DeadlineOutcome::Completed(summary) => summary,
             DeadlineOutcome::TimedOut => FlushSummary::timed_out(),
             DeadlineOutcome::Failed => FlushSummary::failed(),
+        };
+        // 网络日志在业务刷新结束后独立刷新：不占用业务刷新的时限，结果也不进入业务摘要；
+        // 它自己的状态与导出报告说明成败。
+        if let Some(network) = &self.state.network {
+            let _ = network.flush(deadline.saturating_sub(started.elapsed()));
         }
+        summary
     }
 
     pub fn shutdown(&self, deadline: Duration) -> ShutdownSummary {
@@ -300,6 +362,14 @@ impl ProcessObservabilityHandle {
                     .unwrap_or_else(ShutdownSummary::timed_out);
             }
             ShutdownStart::Started => {}
+        }
+        // 网络日志在自己的线程里排空，耗时与结果不占用业务日志的关闭预算。
+        if let Some(network) = &self.state.network {
+            network.shutdown_detached(deadline);
+        }
+        // 资源记录线程只在周期等待中，停止是立即的；先停，避免关闭后继续写记录。
+        if let Some(census) = self.state.census.get() {
+            census.stop();
         }
         self.state.health_accepting.store(true, Ordering::Release);
         self.state.telemetry.recording.finish_run();
@@ -354,6 +424,10 @@ struct RuntimeState {
     lifecycle: Arc<LifecycleGate>,
     health_accepting: Arc<AtomicBool>,
     module_log: Arc<ModuleLogStats>,
+    /// 独立的网络日志；与业务日志互不依赖，没有配置时为空。
+    network: Option<Arc<NetworkLogRuntime>>,
+    /// 进程资源周期记录；安装成功且有本地日志目录时设置，关闭时停止。
+    census: OnceLock<ProcessCensus>,
 }
 
 fn build_runtime(
@@ -361,9 +435,14 @@ fn build_runtime(
     host_layers: Vec<HostLogLayer>,
 ) -> (Arc<RuntimeState>, impl tracing::Subscriber + Send + Sync) {
     let health_accepting = Arc::new(AtomicBool::new(true));
+    let health_recording = HealthRecording::default();
     let mut layers = Vec::new();
     let (local_file_status, local_file) = match config.local_logs.as_ref() {
-        Some(local) => match local_health_layer(&local.directory, Arc::clone(&health_accepting)) {
+        Some(local) => match local_health_layer(
+            &local.directory,
+            Arc::clone(&health_accepting),
+            Arc::clone(&health_recording),
+        ) {
             Ok((layer, local_file)) => {
                 layers.push(layer);
                 (SetupStatus::Ready, Some(local_file))
@@ -374,6 +453,7 @@ fn build_runtime(
     };
 
     let (telemetry, remote_setup) = TelemetryRuntime::new(&config, local_file.clone());
+    let _ = health_recording.set(Arc::clone(&telemetry.recording));
     let telemetry_accepting = telemetry.accepting();
     layers.extend(telemetry.layers());
     layers.push(system_layer());
@@ -408,6 +488,15 @@ fn build_runtime(
             },
         ))));
     }
+    // 线程无法创建时降级为不采集；业务日志与 Engine 启动不受影响。
+    let network = config
+        .network_logs
+        .clone()
+        .and_then(|network_config| NetworkLogRuntime::new(network_config).ok())
+        .map(|(runtime, layer)| {
+            all_layers.push(layer);
+            runtime
+        });
     if !host_layers.is_empty() {
         all_layers.push(Box::new(host_layers.with_filter(
             tracing_subscriber::filter::filter_fn(host_metadata_enabled),
@@ -432,6 +521,8 @@ fn build_runtime(
         lifecycle: Arc::new(LifecycleGate::default()),
         health_accepting,
         module_log,
+        network,
+        census: OnceLock::new(),
     });
     (state, subscriber)
 }
@@ -439,7 +530,11 @@ fn build_runtime(
 fn host_metadata_enabled(metadata: &tracing::Metadata<'_>) -> bool {
     if matches!(
         metadata.target(),
-        TELEMETRY_TARGET | CONNECTIVITY_TARGET | LOCAL_DIAGNOSTIC_TARGET | HEALTH_TARGET
+        TELEMETRY_TARGET
+            | CONNECTIVITY_TARGET
+            | LOCAL_DIAGNOSTIC_TARGET
+            | HEALTH_TARGET
+            | NETWORK_SCOPE_TARGET
     ) {
         return false;
     }

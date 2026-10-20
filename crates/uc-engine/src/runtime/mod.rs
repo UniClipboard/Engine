@@ -1,3 +1,4 @@
+mod census;
 mod dispatch;
 mod host_clipboard;
 pub(crate) mod host_file;
@@ -286,6 +287,7 @@ impl ProductionRuntime {
         .await;
         spawn_network_recovery_events(network_recovery.subscribe(), &task_registry, events.clone())
             .await;
+        census::spawn_runtime_census(&task_registry).await;
         let clipboard_change_runtime = HostClipboardChangeRuntime {
             session_supervisor: Arc::clone(&session_supervisor),
             system_clipboard: Arc::clone(&host_adapters.system_clipboard),

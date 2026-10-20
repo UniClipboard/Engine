@@ -313,6 +313,14 @@ export interface OhFileSourceCounts {
   writeFailedCount: string
   lastWrittenAtMs?: string
 }
+export interface OhModuleLogCounts {
+  emitted: string
+  rateLimited: string
+  budgetDropped: string
+  truncated: string
+  rejected: string
+  opaqueErrorLayers: string
+}
 export interface OhLocalDiagnosticStatus {
   runId: string
   capture: OhLocalCaptureStatus
@@ -334,13 +342,86 @@ export interface OhLocalDiagnosticExportReport {
   completedAtUtc: string
   otherProcessesFlushed: boolean
   files: OhFileSourceCounts[]
+  moduleLogs: OhModuleLogCounts
 }
 export interface OhHostDiagnosticReceipt {
   status: string
   token?: string
 }
 
+export enum OhNetworkProcessRole {
+  Daemon,
+  MobileApp,
+  KeyboardExtension,
+  ShareExtension,
+  BackgroundService,
+}
+export interface OhNetworkLogConfig {
+  role: OhNetworkProcessRole
+  recordBytes: number
+  queueRecords: number
+  fileBytes: string
+  runBytes: string
+  rootBytes: string
+  retentionSeconds: number
+}
+export interface OhNetworkLogCounters {
+  accepted: string
+  written: string
+  policyFiltered: string
+  rateLimited: string
+  oversized: string
+  queueDropped: string
+  closedDropped: string
+  writeFailed: string
+  rotatedOutFiles: string
+  pathRecovered: string
+  unreviewedCallsites: string
+}
+export interface OhNetworkLibraryStatus {
+  library: string
+  versionDir?: string
+  approvedRules: number
+  observedRecords: string
+}
+export interface OhNetworkLogStatus {
+  schemaVersion: number
+  state: string
+  runId: string
+  role: string
+  mode: string
+  detailedRemainingMs?: string
+  counters: OhNetworkLogCounters
+  libraries: OhNetworkLibraryStatus[]
+  sampledAtUtc: string
+}
+export interface OhNetworkCaptureStatus {
+  captureId: string
+  startedAtUtc: string
+  durationMs: string
+  alreadyActive: boolean
+}
+export interface OhNetworkLogFile {
+  name: string
+  bytes: string
+  sha256: string
+}
+export interface OhNetworkLogExportReport {
+  flush: string
+  status: OhNetworkLogStatus
+  requestedAtUtc: string
+  completedAtUtc: string
+  otherProcessesFlushed: boolean
+  runDirectory: string
+  files: OhNetworkLogFile[]
+}
+
 declare const engine: {
+  configureNetworkLog(config: OhNetworkLogConfig): void
+  startNetworkCapture(durationMs: number): OhNetworkCaptureStatus
+  stopNetworkCapture(captureId: string): void
+  queryNetworkLogStatus(): OhNetworkLogStatus
+  prepareNetworkLogExport(deadlineMs: number): Promise<OhNetworkLogExportReport>
   startLocalDiagnosticCapture(durationMs: number): OhLocalCaptureStatus
   stopLocalDiagnosticCapture(captureId: string): string
   queryLocalDiagnosticStatus(): OhLocalDiagnosticStatus
