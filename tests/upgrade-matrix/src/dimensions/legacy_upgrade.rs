@@ -95,6 +95,12 @@ pub(crate) async fn run(
             // 首次会话未保存设置时，重启仍带着非法偏好启动，即已运行过 Engine 的资料再次遇到同一输入。
             let still_present = invalid_preferences_present(&device)?;
             run.fact("invalid-preferences-before-restart", json!(still_present));
+            if !still_present {
+                return Err(failure(
+                    FailureKind::ProductInvariant,
+                    "invalid-preferences-gone-before-restart",
+                ));
+            }
         }
         device.stop(run).await?;
         device.start(run, to).await?;
