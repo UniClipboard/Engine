@@ -290,3 +290,14 @@ reserve tar and AEAD overhead, and keep the existing typed size rejection. No ne
 Write public Engine E2E first: upgraded schema-1 and incomplete schema-2 staging must permit first
 and subsequent startup with original Space/history/config; two sparse 1 GiB blobs must reject export
 without allocating their contents or replacing the destination. Keep existing import/recovery E2E.
+
+
+## PR226 additional CI failure: active log-count fixture (before change)
+
+Run 39619613559 reports 302 disk records versus 301 from the earlier counter snapshot plus legacy.
+The public diagnostic report and later directory read are not atomic while the Engine writes logs.
+An arbitrary tolerance or retry would hide losses. Keep the active snapshot as a lower-bound check;
+then complete public Engine shutdown and public process-observability shutdown before demanding
+exact equality and count growth across leave. Preserve same-instance create after leave and legacy
+migration checks. Change only the existing binding E2E fixture. Retain exact numeric artifacts.
+The detailed pre-change diagnosis and original failure live in the review-repair evidence directory.
