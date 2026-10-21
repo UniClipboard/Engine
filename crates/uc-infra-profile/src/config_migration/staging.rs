@@ -19,7 +19,7 @@
 //!   iroh-identity/*        # 0600 device-identity files; copy into identity dir
 //!   settings.json
 //!   secrets.json           # { "secrets": { "<key>": "<base64>" , ... } }; KEK only
-//!   ui-state/*.json        # optional
+//!   ui-state/<name>        # host-declared configuration files (historical prefix)
 //! pending-import.json      # marker at the data root (sibling of import-staging/)
 //! ```
 //!
@@ -33,6 +33,7 @@ use std::path::{Path, PathBuf};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
+use uc_core::app_dirs::HostConfigurationFiles;
 use uc_core::ports::SecureStoragePort;
 use uc_observability_contract::{error_source::io_error_kind, uc_error, uc_info};
 
@@ -237,8 +238,13 @@ pub const SETTINGS_MEMBER: &str = "settings.json";
 /// Member path of the db snapshot inside the bundle / staging area.
 pub const DB_MEMBER: &str = "db/uniclipboard.db";
 
-/// Prefix for optional UI-state members.
-pub const UI_STATE_PREFIX: &str = "ui-state/";
+/// Prefix for host-declared configuration file members.
+///
+/// The `ui-state/` spelling predates host declarations; it is kept so bundles
+/// exported before declarations (which carried the updater-state files here)
+/// restore through the same mapping. A member `ui-state/<name>` restores to
+/// `<data_root>/<name>` only when the importing host declares `<name>`.
+pub const HOST_CONFIGURATION_PREFIX: &str = "ui-state/";
 
 /// Prefix for iroh device-identity files.
 ///
@@ -263,6 +269,7 @@ pub fn apply_pending_import(
     vault_dir: &Path,
     settings_path: &Path,
     iroh_identity_dir: &Path,
+    host_configuration_files: &HostConfigurationFiles,
     secure_storage: &dyn SecureStoragePort,
 ) -> Result<(), PendingImportError> {
     let layout = StagingLayout::new(app_data_root);
@@ -342,11 +349,7 @@ pub fn apply_pending_import(
     )?;
     copy_dir_members(&staging_dir, IROH_IDENTITY_PREFIX, iroh_identity_dir)?;
     copy_member_if_present(&staging_dir, SETTINGS_MEMBER, settings_path)?;
-    copy_dir_members(
-        &staging_dir,
-        UI_STATE_PREFIX,
-        &app_data_root.join(UI_STATE_PREFIX.trim_end_matches('/')),
-    )?;
+    restore_host_configuration_files(&staging_dir, app_data_root, host_configuration_files)?;
 
     std::fs::remove_dir_all(&staging_dir).map_err(PendingImportError::cleanup_from)?;
     std::fs::remove_file(&marker_path).map_err(PendingImportError::cleanup_from)?;
@@ -416,6 +419,57 @@ fn copy_dir_members(
         std::fs::copy(entry.path(), dest_dir.join(entry.file_name()))
             .map_err(PendingImportError::copy_member_from)?;
     }
+    Ok(())
+}
+
+/// 只把当前宿主声明的 `ui-state/<name>` 放回 `<data_root>/<name>`；配置包里其余成员一律忽略，
+/// 导入的清单不能决定写入位置。每个文件先写数据根内的临时名再改名替换：单文件原子，
+/// 目标若是符号链接则替换链接本身而不写穿。配置包缺少某个声明文件时保留现有文件。
+fn restore_host_configuration_files(
+    staging_dir: &Path,
+    app_data_root: &Path,
+    host_configuration_files: &HostConfigurationFiles,
+) -> Result<(), PendingImportError> {
+    let source_dir = staging_dir.join(HOST_CONFIGURATION_PREFIX.trim_end_matches('/'));
+    let mut restored = 0_usize;
+    for name in host_configuration_files.names() {
+        let source = source_dir.join(name);
+        match std::fs::symlink_metadata(&source) {
+            Ok(metadata) if metadata.file_type().is_file() => {}
+            Ok(_) => return Err(PendingImportError::copy_member()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(PendingImportError::copy_member_from(error)),
+        }
+        std::fs::create_dir_all(app_data_root).map_err(PendingImportError::copy_member_from)?;
+        let temporary = app_data_root.join(format!(".{name}.import-tmp"));
+        match std::fs::remove_file(&temporary) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(PendingImportError::copy_member_from(error)),
+        }
+        std::fs::copy(&source, &temporary).map_err(PendingImportError::copy_member_from)?;
+        std::fs::rename(&temporary, app_data_root.join(name))
+            .map_err(PendingImportError::copy_member_from)?;
+        restored += 1;
+    }
+    let ignored = match std::fs::read_dir(&source_dir) {
+        Ok(entries) => entries
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_none_or(|name| !host_configuration_files.contains(name))
+            })
+            .count(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => return Err(PendingImportError::copy_member_from(error)),
+    };
+    uc_info!(
+        entry_count = restored,
+        dropped_count = ignored,
+        "host configuration files restored from staged import"
+    );
     Ok(())
 }
 
@@ -680,6 +734,7 @@ mod tests {
             &vault_dir,
             &settings_path,
             &identity_dir,
+            &HostConfigurationFiles::default(),
             &MemorySecureStorage::default(),
         )
         .unwrap();

@@ -516,6 +516,9 @@ pub(crate) async fn wire_host_capabilities_with_emitter(
     startup_progress: Arc<StartupProgressStore>,
     profile_key_recovery: Arc<uc_infra_profile::security::ProfileKeyRecoveryStore>,
 ) -> WiringResult<HostWiring> {
+    let host_configuration_files = config
+        .validated_host_configuration_files()
+        .map_err(WiringError::HostConfigurationFiles)?;
     let (directories, secure_storage, mut clipboard, files, analytics) = host.into_parts();
     let secure_storage = adapt_shared_secure_storage(secure_storage);
     let app_data_root = paths.app_data_root_dir.clone();
@@ -534,6 +537,7 @@ pub(crate) async fn wire_host_capabilities_with_emitter(
         Arc::new(ProfileStartupStorage::new(
             paths.clone(),
             Arc::clone(&secure_storage),
+            host_configuration_files.clone(),
         )),
         Arc::new(ProfileLifecycleRepository::new(Arc::clone(&secure_storage))),
         ProfileUpgradeVersions {
@@ -592,6 +596,7 @@ pub(crate) async fn wire_host_capabilities_with_emitter(
         startup_progress,
         profile_key_recovery,
         upgrade_backup_security: upgrade_backup_store,
+        host_configuration_files,
     })
     .await?;
 

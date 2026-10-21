@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use uc_application::deps::{ProfileStartupStorageError, ProfileStartupStoragePort};
-use uc_core::app_dirs::AppPaths;
+use uc_core::app_dirs::{AppPaths, HostConfigurationFiles};
 use uc_core::ports::SecureStoragePort;
 
 use crate::config_migration::staging::apply_pending_import;
@@ -13,13 +13,19 @@ use crate::config_migration::staging::apply_pending_import;
 pub struct ProfileStartupStorage {
     paths: AppPaths,
     secure_storage: Arc<dyn SecureStoragePort>,
+    host_configuration_files: HostConfigurationFiles,
 }
 
 impl ProfileStartupStorage {
-    pub fn new(paths: AppPaths, secure_storage: Arc<dyn SecureStoragePort>) -> Self {
+    pub fn new(
+        paths: AppPaths,
+        secure_storage: Arc<dyn SecureStoragePort>,
+        host_configuration_files: HostConfigurationFiles,
+    ) -> Self {
         Self {
             paths,
             secure_storage,
+            host_configuration_files,
         }
     }
 }
@@ -36,6 +42,7 @@ impl ProfileStartupStoragePort for ProfileStartupStorage {
             &self.paths.vault_dir,
             &self.paths.settings_path,
             &self.paths.iroh_identity_dir(),
+            &self.host_configuration_files,
             self.secure_storage.as_ref(),
         )
         .map_err(storage_error)

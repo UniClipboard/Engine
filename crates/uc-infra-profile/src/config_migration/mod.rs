@@ -180,6 +180,7 @@ mod tests {
             iroh_identity_dir,
             settings_path: data_root.join("settings.json"),
             app_data_root: data_root.clone(),
+            host_configuration_files: uc_core::app_dirs::HostConfigurationFiles::default(),
         };
 
         let adapter = Arc::new(ConfigMigrationAdapter::new(

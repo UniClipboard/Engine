@@ -183,6 +183,7 @@ async fn build_source(passphrase: &Passphrase) -> Source {
         iroh_identity_dir: iroh_identity_dir.clone(),
         settings_path: data_root.join("settings.json"),
         app_data_root: data_root.clone(),
+        host_configuration_files: uc_core::app_dirs::HostConfigurationFiles::default(),
     };
 
     let settings_path = data_root.join("settings.json");
@@ -259,6 +260,7 @@ fn build_target() -> Target {
         iroh_identity_dir: iroh_identity_dir.clone(),
         settings_path: data_root.join("settings.json"),
         app_data_root: data_root.clone(),
+        host_configuration_files: uc_core::app_dirs::HostConfigurationFiles::default(),
     };
 
     let adapter = ConfigMigrationAdapter::new(
@@ -357,6 +359,7 @@ async fn export_stage_apply_round_trip_lands_db_vault_identity_and_kek() {
         &tgt.vault_dir,
         &tgt.settings_path,
         &tgt.iroh_identity_dir,
+        &uc_core::app_dirs::HostConfigurationFiles::default(),
         tgt.core_secure_storage.as_ref(),
     )
     .expect("apply_pending_import should succeed");
