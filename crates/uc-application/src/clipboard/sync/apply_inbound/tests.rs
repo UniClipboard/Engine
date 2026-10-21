@@ -6,6 +6,7 @@ mod generation;
 mod item_results;
 mod lifecycle;
 mod receive_work;
+mod result_query;
 mod retry_material;
 
 use crate::clipboard::sync::apply_inbound::InboundActivationOwner;

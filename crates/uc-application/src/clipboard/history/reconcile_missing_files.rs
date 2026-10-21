@@ -23,12 +23,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 
 use uc_core::ids::{EntryId, RepresentationId};
-use uc_core::ports::blob::BlobTransferPort;
-use uc_core::ports::clipboard::{
-    DeleteClipboardEntryPort, GetClipboardEntryPort, ListRepresentationsForEventPort,
-};
-use uc_core::ports::search::search_index::SearchIndexPort;
-use uc_core::ports::{CacheFsPort, ClipboardEventWriterPort, ClipboardSelectionRepositoryPort};
+use uc_core::ports::CacheFsPort;
 use uc_observability_contract::{
     error_source::io_error_kind, log_fields::log_id, uc_info, uc_warn,
 };
@@ -55,50 +50,23 @@ const ENTRY_LIST_BATCH_SIZE: usize = 1000;
 pub(crate) struct ReconcileMissingFilesUseCase {
     file_cache_dir: PathBuf,
     file_references: Arc<dyn HistoryFileReferencePort>,
-    get_entry: Arc<dyn GetClipboardEntryPort>,
-    delete_entry: Arc<dyn DeleteClipboardEntryPort>,
-    selection_repo: Arc<dyn ClipboardSelectionRepositoryPort>,
-    event_writer: Arc<dyn ClipboardEventWriterPort>,
-    representation_repo: Arc<dyn ListRepresentationsForEventPort>,
+    delete_uc: Arc<DeleteClipboardEntryUseCase>,
     cache_fs: Arc<dyn CacheFsPort>,
-    blob_transfer: Option<Arc<dyn BlobTransferPort>>,
-    search_index: Option<Arc<dyn SearchIndexPort>>,
 }
 
 impl ReconcileMissingFilesUseCase {
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         file_cache_dir: PathBuf,
         file_references: Arc<dyn HistoryFileReferencePort>,
-        get_entry: Arc<dyn GetClipboardEntryPort>,
-        delete_entry: Arc<dyn DeleteClipboardEntryPort>,
-        selection_repo: Arc<dyn ClipboardSelectionRepositoryPort>,
-        event_writer: Arc<dyn ClipboardEventWriterPort>,
-        representation_repo: Arc<dyn ListRepresentationsForEventPort>,
+        delete_uc: Arc<DeleteClipboardEntryUseCase>,
         cache_fs: Arc<dyn CacheFsPort>,
     ) -> Self {
         Self {
             file_cache_dir,
             file_references,
-            get_entry,
-            delete_entry,
-            selection_repo,
-            event_writer,
-            representation_repo,
+            delete_uc,
             cache_fs,
-            blob_transfer: None,
-            search_index: None,
         }
-    }
-
-    pub(crate) fn with_blob_transfer(mut self, blob_transfer: Arc<dyn BlobTransferPort>) -> Self {
-        self.blob_transfer = Some(blob_transfer);
-        self
-    }
-
-    pub(crate) fn with_search_index(mut self, search_index: Arc<dyn SearchIndexPort>) -> Self {
-        self.search_index = Some(search_index);
-        self
     }
 
     #[tracing::instrument(name = "usecase.reconcile_missing_files.execute", skip_all)]
@@ -106,21 +74,6 @@ impl ReconcileMissingFilesUseCase {
         if !self.cache_fs.exists(&self.file_cache_dir).await {
             uc_info!("File cache directory does not exist, nothing to reconcile");
             return Ok(ReconcileResult::default());
-        }
-
-        let mut delete_uc = DeleteClipboardEntryUseCase::from_ports(
-            self.get_entry.clone(),
-            self.delete_entry.clone(),
-            self.selection_repo.clone(),
-            self.event_writer.clone(),
-            self.representation_repo.clone(),
-        )
-        .with_file_cache_dir(self.file_cache_dir.clone());
-        if let Some(idx) = self.search_index.clone() {
-            delete_uc = delete_uc.with_search_index(idx);
-        }
-        if let Some(bt) = self.blob_transfer.clone() {
-            delete_uc = delete_uc.with_blob_transfer(bt);
         }
 
         let mut result = ReconcileResult::default();
@@ -161,7 +114,7 @@ impl ReconcileMissingFilesUseCase {
         }
 
         for entry_id in &to_delete {
-            match delete_uc.execute(entry_id).await {
+            match self.delete_uc.execute(entry_id).await {
                 Ok(()) => {
                     result.entries_deleted += 1;
                     uc_info!(

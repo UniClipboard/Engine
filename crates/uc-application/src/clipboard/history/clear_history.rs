@@ -1,13 +1,7 @@
 use anyhow::{Context, Result};
-use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{info_span, Instrument};
-use uc_core::ports::blob::BlobTransferPort;
-use uc_core::ports::clipboard::{
-    DeleteClipboardEntryPort, GetClipboardEntryPort, ListClipboardEntriesPort,
-    ListRepresentationsForEventPort,
-};
-use uc_core::ports::{ClipboardEventWriterPort, ClipboardSelectionRepositoryPort, SearchIndexPort};
+use uc_core::ports::clipboard::ListClipboardEntriesPort;
 use uc_observability_contract::{
     error_source::io_error_kind, log_fields::log_id, uc_info, uc_warn,
 };
@@ -24,53 +18,20 @@ pub(crate) struct ClearHistoryResult {
 /// and per-entry deletion.
 pub(crate) struct ClearClipboardHistoryUseCase {
     list_entries: Arc<dyn ListClipboardEntriesPort>,
-    get_entry: Arc<dyn GetClipboardEntryPort>,
-    delete_entry: Arc<dyn DeleteClipboardEntryPort>,
-    selection_repo: Arc<dyn ClipboardSelectionRepositoryPort>,
-    event_writer: Arc<dyn ClipboardEventWriterPort>,
-    representation_repo: Arc<dyn ListRepresentationsForEventPort>,
-    file_cache_dir: Option<PathBuf>,
-    search_index: Option<Arc<dyn SearchIndexPort>>,
-    blob_transfer: Option<Arc<dyn BlobTransferPort>>,
+    delete_uc: Arc<DeleteClipboardEntryUseCase>,
 }
 
 const BATCH_SIZE: usize = 1000;
 
 impl ClearClipboardHistoryUseCase {
-    pub(crate) fn from_ports(
+    pub(crate) fn new(
         list_entries: Arc<dyn ListClipboardEntriesPort>,
-        get_entry: Arc<dyn GetClipboardEntryPort>,
-        delete_entry: Arc<dyn DeleteClipboardEntryPort>,
-        selection_repo: Arc<dyn ClipboardSelectionRepositoryPort>,
-        event_writer: Arc<dyn ClipboardEventWriterPort>,
-        representation_repo: Arc<dyn ListRepresentationsForEventPort>,
+        delete_uc: Arc<DeleteClipboardEntryUseCase>,
     ) -> Self {
         Self {
             list_entries,
-            get_entry,
-            delete_entry,
-            selection_repo,
-            event_writer,
-            representation_repo,
-            file_cache_dir: None,
-            search_index: None,
-            blob_transfer: None,
+            delete_uc,
         }
-    }
-
-    pub(crate) fn with_file_cache_dir(mut self, dir: PathBuf) -> Self {
-        self.file_cache_dir = Some(dir);
-        self
-    }
-
-    pub(crate) fn with_search_index(mut self, search_index: Arc<dyn SearchIndexPort>) -> Self {
-        self.search_index = Some(search_index);
-        self
-    }
-
-    pub(crate) fn with_blob_transfer(mut self, blob_transfer: Arc<dyn BlobTransferPort>) -> Self {
-        self.blob_transfer = Some(blob_transfer);
-        self
     }
 
     #[tracing::instrument(name = "usecase.clear_clipboard_history.execute", skip_all)]
@@ -93,26 +54,9 @@ impl ClearClipboardHistoryUseCase {
         let mut deleted_count = 0u64;
         let mut failed_entries: Vec<(String, String)> = Vec::new();
 
-        let mut delete_uc = DeleteClipboardEntryUseCase::from_ports(
-            self.get_entry.clone(),
-            self.delete_entry.clone(),
-            self.selection_repo.clone(),
-            self.event_writer.clone(),
-            self.representation_repo.clone(),
-        );
-        if let Some(file_cache_dir) = self.file_cache_dir.clone() {
-            delete_uc = delete_uc.with_file_cache_dir(file_cache_dir);
-        }
-        if let Some(search_index) = self.search_index.clone() {
-            delete_uc = delete_uc.with_search_index(search_index);
-        }
-        if let Some(blob_transfer) = self.blob_transfer.clone() {
-            delete_uc = delete_uc.with_blob_transfer(blob_transfer);
-        }
-
         for entry in &entries {
             let entry_id_str = entry.entry_id.inner().to_string();
-            match delete_uc.execute(&entry.entry_id).await {
+            match self.delete_uc.execute(&entry.entry_id).await {
                 Ok(()) => deleted_count += 1,
                 Err(e) => {
                     uc_warn!(

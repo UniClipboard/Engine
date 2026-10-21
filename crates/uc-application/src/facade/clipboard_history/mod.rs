@@ -1,3 +1,4 @@
+use crate::transfer::receive::work::ReceiveWorkRegistry;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -57,6 +58,7 @@ pub use crate::clipboard::history_tags::{
 /// wiring deps and pass it once to `ClipboardHistoryFacade::new`. The facade
 /// then owns the use cases internally; no per-call gateway adapter is needed.
 pub struct ClipboardHistoryFacadeDeps {
+    pub(crate) receive_work: Arc<ReceiveWorkRegistry>,
     pub file_references: Arc<dyn HistoryFileReferencePort>,
     pub entry_ports: ClipboardEntryPorts,
     pub selection_repo: Arc<dyn ClipboardSelectionRepositoryPort>,
@@ -113,6 +115,7 @@ pub struct ClipboardHistoryFacade {
 impl ClipboardHistoryFacade {
     pub fn new(deps: ClipboardHistoryFacadeDeps) -> Self {
         let ClipboardHistoryFacadeDeps {
+            receive_work,
             file_references,
             entry_ports,
             selection_repo,
@@ -202,7 +205,8 @@ impl ClipboardHistoryFacade {
             event_writer.clone(),
             rep_list_for_event.clone(),
         )
-        .with_receive_state_delete(entry_delete_with_receive_state);
+        .with_receive_state_delete(entry_delete_with_receive_state)
+        .with_receive_work(receive_work);
         if let Some(dir) = file_cache_dir.clone() {
             delete_uc = delete_uc.with_file_cache_dir(dir);
         }
@@ -214,23 +218,7 @@ impl ClipboardHistoryFacade {
         }
         let delete_uc = Arc::new(delete_uc);
 
-        let mut clear_uc = ClearClipboardHistoryUseCase::from_ports(
-            entry_list.clone(),
-            entry_get.clone(),
-            entry_delete.clone(),
-            selection_repo.clone(),
-            event_writer.clone(),
-            rep_list_for_event.clone(),
-        );
-        if let Some(dir) = file_cache_dir.clone() {
-            clear_uc = clear_uc.with_file_cache_dir(dir);
-        }
-        if let Some(idx) = search_index.clone() {
-            clear_uc = clear_uc.with_search_index(idx);
-        }
-        if let Some(bt) = blob_transfer.clone() {
-            clear_uc = clear_uc.with_blob_transfer(bt);
-        }
+        let clear_uc = ClearClipboardHistoryUseCase::new(entry_list.clone(), delete_uc.clone());
 
         // cleanup 只在装配方传入了 file_cache_dir 时才有意义：没有 cache
         // 目录就没有可扫描的文件。retention no longer depends on
@@ -242,24 +230,14 @@ impl ClipboardHistoryFacade {
         let cleanup_uc = file_cache_dir.clone().map(|dir| {
             // Clone cache_fs here since reconcile (built below) takes ownership
             // of the original. All of cleanup's on-disk work routes through it.
-            let mut uc = CleanupExpiredFilesUseCase::new(
+            CleanupExpiredFilesUseCase::new(
                 settings,
                 dir,
                 entry_list.clone(),
-                entry_get.clone(),
-                entry_delete.clone(),
-                selection_repo.clone(),
-                event_writer.clone(),
+                delete_uc.clone(),
                 rep_list_for_event.clone(),
                 cache_fs.clone(),
-            );
-            if let Some(idx) = search_index.clone() {
-                uc = uc.with_search_index(idx);
-            }
-            if let Some(bt) = blob_transfer.clone() {
-                uc = uc.with_blob_transfer(bt);
-            }
-            uc
+            )
         });
 
         let retention_uc = EnforceRetentionPolicyUseCase::new(
@@ -269,23 +247,7 @@ impl ClipboardHistoryFacade {
         );
 
         let reconcile_uc = file_cache_dir.map(|dir| {
-            let mut uc = ReconcileMissingFilesUseCase::new(
-                dir,
-                file_references,
-                entry_get,
-                entry_delete,
-                selection_repo,
-                event_writer,
-                rep_list_for_event,
-                cache_fs,
-            );
-            if let Some(idx) = search_index {
-                uc = uc.with_search_index(idx);
-            }
-            if let Some(bt) = blob_transfer {
-                uc = uc.with_blob_transfer(bt);
-            }
-            uc
+            ReconcileMissingFilesUseCase::new(dir, file_references, delete_uc.clone(), cache_fs)
         });
 
         Self {

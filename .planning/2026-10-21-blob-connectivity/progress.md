@@ -189,3 +189,12 @@
 - 补充复查识别旧扫描初筛到清理之间的新接收登记竞态，增加按条目清理保护，与新登记在同一锁内互斥，跨异步清理持有；登记冲突保留ReceiveRegistrationError::CleanupInProgress类型和固定分类。内部register消费者统一迁移Result，转换脚本曾生成is_err().is_ok()，在编译前检查发现并修正，未视为通过。当前最终候选Application1182通过／1跳过（3.777秒），Engine公开契约50通过（0.018秒）；上一次1181和workspace1m19只对应增加清理保护之前的候选。
 
 - 清理保护后的最终Application1182通过／1跳过（3.777秒），Engine公开契约50通过（0.018秒），workspace全目标check通过（1m18s）。metadata JSON、fmt、Rust style、repository preflight、官方1369站点清单、变更链接及diff检查通过。手工审查同锁世代封口、旧恢复不可控制新世代、生产共享registry、异步清理保护寿命、typed登记冲突及全部消费者迁移；code-review skill不可用。无新持久格式或Engine内部查询。未执行完整workspace测试／网络／设备矩阵，保留profile基线失败；原始资料、最终结果合并、选择重试与剩余sweep迁移继续。
+
+- 上轮1541a25b实现运行世代／清理保护并验证，归为progress。当前工作区四个用户原有规划目录保留。本轮实际接线来源目录、完整项查询合并和删除封口：新源码最初导入插在模块内文档之前导致fmt／check失败，另有routes.drain借用和旧_source测试字段，均已修复；receive-catalog-check.log保留失败，fixed check通过（20.50秒）。新增集成测试首轮缺ApplyInboundInput两个必填字段，修复后8项执行6通过2通知超时；改为receipt弱持batch和最终事实，receive-catalog-tests-settled.log最终8通过（0.033秒）。中间脚本一次未找到函数文本，只改完删除方法，随后按实际文本完成Batch快照改造，未把部分执行当作完成。
+- Rust style 首轮拒绝两种删除port纯转调，已让各完整入口直接持删除保护到实际结果，共享内部删除当前event的规则，未加豁免或绕过门禁；后续style通过。完整Application、契约和workspace检查正在运行，不提前记录通过。实际RetryEntryReceive与源字段消费仍未实现。
+
+- 首轮完整App1188通过／1跳过（3.782秒）、Engine契约50通过（0.019秒）、workspace全目标check1m17s通过，均属于底层删除装饰器候选。手工复查发现原HistoryDeleteUC在进入装饰器之前读了旧event／文件引用，可能漏清理停止期间新保存的受管文件。因此删除该装饰器，把封口／等待迁入完整DeleteUC最前，并让clear、cleanup、reconcile和retention共用同一Arc；不保留两套删除管线。迁移首轮check发现cleanup另有两个readonly表示查询和测试anyhow source引用需保留／修正，失败日志保留。增加真实目录的最新event引用、受管文件删除和用户文件保留检查，当前新候选App1188通过／1跳过（3.885秒），最终契约／workspace门禁仍在执行。
+
+- 最终owner候选App1188通过／1跳过（3.885秒）、Engine50通过（0.019秒）。workspace检查因mbx检测build-script声明输入在编译期间变化而丢弃observability_probe／local_capture_policy编译结果，exit101（receive-catalog-owner-workspace.log）；非Rust诊断错误，不记通过。当前target可用，磁盘889GiB可用，无已知本轮Cargo活动句柄，冻结文件后在相同target／wrapper上原命令重跑，不清缓存。此前删除的adapter路径预测未恢复仅为mbx warning，已记录实际源码删除，不恢复废弃入口。
+
+- 冻结源码与文档后原target／mbx wrapper的workspace全目标check重跑通过（1m21s），metadata JSON已解析、fmt、Rust style、repository preflight、官方1369站点清单、变更Markdown无新增失效目标及diff检查通过。最终业务源码App1188通过／1跳过（3.885秒）、Engine50通过（0.019秒）。手工审查来源只内存保留／保存释放原包、receipt弱持通知寿命及实际保存证明、原项身份单一来源、删除封旧birth、停止后读取最终event／文件引用、全部维护入口共用一个删除UC、错误来源与用户输出所有权；code-review skill不可用。来源字段仍待真正重试消费，NoEntry来源寿命／容量、清空未枚举pending、删除调用等待退出后的完整责任及无runtime来源重建等缺口均保留。未执行完整workspace测试／网络／设备矩阵，不假报通过；完整目标继续。

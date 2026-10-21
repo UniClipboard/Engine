@@ -167,6 +167,10 @@ impl FileTransferAssembly {
         }
     }
 
+    pub(crate) fn receive_registry(&self) -> Arc<ReceiveWorkRegistry> {
+        self.receive_work.clone()
+    }
+
     pub fn facade(&self) -> Arc<FileTransferFacade> {
         Arc::clone(&self.facade)
     }
@@ -222,6 +226,7 @@ impl FileTransferAssembly {
             Arc::new(ReceiveProgressQuery::new(
                 Arc::clone(&self.directory_receive.entry_progress),
                 Arc::clone(&self.directory_receive.list_attempts),
+                self.receive_work.clone(),
             )),
             cancellation,
         )

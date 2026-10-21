@@ -1,5 +1,6 @@
 //! 接收计划的文件物化、目录发布及本地产物结算。
 
+use super::super::identity::{directory_member_transfer_id, directory_representation_transfer_id};
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1904,37 +1905,6 @@ fn directory_member_transfer_context(
         outbound_target: Some(*from_device),
         batch_position,
         individual_lifecycle: true,
-    }
-}
-
-fn directory_member_transfer_id(
-    receiver_entry_id: &EntryId,
-    attempt_id: Option<&str>,
-    member_index: usize,
-) -> String {
-    match attempt_id {
-        Some(attempt_id) => format!(
-            "{}:attempt:{attempt_id}:member:{member_index}",
-            receiver_entry_id.as_ref()
-        ),
-        None => format!("{}:member:{member_index}", receiver_entry_id.as_ref()),
-    }
-}
-
-fn directory_representation_transfer_id(
-    entry_id: &EntryId,
-    attempt_id: Option<&str>,
-    representation_index: usize,
-) -> String {
-    match attempt_id {
-        Some(attempt) => format!(
-            "{}:attempt:{attempt}:representation:{representation_index}",
-            entry_id.as_ref()
-        ),
-        None => format!(
-            "{}:representation:{representation_index}",
-            entry_id.as_ref()
-        ),
     }
 }
 

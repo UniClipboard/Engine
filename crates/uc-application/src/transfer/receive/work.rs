@@ -1,4 +1,4 @@
-//! 接收动作的实际寿命；只保存内存围栏和完成事实，不代替持久 attempt 权威。
+//! 接收运行世代、实际寿命与同进程来源；持久 attempt 仍是权威。
 
 use super::batch::ReceiveBatch;
 use std::collections::{HashMap, HashSet};
@@ -9,6 +9,9 @@ use tokio_util::sync::CancellationToken;
 use uc_core::error_class::ErrorClass;
 use uc_core::ids::EntryId;
 use uc_observability_contract::wire_enum;
+
+mod catalog;
+pub(crate) use catalog::{PlannedReceiveItem, ReceiveRepresentation, ReceiveSource};
 
 type Completion = Option<Result<(), Arc<ReceiveWorkError>>>;
 type Key = (EntryId, String);
@@ -22,6 +25,9 @@ struct RegistryState {
     generation: CancellationToken,
     active: HashMap<Key, Weak<Progress>>,
     cleaning: HashSet<String>,
+    receipts: HashMap<EntryId, catalog::ReceiveReceipt>,
+    born: Vec<Weak<()>>,
+    retired: HashMap<EntryId, Vec<Weak<()>>>,
 }
 
 impl RegistryState {
@@ -38,6 +44,8 @@ impl RegistryState {
         self.accepting = false;
         self.generation.cancel();
         self.generation = CancellationToken::new();
+        self.receipts.clear();
+        self.retired.clear();
     }
 }
 
@@ -49,12 +57,17 @@ impl Default for ReceiveWorkRegistry {
                 generation: CancellationToken::new(),
                 active: HashMap::new(),
                 cleaning: HashSet::new(),
+                receipts: HashMap::new(),
+                born: Vec::new(),
+                retired: HashMap::new(),
             }),
         }
     }
 }
 
 struct Progress {
+    entry: EntryId,
+    attempt: String,
     cancel: CancellationToken,
     completion: watch::Sender<Completion>,
 }
@@ -65,6 +78,7 @@ pub(crate) struct ReceiveAction {
     registry: Arc<ReceiveWorkRegistry>,
     progress: Mutex<Option<Arc<Progress>>>,
     generation: CancellationToken,
+    birth: Arc<()>,
 }
 
 /// 旧行清理与新接收登记互斥；跨异步清理持有，退出时才释放。
@@ -89,6 +103,8 @@ wire_enum! {
     pub(crate) enum ReceiveRegistrationError: &'static str {
         #[error("receive gate generation is closed")]
         GateClosed => "receive_gate_closed",
+        #[error("receive entry was deleted after this action started")]
+        EntryDeleted => "receive_entry_deleted",
         #[error("receive cleanup is still in progress")]
         CleanupInProgress => "receive_cleanup_in_progress",
     }
@@ -106,11 +122,20 @@ pub(crate) struct StoppedReceive {
 
 impl ReceiveWorkRegistry {
     pub(crate) fn action(self: &Arc<Self>) -> Arc<ReceiveAction> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let birth = Arc::new(());
+        state.born.retain(|birth| birth.strong_count() != 0);
+        state.born.push(Arc::downgrade(&birth));
+        state.retired.retain(|_, births| {
+            births.retain(|birth| birth.strong_count() != 0);
+            !births.is_empty()
+        });
         Arc::new(ReceiveAction {
             batch: Arc::new(ReceiveBatch::default()),
             registry: self.clone(),
             progress: Mutex::new(None),
-            generation: self.generation(),
+            generation: state.generation.clone(),
+            birth,
         })
     }
 
@@ -169,6 +194,54 @@ impl ReceiveWorkRegistry {
         })
     }
 
+    /// 删除先封住全部旧动作并发停止，再等待实际结果；不借用下载许可。
+    pub(crate) async fn delete_scope(
+        self: &Arc<Self>,
+        entry: &EntryId,
+    ) -> anyhow::Result<ReceiveCleanup> {
+        let (guard, waiting) = {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if !state.cleaning.insert(entry.to_string()) {
+                return Err(ReceiveRegistrationError::CleanupInProgress.into());
+            }
+            let births = state.born.clone();
+            state.retired.insert(entry.clone(), births);
+            state.receipts.remove(entry);
+            let waiting = state
+                .active
+                .iter()
+                .filter(|((id, _), _)| id == entry)
+                .filter_map(|(_, progress)| progress.upgrade())
+                .filter_map(|progress| {
+                    if progress.completion.borrow().is_some() {
+                        return None;
+                    }
+                    progress.cancel.cancel();
+                    Some(StoppedReceive {
+                        completion: progress.completion.subscribe(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            (
+                ReceiveCleanup {
+                    registry: self.clone(),
+                    entry: entry.to_string(),
+                },
+                waiting,
+            )
+        };
+        for waiting in waiting {
+            if let Err(source) = waiting.wait().await {
+                if !matches!(source.as_ref(), ReceiveWorkError::Stopped) {
+                    return Err(
+                        anyhow::Error::new(source).context("stop receive before entry deletion")
+                    );
+                }
+            }
+        }
+        Ok(guard)
+    }
+
     pub(crate) fn stop(&self, entry: &EntryId, attempt: &str) -> Option<StoppedReceive> {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let progress = state
@@ -204,10 +277,20 @@ impl ReceiveAction {
         if !state.accepting || self.generation.is_cancelled() {
             return Err(ReceiveRegistrationError::GateClosed);
         }
+        if state.retired.get(entry).is_some_and(|births| {
+            births
+                .iter()
+                .filter_map(Weak::upgrade)
+                .any(|birth| Arc::ptr_eq(&birth, &self.birth))
+        }) {
+            return Err(ReceiveRegistrationError::EntryDeleted);
+        }
         if state.cleaning.contains(entry.as_ref()) {
             return Err(ReceiveRegistrationError::CleanupInProgress);
         }
         let progress = Arc::new(Progress {
+            entry: entry.clone(),
+            attempt: attempt.to_owned(),
             cancel: self.generation.child_token(),
             completion: watch::channel(None).0,
         });
@@ -231,6 +314,7 @@ impl ReceiveAction {
 
     pub(crate) fn finish(&self, result: Result<(), ReceiveWorkError>) {
         self.batch.finish(result.is_ok());
+        self.finish_receipt();
         if let Some(progress) = self
             .progress
             .lock()

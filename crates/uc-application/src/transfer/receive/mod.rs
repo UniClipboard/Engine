@@ -17,3 +17,5 @@ pub(crate) mod work;
 pub(crate) mod batch;
 
 pub(crate) mod query;
+
+mod identity;

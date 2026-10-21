@@ -1,3 +1,4 @@
+use crate::transfer::receive::work::ReceiveWorkRegistry;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -15,6 +16,7 @@ use uc_observability_contract::{
 
 /// Use case for deleting clipboard entries with all associated data.
 pub(crate) struct DeleteClipboardEntryUseCase {
+    receive_work: Option<Arc<ReceiveWorkRegistry>>,
     get_entry: Arc<dyn GetClipboardEntryPort>,
     delete_entry: Arc<dyn DeleteClipboardEntryPort>,
     selection_repo: Arc<dyn ClipboardSelectionRepositoryPort>,
@@ -35,6 +37,7 @@ impl DeleteClipboardEntryUseCase {
         representation_repo: Arc<dyn ListRepresentationsForEventPort>,
     ) -> Self {
         Self {
+            receive_work: None,
             get_entry,
             delete_entry,
             selection_repo,
@@ -45,6 +48,11 @@ impl DeleteClipboardEntryUseCase {
             blob_transfer: None,
             delete_with_receive_state: None,
         }
+    }
+
+    pub(crate) fn with_receive_work(mut self, work: Arc<ReceiveWorkRegistry>) -> Self {
+        self.receive_work = Some(work);
+        self
     }
 
     pub(crate) fn with_file_cache_dir(mut self, dir: PathBuf) -> Self {
@@ -80,17 +88,23 @@ impl DeleteClipboardEntryUseCase {
         fields(entry_id = %entry_id)
     )]
     pub(crate) async fn execute(&self, entry_id: &EntryId) -> Result<()> {
-        let entry = async {
-            self.get_entry
-                .get_entry(entry_id)
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("Clipboard entry not found: {}", entry_id))
-        }
-        .instrument(info_span!(
-            "fetch_entry",
-            entry_id = %entry_id
-        ))
-        .await?;
+        let _receive_scope = match &self.receive_work {
+            Some(work) => Some(work.delete_scope(entry_id).await?),
+            None => None,
+        };
+        let entry = self
+            .get_entry
+            .get_entry(entry_id)
+            .instrument(info_span!("fetch_entry", entry_id = %entry_id))
+            .await?;
+        let Some(entry) = entry else {
+            // 尚未保存的接收也必须封口；完整删除能力会等实际停止并删除期间产生的记录。
+            self.delete_entry
+                .delete_entry(entry_id)
+                .await
+                .context("delete pending clipboard receive")?;
+            return Ok(());
+        };
         let event_id = entry.event_id.clone();
 
         let representations = self
@@ -231,3 +245,6 @@ impl DeleteClipboardEntryUseCase {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

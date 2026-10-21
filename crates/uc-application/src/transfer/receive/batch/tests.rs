@@ -89,7 +89,7 @@ async fn terminal_handoff_waits_for_persistence_and_last_success_never_erases_fa
             .all(|(_, _, status)| matches!(status, OutboundProgressStatus::InProgress)));
         if child_failed {
             let state = batch.0.lock().unwrap();
-            let source = state.items["first"]._source.as_ref().unwrap();
+            let source = state.items["first"].source.as_ref().unwrap();
             assert_eq!(
                 source.downcast_ref::<io::Error>().unwrap().kind(),
                 io::ErrorKind::PermissionDenied

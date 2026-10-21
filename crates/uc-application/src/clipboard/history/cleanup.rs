@@ -42,15 +42,8 @@ use tracing::{info_span, Instrument};
 
 use uc_core::clipboard::PayloadAvailability;
 use uc_core::ids::EntryId;
-use uc_core::ports::blob::BlobTransferPort;
-use uc_core::ports::clipboard::{
-    DeleteClipboardEntryPort, GetClipboardEntryPort, ListClipboardEntriesPort,
-    ListRepresentationsForEventPort,
-};
-use uc_core::ports::search::search_index::SearchIndexPort;
-use uc_core::ports::{
-    CacheFsPort, ClipboardEventWriterPort, ClipboardSelectionRepositoryPort, SettingsPort,
-};
+use uc_core::ports::clipboard::{ListClipboardEntriesPort, ListRepresentationsForEventPort};
+use uc_core::ports::{CacheFsPort, SettingsPort};
 use uc_observability_contract::{
     error_source::io_error_kind, log_fields::log_id, uc_info, uc_warn,
 };
@@ -82,13 +75,8 @@ pub(crate) struct CleanupExpiredFilesUseCase {
     settings: Arc<dyn SettingsPort>,
     file_cache_dir: PathBuf,
     list_entries: Arc<dyn ListClipboardEntriesPort>,
-    get_entry: Arc<dyn GetClipboardEntryPort>,
-    delete_entry: Arc<dyn DeleteClipboardEntryPort>,
-    selection_repo: Arc<dyn ClipboardSelectionRepositoryPort>,
-    event_writer: Arc<dyn ClipboardEventWriterPort>,
+    delete_uc: Arc<DeleteClipboardEntryUseCase>,
     representation_repo: Arc<dyn ListRepresentationsForEventPort>,
-    blob_transfer: Option<Arc<dyn BlobTransferPort>>,
-    search_index: Option<Arc<dyn SearchIndexPort>>,
     /// Filesystem port — every on-disk access this use case makes (the TTL
     /// sweep, orphan/empty-dir removal, and the quota baseline marker) routes
     /// through it rather than `std::fs`, keeping the use case infra-agnostic.
@@ -96,15 +84,11 @@ pub(crate) struct CleanupExpiredFilesUseCase {
 }
 
 impl CleanupExpiredFilesUseCase {
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         settings: Arc<dyn SettingsPort>,
         file_cache_dir: PathBuf,
         list_entries: Arc<dyn ListClipboardEntriesPort>,
-        get_entry: Arc<dyn GetClipboardEntryPort>,
-        delete_entry: Arc<dyn DeleteClipboardEntryPort>,
-        selection_repo: Arc<dyn ClipboardSelectionRepositoryPort>,
-        event_writer: Arc<dyn ClipboardEventWriterPort>,
+        delete_uc: Arc<DeleteClipboardEntryUseCase>,
         representation_repo: Arc<dyn ListRepresentationsForEventPort>,
         cache_fs: Arc<dyn CacheFsPort>,
     ) -> Self {
@@ -112,25 +96,10 @@ impl CleanupExpiredFilesUseCase {
             settings,
             file_cache_dir,
             list_entries,
-            get_entry,
-            delete_entry,
-            selection_repo,
-            event_writer,
+            delete_uc,
             representation_repo,
-            blob_transfer: None,
-            search_index: None,
             cache_fs,
         }
-    }
-
-    pub(crate) fn with_blob_transfer(mut self, blob_transfer: Arc<dyn BlobTransferPort>) -> Self {
-        self.blob_transfer = Some(blob_transfer);
-        self
-    }
-
-    pub(crate) fn with_search_index(mut self, search_index: Arc<dyn SearchIndexPort>) -> Self {
-        self.search_index = Some(search_index);
-        self
     }
 
     #[tracing::instrument(name = "usecase.cleanup_expired_files.execute", skip_all)]
@@ -152,29 +121,11 @@ impl CleanupExpiredFilesUseCase {
 
         let mut result = CleanupResult::default();
 
-        // One entry-aware delete path, shared by both passes. For blob-backed
-        // entries this untags the blob; iroh-blobs GC reclaims the bytes on its
-        // next sweep (see DeleteClipboardEntryUseCase).
-        let mut delete_uc = DeleteClipboardEntryUseCase::from_ports(
-            self.get_entry.clone(),
-            self.delete_entry.clone(),
-            self.selection_repo.clone(),
-            self.event_writer.clone(),
-            self.representation_repo.clone(),
-        )
-        .with_file_cache_dir(self.file_cache_dir.clone());
-        if let Some(idx) = self.search_index.clone() {
-            delete_uc = delete_uc.with_search_index(idx);
-        }
-        if let Some(bt) = self.blob_transfer.clone() {
-            delete_uc = delete_uc.with_blob_transfer(bt);
-        }
-
         // Pass 1: TTL sweep of the on-disk file cache (copied files only).
         // Non-fatal: a file-cache sweep failure must not block the quota pass
         // below, which is the only one that bounds the image-blob store.
         if let Err(e) = self
-            .run_file_cache_ttl(retention_hours, &delete_uc, &mut result)
+            .run_file_cache_ttl(retention_hours, self.delete_uc.as_ref(), &mut result)
             .await
         {
             uc_warn!(
@@ -199,7 +150,7 @@ impl CleanupExpiredFilesUseCase {
         self.run_quota(
             quota_bytes,
             settings.retention_policy.skip_pinned,
-            &delete_uc,
+            self.delete_uc.as_ref(),
             &mut result,
         )
         .await;

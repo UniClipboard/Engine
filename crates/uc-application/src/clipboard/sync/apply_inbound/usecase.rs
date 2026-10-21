@@ -36,7 +36,8 @@ use crate::clipboard::write::{ClipboardWriteIntent, MobileConsumabilityProbe};
 use crate::runtime_lifecycle::LifecycleError;
 use crate::transfer::receive::reconciliation::ReceiveReadinessCoordinator;
 use crate::transfer::receive::work::{
-    ReceiveAction, ReceiveRegistrationError, ReceiveWorkRegistry,
+    ReceiveAction, ReceiveRegistrationError, ReceiveRepresentation, ReceiveSource,
+    ReceiveWorkRegistry,
 };
 
 use crate::clipboard::active::ClipboardSnapshotDeps;
@@ -589,7 +590,9 @@ impl ApplyInboundClipboardUseCase {
         action
             .register(entry_id, &attempt_id)
             .map_err(|error| match error {
-                ReceiveRegistrationError::GateClosed => ApplyInboundError::Stopped,
+                ReceiveRegistrationError::GateClosed | ReceiveRegistrationError::EntryDeleted => {
+                    ApplyInboundError::Stopped
+                }
                 ReceiveRegistrationError::CleanupInProgress => {
                     ApplyInboundError::Internal(SourceError::new(error))
                 }
@@ -1125,6 +1128,24 @@ impl ApplyInboundClipboardUseCase {
         let receive_attempt_id = self
             .begin_receive_attempt(&receiver_entry_id, receive_action)
             .await?;
+        if !blob_refs.is_empty() || file_set_manifest.is_some() {
+            receive_action.retain_source(ReceiveSource {
+                from_device: input.from_device,
+                expected_hash: input.snapshot_hash.clone(),
+                blob_refs: blob_refs.clone(),
+                manifest: file_set_manifest.clone(),
+                original_wire: Some(input.plaintext.clone()),
+                representations: snapshot
+                    .representations
+                    .iter()
+                    .map(|rep| ReceiveRepresentation {
+                        id: rep.id.clone(),
+                        format_id: rep.format_id.clone(),
+                        mime: rep.mime.clone(),
+                    })
+                    .collect(),
+            });
+        }
         self.emit_receive_state(
             &receiver_entry_id,
             receive_attempt_id.as_deref(),
@@ -1603,6 +1624,7 @@ impl ApplyInboundClipboardUseCase {
         if let Some(publication) = publication {
             publication.commit().await;
         }
+        receive_action.persisted(materialize_outcome == MaterializeOutcome::Complete);
         receive_action.batch.settled(match materialize_outcome {
             MaterializeOutcome::Complete => AttemptState::Completed,
             MaterializeOutcome::PartialFailed => AttemptState::Failed,

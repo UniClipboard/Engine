@@ -464,6 +464,7 @@ impl ClipboardAssembly {
         blob_transfer: Option<Arc<dyn BlobTransferPort>>,
     ) -> Arc<ClipboardHistoryFacade> {
         Arc::new(ClipboardHistoryFacade::new(ClipboardHistoryFacadeDeps {
+            receive_work: self.file_transfer.receive_registry(),
             file_references: Arc::clone(&self.deps.clipboard.history_file_references),
             entry_ports: self.deps.clipboard.entry_ports.clone(),
             selection_repo: Arc::clone(&self.deps.clipboard.selection_repo),
