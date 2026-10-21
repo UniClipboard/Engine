@@ -15,6 +15,7 @@ use uc_core::clipboard::{
     FileDisplayMetadataEntry, FileSetMemberKind, FileSetMemberLocation, HashAlgorithm,
     FILE_DISPLAY_METADATA_FORMAT, FILE_DISPLAY_METADATA_MIME, IMAGE_FROM_FILE_FORMAT,
 };
+use uc_core::file_transfer::{FileTransferCancellationReason, OutboundProgressStatus};
 use uc_core::ids::{DeviceId, EntryId, FormatId, RepresentationId};
 use uc_core::ports::atomic_publish::{AtomicPublishPort, PublishError};
 use uc_core::ports::hidden_path::MarkHiddenPort;
@@ -45,6 +46,7 @@ use super::{
     InboundBlobFetcher, InboundBlobMaterializer, InboundFileSetManifest, InboundFileSetMember,
     MaterializeOutcome, MaterializeResult, MissingFileRef, ReceiveWorkPlan,
 };
+use crate::transfer::receive::batch::ReceiveBatch;
 
 /// 判断 fetcher 返回的 anyhow 错误是否来自 `BlobTransferError::Cancelled`。
 /// 仅 `BlobTransferFacade` 这一条生产路径保留 thiserror chain;mock 路径
@@ -562,7 +564,41 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
             attempt_id,
             expected_snapshot_hash,
             cancellation,
+            batch,
         ) = plan.into_parts();
+        let representation_count = blob_refs
+            .iter()
+            .filter(|blob| blob.representation_index.is_some())
+            .count();
+        let (count, total) = if let Some(manifest) = &file_set_manifest {
+            let members = manifest
+                .members
+                .iter()
+                .filter(|member| member.kind != FileSetMemberKind::EmptyDirectory);
+            let mut count = representation_count;
+            let mut total = blob_refs
+                .iter()
+                .filter(|blob| blob.representation_index.is_some())
+                .fold(0u64, |sum, blob| sum.saturating_add(blob.size_bytes));
+            for member in members {
+                count += 1;
+                total = total.saturating_add(
+                    member
+                        .blob_ref_index
+                        .and_then(|i| blob_refs.get(i as usize))
+                        .map_or(0, |blob| blob.size_bytes),
+                );
+            }
+            (count, total)
+        } else {
+            (
+                blob_refs.len(),
+                blob_refs
+                    .iter()
+                    .fold(0u64, |sum, blob| sum.saturating_add(blob.size_bytes)),
+            )
+        };
+        batch.plan(count, total);
         if blob_refs.is_empty() && file_set_manifest.is_none() {
             return Ok(MaterializeResult::complete(snapshot));
         }
@@ -580,9 +616,7 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
             .into_iter()
             .partition(|r| r.representation_index.is_some());
 
-        // Flat payload blobs share one receiver transfer id. BatchPosition lets
-        // the blob facade create one session, reuse it across fetches, and only
-        // settle it after the last blob.
+        // 每项独立结算；BatchPosition 只保留旧兼容接缝的位置，整批通知由接收动作汇总。
         let batch_total = rep_refs.len() + file_refs.len();
         let mut batch_idx = 0usize;
 
@@ -593,12 +627,12 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
         // - `missing_files`:file_refs 阶段被取消的文件元数据,用于:
         //   (a) 在 file-list rep 中以 `uniclip-missing://` URI 占位;
         //   (b) 返回给上层做"是否 partial"判定。
-        // - `partial`: set when cancel or fetch error occurs; remaining blobs
-        //   are marked missing and no further fetches are attempted.
+        // - `partial` 汇总任何缺失项；独立文件失败／单项取消继续，整计划取消才封后续项。
         let mut incomplete_rep_idxs: Vec<usize> = Vec::new();
         let mut missing_files: Vec<MissingFileRef> = Vec::new();
         let mut partial = false;
         let mut partial_outcome = MaterializeOutcome::PartialFailed;
+        let mut item_failed = false;
 
         // 1. Hydrate representation-bound blobs back into the snapshot.
         //
@@ -634,38 +668,17 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                 "materialize: fetching representation-bound blob"
             );
 
-            // transfer_id 用接收端的 receiver_entry_id —— 与 file_refs
-            // 路径保持一致,确保占位卡片 / 进度事件 / 最终 entry 共享同
-            // 一个 ID(协议层 transfer_id == receiver_entry_id)。
-            // `blob_ref.entry_id` 是发送端 id,只用于 iroh tag。
-            // filename: rep-bound blob 没有显式文件名,留空让 receiver
-            // projection 的 filename 字段保持空(dashboard 显示 mime/size
-            // 兜底)。
-            // outbound_*: 反向进度回报上下文 —— transfer_id 用 sender 的
-            // entry_id(V3BlobRef.entry_id),target 用消息来源 device,
-            // 两者让 sender UI 能定位本地 entry 并接收实时字节进度。
-            let transfer_context = match attempt_id.as_deref() {
-                Some(attempt_id) => directory_representation_transfer_context(
-                    &receiver_entry_id,
-                    attempt_id,
-                    loop_idx,
-                    &blob_ref,
-                    &from_device,
-                    position_in_batch(batch_idx, batch_total),
-                ),
-                None => FetchTransferContext {
-                    transfer_id: receiver_entry_id.as_ref().to_string(),
-                    entry_id: receiver_entry_id.as_ref().to_string(),
-                    attempt_id: None,
-                    peer_id: from_device.as_str().to_string(),
-                    total_bytes: Some(advertised_size),
-                    filename: String::new(),
-                    outbound_transfer_id: Some(blob_ref.entry_id.as_ref().to_string()),
-                    outbound_target: Some(from_device),
-                    batch_position: position_in_batch(batch_idx, batch_total),
-                    individual_lifecycle: false,
-                },
-            };
+            // 表示项以原始表示位置区分，通知仍聚合到来源条目。
+            let mut transfer_context = directory_representation_transfer_context(
+                &receiver_entry_id,
+                attempt_id.as_deref(),
+                idx as usize,
+                &blob_ref,
+                &from_device,
+                position_in_batch(batch_idx, batch_total),
+            );
+            transfer_context.batch = Some(batch.clone());
+            let item_id = transfer_context.transfer_id.clone();
             batch_idx += 1;
             let fetched = match self
                 .fetcher
@@ -687,6 +700,14 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                         "materialize: representation-bound blob fetch cancelled, marking partial"
                     );
                     incomplete_rep_idxs.extend(pending_rep_idxs[loop_idx..].iter().copied());
+                    batch.item_result(
+                        &item_id,
+                        0,
+                        OutboundProgressStatus::Cancelled {
+                            reason: FileTransferCancellationReason::LocalUser,
+                        },
+                        Some(e),
+                    );
                     partial = true;
                     partial_outcome = MaterializeOutcome::PartialCancelled;
                     break;
@@ -701,6 +722,8 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                         "materialize: representation-bound blob fetch failed, marking partial"
                     );
                     incomplete_rep_idxs.extend(pending_rep_idxs[loop_idx..].iter().copied());
+                    batch.item_result(&item_id, 0, OutboundProgressStatus::Failed, Some(e));
+                    item_failed = true;
                     partial = true;
                     break;
                 }
@@ -714,6 +737,12 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                 )
             })?;
             let fetched_len = fetched.plaintext.len();
+            batch.item_result(
+                &item_id,
+                fetched_len as u64,
+                OutboundProgressStatus::Completed,
+                None,
+            );
             rep.set_inline_bytes(fetched.plaintext.to_vec())
                 .context("materialize: failed to set inline bytes")?;
             uc_info!(
@@ -726,33 +755,28 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
 
         // Rep-refs stage partial (cancel or error): skip all file_refs fetches,
         // mark them missing, finalize via the partial path.
-        if partial {
-            if file_set_manifest.is_some() {
-                return Err(anyhow!("directory representation blob fetch failed"));
-            }
-            for blob_ref in file_refs.iter() {
-                missing_files.push(MissingFileRef {
-                    filename: blob_ref
-                        .filename
-                        .clone()
-                        .unwrap_or_else(|| format!("blob-{}", blob_ref.entry_id.as_ref())),
-                    size_bytes: blob_ref.size_bytes,
-                });
-            }
-            return Ok(finalize_partial(
-                snapshot,
-                &incomplete_rep_idxs,
-                Vec::new(),
-                missing_files,
-                &from_device,
-                partial_outcome,
-                false,
-                Vec::new(),
-            ));
+        if partial && file_set_manifest.is_some() {
+            return if partial_outcome == MaterializeOutcome::PartialCancelled {
+                Err(BlobTransferError::Cancelled.into())
+            } else {
+                Err(anyhow!("directory representation blob fetch failed"))
+            };
         }
-
         if file_refs.is_empty() && file_set_manifest.is_none() {
-            return Ok(MaterializeResult::complete(snapshot));
+            return if partial {
+                Ok(finalize_partial(
+                    snapshot,
+                    &incomplete_rep_idxs,
+                    Vec::new(),
+                    missing_files,
+                    &from_device,
+                    partial_outcome,
+                    false,
+                    Vec::new(),
+                ))
+            } else {
+                Ok(MaterializeResult::complete(snapshot))
+            };
         }
 
         if let Some(manifest) = file_set_manifest {
@@ -768,12 +792,14 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                     batch_idx,
                     batch_total,
                     &cancellation,
+                    &batch,
                 )
                 .await;
         }
 
         // 2. Free-standing files: existing cache_dir + file-list rewrite path.
         let mut local_paths = Vec::with_capacity(file_refs.len());
+        let mut completed_file_refs = Vec::with_capacity(file_refs.len());
         let mut file_content_digests: Vec<[u8; 32]> = Vec::with_capacity(file_refs.len());
         let mut used_names = HashSet::new();
         let blob_ref_total = file_refs.len();
@@ -803,7 +829,6 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
             let blob_ref = file_refs[idx].clone();
             let entry_id = blob_ref.entry_id.clone();
             let advertised_size = blob_ref.size_bytes;
-            let declared_name = blob_ref.filename.clone();
             uc_debug!(
                 idx = idx,
                 total = blob_ref_total,
@@ -812,38 +837,17 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                 "materialize: fetching blob"
             );
 
-            // transfer_id 用接收端的 entry_id ——
-            // ApplyInbound 已在流程入口预生成,贯穿到 capture 后的 NewContent。
-            // 即便 envelope 含多个 blob_ref,也共享同一 transfer_id:前端按
-            // 累计字节数显示总进度即可。`blob_ref.entry_id` 是发送端 id,
-            // 仅用于 iroh tag,不参与前端关联。
-            // filename: 用 sender 声明的原始文件名(blob_ref.filename),
-            // dashboard 直接显示;真正落盘后的去重文件名由 BlobTransferFacade
-            // 用 target_path 写进 cached_path,两者职责分离。
-            // outbound_*: 反向进度回报。transfer_id 用 sender 的 entry_id
-            // 让 sender UI 定位本地 entry,target 是消息来源 device。
-            let transfer_context = match attempt_id.as_deref() {
-                Some(attempt_id) => directory_member_transfer_context(
-                    &receiver_entry_id,
-                    Some(attempt_id),
-                    idx,
-                    &blob_ref,
-                    &from_device,
-                    position_in_batch(batch_idx, batch_total),
-                ),
-                None => FetchTransferContext {
-                    transfer_id: receiver_entry_id.as_ref().to_string(),
-                    entry_id: receiver_entry_id.as_ref().to_string(),
-                    attempt_id: None,
-                    peer_id: from_device.as_str().to_string(),
-                    total_bytes: Some(advertised_size),
-                    filename: declared_name.clone().unwrap_or_default(),
-                    outbound_transfer_id: Some(blob_ref.entry_id.as_ref().to_string()),
-                    outbound_target: Some(from_device),
-                    batch_position: position_in_batch(batch_idx, batch_total),
-                    individual_lifecycle: false,
-                },
-            };
+            // 项身份绑定接收条目、尝试和原始位置，不以名称或来源摘要去重。
+            let mut transfer_context = directory_member_transfer_context(
+                &receiver_entry_id,
+                attempt_id.as_deref(),
+                idx,
+                &blob_ref,
+                &from_device,
+                position_in_batch(batch_idx, batch_total),
+            );
+            transfer_context.batch = Some(batch.clone());
+            let item_id = transfer_context.transfer_id.clone();
             batch_idx += 1;
 
             // Resolve the destination for this file. When a user save
@@ -919,99 +923,115 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                 }
             }
 
-            let fetched =
-                match async {
-                    if cancellation.is_cancelled() {
-                        return Err(BlobTransferError::Cancelled.into());
-                    }
-                    self.fetcher
-                        .fetch_blob_to_path(FetchBlobToPathCommand {
-                            cancellation: cancellation.clone(),
-                            ticket: blob_ref.ticket,
-                            entry_id: blob_ref.entry_id.clone(),
-                            target_path: path.clone(),
-                            transfer_context: Some(transfer_context),
-                        })
-                        .await
+            let fetched = match async {
+                if cancellation.is_cancelled() {
+                    return Err(BlobTransferError::Cancelled.into());
                 }
-                .await
-                {
-                    Ok(v) => v,
-                    Err(e) if is_cancel_error(&e) => {
-                        // A cancelled fetch never runs the store-export step, so
-                        // a reserved user-dir placeholder stays as a 0-byte file.
-                        // The transfer layer does not remove it (cancel only
-                        // tears down the connection), so we delete it here to
-                        // keep the user's save directory clean. The current +
-                        // file_refs[idx+1..] entries go to missing; break to
-                        // finalize.
-                        if from_reserver {
-                            remove_reserved_placeholder(&path).await;
-                        }
-                        receive_artifacts.pop();
-                        artifact_journaled |= self
-                            .record_receive_artifacts(
-                                &receiver_entry_id,
-                                attempt_id.as_deref(),
-                                &receive_artifacts,
-                            )
-                            .await?;
-                        uc_warn!(
-                            idx = idx,
-                            total = blob_ref_total,
-                            entry_id = log_id(&entry_id),
-                            "materialize: blob fetch cancelled, marking partial"
-                        );
-                        for remaining in &file_refs[idx..] {
-                            missing_files.push(MissingFileRef {
-                                filename: remaining.filename.clone().unwrap_or_else(|| {
-                                    format!("blob-{}", remaining.entry_id.as_ref())
-                                }),
-                                size_bytes: remaining.size_bytes,
-                            });
-                        }
-                        partial = true;
+                self.fetcher
+                    .fetch_blob_to_path(FetchBlobToPathCommand {
+                        cancellation: cancellation.clone(),
+                        ticket: blob_ref.ticket,
+                        entry_id: blob_ref.entry_id.clone(),
+                        target_path: path.clone(),
+                        transfer_context: Some(transfer_context),
+                    })
+                    .await
+            }
+            .await
+            {
+                Ok(v) => v,
+                Err(e) if is_cancel_error(&e) => {
+                    // 只移除本项预留；单项取消继续其余文件，整计划停止才终止循环。
+                    if from_reserver {
+                        remove_reserved_placeholder(&path).await;
+                    }
+                    receive_artifacts.pop();
+                    artifact_journaled |= self
+                        .record_receive_artifacts(
+                            &receiver_entry_id,
+                            attempt_id.as_deref(),
+                            &receive_artifacts,
+                        )
+                        .await?;
+                    uc_warn!(
+                        idx = idx,
+                        total = blob_ref_total,
+                        entry_id = log_id(&entry_id),
+                        "materialize: blob fetch cancelled, marking partial"
+                    );
+                    batch.item_result(
+                        &item_id,
+                        0,
+                        OutboundProgressStatus::Cancelled {
+                            reason: FileTransferCancellationReason::LocalUser,
+                        },
+                        Some(e),
+                    );
+                    let end = if cancellation.is_cancelled() {
+                        file_refs.len()
+                    } else {
+                        idx + 1
+                    };
+                    for remaining in &file_refs[idx..end] {
+                        missing_files.push(MissingFileRef {
+                            filename: remaining
+                                .filename
+                                .clone()
+                                .unwrap_or_else(|| format!("blob-{}", remaining.entry_id.as_ref())),
+                            size_bytes: remaining.size_bytes,
+                        });
+                    }
+                    partial = true;
+                    if !item_failed {
                         partial_outcome = MaterializeOutcome::PartialCancelled;
+                    }
+                    file_idx += 1;
+                    if cancellation.is_cancelled() {
                         break;
                     }
-                    Err(e) => {
-                        // Non-cancel failure (network drop, export error, ...).
-                        // Same reasoning as the cancel arm: remove the reserved
-                        // placeholder / partial file so it does not linger in
-                        // the user's save directory (which retention and entry
-                        // deletion never touch) or block the name for a retry.
-                        if from_reserver {
-                            remove_reserved_placeholder(&path).await;
-                        }
-                        receive_artifacts.pop();
-                        artifact_journaled |= self
-                            .record_receive_artifacts(
-                                &receiver_entry_id,
-                                attempt_id.as_deref(),
-                                &receive_artifacts,
-                            )
-                            .await?;
-                        uc_warn!(
-                            idx = idx,
-                            total = blob_ref_total,
-                            entry_id = log_id(&entry_id),
-                            size_bytes = advertised_size,
-                            error_kind = "blob_fetch",
-                            io_error_kind = io_error_kind(e.as_ref()),
-                            "materialize: blob fetch failed, marking partial"
-                        );
-                        for remaining in &file_refs[idx..] {
-                            missing_files.push(MissingFileRef {
-                                filename: remaining.filename.clone().unwrap_or_else(|| {
-                                    format!("blob-{}", remaining.entry_id.as_ref())
-                                }),
-                                size_bytes: remaining.size_bytes,
-                            });
-                        }
-                        partial = true;
-                        break;
+                    continue;
+                }
+                Err(e) => {
+                    // Non-cancel failure (network drop, export error, ...).
+                    // Same reasoning as the cancel arm: remove the reserved
+                    // placeholder / partial file so it does not linger in
+                    // the user's save directory (which retention and entry
+                    // deletion never touch) or block the name for a retry.
+                    if from_reserver {
+                        remove_reserved_placeholder(&path).await;
                     }
-                };
+                    receive_artifacts.pop();
+                    artifact_journaled |= self
+                        .record_receive_artifacts(
+                            &receiver_entry_id,
+                            attempt_id.as_deref(),
+                            &receive_artifacts,
+                        )
+                        .await?;
+                    uc_warn!(
+                        idx = idx,
+                        total = blob_ref_total,
+                        entry_id = log_id(&entry_id),
+                        size_bytes = advertised_size,
+                        error_kind = "blob_fetch",
+                        io_error_kind = io_error_kind(e.as_ref()),
+                        "materialize: blob fetch failed, marking partial"
+                    );
+                    missing_files.push(MissingFileRef {
+                        filename: blob_ref
+                            .filename
+                            .clone()
+                            .unwrap_or_else(|| format!("blob-{}", blob_ref.entry_id.as_ref())),
+                        size_bytes: blob_ref.size_bytes,
+                    });
+                    batch.item_result(&item_id, 0, OutboundProgressStatus::Failed, Some(e));
+                    item_failed = true;
+                    partial = true;
+                    partial_outcome = MaterializeOutcome::PartialFailed;
+                    file_idx += 1;
+                    continue;
+                }
+            };
 
             uc_info!(
                 idx = idx,
@@ -1020,14 +1040,22 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                 bytes_written = fetched.bytes_written,
                 "materialize: blob cached to local path (streaming)"
             );
+            batch.item_result(
+                &item_id,
+                fetched.bytes_written,
+                OutboundProgressStatus::Completed,
+                None,
+            );
             file_content_digests.push(*fetched.plaintext_hash.as_bytes());
             local_paths.push(path);
+            completed_file_refs.push(file_refs[idx].clone());
             file_idx += 1;
         }
 
+        snapshot.file_content_digests = file_content_digests;
         if partial {
-            // The break collected current + remaining file_refs into
-            // missing_files. Finalize the partial entry.
+            // 只有已完成文件进入本机显示元数据；缺失项独立保留原始资料。
+            rewrite_file_display_metadata(&mut snapshot, &local_paths, &completed_file_refs)?;
             return Ok(finalize_partial(
                 snapshot,
                 &incomplete_rep_idxs,
@@ -1038,10 +1066,6 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                 artifact_journaled,
                 receive_artifacts,
             ));
-        }
-
-        if !file_content_digests.is_empty() {
-            snapshot.file_content_digests = file_content_digests;
         }
 
         let uri_list = local_file_uri_list(&local_paths)?;
@@ -1200,6 +1224,7 @@ impl FileCacheBlobMaterializer {
         mut batch_idx: usize,
         batch_total: usize,
         cancellation: &CancellationToken,
+        batch: &Arc<ReceiveBatch>,
     ) -> Result<MaterializeResult> {
         if attempt_id.is_some() && self.directory_attempts.is_none() {
             return Err(anyhow!(
@@ -1228,6 +1253,7 @@ impl FileCacheBlobMaterializer {
                 &mut batch_idx,
                 batch_total,
                 cancellation,
+                batch,
             )
             .await;
 
@@ -1427,6 +1453,7 @@ impl FileCacheBlobMaterializer {
         batch_idx: &mut usize,
         batch_total: usize,
         cancellation: &CancellationToken,
+        batch: &Arc<ReceiveBatch>,
     ) -> Result<(
         DirectoryPublication,
         BTreeMap<u32, PathBuf>,
@@ -1545,7 +1572,7 @@ impl FileCacheBlobMaterializer {
                     if let Some(parent) = target.parent() {
                         tokio::fs::create_dir_all(parent).await?;
                     }
-                    let context = directory_member_transfer_context(
+                    let mut context = directory_member_transfer_context(
                         receiver_entry_id,
                         attempt_id,
                         member_index,
@@ -1553,6 +1580,8 @@ impl FileCacheBlobMaterializer {
                         from_device,
                         position_in_batch(*batch_idx, batch_total),
                     );
+                    context.batch = Some(batch.clone());
+                    let item_id = context.transfer_id.clone();
                     *batch_idx += 1;
                     let fetched = match self
                         .fetcher
@@ -1604,6 +1633,12 @@ impl FileCacheBlobMaterializer {
                     if member.kind == FileSetMemberKind::Executable {
                         restore_executable_permission(&target).await?;
                     }
+                    batch.item_result(
+                        &item_id,
+                        fetched.bytes_written,
+                        OutboundProgressStatus::Completed,
+                        None,
+                    );
                     member_digests.insert(index as u32, *fetched.plaintext_hash.as_bytes());
                 }
             }
@@ -1848,6 +1883,7 @@ fn directory_member_transfer_context(
     batch_position: BatchPosition,
 ) -> FetchTransferContext {
     FetchTransferContext {
+        batch: None,
         transfer_id: directory_member_transfer_id(receiver_entry_id, attempt_id, member_index),
         entry_id: receiver_entry_id.as_ref().to_owned(),
         attempt_id: attempt_id.map(str::to_owned),
@@ -1877,33 +1913,38 @@ fn directory_member_transfer_id(
 
 fn directory_representation_transfer_id(
     entry_id: &EntryId,
-    attempt_id: &str,
+    attempt_id: Option<&str>,
     representation_index: usize,
 ) -> String {
-    format!(
-        "{}:attempt:{}:representation:{}",
-        entry_id.as_ref(),
-        attempt_id,
-        representation_index
-    )
+    match attempt_id {
+        Some(attempt) => format!(
+            "{}:attempt:{attempt}:representation:{representation_index}",
+            entry_id.as_ref()
+        ),
+        None => format!(
+            "{}:representation:{representation_index}",
+            entry_id.as_ref()
+        ),
+    }
 }
 
 fn directory_representation_transfer_context(
     receiver_entry_id: &EntryId,
-    attempt_id: &str,
+    attempt_id: Option<&str>,
     representation_index: usize,
     blob_ref: &V3BlobRef,
     from_device: &DeviceId,
     batch_position: BatchPosition,
 ) -> FetchTransferContext {
     FetchTransferContext {
+        batch: None,
         transfer_id: directory_representation_transfer_id(
             receiver_entry_id,
             attempt_id,
             representation_index,
         ),
         entry_id: receiver_entry_id.as_ref().to_owned(),
-        attempt_id: Some(attempt_id.to_owned()),
+        attempt_id: attempt_id.map(str::to_owned),
         peer_id: from_device.as_str().to_owned(),
         total_bytes: Some(blob_ref.size_bytes),
         filename: String::new(),

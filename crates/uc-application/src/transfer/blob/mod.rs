@@ -10,7 +10,7 @@
 pub(crate) mod facade;
 mod failure;
 mod fetch_blob;
-mod notifications;
+pub(super) mod notifications;
 mod publish_blob;
 pub(crate) mod transport;
 
@@ -19,7 +19,7 @@ pub(crate) use fetch_blob::{FetchBlobInput, FetchBlobPathInput, FetchBlobUseCase
 pub(crate) use publish_blob::{PublishBlobInput, PublishBlobUseCase};
 
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 #[cfg(test)]
 mod tests {

@@ -66,3 +66,7 @@
 - 正常错误共享不能直接包完整 ApplyInboundError，否则改变原 Display；thiserror transparent 对 anyhow 来源还会跳过其根 IO。共享 lower SourceError 的显式 source 包装保留 root，并只用于已登记计划，无计划的原处理错误保持原对象。完整动作失败继续由取消等待结果传播，不能将 watch 结束当作成功。
 
 - 下一步所需生产重试资料尚未接线：当前 original_blob_indices 只作长度断言，RetryEntryReceive / item_ids 在 crates 下仍未实现。Core 现有 attempt／artifact ports 没有 recipe／ticket 字段；阶段0“从原始V3可重建”是可行性证据，不能当作生产已保留资料。后续须按不新增持久格式的既定约束把普通同进程原始资料保留与稳定项结果一起接入，重启不可重建明确不可用。
+
+- 本轮从实际代码修正：平面循环原失败分支把当前和所有剩余文件都标缺失并break；单项取消也break；无attempt调用还复用同一会话，若继续便会接到已经失败的会话。现所有文件各自按原位置区分，失败／单项取消继续，整计划token仍封剩余项。
+- 文件获取原最后项直接向来源条目发Completed，会覆盖前面的失败且早于条目保存；ReceiveBatch只记逐项事实，由原ReceiveAction在持久结果／实际流程结束后发一次终态，进度按整批200ms节流。必要session.complete错误现在保留source并返回失败。
+- 后续需核对：旧超时扫描目前只查BlobFacade在途登记，仍可能漏掉完整计划在子UC已结束但会话／条目结算未完的寿命；必须接现有ReceiveWorkRegistry，不能仅靠新测试统计宣布许可／生命周期全覆盖。目录表示获取失败的既有generic错误仍待改为完整source；原资料生产保留和稳定逐项查询仍未实现。

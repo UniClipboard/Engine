@@ -1,5 +1,6 @@
 //! 接收动作的实际寿命；只保存内存围栏和完成事实，不代替持久 attempt 权威。
 
+use super::batch::ReceiveBatch;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use tokio::sync::watch;
@@ -22,6 +23,7 @@ struct Progress {
 
 /// 同一接收处理和其监督者共同持有；只有监督者能声明整个动作结束。
 pub(crate) struct ReceiveAction {
+    pub(crate) batch: Arc<ReceiveBatch>,
     registry: Arc<ReceiveWorkRegistry>,
     progress: Mutex<Option<Arc<Progress>>>,
 }
@@ -33,6 +35,7 @@ pub(crate) struct StoppedReceive {
 impl ReceiveWorkRegistry {
     pub(crate) fn action(self: &Arc<Self>) -> Arc<ReceiveAction> {
         Arc::new(ReceiveAction {
+            batch: Arc::new(ReceiveBatch::default()),
             registry: self.clone(),
             progress: Mutex::new(None),
         })
@@ -87,6 +90,7 @@ impl ReceiveAction {
     }
 
     pub(crate) fn finish(&self, result: Result<(), ReceiveWorkError>) {
+        self.batch.finish(result.is_ok());
         if let Some(progress) = self
             .progress
             .lock()

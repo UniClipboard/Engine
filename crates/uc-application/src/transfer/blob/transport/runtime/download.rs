@@ -5,6 +5,7 @@ use super::super::{
 };
 use super::owner::BlobTransport;
 use crate::connectivity::{ConnectionLease, ConnectionRequest, ConnectionRequestScope};
+use crate::transfer::policy::PROGRESS_REPORT_INTERVAL;
 use crate::transfer::receive::scheduler::{DownloadPermit, DownloadReservation};
 use crate::transfer::receive::timing::{ReceiveTiming, TimingError};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -278,6 +279,6 @@ async fn report_progress(
         if let Some((end, total)) = value {
             sink.report(end, Some(total)).await;
         }
-        next = Instant::now() + std::time::Duration::from_millis(200);
+        next = Instant::now() + PROGRESS_REPORT_INTERVAL;
     }
 }

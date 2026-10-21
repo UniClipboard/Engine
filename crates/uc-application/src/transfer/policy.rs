@@ -1,6 +1,8 @@
 //! 第七片的资源与单调时间预算；下载、恢复和提供端共用这一份默认值。
 use std::time::Duration;
 
+pub(super) const PROGRESS_REPORT_INTERVAL: Duration = Duration::from_millis(200);
+
 pub(super) const ACTIVE_DOWNLOADS: usize = 4;
 pub(super) const ACTIVE_DOWNLOADS_PER_PEER: usize = 2;
 pub(super) const QUEUED_DOWNLOADS: usize = 64;

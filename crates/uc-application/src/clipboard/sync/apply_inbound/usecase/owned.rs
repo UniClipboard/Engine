@@ -41,7 +41,10 @@ impl ApplyInboundClipboardUseCase {
                     receive_action.finish(Ok(()));
                     Ok(Ok(outcome))
                 }
-                Ok(Err(error)) if !receive_action.is_registered() => Ok(Err(error)),
+                Ok(Err(error)) if !receive_action.is_registered() => {
+                    receive_action.batch.finish(false);
+                    Ok(Err(error))
+                }
                 Ok(Err(error)) => {
                     let (caller_error, shared) = share_failure(error);
                     receive_action.finish(Err(shared));

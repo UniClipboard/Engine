@@ -1,5 +1,7 @@
 use super::DirectoryPublication;
 use crate::clipboard::sync::payload_codec::V3BlobRef;
+use crate::transfer::receive::batch::ReceiveBatch;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use uc_core::clipboard::{EntryFileSet, FileSetMemberKind};
 use uc_core::ids::{DeviceId, EntryId};
@@ -40,6 +42,7 @@ pub struct ReceiveWorkPlan {
     expected_snapshot_hash: Option<String>,
     original_blob_indices: Vec<usize>,
     cancellation: CancellationToken,
+    batch: Arc<ReceiveBatch>,
 }
 
 impl ReceiveWorkPlan {
@@ -64,11 +67,17 @@ impl ReceiveWorkPlan {
             expected_snapshot_hash,
             original_blob_indices,
             cancellation: CancellationToken::new(),
+            batch: Arc::new(ReceiveBatch::default()),
         }
     }
 
     pub(crate) fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
         self.cancellation = cancellation;
+        self
+    }
+
+    pub(crate) fn with_batch(mut self, batch: Arc<ReceiveBatch>) -> Self {
+        self.batch = batch;
         self
     }
 
@@ -83,6 +92,7 @@ impl ReceiveWorkPlan {
         Option<String>,
         Option<String>,
         CancellationToken,
+        Arc<ReceiveBatch>,
     ) {
         debug_assert_eq!(self.original_blob_indices.len(), self.blob_refs.len());
         (
@@ -94,6 +104,7 @@ impl ReceiveWorkPlan {
             self.attempt_id,
             self.expected_snapshot_hash,
             self.cancellation,
+            self.batch,
         )
     }
 }

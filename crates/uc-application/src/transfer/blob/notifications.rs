@@ -26,7 +26,7 @@ struct Mailbox {
     pending: Mutex<Pending>,
     changed: Notify,
 }
-pub(super) struct OutboundNotifications {
+pub(crate) struct OutboundNotifications {
     mailbox: Arc<Mailbox>,
     _task: DownloadTask<()>,
 }

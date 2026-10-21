@@ -221,7 +221,7 @@ async fn commit_race_keeps_partial_settlement_owned_and_preserves_capture_failur
             .expect_materialize_plan()
             .times(1)
             .returning(|plan| {
-                let (_, _, snapshot, _, _, _, _, _) = plan.into_parts();
+                let (_, _, snapshot, _, _, _, _, _, _) = plan.into_parts();
                 Ok(MaterializeResult::complete(snapshot))
             });
         let readiness = Arc::new(ReceiveReadinessCoordinator::new());

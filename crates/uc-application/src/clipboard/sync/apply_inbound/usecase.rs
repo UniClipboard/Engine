@@ -1189,7 +1189,8 @@ impl ApplyInboundClipboardUseCase {
                                 receive_attempt_id.clone(),
                                 Some(input.snapshot_hash.clone()),
                             )
-                            .with_cancellation(receive_action.cancellation()),
+                            .with_cancellation(receive_action.cancellation())
+                            .with_batch(receive_action.batch.clone()),
                         )
                         .await
                     {
@@ -1219,6 +1220,9 @@ impl ApplyInboundClipboardUseCase {
                                 false,
                             )
                             .await?;
+                            if cancelled {
+                                receive_action.batch.settled(AttemptState::Cancelled);
+                            }
                             uc_warn!(
                                 error_kind = "blob_materialize",
                                 io_error_kind = io_error_kind(error.as_ref()),
@@ -1587,6 +1591,11 @@ impl ApplyInboundClipboardUseCase {
         if let Some(publication) = publication {
             publication.commit().await;
         }
+        receive_action.batch.settled(match materialize_outcome {
+            MaterializeOutcome::Complete => AttemptState::Completed,
+            MaterializeOutcome::PartialFailed => AttemptState::Failed,
+            MaterializeOutcome::PartialCancelled => AttemptState::Cancelled,
+        });
 
         // The find → commit section is complete; release the per-identity lock
         // before the best-effort side work (register advance, search index, OS

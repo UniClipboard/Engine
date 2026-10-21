@@ -64,7 +64,7 @@ impl BlobSourcePort for FakeLocalStore {
         Ok(DeviceId::new("peer"))
     }
 }
-pub(super) struct RejectUnexpectedNetwork;
+pub(crate) struct RejectUnexpectedNetwork;
 #[async_trait]
 impl ConnectivityBackend for RejectUnexpectedNetwork {
     async fn connect(

@@ -1,3 +1,4 @@
+use crate::transfer::receive::batch::ReceiveBatch;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -122,6 +123,7 @@ pub struct PublishBlobResult {
 /// 不提供 transfer_context 时 fetch_blob 表现等同于改造前——只拉数据,不发事件。
 #[derive(Debug, Clone)]
 pub struct FetchTransferContext {
+    pub(crate) batch: Option<Arc<ReceiveBatch>>,
     pub transfer_id: String,
     /// Clipboard entry that owns this transfer. Directory members use a
     /// distinct `transfer_id` while sharing this entry id for aggregation.
@@ -490,9 +492,7 @@ impl BlobTransferFacade {
                                 })?;
                             }
                             if let Some(outbound) = outbound {
-                                outbound.reporter.report(
-                                    &outbound.target,
-                                    &outbound.transfer_id,
+                                outbound.report(
                                     0,
                                     None,
                                     OutboundProgressStatus::Cancelled {
@@ -700,27 +700,18 @@ impl BlobTransferFacade {
                     }
                     if ctx.individual_lifecycle {
                         if let Some(session) = lifecycle_session.as_ref() {
-                            if let Err(error) = session.complete().await {
-                                uc_warn!(
-                                    transfer_id = log_id(&ctx.transfer_id),
-                                    error_kind = "session_complete",
-                                    io_error_kind = io_error_kind(&error),
-                                    "blob fetch: session completion failed"
-                                );
-                            }
+                            session
+                                .complete()
+                                .await
+                                .map_err(|source| BlobTransferError::Persistence(source.into()))?;
                         }
                     }
-                    if ctx.batch_position.is_last() {
-                        if !ctx.individual_lifecycle {
+                    if ctx.batch_position.is_last() || ctx.batch.is_some() {
+                        if !ctx.individual_lifecycle && ctx.batch_position.is_last() {
                             if let Some(session) = lifecycle_session.as_ref() {
-                                if let Err(error) = session.complete().await {
-                                    uc_warn!(
-                                        transfer_id = log_id(&ctx.transfer_id),
-                                        error_kind = "batch_session_complete",
-                                        io_error_kind = io_error_kind(&error),
-                                        "blob fetch: batch session completion failed"
-                                    );
-                                }
+                                session.complete().await.map_err(|source| {
+                                    BlobTransferError::Persistence(source.into())
+                                })?;
                             }
                         }
                         self.report_outbound_terminal(
@@ -881,27 +872,18 @@ impl BlobTransferFacade {
                     }
                     if ctx.individual_lifecycle {
                         if let Some(session) = lifecycle_session.as_ref() {
-                            if let Err(error) = session.complete().await {
-                                uc_warn!(
-                                    transfer_id = log_id(&ctx.transfer_id),
-                                    error_kind = "session_complete",
-                                    io_error_kind = io_error_kind(&error),
-                                    "blob fetch: session completion failed"
-                                );
-                            }
+                            session
+                                .complete()
+                                .await
+                                .map_err(|source| BlobTransferError::Persistence(source.into()))?;
                         }
                     }
-                    if ctx.batch_position.is_last() {
-                        if !ctx.individual_lifecycle {
+                    if ctx.batch_position.is_last() || ctx.batch.is_some() {
+                        if !ctx.individual_lifecycle && ctx.batch_position.is_last() {
                             if let Some(session) = lifecycle_session.as_ref() {
-                                if let Err(error) = session.complete().await {
-                                    uc_warn!(
-                                        transfer_id = log_id(&ctx.transfer_id),
-                                        error_kind = "batch_session_complete",
-                                        io_error_kind = io_error_kind(&error),
-                                        "blob fetch: batch session completion failed"
-                                    );
-                                }
+                                session.complete().await.map_err(|source| {
+                                    BlobTransferError::Persistence(source.into())
+                                })?;
                             }
                         }
                         self.report_outbound_terminal(
@@ -986,6 +968,8 @@ impl BlobTransferFacade {
         let transfer_id = ctx.outbound_transfer_id.clone()?;
         let target = ctx.outbound_target?;
         Some(OutboundReportContext {
+            item: ctx.transfer_id.clone(),
+            batch: ctx.batch.clone(),
             reporter,
             transfer_id,
             target,
@@ -1028,14 +1012,9 @@ impl BlobTransferFacade {
         total_bytes: Option<u64>,
         status: OutboundProgressStatus,
     ) {
-        let (Some(reporter), Some(tid), Some(target)) = (
-            self.outbound_progress_reporter.as_ref(),
-            ctx.outbound_transfer_id.as_ref(),
-            ctx.outbound_target.as_ref(),
-        ) else {
-            return;
-        };
-        reporter.report(target, tid, bytes_transferred, total_bytes, status);
+        if let Some(outbound) = self.build_outbound_context(Some(ctx)) {
+            outbound.report(bytes_transferred, total_bytes, status);
+        }
     }
 }
 
@@ -1075,9 +1054,29 @@ async fn wait_download_completion(
 /// 反向上报上下文。同时配齐三个字段才会触发 outbound report。
 #[derive(Clone)]
 struct OutboundReportContext {
+    item: String,
+    batch: Option<Arc<ReceiveBatch>>,
     reporter: Arc<OutboundNotifications>,
     transfer_id: String,
     target: DeviceId,
+}
+
+impl OutboundReportContext {
+    fn report(&self, bytes: u64, total: Option<u64>, status: OutboundProgressStatus) {
+        if let Some(batch) = &self.batch {
+            batch.record(
+                self.reporter.clone(),
+                self.target,
+                &self.transfer_id,
+                &self.item,
+                bytes,
+                status,
+            );
+        } else {
+            self.reporter
+                .report(&self.target, &self.transfer_id, bytes, total, status);
+        }
+    }
 }
 
 /// 把 receiver 视角的 cancel reason 翻转成 sender 视角的 reason。
@@ -1140,9 +1139,7 @@ impl BlobProgressSink for FileTransferProgressSink {
         }
 
         if let Some(ob) = self.outbound.as_ref() {
-            ob.reporter.report(
-                &ob.target,
-                &ob.transfer_id,
+            ob.report(
                 cumulative_bytes,
                 cumulative_total,
                 OutboundProgressStatus::InProgress,
@@ -1392,6 +1389,7 @@ mod tests {
                             ticket: BlobTicket::from_bytes(vec![1; 32]),
                             entry_id: EntryId::from("sender-image"),
                             transfer_context: Some(FetchTransferContext {
+                                batch: None,
                                 transfer_id: "entry:attempt:a1:representation:0".to_owned(),
                                 entry_id: "entry".to_owned(),
                                 attempt_id: Some("a1".to_owned()),

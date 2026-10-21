@@ -1,6 +1,7 @@
 use crate::transfer::receive::work::ReceiveWorkRegistry;
 use std::sync::{Arc, Mutex};
 
+mod item_results;
 mod lifecycle;
 mod receive_work;
 mod retry_material;
@@ -1488,7 +1489,7 @@ async fn materializes_blob_refs_before_capture_and_write() {
                 && refs == &vec![blob_ref.clone()]
         })
         .returning(|plan| {
-            let (_, _, mut snapshot, _, _, _, _, _) = plan.into_parts();
+            let (_, _, mut snapshot, _, _, _, _, _, _) = plan.into_parts();
             snapshot.representations[0]
                 .set_inline_bytes(b"file:///local/cache/original.txt\n".to_vec())
                 .unwrap();
@@ -1572,7 +1573,7 @@ async fn partial_materialize_persists_entry_but_skips_os_write() {
         .expect_materialize_plan()
         .times(1)
         .returning(|plan| {
-            let (_, _, mut snapshot, _, _, _, _, _) = plan.into_parts();
+            let (_, _, mut snapshot, _, _, _, _, _, _) = plan.into_parts();
             snapshot.representations[0]
                 .set_inline_bytes(
                     b"uniclip-missing:///big.iso?size=950000000&reason=cancelled".to_vec(),
@@ -1673,7 +1674,7 @@ async fn partial_materialize_does_not_register_dedup_entry() {
         .expect_materialize_plan()
         .times(2)
         .returning(move |plan| {
-            let (_, _, mut snapshot, _, _, _, _, _) = plan.into_parts();
+            let (_, _, mut snapshot, _, _, _, _, _, _) = plan.into_parts();
             let n = call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if n == 0 {
                 snapshot.representations[0]
@@ -3279,7 +3280,7 @@ async fn partial_match_is_upgraded_in_place_by_complete_delivery() {
         .expect_materialize_plan()
         .times(1)
         .returning(|plan| {
-            let (_, _, mut snapshot, _, _, _, _, _) = plan.into_parts();
+            let (_, _, mut snapshot, _, _, _, _, _, _) = plan.into_parts();
             snapshot.representations[0]
                 .set_inline_bytes(b"file:///local/cache/payload.bin\n".to_vec())
                 .unwrap();
@@ -3381,7 +3382,7 @@ async fn partial_delivery_does_not_replace_existing_partial() {
         .expect_materialize_plan()
         .times(1)
         .returning(|plan| {
-            let (_, _, mut snapshot, _, _, _, _, _) = plan.into_parts();
+            let (_, _, mut snapshot, _, _, _, _, _, _) = plan.into_parts();
             snapshot.representations[0]
                 .set_inline_bytes(
                     b"uniclip-missing:///payload.bin?size=10&reason=cancelled".to_vec(),
