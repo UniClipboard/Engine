@@ -58,3 +58,5 @@
 
 - a829f384 后的条目取消用例原在 facade 内；实际只返回 CancellationIncomplete 而没有继续条目投影、staging 与 CAS。现已迁入 transfer/receive/cancellation，完整动作以 entry+attempt 去重、独立于下载许可的有界工作表持有，transport 监督完整协程。Complete 子停止能力不再返回五秒局部结果；五秒仅在完整动作入口等待处计算。
 - 取消后端仍需与完整 ReceiveWorkPlan 的实际生命周期统一。当前 materializer 的平面文件循环与目录流程在 clipboard 模块；目录路径有 ensure_attempt_active／committing 核对，平面路径还需按真实调用图核对，不可仅凭子 fetch 已停止就证明整个接收计划所有输出均已静止。下一步必须接完整计划、逐项结果与重试，不继续只补网络小测试。
+
+- 当前 ReceiveWorkPlan 默认入口只是把请求拆成七参数后调用旧 materialize；原实现仍在 clipboard，无法将请求级生命周期知识集中 transfer。已迁至 transfer/receive/materialization 并删除旧入口与 clipboard 二次导出，模型／port／流程分开；本次不把结构迁移算作取消围栏或完整结果聚合完成。

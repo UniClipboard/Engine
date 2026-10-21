@@ -27,9 +27,8 @@ use crate::clipboard::active::ClipboardSnapshotDeps;
 use crate::clipboard::entry_identity::EntryIdentityCoordinator;
 use crate::clipboard::inbound::InboundClipboardApplyPort;
 use crate::clipboard::sync::apply_inbound::{
-    ApplyInboundClipboardUseCase, FileCacheBlobMaterializer, InboundApplyCommonDeps,
-    InboundBlobFetcher, InboundCapture, InboundReceiveAttemptDeps, InboundWrite,
-    InteractiveReceiveDeps, StoreOnlyPullDeps,
+    ApplyInboundClipboardUseCase, InboundApplyCommonDeps, InboundCapture,
+    InboundReceiveAttemptDeps, InboundWrite, InteractiveReceiveDeps, StoreOnlyPullDeps,
 };
 use crate::clipboard::write::MobileConsumabilityProbe;
 use crate::deps::{DirectoryReceivePorts, FileTransferPorts};
@@ -42,6 +41,7 @@ use crate::search::live_index::ClipboardLiveIndexPort;
 use crate::transfer::file::facade::{FileTransferFacade, FileTransferFacadeDeps};
 use crate::transfer::file::lifecycle::FileTransferLifecycleDeps;
 use crate::transfer::receive::cancellation::CancelEntryReceiveUseCase;
+use crate::transfer::receive::materialization::{FileCacheBlobMaterializer, InboundBlobFetcher};
 use crate::transfer::receive::reconciliation::ReceiveReadinessCoordinator;
 
 /// Engine 选择的文件系统与持久化 adapter。

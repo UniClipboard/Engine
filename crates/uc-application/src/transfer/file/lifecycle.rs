@@ -23,6 +23,7 @@ use uc_observability_contract::{
 use crate::facade::blob_transfer::{BlobTransferError, BlobTransferFacade, InboundCancelOutcome};
 use crate::facade::host_event::{HostEvent, HostEventBus, TransferHostEvent};
 use crate::transfer::blob::facade::TransferCancellationWait;
+use crate::transfer::receive::materialization::sweep_inbound_staging as sweep_materialization_staging;
 use crate::transfer::receive::reconciliation::{
     EnsureReceiveReadyPort, ReceiveReadinessCoordinator, ReceiveReadinessError,
     ReceiveReadinessStatus, ReconcileReceiveAttemptsUseCase,
@@ -454,7 +455,7 @@ async fn sweep_inbound_staging(
         }
     }
 
-    crate::clipboard::sync::sweep_inbound_staging(&scan_dirs).await;
+    sweep_materialization_staging(&scan_dirs).await;
 }
 
 /// Best-effort cleanup of a cached file or transfer directory.

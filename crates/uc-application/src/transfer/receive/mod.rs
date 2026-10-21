@@ -9,3 +9,5 @@ pub(super) mod scheduler;
 pub(super) mod timing;
 
 pub(crate) mod cancellation;
+
+pub(crate) mod materialization;

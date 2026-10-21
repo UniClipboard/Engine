@@ -1,13 +1,11 @@
 //! 阶段 0：失败展示快照之外，原始 V3 接收材料足以重建同进程重试来源。
 use super::{test_materializer, MockBlobFetcher};
-use crate::clipboard::sync::apply_inbound::materializer::{
-    InboundBlobMaterializer, ReceiveWorkPlan,
-};
 use crate::clipboard::sync::payload_codec::{
     decode_v3_bytes_to_snapshot_and_blob_refs, encode_snapshot_with_blob_refs_to_v3_bytes,
     V3BlobRef,
 };
 use crate::facade::blob_transfer::FetchBlobToPathResult;
+use crate::transfer::receive::materialization::{InboundBlobMaterializer, ReceiveWorkPlan};
 use bytes::Bytes;
 use std::io;
 use std::sync::{Arc, Mutex};

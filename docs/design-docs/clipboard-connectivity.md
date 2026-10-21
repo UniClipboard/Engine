@@ -59,6 +59,8 @@ Blob backend 每轮只调用一次原生连接；内容流程统一负责网络�
 Blob 的完整提供端由 Application `transfer/blob/transport/runtime` 负责，生产 Router 通过薄 handler 交接，
 原 SDK provider 自管连接入口已经移除。获取只交给 Uni 的请求级不透明地址提示，不为票据地址另开预热连接。
 票据认证公钥可在同步排队时区分来源；业务设备身份与授权仍读取当前权威，原会话与撤销围栏在异步目录查询前冻结。
+接收物化由 `transfer/receive/materialization` 接受唯一 `ReceiveWorkPlan` 入口；模型、专属 port 与流程按职责组织，
+原剪贴板模块只交接计划、接收聚合结果并继续保存，不再持有物化实现。
 下载额度和内容保护归 transfer 的完整获取、适用输出和引用结算持有；对端通知通过有界合并交接，不进入停止等待链。
 旧行扫描只恢复当前没有未结算获取／取消负责人的记录，不能抢占受管请求的阶段时钟。
 条目取消由 Application `transfer/receive/cancellation` 完整负责权威 CAS、实际子任务停止、投影、暂存清理和终态提交；

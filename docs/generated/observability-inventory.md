@@ -281,12 +281,12 @@
 | `<module>` | `crates/uc-application/src/clipboard/outbound/mod.rs:853` | `warn` | sensitive-field, message-body |
 | `<module>` | `crates/uc-application/src/clipboard/outbound/mod.rs:1035` | `info` | sensitive-field, message-body |
 | `<module>` | `crates/uc-application/src/clipboard/outbound/mod.rs:1086` | `info` | sensitive-field, message-body |
-| `<module>` | `crates/uc-application/src/clipboard/outbound/payload_prep.rs:97` | `warn` | sensitive-field, message-body |
-| `<module>` | `crates/uc-application/src/clipboard/outbound/payload_prep.rs:121` | `warn` | sensitive-field, message-body |
-| `<module>` | `crates/uc-application/src/clipboard/outbound/payload_prep.rs:129` | `warn` | sensitive-field, message-body |
-| `<module>` | `crates/uc-application/src/clipboard/outbound/payload_prep.rs:151` | `warn` | sensitive-field, message-body |
-| `<module>` | `crates/uc-application/src/clipboard/outbound/payload_prep.rs:164` | `warn` | sensitive-field, message-body |
-| `<module>` | `crates/uc-application/src/clipboard/outbound/payload_prep.rs:191` | `warn` | sensitive-field, message-body |
+| `<module>` | `crates/uc-application/src/clipboard/outbound/payload_prep.rs:99` | `warn` | sensitive-field, message-body |
+| `<module>` | `crates/uc-application/src/clipboard/outbound/payload_prep.rs:123` | `warn` | sensitive-field, message-body |
+| `<module>` | `crates/uc-application/src/clipboard/outbound/payload_prep.rs:131` | `warn` | sensitive-field, message-body |
+| `<module>` | `crates/uc-application/src/clipboard/outbound/payload_prep.rs:153` | `warn` | sensitive-field, message-body |
+| `<module>` | `crates/uc-application/src/clipboard/outbound/payload_prep.rs:166` | `warn` | sensitive-field, message-body |
+| `<module>` | `crates/uc-application/src/clipboard/outbound/payload_prep.rs:193` | `warn` | sensitive-field, message-body |
 | `<module>` | `crates/uc-application/src/clipboard/resource/mod.rs:61` | `instrument` | - |
 | `<module>` | `crates/uc-application/src/clipboard/resource/mod.rs:90` | `instrument` | - |
 | `<module>` | `crates/uc-application/src/clipboard/resource/mod.rs:147` | `instrument` | - |
@@ -358,34 +358,6 @@
 | `<module>` | `crates/uc-application/src/clipboard/sync/active_state/serve_pull.rs:206` | `info` | message-body |
 | `<module>` | `crates/uc-application/src/clipboard/sync/active_state/serve_pull.rs:214` | `debug` | message-body |
 | `<module>` | `crates/uc-application/src/clipboard/sync/active_state/serve_pull.rs:238` | `debug` | sensitive-field, message-body |
-| `<module>` | `crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs:405` | `warn` | message-body |
-| `<module>` | `crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs:415` | `warn` | message-body |
-| `<module>` | `crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs:426` | `info` | message-body |
-| `<module>` | `crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs:542` | `warn` | message-body |
-| `<module>` | `crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs:553` | `debug` | message-body |
-| `<module>` | `crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs:559` | `warn` | message-body |
-| `<module>` | `crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs:576` | `warn` | message-body |
-| `<module>` | `crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs:589` | `warn` | message-body |
-| `<module>` | `crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs:880` | `debug` | sensitive-field, message-body |
-| `<module>` | `crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs:934` | `warn` | sensitive-field, message-body |
-| `<module>` | `crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs:945` | `warn` | sensitive-field, message-body |
-| `<module>` | `crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs:969` | `info` | sensitive-field, message-body |
-| `<module>` | `crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs:1042` | `debug` | sensitive-field, message-body |
-| `<module>` | `crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs:1188` | `warn` | sensitive-field, message-body |
-| `<module>` | `crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs:1223` | `warn` | sensitive-field, message-body |
-| `<module>` | `crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs:1245` | `info` | sensitive-field, message-body |
-| `<module>` | `crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs:1296` | `info` | message-body |
-| `<module>` | `crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs:1301` | `info` | message-body |
-| `<module>` | `crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs:1342` | `info` | message-body |
-| `<module>` | `crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs:1534` | `info` | message-body |
-| `<module>` | `crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs:1540` | `warn` | message-body |
-| `<module>` | `crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs:1908` | `record` | raw-error |
-| `<module>` | `crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs:1930` | `warn` | message-body |
-| `<module>` | `crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs:1938` | `warn` | message-body |
-| `<module>` | `crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs:2359` | `debug` | message-body |
-| `<module>` | `crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs:2457` | `info` | message-body |
-| `<module>` | `crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs:2460` | `info` | message-body |
-| `<module>` | `crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs:2641` | `warn` | message-body |
 | `<module>` | `crates/uc-application/src/clipboard/sync/apply_inbound/usecase.rs:455` | `debug` | sensitive-field, message-body |
 | `<module>` | `crates/uc-application/src/clipboard/sync/apply_inbound/usecase.rs:458` | `debug` | sensitive-field, message-body |
 | `<module>` | `crates/uc-application/src/clipboard/sync/apply_inbound/usecase.rs:465` | `warn` | sensitive-field, message-body |
@@ -486,10 +458,10 @@
 | `<module>` | `crates/uc-application/src/facade/clipboard_restore/mod.rs:220` | `info` | sensitive-field, message-body |
 | `<module>` | `crates/uc-application/src/facade/clipboard_restore/mod.rs:234` | `instrument` | - |
 | `<module>` | `crates/uc-application/src/facade/clipboard_restore/mod.rs:250` | `warn` | sensitive-field, message-body |
-| `<module>` | `crates/uc-application/src/facade/clipboard/facade.rs:333` | `instrument` | - |
-| `<module>` | `crates/uc-application/src/facade/clipboard/facade.rs:393` | `instrument` | - |
-| `<module>` | `crates/uc-application/src/facade/clipboard/facade.rs:410` | `instrument` | - |
-| `<module>` | `crates/uc-application/src/facade/clipboard/facade.rs:428` | `instrument` | - |
+| `<module>` | `crates/uc-application/src/facade/clipboard/facade.rs:335` | `instrument` | - |
+| `<module>` | `crates/uc-application/src/facade/clipboard/facade.rs:395` | `instrument` | - |
+| `<module>` | `crates/uc-application/src/facade/clipboard/facade.rs:412` | `instrument` | - |
+| `<module>` | `crates/uc-application/src/facade/clipboard/facade.rs:430` | `instrument` | - |
 | `<module>` | `crates/uc-application/src/facade/roster/facade.rs:110` | `instrument` | - |
 | `<module>` | `crates/uc-application/src/facade/roster/facade.rs:155` | `instrument` | - |
 | `<module>` | `crates/uc-application/src/facade/roster/facade.rs:186` | `instrument` | - |
@@ -719,22 +691,50 @@
 | `<module>` | `crates/uc-application/src/transfer/blob/transport/runtime/owner.rs:163` | `warn` | message-body |
 | `<module>` | `crates/uc-application/src/transfer/blob/transport/runtime/provide.rs:115` | `debug` | message-body |
 | `<module>` | `crates/uc-application/src/transfer/blob/transport/runtime/provide.rs:151` | `warn` | message-body |
-| `<module>` | `crates/uc-application/src/transfer/file/lifecycle.rs:197` | `info` | message-body |
-| `<module>` | `crates/uc-application/src/transfer/file/lifecycle.rs:215` | `warn` | message-body |
-| `<module>` | `crates/uc-application/src/transfer/file/lifecycle.rs:227` | `info` | message-body |
-| `<module>` | `crates/uc-application/src/transfer/file/lifecycle.rs:257` | `warn` | sensitive-field, message-body |
-| `<module>` | `crates/uc-application/src/transfer/file/lifecycle.rs:270` | `warn` | sensitive-field, message-body |
-| `<module>` | `crates/uc-application/src/transfer/file/lifecycle.rs:291` | `info_span` | - |
-| `<module>` | `crates/uc-application/src/transfer/file/lifecycle.rs:307` | `info_span` | - |
-| `<module>` | `crates/uc-application/src/transfer/file/lifecycle.rs:317` | `info` | message-body |
-| `<module>` | `crates/uc-application/src/transfer/file/lifecycle.rs:321` | `info` | message-body |
-| `<module>` | `crates/uc-application/src/transfer/file/lifecycle.rs:437` | `warn` | message-body |
-| `<module>` | `crates/uc-application/src/transfer/file/lifecycle.rs:449` | `warn` | message-body |
-| `<module>` | `crates/uc-application/src/transfer/file/lifecycle.rs:470` | `warn` | message-body |
-| `<module>` | `crates/uc-application/src/transfer/file/lifecycle.rs:486` | `warn` | message-body |
+| `<module>` | `crates/uc-application/src/transfer/file/lifecycle.rs:198` | `info` | message-body |
+| `<module>` | `crates/uc-application/src/transfer/file/lifecycle.rs:216` | `warn` | message-body |
+| `<module>` | `crates/uc-application/src/transfer/file/lifecycle.rs:228` | `info` | message-body |
+| `<module>` | `crates/uc-application/src/transfer/file/lifecycle.rs:258` | `warn` | sensitive-field, message-body |
+| `<module>` | `crates/uc-application/src/transfer/file/lifecycle.rs:271` | `warn` | sensitive-field, message-body |
+| `<module>` | `crates/uc-application/src/transfer/file/lifecycle.rs:292` | `info_span` | - |
+| `<module>` | `crates/uc-application/src/transfer/file/lifecycle.rs:308` | `info_span` | - |
+| `<module>` | `crates/uc-application/src/transfer/file/lifecycle.rs:318` | `info` | message-body |
+| `<module>` | `crates/uc-application/src/transfer/file/lifecycle.rs:322` | `info` | message-body |
+| `<module>` | `crates/uc-application/src/transfer/file/lifecycle.rs:438` | `warn` | message-body |
+| `<module>` | `crates/uc-application/src/transfer/file/lifecycle.rs:450` | `warn` | message-body |
+| `<module>` | `crates/uc-application/src/transfer/file/lifecycle.rs:471` | `warn` | message-body |
+| `<module>` | `crates/uc-application/src/transfer/file/lifecycle.rs:487` | `warn` | message-body |
 | `<module>` | `crates/uc-application/src/transfer/file/timeout_runtime.rs:34` | `warn` | message-body |
 | `<module>` | `crates/uc-application/src/transfer/receive/cancellation/owner.rs:70` | `instrument` | - |
 | `<module>` | `crates/uc-application/src/transfer/receive/cancellation/owner.rs:101` | `warn` | message-body |
+| `<module>` | `crates/uc-application/src/transfer/receive/materialization/workflow.rs:174` | `warn` | message-body |
+| `<module>` | `crates/uc-application/src/transfer/receive/materialization/workflow.rs:184` | `warn` | message-body |
+| `<module>` | `crates/uc-application/src/transfer/receive/materialization/workflow.rs:195` | `info` | message-body |
+| `<module>` | `crates/uc-application/src/transfer/receive/materialization/workflow.rs:311` | `warn` | message-body |
+| `<module>` | `crates/uc-application/src/transfer/receive/materialization/workflow.rs:322` | `debug` | message-body |
+| `<module>` | `crates/uc-application/src/transfer/receive/materialization/workflow.rs:328` | `warn` | message-body |
+| `<module>` | `crates/uc-application/src/transfer/receive/materialization/workflow.rs:345` | `warn` | message-body |
+| `<module>` | `crates/uc-application/src/transfer/receive/materialization/workflow.rs:358` | `warn` | message-body |
+| `<module>` | `crates/uc-application/src/transfer/receive/materialization/workflow.rs:621` | `debug` | sensitive-field, message-body |
+| `<module>` | `crates/uc-application/src/transfer/receive/materialization/workflow.rs:675` | `warn` | sensitive-field, message-body |
+| `<module>` | `crates/uc-application/src/transfer/receive/materialization/workflow.rs:686` | `warn` | sensitive-field, message-body |
+| `<module>` | `crates/uc-application/src/transfer/receive/materialization/workflow.rs:710` | `info` | sensitive-field, message-body |
+| `<module>` | `crates/uc-application/src/transfer/receive/materialization/workflow.rs:783` | `debug` | sensitive-field, message-body |
+| `<module>` | `crates/uc-application/src/transfer/receive/materialization/workflow.rs:929` | `warn` | sensitive-field, message-body |
+| `<module>` | `crates/uc-application/src/transfer/receive/materialization/workflow.rs:964` | `warn` | sensitive-field, message-body |
+| `<module>` | `crates/uc-application/src/transfer/receive/materialization/workflow.rs:986` | `info` | sensitive-field, message-body |
+| `<module>` | `crates/uc-application/src/transfer/receive/materialization/workflow.rs:1037` | `info` | message-body |
+| `<module>` | `crates/uc-application/src/transfer/receive/materialization/workflow.rs:1042` | `info` | message-body |
+| `<module>` | `crates/uc-application/src/transfer/receive/materialization/workflow.rs:1083` | `info` | message-body |
+| `<module>` | `crates/uc-application/src/transfer/receive/materialization/workflow.rs:1275` | `info` | message-body |
+| `<module>` | `crates/uc-application/src/transfer/receive/materialization/workflow.rs:1281` | `warn` | message-body |
+| `<module>` | `crates/uc-application/src/transfer/receive/materialization/workflow.rs:1649` | `record` | raw-error |
+| `<module>` | `crates/uc-application/src/transfer/receive/materialization/workflow.rs:1671` | `warn` | message-body |
+| `<module>` | `crates/uc-application/src/transfer/receive/materialization/workflow.rs:1679` | `warn` | message-body |
+| `<module>` | `crates/uc-application/src/transfer/receive/materialization/workflow.rs:2100` | `debug` | message-body |
+| `<module>` | `crates/uc-application/src/transfer/receive/materialization/workflow.rs:2198` | `info` | message-body |
+| `<module>` | `crates/uc-application/src/transfer/receive/materialization/workflow.rs:2201` | `info` | message-body |
+| `<module>` | `crates/uc-application/src/transfer/receive/materialization/workflow.rs:2382` | `warn` | message-body |
 | `<module>` | `crates/uc-application/src/transfer/receive/reconciliation.rs:120` | `warn` | message-body |
 | `<module>` | `crates/uc-application/src/transfer/receive/reconciliation.rs:183` | `instrument` | - |
 | `<module>` | `crates/uc-application/src/transfer/receive/reconciliation.rs:240` | `error` | sensitive-field, message-body |

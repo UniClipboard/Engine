@@ -45,7 +45,7 @@
 //! * [`ports`] — `InboundCapture` / `InboundWrite` 抽象 + 它们对
 //!   `CaptureClipboardUseCase` / `ClipboardWriteCoordinator` 的 blanket impl,
 //!   保持 use case 在测试里可 mock。
-//! * [`materializer`] — `InboundBlobMaterializer` / `InboundBlobFetcher`
+//! * [`crate::transfer::receive::materialization`] — `InboundBlobMaterializer` / `InboundBlobFetcher`
 //!   抽象 + `FileCacheBlobMaterializer` 默认实现,负责把入站 blob refs 拉到
 //!   本机缓存 / 写回 representation。
 //! * [`usecase`] — `ApplyInboundClipboardUseCase` 主流程,只负责编排:
@@ -69,7 +69,6 @@ use uc_core::ids::{DeviceId, EntryId};
 
 use crate::clipboard::write::ClipboardWriteIntent;
 
-mod materializer;
 pub(crate) mod ports;
 
 pub use ports::InboundSnapshotRebuild;
@@ -79,11 +78,6 @@ mod usecase;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use materializer::compute_file_set_component;
-pub(crate) use materializer::sweep_inbound_staging;
-pub use materializer::{
-    FileCacheBlobMaterializer, InboundBlobFetcher, InboundFileSetManifest, InboundFileSetMember,
-};
 pub use ports::{InboundCapture, InboundWrite};
 pub use usecase::ApplyInboundClipboardUseCase;
 pub(crate) use usecase::{

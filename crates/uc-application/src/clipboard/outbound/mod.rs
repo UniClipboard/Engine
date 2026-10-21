@@ -35,9 +35,6 @@ use uc_observability_contract::{
     uc_debug, uc_info, uc_warn,
 };
 
-use crate::clipboard::sync::apply_inbound::{
-    compute_file_set_component, InboundFileSetManifest, InboundFileSetMember,
-};
 use crate::clipboard::sync::resend_entry::{
     ExistingLocalEntryDeliveryRunner, ResendEntryDeps, ResendEntryRunner, ResendEntryUseCase,
 };
@@ -47,6 +44,9 @@ use crate::deps::CurrentSpaceMemberScopePort;
 use crate::facade::{
     BlobTransferError, BlobTransferFacade, ClipboardSyncFacade, DispatchEntryPerTarget,
     PublishBlobCommand, PublishBlobPathCommand, PublishBlobResult,
+};
+use crate::transfer::receive::materialization::{
+    compute_file_set_component, InboundFileSetManifest, InboundFileSetMember,
 };
 
 pub use crate::clipboard::sync::resend_entry::{

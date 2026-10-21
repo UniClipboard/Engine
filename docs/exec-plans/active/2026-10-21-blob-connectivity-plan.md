@@ -386,3 +386,13 @@ Application 最终1160 passed／1 skipped（3.833秒），Engine公开契约50 p
 metadata、fmt、Rust style 和 repository preflight 通过。慢读取、慢最终提交、调用方丢弃、
 重复取消、真实关闭收集、任务 panic 来源、过载及多子停止来源均有定向验证。
 本轮未重跑完整网络／设备矩阵，完整接收计划的后续动作封闭与部分成功结算仍待实现。
+
+
+### 接收计划入口与物化所有权迁移
+
+文件物化、目录完整发布与回滚迁入 `transfer/receive/materialization`，请求／结果模型、
+专属 port 与流程分开组织。删除旧 `materialize` 七参数入口和默认转调，只保留完整
+`ReceiveWorkPlan` 入口；真实消费者、mock 和目录／文件测试同步迁移。
+内部编解码、出站清单与组装直接依赖该负责人，删除旧 clipboard 模块的二次导出。
+已有 Application facade 公开类型导出保持原边界，Engine 不新增步骤查询。
+此为完整负责人迁移的结构前提，尚不证明计划与取消之间的生命周期围栏、逐项失败聚合或重试完成。

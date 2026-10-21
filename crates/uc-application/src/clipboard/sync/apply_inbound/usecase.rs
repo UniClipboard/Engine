@@ -49,13 +49,13 @@ use crate::search::live_index::{
 };
 
 use super::super::work::{OwnedWork, WorkOwner};
-use super::materializer::{
-    is_directory_cancel_error, verify_file_set_identity, DirectoryPublication,
-    InboundBlobMaterializer, MaterializeOutcome, ReceiveWorkPlan, RollbackOutcome,
-};
 use super::ports::{InboundCapture, InboundSnapshotRebuild, InboundWrite};
 use super::timing::{RAPID_DUPLICATE_WINDOW, VISIBLE_DUPLICATE_WINDOW};
 use super::{ApplyInboundError, ApplyInboundInput, ApplyOutcome, InboundActivationOwner};
+use crate::transfer::receive::materialization::{
+    is_directory_cancel_error, verify_file_set_identity, DirectoryPublication,
+    InboundBlobMaterializer, MaterializeOutcome, ReceiveWorkPlan, RollbackOutcome,
+};
 
 const RECENT_INBOUND_MAX_RECORDS: u64 = 128;
 

@@ -1,13 +1,4 @@
-//! 入站 blob 本地化抽象 + 默认实现。
-//!
-//! `InboundBlobMaterializer` 把 V3 envelope 解码出来的 `V3BlobRef` 列表落地:
-//! - representation-bound blob 写回 `snapshot.representations[i].bytes`(图片 /
-//!   大二进制走这条);
-//! - free-standing 文件写到 `cache_dir/iroh-blobs/<entry_id>/<filename>`,
-//!   再把 file-list rep 改写成本机 `file://` URI。
-//!
-//! `InboundBlobFetcher` 是 facade 适配层,生产环境就是 `BlobTransferFacade`,
-//! 测试用 mockall 替身。
+//! 接收计划的文件物化、目录发布及本地产物结算。
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
@@ -23,7 +14,6 @@ use uc_core::clipboard::{
     FileDisplayMetadataEntry, FileSetMemberKind, FileSetMemberLocation, HashAlgorithm,
     FILE_DISPLAY_METADATA_FORMAT, FILE_DISPLAY_METADATA_MIME, IMAGE_FROM_FILE_FORMAT,
 };
-use uc_core::file_transfer::FileTransferFailureReason;
 use uc_core::ids::{DeviceId, EntryId, FormatId, RepresentationId};
 use uc_core::ports::atomic_publish::{AtomicPublishPort, PublishError};
 use uc_core::ports::hidden_path::MarkHiddenPort;
@@ -45,10 +35,15 @@ use uc_observability_contract::{
 
 use crate::clipboard::sync::payload_codec::V3BlobRef;
 use crate::facade::blob_transfer::{
-    BatchPosition, BlobTransferError, BlobTransferFacade, FetchBlobCommand, FetchBlobResult,
-    FetchBlobToPathCommand, FetchBlobToPathResult, FetchTransferContext,
+    BatchPosition, BlobTransferError, FetchBlobCommand, FetchBlobToPathCommand,
+    FetchTransferContext,
 };
 use crate::transfer::blob::fetch_failure_reason;
+
+use super::{
+    InboundBlobFetcher, InboundBlobMaterializer, InboundFileSetManifest, InboundFileSetMember,
+    MaterializeOutcome, MaterializeResult, MissingFileRef, ReceiveWorkPlan,
+};
 
 /// 判断 fetcher 返回的 anyhow 错误是否来自 `BlobTransferError::Cancelled`。
 /// 仅 `BlobTransferFacade` 这一条生产路径保留 thiserror chain;mock 路径
@@ -69,232 +64,6 @@ pub(crate) fn is_directory_cancel_error(error: &anyhow::Error) -> bool {
                 .downcast_ref::<DirectoryAttemptGateError>()
                 .is_some_and(|gate| matches!(gate, DirectoryAttemptGateError::Cancelled))
         })
-}
-
-/// 描述一份未完成 materialize 的 file blob。`reason` 由 file_transfer
-/// projection 单独承载(P1-10 落地),此处只表达"这个文件在 partial entry
-/// 里是缺失的"+ 元数据,前端按 filename + size 渲染。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MissingFileRef {
-    pub filename: String,
-    pub size_bytes: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InboundFileSetManifest {
-    pub members: Vec<InboundFileSetMember>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InboundFileSetMember {
-    pub root_index: u32,
-    pub root_name: String,
-    pub root_is_file: bool,
-    pub relative_path: String,
-    pub kind: FileSetMemberKind,
-    pub blob_ref_index: Option<u32>,
-}
-
-pub struct ReceiveWorkPlan {
-    from_device: DeviceId,
-    receiver_entry_id: EntryId,
-    snapshot: SystemClipboardSnapshot,
-    blob_refs: Vec<V3BlobRef>,
-    file_set_manifest: Option<InboundFileSetManifest>,
-    attempt_id: Option<String>,
-    expected_snapshot_hash: Option<String>,
-    original_blob_indices: Vec<usize>,
-}
-
-impl ReceiveWorkPlan {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        from_device: DeviceId,
-        receiver_entry_id: EntryId,
-        snapshot: SystemClipboardSnapshot,
-        blob_refs: Vec<V3BlobRef>,
-        file_set_manifest: Option<InboundFileSetManifest>,
-        attempt_id: Option<String>,
-        expected_snapshot_hash: Option<String>,
-    ) -> Self {
-        let original_blob_indices = (0..blob_refs.len()).collect();
-        Self {
-            from_device,
-            receiver_entry_id,
-            snapshot,
-            blob_refs,
-            file_set_manifest,
-            attempt_id,
-            expected_snapshot_hash,
-            original_blob_indices,
-        }
-    }
-
-    fn into_parts(
-        self,
-    ) -> (
-        DeviceId,
-        EntryId,
-        SystemClipboardSnapshot,
-        Vec<V3BlobRef>,
-        Option<InboundFileSetManifest>,
-        Option<String>,
-        Option<String>,
-    ) {
-        debug_assert_eq!(self.original_blob_indices.len(), self.blob_refs.len());
-        (
-            self.from_device,
-            self.receiver_entry_id,
-            self.snapshot,
-            self.blob_refs,
-            self.file_set_manifest,
-            self.attempt_id,
-            self.expected_snapshot_hash,
-        )
-    }
-}
-
-/// `InboundBlobMaterializer::materialize` 的返回值。
-///
-/// `is_partial()` 是"该 snapshot 不完整"的权威信号 —— 调用方据此跳过
-/// OS clipboard write 与 dedup 登记。`missing` 单独列出 file-rep 阶段
-/// 未完成文件的元数据,供前端渲染占位卡片用。
-///
-/// **关键不变量**:`is_partial()` 不等于 `!missing.is_empty()`。rep-bound
-/// blob(图片 / 大二进制)被 cancel 时,materializer 会从 `snapshot.
-/// representations` 中删除未完成的 rep —— 这本身已经让 snapshot 半残,
-/// 但 `missing` 只用于 *file* 列表,如果 envelope 没有 file_refs,
-/// `missing` 仍是空。仅靠 `!missing.is_empty()` 判定会把这种情况误判
-/// 为 complete,把半残 snapshot 当真相落入 dedup 表 + OS 剪贴板。
-#[derive(Debug)]
-pub struct MaterializeResult {
-    pub snapshot: SystemClipboardSnapshot,
-    pub missing: Vec<MissingFileRef>,
-    /// 真正的"是否 partial"标志。`complete()` 置 false,`finalize_partial`
-    /// 置 true。`pub(crate)` 让 crate 内的 mock 测试能构造,外部调用方
-    /// 统一通过 `is_partial()` 读,避免新调用方又掉进"missing 空 ⇒
-    /// complete"陷阱。
-    pub(crate) partial: bool,
-    pub(crate) outcome: MaterializeOutcome,
-    /// Present when this result put directory roots at their final location.
-    ///
-    /// Those roots are visible but provisional: the caller owes them either a
-    /// [`DirectoryPublication::commit`] once the entry is durably recorded, or
-    /// a [`DirectoryPublication::rollback`] on any path that abandons the
-    /// entry. Take it with [`Self::take_publication`] and settle it on every
-    /// branch — dropping it leaves user-visible roots with nothing behind them.
-    pub(crate) publication: Option<DirectoryPublication>,
-    /// Receiver-local manifest for a fully materialized directory. Paths refer
-    /// only to this device's published roots and are sealed by the commit port.
-    pub(crate) directory_file_set: Option<EntryFileSet>,
-    pub(crate) has_receive_artifacts: bool,
-    pub(crate) receive_artifacts: Vec<ReceiveArtifact>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MaterializeOutcome {
-    Complete,
-    PartialCancelled,
-    PartialFailed,
-}
-
-impl MaterializeResult {
-    pub fn complete(snapshot: SystemClipboardSnapshot) -> Self {
-        Self {
-            snapshot,
-            missing: Vec::new(),
-            partial: false,
-            outcome: MaterializeOutcome::Complete,
-            publication: None,
-            directory_file_set: None,
-            has_receive_artifacts: false,
-            receive_artifacts: Vec::new(),
-        }
-    }
-
-    pub fn is_partial(&self) -> bool {
-        self.partial
-    }
-
-    pub fn outcome(&self) -> MaterializeOutcome {
-        self.outcome
-    }
-
-    /// Take ownership of the publication this result is holding, if any.
-    pub fn take_publication(&mut self) -> Option<DirectoryPublication> {
-        self.publication.take()
-    }
-
-    pub(crate) fn take_receive_artifacts(&mut self) -> Vec<ReceiveArtifact> {
-        std::mem::take(&mut self.receive_artifacts)
-    }
-}
-
-#[async_trait]
-pub trait InboundBlobMaterializer: Send + Sync {
-    async fn materialize_plan(&self, plan: ReceiveWorkPlan) -> Result<MaterializeResult> {
-        let (
-            from_device,
-            receiver_entry_id,
-            snapshot,
-            blob_refs,
-            file_set_manifest,
-            attempt_id,
-            expected_snapshot_hash,
-        ) = plan.into_parts();
-        self.materialize(
-            from_device,
-            receiver_entry_id,
-            snapshot,
-            blob_refs,
-            file_set_manifest,
-            attempt_id,
-            expected_snapshot_hash,
-        )
-        .await
-    }
-
-    /// `receiver_entry_id` 是 ApplyInbound 在流程入口生成的接收端 entry_id,
-    /// 用作所有 blob 拉取的 transfer_id —— 让占位卡片、进度事件和最终
-    /// `NewContent` 共享同一个标识,前端无需做合并映射。
-    ///
-    /// 返回 [`MaterializeResult`]:`missing.is_empty()` 表示全量成功;否则
-    /// 是 partial(用户在中途 cancel 了 inbound transfer),`snapshot` 仅包
-    /// 含已成功落地的 representation,缺失的 file blob 用 `uniclip-missing://`
-    /// URI 表达,`missing` 列出元数据供前端展示与调用方判定。
-    async fn materialize(
-        &self,
-        from_device: DeviceId,
-        receiver_entry_id: EntryId,
-        snapshot: SystemClipboardSnapshot,
-        blob_refs: Vec<V3BlobRef>,
-        file_set_manifest: Option<InboundFileSetManifest>,
-        attempt_id: Option<String>,
-        expected_snapshot_hash: Option<String>,
-    ) -> Result<MaterializeResult>;
-}
-
-#[async_trait]
-pub trait InboundBlobFetcher: Send + Sync {
-    /// In-memory fetch path — used by representation-bound blobs (e.g.
-    /// oversized images that we splice back into `snapshot.representations`).
-    async fn fetch_blob(&self, command: FetchBlobCommand) -> Result<FetchBlobResult>;
-
-    /// Streaming fetch path — used by free-standing files. The blob is
-    /// written directly to `command.target_path` (reflink on CoW
-    /// filesystems) so receiving a 1 GiB clipboard transfer no longer
-    /// routes the full plaintext through `Bytes`. GH#487 Phase 2.
-    async fn fetch_blob_to_path(
-        &self,
-        command: FetchBlobToPathCommand,
-    ) -> Result<FetchBlobToPathResult>;
-
-    async fn record_unfetched_failure(
-        &self,
-        _context: FetchTransferContext,
-        _reason: FileTransferFailureReason,
-    ) {
-    }
 }
 
 /// Prefix marking an area where an inbound directory is assembled.
@@ -594,34 +363,6 @@ async fn discard_staging(staging: &std::path::Path) {
     }
 }
 
-#[async_trait]
-impl InboundBlobFetcher for BlobTransferFacade {
-    async fn fetch_blob(&self, command: FetchBlobCommand) -> Result<FetchBlobResult> {
-        // 保留 thiserror 类型链:materializer 用 `is_cancel_error` downcast
-        // 判断是否 user-cancel,与真正的 fetch 失败区分对待。
-        BlobTransferFacade::fetch_blob(self, command)
-            .await
-            .map_err(anyhow::Error::from)
-    }
-
-    async fn fetch_blob_to_path(
-        &self,
-        command: FetchBlobToPathCommand,
-    ) -> Result<FetchBlobToPathResult> {
-        BlobTransferFacade::fetch_blob_to_path(self, command)
-            .await
-            .map_err(anyhow::Error::from)
-    }
-
-    async fn record_unfetched_failure(
-        &self,
-        context: FetchTransferContext,
-        reason: FileTransferFailureReason,
-    ) {
-        BlobTransferFacade::record_unfetched_failure(self, context, reason).await;
-    }
-}
-
 #[derive(Clone)]
 pub(crate) struct DirectoryReceiveAttemptPorts {
     pub get: Arc<dyn GetEntryAttemptPort>,
@@ -810,16 +551,16 @@ impl FileCacheBlobMaterializer {
 
 #[async_trait]
 impl InboundBlobMaterializer for FileCacheBlobMaterializer {
-    async fn materialize(
-        &self,
-        from_device: DeviceId,
-        receiver_entry_id: EntryId,
-        mut snapshot: SystemClipboardSnapshot,
-        blob_refs: Vec<V3BlobRef>,
-        file_set_manifest: Option<InboundFileSetManifest>,
-        attempt_id: Option<String>,
-        expected_snapshot_hash: Option<String>,
-    ) -> Result<MaterializeResult> {
+    async fn materialize_plan(&self, plan: ReceiveWorkPlan) -> Result<MaterializeResult> {
+        let (
+            from_device,
+            receiver_entry_id,
+            mut snapshot,
+            blob_refs,
+            file_set_manifest,
+            attempt_id,
+            expected_snapshot_hash,
+        ) = plan.into_parts();
         if blob_refs.is_empty() && file_set_manifest.is_none() {
             return Ok(MaterializeResult::complete(snapshot));
         }

@@ -136,3 +136,11 @@
 - 本轮完整App回归1164 passed／1 skipped（3.828秒），Engine公开契约50 passed（0.022秒）。已迁移语义为明确的完整停止后才能继续投影／清理，去掉常量失败计数旧接口；业务失败由完整负责人记录一次，Engine共享结果只映射稳定错误。workspace检查与最终门禁仍在进行，未标记完整spec完成。
 
 - 上一状态答复仅核实日志并说明缺口，未改变实现，归为 no progress；本轮继续推进完整目标。最终 workspace 全目标检查通过（1m15s），metadata、fmt、Rust style、repository preflight 通过，当前无活动 Cargo 进程。补齐当前取消负责人文档，并手工复核实际停止后清理顺序、关闭收集和多来源错误；code-review skill 不可用，不冒充技能审查。完整 ReceiveWorkPlan 的物化／条目结算仍是下一实作，未标完成。
+
+- 物化负责人开始迁入 transfer/receive/materialization，模型、专属 port 和流程分文件；移除 materialize 旧参数入口，仅接收 ReceiveWorkPlan，并迁移全部真实调用／mock。首次 check 通过后清除旧模块二次导出，扩展编译暴露 facade 三处旧类型路径，已改直接导入完整负责人；receive-plan-owner-application.log 保留首轮失败，未视为测试通过。
+
+- 全文相对链接扫描发现历史审查 inventory 的旧 uc-infra 路径已有失效，非本轮新增；辅助对照脚本首轮 Python 变量重绑定语法错误已修正。按 HEAD 对照确认新增失效链接为0（既有148个失效目标保留），本次迁移源码链接均有效。
+
+- 迁移后的 Application 全库 1164 passed／1 skipped（3.833秒）。取消、目录发布／回滚、原始材料与旧测试均使用唯一计划入口；未增加机械映射测试。观测清单按官方脚本重生，Rust style 与 repository preflight 通过；workspace 全目标检查仍在运行，不提前写通过。
+
+- 最终 workspace 全目标 check、metadata JSON、fmt、Rust style、repository preflight 和差异检查通过。额外直接对照 HEAD 的旧物化算法与新入口解构之后的完整文件后缀，确认算法正文逐字相同；没有借迁移改变部分失败／取消语义。已手工审查模型与 port 拆分、旧入口删除、全部调用路径、公开 facade 导出和历史文档链接；code-review skill 仍不可用。完整 spec 继续。

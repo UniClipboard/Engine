@@ -36,6 +36,8 @@ use crate::runtime_lifecycle::LifecycleError;
 use crate::transfer::receive::cancellation::{
     CancelEntryReceiveError, CancelEntryReceiveOutcome, CancelEntryReceiveUseCase,
 };
+use crate::transfer::receive::materialization::sweep_inbound_staging as sweep_materialization_staging;
+use crate::transfer::receive::materialization::InboundFileSetManifest;
 use uc_core::clipboard::ClipboardContentCategorySet;
 use uc_core::ports::clipboard::GetClipboardEntryPort;
 use uc_core::ports::ClipboardEventRepositoryPort;
@@ -192,7 +194,7 @@ impl ClipboardSyncFacade {
     /// Governance only: nothing here is fatal. A leftover area costs disk
     /// space, not correctness, since no entry refers to it.
     pub async fn sweep_orphaned_inbound_staging(dirs: &[std::path::PathBuf]) -> usize {
-        crate::clipboard::sync::sweep_inbound_staging(dirs).await
+        sweep_materialization_staging(dirs).await
     }
 
     pub(crate) fn new(deps: ClipboardSyncDeps) -> Self {
@@ -430,7 +432,7 @@ impl ClipboardSyncFacade {
         &self,
         snapshot: SystemClipboardSnapshot,
         blob_refs: Vec<V3BlobRef>,
-        manifest: crate::clipboard::sync::apply_inbound::InboundFileSetManifest,
+        manifest: InboundFileSetManifest,
         origin: ClipboardChangeOrigin,
         entry_id: Option<EntryId>,
         target_filter: Option<Vec<DeviceId>>,
@@ -518,7 +520,7 @@ impl ClipboardSyncDispatch<'_> {
         &self,
         snapshot: SystemClipboardSnapshot,
         blob_refs: Vec<V3BlobRef>,
-        manifest: crate::clipboard::sync::apply_inbound::InboundFileSetManifest,
+        manifest: InboundFileSetManifest,
         origin: ClipboardChangeOrigin,
         entry_id: Option<EntryId>,
         target_filter: Option<Vec<DeviceId>>,

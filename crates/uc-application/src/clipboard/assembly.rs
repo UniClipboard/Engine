@@ -6,6 +6,7 @@
 
 use crate::clipboard::active::transport::ActivePullPreparationPort;
 use crate::clipboard::inbound::ClipboardReceiverPort;
+use crate::transfer::receive::materialization::InboundBlobFetcher;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -41,7 +42,7 @@ use crate::clipboard::local::{
 use crate::clipboard::outbound::{ClipboardOutboundDeps, ClipboardOutboundFacade};
 use crate::clipboard::resource::ResourceFacadeDeps;
 use crate::clipboard::sync::apply_inbound::{
-    ApplyInboundClipboardUseCase, InboundBlobFetcher, InboundCapture, InboundWrite,
+    ApplyInboundClipboardUseCase, InboundCapture, InboundWrite,
 };
 use crate::clipboard::sync::sync_runtime::{ClipboardSyncRuntime, ClipboardSyncRuntimeDeps};
 use crate::clipboard::write::{

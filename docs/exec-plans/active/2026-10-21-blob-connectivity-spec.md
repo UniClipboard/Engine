@@ -42,7 +42,7 @@
 | blob 流程 | `crates/uc-application/src/transfer/blob/` | 发布／获取、密码能力、引用和生命周期；facade 注册在途任务并回报进度 |
 | 接收结算 | `crates/uc-application/src/transfer/receive/` | readiness、启动 reconciliation、接收尝试与产物结算 |
 | 文件会话 | `crates/uc-application/src/transfer/file/` | 单次接收事件、会话、超时扫描及关闭 |
-| 物化与发布 | `crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs` | 独立文件逐项接收；目录 staging、发布和回滚 |
+| 物化与发布 | `crates/uc-application/src/transfer/receive/materialization/workflow.rs` | 独立文件逐项接收；目录 staging、发布和回滚 |
 | 接收主流程 | `crates/uc-application/src/clipboard/sync/apply_inbound/usecase.rs` | 既有接收尝试、保存及系统剪贴板异步后续动作 |
 | Uni | `crates/uc-application/src/connectivity/` | 与传输库无关的连接、流租约、准入和生命周期能力 |
 | 原生实现 | `crates/uc-infra-p2p/src/network/iroh/blobs.rs`、`node.rs` | SDK 下载、store、原生服务 handler；当前取消关闭整个对端连接 |

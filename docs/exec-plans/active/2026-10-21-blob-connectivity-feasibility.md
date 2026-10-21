@@ -22,7 +22,7 @@
 - Infra [`blobs.rs`](../../../crates/uc-infra-p2p/src/network/iroh/blobs.rs) 缓存 SDK Downloader；warmup 与 Downloader 自拨共存，`shutdown_inflight_fetch` 调用 `shutdown_endpoint`。文件获取使用 SDK 流式 export，现有引用／tag 仍归原 owner。
 - [`IrohNode::install_blobs`](../../../crates/uc-infra-p2p/src/network/iroh/node.rs) 装配 FsStore、GC 与 `BlobsProtocol`；SDK provider 自行处理连接。Engine [`assembly/sync_engine.rs`](../../../crates/uc-engine/src/assembly/sync_engine.rs) 负责安装。
 - 现有 [`Uni StreamLease`](../../../crates/uc-application/src/connectivity/stream.rs) 提供通用 AsyncRead／AsyncWrite、finish／settled 和实际工作许可；原生 bridge 在 drop 时 reset／stop 当前半流。已补充显式流 ID、reset／stop 与独立工作租约，并用真实双流证明取消隔离；生产 blob 尚未迁移。
-- 原始来源候选为 [`ReceiveWorkPlan`](../../../crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs) 的 snapshot、V3BlobRef、manifest、original_blob_indices。物化会改写成功路径与失败占位，现有文件会话持有文件名／大小／来源和路径，但没有完整 ticket。已用真实物化测试证明从原始 V3 保留材料重建新 attempt 可恢复正确来源与内容；稳定手动重试与 CAS 仍待实施。
+- 原始来源候选为 [`ReceiveWorkPlan`](../../../crates/uc-application/src/transfer/receive/materialization/model.rs) 的 snapshot、V3BlobRef、manifest、original_blob_indices。物化会改写成功路径与失败占位，现有文件会话持有文件名／大小／来源和路径，但没有完整 ticket。已用真实物化测试证明从原始 V3 保留材料重建新 attempt 可恢复正确来源与内容；稳定手动重试与 CAS 仍待实施。
 
 ## 首轮最小复现
 

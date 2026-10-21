@@ -31,10 +31,6 @@ pub(crate) use outbound_plan::OutboundSyncPlanner;
 pub(crate) use outbound_plan_types::{FileCandidate, FileSyncIntent};
 pub use payload_codec::encode_snapshot_to_v3_bytes;
 
-// Startup governance, reached only through `ClipboardSyncFacade` — the sweep
-// and the areas it removes are the same module's business.
-pub(crate) use apply_inbound::sweep_inbound_staging;
-
 // Slice 2 Phase 3 · T10 — CLI `watch` decodes the V3 envelope payload
 // so it can display human-readable text (daemon-sent payloads are now
 // always enveloped). Exposed publicly because `InboundNotice.plaintext`

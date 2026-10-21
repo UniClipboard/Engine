@@ -25,9 +25,11 @@ use uc_core::ports::SettingsPort;
 use uc_core::{ClipboardChangeOrigin, SystemClipboardSnapshot};
 use uc_observability_contract::{error_source::io_error_kind, log_fields::log_id, uc_warn};
 
-use crate::clipboard::sync::apply_inbound::{compute_file_set_component, InboundFileSetManifest};
 use crate::clipboard::sync::V3BlobRef;
 use crate::clipboard::sync::{FileCandidate, OutboundSyncPlanner};
+use crate::transfer::receive::materialization::{
+    compute_file_set_component, InboundFileSetManifest,
+};
 
 use super::{
     build_transfer_manifest, display_name_for_path, file_display_metadata, publish_file_blob_refs,

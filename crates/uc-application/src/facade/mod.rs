@@ -93,9 +93,8 @@ pub use crate::clipboard::outbound::{
     ResendEntryError, ResendReport, MAX_INLINE_OUTBOUND_REPRESENTATION_BYTES,
 };
 pub use crate::clipboard::sync::apply_inbound::{
-    ApplyInboundError, ApplyInboundInput, ApplyOutcome, FileCacheBlobMaterializer,
-    InboundActivationOwner, InboundBlobFetcher, InboundCapture, InboundSnapshotRebuild,
-    InboundWrite,
+    ApplyInboundError, ApplyInboundInput, ApplyOutcome, InboundActivationOwner, InboundCapture,
+    InboundSnapshotRebuild, InboundWrite,
 };
 pub use crate::clipboard::sync::payload_codec::{self, encode_snapshot_to_v3_bytes};
 pub use crate::clipboard::sync::{
@@ -177,3 +176,7 @@ pub use storage::{ClearCacheResultView, StorageFacade, StorageFacadeError, Stora
 pub use upgrade::{AcknowledgeUpgradeError, DetectUpgradeError, UpgradeFacade, UpgradeStatus};
 
 pub use crate::space::{ConnectivityOpportunity, PeerConnectionError};
+
+pub use crate::transfer::receive::materialization::{
+    FileCacheBlobMaterializer, InboundBlobFetcher,
+};
