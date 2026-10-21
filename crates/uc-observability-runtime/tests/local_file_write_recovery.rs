@@ -93,6 +93,8 @@ fn writer_recovers_after_storage_failure_and_health_follows() {
     assert!(has_marker(&directory, "after_recovery"));
     assert!(!has_marker(&directory, "during_failure"));
     assert_eq!(handle.health().local_file, SetupStatus::Ready);
+    // 恢复记录由文件线程重新入队，可能排在第一次刷新之后。再次刷新保证该记录也已落盘。
+    assert_eq!(flush(), SignalResult::Completed, "flush recovery record");
     assert_eq!(
         event_count(&directory, "uc.observability.local_file_recovered"),
         1

@@ -355,3 +355,13 @@ staging, unchanged source bytes, typed reasons/guidance, and Engine query errors
 Generate actual Swift and Kotlin bindings from the matching host library, record symbols/checksums
 and hashes, and hand off the new fixed stack to tasks9/10/11. Native compilation and product UI
 acceptance remain downstream gates. No peer worktree changes or production data access.
+
+## PR follow-up: completion barriers and inherited CI failures
+
+Failure modes recorded before the follow-up changes:
+
+- A manual rebuild is accepted before its background task starts. A query can observe the previous ready generation, pass an entry-count check, then race with the requested rebuild. The test must observe a new completed rebuild through the public status query before checking all existing tag and content invariants.
+- A recovered file worker emits the recovery record into its own queue. A flush already queued by the caller can acknowledge before that recovery record is written. The test must flush after observing recovery, then require exactly one persisted recovery record with the original envelope assertions.
+- The leave resource test can sample asynchronous reclamation and bounded connection-pool variation. Reuse only task9 ae75c75624e913a77697664e7045bff8649bf4b7's exact test change. Its retained negative controls reject one leaked descriptor or task per cycle. Do not merge task9 implementation.
+
+The first two tests and their relevant production modules have no diff against the fetched task7 baseline. The first local replay passed both tests. Repeated original runs and the complete remote failure log are retained. No import implementation or assertion is removed to address these failures.
