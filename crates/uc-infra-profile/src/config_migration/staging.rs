@@ -425,6 +425,13 @@ pub fn apply_pending_import(
 }
 
 pub(super) fn complete_pending_import(app_data_root: &Path) -> Result<(), PendingImportError> {
+    cleanup_pending_import(app_data_root)?;
+    uc_info!("staged config import applied; staging cleaned up");
+    Ok(())
+}
+
+/// 只清理固定暂存路径；拒绝导入时也可在目标事务开始前调用。
+pub(super) fn cleanup_pending_import(app_data_root: &Path) -> Result<(), PendingImportError> {
     let layout = StagingLayout::new(app_data_root);
     match std::fs::remove_file(layout.marker_path()) {
         Ok(()) => sync_directory(app_data_root).map_err(PendingImportError::cleanup_from)?,
@@ -436,7 +443,6 @@ pub(super) fn complete_pending_import(app_data_root: &Path) -> Result<(), Pendin
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(PendingImportError::cleanup_from(error)),
     }
-    uc_info!("staged config import applied; staging cleaned up");
     Ok(())
 }
 
