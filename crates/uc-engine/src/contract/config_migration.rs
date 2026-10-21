@@ -36,6 +36,8 @@ impl fmt::Debug for PreviewConfigImportInput {
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct StageConfigImportInput {
+    /// 除非宿主已确认不可撤销地替换拒绝暂存，否则必须为 false；验证新包前不释放旧资料。
+    pub replace_rejected_import: bool,
     pub source: HostFileHandle,
     pub password: SecretString,
 }
@@ -44,6 +46,7 @@ impl fmt::Debug for StageConfigImportInput {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("StageConfigImportInput")
+            .field("replace_rejected_import", &self.replace_rejected_import)
             .field("source", &"[REDACTED]")
             .field("password", &"[REDACTED]")
             .finish()

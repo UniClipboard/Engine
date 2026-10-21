@@ -3,12 +3,14 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use super::config_migration::RejectedConfigImportView;
 use anyhow::{anyhow, Context};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tracing::instrument;
 use uc_core::diagnostics::HostLogProfile;
 use uc_core::error_class::ErrorClass;
+use uc_core::ports::config_migration::ConfigMigrationError;
 use zip::write::SimpleFileOptions;
 
 #[derive(Clone)]
@@ -21,6 +23,7 @@ pub struct DiagnosticsFacadeDeps {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DebugStatusView {
+    pub rejected_config_import: Option<RejectedConfigImportView>,
     /// 宿主声明的实际日志档位；Engine 不保存日志偏好，也不从环境或构建类型推测。
     pub effective_log_profile: Option<String>,
 }
@@ -34,6 +37,8 @@ pub struct LogExportView {
 
 #[derive(Debug, thiserror::Error)]
 pub enum DiagnosticsFacadeError {
+    #[error("failed to query retained import status")]
+    ImportStatus(#[source] ConfigMigrationError),
     #[error("Downloads directory is unavailable")]
     DownloadsUnavailable,
     #[error("failed to export logs")]
@@ -45,6 +50,7 @@ impl ErrorClass for DiagnosticsFacadeError {
         match self {
             Self::DownloadsUnavailable => "downloads_unavailable",
             Self::Export(_) => "export",
+            Self::ImportStatus(_) => "import_status",
         }
     }
 }
@@ -60,6 +66,7 @@ impl DiagnosticsFacade {
 
     pub fn debug_status(&self) -> DebugStatusView {
         DebugStatusView {
+            rejected_config_import: None,
             effective_log_profile: self.effective_log_profile(),
         }
     }

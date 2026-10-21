@@ -1,0 +1,16 @@
+[package]
+name = "compression-memory-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+zstd = { version = "=0.13.3", features = ["zstdmt"] }
+zstd-sys = "=2.0.16"
+
+[profile.release]
+opt-level = "z"
+lto = "thin"
+panic = "abort"

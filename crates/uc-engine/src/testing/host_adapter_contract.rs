@@ -2771,6 +2771,7 @@ async fn engine_start_builds_a_resumable_real_session() {
             .await
             .unwrap(),
         crate::OperationResult::DiagnosticsStatus(crate::DiagnosticsStatusSummary {
+            rejected_config_import: None,
             effective_log_profile: None,
         })
     );
@@ -2893,6 +2894,7 @@ async fn engine_start_builds_a_resumable_real_session() {
         engine
             .execute(crate::Operation::StageConfigImport(
                 crate::StageConfigImportInput {
+                    replace_rejected_import: false,
                     source: HostFileHandle::new("config-bundle"),
                     password: crate::SecretString::new("correct horse"),
                 },

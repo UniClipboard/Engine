@@ -12,8 +12,8 @@ use tracing::instrument;
 use uc_core::crypto::domain::Passphrase;
 use uc_core::ids::SpaceId;
 use uc_core::ports::config_migration::{
-    ConfigImportPreview, ConfigMigrationError, ExportConfigBundlePort, PreviewConfigImportPort,
-    StageConfigImportPort, StagedConfigImport,
+    ConfigImportPreview, ConfigImportRejection, ConfigMigrationError, ExportConfigBundlePort,
+    PreviewConfigImportPort, StageConfigImportPort, StagedConfigImport,
 };
 
 #[cfg(test)]
@@ -21,6 +21,13 @@ use crate::space::CurrentSpaceIdentityError;
 use crate::space::{
     CurrentSpaceIdentityPort, IsSpaceUnlockedPort, PortableCurrentSpaceIdentityPort,
 };
+
+/// 拒绝现场的安全展示数据；状态来自持久暂存，不依赖一次事件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RejectedConfigImportView {
+    pub reason: ConfigImportRejection,
+    pub message: String,
+}
 
 /// Ports consumed by [`ConfigMigrationFacade`].
 ///
@@ -122,8 +129,21 @@ impl ConfigMigrationFacade {
         &self,
         password: &Passphrase,
         source: &Path,
+        replace_rejected_import: bool,
     ) -> Result<StagedConfigImport, ConfigMigrationError> {
-        self.deps.stage_import.stage_import(password, source).await
+        self.deps
+            .stage_import
+            .stage_import(password, source, replace_rejected_import)
+            .await
+    }
+
+    /// 查询拒绝原因并给出固定恢复指引，不暴露来源路径或凭据。
+    pub async fn query_rejected_import(
+        &self,
+    ) -> Result<Option<RejectedConfigImportView>, ConfigMigrationError> {
+        self.deps.stage_import.rejected_import().await.map(|reason| reason.map(|reason| RejectedConfigImportView {
+            reason, message: "Import was not completed. Re-export the configuration bundle using the new version.".to_owned(),
+        }))
     }
 
     /// Whether this installation has completed setup, i.e. holds configuration.
@@ -251,11 +271,17 @@ mod tests {
             &self,
             _password: &Passphrase,
             _source: &Path,
+            _replace_rejected_import: bool,
         ) -> Result<StagedConfigImport, ConfigMigrationError> {
             *self.stage_calls.lock().expect("stage calls") += 1;
             Ok(StagedConfigImport {
                 unlock_required_after_apply: true,
             })
+        }
+        async fn rejected_import(
+            &self,
+        ) -> Result<Option<ConfigImportRejection>, ConfigMigrationError> {
+            Ok(None)
         }
     }
 
@@ -369,7 +395,7 @@ mod tests {
         let facade = facade_with(true, true, ports.clone());
 
         let staged = facade
-            .stage_import(&password(), Path::new("/tmp/in.ucbundle"))
+            .stage_import(&password(), Path::new("/tmp/in.ucbundle"), false)
             .await
             .expect("stage should proceed and replace");
 
@@ -383,7 +409,7 @@ mod tests {
         let facade = facade_with(false, false, ports.clone());
 
         let staged = facade
-            .stage_import(&password(), Path::new("/tmp/in.ucbundle"))
+            .stage_import(&password(), Path::new("/tmp/in.ucbundle"), false)
             .await
             .expect("stage should succeed");
 

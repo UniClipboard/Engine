@@ -9,18 +9,20 @@
 //! caller's preconditions; this layer only emits the structural errors
 //! `InvalidPasswordOrCorrupt` / `IncompatibleBundle` / `Io` / `Internal`.
 
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tracing::instrument;
+use tracing::{instrument, Span};
 
 use uc_core::app_dirs::HostConfigurationFiles;
 use uc_core::crypto::domain::Passphrase;
 use uc_core::ids::ProfileId;
 use uc_core::ports::config_migration::{
-    ConfigImportPreview, ConfigMigrationError, ConfigSourceMode, ExportConfigBundlePort,
-    PreviewConfigImportPort, StageConfigImportPort, StagedConfigImport,
+    ConfigImportPreview, ConfigImportRejection, ConfigMigrationError, ConfigSourceMode,
+    ExportConfigBundlePort, PreviewConfigImportPort, StageConfigImportPort, StagedConfigImport,
 };
 use uc_core::ports::{ClockPort, LocalIdentityPort, SecureStoragePort};
 
@@ -33,6 +35,7 @@ use super::archive::{ArchiveError, BundleArchive};
 use super::bundle::{self, Argon2Params, BundleError};
 use super::db_snapshot::{self, DbSnapshotError};
 use super::manifest::{BundleManifest, MANIFEST_MEMBER, MANIFEST_SCHEMA_VER};
+use super::pending::{adoption_journal_present, inspect_pending_import, PendingImportState};
 use super::secret_keys::{migratable_secret_keys, MigratableSecretKind, SECRETS_MEMBER};
 use super::staging::{
     PendingImportMarker, SecretsFile, StagingError, StagingLayout, CONTENT_KEY_CATALOG_MEMBER,
@@ -88,6 +91,7 @@ impl ConfigMigrationPaths {
 }
 
 /// The config-migration adapter.
+#[derive(Clone)]
 pub struct ConfigMigrationAdapter {
     secure_storage: Arc<dyn SecureStoragePort>,
     db_pool: DbPool,
@@ -320,12 +324,8 @@ fn read_host_configuration_file(path: &Path) -> Result<Option<Vec<u8>>, ConfigMi
     read_regular_export_file(path, MAX_HOST_CONFIGURATION_FILE_BYTES)
 }
 
-fn read_regular_export_file(
-    path: &Path,
-    limit: u64,
-) -> Result<Option<Vec<u8>>, ConfigMigrationError> {
-    use std::io::Read;
-
+/// 打开常规导出文件并拒绝符号链接；读取与流式打包共用此边界。
+fn open_regular_export_file(path: &Path) -> Result<Option<File>, ConfigMigrationError> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -375,6 +375,17 @@ fn read_regular_export_file(
             source: None,
         });
     }
+    Ok(Some(file))
+}
+
+/// 小型成员有独立上限；磁盘 blob 不通过此缓冲入口。
+fn read_regular_export_file(
+    path: &Path,
+    limit: u64,
+) -> Result<Option<Vec<u8>>, ConfigMigrationError> {
+    let Some(file) = open_regular_export_file(path)? else {
+        return Ok(None);
+    };
     let mut bytes = Vec::new();
     file.take(limit + 1)
         .read_to_end(&mut bytes)
@@ -496,7 +507,8 @@ fn map_staging_err(err: StagingError) -> ConfigMigrationError {
 struct ExportSnapshotChanged;
 
 impl ConfigMigrationAdapter {
-    fn collect_blob_files(&self) -> Result<Vec<(String, Vec<u8>)>, ConfigMigrationError> {
+    /// 只收集稳定排序的磁盘成员路径；归档负责人先预检总大小，再逐个读取。
+    fn collect_blob_files(&self) -> Result<Vec<(String, PathBuf)>, ConfigMigrationError> {
         let mut pending = vec![self.paths.blob_root.clone()];
         let mut files = Vec::new();
         while let Some(directory) = pending.pop() {
@@ -526,13 +538,7 @@ impl ConfigMigrationAdapter {
                     })?;
                     files.push((
                         format!("runtime-blobs/{}", relative.replace('\\', "/")),
-                        read_regular_export_file(&path, 2 * 1024 * 1024 * 1024)?.ok_or_else(
-                            || {
-                                export_state_error(anyhow::anyhow!(
-                                    "encrypted blob disappeared during export"
-                                ))
-                            },
-                        )?,
+                        path,
                     ));
                 } else {
                     return Err(export_state_error(anyhow::anyhow!(
@@ -541,6 +547,7 @@ impl ConfigMigrationAdapter {
                 }
             }
         }
+        files.sort_by(|left, right| left.0.cmp(&right.0));
         Ok(files)
     }
 
@@ -569,122 +576,6 @@ impl ConfigMigrationAdapter {
         &self,
         destination: &Path,
     ) -> Result<PathBuf, ConfigMigrationError> {
-        uc_info!("starting config bundle export");
-
-        // 两库修订和受保护文件在快照前后必须保持一致，否则整次导出失败。
-        let profile_revision = self
-            .db_pool
-            .persistent_revision()
-            .map_err(export_state_error)?;
-        let control_revision = self
-            .control_db_pool
-            .persistent_revision()
-            .map_err(export_state_error)?;
-        let protected_paths = [
-            self.paths.vault_dir.join("keyslot.json"),
-            self.paths.vault_dir.join(PROFILE_SECRET_FILE_NAME),
-            self.paths
-                .vault_dir
-                .join("profile-content-key-vault-v1.json"),
-            VaultLayout::new(&self.paths.app_data_root).engine_upgrade_cursor_path(),
-            self.paths.vault_dir.join(".active-space-manifest-v2"),
-        ];
-        let protected_before = protected_paths
-            .iter()
-            .map(|path| Self::read_required(path))
-            .collect::<Result<Vec<_>, _>>()?;
-        // 1. Consistent db snapshot (blocking; sqlite + file IO).
-        let pool = self.db_pool.clone();
-        let control_pool = self.control_db_pool.clone();
-        let scratch = self.paths.snapshot_scratch_path();
-        let (db_bytes, control_bytes) = tokio::task::spawn_blocking(move || {
-            let profile = db_snapshot::snapshot_to_bytes(&pool, &scratch)?;
-            let control = db_snapshot::snapshot_to_bytes(
-                &control_pool,
-                &scratch.with_extension("control.db"),
-            )?;
-            Ok::<_, DbSnapshotError>((profile, control))
-        })
-        .await
-        .map_err(|error| ConfigMigrationError::Internal {
-            details: "snapshot task failed to run".to_string(),
-            source: Some(Box::new(error)),
-        })?
-        .map_err(map_db_snapshot_err)?;
-
-        // 2. Secrets (P2P identity + current-profile KEK). The KEK both
-        //    encrypts this bundle and rides inside it for post-import
-        //    auto-unlock. An unlocked session that lacks its KEK is a degenerate
-        //    state we cannot seal from (the passphrase is never retained, so the
-        //    KEK cannot be re-derived here) — fail rather than emit a bundle no
-        //    passphrase can open.
-        let (secret_entries, kek) = self.collect_secrets()?;
-        let Some(kek_bytes) = kek else {
-            uc_error!(
-                "export aborted: current-profile KEK absent from secure storage while unlocked"
-            );
-            return Err(ConfigMigrationError::Internal {
-                details: "key material unavailable for export".to_string(),
-                source: None,
-            });
-        };
-        let kek_key: [u8; 32] = kek_bytes.as_slice().try_into().map_err(|error| {
-            uc_error!("export aborted: KEK material has unexpected length");
-            ConfigMigrationError::Internal {
-                details: "key material has unexpected length".to_string(),
-                source: Some(Box::new(error)),
-            }
-        })?;
-        let secrets_file = SecretsFile::from_raw(secret_entries);
-
-        // 3. Legacy iroh device-identity files, if migration has not removed them.
-        let iroh_identity_files = self.collect_iroh_identity_files()?;
-
-        // 4. Vault + settings files. The keyslot is carried verbatim and also
-        //    parsed for the salt + KDF that derive the KEK from the passphrase,
-        //    so the sealed bundle's header lets `open` reproduce that KEK.
-        let keyslot = Self::read_required(&self.paths.vault_dir.join("keyslot.json"))?;
-        let (bundle_salt, bundle_kdf) = parse_keyslot_kdf(&keyslot)?;
-        let device_id = Self::read_required(&self.paths.vault_dir.join("device_id.txt"))?;
-        let current_space_id =
-            Self::read_required(&self.paths.vault_dir.join(".current-space-id-v1"))?;
-        let profile_secrets =
-            Self::read_optional(&self.paths.vault_dir.join(PROFILE_SECRET_FILE_NAME))?;
-        let settings = Self::read_optional(&self.paths.settings_path)?;
-
-        let content_catalog = Self::read_required(
-            &self
-                .paths
-                .vault_dir
-                .join("profile-content-key-vault-v1.json"),
-        )?;
-        let engine_cursor = Self::read_required(
-            &VaultLayout::new(&self.paths.app_data_root).engine_upgrade_cursor_path(),
-        )?;
-        let blob_files = self.collect_blob_files()?;
-        if self
-            .db_pool
-            .persistent_revision()
-            .map_err(export_state_error)?
-            != profile_revision
-            || self
-                .control_db_pool
-                .persistent_revision()
-                .map_err(export_state_error)?
-                != control_revision
-            || protected_paths
-                .iter()
-                .map(|path| Self::read_required(path))
-                .collect::<Result<Vec<_>, _>>()?
-                != protected_before
-        {
-            return Err(ConfigMigrationError::Internal {
-                details: "runtime state changed during export; retry export".to_owned(),
-                source: Some(Box::new(ExportSnapshotChanged)),
-            });
-        }
-
-        // 5. Device fingerprint (human-confirmable identity) + timestamp.
         let fingerprint = self
             .local_identity
             .get_current_fingerprint()
@@ -695,90 +586,225 @@ impl ConfigMigrationAdapter {
             })?
             .map(|fp| fp.to_string())
             .unwrap_or_default();
-        let created_at_unix_ms = self.clock.now_ms();
+        let adapter = self.clone();
+        let destination = destination.to_path_buf();
+        let span = Span::current();
+        tokio::task::spawn_blocking(move || {
+            let _entered = span.enter();
+            adapter.capture_and_export(&destination, fingerprint)
+        })
+        .await
+        .map_err(|error| ConfigMigrationError::Internal {
+            details: "bundle export task failed to run".to_string(),
+            source: Some(Box::new(error)),
+        })?
+    }
 
-        // 6. Assemble the archive.
-        let mut archive = BundleArchive::new();
-        archive.insert(DB_MEMBER, db_bytes);
-        for (member, bytes) in blob_files {
-            archive.insert(member, bytes);
-        }
-        archive.insert(CONTROL_DB_MEMBER, control_bytes);
-        archive.insert(RUNTIME_MANIFEST_MEMBER, protected_before[4].clone());
-        archive.insert(KEYSLOT_MEMBER, keyslot);
-        archive.insert(DEVICE_ID_MEMBER, device_id);
-        archive.insert(CURRENT_SPACE_ID_MEMBER, current_space_id);
-        archive.insert(CONTENT_KEY_CATALOG_MEMBER, content_catalog);
-        archive.insert(ENGINE_CURSOR_MEMBER, engine_cursor);
-        if let Some(profile_secrets) = profile_secrets {
-            archive.insert(PROFILE_SECRETS_MEMBER, profile_secrets);
-        }
-        if let Some(settings) = settings {
-            archive.insert(SETTINGS_MEMBER, settings);
-        }
-        archive.insert(
-            SECRETS_MEMBER,
-            secrets_file.to_json_bytes().map_err(map_staging_err)?,
-        );
-        for (member, bytes) in iroh_identity_files {
-            archive.insert(member, bytes);
-        }
-        for name in self.paths.host_configuration_files.names() {
-            if let Some(bytes) = read_host_configuration_file(&self.paths.app_data_root.join(name))?
-            {
-                archive.insert(format!("{HOST_CONFIGURATION_PREFIX}{name}"), bytes);
-            }
-        }
+    /// 同一阻塞任务拥有完整捕获、修订核验、打包、加密与目标写入。
+    fn capture_and_export(
+        &self,
+        destination: &Path,
+        fingerprint: String,
+    ) -> Result<PathBuf, ConfigMigrationError> {
+        let scratch_paths = [
+            self.paths.snapshot_scratch_path(),
+            self.paths
+                .snapshot_scratch_path()
+                .with_extension("control.db"),
+        ];
+        let result = (|| {
+            uc_info!("starting config bundle export");
 
-        let manifest = BundleManifest {
-            schema_ver: MANIFEST_SCHEMA_VER,
-            app_version: self.app_version.clone(),
-            source_mode: self.source_mode.into(),
-            created_at_unix_ms,
-            profile_id: self.profile_id.inner().clone(),
-            device_fingerprint: fingerprint,
-            included: archive.member_paths(),
-        };
-        let manifest_bytes = serde_json::to_vec_pretty(&manifest).map_err(|error| {
-            ConfigMigrationError::Internal {
-                details: "encoding the bundle manifest failed".to_string(),
-                source: Some(Box::new(error)),
+            // 两库修订和受保护文件在快照前后必须保持一致，否则整次导出失败。
+            let profile_revision = self
+                .db_pool
+                .persistent_revision()
+                .map_err(export_state_error)?;
+            let control_revision = self
+                .control_db_pool
+                .persistent_revision()
+                .map_err(export_state_error)?;
+            let protected_paths = [
+                self.paths.vault_dir.join("keyslot.json"),
+                self.paths.vault_dir.join(PROFILE_SECRET_FILE_NAME),
+                self.paths
+                    .vault_dir
+                    .join("profile-content-key-vault-v1.json"),
+                VaultLayout::new(&self.paths.app_data_root).engine_upgrade_cursor_path(),
+                self.paths.vault_dir.join(".active-space-manifest-v2"),
+            ];
+            let protected_before = protected_paths
+                .iter()
+                .map(|path| Self::read_required(path))
+                .collect::<Result<Vec<_>, _>>()?;
+            // 1. Consistent db snapshot (blocking; sqlite + file IO).
+            let pool = self.db_pool.clone();
+            let control_pool = self.control_db_pool.clone();
+            let scratch = self.paths.snapshot_scratch_path();
+            db_snapshot::snapshot_to_file(&pool, &scratch).map_err(map_db_snapshot_err)?;
+            db_snapshot::snapshot_to_file(&control_pool, &scratch.with_extension("control.db"))
+                .map_err(map_db_snapshot_err)?;
+
+            // 2. Secrets (P2P identity + current-profile KEK). The KEK both
+            //    encrypts this bundle and rides inside it for post-import
+            //    auto-unlock. An unlocked session that lacks its KEK is a degenerate
+            //    state we cannot seal from (the passphrase is never retained, so the
+            //    KEK cannot be re-derived here) — fail rather than emit a bundle no
+            //    passphrase can open.
+            let (secret_entries, kek) = self.collect_secrets()?;
+            let Some(kek_bytes) = kek else {
+                uc_error!(
+                    "export aborted: current-profile KEK absent from secure storage while unlocked"
+                );
+                return Err(ConfigMigrationError::Internal {
+                    details: "key material unavailable for export".to_string(),
+                    source: None,
+                });
+            };
+            let kek_key: [u8; 32] = kek_bytes.as_slice().try_into().map_err(|error| {
+                uc_error!("export aborted: KEK material has unexpected length");
+                ConfigMigrationError::Internal {
+                    details: "key material has unexpected length".to_string(),
+                    source: Some(Box::new(error)),
+                }
+            })?;
+            let secrets_file = SecretsFile::from_raw(secret_entries);
+
+            // 3. Legacy iroh device-identity files, if migration has not removed them.
+            let iroh_identity_files = self.collect_iroh_identity_files()?;
+
+            // 4. Vault + settings files. The keyslot is carried verbatim and also
+            //    parsed for the salt + KDF that derive the KEK from the passphrase,
+            //    so the sealed bundle's header lets `open` reproduce that KEK.
+            let keyslot = Self::read_required(&self.paths.vault_dir.join("keyslot.json"))?;
+            let (bundle_salt, bundle_kdf) = parse_keyslot_kdf(&keyslot)?;
+            let device_id = Self::read_required(&self.paths.vault_dir.join("device_id.txt"))?;
+            let current_space_id =
+                Self::read_required(&self.paths.vault_dir.join(".current-space-id-v1"))?;
+            let profile_secrets =
+                Self::read_optional(&self.paths.vault_dir.join(PROFILE_SECRET_FILE_NAME))?;
+            let settings = Self::read_optional(&self.paths.settings_path)?;
+
+            let content_catalog = Self::read_required(
+                &self
+                    .paths
+                    .vault_dir
+                    .join("profile-content-key-vault-v1.json"),
+            )?;
+            let engine_cursor = Self::read_required(
+                &VaultLayout::new(&self.paths.app_data_root).engine_upgrade_cursor_path(),
+            )?;
+            let mut disk_members = self.collect_blob_files()?;
+            disk_members.push((DB_MEMBER.to_owned(), scratch.clone()));
+            disk_members.push((
+                CONTROL_DB_MEMBER.to_owned(),
+                scratch.with_extension("control.db"),
+            ));
+            let created_at_unix_ms = self.clock.now_ms();
+
+            // 6. Assemble the archive.
+            let mut archive = BundleArchive::new();
+            archive.insert(RUNTIME_MANIFEST_MEMBER, protected_before[4].clone());
+            archive.insert(KEYSLOT_MEMBER, keyslot);
+            archive.insert(DEVICE_ID_MEMBER, device_id);
+            archive.insert(CURRENT_SPACE_ID_MEMBER, current_space_id);
+            archive.insert(CONTENT_KEY_CATALOG_MEMBER, content_catalog);
+            archive.insert(ENGINE_CURSOR_MEMBER, engine_cursor);
+            if let Some(profile_secrets) = profile_secrets {
+                archive.insert(PROFILE_SECRETS_MEMBER, profile_secrets);
             }
-        })?;
-        // `included` is computed before the manifest member is added; reinsert
-        // with the manifest now present so the recorded list is accurate.
-        archive.insert(MANIFEST_MEMBER, manifest_bytes);
-        let manifest = BundleManifest {
-            included: archive.member_paths(),
-            ..manifest
-        };
-        archive.insert(
-            MANIFEST_MEMBER,
-            serde_json::to_vec_pretty(&manifest).map_err(|error| {
+            if let Some(settings) = settings {
+                archive.insert(SETTINGS_MEMBER, settings);
+            }
+            archive.insert(
+                SECRETS_MEMBER,
+                secrets_file.to_json_bytes().map_err(map_staging_err)?,
+            );
+            for (member, bytes) in iroh_identity_files {
+                archive.insert(member, bytes);
+            }
+            for name in self.paths.host_configuration_files.names() {
+                if let Some(bytes) =
+                    read_host_configuration_file(&self.paths.app_data_root.join(name))?
+                {
+                    archive.insert(format!("{HOST_CONFIGURATION_PREFIX}{name}"), bytes);
+                }
+            }
+
+            let manifest = BundleManifest {
+                schema_ver: MANIFEST_SCHEMA_VER,
+                app_version: self.app_version.clone(),
+                source_mode: self.source_mode.into(),
+                created_at_unix_ms,
+                profile_id: self.profile_id.inner().clone(),
+                device_fingerprint: fingerprint,
+                included: archive
+                    .member_paths()
+                    .into_iter()
+                    .chain(disk_members.iter().map(|(name, _)| name.clone()))
+                    .collect(),
+            };
+            let manifest_bytes = serde_json::to_vec_pretty(&manifest).map_err(|error| {
                 ConfigMigrationError::Internal {
                     details: "encoding the bundle manifest failed".to_string(),
                     source: Some(Box::new(error)),
                 }
-            })?,
-        );
+            })?;
+            // `included` is computed before the manifest member is added; reinsert
+            // with the manifest now present so the recorded list is accurate.
+            archive.insert(MANIFEST_MEMBER, manifest_bytes);
+            let manifest = BundleManifest {
+                included: archive
+                    .member_paths()
+                    .into_iter()
+                    .chain(disk_members.iter().map(|(name, _)| name.clone()))
+                    .collect(),
+                ..manifest
+            };
+            archive.insert(
+                MANIFEST_MEMBER,
+                serde_json::to_vec_pretty(&manifest).map_err(|error| {
+                    ConfigMigrationError::Internal {
+                        details: "encoding the bundle manifest failed".to_string(),
+                        source: Some(Box::new(error)),
+                    }
+                })?,
+            );
 
-        // 6. Tar → seal → write. The bundle is sealed with the KEK directly
-        //    (no Argon2 here — the salt + KDF written to the header let `open`
-        //    re-derive the KEK from the passphrase). AEAD over the snapshot is
-        //    still CPU-bound, so run it blocking.
-        let tar_bytes = archive.to_tar_bytes().map_err(map_archive_err)?;
-        let sealed = tokio::task::spawn_blocking(move || {
-            bundle::seal_with_key(&kek_key, &bundle_salt, bundle_kdf, &tar_bytes)
-        })
-        .await
-        .map_err(|error| ConfigMigrationError::Internal {
-            details: "bundle seal task failed to run".to_string(),
-            source: Some(Box::new(error)),
-        })?
-        .map_err(map_bundle_err)?;
+            // 6. Tar → seal → write. The bundle is sealed with the KEK directly
+            //    (no Argon2 here — the salt + KDF written to the header let `open`
+            //    re-derive the KEK from the passphrase). AEAD over the snapshot is
+            //    still CPU-bound, so run it blocking.
+            let tar_bytes = archive
+                .to_tar_bytes(disk_members)
+                .map_err(map_archive_err)?;
+            drop(archive);
+            if self
+                .db_pool
+                .persistent_revision()
+                .map_err(export_state_error)?
+                != profile_revision
+                || self
+                    .control_db_pool
+                    .persistent_revision()
+                    .map_err(export_state_error)?
+                    != control_revision
+                || protected_paths
+                    .iter()
+                    .map(|path| Self::read_required(path))
+                    .collect::<Result<Vec<_>, _>>()?
+                    != protected_before
+            {
+                return Err(ConfigMigrationError::Internal {
+                    details: "runtime state changed during export; retry export".to_owned(),
+                    source: Some(Box::new(ExportSnapshotChanged)),
+                });
+            }
 
-        let destination = destination.to_path_buf();
-        let final_path = tokio::task::spawn_blocking(move || {
+            let sealed = bundle::seal_with_key(&kek_key, &bundle_salt, bundle_kdf, &tar_bytes)
+                .map_err(map_bundle_err)?;
+            drop(tar_bytes);
+            let destination = destination.to_path_buf();
             if let Some(parent) = destination.parent().filter(|p| !p.as_os_str().is_empty()) {
                 std::fs::create_dir_all(parent).map_err(|error| ConfigMigrationError::Io {
                     details: "failed creating the destination directory".to_string(),
@@ -794,16 +820,16 @@ impl ConfigMigrationAdapter {
                 details: "failed finalizing the bundle file".to_string(),
                 source: Some(Box::new(error)),
             })?;
-            Ok::<_, ConfigMigrationError>(destination)
-        })
-        .await
-        .map_err(|error| ConfigMigrationError::Internal {
-            details: "bundle write task failed to run".to_string(),
-            source: Some(Box::new(error)),
-        })??;
+            let final_path = destination;
 
-        uc_info!("config bundle export complete");
-        Ok(final_path)
+            uc_info!("config bundle export complete");
+            Ok(final_path)
+        })();
+        // 与既有快照入口一致，清理失败不覆盖导出结果；下次快照会先清理残留。
+        for path in scratch_paths {
+            let _ = std::fs::remove_file(path);
+        }
+        result
     }
 }
 
@@ -846,6 +872,7 @@ impl ConfigMigrationAdapter {
         &self,
         password: &Passphrase,
         source: &Path,
+        replace_rejected_import: bool,
     ) -> Result<StagedConfigImport, ConfigMigrationError> {
         uc_info!("staging config import");
         let (archive, _manifest) = self.open_archive(password, source).await?;
@@ -873,15 +900,26 @@ impl ConfigMigrationAdapter {
 
         // Filesystem writes are blocking.
         tokio::task::spawn_blocking(move || {
+            if adoption_journal_present(&data_root).map_err(import_inspection_error)? {
+                return Err(ConfigMigrationError::Internal {
+                    details: "an import adoption transaction must finish before staging".to_owned(), source: None,
+                });
+            }
+            if matches!(inspect_pending_import(&data_root).map_err(import_inspection_error)?, PendingImportState::Rejected(_))
+                && !replace_rejected_import
+            {
+                return Err(ConfigMigrationError::IncompatibleBundle {
+                    reason: "rejected import data is retained; explicit replacement confirmation is required".to_owned(), source: None,
+                });
+            }
             let layout = StagingLayout::new(data_root);
-            layout.write(&archive, &marker)
+            layout.write(&archive, &marker).map_err(map_staging_err)
         })
         .await
         .map_err(|error| ConfigMigrationError::Internal {
             details: "staging task failed to run".to_string(),
             source: Some(Box::new(error)),
-        })?
-        .map_err(map_staging_err)?;
+        })??;
 
         if !has_kek {
             uc_warn!("staged bundle carried no KEK; unlock will be required after apply");
@@ -901,12 +939,49 @@ impl StageConfigImportPort for ConfigMigrationAdapter {
         &self,
         password: &Passphrase,
         source: &Path,
+        replace_rejected_import: bool,
     ) -> Result<StagedConfigImport, ConfigMigrationError> {
-        let result = self.stage_import_inner(password, source).await;
+        let result = self
+            .stage_import_inner(password, source, replace_rejected_import)
+            .await;
         if let Err(error) = &result {
             record_boundary_failure("stage_import", error);
         }
         result
+    }
+    async fn rejected_import(&self) -> Result<Option<ConfigImportRejection>, ConfigMigrationError> {
+        let root = self.paths.app_data_root.clone();
+        let span = Span::current();
+        let result = tokio::task::spawn_blocking(move || {
+            let _entered = span.enter();
+            if adoption_journal_present(&root).map_err(import_inspection_error)? {
+                return Err(ConfigMigrationError::Internal {
+                    details: "import adoption remains in progress".to_owned(),
+                    source: None,
+                });
+            }
+            match inspect_pending_import(&root).map_err(import_inspection_error)? {
+                PendingImportState::Rejected(reason) => Ok(Some(reason)),
+                PendingImportState::Absent | PendingImportState::Applicable => Ok(None),
+            }
+        })
+        .await
+        .map_err(|error| ConfigMigrationError::Internal {
+            details: "import status task failed to run".to_owned(),
+            source: Some(Box::new(error)),
+        })?;
+        if let Err(error) = &result {
+            record_boundary_failure("query_rejected_import", error);
+        }
+        result
+    }
+}
+
+/// 检查失败保留来源，不能被解释为无拒绝状态或覆盖许可。
+fn import_inspection_error(error: std::io::Error) -> ConfigMigrationError {
+    ConfigMigrationError::Io {
+        details: "pending import inspection failed".to_owned(),
+        source: Some(Box::new(error)),
     }
 }
 

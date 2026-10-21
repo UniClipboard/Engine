@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use uc_observability_contract::uc_warn;
 use uuid::Uuid;
 
 use uc_application::deps::{ProfileLifecycleRepositoryPort, ProfileLifecycleState};
@@ -20,10 +21,12 @@ use crate::security::{
     ProfileRuntimeLayout, ProfileUpgradeBackupStore,
 };
 
+use super::pending::{
+    adoption_journal_present, inspect_pending_import, read_import_record, PendingImportState,
+};
 use super::staging::{
     complete_pending_import, copy_member, copy_staged_file, install_pending_import,
-    PendingImportError, PendingImportMarker, CONTROL_DB_MEMBER, DB_MEMBER, PENDING_IMPORT_MARKER,
-    PENDING_IMPORT_SCHEMA_VER, RUNTIME_MANIFEST_MEMBER, STAGING_DIR_NAME,
+    PendingImportError, CONTROL_DB_MEMBER, DB_MEMBER, PENDING_IMPORT_MARKER, STAGING_DIR_NAME,
 };
 
 pub(crate) const ADOPTION_JOURNAL: &str = ".config-import-adoption-v1";
@@ -67,44 +70,29 @@ pub(crate) fn adopt_pending_import(
 ) -> Result<(), PendingImportError> {
     let journal_path = paths.app_data_root_dir.join(ADOPTION_JOURNAL);
     let marker_path = paths.app_data_root_dir.join(PENDING_IMPORT_MARKER);
-    let marker = match fs::read(&marker_path) {
-        Ok(bytes) => Some(bytes),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-        Err(error) => return Err(PendingImportError::read_marker_from(error)),
-    };
-    if marker.is_none() && !journal_path.try_exists().map_err(failure)? {
-        return Ok(());
+    if !adoption_journal_present(&paths.app_data_root_dir).map_err(failure)? {
+        match inspect_pending_import(&paths.app_data_root_dir).map_err(failure)? {
+            PendingImportState::Absent => return Ok(()),
+            PendingImportState::Rejected(_) => {
+                uc_warn!("incompatible_staged_import_retained");
+                return Ok(());
+            }
+            PendingImportState::Applicable => {}
+        }
     }
+    let marker = read_import_record(&marker_path).map_err(PendingImportError::read_marker_from)?;
     let mut components: Vec<PathBuf> = COMPONENTS
         .iter()
         .map(|name| paths.app_data_root_dir.join(name))
         .collect();
     components.push(backups.directory());
     components.push(paths.spool_dir.clone());
-    let mut journal: AdoptionJournal = match fs::read(&journal_path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(failure)?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+    let mut journal: AdoptionJournal = match read_import_record(&journal_path).map_err(failure)? {
+        Some(bytes) => serde_json::from_slice(&bytes).map_err(failure)?,
+        None => {
             let marker = marker
                 .as_ref()
                 .ok_or_else(PendingImportError::read_marker)?;
-            let parsed: PendingImportMarker = serde_json::from_slice(marker).map_err(failure)?;
-            if parsed.schema_ver != PENDING_IMPORT_SCHEMA_VER
-                || parsed.staging_dir != STAGING_DIR_NAME
-            {
-                return Err(failure(io::Error::other("invalid staged import layout")));
-            }
-            for member in [DB_MEMBER, CONTROL_DB_MEMBER, RUNTIME_MANIFEST_MEMBER] {
-                if !paths
-                    .app_data_root_dir
-                    .join(STAGING_DIR_NAME)
-                    .join(member)
-                    .is_file()
-                {
-                    return Err(failure(io::Error::other(
-                        "incomplete staged runtime state; re-export required",
-                    )));
-                }
-            }
             // 只在事务尚未开始时读取目标生命周期，重试不打开可能只复制了一部分的 vault。
             let lifecycle = ProfileLifecycleRepository::new(Arc::clone(&storage))
                 .load()
@@ -140,7 +128,6 @@ pub(crate) fn adopt_pending_import(
             write_record(&journal_path, &journal)?;
             journal
         }
-        Err(error) => return Err(failure(error)),
     };
     if journal.format_version != 1 || journal.present.len() != components.len() {
         return Err(failure(io::Error::other("invalid import adoption journal")));

@@ -256,3 +256,112 @@ Extend the existing synchronous file-preservation contract to Windows before cha
 code. Run the maintained real filesystem contracts and public Engine import E2E. Add the existing
 atomic-publish contracts to Windows CI runtime verification. Push only a new fast-forward commit,
 then run the Windows matrix on that exact SHA. Review quota/configuration remains outside task8.
+
+
+## PR226 Engine check follow-up: reuse task9 fixture repair
+
+The failure matches task9 commit `2c3dd6388f03c3712e1f2859cd2f17e9e4983bc5`
+and its retained report. This is an obsolete host assembly fixture, not an unknown production regression.
+Failure modes: the invalid marker fails before the intended backup denial; the backup-reuse fixture
+never reaches legacy adoption; removing archive or identity assertions would hide retry corruption.
+Reuse only the exact host.rs test diff from that commit. Keep the Application startup owner and
+production ordering unchanged. The backup-denied fixture must reach backup denial without an import
+marker. The reuse fixture must fail lifecycle persistence after backup and legacy adoption, then keep
+one archive with identical bytes across retries, adopted identity and no lifecycle marker.
+Run both existing host tests and the maintained public import E2E; retain failures and exact source
+receipts. Task9 already contains this repair. Downstream synchronization must retain it, not reapply
+an alternative fixture. Do not import task9 log-profile implementation into task8.
+
+
+## PR226 review repair: export bounds and rejected staging (before code)
+
+Failure modes: schema-1 or incomplete staging blocks every boot; discarding a marker after a
+journal exists loses adoption recovery; untrusted marker paths enlarge cleanup scope; cleanup
+failure is hidden; blob buffers exceed the cumulative 2 GiB import limit; tar padding and AEAD
+overhead push an otherwise accepted export past the reader limit; concurrent blob growth changes
+the snapshot; synchronous capture stalls a Tokio worker; stale schema prose misleads hosts.
+
+The existing import owner rejects incompatible staging only before a journal exists, uses fixed
+staging cleanup paths, emits a fixed warning and lets ordinary startup continue. Active journals
+remain fail-closed and retain all recovery data. The existing export adapter owns capture, revision
+verification, bounded archive packing, sealing and writing inside a Span-propagated blocking task.
+Use maintained tar streaming for on-disk blobs, preflight one cumulative budget before blob reads,
+reserve tar and AEAD overhead, and keep the existing typed size rejection. No new crypto or format.
+Write public Engine E2E first: upgraded schema-1 and incomplete schema-2 staging must permit first
+and subsequent startup with original Space/history/config; two sparse 1 GiB blobs must reject export
+without allocating their contents or replacing the destination. Keep existing import/recovery E2E.
+
+
+## PR226 additional CI failure: active log-count fixture (before change)
+
+Run 39619613559 reports 302 disk records versus 301 from the earlier counter snapshot plus legacy.
+The public diagnostic report and later directory read are not atomic while the Engine writes logs.
+An arbitrary tolerance or retry would hide losses. Keep the active snapshot as a lower-bound check;
+then complete public Engine shutdown and public process-observability shutdown before demanding
+exact equality and count growth across leave. Preserve same-instance create after leave and legacy
+migration checks. Change only the existing binding E2E fixture. Retain exact numeric artifacts.
+The detailed pre-change diagnosis and original failure live in the review-repair evidence directory.
+
+
+## Retained rejected import repair (authorized product decision, before code)
+
+The user approved retaining rejected staging, continuing the original Space and exposing a durable
+queryable rejection with re-export guidance. The old cleanup can destroy the only remaining source.
+Failure modes: deleted unique staging; overwritten rejected staging on the next Stage call; ephemeral
+warning mistaken for a durable result; original recovery skipped merely because a rejected marker
+exists; an active adoption journal incorrectly treated as safe rejection; I/O treated as incompatibility;
+marker-selected paths or staging symlinks reach active data; invalid replacement deletes the source;
+unbounded rejection archives; new diagnostic plaintext carries secrets.
+
+Keep the original pending marker and staging bytes in place. No new format, credential copy, backup
+folder or plaintext status file is needed. Their persisted contents are the durable rejection state.
+The import owner performs one read-only classification reused by adoption, recovery, query and Stage.
+Diagnostics queries return a safe typed reason and fixed re-export guidance. Startup continues only
+for rejected inputs with no journal and successful inspection. Active journals and inspection errors
+retain the existing recovery/failure boundary. Original key recovery runs normally for rejected imports.
+
+One pending slot remains bounded. Stage defaults to refusing replacement of rejected data. A new
+explicit replace_rejected_import input authorizes replacing that slot only after the new bundle has
+passed the maintained complete validation. This is an irreversible host-confirmed action, not automatic
+cleanup. Invalid passwords/bundles and default Stage retain all old bytes. Successful explicit restage
+reuses the existing staging writer and adoption transaction; FactoryReset retains its existing explicit
+whole-profile deletion contract. No extra retention copies or automatic pruning are added.
+
+Write public E2E before production changes: actual legacy schema-1 archive staging, schema-2 missing
+member after public Stage, no remaining external bundle, full byte inventories across repeated starts,
+durable QueryDiagnostics rejection, original history reads and new encrypted writes, fixed guidance,
+default/invalid replacement preservation, explicit valid replacement and successful later import,
+active-journal and I/O failure preservation, traversal fields and staging/member/marker symlinks.
+Reuse existing archive/crypto fixture tools only for old-version fixture arrangement; no secure-store
+copying. Preserve all prior failures and 0a623a30 as immutable historical evidence.
+
+
+## Formal Mobile rejection query (before binding code)
+
+Task11 audited whole-directory iOS legacy migration and confirmed it can carry pending imports even
+without an import button. The existing observability query is unrelated. Failure modes: no formal
+binding path; a stale/native-mismatched method; converting Engine read failure into None; a one-shot
+event missed across restart; private-file parsing in Mobile; losing original Space/history while
+reporting rejection; leaking source materials through a binding record. Task11 agreed the typed
+query and error semantics through Herdr coordination, retained in the evidence directory.
+
+Add only MobileEngine.query_rejected_config_import -> Result<Option<RejectedConfigImport>, BindingError>.
+The existing worker sends real Operation::QueryDiagnostics and projects its rejection field. Map
+three reasons to a UniFFI enum, preserve the fixed message and Engine code/category/retryable. None
+never means applied. Mobile owns localization and UI. No write/import API is added to Mobile.
+Write a real binding integration E2E before implementation: original Space, stored history restored
+through the host clipboard, new encrypted writes, repeated starts with both old and incomplete
+staging, unchanged source bytes, typed reasons/guidance, and Engine query errors instead of None.
+Generate actual Swift and Kotlin bindings from the matching host library, record symbols/checksums
+and hashes, and hand off the new fixed stack to tasks9/10/11. Native compilation and product UI
+acceptance remain downstream gates. No peer worktree changes or production data access.
+
+## PR follow-up: completion barriers and inherited CI failures
+
+Failure modes recorded before the follow-up changes:
+
+- A manual rebuild is accepted before its background task starts. A query can observe the previous ready generation, pass an entry-count check, then race with the requested rebuild. The test must observe a new completed rebuild through the public status query before checking all existing tag and content invariants.
+- A recovered file worker emits the recovery record into its own queue. A flush already queued by the caller can acknowledge before that recovery record is written. The test must flush after observing recovery, then require exactly one persisted recovery record with the original envelope assertions.
+- The leave resource test can sample asynchronous reclamation and bounded connection-pool variation. Reuse only task9 ae75c75624e913a77697664e7045bff8649bf4b7's exact test change. Its retained negative controls reject one leaked descriptor or task per cycle. Do not merge task9 implementation.
+
+The first two tests and their relevant production modules have no diff against the fetched task7 baseline. The first local replay passed both tests. Repeated original runs and the complete remote failure log are retained. No import implementation or assertion is removed to address these failures.

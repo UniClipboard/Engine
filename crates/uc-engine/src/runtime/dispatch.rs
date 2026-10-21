@@ -316,9 +316,9 @@ impl EngineRuntime for ProductionRuntime {
                     )
                     .await
                 }
-                Operation::QueryDiagnostics => Ok(execute_query_diagnostics(
-                    self.current_facade().await?.as_ref(),
-                )),
+                Operation::QueryDiagnostics => {
+                    execute_query_diagnostics(self.current_facade().await?.as_ref()).await
+                }
                 Operation::ExportDiagnosticLogs(input) => {
                     execute_export_diagnostic_logs(
                         self.current_facade().await?.as_ref(),

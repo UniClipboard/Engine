@@ -445,7 +445,7 @@ A missing file is optional. A symlink, directory, I/O failure, or file larger th
 The declaration must contain only configuration. Hosts must not declare credentials or user content as configuration.
 The existing encrypted bundle and credential policies remain unchanged.
 
-The archive member is `ui-state/<name>`. The historical prefix and manifest schema version 1 remain unchanged.
+The archive member is `ui-state/<name>`. The historical prefix remains unchanged.
 Import restores that member to `<data_root>/<name>` only if the receiving host declares the same name.
 The archive and its manifest cannot select any other destination.
 Undeclared members do not create host files. A missing member preserves the existing destination file.
@@ -520,6 +520,52 @@ starts on fresh and existing targets, first and subsequent starts, source Space 
 copy-failure replay, retained target bytes and recovery of the old target with its original passphrase.
 The original incomplete legacy bundle is accepted only as an explicit rejection with target state unchanged.
 
+Unsupported or incomplete pending imports left by an older Engine are rejected before adoption starts.
+Engine retains the original `pending-import.json` and the entire `import-staging/` tree byte for byte.
+It does not delete, relocate, copy or rewrite rejected materials. These existing persisted inputs are
+also the persistent rejection state. No additional credential file, journal format, backup series or
+plaintext status file is introduced. Ordinary startup continues with the original profile. Rejected
+staging does not bypass original-profile key recovery. An existing adoption journal or an inspection
+I/O failure still follows the recovery/failure path; it must not be treated as a safe rejection.
+
+`QueryDiagnostics` returns `rejected_config_import: Option<RejectedConfigImportSummary>`, including a
+safe `reason` (`unsupported_format`, `malformed_marker`, or `missing_runtime_members`) and the fixed
+message `Import was not completed. Re-export the configuration bundle using the new version.` Hosts
+must display the rejection and localized re-export guidance after startup, including subsequent starts.
+The status is read from persisted inputs on each query; it is not a once-only event or log message.
+No source path, member name, profile identity or secret is included. `None` means there is no rejected
+pending input; it does not certify a successful import. Stage success still means pending, not applied.
+
+Mobile hosts use the formal UniFFI method `MobileEngine.query_rejected_config_import()`.
+It returns `Result<Option<RejectedConfigImport>, BindingError>` by executing the real Engine
+`QueryDiagnostics` operation. The record contains the typed `ConfigImportRejectionReason` and the
+same fixed message. It does not read private files or use the process-observability status query.
+Engine query errors retain `BindingError::Engine { code, category, retryable }`; they are never
+converted to `None`. Hosts query after startup and successful session recovery/resume, show a
+separate status-read failure when the query fails, and localize by reason rather than parsing message.
+Use Swift/Kotlin generated from the matching UniFFI library; regeneration is part of this interface change.
+No Mobile write or configuration-import operation is added. Product UI remains host-owned.
+
+The single pending slot remains bounded and retained until an explicit action replaces or removes it.
+`StageConfigImportInput.replace_rejected_import` must be `false` unless the host has obtained explicit
+confirmation to irreversibly replace the retained rejected materials. With `false`, a new Stage returns
+`Incompatible` and preserves all old bytes. With `true`, the new bundle and password must first pass
+complete validation; only then may the maintained staging writer replace the old slot. Failed validation
+never releases old materials. Confirmation must explain that the retained data may be the only source
+and that replacement is irreversible. An explicitly requested whole-profile FactoryReset also deletes
+this slot under its existing deletion contract. Ordinary startup, diagnostic queries and export do not.
+There is no automatic pruning, unbounded rejection archive, or hidden credential-copy recovery path.
+
+Only fixed Engine-owned paths are inspected. Marker-supplied destinations cannot select filesystem
+paths. Inspection rejects marker, staging-tree or member symlinks and nonregular objects with a storage
+failure; it does not follow them or convert an I/O fault into permission to continue or replace data.
+The host must supply an exclusively owned profile root. Adversarial replacement of ancestor directories
+outside that root is outside the exclusive-profile contract.
+
+Export checks the cumulative tar size, including headers, padding and the AEAD size allowance, before
+reading blob contents. Oversized exports fail without replacing the destination. Capture and revision
+verification run in one blocking task with the caller's tracing span. Both database snapshots and blobs
+stream into the bounded tar. Scratch snapshots are cleaned on success and failure.
 
 ## Host-declared log profile
 
@@ -545,9 +591,9 @@ Removed from the Engine contract: `Operation::UpdateDebugMode`, `OperationKind::
 `UpdateDebugModeInput`, `DebugModeUpdateSummary`, `OperationResult::DebugModeUpdated`,
 `DiagnosticsStatusSummary.debug_mode`, `DiagnosticsStatusSummary.restart_required`,
 `GeneralSettingsSummary.debug_mode`, `GeneralSettingsPatch.debug_mode`, and the manifest key `debugMode`.
-Error code 1412 is retired for the diagnostics group (`QUERY_DIAGNOSTICS_FAILED_CODE` 1411 is
-retired too, because `QueryDiagnostics` can no longer fail). Code 1412 stays assigned to
-`RECEIVE_UNAVAILABLE_CODE` in the receive group.
+Error code 1412 is retired for the diagnostics group. It stays assigned to
+`RECEIVE_UNAVAILABLE_CODE` in the receive group. `QUERY_DIAGNOSTICS_FAILED_CODE` (1411) stays,
+because `QueryDiagnostics` still fails when the retained-import status cannot be read.
 
 A legacy `general.debug_mode` of any JSON type is ignored on load and not written on the next save.
 The settings schema version does not change.

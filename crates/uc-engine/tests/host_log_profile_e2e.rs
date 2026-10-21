@@ -221,11 +221,13 @@ async fn observe(
     name: &'static str,
 ) -> Step {
     let OperationResult::DiagnosticsStatus(DiagnosticsStatusSummary {
+        rejected_config_import,
         effective_log_profile,
     }) = engine.execute(Operation::QueryDiagnostics).await.unwrap()
     else {
         panic!("unexpected diagnostics result");
     };
+    assert_eq!(rejected_config_import, None, "no pending import exists");
     let capture_mode = match runtime.query_local_diagnostic_status().capture.mode {
         LocalCaptureMode::Standard => "standard",
         LocalCaptureMode::Detailed => "detailed",

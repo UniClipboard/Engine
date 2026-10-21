@@ -8,4 +8,4 @@
 
 mod facade;
 
-pub use facade::{ConfigMigrationDeps, ConfigMigrationFacade};
+pub use facade::{ConfigMigrationDeps, ConfigMigrationFacade, RejectedConfigImportView};

@@ -1,11 +1,11 @@
 //! Chunk-level AEAD streaming encoder and decoder for clipboard wire transfer.
 //!
-//! V3-only wire format with zstd compression for payloads exceeding `COMPRESSION_THRESHOLD`.
+//! V3/V4 wire formats with zstd compression for payloads exceeding `COMPRESSION_THRESHOLD`.
 //!
 //! # Memory Contract
-//! Memory usage is bounded by CHUNK_SIZE x 2 regardless of total payload size:
-//! - Encoder: one plaintext chunk slice (no copy) + one ciphertext Vec<u8> per iteration.
-//! - Decoder: one ciphertext Vec<u8> + one plaintext Vec<u8> per chunk, appended to output.
+//! Chunk encryption uses bounded per-chunk working buffers. Transfer preparation
+//! also holds the plaintext, optional compressed data, and complete ciphertext.
+//! Compression uses a single-threaded context without a per-transfer worker pool.
 //!
 //! # V3 Wire Format (37-byte header)
 //! ```text
@@ -46,7 +46,7 @@ use uc_infra_crypto::secrets::MasterKey;
 use uc_infra_security::InMemorySession;
 
 /// Nominal chunk size: 256 KB.
-/// Peak memory per encode or decode call: ~2 x CHUNK_SIZE.
+/// Per-chunk working buffers exclude the complete input and output allocations.
 pub const CHUNK_SIZE: usize = 256 * 1024;
 
 /// Magic bytes identifying a V3 chunked clipboard payload ("UC3\0").
@@ -70,11 +70,6 @@ pub const MAX_DECOMPRESSED_SIZE: usize = RECEIVE_PLAINTEXT_CAP;
 
 /// Zstd compression level (consistent with Phase 4 blob at-rest choice).
 pub const ZSTD_LEVEL: i32 = 3;
-
-/// Payloads larger than this use multi-threaded zstd compression.
-/// Below this threshold, single-threaded `zstd::bulk::compress` is used to
-/// avoid thread-pool startup overhead for small payloads.
-const PARALLEL_COMPRESSION_THRESHOLD: usize = 1024 * 1024; // 1 MiB
 
 /// Errors that can occur during chunked transfer encoding or decoding.
 ///
@@ -414,25 +409,6 @@ impl ChunkedDecoder {
     }
 }
 
-/// Compress `data` with zstd, using multi-threaded mode for large payloads.
-///
-/// Payloads above `PARALLEL_COMPRESSION_THRESHOLD` (1 MiB) use zstd's
-/// built-in worker pool (one thread per core), which significantly reduces
-/// wall-clock time for multi-megabyte clipboard content. Smaller payloads
-/// use single-threaded `zstd::bulk::compress` to avoid thread-pool overhead.
-fn compress_zstd(data: &[u8], level: i32) -> std::io::Result<Vec<u8>> {
-    if data.len() < PARALLEL_COMPRESSION_THRESHOLD {
-        return zstd::bulk::compress(data, level).map_err(std::io::Error::other);
-    }
-    let n_workers = std::thread::available_parallelism()
-        .map(|n| n.get() as u32)
-        .unwrap_or(1);
-    let mut encoder = zstd::Encoder::new(Vec::new(), level)?;
-    encoder.multithread(n_workers)?;
-    encoder.write_all(data)?;
-    encoder.finish()
-}
-
 /// `TransferCipherPort` 的基础设施适配器。
 ///
 /// 端到端会话管理: 内部持有 uc-infra-security 的 `InMemorySession` 具体类型,
@@ -484,7 +460,8 @@ impl TransferCipherPort for TransferCipherAdapter {
         let (data_to_encrypt, compression_algo) = if plaintext.len() > COMPRESSION_THRESHOLD {
             let _guard = info_span!("transfer.compress", input_len = plaintext.len()).entered();
             let compressed = observe_blob_publish_sync_result(LocalWorkStep::BlobCompress, || {
-                compress_zstd(plaintext, ZSTD_LEVEL)
+                // A fresh multithreaded context reserves large worker buffers even for small images.
+                zstd::bulk::compress(plaintext, ZSTD_LEVEL)
             })
             .map_err(|e| {
                 TransferCipherError::Internal(
@@ -822,6 +799,10 @@ mod tests {
             .downcast_ref::<std::io::Error>()
             .expect("read error stays in the chain");
         assert_eq!(io.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    mod compression_tests {
+        include!("chunked_transfer/compression_tests.rs");
     }
 
     mod blob_publish_observability_tests {

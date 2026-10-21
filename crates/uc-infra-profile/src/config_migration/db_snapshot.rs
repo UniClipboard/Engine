@@ -47,6 +47,18 @@ pub enum DbSnapshotError {
 /// pre-existing target). The scratch file is removed before returning on the
 /// success path.
 pub fn snapshot_to_bytes(pool: &DbPool, scratch_path: &Path) -> Result<Vec<u8>, DbSnapshotError> {
+    snapshot_to_file(pool, scratch_path)?;
+    let bytes = std::fs::read(scratch_path)?;
+    // Best-effort cleanup; a leftover scratch file is not fatal but we surface
+    // a hard failure to read because that would mean an incomplete snapshot.
+    let _ = std::fs::remove_file(scratch_path);
+
+    Ok(bytes)
+}
+
+/// 将一致快照留在调用方指定的 scratch 文件，供有总预算的流式导出读取。
+/// 调用方负责在成功和失败后回收 scratch 文件。
+pub(super) fn snapshot_to_file(pool: &DbPool, scratch_path: &Path) -> Result<(), DbSnapshotError> {
     // VACUUM INTO refuses to overwrite; clear any stale scratch file first.
     if scratch_path.exists() {
         std::fs::remove_file(scratch_path)?;
@@ -63,12 +75,7 @@ pub fn snapshot_to_bytes(pool: &DbPool, scratch_path: &Path) -> Result<Vec<u8>, 
     conn.batch_execute(&sql)?;
     drop(conn);
 
-    let bytes = std::fs::read(scratch_path)?;
-    // Best-effort cleanup; a leftover scratch file is not fatal but we surface
-    // a hard failure to read because that would mean an incomplete snapshot.
-    let _ = std::fs::remove_file(scratch_path);
-
-    Ok(bytes)
+    Ok(())
 }
 
 #[cfg(test)]

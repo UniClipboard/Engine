@@ -24,6 +24,7 @@ pub mod archive;
 pub mod bundle;
 pub mod db_snapshot;
 pub mod manifest;
+pub(crate) mod pending;
 pub mod secret_keys;
 pub mod staging;
 
@@ -274,7 +275,7 @@ mod tests {
 
         let staged = fx
             .adapter
-            .stage_import(&password, &dest)
+            .stage_import(&password, &dest, false)
             .await
             .expect("stage should succeed");
 
@@ -355,7 +356,10 @@ mod tests {
             .await
             .expect("export should succeed without identity files");
 
-        fx.adapter.stage_import(&password, &dest).await.unwrap();
+        fx.adapter
+            .stage_import(&password, &dest, false)
+            .await
+            .unwrap();
         let layout = StagingLayout::new(&fx.data_root);
         // No identity files reached staging.
         assert!(!layout
