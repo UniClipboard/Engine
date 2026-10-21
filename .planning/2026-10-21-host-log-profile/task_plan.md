@@ -86,3 +86,12 @@ Facts found before any change:
 - [x] 5. Docs, downstream handoff
 - [x] 6. Task7 old-anchor smoke investigation (root cause found, smoke still NOT EXECUTED; see findings.md)
 - [ ] 7. Full checks on final immutable SHA
+
+## Follow-up A (after checkpoint ca21e54e): host.rs backup-reuse test
+
+Failure modes written before changes:
+1. Production regression: a failed pending import mutates legacy layout or captures a backup before the retained-originals transaction, so a retry cannot restore the first state.
+2. Production regression: a failure after backup capture (legacy adoption, lifecycle write) creates a second, different backup on retry, or leaves the legacy layout half-adopted.
+3. Test obsolete: task8 deliberately moved `apply_pending_import` before `ensure_backup` (`976b9ffe`, `use_case.rs`). A poisoned marker now fails first, so the test's "failure after backup and legacy adoption" never happens.
+4. Weakened sibling: `startup_preparation_stops_before_legacy_mutations_when_backup_fails` also uses the poisoned marker, so it may now pass because the import fails, not because the backup is denied.
+5. A fix that deletes, ignores or loosens the assertions (identical archive bytes, adopted identity, absent lifecycle marker) would hide mode 2.
