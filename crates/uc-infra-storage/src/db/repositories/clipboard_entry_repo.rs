@@ -18,8 +18,10 @@ use diesel::ExpressionMethods;
 use diesel::OptionalExtension;
 use diesel::RunQueryDsl;
 use diesel::SqliteConnection;
+use diesel::{sql_types::Text, QueryableByName};
 use diesel::{BoolExpressionMethods, Connection};
 use tracing::instrument;
+use uc_application::facade::clipboard_history::HistoryDeletionTargetsPort;
 use uc_core::clipboard::{
     check_receive_deletion, ClipboardEntry, ClipboardRepositoryError, ClipboardSelectionDecision,
 };
@@ -39,6 +41,26 @@ pub struct DieselClipboardEntryRepository<E, ME, MS, RE> {
     entry_mapper: ME,
     selection_mapper: MS,
     row_entry_mapper: RE,
+}
+
+#[derive(QueryableByName)]
+struct HistoryDeletionTarget {
+    #[diesel(sql_type = Text)]
+    entry_id: String,
+}
+
+#[async_trait::async_trait]
+impl<E: DbExecutor, ME: Send + Sync, MS: Send + Sync, RE: Send + Sync> HistoryDeletionTargetsPort
+    for DieselClipboardEntryRepository<E, ME, MS, RE>
+{
+    async fn history_deletion_targets(&self) -> Result<Vec<EntryId>> {
+        self.executor.run(|conn| {
+            let rows = diesel::sql_query(
+                "SELECT entry_id FROM clipboard_entry UNION SELECT entry_id FROM entry_receive_attempt UNION SELECT entry_id FROM file_transfer WHERE entry_id IS NOT NULL UNION SELECT entry_id FROM receive_artifact_log UNION SELECT entry_id FROM directory_publish_log",
+            ).load::<HistoryDeletionTarget>(conn)?;
+            Ok(rows.into_iter().map(|row| EntryId::from(row.entry_id)).collect())
+        })
+    }
 }
 
 impl<E, ME, MS, RE> DieselClipboardEntryRepository<E, ME, MS, RE> {
@@ -918,6 +940,32 @@ mod tests {
             !updated,
             "favoriting an unknown entry must report no row update"
         );
+    }
+
+    #[tokio::test]
+    async fn history_clear_targets_include_unsaved_and_orphan_state_without_duplicate_entries() {
+        let (repo, executor, _tempdir) = make_repo();
+        let (entry, _) = seed_entry_with_receive_state(&executor, "completed", "landed");
+        executor.run(|conn| {
+            diesel::sql_query("INSERT INTO entry_receive_attempt (entry_id, current_attempt_id, attempt_state, updated_at_ms) VALUES ('unsaved', 'attempt', 'failed', 0)").execute(conn)?;
+            diesel::sql_query("INSERT INTO file_transfer (transfer_id, entry_id, binding_state, receive_item_id, status, source_device, metadata_ciphertext, created_at_ms, updated_at_ms) VALUES ('orphan-transfer', 'orphan', 'legacy', 'item', 'failed', 'peer', X'00', 0, 0)").execute(conn)?;
+            diesel::sql_query("INSERT INTO receive_artifact_log (entry_id, attempt_id, phase, resolution, artifact_ciphertext, updated_at_ms) VALUES ('artifact-only', 'old', 'settled', 'rolled_back', X'00', 0)").execute(conn)?;
+            diesel::sql_query("INSERT INTO directory_publish_log (entry_id, attempt_id, phase, root_map_ciphertext, partial_publication, partial_root_count, landed, updated_at_ms) VALUES ('directory-only', 'old', 'landed', X'00', 0, 0, 1, 0)").execute(conn)?;
+            Ok(())
+        }).unwrap();
+        let targets = repo.history_deletion_targets().await.unwrap();
+        assert_eq!(targets.len(), 5);
+        for id in [
+            entry,
+            EntryId::from("unsaved"),
+            EntryId::from("orphan"),
+            EntryId::from("artifact-only"),
+            EntryId::from("directory-only"),
+        ] {
+            assert!(targets.contains(&id));
+            assert!(repo.delete_entry_with_receive_state(&id).await.unwrap());
+        }
+        assert!(repo.history_deletion_targets().await.unwrap().is_empty());
     }
 
     #[tokio::test]

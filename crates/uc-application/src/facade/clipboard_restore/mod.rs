@@ -120,6 +120,7 @@ impl ClipboardRestoreFacade {
         let ClipboardEntryPorts {
             get: entry_get,
             list: _entry_list,
+            list_for_deletion: _,
             save: _entry_save,
             touch: entry_touch,
             set_favorite: _entry_set_favorite,

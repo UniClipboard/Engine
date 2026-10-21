@@ -241,3 +241,47 @@ async fn background_panic_is_retained_by_repeated_shutdown() {
         assert!(!format!("{error:?}").contains("private"));
     }
 }
+
+#[tokio::test]
+async fn history_clear_stops_preparing_receive_without_opening_initial_readiness() {
+    let attempts = AttemptGate::empty();
+    let readiness = Arc::new(ReceiveReadinessCoordinator::new());
+    let receive_work = Arc::new(ReceiveWorkRegistry::default());
+    let receiver = ApplyInboundClipboardUseCase::store_only_pull(StoreOnlyPullDeps {
+        common: InboundApplyCommonDeps {
+            receive_work: receive_work.clone(),
+            entry_repo: Arc::new(MockEntryRepo::new()),
+            capture: Arc::new(MockCapture::new()),
+            blob_materializer: Arc::new(MockBlobMaterializer::new()),
+            receive_attempts: InboundReceiveAttemptDeps {
+                get: attempts.clone(),
+                begin: attempts.clone(),
+                claim_commit: attempts.clone(),
+                request_cancel: attempts.clone(),
+                begin_failure: attempts.clone(),
+                commit: attempts.clone(),
+                clock: attempts,
+            },
+            receive_artifact_cleanup: Arc::new(NoopReceiveArtifactCleanup),
+            receive_readiness: Arc::clone(&readiness),
+            host_event_emitter: Arc::new(HostEventBus::new()),
+            search_live_index: Arc::new(RecordingLiveIndex {
+                calls: AtomicUsize::new(0),
+            }),
+            availability: Arc::new(FakeAvailability { available: true }),
+            entry_identity_coordinator: Arc::new(EntryIdentityCoordinator::new()),
+        },
+    });
+    let (input, _) = fixture_input("waiting-initial-readiness");
+    let mut receive = Box::pin(receiver.execute(input));
+    assert!(timeout(Duration::from_millis(20), receive.as_mut())
+        .await
+        .is_err());
+    let mut scope = receive_work.clear_scope().await.unwrap();
+    timeout(Duration::from_secs(1), scope.stop())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(receive.await, Err(ApplyInboundError::Stopped)));
+    scope.complete();
+}

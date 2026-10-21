@@ -1,124 +1,110 @@
-use anyhow::{Context, Result};
+//! 清空历史及未保存接收的完整负责人；停止、目标快照和逐项删除不交给宿主拼接。
+use super::delete_entry::DeleteClipboardEntryUseCase;
+use crate::transfer::receive::work::ReceiveWorkRegistry;
+use anyhow::{Context, Error as SourceError, Result};
+use async_trait::async_trait;
+use std::error::Error;
+use std::fmt::{self, Display, Formatter};
 use std::sync::Arc;
-use tracing::{info_span, Instrument};
-use uc_core::ports::clipboard::ListClipboardEntriesPort;
+use uc_core::ids::EntryId;
 use uc_observability_contract::{
     error_source::io_error_kind, log_fields::log_id, uc_info, uc_warn,
 };
 
-use super::delete_entry::DeleteClipboardEntryUseCase;
+#[async_trait]
+pub trait HistoryDeletionTargetsPort: Send + Sync {
+    /// 取得全部历史与持久接收状态对应的去重条目标识，不读取业务正文。
+    async fn history_deletion_targets(&self) -> Result<Vec<EntryId>>;
+}
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct ClearHistoryResult {
     pub(crate) deleted_count: u64,
-    pub(crate) failed_entries: Vec<(String, String)>,
+    pub(crate) failed_entries: Vec<(String, SourceError)>,
 }
 
-/// Use case for clearing all clipboard history entries via paginated listing
-/// and per-entry deletion.
+#[derive(Debug)]
+struct ClearHistoryFailure(Vec<(String, SourceError)>);
+impl Display for ClearHistoryFailure {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str("history clear could not delete its targets")
+    }
+}
+impl Error for ClearHistoryFailure {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.0.first().map(|(_, source)| source.as_ref())
+    }
+}
+
 pub(crate) struct ClearClipboardHistoryUseCase {
-    list_entries: Arc<dyn ListClipboardEntriesPort>,
+    targets: Arc<dyn HistoryDeletionTargetsPort>,
     delete_uc: Arc<DeleteClipboardEntryUseCase>,
+    receive_work: Arc<ReceiveWorkRegistry>,
 }
-
-const BATCH_SIZE: usize = 1000;
-
 impl ClearClipboardHistoryUseCase {
     pub(crate) fn new(
-        list_entries: Arc<dyn ListClipboardEntriesPort>,
+        targets: Arc<dyn HistoryDeletionTargetsPort>,
         delete_uc: Arc<DeleteClipboardEntryUseCase>,
+        receive_work: Arc<ReceiveWorkRegistry>,
     ) -> Self {
         Self {
-            list_entries,
+            targets,
             delete_uc,
+            receive_work,
         }
     }
 
     #[tracing::instrument(name = "usecase.clear_clipboard_history.execute", skip_all)]
     pub(crate) async fn execute(&self) -> Result<ClearHistoryResult> {
-        let entries = self.collect_all_entries().await?;
-
+        let mut scope = self.receive_work.clear_scope().await?;
+        scope
+            .stop()
+            .await
+            .context("stop receives before history clear")?;
+        let entries = self
+            .targets
+            .history_deletion_targets()
+            .await
+            .context("read history clear targets")?;
         let total = entries.len() as u64;
         uc_info!(
             total_entries = total,
             "Starting bulk clipboard history deletion"
         );
-
-        if total == 0 {
-            return Ok(ClearHistoryResult {
-                deleted_count: 0,
-                failed_entries: Vec::new(),
-            });
-        }
-
-        let mut deleted_count = 0u64;
-        let mut failed_entries: Vec<(String, String)> = Vec::new();
-
-        for entry in &entries {
-            let entry_id_str = entry.entry_id.inner().to_string();
-            match self.delete_uc.execute(&entry.entry_id).await {
+        let mut deleted_count = 0;
+        let mut failed_entries = Vec::new();
+        for entry in entries {
+            match self.delete_uc.execute(&entry).await {
                 Ok(()) => deleted_count += 1,
-                Err(e) => {
+                Err(source) => {
                     uc_warn!(
-                        entry_id = log_id(&entry.entry_id),
+                        entry_id = log_id(&entry),
                         error_kind = "entry_delete",
-                        io_error_kind = io_error_kind(e.as_ref()),
+                        io_error_kind = io_error_kind(source.as_ref()),
                         "Failed to delete entry during bulk clear"
                     );
-                    failed_entries.push((entry_id_str, e.to_string()));
+                    failed_entries.push((entry.to_string(), source));
                 }
             }
         }
-
         uc_info!(
             deleted = deleted_count,
             failed = failed_entries.len(),
             total = total,
             "Clipboard history cleared"
         );
-
-        if deleted_count == 0 && !failed_entries.is_empty() {
-            return Err(anyhow::anyhow!(
-                "All {} entries failed to delete",
-                failed_entries.len()
-            ));
+        if failed_entries.is_empty() {
+            scope.complete();
         }
-
+        if deleted_count == 0 && !failed_entries.is_empty() {
+            return Err(ClearHistoryFailure(failed_entries).into());
+        }
         Ok(ClearHistoryResult {
             deleted_count,
             failed_entries,
         })
     }
-
-    async fn collect_all_entries(&self) -> Result<Vec<uc_core::clipboard::ClipboardEntry>> {
-        let mut entries = Vec::new();
-        let mut offset = 0usize;
-
-        loop {
-            let batch = self
-                .list_entries
-                .list_entries(BATCH_SIZE, offset)
-                .instrument(info_span!(
-                    "list_entries_batch",
-                    batch_size = BATCH_SIZE,
-                    offset = offset
-                ))
-                .await
-                .context("Failed to list entries for bulk delete")?;
-
-            if batch.is_empty() {
-                break;
-            }
-
-            let batch_len = batch.len();
-            entries.extend(batch);
-            offset += batch_len;
-
-            if batch_len < BATCH_SIZE {
-                break;
-            }
-        }
-
-        Ok(entries)
-    }
 }
+
+#[cfg(test)]
+mod tests;

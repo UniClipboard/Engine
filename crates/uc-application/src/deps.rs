@@ -3,6 +3,7 @@
 //! 定义 Application 对象图所需的依赖分组。这些类型只负责打包必需参数，
 //! 不提供分步构建、默认值或隐式装配逻辑，因此不是 Builder。
 
+use crate::clipboard::history::clear_history::HistoryDeletionTargetsPort;
 use crate::clipboard::history_tags::{HistoryEntryTagReaderPort, HistoryTagStorePort};
 pub use crate::transfer::receive::retry::{
     BeginReceiveRetryInput, BeginReceiveRetryPort, ReceiveRetryItem, ReceiveRetryItemState,
@@ -165,6 +166,8 @@ pub struct ClipboardEntryPorts {
     pub get: Arc<dyn GetClipboardEntryPort>,
     /// 以倒序分页方式列出剪贴板条目。
     pub list: Arc<dyn ListClipboardEntriesPort>,
+    /// 清空覆盖的历史与接收状态标识，不读取正文。
+    pub list_for_deletion: Arc<dyn HistoryDeletionTargetsPort>,
     /// 原子保存条目及其表示选择决策。
     pub save: Arc<dyn SaveClipboardEntryPort>,
     /// 更新已有条目的最后活跃时间。

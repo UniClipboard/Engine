@@ -1,3 +1,4 @@
+pub use crate::clipboard::history::clear_history::HistoryDeletionTargetsPort;
 use crate::transfer::receive::work::ReceiveWorkRegistry;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -138,6 +139,7 @@ impl ClipboardHistoryFacade {
         let ClipboardEntryPorts {
             get: entry_get,
             list: entry_list,
+            list_for_deletion,
             save: entry_save,
             touch: _entry_touch,
             set_favorite: entry_set_favorite,
@@ -202,7 +204,7 @@ impl ClipboardHistoryFacade {
             entry_get.clone(),
             entry_delete_with_receive_state,
             rep_list_for_event.clone(),
-            receive_work,
+            receive_work.clone(),
         );
         if let Some(dir) = file_cache_dir.clone() {
             delete_uc = delete_uc.with_file_cache_dir(dir);
@@ -215,7 +217,8 @@ impl ClipboardHistoryFacade {
         }
         let delete_uc = Arc::new(delete_uc);
 
-        let clear_uc = ClearClipboardHistoryUseCase::new(entry_list.clone(), delete_uc.clone());
+        let clear_uc =
+            ClearClipboardHistoryUseCase::new(list_for_deletion, delete_uc.clone(), receive_work);
 
         // cleanup 只在装配方传入了 file_cache_dir 时才有意义：没有 cache
         // 目录就没有可扫描的文件。retention no longer depends on
@@ -511,7 +514,12 @@ impl ClipboardHistoryFacade {
         })?;
         Ok(ClearHistoryResultView {
             deleted_count: result.deleted_count,
-            failed_entries: result.failed_entries,
+            // discarded-source[contract-boundary]: 完整负责人已记录固定失败分类，公开结果不包含下层错误正文。
+            failed_entries: result
+                .failed_entries
+                .into_iter()
+                .map(|(entry, _)| (entry, "entry_delete_failed".into()))
+                .collect(),
         })
     }
 }

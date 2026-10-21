@@ -5,7 +5,6 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use tokio::sync::{Mutex, Notify};
 use tracing::instrument;
 use uc_core::ids::EntryId;
 use uc_core::ports::{
@@ -22,8 +21,6 @@ use uc_observability_contract::{
 
 pub struct ReceiveReadinessCoordinator {
     work: Arc<ReceiveWorkRegistry>,
-    notify: Notify,
-    recovery_lock: Mutex<()>,
     degraded_reason: RwLock<Option<String>>,
 }
 
@@ -52,8 +49,6 @@ impl ReceiveReadinessCoordinator {
         work.close();
         Self {
             work,
-            notify: Notify::new(),
-            recovery_lock: Mutex::new(()),
             degraded_reason: RwLock::new(None),
         }
     }
@@ -70,7 +65,7 @@ impl ReceiveReadinessCoordinator {
             .degraded_reason
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-        self.notify.notify_waiters();
+        self.work.changed.notify_waiters();
     }
 
     pub fn mark_not_ready(&self) {
@@ -87,7 +82,7 @@ impl ReceiveReadinessCoordinator {
 
     pub async fn wait_ready(&self) {
         while !self.is_ready() {
-            let notified = self.notify.notified();
+            let notified = self.work.changed.notified();
             if self.is_ready() {
                 return;
             }
@@ -118,7 +113,7 @@ impl ReceiveReadinessCoordinator {
             return Ok(());
         }
 
-        let _guard = self.recovery_lock.lock().await;
+        let _guard = self.work.recovery_lease().await;
         if self.is_ready() {
             return Ok(());
         }
@@ -385,6 +380,77 @@ mod tests {
     };
 
     use super::*;
+
+    #[tokio::test]
+    async fn recovery_does_not_run_inside_an_accepted_history_clear() {
+        let readiness = ReceiveReadinessCoordinator::new();
+        readiness.mark_ready();
+        let registry = readiness.work_registry();
+        let mut scope = registry.clear_scope().await.unwrap();
+        let called = AtomicUsize::new(0);
+        let mut waiter = Box::pin(readiness.wait_ready());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), waiter.as_mut())
+                .await
+                .is_err()
+        );
+        let mut recovery = Box::pin(readiness.ensure_ready(|| async {
+            called.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), recovery.as_mut())
+                .await
+                .is_err()
+        );
+        assert_eq!(called.load(Ordering::SeqCst), 0);
+        scope.stop().await.unwrap();
+        scope.complete();
+        drop(scope);
+        recovery.await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .unwrap();
+        assert_eq!(called.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn history_clear_seals_prepares_before_waiting_for_an_existing_recovery() {
+        let readiness = Arc::new(ReceiveReadinessCoordinator::new());
+        let registry = readiness.work_registry();
+        let preparing = registry.action();
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let running = {
+            let readiness = readiness.clone();
+            tokio::spawn(async move {
+                readiness
+                    .ensure_ready(|| async {
+                        entered.send(()).unwrap();
+                        released.await.unwrap();
+                        Ok(())
+                    })
+                    .await
+            })
+        };
+        started.await.unwrap();
+        let mut clearing = Box::pin(registry.clear_scope());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), clearing.as_mut())
+                .await
+                .is_err()
+        );
+        assert!(preparing.cancellation().is_cancelled());
+        release.send(()).unwrap();
+        running.await.unwrap().unwrap();
+        assert!(!readiness.is_ready());
+        let mut scope = clearing.await.unwrap();
+        drop(preparing);
+        scope.stop().await.unwrap();
+        scope.complete();
+        drop(scope);
+        assert!(readiness.is_ready());
+    }
 
     #[tokio::test]
     async fn readiness_waiters_open_only_after_reconciliation_succeeds() {

@@ -201,3 +201,14 @@
 - 读取表示失败原先unwrap_or_default，现保留具体source并不删除记录。Application四项定向测试通过（0.00秒）；真实Engine在实际导出完成权屏障内丢弃删除等待后仍停止重试，移除条目／所有接收状态／受管文件，二次NotFound通过（3.53秒）。既有Engine operation监督真实有效，不另建Application任务表。
 - 编译首轮新SQLitecount缺QueryDsl（5处E0599），改用原测试已有count_star；引入的EventId未使用警告已清理。六项SQLite／Application3项初步绿灯与两个真实红测均保留，不把旧快照当最终全通过。准备冻结代码、扩大Core／App／Storage／Engine及实际profile commit集成验证和根门禁。
 - 额外源码证据：DecryptingClipboardRepresentationRepository列表接口仍会在inline解密失败时返回原密文字节；该历史降级没有由本次get_representations错误回归证明安全，后续应沿已存在的认证文件引用能力核对删除／清理失败边界。本轮不冒称已修复该问题。完整预算、clear／更多生命周期、历史来源、1GiB与最终CI仍保留。
+
+## 2026-10-22 清空覆盖未保存接收
+
+- HEAD cb6c0202，原用户四个规划目录保留；上一轮progress。ClearHistory只分页枚举clipboard_entry，空历史即返回，遗漏未保存／失败NoEntry与孤儿接收状态；并且没有整次动作的登记屏障。
+- ReceiveWorkRegistry现有born只跟踪Weak<()>，无法停止并等待尚未登记的准备；本轮将出生身份与独立取消／完成关联，保持原会话世代权威，避免借清空打开外部关闭会话。新增持久目标列表能力归history消费者，Core不加流程接口；完整装配只有一个ClipboardEntryPorts字面量与两个解构位置，可显式迁移。
+
+- 首个真实clear红测因首项导出暂停导致原发送ACK尚未完成，report.accepted为0（clear-no-entry-red.log），修正fixture检查accepted+pending=1；实际收件IncomingPending／SDK导出及无历史条目仍由真实入口证明。随后clear-no-entry-red-fixed.log精确复现ClearHistory在无保存条目时提前返回。
+- 生存登记改为出生动作独立子取消／完成，不改变外部会话代次。ClearScope先同时停止出生动作，等待未登记准备退出或已登记动作明确完成；注册完成丢失不是成功，多失败保存全部typed来源，失败后封口。专属目标集SQL UNION只读标识，合并历史／attempt／条目关联的file_transfer／产物／目录日志；不新增schema。原逐步caller编排及错误字符串化移除。
+- 真实Engine基本clear8.38秒通过；扩大五项Engine32.69秒通过，含清空后接收新内容。Registry相关17通过（0.05秒）、实际初始readiness准备停止1通过（0.02秒）、真实SQLite目标集1通过（0.07秒）。
+- 审查发现readiness.is_ready临时false会启动reconciliation与清空并行；clear-recovery-red.log确证恢复在清空内立即运行。改用共享维护许可，清空先封口／停止再等已有恢复；恢复重新检查ready，不与已接受clear并行。通知也由Registry唯一持有，clear结束能唤醒readiness等待。双向竞争及receive相关58通过（0.11秒），clear相关15通过（0.08秒），待最终整库／根门禁。
+- 尚未绑定entry的provisional及更早输入／出站准备不由本轮出生表证明覆盖，留在全生命周期与准备预算验收中；既有认证资料读取／删除缓存失败边界仍未修复。完整目标不缩减，不把已关联条目清空当全spec完成。

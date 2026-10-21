@@ -1,4 +1,4 @@
-//! 稳定Engine操作驱动真实网络、SQLite与文件成果；只有一次本地导出被注入失败。
+//! 稳定Engine操作驱动真实网络、SQLite与文件成果；测试仅控制本地导出边界。
 use super::{
     empty_engine_host, mount_engine_rendezvous, next_engine_event_matching,
     MemoryHostSecureStorage, StaticHostClipboard, ENGINE_TEST_LOCK,
@@ -10,9 +10,9 @@ use crate::{
     EntryReceiveProgressInput, EntryReceiveRetryOutcome, HistoryEntryInput, HostCapabilities,
     HostCapabilityError, HostCapabilityErrorCategory, HostClipboardSnapshot, HostDirectories,
     HostFileAccess, HostFileHandle, HostFileMetadata, JoinSpaceInput, Operation, OperationResult,
-    ReceiveItemFailureReason, ReceiveProgressSummary, ReceiveRetryUnavailableReason,
-    RemoveMemberInput, RetryEntryReceiveInput, SecretString, SendFilesInput, SettingsPatch,
-    SyncSettingsPatch,
+    QueryHistoryInput, ReceiveItemFailureReason, ReceiveProgressSummary,
+    ReceiveRetryUnavailableReason, RemoveMemberInput, RetryEntryReceiveInput, SecretString,
+    SendFilesInput, SendTextInput, SettingsPatch, SyncSettingsPatch,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -155,7 +155,7 @@ async fn saved_files(engine: &Engine, entry: &str, root: &Path) -> BTreeMap<Vec<
     files
 }
 
-struct PartialReceive {
+struct ReceiveCase {
     source: Engine,
     receiver: Engine,
     source_id: String,
@@ -166,7 +166,7 @@ struct PartialReceive {
     _source_root: TempDir,
     _server: MockServer,
 }
-impl PartialReceive {
+impl ReceiveCase {
     fn retry_input(&self) -> RetryEntryReceiveInput {
         RetryEntryReceiveInput {
             entry_id: self.first.entry_id.clone(),
@@ -180,12 +180,12 @@ impl PartialReceive {
     }
 }
 
-async fn partial_receive() -> PartialReceive {
+async fn receive_case(pause_first: bool) -> ReceiveCase {
     let server = MockServer::start().await;
     mount_engine_rendezvous(&server).await;
     let source_root = tempfile::tempdir().unwrap();
     let receiver_root = tempfile::tempdir().unwrap();
-    let exports = ReceiveExports::install(receiver_root.path(), 1, 3);
+    let exports = ReceiveExports::install(receiver_root.path(), 1, if pause_first { 0 } else { 3 });
     let host = HostCapabilities::new(
         HostDirectories::new(
             source_root.path().join("private"),
@@ -272,7 +272,11 @@ async fn partial_receive() -> PartialReceive {
     else {
         panic!("file send expected")
     };
-    assert_eq!(report.total_accepted, 1);
+    if pause_first {
+        assert_eq!(report.total_accepted + report.total_pending, 1);
+    } else {
+        assert_eq!(report.total_accepted, 1);
+    }
     let EngineEvent::IncomingPending(pending) = next_engine_event_matching(&mut events, |event| {
         matches!(event, EngineEvent::IncomingPending(_))
     })
@@ -280,24 +284,43 @@ async fn partial_receive() -> PartialReceive {
     else {
         panic!("pending receive expected")
     };
-    let first = progress(&receiver, &pending.entry_id, "failed").await;
-    assert_eq!(
-        first
-            .items
-            .iter()
-            .map(|item| item.state.as_str())
-            .collect::<Vec<_>>(),
-        vec!["completed", "failed", "completed"]
-    );
-    assert_eq!(
-        first.items[1].failure_reason,
-        Some(ReceiveItemFailureReason::StorageUnavailable)
-    );
-    assert_eq!(exports.exports.lock().unwrap().len(), 3);
-    let saved = saved_files(&receiver, &first.entry_id, receiver_root.path()).await;
-    assert_eq!(saved.len(), 2);
-    assert!(saved.contains_key(CONTENTS[0]) && saved.contains_key(CONTENTS[2]));
-    PartialReceive {
+    let (first, saved) = if pause_first {
+        timeout(Duration::from_secs(20), exports.paused.notified())
+            .await
+            .unwrap();
+        let first = progress(&receiver, &pending.entry_id, "receiving").await;
+        assert_eq!(
+            receiver
+                .execute(Operation::GetHistoryEntry(HistoryEntryInput {
+                    entry_id: first.entry_id.clone()
+                }))
+                .await
+                .unwrap_err()
+                .category(),
+            EngineErrorCategory::NotFound
+        );
+        (first, BTreeMap::new())
+    } else {
+        let first = progress(&receiver, &pending.entry_id, "failed").await;
+        assert_eq!(
+            first
+                .items
+                .iter()
+                .map(|item| item.state.as_str())
+                .collect::<Vec<_>>(),
+            vec!["completed", "failed", "completed"]
+        );
+        assert_eq!(
+            first.items[1].failure_reason,
+            Some(ReceiveItemFailureReason::StorageUnavailable)
+        );
+        assert_eq!(exports.exports.lock().unwrap().len(), 3);
+        let saved = saved_files(&receiver, &first.entry_id, receiver_root.path()).await;
+        assert_eq!(saved.len(), 2);
+        assert!(saved.contains_key(CONTENTS[0]) && saved.contains_key(CONTENTS[2]));
+        (first, saved)
+    };
+    ReceiveCase {
         source,
         receiver,
         source_id,
@@ -313,7 +336,7 @@ async fn partial_receive() -> PartialReceive {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn real_engine_partial_file_retry_preserves_saved_files_and_only_fetches_failed_item() {
     let _lock = ENGINE_TEST_LOCK.lock().await;
-    let case = partial_receive().await;
+    let case = receive_case(false).await;
     let _release = ReleaseOnDrop(case.exports.clone());
     let receiver = &case.receiver;
     let first = &case.first;
@@ -394,7 +417,7 @@ async fn real_engine_partial_file_retry_preserves_saved_files_and_only_fetches_f
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn real_engine_retry_rechecks_revoked_sender_before_reusing_cached_blob() {
     let _lock = ENGINE_TEST_LOCK.lock().await;
-    let case = partial_receive().await;
+    let case = receive_case(false).await;
     let _release = ReleaseOnDrop(case.exports.clone());
     case.receiver
         .execute(Operation::RemoveMember(RemoveMemberInput {
@@ -430,7 +453,7 @@ async fn real_engine_retry_rechecks_revoked_sender_before_reusing_cached_blob() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn real_engine_cancelled_retry_waits_for_export_and_keeps_previous_successes() {
     let _lock = ENGINE_TEST_LOCK.lock().await;
-    let case = partial_receive().await;
+    let case = receive_case(false).await;
     let _release = ReleaseOnDrop(case.exports.clone());
     let receiver = &case.receiver;
     let OperationResult::EntryReceiveRetry(EntryReceiveRetryOutcome::Accepted { attempt_id }) =
@@ -506,7 +529,7 @@ async fn real_engine_cancelled_retry_waits_for_export_and_keeps_previous_success
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn real_engine_abandoned_deletion_stops_retry_and_removes_all_receive_state() {
     let _lock = ENGINE_TEST_LOCK.lock().await;
-    let case = partial_receive().await;
+    let case = receive_case(false).await;
     let _release = ReleaseOnDrop(case.exports.clone());
     let receiver = &case.receiver;
     assert!(matches!(
@@ -571,5 +594,90 @@ async fn real_engine_abandoned_deletion_stops_retry_and_removes_all_receive_stat
             .category(),
         EngineErrorCategory::NotFound
     );
+    case.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn real_engine_clear_without_saved_entry_waits_for_export_and_removes_receive_state() {
+    let _lock = ENGINE_TEST_LOCK.lock().await;
+    let case = receive_case(true).await;
+    let _release = ReleaseOnDrop(case.exports.clone());
+    let output = case.exports.paths.lock().unwrap()[0].clone();
+    assert!(output.is_file());
+    assert!(
+        timeout(
+            Duration::from_millis(50),
+            case.receiver.execute(Operation::ClearHistory)
+        )
+        .await
+        .is_err(),
+        "无历史条目也不能绕过实际停止与清理"
+    );
+    case.exports.release.add_permits(1);
+    timeout(Duration::from_secs(20), async {
+        loop {
+            let no_receive = case
+                .receiver
+                .execute(Operation::QueryEntryReceiveProgress(
+                    EntryReceiveProgressInput {
+                        entry_id: case.first.entry_id.clone(),
+                    },
+                ))
+                .await
+                .unwrap()
+                == OperationResult::EntryReceiveProgress(None);
+            if no_receive && !output.exists() {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        case.receiver
+            .execute(Operation::GetHistoryEntry(HistoryEntryInput {
+                entry_id: case.first.entry_id.clone()
+            }))
+            .await
+            .unwrap_err()
+            .category(),
+        EngineErrorCategory::NotFound
+    );
+    let text = "receive after completed clear fixture";
+    let OperationResult::EntrySent(report) = case
+        .source
+        .execute(Operation::SendText(SendTextInput {
+            text: text.into(),
+            target_devices: vec![member_id(&case.receiver).await],
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("new send expected")
+    };
+    assert_eq!(report.total_accepted, 1);
+    timeout(Duration::from_secs(20), async {
+        loop {
+            if let OperationResult::HistoryPage { entries, .. } = case
+                .receiver
+                .execute(Operation::QueryHistory(QueryHistoryInput {
+                    cursor: None,
+                    limit: 10,
+                    query: None,
+                }))
+                .await
+                .unwrap()
+            {
+                if entries.len() == 1 && entries[0].preview.as_deref() == Some(text) {
+                    assert_ne!(entries[0].entry_id, case.first.entry_id);
+                    break;
+                }
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
     case.shutdown().await;
 }

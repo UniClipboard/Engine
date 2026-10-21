@@ -19,7 +19,7 @@
 阶段 0 前置证明完成：SDK／Uni 完成等待、原始材料、当前授权、同内容隔离、协议向量、8 组旧资料矩阵与 1GiB 基线均有证据。阶段 1／2 推进：生产获取和提供端已接线，输出／解密及引用／tag 受监督；完整条目结算、部分失败、稳定重试与薄绑定继续。
 
 ## Next Step
-本轮NoEntry删除已形成唯一原子能力，Core拒绝未结算attempt／产物及缺少同attempt回滚证明的目录；旧fallback及内存存在标记已删除。真实Engine丢弃删除等待后仍完成停止／删除，四crate完整nextest 2114通过／9跳过，profile提交集成七项、全部根门禁通过。下一步提交本轮后继续clear的未保存接收、认证文件资料与清理失败边界、其余生命周期和统一完整预算；随后完成历史来源、受管1GiB资源及最终head CI／平台矩阵。不得将本轮验收当作完整spec。
+清空已关联条目及出生接收的切片完成，四crate完整nextest 2124通过／9跳过，根门禁全部通过；下一步继续认证文件资料与删除清理失败边界、未绑定provisional及其余生命周期和统一完整预算；随后完成历史来源、受管1GiB资源及最终head CI／平台矩阵。不得将局部验收当作完整spec。
 
 ## 错误
 - 探针锁 guard 编译错误已修复，probe.log 保留。
@@ -53,3 +53,5 @@
 - 真实Engine重试切片：完整接收及重试仍归Application transfer，调用方只使用SendFiles／查询／RetryEntryReceive。测试组合根对第二个真实文件导出注入一次StorageFull，其余所有能力原样使用实际实现；保存两项成功并报告一项存储失败，随后只重试失败项且保留成功文件的字节、路径和身份。SQLite与既有加密／CAS负责保存，不新增生产接口或持久格式；重试／关闭／重启责任保持。先验证完整基本流程，再扩大重复点击、取消及权限变化，不以fake原子提交代替实际Engine验收。
 
 - 本轮未保存条目删除：完整负责人仍为Application history删除动作，调用方仅DeleteHistoryEntry。删除先由同一receive registry封口并等实际停止，再通过唯一原子删除能力清理保存条目或NoEntry的持久接收状态；真实缺失返回NotFound，旧非终态及未清理产物不允许跳过屏障。仓储在同一事务内解析实际event及是否存在条目／接收状态，调用方不拼接。复用既有schema、启动reconciliation和Engine operation监督；先用真实SQLite验证NoEntry成功、pending拒绝、原子回滚和重复删除，再验证Application完整删除及稳定Engine调用者退出。删除不会清理用户已拥有文件。
+
+- 本轮ClearHistory完整负责人为Application history清空动作；宿主只发ClearHistory。先封住接收登记，同时通知所有出生动作停止，再收集实际结束，之后统一枚举持久历史／attempt／孤儿状态并调用唯一原子删除。清空期间及之前出生的旧动作永不复活；失败保留source及封口，调用者退出继续沿Engine operation监督。无新schema、无Engine步骤查询；清空成功只解开自己的屏障，不打开外部关闭的会话。先用真实Engine首项导出屏障证明无保存条目也必须等待，再接线完整能力，覆盖并发停止、未登记准备、错误与重开竞争及SQLite目标集。

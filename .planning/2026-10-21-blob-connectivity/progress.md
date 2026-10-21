@@ -296,3 +296,11 @@
 - 最终扩大编译首次因新布尔查询缺BoolExpressionMethods得到E0599，no-entry-final-nextest.log保留且未计为测试通过；补齐trait后Core／Application／Storage／Engine完整nextest（dev-tools、no-fail-fast）2114通过／9跳过（149.896秒）。Core删除规则、NoEntry及目录回滚证明SQLite、真实Engine调用者放弃删除等待均在同一轮实际执行通过。
 - Profile inbound_receive_commit_contract六项及encrypting_inbound_receive_commit一项，共七项实际通过；包含NoEntry取消结算、事务原子性、保存证明重开和删除清理。最后metadata解析812包、workspace全目标check（1m31s）、fmt、Rust style、repository preflight、1352站点隐私清单和diff均通过。Cargo串行共享target及原缓存，无临时target或清缓存旁路。
 - 手工差异审查Core纯删除规则／Infra事务边界、同attempt回滚证明、所有状态表回滚及真实Missing、必需依赖／旧fallback删除、读取失败source、Engine原监督及受管／用户文件边界；code-review skill不可用，不冒称技能审查。完整spec仍未完成，准备提交本轮。后续clear的未保存接收、认证文件资料读取、更多失败／关闭责任、完整预算、历史来源、大文件资源与最终CI／平台矩阵继续。
+
+- 首个真实clear红测因首项导出暂停导致原发送ACK尚未完成，report.accepted为0（clear-no-entry-red.log），修正fixture检查accepted+pending=1；实际收件IncomingPending／SDK导出及无历史条目仍由真实入口证明。随后clear-no-entry-red-fixed.log精确复现ClearHistory在无保存条目时提前返回。
+- 生存登记改为出生动作独立子取消／完成，不改变外部会话代次。ClearScope先同时停止出生动作，等待未登记准备退出或已登记动作明确完成；注册完成丢失不是成功，多失败保存全部typed来源，失败后封口。专属目标集SQL UNION只读标识，合并历史／attempt／条目关联的file_transfer／产物／目录日志；不新增schema。原逐步caller编排及错误字符串化移除。
+- 真实Engine基本clear8.38秒通过；扩大五项Engine32.69秒通过，含清空后接收新内容。Registry相关17通过（0.05秒）、实际初始readiness准备停止1通过（0.02秒）、真实SQLite目标集1通过（0.07秒）。
+- 审查发现readiness.is_ready临时false会启动reconciliation与清空并行；clear-recovery-red.log确证恢复在清空内立即运行。改用共享维护许可，清空先封口／停止再等已有恢复；恢复重新检查ready，不与已接受clear并行。通知也由Registry唯一持有，clear结束能唤醒readiness等待。双向竞争及receive相关58通过（0.11秒），clear相关15通过（0.08秒），待最终整库／根门禁。
+- 尚未绑定entry的provisional及更早输入／出站准备不由本轮出生表证明覆盖，留在全生命周期与准备预算验收中；既有认证资料读取／删除缓存失败边界仍未修复。完整目标不缩减，不把已关联条目清空当全spec完成。
+
+- 清空切片最终Core／Application／Storage／Engine完整nextest 2124通过／9跳过（199.518秒）；metadata解析812包、workspace全目标check（1m24s）、fmt、Rust style、repository preflight、1351站点隐私清单及diff均通过。既有编译警告未记为新通过项，设备未执行。手工审查共享维护许可与锁顺序、取消／出生／完成权、失败封口、SQL目标集及真实Engine调用者退出；code-review skill缺失，不冒称技能审查。下一步继续认证资料读取及删除清理失败边界，完整spec仍在进行。

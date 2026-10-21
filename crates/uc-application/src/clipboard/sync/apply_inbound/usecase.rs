@@ -1051,9 +1051,11 @@ impl ApplyInboundClipboardUseCase {
         mut retry: Option<PreparedReceiveRetry>,
     ) -> Result<ApplyOutcome, ApplyInboundError> {
         if let Some(readiness) = &self.receive_readiness {
+            let cancellation = receive_action.cancellation();
             tokio::select! {
                 biased;
                 _ = work.stopped() => return Err(ApplyInboundError::Stopped),
+                _ = cancellation.cancelled() => return Err(ApplyInboundError::Stopped),
                 _ = readiness.wait_ready() => {}
             }
         }

@@ -324,6 +324,7 @@ pub(super) fn create_infra_layer(
     let clipboard_entry_ports = ClipboardEntryPorts {
         get: entry_repo_arc.clone(),
         list: entry_repo_arc.clone(),
+        list_for_deletion: entry_repo_arc.clone(),
         save: entry_repo_arc.clone(),
         touch: entry_repo_arc.clone(),
         set_favorite: entry_repo_arc.clone(),

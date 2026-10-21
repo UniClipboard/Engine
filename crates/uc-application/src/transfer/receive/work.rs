@@ -2,8 +2,9 @@
 
 use super::batch::ReceiveBatch;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
-use tokio::sync::watch;
+use tokio::sync::{watch, Mutex as AsyncMutex, Notify};
 use tokio::task::JoinError;
 use tokio_util::sync::CancellationToken;
 use uc_core::error_class::ErrorClass;
@@ -11,6 +12,7 @@ use uc_core::ids::EntryId;
 use uc_observability_contract::wire_enum;
 
 mod catalog;
+mod clear;
 pub(crate) use catalog::{PlannedReceiveItem, ReceiveRepresentation, ReceiveSource};
 
 type Completion = Option<Result<(), Arc<ReceiveWorkError>>>;
@@ -18,16 +20,20 @@ type Key = (EntryId, String);
 
 pub(crate) struct ReceiveWorkRegistry {
     state: Mutex<RegistryState>,
+    maintenance: Arc<AsyncMutex<()>>,
+    pub(super) changed: Notify,
 }
 
 struct RegistryState {
     accepting: bool,
+    clearing: bool,
+    clear_failed: bool,
     generation: CancellationToken,
     active: HashMap<Key, Weak<Progress>>,
     cleaning: HashSet<String>,
     receipts: HashMap<EntryId, catalog::ReceiveReceipt>,
-    born: Vec<Weak<()>>,
-    retired: HashMap<EntryId, Vec<Weak<()>>>,
+    born: Vec<Weak<Birth>>,
+    retired: HashMap<EntryId, Vec<Weak<Birth>>>,
 }
 
 impl RegistryState {
@@ -42,6 +48,7 @@ impl RegistryState {
 
     fn seal(&mut self) {
         self.accepting = false;
+        self.clear_failed = false;
         self.generation.cancel();
         self.generation = CancellationToken::new();
         self.receipts.clear();
@@ -52,8 +59,12 @@ impl RegistryState {
 impl Default for ReceiveWorkRegistry {
     fn default() -> Self {
         Self {
+            maintenance: Arc::new(AsyncMutex::new(())),
+            changed: Notify::new(),
             state: Mutex::new(RegistryState {
                 accepting: true,
+                clearing: false,
+                clear_failed: false,
                 generation: CancellationToken::new(),
                 active: HashMap::new(),
                 cleaning: HashSet::new(),
@@ -63,6 +74,12 @@ impl Default for ReceiveWorkRegistry {
             }),
         }
     }
+}
+
+struct Birth {
+    cancel: CancellationToken,
+    registered: AtomicBool,
+    completion: watch::Sender<Completion>,
 }
 
 struct Progress {
@@ -79,7 +96,7 @@ pub(crate) struct ReceiveAction {
     progress: Mutex<Option<Arc<Progress>>>,
     previous_receipt: Mutex<Option<catalog::ReceiveReceipt>>,
     generation: CancellationToken,
-    birth: Arc<()>,
+    birth: Arc<Birth>,
 }
 
 /// 旧行清理与新接收登记互斥；跨异步清理持有，退出时才释放。
@@ -124,7 +141,15 @@ pub(crate) struct StoppedReceive {
 impl ReceiveWorkRegistry {
     pub(crate) fn action(self: &Arc<Self>) -> Arc<ReceiveAction> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let birth = Arc::new(());
+        let generation = state.generation.child_token();
+        if state.clearing || state.clear_failed {
+            generation.cancel();
+        }
+        let birth = Arc::new(Birth {
+            cancel: generation.clone(),
+            registered: AtomicBool::new(false),
+            completion: watch::channel(None).0,
+        });
         state.born.retain(|birth| birth.strong_count() != 0);
         state.born.push(Arc::downgrade(&birth));
         state.retired.retain(|_, births| {
@@ -136,7 +161,7 @@ impl ReceiveWorkRegistry {
             registry: self.clone(),
             progress: Mutex::new(None),
             previous_receipt: Mutex::new(None),
-            generation: state.generation.clone(),
+            generation,
             birth,
         })
     }
@@ -150,10 +175,8 @@ impl ReceiveWorkRegistry {
     }
 
     pub(crate) fn is_open(&self) -> bool {
-        self.state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .accepting
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.accepting && !state.clearing && !state.clear_failed
     }
 
     pub(crate) fn open(&self, generation: &CancellationToken) -> bool {
@@ -162,6 +185,7 @@ impl ReceiveWorkRegistry {
             return false;
         }
         state.accepting = true;
+        state.clear_failed = false;
         true
     }
 
@@ -182,12 +206,12 @@ impl ReceiveWorkRegistry {
 
     pub(crate) fn owns_entry(&self, entry: &str) -> bool {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        state.cleaning.contains(entry) || state.owns_receive(entry)
+        state.clearing || state.cleaning.contains(entry) || state.owns_receive(entry)
     }
 
     pub(crate) fn claim_cleanup(self: &Arc<Self>, entry: &str) -> Option<ReceiveCleanup> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        if state.owns_receive(entry) || !state.cleaning.insert(entry.to_owned()) {
+        if state.clearing || state.owns_receive(entry) || !state.cleaning.insert(entry.to_owned()) {
             return None;
         }
         Some(ReceiveCleanup {
@@ -276,7 +300,11 @@ impl ReceiveAction {
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if !state.accepting || self.generation.is_cancelled() {
+        if !state.accepting
+            || state.clearing
+            || state.clear_failed
+            || self.generation.is_cancelled()
+        {
             return Err(ReceiveRegistrationError::GateClosed);
         }
         if state.retired.get(entry).is_some_and(|births| {
@@ -290,6 +318,7 @@ impl ReceiveAction {
         if state.cleaning.contains(entry.as_ref()) {
             return Err(ReceiveRegistrationError::CleanupInProgress);
         }
+        self.birth.registered.store(true, Ordering::Release);
         let progress = Arc::new(Progress {
             entry: entry.clone(),
             attempt: attempt.to_owned(),
@@ -317,15 +346,15 @@ impl ReceiveAction {
     pub(crate) fn finish(&self, result: Result<(), ReceiveWorkError>) {
         self.batch.finish(result.is_ok());
         self.finish_receipt();
+        let result = result.map_err(Arc::new);
+        self.birth.completion.send_replace(Some(result.clone()));
         if let Some(progress) = self
             .progress
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
         {
-            progress
-                .completion
-                .send_replace(Some(result.map_err(Arc::new)));
+            progress.completion.send_replace(Some(result));
         }
     }
 }
