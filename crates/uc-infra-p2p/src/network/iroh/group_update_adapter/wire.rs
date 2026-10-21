@@ -27,6 +27,7 @@ fn version(protocol: ConnectionProtocol) -> Result<GroupUpdateVersion, Connectiv
         | ConnectionProtocol::MultiplexedMembershipHistory
         | ConnectionProtocol::PeerReachabilityV1
         | ConnectionProtocol::PeerReachabilityV2
+        | ConnectionProtocol::Blob
         | ConnectionProtocol::Unsupported => Err(ConnectivityError::Denied),
     }
 }

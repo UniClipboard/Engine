@@ -18,6 +18,7 @@ pub enum ConnectionMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConnectionProtocol {
     Unsupported,
+    Blob,
     PeerReachabilityV1,
     PeerReachabilityV2,
     ActiveClipboardState,

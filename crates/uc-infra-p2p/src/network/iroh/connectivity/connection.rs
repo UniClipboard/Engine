@@ -1,3 +1,4 @@
+use super::super::blobs::BLOBS_ALPN;
 use super::super::conn_path::connection_channel;
 use super::super::observed_connections::close_reason;
 use super::stream::wrap;
@@ -92,6 +93,7 @@ impl PeerConnection for IrohPeerConnection {
             MULTIPLEXED_CLIPBOARD_ALPN
                 | MULTIPLEXED_MEMBERSHIP_HISTORY_ALPN
                 | PEER_REACHABILITY_ALPN
+                | BLOBS_ALPN
         ) {
             ConnectionMode::Multiplexed
         } else if self.native.alpn() == LEGACY_PEER_REACHABILITY_ALPN {
@@ -102,6 +104,7 @@ impl PeerConnection for IrohPeerConnection {
     }
     fn protocol(&self) -> ConnectionProtocol {
         match self.native.alpn() {
+            BLOBS_ALPN => ConnectionProtocol::Blob,
             PEER_REACHABILITY_ALPN => ConnectionProtocol::PeerReachabilityV2,
             LEGACY_PEER_REACHABILITY_ALPN => ConnectionProtocol::PeerReachabilityV1,
             MULTIPLEXED_CLIPBOARD_ALPN => ConnectionProtocol::MultiplexedClipboard,

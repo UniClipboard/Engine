@@ -17,7 +17,10 @@ Application 的 [`connectivity`](../../crates/uc-application/src/connectivity/) 
 
 同会话、同目标并且实际协商为多流的并发请求共用一个 flight 和活动连接。每个等待者有独立绝对截止时间；
 首等待者退出不取消其他人的拨号，最后等待者退出才取消 flight，manager 的监督任务等待拨号结束。
-剪贴板 manager 只弱引用活动连接；最后一个连接/流租约释放即关闭，不存在空闲连接池。
+剪贴板 manager 只弱引用活动连接；最后一个连接／流／本地工作租约释放即关闭，不存在空闲连接池。
+通用半流提供本连接内流 ID 和显式 reset／stop，只终止当前交换。`StreamLease::into_parts` 可把 I/O 交给 SDK，
+同时将连接、活动计数与额度交给 `StreamWorkLease`；网络结束后，本地导入／导出未结算前仍持有这份工作租约。
+它不授予业务步骤或观测查询能力。
 成员历史使用独立 manager，并启用有界跨轮保留，见[成员历史连接边界](membership-history-ownership.md#成员历史连接边界)。
 
 每次发送在任何排队前捕获自身 `AdmissionAttempt` 撤销快照。共用建连者的连接不替换调用者的快照：

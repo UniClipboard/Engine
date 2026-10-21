@@ -3,6 +3,9 @@
 //! 探针仅使用 SDK 公开接口和测试专属 tracing gate，不替换生产路径。
 //! 成功表示复现了前置阻塞，不表示受管传输合同通过。
 
+#[path = "support/blob_exchange.rs"]
+mod blob_exchange;
+
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -18,6 +21,7 @@ use iroh_blobs::{
 };
 use tokio::sync::Notify;
 use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 use tracing::{field::Visit, Event, Subscriber};
 use tracing_subscriber::{layer::Context, prelude::*, Layer};
 
@@ -30,6 +34,7 @@ struct ImportGate {
     wake: Condvar,
     claimed: AtomicBool,
     timed_out: AtomicBool,
+    export: AtomicBool,
 }
 
 impl ImportGate {
@@ -48,12 +53,16 @@ impl Drop for ReleaseOnDrop {
 
 struct ImportLayer(Arc<ImportGate>);
 #[derive(Default)]
-struct ImportMessage(bool);
+struct ImportMessage(bool, bool);
 impl Visit for ImportMessage {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
         if field.name() == "message" {
             // 只匹配固定 SDK 调用点，不保存或输出包含摘要的第三方消息。
-            self.0 = format!("{value:?}").starts_with("importing bao:");
+            self.0 = format!("{value:?}").starts_with(if self.1 {
+                "exporting bao:"
+            } else {
+                "importing bao:"
+            });
         }
     }
 }
@@ -62,7 +71,7 @@ impl<S: Subscriber> Layer<S> for ImportLayer {
         if event.metadata().target() != "iroh_blobs::store::fs" {
             return;
         }
-        let mut message = ImportMessage::default();
+        let mut message = ImportMessage(false, self.0.export.load(Ordering::SeqCst));
         event.record(&mut message);
         if !message.0 || self.0.claimed.swap(true, Ordering::SeqCst) {
             return;
@@ -160,7 +169,7 @@ async fn sdk_get_error_returns_before_import_worker_finishes() -> anyhow::Result
     );
     let progress = receiver_store
         .remote()
-        .execute_get(pair, GetRequest::all(tag.hash))
+        .execute_get(pair, GetRequest::blob(tag.hash))
         .stream();
     tokio::pin!(progress);
     let first = timeout(DEADLINE, progress.next()).await?;
@@ -190,8 +199,196 @@ async fn sdk_get_error_returns_before_import_worker_finishes() -> anyhow::Result
     timeout(DEADLINE, idle).await??;
     assert!(!gate.timed_out.load(Ordering::SeqCst));
     assert!(connection.close_reason().is_none());
+    // 冻结 SDK 的底层 FSM 可保留这一次 import 的完成权。
+    *gate.released.lock().expect("gate lock") = false;
+    gate.claimed.store(false, Ordering::SeqCst);
+    let (send, receive) = connection.open_bi().await?;
+    let cancel = CancellationToken::new();
+    let ready = Arc::new(Notify::new());
+    let mut managed = tokio::spawn(blob_exchange::get(
+        receiver_store.clone(),
+        StreamPair::new(connection.stable_id() as u64, receive, send),
+        tag.hash,
+        cancel.clone(),
+        ready.clone(),
+    ));
+    timeout(DEADLINE, gate.entered.notified()).await?;
+    timeout(DEADLINE, ready.notified()).await?;
+    cancel.cancel();
+    assert!(timeout(Duration::from_millis(100), &mut managed)
+        .await
+        .is_err());
+
+    // 同一连接上的另一项仍正常获取和读回，不被取消项或全局空闲等待阻塞。
+    let sibling = b"independent-sibling";
+    let sibling_tag = provider_store.blobs().add_bytes(sibling.as_slice()).await?;
+    let (send, receive) = connection.open_bi().await?;
+    timeout(
+        DEADLINE,
+        receiver_store.remote().execute_get(
+            StreamPair::new(connection.stable_id() as u64, receive, send),
+            GetRequest::blob(sibling_tag.hash),
+        ),
+    )
+    .await??;
+    assert_eq!(
+        receiver_store
+            .blobs()
+            .get_bytes(sibling_tag.hash)
+            .await?
+            .as_ref(),
+        sibling
+    );
+    assert!(!managed.is_finished());
+    gate.release();
+    assert!(timeout(DEADLINE, managed).await??.is_err());
+    assert!(!gate.timed_out.load(Ordering::SeqCst));
+
     receiver.close().await;
     router.shutdown().await?;
     receiver_store.shutdown().await?;
+    prove_provider_settlement(&gate).await?;
+    Ok(())
+}
+
+async fn prove_provider_settlement(gate: &Arc<ImportGate>) -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let provider_store = FsStore::load(temp.path().join("provider")).await?;
+    let receiver_store = FsStore::load(temp.path().join("receiver")).await?;
+    let server = Endpoint::builder(iroh::endpoint::presets::N0)
+        .relay_mode(RelayMode::Disabled)
+        .alpns(vec![iroh_blobs::ALPN.to_vec()])
+        .bind()
+        .await?;
+    let client = Endpoint::builder(iroh::endpoint::presets::N0)
+        .relay_mode(RelayMode::Disabled)
+        .bind()
+        .await?;
+    timeout(DEADLINE, async {
+        while server.addr().ip_addrs().next().is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    let (outgoing, incoming) =
+        tokio::join!(client.connect(server.addr(), iroh_blobs::ALPN), async {
+            server.accept().await.expect("incoming connection").await
+        },);
+    let outgoing = outgoing?;
+    let incoming = incoming?;
+    let tag = provider_store
+        .blobs()
+        .add_bytes(vec![19; 1024 * 1024])
+        .await?;
+    *gate.released.lock().expect("gate lock") = false;
+    gate.claimed.store(false, Ordering::SeqCst);
+    gate.export.store(true, Ordering::SeqCst);
+    let (send, receive) = outgoing.open_bi().await?;
+    let get = tokio::spawn(blob_exchange::get(
+        receiver_store.clone(),
+        StreamPair::new(outgoing.stable_id() as u64, receive, send),
+        tag.hash,
+        CancellationToken::new(),
+        Arc::new(Notify::new()),
+    ));
+    let (send, receive) = incoming.accept_bi().await?;
+    let cancel = CancellationToken::new();
+    let mut provide = tokio::spawn(blob_exchange::provide(
+        provider_store.clone(),
+        iroh_blobs::provider::StreamPair::new(
+            incoming.stable_id() as u64,
+            receive,
+            send,
+            Default::default(),
+        ),
+        cancel.clone(),
+    ));
+    timeout(DEADLINE, gate.entered.notified()).await?;
+    cancel.cancel();
+    assert!(timeout(Duration::from_millis(100), &mut provide)
+        .await
+        .is_err());
+    assert!(timeout(DEADLINE, get).await??.is_err());
+    assert!(!provide.is_finished());
+
+    // A 的 export 尚未结算；另一份 store 工作和同连接 B 仍完整读回。
+    let bytes = b"provider-independent-sibling";
+    let sibling = provider_store.blobs().add_bytes(bytes.as_slice()).await?;
+    let (send, receive) = outgoing.open_bi().await?;
+    let get_b = tokio::spawn(blob_exchange::get(
+        receiver_store.clone(),
+        StreamPair::new(outgoing.stable_id() as u64, receive, send),
+        sibling.hash,
+        CancellationToken::new(),
+        Arc::new(Notify::new()),
+    ));
+    let (send, receive) = incoming.accept_bi().await?;
+    timeout(
+        DEADLINE,
+        blob_exchange::provide(
+            provider_store.clone(),
+            iroh_blobs::provider::StreamPair::new(
+                incoming.stable_id() as u64,
+                receive,
+                send,
+                Default::default(),
+            ),
+            CancellationToken::new(),
+        ),
+    )
+    .await??;
+    timeout(DEADLINE, get_b).await???;
+    assert_eq!(
+        receiver_store
+            .blobs()
+            .get_bytes(sibling.hash)
+            .await?
+            .as_ref(),
+        bytes
+    );
+    assert!(!provide.is_finished());
+    gate.release();
+    assert!(timeout(DEADLINE, provide).await??.is_err());
+    assert!(!gate.timed_out.load(Ordering::SeqCst));
+    assert!(outgoing.close_reason().is_none());
+    // 固定 SDK 主动获取这一角色也能读取替代提供端，包含合法空 blob。
+    for payload in [Vec::new(), b"sdk-receiver-compatible".to_vec()] {
+        let tag = provider_store.blobs().add_bytes(payload.clone()).await?;
+        let (send, receive) = outgoing.open_bi().await?;
+        let saved = receiver_store.clone();
+        let get = tokio::spawn(async move {
+            saved
+                .remote()
+                .execute_get(
+                    StreamPair::new(0, receive, send),
+                    GetRequest::blob(tag.hash),
+                )
+                .await
+        });
+        let (send, receive) = incoming.accept_bi().await?;
+        timeout(
+            DEADLINE,
+            blob_exchange::provide(
+                provider_store.clone(),
+                iroh_blobs::provider::StreamPair::new(
+                    incoming.stable_id() as u64,
+                    receive,
+                    send,
+                    Default::default(),
+                ),
+                CancellationToken::new(),
+            ),
+        )
+        .await??;
+        timeout(DEADLINE, get).await???;
+        assert_eq!(
+            receiver_store.blobs().get_bytes(tag.hash).await?.as_ref(),
+            payload
+        );
+    }
+    client.close().await;
+    server.close().await;
+    receiver_store.shutdown().await?;
+    provider_store.shutdown().await?;
     Ok(())
 }

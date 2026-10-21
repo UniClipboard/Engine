@@ -575,7 +575,7 @@ pub use crate::connectivity::{
     ConnectivityBackend, ConnectivityError, ConnectivityManager, ConnectivityPolicy,
     IdleRetentionPolicy, InboundAdmissionFence, InboundConnectionError, PeerConnection,
     PeerReceiveStream, PeerSendStream, PendingInboundLease, SessionConnectionAdmissionPort,
-    StreamLease, StreamPair,
+    StreamLease, StreamPair, StreamWorkLease,
 };
 
 pub use crate::space::{

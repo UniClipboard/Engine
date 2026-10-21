@@ -1,6 +1,6 @@
 # Issue #34 第七切片：文件／blob 受管传输执行计划
 
-状态：**阶段 0 设计阻塞，生产迁移未开始**（2026-10-21）。固定 SDK 高层获取的失败路径缺少单项 store 完成等待权；[复现与方案](2026-10-21-blob-connectivity-feasibility.md)。
+状态：**阶段 0 重验中，生产迁移未开始**（2026-10-21）。高层 SDK 直接桥接存在停止缺口；公开底层 API 与真实 Uni 原型已通过本机验证，其他前置仍未完成；[复现与方案](2026-10-21-blob-connectivity-feasibility.md)。
 唯一设计来源：[实现规格](2026-10-21-blob-connectivity-spec.md)。
 本计划不复制参数、接口和异常规则；均以 spec 相应章节为准。
 
@@ -20,9 +20,9 @@
 * [x] 读取最近 AGENTS、架构、Rust／错误／安全／观测规范，冻结开工 main 和受支持历史旧端的精确 SHA。
 * [ ] 盘点 BlobTransferPort 全部消费者、SDK 任务来源、provider handler、publish／tag／GC、实际取消与 shutdown 路径。
 * [ ] 冻结 blob ALPN、ticket 编解码、原始字节及合法空负载向量；保存旧版真实资料副本与旧旧内容基线。
-* [ ] 用固定 SDK 的 GetStreamPair 和 provider::handle_stream 承载 Uni 通用流，证明双向真实内容读回。
-* [ ] 两个 blob 流共用一条真实连接，暂停 A 后只取消 A；B 不断线、不重试且读回正确。
-* [ ] 观察 SDK 内部工作与导出：证明取消可以 stop／reset 并等待实际任务退出，不能只看进度接收器结束。
+* [x] 用固定 SDK 公开 get::fsm／ImportBaoHandle、provider::StreamPair／export 字节流承载真实 Uni 流，证明真实内容读回；高层 API 缺口与替代责任见 spec §5.4。
+* [x] 两个 blob 流共用一条真实连接，暂停 A 后只取消 A；B 不断线、不重试且读回正确。本机 Uni 原型通过；完整 Engine 硬验收仍在阶段 5。
+* [x] 观察 SDK 内部工作与导出：独立暂停 import／export worker，证明替代原型取消时保持等待，门释放后结算；Uni 工作租约另验证网络释放后不提前归还额度。
 * [ ] 证明失败独立文件可从既有接收材料重建准确来源与原始身份，正常单项重试不新增 schema／持久字段。
 * [ ] 核对旧端与当前成员身份映射、撤销及旧 ticket，证明不修改 blob 协议仍可安全互通。
 * [ ] 记录同内容 SDK 共享行为及等待者所有权，确认是否需要显式共享状态；不为优化主动新增去重。
@@ -137,3 +137,13 @@ git diff --check
 先后修正探针自身的锁 guard 编译错误和 provider store 重复 shutdown，保留首轮日志。停止门释放后实际等待 store 空闲并关闭资源；生产实现、协议与 SDK 来源未修改。原始重试材料、旧端矩阵、Uni 双向与资源基线尚未证明，不能据源码推断勾选。
 
 本次变更根 metadata、全 workspace 全目标 check、fmt、Rust style、repository preflight、文档链接与差异检查通过。完整 workspace 分组为 **4305 passed、1 failed、27 skipped**（555.896 秒，退出码 100）；唯一失败为未改动的 `peer_address_read_diagnostics` 符号化断言（`unresolved`／`captured`），已有二进制单独运行同样失败。新增停止探针在整轮中通过。完整回归不能登记通过；具体证据与命令见可行性报告。线上 CI、设备、旧端矩阵及独立成员全集／升级矩阵未运行。
+
+### 2026-10-21 公开底层 SDK 替代方案重验
+
+高层 API 的失败保留，但它不证明同一 SDK 的底层组合不可行。新增接收／提供原型分别持有公开 import 完成 receiver 与 export 字节流，取消后完成本次本地结算，不调用全局 wait_idle。真实原生双流和真实 Uni 租约原型已通过；A、B 同时暂停，取消 A 后恢复 B，B 精确读回 4MiB，连接 ID 保持且 backend 获取计数为 1。原生 stop/reset 保留来源，工作租约持有连接与额度；这些能力尚未用于生产 blob 路径。
+
+上一轮 sibling error 3 已定位为探针将 Raw blob 用 GetRequest::all 当成 HashSeq，改用 blob 后读回通过；保留首轮失败。SDK 版本、ALPN 和字节格式未修改。SDK handler 的非受管后台工作不作为可采用方案，采用 SDK 公开 parser／encoder 的完整交换原型。
+
+原始项重试材料、当前成员与旧端身份授权、旧资料角色矩阵、资源基线尚未证明；阶段 0 整体未完成，生产迁移未开始。本次不是解除所有前置或宣布 spec 完成。
+
+本轮相关验证：Uni 29、原生 connectivity 3、替代接收生命周期 6、Application transport 20 均通过；metadata、workspace all-targets check、fmt、Rust style、repository preflight、相对链接与 diff 检查通过。固定 SDK 接收普通／空 blob（0.40 秒）和真实 Uni 无效停止码来源／双流隔离（0.09 秒）补充探针通过。完整 workspace 本轮未重跑，首轮失败历史继续保留；下一步仍为其余阶段 0 前置证明。

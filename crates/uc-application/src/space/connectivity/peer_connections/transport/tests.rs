@@ -44,6 +44,13 @@ impl AsyncWrite for MemorySend {
     }
 }
 impl PeerSendStream for MemorySend {
+    fn id(&self) -> u64 {
+        0
+    }
+    fn reset(&mut self, _code: u64) -> Result<(), ConnectivityError> {
+        // 此旧协议 fixture 不提供显式停止能力；需要停止的用例使用真实 bridge。
+        Err(ConnectivityError::Stopped)
+    }
     fn finish(&mut self) -> Result<(), ConnectivityError> {
         Ok(())
     }
@@ -61,7 +68,14 @@ impl AsyncRead for MemoryReceive {
         Pin::new(&mut self.0).poll_read(cx, buf)
     }
 }
-impl PeerReceiveStream for MemoryReceive {}
+impl PeerReceiveStream for MemoryReceive {
+    fn id(&self) -> u64 {
+        0
+    }
+    fn stop(&mut self, _code: u64) -> Result<(), ConnectivityError> {
+        Err(ConnectivityError::Stopped)
+    }
+}
 fn streams() -> StreamPair {
     (
         Box::new(MemorySend(tokio::io::sink())),

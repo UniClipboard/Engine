@@ -35,7 +35,14 @@ impl AsyncRead for ReceiveHalf {
         Pin::new(&mut self.0).poll_read(cx, buf)
     }
 }
-impl PeerReceiveStream for ReceiveHalf {}
+impl PeerReceiveStream for ReceiveHalf {
+    fn id(&self) -> u64 {
+        0
+    }
+    fn stop(&mut self, _code: u64) -> Result<(), ConnectivityError> {
+        Err(ConnectivityError::Stopped)
+    }
+}
 struct SendHalf {
     write: WriteHalf<DuplexStream>,
     stalled: bool,
@@ -61,6 +68,13 @@ impl AsyncWrite for SendHalf {
     }
 }
 impl PeerSendStream for SendHalf {
+    fn id(&self) -> u64 {
+        0
+    }
+    fn reset(&mut self, _code: u64) -> Result<(), ConnectivityError> {
+        // 此旧协议 fixture 不提供显式停止能力；需要停止的用例使用真实 bridge。
+        Err(ConnectivityError::Stopped)
+    }
     fn settled(&mut self) -> futures_util::future::BoxFuture<'_, Result<(), ConnectivityError>> {
         Box::pin(async { Ok(()) })
     }

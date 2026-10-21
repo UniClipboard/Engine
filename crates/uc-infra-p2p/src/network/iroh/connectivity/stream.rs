@@ -1,5 +1,5 @@
 use futures_util::future::BoxFuture;
-use iroh::endpoint::{RecvStream, SendStream};
+use iroh::endpoint::{RecvStream, SendStream, VarInt};
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -36,6 +36,18 @@ impl AsyncWrite for SendHalf {
     }
 }
 impl PeerSendStream for SendHalf {
+    fn id(&self) -> u64 {
+        self.native.id().index()
+    }
+    fn reset(&mut self, code: u64) -> Result<(), ConnectivityError> {
+        let code =
+            VarInt::from_u64(code).map_err(|source| ConnectivityError::Stream(Box::new(source)))?;
+        self.native
+            .reset(code)
+            .map_err(|source| ConnectivityError::Stream(Box::new(source)))?;
+        self.finished = true;
+        Ok(())
+    }
     fn settled(&mut self) -> BoxFuture<'_, Result<(), ConnectivityError>> {
         Box::pin(async {
             self.native
@@ -69,9 +81,25 @@ impl AsyncRead for ReceiveHalf {
         AsyncRead::poll_read(Pin::new(&mut self.0), cx, buf)
     }
 }
-impl PeerReceiveStream for ReceiveHalf {}
+impl PeerReceiveStream for ReceiveHalf {
+    fn id(&self) -> u64 {
+        self.0.id().index()
+    }
+    fn stop(&mut self, code: u64) -> Result<(), ConnectivityError> {
+        let code =
+            VarInt::from_u64(code).map_err(|source| ConnectivityError::Stream(Box::new(source)))?;
+        self.0
+            .stop(code)
+            .map_err(|source| ConnectivityError::Stream(Box::new(source)))?;
+        Ok(())
+    }
+}
 impl Drop for ReceiveHalf {
     fn drop(&mut self) {
         let _ = self.0.stop(0u32.into());
     }
 }
+
+#[cfg(test)]
+#[path = "stream_blob_probe.rs"]
+mod blob_probe;

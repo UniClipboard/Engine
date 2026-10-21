@@ -1,6 +1,6 @@
 # Issue #34 第七切片：文件／blob 受管传输实现规格
 
-状态：**设计定稿；阶段 0 停止证明失败，生产迁移阻塞**（2026-10-21）。见[可行性证据](2026-10-21-blob-connectivity-feasibility.md)。
+状态：**设计定稿；阶段 0 重验中，底层 SDK 与 Uni 流原型通过，生产迁移未开始**（2026-10-21）。见[可行性证据](2026-10-21-blob-connectivity-feasibility.md)。
 配套[执行计划](2026-10-21-blob-connectivity-plan.md)记录实施状态，本文是本片设计与验收的唯一正文来源。
 源码盘点锚点为 `2154b959fa16ccbdb165f8a92a295a039833bf47`；开工时重新冻结 main、旧版与 SDK 来源。
 前置为[第六片](../completed/2026-10-14-peer-reachability-connectivity-spec.md)。第八片反向进度完整迁移另行定稿。
@@ -132,6 +132,12 @@
 优先通过通用流桥接 SDK 的 `GetStreamPair`／`provider::StreamPair`。必要的流 ID、finish、
 stop、reset 能力以传输无关的通用能力补充 Uni，由 Infra 映射 SDK trait；不得为取得原生连接
 向 Application 暴露 downcast 或 Endpoint。每个流的丢弃／取消只终止该交换。
+固定 SDK 高层获取在网络错误时丢弃私有 import 完成等待，实施采用同一 SDK 的公开
+`get::fsm`／`ImportBaoHandle` 驱动接收，并用 `provider::StreamPair` 读取既有请求、
+SDK export 字节流驱动提供；错误或取消后仍等待本次 import／排空本次 export 至通道关闭。
+协议解析、BAO 校验和编码继续归 SDK，不复制一套线上格式。SDK 原有 provider 事件追踪仍不启用，
+业务进度仍归现有 Application 通知能力。Uni 的 I/O 与本地工作许可可拆分持有，后者保留连接、活动和额度至实际结算。
+
 SDK 的 future、其启动的工作及导出都必须有明确完成等待方；若公开 API 无法保证停止并 join，
 阶段 0 即失败，不能用关闭整条连接或仅丢弃进度流冒充成功。
 

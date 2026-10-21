@@ -15,6 +15,13 @@ use uc_core::ids::DeviceId;
 use uc_core::ports::ConnectionChannel;
 
 impl PeerSendStream for Sink {
+    fn id(&self) -> u64 {
+        0
+    }
+    fn reset(&mut self, _code: u64) -> Result<(), ConnectivityError> {
+        // 此旧协议 fixture 不提供显式停止能力；需要停止的用例使用真实 bridge。
+        Err(ConnectivityError::Stopped)
+    }
     fn settled(&mut self) -> futures::future::BoxFuture<'_, Result<(), ConnectivityError>> {
         Box::pin(async { Ok(()) })
     }
@@ -22,7 +29,14 @@ impl PeerSendStream for Sink {
         Ok(())
     }
 }
-impl PeerReceiveStream for Empty {}
+impl PeerReceiveStream for Empty {
+    fn id(&self) -> u64 {
+        0
+    }
+    fn stop(&mut self, _code: u64) -> Result<(), ConnectivityError> {
+        Err(ConnectivityError::Stopped)
+    }
+}
 struct TestConnection {
     id: usize,
     mode: ConnectionMode,
@@ -1074,42 +1088,51 @@ async fn expired_inbound_queue_discards_only_its_stream_and_returns_capacity() {
 
 #[tokio::test]
 async fn local_work_keeps_exchange_capacity_after_network_stream_is_dropped() {
-    let (manager, _, epoch) = fixture(
-        ConnectionMode::Multiplexed,
-        ConnectivityPolicy {
-            inbound_per_session: 1,
-            ..ConnectivityPolicy::default()
-        },
-    );
-    let (closed, _) = watch::channel(false);
-    let raw = Arc::new(TestConnection {
-        id: 987,
-        mode: ConnectionMode::Multiplexed,
-        closed,
-    });
-    let pending = manager
-        .accept_pending(raw, Instant::now() + Duration::from_secs(10))
-        .await
-        .unwrap();
-    let (connection, stream) = pending
-        .bind(Box::new(Grant {
-            epoch: 0,
-            current: epoch,
-            peer: DeviceId::new("peer"),
-        }))
-        .await
-        .unwrap();
-    let work = stream.hold_for_work();
-    drop(stream);
-    let mut following = Box::pin(connection.accept_bi());
-    assert!(
-        futures::poll!(&mut following).is_pending(),
-        "started local work still owns the only exchange slot"
-    );
-    drop(work);
-    let following = following.await.unwrap();
-    drop(following);
-    manager.shutdown().await.unwrap();
+    for split in [false, true] {
+        let (manager, _, epoch) = fixture(
+            ConnectionMode::Multiplexed,
+            ConnectivityPolicy {
+                inbound_per_session: 1,
+                ..ConnectivityPolicy::default()
+            },
+        );
+        let (closed, _) = watch::channel(false);
+        let raw = Arc::new(TestConnection {
+            id: 987,
+            mode: ConnectionMode::Multiplexed,
+            closed,
+        });
+        let pending = manager
+            .accept_pending(raw, Instant::now() + Duration::from_secs(10))
+            .await
+            .unwrap();
+        let (connection, stream) = pending
+            .bind(Box::new(Grant {
+                epoch: 0,
+                current: epoch,
+                peer: DeviceId::new("peer"),
+            }))
+            .await
+            .unwrap();
+        let work = if split {
+            let (parts, work) = stream.into_parts();
+            drop(parts);
+            work
+        } else {
+            let work = stream.hold_for_work();
+            drop(stream);
+            work
+        };
+        let mut following = Box::pin(connection.accept_bi());
+        assert!(
+            futures::poll!(&mut following).is_pending(),
+            "started local work still owns the only exchange slot"
+        );
+        drop(work);
+        let following = following.await.unwrap();
+        drop(following);
+        manager.shutdown().await.unwrap();
+    }
 }
 
 /// 单首轮能力与保留生命周期分开：FIN 后租约继续存活，不能再开第二次首轮流。

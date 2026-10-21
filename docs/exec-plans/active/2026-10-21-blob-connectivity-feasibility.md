@@ -1,6 +1,6 @@
 # 第七片阶段 0：SDK 停止可行性证据
 
-状态：**设计阻塞；生产迁移未开始**（2026-10-21）。对应[规格 §11](2026-10-21-blob-connectivity-spec.md#11-未决问题open-questions)和[执行计划阶段 0](2026-10-21-blob-connectivity-plan.md#阶段-0冻结基线与证明可行性)。
+状态：**阶段 0 重验中；底层 SDK 与 Uni 原型通过，生产迁移未开始**（2026-10-21）。对应[规格 §11](2026-10-21-blob-connectivity-spec.md#11-未决问题open-questions)和[执行计划阶段 0](2026-10-21-blob-connectivity-plan.md#阶段-0冻结基线与证明可行性)。
 
 ## 冻结来源
 
@@ -61,7 +61,7 @@ SDK 公开 `Store::wait_idle` 明确是整个 store 的瞬时空闲屏障，并�
 - 本机两流的 Uni 真实双向接入、完整取消结算、原始单项重试材料、旧旧／旧新授权与协议向量、1GiB／资源基线：**未执行**。
 - Direct／Relay 旧端矩阵、平台 CI、物理设备：**跳过**，不能沿用前片结果作为本片通过证据。
 
-## 本次变更验证
+## 首轮检查点（09d06ea5）验证
 
 | 检查 | 实际结果 |
 | --- | --- |
@@ -80,3 +80,29 @@ SDK 公开 `Store::wait_idle` 明确是整个 store 的瞬时空闲屏障，并�
 手工审查已检查测试工作隔离、停止门故障释放、资源关闭、状态文档与范围；没有新增生产接口、依赖或格式。当前环境未安装 `code-review` skill，执行的是手工审查，不冒称技能审查通过。
 
 本轮日志保存在 `.planning/2026-10-21-blob-connectivity/` 的忽略文件中：`probe.log`、`probe-fixed.log` 保留探针首轮错误，`probe-sibling*.log` 保留撤回扩展的失败，`probe-final.log`、`workspace.log` 和 `diagnostic-existing-binary.log` 保存最终与回归证据。Git 中保留本报告和可重复探针，不提交原始编译日志。workspace 分组按既有脚本排除独立成员全集和升级矩阵；本轮这些项目、平台 CI 与设备检查均跳过。
+
+## 续接：同一 SDK 底层组合与 Uni 证明
+
+采用 spec §5.4 已补充的公开底层 API：下载持有独立 import 完成 receiver，在网络分支退出并关闭输入后等待它；提供端使用 SDK 读取原请求和输出原 BAO 字节，取消时 reset 当前流，继续排空本次 export 直至通道关闭。没有改变 SDK 修订或自定义线上编码，没有接入原生 Downloader 自拨。
+
+`blob_connectivity_feasibility` 的复合原型现在同时验证原高层缺口与替代实现：暂停 import 后取消接收，替代 future 保持等待，另一 Raw blob 精确读回；释放后才结束。暂停 export 后取消提供，同样先停止自身网络并继续监督本次 export，另一流仍能成功读回。
+
+此前 sibling error 3 的具体原因为测试误用 GetRequest::all（HashSeq）获取 Raw blob；修正为 blob 后同连接读回通过。这个错误属于探针自身，不再作为未解释的 SDK 缺陷；首次失败日志保留。
+
+真实 Uni 证明位于 `network::iroh::connectivity::stream::blob_probe::uni_blob_stream_cancel_preserves_sibling_and_local_work_capacity`：使用实际 Iroh 半流 bridge、真实 ConnectivityManager 与 StreamLease；A、B 在同一真实 blob ALPN 连接上分别读至 64KiB 后暂停，取消 A，确认 B 未结束且连接仍可用，再恢复 B，精确读回 4MiB，backend 获取计数为 1。固定身份准入 fixture 只验证认证 key 对应，不冒充当前成员／旧资料授权通过。
+
+新增 `StreamLease::into_parts` 返回 I/O 与 `StreamWorkLease`；工作租约持有连接、活动与原许可，SDK 导入／导出和本地结算完成后才释放。App 的原额度测试现同时覆盖原 hold_for_work 和拆分 I/O 路径。SDK 事件追踪沿用原生产 None 配置，避免把高层 SDK &self 方法的 Sync 要求加给通用半流。
+
+本轮命令：
+
+```bash
+just cargo test -p uc-infra-p2p --test blob_connectivity_feasibility --locked
+just cargo test -p uc-infra-p2p --lib network::iroh::connectivity --locked
+just cargo test -p uc-application --lib connectivity::tests --locked
+just cargo test -p uc-infra-p2p --lib receiver_lifecycle --locked
+just cargo test -p uc-application --lib transport::tests --locked
+```
+
+上述分组分别为 1／3／29／6／20 项通过。工作区编译及本轮最终补充检查结果记录于执行日志。原始材料、旧端授权、完整 Engine 收发、1GiB／资源和平台矩阵仍未执行；阶段 0 整体及后续阶段均不宣称完成。
+
+本轮最终补充：固定 SDK 接收普通与合法空 blob 的反向角色探针通过（0.40 秒）；真实 Uni 测试同时验证无效 reset／stop code 保留稳定分类与 source，且不关闭原连接（0.09 秒）。metadata、全工作区全目标 check、fmt、Rust style、repository preflight、文档相对链接与差异检查通过。完整 workspace／旧端矩阵／平台 CI 本轮未重跑，首轮回归失败仍保留，不能将本轮局部通过视为整个 spec 完成。

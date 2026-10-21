@@ -19,6 +19,6 @@ pub use error::ConnectivityError;
 pub use manager::{ConnectivityManager, ConnectivityPolicy};
 pub use pending::PendingInboundLease;
 pub use retention::IdleRetentionPolicy;
-pub use stream::{PeerReceiveStream, PeerSendStream, StreamLease, StreamPair};
+pub use stream::{PeerReceiveStream, PeerSendStream, StreamLease, StreamPair, StreamWorkLease};
 #[cfg(test)]
 mod tests;
