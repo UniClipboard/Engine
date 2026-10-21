@@ -4,6 +4,7 @@
 mod android;
 mod local_diagnostics;
 mod network_log;
+pub use network_log::*;
 mod observability;
 pub use local_diagnostics::*;
 mod runtime;

@@ -13,6 +13,7 @@ pub struct TransitionContext {
     generation: u64,
     deadline: Option<Instant>,
     cancellation: CancellationToken,
+    final_stop: bool,
 }
 
 impl TransitionContext {
@@ -21,6 +22,7 @@ impl TransitionContext {
             generation,
             deadline,
             cancellation: CancellationToken::new(),
+            final_stop: false,
         }
     }
 
@@ -30,6 +32,17 @@ impl TransitionContext {
 
     pub fn deadline(&self) -> Option<Instant> {
         self.deadline
+    }
+
+    /// 本次暂停是不可恢复的最终停止：随后由重置或关闭负责人继续使用并最终释放本地存储，
+    /// 参与者不应为将来的恢复而关闭这些存储。
+    pub fn is_final_stop(&self) -> bool {
+        self.final_stop
+    }
+
+    pub(super) fn with_final_stop(mut self, final_stop: bool) -> Self {
+        self.final_stop = final_stop;
+        self
     }
 
     pub(super) fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {

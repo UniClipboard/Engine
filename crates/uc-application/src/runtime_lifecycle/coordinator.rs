@@ -116,8 +116,11 @@ impl RuntimeLifecycle {
             return Ok(());
         }
         state.generation = state.generation.saturating_add(1);
-        let context =
-            TransitionContext::new(state.generation, deadline).with_cancellation(cancellation);
+        let context = TransitionContext::new(state.generation, deadline)
+            .with_cancellation(cancellation)
+            .with_final_stop(
+                target == LifecycleTarget::Suspended && self.stop_requested.load(Ordering::Acquire),
+            );
         let needs_cleanup = state.phase == Phase::Incomplete;
         state.phase = Phase::Incomplete;
         if needs_cleanup || target == LifecycleTarget::Suspended {

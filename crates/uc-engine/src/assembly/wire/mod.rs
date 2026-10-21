@@ -422,6 +422,7 @@ pub async fn wire_dependencies_from_inputs(
         create_db_pool(&control_db_path)?
     };
     let db_pool_for_profile_reset = db_pool.clone();
+    let databases_for_suspension = vec![db_pool.clone(), control_db_pool.clone()];
     let control_db_pool_for_space_transition = control_db_pool.clone();
     // Clone pool before infra layer consumes it — search bundle needs the same pool.
     let db_pool_for_search = db_pool.clone();
@@ -1061,6 +1062,10 @@ pub async fn wire_dependencies_from_inputs(
             current_member_signatures,
             membership_session,
             security_lifecycle: Arc::clone(&space_access_adapter),
+            local_resources: Arc::new(uc_infra_profile::space::ProfileLocalResources::new(
+                Arc::clone(&space_access_adapter),
+                databases_for_suspension,
+            )),
             membership_ledger,
             admission_state,
             admission_credentials,

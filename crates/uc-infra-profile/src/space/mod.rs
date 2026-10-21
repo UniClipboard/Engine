@@ -1,6 +1,7 @@
 mod adapters;
 mod admission;
 mod encryption_passphrase_change;
+mod local_resources;
 mod membership_branch_transition;
 pub(crate) mod membership_record;
 
@@ -28,6 +29,7 @@ pub use admission::{
     SqliteSpaceAdmissionCredentials, SqliteSpaceAdmissionState,
 };
 pub use encryption_passphrase_change::EncryptionPassphraseChange;
+pub use local_resources::ProfileLocalResources;
 pub use membership_branch_transition::DefaultMembershipBranchTransitionPreparation;
 pub use membership_record::SqliteMembershipRecordStore;
 pub use uc_infra_crypto::history_signature::OpenMlsHistoricalSignatureVerifier;

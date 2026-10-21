@@ -4,6 +4,8 @@
 mod android;
 mod build_source;
 mod config;
+mod engine_activity;
+pub use engine_activity::EngineLogActivity;
 mod file_statistics;
 mod host_diagnostics;
 pub use host_diagnostics::{

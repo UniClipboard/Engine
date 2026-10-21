@@ -560,11 +560,12 @@ transfer 原始 ID、摘要、原始错误正文或可恢复派生值。
 - **宿主登记**：宿主在 `install_process_observability` 之前调用 `configure_network_log`（UniFFI）/ `configureNetworkLog`（N-API），显式给出进程角色与容量预算（单条、队列、单文件、单次运行、根目录、保留期）。Engine 不提供默认预算；未登记则整条链路不存在，查询返回 `NotConfigured`，不伪装成零事件。安装之后再登记会被拒绝。
 - **输出边界**：只输出固定事件名、枚举、计数、布尔和单次运行内随机的 `peer_ref`/`conn_ref`（有界映射，不可反推）。ALPN 只在位于 `known_network_alpns()` 之内时输出，否则记为 `unrecognized`。地址、端点标识、文件名、路径、令牌一律不进入文件。规则绑定精确版本目录（`iroh-1.3.0`、`noq-proto-1.3.0`）；iroh 固定到 git 提交时（[ADR-034](decisions/034-pin-iroh-to-unreleased-upstream-commit.md)）按 cargo git 签出目录中允许列表内的提交匹配同一逻辑版本；库升级后未经评审的 WARN/ERROR 调用点只输出 `unreviewed_callsite` 和库内 `file:line`。
 - **业务隔离**：建链调用经 `within_network_scope` 驱动（`uc.network` 作用域，显式无 parent）。库内 spawn 的 driver 因此捕获网络作用域而不是调用方的业务 span，不延长业务 span，业务调用树里没有网络库节点。进程没有安装独立日志时，作用域退回完全静默的 dispatch。宿主日志层排除 `uc.network` 目标和网络库来源，第三方原始日志不会进入宿主或远程出口。
-- **文件布局**：`<logs>/network/<role>/<run_id>/`，含 `run.json`（schema、run_id、角色、pid、OS/架构、启动时间、Engine 来源、规则版本、预算）、`lease.lock`（活动写入者租约）和 `network.<YYYYMMDD>.<seq>.jsonl` 分段。分段超限时先淘汰本次运行最旧的分段；根目录超限或过期时，只在 `.cleanup.lock` 下回收租约可获取（没有活动写入者）的旧运行目录。
+- **文件布局**：`<logs>/network/<role>/<run_id>/`，含 `run.json`（schema、run_id、角色、pid、OS/架构、启动时间、Engine 来源、规则版本、预算）、`lease.lock`（活动写入者租约）和 `network.<YYYYMMDD>.<seq>.jsonl` 分段。分段超限时先淘汰本次运行最旧的分段；根目录超限或过期时，只在 `.cleanup.lock` 下回收租约可获取（没有活动写入者）的旧运行目录。运行目录同样只在 `.cleanup.lock` 下建立，不会落入正被另一进程删除的目录。
 - **详细模式**：`start_network_capture` 开启当前进程的限时窗口（1–900 秒），重复开启不延长，窗口不跨重启，过期惰性生效。当前不包含 raw/qlog/keylog 采集；是否采集、预算数值、是否与业务详细采集联动属于待用户确认的产品决定，Engine 不预设。
 - **导出**：`prepare_network_log_export` 有界刷新本进程并返回运行目录与文件的大小和 SHA-256。不代表扩展或其他进程已刷新，也不替宿主决定分享渠道。
 - **计数**：accepted、written、policy_filtered、rate_limited、oversized、queue_dropped、closed_dropped、write_failed、rotated_out_files、path_recovered、unreviewed_callsites。没有日志不等于没有收到数据包，判断须结合这些计数。
 - **关闭**：network 关闭与业务关闭预算分离（detached），不占用业务的 shutdown 时限。
+- **随 Engine 停车**：网络日志属于进程，进程内每个工作中（未暂停、未关闭）的 Engine 持有一份登记（`EngineLogActivity`）。最后一份登记结束时网络日志停车：已入队记录落盘后先关闭当前分段、再交还 `lease.lock`，之后到达的记录计入 `closed_dropped`，任何刷新或导出都不重新打开文件；状态报告为 `Closed`。第一份登记开始时以同一 `run_id` 在 `.cleanup.lock` 下重建目录与租约、写入 `reopened` 加一的清单并打开新分段。登记只由 Engine 生命周期负责人在发布 `Suspended`/`Stopped` 之前结束、在恢复之前开始，宿主不直接停车。停车期间该运行没有租约保护，其他进程超额或过期回收时可以删除它，恢复时重建；清理锁忙时本次重开失败，由下一条记录或刷新重试。
 
 已知缺口：通过 `log` crate 发出的第三方事件（如 noq-udp）不匹配 target 过滤；编译期级别裁剪未验证；iOS、Android、Windows 平台未实机运行；宿主侧消费由对应产品线接入。
 

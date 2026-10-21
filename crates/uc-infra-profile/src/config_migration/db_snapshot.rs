@@ -10,7 +10,7 @@
 use std::path::Path;
 
 use diesel::connection::SimpleConnection;
-use uc_infra_storage::db::pool::DbPool;
+use uc_infra_storage::db::pool::{DbPool, DbPoolError};
 
 /// Failures producing a snapshot.
 ///
@@ -24,7 +24,7 @@ pub enum DbSnapshotError {
     #[error("could not acquire a database connection")]
     Connection {
         #[from]
-        source: diesel::r2d2::PoolError,
+        source: DbPoolError,
     },
     /// `VACUUM INTO` failed.
     #[error("snapshot query failed")]

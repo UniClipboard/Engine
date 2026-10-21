@@ -469,6 +469,8 @@ __log_field_catalog! {
     offline: Scalar,
     offset: Scalar,
     on_disk_size: Scalar,
+    open_database_files: Scalar,
+    open_lease_files: Scalar,
     original_size: Scalar,
     orphan_count: Scalar,
     orphaned: Scalar,

@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -11,6 +12,7 @@ mod in_flight;
 mod lifecycle;
 #[cfg(test)]
 mod lifecycle_tests;
+mod log_activity;
 mod operation;
 #[cfg(test)]
 mod operation_tests;
@@ -32,6 +34,7 @@ pub use event_stream::EventStream;
 use event_stream::{event_channel, EventSender};
 use in_flight::InFlightOperations;
 use lifecycle::TransitionQueue;
+use log_activity::LogActivity;
 pub use startup::{StartupProgress, StartupProgressInput};
 pub use startup_control::{StartupLifecycle, StartupLifecycleInput};
 
@@ -73,6 +76,9 @@ pub struct Engine {
     runtime: Arc<dyn EngineRuntime>,
     events: EventSender,
     operations: Arc<InFlightOperations>,
+    log_activity: LogActivity,
+    /// 暂停结果核对打开文件时检查的宿主目录。
+    file_roots: Arc<[PathBuf]>,
 }
 
 impl Engine {
@@ -113,10 +119,22 @@ impl Engine {
         const EVENT_CAPACITY: usize = 256;
 
         let (events, stream) = event_channel(EVENT_CAPACITY);
+        let directories = host.directories();
+        let file_roots: Arc<[PathBuf]> = [
+            directories.private_data(),
+            directories.cache(),
+            directories.temporary(),
+            directories.logs(),
+        ]
+        .into_iter()
+        .map(Path::to_path_buf)
+        .collect();
         let runtime = Arc::new(
             RecoverableRuntime::start(config, host, events.clone(), Arc::clone(&progress.store))
                 .await?,
         );
+        let log_activity = LogActivity::default();
+        log_activity.begin().await;
         let engine = Self {
             state: Arc::new(Mutex::new(EngineState::Running)),
             lifecycle_gate: Arc::new(Mutex::new(())),
@@ -126,6 +144,8 @@ impl Engine {
             runtime,
             events,
             operations: Arc::new(InFlightOperations::new()),
+            log_activity,
+            file_roots,
         };
         let startup_handoff = engine.bind_lifecycle(true);
         startup_handoff
@@ -166,6 +186,8 @@ impl Engine {
             runtime,
             events,
             operations: Arc::new(InFlightOperations::new()),
+            log_activity: LogActivity::default(),
+            file_roots: Arc::from([]),
         };
         let _ = engine.bind_lifecycle(false);
         (engine, stream)
