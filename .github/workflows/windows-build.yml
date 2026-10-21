@@ -86,6 +86,7 @@ jobs:
       - name: Run Windows storage durability tests
         run: |
           bash scripts/build-cache/mbx.sh --cargo test --locked -p uc-infra-storage --lib active_space_generation_manifest_store 2>&1 | tee "$RUNNER_TEMP/windows-evidence/storage-tests.log"
+          bash scripts/build-cache/mbx.sh --cargo test --locked -p uc-infra-local --lib fs::atomic_publish 2>&1 | tee -a "$RUNNER_TEMP/windows-evidence/storage-tests.log"
           bash scripts/build-cache/mbx.sh --cargo test --locked -p uc-infra-local --lib fs::durability 2>&1 | tee -a "$RUNNER_TEMP/windows-evidence/storage-tests.log"
 
       - name: Retain Windows evidence
