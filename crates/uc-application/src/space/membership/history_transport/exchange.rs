@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::{timeout_at, Instant};
+use tokio_util::sync::CancellationToken;
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
     MembershipHistoryAckV3, MembershipHistoryExchangeError, MembershipHistoryExchangePort,
@@ -66,7 +67,8 @@ impl MembershipHistoryExchangePort for MembershipHistoryTransport {
         timeout_at(deadline, async {
             let mut connection = self
                 .manager
-                .connect(*peer, deadline)
+                .request(*peer)
+                .connect(deadline, &CancellationToken::new())
                 .await
                 .map_err(MembershipHistoryExchangeError::offline_from)?;
             let mut usage = ExchangeUse {

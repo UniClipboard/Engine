@@ -1,3 +1,4 @@
+use super::checks::checked;
 use super::manager::PeerState;
 use super::retention::{ActivityGuard, ConnectionActivity};
 use super::{
@@ -18,7 +19,7 @@ pub(super) struct ConnectionRecord {
     pub activity: Arc<ConnectionActivity>,
     pub stop: CancellationToken,
     pub cache_cancel: CancellationToken,
-    pub presence_retention: bool,
+    pub supervise_local_work: bool,
     pub accepted_stream_timeout: Option<Duration>,
     pub pending: Mutex<Option<AcceptedStream>>,
     pub exchange_claimed: AtomicBool,
@@ -112,7 +113,7 @@ impl ConnectionLease {
         self.open_bi_with_cancel(deadline, &CancellationToken::new())
             .await
     }
-    /// presence 的取消停止网络步骤，已启动的 grant 读取仍持许可直到实际结算。
+    /// 按协议策略停止网络步骤；受监督的 grant 读取持许可到实际结算。
     pub async fn open_bi_with_cancel(
         &self,
         deadline: Instant,
@@ -142,32 +143,15 @@ impl ConnectionLease {
         drop(waiting);
         drop(global_waiting);
         self.claim_exchange()?;
-        let checking = self.check_current();
-        tokio::pin!(checking);
-        let checked = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => {
-                if self.record.presence_retention { let _ = checking.await; }
-                return Err(ConnectivityError::Stopped);
-            }
-            result = timeout_at(deadline, &mut checking) => result,
-        };
-        match checked {
-            Ok(result) => result?,
-            Err(source) => {
-                if self.record.presence_retention {
-                    // 逻辑结束后等待真实本地工作，活动许可不能提前归还。
-                    let _ = checking.await;
-                }
-                return Err(if self.record.presence_retention {
-                    ConnectivityError::AdmissionTimedOut(source)
-                } else {
-                    ConnectivityError::TimedOut(source)
-                });
-            }
-        }
+        checked(
+            self.check_current(),
+            self.record.supervise_local_work,
+            deadline,
+            cancel,
+        )
+        .await?;
         if Instant::now() >= deadline || self.record.stop.is_cancelled() || cancel.is_cancelled() {
-            return Err(if self.record.presence_retention {
+            return Err(if self.record.supervise_local_work {
                 ConnectivityError::AdmissionDeadlineExpired
             } else {
                 ConnectivityError::DeadlineExpired

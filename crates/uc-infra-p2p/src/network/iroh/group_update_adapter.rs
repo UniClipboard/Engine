@@ -4,6 +4,7 @@ mod wire;
 
 use std::sync::Arc;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 use async_trait::async_trait;
 use iroh::endpoint::Connection;
@@ -38,7 +39,8 @@ impl GroupUpdateDispatchPort for IrohGroupUpdateAdapter {
         tokio::time::timeout_at(deadline, async {
             let connection = self
                 .manager
-                .connect(*update.recipient(), deadline)
+                .request(*update.recipient())
+                .connect(deadline, &CancellationToken::new())
                 .await
                 .map_err(GroupUpdateDispatchError::offline_from)?;
             self.wire

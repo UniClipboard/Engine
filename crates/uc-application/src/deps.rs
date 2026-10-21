@@ -572,10 +572,10 @@ pub use crate::space::{
 
 pub use crate::connectivity::{
     AdmissionAttempt, AdmissionGrant, ConnectionLease, ConnectionMode, ConnectionProtocol,
-    ConnectivityBackend, ConnectivityError, ConnectivityManager, ConnectivityPolicy,
-    IdleRetentionPolicy, InboundAdmissionFence, InboundConnectionError, PeerConnection,
-    PeerReceiveStream, PeerSendStream, PendingInboundLease, SessionConnectionAdmissionPort,
-    StreamLease, StreamPair, StreamWorkLease,
+    ConnectionRequest, ConnectivityBackend, ConnectivityError, ConnectivityManager,
+    ConnectivityPolicy, IdleRetentionPolicy, InboundAdmissionFence, InboundConnectionError,
+    PeerConnection, PeerReceiveStream, PeerSendStream, PendingInboundLease,
+    SessionConnectionAdmissionPort, StreamLease, StreamPair, StreamWorkLease,
 };
 
 pub use crate::transfer::blob::transport::{

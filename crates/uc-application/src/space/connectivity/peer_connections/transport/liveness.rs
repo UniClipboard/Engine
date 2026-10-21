@@ -176,10 +176,7 @@ impl Runner {
             _ = cancel.cancelled() => return Err(PeerReachabilityTransportError::Stopped),
             _ = self.ports.environment.recover_for_demand() => {},
         }
-        let connected = self
-            .manager
-            .connect_with_cancel(peer, deadline, &cancel)
-            .await;
+        let connected = self.manager.request(peer).connect(deadline, &cancel).await;
         let lease = match connected {
             Ok(lease) => lease,
             Err(source) if source.is_address_missing() => {

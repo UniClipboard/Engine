@@ -77,3 +77,12 @@
 - SDK worker 真实故障、来源不存在的空 FIN/SourceUnavailable、普通/空/本地已有内容、header 取消/期限都通过。SDK helper Drop 的隐式停止错误改由 IoCompletion 结算，header 已发送后注入 stop PermissionDenied，确认不能返回普通取消且原 IO source 可追溯。
 - 最终 reviewed nextest 11 passed、312 按过滤跳过（0.527 秒），metadata、workspace 全目标 check、fmt、Rust style、repository preflight 与差异检查通过。锁文件结构比对仅当前 Infra 增加既有 bao-tree 依赖边，全部来源/版本不变。
 - 已手工审查 SDK 完成等待、内容/工作保护、EOF 与响应长度、空数据、隐式停止失败、错误链和隐私；没有 code-review skill，不冒充技能审查。当前没有运行中的 Cargo 或网络矩阵工作；生产旧路径尚在，阶段 1/2 全部退出条件未满足，完整目标继续。
+
+- 续接 0ca4ed1c 为 progress：唯一 SDK 交换实现、实际 Uni 探针及异常结算已提交，工作区保留用户四个规划目录。
+- 本轮最小完整切片：Uni 的 ConnectionRequest 在 Blob 自有队列之前冻结准入／会话基线；同一对象用于重试，撤权后旧对象不能因新 epoch 复活。迁移现有消费者并删除原 connect/connect_with_cancel 入口，不保留仅加默认参数的包装。之后接完整 transfer 监督与独立资源策略，稳定 Engine 入口不增加内部阶段查询。
+
+- 上一状态答复 turn 为 no progress（只确认 98 项结果并汇报）；本轮已继续实际修改和验证。增加共享等待者结果分类、最后等待者取消／到期后保留拨号容量且保留真实 backend PermissionDenied 的测试，定向 connectivity 最终 99 passed，0.22 秒。
+- workspace 首轮失败为 group_update_adapter 新 import 放在 //! 之前，修复后两次全目标 check 通过（51.04／57.72 秒）；metadata、fmt、Rust style、diff check 已通过。正在执行 repository preflight 和差异复核，不把本步当作 production Blob 迁移完成。
+- repository preflight 通过；手工复核了所有内部调用方、原 epoch 的 refresh、共享 flight 最后等待者、准入读取实际结算与复合来源。没有可用 code-review skill，仍如实记为手工审查。补跑迁移后的真实 Uni／SDK 定向 nextest，完成前不提交。
+- 迁移后的真实 Uni／SDK nextest 5 passed、317 按过滤跳过（0.513 秒）：包括原生准入、同／不同内容的双流独立停止及 SDK 实际工作结算。根必需检查与文档相对链接、差异检查均通过。完整 workspace 测试和最终生产矩阵本轮未重跑，原已有 profile 诊断失败记录保留。
+- 当前小步只完成请求围栏与 Uni 本地工作监督，未达到阶段 1 全部退出条件；下一步仍是独立 blob manager 的资源策略与完整生产 owner，不修改完整 spec 范围。

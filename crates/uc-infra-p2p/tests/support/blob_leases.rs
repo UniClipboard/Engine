@@ -190,9 +190,10 @@ pub async fn lease(
         manager.accept(Arc::new(Native(connection))).await?
     } else {
         manager
+            .request(DeviceId::new("sdk-work-probe"))
             .connect(
-                DeviceId::new("sdk-work-probe"),
                 Instant::now() + Duration::from_secs(10),
+                &CancellationToken::new(),
             )
             .await?
     };

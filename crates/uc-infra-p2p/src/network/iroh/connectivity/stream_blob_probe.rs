@@ -220,7 +220,10 @@ async fn prove_isolation(same_content: bool) -> anyhow::Result<()> {
             ..ConnectivityPolicy::default()
         },
     );
-    let local = downloading.connect(peer, Instant::now() + BUDGET).await?;
+    let local = downloading
+        .request(peer)
+        .connect(Instant::now() + BUDGET, &CancellationToken::new())
+        .await?;
     let remote = providing.accept(server_backend.connection.clone()).await?;
     let tag = source.blobs().add_bytes(vec![41; 4 * 1024 * 1024]).await?;
     let mut stream_a = local.open_bi(Instant::now() + BUDGET).await?;
@@ -258,7 +261,10 @@ async fn prove_isolation(same_content: bool) -> anyhow::Result<()> {
     timeout(BUDGET, pause_a.entered.notified()).await?;
     let bytes = vec![if same_content { 41 } else { 71 }; 4 * 1024 * 1024];
     let sibling = source.blobs().add_bytes(bytes.clone()).await?;
-    let refreshed = downloading.connect(peer, Instant::now() + BUDGET).await?;
+    let refreshed = downloading
+        .request(peer)
+        .connect(Instant::now() + BUDGET, &CancellationToken::new())
+        .await?;
     assert_eq!(refreshed.connection_id(), local.connection_id());
     assert_eq!(client_backend.calls.load(Ordering::SeqCst), 1);
     let stream_b = refreshed.open_bi(Instant::now() + BUDGET).await?;

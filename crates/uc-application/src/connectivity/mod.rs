@@ -2,10 +2,12 @@
 mod acquisition;
 mod admission;
 mod backend;
+mod checks;
 mod connection;
 mod error;
 mod manager;
 mod pending;
+mod request;
 mod retention;
 mod stream;
 
@@ -18,6 +20,7 @@ pub use connection::ConnectionLease;
 pub use error::ConnectivityError;
 pub use manager::{ConnectivityManager, ConnectivityPolicy};
 pub use pending::PendingInboundLease;
+pub use request::ConnectionRequest;
 pub use retention::IdleRetentionPolicy;
 pub use stream::{PeerReceiveStream, PeerSendStream, StreamLease, StreamPair, StreamWorkLease};
 #[cfg(test)]

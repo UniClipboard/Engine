@@ -19,7 +19,7 @@
 阶段 0 前置证明完成：SDK／Uni 完成等待、原始材料、当前授权、同内容隔离、协议向量、8 组旧资料矩阵与 1GiB 基线均有证据。生产路径未迁移，进入阶段 1。
 
 ## Next Step
-调度／时间规则与专属 SDK 交换 port 已实现，真实 Uni 与 SDK 探针使用同一 Infra 代码；最终 11 项 nextest 与根门禁通过。接下来构造完整 Application 监督 owner、blob 专属 Uni 资源策略，迁移实际获取／提供和本地结算，生产 fetch 尚未切换。
+调度／时间规则与专属 SDK 交换 port 已实现；同步 ConnectionRequest 已冻结外部队列之前的成员／会话代次，99 项连接定向测试及 workspace check 通过。接下来实现 blob 专属 Uni 连接方向／入站资源策略，并由完整 Application owner 迁移实际获取／提供和本地结算；生产 fetch 尚未切换。
 
 ## 错误
 - 探针锁 guard 编译错误已修复，probe.log 保留。

@@ -41,6 +41,12 @@ pub enum ConnectivityError {
     Stream(#[source] Box<dyn Error + Send + Sync>),
     #[error("shared connection acquisition failed")]
     Shared(#[source] std::sync::Arc<ConnectivityError>),
+    #[error("connection local work settlement failed")]
+    Settlement {
+        #[source]
+        primary: Box<ConnectivityError>,
+        additional: Box<ConnectivityError>,
+    },
 }
 
 impl fmt::Debug for ConnectivityError {
@@ -56,6 +62,10 @@ impl ConnectivityError {
                 true
             }
             Self::Shared(source) => source.is_admission_read_failure(),
+            Self::Settlement {
+                primary,
+                additional,
+            } => primary.is_admission_read_failure() || additional.is_admission_read_failure(),
             _ => false,
         }
     }
@@ -96,6 +106,7 @@ impl ErrorClass for ConnectivityError {
             Self::Admission(_) => "connection_admission_failed",
             Self::Stream(_) => "connection_stream_failed",
             Self::Shared(source) => source.class(),
+            Self::Settlement { .. } => "connection_settlement_failed",
         }
     }
 }

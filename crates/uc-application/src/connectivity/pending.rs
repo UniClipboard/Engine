@@ -98,7 +98,7 @@ impl PendingInboundLease {
             activity: Arc::new(ConnectionActivity::default()),
             stop: self.manager.stop_token(),
             cache_cancel: tokio_util::sync::CancellationToken::new(),
-            presence_retention: presence,
+            supervise_local_work: self.manager.policy().wait_for_local_work(),
             accepted_stream_timeout: self.manager.policy().accepted_stream_timeout,
             pending: tokio::sync::Mutex::new(None),
             exchange_claimed: AtomicBool::new(true),

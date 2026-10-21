@@ -79,7 +79,7 @@ impl Acquisition {
             activity: Arc::new(ConnectionActivity::default()),
             stop: self.stop.clone(),
             cache_cancel: CancellationToken::new(),
-            presence_retention: self.policy.presence_retention,
+            supervise_local_work: self.policy.wait_for_local_work(),
             accepted_stream_timeout: self.policy.accepted_stream_timeout,
             pending: tokio::sync::Mutex::new(None),
             exchange_claimed: AtomicBool::new(false),

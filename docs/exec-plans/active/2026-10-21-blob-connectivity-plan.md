@@ -225,3 +225,21 @@ Rust style、repository preflight 与差异检查通过。没有据此勾选完�
 生产仍使用旧 BlobTransferFacade／Downloader／provider；下一步为完整 Application 监督 owner、
 独立 blob Uni 的连接与服务资源策略、实际获取／提供接线及删除旧路径。稳定重试、部分失败、
 绑定、生命周期和最终矩阵继续按原 spec 执行。
+
+### 2026-10-21 外部队列前的请求围栏与实际结算
+
+Uni 内部获取接口统一改为同步 `request` 创建不透明 `ConnectionRequest`，冻结成员撤销与会话代次，
+随后才等待连接；重试克隆同一请求。旧请求即使尚未开始获取，或当前已有重新加入后的连接，也不能复活。
+断开会话后重新启用 manager 不复活旧请求。内部调用方已迁移，稳定 Engine／绑定入口没有增加连接步骤。
+
+新增 `supervise_local_work` 供非 presence 协议保留实际工作完成权。已开始的准入读取在取消／到期后
+继续结算，未开始读取不补启动。共同拨号仅最后等待者退出才停止；非最后等待者立即得到自身结果，
+不阻断兄弟请求。最后等待者继续持拨号额度到真实结束，期间 backend／准入异常与逻辑停止主因一起保留。
+
+Application connectivity 定向 99 项通过（0.22 秒），包括排队前围栏、会话换代、共享等待者取消／
+到期、最后等待者保留容量与原始 PermissionDenied 来源。workspace 全目标 check 通过；首次检查发现
+迁移 import 置于模块文档之前的编译错误，已修正并重跑。本步尚未完成 blob 专属资源策略或生产接线。
+
+迁移后的真实 Uni／SDK nextest 定向 5／5 通过（0.513 秒，317 项按过滤跳过），覆盖真实准入、
+同／不同内容双流独立停止及 SDK 工作结算。metadata、workspace 全目标 check、fmt、Rust style、
+repository preflight、文档相对链接及 diff 检查通过。完整 workspace 与正式生产路径矩阵未在本步重跑。

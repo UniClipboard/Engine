@@ -23,12 +23,21 @@ Application 的 [`connectivity`](../../crates/uc-application/src/connectivity/) 
 它不授予业务步骤或观测查询能力。
 成员历史使用独立 manager，并启用有界跨轮保留，见[成员历史连接边界](membership-history-ownership.md#成员历史连接边界)。
 
-每次发送在任何排队前捕获自身 `AdmissionAttempt` 撤销快照。共用建连者的连接不替换调用者的快照：
+内部协议通过同步的 `ConnectivityManager::request` 在任何排队前捕获自身 `AdmissionAttempt`
+及会话代次，得到不透明的 `ConnectionRequest`；之后才等待该请求的 `connect`。
+协议有自己的外部队列时，也必须先创建请求；网络恢复复用同一请求，不能重新取撤销快照。
+断开会话后，即使 manager 再次接受工作，旧请求也不能启动。共用建连者的连接不替换调用者的快照：
 开流前先检查请求快照，再检查连接 grant 的当前成员权威。旧请求不能借用移除再添加之后的新连接，
 拒绝旧请求也不会关闭仍有效的新世代连接。当前成员拒绝、读取异常或连接授权失效由 grant 关闭整个连接。
 
 Iroh admission 复用原身份目录、成员权威和同一 `AdmittedConnections`，不创建第二份授权表。
 登记与撤销 epoch 保持原子围栏，迟到拨号和待排队请求都不能跨越撤销。
+
+需要等待实际本地工作的协议启用 `supervise_local_work`；presence 保留原有监督行为。
+取消或期限到达只结束自己的等待；还有其他等待者时不取消共同拨号，也不等待兄弟请求完成。
+最后等待者退出时，拨号额度保留到已开始的工作实际结束；期间真实失败与取消／超时主因一起保留。
+准入读取同样等待已经开始的本地工作，不因停止而补启动尚未 poll 的读取。业务负责人负责监督整个
+请求 future，不能用外层超时直接丢弃它来代替这些结算。
 
 bridge 对出站连接在握手后订阅既有确认离线事件；已排队的 Offline 即便随后 Online，获取租约及原生开流前仍同步判旧连接失效；后台观察同时推进同步游标，其他 peer 的健康事件不积压成假失活。消息尚未发送时，准入后已确认失活的连接最多更新一次，仍用原准入快照和原 deadline；迟到共同结果已关闭时有界重新获取，不重发已写出的内容。manager 的原 JoinSet 监督连接结束并在 shutdown join，监督只持原生能力，不保活租约。Offline/Lagged 关闭本条连接，不推进成员 epoch、不复用 presence 连接、不自行重发内容；明确不可达的网络 I/O 返回原 Offline，本地授权来源保持 Io source。
 
