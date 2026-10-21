@@ -49,7 +49,7 @@ Port 归需要能力的层所有，因此 Infra 既可以实现 Core port，也�
 
 ## 不变量
 
-- 业务持久化默认使用 MasterKey AEAD；明文例外见 [`docs/SECURITY.md`](docs/SECURITY.md)。
+- 业务持久化默认使用 MasterKey AEAD；配置、凭据与明文例外见 [`docs/SECURITY.md`](docs/SECURITY.md)。
 - P2P 是默认能力，失败时不自动切换 LAN。
 - 一个跨层行为只有一个完整负责人；调用方不编排内部步骤。
 - 成员资格来自已验证成员历史，不从在线、地址、缓存或旧关系反推。
