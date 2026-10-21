@@ -365,3 +365,14 @@ Failure modes recorded before the follow-up changes:
 - The leave resource test can sample asynchronous reclamation and bounded connection-pool variation. Reuse only task9 ae75c75624e913a77697664e7045bff8649bf4b7's exact test change. Its retained negative controls reject one leaked descriptor or task per cycle. Do not merge task9 implementation.
 
 The first two tests and their relevant production modules have no diff against the fetched task7 baseline. The first local replay passed both tests. Repeated original runs and the complete remote failure log are retained. No import implementation or assertion is removed to address these failures.
+
+## CI follow-up: unavailable collector capture boundary
+
+Failure modes recorded before the test change:
+
+- A remote queue or exporter waits on slow HTTP and blocks the business producer. Keep all 10,000 operations, the strict two-second producer limit, and both dropped-record and failed-batch assertions.
+- On Linux, the independent synchronous JSON system sink writes every completion to stdout. The CI capture pipe can block that sink inside the timed loop. This is not a measurement of remote queue blocking. Use a real subprocess with stdout/stderr retained in a regular artifact file, not a CI pipe. Do not change the production subscriber or its policy.
+- Child recursion, child failure, or missing artifacts can falsely report success. Use one explicit child-mode flag, require a successful child exit and the summary artifact, and retain captured output on failure.
+- An assertion fails before evidence is written. Record elapsed producer time, real exporter health counters, flush and shutdown results before assertions. The slow real wiremock Collector remains unchanged.
+
+The existing E2E owns the entire scenario. The parent only isolates process output; the child installs the real public runtime, sends real HTTP export attempts, saturates the real queues, and checks every original invariant. No new unit test, product API, security contract, or dependency is introduced. CI Linux failed; the original local macOS replay passed. The platform difference remains explicit.
