@@ -5,8 +5,9 @@ use crate::transfer::receive::batch::ReceiveFacts;
 use crate::transfer::receive::identity::{
     directory_member_transfer_id, directory_representation_transfer_id,
 };
-use crate::transfer::receive::materialization::InboundFileSetManifest;
+use crate::transfer::receive::materialization::{InboundFileSetManifest, ReceivedItem};
 use bytes::Bytes;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, PoisonError, Weak};
 use uc_core::ids::{DeviceId, EntryId, FormatId, RepresentationId};
@@ -46,7 +47,7 @@ pub(super) struct ReceiveReceipt {
     planned: Vec<PlannedReceiveItem>,
     batch: Weak<ReceiveBatch>,
     final_facts: Option<ReceiveFacts>,
-    persisted: bool,
+    landed: HashMap<usize, ReceivedItem>,
 }
 
 impl ReceiveSource {
@@ -120,7 +121,7 @@ impl ReceiveAction {
                 planned,
                 batch: Arc::downgrade(&self.batch),
                 final_facts: None,
-                persisted: false,
+                landed: HashMap::new(),
             },
         );
     }
@@ -149,7 +150,7 @@ impl ReceiveAction {
     }
 
     /// 只有持久保存成功才释放原包；全部成功后不再保留重试能力。
-    pub(crate) fn persisted(&self, complete: bool) {
+    pub(crate) fn persisted(&self, complete: bool, completed: &[ReceivedItem]) {
         let progress = self
             .progress
             .lock()
@@ -170,11 +171,15 @@ impl ReceiveAction {
         else {
             return;
         };
-        receipt.persisted = true;
-        receipt.source.original_wire = None;
         if complete {
             state.receipts.remove(&progress.entry);
+            return;
         }
+        receipt.landed = completed
+            .iter()
+            .map(|item| (item.blob_index, item.clone()))
+            .collect();
+        receipt.source.original_wire = None;
     }
 }
 
@@ -188,10 +193,11 @@ impl ReceiveWorkRegistry {
         else {
             return;
         };
+        let committed = receipt.landed.keys().copied().collect::<HashSet<_>>();
         if let Some(batch) = receipt.batch.upgrade() {
-            progress.items = batch.items(&receipt.planned, receipt.persisted, progress.state);
+            progress.items = batch.items(&receipt.planned, &committed, progress.state);
         } else if let Some(facts) = &receipt.final_facts {
-            progress.items = facts.items(&receipt.planned, receipt.persisted, progress.state);
+            progress.items = facts.items(&receipt.planned, &committed, progress.state);
         }
     }
 }

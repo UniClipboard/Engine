@@ -1,6 +1,8 @@
 //! 接收计划的文件物化、目录发布及本地产物结算。
 
 use super::super::identity::{directory_member_transfer_id, directory_representation_transfer_id};
+use super::reuse::validate_selection;
+use super::{ReceivedItem, ReceivedOutput};
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -556,6 +558,8 @@ impl FileCacheBlobMaterializer {
 #[async_trait]
 impl InboundBlobMaterializer for FileCacheBlobMaterializer {
     async fn materialize_plan(&self, plan: ReceiveWorkPlan) -> Result<MaterializeResult> {
+        let selection = plan.selection.clone();
+        let original_blob_indices = plan.original_blob_indices.clone();
         let (
             from_device,
             receiver_entry_id,
@@ -567,6 +571,30 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
             cancellation,
             batch,
         ) = plan.into_parts();
+        if let Some(selection) = &selection {
+            validate_selection(
+                selection,
+                &blob_refs,
+                file_set_manifest.is_some(),
+                &snapshot,
+                &self.cache_dir,
+                &cancellation,
+            )
+            .await?;
+        }
+        let rep_blob_indices = blob_refs
+            .iter()
+            .enumerate()
+            .filter(|(_, blob)| blob.representation_index.is_some())
+            .map(|(index, _)| original_blob_indices[index])
+            .collect::<Vec<_>>();
+        let file_blob_indices = blob_refs
+            .iter()
+            .enumerate()
+            .filter(|(_, blob)| blob.representation_index.is_none())
+            .map(|(index, _)| original_blob_indices[index])
+            .collect::<Vec<_>>();
+        let mut completed = Vec::new();
         let representation_count = blob_refs
             .iter()
             .filter(|blob| blob.representation_index.is_some())
@@ -684,6 +712,26 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
             transfer_context.batch = Some(batch.clone());
             let item_id = transfer_context.transfer_id.clone();
             batch_idx += 1;
+            let original_index = rep_blob_indices[loop_idx];
+            if let Some(selection) = &selection {
+                if let Some(item) = selection.landed.get(&original_index) {
+                    batch.item_result(
+                        &item_id,
+                        item.bytes,
+                        OutboundProgressStatus::Completed,
+                        None,
+                    );
+                    completed.push(item.clone());
+                    continue;
+                }
+                if !selection.selected.contains(&original_index) {
+                    incomplete_rep_idxs.push(idx as usize);
+                    partial = true;
+                    item_failed = true;
+                    batch.item_result(&item_id, 0, OutboundProgressStatus::Failed, None);
+                    continue;
+                }
+            }
             let fetched = match self
                 .fetcher
                 .fetch_blob(FetchBlobCommand {
@@ -762,6 +810,12 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                 OutboundProgressStatus::Completed,
                 None,
             );
+            completed.push(ReceivedItem {
+                blob_index: original_index,
+                plaintext_hash: *fetched.plaintext_hash.as_bytes(),
+                bytes: fetched_len as u64,
+                output: ReceivedOutput::Representation(rep.id.clone()),
+            });
             rep.set_inline_bytes(fetched.plaintext.to_vec())
                 .context("materialize: failed to set inline bytes")?;
             uc_info!(
@@ -783,9 +837,12 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                     partial_outcome,
                     false,
                     Vec::new(),
+                    completed,
                 ))
             } else {
-                Ok(MaterializeResult::complete(snapshot))
+                let mut result = MaterializeResult::complete(snapshot);
+                result.completed = completed;
+                Ok(result)
             };
         }
 
@@ -812,6 +869,19 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
         let mut completed_file_refs = Vec::with_capacity(file_refs.len());
         let mut file_content_digests: Vec<[u8; 32]> = Vec::with_capacity(file_refs.len());
         let mut used_names = HashSet::new();
+        if let Some(selection) = &selection {
+            for item in selection.landed.values() {
+                if let ReceivedOutput::File(artifact) = &item.output {
+                    if let Some(name) = artifact
+                        .final_path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                    {
+                        used_names.insert(name.to_owned());
+                    }
+                }
+            }
+        }
         let blob_ref_total = file_refs.len();
         let mut receive_artifacts = Vec::with_capacity(file_refs.len());
         let mut artifact_journaled = false;
@@ -860,6 +930,41 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
             let item_id = transfer_context.transfer_id.clone();
             batch_idx += 1;
 
+            let original_index = file_blob_indices[idx];
+            if let Some(selection) = &selection {
+                if let Some(item) = selection.landed.get(&original_index) {
+                    let ReceivedOutput::File(artifact) = &item.output else {
+                        return Err(anyhow!("reused receive output is not a file"));
+                    };
+                    local_paths.push(artifact.final_path.clone());
+                    file_content_digests.push(item.plaintext_hash);
+                    completed_file_refs.push(blob_ref.clone());
+                    completed.push(item.clone());
+                    batch.item_result(
+                        &item_id,
+                        item.bytes,
+                        OutboundProgressStatus::Completed,
+                        None,
+                    );
+                    file_idx += 1;
+                    continue;
+                }
+                if !selection.selected.contains(&original_index) {
+                    missing_files.push(MissingFileRef {
+                        filename: blob_ref
+                            .filename
+                            .clone()
+                            .unwrap_or_else(|| format!("blob-{}", blob_ref.entry_id.as_ref())),
+                        size_bytes: blob_ref.size_bytes,
+                    });
+                    partial = true;
+                    item_failed = true;
+                    batch.item_result(&item_id, 0, OutboundProgressStatus::Failed, None);
+                    file_idx += 1;
+                    continue;
+                }
+            }
+
             // Resolve the destination for this file. When a user save
             // directory is configured and usable, write the file there (flat,
             // collision-suffixed) so the user can operate on it directly;
@@ -906,7 +1011,7 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                     entry_dir.join(filename)
                 }
             };
-            receive_artifacts.push(ReceiveArtifact {
+            let artifact = ReceiveArtifact {
                 item_id: transfer_context.transfer_id.clone(),
                 staged_path: path.clone(),
                 final_path: path.clone(),
@@ -915,7 +1020,8 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                 } else {
                     ReceiveArtifactOwnership::ManagedStaging
                 },
-            });
+            };
+            receive_artifacts.push(artifact.clone());
             match self
                 .record_receive_artifacts(
                     &receiver_entry_id,
@@ -1056,6 +1162,12 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                 OutboundProgressStatus::Completed,
                 None,
             );
+            completed.push(ReceivedItem {
+                blob_index: original_index,
+                plaintext_hash: *fetched.plaintext_hash.as_bytes(),
+                bytes: fetched.bytes_written,
+                output: ReceivedOutput::File(artifact),
+            });
             file_content_digests.push(*fetched.plaintext_hash.as_bytes());
             local_paths.push(path);
             completed_file_refs.push(file_refs[idx].clone());
@@ -1075,6 +1187,7 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                 partial_outcome,
                 artifact_journaled,
                 receive_artifacts,
+                completed,
             ));
         }
 
@@ -1159,6 +1272,7 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
         let mut result = MaterializeResult::complete(snapshot);
         result.has_receive_artifacts = artifact_journaled;
         result.receive_artifacts = receive_artifacts;
+        result.completed = completed;
         Ok(result)
     }
 }
@@ -1289,6 +1403,7 @@ impl FileCacheBlobMaterializer {
                 // The staging area stays until the caller settles the
                 // publication: rollback needs somewhere to put the roots back.
                 Ok(MaterializeResult {
+                    completed: Vec::new(),
                     snapshot,
                     missing: Vec::new(),
                     partial: false,
@@ -2198,6 +2313,7 @@ fn finalize_partial(
     outcome: MaterializeOutcome,
     has_receive_artifacts: bool,
     receive_artifacts: Vec<ReceiveArtifact>,
+    completed: Vec<ReceivedItem>,
 ) -> MaterializeResult {
     // 倒序删除 incomplete rep(顺序 -> 倒序保 idx 仍有效)。
     let mut sorted_idxs: Vec<usize> = incomplete_rep_idxs.to_vec();
@@ -2279,6 +2395,7 @@ fn finalize_partial(
         "materialize: finalized partial result"
     );
     MaterializeResult {
+        completed,
         snapshot,
         missing: missing_files,
         partial: true,

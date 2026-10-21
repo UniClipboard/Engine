@@ -2,12 +2,15 @@
 
 mod model;
 mod ports;
+mod reuse;
 mod workflow;
+pub(crate) use reuse::ReceiveReuseRefusal;
 
 pub use model::{
     InboundFileSetManifest, InboundFileSetMember, MaterializeOutcome, MaterializeResult,
     MissingFileRef, ReceiveWorkPlan,
 };
+pub(crate) use model::{ReceiveSelection, ReceivedItem, ReceivedOutput};
 pub use ports::{InboundBlobFetcher, InboundBlobMaterializer};
 pub(crate) use workflow::{
     compute_file_set_component, is_directory_cancel_error, verify_file_set_identity,

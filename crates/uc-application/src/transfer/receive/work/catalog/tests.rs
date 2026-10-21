@@ -1,5 +1,6 @@
 use super::{ReceiveSource, ReceiveWorkRegistry};
 use crate::clipboard::sync::payload_codec::V3BlobRef;
+use crate::transfer::receive::materialization::{ReceivedItem, ReceivedOutput};
 use bytes::Bytes;
 use std::sync::Arc;
 use uc_core::file_transfer::OutboundProgressStatus;
@@ -8,6 +9,7 @@ use uc_core::ports::blob::BlobTicket;
 use uc_core::ports::{
     AttemptState, EntryReceiveProgress, ReceiveItemKind, TrackedFileTransferStatus,
 };
+use uc_core::ports::{ReceiveArtifact, ReceiveArtifactOwnership};
 
 fn source() -> ReceiveSource {
     ReceiveSource {
@@ -58,7 +60,20 @@ fn query_includes_unstarted_items_and_requires_real_persistence_for_completed_do
             None,
         );
         if saved {
-            action.persisted(false);
+            action.persisted(
+                false,
+                &[ReceivedItem {
+                    blob_index: 0,
+                    plaintext_hash: [1; 32],
+                    bytes: 7,
+                    output: ReceivedOutput::File(ReceiveArtifact {
+                        item_id: "receiver:attempt:attempt:member:0".into(),
+                        staged_path: "private-saved".into(),
+                        final_path: "private-saved".into(),
+                        ownership: ReceiveArtifactOwnership::UserDestination,
+                    }),
+                }],
+            );
         }
         action.batch.settled(AttemptState::Failed);
         action.finish(Ok(()));
@@ -137,7 +152,47 @@ fn ordinary_cancel_keeps_original_source_but_full_success_releases_it() {
         .unwrap();
     action.retain_source(source());
     assert_eq!(registry.state.lock().unwrap().receipts.len(), 1);
-    action.persisted(true);
+    action.persisted(true, &[]);
     assert!(registry.state.lock().unwrap().receipts.is_empty());
     action.finish(Ok(()));
+}
+
+#[test]
+fn only_the_explicitly_committed_item_proof_can_turn_download_completion_into_success() {
+    let registry = Arc::new(ReceiveWorkRegistry::default());
+    let action = registry.action();
+    action
+        .register(&EntryId::from("receiver"), "attempt")
+        .unwrap();
+    action.retain_source(source());
+    for index in 0..2 {
+        action.batch.item_result(
+            &format!("receiver:attempt:attempt:member:{index}"),
+            7,
+            OutboundProgressStatus::Completed,
+            None,
+        );
+    }
+    action.persisted(
+        false,
+        &[ReceivedItem {
+            blob_index: 0,
+            plaintext_hash: [1; 32],
+            bytes: 7,
+            output: ReceivedOutput::File(ReceiveArtifact {
+                item_id: "saved".into(),
+                staged_path: "saved".into(),
+                final_path: "saved".into(),
+                ownership: ReceiveArtifactOwnership::UserDestination,
+            }),
+        }],
+    );
+    action.finish(Ok(()));
+    let mut current = progress(AttemptState::Failed);
+    registry.merge_progress(&mut current);
+    assert_eq!(
+        current.items[0].status,
+        TrackedFileTransferStatus::Completed
+    );
+    assert_eq!(current.items[1].status, TrackedFileTransferStatus::Failed);
 }

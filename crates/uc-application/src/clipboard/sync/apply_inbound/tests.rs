@@ -8,6 +8,7 @@ mod lifecycle;
 mod receive_work;
 mod result_query;
 mod retry_material;
+mod selection;
 
 use crate::clipboard::sync::apply_inbound::InboundActivationOwner;
 use anyhow::Result;
@@ -1583,6 +1584,7 @@ async fn partial_materialize_persists_entry_but_skips_os_write() {
                 )
                 .unwrap();
             Ok(MaterializeResult {
+                completed: Vec::new(),
                 snapshot,
                 missing: vec![crate::transfer::receive::materialization::MissingFileRef {
                     filename: "big.iso".to_string(),
@@ -1686,6 +1688,7 @@ async fn partial_materialize_does_not_register_dedup_entry() {
                     )
                     .unwrap();
                 Ok(MaterializeResult {
+                    completed: Vec::new(),
                     snapshot,
                     missing: vec![crate::transfer::receive::materialization::MissingFileRef {
                         filename: "retry.iso".to_string(),
@@ -3392,6 +3395,7 @@ async fn partial_delivery_does_not_replace_existing_partial() {
                 )
                 .unwrap();
             Ok(MaterializeResult {
+                completed: Vec::new(),
                 snapshot,
                 missing: vec![crate::transfer::receive::materialization::MissingFileRef {
                     filename: "payload.bin".to_string(),

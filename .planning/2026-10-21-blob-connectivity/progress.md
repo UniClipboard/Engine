@@ -198,3 +198,8 @@
 - 最终owner候选App1188通过／1跳过（3.885秒）、Engine50通过（0.019秒）。workspace检查因mbx检测build-script声明输入在编译期间变化而丢弃observability_probe／local_capture_policy编译结果，exit101（receive-catalog-owner-workspace.log）；非Rust诊断错误，不记通过。当前target可用，磁盘889GiB可用，无已知本轮Cargo活动句柄，冻结文件后在相同target／wrapper上原命令重跑，不清缓存。此前删除的adapter路径预测未恢复仅为mbx warning，已记录实际源码删除，不恢复废弃入口。
 
 - 冻结源码与文档后原target／mbx wrapper的workspace全目标check重跑通过（1m21s），metadata JSON已解析、fmt、Rust style、repository preflight、官方1369站点清单、变更Markdown无新增失效目标及diff检查通过。最终业务源码App1188通过／1跳过（3.885秒）、Engine50通过（0.019秒）。手工审查来源只内存保留／保存释放原包、receipt弱持通知寿命及实际保存证明、原项身份单一来源、删除封旧birth、停止后读取最终event／文件引用、全部维护入口共用一个删除UC、错误来源与用户输出所有权；code-review skill不可用。来源字段仍待真正重试消费，NoEntry来源寿命／容量、清空未枚举pending、删除调用等待退出后的完整责任及无runtime来源重建等缺口均保留。未执行完整workspace测试／网络／设备矩阵，不假报通过；完整目标继续。
+
+- 上轮6f4e4bfd形成生产来源目录／查询与唯一删除负责人并完成实际验证，归为progress。当前保留四个用户原有规划目录。选择计划先加接缝做red：只允许获取原始第3项时旧代码实际请求member:0、准备写same.bin，真实失败证据在receive-selection-red.log（0通过1失败）。实现选择／复用及逐项完成证明后首轮5通过（0.033秒）；扩展混合表示、修改／缺失／越界所有权、目录子集拒绝后8通过（0.037秒）。
+- 新固定分类ErrorClass接口必须适配按值生成词表，最初self.wire写法被纯转调检查拒绝；改为明确的Self::wire(*self)类型适配，未改检查器或加豁免。全部调用者迁移completed事实后，完整Application1195通过／1跳过（3.828秒），包含取消选中项保留旧成功、符号链接拒绝和逐项保存证明；稳定Retry API仍未实现。最终契约／workspace检查待运行。
+
+- 最终候选Application1195通过／1跳过（3.828秒）、Engine公开契约50通过（0.015秒）、workspace全目标check通过（1m24s）。metadata JSON已解析，fmt、Rust style、repository preflight、官方1369站点清单、变更Markdown无新增失效目标及diff检查通过。手工审查原数组／项身份、复用内容与归属验证、旧产物不进入新清理、实际保存后逐项证明、全部内部消费者及不变的持久格式；code-review skill不可用。未执行完整workspace测试／网络／设备矩阵，原profile基线失败保留。实际RetryEntryReceive、CAS与绑定尚未接线，完整目标继续。

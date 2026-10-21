@@ -4,7 +4,7 @@ use crate::transfer::blob::fetch_failure_reason;
 use crate::transfer::blob::notifications::OutboundNotifications;
 use crate::transfer::policy::PROGRESS_REPORT_INTERVAL;
 use anyhow::Error as SourceError;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::time::Instant;
@@ -132,11 +132,11 @@ impl ReceiveBatch {
     pub(crate) fn items(
         &self,
         planned: &[PlannedReceiveItem],
-        persisted: bool,
+        committed: &HashSet<usize>,
         attempt: AttemptState,
     ) -> Vec<ReceiveItemProgress> {
         let state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        project_items(&state.items, state.finished, planned, persisted, attempt)
+        project_items(&state.items, state.finished, planned, committed, attempt)
     }
 
     pub(crate) fn facts(&self) -> ReceiveFacts {
@@ -254,17 +254,17 @@ impl ReceiveFacts {
     pub(crate) fn items(
         &self,
         planned: &[PlannedReceiveItem],
-        persisted: bool,
+        committed: &HashSet<usize>,
         attempt: AttemptState,
     ) -> Vec<ReceiveItemProgress> {
-        project_items(&self.items, self.finished, planned, persisted, attempt)
+        project_items(&self.items, self.finished, planned, committed, attempt)
     }
 }
 fn project_items(
     items: &HashMap<String, Item>,
     finished: bool,
     planned: &[PlannedReceiveItem],
-    persisted: bool,
+    committed: &HashSet<usize>,
     attempt: AttemptState,
 ) -> Vec<ReceiveItemProgress> {
     if planned
@@ -285,15 +285,14 @@ fn project_items(
     planned
         .iter()
         .map(|planned| {
+            let persisted = committed.contains(&planned.blob_index);
             let item = items.get(&planned.id);
             let mut status = item.map_or(TrackedFileTransferStatus::Pending, |item| {
                 tracked_status(&item.status)
             });
             let mut reason = item.and_then(|item| item.failure_reason);
             let downloaded = status == TrackedFileTransferStatus::Completed;
-            if status == TrackedFileTransferStatus::Completed
-                && (!persisted || !attempt.is_terminal())
-            {
+            if status == TrackedFileTransferStatus::Completed && !persisted {
                 status = TrackedFileTransferStatus::Transferring;
             }
             if attempt.is_terminal()

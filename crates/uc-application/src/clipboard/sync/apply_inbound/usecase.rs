@@ -1,6 +1,7 @@
 //! `ApplyInboundClipboardUseCase` —— 入站剪贴板流程的编排主体。
 
 use std::collections::BTreeMap;
+use std::mem;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Error as SourceError};
@@ -1206,6 +1207,7 @@ impl ApplyInboundClipboardUseCase {
         // commit them or take them back.
         let mut publication: Option<DirectoryPublication> = None;
         let mut directory_file_set = None;
+        let mut completed = Vec::new();
         let (snapshot, mut materialize_outcome, has_receive_artifacts, receive_artifacts) =
             match (requires_materialize, &self.blob_materializer) {
                 (false, _) => (snapshot, MaterializeOutcome::Complete, false, Vec::new()),
@@ -1332,6 +1334,7 @@ impl ApplyInboundClipboardUseCase {
                         partial = partial,
                         "inbound: blob refs materialized into local cache"
                     );
+                    completed = mem::take(&mut result.completed);
                     let receive_artifacts = result.take_receive_artifacts();
                     (
                         result.snapshot,
@@ -1624,7 +1627,10 @@ impl ApplyInboundClipboardUseCase {
         if let Some(publication) = publication {
             publication.commit().await;
         }
-        receive_action.persisted(materialize_outcome == MaterializeOutcome::Complete);
+        receive_action.persisted(
+            materialize_outcome == MaterializeOutcome::Complete,
+            &completed,
+        );
         receive_action.batch.settled(match materialize_outcome {
             MaterializeOutcome::Complete => AttemptState::Completed,
             MaterializeOutcome::PartialFailed => AttemptState::Failed,
