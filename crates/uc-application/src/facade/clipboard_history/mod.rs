@@ -18,9 +18,9 @@ use uc_core::ports::{
 
 use crate::deps::{ClipboardEntryPorts, ClipboardRepresentationPorts};
 use uc_core::{
-    ClipboardEntry, ClipboardEvent, ClipboardSelection, ClipboardSelectionDecision, MimeType,
-    ObservedClipboardRepresentation, PayloadAvailability, PersistedClipboardRepresentation,
-    SelectionPolicyVersion, SystemClipboardSnapshot,
+    ClipboardEntry, ClipboardEvent, ClipboardRepositoryError, ClipboardSelection,
+    ClipboardSelectionDecision, MimeType, ObservedClipboardRepresentation, PayloadAvailability,
+    PersistedClipboardRepresentation, SelectionPolicyVersion, SystemClipboardSnapshot,
 };
 
 use crate::clipboard::history::{
@@ -596,6 +596,12 @@ fn retention_to_view(result: RetentionEnforcementResult) -> RetentionEnforcement
 }
 
 fn map_history_error(err: anyhow::Error) -> ClipboardHistoryError {
+    if matches!(
+        err.downcast_ref::<ClipboardRepositoryError>(),
+        Some(ClipboardRepositoryError::NotFound(_))
+    ) {
+        return ClipboardHistoryError::NotFound;
+    }
     let message = err.to_string();
     let lower = message.to_lowercase();
     if lower.contains("not found") {

@@ -121,18 +121,12 @@ pub(super) fn replace_entry_content_rows(
             clipboard_entry::content_category.eq(&prepared.new_content_category),
         ))
         .execute(conn)?;
-    for representation in &prepared.representation_rows {
-        diesel::insert_into(clipboard_snapshot_representation::table)
-            .values(representation)
-            .execute(conn)?;
-    }
+    // 同一来源的重试保留表示身份；在事务内先移除旧引用和表示，避免主键碰撞。
+    // 后续任何写入失败都会连同这些删除一起回滚，旧条目仍完整可读。
     diesel::delete(
         clipboard_selection::table.filter(clipboard_selection::entry_id.eq(&prepared.entry_id)),
     )
     .execute(conn)?;
-    diesel::insert_into(clipboard_selection::table)
-        .values(&prepared.selection_row)
-        .execute(conn)?;
 
     if !old_rep_ids.is_empty() {
         diesel::delete(
@@ -146,6 +140,14 @@ pub(super) fn replace_entry_content_rows(
             .filter(clipboard_snapshot_representation::event_id.eq(&old_event_id)),
     )
     .execute(conn)?;
+    for representation in &prepared.representation_rows {
+        diesel::insert_into(clipboard_snapshot_representation::table)
+            .values(representation)
+            .execute(conn)?;
+    }
+    diesel::insert_into(clipboard_selection::table)
+        .values(&prepared.selection_row)
+        .execute(conn)?;
     if !old_transfer_ids.is_empty() {
         diesel::delete(
             file_transfer_events::table
@@ -452,6 +454,138 @@ mod tests {
                     .count()
                     .get_result(conn)?;
                 assert_eq!(transfer_events, 0, "old transfer events removed");
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn replace_can_keep_representation_identity_across_events() {
+        let (repo, executor, _dir) = make_repo();
+        seed_full_entry(&executor);
+        let (new_event, mut reps, _) = new_content();
+        reps[0].id = RepresentationId::from("r1");
+        let selection = ClipboardSelectionDecision::new(
+            EntryId::from("e1"),
+            ClipboardSelection {
+                primary_rep_id: reps[0].id.clone(),
+                secondary_rep_ids: vec![],
+                preview_rep_id: reps[0].id.clone(),
+                paste_rep_id: reps[0].id.clone(),
+                policy_version: SelectionPolicyVersion::V1,
+            },
+        );
+        repo.replace_entry_content(
+            &EntryId::from("e1"),
+            &new_event,
+            &reps,
+            &selection,
+            5,
+            ClipboardEntryContentCategory::Text,
+        )
+        .await
+        .unwrap();
+        executor
+            .run(|conn| {
+                let (event, data): (String, Option<Vec<u8>>) =
+                    clipboard_snapshot_representation::table
+                        .filter(clipboard_snapshot_representation::id.eq("r1"))
+                        .select((
+                            clipboard_snapshot_representation::event_id,
+                            clipboard_snapshot_representation::inline_data,
+                        ))
+                        .first(conn)?;
+                assert_eq!(event, "new-ev");
+                assert_eq!(data.as_deref(), Some(b"hello".as_slice()));
+                assert_eq!(
+                    clipboard_snapshot_representation::table
+                        .count()
+                        .get_result::<i64>(conn)?,
+                    1
+                );
+                assert_eq!(
+                    clipboard_representation_thumbnail::table
+                        .count()
+                        .get_result::<i64>(conn)?,
+                    0
+                );
+                assert_eq!(clipboard_event::table.count().get_result::<i64>(conn)?, 1);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn replacement_insert_failure_restores_old_representations_and_dependents() {
+        let (repo, executor, _dir) = make_repo();
+        seed_full_entry(&executor);
+        let (new_event, mut reps, selection) = new_content();
+        reps.push(reps[0].clone());
+        let error = repo
+            .replace_entry_content(
+                &EntryId::from("e1"),
+                &new_event,
+                &reps,
+                &selection,
+                5,
+                ClipboardEntryContentCategory::Text,
+            )
+            .await
+            .unwrap_err();
+        let mut source: &(dyn std::error::Error + 'static) = &error;
+        loop {
+            if matches!(
+                source.downcast_ref::<diesel::result::Error>(),
+                Some(diesel::result::Error::DatabaseError(
+                    diesel::result::DatabaseErrorKind::UniqueViolation,
+                    _
+                ))
+            ) {
+                break;
+            }
+            source = source.source().expect("必须保留真实SQLite唯一约束来源");
+        }
+        executor
+            .run(|conn| {
+                let event: String = clipboard_entry::table
+                    .select(clipboard_entry::event_id)
+                    .first(conn)?;
+                assert_eq!(event, "old-ev");
+                let data: Option<Vec<u8>> = clipboard_snapshot_representation::table
+                    .filter(clipboard_snapshot_representation::id.eq("r1"))
+                    .select(clipboard_snapshot_representation::inline_data)
+                    .first(conn)?;
+                assert_eq!(data.as_deref(), Some(b"old".as_slice()));
+                assert_eq!(
+                    clipboard_snapshot_representation::table
+                        .count()
+                        .get_result::<i64>(conn)?,
+                    2
+                );
+                assert_eq!(
+                    clipboard_representation_thumbnail::table
+                        .count()
+                        .get_result::<i64>(conn)?,
+                    1
+                );
+                let selected: String = clipboard_selection::table
+                    .select(clipboard_selection::primary_rep_id)
+                    .first(conn)?;
+                assert_eq!(selected, "r1");
+                assert_eq!(clipboard_event::table.count().get_result::<i64>(conn)?, 1);
+                assert_eq!(file_transfer::table.count().get_result::<i64>(conn)?, 1);
+                assert_eq!(
+                    file_transfer_events::table
+                        .count()
+                        .get_result::<i64>(conn)?,
+                    1
+                );
+                assert_eq!(
+                    clipboard_entry_delivery::table
+                        .count()
+                        .get_result::<i64>(conn)?,
+                    1
+                );
                 Ok(())
             })
             .unwrap();

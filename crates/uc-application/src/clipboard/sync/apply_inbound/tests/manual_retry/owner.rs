@@ -174,7 +174,7 @@ fn item(index: usize) -> Vec<String> {
 async fn retry_owner_accepts_one_set_and_refuses_different_set_until_full_capture_finishes() {
     let fixture = Fixture::new(1).await;
     fixture.capture.slow.store(true, Ordering::SeqCst);
-    let (owner, _, _) = owner(&fixture);
+    let (owner, _, barrier) = owner(&fixture);
     let result = owner
         .execute(EntryId::from("receiver"), "old".into(), item(1))
         .await
@@ -190,6 +190,16 @@ async fn retry_owner_accepts_one_set_and_refuses_different_set_until_full_captur
             .unwrap(),
         RetryEntryReceiveOutcome::AlreadyReceiving
     );
+    barrier.0.store(true, Ordering::SeqCst);
+    assert_eq!(
+        owner
+            .execute(EntryId::from("receiver"), attempt_id.clone(), item(1))
+            .await
+            .unwrap(),
+        RetryEntryReceiveOutcome::CancellationIncomplete,
+        "防重入仍持有时也必须区分正在停止的完整动作"
+    );
+    barrier.0.store(false, Ordering::SeqCst);
     let current = owner
         .query
         .get(&EntryId::from("receiver"))

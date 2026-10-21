@@ -79,6 +79,7 @@ async fn delete_waits_for_receive_then_cleans_its_latest_event_and_only_managed_
         );
         let deleting = {
             let entry = entry.clone();
+            let deletion = deletion.clone();
             tokio::spawn(async move { deletion.execute(&entry).await })
         };
         action.cancellation().cancelled().await;
@@ -108,6 +109,11 @@ async fn delete_waits_for_receive_then_cleans_its_latest_event_and_only_managed_
         assert_eq!(std::fs::read(&user_file).unwrap(), b"user-owned");
         assert!(store.entry.lock().unwrap().is_none());
         assert!(late.register(&entry, "late").is_err());
+        let missing = deletion.execute(&entry).await.unwrap_err();
+        assert!(matches!(
+            missing.downcast_ref::<ClipboardRepositoryError>(),
+            Some(ClipboardRepositoryError::NotFound(_))
+        ));
     }
 }
 

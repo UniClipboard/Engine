@@ -266,3 +266,23 @@
 - 扩大观测crate的普通Cargo all-targets得到180通过／1失败／1跳过；失败是未修改的physical_connection_records同一二进制两测试重复安装全局subscriber，第二项AlreadyInstalled。改用仓库既有nextest逐测试进程隔离后，两项均实际通过；两crate完整nextest共181通过／1跳过（6.553秒），不改变断言或生产singleton语义，首轮失败日志保留。根门禁继续串行执行。
 
 - 最终metadata解析812包、workspace全目标check通过（1m28s）、fmt、Rust style、repository preflight、1355站点隐私清单及diff全部通过。P2P323通过／3跳过、观测两个crate nextest181通过／1跳过；Collector隐私5和原驱动3通过。真实文件十格含实际blob握手全通过，原冻结库和当前二进制／代码快照指纹已逐格核验。Cargo串行共享target及原缓存，未手动清缓存或使用临时target。手工审查固定ALPN映射、封闭词表、未知拒绝、本地／远程隔离及旧角色复用；code-review skill不可用，不冒充技能审查。准备提交；完整spec未完成，后续优先真实Engine／SQLite部分重试和生命周期、完整准备／结算预算、受管1GiB及默认CI／平台验收。
+
+
+## 2026-10-22 真实 Engine 部分重试与取消结算
+
+- 初始fixture错误关闭发送端自动同步，SendFiles被现有1253门禁拒绝；修正设置并等待真实peer connected。后续真实接收成功，重试却仍Failed；诊断日志明确 completed_bytes=24、items_completed=3，但旧StorageUnavailable事实被恢复。
+- SQLite最小回归实证 UNIQUE constraint failed: clipboard_snapshot_representation.id（replace-stable-representation-red.log）。重试保留原表示ID，replace插入顺序冲突。原事务内先清旧选择／缩略图／表示后插新表示，失败全部回滚；四项仓储测试通过。真实三文件基本重试首次通过3.36秒。
+- 扩展本地导出完成权屏障后，重复点击与旧取消隔离通过；提交后owner尾部未退出时仍AlreadyReceiving合法，要求最终退出后旧attempt明确Superseded。撤销原发送方的真实Engine回归返回AccessDenied，不访问store／改变attempt。
+- 取消等待丢弃后，重复取消实际到期为CancellationIncomplete；重试误报AlreadyReceiving，原日志real-engine-retry-lifecycle-second.log为2通过1失败。修正retry owner防重入同时检查同attempt清理屏障，Failing也不允许新重试。
+- 下一轮又实证取消终态后新导出文件仍存在（real-engine-retry-lifecycle-fixed.log为2通过1失败）。物化只删除用户预留文件、忽略受管缓存；两者现在都清理，成功复用项从不进入本次清理。清理失败保留原fetch完整source chain及独立cleanup IO，不丢产物日志、不结算终态。
+- Application实际文件系统目录拒绝remove_file的两分支回归，验证原StorageFull／Cancelled、IsADirectory清理原因、旧成功文件与Cancelling／Failing非终态。manual_retry相关15通过（0.05秒）。最终真实Engine3通过（16.09秒），含实际写盘后暂停、调用者丢弃取消等待、重复取消5秒到期、拒绝重叠、输出清理、成功保留和撤权拒绝。
+- 仍需扩大三crate整库及根门禁；强杀／历史来源恢复、其余生命周期、预算、1GiB和最终CI／平台仍未完成，不以本次三项覆盖替代完整spec。
+
+- 所有权审查新增实际碰撞红测，原代码确实把新目标指向已保存同名文件（managed-output-ownership-red.log）。受管输出改用原子create_new预留，遇到旧文件使用独立随机名称，不覆盖或清理旧文件。成功／StorageFull均保留旧内容，失败只移除本次已预留输出；接收流程105项通过（2.88秒）。
+- 首轮三crate nextest在1746通过／1失败／9跳过处fail-fast，25项未运行。真实旧Engine测试engine_start_builds_a_resumable_real_session要求第二次删除NotFound，却得到HistoryEntryDeleted；不是本次完整通过，也未当作外部阻塞。
+- 删除owner仍先封口等待，ReceiveCleanup原子保留是否存在接收的事实；无保存条目且无接收时返回Core typed NotFound，facade按具体类型映射，不依赖新增字符串判断。扩展原删除回归核对第二次Missing，未保存接收封口与旧动作停止不变。
+- 该修改后Application整库1214通过／1跳过（25.83秒）。准备冻结代码、更新1355站点inventory并用no-fail-fast完整跑三crate，再执行根门禁。未完成的NoEntry持久清理／删除监督、更多生命周期、预算、历史来源、1GiB和最终CI仍保留。
+
+- 最终三crate nextest启用Engine dev-tools及no-fail-fast：1773通过／9跳过（156.325秒），首次失败的真实Engine二次删除与所有原未运行项均实际执行通过；三项新增真实重试／取消／撤权同样通过。Application独立整库1214通过／1跳过（25.83秒）。
+- 最终metadata解析812包、workspace全目标check（1m25s）、fmt、Rust style、repository preflight、1355站点隐私清单及diff均通过。Cargo串行共享target及原缓存。最终编译与测试期间固定代码／文档／inventory；JSON元数据在结束后改为忽略的log工件，未纳入提交。
+- 手工审查替换事务FK与回滚顺序、表示身份及加密AAD、清理原始source与双失败保留、create_new所有权、取消屏障及锁顺序、二次删除typed结果、仅测试组合根故障注入。code-review skill不可用，不冒充技能审查。准备提交本轮真实Engine验收发现的修复；完整spec保持进行中。下一步NoEntry持久清理／删除调用者退出监督、完整预算与其余生命周期／历史来源／1GiB／最终CI矩阵。

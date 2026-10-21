@@ -1,9 +1,11 @@
 //! 接收计划的唯一物化负责人；调用方只交接完整计划并接收聚合结果。
 
+mod cleanup;
 mod model;
 mod ports;
 mod reuse;
 mod workflow;
+pub(crate) use cleanup::OutputCleanupFailure;
 pub(crate) use reuse::{validate_selection, ReceiveReuseRefusal};
 
 pub use model::{

@@ -59,7 +59,13 @@ impl RetryEntryReceiveUseCase {
         let guard = {
             let mut requests = self.requests.lock().unwrap_or_else(PoisonError::into_inner);
             if requests.contains(&entry) {
-                return Ok(RetryEntryReceiveOutcome::AlreadyReceiving);
+                return Ok(
+                    if self.cancellation.is_settling(&entry, &expected_attempt) {
+                        RetryEntryReceiveOutcome::CancellationIncomplete
+                    } else {
+                        RetryEntryReceiveOutcome::AlreadyReceiving
+                    },
+                );
             }
             if requests.len() >= ACTIVE_DOWNLOADS + QUEUED_DOWNLOADS {
                 return Err(RetryEntryReceiveError::Busy);
@@ -84,7 +90,10 @@ impl RetryEntryReceiveUseCase {
         }
         if self.cancellation.is_settling(&entry, &expected_attempt)
             || (progress.state.is_terminal() && self.work.owns_entry(entry.as_ref()))
-            || progress.state == AttemptState::Cancelling
+            || matches!(
+                progress.state,
+                AttemptState::Cancelling | AttemptState::Failing
+            )
         {
             return Ok(RetryEntryReceiveOutcome::CancellationIncomplete);
         }

@@ -9,6 +9,8 @@ use super::observability::{self, observe_peer_reachability};
 mod outbound_progress;
 #[cfg(all(test, feature = "dev-tools"))]
 use crate::testing::active_pull_publication::{decorate_blob, decorate_preparation};
+#[cfg(all(test, feature = "dev-tools"))]
+use crate::testing::receive_exports;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -369,6 +371,9 @@ pub async fn prepare_sync_session(
         .await?;
     #[cfg(all(test, feature = "dev-tools"))]
     let blob_transfer = decorate_blob(&space_setup.iroh_blob_store_dir, blob_transfer);
+    #[cfg(all(test, feature = "dev-tools"))]
+    let blob_read_store =
+        receive_exports::decorate(&space_setup.iroh_blob_store_dir, blob_read_store);
 
     // Application 先构造认证 endpoint；Space 持续维护要等 Router 就绪后
     // 才由 ApplicationRuntime 启动。

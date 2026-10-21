@@ -3,6 +3,8 @@ use std::collections::HashMap;
 #[cfg(feature = "dev-tools")]
 mod active_pull_cancellation;
 mod profile_upgrade_backup;
+#[cfg(feature = "dev-tools")]
+mod receive_retry;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};

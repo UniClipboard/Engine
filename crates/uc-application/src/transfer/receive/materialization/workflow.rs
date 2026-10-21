@@ -1,6 +1,7 @@
 //! 接收计划的文件物化、目录发布及本地产物结算。
 
 use super::super::identity::{directory_member_transfer_id, directory_representation_transfer_id};
+use super::cleanup::{remove_uncommitted_output, reserve_managed_output, OutputCleanupFailure};
 use super::reuse::validate_selection;
 use super::{ReceivedItem, ReceivedOutput};
 use std::collections::{BTreeMap, HashSet};
@@ -1056,10 +1057,7 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                 }
                 None => None,
             };
-            // A reserved path is an empty placeholder the adapter atomically
-            // created to win the name; if the fetch never completes we must
-            // delete it (see `remove_reserved_placeholder`). When true, `path`
-            // below IS that placeholder. Managed-cache paths need no cleanup.
+            // 预留文件与受管缓存的本次输出都必须在失败后清理；旧成功项已在上方跳过。
             let from_reserver = reserved.is_some();
 
             let path = match reserved {
@@ -1082,7 +1080,9 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
 
                     let filename =
                         managed_filename(blob_ref.filename.as_deref(), idx, &mut used_names);
-                    entry_dir.join(filename)
+                    reserve_managed_output(&entry_dir, &filename)
+                        .await
+                        .context("reserve managed receive output")?
                 }
             };
             let artifact = ReceiveArtifact {
@@ -1106,8 +1106,12 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
             {
                 Ok(recorded) => artifact_journaled |= recorded,
                 Err(error) => {
-                    if from_reserver {
-                        remove_reserved_placeholder(&path).await;
+                    if let Err(cleanup) = remove_uncommitted_output(&path).await {
+                        return Err(OutputCleanupFailure {
+                            cleanup,
+                            cause: error,
+                        }
+                        .into());
                     }
                     return Err(error);
                 }
@@ -1132,8 +1136,8 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                 Ok(v) => v,
                 Err(e) if is_cancel_error(&e) => {
                     // 只移除本项预留；单项取消继续其余文件，整计划停止才终止循环。
-                    if from_reserver {
-                        remove_reserved_placeholder(&path).await;
+                    if let Err(cleanup) = remove_uncommitted_output(&path).await {
+                        return Err(OutputCleanupFailure { cleanup, cause: e }.into());
                     }
                     receive_artifacts.pop();
                     artifact_journaled |= self
@@ -1187,8 +1191,8 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                     // placeholder / partial file so it does not linger in
                     // the user's save directory (which retention and entry
                     // deletion never touch) or block the name for a retry.
-                    if from_reserver {
-                        remove_reserved_placeholder(&path).await;
+                    if let Err(cleanup) = remove_uncommitted_output(&path).await {
+                        return Err(OutputCleanupFailure { cleanup, cause: e }.into());
                     }
                     receive_artifacts.pop();
                     artifact_journaled |= self
@@ -2627,29 +2631,6 @@ fn position_in_batch(idx: usize, total: usize) -> BatchPosition {
         BatchPosition::Last
     } else {
         BatchPosition::Middle
-    }
-}
-
-/// Best-effort removal of a reserved user-directory placeholder after a failed
-/// fetch.
-///
-/// `reserve_target` atomically creates an empty placeholder to claim the name;
-/// when the fetch is cancelled or errors before the store-export step, that
-/// placeholder (or a cross-volume partial copy) is left behind. Files under the
-/// user's save directory are never reclaimed by retention cleanup or entry
-/// deletion, so an orphan would linger forever and force the next same-named
-/// file to a ` (n)` suffix. `NotFound` is expected (export may already have
-/// consumed the placeholder) and stays silent; other errors only warn — this
-/// runs on an already-failed path and a second failure should not disturb it.
-async fn remove_reserved_placeholder(path: &std::path::Path) {
-    if let Err(err) = tokio::fs::remove_file(path).await {
-        if err.kind() != std::io::ErrorKind::NotFound {
-            uc_warn!(
-                error_kind = "reserved_placeholder_remove",
-                io_error_kind = io_error_kind(&err),
-                "materialize: failed to remove reserved placeholder after fetch failure"
-            );
-        }
     }
 }
 

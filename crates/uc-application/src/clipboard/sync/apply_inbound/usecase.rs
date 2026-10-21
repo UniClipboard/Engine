@@ -64,7 +64,8 @@ use super::timing::{RAPID_DUPLICATE_WINDOW, VISIBLE_DUPLICATE_WINDOW};
 use super::{ApplyInboundError, ApplyInboundInput, ApplyOutcome, InboundActivationOwner};
 use crate::transfer::receive::materialization::{
     is_directory_cancel_error, verify_file_set_identity, DirectoryPublication,
-    InboundBlobMaterializer, MaterializeOutcome, ReceiveWorkPlan, RollbackOutcome,
+    InboundBlobMaterializer, MaterializeOutcome, OutputCleanupFailure, ReceiveWorkPlan,
+    RollbackOutcome,
 };
 
 const RECENT_INBOUND_MAX_RECORDS: u64 = 128;
@@ -1335,6 +1336,17 @@ impl ApplyInboundClipboardUseCase {
                                 .await?;
                                 PartialReceiveTerminal::Failed
                             };
+                            if let Some(failure) = error.downcast_ref::<OutputCleanupFailure>() {
+                                uc_warn!(
+                                    error_kind = "receive_output_cleanup",
+                                    io_error_kind = io_error_kind(&failure.cleanup),
+                                    "receive output cleanup remains incomplete"
+                                );
+                                // 产物日志仍指向未清理输出；不能发布终态或覆盖为已回滚。
+                                return Err(ApplyInboundError::Internal(
+                                    error.context("cleanup inbound file output"),
+                                ));
+                            }
                             self.settle_receive_without_entry(
                                 &receiver_entry_id,
                                 receive_attempt_id.as_deref(),

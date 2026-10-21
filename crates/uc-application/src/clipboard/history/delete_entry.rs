@@ -3,6 +3,7 @@ use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{info_span, Instrument};
+use uc_core::clipboard::ClipboardRepositoryError;
 use uc_core::ids::EntryId;
 use uc_core::ports::blob::{BlobTransferPort, TagReason};
 use uc_core::ports::clipboard::{
@@ -88,7 +89,7 @@ impl DeleteClipboardEntryUseCase {
         fields(entry_id = %entry_id)
     )]
     pub(crate) async fn execute(&self, entry_id: &EntryId) -> Result<()> {
-        let _receive_scope = match &self.receive_work {
+        let receive_scope = match &self.receive_work {
             Some(work) => Some(work.delete_scope(entry_id).await?),
             None => None,
         };
@@ -98,6 +99,12 @@ impl DeleteClipboardEntryUseCase {
             .instrument(info_span!("fetch_entry", entry_id = %entry_id))
             .await?;
         let Some(entry) = entry else {
+            if !receive_scope
+                .as_ref()
+                .is_some_and(|scope| scope.had_receive)
+            {
+                return Err(ClipboardRepositoryError::NotFound("clipboard entry".into()).into());
+            }
             // 尚未保存的接收也必须封口；完整删除能力会等实际停止并删除期间产生的记录。
             self.delete_entry
                 .delete_entry(entry_id)

@@ -14,6 +14,81 @@ use uc_core::{
 };
 
 #[tokio::test]
+async fn managed_output_collision_preserves_previous_file_on_success_and_failure() {
+    for fail in [false, true] {
+        let cache = tempfile::tempdir().unwrap();
+        let root = cache.path().join("iroh-blobs/source");
+        std::fs::create_dir_all(&root).unwrap();
+        let previous = root.join("same.bin");
+        std::fs::write(&previous, b"previous success").unwrap();
+        let protected = previous.clone();
+        let mut fetcher = MockBlobFetcher::new();
+        fetcher
+            .expect_fetch_blob_to_path()
+            .times(1)
+            .returning(move |command| {
+                assert_ne!(
+                    command.target_path, protected,
+                    "本次输出必须独立预留，不能覆盖旧文件"
+                );
+                std::fs::write(&command.target_path, b"new").unwrap();
+                if fail {
+                    return Err(io::Error::from(io::ErrorKind::StorageFull).into());
+                }
+                Ok(FetchBlobToPathResult {
+                    entry_id: command.entry_id,
+                    bytes_written: 3,
+                    plaintext_hash: PlaintextHash::from_bytes([3; 32]),
+                    digest: BlobDigest::from_bytes([3; 32]),
+                })
+            });
+        let snapshot = SystemClipboardSnapshot {
+            ts_ms: 1,
+            representations: vec![ObservedClipboardRepresentation::new(
+                RepresentationId::new(),
+                FormatId::from("files"),
+                Some(MimeType("text/uri-list".into())),
+                b"file:///same.bin".to_vec(),
+            )],
+            file_content_digests: Vec::new(),
+            file_set_v1_component: None,
+        };
+        let result = test_materializer(Arc::new(fetcher), cache.path().to_owned())
+            .materialize_plan(ReceiveWorkPlan::new(
+                DeviceId::new("source"),
+                EntryId::from("receiver"),
+                snapshot,
+                vec![V3BlobRef {
+                    ticket: BlobTicket::from_bytes(vec![1]),
+                    entry_id: EntryId::from("source"),
+                    filename: Some("same.bin".into()),
+                    mime: None,
+                    size_bytes: 3,
+                    representation_index: None,
+                }],
+                None,
+                Some("attempt".into()),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(previous).unwrap(), b"previous success");
+        assert_eq!(
+            result.outcome(),
+            if fail {
+                MaterializeOutcome::PartialFailed
+            } else {
+                MaterializeOutcome::Complete
+            }
+        );
+        assert_eq!(
+            std::fs::read_dir(root).unwrap().count(),
+            if fail { 1 } else { 2 }
+        );
+    }
+}
+
+#[tokio::test]
 async fn failed_or_individually_cancelled_files_do_not_skip_later_successes() {
     for failure_first in [false, true] {
         let cache = tempfile::tempdir().unwrap();
