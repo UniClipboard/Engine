@@ -7,6 +7,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use uc_core::clipboard::{
@@ -560,6 +561,7 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
             file_set_manifest,
             attempt_id,
             expected_snapshot_hash,
+            cancellation,
         ) = plan.into_parts();
         if blob_refs.is_empty() && file_set_manifest.is_none() {
             return Ok(MaterializeResult::complete(snapshot));
@@ -613,6 +615,12 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
             })
             .collect::<Result<Vec<_>>>()?;
         for (loop_idx, blob_ref) in rep_refs.into_iter().enumerate() {
+            if cancellation.is_cancelled() {
+                incomplete_rep_idxs.extend(pending_rep_idxs[loop_idx..].iter().copied());
+                partial = true;
+                partial_outcome = MaterializeOutcome::PartialCancelled;
+                break;
+            }
             let entry_id = blob_ref.entry_id.clone();
             let advertised_size = blob_ref.size_bytes;
             let idx = blob_ref
@@ -662,6 +670,7 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
             let fetched = match self
                 .fetcher
                 .fetch_blob(FetchBlobCommand {
+                    cancellation: cancellation.clone(),
                     ticket: blob_ref.ticket,
                     entry_id: blob_ref.entry_id.clone(),
                     transfer_context: Some(transfer_context),
@@ -758,6 +767,7 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                     expected_snapshot_hash.as_deref(),
                     batch_idx,
                     batch_total,
+                    &cancellation,
                 )
                 .await;
         }
@@ -775,6 +785,20 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
         // 看到当前正在 fetch 的那一个 file 名,丢失批中其他未传文件元数据。
         let mut file_idx = 0usize;
         while file_idx < file_refs.len() {
+            if cancellation.is_cancelled() {
+                for remaining in &file_refs[file_idx..] {
+                    missing_files.push(MissingFileRef {
+                        filename: remaining
+                            .filename
+                            .clone()
+                            .unwrap_or_else(|| format!("blob-{}", remaining.entry_id.as_ref())),
+                        size_bytes: remaining.size_bytes,
+                    });
+                }
+                partial = true;
+                partial_outcome = MaterializeOutcome::PartialCancelled;
+                break;
+            }
             let idx = file_idx;
             let blob_ref = file_refs[idx].clone();
             let entry_id = blob_ref.entry_id.clone();
@@ -896,15 +920,21 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
             }
 
             let fetched =
-                match self
-                    .fetcher
-                    .fetch_blob_to_path(FetchBlobToPathCommand {
-                        ticket: blob_ref.ticket,
-                        entry_id: blob_ref.entry_id.clone(),
-                        target_path: path.clone(),
-                        transfer_context: Some(transfer_context),
-                    })
-                    .await
+                match async {
+                    if cancellation.is_cancelled() {
+                        return Err(BlobTransferError::Cancelled.into());
+                    }
+                    self.fetcher
+                        .fetch_blob_to_path(FetchBlobToPathCommand {
+                            cancellation: cancellation.clone(),
+                            ticket: blob_ref.ticket,
+                            entry_id: blob_ref.entry_id.clone(),
+                            target_path: path.clone(),
+                            transfer_context: Some(transfer_context),
+                        })
+                        .await
+                }
+                .await
                 {
                     Ok(v) => v,
                     Err(e) if is_cancel_error(&e) => {
@@ -1169,6 +1199,7 @@ impl FileCacheBlobMaterializer {
         expected_snapshot_hash: Option<&str>,
         mut batch_idx: usize,
         batch_total: usize,
+        cancellation: &CancellationToken,
     ) -> Result<MaterializeResult> {
         if attempt_id.is_some() && self.directory_attempts.is_none() {
             return Err(anyhow!(
@@ -1179,6 +1210,9 @@ impl FileCacheBlobMaterializer {
             return Err(anyhow!("directory manifest has no members"));
         }
 
+        if cancellation.is_cancelled() {
+            return Err(BlobTransferError::Cancelled.into());
+        }
         let plan = self.open_publication(&receiver_entry_id).await?;
 
         let result = self
@@ -1193,6 +1227,7 @@ impl FileCacheBlobMaterializer {
                 &plan,
                 &mut batch_idx,
                 batch_total,
+                cancellation,
             )
             .await;
 
@@ -1391,11 +1426,15 @@ impl FileCacheBlobMaterializer {
         plan: &PublishPlan,
         batch_idx: &mut usize,
         batch_total: usize,
+        cancellation: &CancellationToken,
     ) -> Result<(
         DirectoryPublication,
         BTreeMap<u32, PathBuf>,
         BTreeMap<u32, [u8; 32]>,
     )> {
+        if cancellation.is_cancelled() {
+            return Err(BlobTransferError::Cancelled.into());
+        }
         let staging_base = plan.staging.as_path();
         let mut roots = BTreeMap::<u32, (String, bool)>::new();
         let mut root_member_counts = BTreeMap::<u32, usize>::new();
@@ -1471,8 +1510,14 @@ impl FileCacheBlobMaterializer {
 
         let mut member_digests = BTreeMap::new();
         for (member_index, member) in manifest.members.iter().enumerate() {
+            if cancellation.is_cancelled() {
+                return Err(BlobTransferError::Cancelled.into());
+            }
             self.ensure_attempt_active(receiver_entry_id, attempt_id)
                 .await?;
+            if cancellation.is_cancelled() {
+                return Err(BlobTransferError::Cancelled.into());
+            }
             let root = staging_root(staging_base, member.root_index, &member.root_name);
             let target = if member.root_is_file {
                 root.clone()
@@ -1512,6 +1557,7 @@ impl FileCacheBlobMaterializer {
                     let fetched = match self
                         .fetcher
                         .fetch_blob_to_path(FetchBlobToPathCommand {
+                            cancellation: cancellation.clone(),
                             ticket: blob_ref.ticket.clone(),
                             entry_id: blob_ref.entry_id.clone(),
                             target_path: target.clone(),
@@ -1561,8 +1607,14 @@ impl FileCacheBlobMaterializer {
                     member_digests.insert(index as u32, *fetched.plaintext_hash.as_bytes());
                 }
             }
+            if cancellation.is_cancelled() {
+                return Err(BlobTransferError::Cancelled.into());
+            }
             self.ensure_attempt_active(receiver_entry_id, attempt_id)
                 .await?;
+            if cancellation.is_cancelled() {
+                return Err(BlobTransferError::Cancelled.into());
+            }
         }
         self.ensure_attempt_active(receiver_entry_id, attempt_id)
             .await?;

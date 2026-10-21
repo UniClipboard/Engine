@@ -60,3 +60,9 @@
 - 取消后端仍需与完整 ReceiveWorkPlan 的实际生命周期统一。当前 materializer 的平面文件循环与目录流程在 clipboard 模块；目录路径有 ensure_attempt_active／committing 核对，平面路径还需按真实调用图核对，不可仅凭子 fetch 已停止就证明整个接收计划所有输出均已静止。下一步必须接完整计划、逐项结果与重试，不继续只补网络小测试。
 
 - 当前 ReceiveWorkPlan 默认入口只是把请求拆成七参数后调用旧 materialize；原实现仍在 clipboard，无法将请求级生命周期知识集中 transfer。已迁至 transfer/receive/materialization 并删除旧入口与 clipboard 二次导出，模型／port／流程分开；本次不把结构迁移算作取消围栏或完整结果聚合完成。
+
+- 仅等待 cancel_inbound_attempt 快照不足以证明计划静止；慢 reserve_target 可在快照后才发起获取。本轮用登记于 attempt 可见之前的 ReceiveAction 贯穿整个已有入站监督流程，计划／子获取继承 token，取消先停止计划，再等真实完整流程。
+- 还存在“原计划在取消查表前已经结束”的竞争，内存查无工作不能推出应做 NoEntry：必须在清理前重读账本，已部分取消只能补投影。控制时序回归同时覆盖查表前／后两种终结。
+- 正常错误共享不能直接包完整 ApplyInboundError，否则改变原 Display；thiserror transparent 对 anyhow 来源还会跳过其根 IO。共享 lower SourceError 的显式 source 包装保留 root，并只用于已登记计划，无计划的原处理错误保持原对象。完整动作失败继续由取消等待结果传播，不能将 watch 结束当作成功。
+
+- 下一步所需生产重试资料尚未接线：当前 original_blob_indices 只作长度断言，RetryEntryReceive / item_ids 在 crates 下仍未实现。Core 现有 attempt／artifact ports 没有 recipe／ticket 字段；阶段0“从原始V3可重建”是可行性证据，不能当作生产已保留资料。后续须按不新增持久格式的既定约束把普通同进程原始资料保留与稳定项结果一起接入，重启不可重建明确不可用。

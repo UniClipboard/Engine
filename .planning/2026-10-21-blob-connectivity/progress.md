@@ -144,3 +144,15 @@
 - 迁移后的 Application 全库 1164 passed／1 skipped（3.833秒）。取消、目录发布／回滚、原始材料与旧测试均使用唯一计划入口；未增加机械映射测试。观测清单按官方脚本重生，Rust style 与 repository preflight 通过；workspace 全目标检查仍在运行，不提前写通过。
 
 - 最终 workspace 全目标 check、metadata JSON、fmt、Rust style、repository preflight 和差异检查通过。额外直接对照 HEAD 的旧物化算法与新入口解构之后的完整文件后缀，确认算法正文逐字相同；没有借迁移改变部分失败／取消语义。已手工审查模型与 port 拆分、旧入口删除、全部调用路径、公开 facade 导出和历史文档链接；code-review skill 仍不可用。完整 spec 继续。
+
+- 续接 024cda99 为 progress。本轮完整接收动作在 attempt 可见前登记，监督者在实际流程结束后发布完成事实；取消先封该动作，再停止已有子获取并等待整个动作，终态由权威账本读取。子命令继承计划 token，慢目标预留后不再启动新下载；提交 CAS 若取消先胜，则转为保留成功项的部分取消提交。首轮 uc-application all-targets check 通过（17.29秒）；新增慢预留保留成功文件与后续封口、独立尝试、失败／panic来源测试，仍待验证。
+
+- 首轮 Application 回归发现共享完整 ApplyInboundError 会遮住调用方 Internal source 的原 Display（237通过后失败1，原日志保留）。改为仅共享下层 SourceError 的透明包装，保留调用方原变体、即时 Display 与完整来源，同时供计划取消等待读取同一失败；不通过改断言掩盖回归。
+
+- 第二轮回归定位透明共享包装会跳过原始 IO root：240通过后原根来源断言失败。改用显式 Error::source 返回原 SourceError.as_ref，避免 thiserror transparent 跳过原根；无登记计划的普通处理保持原错误对象不变。保留 receive-work-fixed-application.log，未更改原断言。
+
+- 原错误来源修复后 Application 全库1170通过／1跳过（3.846秒），含真实慢目标预留下保留首文件、后续不启动，以及取消赢提交CAS后调用方退出仍完成部分提交。复核补齐父计划取消导致的晚登记获取会话结算；取消等待主流程终态后仍结算活动投影，但不再清理／NoEntry 覆盖已保存的部分结果。新增相关完整取消负责人回归，正在最后验证。
+
+- 最终候选 Application1172 passed／1 skipped（3.845秒），包含计划查表前结束的竞争回归。新的第二次权威读取让慢读测试显式释放两次读取，而不是减少必要检查；过载接受数仍68，未增加隐藏请求。Engine公开契约、workspace全目标与根检查正在执行，未宣称完整spec完成。
+
+- 最终 Engine公开契约50 passed（0.017秒）、workspace全目标check（1m17s）、metadata JSON解析、fmt、Rust style、repository preflight、官方观测清单、变更Markdown新增失效链接0和diff检查通过。已手工复核完整动作持有、原任务在查表前结束、计划取消的晚子会话、失败双等待者来源和成功产物所有权；code-review skill不可用，不冒充技能审查。当前无编译／网络矩阵任务在运行，未重跑全workspace测试或设备／网络最终矩阵。仍须独立文件逐项失败继续／单项取消聚合、生产recipe与选项重试及绑定、所有退出入口／许可完整结算、旧入口删除和最终验收，目标保持完整未完成。

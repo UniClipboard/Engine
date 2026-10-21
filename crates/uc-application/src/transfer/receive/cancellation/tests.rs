@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use crate::transfer::receive::work::{ReceiveAction, ReceiveWorkError, ReceiveWorkRegistry};
+use std::sync::{Arc, Mutex};
 
 use anyhow::Error as SourceError;
 
@@ -207,6 +208,7 @@ fn use_case(
             Arc::new(NoNetwork),
             Arc::new(NoNetwork),
         ),
+        Arc::new(ReceiveWorkRegistry::default()),
     )
 }
 
@@ -289,6 +291,7 @@ async fn active_file_receive_is_terminally_cancelled() {
             Arc::new(NoNetwork),
             Arc::new(NoNetwork),
         ),
+        Arc::new(ReceiveWorkRegistry::default()),
     );
 
     let result = use_case.execute(&EntryId::new(), "attempt-1").await;
@@ -430,6 +433,7 @@ async fn dropped_and_repeated_waiters_do_not_abandon_cleanup_or_restart_the_canc
         Arc::new(ClockMock),
         Arc::new(HostEventBus::new()),
         transport.clone(),
+        Arc::new(ReceiveWorkRegistry::default()),
     );
     let entry = EntryId::new();
     drop(usecase.execute(&entry, "attempt-1"));
@@ -545,6 +549,7 @@ async fn caller_deadline_covers_initial_authority_read_and_final_commit_without_
             Arc::new(ClockMock),
             Arc::new(HostEventBus::new()),
             transport.clone(),
+            Arc::new(ReceiveWorkRegistry::default()),
         );
         let entry = EntryId::new();
         let start = tokio::time::Instant::now();
@@ -573,7 +578,7 @@ async fn caller_deadline_covers_initial_authority_read_and_final_commit_without_
             futures::poll!(closing.as_mut()).is_pending(),
             "shutdown must retain the real slow phase"
         );
-        gate.release.add_permits(1);
+        gate.release.add_permits(if slow_read { 2 } else { 1 });
         closing.await.expect("real close");
         assert_eq!(commit.calls.load(Ordering::SeqCst), 1);
         assert_eq!(cleaner.calls.load(Ordering::SeqCst), 1);
@@ -623,6 +628,7 @@ async fn cancelled_entry_requests_have_a_bounded_registry_without_hidden_read_wa
         Arc::new(ClockMock),
         Arc::new(HostEventBus::new()),
         transport.clone(),
+        Arc::new(ReceiveWorkRegistry::default()),
     );
     for _ in 0..68 {
         drop(usecase.execute(&EntryId::new(), "attempt-1"));
@@ -639,7 +645,7 @@ async fn cancelled_entry_requests_have_a_bounded_registry_without_hidden_read_wa
     assert!(matches!(error, CancelEntryReceiveError::Busy(_)));
     assert_eq!(gate.entered.available_permits(), 0);
     assert_eq!(attempts.cancel_calls.load(Ordering::SeqCst), 0);
-    gate.release.add_permits(68);
+    gate.release.add_permits(136);
     transport
         .shutdown(crate::transfer::blob::transport::BlobShutdownWait::Complete)
         .await
@@ -687,6 +693,7 @@ async fn panicking_cancel_worker_keeps_the_join_source_and_never_runs_cleanup() 
         Arc::new(ClockMock),
         Arc::new(HostEventBus::new()),
         transport.clone(),
+        Arc::new(ReceiveWorkRegistry::default()),
     );
     let error = usecase
         .execute(&EntryId::new(), "attempt-1")
@@ -751,6 +758,7 @@ async fn failed_transfer_stop_keeps_its_source_and_prevents_following_side_effec
             Arc::new(NoNetwork),
             Arc::new(NoNetwork),
         ),
+        Arc::new(ReceiveWorkRegistry::default()),
     );
 
     let error = use_case
@@ -824,5 +832,165 @@ impl crate::transfer::blob::transport::BlobExchangePort for NoNetwork {
 impl crate::transfer::blob::transport::BlobStoreLifecyclePort for NoNetwork {
     async fn shutdown(&self) -> Result<(), crate::transfer::blob::transport::BlobExchangeError> {
         Ok(())
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn entry_cancellation_waits_for_the_plan_before_touching_projection_or_staging() {
+    let attempts = Arc::new(AttemptMock {
+        state: AttemptState::Receiving,
+        cancel_outcome: RequestReceiveCancellationOutcome::Requested,
+        cancel_calls: AtomicUsize::new(0),
+    });
+    let cleaner = Arc::new(CleanerMock::default());
+    let transfers = Arc::new(TransferMock::default());
+    let projection = Arc::new(ProjectionMock::default());
+    let owner = use_case(
+        attempts,
+        cleaner.clone(),
+        transfers.clone(),
+        projection.clone(),
+    );
+    let entry = EntryId::new();
+    let action = owner.receive_work.action();
+    action.register(&entry, "attempt-1");
+    assert_eq!(
+        owner.execute(&entry, "attempt-1").await.unwrap(),
+        CancelEntryReceiveOutcome::CancellationIncomplete
+    );
+    assert!(action.cancellation().is_cancelled());
+    assert_eq!(transfers.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(projection.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(cleaner.calls.load(Ordering::SeqCst), 0);
+    action.finish(Ok(()));
+    assert_eq!(
+        owner.execute(&entry, "attempt-1").await.unwrap(),
+        CancelEntryReceiveOutcome::Cancelled
+    );
+    assert_eq!(projection.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(cleaner.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_receive_settlement_prevents_cancellation_cleanup_and_preserves_source() {
+    let attempts = Arc::new(AttemptMock {
+        state: AttemptState::Receiving,
+        cancel_outcome: RequestReceiveCancellationOutcome::Requested,
+        cancel_calls: AtomicUsize::new(0),
+    });
+    let cleaner = Arc::new(CleanerMock::default());
+    let transfers = Arc::new(TransferMock::default());
+    let projection = Arc::new(ProjectionMock::default());
+    let owner = use_case(attempts, cleaner.clone(), transfers, projection.clone());
+    let entry = EntryId::new();
+    let action = owner.receive_work.action();
+    action.register(&entry, "attempt-1");
+    assert_eq!(
+        owner.execute(&entry, "attempt-1").await.unwrap(),
+        CancelEntryReceiveOutcome::CancellationIncomplete
+    );
+    action.finish(Err(ReceiveWorkError::Action(
+        std::io::Error::from(std::io::ErrorKind::PermissionDenied).into(),
+    )));
+    let error = owner.execute(&entry, "attempt-1").await.unwrap_err();
+    let source = std::iter::successors(Some(&error as &dyn std::error::Error), |source| {
+        source.source()
+    })
+    .find_map(|source| source.downcast_ref::<std::io::Error>())
+    .unwrap();
+    assert_eq!(source.kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(projection.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(cleaner.calls.load(Ordering::SeqCst), 0);
+}
+
+struct ReceiveSettledLedger {
+    done: std::sync::atomic::AtomicBool,
+    retire: Mutex<Option<Arc<ReceiveAction>>>,
+}
+
+#[async_trait]
+impl GetEntryAttemptPort for ReceiveSettledLedger {
+    async fn get_entry_attempt(
+        &self,
+        entry_id: &str,
+    ) -> Result<Option<EntryReceiveAttempt>, AttemptError> {
+        Ok(Some(EntryReceiveAttempt {
+            entry_id: entry_id.to_owned(),
+            current_attempt_id: "attempt-1".into(),
+            state: if self.done.load(Ordering::SeqCst) {
+                AttemptState::Cancelled
+            } else {
+                AttemptState::Receiving
+            },
+            updated_at_ms: 1,
+        }))
+    }
+}
+#[async_trait]
+impl RequestReceiveCancellationPort for ReceiveSettledLedger {
+    async fn request_receive_cancellation(
+        &self,
+        _: &str,
+        _: &str,
+        _: i64,
+    ) -> Result<RequestReceiveCancellationOutcome, AttemptError> {
+        if let Some(action) = self.retire.lock().unwrap().take() {
+            self.done.store(true, Ordering::SeqCst);
+            action.finish(Ok(()));
+        }
+        Ok(RequestReceiveCancellationOutcome::Requested)
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn plan_settled_partial_cancellation_is_never_overwritten_by_no_entry_cleanup() {
+    for finishes_before_lookup in [false, true] {
+        let attempts = Arc::new(ReceiveSettledLedger {
+            done: std::sync::atomic::AtomicBool::new(false),
+            retire: Mutex::new(None),
+        });
+        let cleaner = Arc::new(CleanerMock::default());
+        let transfers = Arc::new(TransferMock::default());
+        let projection = Arc::new(ProjectionMock::default());
+        let commit = Arc::new(CommitMock::default());
+        let work = Arc::new(ReceiveWorkRegistry::default());
+        let owner = CancelEntryReceiveUseCase::new(
+            attempts.clone(),
+            attempts.clone(),
+            commit.clone(),
+            Arc::new(PublishMock),
+            cleaner.clone(),
+            projection.clone(),
+            transfers,
+            Arc::new(ClockMock),
+            Arc::new(HostEventBus::new()),
+            BlobTransport::new(
+                Arc::new(NoNetwork),
+                Arc::new(NoNetwork),
+                Arc::new(NoNetwork),
+                Arc::new(NoNetwork),
+            ),
+            work.clone(),
+        );
+        let entry = EntryId::new();
+        let action = work.action();
+        action.register(&entry, "attempt-1");
+        if finishes_before_lookup {
+            *attempts.retire.lock().unwrap() = Some(action);
+        } else {
+            assert_eq!(
+                owner.execute(&entry, "attempt-1").await.unwrap(),
+                CancelEntryReceiveOutcome::CancellationIncomplete
+            );
+            attempts.done.store(true, Ordering::SeqCst);
+            action.finish(Ok(()));
+        }
+        assert_eq!(
+            owner.execute(&entry, "attempt-1").await.unwrap(),
+            CancelEntryReceiveOutcome::Cancelled
+        );
+        assert_eq!(projection.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(commit.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(cleaner.calls.load(Ordering::SeqCst), 0);
     }
 }

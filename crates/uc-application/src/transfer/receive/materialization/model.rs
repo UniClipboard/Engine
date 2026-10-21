@@ -1,5 +1,6 @@
 use super::DirectoryPublication;
 use crate::clipboard::sync::payload_codec::V3BlobRef;
+use tokio_util::sync::CancellationToken;
 use uc_core::clipboard::{EntryFileSet, FileSetMemberKind};
 use uc_core::ids::{DeviceId, EntryId};
 use uc_core::ports::ReceiveArtifact;
@@ -38,6 +39,7 @@ pub struct ReceiveWorkPlan {
     attempt_id: Option<String>,
     expected_snapshot_hash: Option<String>,
     original_blob_indices: Vec<usize>,
+    cancellation: CancellationToken,
 }
 
 impl ReceiveWorkPlan {
@@ -61,7 +63,13 @@ impl ReceiveWorkPlan {
             attempt_id,
             expected_snapshot_hash,
             original_blob_indices,
+            cancellation: CancellationToken::new(),
         }
+    }
+
+    pub(crate) fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
+        self.cancellation = cancellation;
+        self
     }
 
     pub(crate) fn into_parts(
@@ -74,6 +82,7 @@ impl ReceiveWorkPlan {
         Option<InboundFileSetManifest>,
         Option<String>,
         Option<String>,
+        CancellationToken,
     ) {
         debug_assert_eq!(self.original_blob_indices.len(), self.blob_refs.len());
         (
@@ -84,6 +93,7 @@ impl ReceiveWorkPlan {
             self.file_set_manifest,
             self.attempt_id,
             self.expected_snapshot_hash,
+            self.cancellation,
         )
     }
 }

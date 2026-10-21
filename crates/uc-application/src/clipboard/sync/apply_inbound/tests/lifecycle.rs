@@ -1,3 +1,4 @@
+use crate::transfer::receive::work::ReceiveWorkRegistry;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -28,6 +29,7 @@ async fn shutdown_releases_a_receive_waiting_for_initial_readiness() {
     let readiness = Arc::new(ReceiveReadinessCoordinator::new());
     let receiver = ApplyInboundClipboardUseCase::store_only_pull(StoreOnlyPullDeps {
         common: InboundApplyCommonDeps {
+            receive_work: Arc::new(ReceiveWorkRegistry::default()),
             entry_repo: Arc::new(MockEntryRepo::new()),
             capture: Arc::new(MockCapture::new()),
             blob_materializer: Arc::new(MockBlobMaterializer::new()),

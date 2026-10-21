@@ -4,6 +4,7 @@ use crate::transfer::blob::transport::{
     BlobExchangeError, BlobExchangeFailure, BlobTransport, DownloadCompletion,
 };
 use crate::transfer::policy::{ACTIVE_DOWNLOADS, CANCEL_WAIT_TIMEOUT, QUEUED_DOWNLOADS};
+use crate::transfer::receive::work::ReceiveWorkRegistry;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::watch;
@@ -27,6 +28,7 @@ struct Job {
 }
 pub(crate) struct CancelEntryReceiveUseCase {
     transport: Arc<BlobTransport>,
+    pub(super) receive_work: Arc<ReceiveWorkRegistry>,
     jobs: Mutex<HashMap<(EntryId, String), Job>>,
     pub(super) get_attempt: Arc<dyn GetEntryAttemptPort>,
     pub(super) request_cancel: Arc<dyn RequestReceiveCancellationPort>,
@@ -51,9 +53,11 @@ impl CancelEntryReceiveUseCase {
         clock: Arc<dyn ClockPort>,
         host_event_bus: Arc<HostEventBus>,
         transport: Arc<BlobTransport>,
+        receive_work: Arc<ReceiveWorkRegistry>,
     ) -> Arc<Self> {
         Arc::new(Self {
             transport,
+            receive_work,
             jobs: Mutex::new(HashMap::new()),
             get_attempt,
             request_cancel,

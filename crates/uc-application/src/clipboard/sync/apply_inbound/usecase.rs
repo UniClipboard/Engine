@@ -35,6 +35,7 @@ use crate::clipboard::entry_identity::EntryIdentityCoordinator;
 use crate::clipboard::write::{ClipboardWriteIntent, MobileConsumabilityProbe};
 use crate::runtime_lifecycle::LifecycleError;
 use crate::transfer::receive::reconciliation::ReceiveReadinessCoordinator;
+use crate::transfer::receive::work::{ReceiveAction, ReceiveWorkRegistry};
 
 use crate::clipboard::active::ClipboardSnapshotDeps;
 use crate::clipboard::sync::payload_codec::{
@@ -64,6 +65,7 @@ mod owned;
 #[derive(Clone)]
 pub struct ApplyInboundClipboardUseCase {
     work: WorkOwner,
+    receive_work: Arc<ReceiveWorkRegistry>,
     entry_repo: Arc<dyn FindEntryIdBySnapshotHashPort>,
     capture: Arc<dyn InboundCapture>,
     mode: InboundApplyMode,
@@ -136,6 +138,7 @@ pub(crate) struct InboundReceiveAttemptDeps {
 }
 
 pub(crate) struct InboundApplyCommonDeps {
+    pub receive_work: Arc<ReceiveWorkRegistry>,
     pub entry_repo: Arc<dyn FindEntryIdBySnapshotHashPort>,
     pub capture: Arc<dyn InboundCapture>,
     pub blob_materializer: Arc<dyn InboundBlobMaterializer>,
@@ -265,6 +268,7 @@ impl ApplyInboundClipboardUseCase {
         outbound_progress_reporter: Option<Arc<dyn OutboundProgressReporterPort>>,
     ) -> Self {
         let InboundApplyCommonDeps {
+            receive_work,
             entry_repo,
             capture,
             blob_materializer,
@@ -278,6 +282,7 @@ impl ApplyInboundClipboardUseCase {
         } = deps;
         Self {
             work: WorkOwner::default(),
+            receive_work,
             entry_repo,
             capture,
             mode,
@@ -314,6 +319,7 @@ impl ApplyInboundClipboardUseCase {
     ) -> Self {
         Self {
             work: WorkOwner::default(),
+            receive_work: Arc::new(ReceiveWorkRegistry::default()),
             entry_repo,
             capture,
             mode: InboundApplyMode::Test {
@@ -572,11 +578,13 @@ impl ApplyInboundClipboardUseCase {
     async fn begin_receive_attempt(
         &self,
         entry_id: &EntryId,
+        action: &ReceiveAction,
     ) -> Result<Option<String>, ApplyInboundError> {
         let Some(ports) = &self.receive_attempts else {
             return Ok(None);
         };
         let attempt_id = EntryId::new().to_string();
+        action.register(entry_id, &attempt_id);
         let now_ms = ports.clock.now_ms();
         let current = ports
             .get
@@ -630,9 +638,9 @@ impl ApplyInboundClipboardUseCase {
         &self,
         entry_id: &EntryId,
         attempt_id: Option<&str>,
-    ) -> Result<(), ApplyInboundError> {
+    ) -> Result<bool, ApplyInboundError> {
         let (Some(ports), Some(attempt_id)) = (&self.receive_attempts, attempt_id) else {
-            return Ok(());
+            return Ok(true);
         };
         if ports
             .claim_commit
@@ -644,7 +652,7 @@ impl ApplyInboundClipboardUseCase {
                 )
             })?
         {
-            return Ok(());
+            return Ok(true);
         }
         let current = ports
             .get
@@ -658,7 +666,15 @@ impl ApplyInboundClipboardUseCase {
         if current.as_ref().is_some_and(|current| {
             current.current_attempt_id == attempt_id && current.state == AttemptState::Committing
         }) {
-            Ok(())
+            Ok(true)
+        } else if current.as_ref().is_some_and(|current| {
+            current.current_attempt_id == attempt_id
+                && matches!(
+                    current.state,
+                    AttemptState::Cancelling | AttemptState::Cancelled
+                )
+        }) {
+            Ok(false)
         } else {
             Err(ApplyInboundError::Internal(anyhow!(
                 "remote receive lost commit authority"
@@ -990,6 +1006,7 @@ impl ApplyInboundClipboardUseCase {
         input: ApplyInboundInput,
         provisional: Option<(String, ReceiveItemRole)>,
         work: &OwnedWork,
+        receive_action: &ReceiveAction,
     ) -> Result<ApplyOutcome, ApplyInboundError> {
         if let Some(readiness) = &self.receive_readiness {
             tokio::select! {
@@ -1093,7 +1110,9 @@ impl ApplyInboundClipboardUseCase {
         // below, so the IncomingPending card and the final entry must share it —
         // a fresh id would strand the pending card on a different entry.
         let receiver_entry_id = existing.clone().unwrap_or_else(EntryId::new);
-        let receive_attempt_id = self.begin_receive_attempt(&receiver_entry_id).await?;
+        let receive_attempt_id = self
+            .begin_receive_attempt(&receiver_entry_id, receive_action)
+            .await?;
         self.emit_receive_state(
             &receiver_entry_id,
             receive_attempt_id.as_deref(),
@@ -1154,21 +1173,24 @@ impl ApplyInboundClipboardUseCase {
         // commit them or take them back.
         let mut publication: Option<DirectoryPublication> = None;
         let mut directory_file_set = None;
-        let (snapshot, materialize_outcome, has_receive_artifacts, receive_artifacts) =
+        let (snapshot, mut materialize_outcome, has_receive_artifacts, receive_artifacts) =
             match (requires_materialize, &self.blob_materializer) {
                 (false, _) => (snapshot, MaterializeOutcome::Complete, false, Vec::new()),
                 (true, Some(materializer)) => {
                     let count = blob_refs.len();
                     let mut result = match materializer
-                        .materialize_plan(ReceiveWorkPlan::new(
-                            input.from_device,
-                            receiver_entry_id.clone(),
-                            snapshot,
-                            blob_refs,
-                            file_set_manifest,
-                            receive_attempt_id.clone(),
-                            Some(input.snapshot_hash.clone()),
-                        ))
+                        .materialize_plan(
+                            ReceiveWorkPlan::new(
+                                input.from_device,
+                                receiver_entry_id.clone(),
+                                snapshot,
+                                blob_refs,
+                                file_set_manifest,
+                                receive_attempt_id.clone(),
+                                Some(input.snapshot_hash.clone()),
+                            )
+                            .with_cancellation(receive_action.cancellation()),
+                        )
                         .await
                     {
                         Ok(result) => result,
@@ -1308,7 +1330,10 @@ impl ApplyInboundClipboardUseCase {
                     return Ok(ApplyOutcome::DecodeFailed { reason });
                 }
             };
-        let is_partial = materialize_outcome != MaterializeOutcome::Complete;
+        if receive_action.cancellation().is_cancelled() {
+            materialize_outcome = MaterializeOutcome::PartialCancelled;
+        }
+        let mut is_partial = materialize_outcome != MaterializeOutcome::Complete;
 
         // 6. Rapid in-memory dedup of a recently-completed re-push. Only
         // complete entries are remembered, so this never suppresses the
@@ -1375,13 +1400,20 @@ impl ApplyInboundClipboardUseCase {
                 }
             }
         } else {
-            self.claim_receive_commit(&receiver_entry_id, receive_attempt_id.as_deref())
-                .await?;
-            self.emit_receive_state(
-                &receiver_entry_id,
-                receive_attempt_id.as_deref(),
-                AttemptState::Committing,
-            );
+            if self
+                .claim_receive_commit(&receiver_entry_id, receive_attempt_id.as_deref())
+                .await?
+            {
+                self.emit_receive_state(
+                    &receiver_entry_id,
+                    receive_attempt_id.as_deref(),
+                    AttemptState::Committing,
+                );
+            } else {
+                // 取消赢得 CAS 后保留已经成功的文件，由同一接收动作提交部分结果。
+                materialize_outcome = MaterializeOutcome::PartialCancelled;
+                is_partial = true;
+            }
         }
         let receive_commit = receive_attempt_id.clone().map(|attempt_id| {
             let file_set = directory_file_set.take();

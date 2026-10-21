@@ -176,6 +176,7 @@ impl BatchPosition {
 
 #[derive(Debug, Clone)]
 pub struct FetchBlobCommand {
+    pub cancellation: CancellationToken,
     pub ticket: BlobTicket,
     /// **发送端**侧的 entry_id —— 仅用于 iroh blob tag 与 fetch use case
     /// 内部记录,不会出现在 host event 里。前端关联用的是
@@ -202,6 +203,7 @@ pub struct FetchBlobResult {
 /// `tokio::fs::write` them out again.
 #[derive(Debug, Clone)]
 pub struct FetchBlobToPathCommand {
+    pub cancellation: CancellationToken,
     pub ticket: BlobTicket,
     pub entry_id: EntryId,
     pub target_path: PathBuf,
@@ -644,7 +646,7 @@ impl BlobTransferFacade {
             }
         }
 
-        let cancel_token = CancellationToken::new();
+        let cancel_token = command.cancellation.child_token();
         let operation = self.fetch_uc.execute(FetchBlobInput {
             ticket: command.ticket,
             cancel: cancel_token.clone(),
@@ -737,7 +739,30 @@ impl BlobTransferFacade {
                     digest: outcome.digest,
                 })
             }
-            Err(BlobTransferError::Cancelled) => Err(BlobTransferError::Cancelled),
+            Err(BlobTransferError::Cancelled) => {
+                if command.cancellation.is_cancelled() {
+                    if let Some(session) = lifecycle_session.as_ref() {
+                        session
+                            .cancel(FileTransferCancellationReason::LocalUser)
+                            .await
+                            .map_err(|source| BlobTransferError::Fetch(source.into()))?;
+                    }
+                    if let Some(context) = command.transfer_context.as_ref() {
+                        self.report_outbound_terminal(
+                            context,
+                            0,
+                            context.total_bytes,
+                            OutboundProgressStatus::Cancelled {
+                                reason: flip_cancel_reason_perspective(
+                                    FileTransferCancellationReason::LocalUser,
+                                ),
+                            },
+                        )
+                        .await;
+                    }
+                }
+                Err(BlobTransferError::Cancelled)
+            }
             Err(BlobTransferError::Fetch(msg)) => {
                 if let Some(ctx) = command.transfer_context.as_ref() {
                     if let Some(session) = lifecycle_session.as_ref() {
@@ -802,7 +827,7 @@ impl BlobTransferFacade {
         }
 
         // 显式接收项可按身份取消；静默获取也由实际任务和调用等待的停止 guard 保护。
-        let cancel_token = CancellationToken::new();
+        let cancel_token = command.cancellation.child_token();
         let operation = self.fetch_uc.execute_to_path(FetchBlobPathInput {
             ticket: command.ticket,
             cancel: cancel_token.clone(),
@@ -896,7 +921,27 @@ impl BlobTransferFacade {
                 })
             }
             Err(BlobTransferError::Cancelled) => {
-                // 唯一取消协调者结算终态，此处不再发送可能竞争的 Failed。
+                if command.cancellation.is_cancelled() {
+                    if let Some(session) = lifecycle_session.as_ref() {
+                        session
+                            .cancel(FileTransferCancellationReason::LocalUser)
+                            .await
+                            .map_err(|source| BlobTransferError::Fetch(source.into()))?;
+                    }
+                    if let Some(context) = command.transfer_context.as_ref() {
+                        self.report_outbound_terminal(
+                            context,
+                            0,
+                            context.total_bytes,
+                            OutboundProgressStatus::Cancelled {
+                                reason: flip_cancel_reason_perspective(
+                                    FileTransferCancellationReason::LocalUser,
+                                ),
+                            },
+                        )
+                        .await;
+                    }
+                }
                 Err(BlobTransferError::Cancelled)
             }
             Err(e) => {
@@ -1343,6 +1388,7 @@ mod tests {
                 async move {
                     facade
                         .fetch_blob(FetchBlobCommand {
+                            cancellation: CancellationToken::new(),
                             ticket: BlobTicket::from_bytes(vec![1; 32]),
                             entry_id: EntryId::from("sender-image"),
                             transfer_context: Some(FetchTransferContext {

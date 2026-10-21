@@ -757,6 +757,7 @@ impl EngineRuntime for ProductionRuntime {
                 .current_facade()
                 .await?
                 .fetch_blob(FetchBlobCommand {
+                    cancellation: CancellationToken::new(),
                     ticket: BlobTicket::from_bytes(ticket),
                     entry_id: EntryId::from_string(entry_id),
                     transfer_context: None,

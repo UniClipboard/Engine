@@ -5,7 +5,7 @@ use anyhow::Error as SourceError;
 use uc_core::file_transfer::FileTransferCancellationReason;
 use uc_core::ids::EntryId;
 use uc_core::ports::{
-    InboundReceiveSettlement, NoEntryReceiveArtifacts, PartialReceiveTerminal,
+    AttemptState, InboundReceiveSettlement, NoEntryReceiveArtifacts, PartialReceiveTerminal,
     RequestReceiveCancellationOutcome,
 };
 
@@ -66,6 +66,8 @@ impl CancelEntryReceiveUseCase {
             },
         ));
 
+        let receive = self.receive_work.stop(entry_id, expected_attempt_id);
+
         if let Err(error) = self
             .transfer_cancellation
             .cancel_inbound_attempt(
@@ -78,6 +80,33 @@ impl CancelEntryReceiveUseCase {
             return Err(CancelEntryReceiveError::Transfer(
                 SourceError::from(error).context("cancel inbound attempt transfers"),
             ));
+        }
+        let mut settled_by_receive = false;
+        if let Some(receive) = receive {
+            receive
+                .wait()
+                .await
+                .map_err(|source| CancelEntryReceiveError::Transfer(SourceError::new(source)))?;
+        }
+        // 原接收动作负责保留独立成功项及最终 CAS；不能再用 NoEntry 覆盖其结果。
+        let current = self
+            .get_attempt
+            .get_entry_attempt(entry_id.as_ref())
+            .await
+            .map_err(|source| CancelEntryReceiveError::Attempt(SourceError::new(source)))?;
+        let Some(current) = current else {
+            return Ok(CancelEntryReceiveOutcome::NotReceiving);
+        };
+        if current.current_attempt_id != expected_attempt_id {
+            return Ok(CancelEntryReceiveOutcome::Superseded);
+        }
+        match current.state {
+            AttemptState::Cancelled => settled_by_receive = true,
+            AttemptState::Completed | AttemptState::Committing => {
+                return Ok(CancelEntryReceiveOutcome::TooLate)
+            }
+            AttemptState::Failed => return Ok(CancelEntryReceiveOutcome::AlreadyTerminal),
+            AttemptState::Receiving | AttemptState::Cancelling | AttemptState::Failing => {}
         }
         if let Err(error) = self
             .cancel_projection
@@ -92,6 +121,10 @@ impl CancelEntryReceiveUseCase {
             return Err(CancelEntryReceiveError::Transfer(
                 SourceError::from(error).context("cancel directory attempt transfers"),
             ));
+        }
+
+        if settled_by_receive {
+            return Ok(CancelEntryReceiveOutcome::Cancelled);
         }
 
         let record = self

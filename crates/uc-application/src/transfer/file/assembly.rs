@@ -43,6 +43,7 @@ use crate::transfer::file::lifecycle::FileTransferLifecycleDeps;
 use crate::transfer::receive::cancellation::CancelEntryReceiveUseCase;
 use crate::transfer::receive::materialization::{FileCacheBlobMaterializer, InboundBlobFetcher};
 use crate::transfer::receive::reconciliation::ReceiveReadinessCoordinator;
+use crate::transfer::receive::work::ReceiveWorkRegistry;
 
 /// Engine 选择的文件系统与持久化 adapter。
 pub struct FileTransferAssemblyDeps {
@@ -108,6 +109,7 @@ pub struct FileTransferAssembly {
     file_cache_dir: PathBuf,
     receive_readiness: Arc<ReceiveReadinessCoordinator>,
     host_event_bus: Arc<HostEventBus>,
+    receive_work: Arc<ReceiveWorkRegistry>,
 }
 
 impl FileTransferAssembly {
@@ -160,6 +162,7 @@ impl FileTransferAssembly {
             file_cache_dir: deps.file_cache_dir,
             receive_readiness,
             host_event_bus: deps.host_event_bus,
+            receive_work: Arc::new(ReceiveWorkRegistry::default()),
         }
     }
 
@@ -212,6 +215,7 @@ impl FileTransferAssembly {
             Arc::clone(&self.clock),
             self.host_event_bus.clone(),
             deps.blob_transfer.transport.clone(),
+            self.receive_work.clone(),
         );
         facade.with_entry_receive_cancellation(
             Arc::clone(&self.directory_receive.entry_progress),
@@ -240,6 +244,7 @@ impl FileTransferAssembly {
         );
 
         InboundApplyCommonDeps {
+            receive_work: self.receive_work.clone(),
             entry_repo: deps.entry_repo,
             capture: deps.capture,
             blob_materializer: materializer,
