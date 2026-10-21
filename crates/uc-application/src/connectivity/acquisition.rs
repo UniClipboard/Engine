@@ -101,6 +101,8 @@ impl Acquisition {
             cache_cancel: CancellationToken::new(),
             supervise_local_work: self.policy.wait_for_local_work(),
             accepted_stream_timeout: self.policy.accepted_stream_timeout,
+            reject_excess_inbound: self.policy.reject_excess_inbound,
+            first_inbound_at: Mutex::new(None),
             pending: tokio::sync::Mutex::new(None),
             exchange_claimed: AtomicBool::new(false),
             grant,

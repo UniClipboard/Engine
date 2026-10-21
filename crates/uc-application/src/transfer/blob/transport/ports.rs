@@ -41,3 +41,9 @@ pub trait BlobExchangePort: Send + Sync {
         cancel: CancellationToken,
     ) -> Result<(), BlobExchangeError>;
 }
+
+/// 完整传输关闭后停止同一内容存储，不由单次交换关闭共享资源。
+#[async_trait]
+pub trait BlobStoreLifecyclePort: Send + Sync {
+    async fn shutdown(&self) -> Result<(), BlobExchangeError>;
+}

@@ -21,3 +21,6 @@ pub(super) const ACTIVE_PROVIDES_PER_PEER: usize = 2;
 pub(super) const UNIDENTIFIED_INBOUND: usize = 16;
 pub(super) const INBOUND_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 pub(super) const CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+// 仅限制跨请求保留集合；新对端可淘汰空闲连接，不作为服务任务总数门槛。
+pub(super) const RETAINED_BLOB_CONNECTIONS: usize = 16;

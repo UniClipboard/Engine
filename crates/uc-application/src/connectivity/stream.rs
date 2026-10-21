@@ -42,6 +42,22 @@ pub struct StreamWorkLease {
 }
 
 impl StreamLease {
+    /// 只停止本交换；调用方仍负责已经移出的 SDK 工作。
+    pub fn stop(mut self) -> Result<(), ConnectivityError> {
+        let send = self.send.reset(0);
+        let receive = self.receive.stop(0);
+        match (send, receive) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(source), Ok(())) | (Ok(()), Err(source)) => Err(source),
+            (Err(primary), Err(additional)) => Err(ConnectivityError::Settlement {
+                primary: Box::new(primary),
+                additional: Box::new(additional),
+            }),
+        }
+    }
+    pub(super) fn attach_capacity(&mut self, permits: Vec<OwnedSemaphorePermit>) {
+        self._permits = Arc::new(permits);
+    }
     pub(crate) fn hold_for_work(&self) -> StreamWorkLease {
         StreamWorkLease {
             _connection: self._connection.clone(),

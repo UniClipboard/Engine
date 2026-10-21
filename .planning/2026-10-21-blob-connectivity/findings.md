@@ -36,3 +36,12 @@
 - 方向名额必须同时被 record（覆盖本地工作）和 native closed 监督持有。ConnectionLifetime 保持唯一 PeerState 及 semaphore，不缓存原生连接；建立中、取消后迟到连接和关闭未完成均占名额。关闭 JoinSet 须收集旧拨号晚登记的新结束任务，watch 必须持原 session token。
 - Native Blob profile 已取消内部 staggered retry，每轮只有一次 Endpoint.connect；不能只数 Uni backend.connect 调用而漏算底层自重试。Blob grant 的 can_retain 读取当前权威，其他 profile 不因此开放保留。
 - 尚未实现：生产 Blob 提供端 4／2 即时拒绝、准入和首请求头共用 60 秒（不能在 SDK provide 重建期限）、独立完整 owner／输出和引用保护、非阻塞进度与 5 秒未完成、稳定重试／绑定和最终矩阵。生产旧 Downloader、warmup/provider/cancel 路径仍存在，资源策略的真实 Uni 探针通过也不能冒充生产接线已完成。
+
+- 生产提供端迁移必须兼容旧客户端先 warmup 再由 Downloader 自拨的两条 native 连接。每方向一个“已授权连接”的限制不能在空预热握手后立即占满：Blob policy 在首 QUIC 流出现后才识别并做成员准入，空预热仍属全局 16 未绑定候选；不读取自定义业务头、不发送数据，首流继续使用原 SDK parser。准入和已缓存首流共用入口起 60 秒。此为旧 SDK 兼容的必要业务顺序，不放宽已授权名额。
+
+- 生产提供端已经换为 BlobTransport/IrohBlobHandler；Node.install_blobs 通过资源 factory 由 Engine 组装 owner，SDK provider handler 不再注册。SDK stream port 与独立 store lifecycle port 复用同一 FsStore，关闭 source 不再仅依赖 SDK 的日志式 shutdown。当前旧 IrohBlobTransferAdapter 仍负责下载／warmup，下一步必须迁走并删除，不能把本步当作完整第七片。
+- 服务连接监督持原 Uni 租约到父任务结果交接结束，每端每方向名额同时约束监督任务。缓存容量 16 只控制保留集合，满时淘汰空闲连接，不作为新对端服务总数门槛；未知候选 16 和服务流 4／2 仍各自独立。SDK 兄弟结果在同一个已 pin 的 accept future 旁收集，不能每次 select 都重建并丢弃准入读。
+- SessionProtocolDispatcher 会在会话取消时直接丢弃 handler future；必须把 SessionLocalWork 附着在同一个 IrohPeerConnection 上，由真实准入／流／SDK 工作引用延长寿命，不能只在 handler 栈上持 guard。真实 Node quiesce 门控用例已证明等待方丢弃后仍保持保护。
+- provider-direct/direct.json 和 provider-relay/relay.json 已核对 outcome=passed、exact_bytes_verified=true、direction_count=2、cleaned/plaintext_clean=true；Relay 另为 direct_paths_blocked=true。应用库 1154／1、P2P 库及两个集成 322／3 通过／跳过，Root全workspace旧profile诊断失败尚未重跑结案。
+- 当前 BlobTransport 的真实 SDK A/B 用例通过：32KiB以上实际 UDP 正文到达后取消A，B同连接4MiB精确读取且只获取一次；第三次正文中断后source owner正常关闭。真实 Noq 停止与 SDK 导出结算在该路径未产生“已关闭误报清理失败”，不额外放宽停止错误。
+- 下一步接下载时需核对：当前 manager.refresh 借用旧 lease，而方向1的名额由该 record 生命周期持有；不能带着旧 lease 自身的名额去重获同方向连接。还须在外部队列及异步 ticket 身份解析之前保持旧会话／撤销围栏，不能拿到名额后取新 epoch；阅读全部真实 fetch 消费者后统一迁移旧端口，不保留转调兼容层。

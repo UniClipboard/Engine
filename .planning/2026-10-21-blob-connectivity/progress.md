@@ -94,3 +94,15 @@
 - Application 全 lib nextest 1148 passed／1 skipped（3.803 秒）；新增晚返回拨号关闭收集用例另 1 passed。最终 Native Blob profile 移除内部阶梯重试，每一轮只调用一次 Endpoint.connect；现有成员 grant 仅对 Blob 开放经当前准入检查的空闲保留。真实 Uni 双流探针启用 16／2 准入、每端每方向 1 连接及 30 秒空闲保留，并调用真实 retain 以验证当前授权接线。生产 Downloader/provider 尚未替换。
 - P2P 全 lib＋blob_connectivity_feasibility nextest 319 passed／3 skipped（38.747 秒），包含启用新 16／2、方向 1 和保留 30 秒策略的真实 Blob 双流、当前授权与 SDK 结算；原普通剪贴板拒绝 ACK、成员历史和前六片相关测试均在本次范围。已手工复核同步过载拒绝不 spawn、未知／识别交接、两种结束顺序、旧 session、不扩大稳定 Engine/API、Blob 单轮原生建连及来源保留。完整 workspace 测试、正式 owner 矩阵与原 profile 诊断失败仍未结案。
 - 最终 metadata 输出已解析核验，workspace all-targets check 通过（1m14s）、fmt、Rust style、repository preflight、文档相对链接及 staged diff 检查通过。code-review skill 不在可用清单，采用手工差异审查，不冒充技能审查。用户四个原有规划目录保留；本轮不修改 SDK／ALPN／持久格式，不把过渡资源能力算作正式 Blob owner 完成。
+
+- 续接 4157ed46 为 progress。当前切片将生产 Router 提供端交给 Application BlobTransport：调用方只交接原生连接，内部完成现有准入、4／2 即时交换限额、整体请求截止时间、SDK 导出结算和关闭。完整接收／手动重试仍是同一最终 transfer 目标；本步先替换旧生产 provider，不改变协议或持久格式。关闭协调者保留任务与结果，调用等待退出不丢工作；本地 store 在完整收尾后关闭。
+- 首轮 App check 通过（19.45 秒）。全工作区首轮仅 Node 测试引用不存在的 NoopPeerReachability，已改为复用原 fixture 的 reachability；修复后的全工作区 all-targets check 通过（1m12s）。生产 Node 已删除 BlobsProtocol 注册，改为 IrohBlobHandler／Application BlobTransport，并用真实 store 生命周期 port 保留关闭结果。
+- 未改造生产 Downloader 在额外空预热仍打开时经新 handler 精确读取 512KiB，真实 UDP／SDK 集成 1 passed（0.050 秒）。受管负责人 4 项 nextest passed（0.028 秒）：4／2 超额只拒绝本交换、首请求整体 60 秒、5 秒未完成不丢收尾、导出与 store 关闭双来源保留及重复关闭。普通空预热无工作按 30 秒回收，不占已授权名额。
+- 真实 Node.quiesce 测试通过：SessionProtocolDispatcher 已取消 handler 等待，但原生连接持有的 SessionLocalWork 持续覆盖 Application／SDK 实际工作，释放门后才排空；与真实 Downloader 用例一起 2 passed（0.090 秒）。增加 SDK 服务任务 panic 唤醒监听并保留 JoinError，避免等 30 秒空闲才发现失败；收集兄弟结果时保留同一个 accept future，不丢已开始的准入读取。
+- Application 全 lib nextest 1154 passed／1 skipped（3.815 秒）。真实 Engine 使用当前加密资料完成 Direct、强制 Relay 双向文件精确读回，各 2 方向，Relay 工件确认 direct_paths_blocked；两组 cleaned／plaintext_clean 均为 true，工件在 target/blob-connectivity-evidence/provider-{direct,relay}。本机提供端与当前旧 Downloader 的互通证明，不代替最终双方完整 owner 矩阵。
+- P2P 全 lib 与 SDK 生命周期／旧协议向量 nextest 322 passed／3 skipped（39.044 秒）。连接工作许可调整为保持到父监督任务发布结果结束，完成结果持续重用原 registry 并在新请求时回收；不让已完成但未收集的监督任务绕过名额。
+- 复核发现额外全局连接工作 semaphore=16 会在缓存全空闲时拒绝第 17 个对端，与原缓存淘汰能力不一致；已移除这项非 spec 的服务总数门槛，改为父监督者持原 Uni 租约到结果交接。每端每方向一个授权连接继续覆盖全部任务寿命，未知候选16／服务4／2不变；新增 17 对端空闲缓存淘汰用例验证不收窄原需求。
+- 缓存复核修正后的 6 项 runtime 测试通过（0.019 秒），Application 全 lib 最终 1155 passed／1 skipped（3.784 秒）；真实 Downloader、真实 Node quiesce 及旧协议向量复核 3 passed（0.091 秒）。移除额外服务门槛后第 17 个对端可通过淘汰空闲连接获得服务。
+- 新增当前受管提供端真实 SDK 双流：接收窗64KiB，UDP统计确认正文开始后取消停读的 A；B 同一连接／一次获取精确4MiB，backend调用数仍为1；第三个正文中途断开对端后提供端 shutdown 实际成功。1 passed（0.167 秒），无需按“连接消失”吞停止错误或修改协议。最后执行全P2P／SDK／向量分组及根门禁；下载与稳定取消仍旧。
+
+- 本轮最终 P2P／SDK／协议向量 323 passed／3 skipped（38.754 秒）；metadata JSON 解析、workspace 全目标 check（16.19 秒）、fmt、Rust style、repository preflight 全部通过。再次手工复核实际任务持有、关闭竞态、准入首流时钟与逐流停止；code-review skill 不可用，如实采用手工审查。上一状态答复只汇报状态，记为 no progress，本轮继续提交生产提供端并推进下载。

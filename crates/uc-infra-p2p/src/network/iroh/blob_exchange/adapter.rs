@@ -6,7 +6,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
     BlobExchangeError, BlobExchangeFailure, BlobExchangePort, BlobReceived, BlobRetainedContent,
-    BlobValidatedProgress, StreamLease, StreamWorkLease,
+    BlobStoreLifecyclePort, BlobValidatedProgress, StreamLease, StreamWorkLease,
 };
 use uc_core::ports::blob::BlobDigest;
 
@@ -88,5 +88,15 @@ impl BlobExchangePort for IrohBlobExchangeAdapter {
         drop(control);
         let provided = provide::provide(&self.store, send, reader, request_deadline, &cancel).await;
         combine(provided, completion.finish())
+    }
+}
+
+#[async_trait]
+impl BlobStoreLifecyclePort for IrohBlobExchangeAdapter {
+    async fn shutdown(&self) -> Result<(), BlobExchangeError> {
+        self.store
+            .shutdown()
+            .await
+            .map_err(|source| BlobExchangeError::new(BlobExchangeFailure::Store, source))
     }
 }

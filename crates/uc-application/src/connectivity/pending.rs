@@ -8,7 +8,7 @@ use super::{
     InboundIdentityReservation, PeerConnection, PeerReceiveStream, PeerSendStream, StreamLease,
 };
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -121,6 +121,8 @@ impl PendingInboundLease {
             cache_cancel: tokio_util::sync::CancellationToken::new(),
             supervise_local_work: self.manager.policy().wait_for_local_work(),
             accepted_stream_timeout: self.manager.policy().accepted_stream_timeout,
+            reject_excess_inbound: self.manager.policy().reject_excess_inbound,
+            first_inbound_at: Mutex::new(None),
             pending: tokio::sync::Mutex::new(None),
             exchange_claimed: AtomicBool::new(true),
             peer: self.manager.peer(grant.peer()),

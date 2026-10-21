@@ -581,7 +581,7 @@ pub use crate::connectivity::{
 
 pub use crate::transfer::blob::transport::{
     BlobExchangeError, BlobExchangeFailure, BlobExchangePort, BlobReceived, BlobRetainedContent,
-    BlobValidatedProgress,
+    BlobShutdownWait, BlobStoreLifecyclePort, BlobTransport, BlobValidatedProgress,
 };
 
 pub use crate::space::{

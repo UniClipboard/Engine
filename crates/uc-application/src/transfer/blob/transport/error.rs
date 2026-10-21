@@ -5,6 +5,16 @@ use uc_observability_contract::wire_enum;
 wire_enum! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
     pub enum BlobExchangeFailure: &'static str {
+        #[error("blob transport capacity exhausted")]
+        Busy => "blob_transport_busy",
+        #[error("blob transport owner closed")]
+        Closed => "blob_transport_closed",
+        #[error("blob connectivity failed")]
+        Connectivity => "blob_connectivity_failed",
+        #[error("blob transport task failed")]
+        Task => "blob_transport_task_failed",
+        #[error("blob shutdown remains incomplete")]
+        ShutdownIncomplete => "blob_shutdown_incomplete",
         #[error("blob exchange cancelled")]
         Cancelled => "blob_exchange_cancelled",
         #[error("blob request deadline expired")]

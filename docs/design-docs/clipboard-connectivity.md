@@ -51,6 +51,12 @@ Iroh admission 复用原身份目录、成员权威和同一 `AdmittedConnection
 Blob backend 每轮只调用一次原生连接；内容流程统一负责网络恢复。Blob 的空闲保留也必须经当前成员准入检查，
 其他协议沿用各自的保留权威与策略。提供端交换限额和业务取消仍归完整 transfer owner，不能用连接限额代替它们。
 
+需要兼容空预热的协议可启用首流准入：候选先等原生首流，不读取业务内容，仍持入口围栏与未知额度；
+第一份流使用准入入口的原截止时间，后续流从自身到达起算。可选即时拒绝策略先取得当前流再检查额度，
+超额显式停止两半流并保留停止失败，只拒绝本交换；许可仍附着在实际 SDK 工作租约上。
+Blob 的完整提供端由 Application `transfer/blob/transport/runtime` 负责，生产 Router 通过薄 handler 交接，
+原 SDK provider 自管连接入口已经移除。下载与结果结算的迁移状态只在当前执行计划维护。
+
 bridge 对出站连接在握手后订阅既有确认离线事件；已排队的 Offline 即便随后 Online，获取租约及原生开流前仍同步判旧连接失效；后台观察同时推进同步游标，其他 peer 的健康事件不积压成假失活。消息尚未发送时，准入后已确认失活的连接最多更新一次，仍用原准入快照和原 deadline；迟到共同结果已关闭时有界重新获取，不重发已写出的内容。manager 的原 JoinSet 监督连接结束并在 shutdown join，监督只持原生能力，不保活租约。Offline/Lagged 关闭本条连接，不推进成员 epoch、不复用 presence 连接、不自行重发内容；明确不可达的网络 I/O 返回原 Offline，本地授权来源保持 Io source。
 
 原 Application 发送 owner 内部按内容/目标围栏在途尝试：新 Pending 持久成功后才能取代旧写入权，旧 deferred 不覆盖同条内容的新结果；失败的新意图不丢失旧回执。私有 token 只存内存且弱表可回收，不改变持久格式。跨内容 Superseded 的既有竞态见[技术债](../exec-plans/tech-debt-tracker.md)。

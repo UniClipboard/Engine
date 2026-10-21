@@ -1,6 +1,6 @@
 # Issue #34 第七切片：文件／blob 受管传输执行计划
 
-状态：**阶段 0 前置证明完成，进入阶段 1**（2026-10-21）。高层 SDK 停止缺口由同一 SDK 公开底层 API 持有完成权解决；材料、旧资料、授权、协议及资源证据见[复现与方案](2026-10-21-blob-connectivity-feasibility.md)。
+状态：**阶段 0 前置证明完成；阶段 1／2 推进，提供端已接线、下载迁移中**（2026-10-21）。高层 SDK 停止缺口由同一 SDK 公开底层 API 持有完成权解决；材料、旧资料、授权、协议及资源证据见[复现与方案](2026-10-21-blob-connectivity-feasibility.md)。
 唯一设计来源：[实现规格](2026-10-21-blob-connectivity-spec.md)。
 本计划不复制参数、接口和异常规则；均以 spec 相应章节为准。
 
@@ -52,7 +52,7 @@
 修改位置：Application blob／file／receive、Infra iroh blobs／connectivity bridge／node。
 
 * [ ] SDK 获取只接收 Uni 已管理流，删除 downloader 自行拨号和连接 warmup 双路径。
-* [ ] Router 交给完整 Application 提供端，准入后调用有界 SDK 流处理，不保留 SDK 自管连接 handler。
+* [x] Router 交给完整 Application 提供端，准入后调用有界 SDK 流处理，不保留 SDK 自管连接 handler。提供端已生产接线；下载与取消入口仍待迁移。
 * [ ] 保留内存 blob 的密码路径、文件流式路径、BAO 校验、tag／GC 保护和输出所有权。
 * [ ] 取消先封后续动作并停止本地；有界非阻塞交接通知，保持原 5Hz 上限，不引入第八片新协议。
 * [ ] 取消等待有上限，重复调用等待同一清理，调用方放弃等待不放弃监督；真实结算后才归还额度。
@@ -272,3 +272,43 @@ just cargo nextest run -p uc-infra-p2p --lib --test blob_connectivity_feasibilit
 最终 metadata、workspace 全目标 check（1m14s）、fmt、Rust style、repository preflight、文档
 相对链接与 staged diff 检查通过；采用手工差异审查。阶段 1 全部退出条件和阶段 2–5 仍未满足，
 完整 workspace 的原 profile 诊断失败与正式生产矩阵继续待处理，不标为通过。
+
+### 2026-10-21 生产提供端接线
+
+Application `transfer/blob/transport/runtime` 的 `BlobTransport` 拥有完整提供流程：
+Uni 当前准入、每请求复核、独立 4／2 服务额度、SDK 原响应及实际导出完成等待。
+空闲保留缓存容量为 16，允许淘汰无工作连接；连接监督直接持原 Uni 租约到结果交接结束，
+任务由已授权对端每方向一条的名额约束，不额外设缓存容量大小的服务总数门槛。
+过载不进入额外 waiter 或 SDK spawn，只停止新流；兄弟结果收集时保留同一个 accept future，
+避免丢弃已经开始的准入读取。SDK 子任务 panic 立即终止监听，原 JoinError 保留到关闭结果。
+
+`IrohSessionBuilder::install_blobs` 已删除 SDK `BlobsProtocol` 注册。Engine 只通过存储能力 factory
+组装唯一 owner，Infra `IrohBlobHandler` 只交接原生连接。会话本地工作保护附着在原连接桥接上，
+Router 等待被取消后仍覆盖实际工作；关闭协调者由 owner 持有，同一次关闭可选等待实际完成或 5 秒返回未完成，
+调用者丢弃等待不撤销协调者。全部工作结算后再关闭同一 FsStore，失败及重复关闭保留原始来源。
+这不是完整 `CancelEntryReceive`／下载输出迁移已经完成。
+
+为兼容旧 Downloader 的空预热，首 QUIC 流出现后才占已授权方向名额，不读取新业务头。
+无流候选保持未知 16 限额和 30 秒空闲；首流准入、暂存和 SDK 请求头共用入口起 60 秒。
+协议、SDK 修订、ticket、加密与持久格式均不变。
+
+证据：
+
+- Application 全 lib nextest 1154 passed／1 skipped（3.815 秒）。提供端 6 项定向通过（0.019 秒），
+  覆盖 4／2 即时拒绝、兄弟不受影响、50 秒准入后仅余 10 秒、5 秒未完成仍保留实际工作、调用等待退出、
+  双重清理失败来源、重复关闭、任务 panic 与第 17 个对端的缓存淘汰。
+- 真实 UDP／旧生产 Downloader 在额外空预热仍打开时精确读取 512KiB；真实 Node quiesce 在 Router 取消后
+  仍等待门控服务工作结算。两项通过（0.090 秒），前者使用实际 SDK 编解码，后者验证真实会话保护组合。
+- P2P 全 lib、SDK 生命周期与旧协议向量 nextest 322 passed／3 skipped（39.044 秒）。
+- 真实 Engine 当前加密资料的 Direct／强制 Relay 双向文件精确读回各 2 方向；Relay 工件确认 direct_paths_blocked，
+  两组 cleaned、plaintext_clean 均为 true。工件位于 `target/blob-connectivity-evidence/provider-direct/` 与
+  `target/blob-connectivity-evidence/provider-relay/`。它们不代替最终旧新资料／双方完整 owner 的矩阵。
+
+仍须完成真实下载、完整输出／引用和提交结算、非阻塞通知、稳定取消／重试与绑定、删除旧 Downloader／warmup，
+并在最终 head 执行整个 workspace、兼容／资源矩阵与必需 CI。
+
+最终缓存监督调整后，Application 全 lib 1155 passed／1 skipped（3.784 秒），
+真实旧下载器／Node quiesce／旧协议向量 3 项复核通过（0.091 秒）。另增当前受管提供端的真实 SDK 双流测试：
+64KiB 接收窗口使 A 在正文传输中停读，只取消 A；B 共用同一连接、一次获取精确 4MiB，
+随后对端在第三个正文中途断开，提供端仍完成实际收尾。用实际 UDP 接收统计证明已开始传输，
+不只取消未开始的请求；1 项通过（0.167 秒）。这是 owner／SDK 边界的真实证明，仍不把旧稳定取消入口标为已迁移。

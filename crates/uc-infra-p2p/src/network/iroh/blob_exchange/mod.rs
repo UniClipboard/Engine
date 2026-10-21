@@ -7,3 +7,9 @@ mod receive;
 mod response_size;
 
 pub use adapter::IrohBlobExchangeAdapter;
+
+mod handler;
+pub use handler::IrohBlobHandler;
+
+#[cfg(test)]
+mod managed_tests;

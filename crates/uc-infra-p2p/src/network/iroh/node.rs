@@ -95,8 +95,10 @@ use super::active_clipboard::{
 };
 use super::addr_filter::apply_addr_filter;
 use super::admission_transport_material::IrohAdmissionTransportMaterial;
+use super::blob_exchange::{IrohBlobExchangeAdapter, IrohBlobHandler};
 use super::blobs::{IrohBlobTransferAdapter, BLOBS_ALPN};
 use super::connectivity::{IrohPeerReachabilityHandler, PresenceEnvironment};
+use uc_application::deps::{BlobExchangePort, BlobStoreLifecyclePort, BlobTransport};
 use uc_sync_protocol::peer_reachability::{LEGACY_PEER_REACHABILITY_ALPN, PEER_REACHABILITY_ALPN};
 #[cfg(test)]
 const LEGACY_CLIPBOARD_ALPN: &[u8] = b"uniclipboard/clipboard/0";
@@ -1462,12 +1464,15 @@ impl IrohSessionBuilder {
 
     /// 安装 iroh-blobs 传输能力。
     ///
-    /// 这个方法把官方 iroh-blobs handler 注册到当前共享 Router 上,同时
-    /// 返回实现 `BlobTransferPort` 的 adapter。sqlite 去重缓存不在这里
-    /// 构造,它属于数据库装配链。
+    /// 在同一存储上组装 SDK 能力和 Application 完整负责人，Router 只注册受管 handler。
+    /// sqlite 引用仓储仍由数据库装配链提供。
     pub async fn install_blobs(
         &mut self,
         store_dir: PathBuf,
+        assemble: impl FnOnce(
+            Arc<dyn BlobExchangePort>,
+            Arc<dyn BlobStoreLifecyclePort>,
+        ) -> Arc<BlobTransport>,
     ) -> Result<BlobHandlers, IrohNodeError> {
         // Phase D1: enable iroh-blobs internal GC at fixed interval.
         // `FsStore::load_with_opts` is the only public entry that can
@@ -1529,9 +1534,9 @@ impl IrohSessionBuilder {
             }
         }
 
-        let protocol = iroh_blobs::BlobsProtocol::new(&store, None);
-
-        self.install_session_handler([BLOBS_ALPN], protocol)?;
+        let exchange = Arc::new(IrohBlobExchangeAdapter::new(store.clone()));
+        let owner = assemble(exchange.clone(), exchange);
+        self.install_session_handler([BLOBS_ALPN], IrohBlobHandler::new(owner))?;
 
         let adapter = Arc::new(IrohBlobTransferAdapter::new(
             Arc::clone(&self.context.endpoint),
@@ -2230,7 +2235,7 @@ mod tests {
                     Arc::new(
                         uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory,
                     ),
-                    peer_reachability,
+                    peer_reachability.clone(),
                 );
                 ConnectivityManager::new(
                     deps.backend,
@@ -2242,7 +2247,21 @@ mod tests {
 
         let tempdir = tempfile::tempdir().expect("tempdir");
         let BlobHandlers { blob_transfer } = builder
-            .install_blobs(tempdir.path().join("iroh-blobs"))
+            .install_blobs(tempdir.path().join("iroh-blobs"), {
+                let deps = builder.connectivity_deps(
+                    ConnectivityProfile::Blob,
+                    Arc::new(EmptyPeerAddressRepo),
+                    Arc::new(EmptyMemberRepo),
+                    Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
+                    Arc::new(
+                        uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory,
+                    ),
+                    peer_reachability.clone(),
+                );
+                move |exchange, lifecycle| {
+                    BlobTransport::new(deps.backend, deps.admission, exchange, lifecycle)
+                }
+            })
             .await
             .expect("install blobs");
 
@@ -2259,6 +2278,141 @@ mod tests {
 
         let node = spawn_session(network, builder).await;
         node.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn quiesce_waits_for_managed_blob_work_after_router_waiter_is_cancelled() {
+        use tokio::sync::Semaphore;
+        use uc_application::deps::{
+            BlobExchangeError, BlobExchangeFailure, BlobReceived, BlobValidatedProgress,
+            KnownPeerIdentity, MembershipLedgerError, StreamLease,
+        };
+        use uc_core::ports::blob::BlobDigest;
+        struct Directory(KnownPeerIdentity);
+        #[async_trait]
+        impl PeerIdentityDirectoryPort for Directory {
+            async fn known_peer_identities(
+                &self,
+            ) -> Result<Vec<KnownPeerIdentity>, MembershipLedgerError> {
+                Ok(vec![self.0.clone()])
+            }
+        }
+        struct SlowExport {
+            entered: Semaphore,
+            cancelled: Semaphore,
+            finish: Semaphore,
+        }
+        #[async_trait]
+        impl BlobExchangePort for SlowExport {
+            async fn receive(
+                &self,
+                _: StreamLease,
+                _: BlobDigest,
+                _: tokio_util::sync::CancellationToken,
+                _: Arc<dyn BlobValidatedProgress>,
+            ) -> Result<BlobReceived, BlobExchangeError> {
+                panic!("unexpected receive");
+            }
+            async fn provide(
+                &self,
+                stream: StreamLease,
+                _: tokio::time::Instant,
+                cancel: tokio_util::sync::CancellationToken,
+            ) -> Result<(), BlobExchangeError> {
+                self.entered.add_permits(1);
+                cancel.cancelled().await;
+                self.cancelled.add_permits(1);
+                self.finish
+                    .acquire()
+                    .await
+                    .expect("actual export finish")
+                    .forget();
+                drop(stream);
+                Err(BlobExchangeError::refused(BlobExchangeFailure::Cancelled))
+            }
+        }
+        let network = IrohNodeBuilder::bind(
+            &identity_store(),
+            IrohNodeConfig {
+                disable_relays: true,
+                ..IrohNodeConfig::default()
+            },
+        )
+        .await
+        .expect("bind");
+        let mut builder = network.prepare_session();
+        let client = Endpoint::builder(presets::N0)
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("client");
+        let fingerprint =
+            Arc::new(uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory);
+        let directory = Arc::new(Directory(KnownPeerIdentity {
+            device_id: DeviceId::new("blob-requester"),
+            identity_fingerprint: fingerprint
+                .from_public_key(client.id().as_bytes())
+                .expect("fingerprint"),
+        }));
+        let backend = Arc::new(IrohConnectivityBackend::new(
+            builder.context.endpoint.clone(),
+            Arc::new(EmptyPeerAddressRepo),
+            None,
+            ConnectivityProfile::Blob,
+        ));
+        let admission = Arc::new(IrohConnectionAdmission::new(
+            directory,
+            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
+            fingerprint,
+            builder.admitted_connections.clone(),
+            ConnectivityProfile::Blob,
+        ));
+        let slow = Arc::new(SlowExport {
+            entered: Semaphore::new(0),
+            cancelled: Semaphore::new(0),
+            finish: Semaphore::new(0),
+        });
+        let provided = slow.clone();
+        let directory = tempfile::tempdir().expect("store directory");
+        builder
+            .install_blobs(directory.path().join("blobs"), move |_, lifecycle| {
+                BlobTransport::new(backend, admission, provided, lifecycle)
+            })
+            .await
+            .expect("managed blobs");
+        let mut node = spawn_session(network, builder).await;
+        let connection = client
+            .connect(node.session_context.endpoint.addr(), BLOBS_ALPN)
+            .await
+            .expect("connection");
+        let (mut send, _receive) = connection.open_bi().await.expect("stream");
+        // 本例只验证会话与实际工作寿命，SDK 请求／响应由 managed_tests 的真实下载器覆盖。
+        send.write_all(&[0]).await.expect("first stream data");
+        tokio::time::timeout(Duration::from_secs(2), slow.entered.acquire())
+            .await
+            .expect("provider started")
+            .expect("started signal")
+            .forget();
+        {
+            let stopping = node.quiesce_session();
+            tokio::pin!(stopping);
+            tokio::select! {
+                result = &mut stopping => panic!("quiesce abandoned actual work: {result:?}"),
+                signal = slow.cancelled.acquire() => signal.expect("cancel signal").forget(),
+            }
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), &mut stopping)
+                    .await
+                    .is_err()
+            );
+            slow.finish.add_permits(1);
+            tokio::time::timeout(Duration::from_secs(2), stopping)
+                .await
+                .expect("quiesce completed")
+                .expect("quiesce");
+        }
+        client.close().await;
+        node.shutdown().await.expect("shutdown");
     }
 
     // ──────────────────────────────────────────────────────────────────

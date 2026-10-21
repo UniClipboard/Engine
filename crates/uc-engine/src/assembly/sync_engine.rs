@@ -28,12 +28,12 @@ use crate::dev::{
 };
 use uc_application::deps::{
     ApplicationClipboardAdapters, ApplicationNetworkAdapters, ApplicationNetworkBinding,
-    ApplicationSpaceAdapters, ApplyGroupUpdatePort, ClipboardReceiverPort, ConnectivityManager,
-    ConnectivityPolicy, GroupUpdateEndpoint, GroupUpdateLocalWorkPort, GroupUpdateReceiverPort,
-    GroupUpdateWirePort, HistoryWirePort, IdleRetentionPolicy, LifecycleError,
-    MembershipHistoryReceiver, MembershipHistoryTransport, PeerIdentityDirectoryPort,
-    PeerReachabilityTransport, PeerReachabilityTransportPorts, SpaceAdmissionAdapters,
-    SpaceMembershipAdapters, SpaceRuntimeAdapters,
+    ApplicationSpaceAdapters, ApplyGroupUpdatePort, BlobTransport, ClipboardReceiverPort,
+    ConnectivityManager, ConnectivityPolicy, GroupUpdateEndpoint, GroupUpdateLocalWorkPort,
+    GroupUpdateReceiverPort, GroupUpdateWirePort, HistoryWirePort, IdleRetentionPolicy,
+    LifecycleError, MembershipHistoryReceiver, MembershipHistoryTransport,
+    PeerIdentityDirectoryPort, PeerReachabilityTransport, PeerReachabilityTransportPorts,
+    SpaceAdmissionAdapters, SpaceMembershipAdapters, SpaceRuntimeAdapters,
 };
 use uc_application::facade::ApplicationAssembly;
 use uc_core::file_transfer::FileTransferCancellationReason;
@@ -339,10 +339,28 @@ pub async fn prepare_sync_session(
         Arc::clone(&space_setup.fingerprint),
     )?;
 
-    // Slice 3 Phase 1:同一节点装第五个 ALPN(iroh-blobs)。BlobReference
-    // 是 sqlite 仓储,不跟 router 绑定;这里只拿传输 port。
+    // 同一存储上的交换能力交给唯一 Application 负责人；Router 不再由 SDK 自管。
+    // BlobReference 仍属于 SQLite 仓储装配，获取和输出迁移继续由 transfer 负责。
+    let blob_connectivity = builder.connectivity_deps(
+        ConnectivityProfile::Blob,
+        Arc::clone(&space_setup.peer_addr_repo),
+        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerIdentityDirectoryPort>,
+        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerAdmissionPort>,
+        Arc::clone(&space_setup.fingerprint),
+        Arc::clone(&peer_reachability),
+    );
     let BlobHandlers { blob_transfer } = builder
-        .install_blobs(space_setup.iroh_blob_store_dir.clone())
+        .install_blobs(
+            space_setup.iroh_blob_store_dir.clone(),
+            move |exchange, lifecycle| {
+                BlobTransport::new(
+                    blob_connectivity.backend,
+                    blob_connectivity.admission,
+                    exchange,
+                    lifecycle,
+                )
+            },
+        )
         .await?;
     #[cfg(all(test, feature = "dev-tools"))]
     let blob_transfer = decorate_blob(&space_setup.iroh_blob_store_dir, blob_transfer);

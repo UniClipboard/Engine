@@ -7,7 +7,7 @@ use super::{
     PeerConnection, StreamLease, StreamPair,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 use std::time::Duration;
 use tokio::sync::{Mutex, Semaphore};
 use tokio::time::{timeout_at, Instant};
@@ -22,6 +22,8 @@ pub(super) struct ConnectionRecord {
     pub cache_cancel: CancellationToken,
     pub supervise_local_work: bool,
     pub accepted_stream_timeout: Option<Duration>,
+    pub reject_excess_inbound: bool,
+    pub first_inbound_at: StdMutex<Option<Instant>>,
     pub pending: Mutex<Option<AcceptedStream>>,
     pub exchange_claimed: AtomicBool,
     pub grant: Box<dyn AdmissionGrant>,
@@ -35,9 +37,9 @@ pub(super) struct ConnectionRecord {
 }
 
 pub(super) struct AcceptedStream {
-    pair: StreamPair,
-    activity: Arc<ActivityGuard>,
-    accepted_at: Instant,
+    pub pair: StreamPair,
+    pub activity: Arc<ActivityGuard>,
+    pub accepted_at: Instant,
 }
 
 impl Drop for ConnectionRecord {
@@ -178,6 +180,91 @@ impl ConnectionLease {
                 .try_acquire_owned()
                 .map_err(ConnectivityError::Busy)?;
             return StreamLease::new(pair, self.record.clone(), vec![capacity]);
+        }
+        if self.record.reject_excess_inbound {
+            let first = *self
+                .record
+                .first_inbound_at
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let buffered = self.record.pending.lock().await.take();
+            let mut held_activity = None;
+            let pair = match buffered {
+                Some(accepted) => {
+                    held_activity = Some(accepted.activity);
+                    accepted.pair
+                }
+                None => {
+                    let accepting = self.record.connection.accept_bi();
+                    match first.zip(self.record.accepted_stream_timeout) {
+                        Some((start, timeout)) => timeout_at(start + timeout, accepting)
+                            .await
+                            .map_err(ConnectivityError::TimedOut)??,
+                        None => accepting.await?,
+                    }
+                }
+            };
+            let started = self
+                .record
+                .first_inbound_at
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take()
+                .unwrap_or_else(Instant::now);
+            let mut stream = StreamLease::new(pair, self.record.clone(), Vec::new())?;
+            stream.received_at = Some(started);
+            drop(held_activity);
+            let capacity = (|| {
+                let local = self
+                    .record
+                    .inbound
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(ConnectivityError::Busy)?;
+                let global = self
+                    .record
+                    .inbound_global
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(ConnectivityError::Busy)?;
+                Ok(vec![local, global])
+            })();
+            let permits = match capacity {
+                Ok(permits) => permits,
+                Err(primary) => {
+                    return match stream.stop() {
+                        Ok(()) => Err(primary),
+                        Err(additional) => Err(ConnectivityError::Settlement {
+                            primary: Box::new(primary),
+                            additional: Box::new(additional),
+                        }),
+                    }
+                }
+            };
+            stream.attach_capacity(permits);
+            self.claim_exchange()?;
+            let deadline = started
+                + self
+                    .record
+                    .accepted_stream_timeout
+                    .ok_or(ConnectivityError::DeadlineExpired)?;
+            if let Err(primary) = checked(
+                self.check_current(),
+                self.record.supervise_local_work,
+                deadline,
+                &self.record.stop,
+            )
+            .await
+            {
+                return match stream.stop() {
+                    Ok(()) => Err(primary),
+                    Err(additional) => Err(ConnectivityError::Settlement {
+                        primary: Box::new(primary),
+                        additional: Box::new(additional),
+                    }),
+                };
+            }
+            return Ok(stream);
         }
         let local = self
             .record

@@ -1,6 +1,6 @@
 use super::acquisition::Acquisition;
 use super::checks::checked;
-use super::connection::ConnectionRecord;
+use super::connection::{AcceptedStream, ConnectionRecord};
 use super::inbound::{InboundAdmissionPolicy, InboundReservation};
 use super::lifetime::ConnectionLifetime;
 use super::pending::{PendingInboundLease, UnboundConnection};
@@ -45,6 +45,10 @@ pub struct ConnectivityPolicy {
     pub flights_per_session: usize,
     pub idle_retention: Option<IdleRetentionPolicy>,
     pub accepted_stream_timeout: Option<Duration>,
+    /// 先接收当前流再立即判额度，超额只拒绝本次，不进入等待队列。
+    pub reject_excess_inbound: bool,
+    /// 等待首流再做身份与成员准入，空预热连接仅占未知入站额度。
+    pub admit_on_first_stream: bool,
     pub task_kind: DiagnosticTaskKind,
 }
 impl Default for ConnectivityPolicy {
@@ -62,6 +66,8 @@ impl Default for ConnectivityPolicy {
             flights_per_session: 64,
             idle_retention: None,
             accepted_stream_timeout: None,
+            reject_excess_inbound: false,
+            admit_on_first_stream: false,
             task_kind: DiagnosticTaskKind::ClipboardConnectivityWorker,
         }
     }
@@ -679,6 +685,28 @@ impl ConnectivityManager {
             if pending.session.is_cancelled() {
                 return Err(pending.failed(ConnectivityError::Stopped));
             }
+            let first = if manager.policy().admit_on_first_stream {
+                let deadline = pending.deadline.ok_or_else(|| InboundConnectionError {
+                    cause: ConnectivityError::DeadlineExpired,
+                    _capacity: None,
+                })?;
+                let first_stream_deadline = manager
+                    .policy()
+                    .idle_retention
+                    .zip(pending.started_at)
+                    .map_or(deadline, |(idle, start)| deadline.min(start + idle.timeout));
+                let accepted = tokio::select! {
+                    biased;
+                    _ = pending.session.cancelled() => Err(ConnectivityError::Stopped),
+                    result = timeout_at(first_stream_deadline, pending.raw.raw.accept_bi()) => result.map_err(ConnectivityError::TimedOut).and_then(|result| result),
+                };
+                match accepted {
+                    Ok(pair) => Some(pair),
+                    Err(source) => return Err(pending.failed(source)),
+                }
+            } else {
+                None
+            };
             let admitted = manager
                 .inner
                 .admission
@@ -709,14 +737,28 @@ impl ConnectivityManager {
                 return Err(pending.failed(cause));
             }
             let peer = manager.peer(grant.peer());
+            let activity = Arc::new(ConnectionActivity::default());
+            let first = match first {
+                Some(pair) => Some(AcceptedStream {
+                    pair,
+                    activity: activity.acquire().map_err(|cause| InboundConnectionError {
+                        cause,
+                        _capacity: None,
+                    })?,
+                    accepted_at: pending.started_at.unwrap_or_else(Instant::now),
+                }),
+                None => None,
+            };
             let record = Arc::new(ConnectionRecord {
                 connection: pending.raw.raw.clone(),
-                activity: Arc::new(ConnectionActivity::default()),
+                activity,
                 stop: pending.session.clone(),
                 cache_cancel: CancellationToken::new(),
                 supervise_local_work: manager.policy().wait_for_local_work(),
                 accepted_stream_timeout: manager.policy().accepted_stream_timeout,
-                pending: tokio::sync::Mutex::new(None),
+                reject_excess_inbound: manager.policy().reject_excess_inbound,
+                first_inbound_at: Mutex::new(pending.started_at),
+                pending: tokio::sync::Mutex::new(first),
                 exchange_claimed: AtomicBool::new(false),
                 grant,
                 peer,

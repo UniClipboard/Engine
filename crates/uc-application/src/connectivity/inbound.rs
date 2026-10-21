@@ -34,6 +34,7 @@ pub(super) struct InboundReservation {
     pub lifetime: Arc<ConnectionLifetime>,
     pub session: CancellationToken,
     pub deadline: Option<Instant>,
+    pub started_at: Option<Instant>,
     fence: Option<Box<dyn InboundAdmissionFence>>,
     capacity: Mutex<Capacity>,
 }
@@ -49,10 +50,10 @@ impl InboundReservation {
         };
         let session = manager.stop_token();
         let fence = manager.inner.admission.inbound_fence();
-        let deadline = manager
-            .policy()
-            .inbound_admission
-            .map(|limits| Instant::now() + limits.timeout);
+        let started_at = manager.policy().inbound_admission.map(|_| Instant::now());
+        let deadline = started_at
+            .zip(manager.policy().inbound_admission)
+            .map(|(start, limits)| start + limits.timeout);
         if session.is_cancelled() {
             return Err(ConnectivityError::Stopped);
         }
@@ -75,6 +76,7 @@ impl InboundReservation {
             lifetime,
             session,
             deadline,
+            started_at,
             fence,
             capacity: Mutex::new(Capacity { identified: None }),
         })
