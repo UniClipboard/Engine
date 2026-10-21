@@ -113,6 +113,7 @@ impl Fixture {
             Arc::new(ProfileStartupStorage::new(
                 self.paths.clone(),
                 self.storage.clone(),
+                uc_core::app_dirs::HostConfigurationFiles::default(),
             )),
             Arc::new(ProfileLifecycleRepository::new(self.storage.clone())),
             target,
@@ -449,6 +450,7 @@ async fn inaccessible_keychain_still_leaves_files_restorable_after_userdata_dele
         Arc::new(ProfileStartupStorage::new(
             fixture.paths.clone(),
             denied.clone(),
+            uc_core::app_dirs::HostConfigurationFiles::default(),
         )),
         Arc::new(ProfileLifecycleRepository::new(denied)),
         fixture.target(),
@@ -751,6 +753,7 @@ async fn independent_userdata_roots_never_reuse_each_others_backup() {
         Arc::new(ProfileStartupStorage::new(
             second.paths.clone(),
             second.storage.clone(),
+            uc_core::app_dirs::HostConfigurationFiles::default(),
         )),
         Arc::new(ProfileLifecycleRepository::new(second.storage.clone())),
         second.target(),

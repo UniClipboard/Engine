@@ -4,6 +4,9 @@
 //! numeric value because callers always interpret an error in the context of
 //! the operation they submitted.
 
+/// `Engine::start`：宿主声明的附加配置文件名不合规、重复或与 Engine 自有文件重名。
+pub const HOST_CONFIGURATION_FILES_INVALID_CODE: u32 = 1109;
+
 pub const CREATE_SPACE_PASSPHRASE_MISMATCH_CODE: u32 = 1201;
 pub const CREATE_SPACE_ALREADY_INITIALIZED_CODE: u32 = 1202;
 pub const CREATE_SPACE_FAILED_CODE: u32 = 1203;

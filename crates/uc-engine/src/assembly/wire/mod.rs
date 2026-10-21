@@ -30,7 +30,7 @@ use uc_application::deps::{
     SpaceAccessPorts, SpaceRebuildProgressPort, StoragePorts, SystemPorts,
 };
 use uc_application::facade::HostEventEmitterPort;
-use uc_core::app_dirs::AppPaths;
+use uc_core::app_dirs::{AppPaths, HostConfigurationFiles};
 use uc_core::clipboard::SelectRepresentationPolicyV1;
 use uc_core::ids::{ProfileId, RepresentationId};
 use uc_core::ports::blob::BlobReferenceRepositoryPort;
@@ -183,6 +183,7 @@ pub struct CoreWiringInputs {
     pub startup_progress: Arc<dyn uc_infra_profile::security::StorageUpgradeObserver>,
     pub profile_key_recovery: Arc<dyn ProfilePassphraseRecoveryPort>,
     pub upgrade_backup_security: Arc<dyn RetireUpgradeBackupSecurityRecordsPort>,
+    pub host_configuration_files: HostConfigurationFiles,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -339,6 +340,7 @@ pub async fn wire_dependencies_from_inputs(
         startup_progress,
         profile_key_recovery,
         upgrade_backup_security,
+        host_configuration_files,
     } = inputs;
     let profile_reset_paths = paths.clone();
     let profile_reset_profile_id = profile_id.inner().to_owned();
@@ -879,6 +881,7 @@ pub async fn wire_dependencies_from_inputs(
             db_pool_for_profile_reset,
             profile_reset_paths,
             db_path.clone(),
+            host_configuration_files.clone(),
         )),
     };
     // Whole-installation configuration migration (export / import preview /
@@ -902,6 +905,7 @@ pub async fn wire_dependencies_from_inputs(
             settings_path: settings_path.clone(),
             app_data_root: app_data_root.clone(),
             iroh_identity_dir,
+            host_configuration_files,
         },
     );
 

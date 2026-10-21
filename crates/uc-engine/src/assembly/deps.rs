@@ -55,6 +55,9 @@ pub enum WiringError {
         source: anyhow::Error,
     },
 
+    #[error("host configuration file declaration is invalid")]
+    HostConfigurationFiles(#[source] uc_core::app_dirs::HostConfigurationFileError),
+
     #[error("unfinished passphrase change could not be recovered")]
     PassphraseChangeRecovery {
         #[source]

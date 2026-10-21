@@ -15,6 +15,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tracing::instrument;
 
+use uc_core::app_dirs::HostConfigurationFiles;
 use uc_core::crypto::domain::Passphrase;
 use uc_core::ids::ProfileId;
 use uc_core::ports::config_migration::{
@@ -33,8 +34,8 @@ use super::manifest::{BundleManifest, MANIFEST_MEMBER, MANIFEST_SCHEMA_VER};
 use super::secret_keys::{migratable_secret_keys, MigratableSecretKind, SECRETS_MEMBER};
 use super::staging::{
     PendingImportMarker, SecretsFile, StagingError, StagingLayout, CURRENT_SPACE_ID_MEMBER,
-    DB_MEMBER, DEVICE_ID_MEMBER, IROH_IDENTITY_PREFIX, KEYSLOT_MEMBER, PENDING_IMPORT_SCHEMA_VER,
-    PROFILE_SECRETS_MEMBER, SETTINGS_MEMBER, STAGING_DIR_NAME, UI_STATE_PREFIX,
+    DB_MEMBER, DEVICE_ID_MEMBER, HOST_CONFIGURATION_PREFIX, IROH_IDENTITY_PREFIX, KEYSLOT_MEMBER,
+    PENDING_IMPORT_SCHEMA_VER, PROFILE_SECRETS_MEMBER, SETTINGS_MEMBER, STAGING_DIR_NAME,
 };
 use uc_observability_contract::{error_source::io_error_kind, uc_error, uc_info, uc_warn};
 
@@ -61,26 +62,14 @@ pub struct ConfigMigrationPaths {
     pub iroh_identity_dir: PathBuf,
     /// User settings file (`settings.json`).
     pub settings_path: PathBuf,
-    /// Data root: staging + marker + optional UI-state files live here.
+    /// Data root: staging + marker + host configuration files live here.
     pub app_data_root: PathBuf,
+    /// Host-declared configuration files (data-root basenames) carried under
+    /// [`HOST_CONFIGURATION_PREFIX`].
+    pub host_configuration_files: HostConfigurationFiles,
 }
 
 impl ConfigMigrationPaths {
-    fn ui_state_paths(&self) -> Vec<(String, PathBuf)> {
-        // Optional UI-state files carried best-effort. Names mirror the data
-        // root's update-state files.
-        vec![
-            (
-                "last_notified_update.json".to_string(),
-                self.app_data_root.join("last_notified_update.json"),
-            ),
-            (
-                "skipped_version.json".to_string(),
-                self.app_data_root.join("skipped_version.json"),
-            ),
-        ]
-    }
-
     /// Scratch path for the `VACUUM INTO` snapshot, kept beside the live db so
     /// it lands on the same filesystem (no cross-device rename surprises).
     fn snapshot_scratch_path(&self) -> PathBuf {
@@ -304,6 +293,59 @@ impl ConfigMigrationAdapter {
     }
 }
 
+/// 单个宿主配置文件的读取上限；配置文件只含偏好，超过即视为宿主异常而不是截断。
+const MAX_HOST_CONFIGURATION_FILE_BYTES: u64 = 1024 * 1024;
+
+/// 读取一个宿主声明文件：不存在返回 `None`；符号链接、目录或超限都使导出失败，
+/// 绝不跟随链接把数据根以外的文件打进配置包。
+fn read_host_configuration_file(path: &Path) -> Result<Option<Vec<u8>>, ConfigMigrationError> {
+    use std::io::Read;
+
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(ConfigMigrationError::Io {
+                details: "failed inspecting a host configuration file".to_string(),
+                source: Some(Box::new(error)),
+            })
+        }
+    };
+    if !metadata.file_type().is_file() {
+        return Err(ConfigMigrationError::Io {
+            details: "a host configuration file is not a regular file".to_string(),
+            source: None,
+        });
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options
+        .open(path)
+        .map_err(|error| ConfigMigrationError::Io {
+            details: "failed opening a host configuration file".to_string(),
+            source: Some(Box::new(error)),
+        })?;
+    let mut bytes = Vec::new();
+    file.take(MAX_HOST_CONFIGURATION_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| ConfigMigrationError::Io {
+            details: "failed reading a host configuration file".to_string(),
+            source: Some(Box::new(error)),
+        })?;
+    if bytes.len() as u64 > MAX_HOST_CONFIGURATION_FILE_BYTES {
+        return Err(ConfigMigrationError::Io {
+            details: "a host configuration file exceeds the size limit".to_string(),
+            source: None,
+        });
+    }
+    Ok(Some(bytes))
+}
+
 fn map_bundle_err(err: BundleError) -> ConfigMigrationError {
     match err {
         // 口令错误与数据损坏刻意不可区分（不提供口令猜测的判断依据），不向上携带细节。
@@ -495,9 +537,10 @@ impl ConfigMigrationAdapter {
         for (member, bytes) in iroh_identity_files {
             archive.insert(member, bytes);
         }
-        for (name, path) in self.paths.ui_state_paths() {
-            if let Some(bytes) = Self::read_optional(&path)? {
-                archive.insert(format!("{UI_STATE_PREFIX}{name}"), bytes);
+        for name in self.paths.host_configuration_files.names() {
+            if let Some(bytes) = read_host_configuration_file(&self.paths.app_data_root.join(name))?
+            {
+                archive.insert(format!("{HOST_CONFIGURATION_PREFIX}{name}"), bytes);
             }
         }
 

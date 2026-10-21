@@ -8,7 +8,7 @@ use uc_application::deps::{
     ClearProfileStatePort, ProfileFactoryResetCapabilityError, ProfileGeneration,
     WipeProfileKeysPort,
 };
-use uc_core::app_dirs::AppPaths;
+use uc_core::app_dirs::{AppPaths, HostConfigurationFiles};
 use uc_core::ports::SecureStoragePort;
 
 use uc_infra_storage::db::pool::DbPool;
@@ -141,14 +141,21 @@ pub struct ProfileStateCleaner {
     database: DbPool,
     paths: AppPaths,
     current_database_path: PathBuf,
+    host_configuration_files: HostConfigurationFiles,
 }
 
 impl ProfileStateCleaner {
-    pub fn new(database: DbPool, paths: AppPaths, current_database_path: PathBuf) -> Self {
+    pub fn new(
+        database: DbPool,
+        paths: AppPaths,
+        current_database_path: PathBuf,
+        host_configuration_files: HostConfigurationFiles,
+    ) -> Self {
         Self {
             database,
             paths,
             current_database_path,
+            host_configuration_files,
         }
     }
 
@@ -217,8 +224,32 @@ impl ProfileStateCleaner {
         Ok(())
     }
 
+    /// 只删除重置负责人为 Engine 的宿主声明文件，且只按文件删除：符号链接只解除链接本身，
+    /// 目录使重置失败，不扩大删除范围。负责人为宿主的声明文件和未声明文件都不触碰。
+    fn clear_host_configuration_files(&self) -> Result<(), ProfileFactoryResetCapabilityError> {
+        for path in self.engine_reset_host_paths() {
+            match std::fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.file_type().is_dir() => return Err(capability_error()),
+                Ok(_) => std::fs::remove_file(&path).map_err(capability_error_from)?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(capability_error_from(error)),
+            }
+        }
+        Ok(())
+    }
+
+    fn engine_reset_host_paths(&self) -> Vec<PathBuf> {
+        self.host_configuration_files
+            .engine_reset_paths(&self.paths.app_data_root_dir)
+    }
+
     fn verify_files_absent(&self) -> Result<(), ProfileFactoryResetCapabilityError> {
-        if self.profile_state_paths().iter().any(|path| path.exists()) {
+        let engine_state_remains = self.profile_state_paths().iter().any(|path| path.exists());
+        let host_files_remain = self
+            .engine_reset_host_paths()
+            .iter()
+            .any(|path| std::fs::symlink_metadata(path).is_ok());
+        if engine_state_remains || host_files_remain {
             return Err(capability_error());
         }
         Ok(())
@@ -246,9 +277,6 @@ impl ProfileStateCleaner {
             self.paths.app_data_root_dir.join("first-sync-state.json"),
             self.paths.daemon_token_path(),
             self.paths.daemon_pid_path(),
-            self.paths.last_notified_update_path(),
-            self.paths.skipped_version_path(),
-            self.paths.update_prompt_throttle_path(),
         ]
     }
 }
@@ -264,6 +292,8 @@ impl ClearProfileStatePort for ProfileStateCleaner {
             .map_err(capability_error_from)?;
         self.remove_database_files()?;
         self.clear_files()?;
+        // 宿主文件排在 Engine 资料之后：Engine 资料清除失败时宿主文件保持原样。
+        self.clear_host_configuration_files()?;
         self.verify_files_absent()
     }
 }
@@ -442,7 +472,12 @@ mod tests {
         drop(connection);
         let pool =
             uc_infra_storage::db::pool::init_db_pool(paths.db_path.to_str().unwrap()).unwrap();
-        let cleaner = ProfileStateCleaner::new(pool, paths.clone(), paths.db_path.clone());
+        let cleaner = ProfileStateCleaner::new(
+            pool,
+            paths.clone(),
+            paths.db_path.clone(),
+            uc_core::app_dirs::HostConfigurationFiles::default(),
+        );
 
         cleaner.clear_and_verify_profile_state().await.unwrap();
 

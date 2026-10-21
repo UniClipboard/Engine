@@ -7,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 
 use uc_application::deps::{LifecycleError, StopProfileRuntimePort};
 use uc_application::facade::ProfileFactoryResetFacade;
+use uc_core::app_dirs::HostConfigurationFileError;
 use uc_core::crypto::domain::Passphrase;
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
 use uc_infra_profile::security::{
@@ -27,9 +28,9 @@ use crate::engine::event_stream::EventSender;
 use crate::engine::startup::StartupProgressStore;
 use crate::engine::EngineRuntime;
 use crate::error_codes::{
-    FACTORY_RESET_RESTART_REQUIRED_CODE, PROFILE_RECOVERY_PARTIAL_CODE,
-    PROFILE_RECOVERY_PERSISTENCE_FAILED_CODE, PROFILE_RECOVERY_UNSUPPORTED_CODE,
-    UNLOCK_SPACE_CORRUPTED_CODE, UNLOCK_SPACE_UNAUTHORIZED_CODE,
+    FACTORY_RESET_RESTART_REQUIRED_CODE, HOST_CONFIGURATION_FILES_INVALID_CODE,
+    PROFILE_RECOVERY_PARTIAL_CODE, PROFILE_RECOVERY_PERSISTENCE_FAILED_CODE,
+    PROFILE_RECOVERY_UNSUPPORTED_CODE, UNLOCK_SPACE_CORRUPTED_CODE, UNLOCK_SPACE_UNAUTHORIZED_CODE,
 };
 use crate::operations::space::factory_reset::execute_factory_reset_space;
 use crate::{
@@ -84,6 +85,24 @@ impl RecoverableRuntime {
         events: EventSender,
         progress: Arc<StartupProgressStore>,
     ) -> Result<Self, EngineError> {
+        // 声明在任何资料读写之前校验：导入恢复和恢复出厂都只按校验后的名字处理宿主文件。
+        if let Err(error) = config.validated_host_configuration_files() {
+            let error_kind = match error {
+                HostConfigurationFileError::InvalidName => "invalid_name",
+                HostConfigurationFileError::Reserved => "reserved_name",
+                HostConfigurationFileError::Duplicate => "duplicate_name",
+            };
+            uc_warn!(
+                error_kind = error_kind,
+                "host configuration file declaration rejected"
+            );
+            // discarded-source[core-pure-validation]: the Core rule is fully classified by the variant logged above
+            return Err(EngineError::new(
+                HOST_CONFIGURATION_FILES_INVALID_CODE,
+                EngineErrorCategory::InvalidInput,
+                false,
+            ));
+        }
         let paths = derive_app_paths(host.directories());
         let recovery = profile_key_recovery_store(&config, &paths, &host);
         let host = ReusableHost::new(host);
