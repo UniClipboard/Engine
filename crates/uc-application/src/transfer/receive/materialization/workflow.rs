@@ -843,12 +843,6 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                 )
             })?;
             let fetched_len = fetched.plaintext.len();
-            batch.item_result(
-                &item_id,
-                fetched_len as u64,
-                OutboundProgressStatus::Completed,
-                None,
-            );
             completed.push(ReceivedItem {
                 blob_index: original_index,
                 plaintext_hash: *fetched.plaintext_hash.as_bytes(),
@@ -857,6 +851,13 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
             });
             rep.set_inline_bytes(fetched.plaintext.to_vec())
                 .context("materialize: failed to set inline bytes")?;
+            batch.item_result(
+                &item_id,
+                fetched_len as u64,
+                OutboundProgressStatus::Completed,
+                None,
+            );
+
             uc_info!(
                 entry_id = log_id(&entry_id),
                 representation_index = idx,

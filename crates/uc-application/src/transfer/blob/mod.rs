@@ -123,12 +123,14 @@ mod tests {
         let first_cancel = CancellationToken::new();
         let second_cancel = CancellationToken::new();
         let first = tokio::spawn(usecase.execute(FetchBlobInput {
+            settlement: Default::default(),
             ticket: ticket.clone(),
             entry_id: EntryId::new(),
             cancel: first_cancel.clone(),
             progress: None,
         }));
         let second = tokio::spawn(usecase.execute(FetchBlobInput {
+            settlement: Default::default(),
             ticket: ticket.clone(),
             entry_id: EntryId::new(),
             cancel: second_cancel.clone(),
@@ -155,6 +157,7 @@ mod tests {
             "deadline cannot abandon started lookup"
         );
         let third = tokio::spawn(usecase.execute(FetchBlobInput {
+            settlement: Default::default(),
             ticket,
             entry_id: EntryId::new(),
             cancel: CancellationToken::new(),
@@ -427,6 +430,7 @@ mod tests {
 
         let outcome = fetch
             .execute(FetchBlobInput {
+                settlement: Default::default(),
                 cancel: tokio_util::sync::CancellationToken::new(),
                 ticket: second.ticket,
                 entry_id: EntryId::from("entry-two"),
@@ -489,6 +493,7 @@ mod tests {
 
         let outcome = usecase
             .execute(FetchBlobInput {
+                settlement: Default::default(),
                 cancel: tokio_util::sync::CancellationToken::new(),
                 ticket,
                 entry_id: entry_id.clone(),

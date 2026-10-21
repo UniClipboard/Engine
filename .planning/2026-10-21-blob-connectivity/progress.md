@@ -313,3 +313,9 @@
 - 首次风格标签因rustfmt隔开而未通过，已修正。审查发现非本机合法file URI被新拒绝误伤，首个扩大运行在编译阶段主动SIGINT终态130，确认编译子进程退出，未记通过；foreign-uri-red精确复现后，合法非本机引用继续保留外部所有权，UTF-8及URL解析失败保留原始具体source。最终七项定向删除回归通过（0.051秒），包含既有缺失缓存目标、外部文件／远端URI、原始解析source与根别名。
 - 最终Application／Engine完整nextest 1527通过／6跳过（173.360秒）；真实Engine部分重试、取消、删除／清空、认证失败恢复与崩溃重启均实际执行。metadata解析812包、workspace全目标check（1m26s）、fmt、Rust style、repository preflight、1350站点隐私清单及diff全部通过。手工审查所有候选验证先于SQL、同源错误、用户路径保留、根别名、缺失及解析边界；code-review skill缺失，不冒称技能审查，设备未运行仍跳过。
 - 本轮不证明路径操作已对抗本机并发文件系统替换，SQL后缓存remove_file仍为既有best-effort，历史清理恢复边界保留。下一步优先回到spec核心的完整准备／结算预算与生命周期验收；不以继续修旧缓存行为替代完整spec。静态证据：BlobDownloadResources::obtain返回的DownloadedBlob._permit在FetchBlobUseCase::execute*_inner局部持有，输出不携带同一guard，须用实际上层保存／清理屏障验证其余工作是否仍受同一额度约束。
+
+- 完整Facade本地进度屏障先实证同端2项尚未结算就允许第三项开始（download-local-settlement-red.log，0.035秒）。同一DownloadPermit由receive/download_work的不透明持有者交给底层工作、Facade及本项本地交接共同持有，不再次排队或创建父批次额度；表示赋值先完成再记录item_result。测试覆盖全局4／每端2、仅Facade／带父交接、7／9项顺序处理及原StorageFull链。
+- 只保留额度还不够：download-local-protection-red.log两项均失败，保护计数为0而预期2（0.033秒）。现在同时保留原BlobRetainedContent，原生实现内含TempTag与StreamWorkLease；最后持有者先释放内容／本地工作，再交回同一额度。无Any／downcast、新SDK类型、Engine查询、第二队列／池或schema。相关transfer／receive 192通过（2.169秒）。
+- 初步完整Application／Engine1529通过／6跳过（193.718秒）之后，缓存关闭屏障又实证shutdown在本地工作／额度仍被持有时完整返回（download-local-shutdown-red.log，0.088秒）。关闭现在等待原slot真正全部交回后才关闭存储。五秒只结束调用等待、保护仍为1；重复Complete复用同一协调者、释放后才真正关闭。相关192项通过（5.509秒）。失败分支最初错误预期shutdown成功，已改为验证既有Store及原StorageFull，不改弱生产策略。
+- 最终同一源快照Application／Engine完整nextest 1529通过／6跳过（178.054秒），含实际三文件重试、取消／删除／清空、认证失败恢复、进程崩溃恢复与新额度／保护／五秒关闭屏障。metadata解析812包、workspace全目标check（1m31s）、fmt、Rust style、repository preflight、1350站点隐私清单及diff全部通过。Cargo串行共享target及原缓存，未执行设备仍跳过。
+- 手工审查许可唯一性及克隆所有权、内容与额度释放顺序、字段可见性、batch逐项释放避免死锁、错误来源不含持有者、通知／锁顺序、关闭quiescence及真实Engine回归；code-review skill缺失，不冒称技能审查。完整spec仍进行：准备阶段admission／60秒、目录发布／最终保存、inflight完整取消及清理失败移交仍需实际屏障证明，不把本轮当完整预算或生命周期完成。

@@ -5,6 +5,7 @@ use super::transport::DownloadTask;
 use super::transport::{
     BlobDownloadResources, BlobExchangeError, BlobExchangeFailure, PreparedDownload,
 };
+use crate::transfer::receive::DownloadSettlement;
 use bytes::Bytes;
 use std::time::Duration;
 use tokio::time::Instant;
@@ -19,6 +20,7 @@ use uc_core::ports::security::TransferCipherPort;
 use uc_core::ports::ContentHashPort;
 
 pub(crate) struct FetchBlobInput {
+    pub(in super::super) settlement: DownloadSettlement,
     pub ticket: BlobTicket,
     pub cancel: CancellationToken,
     pub entry_id: EntryId,
@@ -42,6 +44,7 @@ pub(crate) struct FetchBlobOutcome {
 /// transfer no longer routes the full plaintext through `Bytes` + a second
 /// `tokio::fs::write`.
 pub(crate) struct FetchBlobPathInput {
+    pub(in super::super) settlement: DownloadSettlement,
     pub ticket: BlobTicket,
     pub cancel: CancellationToken,
     pub entry_id: EntryId,
@@ -111,10 +114,15 @@ impl FetchBlobUseCase {
     ) -> Result<FetchBlobOutcome, FetchBlobError> {
         let received = self
             .downloads
-            .obtain(prepared, &input.cancel, input.progress)
+            .obtain(
+                prepared,
+                &input.cancel,
+                input.progress,
+                input.settlement.clone(),
+            )
             .await
             .map_err(|source| FetchBlobError::Transfer(source.into()))?;
-        let digest = received.content.digest;
+        let digest = received.digest;
         if input.cancel.is_cancelled() {
             return Err(FetchBlobError::Cancelled(BlobExchangeFailure::Cancelled));
         }
@@ -189,10 +197,15 @@ impl FetchBlobUseCase {
     ) -> Result<FetchBlobPathOutcome, FetchBlobError> {
         let received = self
             .downloads
-            .obtain(prepared, &input.cancel, input.progress)
+            .obtain(
+                prepared,
+                &input.cancel,
+                input.progress,
+                input.settlement.clone(),
+            )
             .await
             .map_err(|source| FetchBlobError::Transfer(source.into()))?;
-        let digest = received.content.digest;
+        let digest = received.digest;
         if input.cancel.is_cancelled() {
             return Err(FetchBlobError::Cancelled(BlobExchangeFailure::Cancelled));
         }

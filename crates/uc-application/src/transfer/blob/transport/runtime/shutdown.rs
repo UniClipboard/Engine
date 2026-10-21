@@ -92,6 +92,7 @@ impl BlobTransport {
                     }
                 }
             }
+            self.downloads.wait_settled().await;
             match failure {
                 Some(error) => Err(error),
                 None => Ok(()),

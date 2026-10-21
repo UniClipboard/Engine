@@ -6,8 +6,8 @@ use super::super::{
 use super::owner::BlobTransport;
 use crate::connectivity::{ConnectionLease, ConnectionRequest, ConnectionRequestScope};
 use crate::transfer::policy::PROGRESS_REPORT_INTERVAL;
-use crate::transfer::receive::scheduler::{DownloadPermit, DownloadReservation};
 use crate::transfer::receive::timing::{ReceiveTiming, TimingError};
+use crate::transfer::receive::{scheduler::DownloadReservation, DownloadSettlement};
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::{watch, Notify};
 use tokio::time::{sleep_until, Instant};
@@ -27,9 +27,9 @@ pub(in super::super::super::super) struct PreparedDownload {
 }
 
 pub(in super::super::super::super) struct DownloadedBlob {
-    pub content: BlobReceived,
+    pub digest: BlobDigest,
     pub request: ConnectionRequest,
-    _permit: DownloadPermit,
+    _settlement: DownloadSettlement,
 }
 struct Progress {
     timing: Mutex<ReceiveTiming>,
@@ -75,6 +75,7 @@ impl BlobDownloadResources {
         prepared: PreparedDownload,
         cancel: &CancellationToken,
         sink: Option<Arc<dyn BlobProgressSink>>,
+        settlement: DownloadSettlement,
     ) -> Result<DownloadedBlob, BlobExchangeError> {
         let PreparedDownload {
             scope,
@@ -82,9 +83,13 @@ impl BlobDownloadResources {
             queued,
         } = prepared;
         let permit = queued.wait(cancel).await.map_err(BlobExchangeError::from)?;
+        let started_at = permit.started_at;
+        settlement
+            .retain_permit(permit)
+            .map_err(BlobExchangeError::from)?;
         let (latest, receive) = watch::channel(None);
         let progress = Arc::new(Progress {
-            timing: Mutex::new(ReceiveTiming::new(permit.started_at)),
+            timing: Mutex::new(ReceiveTiming::new(started_at)),
             changed: Notify::new(),
             latest,
         });
@@ -144,10 +149,14 @@ impl BlobDownloadResources {
             (Err(error), Ok(())) | (Ok(_), Err(error)) => return Err(error),
             (Err(error), Err(additional)) => return Err(error.with_settlement(additional)),
         };
+        let digest = content.digest;
+        settlement
+            .retain_content(content.protection)
+            .map_err(BlobExchangeError::from)?;
         Ok(DownloadedBlob {
-            content,
+            digest,
             request,
-            _permit: permit,
+            _settlement: settlement,
         })
     }
     async fn obtain_active(

@@ -625,6 +625,16 @@ impl BlobTransferFacade {
         &self,
         command: FetchBlobCommand,
     ) -> Result<FetchBlobResult, BlobTransferError> {
+        let settlement = command
+            .transfer_context
+            .as_ref()
+            .and_then(|context| {
+                context
+                    .batch
+                    .as_ref()
+                    .map(|batch| batch.local_settlement(&context.transfer_id))
+            })
+            .unwrap_or_default();
         let iroh_tag_entry_id = command.entry_id.clone();
         let outbound_ctx = self.build_outbound_context(command.transfer_context.as_ref());
         let lifecycle_session = match command.transfer_context.as_ref() {
@@ -650,6 +660,7 @@ impl BlobTransferFacade {
 
         let cancel_token = command.cancellation.child_token();
         let operation = self.fetch_uc.execute(FetchBlobInput {
+            settlement: settlement.clone(),
             ticket: command.ticket,
             cancel: cancel_token.clone(),
             entry_id: iroh_tag_entry_id,
@@ -791,6 +802,16 @@ impl BlobTransferFacade {
         &self,
         command: FetchBlobToPathCommand,
     ) -> Result<FetchBlobToPathResult, BlobTransferError> {
+        let settlement = command
+            .transfer_context
+            .as_ref()
+            .and_then(|context| {
+                context
+                    .batch
+                    .as_ref()
+                    .map(|batch| batch.local_settlement(&context.transfer_id))
+            })
+            .unwrap_or_default();
         let iroh_tag_entry_id = command.entry_id.clone();
         let outbound_ctx = self.build_outbound_context(command.transfer_context.as_ref());
         let lifecycle_session = match command.transfer_context.as_ref() {
@@ -822,6 +843,7 @@ impl BlobTransferFacade {
         // 显式接收项可按身份取消；静默获取也由实际任务和调用等待的停止 guard 保护。
         let cancel_token = command.cancellation.child_token();
         let operation = self.fetch_uc.execute_to_path(FetchBlobPathInput {
+            settlement: settlement.clone(),
             ticket: command.ticket,
             cancel: cancel_token.clone(),
             entry_id: iroh_tag_entry_id,
@@ -1152,7 +1174,8 @@ impl BlobProgressSink for FileTransferProgressSink {
 
 #[cfg(test)]
 mod tests {
-    use crate::transfer::blob::test_support::retained;
+    mod budget;
+
     use crate::transfer::blob::transport::{BlobExchangeError, BlobReadStorePort, BlobReceived};
     use std::path::Path;
 
@@ -1250,9 +1273,18 @@ mod tests {
         }
     }
 
+    struct CountedProtection(Arc<std::sync::atomic::AtomicUsize>);
+    impl crate::transfer::blob::transport::BlobRetainedContent for CountedProtection {}
+    impl Drop for CountedProtection {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
     struct BlockingBlobTransfer {
         started: Semaphore,
         release: Semaphore,
+        fail_reads: std::sync::atomic::AtomicBool,
+        protected: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl BlockingBlobTransfer {
@@ -1260,6 +1292,8 @@ mod tests {
             Self {
                 started: Semaphore::new(0),
                 release: Semaphore::new(0),
+                fail_reads: std::sync::atomic::AtomicBool::new(false),
+                protected: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             }
         }
     }
@@ -1270,7 +1304,13 @@ mod tests {
             &self,
             digest: BlobDigest,
         ) -> Result<Option<BlobReceived>, BlobExchangeError> {
-            Ok(Some(retained(digest)))
+            self.protected
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Some(BlobReceived {
+                digest,
+                size: 0,
+                protection: Box::new(CountedProtection(self.protected.clone())),
+            }))
         }
         async fn read(&self, _: BlobDigest) -> Result<Bytes, BlobExchangeError> {
             self.started.add_permits(1);
@@ -1279,6 +1319,12 @@ mod tests {
                 .await
                 .expect("release slow local work")
                 .forget();
+            if self.fail_reads.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(BlobExchangeError::new(
+                    BlobExchangeFailure::Store,
+                    std::io::Error::from(std::io::ErrorKind::StorageFull),
+                ));
+            }
             Ok(Bytes::from_static(b"image"))
         }
         async fn export(&self, _: BlobDigest, _: &Path) -> Result<u64, BlobExchangeError> {

@@ -22,3 +22,6 @@ mod identity;
 pub(crate) use identity::receive_item_ids;
 
 pub(crate) mod retry;
+
+mod download_work;
+pub(super) use download_work::DownloadSettlement;

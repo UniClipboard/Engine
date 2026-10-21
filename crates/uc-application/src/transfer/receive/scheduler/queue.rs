@@ -63,6 +63,7 @@ impl Slot {
 
 #[derive(Default)]
 struct State {
+    changed: Arc<Notify>,
     slots: HashMap<u64, Arc<Slot>>,
     pending: HashMap<DownloadPeer, VecDeque<u64>>,
     rotation: VecDeque<DownloadPeer>,
@@ -168,10 +169,36 @@ impl Drop for DownloadReservation {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.remove(self.slot.id, None);
         state.dispatch(Instant::now());
+        let changed = state.changed.clone();
+        drop(state);
+        changed.notify_waiters();
     }
 }
 
 impl DownloadScheduler {
+    /// 关闭后仍等待原许可的实际持有者，不因网络任务先退出而丢弃本地结算。
+    pub async fn wait_settled(&self) {
+        let changed = self
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .changed
+            .clone();
+        loop {
+            let notified = changed.notified();
+            if self
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .slots
+                .is_empty()
+            {
+                return;
+            }
+            notified.await;
+        }
+    }
+
     pub fn reserve(
         &self,
         peer: DownloadPeer,

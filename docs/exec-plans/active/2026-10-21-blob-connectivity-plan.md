@@ -875,3 +875,16 @@ SQLite目标集测试覆盖保存条目、NoEntry、孤儿逐项记录、仅产�
 这一步不证明本地文件系统并发替换竞态已封闭，也未完成SQL后清理失败的恢复；最终完整删除结算与生命周期仍继续。
 
 合法非本机file URI继续作为外部引用保留；UTF-8和URI解析失败保存具体来源，缺失缓存目标可正常删除记录。七项定向回归及Application／Engine完整nextest 1527通过／6跳过（173.360秒）；metadata、workspace全目标check、fmt、Rust style、repository、1350站点隐私清单及diff全部通过。完整准备／本地结算预算与其余生命周期、资源和最终矩阵继续，未执行设备记为跳过。
+
+
+### 2026-10-22 单项本地结算持有原下载许可
+
+完整Facade屏障证明底层fetch返回后，最终本地进度尚未交接就已让第三个同端请求开始。同一DownloadPermit现在由底层工作、Facade及接收batch的单项本地结算共同持有；不增加池、等待者、预算或父批次许可。只有本项输出／清理及日志交接后记录item_result才移交额度，表示项须先完成inline赋值。batch完整负责人结束时释放余留持有，原始下层错误不进入许可对象。
+
+定向验证覆盖全局4／每端2、仅Facade及含上层本项等待两种模式，以及7／9项顺序批次避免整批许可死锁；失败获取也等待父流程本地交接，且原StorageFull沿正常关闭继续可查。此步不代表准备阶段、目录发布／最终保存、完整inflight取消边界或全预算已通过，这些继续从实际完整流程验收。
+
+额外保护计数红测证明单纯保留额度仍提前释放BlobReceived.protection。download_work由receive负责人持有原SDK无关内容保护对象，原生实现内的TempTag及StreamWorkLease随本地结算继续保留；最后持有者先释放保护／本地工作，再归还额度。不增加downcast或Engine接口。相关transfer／receive 192项通过（2.169秒），最终扩大验证以progress为准。
+
+缓存获取的额外关闭屏障又证明：只等待网络监督任务会在本地结算及保护仍被持有时误报完整关闭。关闭现等待原调度slot全部交回，再关闭存储；五秒超时仍返回ShutdownIncomplete并保持原协调者，重复关闭继续同一收尾。完整Facade屏障验证超时后保护保留、释放后真正完成及Store来源不被吞掉；相关192项通过（5.509秒）。首次扩大1529项通过是关闭修复之前的快照，最后扩大验证单独记录，不混同。
+
+最终包含关闭修复的同一快照：Application／Engine完整nextest 1529通过／6跳过（178.054秒）；metadata、workspace全目标check、fmt、Rust style、repository、1350站点隐私清单及diff全部通过。完整准备admission、目录发布／保存、清理失败移交、inflight取消及其余资源／业务记录／平台矩阵仍继续，设备未运行记为跳过。

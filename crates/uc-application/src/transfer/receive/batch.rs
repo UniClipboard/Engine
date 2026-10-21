@@ -1,5 +1,6 @@
 //! 整个接收动作的通知聚合；子获取只能记录事实，持久结算后才交接终态。
 use super::work::PlannedReceiveItem;
+use super::DownloadSettlement;
 use crate::transfer::blob::fetch_failure_reason;
 use crate::transfer::blob::notifications::OutboundNotifications;
 use crate::transfer::policy::PROGRESS_REPORT_INTERVAL;
@@ -24,6 +25,7 @@ struct State {
     planned: usize,
     total: u64,
     items: HashMap<String, Item>,
+    local_work: HashMap<String, DownloadSettlement>,
     routes: HashMap<(DeviceId, String), Arc<OutboundNotifications>>,
     settled: Option<AttemptState>,
     finished: bool,
@@ -41,6 +43,15 @@ impl fmt::Debug for ReceiveBatch {
     }
 }
 impl ReceiveBatch {
+    pub(in super::super) fn local_settlement(&self, item: &str) -> DownloadSettlement {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .local_work
+            .entry(item.to_owned())
+            .or_default()
+            .clone()
+    }
     pub(crate) fn plan(&self, count: usize, total: u64) {
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         state.planned = count;
@@ -103,6 +114,7 @@ impl ReceiveBatch {
     ) {
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         if !state.finished {
+            state.local_work.remove(item);
             let verified = state
                 .items
                 .get(item)
@@ -194,6 +206,7 @@ impl ReceiveBatch {
             return;
         }
         state.finished = true;
+        state.local_work.clear();
         let status = match state.settled {
             Some(AttemptState::Cancelled) => OutboundProgressStatus::Cancelled {
                 reason: FileTransferCancellationReason::RemotePeer,

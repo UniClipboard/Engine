@@ -221,3 +221,14 @@
 - 审查发现合法的非本机file://host引用会因to_file_path的unit被新拒绝误伤；首轮扩大验证仅编译中已主动SIGINT（delete-cache-ownership-final-nextest.log，终态130，并确认编译子进程退出），未计通过。delete-cache-foreign-uri-red.log实际复现此回归（0.032秒）。改为对没有本机路径的合法file URI保留外部所有权并跳过；UTF-8及URL解析失败仍保留具体source。正常完整删除回归同时加入已缺失缓存文件与外部file URI，另核对原始解析source。
 
 - 下一步预算核验定位：transfer/blob/transport/runtime/download.rs的DownloadedBlob持有DownloadPermit，fetch_blob.rs的execute_inner／execute_path_inner在返回后释放该局部对象；上层materialization/workflow.rs仍负责产物清理和后续保存。当前仅为静态调用／所有权证据，不能据此假报完整预算通过或已经实证超额；应先以受控保存／清理屏障验证，并检查目标预留是否发生在同一admission前。更早provisional由transfer/file/facade.rs及clipboard/inbound/runtime.rs进入，不能用ApplyInbound内部出生动作表单独证明其已封口。
+
+- download-local-settlement-red.log从完整Facade获取进入：两项卡在最终本地进度发布时，第三个同端请求已开始，精确复现许可在Facade本地结算前丢弃（0.035秒）。把同一DownloadPermit交给不透明DownloadSettlement共享持有；底层工作、Facade及接收batch本项结算共同延长同一许可，不再次排队。batch在本项item_result后释放，finish清掉余留项；表示项先赋值完成再交接结果，失败清理／日志交接期间仍保留原许可。
+- 首轮基本屏障通过（0.191秒），扩展全局4／同端2、7／9项顺序批次均通过；失败分支quota检查已通过，但shutdown错误预期不正确，expanded.log保留1通过／1失败。既有owner会继续报告Store失败，断言改为核对Store及原StorageFull source，不修改生产关闭策略。expanded-fixed.log两项通过，继续扩大相关流程及真实Engine回归。新增私有字段可见性警告已收窄至transfer范围。
+- 边界仍需继续证明：Facade.begin_lifecycle及初始本地进度位于fetch排队／计时之前；目录成员各自交接后仍有目录校验／发布与最终保存；现有inflight completion仍指向底层worker，不能把本轮许可持有等同为完整取消／准备生命周期。后续必须从实际preflight／发布／cleanup屏障进入，保留原4／2、64／16、首批60秒及整体逻辑项语义，不添加第二池或父批次许可，不用本局部绿灯缩减spec。
+
+- download-local-protection-red.log两项均失败（0.033秒）：虽然额度继续持有，原BlobReceived.protection仍在Facade结算前丢弃，实际保护数0而预期2。原生Iroh RetainedContent同时含TempTag及StreamWorkLease，不能只保留计数。完整接收负责人现在通过download_work私有持有者保留该SDK无关port对象；先释放本地工作／内容保护，最后归还同一调度许可，无Any/downcast或新SDK泄露。保护计数覆盖全局／同端、父清理、失败source及最终归零，相关receive／transfer 192通过（2.169秒）。
+
+- 本地结算／保护版本第一次Application／Engine完整nextest 1529通过／6跳过（193.718秒），但它不证明缓存路径的shutdown等待。download-local-shutdown-red.log随后实际证明缓存获取的最终本地进度仍阻塞、额度及保护仍被持有时，shutdown已返回完整成功（0.088秒）。
+- 调度器现在在封口后通知并等待原slot全部交回，关闭负责人在原任务收集后继续等本地持有者，再关闭共享存储；不加第二资源池／关闭任务，五秒仍只限制watch等待。完整Facade验证缓存模式五秒ShutdownIncomplete仍保留1项保护、重复Complete不提前结束、释放后同一协调者完成；相关192项通过（5.509秒）。正常失败关闭仍报告Store及原StorageFull，未降低旧错误可见性。
+
+- 下一步静态核验点：Facade.begin_lifecycle／初始progress先于FetchBlobUseCase.execute的prepare；materializer先预留目标再调用fetcher。inflight完成仍取底层DownloadTask而不是完整本地交接。目录所有成员item_result后仍进行发布／最终保存；ReceiveBatch.finish会释放余留local_work，不能直接把动作返回等同为失败产物已经结算。需从实际准备、目录发布及cleanup失败恢复进入，继续证明整个逻辑项／生命周期，不以本轮单项物理工作屏障代替。
