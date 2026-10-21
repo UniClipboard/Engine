@@ -18,10 +18,11 @@ use sha2::{Digest, Sha256};
 use uc_engine::error_codes::{EXPORT_CONFIG_FAILED_CODE, HOST_CONFIGURATION_FILES_INVALID_CODE};
 use uc_engine::{
     ConfigExportOutcome, ConfigImportStageOutcome, CreateSpaceInput, Engine, EngineConfig,
-    EngineErrorCategory, ExportConfigInput, HostCapabilities, HostCapabilityError,
-    HostCapabilityErrorCategory, HostClipboard, HostClipboardSnapshot, HostConfigurationFile,
-    HostConfigurationFileReset, HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata,
-    HostSecureStorage, Operation, OperationResult, SecretString, StageConfigImportInput,
+    EngineErrorCategory, ExportConfigInput, HistoryEntryInput, HostCapabilities,
+    HostCapabilityError, HostCapabilityErrorCategory, HostClipboard, HostClipboardSnapshot,
+    HostConfigurationFile, HostConfigurationFileReset, HostDirectories, HostFileAccess,
+    HostFileHandle, HostFileMetadata, HostSecureStorage, Operation, OperationResult, SecretString,
+    SendTextInput, StageConfigImportInput, UnlockSpaceInput,
 };
 use uc_infra_profile::security::{ProfileArchiveReceipt, ProfileBackupArchive};
 
@@ -68,7 +69,7 @@ fn source_files() -> BTreeMap<&'static str, Vec<u8>> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn cross_install_mapping_reproduces_unresolved_startup_gate() {
+async fn new_install_import_starts_on_first_and_subsequent_boot() {
     let mut report = Report::new("round-trip");
     let root = tempfile::tempdir().unwrap();
     let outbox = root.path().join("host-files");
@@ -82,13 +83,17 @@ async fn cross_install_mapping_reproduces_unresolved_startup_gate() {
     report.tree("source data root (before export)", &source.private);
     let engine = source.start(desktop_declaration()).await;
     create_space(&engine).await;
+    let source_space = assert_ready(&engine, &mut report).await;
+    let content = "synthetic encrypted blob content ".repeat(800);
+    let source_entry = send_text(&engine, &content).await;
+    let exported = engine
+        .execute(Operation::ExportConfig(ExportConfigInput {
+            destination: HostFileHandle::new("round-trip.ucbundle"),
+        }))
+        .await
+        .unwrap();
     assert_eq!(
-        engine
-            .execute(Operation::ExportConfig(ExportConfigInput {
-                destination: HostFileHandle::new("round-trip.ucbundle"),
-            }))
-            .await
-            .unwrap(),
+        exported,
         OperationResult::ConfigExport(ConfigExportOutcome::Exported)
     );
     engine.shutdown(Duration::from_secs(15)).await.unwrap();
@@ -109,6 +114,18 @@ async fn cross_install_mapping_reproduces_unresolved_startup_gate() {
     engine.shutdown(Duration::from_secs(15)).await.unwrap();
     let staged = target.private.join("import-staging");
     report.tree("target import-staging (decrypted members)", &staged);
+    let mut blob_inventory = Vec::new();
+    collect(
+        &staged.join("runtime-blobs"),
+        &staged.join("runtime-blobs"),
+        &mut blob_inventory,
+    );
+    assert!(
+        blob_inventory
+            .iter()
+            .any(|entry| !entry.starts_with("dir ")),
+        "large encrypted source content must travel as blobs"
+    );
     let staged_host_members = names_in(&staged.join("ui-state"));
     assert_eq!(
         staged_host_members,
@@ -117,50 +134,14 @@ async fn cross_install_mapping_reproduces_unresolved_startup_gate() {
     );
 
     // 下一次启动在打开资料前应用暂存导入。
-    let first = target.try_start(desktop_declaration()).await;
-    match first {
-        Ok(engine) => {
-            report.line("first apply start: success".into());
-            engine.shutdown(Duration::from_secs(15)).await.unwrap();
-        }
-        Err(error) => {
-            report.line(format!(
-                "first apply start: code {} (required acceptance gap)",
-                error.code()
-            ));
-            assert_eq!(error.code(), 1101);
-            diagnose_import(&target, &mut report).await;
-            let second = target.try_start(desktop_declaration()).await;
-            report.line(format!(
-                "second public start result: {:?}",
-                second.as_ref().err()
-            ));
-            match second {
-                Ok(engine) => {
-                    report.line(
-                        "second public start: success without copying secure-storage entries"
-                            .into(),
-                    );
-                    report.line(format!(
-                        "profile recovery: {:?}",
-                        engine.execute(Operation::QueryProfileRecovery).await
-                    ));
-                    report.line(format!(
-                        "setup: {:?}",
-                        engine.execute(Operation::QuerySetupState).await
-                    ));
-                    engine.shutdown(Duration::from_secs(15)).await.unwrap();
-                }
-                Err(error) => {
-                    assert_eq!(error.code(), 1101);
-                    report.line("CROSS-INSTALL ACCEPTANCE BLOCKED: no Engine handle exists for UnlockSpace or RecoverSession; copied bytes below are not runtime acceptance".into());
-                }
-            }
-        }
-    }
-    report.line(
-        "Mapping assertions only; full cross-install runtime acceptance remains required".into(),
-    );
+    let engine = target.start(desktop_declaration()).await;
+    assert_eq!(assert_ready(&engine, &mut report).await, source_space);
+    assert_history(&engine, &source_entry, &content).await;
+    engine.shutdown(Duration::from_secs(15)).await.unwrap();
+    let engine = target.start(desktop_declaration()).await;
+    assert_eq!(assert_ready(&engine, &mut report).await, source_space);
+    assert_history(&engine, &source_entry, &content).await;
+    engine.shutdown(Duration::from_secs(15)).await.unwrap();
     report.tree("target data root (after apply)", &target.private);
     let expected = source_files();
     for name in [PRODUCT, NOTIFIED, SKIPPED, THROTTLE] {
@@ -193,14 +174,9 @@ async fn cross_install_mapping_reproduces_unresolved_startup_gate() {
     let engine = narrow.start(product_only.clone()).await;
     stage(&engine, "round-trip.ucbundle", PASSPHRASE).await;
     engine.shutdown(Duration::from_secs(15)).await.unwrap();
-    let first = narrow.try_start(product_only.clone()).await;
-    match first {
-        Ok(engine) => engine.shutdown(Duration::from_secs(15)).await.unwrap(),
-        Err(error) => {
-            report.line(format!("subset first start blocked: {}", error.code()));
-            assert_eq!(error.code(), 1101);
-        }
-    }
+    let engine = narrow.start(product_only).await;
+    assert_ready(&engine, &mut report).await;
+    engine.shutdown(Duration::from_secs(15)).await.unwrap();
     report.tree("narrow target data root (after apply)", &narrow.private);
     assert_eq!(narrow.read(PRODUCT), expected[PRODUCT]);
     for name in ENGINE_RESET_FILES {
@@ -579,7 +555,192 @@ async fn upgrade_backup_keeps_the_whole_data_root_including_declared_files() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn legacy_bundle_mapping_reproduces_unresolved_startup_gate() {
+async fn existing_install_import_recovers_partial_adoption_and_retains_usable_backup() {
+    let mut report = Report::new("existing-install-adoption");
+    let root = tempfile::tempdir().unwrap();
+    let outbox = root.path().join("outbox");
+    std::fs::create_dir_all(&outbox).unwrap();
+    let source = Profile::new(root.path().join("source"), &outbox);
+    let engine = source.start(desktop_declaration()).await;
+    create_space(&engine).await;
+    let source_space = assert_ready(&engine, &mut report).await;
+    let source_content = "synthetic cross-install encrypted blob ".repeat(800);
+    let source_entry = send_text(&engine, &source_content).await;
+    for (name, bytes) in source_files() {
+        source.write(name, &bytes);
+    }
+    engine
+        .execute(Operation::ExportConfig(ExportConfigInput {
+            destination: HostFileHandle::new("existing.ucbundle"),
+        }))
+        .await
+        .unwrap();
+    engine.shutdown(Duration::from_secs(15)).await.unwrap();
+    report.file("complete source bundle", &outbox.join("existing.ucbundle"));
+
+    let target = Profile::new(root.path().join("target"), &outbox);
+    const TARGET_PASSPHRASE: &str = "different-synthetic-target-passphrase";
+    let engine = target.start_version("1.2.3", desktop_declaration()).await;
+    create_space_with_passphrase(&engine, TARGET_PASSPHRASE).await;
+    let target_space = assert_ready(&engine, &mut report).await;
+    assert_ne!(source_space, target_space);
+    let target_entry = send_text(&engine, "target history before import").await;
+    engine.shutdown(Duration::from_secs(15)).await.unwrap();
+    // 版本变化先通过真实启动建立旧目标的升级备份。
+    let engine = target.start(desktop_declaration()).await;
+    stage(&engine, "existing.ucbundle", PASSPHRASE).await;
+    engine.shutdown(Duration::from_secs(15)).await.unwrap();
+    target.write(TELEMETRY, b"target telemetry survives");
+    target.write(UNLISTED, b"target unrelated root survives");
+    std::fs::write(
+        target.private.join("vault/unrelated-sentinel"),
+        b"target vault sentinel",
+    )
+    .unwrap();
+    std::fs::create_dir_all(target.private.join("file-cache")).unwrap();
+    std::fs::write(
+        target.private.join("file-cache/unrelated-sentinel"),
+        b"target cached bytes",
+    )
+    .unwrap();
+    std::fs::create_dir_all(target.root.join("cache/spool")).unwrap();
+    std::fs::write(
+        target.root.join("cache/spool/unrelated-sentinel"),
+        b"target pending bytes",
+    )
+    .unwrap();
+    let old_vault = std::fs::read(target.private.join("vault/profile-secrets-v1")).unwrap();
+    report.tree("target before adoption", &target.private);
+    report.tree(
+        "target backup before adoption",
+        &target.root.join("private-upgrade-backups"),
+    );
+
+    // 首次失败发生于安全存储写入，原件和核验归档已经保留。
+    target.storage.fail_sets.store(true, Ordering::SeqCst);
+    assert!(target.try_start(desktop_declaration()).await.is_err());
+    target.storage.fail_sets.store(false, Ordering::SeqCst);
+    assert!(target.private.join("pending-import.json").exists());
+    let recovery = target.root.join(".uc-config-import-recovery");
+    let transaction = only_child(&only_child(&recovery));
+    let receipt_bytes = std::fs::read(transaction.join("receipt.json")).unwrap();
+    report.tree("after secure-storage write failure", &recovery);
+    // 第二次失败发生于 KEK 已写入，但 keyslot 文件尚未安装。
+    *target.storage.block_after_kek.lock().unwrap() =
+        Some(target.private.join("vault/keyslot.json"));
+    assert!(target.try_start(desktop_declaration()).await.is_err());
+    assert!(target.private.join("pending-import.json").exists());
+    assert!(target.private.join(".config-import-adoption-v1").exists());
+    assert!(target.private.join("import-staging").exists());
+    assert_eq!(
+        receipt_bytes,
+        std::fs::read(transaction.join("receipt.json")).unwrap()
+    );
+    report.tree("partial adoption before retry", &target.private);
+    std::fs::remove_dir(target.private.join("vault/keyslot.json")).unwrap();
+
+    let engine = target.start(desktop_declaration()).await;
+    assert_eq!(assert_ready(&engine, &mut report).await, source_space);
+    assert_history(&engine, &source_entry, &source_content).await;
+    let new_entry = send_text(&engine, "imported installation can encrypt new content").await;
+    assert_history(
+        &engine,
+        &new_entry,
+        "imported installation can encrypt new content",
+    )
+    .await;
+    engine.shutdown(Duration::from_secs(15)).await.unwrap();
+    let engine = target.start(desktop_declaration()).await;
+    assert_eq!(assert_ready(&engine, &mut report).await, source_space);
+    assert_history(&engine, &source_entry, &source_content).await;
+    let new_entry = send_text(&engine, "imported installation can encrypt new content").await;
+    assert_history(
+        &engine,
+        &new_entry,
+        "imported installation can encrypt new content",
+    )
+    .await;
+    engine.shutdown(Duration::from_secs(15)).await.unwrap();
+    assert_eq!(
+        receipt_bytes,
+        std::fs::read(transaction.join("receipt.json")).unwrap()
+    );
+    assert_eq!(target.read(TELEMETRY), b"target telemetry survives");
+    assert_eq!(target.read(UNLISTED), b"target unrelated root survives");
+    let originals = transaction.join("originals");
+    assert_eq!(
+        old_vault,
+        std::fs::read(originals.join("vault/profile-secrets-v1")).unwrap()
+    );
+    assert_eq!(
+        std::fs::read(originals.join("vault/unrelated-sentinel")).unwrap(),
+        b"target vault sentinel"
+    );
+    assert_eq!(
+        std::fs::read(originals.join("file-cache/unrelated-sentinel")).unwrap(),
+        b"target cached bytes"
+    );
+    assert_eq!(
+        std::fs::read(originals.join("spool/unrelated-sentinel")).unwrap(),
+        b"target pending bytes"
+    );
+    assert!(originals.join("upgrade-backups/current").is_file());
+    for name in [PRODUCT, NOTIFIED, SKIPPED, THROTTLE] {
+        assert_eq!(target.read(name), source_files()[name]);
+    }
+    for name in [
+        "pending-import.json",
+        "import-staging",
+        ".config-import-adoption-v1",
+    ] {
+        assert!(!target.private.join(name).exists());
+    }
+    report.tree("retained target state and verified backup", &recovery);
+    report.tree("imported target", &target.private);
+
+    // 从核验归档恢复到另一个隔离安装，再用旧目标口令走公开恢复；不复制任何安全存储。
+    let restored = Profile::new(root.path().join("restored-original"), &outbox);
+    let receipt: ProfileArchiveReceipt = serde_json::from_slice(&receipt_bytes).unwrap();
+    let old_backup: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(originals.join("upgrade-backups/current")).unwrap())
+            .unwrap();
+    let old_receipt: ProfileArchiveReceipt =
+        serde_json::from_value(old_backup["receipt"].clone()).unwrap();
+    ProfileBackupArchive::new(originals.join("upgrade-backups"))
+        .verify(&old_receipt)
+        .unwrap();
+    std::fs::create_dir_all(&restored.root).unwrap();
+    ProfileBackupArchive::new(transaction.join("archive"))
+        .restore_to_new_directory(&receipt, &restored.private)
+        .unwrap();
+    let engine = restored.start(desktop_declaration()).await;
+    engine
+        .execute(Operation::UnlockSpace(UnlockSpaceInput {
+            passphrase: SecretString::new(TARGET_PASSPHRASE),
+        }))
+        .await
+        .unwrap();
+    assert_eq!(assert_ready(&engine, &mut report).await, target_space);
+    assert_history(&engine, &target_entry, "target history before import").await;
+    engine.shutdown(Duration::from_secs(15)).await.unwrap();
+    report.tree(
+        "restored original target after public passphrase recovery",
+        &restored.private,
+    );
+    report.finish();
+}
+
+fn only_child(path: &Path) -> PathBuf {
+    let mut entries = std::fs::read_dir(path)
+        .unwrap()
+        .map(|entry| entry.unwrap().path());
+    let child = entries.next().unwrap();
+    assert!(entries.next().is_none());
+    child
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn legacy_bundle_is_rejected_before_target_mutation() {
     let mut report = Report::new("legacy-bundle");
     let fixture =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/config-bundle-0c57e1ab");
@@ -599,128 +760,109 @@ async fn legacy_bundle_mapping_reproduces_unresolved_startup_gate() {
 
     let target = Profile::new(root.path().join("target"), &outbox);
     let engine = target.start(desktop_declaration()).await;
-    stage(&engine, "legacy.ucbundle", LEGACY_PASSPHRASE).await;
+    create_space(&engine).await;
+    target.write(PRODUCT, b"target product survives legacy rejection");
+    let before = engine.execute(Operation::QuerySetupState).await.unwrap();
+    let keys_before = target.storage.values.lock().unwrap().clone();
+    let vault_before = std::fs::read(target.private.join("vault/profile-secrets-v1")).unwrap();
+    let staged = engine
+        .execute(Operation::StageConfigImport(StageConfigImportInput {
+            source: HostFileHandle::new("legacy.ucbundle"),
+            password: SecretString::new(LEGACY_PASSPHRASE),
+        }))
+        .await
+        .unwrap();
+    assert!(
+        matches!(&staged, OperationResult::ConfigImportStaged(ConfigImportStageOutcome::Incompatible { reason }) if reason.contains("re-export"))
+    );
+    report.line(format!("public legacy rejection: {staged:?}"));
+    assert_eq!(
+        before,
+        engine.execute(Operation::QuerySetupState).await.unwrap()
+    );
+    assert_eq!(keys_before, *target.storage.values.lock().unwrap());
+    assert_eq!(
+        vault_before,
+        std::fs::read(target.private.join("vault/profile-secrets-v1")).unwrap()
+    );
+    assert_eq!(
+        target.read(PRODUCT),
+        b"target product survives legacy rejection"
+    );
+    for name in [
+        "pending-import.json",
+        "import-staging",
+        ".config-import-adoption-v1",
+    ] {
+        assert!(!target.private.join(name).exists());
+    }
+    assert!(!target.root.join(".uc-config-import-recovery").exists());
+    assert_ready(&engine, &mut report).await;
     engine.shutdown(Duration::from_secs(15)).await.unwrap();
-    report.tree(
-        "target import-staging (decrypted members)",
-        &target.private.join("import-staging"),
-    );
-    let first = target.try_start(desktop_declaration()).await;
-    match first {
-        Ok(engine) => {
-            report.line("first apply start: success".into());
-            engine.shutdown(Duration::from_secs(15)).await.unwrap();
-        }
-        Err(error) => {
-            report.line(format!(
-                "first apply start: code {} (required acceptance gap)",
-                error.code()
-            ));
-            assert_eq!(error.code(), 1101);
-            diagnose_import(&target, &mut report).await;
-            let second = target.try_start(desktop_declaration()).await;
-            report.line(format!(
-                "second public start result: {:?}",
-                second.as_ref().err()
-            ));
-            match second {
-                Ok(engine) => {
-                    report.line(
-                        "second public start: success without copying secure-storage entries"
-                            .into(),
-                    );
-                    report.line(format!(
-                        "profile recovery: {:?}",
-                        engine.execute(Operation::QueryProfileRecovery).await
-                    ));
-                    report.line(format!(
-                        "setup: {:?}",
-                        engine.execute(Operation::QuerySetupState).await
-                    ));
-                    engine.shutdown(Duration::from_secs(15)).await.unwrap();
-                }
-                Err(error) => {
-                    assert_eq!(error.code(), 1101);
-                    report.line("CROSS-INSTALL ACCEPTANCE BLOCKED: no Engine handle exists for UnlockSpace or RecoverSession; copied bytes below are not runtime acceptance".into());
-                }
-            }
-        }
-    }
-    report.line(
-        "Mapping assertions only; full cross-install runtime acceptance remains required".into(),
-    );
-    report.tree("target data root (after apply)", &target.private);
-
-    for name in [NOTIFIED, SKIPPED] {
-        assert_eq!(
-            target.read(name),
-            std::fs::read(fixture.join(format!("source-{name}"))).unwrap(),
-            "{name} restored from the old ui-state member"
-        );
-    }
-    // 旧 Engine 从不导出这些文件：缺失是预期结果，不是恢复成功。
-    for name in [THROTTLE, PRODUCT, TELEMETRY, UNLISTED] {
-        assert!(
-            !target.private.join(name).exists(),
-            "{name} was never exported"
-        );
-    }
-    assert!(!target.private.join("ui-state").exists());
-    report.line(format!(
-        "expected absent (never exported by 0c57e1ab): {THROTTLE}, {PRODUCT}, {TELEMETRY}, {UNLISTED}"
-    ));
+    let engine = target.start(desktop_declaration()).await;
+    assert_ready(&engine, &mut report).await;
+    engine.shutdown(Duration::from_secs(15)).await.unwrap();
+    report.tree("target after rejected legacy bundle", &target.private);
     report.finish();
 }
 
-// 仅作诊断：通过既有恢复入口检查合成导入资料的 vault。
-async fn diagnose_import(profile: &Profile, report: &mut Report) {
-    use uc_application::deps::ProfileLifecycleRepositoryPort;
-    use uc_core::ports::SecureStoragePort;
-    use uc_infra_profile::security::{
-        AdmissionKeyManager, ProfileKeyRecoveryStore, ProfileLifecycleRepository,
-    };
-    let backing: Arc<dyn SecureStoragePort> = Arc::new(profile.storage.clone());
-    let vault = Arc::new(ProfileKeyRecoveryStore::new(
-        uc_core::app_dirs::AppPaths::with_base_data_local_dir(profile.private.clone()),
-        "default".into(),
-        backing,
-    ));
-    report.line(format!(
-        "imported vault prepare: {:?}",
-        vault.prepare_startup().await
-    ));
-    report.line(format!(
-        "admission key present in imported encrypted vault: {}",
-        vault
-            .get("profile_admission_master_key:v1")
-            .unwrap()
-            .is_some()
-    ));
-    let store: Arc<dyn SecureStoragePort> = vault;
-    let lifecycle = ProfileLifecycleRepository::new(store.clone())
-        .load()
-        .unwrap()
+async fn send_text(engine: &Engine, text: &str) -> String {
+    let result = engine
+        .execute(Operation::SendText(SendTextInput {
+            text: text.into(),
+            target_devices: Vec::new(),
+        }))
+        .await
         .unwrap();
-    let generation = lifecycle.generation().into_bytes();
-    report.line(format!(
-        "imported lifecycle generation hash: {}",
-        sha256(&generation)
-    ));
-    let keys = AdmissionKeyManager::new(store, generation);
-    let payload = std::fs::read(profile.private.join("vault/.current-space-id-v1")).unwrap();
-    report.line(format!(
-        "legacy current-space payload open with imported admission key and generation: {:?}",
-        keys.open_profile_payload(b"legacy-current-space-id-v1", &payload)
-            .map(|bytes| bytes.len())
-    ));
+    let OperationResult::EntrySent(sent) = result else {
+        panic!("expected saved entry")
+    };
+    sent.entry_id
+}
+
+async fn assert_history(engine: &Engine, entry_id: &str, expected: &str) {
+    let result = engine
+        .execute(Operation::GetHistoryEntry(HistoryEntryInput {
+            entry_id: entry_id.into(),
+        }))
+        .await
+        .unwrap();
+    let OperationResult::HistoryEntry(entry) = result else {
+        panic!("expected history entry")
+    };
+    assert_eq!(entry.content, expected);
+}
+
+async fn assert_ready(engine: &Engine, report: &mut Report) -> String {
+    let setup = engine.execute(Operation::QuerySetupState).await.unwrap();
+    assert!(
+        matches!(&setup, OperationResult::SetupState(state) if state.has_completed && state.space_id.is_some() && !state.re_pairing_required)
+    );
+    let encryption = engine
+        .execute(Operation::QueryEncryptionState)
+        .await
+        .unwrap();
+    assert!(
+        matches!(&encryption, OperationResult::EncryptionState(state) if state.initialized && state.session_ready)
+    );
+    report.line(format!("public setup: {setup:?}"));
+    report.line(format!("public encryption: {encryption:?}"));
+    let OperationResult::SetupState(state) = setup else {
+        unreachable!()
+    };
+    state.space_id.unwrap()
 }
 
 async fn create_space(engine: &Engine) {
+    create_space_with_passphrase(engine, PASSPHRASE).await;
+}
+
+async fn create_space_with_passphrase(engine: &Engine, passphrase: &str) {
     engine
         .execute(Operation::CreateSpace(CreateSpaceInput {
             device_name: Some("Synthetic Host Files".into()),
-            passphrase: SecretString::new(PASSPHRASE),
-            passphrase_confirmation: SecretString::new(PASSPHRASE),
+            passphrase: SecretString::new(passphrase),
+            passphrase_confirmation: SecretString::new(passphrase),
         }))
         .await
         .unwrap();
@@ -816,6 +958,8 @@ impl Profile {
 struct MemorySecureStorage {
     values: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     fail_deletes: Arc<AtomicBool>,
+    fail_sets: Arc<AtomicBool>,
+    block_after_kek: Arc<Mutex<Option<PathBuf>>>,
 }
 
 impl HostSecureStorage for MemorySecureStorage {
@@ -824,10 +968,21 @@ impl HostSecureStorage for MemorySecureStorage {
     }
 
     fn set(&self, key: &str, value: &[u8]) -> Result<(), HostCapabilityError> {
+        if self.fail_sets.load(Ordering::SeqCst) {
+            return Err(HostCapabilityError::new(
+                HostCapabilityErrorCategory::Unavailable,
+                "synthetic secure-storage write failure",
+            ));
+        }
         self.values
             .lock()
             .unwrap()
             .insert(key.to_owned(), value.to_vec());
+        if key.starts_with("kek:v1:") {
+            if let Some(path) = self.block_after_kek.lock().unwrap().take() {
+                std::fs::create_dir_all(path).unwrap();
+            }
+        }
         Ok(())
     }
 
@@ -838,20 +993,6 @@ impl HostSecureStorage for MemorySecureStorage {
                 "secure storage delete failure injected by reset test",
             ));
         }
-        self.values.lock().unwrap().remove(key);
-        Ok(())
-    }
-}
-
-impl uc_core::ports::SecureStoragePort for MemorySecureStorage {
-    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, uc_core::ports::SecureStorageError> {
-        Ok(self.values.lock().unwrap().get(key).cloned())
-    }
-    fn set(&self, key: &str, value: &[u8]) -> Result<(), uc_core::ports::SecureStorageError> {
-        self.values.lock().unwrap().insert(key.into(), value.into());
-        Ok(())
-    }
-    fn delete(&self, key: &str) -> Result<(), uc_core::ports::SecureStorageError> {
         self.values.lock().unwrap().remove(key);
         Ok(())
     }
@@ -960,7 +1101,7 @@ struct Report {
 impl Report {
     fn new(scenario: &'static str) -> Self {
         let _ = tracing_subscriber::fmt()
-            .with_env_filter("uc_engine::runtime=error,uc_infra_profile::security::profile_storage_upgrade=error")
+            .with_env_filter("uc_engine=info,uc_infra_profile=info")
             .with_ansi(false)
             .try_init();
         Self {

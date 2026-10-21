@@ -146,12 +146,12 @@ async fn preparation_owns_the_complete_order_before_returning() {
     assert_eq!(
         *fixture.events.lock().unwrap(),
         [
+            "apply import",
             "read backup state",
             "capture and verify",
             "read lifecycle",
             "preserve security materials",
             "adopt old layout",
-            "apply import",
             "create lifecycle"
         ]
     );
@@ -175,12 +175,12 @@ async fn repeated_preparation_preserves_the_created_lifecycle() {
 }
 
 #[tokio::test]
-async fn backup_failure_preserves_source_error_and_stops_all_mutations() {
+async fn backup_failure_preserves_source_error_and_stops_version_preparation() {
     let fixture = Fixture::new(BackupMode::Fail);
     let error = fixture.workflow().execute().await.unwrap_err();
     assert_eq!(
         *fixture.events.lock().unwrap(),
-        ["read backup state", "capture and verify"]
+        ["apply import", "read backup state", "capture and verify"]
     );
     let ProfileStartupError::Backup(error) = error else {
         panic!("wrong failure");
@@ -197,7 +197,7 @@ async fn backup_failure_preserves_source_error_and_stops_all_mutations() {
 }
 
 #[tokio::test]
-async fn cancelled_backup_wait_cannot_adopt_import_or_create_lifecycle() {
+async fn cancelled_backup_wait_cannot_adopt_legacy_layout_or_create_lifecycle() {
     let fixture = Fixture::new(BackupMode::Pending);
     let workflow = fixture.workflow();
     let mut preparation = Box::pin(workflow.execute());
@@ -209,7 +209,7 @@ async fn cancelled_backup_wait_cannot_adopt_import_or_create_lifecycle() {
     drop(preparation);
     assert_eq!(
         *fixture.events.lock().unwrap(),
-        ["read backup state", "capture and verify"]
+        ["apply import", "read backup state", "capture and verify"]
     );
     assert!(fixture.lifecycle.lock().unwrap().is_none());
 }
@@ -224,12 +224,12 @@ async fn retry_ensures_backup_through_the_single_capture_step_and_reuses_lifecyc
     assert_eq!(
         *fixture.events.lock().unwrap(),
         [
+            "apply import",
             "read backup state",
             "capture and verify",
             "read lifecycle",
             "preserve security materials",
             "adopt old layout",
-            "apply import"
         ]
     );
 }
@@ -246,10 +246,10 @@ async fn fresh_or_current_version_prepares_without_backup() {
         assert_eq!(
             *fixture.events.lock().unwrap(),
             [
+                "apply import",
                 "read backup state",
                 "read lifecycle",
                 "adopt old layout",
-                "apply import",
                 "create lifecycle"
             ]
         );
@@ -266,7 +266,12 @@ async fn factory_reset_preserves_files_before_returning_the_existing_lifecycle()
     assert_eq!(fixture.workflow().execute().await.unwrap(), lifecycle);
     assert_eq!(
         *fixture.events.lock().unwrap(),
-        ["read backup state", "capture and verify", "read lifecycle"]
+        [
+            "apply import",
+            "read backup state",
+            "capture and verify",
+            "read lifecycle"
+        ]
     );
 }
 
@@ -278,17 +283,7 @@ async fn failed_import_does_not_create_a_new_lifecycle() {
         fixture.workflow().execute().await,
         Err(ProfileStartupError::Storage(_))
     ));
-    assert_eq!(
-        *fixture.events.lock().unwrap(),
-        [
-            "read backup state",
-            "capture and verify",
-            "read lifecycle",
-            "preserve security materials",
-            "adopt old layout",
-            "apply import"
-        ]
-    );
+    assert_eq!(*fixture.events.lock().unwrap(), ["apply import"]);
     assert!(fixture.lifecycle.lock().unwrap().is_none());
 }
 
@@ -301,6 +296,11 @@ async fn keychain_failure_occurs_after_file_backup_and_before_mutation() {
     ));
     assert_eq!(
         *fixture.events.lock().unwrap(),
-        ["read backup state", "capture and verify", "read lifecycle"]
+        [
+            "apply import",
+            "read backup state",
+            "capture and verify",
+            "read lifecycle"
+        ]
     );
 }

@@ -7,13 +7,16 @@ use uc_application::deps::{ProfileStartupStorageError, ProfileStartupStoragePort
 use uc_core::app_dirs::{AppPaths, HostConfigurationFiles};
 use uc_core::ports::SecureStoragePort;
 
-use crate::config_migration::staging::apply_pending_import;
+use super::{ProfileKeyRecoveryStore, ProfileUpgradeBackupStore};
+use crate::config_migration::adoption::adopt_pending_import;
 
 /// 启动前的旧布局和待导入资料适配器；操作顺序由 Application 决定。
 pub struct ProfileStartupStorage {
     paths: AppPaths,
     secure_storage: Arc<dyn SecureStoragePort>,
     host_configuration_files: HostConfigurationFiles,
+    recovery: Arc<ProfileKeyRecoveryStore>,
+    backups: Arc<ProfileUpgradeBackupStore>,
 }
 
 impl ProfileStartupStorage {
@@ -21,11 +24,15 @@ impl ProfileStartupStorage {
         paths: AppPaths,
         secure_storage: Arc<dyn SecureStoragePort>,
         host_configuration_files: HostConfigurationFiles,
+        recovery: Arc<ProfileKeyRecoveryStore>,
+        backups: Arc<ProfileUpgradeBackupStore>,
     ) -> Self {
         Self {
             paths,
             secure_storage,
             host_configuration_files,
+            recovery,
+            backups,
         }
     }
 }
@@ -36,14 +43,12 @@ impl ProfileStartupStoragePort for ProfileStartupStorage {
     }
 
     fn apply_pending_import(&self) -> Result<(), ProfileStartupStorageError> {
-        apply_pending_import(
-            &self.paths.app_data_root_dir,
-            &self.paths.db_path,
-            &self.paths.vault_dir,
-            &self.paths.settings_path,
-            &self.paths.iroh_identity_dir(),
+        adopt_pending_import(
+            &self.paths,
             &self.host_configuration_files,
-            self.secure_storage.as_ref(),
+            Arc::clone(&self.secure_storage),
+            self.recovery.as_ref(),
+            self.backups.as_ref(),
         )
         .map_err(storage_error)
     }

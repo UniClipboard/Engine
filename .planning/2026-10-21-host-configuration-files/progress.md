@@ -27,3 +27,21 @@
   is separately recorded as 0 in resume-validation/exit-codes.txt.
 - Local implementation is ready for immutable-source verification. Cross-install runtime acceptance
   and old-anchor downgrade execution remain unresolved gates; native runs remain skipped.
+
+## Authorized cross-install repair continuation
+
+- Preserved immutable checkpoint 74122413 and its summary receipts under adoption-repair/checkpoint-74122413.
+- Committed failure modes and adoption invariants separately at aeb6410b before the repair.
+- Traced missing V3 control state, rejected a failed monolithic snapshot approach, and retained every failure log.
+- Implemented complete V3 export and offline adoption with the existing vault/KEK, runtime layout, and backup archive.
+- The user approved rejecting incomplete schema-1 bundles before staging and requiring source re-export.
+- v3-runtime-4: public fresh-install first/subsequent startup passed.
+- expanded-e2e: 7 passed; the remaining failure was a missing parent in the isolated backup-restore fixture.
+- existing-target-2: public existing-install, two partial-adoption failures, replay, original-target backup
+  restoration and public original-passphrase recovery passed.
+- full-public-e2e: both low-level migration scenarios passed; two public scenarios rejected an oversized
+  synthetic SendText input. The fixture was corrected to the public 64 KiB input limit.
+- content-e2e: all 8 public host-file scenarios passed, including large encrypted blob reads and new writes.
+- No new unit tests were added. Existing constructor fixtures and startup-order assertions were maintained.
+- Final immutable-source repository checks and matched artifact receipts remain in progress.
+- Task7 old-anchor mbx gap remains explicit. Native GUI, devices, Windows, downstream, and release are skipped.

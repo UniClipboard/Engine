@@ -15,6 +15,7 @@ use zeroize::Zeroize;
 use super::profile_lifecycle::PROFILE_LIFECYCLE_MARKER_NAME;
 use super::profile_upgrade_backup::PROFILE_UPGRADE_BACKUP_RECORD_KEY;
 use super::{Kek, MasterKey};
+use crate::config_migration::adoption::ADOPTION_JOURNAL;
 use crate::config_migration::staging::PENDING_IMPORT_MARKER;
 use uc_infra_crypto::crypto_model::{EncryptedBlob, KeyScope};
 use uc_infra_crypto::v1_aead;
@@ -187,6 +188,21 @@ impl ProfileKeyRecoveryStore {
     pub async fn prepare_startup(
         &self,
     ) -> Result<ProfileRecoveryPreparation, ProfileKeyRecoveryError> {
+        // 导入事务可能处于 KEK 与 vault 分步替换之间；先由离线采用负责人续做。
+        if self
+            .paths
+            .app_data_root_dir
+            .join(PENDING_IMPORT_MARKER)
+            .try_exists()?
+            || self
+                .paths
+                .app_data_root_dir
+                .join(ADOPTION_JOURNAL)
+                .try_exists()?
+        {
+            self.suspend();
+            return Ok(ProfileRecoveryPreparation::Ready);
+        }
         if !self.material.keyslot_exists().await? {
             return Ok(ProfileRecoveryPreparation::Ready);
         }
