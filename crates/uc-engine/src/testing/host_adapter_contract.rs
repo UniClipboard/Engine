@@ -2765,40 +2765,16 @@ async fn engine_start_builds_a_resumable_real_session() {
             .unwrap(),
         crate::OperationResult::ConfigExport(crate::ConfigExportOutcome::NotInitialized,)
     );
-    assert!(matches!(
-        engine
-            .execute(crate::Operation::QueryDiagnostics)
-            .await
-            .unwrap(),
-        crate::OperationResult::DiagnosticsStatus(crate::DiagnosticsStatusSummary {
-            debug_mode: false,
-            restart_required: false,
-            ..
-        })
-    ));
     assert_eq!(
         engine
-            .execute(crate::Operation::UpdateDebugMode(
-                crate::UpdateDebugModeInput { enabled: true },
-            ))
-            .await
-            .unwrap(),
-        crate::OperationResult::DebugModeUpdated(crate::DebugModeUpdateSummary {
-            debug_mode: true,
-            restart_required: true,
-        })
-    );
-    assert!(matches!(
-        engine
             .execute(crate::Operation::QueryDiagnostics)
             .await
             .unwrap(),
         crate::OperationResult::DiagnosticsStatus(crate::DiagnosticsStatusSummary {
-            debug_mode: true,
-            restart_required: false,
-            ..
+            rejected_config_import: None,
+            effective_log_profile: None,
         })
-    ));
+    );
     assert!(matches!(
         engine
             .execute(crate::Operation::ExportDiagnosticLogs(

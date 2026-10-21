@@ -11,6 +11,7 @@
 # 补丁只允许改宿主与工作区成员声明。产物位于 <target>/upgrade-anchors/<rev>/bin/uc-connectivity-host，host.json 记录
 # 缓存键、补丁摘要与构建耗时；缓存键不变时直接复用。构建并行度沿用当前仓库的设置（本地为
 # .cargo/config.toml 的 jobs，CI 由 rust-ci-setup 设置 CARGO_BUILD_JOBS），并关闭增量编译。
+# 每个快照使用自己工作目录的规范 target；`--clean` 一并回收它们。
 set -euo pipefail
 
 # 当前脚本与所有嵌套 Cargo 调用统一经由 MBX。
@@ -158,6 +159,16 @@ for id in "${ids[@]}"; do
   lock_before=$(sha256 <"$source/Cargo.lock")
   log="$out/build.log"
   build_status=0
+  # 快照是独立的工作目录，编译输出使用它自己的规范 target：由调用环境经 `cargo metadata` 决定
+  # （受管编译盘按工作目录分配，CI 则沿用其统一设置），不借用当前仓库的 target。
+  # 受管环境按工作目录隔离输出，借用他树的 target 会被拒绝，也会让 Cargo 按 mtime 误判产物为最新。
+  build=$(target_directory --manifest-path "$source/Cargo.toml") || build=
+  if [[ -z "$build" ]]; then
+    printf '%s %s: cannot resolve the snapshot build directory\n' "$id" "${rev:0:12}" >"$log"
+    printf '%s %s: build failed, see %s\n' "$id" "${rev:0:12}" "$log" >&2
+    status=1
+    continue
+  fi
   # 共享 target 时主动刷新快照时间戳；源码字节不变，不能把另一快照误判 fresh。
   find "$source" -type f -name '*.rs' -exec touch {} +
   (
@@ -169,11 +180,10 @@ for id in "${ids[@]}"; do
     # 内部崩溃（annotate_snippet_emitter 切片越界），旧版源码的警告本就不需要完整片段。
     UC_HOST_ANCHOR="$id" UC_HOST_ENGINE_REV="$rev" \
       UC_ENGINE_SOURCE_COMMIT="$rev" UC_ENGINE_SOURCE_STATE=modified \
-      CARGO_TARGET_DIR="$shared_target" CARGO_PROFILE_DEV_DEBUG=0 \
+      CARGO_TARGET_DIR="$build" CARGO_PROFILE_DEV_DEBUG=0 \
       CARGO_BUILD_JOBS="$build_jobs" CARGO_INCREMENTAL=0 \
       cargo build --offline --message-format short -p uc-connectivity-host --no-default-features --features "$features"
   ) >"$log" 2>&1 || build_status=$?
-  build="$shared_target"
   elapsed=$(($(date +%s) - started))
   if ((build_status != 0)); then
     printf '%s %s: build failed after %ss, see %s\n' "$id" "${rev:0:12}" "$elapsed" "$log" >&2
@@ -182,8 +192,8 @@ for id in "${ids[@]}"; do
   fi
   cp "$build/debug/uc-connectivity-host" "$binary"
   lock_after=$(sha256 <"$source/Cargo.lock")
-  # 编译输出由根 target 和共享编译缓存持有，不创建另一套完整构建目录。
-  # 当前共享 target 保留；只回收历史脚本留下的快照专用目录。
+  # 依赖编译由共享编译缓存复用；快照 target 位于编译盘，可由 `--clean` 回收。
+  # 快照源码树内的 target 不保留。
   rm -rf -- "$source/target"
   cat >"$out/host.json" <<JSON
 {

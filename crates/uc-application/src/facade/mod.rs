@@ -120,9 +120,7 @@ pub use clipboard_history::{
 };
 pub use clipboard_restore::{ClipboardRestoreError, ClipboardRestoreFacade};
 pub use config_migration::ConfigMigrationFacade;
-pub use diagnostics::{
-    DebugStatusView, DiagnosticsFacade, DiagnosticsFacadeError, LogExportView, UpdateDebugModeView,
-};
+pub use diagnostics::{DebugStatusView, DiagnosticsFacade, DiagnosticsFacadeError, LogExportView};
 pub use file_transfer::{
     BeginReceiverTransfer, FileTransferApplicationError, FileTransferFacade,
     ReceiverTransferHandle, ReceiverTransferRegistration,

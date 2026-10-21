@@ -60,9 +60,9 @@ impl SettingsAssembly {
         Self {
             settings: Arc::new(settings),
             diagnostics: Arc::new(DiagnosticsFacade::new(DiagnosticsFacadeDeps {
-                settings: Arc::clone(&deps.settings),
                 logs_dir: paths.logs_dir.clone(),
                 app_version: env!("CARGO_PKG_VERSION").to_owned(),
+                host_log_profile: deps.host_log_profile.clone(),
             })),
             storage: Arc::new(StorageFacade::new(StorageFacadeDeps {
                 db_path: paths.db_path.clone(),

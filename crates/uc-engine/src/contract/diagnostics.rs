@@ -9,20 +9,8 @@ pub struct DiagnosticsStatusSummary {
     /// 拒绝资料仍在原位；宿主必须展示原因和重新导出指引。
     #[serde(default)]
     pub rejected_config_import: Option<RejectedConfigImportSummary>,
-    pub debug_mode: bool,
-    pub effective_log_profile: String,
-    pub restart_required: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UpdateDebugModeInput {
-    pub enabled: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DebugModeUpdateSummary {
-    pub debug_mode: bool,
-    pub restart_required: bool,
+    /// 宿主经 `EngineConfig::with_host_log_profile` 声明的本进程实际日志档位；未声明为 `None`。
+    pub effective_log_profile: Option<String>,
 }
 
 #[derive(Clone, PartialEq, Eq)]

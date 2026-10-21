@@ -58,7 +58,6 @@ pub enum RetentionRuleView {
 #[derive(Debug, Clone)]
 pub struct GeneralSettingsView {
     pub device_name: Option<String>,
-    pub debug_mode: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -142,7 +141,6 @@ pub struct SettingsView {
 #[derive(Debug, Clone, Default)]
 pub struct GeneralSettingsPatch {
     pub device_name: Option<Option<String>>,
-    pub debug_mode: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -353,7 +351,6 @@ impl From<core::Settings> for SettingsView {
             schema_version: value.schema_version,
             general: GeneralSettingsView {
                 device_name: value.general.device_name,
-                debug_mode: value.general.debug_mode,
             },
             sync: SyncSettingsView {
                 sync_enabled: value.sync.sync_enabled,
@@ -413,9 +410,6 @@ pub(crate) fn apply_settings_patch(
     if let Some(general) = patch.general {
         if let Some(v) = general.device_name {
             existing.general.device_name = v;
-        }
-        if let Some(v) = general.debug_mode {
-            existing.general.debug_mode = v;
         }
     }
 

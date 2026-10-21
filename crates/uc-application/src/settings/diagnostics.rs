@@ -1,7 +1,6 @@
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use super::config_migration::RejectedConfigImportView;
@@ -9,31 +8,24 @@ use anyhow::{anyhow, Context};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tracing::instrument;
+use uc_core::diagnostics::HostLogProfile;
 use uc_core::error_class::ErrorClass;
 use uc_core::ports::config_migration::ConfigMigrationError;
-use uc_core::ports::SettingsPort;
-use uc_observability_contract::{error_source::io_error_kind, uc_warn};
 use zip::write::SimpleFileOptions;
 
 #[derive(Clone)]
 pub struct DiagnosticsFacadeDeps {
-    pub settings: Arc<dyn SettingsPort>,
     pub logs_dir: PathBuf,
     pub app_version: String,
+    /// 宿主声明的、本进程实际安装的日志档位；未声明为 `None`。
+    pub host_log_profile: Option<HostLogProfile>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DebugStatusView {
     pub rejected_config_import: Option<RejectedConfigImportView>,
-    pub debug_mode: bool,
-    pub effective_log_profile: String,
-    pub restart_required: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UpdateDebugModeView {
-    pub debug_mode: bool,
-    pub restart_required: bool,
+    /// 宿主声明的实际日志档位；Engine 不保存日志偏好，也不从环境或构建类型推测。
+    pub effective_log_profile: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,10 +39,6 @@ pub struct LogExportView {
 pub enum DiagnosticsFacadeError {
     #[error("failed to query retained import status")]
     ImportStatus(#[source] ConfigMigrationError),
-    #[error("failed to load settings")]
-    LoadSettings(#[source] anyhow::Error),
-    #[error("failed to save settings")]
-    SaveSettings(#[source] anyhow::Error),
     #[error("Downloads directory is unavailable")]
     DownloadsUnavailable,
     #[error("failed to export logs")]
@@ -60,30 +48,10 @@ pub enum DiagnosticsFacadeError {
 impl ErrorClass for DiagnosticsFacadeError {
     fn class(&self) -> &'static str {
         match self {
-            Self::LoadSettings(_) => "load_settings",
-            Self::SaveSettings(_) => "save_settings",
             Self::DownloadsUnavailable => "downloads_unavailable",
             Self::Export(_) => "export",
             Self::ImportStatus(_) => "import_status",
         }
-    }
-}
-
-/// 调试模式状态与开关失败的记录：失败原样返回，由本负责人记录一次固定分类
-/// （公开契约边界会丢弃来源）。
-fn record_debug_mode_failure<T>(
-    operation: &'static str,
-    result: &Result<T, DiagnosticsFacadeError>,
-) {
-    if let Err(error) = result {
-        uc_warn!(
-            operation = operation,
-            outcome = "failed",
-            error_kind = "debug_mode_settings",
-            error_class = error.class(),
-            io_error_kind = io_error_kind(error),
-            "diagnostics debug mode operation failed"
-        );
     }
 }
 
@@ -96,59 +64,18 @@ impl DiagnosticsFacade {
         Self { deps }
     }
 
-    #[instrument(skip_all)]
-    pub async fn debug_status(&self) -> Result<DebugStatusView, DiagnosticsFacadeError> {
-        let result = self.read_debug_status().await;
-        record_debug_mode_failure("debug_status", &result);
-        result
-    }
-
-    async fn read_debug_status(&self) -> Result<DebugStatusView, DiagnosticsFacadeError> {
-        let settings = self
-            .deps
-            .settings
-            .load()
-            .await
-            .map_err(DiagnosticsFacadeError::LoadSettings)?;
-        Ok(DebugStatusView {
+    pub fn debug_status(&self) -> DebugStatusView {
+        DebugStatusView {
             rejected_config_import: None,
-            debug_mode: settings.general.debug_mode,
-            effective_log_profile: current_effective_log_profile(settings.general.debug_mode),
-            restart_required: false,
-        })
+            effective_log_profile: self.effective_log_profile(),
+        }
     }
 
-    #[instrument(skip_all, fields(enabled))]
-    pub async fn set_debug_mode(
-        &self,
-        enabled: bool,
-    ) -> Result<UpdateDebugModeView, DiagnosticsFacadeError> {
-        let result = self.write_debug_mode(enabled).await;
-        record_debug_mode_failure("set_debug_mode", &result);
-        result
-    }
-
-    async fn write_debug_mode(
-        &self,
-        enabled: bool,
-    ) -> Result<UpdateDebugModeView, DiagnosticsFacadeError> {
-        let mut settings = self
-            .deps
-            .settings
-            .load()
-            .await
-            .map_err(DiagnosticsFacadeError::LoadSettings)?;
-        settings.general.debug_mode = enabled;
+    fn effective_log_profile(&self) -> Option<String> {
         self.deps
-            .settings
-            .save(&settings)
-            .await
-            .map_err(DiagnosticsFacadeError::SaveSettings)?;
-
-        Ok(UpdateDebugModeView {
-            debug_mode: enabled,
-            restart_required: true,
-        })
+            .host_log_profile
+            .as_ref()
+            .map(|profile| profile.as_str().to_owned())
     }
 
     #[instrument(skip_all, fields(since_hours))]
@@ -167,14 +94,7 @@ impl DiagnosticsFacade {
         since_hours: Option<u32>,
         downloads_dir: PathBuf,
     ) -> Result<LogExportView, DiagnosticsFacadeError> {
-        let settings = self
-            .deps
-            .settings
-            .load()
-            .await
-            .map_err(DiagnosticsFacadeError::LoadSettings)?;
-        let debug_mode = settings.general.debug_mode;
-        let effective_log_profile = current_effective_log_profile(debug_mode);
+        let effective_log_profile = self.effective_log_profile();
         let since_hours = since_hours.unwrap_or(24).max(1);
         let now = Utc::now();
         let since = now - chrono::Duration::hours(i64::from(since_hours));
@@ -193,8 +113,7 @@ impl DiagnosticsFacade {
                 since,
                 now,
                 &deps.app_version,
-                debug_mode,
-                &effective_log_profile,
+                effective_log_profile.as_deref(),
             )
         })
         .await
@@ -209,40 +128,13 @@ impl DiagnosticsFacade {
     }
 }
 
-fn current_effective_log_profile(debug_mode: bool) -> String {
-    if std::env::var("RUST_LOG").is_ok() {
-        "rust_log".to_string()
-    } else if let Ok(profile) = std::env::var("UC_LOG_PROFILE") {
-        if !profile.trim().is_empty() {
-            profile
-        } else if debug_mode {
-            "debug".to_string()
-        } else {
-            default_profile_name()
-        }
-    } else if debug_mode {
-        "debug".to_string()
-    } else {
-        default_profile_name()
-    }
-}
-
-fn default_profile_name() -> String {
-    if cfg!(debug_assertions) {
-        "dev".to_string()
-    } else {
-        "prod".to_string()
-    }
-}
-
 fn export_logs_blocking(
     logs_dir: &Path,
     output_path: &Path,
     since: DateTime<Utc>,
     exported_at: DateTime<Utc>,
     app_version: &str,
-    debug_mode: bool,
-    effective_log_profile: &str,
+    effective_log_profile: Option<&str>,
 ) -> Result<Vec<String>, DiagnosticsFacadeError> {
     fs::create_dir_all(output_path.parent().ok_or_else(|| {
         DiagnosticsFacadeError::Export(anyhow!("export output path has no parent"))
@@ -281,7 +173,6 @@ fn export_logs_blocking(
     let manifest = LogExportManifest {
         exported_at,
         since,
-        debug_mode,
         effective_log_profile,
         included_files: included.clone(),
         app_version,
@@ -393,8 +284,7 @@ fn system_time_from_datetime(dt: DateTime<Utc>) -> SystemTime {
 struct LogExportManifest<'a> {
     exported_at: DateTime<Utc>,
     since: DateTime<Utc>,
-    debug_mode: bool,
-    effective_log_profile: &'a str,
+    effective_log_profile: Option<&'a str>,
     included_files: Vec<String>,
     app_version: &'a str,
     platform: &'a str,
@@ -403,150 +293,13 @@ struct LogExportManifest<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::Mutex;
-    use uc_core::settings::model::Settings;
-
-    #[derive(Default)]
-    struct InMemorySettings {
-        settings: Mutex<Settings>,
-    }
-
-    #[async_trait::async_trait]
-    impl SettingsPort for InMemorySettings {
-        async fn load(&self) -> anyhow::Result<Settings> {
-            Ok(self.settings.lock().await.clone())
-        }
-
-        async fn save(&self, settings: &Settings) -> anyhow::Result<()> {
-            *self.settings.lock().await = settings.clone();
-            Ok(())
-        }
-    }
 
     fn facade(temp: &tempfile::TempDir) -> DiagnosticsFacade {
         DiagnosticsFacade::new(DiagnosticsFacadeDeps {
-            settings: Arc::new(InMemorySettings::default()),
             logs_dir: temp.path().join("logs"),
             app_version: "test-version".to_string(),
+            host_log_profile: None,
         })
-    }
-
-    struct FailingSettings {
-        fail_load: bool,
-    }
-
-    #[async_trait::async_trait]
-    impl SettingsPort for FailingSettings {
-        async fn load(&self) -> anyhow::Result<Settings> {
-            if self.fail_load {
-                return Err(io_failure());
-            }
-            Ok(Settings::default())
-        }
-
-        async fn save(&self, _settings: &Settings) -> anyhow::Result<()> {
-            Err(io_failure())
-        }
-    }
-
-    fn io_failure() -> anyhow::Error {
-        anyhow::Error::new(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "SECRET_SETTINGS_PATH",
-        ))
-        .context("access settings")
-    }
-
-    fn failing_facade(temp: &tempfile::TempDir, fail_load: bool) -> DiagnosticsFacade {
-        DiagnosticsFacade::new(DiagnosticsFacadeDeps {
-            settings: Arc::new(FailingSettings { fail_load }),
-            logs_dir: temp.path().join("logs"),
-            app_version: "test-version".to_string(),
-        })
-    }
-
-    #[tokio::test]
-    async fn a_failed_status_read_records_only_fixed_classification() {
-        let logs = uc_testkit::log_capture::CapturedLogs::default();
-        let _guard = logs.install();
-        let temp = tempfile::TempDir::new().expect("temp");
-
-        let error = failing_facade(&temp, true)
-            .debug_status()
-            .await
-            .unwrap_err();
-
-        assert!(matches!(error, DiagnosticsFacadeError::LoadSettings(_)));
-        let output = logs.output();
-        assert_eq!(
-            logs.count("diagnostics debug mode operation failed"),
-            1,
-            "{output}"
-        );
-        assert!(output.contains("operation=\"debug_status\""), "{output}");
-        assert!(
-            output.contains("error_kind=\"debug_mode_settings\""),
-            "{output}"
-        );
-        assert!(output.contains("error_class=\"load_settings\""), "{output}");
-        assert!(
-            output.contains("io_error_kind=PermissionDenied"),
-            "{output}"
-        );
-        assert!(!output.contains("SECRET_SETTINGS_PATH"), "{output}");
-    }
-
-    #[tokio::test]
-    async fn a_failed_debug_mode_write_records_the_failing_step_class() {
-        let logs = uc_testkit::log_capture::CapturedLogs::default();
-        let _guard = logs.install();
-        let temp = tempfile::TempDir::new().expect("temp");
-
-        let error = failing_facade(&temp, false)
-            .set_debug_mode(true)
-            .await
-            .unwrap_err();
-
-        assert!(matches!(error, DiagnosticsFacadeError::SaveSettings(_)));
-        let output = logs.output();
-        assert_eq!(
-            logs.count("diagnostics debug mode operation failed"),
-            1,
-            "{output}"
-        );
-        assert!(output.contains("operation=\"set_debug_mode\""), "{output}");
-        assert!(output.contains("error_class=\"save_settings\""), "{output}");
-        assert!(
-            output.contains("io_error_kind=PermissionDenied"),
-            "{output}"
-        );
-        assert!(!output.contains("SECRET_SETTINGS_PATH"), "{output}");
-    }
-
-    #[tokio::test]
-    async fn successful_debug_mode_operations_write_no_failure_record() {
-        let logs = uc_testkit::log_capture::CapturedLogs::default();
-        let _guard = logs.install();
-        let temp = tempfile::TempDir::new().expect("temp");
-        let facade = facade(&temp);
-
-        facade.set_debug_mode(true).await.expect("set debug");
-        facade.debug_status().await.expect("status");
-
-        assert_eq!(logs.count("diagnostics debug mode operation failed"), 0);
-    }
-
-    #[tokio::test]
-    async fn set_debug_mode_persists_and_requires_restart() {
-        let temp = tempfile::TempDir::new().expect("temp");
-        let facade = facade(&temp);
-
-        let result = facade.set_debug_mode(true).await.expect("set debug");
-        let status = facade.debug_status().await.expect("status");
-
-        assert!(result.debug_mode);
-        assert!(result.restart_required);
-        assert!(status.debug_mode);
     }
 
     #[tokio::test]

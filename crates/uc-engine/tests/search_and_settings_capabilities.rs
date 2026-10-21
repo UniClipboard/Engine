@@ -448,8 +448,7 @@ async fn settings_updates_emit_a_section_only_change_event() {
 
     update(SettingsPatch {
         general: Some(GeneralSettingsPatch {
-            debug_mode: Some(true),
-            ..Default::default()
+            device_name: Some(Some("Synthetic Settings Device".to_string())),
         }),
         sync: Some(SyncSettingsPatch {
             sync_on_restore: Some(true),
@@ -477,8 +476,7 @@ async fn settings_updates_emit_a_section_only_change_event() {
     // 内容没变的保存不通知。
     update(SettingsPatch {
         general: Some(GeneralSettingsPatch {
-            debug_mode: Some(true),
-            ..Default::default()
+            device_name: Some(Some("Synthetic Settings Device".to_string())),
         }),
         ..Default::default()
     })

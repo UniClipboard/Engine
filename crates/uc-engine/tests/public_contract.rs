@@ -605,10 +605,6 @@ fn diagnostics_contract_exports_through_host_handles_without_debugging_paths() {
         Operation::QueryDiagnostics.kind(),
         OperationKind::QueryDiagnostics
     );
-    assert_eq!(
-        Operation::UpdateDebugMode(uc_engine::UpdateDebugModeInput { enabled: true }).kind(),
-        OperationKind::UpdateDebugMode
-    );
     let export = Operation::ExportDiagnosticLogs(uc_engine::ExportDiagnosticLogsInput {
         since_hours: Some(48),
         destination: uc_engine::HostFileHandle::new("private diagnostic destination"),

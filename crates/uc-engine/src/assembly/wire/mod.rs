@@ -32,6 +32,7 @@ use uc_application::deps::{
 use uc_application::facade::HostEventEmitterPort;
 use uc_core::app_dirs::{AppPaths, HostConfigurationFiles};
 use uc_core::clipboard::SelectRepresentationPolicyV1;
+use uc_core::diagnostics::HostLogProfile;
 use uc_core::ids::{ProfileId, RepresentationId};
 use uc_core::ports::blob::BlobReferenceRepositoryPort;
 use uc_core::ports::clipboard::{RepresentationCachePort, SelfWriteLedgerPort, SpoolQueuePort};
@@ -184,6 +185,7 @@ pub struct CoreWiringInputs {
     pub profile_key_recovery: Arc<dyn ProfilePassphraseRecoveryPort>,
     pub upgrade_backup_security: Arc<dyn RetireUpgradeBackupSecurityRecordsPort>,
     pub host_configuration_files: HostConfigurationFiles,
+    pub host_log_profile: Option<HostLogProfile>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -341,6 +343,7 @@ pub async fn wire_dependencies_from_inputs(
         profile_key_recovery,
         upgrade_backup_security,
         host_configuration_files,
+        host_log_profile,
     } = inputs;
     let profile_reset_paths = paths.clone();
     let profile_reset_profile_id = profile_id.inner().to_owned();
@@ -938,6 +941,7 @@ pub async fn wire_dependencies_from_inputs(
 
     let mut deps = ApplicationDeps {
         paths: paths.clone(),
+        host_log_profile,
         relay_diagnostic: build_relay_diagnostic(),
         host_event_bus: Arc::clone(&host_event_bus),
         file_transfer_event_store: file_transfer_store_arc,

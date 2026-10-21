@@ -3,8 +3,7 @@ use std::time::Duration;
 use super::model::*;
 
 impl Default for GeneralSettings {
-    /// Returns the default `GeneralSettings`: no saved device name and the
-    /// diagnostic logging profile off.
+    /// Returns the default `GeneralSettings`: no saved device name.
     ///
     /// # Examples
     ///
@@ -13,13 +12,9 @@ impl Default for GeneralSettings {
     ///
     /// let settings = GeneralSettings::default();
     /// assert!(settings.device_name.is_none());
-    /// assert!(!settings.debug_mode);
     /// ```
     fn default() -> Self {
-        Self {
-            device_name: None,
-            debug_mode: false,
-        }
+        Self { device_name: None }
     }
 }
 
@@ -277,8 +272,8 @@ impl Default for Settings {
 #[cfg(test)]
 mod tests {
     use crate::settings::model::{
-        ContentTypes, FileSyncSettings, GeneralSettings, NetworkSettings, Settings, SyncFrequency,
-        SyncSettings, CURRENT_SCHEMA_VERSION,
+        ContentTypes, FileSyncSettings, NetworkSettings, Settings, SyncFrequency, SyncSettings,
+        CURRENT_SCHEMA_VERSION,
     };
 
     /// Pitfall 2 防御：默认值必须为 true（允许 fallback），保护老用户
@@ -298,17 +293,7 @@ mod tests {
     fn settings_default_includes_network_with_fallback_allowed() {
         let s = Settings::default();
         assert!(s.network.allow_relay_fallback);
-        assert!(!s.general.debug_mode);
         assert_eq!(s.schema_version, CURRENT_SCHEMA_VERSION);
-    }
-
-    #[test]
-    fn old_general_settings_without_debug_mode_defaults_to_false() {
-        let json = r#"{"device_name":"Desk"}"#;
-        let general: GeneralSettings = serde_json::from_str(json).expect("parse old general");
-
-        assert_eq!(general.device_name.as_deref(), Some("Desk"));
-        assert!(!general.debug_mode);
     }
 
     /// NETSET-02 success criterion #2：缺 `network` 段的旧 settings.json
@@ -517,8 +502,6 @@ mod tests {
         let json = r#"{ "general": { "device_name": "Desk" } }"#;
         let s: Settings = serde_json::from_str(json).expect("partial general must parse");
         assert_eq!(s.general.device_name.as_deref(), Some("Desk"));
-        // 其余字段全部走默认
-        assert!(!s.general.debug_mode);
     }
 
     /// `sync` 段缺开关与 `content_types` 时均回退默认。

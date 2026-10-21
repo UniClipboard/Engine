@@ -19,17 +19,12 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 /// Engine 拥有的通用设置。
 ///
 /// 宿主产品外壳偏好（启动方式、自动启动、更新、主题、语言、产品分析许可、
-/// 快捷键与快捷面板）归宿主产品保存，不属于 Engine 设置。旧版 settings.json
-/// 中残留的这些键在加载时被忽略，下一次保存时不再写出。
+/// 快捷键与快捷面板、调试日志开关）归宿主产品保存，不属于 Engine 设置。旧版
+/// settings.json 中残留的这些键在加载时被忽略，下一次保存时不再写出。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct GeneralSettings {
     pub device_name: Option<String>,
-    /// Enables a persistent local diagnostic logging profile on the next process start.
-    ///
-    /// This only changes local log verbosity. It does not change sync behavior,
-    /// network policy, telemetry/analytics gates, or clipboard content handling.
-    pub debug_mode: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -17,6 +17,7 @@ use uc_application::deps::{
 };
 use uc_core::app_dirs::HostConfigurationFileError;
 use uc_core::clipboard::ActiveClipboardState;
+use uc_core::diagnostics::HostLogProfileError;
 use uc_core::ports::blob::BlobReferenceRepositoryPort;
 use uc_observability_contract::analytics::AnalyticsFacade;
 
@@ -58,6 +59,9 @@ pub enum WiringError {
 
     #[error("host configuration file declaration is invalid")]
     HostConfigurationFiles(#[source] HostConfigurationFileError),
+
+    #[error("host log profile declaration is invalid")]
+    HostLogProfile(#[source] HostLogProfileError),
 
     #[error("unfinished passphrase change could not be recovered")]
     PassphraseChangeRecovery {

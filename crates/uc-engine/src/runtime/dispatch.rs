@@ -55,7 +55,7 @@ use crate::operations::settings::config_migration::{
     execute_export_config, execute_preview_config_import, execute_stage_config_import,
 };
 use crate::operations::settings::diagnostics::{
-    execute_export_diagnostic_logs, execute_query_diagnostics, execute_update_debug_mode,
+    execute_export_diagnostic_logs, execute_query_diagnostics,
 };
 use crate::operations::settings::encryption::{
     execute_lock_encryption, execute_query_encryption_state, execute_verify_secure_storage_access,
@@ -318,9 +318,6 @@ impl EngineRuntime for ProductionRuntime {
                 }
                 Operation::QueryDiagnostics => {
                     execute_query_diagnostics(self.current_facade().await?.as_ref()).await
-                }
-                Operation::UpdateDebugMode(input) => {
-                    execute_update_debug_mode(self.current_facade().await?.as_ref(), input).await
                 }
                 Operation::ExportDiagnosticLogs(input) => {
                     execute_export_diagnostic_logs(
