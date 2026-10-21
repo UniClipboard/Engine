@@ -1,0 +1,4 @@
+已读取工程约束，target链接到Engine已有共享构建目录；未绕过MBX。
+
+压缩对照已完成；增加既有TransferCipherPort大文本/不可压缩二进制往返及压缩旧V3解码覆盖。chunked_transfer相关11测试通过，uc-infra-content全包测试通过；全工作区检查进行中。首轮诊断manifest误生成局部target，已修正复用共享target，并核对无活动构建后清理局部产物。
+全工作区all-targets检查完成（1m31s）；uc-infra-content79测试通过。公开加密Port大输入/不可压缩输入与旧压缩V3兼容性覆盖均通过。纯压缩对照见诊断程序，采用低内存单线程路径，删除旧并行阈值与zstdmt特性。
