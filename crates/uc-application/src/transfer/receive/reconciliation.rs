@@ -1,6 +1,6 @@
+use super::work::ReceiveWorkRegistry;
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use anyhow::{anyhow, Result};
@@ -21,7 +21,7 @@ use uc_observability_contract::{
 };
 
 pub struct ReceiveReadinessCoordinator {
-    ready: AtomicBool,
+    work: Arc<ReceiveWorkRegistry>,
     notify: Notify,
     recovery_lock: Mutex<()>,
     degraded_reason: RwLock<Option<String>>,
@@ -48,29 +48,41 @@ pub trait EnsureReceiveReadyPort: Send + Sync {
 
 impl ReceiveReadinessCoordinator {
     pub fn new() -> Self {
+        let work = Arc::new(ReceiveWorkRegistry::default());
+        work.close();
         Self {
-            ready: AtomicBool::new(false),
+            work,
             notify: Notify::new(),
             recovery_lock: Mutex::new(()),
             degraded_reason: RwLock::new(None),
         }
     }
 
-    pub fn mark_ready(&self) {
+    #[cfg(test)]
+    pub(crate) fn mark_ready(&self) {
+        let generation = self.work.generation();
+        self.work.open(&generation);
+        self.publish_ready();
+    }
+
+    fn publish_ready(&self) {
         *self
             .degraded_reason
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-        self.ready.store(true, Ordering::Release);
         self.notify.notify_waiters();
     }
 
     pub fn mark_not_ready(&self) {
-        self.ready.store(false, Ordering::Release);
+        self.work.close();
     }
 
     pub fn is_ready(&self) -> bool {
-        self.ready.load(Ordering::Acquire)
+        self.work.is_open()
+    }
+
+    pub(crate) fn work_registry(&self) -> Arc<ReceiveWorkRegistry> {
+        self.work.clone()
     }
 
     pub async fn wait_ready(&self) {
@@ -111,9 +123,13 @@ impl ReceiveReadinessCoordinator {
             return Ok(());
         }
 
+        let generation = self.work.generation();
         match recover().await {
             Ok(()) => {
-                self.mark_ready();
+                if !self.work.open(&generation) {
+                    return Err(anyhow!("receive recovery was superseded by gate closure"));
+                }
+                self.publish_ready();
                 Ok(())
             }
             Err(error) => {
@@ -122,11 +138,12 @@ impl ReceiveReadinessCoordinator {
                     io_error_kind = io_error_kind(error.as_ref()),
                     "receive readiness recovery failed; receive gate stays closed"
                 );
-                self.mark_not_ready();
-                *self
-                    .degraded_reason
-                    .write()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error.to_string());
+                if self.work.close_if_current(&generation) {
+                    *self
+                        .degraded_reason
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error.to_string());
+                }
                 Err(error)
             }
         }
@@ -434,6 +451,69 @@ mod tests {
             .await
             .expect("waiter must be released after successful retry")
             .expect("waiter task must succeed");
+    }
+
+    #[tokio::test]
+    async fn closing_gate_during_recovery_cannot_reopen_it_or_readmit_old_actions() {
+        let readiness = Arc::new(ReceiveReadinessCoordinator::new());
+        let work = readiness.work_registry();
+        let old = work.action();
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let recovering = {
+            let readiness = readiness.clone();
+            tokio::spawn(async move {
+                readiness
+                    .ensure_ready(|| async {
+                        entered.send(()).unwrap();
+                        released.await.unwrap();
+                        Ok(())
+                    })
+                    .await
+            })
+        };
+        waiting.await.unwrap();
+        readiness.mark_not_ready();
+        release.send(()).unwrap();
+        assert!(recovering.await.unwrap().is_err());
+        assert!(!readiness.is_ready());
+        assert!(old.register(&EntryId::from("entry"), "late").is_err());
+        readiness.ensure_ready(|| async { Ok(()) }).await.unwrap();
+        assert!(readiness.is_ready());
+        assert!(old.register(&EntryId::from("entry"), "still-late").is_err());
+        let current = work.action();
+        assert!(current.register(&EntryId::from("entry"), "current").is_ok());
+        assert!(!current.cancellation().is_cancelled());
+        current.finish(Ok(()));
+    }
+
+    #[tokio::test]
+    async fn superseded_recovery_failure_cannot_cancel_the_next_generations_waiting_action() {
+        let readiness = Arc::new(ReceiveReadinessCoordinator::new());
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let recovering = {
+            let readiness = readiness.clone();
+            tokio::spawn(async move {
+                readiness
+                    .ensure_ready(|| async {
+                        entered.send(()).unwrap();
+                        released.await.unwrap();
+                        Err(anyhow!("old recovery failure"))
+                    })
+                    .await
+            })
+        };
+        waiting.await.unwrap();
+        readiness.mark_not_ready();
+        let current = readiness.work_registry().action();
+        release.send(()).unwrap();
+        assert!(recovering.await.unwrap().is_err());
+        assert!(!current.cancellation().is_cancelled());
+        assert!(readiness.degraded_reason().is_none());
+        readiness.ensure_ready(|| async { Ok(()) }).await.unwrap();
+        assert!(current.register(&EntryId::from("entry"), "current").is_ok());
+        current.finish(Ok(()));
     }
 
     struct Store {

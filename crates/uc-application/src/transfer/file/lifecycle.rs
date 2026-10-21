@@ -178,6 +178,7 @@ impl FileTransferLifecycle {
         let clock = Arc::clone(&self.clock);
         let bus = Arc::clone(&self.host_event_bus);
         let readiness = Arc::clone(&self.receive_readiness);
+        let receive_work = readiness.work_registry();
 
         tokio::spawn(
             async move {
@@ -219,7 +220,10 @@ impl FileTransferLifecycle {
                     };
 
                     let expired = expired.into_iter()
-                        .filter(|transfer| !blob_transfer.owns_inbound_work(&transfer.transfer_id))
+                        .filter(|transfer| {
+                            !receive_work.owns_entry(&transfer.entry_id)
+                                && !blob_transfer.owns_inbound_work(&transfer.transfer_id)
+                        })
                         .collect::<Vec<_>>();
                     if expired.is_empty() {
                         continue;
@@ -231,6 +235,9 @@ impl FileTransferLifecycle {
                     );
 
                     for t in &expired {
+                        let Some(_cleanup) = receive_work.claim_cleanup(&t.entry_id) else {
+                            continue;
+                        };
                         if sweep_cancelled(&cancel) {
                             return;
                         }

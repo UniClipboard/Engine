@@ -853,7 +853,7 @@ async fn entry_cancellation_waits_for_the_plan_before_touching_projection_or_sta
     );
     let entry = EntryId::new();
     let action = owner.receive_work.action();
-    action.register(&entry, "attempt-1");
+    action.register(&entry, "attempt-1").unwrap();
     assert_eq!(
         owner.execute(&entry, "attempt-1").await.unwrap(),
         CancelEntryReceiveOutcome::CancellationIncomplete
@@ -884,7 +884,7 @@ async fn failed_receive_settlement_prevents_cancellation_cleanup_and_preserves_s
     let owner = use_case(attempts, cleaner.clone(), transfers, projection.clone());
     let entry = EntryId::new();
     let action = owner.receive_work.action();
-    action.register(&entry, "attempt-1");
+    action.register(&entry, "attempt-1").unwrap();
     assert_eq!(
         owner.execute(&entry, "attempt-1").await.unwrap(),
         CancelEntryReceiveOutcome::CancellationIncomplete
@@ -974,7 +974,7 @@ async fn plan_settled_partial_cancellation_is_never_overwritten_by_no_entry_clea
         );
         let entry = EntryId::new();
         let action = work.action();
-        action.register(&entry, "attempt-1");
+        action.register(&entry, "attempt-1").unwrap();
         if finishes_before_lookup {
             *attempts.retire.lock().unwrap() = Some(action);
         } else {

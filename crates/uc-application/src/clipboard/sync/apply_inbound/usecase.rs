@@ -35,7 +35,9 @@ use crate::clipboard::entry_identity::EntryIdentityCoordinator;
 use crate::clipboard::write::{ClipboardWriteIntent, MobileConsumabilityProbe};
 use crate::runtime_lifecycle::LifecycleError;
 use crate::transfer::receive::reconciliation::ReceiveReadinessCoordinator;
-use crate::transfer::receive::work::{ReceiveAction, ReceiveWorkRegistry};
+use crate::transfer::receive::work::{
+    ReceiveAction, ReceiveRegistrationError, ReceiveWorkRegistry,
+};
 
 use crate::clipboard::active::ClipboardSnapshotDeps;
 use crate::clipboard::sync::payload_codec::{
@@ -584,7 +586,14 @@ impl ApplyInboundClipboardUseCase {
             return Ok(None);
         };
         let attempt_id = EntryId::new().to_string();
-        action.register(entry_id, &attempt_id);
+        action
+            .register(entry_id, &attempt_id)
+            .map_err(|error| match error {
+                ReceiveRegistrationError::GateClosed => ApplyInboundError::Stopped,
+                ReceiveRegistrationError::CleanupInProgress => {
+                    ApplyInboundError::Internal(SourceError::new(error))
+                }
+            })?;
         let now_ms = ports.clock.now_ms();
         let current = ports
             .get
@@ -595,6 +604,9 @@ impl ApplyInboundClipboardUseCase {
                     SourceError::from(error).context("read receive attempt"),
                 )
             })?;
+        if action.cancellation().is_cancelled() {
+            return Err(ApplyInboundError::Stopped);
+        }
         let outcome = match current {
             None => ports
                 .begin

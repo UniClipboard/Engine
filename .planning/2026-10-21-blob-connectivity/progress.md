@@ -182,3 +182,10 @@
 - 取消绑定切片：UniFFI与N-API各增加整attempt和单项用户取消入口，分别只调用一个现有Engine操作，单项固定LocalUser；输出由Engine wire_enum的Display派生，保留cancellation_incomplete／not_inflight等区别。不增加业务步骤查询，实际清理和重试仍归原receive负责人。正在验证当前候选，不提前记为通过。
 
 - 最终候选取消绑定lib64通过（0.217秒），Application全库1176通过／1跳过（3.891秒），Engine公开契约50通过（0.018秒），workspace全目标check通过（1m26s）。metadata JSON已解析，fmt、Rust style、repository preflight、官方观测1369站点清单、变更Markdown无新增失效链接及diff检查通过。手工审查绑定只交接完整操作、LocalUser固定输入、五秒未完成不归并及目录原始来源／无发布边界；code-review skill不可用。未执行完整workspace测试、网络或真机矩阵，不标通过；原profile诊断失败仍待最终结案。
+
+- 上轮提交683ce622与15f72823并通过实际检查，归为progress。续接工作区仅用户四个原有规划目录。本轮先实现原始来源保留必须依赖的运行世代：readiness共享完整工作registry，关闭封旧世代，恢复只改变原世代，旧超时扫描识别完整接收动作；未把原资料保留或重试标为完成。
+- 首轮Application all-targets check通过（26.41秒），世代／完整动作定向6通过（0.032秒）；加入真实接收身份读取竞争后Application1180通过／1跳过（3.859秒）。复核补充权威读取后停止检查，以及旧恢复失败不得影响新世代的回归；前一轮1180结果只属于此前候选，正在运行最终候选检查。
+
+- 补充复查识别旧扫描初筛到清理之间的新接收登记竞态，增加按条目清理保护，与新登记在同一锁内互斥，跨异步清理持有；登记冲突保留ReceiveRegistrationError::CleanupInProgress类型和固定分类。内部register消费者统一迁移Result，转换脚本曾生成is_err().is_ok()，在编译前检查发现并修正，未视为通过。当前最终候选Application1182通过／1跳过（3.777秒），Engine公开契约50通过（0.018秒）；上一次1181和workspace1m19只对应增加清理保护之前的候选。
+
+- 清理保护后的最终Application1182通过／1跳过（3.777秒），Engine公开契约50通过（0.018秒），workspace全目标check通过（1m18s）。metadata JSON、fmt、Rust style、repository preflight、官方1369站点清单、变更链接及diff检查通过。手工审查同锁世代封口、旧恢复不可控制新世代、生产共享registry、异步清理保护寿命、typed登记冲突及全部消费者迁移；code-review skill不可用。无新持久格式或Engine内部查询。未执行完整workspace测试／网络／设备矩阵，保留profile基线失败；原始资料、最终结果合并、选择重试与剩余sweep迁移继续。

@@ -161,9 +161,9 @@ impl FileTransferAssembly {
             artifact_cleanup: deps.artifact_cleanup,
             save_dir_resolver: deps.save_dir_resolver,
             file_cache_dir: deps.file_cache_dir,
+            receive_work: receive_readiness.work_registry(),
             receive_readiness,
             host_event_bus: deps.host_event_bus,
-            receive_work: Arc::new(ReceiveWorkRegistry::default()),
         }
     }
 
