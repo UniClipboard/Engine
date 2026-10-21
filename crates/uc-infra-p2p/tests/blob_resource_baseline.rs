@@ -9,7 +9,13 @@ use iroh::{
     protocol::{AcceptError, ProtocolHandler, Router},
     Endpoint, RelayMode,
 };
-use iroh_blobs::{store::fs::FsStore, BlobsProtocol};
+use iroh_blobs::{
+    api::blobs::{ExportMode, ExportOptions},
+    store::fs::FsStore,
+    ticket::BlobTicket as NativeBlobTicket,
+    BlobsProtocol, HashAndFormat,
+};
+use iroh_tickets::Ticket;
 use serde_json::json;
 use std::fs::File;
 use std::io::Read;
@@ -161,12 +167,26 @@ async fn blob_streaming_one_gib_resource_baseline() -> Result<()> {
     .await??;
     let ticket = publishing.issue_ticket(&digest).await?;
     let target = root.path().join("received.bin");
-    let received = timeout(
+    let native = NativeBlobTicket::decode_bytes(ticket.as_bytes())?;
+    let retained = receive_store
+        .tags()
+        .temp_tag(HashAndFormat::raw(native.hash()))
+        .await?;
+    let legacy = receive_store.downloader(&receive_endpoint);
+    timeout(
         Duration::from_secs(180),
-        fetching.fetch_to_path(&ticket, &target, None),
+        legacy.download(native.hash_and_format(), [native.addr().id]),
     )
     .await??;
-    assert_eq!(received, digest);
+    receive_store
+        .blobs()
+        .export_with_opts(ExportOptions {
+            hash: native.hash(),
+            mode: ExportMode::TryReference,
+            target: target.clone(),
+        })
+        .await?;
+    drop(retained);
     fetching.tag(&digest, receive_reason.clone()).await?;
     assert_eq!(std::fs::metadata(&target)?.len(), FILE_BYTES);
     // 独立于 SDK 的逐块精确比较，不把整个文件读入内存。
@@ -203,6 +223,7 @@ async fn blob_streaming_one_gib_resource_baseline() -> Result<()> {
         "one GiB transfer must not allocate an entire-file buffer"
     );
     drop(publishing);
+    drop(legacy);
     drop(fetching);
     receive_endpoint.close().await;
     router.shutdown().await?;

@@ -10,9 +10,7 @@ use tokio_util::bytes::Bytes;
 use uc_application::deps::{
     ActivePullPreparationError, ActivePullPreparationPort, ActivePullPreparationStop,
 };
-use uc_core::ports::blob::{
-    BlobDigest, BlobError, BlobProgressSink, BlobTicket, BlobTransferPort, TagReason,
-};
+use uc_core::ports::blob::{BlobDigest, BlobError, BlobTicket, BlobTransferPort, TagReason};
 
 static FIXTURES: OnceLock<Mutex<HashMap<PathBuf, Weak<PublicationFixture>>>> = OnceLock::new();
 fn fixtures() -> &'static Mutex<HashMap<PathBuf, Weak<PublicationFixture>>> {
@@ -135,24 +133,6 @@ impl BlobTransferPort for GatedPublication {
     }
     async fn issue_ticket(&self, digest: &BlobDigest) -> Result<BlobTicket, BlobError> {
         self.inner.issue_ticket(digest).await
-    }
-    async fn fetch(
-        &self,
-        ticket: &BlobTicket,
-        progress: Option<&dyn BlobProgressSink>,
-    ) -> Result<Bytes, BlobError> {
-        self.inner.fetch(ticket, progress).await
-    }
-    async fn fetch_to_path(
-        &self,
-        ticket: &BlobTicket,
-        path: &Path,
-        progress: Option<&dyn BlobProgressSink>,
-    ) -> Result<BlobDigest, BlobError> {
-        self.inner.fetch_to_path(ticket, path, progress).await
-    }
-    async fn shutdown_inflight_fetch(&self, ticket: &BlobTicket) -> Result<(), BlobError> {
-        self.inner.shutdown_inflight_fetch(ticket).await
     }
     async fn has(&self, digest: &BlobDigest) -> Result<bool, BlobError> {
         self.inner.has(digest).await

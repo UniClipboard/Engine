@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use iroh::{endpoint::presets, protocol::Router, Endpoint, RelayMode};
 use iroh_blobs::store::fs::FsStore;
+use iroh_tickets::Ticket;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -89,20 +90,21 @@ async fn managed_provider_serves_legacy_downloader_while_empty_warmup_is_still_o
         .accept(BLOBS_ALPN, IrohBlobHandler::new(owner.clone()))
         .spawn();
     let source_port = IrohBlobTransferAdapter::new(Arc::new(server.clone()), source.clone());
-    let destination_port =
-        IrohBlobTransferAdapter::new(Arc::new(client.clone()), destination.clone());
     let bytes = Bytes::from(vec![57; 512 * 1024]);
     let digest = source_port
         .publish(bytes.clone(), TagReason::ClipboardEntry(EntryId::new()))
         .await?;
     let ticket = source_port.issue_ticket(&digest).await?;
-    // 显式保留一个无流预热，实际 fetch 还会运行旧 adapter 原有 warmup／Downloader 路径。
+    // 只有历史客户端fixture保留SDK Downloader；实际提供端仍走生产Uni负责人。
     let warmup = client.connect(server.addr(), BLOBS_ALPN).await?;
-    let received = timeout(
+    let legacy = destination.downloader(&client);
+    let native = iroh_blobs::ticket::BlobTicket::decode_bytes(ticket.as_bytes())?;
+    timeout(
         Duration::from_secs(10),
-        destination_port.fetch(&ticket, None),
+        legacy.download(native.hash_and_format(), [native.addr().id]),
     )
     .await??;
+    let received = destination.blobs().get_bytes(native.hash()).await?;
     assert_eq!(received, bytes);
     assert!(
         warmup.close_reason().is_none(),
@@ -117,7 +119,7 @@ async fn managed_provider_serves_legacy_downloader_while_empty_warmup_is_still_o
     owner.shutdown(BlobShutdownWait::Complete).await?;
     router.shutdown().await?;
     client.close().await;
-    drop(destination_port);
+    drop(legacy);
     destination.shutdown().await?;
     Ok(())
 }

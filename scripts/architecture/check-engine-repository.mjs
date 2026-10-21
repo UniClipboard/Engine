@@ -2208,6 +2208,9 @@ function packageSelectorSources() {
 function repositorySources() {
   return {
     packageSelectors: packageSelectorSources(),
+    blobLocalCapability: read('crates/uc-core/src/ports/blob/transfer.rs'),
+    blobNativeProduction: productionSources('crates/uc-infra-p2p/src', [], true),
+    blobRouterBridge: read('crates/uc-infra-p2p/src/network/iroh/blob_exchange/handler.rs'),
     monolithicMembershipHistoryPresent: existsSync(join(REPOSITORY_ROOT, 'crates/uc-core/src/membership/versioned_membership_history.rs')),
     membershipHistoryRoot: read('crates/uc-core/src/membership/versioned_membership_history/mod.rs'),
     membershipHistoryCore: readSourceTree('crates/uc-core/src/membership/versioned_membership_history'),
@@ -2354,6 +2357,20 @@ function checkPresenceOwnership(sources) {
   return problems
 }
 
+// blob网络工作只经过通用租约；本地发布端口不能重新获得获取或对端取消能力。
+function checkBlobTransferOwnership(sources) {
+  const problems = []
+  if (/async\s+fn\s+(?:fetch|fetch_to_path|shutdown_inflight_fetch)\b/.test(sources.blobLocalCapability))
+    problems.push('retired blob fetch or peer-wide cancellation capability must not return')
+  if (/\bDownloader\b|\.downloader\s*\(/.test(sources.blobNativeProduction))
+    problems.push('production blob transfers must not create an SDK Downloader or its connection pool')
+  if (/\bshutdown_endpoint\b/.test(sources.blobNativeProduction))
+    problems.push('blob cancellation must not close a peer connection')
+  if (/\bBlobsProtocol\b/.test(sources.blobNativeProduction) || /\.(?:connect|open_bi|accept_bi)\s*\(/.test(sources.blobRouterBridge))
+    problems.push('blob Router must delegate the complete connection to the Application owner')
+  return problems
+}
+
 function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
   return [
     ...checkWorkspaceShape(metadata),
@@ -2383,6 +2400,7 @@ function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
     ...checkIrohPeerAddressResolution(sources),
     ...checkActiveClipboardTransportOwnership(sources),
     ...checkPresenceOwnership(sources),
+    ...checkBlobTransferOwnership(sources),
     ...checkSessionSupervisorOwnership(sources),
     ...checkRuntimeLifecycleOwnership(sources),
     ...checkSpaceAccessConstructionModes(sources),
@@ -2410,6 +2428,21 @@ function expectRejected(name, mutate, metadata, sources) {
 }
 
 function runNegativeFixtures(metadata, sources) {
+  expectRejected('retired blob fetch capability', (_metadata, changed) => {
+    changed.blobLocalCapability += '\nasync fn fetch_to_path() {}\n'
+  }, metadata, sources)
+  expectRejected('blob SDK self-dialing pool', (_metadata, changed) => {
+    changed.blobNativeProduction += '\nlet downloader = store.downloader(endpoint);\n'
+  }, metadata, sources)
+  expectRejected('blob peer-wide cancellation', (_metadata, changed) => {
+    changed.blobNativeProduction += '\nasync fn cancel() { pool.shutdown_endpoint(peer).await; }\n'
+  }, metadata, sources)
+  expectRejected('blob raw provider handler', (_metadata, changed) => {
+    changed.blobNativeProduction += '\nlet handler = BlobsProtocol::new(store, None);\n'
+  }, metadata, sources)
+  expectRejected('blob bridge stream workflow', (_metadata, changed) => {
+    changed.blobRouterBridge += '\nasync fn bypass() { connection.accept_bi().await; }\n'
+  }, metadata, sources)
   expectRejected('presence native workflow bypass', (_metadata, changed) => {
     changed.presenceBridge += '\nasync fn bypass() { connection.accept_bi().await; }\n'
   }, metadata, sources)

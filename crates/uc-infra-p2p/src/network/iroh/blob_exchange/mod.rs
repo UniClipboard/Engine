@@ -17,3 +17,6 @@ mod managed_tests;
 mod source;
 mod store;
 pub use source::IrohBlobSourceResolver;
+
+mod store_scope;
+pub(super) use store_scope::without_request_span;

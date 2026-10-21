@@ -16,6 +16,7 @@
 //! [`install_peer_reachability`]: IrohSessionBuilder::install_peer_reachability
 //! [`install_clipboard`]: IrohSessionBuilder::install_clipboard
 
+use super::blob_exchange::without_request_span;
 use super::discovery::endpoint_id;
 use futures_util::{stream, stream::BoxStream, StreamExt};
 #[cfg(any(test, feature = "test-util"))]
@@ -58,8 +59,8 @@ use iroh::protocol::Router;
 use iroh::{Endpoint, RelayConfig, RelayMode, RelayUrl, TransportAddr};
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 use noq_proto::congestion::{Bbr3Config, CubicConfig};
-use tracing::instrument;
 use tracing::instrument::WithSubscriber;
+use tracing::{dispatcher, instrument, Dispatch};
 use uc_application::deps::{
     ConnectionHint, DiscoveryError, DiscoveryManager, IssueMembershipBranchRecoveryPort,
     PeerReachabilityEnvironmentPort, PeerReachabilityTransport,
@@ -885,16 +886,19 @@ impl IrohNodeBuilder {
         let connection_observations =
             super::observed_connections::ObservedConnections::new(recorder.clone());
         let session_protocols = Arc::new(SessionProtocolRegistry::new());
-        let mut endpoint_builder = Endpoint::builder(presets::N0)
-            .clear_address_lookup()
-            .secret_key(secret)
-            .relay_mode(relay_mode)
-            .transport_config(build_transport_config(config.congestion_controller))
-            // UniClipboard#486: drop Clash TUN / link-local IPs from every
-            // address-lookup service in one shot, and drop CGNAT/Tailscale
-            // overlay IPs unless the user opts in. See `build_addr_filter`.
-            .addr_filter(build_addr_filter(allow_overlay))
-            .hooks(session_protocols.endpoint_hooks());
+        // 第三方构造和驱动一起隔离，避免在future创建时捕获调用请求的parent。
+        let mut endpoint_builder = dispatcher::with_default(&Dispatch::none(), || {
+            Endpoint::builder(presets::N0)
+                .clear_address_lookup()
+                .secret_key(secret)
+                .relay_mode(relay_mode)
+                .transport_config(build_transport_config(config.congestion_controller))
+                // UniClipboard#486: drop Clash TUN / link-local IPs from every
+                // address-lookup service in one shot, and drop CGNAT/Tailscale
+                // overlay IPs unless the user opts in. See `build_addr_filter`.
+                .addr_filter(build_addr_filter(allow_overlay))
+                .hooks(session_protocols.endpoint_hooks())
+        });
         // 保留 N0 原生平台的原服务及原配置，只包裹固定的采集入口。
         if !config.disable_relays {
             use super::observed_address_lookup::ObservedAddressLookupBuilder;
@@ -979,21 +983,20 @@ impl IrohNodeBuilder {
         }
 
         let discovery_slot = Arc::new(OnceLock::new());
-        let endpoint = endpoint_builder
-            // 统一候选入口；mDNS 发布及所有结果仍经过原地址过滤。
-            .address_lookup(DirectoryAddressLookupBuilder {
-                mdns: mdns.clone(),
-                cloud_enabled: !config.disable_relays,
-                recorder: recorder.clone(),
-                manager: discovery_slot.clone(),
-            })
-            .bind()
-            // Endpoint 的长期驱动不能持有启动/恢复操作的 span。
-            .with_subscriber(tracing::Dispatch::new(
-                tracing::subscriber::NoSubscriber::default(),
-            ))
-            .await
-            .map_err(|err| IrohNodeError::Bind(anyhow::Error::new(err)))?;
+        let endpoint = async {
+            endpoint_builder
+                .address_lookup(DirectoryAddressLookupBuilder {
+                    mdns: mdns.clone(),
+                    cloud_enabled: !config.disable_relays,
+                    recorder: recorder.clone(),
+                    manager: discovery_slot.clone(),
+                })
+                .bind()
+                .await
+        }
+        .with_subscriber(Dispatch::none())
+        .await
+        .map_err(|err| IrohNodeError::Bind(anyhow::Error::new(err)))?;
         let endpoint = Arc::new(endpoint);
         // 只有 bind 完成才将来源标记为可采集；失败构造不能留下 Enabled 假象。
         {
@@ -1498,9 +1501,11 @@ impl IrohSessionBuilder {
             add_protected: None,
         });
         let db_path = store_dir.join("blobs.db");
-        let store = iroh_blobs::store::fs::FsStore::load_with_opts(db_path, options)
-            .await
-            .map_err(|err| IrohNodeError::BlobStoreInit(anyhow::Error::from(err)))?;
+        let store = without_request_span(|| {
+            iroh_blobs::store::fs::FsStore::load_with_opts(db_path, options)
+        })
+        .await
+        .map_err(|err| IrohNodeError::BlobStoreInit(anyhow::Error::from(err)))?;
 
         // Phase E1 (transitional): sweep `auto-*` tags left behind by
         // pre-Phase-F daemons.
@@ -1523,7 +1528,7 @@ impl IrohSessionBuilder {
         // sweep becomes a near-no-op (delete-prefix on an empty range);
         // we keep it for one or two release cycles to cover stragglers
         // and then can drop the call entirely.
-        match store.tags().delete_prefix(b"auto-").await {
+        match without_request_span(|| store.tags().delete_prefix(b"auto-")).await {
             Ok(removed) => {
                 if removed > 0 {
                     uc_info!(removed = removed, "iroh blobs: swept stale auto-* tags");
@@ -1671,6 +1676,10 @@ impl IrohNodeError {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "node/startup_trace_tests.rs"]
+mod startup_trace_tests;
 
 #[cfg(test)]
 mod tests {

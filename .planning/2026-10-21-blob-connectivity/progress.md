@@ -225,3 +225,27 @@
 - 合并main后的既有attempt／artifact契约13＋2通过，Engine公开契约51通过；真实UniFFI暂停文件释放2通过（9.68秒），验证暂停SQLite／日志资源释放和恢复，不能替代活动接收的所有生命周期矩阵。内容处理库79通过（0.35秒），包括合入main的压缩回归。官方观测清单重生为1373站点，fmt/style/diff通过，开始冻结Rust／文档／inventory进行最终workspace、metadata与repository门禁。
 
 - 本轮最终workspace全目标check通过（1m32s），metadata JSON解析812个包、fmt、Rust style、repository preflight、官方1373站点隐私清单及diff检查通过。最终相关回归App1207／Core335／Storage260／Content79／原子提交10／attempt和artifact15／Engine51／真实绑定暂停2项通过，4项跳过；合计1959通过。手工审查候选项原位置映射、密文装饰器、原子标记回滚和NoEntry隔离；code-review skill缺失，未冒充技能审查。源码／文档／inventory冻结期间未改动输入，未清缓存或新增target。完整workspace测试、旧profile基线结案、最终网络／1GiB／真机矩阵仍未完成。准备提交保存证明切片，完整目标保持未完成；继续历史成果／来源恢复、普通redelivery衔接、许可／关闭／删除／撤权与旧入口删除。
+
+- 上轮47d6bf43完成真实原子保存证明并提交，归为progress，当前仍仅四个用户规划目录未跟踪。新盘点确认普通redelivery不能无条件按fresh数组索引继承原成果，须核验原表示身份；原Downloader／warmup／shutdown_endpoint仍留在生产adapter，调用只剩测试和测试装饰器。本轮先完成唯一下载路径收口：Application transfer继续拥有完整网络获取和停止；Core旧port只保留发布／引用／票据解释，生产adapter移除自拨／重试／对端关闭；真实本地读写测试迁至专属ReadStore，旧SDK比较仅保留在明确历史测试内。验证所有消费者迁移、真实Uni提供／获取与原协议兼容，随后回到原成果衔接。
+
+- 生产旧下载实现和Core trait方法删除，App缓存fake与Engine发布装饰器全部迁移；真实Uni／本地导出19通过（0.15秒），同连接停止隔离与旧客户端兼容2通过（0.20秒）。完整App1207通过／1跳过（25.96秒）、Core335通过（0.38秒）。repository当前源码与五个新增反例通过。初次P2P check有4处旧Digest断言未迁移到export字节返回，修复并保留；共享fixture拆分漏ConnectivityError也已修复。当前真实P2P整库／协议向量／SDK结算探针／1GiB历史基线运行中，未提前记通过。
+
+- 扩展P2P整库得到320通过／2失败／3跳过（162.35秒），因此后续向量／故障／资源测试未执行。失败不是文件名泄露：SDK metadata actor在另一个subscriber下创建事务span，父ID来自请求subscriber，导致clone不存在ID、RPC sender关闭；节点关闭也在异步actor析构时向错误registry释放parent。完整失败和backtrace已保留。
+- diagnosing-bugs最小反馈环已缩至两测试组合：accepts_single_inbound_frame_from_known_peer（安装全局过滤subscriber）＋publish_path_logs_do_not_include_source_path；0.3秒稳定red。单跑后者与node诊断都通过，三测试组合0.36秒2失败。61测试prefix同样复现，两组更小的无全局subscriber前置组合全通过，排除单纯网络负载／顺序时间猜测。
+- 单变量试验只把publish_path的SDK future创建与poll放到无业务parent的dispatch，原完成日志仍在外层记录；最小三测试变为2通过1失败，证实SDK跨subscriber的请求parent问题。新增正向日志断言，避免隐私测试日志为空也通过。mDNS actor显式parent None后测试状态3通过，但stderr仍有acto guardian析构panic，不能算真正green；正在对独立discoverer启动同样隔离短期parent。当前handle日志trace-dispatch-probe-discovery-root.log待启动验证，未提交／未宣称收口完成。
+
+- 两个具体修复的最小三测试已3通过（0.27秒）且无panic输出：publish_path的SDK创建／poll隔离请求parent；mDNS actor显式parent None，discoverer的acto启动也不捕获短期parent。只修mDNS外层actor时仍存在被Tokio吞掉的guardian析构panic，即使test status为ok也未当作green；第二层隔离后实际stderr干净。
+- SDK隔离已收拢为私有without_request_span闭包能力，并覆盖发布／引用、本地读写、实际交换及SDK初始化，不改错误链／业务日志／协议。全目标check首次暴露helper可见性和ObserveProgress是IntoFuture而非Future，已修为pub(in super::super)与IntoFuture；rustfmt macro空白问题已修。
+- 新增真实Node启动span寿命测试node/startup_trace_tests.rs，断言发现仍在运行时启动span已关闭，并总是先停止节点再做结果断言。当前为证明该测试能抓住问题，临时还原third_party/iroh-mdns-address-lookup/src/lib.rs中discoverer.spawn(rt)的NoSubscriber包装（外层actor的parent None保留）。当前handle9643运行startup-span-lifetime-red-fixed.log；得到真实红测后必须恢复dispatcher::with_default(&Dispatch::none(), || discoverer.spawn(rt))，再跑green。未恢复前不能提交或记完成。
+
+- 新真实启动计时测试已red：临时去掉discoverer隔离后0通过1失败（0.01秒），明确断言长期发现actor延长已完成启动请求计时；失败前已正常停止节点。已恢复最终dispatcher隔离并补vendor补丁说明，开始green及跨subscriber组合验证。
+
+- 计时断言原版本把span.enter守卫跨await持有，会让同线程其它任务误继承startup；这是测试自身干扰，之前startup-span-lifetime-red*不能作为真实修复证据。已改为完整bind＋session激活async动作instrument(startup.clone())，只在本动作poll期间进入span；重新临时去掉discoverer隔离，证明正确接缝确实red，随后恢复。原两测试跨subscriber RPC／关闭panic复现独立成立，不受该测试错误影响。Endpoint构造与bind创建／poll现统一隔离，但不再声称旧创建span清单已经证明preset同步创建actor，实际scope以正确instrument回归为准。
+
+- 正确的async instrument计时回归已red（startup-span-instrumented-red.log，0通过1失败，0.01秒），并在完整session激活后取样。open parent树明确为test_session_start→Node.bind→acto guardian→发现sender／receivers，证明不是半流程或enter守卫干扰。已恢复discoverer的NoSubscriber包装，开始最终4测试组合green。旧无效enter版本的red不作证据；后续以本次正确回归及组合无panic为准。
+
+- 正确async instrument回归恢复隔离后4项全通过（startup-span-instrumented-green.log，0.26秒），显式扫描无panicked／FAILED。覆盖全局subscriber前置、真实发布日志捕获（新增完成记录正向断言）、原生连接诊断及完整会话启动span在发现停止前关闭。已开始remove-legacy-final-p2p-regression.log串行整库＋协议向量＋SDK停止结算探针＋1GiB历史基线，使用--no-fail-fast收集独立二进制结果；不能把微型回归或测试状态ok但stderr有panic当作整体green。
+
+- 整库残留1失败已复现到SDK Endpoint关闭的跨subscriber父ID；新增显式双registry隐私回归先red（0.08秒）后green，测试夹具启动与生产Node统一隔离SDK长期驱动。保留领域日志正向捕获和路径隐私断言，不跳过测试、不修改SDK。最终P2P整库323通过／3跳过（167.73秒）、SDK结算1通过／协议向量1通过，日志无panic；首轮322通过／1失败及扩大77通过／1失败backtrace保留。历史1GiB基线1通过（23.74秒，峰值RSS45600KiB），只证明原SDK历史基线，FD／线程／任务未全部回到起点，未当作最终生产资源回收。开始Engine契约／真实取消与最终根检查，完整spec仍未完成。
+
+- 最终Engine公开契约51通过；默认feature尝试真实取消用例只筛到0项，未记通过，补dev-tools后真实active_pull_cancel_settles_real_file_a_without_starting_file_b为1通过（5.94秒）。最终metadata解析812个包、workspace全目标check通过（1m29s）、fmt、Rust style、repository（含五个新反例）、1355站点隐私清单与diff检查全部通过。编译期间冻结源码／文档／inventory，所有Cargo串行复用共享target及缓存。手工审查原本地tag／TryReference、来源链、SDK无请求parent边界、启动计时与两registry回归；code-review skill仍缺失，未冒充技能审查。准备提交本切片；完整spec继续，普通redelivery原成果衔接、历史成果／来源恢复、完整许可／生命周期、最终Engine网络资源及平台矩阵仍未完成。

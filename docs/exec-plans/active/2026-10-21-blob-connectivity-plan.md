@@ -51,7 +51,7 @@
 
 修改位置：Application blob／file／receive、Infra iroh blobs／connectivity bridge／node。
 
-* [ ] SDK 获取只接收 Uni 已管理流，删除 downloader 自行拨号和连接 warmup 双路径。
+* [x] SDK 获取只接收 Uni 已管理流，删除 downloader 自行拨号和连接 warmup 双路径。
 * [x] Router 交给完整 Application 提供端，准入后调用有界 SDK 流处理，不保留 SDK 自管连接 handler。提供端已生产接线；下载与取消入口仍待迁移。
 * [ ] 保留内存 blob 的密码路径、文件流式路径、BAO 校验、tag／GC 保护和输出所有权。
 * [ ] 取消先封后续动作并停止本地；有界非阻塞交接通知，保持原 5Hz 上限，不引入第八片新协议。
@@ -83,8 +83,8 @@
 ## 阶段 4：唯一装配与删除旧实现
 
 * [ ] Engine 组装唯一 blob owner、独立 Uni manager、SDK adapter 及既有完整观测 decorator。
-* [ ] BlobTransferPort 取消合同和全部内部消费者同步迁移；不保留无意义旧包装或生产 feature 旁路。
-* [ ] 删除对端级 shutdown_endpoint 取消、SDK 自拨池和旧 provider 业务路径，保留底层 store 能力。
+* [x] BlobTransferPort 取消合同和全部内部消费者同步迁移；不保留无意义旧包装或生产 feature 旁路。
+* [x] 删除对端级 shutdown_endpoint 取消、SDK 自拨池和旧 provider 业务路径，保留底层 store 能力。
 * [ ] mod.rs 保持模块入口；所有权和恢复规则不散回 materializer、Engine 或绑定。
 * [ ] 架构检查限制业务代码直接用原生 Endpoint／Connection，实际 bridge／SDK 实现保留明确边界。
 * [ ] 按 spec §5.8 验证业务触发、结果、部分失败与隐私，正常清理不冒充业务入口。
@@ -695,3 +695,44 @@ blob原位置、representation_index和独立file序号；继承文件使用新a
 真实UniFFI暂停文件释放2通过（包含桌面进程上的跨进程SQLite／日志资源与恢复验证），
 内容处理库79通过。没有执行活动blob下所有关闭／撤权情形或真机矩阵。
 本轮根门禁与提交结果以任务progress为准。
+
+
+### 2026-10-22 删除旧下载与对端取消旁路
+
+完整网络获取和停止继续由 Application transfer 负责人承担。
+`BlobTransferPort` 只保留密文发布、ticket签发／本地解释、存在查询和引用标签；
+旧fetch、fetch_to_path和shutdown_inflight_fetch已从trait、实际adapter及全部测试装饰器删除。
+`IrohBlobTransferAdapter`不再持有Downloader、预热连接或包裹SDK的重试循环。
+获取／提供的真实SDK工作只消费Uni租约，本地缓存读取及TryReference导出走专属
+BlobReadStorePort；发布、原票据和blob字节不变。
+
+Application测试直接提供本地读取能力，不再借旧网络接口实现fake缓存。
+实际本地导出、64KiB以上TryReference、标签释放／poisoned存储回归仍保留，
+远端读取测试改用真实Uni租约和实际交换adapter。提供端仍用生产完整负责人验证
+同连接A取消不影响B、B内容精确且只建一次连接，以及旧SDK客户端的空连接兼容。
+旧Downloader和原BlobsProtocol只在明确的历史客户端／提供端、阶段0资源比较fixture内存在，
+不为它们保留生产兼容入口；阶段0基线不能据此冒充最终生产1GiB验收。
+
+repository门禁新增五个反例：旧Core获取能力、SDK自拨池、对端级取消、
+原生provider handler和Router半流编排都必须拒绝。现有真实生产源码检查及五个反例已通过。
+原始get／provide协议和大文件历史基线仍在验证，最终结果记录在任务progress。
+
+普通重复投递的旧部分成果衔接仍待完成：新source会覆盖当前receipt，
+但新包的表示身份／blob原位置不能无条件继承到旧成果；这项没有因删除旁路而被视为完成。
+历史材料恢复、完整许可和生命周期、所有关闭／删除／撤权、最终网络资源与平台矩阵仍在原范围。
+
+
+扩大P2P回归另发现并修复跨subscriber的span所有权：固定SDK事务actor在独立runtime
+创建span，不能解释请求局部subscriber的parent；SDK能力现在在私有store_scope中一起
+创建／驱动future，领域结果和关联仍由外层负责人记录，原始source链保留。
+没有修改固定iroh-blobs源码、协议或停止算法。长期mDNS actor显式无parent，
+acto发现服务启动及Endpoint原生构造／bind不保存短期启动请求的span；实际网络诊断保留。
+正确的异步instrument生命周期测试先red后green，完整会话激活后、发现停止前，
+启动根span必须已结束。全局／局部subscriber组合4测试已通过且stderr无后台panic，
+整库及SDK／资源结果仍以progress为准。
+
+整库进一步复现了测试夹具跨subscriber关闭Endpoint时的SDK显式parent错误。
+隐私日志测试现在显式使用两个registry，旧夹具0.08秒失败；夹具SDK启动与生产节点相同隔离后通过，
+仍要求实际捕获领域完成记录并验证源路径不泄露。最终P2P整库323通过／3跳过，
+SDK结算及协议向量各1通过，输出无panic。历史1GiB基线通过，峰值RSS45600KiB、
+精确字节及tag／临时文件释放通过；FD／线程／任务未全部回到起点，不能作为最终生产资源回收证明。

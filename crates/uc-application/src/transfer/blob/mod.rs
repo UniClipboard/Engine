@@ -31,17 +31,22 @@ mod tests {
     use bytes::Bytes;
     use uc_core::ids::EntryId;
     use uc_core::ports::blob::{
-        BlobDigest, BlobError, BlobProgressSink, BlobReferenceError, BlobReferenceRepositoryPort,
-        BlobTicket, BlobTransferPort, PlaintextHash, TagReason,
+        BlobDigest, BlobError, BlobReferenceError, BlobReferenceRepositoryPort, BlobTicket,
+        BlobTransferPort, PlaintextHash, TagReason,
     };
     use uc_core::ports::security::{TransferCipherError, TransferCipherPort};
     use uc_core::ports::ContentHashPort;
     use uc_core::{ContentHash, HashAlgorithm};
 
+    use super::test_support::retained;
+    use super::transport::{
+        BlobExchangeError, BlobExchangeFailure, BlobReadStorePort, BlobReceived,
+    };
     use super::{FetchBlobInput, FetchBlobUseCase, PublishBlobInput, PublishBlobUseCase};
+    use std::path::Path;
 
     struct SlowIdentitySource {
-        local: super::test_support::FakeLocalStore,
+        local: super::test_support::FakeLocalStore<FakeBlobTransfer>,
         entered: tokio::sync::Semaphore,
         finish: tokio::sync::Semaphore,
         calls: std::sync::atomic::AtomicUsize,
@@ -51,13 +56,13 @@ mod tests {
         fn inspect(
             &self,
             ticket: &BlobTicket,
-        ) -> Result<super::transport::BlobSource, super::transport::BlobExchangeError> {
+        ) -> Result<super::transport::BlobSource, BlobExchangeError> {
             super::transport::BlobSourcePort::inspect(&self.local, ticket)
         }
         async fn resolve_peer(
             &self,
             _: &[u8; 32],
-        ) -> Result<uc_core::ids::DeviceId, super::transport::BlobExchangeError> {
+        ) -> Result<uc_core::ids::DeviceId, BlobExchangeError> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.entered.add_permits(1);
             self.finish
@@ -561,6 +566,37 @@ mod tests {
     }
 
     #[async_trait]
+    impl BlobReadStorePort for FakeBlobTransfer {
+        async fn protect(
+            &self,
+            digest: BlobDigest,
+        ) -> Result<Option<BlobReceived>, BlobExchangeError> {
+            Ok(Some(retained(digest)))
+        }
+        async fn read(&self, digest: BlobDigest) -> Result<Bytes, BlobExchangeError> {
+            self.store
+                .lock()
+                .expect("lock store")
+                .get(&digest)
+                .cloned()
+                .ok_or_else(|| {
+                    BlobExchangeError::new(BlobExchangeFailure::Store, BlobError::NotFound)
+                })
+        }
+        async fn export(
+            &self,
+            digest: BlobDigest,
+            target: &Path,
+        ) -> Result<u64, BlobExchangeError> {
+            let bytes = self.read(digest).await?;
+            tokio::fs::write(target, &bytes)
+                .await
+                .map_err(|source| BlobExchangeError::new(BlobExchangeFailure::Store, source))?;
+            Ok(bytes.len() as u64)
+        }
+    }
+
+    #[async_trait]
     impl BlobTransferPort for FakeBlobTransfer {
         async fn publish(
             &self,
@@ -597,44 +633,6 @@ mod tests {
 
         async fn issue_ticket(&self, digest: &BlobDigest) -> Result<BlobTicket, BlobError> {
             Ok(BlobTicket::from_bytes(digest.as_bytes().to_vec()))
-        }
-
-        async fn fetch(
-            &self,
-            ticket: &BlobTicket,
-            _progress: Option<&dyn BlobProgressSink>,
-        ) -> Result<Bytes, BlobError> {
-            let digest = self.digest_of(ticket)?;
-            self.store
-                .lock()
-                .expect("lock store")
-                .get(&digest)
-                .cloned()
-                .ok_or(BlobError::NotFound)
-        }
-
-        async fn fetch_to_path(
-            &self,
-            ticket: &BlobTicket,
-            target_path: &std::path::Path,
-            progress: Option<&dyn BlobProgressSink>,
-        ) -> Result<BlobDigest, BlobError> {
-            // Fake-only: read store entry into memory and write the file
-            // out — tests work with small payloads, so the in-memory step
-            // is fine. Real adapter (`IrohBlobTransferAdapter`) goes
-            // through `Blobs::export` for true streaming export.
-            let bytes = self.fetch(ticket, progress).await?;
-            tokio::fs::write(target_path, &bytes)
-                .await
-                .map_err(|e| BlobError::Internal(e.into()))?;
-            self.digest_of(ticket)
-        }
-
-        async fn shutdown_inflight_fetch(&self, _ticket: &BlobTicket) -> Result<(), BlobError> {
-            // Fake: 测试场景下 fetch 是同步内存读,没有"正在进行中"的 fetch
-            // 可中止。返回 Ok 满足幂等契约;真实 adapter
-            // (`IrohBlobTransferAdapter`) 走 QUIC connection 拆除路径。
-            Ok(())
         }
 
         async fn has(&self, digest: &BlobDigest) -> Result<bool, BlobError> {

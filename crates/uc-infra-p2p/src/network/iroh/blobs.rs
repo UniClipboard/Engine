@@ -1,19 +1,18 @@
 //! iroh-blobs backed implementation of [`BlobTransferPort`].
 //!
 //! Adapter 只处理已经加密好的密文字节:发布到本地 iroh-blobs store、生成
-//! ticket、按 ticket 拉取、记录本地保留标签。加解密与明文去重分别由
+//! ticket、记录本地保留标签。获取及其停止统一由受管交换负责人执行，加解密与明文去重由
 //! 上层 use case 和 sqlite `BlobReferenceRepositoryPort` 负责。
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use super::blob_exchange::without_request_span;
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures_util::StreamExt;
 use iroh::Endpoint;
 use iroh_blobs::{
-    api::blobs::{AddPathOptions, ExportMode, ExportOptions, ImportMode},
-    api::downloader::{DownloadProgressItem, Downloader},
+    api::blobs::{AddPathOptions, ImportMode},
     store::fs::FsStore,
     ticket::BlobTicket as NativeBlobTicket,
     BlobFormat, Hash, HashAndFormat,
@@ -21,44 +20,11 @@ use iroh_blobs::{
 use iroh_tickets::Ticket;
 use tracing::instrument;
 
-use uc_core::ports::blob::{
-    BlobDigest, BlobError, BlobProgressSink, BlobTicket, BlobTransferPort, TagReason,
-};
+use uc_core::ports::blob::{BlobDigest, BlobError, BlobTicket, BlobTransferPort, TagReason};
 use uc_observability_contract::diagnostics::connectivity::{
     LocalWorkObservation, LocalWorkOutcome, LocalWorkStep,
 };
-use uc_observability_contract::{
-    error_source::io_error_kind, log_fields::log_vocab_debug, uc_debug, uc_info, uc_warn,
-};
-
-/// Minimum wall-clock interval between two `BlobProgressSink::report` calls.
-///
-/// **硬上限 5 emits/sec** —— 单纯按时间节流,与字节速率无关。
-///
-/// 历史 bug:节流条件曾是 `due_by_bytes || due_by_time` (256KB 或 200ms,
-/// 任一满足即 emit)。高带宽 wifi 下每 ~5ms 就跨过 256KB → 实测达 18
-/// emits/sec。下游 WS 帧把 WebKit native 堆撑到 GB 级(每帧在 webview
-/// 端产生 MessageEvent / PerformanceResourceTiming 等若干 C++ 对象,
-/// 高频累积 GC 跟不上)。详见 findings.md 2026-05-23 Phase 4 vmmap 取证。
-///
-/// 现在改成时间窗硬上限:既限制了高带宽下的洪水,也保证慢速传输每
-/// 200ms 至少更新一次,前端 ETA / 进度条不会停滞。200ms 对人眼是肉眼
-/// 可感知更新极限的下界,UI 表现仍然流畅。
-const PROGRESS_REPORT_INTERVAL: Duration = Duration::from_millis(200);
-
-/// 跨公网 holepunch 收敛时,iroh-blobs 内部 `ConnectionPool` 的 1s `connect_timeout`
-/// 经常来不及——即便 `endpoint.connect` 已预热 quinn 层,pool 自己仍按 EndpointId 重新
-/// 走 connect_with_alpn,首次 attempt 抓不到热连接就直接 abort。
-///
-/// 这两个常量定义"在我们这一层包重试":总尝试次数(含首次)和每次失败后的退避。
-/// 退避采用阶梯式:200ms 让 endpoint 状态机消化一轮 pong,800ms 给 call-me-maybe
-/// 完整往返,2s 兜底大 RTT。最坏情况 ≈ 3s + 4 次 1s 内部 timeout = 7s 才放弃。
-const BLOB_FETCH_MAX_ATTEMPTS: u32 = 4;
-const BLOB_FETCH_BACKOFFS: [Duration; 3] = [
-    Duration::from_millis(200),
-    Duration::from_millis(800),
-    Duration::from_secs(2),
-];
+use uc_observability_contract::{log_fields::log_vocab_debug, uc_debug, uc_info};
 
 pub const BLOBS_ALPN: &[u8] = iroh_blobs::ALPN;
 
@@ -82,29 +48,11 @@ pub const BLOBS_GC_INTERVAL: Duration = Duration::from_secs(3600);
 pub struct IrohBlobTransferAdapter {
     endpoint: Arc<Endpoint>,
     store: FsStore,
-    /// Long-lived downloader. `iroh_blobs::Store::downloader(&endpoint)` spawns
-    /// a DownloaderActor and its internal `ConnectionPool` on every call — if
-    /// we rebuild it per `fetch()`, the pool (idle_timeout=5s, connect_timeout=1s)
-    /// can never accumulate a reusable QUIC connection, so every fetch pays the
-    /// full hole-punch cost. Cache it once per adapter instance.
-    downloader: OnceLock<Downloader>,
 }
 
 impl IrohBlobTransferAdapter {
     pub fn new(endpoint: Arc<Endpoint>, store: FsStore) -> Self {
-        Self {
-            endpoint,
-            store,
-            downloader: OnceLock::new(),
-        }
-    }
-
-    /// Lazy-init and cache the iroh-blobs `Downloader`. First call spawns the
-    /// DownloaderActor; subsequent calls hand back the same instance so the
-    /// internal ConnectionPool can reuse live QUIC connections across fetches.
-    fn downloader(&self) -> &Downloader {
-        self.downloader
-            .get_or_init(|| self.store.downloader(&self.endpoint))
+        Self { endpoint, store }
     }
 
     fn native_hash(digest: &BlobDigest) -> Hash {
@@ -168,12 +116,14 @@ impl BlobTransferPort for IrohBlobTransferAdapter {
         let started = Instant::now();
         let tag_name = Self::tag_name(&reason);
         let observation = LocalWorkObservation::begin(LocalWorkStep::BlobStorePublish);
-        let publish_result = self
-            .store
-            .blobs()
-            .add_bytes(ciphertext)
-            .with_named_tag(tag_name.as_bytes())
-            .await;
+        let publish_result = without_request_span(|| async {
+            self.store
+                .blobs()
+                .add_bytes(ciphertext)
+                .with_named_tag(tag_name.as_bytes())
+                .await
+        })
+        .await;
         observation.finish(if publish_result.is_ok() {
             LocalWorkOutcome::Ok
         } else {
@@ -222,17 +172,19 @@ impl BlobTransferPort for IrohBlobTransferAdapter {
         let started = Instant::now();
         let mode = preferred_import_mode();
         let tag_name = Self::tag_name(&reason);
-        let haf = self
-            .store
-            .blobs()
-            .add_path_with_opts(AddPathOptions {
-                path: path.to_owned(),
-                format: BlobFormat::Raw,
-                mode,
-            })
-            .with_named_tag(tag_name.as_bytes())
-            .await
-            .map_err(|e| BlobError::Internal(e.into()))?;
+        let haf = without_request_span(|| async {
+            self.store
+                .blobs()
+                .add_path_with_opts(AddPathOptions {
+                    path: path.to_owned(),
+                    format: BlobFormat::Raw,
+                    mode,
+                })
+                .with_named_tag(tag_name.as_bytes())
+                .await
+        })
+        .await
+        .map_err(|e| BlobError::Internal(e.into()))?;
         uc_info!(
             add_path_ms = started.elapsed().as_millis() as u64,
             mode = log_vocab_debug(&mode),
@@ -256,146 +208,9 @@ impl BlobTransferPort for IrohBlobTransferAdapter {
     }
 
     #[instrument(skip_all)]
-    async fn fetch(
-        &self,
-        ticket: &BlobTicket,
-        progress: Option<&dyn BlobProgressSink>,
-    ) -> Result<Bytes, BlobError> {
-        let native = Self::parse_ticket(ticket)?;
-        // GC race window protection: hold a TempTag for the whole fetch
-        // method. iroh-blobs `Downloader::download(...).stream()` does not
-        // attach any protection to the freshly downloaded blob
-        // (`api/downloader.rs`, 0.100), so a concurrent GC sweep between
-        // download completion and the caller's `BlobTransferPort::tag(...)`
-        // call could reclaim the blob. Keeping `_temp_tag` alive through
-        // both `ensure_blob_in_store` and `get_bytes` closes the in-method
-        // window; the remaining microsecond window between this method
-        // returning and the use case's permanent `tag(...)` call is
-        // dominated by the GC interval (1h) and is theoretical only.
-        let _temp_tag = self
-            .store
-            .tags()
-            .temp_tag(HashAndFormat::raw(native.hash()))
-            .await
-            .map_err(|e| {
-                BlobError::Internal(anyhow::Error::from(e).context("temp_tag for fetch").into())
-            })?;
-        self.ensure_blob_in_store(&native, progress).await?;
-        self.store
-            .blobs()
-            .get_bytes(native.hash())
-            .await
-            .map_err(|e| BlobError::Unavailable(e.into()))
-    }
-
-    #[instrument(skip_all)]
-    async fn fetch_to_path(
-        &self,
-        ticket: &BlobTicket,
-        target_path: &std::path::Path,
-        progress: Option<&dyn BlobProgressSink>,
-    ) -> Result<BlobDigest, BlobError> {
-        // GH#487 receive-side stream-out:走 `ExportMode::TryReference`,而不是
-        // `Blobs::export()` 默认的 `ExportMode::Copy`。
-        //
-        // `Copy` 在无 reflink 的 FS(NTFS / ext4)上 fallback 成 stream copy ——
-        // 把 store 里 owned data file 再写一遍到 target_path,800 MB 实测 ~19.5s,
-        // 与文件大小线性。
-        //
-        // `TryReference` 行为(iroh-blobs 0.97 `store/fs.rs:1281-1313`):
-        //   - target 与 store_dir **同卷**(典型场景:都装在 AppData / $HOME):
-        //     `std::fs::rename(store_owned_data, target)` —— 元数据操作 ~0ms,
-        //     与文件大小无关
-        //   - **跨卷**(rename 返回 ERR_CROSS):fallback 到
-        //     `reflink_or_copy_with_progress`,行为与 `Copy` 等同,不会更差
-        //   - 完成后 store entry 状态转为 External(指向 target),不再持有
-        //     owned 副本。`has(digest)` 仍报告 complete(由
-        //     `fetch_to_path_keeps_blob_observable_after_export` 测试覆盖契约),
-        //     `issue_ticket` 仍可签发,tag/untag 仍工作。
-        //
-        // 副作用:本端 store 不再持有 blob 的本地副本,无法再向其他对端转发
-        // 该 blob。但 clipboard 同步是单跳(sender → receiver),没人会再向
-        // receiver 拉同一个 blob,这条能力实际无人使用,可接受。
-        let native = Self::parse_ticket(ticket)?;
-        let digest = Self::core_digest(native.hash());
-
-        // GC race window protection — see `fetch` for the full rationale.
-        // Keeping `_temp_tag` alive through both `ensure_blob_in_store` and
-        // `export_with_opts` covers the in-method window; the caller's
-        // subsequent permanent `tag(...)` call closes it definitively.
-        let _temp_tag = self
-            .store
-            .tags()
-            .temp_tag(HashAndFormat::raw(native.hash()))
-            .await
-            .map_err(|e| {
-                BlobError::Internal(
-                    anyhow::Error::from(e)
-                        .context("temp_tag for fetch_to_path")
-                        .into(),
-                )
-            })?;
-
-        self.ensure_blob_in_store(&native, progress).await?;
-
-        let export_start = Instant::now();
-        let bytes_written = self
-            .store
-            .blobs()
-            .export_with_opts(ExportOptions {
-                hash: native.hash(),
-                mode: ExportMode::TryReference,
-                target: target_path.to_owned(),
-            })
-            .await
-            .map_err(|e| BlobError::Internal(e.into()))?;
-        uc_info!(
-            bytes = bytes_written,
-            export_ms = export_start.elapsed().as_millis() as u64,
-            "blob fetch_to_path: export completed (TryReference)"
-        );
-        Ok(digest)
-    }
-
-    #[instrument(skip_all)]
-    async fn shutdown_inflight_fetch(&self, ticket: &BlobTicket) -> Result<(), BlobError> {
-        // 取消的真实路径：撕掉 fetch task 用的那条 QUIC connection。
-        // iroh-blobs Downloader 把 download 任务挂在内部 JoinSet 上,caller
-        // drop progress receiver 不会传播取消(handle_download 用
-        // tx.send().await.ok() 吞错),所以唯一可靠的中止手段是让 actor 里
-        // execute_get 的 read 立刻报 Read(Reset) / ConnectionLost。
-        // ConnectionPool::close 通过 Downloader::shutdown_endpoint 暴露
-        // (vendor patch P3,见 UNICLIPBOARD_PATCH.md)。
-        //
-        // 幂等:对端不在 pool 里时 close 是 no-op。
-        let native = Self::parse_ticket(ticket)?;
-        let endpoint_id = native.addr().id;
-        match self.downloader().shutdown_endpoint(endpoint_id).await {
-            Ok(()) => {
-                uc_info!("blob fetch: shutdown_endpoint dispatched");
-                Ok(())
-            }
-            Err(err) => {
-                // Pool shutdown 是 process-wide 失败,不是单次 cancel 失败 ——
-                // 仍然映射成 Internal 让上层知道,但取消请求本身不视为"对端
-                // 还在传"的语义错误。
-                uc_warn!(
-                    error_kind = "endpoint_shutdown",
-                    io_error_kind = io_error_kind(&err),
-                    "blob fetch: shutdown_endpoint failed (pool already gone)"
-                );
-                Err(BlobError::Internal(err.into()))
-            }
-        }
-    }
-
-    #[instrument(skip_all)]
     async fn has(&self, digest: &BlobDigest) -> Result<bool, BlobError> {
         let hash = Self::native_hash(digest);
-        let observed = self
-            .store
-            .blobs()
-            .observe(hash)
+        let observed = without_request_span(|| self.store.blobs().observe(hash))
             .await
             .map_err(|e| BlobError::Internal(e.into()))?;
         Ok(observed.is_complete())
@@ -404,23 +219,20 @@ impl BlobTransferPort for IrohBlobTransferAdapter {
     #[instrument(skip_all)]
     async fn tag(&self, digest: &BlobDigest, reason: TagReason) -> Result<(), BlobError> {
         let name = Self::tag_name(&reason);
-        self.store
-            .tags()
-            .set(
+        without_request_span(|| {
+            self.store.tags().set(
                 name.as_bytes(),
                 HashAndFormat::raw(Self::native_hash(digest)),
             )
-            .await
-            .map_err(|e| BlobError::Internal(e.into()))
+        })
+        .await
+        .map_err(|e| BlobError::Internal(e.into()))
     }
 
     #[instrument(skip_all)]
     async fn untag(&self, reason: TagReason) -> Result<(), BlobError> {
         let name = Self::tag_name(&reason);
-        let removed = self
-            .store
-            .tags()
-            .delete(name.as_bytes())
+        let removed = without_request_span(|| self.store.tags().delete(name.as_bytes()))
             .await
             .map_err(|e| BlobError::Internal(e.into()))?;
         uc_debug!(removed = removed, "blob tag removed");
@@ -433,239 +245,9 @@ impl BlobTransferPort for IrohBlobTransferAdapter {
     }
 }
 
-impl IrohBlobTransferAdapter {
-    /// Make sure the local iroh store holds the blob the ticket points at,
-    /// either by serving the existing copy or by running the full
-    /// `pre-connect → downloader → retry` loop. Shared between
-    /// [`fetch`](BlobTransferPort::fetch) (which then `get_bytes`s the
-    /// store back into memory) and
-    /// [`fetch_to_path`](BlobTransferPort::fetch_to_path) (which then
-    /// `export`s the store entry into a target file). Pulling the loop
-    /// up here keeps the two trait methods in lockstep on retries,
-    /// progress sink semantics, and connection-pool warm-up.
-    async fn ensure_blob_in_store(
-        &self,
-        native: &NativeBlobTicket,
-        progress: Option<&dyn BlobProgressSink>,
-    ) -> Result<(), BlobError> {
-        let digest = Self::core_digest(native.hash());
-        if self.has(&digest).await? {
-            uc_info!("blob fetch: local hit, skipping network");
-            return Ok(());
-        }
-
-        // Pre-connect to seed the iroh endpoint's address lookup with the
-        // ticket's full `EndpointAddr` (relay + direct addrs). The downloader's
-        // ConnectionPool only takes `EndpointId`, so without this step it'd
-        // have to rediscover addrs via mDNS / pkarr.
-        //
-        // CRITICAL: We keep `_connection` in scope for the whole fetch. The
-        // previous implementation did `drop(connection)` immediately, which
-        // let the QUIC connection close before the downloader's ConnectionPool
-        // had a chance to reuse it — forcing a second hole-punch on every
-        // fetch (see phase notes: observed 33s blob-unavailable failures on
-        // cold paths). Holding the connection until the download completes
-        // gives the pool a warm reference to grab.
-        let connect_start = Instant::now();
-        // LAN-only Mode 防御：剥掉 ticket 解出的 EndpointAddr 中的 Relay 项，
-        // 否则 iroh-blobs 的 ConnectionPool 会用对端发布的 relay url 走中转。
-        // `strip_relay_if_lan_only` 内部读 runtime_consts 的进程级 LAN-only
-        // 常量；非 LAN-only 路径下零开销直接返回原 addr。
-        let dial_addr = super::connect::strip_relay_if_lan_only(native.addr().clone());
-        let _connection = match self.endpoint.connect(dial_addr, BLOBS_ALPN).await {
-            Ok(c) => c,
-            Err(e) => {
-                uc_warn!(
-                    elapsed_ms = connect_start.elapsed().as_millis() as u64,
-                    error_kind = "endpoint_connect",
-                    io_error_kind = io_error_kind(&e),
-                    "blob fetch: endpoint.connect failed"
-                );
-                return Err(BlobError::Unavailable(e.into()));
-            }
-        };
-        uc_info!(
-            elapsed_ms = connect_start.elapsed().as_millis() as u64,
-            "blob fetch: endpoint.connect ready, launching download"
-        );
-
-        // Throttle Progress(n) logs: 65MB blobs emit one event per chunk.
-        // Log a checkpoint every PROGRESS_LOG_BYTES so Seq can show shape of
-        // the transfer (continuous vs stalled) without flooding.
-        const PROGRESS_LOG_BYTES: u64 = 4 * 1024 * 1024;
-
-        // Progress sink 状态需要跨 attempt 持有,避免重试时进度条回退。
-        let mut last_reported_bytes: u64 = 0;
-        let mut last_reported_at: Option<Instant> = None;
-        let mut final_bytes: u64 = 0;
-        let mut total_tried_providers: u32 = 0;
-        let mut last_attempt_ms: u64 = 0;
-
-        let fetch_start = Instant::now();
-        for attempt in 1..=BLOB_FETCH_MAX_ATTEMPTS {
-            // Subscribe to the Downloader's progress stream instead of `.await`ing
-            // the IntoFuture form. iroh-blobs 0.97 `execute_get` (downloader.rs:472)
-            // discards the underlying QUIC error with `Err(_cause) => continue`,
-            // surfacing only the high-level `bail!("Unable to download {}", hash)`
-            // when all providers are exhausted. The progress channel is the only
-            // place where we can observe per-provider failures, byte-level
-            // progress, and the eventual `Error(anyhow::Error)` whose chain
-            // contains the real quinn cause (ConnectionLost, Read(Reset), etc).
-            let download_start = Instant::now();
-            let mut progress_stream = match self
-                .downloader()
-                .download(native.hash_and_format(), [native.addr().id])
-                .stream()
-                .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    uc_warn!(
-                        elapsed_ms = download_start.elapsed().as_millis() as u64,
-                        attempt = attempt,
-                        error_kind = "download_stream_open",
-                        io_error_kind = io_error_kind(&e),
-                        "blob fetch: downloader.stream() open failed"
-                    );
-                    return Err(BlobError::Unavailable(e.into()));
-                }
-            };
-
-            let mut bytes_so_far: u64 = 0;
-            let mut last_logged_bytes: u64 = 0;
-            let mut provider_failures: u32 = 0;
-            let mut tried_providers: u32 = 0;
-
-            let download_result: Result<(), BlobError> = loop {
-                let Some(item) = progress_stream.next().await else {
-                    break Ok(());
-                };
-                match item {
-                    DownloadProgressItem::TryProvider { .. } => {
-                        tried_providers += 1;
-                        uc_info!(
-                            elapsed_ms = download_start.elapsed().as_millis() as u64,
-                            attempt = attempt,
-                            "blob fetch: trying provider"
-                        );
-                    }
-                    DownloadProgressItem::ProviderFailed { .. } => {
-                        provider_failures += 1;
-                        // execute_get drops the underlying error here — we only
-                        // get to know which provider failed and how far we got.
-                        uc_warn!(
-                            elapsed_ms = download_start.elapsed().as_millis() as u64,
-                            bytes_downloaded = bytes_so_far,
-                            attempt = attempt,
-                            "blob fetch: provider failed (cause discarded by iroh-blobs::execute_get)"
-                        );
-                    }
-                    DownloadProgressItem::Progress(total) => {
-                        bytes_so_far = total;
-                        if total >= last_logged_bytes + PROGRESS_LOG_BYTES {
-                            uc_info!(
-                                bytes = total,
-                                elapsed_ms = download_start.elapsed().as_millis() as u64,
-                                attempt = attempt,
-                                "blob fetch: progress checkpoint"
-                            );
-                            last_logged_bytes = total;
-                        }
-                        if let Some(sink) = progress {
-                            // 仅按时间窗节流(<=5 emits/sec)。字节窗会被高带宽绕过,
-                            // 详见 PROGRESS_REPORT_INTERVAL 常量上的 Phase 4 注释。
-                            let due_by_time = last_reported_at
-                                .map(|t| t.elapsed() >= PROGRESS_REPORT_INTERVAL)
-                                .unwrap_or(true);
-                            if due_by_time && total > last_reported_bytes {
-                                sink.report(total, None).await;
-                                last_reported_bytes = total;
-                                last_reported_at = Some(Instant::now());
-                            }
-                        }
-                    }
-                    DownloadProgressItem::PartComplete { .. } => {
-                        uc_info!(
-                            bytes = bytes_so_far,
-                            elapsed_ms = download_start.elapsed().as_millis() as u64,
-                            attempt = attempt,
-                            "blob fetch: part complete"
-                        );
-                        if let Some(sink) = progress {
-                            if bytes_so_far > last_reported_bytes {
-                                sink.report(bytes_so_far, Some(bytes_so_far)).await;
-                                last_reported_bytes = bytes_so_far;
-                                last_reported_at = Some(Instant::now());
-                            }
-                        }
-                    }
-                    DownloadProgressItem::DownloadError => {
-                        uc_warn!(
-                            elapsed_ms = download_start.elapsed().as_millis() as u64,
-                            bytes_downloaded = bytes_so_far,
-                            provider_failures = provider_failures,
-                            tried_providers = tried_providers,
-                            attempt = attempt,
-                            "blob fetch: DownloadError signalled (split-strategy aggregate failure)"
-                        );
-                        break Err(BlobError::Unavailable("Download error".into()));
-                    }
-                    DownloadProgressItem::Error(e) => {
-                        // The single most useful event: the anyhow chain here
-                        // typically wraps the quinn::ConnectionError or
-                        // ReadError that `execute_get` swallowed earlier.
-                        uc_warn!(
-                            elapsed_ms = download_start.elapsed().as_millis() as u64,
-                            bytes_downloaded = bytes_so_far,
-                            provider_failures = provider_failures,
-                            tried_providers = tried_providers,
-                            attempt = attempt,
-                            error_kind = "download_stream",
-                            io_error_kind = io_error_kind(&e),
-                            "blob fetch: downloader Error event (root cause from anyhow chain)"
-                        );
-                        break Err(BlobError::Unavailable(e.into()));
-                    }
-                }
-            };
-
-            last_attempt_ms = download_start.elapsed().as_millis() as u64;
-            total_tried_providers = total_tried_providers.saturating_add(tried_providers);
-
-            match download_result {
-                Ok(()) => {
-                    final_bytes = bytes_so_far;
-                    break;
-                }
-                Err(BlobError::Unavailable(msg)) if attempt < BLOB_FETCH_MAX_ATTEMPTS => {
-                    let backoff = BLOB_FETCH_BACKOFFS[(attempt - 1) as usize];
-                    uc_warn!(
-                        attempt = attempt,
-                        max_attempts = BLOB_FETCH_MAX_ATTEMPTS,
-                        backoff_ms = backoff.as_millis() as u64,
-                        error_kind = "blob_unavailable_retry",
-                        io_error_kind = io_error_kind(msg.as_ref()),
-                        "blob fetch: retrying after Unavailable"
-                    );
-                    tokio::time::sleep(backoff).await;
-                    continue;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-
-        uc_info!(
-            bytes = final_bytes,
-            last_attempt_ms = last_attempt_ms,
-            download_ms = fetch_start.elapsed().as_millis() as u64,
-            connect_ms = (connect_start.elapsed() - fetch_start.elapsed()).as_millis() as u64,
-            tried_providers = total_tried_providers,
-            "blob fetch: download complete"
-        );
-
-        Ok(())
-    }
-}
+#[cfg(test)]
+#[path = "../../../tests/support/blob_leases/lease.rs"]
+mod lease_fixture;
 
 #[cfg(test)]
 mod tests {
@@ -677,8 +259,15 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
+    use crate::network::iroh::blob_exchange::IrohBlobExchangeAdapter;
     use iroh::{protocol::Router, RelayMode};
     use tempfile::{tempdir, TempDir};
+    use tokio::time::Instant as TokioInstant;
+    use tokio_util::sync::CancellationToken;
+    use tracing::instrument::WithSubscriber;
+    use uc_application::deps::{
+        BlobExchangeError, BlobExchangePort, BlobReadStorePort, BlobValidatedProgress,
+    };
     use uc_core::ids::EntryId;
 
     #[derive(Clone, Default)]
@@ -715,6 +304,7 @@ mod tests {
 
     struct Fixture {
         adapter: IrohBlobTransferAdapter,
+        exchange: IrohBlobExchangeAdapter,
         router: Router,
         store: FsStore,
         _tempdir: TempDir,
@@ -722,25 +312,30 @@ mod tests {
 
     impl Fixture {
         async fn bind() -> anyhow::Result<Self> {
-            let tempdir = tempdir()?;
-            let store = FsStore::load(store_path(&tempdir)).await?;
-            let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
-                .relay_mode(RelayMode::Disabled)
-                .bind()
-                .await?;
-            let protocol = iroh_blobs::BlobsProtocol::new(&store, None);
-            let router = Router::builder(endpoint.clone())
-                .accept(BLOBS_ALPN, protocol)
-                .spawn();
-            let endpoint = Arc::new(endpoint);
-            let adapter = IrohBlobTransferAdapter::new(endpoint, store.clone());
+            // 与生产节点一致：SDK长期驱动不持有测试启动subscriber的span。
+            without_request_span(|| async {
+                let tempdir = tempdir()?;
+                let store = FsStore::load(store_path(&tempdir)).await?;
+                let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
+                    .relay_mode(RelayMode::Disabled)
+                    .bind()
+                    .await?;
+                let protocol = iroh_blobs::BlobsProtocol::new(&store, None);
+                let router = Router::builder(endpoint.clone())
+                    .accept(BLOBS_ALPN, protocol)
+                    .spawn();
+                let endpoint = Arc::new(endpoint);
+                let adapter = IrohBlobTransferAdapter::new(endpoint, store.clone());
 
-            Ok(Self {
-                adapter,
-                router,
-                store,
-                _tempdir: tempdir,
+                Ok(Self {
+                    adapter,
+                    exchange: IrohBlobExchangeAdapter::new(store.clone()),
+                    router,
+                    store,
+                    _tempdir: tempdir,
+                })
             })
+            .await
         }
 
         async fn wait_for_direct_addr(&self) -> anyhow::Result<()> {
@@ -782,10 +377,10 @@ mod tests {
         reports: AtomicUsize,
     }
 
-    #[async_trait]
-    impl BlobProgressSink for CountingProgressSink {
-        async fn report(&self, _bytes_transferred: u64, _total_bytes: Option<u64>) {
+    impl BlobValidatedProgress for CountingProgressSink {
+        fn validated_through(&self, _: u64, _: u64) -> Result<(), BlobExchangeError> {
             self.reports.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         }
     }
 
@@ -807,11 +402,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_to_path_writes_local_hit_to_target() -> anyhow::Result<()> {
-        // GH#487 Phase 2: when the blob is already in the local store
-        // (e.g. publisher fetching its own ticket), fetch_to_path must
-        // export it directly to the target path without going through
-        // the network or materialising the bytes in memory.
+    async fn local_export_writes_cached_ciphertext_to_target() -> anyhow::Result<()> {
+        // GH#487：本地已有密文通过专属存储能力直接导出，
+        // 不建连，也不把完整文件加载到内存。
         let fixture = Fixture::bind().await?;
         fixture.wait_for_direct_addr().await?;
         let payload = b"gh-487-fetch-to-path-local-hit".to_vec();
@@ -823,15 +416,19 @@ mod tests {
             )
             .await?;
         let ticket = fixture.adapter.issue_ticket(&digest).await?;
+        assert_eq!(fixture.adapter.digest_of(&ticket)?, digest);
 
         let dir = tempdir()?;
         let target = dir.path().join("out.bin");
-        let returned = fixture
-            .adapter
-            .fetch_to_path(&ticket, &target, None)
-            .await?;
+        let content = fixture
+            .exchange
+            .protect(digest)
+            .await?
+            .expect("protected local ciphertext");
+        let returned = fixture.exchange.export(digest, &target).await?;
+        drop(content);
 
-        assert_eq!(returned, digest);
+        assert_eq!(returned, payload.len() as u64);
         let written = std::fs::read(&target)?;
         assert_eq!(written, payload);
         fixture.shutdown().await?;
@@ -839,8 +436,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_to_path_try_reference_writes_correct_bytes_above_inline_limit(
-    ) -> anyhow::Result<()> {
+    async fn local_export_try_reference_writes_bytes_above_inline_limit() -> anyhow::Result<()> {
         // GH#487 receive-side TryReference: payload must exceed iroh-blobs'
         // default 16 KiB inline threshold so the store actually holds an
         // owned data file (the only case TryReference's `fs::rename` branch
@@ -855,15 +451,19 @@ mod tests {
             .publish(Bytes::from(payload.clone()), dummy_reason("fetch-try-ref"))
             .await?;
         let ticket = fixture.adapter.issue_ticket(&digest).await?;
+        assert_eq!(fixture.adapter.digest_of(&ticket)?, digest);
 
         let dir = tempdir()?;
         let target = dir.path().join("big.bin");
-        let returned = fixture
-            .adapter
-            .fetch_to_path(&ticket, &target, None)
-            .await?;
+        let content = fixture
+            .exchange
+            .protect(digest)
+            .await?
+            .expect("protected local ciphertext");
+        let returned = fixture.exchange.export(digest, &target).await?;
+        drop(content);
 
-        assert_eq!(returned, digest);
+        assert_eq!(returned, payload.len() as u64);
         let written = std::fs::read(&target)?;
         assert_eq!(written.len(), payload.len());
         assert_eq!(written, payload);
@@ -872,7 +472,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_to_path_keeps_blob_observable_after_export() -> anyhow::Result<()> {
+    async fn local_export_keeps_blob_observable_after_export() -> anyhow::Result<()> {
         // GH#487 receive-side TryReference contract regression: after export
         // the iroh store transitions the entry to External(target_path) and
         // drops its owned data file. `has(digest)` must still report
@@ -890,13 +490,17 @@ mod tests {
             )
             .await?;
         let ticket = fixture.adapter.issue_ticket(&digest).await?;
+        assert_eq!(fixture.adapter.digest_of(&ticket)?, digest);
 
         let dir = tempdir()?;
         let target = dir.path().join("exported.bin");
-        fixture
-            .adapter
-            .fetch_to_path(&ticket, &target, None)
-            .await?;
+        let content = fixture
+            .exchange
+            .protect(digest)
+            .await?
+            .expect("protected local ciphertext");
+        fixture.exchange.export(digest, &target).await?;
+        drop(content);
 
         assert!(
             fixture.adapter.has(&digest).await?,
@@ -949,7 +553,12 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn publish_path_logs_do_not_include_source_path() -> anyhow::Result<()> {
-        let fixture = Fixture::bind().await?;
+        // 启动与请求使用不同registry，显式覆盖SDK关闭时误用启动span的回归。
+        let fixture = Fixture::bind()
+            .with_subscriber(tracing::Dispatch::new(
+                tracing_subscriber::Registry::default(),
+            ))
+            .await?;
         let dir = tempdir()?;
         let secret_name = "customer-payroll-private.bin";
         let path = dir.path().join(secret_name);
@@ -969,6 +578,10 @@ mod tests {
             .await?;
 
         let logs = writer.dump();
+        assert!(
+            logs.contains("iroh blob publish: add_path completed"),
+            "实际adapter完成记录必须被捕获"
+        );
         assert!(
             !logs.contains(secret_name),
             "source path leaked into adapter logs: {logs}"
@@ -1061,14 +674,18 @@ mod tests {
             .await?;
         let digest = IrohBlobTransferAdapter::core_digest(tag_info.hash);
         let ticket = fixture.adapter.issue_ticket(&digest).await?;
+        assert_eq!(fixture.adapter.digest_of(&ticket)?, digest);
 
         let target = dir.path().join("out.bin");
-        let returned = fixture
-            .adapter
-            .fetch_to_path(&ticket, &target, None)
-            .await?;
+        let content = fixture
+            .exchange
+            .protect(digest)
+            .await?
+            .expect("protected local ciphertext");
+        let returned = fixture.exchange.export(digest, &target).await?;
+        drop(content);
 
-        assert_eq!(returned, digest);
+        assert_eq!(returned, payload.len() as u64);
         let fetched = std::fs::read(&target)?;
         assert_eq!(fetched, payload);
         fixture.shutdown().await?;
@@ -1106,6 +723,7 @@ mod tests {
             .await?;
 
         let ticket = fixture.adapter.issue_ticket(&digest).await?;
+        assert_eq!(fixture.adapter.digest_of(&ticket)?, digest);
 
         assert_eq!(fixture.adapter.digest_of(&ticket)?, digest);
         assert_eq!(
@@ -1156,8 +774,12 @@ mod tests {
             .publish(payload.clone(), dummy_reason("self-fetch"))
             .await?;
         let ticket = fixture.adapter.issue_ticket(&digest).await?;
+        assert_eq!(fixture.adapter.digest_of(&ticket)?, digest);
 
-        let fetched = fixture.adapter.fetch(&ticket, None).await?;
+        let fetched = fixture
+            .exchange
+            .read(fixture.adapter.digest_of(&ticket)?)
+            .await?;
 
         assert_eq!(fetched, payload);
         fixture.shutdown().await?;
@@ -1177,7 +799,29 @@ mod tests {
             .await?;
         let ticket = provider.adapter.issue_ticket(&digest).await?;
 
-        let fetched = receiver.adapter.fetch(&ticket, None).await?;
+        let native = NativeBlobTicket::decode_bytes(ticket.as_bytes())?;
+        let connection = receiver
+            .adapter
+            .endpoint
+            .connect(native.addr().clone(), BLOBS_ALPN)
+            .await?;
+        let (manager, lease) = lease_fixture::lease(connection, false).await?;
+        let stream = lease
+            .open_bi(TokioInstant::now() + Duration::from_secs(5))
+            .await?;
+        let content = receiver
+            .exchange
+            .receive(
+                stream,
+                digest,
+                CancellationToken::new(),
+                Arc::new(CountingProgressSink::default()),
+            )
+            .await?;
+        let fetched = receiver.exchange.read(content.digest).await?;
+        drop(content);
+        drop(lease);
+        manager.shutdown().await?;
 
         assert_eq!(fetched, payload);
         receiver.shutdown().await?;
@@ -1186,8 +830,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn partially_cached_directory_batch_downloads_only_missing_member() -> anyhow::Result<()>
-    {
+    async fn cached_protection_and_managed_missing_member_preserve_directory_bytes(
+    ) -> anyhow::Result<()> {
         let provider = Fixture::bind().await?;
         let receiver = Fixture::bind().await?;
         provider.wait_for_direct_addr().await?;
@@ -1209,7 +853,6 @@ mod tests {
                 dummy_reason("resend-provider-missing"),
             )
             .await?;
-        let cached_ticket = provider.adapter.issue_ticket(&cached_digest).await?;
         let missing_ticket = provider.adapter.issue_ticket(&missing_digest).await?;
 
         let receiver_cached_digest = receiver
@@ -1224,21 +867,47 @@ mod tests {
         let target_dir = tempdir()?;
         let cached_target = target_dir.path().join("cached-member.bin");
         let missing_target = target_dir.path().join("missing-member.bin");
-        let cached_progress = CountingProgressSink::default();
-        let missing_progress = CountingProgressSink::default();
-
+        let cached_content = receiver
+            .exchange
+            .protect(cached_digest)
+            .await?
+            .expect("cached member");
+        assert!(receiver.exchange.protect(missing_digest).await?.is_none());
         receiver
+            .exchange
+            .export(cached_digest, &cached_target)
+            .await?;
+        drop(cached_content);
+        let missing_progress = Arc::new(CountingProgressSink::default());
+        let native = NativeBlobTicket::decode_bytes(missing_ticket.as_bytes())?;
+        let connection = receiver
             .adapter
-            .fetch_to_path(&cached_ticket, &cached_target, Some(&cached_progress))
+            .endpoint
+            .connect(native.addr().clone(), BLOBS_ALPN)
+            .await?;
+        let (manager, lease) = lease_fixture::lease(connection, false).await?;
+        let stream = lease
+            .open_bi(TokioInstant::now() + Duration::from_secs(5))
+            .await?;
+        let content = receiver
+            .exchange
+            .receive(
+                stream,
+                missing_digest,
+                CancellationToken::new(),
+                missing_progress.clone(),
+            )
             .await?;
         receiver
-            .adapter
-            .fetch_to_path(&missing_ticket, &missing_target, Some(&missing_progress))
+            .exchange
+            .export(content.digest, &missing_target)
             .await?;
+        drop(content);
+        drop(lease);
+        manager.shutdown().await?;
 
         assert_eq!(std::fs::read(cached_target)?, cached_payload);
         assert_eq!(std::fs::read(missing_target)?, missing_payload);
-        assert_eq!(cached_progress.reports.load(Ordering::SeqCst), 0);
         assert!(missing_progress.reports.load(Ordering::SeqCst) > 0);
 
         receiver.shutdown().await?;
@@ -1314,9 +983,9 @@ mod tests {
         // 复现"用户删 entry 后立即点旧历史"的场景:
         //   1. publish + tag (业务侧持有声明)
         //   2. untag (模拟 DeleteClipboardEntryUseCase)
-        //   3. has + issue_ticket + fetch_to_path (GUI 立即点旧历史)
+        //   3. has + issue_ticket + 本地export（GUI立即点旧历史）
         //
-        // fetch_to_path 内部读 bao outboard,是原 panic 真正触发的代码
+        // 本地export内部读bao outboard，是原panic真正触发的代码
         // 路径 —— 跑通即证明我们没有把 store 弄成 Poisoned 状态。
         //
         // 64 KiB 大于 iroh-blobs 默认 16 KiB inline 阈值,确保实际写出
@@ -1329,7 +998,7 @@ mod tests {
         // Phase F: publish 已原子打业务 tag,无需再单独 tag()。这同时是
         // Phase F 后语义对齐的关键 —— 1h GC interval 内 untag 后 store 立即
         // **完全无 tag 保护**(没有 auto-tag 兜底了),仍要求 has /
-        // issue_ticket / fetch_to_path 在内存路径(尚未触发 GC)上不进入
+        // issue_ticket / 本地export在内存路径(尚未触发 GC)上不进入
         // Poisoned 状态。如果未来有人在 publish/untag 路径里偷偷物理 unlink
         // data 文件,这个测试同样会抓到。
         let digest = fixture
@@ -1346,16 +1015,20 @@ mod tests {
             "untag must not remove metadata: blob should still be observable"
         );
         let ticket = fixture.adapter.issue_ticket(&digest).await?;
+        assert_eq!(fixture.adapter.digest_of(&ticket)?, digest);
 
-        // local-hit fetch_to_path 走完整的 bao outboard 读取路径,
+        // 本地export走完整的bao outboard读取路径，
         // 是原 panic 真正触发的代码点。
         let dir = tempdir()?;
         let target = dir.path().join("after_untag.bin");
-        let returned = fixture
-            .adapter
-            .fetch_to_path(&ticket, &target, None)
-            .await?;
-        assert_eq!(returned, digest);
+        let content = fixture
+            .exchange
+            .protect(digest)
+            .await?
+            .expect("protected local ciphertext");
+        let returned = fixture.exchange.export(digest, &target).await?;
+        drop(content);
+        assert_eq!(returned, payload.len() as u64);
         let written = std::fs::read(&target)?;
         assert_eq!(
             written, payload,

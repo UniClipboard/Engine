@@ -37,7 +37,7 @@
 
 ## local debug
 
-共 1353 个调用点。
+共 1335 个调用点。
 
 | Target | 调用点 | 类型 | 风险标记 |
 | --- | --- | --- | --- |
@@ -1034,33 +1034,15 @@
 | `<module>` | `crates/uc-infra-p2p/src/network/iroh/blob_exchange/handler.rs:32` | `warn` | message-body |
 | `<module>` | `crates/uc-infra-p2p/src/network/iroh/blob_exchange/io.rs:84` | `record` | raw-error |
 | `<module>` | `crates/uc-infra-p2p/src/network/iroh/blob_exchange/io.rs:99` | `record` | raw-error |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:147` | `instrument` | - |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:183` | `info` | message-body |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:191` | `instrument` | - |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:236` | `info` | message-body |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:244` | `instrument` | - |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:258` | `instrument` | - |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:291` | `instrument` | - |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:352` | `info` | message-body |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:360` | `instrument` | - |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:375` | `info` | message-body |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:382` | `warn` | message-body |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:392` | `instrument` | - |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:404` | `instrument` | - |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:417` | `instrument` | - |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:426` | `debug` | message-body |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:453` | `info` | message-body |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:478` | `warn` | message-body |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:487` | `info` | message-body |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:523` | `warn` | message-body |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:546` | `info` | message-body |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:556` | `warn` | message-body |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:566` | `info` | message-body |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:588` | `info` | message-body |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:603` | `warn` | message-body |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:617` | `warn` | message-body |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:642` | `warn` | message-body |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:657` | `info` | message-body |
+| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:95` | `instrument` | - |
+| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:133` | `info` | message-body |
+| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:141` | `instrument` | - |
+| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:188` | `info` | message-body |
+| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:196` | `instrument` | - |
+| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:210` | `instrument` | - |
+| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:219` | `instrument` | - |
+| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:232` | `instrument` | - |
+| `<module>` | `crates/uc-infra-p2p/src/network/iroh/blobs.rs:238` | `debug` | message-body |
 | `<module>` | `crates/uc-infra-p2p/src/network/iroh/connection_census.rs:94` | `info` | message-body |
 | `<module>` | `crates/uc-infra-p2p/src/network/iroh/connection_channel_adapter.rs:78` | `debug` | message-body |
 | `<module>` | `crates/uc-infra-p2p/src/network/iroh/connection_channel_adapter.rs:82` | `debug` | message-body |
@@ -1089,18 +1071,18 @@
 | `iroh.net_recovery` | `crates/uc-infra-p2p/src/network/iroh/net_recovery.rs:436` | `warn` | message-body |
 | `iroh.net_recovery` | `crates/uc-infra-p2p/src/network/iroh/net_recovery.rs:481` | `info` | message-body |
 | `<module>` | `crates/uc-infra-p2p/src/network/iroh/network_log_e2e.rs:72` | `record` | - |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/node.rs:455` | `info` | message-body |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/node.rs:487` | `info` | message-body |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/node.rs:657` | `warn` | message-body |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/node.rs:862` | `instrument` | - |
-| `iroh.addr_filter` | `crates/uc-infra-p2p/src/network/iroh/node.rs:878` | `info` | message-body |
-| `iroh.address_lookup` | `crates/uc-infra-p2p/src/network/iroh/node.rs:930` | `info` | message-body |
-| `iroh.bind` | `crates/uc-infra-p2p/src/network/iroh/node.rs:961` | `info` | message-body |
-| `iroh.bind` | `crates/uc-infra-p2p/src/network/iroh/node.rs:975` | `info` | message-body |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/node.rs:1042` | `debug` | message-body |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/node.rs:1529` | `info` | message-body |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/node.rs:1533` | `warn` | message-body |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/node.rs:1550` | `info` | message-body |
+| `<module>` | `crates/uc-infra-p2p/src/network/iroh/node.rs:456` | `info` | message-body |
+| `<module>` | `crates/uc-infra-p2p/src/network/iroh/node.rs:488` | `info` | message-body |
+| `<module>` | `crates/uc-infra-p2p/src/network/iroh/node.rs:658` | `warn` | message-body |
+| `<module>` | `crates/uc-infra-p2p/src/network/iroh/node.rs:863` | `instrument` | - |
+| `iroh.addr_filter` | `crates/uc-infra-p2p/src/network/iroh/node.rs:879` | `info` | message-body |
+| `iroh.address_lookup` | `crates/uc-infra-p2p/src/network/iroh/node.rs:934` | `info` | message-body |
+| `iroh.bind` | `crates/uc-infra-p2p/src/network/iroh/node.rs:965` | `info` | message-body |
+| `iroh.bind` | `crates/uc-infra-p2p/src/network/iroh/node.rs:979` | `info` | message-body |
+| `<module>` | `crates/uc-infra-p2p/src/network/iroh/node.rs:1045` | `debug` | message-body |
+| `<module>` | `crates/uc-infra-p2p/src/network/iroh/node.rs:1534` | `info` | message-body |
+| `<module>` | `crates/uc-infra-p2p/src/network/iroh/node.rs:1538` | `warn` | message-body |
+| `<module>` | `crates/uc-infra-p2p/src/network/iroh/node.rs:1555` | `info` | message-body |
 | `<module>` | `crates/uc-infra-p2p/src/network/iroh/node/shutdown.rs:54` | `instrument` | - |
 | `<module>` | `crates/uc-infra-p2p/src/network/iroh/node/shutdown.rs:104` | `warn` | message-body |
 | `<module>` | `crates/uc-infra-p2p/src/network/iroh/node/shutdown.rs:125` | `debug` | message-body |

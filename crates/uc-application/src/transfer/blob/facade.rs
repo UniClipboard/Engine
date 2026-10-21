@@ -1152,6 +1152,10 @@ impl BlobProgressSink for FileTransferProgressSink {
 
 #[cfg(test)]
 mod tests {
+    use crate::transfer::blob::test_support::retained;
+    use crate::transfer::blob::transport::{BlobExchangeError, BlobReadStorePort, BlobReceived};
+    use std::path::Path;
+
     use super::*;
     use tokio::sync::Semaphore;
     use uc_core::clipboard::{ContentHash, HashAlgorithm};
@@ -1261,6 +1265,28 @@ mod tests {
     }
 
     #[async_trait]
+    impl BlobReadStorePort for BlockingBlobTransfer {
+        async fn protect(
+            &self,
+            digest: BlobDigest,
+        ) -> Result<Option<BlobReceived>, BlobExchangeError> {
+            Ok(Some(retained(digest)))
+        }
+        async fn read(&self, _: BlobDigest) -> Result<Bytes, BlobExchangeError> {
+            self.started.add_permits(1);
+            self.release
+                .acquire()
+                .await
+                .expect("release slow local work")
+                .forget();
+            Ok(Bytes::from_static(b"image"))
+        }
+        async fn export(&self, _: BlobDigest, _: &Path) -> Result<u64, BlobExchangeError> {
+            panic!("unused local export")
+        }
+    }
+
+    #[async_trait]
     impl BlobTransferPort for BlockingBlobTransfer {
         async fn publish(
             &self,
@@ -1280,34 +1306,6 @@ mod tests {
 
         async fn issue_ticket(&self, _digest: &BlobDigest) -> Result<BlobTicket, BlobError> {
             Err(BlobError::Internal("unused".into()))
-        }
-
-        async fn fetch(
-            &self,
-            _ticket: &BlobTicket,
-            _progress: Option<&dyn BlobProgressSink>,
-        ) -> Result<Bytes, BlobError> {
-            self.started.add_permits(1);
-            let permit = self
-                .release
-                .acquire()
-                .await
-                .map_err(|error| BlobError::Internal(error.into()))?;
-            permit.forget();
-            Ok(Bytes::from_static(b"image"))
-        }
-
-        async fn fetch_to_path(
-            &self,
-            _ticket: &BlobTicket,
-            _target_path: &std::path::Path,
-            _progress: Option<&dyn BlobProgressSink>,
-        ) -> Result<BlobDigest, BlobError> {
-            Err(BlobError::Internal("unused".into()))
-        }
-
-        async fn shutdown_inflight_fetch(&self, _ticket: &BlobTicket) -> Result<(), BlobError> {
-            panic!("cancellation must not close a peer connection")
         }
 
         async fn has(&self, _digest: &BlobDigest) -> Result<bool, BlobError> {

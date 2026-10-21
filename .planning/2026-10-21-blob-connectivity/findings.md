@@ -131,3 +131,24 @@
 - 新receive_item_ids集中原数组映射，来源／retry seed／capture共用；目录仍整单元，不声明单成员交付。App真实重试测试同时验证只把旧成果和新增成果提交，不包含未选取消项。
 - 定向真实提交／加密／目录契约共10通过；完整App1207通过／1跳过、Core335通过、Storage260通过／3跳过。首次check的私有identity路径错误改用有限crate内导出；新增集成测试子模块路径需显式path属性，修正后通过。失败日志保留。
 - 历史partial行可能只有裸下载Completed；其原始行未改写或删除，但在无保存证明时保守展示中断。完整历史成果恢复必须基于已有密文快照／产物资料继续实现，不能靠这次新写标记宣称已兼容全部历史结果。
+
+
+## 2026-10-22 生产下载旁路删除
+
+- 普通redelivery在begin后retain_source会把旧receipt及landed覆盖；后续partial-vs-partial分支又保留旧entry、回滚新输出。不能按fresh数组直接移植旧证明：Representation保存证明核验原ID和正文，新包中的ID／来源可能改变。需要原资料完整衔接；当前未实现，不以任意拒绝全部重投缩减能力。
+- 确认旧BlobTransferPort.fetch／fetch_to_path／shutdown_inflight_fetch仅剩测试消费者，但真实IrohBlobTransferAdapter仍完整保留Downloader缓存、endpoint预热、4次重试和shutdown_endpoint。已删除全部生产实现和trait方法，Engine测试发布装饰器也不转发旧方法。
+- 本地导出回归移至实际BlobReadStorePort，返回值为字节数，因此迁移初次check发现4处旧Digest返回断言；改为实际长度、独立ticket摘要和精确字节验证，未删断言。真实Uni远端读取＋local／tag／TryReference19通过，实际生产provider的同连接A取消B不受影响及旧客户端空连接2通过。
+- FakeLocalStore不再调用旧网络fetch，复用独立本地port；完整App1207通过／1跳过、Core335通过。共享SDK租约fixture拆出纯租约模块，首次整组check漏引ConnectivityError，修复后重跑；失败日志保留。
+- SDK Downloader仅在明确旧角色fixture保留；阶段0的1GiB基线直接固定SDK，不通过已退休生产adapter，保留相同长寿命pool到原资源采样完成。它仍只代表历史基线，最终生产资源矩阵尚未完成。
+- 新repository五个反例及当前源码均通过：旧能力、SDK pool、peer-wide取消、原生provider与bridge内部流编排不可回流。完整P2P／向量／故障探针与1GiB历史基线继续运行。
+
+
+## 扩大回归揭示SDK与长期actor的span所有权
+
+- 全库初轮320通过／2失败／3跳过：真实固定SDK meta.rs:708的info_span(parent: &cmd.parent_span())在全局subscriber创建子span，却拿到请求局部subscriber的ID。独立运行通过，但先运行accepts_single_inbound_frame_from_known_peer安装全局过滤subscriber后，publish_path_logs_do_not_include_source_path在0.3秒稳定失败，RPC sender关闭。全局＋请求subscriber是load-bearing条件，原生连接诊断关闭也在actor析构时向全局registry释放局部parent。
+- 单变量把SDK add_path future的创建／驱动移出请求parent后，原始3测试从2失败降为仅node关闭失败；领域完成日志仍在外层，新增正向捕获断言，未过滤第三方记录去掩盖问题，也未改固定iroh-blobs源。之后把相同私有store_scope策略覆盖生产SDK能力，maker接缝接受IntoFuture，防止future创建时就捕获局部parent。
+- mDNS外层actor需要显式parent None；acto发现服务的同步spawn也不能保存启动请求parent。只改外层时Rust测试状态ok，但stderr仍有guardian析构panic，不作green。恢复两层隔离后原最小组无panic。
+- 新startup_trace_tests使用真实Node完整bind＋session激活，并在发现仍运行时检查根span已关闭；正确async instrument red在临时移除discoverer隔离后0通过1失败（0.01秒），parent树明确为startup→Node.bind→guardian→sender/receivers，恢复后green。第一版enter守卫跨await会给其它任务错误parent，已经纠正，该版失败不作修复证据。Endpoint原生构造与bind future创建／驱动统一隔离；诊断recorder在外层捕获并继续输出实际网络结果。
+- 当前正确4测试组合0.26秒全通过且无panic；整库／SDK资源验证仍在运行。SDK协议、票据、blob字节、失败链与停止等待算法未改；没有新增Engine业务步骤接口。
+
+- 最后整库322通过／1失败／3跳过，SDK／向量／1GiB独立二进制各通过；失败堆栈已从SDK事务worker转为测试Endpoint关闭，socket.rs:1128／1208显式使用启动subscriber的span。扩大78测试复现77通过／1失败，完整backtrace保留trace-dispatch-repro-expanded.log。隐私测试显式跨两个registry后单跑0通过1失败（0.08秒，endpoint-subscriber-red.log），不再依赖全局前置顺序。fixture SDK启动按生产边界隔离后最小3通过，日志正向捕获与路径隐私断言保留。最终整库323通过／3跳过（167.73秒），SDK结算1通过（0.43秒）、协议向量1通过，remove-legacy-p2p-final.log无panic。

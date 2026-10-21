@@ -16,41 +16,30 @@ use tokio_util::sync::CancellationToken;
 use uc_core::ids::DeviceId;
 use uc_core::ports::blob::{BlobDigest, BlobTicket, BlobTransferPort};
 
-pub(super) struct FakeLocalStore(pub Arc<dyn BlobTransferPort>);
+pub(super) struct FakeLocalStore<T>(pub Arc<T>);
 struct Protection;
+pub(super) fn retained(digest: BlobDigest) -> BlobReceived {
+    BlobReceived {
+        digest,
+        size: 0,
+        protection: Box::new(Protection),
+    }
+}
 impl BlobRetainedContent for Protection {}
 #[async_trait]
-impl BlobReadStorePort for FakeLocalStore {
+impl<T: BlobTransferPort + BlobReadStorePort> BlobReadStorePort for FakeLocalStore<T> {
     async fn protect(&self, digest: BlobDigest) -> Result<Option<BlobReceived>, BlobExchangeError> {
-        Ok(Some(BlobReceived {
-            digest,
-            size: 0,
-            protection: Box::new(Protection),
-        }))
+        self.0.protect(digest).await
     }
     async fn read(&self, digest: BlobDigest) -> Result<Bytes, BlobExchangeError> {
-        self.0
-            .fetch(&BlobTicket::from_bytes(digest.as_bytes().to_vec()), None)
-            .await
-            .map_err(|source| BlobExchangeError::new(BlobExchangeFailure::Store, source))
+        self.0.read(digest).await
     }
     async fn export(&self, digest: BlobDigest, target: &Path) -> Result<u64, BlobExchangeError> {
-        self.0
-            .fetch_to_path(
-                &BlobTicket::from_bytes(digest.as_bytes().to_vec()),
-                target,
-                None,
-            )
-            .await
-            .map_err(|source| BlobExchangeError::new(BlobExchangeFailure::Store, source))?;
-        Ok(tokio::fs::metadata(target)
-            .await
-            .expect("export metadata")
-            .len())
+        self.0.export(digest, target).await
     }
 }
 #[async_trait]
-impl BlobSourcePort for FakeLocalStore {
+impl<T: BlobTransferPort + BlobReadStorePort> BlobSourcePort for FakeLocalStore<T> {
     fn inspect(&self, ticket: &BlobTicket) -> Result<BlobSource, BlobExchangeError> {
         Ok(BlobSource {
             source_key: [0; 32],
