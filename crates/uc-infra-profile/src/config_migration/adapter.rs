@@ -693,7 +693,7 @@ impl ConfigMigrationAdapter {
             let engine_cursor = Self::read_required(
                 &VaultLayout::new(&self.paths.app_data_root).engine_upgrade_cursor_path(),
             )?;
-            let mut disk_members = self.collect_disk_members()?;
+            let mut disk_members = self.collect_blob_files()?;
             disk_members.push((DB_MEMBER.to_owned(), scratch.clone()));
             disk_members.push((
                 CONTROL_DB_MEMBER.to_owned(),
