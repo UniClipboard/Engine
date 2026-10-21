@@ -10,13 +10,14 @@ pub use local_diagnostics::*;
 mod runtime;
 
 pub use runtime::{
-    ActiveClipboard, ConnectivityOpportunity, CustomRelay, CustomRelayMutationRejection,
-    CustomRelayMutationResult, Device, EntryNotResendableReason, InvitationAvailability,
-    InvitationIssued, JoinSpaceRejectionReason, JoinSpaceStatus, JoinSpaceTerminationReason,
-    JoinedSpace, LocalDevice, MobileEngine, MobileStartupLifecycle, PeerConnectionRefresh,
-    RelayEntrySource, RelayOverview, RelayOverviewEntry, RelayRoutingMode, RelaySaveResult,
-    ResendEntryOutcome, SendReport, SessionRecovery, SpaceCreated, SpaceInvitation, SpaceState,
-    WorkspaceConvergence, WorkspaceConvergenceFailureCategory, WorkspaceConvergencePhase,
+    ActiveClipboard, ConfigImportRejectionReason, ConnectivityOpportunity, CustomRelay,
+    CustomRelayMutationRejection, CustomRelayMutationResult, Device, EntryNotResendableReason,
+    InvitationAvailability, InvitationIssued, JoinSpaceRejectionReason, JoinSpaceStatus,
+    JoinSpaceTerminationReason, JoinedSpace, LocalDevice, MobileEngine, MobileStartupLifecycle,
+    PeerConnectionRefresh, RejectedConfigImport, RelayEntrySource, RelayOverview,
+    RelayOverviewEntry, RelayRoutingMode, RelaySaveResult, ResendEntryOutcome, SendReport,
+    SessionRecovery, SpaceCreated, SpaceInvitation, SpaceState, WorkspaceConvergence,
+    WorkspaceConvergenceFailureCategory, WorkspaceConvergencePhase,
 };
 
 uniffi::setup_scaffolding!();

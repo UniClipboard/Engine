@@ -536,6 +536,16 @@ The status is read from persisted inputs on each query; it is not a once-only ev
 No source path, member name, profile identity or secret is included. `None` means there is no rejected
 pending input; it does not certify a successful import. Stage success still means pending, not applied.
 
+Mobile hosts use the formal UniFFI method `MobileEngine.query_rejected_config_import()`.
+It returns `Result<Option<RejectedConfigImport>, BindingError>` by executing the real Engine
+`QueryDiagnostics` operation. The record contains the typed `ConfigImportRejectionReason` and the
+same fixed message. It does not read private files or use the process-observability status query.
+Engine query errors retain `BindingError::Engine { code, category, retryable }`; they are never
+converted to `None`. Hosts query after startup and successful session recovery/resume, show a
+separate status-read failure when the query fails, and localize by reason rather than parsing message.
+Use Swift/Kotlin generated from the matching UniFFI library; regeneration is part of this interface change.
+No Mobile write or configuration-import operation is added. Product UI remains host-owned.
+
 The single pending slot remains bounded and retained until an explicit action replaces or removes it.
 `StageConfigImportInput.replace_rejected_import` must be `false` unless the host has obtained explicit
 confirmation to irreversibly replace the retained rejected materials. With `false`, a new Stage returns

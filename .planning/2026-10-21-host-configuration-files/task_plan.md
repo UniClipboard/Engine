@@ -334,3 +334,24 @@ default/invalid replacement preservation, explicit valid replacement and success
 active-journal and I/O failure preservation, traversal fields and staging/member/marker symlinks.
 Reuse existing archive/crypto fixture tools only for old-version fixture arrangement; no secure-store
 copying. Preserve all prior failures and 0a623a30 as immutable historical evidence.
+
+
+## Formal Mobile rejection query (before binding code)
+
+Task11 audited whole-directory iOS legacy migration and confirmed it can carry pending imports even
+without an import button. The existing observability query is unrelated. Failure modes: no formal
+binding path; a stale/native-mismatched method; converting Engine read failure into None; a one-shot
+event missed across restart; private-file parsing in Mobile; losing original Space/history while
+reporting rejection; leaking source materials through a binding record. Task11 agreed the typed
+query and error semantics through Herdr coordination, retained in the evidence directory.
+
+Add only MobileEngine.query_rejected_config_import -> Result<Option<RejectedConfigImport>, BindingError>.
+The existing worker sends real Operation::QueryDiagnostics and projects its rejection field. Map
+three reasons to a UniFFI enum, preserve the fixed message and Engine code/category/retryable. None
+never means applied. Mobile owns localization and UI. No write/import API is added to Mobile.
+Write a real binding integration E2E before implementation: original Space, stored history restored
+through the host clipboard, new encrypted writes, repeated starts with both old and incomplete
+staging, unchanged source bytes, typed reasons/guidance, and Engine query errors instead of None.
+Generate actual Swift and Kotlin bindings from the matching host library, record symbols/checksums
+and hashes, and hand off the new fixed stack to tasks9/10/11. Native compilation and product UI
+acceptance remain downstream gates. No peer worktree changes or production data access.

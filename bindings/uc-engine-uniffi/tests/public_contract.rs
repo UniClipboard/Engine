@@ -27,6 +27,9 @@ mod lifecycle_targets;
 #[path = "public_contract/startup_lifecycle.rs"]
 mod startup_lifecycle;
 
+#[path = "public_contract/rejected_import.rs"]
+mod rejected_import;
+
 #[test]
 fn core_version_uses_the_binding_package_version() {
     assert_eq!(core_version(), format!("v{}", env!("CARGO_PKG_VERSION")));
