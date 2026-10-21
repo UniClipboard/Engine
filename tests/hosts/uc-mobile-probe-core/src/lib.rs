@@ -705,7 +705,6 @@ fn operation_response(result: OperationResult) -> Value {
             "auto_sync_enabled": settings.sync.auto_sync_enabled,
             "retention_enabled": settings.retention_policy.enabled,
             "retention_rule_count": settings.retention_policy.rules.len(),
-            "shortcut_count": settings.keyboard_shortcuts.len(),
             "custom_relay_count": settings.network.custom_relay_urls.len(),
             "has_auto_save_dir": settings.file_sync.auto_save_dir.is_some(),
         }),

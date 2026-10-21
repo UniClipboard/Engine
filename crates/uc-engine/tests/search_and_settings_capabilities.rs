@@ -16,9 +16,9 @@ use uc_engine::{
     CountSearchEntriesInput, CreateSpaceInput, DailyEntryCountsInput, Engine, EngineConfig,
     EngineEvent, EventStream, GeneralSettingsPatch, HostCapabilities, HostCapabilityError,
     HostClipboard, HostClipboardSnapshot, HostDirectories, HostFileAccess, HostFileHandle,
-    HostFileMetadata, HostSecureStorage, Operation, OperationResult, QuickPanelPositionSummary,
-    QuickPanelSettingsPatch, SearchEntriesInput, SecretString, SendTextInput,
-    SetHistoryEntryFavoriteInput, SettingsPatch, SettingsSectionSummary, UnlockSpaceInput,
+    HostFileMetadata, HostSecureStorage, Operation, OperationResult, SearchEntriesInput,
+    SecretString, SendTextInput, SetHistoryEntryFavoriteInput, SettingsPatch,
+    SettingsSectionSummary, SyncSettingsPatch, UnlockSpaceInput,
 };
 
 const PASSPHRASE: &str = "quick-panel-capability-passphrase";
@@ -448,20 +448,17 @@ async fn settings_updates_emit_a_section_only_change_event() {
 
     update(SettingsPatch {
         general: Some(GeneralSettingsPatch {
-            language: Some(Some("zh-CN".into())),
+            debug_mode: Some(true),
             ..Default::default()
         }),
-        quick_panel: Some(QuickPanelSettingsPatch {
-            position: Some(QuickPanelPositionSummary::FollowCursor),
+        sync: Some(SyncSettingsPatch {
+            sync_on_restore: Some(true),
             ..Default::default()
         }),
-        keyboard_shortcuts: Some(
-            [(
-                "quick_panel.toggle".to_string(),
-                Some(uc_engine::ShortcutKeySummary::Single("ctrl+alt+p".into())),
-            )]
-            .into(),
-        ),
+        file_sync: Some(uc_engine::FileSyncSettingsPatch {
+            file_retention_hours: Some(48),
+            ..Default::default()
+        }),
         ..Default::default()
     })
     .await;
@@ -470,8 +467,8 @@ async fn settings_updates_emit_a_section_only_change_event() {
         .expect("a successful update emits SettingsChanged");
     for expected in [
         SettingsSectionSummary::General,
-        SettingsSectionSummary::QuickPanel,
-        SettingsSectionSummary::KeyboardShortcuts,
+        SettingsSectionSummary::Sync,
+        SettingsSectionSummary::FileSync,
     ] {
         assert!(sections.contains(&expected), "{expected:?} in {sections:?}");
     }
@@ -480,7 +477,7 @@ async fn settings_updates_emit_a_section_only_change_event() {
     // 内容没变的保存不通知。
     update(SettingsPatch {
         general: Some(GeneralSettingsPatch {
-            language: Some(Some("zh-CN".into())),
+            debug_mode: Some(true),
             ..Default::default()
         }),
         ..Default::default()
@@ -531,14 +528,14 @@ async fn concurrent_settings_updates_are_all_covered_by_notifications() {
     let engine = Arc::new(engine);
     let mut tasks = Vec::new();
     for round in 0..8 {
-        let language = format!("lang-{round}");
+        let device_name = format!("device-{round}");
         let engine_a = Arc::clone(&engine);
         let engine_b = Arc::clone(&engine);
         tasks.push(tokio::spawn(async move {
             engine_a
                 .execute(Operation::UpdateSettings(Box::new(SettingsPatch {
                     general: Some(GeneralSettingsPatch {
-                        language: Some(Some(language)),
+                        device_name: Some(Some(device_name)),
                         ..Default::default()
                     }),
                     ..Default::default()
@@ -549,8 +546,8 @@ async fn concurrent_settings_updates_are_all_covered_by_notifications() {
         tasks.push(tokio::spawn(async move {
             engine_b
                 .execute(Operation::UpdateSettings(Box::new(SettingsPatch {
-                    quick_panel: Some(QuickPanelSettingsPatch {
-                        enabled: Some(round % 2 == 0),
+                    sync: Some(SyncSettingsPatch {
+                        sync_on_restore: Some(round % 2 == 0),
                         ..Default::default()
                     }),
                     ..Default::default()
@@ -570,10 +567,7 @@ async fn concurrent_settings_updates_are_all_covered_by_notifications() {
         }
     }
     assert!(seen.contains(&SettingsSectionSummary::General), "{seen:?}");
-    assert!(
-        seen.contains(&SettingsSectionSummary::QuickPanel),
-        "{seen:?}"
-    );
+    assert!(seen.contains(&SettingsSectionSummary::Sync), "{seen:?}");
     let OperationResult::Settings(final_settings) =
         engine.execute(Operation::QuerySettings).await.unwrap()
     else {
@@ -582,8 +576,8 @@ async fn concurrent_settings_updates_are_all_covered_by_notifications() {
     // 并发任务的落盘顺序不固定，只断言最终值确实来自这些更新之一。
     assert!(final_settings
         .general
-        .language
+        .device_name
         .as_deref()
-        .is_some_and(|language| language.starts_with("lang-")));
+        .is_some_and(|device_name| device_name.starts_with("device-")));
     engine.shutdown(Duration::from_secs(15)).await.unwrap();
 }
