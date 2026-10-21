@@ -62,6 +62,9 @@ const HEADER_LEN: usize = 8 + 2 + 1 + 4 + 4 + 4 + SALT_LEN + NONCE_LEN;
 /// incompatible rather than attempted.
 const MAX_SEALED_LEN: u64 = 2 * 1024 * 1024 * 1024;
 
+/// 导出上限同时预留固定头和 AEAD tag，保证完整包也不超过读取上限。
+pub(super) const MAX_EXPORT_ARCHIVE_BYTES: u64 = MAX_SEALED_LEN - HEADER_LEN as u64 - 16;
+
 /// Argon2id cost parameters recorded in the header and used for derivation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Argon2Params {

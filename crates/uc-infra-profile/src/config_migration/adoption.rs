@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use uc_observability_contract::uc_warn;
 use uuid::Uuid;
 
 use uc_application::deps::{ProfileLifecycleRepositoryPort, ProfileLifecycleState};
@@ -21,9 +22,9 @@ use crate::security::{
 };
 
 use super::staging::{
-    complete_pending_import, copy_member, copy_staged_file, install_pending_import,
-    PendingImportError, PendingImportMarker, CONTROL_DB_MEMBER, DB_MEMBER, PENDING_IMPORT_MARKER,
-    PENDING_IMPORT_SCHEMA_VER, RUNTIME_MANIFEST_MEMBER, STAGING_DIR_NAME,
+    cleanup_pending_import, complete_pending_import, copy_member, copy_staged_file,
+    install_pending_import, PendingImportError, PendingImportMarker, CONTROL_DB_MEMBER, DB_MEMBER,
+    PENDING_IMPORT_MARKER, PENDING_IMPORT_SCHEMA_VER, RUNTIME_MANIFEST_MEMBER, STAGING_DIR_NAME,
 };
 
 pub(crate) const ADOPTION_JOURNAL: &str = ".config-import-adoption-v1";
@@ -87,23 +88,26 @@ pub(crate) fn adopt_pending_import(
             let marker = marker
                 .as_ref()
                 .ok_or_else(PendingImportError::read_marker)?;
-            let parsed: PendingImportMarker = serde_json::from_slice(marker).map_err(failure)?;
-            if parsed.schema_ver != PENDING_IMPORT_SCHEMA_VER
-                || parsed.staging_dir != STAGING_DIR_NAME
-            {
-                return Err(failure(io::Error::other("invalid staged import layout")));
-            }
+            let parsed = serde_json::from_slice::<PendingImportMarker>(marker);
+            let compatible = parsed.is_ok_and(|parsed| {
+                parsed.schema_ver == PENDING_IMPORT_SCHEMA_VER
+                    && parsed.staging_dir == STAGING_DIR_NAME
+            });
+            let mut complete = true;
             for member in [DB_MEMBER, CONTROL_DB_MEMBER, RUNTIME_MANIFEST_MEMBER] {
-                if !paths
-                    .app_data_root_dir
-                    .join(STAGING_DIR_NAME)
-                    .join(member)
-                    .is_file()
-                {
-                    return Err(failure(io::Error::other(
-                        "incomplete staged runtime state; re-export required",
-                    )));
+                match fs::symlink_metadata(
+                    paths.app_data_root_dir.join(STAGING_DIR_NAME).join(member),
+                ) {
+                    Ok(metadata) => complete &= metadata.is_file(),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => complete = false,
+                    Err(error) => return Err(failure(error)),
                 }
+            }
+            if !compatible || !complete {
+                // 尚无 journal，目标原件未动；只清除固定暂存路径，宿主可重新暂存完整包。
+                uc_warn!("incompatible_staged_import");
+                cleanup_pending_import(&paths.app_data_root_dir)?;
+                return Ok(());
             }
             // 只在事务尚未开始时读取目标生命周期，重试不打开可能只复制了一部分的 vault。
             let lifecycle = ProfileLifecycleRepository::new(Arc::clone(&storage))

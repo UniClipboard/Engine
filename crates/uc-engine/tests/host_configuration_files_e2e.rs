@@ -806,6 +806,97 @@ async fn legacy_bundle_is_rejected_before_target_mutation() {
     report.finish();
 }
 
+/// 升级前暂存的旧包或不完整包不得阻断目标资料的后续启动。
+#[tokio::test(flavor = "multi_thread")]
+async fn rejected_pending_import_keeps_target_usable_across_restarts() {
+    let mut report = Report::new("rejected-pending-import");
+    let root = tempfile::tempdir().unwrap();
+    let outbox = root.path().join("outbox");
+    std::fs::create_dir_all(&outbox).unwrap();
+    for schema in [1, 2] {
+        let target = Profile::new(root.path().join(format!("target-{schema}")), &outbox);
+        target.write(PRODUCT, b"target configuration");
+        let engine = target.start(desktop_declaration()).await;
+        create_space(&engine).await;
+        let space = assert_ready(&engine, &mut report).await;
+        let content = "synthetic retained history";
+        let entry = send_text(&engine, content).await;
+        engine.shutdown(Duration::from_secs(15)).await.unwrap();
+        target.write(
+            "pending-import.json",
+            &serde_json::to_vec(&serde_json::json!({
+                "schema_ver": schema, "staging_dir": "import-staging",
+                "has_kek": true, "staged_at_unix_ms": 0
+            }))
+            .unwrap(),
+        );
+        let staging = target.private.join("import-staging/db");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("uniclipboard.db"), b"incomplete source").unwrap();
+        for _ in 0..2 {
+            let engine = target.start(desktop_declaration()).await;
+            assert_eq!(assert_ready(&engine, &mut report).await, space);
+            assert_history(&engine, &entry, content).await;
+            engine.shutdown(Duration::from_secs(15)).await.unwrap();
+        }
+        assert!(!target.private.join("pending-import.json").exists());
+        assert!(!target.private.join("import-staging").exists());
+        assert!(!target.private.join(".config-import-adoption-v1").exists());
+        assert_eq!(target.read(PRODUCT), b"target configuration");
+        report.tree("retained target", &target.private);
+    }
+    report.finish();
+}
+
+/// 超出累计上限的稀疏密文文件应在读取内容前拒绝，且不覆盖导出目标。
+#[tokio::test(flavor = "multi_thread")]
+async fn cumulative_blob_export_limit_preserves_destination() {
+    let mut report = Report::new("cumulative-export-limit");
+    let root = tempfile::tempdir().unwrap();
+    let outbox = root.path().join("outbox");
+    std::fs::create_dir_all(&outbox).unwrap();
+    let source = Profile::new(root.path().join("source"), &outbox);
+    let engine = source.start(desktop_declaration()).await;
+    create_space(&engine).await;
+    let generation = std::fs::read_dir(source.private.join("profile-data-generations"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let blobs = generation.join("v3-payloads/blobs");
+    std::fs::create_dir_all(&blobs).unwrap();
+    for name in ["synthetic-sparse-a", "synthetic-sparse-b"] {
+        std::fs::File::create(blobs.join(name))
+            .unwrap()
+            .set_len(1024 * 1024 * 1024)
+            .unwrap();
+    }
+    let destination = outbox.join("bounded.ucbundle");
+    std::fs::write(&destination, b"existing destination").unwrap();
+    let error = tokio::time::timeout(
+        Duration::from_secs(15),
+        engine.execute(Operation::ExportConfig(ExportConfigInput {
+            destination: HostFileHandle::new("bounded.ucbundle"),
+        })),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(error.code(), EXPORT_CONFIG_FAILED_CODE);
+    assert_eq!(
+        std::fs::read(&destination).unwrap(),
+        b"existing destination"
+    );
+    assert!(!outbox.join("bounded.ucbundle.tmp").exists());
+    report.line(format!(
+        "two sparse 1 GiB members rejected: {}",
+        error.code()
+    ));
+    engine.shutdown(Duration::from_secs(15)).await.unwrap();
+    report.finish();
+}
+
 async fn send_text(engine: &Engine, text: &str) -> String {
     let result = engine
         .execute(Operation::SendText(SendTextInput {

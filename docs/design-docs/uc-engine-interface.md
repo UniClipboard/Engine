@@ -445,7 +445,7 @@ A missing file is optional. A symlink, directory, I/O failure, or file larger th
 The declaration must contain only configuration. Hosts must not declare credentials or user content as configuration.
 The existing encrypted bundle and credential policies remain unchanged.
 
-The archive member is `ui-state/<name>`. The historical prefix and manifest schema version 1 remain unchanged.
+The archive member is `ui-state/<name>`. The historical prefix remains unchanged.
 Import restores that member to `<data_root>/<name>` only if the receiving host declares the same name.
 The archive and its manifest cannot select any other destination.
 Undeclared members do not create host files. A missing member preserves the existing destination file.
@@ -519,3 +519,12 @@ Historical 1101 and 1103 failures remain repro evidence. Successful acceptance r
 starts on fresh and existing targets, first and subsequent starts, source Space identity, ready encryption,
 copy-failure replay, retained target bytes and recovery of the old target with its original passphrase.
 The original incomplete legacy bundle is accepted only as an explicit rejection with target state unchanged.
+
+Unsupported or incomplete pending imports left by an older Engine are rejected before adoption starts.
+Engine removes only the fixed pending marker and staging directory, emits `incompatible_staged_import`,
+and continues normal startup. The host must re-export and stage a complete bundle. If an adoption
+journal already exists, Engine retains recovery state and reports failure instead of discarding it.
+Export checks the cumulative tar size, including headers, padding and the AEAD size allowance, before
+reading blob contents. Oversized exports fail without replacing the destination. Capture and revision
+verification run in one blocking task with the caller's tracing span. Both database snapshots and blobs
+stream into the bounded tar. Scratch snapshots are cleaned on success and failure.

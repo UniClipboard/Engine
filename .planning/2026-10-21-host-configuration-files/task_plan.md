@@ -271,3 +271,22 @@ one archive with identical bytes across retries, adopted identity and no lifecyc
 Run both existing host tests and the maintained public import E2E; retain failures and exact source
 receipts. Task9 already contains this repair. Downstream synchronization must retain it, not reapply
 an alternative fixture. Do not import task9 log-profile implementation into task8.
+
+
+## PR226 review repair: export bounds and rejected staging (before code)
+
+Failure modes: schema-1 or incomplete staging blocks every boot; discarding a marker after a
+journal exists loses adoption recovery; untrusted marker paths enlarge cleanup scope; cleanup
+failure is hidden; blob buffers exceed the cumulative 2 GiB import limit; tar padding and AEAD
+overhead push an otherwise accepted export past the reader limit; concurrent blob growth changes
+the snapshot; synchronous capture stalls a Tokio worker; stale schema prose misleads hosts.
+
+The existing import owner rejects incompatible staging only before a journal exists, uses fixed
+staging cleanup paths, emits a fixed warning and lets ordinary startup continue. Active journals
+remain fail-closed and retain all recovery data. The existing export adapter owns capture, revision
+verification, bounded archive packing, sealing and writing inside a Span-propagated blocking task.
+Use maintained tar streaming for on-disk blobs, preflight one cumulative budget before blob reads,
+reserve tar and AEAD overhead, and keep the existing typed size rejection. No new crypto or format.
+Write public Engine E2E first: upgraded schema-1 and incomplete schema-2 staging must permit first
+and subsequent startup with original Space/history/config; two sparse 1 GiB blobs must reject export
+without allocating their contents or replacing the destination. Keep existing import/recovery E2E.
