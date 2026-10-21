@@ -236,3 +236,23 @@ A24 An old Engine opens new staging without reading the bundle manifest. Bump pe
 - Existing Infra config-migration tests: 39 passed. No new unit tests were added.
 - Final delivery uses an immutable repair commit and a fresh source receipt. Historical progress and
   verification sections above describe checkpoint 74122413, not current acceptance.
+
+## PR226 Windows follow-up (before repair)
+
+The x64 Windows job on 976b9ffe failed to compile: adoption imports a synchronous no-replace
+helper that was exported only on Linux, Android and macOS. The async publisher already has a
+maintained Windows MoveFileExW implementation. Keep 976b9ffe immutable and add a separate fix.
+
+Failure modes: a normal rename can overwrite retained originals; COPY_ALLOWED can cross a volume
+without atomicity; missing WRITE_THROUGH can publish the journal before retirement is durable;
+string conversion can discard the Windows system error; unsupported mobile Unix targets must
+compile and fail explicitly instead of emulating successful retirement.
+
+Keep the fs atomic-publish module as the primitive owner. Extract its existing Windows syscall
+into the synchronous capability used by both import and the async publisher. Keep replacement and
+copy flags disabled, retain the original io::Error, and use WRITE_THROUGH on Windows. Provide an
+explicit Unsupported synchronous capability on unsupported targets. Keep import ownership unchanged.
+Extend the existing synchronous file-preservation contract to Windows before changing production
+code. Run the maintained real filesystem contracts and public Engine import E2E. Add the existing
+atomic-publish contracts to Windows CI runtime verification. Push only a new fast-forward commit,
+then run the Windows matrix on that exact SHA. Review quota/configuration remains outside task8.
