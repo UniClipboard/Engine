@@ -122,3 +122,12 @@
 - 红测先证明旧CAS重开后0项（预期3），写全行后再证明旧group_receive_items把实际继承完成降为Transferring。既有binding_state增加entry_bound保存已交付事实，所有初态cached_path=None；不写事件／产物清理记录，目录根映射仍使用既有加密能力。真实唯一键故障证明CAS与前面已插入行全部回滚。
 - 原选择物化遇前项父取消直接break，会漏掉后面的实际旧成功。真实文件红测保留，修复为选择模式逐项处理取消并继续继承；普通模式和目录整体取消语义保持。
 - 当前真实storage259通过／3跳过，App1207通过／1跳过、Core335通过。额外保存阻塞时查询证明旧完成、新下载未交付和旧未选取消同时可见。新下载在capture失败／重启后的持久交付证明仍未完成，不把entry_bound继承事实冒充所有接收保存已解决。
+
+
+## 2026-10-22 新成果实际保存证明
+
+- 真实SQLite NoEntry红测复现裸下载Completed在终态仍错误报告交付；不放宽断言，保留delivery-proof-red.log。Core查询现在只认可明确entry_bound或完整Completed attempt，未提交的下载在终态显示中断／取消。
+- 既有InboundCaptureCommitContext与InboundReceiveSettlement的Complete／Partial携带内部delivered_item_ids；实际成功物化构造候选，capture与密文装饰器原样交给唯一原子提交。NoEntry没有该字段。SQL同事务核验entry／attempt／Completed行并写既有binding_state标记，缺失行回滚记录和标记，Backend source保留具体不变量类型。
+- 新receive_item_ids集中原数组映射，来源／retry seed／capture共用；目录仍整单元，不声明单成员交付。App真实重试测试同时验证只把旧成果和新增成果提交，不包含未选取消项。
+- 定向真实提交／加密／目录契约共10通过；完整App1207通过／1跳过、Core335通过、Storage260通过／3跳过。首次check的私有identity路径错误改用有限crate内导出；新增集成测试子模块路径需显式path属性，修正后通过。失败日志保留。
+- 历史partial行可能只有裸下载Completed；其原始行未改写或删除，但在无保存证明时保守展示中断。完整历史成果恢复必须基于已有密文快照／产物资料继续实现，不能靠这次新写标记宣称已兼容全部历史结果。

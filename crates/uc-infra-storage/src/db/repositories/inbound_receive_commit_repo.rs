@@ -18,6 +18,7 @@ use super::entry_file_set_repo::{replace_entry_file_set_rows, EntryFileSetProtec
 use super::entry_replace_repo::{
     prepare_entry_replacement, replace_entry_content_rows, PreparedEntryReplacement,
 };
+use super::file_transfer_repo::ENTRY_DELIVERED_BINDING;
 use crate::db::mappers::clipboard_entry_mapper::ClipboardEntryRowMapper;
 use crate::db::mappers::clipboard_event_mapper::ClipboardEventRowMapper;
 use crate::db::mappers::clipboard_selection_mapper::ClipboardSelectionRowMapper;
@@ -25,7 +26,9 @@ use crate::db::mappers::snapshot_representation_mapper::RepresentationRowMapper;
 use crate::db::models::snapshot_representation::NewSnapshotRepresentationRow;
 use crate::db::models::{NewClipboardEntryRow, NewClipboardEventRow, NewClipboardSelectionRow};
 use crate::db::ports::{DbExecutor, InsertMapper};
-use crate::db::schema::{directory_publish_log, entry_receive_attempt, receive_artifact_log};
+use crate::db::schema::{
+    directory_publish_log, entry_receive_attempt, file_transfer, receive_artifact_log,
+};
 use uc_infra_security::ContentProtection;
 
 pub struct DieselInboundReceiveCommitRepository<E> {
@@ -79,6 +82,8 @@ enum CommitInvariantError {
     ArtifactRecordMissing,
     #[error("directory publish record missing")]
     DirectoryPublishRecordMissing,
+    #[error("saved receive item does not match a completed attempt item")]
+    DeliveryItemMismatch,
 }
 
 fn map_error(error: anyhow::Error) -> InboundReceiveCommitError {
@@ -92,7 +97,9 @@ fn map_error(error: anyhow::Error) -> InboundReceiveCommitError {
         Some(CommitInvariantError::DirectoryPublishRecordMissing) => {
             InboundReceiveCommitError::DirectoryPublishRecordMissing
         }
-        None => InboundReceiveCommitError::Backend(error.context("commit inbound receive").into()),
+        Some(CommitInvariantError::DeliveryItemMismatch) | None => {
+            InboundReceiveCommitError::Backend(error.context("commit inbound receive").into())
+        }
     }
 }
 
@@ -146,11 +153,21 @@ impl<E: DbExecutor> CommitInboundReceivePort for DieselInboundReceiveCommitRepos
                 ..
             }
         );
+        let delivered_item_ids = match settlement {
+            InboundReceiveSettlement::Complete {
+                delivered_item_ids, ..
+            }
+            | InboundReceiveSettlement::Partial {
+                delivered_item_ids, ..
+            } => delivered_item_ids.clone(),
+            InboundReceiveSettlement::NoEntry { .. } => Vec::new(),
+        };
         let (record, entry_id, attempt_id, file_set, expected, target, artifacts, now_ms) =
             match settlement {
                 InboundReceiveSettlement::Complete {
                     record,
                     attempt_id,
+                    delivered_item_ids: _,
                     file_set,
                     artifacts,
                     now_ms,
@@ -173,6 +190,7 @@ impl<E: DbExecutor> CommitInboundReceivePort for DieselInboundReceiveCommitRepos
                 InboundReceiveSettlement::Partial {
                     record,
                     attempt_id,
+                    delivered_item_ids: _,
                     terminal,
                     file_set,
                     artifacts,
@@ -280,6 +298,23 @@ impl<E: DbExecutor> CommitInboundReceivePort for DieselInboundReceiveCommitRepos
                     }
 
                     settle_artifacts(conn, &entry_id, &attempt_id, artifacts, now_ms)?;
+                    for item_id in &delivered_item_ids {
+                        let updated = diesel::update(
+                            file_transfer::table
+                                .filter(file_transfer::entry_id.eq(&entry_id))
+                                .filter(file_transfer::attempt_id.eq(&attempt_id))
+                                .filter(file_transfer::receive_item_id.eq(item_id))
+                                .filter(file_transfer::status.eq("completed")),
+                        )
+                        .set((
+                            file_transfer::binding_state.eq(ENTRY_DELIVERED_BINDING),
+                            file_transfer::updated_at_ms.eq(now_ms),
+                        ))
+                        .execute(conn)?;
+                        if updated != 1 {
+                            return Err(CommitInvariantError::DeliveryItemMismatch.into());
+                        }
+                    }
                     Ok(())
                 })
             })

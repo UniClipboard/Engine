@@ -252,7 +252,10 @@ pub fn group_receive_items(
                 if matches!(
                     item.status,
                     TrackedFileTransferStatus::Pending | TrackedFileTransferStatus::Transferring
-                ) {
+                ) || (item.status == TrackedFileTransferStatus::Completed
+                    && state != AttemptState::Completed
+                    && !delivered.contains(&item.item_id))
+                {
                     if state == AttemptState::Cancelled {
                         item.status = TrackedFileTransferStatus::Cancelled;
                     } else {

@@ -217,3 +217,11 @@
 - 当前真实SQLite完整库259通过／3跳过（20.16秒），包括V3材料与目录封装、错误输入不改权威和插入失败回滚。App1207通过／1跳过、Core335通过；新增保存阻塞期间查询断言1通过（0.00秒）。已保留两次账本红测及取消前项漏继承红测，不放宽原断言。准备冻结源码与文档运行跨层门禁；新下载真正保存的持久证明和完整Engine矩阵仍未完成。
 
 - 本轮最终workspace全目标check通过（首轮1m33s；去掉新增测试的重复import后12.29s），metadata JSON解析812个包、fmt、Rust style、repository preflight、官方1371站点隐私清单及diff检查通过。真实Storage259通过／3跳过、App1207通过／1跳过、Core335通过，保存阻塞查询新增断言单独通过。手工复核CAS同事务、加密与原清理所有权、目录空根头覆写和父取消遍历；code-review skill不可用。完整workspace／真实Engine／最终网络设备矩阵未执行，完整目标继续。下一步同步main的暂停释放资源修复，再补齐实际保存的持久逐项证明。
+
+- 8fd56c5b提交完成项初态持久化。重新fetch发现origin/main已推进至a8753ff5，合并提交5a3ae7b9同时纳入#224暂停文件释放与#229取消每传输zstd工作池；无冲突，四个用户规划目录保留。恢复本任务planning指针。当前补齐实际保存事实：仍由唯一接收流程交给原子capture提交候选项，提交与逐项交付标记同事务；保存失败／NoEntry不能把裸下载Completed在重启后冒充交付。先做真实SQLite红测，再扩大到实际capture提交契约。
+
+- 当前保存证明切片：真实NoEntry红测0通过1失败；修复后1通过。提交／加密／目录10项通过；完整App1207通过／1跳过（25.83秒）、Core335通过（0.41秒）、Storage260通过／3跳过（18.03秒）。正在串行运行既有attempt／artifact契约、Engine公开契约及合并main后的真实暂停文件释放验收；尚未将这些检查标为通过。
+
+- 合并main后的既有attempt／artifact契约13＋2通过，Engine公开契约51通过；真实UniFFI暂停文件释放2通过（9.68秒），验证暂停SQLite／日志资源释放和恢复，不能替代活动接收的所有生命周期矩阵。内容处理库79通过（0.35秒），包括合入main的压缩回归。官方观测清单重生为1373站点，fmt/style/diff通过，开始冻结Rust／文档／inventory进行最终workspace、metadata与repository门禁。
+
+- 本轮最终workspace全目标check通过（1m32s），metadata JSON解析812个包、fmt、Rust style、repository preflight、官方1373站点隐私清单及diff检查通过。最终相关回归App1207／Core335／Storage260／Content79／原子提交10／attempt和artifact15／Engine51／真实绑定暂停2项通过，4项跳过；合计1959通过。手工审查候选项原位置映射、密文装饰器、原子标记回滚和NoEntry隔离；code-review skill缺失，未冒充技能审查。源码／文档／inventory冻结期间未改动输入，未清缓存或新增target。完整workspace测试、旧profile基线结案、最终网络／1GiB／真机矩阵仍未完成。准备提交保存证明切片，完整目标保持未完成；继续历史成果／来源恢复、普通redelivery衔接、许可／关闭／删除／撤权与旧入口删除。

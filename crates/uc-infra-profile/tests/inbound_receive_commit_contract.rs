@@ -1,3 +1,5 @@
+#[path = "inbound_receive_commit_contract/delivery.rs"]
+mod delivery;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -141,6 +143,7 @@ async fn settlement_resolves_and_entry_delete_clears_receive_state() {
 
     commit
         .commit_inbound_receive(&InboundReceiveSettlement::Complete {
+            delivered_item_ids: Vec::new(),
             record: record("entry"),
             attempt_id: "attempt".to_owned(),
             file_set: None,
@@ -219,6 +222,7 @@ async fn complete_create_and_missing_artifact_are_atomic() {
         .unwrap());
     commit
         .commit_inbound_receive(&InboundReceiveSettlement::Complete {
+            delivered_item_ids: Vec::new(),
             record: record("entry-ok"),
             attempt_id: "a1".to_owned(),
             file_set: None,
@@ -238,6 +242,7 @@ async fn complete_create_and_missing_artifact_are_atomic() {
         .unwrap());
     let result = commit
         .commit_inbound_receive(&InboundReceiveSettlement::Complete {
+            delivered_item_ids: Vec::new(),
             record: record("entry-rollback"),
             attempt_id: "a2".to_owned(),
             file_set: None,
@@ -385,6 +390,7 @@ async fn cancellation_settlement_is_idempotent_after_partial_receive_finishes_fi
         .unwrap();
     commit
         .commit_inbound_receive(&InboundReceiveSettlement::Partial {
+            delivered_item_ids: Vec::new(),
             record: record("entry"),
             attempt_id: "a1".to_owned(),
             terminal: PartialReceiveTerminal::Cancelled,
@@ -448,6 +454,7 @@ async fn stale_old_attempt_settlement_cannot_change_a_redelivery() {
     );
     commit
         .commit_inbound_receive(&InboundReceiveSettlement::Partial {
+            delivered_item_ids: Vec::new(),
             record: record("entry"),
             attempt_id: "a1".to_owned(),
             terminal: PartialReceiveTerminal::Failed,

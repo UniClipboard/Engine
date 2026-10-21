@@ -66,6 +66,8 @@ pub enum InboundReceiveSettlement {
     Complete {
         record: InboundReceiveRecord,
         attempt_id: String,
+        /// 随记录一起保存的逐项成果；只有提交成功才能成为交付证明。
+        delivered_item_ids: Vec<String>,
         file_set: Option<EntryFileSet>,
         artifacts: CompletedReceiveArtifacts,
         now_ms: i64,
@@ -73,6 +75,8 @@ pub enum InboundReceiveSettlement {
     Partial {
         record: InboundReceiveRecord,
         attempt_id: String,
+        /// 只包含实际进入本次保存记录的成功项，不包含仅下载完成的项。
+        delivered_item_ids: Vec<String>,
         terminal: PartialReceiveTerminal,
         file_set: Option<EntryFileSet>,
         artifacts: PartialReceiveArtifacts,

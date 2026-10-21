@@ -44,6 +44,7 @@ impl BlobCipherPort for RecordingCipher {
 #[derive(Default)]
 struct RecordingCommit {
     inline_data: Mutex<Vec<Vec<u8>>>,
+    deliveries: Mutex<Vec<String>>,
 }
 
 #[async_trait]
@@ -53,8 +54,22 @@ impl CommitInboundReceivePort for RecordingCommit {
         settlement: &InboundReceiveSettlement,
     ) -> Result<(), InboundReceiveCommitError> {
         let record = match settlement {
-            InboundReceiveSettlement::Complete { record, .. }
-            | InboundReceiveSettlement::Partial { record, .. } => record,
+            InboundReceiveSettlement::Complete {
+                record,
+                delivered_item_ids,
+                ..
+            }
+            | InboundReceiveSettlement::Partial {
+                record,
+                delivered_item_ids,
+                ..
+            } => {
+                self.deliveries
+                    .lock()
+                    .unwrap()
+                    .extend(delivered_item_ids.clone());
+                record
+            }
             InboundReceiveSettlement::NoEntry { .. } => return Ok(()),
         };
         let representations = match record {
@@ -120,6 +135,7 @@ async fn atomic_inbound_commit_encrypts_inline_payload_before_storage() {
 
     commit
         .commit_inbound_receive(&InboundReceiveSettlement::Complete {
+            delivered_item_ids: vec!["saved-item".into()],
             record: record(),
             attempt_id: "attempt-1".to_owned(),
             file_set: None,
@@ -133,6 +149,7 @@ async fn atomic_inbound_commit_encrypts_inline_payload_before_storage() {
         inner.inline_data.lock().unwrap().as_slice(),
         &[b"encrypted:hello".to_vec()]
     );
+    assert_eq!(inner.deliveries.lock().unwrap().as_slice(), &["saved-item"]);
     assert_eq!(
         cipher.aads.lock().unwrap().as_slice(),
         &[uc_core::crypto::aad::for_inline(

@@ -40,7 +40,7 @@ use uc_observability_contract::{
 };
 
 /// 行已绑定此前实际保存的条目；不将其输出纳入新尝试清理。
-const ENTRY_DELIVERED_BINDING: &str = "entry_bound";
+pub(super) const ENTRY_DELIVERED_BINDING: &str = "entry_bound";
 
 /// SQLite adapter for the receiver-side file-transfer projection ports.
 pub struct DieselFileTransferRepository<E> {

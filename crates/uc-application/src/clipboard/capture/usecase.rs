@@ -100,11 +100,13 @@ pub struct DirectoryCaptureCommitContext {
 pub enum InboundCaptureCommitContext {
     Complete {
         attempt_id: String,
+        delivered_item_ids: Vec<String>,
         file_set: Option<EntryFileSet>,
         artifacts: CompletedReceiveArtifacts,
     },
     Partial {
         attempt_id: String,
+        delivered_item_ids: Vec<String>,
         terminal: PartialReceiveTerminal,
         file_set: Option<EntryFileSet>,
         artifacts: PartialReceiveArtifacts,
@@ -298,6 +300,7 @@ impl CaptureClipboardUseCase {
             Some(CaptureCommitContext::Inbound(
                 InboundCaptureCommitContext::Complete {
                     attempt_id: directory_commit.attempt_id,
+                    delivered_item_ids: Vec::new(),
                     file_set: Some(directory_commit.file_set),
                     artifacts: CompletedReceiveArtifacts::DirectoryPublished,
                 },
@@ -700,23 +703,27 @@ impl CaptureClipboardUseCase {
                             let settlement = match commit_context {
                                 InboundCaptureCommitContext::Complete {
                                     attempt_id,
+                                    delivered_item_ids,
                                     file_set,
                                     artifacts,
                                 } => InboundReceiveSettlement::Complete {
                                     record,
                                     attempt_id,
+                                    delivered_item_ids,
                                     file_set,
                                     artifacts,
                                     now_ms,
                                 },
                                 InboundCaptureCommitContext::Partial {
                                     attempt_id,
+                                    delivered_item_ids,
                                     terminal,
                                     file_set,
                                     artifacts,
                                 } => InboundReceiveSettlement::Partial {
                                     record,
                                     attempt_id,
+                                    delivered_item_ids,
                                     terminal,
                                     file_set,
                                     artifacts,

@@ -2,9 +2,7 @@ use super::{
     BeginReceiveRetryInput, PreparedReceiveRetry, ReceiveRetryItem, ReceiveRetryItemState,
 };
 use crate::clipboard::sync::apply_inbound::ApplyInboundError;
-use crate::transfer::receive::identity::{
-    directory_member_transfer_id, directory_representation_transfer_id,
-};
+use crate::transfer::receive::identity::receive_item_ids;
 use uc_core::ports::{ReceiveItemFailureReason, ReceiveItemRole, TrackedFileTransferStatus};
 
 impl PreparedReceiveRetry {
@@ -16,22 +14,13 @@ impl PreparedReceiveRetry {
         let selection = self.selection.as_ref().ok_or_else(|| {
             ApplyInboundError::Internal(anyhow::anyhow!("receive retry selection is missing"))
         })?;
-        let mut file_index = 0;
+        let item_ids = receive_item_ids(&self.entry, attempt, &self.source.blob_refs);
         let mut items = Vec::with_capacity(self.source.blob_refs.len());
-        for (index, blob) in self.source.blob_refs.iter().enumerate() {
-            let (item_id, role) = if let Some(rep_index) = blob.representation_index {
-                (
-                    directory_representation_transfer_id(
-                        &self.entry,
-                        Some(attempt),
-                        rep_index as usize,
-                    ),
-                    ReceiveItemRole::Representation,
-                )
+        for (index, (blob, item_id)) in self.source.blob_refs.iter().zip(item_ids).enumerate() {
+            let role = if blob.representation_index.is_some() {
+                ReceiveItemRole::Representation
             } else {
-                let id = directory_member_transfer_id(&self.entry, Some(attempt), file_index);
-                file_index += 1;
-                (id, ReceiveItemRole::File)
+                ReceiveItemRole::File
             };
             let (state, bytes) = if let Some(saved) = selection.landed.get(&index) {
                 (ReceiveRetryItemState::Completed, saved.bytes)

@@ -19,5 +19,6 @@ pub(crate) mod batch;
 pub(crate) mod query;
 
 mod identity;
+pub(crate) use identity::receive_item_ids;
 
 pub(crate) mod retry;

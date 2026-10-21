@@ -35,6 +35,7 @@ use crate::clipboard::capture::InboundCaptureCommitContext;
 use crate::clipboard::entry_identity::EntryIdentityCoordinator;
 use crate::clipboard::write::{ClipboardWriteIntent, MobileConsumabilityProbe};
 use crate::runtime_lifecycle::LifecycleError;
+use crate::transfer::receive::receive_item_ids;
 use crate::transfer::receive::reconciliation::ReceiveReadinessCoordinator;
 use crate::transfer::receive::retry::{
     accept_retry, PreparedReceiveRetry, RetryEntryReceiveOutcome,
@@ -1285,6 +1286,11 @@ impl ApplyInboundClipboardUseCase {
         let mut publication: Option<DirectoryPublication> = None;
         let mut directory_file_set = None;
         let mut completed = Vec::new();
+        let planned_item_ids = receive_attempt_id
+            .as_deref()
+            .filter(|_| file_set_manifest.is_none())
+            .map(|attempt| receive_item_ids(&receiver_entry_id, attempt, &blob_refs))
+            .unwrap_or_default();
         let (snapshot, mut materialize_outcome, has_receive_artifacts, receive_artifacts) =
             match (requires_materialize, &self.blob_materializer) {
                 (false, _) => (snapshot, MaterializeOutcome::Complete, false, Vec::new()),
@@ -1533,10 +1539,15 @@ impl ApplyInboundClipboardUseCase {
             }
         }
         let receive_commit = receive_attempt_id.clone().map(|attempt_id| {
+            let delivered_item_ids = completed
+                .iter()
+                .filter_map(|item| planned_item_ids.get(item.blob_index).cloned())
+                .collect();
             let file_set = directory_file_set.take();
             if is_partial {
                 InboundCaptureCommitContext::Partial {
                     attempt_id,
+                    delivered_item_ids,
                     terminal: match materialize_outcome {
                         MaterializeOutcome::PartialCancelled => PartialReceiveTerminal::Cancelled,
                         MaterializeOutcome::PartialFailed | MaterializeOutcome::Complete => {
@@ -1553,6 +1564,7 @@ impl ApplyInboundClipboardUseCase {
             } else {
                 InboundCaptureCommitContext::Complete {
                     attempt_id,
+                    delivered_item_ids,
                     file_set,
                     artifacts: if verify_directory_identity {
                         CompletedReceiveArtifacts::DirectoryPublished

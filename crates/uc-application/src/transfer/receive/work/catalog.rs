@@ -2,9 +2,7 @@
 use super::{ReceiveAction, ReceiveBatch, ReceiveWorkRegistry};
 use crate::clipboard::sync::payload_codec::V3BlobRef;
 use crate::transfer::receive::batch::ReceiveFacts;
-use crate::transfer::receive::identity::{
-    directory_member_transfer_id, directory_representation_transfer_id,
-};
+use crate::transfer::receive::identity::receive_item_ids;
 use crate::transfer::receive::materialization::{
     InboundFileSetManifest, ReceiveSelection, ReceivedItem,
 };
@@ -63,21 +61,15 @@ impl ReceiveSource {
                 blob_index: 0,
             }];
         }
-        let mut file_index = 0;
         self.blob_refs
             .iter()
+            .zip(receive_item_ids(entry, attempt, &self.blob_refs))
             .enumerate()
-            .map(|(blob_index, blob)| {
-                let (id, kind) = match blob.representation_index {
-                    Some(index) => (
-                        directory_representation_transfer_id(entry, Some(attempt), index as usize),
-                        ReceiveItemKind::Representation,
-                    ),
-                    None => {
-                        let id = directory_member_transfer_id(entry, Some(attempt), file_index);
-                        file_index += 1;
-                        (id, ReceiveItemKind::File)
-                    }
+            .map(|(blob_index, (blob, id))| {
+                let kind = if blob.representation_index.is_some() {
+                    ReceiveItemKind::Representation
+                } else {
+                    ReceiveItemKind::File
                 };
                 PlannedReceiveItem {
                     id,

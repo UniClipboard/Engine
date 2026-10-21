@@ -371,3 +371,59 @@ async fn invalid_retry_plan_cannot_change_authority() {
         assert_eq!(current.state, AttemptState::Failed);
     }
 }
+
+#[tokio::test]
+async fn downloaded_item_without_saved_record_is_not_delivered_after_settlement() {
+    use crate::db::repositories::DieselInboundReceiveCommitRepository;
+    use crate::db::schema::file_transfer;
+    use uc_core::ids::EntryId;
+    use uc_core::ports::{
+        CommitInboundReceivePort, InboundReceiveSettlement, NoEntryReceiveArtifacts,
+        PartialReceiveTerminal, ReceiveItemFailureReason,
+    };
+    let (repo, executor, _directory) = database().await;
+    repo.begin_receive_retry(input()).await.unwrap();
+    executor
+        .run(|conn| {
+            diesel::update(
+                file_transfer::table
+                    .filter(file_transfer::receive_item_id.eq("entry:attempt:new:member:1")),
+            )
+            .set(file_transfer::status.eq("completed"))
+            .execute(conn)?;
+            diesel::update(entry_receive_attempt::table)
+                .set(entry_receive_attempt::attempt_state.eq("failing"))
+                .execute(conn)?;
+            Ok(())
+        })
+        .unwrap();
+    let (keys, profile) = crate::file_transfer::persistence_cipher::test_keys::ports();
+    DieselInboundReceiveCommitRepository::new(executor, keys, profile)
+        .commit_inbound_receive(&InboundReceiveSettlement::NoEntry {
+            entry_id: EntryId::from("entry"),
+            attempt_id: "new".into(),
+            terminal: PartialReceiveTerminal::Failed,
+            artifacts: NoEntryReceiveArtifacts::None,
+            now_ms: 20,
+        })
+        .await
+        .unwrap();
+    let progress = repo
+        .get_entry_receive_progress("entry")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        progress.items[0].status,
+        TrackedFileTransferStatus::Completed
+    );
+    assert_eq!(
+        progress.items[1].status,
+        TrackedFileTransferStatus::Failed,
+        "只有下载完成，没有保存记录的项不能报告交付成功"
+    );
+    assert_eq!(
+        progress.items[1].failure_reason,
+        Some(ReceiveItemFailureReason::Interrupted)
+    );
+}

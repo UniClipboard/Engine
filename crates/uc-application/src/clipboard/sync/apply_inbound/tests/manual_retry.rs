@@ -88,6 +88,7 @@ impl GetEntrySnapshotHashPort for Checks {
 struct Capture {
     attempts: Arc<AttemptGate>,
     snapshots: Mutex<Vec<SystemClipboardSnapshot>>,
+    deliveries: Mutex<Vec<Vec<String>>>,
     entered: Notify,
     release: Semaphore,
     slow: AtomicBool,
@@ -108,7 +109,7 @@ impl InboundCapture for Capture {
         _: DeviceId,
         snapshot: SystemClipboardSnapshot,
         _: Option<SnapshotHash>,
-        _: InboundCaptureCommitContext,
+        commit: InboundCaptureCommitContext,
     ) -> Result<Option<EntryId>> {
         if self.slow.load(Ordering::SeqCst) {
             self.entered.notify_one();
@@ -119,6 +120,15 @@ impl InboundCapture for Capture {
         } else {
             AttemptState::Cancelled
         };
+        let delivered_item_ids = match commit {
+            InboundCaptureCommitContext::Complete {
+                delivered_item_ids, ..
+            }
+            | InboundCaptureCommitContext::Partial {
+                delivered_item_ids, ..
+            } => delivered_item_ids,
+        };
+        self.deliveries.lock().unwrap().push(delivered_item_ids);
         self.snapshots.lock().unwrap().push(snapshot);
         Ok(Some(entry))
     }
@@ -174,6 +184,7 @@ impl Fixture {
         let capture = Arc::new(Capture {
             attempts: attempts.clone(),
             snapshots: Mutex::new(Vec::new()),
+            deliveries: Mutex::new(Vec::new()),
             entered: Notify::new(),
             release: Semaphore::new(0),
             slow: AtomicBool::new(false),
@@ -388,6 +399,14 @@ async fn manual_retry_saves_new_partial_success_without_fetching_or_deleting_pre
         panic!("retry not accepted")
     };
     assert_ne!(attempt_id, "old");
+    assert_eq!(
+        fixture.capture.deliveries.lock().unwrap().as_slice(),
+        &[vec![
+            format!("receiver:attempt:{attempt_id}:member:0"),
+            format!("receiver:attempt:{attempt_id}:member:1"),
+        ]],
+        "原成功与新增成功一起保存，未选取消项不能进入交付证明"
+    );
     assert_eq!(fixture.attempts.retry_calls.load(Ordering::SeqCst), 1);
     let snapshots = fixture.capture.snapshots.lock().unwrap();
     assert_eq!(snapshots.len(), 1, "a second partial must be saved");
