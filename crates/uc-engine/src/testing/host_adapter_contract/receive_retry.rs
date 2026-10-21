@@ -14,6 +14,8 @@ use crate::{
     ReceiveRetryUnavailableReason, RemoveMemberInput, RetryEntryReceiveInput, SecretString,
     SendFilesInput, SendTextInput, SettingsPatch, SyncSettingsPatch,
 };
+use diesel::sql_types::{Binary, Text};
+use diesel::{Connection, QueryableByName, RunQueryDsl, SqliteConnection};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -679,5 +681,112 @@ async fn real_engine_clear_without_saved_entry_waits_for_export_and_removes_rece
     })
     .await
     .unwrap();
+    case.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn real_engine_delete_refuses_unauthenticated_file_references_and_preserves_retry_material() {
+    let _guard = ENGINE_TEST_LOCK.lock().await;
+    let case = receive_case(false).await;
+    let entry = &case.first.entry_id;
+    let generation = std::fs::read_dir(
+        case.receiver_root
+            .path()
+            .join("private/profile-data-generations"),
+    )
+    .unwrap()
+    .map(|entry| entry.unwrap())
+    .find(|entry| entry.file_type().unwrap().is_dir())
+    .unwrap();
+    let mut connection = SqliteConnection::establish(
+        generation
+            .path()
+            .join("v3-payloads/profile.sqlite")
+            .to_str()
+            .unwrap(),
+    )
+    .unwrap();
+    #[derive(QueryableByName)]
+    struct Inline {
+        #[diesel(sql_type = Text)]
+        id: String,
+        #[diesel(sql_type = Binary)]
+        inline_data: Vec<u8>,
+    }
+    let original = diesel::sql_query(
+        "SELECT r.id, r.inline_data FROM clipboard_snapshot_representation r \
+         JOIN clipboard_entry e ON r.event_id = e.event_id \
+         WHERE e.entry_id = ? AND r.inline_data IS NOT NULL ORDER BY r.id LIMIT 1",
+    )
+    .bind::<Text, _>(entry)
+    .get_result::<Inline>(&mut connection)
+    .unwrap();
+    assert!(!original
+        .inline_data
+        .windows(NAME.len())
+        .any(|bytes| bytes == NAME.as_bytes()));
+    // 真实已加密文件引用被破坏；不能用旧降级返回的密文完成删除。
+    let mut corrupted = original.inline_data.clone();
+    let last = corrupted.last_mut().unwrap();
+    *last ^= 1;
+    assert_eq!(
+        diesel::sql_query(
+            "UPDATE clipboard_snapshot_representation SET inline_data = ? WHERE id = ?"
+        )
+        .bind::<Binary, _>(&corrupted)
+        .bind::<Text, _>(&original.id)
+        .execute(&mut connection)
+        .unwrap(),
+        1
+    );
+    let failure = case
+        .receiver
+        .execute(Operation::DeleteHistoryEntry(HistoryEntryInput {
+            entry_id: entry.clone(),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(failure.category(), EngineErrorCategory::Internal);
+    let clear_failure = case
+        .receiver
+        .execute(Operation::ClearHistory)
+        .await
+        .unwrap_err();
+    assert_eq!(clear_failure.category(), EngineErrorCategory::Internal);
+    let retained = diesel::sql_query(
+        "SELECT r.id, r.inline_data FROM clipboard_snapshot_representation r \
+         JOIN clipboard_entry e ON r.event_id = e.event_id \
+         WHERE e.entry_id = ? AND r.id = ?",
+    )
+    .bind::<Text, _>(entry)
+    .bind::<Text, _>(&original.id)
+    .get_result::<Inline>(&mut connection)
+    .unwrap();
+    assert_eq!(retained.inline_data, corrupted);
+    assert_eq!(
+        progress(&case.receiver, entry, "failed").await.attempt_id,
+        case.first.attempt_id
+    );
+    for (bytes, path) in &case.saved {
+        assert_eq!(&std::fs::read(path).unwrap(), bytes);
+    }
+    // 恢复原密文后，原动作仍可读取原成果并完成清空，不需要新建接收尝试。
+    diesel::sql_query("UPDATE clipboard_snapshot_representation SET inline_data = ? WHERE id = ?")
+        .bind::<Binary, _>(&original.inline_data)
+        .bind::<Text, _>(&original.id)
+        .execute(&mut connection)
+        .unwrap();
+    assert_eq!(
+        saved_files(&case.receiver, entry, case.receiver_root.path()).await,
+        case.saved
+    );
+    case.receiver
+        .execute(Operation::ClearHistory)
+        .await
+        .unwrap();
+    for path in case.saved.values() {
+        assert!(!path.exists());
+    }
+    drop(connection);
     case.shutdown().await;
 }

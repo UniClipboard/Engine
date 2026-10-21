@@ -965,11 +965,11 @@
 | `<module>` | `crates/uc-infra-content/src/content_protection/blob_store.rs:103` | `info_span` | - |
 | `<module>` | `crates/uc-infra-content/src/content_protection/blob_store.rs:114` | `debug` | message-body |
 | `<module>` | `crates/uc-infra-content/src/decrypting_clipboard_event_repo.rs:63` | `trace` | message-body |
-| `<module>` | `crates/uc-infra-content/src/decrypting_representation_repo.rs:70` | `trace` | message-body |
-| `<module>` | `crates/uc-infra-content/src/decrypting_representation_repo.rs:107` | `trace` | message-body |
-| `<module>` | `crates/uc-infra-content/src/decrypting_representation_repo.rs:127` | `trace` | message-body |
-| `<module>` | `crates/uc-infra-content/src/decrypting_representation_repo.rs:213` | `warn` | message-body |
-| `<module>` | `crates/uc-infra-content/src/decrypting_representation_repo.rs:221` | `debug` | sensitive-field, message-body |
+| `<module>` | `crates/uc-infra-content/src/decrypting_representation_repo.rs:93` | `trace` | message-body |
+| `<module>` | `crates/uc-infra-content/src/decrypting_representation_repo.rs:130` | `trace` | message-body |
+| `<module>` | `crates/uc-infra-content/src/decrypting_representation_repo.rs:150` | `trace` | message-body |
+| `<module>` | `crates/uc-infra-content/src/decrypting_representation_repo.rs:231` | `warn` | message-body |
+| `<module>` | `crates/uc-infra-content/src/decrypting_representation_repo.rs:240` | `debug` | sensitive-field, message-body |
 | `<module>` | `crates/uc-infra-content/src/encrypted_blob_store.rs:211` | `debug` | message-body |
 | `<module>` | `crates/uc-infra-content/src/encrypted_blob_store.rs:271` | `info_span` | - |
 | `<module>` | `crates/uc-infra-content/src/encrypted_blob_store.rs:274` | `debug` | message-body |

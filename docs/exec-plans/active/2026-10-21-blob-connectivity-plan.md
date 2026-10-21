@@ -859,3 +859,10 @@ SQLite目标集测试覆盖保存条目、NoEntry、孤儿逐项记录、仅产�
 出站准备、认证文件资料及既有删除清理失败边界仍继续验收，不把本轮当作完整生命周期或完整spec通过。
 
 最终同一代码快照完整nextest 2124通过／9跳过（199.518秒）；metadata、workspace全目标check、fmt、Rust style、repository、1351站点隐私清单及diff全部通过。设备未运行记为跳过，完整spec继续。
+
+
+### 2026-10-22 删除前认证文件引用
+
+真实Engine证明破坏已保存V3引用密文后，旧列表降级仍让删除返回成功。批量表示能力现在只返回全部认证后的结果；失败保留全部typed密码来源，窄port仍保留完整source chain，不把密文或空缺伪装成可用结果。完整负责人及调用方保持原DeleteHistoryEntry／ClearHistory；读取失败不触碰原保存／接收状态或文件。恢复原密文后仍通过原清空动作重试，无新schema／格式／Engine接口。该切片不替代磁盘清理失败重试、路径所有权及其余完整生命周期验收。
+
+本轮定向81项通过；最终五crate完整nextest 2205通过／9跳过（168.796秒），metadata、workspace全目标check、fmt、Rust style、repository、1351站点隐私清单及diff全部通过。磁盘清理失败与路径／成果所有权、其余生命周期／预算、资源及最终矩阵仍继续。

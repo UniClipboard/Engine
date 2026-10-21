@@ -212,3 +212,5 @@
 - 真实Engine基本clear8.38秒通过；扩大五项Engine32.69秒通过，含清空后接收新内容。Registry相关17通过（0.05秒）、实际初始readiness准备停止1通过（0.02秒）、真实SQLite目标集1通过（0.07秒）。
 - 审查发现readiness.is_ready临时false会启动reconciliation与清空并行；clear-recovery-red.log确证恢复在清空内立即运行。改用共享维护许可，清空先封口／停止再等已有恢复；恢复重新检查ready，不与已接受clear并行。通知也由Registry唯一持有，clear结束能唤醒readiness等待。双向竞争及receive相关58通过（0.11秒），clear相关15通过（0.08秒），待最终整库／根门禁。
 - 尚未绑定entry的provisional及更早输入／出站准备不由本轮出生表证明覆盖，留在全生命周期与准备预算验收中；既有认证资料读取／删除缓存失败边界仍未修复。完整目标不缩减，不把已关联条目清空当全spec完成。
+
+- 认证读取红测authenticated-list-red.log确认旧列表在两项解密失败后返回原密文；真实Engine authenticated-delete-red.log在破坏实际保存的V3文件引用密文后仍返回history_entry_deleted（4.251秒）。这会丢弃文件清理及重试资料。修复批量接口为全认证或typed失败，保留全部密码来源并保持单条数量诊断；窄port转换仍应追溯BlobCipherError。真实Engine验收继续覆盖Delete／Clear失败保留状态和文件、恢复原密文后重试清空。

@@ -304,3 +304,7 @@
 - 尚未绑定entry的provisional及更早输入／出站准备不由本轮出生表证明覆盖，留在全生命周期与准备预算验收中；既有认证资料读取／删除缓存失败边界仍未修复。完整目标不缩减，不把已关联条目清空当全spec完成。
 
 - 清空切片最终Core／Application／Storage／Engine完整nextest 2124通过／9跳过（199.518秒）；metadata解析812包、workspace全目标check（1m24s）、fmt、Rust style、repository preflight、1351站点隐私清单及diff均通过。既有编译警告未记为新通过项，设备未执行。手工审查共享维护许可与锁顺序、取消／出生／完成权、失败封口、SQL目标集及真实Engine调用者退出；code-review skill缺失，不冒称技能审查。下一步继续认证资料读取及删除清理失败边界，完整spec仍在进行。
+
+- 认证读取切片先由authenticated-list-red.log复现两个密码失败仍交付原密文，再由authenticated-delete-red.log复现真实V3引用密文破坏后DeleteHistoryEntry仍history_entry_deleted（4.251秒）。移除旧降级，整批只交付认证结果；聚合错误保留每项BlobCipherError，窄port的Storage转换仍可追溯原始具体类型与source；诊断只聚合数量。
+- 定向内容整库及新增真实Engine共81通过（4.438秒）；Engine同时证明单删／清空拒绝、原接收attempt／受管文件／原密文记录保留，以及恢复原密文后通过原清空动作成功完成。最终Core／Application／Storage／Content／Engine完整nextest 2205通过／9跳过（168.796秒），metadata解析812包、workspace全目标check（57.31秒）、fmt、Rust style、repository preflight、1351站点隐私清单及diff全部通过。未执行设备仍跳过。
+- 手工审查批量完整性、所有密码来源保留、窄port转换、固定日志、真实SQLite破坏／恢复及失败后重试；code-review skill缺失，不冒称技能审查。无新schema／格式或Engine步骤接口。删除缓存仍在SQL后best-effort，路径仅词法前缀，磁盘失败及安全所有权尚须继续；本轮不把认证读取当作完整删除／生命周期或完整spec通过。
