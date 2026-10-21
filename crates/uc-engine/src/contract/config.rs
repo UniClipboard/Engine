@@ -2,6 +2,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use uc_core::app_dirs::{HostConfigurationFileError, HostConfigurationFiles};
+use uc_core::diagnostics::{HostLogProfile, HostLogProfileError};
 
 const DEFAULT_PROFILE_ID: &str = "default";
 
@@ -53,6 +54,9 @@ pub struct EngineConfig {
     /// 宿主在数据根下拥有、随配置导出导入的附加配置文件；启动时校验。
     #[serde(default)]
     host_configuration_files: Vec<HostConfigurationFile>,
+    /// 宿主进程实际安装的日志档位名称；诊断状态与导出清单原样报告，启动时校验。
+    #[serde(default)]
+    host_log_profile: Option<String>,
     #[cfg(feature = "dev-tools")]
     #[serde(skip)]
     rendezvous_base_url: Option<String>,
@@ -74,6 +78,7 @@ impl EngineConfig {
             profile_id: DEFAULT_PROFILE_ID.to_string(),
             portable_storage: false,
             host_configuration_files: Vec::new(),
+            host_log_profile: None,
             #[cfg(feature = "dev-tools")]
             rendezvous_base_url: None,
             #[cfg(feature = "dev-tools")]
@@ -123,6 +128,27 @@ impl EngineConfig {
             };
             (file.name.clone(), reset)
         }))
+    }
+
+    /// 声明宿主本次进程实际安装的日志档位，例如 `prod` 或 `debug`。Engine 不解释、不保存该名称，
+    /// 也不据此改变自身日志；未声明时诊断报告为缺失。名称须为 1–32 字节的 `[a-z0-9_-]`，否则
+    /// `Engine::start` 以 `HOST_LOG_PROFILE_INVALID_CODE` 拒绝启动。
+    pub fn with_host_log_profile(mut self, label: impl Into<String>) -> Self {
+        self.host_log_profile = Some(label.into());
+        self
+    }
+
+    pub fn host_log_profile(&self) -> Option<&str> {
+        self.host_log_profile.as_deref()
+    }
+
+    pub(crate) fn validated_host_log_profile(
+        &self,
+    ) -> Result<Option<HostLogProfile>, HostLogProfileError> {
+        self.host_log_profile
+            .as_deref()
+            .map(HostLogProfile::new)
+            .transpose()
     }
 
     pub fn app_version(&self) -> &str {
@@ -210,7 +236,8 @@ impl fmt::Debug for EngineConfig {
             .field(
                 "host_configuration_file_count",
                 &self.host_configuration_files.len(),
-            );
+            )
+            .field("has_host_log_profile", &self.host_log_profile.is_some());
         #[cfg(feature = "dev-tools")]
         debug.field(
             "has_rendezvous_override",

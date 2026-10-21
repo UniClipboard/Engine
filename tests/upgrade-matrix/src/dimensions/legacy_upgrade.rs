@@ -36,11 +36,12 @@ const ENGINE_SETTINGS_KEYS: [&str; 9] = [
     "network",
     "mobile_sync",
 ];
-const ENGINE_GENERAL_KEYS: [&str; 2] = ["device_name", "debug_mode"];
+const ENGINE_GENERAL_KEYS: [&str; 1] = ["device_name"];
 
 /// 注入的非法宿主产品偏好：路径与写入值。`general.theme = "neon"` 与 Desktop 任务 4 的 B3 输入相同，
-/// 其余覆盖非法枚举与错误 JSON 类型；不改动任何仍归 Engine 的字段。
-fn invalid_preferences() -> [(&'static str, &'static str, Value); 9] {
+/// 其余覆盖非法枚举与错误 JSON 类型；`general.debug_mode` 已迁出 Engine，错误类型同样不得阻止启动。
+/// 不改动任何仍归 Engine 的字段。
+fn invalid_preferences() -> [(&'static str, &'static str, Value); 10] {
     [
         ("general", "theme", json!("neon")),
         ("general", "startup_mode", json!("turbo")),
@@ -48,6 +49,7 @@ fn invalid_preferences() -> [(&'static str, &'static str, Value); 9] {
         ("general", "language", json!(42)),
         ("general", "usage_analytics_enabled", json!("yes")),
         ("general", "theme_overrides_light", json!("not-a-map")),
+        ("general", "debug_mode", json!("yes")),
         ("quick_panel", "position", json!("nowhere")),
         ("quick_panel", "double_tap_modifier", json!("hyper")),
         ("keyboard_shortcuts", "global.toggleQuickPanel", json!(42)),
@@ -333,8 +335,7 @@ async fn verify_saved_settings(
         && saved["sync"]["sync_frequency"] == snapshot["sync"]["sync_frequency"]
         && saved["sync"]["content_types"] == snapshot["sync"]["content_types"]
         && saved["sync"]["sync_on_restore"] == true;
-    let general_kept = saved["general"]["device_name"] == from.device_name.as_str()
-        && saved["general"]["debug_mode"] == snapshot["general"]["debug_mode"];
+    let general_kept = saved["general"]["device_name"] == from.device_name.as_str();
     if !(engine_sections_kept && sync_kept && general_kept) {
         run.fact(
             "engine-settings-kept",

@@ -788,15 +788,7 @@ fn operation_response(result: OperationResult) -> Value {
         OperationResult::DiagnosticsStatus(status) => json!({
             "ok": true,
             "kind": "diagnostics_status",
-            "debug_mode": status.debug_mode,
             "effective_log_profile": status.effective_log_profile,
-            "restart_required": status.restart_required,
-        }),
-        OperationResult::DebugModeUpdated(result) => json!({
-            "ok": true,
-            "kind": "debug_mode_updated",
-            "debug_mode": result.debug_mode,
-            "restart_required": result.restart_required,
         }),
         OperationResult::DiagnosticLogsExported(result) => json!({
             "ok": true,

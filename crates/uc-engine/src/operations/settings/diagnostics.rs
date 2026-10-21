@@ -9,41 +9,15 @@ use uc_observability_contract::{error_source::io_error_kind, uc_warn};
 
 use crate::runtime::host_file::{copy_path_to_host, HostFileCopyError};
 use crate::{
-    DebugModeUpdateSummary, DiagnosticLogsExportSummary, DiagnosticsStatusSummary, EngineError,
-    EngineErrorCategory, ExportDiagnosticLogsInput, HostCapabilityErrorCategory, HostFileAccess,
-    OperationResult, UpdateDebugModeInput,
+    DiagnosticLogsExportSummary, DiagnosticsStatusSummary, EngineError, EngineErrorCategory,
+    ExportDiagnosticLogsInput, HostCapabilityErrorCategory, HostFileAccess, OperationResult,
 };
 
-pub(crate) async fn execute_query_diagnostics(
-    facade: &AppFacade,
-) -> Result<OperationResult, EngineError> {
-    let status = facade
-        .diagnostics_status()
-        .await
-        // discarded-source[contract-boundary]: the public error carries a stable code only, the owner records the failure classification
-        .map_err(|_| internal_error(QUERY_DIAGNOSTICS_FAILED_CODE))?;
-    Ok(OperationResult::DiagnosticsStatus(
-        DiagnosticsStatusSummary {
-            debug_mode: status.debug_mode,
-            effective_log_profile: status.effective_log_profile,
-            restart_required: status.restart_required,
-        },
-    ))
-}
-
-pub(crate) async fn execute_update_debug_mode(
-    facade: &AppFacade,
-    input: UpdateDebugModeInput,
-) -> Result<OperationResult, EngineError> {
-    let result = facade
-        .update_debug_mode(input.enabled)
-        .await
-        // discarded-source[contract-boundary]: the public error carries a stable code only, the owner records the failure classification
-        .map_err(|_| internal_error(UPDATE_DEBUG_MODE_FAILED_CODE))?;
-    Ok(OperationResult::DebugModeUpdated(DebugModeUpdateSummary {
-        debug_mode: result.debug_mode,
-        restart_required: result.restart_required,
-    }))
+pub(crate) fn execute_query_diagnostics(facade: &AppFacade) -> OperationResult {
+    let status = facade.diagnostics_status();
+    OperationResult::DiagnosticsStatus(DiagnosticsStatusSummary {
+        effective_log_profile: status.effective_log_profile,
+    })
 }
 
 pub(crate) async fn execute_export_diagnostic_logs(
@@ -104,10 +78,9 @@ fn create_export_dir(temporary_root: &Path) -> Result<std::path::PathBuf, Engine
 
 fn map_diagnostics_error(error: DiagnosticsFacadeError) -> EngineError {
     match error {
-        DiagnosticsFacadeError::DownloadsUnavailable
-        | DiagnosticsFacadeError::LoadSettings(_)
-        | DiagnosticsFacadeError::SaveSettings(_)
-        | DiagnosticsFacadeError::Export(_) => internal_error(EXPORT_DIAGNOSTIC_LOGS_FAILED_CODE),
+        DiagnosticsFacadeError::DownloadsUnavailable | DiagnosticsFacadeError::Export(_) => {
+            internal_error(EXPORT_DIAGNOSTIC_LOGS_FAILED_CODE)
+        }
     }
 }
 

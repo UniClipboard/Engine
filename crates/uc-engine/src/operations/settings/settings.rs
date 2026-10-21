@@ -319,7 +319,6 @@ fn map_settings(settings: app::SettingsView) -> SettingsSummary {
         schema_version: settings.schema_version,
         general: GeneralSettingsSummary {
             device_name: settings.general.device_name,
-            debug_mode: settings.general.debug_mode,
         },
         sync: SyncSettingsSummary {
             sync_enabled: settings.sync.sync_enabled,
@@ -377,7 +376,6 @@ fn map_patch(patch: SettingsPatch) -> Result<app::SettingsPatch, String> {
     Ok(app::SettingsPatch {
         general: patch.general.map(|value| app::GeneralSettingsPatch {
             device_name: value.device_name,
-            debug_mode: value.debug_mode,
         }),
         sync: patch.sync.map(|value| app::SyncSettingsPatch {
             sync_enabled: value.sync_enabled,
@@ -577,7 +575,6 @@ mod tests {
         let patch = SettingsPatch {
             general: Some(crate::GeneralSettingsPatch {
                 device_name: Some(None),
-                debug_mode: None,
             }),
             ..Default::default()
         };
@@ -585,7 +582,6 @@ mod tests {
         let mapped = map_patch(patch).expect("valid patch");
         let general = mapped.general.expect("general patch");
         assert_eq!(general.device_name, Some(None));
-        assert_eq!(general.debug_mode, None);
     }
 
     #[test]

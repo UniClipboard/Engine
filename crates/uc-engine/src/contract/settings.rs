@@ -83,17 +83,15 @@ pub enum RetentionRulePatch {
 }
 
 /// Engine 拥有的通用设置。宿主产品外壳偏好（启动、更新、主题、语言、产品分析许可、
-/// 快捷键与快捷面板）由宿主产品自行保存，不在 Engine 契约中。
+/// 快捷键与快捷面板、调试日志开关）由宿主产品自行保存，不在 Engine 契约中。
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GeneralSettingsSummary {
     pub device_name: Option<String>,
-    pub debug_mode: bool,
 }
 
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GeneralSettingsPatch {
     pub device_name: Option<Option<String>>,
-    pub debug_mode: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

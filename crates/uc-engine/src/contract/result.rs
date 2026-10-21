@@ -9,14 +9,14 @@ use uc_application::facade::{
 use super::{EngineError, ResendEntryOutcome, SendReportSummary};
 use crate::{
     ConfigExportOutcome, ConfigImportPreviewOutcome, ConfigImportStageOutcome,
-    CustomRelayMutationOutcome, CustomRelaySummary, DebugModeUpdateSummary,
-    DiagnosticLogsExportSummary, DiagnosticsStatusSummary, MobileAuthenticatedSession,
-    MobileAuthenticationOutcome, MobileDeviceRegistrationOutcome, MobileDeviceRevokeOutcome,
-    MobileDeviceSummary, MobileDeviceUpdateOutcome, MobileFileUploadHandle,
-    MobileLanInterfaceSummary, MobileSyncDocument, MobileSyncDocumentApplyOutcome,
-    MobileSyncFileReadOutcome, MobileSyncSettingsSummary, MobileSyncSettingsUpdateOutcome,
-    RelayCredentialStatus, RelayOverview, RelayProbeOutcome, SaveRelayOutcome, SettingsSummary,
-    SettingsUpdateOutcome, UpgradeStatusSummary,
+    CustomRelayMutationOutcome, CustomRelaySummary, DiagnosticLogsExportSummary,
+    DiagnosticsStatusSummary, MobileAuthenticatedSession, MobileAuthenticationOutcome,
+    MobileDeviceRegistrationOutcome, MobileDeviceRevokeOutcome, MobileDeviceSummary,
+    MobileDeviceUpdateOutcome, MobileFileUploadHandle, MobileLanInterfaceSummary,
+    MobileSyncDocument, MobileSyncDocumentApplyOutcome, MobileSyncFileReadOutcome,
+    MobileSyncSettingsSummary, MobileSyncSettingsUpdateOutcome, RelayCredentialStatus,
+    RelayOverview, RelayProbeOutcome, SaveRelayOutcome, SettingsSummary, SettingsUpdateOutcome,
+    UpgradeStatusSummary,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -536,7 +536,6 @@ pub enum OperationResult {
         version: String,
     },
     DiagnosticsStatus(DiagnosticsStatusSummary),
-    DebugModeUpdated(DebugModeUpdateSummary),
     DiagnosticLogsExported(DiagnosticLogsExportSummary),
     ConfigExport(ConfigExportOutcome),
     ConfigImportPreview(ConfigImportPreviewOutcome),
@@ -790,9 +789,6 @@ impl fmt::Debug for OperationResult {
             Self::DiagnosticsStatus(status) => debug
                 .field("kind", &"diagnostics_status")
                 .field("status", status),
-            Self::DebugModeUpdated(result) => debug
-                .field("kind", &"debug_mode_updated")
-                .field("result", result),
             Self::DiagnosticLogsExported(result) => debug
                 .field("kind", &"diagnostic_logs_exported")
                 .field("result", result),

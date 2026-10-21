@@ -11,7 +11,7 @@ use crate::{
     MobileSyncSettingsPatch, PreviewConfigImportInput, ReadMobileSyncFileInput,
     RegisterMobileDeviceInput, RelayCredentialInput, RelayProbeInput,
     RevalidateMobileCredentialInput, SaveRelayInput, SettingsPatch, StageConfigImportInput,
-    UpdateDebugModeInput, UpdateMobileDeviceInput,
+    UpdateMobileDeviceInput,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,7 +58,6 @@ pub enum OperationKind {
     QueryUpgradeStatus,
     AcknowledgeUpgrade,
     QueryDiagnostics,
-    UpdateDebugMode,
     ExportDiagnosticLogs,
     ExportConfig,
     PreviewConfigImport,
@@ -172,7 +171,6 @@ impl fmt::Display for OperationKind {
             Self::QueryUpgradeStatus => "query_upgrade_status",
             Self::AcknowledgeUpgrade => "acknowledge_upgrade",
             Self::QueryDiagnostics => "query_diagnostics",
-            Self::UpdateDebugMode => "update_debug_mode",
             Self::ExportDiagnosticLogs => "export_diagnostic_logs",
             Self::ExportConfig => "export_config",
             Self::PreviewConfigImport => "preview_config_import",
@@ -330,7 +328,6 @@ pub enum Operation {
     QueryUpgradeStatus,
     AcknowledgeUpgrade,
     QueryDiagnostics,
-    UpdateDebugMode(UpdateDebugModeInput),
     ExportDiagnosticLogs(ExportDiagnosticLogsInput),
     ExportConfig(ExportConfigInput),
     PreviewConfigImport(PreviewConfigImportInput),
@@ -446,7 +443,6 @@ impl Operation {
             Self::QueryUpgradeStatus => OperationKind::QueryUpgradeStatus,
             Self::AcknowledgeUpgrade => OperationKind::AcknowledgeUpgrade,
             Self::QueryDiagnostics => OperationKind::QueryDiagnostics,
-            Self::UpdateDebugMode(_) => OperationKind::UpdateDebugMode,
             Self::ExportDiagnosticLogs(_) => OperationKind::ExportDiagnosticLogs,
             Self::ExportConfig(_) => OperationKind::ExportConfig,
             Self::PreviewConfigImport(_) => OperationKind::PreviewConfigImport,

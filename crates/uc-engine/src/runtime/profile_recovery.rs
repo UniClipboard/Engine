@@ -29,8 +29,9 @@ use crate::engine::startup::StartupProgressStore;
 use crate::engine::EngineRuntime;
 use crate::error_codes::{
     FACTORY_RESET_RESTART_REQUIRED_CODE, HOST_CONFIGURATION_FILES_INVALID_CODE,
-    PROFILE_RECOVERY_PARTIAL_CODE, PROFILE_RECOVERY_PERSISTENCE_FAILED_CODE,
-    PROFILE_RECOVERY_UNSUPPORTED_CODE, UNLOCK_SPACE_CORRUPTED_CODE, UNLOCK_SPACE_UNAUTHORIZED_CODE,
+    HOST_LOG_PROFILE_INVALID_CODE, PROFILE_RECOVERY_PARTIAL_CODE,
+    PROFILE_RECOVERY_PERSISTENCE_FAILED_CODE, PROFILE_RECOVERY_UNSUPPORTED_CODE,
+    UNLOCK_SPACE_CORRUPTED_CODE, UNLOCK_SPACE_UNAUTHORIZED_CODE,
 };
 use crate::operations::space::factory_reset::execute_factory_reset_space;
 use crate::{
@@ -99,6 +100,19 @@ impl RecoverableRuntime {
             // discarded-source[core-pure-validation]: the Core rule is fully classified by the variant logged above
             return Err(EngineError::new(
                 HOST_CONFIGURATION_FILES_INVALID_CODE,
+                EngineErrorCategory::InvalidInput,
+                false,
+            ));
+        }
+        // 日志档位名称会进入诊断状态与导出清单，同样在任何资料读写之前校验。
+        if config.validated_host_log_profile().is_err() {
+            uc_warn!(
+                error_kind = "invalid_label",
+                "host log profile declaration rejected"
+            );
+            // discarded-source[core-pure-validation]: the Core rule has a single failure, fully classified above
+            return Err(EngineError::new(
+                HOST_LOG_PROFILE_INVALID_CODE,
                 EngineErrorCategory::InvalidInput,
                 false,
             ));

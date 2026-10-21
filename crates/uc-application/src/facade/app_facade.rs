@@ -132,12 +132,12 @@ use crate::facade::upgrade::UpgradeFacade;
 use crate::facade::{
     BlobTransferError, BlobTransferFacade, ChangeEncryptionPassphraseError, ClipboardCaptureFacade,
     ClipboardHistoryFacade, ClipboardOutboundFacade, ClipboardRestoreError, ClipboardRestoreFacade,
-    ClipboardSyncError, ClipboardSyncFacade, DiagnosticsFacade, DispatchEntryOutcome,
-    FetchBlobCommand, FetchBlobResult, FetchBlobToPathCommand, FetchBlobToPathResult,
-    LocalDeviceInfo, ProbeProfileKeyAccessError, PublishBlobCommand, PublishBlobPathCommand,
-    PublishBlobResult, QuerySpaceAccessStateError, ResendEntryCommand, ResendEntryError,
-    ResendReport, ResourceFacade, SearchFacade, SearchFacadeError, SearchPageView,
-    SearchQueryInput, SearchRebuildAcceptedView, SearchStatusView, SettingsFacade,
+    ClipboardSyncError, ClipboardSyncFacade, DebugStatusView, DiagnosticsFacade,
+    DispatchEntryOutcome, FetchBlobCommand, FetchBlobResult, FetchBlobToPathCommand,
+    FetchBlobToPathResult, LocalDeviceInfo, ProbeProfileKeyAccessError, PublishBlobCommand,
+    PublishBlobPathCommand, PublishBlobResult, QuerySpaceAccessStateError, ResendEntryCommand,
+    ResendEntryError, ResendReport, ResourceFacade, SearchFacade, SearchFacadeError,
+    SearchPageView, SearchQueryInput, SearchRebuildAcceptedView, SearchStatusView, SettingsFacade,
     SettingsFacadeError, SpaceAccessState, SpaceFacade, StorageFacade,
 };
 use crate::profile::probe_profile_key_access::ProbeProfileKeyAccessUseCase;
@@ -1028,17 +1028,8 @@ impl AppFacade {
         self.space.space_protection().await
     }
 
-    pub async fn diagnostics_status(
-        &self,
-    ) -> Result<crate::facade::DebugStatusView, crate::facade::DiagnosticsFacadeError> {
-        self.diagnostics.debug_status().await
-    }
-
-    pub async fn update_debug_mode(
-        &self,
-        enabled: bool,
-    ) -> Result<crate::facade::UpdateDebugModeView, crate::facade::DiagnosticsFacadeError> {
-        self.diagnostics.set_debug_mode(enabled).await
+    pub fn diagnostics_status(&self) -> DebugStatusView {
+        self.diagnostics.debug_status()
     }
 
     pub async fn export_diagnostic_logs(
@@ -1088,7 +1079,6 @@ impl AppFacade {
             .update(SettingsPatch {
                 general: Some(GeneralSettingsPatch {
                     device_name: Some(Some(device_name)),
-                    debug_mode: None,
                 }),
                 sync: None,
                 retention_policy: None,
