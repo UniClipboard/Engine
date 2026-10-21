@@ -249,3 +249,11 @@
 - 整库残留1失败已复现到SDK Endpoint关闭的跨subscriber父ID；新增显式双registry隐私回归先red（0.08秒）后green，测试夹具启动与生产Node统一隔离SDK长期驱动。保留领域日志正向捕获和路径隐私断言，不跳过测试、不修改SDK。最终P2P整库323通过／3跳过（167.73秒）、SDK结算1通过／协议向量1通过，日志无panic；首轮322通过／1失败及扩大77通过／1失败backtrace保留。历史1GiB基线1通过（23.74秒，峰值RSS45600KiB），只证明原SDK历史基线，FD／线程／任务未全部回到起点，未当作最终生产资源回收。开始Engine契约／真实取消与最终根检查，完整spec仍未完成。
 
 - 最终Engine公开契约51通过；默认feature尝试真实取消用例只筛到0项，未记通过，补dev-tools后真实active_pull_cancel_settles_real_file_a_without_starting_file_b为1通过（5.94秒）。最终metadata解析812个包、workspace全目标check通过（1m29s）、fmt、Rust style、repository（含五个新反例）、1355站点隐私清单与diff检查全部通过。编译期间冻结源码／文档／inventory，所有Cargo串行复用共享target及缓存。手工审查原本地tag／TryReference、来源链、SDK无请求parent边界、启动计时与两registry回归；code-review skill仍缺失，未冒充技能审查。准备提交本切片；完整spec继续，普通redelivery原成果衔接、历史成果／来源恢复、完整许可／生命周期、最终Engine网络资源及平台矩阵仍未完成。
+
+
+- 2576a4cf之后继续来源提交边界。真实普通重复投递的新包来自不同发送方、两项和新ticket／表示ID，被partial-kept分支丢弃后原三项recipe却被覆盖；redelivery-recipe-red-fixed.log为0通过1失败（0.00秒），明确来源由原source变为different-sender。首轮测试私有字段编译错误改为完整receiver测试构造，共享原readiness，不扩大生产接口。
+- receive/work保留至多一份实际保存旧receipt，只有persisted成功确认才切换；未保存finish恢复原清单／输出所有权并按当前attempt重绑定项身份及原facts。连续两次失败、重复finish、实际保存切换／完整释放、关闭重开和删除后的迟到finish均有覆盖；普通begin也拒绝仍持有条目的旧完整动作，具体CleanupInProgress来源保留。
+- 首轮最小2通过，manual_retry／work／batch扩展28通过（0.06秒）。补capture StorageFull分支后的整库1211通过／1失败／1跳过，失败在测试只downcast最外层而忽略既有SharedSource包装；改为沿完整chain核验原StorageFull，保留首次日志。最终App1212通过／1跳过（26.06秒），同一回归继续完整手动选择，只获取旧失败项并保留原成功。1355站点隐私清单与style／diff通过，开始Engine真实取消和最终根检查。
+- 此步不宣称新旧两份partial成果已安全合并，也不宣称跨重启来源／历史交付证明恢复完成；完整许可、生命周期及最终生产网络资源／平台矩阵继续保留。
+
+- 最终真实Engine dev-tools取消回归1通过（5.82秒），metadata解析812包、workspace全目标check通过（1m26s）、fmt、Rust style、repository preflight、1355站点隐私清单与diff全部通过。全过程Cargo串行复用共享target和原缓存，验证期间未修改源码／文档／inventory。手工审查旧proof仅来自实际保存receipt、同一原清单重绑定、锁顺序、finish幂等、删除／世代封口及具体错误来源；code-review skill不可用，不冒充技能审查。当前只修复未保存替换的同进程来源保留，未将其当作完整新旧partial合并或跨重启证明。准备提交，完整目标继续。

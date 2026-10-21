@@ -152,3 +152,12 @@
 - 当前正确4测试组合0.26秒全通过且无panic；整库／SDK资源验证仍在运行。SDK协议、票据、blob字节、失败链与停止等待算法未改；没有新增Engine业务步骤接口。
 
 - 最后整库322通过／1失败／3跳过，SDK／向量／1GiB独立二进制各通过；失败堆栈已从SDK事务worker转为测试Endpoint关闭，socket.rs:1128／1208显式使用启动subscriber的span。扩大78测试复现77通过／1失败，完整backtrace保留trace-dispatch-repro-expanded.log。隐私测试显式跨两个registry后单跑0通过1失败（0.08秒，endpoint-subscriber-red.log），不再依赖全局前置顺序。fixture SDK启动按生产边界隔离后最小3通过，日志正向捕获与路径隐私断言保留。最终整库323通过／3跳过（167.73秒），SDK结算1通过（0.43秒）、协议向量1通过，remove-legacy-p2p-final.log无panic。
+
+
+## 2026-10-22 未保存投递的来源提交边界
+
+- 上轮2576a4cf为progress：已提交退休路径删除、跨subscriber修复及完整P2P／Engine／根门禁。本轮工作树核对仅用户四个规划目录未跟踪。
+- 真正来源覆盖红测在完整普通接收之后断言原source：新包来自different-sender、两项和新ticket／新表示ID；它被partial-kept分支丢弃，但receipt原三项和已保存项被覆盖，实际left为新发送方。redelivery-recipe-red-fixed.log为0通过1失败（0.00秒）。首轮测试编译因兄弟usecase模块私有字段不可直接替换；改为测试完整receiver构造显式传共享readiness与各port，不扩大生产可见性。
+- receive/work的候选动作持有至多一份实际保存旧receipt，只有persisted确认提交后丢弃；否则finish按原source清单重生成当前attempt项ID并重绑定既有facts。旧表示ID、实际输出及原删除所有权均不变，不能继承新包数组。无旧保存成果时保留新来源。finish幂等，不能将已恢复facts再覆写为丢弃下载的facts。
+- 普通begin在register前检查旧完整action仍否持有条目，拒绝原因保留具体ReceiveRegistrationError::CleanupInProgress；旧终态但还在收尾不能并发接收。
+- 首轮修复完整普通接收＋随后的手动选择和旧动作封口2通过（0.01秒）；扩展manual_retry／work／batch28通过（0.06秒），包含两次未提交候选、保存成功后来源替换／完整释放、关闭重开与删除后迟到finish不复活。正在补capture失败真实分支并扩大Application整库，不提前记通过。

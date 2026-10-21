@@ -5,8 +5,8 @@ use crate::transfer::blob::notifications::OutboundNotifications;
 use crate::transfer::policy::PROGRESS_REPORT_INTERVAL;
 use anyhow::Error as SourceError;
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::{fmt, mem};
 use tokio::time::Instant;
 use uc_core::file_transfer::{
     FileTransferCancellationReason, FileTransferFailureReason, OutboundProgressStatus,
@@ -273,6 +273,24 @@ pub(crate) struct ReceiveFacts {
     finished: bool,
 }
 impl ReceiveFacts {
+    /// 两组标识均由同一份原始清单生成；只改变尝试身份，不采用新投递的数组位置。
+    pub(super) fn rebase(
+        &mut self,
+        previous: &[PlannedReceiveItem],
+        current: &[PlannedReceiveItem],
+    ) {
+        let mut items = mem::take(&mut self.items);
+        self.items = previous
+            .iter()
+            .zip(current)
+            .filter_map(|(previous, current)| {
+                items
+                    .remove(&previous.id)
+                    .map(|item| (current.id.clone(), item))
+            })
+            .collect();
+    }
+
     pub(crate) fn items(
         &self,
         planned: &[PlannedReceiveItem],

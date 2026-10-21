@@ -77,6 +77,7 @@ pub(crate) struct ReceiveAction {
     pub(crate) batch: Arc<ReceiveBatch>,
     registry: Arc<ReceiveWorkRegistry>,
     progress: Mutex<Option<Arc<Progress>>>,
+    previous_receipt: Mutex<Option<catalog::ReceiveReceipt>>,
     generation: CancellationToken,
     birth: Arc<()>,
 }
@@ -134,6 +135,7 @@ impl ReceiveWorkRegistry {
             batch: Arc::new(ReceiveBatch::default()),
             registry: self.clone(),
             progress: Mutex::new(None),
+            previous_receipt: Mutex::new(None),
             generation: state.generation.clone(),
             birth,
         })

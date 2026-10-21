@@ -137,7 +137,8 @@ impl ReceiveAction {
             return;
         }
         let planned = source.planned(&progress.entry, &progress.attempt);
-        state.receipts.insert(
+        let expected_hash = source.expected_hash.clone();
+        let previous = state.receipts.insert(
             progress.entry.clone(),
             ReceiveReceipt {
                 attempt: progress.attempt.clone(),
@@ -148,6 +149,20 @@ impl ReceiveAction {
                 landed: HashMap::new(),
             },
         );
+        let mut saved = self
+            .previous_receipt
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if saved.is_none() {
+            *saved = previous.filter(|receipt| {
+                receipt.attempt != progress.attempt
+                    && !receipt.landed.is_empty()
+                    && receipt.final_facts.is_some()
+                    && receipt.source.as_ref().is_some_and(|original| {
+                        original.manifest.is_none() && original.expected_hash == expected_hash
+                    })
+            });
+        }
     }
 
     pub(super) fn finish_receipt(&self) {
@@ -164,12 +179,45 @@ impl ReceiveAction {
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        let previous = self
+            .previous_receipt
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(mut previous) = previous {
+            if state.accepting
+                && !self.generation.is_cancelled()
+                && !state.cleaning.contains(progress.entry.as_ref())
+                && state
+                    .receipts
+                    .get(&progress.entry)
+                    .is_some_and(|receipt| receipt.attempt == progress.attempt)
+            {
+                if let Some(source) = &previous.source {
+                    let planned = source.planned(&progress.entry, &progress.attempt);
+                    if let Some(facts) = &mut previous.final_facts {
+                        facts.rebase(&previous.planned, &planned);
+                    }
+                    previous.planned = planned;
+                    previous.attempt = progress.attempt.clone();
+                    previous.batch = Weak::new();
+                    state.receipts.insert(progress.entry.clone(), previous);
+                    return;
+                }
+            }
+        }
         if let Some(receipt) = state
             .receipts
             .get_mut(&progress.entry)
             .filter(|receipt| receipt.attempt == progress.attempt)
         {
-            receipt.final_facts = Some(self.batch.facts());
+            if receipt
+                .batch
+                .upgrade()
+                .is_some_and(|batch| Arc::ptr_eq(&batch, &self.batch))
+            {
+                receipt.final_facts = Some(self.batch.facts());
+            }
         }
     }
 
@@ -188,6 +236,11 @@ impl ReceiveAction {
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        // 唯一capture提交已经成功，旧来源不再代表当前保存事实。
+        self.previous_receipt
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
         let Some(receipt) = state
             .receipts
             .get_mut(&progress.entry)

@@ -3,7 +3,7 @@ use crate::clipboard::sync::payload_codec::V3BlobRef;
 use crate::transfer::receive::materialization::{ReceivedItem, ReceivedOutput};
 use bytes::Bytes;
 use std::sync::Arc;
-use uc_core::file_transfer::OutboundProgressStatus;
+use uc_core::file_transfer::{FileTransferCancellationReason, OutboundProgressStatus};
 use uc_core::ids::{DeviceId, EntryId};
 use uc_core::ports::blob::BlobTicket;
 use uc_core::ports::{
@@ -207,4 +207,145 @@ fn only_the_explicitly_committed_item_proof_can_turn_download_completion_into_su
         TrackedFileTransferStatus::Completed
     );
     assert_eq!(current.items[1].status, TrackedFileTransferStatus::Failed);
+}
+
+fn saved_registry() -> Arc<ReceiveWorkRegistry> {
+    let registry = Arc::new(ReceiveWorkRegistry::default());
+    let saved = registry.action();
+    saved
+        .register(&EntryId::from("receiver"), "attempt")
+        .unwrap();
+    saved.retain_source(source());
+    saved.batch.item_result(
+        "receiver:attempt:attempt:member:2",
+        0,
+        OutboundProgressStatus::Cancelled {
+            reason: FileTransferCancellationReason::LocalUser,
+        },
+        None,
+    );
+    saved.persisted(
+        false,
+        &[ReceivedItem {
+            blob_index: 0,
+            plaintext_hash: [1; 32],
+            bytes: 7,
+            output: ReceivedOutput::File(ReceiveArtifact {
+                item_id: "saved-original".into(),
+                staged_path: "saved-original".into(),
+                final_path: "saved-original".into(),
+                ownership: ReceiveArtifactOwnership::UserDestination,
+            }),
+        }],
+    );
+    saved.finish(Ok(()));
+    registry
+}
+
+#[test]
+fn successive_uncommitted_sources_keep_original_item_identity_and_saved_results() {
+    let registry = saved_registry();
+    for attempt in ["second", "third"] {
+        let incoming = registry.action();
+        incoming
+            .register(&EntryId::from("receiver"), attempt)
+            .unwrap();
+        let mut new_source = source();
+        new_source.from_device = DeviceId::new("different");
+        new_source.blob_refs.truncate(1);
+        incoming.retain_source(new_source);
+        incoming.finish(Ok(()));
+        // 重复完成通知不能把回退后的保存事实替换为已丢弃的新下载事实。
+        incoming.finish(Ok(()));
+        let (original, landed) = registry
+            .retry_material(&EntryId::from("receiver"), attempt)
+            .unwrap();
+        assert_eq!(original.from_device, DeviceId::new("PRIVATE_DEVICE"));
+        assert_eq!(original.blob_refs.len(), 3);
+        assert_eq!(landed.len(), 1);
+        assert!(landed.contains_key(&0));
+        let mut current = progress(AttemptState::Failed);
+        current.attempt_id = attempt.into();
+        registry.merge_progress(&mut current);
+        assert_eq!(
+            current
+                .items
+                .iter()
+                .map(|item| item.status)
+                .collect::<Vec<_>>(),
+            vec![
+                TrackedFileTransferStatus::Completed,
+                TrackedFileTransferStatus::Failed,
+                TrackedFileTransferStatus::Cancelled,
+            ]
+        );
+        assert_eq!(
+            current.items[0].item_id,
+            format!("receiver:attempt:{attempt}:member:0")
+        );
+    }
+}
+
+#[test]
+fn actual_persistence_replaces_previous_recipe_and_full_success_releases_both_sources() {
+    for complete in [false, true] {
+        let registry = saved_registry();
+        let incoming = registry.action();
+        incoming
+            .register(&EntryId::from("receiver"), "second")
+            .unwrap();
+        let mut new_source = source();
+        new_source.from_device = DeviceId::new("different");
+        new_source.blob_refs.truncate(2);
+        incoming.retain_source(new_source);
+        let new_saved = ReceivedItem {
+            blob_index: 1,
+            plaintext_hash: [2; 32],
+            bytes: 7,
+            output: ReceivedOutput::File(ReceiveArtifact {
+                item_id: "new-saved".into(),
+                staged_path: "new-saved".into(),
+                final_path: "new-saved".into(),
+                ownership: ReceiveArtifactOwnership::UserDestination,
+            }),
+        };
+        incoming.persisted(complete, &[new_saved]);
+        incoming.finish(Ok(()));
+        let material = registry.retry_material(&EntryId::from("receiver"), "second");
+        if complete {
+            assert!(material.is_none());
+            assert!(registry.state.lock().unwrap().receipts.is_empty());
+        } else {
+            let (original, landed) = material.unwrap();
+            assert_eq!(original.from_device, DeviceId::new("different"));
+            assert_eq!(original.blob_refs.len(), 2);
+            assert_eq!(landed.len(), 1);
+            assert!(landed.contains_key(&1));
+        }
+    }
+}
+
+#[tokio::test]
+async fn close_and_delete_discard_saved_backup_before_late_completion() {
+    for deleting in [false, true] {
+        let registry = saved_registry();
+        let incoming = registry.action();
+        let entry = EntryId::from("receiver");
+        incoming.register(&entry, "second").unwrap();
+        incoming.retain_source(source());
+        if deleting {
+            let owner = registry.clone();
+            let deleting = tokio::spawn(async move { owner.delete_scope(&entry).await });
+            incoming.cancellation().cancelled().await;
+            incoming.finish(Ok(()));
+            drop(deleting.await.unwrap().unwrap());
+        } else {
+            registry.close();
+            assert!(registry.open(&registry.generation()));
+            incoming.finish(Ok(()));
+        }
+        incoming.finish(Ok(()));
+        assert!(registry.state.lock().unwrap().receipts.is_empty());
+        assert!(incoming.previous_receipt.lock().unwrap().is_none());
+    }
 }

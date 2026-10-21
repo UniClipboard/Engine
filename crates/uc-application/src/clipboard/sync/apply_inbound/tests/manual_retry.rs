@@ -1,13 +1,16 @@
 mod owner;
 use super::{
-    test_materializer, ApplyInboundClipboardUseCase, AttemptGate, FakeAvailability,
-    InboundApplyCommonDeps, InboundReceiveAttemptDeps, MockBlobFetcher, MockEntryRepo,
-    NoopReceiveArtifactCleanup, RecordingLiveIndex, StoreOnlyPullDeps,
+    file_blob_input, test_materializer, ApplyInboundClipboardUseCase, ApplyInboundError,
+    ApplyInboundInput, ApplyOutcome, AttemptGate, FakeAvailability, InboundApplyCommonDeps,
+    InboundReceiveAttemptDeps, MockBlobFetcher, MockEntryRepo, NoopReceiveArtifactCleanup,
+    RecordingLiveIndex, StoreOnlyPullDeps,
 };
 use crate::clipboard::capture::InboundCaptureCommitContext;
 use crate::clipboard::entry_identity::EntryIdentityCoordinator;
 use crate::clipboard::sync::apply_inbound::InboundCapture;
-use crate::clipboard::sync::payload_codec::V3BlobRef;
+use crate::clipboard::sync::payload_codec::{
+    encode_snapshot_with_blob_refs_to_v3_bytes, V3BlobRef,
+};
 use crate::facade::blob_transfer::FetchBlobToPathResult;
 use crate::facade::HostEventBus;
 use crate::space::{
@@ -19,12 +22,15 @@ use crate::transfer::receive::retry::{
     BeginReceiveRetryInput, BeginReceiveRetryPort, PreparedReceiveRetry,
     ReceiveCancellationBarrier, RetryEntryReceiveOutcome,
 };
-use crate::transfer::receive::work::{ReceiveRepresentation, ReceiveSource, ReceiveWorkRegistry};
+use crate::transfer::receive::work::{
+    ReceiveRegistrationError, ReceiveRepresentation, ReceiveSource, ReceiveWorkRegistry,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::{io, path::PathBuf};
 use tokio::sync::{oneshot, Notify, Semaphore};
 use uc_core::clipboard::ClipboardRepositoryError;
 use uc_core::file_transfer::{FileTransferCancellationReason, OutboundProgressStatus};
@@ -37,6 +43,164 @@ use uc_core::ports::{
     ReceiveItemProgress, TrackedFileTransferStatus,
 };
 use uc_core::{MimeType, ObservedClipboardRepresentation, SnapshotHash, SystemClipboardSnapshot};
+
+#[tokio::test]
+async fn discarded_partial_redelivery_preserves_original_saved_recipe_for_manual_retry() {
+    for save_fails in [false, true] {
+        let fixture = Fixture::new(1).await;
+        fixture.capture.fail.store(save_fails, Ordering::SeqCst);
+        let mut fetcher = MockBlobFetcher::new();
+        fetcher
+            .expect_fetch_blob_to_path()
+            .times(2)
+            .returning(move |command| {
+                if !save_fails
+                    && command
+                        .transfer_context
+                        .as_ref()
+                        .unwrap()
+                        .transfer_id
+                        .ends_with("member:0")
+                {
+                    return Err(io::Error::from(io::ErrorKind::ConnectionReset).into());
+                }
+                std::fs::write(&command.target_path, b"newfile").unwrap();
+                Ok(FetchBlobToPathResult {
+                    entry_id: command.entry_id,
+                    bytes_written: 7,
+                    plaintext_hash: PlaintextHash::from_bytes(*blake3::hash(b"newfile").as_bytes()),
+                    digest: BlobDigest::from_bytes([6; 32]),
+                })
+            });
+        let redelivery = receiver(
+            fixture.attempts.clone(),
+            fixture.capture.clone(),
+            fixture.readiness.clone(),
+            fetcher,
+            fixture._cache.path().to_owned(),
+        );
+        // 新包的来源、项数、ticket及表示ID都不同，不能把其索引当成旧保存证明。
+        let mut incoming = fixture.snapshot.clone();
+        incoming.representations[0].id = RepresentationId::new();
+        let refs = (0..2)
+            .map(|_| V3BlobRef {
+                ticket: BlobTicket::from_bytes(vec![6]),
+                entry_id: EntryId::from("different-source-entry"),
+                filename: Some("incoming.bin".into()),
+                mime: None,
+                size_bytes: 7,
+                representation_index: None,
+            })
+            .collect::<Vec<_>>();
+        let (wire, _) = encode_snapshot_with_blob_refs_to_v3_bytes(&incoming, &refs).unwrap();
+        let result = redelivery
+            .execute(ApplyInboundInput {
+                from_device: DeviceId::new("different-sender"),
+                plaintext: wire,
+                snapshot_hash: "original-hash".into(),
+                ..file_blob_input()
+            })
+            .await;
+        if save_fails {
+            let Err(ApplyInboundError::Capture(source)) = result else {
+                panic!("save must fail")
+            };
+            assert_eq!(
+                source
+                    .chain()
+                    .find_map(|cause| cause.downcast_ref::<io::Error>())
+                    .unwrap()
+                    .kind(),
+                io::ErrorKind::StorageFull
+            );
+        } else {
+            assert!(matches!(
+                result.unwrap(),
+                ApplyOutcome::DuplicateSkipped { .. }
+            ));
+        }
+        fixture.capture.fail.store(false, Ordering::SeqCst);
+        assert!(fixture.capture.snapshots.lock().unwrap().is_empty());
+        let attempt = fixture.attempts.attempt_id.lock().unwrap().clone();
+        assert_ne!(attempt, "old");
+        let (source, landed) = fixture
+            .work
+            .retry_material(&EntryId::from("receiver"), &attempt)
+            .unwrap();
+        assert_eq!(source.from_device, DeviceId::new("source"));
+        assert_eq!(source.blob_refs.len(), 3);
+        assert!(source
+            .blob_refs
+            .iter()
+            .all(|blob| blob.ticket.as_bytes() == [1]));
+        assert_eq!(
+            source.representations[0].id,
+            fixture.snapshot.representations[0].id
+        );
+        assert_eq!(landed.keys().copied().collect::<Vec<_>>(), vec![0]);
+        let mut progress = EntryReceiveProgress {
+            entry_id: "receiver".into(),
+            attempt_id: attempt.clone(),
+            state: AttemptState::Failed,
+            total_bytes: 0,
+            completed_bytes: 0,
+            items_total: 0,
+            items_completed: 0,
+            items: Vec::new(),
+        };
+        fixture.work.merge_progress(&mut progress);
+        assert_eq!(
+            progress
+                .items
+                .iter()
+                .map(|item| item.status)
+                .collect::<Vec<_>>(),
+            vec![
+                TrackedFileTransferStatus::Completed,
+                TrackedFileTransferStatus::Failed,
+                TrackedFileTransferStatus::Cancelled,
+            ]
+        );
+        assert!(progress
+            .items
+            .iter()
+            .all(|item| item.item_id.contains(&attempt)));
+        let (accepted, reply) = oneshot::channel();
+        fixture
+            .apply
+            .execute_retry(PreparedReceiveRetry {
+                begin: fixture.begin.clone(),
+                cancellation: fixture.checks.clone(),
+                identity: fixture.checks.clone(),
+                scope: fixture.checks.clone(),
+                entry: EntryId::from("receiver"),
+                expected_attempt: attempt,
+                source,
+                snapshot: fixture.snapshot.clone(),
+                selection: Some(ReceiveSelection {
+                    selected: HashSet::from([1]),
+                    landed,
+                    unselected: HashMap::from([(2, progress.items[2].clone())]),
+                }),
+                action: fixture.work.action(),
+                accepted: Some(accepted),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            reply.await.unwrap(),
+            RetryEntryReceiveOutcome::Accepted { .. }
+        ));
+        assert_eq!(fixture.capture.snapshots.lock().unwrap().len(), 1);
+        assert_eq!(std::fs::read(&fixture.saved).unwrap(), b"success");
+        assert_eq!(
+            fixture.capture.snapshots.lock().unwrap()[0]
+                .file_content_digests
+                .len(),
+            2
+        );
+    }
+}
 
 struct Checks {
     pause_identity: AtomicBool,
@@ -92,6 +256,7 @@ struct Capture {
     entered: Notify,
     release: Semaphore,
     slow: AtomicBool,
+    fail: AtomicBool,
 }
 #[async_trait]
 impl InboundCapture for Capture {
@@ -114,6 +279,9 @@ impl InboundCapture for Capture {
         if self.slow.load(Ordering::SeqCst) {
             self.entered.notify_one();
             self.release.acquire().await.unwrap().forget();
+        }
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(io::Error::from(io::ErrorKind::StorageFull).into());
         }
         *self.attempts.state.lock().unwrap() = if snapshot.file_content_digests.len() == 3 {
             AttemptState::Completed
@@ -159,14 +327,54 @@ impl BeginReceiveRetryPort for RetryStarter {
     }
 }
 
+fn receiver(
+    attempts: Arc<AttemptGate>,
+    capture: Arc<Capture>,
+    readiness: Arc<ReceiveReadinessCoordinator>,
+    fetcher: MockBlobFetcher,
+    cache_dir: PathBuf,
+) -> Arc<ApplyInboundClipboardUseCase> {
+    let mut repo = MockEntryRepo::new();
+    repo.expect_find_entry_id_by_snapshot_hash()
+        .returning(|_| Ok(Some(EntryId::from("receiver"))));
+    Arc::new(ApplyInboundClipboardUseCase::store_only_pull(
+        StoreOnlyPullDeps {
+            common: InboundApplyCommonDeps {
+                receive_work: readiness.work_registry(),
+                entry_repo: Arc::new(repo),
+                capture: capture.clone(),
+                blob_materializer: Arc::new(test_materializer(Arc::new(fetcher), cache_dir)),
+                receive_attempts: InboundReceiveAttemptDeps {
+                    get: attempts.clone(),
+                    begin: attempts.clone(),
+                    claim_commit: attempts.clone(),
+                    request_cancel: attempts.clone(),
+                    begin_failure: attempts.clone(),
+                    commit: attempts.clone(),
+                    clock: attempts.clone(),
+                },
+                receive_artifact_cleanup: Arc::new(NoopReceiveArtifactCleanup),
+                receive_readiness: readiness,
+                host_event_emitter: Arc::new(HostEventBus::new()),
+                search_live_index: Arc::new(RecordingLiveIndex {
+                    calls: AtomicUsize::new(0),
+                }),
+                availability: Arc::new(FakeAvailability { available: false }),
+                entry_identity_coordinator: Arc::new(EntryIdentityCoordinator::new()),
+            },
+        },
+    ))
+}
+
 struct Fixture {
     begin: Arc<RetryStarter>,
     _cache: tempfile::TempDir,
-    saved: std::path::PathBuf,
+    saved: PathBuf,
     apply: Arc<ApplyInboundClipboardUseCase>,
     capture: Arc<Capture>,
     attempts: Arc<AttemptGate>,
     work: Arc<ReceiveWorkRegistry>,
+    readiness: Arc<ReceiveReadinessCoordinator>,
     checks: Arc<Checks>,
     snapshot: SystemClipboardSnapshot,
 }
@@ -188,10 +396,8 @@ impl Fixture {
             entered: Notify::new(),
             release: Semaphore::new(0),
             slow: AtomicBool::new(false),
+            fail: AtomicBool::new(false),
         });
-        let mut repo = MockEntryRepo::new();
-        repo.expect_find_entry_id_by_snapshot_hash()
-            .returning(|_| Ok(Some(EntryId::from("receiver"))));
         let mut fetcher = MockBlobFetcher::new();
         fetcher
             .expect_fetch_blob_to_path()
@@ -220,36 +426,13 @@ impl Fixture {
                     digest: BlobDigest::from_bytes([4; 32]),
                 })
             });
-        let apply = Arc::new(ApplyInboundClipboardUseCase::store_only_pull(
-            StoreOnlyPullDeps {
-                common: InboundApplyCommonDeps {
-                    receive_work: work.clone(),
-                    entry_repo: Arc::new(repo),
-                    capture: capture.clone(),
-                    blob_materializer: Arc::new(test_materializer(
-                        Arc::new(fetcher),
-                        cache.path().to_owned(),
-                    )),
-                    receive_attempts: InboundReceiveAttemptDeps {
-                        get: attempts.clone(),
-                        begin: attempts.clone(),
-                        claim_commit: attempts.clone(),
-                        request_cancel: attempts.clone(),
-                        begin_failure: attempts.clone(),
-                        commit: attempts.clone(),
-                        clock: attempts.clone(),
-                    },
-                    receive_artifact_cleanup: Arc::new(NoopReceiveArtifactCleanup),
-                    receive_readiness: readiness,
-                    host_event_emitter: Arc::new(HostEventBus::new()),
-                    search_live_index: Arc::new(RecordingLiveIndex {
-                        calls: AtomicUsize::new(0),
-                    }),
-                    availability: Arc::new(FakeAvailability { available: false }),
-                    entry_identity_coordinator: Arc::new(EntryIdentityCoordinator::new()),
-                },
-            },
-        ));
+        let apply = receiver(
+            attempts.clone(),
+            capture.clone(),
+            readiness.clone(),
+            fetcher,
+            cache.path().to_owned(),
+        );
         let snapshot = SystemClipboardSnapshot {
             ts_ms: 1,
             representations: vec![ObservedClipboardRepresentation::new(
@@ -336,6 +519,7 @@ impl Fixture {
             capture,
             attempts,
             work,
+            readiness,
             checks: Arc::new(Checks {
                 pause_identity: AtomicBool::new(false),
                 identity_entered: Notify::new(),
@@ -649,4 +833,24 @@ async fn manual_retry_late_cleanup_or_gate_close_has_a_stable_refusal_without_ne
         assert!(fixture.capture.snapshots.lock().unwrap().is_empty());
         drop(cleanup);
     }
+}
+
+#[tokio::test]
+async fn ordinary_redelivery_waits_for_previous_terminal_actions_actual_settlement() {
+    let fixture = Fixture::new(0).await;
+    let previous = fixture.work.action();
+    previous
+        .register(&EntryId::from("receiver"), "old")
+        .unwrap();
+    let Err(ApplyInboundError::Internal(source)) = fixture.apply.execute(file_blob_input()).await
+    else {
+        panic!("previous action must finish first")
+    };
+    assert!(matches!(
+        source.downcast_ref::<ReceiveRegistrationError>(),
+        Some(ReceiveRegistrationError::CleanupInProgress)
+    ));
+    assert_eq!(fixture.attempts.retry_calls.load(Ordering::SeqCst), 0);
+    assert!(fixture.capture.snapshots.lock().unwrap().is_empty());
+    previous.finish(Ok(()));
 }

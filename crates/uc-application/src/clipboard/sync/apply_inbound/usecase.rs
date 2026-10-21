@@ -592,6 +592,11 @@ impl ApplyInboundClipboardUseCase {
         let Some(ports) = &self.receive_attempts else {
             return Ok(None);
         };
+        if self.receive_work.owns_entry(entry_id.as_ref()) {
+            return Err(ApplyInboundError::Internal(SourceError::new(
+                ReceiveRegistrationError::CleanupInProgress,
+            )));
+        }
         let attempt_id = EntryId::new().to_string();
         action
             .register(entry_id, &attempt_id)
