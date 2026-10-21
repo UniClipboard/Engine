@@ -214,3 +214,10 @@
 - 尚未绑定entry的provisional及更早输入／出站准备不由本轮出生表证明覆盖，留在全生命周期与准备预算验收中；既有认证资料读取／删除缓存失败边界仍未修复。完整目标不缩减，不把已关联条目清空当全spec完成。
 
 - 认证读取红测authenticated-list-red.log确认旧列表在两项解密失败后返回原密文；真实Engine authenticated-delete-red.log在破坏实际保存的V3文件引用密文后仍返回history_entry_deleted（4.251秒）。这会丢弃文件清理及重试资料。修复批量接口为全认证或typed失败，保留全部密码来源并保持单条数量诊断；窄port转换仍应追溯BlobCipherError。真实Engine验收继续覆盖Delete／Clear失败保留状态和文件、恢复原密文后重试清空。
+
+- delete-cache-ownership-red.log用实际文件系统确认cache/../user的原始历史路径被按前缀当作缓存，用户文件确实已删除，读回为NotFound。路径预验证现在完整运行于原子删除前，拒绝ParentTraversal与任意缓存内符号链接，解析失败保留source；缺失目标不误报IO失败，根使用宿主配置解析后的实际目录。正常文件与无归属引用混合时全部拒绝，保护先前正常缓存文件和所有记录。六项删除回归初步通过（0.030秒）；风格门禁要求unit错误标签紧邻map_err，格式化后位置已修复。
+- 当前预验证仍通过路径操作，不把它宣称为对抗本地并发替换的文件描述符沙箱。SQL后的remove_file失败仍会丢失引用恢复依据；后续须在不绕过Core未结算拒绝、目录所有权及单一删除负责人的前提下形成完整结算。不得简单把文件删除移到SQL前。
+
+- 审查发现合法的非本机file://host引用会因to_file_path的unit被新拒绝误伤；首轮扩大验证仅编译中已主动SIGINT（delete-cache-ownership-final-nextest.log，终态130，并确认编译子进程退出），未计通过。delete-cache-foreign-uri-red.log实际复现此回归（0.032秒）。改为对没有本机路径的合法file URI保留外部所有权并跳过；UTF-8及URL解析失败仍保留具体source。正常完整删除回归同时加入已缺失缓存文件与外部file URI，另核对原始解析source。
+
+- 下一步预算核验定位：transfer/blob/transport/runtime/download.rs的DownloadedBlob持有DownloadPermit，fetch_blob.rs的execute_inner／execute_path_inner在返回后释放该局部对象；上层materialization/workflow.rs仍负责产物清理和后续保存。当前仅为静态调用／所有权证据，不能据此假报完整预算通过或已经实证超额；应先以受控保存／清理屏障验证，并检查目标预留是否发生在同一admission前。更早provisional由transfer/file/facade.rs及clipboard/inbound/runtime.rs进入，不能用ApplyInbound内部出生动作表单独证明其已封口。

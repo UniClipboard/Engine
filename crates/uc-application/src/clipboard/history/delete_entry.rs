@@ -1,3 +1,6 @@
+mod cache_files;
+
+use self::cache_files::CacheFiles;
 use crate::transfer::receive::work::ReceiveWorkRegistry;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -84,6 +87,12 @@ impl DeleteClipboardEntryUseCase {
                 .context("read representations before deletion")?,
             None => Vec::new(),
         };
+        let cache_files = match &self.file_cache_dir {
+            Some(root) => CacheFiles::verify(&representations, root)
+                .await
+                .context("verify managed cache ownership before entry deletion")?,
+            None => None,
+        };
         // 仓储在同一原子边界解析实际条目与NoEntry状态，缺失不能伪报删除成功。
         if !self
             .delete
@@ -113,54 +122,21 @@ impl DeleteClipboardEntryUseCase {
         }
 
         async {
-            let Some(ref cache_dir) = self.file_cache_dir else {
+            let Some(cache_files) = cache_files else {
                 return;
             };
-
-            for rep in &representations {
-                let mime = rep.mime_type.as_ref().map(|m| m.as_str()).unwrap_or("");
-                if mime.contains("uri-list") {
-                    if let Some(ref inline) = rep.inline_data {
-                        let uri_text = String::from_utf8_lossy(inline);
-                        for line in uri_text.lines() {
-                            let line = line.trim();
-                            if line.is_empty() || line.starts_with('#') {
-                                continue;
-                            }
-                            let path = if line.starts_with("file://") {
-                                url::Url::parse(line)
-                                    .ok()
-                                    .and_then(|u| u.to_file_path().ok())
-                            } else {
-                                Some(std::path::PathBuf::from(line))
-                            };
-
-                            let Some(path) = path else {
-                                continue;
-                            };
-
-                            if !path.starts_with(cache_dir) {
-                                uc_info!(
-                                    "Skipping file deletion — path is outside the managed file-cache directory (user-owned file)"
-                                );
-                                continue;
-                            }
-
-                            if let Err(e) = tokio::fs::remove_file(&path).await {
-                                uc_warn!(
-                                    error_kind = "cache_file_remove",
-                                    io_error_kind = io_error_kind(&e),
-                                    "Failed to delete cache file during entry cleanup"
-                                );
-                            } else {
-                                uc_info!("Deleted cache file during entry cleanup");
-                                if let Some(parent) = path.parent() {
-                                    if parent != cache_dir.as_path() && parent.starts_with(cache_dir)
-                                    {
-                                        let _ = tokio::fs::remove_dir(parent).await;
-                                    }
-                                }
-                            }
+            for path in cache_files.paths {
+                if let Err(source) = tokio::fs::remove_file(&path).await {
+                    uc_warn!(
+                        error_kind = "cache_file_remove",
+                        io_error_kind = io_error_kind(&source),
+                        "Failed to delete cache file during entry cleanup"
+                    );
+                } else {
+                    uc_info!("Deleted cache file during entry cleanup");
+                    if let Some(parent) = path.parent() {
+                        if parent != cache_files.root && parent.starts_with(&cache_files.root) {
+                            let _ = tokio::fs::remove_dir(parent).await;
                         }
                     }
                 }

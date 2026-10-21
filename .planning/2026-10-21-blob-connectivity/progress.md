@@ -308,3 +308,8 @@
 - 认证读取切片先由authenticated-list-red.log复现两个密码失败仍交付原密文，再由authenticated-delete-red.log复现真实V3引用密文破坏后DeleteHistoryEntry仍history_entry_deleted（4.251秒）。移除旧降级，整批只交付认证结果；聚合错误保留每项BlobCipherError，窄port的Storage转换仍可追溯原始具体类型与source；诊断只聚合数量。
 - 定向内容整库及新增真实Engine共81通过（4.438秒）；Engine同时证明单删／清空拒绝、原接收attempt／受管文件／原密文记录保留，以及恢复原密文后通过原清空动作成功完成。最终Core／Application／Storage／Content／Engine完整nextest 2205通过／9跳过（168.796秒），metadata解析812包、workspace全目标check（57.31秒）、fmt、Rust style、repository preflight、1351站点隐私清单及diff全部通过。未执行设备仍跳过。
 - 手工审查批量完整性、所有密码来源保留、窄port转换、固定日志、真实SQLite破坏／恢复及失败后重试；code-review skill缺失，不冒称技能审查。无新schema／格式或Engine步骤接口。删除缓存仍在SQL后best-effort，路径仅词法前缀，磁盘失败及安全所有权尚须继续；本轮不把认证读取当作完整删除／生命周期或完整spec通过。
+
+- 缓存归属切片：实际原始路径cache/../user红测确认用户文件已被误删（delete-cache-ownership-red.log）。删除前新增完整引用验证，拒绝父级逃逸、缓存内任意符号链接及根自身；校验全部候选后才进入原子删除，使用解析后的根及目标进行既有清理。混合正常／危险引用不改变任何文件或记录，配置根合法别名不被误删。
+- 首次风格标签因rustfmt隔开而未通过，已修正。审查发现非本机合法file URI被新拒绝误伤，首个扩大运行在编译阶段主动SIGINT终态130，确认编译子进程退出，未记通过；foreign-uri-red精确复现后，合法非本机引用继续保留外部所有权，UTF-8及URL解析失败保留原始具体source。最终七项定向删除回归通过（0.051秒），包含既有缺失缓存目标、外部文件／远端URI、原始解析source与根别名。
+- 最终Application／Engine完整nextest 1527通过／6跳过（173.360秒）；真实Engine部分重试、取消、删除／清空、认证失败恢复与崩溃重启均实际执行。metadata解析812包、workspace全目标check（1m26s）、fmt、Rust style、repository preflight、1350站点隐私清单及diff全部通过。手工审查所有候选验证先于SQL、同源错误、用户路径保留、根别名、缺失及解析边界；code-review skill缺失，不冒称技能审查，设备未运行仍跳过。
+- 本轮不证明路径操作已对抗本机并发文件系统替换，SQL后缓存remove_file仍为既有best-effort，历史清理恢复边界保留。下一步优先回到spec核心的完整准备／结算预算与生命周期验收；不以继续修旧缓存行为替代完整spec。静态证据：BlobDownloadResources::obtain返回的DownloadedBlob._permit在FetchBlobUseCase::execute*_inner局部持有，输出不携带同一guard，须用实际上层保存／清理屏障验证其余工作是否仍受同一额度约束。

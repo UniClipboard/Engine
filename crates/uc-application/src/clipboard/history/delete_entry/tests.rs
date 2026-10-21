@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use super::cache_files::CacheOwnershipRefusal;
 use super::DeleteClipboardEntryUseCase;
 use crate::transfer::receive::work::{ReceiveWorkError, ReceiveWorkRegistry};
 use async_trait::async_trait;
@@ -117,9 +119,10 @@ async fn delete_waits_for_receive_then_cleans_its_latest_event_and_only_managed_
         std::fs::write(&managed, b"managed").unwrap();
         std::fs::write(&user_file, b"user-owned").unwrap();
         let uris = format!(
-            "{}\r\n{}\r\n",
+            "{}\r\n{}\r\n{}\r\nfile://history-file-host.example/shared/kept.bin\r\n",
             Url::from_file_path(&managed).unwrap(),
-            Url::from_file_path(&user_file).unwrap()
+            Url::from_file_path(&user_file).unwrap(),
+            Url::from_file_path(cache.path().join("already-missing.bin")).unwrap()
         );
         *store.reps.lock().unwrap() = vec![PersistedClipboardRepresentation::new(
             RepresentationId::new(),
@@ -238,4 +241,118 @@ async fn deletion_keeps_record_and_source_when_cleanup_representations_cannot_be
     assert!(store.entry.lock().unwrap().is_some());
     assert!(store.receive.load(Ordering::SeqCst));
     assert!(store.deleted.lock().unwrap().is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn deletion_refuses_cache_parent_escape_and_symlink_before_changing_records() {
+    for through_symlink in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let cache = root.path().join("cache");
+        let user = root.path().join("user");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::create_dir_all(&user).unwrap();
+        let user_file = user.join("kept.bin");
+        std::fs::write(&user_file, b"user-owned").unwrap();
+        let reference = if through_symlink {
+            let alias = cache.join("alias");
+            std::os::unix::fs::symlink(&user, &alias).unwrap();
+            Url::from_file_path(alias.join("kept.bin"))
+                .unwrap()
+                .to_string()
+        } else {
+            // 历史表示允许原始路径；不能只以词法前缀认定归属。
+            cache
+                .join("..")
+                .join("user/kept.bin")
+                .to_string_lossy()
+                .into_owned()
+        };
+        let managed = cache.join("managed.bin");
+        std::fs::write(&managed, b"managed").unwrap();
+        let reference = format!(
+            "{}\n{}\n",
+            Url::from_file_path(&managed).unwrap(),
+            reference
+        );
+        let entry = EntryId::from("entry");
+        let store = Arc::new(Store {
+            entry: Mutex::new(Some(ClipboardEntry::new(
+                entry.clone(),
+                EventId::new(),
+                1,
+                1,
+            ))),
+            receive: AtomicBool::new(true),
+            read_error: AtomicBool::new(false),
+            deleted: Mutex::new(Vec::new()),
+            read_reps: Mutex::new(Vec::new()),
+            reps: Mutex::new(vec![PersistedClipboardRepresentation::new(
+                RepresentationId::new(),
+                FormatId::from("files"),
+                Some(MimeType("text/uri-list".into())),
+                reference.len() as i64,
+                Some(reference.into_bytes()),
+                None,
+            )]),
+        });
+        let outcome = deletion(store.clone(), Arc::new(ReceiveWorkRegistry::default()))
+            .with_file_cache_dir(cache)
+            .execute(&entry)
+            .await;
+        assert_eq!(std::fs::read(&user_file).unwrap(), b"user-owned");
+        let failure = outcome.unwrap_err();
+        assert!(matches!(
+            failure.downcast_ref::<CacheOwnershipRefusal>(),
+            Some(CacheOwnershipRefusal::ParentTraversal | CacheOwnershipRefusal::SymbolicLink)
+        ));
+        assert_eq!(std::fs::read(&managed).unwrap(), b"managed");
+        assert!(store.entry.lock().unwrap().is_some());
+        assert!(store.receive.load(Ordering::SeqCst));
+        assert!(store.deleted.lock().unwrap().is_empty());
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn deleting_through_the_configured_cache_root_alias_keeps_the_root_itself() {
+    let root = tempfile::tempdir().unwrap();
+    let cache = root.path().join("cache");
+    std::fs::create_dir(&cache).unwrap();
+    let alias = root.path().join("configured-cache");
+    std::os::unix::fs::symlink(&cache, &alias).unwrap();
+    let file = cache.join("received.bin");
+    std::fs::write(&file, b"managed").unwrap();
+    let reference = Url::from_file_path(alias.join("received.bin"))
+        .unwrap()
+        .to_string();
+    let entry = EntryId::from("entry");
+    let store = Arc::new(Store {
+        entry: Mutex::new(Some(ClipboardEntry::new(
+            entry.clone(),
+            EventId::new(),
+            1,
+            1,
+        ))),
+        receive: AtomicBool::new(true),
+        read_error: AtomicBool::new(false),
+        deleted: Mutex::new(Vec::new()),
+        read_reps: Mutex::new(Vec::new()),
+        reps: Mutex::new(vec![PersistedClipboardRepresentation::new(
+            RepresentationId::new(),
+            FormatId::from("files"),
+            Some(MimeType("text/uri-list".into())),
+            reference.len() as i64,
+            Some(reference.into_bytes()),
+            None,
+        )]),
+    });
+    deletion(store.clone(), Arc::new(ReceiveWorkRegistry::default()))
+        .with_file_cache_dir(alias.clone())
+        .execute(&entry)
+        .await
+        .unwrap();
+    assert!(!file.exists());
+    assert!(cache.is_dir() && alias.is_dir());
+    assert!(store.entry.lock().unwrap().is_none());
 }
