@@ -89,6 +89,17 @@ pub(crate) trait RecordStore: Send + 'static {
 
     fn store_record(&mut self, bytes: &[u8], source: usize) -> io::Result<()>;
     fn settle(&mut self) -> io::Result<()>;
+
+    /// 暂时交还本策略持有的全部文件：先落盘，再关闭。之后不再打开任何文件，直到 [`Self::unpark`]。
+    /// 只有持有需交还文件（租约）的策略实现；其余策略没有可交还的内容。
+    fn park(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
+    /// 结束停车并重新打开；没有停车时什么也不做。
+    fn unpark(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// 队列侧的按来源计数；写入策略自己的落盘计数不经过这里。
@@ -152,6 +163,8 @@ pub(crate) struct AsyncFileWriter {
     sender: mpsc::SyncSender<FileMessage>,
     dropped_records: Arc<AtomicU64>,
     closed: Arc<AtomicBool>,
+    /// 停车期间到达的记录与封口后一样直接丢弃，不进入队列，也不让文件线程重新打开文件。
+    parked: Arc<AtomicBool>,
     submission: Arc<Mutex<()>>,
     counters: Arc<dyn RecordCounters>,
 }
@@ -173,6 +186,7 @@ struct LocalFileWorker {
     sender: mpsc::SyncSender<FileMessage>,
     thread: Arc<Mutex<Option<JoinHandle<()>>>>,
     closed: Arc<AtomicBool>,
+    parked: Arc<AtomicBool>,
     submission: Arc<Mutex<()>>,
     shutdown: Arc<FileShutdownCoordinator>,
 }
@@ -207,6 +221,8 @@ impl Default for FileShutdownCoordinator {
 enum FileMessage {
     Line(Vec<u8>, usize),
     Flush(mpsc::Sender<bool>),
+    Park(mpsc::Sender<bool>),
+    Unpark(mpsc::Sender<bool>),
     Shutdown(mpsc::Sender<bool>),
 }
 
@@ -324,7 +340,7 @@ impl FileQueue {
     }
 
     pub(crate) fn flush_result(&self, deadline: Duration) -> SignalResult {
-        self.worker.flush_result(deadline)
+        self.worker.signal(FileMessage::Flush, deadline, || {})
     }
 
     pub(crate) fn shutdown(&self, deadline: Duration) -> bool {
@@ -333,6 +349,14 @@ impl FileQueue {
 
     pub(crate) fn shutdown_cleanup_incomplete(&self) -> bool {
         self.worker.shutdown_cleanup_incomplete()
+    }
+
+    pub(crate) fn park(&self, deadline: Duration) -> SignalResult {
+        self.worker.park(deadline)
+    }
+
+    pub(crate) fn unpark(&self, deadline: Duration) -> SignalResult {
+        self.worker.unpark(deadline)
     }
 }
 
@@ -364,6 +388,7 @@ fn spawn_file_queue<S: RecordStore>(
 ) -> io::Result<(AsyncFileWriter, Arc<LocalFileWorker>)> {
     let (sender, receiver) = mpsc::sync_channel(capacity);
     let closed = Arc::new(AtomicBool::new(false));
+    let parked = Arc::new(AtomicBool::new(false));
     let submission = Arc::new(Mutex::new(()));
     let worker_dropped_records = Arc::clone(&dropped_records);
     let worker_counters = Arc::clone(&counters);
@@ -384,6 +409,7 @@ fn spawn_file_queue<S: RecordStore>(
             sender: sender.clone(),
             dropped_records,
             closed: Arc::clone(&closed),
+            parked: Arc::clone(&parked),
             submission: Arc::clone(&submission),
             counters,
         },
@@ -391,6 +417,7 @@ fn spawn_file_queue<S: RecordStore>(
             sender,
             thread: Arc::new(Mutex::new(Some(thread))),
             closed,
+            parked,
             submission,
             shutdown: Arc::new(FileShutdownCoordinator::default()),
         }),
@@ -406,7 +433,7 @@ impl AsyncFileWriter {
         // 门只保护封口与入队的先后顺序，持有者只做不阻塞的 `try_send`，所以这里等待锁不会等待磁盘或网络；
         // 争用本身不得丢记录，只有队列已满或已封口才计入丢弃。
         let _submission = lock(&self.submission);
-        if self.closed.load(Ordering::Acquire) {
+        if self.closed.load(Ordering::Acquire) || self.parked.load(Ordering::Acquire) {
             increment(&self.dropped_records);
             self.counters.closed_dropped(source);
         } else if self
@@ -448,13 +475,39 @@ impl LocalFileWorker {
     }
 
     pub(crate) fn flush(&self, deadline: Duration) -> bool {
-        self.flush_result(deadline) == SignalResult::Completed
+        self.signal(FileMessage::Flush, deadline, || {}) == SignalResult::Completed
     }
 
-    pub(crate) fn flush_result(&self, deadline: Duration) -> SignalResult {
+    /// 先在提交门内停止接收新记录，再把停车请求排在已入队记录之后：已接受的记录全部落盘后才交还文件。
+    pub(crate) fn park(&self, deadline: Duration) -> SignalResult {
+        {
+            let _submission = lock(&self.submission);
+            if self.closed.load(Ordering::Acquire) {
+                return SignalResult::AlreadyShutdown;
+            }
+            self.parked.store(true, Ordering::Release);
+        }
+        self.signal(FileMessage::Park, deadline, || {})
+    }
+
+    /// 重开请求入队与放行写入在同一提交门内完成：之后到达的记录必然排在重开之后。
+    pub(crate) fn unpark(&self, deadline: Duration) -> SignalResult {
+        self.signal(FileMessage::Unpark, deadline, || {
+            self.parked.store(false, Ordering::Release);
+        })
+    }
+
+    /// 把一次带回复的控制请求（刷新、停车、重开）排入队列并等待回复；`enqueued` 在请求入队后、仍持有提交门时执行。
+    fn signal(
+        &self,
+        request: fn(mpsc::Sender<bool>) -> FileMessage,
+        deadline: Duration,
+        enqueued: impl FnOnce(),
+    ) -> SignalResult {
         let started = Instant::now();
         let (sender, receiver) = mpsc::channel();
-        let mut message = FileMessage::Flush(sender);
+        let mut message = request(sender);
+        let mut enqueued = Some(enqueued);
         loop {
             // 队列已满时在两次尝试之间释放提交门，等待期间不阻塞写入方。
             {
@@ -469,7 +522,12 @@ impl LocalFileWorker {
                     return SignalResult::AlreadyShutdown;
                 }
                 match self.sender.try_send(message) {
-                    Ok(()) => break,
+                    Ok(()) => {
+                        if let Some(enqueued) = enqueued.take() {
+                            enqueued();
+                        }
+                        break;
+                    }
                     Err(mpsc::TrySendError::Full(returned)) => message = returned,
                     Err(mpsc::TrySendError::Disconnected(_)) => return SignalResult::Failed,
                 }
@@ -667,6 +725,18 @@ fn run_file_worker<S: RecordStore>(
             FileMessage::Flush(reply) => {
                 // 刷新是明确的重试点：失败态下也尝试重新打开，不受退避限制。
                 let _ = reply.send(settle_flush(&mut writer, &mut health));
+            }
+            FileMessage::Park(reply) => {
+                let _ = reply.send(writer.park().is_ok());
+            }
+            FileMessage::Unpark(reply) => {
+                let reopened = writer.unpark().is_ok();
+                if reopened {
+                    health.succeeded();
+                } else {
+                    health.failed("open_failed");
+                }
+                let _ = reply.send(reopened);
             }
             FileMessage::Shutdown(reply) => {
                 let _ = reply.send(settle_flush(&mut writer, &mut health));
@@ -1246,6 +1316,7 @@ mod tests {
             sender,
             thread: Arc::new(Mutex::new(None)),
             closed: Arc::new(AtomicBool::new(false)),
+            parked: Arc::new(AtomicBool::new(false)),
             submission: Arc::new(Mutex::new(())),
             shutdown: Arc::new(FileShutdownCoordinator::default()),
         });
@@ -1267,7 +1338,7 @@ mod tests {
 
         let started = Instant::now();
         assert_eq!(
-            worker.flush_result(Duration::from_millis(5)),
+            worker.signal(FileMessage::Flush, Duration::from_millis(5), || {}),
             SignalResult::TimedOut
         );
         assert!(started.elapsed() < Duration::from_millis(50));
@@ -1314,6 +1385,7 @@ mod tests {
             sender,
             thread: Arc::new(Mutex::new(None)),
             closed: Arc::new(AtomicBool::new(false)),
+            parked: Arc::new(AtomicBool::new(false)),
             submission: Arc::new(Mutex::new(())),
             shutdown: Arc::new(FileShutdownCoordinator::default()),
         });
@@ -1339,6 +1411,7 @@ mod tests {
             sender,
             thread: Arc::new(Mutex::new(Some(std::thread::spawn(|| {})))),
             closed: Arc::new(AtomicBool::new(false)),
+            parked: Arc::new(AtomicBool::new(false)),
             submission: Arc::new(Mutex::new(())),
             shutdown: Arc::new(FileShutdownCoordinator::default()),
         };
@@ -1359,6 +1432,7 @@ mod tests {
             sender,
             thread: Arc::new(Mutex::new(Some(std::thread::spawn(|| {})))),
             closed: Arc::new(AtomicBool::new(false)),
+            parked: Arc::new(AtomicBool::new(false)),
             submission: Arc::new(Mutex::new(())),
             shutdown: Arc::new(FileShutdownCoordinator::default()),
         };

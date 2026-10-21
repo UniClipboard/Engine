@@ -38,6 +38,8 @@ pub(crate) struct RunStore {
     prepared: Arc<AtomicBool>,
     open: Option<OpenRun>,
     reopened: u64,
+    /// 停车期间不打开任何文件；只有 [`RecordStore::unpark`] 结束停车。
+    parked: bool,
 }
 
 struct OpenRun {
@@ -74,6 +76,7 @@ impl RunStore {
             prepared,
             open: None,
             reopened: 0,
+            parked: false,
         }
     }
 
@@ -82,6 +85,9 @@ impl RunStore {
     }
 
     fn ensure_open(&mut self) -> io::Result<&mut OpenRun> {
+        if self.parked {
+            return Err(io::Error::other("network log is parked"));
+        }
         if self.open.is_none() {
             let run = self.open_run()?;
             self.open = Some(run);
@@ -92,12 +98,16 @@ impl RunStore {
             .ok_or_else(|| io::Error::other("network log run is not open"))
     }
 
+    /// 在清理锁内建立目录与租约：另一进程正在回收时不重建，避免新文件落入正被删除的目录。
+    /// 清理锁忙时本次打开失败，由下一条记录或刷新重试。
     fn open_run(&mut self) -> io::Result<OpenRun> {
         let directory = self.run_directory();
+        let cleanup = open_cleanup_lock(&self.network_root)?;
         create_private_directory(&directory)?;
         let lease = open_lease(&directory.join(LEASE_FILE))?;
         // 回收旧运行不影响本次写入；失败只留到下次，不让日志清理拖垮采集。
         let _ = collect_old_runs(&self.network_root, &directory, &self.budget);
+        drop(cleanup);
         let manifest = self.manifest();
         write_atomically(&directory.join(MANIFEST_FILE), &manifest)?;
         let sequence = next_sequence(&directory)?;
@@ -179,6 +189,33 @@ impl RecordStore for RunStore {
         self.ensure_open().map(|_| ())
     }
 
+    /// 先落盘并关闭分段，再交还租约：其他进程只有在本进程停止写入后才能把该运行视为不活动。
+    fn park(&mut self) -> io::Result<()> {
+        self.parked = true;
+        let Some(run) = self.open.take() else {
+            return Ok(());
+        };
+        // 重开时写入清单的值；停车前打开过的运行，下一次打开就是重开。
+        self.reopened = self.reopened.saturating_add(1);
+        let OpenRun {
+            mut file,
+            _lease: lease,
+            ..
+        } = run;
+        let flushed = file.flush();
+        drop(file);
+        drop(lease);
+        flushed
+    }
+
+    fn unpark(&mut self) -> io::Result<()> {
+        if !self.parked {
+            return Ok(());
+        }
+        self.parked = false;
+        self.ensure_open().map(|_| ())
+    }
+
     fn store_record(&mut self, bytes: &[u8], _source: usize) -> io::Result<()> {
         self.ensure_current()?;
         let budget = self.budget;
@@ -202,6 +239,10 @@ impl RecordStore for RunStore {
     }
 
     fn settle(&mut self) -> io::Result<()> {
+        // 停车后没有打开的文件，也没有待落盘的内容；刷新不能借机重新取得租约。
+        if self.parked {
+            return Ok(());
+        }
         self.ensure_current()?;
         self.ensure_open()?.file.flush()
     }
@@ -328,21 +369,32 @@ struct RunEntry {
 
 /// 回收没有活动写入者的旧运行目录：先按保留时间，再在根目录超额时从最旧的起。
 ///
-/// 清理锁串行不同进程的扫描；运行是否活动只看它的 lease 锁，成功取得锁才可删除。
+/// 清理锁串行不同进程的扫描与运行目录的建立；运行是否活动只看它的 lease 锁，成功取得锁才可删除。
 /// 锁忙、权限失败或任何 I/O 错误都跳过，不等待、不影响采集。
-fn collect_old_runs(
-    network_root: &Path,
-    own_directory: &Path,
-    budget: &NetworkLogBudget,
-) -> io::Result<()> {
+/// 取得串行各进程扫描的清理锁；忙时返回 `WouldBlock`。
+fn open_cleanup_lock(network_root: &Path) -> io::Result<File> {
+    create_private_directory(network_root)?;
     let cleanup = OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
         .open(network_root.join(CLEANUP_LOCK_FILE))?;
-    if cleanup.try_lock().is_err() {
-        return Ok(());
-    }
+    cleanup.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "network log cleanup is running in another process",
+        ),
+        std::fs::TryLockError::Error(error) => error,
+    })?;
+    Ok(cleanup)
+}
+
+/// 调用方已持有清理锁。
+fn collect_old_runs(
+    network_root: &Path,
+    own_directory: &Path,
+    budget: &NetworkLogBudget,
+) -> io::Result<()> {
     let mut runs = Vec::new();
     for role in std::fs::read_dir(network_root)? {
         let role = role?;

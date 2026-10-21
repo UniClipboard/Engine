@@ -208,8 +208,10 @@ impl ProductionRuntime {
         let analytics = Arc::clone(&wired.sync_engine.analytics_facade);
         let mut security_guard = StartupSecurityGuard(Some(Arc::clone(&security_lifecycle)));
         let host_adapters = wired.application.host_adapters();
-        let session_supervisor =
-            SessionSupervisor::new(wired.application.clone(), Arc::clone(&security_lifecycle));
+        let session_supervisor = SessionSupervisor::new(
+            wired.application.clone(),
+            Arc::clone(&wired.sync_engine.local_resources),
+        );
         let task_registry = Arc::new(TaskRegistry::new());
         let profile_runtime = Arc::new(shutdown::ProfileRuntimeStopper::new(
             Arc::clone(&security_lifecycle),

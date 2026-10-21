@@ -21,7 +21,7 @@ use uc_application::facade::{
 use uc_core::{FileTransferCancellationReason, TaskRegistry};
 use uc_infra_local::fs::{FsAtomicPublisher, FsHiddenPathMarker, FsInboundFileTarget};
 use uc_infra_p2p::network::iroh::{IrohNode, IrohSessionBuilder, PreparedIrohSession};
-use uc_infra_profile::space::RuntimeSpaceAccessAdapter;
+use uc_infra_profile::space::ProfileLocalResources;
 use uc_observability_contract::diagnostics::connectivity::{
     observe_local_result, record_session_lock_wait, LocalWorkStep, SessionTransition,
     SessionTransitionResult,
@@ -365,7 +365,7 @@ fn session_lifecycle_error_type(error: &EngineError) -> DiagnosticErrorType {
 impl SessionSupervisor {
     pub(super) fn new(
         application: ApplicationAssembly,
-        security: Arc<RuntimeSpaceAccessAdapter>,
+        local_resources: Arc<ProfileLocalResources>,
     ) -> Arc<Self> {
         use uc_observability_contract::diagnostics::connectivity::{
             LocalDiagnosticSource, NetworkRecorder, SourceCapability, SourceCollection,
@@ -390,7 +390,7 @@ impl SessionSupervisor {
             admission_recovery: StdMutex::new(None),
             refresh_hold: StdMutex::new(None),
             coordinator: application
-                .runtime_lifecycle(Arc::new(SessionWork(owner.clone())), security),
+                .runtime_lifecycle(Arc::new(SessionWork(owner.clone())), local_resources),
         })
     }
 

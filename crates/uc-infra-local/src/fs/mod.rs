@@ -5,6 +5,7 @@ pub mod durability;
 pub mod file_lock;
 pub mod hidden_path;
 pub mod inbound_target;
+pub mod open_files;
 pub mod receive_artifact_cleanup;
 mod vault_layout;
 pub mod work_directory;
