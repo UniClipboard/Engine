@@ -53,8 +53,20 @@ F12 Upgrade-matrix `settings` observation changes meaning across versions (old a
 
 ## Phases
 
-1. [ ] Failure modes + red E2E run on baseline
-2. [ ] Code removal (core → app → engine → hosts)
-3. [ ] E2E green + delivery checks
-4. [ ] Docs: interface, glossary, matrix README note; task12 rule patch
-5. [ ] Commits, report
+1. [x] Failure modes + red E2E run on baseline (production code at 1c0660d9 + new matrix test code)
+   - invalid-preferences: refused start_failed 1101, context "p2p network", upgrade_completed=true (B3 reproduced)
+   - l0194-head and commit-interrupted: product-settings-written at stage settings-save (F3 reproduced)
+2. [x] Code removal (core → app → engine → hosts)
+3. [x] E2E green + delivery checks (dirty tree); final validation on the clean final SHA
+4. [x] Docs: interface, glossary, matrix plan 051, fixture README; task12 rule patch with corrected
+   key-material exception list (keyslot.json, profile-secrets-v1, iroh-identity/)
+5. [x] Commits; report in the thread folder
+
+## Findings
+
+- F12 holds: the matrix `settings` observation only covers device_name and sync_on_restore, so old
+  anchors and head observe the same fields.
+- Restart in the invalid-preferences cell is also a true B3 case: invalid keys stay on disk until the
+  first explicit save (fact invalid-preferences-before-restart = true).
+- Residual strict fields that can still stop the session: debug_mode (task9), sync.sync_frequency,
+  network.congestion_controller, retention rules, and every other Engine-owned typed field.
