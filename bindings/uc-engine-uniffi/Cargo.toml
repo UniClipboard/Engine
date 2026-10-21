@@ -36,5 +36,8 @@ cargo_metadata = "0.19.2"
 tempfile = "3"
 uc-engine = { path = "../../crates/uc-engine", features = ["dev-tools"] }
 
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+
 [lints]
 workspace = true

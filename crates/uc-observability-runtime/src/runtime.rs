@@ -38,6 +38,11 @@ static INSTALLED: OnceLock<Arc<RuntimeState>> = OnceLock::new();
 
 pub struct ProcessObservabilityRuntime;
 
+/// 已安装运行期的网络日志；未安装或未配置时为空。
+pub(crate) fn installed_network_log() -> Option<Arc<NetworkLogRuntime>> {
+    INSTALLED.get().and_then(|state| state.network.clone())
+}
+
 impl ProcessObservabilityRuntime {
     pub fn install(config: ObservabilityConfig) -> Result<InstallOutcome, InstallError> {
         Self::install_with_host_layers(config, Vec::new())

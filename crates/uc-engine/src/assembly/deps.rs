@@ -97,6 +97,8 @@ pub struct SyncEngineDeps {
     pub membership_session: Arc<uc_infra_profile::space::InMemorySession>,
     /// 完整后台安全生命周期；关闭时封口，普通 GUI 授权不影响它。
     pub security_lifecycle: Arc<uc_infra_profile::space::RuntimeSpaceAccessAdapter>,
+    /// 暂停时交还的全部本地资源：安全会话、内容密钥租约与运行期数据库连接。
+    pub local_resources: Arc<uc_infra_profile::space::ProfileLocalResources>,
     /// MasterKey-encrypted single membership record, committed together with its read model.
     pub membership_ledger: Arc<
         uc_infra_profile::space::SqliteMembershipRecordStore<

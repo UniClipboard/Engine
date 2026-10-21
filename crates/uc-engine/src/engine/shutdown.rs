@@ -42,6 +42,7 @@ impl Engine {
         let runtime = Arc::clone(&self.runtime);
         let events = self.events.clone();
         let operations = Arc::clone(&self.operations);
+        let log_activity = self.log_activity.clone();
         // 排队也由执行任务持有；等待方离开不会撤销已接受的关闭意图。
         tokio::spawn(async move {
             let _shutdown = shutdown_gate.lock().await;
@@ -79,6 +80,7 @@ impl Engine {
                 }
                 return result;
             }
+            log_activity.end().await;
             *state.lock().await = EngineState::Stopped;
             events.send(EngineEvent::StateChanged {
                 state: EngineState::Stopped,

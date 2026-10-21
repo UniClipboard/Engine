@@ -3,8 +3,9 @@ use diesel::r2d2::{ConnectionManager, CustomizeConnection, Pool, PooledConnectio
 use diesel::sqlite::SqliteConnection;
 use diesel::{connection::SimpleConnection, Connection, RunQueryDsl};
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+use std::time::Duration;
 
 use super::connection::BUSY_TIMEOUT_MS;
 use uc_observability_contract::uc_info;
@@ -14,32 +15,59 @@ pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
 type RawDbPool = Pool<ConnectionManager<SqliteConnection>>;
 
+/// 暂停时轮询借出连接是否已全部归还的间隔。
+const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(5);
+
 #[derive(Clone)]
 pub struct DbPool {
-    inner: Arc<RwLock<RawDbPool>>,
+    inner: Arc<RwLock<PoolSlot>>,
     /// 底层数据库每替换一次加一；读取方据此判断此前读到的资料是否仍属于当前数据库。
     generation: Arc<AtomicU64>,
+    /// 暂停时从槽位取下、仍在等待借出连接归还的旧池。期限只结束等待，接续的暂停继续等待同一个池，
+    /// 不会因为第二次调用而误报已关闭。
+    draining: Arc<Mutex<Option<RawDbPool>>>,
+}
+
+/// 当前目标与打开状态；`pool` 为空表示连接已因暂停全部关闭，取连接直接失败而不是重新打开。
+struct PoolSlot {
+    target: PoolTarget,
+    pool: Option<RawDbPool>,
+}
+
+/// 内存库没有文件可交还，关闭会丢失其内容，因此暂停时保持打开。
+enum PoolTarget {
+    File(String),
+    Ephemeral,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DbPoolError {
+    #[error("database connections are suspended")]
+    Suspended,
+    #[error("database pool could not provide a connection")]
+    Pool {
+        #[from]
+        source: diesel::r2d2::PoolError,
+    },
 }
 
 impl DbPool {
     pub fn get(
         &self,
-    ) -> std::result::Result<
-        PooledConnection<ConnectionManager<SqliteConnection>>,
-        diesel::r2d2::PoolError,
-    > {
-        self.inner
+    ) -> std::result::Result<PooledConnection<ConnectionManager<SqliteConnection>>, DbPoolError>
+    {
+        let slot = self
+            .inner
             .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Ok(slot.pool.as_ref().ok_or(DbPoolError::Suspended)?.get()?)
     }
 
     pub fn replace_database(&self, database_url: &str) -> Result<()> {
         let replacement = build_raw_pool(database_url)?;
         run_migrations_raw(&replacement)?;
         install_revision_triggers_raw(&replacement)?;
-        self.swap(replacement);
-        Ok(())
+        self.swap(PoolTarget::File(database_url.to_owned()), replacement)
     }
 
     /// 当前底层数据库的代号；替换数据库后必然改变。
@@ -47,14 +75,20 @@ impl DbPool {
         self.generation.load(Ordering::Acquire)
     }
 
-    fn swap(&self, replacement: RawDbPool) {
-        let mut inner = self
+    fn swap(&self, target: PoolTarget, replacement: RawDbPool) -> Result<()> {
+        let mut slot = self
             .inner
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *inner = replacement;
+        // 暂停期间所有使用者都已停止；此时替换会在宿主挂起前重新占用文件。
+        anyhow::ensure!(slot.pool.is_some(), DbPoolError::Suspended);
+        *slot = PoolSlot {
+            target,
+            pool: Some(replacement),
+        };
         // 在持有写锁时推进代号：读到新代号的读取方必然访问新数据库。
         self.generation.fetch_add(1, Ordering::AcqRel);
+        Ok(())
     }
 
     pub fn detach_to_ephemeral_database(&self) -> Result<()> {
@@ -66,7 +100,67 @@ impl DbPool {
             .context("Failed to create ephemeral database")?;
         run_migrations_raw(&replacement)?;
         install_revision_triggers_raw(&replacement)?;
-        self.swap(replacement);
+        self.swap(PoolTarget::Ephemeral, replacement)
+    }
+
+    /// 关闭文件数据库的全部连接，使本进程不再持有数据库文件及其 SQLite 锁。
+    ///
+    /// 新的取连接请求立即失败；仍借出的连接不会被强行关闭，本调用一直等到它们归还后才关闭旧池并返回
+    /// `true`。`cancelled` 置位时停止等待并返回 `false`，旧池保留给下一次暂停继续等待。
+    /// 内存库保持打开。同一实例重复调用不会重复关闭。会阻塞调用线程，不能在异步运行线程上执行。
+    pub fn suspend_connections(&self, cancelled: &AtomicBool) -> bool {
+        {
+            let mut slot = self
+                .inner
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if matches!(slot.target, PoolTarget::Ephemeral) {
+                return true;
+            }
+            if let Some(pool) = slot.pool.take() {
+                *lock(&self.draining) = Some(pool);
+            }
+        }
+        loop {
+            {
+                let mut draining = lock(&self.draining);
+                let drained = draining.as_ref().is_none_or(|pool| {
+                    let state = pool.state();
+                    state.connections == state.idle_connections
+                });
+                if drained {
+                    // 最后一个强引用在这里释放：空闲连接随池一起关闭，SQLite 交还文件锁。
+                    drop(draining.take());
+                    return true;
+                }
+            }
+            if cancelled.load(Ordering::Acquire) {
+                return false;
+            }
+            std::thread::sleep(DRAIN_POLL_INTERVAL);
+        }
+    }
+
+    /// 重新打开暂停前的同一数据库：不重跑迁移、不改动触发器，也不推进代号。暂停尚未关闭完的旧池直接恢复使用。
+    /// 打开后立即取一次连接，数据库无法打开时恢复失败而不是延后到第一次查询。会阻塞调用线程。
+    pub fn resume_connections(&self) -> Result<()> {
+        let mut slot = self
+            .inner
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if slot.pool.is_some() {
+            return Ok(());
+        }
+        if let Some(pool) = lock(&self.draining).take() {
+            slot.pool = Some(pool);
+            return Ok(());
+        }
+        let PoolTarget::File(database_url) = &slot.target else {
+            return Ok(());
+        };
+        let pool = open_raw_pool(database_url).context("Failed to reopen database pool")?;
+        drop(pool.get().context("Failed to reopen database connection")?);
+        slot.pool = Some(pool);
         Ok(())
     }
 
@@ -77,6 +171,23 @@ impl DbPool {
         // discarded-source[int-conversion]: `core::num::TryFromIntError`: the target classification already expresses the range or length mismatch
         u64::try_from(row.revision).map_err(|_| anyhow::anyhow!("database revision is invalid"))
     }
+
+    fn from_raw(target: PoolTarget, pool: RawDbPool) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(PoolSlot {
+                target,
+                pool: Some(pool),
+            })),
+            generation: Arc::new(AtomicU64::new(0)),
+            draining: Arc::new(Mutex::new(None)),
+        }
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[derive(diesel::QueryableByName)]
@@ -174,10 +285,7 @@ pub fn init_db_pool(database_url: &str) -> Result<DbPool> {
     let pool = build_raw_pool(database_url)?;
     run_migrations_raw(&pool)?;
     install_revision_triggers_raw(&pool)?;
-    Ok(DbPool {
-        inner: Arc::new(RwLock::new(pool)),
-        generation: Arc::new(AtomicU64::new(0)),
-    })
+    Ok(DbPool::from_raw(pool_target(database_url), pool))
 }
 
 /// 只为已经完成 migration 的候选 generation 建立 production 连接池。
@@ -185,15 +293,26 @@ pub fn init_db_pool(database_url: &str) -> Result<DbPool> {
 /// 该入口不重跑 migration，也不删除/重建 revision trigger，避免只读回验改变
 /// 候选数据库的 schema cookie。调用方必须先通过自己的完整 schema/integrity gate。
 pub fn open_existing_db_pool(database_url: &str) -> Result<DbPool> {
+    let pool = open_raw_pool(database_url).context("Failed to open existing database pool")?;
+    Ok(DbPool::from_raw(pool_target(database_url), pool))
+}
+
+fn pool_target(database_url: &str) -> PoolTarget {
+    if database_url == ":memory:" {
+        PoolTarget::Ephemeral
+    } else {
+        PoolTarget::File(database_url.to_owned())
+    }
+}
+
+/// 连接只在取用时建立：池不在后台补足空闲连接，暂停取下连接池后不会有工作线程再打开数据库文件。
+fn open_raw_pool(database_url: &str) -> Result<RawDbPool> {
     let manager = ConnectionManager::<SqliteConnection>::new(database_url);
-    let pool = Pool::builder()
+    Pool::builder()
+        .min_idle(Some(0))
         .connection_customizer(Box::new(SqlitePragmaCustomizer))
         .build(manager)
-        .context("Failed to open existing database pool")?;
-    Ok(DbPool {
-        inner: Arc::new(RwLock::new(pool)),
-        generation: Arc::new(AtomicU64::new(0)),
-    })
+        .context("Failed to create database pool")
 }
 
 fn install_revision_triggers_raw(pool: &RawDbPool) -> Result<()> {
@@ -238,13 +357,7 @@ fn build_raw_pool(database_url: &str) -> Result<RawDbPool> {
     // Doing it here avoids "database is locked" errors when r2d2 initializes multiple
     // connections concurrently, each trying to set WAL in on_acquire.
     enable_wal_mode(database_url)?;
-
-    let manager = ConnectionManager::<SqliteConnection>::new(database_url);
-
-    Pool::builder()
-        .connection_customizer(Box::new(SqlitePragmaCustomizer))
-        .build(manager)
-        .context("Failed to create database pool")
+    open_raw_pool(database_url)
 }
 
 #[cfg(test)]

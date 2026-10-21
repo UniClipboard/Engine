@@ -1,5 +1,6 @@
 mod queue;
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -7,9 +8,13 @@ use std::time::Duration;
 use tokio::sync::{oneshot, Mutex};
 use tokio::time::{timeout_at, Instant};
 use tokio_util::sync::CancellationToken;
+use uc_infra_local::fs::open_files::open_lockable_files;
+use uc_observability_contract::diagnostics::{record_task_join_failure, DiagnosticTaskKind};
+use uc_observability_contract::{uc_info, uc_warn};
 
 use super::event_stream::EventSender;
 use super::in_flight::InFlightOperations;
+use super::log_activity::LogActivity;
 use super::{invalid_state_error, operation_cancelled_error, Engine, EngineRuntime};
 use crate::{
     EngineError, EngineErrorCategory, EngineEvent, EngineState, LifecycleAction, OperationTerminal,
@@ -40,6 +45,8 @@ struct Transition {
     runtime: Arc<dyn EngineRuntime>,
     operations: Arc<InFlightOperations>,
     events: EventSender,
+    log_activity: LogActivity,
+    file_roots: Arc<[PathBuf]>,
 }
 
 impl Engine {
@@ -76,6 +83,8 @@ impl Engine {
             runtime: Arc::clone(&self.runtime),
             operations: Arc::clone(&self.operations),
             events: self.events.clone(),
+            log_activity: self.log_activity.clone(),
+            file_roots: Arc::clone(&self.file_roots),
         };
         self.lifecycle_requests.bind(transition, announce_start)
     }
@@ -145,6 +154,9 @@ impl Transition {
             result => result,
         };
         self.report_result(LifecycleAction::Suspend, result)?;
+        // 进程网络日志在发布暂停前交还文件：宿主读到 Suspended 即可结束后台任务。
+        self.log_activity.end().await;
+        self.record_open_files().await;
         self.publish(EngineState::Suspended).await;
         Ok(())
     }
@@ -167,6 +179,8 @@ impl Transition {
         if state == EngineState::Suspended {
             self.publish(EngineState::Quiesced).await;
         }
+        // 先重开网络日志，恢复中的网络启动记录才能落盘；恢复失败时保持登记，直到下一次暂停成功交还。
+        self.log_activity.begin().await;
         self.report_result(
             LifecycleAction::Resume,
             self.runtime.resume(cancellation.clone()).await,
@@ -199,6 +213,35 @@ impl Transition {
         }
         self.publish(EngineState::Quiesced).await;
         Ok(())
+    }
+
+    /// 暂停成功的核对记录：宿主目录内仍被本进程打开的数据库与租约文件数，预期为零。
+    /// 只含计数；无法枚举描述符的平台不写计数。宿主自己的文件（例如运行期所有权锁）不在宿主目录内时不计入。
+    async fn record_open_files(&self) {
+        let roots = Arc::clone(&self.file_roots);
+        let census = match tokio::task::spawn_blocking(move || open_lockable_files(&roots)).await {
+            Ok(census) => census,
+            // discarded-source[contract-boundary]: `tokio::task::JoinError`: the task kind is the full classification; the record then carries no counts
+            Err(_) => {
+                record_task_join_failure(DiagnosticTaskKind::EngineLifecycleTransition);
+                None
+            }
+        };
+        let databases = census.map(|census| census.databases);
+        let leases = census.map(|census| census.leases);
+        if census.is_some_and(|census| census.total() > 0) {
+            uc_warn!(
+                open_database_files = databases,
+                open_lease_files = leases,
+                "engine suspended while local files remain open"
+            );
+        } else {
+            uc_info!(
+                open_database_files = databases,
+                open_lease_files = leases,
+                "engine suspended with local files released"
+            );
+        }
     }
 
     async fn publish(&self, state: EngineState) {
