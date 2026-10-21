@@ -156,10 +156,12 @@ function table() {
   const header = `| 起始版本 → head | ${columns.map(([title]) => title).join(' | ')} |`
   const rule = `| --- | ${columns.map(() => '---').join(' | ')} |`
   const mark = id => SYMBOL[cells.find(cell => cell.cell === id)?.status ?? 'not-run']
-  // 旧版快照只参与 D1；提交中断单元的结果写在同一格内。
+  // 旧版快照只参与 D1；提交中断与非法宿主偏好单元的结果写在同一格内。
   const legacyRows = legacyPoints.map(from => {
     const marks = columns.map(([, dimension]) =>
-      dimension === 'd1' ? `${mark(`d1-${from}-head`)}（中断 ${mark(`d1-${from}-head-commit-interrupted`)}）` : '—',
+      dimension === 'd1'
+        ? `${mark(`d1-${from}-head`)}（中断 ${mark(`d1-${from}-head-commit-interrupted`)}，非法偏好 ${mark(`d1-${from}-head-invalid-preferences`)}）`
+        : '—',
     )
     return `| ${from}（快照） | ${marks.join(' | ')} |`
   })

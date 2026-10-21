@@ -53,11 +53,14 @@ pub(crate) enum Inviter {
     New,
 }
 
-/// 升级过程中注入的外部干扰。
+/// 升级前或升级过程中注入的外部干扰。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Interruption {
     /// 首次升级期间外部持有 Space 转换激活租约，使单设备重建在提交边界失败；随后释放并重启。
     CommitInterrupted,
+    /// 首次启动前把资料副本 `settings.json` 中已迁出 Engine 的宿主产品偏好改为非法值或错误类型；
+    /// 快照文件本身不变。Engine 必须忽略这些键并正常建立会话。
+    InvalidPreferences,
 }
 
 #[derive(Clone, Debug)]
@@ -285,6 +288,7 @@ pub(crate) fn cell(id: &str) -> Result<CellSpec, String> {
         (Some("old"), Some("inviter")) => (Some(Inviter::Old), None),
         (Some("new"), Some("inviter")) => (Some(Inviter::New), None),
         (Some("commit"), Some("interrupted")) => (None, Some(Interruption::CommitInterrupted)),
+        (Some("invalid"), Some("preferences")) => (None, Some(Interruption::InvalidPreferences)),
         (None, None) => (None, None),
         _ => return Err(format!("{id} has an unknown variant")),
     };
