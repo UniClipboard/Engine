@@ -144,3 +144,60 @@ Windows and native platform runs are skipped. The public config migration E2E re
 Cross-install reproduction tests can pass while recording an expected 1101; this is a reproduced
 blocker, not accepted cross-install behaviour. Only the same-install scenario proves successful
 public export/import/restart. The legacy bundle test proves mapping bytes, not a usable session.
+
+## Cross-install adoption repair (authorized continuation)
+
+Checkpoint `7412241308b6fb044d28f724351c269b63b82822` is immutable. Preserve its report,
+acceptance receipt, bundles and failures. New work uses separate commits.
+
+### Failure modes, before implementation and isolated checks
+
+A1 Startup caches the target lifecycle across import: source ciphertext opens with the wrong generation.
+A2 Recovery caches the target decrypted vault across replacement: imported KEK and old secrets become mixed.
+A3 Target active manifests, content-key catalogs, upgrade journals or generation directories survive adoption:
+   startup follows target state under source keys, or exposes target data as imported data.
+A4 A crash between retiring two target components leaves no usable profile and loses original files.
+A5 A crash after writing the new KEK but before replacing the vault prevents recovery preparation on retry.
+A6 Backup fails or fills the disk after retirement: importing must not begin; every original remains retained.
+A7 A retry repeats retirement after imported files exist: imported files overwrite the original backup.
+A8 The imported archive selects retirement names, backup locations or a transaction identifier: unrelated files can move.
+A9 An existing target backup record uses its old vault key after import: later backup preparation cannot decrypt it.
+A10 Cleanup removes staging before removing its marker: the next boot sees an incomplete import.
+A11 A secure-storage write fails but apply returns success: startup opens a mixture or discards the retry marker.
+A12 Existing target contains unrelated root files, telemetry or data inside retired Engine directories:
+    adoption must preserve their exact bytes, including retained originals.
+A13 Legacy bundle has no generation manifest: adopt its portable legacy state, then use the existing V3 upgrade.
+A14 Successful first boot still fails on the second boot: verify both, setup completion and session readiness.
+A15 Target is mid factory reset: import must not bypass the reset journal.
+A16 Source/target backup roots are on different filesystems: never use copy-and-delete without verification.
+
+### Transaction and ownership invariants
+
+- The existing Application profile-startup owner invokes one complete offline import capability before
+  version upgrade and before loading the lifecycle used for runtime wiring.
+- The Infra import owner alone selects a fixed list of Engine-owned components to retire. Imported
+  paths never select retirement scope. Unknown root files and telemetry stay in place.
+- A local journal outside the untrusted staging directory binds one staged marker to one transaction.
+  Publish and flush it before any move. Persist the original component inventory once.
+- Retire original Engine components with no-replace renames into a private, retained local recovery
+  directory. Never delete originals. On retry, an existing retired destination is authoritative;
+  do not move newly installed files into it. Fail on ambiguous states.
+- Capture and verify retired Engine state with the maintained ProfileBackupArchive before installing
+  staged bytes. Retain the archive receipt and originals after success. No extra credential export.
+- Retain existing target upgrade-backup records with their original encrypted vault so imported
+  credentials never reinterpret those records. Keep prior backups, rather than pruning or resetting them.
+- Reset the in-memory recovery cache before and after replacement. Adopt only the bundle's existing
+  encrypted profile vault and KEK. Reread lifecycle after adoption; never generate a replacement identity.
+- Preserve marker/staging/journal on any failure. Replay installation only after retirement and backup
+  are durable. A failed attempt never publishes an Engine handle or starts background runtime work.
+- Finish installation before clearing the pending marker. Remove the marker before cleaning staging;
+  an orphan staging directory is inert and the next explicit staging operation can replace it.
+- Keep D5/D6 ownership and historical upgrade-backup scope unchanged. Keep the task7 old-anchor gate.
+
+### Acceptance
+
+Use real public Engine starts and operations with separate synthetic installations and no credential
+copying. Verify new and existing targets, first and later starts, unchanged source Space identity,
+setup completion, usable encryption, product bytes, unrelated target bytes, retained target backups,
+and interrupted retirement/install retry. Run the original exported legacy bundle unchanged.
+Historical negative 1101 evidence remains at the checkpoint; new acceptance requires successful starts.
