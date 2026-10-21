@@ -294,18 +294,18 @@ async fn repeated_leaves_do_not_accumulate_tasks_or_descriptors() {
         .unwrap();
 
     let mut samples = Vec::new();
-    for round in 0..6 {
+    for round in 0..LEAK_ROUNDS {
         engine
             .execute(create_space(&format!("leak round {round}")))
             .await
             .unwrap();
         leave(&engine).await;
-        // 让被取消的任务有机会退出后再取样。
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        samples.push(resource_sample());
+        // 旧运行期的任务与句柄在离开返回后仍异步回收约 1–2 秒；等计数稳定后再取样，
+        // 否则样本会落在回收中途。始终不稳定本身就是泄漏信号。
+        samples.push(settled_resource_sample().await);
     }
-    // 取样本身有 ±1 的抖动；每轮泄漏哪怕一个任务或句柄，后三轮也会比前三轮多出至少两个。
-    let (early, late) = samples.split_at(3);
+    // 稳定后的任务数不随轮次变化。
+    let (early, late) = samples.split_at(LEAK_ROUNDS / 2);
     let early_tasks = early.iter().map(|sample| sample.tasks).min().unwrap();
     let late_tasks = late.iter().map(|sample| sample.tasks).max().unwrap();
     assert!(
@@ -313,22 +313,62 @@ async fn repeated_leaves_do_not_accumulate_tasks_or_descriptors() {
         "alive tasks grew across leave cycles: {samples:?}"
     );
     // 只有受支持的平台才有句柄计数；不可用时不做该断言，也不当作通过。
+    // 稳定后的句柄数仍随新运行期数据库连接池的并发而在约 3 个之间摆动（不是泄漏：无增长趋势）。
+    // 因此看逐轮趋势而不是首尾极值：每轮多泄漏一个句柄，斜率就是 1，远高于阈值。
     #[cfg(unix)]
     {
-        let counts = |range: &[ResourceSample]| {
-            range
-                .iter()
-                .map(|sample| sample.descriptors.expect("descriptor count on unix"))
-                .collect::<Vec<_>>()
-        };
-        let early_descriptors = counts(early).into_iter().min().unwrap();
-        let late_descriptors = counts(late).into_iter().max().unwrap();
+        let descriptors: Vec<f64> = samples
+            .iter()
+            .map(|sample| sample.descriptors.expect("descriptor count on unix") as f64)
+            .collect();
+        let slope = least_squares_slope(&descriptors);
         assert!(
-            late_descriptors <= early_descriptors + 1,
-            "open descriptors grew across leave cycles: {samples:?}"
+            slope < MAX_DESCRIPTOR_GROWTH_PER_CYCLE,
+            "open descriptors grew {slope:.2} per leave cycle: {samples:?}"
         );
     }
     engine.shutdown(Duration::from_secs(15)).await.unwrap();
+}
+
+/// 参与趋势判断的离开轮数。
+const LEAK_ROUNDS: usize = 8;
+/// 允许的句柄增长上限（每轮）。逐轮泄漏一个句柄的斜率为 1。
+const MAX_DESCRIPTOR_GROWTH_PER_CYCLE: f64 = 0.5;
+
+/// 逐轮样本的最小二乘斜率。
+fn least_squares_slope(values: &[f64]) -> f64 {
+    let count = values.len() as f64;
+    let mean_x = (count - 1.0) / 2.0;
+    let mean_y = values.iter().sum::<f64>() / count;
+    let covariance: f64 = values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| (index as f64 - mean_x) * (value - mean_y))
+        .sum();
+    let variance: f64 = (0..values.len())
+        .map(|index| (index as f64 - mean_x).powi(2))
+        .sum();
+    covariance / variance
+}
+
+/// 连续 5 次（间隔 100 ms）读数不变才视为稳定；15 秒内不稳定则失败。
+async fn settled_resource_sample() -> ResourceSample {
+    let mut previous = resource_sample();
+    let mut stable = 0;
+    for _ in 0..150 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let current = resource_sample();
+        if current.tasks == previous.tasks && current.descriptors == previous.descriptors {
+            stable += 1;
+            if stable == 5 {
+                return current;
+            }
+        } else {
+            stable = 0;
+        }
+        previous = current;
+    }
+    panic!("resources did not settle after leaving: {previous:?}");
 }
 
 #[derive(Debug, Clone, Copy)]
