@@ -30,3 +30,22 @@
 - 本轮未重跑整套 workspace／成员全集／旧端矩阵和平台 CI，不沿用上一检查点的完整回归结果冒充当前 head。完整 spec 完成前仍须完成其全部必需门禁。
 - 手工差异审查：通用半流变更仅扩展传输无关能力，稳定 Engine／绑定未扩大；I/O 分离后的连接与许可保留至实际本地工作退出。所有 SDK 替代流程仍为测试原型，生产 blob 路径未切换。
 - 下一步：原始接收项材料与身份重建、旧端当前授权及资料角色、协议／资源基线前置；原型采用时迁入唯一 Infra 实现并删除测试副本，再推进调度和生产接线。
+
+- 续接已重新核对工作区；上一 goal turn 为 progress（cfba06c4 提交了真实 SDK／Uni 原型和通用工作租约）。当前继续阶段0，不将局部证明冒充全 spec。
+- 新增材料原型首轮编译误用 FetchTransferContext.from_device_id，真实字段是 peer_id；已更正，首轮日志保留 retry-material-probe.log。
+- 材料测试两次后续编译暴露 peer_id 是 String、DeviceId 的实际访问器为 as_str（不是 as_ref）；已按真实定义修正，日志分别保留 retry-material-fixed.log 与 retry-material-corrected.log。
+- 原始材料两项探针通过：首次真实物化失败后，新 attempt 从保留 V3 恢复相同 ticket／来源并写回正确文件；重复名称与重复内容按原位置区分。此为材料可行性，不冒充稳定 RetryEntryReceive API 已完成。
+- 开工 main a461b894 冻结宿主构建成功，复用原冻结构建脚本并支持显式 SHA／输出目录，未修改旧 Engine。临时源码由原 trap 清理。
+- 1GiB 首跑完成内部传输／校验／资源断言后，在写计数工件时失败：Cargo 测试 cwd 位于 crate，驱动误传相对工件路径。保留 resource-baseline.log，使用绝对工件路径重跑；不修改测试断言。
+
+- 1GiB 资源基线重跑通过（16.50 秒）：逐块精确校验，RSS 峰值 47024 KiB，释放 tag 且无 SDK 临时文件；生产仍是旧适配器，连接总数／峰值均为 2，此为迁移前基线，不是新路径验收。
+- rc.15 Direct 单边升级首组通过：旧旧双向文件、升级后原文件可读、新旧双向文件均精确校验；成员／历史／身份保留。完整升级矩阵仍待补齐。
+- 真实 Uni 当前准入及同内容探针通过：原生 connectivity 4 项，0.23 秒。使用生产 IrohConnectionAdmission，成员读取为可变 fixture；撤权、重新加入后的旧 epoch、会话关闭均拒绝旧许可，不能把有效 ticket 视为当前授权。不是实际 SQLite 成员与完整 Engine 新流程的验收。
+- 正在未修改的 rc.15 库中构建独立协议向量 example，使用共享 target；旧库与锁文件不打补丁，仅添加合成向量入口。
+
+- rc.15 协议向量生成完成（2m21s），临时源码退出后回收；当前 SDK 对照 Raw／空负载的 ALPN、ticket、Get 请求、BAO 响应完全一致，1 项通过。旧 SDK 为 0.102.0 的 b33af91 固定 fork，不是 0.100。
+- 正在串行构建当前宿主与 Relay，用于补齐两个冻结旧端 × Direct／Relay × 单边升级方向的迁移前资料矩阵。
+
+- 8 组迁移前旧资料矩阵全部通过，汇总逐项核对内容／旧文件／保留身份成员历史／副本／清理／明文探针；摘要落在 target，两个临时冻结源码目录均不存在。汇总首轮误按固定 presence 后缀找第 1 侧工件，修正实际后缀后完整核验，不重跑网络。
+- metadata、workspace all-targets check、fmt、Rust style、repository preflight 通过；preflight 首轮触发内部 Cargo 等待，已中止，构建结束后串行重跑通过。完整 workspace 首轮失败历史不变。
+- 阶段 0 三项技术证明完成，文档状态统一进入阶段 1；不把原型或迁移前矩阵当作正式受管路径硬验收。下一步实施公平有界调度及精确预算。

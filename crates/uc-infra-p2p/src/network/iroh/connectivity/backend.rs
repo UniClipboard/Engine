@@ -1,3 +1,4 @@
+use super::super::blobs::BLOBS_ALPN;
 use super::super::connect::connect_with_staggered_retry_classified;
 use super::super::peer_address_resolver::PeerAddressResolver;
 use super::IrohPeerConnection;
@@ -21,6 +22,7 @@ use uc_sync_protocol::peer_reachability::{LEGACY_PEER_REACHABILITY_ALPN, PEER_RE
 /// 同一 endpoint 上的独立协议连接池只使用各自固定的协商配置。
 #[derive(Clone, Copy)]
 pub enum ConnectivityProfile {
+    Blob,
     Presence,
     ActiveClipboardState,
     ActiveClipboardPull,
@@ -76,6 +78,7 @@ impl ConnectivityBackend for IrohConnectivityBackend {
             return Err(ConnectivityError::Stopped);
         }
         let (preferred, fallback, label) = match self.profile {
+            ConnectivityProfile::Blob => (BLOBS_ALPN, BLOBS_ALPN, "blob"),
             ConnectivityProfile::Presence => (
                 PEER_REACHABILITY_ALPN,
                 LEGACY_PEER_REACHABILITY_ALPN,

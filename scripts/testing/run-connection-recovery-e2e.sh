@@ -8,6 +8,7 @@ usage() {
   echo "Usage: $0 [--suite all|local|network] [--repeat N] [--mode all|direct|known-peer|relay|legacy] [--case PREFIX] [--prebuilt] [--peer-host PATH --peer-side 0|1] [--relay-binary PATH] [--relay-b PATH] [--prepaired-host PATH --upgrade-side 0|1 --presence-role receive|initiate --presence-protocol peer_reachability_v1|peer_reachability_v2]"
   echo "  --repeat applies to the network scenarios only; the local suite always runs once."
   echo "  --peer-host runs one side of the direct, known-peer or relay scenarios with another version's test host; --relay-binary replaces the relay server; --relay-b gives the second node its own relay server (different home relays)."
+  echo "  --blob-baseline adds old/old and upgraded bidirectional file readback, then ends before presence recovery."
   echo "  --prebuilt reuses the test host already built in the cargo target directory, such as by the workspace test build."
 }
 
@@ -16,6 +17,7 @@ repeat=3
 mode=all
 case_prefix=
 prebuilt=0
+blob_baseline=0
 peer_host=
 peer_side=1
 relay_binary=
@@ -31,6 +33,7 @@ while (($#)); do
     --mode) mode=$2; shift 2 ;;
     --case) case_prefix=$2; shift 2 ;;
     --prebuilt) prebuilt=1; shift ;;
+    --blob-baseline) blob_baseline=1; shift ;;
     --peer-host) peer_host=$2; shift 2 ;;
     --peer-side) peer_side=$2; shift 2 ;;
     --relay-binary) relay_binary=$2; shift 2 ;;
@@ -107,11 +110,14 @@ writeFileSync(join(process.argv[2], 'source-tree-sha256.txt'), `${digest.digest(
 NODE
 rustc --version > "$evidence/rust-version.txt"
 node --version > "$evidence/node-version.txt"
-runner=(node "$repo/scripts/testing/connection-recovery-network.mjs" --host "$target/debug/uc-connectivity-host" --repeat "$repeat" --evidence "$evidence")
+runner=(node "$repo/scripts/testing/connection-recovery-network.mjs" --host "$target/debug/uc-connectivity-host" --repeat "$repeat" --evidence "$evidence" --blob-baseline "$blob_baseline")
 if [[ -n "$case_prefix" ]]; then runner+=(--case "$case_prefix"); fi
 if [[ -n "$peer_host" ]]; then
   [[ "$mode" != all && "$mode" != legacy && -x "$peer_host" && "$peer_side" =~ ^[01]$ ]] || { echo "--peer-host needs an executable, --peer-side 0|1 and a single non-legacy --mode." >&2; exit 2; }
   runner+=(--peer-host "$peer_host" --peer-side "$peer_side")
+fi
+if ((blob_baseline)); then
+  [[ -n "$prepaired_host" && "$case_prefix" == P00-prepaired-upgrade ]] || { echo '--blob-baseline requires the prepaired upgrade scenario.' >&2; exit 2; }
 fi
 if [[ -n "$prepaired_host" ]]; then
   [[ "$suite" == network && ( "$mode" == direct || "$mode" == relay ) && -x "$prepaired_host" && "$upgrade_side" =~ ^[01]$ && "$case_prefix" == P00-prepaired-upgrade && -z "$peer_host" ]] || { echo '--prepaired-host requires network direct|relay, --upgrade-side 0|1 and --case P00-prepaired-upgrade.' >&2; exit 2; }

@@ -1,6 +1,6 @@
 # 第七片阶段 0：SDK 停止可行性证据
 
-状态：**阶段 0 重验中；底层 SDK 与 Uni 原型通过，生产迁移未开始**（2026-10-21）。对应[规格 §11](2026-10-21-blob-connectivity-spec.md#11-未决问题open-questions)和[执行计划阶段 0](2026-10-21-blob-connectivity-plan.md#阶段-0冻结基线与证明可行性)。
+状态：**阶段 0 前置证明完成；生产迁移与完整验收待实施**（2026-10-21）。对应[规格 §11](2026-10-21-blob-connectivity-spec.md#11-未决问题open-questions)和[执行计划阶段 0](2026-10-21-blob-connectivity-plan.md#阶段-0冻结基线与证明可行性)。
 
 ## 冻结来源
 
@@ -106,3 +106,79 @@ just cargo test -p uc-application --lib transport::tests --locked
 上述分组分别为 1／3／29／6／20 项通过。工作区编译及本轮最终补充检查结果记录于执行日志。原始材料、旧端授权、完整 Engine 收发、1GiB／资源和平台矩阵仍未执行；阶段 0 整体及后续阶段均不宣称完成。
 
 本轮最终补充：固定 SDK 接收普通与合法空 blob 的反向角色探针通过（0.40 秒）；真实 Uni 测试同时验证无效 reset／stop code 保留稳定分类与 source，且不关闭原连接（0.09 秒）。metadata、全工作区全目标 check、fmt、Rust style、repository preflight、文档相对链接与差异检查通过。完整 workspace／旧端矩阵／平台 CI 本轮未重跑，首轮回归失败仍保留，不能将本轮局部通过视为整个 spec 完成。
+
+## 续接：原始材料、当前准入与迁移前资源
+
+`clipboard::sync::apply_inbound::tests::retry_material` 两项通过：第一次真实物化失败生成缺失占位后，
+从保留的原始 V3 接收材料创建新 attempt，准确恢复来源、ticket 和原始预期内容，写回精确文件。
+重复名称和重复内容通过原清单位置区分，不把失败占位当成获取材料。此为材料可行性证明；
+尚未实现稳定 RetryEntryReceive、持久 CAS 或成功项与重试结果合并。
+
+真实 Uni 原型改为生产 `IrohConnectionAdmission` 与 SHA256 身份指纹实现，成员目录与准入账本为
+可变测试 fixture。撤权后请求、重新加入后的旧 epoch 和关闭后的旧会话均被拒绝，原 ticket
+仍合法且原 blob 尚在，证明能力票据不能替代当前授权。同内容 A／B 各自开流；SDK 同 hash
+导入可能串行，取消 A 并等待其导入结束后 B 可继续并精确读回。没有增加应用层内容去重或
+共享 waiter 注册表；采用一个逻辑项一份下载许可，SDK 内部共享不移交其他项的完成权。
+本轮原生 connectivity 四项通过（0.23 秒），不是实际 SQLite 成员和完整新 Engine 流程验收。
+
+迁移前 `blob_resource_baseline` 通过（16.50 秒）：实际旧生产适配器发布并逐块精确验证 1GiB，
+不创建整文件内存缓冲。RSS 峰值 47024 KiB；FD 为 10／20／21／12（初始／准备／传输结束／关闭），
+本地 Tokio runtime 任务为 0／28／1（初始／传输结束／关闭），不声称统计全局 SDK runtime。
+显式引用时两端各一 tag，释放后均为零；SDK 临时文件为零。提供端连接总数和峰值均为 2，
+反映旧 warmup 与 Downloader 双路径；关闭后为零。不能将此迁移前基线视为新 owner 的
+连续运行、完整 Engine staging 或所有资源归零验收。
+
+开工 main 冻结宿主已构建，原库和锁文件未经修改；临时源码由冻结脚本回收。rc.15 Direct
+单边升级首组已通过旧旧文件、原文件升级后读回与旧新双向文件精确校验，原身份、传输身份、
+成员和历史均保留。当前路径仍为迁移前生产路径，完整 Direct／Relay 双边矩阵与协议向量
+正在补齐，阶段 0 整体尚未退出；正式迁移后须重新执行完整硬验收。
+
+可重复入口：
+
+```bash
+just cargo test -p uc-application --lib retry_material --locked
+just cargo test -p uc-infra-p2p --lib network::iroh::connectivity --locked
+UC_BLOB_RESOURCE_EVIDENCE="$PWD/target/blob-connectivity-evidence/resource-baseline.json" \
+  just cargo test -p uc-infra-p2p --test blob_resource_baseline --locked -- --nocapture
+```
+
+资源首轮因为工件路径相对 Cargo 测试 cwd 导致写入失败；保留原日志，改由驱动传入绝对工件路径后重跑通过，
+没有放宽传输或资源断言。日志与私有原始计数位于 `.planning/2026-10-21-blob-connectivity/` 和
+`target/blob-connectivity-evidence/`，不提交原始文件、资料或实际身份。
+
+## 阶段 0 退出证据
+
+完整迁移前资料矩阵 8／8 通过：开工 main／rc.15 × Direct／强制 Relay × 升级第 0／1 侧。
+每组的旧旧配对与旧资料重开、旧旧文件精确读回、单边升级后原接收文件可读、旧新双向文件精确读回、
+原设备与传输身份／成员／历史保留均有证明；独立原始资料副本在升级前创建，结束后按规则清理。
+每组 plaintext_clean／cleaned 均为 true，failed 均为 false。固定旧库不打补丁。
+
+| 锚点 | Direct 两侧升级 | 强制 Relay 两侧升级 | 文件角色 |
+| --- | --- | --- | --- |
+| 开工 main a461b894 | 2／2 | 2／2 | 新侧获取与提供均通过 |
+| rc.15 f6f305d9 | 2／2 | 2／2 | 新侧获取与提供均通过 |
+
+每组沿既有 harness 运行，例如：
+
+```bash
+UC_NETWORK_UNPRIVILEGED=1 just mbx-exec bash scripts/testing/run-connection-recovery-e2e.sh \
+  --suite network --repeat 1 --mode direct --case P00-prepaired-upgrade --prebuilt \
+  --blob-baseline --prepaired-host "$PWD/target/blob-connectivity-evidence/frozen-main/uc-connectivity-host" \
+  --upgrade-side 0
+bash scripts/testing/freeze-blob-wire-vectors.sh
+just cargo test -p uc-infra-p2p --test blob_protocol_vectors --locked
+```
+
+固定历史 SDK 0.102.0 的独立 example 导出向量，当前 SDK 对照 Raw 与空负载全部字节相同。
+向量使用合成固定 key 和内容，没有真实票据或身份。旧临时源码均已检查回收；私有矩阵摘要
+位于 target 下 baseline-matrix-summary.json，记录运行二进制摘要、HEAD 与工作差异摘要。
+驱动保留每组原始工件和日志；最终汇总首次误按固定 presence 后缀寻找第 1 侧文件，
+按实际工件后缀核对后 8 组完整通过，未重跑或覆盖网络失败。
+
+旧新配对身份沿用相同 SHA256 指纹算法和普通成员目录；生产准入组件的可变权威 fixture
+证明撤权与会话代次失效，正常旧资料互通证明原身份可持续解析。两个证据共同解除阶段 0
+身份前置，不宣称迁移后 SDK 请求已经经过新准入负责人。实际 blob ALPN 的协议字节由
+向量证明，矩阵的传输路径由隔离网络约束；迁移后实际协商与流级资源计数仍须阶段 5 验证。
+
+阶段 0 技术前置完成。生产 owner、容量与期限、自动恢复、取消通知背压、部分失败、稳定重试与绑定、
+最终矩阵／完整回归／平台 CI 仍未实现或未执行，不能据此宣称完整 spec 完成。

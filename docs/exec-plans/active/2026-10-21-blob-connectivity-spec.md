@@ -1,6 +1,6 @@
 # Issue #34 第七切片：文件／blob 受管传输实现规格
 
-状态：**设计定稿；阶段 0 重验中，底层 SDK 与 Uni 流原型通过，生产迁移未开始**（2026-10-21）。见[可行性证据](2026-10-21-blob-connectivity-feasibility.md)。
+状态：**设计定稿；阶段 0 前置证明完成，阶段 1 实施中**（2026-10-21）。见[可行性证据](2026-10-21-blob-connectivity-feasibility.md)。
 配套[执行计划](2026-10-21-blob-connectivity-plan.md)记录实施状态，本文是本片设计与验收的唯一正文来源。
 源码盘点锚点为 `2154b959fa16ccbdb165f8a92a295a039833bf47`；开工时重新冻结 main、旧版与 SDK 来源。
 前置为[第六片](../completed/2026-10-14-peer-reachability-connectivity-spec.md)。第八片反向进度完整迁移另行定稿。

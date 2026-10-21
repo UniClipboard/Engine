@@ -36,6 +36,7 @@ impl IrohConnectionAdmission {
             admission,
             connections,
             protocol: match profile {
+                ConnectivityProfile::Blob => InboundPeerProtocol::Blob,
                 ConnectivityProfile::Presence => InboundPeerProtocol::Presence,
                 ConnectivityProfile::ActiveClipboardPull => {
                     InboundPeerProtocol::ActiveClipboardPull

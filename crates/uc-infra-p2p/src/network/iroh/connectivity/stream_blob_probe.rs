@@ -2,7 +2,8 @@
 #[path = "../../../../tests/support/blob_exchange.rs"]
 mod exchange;
 
-use super::super::IrohPeerConnection;
+use super::super::{ConnectivityProfile, IrohConnectionAdmission, IrohPeerConnection};
+use crate::network::iroh::admitted_connections::AdmittedConnections;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::task::AtomicWaker;
@@ -12,6 +13,8 @@ use iroh_blobs::util::{AsyncReadRecvStream, AsyncReadRecvStreamExtra, SendStream
 use iroh_blobs::{
     get::StreamPair as GetPair, provider::StreamPair as ProvidePair, store::fs::FsStore,
 };
+use iroh_blobs::{ticket::BlobTicket, BlobFormat};
+use iroh_tickets::Ticket;
 use std::error::Error;
 use std::io;
 use std::pin::Pin;
@@ -26,12 +29,16 @@ use tokio::sync::Notify;
 use tokio::time::{timeout, Instant};
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
-    AdmissionAttempt, AdmissionGrant, ConnectivityBackend, ConnectivityError, ConnectivityManager,
-    ConnectivityPolicy, PeerConnection, PeerReceiveStream, PeerSendStream,
-    SessionConnectionAdmissionPort, StreamLease, StreamWorkLease,
+    ConnectivityBackend, ConnectivityError, ConnectivityManager, ConnectivityPolicy,
+    KnownPeerIdentity, MembershipLedgerError, PeerConnection, PeerIdentityDirectoryPort,
+    PeerReceiveStream, PeerSendStream, SessionConnectionAdmissionPort, StreamLease,
+    StreamWorkLease,
 };
 use uc_core::error_class::ErrorClass;
 use uc_core::ids::DeviceId;
+use uc_core::membership::{PeerAdmissionError, PeerAdmissionPort};
+use uc_core::ports::security::IdentityFingerprintFactoryPort;
+use uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory;
 
 const BUDGET: Duration = Duration::from_secs(5);
 struct Backend {
@@ -49,49 +56,21 @@ impl ConnectivityBackend for Backend {
         Ok(self.connection.clone())
     }
 }
-#[derive(Clone)]
-struct Identity {
-    peer: DeviceId,
-    key: [u8; 32],
+struct Members {
+    identities: Vec<KnownPeerIdentity>,
+    admitted: AtomicBool,
 }
-struct Grant(DeviceId);
 #[async_trait]
-impl AdmissionGrant for Grant {
-    fn peer(&self) -> DeviceId {
-        self.0
-    }
-    async fn check_current(&self) -> Result<(), ConnectivityError> {
-        Ok(())
+impl PeerIdentityDirectoryPort for Members {
+    async fn known_peer_identities(&self) -> Result<Vec<KnownPeerIdentity>, MembershipLedgerError> {
+        Ok(self.identities.clone())
     }
 }
 #[async_trait]
-impl AdmissionAttempt for Identity {
-    async fn check_current(&self) -> Result<(), ConnectivityError> {
-        Ok(())
-    }
-    async fn adopt(
-        &self,
-        connection: Arc<dyn PeerConnection>,
-    ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError> {
-        if connection.authenticated_key() != self.key {
-            return Err(ConnectivityError::Denied);
-        }
-        Ok(Box::new(Grant(self.peer)))
-    }
-}
-#[async_trait]
-impl SessionConnectionAdmissionPort for Identity {
-    fn begin(&self, _: DeviceId) -> Box<dyn AdmissionAttempt> {
-        Box::new(self.clone())
-    }
-    async fn adopt_inbound(
-        &self,
-        connection: Arc<dyn PeerConnection>,
-    ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError> {
-        if connection.authenticated_key() != self.key {
-            return Err(ConnectivityError::Denied);
-        }
-        Ok(Box::new(Grant(self.peer)))
+impl PeerAdmissionPort for Members {
+    async fn is_admitted(&self, peer: &DeviceId) -> Result<bool, PeerAdmissionError> {
+        Ok(self.admitted.load(Ordering::SeqCst)
+            && self.identities.iter().any(|row| row.device_id == *peer))
     }
 }
 struct SdkSend {
@@ -208,6 +187,13 @@ fn split(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn uni_blob_stream_cancel_preserves_sibling_and_local_work_capacity() -> anyhow::Result<()> {
+    prove_isolation(false).await
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn uni_same_content_cancel_preserves_independent_waiter() -> anyhow::Result<()> {
+    prove_isolation(true).await
+}
+async fn prove_isolation(same_content: bool) -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let source = FsStore::load(temp.path().join("source")).await?;
     let destination = FsStore::load(temp.path().join("destination")).await?;
@@ -242,12 +228,40 @@ async fn uni_blob_stream_cancel_preserves_sibling_and_local_work_capacity() -> a
         connection: IrohPeerConnection::wrap(native_server.clone()),
         calls: AtomicUsize::new(0),
     });
+    let receiver_peer = DeviceId::new("blob-receiver");
+    let fingerprint = Arc::new(Sha256IdentityFingerprintFactory);
+    let client_members = Arc::new(Members {
+        identities: vec![KnownPeerIdentity {
+            device_id: peer,
+            identity_fingerprint: fingerprint.from_public_key(server.id().as_bytes())?,
+        }],
+        admitted: AtomicBool::new(true),
+    });
+    let server_members = Arc::new(Members {
+        identities: vec![KnownPeerIdentity {
+            device_id: receiver_peer,
+            identity_fingerprint: fingerprint.from_public_key(client.id().as_bytes())?,
+        }],
+        admitted: AtomicBool::new(true),
+    });
+    let server_registry = AdmittedConnections::default();
+    let client_admission = Arc::new(IrohConnectionAdmission::new(
+        client_members.clone(),
+        client_members,
+        fingerprint.clone(),
+        AdmittedConnections::default(),
+        ConnectivityProfile::Blob,
+    ));
+    let server_admission = Arc::new(IrohConnectionAdmission::new(
+        server_members.clone(),
+        server_members.clone(),
+        fingerprint,
+        server_registry.clone(),
+        ConnectivityProfile::Blob,
+    ));
     let downloading = ConnectivityManager::new(
         client_backend.clone(),
-        Arc::new(Identity {
-            peer,
-            key: *server.id().as_bytes(),
-        }),
+        client_admission,
         ConnectivityPolicy {
             outbound_per_peer: 2,
             ..ConnectivityPolicy::default()
@@ -255,10 +269,7 @@ async fn uni_blob_stream_cancel_preserves_sibling_and_local_work_capacity() -> a
     );
     let providing = ConnectivityManager::new(
         server_backend.clone(),
-        Arc::new(Identity {
-            peer: DeviceId::new("blob-receiver"),
-            key: *client.id().as_bytes(),
-        }),
+        server_admission.clone(),
         ConnectivityPolicy {
             inbound_per_connection: 2,
             ..ConnectivityPolicy::default()
@@ -305,7 +316,7 @@ async fn uni_blob_stream_cancel_preserves_sibling_and_local_work_capacity() -> a
         .await
     });
     timeout(BUDGET, pause_a.entered.notified()).await?;
-    let bytes = vec![71; 4 * 1024 * 1024];
+    let bytes = vec![if same_content { 41 } else { 71 }; 4 * 1024 * 1024];
     let sibling = source.blobs().add_bytes(bytes.clone()).await?;
     let refreshed = downloading.connect(peer, Instant::now() + BUDGET).await?;
     assert_eq!(refreshed.connection_id(), local.connection_id());
@@ -336,13 +347,18 @@ async fn uni_blob_stream_cancel_preserves_sibling_and_local_work_capacity() -> a
         )
         .await
     });
-    timeout(BUDGET, pause_b.entered.notified()).await?;
+    if !same_content {
+        timeout(BUDGET, pause_b.entered.notified()).await?;
+    }
     assert!(!get_b.is_finished());
     cancel.cancel();
     assert!(timeout(BUDGET, get_a).await??.is_err());
     let _ = timeout(BUDGET, serve_a).await??;
     assert!(!get_b.is_finished());
     assert!(native_client.close_reason().is_none());
+    if same_content {
+        timeout(BUDGET, pause_b.entered.notified()).await?;
+    }
     pause_b.release();
     timeout(BUDGET, serve_b).await???;
     timeout(BUDGET, get_b).await???;
@@ -351,6 +367,37 @@ async fn uni_blob_stream_cancel_preserves_sibling_and_local_work_capacity() -> a
         bytes
     );
     assert!(native_client.close_reason().is_none());
+    // ticket 仍合法且来源内容仍在；当前成员撤销与会话代次决定授权。
+    let ticket = BlobTicket::new(server.addr(), sibling.hash, BlobFormat::Raw).encode_bytes();
+    let old_attempt = server_admission.begin(receiver_peer);
+    server_members.admitted.store(false, Ordering::SeqCst);
+    assert!(matches!(
+        remote.check_current().await,
+        Err(ConnectivityError::Denied)
+    ));
+    let fresh = server_admission.begin(receiver_peer);
+    assert!(matches!(
+        fresh.adopt(server_backend.connection.clone()).await,
+        Err(ConnectivityError::Denied)
+    ));
+    server_registry.close_device(&receiver_peer, b"test member revoked");
+    server_members.admitted.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        old_attempt.check_current().await,
+        Err(ConnectivityError::Denied)
+    ));
+    assert!(matches!(
+        remote.check_current().await,
+        Err(ConnectivityError::Denied)
+    ));
+    let session_attempt = server_admission.begin(receiver_peer);
+    server_registry.close_all(b"test session retired");
+    assert!(matches!(
+        session_attempt.check_current().await,
+        Err(ConnectivityError::Denied)
+    ));
+    assert_eq!(BlobTicket::decode_bytes(&ticket)?.hash(), sibling.hash);
+    assert!(source.blobs().has(sibling.hash).await?);
     downloading.shutdown().await?;
     providing.shutdown().await?;
     client.close().await;

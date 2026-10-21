@@ -20,7 +20,7 @@
 
 ## 当前专项计划
 
-- Issue #34 第七切片：[文件／blob 受管传输执行计划](exec-plans/active/2026-10-21-blob-connectivity-plan.md)，对应[实现规格](exec-plans/active/2026-10-21-blob-connectivity-spec.md)。状态为阶段 0 重验中：公开底层 SDK 与真实 Uni 流原型通过，原始重试材料与旧端身份授权等前置仍待证明，见[复现与方案](exec-plans/active/2026-10-21-blob-connectivity-feasibility.md)。目标包含单任务取消隔离、有限调度与重试、独立文件部分失败及手动重试，保持文件夹完整发布和旧版文件互通。SDK 接入及原始项重试材料须先通过阶段 0，反向进度完整迁移留在第八片。
+- Issue #34 第七切片：[文件／blob 受管传输执行计划](exec-plans/active/2026-10-21-blob-connectivity-plan.md)，对应[实现规格](exec-plans/active/2026-10-21-blob-connectivity-spec.md)。状态为阶段 0 前置证明完成、阶段 1 实施中：公开底层 SDK／Uni、原始重试材料、当前授权、两个冻结旧端 Direct／Relay 资料矩阵及协议资源基线通过，见[复现与方案](exec-plans/active/2026-10-21-blob-connectivity-feasibility.md)。目标包含单任务取消隔离、有限调度与重试、独立文件部分失败及手动重试，保持文件夹完整发布和旧版文件互通。SDK 接入及原始项重试材料须先通过阶段 0，反向进度完整迁移留在第八片。
 
 - Issue #34 第六切片：[设备可达性、准入与存活检查执行计划](exec-plans/completed/2026-10-14-peer-reachability-connectivity-plan.md)，对应[实现规格](exec-plans/completed/2026-10-14-peer-reachability-connectivity-spec.md)。状态为完成；完整 Application presence owner、独立 Uni manager、3N 长期保留与暂态额度分离、本机读取故障来源和显示语义落地；本地完整回归、旧新双角色 Direct／Relay 及全部必需平台 CI 通过，真机与额外历史矩阵跳过；文件／blob／进度等剩余范围继续保留。
 

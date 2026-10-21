@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 mod lifecycle;
+mod retry_material;
 
 use crate::clipboard::sync::apply_inbound::InboundActivationOwner;
 use anyhow::Result;
