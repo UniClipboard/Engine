@@ -1,5 +1,5 @@
 //! 节点拥有的有界连接观察任务；只保留弱连接句柄，不参与连接决策。
-use super::connection_census::ConnectionCensus;
+use super::{blobs::BLOBS_ALPN, connection_census::ConnectionCensus};
 use futures_util::StreamExt;
 use iroh::endpoint::{AfterHandshakeOutcome, Connection, EndpointHooks, PathEvent, Side};
 use iroh::TransportAddr;
@@ -131,6 +131,7 @@ impl EndpointHooks for ObservedConnections {
             observation.negotiated(match conn.alpn() {
                 LEGACY_PEER_REACHABILITY_ALPN => NegotiatedProtocol::PeerReachabilityV1,
                 PEER_REACHABILITY_ALPN => NegotiatedProtocol::PeerReachabilityV2,
+                BLOBS_ALPN => NegotiatedProtocol::Blob,
                 _ => NegotiatedProtocol::Other,
             });
             if let Some(path) = selected {
@@ -213,6 +214,7 @@ pub(super) fn close_reason(reason: &iroh::endpoint::ConnectionError) -> Connecti
 
 #[cfg(test)]
 mod tests {
+    use super::super::blobs::BLOBS_ALPN;
     use super::{Arc, Duration, Instant, NetworkRecorder, ObservedConnections};
 
     #[tokio::test(start_paused = true)]
@@ -279,7 +281,7 @@ mod tests {
         assert!(observers.recorder.is_enabled());
         let server = Endpoint::builder(iroh::endpoint::presets::N0)
             .relay_mode(RelayMode::Disabled)
-            .alpns(vec![b"observer-test".to_vec()])
+            .alpns(vec![BLOBS_ALPN.to_vec()])
             .bind()
             .await
             .unwrap();
@@ -296,7 +298,7 @@ mod tests {
         }
         let (incoming, outgoing) = tokio::join!(
             async { server.accept().await.unwrap().await.unwrap() },
-            client.connect(server.addr(), b"observer-test")
+            client.connect(server.addr(), BLOBS_ALPN)
         );
         let outgoing = outgoing.unwrap();
         assert!(outgoing.paths().iter().any(|path| path.is_selected()));
@@ -307,6 +309,11 @@ mod tests {
         incoming.close(0u32.into(), b"test done");
         client.close().await;
         server.close().await;
+        assert!(
+            logs.output().contains(r#"\"protocol\":\"blob\""#),
+            "实际握手的blob协议必须保留固定分类: {}",
+            logs.output()
+        );
         assert_eq!(
             logs.count("connection.path.observed"),
             1,

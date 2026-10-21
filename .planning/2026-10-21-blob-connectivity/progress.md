@@ -257,3 +257,12 @@
 - 此步不宣称新旧两份partial成果已安全合并，也不宣称跨重启来源／历史交付证明恢复完成；完整许可、生命周期及最终生产网络资源／平台矩阵继续保留。
 
 - 最终真实Engine dev-tools取消回归1通过（5.82秒），metadata解析812包、workspace全目标check通过（1m26s）、fmt、Rust style、repository preflight、1355站点隐私清单与diff全部通过。全过程Cargo串行复用共享target和原缓存，验证期间未修改源码／文档／inventory。手工审查旧proof仅来自实际保存receipt、同一原清单重绑定、锁顺序、finish幂等、删除／世代封口及具体错误来源；code-review skill不可用，不冒充技能审查。当前只修复未保存替换的同进程来源保留，未将其当作完整新旧partial合并或跨重启证明。准备提交，完整目标继续。
+
+
+- 本轮按spec必需验收推进真实资料矩阵。当前宿主构建成功，原main／rc15冻结宿主SHA逐个与阶段0摘要一致；首轮10组真实文件通过，但协议记录Other，未计为完整实际ALPN证明。添加真实流程断言后以旧候选二进制重现red，原记录保留；封闭契约及native实际握手两红测也保留。
+- 既有连接观察者增加固定SDK ALPN→封闭Blob分类；unknown仍Other，未扩大原始协议文本或远程字段，未增加Engine内部接口。封闭编码2通过、真实native握手1通过、实际本地导出1通过、Collector隐私5通过、原会话驱动3通过。修复后的十组真实资料全部通过，逐个核对当前及冻结旧二进制、真实blob协商、旧文件／新双向文件、身份成员历史、两栈UDP阻断与选路、资料副本和明文／清理。十格源码树／工作差异摘要均一致，matrix-summary记录候选5a9+diff与未证明范围，未冒充整体spec。
+- 最终P2P整库323通过／3跳过（171.09秒），本轮未修改实际传输／SDK字节或持久格式；继续完整观测crate及根门禁。受管Engine1GiB资源、数量／时间全边界、真实部分重试／生命周期和当前交付head CI／平台矩阵仍未完成。
+
+- 扩大观测crate的普通Cargo all-targets得到180通过／1失败／1跳过；失败是未修改的physical_connection_records同一二进制两测试重复安装全局subscriber，第二项AlreadyInstalled。改用仓库既有nextest逐测试进程隔离后，两项均实际通过；两crate完整nextest共181通过／1跳过（6.553秒），不改变断言或生产singleton语义，首轮失败日志保留。根门禁继续串行执行。
+
+- 最终metadata解析812包、workspace全目标check通过（1m28s）、fmt、Rust style、repository preflight、1355站点隐私清单及diff全部通过。P2P323通过／3跳过、观测两个crate nextest181通过／1跳过；Collector隐私5和原驱动3通过。真实文件十格含实际blob握手全通过，原冻结库和当前二进制／代码快照指纹已逐格核验。Cargo串行共享target及原缓存，未手动清缓存或使用临时target。手工审查固定ALPN映射、封闭词表、未知拒绝、本地／远程隔离及旧角色复用；code-review skill不可用，不冒充技能审查。准备提交；完整spec未完成，后续优先真实Engine／SQLite部分重试和生命周期、完整准备／结算预算、受管1GiB及默认CI／平台验收。

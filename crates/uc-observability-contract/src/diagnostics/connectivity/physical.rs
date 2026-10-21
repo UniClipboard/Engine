@@ -15,6 +15,7 @@ wire_enum! {
     pub enum NegotiatedProtocol {
         PeerReachabilityV1 => "peer_reachability_v1",
         PeerReachabilityV2 => "peer_reachability_v2",
+        Blob => "blob",
         Other => "other",
     }
 }

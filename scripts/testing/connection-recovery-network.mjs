@@ -627,7 +627,7 @@ async function run() {
     await requiredScenario('E02-text-transfer', async () => {
       await transfer(a, b, 'baseline')
       if (c) await transfer(a, c, 'baseline')
-      return { exact_text_verified: true, direction_count: c ? 4 : 2, ...(mode === 'direct' ? { paths: await selectedPaths(), ...await negotiatedPresence(a, 'peer_reachability_v2') } : {}) }
+      return { exact_text_verified: true, direction_count: c ? 4 : 2, ...(mode === 'direct' ? { paths: await selectedPaths(), ...await negotiatedProtocol(a, 'peer_reachability_v2') } : {}) }
     })
     await requiredScenario('E02-file-transfer', async () => {
       await transferFile(a, b, 'baseline')
@@ -806,7 +806,7 @@ async function prepairedUpgrade() {
     return { ...records.at(-1).proof, exact_bidirectional_content: true,
       ...(blobBaseline ? { original_received_files_readable: true, exact_bidirectional_files: true } : {}),
       paths: await selectedPaths(), hosts: nodes.map(node => node.hostIdentity),
-      ...(!blobBaseline ? await negotiatedPresence(upgraded, options.get('--presence-protocol') ?? 'peer_reachability_v1') : {}) }
+      ...await negotiatedProtocol(upgraded, blobBaseline ? 'blob' : (options.get('--presence-protocol') ?? 'peer_reachability_v1')) }
 
   })
   if (blobBaseline) return
@@ -858,18 +858,18 @@ async function prepairedUpgrade() {
 
 }
 
-async function negotiatedPresence(node, expected) {
+async function negotiatedProtocol(node, expected) {
   await node.call('flush')
   const facts = []
   for (const name of readdirSync(join(node.root, 'logs')).filter(name => name.includes('.json'))) {
     for (const line of readFileSync(join(node.root, 'logs', name), 'utf8').split('\n')) {
       try {
         const fields = JSON.parse(line).fields ?? {}
-        if (fields['event.name'] === 'connection.protocol.negotiated' && fields.protocol?.startsWith('peer_reachability_')) facts.push(fields.protocol)
+        if (fields['event.name'] === 'connection.protocol.negotiated' && typeof fields.protocol === 'string') facts.push(fields.protocol)
       } catch {}
     }
   }
-  assert(facts.includes(expected), 'actual negotiated presence ALPN was not observed')
+  assert(facts.includes(expected), 'actual negotiated protocol was not observed')
   return { negotiated_protocol: expected, actual_handshake_observed: true }
 }
 
@@ -1052,7 +1052,7 @@ async function relayScenarios(a, b) {
   await online(nodes, 20_000)
   await requiredScenario('E02-relay-only-text-transfer', async () => {
     await transfer(a, b, 'relay-only-baseline')
-    return { direct_paths_blocked: directDropPackets > 0, exact_text_verified: true, direction_count: 2, paths: await selectedPaths(), ...await negotiatedPresence(a, 'peer_reachability_v2') }
+    return { direct_paths_blocked: directDropPackets > 0, exact_text_verified: true, direction_count: 2, paths: await selectedPaths(), ...await negotiatedProtocol(a, 'peer_reachability_v2') }
   })
   await requiredScenario('E02-relay-only-file-transfer', async () => {
     await transferFile(a, b, 'relay-only-baseline')

@@ -161,3 +161,14 @@
 - receive/work的候选动作持有至多一份实际保存旧receipt，只有persisted确认提交后丢弃；否则finish按原source清单重生成当前attempt项ID并重绑定既有facts。旧表示ID、实际输出及原删除所有权均不变，不能继承新包数组。无旧保存成果时保留新来源。finish幂等，不能将已恢复facts再覆写为丢弃下载的facts。
 - 普通begin在register前检查旧完整action仍否持有条目，拒绝原因保留具体ReceiveRegistrationError::CleanupInProgress；旧终态但还在收尾不能并发接收。
 - 首轮修复完整普通接收＋随后的手动选择和旧动作封口2通过（0.01秒）；扩展manual_retry／work／batch28通过（0.06秒），包含两次未提交候选、保存成功后来源替换／完整释放、关闭重开与删除后迟到finish不复活。正在补capture失败真实分支并扩大Application整库，不提前记通过。
+
+
+## 2026-10-22 当前候选真实资料矩阵与实际协议证据
+
+- 5a9ae6f7为progress：保存来源切片已提交。核对spec §8／9，不能把此前SDK基线及局部测试当最终候选矩阵；开始用当前宿主、开工main a461和rc.15 f6f的原冻结库跑既有P00资料流程。
+- 首轮当前候选十组文件矩阵全部通过：两旧端×Direct／强制Relay×升级第0／1侧，共8组，另新新Direct／Relay两组。旧库二进制与阶段0摘要逐个核对SHA；每组旧旧重开、旧文件升级后读回、新旧双向精确文件、原身份／传输身份／成员／历史、副本和清理／明文检查均真实执行。工件在target/blob-connectivity-evidence/candidate-5a9ae6f7-2026-10-22。该轮实际blob ALPN在物理连接记录中仍为other，因此未当作spec完整协议证据。
+- 收紧P00既有harness，复用同一真实协商日志读取能力，要求候选实际协商blob。保持旧二进制运行同一流程后red（blob-protocol-matrix-red.log）：旧文件和双向文件仍通过，但未观察到实际协议。封闭编码红测0通过1失败、实际native握手红测0通过1失败（0.03秒），分别保留contract-red／handshake-red日志。
+- 现有ObservedConnections读取实际conn.alpn()，增加固定SDK ALPN→NegotiatedProtocol::Blob映射；wire_enum同时唯一生成封闭编码。未知仍Other，任意ALPN／未知字段仍拒绝。无新业务trace／Engine步骤查询、源地址或原始ALPN，不更改SDK／协议／持久格式。原本地uc.connectivity仍不发往远程Collector。
+- 固定协议解码2通过、真实native握手1通过（0.04秒）、实际本地导出1通过、Collector隐私5通过；已重建当前宿主。下一步带实际协商断言重跑十组，尚未预先记为通过。
+
+- 带实际blob协商断言的十组已全部通过，summary逐格核对二进制SHA／旧库修订、源码树／工作差异一致、原资料保持、精确双向文件、真实blob握手、两栈UDP强制Relay、明文和清理。完整P2P323通过／3跳过；普通Cargo观测回归180通过／1失败／1跳过是未改动的两测试共享全局subscriber，按项目nextest隔离后181通过／1跳过，不修改产品语义或断言。根门禁全部通过；完整资源／数量期限／生命周期／最终head CI仍未证明。
