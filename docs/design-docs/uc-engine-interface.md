@@ -423,3 +423,63 @@ HarmonyOS 绑定必须公开相同字段、结果、错误和提醒。
 ## 文件发送
 
 `SendFiles` 通过 `HostFileAccess` 从宿主文件句柄分块读取内容，并交给核心拥有的导入目录和 blob store。文件内容允许按原始字节落盘，以保持现有 P2P 文件格式；文件名、宿主路径和关联元数据仍不得明文持久化。
+
+
+## Host-declared configuration files
+
+The host declares additional configuration files with `EngineConfig::with_host_configuration_files`.
+Each `HostConfigurationFile` contains a basename and a `HostConfigurationFileReset` owner.
+The default declaration is empty. Engine does not parse product values or accept host-selected destination paths from a bundle.
+
+Names must match `[a-z0-9][a-z0-9._-]*`, end in `.json`, contain no `..`, and use at most 64 ASCII bytes.
+Names must contain one path component. Duplicate names fail validation, including duplicates with different reset owners.
+Engine rejects these reserved names: `settings.json`, `pending-import.json`, `upgrade-cursor.json`,
+`first-sync-state.json`, `daemon-run.json`, and `daemon-last-exit.json`.
+An invalid declaration stops `Engine::start` before profile I/O with code 1109 (`InvalidInput`, not retryable).
+Debug output contains the declaration count, not the filenames.
+
+### Export and import
+
+Export includes every declared regular file that exists under the data root.
+A missing file is optional. A symlink, directory, I/O failure, or file larger than 1 MiB fails export.
+The declaration must contain only configuration. Hosts must not declare credentials or user content as configuration.
+The existing encrypted bundle and credential policies remain unchanged.
+
+The archive member is `ui-state/<name>`. The historical prefix and manifest schema version 1 remain unchanged.
+Import restores that member to `<data_root>/<name>` only if the receiving host declares the same name.
+The archive and its manifest cannot select any other destination.
+Undeclared members do not create host files. A missing member preserves the existing destination file.
+Old bundles use this mapping for their existing members. Old exporters never included every host file.
+Old Engines still restore members under their historical `ui-state/` destination; they do not provide the new root mapping.
+
+The existing archive reader rejects absolute paths and parent traversal.
+The archive reader uses the last occurrence of a duplicate normalized member path, under the existing total size limit.
+Host declaration duplicates are rejected separately before I/O.
+Import writes each host file to a new temporary file, flushes it, then replaces the destination.
+A destination symlink is replaced; import does not write through the link.
+A destination directory fails import without removing that directory.
+Successful files can remain visible if a later copy fails. The import marker and staging remain for the next boot to retry.
+The boot owner removes staging only after all copies succeed. The operation is not atomic across files.
+A retry copies the same staged bytes again. Hosts must not concurrently change files while boot applies an import.
+
+### Reset and upgrade backup
+
+`ByEngine` files follow the existing factory-reset journal after key wipe and Engine state cleanup.
+Engine removes files and unlinks symlinks. Engine refuses directories without recursively removing them.
+A failure preserves the reset phase for retry. Earlier file deletions can remain visible.
+`ByHost` files survive both failed and successful Engine reset.
+The daemon deletes the product file only after `FactoryResetSpace` succeeds and owns deletion retry and error visibility.
+The host must leave telemetry consent outside the reset declaration.
+
+Upgrade backup keeps its existing whole-root scope and exclusion list.
+Backup includes declared files, undeclared files, and telemetry when they exist in the root.
+The declaration does not narrow that scope.
+
+### Required integration gate
+
+Cross-install import is not accepted yet. The retained task8 baseline and changed runs return startup code 1101 after staging succeeds.
+The encrypted profile vault contains the admission key; additional credential export is not the proposed remedy.
+Startup retains a lifecycle value read before import. A later start also encounters the target's old upgrade journal under the imported security context.
+The current public startup failure returns no Engine handle for recovery operations.
+Same-install import and host-file mapping evidence do not close this gate.
+Track the repair and acceptance in the [technical debt tracker](../exec-plans/tech-debt-tracker.md).

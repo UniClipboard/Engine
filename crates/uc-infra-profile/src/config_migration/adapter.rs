@@ -324,12 +324,32 @@ fn read_host_configuration_file(path: &Path) -> Result<Option<Vec<u8>>, ConfigMi
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
     let file = options
         .open(path)
         .map_err(|error| ConfigMigrationError::Io {
             details: "failed opening a host configuration file".to_string(),
             source: Some(Box::new(error)),
         })?;
+    if !file
+        .metadata()
+        .map_err(|error| ConfigMigrationError::Io {
+            details: "failed inspecting opened host configuration file".to_string(),
+            source: Some(Box::new(error)),
+        })?
+        .file_type()
+        .is_file()
+    {
+        return Err(ConfigMigrationError::Io {
+            details: "opened host configuration file is not a regular file".to_string(),
+            source: None,
+        });
+    }
     let mut bytes = Vec::new();
     file.take(MAX_HOST_CONFIGURATION_FILE_BYTES + 1)
         .read_to_end(&mut bytes)

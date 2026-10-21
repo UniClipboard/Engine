@@ -28,7 +28,11 @@
 //! contents.
 
 use std::collections::BTreeMap;
+use std::fs::OpenOptions;
+use std::io;
 use std::path::{Path, PathBuf};
+
+use uc_infra_local::fs::durability::{replace_file, sync_directory};
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -447,14 +451,29 @@ fn restore_host_configuration_files(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(PendingImportError::copy_member_from(error)),
         }
-        std::fs::copy(&source, &temporary).map_err(PendingImportError::copy_member_from)?;
-        std::fs::rename(&temporary, app_data_root.join(name))
+        // create_new 不跟随预先存在的临时链接；失败保留 marker 和 staging，重启可重试。
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
             .map_err(PendingImportError::copy_member_from)?;
+        let mut input =
+            std::fs::File::open(&source).map_err(PendingImportError::copy_member_from)?;
+        io::copy(&mut input, &mut output).map_err(PendingImportError::copy_member_from)?;
+        output
+            .sync_all()
+            .map_err(PendingImportError::copy_member_from)?;
+        drop(output);
+        replace_file(&temporary, &app_data_root.join(name))
+            .map_err(PendingImportError::copy_member_from)?;
+        sync_directory(app_data_root).map_err(PendingImportError::copy_member_from)?;
         restored += 1;
     }
     let ignored = match std::fs::read_dir(&source_dir) {
         Ok(entries) => entries
-            .filter_map(Result::ok)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(PendingImportError::copy_member_from)?
+            .into_iter()
             .filter(|entry| {
                 entry
                     .file_name()

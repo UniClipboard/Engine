@@ -25,7 +25,7 @@ Engine hard-codes three Desktop updater file names (`last_notified_update.json`,
 - Backup: unchanged code; existing whole-root capture already includes declared files.
 - Caller action: declare names once in `EngineConfig`. No new operation, result or event.
 - Success: declared files travel in the bundle and land at `<data_root>/<name>` after the boot apply;
-  reset removes them after keys are wiped; backup contains them.
+  reset removes only ByEngine files after keys are wiped; ByHost files survive; backup contains all files.
 - Failure: invalid declaration fails `Engine::start` with `InvalidInput` code 1109 before any I/O.
   Export of a declared path that is a symlink or a directory, or above the size limit, fails the export.
   Apply failure keeps the marker and staging; the next boot re-applies everything (existing contract).
@@ -49,17 +49,16 @@ Engine hard-codes three Desktop updater file names (`last_notified_update.json`,
 - Declared member absent from the bundle: the live file is left unchanged (same as `settings.json`).
 - Export: absent declared file is skipped; a regular file is carried; a symlink or directory fails the
   export (following a symlink would bundle an arbitrary host file); a file over 1 MiB fails the export.
-- Reset: declared paths are removed as files only (a symlink is unlinked, a directory fails the reset),
+- Reset: ByEngine declared paths are removed as files only (a symlink is unlinked, a directory fails the reset),
   then verified absent together with Engine state.
 
-## D5 interpretation (needs confirmation)
+## D5/D6 ownership (approved)
 
-D5 says the daemon deletes the product file after Engine reset succeeds. D6 puts reset under the host
-declaration. To avoid two deleters: Engine deletes declared files as part of the reset state clear,
-after key wipe and with Engine state, and reports success only after they are verified absent. A crash in
-between is replayed by the reset journal, which a daemon-side delete after success cannot do. Desktop
-task10 must therefore not delete the declared files again; it reloads its in-memory product store after
-`SpaceFactoryReset`. Undeclared files (`desktop-telemetry.json`) are never touched.
+The daemon deletes the product file only AFTER Engine reset succeeds. Declare that file as `ByHost`.
+Engine preserves every `ByHost` file after both failed and successful reset. Declare updater-state
+files as `ByEngine`; Engine deletes them after key wipe in the existing journaled reset. Task10 owns
+post-success product deletion, retry, error visibility and in-memory reload. Telemetry is undeclared
+and survives reset. Whole-root upgrade backups still include telemetry and undeclared files.
 
 ## Old bundles
 
@@ -106,8 +105,8 @@ E2E (public `Engine::start` + operations, real files, isolated temp roots, synth
 2. Bundle with an undeclared member: not restored (H4) — covered by target declaring a subset.
 3. Destination symlink at apply: replaced, target outside untouched (H8).
 4. Export with a declared symlink fails; with a missing declared file succeeds (H6, H7).
-5. Factory reset with injected key-delete failure keeps declared files; retry removes them; telemetry
-   kept (H11, H12, D5 ordering).
+5. Factory reset with injected key-delete failure keeps all host files; retry removes ByEngine files;
+   ByHost product, telemetry and unlisted files survive failure and success (H11, H12, D5 ordering).
 6. Invalid declarations fail start with 1109 and create no data (H1–H3).
 7. Upgrade backup (1.2.3 → 1.2.4) inventory contains declared files byte-identical (H16).
 8. Real `0c57e1ab` bundle restores its two members at the root; throttle absent as expected (H13).
@@ -119,7 +118,29 @@ contract tests; bindings compile through workspace check.
 
 - [x] Orientation, design, failure modes
 - [x] Real pre-change bundle exported on clean `0c57e1ab` (library/legacy-bundle-0c57e1ab)
-- [ ] Implementation
-- [ ] E2E + artifacts
-- [ ] Docs (interface, security, tech debt)
-- [ ] Validation with exit codes
+- [x] Implementation
+- [x] Nonvisual E2E + artifacts; cross-install runtime acceptance remains blocked
+- [x] Docs (interface and existing import debt; no security exception)
+- [x] Local validation with exit codes; final immutable-source receipt stays in the thread library
+
+## Resume constraints and additional failure modes (before continuation)
+
+WIP `3c42d7b719fd0713f44ea3c310383bc3472c2fd5` and all original evidence are preserved.
+H18 ByHost file removed on reset success or failure violates D5; verify both outcomes.
+H19 Cross-install import copies data but Engine cannot start: investigate missing admission-key versus
+    host adapter inconsistency; preserve original bundle and baseline trace. Do not export additional
+    credentials or replace this acceptance gate with same-install evidence.
+H20 Import copy fails after some host files: marker and staging must survive; repeat boot applies the
+    same staged bytes and starts successfully after the destination obstruction is removed.
+H21 Export regular-file check races with symlink replacement: Unix no-follow open must reject it.
+H22 Import missing optional member must preserve existing destination bytes.
+H23 Reset-owned directory must fail without recursively deleting it; ByHost and telemetry survive.
+H24 Secure-storage set failure during apply must remain distinguishable from successful recovery.
+
+## Verification scope
+
+The host-file E2E suite uses Unix symlink primitives and is compiled only on Unix.
+Windows and native platform runs are skipped. The public config migration E2E remains portable.
+Cross-install reproduction tests can pass while recording an expected 1101; this is a reproduced
+blocker, not accepted cross-install behaviour. Only the same-install scenario proves successful
+public export/import/restart. The legacy bundle test proves mapping bytes, not a usable session.

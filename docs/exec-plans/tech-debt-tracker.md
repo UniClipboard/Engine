@@ -25,3 +25,30 @@
 | 已完整接收目录的再次激活触发重复 pull 并存储失败 | 独立进程复现两次；冻结 main 可用性实现与当前一致 | Application 内容可用性负责人和 Infra 存储负责人统一目录完整性判断与重复接收结算；真实目录包含嵌套文件及空目录，首次物化后再次激活不重复拉取，缺失成员仍不得判定可用；不得仅把根目录存在当作成员完整 | [发现记录](../../.planning/2026-10-14-active-clipboard-connectivity/findings.md) |
 
 关闭项目时记录验证证据，更新稳定文档，并将对应计划移入 `completed/`。
+
+
+## Configuration import: lifecycle and upgrade-journal adoption
+
+Status: required acceptance gate for host configuration migration and Desktop task10.
+The defect exists on task7 final `0c57e1ab` and remains outside the task8 file-declaration change.
+
+`PrepareProfileStartupUseCase::execute` reads the target lifecycle before `apply_pending_import` and returns that cached lifecycle after import.
+The imported encrypted vault carries the source lifecycle and admission key.
+`AdmissionKeyManager` binds profile payloads to the lifecycle generation.
+A fresh target can therefore fail startup while reading the imported legacy current-Space payload.
+A second start can fail while reading the target's existing storage-upgrade journal with the imported key and generation.
+Both observed failures return 1101. The returned error supplies no Engine handle for `UnlockSpace` or `RecoverSession`.
+
+Synthetic runtime diagnosis opened the imported vault with the imported KEK.
+The admission key existed, and the imported key plus imported generation opened the current-Space payload.
+This evidence rejects the earlier missing-admission-key diagnosis.
+Do not add credentials to `secrets.json` as a workaround.
+
+Proposed repair, not implemented: give the import owner a complete profile-adoption transaction.
+After verified backup, adopt the imported vault and lifecycle before constructing generation-bound adapters.
+Reconcile existing target manifests and upgrade journals with that adoption instead of reusing journals under a different security context.
+Validate the required V3 state and preserve crash retry before clearing the import marker.
+Use the existing encrypted profile vault and KEK path; do not export raw independent keys or reset consent.
+A security review must verify that imported state cannot authorize deleting unrelated target state.
+Require a fresh-install and existing-install public export/import/restart matrix with failpoints before accepting the repair.
+The initial task8 evidence and reproducible E2E are retained in its thread library and `host_configuration_files_e2e.rs`.
