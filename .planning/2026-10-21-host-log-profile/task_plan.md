@@ -79,10 +79,10 @@ Facts found before any change:
 
 ## Phases
 
-- [ ] 1. Failure modes and plan (this file)
-- [ ] 2. Contract, Core, Application, Engine wiring
-- [ ] 3. Adapt existing checks, upgrade matrix, mobile probe
-- [ ] 4. Public E2E and artifacts
-- [ ] 5. Docs, downstream handoff
-- [ ] 6. Task7 old-anchor smoke investigation
+- [x] 1. Failure modes and plan (this file)
+- [x] 2. Contract, Core, Application, Engine wiring
+- [x] 3. Adapt existing checks, upgrade matrix, mobile probe
+- [x] 4. Public E2E and artifacts
+- [x] 5. Docs, downstream handoff
+- [x] 6. Task7 old-anchor smoke investigation (root cause found, smoke still NOT EXECUTED; see findings.md)
 - [ ] 7. Full checks on final immutable SHA
