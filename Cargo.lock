@@ -7408,6 +7408,7 @@ version = "1.1.0-rc.23"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bao-tree",
  "blake3",
  "bytes",
  "chrono",

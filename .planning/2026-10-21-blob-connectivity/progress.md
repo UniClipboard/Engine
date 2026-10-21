@@ -64,3 +64,16 @@
 - 最终检查完成：transfer 38 passed（0.02 秒）、metadata、workspace all-targets check、fmt、Rust style、repository preflight 与差异检查通过。旧向量脚本改为直接使用冻结 crate manifest，重跑 5.76 秒通过，fixture 字节未变化；首轮包选择器门禁失败保留。
 - 手工审查调度登记／预留 Drop／到期清除／关闭、授予时刻与恢复累计路径，均不扩大稳定入口或引入 schema。未安装 code-review skill，仍为手工审查。临时旧源码和矩阵进程均已结束回收；用户原有四个规划目录保留。
 - 当前仍未完成完整 spec：规则模块尚未接生产，旧 SDK Downloader、warmup、对端级取消与旧 provider 仍在；后续必须完成 phase 1 专属 port/资源策略、phase 2 实际迁移与监督、phase 3 部分结果和稳定重试/绑定、phase 4 删除旁路，以及 phase 5 全部必需验收。完整回归未在新规则 head 重跑，原符号化失败和平台/设备跳过记录保留。
+
+- 续接 ab3109fc 为 progress：已提交阶段 0 证据和阶段 1 调度／时间规则，当前工作区只保留用户原有四个规划目录。
+- 正在迁入 Application 专属 BlobExchangePort 与 Infra 唯一 SDK 实现，固定 SDK parser/encoder、不使用 Endpoint。成功结果携带不透明 TempTag／StreamWorkLease 保护，引用／输出结算后才释放。取消不丢 import 准备／完成等待，提供端排空同次 export。
+- SDK 源码盘点发现 into_byte_stream 的通道错误会映射为 EOF；提供端完成前补同一 store 状态核验与至少合法响应头的检查，具体故障覆盖仍须验证，不能仅据源码宣称异常路径完备。
+- 交换首轮 check 报 TempTag 的真实路径为 api::TempTag、AtConnected::new 首参为 std::time::Instant；已按固定源码修正，保留 exchange-first-check.log，继续定向编译。
+- 唯一 Infra 实现替代原型后，真实 Uni connectivity 4 项通过（0.25 秒），含当前生产准入与同内容取消隔离。SDK 暂停 import/export 的复合探针迁入同一 port 后通过（0.46 秒）；已删除 tests/support/blob_exchange.rs 重复算法，新增仅测试的预连接租约 fixture。
+- 新增具体网络错误白名单、显式 QUIC 流停止不重试、结算复合错误保留双来源及 Debug 隐私测试。合法空 blob 沿 SDK EMPTY 始终完整语义，不再 add_bytes 创建自动永久标签；扩展真实空／已有本地内容、未完整请求头取消与恰好到期探针，正在验证。
+- 二轮 check 暴露 SDK 的 n0_future::time::Instant 在当前平台实际为 Tokio Instant；已修正，保留 exchange-fixed-check.log。未修改固定 SDK 修订、ALPN 或线上编码。
+
+- BAO 长度辅助首轮 compile 暴露 private rec 模块及 ChunkNum 类型；改用公开最小树 + SDK 分组层数。扩展尾部范围用例又发现 16KiB 预期多出 192 字节，归一化末块尾部为开放范围后全部通过，exchange-size-check.log／exchange-size-expanded.log 均保留。
+- SDK worker 真实故障、来源不存在的空 FIN/SourceUnavailable、普通/空/本地已有内容、header 取消/期限都通过。SDK helper Drop 的隐式停止错误改由 IoCompletion 结算，header 已发送后注入 stop PermissionDenied，确认不能返回普通取消且原 IO source 可追溯。
+- 最终 reviewed nextest 11 passed、312 按过滤跳过（0.527 秒），metadata、workspace 全目标 check、fmt、Rust style、repository preflight 与差异检查通过。锁文件结构比对仅当前 Infra 增加既有 bao-tree 依赖边，全部来源/版本不变。
+- 已手工审查 SDK 完成等待、内容/工作保护、EOF 与响应长度、空数据、隐式停止失败、错误链和隐私；没有 code-review skill，不冒充技能审查。当前没有运行中的 Cargo 或网络矩阵工作；生产旧路径尚在，阶段 1/2 全部退出条件未满足，完整目标继续。

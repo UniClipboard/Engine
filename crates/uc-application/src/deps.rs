@@ -578,6 +578,11 @@ pub use crate::connectivity::{
     StreamLease, StreamPair, StreamWorkLease,
 };
 
+pub use crate::transfer::blob::transport::{
+    BlobExchangeError, BlobExchangeFailure, BlobExchangePort, BlobReceived, BlobRetainedContent,
+    BlobValidatedProgress,
+};
+
 pub use crate::space::{
     membership_history_purpose, HistoryConnectionRetentionPort, HistoryIncoming,
     HistoryLocalWorkPort, HistoryPeerBindingPort, HistoryReceiverPort, HistoryReply,

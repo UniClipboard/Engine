@@ -8,6 +8,7 @@ pub mod active_clipboard;
 mod addr_filter;
 mod admission_transport_material;
 pub mod admitted_connections;
+pub mod blob_exchange;
 pub mod blobs;
 mod conn_path;
 mod connect;

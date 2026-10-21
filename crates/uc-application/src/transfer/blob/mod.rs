@@ -11,6 +11,7 @@ pub(crate) mod facade;
 mod failure;
 mod fetch_blob;
 mod publish_blob;
+pub(crate) mod transport;
 
 pub(crate) use failure::fetch_failure_reason;
 pub(crate) use fetch_blob::{FetchBlobInput, FetchBlobPathInput, FetchBlobUseCase};

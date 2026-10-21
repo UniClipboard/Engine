@@ -40,7 +40,7 @@
 * [ ] 实现 spec §5.3 的容量、期限、退避和累计恢复计时；常量集中，只有一处事实来源。
 * [x] 公平调度按对端轮转，同端保序；入队与名额原子，取消等待者不启动后续工作。规则模块已验证，正式网络接线仍待后续阶段。
 * [ ] 明确额外共享等待者的有界计数，实际工作结束前保留活跃许可；恢复等待不另建隐形队列。
-* [ ] 按实际 SDK 接缝补充最小通用流停止能力与 Application 专属交换 port；不暴露 Iroh 类型或 downcast。
+* [x] 按实际 SDK 接缝补充最小通用流停止能力与 Application 专属交换 port；不暴露 Iroh 类型或 downcast。唯一 SDK 实现已由真实 Uni／SDK 探针使用，业务组装仍待后续阶段。
 * [ ] 构造独立 blob Uni policy，提供端与本地下载分别限额；复用现有身份目录和统一撤销登记。
 * [ ] 使用可控时钟及第二 backend 验证所有恰好到期、并发、关闭与额度边界。
 
@@ -201,3 +201,27 @@ ReceiveTiming 覆盖首次 60 秒、有效新增数据 300 秒停滞、累计恢
 repository preflight 和差异检查通过。提交后包选择器门禁发现旧向量脚本仍使用已拆分包的 -p 名称，
 改为直接指定冻结 crate manifest，重跑旧向量生成（5.76 秒）及门禁通过，fixture 字节未变；
 首轮失败日志保留。code-review 技能缺失，按手工差异审查记录；完整 workspace 与最终平台 CI 本轮未重跑。
+
+### 2026-10-21 专属 SDK 交换能力
+
+新增 Application `transfer/blob/transport` 的完整交换 port 与不透明结果保护；Infra
+`network/iroh/blob_exchange` 是唯一手动驱动 SDK 的实现，只接收已准入 Uni 租约，
+没有 Endpoint、自拨或业务重试。原 tests/support 交换算法已删除，真实 Uni 双流、
+同内容隔离及暂停 import／export 探针均调用同一实现。成功结果继续持有 TempTag 与
+StreamWorkLease，后续引用／输出结算完成后才允许释放。请求头、tag 准备、数据交换和
+import／export 结算都处理取消，析构兜底停止的失败也回收到同一结果，不按取消成功吞掉。
+
+提供端不把 SDK 字节流 EOF 单独视为完成：使用 SDK 同源 BAO 遍历器核对完整响应长度，
+并核对本地状态；编码继续由 SDK export 完成。真实 SDK export worker 故障注入已证明
+不会报告完成。稀疏与越过末尾范围的首轮长度差异已修复为与 SDK 一致的尾部归一化，
+失败日志保留。直接引用的 bao-tree 已存在于原锁文件，只新增当前 crate 的依赖边，
+全部依赖版本／来源与 SDK 修订不变。
+
+最终 nextest 定向 11／11 通过（0.527 秒，312 项按过滤跳过），包含旧协议向量、真实 Uni
+不同／相同内容取消、SDK 工作结算、空文件及本地已有内容、请求头取消／到期、来源不存在、
+隐式停止失败来源、网络重试分类与 SDK worker 故障。metadata、workspace 全目标 check、fmt、
+Rust style、repository preflight 与差异检查通过。没有据此勾选完整 Engine 收发或阶段 5。
+
+生产仍使用旧 BlobTransferFacade／Downloader／provider；下一步为完整 Application 监督 owner、
+独立 blob Uni 的连接与服务资源策略、实际获取／提供接线及删除旧路径。稳定重试、部分失败、
+绑定、生命周期和最终矩阵继续按原 spec 执行。

@@ -95,6 +95,8 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 postcard = { version = "1", features = ["use-std"] }
 bytes = "1.7"
+# 复用固定 SDK 已使用的 BAO 遍历器核对响应长度，不另写字节编码。
+bao-tree = "0.16.0"
 
 [dependencies.uuid]
 version = "1.10.0"

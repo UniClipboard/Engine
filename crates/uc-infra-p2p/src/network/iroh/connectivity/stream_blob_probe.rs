@@ -1,18 +1,11 @@
 //! 固定 SDK 与真实 Uni 租约的最小交换证明；成员授权由后续身份矩阵另证。
-#[path = "../../../../tests/support/blob_exchange.rs"]
-mod exchange;
-
 use super::super::{ConnectivityProfile, IrohConnectionAdmission, IrohPeerConnection};
 use crate::network::iroh::admitted_connections::AdmittedConnections;
+use crate::network::iroh::blob_exchange::IrohBlobExchangeAdapter;
 use async_trait::async_trait;
-use bytes::Bytes;
 use futures_util::task::AtomicWaker;
-use iroh::endpoint::VarInt;
 use iroh::{Endpoint, RelayMode};
-use iroh_blobs::util::{AsyncReadRecvStream, AsyncReadRecvStreamExtra, SendStream};
-use iroh_blobs::{
-    get::StreamPair as GetPair, provider::StreamPair as ProvidePair, store::fs::FsStore,
-};
+use iroh_blobs::store::fs::FsStore;
 use iroh_blobs::{ticket::BlobTicket, BlobFormat};
 use iroh_tickets::Ticket;
 use std::error::Error;
@@ -24,19 +17,20 @@ use std::sync::{
 };
 use std::task::{Context, Poll};
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncWriteExt, ReadBuf};
+use tokio::io::{AsyncRead, ReadBuf};
 use tokio::sync::Notify;
 use tokio::time::{timeout, Instant};
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
-    ConnectivityBackend, ConnectivityError, ConnectivityManager, ConnectivityPolicy,
-    KnownPeerIdentity, MembershipLedgerError, PeerConnection, PeerIdentityDirectoryPort,
-    PeerReceiveStream, PeerSendStream, SessionConnectionAdmissionPort, StreamLease,
-    StreamWorkLease,
+    BlobExchangeError, BlobExchangePort, BlobValidatedProgress, ConnectivityBackend,
+    ConnectivityError, ConnectivityManager, ConnectivityPolicy, KnownPeerIdentity,
+    MembershipLedgerError, PeerConnection, PeerIdentityDirectoryPort, PeerReceiveStream,
+    SessionConnectionAdmissionPort, StreamLease,
 };
 use uc_core::error_class::ErrorClass;
 use uc_core::ids::DeviceId;
 use uc_core::membership::{PeerAdmissionError, PeerAdmissionPort};
+use uc_core::ports::blob::BlobDigest;
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory;
 
@@ -73,40 +67,10 @@ impl PeerAdmissionPort for Members {
             && self.identities.iter().any(|row| row.device_id == *peer))
     }
 }
-struct SdkSend {
-    stream: Box<dyn PeerSendStream>,
-    finished: bool,
-}
-impl SendStream for SdkSend {
-    async fn send_bytes(&mut self, bytes: Bytes) -> io::Result<()> {
-        self.stream.write_all(&bytes).await
-    }
-    async fn send(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.stream.write_all(bytes).await
-    }
-    async fn sync(&mut self) -> io::Result<()> {
-        self.stream.flush().await?;
-        self.stream.finish().map_err(io::Error::other)?;
-        self.finished = true;
+struct Progress;
+impl BlobValidatedProgress for Progress {
+    fn validated_through(&self, _: u64, _: u64) -> Result<(), BlobExchangeError> {
         Ok(())
-    }
-    fn reset(&mut self, code: VarInt) -> io::Result<()> {
-        self.finished = true;
-        self.stream.reset(u64::from(code)).map_err(io::Error::other)
-    }
-    async fn stopped(&mut self) -> io::Result<Option<VarInt>> {
-        self.stream.settled().await.map_err(io::Error::other)?;
-        Ok(None)
-    }
-    fn id(&self) -> u64 {
-        self.stream.id()
-    }
-}
-impl Drop for SdkSend {
-    fn drop(&mut self) {
-        if !self.finished {
-            let _ = self.stream.reset(0);
-        }
     }
 }
 #[derive(Default)]
@@ -148,41 +112,22 @@ impl AsyncRead for Receive {
         result
     }
 }
-impl AsyncReadRecvStreamExtra for Receive {
-    fn inner(&mut self) -> &mut (impl AsyncRead + Unpin + Send) {
-        self
-    }
-    fn stop(&mut self, code: VarInt) -> io::Result<()> {
-        self.stream.stop(u64::from(code)).map_err(io::Error::other)
+impl PeerReceiveStream for Receive {
+    fn stop(&mut self, code: u64) -> Result<(), ConnectivityError> {
+        self.stream.stop(code)
     }
     fn id(&self) -> u64 {
         self.stream.id()
     }
 }
-impl Drop for Receive {
-    fn drop(&mut self) {
-        let _ = self.stream.stop(0);
-    }
-}
-fn split(
-    stream: StreamLease,
-    pause: Option<Arc<Pause>>,
-) -> (SdkSend, AsyncReadRecvStream<Receive>, StreamWorkLease) {
-    let ((send, receive), work) = stream.into_parts();
-    let limit = pause.as_ref().map(|_| 64 * 1024);
-    (
-        SdkSend {
-            stream: send,
-            finished: false,
-        },
-        AsyncReadRecvStream::new(Receive {
-            stream: receive,
-            read: 0,
-            limit,
-            paused: pause.unwrap_or_else(|| Arc::new(Pause::default())),
-        }),
-        work,
-    )
+fn paused(mut stream: StreamLease, pause: Arc<Pause>) -> StreamLease {
+    stream.receive = Box::new(Receive {
+        stream: stream.receive,
+        read: 0,
+        limit: Some(64 * 1024),
+        paused: pause,
+    });
+    stream
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -294,26 +239,21 @@ async fn prove_isolation(same_content: bool) -> anyhow::Result<()> {
     let stop = cancel.clone();
     let saved = destination.clone();
     let get_a = tokio::spawn(async move {
-        let (send, receive, _work) = split(stream_a, Some(paused));
-        exchange::get(
-            saved,
-            GetPair::new(0, receive, send),
-            tag.hash,
-            stop,
-            Arc::new(Notify::new()),
-        )
-        .await
+        IrohBlobExchangeAdapter::new(saved)
+            .receive(
+                self::paused(stream_a, paused),
+                BlobDigest::from_bytes(*tag.hash.as_bytes()),
+                stop,
+                Arc::new(Progress),
+            )
+            .await
     });
     let stream_a = remote.accept_bi().await?;
     let providing_a = source.clone();
     let serve_a = tokio::spawn(async move {
-        let (send, receive, _work) = split(stream_a, None);
-        exchange::provide(
-            providing_a,
-            ProvidePair::new(0, receive, send, Default::default()),
-            CancellationToken::new(),
-        )
-        .await
+        IrohBlobExchangeAdapter::new(providing_a)
+            .provide(stream_a, Instant::now() + BUDGET, CancellationToken::new())
+            .await
     });
     timeout(BUDGET, pause_a.entered.notified()).await?;
     let bytes = vec![if same_content { 41 } else { 71 }; 4 * 1024 * 1024];
@@ -326,26 +266,21 @@ async fn prove_isolation(same_content: bool) -> anyhow::Result<()> {
     let pause_b = Arc::new(Pause::default());
     let paused = pause_b.clone();
     let get_b = tokio::spawn(async move {
-        let (send, receive, _work) = split(stream_b, Some(paused));
-        exchange::get(
-            saved,
-            GetPair::new(0, receive, send),
-            sibling.hash,
-            CancellationToken::new(),
-            Arc::new(Notify::new()),
-        )
-        .await
+        IrohBlobExchangeAdapter::new(saved)
+            .receive(
+                self::paused(stream_b, paused),
+                BlobDigest::from_bytes(*sibling.hash.as_bytes()),
+                CancellationToken::new(),
+                Arc::new(Progress),
+            )
+            .await
     });
     let stream_b = remote.accept_bi().await?;
     let providing_b = source.clone();
     let serve_b = tokio::spawn(async move {
-        let (send, receive, _work) = split(stream_b, None);
-        exchange::provide(
-            providing_b,
-            ProvidePair::new(0, receive, send, Default::default()),
-            CancellationToken::new(),
-        )
-        .await
+        IrohBlobExchangeAdapter::new(providing_b)
+            .provide(stream_b, Instant::now() + BUDGET, CancellationToken::new())
+            .await
     });
     if !same_content {
         timeout(BUDGET, pause_b.entered.notified()).await?;
@@ -361,11 +296,13 @@ async fn prove_isolation(same_content: bool) -> anyhow::Result<()> {
     }
     pause_b.release();
     timeout(BUDGET, serve_b).await???;
-    timeout(BUDGET, get_b).await???;
+    let completed = timeout(BUDGET, get_b).await???;
+    assert_eq!(completed.size, bytes.len() as u64);
     assert_eq!(
         destination.blobs().get_bytes(sibling.hash).await?.as_ref(),
         bytes
     );
+    drop(completed);
     assert!(native_client.close_reason().is_none());
     // ticket 仍合法且来源内容仍在；当前成员撤销与会话代次决定授权。
     let ticket = BlobTicket::new(server.addr(), sibling.hash, BlobFormat::Raw).encode_bytes();

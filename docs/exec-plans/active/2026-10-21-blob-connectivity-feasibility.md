@@ -185,3 +185,35 @@ just cargo test -p uc-infra-p2p --test blob_protocol_vectors --locked
 
 阶段 0 技术前置完成。生产 owner、容量与期限、自动恢复、取消通知背压、部分失败、稳定重试与绑定、
 最终矩阵／完整回归／平台 CI 仍未实现或未执行，不能据此宣称完整 spec 完成。
+
+## 阶段 1：原型采用为唯一 SDK 交换能力
+
+原 `tests/support/blob_exchange.rs` 已删除。Application 的专属 port 位于
+[`transfer/blob/transport`](../../../crates/uc-application/src/transfer/blob/transport/)，
+Infra 实现位于 [`blob_exchange`](../../../crates/uc-infra-p2p/src/network/iroh/blob_exchange/)。
+原 Uni 与 SDK 工作探针改用这一份实现；integration 预连接 fixture 仅用于 SDK 工作证明，
+真实原生 bridge／当前成员准入仍由既有 Uni 单元探针验证，不能混同为完整 Engine 组装。
+
+固定 SDK 的 into_byte_stream 会把通道异常映射为 EOF，不能只据流结束报告成功。
+采用其同源 BAO 遍历器核对期望响应长度与实际输出，再核对同一 store 状态；仍由原
+SDK export 编码，不新增线上帧。尾部范围归一化首轮失败（16KiB 用例的长度不一致）已保留，
+修复后空／完整／稀疏／越过末尾范围与真实 SDK 字节数量一致。锁文件只增加当前 Infra crate
+到既有 bao-tree 的依赖边，没有更新任何包、SDK 来源或版本。
+
+SDK export worker 的真实故障注入、未完整请求头的取消／恰好到期、来源不存在的原协议空 FIN、
+本地已有内容、合法空内容无新增永久标签均已验证。流析构的停止失败会被收集到交换结算结果，
+实际请求已送出且响应头未到达时注入 stop 权限失败，证明没有伪报取消成功，并可追溯原始 IO 来源。
+下载网络错误或取消仍等待独立 import receiver，提供端停止自身网络后仍排空同次 export。
+
+最终命令及结果：
+
+```bash
+just cargo nextest run --locked -p uc-infra-p2p --lib \
+  --test blob_connectivity_feasibility --test blob_protocol_vectors \
+  -E '(kind(lib) & (test(network::iroh::blob_exchange) | test(network::iroh::connectivity))) | binary(blob_connectivity_feasibility) | binary(blob_protocol_vectors)'
+```
+
+11 passed、312 项按过滤跳过，0.527 秒；本轮根门禁通过。原 SDK 高层失败、首轮编译错误、
+响应长度失败与最终结果均保留在忽略日志中。新 port 的成功结果持有内容与工作保护，
+但当前生产 facade／Router 尚未使用它；完整 owner、预算接线、独立资源池与生命周期仍待实施。
+完整 workspace、最终新路径旧端矩阵、资源连续运行、平台 CI 与设备未重跑，不能视为 spec 完成。

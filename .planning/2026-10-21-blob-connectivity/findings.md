@@ -21,3 +21,9 @@
 - 现有 SDK fetch/fetch_to_path 的 TempTag 只覆盖 adapter 方法，到永久 tag 还有微小窗口；新交换结果须保留 store 保护，直到引用/输出/tag 必要结算，不复制“理论窗口可忽略”的旧理由。
 - 现有 Uni policy 的 incoming 非 presence 默认取 waiters_per_session，accept 以连接为单位占该许可；accept_bi 默认先等许可再取流。blob 的未知入站 16、交换 4/2、每方向一条连接且退出未完成仍占名额须独立落实，不能仅设置现有几个数字就宣称满足。也不能保留第二份原生连接缓存。
 - 下一步：Application transfer/blob/transport 的专属完整交换 port；仅接收已准入 Uni StreamLease，SDK/BAO/store 留在 Infra。下载及提供都必须监督准备、import/export 与输出，取消/超时发送停止意图后继续 join，不丢弃 SDK future。采用时迁走并删除 tests/support/blob_exchange.rs 原型副本；生产仍旧，阶段 2–4 全部待完成。
+
+- 本轮已实现 Application BlobExchangePort 与 Infra IrohBlobExchangeAdapter，前者只有 Uni StreamLease/内容身份/取消上下文，后者只有 FsStore。接收保留独立 import rx，提供取消后排空 export，成功 receipt 保留 TempTag + StreamWorkLease；tests/support/blob_exchange.rs 已删除，旧探针全部调用同一实现。
+- SDK into_byte_stream 把通道异常隐藏为 EOF；不能只查 store 状态／至少 8 字节。现在用 SDK 同源 bao-tree 遍历器的预期长度 + 实际长度 + store 状态判定完整响应，编码仍是 SDK。直接 bao-tree 仅新增已有锁版本依赖边。公共遍历须按 SDK 组层数压缩，并把触及／超过末块的尾部归一化为开放范围；首轮 16KiB 稀疏用例曾差 192 字节，修复后全部比较通过。
+- 停止错误不能只在显式 cancel 分支捕获：SDK 准备／请求头 future 被取消时可能通过 Drop 停止半流。IoCompletion 最多收集两半流各一项兜底失败，真实 header 等待时注入 stop 权限失败已证明保留 IO source，不能返回普通 Cancelled。
+- SDK helper 成功不等于业务完成；当前 production facade/Router 仍旧。下一步必须把全局 DownloadPermit 移入受监督的完整工作任务，覆盖网络、输出、引用与所需结算；调用方取消等待不丢任务，5 秒只结束等待，通知非阻塞。还需 ticket 来源解析／当前身份映射、独立 manager 方向名额／入站资源与 30 秒空闲、生命周期及实际 Node/Engine 接线。
+- 后续调度接线要特别处理撤销基线：现有 ConnectivityManager.connect_with_cancel 在自身排队前 begin(target)，但 blob 的 DownloadScheduler 在它外部。必须在逻辑请求接受／外部排队之前冻结同一准入基线，并贯穿复用、开流和提交；不能等拿到下载名额后才取新 epoch，导致排队旧任务在撤销／重新加入后复活。
