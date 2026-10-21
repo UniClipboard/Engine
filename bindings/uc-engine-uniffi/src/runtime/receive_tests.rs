@@ -1,7 +1,10 @@
-use super::map_receive_progress;
+use super::{
+    map_entry_receive_cancellation, map_inbound_transfer_cancellation, map_receive_progress,
+};
+use crate::BindingError;
 use uc_engine::{
-    OperationResult, ReceiveItemFailureReason, ReceiveItemKind, ReceiveItemSummary,
-    ReceiveProgressSummary,
+    EntryReceiveCancellationOutcome, InboundTransferCancellationOutcome, OperationResult,
+    ReceiveItemFailureReason, ReceiveItemKind, ReceiveItemSummary, ReceiveProgressSummary,
 };
 
 #[test]
@@ -36,4 +39,40 @@ fn receive_mapping_keeps_exact_counts_and_engine_vocabulary() {
             .unwrap()
             .is_none()
     );
+}
+
+#[test]
+fn cancellation_mapping_keeps_incomplete_distinct_from_cancelled_and_not_inflight() {
+    assert_eq!(
+        map_entry_receive_cancellation(OperationResult::EntryReceiveCancellation(
+            EntryReceiveCancellationOutcome::CancellationIncomplete
+        ))
+        .unwrap(),
+        "cancellation_incomplete"
+    );
+    assert_eq!(
+        map_entry_receive_cancellation(OperationResult::EntryReceiveCancellation(
+            EntryReceiveCancellationOutcome::Cancelled
+        ))
+        .unwrap(),
+        "cancelled"
+    );
+    assert_eq!(
+        map_inbound_transfer_cancellation(OperationResult::InboundTransferCancellation(
+            InboundTransferCancellationOutcome::CancellationIncomplete
+        ))
+        .unwrap(),
+        "cancellation_incomplete"
+    );
+    assert_eq!(
+        map_inbound_transfer_cancellation(OperationResult::InboundTransferCancellation(
+            InboundTransferCancellationOutcome::NotInflight
+        ))
+        .unwrap(),
+        "not_inflight"
+    );
+    assert!(matches!(
+        map_entry_receive_cancellation(OperationResult::EntryReceiveProgress(None)),
+        Err(BindingError::UnexpectedResult)
+    ));
 }

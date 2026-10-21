@@ -1,6 +1,7 @@
 use crate::transfer::receive::work::ReceiveWorkRegistry;
 use std::sync::{Arc, Mutex};
 
+mod directory_failure;
 mod item_results;
 mod lifecycle;
 mod receive_work;

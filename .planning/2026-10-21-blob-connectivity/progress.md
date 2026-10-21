@@ -177,3 +177,8 @@
 - 最终Engine公开契约50通过（0.017秒），两绑定lib63通过（0.218秒），SQLite契约13通过（0.225秒）；workspace全目标check通过（1m21s）。当前持久项查询和绑定查询作为完整重试的一部分交付，不将其当作完整业务项结果；真实owner结算／原资料和未启动项合并、RetryEntryReceive、取消绑定与生命周期／许可／最终矩阵仍待继续。实际平台设备未执行，不记为通过。
 
 - 上一目标轮仅核实并回答当前问题，归为 no progress；本轮重新核对实际差异与最终日志，确认查询切片 Engine 契约50、绑定63、SQLite13及workspace全目标检查通过。LAN facade 未按feature隐藏，默认workspace检查已覆盖本轮新增字段。手工审查类型来源、固定错误词表、旧JSON兼容、绑定字节精度、查询负责人及既有持久字段更新；code-review skill不可用，不冒充技能审查。完整逐项最终结果／重试仍未完成，保持原目标。
+
+- 查询与角色／绑定切片已提交683ce622。后续目录表示错误来源回归首轮因测试导入私有未导出的helper编译失败，改为从实际错误链判断取消；随后原实现真实失败于原始类型不可达（directory-source-red-fixed.log）。修复目录表示失败／取消直接带原始来源返回，目录获取和发布均不启动，两个定向回归通过（0.030秒）。
+- 取消绑定切片：UniFFI与N-API各增加整attempt和单项用户取消入口，分别只调用一个现有Engine操作，单项固定LocalUser；输出由Engine wire_enum的Display派生，保留cancellation_incomplete／not_inflight等区别。不增加业务步骤查询，实际清理和重试仍归原receive负责人。正在验证当前候选，不提前记为通过。
+
+- 最终候选取消绑定lib64通过（0.217秒），Application全库1176通过／1跳过（3.891秒），Engine公开契约50通过（0.018秒），workspace全目标check通过（1m26s）。metadata JSON已解析，fmt、Rust style、repository preflight、官方观测1369站点清单、变更Markdown无新增失效链接及diff检查通过。手工审查绑定只交接完整操作、LocalUser固定输入、五秒未完成不归并及目录原始来源／无发布边界；code-review skill不可用。未执行完整workspace测试、网络或真机矩阵，不标通过；原profile诊断失败仍待最终结案。

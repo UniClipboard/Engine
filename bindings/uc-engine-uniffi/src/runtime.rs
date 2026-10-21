@@ -12,15 +12,16 @@ use uc_engine::observability::{
     AnalyticsPort, DeviceType, Event, GroupIdentifyPayload, IdentifyPayload, Os, ReleaseOutcome,
 };
 use uc_engine::{
-    ChangeEncryptionPassphraseInput, ClipboardRestoreMode, ClipboardRestoreOutcome,
-    CreateSpaceInput, CustomRelayMutation, CustomRelayMutationOutcome, CustomRelayRejection,
-    Engine, EngineConfig, EntryReceiveProgressInput, ExportEntryInput, HostCapabilities,
-    HostCapabilityError, HostCapabilityErrorCategory, HostClipboard, HostClipboardRepresentation,
-    HostClipboardSnapshot, HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata,
-    HostSecureStorage, JoinSpaceInput, ObserveClipboardChangeInput, Operation, OperationResult,
+    CancelEntryReceiveInput, CancelInboundTransferInput, ChangeEncryptionPassphraseInput,
+    ClipboardRestoreMode, ClipboardRestoreOutcome, CreateSpaceInput, CustomRelayMutation,
+    CustomRelayMutationOutcome, CustomRelayRejection, Engine, EngineConfig,
+    EntryReceiveProgressInput, ExportEntryInput, HostCapabilities, HostCapabilityError,
+    HostCapabilityErrorCategory, HostClipboard, HostClipboardRepresentation, HostClipboardSnapshot,
+    HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata, HostSecureStorage,
+    JoinSpaceInput, ObserveClipboardChangeInput, Operation, OperationResult,
     ReceiveProgressSummary, RecoverSessionInput, RemoveMemberInput, ResendEntryInput,
     RestoreClipboardInput, SecretString, SendFilesInput, SendImageInput, SendTextInput,
-    StartupLifecycleInput, StartupProgress,
+    StartupLifecycleInput, StartupProgress, TransferCancellationReason,
 };
 use zeroize::Zeroizing;
 
@@ -701,6 +702,15 @@ enum WorkerCommand {
         entry_id: String,
         mode: BindingClipboardRestoreMode,
         response: mpsc::Sender<Result<BindingClipboardRestoreOutcome, BindingError>>,
+    },
+    CancelEntryReceive {
+        entry_id: String,
+        attempt_id: String,
+        response: mpsc::Sender<Result<String, BindingError>>,
+    },
+    CancelInboundTransfer {
+        transfer_id: String,
+        response: mpsc::Sender<Result<String, BindingError>>,
     },
     QueryEntryReceiveProgress {
         entry_id: String,
@@ -1448,6 +1458,27 @@ impl MobileEngine {
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
+    /// 用户取消整个接收尝试；仍在收尾时返回 cancellation_incomplete。
+    pub fn cancel_entry_receive(
+        &self,
+        entry_id: String,
+        attempt_id: String,
+    ) -> Result<String, BindingError> {
+        self.request(|response| WorkerCommand::CancelEntryReceive {
+            entry_id,
+            attempt_id,
+            response,
+        })
+    }
+
+    /// 用户主动取消单项；固定使用 LocalUser 原因。
+    pub fn cancel_inbound_transfer(&self, transfer_id: String) -> Result<String, BindingError> {
+        self.request(|response| WorkerCommand::CancelInboundTransfer {
+            transfer_id,
+            response,
+        })
+    }
+
     pub fn query_entry_receive_progress(
         &self,
         entry_id: String,
@@ -2031,6 +2062,37 @@ async fn run_operations(
                     .await
                     .map_err(BindingError::from)
                     .and_then(map_clipboard_restored);
+                let _ = response.send(result);
+            }
+            WorkerCommand::CancelEntryReceive {
+                entry_id,
+                attempt_id,
+                response,
+            } => {
+                let result = engine
+                    .execute(Operation::CancelEntryReceive(CancelEntryReceiveInput {
+                        entry_id,
+                        attempt_id,
+                    }))
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(map_entry_receive_cancellation);
+                let _ = response.send(result);
+            }
+            WorkerCommand::CancelInboundTransfer {
+                transfer_id,
+                response,
+            } => {
+                let result = engine
+                    .execute(Operation::CancelInboundTransfer(
+                        CancelInboundTransferInput {
+                            transfer_id,
+                            reason: TransferCancellationReason::LocalUser,
+                        },
+                    ))
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(map_inbound_transfer_cancellation);
                 let _ = response.send(result);
             }
             WorkerCommand::QueryEntryReceiveProgress { entry_id, response } => {
@@ -2799,6 +2861,13 @@ fn receive_progress(progress: ReceiveProgressSummary) -> ReceiveProgress {
             .collect(),
     }
 }
+fn map_entry_receive_cancellation(result: OperationResult) -> Result<String, BindingError> {
+    unpack_operation!(result, OperationResult::EntryReceiveCancellation(outcome) => outcome.to_string())
+}
+fn map_inbound_transfer_cancellation(result: OperationResult) -> Result<String, BindingError> {
+    unpack_operation!(result, OperationResult::InboundTransferCancellation(outcome) => outcome.to_string())
+}
+
 fn map_receive_progress(result: OperationResult) -> Result<Option<ReceiveProgress>, BindingError> {
     unpack_operation!(result, OperationResult::EntryReceiveProgress(progress) => progress.map(receive_progress))
 }

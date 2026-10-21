@@ -354,6 +354,17 @@ wire_enum! {
     }
 }
 
+impl fmt::Display for EntryReceiveCancellationOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.wire())
+    }
+}
+impl fmt::Display for InboundTransferCancellationOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.wire())
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ClipboardRestoreOutcome {

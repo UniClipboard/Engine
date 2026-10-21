@@ -79,6 +79,8 @@ Blob 的完整提供端由 Application `transfer/blob/transport/runtime` 负责�
 类型使用已有 `item_role`，资料缺失明确为 unknown，不从文件名或任务 ID 猜测；原因仅为固定分类，
 不读取密文元数据正文来拼接公开错误。成员数据完成但 attempt 尚未结算时，项仍显示接收中。
 UniFFI 和 N-API 提供单条查询与进行中列表；N-API 的字节数使用十进制整数串，避免精度损失。
+两套绑定也提供整条目／attempt取消与单项用户取消，直接映射同版本 Engine 操作；
+`cancellation_incomplete` 明确表示原负责人仍在结算，不能按已取消或不在途处理。
 完整原始清单、未启动项和真实保存结果的合并状态仍以当前执行计划为准。
 
 bridge 对出站连接在握手后订阅既有确认离线事件；已排队的 Offline 即便随后 Online，获取租约及原生开流前仍同步判旧连接失效；后台观察同时推进同步游标，其他 peer 的健康事件不积压成假失活。消息尚未发送时，准入后已确认失活的连接最多更新一次，仍用原准入快照和原 deadline；迟到共同结果已关闭时有界重新获取，不重发已写出的内容。manager 的原 JoinSet 监督连接结束并在 shutdown join，监督只持原生能力，不保活租约。Offline/Lagged 关闭本条连接，不推进成员 epoch、不复用 presence 连接、不自行重发内容；明确不可达的网络 I/O 返回原 Offline，本地授权来源保持 Io source。

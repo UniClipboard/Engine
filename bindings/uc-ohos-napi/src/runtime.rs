@@ -7,13 +7,15 @@ use napi::Status;
 use napi_derive::napi;
 use uc_engine::observability::uc_warn;
 use uc_engine::{
-    CancelJoinSpaceInput, ChangeEncryptionPassphraseInput, ChooseDeviceGroupInput,
-    ClipboardRestoreMode, ClipboardRestoreOutcome, CreateSpaceInput, Engine, EngineConfig,
-    EngineError, EngineEvent, EngineState, EntryReceiveProgressInput, EventStream,
-    ExportEntryInput, HostFileHandle, InvitationAvailability, JoinSpaceInput, Operation,
-    OperationResult, OperationTerminal, ReceiveProgressSummary, RecoverSessionInput, RefreshReason,
-    RemoveMemberInput, RestoreClipboardInput, SecretString, SendFilesInput, SendImageInput,
-    SendReportSummary, SendTextInput, StartupLifecycle, StartupLifecycleInput, StartupProgress,
+    CancelEntryReceiveInput, CancelInboundTransferInput, CancelJoinSpaceInput,
+    ChangeEncryptionPassphraseInput, ChooseDeviceGroupInput, ClipboardRestoreMode,
+    ClipboardRestoreOutcome, CreateSpaceInput, Engine, EngineConfig, EngineError, EngineEvent,
+    EngineState, EntryReceiveProgressInput, EventStream, ExportEntryInput, HostFileHandle,
+    InvitationAvailability, JoinSpaceInput, Operation, OperationResult, OperationTerminal,
+    ReceiveProgressSummary, RecoverSessionInput, RefreshReason, RemoveMemberInput,
+    RestoreClipboardInput, SecretString, SendFilesInput, SendImageInput, SendReportSummary,
+    SendTextInput, StartupLifecycle, StartupLifecycleInput, StartupProgress,
+    TransferCancellationReason,
 };
 use zeroize::Zeroizing;
 
@@ -466,6 +468,46 @@ impl OhEngine {
             .map_err(engine_error)?;
         match result {
             OperationResult::ClipboardCaptured { entry_id } => Ok(entry_id),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    /// 用户取消整个接收尝试；保留 Engine 的明确结果。
+    #[napi]
+    pub async fn cancel_entry_receive(
+        &self,
+        entry_id: String,
+        attempt_id: String,
+    ) -> napi::Result<String> {
+        match self
+            .engine
+            .execute(Operation::CancelEntryReceive(CancelEntryReceiveInput {
+                entry_id,
+                attempt_id,
+            }))
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::EntryReceiveCancellation(outcome) => Ok(outcome.to_string()),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    /// 用户主动取消单项；固定使用 LocalUser 原因。
+    #[napi]
+    pub async fn cancel_inbound_transfer(&self, transfer_id: String) -> napi::Result<String> {
+        match self
+            .engine
+            .execute(Operation::CancelInboundTransfer(
+                CancelInboundTransferInput {
+                    transfer_id,
+                    reason: TransferCancellationReason::LocalUser,
+                },
+            ))
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::InboundTransferCancellation(outcome) => Ok(outcome.to_string()),
             _ => Err(unexpected_result()),
         }
     }

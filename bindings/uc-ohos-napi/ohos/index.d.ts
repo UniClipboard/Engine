@@ -281,6 +281,10 @@ export interface OhEngine {
   querySharedDeviceRefresh(requestId: string): Promise<OhSharedDeviceRefresh | null>
   removeMember(deviceId: string): Promise<OhMemberRemoval>
   queryMemberRemoval(): Promise<OhMemberRemoval>
+  /** 取消整个接收尝试；cancellation_incomplete 表示实际清理仍在进行。 */
+  cancelEntryReceive(entryId: string, attemptId: string): Promise<string>
+  /** 用户主动取消单项；cancellation_incomplete 不等于已取消。 */
+  cancelInboundTransfer(transferId: string): Promise<string>
   queryEntryReceiveProgress(entryId: string): Promise<OhReceiveProgress | null>
   listEntryReceiveProgress(): Promise<OhReceiveProgress[]>
   queryActiveClipboard(): Promise<OhActiveClipboard | null>

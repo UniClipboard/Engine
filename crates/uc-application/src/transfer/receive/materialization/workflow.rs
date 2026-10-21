@@ -650,6 +650,9 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
             .collect::<Result<Vec<_>>>()?;
         for (loop_idx, blob_ref) in rep_refs.into_iter().enumerate() {
             if cancellation.is_cancelled() {
+                if file_set_manifest.is_some() {
+                    return Err(BlobTransferError::Cancelled.into());
+                }
                 incomplete_rep_idxs.extend(pending_rep_idxs[loop_idx..].iter().copied());
                 partial = true;
                 partial_outcome = MaterializeOutcome::PartialCancelled;
@@ -699,6 +702,17 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                         representation_index = idx,
                         "materialize: representation-bound blob fetch cancelled, marking partial"
                     );
+                    if file_set_manifest.is_some() {
+                        batch.item_result(
+                            &item_id,
+                            0,
+                            OutboundProgressStatus::Cancelled {
+                                reason: FileTransferCancellationReason::LocalUser,
+                            },
+                            None,
+                        );
+                        return Err(e.context("fetch directory representation"));
+                    }
                     incomplete_rep_idxs.extend(pending_rep_idxs[loop_idx..].iter().copied());
                     batch.item_result(
                         &item_id,
@@ -721,6 +735,10 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                         io_error_kind = io_error_kind(e.as_ref()),
                         "materialize: representation-bound blob fetch failed, marking partial"
                     );
+                    if file_set_manifest.is_some() {
+                        batch.item_result(&item_id, 0, OutboundProgressStatus::Failed, None);
+                        return Err(e.context("fetch directory representation"));
+                    }
                     incomplete_rep_idxs.extend(pending_rep_idxs[loop_idx..].iter().copied());
                     batch.item_result(&item_id, 0, OutboundProgressStatus::Failed, Some(e));
                     item_failed = true;
@@ -753,15 +771,6 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
             );
         }
 
-        // Rep-refs stage partial (cancel or error): skip all file_refs fetches,
-        // mark them missing, finalize via the partial path.
-        if partial && file_set_manifest.is_some() {
-            return if partial_outcome == MaterializeOutcome::PartialCancelled {
-                Err(BlobTransferError::Cancelled.into())
-            } else {
-                Err(anyhow!("directory representation blob fetch failed"))
-            };
-        }
         if file_refs.is_empty() && file_set_manifest.is_none() {
             return if partial {
                 Ok(finalize_partial(

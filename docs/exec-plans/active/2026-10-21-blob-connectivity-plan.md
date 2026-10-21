@@ -464,7 +464,7 @@ Application1175通过／1跳过（3.815秒），Engine公开契约50通过（0.0
 UniFFI／N-API 新增单条接收进度和进行中列表的完整查询，复用同版本 Engine 操作；
 固定词表通过 Engine wire_enum 和 Display 共用定义，不在绑定复制词表。
 UniFFI 保持 i64，N-API 字节数为十进制串；声明与映射均已同步。
-此处只完成查询绑定，不包括尚未实现的 RetryEntryReceive／取消绑定。
+此处只完成查询绑定；取消绑定见后续记录，RetryEntryReceive 仍未实现。
 
 验证：Core＋Application1508通过／1跳过（3.836秒）；真实SQLite契约13通过（0.225秒），
 包括类型保存、损坏原因不外泄、目录原单元和终态竞争的查询；Engine公开契约50通过（0.017秒），
@@ -473,4 +473,27 @@ workspace全目标check通过（1m21s）。首轮契约测试遗漏同步非空�
 
 **剩余范围**：当前集合仍基于已知持久项；完整原始清单、未启动项和接收 owner 的真实结果／
 逐项产物证据尚需合并，部分结果不能只凭传输投影宣告完整交付。原始重试资料保留、选择重试 CAS、
-完整重试／取消绑定及最终网络／设备矩阵仍未完成，不勾选整个阶段 3 的业务查询／重试退出项。
+完整重试绑定及最终网络／设备矩阵仍未完成，不勾选整个阶段 3 的业务查询／重试退出项。
+
+
+### 目录失败来源与取消绑定
+
+目录表示获取失败／取消现在直接向完整接收负责人返回原始错误及固定上下文，
+不再用泛化错误或重新构造的取消错误替换来源。失败后不启动目录成员获取，不发布目录；
+独立文件的部分接收规则不变。新回归先证实原实现丢失来源，再验证原始类型、
+IO ConnectionReset 与取消分类仍可追溯，真实目标目录保持为空。
+
+UniFFI／N-API 各新增 `cancel_entry_receive` 和 `cancel_inbound_transfer`：
+前者提交条目及预期 attempt，后者是用户主动取消并固定使用 LocalUser；
+各自只执行一个既有 Engine 完整操作，不在绑定拼接查询、停止与清理。
+固定结果通过同一 Engine wire_enum 的 Display 输出，保留 cancellation_incomplete、
+not_inflight、cancelled 等结果区别；N-API 声明同步更新。
+这不是手动重试实现，也不替代完整来源保留、逐项最终结果与最终设备矩阵。
+
+验证：目录来源定向2通过（0.030秒），Application全库1176通过／1跳过（3.891秒），
+Engine公开契约50通过（0.018秒），两套绑定lib64通过（0.217秒）。
+最终workspace全目标check通过（1m26s），metadata JSON、fmt、Rust style、repository preflight、
+官方观测清单重生（1369站点）、变更链接与diff检查通过。
+采用手工差异审查；code-review skill不可用，不冒充技能审查。
+本轮未重跑完整workspace测试或网络／设备矩阵，原profile诊断基线失败仍未结案；
+完整spec保持进行中。
