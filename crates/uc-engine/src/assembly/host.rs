@@ -664,6 +664,8 @@ mod tests {
     struct BackupTestStorage {
         storage: Arc<TestSecureStorage>,
         reject_backup: bool,
+        /// 拒绝写入生命周期标记：备份与旧布局采用之后的失败点。
+        reject_lifecycle: bool,
     }
 
     impl HostSecureStorage for BackupTestStorage {
@@ -671,6 +673,12 @@ mod tests {
             self.storage.get(key)
         }
         fn set(&self, key: &str, value: &[u8]) -> Result<(), HostCapabilityError> {
+            if self.reject_lifecycle && key == "profile_lifecycle_marker:v1" {
+                return Err(HostCapabilityError::new(
+                    crate::HostCapabilityErrorCategory::PermissionDenied,
+                    "lifecycle denied",
+                ));
+            }
             if self.reject_backup && key == "profile_upgrade_backup_record_key:v1" {
                 return Err(HostCapabilityError::new(
                     crate::HostCapabilityErrorCategory::PermissionDenied,
@@ -691,8 +699,6 @@ mod tests {
         let legacy = private.join("iroh-identity_old");
         std::fs::create_dir_all(&legacy).unwrap();
         std::fs::write(legacy.join("identity.bin"), b"old identity").unwrap();
-        let marker = private.join("pending-import.json");
-        std::fs::write(&marker, b"invalid import marker").unwrap();
         let storage = Arc::new(TestSecureStorage::default());
         let host = HostCapabilities::new(
             HostDirectories::new(
@@ -704,6 +710,7 @@ mod tests {
             Box::new(BackupTestStorage {
                 storage: storage.clone(),
                 reject_backup: true,
+                reject_lifecycle: false,
             }),
             Box::new(EmptyHostClipboard),
             Box::new(EmptyHostFiles),
@@ -714,7 +721,6 @@ mod tests {
         ));
         assert!(legacy.exists());
         assert!(!private.join("iroh-identity").exists());
-        assert_eq!(std::fs::read(marker).unwrap(), b"invalid import marker");
         assert!(storage
             .get("profile_lifecycle_marker:v1")
             .unwrap()
@@ -723,17 +729,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_preparation_reuses_backup_after_later_import_failure() {
+    async fn startup_preparation_reuses_backup_after_later_lifecycle_failure() {
         let root = tempfile::tempdir().unwrap();
         let private = root.path().join("private");
         let legacy = private.join("iroh-identity_old");
         std::fs::create_dir_all(&legacy).unwrap();
         std::fs::write(legacy.join("identity.bin"), b"old identity").unwrap();
-        std::fs::write(
-            private.join("pending-import.json"),
-            b"invalid import marker",
-        )
-        .unwrap();
         let storage = Arc::new(TestSecureStorage::default());
         let mut previous = None;
         for _ in 0..2 {
@@ -747,6 +748,7 @@ mod tests {
                 Box::new(BackupTestStorage {
                     storage: storage.clone(),
                     reject_backup: false,
+                    reject_lifecycle: true,
                 }),
                 Box::new(EmptyHostClipboard),
                 Box::new(EmptyHostFiles),
