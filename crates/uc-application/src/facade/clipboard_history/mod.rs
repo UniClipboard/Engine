@@ -141,7 +141,7 @@ impl ClipboardHistoryFacade {
             save: entry_save,
             touch: _entry_touch,
             set_favorite: entry_set_favorite,
-            delete: entry_delete,
+            delete: _,
             delete_with_receive_state: entry_delete_with_receive_state,
             find_by_snapshot_hash: _entry_find,
             get_snapshot_hash: _entry_snapshot_hash,
@@ -200,13 +200,10 @@ impl ClipboardHistoryFacade {
 
         let mut delete_uc = DeleteClipboardEntryUseCase::from_ports(
             entry_get.clone(),
-            entry_delete.clone(),
-            selection_repo.clone(),
-            event_writer.clone(),
+            entry_delete_with_receive_state,
             rep_list_for_event.clone(),
-        )
-        .with_receive_state_delete(entry_delete_with_receive_state)
-        .with_receive_work(receive_work);
+            receive_work,
+        );
         if let Some(dir) = file_cache_dir.clone() {
             delete_uc = delete_uc.with_file_cache_dir(dir);
         }

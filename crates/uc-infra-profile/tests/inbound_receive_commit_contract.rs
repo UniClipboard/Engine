@@ -172,7 +172,7 @@ async fn settlement_resolves_and_entry_delete_clears_receive_state() {
         .unwrap();
 
     entries
-        .delete_entry_with_receive_state(&EntryId::from("entry"), &EventId::from("event-entry"))
+        .delete_entry_with_receive_state(&EntryId::from("entry"))
         .await
         .unwrap();
 

@@ -86,7 +86,6 @@ pub(crate) struct ReceiveAction {
 pub(crate) struct ReceiveCleanup {
     registry: Arc<ReceiveWorkRegistry>,
     entry: String,
-    pub(crate) had_receive: bool,
 }
 
 impl Drop for ReceiveCleanup {
@@ -194,7 +193,6 @@ impl ReceiveWorkRegistry {
         Some(ReceiveCleanup {
             registry: self.clone(),
             entry: entry.to_owned(),
-            had_receive: false,
         })
     }
 
@@ -210,8 +208,7 @@ impl ReceiveWorkRegistry {
             }
             let births = state.born.clone();
             state.retired.insert(entry.clone(), births);
-            let had_receive =
-                state.receipts.remove(entry).is_some() || state.owns_receive(entry.as_ref());
+            state.receipts.remove(entry);
             let waiting = state
                 .active
                 .iter()
@@ -231,7 +228,6 @@ impl ReceiveWorkRegistry {
                 ReceiveCleanup {
                     registry: self.clone(),
                     entry: entry.to_string(),
-                    had_receive,
                 },
                 waiting,
             )

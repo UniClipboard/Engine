@@ -286,3 +286,13 @@
 - 最终三crate nextest启用Engine dev-tools及no-fail-fast：1773通过／9跳过（156.325秒），首次失败的真实Engine二次删除与所有原未运行项均实际执行通过；三项新增真实重试／取消／撤权同样通过。Application独立整库1214通过／1跳过（25.83秒）。
 - 最终metadata解析812包、workspace全目标check（1m25s）、fmt、Rust style、repository preflight、1355站点隐私清单及diff均通过。Cargo串行共享target及原缓存。最终编译与测试期间固定代码／文档／inventory；JSON元数据在结束后改为忽略的log工件，未纳入提交。
 - 手工审查替换事务FK与回滚顺序、表示身份及加密AAD、清理原始source与双失败保留、create_new所有权、取消屏障及锁顺序、二次删除typed结果、仅测试组合根故障注入。code-review skill不可用，不冒充技能审查。准备提交本轮真实Engine验收发现的修复；完整spec保持进行中。下一步NoEntry持久清理／删除调用者退出监督、完整预算与其余生命周期／历史来源／1GiB／最终CI矩阵。
+
+- NoEntry删除红测no-entry-delete-red.log明确调用旧DeleteClipboardEntryPort，任务panic而未走原子清理。完整port改为仅接受EntryId并返回实际删除bool，旧event参数及DeleteUC的可选原子port／分步fallback全部删除。Facade与所有内部测试同步迁移，无新Engine接口或schema。持久事实决定Missing，不再保留ReceiveCleanup.had_receive。
+- NoEntry真实SQLite六项初轮通过；扩展目录未发布日志场景得到no-entry-publish-delete-red.log红测，原实现错误返回true并丢弃发布恢复记录。Core新增完整删除准入规则，Infra在事务内读取事实；未发布目录逐attempt匹配Settled+RolledBack证明，拒绝错attempt、Pending及未完成phase。
+- 读取表示失败原先unwrap_or_default，现保留具体source并不删除记录。Application四项定向测试通过（0.00秒）；真实Engine在实际导出完成权屏障内丢弃删除等待后仍停止重试，移除条目／所有接收状态／受管文件，二次NotFound通过（3.53秒）。既有Engine operation监督真实有效，不另建Application任务表。
+- 编译首轮新SQLitecount缺QueryDsl（5处E0599），改用原测试已有count_star；引入的EventId未使用警告已清理。六项SQLite／Application3项初步绿灯与两个真实红测均保留，不把旧快照当最终全通过。准备冻结代码、扩大Core／App／Storage／Engine及实际profile commit集成验证和根门禁。
+- 额外源码证据：DecryptingClipboardRepresentationRepository列表接口仍会在inline解密失败时返回原密文字节；该历史降级没有由本次get_representations错误回归证明安全，后续应沿已存在的认证文件引用能力核对删除／清理失败边界。本轮不冒称已修复该问题。完整预算、clear／更多生命周期、历史来源、1GiB与最终CI仍保留。
+
+- 最终扩大编译首次因新布尔查询缺BoolExpressionMethods得到E0599，no-entry-final-nextest.log保留且未计为测试通过；补齐trait后Core／Application／Storage／Engine完整nextest（dev-tools、no-fail-fast）2114通过／9跳过（149.896秒）。Core删除规则、NoEntry及目录回滚证明SQLite、真实Engine调用者放弃删除等待均在同一轮实际执行通过。
+- Profile inbound_receive_commit_contract六项及encrypting_inbound_receive_commit一项，共七项实际通过；包含NoEntry取消结算、事务原子性、保存证明重开和删除清理。最后metadata解析812包、workspace全目标check（1m31s）、fmt、Rust style、repository preflight、1352站点隐私清单和diff均通过。Cargo串行共享target及原缓存，无临时target或清缓存旁路。
+- 手工差异审查Core纯删除规则／Infra事务边界、同attempt回滚证明、所有状态表回滚及真实Missing、必需依赖／旧fallback删除、读取失败source、Engine原监督及受管／用户文件边界；code-review skill不可用，不冒称技能审查。完整spec仍未完成，准备提交本轮。后续clear的未保存接收、认证文件资料读取、更多失败／关闭责任、完整预算、历史来源、大文件资源与最终CI／平台矩阵继续。

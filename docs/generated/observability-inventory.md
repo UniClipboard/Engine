@@ -37,7 +37,7 @@
 
 ## local debug
 
-共 1335 个调用点。
+共 1332 个调用点。
 
 | Target | 调用点 | 类型 | 风险标记 |
 | --- | --- | --- | --- |
@@ -209,20 +209,17 @@
 | `<module>` | `crates/uc-application/src/clipboard/history/clear_history.rs:62` | `warn` | sensitive-field, message-body |
 | `<module>` | `crates/uc-application/src/clipboard/history/clear_history.rs:73` | `info` | message-body |
 | `<module>` | `crates/uc-application/src/clipboard/history/clear_history.rs:101` | `info_span` | - |
-| `<module>` | `crates/uc-application/src/clipboard/history/delete_entry.rs:86` | `instrument` | implicit-arguments |
-| `<module>` | `crates/uc-application/src/clipboard/history/delete_entry.rs:99` | `info_span` | sensitive-field |
-| `<module>` | `crates/uc-application/src/clipboard/history/delete_entry.rs:131` | `info_span` | sensitive-field |
-| `<module>` | `crates/uc-application/src/clipboard/history/delete_entry.rs:140` | `info_span` | sensitive-field |
-| `<module>` | `crates/uc-application/src/clipboard/history/delete_entry.rs:149` | `info_span` | sensitive-field |
-| `<module>` | `crates/uc-application/src/clipboard/history/delete_entry.rs:163` | `warn` | sensitive-field, message-body |
-| `<module>` | `crates/uc-application/src/clipboard/history/delete_entry.rs:171` | `info_span` | sensitive-field |
-| `<module>` | `crates/uc-application/src/clipboard/history/delete_entry.rs:203` | `info` | message-body |
-| `<module>` | `crates/uc-application/src/clipboard/history/delete_entry.rs:210` | `warn` | message-body |
-| `<module>` | `crates/uc-application/src/clipboard/history/delete_entry.rs:216` | `info` | message-body |
-| `<module>` | `crates/uc-application/src/clipboard/history/delete_entry.rs:229` | `info_span` | sensitive-field |
-| `<module>` | `crates/uc-application/src/clipboard/history/delete_entry.rs:235` | `warn` | sensitive-field, message-body |
-| `<module>` | `crates/uc-application/src/clipboard/history/delete_entry.rs:243` | `info_span` | sensitive-field |
-| `<module>` | `crates/uc-application/src/clipboard/history/delete_entry.rs:247` | `info` | sensitive-field, message-body |
+| `<module>` | `crates/uc-application/src/clipboard/history/delete_entry.rs:66` | `instrument` | implicit-arguments |
+| `<module>` | `crates/uc-application/src/clipboard/history/delete_entry.rs:76` | `info_span` | sensitive-field |
+| `<module>` | `crates/uc-application/src/clipboard/history/delete_entry.rs:103` | `warn` | sensitive-field, message-body |
+| `<module>` | `crates/uc-application/src/clipboard/history/delete_entry.rs:111` | `info_span` | sensitive-field |
+| `<module>` | `crates/uc-application/src/clipboard/history/delete_entry.rs:143` | `info` | message-body |
+| `<module>` | `crates/uc-application/src/clipboard/history/delete_entry.rs:150` | `warn` | message-body |
+| `<module>` | `crates/uc-application/src/clipboard/history/delete_entry.rs:156` | `info` | message-body |
+| `<module>` | `crates/uc-application/src/clipboard/history/delete_entry.rs:169` | `info_span` | sensitive-field |
+| `<module>` | `crates/uc-application/src/clipboard/history/delete_entry.rs:175` | `warn` | sensitive-field, message-body |
+| `<module>` | `crates/uc-application/src/clipboard/history/delete_entry.rs:183` | `info_span` | sensitive-field |
+| `<module>` | `crates/uc-application/src/clipboard/history/delete_entry.rs:187` | `info` | sensitive-field, message-body |
 | `<module>` | `crates/uc-application/src/clipboard/history/list_entry_projections.rs:309` | `warn` | sensitive-field, message-body |
 | `<module>` | `crates/uc-application/src/clipboard/history/list_entry_projections.rs:316` | `warn` | sensitive-field, message-body |
 | `<module>` | `crates/uc-application/src/clipboard/history/list_entry_projections.rs:334` | `warn` | sensitive-field, message-body |
@@ -1284,14 +1281,14 @@
 | `<module>` | `crates/uc-infra-storage/src/db/repositories/active_clipboard_register_repo.rs:371` | `debug_span` | - |
 | `<module>` | `crates/uc-infra-storage/src/db/repositories/blob_repo.rs:46` | `debug_span` | - |
 | `<module>` | `crates/uc-infra-storage/src/db/repositories/blob_repo.rs:64` | `debug_span` | - |
-| `<module>` | `crates/uc-infra-storage/src/db/repositories/clipboard_entry_repo.rs:72` | `instrument` | - |
-| `<module>` | `crates/uc-infra-storage/src/db/repositories/clipboard_entry_repo.rs:96` | `instrument` | - |
-| `<module>` | `crates/uc-infra-storage/src/db/repositories/clipboard_entry_repo.rs:144` | `instrument` | - |
-| `<module>` | `crates/uc-infra-storage/src/db/repositories/clipboard_entry_repo.rs:169` | `instrument` | - |
-| `<module>` | `crates/uc-infra-storage/src/db/repositories/clipboard_entry_repo.rs:192` | `instrument` | - |
-| `<module>` | `crates/uc-infra-storage/src/db/repositories/clipboard_entry_repo.rs:230` | `instrument` | - |
-| `<module>` | `crates/uc-infra-storage/src/db/repositories/clipboard_entry_repo.rs:259` | `instrument` | - |
-| `<module>` | `crates/uc-infra-storage/src/db/repositories/clipboard_entry_repo.rs:299` | `instrument` | - |
+| `<module>` | `crates/uc-infra-storage/src/db/repositories/clipboard_entry_repo.rs:77` | `instrument` | - |
+| `<module>` | `crates/uc-infra-storage/src/db/repositories/clipboard_entry_repo.rs:101` | `instrument` | - |
+| `<module>` | `crates/uc-infra-storage/src/db/repositories/clipboard_entry_repo.rs:149` | `instrument` | - |
+| `<module>` | `crates/uc-infra-storage/src/db/repositories/clipboard_entry_repo.rs:174` | `instrument` | - |
+| `<module>` | `crates/uc-infra-storage/src/db/repositories/clipboard_entry_repo.rs:197` | `instrument` | - |
+| `<module>` | `crates/uc-infra-storage/src/db/repositories/clipboard_entry_repo.rs:235` | `instrument` | - |
+| `<module>` | `crates/uc-infra-storage/src/db/repositories/clipboard_entry_repo.rs:264` | `instrument` | - |
+| `<module>` | `crates/uc-infra-storage/src/db/repositories/clipboard_entry_repo.rs:304` | `instrument` | - |
 | `<module>` | `crates/uc-infra-storage/src/db/repositories/clipboard_event_repo.rs:87` | `debug_span` | sensitive-field |
 | `<module>` | `crates/uc-infra-storage/src/db/repositories/clipboard_event_repo.rs:128` | `debug_span` | sensitive-field |
 | `<module>` | `crates/uc-infra-storage/src/db/repositories/clipboard_event_repo.rs:166` | `debug_span` | sensitive-field |

@@ -294,11 +294,14 @@ pub(crate) fn delete_receive_state(
         )
         .execute(conn)?;
     }
-    diesel::delete(file_transfer::table.filter(file_transfer::entry_id.eq(entry_id)))
-        .execute(conn)?;
-    diesel::delete(receive_artifact_log::table.filter(receive_artifact_log::entry_id.eq(entry_id)))
-        .execute(conn)?;
-    diesel::delete(
+    let transfers =
+        diesel::delete(file_transfer::table.filter(file_transfer::entry_id.eq(entry_id)))
+            .execute(conn)?;
+    let artifacts = diesel::delete(
+        receive_artifact_log::table.filter(receive_artifact_log::entry_id.eq(entry_id)),
+    )
+    .execute(conn)?;
+    let publications = diesel::delete(
         directory_publish_log::table.filter(directory_publish_log::entry_id.eq(entry_id)),
     )
     .execute(conn)?;
@@ -306,7 +309,7 @@ pub(crate) fn delete_receive_state(
         entry_receive_attempt::table.filter(entry_receive_attempt::entry_id.eq(entry_id)),
     )
     .execute(conn)?;
-    Ok(deleted == 1)
+    Ok(deleted > 0 || transfers > 0 || artifacts > 0 || publications > 0)
 }
 
 /// 调用方持有事务，同时提交重试资料；比较与替换只维护一个权威attempt。

@@ -11,7 +11,7 @@ use crate::clipboard::{
     ClipboardEntry, ClipboardEvent, ClipboardRepositoryError, ClipboardSelectionDecision,
     PersistedClipboardRepresentation,
 };
-use crate::ids::{EntryId, EventId};
+use crate::ids::EntryId;
 
 /// Fetch a single clipboard entry by id.
 #[async_trait]
@@ -82,11 +82,13 @@ pub trait DeleteClipboardEntryPort: Send + Sync {
 
 #[async_trait]
 pub trait DeleteClipboardEntryWithReceiveStatePort: Send + Sync {
+    /// 原子移除条目及其已结算的接收状态；未保存条目时也移除同一条目的接收状态。
+    /// 非终态接收或未结算产物必须拒绝，失败不得部分删除。
+    /// 返回是否实际移除了条目或接收状态；真实缺失返回false。
     async fn delete_entry_with_receive_state(
         &self,
         entry_id: &EntryId,
-        event_id: &EventId,
-    ) -> Result<(), ClipboardRepositoryError>;
+    ) -> Result<bool, ClipboardRepositoryError>;
 }
 
 /// Resolve an entry id from a previously observed content snapshot hash.

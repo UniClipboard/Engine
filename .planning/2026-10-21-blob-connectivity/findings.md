@@ -188,3 +188,16 @@
 - 首轮三crate nextest在1746通过／1失败／9跳过处fail-fast，25项未运行。真实旧Engine测试engine_start_builds_a_resumable_real_session要求第二次删除NotFound，却得到HistoryEntryDeleted；不是本次完整通过，也未当作外部阻塞。
 - 删除owner仍先封口等待，ReceiveCleanup原子保留是否存在接收的事实；无保存条目且无接收时返回Core typed NotFound，facade按具体类型映射，不依赖新增字符串判断。扩展原删除回归核对第二次Missing，未保存接收封口与旧动作停止不变。
 - 该修改后Application整库1214通过／1跳过（25.83秒）。准备冻结代码、更新1355站点inventory并用no-fail-fast完整跑三crate，再执行根门禁。未完成的NoEntry持久清理／删除监督、更多生命周期、预算、历史来源、1GiB和最终CI仍保留。
+
+## 2026-10-22 NoEntry删除与监督
+
+- 核对HEAD09aebb9c，工作树仅四个用户原未跟踪规划目录。上一轮为progress，未出现外部阻塞。
+- DeleteUC的NoEntry分支仍调用仅删除clipboard_entry的旧port，实际不清理attempt／file_transfer／产物日志；重启后只剩持久attempt且无内存receipt时，还会直接返回NotFound。完整原子port则强制调用方提供event_id，无法表达NoEntry；需要收紧唯一完整能力，不能伪造EventId或另外保留NoEntry删除实现。
+- 内部DeleteUC只有facade和自身测试两个构造点，可以去掉旧可选原子port／旧逐步删除fallback，使用一套显式完整依赖。Core内部port及所有消费方统一迁移，无新schema或Engine步骤接口。
+- Engine已有operation监督及abandoned-operation/shutdown真实回归，不能直接假设删除需要第二套spawn／任务表；先核对实际稳定删除入口的完整责任，再决定必要修复。
+
+- NoEntry删除红测no-entry-delete-red.log明确调用旧DeleteClipboardEntryPort，任务panic而未走原子清理。完整port改为仅接受EntryId并返回实际删除bool，旧event参数及DeleteUC的可选原子port／分步fallback全部删除。Facade与所有内部测试同步迁移，无新Engine接口或schema。持久事实决定Missing，不再保留ReceiveCleanup.had_receive。
+- NoEntry真实SQLite六项初轮通过；扩展目录未发布日志场景得到no-entry-publish-delete-red.log红测，原实现错误返回true并丢弃发布恢复记录。Core新增完整删除准入规则，Infra在事务内读取事实；未发布目录逐attempt匹配Settled+RolledBack证明，拒绝错attempt、Pending及未完成phase。
+- 读取表示失败原先unwrap_or_default，现保留具体source并不删除记录。Application四项定向测试通过（0.00秒）；真实Engine在实际导出完成权屏障内丢弃删除等待后仍停止重试，移除条目／所有接收状态／受管文件，二次NotFound通过（3.53秒）。既有Engine operation监督真实有效，不另建Application任务表。
+- 编译首轮新SQLitecount缺QueryDsl（5处E0599），改用原测试已有count_star；引入的EventId未使用警告已清理。六项SQLite／Application3项初步绿灯与两个真实红测均保留，不把旧快照当最终全通过。准备冻结代码、扩大Core／App／Storage／Engine及实际profile commit集成验证和根门禁。
+- 额外源码证据：DecryptingClipboardRepresentationRepository列表接口仍会在inline解密失败时返回原密文字节；该历史降级没有由本次get_representations错误回归证明安全，后续应沿已存在的认证文件引用能力核对删除／清理失败边界。本轮不冒称已修复该问题。完整预算、clear／更多生命周期、历史来源、1GiB与最终CI仍保留。

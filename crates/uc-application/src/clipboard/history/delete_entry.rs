@@ -7,53 +7,41 @@ use uc_core::clipboard::ClipboardRepositoryError;
 use uc_core::ids::EntryId;
 use uc_core::ports::blob::{BlobTransferPort, TagReason};
 use uc_core::ports::clipboard::{
-    DeleteClipboardEntryPort, DeleteClipboardEntryWithReceiveStatePort, GetClipboardEntryPort,
+    DeleteClipboardEntryWithReceiveStatePort, GetClipboardEntryPort,
     ListRepresentationsForEventPort,
 };
-use uc_core::ports::{ClipboardEventWriterPort, ClipboardSelectionRepositoryPort, SearchIndexPort};
+use uc_core::ports::SearchIndexPort;
 use uc_observability_contract::{
     error_source::io_error_kind, log_fields::log_id, uc_info, uc_warn,
 };
 
 /// Use case for deleting clipboard entries with all associated data.
 pub(crate) struct DeleteClipboardEntryUseCase {
-    receive_work: Option<Arc<ReceiveWorkRegistry>>,
+    receive_work: Arc<ReceiveWorkRegistry>,
     get_entry: Arc<dyn GetClipboardEntryPort>,
-    delete_entry: Arc<dyn DeleteClipboardEntryPort>,
-    selection_repo: Arc<dyn ClipboardSelectionRepositoryPort>,
-    event_writer: Arc<dyn ClipboardEventWriterPort>,
+    delete: Arc<dyn DeleteClipboardEntryWithReceiveStatePort>,
     representation_repo: Arc<dyn ListRepresentationsForEventPort>,
     file_cache_dir: Option<PathBuf>,
     search_index: Option<Arc<dyn SearchIndexPort>>,
     blob_transfer: Option<Arc<dyn BlobTransferPort>>,
-    delete_with_receive_state: Option<Arc<dyn DeleteClipboardEntryWithReceiveStatePort>>,
 }
 
 impl DeleteClipboardEntryUseCase {
     pub(crate) fn from_ports(
         get_entry: Arc<dyn GetClipboardEntryPort>,
-        delete_entry: Arc<dyn DeleteClipboardEntryPort>,
-        selection_repo: Arc<dyn ClipboardSelectionRepositoryPort>,
-        event_writer: Arc<dyn ClipboardEventWriterPort>,
+        delete: Arc<dyn DeleteClipboardEntryWithReceiveStatePort>,
         representation_repo: Arc<dyn ListRepresentationsForEventPort>,
+        receive_work: Arc<ReceiveWorkRegistry>,
     ) -> Self {
         Self {
-            receive_work: None,
+            receive_work,
             get_entry,
-            delete_entry,
-            selection_repo,
-            event_writer,
+            delete,
             representation_repo,
             file_cache_dir: None,
             search_index: None,
             blob_transfer: None,
-            delete_with_receive_state: None,
         }
-    }
-
-    pub(crate) fn with_receive_work(mut self, work: Arc<ReceiveWorkRegistry>) -> Self {
-        self.receive_work = Some(work);
-        self
     }
 
     pub(crate) fn with_file_cache_dir(mut self, dir: PathBuf) -> Self {
@@ -71,14 +59,6 @@ impl DeleteClipboardEntryUseCase {
         self
     }
 
-    pub(crate) fn with_receive_state_delete(
-        mut self,
-        delete: Arc<dyn DeleteClipboardEntryWithReceiveStatePort>,
-    ) -> Self {
-        self.delete_with_receive_state = Some(delete);
-        self
-    }
-
     /// Deletes a clipboard entry and its associated selection, event, and snapshot
     /// representations in the required order. For file entries (text/uri-list),
     /// also deletes the cache files from disk when they live inside the managed
@@ -89,69 +69,29 @@ impl DeleteClipboardEntryUseCase {
         fields(entry_id = %entry_id)
     )]
     pub(crate) async fn execute(&self, entry_id: &EntryId) -> Result<()> {
-        let receive_scope = match &self.receive_work {
-            Some(work) => Some(work.delete_scope(entry_id).await?),
-            None => None,
-        };
+        let _receive_scope = self.receive_work.delete_scope(entry_id).await?;
         let entry = self
             .get_entry
             .get_entry(entry_id)
             .instrument(info_span!("fetch_entry", entry_id = %entry_id))
-            .await?;
-        let Some(entry) = entry else {
-            if !receive_scope
-                .as_ref()
-                .is_some_and(|scope| scope.had_receive)
-            {
-                return Err(ClipboardRepositoryError::NotFound("clipboard entry".into()).into());
-            }
-            // 尚未保存的接收也必须封口；完整删除能力会等实际停止并删除期间产生的记录。
-            self.delete_entry
-                .delete_entry(entry_id)
-                .await
-                .context("delete pending clipboard receive")?;
-            return Ok(());
-        };
-        let event_id = entry.event_id.clone();
-
-        let representations = self
-            .representation_repo
-            .get_representations_for_event(&event_id)
             .await
-            .unwrap_or_default();
-
-        if let Some(delete) = self.delete_with_receive_state.as_ref() {
-            delete
-                .delete_entry_with_receive_state(entry_id, &event_id)
+            .context("read entry before deletion")?;
+        let representations = match entry {
+            Some(entry) => self
+                .representation_repo
+                .get_representations_for_event(&entry.event_id)
                 .await
-                .context("Failed to delete entry")?;
-        } else {
-            self.selection_repo
-                .delete_selection(entry_id)
-                .instrument(info_span!(
-                    "delete_selection",
-                    entry_id = %entry_id
-                ))
-                .await
-                .context("Failed to delete selection")?;
-
-            self.delete_entry
-                .delete_entry(entry_id)
-                .instrument(info_span!(
-                    "delete_entry",
-                    entry_id = %entry_id
-                ))
-                .await
-                .context("Failed to delete entry")?;
-
-            self.event_writer
-                .delete_event_and_representations(&event_id)
-                .instrument(info_span!(
-                    "delete_event",
-                    event_id = %event_id
-                ))
-                .await
-                .context("Failed to delete event")?;
+                .context("read representations before deletion")?,
+            None => Vec::new(),
+        };
+        // 仓储在同一原子边界解析实际条目与NoEntry状态，缺失不能伪报删除成功。
+        if !self
+            .delete
+            .delete_entry_with_receive_state(entry_id)
+            .await
+            .context("delete entry and settled receive state")?
+        {
+            return Err(ClipboardRepositoryError::NotFound("clipboard entry".into()).into());
         }
 
         if let Some(blob_transfer) = self.blob_transfer.as_ref() {
@@ -226,7 +166,7 @@ impl DeleteClipboardEntryUseCase {
                 }
             }
         }
-        .instrument(info_span!("cleanup_cache_files", event_id = %event_id))
+        .instrument(info_span!("cleanup_cache_files", entry_id = %entry_id))
         .await;
 
         if let Some(search_index) = self.search_index.as_ref() {
@@ -246,7 +186,6 @@ impl DeleteClipboardEntryUseCase {
 
         uc_info!(
             entry_id = log_id(&entry_id),
-            event_id = log_id(&event_id),
             "Deleted clipboard entry successfully"
         );
         Ok(())

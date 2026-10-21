@@ -6,10 +6,10 @@ use super::{
 use crate::testing::receive_exports::{ReceiveExports, ReleaseOnDrop};
 use crate::{
     BlobResourceInput, CancelEntryReceiveInput, CreateSpaceInput, DeviceMembershipSummary, Engine,
-    EngineConfig, EngineEvent, EntryReceiveCancellationOutcome, EntryReceiveProgressInput,
-    EntryReceiveRetryOutcome, HistoryEntryInput, HostCapabilities, HostCapabilityError,
-    HostCapabilityErrorCategory, HostClipboardSnapshot, HostDirectories, HostFileAccess,
-    HostFileHandle, HostFileMetadata, JoinSpaceInput, Operation, OperationResult,
+    EngineConfig, EngineErrorCategory, EngineEvent, EntryReceiveCancellationOutcome,
+    EntryReceiveProgressInput, EntryReceiveRetryOutcome, HistoryEntryInput, HostCapabilities,
+    HostCapabilityError, HostCapabilityErrorCategory, HostClipboardSnapshot, HostDirectories,
+    HostFileAccess, HostFileHandle, HostFileMetadata, JoinSpaceInput, Operation, OperationResult,
     ReceiveItemFailureReason, ReceiveProgressSummary, ReceiveRetryUnavailableReason,
     RemoveMemberInput, RetryEntryReceiveInput, SecretString, SendFilesInput, SettingsPatch,
     SyncSettingsPatch,
@@ -499,6 +499,77 @@ async fn real_engine_cancelled_retry_waits_for_export_and_keeps_previous_success
     assert_eq!(
         saved_files(receiver, &case.first.entry_id, case.receiver_root.path()).await,
         case.saved
+    );
+    case.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn real_engine_abandoned_deletion_stops_retry_and_removes_all_receive_state() {
+    let _lock = ENGINE_TEST_LOCK.lock().await;
+    let case = partial_receive().await;
+    let _release = ReleaseOnDrop(case.exports.clone());
+    let receiver = &case.receiver;
+    assert!(matches!(
+        receiver
+            .execute(Operation::RetryEntryReceive(case.retry_input()))
+            .await
+            .unwrap(),
+        OperationResult::EntryReceiveRetry(EntryReceiveRetryOutcome::Accepted { .. })
+    ));
+    timeout(Duration::from_secs(20), case.exports.paused.notified())
+        .await
+        .unwrap();
+    let output = case.exports.paths.lock().unwrap()[3].clone();
+    assert!(output.is_file());
+    assert!(timeout(
+        Duration::from_millis(50),
+        receiver.execute(Operation::DeleteHistoryEntry(HistoryEntryInput {
+            entry_id: case.first.entry_id.clone(),
+        }))
+    )
+    .await
+    .is_err());
+    // 等待者已经离开；受管导出未结算时，删除不能越过停止屏障。
+    assert_eq!(
+        saved_files(receiver, &case.first.entry_id, case.receiver_root.path()).await,
+        case.saved
+    );
+    case.exports.release.add_permits(1);
+    timeout(Duration::from_secs(20), async {
+        loop {
+            let deleted = matches!(receiver.execute(Operation::GetHistoryEntry(HistoryEntryInput {
+                entry_id: case.first.entry_id.clone(),
+            })).await, Err(error) if error.category() == EngineErrorCategory::NotFound);
+            let no_receive = receiver
+                .execute(Operation::QueryEntryReceiveProgress(
+                    EntryReceiveProgressInput {
+                        entry_id: case.first.entry_id.clone(),
+                    },
+                ))
+                .await
+                .unwrap()
+                == OperationResult::EntryReceiveProgress(None);
+            if deleted
+                && no_receive
+                && !output.exists()
+                && case.saved.values().all(|path| !path.exists())
+            {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        receiver
+            .execute(Operation::DeleteHistoryEntry(HistoryEntryInput {
+                entry_id: case.first.entry_id.clone(),
+            }))
+            .await
+            .unwrap_err()
+            .category(),
+        EngineErrorCategory::NotFound
     );
     case.shutdown().await;
 }
