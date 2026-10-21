@@ -142,6 +142,7 @@ fn owner(fixture: &Fixture) -> (Arc<RetryEntryReceiveUseCase>, Arc<Stored>, Arc<
     let barrier = Arc::new(Barrier(AtomicBool::new(false)));
     (
         Arc::new(RetryEntryReceiveUseCase {
+            begin: fixture.begin.clone(),
             cache_dir: fixture._cache.path().to_owned(),
             apply: fixture.apply.clone(),
             query: Arc::new(ReceiveProgressQuery::new(

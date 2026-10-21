@@ -114,3 +114,11 @@
 - 实际GetReceiveArtifactsPort尚不存在，现有Core只有receive_artifact_log.rs的ListUnsettledReceiveArtifactsPort；不能按旧摘要把所需读取能力假当已实现。entry_receive_attempt_repo.rs的begin_redelivery保留旧传输／产物行，仅以Failed／Cancelled＋旧attempt作CAS。新attempt的实际继承项投影可以研究既有FileTransferFacade／ReceiverTransferRegistration和ReceiverTransferHandle，但必须先核对清理不能按新行cached_path误删旧输出。
 - 仍需真实SQLite／Engine链路，而不是继续只用测试attempt／capture端口证明完整业务。正常redelivery保留旧部分成果时会覆盖原receipt且未继承旧证明，需要完整来源衔接；新retry预检还未登记active，局部校验与完整结算许可／期限、关闭／删除／撤权全覆盖仍未完成。NoEntry来源寿命、无runtime来源可重建性、目录原始整单元、旧fetch／Downloader／warmup与最终矩阵继续保留。
 - 当前origin/main额外有1c0660d9（#224，暂停释放SQLite连接与network log lease），本分支仍基于开工a461b894；生命周期整合／最终交付前须同步并重验，不在未提交大改动期间重写分支。
+
+
+## 2026-10-22 重试账本原子接受
+
+- 新专属BeginReceiveRetryPort把旧attempt CAS、完整项初态及目录空Staging头放进一个事务。共享replace_terminal_attempt保持普通redelivery原语义，不复制两套CAS；无新增schema／密文版本。
+- 红测先证明旧CAS重开后0项（预期3），写全行后再证明旧group_receive_items把实际继承完成降为Transferring。既有binding_state增加entry_bound保存已交付事实，所有初态cached_path=None；不写事件／产物清理记录，目录根映射仍使用既有加密能力。真实唯一键故障证明CAS与前面已插入行全部回滚。
+- 原选择物化遇前项父取消直接break，会漏掉后面的实际旧成功。真实文件红测保留，修复为选择模式逐项处理取消并继续继承；普通模式和目录整体取消语义保持。
+- 当前真实storage259通过／3跳过，App1207通过／1跳过、Core335通过。额外保存阻塞时查询证明旧完成、新下载未交付和旧未选取消同时可见。新下载在capture失败／重启后的持久交付证明仍未完成，不把entry_bound继承事实冒充所有接收保存已解决。

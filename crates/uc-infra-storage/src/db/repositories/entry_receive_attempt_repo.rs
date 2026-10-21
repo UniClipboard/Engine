@@ -143,51 +143,13 @@ impl<E: DbExecutor> BeginReceiveAttemptPort for DieselEntryReceiveAttemptReposit
         self.executor
             .run(move |conn| {
                 conn.transaction::<_, anyhow::Error, _>(|conn| {
-                    let affected = diesel::update(
-                        entry_receive_attempt::table
-                            .filter(entry_receive_attempt::entry_id.eq(&entry_id))
-                            .filter(
-                                entry_receive_attempt::current_attempt_id.eq(&expected_attempt_id),
-                            )
-                            .filter(
-                                entry_receive_attempt::attempt_state
-                                    .eq(AttemptState::Cancelled.to_string())
-                                    .or(entry_receive_attempt::attempt_state
-                                        .eq(AttemptState::Failed.to_string())),
-                            ),
+                    replace_terminal_attempt(
+                        conn,
+                        &entry_id,
+                        &expected_attempt_id,
+                        &new_attempt_id,
+                        now_ms,
                     )
-                    .set((
-                        entry_receive_attempt::current_attempt_id.eq(new_attempt_id),
-                        entry_receive_attempt::attempt_state
-                            .eq(AttemptState::Receiving.to_string()),
-                        entry_receive_attempt::updated_at_ms.eq(now_ms),
-                    ))
-                    .execute(conn)?;
-                    if affected == 1 {
-                        return Ok(BeginReceiveOutcome::Begun);
-                    }
-                    let current = entry_receive_attempt::table
-                        .filter(entry_receive_attempt::entry_id.eq(&entry_id))
-                        .select((
-                            entry_receive_attempt::current_attempt_id,
-                            entry_receive_attempt::attempt_state,
-                        ))
-                        .first::<(String, String)>(conn)
-                        .optional()?;
-                    match current {
-                        Some((current_id, _)) if current_id != expected_attempt_id => {
-                            Ok(BeginReceiveOutcome::Superseded)
-                        }
-                        Some((_, state)) => {
-                            let state = AttemptState::from_str(&state)?;
-                            if state.is_terminal() {
-                                Ok(BeginReceiveOutcome::Superseded)
-                            } else {
-                                Ok(BeginReceiveOutcome::AlreadyReceiving)
-                            }
-                        }
-                        None => Ok(BeginReceiveOutcome::Superseded),
-                    }
                 })
             })
             .map_err(backend)
@@ -345,4 +307,55 @@ pub(crate) fn delete_receive_state(
     )
     .execute(conn)?;
     Ok(deleted == 1)
+}
+
+/// 调用方持有事务，同时提交重试资料；比较与替换只维护一个权威attempt。
+pub(super) fn replace_terminal_attempt(
+    conn: &mut diesel::sqlite::SqliteConnection,
+    entry_id: &str,
+    expected_attempt_id: &str,
+    new_attempt_id: &str,
+    now_ms: i64,
+) -> anyhow::Result<BeginReceiveOutcome> {
+    let affected = diesel::update(
+        entry_receive_attempt::table
+            .filter(entry_receive_attempt::entry_id.eq(entry_id))
+            .filter(entry_receive_attempt::current_attempt_id.eq(expected_attempt_id))
+            .filter(
+                entry_receive_attempt::attempt_state
+                    .eq(AttemptState::Cancelled.to_string())
+                    .or(entry_receive_attempt::attempt_state.eq(AttemptState::Failed.to_string())),
+            ),
+    )
+    .set((
+        entry_receive_attempt::current_attempt_id.eq(new_attempt_id),
+        entry_receive_attempt::attempt_state.eq(AttemptState::Receiving.to_string()),
+        entry_receive_attempt::updated_at_ms.eq(now_ms),
+    ))
+    .execute(conn)?;
+    if affected == 1 {
+        return Ok(BeginReceiveOutcome::Begun);
+    }
+    let current = entry_receive_attempt::table
+        .filter(entry_receive_attempt::entry_id.eq(entry_id))
+        .select((
+            entry_receive_attempt::current_attempt_id,
+            entry_receive_attempt::attempt_state,
+        ))
+        .first::<(String, String)>(conn)
+        .optional()?;
+    match current {
+        Some((current_id, _)) if current_id != expected_attempt_id => {
+            Ok(BeginReceiveOutcome::Superseded)
+        }
+        Some((_, state)) => {
+            let state = AttemptState::from_str(&state)?;
+            if state.is_terminal() {
+                Ok(BeginReceiveOutcome::Superseded)
+            } else {
+                Ok(BeginReceiveOutcome::AlreadyReceiving)
+            }
+        }
+        None => Ok(BeginReceiveOutcome::Superseded),
+    }
 }

@@ -27,7 +27,7 @@ pub struct DieselDirectoryPublishLogRepository<E> {
     protection: DirectoryPublishProtection,
 }
 
-enum DirectoryPublishProtection {
+pub(super) enum DirectoryPublishProtection {
     Legacy {
         derive_subkey: Arc<dyn DeriveSpaceSubkeyPort>,
         current_profile: Arc<dyn CurrentProfilePort>,
@@ -88,7 +88,7 @@ impl DirectoryPublishProtection {
         Ok(DirectoryPublishLogCipher::new(key))
     }
 
-    async fn seal(
+    pub(super) async fn seal(
         &self,
         entry_id: &EntryId,
         attempt_id: &str,

@@ -211,3 +211,9 @@
 - 最终核心行为候选App1206通过／1跳过（25.91秒），包括可控身份读取期间插入清理／关闭，不建新attempt且返回固定拒绝结果。之前绑定47＋19与Engine公开契约51通过；公开错误Debug已按Display脱敏，Lost原始类型仍可追溯。前一次workspace全目标通过（1m25s）、metadata JSON已解析。新增Markdown链接检查初次受Git i/w前缀影响计数为0，已显式固定a/b前缀重验4个新增目标、缺失0；未将零覆盖当作有效验证。当前冻结源码／文档准备最终根检查，完整spec仍未完成。
 
 - 最终当前候选Engine公开契约51通过（0.00秒）、绑定47（0.64秒）＋19（0.00秒），App1206通过／1跳过（25.91秒）。最后workspace全目标check通过（1m30s），metadata JSON解析、fmt、Rust style、repository preflight、官方1371站点观测隐私清单与diff检查通过；新增Markdown目标4个无缺失。已手工审查源次序／证明、CAS与最终拒绝、单集合到实际保存结束、公共错误脱敏／原链及完整动作绑定；code-review skill不可用。几次只读路径盘点曾猜中不存在的glob／文件，后续用rg文件索引定位；生产组装首次还漏EntryId导入，已集中引入并重验，失败日志保留。无运行中的本轮Cargo／网络矩阵任务；没有清缓存／创建独立target。完整workspace、真实SQLite／Engine及最终网络／真机矩阵本轮未执行，profile基线未结案；目标完整未完成。准备提交本轮实际重试切片。
+
+- 上轮d48e8497实际手动重试接线并完成验证，归为progress。当前开始补齐重启查询证明：新Application专属BeginReceiveRetryPort在一个事务完成旧attempt CAS与全部新项初态，复用／未选项不登记新清理路径或假下载事件。目录在同一事务记录空根映射的Staging头，既有真实目标准备随后覆写，不增schema／格式。将使用真实SQLite验证刚接受后的重开查询、失败回滚、旧CAS冲突、密文和旧成功文件不被清理。
+
+- 当前真实SQLite完整库259通过／3跳过（20.16秒），包括V3材料与目录封装、错误输入不改权威和插入失败回滚。App1207通过／1跳过、Core335通过；新增保存阻塞期间查询断言1通过（0.00秒）。已保留两次账本红测及取消前项漏继承红测，不放宽原断言。准备冻结源码与文档运行跨层门禁；新下载真正保存的持久证明和完整Engine矩阵仍未完成。
+
+- 本轮最终workspace全目标check通过（首轮1m33s；去掉新增测试的重复import后12.29s），metadata JSON解析812个包、fmt、Rust style、repository preflight、官方1371站点隐私清单及diff检查通过。真实Storage259通过／3跳过、App1207通过／1跳过、Core335通过，保存阻塞查询新增断言单独通过。手工复核CAS同事务、加密与原清理所有权、目录空根头覆写和父取消遍历；code-review skill不可用。完整workspace／真实Engine／最终网络设备矩阵未执行，完整目标继续。下一步同步main的暂停释放资源修复，再补齐实际保存的持久逐项证明。

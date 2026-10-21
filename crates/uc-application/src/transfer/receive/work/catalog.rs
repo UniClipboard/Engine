@@ -5,7 +5,9 @@ use crate::transfer::receive::batch::ReceiveFacts;
 use crate::transfer::receive::identity::{
     directory_member_transfer_id, directory_representation_transfer_id,
 };
-use crate::transfer::receive::materialization::{InboundFileSetManifest, ReceivedItem};
+use crate::transfer::receive::materialization::{
+    InboundFileSetManifest, ReceiveSelection, ReceivedItem,
+};
 use bytes::Bytes;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -88,7 +90,7 @@ impl ReceiveSource {
 }
 
 impl ReceiveAction {
-    pub(crate) fn inherit_saved(&self, landed: &HashMap<usize, ReceivedItem>) {
+    pub(crate) fn inherit_results(&self, selection: &ReceiveSelection) {
         let progress = self
             .progress
             .lock()
@@ -107,7 +109,12 @@ impl ReceiveAction {
             .get_mut(&progress.entry)
             .filter(|receipt| receipt.attempt == progress.attempt)
         {
-            receipt.landed = landed.clone();
+            receipt.landed = selection.landed.clone();
+            for item in &receipt.planned {
+                if let Some(previous) = selection.unselected.get(&item.blob_index) {
+                    self.batch.inherit_result(&item.id, previous);
+                }
+            }
         }
     }
 

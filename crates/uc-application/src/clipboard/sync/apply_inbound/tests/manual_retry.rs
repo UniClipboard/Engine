@@ -16,7 +16,8 @@ use crate::space::{
 use crate::transfer::receive::materialization::{ReceiveSelection, ReceivedItem, ReceivedOutput};
 use crate::transfer::receive::reconciliation::ReceiveReadinessCoordinator;
 use crate::transfer::receive::retry::{
-    PreparedReceiveRetry, ReceiveCancellationBarrier, RetryEntryReceiveOutcome,
+    BeginReceiveRetryInput, BeginReceiveRetryPort, PreparedReceiveRetry,
+    ReceiveCancellationBarrier, RetryEntryReceiveOutcome,
 };
 use crate::transfer::receive::work::{ReceiveRepresentation, ReceiveSource, ReceiveWorkRegistry};
 use anyhow::Result;
@@ -31,7 +32,8 @@ use uc_core::ids::{DeviceId, EntryId, FormatId, RepresentationId};
 use uc_core::ports::blob::{BlobDigest, BlobTicket, PlaintextHash};
 use uc_core::ports::clipboard::GetEntrySnapshotHashPort;
 use uc_core::ports::{
-    AttemptState, EntryReceiveProgress, ReceiveArtifact, ReceiveArtifactOwnership, ReceiveItemKind,
+    AttemptState, BeginReceiveAttemptPort, BeginReceiveOutcome, EntryReceiveProgress,
+    FileTransferProjectionError, ReceiveArtifact, ReceiveArtifactOwnership, ReceiveItemKind,
     ReceiveItemProgress, TrackedFileTransferStatus,
 };
 use uc_core::{MimeType, ObservedClipboardRepresentation, SnapshotHash, SystemClipboardSnapshot};
@@ -121,7 +123,34 @@ impl InboundCapture for Capture {
         Ok(Some(entry))
     }
 }
+struct RetryStarter {
+    attempts: Arc<AttemptGate>,
+    plans: Mutex<Vec<BeginReceiveRetryInput>>,
+}
+#[async_trait]
+impl BeginReceiveRetryPort for RetryStarter {
+    async fn begin_receive_retry(
+        &self,
+        input: BeginReceiveRetryInput,
+    ) -> std::result::Result<BeginReceiveOutcome, FileTransferProjectionError> {
+        input
+            .validate()
+            .map_err(|source| FileTransferProjectionError::Backend(Box::new(source)))?;
+        self.plans.lock().unwrap().push(input.clone());
+        self.attempts
+            .begin_redelivery(
+                &input.entry_id,
+                &input.expected_attempt_id,
+                &input.attempt_id,
+                input.now_ms,
+            )
+            .await
+            .map_err(|source| FileTransferProjectionError::Backend(Box::new(source)))
+    }
+}
+
 struct Fixture {
+    begin: Arc<RetryStarter>,
     _cache: tempfile::TempDir,
     saved: std::path::PathBuf,
     apply: Arc<ApplyInboundClipboardUseCase>,
@@ -286,6 +315,10 @@ impl Fixture {
         );
         original.finish(Ok(()));
         Self {
+            begin: Arc::new(RetryStarter {
+                attempts: attempts.clone(),
+                plans: Mutex::new(Vec::new()),
+            }),
             _cache: cache,
             saved,
             apply,
@@ -317,6 +350,7 @@ impl Fixture {
         let (accepted, reply) = oneshot::channel();
         (
             PreparedReceiveRetry {
+                begin: self.begin.clone(),
                 cancellation: self.checks.clone(),
                 entry: EntryId::from("receiver"),
                 expected_attempt: "old".into(),
@@ -461,6 +495,30 @@ async fn manual_retry_caller_drop_keeps_full_capture_supervised_until_actual_com
     let RetryEntryReceiveOutcome::Accepted { attempt_id } = reply.await.unwrap() else {
         panic!("retry not accepted")
     };
+    let mut pending = EntryReceiveProgress {
+        entry_id: "receiver".into(),
+        attempt_id: attempt_id.clone(),
+        state: AttemptState::Receiving,
+        total_bytes: 0,
+        completed_bytes: 0,
+        items_total: 0,
+        items_completed: 0,
+        items: Vec::new(),
+    };
+    fixture.work.merge_progress(&mut pending);
+    assert_eq!(
+        pending
+            .items
+            .iter()
+            .map(|item| item.status)
+            .collect::<Vec<_>>(),
+        vec![
+            TrackedFileTransferStatus::Completed,
+            TrackedFileTransferStatus::Transferring,
+            TrackedFileTransferStatus::Cancelled,
+        ],
+        "保存仍阻塞时，继承交付和未选取消已经可见，新下载不能提前交付"
+    );
     waiter.abort();
     let stopped = fixture
         .work
@@ -492,6 +550,7 @@ async fn manual_retry_full_completion_keeps_inherited_item_results_and_releases_
     fixture
         .apply
         .execute_retry(PreparedReceiveRetry {
+            begin: fixture.begin.clone(),
             cancellation: fixture.checks.clone(),
             identity: fixture.checks.clone(),
             scope: fixture.checks.clone(),

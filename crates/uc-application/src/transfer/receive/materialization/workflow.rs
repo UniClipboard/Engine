@@ -679,7 +679,7 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
             })
             .collect::<Result<Vec<_>>>()?;
         for (loop_idx, blob_ref) in rep_refs.into_iter().enumerate() {
-            if cancellation.is_cancelled() {
+            if cancellation.is_cancelled() && (selection.is_none() || file_set_manifest.is_some()) {
                 if file_set_manifest.is_some() {
                     return Err(BlobTransferError::Cancelled.into());
                 }
@@ -745,6 +745,22 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                     continue;
                 }
             }
+            if cancellation.is_cancelled() {
+                incomplete_rep_idxs.push(idx as usize);
+                partial = true;
+                if !item_failed {
+                    partial_outcome = MaterializeOutcome::PartialCancelled;
+                }
+                batch.item_result(
+                    &item_id,
+                    0,
+                    OutboundProgressStatus::Cancelled {
+                        reason: FileTransferCancellationReason::LocalUser,
+                    },
+                    None,
+                );
+                continue;
+            }
             let fetched = match self
                 .fetcher
                 .fetch_blob(FetchBlobCommand {
@@ -775,7 +791,11 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                         );
                         return Err(e.context("fetch directory representation"));
                     }
-                    incomplete_rep_idxs.extend(pending_rep_idxs[loop_idx..].iter().copied());
+                    if selection.is_some() {
+                        incomplete_rep_idxs.push(idx as usize);
+                    } else {
+                        incomplete_rep_idxs.extend(pending_rep_idxs[loop_idx..].iter().copied());
+                    }
                     batch.item_result(
                         &item_id,
                         0,
@@ -785,7 +805,12 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                         Some(e),
                     );
                     partial = true;
-                    partial_outcome = MaterializeOutcome::PartialCancelled;
+                    if !item_failed {
+                        partial_outcome = MaterializeOutcome::PartialCancelled;
+                    }
+                    if selection.is_some() {
+                        continue;
+                    }
                     break;
                 }
                 Err(e) => {
@@ -904,7 +929,7 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
         // 看到当前正在 fetch 的那一个 file 名,丢失批中其他未传文件元数据。
         let mut file_idx = 0usize;
         while file_idx < file_refs.len() {
-            if cancellation.is_cancelled() {
+            if cancellation.is_cancelled() && selection.is_none() {
                 for remaining in &file_refs[file_idx..] {
                     missing_files.push(MissingFileRef {
                         filename: remaining
@@ -988,6 +1013,30 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                     file_idx += 1;
                     continue;
                 }
+            }
+
+            if cancellation.is_cancelled() {
+                missing_files.push(MissingFileRef {
+                    filename: blob_ref
+                        .filename
+                        .clone()
+                        .unwrap_or_else(|| format!("blob-{}", blob_ref.entry_id.as_ref())),
+                    size_bytes: blob_ref.size_bytes,
+                });
+                partial = true;
+                if !item_failed {
+                    partial_outcome = MaterializeOutcome::PartialCancelled;
+                }
+                batch.item_result(
+                    &item_id,
+                    0,
+                    OutboundProgressStatus::Cancelled {
+                        reason: FileTransferCancellationReason::LocalUser,
+                    },
+                    None,
+                );
+                file_idx += 1;
+                continue;
             }
 
             // Resolve the destination for this file. When a user save
@@ -1108,7 +1157,7 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                         },
                         Some(e),
                     );
-                    let end = if cancellation.is_cancelled() {
+                    let end = if cancellation.is_cancelled() && selection.is_none() {
                         file_refs.len()
                     } else {
                         idx + 1
@@ -1127,7 +1176,7 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                         partial_outcome = MaterializeOutcome::PartialCancelled;
                     }
                     file_idx += 1;
-                    if cancellation.is_cancelled() {
+                    if cancellation.is_cancelled() && selection.is_none() {
                         break;
                     }
                     continue;

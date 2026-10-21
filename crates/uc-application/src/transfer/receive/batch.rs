@@ -302,7 +302,7 @@ fn project_items(
                 failure_reason: item.failure_reason,
             })
             .collect();
-        return group_receive_items(attempt, true, members);
+        return group_receive_items(attempt, true, members, &HashSet::new());
     }
     planned
         .iter()

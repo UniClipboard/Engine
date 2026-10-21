@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -8,6 +9,8 @@ use diesel::sql_types::{Nullable, Text};
 use diesel::upsert::excluded;
 use tracing::debug_span;
 
+use super::directory_publish_log_cipher::V3DirectoryPublishLogCipher;
+use super::directory_publish_log_repo::DirectoryPublishProtection;
 use crate::db::models::{EntryReceiveAttemptRow, FileTransferRow, NewFileTransferRow};
 use crate::db::ports::DbExecutor;
 use crate::db::schema::{directory_publish_log, entry_receive_attempt, file_transfer};
@@ -30,15 +33,20 @@ use uc_core::ports::file_transfer::{
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::space::DeriveSpaceSubkeyPort;
 use uc_infra_security::ContentProtection;
+mod retry;
 use uc_observability_contract::{
     log_fields::{log_id, log_vocab},
     uc_debug,
 };
 
+/// 行已绑定此前实际保存的条目；不将其输出纳入新尝试清理。
+const ENTRY_DELIVERED_BINDING: &str = "entry_bound";
+
 /// SQLite adapter for the receiver-side file-transfer projection ports.
 pub struct DieselFileTransferRepository<E> {
     executor: E,
     protection: TransferPersistenceProtection,
+    directory_protection: DirectoryPublishProtection,
 }
 
 impl<E> DieselFileTransferRepository<E> {
@@ -49,14 +57,24 @@ impl<E> DieselFileTransferRepository<E> {
     ) -> Self {
         Self {
             executor,
-            protection: TransferPersistenceProtection::legacy(derive_subkey, current_profile),
+            protection: TransferPersistenceProtection::legacy(
+                derive_subkey.clone(),
+                current_profile.clone(),
+            ),
+            directory_protection: DirectoryPublishProtection::Legacy {
+                derive_subkey,
+                current_profile,
+            },
         }
     }
 
     pub fn new_v3(executor: E, protection: Arc<ContentProtection>) -> Self {
         Self {
             executor,
-            protection: TransferPersistenceProtection::v3(protection),
+            protection: TransferPersistenceProtection::v3(protection.clone()),
+            directory_protection: DirectoryPublishProtection::V3(V3DirectoryPublishLogCipher::new(
+                protection,
+            )),
         }
     }
 }
@@ -547,16 +565,42 @@ impl<E: DbExecutor> GetEntryTransferSummaryPort for DieselFileTransferRepository
     }
 }
 
+const RECEIVE_FAILURE_CODES: &[(ReceiveItemFailureReason, &str)] = &[
+    (
+        ReceiveItemFailureReason::NetworkUnavailable,
+        "network_unavailable",
+    ),
+    (ReceiveItemFailureReason::TimedOut, "timed_out"),
+    (ReceiveItemFailureReason::AccessDenied, "access_denied"),
+    (
+        ReceiveItemFailureReason::StorageUnavailable,
+        "storage_unavailable",
+    ),
+    (
+        ReceiveItemFailureReason::IntegrityCheckFailed,
+        "integrity_check_failed",
+    ),
+    (ReceiveItemFailureReason::Interrupted, "interrupted"),
+    (ReceiveItemFailureReason::Unknown, "unknown"),
+];
+
 fn receive_failure_reason(code: Option<&str>) -> ReceiveItemFailureReason {
-    match code {
-        Some("network_unavailable") => ReceiveItemFailureReason::NetworkUnavailable,
-        Some("timed_out" | "timeout") => ReceiveItemFailureReason::TimedOut,
-        Some("access_denied") => ReceiveItemFailureReason::AccessDenied,
-        Some("storage_unavailable") => ReceiveItemFailureReason::StorageUnavailable,
-        Some("integrity_check_failed") => ReceiveItemFailureReason::IntegrityCheckFailed,
-        Some("interrupted") => ReceiveItemFailureReason::Interrupted,
-        _ => ReceiveItemFailureReason::Unknown,
-    }
+    let code = if code == Some("timeout") {
+        Some("timed_out")
+    } else {
+        code
+    };
+    RECEIVE_FAILURE_CODES
+        .iter()
+        .find_map(|(reason, value)| (Some(*value) == code).then_some(*reason))
+        .unwrap_or(ReceiveItemFailureReason::Unknown)
+}
+
+fn receive_failure_code(reason: ReceiveItemFailureReason) -> &'static str {
+    RECEIVE_FAILURE_CODES
+        .iter()
+        .find_map(|(known, value)| (*known == reason).then_some(*value))
+        .unwrap_or("unknown")
 }
 
 #[async_trait]
@@ -670,7 +714,16 @@ impl<E: DbExecutor> GetEntryReceiveProgressPort for DieselFileTransferRepository
                 failure_reason,
             });
         }
-        let items = group_receive_items(state, directory, items);
+        let delivered = rows
+            .iter()
+            .filter(|row| row.binding_state == ENTRY_DELIVERED_BINDING)
+            .map(|row| {
+                row.receive_item_id
+                    .clone()
+                    .unwrap_or_else(|| row.transfer_id.clone())
+            })
+            .collect::<HashSet<_>>();
+        let items = group_receive_items(state, directory, items, &delivered);
         Ok(Some(EntryReceiveProgress {
             entry_id: attempt.entry_id,
             attempt_id: attempt.current_attempt_id,

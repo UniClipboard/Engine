@@ -1,6 +1,6 @@
 use super::{
-    PreparedReceiveRetry, ReceiveCancellationBarrier, RetryEntryReceiveError,
-    RetryEntryReceiveOutcome, RetrySnapshotReader,
+    BeginReceiveRetryPort, PreparedReceiveRetry, ReceiveCancellationBarrier,
+    RetryEntryReceiveError, RetryEntryReceiveOutcome, RetrySnapshotReader,
 };
 use crate::clipboard::sync::apply_inbound::ApplyInboundClipboardUseCase;
 use crate::space::{CurrentSpaceMemberScopeError, CurrentSpaceMemberScopePort};
@@ -18,6 +18,7 @@ use uc_observability_contract::diagnostics::ObservationContext;
 use uc_observability_contract::{error_source::io_error_kind, uc_warn};
 
 pub(crate) struct RetryEntryReceiveUseCase {
+    pub(crate) begin: Arc<dyn BeginReceiveRetryPort>,
     pub(crate) cache_dir: PathBuf,
     pub(crate) apply: Arc<ApplyInboundClipboardUseCase>,
     pub(crate) query: Arc<ReceiveProgressQuery>,
@@ -175,6 +176,7 @@ impl RetryEntryReceiveUseCase {
         .map_err(|source| preflight_failure(RetryEntryReceiveError::Unavailable(source)))?;
         let (accepted, reply) = oneshot::channel();
         let prepared = PreparedReceiveRetry {
+            begin: self.begin.clone(),
             cancellation: self.cancellation.clone(),
             identity: self.snapshots.identity.clone(),
             scope: self.scope.clone(),

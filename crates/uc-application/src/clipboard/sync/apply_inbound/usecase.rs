@@ -1176,7 +1176,6 @@ impl ApplyInboundClipboardUseCase {
                 prepared,
                 &self.receive_work,
                 ports.get.as_ref(),
-                ports.begin.as_ref(),
                 ports.clock.as_ref(),
             )
             .await?
@@ -1196,7 +1195,7 @@ impl ApplyInboundClipboardUseCase {
         if let Some(prepared) = retry.as_mut() {
             receive_action.retain_source(prepared.source.clone());
             if let Some(selection) = &prepared.selection {
-                receive_action.inherit_saved(&selection.landed);
+                receive_action.inherit_results(selection);
             }
             if let (Some(reply), Some(attempt_id)) =
                 (prepared.accepted.take(), receive_attempt_id.as_ref())

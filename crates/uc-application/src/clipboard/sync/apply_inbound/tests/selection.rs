@@ -1,6 +1,6 @@
 use super::{test_materializer, MockBlobFetcher};
 use crate::clipboard::sync::payload_codec::V3BlobRef;
-use crate::facade::blob_transfer::FetchBlobToPathResult;
+use crate::facade::blob_transfer::{BlobTransferError, FetchBlobToPathResult};
 use crate::transfer::receive::materialization::{
     InboundBlobMaterializer, ReceiveReuseRefusal, ReceiveSelection, ReceiveWorkPlan, ReceivedItem,
     ReceivedOutput,
@@ -354,7 +354,7 @@ async fn cancelled_selected_file_leaves_previous_success_outside_new_cleanup() {
                 .transfer_id
                 .ends_with("member:2")
         })
-        .returning(|_| Err(crate::facade::blob_transfer::BlobTransferError::Cancelled.into()));
+        .returning(|_| Err(BlobTransferError::Cancelled.into()));
     let result = test_materializer(Arc::new(fetcher), cache.path().to_owned())
         .materialize_plan(
             ReceiveWorkPlan::new(
@@ -418,4 +418,88 @@ async fn replaced_symlink_does_not_reuse_another_files_ownership() {
         Some(ReceiveReuseRefusal::OwnershipChanged)
     ));
     assert_eq!(std::fs::read(target).unwrap(), b"success");
+}
+
+#[tokio::test]
+async fn cancelling_selected_first_item_keeps_a_later_previously_saved_file() {
+    let cache = tempfile::tempdir().unwrap();
+    let saved = cache.path().join("iroh-blobs/source/saved.bin");
+    std::fs::create_dir_all(saved.parent().unwrap()).unwrap();
+    std::fs::write(&saved, b"success").unwrap();
+    let mut fetcher = MockBlobFetcher::new();
+    fetcher
+        .expect_fetch_blob_to_path()
+        .times(1)
+        .returning(|command| {
+            command.cancellation.cancel();
+            Err(BlobTransferError::Cancelled.into())
+        });
+    let snapshot = SystemClipboardSnapshot {
+        ts_ms: 1,
+        representations: vec![ObservedClipboardRepresentation::new(
+            RepresentationId::new(),
+            FormatId::from("files"),
+            Some(MimeType("text/uri-list".into())),
+            Vec::new(),
+        )],
+        file_content_digests: Vec::new(),
+        file_set_v1_component: None,
+    };
+    let refs = (0..3)
+        .map(|_| V3BlobRef {
+            ticket: BlobTicket::from_bytes(vec![1]),
+            entry_id: EntryId::from("source"),
+            filename: Some("same.bin".into()),
+            mime: None,
+            size_bytes: 7,
+            representation_index: None,
+        })
+        .collect();
+    let output = test_materializer(Arc::new(fetcher), cache.path().to_owned())
+        .materialize_plan(
+            ReceiveWorkPlan::new(
+                DeviceId::new("peer"),
+                EntryId::from("receiver"),
+                snapshot,
+                refs,
+                None,
+                Some("new".into()),
+                None,
+            )
+            .with_selection(ReceiveSelection {
+                selected: HashSet::from([0]),
+                unselected: HashMap::new(),
+                landed: HashMap::from([(
+                    2,
+                    ReceivedItem {
+                        blob_index: 2,
+                        bytes: 7,
+                        plaintext_hash: *blake3::hash(b"success").as_bytes(),
+                        output: ReceivedOutput::File(ReceiveArtifact {
+                            item_id: "old:member:2".into(),
+                            staged_path: saved.clone(),
+                            final_path: saved.clone(),
+                            ownership: ReceiveArtifactOwnership::ManagedStaging,
+                        }),
+                    },
+                )]),
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        output
+            .completed
+            .iter()
+            .map(|item| item.blob_index)
+            .collect::<Vec<_>>(),
+        vec![2]
+    );
+    assert_eq!(
+        output.snapshot.file_content_digests,
+        vec![*blake3::hash(b"success").as_bytes()]
+    );
+    assert_eq!(output.missing.len(), 2);
+    assert!(output.receive_artifacts.is_empty());
+    assert_eq!(std::fs::read(saved).unwrap(), b"success");
 }

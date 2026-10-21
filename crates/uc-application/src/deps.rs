@@ -4,6 +4,9 @@
 //! 不提供分步构建、默认值或隐式装配逻辑，因此不是 Builder。
 
 use crate::clipboard::history_tags::{HistoryEntryTagReaderPort, HistoryTagStorePort};
+pub use crate::transfer::receive::retry::{
+    BeginReceiveRetryInput, BeginReceiveRetryPort, ReceiveRetryItem, ReceiveRetryItemState,
+};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use uc_core::blob::ports::{BlobContentIngestPort, BlobReaderPort, BlobWriterPort};
@@ -386,6 +389,8 @@ pub struct DirectoryReceivePorts {
     pub get_publish: Arc<dyn GetDirectoryPublishRecordPort>,
     /// 开始首次接收，或在重投时替换精确匹配的已终结 attempt。
     pub begin_receive: Arc<dyn BeginReceiveAttemptPort>,
+    /// 原子接受手动重试及其完整逐项初态。
+    pub begin_retry: Arc<dyn BeginReceiveRetryPort>,
     /// 将精确匹配且正在接收的 attempt 领取为提交结算负责人。
     pub claim_commit: Arc<dyn ClaimReceiveCommitPort>,
     /// 请求取消接收 attempt，但不直接完成结算。

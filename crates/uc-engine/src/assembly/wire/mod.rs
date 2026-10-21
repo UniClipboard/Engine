@@ -739,6 +739,7 @@ pub async fn wire_dependencies_from_inputs(
         record_publish: directory_publish_impl.clone(),
         get_publish: directory_publish_impl,
         begin_receive: directory_attempt_impl.clone(),
+        begin_retry: file_transfer_adapter.clone(),
         claim_commit: directory_attempt_impl.clone(),
         request_cancel: directory_attempt_impl.clone(),
         begin_failure: directory_attempt_impl.clone(),

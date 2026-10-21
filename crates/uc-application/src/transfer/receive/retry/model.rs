@@ -1,4 +1,4 @@
-use super::ReceiveCancellationBarrier;
+use super::{BeginReceiveRetryPort, ReceiveCancellationBarrier};
 use crate::space::CurrentSpaceMemberScopePort;
 use crate::transfer::receive::materialization::ReceiveSelection;
 use crate::transfer::receive::work::{ReceiveAction, ReceiveSource};
@@ -41,6 +41,7 @@ impl fmt::Debug for RetryEntryReceiveError {
 }
 
 pub(crate) struct PreparedReceiveRetry {
+    pub(crate) begin: Arc<dyn BeginReceiveRetryPort>,
     pub(crate) cancellation: Arc<dyn ReceiveCancellationBarrier>,
     pub(crate) identity: Arc<dyn GetEntrySnapshotHashPort>,
     pub(crate) scope: Arc<dyn CurrentSpaceMemberScopePort>,

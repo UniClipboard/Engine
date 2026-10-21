@@ -5,15 +5,12 @@ use crate::space::CurrentSpaceMemberScopeError;
 use crate::transfer::receive::work::{ReceiveRegistrationError, ReceiveWorkRegistry};
 use anyhow::{Context, Error};
 use uc_core::ids::EntryId;
-use uc_core::ports::{
-    AttemptState, BeginReceiveAttemptPort, BeginReceiveOutcome, ClockPort, GetEntryAttemptPort,
-};
+use uc_core::ports::{AttemptState, BeginReceiveOutcome, ClockPort, GetEntryAttemptPort};
 
 pub(crate) async fn accept_retry(
     retry: &mut PreparedReceiveRetry,
     work: &ReceiveWorkRegistry,
     get: &dyn GetEntryAttemptPort,
-    begin: &dyn BeginReceiveAttemptPort,
     clock: &dyn ClockPort,
 ) -> Result<Option<String>, ApplyInboundError> {
     let current = get
@@ -118,13 +115,10 @@ pub(crate) async fn accept_retry(
         }
         return Ok(None);
     }
-    let outcome = begin
-        .begin_redelivery(
-            retry.entry.as_ref(),
-            &retry.expected_attempt,
-            &attempt,
-            clock.now_ms(),
-        )
+    let plan = retry.ledger_plan(&attempt, clock.now_ms())?;
+    let outcome = retry
+        .begin
+        .begin_receive_retry(plan)
         .await
         .context("accept selected receive retry")
         .map_err(ApplyInboundError::Internal)?;

@@ -241,6 +241,7 @@ impl FileTransferAssembly {
             self.receive_work.clone(),
         ));
         let retry = Arc::new(RetryEntryReceiveUseCase {
+            begin: self.directory_receive.begin_retry.clone(),
             cache_dir: self.file_cache_dir.clone(),
             apply: Arc::new(ApplyInboundClipboardUseCase::store_only_pull(
                 StoreOnlyPullDeps {

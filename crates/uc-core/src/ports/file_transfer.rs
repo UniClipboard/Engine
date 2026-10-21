@@ -10,6 +10,7 @@
 
 use super::entry_receive_attempt::AttemptState;
 use async_trait::async_trait;
+use std::collections::HashSet;
 
 /// Failure while completing the one-shot privacy maintenance required after
 /// migrating receiver transfer persistence from plaintext to ciphertext.
@@ -232,14 +233,32 @@ pub fn group_receive_items(
     state: AttemptState,
     directory: bool,
     mut items: Vec<ReceiveItemProgress>,
+    delivered: &HashSet<String>,
 ) -> Vec<ReceiveItemProgress> {
     items.sort_by(|left, right| left.item_id.cmp(&right.item_id));
     if !directory {
-        // 成员字节完成不等于接收记录已经保存；保持既有汇总计数，但业务项不能提前完成。
+        // 下载完成仍需保存；已经交付的继承项不因新尝试接收中而退回传输态。
         if !state.is_terminal() {
             for item in &mut items {
-                if item.status == TrackedFileTransferStatus::Completed {
+                if item.status == TrackedFileTransferStatus::Completed
+                    && !delivered.contains(&item.item_id)
+                {
                     item.status = TrackedFileTransferStatus::Transferring;
+                }
+            }
+        }
+        if state.is_terminal() {
+            for item in &mut items {
+                if matches!(
+                    item.status,
+                    TrackedFileTransferStatus::Pending | TrackedFileTransferStatus::Transferring
+                ) {
+                    if state == AttemptState::Cancelled {
+                        item.status = TrackedFileTransferStatus::Cancelled;
+                    } else {
+                        item.status = TrackedFileTransferStatus::Failed;
+                        item.failure_reason = Some(ReceiveItemFailureReason::Interrupted);
+                    }
                 }
             }
         }
@@ -435,4 +454,69 @@ pub fn compute_aggregate_status(
         return Some(TrackedFileTransferStatus::Cancelled);
     }
     Some(TrackedFileTransferStatus::Completed)
+}
+
+#[cfg(test)]
+mod receive_item_tests {
+    use super::*;
+
+    fn completed(id: &str) -> ReceiveItemProgress {
+        ReceiveItemProgress {
+            item_id: id.into(),
+            kind: ReceiveItemKind::File,
+            status: TrackedFileTransferStatus::Completed,
+            failure_reason: None,
+        }
+    }
+
+    #[test]
+    fn delivered_item_does_not_reenter_transfer_while_new_download_still_needs_commit() {
+        let proof = HashSet::from(["saved".to_owned()]);
+        let result = group_receive_items(
+            AttemptState::Receiving,
+            false,
+            vec![completed("saved"), completed("downloaded")],
+            &proof,
+        );
+        assert_eq!(result[0].item_id, "downloaded");
+        assert_eq!(result[0].status, TrackedFileTransferStatus::Transferring);
+        assert_eq!(result[1].status, TrackedFileTransferStatus::Completed);
+        let directory = group_receive_items(
+            AttemptState::Receiving,
+            true,
+            vec![completed("saved")],
+            &proof,
+        );
+        assert_eq!(directory[0].kind, ReceiveItemKind::DirectoryUnit);
+        assert_eq!(directory[0].status, TrackedFileTransferStatus::Transferring);
+    }
+
+    #[test]
+    fn unstarted_items_follow_terminal_attempt_without_erasing_prior_delivery() {
+        for state in [AttemptState::Failed, AttemptState::Cancelled] {
+            let result = group_receive_items(
+                state,
+                false,
+                vec![
+                    completed("saved"),
+                    ReceiveItemProgress {
+                        item_id: "unstarted".into(),
+                        kind: ReceiveItemKind::File,
+                        status: TrackedFileTransferStatus::Pending,
+                        failure_reason: None,
+                    },
+                ],
+                &HashSet::from(["saved".into()]),
+            );
+            assert_eq!(result[0].status, TrackedFileTransferStatus::Completed);
+            assert_eq!(
+                result[1].status,
+                if state == AttemptState::Cancelled {
+                    TrackedFileTransferStatus::Cancelled
+                } else {
+                    TrackedFileTransferStatus::Failed
+                }
+            );
+        }
+    }
 }
