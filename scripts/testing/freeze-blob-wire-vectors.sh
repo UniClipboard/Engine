@@ -31,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
 RUST
 CARGO_TARGET_DIR="$repo/target" CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 UC_BLOB_VECTOR_OUTPUT="$root/protocol-vectors-rc15.json" \
-  just cargo run --locked --offline --manifest-path "$source_dir/Cargo.toml" -p uc-infra --example emit_blob_vectors
+  just cargo run --locked --offline --manifest-path "$source_dir/crates/uc-infra/Cargo.toml" --example emit_blob_vectors
 mkdir -p crates/uc-infra-p2p/tests/fixtures
 cp "$root/protocol-vectors-rc15.json" crates/uc-infra-p2p/tests/fixtures/blob-connectivity-rc15-vectors.json
 sha256sum "$root/protocol-vectors-rc15.json" > "$root/protocol-vectors-rc15.sha256"

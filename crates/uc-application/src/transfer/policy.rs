@@ -1,0 +1,23 @@
+//! 第七片的资源与单调时间预算；下载、恢复和提供端共用这一份默认值。
+use std::time::Duration;
+
+pub(super) const ACTIVE_DOWNLOADS: usize = 4;
+pub(super) const ACTIVE_DOWNLOADS_PER_PEER: usize = 2;
+pub(super) const QUEUED_DOWNLOADS: usize = 64;
+pub(super) const QUEUED_DOWNLOADS_PER_PEER: usize = 16;
+pub(super) const QUEUE_TIMEOUT: Duration = Duration::from_secs(60);
+pub(super) const FIRST_DATA_TIMEOUT: Duration = Duration::from_secs(60);
+pub(super) const DATA_STALL_TIMEOUT: Duration = Duration::from_secs(300);
+pub(super) const CANCEL_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+pub(super) const MAX_FETCH_ATTEMPTS: u32 = 4;
+pub(super) const FETCH_BACKOFFS: [Duration; 3] = [
+    Duration::from_millis(200),
+    Duration::from_millis(800),
+    Duration::from_millis(2000),
+];
+pub(super) const RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
+pub(super) const ACTIVE_PROVIDES: usize = 4;
+pub(super) const ACTIVE_PROVIDES_PER_PEER: usize = 2;
+pub(super) const UNIDENTIFIED_INBOUND: usize = 16;
+pub(super) const INBOUND_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+pub(super) const CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(30);

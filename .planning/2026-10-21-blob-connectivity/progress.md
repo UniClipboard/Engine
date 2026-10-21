@@ -49,3 +49,18 @@
 - 8 组迁移前旧资料矩阵全部通过，汇总逐项核对内容／旧文件／保留身份成员历史／副本／清理／明文探针；摘要落在 target，两个临时冻结源码目录均不存在。汇总首轮误按固定 presence 后缀找第 1 侧工件，修正实际后缀后完整核验，不重跑网络。
 - metadata、workspace all-targets check、fmt、Rust style、repository preflight 通过；preflight 首轮触发内部 Cargo 等待，已中止，构建结束后串行重跑通过。完整 workspace 首轮失败历史不变。
 - 阶段 0 三项技术证明完成，文档状态统一进入阶段 1；不把原型或迁移前矩阵当作正式受管路径硬验收。下一步实施公平有界调度及精确预算。
+- 阶段 0 已提交 dc0c3b22。阶段 1 最小切片：transfer 内部 DownloadScheduler 原子接收一个逻辑项，返回持有至实际结算的非克隆许可；排队满／到期／取消／关闭明确拒绝。调度不掌握 SDK，运行中任务停止与重试由后续 transport 完整负责人监督，重启不恢复队列。先用可控 Tokio 单调时钟验证 4／2、64／16、60 秒、跨端轮转和 drop/关闭竞争，再接实际交换。
+- 已实现 DownloadScheduler 初版：原子容量检查、同端 FIFO／跨端轮转、60 秒单调排队期限、future 被丢弃或取消时精确撤销自身预留；实际许可记录真正授予时刻，迟到 poll 不重置首数据计时。关闭只封口等待项，运行工作保留许可。定向测试开始编译。
+
+- 调度首轮编译失败为测试使用 DeviceId::from(&str)，实际显式构造器是 new；已修正并保留 scheduler-first.log，生产调度无同类调用。
+- 调度 7 项通过（0.01 秒）：4／2 活跃、64／16 排队、跨端轮转与同端顺序、恰好 60 秒到期、未 poll 的到期项释放队列、取消／丢弃交接、自身预留回收、真正授予时刻与关闭封口。
+- 已新增单项 ReceiveTiming：首数据／停滞期限、重复已验证前缀不续期、累计恢复 30 秒暂停而不归零、4 次真实尝试与固定退避；定向 receive 分组开始。尚未接生产 fetch，不能宣称正式网络预算生效。
+
+- transfer 分组 38 项通过，包含并发 80 个任务只接受 64 个等待者且取消无残留。首次 style 检查拒绝受限可见性的 crate:: 路径和原因枚举上的纯转调分类；改为祖先相对可见性，并只给主错误提供固定原因分类，修复后 style 通过。
+- 正在对最终规则模块串行跑 transfer 定向与根门禁。后续直接实现专属 SDK 交换 port 与完整 transport；当前生产路径仍旧，不用旧测试替代正式迁移验收。
+
+- 最终规则分组 38 项通过（0.02 秒），workspace check 通过。根 preflight 发现已提交的向量脚本 -p uc-infra 被当前包选择器门禁拒绝（旧 monolith 已拆分）；改为直接指定冻结旧 crate 的 manifest，不增加门禁例外或放宽当前工作区检查。重跑向量生成和根门禁。
+
+- 最终检查完成：transfer 38 passed（0.02 秒）、metadata、workspace all-targets check、fmt、Rust style、repository preflight 与差异检查通过。旧向量脚本改为直接使用冻结 crate manifest，重跑 5.76 秒通过，fixture 字节未变化；首轮包选择器门禁失败保留。
+- 手工审查调度登记／预留 Drop／到期清除／关闭、授予时刻与恢复累计路径，均不扩大稳定入口或引入 schema。未安装 code-review skill，仍为手工审查。临时旧源码和矩阵进程均已结束回收；用户原有四个规划目录保留。
+- 当前仍未完成完整 spec：规则模块尚未接生产，旧 SDK Downloader、warmup、对端级取消与旧 provider 仍在；后续必须完成 phase 1 专属 port/资源策略、phase 2 实际迁移与监督、phase 3 部分结果和稳定重试/绑定、phase 4 删除旁路，以及 phase 5 全部必需验收。完整回归未在新规则 head 重跑，原符号化失败和平台/设备跳过记录保留。
