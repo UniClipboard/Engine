@@ -10,6 +10,10 @@
       "expected": "pass"
     },
     {
+      "cell": "d1-l0194-head-invalid-preferences",
+      "expected": "pass"
+    },
+    {
       "cell": "d1-a01-head",
       "expected": "skip",
       "condition": "local-network-unavailable",

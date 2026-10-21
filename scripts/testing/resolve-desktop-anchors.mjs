@@ -108,6 +108,7 @@ export function expandCells(anchorIds, legacyIds = []) {
   for (const from of legacyIds) {
     cells.push(`d1-${from}-head`)
     cells.push(`d1-${from}-head-commit-interrupted`)
+    cells.push(`d1-${from}-head-invalid-preferences`)
   }
   for (const from of anchorIds) cells.push(`d1-${from}-head`)
   cells.push('d1-chain')
