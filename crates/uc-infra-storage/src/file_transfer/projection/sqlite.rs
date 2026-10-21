@@ -306,6 +306,7 @@ mod tests {
 
     fn pending_transfer() -> PendingInboundTransfer {
         PendingInboundTransfer {
+            item_role: None,
             transfer_id: "transfer-1".into(),
             entry_id: "entry-1".into(),
             attempt_id: None,
@@ -435,6 +436,7 @@ mod tests {
 
         let (store, repo, _reader, tempdir) = make_setup();
         repo.upsert_pending_transfer(&PendingInboundTransfer {
+            item_role: None,
             transfer_id: "transfer-private".into(),
             entry_id: "entry-private".into(),
             attempt_id: Some("attempt-private".into()),

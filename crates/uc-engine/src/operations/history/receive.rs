@@ -11,7 +11,12 @@ use uc_application::facade::{
 use crate::{
     CancelEntryReceiveInput, CancelInboundTransferInput, EngineError, EngineErrorCategory,
     EntryReceiveCancellationOutcome, EntryReceiveProgressInput, InboundTransferCancellationOutcome,
-    OperationResult, ReceiveProgressSummary, TransferCancellationReason,
+    OperationResult, ReceiveItemFailureReason, ReceiveItemKind, ReceiveItemSummary,
+    ReceiveProgressSummary, TransferCancellationReason,
+};
+use uc_core::ports::{
+    ReceiveItemFailureReason as CoreReceiveItemFailureReason,
+    ReceiveItemKind as CoreReceiveItemKind,
 };
 use uc_observability_contract::uc_error;
 
@@ -91,6 +96,39 @@ fn receive_progress(progress: uc_core::ports::EntryReceiveProgress) -> ReceivePr
         completed_bytes: progress.completed_bytes,
         items_total: progress.items_total,
         items_completed: progress.items_completed,
+        items: progress
+            .items
+            .into_iter()
+            .map(|item| ReceiveItemSummary {
+                item_id: item.item_id,
+                kind: match item.kind {
+                    CoreReceiveItemKind::Unknown => ReceiveItemKind::Unknown,
+                    CoreReceiveItemKind::File => ReceiveItemKind::File,
+                    CoreReceiveItemKind::Representation => ReceiveItemKind::Representation,
+                    CoreReceiveItemKind::DirectoryUnit => ReceiveItemKind::DirectoryUnit,
+                },
+                state: item.status.to_string(),
+                failure_reason: item.failure_reason.map(|reason| match reason {
+                    CoreReceiveItemFailureReason::NetworkUnavailable => {
+                        ReceiveItemFailureReason::NetworkUnavailable
+                    }
+                    CoreReceiveItemFailureReason::TimedOut => ReceiveItemFailureReason::TimedOut,
+                    CoreReceiveItemFailureReason::AccessDenied => {
+                        ReceiveItemFailureReason::AccessDenied
+                    }
+                    CoreReceiveItemFailureReason::StorageUnavailable => {
+                        ReceiveItemFailureReason::StorageUnavailable
+                    }
+                    CoreReceiveItemFailureReason::IntegrityCheckFailed => {
+                        ReceiveItemFailureReason::IntegrityCheckFailed
+                    }
+                    CoreReceiveItemFailureReason::Interrupted => {
+                        ReceiveItemFailureReason::Interrupted
+                    }
+                    CoreReceiveItemFailureReason::Unknown => ReceiveItemFailureReason::Unknown,
+                }),
+            })
+            .collect(),
     }
 }
 

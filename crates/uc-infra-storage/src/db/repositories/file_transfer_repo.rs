@@ -2,27 +2,30 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use diesel::dsl::sql;
 use diesel::prelude::*;
+use diesel::sql_types::{Nullable, Text};
 use diesel::upsert::excluded;
 use tracing::debug_span;
 
 use crate::db::models::{EntryReceiveAttemptRow, FileTransferRow, NewFileTransferRow};
 use crate::db::ports::DbExecutor;
-use crate::db::schema::{entry_receive_attempt, file_transfer};
+use crate::db::schema::{directory_publish_log, entry_receive_attempt, file_transfer};
 use crate::file_transfer::persistence_cipher::{
     ResolvedTransferPersistenceProtection, TransferMetadata, TransferPersistenceProtection,
 };
 use uc_core::file_transfer::FileTransferCancellationReason;
 use uc_core::ports::entry_receive_attempt::AttemptState;
 use uc_core::ports::file_transfer::{
-    compute_aggregate_status, CancelDirectoryAttemptTransfersPort, EntryReceiveProgress,
-    EntryTransferSummary, ExpiredInflightTransfer, FailInflightTransfersPort,
+    compute_aggregate_status, group_receive_items, CancelDirectoryAttemptTransfersPort,
+    EntryReceiveProgress, EntryTransferSummary, ExpiredInflightTransfer, FailInflightTransfersPort,
     FileTransferProjectionError, FinalizeProvisionalReceivePort, FindAttemptIdForTransferPort,
     FindEntryIdForTransferPort, GetEntryReceiveProgressPort, GetEntryTransferSummaryPort,
     ListExpiredInflightTransfersPort, ListProvisionalReceivesPort, PendingInboundTransfer,
     ProvisionalInboundTransfer, ProvisionalReceiveAction, ProvisionalReceiveError,
-    ProvisionalReceiveRecovery, RecordReceiverTransferPort, SeedProvisionalReceivePort,
-    TrackedFileTransferStatus, UpdateProvisionalReceivePathPort,
+    ProvisionalReceiveRecovery, ReceiveItemFailureReason, ReceiveItemKind, ReceiveItemProgress,
+    RecordReceiverTransferPort, SeedProvisionalReceivePort, TrackedFileTransferStatus,
+    UpdateProvisionalReceivePathPort,
 };
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::space::DeriveSpaceSubkeyPort;
@@ -115,7 +118,7 @@ impl<E: DbExecutor> RecordReceiverTransferPort for DieselFileTransferRepository<
                 "legacy".to_owned()
             },
             receive_item_id: Some(transfer.transfer_id.clone()),
-            item_role: None,
+            item_role: transfer.item_role.map(|role| role.as_str().to_owned()),
             content_hash: None,
             status: TrackedFileTransferStatus::Pending.as_str().to_string(),
             source_device: transfer.origin_device_id.clone(),
@@ -154,6 +157,9 @@ impl<E: DbExecutor> RecordReceiverTransferPort for DieselFileTransferRepository<
                         .set((
                             file_transfer::entry_id.eq(excluded(file_transfer::entry_id)),
                             file_transfer::attempt_id.eq(excluded(file_transfer::attempt_id)),
+                            file_transfer::item_role.eq(sql::<Nullable<Text>>(
+                                "COALESCE(excluded.item_role, file_transfer.item_role)",
+                            )),
                             file_transfer::file_size.eq(excluded(file_transfer::file_size)),
                             file_transfer::source_device.eq(excluded(file_transfer::source_device)),
                             file_transfer::metadata_ciphertext
@@ -541,6 +547,18 @@ impl<E: DbExecutor> GetEntryTransferSummaryPort for DieselFileTransferRepository
     }
 }
 
+fn receive_failure_reason(code: Option<&str>) -> ReceiveItemFailureReason {
+    match code {
+        Some("network_unavailable") => ReceiveItemFailureReason::NetworkUnavailable,
+        Some("timed_out" | "timeout") => ReceiveItemFailureReason::TimedOut,
+        Some("access_denied") => ReceiveItemFailureReason::AccessDenied,
+        Some("storage_unavailable") => ReceiveItemFailureReason::StorageUnavailable,
+        Some("integrity_check_failed") => ReceiveItemFailureReason::IntegrityCheckFailed,
+        Some("interrupted") => ReceiveItemFailureReason::Interrupted,
+        _ => ReceiveItemFailureReason::Unknown,
+    }
+}
+
 #[async_trait]
 impl<E: DbExecutor> GetEntryReceiveProgressPort for DieselFileTransferRepository<E> {
     async fn get_entry_receive_progress(
@@ -563,11 +581,18 @@ impl<E: DbExecutor> GetEntryReceiveProgressPort for DieselFileTransferRepository
                     .filter(file_transfer::entry_id.eq(&entry_id))
                     .filter(file_transfer::attempt_id.eq(Some(&attempt.current_attempt_id)))
                     .load::<FileTransferRow>(conn)?;
-                Ok(Some((attempt, rows)))
+                let directory = directory_publish_log::table
+                    .filter(directory_publish_log::entry_id.eq(&entry_id))
+                    .filter(directory_publish_log::attempt_id.eq(&attempt.current_attempt_id))
+                    .select(directory_publish_log::entry_id)
+                    .first::<String>(conn)
+                    .optional()?
+                    .is_some();
+                Ok(Some((attempt, rows, directory)))
             })
             .map_err(backend)?;
 
-        let Some((attempt, rows)) = result else {
+        let Some((attempt, rows, directory)) = result else {
             return Ok(None);
         };
         let state = AttemptState::from_str(&attempt.attempt_state)
@@ -613,6 +638,39 @@ impl<E: DbExecutor> GetEntryReceiveProgressPort for DieselFileTransferRepository
             }
         })?;
 
+        let mut items = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let status =
+                TrackedFileTransferStatus::from_str_value(&row.status).ok_or_else(|| {
+                    FileTransferProjectionError::Backend("invalid receive item status".into())
+                })?;
+            let kind = match row.item_role.as_deref() {
+                Some("representation") => ReceiveItemKind::Representation,
+                Some("file") => ReceiveItemKind::File,
+                _ => ReceiveItemKind::Unknown,
+            };
+            let failure_reason = match status {
+                TrackedFileTransferStatus::Failed => {
+                    Some(receive_failure_reason(row.failure_code.as_deref()))
+                }
+                TrackedFileTransferStatus::Cancelled
+                    if row.failure_code.as_deref() == Some("timeout") =>
+                {
+                    Some(ReceiveItemFailureReason::TimedOut)
+                }
+                _ => None,
+            };
+            items.push(ReceiveItemProgress {
+                item_id: row
+                    .receive_item_id
+                    .clone()
+                    .unwrap_or_else(|| row.transfer_id.clone()),
+                kind,
+                status,
+                failure_reason,
+            });
+        }
+        let items = group_receive_items(state, directory, items);
         Ok(Some(EntryReceiveProgress {
             entry_id: attempt.entry_id,
             attempt_id: attempt.current_attempt_id,
@@ -621,6 +679,7 @@ impl<E: DbExecutor> GetEntryReceiveProgressPort for DieselFileTransferRepository
             completed_bytes,
             items_total,
             items_completed,
+            items,
         }))
     }
 }
@@ -871,6 +930,7 @@ mod tests {
 
     async fn seed(repo: &Repo, transfer_id: &str, filename: &str) {
         repo.upsert_pending_transfer(&PendingInboundTransfer {
+            item_role: None,
             transfer_id: transfer_id.to_string(),
             entry_id: "entry-directory".to_string(),
             attempt_id: None,

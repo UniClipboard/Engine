@@ -73,6 +73,14 @@ Blob 的完整提供端由 Application `transfer/blob/transport/runtime` 负责�
 `transfer/receive/batch` 汇总所有有效项的事实，完整接收动作在持久保存结算后才交接远端终态；
 单项最后成功不能覆盖之前失败，必要会话结算失败也不能报告完成。批次与获取共用 200ms 的普通进度节流。完整接收和结果结算的迁移状态只在当前执行计划维护。
 
+
+接收进度查询由 `transfer/receive/query` 统一持有读取和枚举，门面与绑定只交接完整查询。
+原汇总计数继续表示成员；新增 `items` 表示已知持久项，已有目录发布记录归为完整目录单元。
+类型使用已有 `item_role`，资料缺失明确为 unknown，不从文件名或任务 ID 猜测；原因仅为固定分类，
+不读取密文元数据正文来拼接公开错误。成员数据完成但 attempt 尚未结算时，项仍显示接收中。
+UniFFI 和 N-API 提供单条查询与进行中列表；N-API 的字节数使用十进制整数串，避免精度损失。
+完整原始清单、未启动项和真实保存结果的合并状态仍以当前执行计划为准。
+
 bridge 对出站连接在握手后订阅既有确认离线事件；已排队的 Offline 即便随后 Online，获取租约及原生开流前仍同步判旧连接失效；后台观察同时推进同步游标，其他 peer 的健康事件不积压成假失活。消息尚未发送时，准入后已确认失活的连接最多更新一次，仍用原准入快照和原 deadline；迟到共同结果已关闭时有界重新获取，不重发已写出的内容。manager 的原 JoinSet 监督连接结束并在 shutdown join，监督只持原生能力，不保活租约。Offline/Lagged 关闭本条连接，不推进成员 epoch、不复用 presence 连接、不自行重发内容；明确不可达的网络 I/O 返回原 Offline，本地授权来源保持 Io source。
 
 原 Application 发送 owner 内部按内容/目标围栏在途尝试：新 Pending 持久成功后才能取代旧写入权，旧 deferred 不覆盖同条内容的新结果；失败的新意图不丢失旧回执。私有 token 只存内存且弱表可回收，不改变持久格式。跨内容 Superseded 的既有竞态见[技术债](../exec-plans/tech-debt-tracker.md)。

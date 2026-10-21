@@ -2,6 +2,7 @@
 //! The complete inbound receive lifecycle is owned separately by
 //! `ClipboardInboundRuntime`.
 
+use crate::transfer::receive::query::ReceiveProgressQuery;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -11,9 +12,9 @@ use uc_core::ids::{DeviceId, EntryId};
 use uc_core::ports::security::TransferCipherPort;
 use uc_core::ports::{
     ClipboardDispatchPort, ClipboardHeader, ClockPort, DeviceIdentityPort, DispatchAck,
-    EntryDeliveryRepositoryPort, FindMobileDeviceByIdPort, FirstSyncStatePort,
-    GetEntryReceiveProgressPort, ListNonTerminalAttemptsPort, LocalIdentityPort,
-    PeerAddressRepositoryPort, PeerReachabilityPort, SettingsPort,
+    EntryDeliveryRepositoryPort, EntryReceiveProgress, FindMobileDeviceByIdPort,
+    FirstSyncStatePort, LocalIdentityPort, PeerAddressRepositoryPort, PeerReachabilityPort,
+    SettingsPort,
 };
 use uc_core::MemberRepositoryPort;
 use uc_core::{ClipboardChangeOrigin, SystemClipboardSnapshot};
@@ -160,8 +161,7 @@ pub struct ClipboardSyncFacade {
     dispatch_uc: Arc<DispatchClipboardEntryUseCase>,
     view_uc: Arc<GetEntryDeliveryViewUseCase>,
     cancel_entry_receive_uc: Option<Arc<CancelEntryReceiveUseCase>>,
-    receive_progress: Option<Arc<dyn GetEntryReceiveProgressPort>>,
-    list_receive_attempts: Option<Arc<dyn ListNonTerminalAttemptsPort>>,
+    receive_progress: Option<Arc<ReceiveProgressQuery>>,
 }
 
 #[derive(Clone, Copy)]
@@ -229,7 +229,6 @@ impl ClipboardSyncFacade {
             view_uc,
             cancel_entry_receive_uc: None,
             receive_progress: None,
-            list_receive_attempts: None,
         }
     }
 
@@ -239,12 +238,10 @@ impl ClipboardSyncFacade {
 
     pub(crate) fn with_entry_receive_cancellation(
         mut self,
-        progress: Arc<dyn GetEntryReceiveProgressPort>,
-        list_attempts: Arc<dyn ListNonTerminalAttemptsPort>,
+        progress: Arc<ReceiveProgressQuery>,
         cancellation: Arc<CancelEntryReceiveUseCase>,
     ) -> Self {
         self.receive_progress = Some(progress);
-        self.list_receive_attempts = Some(list_attempts);
         self.cancel_entry_receive_uc = Some(cancellation);
         self
     }
@@ -252,54 +249,22 @@ impl ClipboardSyncFacade {
     pub async fn get_entry_receive_progress(
         &self,
         entry_id: &EntryId,
-    ) -> Result<Option<uc_core::ports::EntryReceiveProgress>, CancelEntryReceiveError> {
-        let progress = self
-            .receive_progress
+    ) -> Result<Option<EntryReceiveProgress>, CancelEntryReceiveError> {
+        self.receive_progress
             .as_ref()
-            .ok_or(CancelEntryReceiveError::Unavailable)?;
-        progress
-            .get_entry_receive_progress(entry_id.as_ref())
+            .ok_or(CancelEntryReceiveError::Unavailable)?
+            .get(entry_id)
             .await
-            .map_err(|error| {
-                CancelEntryReceiveError::Attempt(
-                    anyhow::Error::from(error).context("read entry receive progress"),
-                )
-            })
     }
 
     pub async fn list_entry_receive_progress(
         &self,
-    ) -> Result<Vec<uc_core::ports::EntryReceiveProgress>, CancelEntryReceiveError> {
-        let attempts = self
-            .list_receive_attempts
+    ) -> Result<Vec<EntryReceiveProgress>, CancelEntryReceiveError> {
+        self.receive_progress
             .as_ref()
             .ok_or(CancelEntryReceiveError::Unavailable)?
-            .list_non_terminal_attempts()
+            .list()
             .await
-            .map_err(|error| {
-                CancelEntryReceiveError::Attempt(
-                    anyhow::Error::from(error).context("list receive attempts"),
-                )
-            })?;
-        let progress = self
-            .receive_progress
-            .as_ref()
-            .ok_or(CancelEntryReceiveError::Unavailable)?;
-        let mut result = Vec::with_capacity(attempts.len());
-        for attempt in attempts {
-            if let Some(current) = progress
-                .get_entry_receive_progress(&attempt.entry_id)
-                .await
-                .map_err(|error| {
-                    CancelEntryReceiveError::Attempt(
-                        anyhow::Error::from(error).context("read entry receive progress"),
-                    )
-                })?
-            {
-                result.push(current);
-            }
-        }
-        Ok(result)
     }
 
     pub async fn cancel_entry_receive(

@@ -9,18 +9,19 @@ use uc_engine::observability::uc_warn;
 use uc_engine::{
     CancelJoinSpaceInput, ChangeEncryptionPassphraseInput, ChooseDeviceGroupInput,
     ClipboardRestoreMode, ClipboardRestoreOutcome, CreateSpaceInput, Engine, EngineConfig,
-    EngineError, EngineEvent, EngineState, EventStream, ExportEntryInput, HostFileHandle,
-    InvitationAvailability, JoinSpaceInput, Operation, OperationResult, OperationTerminal,
-    RecoverSessionInput, RefreshReason, RemoveMemberInput, RestoreClipboardInput, SecretString,
-    SendFilesInput, SendImageInput, SendReportSummary, SendTextInput, StartupLifecycle,
-    StartupLifecycleInput, StartupProgress,
+    EngineError, EngineEvent, EngineState, EntryReceiveProgressInput, EventStream,
+    ExportEntryInput, HostFileHandle, InvitationAvailability, JoinSpaceInput, Operation,
+    OperationResult, OperationTerminal, ReceiveProgressSummary, RecoverSessionInput, RefreshReason,
+    RemoveMemberInput, RestoreClipboardInput, SecretString, SendFilesInput, SendImageInput,
+    SendReportSummary, SendTextInput, StartupLifecycle, StartupLifecycleInput, StartupProgress,
 };
 use zeroize::Zeroizing;
 
 use crate::{
     host, OhActiveClipboard, OhEngineConfig, OhEngineEvent, OhHost, OhInvitationIssued,
-    OhJoinSpaceStatus, OhJoinedSpace, OhLocalDevice, OhNetworkRecoveryStatus, OhRelayOverview,
-    OhRelayOverviewEntry, OhSendReport, OhSessionRecovery, OhSpaceCreated, OhWorkspaceConvergence,
+    OhJoinSpaceStatus, OhJoinedSpace, OhLocalDevice, OhNetworkRecoveryStatus, OhReceiveItem,
+    OhReceiveProgress, OhRelayOverview, OhRelayOverviewEntry, OhSendReport, OhSessionRecovery,
+    OhSpaceCreated, OhWorkspaceConvergence,
 };
 
 #[napi]
@@ -465,6 +466,38 @@ impl OhEngine {
             .map_err(engine_error)?;
         match result {
             OperationResult::ClipboardCaptured { entry_id } => Ok(entry_id),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
+    pub async fn query_entry_receive_progress(
+        &self,
+        entry_id: String,
+    ) -> napi::Result<Option<OhReceiveProgress>> {
+        match self
+            .engine
+            .execute(Operation::QueryEntryReceiveProgress(
+                EntryReceiveProgressInput { entry_id },
+            ))
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::EntryReceiveProgress(progress) => Ok(progress.map(receive_progress)),
+            _ => Err(unexpected_result()),
+        }
+    }
+    #[napi]
+    pub async fn list_entry_receive_progress(&self) -> napi::Result<Vec<OhReceiveProgress>> {
+        match self
+            .engine
+            .execute(Operation::ListEntryReceiveProgress)
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::EntryReceiveProgressList(progress) => {
+                Ok(progress.into_iter().map(receive_progress).collect())
+            }
             _ => Err(unexpected_result()),
         }
     }
@@ -1295,3 +1328,28 @@ fn relay_mode_name(mode: uc_engine::RelayRoutingMode) -> &'static str {
         uc_engine::RelayRoutingMode::Disabled => "disabled",
     }
 }
+
+fn receive_progress(progress: ReceiveProgressSummary) -> OhReceiveProgress {
+    OhReceiveProgress {
+        entry_id: progress.entry_id,
+        attempt_id: progress.attempt_id,
+        state: progress.state,
+        total_bytes: progress.total_bytes.to_string(),
+        completed_bytes: progress.completed_bytes.to_string(),
+        items_total: progress.items_total,
+        items_completed: progress.items_completed,
+        items: progress
+            .items
+            .into_iter()
+            .map(|item| OhReceiveItem {
+                item_id: item.item_id,
+                kind: item.kind.to_string(),
+                state: item.state,
+                failure_reason: item.failure_reason.map(|reason| reason.to_string()),
+            })
+            .collect(),
+    }
+}
+
+#[cfg(test)]
+mod receive_tests;

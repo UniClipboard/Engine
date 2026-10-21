@@ -235,6 +235,25 @@ export interface OhSpaceCreated {
   identityFingerprint: string
 }
 
+export interface OhReceiveItem {
+  itemId: string
+  kind: string
+  state: string
+  failureReason?: string
+}
+
+export interface OhReceiveProgress {
+  entryId: string
+  attemptId: string
+  state: string
+  /** 十进制字节数，保持整数精度。 */
+  totalBytes: string
+  completedBytes: string
+  itemsTotal: number
+  itemsCompleted: number
+  items: OhReceiveItem[]
+}
+
 export interface OhActiveClipboard {
   entryId: string
   activatedBy: string
@@ -262,6 +281,8 @@ export interface OhEngine {
   querySharedDeviceRefresh(requestId: string): Promise<OhSharedDeviceRefresh | null>
   removeMember(deviceId: string): Promise<OhMemberRemoval>
   queryMemberRemoval(): Promise<OhMemberRemoval>
+  queryEntryReceiveProgress(entryId: string): Promise<OhReceiveProgress | null>
+  listEntryReceiveProgress(): Promise<OhReceiveProgress[]>
   queryActiveClipboard(): Promise<OhActiveClipboard | null>
   lifecycleState(): Promise<string>
   suspend(): Promise<void>

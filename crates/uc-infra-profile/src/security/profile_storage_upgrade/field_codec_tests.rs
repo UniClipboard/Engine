@@ -347,6 +347,7 @@ async fn specialized_repositories_use_only_the_selected_v3_strategy() {
     );
     transfers
         .upsert_pending_transfer(&uc_core::ports::file_transfer::PendingInboundTransfer {
+            item_role: None,
             transfer_id: "event-transfer-v3".to_owned(),
             entry_id: "entry-v3".to_owned(),
             attempt_id: None,

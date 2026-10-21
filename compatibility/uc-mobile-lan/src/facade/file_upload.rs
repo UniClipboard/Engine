@@ -209,6 +209,7 @@ impl MobileFileUploadCoordinator {
             .ok_or(MobileFileUploadError::Unavailable)?;
         let session = file_transfer
             .begin_receiver_transfer(BeginReceiverTransfer {
+                item_role: None,
                 transfer_id: input.transfer_id.clone(),
                 peer_id,
                 filename: input.data_name.clone(),

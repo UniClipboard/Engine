@@ -84,15 +84,16 @@ pub use entry_receive_attempt::{
 };
 pub use errors::AppDirsError;
 pub use file_transfer::{
-    compute_aggregate_status, CancelDirectoryAttemptTransfersPort,
+    compute_aggregate_status, group_receive_items, CancelDirectoryAttemptTransfersPort,
     EnsureFileTransferPrivacyMaintenancePort, EntryReceiveProgress, EntryTransferSummary,
     ExpiredInflightTransfer, FailInflightTransfersPort, FileTransferPrivacyMaintenanceError,
     FileTransferProjectionError, FinalizeProvisionalReceivePort, FindAttemptIdForTransferPort,
     FindEntryIdForTransferPort, GetEntryReceiveProgressPort, GetEntryTransferSummaryPort,
     ListExpiredInflightTransfersPort, ListProvisionalReceivesPort, PendingInboundTransfer,
     ProvisionalInboundTransfer, ProvisionalReceiveAction, ProvisionalReceiveError,
-    ProvisionalReceiveRecovery, ReceiveItemRole, RecordReceiverTransferPort,
-    SeedProvisionalReceivePort, TrackedFileTransferStatus, UpdateProvisionalReceivePathPort,
+    ProvisionalReceiveRecovery, ReceiveItemFailureReason, ReceiveItemKind, ReceiveItemProgress,
+    ReceiveItemRole, RecordReceiverTransferPort, SeedProvisionalReceivePort,
+    TrackedFileTransferStatus, UpdateProvisionalReceivePathPort,
 };
 pub use hidden_path::MarkHiddenPort;
 pub use host_event::{

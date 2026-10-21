@@ -148,6 +148,7 @@ mod tests {
 
     fn pending_transfer() -> PendingInboundTransfer {
         PendingInboundTransfer {
+            item_role: None,
             transfer_id: "transfer-1".into(),
             entry_id: "entry-1".into(),
             attempt_id: None,

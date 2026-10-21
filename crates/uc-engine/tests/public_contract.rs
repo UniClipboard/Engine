@@ -1014,7 +1014,22 @@ fn receive_progress_and_cancellation_have_stable_operations_and_results() {
         completed_bytes: 40,
         items_total: 2,
         items_completed: 1,
+        items: vec![uc_engine::ReceiveItemSummary {
+            item_id: "stable-item".into(),
+            kind: uc_engine::ReceiveItemKind::File,
+            state: "failed".into(),
+            failure_reason: Some(uc_engine::ReceiveItemFailureReason::IntegrityCheckFailed),
+        }],
     };
+    let mut serialized = serde_json::to_value(&progress).unwrap();
+    assert_eq!(serialized["items"][0]["kind"], "file");
+    assert_eq!(
+        serialized["items"][0]["failure_reason"],
+        "integrity_check_failed"
+    );
+    serialized.as_object_mut().unwrap().remove("items");
+    let legacy: uc_engine::ReceiveProgressSummary = serde_json::from_value(serialized).unwrap();
+    assert!(legacy.items.is_empty());
     assert_eq!(
         uc_engine::OperationResult::EntryReceiveProgress(Some(progress.clone())),
         uc_engine::OperationResult::EntryReceiveProgress(Some(progress.clone()))
@@ -1030,6 +1045,12 @@ fn receive_progress_and_cancellation_have_stable_operations_and_results() {
                 completed_bytes: 40,
                 items_total: 2,
                 items_completed: 1,
+                items: vec![uc_engine::ReceiveItemSummary {
+                    item_id: "stable-item".into(),
+                    kind: uc_engine::ReceiveItemKind::File,
+                    state: "failed".into(),
+                    failure_reason: Some(uc_engine::ReceiveItemFailureReason::IntegrityCheckFailed),
+                }],
             },
         ])
     );

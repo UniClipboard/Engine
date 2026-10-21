@@ -164,3 +164,16 @@
 - 最终候选App1175通过／1跳过（3.815秒），Engine公开契约50通过（0.025秒）。一条文档搜索命令遇到zsh空glob，无文件改动，已改为rg文件索引确认产品spec目录没有对应文件；行为结论维护在现有稳定设计文档和active plan，不新建重复入口。完整workspace全目标和架构门禁正在完成。
 
 - 最终metadata JSON解析、workspace全目标check（1m18s）、fmt、Rust style、repository preflight、官方观测清单重生（1369处）、变更链接新增失效0和diff检查通过。手工审查独立会话身份、混合结果优先级、非连续成功元数据、来源保留、保存之后交接终态、聚合进度高水位与Actor关闭；code-review skill不可用。无活动Cargo／矩阵进程；未重跑完整workspace测试或最终网络／设备矩阵。目标继续，稳定逐项查询、原资料保留、选项重试CAS／绑定、生命周期与许可完整结算、旧入口删除和最终验收仍未完成。
+
+- 续接08fe5805为progress。本轮先贯通既有持久进度的逐项查询：Core定义纯业务项／固定原因，Core规则按attempt权威汇总目录原单元；SQL只读已有身份／类型／状态／原因枚举，不解密或返回名称、路径、ticket。Engine扩展原查询结果items，原汇总字段保持原成员计数含义。首次workspace全目标check通过（1m43s）。
+- 类型资料由实际获取上下文传入既有item_role字段，删除SQL解析Application命名约定的初稿；历史缺少类型返回unknown，不假称文件。同步迁移既有内部／兼容调用。第二轮workspace检查仍在执行；本轮还没有实现原始重试资料保留或RetryEntryReceive，不将持久查询子步骤冒充完整重试。
+
+- 新增真实SQLite回归13项全部通过（0.179秒），含类型资料保留、损坏原因只回unknown、查询不含名称／路径／设备元数据，以及目录成员全完成但attempt未结算时仍不可报告目录完成。补充UniFFI／N-API查询入口和原结果映射，N-API字节数沿宿主整数串约定避免JS精度损失；固定词表通过Engine Display复用wire_enum同一来源。正在验证两绑定与Core／App回归。
+
+- Core＋App全lib1508通过／1跳过（3.836秒）。查询的原Facade逐attempt循环已移入transfer/receive/query完整负责人，Facade仅交接完整get/list动作；尚待合并内存完整计划事实与原资料。曾重复轮询已结束的39045句柄返回Unknown process id；该句柄此前已确认exit0，没有重启任务，当前验证只等待实际新句柄。
+
+- Engine公开契约首轮48/50执行（47通过／1失败）为测试新增非空items后，列表比较的显式期望仍为空集合；已将显式期望同步为真实非空项，保留原逐字段比较与旧JSON缺省兼容断言，没有弱化为只比数量。receive-items-contract.log保留首轮失败，继续绑定与最终检查。
+
+- 最终Engine公开契约50通过（0.017秒），两绑定lib63通过（0.218秒），SQLite契约13通过（0.225秒）；workspace全目标check通过（1m21s）。当前持久项查询和绑定查询作为完整重试的一部分交付，不将其当作完整业务项结果；真实owner结算／原资料和未启动项合并、RetryEntryReceive、取消绑定与生命周期／许可／最终矩阵仍待继续。实际平台设备未执行，不记为通过。
+
+- 上一目标轮仅核实并回答当前问题，归为 no progress；本轮重新核对实际差异与最终日志，确认查询切片 Engine 契约50、绑定63、SQLite13及workspace全目标检查通过。LAN facade 未按feature隐藏，默认workspace检查已覆盖本轮新增字段。手工审查类型来源、固定错误词表、旧JSON兼容、绑定字节精度、查询负责人及既有持久字段更新；code-review skill不可用，不冒充技能审查。完整逐项最终结果／重试仍未完成，保持原目标。

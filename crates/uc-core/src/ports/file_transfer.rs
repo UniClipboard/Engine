@@ -8,6 +8,7 @@
 // Types use String for transfer_id / entry_id to keep the receiver projection
 // DTOs decoupled from id value objects across crate boundaries.
 
+use super::entry_receive_attempt::AttemptState;
 use async_trait::async_trait;
 
 /// Failure while completing the one-shot privacy maintenance required after
@@ -81,6 +82,7 @@ impl std::fmt::Display for TrackedFileTransferStatus {
 /// Input for seeding a pending transfer record from clipboard metadata.
 #[derive(Debug, Clone)]
 pub struct PendingInboundTransfer {
+    pub item_role: Option<ReceiveItemRole>,
     pub transfer_id: String,
     pub entry_id: String,
     pub attempt_id: Option<String>,
@@ -194,6 +196,84 @@ pub struct EntryTransferSummary {
     pub transfer_ids: Vec<String>,
 }
 
+/// 接收项的业务单元；目录始终按完整原始单元呈现。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiveItemKind {
+    /// 历史记录未保存类型资料；不得根据名称或路径推断。
+    Unknown,
+    File,
+    Representation,
+    DirectoryUnit,
+}
+
+/// 接收失败的固定原因，不携带底层错误正文或来源资料。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiveItemFailureReason {
+    NetworkUnavailable,
+    TimedOut,
+    AccessDenied,
+    StorageUnavailable,
+    IntegrityCheckFailed,
+    Interrupted,
+    Unknown,
+}
+
+/// 可供宿主选择的接收项；身份绑定本次查询的 attempt。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceiveItemProgress {
+    pub item_id: String,
+    pub kind: ReceiveItemKind,
+    pub status: TrackedFileTransferStatus,
+    pub failure_reason: Option<ReceiveItemFailureReason>,
+}
+
+/// 目录完整性由 attempt 的终态决定，不能由最后一个成员完成替代。
+pub fn group_receive_items(
+    state: AttemptState,
+    directory: bool,
+    mut items: Vec<ReceiveItemProgress>,
+) -> Vec<ReceiveItemProgress> {
+    items.sort_by(|left, right| left.item_id.cmp(&right.item_id));
+    if !directory {
+        // 成员字节完成不等于接收记录已经保存；保持既有汇总计数，但业务项不能提前完成。
+        if !state.is_terminal() {
+            for item in &mut items {
+                if item.status == TrackedFileTransferStatus::Completed {
+                    item.status = TrackedFileTransferStatus::Transferring;
+                }
+            }
+        }
+        return items;
+    }
+    let status = match state {
+        AttemptState::Completed => TrackedFileTransferStatus::Completed,
+        AttemptState::Failed => TrackedFileTransferStatus::Failed,
+        AttemptState::Cancelled => TrackedFileTransferStatus::Cancelled,
+        AttemptState::Receiving
+        | AttemptState::Committing
+        | AttemptState::Cancelling
+        | AttemptState::Failing => TrackedFileTransferStatus::Transferring,
+    };
+    let failure_reason = if status == TrackedFileTransferStatus::Failed {
+        Some(
+            items
+                .iter()
+                .filter(|item| item.status == TrackedFileTransferStatus::Failed)
+                .filter_map(|item| item.failure_reason)
+                .find(|reason| *reason != ReceiveItemFailureReason::Unknown)
+                .unwrap_or(ReceiveItemFailureReason::Unknown),
+        )
+    } else {
+        None
+    };
+    vec![ReceiveItemProgress {
+        item_id: "directory_unit".to_owned(),
+        kind: ReceiveItemKind::DirectoryUnit,
+        status,
+        failure_reason,
+    }]
+}
+
 /// Current aggregate progress for any remote inbound receive attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntryReceiveProgress {
@@ -204,6 +284,7 @@ pub struct EntryReceiveProgress {
     pub completed_bytes: i64,
     pub items_total: u32,
     pub items_completed: u32,
+    pub items: Vec<ReceiveItemProgress>,
 }
 
 /// Expired in-flight record with cleanup target.

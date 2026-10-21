@@ -20,7 +20,7 @@ use uc_core::ports::blob::{
     PlaintextHash,
 };
 use uc_core::ports::security::TransferCipherPort;
-use uc_core::ports::ContentHashPort;
+use uc_core::ports::{ContentHashPort, ReceiveItemRole};
 use uc_observability_contract::{error_source::io_error_kind, log_fields::log_id, uc_warn};
 
 use super::notifications::OutboundNotifications;
@@ -123,6 +123,7 @@ pub struct PublishBlobResult {
 /// 不提供 transfer_context 时 fetch_blob 表现等同于改造前——只拉数据,不发事件。
 #[derive(Debug, Clone)]
 pub struct FetchTransferContext {
+    pub item_role: ReceiveItemRole,
     pub(crate) batch: Option<Arc<ReceiveBatch>>,
     pub transfer_id: String,
     /// Clipboard entry that owns this transfer. Directory members use a
@@ -376,6 +377,7 @@ impl BlobTransferFacade {
         };
         facade
             .begin_receiver_transfer(BeginReceiverTransfer {
+                item_role: Some(ctx.item_role),
                 transfer_id: ctx.transfer_id.clone(),
                 peer_id: ctx.peer_id.clone(),
                 filename: ctx.filename.clone(),
@@ -1389,6 +1391,7 @@ mod tests {
                             ticket: BlobTicket::from_bytes(vec![1; 32]),
                             entry_id: EntryId::from("sender-image"),
                             transfer_context: Some(FetchTransferContext {
+                                item_role: ReceiveItemRole::Representation,
                                 batch: None,
                                 transfer_id: "entry:attempt:a1:representation:0".to_owned(),
                                 entry_id: "entry".to_owned(),

@@ -42,6 +42,7 @@ use crate::transfer::file::facade::{FileTransferFacade, FileTransferFacadeDeps};
 use crate::transfer::file::lifecycle::FileTransferLifecycleDeps;
 use crate::transfer::receive::cancellation::CancelEntryReceiveUseCase;
 use crate::transfer::receive::materialization::{FileCacheBlobMaterializer, InboundBlobFetcher};
+use crate::transfer::receive::query::ReceiveProgressQuery;
 use crate::transfer::receive::reconciliation::ReceiveReadinessCoordinator;
 use crate::transfer::receive::work::ReceiveWorkRegistry;
 
@@ -218,8 +219,10 @@ impl FileTransferAssembly {
             self.receive_work.clone(),
         );
         facade.with_entry_receive_cancellation(
-            Arc::clone(&self.directory_receive.entry_progress),
-            Arc::clone(&self.directory_receive.list_attempts),
+            Arc::new(ReceiveProgressQuery::new(
+                Arc::clone(&self.directory_receive.entry_progress),
+                Arc::clone(&self.directory_receive.list_attempts),
+            )),
             cancellation,
         )
     }

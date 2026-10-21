@@ -8,7 +8,7 @@ use uc_core::ports::file_transfer::{
 };
 use uc_core::ports::{
     ClockPort, FinalizeProvisionalReceivePort, ProvisionalReceiveAction, ProvisionalReceiveError,
-    RecordReceiverTransferPort, SeedProvisionalReceivePort,
+    ReceiveItemRole, RecordReceiverTransferPort, SeedProvisionalReceivePort,
 };
 use uc_core::FileTransferEvent;
 
@@ -33,6 +33,7 @@ pub enum ReceiverTransferRegistration {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BeginReceiverTransfer {
+    pub item_role: Option<ReceiveItemRole>,
     pub transfer_id: String,
     pub peer_id: String,
     pub filename: String,
@@ -184,6 +185,7 @@ impl FileTransferFacade {
             } => self
                 .repo
                 .upsert_pending_transfer(&PendingInboundTransfer {
+                    item_role: input.item_role,
                     transfer_id: input.transfer_id.clone(),
                     entry_id: entry_id.clone(),
                     attempt_id: attempt_id.clone(),

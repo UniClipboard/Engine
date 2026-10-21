@@ -272,6 +272,47 @@ pub enum DeliveryFailureReasonSummary {
     Internal,
 }
 
+wire_enum! {
+    serde
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum ReceiveItemKind {
+        Unknown => "unknown",
+        File => "file",
+        Representation => "representation",
+        DirectoryUnit => "directory_unit",
+    }
+}
+wire_enum! {
+    serde
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum ReceiveItemFailureReason {
+        NetworkUnavailable => "network_unavailable",
+        TimedOut => "timed_out",
+        AccessDenied => "access_denied",
+        StorageUnavailable => "storage_unavailable",
+        IntegrityCheckFailed => "integrity_check_failed",
+        Interrupted => "interrupted",
+        Unknown => "unknown",
+    }
+}
+impl fmt::Display for ReceiveItemKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.wire())
+    }
+}
+impl fmt::Display for ReceiveItemFailureReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.wire())
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiveItemSummary {
+    pub item_id: String,
+    pub kind: ReceiveItemKind,
+    pub state: String,
+    pub failure_reason: Option<ReceiveItemFailureReason>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReceiveProgressSummary {
     pub entry_id: String,
@@ -281,6 +322,8 @@ pub struct ReceiveProgressSummary {
     pub completed_bytes: i64,
     pub items_total: u32,
     pub items_completed: u32,
+    #[serde(default)]
+    pub items: Vec<ReceiveItemSummary>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

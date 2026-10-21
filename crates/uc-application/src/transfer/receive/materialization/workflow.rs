@@ -25,8 +25,8 @@ use uc_core::ports::inbound_file_target::{
 use uc_core::ports::{
     AttemptState, ClaimReceiveCommitPort, ClockPort, GetEntryAttemptPort, PublishPhase,
     ReceiveArtifact, ReceiveArtifactOwnership, ReceiveArtifactPhase, ReceiveArtifactRecord,
-    ReceiveArtifactResolution, RecordDirectoryPublishPort, RecordReceiveArtifactsPort,
-    DIRECTORY_RECEIVE_STAGING_PREFIX,
+    ReceiveArtifactResolution, ReceiveItemRole, RecordDirectoryPublishPort,
+    RecordReceiveArtifactsPort, DIRECTORY_RECEIVE_STAGING_PREFIX,
 };
 use uc_core::{MimeType, ObservedClipboardRepresentation, SystemClipboardSnapshot};
 use uc_observability_contract::{
@@ -1883,6 +1883,7 @@ fn directory_member_transfer_context(
     batch_position: BatchPosition,
 ) -> FetchTransferContext {
     FetchTransferContext {
+        item_role: ReceiveItemRole::File,
         batch: None,
         transfer_id: directory_member_transfer_id(receiver_entry_id, attempt_id, member_index),
         entry_id: receiver_entry_id.as_ref().to_owned(),
@@ -1937,6 +1938,7 @@ fn directory_representation_transfer_context(
     batch_position: BatchPosition,
 ) -> FetchTransferContext {
     FetchTransferContext {
+        item_role: ReceiveItemRole::Representation,
         batch: None,
         transfer_id: directory_representation_transfer_id(
             receiver_entry_id,

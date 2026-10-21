@@ -14,12 +14,13 @@ use uc_engine::observability::{
 use uc_engine::{
     ChangeEncryptionPassphraseInput, ClipboardRestoreMode, ClipboardRestoreOutcome,
     CreateSpaceInput, CustomRelayMutation, CustomRelayMutationOutcome, CustomRelayRejection,
-    Engine, EngineConfig, ExportEntryInput, HostCapabilities, HostCapabilityError,
-    HostCapabilityErrorCategory, HostClipboard, HostClipboardRepresentation, HostClipboardSnapshot,
-    HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata, HostSecureStorage,
-    JoinSpaceInput, ObserveClipboardChangeInput, Operation, OperationResult, RecoverSessionInput,
-    RemoveMemberInput, ResendEntryInput, RestoreClipboardInput, SecretString, SendFilesInput,
-    SendImageInput, SendTextInput, StartupLifecycleInput, StartupProgress,
+    Engine, EngineConfig, EntryReceiveProgressInput, ExportEntryInput, HostCapabilities,
+    HostCapabilityError, HostCapabilityErrorCategory, HostClipboard, HostClipboardRepresentation,
+    HostClipboardSnapshot, HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata,
+    HostSecureStorage, JoinSpaceInput, ObserveClipboardChangeInput, Operation, OperationResult,
+    ReceiveProgressSummary, RecoverSessionInput, RemoveMemberInput, ResendEntryInput,
+    RestoreClipboardInput, SecretString, SendFilesInput, SendImageInput, SendTextInput,
+    StartupLifecycleInput, StartupProgress,
 };
 use zeroize::Zeroizing;
 
@@ -185,6 +186,25 @@ pub struct SpaceCreated {
 pub struct SessionRecovery {
     pub unlocked: bool,
     pub resumed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ReceiveItem {
+    pub item_id: String,
+    pub kind: String,
+    pub state: String,
+    pub failure_reason: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ReceiveProgress {
+    pub entry_id: String,
+    pub attempt_id: String,
+    pub state: String,
+    pub total_bytes: i64,
+    pub completed_bytes: i64,
+    pub items_total: u32,
+    pub items_completed: u32,
+    pub items: Vec<ReceiveItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -681,6 +701,13 @@ enum WorkerCommand {
         entry_id: String,
         mode: BindingClipboardRestoreMode,
         response: mpsc::Sender<Result<BindingClipboardRestoreOutcome, BindingError>>,
+    },
+    QueryEntryReceiveProgress {
+        entry_id: String,
+        response: mpsc::Sender<Result<Option<ReceiveProgress>, BindingError>>,
+    },
+    ListEntryReceiveProgress {
+        response: mpsc::Sender<Result<Vec<ReceiveProgress>, BindingError>>,
     },
     QueryActiveClipboard {
         response: mpsc::Sender<Result<Option<ActiveClipboard>, BindingError>>,
@@ -1421,6 +1448,16 @@ impl MobileEngine {
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
+    pub fn query_entry_receive_progress(
+        &self,
+        entry_id: String,
+    ) -> Result<Option<ReceiveProgress>, BindingError> {
+        self.request(|response| WorkerCommand::QueryEntryReceiveProgress { entry_id, response })
+    }
+    pub fn list_entry_receive_progress(&self) -> Result<Vec<ReceiveProgress>, BindingError> {
+        self.request(|response| WorkerCommand::ListEntryReceiveProgress { response })
+    }
+
     pub fn query_active_clipboard(&self) -> Result<Option<ActiveClipboard>, BindingError> {
         self.request(|response| WorkerCommand::QueryActiveClipboard { response })
     }
@@ -1994,6 +2031,29 @@ async fn run_operations(
                     .await
                     .map_err(BindingError::from)
                     .and_then(map_clipboard_restored);
+                let _ = response.send(result);
+            }
+            WorkerCommand::QueryEntryReceiveProgress { entry_id, response } => {
+                let result = engine
+                    .execute(Operation::QueryEntryReceiveProgress(
+                        EntryReceiveProgressInput { entry_id },
+                    ))
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(map_receive_progress);
+                let _ = response.send(result);
+            }
+            WorkerCommand::ListEntryReceiveProgress { response } => {
+                let result = engine
+                    .execute(Operation::ListEntryReceiveProgress)
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(|result| match result {
+                        OperationResult::EntryReceiveProgressList(progress) => {
+                            Ok(progress.into_iter().map(receive_progress).collect())
+                        }
+                        _ => Err(BindingError::UnexpectedResult),
+                    });
                 let _ = response.send(result);
             }
             WorkerCommand::QueryActiveClipboard { response } => {
@@ -2716,6 +2776,31 @@ fn map_clipboard_restored(
         }
         _ => Err(BindingError::UnexpectedResult),
     }
+}
+
+fn receive_progress(progress: ReceiveProgressSummary) -> ReceiveProgress {
+    ReceiveProgress {
+        entry_id: progress.entry_id,
+        attempt_id: progress.attempt_id,
+        state: progress.state,
+        total_bytes: progress.total_bytes,
+        completed_bytes: progress.completed_bytes,
+        items_total: progress.items_total,
+        items_completed: progress.items_completed,
+        items: progress
+            .items
+            .into_iter()
+            .map(|item| ReceiveItem {
+                item_id: item.item_id,
+                kind: item.kind.to_string(),
+                state: item.state,
+                failure_reason: item.failure_reason.map(|reason| reason.to_string()),
+            })
+            .collect(),
+    }
+}
+fn map_receive_progress(result: OperationResult) -> Result<Option<ReceiveProgress>, BindingError> {
+    unpack_operation!(result, OperationResult::EntryReceiveProgress(progress) => progress.map(receive_progress))
 }
 
 fn map_active_clipboard(result: OperationResult) -> Result<Option<ActiveClipboard>, BindingError> {
@@ -3615,3 +3700,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod receive_tests;

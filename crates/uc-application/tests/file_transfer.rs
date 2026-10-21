@@ -448,6 +448,7 @@ fn build_context() -> TestContext {
 
 fn entry_transfer(transfer_id: &str) -> BeginReceiverTransfer {
     BeginReceiverTransfer {
+        item_role: None,
         transfer_id: transfer_id.into(),
         peer_id: "peer-1".into(),
         filename: "report.pdf".into(),
