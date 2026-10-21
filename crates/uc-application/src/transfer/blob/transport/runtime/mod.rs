@@ -7,3 +7,11 @@ pub use owner::{BlobShutdownWait, BlobTransport};
 
 #[cfg(test)]
 mod tests;
+
+mod download;
+pub use download::BlobDownloadResources;
+pub(in super::super::super) use download::PreparedDownload;
+
+mod supervision;
+
+pub(in super::super::super) use supervision::{DownloadCompletion, DownloadTask};

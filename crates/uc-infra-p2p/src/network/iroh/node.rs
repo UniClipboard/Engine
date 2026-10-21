@@ -98,7 +98,9 @@ use super::admission_transport_material::IrohAdmissionTransportMaterial;
 use super::blob_exchange::{IrohBlobExchangeAdapter, IrohBlobHandler};
 use super::blobs::{IrohBlobTransferAdapter, BLOBS_ALPN};
 use super::connectivity::{IrohPeerReachabilityHandler, PresenceEnvironment};
-use uc_application::deps::{BlobExchangePort, BlobStoreLifecyclePort, BlobTransport};
+use uc_application::deps::{
+    BlobExchangePort, BlobReadStorePort, BlobStoreLifecyclePort, BlobTransport,
+};
 use uc_sync_protocol::peer_reachability::{LEGACY_PEER_REACHABILITY_ALPN, PEER_REACHABILITY_ALPN};
 #[cfg(test)]
 const LEGACY_CLIPBOARD_ALPN: &[u8] = b"uniclipboard/clipboard/0";
@@ -203,6 +205,8 @@ pub struct ActiveClipboardPullHandlers {
 
 /// [`IrohSessionBuilder::install_blobs`] 产出的 blob port。
 pub struct BlobHandlers {
+    pub transport: Arc<BlobTransport>,
+    pub read_store: Arc<dyn BlobReadStorePort>,
     pub blob_transfer: Arc<dyn BlobTransferPort>,
 }
 
@@ -1535,8 +1539,8 @@ impl IrohSessionBuilder {
         }
 
         let exchange = Arc::new(IrohBlobExchangeAdapter::new(store.clone()));
-        let owner = assemble(exchange.clone(), exchange);
-        self.install_session_handler([BLOBS_ALPN], IrohBlobHandler::new(owner))?;
+        let owner = assemble(exchange.clone(), exchange.clone());
+        self.install_session_handler([BLOBS_ALPN], IrohBlobHandler::new(owner.clone()))?;
 
         let adapter = Arc::new(IrohBlobTransferAdapter::new(
             Arc::clone(&self.context.endpoint),
@@ -1550,6 +1554,8 @@ impl IrohSessionBuilder {
         );
 
         Ok(BlobHandlers {
+            transport: owner,
+            read_store: exchange,
             blob_transfer: adapter,
         })
     }
@@ -2246,7 +2252,7 @@ mod tests {
             .expect("install clipboard");
 
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let BlobHandlers { blob_transfer } = builder
+        let BlobHandlers { blob_transfer, .. } = builder
             .install_blobs(tempdir.path().join("iroh-blobs"), {
                 let deps = builder.connectivity_deps(
                     ConnectivityProfile::Blob,

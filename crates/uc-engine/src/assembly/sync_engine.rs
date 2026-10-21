@@ -28,10 +28,10 @@ use crate::dev::{
 };
 use uc_application::deps::{
     ApplicationClipboardAdapters, ApplicationNetworkAdapters, ApplicationNetworkBinding,
-    ApplicationSpaceAdapters, ApplyGroupUpdatePort, BlobTransport, ClipboardReceiverPort,
-    ConnectivityManager, ConnectivityPolicy, GroupUpdateEndpoint, GroupUpdateLocalWorkPort,
-    GroupUpdateReceiverPort, GroupUpdateWirePort, HistoryWirePort, IdleRetentionPolicy,
-    LifecycleError, MembershipHistoryReceiver, MembershipHistoryTransport,
+    ApplicationSpaceAdapters, ApplyGroupUpdatePort, BlobDownloadResources, BlobTransport,
+    ClipboardReceiverPort, ConnectivityManager, ConnectivityPolicy, GroupUpdateEndpoint,
+    GroupUpdateLocalWorkPort, GroupUpdateReceiverPort, GroupUpdateWirePort, HistoryWirePort,
+    IdleRetentionPolicy, LifecycleError, MembershipHistoryReceiver, MembershipHistoryTransport,
     PeerIdentityDirectoryPort, PeerReachabilityTransport, PeerReachabilityTransportPorts,
     SpaceAdmissionAdapters, SpaceMembershipAdapters, SpaceRuntimeAdapters,
 };
@@ -46,6 +46,7 @@ use uc_infra_local::fs::{
     FsAtomicPublisher, FsDirectoryStagingCleaner, FsHiddenPathMarker, FsInboundFileTarget,
 };
 use uc_infra_p2p::network::iroh::{
+    blob_exchange::IrohBlobSourceResolver,
     connectivity::{ConnectivityProfile, PeerReachabilityWire},
     group_update_adapter::{GroupUpdateWire, IrohGroupUpdateAdapter, SessionGroupUpdateLocalWork},
     ActiveClipboardHandlers, ActiveClipboardPullHandlers, BlobHandlers, ClipboardHandlers,
@@ -340,7 +341,7 @@ pub async fn prepare_sync_session(
     )?;
 
     // 同一存储上的交换能力交给唯一 Application 负责人；Router 不再由 SDK 自管。
-    // BlobReference 仍属于 SQLite 仓储装配，获取和输出迁移继续由 transfer 负责。
+    // SQLite 引用与纯本地存储能力交给 transfer，完整条目提交仍归既有接收权威。
     let blob_connectivity = builder.connectivity_deps(
         ConnectivityProfile::Blob,
         Arc::clone(&space_setup.peer_addr_repo),
@@ -349,7 +350,11 @@ pub async fn prepare_sync_session(
         Arc::clone(&space_setup.fingerprint),
         Arc::clone(&peer_reachability),
     );
-    let BlobHandlers { blob_transfer } = builder
+    let BlobHandlers {
+        blob_transfer,
+        transport: blob_transport,
+        read_store: blob_read_store,
+    } = builder
         .install_blobs(
             space_setup.iroh_blob_store_dir.clone(),
             move |exchange, lifecycle| {
@@ -565,6 +570,14 @@ pub async fn prepare_sync_session(
             staging_cleanup: FsDirectoryStagingCleaner::new(),
         });
     let application_network = application.assemble_network(ApplicationNetworkAdapters {
+        blob_downloads: Arc::new(BlobDownloadResources {
+            transport: blob_transport,
+            store: blob_read_store,
+            source: Arc::new(IrohBlobSourceResolver::new(
+                space_setup.peer_access.clone(),
+                space_setup.fingerprint.clone(),
+            )),
+        }),
         blob_transfer: Arc::clone(&blob_transfer),
         blob_reference: Arc::clone(&space_setup.blob_reference_repo),
         outbound_progress_reporter: Arc::clone(&outbound_progress_reporter),

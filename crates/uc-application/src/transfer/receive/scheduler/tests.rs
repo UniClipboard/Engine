@@ -10,7 +10,6 @@ use tokio::sync::{mpsc, Barrier};
 use tokio::task::JoinSet;
 use tokio::time::{advance, Instant};
 use tokio_util::sync::CancellationToken;
-use uc_core::ids::DeviceId;
 
 type Waiting<'a> = Pin<Box<dyn Future<Output = Result<DownloadPermit, ScheduleError>> + Send + 'a>>;
 fn waiting<'a>(
@@ -18,7 +17,8 @@ fn waiting<'a>(
     peer: &str,
     cancel: &'a CancellationToken,
 ) -> Waiting<'a> {
-    Box::pin(scheduler.acquire(DeviceId::new(peer), cancel))
+    let queued = scheduler.reserve(*blake3::hash(peer.as_bytes()).as_bytes(), cancel);
+    Box::pin(async move { queued?.wait(cancel).await })
 }
 fn refusal(result: Result<DownloadPermit, ScheduleError>, expected: ScheduleRefusal) {
     let Err(error) = result else {

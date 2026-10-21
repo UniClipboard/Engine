@@ -96,6 +96,7 @@ impl ConnectivityBackend for Backend {
     async fn connect(
         &self,
         _: DeviceId,
+        _address_hint: Option<Vec<u8>>,
         _cancel: CancellationToken,
     ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
         let id = self.calls.fetch_add(1, Ordering::SeqCst);
@@ -359,6 +360,7 @@ async fn last_waiter_keeps_capacity_and_backend_failure_until_real_settlement() 
         async fn connect(
             &self,
             _: DeviceId,
+            _address_hint: Option<Vec<u8>>,
             _: CancellationToken,
         ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
             self.entered.add_permits(1);
@@ -655,6 +657,7 @@ async fn backend_panic_reaches_waiter_and_repeated_shutdown_retains_source() {
         async fn connect(
             &self,
             _: DeviceId,
+            _address_hint: Option<Vec<u8>>,
             _cancel: CancellationToken,
         ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
             panic!("private-panic-sentinel")
@@ -1591,3 +1594,78 @@ mod inbound;
 
 #[path = "lifetime_tests.rs"]
 mod lifetime;
+
+#[tokio::test]
+async fn identity_lookup_scope_cannot_gain_a_fresh_grant_after_revocation_or_session_restart() {
+    struct Fence {
+        epoch: usize,
+        current: Arc<AtomicUsize>,
+    }
+    impl super::InboundAdmissionFence for Fence {
+        fn check_current(&self, _: &DeviceId) -> Result<(), ConnectivityError> {
+            if self.current.load(Ordering::SeqCst) == self.epoch {
+                Ok(())
+            } else {
+                Err(ConnectivityError::Denied)
+            }
+        }
+    }
+    struct ScopedAdmission(Arc<AtomicUsize>);
+    #[async_trait]
+    impl SessionConnectionAdmissionPort for ScopedAdmission {
+        fn inbound_fence(&self) -> Option<Box<dyn super::InboundAdmissionFence>> {
+            Some(Box::new(Fence {
+                epoch: self.0.load(Ordering::SeqCst),
+                current: self.0.clone(),
+            }))
+        }
+        fn begin(&self, target: DeviceId) -> Box<dyn AdmissionAttempt> {
+            Admission(self.0.clone()).begin(target)
+        }
+        async fn adopt_inbound(
+            &self,
+            _: Arc<dyn PeerConnection>,
+            _: &dyn InboundIdentityReservation,
+        ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError> {
+            panic!("outbound scope fixture")
+        }
+    }
+    let (_, backend, epoch) = fixture(ConnectionMode::Multiplexed, ConnectivityPolicy::default());
+    let manager = ConnectivityManager::new(
+        backend.clone(),
+        Arc::new(ScopedAdmission(epoch.clone())),
+        ConnectivityPolicy::default(),
+    );
+    let before_identity = manager.freeze_request();
+    epoch.store(1, Ordering::SeqCst);
+    assert!(matches!(
+        before_identity.bind(DeviceId::new("peer"), Vec::new()),
+        Err(ConnectivityError::Denied)
+    ));
+    let before_queue = manager
+        .freeze_request()
+        .bind(DeviceId::new("peer"), Vec::new())
+        .expect("current request");
+    epoch.store(2, Ordering::SeqCst);
+    assert!(matches!(
+        before_queue
+            .connect(
+                Instant::now() + Duration::from_secs(1),
+                &CancellationToken::new()
+            )
+            .await,
+        Err(ConnectivityError::Denied)
+    ));
+    let old_session = manager.freeze_request();
+    manager.disconnect_all().await.expect("restart session");
+    assert!(matches!(
+        old_session.bind(DeviceId::new("peer"), Vec::new()),
+        Err(ConnectivityError::Stopped)
+    ));
+    assert_eq!(
+        backend.calls.load(Ordering::SeqCst),
+        0,
+        "old request must never dial under renewed authority"
+    );
+    manager.shutdown().await.expect("shutdown");
+}

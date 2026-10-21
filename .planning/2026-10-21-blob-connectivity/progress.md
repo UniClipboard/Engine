@@ -110,3 +110,20 @@
 - 提供端已提交 6d0c13c1；开始修复下载恢复所需的旧连接寿命等待。refresh 改为消费旧 lease，保存原资格／会话，退役旧缓存，在方向名额实际释放后重拨；关闭和本地工作任一未完都不能提前拨号。首轮编译发现 membership history 也调用该入口，已同步迁移；会话测试改为监督异步 disconnect_all，未丢弃未 poll 的 future。日志 refresh-lifetime-tests.log 保留。
 
 - 重连修复的 Application 全库 1157 passed／1 skipped（3.863 秒）、workspace all-targets check（1m18s）、metadata JSON、fmt、Rust style、repository preflight 和 diff check 均通过。手工审查消费旧租约、缓存强引用、寿命通知先归还许可再唤醒、重复会话及全部调用方；本轮没有启动全 workspace 测试或重跑最终网络矩阵，不把原 profile 诊断失败结案。
+
+- 续接 61423f3a 为 progress，工作区仅用户四个原有规划目录。当前迁移不再扩展提供端测试：实际 FetchBlobUseCase 必须改用受管获取，并持下载许可及内容保护覆盖输出／解密、引用和 tag；外层 select 不能丢弃实际任务。ticket 来源需以真实身份目录解析，开始解析前冻结原会话／撤销围栏，不能在外部队列之后新授资格。旧 fetch 还用 ticket 完整地址预热；新路径必须把该地址作为本请求的不透明拨号提示传给 Uni，不建立第二套原生连接缓存或为地址再拨一次。
+- 已开始把票据地址改为本请求不透明提示，沿共同 flight、失活刷新和唯一 backend 传递；不持久化、不增加地址缓存。首轮 all-targets check 仅发现四个测试直调 backend 缺少新参数，已迁移；download-hint-check.log 保留。
+- 实际下载代码已开始取代 FetchBlobUseCase 中 Core fetch/fetch_to_path 调用：新增纯本地 read/protect/export port 与票据来源能力，Engine 组装同一 BlobTransport/FsStore；下载许可和 TempTag 持到输出、解密、引用及标签完成。正在编译及迁移 fixture，尚未宣称本轮接线可交付。首轮 owner 编译暴露新增取消分类的穷举分支，已补齐；接线编译暴露批量替换导致结果构造括号多一层，已修正，原日志均保留。
+- 为避免异步身份查询在队列前形成无界隐藏等待，调度键改用票据的认证公钥（不作为业务 DeviceId），同步 inspect + reserve 后才监督工作；活跃许可起算覆盖权威 DeviceId 查询、当前准入和网络。身份查询前的原会话／撤销围栏持续由 ScopedAttempt 保持，地址提示只经过唯一 Uni backend，不落库。
+- 新生产组装已通过一次 workspace all-targets check（1m17s），当前继续修正取消实际结算，不能将该中间编译作为最终交付。旧 facade 对端级 shutdown 调用已删除，获取 future 的外层 select 已删除；唯一监督任务返回不透明完成通知，取消协调者先触发本流取消，再等待真实获取／本地工作及本次会话结算，五秒超时只结束调用等待。反向通知由同一 transport 监督一个有界、按任务合并的 actor，不再直接 await reporter。实际测试及最终检查待完成。
+- 下载获取／同步调度／原连接围栏／提供端定向 nextest 135 passed（0.122 秒），含原文件引用及内存解密回归、取消慢本地工作五秒返回未完成并重复等待真实结束、不调用旧对端级 shutdown。开始当前生产 Engine Direct 文件端到端验收，实际获取应全部经过新 Uni；尚未把进度 actor、重试分类或完整接收提交的余项标完成。
+- 当前生产获取 Direct E02-file-transfer（275ms）与强制 Relay E02-relay-only-file-transfer（147ms）均双向精确通过，工件在 target/blob-connectivity-evidence/download-{direct,relay}；这两组是提供端和下载端都已接线的当前资料验收，不替代最终旧新／资源矩阵。
+- 永久阻塞 reporter＋本地慢读用例在调用方保留和丢弃两种情况下均通过：首个取消五秒明确未完成，重复调用接同一次实际收尾，释放慢读后取消完成；不调用对端级 shutdown，transport 关闭收集通知 actor。定向 135 passed（0.122秒）。Rust style 首轮可见性路径误报已用相对祖先范围修正。重试分类正在接入 native 错误白名单；首轮显式 Option 类型推断失败已修正，日志保留。
+
+- 当前迁移最终 P2P／SDK／向量 324 passed／3 skipped（39.232秒）。全库 App 第一轮新增身份慢读测试发现取消来源被宽泛 Connectivity 包装成了 Settlement，已统一调度／Uni 语义分类并修正，定向1 passed（0.029秒）后全库1159 passed／1 skipped。原失败输出、缺少调度错误导出及异步结果类型标注的编译日志保留。
+- 复核发现新五秒未完成不能落回旧条目取消清理：已让条目取消保留 Cancelling 并返回 CancellationIncomplete，不做 projection/staging/terminal；旧扫描也跳过仍由受管负责人持有的任务。Engine 显式同名结果走固定 wire_enum，未改持久状态。首轮宏 serde 分支误写类型冒号，已按实际宏语法修正；完整后台条目取消／薄绑定仍未完成。
+- 一次登记回收脚本未找到预期替换，未写入文件；已改用明确定位完成通知的登记块，工作区实际 helper 负责回收已完成但等待方退出的登记，并拒绝覆盖同一活跃身份。误触重复 App 验证结果仍保留为证据，不冒充新增覆盖。
+
+- 取消与到期竞争采用红绿验证：30秒先取消、60秒仍有慢身份读取时原实现错误返回 RequestExpired（download-cancel-before-deadline-red.log）；修正后取消分支持有真实工作，抑制后续期限改写结果。未取消项仍按60秒到期，两者真实读取结束前都占名额；新输出启动前再次检查停止意图。
+- 最新源码最终 App 全库 1160 passed／1 skipped（3.833秒），Engine公开契约50 passed（0.021秒），workspace all-targets check（1m15s）、metadata JSON、fmt、Rust style、repository preflight 与 diff check 全部通过。真实Engine双向文件最终 Direct277ms／强制Relay212ms，各精确2方向，Relay直连阻断，cleaned/plaintext_clean均true。最终工件为 target/blob-connectivity-evidence/download-settlement-final-{direct,relay}，先前候选证据不冒充此轮最终候选。
+- 本轮手工差异审查已覆盖同步容量／原围栏、唯一地址提示、下载实际工作持有、取消早于期限的先因、永久通知阻塞、五秒未完成与 staging／扫描隔离、类型来源及无持久格式变化；code-review skill 不可用，不冒充技能审查。完整Receiver计划与自动取消全流程、单项重试／绑定、删除旧入口及最终全矩阵仍未完成，目标保持 active。

@@ -32,6 +32,7 @@ impl ConnectivityBackend for Backend {
     async fn connect(
         &self,
         _: DeviceId,
+        _address_hint: Option<Vec<u8>>,
         _: CancellationToken,
     ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
         panic!("provider must not dial");

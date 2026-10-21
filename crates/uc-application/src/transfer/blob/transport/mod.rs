@@ -5,8 +5,12 @@ mod runtime;
 
 pub use error::{BlobExchangeError, BlobExchangeFailure};
 pub use ports::{
-    BlobExchangePort, BlobReceived, BlobRetainedContent, BlobStoreLifecyclePort,
-    BlobValidatedProgress,
+    BlobExchangePort, BlobReadStorePort, BlobReceived, BlobRetainedContent, BlobSource,
+    BlobSourcePort, BlobStoreLifecyclePort, BlobValidatedProgress,
 };
 
-pub use runtime::{BlobShutdownWait, BlobTransport};
+pub use runtime::{BlobDownloadResources, BlobShutdownWait, BlobTransport};
+
+pub(in super::super) use runtime::PreparedDownload;
+
+pub(in super::super) use runtime::{DownloadCompletion, DownloadTask};

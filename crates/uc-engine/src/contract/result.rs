@@ -5,6 +5,7 @@ use uc_application::facade::{
     AdmissionReadFailureCategory, AdmissionRecoveryAction as ReadRecoveryAction,
     AdmissionRecoveryStage as ReadRecoveryStage,
 };
+use uc_observability_contract::wire_enum;
 
 use super::{EngineError, ResendEntryOutcome, SendReportSummary};
 use crate::{
@@ -288,21 +289,26 @@ pub struct ReceiveReadinessSummary {
     pub degraded: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EntryReceiveCancellationOutcome {
-    Cancelled,
-    NotReceiving,
-    TooLate,
-    AlreadyTerminal,
-    Superseded,
+wire_enum! {
+    serde
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum EntryReceiveCancellationOutcome {
+        Cancelled => "cancelled",
+        CancellationIncomplete => "cancellation_incomplete",
+        NotReceiving => "not_receiving",
+        TooLate => "too_late",
+        AlreadyTerminal => "already_terminal",
+        Superseded => "superseded",
+    }
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum InboundTransferCancellationOutcome {
-    Cancelled,
-    NotInflight,
+wire_enum! {
+    serde
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum InboundTransferCancellationOutcome {
+        Cancelled => "cancelled",
+        CancellationIncomplete => "cancellation_incomplete",
+        NotInflight => "not_inflight",
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -20,7 +20,7 @@ use uc_observability_contract::{
     error_source::io_error_kind, log_fields::log_id, uc_info, uc_warn,
 };
 
-use crate::facade::blob_transfer::{BlobTransferFacade, InboundCancelOutcome};
+use crate::facade::blob_transfer::{BlobTransferError, BlobTransferFacade, InboundCancelOutcome};
 use crate::facade::host_event::{HostEvent, HostEventBus, TransferHostEvent};
 use crate::transfer::receive::reconciliation::{
     EnsureReceiveReadyPort, ReceiveReadinessCoordinator, ReceiveReadinessError,
@@ -216,6 +216,9 @@ impl FileTransferLifecycle {
                         }
                     };
 
+                    let expired = expired.into_iter()
+                        .filter(|transfer| !blob_transfer.owns_inbound_work(&transfer.transfer_id))
+                        .collect::<Vec<_>>();
                     if expired.is_empty() {
                         continue;
                     }
@@ -243,6 +246,10 @@ impl FileTransferLifecycle {
                                 }
                                 Ok(InboundCancelOutcome::NotInflight) => {
                                     // fall through to mark_failed
+                                }
+                                Err(BlobTransferError::CancellationIncomplete(_)) => {
+                                    // discarded-source[timeout]: 真实工作尚未结束，不能竞争写终态或删除其输出。
+                                    continue;
                                 }
                                 Err(err) => {
                                     uc_warn!(

@@ -1,4 +1,7 @@
-use super::{failure::combine, io, provide, receive};
+use super::{
+    failure::{self, combine},
+    io, provide, receive,
+};
 use async_trait::async_trait;
 use iroh_blobs::{api::TempTag, store::fs::FsStore, Hash, HashAndFormat};
 use std::sync::Arc;
@@ -6,26 +9,29 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
     BlobExchangeError, BlobExchangeFailure, BlobExchangePort, BlobReceived, BlobRetainedContent,
-    BlobStoreLifecyclePort, BlobValidatedProgress, StreamLease, StreamWorkLease,
+    BlobStoreLifecyclePort, BlobValidatedProgress, ConnectivityError, StreamLease, StreamWorkLease,
 };
 use uc_core::ports::blob::BlobDigest;
 
 pub struct IrohBlobExchangeAdapter {
-    store: FsStore,
+    pub(super) store: FsStore,
 }
 impl IrohBlobExchangeAdapter {
     pub fn new(store: FsStore) -> Self {
         Self { store }
     }
 }
-struct RetainedContent {
-    _tag: TempTag,
-    _work: StreamWorkLease,
+pub(super) struct RetainedContent {
+    pub(super) _tag: TempTag,
+    pub(super) _work: Option<StreamWorkLease>,
 }
 impl BlobRetainedContent for RetainedContent {}
 
 #[async_trait]
 impl BlobExchangePort for IrohBlobExchangeAdapter {
+    fn connection_failure(&self, source: ConnectivityError) -> BlobExchangeError {
+        failure::connection(source)
+    }
     async fn receive(
         &self,
         mut stream: StreamLease,
@@ -73,7 +79,7 @@ impl BlobExchangePort for IrohBlobExchangeAdapter {
             size,
             protection: Box::new(RetainedContent {
                 _tag: tag,
-                _work: work,
+                _work: Some(work),
             }),
         })
     }

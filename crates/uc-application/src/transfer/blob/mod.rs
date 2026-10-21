@@ -10,12 +10,16 @@
 pub(crate) mod facade;
 mod failure;
 mod fetch_blob;
+mod notifications;
 mod publish_blob;
 pub(crate) mod transport;
 
 pub(crate) use failure::fetch_failure_reason;
 pub(crate) use fetch_blob::{FetchBlobInput, FetchBlobPathInput, FetchBlobUseCase};
 pub(crate) use publish_blob::{PublishBlobInput, PublishBlobUseCase};
+
+#[cfg(test)]
+mod test_support;
 
 #[cfg(test)]
 mod tests {
@@ -35,6 +39,167 @@ mod tests {
     use uc_core::{ContentHash, HashAlgorithm};
 
     use super::{FetchBlobInput, FetchBlobUseCase, PublishBlobInput, PublishBlobUseCase};
+
+    struct SlowIdentitySource {
+        local: super::test_support::FakeLocalStore,
+        entered: tokio::sync::Semaphore,
+        finish: tokio::sync::Semaphore,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait]
+    impl super::transport::BlobSourcePort for SlowIdentitySource {
+        fn inspect(
+            &self,
+            ticket: &BlobTicket,
+        ) -> Result<super::transport::BlobSource, super::transport::BlobExchangeError> {
+            super::transport::BlobSourcePort::inspect(&self.local, ticket)
+        }
+        async fn resolve_peer(
+            &self,
+            _: &[u8; 32],
+        ) -> Result<uc_core::ids::DeviceId, super::transport::BlobExchangeError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.entered.add_permits(1);
+            self.finish
+                .acquire()
+                .await
+                .expect("identity finish")
+                .forget();
+            Ok(uc_core::ids::DeviceId::new("peer"))
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn first_data_deadline_includes_identity_lookup_and_keeps_capacity_until_it_really_finishes(
+    ) {
+        use super::test_support::{FakeLocalStore, RejectUnexpectedNetwork};
+        use super::transport::{
+            BlobDownloadResources, BlobExchangeFailure, BlobShutdownWait, BlobTransport,
+        };
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+        use tokio_util::sync::CancellationToken;
+        let transfer = Arc::new(FakeBlobTransfer::default());
+        let cipher = Arc::new(FakeCipher);
+        let plaintext = Bytes::from_static(b"deadline content");
+        let digest = transfer
+            .publish(
+                Bytes::from(cipher.encrypt(&plaintext).await.expect("encrypt")),
+                TagReason::ClipboardEntry(EntryId::new()),
+            )
+            .await
+            .expect("seed");
+        let ticket = transfer.issue_ticket(&digest).await.expect("ticket");
+        let local = Arc::new(FakeLocalStore(transfer.clone()));
+        let source = Arc::new(SlowIdentitySource {
+            local: FakeLocalStore(transfer.clone()),
+            entered: tokio::sync::Semaphore::new(0),
+            finish: tokio::sync::Semaphore::new(0),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let transport = BlobTransport::new(
+            Arc::new(RejectUnexpectedNetwork),
+            Arc::new(RejectUnexpectedNetwork),
+            Arc::new(RejectUnexpectedNetwork),
+            Arc::new(RejectUnexpectedNetwork),
+        );
+        let downloads = Arc::new(BlobDownloadResources {
+            transport: transport.clone(),
+            source: source.clone(),
+            store: local,
+        });
+        let usecase = Arc::new(FetchBlobUseCase::new(
+            downloads,
+            Arc::new(FakeHash),
+            transfer,
+            Arc::new(FakeBlobReferenceRepository::default()),
+            cipher,
+        ));
+        let first_cancel = CancellationToken::new();
+        let second_cancel = CancellationToken::new();
+        let first = tokio::spawn(usecase.execute(FetchBlobInput {
+            ticket: ticket.clone(),
+            entry_id: EntryId::new(),
+            cancel: first_cancel.clone(),
+            progress: None,
+        }));
+        let second = tokio::spawn(usecase.execute(FetchBlobInput {
+            ticket: ticket.clone(),
+            entry_id: EntryId::new(),
+            cancel: second_cancel.clone(),
+            progress: None,
+        }));
+        source
+            .entered
+            .acquire_many(2)
+            .await
+            .expect("two active lookups")
+            .forget();
+        tokio::time::advance(Duration::from_secs(30)).await;
+        first_cancel.cancel();
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_secs(30)).await;
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(first_cancel.is_cancelled() && second_cancel.is_cancelled());
+        assert!(
+            !first.is_finished() && !second.is_finished(),
+            "deadline cannot abandon started lookup"
+        );
+        let third = tokio::spawn(usecase.execute(FetchBlobInput {
+            ticket,
+            entry_id: EntryId::new(),
+            cancel: CancellationToken::new(),
+            progress: None,
+        }));
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            source.calls.load(Ordering::SeqCst),
+            2,
+            "timed-out work still owns per-peer slots"
+        );
+        source.finish.add_permits(2);
+        assert_eq!(
+            first
+                .await
+                .expect("first task")
+                .expect_err("first cancellation remains authoritative")
+                .kind,
+            BlobExchangeFailure::Cancelled
+        );
+        assert_eq!(
+            second
+                .await
+                .expect("second task")
+                .expect_err("second expired")
+                .kind,
+            BlobExchangeFailure::RequestExpired
+        );
+        source
+            .entered
+            .acquire()
+            .await
+            .expect("third may now start")
+            .forget();
+        source.finish.add_permits(1);
+        assert_eq!(
+            third
+                .await
+                .expect("third task")
+                .expect("third succeeds")
+                .plaintext,
+            plaintext
+        );
+        transport
+            .shutdown(BlobShutdownWait::Complete)
+            .await
+            .expect("shutdown");
+    }
 
     #[derive(Clone, Default)]
     struct CapturedWriter(Arc<Mutex<Vec<u8>>>);
@@ -214,7 +379,27 @@ mod tests {
             reference.clone(),
             cipher.clone(),
         );
-        let fetch = FetchBlobUseCase::new(hash, transfer, reference, cipher);
+        let fetch = Arc::new(FetchBlobUseCase::new(
+            {
+                use super::test_support::{FakeLocalStore, RejectUnexpectedNetwork};
+                use super::transport::{BlobDownloadResources, BlobTransport};
+                let local = Arc::new(FakeLocalStore(transfer.clone()));
+                Arc::new(BlobDownloadResources {
+                    transport: BlobTransport::new(
+                        Arc::new(RejectUnexpectedNetwork),
+                        Arc::new(RejectUnexpectedNetwork),
+                        Arc::new(RejectUnexpectedNetwork),
+                        Arc::new(RejectUnexpectedNetwork),
+                    ),
+                    source: local.clone(),
+                    store: local,
+                })
+            },
+            hash,
+            transfer,
+            reference,
+            cipher,
+        ));
 
         let plaintext = Bytes::from_static(b"same file bytes");
         let first = publish
@@ -237,6 +422,7 @@ mod tests {
 
         let outcome = fetch
             .execute(FetchBlobInput {
+                cancel: tokio_util::sync::CancellationToken::new(),
                 ticket: second.ticket,
                 entry_id: EntryId::from("entry-two"),
                 progress: None,
@@ -254,12 +440,27 @@ mod tests {
         let transfer = Arc::new(FakeBlobTransfer::default());
         let reference = Arc::new(FakeBlobReferenceRepository::default());
         let cipher = Arc::new(FakeCipher);
-        let usecase = FetchBlobUseCase::new(
+        let usecase = Arc::new(FetchBlobUseCase::new(
+            {
+                use super::test_support::{FakeLocalStore, RejectUnexpectedNetwork};
+                use super::transport::{BlobDownloadResources, BlobTransport};
+                let local = Arc::new(FakeLocalStore(transfer.clone()));
+                Arc::new(BlobDownloadResources {
+                    transport: BlobTransport::new(
+                        Arc::new(RejectUnexpectedNetwork),
+                        Arc::new(RejectUnexpectedNetwork),
+                        Arc::new(RejectUnexpectedNetwork),
+                        Arc::new(RejectUnexpectedNetwork),
+                    ),
+                    source: local.clone(),
+                    store: local,
+                })
+            },
             hash.clone(),
             transfer.clone(),
             reference.clone(),
             cipher.clone(),
-        );
+        ));
 
         let entry_id = EntryId::new();
         let plaintext = Bytes::from_static(b"remote blob bytes");
@@ -283,6 +484,7 @@ mod tests {
 
         let outcome = usecase
             .execute(FetchBlobInput {
+                cancel: tokio_util::sync::CancellationToken::new(),
                 ticket,
                 entry_id: entry_id.clone(),
                 progress: None,

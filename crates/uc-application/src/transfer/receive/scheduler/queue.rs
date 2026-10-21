@@ -8,7 +8,8 @@ use tokio::sync::Notify;
 use tokio::time::{sleep_until, Instant};
 use tokio_util::sync::CancellationToken;
 use uc_core::error_class::ErrorClass;
-use uc_core::ids::DeviceId;
+// 排队前只需要票据中的认证公钥；业务 DeviceId 仍由当前权威目录解析。
+type DownloadPeer = [u8; 32];
 use uc_observability_contract::wire_enum;
 
 wire_enum! {
@@ -45,7 +46,7 @@ enum Phase {
 }
 struct Slot {
     id: u64,
-    peer: DeviceId,
+    peer: DownloadPeer,
     accepted_at: Instant,
     phase: Mutex<Phase>,
     changed: Notify,
@@ -63,14 +64,14 @@ impl Slot {
 #[derive(Default)]
 struct State {
     slots: HashMap<u64, Arc<Slot>>,
-    pending: HashMap<DeviceId, VecDeque<u64>>,
-    rotation: VecDeque<DeviceId>,
-    running: HashMap<DeviceId, usize>,
+    pending: HashMap<DownloadPeer, VecDeque<u64>>,
+    rotation: VecDeque<DownloadPeer>,
+    running: HashMap<DownloadPeer, usize>,
     next_id: u64,
     closed: bool,
 }
 impl State {
-    fn can_start(&self, peer: &DeviceId) -> bool {
+    fn can_start(&self, peer: &DownloadPeer) -> bool {
         self.running.values().sum::<usize>() < ACTIVE_DOWNLOADS
             && self.running.get(peer).copied().unwrap_or(0) < ACTIVE_DOWNLOADS_PER_PEER
     }
@@ -156,13 +157,13 @@ pub(in super::super::super) struct DownloadScheduler {
 /// 唯一逻辑项的额度；不可克隆，实际任务及本地结算完成后才允许丢弃。
 pub(in super::super::super) struct DownloadPermit {
     pub started_at: Instant,
-    _reservation: Reservation,
+    _reservation: DownloadReservation,
 }
-struct Reservation {
+pub(in super::super::super) struct DownloadReservation {
     state: Arc<Mutex<State>>,
     slot: Arc<Slot>,
 }
-impl Drop for Reservation {
+impl Drop for DownloadReservation {
     fn drop(&mut self) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.remove(self.slot.id, None);
@@ -171,11 +172,11 @@ impl Drop for Reservation {
 }
 
 impl DownloadScheduler {
-    pub async fn acquire(
+    pub fn reserve(
         &self,
-        peer: DeviceId,
+        peer: DownloadPeer,
         cancel: &CancellationToken,
-    ) -> Result<DownloadPermit, ScheduleError> {
+    ) -> Result<DownloadReservation, ScheduleError> {
         if cancel.is_cancelled() {
             return Err(ScheduleError(ScheduleRefusal::Cancelled));
         }
@@ -210,11 +211,33 @@ impl DownloadScheduler {
             }
             state.pending.entry(peer).or_default().push_back(id);
             state.dispatch(now);
-            Reservation {
+            DownloadReservation {
                 state: self.state.clone(),
                 slot,
             }
         };
+        Ok(reservation)
+    }
+
+    pub fn close(&self) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.closed = true;
+        let pending: Vec<_> = state
+            .slots
+            .values()
+            .filter(|slot| slot.phase() == Phase::Queued)
+            .map(|slot| slot.id)
+            .collect();
+        for id in pending {
+            state.remove(id, Some(ScheduleRefusal::Closed));
+        }
+        // 运行中许可仍归实际任务，关闭不虚放额度；完整负责人另行发出停止意图。
+    }
+}
+
+impl DownloadReservation {
+    pub async fn wait(self, cancel: &CancellationToken) -> Result<DownloadPermit, ScheduleError> {
+        let reservation = self;
         loop {
             if cancel.is_cancelled() {
                 return Err(ScheduleError(ScheduleRefusal::Cancelled));
@@ -233,26 +256,11 @@ impl DownloadScheduler {
                 biased;
                 _ = cancel.cancelled() => return Err(ScheduleError(ScheduleRefusal::Cancelled)),
                 _ = sleep_until(reservation.slot.accepted_at + QUEUE_TIMEOUT) => {
-                    let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+                    let mut state = reservation.state.lock().unwrap_or_else(PoisonError::into_inner);
                     state.dispatch(Instant::now());
                 }
                 _ = reservation.slot.changed.notified() => {}
             }
         }
-    }
-
-    pub fn close(&self) {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        state.closed = true;
-        let pending: Vec<_> = state
-            .slots
-            .values()
-            .filter(|slot| slot.phase() == Phase::Queued)
-            .map(|slot| slot.id)
-            .collect();
-        for id in pending {
-            state.remove(id, Some(ScheduleRefusal::Closed));
-        }
-        // 运行中许可仍归实际任务，关闭不虚放额度；完整负责人另行发出停止意图。
     }
 }

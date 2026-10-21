@@ -1036,17 +1036,29 @@ fn receive_progress_and_cancellation_have_stable_operations_and_results() {
 
     let receive_outcomes = [
         uc_engine::EntryReceiveCancellationOutcome::Cancelled,
+        uc_engine::EntryReceiveCancellationOutcome::CancellationIncomplete,
         uc_engine::EntryReceiveCancellationOutcome::NotReceiving,
         uc_engine::EntryReceiveCancellationOutcome::TooLate,
         uc_engine::EntryReceiveCancellationOutcome::AlreadyTerminal,
         uc_engine::EntryReceiveCancellationOutcome::Superseded,
     ];
-    assert_eq!(receive_outcomes.len(), 5);
+    assert_eq!(receive_outcomes.len(), 6);
     let transfer_outcomes = [
         uc_engine::InboundTransferCancellationOutcome::Cancelled,
+        uc_engine::InboundTransferCancellationOutcome::CancellationIncomplete,
         uc_engine::InboundTransferCancellationOutcome::NotInflight,
     ];
-    assert_eq!(transfer_outcomes.len(), 2);
+    assert_eq!(transfer_outcomes.len(), 3);
+    assert_eq!(
+        serde_json::to_value(uc_engine::EntryReceiveCancellationOutcome::CancellationIncomplete)
+            .expect("entry cancellation encoding"),
+        serde_json::json!("cancellation_incomplete")
+    );
+    assert_eq!(
+        serde_json::to_value(uc_engine::InboundTransferCancellationOutcome::CancellationIncomplete)
+            .expect("transfer cancellation encoding"),
+        serde_json::json!("cancellation_incomplete")
+    );
 }
 
 #[test]

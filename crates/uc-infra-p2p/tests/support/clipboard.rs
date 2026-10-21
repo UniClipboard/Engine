@@ -17,6 +17,7 @@ impl ConnectivityBackend for InboundOnly {
     async fn connect(
         &self,
         _: DeviceId,
+        _address_hint: Option<Vec<u8>>,
         _cancel: CancellationToken,
     ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
         panic!("inbound-only test")

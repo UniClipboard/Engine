@@ -1,6 +1,6 @@
 # Issue #34 第七切片：文件／blob 受管传输执行计划
 
-状态：**阶段 0 前置证明完成；阶段 1／2 推进，提供端已接线、下载迁移中**（2026-10-21）。高层 SDK 停止缺口由同一 SDK 公开底层 API 持有完成权解决；材料、旧资料、授权、协议及资源证据见[复现与方案](2026-10-21-blob-connectivity-feasibility.md)。
+状态：**阶段 0 前置证明完成；阶段 1／2 推进，生产获取与提供已接线，完整接收结算继续迁移**（2026-10-21）。高层 SDK 停止缺口由同一 SDK 公开底层 API 持有完成权解决；材料、旧资料、授权、协议及资源证据见[复现与方案](2026-10-21-blob-connectivity-feasibility.md)。
 唯一设计来源：[实现规格](2026-10-21-blob-connectivity-spec.md)。
 本计划不复制参数、接口和异常规则；均以 spec 相应章节为准。
 
@@ -41,7 +41,7 @@
 * [x] 公平调度按对端轮转，同端保序；入队与名额原子，取消等待者不启动后续工作。规则模块已验证，正式网络接线仍待后续阶段。
 * [ ] 明确额外共享等待者的有界计数，实际工作结束前保留活跃许可；恢复等待不另建隐形队列。
 * [x] 按实际 SDK 接缝补充最小通用流停止能力与 Application 专属交换 port；不暴露 Iroh 类型或 downcast。唯一 SDK 实现已由真实 Uni／SDK 探针使用，业务组装仍待后续阶段。
-* [ ] 构造独立 blob Uni policy，提供端与本地下载分别限额；复用现有身份目录和统一撤销登记。
+* [x] 构造独立 blob Uni policy，提供端与本地下载分别限额；复用现有身份目录和统一撤销登记。
 * [ ] 使用可控时钟及第二 backend 验证所有恰好到期、并发、关闭与额度边界。
 
 风险：新增调度可能覆盖旧扫描计时、共享等待者可能绕过容量；以同一 owner 和原子计数收口。
@@ -322,3 +322,49 @@ Router 等待被取消后仍覆盖实际工作；关闭协调者由 owner 持有
 可控时钟验证关闭／本地工作两种顺序及截止、取消、会话退出；连接相关定向测试 111 项通过
 （0.126 秒），Application 全 lib 1157 passed／1 skipped（3.863 秒）。这是下载恢复的必要底层修复，
 下载负责人、完整输出和引用结算尚未接线，阶段 2 不据此宣布完成。
+
+
+### 2026-10-21 生产获取、输出与取消完成等待
+
+`FetchBlobUseCase` 的实际网络路径已改用同一 `BlobTransport`；Core 旧 fetch/fetch_to_path 不再由
+生产获取调用。Application 同步解释票据并占用 4／2 活跃、64／16 等待额度；排队键采用票据认证公钥，
+获得活跃许可后才读取权威目录中的业务设备身份。查身份之前的会话和撤销围栏持续核对，
+不能在等待后改取新资格。票据完整地址沿同一 Uni request／flight／失活刷新交给唯一 backend，
+只在本次建连时与当前已存地址合并，不增加地址缓存、持久字段或预热拨号。
+
+SDK import 的保护、下载许可继续覆盖内存内容的解密／摘要、Raw 文件的流式导出、引用及 tag。
+纯本地 `BlobReadStorePort` 不接触端点。已启动的获取与本地工作归 transport 的任务集合；
+调用方丢弃等待只发停止意图，不丢弃实际工作。固定原生错误白名单也用于 Uni backend／开流失败，
+成员读取、地址读取和清理失败不因内部 IO 类别看似暂态而重试；原始及复合来源保留。
+首批数据时钟覆盖权威身份读取，运行期只有一位时钟监督者；新增校验数据才更新时钟。
+
+反向通知由一个受 transport 监督的有界 actor 持有，按任务合并最新消息；SDK 回调只做同步交接，
+普通进度最多 5Hz。取消先发自身停止，再加入同一个收尾协调者，五秒只结束调用等待。
+慢本地工作、重复取消及等待方退出均保留真实完成权；不会调用旧对端级 shutdown。
+旧过期扫描只恢复没有在途负责人的行，不以旧 pending／transferring 截止时间抢占新时钟。
+条目取消若收到未完成，保留 Cancelling，禁止继续清理仍被工作使用的 staging 或写取消终态。
+Engine 两种取消结果新增 `cancellation_incomplete`；薄绑定完整动作仍在后续阶段完成。
+
+实际证据：
+
+- 当前资料的真实 Engine 双向文件：Direct 275ms、强制 Relay 147ms，精确字节读回各两个方向；
+  Relay 确认 direct_paths_blocked，均 cleaned／plaintext_clean=true。
+  工件在 `target/blob-connectivity-evidence/download-direct/` 和 `download-relay/`。
+- Application 全 lib 1159 passed／1 skipped（3.847秒）；包含权威查询 60 秒到期但实际慢读未结束时继续持两个名额，
+  第三个同端项不能提前开始，以及身份查询前撤销／会话重启的旧资格拒绝。
+- 永久阻塞 reporter 与慢本地工作，在保留和丢弃获取等待两种情况下均完成五秒未完成、重复取消、
+  实际收尾和 transport 关闭验证；不调用对端级关闭。
+- P2P 全 lib／真实 SDK／旧协议向量 324 passed／3 skipped（39.232秒）；含新增建连错误分类与清理双来源。
+
+以上不等于完整阶段 2–5 已完成：完整 ReceiveWorkPlan 负责人、批次与单项结果、文件夹整单元重试、
+手动重试 CAS 与薄绑定尚需迁移；条目取消的完整后台协调、删除／关闭与产物结算仍需完整验收。
+旧 Core 网络入口、Downloader／warmup 实现尚待删除；当前完整 workspace 的已有 profile 诊断失败、
+最终旧新／大文件资源矩阵与必需 CI 也未结案。新增 staging 安全分支和 Engine 契约的最终检查结果另记。
+
+最终候选补充：取消早于期限的竞争已先复现再修复；30秒取消在60秒慢查询仍未结束时保持取消结果，
+未取消项保持原期限，均等实际查询结束才归还额度。新增条目取消未完成不触碰产物／投影／终态的测试后，
+Application 最终1160 passed／1 skipped（3.833秒），Engine公开契约50 passed（0.021秒）。
+最终 workspace all-targets check（1m15s）、metadata、fmt、Rust style、repository preflight 及差异检查通过。
+最新候选网络工件在 `target/blob-connectivity-evidence/download-settlement-final-direct/` 与
+`download-settlement-final-relay/`，双向精确读回分别277ms／212ms，Relay直连被阻断、清理与隐私检查均通过。
+这些候选证据保留源码与二进制摘要；完整阶段5当前最终head矩阵和CI仍待全部功能落地后运行。

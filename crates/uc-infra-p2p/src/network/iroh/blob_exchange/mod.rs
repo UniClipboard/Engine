@@ -13,3 +13,7 @@ pub use handler::IrohBlobHandler;
 
 #[cfg(test)]
 mod managed_tests;
+
+mod source;
+mod store;
+pub use source::IrohBlobSourceResolver;

@@ -1,7 +1,7 @@
 use iroh::endpoint::{ConnectionError, ReadError, WriteError};
 use iroh_blobs::get::fsm::{AtBlobHeaderNextError, ConnectedNextError, DecodeError};
 use std::io;
-use uc_application::deps::{BlobExchangeError, BlobExchangeFailure};
+use uc_application::deps::{BlobExchangeError, BlobExchangeFailure, ConnectivityError};
 
 pub(super) fn network(source: impl Into<anyhow::Error>) -> BlobExchangeError {
     let source = source.into();
@@ -44,6 +44,31 @@ pub(super) fn network(source: impl Into<anyhow::Error>) -> BlobExchangeError {
         },
         source,
     )
+}
+
+pub(super) fn connection(source: ConnectivityError) -> BlobExchangeError {
+    fn category(error: &ConnectivityError) -> BlobExchangeFailure {
+        match error {
+            ConnectivityError::Shared(error) => category(error),
+            ConnectivityError::Settlement { .. } => BlobExchangeFailure::Settlement,
+            ConnectivityError::Task(_) => BlobExchangeFailure::Task,
+            ConnectivityError::Busy(_) => BlobExchangeFailure::Busy,
+            ConnectivityError::Backend(_) | ConnectivityError::Stream(_) => {
+                BlobExchangeFailure::Network
+            }
+            _ => BlobExchangeFailure::Connectivity,
+        }
+    }
+    let kind = category(&source);
+    if kind == BlobExchangeFailure::Network {
+        let mut classified = network(source);
+        if classified.kind != BlobExchangeFailure::TransientNetwork {
+            classified.kind = BlobExchangeFailure::Connectivity;
+        }
+        classified
+    } else {
+        BlobExchangeError::from(source)
+    }
 }
 
 pub(super) fn request_write(source: ConnectedNextError) -> BlobExchangeError {
@@ -91,6 +116,61 @@ mod tests {
     use std::io;
     use uc_application::deps::{BlobExchangeError, BlobExchangeFailure};
     use uc_core::error_class::ErrorClass;
+
+    #[test]
+    fn connection_retry_classification_keeps_authorization_and_settlement_out_of_network_recovery()
+    {
+        use super::connection;
+        use std::sync::Arc;
+        use uc_application::deps::ConnectivityError;
+        for failure in [
+            ConnectivityError::Backend(Box::new(ConnectionError::TimedOut)),
+            ConnectivityError::Shared(Arc::new(ConnectivityError::Backend(Box::new(
+                ConnectionError::Reset,
+            )))),
+        ] {
+            let report = connection(failure);
+            assert_eq!(report.kind, BlobExchangeFailure::TransientNetwork);
+            assert!(report.source().is_some());
+        }
+        for failure in [
+            ConnectivityError::Admission(Box::new(io::Error::from(io::ErrorKind::TimedOut))),
+            ConnectivityError::AddressLookup(Box::new(io::Error::from(
+                io::ErrorKind::ConnectionReset,
+            ))),
+            ConnectivityError::Backend(Box::new(io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                io::Error::other("opaque"),
+            ))),
+        ] {
+            assert_eq!(connection(failure).kind, BlobExchangeFailure::Connectivity);
+        }
+        let report = connection(ConnectivityError::Settlement {
+            primary: Box::new(ConnectivityError::Backend(Box::new(
+                ConnectionError::TimedOut,
+            ))),
+            additional: Box::new(ConnectivityError::Stream(Box::new(io::Error::from(
+                io::ErrorKind::PermissionDenied,
+            )))),
+        });
+        assert_eq!(report.kind, BlobExchangeFailure::Settlement);
+        let preserved = report
+            .source
+            .downcast_ref::<ConnectivityError>()
+            .expect("typed connectivity source");
+        let ConnectivityError::Settlement { additional, .. } = preserved else {
+            panic!("compound source lost")
+        };
+        assert_eq!(
+            additional
+                .source()
+                .expect("additional source")
+                .downcast_ref::<io::Error>()
+                .expect("IO source")
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
 
     #[test]
     fn retry_whitelist_requires_a_specific_network_source() {

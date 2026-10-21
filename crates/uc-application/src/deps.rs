@@ -580,8 +580,9 @@ pub use crate::connectivity::{
 };
 
 pub use crate::transfer::blob::transport::{
-    BlobExchangeError, BlobExchangeFailure, BlobExchangePort, BlobReceived, BlobRetainedContent,
-    BlobShutdownWait, BlobStoreLifecyclePort, BlobTransport, BlobValidatedProgress,
+    BlobDownloadResources, BlobExchangeError, BlobExchangeFailure, BlobExchangePort,
+    BlobReadStorePort, BlobReceived, BlobRetainedContent, BlobShutdownWait, BlobSource,
+    BlobSourcePort, BlobStoreLifecyclePort, BlobTransport, BlobValidatedProgress,
 };
 
 pub use crate::space::{

@@ -47,3 +47,11 @@
 - 下一步接下载时需核对：当前 manager.refresh 借用旧 lease，而方向1的名额由该 record 生命周期持有；不能带着旧 lease 自身的名额去重获同方向连接。还须在外部队列及异步 ticket 身份解析之前保持旧会话／撤销围栏，不能拿到名额后取新 epoch；阅读全部真实 fetch 消费者后统一迁移旧端口，不保留转调兼容层。
 
 - refresh 的实际消费者还包括 membership/history_transport，不能只搜索 connectivity 子目录。旧实现借用 lease 在方向限额1时会被自身挡住；新增寿命完成 watch 只携带完成事实，不持有旧 record。下载自动恢复仍须使用同一冻结 ConnectionRequest，且持原下载许可等待实际结算，不重新入队。
+
+- 当前真实获取已经调用 Uni／唯一 SDK port，内存解密与 Raw 流式输出、引用和 tag 在受监督 UC 内，许可持至这些工作结束；正常 Engine Direct／Relay 双向精确通过。旧 Core fetch／Downloader 代码仍在，主要测试引用它们，需要后续整体删除并迁移旧客户端 fixture。
+- 源身份异步读取必须位于已取得活跃许可之后；同步票据公钥可作内部调度键，不能派生业务 DeviceId。Scope 冻结当前会话和原撤销围栏，后续 bind／每次准入继续核对。票据地址用不透明本请求提示传给唯一 backend，不能通过 upsert 或第二份缓存偷偷持久化。
+- 不能让两个等待者消费同一个 Notify 维护时钟；获取外围唯一时间监督者覆盖身份读取、准备及真实 SDK 工作，恢复开始也显式唤醒重算期限。身份60秒慢读用例已证明到期发停止但不虚放名额。
+- 当前仍有完整性缺口需继续：文件会话最终事件／条目提交在 Fetch UC 外，完整 ReceiveWorkPlan 与后台条目取消还需统一负责人；CancellationIncomplete 已阻止旧清理，但后续自动完成 CAS／产物结算不能依赖用户再次调用。稳定绑定尚无这些完整接收动作映射，不假称只有 serde 就满足薄绑定。
+
+- 当前普通下载已从生产调用点移走 SDK Downloader，但 Core trait 与旧实现仍供测试及兼容探针使用，尚须整体删除生产入口并保留明确的旧客户端测试 fixture。不要把生产调用点切换等同于旧代码已删除。
+- 完整接收负责人迁移还需校正取消通知的终态位置：当前队列在接受停止意图后就提交旧 Cancelled 帧，实际 TooLate／清理失败应由最终聚合结果决定。后台完整动作的观测上下文也需检查：同步 execute 的 span 不能仅靠 with_current_subscriber 就假定已传播到 detached worker；不为此扩大 Engine 内部查询接口。

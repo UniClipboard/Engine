@@ -36,6 +36,7 @@ pub trait ConnectivityBackend: Send + Sync {
     async fn connect(
         &self,
         target: DeviceId,
+        address_hint: Option<Vec<u8>>,
         cancel: CancellationToken,
     ) -> Result<Arc<dyn PeerConnection>, ConnectivityError>;
 }

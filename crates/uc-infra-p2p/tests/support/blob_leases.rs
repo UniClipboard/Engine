@@ -26,6 +26,7 @@ impl ConnectivityBackend for Native {
     async fn connect(
         &self,
         _: DeviceId,
+        _address_hint: Option<Vec<u8>>,
         _: CancellationToken,
     ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
         Ok(Arc::new(Native(self.0.clone())))

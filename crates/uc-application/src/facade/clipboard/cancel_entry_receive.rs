@@ -39,6 +39,7 @@ impl AttemptTransferCancellation for BlobTransferFacade {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelEntryReceiveOutcome {
+    CancellationIncomplete,
     Cancelled,
     NotReceiving,
     TooLate,
@@ -172,6 +173,10 @@ impl CancelEntryReceiveUseCase {
             )
             .await
         {
+            if matches!(error, BlobTransferError::CancellationIncomplete(_)) {
+                // discarded-source[timeout]: 五秒只结束调用等待，保留 Cancelling，不清理仍被实际工作使用的产物。
+                return Ok(CancelEntryReceiveOutcome::CancellationIncomplete);
+            }
             transfer_errors
                 .push(SourceError::from(error).context("cancel inbound attempt transfers"));
         }
@@ -576,6 +581,54 @@ mod tests {
                 std::io::Error::other("transport gone"),
             )))
         }
+    }
+
+    struct IncompleteTransfers;
+    #[async_trait]
+    impl AttemptTransferCancellation for IncompleteTransfers {
+        async fn cancel_inbound_attempt(
+            &self,
+            _: &str,
+            _: FileTransferCancellationReason,
+        ) -> Result<usize, BlobTransferError> {
+            let elapsed =
+                tokio::time::timeout(std::time::Duration::ZERO, std::future::pending::<()>())
+                    .await
+                    .expect_err("waiting deadline");
+            Err(BlobTransferError::CancellationIncomplete(elapsed))
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn incomplete_transfer_cancellation_keeps_attempt_cancelling_and_does_not_touch_staging_or_projection(
+    ) {
+        let attempts = Arc::new(AttemptMock {
+            state: AttemptState::Receiving,
+            cancel_outcome: RequestReceiveCancellationOutcome::Requested,
+            cancel_calls: AtomicUsize::new(0),
+        });
+        let commit = Arc::new(CommitMock::default());
+        let cleaner = Arc::new(CleanerMock::default());
+        let projection = Arc::new(ProjectionMock::default());
+        let usecase = CancelEntryReceiveUseCase::new(
+            attempts.clone(),
+            attempts.clone(),
+            commit.clone(),
+            Arc::new(PublishMock),
+            cleaner.clone(),
+            projection.clone(),
+            Arc::new(IncompleteTransfers),
+            Arc::new(ClockMock),
+            Arc::new(HostEventBus::new()),
+        );
+        let outcome = usecase
+            .execute(&EntryId::new(), "attempt-1")
+            .await
+            .expect("incomplete is a business result");
+        assert_eq!(outcome, CancelEntryReceiveOutcome::CancellationIncomplete);
+        assert_eq!(attempts.cancel_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(commit.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(projection.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(cleaner.calls.load(Ordering::SeqCst), 0);
     }
 
     struct FailingProjection;

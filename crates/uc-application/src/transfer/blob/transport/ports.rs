@@ -1,10 +1,33 @@
 use super::BlobExchangeError;
-use crate::connectivity::StreamLease;
+use crate::connectivity::{ConnectivityError, StreamLease};
 use async_trait::async_trait;
+use bytes::Bytes;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use uc_core::ports::blob::BlobDigest;
+use uc_core::ids::DeviceId;
+use uc_core::ports::blob::{BlobDigest, BlobTicket};
+
+/// ticket 的来源及本请求地址材料；内容身份和设备身份不得由文件名推导。
+pub struct BlobSource {
+    pub source_key: [u8; 32],
+    pub digest: BlobDigest,
+    pub address_hint: Vec<u8>,
+}
+#[async_trait]
+pub trait BlobSourcePort: Send + Sync {
+    fn inspect(&self, ticket: &BlobTicket) -> Result<BlobSource, BlobExchangeError>;
+    async fn resolve_peer(&self, key: &[u8; 32]) -> Result<DeviceId, BlobExchangeError>;
+}
+
+/// 纯本地内容能力；不接触 Endpoint，不自拨，不负责业务重试。
+#[async_trait]
+pub trait BlobReadStorePort: Send + Sync {
+    async fn protect(&self, digest: BlobDigest) -> Result<Option<BlobReceived>, BlobExchangeError>;
+    async fn read(&self, digest: BlobDigest) -> Result<Bytes, BlobExchangeError>;
+    async fn export(&self, digest: BlobDigest, target: &Path) -> Result<u64, BlobExchangeError>;
+}
 
 /// 只交接 SDK 已验证的 Raw 内容末尾位置；实现不得等待通知网络或宿主事件。
 pub trait BlobValidatedProgress: Send + Sync {
@@ -24,6 +47,10 @@ pub struct BlobReceived {
 /// 只使用已经准入的通用流；不接触端点、不自拨，也不拥有业务重试或提交权威。
 #[async_trait]
 pub trait BlobExchangePort: Send + Sync {
+    /// 只有原生实现能证明暂态网络来源；未知实现默认不重试。
+    fn connection_failure(&self, source: ConnectivityError) -> BlobExchangeError {
+        BlobExchangeError::from(source)
+    }
     /// 取消或网络失败后仍等待同次 import 完成，不允许直接丢弃此 future。
     async fn receive(
         &self,

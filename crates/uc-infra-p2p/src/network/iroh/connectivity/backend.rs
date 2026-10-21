@@ -1,9 +1,9 @@
 use super::super::blobs::BLOBS_ALPN;
-use super::super::connect::connect_with_staggered_retry_classified;
+use super::super::connect::{connect_with_staggered_retry_classified, strip_relay_if_lan_only};
 use super::super::peer_address_resolver::PeerAddressResolver;
 use super::IrohPeerConnection;
 use async_trait::async_trait;
-use iroh::Endpoint;
+use iroh::{Endpoint, EndpointAddr};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{ConnectivityBackend, ConnectivityError, PeerConnection};
@@ -59,21 +59,36 @@ impl ConnectivityBackend for IrohConnectivityBackend {
     async fn connect(
         &self,
         target: DeviceId,
+        address_hint: Option<Vec<u8>>,
         cancel: CancellationToken,
     ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
         if cancel.is_cancelled() {
             return Err(ConnectivityError::Stopped);
         }
-        let address = self
+        let stored = self
             .addresses
             .resolve(&target)
             .await
-            .map_err(|error| ConnectivityError::AddressLookup(Box::new(error)))?
-            .ok_or(if matches!(self.profile, ConnectivityProfile::Presence) {
+            .map_err(|error| ConnectivityError::AddressLookup(Box::new(error)))?;
+        let address = match address_hint {
+            Some(encoded) if matches!(self.profile, ConnectivityProfile::Blob) => {
+                let mut hinted: EndpointAddr = postcard::from_bytes(&encoded)
+                    .map_err(|source| ConnectivityError::AddressLookup(Box::new(source)))?;
+                if let Some(stored) = stored {
+                    if stored.id != hinted.id {
+                        return Err(ConnectivityError::Denied);
+                    }
+                    hinted.addrs.extend(stored.addrs);
+                }
+                strip_relay_if_lan_only(hinted)
+            }
+            Some(_) => return Err(ConnectivityError::Denied),
+            None => stored.ok_or(if matches!(self.profile, ConnectivityProfile::Presence) {
                 ConnectivityError::AddressMissing
             } else {
                 ConnectivityError::Offline
-            })?;
+            })?,
+        };
         if cancel.is_cancelled() {
             return Err(ConnectivityError::Stopped);
         }

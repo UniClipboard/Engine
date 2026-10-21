@@ -51,6 +51,7 @@ use crate::space::{
     SpaceRuntimeAdapters, SpaceSessionDeps, SpaceTransitionDeps,
 };
 use crate::transfer::blob::facade::BlobTransferDeps;
+use crate::transfer::blob::transport::BlobDownloadResources;
 use crate::transfer::file::assembly::FileTransferAssembly;
 use crate::transfer::file::assembly::{FileTransferAssemblyDeps, ReceiveCancellationDeps};
 use crate::transfer::file::timeout_runtime::FileTransferTimeoutRuntime;
@@ -101,6 +102,7 @@ pub struct ApplicationClipboardAdapters {
 
 /// Engine 一次提交给 Application 的网络 adapter 集合。
 pub struct ApplicationNetworkAdapters {
+    pub blob_downloads: Arc<BlobDownloadResources>,
     pub blob_transfer: Arc<dyn BlobTransferPort>,
     pub blob_reference: Arc<dyn BlobReferenceRepositoryPort>,
     pub outbound_progress_reporter: Arc<dyn OutboundProgressReporterPort>,
@@ -415,11 +417,13 @@ impl ApplicationAssembly {
         let ApplicationNetworkAdapters {
             blob_transfer,
             blob_reference,
+            blob_downloads,
             outbound_progress_reporter,
             space,
             clipboard,
         } = adapters;
         let blob = Arc::new(BlobTransferFacade::new(BlobTransferDeps {
+            downloads: blob_downloads,
             hash: Arc::clone(&self.deps.system.hash),
             blob_transfer: Arc::clone(&blob_transfer),
             blob_reference,

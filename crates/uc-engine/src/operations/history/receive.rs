@@ -64,10 +64,19 @@ pub async fn execute_cancel_inbound_transfer(
     input: CancelInboundTransferInput,
 ) -> Result<OperationResult, EngineError> {
     validate_id(&input.transfer_id)?;
-    let outcome = facade
+    let outcome = match facade
         .cancel_inbound_transfer(&input.transfer_id, transfer_reason(input.reason))
         .await
-        .map_err(map_transfer_cancel_error)?;
+    {
+        Ok(outcome) => outcome,
+        Err(BlobTransferError::CancellationIncomplete(_)) => {
+            // discarded-source[timeout]: 固定业务结果表达仍在收尾，不伪装为取消成功或没有在途任务。
+            return Ok(OperationResult::InboundTransferCancellation(
+                InboundTransferCancellationOutcome::CancellationIncomplete,
+            ));
+        }
+        Err(error) => return Err(map_transfer_cancel_error(error)),
+    };
     Ok(OperationResult::InboundTransferCancellation(
         inbound_transfer_cancellation(outcome),
     ))
@@ -89,6 +98,9 @@ fn entry_receive_cancellation(
     outcome: AppEntryReceiveCancellationOutcome,
 ) -> EntryReceiveCancellationOutcome {
     match outcome {
+        AppEntryReceiveCancellationOutcome::CancellationIncomplete => {
+            EntryReceiveCancellationOutcome::CancellationIncomplete
+        }
         AppEntryReceiveCancellationOutcome::Cancelled => EntryReceiveCancellationOutcome::Cancelled,
         AppEntryReceiveCancellationOutcome::NotReceiving => {
             EntryReceiveCancellationOutcome::NotReceiving

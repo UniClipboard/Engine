@@ -20,6 +20,7 @@ impl BlobTransport {
                 Some(receive) => receive.clone(),
                 None => {
                     self.stop.cancel();
+                    self.downloads.close();
                     let (send, receive) = watch::channel(None);
                     let owner = self.clone();
                     tokio::spawn(

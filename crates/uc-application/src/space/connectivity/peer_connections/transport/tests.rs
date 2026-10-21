@@ -163,6 +163,7 @@ impl ConnectivityBackend for MemoryBackend {
     async fn connect(
         &self,
         target: DeviceId,
+        _address_hint: Option<Vec<u8>>,
         _: CancellationToken,
     ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
         let index = target

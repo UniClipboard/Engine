@@ -17,6 +17,7 @@ use uc_core::ports::ConnectionChannel;
 
 pub(super) struct ConnectionRecord {
     pub connection: Arc<dyn PeerConnection>,
+    pub address_hint: Option<Vec<u8>>,
     pub activity: Arc<ConnectionActivity>,
     pub stop: CancellationToken,
     pub cache_cancel: CancellationToken,

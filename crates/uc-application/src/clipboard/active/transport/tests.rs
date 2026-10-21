@@ -150,6 +150,7 @@ impl ConnectivityBackend for MemoryBackend {
     async fn connect(
         &self,
         _: DeviceId,
+        _address_hint: Option<Vec<u8>>,
         _cancel: CancellationToken,
     ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
         let id = self.calls.fetch_add(1, Ordering::SeqCst);

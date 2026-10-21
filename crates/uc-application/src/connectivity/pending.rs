@@ -116,6 +116,7 @@ impl PendingInboundLease {
         };
         let record = Arc::new(ConnectionRecord {
             connection: self.raw.raw.clone(),
+            address_hint: None,
             activity: Arc::new(ConnectionActivity::default()),
             stop: self.session.clone(),
             cache_cancel: tokio_util::sync::CancellationToken::new(),

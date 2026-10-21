@@ -4,6 +4,7 @@ use super::connection::{AcceptedStream, ConnectionRecord};
 use super::inbound::{InboundAdmissionPolicy, InboundReservation};
 use super::lifetime::ConnectionLifetime;
 use super::pending::{PendingInboundLease, UnboundConnection};
+use super::request::ConnectionRequestScope;
 use super::retention::{ConnectionActivity, IdleRetentionPolicy};
 use super::{
     AdmissionAttempt, AdmissionGrant, ConnectionLease, ConnectionMode, ConnectionRequest,
@@ -232,6 +233,14 @@ impl ConnectivityManager {
             target,
             attempt: Arc::from(self.inner.admission.begin(target)),
             session: self.stop_token(),
+            address_hint: None,
+        }
+    }
+    pub(crate) fn freeze_request(&self) -> ConnectionRequestScope {
+        ConnectionRequestScope {
+            manager: self.clone(),
+            session: self.stop_token(),
+            fence: self.inner.admission.inbound_fence(),
         }
     }
     pub(super) async fn acquire_request(
@@ -300,7 +309,13 @@ impl ConnectivityManager {
         };
         let _waiter = Waiter(flight.clone());
         if launch {
-            self.launch(target, peer.clone(), flight.clone(), attempt.clone());
+            self.launch(
+                target,
+                peer.clone(),
+                flight.clone(),
+                attempt.clone(),
+                request.address_hint.clone(),
+            );
         }
         let mut rx = flight.result.subscribe();
         let awaiting = timeout_at(deadline, async {
@@ -373,7 +388,7 @@ impl ConnectivityManager {
                 // 旧端已领取或共同结果已经失活；负载尚未发送，原请求期限内有界取得新连接。
                 let record = tokio::select! {
                     _ = self.inner.stop.cancelled() => return Err(ConnectivityError::Stopped),
-                    result = timeout_at(deadline, self.acquire(target, peer, attempt.clone())) => result.map_err(ConnectivityError::TimedOut)??,
+                    result = timeout_at(deadline, self.acquire(target, peer, attempt.clone(), request.address_hint.clone())) => result.map_err(ConnectivityError::TimedOut)??,
                 };
                 ConnectionLease::outbound(record, attempt.clone())
             }
@@ -395,6 +410,7 @@ impl ConnectivityManager {
             target: previous.peer(),
             attempt: request,
             session: previous.record.stop.clone(),
+            address_hint: previous.record.address_hint.clone(),
         };
         let mut settled = previous.record._lifetime.settled();
         previous.close();
@@ -421,10 +437,12 @@ impl ConnectivityManager {
         peer: Arc<PeerState>,
         flight: Arc<Flight>,
         attempt: Arc<dyn AdmissionAttempt>,
+        address_hint: Option<Vec<u8>>,
     ) {
         let weak = Arc::downgrade(&self.inner);
         let task_kind = self.inner.policy.task_kind;
         let mut acquisition = self.acquisition();
+        acquisition.address_hint = address_hint;
         acquisition.cancel = flight.cancel.clone();
         let pending = acquisition.pending.clone();
         let settle_local = self.inner.policy.wait_for_local_work();
@@ -528,6 +546,7 @@ impl ConnectivityManager {
         Acquisition {
             owner: Arc::downgrade(&self.inner),
             backend: self.inner.backend.clone(),
+            address_hint: None,
             policy: self.inner.policy,
             inbound: self.inner.inbound.clone(),
             waiting: self.inner.waiting.clone(),
@@ -541,6 +560,7 @@ impl ConnectivityManager {
         target: DeviceId,
         peer: Arc<PeerState>,
         attempt: Arc<dyn AdmissionAttempt>,
+        address_hint: Option<Vec<u8>>,
     ) -> Result<Arc<ConnectionRecord>, ConnectivityError> {
         let _permit = self
             .inner
@@ -549,7 +569,9 @@ impl ConnectivityManager {
             .acquire_owned()
             .await
             .map_err(ConnectivityError::ResourceClosed)?;
-        let record = self.acquisition().connect(target, peer, attempt).await?;
+        let mut acquisition = self.acquisition();
+        acquisition.address_hint = address_hint;
+        let record = acquisition.connect(target, peer, attempt).await?;
         self.track(&record)?;
         Ok(record)
     }
@@ -766,6 +788,7 @@ impl ConnectivityManager {
             };
             let record = Arc::new(ConnectionRecord {
                 connection: pending.raw.raw.clone(),
+                address_hint: None,
                 activity,
                 stop: pending.session.clone(),
                 cache_cancel: CancellationToken::new(),

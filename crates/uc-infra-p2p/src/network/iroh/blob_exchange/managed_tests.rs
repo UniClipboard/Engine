@@ -30,6 +30,7 @@ impl ConnectivityBackend for NoDial {
     async fn connect(
         &self,
         _: DeviceId,
+        _address_hint: Option<Vec<u8>>,
         _: CancellationToken,
     ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
         panic!("provider must not dial");
@@ -130,6 +131,7 @@ impl ConnectivityBackend for ExistingConnection {
     async fn connect(
         &self,
         _: DeviceId,
+        _address_hint: Option<Vec<u8>>,
         _: CancellationToken,
     ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
         self.calls.fetch_add(1, Ordering::SeqCst);

@@ -2,7 +2,7 @@
 mod queue;
 
 pub(in super::super) use queue::{
-    DownloadPermit, DownloadScheduler, ScheduleError, ScheduleRefusal,
+    DownloadPermit, DownloadReservation, DownloadScheduler, ScheduleError, ScheduleRefusal,
 };
 
 #[cfg(test)]

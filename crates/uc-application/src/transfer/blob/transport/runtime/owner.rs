@@ -10,6 +10,7 @@ use crate::transfer::policy::{
     CONNECTION_IDLE_TIMEOUT, INBOUND_REQUEST_TIMEOUT, RETAINED_BLOB_CONNECTIONS,
     UNIDENTIFIED_INBOUND,
 };
+use crate::transfer::receive::scheduler::DownloadScheduler;
 use futures::future::{ready, Either};
 use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -30,7 +31,8 @@ pub enum BlobShutdownWait {
 }
 
 pub struct BlobTransport {
-    pub(super) manager: ConnectivityManager,
+    pub(super) downloads: DownloadScheduler,
+    pub(in super::super::super::super) manager: ConnectivityManager,
     pub(super) exchange: Arc<dyn BlobExchangePort>,
     pub(super) lifecycle: Arc<dyn BlobStoreLifecyclePort>,
     pub(super) stop: CancellationToken,
@@ -84,6 +86,7 @@ impl BlobTransport {
             },
         );
         Arc::new(Self {
+            downloads: DownloadScheduler::default(),
             manager,
             exchange,
             lifecycle,
@@ -92,6 +95,23 @@ impl BlobTransport {
             failure: Mutex::new(None),
             closing: Mutex::new(None),
         })
+    }
+    pub(super) fn reap_completed(&self, jobs: &mut JoinSet<Result<(), Arc<BlobExchangeError>>>) {
+        while let Some(result) = jobs.try_join_next() {
+            let result = match result {
+                Ok(result) => result,
+                Err(source) => Err(Arc::new(task_error(source))),
+            };
+            if let Err(source) = result {
+                if !shutdown_failure(&source) {
+                    continue;
+                }
+                self.failure
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get_or_insert(source);
+            }
+        }
     }
     /// 入口立即冻结准入；协议等待被丢弃时发停止意图，原任务继续结算。
     pub fn serve(
@@ -119,22 +139,7 @@ impl BlobTransport {
             let (send, receive) = oneshot::channel();
             {
                 let mut jobs = owner.jobs.lock().unwrap_or_else(PoisonError::into_inner);
-                while let Some(result) = jobs.try_join_next() {
-                    let result = match result {
-                        Ok(result) => result,
-                        Err(source) => Err(Arc::new(task_error(source))),
-                    };
-                    if let Err(source) = result {
-                        if !shutdown_failure(&source) {
-                            continue;
-                        }
-                        owner
-                            .failure
-                            .lock()
-                            .unwrap_or_else(PoisonError::into_inner)
-                            .get_or_insert(source);
-                    }
-                }
+                owner.reap_completed(&mut jobs);
                 if owner.stop.is_cancelled() || cancel.is_cancelled() {
                     return Err(BlobExchangeError::refused(BlobExchangeFailure::Closed));
                 }

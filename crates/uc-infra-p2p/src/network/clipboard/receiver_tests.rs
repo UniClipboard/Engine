@@ -447,10 +447,11 @@ impl ConnectivityBackend for RecordingBackend {
     async fn connect(
         &self,
         target: DeviceId,
+        _address_hint: Option<Vec<u8>>,
         _cancel: CancellationToken,
     ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        let connection = self.native.connect(target, _cancel).await?;
+        let connection = self.native.connect(target, _address_hint, _cancel).await?;
         self.connections
             .lock()
             .unwrap()

@@ -28,3 +28,5 @@ pub use retention::IdleRetentionPolicy;
 pub use stream::{PeerReceiveStream, PeerSendStream, StreamLease, StreamPair, StreamWorkLease};
 #[cfg(test)]
 mod tests;
+
+pub(crate) use request::ConnectionRequestScope;

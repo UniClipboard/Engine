@@ -16,6 +16,7 @@ use uc_core::ids::DeviceId;
 pub(super) struct Acquisition {
     pub owner: Weak<Inner>,
     pub backend: Arc<dyn ConnectivityBackend>,
+    pub address_hint: Option<Vec<u8>>,
     pub policy: ConnectivityPolicy,
     pub inbound: Arc<Semaphore>,
     pub waiting: Arc<Semaphore>,
@@ -67,7 +68,10 @@ impl Acquisition {
         lifetime: Arc<ConnectionLifetime>,
     ) -> Result<Arc<ConnectionRecord>, ConnectivityError> {
         let mut pending = PendingConnection {
-            connection: self.backend.connect(target, self.cancel.clone()).await?,
+            connection: self
+                .backend
+                .connect(target, self.address_hint.clone(), self.cancel.clone())
+                .await?,
             adopted: false,
         };
         *self.pending.lock().unwrap_or_else(PoisonError::into_inner) =
@@ -96,6 +100,7 @@ impl Acquisition {
         let connection = pending.connection.clone();
         Ok(Arc::new(ConnectionRecord {
             connection,
+            address_hint: self.address_hint.clone(),
             activity: Arc::new(ConnectionActivity::default()),
             stop: self.stop.clone(),
             cache_cancel: CancellationToken::new(),
