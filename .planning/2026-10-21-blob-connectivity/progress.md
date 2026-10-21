@@ -106,3 +106,7 @@
 - 新增当前受管提供端真实 SDK 双流：接收窗64KiB，UDP统计确认正文开始后取消停读的 A；B 同一连接／一次获取精确4MiB，backend调用数仍为1；第三个正文中途断开对端后提供端 shutdown 实际成功。1 passed（0.167 秒），无需按“连接消失”吞停止错误或修改协议。最后执行全P2P／SDK／向量分组及根门禁；下载与稳定取消仍旧。
 
 - 本轮最终 P2P／SDK／协议向量 323 passed／3 skipped（38.754 秒）；metadata JSON 解析、workspace 全目标 check（16.19 秒）、fmt、Rust style、repository preflight 全部通过。再次手工复核实际任务持有、关闭竞态、准入首流时钟与逐流停止；code-review skill 不可用，如实采用手工审查。上一状态答复只汇报状态，记为 no progress，本轮继续提交生产提供端并推进下载。
+
+- 提供端已提交 6d0c13c1；开始修复下载恢复所需的旧连接寿命等待。refresh 改为消费旧 lease，保存原资格／会话，退役旧缓存，在方向名额实际释放后重拨；关闭和本地工作任一未完都不能提前拨号。首轮编译发现 membership history 也调用该入口，已同步迁移；会话测试改为监督异步 disconnect_all，未丢弃未 poll 的 future。日志 refresh-lifetime-tests.log 保留。
+
+- 重连修复的 Application 全库 1157 passed／1 skipped（3.863 秒）、workspace all-targets check（1m18s）、metadata JSON、fmt、Rust style、repository preflight 和 diff check 均通过。手工审查消费旧租约、缓存强引用、寿命通知先归还许可再唤醒、重复会话及全部调用方；本轮没有启动全 workspace 测试或重跑最终网络矩阵，不把原 profile 诊断失败结案。

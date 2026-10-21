@@ -91,7 +91,7 @@ impl MembershipHistoryExchangePort for MembershipHistoryTransport {
                     connection.close();
                     connection = self
                         .manager
-                        .refresh(&connection, deadline)
+                        .refresh(connection, deadline, &CancellationToken::new())
                         .await
                         .map_err(MembershipHistoryExchangeError::offline_from)?;
                     usage.connection = connection.clone();

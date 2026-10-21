@@ -1168,7 +1168,11 @@ async fn refreshing_dead_transport_preserves_the_original_request_revocation_fen
     epoch.store(1, Ordering::SeqCst);
     assert!(matches!(
         manager
-            .refresh(&lease, Instant::now() + Duration::from_secs(10))
+            .refresh(
+                lease,
+                Instant::now() + Duration::from_secs(10),
+                &CancellationToken::new()
+            )
             .await,
         Err(ConnectivityError::Denied)
     ));

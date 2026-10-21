@@ -19,7 +19,7 @@
 阶段 0 前置证明完成：SDK／Uni 完成等待、原始材料、当前授权、同内容隔离、协议向量、8 组旧资料矩阵与 1GiB 基线均有证据。阶段 1／2 推进：生产提供端已迁移，下载、输出／引用／提交结算与稳定取消仍待完成。
 
 ## Next Step
-生产提供端已迁至完整 BlobTransport：4／2、首流共用截止时间、会话保护及受监督关闭已验证。Application 1155 passed／1 skipped、P2P 323 passed／3 skipped，真实 Engine Direct／Relay 双向文件均通过。完成本轮根门禁和提交后，迁移下载、输出／引用／提交结算及非阻塞通知，统一稳定取消；生产 fetch／warmup 仍是旧路径。
+生产提供端已提交 6d0c13c1；重连现消费旧租约并等待方向名额真实释放，Application 全库 1157 passed／1 skipped。下一步直接迁移真实下载完整流程：统一获取、流式输出／解密、引用／标签及实际结算，把 DownloadPermit 保持至任务结束，接入预算与非阻塞通知，删除旧 Downloader／warmup 和对端级取消；不能继续只扩大提供端或基础设施测试。
 
 ## 错误
 - 探针锁 guard 编译错误已修复，probe.log 保留。

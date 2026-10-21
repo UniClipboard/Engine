@@ -382,11 +382,11 @@ impl ConnectivityManager {
     /// 尚未发送请求的已失活连接可重获；原请求撤销快照不能随新拨号刷新。
     pub async fn refresh(
         &self,
-        previous: &ConnectionLease,
+        previous: ConnectionLease,
         deadline: Instant,
+        cancel: &CancellationToken,
     ) -> Result<ConnectionLease, ConnectivityError> {
         let request = previous.request.clone().ok_or(ConnectivityError::Denied)?;
-        request.check_current().await?;
         if !previous.is_closed() && !previous.is_unreachable() {
             return Err(ConnectivityError::Denied);
         }
@@ -396,9 +396,24 @@ impl ConnectivityManager {
             attempt: request,
             session: previous.record.stop.clone(),
         };
-        let lease = frozen.connect(deadline, &CancellationToken::new()).await?;
-        lease.check_current().await?;
-        Ok(lease)
+        let mut settled = previous.record._lifetime.settled();
+        previous.close();
+        self.retire(&previous);
+        drop(previous);
+        // 旧租约、兄弟流的本地工作和原生关闭共同完成后才重获方向名额。
+        // 等待本身不保留旧 record，也不刷新原请求资格、会话或期限。
+        if self.policy().connections_per_peer_direction.is_some() {
+            tokio::select! {
+                biased;
+                _ = frozen.session.cancelled() => return Err(ConnectivityError::Stopped),
+                _ = cancel.cancelled() => return Err(ConnectivityError::Stopped),
+                result = timeout_at(deadline, settled.wait_for(|finished| *finished)) => {
+                    result.map_err(ConnectivityError::TimedOut)?
+                        .map_err(ConnectivityError::ResultClosed)?;
+                }
+            }
+        }
+        frozen.connect(deadline, cancel).await
     }
     fn launch(
         &self,

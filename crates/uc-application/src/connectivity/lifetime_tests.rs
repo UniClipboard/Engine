@@ -257,3 +257,128 @@ async fn shutdown_joins_close_work_registered_by_a_late_returning_dial() {
     connection.finished.send_replace(true);
     closing.await.expect("shutdown task").expect("shutdown");
 }
+
+#[tokio::test(start_paused = true)]
+async fn refresh_releases_its_own_lease_and_waits_for_actual_close_and_local_work() {
+    for close_first in [false, true] {
+        let (manager, backend) = setup();
+        backend.finish.add_permits(2);
+        let lease = manager
+            .request(DeviceId::new("peer"))
+            .connect(
+                Instant::now() + Duration::from_secs(10),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("first connection");
+        let stream = lease
+            .open_bi(Instant::now() + Duration::from_secs(10))
+            .await
+            .expect("stream");
+        let (io, work) = stream.into_parts();
+        drop(io);
+        let original = backend.connections.lock().expect("connections")[0].clone();
+        lease.close();
+        let owner = manager.clone();
+        let refreshed = tokio::spawn(async move {
+            owner
+                .refresh(
+                    lease,
+                    Instant::now() + Duration::from_secs(10),
+                    &CancellationToken::new(),
+                )
+                .await
+        });
+        settle_watchers().await;
+        assert!(!refreshed.is_finished());
+        if close_first {
+            original.finished.send_replace(true);
+            settle_watchers().await;
+            assert!(!refreshed.is_finished(), "local work escaped lifetime");
+            drop(work);
+        } else {
+            drop(work);
+            settle_watchers().await;
+            assert!(!refreshed.is_finished(), "native close escaped lifetime");
+            original.finished.send_replace(true);
+        }
+        let next = refreshed
+            .await
+            .expect("refresh task")
+            .expect("fresh connection");
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
+        backend.connections.lock().expect("connections")[1]
+            .finished
+            .send_replace(true);
+        drop(next);
+        manager.shutdown().await.expect("shutdown");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn refresh_wait_respects_original_deadline_cancellation_and_session() {
+    for ending in ["deadline", "cancel", "session"] {
+        let (manager, backend) = setup();
+        backend.finish.add_permits(1);
+        let lease = manager
+            .request(DeviceId::new("peer"))
+            .connect(
+                Instant::now() + Duration::from_secs(10),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("first connection");
+        let original = backend.connections.lock().expect("connections")[0].clone();
+        lease.close();
+        let cancel = CancellationToken::new();
+        let token = cancel.clone();
+        let owner = manager.clone();
+        let refreshed = tokio::spawn(async move {
+            owner
+                .refresh(lease, Instant::now() + Duration::from_secs(10), &token)
+                .await
+        });
+        settle_watchers().await;
+        let resetting = match ending {
+            "deadline" => {
+                tokio::time::advance(Duration::from_secs(10)).await;
+                None
+            }
+            "cancel" => {
+                cancel.cancel();
+                None
+            }
+            "session" => {
+                let owner = manager.clone();
+                Some(tokio::spawn(async move { owner.disconnect_all().await }))
+            }
+            _ => unreachable!(),
+        };
+        let error = refreshed
+            .await
+            .expect("refresh task")
+            .err()
+            .expect("wait must end");
+        if ending == "deadline" {
+            assert!(matches!(error, ConnectivityError::TimedOut(_)));
+        } else {
+            assert!(matches!(error, ConnectivityError::Stopped));
+        }
+        assert_eq!(
+            backend.calls.load(Ordering::SeqCst),
+            1,
+            "wait cannot redial early"
+        );
+        if ending != "session" {
+            busy(&manager).await;
+        }
+        original.finished.send_replace(true);
+        if let Some(resetting) = resetting {
+            resetting
+                .await
+                .expect("session reset task")
+                .expect("session reset");
+        }
+        manager.shutdown().await.expect("shutdown");
+    }
+}

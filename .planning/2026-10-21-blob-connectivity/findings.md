@@ -45,3 +45,5 @@
 - provider-direct/direct.json 和 provider-relay/relay.json 已核对 outcome=passed、exact_bytes_verified=true、direction_count=2、cleaned/plaintext_clean=true；Relay 另为 direct_paths_blocked=true。应用库 1154／1、P2P 库及两个集成 322／3 通过／跳过，Root全workspace旧profile诊断失败尚未重跑结案。
 - 当前 BlobTransport 的真实 SDK A/B 用例通过：32KiB以上实际 UDP 正文到达后取消A，B同连接4MiB精确读取且只获取一次；第三次正文中断后source owner正常关闭。真实 Noq 停止与 SDK 导出结算在该路径未产生“已关闭误报清理失败”，不额外放宽停止错误。
 - 下一步接下载时需核对：当前 manager.refresh 借用旧 lease，而方向1的名额由该 record 生命周期持有；不能带着旧 lease 自身的名额去重获同方向连接。还须在外部队列及异步 ticket 身份解析之前保持旧会话／撤销围栏，不能拿到名额后取新 epoch；阅读全部真实 fetch 消费者后统一迁移旧端口，不保留转调兼容层。
+
+- refresh 的实际消费者还包括 membership/history_transport，不能只搜索 connectivity 子目录。旧实现借用 lease 在方向限额1时会被自身挡住；新增寿命完成 watch 只携带完成事实，不持有旧 record。下载自动恢复仍须使用同一冻结 ConnectionRequest，且持原下载许可等待实际结算，不重新入队。
