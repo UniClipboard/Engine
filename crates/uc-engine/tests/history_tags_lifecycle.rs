@@ -816,10 +816,41 @@ async fn history_tags_survive_merge_delete_restart_and_index_rebuild() {
     );
 
     // 11. 显式重建索引后，用户标签过滤、结果 tags 与计数保持一致。
+    let OperationResult::SearchStatus(before_rebuild) =
+        engine.execute(Operation::QuerySearchStatus).await.unwrap()
+    else {
+        panic!("expected search status")
+    };
     match engine.execute(Operation::RebuildSearchIndex).await {
         Ok(OperationResult::SearchRebuildAccepted { .. }) => {}
         other => panic!("unexpected rebuild result: {other:?}"),
     }
+    // 接受请求不代表后台重建已经开始。先确认本次重建完成，不能用上一代的 ready 状态放行。
+    let mut completed_rebuild = None;
+    for _ in 0..150 {
+        let OperationResult::SearchStatus(status) =
+            engine.execute(Operation::QuerySearchStatus).await.unwrap()
+        else {
+            panic!("expected search status")
+        };
+        if status.state == "ready"
+            && status.last_rebuild_completed_at_ms.is_some()
+            && status.last_rebuild_completed_at_ms != before_rebuild.last_rebuild_completed_at_ms
+        {
+            completed_rebuild = Some(status);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let completed_rebuild = completed_rebuild.expect("requested rebuild must complete");
+    evidence.step(
+        "rebuild_completed",
+        json!({
+            "before_completed_at_ms": before_rebuild.last_rebuild_completed_at_ms,
+            "completed_at_ms": completed_rebuild.last_rebuild_completed_at_ms,
+            "state": completed_rebuild.state,
+        }),
+    );
     wait_for_indexed(&engine, 3).await;
     assert_eq!(
         entry_ids(&engine, tagged(&[&work.tag_id], None)).await,

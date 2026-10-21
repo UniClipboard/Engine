@@ -5,13 +5,15 @@ use std::time::Duration;
 
 use uc_application::facade::{AppFacade, DiagnosticsFacadeError};
 use uc_core::ids::RepresentationId;
+use uc_core::ports::config_migration::ConfigImportRejection;
 use uc_observability_contract::{error_source::io_error_kind, uc_warn};
 
 use crate::runtime::host_file::{copy_path_to_host, HostFileCopyError};
 use crate::{
-    DebugModeUpdateSummary, DiagnosticLogsExportSummary, DiagnosticsStatusSummary, EngineError,
-    EngineErrorCategory, ExportDiagnosticLogsInput, HostCapabilityErrorCategory, HostFileAccess,
-    OperationResult, UpdateDebugModeInput,
+    ConfigImportRejectionReason, DebugModeUpdateSummary, DiagnosticLogsExportSummary,
+    DiagnosticsStatusSummary, EngineError, EngineErrorCategory, ExportDiagnosticLogsInput,
+    HostCapabilityErrorCategory, HostFileAccess, OperationResult, RejectedConfigImportSummary,
+    UpdateDebugModeInput,
 };
 
 pub(crate) async fn execute_query_diagnostics(
@@ -24,6 +26,22 @@ pub(crate) async fn execute_query_diagnostics(
         .map_err(|_| internal_error(QUERY_DIAGNOSTICS_FAILED_CODE))?;
     Ok(OperationResult::DiagnosticsStatus(
         DiagnosticsStatusSummary {
+            rejected_config_import: status.rejected_config_import.map(|rejected| {
+                RejectedConfigImportSummary {
+                    reason: match rejected.reason {
+                        ConfigImportRejection::UnsupportedFormat => {
+                            ConfigImportRejectionReason::UnsupportedFormat
+                        }
+                        ConfigImportRejection::MalformedMarker => {
+                            ConfigImportRejectionReason::MalformedMarker
+                        }
+                        ConfigImportRejection::MissingRuntimeMembers => {
+                            ConfigImportRejectionReason::MissingRuntimeMembers
+                        }
+                    },
+                    message: rejected.message,
+                }
+            }),
             debug_mode: status.debug_mode,
             effective_log_profile: status.effective_log_profile,
             restart_required: status.restart_required,
@@ -107,7 +125,10 @@ fn map_diagnostics_error(error: DiagnosticsFacadeError) -> EngineError {
         DiagnosticsFacadeError::DownloadsUnavailable
         | DiagnosticsFacadeError::LoadSettings(_)
         | DiagnosticsFacadeError::SaveSettings(_)
-        | DiagnosticsFacadeError::Export(_) => internal_error(EXPORT_DIAGNOSTIC_LOGS_FAILED_CODE),
+        | DiagnosticsFacadeError::Export(_)
+        | DiagnosticsFacadeError::ImportStatus(_) => {
+            internal_error(EXPORT_DIAGNOSTIC_LOGS_FAILED_CODE)
+        }
     }
 }
 

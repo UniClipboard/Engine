@@ -17,7 +17,7 @@ use uc_core::ports::ConfigSourceMode;
 /// Bump when the archive layout (member set / manifest shape) changes in a way
 /// older readers cannot understand. Readers reject anything greater than the
 /// version they were built with.
-pub const MANIFEST_SCHEMA_VER: u32 = 1;
+pub const MANIFEST_SCHEMA_VER: u32 = 2;
 
 /// Storage layout the source installation ran under, recorded so the operator
 /// (and the staging step) can reason about cross-layout migration.

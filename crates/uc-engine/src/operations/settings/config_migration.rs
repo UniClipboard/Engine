@@ -111,7 +111,10 @@ pub(crate) async fn execute_stage_config_import(
     let result = match copied {
         Ok(()) => {
             let password = Passphrase::new(input.password.expose().to_string());
-            match facade.stage_config_import(&password, &bundle_path).await {
+            match facade
+                .stage_config_import(&password, &bundle_path, input.replace_rejected_import)
+                .await
+            {
                 Ok(staged) => Ok(OperationResult::ConfigImportStaged(
                     ConfigImportStageOutcome::Staged {
                         unlock_required_after_apply: staged.unlock_required_after_apply,

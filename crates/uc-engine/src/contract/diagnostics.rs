@@ -6,6 +6,9 @@ use crate::HostFileHandle;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiagnosticsStatusSummary {
+    /// 拒绝资料仍在原位；宿主必须展示原因和重新导出指引。
+    #[serde(default)]
+    pub rejected_config_import: Option<RejectedConfigImportSummary>,
     pub debug_mode: bool,
     pub effective_log_profile: String,
     pub restart_required: bool,
@@ -52,4 +55,21 @@ impl fmt::Debug for DiagnosticLogsExportSummary {
             .field("since_unix_ms", &self.since_unix_ms)
             .finish()
     }
+}
+
+uc_observability_contract::wire_enum! {
+    serde
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum ConfigImportRejectionReason {
+        UnsupportedFormat => "unsupported_format",
+        MalformedMarker => "malformed_marker",
+        MissingRuntimeMembers => "missing_runtime_members",
+    }
+}
+
+/// 描述未完成的导入；不包含路径、身份、密钥或归档内容。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RejectedConfigImportSummary {
+    pub reason: ConfigImportRejectionReason,
+    pub message: String,
 }

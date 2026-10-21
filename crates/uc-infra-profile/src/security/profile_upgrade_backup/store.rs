@@ -81,11 +81,11 @@ impl ProfileUpgradeBackupStore {
         }
     }
 
-    pub(super) fn directory(&self) -> PathBuf {
+    pub(crate) fn directory(&self) -> PathBuf {
         self.directory.clone()
     }
 
-    pub(super) fn source(&self) -> Result<ProfileBackupSource, ProfileUpgradeBackupError> {
+    pub(crate) fn source(&self) -> Result<ProfileBackupSource, ProfileUpgradeBackupError> {
         Ok(ProfileBackupSource {
             product_version: read_version_before_upgrade(
                 &self.paths.app_data_root_dir.join(DEFAULT_FILE_NAME),

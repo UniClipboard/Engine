@@ -15,6 +15,7 @@ use uc_application::deps::{
     ClearProfileStatePort, CurrentMemberSignaturePort, ProfileLifecycleRepositoryPort,
     RetireUpgradeBackupSecurityRecordsPort, WipeProfileKeysPort,
 };
+use uc_core::app_dirs::HostConfigurationFileError;
 use uc_core::clipboard::ActiveClipboardState;
 use uc_core::ports::blob::BlobReferenceRepositoryPort;
 use uc_observability_contract::analytics::AnalyticsFacade;
@@ -54,6 +55,9 @@ pub enum WiringError {
         #[source]
         source: anyhow::Error,
     },
+
+    #[error("host configuration file declaration is invalid")]
+    HostConfigurationFiles(#[source] HostConfigurationFileError),
 
     #[error("unfinished passphrase change could not be recovered")]
     PassphraseChangeRecovery {

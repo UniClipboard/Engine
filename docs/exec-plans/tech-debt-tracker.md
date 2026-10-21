@@ -25,3 +25,30 @@
 | 已完整接收目录的再次激活触发重复 pull 并存储失败 | 独立进程复现两次；冻结 main 可用性实现与当前一致 | Application 内容可用性负责人和 Infra 存储负责人统一目录完整性判断与重复接收结算；真实目录包含嵌套文件及空目录，首次物化后再次激活不重复拉取，缺失成员仍不得判定可用；不得仅把根目录存在当作成员完整 | [发现记录](../../.planning/2026-10-14-active-clipboard-connectivity/findings.md) |
 
 关闭项目时记录验证证据，更新稳定文档，并将对应计划移入 `completed/`。
+
+
+## Configuration import: lifecycle and upgrade-journal adoption
+
+Status: implementation and public Engine acceptance are tracked by the host-configuration plan.
+The immutable checkpoint `74122413` retains the original unresolved gate and negative evidence.
+
+The original defect used the pre-import target lifecycle and later reused target upgrade state under
+source keys. Synthetic diagnosis proved that the imported encrypted vault already carried the admission
+key. No new independent-key export is needed. A profile-only V3 snapshot also omitted control security
+material and could not restore a session. Merging V3 credentials into a legacy upgrade source did not
+preserve their authenticated generation bindings.
+
+The repair gives the existing offline import owner a durable adoption transaction. It retains target
+state and upgrade backups, verifies an archive, then installs the source V3 manifest, both consistent
+database snapshots, content-key catalog, encrypted blobs and existing encrypted vault. Startup rereads
+the imported lifecycle. Failure retains the journal and staging for replay. See the stable
+[configuration import contract](../design-docs/uc-engine-interface.md#configuration-import-adoption).
+
+The user approved explicit rejection of incomplete schema-1 bundles before target mutation. These
+bundles require a new export from the retained source installation. Their historical 1101 assertions
+are preserved as repro evidence and do not count as successful imports.
+
+Acceptance remains evidence-based: the final task8 receipt must identify the tested source SHA,
+public fresh/existing-install runs, first/subsequent starts, partial adoption recovery, retained target
+backup verification and public passphrase recovery. Task7 old-anchor mbx downgrade execution and
+native/downstream acceptance remain separate gates.

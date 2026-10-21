@@ -635,6 +635,7 @@ fn config_migration_contract_uses_host_handles_and_redacts_identity_metadata() {
         password: uc_engine::SecretString::new("private config password"),
     });
     let stage = Operation::StageConfigImport(uc_engine::StageConfigImportInput {
+        replace_rejected_import: false,
         source: uc_engine::HostFileHandle::new("private config source"),
         password: uc_engine::SecretString::new("private config password"),
     });

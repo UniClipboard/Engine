@@ -19,7 +19,7 @@
 //!   iroh-identity/*        # 0600 device-identity files; copy into identity dir
 //!   settings.json
 //!   secrets.json           # { "secrets": { "<key>": "<base64>" , ... } }; KEK only
-//!   ui-state/*.json        # optional
+//!   ui-state/<name>        # host-declared configuration files (historical prefix)
 //! pending-import.json      # marker at the data root (sibling of import-staging/)
 //! ```
 //!
@@ -28,11 +28,17 @@
 //! contents.
 
 use std::collections::BTreeMap;
+use std::fs::OpenOptions;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+
+use uc_infra_local::fs::durability::{replace_file, sync_directory};
+use uc_infra_local::fs::VaultLayout;
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
+use uc_core::app_dirs::HostConfigurationFiles;
 use uc_core::ports::SecureStoragePort;
 use uc_observability_contract::{error_source::io_error_kind, uc_error, uc_info};
 
@@ -48,7 +54,7 @@ pub const STAGING_DIR_NAME: &str = "import-staging";
 pub const PENDING_IMPORT_MARKER: &str = "pending-import.json";
 
 /// Schema version of the marker + staging layout contract.
-pub const PENDING_IMPORT_SCHEMA_VER: u32 = 1;
+pub const PENDING_IMPORT_SCHEMA_VER: u32 = 2;
 
 /// Boot-time marker written next to the staging directory.
 ///
@@ -187,10 +193,20 @@ impl StagingLayout {
 
         for (member, bytes) in archive.iter() {
             let dest = staging.join(member);
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent).map_err(StagingError::io_from)?;
+            ensure_parent(&dest).map_err(StagingError::io_from)?;
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
             }
-            std::fs::write(&dest, bytes).map_err(StagingError::io_from)?;
+            let mut file = options.open(&dest).map_err(StagingError::io_from)?;
+            file.write_all(bytes).map_err(StagingError::io_from)?;
+            file.sync_all().map_err(StagingError::io_from)?;
+            if let Some(parent) = dest.parent() {
+                sync_directory(parent).map_err(StagingError::io_from)?;
+            }
         }
 
         // Marker written last and atomically (tmp + rename) so its presence
@@ -198,8 +214,22 @@ impl StagingLayout {
         let marker_json =
             serde_json::to_vec_pretty(marker).map_err(StagingError::serialize_from)?;
         let tmp = marker_path.with_extension("json.tmp");
-        std::fs::write(&tmp, &marker_json).map_err(StagingError::io_from)?;
-        std::fs::rename(&tmp, &marker_path).map_err(StagingError::io_from)?;
+        match std::fs::remove_file(&tmp) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(StagingError::io_from(error)),
+        }
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .map_err(StagingError::io_from)?;
+        file.write_all(&marker_json)
+            .map_err(StagingError::io_from)?;
+        file.sync_all().map_err(StagingError::io_from)?;
+        drop(file);
+        replace_file(&tmp, &marker_path).map_err(StagingError::io_from)?;
+        sync_directory(&self.data_root).map_err(StagingError::io_from)?;
 
         Ok(())
     }
@@ -230,15 +260,24 @@ pub const CURRENT_SPACE_ID_MEMBER: &str = "vault/.current-space-id-v1";
 
 /// Member path of the encrypted independent profile-secret store.
 pub const PROFILE_SECRETS_MEMBER: &str = "vault/profile-secrets-v1";
+pub const CONTENT_KEY_CATALOG_MEMBER: &str = "vault/profile-content-key-vault-v1.json";
+pub const ENGINE_CURSOR_MEMBER: &str = "state/engine-upgrade-cursor.json";
 
 /// Member path of settings inside the bundle / staging area.
 pub const SETTINGS_MEMBER: &str = "settings.json";
 
 /// Member path of the db snapshot inside the bundle / staging area.
 pub const DB_MEMBER: &str = "db/uniclipboard.db";
+pub const CONTROL_DB_MEMBER: &str = "db/control.sqlite";
+pub const RUNTIME_MANIFEST_MEMBER: &str = "vault/.active-space-manifest-v2";
 
-/// Prefix for optional UI-state members.
-pub const UI_STATE_PREFIX: &str = "ui-state/";
+/// Prefix for host-declared configuration file members.
+///
+/// The `ui-state/` spelling predates host declarations; it is kept so bundles
+/// exported before declarations (which carried the updater-state files here)
+/// restore through the same mapping. A member `ui-state/<name>` restores to
+/// `<data_root>/<name>` only when the importing host declares `<name>`.
+pub const HOST_CONFIGURATION_PREFIX: &str = "ui-state/";
 
 /// Prefix for iroh device-identity files.
 ///
@@ -257,12 +296,13 @@ pub fn staged_member_path(data_root: &Path, member: &str) -> PathBuf {
 }
 
 /// Apply a staged configuration import before any live database connection opens.
-pub fn apply_pending_import(
+pub(super) fn install_pending_import(
     app_data_root: &Path,
     db_path: &Path,
     vault_dir: &Path,
     settings_path: &Path,
     iroh_identity_dir: &Path,
+    host_configuration_files: &HostConfigurationFiles,
     secure_storage: &dyn SecureStoragePort,
 ) -> Result<(), PendingImportError> {
     let layout = StagingLayout::new(app_data_root);
@@ -281,7 +321,7 @@ pub fn apply_pending_import(
             expected_schema_ver = PENDING_IMPORT_SCHEMA_VER,
             "staged import schema version mismatch; skipping apply and preserving staging"
         );
-        return Ok(());
+        return Err(PendingImportError::parse_marker());
     }
 
     let staging_dir = layout.staging_dir();
@@ -298,12 +338,12 @@ pub fn apply_pending_import(
     for (key, encoded) in &secrets.secrets {
         let bytes = match decode_secret_value(encoded) {
             Ok(bytes) => bytes,
-            Err(_) => {
+            Err(error) => {
                 uc_error!(
                     key_class = classify_secret_key(key),
                     "staged secret value failed to decode; aborting import apply, staging preserved"
                 );
-                return Ok(());
+                return Err(PendingImportError::parse_secrets_from(error));
             }
         };
         if let Err(error) = secure_storage.set(key, &bytes) {
@@ -313,7 +353,7 @@ pub fn apply_pending_import(
                 io_error_kind = io_error_kind(&error),
                 "writing staged secret into secure storage failed; aborting import apply, staging preserved"
             );
-            return Ok(());
+            return Err(PendingImportError::copy_member_from(error));
         }
     }
 
@@ -340,23 +380,113 @@ pub fn apply_pending_import(
         PROFILE_SECRETS_MEMBER,
         &vault_dir.join(PROFILE_SECRET_FILE_NAME),
     )?;
+    copy_member_if_present(
+        &staging_dir,
+        CONTENT_KEY_CATALOG_MEMBER,
+        &vault_dir.join("profile-content-key-vault-v1.json"),
+    )?;
+    copy_member_if_present(
+        &staging_dir,
+        ENGINE_CURSOR_MEMBER,
+        &VaultLayout::new(app_data_root).engine_upgrade_cursor_path(),
+    )?;
+    copy_member_if_present(
+        &staging_dir,
+        RUNTIME_MANIFEST_MEMBER,
+        &vault_dir.join(".active-space-manifest-v2"),
+    )?;
     copy_dir_members(&staging_dir, IROH_IDENTITY_PREFIX, iroh_identity_dir)?;
     copy_member_if_present(&staging_dir, SETTINGS_MEMBER, settings_path)?;
-    copy_dir_members(
-        &staging_dir,
-        UI_STATE_PREFIX,
-        &app_data_root.join(UI_STATE_PREFIX.trim_end_matches('/')),
-    )?;
+    restore_host_configuration_files(&staging_dir, app_data_root, host_configuration_files)?;
 
-    std::fs::remove_dir_all(&staging_dir).map_err(PendingImportError::cleanup_from)?;
-    std::fs::remove_file(&marker_path).map_err(PendingImportError::cleanup_from)?;
+    Ok(())
+}
+
+/// 既有完整低层入口；生产启动另经离线采用事务保留目标状态。
+pub fn apply_pending_import(
+    app_data_root: &Path,
+    db_path: &Path,
+    vault_dir: &Path,
+    settings_path: &Path,
+    iroh_identity_dir: &Path,
+    host_configuration_files: &HostConfigurationFiles,
+    secure_storage: &dyn SecureStoragePort,
+) -> Result<(), PendingImportError> {
+    install_pending_import(
+        app_data_root,
+        db_path,
+        vault_dir,
+        settings_path,
+        iroh_identity_dir,
+        host_configuration_files,
+        secure_storage,
+    )?;
+    complete_pending_import(app_data_root)
+}
+
+pub(super) fn complete_pending_import(app_data_root: &Path) -> Result<(), PendingImportError> {
+    cleanup_pending_import(app_data_root)?;
     uc_info!("staged config import applied; staging cleaned up");
     Ok(())
 }
 
-fn copy_member(staging_dir: &Path, member: &str, dest: &Path) -> Result<(), PendingImportError> {
+/// 只清理固定暂存路径；拒绝导入时也可在目标事务开始前调用。
+pub(super) fn cleanup_pending_import(app_data_root: &Path) -> Result<(), PendingImportError> {
+    let layout = StagingLayout::new(app_data_root);
+    match std::fs::remove_file(layout.marker_path()) {
+        Ok(()) => sync_directory(app_data_root).map_err(PendingImportError::cleanup_from)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(PendingImportError::cleanup_from(error)),
+    }
+    match std::fs::remove_dir_all(layout.staging_dir()) {
+        Ok(()) => sync_directory(app_data_root).map_err(PendingImportError::cleanup_from)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(PendingImportError::cleanup_from(error)),
+    }
+    Ok(())
+}
+
+pub(super) fn copy_member(
+    staging_dir: &Path,
+    member: &str,
+    dest: &Path,
+) -> Result<(), PendingImportError> {
+    copy_staged_file(&staging_dir.join(member), dest)
+}
+
+pub(super) fn copy_staged_file(source: &Path, dest: &Path) -> Result<(), PendingImportError> {
     ensure_parent(dest)?;
-    std::fs::copy(staging_dir.join(member), dest).map_err(PendingImportError::copy_member_from)?;
+    let temporary = dest.with_file_name(format!(
+        ".{}.import-tmp",
+        dest.file_name()
+            .ok_or_else(PendingImportError::copy_member)?
+            .to_string_lossy()
+    ));
+    match std::fs::remove_file(&temporary) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(PendingImportError::copy_member_from(error)),
+    }
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut output = options
+        .open(&temporary)
+        .map_err(PendingImportError::copy_member_from)?;
+    let mut input = std::fs::File::open(source).map_err(PendingImportError::copy_member_from)?;
+    io::copy(&mut input, &mut output).map_err(PendingImportError::copy_member_from)?;
+    output
+        .sync_all()
+        .map_err(PendingImportError::copy_member_from)?;
+    drop(output);
+    replace_file(&temporary, dest).map_err(PendingImportError::copy_member_from)?;
+    if let Some(parent) = dest.parent() {
+        sync_directory(parent).map_err(PendingImportError::copy_member_from)?;
+    }
     Ok(())
 }
 
@@ -369,9 +499,7 @@ fn copy_member_if_present(
     if !source.exists() {
         return Ok(());
     }
-    ensure_parent(dest)?;
-    std::fs::copy(source, dest).map_err(PendingImportError::copy_member_from)?;
-    Ok(())
+    copy_staged_file(&source, dest)
 }
 
 fn copy_member_or_remove(
@@ -381,11 +509,7 @@ fn copy_member_or_remove(
 ) -> Result<(), PendingImportError> {
     let source = staging_dir.join(member);
     if source.exists() {
-        ensure_parent(dest)?;
-        return match std::fs::copy(source, dest) {
-            Ok(_) => Ok(()),
-            Err(_) => Err(PendingImportError::copy_member()),
-        };
+        return copy_staged_file(&source, dest);
     }
     match std::fs::remove_file(dest) {
         Ok(()) => Ok(()),
@@ -413,15 +537,73 @@ fn copy_dir_members(
         {
             continue;
         }
-        std::fs::copy(entry.path(), dest_dir.join(entry.file_name()))
-            .map_err(PendingImportError::copy_member_from)?;
+        copy_staged_file(&entry.path(), &dest_dir.join(entry.file_name()))?;
     }
+    Ok(())
+}
+
+/// 只把当前宿主声明的 `ui-state/<name>` 放回 `<data_root>/<name>`；配置包里其余成员一律忽略，
+/// 导入的清单不能决定写入位置。每个文件先写数据根内的临时名再改名替换：单文件原子，
+/// 目标若是符号链接则替换链接本身而不写穿。配置包缺少某个声明文件时保留现有文件。
+fn restore_host_configuration_files(
+    staging_dir: &Path,
+    app_data_root: &Path,
+    host_configuration_files: &HostConfigurationFiles,
+) -> Result<(), PendingImportError> {
+    let source_dir = staging_dir.join(HOST_CONFIGURATION_PREFIX.trim_end_matches('/'));
+    let mut restored = 0_usize;
+    for name in host_configuration_files.names() {
+        let source = source_dir.join(name);
+        match std::fs::symlink_metadata(&source) {
+            Ok(metadata) if metadata.file_type().is_file() => {}
+            Ok(_) => return Err(PendingImportError::copy_member()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(PendingImportError::copy_member_from(error)),
+        }
+        copy_staged_file(&source, &app_data_root.join(name))?;
+        restored += 1;
+    }
+    let ignored = match std::fs::read_dir(&source_dir) {
+        Ok(entries) => entries
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(PendingImportError::copy_member_from)?
+            .into_iter()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_none_or(|name| !host_configuration_files.contains(name))
+            })
+            .count(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => return Err(PendingImportError::copy_member_from(error)),
+    };
+    uc_info!(
+        entry_count = restored,
+        dropped_count = ignored,
+        "host configuration files restored from staged import"
+    );
     Ok(())
 }
 
 fn ensure_parent(dest: &Path) -> Result<(), PendingImportError> {
     if let Some(parent) = dest.parent().filter(|path| !path.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent).map_err(PendingImportError::copy_member_from)?;
+        if !parent.is_dir() {
+            ensure_parent(parent)?;
+            let mut builder = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            builder
+                .create(parent)
+                .map_err(PendingImportError::copy_member_from)?;
+            sync_directory(parent).map_err(PendingImportError::copy_member_from)?;
+            if let Some(grandparent) = parent.parent() {
+                sync_directory(grandparent).map_err(PendingImportError::copy_member_from)?;
+            }
+        }
     }
     Ok(())
 }
@@ -680,6 +862,7 @@ mod tests {
             &vault_dir,
             &settings_path,
             &identity_dir,
+            &HostConfigurationFiles::default(),
             &MemorySecureStorage::default(),
         )
         .unwrap();
