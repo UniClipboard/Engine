@@ -256,3 +256,18 @@ Extend the existing synchronous file-preservation contract to Windows before cha
 code. Run the maintained real filesystem contracts and public Engine import E2E. Add the existing
 atomic-publish contracts to Windows CI runtime verification. Push only a new fast-forward commit,
 then run the Windows matrix on that exact SHA. Review quota/configuration remains outside task8.
+
+
+## PR226 Engine check follow-up: reuse task9 fixture repair
+
+The failure matches task9 commit `2c3dd6388f03c3712e1f2859cd2f17e9e4983bc5`
+and its retained report. This is an obsolete host assembly fixture, not an unknown production regression.
+Failure modes: the invalid marker fails before the intended backup denial; the backup-reuse fixture
+never reaches legacy adoption; removing archive or identity assertions would hide retry corruption.
+Reuse only the exact host.rs test diff from that commit. Keep the Application startup owner and
+production ordering unchanged. The backup-denied fixture must reach backup denial without an import
+marker. The reuse fixture must fail lifecycle persistence after backup and legacy adoption, then keep
+one archive with identical bytes across retries, adopted identity and no lifecycle marker.
+Run both existing host tests and the maintained public import E2E; retain failures and exact source
+receipts. Task9 already contains this repair. Downstream synchronization must retain it, not reapply
+an alternative fixture. Do not import task9 log-profile implementation into task8.
