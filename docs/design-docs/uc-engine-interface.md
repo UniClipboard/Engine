@@ -449,8 +449,12 @@ The archive member is `ui-state/<name>`. The historical prefix and manifest sche
 Import restores that member to `<data_root>/<name>` only if the receiving host declares the same name.
 The archive and its manifest cannot select any other destination.
 Undeclared members do not create host files. A missing member preserves the existing destination file.
-Old bundles use this mapping for their existing members. Old exporters never included every host file.
-Old Engines still restore members under their historical `ui-state/` destination; they do not provide the new root mapping.
+Manifest schema 2 keeps the historical `ui-state/` member prefix. It requires the complete V3 runtime state.
+An incomplete schema-1 bundle is rejected before staging or target mutation. The result is
+`ConfigImportStageOutcome::Incompatible`, with a reason that requires re-export from the retained
+source installation. This compatibility policy was explicitly approved. Old readers reject archive schema 2. The pending marker also uses schema 2, so an old boot reader
+does not apply the new staging layout as a legacy single-store import.
+Do not reconstruct missing members, export independent keys, or copy platform credentials.
 
 The existing archive reader rejects absolute paths and parent traversal.
 The archive reader uses the last occurrence of a duplicate normalized member path, under the existing total size limit.
@@ -459,7 +463,9 @@ Import writes each host file to a new temporary file, flushes it, then replaces 
 A destination symlink is replaced; import does not write through the link.
 A destination directory fails import without removing that directory.
 Successful files can remain visible if a later copy fails. The import marker and staging remain for the next boot to retry.
-The boot owner removes staging only after all copies succeed. The operation is not atomic across files.
+The boot owner clears the pending marker after all copies and runtime-layout installation succeed.
+It then removes staging. Each publication is flushed. The operation is not atomic across files.
+A failed adoption returns no running Engine handle. The next start resumes the same adoption.
 A retry copies the same staged bytes again. Hosts must not concurrently change files while boot applies an import.
 
 ### Reset and upgrade backup
@@ -475,11 +481,41 @@ Upgrade backup keeps its existing whole-root scope and exclusion list.
 Backup includes declared files, undeclared files, and telemetry when they exist in the root.
 The declaration does not narrow that scope.
 
-### Required integration gate
+### Configuration import adoption
 
-Cross-install import is not accepted yet. The retained task8 baseline and changed runs return startup code 1101 after staging succeeds.
-The encrypted profile vault contains the admission key; additional credential export is not the proposed remedy.
-Startup retains a lifecycle value read before import. A later start also encounters the target's old upgrade journal under the imported security context.
-The current public startup failure returns no Engine handle for recovery operations.
-Same-install import and host-file mapping evidence do not close this gate.
-Track the repair and acceptance in the [technical debt tracker](../exec-plans/tech-debt-tracker.md).
+The Application profile-startup owner invokes one complete offline adoption capability before version
+backup and before reading the lifecycle used for runtime wiring. The Infra import owner performs the
+following transaction while the host holds exclusive access to the profile:
+
+1. Bind a durable local journal to the staged marker and record which fixed Engine components exist.
+2. Move those components with no-replace renames into a private sibling recovery directory.
+3. Capture and verify the retired state with `ProfileBackupArchive`. Retain its receipt and originals.
+4. Clear the recovery cache. Install the existing encrypted vault, content-key catalog, KEK and cursor.
+5. Authenticate the source V3 manifest with the imported lifecycle and admission key. Use
+   `ProfileRuntimeLayout` to install both database snapshots and encrypted blobs at its generation paths.
+6. Mark installation durable. Clear the pending marker, remove staging, then clear the local journal.
+7. Load the imported lifecycle for runtime wiring. Never reuse the target lifecycle or upgrade journal.
+
+Export keeps independent profile and control snapshots. It checks both persistent database revisions
+and protected files before sealing. A concurrent source change causes at most three attempts. Other
+errors fail immediately. The outer bundle AEAD, KDF, limits and current-profile KEK contract do not change.
+The existing encrypted profile vault carries independent runtime secrets. `secrets.json` does not gain keys.
+
+The retirement list is fixed in Engine code. Neither the archive nor host declarations select it.
+Unknown root files and telemetry remain in place. Optional absent settings remain in place. Declared
+host files use their existing overwrite and missing-member rules. Retired Engine directories include
+unknown children without deleting them. Existing target upgrade backups stay with the old encrypted
+vault in the retained recovery transaction. Imported keys do not reinterpret their security records.
+
+Recovery data lives at the profile parent's `.uc-config-import-recovery/<root-digest>/<transaction>/`.
+`originals/`, `archive/` and `receipt.json` remain after success. This transaction does not prune them.
+To restore, use the verified archive to create a new isolated profile. Restore retained upgrade backups
+to the host-selected backup directory and spool data to the host-selected spool directory separately.
+Use the original target passphrase through public `UnlockSpace`; never copy secure-storage identities.
+No-replace retirement requires the state and recovery directory to share a filesystem. A cross-device
+move fails with originals retained. Do not substitute an unverified copy-and-delete operation.
+
+Historical 1101 and 1103 failures remain repro evidence. Successful acceptance requires public Engine
+starts on fresh and existing targets, first and subsequent starts, source Space identity, ready encryption,
+copy-failure replay, retained target bytes and recovery of the old target with its original passphrase.
+The original incomplete legacy bundle is accepted only as an explicit rejection with target state unchanged.

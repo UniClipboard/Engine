@@ -33,6 +33,8 @@ impl PrepareProfileStartupUseCase {
 
     #[tracing::instrument(name = "usecase.profile_startup.execute", skip_all)]
     pub async fn execute(&self) -> Result<ProfileLifecycle, ProfileStartupError> {
+        // 导入自带保留目标原件和核验副本的离线事务；完成前不打开版本升级或生命周期。
+        self.storage.apply_pending_import()?;
         let backed_up = self.ensure_backup().await?;
         let existing = self.lifecycle.load()?;
         if let Some(lifecycle) = &existing {
@@ -47,7 +49,6 @@ impl PrepareProfileStartupUseCase {
                 .await?;
         }
         self.storage.adopt_legacy_layout()?;
-        self.storage.apply_pending_import()?;
         if let Some(lifecycle) = existing {
             return Ok(lifecycle);
         }

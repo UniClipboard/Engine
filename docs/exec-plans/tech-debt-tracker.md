@@ -29,26 +29,26 @@
 
 ## Configuration import: lifecycle and upgrade-journal adoption
 
-Status: required acceptance gate for host configuration migration and Desktop task10.
-The defect exists on task7 final `0c57e1ab` and remains outside the task8 file-declaration change.
+Status: implementation and public Engine acceptance are tracked by the host-configuration plan.
+The immutable checkpoint `74122413` retains the original unresolved gate and negative evidence.
 
-`PrepareProfileStartupUseCase::execute` reads the target lifecycle before `apply_pending_import` and returns that cached lifecycle after import.
-The imported encrypted vault carries the source lifecycle and admission key.
-`AdmissionKeyManager` binds profile payloads to the lifecycle generation.
-A fresh target can therefore fail startup while reading the imported legacy current-Space payload.
-A second start can fail while reading the target's existing storage-upgrade journal with the imported key and generation.
-Both observed failures return 1101. The returned error supplies no Engine handle for `UnlockSpace` or `RecoverSession`.
+The original defect used the pre-import target lifecycle and later reused target upgrade state under
+source keys. Synthetic diagnosis proved that the imported encrypted vault already carried the admission
+key. No new independent-key export is needed. A profile-only V3 snapshot also omitted control security
+material and could not restore a session. Merging V3 credentials into a legacy upgrade source did not
+preserve their authenticated generation bindings.
 
-Synthetic runtime diagnosis opened the imported vault with the imported KEK.
-The admission key existed, and the imported key plus imported generation opened the current-Space payload.
-This evidence rejects the earlier missing-admission-key diagnosis.
-Do not add credentials to `secrets.json` as a workaround.
+The repair gives the existing offline import owner a durable adoption transaction. It retains target
+state and upgrade backups, verifies an archive, then installs the source V3 manifest, both consistent
+database snapshots, content-key catalog, encrypted blobs and existing encrypted vault. Startup rereads
+the imported lifecycle. Failure retains the journal and staging for replay. See the stable
+[configuration import contract](../design-docs/uc-engine-interface.md#configuration-import-adoption).
 
-Proposed repair, not implemented: give the import owner a complete profile-adoption transaction.
-After verified backup, adopt the imported vault and lifecycle before constructing generation-bound adapters.
-Reconcile existing target manifests and upgrade journals with that adoption instead of reusing journals under a different security context.
-Validate the required V3 state and preserve crash retry before clearing the import marker.
-Use the existing encrypted profile vault and KEK path; do not export raw independent keys or reset consent.
-A security review must verify that imported state cannot authorize deleting unrelated target state.
-Require a fresh-install and existing-install public export/import/restart matrix with failpoints before accepting the repair.
-The initial task8 evidence and reproducible E2E are retained in its thread library and `host_configuration_files_e2e.rs`.
+The user approved explicit rejection of incomplete schema-1 bundles before target mutation. These
+bundles require a new export from the retained source installation. Their historical 1101 assertions
+are preserved as repro evidence and do not count as successful imports.
+
+Acceptance remains evidence-based: the final task8 receipt must identify the tested source SHA,
+public fresh/existing-install runs, first/subsequent starts, partial adoption recovery, retained target
+backup verification and public passphrase recovery. Task7 old-anchor mbx downgrade execution and
+native/downstream acceptance remain separate gates.

@@ -431,6 +431,7 @@ pub async fn wire_dependencies_from_inputs(
     // Config-migration export produces a consistent db snapshot via `VACUUM INTO`
     // off its own pooled connection; clone before infra consumes the pool.
     let db_pool_for_config_migration = db_pool.clone();
+    let control_db_pool_for_config_migration = control_db_pool.clone();
 
     let mut infra = create_infra_layer(
         db_pool,
@@ -451,7 +452,7 @@ pub async fn wire_dependencies_from_inputs(
         secure_storage,
         profile_id,
         &vault_path,
-        blob_store_dir,
+        blob_store_dir.clone(),
         infra.blob_repository.clone(),
         infra.clock.clone(),
         storage_config.clone(),
@@ -893,6 +894,7 @@ pub async fn wire_dependencies_from_inputs(
         &platform.secure_storage,
         &iroh_identity_storage,
         db_pool_for_config_migration,
+        control_db_pool_for_config_migration,
         &infra.clock,
         &current_space_identity,
         &portable_current_space_identity,
@@ -900,6 +902,7 @@ pub async fn wire_dependencies_from_inputs(
         app_version,
         config_source_mode,
         ConfigMigrationPaths {
+            blob_root: blob_store_dir.clone(),
             db_path: db_path.clone(),
             vault_dir: vault_path.clone(),
             settings_path: settings_path.clone(),

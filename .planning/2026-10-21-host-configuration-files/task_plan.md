@@ -166,7 +166,7 @@ A10 Cleanup removes staging before removing its marker: the next boot sees an in
 A11 A secure-storage write fails but apply returns success: startup opens a mixture or discards the retry marker.
 A12 Existing target contains unrelated root files, telemetry or data inside retired Engine directories:
     adoption must preserve their exact bytes, including retained originals.
-A13 Legacy bundle has no generation manifest: adopt its portable legacy state, then use the existing V3 upgrade.
+A13 Legacy bundle lacks complete runtime state: reject before staging and require re-export (approved).
 A14 Successful first boot still fails on the second boot: verify both, setup completion and session readiness.
 A15 Target is mid factory reset: import must not bypass the reset journal.
 A16 Source/target backup roots are on different filesystems: never use copy-and-delete without verification.
@@ -201,3 +201,38 @@ copying. Verify new and existing targets, first and later starts, unchanged sour
 setup completion, usable encryption, product bytes, unrelated target bytes, retained target backups,
 and interrupted retirement/install retry. Run the original exported legacy bundle unchanged.
 Historical negative 1101 evidence remains at the checkpoint; new acceptance requires successful starts.
+
+### Approved incomplete-bundle decision
+
+The user explicitly chose: reject incomplete legacy bundles before target mutation and require a new
+export from the retained source installation. This replaces successful-import acceptance for the
+original `0c57e1ab` bundle. Preserve its original bytes and negative evidence.
+
+A17 V3 export includes only the profile database: control security material and membership are lost.
+    Preserve both database snapshots and the authenticated V3 manifest. Resolve installed paths with
+    the maintained runtime-layout owner. Never merge V3 credentials into a legacy upgrade source.
+A18 Source writes during the two database snapshots or vault capture: reject an export when persistent
+    database revisions or protected state bytes change. Do not seal a mixed snapshot.
+A19 Imported current-version state lacks the source Engine upgrade cursor or encrypted content-key
+    catalog: startup can run a false legacy isolation or lose access to protected payloads.
+    Carry these existing protected files; do not export additional independent keys.
+A20 A new bundle requires state older readers ignore: use manifest schema 2 so old readers reject it.
+    Keep the outer encryption and KEK contract unchanged. Reject schema-1 incomplete bundles before staging.
+
+A21 V3 rows and admission credentials bind the source runtime generations. A merged monolith cannot
+    be treated as a pre-V3 source. Preserve the authenticated source manifest and both active stores.
+A22 Missing source blobs leave a valid manifest with unavailable content. Carry active encrypted blobs
+    and reject unsupported files; keep the existing archive size and AEAD limits.
+A23 Imported protected files reach disk after the completion journal. Flush files and containing
+    directories before declaring installation complete.
+
+A24 An old Engine opens new staging without reading the bundle manifest. Bump pending marker schema
+    to 2 as well as archive schema 2, so an old boot reader cannot apply a partial single-store import.
+
+## Continuation verification status
+
+- Public content E2E: 8 passed, including new/existing targets, blob reads, new encrypted writes,
+  partial-adoption replay, original-target recovery, explicit legacy rejection, reset and backup.
+- Existing Infra config-migration tests: 39 passed. No new unit tests were added.
+- Final delivery uses an immutable repair commit and a fresh source receipt. Historical progress and
+  verification sections above describe checkpoint 74122413, not current acceptance.

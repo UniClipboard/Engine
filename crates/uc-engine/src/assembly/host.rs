@@ -538,6 +538,8 @@ pub(crate) async fn wire_host_capabilities_with_emitter(
             paths.clone(),
             Arc::clone(&secure_storage),
             host_configuration_files.clone(),
+            Arc::clone(&profile_key_recovery),
+            Arc::clone(&upgrade_backup_store),
         )),
         Arc::new(ProfileLifecycleRepository::new(Arc::clone(&secure_storage))),
         ProfileUpgradeVersions {
