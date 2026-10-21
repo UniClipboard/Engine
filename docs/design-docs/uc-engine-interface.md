@@ -519,3 +519,35 @@ Historical 1101 and 1103 failures remain repro evidence. Successful acceptance r
 starts on fresh and existing targets, first and subsequent starts, source Space identity, ready encryption,
 copy-failure replay, retained target bytes and recovery of the old target with its original passphrase.
 The original incomplete legacy bundle is accepted only as an explicit rejection with target state unchanged.
+
+
+## Host-declared log profile
+
+Engine owns no log-verbosity preference. The host owns the process log profile and applies it
+before it starts Engine. The host reports the profile it installed with `EngineConfig::with_host_log_profile`.
+The default is no declaration.
+
+The label must be 1–32 bytes of `[a-z0-9_-]`. Engine does not interpret the label or keep a list of
+host names. An invalid label stops `Engine::start` before profile I/O with code 1110 (`InvalidInput`,
+not retryable). The label is not persisted and is not part of a configuration bundle. Each start reports
+only its own declaration. The host owns any restart that applies a changed preference.
+
+`QueryDiagnostics` returns `DiagnosticsStatusSummary { effective_log_profile: Option<String> }`.
+The diagnostic export manifest carries the same value as `effectiveLogProfile`, or `null` when
+the host declared nothing. One value feeds both. Engine does not read `RUST_LOG`, `UC_LOG_PROFILE`,
+`settings.json` or its own build type to guess a profile. Diagnostic export no longer loads settings.
+
+The declaration changes no Engine logging. Module logs follow the standard and detailed capture
+modes of the process observability runtime. The network-library log rules, budgets and capture
+windows are unchanged. No profile label starts a detailed capture.
+
+Removed from the Engine contract: `Operation::UpdateDebugMode`, `OperationKind::UpdateDebugMode`,
+`UpdateDebugModeInput`, `DebugModeUpdateSummary`, `OperationResult::DebugModeUpdated`,
+`DiagnosticsStatusSummary.debug_mode`, `DiagnosticsStatusSummary.restart_required`,
+`GeneralSettingsSummary.debug_mode`, `GeneralSettingsPatch.debug_mode`, and the manifest key `debugMode`.
+Error code 1412 is retired for the diagnostics group (`QUERY_DIAGNOSTICS_FAILED_CODE` 1411 is
+retired too, because `QueryDiagnostics` can no longer fail). Code 1412 stays assigned to
+`RECEIVE_UNAVAILABLE_CODE` in the receive group.
+
+A legacy `general.debug_mode` of any JSON type is ignored on load and not written on the next save.
+The settings schema version does not change.
