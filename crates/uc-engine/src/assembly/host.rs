@@ -457,13 +457,9 @@ impl HostEventEmitterPort for EngineHostEventEmitter {
                             }
                             SettingsSection::Security => SettingsSectionSummary::Security,
                             SettingsSection::Pairing => SettingsSectionSummary::Pairing,
-                            SettingsSection::KeyboardShortcuts => {
-                                SettingsSectionSummary::KeyboardShortcuts
-                            }
                             SettingsSection::FileSync => SettingsSectionSummary::FileSync,
                             SettingsSection::Network => SettingsSectionSummary::Network,
                             SettingsSection::MobileSync => SettingsSectionSummary::MobileSync,
-                            SettingsSection::QuickPanel => SettingsSectionSummary::QuickPanel,
                         })
                         .collect(),
                 })

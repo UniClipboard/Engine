@@ -527,10 +527,6 @@ fn settings_contract_preserves_updates_and_probe_outcomes_without_debugging_user
     let mut settings = uc_engine::SettingsSummary::default();
     settings.general.device_name = Some("Private Mac".into());
     settings
-        .general
-        .theme_overrides_light
-        .insert("primary".into(), "private-theme-value".into());
-    settings
         .network
         .custom_relay_urls
         .push("https://private-relay.example".into());
@@ -558,7 +554,6 @@ fn settings_contract_preserves_updates_and_probe_outcomes_without_debugging_user
     let debug = format!("{save_relay:?} {values:?}");
     for secret in [
         "Private Mac",
-        "private-theme-value",
         "private-relay.example",
         "/private/export/path",
         "private validation detail",

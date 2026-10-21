@@ -315,11 +315,9 @@ pub enum SettingsSectionSummary {
     RetentionPolicy,
     Security,
     Pairing,
-    KeyboardShortcuts,
     FileSync,
     Network,
     MobileSync,
-    QuickPanel,
 }
 
 /// 持久化设置已在一次成功保存后发生变化。

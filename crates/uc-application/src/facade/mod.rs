@@ -158,8 +158,7 @@ pub use settings::{
     RelayProbeReport, RelayProbeReportView, RetentionPolicyPatch, RetentionPolicyView,
     RetentionRulePatchValue, RetentionRuleView, RuleEvaluationView, SecuritySettingsPatch,
     SecuritySettingsView, SettingsFacade, SettingsFacadeError, SettingsPatch, SettingsView,
-    ShortcutKeyView, SyncFrequencyView, SyncSettingsPatch, SyncSettingsView, ThemeView,
-    UpdateChannelView,
+    SyncFrequencyView, SyncSettingsPatch, SyncSettingsView,
 };
 
 pub use space_setup::{
