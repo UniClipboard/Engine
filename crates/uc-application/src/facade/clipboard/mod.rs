@@ -1,9 +1,10 @@
 //! Outbound clipboard dispatch and receive-management facade.
 
-mod cancel_entry_receive;
 pub(crate) mod facade;
 
-pub use cancel_entry_receive::{CancelEntryReceiveError, CancelEntryReceiveOutcome};
+pub use crate::transfer::receive::cancellation::{
+    CancelEntryReceiveError, CancelEntryReceiveOutcome,
+};
 pub use facade::{
     ClipboardSyncError, ClipboardSyncFacade, DispatchEntryInput, DispatchEntryOutcome,
     DispatchEntryPerTarget,

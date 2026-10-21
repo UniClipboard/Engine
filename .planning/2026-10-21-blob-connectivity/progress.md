@@ -127,3 +127,12 @@
 - 取消与到期竞争采用红绿验证：30秒先取消、60秒仍有慢身份读取时原实现错误返回 RequestExpired（download-cancel-before-deadline-red.log）；修正后取消分支持有真实工作，抑制后续期限改写结果。未取消项仍按60秒到期，两者真实读取结束前都占名额；新输出启动前再次检查停止意图。
 - 最新源码最终 App 全库 1160 passed／1 skipped（3.833秒），Engine公开契约50 passed（0.021秒），workspace all-targets check（1m15s）、metadata JSON、fmt、Rust style、repository preflight 与 diff check 全部通过。真实Engine双向文件最终 Direct277ms／强制Relay212ms，各精确2方向，Relay直连阻断，cleaned/plaintext_clean均true。最终工件为 target/blob-connectivity-evidence/download-settlement-final-{direct,relay}，先前候选证据不冒充此轮最终候选。
 - 本轮手工差异审查已覆盖同步容量／原围栏、唯一地址提示、下载实际工作持有、取消早于期限的先因、永久通知阻塞、五秒未完成与 staging／扫描隔离、类型来源及无持久格式变化；code-review skill 不可用，不冒充技能审查。完整Receiver计划与自动取消全流程、单项重试／绑定、删除旧入口及最终全矩阵仍未完成，目标保持 active。
+
+- 续接 a829f384 为 progress；工作区仅用户四个原有规划目录。当前完整切片将条目取消流程移至 transfer/receive/cancellation：入口按条目／attempt 合并请求，五秒只限制外部等待，实际 ledger 读取／取消声明、全部子获取停止、投影、staging 和最终 CAS 由同一个后台任务完成。任务归现有 transport 生命周期，调用方丢弃等待及重复取消不丢工作；原 readiness/reconciliation 继续负责重启，不新增持久状态或格式。
+- 新协调者定向10项通过（0.034秒）：包括首次权威读取／最终提交两种慢阶段，五秒返回后不遗弃，并由真实生命周期收集后完成；panic 保留 JoinError 且不继续清理。首次组装编译发现 FileTransferAssembly 未保留 bus、迁移测试重复导入，已修正并保留 cancellation-owner-check.log。
+- 取消业务逻辑与专属 port／模型／错误／测试已移出 facade，facade 仅接完整负责人；停止失败立即结束，不再继续清理正在使用的产物。原只保留首个子失败的逻辑改为结构化复合来源；取消终态通知移至实际子任务／会话结算后，TooLate 或清理失败不预发 Cancelled。
+
+- 增加独立取消工作表过载测试：68个已接受慢读取占满工作位，第69个立即 Busy、不产生额外读取；已接受动作仍全部完成提交。该表不占用下载4／2池，避免停止与下载互锁；上限由可接受下载请求数4+64推导，重复key直接共享原任务。
+- 本轮完整App回归1164 passed／1 skipped（3.828秒），Engine公开契约50 passed（0.022秒）。已迁移语义为明确的完整停止后才能继续投影／清理，去掉常量失败计数旧接口；业务失败由完整负责人记录一次，Engine共享结果只映射稳定错误。workspace检查与最终门禁仍在进行，未标记完整spec完成。
+
+- 上一状态答复仅核实日志并说明缺口，未改变实现，归为 no progress；本轮继续推进完整目标。最终 workspace 全目标检查通过（1m15s），metadata、fmt、Rust style、repository preflight 通过，当前无活动 Cargo 进程。补齐当前取消负责人文档，并手工复核实际停止后清理顺序、关闭收集和多来源错误；code-review skill 不可用，不冒充技能审查。完整 ReceiveWorkPlan 的物化／条目结算仍是下一实作，未标完成。

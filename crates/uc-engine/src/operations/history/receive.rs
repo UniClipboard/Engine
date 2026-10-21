@@ -153,14 +153,21 @@ fn validate_id(value: &str) -> Result<(), EngineError> {
 
 fn map_receive_error(error: CancelEntryReceiveError) -> EngineError {
     match error {
-        CancelEntryReceiveError::Unavailable => EngineError::new(
-            RECEIVE_UNAVAILABLE_CODE,
-            EngineErrorCategory::Unavailable,
-            true,
-        ),
-        CancelEntryReceiveError::Attempt(_)
+        CancelEntryReceiveError::Unavailable | CancelEntryReceiveError::Busy(_) => {
+            EngineError::new(
+                RECEIVE_UNAVAILABLE_CODE,
+                EngineErrorCategory::Unavailable,
+                true,
+            )
+        }
+        // discarded-source[contract-boundary]: 完整取消负责人已记录该次失败；重复查询同一结果不重复写业务失败。
+        CancelEntryReceiveError::Shared(_) => {
+            EngineError::new(RECEIVE_FAILED_CODE, EngineErrorCategory::Internal, false)
+        }
+        CancelEntryReceiveError::Supervision(_)
+        | CancelEntryReceiveError::Attempt(_)
         | CancelEntryReceiveError::PublishLog(_)
-        | CancelEntryReceiveError::Transfer { .. }
+        | CancelEntryReceiveError::Transfer(_)
         | CancelEntryReceiveError::Cleanup(_) => {
             uc_error!("entry receive operation failed");
             EngineError::new(RECEIVE_FAILED_CODE, EngineErrorCategory::Internal, false)

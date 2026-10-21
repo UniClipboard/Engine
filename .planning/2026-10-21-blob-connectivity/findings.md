@@ -55,3 +55,6 @@
 
 - 当前普通下载已从生产调用点移走 SDK Downloader，但 Core trait 与旧实现仍供测试及兼容探针使用，尚须整体删除生产入口并保留明确的旧客户端测试 fixture。不要把生产调用点切换等同于旧代码已删除。
 - 完整接收负责人迁移还需校正取消通知的终态位置：当前队列在接受停止意图后就提交旧 Cancelled 帧，实际 TooLate／清理失败应由最终聚合结果决定。后台完整动作的观测上下文也需检查：同步 execute 的 span 不能仅靠 with_current_subscriber 就假定已传播到 detached worker；不为此扩大 Engine 内部查询接口。
+
+- a829f384 后的条目取消用例原在 facade 内；实际只返回 CancellationIncomplete 而没有继续条目投影、staging 与 CAS。现已迁入 transfer/receive/cancellation，完整动作以 entry+attempt 去重、独立于下载许可的有界工作表持有，transport 监督完整协程。Complete 子停止能力不再返回五秒局部结果；五秒仅在完整动作入口等待处计算。
+- 取消后端仍需与完整 ReceiveWorkPlan 的实际生命周期统一。当前 materializer 的平面文件循环与目录流程在 clipboard 模块；目录路径有 ensure_attempt_active／committing 核对，平面路径还需按真实调用图核对，不可仅凭子 fetch 已停止就证明整个接收计划所有输出均已静止。下一步必须接完整计划、逐项结果与重试，不继续只补网络小测试。

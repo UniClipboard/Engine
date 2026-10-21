@@ -128,7 +128,7 @@
 | [`crates/uc-application/src/clipboard/sync/snapshot_from_entry.rs`](../../../crates/uc-application/src/clipboard/sync/snapshot_from_entry.rs) | 201 | 1 |  |
 | [`crates/uc-application/src/facade/clipboard_capture/mod.rs`](../../../crates/uc-application/src/facade/clipboard_capture/mod.rs) | 91, 146, 165, 208 | 4 |  |
 | [`crates/uc-application/src/facade/clipboard_history/mod.rs`](../../../crates/uc-application/src/facade/clipboard_history/mod.rs) | 342, 347, 368, 416, 475, 496, 513, 522, 619 | 9 |  |
-| [`crates/uc-application/src/facade/clipboard/cancel_entry_receive.rs`](../../../crates/uc-application/src/facade/clipboard/cancel_entry_receive.rs) | 27, 105, 122, 171, 181, 198 | 6 |  |
+| [条目取消模块（原门面用例）](../../../crates/uc-application/src/transfer/receive/cancellation/mod.rs) | 27, 105, 122, 171, 181, 198 | 6 | 历史审查行号；实现现已迁移并按职责拆分 |
 | [`crates/uc-application/src/facade/clipboard/facade.rs`](../../../crates/uc-application/src/facade/clipboard/facade.rs) | 280, 292, 302, 480, 508, 541 | 6 |  |
 | [`crates/uc-application/src/facade/roster/facade.rs`](../../../crates/uc-application/src/facade/roster/facade.rs) | 98, 104, 116, 126, 196, 214, 227, 241, 250 | 9 |  |
 | [`crates/uc-application/src/search/coordinator.rs`](../../../crates/uc-application/src/search/coordinator.rs) | 774 | 1 |  |

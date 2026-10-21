@@ -368,3 +368,21 @@ Application 最终1160 passed／1 skipped（3.833秒），Engine公开契约50 p
 最新候选网络工件在 `target/blob-connectivity-evidence/download-settlement-final-direct/` 与
 `download-settlement-final-relay/`，双向精确读回分别277ms／212ms，Relay直连被阻断、清理与隐私检查均通过。
 这些候选证据保留源码与二进制摘要；完整阶段5当前最终head矩阵和CI仍待全部功能落地后运行。
+
+
+### 条目取消的完整后台协调
+
+取消业务已从 facade 迁入 `transfer/receive/cancellation`，按入口、流程、专属 port、结果、错误和测试拆分。
+入口按条目与尝试去重，五秒覆盖首次权威读取到最终提交的全部调用等待；实际任务归原 BlobTransport
+监督，等待退出不丢工作，重复请求共享实际结果。协调者等待全部子任务实际停止后，才推进投影、
+暂存清理和取消 CAS。任一依赖失败立即停止后续破坏性动作，保留原始来源；多个子停止失败保留结构化附带来源。
+已完成的独立文件如何保留仍须随完整接收结果聚合迁移，当前不能据此标记整个阶段 2 完成。
+
+取消协调工作表独立于下载许可，接受上限取已有下载活动与排队容量之和（4+64）；
+超额新请求即时返回繁忙，重复请求仍加入原任务，避免停止动作被下载池反向阻塞。
+不新增持久字段，重启恢复继续归既有 readiness/reconciliation。
+
+验证：Application 1164 项通过、1 项跳过；Engine 公开契约 50 项通过；workspace 全目标 check、
+metadata、fmt、Rust style 和 repository preflight 通过。慢读取、慢最终提交、调用方丢弃、
+重复取消、真实关闭收集、任务 panic 来源、过载及多子停止来源均有定向验证。
+本轮未重跑完整网络／设备矩阵，完整接收计划的后续动作封闭与部分成功结算仍待实现。

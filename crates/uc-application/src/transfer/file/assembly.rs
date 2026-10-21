@@ -41,6 +41,7 @@ use crate::facade::host_event::{
 use crate::search::live_index::ClipboardLiveIndexPort;
 use crate::transfer::file::facade::{FileTransferFacade, FileTransferFacadeDeps};
 use crate::transfer::file::lifecycle::FileTransferLifecycleDeps;
+use crate::transfer::receive::cancellation::CancelEntryReceiveUseCase;
 use crate::transfer::receive::reconciliation::ReceiveReadinessCoordinator;
 
 /// Engine 选择的文件系统与持久化 adapter。
@@ -106,6 +107,7 @@ pub struct FileTransferAssembly {
     save_dir_resolver: Arc<dyn ResolveInboundSaveDirPort>,
     file_cache_dir: PathBuf,
     receive_readiness: Arc<ReceiveReadinessCoordinator>,
+    host_event_bus: Arc<HostEventBus>,
 }
 
 impl FileTransferAssembly {
@@ -143,7 +145,7 @@ impl FileTransferAssembly {
                 save_dir_resolver: Arc::clone(&deps.save_dir_resolver),
                 file_cache_dir: deps.file_cache_dir.clone(),
                 clock: Arc::clone(&deps.clock),
-                host_event_bus: deps.host_event_bus,
+                host_event_bus: deps.host_event_bus.clone(),
                 receive_readiness: Arc::clone(&receive_readiness),
             },
         }));
@@ -157,6 +159,7 @@ impl FileTransferAssembly {
             save_dir_resolver: deps.save_dir_resolver,
             file_cache_dir: deps.file_cache_dir,
             receive_readiness,
+            host_event_bus: deps.host_event_bus,
         }
     }
 
@@ -198,17 +201,22 @@ impl FileTransferAssembly {
         facade: ClipboardSyncFacade,
         deps: ReceiveCancellationDeps,
     ) -> ClipboardSyncFacade {
-        facade.with_entry_receive_cancellation(
+        let cancellation = CancelEntryReceiveUseCase::new(
             Arc::clone(&self.directory_receive.get_attempt),
             Arc::clone(&self.directory_receive.request_cancel),
-            Arc::clone(&self.directory_receive.entry_progress),
-            Arc::clone(&self.directory_receive.list_attempts),
             Arc::clone(&self.directory_receive.commit_inbound),
             Arc::clone(&self.directory_receive.get_publish),
             deps.staging_cleanup,
             Arc::clone(&self.file_transfer.cancel_attempt),
-            deps.blob_transfer,
+            deps.blob_transfer.clone(),
             Arc::clone(&self.clock),
+            self.host_event_bus.clone(),
+            deps.blob_transfer.transport.clone(),
+        );
+        facade.with_entry_receive_cancellation(
+            Arc::clone(&self.directory_receive.entry_progress),
+            Arc::clone(&self.directory_receive.list_attempts),
+            cancellation,
         )
     }
 

@@ -22,6 +22,7 @@ use uc_observability_contract::{
 
 use crate::facade::blob_transfer::{BlobTransferError, BlobTransferFacade, InboundCancelOutcome};
 use crate::facade::host_event::{HostEvent, HostEventBus, TransferHostEvent};
+use crate::transfer::blob::facade::TransferCancellationWait;
 use crate::transfer::receive::reconciliation::{
     EnsureReceiveReadyPort, ReceiveReadinessCoordinator, ReceiveReadinessError,
     ReceiveReadinessStatus, ReconcileReceiveAttemptsUseCase,
@@ -237,6 +238,7 @@ impl FileTransferLifecycle {
                                 .cancel_inbound_transfer(
                                     &t.transfer_id,
                                     FileTransferCancellationReason::Timeout,
+                                    TransferCancellationWait::Bounded,
                                 )
                                 .await
                             {

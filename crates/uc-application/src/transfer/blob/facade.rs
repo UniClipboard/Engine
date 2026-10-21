@@ -256,6 +256,12 @@ pub enum InboundCancelOutcome {
     NotInflight,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum TransferCancellationWait {
+    Bounded,
+    Complete,
+}
+
 /// 单项获取及唯一取消协调者的完成事实，取消不提前移除登记。
 #[derive(Clone)]
 struct InflightFetch {
@@ -271,7 +277,7 @@ pub struct BlobTransferFacade {
     publish_uc: Arc<PublishBlobUseCase>,
     fetch_uc: Arc<FetchBlobUseCase>,
     /// 全部获取、通知和收尾任务由同一个传输负责人监督。
-    transport: Arc<BlobTransport>,
+    pub(in super::super) transport: Arc<BlobTransport>,
     host_event_emitter: Option<SharedHostEventEmitter>,
     outbound_progress_reporter: Option<Arc<OutboundNotifications>>,
     file_transfer: Option<Arc<FileTransferFacade>>,
@@ -428,10 +434,11 @@ impl BlobTransferFacade {
     }
 
     /// 先停止自身，再接入唯一收尾协调者；五秒只限制调用等待。
-    pub async fn cancel_inbound_transfer(
+    pub(crate) async fn cancel_inbound_transfer(
         &self,
         transfer_id: &str,
         reason: FileTransferCancellationReason,
+        wait: TransferCancellationWait,
     ) -> Result<InboundCancelOutcome, BlobTransferError> {
         let deadline = Instant::now() + CANCEL_WAIT_TIMEOUT;
         let entry = self
@@ -460,19 +467,9 @@ impl BlobTransferFacade {
             match cancelling.as_ref() {
                 Some(completion) => completion.clone(),
                 None => {
-                    if let Some(outbound) = entry.outbound.as_ref() {
-                        outbound.reporter.report(
-                            &outbound.target,
-                            &outbound.transfer_id,
-                            0,
-                            None,
-                            OutboundProgressStatus::Cancelled {
-                                reason: flip_cancel_reason_perspective(reason),
-                            },
-                        );
-                    }
                     let mut pending = entry.completion.clone();
                     let session = entry.session.clone();
+                    let outbound = entry.outbound.clone();
                     let job = self
                         .transport
                         .supervise(CancellationToken::new(), async move {
@@ -490,6 +487,17 @@ impl BlobTransferFacade {
                                     BlobExchangeError::new(BlobExchangeFailure::Settlement, source)
                                 })?;
                             }
+                            if let Some(outbound) = outbound {
+                                outbound.reporter.report(
+                                    &outbound.target,
+                                    &outbound.transfer_id,
+                                    0,
+                                    None,
+                                    OutboundProgressStatus::Cancelled {
+                                        reason: flip_cancel_reason_perspective(reason),
+                                    },
+                                );
+                            }
                             Ok(())
                         });
                     let completion = job.completion();
@@ -501,10 +509,15 @@ impl BlobTransferFacade {
             }
         };
         let mut completion = completion;
-        match timeout_at(deadline, wait_download_completion(&mut completion))
-            .await
-            .map_err(BlobTransferError::CancellationIncomplete)?
-        {
+        let result = match wait {
+            TransferCancellationWait::Complete => wait_download_completion(&mut completion).await,
+            TransferCancellationWait::Bounded => {
+                timeout_at(deadline, wait_download_completion(&mut completion))
+                    .await
+                    .map_err(BlobTransferError::CancellationIncomplete)?
+            }
+        };
+        match result {
             Ok(()) => {}
             Err(error) if error.kind == BlobExchangeFailure::AlreadyCompleted => {
                 return Ok(InboundCancelOutcome::NotInflight)
@@ -518,6 +531,7 @@ impl BlobTransferFacade {
         &self,
         attempt_id: &str,
         reason: FileTransferCancellationReason,
+        wait: TransferCancellationWait,
     ) -> Result<usize, BlobTransferError> {
         let transfer_ids = self
             .inflight_fetches
@@ -535,11 +549,11 @@ impl BlobTransferFacade {
             .collect::<Vec<_>>();
 
         let mut cancelled = 0usize;
-        let mut first_error = None;
+        let mut errors = Vec::new();
         let results = futures::future::join_all(
             transfer_ids
                 .iter()
-                .map(|transfer_id| self.cancel_inbound_transfer(transfer_id, reason)),
+                .map(|transfer_id| self.cancel_inbound_transfer(transfer_id, reason, wait)),
         )
         .await;
         for (transfer_id, result) in transfer_ids.into_iter().zip(results) {
@@ -553,16 +567,11 @@ impl BlobTransferFacade {
                         io_error_kind = io_error_kind(&error),
                         "failed to cancel directory member transfer"
                     );
-                    if first_error.is_none() {
-                        first_error = Some(error);
-                    }
+                    errors.push(error);
                 }
             }
         }
-        match first_error {
-            Some(error) => Err(error),
-            None => Ok(cancelled),
-        }
+        cancellation_result(cancelled, errors)
     }
 
     pub async fn publish_blob(
@@ -985,6 +994,25 @@ impl BlobTransferFacade {
     }
 }
 
+fn cancellation_result(
+    cancelled: usize,
+    errors: Vec<BlobTransferError>,
+) -> Result<usize, BlobTransferError> {
+    let mut errors = errors.into_iter();
+    let Some(first) = errors.next() else {
+        return Ok(cancelled);
+    };
+    let additional = errors
+        .map(|source| BlobExchangeError::new(BlobExchangeFailure::Settlement, source))
+        .collect::<Vec<_>>();
+    if additional.is_empty() {
+        return Err(first);
+    }
+    let mut report = BlobExchangeError::new(BlobExchangeFailure::Settlement, first);
+    report.additional = additional;
+    Err(BlobTransferError::Fetch(report.into()))
+}
+
 async fn wait_download_completion(
     completion: &mut DownloadCompletion,
 ) -> Result<(), BlobExchangeError> {
@@ -1085,6 +1113,46 @@ mod tests {
     use uc_core::clipboard::{ContentHash, HashAlgorithm};
     use uc_core::ports::blob::{BlobError, BlobReferenceError, TagReason};
     use uc_core::ports::security::{TransferCipherError, TransferCipherPort};
+
+    #[test]
+    fn cancelling_multiple_members_preserves_each_cleanup_source() {
+        let error = cancellation_result(
+            0,
+            vec![
+                BlobTransferError::Fetch(
+                    std::io::Error::from(std::io::ErrorKind::PermissionDenied).into(),
+                ),
+                BlobTransferError::Fetch(
+                    std::io::Error::from(std::io::ErrorKind::ReadOnlyFilesystem).into(),
+                ),
+            ],
+        )
+        .expect_err("cleanup failed");
+        let BlobTransferError::Fetch(error) = error else {
+            panic!("structured report required")
+        };
+        let report = error
+            .downcast_ref::<BlobExchangeError>()
+            .expect("exchange report");
+        assert_eq!(
+            report
+                .source
+                .chain()
+                .find_map(|source| source.downcast_ref::<std::io::Error>())
+                .expect("primary IO")
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            report.additional[0]
+                .source
+                .chain()
+                .find_map(|source| source.downcast_ref::<std::io::Error>())
+                .expect("additional IO")
+                .kind(),
+            std::io::ErrorKind::ReadOnlyFilesystem
+        );
+    }
 
     struct TestHash;
 
@@ -1307,7 +1375,11 @@ mod tests {
             }
             assert!(facade.owns_inbound_work("entry:attempt:a1:representation:0"));
             let incomplete = facade
-                .cancel_inbound_attempt("a1", FileTransferCancellationReason::LocalUser)
+                .cancel_inbound_attempt(
+                    "a1",
+                    FileTransferCancellationReason::LocalUser,
+                    TransferCancellationWait::Bounded,
+                )
                 .await;
             assert!(matches!(
                 incomplete,
@@ -1315,7 +1387,11 @@ mod tests {
             ));
             transfer.release.add_permits(1);
             let cancelled = facade
-                .cancel_inbound_attempt("a1", FileTransferCancellationReason::LocalUser)
+                .cancel_inbound_attempt(
+                    "a1",
+                    FileTransferCancellationReason::LocalUser,
+                    TransferCancellationWait::Bounded,
+                )
                 .await
                 .expect("cancel attempt");
             let fetch_result = fetch.await;
