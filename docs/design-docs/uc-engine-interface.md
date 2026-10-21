@@ -521,9 +521,37 @@ copy-failure replay, retained target bytes and recovery of the old target with i
 The original incomplete legacy bundle is accepted only as an explicit rejection with target state unchanged.
 
 Unsupported or incomplete pending imports left by an older Engine are rejected before adoption starts.
-Engine removes only the fixed pending marker and staging directory, emits `incompatible_staged_import`,
-and continues normal startup. The host must re-export and stage a complete bundle. If an adoption
-journal already exists, Engine retains recovery state and reports failure instead of discarding it.
+Engine retains the original `pending-import.json` and the entire `import-staging/` tree byte for byte.
+It does not delete, relocate, copy or rewrite rejected materials. These existing persisted inputs are
+also the persistent rejection state. No additional credential file, journal format, backup series or
+plaintext status file is introduced. Ordinary startup continues with the original profile. Rejected
+staging does not bypass original-profile key recovery. An existing adoption journal or an inspection
+I/O failure still follows the recovery/failure path; it must not be treated as a safe rejection.
+
+`QueryDiagnostics` returns `rejected_config_import: Option<RejectedConfigImportSummary>`, including a
+safe `reason` (`unsupported_format`, `malformed_marker`, or `missing_runtime_members`) and the fixed
+message `Import was not completed. Re-export the configuration bundle using the new version.` Hosts
+must display the rejection and localized re-export guidance after startup, including subsequent starts.
+The status is read from persisted inputs on each query; it is not a once-only event or log message.
+No source path, member name, profile identity or secret is included. `None` means there is no rejected
+pending input; it does not certify a successful import. Stage success still means pending, not applied.
+
+The single pending slot remains bounded and retained until an explicit action replaces or removes it.
+`StageConfigImportInput.replace_rejected_import` must be `false` unless the host has obtained explicit
+confirmation to irreversibly replace the retained rejected materials. With `false`, a new Stage returns
+`Incompatible` and preserves all old bytes. With `true`, the new bundle and password must first pass
+complete validation; only then may the maintained staging writer replace the old slot. Failed validation
+never releases old materials. Confirmation must explain that the retained data may be the only source
+and that replacement is irreversible. An explicitly requested whole-profile FactoryReset also deletes
+this slot under its existing deletion contract. Ordinary startup, diagnostic queries and export do not.
+There is no automatic pruning, unbounded rejection archive, or hidden credential-copy recovery path.
+
+Only fixed Engine-owned paths are inspected. Marker-supplied destinations cannot select filesystem
+paths. Inspection rejects marker, staging-tree or member symlinks and nonregular objects with a storage
+failure; it does not follow them or convert an I/O fault into permission to continue or replace data.
+The host must supply an exclusively owned profile root. Adversarial replacement of ancestor directories
+outside that root is outside the exclusive-profile contract.
+
 Export checks the cumulative tar size, including headers, padding and the AEAD size allowance, before
 reading blob contents. Oversized exports fail without replacing the destination. Capture and revision
 verification run in one blocking task with the caller's tracing span. Both database snapshots and blobs

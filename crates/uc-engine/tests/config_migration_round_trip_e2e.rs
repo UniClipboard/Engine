@@ -356,7 +356,7 @@ async fn export_stage_apply_round_trip_lands_db_vault_identity_and_kek() {
     //    space passphrase that derives the KEK.
     let staged = tgt
         .adapter
-        .stage_import(&passphrase, &bundle_path)
+        .stage_import(&passphrase, &bundle_path, false)
         .await
         .expect("stage should succeed");
 
@@ -471,7 +471,7 @@ async fn stage_import_with_wrong_passphrase_is_invalid_or_corrupt() {
 
     let err = tgt
         .adapter
-        .stage_import(&Passphrase::from("wrong-passphrase"), &bundle_path)
+        .stage_import(&Passphrase::from("wrong-passphrase"), &bundle_path, false)
         .await
         .expect_err("staging with the wrong passphrase must fail");
 

@@ -13,5 +13,5 @@ pub mod model;
 pub mod ports;
 
 pub use error::ConfigMigrationError;
-pub use model::{ConfigImportPreview, ConfigSourceMode, StagedConfigImport};
+pub use model::{ConfigImportPreview, ConfigImportRejection, ConfigSourceMode, StagedConfigImport};
 pub use ports::{ExportConfigBundlePort, PreviewConfigImportPort, StageConfigImportPort};

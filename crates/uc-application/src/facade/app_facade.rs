@@ -40,6 +40,7 @@ use crate::facade::{
     MembershipDiagnosticsView, MembershipReadiness, QueryMembershipDiagnosticsError,
     QueryMembershipReadinessError,
 };
+use crate::settings::diagnostics::DiagnosticsFacadeError;
 use crate::space::PeerConnectionError;
 
 pub use crate::space::{DeviceGroupChoicesView, QueryDeviceGroupChoicesError};
@@ -998,11 +999,14 @@ impl AppFacade {
         &self,
         password: &uc_core::crypto::domain::Passphrase,
         source: &Path,
+        replace_rejected_import: bool,
     ) -> Result<
         uc_core::ports::config_migration::StagedConfigImport,
         uc_core::ports::config_migration::ConfigMigrationError,
     > {
-        self.config_migration.stage_import(password, source).await
+        self.config_migration
+            .stage_import(password, source, replace_rejected_import)
+            .await
     }
 
     pub async fn member_sync_preferences(
@@ -1031,7 +1035,13 @@ impl AppFacade {
     pub async fn diagnostics_status(
         &self,
     ) -> Result<crate::facade::DebugStatusView, crate::facade::DiagnosticsFacadeError> {
-        self.diagnostics.debug_status().await
+        let mut status = self.diagnostics.debug_status().await?;
+        status.rejected_config_import = self
+            .config_migration
+            .query_rejected_import()
+            .await
+            .map_err(DiagnosticsFacadeError::ImportStatus)?;
+        Ok(status)
     }
 
     pub async fn update_debug_mode(

@@ -21,8 +21,8 @@ use uc_core::app_dirs::HostConfigurationFiles;
 use uc_core::crypto::domain::Passphrase;
 use uc_core::ids::ProfileId;
 use uc_core::ports::config_migration::{
-    ConfigImportPreview, ConfigMigrationError, ConfigSourceMode, ExportConfigBundlePort,
-    PreviewConfigImportPort, StageConfigImportPort, StagedConfigImport,
+    ConfigImportPreview, ConfigImportRejection, ConfigMigrationError, ConfigSourceMode,
+    ExportConfigBundlePort, PreviewConfigImportPort, StageConfigImportPort, StagedConfigImport,
 };
 use uc_core::ports::{ClockPort, LocalIdentityPort, SecureStoragePort};
 
@@ -35,6 +35,7 @@ use super::archive::{ArchiveError, BundleArchive};
 use super::bundle::{self, Argon2Params, BundleError};
 use super::db_snapshot::{self, DbSnapshotError};
 use super::manifest::{BundleManifest, MANIFEST_MEMBER, MANIFEST_SCHEMA_VER};
+use super::pending::{adoption_journal_present, inspect_pending_import, PendingImportState};
 use super::secret_keys::{migratable_secret_keys, MigratableSecretKind, SECRETS_MEMBER};
 use super::staging::{
     PendingImportMarker, SecretsFile, StagingError, StagingLayout, CONTENT_KEY_CATALOG_MEMBER,
@@ -871,6 +872,7 @@ impl ConfigMigrationAdapter {
         &self,
         password: &Passphrase,
         source: &Path,
+        replace_rejected_import: bool,
     ) -> Result<StagedConfigImport, ConfigMigrationError> {
         uc_info!("staging config import");
         let (archive, _manifest) = self.open_archive(password, source).await?;
@@ -898,15 +900,26 @@ impl ConfigMigrationAdapter {
 
         // Filesystem writes are blocking.
         tokio::task::spawn_blocking(move || {
+            if adoption_journal_present(&data_root).map_err(import_inspection_error)? {
+                return Err(ConfigMigrationError::Internal {
+                    details: "an import adoption transaction must finish before staging".to_owned(), source: None,
+                });
+            }
+            if matches!(inspect_pending_import(&data_root).map_err(import_inspection_error)?, PendingImportState::Rejected(_))
+                && !replace_rejected_import
+            {
+                return Err(ConfigMigrationError::IncompatibleBundle {
+                    reason: "rejected import data is retained; explicit replacement confirmation is required".to_owned(), source: None,
+                });
+            }
             let layout = StagingLayout::new(data_root);
-            layout.write(&archive, &marker)
+            layout.write(&archive, &marker).map_err(map_staging_err)
         })
         .await
         .map_err(|error| ConfigMigrationError::Internal {
             details: "staging task failed to run".to_string(),
             source: Some(Box::new(error)),
-        })?
-        .map_err(map_staging_err)?;
+        })??;
 
         if !has_kek {
             uc_warn!("staged bundle carried no KEK; unlock will be required after apply");
@@ -926,12 +939,49 @@ impl StageConfigImportPort for ConfigMigrationAdapter {
         &self,
         password: &Passphrase,
         source: &Path,
+        replace_rejected_import: bool,
     ) -> Result<StagedConfigImport, ConfigMigrationError> {
-        let result = self.stage_import_inner(password, source).await;
+        let result = self
+            .stage_import_inner(password, source, replace_rejected_import)
+            .await;
         if let Err(error) = &result {
             record_boundary_failure("stage_import", error);
         }
         result
+    }
+    async fn rejected_import(&self) -> Result<Option<ConfigImportRejection>, ConfigMigrationError> {
+        let root = self.paths.app_data_root.clone();
+        let span = Span::current();
+        let result = tokio::task::spawn_blocking(move || {
+            let _entered = span.enter();
+            if adoption_journal_present(&root).map_err(import_inspection_error)? {
+                return Err(ConfigMigrationError::Internal {
+                    details: "import adoption remains in progress".to_owned(),
+                    source: None,
+                });
+            }
+            match inspect_pending_import(&root).map_err(import_inspection_error)? {
+                PendingImportState::Rejected(reason) => Ok(Some(reason)),
+                PendingImportState::Absent | PendingImportState::Applicable => Ok(None),
+            }
+        })
+        .await
+        .map_err(|error| ConfigMigrationError::Internal {
+            details: "import status task failed to run".to_owned(),
+            source: Some(Box::new(error)),
+        })?;
+        if let Err(error) = &result {
+            record_boundary_failure("query_rejected_import", error);
+        }
+        result
+    }
+}
+
+/// 检查失败保留来源，不能被解释为无拒绝状态或覆盖许可。
+fn import_inspection_error(error: std::io::Error) -> ConfigMigrationError {
+    ConfigMigrationError::Io {
+        details: "pending import inspection failed".to_owned(),
+        source: Some(Box::new(error)),
     }
 }
 

@@ -15,7 +15,10 @@ use zeroize::Zeroize;
 use super::profile_lifecycle::PROFILE_LIFECYCLE_MARKER_NAME;
 use super::profile_upgrade_backup::PROFILE_UPGRADE_BACKUP_RECORD_KEY;
 use super::{Kek, MasterKey};
-use crate::config_migration::adoption::ADOPTION_JOURNAL;
+use crate::config_migration::pending::{
+    adoption_journal_present, inspect_pending_import, PendingImportState,
+};
+#[cfg(test)]
 use crate::config_migration::staging::PENDING_IMPORT_MARKER;
 use uc_infra_crypto::crypto_model::{EncryptedBlob, KeyScope};
 use uc_infra_crypto::v1_aead;
@@ -189,16 +192,11 @@ impl ProfileKeyRecoveryStore {
         &self,
     ) -> Result<ProfileRecoveryPreparation, ProfileKeyRecoveryError> {
         // 导入事务可能处于 KEK 与 vault 分步替换之间；先由离线采用负责人续做。
-        if self
-            .paths
-            .app_data_root_dir
-            .join(PENDING_IMPORT_MARKER)
-            .try_exists()?
-            || self
-                .paths
-                .app_data_root_dir
-                .join(ADOPTION_JOURNAL)
-                .try_exists()?
+        if adoption_journal_present(&self.paths.app_data_root_dir)?
+            || matches!(
+                inspect_pending_import(&self.paths.app_data_root_dir)?,
+                PendingImportState::Applicable
+            )
         {
             self.suspend();
             return Ok(ProfileRecoveryPreparation::Ready);
@@ -621,7 +619,10 @@ impl ProfileKeyRecoveryStore {
 
     fn identity_adoption_pending(&self) -> Result<bool, ProfileKeyRecoveryError> {
         let root = &self.paths.app_data_root_dir;
-        if root.join(PENDING_IMPORT_MARKER).try_exists()? {
+        if matches!(
+            inspect_pending_import(root)?,
+            PendingImportState::Applicable
+        ) {
             return Ok(true);
         }
         for entry in fs::read_dir(root)? {
@@ -1726,7 +1727,16 @@ mod tests {
             .unwrap();
             let pending = paths.app_data_root_dir.join(pending);
             if pending.extension().is_some() {
-                std::fs::write(pending, b"{}").unwrap();
+                std::fs::write(pending, br#"{"schema_ver":2,"staging_dir":"import-staging","has_kek":true,"staged_at_unix_ms":0}"#).unwrap();
+                for member in [
+                    "db/uniclipboard.db",
+                    "db/control.sqlite",
+                    "vault/.active-space-manifest-v2",
+                ] {
+                    let path = paths.app_data_root_dir.join("import-staging").join(member);
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    std::fs::write(path, b"pending runtime fixture").unwrap();
+                }
             } else {
                 std::fs::create_dir_all(pending).unwrap();
             }

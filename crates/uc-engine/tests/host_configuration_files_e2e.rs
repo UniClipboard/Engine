@@ -767,6 +767,7 @@ async fn legacy_bundle_is_rejected_before_target_mutation() {
     let vault_before = std::fs::read(target.private.join("vault/profile-secrets-v1")).unwrap();
     let staged = engine
         .execute(Operation::StageConfigImport(StageConfigImportInput {
+            replace_rejected_import: false,
             source: HostFileHandle::new("legacy.ucbundle"),
             password: SecretString::new(LEGACY_PASSPHRASE),
         }))
@@ -806,13 +807,28 @@ async fn legacy_bundle_is_rejected_before_target_mutation() {
     report.finish();
 }
 
-/// 升级前暂存的旧包或不完整包不得阻断目标资料的后续启动。
+/// 拒绝的唯一来源必须原位保全，诊断状态跨重启可查询，原空间仍可读写。
 #[tokio::test(flavor = "multi_thread")]
 async fn rejected_pending_import_keeps_target_usable_across_restarts() {
     let mut report = Report::new("rejected-pending-import");
     let root = tempfile::tempdir().unwrap();
     let outbox = root.path().join("outbox");
     std::fs::create_dir_all(&outbox).unwrap();
+    let source = Profile::new(root.path().join("source"), &outbox);
+    let source_engine = source.start(desktop_declaration()).await;
+    create_space(&source_engine).await;
+    let source_space = assert_ready(&source_engine, &mut report).await;
+    source_engine
+        .execute(Operation::ExportConfig(ExportConfigInput {
+            destination: HostFileHandle::new("complete.ucbundle"),
+        }))
+        .await
+        .unwrap();
+    source_engine
+        .shutdown(Duration::from_secs(15))
+        .await
+        .unwrap();
+    let valid_bundle = std::fs::read(outbox.join("complete.ucbundle")).unwrap();
     for schema in [1, 2] {
         let target = Profile::new(root.path().join(format!("target-{schema}")), &outbox);
         target.write(PRODUCT, b"target configuration");
@@ -821,31 +837,243 @@ async fn rejected_pending_import_keeps_target_usable_across_restarts() {
         let space = assert_ready(&engine, &mut report).await;
         let content = "synthetic retained history";
         let entry = send_text(&engine, content).await;
+        if schema == 2 {
+            stage(&engine, "complete.ucbundle", PASSPHRASE).await;
+        }
         engine.shutdown(Duration::from_secs(15)).await.unwrap();
-        target.write(
-            "pending-import.json",
-            &serde_json::to_vec(&serde_json::json!({
-                "schema_ver": schema, "staging_dir": "import-staging",
-                "has_kek": true, "staged_at_unix_ms": 0
-            }))
-            .unwrap(),
-        );
-        let staging = target.private.join("import-staging/db");
-        std::fs::create_dir_all(&staging).unwrap();
-        std::fs::write(staging.join("uniclipboard.db"), b"incomplete source").unwrap();
-        for _ in 0..2 {
+        if schema == 1 {
+            let tar = uc_infra_profile::config_migration::bundle::open(
+                &uc_core::crypto::domain::Passphrase::new(LEGACY_PASSPHRASE.to_owned()),
+                include_bytes!("fixtures/config-bundle-0c57e1ab/bundle.ucbundle"),
+            )
+            .unwrap();
+            let archive =
+                uc_infra_profile::config_migration::archive::BundleArchive::from_tar_bytes(&tar)
+                    .unwrap();
+            for (member, bytes) in archive.iter() {
+                let path = target.private.join("import-staging").join(member);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, bytes).unwrap();
+            }
+            target.write(
+                "pending-import.json",
+                &serde_json::to_vec(&serde_json::json!({
+                    "schema_ver": 1, "staging_dir": "import-staging",
+                    "has_kek": true, "staged_at_unix_ms": 0
+                }))
+                .unwrap(),
+            );
+        } else {
+            std::fs::remove_file(target.private.join("import-staging/db/control.sqlite")).unwrap();
+        }
+        // 删除本场景的外部包；只保留待导入目录，比较全体成员哈希而非正常启动。
+        std::fs::remove_file(outbox.join("complete.ucbundle")).unwrap();
+        let before = pending_hashes(&target.private);
+        report.line(format!(
+            "schema={schema} unique retained members={before:?}"
+        ));
+        for boot in 0..2 {
             let engine = target.start(desktop_declaration()).await;
             assert_eq!(assert_ready(&engine, &mut report).await, space);
             assert_history(&engine, &entry, content).await;
+            let new_content = format!("synthetic target encrypted write {schema}-{boot}");
+            let new_entry = send_text(&engine, &new_content).await;
+            assert_history(&engine, &new_entry, &new_content).await;
+            let OperationResult::DiagnosticsStatus(status) =
+                engine.execute(Operation::QueryDiagnostics).await.unwrap()
+            else {
+                panic!("diagnostics result")
+            };
+            let rejected = status.rejected_config_import.expect("durable rejection");
+            assert!(rejected.message.contains("not completed"));
+            assert!(rejected.message.contains("Re-export"));
+            assert!(rejected.message.contains("new version"));
+            assert_eq!(
+                rejected.reason,
+                if schema == 1 {
+                    uc_engine::ConfigImportRejectionReason::UnsupportedFormat
+                } else {
+                    uc_engine::ConfigImportRejectionReason::MissingRuntimeMembers
+                }
+            );
+            report.line(format!(
+                "schema={schema} boot={boot} rejection={rejected:?}"
+            ));
             engine.shutdown(Duration::from_secs(15)).await.unwrap();
+            assert_eq!(pending_hashes(&target.private), before);
         }
-        assert!(!target.private.join("pending-import.json").exists());
-        assert!(!target.private.join("import-staging").exists());
         assert!(!target.private.join(".config-import-adoption-v1").exists());
         assert_eq!(target.read(PRODUCT), b"target configuration");
-        report.tree("retained target", &target.private);
+        std::fs::write(outbox.join("complete.ucbundle"), &valid_bundle).unwrap();
+        let engine = target.start(desktop_declaration()).await;
+        for (password, replace) in [(PASSPHRASE, false), ("invalid-passphrase", true)] {
+            let outcome = engine
+                .execute(Operation::StageConfigImport(StageConfigImportInput {
+                    source: HostFileHandle::new("complete.ucbundle"),
+                    password: SecretString::new(password.to_owned()),
+                    replace_rejected_import: replace,
+                }))
+                .await
+                .unwrap();
+            assert!(!matches!(
+                outcome,
+                OperationResult::ConfigImportStaged(ConfigImportStageOutcome::Staged { .. })
+            ));
+            assert_eq!(pending_hashes(&target.private), before);
+        }
+        engine
+            .execute(Operation::StageConfigImport(StageConfigImportInput {
+                source: HostFileHandle::new("complete.ucbundle"),
+                password: SecretString::new(PASSPHRASE.to_owned()),
+                replace_rejected_import: true,
+            }))
+            .await
+            .unwrap();
+        engine.shutdown(Duration::from_secs(15)).await.unwrap();
+        let engine = target.start(desktop_declaration()).await;
+        assert_eq!(assert_ready(&engine, &mut report).await, source_space);
+        let OperationResult::DiagnosticsStatus(status) =
+            engine.execute(Operation::QueryDiagnostics).await.unwrap()
+        else {
+            panic!("diagnostics result")
+        };
+        assert!(status.rejected_config_import.is_none());
+        engine.shutdown(Duration::from_secs(15)).await.unwrap();
+        assert!(!target.private.join("pending-import.json").exists());
+        report.tree(
+            "target after explicit validated replacement",
+            &target.private,
+        );
     }
     report.finish();
+}
+
+/// 已有 journal、I/O 故障或链接边界必须保留现场，不得强行启动或沿链接修改资料。
+#[tokio::test(flavor = "multi_thread")]
+async fn rejected_import_preserves_journal_io_and_path_boundaries() {
+    let mut report = Report::new("rejected-import-boundaries");
+    let root = tempfile::tempdir().unwrap();
+    let outbox = root.path().join("outbox");
+    std::fs::create_dir_all(&outbox).unwrap();
+    for fault in [
+        "journal",
+        "marker-directory",
+        "marker-link",
+        "staging-link",
+        "member-link",
+        "traversal",
+    ] {
+        let target = Profile::new(root.path().join(fault), &outbox);
+        let outside = root.path().join(format!("outside-{fault}"));
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("keep"), b"outside active data").unwrap();
+        let engine = target.start(desktop_declaration()).await;
+        create_space(&engine).await;
+        let space = assert_ready(&engine, &mut report).await;
+        let marker = br#"{"schema_ver":1,"staging_dir":"import-staging","has_kek":true,"staged_at_unix_ms":0}"#;
+        target.write("pending-import.json", marker);
+        std::fs::create_dir_all(target.private.join("import-staging/db")).unwrap();
+        std::fs::write(
+            target.private.join("import-staging/db/uniclipboard.db"),
+            b"unique source",
+        )
+        .unwrap();
+        match fault {
+            "journal" => target.write(".config-import-adoption-v1", b"invalid journal must survive"),
+            "marker-directory" => {
+                std::fs::remove_file(target.private.join("pending-import.json")).unwrap();
+                std::fs::create_dir(target.private.join("pending-import.json")).unwrap();
+            }
+            "marker-link" => {
+                std::fs::remove_file(target.private.join("pending-import.json")).unwrap();
+                std::os::unix::fs::symlink(outside.join("keep"), target.private.join("pending-import.json")).unwrap();
+            }
+            "staging-link" => {
+                std::fs::rename(target.private.join("import-staging"), target.private.join("retained-source")).unwrap();
+                std::os::unix::fs::symlink(&outside, target.private.join("import-staging")).unwrap();
+            }
+            "member-link" => {
+                std::os::unix::fs::symlink(outside.join("keep"), target.private.join("import-staging/linked-member")).unwrap();
+            }
+            "traversal" => target.write("pending-import.json", br#"{"schema_ver":1,"staging_dir":"../outside","has_kek":true,"staged_at_unix_ms":0}"#),
+            _ => unreachable!(),
+        }
+        if fault != "traversal" {
+            assert!(
+                engine.execute(Operation::QueryDiagnostics).await.is_err(),
+                "{fault}: query must fail closed"
+            );
+        }
+        engine.shutdown(Duration::from_secs(15)).await.unwrap();
+        if fault == "traversal" {
+            let before = pending_hashes(&target.private);
+            let engine = target.start(desktop_declaration()).await;
+            assert_eq!(assert_ready(&engine, &mut report).await, space);
+            let OperationResult::DiagnosticsStatus(status) =
+                engine.execute(Operation::QueryDiagnostics).await.unwrap()
+            else {
+                panic!("diagnostics result")
+            };
+            assert!(status.rejected_config_import.is_some());
+            engine.shutdown(Duration::from_secs(15)).await.unwrap();
+            assert_eq!(pending_hashes(&target.private), before);
+        } else {
+            assert!(
+                target.try_start(desktop_declaration()).await.is_err(),
+                "{fault}"
+            );
+            assert!(std::fs::symlink_metadata(target.private.join("pending-import.json")).is_ok());
+            assert!(std::fs::symlink_metadata(target.private.join("import-staging")).is_ok());
+            if fault == "journal" {
+                assert_eq!(
+                    target.read(".config-import-adoption-v1"),
+                    b"invalid journal must survive"
+                );
+            }
+        }
+        let retained = if fault == "staging-link" {
+            "retained-source"
+        } else {
+            "import-staging"
+        };
+        assert_eq!(
+            std::fs::read(target.private.join(retained).join("db/uniclipboard.db")).unwrap(),
+            b"unique source"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("keep")).unwrap(),
+            b"outside active data"
+        );
+        report.line(format!(
+            "fault={fault}: original source and outside data retained"
+        ));
+    }
+    report.finish();
+}
+
+/// 只读取常规测试文件；拒绝现场的 marker 和每个成员均参与完整字节比对。
+fn pending_hashes(root: &Path) -> BTreeMap<String, String> {
+    fn visit(base: &Path, path: &Path, values: &mut BTreeMap<String, String>) {
+        let metadata = std::fs::symlink_metadata(path).unwrap();
+        assert!(!metadata.file_type().is_symlink());
+        if metadata.is_dir() {
+            for entry in std::fs::read_dir(path).unwrap() {
+                visit(base, &entry.unwrap().path(), values);
+            }
+        } else {
+            values.insert(
+                path.strip_prefix(base)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                sha256(&std::fs::read(path).unwrap()),
+            );
+        }
+    }
+    let mut values = BTreeMap::new();
+    visit(root, &root.join("pending-import.json"), &mut values);
+    visit(root, &root.join("import-staging"), &mut values);
+    values
 }
 
 /// 超出累计上限的稀疏密文文件应在读取内容前拒绝，且不覆盖导出目标。
@@ -962,6 +1190,7 @@ async fn create_space_with_passphrase(engine: &Engine, passphrase: &str) {
 async fn stage(engine: &Engine, handle: &str, passphrase: &str) {
     let staged = engine
         .execute(Operation::StageConfigImport(StageConfigImportInput {
+            replace_rejected_import: false,
             source: HostFileHandle::new(handle),
             password: SecretString::new(passphrase),
         }))

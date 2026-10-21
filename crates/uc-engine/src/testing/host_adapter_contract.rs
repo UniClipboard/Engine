@@ -2918,6 +2918,7 @@ async fn engine_start_builds_a_resumable_real_session() {
         engine
             .execute(crate::Operation::StageConfigImport(
                 crate::StageConfigImportInput {
+                    replace_rejected_import: false,
                     source: HostFileHandle::new("config-bundle"),
                     password: crate::SecretString::new("correct horse"),
                 },

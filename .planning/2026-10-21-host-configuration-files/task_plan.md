@@ -301,3 +301,36 @@ then complete public Engine shutdown and public process-observability shutdown b
 exact equality and count growth across leave. Preserve same-instance create after leave and legacy
 migration checks. Change only the existing binding E2E fixture. Retain exact numeric artifacts.
 The detailed pre-change diagnosis and original failure live in the review-repair evidence directory.
+
+
+## Retained rejected import repair (authorized product decision, before code)
+
+The user approved retaining rejected staging, continuing the original Space and exposing a durable
+queryable rejection with re-export guidance. The old cleanup can destroy the only remaining source.
+Failure modes: deleted unique staging; overwritten rejected staging on the next Stage call; ephemeral
+warning mistaken for a durable result; original recovery skipped merely because a rejected marker
+exists; an active adoption journal incorrectly treated as safe rejection; I/O treated as incompatibility;
+marker-selected paths or staging symlinks reach active data; invalid replacement deletes the source;
+unbounded rejection archives; new diagnostic plaintext carries secrets.
+
+Keep the original pending marker and staging bytes in place. No new format, credential copy, backup
+folder or plaintext status file is needed. Their persisted contents are the durable rejection state.
+The import owner performs one read-only classification reused by adoption, recovery, query and Stage.
+Diagnostics queries return a safe typed reason and fixed re-export guidance. Startup continues only
+for rejected inputs with no journal and successful inspection. Active journals and inspection errors
+retain the existing recovery/failure boundary. Original key recovery runs normally for rejected imports.
+
+One pending slot remains bounded. Stage defaults to refusing replacement of rejected data. A new
+explicit replace_rejected_import input authorizes replacing that slot only after the new bundle has
+passed the maintained complete validation. This is an irreversible host-confirmed action, not automatic
+cleanup. Invalid passwords/bundles and default Stage retain all old bytes. Successful explicit restage
+reuses the existing staging writer and adoption transaction; FactoryReset retains its existing explicit
+whole-profile deletion contract. No extra retention copies or automatic pruning are added.
+
+Write public E2E before production changes: actual legacy schema-1 archive staging, schema-2 missing
+member after public Stage, no remaining external bundle, full byte inventories across repeated starts,
+durable QueryDiagnostics rejection, original history reads and new encrypted writes, fixed guidance,
+default/invalid replacement preservation, explicit valid replacement and successful later import,
+active-journal and I/O failure preservation, traversal fields and staging/member/marker symlinks.
+Reuse existing archive/crypto fixture tools only for old-version fixture arrangement; no secure-store
+copying. Preserve all prior failures and 0a623a30 as immutable historical evidence.

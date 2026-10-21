@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use crate::crypto::domain::Passphrase;
 
 use super::error::ConfigMigrationError;
-use super::model::{ConfigImportPreview, StagedConfigImport};
+use super::model::{ConfigImportPreview, ConfigImportRejection, StagedConfigImport};
 
 /// Export the current installation's configuration into a self-protected
 /// bundle written to a destination path.
@@ -84,9 +84,13 @@ pub trait StageConfigImportPort: Send + Sync {
     ///   new or otherwise unsupported;
     /// * [`ConfigMigrationError::Io`] when the source cannot be read or the
     ///   pending migration cannot be recorded.
+    /// replace_rejected_import 只在宿主已确认不可撤销替换时为 true；新包验证失败不得释放旧资料。
     async fn stage_import(
         &self,
         password: &Passphrase,
         source: &Path,
+        replace_rejected_import: bool,
     ) -> Result<StagedConfigImport, ConfigMigrationError>;
+    /// 查询原位保留的拒绝资料；读取失败必须报告，不得返回无拒绝状态。
+    async fn rejected_import(&self) -> Result<Option<ConfigImportRejection>, ConfigMigrationError>;
 }

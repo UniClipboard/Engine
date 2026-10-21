@@ -4,11 +4,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use super::config_migration::RejectedConfigImportView;
 use anyhow::{anyhow, Context};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tracing::instrument;
 use uc_core::error_class::ErrorClass;
+use uc_core::ports::config_migration::ConfigMigrationError;
 use uc_core::ports::SettingsPort;
 use uc_observability_contract::{error_source::io_error_kind, uc_warn};
 use zip::write::SimpleFileOptions;
@@ -22,6 +24,7 @@ pub struct DiagnosticsFacadeDeps {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DebugStatusView {
+    pub rejected_config_import: Option<RejectedConfigImportView>,
     pub debug_mode: bool,
     pub effective_log_profile: String,
     pub restart_required: bool,
@@ -42,6 +45,8 @@ pub struct LogExportView {
 
 #[derive(Debug, thiserror::Error)]
 pub enum DiagnosticsFacadeError {
+    #[error("failed to query retained import status")]
+    ImportStatus(#[source] ConfigMigrationError),
     #[error("failed to load settings")]
     LoadSettings(#[source] anyhow::Error),
     #[error("failed to save settings")]
@@ -59,6 +64,7 @@ impl ErrorClass for DiagnosticsFacadeError {
             Self::SaveSettings(_) => "save_settings",
             Self::DownloadsUnavailable => "downloads_unavailable",
             Self::Export(_) => "export",
+            Self::ImportStatus(_) => "import_status",
         }
     }
 }
@@ -105,6 +111,7 @@ impl DiagnosticsFacade {
             .await
             .map_err(DiagnosticsFacadeError::LoadSettings)?;
         Ok(DebugStatusView {
+            rejected_config_import: None,
             debug_mode: settings.general.debug_mode,
             effective_log_profile: current_effective_log_profile(settings.general.debug_mode),
             restart_required: false,
