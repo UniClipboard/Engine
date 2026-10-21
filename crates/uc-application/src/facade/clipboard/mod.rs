@@ -17,3 +17,5 @@ pub use crate::clipboard::sync::get_entry_delivery_view::{
     EntryDeliveryStatusView, EntryDeliveryTargetView, EntryDeliveryView, EntrySource,
     GetEntryDeliveryViewError,
 };
+
+pub use crate::transfer::receive::retry::{RetryEntryReceiveError, RetryEntryReceiveOutcome};

@@ -335,6 +335,35 @@ pub struct ReceiveReadinessSummary {
 wire_enum! {
     serde
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum ReceiveRetryUnavailableReason {
+        SourceUnavailable => "source_unavailable",
+        AccessDenied => "access_denied",
+    }
+}
+
+impl fmt::Display for ReceiveRetryUnavailableReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.wire())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum EntryReceiveRetryOutcome {
+    Accepted {
+        attempt_id: String,
+    },
+    AlreadyReceiving,
+    Superseded,
+    CancellationIncomplete,
+    Unavailable {
+        reason: ReceiveRetryUnavailableReason,
+    },
+}
+
+wire_enum! {
+    serde
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
     pub enum EntryReceiveCancellationOutcome {
         Cancelled => "cancelled",
         CancellationIncomplete => "cancellation_incomplete",
@@ -676,6 +705,7 @@ pub enum OperationResult {
     EntryReceiveProgress(Option<ReceiveProgressSummary>),
     EntryReceiveProgressList(Vec<ReceiveProgressSummary>),
     EntryReceiveCancellation(EntryReceiveCancellationOutcome),
+    EntryReceiveRetry(EntryReceiveRetryOutcome),
     InboundTransferCancellation(InboundTransferCancellationOutcome),
     ClipboardCaptured {
         entry_id: Option<String>,
@@ -1040,6 +1070,9 @@ impl fmt::Debug for OperationResult {
             Self::EntryReceiveProgressList(progress) => debug
                 .field("kind", &"entry_receive_progress_list")
                 .field("progress_count", &progress.len()),
+            Self::EntryReceiveRetry(outcome) => debug
+                .field("kind", &"entry_receive_retry")
+                .field("outcome", outcome),
             Self::EntryReceiveCancellation(outcome) => debug
                 .field("kind", &"entry_receive_cancellation")
                 .field("outcome", outcome),

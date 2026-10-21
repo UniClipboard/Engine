@@ -129,6 +129,28 @@ impl ReceiveBatch {
             );
         }
     }
+    pub(crate) fn inherit_result(&self, id: &str, previous: &ReceiveItemProgress) {
+        let status = if previous.status == TrackedFileTransferStatus::Cancelled {
+            OutboundProgressStatus::Cancelled {
+                reason: FileTransferCancellationReason::LocalUser,
+            }
+        } else {
+            OutboundProgressStatus::Failed
+        };
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if !state.finished {
+            state.items.insert(
+                id.to_owned(),
+                Item {
+                    bytes: 0,
+                    status,
+                    source: None,
+                    failure_reason: previous.failure_reason,
+                },
+            );
+        }
+    }
+
     pub(crate) fn items(
         &self,
         planned: &[PlannedReceiveItem],
@@ -291,6 +313,10 @@ fn project_items(
                 tracked_status(&item.status)
             });
             let mut reason = item.and_then(|item| item.failure_reason);
+            if persisted {
+                status = TrackedFileTransferStatus::Completed;
+                reason = None;
+            }
             let downloaded = status == TrackedFileTransferStatus::Completed;
             if status == TrackedFileTransferStatus::Completed && !persisted {
                 status = TrackedFileTransferStatus::Transferring;

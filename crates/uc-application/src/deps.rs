@@ -143,7 +143,6 @@ pub use crate::space::{
     SpaceMembershipRecord,
 };
 pub use crate::space::{SpaceAdmissionAdapters, SpaceMembershipAdapters, SpaceRuntimeAdapters};
-pub use crate::transfer::file::assembly::ReceiveCancellationDeps;
 pub use crate::transfer::file::facade::FileTransferFacadeDeps;
 pub use crate::transfer::file::lifecycle::FileTransferLifecycleDeps;
 pub use crate::transfer::receive::reconciliation::ReceiveReadinessCoordinator;

@@ -15,6 +15,7 @@ use uc_core::ports::{EntryReceiveProgress, ReceiveItemKind};
 use uc_core::MimeType;
 
 /// 原包只在尚未保存条目时需要；保存后从既有密文快照重建正文。
+#[derive(Clone)]
 pub(crate) struct ReceiveSource {
     pub(crate) from_device: DeviceId,
     pub(crate) expected_hash: String,
@@ -29,6 +30,7 @@ impl fmt::Debug for ReceiveSource {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct ReceiveRepresentation {
     pub(crate) id: RepresentationId,
     pub(crate) format_id: FormatId,
@@ -43,7 +45,7 @@ pub(crate) struct PlannedReceiveItem {
 
 pub(super) struct ReceiveReceipt {
     attempt: String,
-    source: ReceiveSource,
+    source: Option<ReceiveSource>,
     planned: Vec<PlannedReceiveItem>,
     batch: Weak<ReceiveBatch>,
     final_facts: Option<ReceiveFacts>,
@@ -51,7 +53,7 @@ pub(super) struct ReceiveReceipt {
 }
 
 impl ReceiveSource {
-    fn planned(&self, entry: &EntryId, attempt: &str) -> Vec<PlannedReceiveItem> {
+    pub(crate) fn planned(&self, entry: &EntryId, attempt: &str) -> Vec<PlannedReceiveItem> {
         if self.manifest.is_some() {
             return vec![PlannedReceiveItem {
                 id: "directory_unit".into(),
@@ -86,6 +88,29 @@ impl ReceiveSource {
 }
 
 impl ReceiveAction {
+    pub(crate) fn inherit_saved(&self, landed: &HashMap<usize, ReceivedItem>) {
+        let progress = self
+            .progress
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let Some(progress) = progress else {
+            return;
+        };
+        let mut state = self
+            .registry
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(receipt) = state
+            .receipts
+            .get_mut(&progress.entry)
+            .filter(|receipt| receipt.attempt == progress.attempt)
+        {
+            receipt.landed = landed.clone();
+        }
+    }
+
     pub(crate) fn retain_source(&self, source: ReceiveSource) {
         let progress = self
             .progress
@@ -117,7 +142,7 @@ impl ReceiveAction {
             progress.entry.clone(),
             ReceiveReceipt {
                 attempt: progress.attempt.clone(),
-                source,
+                source: Some(source),
                 planned,
                 batch: Arc::downgrade(&self.batch),
                 final_facts: None,
@@ -171,19 +196,41 @@ impl ReceiveAction {
         else {
             return;
         };
-        if complete {
+        if complete && receipt.landed.is_empty() {
             state.receipts.remove(&progress.entry);
             return;
+        }
+        if complete {
+            // 继承成功项没有本次下载行，保留纯结果投影，立即释放全部重试来源。
+            receipt.source = None;
         }
         receipt.landed = completed
             .iter()
             .map(|item| (item.blob_index, item.clone()))
             .collect();
-        receipt.source.original_wire = None;
+        if let Some(source) = &mut receipt.source {
+            source.original_wire = None;
+        }
     }
 }
 
 impl ReceiveWorkRegistry {
+    pub(crate) fn retry_material(
+        &self,
+        entry: &EntryId,
+        attempt: &str,
+    ) -> Option<(ReceiveSource, HashMap<usize, ReceivedItem>)> {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if !state.accepting || state.cleaning.contains(entry.as_ref()) {
+            return None;
+        }
+        let receipt = state
+            .receipts
+            .get(entry)
+            .filter(|row| row.attempt == attempt)?;
+        Some((receipt.source.as_ref()?.clone(), receipt.landed.clone()))
+    }
+
     pub(crate) fn merge_progress(&self, progress: &mut EntryReceiveProgress) {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(receipt) = state

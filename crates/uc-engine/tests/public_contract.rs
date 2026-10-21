@@ -2013,3 +2013,62 @@ fn device_summary_debug_output_redacts_display_name() {
     assert!(debug.contains("device-1"));
     assert!(debug.contains("online"));
 }
+
+#[test]
+fn receive_retry_has_one_operation_and_preserves_all_business_results() {
+    use uc_engine::{
+        EntryReceiveRetryOutcome, ReceiveRetryUnavailableReason, RetryEntryReceiveInput,
+    };
+    let operation = uc_engine::Operation::RetryEntryReceive(RetryEntryReceiveInput {
+        entry_id: "entry".into(),
+        expected_attempt_id: "old".into(),
+        item_ids: vec!["item".into()],
+    });
+    assert_eq!(
+        operation.kind(),
+        uc_engine::OperationKind::RetryEntryReceive
+    );
+    assert_eq!(
+        serde_json::to_value(operation.kind()).unwrap(),
+        "retry_entry_receive"
+    );
+    for (result, expected) in [
+        (
+            EntryReceiveRetryOutcome::Accepted {
+                attempt_id: "new".into(),
+            },
+            serde_json::json!({"kind":"accepted", "attempt_id":"new"}),
+        ),
+        (
+            EntryReceiveRetryOutcome::AlreadyReceiving,
+            serde_json::json!({"kind":"already_receiving"}),
+        ),
+        (
+            EntryReceiveRetryOutcome::Superseded,
+            serde_json::json!({"kind":"superseded"}),
+        ),
+        (
+            EntryReceiveRetryOutcome::CancellationIncomplete,
+            serde_json::json!({"kind":"cancellation_incomplete"}),
+        ),
+        (
+            EntryReceiveRetryOutcome::Unavailable {
+                reason: ReceiveRetryUnavailableReason::SourceUnavailable,
+            },
+            serde_json::json!({"kind":"unavailable", "reason":"source_unavailable"}),
+        ),
+        (
+            EntryReceiveRetryOutcome::Unavailable {
+                reason: ReceiveRetryUnavailableReason::AccessDenied,
+            },
+            serde_json::json!({"kind":"unavailable", "reason":"access_denied"}),
+        ),
+    ] {
+        let encoded = serde_json::to_value(&result).unwrap();
+        assert_eq!(encoded, expected);
+        assert_eq!(
+            serde_json::from_value::<EntryReceiveRetryOutcome>(encoded).unwrap(),
+            result
+        );
+    }
+}

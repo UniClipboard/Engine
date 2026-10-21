@@ -36,10 +36,14 @@ use crate::clipboard::entry_identity::EntryIdentityCoordinator;
 use crate::clipboard::write::{ClipboardWriteIntent, MobileConsumabilityProbe};
 use crate::runtime_lifecycle::LifecycleError;
 use crate::transfer::receive::reconciliation::ReceiveReadinessCoordinator;
+use crate::transfer::receive::retry::{
+    accept_retry, PreparedReceiveRetry, RetryEntryReceiveOutcome,
+};
 use crate::transfer::receive::work::{
     ReceiveAction, ReceiveRegistrationError, ReceiveRepresentation, ReceiveSource,
     ReceiveWorkRegistry,
 };
+use bytes::Bytes;
 
 use crate::clipboard::active::ClipboardSnapshotDeps;
 use crate::clipboard::sync::payload_codec::{
@@ -998,7 +1002,7 @@ impl ApplyInboundClipboardUseCase {
         &self,
         input: ApplyInboundInput,
     ) -> Result<ApplyOutcome, ApplyInboundError> {
-        self.execute_owned(input, None).await
+        self.execute_owned(input, None, None).await
     }
 
     pub async fn execute_with_provisional(
@@ -1007,8 +1011,22 @@ impl ApplyInboundClipboardUseCase {
         provisional_transfer_id: String,
         role: ReceiveItemRole,
     ) -> Result<ApplyOutcome, ApplyInboundError> {
-        self.execute_owned(input, Some((provisional_transfer_id, role)))
+        self.execute_owned(input, Some((provisional_transfer_id, role)), None)
             .await
+    }
+
+    pub(crate) async fn execute_retry(
+        &self,
+        retry: PreparedReceiveRetry,
+    ) -> Result<ApplyOutcome, ApplyInboundError> {
+        let input = ApplyInboundInput {
+            from_device: retry.source.from_device,
+            snapshot_hash: retry.source.expected_hash.clone(),
+            plaintext: Bytes::new(),
+            resurface_intent: ClipboardWriteIntent::RemotePush,
+            activation_owner: InboundActivationOwner::Caller,
+        };
+        self.execute_owned(input, None, Some(retry)).await
     }
 
     #[instrument(
@@ -1023,6 +1041,7 @@ impl ApplyInboundClipboardUseCase {
         provisional: Option<(String, ReceiveItemRole)>,
         work: &OwnedWork,
         receive_action: &ReceiveAction,
+        mut retry: Option<PreparedReceiveRetry>,
     ) -> Result<ApplyOutcome, ApplyInboundError> {
         if let Some(readiness) = &self.receive_readiness {
             tokio::select! {
@@ -1033,7 +1052,13 @@ impl ApplyInboundClipboardUseCase {
         }
         // 1. Decode V3 envelope. Decode failure is non-fatal — drop the
         // frame, keep the loop alive (peer may be on a newer wire).
-        let (snapshot, blob_refs, file_set_manifest) =
+        let (snapshot, blob_refs, file_set_manifest) = if let Some(retry) = &retry {
+            (
+                retry.snapshot.clone(),
+                retry.source.blob_refs.clone(),
+                retry.source.manifest.clone(),
+            )
+        } else {
             match decode_v3_bytes_to_snapshot_blob_refs_and_file_set(input.plaintext.as_ref()) {
                 Ok(decoded) => decoded,
                 Err(e) => {
@@ -1044,7 +1069,8 @@ impl ApplyInboundClipboardUseCase {
                     );
                     return Ok(ApplyOutcome::DecodeFailed { reason });
                 }
-            };
+            }
+        };
 
         uc_info!(
             blob_ref_count = blob_refs.len(),
@@ -1077,7 +1103,7 @@ impl ApplyInboundClipboardUseCase {
             .await
             .map_err(|error| ApplyInboundError::DedupQuery(error.into()))?;
         if let Some(existing_id) = existing.as_ref() {
-            if self.is_entry_available(existing_id).await {
+            if retry.is_none() && self.is_entry_available(existing_id).await {
                 self.report_reused_outbound_transfers(&input.from_device, &blob_refs)
                     .await;
                 if let Some((transfer_id, _)) = provisional.as_ref() {
@@ -1097,7 +1123,7 @@ impl ApplyInboundClipboardUseCase {
             );
         }
 
-        if existing.is_none() {
+        if retry.is_none() && existing.is_none() {
             if let Some(existing_entry_id) = self.recent_snapshot_hashes.get(&input.snapshot_hash) {
                 self.report_reused_outbound_transfers(&input.from_device, &blob_refs)
                     .await;
@@ -1125,27 +1151,79 @@ impl ApplyInboundClipboardUseCase {
         // that entry's id: the completed content is persisted under `existing`
         // below, so the IncomingPending card and the final entry must share it —
         // a fresh id would strand the pending card on a different entry.
-        let receiver_entry_id = existing.clone().unwrap_or_else(EntryId::new);
-        let receive_attempt_id = self
-            .begin_receive_attempt(&receiver_entry_id, receive_action)
-            .await?;
-        if !blob_refs.is_empty() || file_set_manifest.is_some() {
-            receive_action.retain_source(ReceiveSource {
-                from_device: input.from_device,
-                expected_hash: input.snapshot_hash.clone(),
-                blob_refs: blob_refs.clone(),
-                manifest: file_set_manifest.clone(),
-                original_wire: Some(input.plaintext.clone()),
-                representations: snapshot
-                    .representations
-                    .iter()
-                    .map(|rep| ReceiveRepresentation {
-                        id: rep.id.clone(),
-                        format_id: rep.format_id.clone(),
-                        mime: rep.mime.clone(),
+        let receiver_entry_id = retry
+            .as_ref()
+            .map(|retry| retry.entry.clone())
+            .or_else(|| existing.clone())
+            .unwrap_or_else(EntryId::new);
+        let receive_attempt_id = if let Some(prepared) = retry.as_mut() {
+            if existing
+                .as_ref()
+                .is_some_and(|existing| existing != &prepared.entry)
+            {
+                if let Some(reply) = prepared.accepted.take() {
+                    let _ = reply.send(RetryEntryReceiveOutcome::Superseded);
+                }
+                return Ok(ApplyOutcome::DuplicateSkipped {
+                    snapshot_hash: input.snapshot_hash,
+                    existing_entry_id: receiver_entry_id,
+                });
+            }
+            let ports = self.receive_attempts.as_ref().ok_or_else(|| {
+                ApplyInboundError::Internal(anyhow!("receive tracking is required for retry"))
+            })?;
+            match accept_retry(
+                prepared,
+                &self.receive_work,
+                ports.get.as_ref(),
+                ports.begin.as_ref(),
+                ports.clock.as_ref(),
+            )
+            .await?
+            {
+                Some(attempt) => Some(attempt),
+                None => {
+                    return Ok(ApplyOutcome::DuplicateSkipped {
+                        snapshot_hash: input.snapshot_hash,
+                        existing_entry_id: receiver_entry_id,
                     })
-                    .collect(),
-            });
+                }
+            }
+        } else {
+            self.begin_receive_attempt(&receiver_entry_id, receive_action)
+                .await?
+        };
+        if let Some(prepared) = retry.as_mut() {
+            receive_action.retain_source(prepared.source.clone());
+            if let Some(selection) = &prepared.selection {
+                receive_action.inherit_saved(&selection.landed);
+            }
+            if let (Some(reply), Some(attempt_id)) =
+                (prepared.accepted.take(), receive_attempt_id.as_ref())
+            {
+                let _ = reply.send(RetryEntryReceiveOutcome::Accepted {
+                    attempt_id: attempt_id.clone(),
+                });
+            }
+        } else {
+            if !blob_refs.is_empty() || file_set_manifest.is_some() {
+                receive_action.retain_source(ReceiveSource {
+                    from_device: input.from_device,
+                    expected_hash: input.snapshot_hash.clone(),
+                    blob_refs: blob_refs.clone(),
+                    manifest: file_set_manifest.clone(),
+                    original_wire: Some(input.plaintext.clone()),
+                    representations: snapshot
+                        .representations
+                        .iter()
+                        .map(|rep| ReceiveRepresentation {
+                            id: rep.id.clone(),
+                            format_id: rep.format_id.clone(),
+                            mime: rep.mime.clone(),
+                        })
+                        .collect(),
+                });
+            }
         }
         self.emit_receive_state(
             &receiver_entry_id,
@@ -1213,22 +1291,22 @@ impl ApplyInboundClipboardUseCase {
                 (false, _) => (snapshot, MaterializeOutcome::Complete, false, Vec::new()),
                 (true, Some(materializer)) => {
                     let count = blob_refs.len();
-                    let mut result = match materializer
-                        .materialize_plan(
-                            ReceiveWorkPlan::new(
-                                input.from_device,
-                                receiver_entry_id.clone(),
-                                snapshot,
-                                blob_refs,
-                                file_set_manifest,
-                                receive_attempt_id.clone(),
-                                Some(input.snapshot_hash.clone()),
-                            )
-                            .with_cancellation(receive_action.cancellation())
-                            .with_batch(receive_action.batch.clone()),
-                        )
-                        .await
+                    let mut plan = ReceiveWorkPlan::new(
+                        input.from_device,
+                        receiver_entry_id.clone(),
+                        snapshot,
+                        blob_refs,
+                        file_set_manifest,
+                        receive_attempt_id.clone(),
+                        Some(input.snapshot_hash.clone()),
+                    )
+                    .with_cancellation(receive_action.cancellation())
+                    .with_batch(receive_action.batch.clone());
+                    if let Some(selection) = retry.as_mut().and_then(|retry| retry.selection.take())
                     {
+                        plan = plan.with_selection(selection);
+                    }
+                    let mut result = match materializer.materialize_plan(plan).await {
                         Ok(result) => result,
                         Err(error) => {
                             let cancelled = is_directory_cancel_error(&error);
@@ -1380,7 +1458,7 @@ impl ApplyInboundClipboardUseCase {
         // completing delivery of a partial. Consulted only when the DB had no
         // match — a partial DB match takes the upgrade path below.
         let visible_key = snapshot.meaningful_origin_key();
-        if existing.is_none() {
+        if retry.is_none() && existing.is_none() {
             if let Some(existing_entry_id) =
                 self.find_recent_duplicate(&input.snapshot_hash, visible_key.as_deref())
             {
@@ -1491,7 +1569,7 @@ impl ApplyInboundClipboardUseCase {
             // Any surviving match is partial — fully-held matches returned at
             // step 3.
             Some(existing_id) => {
-                if is_partial {
+                if is_partial && retry.is_none() {
                     // Don't replace a partial with another partial: keep the
                     // existing placeholder so the eventual completed delivery
                     // upgrades it (avoids thrashing between two partials).

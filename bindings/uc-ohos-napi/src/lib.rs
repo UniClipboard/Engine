@@ -182,6 +182,13 @@ pub struct OhWorkspaceConvergence {
 }
 
 #[napi(object)]
+pub struct OhReceiveRetryOutcome {
+    pub status: String,
+    pub attempt_id: Option<String>,
+    pub reason: Option<String>,
+}
+
+#[napi(object)]
 pub struct OhReceiveItem {
     pub item_id: String,
     pub kind: String,

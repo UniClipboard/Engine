@@ -95,15 +95,27 @@ fn query_includes_unstarted_items_and_requires_real_persistence_for_completed_do
         assert!(!format!("{current:?}").contains("PRIVATE"));
         let state = registry.state.lock().unwrap();
         let receipt = &state.receipts[&EntryId::from("receiver")];
-        assert_eq!(receipt.source.original_wire.is_none(), saved);
-        assert_eq!(receipt.source.from_device, DeviceId::new("PRIVATE_DEVICE"));
-        assert_eq!(receipt.source.expected_hash, "PRIVATE_HASH");
+        assert_eq!(
+            receipt.source.as_ref().unwrap().original_wire.is_none(),
+            saved
+        );
+        assert_eq!(
+            receipt.source.as_ref().unwrap().from_device,
+            DeviceId::new("PRIVATE_DEVICE")
+        );
+        assert_eq!(
+            receipt.source.as_ref().unwrap().expected_hash,
+            "PRIVATE_HASH"
+        );
         assert_eq!(receipt.planned[2].blob_index, 2);
         assert!(receipt
             .planned
             .iter()
             .all(|item| item.kind == ReceiveItemKind::File));
-        assert_eq!(format!("{:?}", receipt.source), "ReceiveSource");
+        assert_eq!(
+            format!("{:?}", receipt.source.as_ref().unwrap()),
+            "ReceiveSource"
+        );
     }
 }
 

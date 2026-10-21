@@ -3,6 +3,9 @@
 //! `ClipboardInboundRuntime`.
 
 use crate::transfer::receive::query::ReceiveProgressQuery;
+use crate::transfer::receive::retry::{
+    RetryEntryReceiveError, RetryEntryReceiveOutcome, RetryEntryReceiveUseCase,
+};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -162,6 +165,7 @@ pub struct ClipboardSyncFacade {
     view_uc: Arc<GetEntryDeliveryViewUseCase>,
     cancel_entry_receive_uc: Option<Arc<CancelEntryReceiveUseCase>>,
     receive_progress: Option<Arc<ReceiveProgressQuery>>,
+    retry_entry_receive: Option<Arc<RetryEntryReceiveUseCase>>,
 }
 
 #[derive(Clone, Copy)]
@@ -229,6 +233,7 @@ impl ClipboardSyncFacade {
             view_uc,
             cancel_entry_receive_uc: None,
             receive_progress: None,
+            retry_entry_receive: None,
         }
     }
 
@@ -236,14 +241,28 @@ impl ClipboardSyncFacade {
         ClipboardSyncDispatch { facade: self }
     }
 
-    pub(crate) fn with_entry_receive_cancellation(
+    pub(crate) fn with_entry_receive_actions(
         mut self,
         progress: Arc<ReceiveProgressQuery>,
         cancellation: Arc<CancelEntryReceiveUseCase>,
+        retry: Arc<RetryEntryReceiveUseCase>,
     ) -> Self {
         self.receive_progress = Some(progress);
+        self.retry_entry_receive = Some(retry);
         self.cancel_entry_receive_uc = Some(cancellation);
         self
+    }
+
+    pub async fn retry_entry_receive(
+        &self,
+        entry_id: EntryId,
+        expected_attempt_id: String,
+        item_ids: Vec<String>,
+    ) -> Result<RetryEntryReceiveOutcome, RetryEntryReceiveError> {
+        let Some(owner) = &self.retry_entry_receive else {
+            return Ok(RetryEntryReceiveOutcome::Unavailable);
+        };
+        owner.execute(entry_id, expected_attempt_id, item_ids).await
     }
 
     pub async fn get_entry_receive_progress(

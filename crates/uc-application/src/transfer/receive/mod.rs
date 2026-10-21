@@ -19,3 +19,5 @@ pub(crate) mod batch;
 pub(crate) mod query;
 
 mod identity;
+
+pub(crate) mod retry;

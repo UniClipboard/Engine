@@ -64,6 +64,7 @@ use crate::transfer::file::assembly::FileTransferAssembly;
 use crate::transfer::file::assembly::StoreOnlyPullIntentDeps;
 use crate::transfer::file::assembly::{
     InboundMaterializerDeps, InboundReceiveIntentDeps, InteractiveReceiveIntentDeps,
+    ReceiveRetryIntentDeps,
 };
 
 /// Clipboard 运行所需的跨领域、被动装配输入。
@@ -505,6 +506,27 @@ impl ClipboardAssembly {
             write_coordinator: Arc::clone(&self.write_coordinator),
             integration_mode,
         }))
+    }
+
+    pub(crate) fn receive_retry_deps(
+        &self,
+        materializer: InboundMaterializerDeps,
+        scope: Arc<dyn CurrentSpaceMemberScopePort>,
+    ) -> ReceiveRetryIntentDeps {
+        ReceiveRetryIntentDeps {
+            common: InboundReceiveIntentDeps {
+                entry_repo: Arc::clone(&self.deps.clipboard.entry_ports.find_by_snapshot_hash),
+                capture: self.capture_use_case.clone(),
+                materializer,
+                host_event_emitter: self.host_event_bus.clone(),
+                search_live_index: self.live_index.clone(),
+                availability: self.deps.clipboard.entry_ports.availability.clone(),
+                entry_identity_coordinator: self.entry_identity.clone(),
+            },
+            snapshot: self.snapshot_deps(),
+            identity: self.deps.clipboard.entry_ports.get_snapshot_hash.clone(),
+            scope,
+        }
     }
 
     fn snapshot_deps(&self) -> ClipboardSnapshotDeps {

@@ -4,7 +4,7 @@ mod model;
 mod ports;
 mod reuse;
 mod workflow;
-pub(crate) use reuse::ReceiveReuseRefusal;
+pub(crate) use reuse::{validate_selection, ReceiveReuseRefusal};
 
 pub use model::{
     InboundFileSetManifest, InboundFileSetMember, MaterializeOutcome, MaterializeResult,

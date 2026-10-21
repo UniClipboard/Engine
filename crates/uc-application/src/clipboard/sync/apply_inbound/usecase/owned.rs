@@ -1,3 +1,4 @@
+use crate::transfer::receive::retry::PreparedReceiveRetry;
 use crate::transfer::receive::work::ReceiveWorkError;
 use anyhow::Error as SourceError;
 use std::{
@@ -17,10 +18,13 @@ impl ApplyInboundClipboardUseCase {
         &self,
         input: ApplyInboundInput,
         provisional: Option<(String, ReceiveItemRole)>,
+        retry: Option<PreparedReceiveRetry>,
     ) -> Result<ApplyOutcome, ApplyInboundError> {
         let work = Arc::new(self.work.begin().ok_or(ApplyInboundError::Stopped)?);
         let action = Arc::clone(&work);
-        let receive_action = self.receive_work.action();
+        let receive_action = retry
+            .as_ref()
+            .map_or_else(|| self.receive_work.action(), |retry| retry.action.clone());
         let processing_receive = receive_action.clone();
         let owner = self.clone();
         let observation = ObservationContext::capture();
@@ -28,7 +32,7 @@ impl ApplyInboundClipboardUseCase {
             observation.scope(
                 async move {
                     owner
-                        .execute_internal(input, provisional, &action, &processing_receive)
+                        .execute_internal(input, provisional, &action, &processing_receive, retry)
                         .await
                 }
                 .in_current_span(),

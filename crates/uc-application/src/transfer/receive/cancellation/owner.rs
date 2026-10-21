@@ -4,6 +4,7 @@ use crate::transfer::blob::transport::{
     BlobExchangeError, BlobExchangeFailure, BlobTransport, DownloadCompletion,
 };
 use crate::transfer::policy::{ACTIVE_DOWNLOADS, CANCEL_WAIT_TIMEOUT, QUEUED_DOWNLOADS};
+use crate::transfer::receive::retry::ReceiveCancellationBarrier;
 use crate::transfer::receive::work::ReceiveWorkRegistry;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -39,6 +40,16 @@ pub(crate) struct CancelEntryReceiveUseCase {
     pub(super) transfer_cancellation: Arc<dyn AttemptTransferCancellation>,
     pub(super) clock: Arc<dyn ClockPort>,
     pub(super) host_event_bus: Arc<HostEventBus>,
+}
+
+impl ReceiveCancellationBarrier for CancelEntryReceiveUseCase {
+    fn is_settling(&self, entry: &EntryId, attempt: &str) -> bool {
+        self.jobs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&(entry.clone(), attempt.to_owned()))
+            .is_some_and(|job| job.settled.borrow().is_none())
+    }
 }
 
 impl CancelEntryReceiveUseCase {
@@ -86,9 +97,7 @@ impl CancelEntryReceiveUseCase {
             if let Some(existing) = jobs.get(&key) {
                 Ok(existing.clone())
             } else {
-                jobs.retain(|_, job| {
-                    job.result.borrow().is_none() && job.settled.borrow().is_none()
-                });
+                jobs.retain(|_, job| job.settled.borrow().is_none());
                 if jobs.len() >= ACTIVE_DOWNLOADS + QUEUED_DOWNLOADS {
                     Err(CancelEntryReceiveError::Busy(BlobExchangeError::refused(
                         BlobExchangeFailure::Busy,

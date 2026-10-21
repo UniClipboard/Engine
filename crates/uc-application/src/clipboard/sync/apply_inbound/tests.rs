@@ -5,6 +5,7 @@ mod directory_failure;
 mod generation;
 mod item_results;
 mod lifecycle;
+mod manual_retry;
 mod receive_work;
 mod result_query;
 mod retry_material;

@@ -23,6 +23,7 @@
 //!   its state machine had no dispatcher, while the real admit path runs
 //!   through `PairingInboundOrchestrator`.
 
+use crate::facade::clipboard::{RetryEntryReceiveError, RetryEntryReceiveOutcome};
 use crate::transfer::blob::facade::TransferCancellationWait;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -147,7 +148,7 @@ use crate::space::{
     NetworkRecoveryStatus, RecoverSpaceSessionError, RecoverSpaceSessionResult,
 };
 use uc_core::crypto::domain::Passphrase;
-use uc_core::ids::DeviceId;
+use uc_core::ids::{DeviceId, EntryId};
 use uc_core::ports::{PeerReachabilityChanged, ReachabilityState};
 use uc_core::ClipboardChangeOrigin;
 use uc_core::SystemClipboardSnapshot;
@@ -734,6 +735,17 @@ impl AppFacade {
     ) -> Result<Vec<uc_core::ports::EntryReceiveProgress>, crate::facade::CancelEntryReceiveError>
     {
         self.clipboard_sync.list_entry_receive_progress().await
+    }
+
+    pub async fn retry_entry_receive(
+        &self,
+        entry_id: EntryId,
+        expected_attempt_id: String,
+        item_ids: Vec<String>,
+    ) -> Result<RetryEntryReceiveOutcome, RetryEntryReceiveError> {
+        self.clipboard_sync
+            .retry_entry_receive(entry_id, expected_attempt_id, item_ids)
+            .await
     }
 
     pub async fn cancel_entry_receive(

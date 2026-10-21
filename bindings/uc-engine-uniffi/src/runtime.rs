@@ -15,12 +15,13 @@ use uc_engine::{
     CancelEntryReceiveInput, CancelInboundTransferInput, ChangeEncryptionPassphraseInput,
     ClipboardRestoreMode, ClipboardRestoreOutcome, CreateSpaceInput, CustomRelayMutation,
     CustomRelayMutationOutcome, CustomRelayRejection, Engine, EngineConfig,
-    EntryReceiveProgressInput, ExportEntryInput, HostCapabilities, HostCapabilityError,
-    HostCapabilityErrorCategory, HostClipboard, HostClipboardRepresentation, HostClipboardSnapshot,
-    HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata, HostSecureStorage,
-    JoinSpaceInput, ObserveClipboardChangeInput, Operation, OperationResult,
-    ReceiveProgressSummary, RecoverSessionInput, RemoveMemberInput, ResendEntryInput,
-    RestoreClipboardInput, SecretString, SendFilesInput, SendImageInput, SendTextInput,
+    EntryReceiveProgressInput, EntryReceiveRetryOutcome as EngineReceiveRetryOutcome,
+    ExportEntryInput, HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory,
+    HostClipboard, HostClipboardRepresentation, HostClipboardSnapshot, HostDirectories,
+    HostFileAccess, HostFileHandle, HostFileMetadata, HostSecureStorage, JoinSpaceInput,
+    ObserveClipboardChangeInput, Operation, OperationResult, ReceiveProgressSummary,
+    RecoverSessionInput, RemoveMemberInput, ResendEntryInput, RestoreClipboardInput,
+    RetryEntryReceiveInput, SecretString, SendFilesInput, SendImageInput, SendTextInput,
     StartupLifecycleInput, StartupProgress, TransferCancellationReason,
 };
 use zeroize::Zeroizing;
@@ -187,6 +188,15 @@ pub struct SpaceCreated {
 pub struct SessionRecovery {
     pub unlocked: bool,
     pub resumed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum ReceiveRetryOutcome {
+    Accepted { attempt_id: String },
+    AlreadyReceiving,
+    Superseded,
+    CancellationIncomplete,
+    Unavailable { reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -702,6 +712,12 @@ enum WorkerCommand {
         entry_id: String,
         mode: BindingClipboardRestoreMode,
         response: mpsc::Sender<Result<BindingClipboardRestoreOutcome, BindingError>>,
+    },
+    RetryEntryReceive {
+        entry_id: String,
+        expected_attempt_id: String,
+        item_ids: Vec<String>,
+        response: mpsc::Sender<Result<ReceiveRetryOutcome, BindingError>>,
     },
     CancelEntryReceive {
         entry_id: String,
@@ -1458,6 +1474,21 @@ impl MobileEngine {
             .map_err(|_| BindingError::RuntimeUnavailable)?
     }
 
+    /// 只提交完整重试意图，接受之后由Engine继续监督实际接收。
+    pub fn retry_entry_receive(
+        &self,
+        entry_id: String,
+        expected_attempt_id: String,
+        item_ids: Vec<String>,
+    ) -> Result<ReceiveRetryOutcome, BindingError> {
+        self.request(|response| WorkerCommand::RetryEntryReceive {
+            entry_id,
+            expected_attempt_id,
+            item_ids,
+            response,
+        })
+    }
+
     /// 用户取消整个接收尝试；仍在收尾时返回 cancellation_incomplete。
     pub fn cancel_entry_receive(
         &self,
@@ -2062,6 +2093,23 @@ async fn run_operations(
                     .await
                     .map_err(BindingError::from)
                     .and_then(map_clipboard_restored);
+                let _ = response.send(result);
+            }
+            WorkerCommand::RetryEntryReceive {
+                entry_id,
+                expected_attempt_id,
+                item_ids,
+                response,
+            } => {
+                let result = engine
+                    .execute(Operation::RetryEntryReceive(RetryEntryReceiveInput {
+                        entry_id,
+                        expected_attempt_id,
+                        item_ids,
+                    }))
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(map_entry_receive_retry);
                 let _ = response.send(result);
             }
             WorkerCommand::CancelEntryReceive {
@@ -2861,6 +2909,16 @@ fn receive_progress(progress: ReceiveProgressSummary) -> ReceiveProgress {
             .collect(),
     }
 }
+fn map_entry_receive_retry(result: OperationResult) -> Result<ReceiveRetryOutcome, BindingError> {
+    unpack_operation!(result, OperationResult::EntryReceiveRetry(outcome) => match outcome {
+        EngineReceiveRetryOutcome::Accepted { attempt_id } => ReceiveRetryOutcome::Accepted { attempt_id },
+        EngineReceiveRetryOutcome::AlreadyReceiving => ReceiveRetryOutcome::AlreadyReceiving,
+        EngineReceiveRetryOutcome::Superseded => ReceiveRetryOutcome::Superseded,
+        EngineReceiveRetryOutcome::CancellationIncomplete => ReceiveRetryOutcome::CancellationIncomplete,
+        EngineReceiveRetryOutcome::Unavailable { reason } => ReceiveRetryOutcome::Unavailable { reason: reason.to_string() },
+    })
+}
+
 fn map_entry_receive_cancellation(result: OperationResult) -> Result<String, BindingError> {
     unpack_operation!(result, OperationResult::EntryReceiveCancellation(outcome) => outcome.to_string())
 }

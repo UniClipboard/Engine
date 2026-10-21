@@ -6,6 +6,7 @@ use super::{ReceivedItem, ReceivedOutput};
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use uc_core::ports::TrackedFileTransferStatus;
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -727,8 +728,20 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                 if !selection.selected.contains(&original_index) {
                     incomplete_rep_idxs.push(idx as usize);
                     partial = true;
-                    item_failed = true;
-                    batch.item_result(&item_id, 0, OutboundProgressStatus::Failed, None);
+                    if let Some(previous) = selection.unselected.get(&original_index) {
+                        batch.inherit_result(&item_id, previous);
+                        if previous.status == TrackedFileTransferStatus::Cancelled {
+                            if !item_failed {
+                                partial_outcome = MaterializeOutcome::PartialCancelled;
+                            }
+                        } else {
+                            item_failed = true;
+                            partial_outcome = MaterializeOutcome::PartialFailed;
+                        }
+                    } else {
+                        item_failed = true;
+                        batch.item_result(&item_id, 0, OutboundProgressStatus::Failed, None);
+                    }
                     continue;
                 }
             }
@@ -958,8 +971,20 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                         size_bytes: blob_ref.size_bytes,
                     });
                     partial = true;
-                    item_failed = true;
-                    batch.item_result(&item_id, 0, OutboundProgressStatus::Failed, None);
+                    if let Some(previous) = selection.unselected.get(&original_index) {
+                        batch.inherit_result(&item_id, previous);
+                        if previous.status == TrackedFileTransferStatus::Cancelled {
+                            if !item_failed {
+                                partial_outcome = MaterializeOutcome::PartialCancelled;
+                            }
+                        } else {
+                            item_failed = true;
+                            partial_outcome = MaterializeOutcome::PartialFailed;
+                        }
+                    } else {
+                        item_failed = true;
+                        batch.item_result(&item_id, 0, OutboundProgressStatus::Failed, None);
+                    }
                     file_idx += 1;
                     continue;
                 }

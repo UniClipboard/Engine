@@ -81,6 +81,7 @@ async fn selecting_one_original_item_keeps_saved_same_name_file_without_fetch_or
                 None,
             )
             .with_selection(ReceiveSelection {
+                unselected: HashMap::new(),
                 selected: HashSet::from([2]),
                 landed: HashMap::from([(0, proof)]),
             }),
@@ -180,6 +181,7 @@ async fn changed_missing_or_unowned_saved_files_are_rejected_before_any_fetch() 
                     None,
                 )
                 .with_selection(ReceiveSelection {
+                    unselected: HashMap::new(),
                     selected: HashSet::from([1]),
                     landed: HashMap::from([(0, file_proof(path))]),
                 }),
@@ -277,6 +279,7 @@ async fn representations_and_files_keep_their_original_positions_when_only_later
                 None,
             )
             .with_selection(ReceiveSelection {
+                unselected: HashMap::new(),
                 selected: HashSet::from([2]),
                 landed: HashMap::from([(0, image), (1, file)]),
             }),
@@ -318,6 +321,7 @@ async fn directory_selection_rejects_member_subset_before_publication_or_fetch()
                 None,
             )
             .with_selection(ReceiveSelection {
+                unselected: HashMap::new(),
                 selected: HashSet::from([0]),
                 landed: HashMap::new(),
             }),
@@ -363,6 +367,7 @@ async fn cancelled_selected_file_leaves_previous_success_outside_new_cleanup() {
                 None,
             )
             .with_selection(ReceiveSelection {
+                unselected: HashMap::new(),
                 selected: HashSet::from([2]),
                 landed: HashMap::from([(0, file_proof(saved.clone()))]),
             }),
@@ -401,6 +406,7 @@ async fn replaced_symlink_does_not_reuse_another_files_ownership() {
                 None,
             )
             .with_selection(ReceiveSelection {
+                unselected: HashMap::new(),
                 selected: HashSet::from([1]),
                 landed: HashMap::from([(0, file_proof(replaced))]),
             }),

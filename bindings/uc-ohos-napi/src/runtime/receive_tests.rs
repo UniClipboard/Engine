@@ -29,3 +29,58 @@ fn receive_mapping_preserves_integers_beyond_javascript_precision() {
         Some("interrupted")
     );
 }
+
+#[test]
+fn retry_mapping_keeps_attempt_only_for_accepted_and_fixed_unavailable_reasons() {
+    use super::receive_retry;
+    use uc_engine::{EntryReceiveRetryOutcome, ReceiveRetryUnavailableReason};
+    for (engine, status, attempt, reason) in [
+        (
+            EntryReceiveRetryOutcome::Accepted {
+                attempt_id: "new-attempt".into(),
+            },
+            "accepted",
+            Some("new-attempt"),
+            None,
+        ),
+        (
+            EntryReceiveRetryOutcome::AlreadyReceiving,
+            "already_receiving",
+            None,
+            None,
+        ),
+        (
+            EntryReceiveRetryOutcome::Superseded,
+            "superseded",
+            None,
+            None,
+        ),
+        (
+            EntryReceiveRetryOutcome::CancellationIncomplete,
+            "cancellation_incomplete",
+            None,
+            None,
+        ),
+        (
+            EntryReceiveRetryOutcome::Unavailable {
+                reason: ReceiveRetryUnavailableReason::SourceUnavailable,
+            },
+            "unavailable",
+            None,
+            Some("source_unavailable"),
+        ),
+        (
+            EntryReceiveRetryOutcome::Unavailable {
+                reason: ReceiveRetryUnavailableReason::AccessDenied,
+            },
+            "unavailable",
+            None,
+            Some("access_denied"),
+        ),
+    ] {
+        let result = receive_retry(engine);
+        assert_eq!(result.status, status);
+        assert_eq!(result.attempt_id.as_deref(), attempt);
+        assert_eq!(result.reason.as_deref(), reason);
+    }
+}

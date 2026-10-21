@@ -7,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 use uc_core::clipboard::{EntryFileSet, FileSetMemberKind};
 use uc_core::ids::{DeviceId, EntryId, RepresentationId};
 use uc_core::ports::ReceiveArtifact;
+use uc_core::ports::ReceiveItemProgress;
 use uc_core::SystemClipboardSnapshot;
 
 /// 描述一份未完成 materialize 的 file blob。`reason` 由 file_transfer
@@ -48,6 +49,7 @@ pub(crate) enum ReceivedOutput {
 }
 /// 始终引用完整原始blob数组；复用项不属于新尝试的清理集合。
 pub(crate) struct ReceiveSelection {
+    pub(crate) unselected: HashMap<usize, ReceiveItemProgress>,
     pub(crate) selected: HashSet<usize>,
     pub(crate) landed: HashMap<usize, ReceivedItem>,
 }

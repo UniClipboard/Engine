@@ -38,13 +38,18 @@ use crate::facade::host_event::{
     FileTransferHostEventPublisher, HostEventBus, OutboundEntryIdCache,
 };
 use crate::search::live_index::ClipboardLiveIndexPort;
+use crate::space::CurrentSpaceMemberScopePort;
 use crate::transfer::file::facade::{FileTransferFacade, FileTransferFacadeDeps};
 use crate::transfer::file::lifecycle::FileTransferLifecycleDeps;
 use crate::transfer::receive::cancellation::CancelEntryReceiveUseCase;
 use crate::transfer::receive::materialization::{FileCacheBlobMaterializer, InboundBlobFetcher};
 use crate::transfer::receive::query::ReceiveProgressQuery;
 use crate::transfer::receive::reconciliation::ReceiveReadinessCoordinator;
+use crate::transfer::receive::retry::{RetryEntryReceiveUseCase, RetrySnapshotReader};
 use crate::transfer::receive::work::ReceiveWorkRegistry;
+use std::collections::HashSet;
+use std::sync::Mutex;
+use uc_core::ports::clipboard::GetEntrySnapshotHashPort;
 
 /// Engine 选择的文件系统与持久化 adapter。
 pub struct FileTransferAssemblyDeps {
@@ -92,8 +97,16 @@ pub struct StoreOnlyPullIntentDeps {
     pub common: InboundReceiveIntentDeps,
 }
 
+pub(crate) struct ReceiveRetryIntentDeps {
+    pub common: InboundReceiveIntentDeps,
+    pub snapshot: ClipboardSnapshotDeps,
+    pub identity: Arc<dyn GetEntrySnapshotHashPort>,
+    pub scope: Arc<dyn CurrentSpaceMemberScopePort>,
+}
+
 /// Cancel intent 仍由 Engine 选择网络与文件系统 adapter，但步骤顺序不外泄。
-pub struct ReceiveCancellationDeps {
+pub(crate) struct ReceiveActionsDeps {
+    pub retry: ReceiveRetryIntentDeps,
     pub staging_cleanup: Arc<dyn CleanupDirectoryStagingPort>,
     pub blob_transfer: Arc<BlobTransferFacade>,
 }
@@ -204,10 +217,10 @@ impl FileTransferAssembly {
         ))
     }
 
-    pub fn with_receive_cancellation(
+    pub(crate) fn with_receive_actions(
         &self,
         facade: ClipboardSyncFacade,
-        deps: ReceiveCancellationDeps,
+        deps: ReceiveActionsDeps,
     ) -> ClipboardSyncFacade {
         let cancellation = CancelEntryReceiveUseCase::new(
             Arc::clone(&self.directory_receive.get_attempt),
@@ -222,14 +235,26 @@ impl FileTransferAssembly {
             deps.blob_transfer.transport.clone(),
             self.receive_work.clone(),
         );
-        facade.with_entry_receive_cancellation(
-            Arc::new(ReceiveProgressQuery::new(
-                Arc::clone(&self.directory_receive.entry_progress),
-                Arc::clone(&self.directory_receive.list_attempts),
-                self.receive_work.clone(),
+        let query = Arc::new(ReceiveProgressQuery::new(
+            Arc::clone(&self.directory_receive.entry_progress),
+            Arc::clone(&self.directory_receive.list_attempts),
+            self.receive_work.clone(),
+        ));
+        let retry = Arc::new(RetryEntryReceiveUseCase {
+            cache_dir: self.file_cache_dir.clone(),
+            apply: Arc::new(ApplyInboundClipboardUseCase::store_only_pull(
+                StoreOnlyPullDeps {
+                    common: self.common_receive_deps(deps.retry.common),
+                },
             )),
-            cancellation,
-        )
+            query: query.clone(),
+            work: self.receive_work.clone(),
+            cancellation: cancellation.clone(),
+            snapshots: RetrySnapshotReader::new(deps.retry.snapshot, deps.retry.identity),
+            scope: deps.retry.scope,
+            requests: Arc::new(Mutex::new(HashSet::new())),
+        });
+        facade.with_entry_receive_actions(query, cancellation, retry)
     }
 
     fn common_receive_deps(&self, deps: InboundReceiveIntentDeps) -> InboundApplyCommonDeps {

@@ -203,3 +203,11 @@
 - 新固定分类ErrorClass接口必须适配按值生成词表，最初self.wire写法被纯转调检查拒绝；改为明确的Self::wire(*self)类型适配，未改检查器或加豁免。全部调用者迁移completed事实后，完整Application1195通过／1跳过（3.828秒），包含取消选中项保留旧成功、符号链接拒绝和逐项保存证明；稳定Retry API仍未实现。最终契约／workspace检查待运行。
 
 - 最终候选Application1195通过／1跳过（3.828秒）、Engine公开契约50通过（0.015秒）、workspace全目标check通过（1m24s）。metadata JSON已解析，fmt、Rust style、repository preflight、官方1369站点清单、变更Markdown无新增失效目标及diff检查通过。手工审查原数组／项身份、复用内容与归属验证、旧产物不进入新清理、实际保存后逐项证明、全部内部消费者及不变的持久格式；code-review skill不可用。未执行完整workspace测试／网络／设备矩阵，原profile基线失败保留。实际RetryEntryReceive、CAS与绑定尚未接线，完整目标继续。
+
+- 上一状态答复仅报告现状，归为no progress。续接已实际增加retry负责人、原位置快照重建、同条目防重入、旧清理检查、成员校验和共享ApplyInbound重试分支，生产组装与Application facade已接线。首轮check因私有membership路径失败，改用公开再导出；第二轮句柄5547因会话中断丢失，ps确认无对应活动进程，日志无最终结果，不记通过。当前实际句柄58372运行生产组装候选check；尚无新测试或稳定Engine／绑定，不宣称重试完成。
+
+- 实际手动重试首轮共享接收回归5通过（含既有同名筛选1项），完整负责人扩展9通过（0.02秒）；生产API初候选workspace全目标check通过（1m25s）。随后Application1204通过／1跳过（25.66秒）、Engine公开契约51通过。补齐最终完整成功释放来源、继承项最终投影、固定未选取消结果、接受前归属／内容校验、原清理最后复核和薄绑定映射；复核把最终CAS校验归回transfer/retry，并以不透明关联交接后台、Application单点记录失败。一次按旧fmt文本定位scope的脚本在首次写入前失败，改精确patch完成；当前候选仍待最终完整验证，未把此前结果冒充当前通过。
+
+- 最终核心行为候选App1206通过／1跳过（25.91秒），包括可控身份读取期间插入清理／关闭，不建新attempt且返回固定拒绝结果。之前绑定47＋19与Engine公开契约51通过；公开错误Debug已按Display脱敏，Lost原始类型仍可追溯。前一次workspace全目标通过（1m25s）、metadata JSON已解析。新增Markdown链接检查初次受Git i/w前缀影响计数为0，已显式固定a/b前缀重验4个新增目标、缺失0；未将零覆盖当作有效验证。当前冻结源码／文档准备最终根检查，完整spec仍未完成。
+
+- 最终当前候选Engine公开契约51通过（0.00秒）、绑定47（0.64秒）＋19（0.00秒），App1206通过／1跳过（25.91秒）。最后workspace全目标check通过（1m30s），metadata JSON解析、fmt、Rust style、repository preflight、官方1371站点观测隐私清单与diff检查通过；新增Markdown目标4个无缺失。已手工审查源次序／证明、CAS与最终拒绝、单集合到实际保存结束、公共错误脱敏／原链及完整动作绑定；code-review skill不可用。几次只读路径盘点曾猜中不存在的glob／文件，后续用rg文件索引定位；生产组装首次还漏EntryId导入，已集中引入并重验，失败日志保留。无运行中的本轮Cargo／网络矩阵任务；没有清缓存／创建独立target。完整workspace、真实SQLite／Engine及最终网络／真机矩阵本轮未执行，profile基线未结案；目标完整未完成。准备提交本轮实际重试切片。

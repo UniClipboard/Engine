@@ -31,7 +31,7 @@ impl ErrorClass for ReceiveReuseRefusal {
     }
 }
 
-pub(super) async fn validate_selection(
+pub(crate) async fn validate_selection(
     selection: &ReceiveSelection,
     refs: &[V3BlobRef],
     directory: bool,

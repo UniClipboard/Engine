@@ -76,3 +76,53 @@ fn cancellation_mapping_keeps_incomplete_distinct_from_cancelled_and_not_infligh
         Err(BindingError::UnexpectedResult)
     ));
 }
+
+#[test]
+fn retry_mapping_preserves_new_attempt_and_all_nonaccepted_outcomes() {
+    use super::{map_entry_receive_retry, ReceiveRetryOutcome};
+    use uc_engine::{EntryReceiveRetryOutcome as EngineOutcome, ReceiveRetryUnavailableReason};
+    for (engine, binding) in [
+        (
+            EngineOutcome::Accepted {
+                attempt_id: "new-attempt".into(),
+            },
+            ReceiveRetryOutcome::Accepted {
+                attempt_id: "new-attempt".into(),
+            },
+        ),
+        (
+            EngineOutcome::AlreadyReceiving,
+            ReceiveRetryOutcome::AlreadyReceiving,
+        ),
+        (EngineOutcome::Superseded, ReceiveRetryOutcome::Superseded),
+        (
+            EngineOutcome::CancellationIncomplete,
+            ReceiveRetryOutcome::CancellationIncomplete,
+        ),
+        (
+            EngineOutcome::Unavailable {
+                reason: ReceiveRetryUnavailableReason::SourceUnavailable,
+            },
+            ReceiveRetryOutcome::Unavailable {
+                reason: "source_unavailable".into(),
+            },
+        ),
+        (
+            EngineOutcome::Unavailable {
+                reason: ReceiveRetryUnavailableReason::AccessDenied,
+            },
+            ReceiveRetryOutcome::Unavailable {
+                reason: "access_denied".into(),
+            },
+        ),
+    ] {
+        assert_eq!(
+            map_entry_receive_retry(OperationResult::EntryReceiveRetry(engine)).unwrap(),
+            binding
+        );
+    }
+    assert!(matches!(
+        map_entry_receive_retry(OperationResult::EntryReceiveProgress(None)),
+        Err(BindingError::UnexpectedResult)
+    ));
+}

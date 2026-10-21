@@ -127,6 +127,7 @@ pub enum OperationKind {
     QueryEntryReceiveProgress,
     ListEntryReceiveProgress,
     CancelEntryReceive,
+    RetryEntryReceive,
     CancelInboundTransfer,
     CaptureCurrentClipboard,
     ObserveClipboardChange,
@@ -241,6 +242,7 @@ impl fmt::Display for OperationKind {
             Self::QueryEntryReceiveProgress => "query_entry_receive_progress",
             Self::ListEntryReceiveProgress => "list_entry_receive_progress",
             Self::CancelEntryReceive => "cancel_entry_receive",
+            Self::RetryEntryReceive => "retry_entry_receive",
             Self::CancelInboundTransfer => "cancel_inbound_transfer",
             Self::CaptureCurrentClipboard => "capture_current_clipboard",
             Self::ObserveClipboardChange => "observe_clipboard_change",
@@ -399,6 +401,7 @@ pub enum Operation {
     QueryEntryReceiveProgress(EntryReceiveProgressInput),
     ListEntryReceiveProgress,
     CancelEntryReceive(CancelEntryReceiveInput),
+    RetryEntryReceive(RetryEntryReceiveInput),
     CancelInboundTransfer(CancelInboundTransferInput),
     CaptureCurrentClipboard,
     ObserveClipboardChange(ObserveClipboardChangeInput),
@@ -515,6 +518,7 @@ impl Operation {
             Self::QueryEntryReceiveProgress(_) => OperationKind::QueryEntryReceiveProgress,
             Self::ListEntryReceiveProgress => OperationKind::ListEntryReceiveProgress,
             Self::CancelEntryReceive(_) => OperationKind::CancelEntryReceive,
+            Self::RetryEntryReceive(_) => OperationKind::RetryEntryReceive,
             Self::CancelInboundTransfer(_) => OperationKind::CancelInboundTransfer,
             Self::CaptureCurrentClipboard => OperationKind::CaptureCurrentClipboard,
             Self::ObserveClipboardChange(_) => OperationKind::ObserveClipboardChange,
@@ -932,6 +936,13 @@ pub struct EntryReceiveProgressInput {
 pub struct CancelEntryReceiveInput {
     pub entry_id: String,
     pub attempt_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetryEntryReceiveInput {
+    pub entry_id: String,
+    pub expected_attempt_id: String,
+    pub item_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

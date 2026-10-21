@@ -1,0 +1,574 @@
+mod owner;
+use super::{
+    test_materializer, ApplyInboundClipboardUseCase, AttemptGate, FakeAvailability,
+    InboundApplyCommonDeps, InboundReceiveAttemptDeps, MockBlobFetcher, MockEntryRepo,
+    NoopReceiveArtifactCleanup, RecordingLiveIndex, StoreOnlyPullDeps,
+};
+use crate::clipboard::capture::InboundCaptureCommitContext;
+use crate::clipboard::entry_identity::EntryIdentityCoordinator;
+use crate::clipboard::sync::apply_inbound::InboundCapture;
+use crate::clipboard::sync::payload_codec::V3BlobRef;
+use crate::facade::blob_transfer::FetchBlobToPathResult;
+use crate::facade::HostEventBus;
+use crate::space::{
+    CurrentSpaceMemberScope, CurrentSpaceMemberScopeError, CurrentSpaceMemberScopePort,
+};
+use crate::transfer::receive::materialization::{ReceiveSelection, ReceivedItem, ReceivedOutput};
+use crate::transfer::receive::reconciliation::ReceiveReadinessCoordinator;
+use crate::transfer::receive::retry::{
+    PreparedReceiveRetry, ReceiveCancellationBarrier, RetryEntryReceiveOutcome,
+};
+use crate::transfer::receive::work::{ReceiveRepresentation, ReceiveSource, ReceiveWorkRegistry};
+use anyhow::Result;
+use async_trait::async_trait;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use tokio::sync::{oneshot, Notify, Semaphore};
+use uc_core::clipboard::ClipboardRepositoryError;
+use uc_core::file_transfer::{FileTransferCancellationReason, OutboundProgressStatus};
+use uc_core::ids::{DeviceId, EntryId, FormatId, RepresentationId};
+use uc_core::ports::blob::{BlobDigest, BlobTicket, PlaintextHash};
+use uc_core::ports::clipboard::GetEntrySnapshotHashPort;
+use uc_core::ports::{
+    AttemptState, EntryReceiveProgress, ReceiveArtifact, ReceiveArtifactOwnership, ReceiveItemKind,
+    ReceiveItemProgress, TrackedFileTransferStatus,
+};
+use uc_core::{MimeType, ObservedClipboardRepresentation, SnapshotHash, SystemClipboardSnapshot};
+
+struct Checks {
+    pause_identity: AtomicBool,
+    identity_entered: Notify,
+    identity_release: Semaphore,
+    locked: AtomicBool,
+    settling: AtomicBool,
+    allowed: AtomicBool,
+    hash: Mutex<Option<String>>,
+}
+impl ReceiveCancellationBarrier for Checks {
+    fn is_settling(&self, _: &EntryId, _: &str) -> bool {
+        self.settling.load(Ordering::SeqCst)
+    }
+}
+#[async_trait]
+impl CurrentSpaceMemberScopePort for Checks {
+    async fn snapshot(
+        &self,
+    ) -> std::result::Result<CurrentSpaceMemberScope, CurrentSpaceMemberScopeError> {
+        if self.locked.load(Ordering::SeqCst) {
+            return Err(CurrentSpaceMemberScopeError::Locked);
+        }
+        Ok(CurrentSpaceMemberScope {
+            revision: 1,
+            local_member_active: true,
+            usable_peer_device_ids: if self.allowed.load(Ordering::SeqCst) {
+                vec![DeviceId::new("source")]
+            } else {
+                Vec::new()
+            },
+            paused_peer_devices: Vec::new(),
+        })
+    }
+}
+#[async_trait]
+impl GetEntrySnapshotHashPort for Checks {
+    async fn get_entry_snapshot_hash(
+        &self,
+        _: &EntryId,
+    ) -> std::result::Result<Option<String>, ClipboardRepositoryError> {
+        if self.pause_identity.load(Ordering::SeqCst) {
+            self.identity_entered.notify_one();
+            self.identity_release.acquire().await.unwrap().forget();
+        }
+        Ok(self.hash.lock().unwrap().clone())
+    }
+}
+struct Capture {
+    attempts: Arc<AttemptGate>,
+    snapshots: Mutex<Vec<SystemClipboardSnapshot>>,
+    entered: Notify,
+    release: Semaphore,
+    slow: AtomicBool,
+}
+#[async_trait]
+impl InboundCapture for Capture {
+    async fn capture(
+        &self,
+        _: EntryId,
+        _: DeviceId,
+        _: SystemClipboardSnapshot,
+    ) -> Result<Option<EntryId>> {
+        panic!("retry must replace its partial entry atomically")
+    }
+    async fn replace_inbound_with_identity(
+        &self,
+        entry: EntryId,
+        _: DeviceId,
+        snapshot: SystemClipboardSnapshot,
+        _: Option<SnapshotHash>,
+        _: InboundCaptureCommitContext,
+    ) -> Result<Option<EntryId>> {
+        if self.slow.load(Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.acquire().await.unwrap().forget();
+        }
+        *self.attempts.state.lock().unwrap() = if snapshot.file_content_digests.len() == 3 {
+            AttemptState::Completed
+        } else {
+            AttemptState::Cancelled
+        };
+        self.snapshots.lock().unwrap().push(snapshot);
+        Ok(Some(entry))
+    }
+}
+struct Fixture {
+    _cache: tempfile::TempDir,
+    saved: std::path::PathBuf,
+    apply: Arc<ApplyInboundClipboardUseCase>,
+    capture: Arc<Capture>,
+    attempts: Arc<AttemptGate>,
+    work: Arc<ReceiveWorkRegistry>,
+    checks: Arc<Checks>,
+    snapshot: SystemClipboardSnapshot,
+}
+impl Fixture {
+    async fn new(fetches: usize) -> Self {
+        let cache = tempfile::tempdir().unwrap();
+        let saved = cache.path().join("iroh-blobs/source/same.bin");
+        std::fs::create_dir_all(saved.parent().unwrap()).unwrap();
+        std::fs::write(&saved, b"success").unwrap();
+        let readiness = Arc::new(ReceiveReadinessCoordinator::new());
+        readiness.ensure_ready(|| async { Ok(()) }).await.unwrap();
+        let work = readiness.work_registry();
+        let attempts = AttemptGate::new(AttemptState::Failed, None);
+        *attempts.attempt_id.lock().unwrap() = "old".into();
+        let capture = Arc::new(Capture {
+            attempts: attempts.clone(),
+            snapshots: Mutex::new(Vec::new()),
+            entered: Notify::new(),
+            release: Semaphore::new(0),
+            slow: AtomicBool::new(false),
+        });
+        let mut repo = MockEntryRepo::new();
+        repo.expect_find_entry_id_by_snapshot_hash()
+            .returning(|_| Ok(Some(EntryId::from("receiver"))));
+        let mut fetcher = MockBlobFetcher::new();
+        fetcher
+            .expect_fetch_blob_to_path()
+            .times(fetches)
+            .withf(move |command| {
+                command
+                    .transfer_context
+                    .as_ref()
+                    .unwrap()
+                    .transfer_id
+                    .ends_with("member:1")
+                    || (fetches > 1
+                        && command
+                            .transfer_context
+                            .as_ref()
+                            .unwrap()
+                            .transfer_id
+                            .ends_with("member:2"))
+            })
+            .returning(|command| {
+                std::fs::write(&command.target_path, b"retried").unwrap();
+                Ok(FetchBlobToPathResult {
+                    entry_id: command.entry_id,
+                    bytes_written: 7,
+                    plaintext_hash: PlaintextHash::from_bytes(*blake3::hash(b"retried").as_bytes()),
+                    digest: BlobDigest::from_bytes([4; 32]),
+                })
+            });
+        let apply = Arc::new(ApplyInboundClipboardUseCase::store_only_pull(
+            StoreOnlyPullDeps {
+                common: InboundApplyCommonDeps {
+                    receive_work: work.clone(),
+                    entry_repo: Arc::new(repo),
+                    capture: capture.clone(),
+                    blob_materializer: Arc::new(test_materializer(
+                        Arc::new(fetcher),
+                        cache.path().to_owned(),
+                    )),
+                    receive_attempts: InboundReceiveAttemptDeps {
+                        get: attempts.clone(),
+                        begin: attempts.clone(),
+                        claim_commit: attempts.clone(),
+                        request_cancel: attempts.clone(),
+                        begin_failure: attempts.clone(),
+                        commit: attempts.clone(),
+                        clock: attempts.clone(),
+                    },
+                    receive_artifact_cleanup: Arc::new(NoopReceiveArtifactCleanup),
+                    receive_readiness: readiness,
+                    host_event_emitter: Arc::new(HostEventBus::new()),
+                    search_live_index: Arc::new(RecordingLiveIndex {
+                        calls: AtomicUsize::new(0),
+                    }),
+                    availability: Arc::new(FakeAvailability { available: false }),
+                    entry_identity_coordinator: Arc::new(EntryIdentityCoordinator::new()),
+                },
+            },
+        ));
+        let snapshot = SystemClipboardSnapshot {
+            ts_ms: 1,
+            representations: vec![ObservedClipboardRepresentation::new(
+                RepresentationId::new(),
+                FormatId::from("files"),
+                Some(MimeType("text/uri-list".into())),
+                Vec::new(),
+            )],
+            file_content_digests: Vec::new(),
+            file_set_v1_component: None,
+        };
+        let original = work.action();
+        original
+            .register(&EntryId::from("receiver"), "old")
+            .unwrap();
+        original.retain_source(ReceiveSource {
+            from_device: DeviceId::new("source"),
+            expected_hash: "original-hash".into(),
+            blob_refs: (0..3)
+                .map(|_| V3BlobRef {
+                    ticket: BlobTicket::from_bytes(vec![1]),
+                    entry_id: EntryId::from("source"),
+                    filename: Some("same.bin".into()),
+                    mime: None,
+                    size_bytes: 7,
+                    representation_index: None,
+                })
+                .collect(),
+            manifest: None,
+            original_wire: None,
+            representations: snapshot
+                .representations
+                .iter()
+                .map(|rep| ReceiveRepresentation {
+                    id: rep.id.clone(),
+                    format_id: rep.format_id.clone(),
+                    mime: rep.mime.clone(),
+                })
+                .collect(),
+        });
+        original.batch.item_result(
+            "receiver:attempt:old:member:0",
+            7,
+            OutboundProgressStatus::Completed,
+            None,
+        );
+        original.batch.item_result(
+            "receiver:attempt:old:member:1",
+            0,
+            OutboundProgressStatus::Failed,
+            None,
+        );
+        original.batch.item_result(
+            "receiver:attempt:old:member:2",
+            0,
+            OutboundProgressStatus::Cancelled {
+                reason: FileTransferCancellationReason::LocalUser,
+            },
+            None,
+        );
+        original.persisted(
+            false,
+            &[ReceivedItem {
+                blob_index: 0,
+                plaintext_hash: *blake3::hash(b"success").as_bytes(),
+                bytes: 7,
+                output: ReceivedOutput::File(ReceiveArtifact {
+                    item_id: "receiver:attempt:old:member:0".into(),
+                    staged_path: saved.clone(),
+                    final_path: saved.clone(),
+                    ownership: ReceiveArtifactOwnership::ManagedStaging,
+                }),
+            }],
+        );
+        original.finish(Ok(()));
+        Self {
+            _cache: cache,
+            saved,
+            apply,
+            capture,
+            attempts,
+            work,
+            checks: Arc::new(Checks {
+                pause_identity: AtomicBool::new(false),
+                identity_entered: Notify::new(),
+                identity_release: Semaphore::new(0),
+                locked: AtomicBool::new(false),
+                settling: AtomicBool::new(false),
+                allowed: AtomicBool::new(true),
+                hash: Mutex::new(Some("original-hash".into())),
+            }),
+            snapshot,
+        }
+    }
+    fn prepared(
+        &self,
+    ) -> (
+        PreparedReceiveRetry,
+        oneshot::Receiver<RetryEntryReceiveOutcome>,
+    ) {
+        let (source, landed) = self
+            .work
+            .retry_material(&EntryId::from("receiver"), "old")
+            .unwrap();
+        let (accepted, reply) = oneshot::channel();
+        (
+            PreparedReceiveRetry {
+                cancellation: self.checks.clone(),
+                entry: EntryId::from("receiver"),
+                expected_attempt: "old".into(),
+                source,
+                snapshot: self.snapshot.clone(),
+                action: self.work.action(),
+                selection: Some(ReceiveSelection {
+                    selected: HashSet::from([1]),
+                    landed,
+                    unselected: HashMap::from([(
+                        2,
+                        ReceiveItemProgress {
+                            item_id: "receiver:attempt:old:member:2".into(),
+                            kind: ReceiveItemKind::File,
+                            status: TrackedFileTransferStatus::Cancelled,
+                            failure_reason: None,
+                        },
+                    )]),
+                }),
+                accepted: Some(accepted),
+                identity: self.checks.clone(),
+                scope: self.checks.clone(),
+            },
+            reply,
+        )
+    }
+}
+
+#[tokio::test]
+async fn manual_retry_saves_new_partial_success_without_fetching_or_deleting_previous_success() {
+    let fixture = Fixture::new(1).await;
+    let (prepared, reply) = fixture.prepared();
+    fixture.apply.execute_retry(prepared).await.unwrap();
+    let RetryEntryReceiveOutcome::Accepted { attempt_id } = reply.await.unwrap() else {
+        panic!("retry not accepted")
+    };
+    assert_ne!(attempt_id, "old");
+    assert_eq!(fixture.attempts.retry_calls.load(Ordering::SeqCst), 1);
+    let snapshots = fixture.capture.snapshots.lock().unwrap();
+    assert_eq!(snapshots.len(), 1, "a second partial must be saved");
+    assert_eq!(
+        snapshots[0].file_content_digests,
+        vec![
+            *blake3::hash(b"success").as_bytes(),
+            *blake3::hash(b"retried").as_bytes()
+        ]
+    );
+    assert_eq!(std::fs::read(&fixture.saved).unwrap(), b"success");
+    let mut progress = EntryReceiveProgress {
+        entry_id: "receiver".into(),
+        attempt_id,
+        state: AttemptState::Cancelled,
+        total_bytes: 0,
+        completed_bytes: 0,
+        items_total: 0,
+        items_completed: 0,
+        items: Vec::new(),
+    };
+    fixture.work.merge_progress(&mut progress);
+    assert_eq!(
+        progress
+            .items
+            .iter()
+            .map(|item| item.status)
+            .collect::<Vec<_>>(),
+        vec![
+            TrackedFileTransferStatus::Completed,
+            TrackedFileTransferStatus::Completed,
+            TrackedFileTransferStatus::Cancelled
+        ]
+    );
+}
+
+#[tokio::test]
+async fn manual_retry_rechecks_expected_attempt_membership_and_stored_identity_before_cas() {
+    for case in 0..5 {
+        let fixture = Fixture::new(0).await;
+        let (prepared, reply) = fixture.prepared();
+        let expected = match case {
+            0 => {
+                *fixture.attempts.attempt_id.lock().unwrap() = "newer".into();
+                RetryEntryReceiveOutcome::Superseded
+            }
+            1 => {
+                fixture.checks.allowed.store(false, Ordering::SeqCst);
+                RetryEntryReceiveOutcome::AccessDenied
+            }
+            2 => {
+                *fixture.checks.hash.lock().unwrap() = Some("different-content".into());
+                RetryEntryReceiveOutcome::Unavailable
+            }
+            3 => {
+                fixture.checks.settling.store(true, Ordering::SeqCst);
+                RetryEntryReceiveOutcome::CancellationIncomplete
+            }
+            _ => {
+                fixture.checks.locked.store(true, Ordering::SeqCst);
+                RetryEntryReceiveOutcome::AccessDenied
+            }
+        };
+        fixture.apply.execute_retry(prepared).await.unwrap();
+        assert_eq!(reply.await.unwrap(), expected);
+        assert_eq!(fixture.attempts.retry_calls.load(Ordering::SeqCst), 0);
+        assert!(fixture.capture.snapshots.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn manual_retry_waits_for_actual_old_action_settlement_and_respects_deletion_fence() {
+    let fixture = Fixture::new(0).await;
+    let (prepared, reply) = fixture.prepared();
+    let old = fixture.work.action();
+    old.register(&EntryId::from("receiver"), "old").unwrap();
+    fixture.apply.execute_retry(prepared).await.unwrap();
+    assert_eq!(
+        reply.await.unwrap(),
+        RetryEntryReceiveOutcome::CancellationIncomplete
+    );
+    assert_eq!(fixture.attempts.retry_calls.load(Ordering::SeqCst), 0);
+    old.finish(Ok(()));
+    let (prepared, reply) = fixture.prepared();
+    drop(
+        fixture
+            .work
+            .delete_scope(&EntryId::from("receiver"))
+            .await
+            .unwrap(),
+    );
+    fixture.apply.execute_retry(prepared).await.unwrap();
+    assert_eq!(reply.await.unwrap(), RetryEntryReceiveOutcome::Unavailable);
+    assert_eq!(fixture.attempts.retry_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn manual_retry_caller_drop_keeps_full_capture_supervised_until_actual_completion() {
+    let fixture = Fixture::new(1).await;
+    fixture.capture.slow.store(true, Ordering::SeqCst);
+    let (prepared, reply) = fixture.prepared();
+    let apply = fixture.apply.clone();
+    let waiter = tokio::spawn(async move { apply.execute_retry(prepared).await });
+    fixture.capture.entered.notified().await;
+    let RetryEntryReceiveOutcome::Accepted { attempt_id } = reply.await.unwrap() else {
+        panic!("retry not accepted")
+    };
+    waiter.abort();
+    let stopped = fixture
+        .work
+        .stop(&EntryId::from("receiver"), &attempt_id)
+        .unwrap();
+    assert!(fixture.work.owns_entry("receiver"));
+    fixture.capture.release.add_permits(1);
+    stopped.wait().await.unwrap();
+    assert_eq!(fixture.capture.snapshots.lock().unwrap().len(), 1);
+    assert!(!fixture.work.owns_entry("receiver"));
+}
+
+#[tokio::test]
+async fn manual_retry_full_completion_keeps_inherited_item_results_and_releases_all_sources() {
+    let fixture = Fixture::new(2).await;
+    let (prepared, first_reply) = fixture.prepared();
+    fixture.apply.execute_retry(prepared).await.unwrap();
+    let RetryEntryReceiveOutcome::Accepted { attempt_id: first } = first_reply.await.unwrap()
+    else {
+        panic!("not accepted")
+    };
+    let (source, landed) = fixture
+        .work
+        .retry_material(&EntryId::from("receiver"), &first)
+        .unwrap();
+    assert_eq!(landed.len(), 2);
+    let (send, reply) = oneshot::channel();
+    let snapshot = fixture.capture.snapshots.lock().unwrap()[0].clone();
+    fixture
+        .apply
+        .execute_retry(PreparedReceiveRetry {
+            cancellation: fixture.checks.clone(),
+            identity: fixture.checks.clone(),
+            scope: fixture.checks.clone(),
+            entry: EntryId::from("receiver"),
+            expected_attempt: first,
+            source,
+            snapshot,
+            selection: Some(ReceiveSelection {
+                selected: HashSet::from([2]),
+                landed,
+                unselected: HashMap::new(),
+            }),
+            action: fixture.work.action(),
+            accepted: Some(send),
+        })
+        .await
+        .unwrap();
+    let RetryEntryReceiveOutcome::Accepted { attempt_id } = reply.await.unwrap() else {
+        panic!("not accepted")
+    };
+    assert_eq!(
+        *fixture.attempts.state.lock().unwrap(),
+        AttemptState::Completed
+    );
+    assert!(fixture
+        .work
+        .retry_material(&EntryId::from("receiver"), &attempt_id)
+        .is_none());
+    let mut current = EntryReceiveProgress {
+        entry_id: "receiver".into(),
+        attempt_id,
+        state: AttemptState::Completed,
+        total_bytes: 0,
+        completed_bytes: 0,
+        items_total: 0,
+        items_completed: 0,
+        items: Vec::new(),
+    };
+    fixture.work.merge_progress(&mut current);
+    assert_eq!(current.items.len(), 3);
+    assert!(current
+        .items
+        .iter()
+        .all(|item| item.status == TrackedFileTransferStatus::Completed));
+    assert_eq!(std::fs::read(&fixture.saved).unwrap(), b"success");
+}
+
+#[tokio::test]
+async fn manual_retry_late_cleanup_or_gate_close_has_a_stable_refusal_without_new_attempt() {
+    for closing in [false, true] {
+        let fixture = Fixture::new(0).await;
+        let (prepared, reply) = fixture.prepared();
+        fixture.checks.pause_identity.store(true, Ordering::SeqCst);
+        let apply = fixture.apply.clone();
+        let task = tokio::spawn(async move { apply.execute_retry(prepared).await });
+        fixture.checks.identity_entered.notified().await;
+        let cleanup = if closing {
+            fixture.work.close();
+            None
+        } else {
+            fixture.work.claim_cleanup("receiver")
+        };
+        if !closing {
+            assert!(cleanup.is_some());
+        }
+        fixture.checks.identity_release.add_permits(1);
+        task.await.unwrap().unwrap();
+        assert_eq!(
+            reply.await.unwrap(),
+            if closing {
+                RetryEntryReceiveOutcome::Unavailable
+            } else {
+                RetryEntryReceiveOutcome::CancellationIncomplete
+            }
+        );
+        assert_eq!(fixture.attempts.retry_calls.load(Ordering::SeqCst), 0);
+        assert!(fixture.capture.snapshots.lock().unwrap().is_empty());
+        drop(cleanup);
+    }
+}

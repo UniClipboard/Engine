@@ -73,6 +73,7 @@ pub use clipboard::{
     CancelEntryReceiveError, CancelEntryReceiveOutcome, ClipboardSyncError, ClipboardSyncFacade,
     DispatchEntryInput, DispatchEntryOutcome, DispatchEntryPerTarget, EntryDeliveryStatusView,
     EntryDeliveryTargetView, EntryDeliveryView, EntrySource, GetEntryDeliveryViewError,
+    RetryEntryReceiveError, RetryEntryReceiveOutcome,
 };
 // V3 envelope codec helpers — surfaced through the facade per §11.4.3 so
 // external CLI / test consumers don't reach into `crate::usecases::*`

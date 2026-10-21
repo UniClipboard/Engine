@@ -5,15 +5,18 @@ use crate::error_codes::*;
 use uc_application::facade::{
     AppFacade, BlobTransferError, CancelEntryReceiveError,
     CancelEntryReceiveOutcome as AppEntryReceiveCancellationOutcome,
-    InboundCancelOutcome as AppInboundTransferCancellationOutcome,
+    InboundCancelOutcome as AppInboundTransferCancellationOutcome, RetryEntryReceiveError,
+    RetryEntryReceiveOutcome as AppReceiveRetryOutcome,
 };
 
 use crate::{
     CancelEntryReceiveInput, CancelInboundTransferInput, EngineError, EngineErrorCategory,
-    EntryReceiveCancellationOutcome, EntryReceiveProgressInput, InboundTransferCancellationOutcome,
-    OperationResult, ReceiveItemFailureReason, ReceiveItemKind, ReceiveItemSummary,
-    ReceiveProgressSummary, TransferCancellationReason,
+    EntryReceiveCancellationOutcome, EntryReceiveProgressInput, EntryReceiveRetryOutcome,
+    InboundTransferCancellationOutcome, OperationResult, ReceiveItemFailureReason, ReceiveItemKind,
+    ReceiveItemSummary, ReceiveProgressSummary, ReceiveRetryUnavailableReason,
+    RetryEntryReceiveInput, TransferCancellationReason,
 };
+use uc_core::ids::EntryId;
 use uc_core::ports::{
     ReceiveItemFailureReason as CoreReceiveItemFailureReason,
     ReceiveItemKind as CoreReceiveItemKind,
@@ -44,6 +47,72 @@ pub async fn execute_list_entry_receive_progress(
         .map(receive_progress)
         .collect();
     Ok(OperationResult::EntryReceiveProgressList(progress))
+}
+
+pub async fn execute_retry_entry_receive(
+    facade: &AppFacade,
+    input: RetryEntryReceiveInput,
+) -> Result<OperationResult, EngineError> {
+    if input.item_ids.is_empty() {
+        return Err(map_retry_error(RetryEntryReceiveError::InvalidInput));
+    }
+    validate_id(&input.entry_id)?;
+    validate_id(&input.expected_attempt_id)?;
+    for item in &input.item_ids {
+        validate_id(item)?;
+    }
+    let outcome = facade
+        .retry_entry_receive(
+            EntryId::from_string(input.entry_id),
+            input.expected_attempt_id,
+            input.item_ids,
+        )
+        .await
+        .map_err(map_retry_error)?;
+    let outcome = match outcome {
+        AppReceiveRetryOutcome::Accepted { attempt_id } => {
+            EntryReceiveRetryOutcome::Accepted { attempt_id }
+        }
+        AppReceiveRetryOutcome::AlreadyReceiving => EntryReceiveRetryOutcome::AlreadyReceiving,
+        AppReceiveRetryOutcome::Superseded => EntryReceiveRetryOutcome::Superseded,
+        AppReceiveRetryOutcome::CancellationIncomplete => {
+            EntryReceiveRetryOutcome::CancellationIncomplete
+        }
+        AppReceiveRetryOutcome::Unavailable => EntryReceiveRetryOutcome::Unavailable {
+            reason: ReceiveRetryUnavailableReason::SourceUnavailable,
+        },
+        AppReceiveRetryOutcome::AccessDenied => EntryReceiveRetryOutcome::Unavailable {
+            reason: ReceiveRetryUnavailableReason::AccessDenied,
+        },
+    };
+    Ok(OperationResult::EntryReceiveRetry(outcome))
+}
+
+fn map_retry_error(error: RetryEntryReceiveError) -> EngineError {
+    match error {
+        RetryEntryReceiveError::InvalidInput => EngineError::new(
+            RECEIVE_INVALID_INPUT_CODE,
+            EngineErrorCategory::InvalidInput,
+            false,
+        ),
+        // discarded-source[contract-boundary]: 完整重试负责人已记录原始失败分类，边界只映射固定码。
+        RetryEntryReceiveError::Unavailable(_) => EngineError::new(
+            RECEIVE_UNAVAILABLE_CODE,
+            EngineErrorCategory::Unavailable,
+            false,
+        ),
+        RetryEntryReceiveError::Busy => EngineError::new(
+            RECEIVE_UNAVAILABLE_CODE,
+            EngineErrorCategory::Unavailable,
+            true,
+        ),
+        // discarded-source[contract-boundary]: 原始链保留在Application结果；禁止向宿主泄露正文或重复记录。
+        RetryEntryReceiveError::Source(_)
+        | RetryEntryReceiveError::Receive(_)
+        | RetryEntryReceiveError::Task(_) => {
+            EngineError::new(RECEIVE_FAILED_CODE, EngineErrorCategory::Internal, false)
+        }
+    }
 }
 
 pub async fn execute_cancel_entry_receive(
