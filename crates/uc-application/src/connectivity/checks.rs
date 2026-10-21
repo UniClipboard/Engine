@@ -6,12 +6,12 @@ use std::task::Poll;
 use tokio::time::{timeout_at, Instant};
 use tokio_util::sync::CancellationToken;
 
-pub(super) async fn checked(
-    work: impl Future<Output = Result<(), ConnectivityError>>,
+pub(super) async fn checked<T>(
+    work: impl Future<Output = Result<T, ConnectivityError>>,
     supervise: bool,
     deadline: Instant,
     cancel: &CancellationToken,
-) -> Result<(), ConnectivityError> {
+) -> Result<T, ConnectivityError> {
     let mut started = false;
     tokio::pin!(work);
     let primary = {
@@ -39,6 +39,11 @@ pub(super) async fn checked(
     };
     if supervise && started {
         if let Err(additional) = work.await {
+            if matches!(primary, ConnectivityError::Stopped)
+                && matches!(additional, ConnectivityError::Stopped)
+            {
+                return Err(primary);
+            }
             return Err(ConnectivityError::Settlement {
                 primary: Box::new(primary),
                 additional: Box::new(additional),

@@ -1,7 +1,7 @@
 use super::{
     AdmissionAttempt, AdmissionGrant, ConnectionMode, ConnectionProtocol, ConnectivityBackend,
-    ConnectivityError, ConnectivityManager, ConnectivityPolicy, PeerConnection, PeerReceiveStream,
-    PeerSendStream, SessionConnectionAdmissionPort, StreamPair,
+    ConnectivityError, ConnectivityManager, ConnectivityPolicy, InboundIdentityReservation,
+    PeerConnection, PeerReceiveStream, PeerSendStream, SessionConnectionAdmissionPort, StreamPair,
 };
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -192,6 +192,7 @@ impl SessionConnectionAdmissionPort for Admission {
     async fn adopt_inbound(
         &self,
         _: Arc<dyn PeerConnection>,
+        _reservation: &dyn InboundIdentityReservation,
     ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError> {
         panic!("outbound fixture")
     }
@@ -735,6 +736,7 @@ async fn old_request_cannot_borrow_a_new_epoch_active_connection() {
         async fn adopt_inbound(
             &self,
             _: Arc<dyn PeerConnection>,
+            _reservation: &dyn InboundIdentityReservation,
         ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError> {
             panic!("outbound-only fixture")
         }
@@ -830,6 +832,7 @@ async fn completed_dials_racing_shutdown_cannot_escape_the_owner() {
         async fn adopt_inbound(
             &self,
             _: Arc<dyn PeerConnection>,
+            _reservation: &dyn InboundIdentityReservation,
         ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError> {
             panic!("outbound-only fixture")
         }
@@ -918,6 +921,7 @@ async fn cancelled_adoption_closes_a_connection_retained_by_the_backend() {
         async fn adopt_inbound(
             &self,
             _: Arc<dyn PeerConnection>,
+            _reservation: &dyn InboundIdentityReservation,
         ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError> {
             panic!("outbound-only fixture")
         }
@@ -1577,3 +1581,9 @@ async fn presence_cancelled_acquisition_waits_for_real_work_before_returning_fli
     drop(lease);
     manager.shutdown().await.unwrap();
 }
+
+#[path = "inbound_tests.rs"]
+mod inbound;
+
+#[path = "lifetime_tests.rs"]
+mod lifetime;

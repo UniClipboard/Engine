@@ -31,3 +31,8 @@
 - 外部队列围栏已改为同步 ConnectionRequest；manager 的旧 connect/connect_with_cancel 已删除并统一迁移内部消费者，refresh 复用原请求快照。新请求跨 disconnect_all 会话重启后仍拒绝旧 token。
 - Uni 的 supervise_local_work 与 presence 保留分离；checked helper 不补启动已取消／到期且尚未 poll 的本地读，已开始读结算后复合保留主因与真实失败。共同拨号取消／到期只影响自己，最后等待者才 join；flight 结果不再以 Stopped 覆盖真实 backend failure。
 - 该接口改造不等于完整 Blob owner 已接入。manager.accept 仍在 await 内取准入，未知入站与识别后额度尚未分离，方向名额及 closing 资源需后续实现；不能直接把 supervise flag 配上就宣称完成生命周期。
+
+- Uni 现有可配置 InboundAdmissionPolicy，未知与识别后额度在真实身份解析／成员读取之间交接；受管 accept 在入口申请未知额度并冻结 token/fence，超额立即返回，不 spawn 额外拒绝任务。准入本地工作由 JoinSet 持有，等待方 drop 后仍完成；到期先关闭原连接，再等待真实读并保留附带错误。
+- 方向名额必须同时被 record（覆盖本地工作）和 native closed 监督持有。ConnectionLifetime 保持唯一 PeerState 及 semaphore，不缓存原生连接；建立中、取消后迟到连接和关闭未完成均占名额。关闭 JoinSet 须收集旧拨号晚登记的新结束任务，watch 必须持原 session token。
+- Native Blob profile 已取消内部 staggered retry，每轮只有一次 Endpoint.connect；不能只数 Uni backend.connect 调用而漏算底层自重试。Blob grant 的 can_retain 读取当前权威，其他 profile 不因此开放保留。
+- 尚未实现：生产 Blob 提供端 4／2 即时拒绝、准入和首请求头共用 60 秒（不能在 SDK provide 重建期限）、独立完整 owner／输出和引用保护、非阻塞进度与 5 秒未完成、稳定重试／绑定和最终矩阵。生产旧 Downloader、warmup/provider/cancel 路径仍存在，资源策略的真实 Uni 探针通过也不能冒充生产接线已完成。

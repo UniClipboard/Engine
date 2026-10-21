@@ -58,7 +58,7 @@ async fn cancellation_and_timeout_retain_the_actual_read_failure_and_wait_for_it
                 async move {
                     signal.notify_one();
                     let _work = gate.acquire().await.expect("read gate");
-                    Err(ConnectivityError::Admission(Box::new(io::Error::from(
+                    Err::<(), _>(ConnectivityError::Admission(Box::new(io::Error::from(
                         io::ErrorKind::PermissionDenied,
                     ))))
                 },

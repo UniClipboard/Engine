@@ -5,8 +5,8 @@ use super::{
 };
 use crate::connectivity::{
     AdmissionAttempt, AdmissionGrant, ConnectionMode, ConnectionProtocol, ConnectivityBackend,
-    ConnectivityError, ConnectivityManager, ConnectivityPolicy, PeerConnection, PeerReceiveStream,
-    PeerSendStream, SessionConnectionAdmissionPort, StreamPair,
+    ConnectivityError, ConnectivityManager, ConnectivityPolicy, InboundIdentityReservation,
+    PeerConnection, PeerReceiveStream, PeerSendStream, SessionConnectionAdmissionPort, StreamPair,
 };
 use async_trait::async_trait;
 use futures::future::BoxFuture;
@@ -266,7 +266,9 @@ impl SessionConnectionAdmissionPort for MemoryAdmission {
     async fn adopt_inbound(
         &self,
         raw: Arc<dyn PeerConnection>,
+        reservation: &dyn InboundIdentityReservation,
     ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError> {
+        reservation.identified(peer(raw.authenticated_key()[0]))?;
         Ok(Box::new(MemoryGrant {
             authority: self.0.clone(),
             peer: peer(raw.authenticated_key()[0]),

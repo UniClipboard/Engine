@@ -14,8 +14,8 @@ use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
     AdmissionAttempt, AdmissionGrant, BlobExchangeError, BlobValidatedProgress, ConnectionLease,
     ConnectionMode, ConnectionProtocol, ConnectivityBackend, ConnectivityError,
-    ConnectivityManager, ConnectivityPolicy, PeerConnection, PeerReceiveStream, PeerSendStream,
-    SessionConnectionAdmissionPort, StreamLease, StreamPair,
+    ConnectivityManager, ConnectivityPolicy, InboundIdentityReservation, PeerConnection,
+    PeerReceiveStream, PeerSendStream, SessionConnectionAdmissionPort, StreamLease, StreamPair,
 };
 use uc_core::ids::DeviceId;
 use uc_core::ports::ConnectionChannel;
@@ -172,7 +172,9 @@ impl SessionConnectionAdmissionPort for Identity {
     async fn adopt_inbound(
         &self,
         connection: Arc<dyn PeerConnection>,
+        reservation: &dyn InboundIdentityReservation,
     ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError> {
+        reservation.identified(self.peer())?;
         self.adopt(connection).await
     }
 }

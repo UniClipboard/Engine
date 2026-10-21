@@ -1,15 +1,17 @@
 //! 首帧身份介绍需要有限未绑定使用权；不构造虚假的 DeviceId grant。
 use super::connection::ConnectionRecord;
+use super::lifetime::ConnectionLifetime;
 use super::manager::PeerState;
 use super::retention::ConnectionActivity;
 use super::{
     AdmissionGrant, ConnectionLease, ConnectivityError, ConnectivityManager, InboundAdmissionFence,
-    PeerConnection, PeerReceiveStream, PeerSendStream, StreamLease,
+    InboundIdentityReservation, PeerConnection, PeerReceiveStream, PeerSendStream, StreamLease,
 };
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use uc_core::ids::DeviceId;
 
 pub(super) struct UnboundConnection {
@@ -32,6 +34,8 @@ pub struct PendingInboundLease {
     pub(super) received_at: Instant,
     pub(super) raw: UnboundConnection,
     pub(super) manager: ConnectivityManager,
+    pub(super) session: CancellationToken,
+    pub(super) lifetime: Arc<ConnectionLifetime>,
     pub(super) incoming: OwnedSemaphorePermit,
     pub(super) global: OwnedSemaphorePermit,
     pub(super) identified_peer: Option<(DeviceId, Arc<PeerState>)>,
@@ -44,6 +48,9 @@ impl PendingInboundLease {
     }
     /// 已识别身份立即占用每端 pending 额度；不排队，也不占长期集合。
     pub fn reserve_peer(&mut self, peer: DeviceId) -> Result<(), ConnectivityError> {
+        if self.session.is_cancelled() {
+            return Err(ConnectivityError::Stopped);
+        }
         if let Some(fence) = &self.fence {
             fence.check_current(&peer)?;
         }
@@ -55,17 +62,28 @@ impl PendingInboundLease {
                 .try_acquire_owned()
                 .map_err(ConnectivityError::Busy)?,
         );
+        self.lifetime.reserve(state.clone(), true)?;
         self.identified_peer = Some((peer, state));
         Ok(())
     }
     /// 取得同一会话准入证明；并非建立第二份成员资格。
     pub async fn admit(&mut self) -> Result<Box<dyn AdmissionGrant>, ConnectivityError> {
-        self.manager.admit_pending(self.raw.raw.clone()).await
+        let reservation = PendingIdentityReservation {
+            session: &self.session,
+            fence: &self.fence,
+            peer: self.identified_peer.as_ref().map(|(peer, _)| *peer),
+        };
+        self.manager
+            .admit_pending(self.raw.raw.clone(), &reservation)
+            .await
     }
     pub async fn bind(
         mut self,
         grant: Box<dyn AdmissionGrant>,
     ) -> Result<(ConnectionLease, StreamLease), ConnectivityError> {
+        if self.session.is_cancelled() {
+            return Err(ConnectivityError::Stopped);
+        }
         if Instant::now() >= self.deadline {
             return Err(ConnectivityError::DeadlineExpired);
         }
@@ -73,6 +91,9 @@ impl PendingInboundLease {
             fence.check_current(&grant.peer())?;
         }
         grant.check_current().await?;
+        if self.session.is_cancelled() {
+            return Err(ConnectivityError::Stopped);
+        }
         if Instant::now() >= self.deadline {
             return Err(ConnectivityError::DeadlineExpired);
         }
@@ -96,7 +117,7 @@ impl PendingInboundLease {
         let record = Arc::new(ConnectionRecord {
             connection: self.raw.raw.clone(),
             activity: Arc::new(ConnectionActivity::default()),
-            stop: self.manager.stop_token(),
+            stop: self.session.clone(),
             cache_cancel: tokio_util::sync::CancellationToken::new(),
             supervise_local_work: self.manager.policy().wait_for_local_work(),
             accepted_stream_timeout: self.manager.policy().accepted_stream_timeout,
@@ -107,6 +128,8 @@ impl PendingInboundLease {
             inbound: Arc::new(Semaphore::new(self.manager.policy().inbound_per_connection)),
             inbound_global: self.manager.inbound_capacity(),
             waiting_global: self.manager.waiting_capacity(),
+            inbound_direction: true,
+            _lifetime: self.lifetime.clone(),
             _inbound_connection: incoming,
         });
         let local = record
@@ -127,5 +150,23 @@ impl PendingInboundLease {
             },
             stream,
         ))
+    }
+}
+
+struct PendingIdentityReservation<'a> {
+    session: &'a CancellationToken,
+    fence: &'a Option<Box<dyn InboundAdmissionFence>>,
+    peer: Option<DeviceId>,
+}
+impl InboundIdentityReservation for PendingIdentityReservation<'_> {
+    fn identified(&self, peer: DeviceId) -> Result<(), ConnectivityError> {
+        if self.session.is_cancelled() {
+            return Err(ConnectivityError::Stopped);
+        }
+        self.fence.identified(peer)?;
+        if self.peer.is_some_and(|expected| expected != peer) {
+            return Err(ConnectivityError::Denied);
+        }
+        Ok(())
     }
 }

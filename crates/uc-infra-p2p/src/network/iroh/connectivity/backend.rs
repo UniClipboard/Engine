@@ -111,17 +111,25 @@ impl ConnectivityBackend for IrohConnectivityBackend {
                 (GROUP_UPDATE_ALPN, LEGACY_GROUP_UPDATE_ALPN, "group-update")
             }
         };
-        let dial = connect_with_staggered_retry_classified(
-            self.endpoint.clone(),
-            address,
-            preferred,
-            vec![fallback.to_vec()],
-            label,
-            AddressInputSource::Stored,
-        );
-        let result = tokio::select! {
-            _ = cancel.cancelled() => return Err(ConnectivityError::Stopped),
-            result = dial => result,
+        let result = if matches!(self.profile, ConnectivityProfile::Blob) {
+            // blob 的每轮只发起一次原生建连；恢复次数与退避由完整接收负责人统一计算。
+            tokio::select! {
+                _ = cancel.cancelled() => return Err(ConnectivityError::Stopped),
+                result = self.endpoint.connect(address, preferred) => result.map_err(|source| ConnectivityError::Backend(Box::new(source))),
+            }
+        } else {
+            let dial = connect_with_staggered_retry_classified(
+                self.endpoint.clone(),
+                address,
+                preferred,
+                vec![fallback.to_vec()],
+                label,
+                AddressInputSource::Stored,
+            );
+            tokio::select! {
+                _ = cancel.cancelled() => return Err(ConnectivityError::Stopped),
+                result = dial => result.map_err(|source| ConnectivityError::Backend(Box::new(source))),
+            }
         };
         match result {
             Ok(connection) => {
@@ -139,7 +147,7 @@ impl ConnectivityBackend for IrohConnectivityBackend {
                 if let Some(reachability) = &self.reachability {
                     reachability.report_communication_failure(&target).await;
                 }
-                Err(ConnectivityError::Backend(Box::new(error)))
+                Err(error)
             }
         }
     }

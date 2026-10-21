@@ -1,4 +1,5 @@
 use super::checks::checked;
+use super::lifetime::ConnectionLifetime;
 use super::manager::PeerState;
 use super::retention::{ActivityGuard, ConnectionActivity};
 use super::{
@@ -28,6 +29,8 @@ pub(super) struct ConnectionRecord {
     pub inbound: Arc<Semaphore>,
     pub inbound_global: Arc<Semaphore>,
     pub waiting_global: Arc<Semaphore>,
+    pub inbound_direction: bool,
+    pub _lifetime: Arc<ConnectionLifetime>,
     pub _inbound_connection: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 

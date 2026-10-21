@@ -86,3 +86,11 @@
 - repository preflight 通过；手工复核了所有内部调用方、原 epoch 的 refresh、共享 flight 最后等待者、准入读取实际结算与复合来源。没有可用 code-review skill，仍如实记为手工审查。补跑迁移后的真实 Uni／SDK 定向 nextest，完成前不提交。
 - 迁移后的真实 Uni／SDK nextest 5 passed、317 按过滤跳过（0.513 秒）：包括原生准入、同／不同内容的双流独立停止及 SDK 实际工作结算。根必需检查与文档相对链接、差异检查均通过。完整 workspace 测试和最终生产矩阵本轮未重跑，原已有 profile 诊断失败记录保留。
 - 当前小步只完成请求围栏与 Uni 本地工作监督，未达到阶段 1 全部退出条件；下一步仍是独立 blob manager 的资源策略与完整生产 owner，不修改完整 spec 范围。
+
+- 续接 a714953a 为 progress；工作区仅用户四个原有规划目录。当前最小切片：Uni 完整拥有入站准入，入口同步冻结会话／撤销并申请未知额度；Infra 识别后通过准入预留回调原子交接每端额度，之后才读成员权威。成功返回同一完整连接租约，失败保留来源；已开始的本地读取由原准入 future 结算，不新增持久恢复。blob 最终配置 16／2／60 秒；本步以真实消费者编译及门控读取／可控时间测试验证，不冒充方向连接限制或生产 owner 已完成。
+- 入站首轮 workspace check 仅报 checked 泛型化后纯 Err 测试缺少成功类型；已明确标注 Result<(), _>。实际生产与全部 trait 消费者已通过类型检查到这一处。为防接受方丢弃等待后遗弃本地读取，启用监督的入站准入也交由 manager 的 JoinSet 持有；取消会话后关闭原连接，但实际读取未结束仍保留准入额度。
+- 新入站定向 105 项通过（0.23 秒）：未知 16、识别后每端 2、交接后未知名额复用、先撤销后重加、60 秒慢读结算保留 PermissionDenied、会话关闭等待与 panic 来源。继续实现方向名额覆盖建立／本地结算／真实关闭，避免只限交换数仍积累连接；现有 105 项在首轮 lifetime 变更后再次通过（0.22 秒）。
+- 方向名额测试首轮 107 passed（0.26 秒），补齐入站方向隔离及关闭／本地结算两种先后顺序后 108 passed（0.23 秒）。复核另修复两处责任边界：过载立即返回，不为拒绝再 spawn 监督任务；连接监视持冻结会话 token，关闭收集包含晚返回拨号登记的结束任务。后续检查先暴露嵌套 Either 的括号错误，修复后又暴露 PendingInboundLease 的 I/O 非 Sync；已将预留上下文缩至可共享的围栏／会话／预期身份，不要求 I/O 具备 Sync。首轮日志均保留。
+- Application 全 lib nextest 1148 passed／1 skipped（3.803 秒）；新增晚返回拨号关闭收集用例另 1 passed。最终 Native Blob profile 移除内部阶梯重试，每一轮只调用一次 Endpoint.connect；现有成员 grant 仅对 Blob 开放经当前准入检查的空闲保留。真实 Uni 双流探针启用 16／2 准入、每端每方向 1 连接及 30 秒空闲保留，并调用真实 retain 以验证当前授权接线。生产 Downloader/provider 尚未替换。
+- P2P 全 lib＋blob_connectivity_feasibility nextest 319 passed／3 skipped（38.747 秒），包含启用新 16／2、方向 1 和保留 30 秒策略的真实 Blob 双流、当前授权与 SDK 结算；原普通剪贴板拒绝 ACK、成员历史和前六片相关测试均在本次范围。已手工复核同步过载拒绝不 spawn、未知／识别交接、两种结束顺序、旧 session、不扩大稳定 Engine/API、Blob 单轮原生建连及来源保留。完整 workspace 测试、正式 owner 矩阵与原 profile 诊断失败仍未结案。
+- 最终 metadata 输出已解析核验，workspace all-targets check 通过（1m14s）、fmt、Rust style、repository preflight、文档相对链接及 staged diff 检查通过。code-review skill 不在可用清单，采用手工差异审查，不冒充技能审查。用户四个原有规划目录保留；本轮不修改 SDK／ALPN／持久格式，不把过渡资源能力算作正式 Blob owner 完成。

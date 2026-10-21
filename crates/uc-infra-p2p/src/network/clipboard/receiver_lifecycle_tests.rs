@@ -15,8 +15,8 @@ use tokio_util::sync::CancellationToken;
 use uc_application::deps::ConnectionProtocol;
 use uc_application::deps::{
     AdmissionAttempt, AdmissionGrant, ClipboardReceiverPort, ConnectionMode, ConnectivityBackend,
-    ConnectivityError, ConnectivityManager, ConnectivityPolicy, PeerConnection, PeerReceiveStream,
-    PeerSendStream, SessionConnectionAdmissionPort, StreamPair,
+    ConnectivityError, ConnectivityManager, ConnectivityPolicy, InboundIdentityReservation,
+    PeerConnection, PeerReceiveStream, PeerSendStream, SessionConnectionAdmissionPort, StreamPair,
 };
 use uc_core::ids::DeviceId;
 use uc_core::ports::{
@@ -196,7 +196,9 @@ impl SessionConnectionAdmissionPort for InboundAdmission {
     async fn adopt_inbound(
         &self,
         _: Arc<dyn PeerConnection>,
+        reservation: &dyn InboundIdentityReservation,
     ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError> {
+        reservation.identified(Grant(self.0.clone()).peer())?;
         Ok(Box::new(Grant(self.0.clone())))
     }
 }

@@ -13,8 +13,8 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
     AdmissionAttempt, AdmissionGrant, ClipboardReceiverPort, ConnectivityBackend,
-    ConnectivityError, ConnectivityManager, ConnectivityPolicy, PeerConnection,
-    PeerIdentityDirectoryPort, SessionConnectionAdmissionPort,
+    ConnectivityError, ConnectivityManager, ConnectivityPolicy, InboundIdentityReservation,
+    PeerConnection, PeerIdentityDirectoryPort, SessionConnectionAdmissionPort,
 };
 use uc_core::ids::DeviceId;
 use uc_core::membership::PeerAdmissionPort;
@@ -84,6 +84,7 @@ impl SessionConnectionAdmissionPort for EpochOnlyAdmission {
     async fn adopt_inbound(
         &self,
         _: Arc<dyn PeerConnection>,
+        _reservation: &dyn InboundIdentityReservation,
     ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError> {
         panic!("outbound-only fixture")
     }

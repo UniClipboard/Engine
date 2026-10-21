@@ -243,3 +243,32 @@ Application connectivity 定向 99 项通过（0.22 秒），包括排队前围�
 迁移后的真实 Uni／SDK nextest 定向 5／5 通过（0.513 秒，317 项按过滤跳过），覆盖真实准入、
 同／不同内容双流独立停止及 SDK 工作结算。metadata、workspace 全目标 check、fmt、Rust style、
 repository preflight、文档相对链接及 diff 检查通过。完整 workspace 与正式生产路径矩阵未在本步重跑。
+
+### 2026-10-21 入站容量交接与连接真实生命周期
+
+Uni 新增独立的入站准入策略，入口同步冻结会话／撤销围栏并预留未知额度；Infra 解析身份后调用
+同步预留合同，取得每端名额后才读成员权威。成功识别释放未知额度，本地读取未结束则保留识别后名额。
+启用策略的准入任务由 manager 自身监督，等待方退出不丢弃工作；过载直接返回而不再 spawn 拒绝任务。
+60 秒到期先关闭当前连接，再结算已开始的读取；失败保留主因、实际来源及任务 panic。
+
+可选的每端每方向连接名额由 Uni 工作使用权和实际关闭监督共同持有，包括拨号及退出未完成阶段；
+入站／出站互不占用，不新增原生连接缓存。关闭会收集晚返回拨号登记的结束任务；所有监视沿用冻结会话，
+Pending 入站也不能跨重新激活。Native Blob backend 每轮只建连一次，不再内部叠加阶梯重试。
+当前成员授权的 Blob grant 可参与受管空闲保留，真实 Uni 双流探针使用 16／2 准入、每方向 1 连接与 30 秒保留。
+
+定向连接测试 108 项通过（0.25 秒）；Application 全 lib nextest 1148 项通过、1 项跳过（3.803 秒）。
+另增晚返回拨号关闭收集测试 1 项通过。仍待真实网络回归及根门禁；这些证据不替代正式 Blob owner 接线，
+提供端 4／2 交换、准入与首请求头共用截止时间、完整输出／引用结算与 5 秒取消仍须按阶段 2 完成。
+
+P2P 全 lib 与 SDK 结算集成 nextest 319 项通过、3 项跳过（38.747 秒）；包含启用新策略的真实
+Blob 双流／当前准入／同内容隔离，以及前六片相关传输回归。可重复命令：
+
+```bash
+just cargo nextest run -p uc-application --lib --locked
+just cargo test -p uc-application --lib shutdown_joins_close_work_registered --locked
+just cargo nextest run -p uc-infra-p2p --lib --test blob_connectivity_feasibility --locked
+```
+
+最终 metadata、workspace 全目标 check（1m14s）、fmt、Rust style、repository preflight、文档
+相对链接与 staged diff 检查通过；采用手工差异审查。阶段 1 全部退出条件和阶段 2–5 仍未满足，
+完整 workspace 的原 profile 诊断失败与正式生产矩阵继续待处理，不标为通过。

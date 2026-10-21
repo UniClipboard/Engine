@@ -2,8 +2,8 @@
 use super::*;
 use crate::connectivity::{
     AdmissionAttempt, AdmissionGrant, ConnectionMode, ConnectionProtocol, ConnectivityBackend,
-    ConnectivityError, ConnectivityManager, ConnectivityPolicy, PeerConnection, PeerReceiveStream,
-    PeerSendStream, SessionConnectionAdmissionPort, StreamPair,
+    ConnectivityError, ConnectivityManager, ConnectivityPolicy, InboundIdentityReservation,
+    PeerConnection, PeerReceiveStream, PeerSendStream, SessionConnectionAdmissionPort, StreamPair,
 };
 use crate::deps::{
     CurrentSpaceMemberScope, CurrentSpaceMemberScopeError, CurrentSpaceMemberScopePort,
@@ -188,7 +188,9 @@ impl SessionConnectionAdmissionPort for FixedAdmission {
     async fn adopt_inbound(
         &self,
         _: Arc<dyn PeerConnection>,
+        reservation: &dyn InboundIdentityReservation,
     ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError> {
+        reservation.identified(FixedGrant.peer())?;
         Ok(Box::new(FixedGrant))
     }
 }

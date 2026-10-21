@@ -9,7 +9,7 @@ use tracing::Instrument;
 use uc_application::deps::ConnectivityPolicy;
 use uc_application::deps::{
     AdmissionAttempt, AdmissionGrant, ConnectionMode, ConnectivityBackend, ConnectivityError,
-    PeerConnection, SessionConnectionAdmissionPort,
+    InboundIdentityReservation, PeerConnection, SessionConnectionAdmissionPort,
 };
 use uc_observability_contract::diagnostics::{
     operation_span, DiagnosticDomain, DiagnosticOperation, DiagnosticRole, DiagnosticSpanKind,
@@ -586,8 +586,9 @@ impl SessionConnectionAdmissionPort for DelayedAdmission {
     async fn adopt_inbound(
         &self,
         connection: Arc<dyn PeerConnection>,
+        reservation: &dyn InboundIdentityReservation,
     ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError> {
-        self.inner.adopt_inbound(connection).await
+        self.inner.adopt_inbound(connection, reservation).await
     }
 }
 

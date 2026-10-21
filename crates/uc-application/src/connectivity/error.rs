@@ -17,6 +17,8 @@ pub enum ConnectivityError {
     ResourceClosed(#[source] tokio::sync::AcquireError),
     #[error("connection result channel closed")]
     ResultClosed(#[source] tokio::sync::watch::error::RecvError),
+    #[error("inbound connection result channel closed")]
+    InboundResultClosed(#[source] tokio::sync::oneshot::error::RecvError),
     #[error("connection task failed")]
     Task(#[source] std::sync::Arc<tokio::task::JoinError>),
     #[error("single-exchange connection already used")]
@@ -94,6 +96,7 @@ impl ErrorClass for ConnectivityError {
             Self::Stopped => "connection_stopped",
             Self::ResourceClosed(_) => "connection_resource_closed",
             Self::ResultClosed(_) => "connection_result_closed",
+            Self::InboundResultClosed(_) => "inbound_connection_result_closed",
             Self::Task(_) => "connection_task_failed",
             Self::ExchangeAlreadyUsed => "connection_exchange_already_used",
             Self::Denied => "connection_admission_denied",

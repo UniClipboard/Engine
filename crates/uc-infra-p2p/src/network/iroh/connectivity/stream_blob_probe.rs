@@ -23,9 +23,9 @@ use tokio::time::{timeout, Instant};
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
     BlobExchangeError, BlobExchangePort, BlobValidatedProgress, ConnectivityBackend,
-    ConnectivityError, ConnectivityManager, ConnectivityPolicy, KnownPeerIdentity,
-    MembershipLedgerError, PeerConnection, PeerIdentityDirectoryPort, PeerReceiveStream,
-    SessionConnectionAdmissionPort, StreamLease,
+    ConnectivityError, ConnectivityManager, ConnectivityPolicy, IdleRetentionPolicy,
+    InboundAdmissionPolicy, KnownPeerIdentity, MembershipLedgerError, PeerConnection,
+    PeerIdentityDirectoryPort, PeerReceiveStream, SessionConnectionAdmissionPort, StreamLease,
 };
 use uc_core::error_class::ErrorClass;
 use uc_core::ids::DeviceId;
@@ -209,6 +209,11 @@ async fn prove_isolation(same_content: bool) -> anyhow::Result<()> {
         client_admission,
         ConnectivityPolicy {
             outbound_per_peer: 2,
+            connections_per_peer_direction: Some(1),
+            idle_retention: Some(IdleRetentionPolicy {
+                timeout: Duration::from_secs(30),
+                capacity: 16,
+            }),
             ..ConnectivityPolicy::default()
         },
     );
@@ -217,6 +222,16 @@ async fn prove_isolation(same_content: bool) -> anyhow::Result<()> {
         server_admission.clone(),
         ConnectivityPolicy {
             inbound_per_connection: 2,
+            connections_per_peer_direction: Some(1),
+            idle_retention: Some(IdleRetentionPolicy {
+                timeout: Duration::from_secs(30),
+                capacity: 16,
+            }),
+            inbound_admission: Some(InboundAdmissionPolicy {
+                unidentified: 16,
+                identified_per_peer: 2,
+                timeout: Duration::from_secs(60),
+            }),
             ..ConnectivityPolicy::default()
         },
     );
@@ -225,6 +240,8 @@ async fn prove_isolation(same_content: bool) -> anyhow::Result<()> {
         .connect(Instant::now() + BUDGET, &CancellationToken::new())
         .await?;
     let remote = providing.accept(server_backend.connection.clone()).await?;
+    assert!(downloading.retain(&local).await?);
+    assert!(providing.retain(&remote).await?);
     let tag = source.blobs().add_bytes(vec![41; 4 * 1024 * 1024]).await?;
     let mut stream_a = local.open_bi(Instant::now() + BUDGET).await?;
     assert_eq!(stream_a.send.id(), stream_a.receive.id());
