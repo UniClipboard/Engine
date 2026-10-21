@@ -558,8 +558,8 @@ pub struct ApplicationDeps {
     pub search: SearchPorts,
     /// 接收产品分析事件的横切上报端口。
     ///
-    /// 组合根使用带开关的 observer 包装具体 sink。调用方只需提交事件，
-    /// 不需重复查询 `usage_analytics_enabled`。
+    /// 组合根使用带开关的 observer 包装具体 sink，开关由宿主的产品分析许可决定。
+    /// 调用方只需提交事件，不需重复查询许可。
     pub analytics: Arc<dyn AnalyticsPort>,
 }
 pub use crate::space::MembershipProjectionPlan;

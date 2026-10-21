@@ -98,11 +98,9 @@ pub enum SettingsSection {
     RetentionPolicy,
     Security,
     Pairing,
-    KeyboardShortcuts,
     FileSync,
     Network,
     MobileSync,
-    QuickPanel,
 }
 
 /// 设置子系统事件。

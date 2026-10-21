@@ -1088,30 +1088,14 @@ impl AppFacade {
             .update(SettingsPatch {
                 general: Some(GeneralSettingsPatch {
                     device_name: Some(Some(device_name)),
-                    auto_start: None,
-                    startup_mode: None,
-                    restore_last_entry_on_startup: None,
-                    auto_check_update: None,
-                    auto_download_update: None,
-                    theme: None,
-                    theme_color: None,
-                    theme_color_light: None,
-                    theme_color_dark: None,
-                    theme_overrides_light: None,
-                    theme_overrides_dark: None,
-                    language: None,
-                    update_channel: None,
-                    usage_analytics_enabled: None,
                     debug_mode: None,
                 }),
                 sync: None,
                 retention_policy: None,
                 security: None,
                 pairing: None,
-                keyboard_shortcuts: None,
                 file_sync: None,
                 network: None,
-                quick_panel: None,
             })
             .await?;
         Ok(())

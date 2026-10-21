@@ -1,55 +1,8 @@
-use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
 use crate::SecretString;
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ThemeSummary {
-    Light,
-    Dark,
-    #[default]
-    System,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UpdateChannelSummary {
-    Stable,
-    Alpha,
-    Beta,
-    Rc,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StartupModeSummary {
-    #[default]
-    Normal,
-    Silent,
-    Lightweight,
-}
-
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum ShortcutKeySummary {
-    Single(String),
-    Multiple(Vec<String>),
-}
-
-impl fmt::Debug for ShortcutKeySummary {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Single(_) => formatter.write_str("ShortcutKeySummary::Single([REDACTED])"),
-            Self::Multiple(values) => formatter
-                .debug_struct("ShortcutKeySummary::Multiple")
-                .field("count", &values.len())
-                .finish(),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettingsContentTypes {
@@ -129,43 +82,17 @@ pub enum RetentionRulePatch {
     },
 }
 
+/// Engine 拥有的通用设置。宿主产品外壳偏好（启动、更新、主题、语言、产品分析许可、
+/// 快捷键与快捷面板）由宿主产品自行保存，不在 Engine 契约中。
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GeneralSettingsSummary {
-    pub auto_start: bool,
-    pub startup_mode: StartupModeSummary,
-    pub restore_last_entry_on_startup: bool,
-    pub auto_check_update: bool,
-    pub auto_download_update: bool,
-    pub theme: ThemeSummary,
-    pub theme_color: Option<String>,
-    pub theme_color_light: Option<String>,
-    pub theme_color_dark: Option<String>,
-    pub theme_overrides_light: BTreeMap<String, String>,
-    pub theme_overrides_dark: BTreeMap<String, String>,
-    pub language: Option<String>,
     pub device_name: Option<String>,
-    pub update_channel: Option<UpdateChannelSummary>,
-    pub usage_analytics_enabled: bool,
     pub debug_mode: bool,
 }
 
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GeneralSettingsPatch {
-    pub auto_start: Option<bool>,
-    pub startup_mode: Option<StartupModeSummary>,
-    pub restore_last_entry_on_startup: Option<bool>,
-    pub auto_check_update: Option<bool>,
-    pub auto_download_update: Option<bool>,
-    pub theme: Option<ThemeSummary>,
-    pub theme_color: Option<Option<String>>,
-    pub theme_color_light: Option<Option<String>>,
-    pub theme_color_dark: Option<Option<String>>,
-    pub theme_overrides_light: Option<BTreeMap<String, String>>,
-    pub theme_overrides_dark: Option<BTreeMap<String, String>>,
-    pub language: Option<Option<String>>,
     pub device_name: Option<Option<String>>,
-    pub update_channel: Option<Option<UpdateChannelSummary>>,
-    pub usage_analytics_enabled: Option<bool>,
     pub debug_mode: Option<bool>,
 }
 
@@ -283,38 +210,6 @@ pub struct NetworkSettingsPatch {
     pub congestion_controller: Option<CongestionControllerSummary>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum QuickPanelPositionSummary {
-    #[default]
-    Center,
-    FollowCursor,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum QuickPanelDoubleTapModifierSummary {
-    #[default]
-    Disabled,
-    Alt,
-    Control,
-    Meta,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct QuickPanelSettingsSummary {
-    pub enabled: bool,
-    pub position: QuickPanelPositionSummary,
-    pub double_tap_modifier: QuickPanelDoubleTapModifierSummary,
-}
-
-#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct QuickPanelSettingsPatch {
-    pub enabled: Option<bool>,
-    pub position: Option<QuickPanelPositionSummary>,
-    pub double_tap_modifier: Option<QuickPanelDoubleTapModifierSummary>,
-}
-
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettingsSummary {
     pub schema_version: u32,
@@ -323,10 +218,8 @@ pub struct SettingsSummary {
     pub retention_policy: RetentionPolicySummary,
     pub security: SecuritySettingsSummary,
     pub pairing: PairingSettingsSummary,
-    pub keyboard_shortcuts: BTreeMap<String, ShortcutKeySummary>,
     pub file_sync: FileSyncSettingsSummary,
     pub network: NetworkSettingsSummary,
-    pub quick_panel: QuickPanelSettingsSummary,
 }
 
 impl fmt::Debug for SettingsSummary {
@@ -335,7 +228,6 @@ impl fmt::Debug for SettingsSummary {
             .debug_struct("SettingsSummary")
             .field("schema_version", &self.schema_version)
             .field("retention_rule_count", &self.retention_policy.rules.len())
-            .field("keyboard_shortcut_count", &self.keyboard_shortcuts.len())
             .field("custom_relay_count", &self.network.custom_relay_urls.len())
             .field("has_auto_save_dir", &self.file_sync.auto_save_dir.is_some())
             .finish()
@@ -349,10 +241,8 @@ pub struct SettingsPatch {
     pub retention_policy: Option<RetentionPolicyPatch>,
     pub security: Option<SecuritySettingsPatch>,
     pub pairing: Option<PairingSettingsPatch>,
-    pub keyboard_shortcuts: Option<BTreeMap<String, Option<ShortcutKeySummary>>>,
     pub file_sync: Option<FileSyncSettingsPatch>,
     pub network: Option<NetworkSettingsPatch>,
-    pub quick_panel: Option<QuickPanelSettingsPatch>,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]

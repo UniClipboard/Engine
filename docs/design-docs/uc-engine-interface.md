@@ -52,7 +52,7 @@ crate 根只保留稳定名称的统一导出，内部按职责分为七层：
 | `WorkspaceConvergenceChanged` | 仅 `dev-tools` 的内部收敛诊断事件；不进入正式宿主和发布产物 |
 | `NetworkRecoveryChanged` | 网络会话恢复开始、等待下一次尝试、成功或最终失败的稳定状态变化 |
 | `ProfileRecoveryChanged` | 资料密钥恢复状态发生变化；宿主仍可通过查询重新取得完整快照 |
-| `SettingsChanged { sections }` | 一次成功保存使持久化设置发生变化，只列出变化的分区（`general`、`sync`、`retention_policy`、`security`、`pairing`、`keyboard_shortcuts`、`file_sync`、`network`、`mobile_sync`、`quick_panel`），不携带设置值；宿主重新调用 `QuerySettings`。所有写入路径共享同一个通知出口，内容没有变化的保存和被拒绝的更新不产生事件 |
+| `SettingsChanged { sections }` | 一次成功保存使持久化设置发生变化，只列出变化的分区（`general`、`sync`、`retention_policy`、`security`、`pairing`、`file_sync`、`network`、`mobile_sync`），不携带设置值；宿主重新调用 `QuerySettings`。所有写入路径共享同一个通知出口，内容没有变化的保存和被拒绝的更新不产生事件。Engine 设置只含 Engine 拥有的节点行为与本机设备名；宿主产品外壳偏好（启动方式、自动启动、更新、主题、语言、产品分析许可、快捷键、快捷面板）由宿主产品自行保存，不在设置契约和本事件中。旧 `settings.json` 中残留的这些键在加载时被忽略，即使取值非法也不影响启动，下一次保存时不再写出 |
 | `RePairingRequired { scope }` | 旧资料独立化完成，需要产品提示重新配对；`all_devices` 表示全部旧设备关系均须重新建立 |
 | `RefreshRequired` | 宿主必须重新查询当前状态 |
 | `OperationFinished` | 一次操作进入成功、失败或取消终态 |
