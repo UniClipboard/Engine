@@ -127,6 +127,19 @@ impl CommitInboundReceivePort for EncryptingInboundReceiveCommit {
         settlement: &InboundReceiveSettlement,
     ) -> Result<(), InboundReceiveCommitError> {
         let encrypted = match settlement {
+            InboundReceiveSettlement::Progress {
+                delivered_item_ids,
+                record,
+                attempt_id,
+                artifact,
+                now_ms,
+            } => InboundReceiveSettlement::Progress {
+                delivered_item_ids: delivered_item_ids.clone(),
+                record: self.encrypt_record(record).await?,
+                attempt_id: attempt_id.clone(),
+                artifact: artifact.clone(),
+                now_ms: *now_ms,
+            },
             InboundReceiveSettlement::Complete {
                 record,
                 attempt_id,

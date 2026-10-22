@@ -354,3 +354,9 @@
 ### 2026-10-22 完整双流隔离硬验收
 
 新增实际Application完整Facade／自动重试＋生产Uni及SDK双流用例，27对／54流覆盖不同4MiB、32MiB及同内容。不同内容的A、B均有部分真实校验数据后取消A，B精确导出且无重试、重拨或连接关闭。测试引用仓储为内存替身，不宣称SQLite或Relay覆盖。定向7项通过；最终1866通过／9跳过（189.264秒）；metadata812包、workspace全目标check（1m34s）、repository、fmt、Rust style、1348站点观测隐私及diff通过。用户已明确批准逐项保存成功文件、保留4／2预算，规格与计划同步；下一切片从原子持久提交和产物日志移交开始。
+
+### 2026-10-22 逐项进度提交基础切片
+
+实现既有CommitInboundReceivePort的Progress结果、capture映射及加密decorator，保持Receiving。Core按实际产物身份／路径／归属判定唯一移交；Infra在原事务保存条目和交付事实，同时以原密文CAS重封剩余产物，避免恢复误删已交付文件。V1／V3沿原格式和schema。先后修复测试的profile私有类型导入、文件内层doc位置及manual_retry新context穷举分支；最终17项定向通过（0.163秒）、四层库1921通过／4跳过（23.719秒），metadata812包、workspace全目标check（1m33s）、repository、fmt、style、1348站点隐私、diff全部通过。
+
+完整materializer逐项调用尚未接入，不宣称用户选择已端到端完成。后续接线已在findings记录：现有Arc<ReceiveAction>可直接复用；保存后立即更新receipt、只保留pending产物；最终replace本次已经保存的条目，并处理原本已有partial及rapid dedup。尚未实际清理失败的资源／目录完整单元及其余spec继续，设备未运行仍跳过。

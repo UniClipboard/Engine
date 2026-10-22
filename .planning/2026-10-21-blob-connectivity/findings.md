@@ -251,3 +251,17 @@
 - 仍有确定的资源边界：下一项local_settlement先释放旧交接，随后解析／排队若拒绝或取消未必拿到新许可；父部分保存可能无持有者。finish错误分支也仍清除未结算清理的guard。二者未修复／未验收，不能把普通最终capture屏障推断为完整预算或恢复证明。
 
 - 调度／提交存在必须明确的组合语义：spec §5.3规定每个逻辑接收项一份许可且业务结算前不归还；§5.6要求独立文件逐项结算，而当前workflow先物化整批、usecase后统一capture，若全部文件持有至统一提交则7／9项会耗尽4／2并互等。临时commit_handoff只覆盖最后一项，不能完整解决中途排队取消或旧成功项尚未提交。用户已明确选择“逐项保存成功文件，保留现有预算”：逐项实际保存后归还原许可，整批仍接收中、最终汇总，已保存项不得被后续失败回滚。该语义已获授权，下一步接入原子保存／交付事实／产物日志移交，不再等待确认。
+
+- 逐项保存的原子基础能力已实现：在同一Receiving attempt下保存记录、标记本项entry_bound、认证并重封原产物日志且仅移除实际同身份／同路径／同归属项。跨记录归属规则在Core，Infra以原密文比较防止准备／提交之间的日志并发覆盖。V1旧日志及生产V3／inline AEAD均沿原保护能力，无schema、状态字符串或格式版本变化；真实SQLite／文件清理／重开、取消、晚段回滚、连续替换、日志损坏与并发更改共16项通过（0.167秒）。完整materializer逐项调用及实时receipt更新尚未接入，不能声称用户选择已端到端实现。
+- 该切片两次测试辅助编译失败已定位并修复：InMemorySession／MasterKey须从uc-infra-security导入而非profile私有入口；模块声明必须位于文件内层doc注释之后。per-item-progress-expanded-tests.log现为最终16项通过记录。
+
+- 进度提交进一步收口：Progress携带当前保存快照的delivered_item_ids，可覆盖实际已经保存的内联表示／继承文件；本次必须包含实际移交的文件，且不能把日志中其他仍待清理文件一并标为交付。文件角色及completed事实由同一事务核对，其他交付行沿既有原子检查。新定向17项通过（0.163秒）；扩大Core／Application／Storage／Content库1921通过／4跳过（23.719秒）。首次扩大编译暴露manual_retry测试capture对新context缺少穷举分支，已补同样的交付事实映射，实际扩大验证通过。
+
+后续逐项调用接线已确认的现有结构（未实现）：
+- ReceiveWorkRegistry::action原本就返回Arc<ReceiveAction>，execute_owned也一直持Arc；execute_internal目前只借&ReceiveAction，改为&Arc即可把同一完整负责动作交给内部进度保存helper，无须新注册表、监督池或可克隆的Action。
+- ReceiveWorkPlan可带crate内可选完整进度保存能力；生产独立文件计划接入，直接materializer测试无调用者继续沿原完整计划入口。helper使用既有InboundCapture及Progress context，保存成功即action.persisted(false, completed)，同步实际receipt来源及交付事实。Engine不介入内部步骤。
+- 当前batch.item_result会将最后许可放入commit_handoff；需要文件的“实际保存成功”结果交接原子地记录事实并移除同一个local_work许可，而不是保存完再调用旧item_result重新留handoff。失败／清理尚未结束时不得释放；清理失败的恢复责任仍须另外落实。
+- 中间快照必须以完整原blob位置构造：已保存文件和当前文件的本机URI、全部其余缺失项、已成功的表示；不能把尚未下载的声明当真相。可复用finalize_partial和显示元数据重写，但最终完整快照／图像合成仍由原materializer完成。目录继续整体发布，不能接逐成员Progress。
+- 每次Progress后只保留尚未交付的receive_artifacts给下一次journal预留和最终清理；否则新写日志会把已交付文件重新登记成可删除产物。最终has_receive_artifacts仍反映确有日志，空pending向量可由终态提交结算。
+- 根流程需要区分“本次逐项已经保存”的记录与原本existing partial：最终应replace本次保存条目，不能再create，也不能走普通重复partial的skip分支；原有rapid dedup在materialize之后，须移到首次实际保存之前，不能保存后再当NoEntry回滚。原本已有partial的普通重复接收必须处理原成功映射，不可简单跳过逐项保存来声称覆盖全部路径。
+- 最终capture失败只可清理当前未交付集合，保留已保存快照／文件和receipt；后续独立项保存失败应移除其新输出、保留原source且继续其他项。现有manual_retry Capture替身按快照摘要数直接设Completed／Cancelled，接线后Progress必须保持Receiving，不能让替身抢先终结。

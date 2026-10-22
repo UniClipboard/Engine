@@ -151,27 +151,27 @@
 | `<module>` | `crates/uc-application/src/clipboard/active/transport/pull.rs:27` | `instrument` | - |
 | `<module>` | `crates/uc-application/src/clipboard/active/transport/receiver.rs:55` | `info` | message-body |
 | `<module>` | `crates/uc-application/src/clipboard/active/transport/sender.rs:26` | `instrument` | - |
-| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:261` | `instrument` | - |
-| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:281` | `instrument` | - |
-| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:312` | `instrument` | - |
-| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:347` | `info` | message-body |
-| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:354` | `info` | message-body |
-| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:361` | `info` | message-body |
-| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:411` | `warn` | message-body |
-| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:471` | `info` | sensitive-field, message-body |
-| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:514` | `info` | message-body |
-| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:557` | `info` | message-body |
-| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:785` | `warn` | sensitive-field, message-body |
-| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:795` | `info` | sensitive-field, message-body |
-| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:830` | `debug` | message-body |
-| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:907` | `warn` | message-body |
-| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:919` | `debug` | sensitive-field, message-body |
-| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:926` | `warn` | sensitive-field, message-body |
-| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:1065` | `debug` | message-body |
-| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:1115` | `debug` | message-body |
-| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:1250` | `warn` | message-body |
-| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:1454` | `warn` | message-body |
-| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:1536` | `warn` | message-body |
+| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:267` | `instrument` | - |
+| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:287` | `instrument` | - |
+| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:318` | `instrument` | - |
+| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:353` | `info` | message-body |
+| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:360` | `info` | message-body |
+| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:367` | `info` | message-body |
+| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:417` | `warn` | message-body |
+| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:477` | `info` | sensitive-field, message-body |
+| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:520` | `info` | message-body |
+| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:563` | `info` | message-body |
+| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:802` | `warn` | sensitive-field, message-body |
+| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:812` | `info` | sensitive-field, message-body |
+| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:847` | `debug` | message-body |
+| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:924` | `warn` | message-body |
+| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:936` | `debug` | sensitive-field, message-body |
+| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:943` | `warn` | sensitive-field, message-body |
+| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:1082` | `debug` | message-body |
+| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:1132` | `debug` | message-body |
+| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:1267` | `warn` | message-body |
+| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:1471` | `warn` | message-body |
+| `<module>` | `crates/uc-application/src/clipboard/capture/usecase.rs:1553` | `warn` | message-body |
 | `<module>` | `crates/uc-application/src/clipboard/history_tags/flow.rs:66` | `warn` | sensitive-field, message-body |
 | `<module>` | `crates/uc-application/src/clipboard/history_tags/flow.rs:115` | `info` | message-body |
 | `<module>` | `crates/uc-application/src/clipboard/history_tags/flow.rs:156` | `info` | message-body |

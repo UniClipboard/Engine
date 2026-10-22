@@ -51,7 +51,8 @@ use uc_core::ports::clipboard::{
 use uc_core::ports::{
     ClipboardEventWriterPort, ClipboardRepresentationNormalizerPort, CommitInboundReceivePort,
     CompletedReceiveArtifacts, DeviceIdentityPort, InboundReceiveRecord, InboundReceiveSettlement,
-    PartialReceiveArtifacts, PartialReceiveTerminal, SelectRepresentationPolicyPort, SettingsPort,
+    PartialReceiveArtifacts, PartialReceiveTerminal, ReceiveArtifact,
+    SelectRepresentationPolicyPort, SettingsPort,
 };
 use uc_core::{
     ClipboardChangeOrigin, ClipboardEntry, ClipboardEntryContentCategory, ClipboardEvent,
@@ -98,6 +99,11 @@ pub struct DirectoryCaptureCommitContext {
 }
 
 pub enum InboundCaptureCommitContext {
+    Progress {
+        delivered_item_ids: Vec<String>,
+        attempt_id: String,
+        artifact: ReceiveArtifact,
+    },
     Complete {
         attempt_id: String,
         delivered_item_ids: Vec<String>,
@@ -701,6 +707,17 @@ impl CaptureClipboardUseCase {
                                     anyhow::anyhow!("inbound receive commit port is not wired")
                                 })?;
                             let settlement = match commit_context {
+                                InboundCaptureCommitContext::Progress {
+                                    delivered_item_ids,
+                                    attempt_id,
+                                    artifact,
+                                } => InboundReceiveSettlement::Progress {
+                                    delivered_item_ids,
+                                    record,
+                                    attempt_id,
+                                    artifact,
+                                    now_ms,
+                                },
                                 InboundCaptureCommitContext::Complete {
                                     attempt_id,
                                     delivered_item_ids,

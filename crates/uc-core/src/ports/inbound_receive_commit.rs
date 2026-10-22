@@ -1,5 +1,8 @@
 use async_trait::async_trait;
 
+use super::{
+    ReceiveArtifact, ReceiveArtifactPhase, ReceiveArtifactRecord, ReceiveArtifactResolution,
+};
 use crate::clipboard::{
     ClipboardEntry, ClipboardEntryContentCategory, ClipboardEvent, ClipboardSelectionDecision,
     EntryFileSet, PersistedClipboardRepresentation,
@@ -63,6 +66,15 @@ pub enum PartialReceiveTerminal {
 }
 
 pub enum InboundReceiveSettlement {
+    /// 独立文件的持久交付；保持接收中，原子解除该项的待清理责任。
+    Progress {
+        /// 当前保存快照中的成功项；新文件只解除下述单项产物责任。
+        delivered_item_ids: Vec<String>,
+        record: InboundReceiveRecord,
+        attempt_id: String,
+        artifact: ReceiveArtifact,
+        now_ms: i64,
+    },
     Complete {
         record: InboundReceiveRecord,
         attempt_id: String,
@@ -97,6 +109,8 @@ pub enum InboundReceiveCommitError {
     AttemptStateMismatch,
     #[error("required receive artifact record is missing")]
     ArtifactRecordMissing,
+    #[error("receive artifact ownership changed before commit")]
+    ArtifactStateMismatch,
     #[error("required directory publication record is missing")]
     DirectoryPublishRecordMissing,
     #[error("inbound receive commit store error")]
@@ -109,4 +123,34 @@ pub trait CommitInboundReceivePort: Send + Sync {
         &self,
         settlement: &InboundReceiveSettlement,
     ) -> Result<(), InboundReceiveCommitError>;
+}
+
+/// 已交付独立文件只解除自己的清理责任，其他产物仍归原尝试。
+pub fn receive_artifacts_after_delivery(
+    record: &ReceiveArtifactRecord,
+    delivered: &ReceiveArtifact,
+    delivered_item_ids: &[String],
+) -> Result<Vec<ReceiveArtifact>, InboundReceiveCommitError> {
+    if !delivered_item_ids.contains(&delivered.item_id)
+        || record.artifacts.iter().any(|item| {
+            item.item_id != delivered.item_id && delivered_item_ids.contains(&item.item_id)
+        })
+        || record.phase != ReceiveArtifactPhase::Preparing
+        || record.resolution != ReceiveArtifactResolution::Pending
+        || record
+            .artifacts
+            .iter()
+            .filter(|item| item.item_id == delivered.item_id)
+            .count()
+            != 1
+        || !record.artifacts.contains(delivered)
+    {
+        return Err(InboundReceiveCommitError::ArtifactStateMismatch);
+    }
+    Ok(record
+        .artifacts
+        .iter()
+        .filter(|item| item.item_id != delivered.item_id)
+        .cloned()
+        .collect())
 }

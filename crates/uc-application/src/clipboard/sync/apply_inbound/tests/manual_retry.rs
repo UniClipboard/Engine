@@ -359,7 +359,10 @@ impl InboundCapture for Capture {
             AttemptState::Cancelled
         };
         let delivered_item_ids = match commit {
-            InboundCaptureCommitContext::Complete {
+            InboundCaptureCommitContext::Progress {
+                delivered_item_ids, ..
+            }
+            | InboundCaptureCommitContext::Complete {
                 delivered_item_ids, ..
             }
             | InboundCaptureCommitContext::Partial {

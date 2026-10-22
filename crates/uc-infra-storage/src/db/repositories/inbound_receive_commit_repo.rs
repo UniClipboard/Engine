@@ -1,3 +1,5 @@
+mod progress;
+
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -19,6 +21,8 @@ use super::entry_replace_repo::{
     prepare_entry_replacement, replace_entry_content_rows, PreparedEntryReplacement,
 };
 use super::file_transfer_repo::ENTRY_DELIVERED_BINDING;
+use super::receive_artifact_cipher::V3ReceiveArtifactCipher;
+use super::receive_artifact_log_repo::ReceiveArtifactProtection;
 use crate::db::mappers::clipboard_entry_mapper::ClipboardEntryRowMapper;
 use crate::db::mappers::clipboard_event_mapper::ClipboardEventRowMapper;
 use crate::db::mappers::clipboard_selection_mapper::ClipboardSelectionRowMapper;
@@ -29,11 +33,13 @@ use crate::db::ports::{DbExecutor, InsertMapper};
 use crate::db::schema::{
     directory_publish_log, entry_receive_attempt, file_transfer, receive_artifact_log,
 };
+use progress::PreparedProgressArtifacts;
 use uc_infra_security::ContentProtection;
 
 pub struct DieselInboundReceiveCommitRepository<E> {
     executor: E,
     file_set_protection: EntryFileSetProtection,
+    artifact_protection: ReceiveArtifactProtection,
 }
 
 impl<E> DieselInboundReceiveCommitRepository<E> {
@@ -44,14 +50,24 @@ impl<E> DieselInboundReceiveCommitRepository<E> {
     ) -> Self {
         Self {
             executor,
-            file_set_protection: EntryFileSetProtection::legacy(derive_subkey, current_profile),
+            file_set_protection: EntryFileSetProtection::legacy(
+                derive_subkey.clone(),
+                current_profile.clone(),
+            ),
+            artifact_protection: ReceiveArtifactProtection::Legacy {
+                derive_subkey,
+                current_profile,
+            },
         }
     }
 
     pub fn new_v3(executor: E, protection: Arc<ContentProtection>) -> Self {
         Self {
             executor,
-            file_set_protection: EntryFileSetProtection::v3(protection),
+            file_set_protection: EntryFileSetProtection::v3(protection.clone()),
+            artifact_protection: ReceiveArtifactProtection::V3(V3ReceiveArtifactCipher::new(
+                protection,
+            )),
         }
     }
 }
@@ -80,6 +96,8 @@ enum CommitInvariantError {
     AttemptStateMismatch,
     #[error("artifact record missing")]
     ArtifactRecordMissing,
+    #[error("artifact ownership changed")]
+    ArtifactStateMismatch,
     #[error("directory publish record missing")]
     DirectoryPublishRecordMissing,
     #[error("saved receive item does not match a completed attempt item")]
@@ -93,6 +111,9 @@ fn map_error(error: anyhow::Error) -> InboundReceiveCommitError {
         }
         Some(CommitInvariantError::ArtifactRecordMissing) => {
             InboundReceiveCommitError::ArtifactRecordMissing
+        }
+        Some(CommitInvariantError::ArtifactStateMismatch) => {
+            InboundReceiveCommitError::ArtifactStateMismatch
         }
         Some(CommitInvariantError::DirectoryPublishRecordMissing) => {
             InboundReceiveCommitError::DirectoryPublishRecordMissing
@@ -153,8 +174,31 @@ impl<E: DbExecutor> CommitInboundReceivePort for DieselInboundReceiveCommitRepos
                 ..
             }
         );
+        let progress_artifacts = match settlement {
+            InboundReceiveSettlement::Progress {
+                delivered_item_ids,
+                record,
+                attempt_id,
+                artifact,
+                ..
+            } => Some(
+                PreparedProgressArtifacts::prepare(
+                    &self.executor,
+                    &self.artifact_protection,
+                    record.entry_id().as_ref(),
+                    attempt_id,
+                    artifact,
+                    delivered_item_ids,
+                )
+                .await?,
+            ),
+            _ => None,
+        };
         let delivered_item_ids = match settlement {
-            InboundReceiveSettlement::Complete {
+            InboundReceiveSettlement::Progress {
+                delivered_item_ids, ..
+            }
+            | InboundReceiveSettlement::Complete {
                 delivered_item_ids, ..
             }
             | InboundReceiveSettlement::Partial {
@@ -164,6 +208,21 @@ impl<E: DbExecutor> CommitInboundReceivePort for DieselInboundReceiveCommitRepos
         };
         let (record, entry_id, attempt_id, file_set, expected, target, artifacts, now_ms) =
             match settlement {
+                InboundReceiveSettlement::Progress {
+                    record,
+                    attempt_id,
+                    now_ms,
+                    ..
+                } => (
+                    Some(record),
+                    record.entry_id().to_string(),
+                    attempt_id.clone(),
+                    None,
+                    AttemptState::Receiving,
+                    AttemptState::Receiving,
+                    ArtifactAction::None,
+                    *now_ms,
+                ),
                 InboundReceiveSettlement::Complete {
                     record,
                     attempt_id,
@@ -297,6 +356,9 @@ impl<E: DbExecutor> CommitInboundReceivePort for DieselInboundReceiveCommitRepos
                         }
                     }
 
+                    if let Some(progress) = &progress_artifacts {
+                        progress.commit(conn, &entry_id, &attempt_id, now_ms)?;
+                    }
                     settle_artifacts(conn, &entry_id, &attempt_id, artifacts, now_ms)?;
                     for item_id in &delivered_item_ids {
                         let updated = diesel::update(

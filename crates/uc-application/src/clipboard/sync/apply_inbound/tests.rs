@@ -318,6 +318,9 @@ impl CommitInboundReceivePort for AttemptGate {
     ) -> std::result::Result<(), InboundReceiveCommitError> {
         self.commit_calls.fetch_add(1, Ordering::SeqCst);
         let (attempt_id, expected, terminal) = match settlement {
+            InboundReceiveSettlement::Progress { attempt_id, .. } => {
+                (attempt_id, AttemptState::Receiving, AttemptState::Receiving)
+            }
             InboundReceiveSettlement::Complete { attempt_id, .. } => (
                 attempt_id,
                 AttemptState::Committing,

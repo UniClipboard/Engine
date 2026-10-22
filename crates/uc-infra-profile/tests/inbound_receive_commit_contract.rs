@@ -1,5 +1,7 @@
 #[path = "inbound_receive_commit_contract/delivery.rs"]
 mod delivery;
+#[path = "inbound_receive_commit_contract/progress.rs"]
+mod progress;
 use std::sync::Arc;
 
 use async_trait::async_trait;
