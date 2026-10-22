@@ -1,4 +1,5 @@
 //! 获取流程测试复用本地能力，网络／授权边界另由真实 Uni 测试覆盖。
+pub(crate) use super::facade::tests::local_file_probe;
 use super::transport::{
     BlobExchangeError, BlobExchangeFailure, BlobExchangePort, BlobReadStorePort, BlobReceived,
     BlobRetainedContent, BlobSource, BlobSourcePort, BlobStoreLifecyclePort, BlobValidatedProgress,

@@ -26,6 +26,8 @@ struct State {
     total: u64,
     items: HashMap<String, Item>,
     local_work: HashMap<String, DownloadSettlement>,
+    /// 最后一个实际下载的本地交接覆盖父保存；下一项启动前不积累旧许可。
+    commit_handoff: Option<DownloadSettlement>,
     routes: HashMap<(DeviceId, String), Arc<OutboundNotifications>>,
     settled: Option<AttemptState>,
     finished: bool,
@@ -44,13 +46,9 @@ impl fmt::Debug for ReceiveBatch {
 }
 impl ReceiveBatch {
     pub(in super::super) fn local_settlement(&self, item: &str) -> DownloadSettlement {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .local_work
-            .entry(item.to_owned())
-            .or_default()
-            .clone()
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        state.commit_handoff = None;
+        state.local_work.entry(item.to_owned()).or_default().clone()
     }
     pub(crate) fn plan(&self, count: usize, total: u64) {
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
@@ -114,7 +112,10 @@ impl ReceiveBatch {
     ) {
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         if !state.finished {
-            state.local_work.remove(item);
+            let local = state.local_work.remove(item);
+            if state.local_work.is_empty() && local.is_some() {
+                state.commit_handoff = local;
+            }
             let verified = state
                 .items
                 .get(item)
@@ -207,6 +208,7 @@ impl ReceiveBatch {
         }
         state.finished = true;
         state.local_work.clear();
+        state.commit_handoff = None;
         let status = match state.settled {
             Some(AttemptState::Cancelled) => OutboundProgressStatus::Cancelled {
                 reason: FileTransferCancellationReason::RemotePeer,

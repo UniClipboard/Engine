@@ -924,3 +924,56 @@ async fn ordinary_redelivery_waits_for_previous_terminal_actions_actual_settleme
     assert!(fixture.capture.snapshots.lock().unwrap().is_empty());
     previous.finish(Ok(()));
 }
+
+#[tokio::test]
+async fn actual_download_retains_original_protection_and_capacity_through_owned_capture() {
+    use crate::transfer::blob::test_support::local_file_probe;
+    use crate::transfer::blob::transport::{BlobExchangeFailure, BlobShutdownWait};
+    let fixture = Fixture::new(0).await;
+    fixture.capture.slow.store(true, Ordering::SeqCst);
+    let (facade, transport, protected) = local_file_probe();
+    let apply = Arc::new(
+        fixture
+            .apply
+            .as_ref()
+            .clone()
+            .with_blob_materializer(Arc::new(test_materializer(
+                facade,
+                fixture._cache.path().to_owned(),
+            ))),
+    );
+    let (prepared, reply) = fixture.prepared();
+    let caller = {
+        let apply = apply.clone();
+        tokio::spawn(async move { apply.execute_retry(prepared).await })
+    };
+    fixture.capture.entered.notified().await;
+    let RetryEntryReceiveOutcome::Accepted { attempt_id } = reply.await.unwrap() else {
+        panic!("retry not accepted");
+    };
+    let held_during_capture = protected.load(Ordering::SeqCst);
+    let incomplete = transport.shutdown(BlobShutdownWait::Bounded).await;
+    caller.abort();
+    let stopped = fixture
+        .work
+        .stop(&EntryId::from("receiver"), &attempt_id)
+        .unwrap();
+    fixture.capture.release.add_permits(1);
+    stopped.wait().await.unwrap();
+    apply.shutdown().await.unwrap();
+    transport
+        .shutdown(BlobShutdownWait::Complete)
+        .await
+        .unwrap();
+    assert_eq!(
+        held_during_capture, 1,
+        "capture still running must retain the original download protection"
+    );
+    assert!(
+        matches!(incomplete, Err(error) if error.kind == BlobExchangeFailure::ShutdownIncomplete),
+        "shutdown must wait for actual parent capture completion"
+    );
+    assert_eq!(protected.load(Ordering::SeqCst), 0);
+    assert_eq!(std::fs::read(&fixture.saved).unwrap(), b"success");
+    assert_eq!(fixture.capture.snapshots.lock().unwrap().len(), 1);
+}

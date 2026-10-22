@@ -246,3 +246,6 @@
 
 - Facade原inflight只指向底层worker，原worker返回后最终进度／终态仍可能阻塞，重复请求与取消提前失去所有权。实际红测已证实。现在原任务包含统一最终交接，完成通知及重复排他覆盖完整Facade；取消协调者不再写第二次终态，旧结束项在后续登记统一回收。
 - 终态写入失败不能只记录诊断：真实ReceiverTransferHandle三个终态注入StorageFull均要求完整Settlement及原获取／取消来源，失败取消不能报告成功。纯最终存储失败此前分类Unknown，具体红测后改按既有交换类别和IO原因识别。完整条目保存CAS及父流程清理仍另待验证。
+
+- item_result原先释放最后的DownloadSettlement，实际ApplyInbound capture尚未结束时保护计数已0；源码及完整重试屏障均证实。现以原对象交给batch.commit_handoff至ReceiveAction.finish，未选／继承项不覆盖，既有7／9项及实际关闭等待通过。
+- 仍有确定的资源边界：下一项local_settlement先释放旧交接，随后解析／排队若拒绝或取消未必拿到新许可；父部分保存可能无持有者。finish错误分支也仍清除未结算清理的guard。二者未修复／未验收，不能把普通最终capture屏障推断为完整预算或恢复证明。

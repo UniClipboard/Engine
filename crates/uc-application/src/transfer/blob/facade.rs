@@ -936,12 +936,14 @@ impl BlobProgressSink for FileTransferProgressSink {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     mod budget;
     mod finalization;
     mod targets;
 
-    use crate::transfer::blob::transport::{BlobExchangeError, BlobReadStorePort, BlobReceived};
+    use crate::transfer::blob::transport::{
+        BlobExchangeError, BlobReadStorePort, BlobReceived, BlobSource, BlobSourcePort,
+    };
     use std::path::Path;
 
     use super::*;
@@ -1045,6 +1047,54 @@ mod tests {
             self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         }
     }
+    struct FileProbeSource;
+    #[async_trait]
+    impl BlobSourcePort for FileProbeSource {
+        fn inspect(&self, ticket: &BlobTicket) -> Result<BlobSource, BlobExchangeError> {
+            assert_eq!(ticket.as_bytes(), &[1]);
+            Ok(BlobSource {
+                source_key: [0; 32],
+                digest: BlobDigest::from_bytes(*blake3::hash(b"retried").as_bytes()),
+                address_hint: Vec::new(),
+            })
+        }
+        async fn resolve_peer(&self, _: &[u8; 32]) -> Result<DeviceId, BlobExchangeError> {
+            Ok(DeviceId::new("peer"))
+        }
+    }
+    /// 实际下载调度与文件输出；本地存储替身显式持有可计数保护，不模拟网络验收。
+    pub(crate) fn local_file_probe() -> (
+        Arc<BlobTransferFacade>,
+        Arc<BlobTransport>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use crate::transfer::blob::test_support::{FakeLocalStore, RejectUnexpectedNetwork};
+        let transfer = Arc::new(BlockingBlobTransfer::new());
+        transfer.release.add_permits(1024);
+        let protected = transfer.protected.clone();
+        let transport = BlobTransport::new(
+            Arc::new(RejectUnexpectedNetwork),
+            Arc::new(RejectUnexpectedNetwork),
+            Arc::new(RejectUnexpectedNetwork),
+            Arc::new(RejectUnexpectedNetwork),
+        );
+        let facade = Arc::new(BlobTransferFacade::new(BlobTransferDeps {
+            downloads: Arc::new(BlobDownloadResources {
+                transport: transport.clone(),
+                source: Arc::new(FileProbeSource),
+                store: Arc::new(FakeLocalStore(transfer.clone())),
+            }),
+            hash: Arc::new(TestHash),
+            blob_transfer: transfer,
+            blob_reference: Arc::new(TestReferences),
+            transfer_cipher: Arc::new(TestCipher),
+            host_event_emitter: None,
+            outbound_progress_reporter: None,
+            file_transfer: None,
+        }));
+        (facade, transport, protected)
+    }
+
     struct BlockingBlobTransfer {
         started: Semaphore,
         release: Semaphore,
@@ -1092,8 +1142,13 @@ mod tests {
             }
             Ok(Bytes::from_static(b"image"))
         }
-        async fn export(&self, _: BlobDigest, _: &Path) -> Result<u64, BlobExchangeError> {
-            panic!("unused local export")
+        async fn export(&self, _: BlobDigest, target: &Path) -> Result<u64, BlobExchangeError> {
+            self.started.add_permits(1);
+            self.release.acquire().await.unwrap().forget();
+            tokio::fs::write(target, b"retried")
+                .await
+                .map_err(|source| BlobExchangeError::new(BlobExchangeFailure::Store, source))?;
+            Ok(7)
         }
     }
 
