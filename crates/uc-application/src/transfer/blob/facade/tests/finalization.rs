@@ -76,6 +76,7 @@ async fn terminal_write_failures_preserve_success_failure_and_cancel_settlement_
             Arc::new(SettledTerminalPublish),
             Weak::new(),
             Some(0),
+            true,
         ));
         let preparation_failure = if scenario == 3 {
             state.stop_attempted.store(true, Ordering::SeqCst);
@@ -261,6 +262,7 @@ async fn persisted_terminal_wins_late_cancel_but_shutdown_waits_for_real_event_h
         publisher.clone(),
         Weak::new(),
         Some(0),
+        true,
     )));
     let cancel = CancellationToken::new();
     let finishing = FetchFinalization {

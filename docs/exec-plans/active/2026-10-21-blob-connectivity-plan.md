@@ -1084,3 +1084,18 @@ metadata812包、workspace全目标check（3m52s）、fmt、Rust style、reposit
 网络终态文件切片最终结果：原DownloadTask先返回首次完整失败链，但完成屏障只在原事件／projection交接及修复真正结束后完成；session先封存终态意图，分别记录持久／发布进度，关闭不能把已知Failed／Completed改为Cancelled。原worker及同一DownloadSettlement持续持原许可／保护，本地退避共用1／2／4／8／16／30s policy；错误仅有失败链及不持资源的完成信号。父FileProgress等信号后补FileFailed或FileCleaned及NoEntry；Completed网络事实保留。无新schema、队列或监督池。
 
 同一生产源快照Application lib＋file_transfer1275项通过113.597s，独占日志诊断精确1项通过0.07s；完整Native receive_retry20项177.490s全通过，含实际Failed／Completed／Cancelled终态SQLite拒绝、原输出／原意图与关闭屏障。首取消断言错误要求failure_code空，已按既有projection严格核对local_user，未改生产语义／窗口／期限。最终metadata812、workspace all-targets3m09s、fmt、Rust style、repository含隐私与负例、diff全通过。首红测18.268s及后续错误现场保留。初始Started提交后责任、表示／目录父NoEntry、key范围与完整生命周期、来源C、1GiB和最终head网络／CI／平台矩阵仍继续，完整spec不归档。
+
+- 当前Started准备提交切片：原接收／下载负责人继续唯一负责，调用方只SendFiles／查询／关闭。已登记Pending后Started事件／projection事务失败时，不能丢失原session与产物责任，也不能开始本项网络数据；解除存储拒绝后同一原任务补记原失败，再沿父文件清理／NoEntry结算。先用真实Native第二项transferring更新SQL拒绝、原结果通知和关闭屏障取得红测，核对仅首项导出／成功路径不变及Pending最终Failed；不放宽FileCleaned、重试内容、再入队或新增schema／池。重启沿既有日志reconciliation，表示／目录与全生命周期仍继续。
+
+
+### 2026-10-23 已登记 Pending 的 Started 失败修复
+
+真实 Native 测试用 SQLite trigger 拒绝第二项 Started 更新，首次运行在解除拒绝后仍遗留 Pending，19.855 秒失败；首项已经保存，第二项没有开始下载。完整负责人仍为原下载任务及原接收动作，调用方只发送／取消／关闭；失败原意在准备阶段确定，关闭不能改写为取消，恢复只补同一 Started 与 Failed 记录，不重新下载内容。
+
+文件 session 在 Started 写入前登记，并分别记住 Started 的持久化与发布是否完成。准备错误保留原来源，只有本次 Store／Publish 失败才接回已登记 session，业务拒绝不接管其他 session。原任务沿既有有界退避修复本地交接，原许可和父动作保持至真实结算；不新增持久字段、监督池、格式版本或 Engine 步骤接口。Started 已持久而发布失败的合同也验证失败原意、只追加一个 Started 和最终 Failed。
+
+直接相关 Application／文件会话合同 27 项通过（39.985 秒）；上述真实 Native 红测修复后通过（10.713 秒），验证关闭期限、恢复失败原意、父尝试 settled／rolled_back、首项内容保留且无第二项下载。完整接收重试组与根门禁的最终结果另追加；此处不代表全 spec 完成。首轮失败及修复后日志保留在原任务规划目录。
+
+人工审阅确认：FileCleaned 对活动行的拒绝保持；Started 与终态由同一 session 顺序恢复，发布不重复追加已持久事件；既有完成／取消终态恢复沿原屏障；没有明文例外或授权／网络预算变化。表示／目录整体结算、来源 C、完整生命周期、最终资源与历史兼容矩阵仍未完成。
+
+最终同一源码快照验证：完整 Native 接收重试21项通过（186.083秒）；locked metadata、workspace all-targets check（3分07秒）、fmt、Rust style、repository preflight（含隐私／负例）及 diff 全部退出0。全部 Cargo 串行，共享 target／编译缓存，scope 限制 MemoryMax=5GiB、MemorySwapMax=4GiB，实际观察峰值约3.0GiB。该切片完成，后续边界继续执行。

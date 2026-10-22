@@ -493,3 +493,7 @@ Application实际故障注入证实：文件保存StorageFull、失败事实结�
 - terminal-repair-native：原Failed与RawCompleted本地失败两种真实SQL拒绝恢复均通过，合计19.085s。随后terminal-repair-final完整Application lib＋file_transfer集成1275项全通过113.597s，1项独占日志诊断按ignore跳过（blocked_updates_explain_queue_wait_and_coalesced_wakes_without_changing_order，下一轮精确独占执行）。Native20项跑到18项，前17项通过，新增Cancelled用例完成关闭和RawCancelled后仅因新增断言错误失败：既有projection在failure_code保存LocalUser.as_str()="local_user"，不是None。已改为严格核对原取消原因，不改生产逻辑／窗口／deadline；保留首失败terminal-repair-final-native.log。后两项当轮未运行，不记通过。
 
 - 网络终态文件切片最终验证：同一生产源快照Application lib＋file_transfer全量1275项通过113.597s；唯一ignore的独占日志诊断已精确运行1项通过0.07s。改正新增取消原因空值断言后，完整Native receive_retry20项177.490s全通过（Failed／Completed／Cancelled SQL拒绝恢复、原成功保留、关闭等待均验证）。terminal-repair-verified metadata812包、workspace all-targets3m09s、fmt／style／repository含隐私与负例／diff全部exit0。原scope inactive，活动期资源观测保存terminal-repair-verified-scope.log。手工复查原worker／同一DownloadSettlement持资源、结果与完成分离、原意图封口及父文件完成信号、RawCompleted本地失败沿FileFailed、失败／取消沿FileCleaned，无新schema或监督池。首次真实红测与编译／新断言错误日志均保留。准备提交；初始登记后Started写入、表示／目录父NoEntry及全预算／生命周期、来源C、1GiB、最终head完整协议与CI／平台矩阵等未完成，完整goal active。
+
+- 2026-10-23 Started 准备责任：真实 Native 首轮 19.855s 失败，数据库解除拒绝后第二项仍 Pending；修复后 10.713s 通过。相关 Application／文件会话 27 项通过39.985s。原 session 先登记、冻结准备失败意图，原下载任务补齐 Started 与 Failed；原接收动作待真实屏障再清理，不重新获取内容。完整 Native 接收重试21项及根门禁正在同一5GiB受限scope串行运行，见 started-repair-verified-*；未把在运行项记成通过。
+
+- Started切片最终验证：Native receive_retry 21/21通过186.083s，相关App27/27通过39.985s；locked metadata、workspace alltargets3m07s、fmt、style、repository、diff均退出0。受限串行scope已退出，源码人工审阅完成；下一步表示／目录父结算，完整goal保持active。

@@ -23,6 +23,7 @@ pub(super) struct FetchPreparationState {
     pub(super) progress: Mutex<Option<Arc<dyn BlobProgressSink>>>,
     pub(super) stop: Arc<Mutex<Option<BlobPreparationStop>>>,
     pub(super) stop_attempted: AtomicBool,
+    pub(super) start_failed: AtomicBool,
 }
 
 impl BlobTransferFacade {
@@ -53,8 +54,37 @@ impl BlobTransferFacade {
                 }
                 Some(context) => owner.existing_lifecycle(context).await,
                 None => Ok(None),
-            }
-            .map_err(preparation_error)?;
+            };
+            let session = match session {
+                Ok(session) => session,
+                Err(source) => {
+                    // 仅接回本次已登记的本地准备失败；业务拒绝不能接管别人的 session。
+                    let local_start_failure = match &source {
+                        BlobTransferError::Persistence(cause) => cause.chain().any(|cause| {
+                            matches!(
+                                cause.downcast_ref::<FileTransferApplicationError>(),
+                                Some(
+                                    FileTransferApplicationError::Store(_)
+                                        | FileTransferApplicationError::Publish(_)
+                                )
+                            )
+                        }),
+                        _ => false,
+                    };
+                    if local_start_failure {
+                        if let (Some(context), Some(facade)) =
+                            (context.as_ref(), owner.file_transfer.as_ref())
+                        {
+                            let session = facade.active_session(&context.transfer_id).await;
+                            state
+                                .start_failed
+                                .store(session.is_some(), Ordering::Release);
+                            *state.session.lock().unwrap_or_else(PoisonError::into_inner) = session;
+                        }
+                    }
+                    return Err(preparation_error(source));
+                }
+            };
             *state.session.lock().unwrap_or_else(PoisonError::into_inner) = session.clone();
             let sink = owner
                 .build_progress_sink(context.as_ref(), session.clone(), outbound)

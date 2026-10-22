@@ -98,3 +98,7 @@ FileCleaned已提交da77bea0（Core／App30、Profile42、Native14及根门禁�
 - 网络终态持久修复：以真实第二项StoreFull与failed终态SQL trigger取得端到端红测；先保持原网络事实／活动许可，再补记同一终态和父清理责任。须覆盖完成／取消／准备阶段，继续保留原5秒等待与源分类，不增加监督池或放宽FileCleaned。
 
 - 原终态事件／projection恢复（独立文件）已完成该切片：1275项App全量＋独占诊断1项、Native接收重试20项与根门禁均通过，准备提交。下一步从真实Native初始Started提交拒绝检查已形成pending row却未交出session的责任；表示／目录早返回后的父结算、原网络key范围和全部生命周期等继续，不标全spec完成。
+
+- Started准备已登记Pending责任：真实Native第二项Started更新拒绝、无第二项导出、关闭未完成和解除拒绝后补记Failed的端到端红测；验证经用户spec／plan批准的稳定操作与SQLite契约。原slot持续持有，不重发内容；不加持久recipe、池或业务阶段Engine入口。
+
+- Started切片最终验证：Native receive_retry 21/21通过186.083s，相关App27/27通过39.985s；locked metadata、workspace alltargets3m07s、fmt、style、repository、diff均退出0。受限串行scope已退出，源码人工审阅完成；下一步表示／目录父结算，完整goal保持active。

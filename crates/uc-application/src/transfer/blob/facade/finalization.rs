@@ -107,7 +107,9 @@ impl FetchFinalization {
                 };
                 let error = Arc::new(error);
                 let stopped_in_preparation = self.prepared.stop_attempted.load(Ordering::Acquire);
-                let intent = if stopped_in_preparation {
+                let intent = if self.prepared.start_failed.load(Ordering::Acquire) {
+                    TerminalIntent::Failed(FileTransferFailureReason::StorageUnavailable)
+                } else if stopped_in_preparation {
                     match *self
                         .prepared
                         .stop

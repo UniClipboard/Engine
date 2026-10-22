@@ -743,13 +743,29 @@ async fn persisted_start_is_not_forgotten_when_publishing_fails() {
         .active_session("transfer-1")
         .await
         .expect("persisted session must remain active");
-    let retried_session = facade
+    let retry_error = facade
         .begin_receiver_transfer(entry_transfer("transfer-1"))
         .await
+        .unwrap_err();
+    assert!(matches!(
+        retry_error,
+        FileTransferApplicationError::TransferAlreadyFinished { .. }
+    ));
+    persisted_session
+        .fail(FileTransferFailureReason::StorageUnavailable, None)
+        .await
         .unwrap();
-
-    assert!(Arc::ptr_eq(&persisted_session, &retried_session));
-    assert_eq!(store.load("transfer-1").await.unwrap().len(), 1);
+    let history = store.load("transfer-1").await.unwrap();
+    assert_eq!(history.len(), 2);
+    assert!(matches!(history[0], FileTransferEvent::Started { .. }));
+    assert!(matches!(
+        history[1],
+        FileTransferEvent::Failed {
+            reason: FileTransferFailureReason::StorageUnavailable,
+            ..
+        }
+    ));
+    assert!(facade.active_session("transfer-1").await.is_none());
 }
 
 #[tokio::test]

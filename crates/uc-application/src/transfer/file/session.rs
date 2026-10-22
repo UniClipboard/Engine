@@ -70,6 +70,8 @@ impl ReceiverTransferHandleRegistry {
 #[derive(Default)]
 struct SessionState {
     last_progress_bytes: Option<u64>,
+    started_stored: bool,
+    started_published: bool,
     terminal_intent: Option<FileTransferEvent>,
     terminal_stored: bool,
     terminal_published: bool,
@@ -99,6 +101,7 @@ impl ReceiverTransferHandle {
         publisher: Arc<dyn FileTransferEventPublisherPort>,
         registry: Weak<ReceiverTransferHandleRegistry>,
         last_progress_bytes: Option<u64>,
+        started: bool,
     ) -> Self {
         Self {
             descriptor,
@@ -107,11 +110,56 @@ impl ReceiverTransferHandle {
             registry,
             state: Mutex::new(SessionState {
                 last_progress_bytes,
+                started_stored: started,
+                started_published: started,
                 terminal_intent: None,
                 terminal_stored: false,
                 terminal_published: false,
             }),
         }
+    }
+
+    pub(crate) async fn start(&self) -> Result<(), FileTransferApplicationError> {
+        let mut state = self.state.lock().await;
+        self.ensure_active(&state)?;
+        if let Err(error) = self.store_started(&mut state).await {
+            // 准备失败已确定；关闭不能把同一原任务的失败改写成取消。
+            state.terminal_intent = Some(FileTransferEvent::failed(
+                self.transfer_id(),
+                &self.descriptor.peer_id,
+                FileTransferFailureReason::StorageUnavailable,
+                None,
+            ));
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn store_started(
+        &self,
+        state: &mut SessionState,
+    ) -> Result<(), FileTransferApplicationError> {
+        let event = FileTransferEvent::started(
+            self.transfer_id(),
+            &self.descriptor.peer_id,
+            &self.descriptor.filename,
+            self.descriptor.file_size,
+        );
+        if !state.started_stored {
+            self.store
+                .append(event.clone())
+                .await
+                .map_err(FileTransferApplicationError::Store)?;
+            state.started_stored = true;
+        }
+        if !state.started_published {
+            self.publisher
+                .publish(event)
+                .await
+                .map_err(FileTransferApplicationError::Publish)?;
+            state.started_published = true;
+        }
+        Ok(())
     }
 
     pub fn transfer_id(&self) -> &str {
@@ -213,6 +261,7 @@ impl ReceiverTransferHandle {
             // 意图先封住后续进度和不同终态；失败时仍由同一原任务恢复该意图。
             state.terminal_intent = Some(event.clone());
         }
+        self.store_started(&mut state).await?;
         if !state.terminal_stored {
             self.store
                 .append(event.clone())

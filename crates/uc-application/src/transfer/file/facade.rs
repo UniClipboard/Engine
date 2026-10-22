@@ -10,7 +10,6 @@ use uc_core::ports::{
     ClockPort, FinalizeProvisionalReceivePort, ProvisionalReceiveAction, ProvisionalReceiveError,
     ReceiveItemRole, RecordReceiverTransferPort, SeedProvisionalReceivePort,
 };
-use uc_core::FileTransferEvent;
 
 use crate::transfer::file::lifecycle::{FileTransferLifecycle, FileTransferLifecycleDeps};
 use crate::transfer::file::FileTransferApplicationError;
@@ -96,6 +95,7 @@ impl FileTransferFacade {
         self.sessions.ensure_open().await?;
         if let Some(existing) = self.sessions.get(&input.transfer_id).await {
             return if existing.matches(&input) {
+                existing.start().await?;
                 Ok(existing)
             } else {
                 Err(FileTransferApplicationError::SessionConflict {
@@ -123,28 +123,12 @@ impl FileTransferFacade {
             Arc::clone(&self.publisher),
             Arc::downgrade(&self.sessions),
             timeline.last_progress_bytes,
+            timeline.started,
         ));
 
-        if timeline.started {
-            self.sessions.insert(Arc::clone(&session)).await;
-            return Ok(session);
-        }
-
-        let started = FileTransferEvent::started(
-            input.transfer_id,
-            input.peer_id,
-            input.filename,
-            input.file_size,
-        );
-        self.store
-            .append(started.clone())
-            .await
-            .map_err(FileTransferApplicationError::Store)?;
+        // 先登记原负责人；Started 的本地失败也必须保留在同一 session 内结算。
         self.sessions.insert(Arc::clone(&session)).await;
-        self.publisher
-            .publish(started)
-            .await
-            .map_err(FileTransferApplicationError::Publish)?;
+        session.start().await?;
         Ok(session)
     }
 
