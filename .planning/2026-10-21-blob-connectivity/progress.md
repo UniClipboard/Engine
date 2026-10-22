@@ -551,3 +551,19 @@ Core 2项通过（0.017秒）；实际SQLite入站提交29项通过（9.794秒�
 
 
 本切片最终同源检查：Application＋file_transfer 1285项通过（124.681秒），1项默认跳过；Native receive_retry 23项通过（228.790秒），其余300项不在过滤范围。locked metadata、workspace all-targets（3分30秒）、fmt、Rust style、repository preflight（含隐私与负例）及diff均退出0。Core 2项、真实SQLite／AEAD 29项的已通过代码未再修改；最终只有App测试名称引入整理后参与全量回归。人工审阅确认规则归Core、转换复用原mapper、确认在原事务中只读、相同终态／尝试检查和产物拒绝、原错误链、既有取消确认以及不重复下载／通知；未增加格式或Engine阶段入口。构建保持单scope串行、jobs=1、共享target／缓存和短磁盘TMPDIR，已观察峰值约3.0GiB；scope结束后核验并回收专用目录。完整spec仍active，Native回执丢失注入、目录成员终态与其他未执行矩阵不冒充完成。
+
+
+### 2026-10-23：真实目录成员终态交接及非终态失败原因
+
+以稳定Engine操作驱动真实目录发送：测试组合根的HostClipboard可在配对和故障安装后交出inline目录URI，走ObserveClipboardChange(dispatch=true)、原目录遍历／V3文件集合、SDK获取及SQLite。仅拒绝本次目录成员的Completed写入，原独立文件接收不受阻。测试初次误用公开枚举Directory而提前终止构建（143，未执行测试），随后改为既有DirectoryUnit；首个实际执行因错误假设“未启动成员不记失败行”失败，已改为核对一个Transferring，其余只可为未启动失败，不能靠底层总行数推导开始过下载。修正后的真正行为红测6.770秒失败：原成员仍Transferring时父目录已Failed。原网络意图恢复与关闭等待先完成后才断言该快照，故红测不是因尚未清理的测试资源失败。
+
+原FileCacheBlobMaterializer仍负责完整流程，表示与目录共用一个私有等待实现：首次获取错误含FetchTerminalFailure时先记录已知业务失败，再等待原下载任务的真实终态完成信号，随后继续原目录失败／回滚／NoEntry。没有新资源池、重复获取、持久重试队列或Engine阶段入口；错误中的信号不持有许可和内容保护。目录不会因一个成员的本地终态仍在修复而提前完成父结算。
+
+Core红测0.002秒复现目录非终态聚合丢失StorageUnavailable（None／Some）；聚合现在保留已有成员的具体失败原因，同时目录项及父尝试继续保持非终态。完成／取消的原终态规则保留，失败原因本身不代表父结算完成。Core与稳定Engine查询字段均已说明此含义，不加新字段或分类值。Core接收项3项通过（0.030秒）。提取共享等待时的一处Arc借用编译错误已修正，原日志保留。
+
+实际Native目录与表示两项通过（25.138秒）：目录父Receiving、DirectoryUnit及StorageUnavailable、原总成员2／已保存0、100ms关闭未完成；解除SQL拒绝后原网络仍Completed，父目录最终Failed／Cancelled，暂存输出实际清理，不重启后续成员或旧成功项，旧成果字节不变。表示同一终态修复回归通过。测试使用实际文件系统、V3、SDK和SQLite，不以App假端口代替；未据此声明所有目录生命周期或资源矩阵完成。
+
+当前扩大验证在单个受限scope内串行运行全量App、Native receive_retry、真实入站查询契约与根门禁。新真实SQLite查询断言还核对无活动接收快照时，持久成员的已知失败同样保留而目录仍Transferring。最终结果待追加；成功staging清理、open/probe失败、其他撤回入口、完整生命周期、来源C、受管1GiB和最终兼容／设备矩阵继续保持未完成。
+
+
+本切片最终同源检查：Application＋file_transfer 1285项通过（124.457秒），1项默认跳过；Native receive_retry 24项通过（236.065秒），其余300项不在过滤范围；真实入站查询契约13项通过（2.799秒），新增持久目录失败原因断言通过。locked metadata、workspace all-targets（3分29秒）、fmt、Rust style、repository preflight（含隐私及负例）与diff均退出0。Core接收项3项通过后的行为实现未再改动，只补充查询字段说明；目录与表示原终态屏障已由实际Native再验。人工审阅核对原资源仍由DownloadSettlement及原batch持有、私有共享等待不交接资源、非终态原因不构成父终态、实际Raw Completed未被父失败覆盖、旧成果及原staging清理。单scope串行、jobs=1及既有5GiB内存／4GiB swap上限保持，已观察峰值约3.0GiB；结束后检查无活动进程并回收专用磁盘TMPDIR。完整spec继续active，其他目录清理入口、生命周期、来源C、资源和最终兼容／设备矩阵不据此勾选完成。

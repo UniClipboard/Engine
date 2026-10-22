@@ -310,6 +310,7 @@ pub struct ReceiveItemSummary {
     pub item_id: String,
     pub kind: ReceiveItemKind,
     pub state: String,
+    /// 目录尚待结算时也可携带已知失败原因；父接收是否结束仍以聚合状态为准。
     pub failure_reason: Option<ReceiveItemFailureReason>,
 }
 

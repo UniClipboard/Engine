@@ -3,25 +3,25 @@ mod redelivery;
 mod save_failure;
 use super::{
     empty_engine_host, mount_engine_rendezvous, next_engine_event_matching,
-    MemoryHostSecureStorage, StaticHostClipboard, ENGINE_TEST_LOCK,
+    MemoryHostSecureStorage, ENGINE_TEST_LOCK,
 };
 use crate::testing::receive_exports::{ReceiveExports, ReleaseOnDrop};
 use crate::{
     BlobResourceInput, CancelEntryReceiveInput, CreateSpaceInput, DeviceMembershipSummary, Engine,
     EngineConfig, EngineErrorCategory, EngineEvent, EntryReceiveCancellationOutcome,
     EntryReceiveProgressInput, EntryReceiveRetryOutcome, EventStream, HistoryEntryInput,
-    HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory, HostClipboardSnapshot,
-    HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata, JoinSpaceInput, Operation,
-    OperationResult, OperationTerminal, QueryHistoryInput, ReceiveItemFailureReason,
-    ReceiveProgressSummary, ReceiveRetryUnavailableReason, RemoveMemberInput,
-    RetryEntryReceiveInput, SecretString, SendFilesInput, SendTextInput, SettingsPatch,
-    SyncSettingsPatch,
+    HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory, HostClipboard,
+    HostClipboardSnapshot, HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata,
+    JoinSpaceInput, Operation, OperationResult, OperationTerminal, QueryHistoryInput,
+    ReceiveItemFailureReason, ReceiveProgressSummary, ReceiveRetryUnavailableReason,
+    RemoveMemberInput, RetryEntryReceiveInput, SecretString, SendFilesInput, SendTextInput,
+    SettingsPatch, SyncSettingsPatch,
 };
 use diesel::sql_types::{Binary, Text};
 use diesel::{Connection, QueryableByName, RunQueryDsl, SqliteConnection};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::time::{sleep, timeout};
@@ -160,6 +160,16 @@ async fn saved_files(engine: &Engine, entry: &str, root: &Path) -> BTreeMap<Vec<
     files
 }
 
+struct ReceiveClipboard(Arc<Mutex<HostClipboardSnapshot>>);
+impl HostClipboard for ReceiveClipboard {
+    fn read(&self) -> Result<HostClipboardSnapshot, HostCapabilityError> {
+        Ok(self.0.lock().unwrap().clone())
+    }
+    fn write(&self, _: HostClipboardSnapshot) -> Result<(), HostCapabilityError> {
+        Ok(())
+    }
+}
+
 struct ReceiveCase {
     source: Engine,
     receiver: Engine,
@@ -169,6 +179,7 @@ struct ReceiveCase {
     first: ReceiveProgressSummary,
     events: EventStream,
     saved: BTreeMap<Vec<u8>, PathBuf>,
+    clipboard: Arc<Mutex<HostClipboardSnapshot>>,
     _source_root: TempDir,
     _server: MockServer,
 }
@@ -210,6 +221,10 @@ async fn receive_case_with_progress(
             3
         },
     );
+    let clipboard = Arc::new(Mutex::new(HostClipboardSnapshot {
+        observed_at_ms: 0,
+        representations: Vec::new(),
+    }));
     let host = HostCapabilities::new(
         HostDirectories::new(
             source_root.path().join("private"),
@@ -218,12 +233,7 @@ async fn receive_case_with_progress(
             source_root.path().join("logs"),
         ),
         Box::new(MemoryHostSecureStorage::default()),
-        Box::new(StaticHostClipboard {
-            snapshot: HostClipboardSnapshot {
-                observed_at_ms: 0,
-                representations: Vec::new(),
-            },
-        }),
+        Box::new(ReceiveClipboard(clipboard.clone())),
         Box::new(Files),
     );
     let config = EngineConfig::new("1.2.3")
@@ -377,6 +387,7 @@ async fn receive_case_with_progress(
         first,
         saved,
         events,
+        clipboard,
         _source_root: source_root,
         _server: server,
     }

@@ -19,7 +19,7 @@
 阶段 0 前置证明完成：SDK／Uni 完成等待、原始材料、当前授权、同内容隔离、协议向量、8 组旧资料矩阵与 1GiB 基线均有证据。阶段 1／2 推进：生产获取和提供端已接线，输出／解密及引用／tag 受监督；完整条目结算、部分失败、稳定重试与薄绑定继续。
 
 ## Next Step
-NoEntry提交回执丢失的只读确认切片已完成：Core 2、真实SQLite／AEAD 29、App目录结算7、全量App＋file_transfer1285（124.681秒）及Native receive_retry23（228.790秒）通过；1项默认ignored未执行，Native其余300项不在过滤范围。locked metadata、workspace all-targets（3分30秒）、fmt、style、repository及diff通过，所有scope已结束，提交后核验专用磁盘TMPDIR已回收。下一项用真实Engine目录成员Completed写入拒绝验证父Receiving及实际终态交接；原fixture的SendFiles不支持目录句柄，应经可变HostClipboard inline真实目录URI＋ObserveClipboardChange，候选入口与角色证据见findings。随后继续成功staging清理、open/probe失败、其他撤回入口及生命周期、来源C、受管1GiB、最终兼容／设备矩阵。完整spec仍active。
+目录成员原终态等待与非终态失败原因切片已完成：Core 3、定向Native目录／表示2项（25.138秒）、全量App＋file_transfer1285（124.457秒）、Native receive_retry24（236.065秒）及真实入站查询13（2.799秒）通过；1项默认ignored未执行，Native其余300项不在过滤范围。locked metadata、workspace all-targets（3分29秒）、fmt、style、repository及diff通过，所有scope已结束，提交后核验专用磁盘TMPDIR已回收。接下来继续成功staging清理、open/probe失败、其他撤回入口；目录真实测试已具备可变HostClipboard＋ObserveClipboardChange入口。完整生命周期、来源C、受管1GiB、最终兼容／设备矩阵保持未完成，原完整spec目标不缩减。日志 `directory-terminal-*`。
 
 ## 先前切片记录
 业务计数切片完成同源全部门禁：五crate库2244通过／9跳过（282.213秒），metadata812包、workspace全目标check3m41s、fmt／style／repository／1350隐私／diff通过；34 App、4 Native及33真实SQLite／AEAD契约通过。已提交b3cacddf。保存失败＋物理清理拒绝已复现原保护0／期望1及原source覆盖；同一ReceiveAction已接线清理恢复，25 App回归通过（25.148秒），包括原路径复用保护。保存后物理清理已提交01783244（App25／Native5及根门禁）。当前未提交获取失败／取消清理恢复：fetch-cleanup-red实际Facade保护0／期望1（0.007秒）；恢复意图区分FileCommit、FetchFailure、FetchCancellation，只有FileCommit写FileFailed，其余按原网络事实和实际journaled完成NoEntry；取消通过原CAS争取权威。原本只检查错误的mock测试由实际Facade／资源／文件系统／取消源检查替代。首轮25通过／2失败：一为旧错误类型断言，一为新测试错要求关闭吞掉Store；依据原supervision的错误保留合同，测试现明确断言Store和StorageFull仍存在，不改生产关闭。新增Native第二项实际导出失败＋目录清理拒绝，用原结果事件确认失败已返回，再验证100ms关闭、旧成功文件、原Failed网络事实及重开日志。
@@ -121,3 +121,6 @@ FileCleaned已提交da77bea0（Core／App30、Profile42、Native14及根门禁�
 
 
 - NoEntry回执丢失切片：完整接收及本地重试仍归Application，宿主只提交原接收／关闭；Infra原子提交能力须只读确认同一条目、同一尝试和同一终态已经完成的NoEntry。RolledBack重放还须确认原产物日志确为settled／rolled_back，不重新写终态或覆盖已交付／活动产物。不加格式、Engine步骤查询或后台任务；原任务仍负责资源至实际确认。先用真实SQLite执行器在事务实际成功后返回一次IO错误，证明重放行为及拒绝边界，再验证完整Application原动作能结束。
+
+
+- 目录成员终态交接切片：完整负责人仍为Application transfer，调用方只使用ObserveClipboardChange／既有查询／关闭。真实Engine读取宿主目录URI，通过原V3文件集合、SDK及SQLite接收；注入原成员Completed写入拒绝，验证父Receiving、已知StorageUnavailable、关闭未完成、恢复后的原Completed及目录整体失败／取消，且不重新获取已完成内容。原下载任务负责网络终态本地修复，父接收必须等待其原完成信号；不增加资源所有者、持久队列或Engine阶段接口。

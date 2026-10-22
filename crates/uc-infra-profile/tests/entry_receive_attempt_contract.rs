@@ -747,4 +747,35 @@ async fn directory_receive_query_exposes_one_unit_until_atomic_settlement_finish
             if state == "completed" { 30 } else { 0 }
         );
     }
+    // 进程内收尾尚未结束时，持久成员失败也须保留具体原因，不能使父目录提前结束。
+    writer
+        .run(|conn| {
+            diesel::update(
+                entry_receive_attempt::table.filter(entry_receive_attempt::entry_id.eq("entry")),
+            )
+            .set(entry_receive_attempt::attempt_state.eq("receiving"))
+            .execute(conn)?;
+            diesel::update(file_transfer::table.filter(file_transfer::transfer_id.eq("first")))
+                .set((
+                    file_transfer::status.eq("failed"),
+                    file_transfer::failure_code.eq(Some("storage_unavailable")),
+                ))
+                .execute(conn)?;
+            Ok(())
+        })
+        .unwrap();
+    let pending = transfers
+        .get_entry_receive_progress("entry")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        pending.items[0].status,
+        TrackedFileTransferStatus::Transferring
+    );
+    assert_eq!(
+        pending.items[0].failure_reason,
+        Some(ReceiveItemFailureReason::StorageUnavailable)
+    );
+    assert_eq!(pending.items_completed, 0);
 }

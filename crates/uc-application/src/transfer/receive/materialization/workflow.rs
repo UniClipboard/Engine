@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use uc_core::ports::TrackedFileTransferStatus;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Context, Error as SourceError, Result};
 use async_trait::async_trait;
 
 use tokio_util::sync::CancellationToken;
@@ -82,6 +82,22 @@ pub(crate) fn is_directory_cancel_error(error: &anyhow::Error) -> bool {
                 .downcast_ref::<DirectoryAttemptGateError>()
                 .is_some_and(|gate| matches!(gate, DirectoryAttemptGateError::Cancelled))
         })
+}
+
+/// 首次获取错误不等于原任务已结束；表示和目录沿同一实际终态屏障交接。
+async fn wait_for_fetch_terminal(source: Option<&SourceError>, batch: &ReceiveBatch, item: &str) {
+    let Some(error) = source else {
+        return;
+    };
+    let terminal = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<FetchTerminalFailure>())
+        .cloned();
+    if let Some(terminal) = terminal {
+        batch.unsettled_fetch_failure(item, is_cancel_error(error), error);
+        // 原任务保留许可与内容保护；取消等待不能越过已开始的本地终态结算。
+        terminal.wait_settled().await;
+    }
 }
 
 /// Prefix marking an area where an inbound directory is assembled.
@@ -598,18 +614,7 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                     transfer_context: Some(transfer_context),
                 })
                 .await;
-            let terminal = outcome.as_ref().err().and_then(|error| {
-                error
-                    .chain()
-                    .find_map(|source| source.downcast_ref::<FetchTerminalFailure>())
-                    .cloned()
-            });
-            if let (Some(terminal), Err(error)) = (terminal, &outcome) {
-                batch.unsettled_fetch_failure(&item_id, is_cancel_error(error), error);
-                // 首次错误已交回，但原任务仍在补记终态；父动作继续持有原许可。
-                // 取消只结束外部等待，不能让部分结果提前跨过真实本地完成屏障。
-                terminal.wait_settled().await;
-            }
+            wait_for_fetch_terminal(outcome.as_ref().err(), batch.as_ref(), &item_id).await;
             let fetched = match outcome {
                 Ok(v) => v,
                 Err(e) if is_cancel_error(&e) => {
@@ -1738,7 +1743,7 @@ impl FileCacheBlobMaterializer {
                     context.batch = Some(batch.clone());
                     let item_id = context.transfer_id.clone();
                     *batch_idx += 1;
-                    let fetched = match self
+                    let outcome = self
                         .fetcher
                         .fetch_blob_to_path(FetchBlobToPathCommand {
                             cancellation: cancellation.clone(),
@@ -1747,8 +1752,9 @@ impl FileCacheBlobMaterializer {
                             target_path: target.clone().into(),
                             transfer_context: Some(context),
                         })
-                        .await
-                    {
+                        .await;
+                    wait_for_fetch_terminal(outcome.as_ref().err(), batch.as_ref(), &item_id).await;
+                    let fetched = match outcome {
                         Ok(fetched) => fetched,
                         Err(err) => {
                             if is_cancel_error(&err) {

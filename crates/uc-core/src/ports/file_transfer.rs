@@ -225,6 +225,7 @@ pub struct ReceiveItemProgress {
     pub item_id: String,
     pub kind: ReceiveItemKind,
     pub status: TrackedFileTransferStatus,
+    /// 目录仍待父结算时可保留已知成员失败；该原因本身不表示父尝试已经结束。
     pub failure_reason: Option<ReceiveItemFailureReason>,
 }
 
@@ -276,17 +277,18 @@ pub fn group_receive_items(
         | AttemptState::Cancelling
         | AttemptState::Failing => TrackedFileTransferStatus::Transferring,
     };
-    let failure_reason = if status == TrackedFileTransferStatus::Failed {
-        Some(
-            items
-                .iter()
-                .filter(|item| item.status == TrackedFileTransferStatus::Failed)
-                .filter_map(|item| item.failure_reason)
-                .find(|reason| *reason != ReceiveItemFailureReason::Unknown)
-                .unwrap_or(ReceiveItemFailureReason::Unknown),
-        )
-    } else {
-        None
+    let member_failure = items
+        .iter()
+        .filter(|item| item.status == TrackedFileTransferStatus::Failed)
+        .filter_map(|item| item.failure_reason)
+        .find(|reason| *reason != ReceiveItemFailureReason::Unknown);
+    // 目录仍等待原成员终态或清理交接时，可展示已知失败，但不能据此终结父尝试。
+    let failure_reason = match status {
+        TrackedFileTransferStatus::Failed => {
+            Some(member_failure.unwrap_or(ReceiveItemFailureReason::Unknown))
+        }
+        TrackedFileTransferStatus::Transferring => member_failure,
+        _ => None,
     };
     vec![ReceiveItemProgress {
         item_id: "directory_unit".to_owned(),
@@ -495,6 +497,33 @@ mod receive_item_tests {
         );
         assert_eq!(directory[0].kind, ReceiveItemKind::DirectoryUnit);
         assert_eq!(directory[0].status, TrackedFileTransferStatus::Transferring);
+    }
+
+    #[test]
+    fn directory_keeps_known_failure_while_waiting_for_parent_settlement() {
+        for state in [
+            AttemptState::Receiving,
+            AttemptState::Committing,
+            AttemptState::Failing,
+            AttemptState::Cancelling,
+        ] {
+            let directory = group_receive_items(
+                state,
+                true,
+                vec![ReceiveItemProgress {
+                    item_id: "member".into(),
+                    kind: ReceiveItemKind::File,
+                    status: TrackedFileTransferStatus::Failed,
+                    failure_reason: Some(ReceiveItemFailureReason::StorageUnavailable),
+                }],
+                &HashSet::new(),
+            );
+            assert_eq!(directory[0].status, TrackedFileTransferStatus::Transferring);
+            assert_eq!(
+                directory[0].failure_reason,
+                Some(ReceiveItemFailureReason::StorageUnavailable)
+            );
+        }
     }
 
     #[test]
