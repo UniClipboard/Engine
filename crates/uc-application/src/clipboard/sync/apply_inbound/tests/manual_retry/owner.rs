@@ -215,7 +215,7 @@ async fn retry_owner_accepts_one_set_and_refuses_different_set_until_full_captur
         .unwrap();
     fixture.capture.release.add_permits(1);
     waiting.wait().await.unwrap();
-    assert_eq!(fixture.capture.snapshots.lock().unwrap().len(), 1);
+    assert_eq!(fixture.capture.snapshots.lock().unwrap().len(), 2);
 }
 
 #[tokio::test]

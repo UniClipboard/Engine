@@ -1,4 +1,4 @@
-use super::{MaterializeResult, ReceiveWorkPlan};
+use super::{MaterializeResult, ReceiveWorkPlan, ReceivedItem};
 use crate::facade::blob_transfer::{
     BlobTransferFacade, FetchBlobCommand, FetchBlobResult, FetchBlobToPathCommand,
     FetchBlobToPathResult, FetchTransferContext,
@@ -6,6 +6,7 @@ use crate::facade::blob_transfer::{
 use anyhow::Result;
 use async_trait::async_trait;
 use uc_core::file_transfer::FileTransferFailureReason;
+use uc_core::{ports::ReceiveArtifact, SystemClipboardSnapshot};
 
 #[async_trait]
 pub trait InboundBlobMaterializer: Send + Sync {
@@ -62,4 +63,15 @@ impl InboundBlobFetcher for BlobTransferFacade {
     ) {
         BlobTransferFacade::record_unfetched_failure(self, context, reason).await;
     }
+}
+
+/// 接收负责人在原许可内保存一个文件及当前完整的交付事实。
+#[async_trait]
+pub(crate) trait ReceiveFileProgress: Send + Sync {
+    async fn persist_file(
+        &self,
+        snapshot: SystemClipboardSnapshot,
+        completed: &[ReceivedItem],
+        artifact: &ReceiveArtifact,
+    ) -> Result<()>;
 }

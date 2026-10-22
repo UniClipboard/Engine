@@ -1,4 +1,5 @@
 //! 整个接收动作的通知聚合；子获取只能记录事实，持久结算后才交接终态。
+use super::materialization::FileProgressCommitError;
 use super::work::PlannedReceiveItem;
 use super::DownloadSettlement;
 use crate::transfer::blob::fetch_failure_reason;
@@ -142,6 +143,38 @@ impl ReceiveBatch {
             );
         }
     }
+    pub(crate) fn item_materialized(&self, item: &str, bytes: u64) {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if !state.finished {
+            state.items.insert(
+                item.to_owned(),
+                Item {
+                    bytes,
+                    status: OutboundProgressStatus::InProgress,
+                    source: None,
+                    failure_reason: None,
+                },
+            );
+        }
+    }
+
+    /// 只有实际保存成功的本项才可在父动作结束之前归还原许可。
+    pub(crate) fn item_saved(&self, item: &str, bytes: u64) {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if !state.finished {
+            state.items.insert(
+                item.to_owned(),
+                Item {
+                    bytes,
+                    status: OutboundProgressStatus::Completed,
+                    source: None,
+                    failure_reason: None,
+                },
+            );
+            state.local_work.remove(item);
+        }
+    }
+
     pub(crate) fn inherit_result(&self, id: &str, previous: &ReceiveItemProgress) {
         let status = if previous.status == TrackedFileTransferStatus::Cancelled {
             OutboundProgressStatus::Cancelled {
@@ -267,6 +300,12 @@ fn tracked_status(status: &OutboundProgressStatus) -> TrackedFileTransferStatus 
     }
 }
 fn failure_reason(error: &SourceError) -> ReceiveItemFailureReason {
+    if error
+        .chain()
+        .any(|source| source.is::<FileProgressCommitError>())
+    {
+        return ReceiveItemFailureReason::StorageUnavailable;
+    }
     match fetch_failure_reason(error) {
         FileTransferFailureReason::NetworkUnavailable => {
             ReceiveItemFailureReason::NetworkUnavailable

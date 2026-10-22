@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::mem;
-use std::sync::Arc;
+use std::sync::{atomic::AtomicBool, Arc};
 
 use anyhow::{anyhow, Error as SourceError};
 use moka::sync::Cache;
@@ -71,6 +71,8 @@ use crate::transfer::receive::materialization::{
 const RECENT_INBOUND_MAX_RECORDS: u64 = 128;
 
 mod owned;
+mod progress;
+use progress::FileProgress;
 
 #[derive(Clone)]
 pub struct ApplyInboundClipboardUseCase {
@@ -1047,7 +1049,7 @@ impl ApplyInboundClipboardUseCase {
         input: ApplyInboundInput,
         provisional: Option<(String, ReceiveItemRole)>,
         work: &OwnedWork,
-        receive_action: &ReceiveAction,
+        receive_action: &Arc<ReceiveAction>,
         mut retry: Option<PreparedReceiveRetry>,
     ) -> Result<ApplyOutcome, ApplyInboundError> {
         if let Some(readiness) = &self.receive_readiness {
@@ -1134,6 +1136,28 @@ impl ApplyInboundClipboardUseCase {
 
         if retry.is_none() && existing.is_none() {
             if let Some(existing_entry_id) = self.recent_snapshot_hashes.get(&input.snapshot_hash) {
+                self.report_reused_outbound_transfers(&input.from_device, &blob_refs)
+                    .await;
+                if let Some((transfer_id, _)) = provisional.as_ref() {
+                    self.finalize_provisional(
+                        transfer_id,
+                        ProvisionalReceiveAction::DiscardAsFullyHeld,
+                    )
+                    .await?;
+                }
+                return Ok(ApplyOutcome::DuplicateSkipped {
+                    snapshot_hash: input.snapshot_hash,
+                    existing_entry_id,
+                });
+            }
+        }
+
+        // 逐项提交之前排除已知的快速重复；保存后不能再把交付条目当NoEntry撤销。
+        if retry.is_none() && existing.is_none() {
+            if let Some(existing_entry_id) = self.find_recent_duplicate(
+                &input.snapshot_hash,
+                snapshot.meaningful_origin_key().as_deref(),
+            ) {
                 self.report_reused_outbound_transfers(&input.from_device, &blob_refs)
                     .await;
                 if let Some((transfer_id, _)) = provisional.as_ref() {
@@ -1299,6 +1323,29 @@ impl ApplyInboundClipboardUseCase {
             .filter(|_| file_set_manifest.is_none())
             .map(|attempt| receive_item_ids(&receiver_entry_id, attempt, &blob_refs))
             .unwrap_or_default();
+        let file_progress = receive_attempt_id
+            .as_ref()
+            .filter(|_| {
+                !verify_directory_identity
+                    && blob_refs
+                        .iter()
+                        .any(|blob| blob.representation_index.is_none())
+            })
+            // 旧partial的普通重投仍需先完成原成功项映射，保持原升级策略。
+            .filter(|_| retry.is_some() || existing.is_none())
+            .map(|attempt| {
+                Arc::new(FileProgress {
+                    owner: self.clone(),
+                    action: receive_action.clone(),
+                    entry: receiver_entry_id.clone(),
+                    attempt: attempt.clone(),
+                    item_ids: planned_item_ids.clone(),
+                    hash: input.snapshot_hash.clone(),
+                    replacing: retry.is_some() || existing.is_some(),
+                    saved: AtomicBool::new(false),
+                    from_device: input.from_device,
+                })
+            });
         let (snapshot, mut materialize_outcome, has_receive_artifacts, receive_artifacts) =
             match (requires_materialize, &self.blob_materializer) {
                 (false, _) => (snapshot, MaterializeOutcome::Complete, false, Vec::new()),
@@ -1315,6 +1362,9 @@ impl ApplyInboundClipboardUseCase {
                     )
                     .with_cancellation(receive_action.cancellation())
                     .with_batch(receive_action.batch.clone());
+                    if let Some(progress) = &file_progress {
+                        plan = plan.with_progress(progress.clone());
+                    }
                     if let Some(selection) = retry.as_mut().and_then(|retry| retry.selection.take())
                     {
                         plan = plan.with_selection(selection);
@@ -1482,7 +1532,12 @@ impl ApplyInboundClipboardUseCase {
         // completing delivery of a partial. Consulted only when the DB had no
         // match — a partial DB match takes the upgrade path below.
         let visible_key = snapshot.meaningful_origin_key();
-        if retry.is_none() && existing.is_none() {
+        if retry.is_none()
+            && existing.is_none()
+            && !file_progress
+                .as_ref()
+                .is_some_and(|progress| progress.has_saved())
+        {
             if let Some(existing_entry_id) =
                 self.find_recent_duplicate(&input.snapshot_hash, visible_key.as_deref())
             {
@@ -1526,6 +1581,14 @@ impl ApplyInboundClipboardUseCase {
         // unparseable wire hash degrades to `None` (recompute), never a DoS.
         let snapshot_for_write = Arc::new(snapshot.clone());
         let authoritative_hash = SnapshotHash::parse(&input.snapshot_hash);
+        let progress_saved = file_progress
+            .as_ref()
+            .is_some_and(|progress| progress.has_saved());
+        let existing = if progress_saved {
+            Some(receiver_entry_id.clone())
+        } else {
+            existing
+        };
         let replacing = existing.is_some();
         if is_partial {
             match materialize_outcome {
@@ -1599,7 +1662,7 @@ impl ApplyInboundClipboardUseCase {
             // Any surviving match is partial — fully-held matches returned at
             // step 3.
             Some(existing_id) => {
-                if is_partial && retry.is_none() {
+                if is_partial && retry.is_none() && !progress_saved {
                     // Don't replace a partial with another partial: keep the
                     // existing placeholder so the eventual completed delivery
                     // upgrades it (avoids thrashing between two partials).

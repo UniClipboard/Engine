@@ -4,6 +4,8 @@ mod cleanup;
 mod model;
 mod output;
 mod ports;
+mod progress;
+pub(crate) use progress::FileProgressCommitError;
 mod reuse;
 mod workflow;
 pub(crate) use cleanup::OutputCleanupFailure;
@@ -14,6 +16,7 @@ pub use model::{
     MissingFileRef, ReceiveWorkPlan,
 };
 pub(crate) use model::{ReceiveSelection, ReceivedItem, ReceivedOutput};
+pub(crate) use ports::ReceiveFileProgress;
 pub use ports::{InboundBlobFetcher, InboundBlobMaterializer};
 pub(crate) use workflow::{
     compute_file_set_component, is_directory_cancel_error, verify_file_set_identity,

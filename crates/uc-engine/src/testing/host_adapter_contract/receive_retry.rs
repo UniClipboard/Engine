@@ -183,11 +183,25 @@ impl ReceiveCase {
 }
 
 async fn receive_case(pause_first: bool) -> ReceiveCase {
+    receive_case_with_progress(pause_first, false).await
+}
+
+async fn receive_case_with_progress(pause_first: bool, prove_progress: bool) -> ReceiveCase {
     let server = MockServer::start().await;
     mount_engine_rendezvous(&server).await;
     let source_root = tempfile::tempdir().unwrap();
     let receiver_root = tempfile::tempdir().unwrap();
-    let exports = ReceiveExports::install(receiver_root.path(), 1, if pause_first { 0 } else { 3 });
+    let exports = ReceiveExports::install(
+        receiver_root.path(),
+        1,
+        if prove_progress {
+            2
+        } else if pause_first {
+            0
+        } else {
+            3
+        },
+    );
     let host = HostCapabilities::new(
         HostDirectories::new(
             source_root.path().join("private"),
@@ -274,7 +288,7 @@ async fn receive_case(pause_first: bool) -> ReceiveCase {
     else {
         panic!("file send expected")
     };
-    if pause_first {
+    if pause_first || prove_progress {
         assert_eq!(report.total_accepted + report.total_pending, 1);
     } else {
         assert_eq!(report.total_accepted, 1);
@@ -286,6 +300,30 @@ async fn receive_case(pause_first: bool) -> ReceiveCase {
     else {
         panic!("pending receive expected")
     };
+    if prove_progress {
+        let _release = ReleaseOnDrop(exports.clone());
+        timeout(Duration::from_secs(20), exports.paused.notified())
+            .await
+            .unwrap();
+        let receiving = progress(&receiver, &pending.entry_id, "receiving").await;
+        assert_eq!(
+            receiving
+                .items
+                .iter()
+                .map(|item| item.state.as_str())
+                .collect::<Vec<_>>(),
+            vec!["completed", "failed", "transferring"]
+        );
+        let committed = saved_files(&receiver, &pending.entry_id, receiver_root.path()).await;
+        assert_eq!(
+            committed.len(),
+            1,
+            "后项未结束前，首项必须已经通过实际保存入口可读"
+        );
+        assert!(committed.contains_key(CONTENTS[0]));
+        assert_eq!(exports.exports.lock().unwrap().len(), 3);
+        exports.release.add_permits(1);
+    }
     let (first, saved) = if pause_first {
         timeout(Duration::from_secs(20), exports.paused.notified())
             .await
@@ -333,6 +371,14 @@ async fn receive_case(pause_first: bool) -> ReceiveCase {
         _source_root: source_root,
         _server: server,
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn real_engine_file_is_durably_saved_while_batch_and_later_file_are_still_receiving() {
+    let _lock = ENGINE_TEST_LOCK.lock().await;
+    let case = receive_case_with_progress(false, true).await;
+    assert_eq!(case.saved.len(), 2);
+    case.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

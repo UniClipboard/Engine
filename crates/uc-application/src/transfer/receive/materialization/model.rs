@@ -1,4 +1,4 @@
-use super::DirectoryPublication;
+use super::{DirectoryPublication, ReceiveFileProgress};
 use crate::clipboard::sync::payload_codec::V3BlobRef;
 use crate::transfer::receive::batch::ReceiveBatch;
 use std::collections::{HashMap, HashSet};
@@ -64,6 +64,7 @@ pub struct ReceiveWorkPlan {
     expected_snapshot_hash: Option<String>,
     pub(super) original_blob_indices: Vec<usize>,
     pub(super) selection: Option<Arc<ReceiveSelection>>,
+    pub(super) progress: Option<Arc<dyn ReceiveFileProgress>>,
     cancellation: CancellationToken,
     batch: Arc<ReceiveBatch>,
 }
@@ -90,9 +91,15 @@ impl ReceiveWorkPlan {
             expected_snapshot_hash,
             original_blob_indices,
             selection: None,
+            progress: None,
             cancellation: CancellationToken::new(),
             batch: Arc::new(ReceiveBatch::default()),
         }
+    }
+
+    pub(crate) fn with_progress(mut self, progress: Arc<dyn ReceiveFileProgress>) -> Self {
+        self.progress = Some(progress);
+        self
     }
 
     pub(crate) fn with_selection(mut self, selection: ReceiveSelection) -> Self {

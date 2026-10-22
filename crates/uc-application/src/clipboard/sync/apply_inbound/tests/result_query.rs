@@ -48,15 +48,28 @@ impl InboundCapture for Capture {
         _: DeviceId,
         snapshot: SystemClipboardSnapshot,
         _: Option<SnapshotHash>,
-        _: InboundCaptureCommitContext,
+        commit: InboundCaptureCommitContext,
     ) -> Result<Option<EntryId>> {
         *self.entry.lock().unwrap() = Some(entry.clone());
-        assert_eq!(snapshot.file_content_digests.len(), 1);
         if self.fail {
             return Err(io::Error::from(io::ErrorKind::StorageFull).into());
         }
-        *self.attempts.state.lock().unwrap() = AttemptState::Failed;
+        assert_eq!(snapshot.file_content_digests.len(), 1);
+        if !matches!(commit, InboundCaptureCommitContext::Progress { .. }) {
+            *self.attempts.state.lock().unwrap() = AttemptState::Failed;
+        }
         Ok(Some(entry))
+    }
+    async fn replace_inbound_with_identity(
+        &self,
+        entry: EntryId,
+        source: DeviceId,
+        snapshot: SystemClipboardSnapshot,
+        hash: Option<SnapshotHash>,
+        commit: InboundCaptureCommitContext,
+    ) -> Result<Option<EntryId>> {
+        self.capture_inbound_with_identity(entry, source, snapshot, hash, commit)
+            .await
     }
 }
 struct Progress(Arc<AttemptGate>);

@@ -360,3 +360,13 @@
 实现既有CommitInboundReceivePort的Progress结果、capture映射及加密decorator，保持Receiving。Core按实际产物身份／路径／归属判定唯一移交；Infra在原事务保存条目和交付事实，同时以原密文CAS重封剩余产物，避免恢复误删已交付文件。V1／V3沿原格式和schema。先后修复测试的profile私有类型导入、文件内层doc位置及manual_retry新context穷举分支；最终17项定向通过（0.163秒）、四层库1921通过／4跳过（23.719秒），metadata812包、workspace全目标check（1m33s）、repository、fmt、style、1348站点隐私、diff全部通过。
 
 完整materializer逐项调用尚未接入，不宣称用户选择已端到端完成。后续接线已在findings记录：现有Arc<ReceiveAction>可直接复用；保存后立即更新receipt、只保留pending产物；最终replace本次已经保存的条目，并处理原本已有partial及rapid dedup。尚未实际清理失败的资源／目录完整单元及其余spec继续，设备未运行仍跳过。
+
+### 2026-10-22 完整逐项保存首个接线切片
+
+新接收／手动重试的文件计划在同一ReceiveAction内逐项保存，实际提交前保留原DownloadSettlement，成功后归还同一许可并从pending日志移除。中间快照合并全部继承成功（含尚未遍历位置）；失败只清本项并继续，最终replace本次保存记录。提前快速重复处理同时结算provisional；CAS封口立即取消原action，避免停止通知迟到时启动后项。目录及普通已有partial重投未纳入本次逐项路径，后者原成果映射仍未完成。
+
+新增9文件实际Facade额度／保护与真实文件输出、保存失败后项继续、取消CAS通知竞态用例，保存端明确替身。真实Engine证明第三项仍Receiving时首项已从稳定历史入口可读，后续部分失败及仅失败项重试仍正确。定向18项、最终相关199项通过；Engine两个用例14.000秒通过。首次相关回归暴露测试替身的AlreadyCancelling及Progress状态／replace能力不符合既有port，已修正并保持全部业务断言。最终Application／Engine1544通过／6跳过（183.042秒），metadata812包、workspace全目标check（1m30s）、repository、fmt、style、1348站点隐私及diff全通过。
+
+下一步优先实际单项取消＋阻塞保存及SQLite保存故障红测：目前fetch返回后才调用Progress，许可虽仍持有，Facade自己的inflight／网络会话已经完成；单项取消与保存失败的持久分类尚不能宣称完整。结合原DownloadTask／FetchFinalization和业务提交CAS设计完整责任，禁止新增池、Engine步骤查询或回退终态。普通已有partial来源映射、未清理产物恢复及其余完整spec继续。
+
+交付审查移除保存失败后冗余的空日志写入，避免二次IO失败覆盖原source并提前终止后项；原日志保守覆盖已删除项，下一预留／最终结算更新。强化用例额外拒绝空日志，0.056秒通过；其后同一最终源快照1544通过／6跳过（183.042秒），根门禁重新全部通过，未复用前一次快照结论。

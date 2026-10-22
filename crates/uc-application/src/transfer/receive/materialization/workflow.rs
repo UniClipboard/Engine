@@ -3,7 +3,9 @@
 use super::super::identity::{directory_member_transfer_id, directory_representation_transfer_id};
 use super::cleanup::{remove_uncommitted_output, OutputCleanupFailure};
 use super::output::{FileOutputJournal, FileOutputPreparation, PreparedReceiveOutput};
+use super::progress::FileProgressSnapshot;
 use super::reuse::validate_selection;
+use super::FileProgressCommitError;
 use super::{ReceivedItem, ReceivedOutput};
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
@@ -561,6 +563,7 @@ impl FileCacheBlobMaterializer {
 #[async_trait]
 impl InboundBlobMaterializer for FileCacheBlobMaterializer {
     async fn materialize_plan(&self, plan: ReceiveWorkPlan) -> Result<MaterializeResult> {
+        let progress = plan.progress.clone();
         let selection = plan.selection.clone();
         let original_blob_indices = plan.original_blob_indices.clone();
         let (
@@ -1217,18 +1220,78 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                 bytes_written = fetched.bytes_written,
                 "materialize: blob cached to local path (streaming)"
             );
-            batch.item_result(
-                &item_id,
-                fetched.bytes_written,
-                OutboundProgressStatus::Completed,
-                None,
-            );
-            completed.push(ReceivedItem {
+            let item = ReceivedItem {
                 blob_index: original_index,
                 plaintext_hash: *fetched.plaintext_hash.as_bytes(),
                 bytes: fetched.bytes_written,
-                output: ReceivedOutput::File(artifact),
-            });
+                output: ReceivedOutput::File(artifact.clone()),
+            };
+            if let Some(progress) = &progress {
+                batch.item_materialized(&item_id, fetched.bytes_written);
+                let mut candidate = completed.clone();
+                candidate.push(item.clone());
+                let saved = async {
+                    let saved = FileProgressSnapshot::new(
+                        &snapshot,
+                        &incomplete_rep_idxs,
+                        &file_refs,
+                        &file_blob_indices,
+                        &candidate,
+                        selection.as_deref(),
+                        &from_device,
+                    )?;
+                    progress
+                        .persist_file(saved.snapshot, &saved.completed, &artifact)
+                        .await
+                }
+                .await;
+                if let Err(source) = saved {
+                    let error = anyhow::Error::new(FileProgressCommitError(source));
+                    if let Err(cleanup) = remove_uncommitted_output(&path).await {
+                        return Err(OutputCleanupFailure {
+                            cleanup,
+                            cause: error,
+                        }
+                        .into());
+                    }
+                    receive_artifacts.pop();
+                    // 原日志保守保留已删除项；下一次预留或最终结算再更新。
+                    // 此处再次写盘失败不能覆盖保存source，也不能提前终止其他独立项。
+                    missing_files.push(MissingFileRef {
+                        filename: file_refs[idx].filename.clone().unwrap_or_else(|| {
+                            format!("blob-{}", file_refs[idx].entry_id.as_ref())
+                        }),
+                        size_bytes: advertised_size,
+                    });
+                    let status = if cancellation.is_cancelled() {
+                        if !item_failed {
+                            partial_outcome = MaterializeOutcome::PartialCancelled;
+                        }
+                        OutboundProgressStatus::Cancelled {
+                            reason: FileTransferCancellationReason::LocalUser,
+                        }
+                    } else {
+                        item_failed = true;
+                        partial_outcome = MaterializeOutcome::PartialFailed;
+                        OutboundProgressStatus::Failed
+                    };
+                    batch.item_result(&item_id, fetched.bytes_written, status, Some(error));
+                    partial = true;
+                    file_idx += 1;
+                    continue;
+                }
+                // 数据库已原子解除该产物责任，之后的新日志不得重新纳入它。
+                receive_artifacts.pop();
+                batch.item_saved(&item_id, fetched.bytes_written);
+            } else {
+                batch.item_result(
+                    &item_id,
+                    fetched.bytes_written,
+                    OutboundProgressStatus::Completed,
+                    None,
+                );
+            }
+            completed.push(item);
             file_content_digests.push(*fetched.plaintext_hash.as_bytes());
             local_paths.push(path);
             completed_file_refs.push(file_refs[idx].clone());
@@ -1338,7 +1401,7 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
     }
 }
 
-fn rewrite_file_display_metadata(
+pub(super) fn rewrite_file_display_metadata(
     snapshot: &mut SystemClipboardSnapshot,
     local_paths: &[PathBuf],
     file_refs: &[V3BlobRef],
@@ -2365,7 +2428,7 @@ fn rewrite_file_list(
 ///   场景:rep_refs 被全删 + envelope 没有自带任何不需要 fetch 的 rep),
 ///   mint 一条 `text/plain` 兜底 rep,描述这是一次 cancelled transfer,
 ///   保证 `CaptureClipboardUseCase::has_supported_representation` 返回 true。
-fn finalize_partial(
+pub(super) fn finalize_partial(
     mut snapshot: SystemClipboardSnapshot,
     incomplete_rep_idxs: &[usize],
     completed_paths: Vec<PathBuf>,

@@ -1,4 +1,5 @@
 mod owner;
+mod progress;
 use super::{
     file_blob_input, test_materializer, ApplyInboundClipboardUseCase, ApplyInboundError,
     ApplyInboundInput, ApplyOutcome, AttemptGate, FakeAvailability, InboundApplyCommonDeps,
@@ -261,7 +262,7 @@ async fn discarded_partial_redelivery_preserves_original_saved_recipe_for_manual
             reply.await.unwrap(),
             RetryEntryReceiveOutcome::Accepted { .. }
         ));
-        assert_eq!(fixture.capture.snapshots.lock().unwrap().len(), 1);
+        assert_eq!(fixture.capture.snapshots.lock().unwrap().len(), 2);
         assert_eq!(std::fs::read(&fixture.saved).unwrap(), b"success");
         assert_eq!(
             fixture.capture.snapshots.lock().unwrap()[0]
@@ -327,6 +328,11 @@ struct Capture {
     release: Semaphore,
     slow: AtomicBool,
     fail: AtomicBool,
+    progress_calls: AtomicUsize,
+    fail_progress_at: Mutex<Option<usize>>,
+    cancel_progress_at: Mutex<Option<usize>>,
+    guards: Mutex<Option<Arc<AtomicUsize>>>,
+    held: Mutex<Vec<(bool, usize)>>,
 }
 #[async_trait]
 impl InboundCapture for Capture {
@@ -346,18 +352,47 @@ impl InboundCapture for Capture {
         _: Option<SnapshotHash>,
         commit: InboundCaptureCommitContext,
     ) -> Result<Option<EntryId>> {
-        if self.slow.load(Ordering::SeqCst) {
+        let progress = matches!(&commit, InboundCaptureCommitContext::Progress { .. });
+        if let Some(guards) = self.guards.lock().unwrap().as_ref() {
+            self.held
+                .lock()
+                .unwrap()
+                .push((progress, guards.load(Ordering::SeqCst)));
+        }
+        if progress {
+            let index = self.progress_calls.fetch_add(1, Ordering::SeqCst);
+            if *self.cancel_progress_at.lock().unwrap() == Some(index) {
+                *self.attempts.state.lock().unwrap() = AttemptState::Cancelling;
+                return Err(uc_core::ports::InboundReceiveCommitError::AttemptStateMismatch.into());
+            }
+            if *self.fail_progress_at.lock().unwrap() == Some(index) {
+                return Err(io::Error::from(io::ErrorKind::StorageFull).into());
+            }
+        }
+        if self.slow.swap(false, Ordering::SeqCst) {
             self.entered.notify_one();
             self.release.acquire().await.unwrap().forget();
         }
         if self.fail.load(Ordering::SeqCst) {
             return Err(io::Error::from(io::ErrorKind::StorageFull).into());
         }
-        *self.attempts.state.lock().unwrap() = if snapshot.file_content_digests.len() == 3 {
-            AttemptState::Completed
-        } else {
-            AttemptState::Cancelled
-        };
+        match &commit {
+            InboundCaptureCommitContext::Progress { .. } => {
+                assert_eq!(
+                    *self.attempts.state.lock().unwrap(),
+                    AttemptState::Receiving
+                );
+            }
+            InboundCaptureCommitContext::Complete { .. } => {
+                *self.attempts.state.lock().unwrap() = AttemptState::Completed;
+            }
+            InboundCaptureCommitContext::Partial { terminal, .. } => {
+                *self.attempts.state.lock().unwrap() = match terminal {
+                    uc_core::ports::PartialReceiveTerminal::Cancelled => AttemptState::Cancelled,
+                    uc_core::ports::PartialReceiveTerminal::Failed => AttemptState::Failed,
+                };
+            }
+        }
         let delivered_item_ids = match commit {
             InboundCaptureCommitContext::Progress {
                 delivered_item_ids, ..
@@ -453,6 +488,9 @@ struct Fixture {
 }
 impl Fixture {
     async fn new(fetches: usize) -> Self {
+        Self::with_items(fetches, 3).await
+    }
+    async fn with_items(fetches: usize, items: usize) -> Self {
         let cache = tempfile::tempdir().unwrap();
         let saved = cache.path().join("iroh-blobs/source/same.bin");
         std::fs::create_dir_all(saved.parent().unwrap()).unwrap();
@@ -470,6 +508,11 @@ impl Fixture {
             release: Semaphore::new(0),
             slow: AtomicBool::new(false),
             fail: AtomicBool::new(false),
+            progress_calls: AtomicUsize::new(0),
+            fail_progress_at: Mutex::new(None),
+            cancel_progress_at: Mutex::new(None),
+            guards: Mutex::new(None),
+            held: Mutex::new(Vec::new()),
         });
         let mut fetcher = MockBlobFetcher::new();
         fetcher
@@ -524,7 +567,7 @@ impl Fixture {
         original.retain_source(ReceiveSource {
             from_device: DeviceId::new("source"),
             expected_hash: "original-hash".into(),
-            blob_refs: (0..3)
+            blob_refs: (0..items)
                 .map(|_| V3BlobRef {
                     ticket: BlobTicket::from_bytes(vec![1]),
                     entry_id: EntryId::from("source"),
@@ -656,17 +699,18 @@ async fn manual_retry_saves_new_partial_success_without_fetching_or_deleting_pre
         panic!("retry not accepted")
     };
     assert_ne!(attempt_id, "old");
+    let expected = vec![
+        format!("receiver:attempt:{attempt_id}:member:0"),
+        format!("receiver:attempt:{attempt_id}:member:1"),
+    ];
     assert_eq!(
         fixture.capture.deliveries.lock().unwrap().as_slice(),
-        &[vec![
-            format!("receiver:attempt:{attempt_id}:member:0"),
-            format!("receiver:attempt:{attempt_id}:member:1"),
-        ]],
-        "原成功与新增成功一起保存，未选取消项不能进入交付证明"
+        &[expected.clone(), expected],
+        "逐项与批次保存均只证明实际成功项，未选取消项不进入交付证明"
     );
     assert_eq!(fixture.attempts.retry_calls.load(Ordering::SeqCst), 1);
     let snapshots = fixture.capture.snapshots.lock().unwrap();
-    assert_eq!(snapshots.len(), 1, "a second partial must be saved");
+    assert_eq!(snapshots.len(), 2, "逐项保存后仍须结算批次终态");
     assert_eq!(
         snapshots[0].file_content_digests,
         vec![
@@ -803,7 +847,7 @@ async fn manual_retry_caller_drop_keeps_full_capture_supervised_until_actual_com
     assert!(fixture.work.owns_entry("receiver"));
     fixture.capture.release.add_permits(1);
     stopped.wait().await.unwrap();
-    assert_eq!(fixture.capture.snapshots.lock().unwrap().len(), 1);
+    assert_eq!(fixture.capture.snapshots.lock().unwrap().len(), 2);
     assert!(!fixture.work.owns_entry("receiver"));
 }
 
@@ -978,5 +1022,5 @@ async fn actual_download_retains_original_protection_and_capacity_through_owned_
     );
     assert_eq!(protected.load(Ordering::SeqCst), 0);
     assert_eq!(std::fs::read(&fixture.saved).unwrap(), b"success");
-    assert_eq!(fixture.capture.snapshots.lock().unwrap().len(), 1);
+    assert_eq!(fixture.capture.snapshots.lock().unwrap().len(), 2);
 }

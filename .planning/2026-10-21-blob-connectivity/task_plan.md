@@ -19,7 +19,7 @@
 阶段 0 前置证明完成：SDK／Uni 完成等待、原始材料、当前授权、同内容隔离、协议向量、8 组旧资料矩阵与 1GiB 基线均有证据。阶段 1／2 推进：生产获取和提供端已接线，输出／解密及引用／tag 受监督；完整条目结算、部分失败、稳定重试与薄绑定继续。
 
 ## Next Step
-按用户已确认的逐项保存语义接完整物化流程：原子Progress基础能力已完成（17定向通过、Core／Application／Storage／Content库1921通过／4跳过，根门禁全通过），但尚无完整materializer调用。复用现有Arc<ReceiveAction>，在原许可下保存当前快照及交付事实后即时更新receipt并只保留pending日志；文件成功后归还同一许可，最终替换本次保存条目，处理已有partial和rapid dedup，验证大于4／2的批次、后项失败／取消和实际Engine查询／重试。目录仍完整单元；未完成清理的资源恢复责任及其余生命周期、来源、受管1GiB、业务记录、最终head网络／CI／平台矩阵继续，不把局部通过当完整spec。
+新接收／手动重试已逐项实际保存后归还原许可并移出pending日志；9文件预算、保存失败继续、取消CAS竞态及真实Engine第三项Receiving时首项可读均有证明，最终Application／Engine1544通过／6跳过，根门禁全通过。下一步优先以单项CancelInboundTransfer＋阻塞保存及真实SQLite保存故障证明并修复完整结算：当前Progress发生于fetch返回后，原许可仍持有但Facade inflight／网络会话已完成，单项取消与持久失败分类不能据局部通过宣称完成。结合原DownloadTask／FetchFinalization／业务CAS落实同一责任，禁止第二池、终态回退或Engine步骤查询。然后补普通已有partial原成果映射、未清理产物恢复、目录整体预算、其余生命周期／来源、受管1GiB及最终head矩阵。
 
 ## 错误
 - 探针锁 guard 编译错误已修复，probe.log 保留。

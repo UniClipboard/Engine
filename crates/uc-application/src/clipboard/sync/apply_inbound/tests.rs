@@ -390,6 +390,8 @@ impl RequestReceiveCancellationPort for AttemptGate {
         if is_current && *state == AttemptState::Receiving {
             *state = AttemptState::Cancelling;
             Ok(RequestReceiveCancellationOutcome::Requested)
+        } else if is_current && *state == AttemptState::Cancelling {
+            Ok(RequestReceiveCancellationOutcome::AlreadyCancelling)
         } else {
             Ok(RequestReceiveCancellationOutcome::Superseded)
         }
