@@ -3,7 +3,7 @@ use super::ApplyInboundClipboardUseCase;
 use crate::clipboard::capture::InboundCaptureCommitContext;
 use crate::facade::blob_transfer::BlobTransferError;
 use crate::transfer::receive::materialization::{ReceiveFileProgress, ReceivedItem};
-use crate::transfer::receive::work::ReceiveAction;
+use crate::transfer::receive::work::{ReceiveAction, UnsettledFile};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,6 +36,7 @@ impl ReceiveFileProgress for FileProgress {
         &self,
         artifact: &ReceiveArtifact,
         failure: ReceiveFileFailure,
+        artifacts: &[ReceiveArtifact],
     ) -> Result<()> {
         let ports = self
             .owner
@@ -51,7 +52,21 @@ impl ReceiveFileProgress for FileProgress {
                 failure,
                 now_ms: ports.clock.now_ms(),
             })
-            .await?;
+            .await
+            .map_err(|source| {
+                self.action.defer_file_settlement(UnsettledFile {
+                    entry: self.entry.clone(),
+                    attempt: self.attempt.clone(),
+                    artifact: artifact.clone(),
+                    failure,
+                    remaining: artifacts
+                        .iter()
+                        .filter(|item| item.item_id != artifact.item_id)
+                        .cloned()
+                        .collect(),
+                });
+                anyhow::Error::new(source)
+            })?;
         Ok(())
     }
 

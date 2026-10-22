@@ -4,9 +4,10 @@ use anyhow::Error as SourceError;
 use std::{
     error::Error,
     fmt::{self, Display, Formatter},
-    sync::Arc,
+    sync::{Arc, Mutex, PoisonError},
 };
 
+use tokio::sync::oneshot;
 use tracing::Instrument;
 use uc_core::ports::ReceiveItemRole;
 use uc_observability_contract::diagnostics::ObservationContext;
@@ -26,14 +27,51 @@ impl ApplyInboundClipboardUseCase {
             .as_ref()
             .map_or_else(|| self.receive_work.action(), |retry| retry.action.clone());
         let processing_receive = receive_action.clone();
+        let (sender, receiver) = oneshot::channel();
+        let reply = Arc::new(Mutex::new(Some(sender)));
+        let processing_reply = reply.clone();
         let owner = self.clone();
         let observation = ObservationContext::capture();
         let task = tokio::spawn(
             observation.scope(
                 async move {
-                    owner
+                    let outcome = owner
                         .execute_internal(input, provisional, &action, &processing_receive, retry)
-                        .await
+                        .await;
+                    match (outcome, processing_receive.take_file_settlement()) {
+                        (Err(error), Some(pending)) => {
+                            let (caller, failure) = share_failure(error);
+                            let failure = Arc::new(failure);
+                            respond(&processing_reply, Err(caller));
+                            // 原任务继续持有原许可，只修复失败结算，不重试下载或保存。
+                            owner
+                                .recover_file_settlement(
+                                    pending,
+                                    &processing_receive,
+                                    failure.clone(),
+                                )
+                                .await;
+                            Processed::Recovered(failure)
+                        }
+                        (outcome, None) => Processed::Original(outcome),
+                        // 成功路径不应留下失败责任；保留责任并完成结算，不能静默释放。
+                        (Ok(_), Some(pending)) => {
+                            let (caller, failure) =
+                                share_failure(ApplyInboundError::Internal(SourceError::msg(
+                                    "successful receive retained unsettled file failure",
+                                )));
+                            let failure = Arc::new(failure);
+                            respond(&processing_reply, Err(caller));
+                            owner
+                                .recover_file_settlement(
+                                    pending,
+                                    &processing_receive,
+                                    failure.clone(),
+                                )
+                                .await;
+                            Processed::Recovered(failure)
+                        }
+                    }
                 }
                 .in_current_span(),
             ),
@@ -41,30 +79,37 @@ impl ApplyInboundClipboardUseCase {
         // 同一许可由处理与监督共同持有，异常登记完成前关闭不能返回成功。
         tokio::spawn(async move {
             let outcome = match task.await {
-                Ok(Ok(outcome)) => {
+                Ok(Processed::Original(Ok(outcome))) => {
                     receive_action.finish(Ok(()));
-                    Ok(Ok(outcome))
+                    Some(Ok(outcome))
                 }
-                Ok(Err(error)) if !receive_action.is_registered() => {
+                Ok(Processed::Original(Err(error))) if !receive_action.is_registered() => {
                     receive_action.batch.finish(false);
-                    Ok(Err(error))
+                    Some(Err(error))
                 }
-                Ok(Err(error)) => {
+                Ok(Processed::Original(Err(error))) => {
                     let (caller_error, shared) = share_failure(error);
                     receive_action.finish(Err(shared));
-                    Ok(Err(caller_error))
+                    Some(Err(caller_error))
+                }
+                Ok(Processed::Recovered(source)) => {
+                    receive_action.finish_shared(Err(source));
+                    None
                 }
                 Err(source) => {
                     let source = work.failed(source);
                     receive_action.finish(Err(ReceiveWorkError::Task(source.clone())));
-                    Err(ApplyInboundError::WorkFailed(source.into()))
+                    Some(Err(ApplyInboundError::WorkFailed(source.into())))
                 }
             };
             drop(work);
-            outcome?
-        })
-        .await
-        .map_err(|source| ApplyInboundError::WorkFailed(source.into()))?
+            if let Some(outcome) = outcome {
+                respond(&reply, outcome);
+            }
+        });
+        receiver
+            .await
+            .map_err(|source| ApplyInboundError::WorkFailed(source.into()))?
     }
 }
 
@@ -98,4 +143,18 @@ fn share_failure(error: ApplyInboundError) -> (ApplyInboundError, ReceiveWorkErr
         wrap(SourceError::new(shared.clone())),
         ReceiveWorkError::Action(SourceError::new(shared)),
     )
+}
+
+enum Processed {
+    Original(Result<ApplyOutcome, ApplyInboundError>),
+    Recovered(Arc<ReceiveWorkError>),
+}
+
+type Reply = Arc<Mutex<Option<oneshot::Sender<Result<ApplyOutcome, ApplyInboundError>>>>>;
+
+fn respond(reply: &Reply, outcome: Result<ApplyOutcome, ApplyInboundError>) {
+    if let Some(sender) = reply.lock().unwrap_or_else(PoisonError::into_inner).take() {
+        // discarded-source[channel]: 等待方已退出，原监督任务仍负责实际完成。
+        let _ = sender.send(outcome);
+    }
 }

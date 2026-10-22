@@ -1265,7 +1265,10 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                     } else {
                         ReceiveFileFailure::Failed(ReceiveItemFailureReason::StorageUnavailable)
                     };
-                    if let Err(settlement) = progress.fail_file(&artifact, failure).await {
+                    if let Err(settlement) = progress
+                        .fail_file(&artifact, failure, &receive_artifacts)
+                        .await
+                    {
                         return Err(FileFailureSettlementError {
                             cause: error,
                             settlement,

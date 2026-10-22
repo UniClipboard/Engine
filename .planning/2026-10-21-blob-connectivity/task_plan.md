@@ -19,7 +19,11 @@
 阶段 0 前置证明完成：SDK／Uni 完成等待、原始材料、当前授权、同内容隔离、协议向量、8 组旧资料矩阵与 1GiB 基线均有证据。阶段 1／2 推进：生产获取和提供端已接线，输出／解密及引用／tag 受监督；完整条目结算、部分失败、稳定重试与薄绑定继续。
 
 ## Next Step
-连续写入失败覆盖原双来源已红测并修复；真实Engine首／中／末保存故障、数据库重开事实、只重试原失败摘要及两项原成功路径／字节保留均通过。最终五crate库2236通过／9跳过，根门禁全通过，首次既有启动超时已保留，未改配置。下一片优先实际失败结算／关闭屏障验证ReceiveAction.finish清除持有者时原许可与保护提前释放，再落实原监督动作或既有reconciliation的明确完整移交；保持4／2及单一活跃负责人，无第二池／预算或Engine阶段接口。普通partial重投、未保存阶段计数、目录／表示预算与其余spec硬验收继续。
+原失败结算的资源责任切片已完成：同一动作持原许可／保护直到 FileFailed、剩余清理和原attempt全部结算；不重试数据保存／下载。真实Native默认无订阅者关闭及重复两轮均通过，实际暴露并修复主原因和additional任务超时汇总遗漏，真实混合失败仍保留。临时打印／Native订阅者已移除。最终同一源快照五crate库2241通过／9跳过（263.366秒），metadata812包、workspace全目标check（3m45s）、fmt、style、repository／隐私、diff全通过。已完成最后差异审查，接下来进入下述未完成范围。
+
+后续优先取实际证据处理未保存阶段计数（raw Completed 且无 failure_code 不等于已保存）以及保存失败后的物理清理失败责任；不要把当前 FileFailed 已完成物理清理的修复扩大声称为所有失败交接已完成。普通partial重投映射、准备拒绝交接、目录／表示完整预算、来源C、完整生命周期、受管1GiB及最终head网络／CI／设备矩阵仍全部保留，完整spec未完成。
+
+资源约束持续有效：用户设置16 GiB swap并明确resume；后续Cargo仍串行、CARGO_BUILD_JOBS=1，临时scope MemoryHigh=3 GiB／MemoryMax=5 GiB／MemorySwapMax=4 GiB及CPU／IO权重20，保持共享缓存和仓库target。先核对真实活动scope／PID与退出状态，不能因输出静默重启；当前 uni-blob-settlement-final-gates 已完整结束并自动回收。
 
 ## 错误
 - 探针锁 guard 编译错误已修复，probe.log 保留。

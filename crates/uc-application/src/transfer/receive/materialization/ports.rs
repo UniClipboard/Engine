@@ -76,6 +76,7 @@ pub(crate) trait ReceiveFileProgress: Send + Sync {
         &self,
         artifact: &ReceiveArtifact,
         failure: ReceiveFileFailure,
+        artifacts: &[ReceiveArtifact],
     ) -> Result<()>;
 
     async fn persist_file(

@@ -72,6 +72,7 @@ const RECENT_INBOUND_MAX_RECORDS: u64 = 128;
 
 mod owned;
 mod progress;
+mod settlement_recovery;
 use progress::FileProgress;
 
 #[derive(Clone)]

@@ -1003,3 +1003,20 @@ Application实际故障注入证实：文件保存StorageFull、失败事实结�
 首轮完整五crate库2235通过／1超时／9跳过（253.933秒），既有engine_start_builds_a_resumable_real_session超过原20秒；原样单测13.463秒通过。没有改超时、并发4、断言或生产启动逻辑，准确超时触发点未证实。最终同一源快照Core／Application／Engine／Storage／Content库2236通过／9跳过（215.351秒），该启动测试11.695秒通过；metadata812包、workspace全目标check（1m34s）、repository、fmt、Rust style、1349站点隐私及diff全部通过。手工审查负责人顺序、来源保留、定向故障的事务边界、实际保存结果和仅失败项重试；code-review skill缺失，未冒称技能审查。设备未执行仍跳过。
 
 下一片优先未完成结算的资源责任：ReceiveAction.finish仍通过ReceiveBatch.finish清除local_work／commit_handoff，文件失败事实本身尚未写成时原许可和保护仍会释放。须用实际失败结算／关闭屏障先取得证据，明确原监督动作或既有reconciliation的完整移交，直到真实结算才能归还4／2许可，不能以错误对象持资源、第二预算或仅内存持有者替代活跃负责人。普通已有partial重投映射、准备拒绝交接、目录／表示完整预算、未保存阶段计数、来源授权、生命周期、受管1GiB及最终head网络／CI／设备矩阵仍继续，完整spec未完成。
+
+
+- 当前未完成结算资源切片：原ReceiveAction监督者继续拥有同一work和下载持有者，前台可返回原失败／未完成，实际完成信号与资源不得随之释放。仅修复失败事实及清理日志／attempt结算，不重试原下载或数据保存，不新增持久队列、监督池或预算。先以实际Facade许可／本地保护和关闭屏障复现提前释放，再让同一监督动作在本地存储可用后完成既有结算并归还原4／2许可；失败保留来源，关闭五秒仅限制等待。恢复的阶段与幂等责任必须由同一流程负责，Engine不读取或编排内部步骤。
+
+### 2026-10-22 失败结算由原动作继续持有资源
+
+实际失败结算／关闭屏障首先证明：FileFailed 写入尚未成功时，原保护计数已由 1 变为 0。现由同一 ReceiveAction 的原处理与监督任务继续负责本地修复，一次性回复只让调用方先得到保留双来源的错误，不代表动作完成。原许可、内容保护和本地完成观察者保持到 FileFailed、剩余产物清理及原 attempt 的 NoEntry 结算都完成；修复只补记本地失败及清理责任，不重新下载或保存数据，不新增持久队列、监督池、预算或 Engine 步骤接口。Core 核对原身份及权威，已完成结果不可回退，取消赢得父尝试时沿真实取消结算。
+
+Application 实际 Facade／调度／文件输出屏障覆盖两个阶段：失败事实写入仍失败，以及失败事实已写入但父失败 CAS 仍失败。两阶段均保持原资源，五秒关闭只返回未完成，修复后原保护归零，保存调用仍仅一次，旧成功文件保持。该接缝的 capture／提交端明确为替身。
+
+真实 Engine／网络／V3／SQLite 场景同时拒绝第二项数据保存及失败事实写入，确认关闭不能完成；解除失败事实故障后由原动作完成结算，重新打开数据库核对原网络 Completed 不回退、storage_unavailable、attempt 终态及产物日志 settled／rolled_back，首项成功文件保持且没有后续网络获取。
+
+首轮新增 Native 场景暴露关闭分类遗漏：主原因期限到期，附加 TaskShutdownReport 仅有三项超时而无任务异常，原映射漏查附加报告并返回 Internal。临时订阅者改变调度导致偶然通过，移除后再次复现，失败记录均保留。现 Application 统一识别嵌套／共享生命周期报告与纯任务超时，只有全部原因均为期限且无任务异常才归类期限；Engine 删除只扫描主原因且忽略混合真实失败的旧分支。真实 TaskRegistry、StorageFull、权限拒绝和 panic 回归证明实际失败仍保留，不被超时遮住。临时打印与新增订阅者已全部移除，未改变原断言、100ms 调用期限或 nextest 配置。
+
+最终定向十五项通过（38.170秒）；默认无订阅者 Native 关闭又连续两轮通过（10.331／10.691秒）。最终同一源快照 Core／Application／Engine／Storage／Content 库2241通过／9跳过（263.366秒）；metadata解析812包，workspace全目标check（3m45s）、fmt、Rust style、repository、观测隐私及diff全部通过。用户设置 swap 后验证在临时资源限制中串行执行：单个构建任务、MemoryHigh 3 GiB、MemoryMax 5 GiB、MemorySwapMax 4 GiB、CPU／IO 权重20，保持共享缓存和仓库 target。
+
+本切片不代表其余预算与生命周期全部完成：普通已有 partial 重投映射、清理失败责任、准备拒绝交接、未保存阶段计数、目录／表示预算、来源 C、完整生命周期、受管1GiB及交付head网络／CI／设备矩阵仍须继续。完整 spec 保持未完成，设备未运行记为跳过。

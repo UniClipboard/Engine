@@ -14,7 +14,9 @@ use uc_observability_contract::wire_enum;
 
 mod catalog;
 mod clear;
+mod settlement;
 pub(crate) use catalog::{PlannedReceiveItem, ReceiveRepresentation, ReceiveSource};
+pub(crate) use settlement::UnsettledFile;
 
 type Completion = Option<Result<(), Arc<ReceiveWorkError>>>;
 type Key = (EntryId, String);
@@ -96,6 +98,7 @@ pub(crate) struct ReceiveAction {
     registry: Arc<ReceiveWorkRegistry>,
     progress: Mutex<Option<Arc<Progress>>>,
     previous_receipt: Mutex<Option<catalog::ReceiveReceipt>>,
+    file_settlement: Mutex<Option<UnsettledFile>>,
     generation: CancellationToken,
     birth: Arc<Birth>,
 }
@@ -162,6 +165,7 @@ impl ReceiveWorkRegistry {
             registry: self.clone(),
             progress: Mutex::new(None),
             previous_receipt: Mutex::new(None),
+            file_settlement: Mutex::new(None),
             generation,
             birth,
         })
@@ -345,7 +349,10 @@ impl ReceiveAction {
     }
 
     pub(crate) fn finish(&self, result: Result<(), ReceiveWorkError>) {
-        let result = result.map_err(Arc::new);
+        self.finish_shared(result.map_err(Arc::new));
+    }
+
+    pub(crate) fn finish_shared(&self, result: Result<(), Arc<ReceiveWorkError>>) {
         if let Err(source) = &result {
             self.batch
                 .fail_unsettled_files(Arc::new(SourceError::new(source.clone())));

@@ -401,3 +401,32 @@ Application实际故障注入证实：文件保存StorageFull、失败事实结�
 首轮完整五crate库2235通过／1超时／9跳过（253.933秒），既有engine_start_builds_a_resumable_real_session超过原20秒；原样单测13.463秒通过。没有改超时、并发4、断言或生产启动逻辑，准确超时触发点未证实。最终同一源快照Core／Application／Engine／Storage／Content库2236通过／9跳过（215.351秒），该启动测试11.695秒通过；metadata812包、workspace全目标check（1m34s）、repository、fmt、Rust style、1349站点隐私及diff全部通过。手工审查负责人顺序、来源保留、定向故障的事务边界、实际保存结果和仅失败项重试；code-review skill缺失，未冒称技能审查。设备未执行仍跳过。
 
 下一片优先未完成结算的资源责任：ReceiveAction.finish仍通过ReceiveBatch.finish清除local_work／commit_handoff，文件失败事实本身尚未写成时原许可和保护仍会释放。须用实际失败结算／关闭屏障先取得证据，明确原监督动作或既有reconciliation的完整移交，直到真实结算才能归还4／2许可，不能以错误对象持资源、第二预算或仅内存持有者替代活跃负责人。普通已有partial重投映射、准备拒绝交接、目录／表示完整预算、未保存阶段计数、来源授权、生命周期、受管1GiB及最终head网络／CI／设备矩阵仍继续，完整spec未完成。
+
+### 2026-10-22 原失败结算责任继续执行（进行中）
+
+- 本轮状态为进展：实际修改原处理／监督任务，而非只保留错误或孤立许可。`UnsettledFile` 只保存原尝试及清理资料；原 `ReceiveAction` 和原处理任务继续持有原下载资源，调用者经一次性回复先得到完整失败链。
+- 已有屏障在修改前实际失败：`unsettled-resource-red.log` 显示保护计数预期 1、实际 0。新增用例还要求失败事实成功写入但父失败 CAS 继续失败时保留资源，全部修复后才释放；保存调用不得重复。
+- 修复只补记 FileFailed、清理剩余受管产物和结算原尝试；没有重新下载／保存、第二额度池、持久重试队列或新增 Engine 步骤接口。局部失败以固定分类记录，按 1／2／4／8／16／30 秒退避，五秒仅约束外部等待。Core 校验原身份、取消胜出与已完成拒绝。
+- 新增真实 Engine／网络／V3／SQLite 故障用例：首项保存，第二项保存和失败事实均由 SQLite 触发器拒绝；关闭应超时，解除失败事实故障后由原动作结算，保持首项文件并不启动后项。此项尚待执行，不以 fake 仓储通过代替。
+- 编译验证两次被信号 15 终止（green.log、green-current.log），均无测试结果；首次期间实测可用内存约 278 MiB、无 swap、内存／IO 压力高，后续内存恢复。尚无证据断言信号来源，不能把中断记作断言失败或通过。`green-final.log` 正在重新验证。
+- Rust 风格检查和 diff check 已通过；完整 Cargo／Native／仓库门禁仍未完成。普通既有 partial 再投递、清理失败责任移交、目录单元、来源 C 和完整矩阵等原范围保持未完成。
+
+### 本机构建资源约束（用户最新反馈）
+
+用户反馈每次验证导致本机卡死。已停止恢复／重启本机构建；最后进程检查没有 cargo、rustc、mbx 或 just 构建进程。不得沿前文继续自动重跑：先确定并落实可控的内存限制或其他验证环境，再恢复编译测试。现有代码保留且未验证，不宣称通过。实测机器 15 GiB、无 swap，先前 rustc 约 2.5 GiB，内存及 IO 压力高；不能推断所有临时内存均由本任务产生。
+
+### 用户设置 swap 后恢复验证
+
+用户明确 /goal resume；已确认 16 GiB swap 生效，可用约 13 GiB。沿原工作树恢复：构建通过临时 systemd scope 限制 MemoryHigh=3 GiB、MemoryMax=5 GiB、MemorySwapMax=4 GiB、CPUWeight／IOWeight=20，CARGO_BUILD_JOBS=1。保持共享缓存与仓库 target，验证串行执行，不因日志静默重复启动。首先只验证原失败结算资源屏障；完整 spec 范围不变。
+
+资源受限验证首个结果：实际原许可／内容保护屏障通过（1项，15.01秒），同时验证 FileFailed 落库仍失败及 FileFailed 已成功而父失败 CAS 仍失败两个阶段；恢复后保存调用仍为1、原成功文件保留、资源归0。日志 `unsettled-bounded-target.log`，退出码0。默认特性下 Core／Application／Engine 定向28项通过（25.135秒），日志 `unsettled-bounded-related.log`；核对清单后确认它没有包含 dev-tools 下的真实 Engine 接收用例，不能冒称 Native 通过。已显式启用 dev-tools 单独执行 save_failure 模块4项（`unsettled-bounded-native.log`），结果待定。构建 scope 实测内存峰值约3 GiB、swap峰值约1.03 GiB；不更改缓存或 target，不调整测试超时。
+
+真实 Native 首轮4项结果：3通过、1失败（37.054秒）；新关闭场景实际返回 Engine 1108／Internal／retryable，而非预期 DeadlineExceeded；独立重跑9.352秒复现同一结果，保留 `unsettled-bounded-native.log` 与 `unsettled-bounded-native-diagnosis.log`，不放宽关闭期限或断言。随后真实单测证明嵌套报告的纯期限被 is_deadline_elapsed 误判，`unsettled-nested-deadline-red.log` 为0通过／1失败。已实现只递归识别既有 LifecycleError／Arc 报告，必须全部原因都是期限才分类 deadline，混合 StorageFull 仍为实际失败且来源保留；它是否解释 Native 失败须经重跑确认，尚未宣称根因已关闭。
+
+嵌套期限修复后的5项回归：纯分类与原3个Native通过，新关闭场景仍为1108／Internal（4通过／1失败，37.834秒），故该纯分类缺口不是此次Native失败的充分解释。已临时在 Engine lifecycle.rs 的 cfg(test) 中采集固定报告类别／任务计数／IO或SQL枚举种类，并在Native测试使用既有TaskJoinFailures收集器；不得输出原source正文或路径。当前 `unsettled-native-typed-diagnosis.log` 单独重跑；定位后必须移除临时report_shutdown_classes及其调用，不能携带eprintln诊断交付。
+
+诊断证实实际差异：未安装订阅者的失败报告主原因仅期限到期，additional含TaskShutdownReport（timed_out_count=3，join_error_count=0），故先前只递归LifecycleError的修复不足。启用TaskJoinFailures订阅者改变调度，三次偶然通过（不能当根因修复）；去除订阅者后原样失败，`unsettled-native-no-subscriber-diagnosis.log`保存固定分类证据。现统一由Application LifecycleError识别全部原因中的真实纯超时TaskShutdownReport，join_error>0不能分类为期限；Engine删除仅扫描primary且只看timed_out>0的旧分支，避免同时有真实失败时误报期限。新增实际TaskRegistry超时／panic和混合StorageFull回归，完整source未丢失。已移除全部临时eprintln/report_shutdown_classes及Native订阅者；现无订阅者验证（unsettled-aggregate-and-native-final.log）进行中，断言及100ms调用期限未改变。
+
+最终定向验证15项全部通过（38.170秒），包括默认无订阅者Native关闭场景10.069秒、原资源双阶段失败屏障15.011秒、真实TaskRegistry超时及混合panic／StorageFull分类；日志 unsettled-aggregate-and-native-final.log。当前已启动唯一scope uni-blob-settlement-final-gates：先重复无订阅者Native两轮，再显式dev-tools运行五crate库、metadata、workspace全目标check、fmt、style、repository及diff；阶段见 unsettled-final-stage.log，结果尚待检查。所有Cargo保持串行与原资源限制。
+
+最终交付验证：无订阅者 Native 再次连续两轮10.331／10.691秒通过；同一源快照显式 uc-engine/dev-tools 的 Core／Application／Engine／Storage／Content 库2241通过／9跳过（263.366秒），既有startup测试12.017秒通过。metadata812包、workspace全目标check（3m45s）、fmt、Rust style、repository与观测隐私、diff全通过，unsettled-final-stage.log=complete、unsettled-final-gates.exit.log=0。资源scope已自动回收，最终峰值计数不可读，不能把执行期间约2–3 GiB样本冒称最终峰值；配置上限始终5 GiB内存／4 GiB swap，未清缓存或更换target。手工审查原许可／内容所有权、调用者退出与真实完成分离、逐阶段修复、已交付结果优先、终态不可回退、source链、超时混合真实失败以及临时诊断删除；code-review skill缺失，不冒称技能审查。完整spec及设备矩阵仍未完成，未执行设备仍跳过。

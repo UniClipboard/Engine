@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use tokio::task::JoinHandle;
 use uc_application::deps::{LifecycleError, RuntimeLifecyclePort, TransitionContext};
 use uc_application::facade::NetworkRecoveryRequestError;
-use uc_core::{FileTransferCancellationReason, TaskShutdownReport};
+use uc_core::FileTransferCancellationReason;
 use uc_observability_contract::diagnostics::{record_task_join_failure, DiagnosticTaskKind};
 
 use super::SessionSupervisor;
@@ -33,13 +33,6 @@ pub(in super::super) fn lifecycle_error(error: LifecycleError) -> EngineError {
         return EngineError::new(1108, EngineErrorCategory::Internal, false);
     }
     if error.is_deadline_elapsed() {
-        return EngineError::new(1106, EngineErrorCategory::DeadlineExceeded, true);
-    }
-    if source
-        .chain()
-        .filter_map(|source| source.downcast_ref::<TaskShutdownReport>())
-        .any(|report| report.timed_out_count > 0)
-    {
         return EngineError::new(1106, EngineErrorCategory::DeadlineExceeded, true);
     }
     source
@@ -139,7 +132,8 @@ mod tests {
     use uc_application::facade::RebuildNetworkSessionError;
 
     use crate::testing::TaskJoinFailures;
-    use uc_core::TaskRegistry;
+    use tokio::sync::oneshot;
+    use uc_core::{TaskRegistry, TaskShutdownReport};
 
     #[tokio::test]
     async fn operation_drain_failure_keeps_the_session_available_to_in_flight_work() {
@@ -190,6 +184,67 @@ mod tests {
         assert_eq!(
             lifecycle_error(outer),
             EngineError::new(1106, EngineErrorCategory::DeadlineExceeded, true)
+        );
+    }
+
+    async fn timeout_report() -> TaskShutdownReport {
+        let tasks = TaskRegistry::new();
+        assert!(tasks.spawn(|_| std::future::pending()).await);
+        tasks
+            .shutdown(Duration::ZERO)
+            .await
+            .into_result()
+            .unwrap_err()
+    }
+
+    #[tokio::test]
+    async fn task_deadline_mapping_accounts_for_all_participant_failures() {
+        let error = LifecycleError {
+            primary: anyhow::Error::new(timeout_report().await).context("stop session tasks"),
+            additional: vec![
+                anyhow::Error::new(timeout_report().await).context("stop process tasks")
+            ],
+        };
+        assert_eq!(
+            lifecycle_error(error),
+            EngineError::new(1106, EngineErrorCategory::DeadlineExceeded, true)
+        );
+        let mixed = LifecycleError {
+            primary: timeout_report().await.into(),
+            additional: vec![std::io::Error::from(std::io::ErrorKind::StorageFull).into()],
+        };
+        assert_eq!(
+            lifecycle_error(mixed),
+            EngineError::new(1108, EngineErrorCategory::Internal, true)
+        );
+
+        let tasks = TaskRegistry::new();
+        let (entered, ready) = oneshot::channel();
+        assert!(
+            tasks
+                .spawn(move |_| async move {
+                    let _ = entered.send(());
+                    panic!("test participant task failure");
+                })
+                .await
+        );
+        ready.await.unwrap();
+        assert!(tasks.spawn(|_| std::future::pending()).await);
+        let report = tasks
+            .shutdown(Duration::ZERO)
+            .await
+            .into_result()
+            .unwrap_err();
+        assert_eq!(report.timed_out_count, 1);
+        assert_eq!(report.join_error_count, 1);
+        assert!(report.failures().iter().any(|source| source.is_panic()));
+        let mixed = LifecycleError {
+            primary: report.into(),
+            additional: Vec::new(),
+        };
+        assert_eq!(
+            lifecycle_error(mixed),
+            EngineError::new(1108, EngineErrorCategory::Internal, true)
         );
     }
 

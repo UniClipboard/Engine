@@ -297,9 +297,63 @@ async fn failure_settlement_error_preserves_both_sources_and_keeps_attempt_nonte
             .count(),
         1
     );
+    assert_eq!(
+        protected.load(Ordering::SeqCst),
+        1,
+        "失败事实尚未结算，原保护和许可必须仍由实际负责人持有"
+    );
+    assert!(
+        matches!(transport.shutdown(BlobShutdownWait::Bounded).await,
+        Err(error) if error.kind == crate::transfer::blob::transport::BlobExchangeFailure::ShutdownIncomplete)
+    );
+    assert_eq!(protected.load(Ordering::SeqCst), 1);
+    fixture
+        .attempts
+        .fail_file_settlement
+        .store(false, Ordering::SeqCst);
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if !fixture.attempts.file_failures.lock().unwrap().is_empty()
+                && fixture.attempts.failure_begin_calls.load(Ordering::SeqCst) > 0
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        protected.load(Ordering::SeqCst),
+        1,
+        "单项失败已记录但父尝试仍未结算，原资源仍须保留"
+    );
+    assert_eq!(
+        *fixture.attempts.state.lock().unwrap(),
+        AttemptState::Receiving
+    );
+    fixture
+        .attempts
+        .fail_begin_failure
+        .store(false, Ordering::SeqCst);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        transport.shutdown(BlobShutdownWait::Complete),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    apply.shutdown().await.unwrap();
     assert_eq!(protected.load(Ordering::SeqCst), 0);
-    transport
-        .shutdown(BlobShutdownWait::Complete)
-        .await
-        .unwrap();
+    assert_eq!(
+        fixture.capture.progress_calls.load(Ordering::SeqCst),
+        1,
+        "本地结算恢复不重新保存数据或启动后续文件"
+    );
+    assert_eq!(fixture.attempts.file_failures.lock().unwrap().len(), 1);
+    assert_eq!(std::fs::read(&fixture.saved).unwrap(), b"success");
+    assert_eq!(
+        *fixture.attempts.state.lock().unwrap(),
+        AttemptState::Failed
+    );
 }

@@ -13,3 +13,8 @@ mod receive_settlement;
 pub use receive_settlement::{
     ReceiveFileSettlement, ReceiveFileSettlementEffect, ReceiveFileSettlementInput,
 };
+
+mod receive_recovery;
+pub use receive_recovery::{
+    receive_failure_recovery_action, ReceiveFailureRecoveryAction, ReceiveFailureRecoveryRefusal,
+};
