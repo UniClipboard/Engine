@@ -1079,7 +1079,7 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                             return Err(output_cleanup_failure(
                                 progress.as_deref(),
                                 artifact.as_ref(),
-                                ReceiveOutputFailure::FetchFailure,
+                                ReceiveOutputFailure::PreparationFailure,
                                 &receive_artifacts,
                                 artifact_journaled,
                                 cleanup,
@@ -1103,14 +1103,30 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                                 e,
                             ));
                         }
-                        receive_artifacts.pop();
-                        artifact_journaled |= self
-                            .record_receive_artifacts(
-                                &receiver_entry_id,
-                                attempt_id.as_deref(),
-                                &receive_artifacts,
-                            )
-                            .await?;
+                        if let (Some(progress), Some(artifact)) =
+                            (progress.as_deref(), artifact.as_ref())
+                        {
+                            if let Err(settlement) = progress
+                                .clean_file(artifact, true, &receive_artifacts, &e)
+                                .await
+                            {
+                                return Err(FileFailureSettlementError {
+                                    cause: e,
+                                    settlement,
+                                }
+                                .into());
+                            }
+                            receive_artifacts.pop();
+                        } else {
+                            receive_artifacts.pop();
+                            artifact_journaled |= self
+                                .record_receive_artifacts(
+                                    &receiver_entry_id,
+                                    attempt_id.as_deref(),
+                                    &receive_artifacts,
+                                )
+                                .await?;
+                        }
                     }
                     uc_warn!(
                         idx = idx,
@@ -1168,14 +1184,30 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                                 e,
                             ));
                         }
-                        receive_artifacts.pop();
-                        artifact_journaled |= self
-                            .record_receive_artifacts(
-                                &receiver_entry_id,
-                                attempt_id.as_deref(),
-                                &receive_artifacts,
-                            )
-                            .await?;
+                        if let (Some(progress), Some(artifact)) =
+                            (progress.as_deref(), artifact.as_ref())
+                        {
+                            if let Err(settlement) = progress
+                                .clean_file(artifact, false, &receive_artifacts, &e)
+                                .await
+                            {
+                                return Err(FileFailureSettlementError {
+                                    cause: e,
+                                    settlement,
+                                }
+                                .into());
+                            }
+                            receive_artifacts.pop();
+                        } else {
+                            receive_artifacts.pop();
+                            artifact_journaled |= self
+                                .record_receive_artifacts(
+                                    &receiver_entry_id,
+                                    attempt_id.as_deref(),
+                                    &receive_artifacts,
+                                )
+                                .await?;
+                        }
                     }
                     uc_warn!(
                         idx = idx,

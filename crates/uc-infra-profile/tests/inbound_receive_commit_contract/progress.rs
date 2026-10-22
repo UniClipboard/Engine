@@ -1,4 +1,6 @@
 //! 逐项保存使用真实SQLite及产物AEAD；恢复只允许清理尚未交付的产物。
+#[path = "file_cleanup.rs"]
+mod file_cleanup;
 #[path = "file_failure.rs"]
 mod file_failure;
 #[path = "progress_v3.rs"]

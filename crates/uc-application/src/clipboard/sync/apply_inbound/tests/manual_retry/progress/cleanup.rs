@@ -1,4 +1,5 @@
 //! 保存和物理清理均失败时，原动作仍承担结算；已清理路径不能重复删除。
+mod journal;
 use super::*;
 use crate::transfer::receive::materialization::FileFailureSettlementError;
 
@@ -111,6 +112,7 @@ async fn failed_or_cancelled_fetch_cleanup_retains_resources_without_completed_f
         let failure = Arc::new(FailedFileExport {
             output: Mutex::new(None),
             cancelled,
+            obstruct_cleanup: true,
         });
         let (facade, transport, protected) = local_file_probe(Some(failure.clone()));
         let apply = fixture

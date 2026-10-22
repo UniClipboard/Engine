@@ -36,13 +36,14 @@ use uc_core::ids::{DeviceId, EntryId, FormatId, RepresentationId};
 use uc_core::ports::blob::{BlobDigest, BlobTicket, PlaintextHash};
 use uc_core::ports::clipboard::{FindEntryIdBySnapshotHashPort, TouchClipboardEntryPort};
 use uc_core::ports::{
-    AttemptError, AttemptState, BeginReceiveAttemptPort, BeginReceiveFailureOutcome,
-    BeginReceiveFailurePort, BeginReceiveOutcome, ClaimReceiveCommitPort, ClockPort,
-    CommitInboundReceivePort, EntryReceiveAttempt, FinalizeProvisionalReceivePort,
-    GetEntryAttemptPort, InboundReceiveCommitError, InboundReceiveSettlement,
-    ProvisionalReceiveAction, ProvisionalReceiveError, PublishLogError, PublishPhase,
-    ReceiveItemRole, RecordDirectoryPublishPort, RequestReceiveCancellationOutcome,
-    RequestReceiveCancellationPort,
+    receive_file_settlement_decision, AttemptError, AttemptState, BeginReceiveAttemptPort,
+    BeginReceiveFailureOutcome, BeginReceiveFailurePort, BeginReceiveOutcome,
+    ClaimReceiveCommitPort, ClockPort, CommitInboundReceivePort, EntryReceiveAttempt,
+    FinalizeProvisionalReceivePort, GetEntryAttemptPort, InboundReceiveCommitError,
+    InboundReceiveSettlement, ProvisionalReceiveAction, ProvisionalReceiveError, PublishLogError,
+    PublishPhase, ReceiveFileSettlementDecision, ReceiveFileSettlementRecord, ReceiveItemRole,
+    RecordDirectoryPublishPort, RequestReceiveCancellationOutcome, RequestReceiveCancellationPort,
+    TrackedFileTransferStatus,
 };
 use uc_core::{
     FileDisplayMetadata, FileDisplayMetadataEntry, MimeType, ObservedClipboardRepresentation,
@@ -329,7 +330,17 @@ impl CommitInboundReceivePort for AttemptGate {
             InboundReceiveSettlement::FileFailed {
                 artifact, failure, ..
             } => {
-                assert!(failure.accepts_attempt(*self.state.lock().unwrap()));
+                assert_eq!(
+                    receive_file_settlement_decision(
+                        Some(*self.state.lock().unwrap()),
+                        ReceiveFileSettlementRecord::Tracked {
+                            network: TrackedFileTransferStatus::Completed,
+                            delivered: false
+                        },
+                        Some(*failure)
+                    ),
+                    ReceiveFileSettlementDecision::Allowed
+                );
                 if self.fail_file_settlement.load(Ordering::SeqCst) {
                     return Err(InboundReceiveCommitError::Backend(Box::new(
                         std::io::Error::from(std::io::ErrorKind::PermissionDenied),
@@ -339,6 +350,25 @@ impl CommitInboundReceivePort for AttemptGate {
                     .lock()
                     .unwrap()
                     .push((artifact.item_id.clone(), *failure));
+                return Ok(());
+            }
+            InboundReceiveSettlement::FileCleaned { .. } => {
+                assert_eq!(
+                    receive_file_settlement_decision(
+                        Some(*self.state.lock().unwrap()),
+                        ReceiveFileSettlementRecord::Tracked {
+                            network: TrackedFileTransferStatus::Failed,
+                            delivered: false
+                        },
+                        None
+                    ),
+                    ReceiveFileSettlementDecision::Allowed
+                );
+                if self.fail_file_settlement.load(Ordering::SeqCst) {
+                    return Err(InboundReceiveCommitError::Backend(Box::new(
+                        std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+                    )));
+                }
                 return Ok(());
             }
             InboundReceiveSettlement::Progress { attempt_id, .. } => {

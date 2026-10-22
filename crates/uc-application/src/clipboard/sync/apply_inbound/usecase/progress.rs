@@ -28,6 +28,28 @@ pub(super) struct FileProgress {
     pub(super) from_device: DeviceId,
 }
 impl FileProgress {
+    fn pending_file(
+        &self,
+        artifact: &ReceiveArtifact,
+        failure: ReceiveOutputFailure,
+        artifacts: &[ReceiveArtifact],
+        output_cleanup_pending: bool,
+        has_artifact_journal: bool,
+    ) -> UnsettledFile {
+        UnsettledFile {
+            entry: self.entry.clone(),
+            attempt: self.attempt.clone(),
+            artifact: artifact.clone(),
+            failure,
+            remaining: artifacts
+                .iter()
+                .filter(|item| item.item_id != artifact.item_id)
+                .cloned()
+                .collect(),
+            output_cleanup_pending,
+            has_artifact_journal,
+        }
+    }
     pub(super) fn has_saved(&self) -> bool {
         self.saved.load(Ordering::SeqCst)
     }
@@ -49,19 +71,50 @@ impl ReceiveFileProgress for FileProgress {
                 cause,
             );
         }
-        self.action.defer_file_settlement(UnsettledFile {
-            entry: self.entry.clone(),
-            attempt: self.attempt.clone(),
-            artifact: artifact.clone(),
+        self.action.defer_file_settlement(self.pending_file(
+            artifact,
             failure,
-            remaining: artifacts
-                .iter()
-                .filter(|item| item.item_id != artifact.item_id)
-                .cloned()
-                .collect(),
-            output_cleanup_pending: true,
+            artifacts,
+            true,
             has_artifact_journal,
-        });
+        ));
+    }
+
+    async fn clean_file(
+        &self,
+        artifact: &ReceiveArtifact,
+        cancelled: bool,
+        artifacts: &[ReceiveArtifact],
+        cause: &SourceError,
+    ) -> Result<()> {
+        let ports = self
+            .owner
+            .receive_attempts
+            .as_ref()
+            .ok_or_else(|| anyhow!("file settlement ports are not wired"))?;
+        let failure = if cancelled {
+            ReceiveOutputFailure::FetchCancellation
+        } else {
+            ReceiveOutputFailure::FetchFailure
+        };
+        self.action
+            .batch
+            .unsettled_fetch_failure(&artifact.item_id, cancelled, cause);
+        ports
+            .commit
+            .commit_inbound_receive(&InboundReceiveSettlement::FileCleaned {
+                entry_id: self.entry.clone(),
+                attempt_id: self.attempt.clone(),
+                artifact: artifact.clone(),
+                now_ms: ports.clock.now_ms(),
+            })
+            .await
+            .map_err(|source| {
+                self.action.defer_file_settlement(
+                    self.pending_file(artifact, failure, artifacts, false, true),
+                );
+                SourceError::new(source)
+            })
     }
 
     async fn fail_file(
@@ -86,19 +139,13 @@ impl ReceiveFileProgress for FileProgress {
             })
             .await
             .map_err(|source| {
-                self.action.defer_file_settlement(UnsettledFile {
-                    entry: self.entry.clone(),
-                    attempt: self.attempt.clone(),
-                    artifact: artifact.clone(),
-                    failure: ReceiveOutputFailure::FileCommit(failure),
-                    output_cleanup_pending: false,
-                    has_artifact_journal: true,
-                    remaining: artifacts
-                        .iter()
-                        .filter(|item| item.item_id != artifact.item_id)
-                        .cloned()
-                        .collect(),
-                });
+                self.action.defer_file_settlement(self.pending_file(
+                    artifact,
+                    ReceiveOutputFailure::FileCommit(failure),
+                    artifacts,
+                    false,
+                    true,
+                ));
                 anyhow::Error::new(source)
             })?;
         Ok(())

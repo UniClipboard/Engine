@@ -173,7 +173,8 @@ impl CommitInboundReceivePort for EncryptingInboundReceiveCommit {
                 now_ms: *now_ms,
             },
             InboundReceiveSettlement::NoEntry { .. }
-            | InboundReceiveSettlement::FileFailed { .. } => {
+            | InboundReceiveSettlement::FileFailed { .. }
+            | InboundReceiveSettlement::FileCleaned { .. } => {
                 return self.inner.commit_inbound_receive(settlement).await;
             }
         };

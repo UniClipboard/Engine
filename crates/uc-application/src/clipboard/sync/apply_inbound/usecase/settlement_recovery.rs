@@ -22,11 +22,11 @@ impl ApplyInboundClipboardUseCase {
         source: Arc<ReceiveWorkError>,
     ) {
         let mut output_cleaned = !pending.output_cleanup_pending;
-        let mut file_recorded = false;
+        let mut item_acknowledged = false;
         let mut delay = Duration::from_secs(1);
         loop {
             match self
-                .repair_file_settlement(&pending, &mut output_cleaned, &mut file_recorded)
+                .repair_file_settlement(&pending, &mut output_cleaned, &mut item_acknowledged)
                 .await
             {
                 Ok(terminal) => {
@@ -68,7 +68,7 @@ impl ApplyInboundClipboardUseCase {
         &self,
         pending: &UnsettledFile,
         output_cleaned: &mut bool,
-        file_recorded: &mut bool,
+        item_acknowledged: &mut bool,
     ) -> Result<PartialReceiveTerminal, ApplyInboundError> {
         let ports = self.receive_attempts.as_ref().ok_or_else(|| {
             ApplyInboundError::Internal(anyhow!("file settlement ports are not wired"))
@@ -80,21 +80,35 @@ impl ApplyInboundClipboardUseCase {
             // 清理成功后不再触碰相同路径；存储重试期间该路径可能已被重新使用。
             *output_cleaned = true;
         }
-        if let ReceiveOutputFailure::FileCommit(failure) = pending.failure {
-            if !*file_recorded {
-                ports
-                    .commit
-                    .commit_inbound_receive(&InboundReceiveSettlement::FileFailed {
+        if !*item_acknowledged {
+            let settlement = match pending.failure {
+                ReceiveOutputFailure::FileCommit(failure) => {
+                    Some(InboundReceiveSettlement::FileFailed {
                         entry_id: pending.entry.clone(),
                         attempt_id: pending.attempt.clone(),
                         artifact: pending.artifact.clone(),
                         failure,
                         now_ms: ports.clock.now_ms(),
                     })
+                }
+                ReceiveOutputFailure::FetchFailure | ReceiveOutputFailure::FetchCancellation => {
+                    Some(InboundReceiveSettlement::FileCleaned {
+                        entry_id: pending.entry.clone(),
+                        attempt_id: pending.attempt.clone(),
+                        artifact: pending.artifact.clone(),
+                        now_ms: ports.clock.now_ms(),
+                    })
+                }
+                ReceiveOutputFailure::PreparationFailure => None,
+            };
+            if let Some(settlement) = settlement {
+                ports
+                    .commit
+                    .commit_inbound_receive(&settlement)
                     .await
                     .map_err(|error| ApplyInboundError::Internal(SourceError::new(error)))?;
-                *file_recorded = true;
             }
+            *item_acknowledged = true;
         }
         // CAS 后重新读取权威；取消可赢得父尝试，但不得覆盖已交付成功项。
         loop {

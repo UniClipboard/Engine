@@ -82,7 +82,8 @@ impl CommitInboundReceivePort for RecordingCommit {
                 record
             }
             InboundReceiveSettlement::NoEntry { .. }
-            | InboundReceiveSettlement::FileFailed { .. } => return Ok(()),
+            | InboundReceiveSettlement::FileFailed { .. }
+            | InboundReceiveSettlement::FileCleaned { .. } => return Ok(()),
         };
         let representations = match record {
             InboundReceiveRecord::Create {

@@ -1054,3 +1054,17 @@ Application完整重试／实际Facade／实际文件系统拒绝与明确captur
 最终相关App26项通过（26.187秒）；默认无新增订阅者Native六项通过（58.593秒），新增导出失败场景10.257秒。Native使用原EventStream完整结果通知，实际网络／V3／SQLite证明旧成功文件不变、100ms关闭等待、解除故障后原网络Failed及storage_unavailable保持、重开日志settled／rolled_back且未启动后项。metadata812包、workspace全目标check（3m18s）、fmt、Rust style、repository／1350隐私站点及diff全部通过。手工审查同一任务／许可、来源、实际journaled与原CAS、网络终态不回退，无可用code-review skill；未重复宣称旧快照全量结果为本次结果。未运行设备仍跳过。
 
 本轮只证明获取／取消及准备失败分支的物理清理拒绝交接。准备路径目前只有共用分支与既有直接物化测试，尚未完成实际Engine准备失败矩阵；物理清理成功后重写产物日志失败、目录／表示、普通已有partial重投、交接本身失败的网络分类及其余完整spec继续，不把该片当全部恢复完成。
+
+- 当前获取失败产物交接切片：原transfer接收负责人保持完整责任，调用方仍仅提交原接收／重试。输出物理清理已经成功而后续清理日志写入失败时，保留原获取／取消source、原许可和既有日志，不能返回假结算。先通过原Facade及真实文件删除、明确日志故障取得双来源／资源红测；若确认需新原子能力，仅扩展既有完整提交port来验证并解除已经Failed／Cancelled文件的清理责任，Core保存规则、Infra在同一原事务内认证AEAD与当前attempt／文件事实，不改网络终态或新增schema。准备失败时本项未记入日志与网络生命周期写入失败时raw尚非终态须明确区别，不能伪造完成。取消／关闭仍持原资源并按既有CAS／启动恢复；真实SQLite回滚、旧成功文件和Native完整接收负责验收。
+
+### 2026-10-22 获取失败后已删除输出的原子交接
+
+实际Facade／导出失败及实际文件删除的红测证明：后续清空产物日志被拒绝后，原保护与原获取source为(0,false)，期望(1,true)，0.008秒失败。原完整提交能力现增加FileCleaned，Core统一判定当前开放尝试、已交付优先及文件结果，Infra认证原AEAD并在同一事务内校验和移除本项；普通网络Failed／Cancelled保留原字段，不复用只接受Completed的FileFailed。两种结算失败均由原ReceiveAction、原任务和原资源继续修复，不重删已清理路径，不重新获取／保存，无新schema、持久格式、池或Engine内部接口。
+
+Core／App首轮29项通过（28.178秒），真实Profile阶段编译E0599发现状态枚举只提供from_str_value，已使用原入口；随后41项实际存储／加密契约通过（1.748秒）。审查将唯一事实读取限制为两行，未知／重复记录不采用第一条或补造默认状态。合法准备状态的新增实际SQLite红测又证明：已有认证产物、输出已清理、但网络登记尚未成功时被错误拒绝（0.072秒）。Core现明确区分Missing、Tracked和Unusable：仅普通清理允许缺失且不补造网络记录，本地保存失败仍要求Completed；未知／重复／活动／已交付记录继续拒绝。准备失败有独立内部意图，不把目标准备错误当作已完成网络文件。
+
+最终同一源快照Core／App30项通过（27.159秒），真实Profile SQLite／AEAD／加密42项通过（1.721秒），包括Failed／Cancelled重开、错误状态、已交付保护、过期attempt、坏AEAD、未知／重复、SQL原子回滚且具体追溯原Diesel错误、合法未登记产物。完整真实Engine接收／重试14项通过（99.672秒）；新增第二项网络登记被定向SQL拒绝的场景9.318秒通过，首／三项正常交付、失败项临时输出实际删除、状态不永久Receiving、不补造网络行；解除故障后通过原稳定操作仅补取该项，原成功文件路径与字节不变。
+
+metadata812包、workspace全目标check（3m52s）、fmt、Rust style、repository／1350隐私站点及diff全部通过。没有放宽原超时、并发或断言，没有新增观测订阅者。手工审查原始资源连续性、原attempt／AEAD／唯一记录、已交付保护和网络终态不回退，无可用code-review skill；未运行设备仍跳过。所有Cargo继续在单任务、3 GiB MemoryHigh／5 GiB MemoryMax／4 GiB MemorySwapMax和低CPU／IO权重中执行，保留原共享target与MBX。
+
+本轮不代表准备／最终交接的全部写入失败已经恢复：已经形成非终态网络记录而终态写入失败仍须由原网络负责人修复，不能按缺失规则绕过。普通已有partial重投映射、表示／目录完整预算与清理、全生命周期、受管1GiB、最终head网络／CI／设备矩阵及业务记录验收继续，完整spec未完成。

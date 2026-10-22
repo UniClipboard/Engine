@@ -458,3 +458,13 @@ Application实际故障注入证实：文件保存StorageFull、失败事实结�
 - 分类修复后的App26项通过（26.187秒），包含清理阻塞时StorageUnavailable／Cancelled查询、原保护仍持有，以及关闭保留原Store／StorageFull。Native同源重跑仍在编译，scope uni-blob-fetch-cleanup-reason-final、PID1818283，当前无最终通过结论。
 
 - 获取失败清理与查询分类最终同源：App26通过（26.187秒），Native6通过（58.593秒；新增导出故障10.257秒）。metadata812包、workspace全目标check3m18s、fmt／style／repository／1350隐私／diff均通过。保留原失败日志，不更改超时、并发或生产关闭分类。当前手工审查后提交；后续先证明物理清理成功但原日志重写失败时的来源与资源，完整spec继续。
+
+- FileCleaned原子交接实现与五项实际Profile契约已补齐，尚未声明通过；唯一scope uni-blob-fetch-ack-contracts、PID1868627串行Core／App和SQLite／AEAD／加密相关测试。先检查原stage／exit及实际进程，不重启活动任务。fmt、Rust style及diff当前静态通过。
+
+- FileCleaned首轮Core／App29项通过（28.178秒）。真实Profile阶段编译E0599：TrackedFileTransferStatus只提供from_str_value而非FromStr；已使用原解析入口，未知值交Core明确拒绝，不补造状态。审查同时将唯一文件事实读取限制为两行（足以拒绝重复），新增真实SQLite未知／重复事实拒绝测试。原Profile尚未执行测试，不冒称通过；下一轮只重跑受影响的Profile契约，再扩大Native。
+
+- 修正解析入口后的真实Profile41项通过（1.748秒）。随后补合法的“已准备产物但未登记网络”红测，0.072秒被原Core拒绝；现明确区分Missing／Tracked／Unusable，缺失只允许清理而不补造网络状态，本地保存失败仍要求Completed，未知／重复仍拒绝。新增真实Engine定向SQL拒绝第二项登记，验收首／三项交付与无永久Receiving；以及SQL回滚测试具体追溯Diesel来源。当前新源快照待重新执行Core／App／Profile／Native与门禁。
+
+- FileCleaned最终同源验证启动：scope uni-blob-fetch-ack-final、PID1932962，Core／App、真实Profile、完整Native receive_retry及根门禁顺序运行。新记录类型消除“缺失等于损坏”的混淆，SQL拒绝保留具体Diesel来源。不得沿用旧29／41结果作为新接口快照绿灯，先看fetch-ack-final-stage／-gates.exit及真实scope。
+
+- FileCleaned原子交接最终同源Core／App30通过27.159秒、Profile42通过1.721秒、完整Native receive_retry14通过99.672秒（新登记故障9.318秒）。metadata812包、workspace全目标check3m52s、fmt／style／repository／1350隐私／diff通过。手工审查原资源、当前attempt、AEAD／唯一记录、未登记与损坏区分、已交付保护及原网络事实；无可用code-review skill。现在整理提交，完整spec仍继续。

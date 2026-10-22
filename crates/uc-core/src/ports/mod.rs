@@ -103,9 +103,10 @@ pub use host_event::{
 };
 pub use inbound_file_target::{ReserveInboundFileTargetPort, ResolveInboundSaveDirPort};
 pub use inbound_receive_commit::{
-    CommitInboundReceivePort, CompletedReceiveArtifacts, InboundReceiveCommitError,
-    InboundReceiveRecord, InboundReceiveSettlement, NoEntryReceiveArtifacts,
-    PartialReceiveArtifacts, PartialReceiveTerminal, ReceiveFileFailure,
+    receive_file_settlement_decision, CommitInboundReceivePort, CompletedReceiveArtifacts,
+    InboundReceiveCommitError, InboundReceiveRecord, InboundReceiveSettlement,
+    NoEntryReceiveArtifacts, PartialReceiveArtifacts, PartialReceiveTerminal, ReceiveFileFailure,
+    ReceiveFileSettlementDecision, ReceiveFileSettlementRecord,
 };
 pub use local_identity::{LocalIdentityError, LocalIdentityPort};
 pub use mobile_sync::{

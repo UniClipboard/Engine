@@ -74,6 +74,7 @@ pub(crate) enum ReceiveOutputFailure {
     FileCommit(ReceiveFileFailure),
     FetchFailure,
     FetchCancellation,
+    PreparationFailure,
 }
 impl ReceiveOutputFailure {
     pub(crate) fn is_cancelled(self) -> bool {
@@ -96,6 +97,15 @@ pub(crate) trait ReceiveFileProgress: Send + Sync {
         has_artifact_journal: bool,
         cause: &SourceError,
     );
+
+    /// 网络已经失败或取消且输出已清理，只解除原产物责任，不改变网络结果。
+    async fn clean_file(
+        &self,
+        artifact: &ReceiveArtifact,
+        cancelled: bool,
+        artifacts: &[ReceiveArtifact],
+        cause: &SourceError,
+    ) -> Result<()>;
 
     /// 本项输出已清理，记录实际失败并解除其日志责任；失败不能宣称结算完成。
     async fn fail_file(

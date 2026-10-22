@@ -917,6 +917,7 @@ pub(super) mod tests {
     pub(crate) struct FailedFileExport {
         pub(crate) output: std::sync::Mutex<Option<std::path::PathBuf>>,
         pub(crate) cancelled: bool,
+        pub(crate) obstruct_cleanup: bool,
     }
     /// 实际下载调度与文件输出；本地替身持有可计数保护，不模拟网络验收。
     pub(crate) fn local_file_probe(
@@ -1009,8 +1010,10 @@ pub(super) mod tests {
             self.started.add_permits(1);
             self.release.acquire().await.unwrap().forget();
             if let Some(failure) = &self.failed_export {
-                tokio::fs::remove_file(target).await.unwrap();
-                tokio::fs::create_dir(target).await.unwrap();
+                if failure.obstruct_cleanup {
+                    tokio::fs::remove_file(target).await.unwrap();
+                    tokio::fs::create_dir(target).await.unwrap();
+                }
                 *failure.output.lock().unwrap() = Some(target.to_owned());
                 return Err(if failure.cancelled {
                     BlobExchangeError::refused(BlobExchangeFailure::Cancelled)

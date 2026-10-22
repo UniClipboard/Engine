@@ -23,7 +23,17 @@
 
 前一最终Native真实复现Unknown／StorageUnavailable（新增8.228秒失败，其他5项通过，53.704秒；原App26通过27.189秒）。现仅补充获取失败／取消的批次业务事实及来源，不结束LocalSettlement、不移动资源；保存失败仍等FileFailed持久事实。App增加实际清理等待中的查询分类，原失败断言不删。
 
-最终同源App26通过26.187秒、Native6通过58.593秒（新增10.257秒），metadata812包、workspace全目标check3m18s、fmt／style／repository／1350隐私／diff通过。手工审查后正在提交当前获取清理／分类片。下一步实际证明网络失败后物理清理已成功但重写产物日志失败的来源与资源责任，不应把FileFailed用于raw Failed／Cancelled；准备阶段／目录／表示、交接失败的原网络分类，以及完整spec继续。
+获取失败物理清理与分类已提交f4cbc487（App26／Native6及根门禁）。当前FileCleaned原子交接切片：fetch-ack-red实际输出已删除但原保护／原获取source为(0,false)，应为(1,true)，0.008秒失败。新增原完整提交port的FileCleaned，Core统一判定当前开放attempt、唯一文件、未交付及匹配网络结果；Infra认证AEAD并在同一事务比较与移除本项，原Failed／Cancelled网络字段不写。普通获取清理走该能力，失败由原ReceiveAction保留原Source和资源继续修复；准备失败独立PreparationFailure，不对未登记文件做网络结算。没有新schema、池、预算或Engine接口。
+
+Core／App29项通过28.178秒；Profile编译发现状态枚举无FromStr，已改用原from_str_value，未知状态不补造默认值。唯一事实读取增加limit(2)，新增实际SQLite重复／未知记录拒绝测试。
+
+真实Profile41项通过1.748秒，Core／App29项通过28.178秒。审查发现网络登记失败后可能只有认证产物日志而无网络记录；不能把该合法准备状态与冲突／未知记录混为None并永久拒绝清理。新增实际SQLite缺失网络记录清理红测，以及真实Engine第二项登记被SQL拒绝、其余两项交付的最终验收（Native尚未运行）。
+
+合法准备状态的实际SQLite红测0.072秒被原规则错误拒绝。Core现明确Missing／Tracked／Unusable：只有清理允许尚未登记而不补造网络记录，本地保存失败仍须Completed，未知／重复／活动／已交付记录继续拒绝。Native新增定向SQL登记拒绝并验证第三项正常交付、失败项可通过原稳定重试补取且保留原成功文件，尚待实际执行。
+
+FileCleaned最终同源Core／App30通过27.159秒、Profile42通过1.721秒、完整Native14通过99.672秒（新增网络登记故障9.318秒，包含原失败项稳定重试、旧成功路径／字节保留）。metadata812包、workspace全目标check3m52s、fmt／style／repository／1350隐私／diff通过。正在手工审查后提交本片。
+
+下一步推进普通已有partial正常重投：当前明确禁用增量FileProgress，仍可能整批累积许可；须基于原始内容身份和成功输出验证做来源／位置映射，不能直接打开progress或把新数组下标当旧成果。先检查现有完整负责人、可用票据摘要能力、原始来源与既有成功绑定规则，再在实际Flow／Native取得失败证据。准备／最终网络交接写入失败的已存在非终态记录仍须原负责人恢复；表示／目录、全生命周期、受管1GiB和最终head网络／CI／设备矩阵及业务记录验收继续，完整spec未完成。
 后续保持完整spec：普通partial重投映射与重启材料完整性、保存失败后的物理清理失败责任、准备拒绝交接、目录／表示完整预算、来源C、完整生命周期、受管1GiB及最终head网络／CI／设备矩阵。未运行设备仍记跳过。
 
 资源约束持续有效：用户设置16 GiB swap并明确resume；Cargo串行、CARGO_BUILD_JOBS=1，临时scope MemoryHigh=3 GiB／MemoryMax=5 GiB／MemorySwapMax=4 GiB及CPU／IO权重20，保持共享缓存和仓库target。先核对真实活动scope／PID与退出状态，不得重启仍在运行的验证。

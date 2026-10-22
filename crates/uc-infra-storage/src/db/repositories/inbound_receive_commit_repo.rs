@@ -102,7 +102,7 @@ enum CommitInvariantError {
     ArtifactStateMismatch,
     #[error("directory publish record missing")]
     DirectoryPublishRecordMissing,
-    #[error("saved receive item does not match a completed attempt item")]
+    #[error("receive file outcome does not match its settlement")]
     DeliveryItemMismatch,
 }
 
@@ -177,7 +177,24 @@ impl<E: DbExecutor> CommitInboundReceivePort for DieselInboundReceiveCommitRepos
         } = settlement
         {
             return self
-                .commit_file_failure(entry_id, attempt_id, artifact, *failure, *now_ms)
+                .commit_failed_file_artifacts(
+                    entry_id,
+                    attempt_id,
+                    artifact,
+                    Some(*failure),
+                    *now_ms,
+                )
+                .await;
+        }
+        if let InboundReceiveSettlement::FileCleaned {
+            entry_id,
+            attempt_id,
+            artifact,
+            now_ms,
+        } = settlement
+        {
+            return self
+                .commit_failed_file_artifacts(entry_id, attempt_id, artifact, None, *now_ms)
                 .await;
         }
         let allow_cancelled_replay = matches!(
@@ -219,13 +236,15 @@ impl<E: DbExecutor> CommitInboundReceivePort for DieselInboundReceiveCommitRepos
                 delivered_item_ids, ..
             } => delivered_item_ids.clone(),
             InboundReceiveSettlement::NoEntry { .. } => Vec::new(),
-            InboundReceiveSettlement::FileFailed { .. } => {
+            InboundReceiveSettlement::FileFailed { .. }
+            | InboundReceiveSettlement::FileCleaned { .. } => {
                 return Err(InboundReceiveCommitError::AttemptStateMismatch)
             }
         };
         let (record, entry_id, attempt_id, file_set, expected, target, artifacts, now_ms) =
             match settlement {
-                InboundReceiveSettlement::FileFailed { .. } => {
+                InboundReceiveSettlement::FileFailed { .. }
+                | InboundReceiveSettlement::FileCleaned { .. } => {
                     return Err(InboundReceiveCommitError::AttemptStateMismatch)
                 }
                 InboundReceiveSettlement::Progress {

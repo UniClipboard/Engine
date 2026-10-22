@@ -73,7 +73,7 @@ impl PreparedFileArtifacts {
         })
     }
 
-    pub(super) fn commit(
+    pub(super) fn commit_log(
         &self,
         conn: &mut SqliteConnection,
         entry_id: &str,
@@ -99,6 +99,17 @@ impl PreparedFileArtifacts {
         if updated != 1 {
             return Err(CommitInvariantError::ArtifactStateMismatch.into());
         }
+        Ok(())
+    }
+
+    pub(super) fn commit(
+        &self,
+        conn: &mut SqliteConnection,
+        entry_id: &str,
+        attempt_id: &str,
+        now_ms: i64,
+    ) -> Result<()> {
+        self.commit_log(conn, entry_id, attempt_id, now_ms)?;
         let delivered = file_transfer::table
             .filter(file_transfer::entry_id.eq(entry_id))
             .filter(file_transfer::attempt_id.eq(attempt_id))

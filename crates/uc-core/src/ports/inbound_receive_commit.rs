@@ -88,16 +88,75 @@ impl ReceiveFileFailure {
             Self::Cancelled => (TrackedFileTransferStatus::Cancelled, None),
         }
     }
+}
 
-    pub fn accepts_attempt(self, state: AttemptState) -> bool {
-        matches!(
-            state,
-            AttemptState::Receiving | AttemptState::Cancelling | AttemptState::Failing
-        )
+/// 当前文件结算是否仍有权威；判断不改变网络结果或清理事实。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiveFileSettlementDecision {
+    Allowed,
+    AttemptMismatch,
+    FileMismatch,
+}
+
+/// 文件跟踪事实缺失与损坏／冲突不同；准备失败可能尚未形成网络记录。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiveFileSettlementRecord {
+    Missing,
+    Tracked {
+        network: TrackedFileTransferStatus,
+        delivered: bool,
+    },
+    Unusable,
+}
+
+/// 本地保存失败要求网络已完成；普通清理仅接受失败、取消或尚未登记的事实。
+pub fn receive_file_settlement_decision(
+    attempt: Option<AttemptState>,
+    file: ReceiveFileSettlementRecord,
+    local_failure: Option<ReceiveFileFailure>,
+) -> ReceiveFileSettlementDecision {
+    if !matches!(
+        attempt,
+        Some(AttemptState::Receiving | AttemptState::Cancelling | AttemptState::Failing)
+    ) {
+        return ReceiveFileSettlementDecision::AttemptMismatch;
+    }
+    let (network, delivered) = match file {
+        ReceiveFileSettlementRecord::Missing => {
+            return if local_failure.is_none() {
+                ReceiveFileSettlementDecision::Allowed
+            } else {
+                ReceiveFileSettlementDecision::FileMismatch
+            };
+        }
+        ReceiveFileSettlementRecord::Tracked { network, delivered } => (network, delivered),
+        ReceiveFileSettlementRecord::Unusable => {
+            return ReceiveFileSettlementDecision::FileMismatch
+        }
+    };
+    let allowed = !delivered
+        && match local_failure {
+            Some(_) => network == TrackedFileTransferStatus::Completed,
+            None => matches!(
+                network,
+                TrackedFileTransferStatus::Failed | TrackedFileTransferStatus::Cancelled
+            ),
+        };
+    if allowed {
+        ReceiveFileSettlementDecision::Allowed
+    } else {
+        ReceiveFileSettlementDecision::FileMismatch
     }
 }
 
 pub enum InboundReceiveSettlement {
+    /// 本次输出已清理，原子解除责任；保留已有失败／取消，也允许尚未登记，不补造网络记录。
+    FileCleaned {
+        entry_id: EntryId,
+        attempt_id: String,
+        artifact: ReceiveArtifact,
+        now_ms: i64,
+    },
     /// 输出已按所有权完成清理，原子保存失败事实并解除本项清理责任。
     FileFailed {
         entry_id: EntryId,
@@ -212,6 +271,108 @@ mod file_failure_tests {
     use super::*;
 
     #[test]
+    fn file_cleanup_requires_open_attempt_and_no_delivered_or_active_transfer() {
+        for network in [
+            TrackedFileTransferStatus::Pending,
+            TrackedFileTransferStatus::Transferring,
+            TrackedFileTransferStatus::Completed,
+            TrackedFileTransferStatus::Failed,
+            TrackedFileTransferStatus::Cancelled,
+        ] {
+            let expected = if matches!(
+                network,
+                TrackedFileTransferStatus::Failed | TrackedFileTransferStatus::Cancelled
+            ) {
+                ReceiveFileSettlementDecision::Allowed
+            } else {
+                ReceiveFileSettlementDecision::FileMismatch
+            };
+            assert_eq!(
+                receive_file_settlement_decision(
+                    Some(AttemptState::Receiving),
+                    ReceiveFileSettlementRecord::Tracked {
+                        network: network,
+                        delivered: false
+                    },
+                    None
+                ),
+                expected
+            );
+            assert_eq!(
+                receive_file_settlement_decision(
+                    Some(AttemptState::Receiving),
+                    ReceiveFileSettlementRecord::Tracked {
+                        network: network,
+                        delivered: true
+                    },
+                    None
+                ),
+                ReceiveFileSettlementDecision::FileMismatch
+            );
+            assert_eq!(
+                receive_file_settlement_decision(
+                    None,
+                    ReceiveFileSettlementRecord::Tracked {
+                        network: network,
+                        delivered: false
+                    },
+                    None
+                ),
+                ReceiveFileSettlementDecision::AttemptMismatch
+            );
+            assert_eq!(
+                receive_file_settlement_decision(
+                    Some(AttemptState::Completed),
+                    ReceiveFileSettlementRecord::Tracked {
+                        network: network,
+                        delivered: false
+                    },
+                    None
+                ),
+                ReceiveFileSettlementDecision::AttemptMismatch
+            );
+        }
+        assert_eq!(
+            receive_file_settlement_decision(
+                Some(AttemptState::Receiving),
+                ReceiveFileSettlementRecord::Missing,
+                None
+            ),
+            ReceiveFileSettlementDecision::Allowed
+        );
+    }
+
+    #[test]
+    fn missing_network_record_is_allowed_only_for_cleanup_and_unusable_records_are_never_allowed() {
+        for local_failure in [None, Some(ReceiveFileFailure::Cancelled)] {
+            assert_eq!(
+                receive_file_settlement_decision(
+                    Some(AttemptState::Receiving),
+                    ReceiveFileSettlementRecord::Unusable,
+                    local_failure
+                ),
+                ReceiveFileSettlementDecision::FileMismatch
+            );
+            assert_eq!(
+                receive_file_settlement_decision(
+                    Some(AttemptState::Completed),
+                    ReceiveFileSettlementRecord::Missing,
+                    local_failure
+                ),
+                ReceiveFileSettlementDecision::AttemptMismatch
+            );
+        }
+        assert_eq!(
+            receive_file_settlement_decision(
+                Some(AttemptState::Receiving),
+                ReceiveFileSettlementRecord::Missing,
+                Some(ReceiveFileFailure::Cancelled)
+            ),
+            ReceiveFileSettlementDecision::FileMismatch
+        );
+    }
+
+    #[test]
     fn local_failure_never_retracts_delivered_or_rewrites_network_failure() {
         for failure in [
             ReceiveFileFailure::Failed(ReceiveItemFailureReason::StorageUnavailable),
@@ -225,14 +386,34 @@ mod file_failure_tests {
                 failure.project(TrackedFileTransferStatus::Failed, false),
                 (TrackedFileTransferStatus::Failed, None)
             );
-            assert!(failure.accepts_attempt(AttemptState::Cancelling));
+            assert_eq!(
+                receive_file_settlement_decision(
+                    Some(AttemptState::Cancelling),
+                    ReceiveFileSettlementRecord::Tracked {
+                        network: TrackedFileTransferStatus::Completed,
+                        delivered: false
+                    },
+                    Some(failure)
+                ),
+                ReceiveFileSettlementDecision::Allowed
+            );
             for state in [
                 AttemptState::Committing,
                 AttemptState::Completed,
                 AttemptState::Failed,
                 AttemptState::Cancelled,
             ] {
-                assert!(!failure.accepts_attempt(state));
+                assert_eq!(
+                    receive_file_settlement_decision(
+                        Some(state),
+                        ReceiveFileSettlementRecord::Tracked {
+                            network: TrackedFileTransferStatus::Completed,
+                            delivered: false
+                        },
+                        Some(failure)
+                    ),
+                    ReceiveFileSettlementDecision::AttemptMismatch
+                );
             }
         }
     }

@@ -316,3 +316,7 @@
 - 该缺口已被真实Native复现：fetch-cleanup-final-native新增场景8.228秒失败，清理等待中failure_reason为Unknown，期望StorageUnavailable；同轮其余5 Native通过（总53.704秒），门禁因失败未继续。修复只在原批次内记录获取已经失败／取消的事实和来源分类，不调用item_result、不完成LocalSettlement、不移动或释放资源；业务保存失败仍等其既有FileFailed持久事实，不把未保存raw Completed提前终结。App增加原资源仍持有期间的查询断言；同源materialization导入已合并。
 
 - 后续真实接缝：workflow获取失败／取消在remove_uncommitted_output成功后仍对record_receive_artifacts(...).await?，该写入失败可能同时丢失原获取source并释放资源，尚未取得该分支红测。考虑让原完整提交能力原子解除已网络Failed／Cancelled成员的产物责任，而非硬用FileFailed；必须区分准备失败时本项从未成功记入日志，及最终网络生命周期写入失败后raw仍非终态的情况。不要仅依据fetch返回Err推断raw状态，也不提前调用item_result来换取查询分类。
+
+- fetch-ack-red已实际复现：输出删除成功后，原保护与原获取source的组合为(0,false)，期望(1,true)，0.008秒失败。现拟新增FileCleaned到原完整提交port，Core从当前attempt、唯一文件网络事实与已交付标记决定是否允许；Infra认证原AEAD产物并在同一事务内验证和移除本项，只为FileFailed写本地失败码。原网络Failed／Cancelled不重写；准备失败用独立PreparationFailure意图，避免对尚未登记的文件补写网络结算。原任务修复失败交接，不重删已清理路径或重试内容。
+
+- 新合法准备状态的实际SQLite红测fetch-ack-missing-red：认证产物存在、物理输出已删除但尚无网络登记，原规则错误返回Backend/FileMismatch，0.072秒失败。Core现用Missing／Tracked／Unusable明确区分：清理允许缺失而不补造网络状态，本地保存失败仍必须有Completed；未知、重复、已交付及活动网络记录继续拒绝。新增Native SQL拒绝第二项网络登记，要求原临时输出清理、第一／三项正常落地且原任务不能永久Receiving。该Native尚待执行，不记通过。
