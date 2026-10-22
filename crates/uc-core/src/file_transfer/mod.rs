@@ -16,5 +16,6 @@ pub use receive_settlement::{
 
 mod receive_recovery;
 pub use receive_recovery::{
-    receive_failure_recovery_action, ReceiveFailureRecoveryAction, ReceiveFailureRecoveryRefusal,
+    receive_failure_recovery_action, receive_no_entry_confirmation, ReceiveFailureRecoveryAction,
+    ReceiveFailureRecoveryRefusal,
 };

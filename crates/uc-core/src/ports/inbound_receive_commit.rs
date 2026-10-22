@@ -218,6 +218,9 @@ pub enum InboundReceiveCommitError {
 
 #[async_trait]
 pub trait CommitInboundReceivePort: Send + Sync {
+    /// NoEntry事务已提交而回执丢失时，可只读确认同一条目、尝试及目标终态。
+    /// None只确认父终态，不移交产物；RolledBack还须确认原日志已settled／rolled_back。
+    /// 不同尝试或终态、尚未结算及已交付产物不能据此改写；确认不刷新时间戳。
     async fn commit_inbound_receive(
         &self,
         settlement: &InboundReceiveSettlement,

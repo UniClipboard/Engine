@@ -351,5 +351,10 @@
 - HostFileAccess稳定接口只有文件metadata／read_chunk／write_chunk／finish_write，未提供目录枚举；目录端到端接缝应优先使用既有完整Application接收能力和V3目录合同，不为测试新增Engine阶段／步骤入口。所有新增测试仍从用户spec已批准的完整cap与真实SQLite／AEAD／文件契约进入。
 
 
-### 待证实的NoEntry提交回执丢失边界（2026-10-23）
-人工审阅发现 Core 的 receive_failure_recovery_action 接受同一尝试 Failed 进入 Settle(Failed)，而 Infra inbound_receive_commit_repo 的 allow_cancelled_replay 仅对 Cancelled／None 开放。需要用真实SQLite及完整接收故障注入证明“事务已提交但返回失败”后，原负责人是否能确认实际Failed并结束，还是持续重复NoEntry被状态拒绝。当前只有代码证据，不把它记成已复现或已修复；后续测试必须核验同尝试、实际条目／产物／文件事实，不能简单放宽终态重放或吞掉Unknown错误。
+### NoEntry提交回执丢失边界已复现及局部修复（2026-10-23）
+真实SQLite执行器在事务成功后返回一次BrokenPipe，持久尝试已为Failed，随后同一NoEntry返回AttemptStateMismatch（红测0.257秒）。Core现持有同条目／同尝试／同终态的只读确认规则；RolledBack还须既有settled／rolled_back事实，None只确认父终态、不移交产物。Infra在同一事务内加载及解析事实并调用Core；确认成功不执行写入。真实SQLite／AEAD 29项、Core 2项及完整Application目录结算7项通过，最终门禁仍运行；不把该组合测试写成真实Engine回执丢失注入验收。
+
+### 下一项待核验：目录成员的原网络终态仍在修复（2026-10-23）
+表示物化路径已等待FetchTerminalFailure的实际完成信号。目录成员获取的Err分支直接返回，后续fail_directory_receive会先尝试父NoEntry；只有已经进入recover_settlement时才等底层终态。需通过真实Engine目录成员＋SQLite拒绝原Completed写入，核验父Receiving、具体失败分类、关闭短等待、原Completed恢复及最终目录失败／取消，不能从表示或普通文件绿测推导目录通过。当前为代码证据，不先记作已复现。
+
+后续目录Native测试入口已定位：SendFilesInput只有HostFileHandle列表，当前receive_retry::Files仅支持数值句柄，不能把目录路径直接传给它。capture/usecase的build_entry_file_set支持inline text/uri-list并通过实际文件系统展开目录；应使用测试内可变HostClipboard，在配对和SQL故障安装完成后提交真实目录URI，再走ObserveClipboardChange(dispatch=true)，避免启动时提前同步。ReceiveItemRole只有Representation／File，目录成员仍是file，不存在directory_member角色；触发器应针对本次目录接收的真实file行。不得为了测试新增公开Engine步骤或发送原始信封操作。

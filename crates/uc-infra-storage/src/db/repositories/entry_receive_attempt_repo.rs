@@ -31,7 +31,7 @@ fn backend(error: anyhow::Error) -> AttemptError {
     AttemptError::Backend(error.context("access receive attempt store").into())
 }
 
-fn to_attempt(row: EntryReceiveAttemptRow) -> Result<EntryReceiveAttempt, AttemptError> {
+pub(super) fn to_attempt(row: EntryReceiveAttemptRow) -> Result<EntryReceiveAttempt, AttemptError> {
     Ok(EntryReceiveAttempt {
         entry_id: row.entry_id,
         current_attempt_id: row.current_attempt_id,

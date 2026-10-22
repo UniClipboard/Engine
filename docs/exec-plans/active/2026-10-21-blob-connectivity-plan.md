@@ -1157,3 +1157,17 @@ ReceiveAction 的原待结算位置统一为文件／表示两种原责任，沿
 
 
 本切片最终同源检查：Application＋file_transfer 1284项通过（123.869秒），1项默认跳过；locked metadata、workspace all-targets（3分07秒）、fmt、Rust style、repository preflight（含隐私与负例）及diff全部退出0。人工审阅核对从准备起持有同一publication、Staging先记日志再建成员、日志绑定只发生在实际写入后、已清理持有者继续承担父NoEntry、双来源以及终态通知时机。未增加Engine步骤接口、持久字段、明文例外、任务池或网络重试。全部构建scope已结束，提交后检查并回收本次专用磁盘TMPDIR；已观察峰值约3.0GiB。完整spec仍active，当前未完成项不缩减；另已记录同一Failed的NoEntry回执丢失重放边界待真实SQLite复现。
+
+
+### 2026-10-23：NoEntry事务已提交而回执失败的只读确认
+
+真实SQLite执行器包裹原事务，在实际提交后返回一次BrokenPipe；红测0.257秒失败，数据库已为Failed，而原NoEntry再次调用返回AttemptStateMismatch。首次测试编译的source链迭代生命周期问题已改为明确遍历，编译失败日志保留，之后才登记实际行为红测。
+
+Core负责跨记录确认规则：同一条目、同一尝试及相同失败／取消终态才可确认；None只确认父终态，不移交其他产物；RolledBack还必须存在已settled／rolled_back的原产物记录。Infra复用原尝试行转换，在同一事务中读取并解析事实后调用Core；确认直接返回，不刷新时间戳、不覆写产物、事件或条目。不存在、仍待清理、已交付及未知产物不能被RolledBack确认改写；未知值保留实际解析来源。此路径不新增持久字段、状态字符串或Engine步骤接口。
+
+Core 2项通过（0.017秒）；实际SQLite入站提交29项通过（9.794秒），包括Failed／Cancelled × None／RolledBack四组回执丢失，SQL触发器拒绝任何终态／产物UPDATE，重开后时间戳与AEAD密文完全不变；产物缺失、pending、landed与未知值矩阵保持拒绝，旧尝试不能改变重投的既有契约继续通过。
+
+完整Application接收使用既有完整提交port模拟“先实际置Failed、再返回一次回执错误，并阻止后续确认”，验证原关闭短等待不完成，解除确认阻止后原任务结束，原获取StorageFull及回执BrokenPipe均保留，下载不重启，最终通知只发一次。目录结算7项通过（7.180秒）。该流程使用port模型及真实文件系统，实际SQLite验证在前述独立存储契约；不把两者合称真实Engine回执丢失注入。本轮全量Application、Native receive_retry及根门禁在同一受限scope内串行运行，结果待追加。完整spec其他目录清理、目录网络终态、来源C、生命周期、资源和最终兼容矩阵保持未完成。
+
+
+本切片最终同源检查：Application＋file_transfer 1285项通过（124.681秒），1项默认跳过；Native receive_retry 23项通过（228.790秒），其余300项不在过滤范围。locked metadata、workspace all-targets（3分30秒）、fmt、Rust style、repository preflight（含隐私与负例）及diff均退出0。Core 2项、真实SQLite／AEAD 29项的已通过代码未再修改；最终只有App测试名称引入整理后参与全量回归。人工审阅确认规则归Core、转换复用原mapper、确认在原事务中只读、相同终态／尝试检查和产物拒绝、原错误链、既有取消确认以及不重复下载／通知；未增加格式或Engine阶段入口。构建保持单scope串行、jobs=1、共享target／缓存和短磁盘TMPDIR，已观察峰值约3.0GiB；scope结束后核验并回收专用目录。完整spec仍active，Native回执丢失注入、目录成员终态与其他未执行矩阵不冒充完成。

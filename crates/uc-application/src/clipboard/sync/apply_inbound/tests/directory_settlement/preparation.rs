@@ -27,6 +27,7 @@ impl Drop for StagingPermissions {
 struct RejectNoEntry {
     inner: Arc<AttemptGate>,
     blocked: AtomicBool,
+    lose_once: AtomicBool,
 }
 #[async_trait]
 impl CommitInboundReceivePort for RejectNoEntry {
@@ -34,6 +35,14 @@ impl CommitInboundReceivePort for RejectNoEntry {
         &self,
         settlement: &InboundReceiveSettlement,
     ) -> Result<(), InboundReceiveCommitError> {
+        if matches!(settlement, InboundReceiveSettlement::NoEntry { .. })
+            && self.lose_once.swap(false, Ordering::SeqCst)
+        {
+            self.inner.commit_inbound_receive(settlement).await?;
+            return Err(InboundReceiveCommitError::Backend(Box::new(
+                io::Error::from(io::ErrorKind::BrokenPipe),
+            )));
+        }
         if self.blocked.load(Ordering::SeqCst)
             && matches!(settlement, InboundReceiveSettlement::NoEntry { .. })
         {
@@ -81,20 +90,25 @@ impl RecordDirectoryPublishPort for RejectStagingLog {
 
 #[tokio::test]
 async fn directory_staging_log_failure_keeps_cleanup_without_assuming_the_record_exists() {
-    assert_preparation_failure(true, false).await;
+    assert_preparation_failure(true, false, false).await;
 }
 
 #[tokio::test]
 async fn directory_preparation_failure_keeps_staging_cleanup_in_the_original_action() {
-    assert_preparation_failure(false, false).await;
+    assert_preparation_failure(false, false, false).await;
 }
 
 #[tokio::test]
 async fn directory_preparation_cleanup_success_keeps_original_no_entry_commit_until_repaired() {
-    assert_preparation_failure(false, true).await;
+    assert_preparation_failure(false, true, false).await;
 }
 
-async fn assert_preparation_failure(fail_log: bool, fail_commit: bool) {
+#[tokio::test]
+async fn directory_original_action_finishes_after_lost_no_entry_acknowledgement_is_confirmed() {
+    assert_preparation_failure(false, true, true).await;
+}
+
+async fn assert_preparation_failure(fail_log: bool, fail_commit: bool, lose_ack: bool) {
     let cache = tempfile::tempdir().unwrap();
     let destination = tempfile::tempdir().unwrap();
     std::fs::write(destination.path().join("unrelated.txt"), b"keep").unwrap();
@@ -156,6 +170,7 @@ async fn assert_preparation_failure(fail_log: bool, fail_commit: bool) {
     let commit = Arc::new(RejectNoEntry {
         inner: attempts.clone(),
         blocked: AtomicBool::new(fail_commit),
+        lose_once: AtomicBool::new(lose_ack),
     });
     let receiver = build(repo, capture, write)
         .with_blob_materializer(Arc::new(materializer))
@@ -217,7 +232,14 @@ async fn assert_preparation_failure(fail_log: bool, fail_commit: bool) {
     assert!(!before_events.iter().any(|event| matches!(event, HostEvent::Transfer(TransferHostEvent::StatusChanged { status, .. }) if matches!(status.as_str(), "failed" | "cancelled"))));
     let final_events = events.snapshot();
     assert_eq!(final_events.iter().filter(|event| matches!(event, HostEvent::Transfer(TransferHostEvent::StatusChanged { status, .. }) if status == "failed")).count(), 1, "真实交接后只发一次目录失败通知");
-    assert_eq!(before.state, AttemptState::Failing);
+    assert_eq!(
+        before.state,
+        if lose_ack {
+            AttemptState::Failed
+        } else {
+            AttemptState::Failing
+        }
+    );
     assert_eq!(
         attempts
             .get_entry_attempt(&entry)
@@ -239,7 +261,12 @@ async fn assert_preparation_failure(fail_log: bool, fail_commit: bool) {
         .is_some_and(|source| source.kind() == io::ErrorKind::StorageFull)));
     assert!(failure.settlement.chain().any(|source| source
         .downcast_ref::<io::Error>()
-        .is_some_and(|source| source.kind() == io::ErrorKind::PermissionDenied)));
+        .is_some_and(|source| source.kind()
+            == if lose_ack {
+                io::ErrorKind::BrokenPipe
+            } else {
+                io::ErrorKind::PermissionDenied
+            })));
     assert_eq!(
         std::fs::read(destination.path().join("unrelated.txt")).unwrap(),
         b"keep"

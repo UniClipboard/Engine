@@ -2,6 +2,8 @@
 mod delivery;
 #[path = "inbound_receive_commit_contract/progress.rs"]
 mod progress;
+#[path = "inbound_receive_commit_contract/terminal_replay.rs"]
+mod terminal_replay;
 use std::sync::Arc;
 
 use async_trait::async_trait;

@@ -43,10 +43,10 @@ use uc_core::ports::{
     BeginReceiveFailureOutcome, BeginReceiveFailurePort, BeginReceiveOutcome,
     ClaimReceiveCommitPort, ClockPort, CommitInboundReceivePort, EntryReceiveAttempt,
     FinalizeProvisionalReceivePort, GetEntryAttemptPort, InboundReceiveCommitError,
-    InboundReceiveSettlement, ProvisionalReceiveAction, ProvisionalReceiveError, PublishLogError,
-    PublishPhase, ReceiveFileSettlementDecision, ReceiveFileSettlementRecord, ReceiveItemRole,
-    RecordDirectoryPublishPort, RequestReceiveCancellationOutcome, RequestReceiveCancellationPort,
-    TrackedFileTransferStatus,
+    InboundReceiveSettlement, NoEntryReceiveArtifacts, ProvisionalReceiveAction,
+    ProvisionalReceiveError, PublishLogError, PublishPhase, ReceiveFileSettlementDecision,
+    ReceiveFileSettlementRecord, ReceiveItemRole, RecordDirectoryPublishPort,
+    RequestReceiveCancellationOutcome, RequestReceiveCancellationPort, TrackedFileTransferStatus,
 };
 use uc_core::{
     FileDisplayMetadata, FileDisplayMetadataEntry, MimeType, ObservedClipboardRepresentation,
@@ -406,6 +406,18 @@ impl CommitInboundReceivePort for AttemptGate {
             return Err(InboundReceiveCommitError::AttemptStateMismatch);
         }
         let mut state = self.state.lock().unwrap();
+        // 原子port的同终态只读确认；真实SQLite／AEAD规则另由持久契约测试覆盖。
+        if *state == terminal
+            && matches!(
+                settlement,
+                InboundReceiveSettlement::NoEntry {
+                    artifacts: NoEntryReceiveArtifacts::None,
+                    ..
+                }
+            )
+        {
+            return Ok(());
+        }
         if *state != expected {
             return Err(InboundReceiveCommitError::AttemptStateMismatch);
         }
