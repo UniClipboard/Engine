@@ -8,7 +8,7 @@ mod progress;
 pub(crate) use progress::{FileFailureSettlementError, FileProgressCommitError};
 mod reuse;
 mod workflow;
-pub(crate) use cleanup::OutputCleanupFailure;
+pub(crate) use cleanup::{remove_uncommitted_output, OutputCleanupFailure};
 pub(crate) use reuse::{validate_selection, ReceiveReuseRefusal};
 
 pub(crate) use model::{receive_member_totals, ReceiveSelection, ReceivedItem, ReceivedOutput};

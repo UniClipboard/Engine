@@ -71,6 +71,14 @@ impl InboundBlobFetcher for BlobTransferFacade {
 /// 接收负责人在原许可内保存一个文件及当前完整的交付事实。
 #[async_trait]
 pub(crate) trait ReceiveFileProgress: Send + Sync {
+    /// 保存和物理清理均失败，把本项剩余责任交给仍持原资源的接收动作。
+    fn defer_file_cleanup(
+        &self,
+        artifact: &ReceiveArtifact,
+        failure: ReceiveFileFailure,
+        artifacts: &[ReceiveArtifact],
+    );
+
     /// 本项输出已清理，记录实际失败并解除其日志责任；失败不能宣称结算完成。
     async fn fail_file(
         &self,

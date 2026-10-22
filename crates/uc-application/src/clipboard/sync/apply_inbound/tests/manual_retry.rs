@@ -332,6 +332,8 @@ struct Capture {
     fail: AtomicBool,
     progress_calls: AtomicUsize,
     fail_progress_at: Mutex<Option<usize>>,
+    obstruct_cleanup: AtomicBool,
+    obstructed_output: Mutex<Option<PathBuf>>,
     cancel_progress_at: Mutex<Option<usize>>,
     guards: Mutex<Option<Arc<AtomicUsize>>>,
     held: Mutex<Vec<(bool, usize)>>,
@@ -368,6 +370,14 @@ impl InboundCapture for Capture {
                 return Err(uc_core::ports::InboundReceiveCommitError::AttemptStateMismatch.into());
             }
             if *self.fail_progress_at.lock().unwrap() == Some(index) {
+                if self.obstruct_cleanup.load(Ordering::SeqCst) {
+                    let InboundCaptureCommitContext::Progress { artifact, .. } = &commit else {
+                        unreachable!()
+                    };
+                    std::fs::remove_file(&artifact.final_path).unwrap();
+                    std::fs::create_dir(&artifact.final_path).unwrap();
+                    *self.obstructed_output.lock().unwrap() = Some(artifact.final_path.clone());
+                }
                 return Err(io::Error::from(io::ErrorKind::StorageFull).into());
             }
         }
@@ -512,6 +522,8 @@ impl Fixture {
             fail: AtomicBool::new(false),
             progress_calls: AtomicUsize::new(0),
             fail_progress_at: Mutex::new(None),
+            obstruct_cleanup: AtomicBool::new(false),
+            obstructed_output: Mutex::new(None),
             cancel_progress_at: Mutex::new(None),
             guards: Mutex::new(None),
             held: Mutex::new(Vec::new()),

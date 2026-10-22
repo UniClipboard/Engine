@@ -39,7 +39,7 @@ pub(super) async fn reserve_managed_output(parent: &Path, filename: &str) -> io:
     }
 }
 
-pub(super) async fn remove_uncommitted_output(path: &Path) -> io::Result<()> {
+pub(crate) async fn remove_uncommitted_output(path: &Path) -> io::Result<()> {
     match tokio::fs::remove_file(path).await {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),

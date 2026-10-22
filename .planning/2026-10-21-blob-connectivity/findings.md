@@ -302,3 +302,9 @@
 - 首次最终扩大五crate库2235通过／1超时／9跳过（253.933秒），已有engine_start_builds_a_resumable_real_session超过原20秒限制；该测试原样单独复跑13.463秒通过（Summary13.485秒）。历史记录已有同名启动超时，确切触发点本轮尚未证实，未改超时、并发4或断言；最终同源快照扩大重跑中。三个新增Native保存故障在首次扩大均通过。
 
 - 最终同一源快照五crate库2236通过／9跳过（215.351秒），启动测试11.695秒通过；metadata812包、workspace全目标check（1m34s）、repository、fmt、Rust style、1349站点隐私及diff通过。没有修改超时／并发来获得通过。手工审查完整负责人、来源、原事务／产物边界及Native仅失败项重试，无可用code-review skill。下一片回到ReceiveAction.finish→ReceiveBatch.finish清除local_work／commit_handoff的未完成结算资源问题，须实际屏障证明并落实唯一实际负责人的恢复移交；不以本轮保存故障通过冒称完整预算或全生命周期已完成。
+
+- 保存＋物理清理故障首次真实红测（save-cleanup-red）：再写begin_receive_failure失败覆盖原StorageFull。原IsADirectory来自把本次实际文件替换为目录，未使用fake清理返回。继续优先断言原资源，单独确认是否提前释放，再统一同一动作恢复责任。
+
+- 第二项独立资源红测save-cleanup-resource-red：物理输出仍为目录且未清理，实际Facade原保护已变0，期望1；0.006秒失败。现把保存后的物理清理责任与FileFailed结算复用原ReceiveAction恢复；清理成功布尔状态只由原处理任务持有，后续存储失败不得重新触碰该路径。
+
+- 物理清理成功到FileFailed持久交接之间仍有崩溃窗口；本轮路径复用证明限定同进程后续CAS／存储重试，不声称新的跨进程文件身份保护。重启沿既有受管／用户目标所有权和产物日志；后续完整重启验收须核对该窗口。

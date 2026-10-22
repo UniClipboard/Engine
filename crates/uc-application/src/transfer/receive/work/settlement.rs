@@ -10,6 +10,7 @@ pub(crate) struct UnsettledFile {
     pub(crate) artifact: ReceiveArtifact,
     pub(crate) failure: ReceiveFileFailure,
     pub(crate) remaining: Vec<ReceiveArtifact>,
+    pub(crate) output_cleanup_pending: bool,
 }
 
 impl ReceiveAction {

@@ -1222,18 +1222,19 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                 .await;
                 if let Err(source) = saved {
                     let error = anyhow::Error::new(FileProgressCommitError(source));
-                    if let Err(cleanup) = remove_uncommitted_output(&path).await {
-                        return Err(OutputCleanupFailure {
-                            cleanup,
-                            cause: error,
-                        }
-                        .into());
-                    }
                     let failure = if cancellation.is_cancelled() || is_cancel_error(&error) {
                         ReceiveFileFailure::Cancelled
                     } else {
                         ReceiveFileFailure::Failed(ReceiveItemFailureReason::StorageUnavailable)
                     };
+                    if let Err(cleanup) = remove_uncommitted_output(&path).await {
+                        progress.defer_file_cleanup(&artifact, failure, &receive_artifacts);
+                        return Err(FileFailureSettlementError {
+                            cause: error,
+                            settlement: cleanup.into(),
+                        }
+                        .into());
+                    }
                     if let Err(settlement) = progress
                         .fail_file(&artifact, failure, &receive_artifacts)
                         .await

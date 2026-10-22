@@ -19,7 +19,7 @@
 阶段 0 前置证明完成：SDK／Uni 完成等待、原始材料、当前授权、同内容隔离、协议向量、8 组旧资料矩阵与 1GiB 基线均有证据。阶段 1／2 推进：生产获取和提供端已接线，输出／解密及引用／tag 受监督；完整条目结算、部分失败、稳定重试与薄绑定继续。
 
 ## Next Step
-业务计数切片完成同源全部门禁：五crate库2244通过／9跳过（282.213秒），metadata812包、workspace全目标check3m41s、fmt／style／repository／1350隐私／diff通过；34 App、4 Native及33真实SQLite／AEAD契约通过。正在提交该切片。下一步以真实Facade和实际文件系统拒绝证明保存失败后的清理失败是否提前释放原保护，再由同一ReceiveAction落实清理与失败事实的恢复责任；不创建新池、预算或持久格式。
+业务计数切片完成同源全部门禁：五crate库2244通过／9跳过（282.213秒），metadata812包、workspace全目标check3m41s、fmt／style／repository／1350隐私／diff通过；34 App、4 Native及33真实SQLite／AEAD契约通过。已提交b3cacddf。保存失败＋物理清理拒绝已复现原保护0／期望1及原source覆盖；同一ReceiveAction已接线清理恢复，25 App回归通过（25.148秒），包括原路径复用保护。最终App25项／Native5项通过，metadata812包、workspace全目标check3m17s、fmt／style／repository／1350隐私／diff通过，正在提交保存后物理清理切片。下一步先证明网络失败／取消或准备失败后的物理清理拒绝是否同样释放资源，并检查现有FileFailed只接受raw Completed，不能把网络失败硬写成该事实；沿同一负责人、原产物日志与NoEntry结算设计，不加池或schema。
 后续保持完整spec：普通partial重投映射与重启材料完整性、保存失败后的物理清理失败责任、准备拒绝交接、目录／表示完整预算、来源C、完整生命周期、受管1GiB及最终head网络／CI／设备矩阵。未运行设备仍记跳过。
 
 资源约束持续有效：用户设置16 GiB swap并明确resume；Cargo串行、CARGO_BUILD_JOBS=1，临时scope MemoryHigh=3 GiB／MemoryMax=5 GiB／MemorySwapMax=4 GiB及CPU／IO权重20，保持共享缓存和仓库target。先核对真实活动scope／PID与退出状态，不得重启仍在运行的验证。

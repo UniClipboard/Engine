@@ -32,6 +32,26 @@ impl FileProgress {
 }
 #[async_trait]
 impl ReceiveFileProgress for FileProgress {
+    fn defer_file_cleanup(
+        &self,
+        artifact: &ReceiveArtifact,
+        failure: ReceiveFileFailure,
+        artifacts: &[ReceiveArtifact],
+    ) {
+        self.action.defer_file_settlement(UnsettledFile {
+            entry: self.entry.clone(),
+            attempt: self.attempt.clone(),
+            artifact: artifact.clone(),
+            failure,
+            remaining: artifacts
+                .iter()
+                .filter(|item| item.item_id != artifact.item_id)
+                .cloned()
+                .collect(),
+            output_cleanup_pending: true,
+        });
+    }
+
     async fn fail_file(
         &self,
         artifact: &ReceiveArtifact,
@@ -59,6 +79,7 @@ impl ReceiveFileProgress for FileProgress {
                     attempt: self.attempt.clone(),
                     artifact: artifact.clone(),
                     failure,
+                    output_cleanup_pending: false,
                     remaining: artifacts
                         .iter()
                         .filter(|item| item.item_id != artifact.item_id)

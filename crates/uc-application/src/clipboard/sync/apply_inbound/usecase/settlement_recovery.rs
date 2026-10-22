@@ -1,5 +1,6 @@
 //! 原处理任务负责失败事实与清理的本地修复；不重新获取或保存业务内容。
 use super::{ApplyInboundClipboardUseCase, ApplyInboundError};
+use crate::transfer::receive::materialization::remove_uncommitted_output;
 use crate::transfer::receive::work::{ReceiveAction, ReceiveWorkError, UnsettledFile};
 use anyhow::{anyhow, Error as SourceError};
 use std::{sync::Arc, time::Duration};
@@ -21,11 +22,12 @@ impl ApplyInboundClipboardUseCase {
         action: &ReceiveAction,
         source: Arc<ReceiveWorkError>,
     ) {
+        let mut output_cleaned = !pending.output_cleanup_pending;
         let mut file_recorded = false;
         let mut delay = Duration::from_secs(1);
         loop {
             match self
-                .repair_file_settlement(&pending, &mut file_recorded)
+                .repair_file_settlement(&pending, &mut output_cleaned, &mut file_recorded)
                 .await
             {
                 Ok(terminal) => {
@@ -65,11 +67,19 @@ impl ApplyInboundClipboardUseCase {
     async fn repair_file_settlement(
         &self,
         pending: &UnsettledFile,
+        output_cleaned: &mut bool,
         file_recorded: &mut bool,
     ) -> Result<PartialReceiveTerminal, ApplyInboundError> {
         let ports = self.receive_attempts.as_ref().ok_or_else(|| {
             ApplyInboundError::Internal(anyhow!("file settlement ports are not wired"))
         })?;
+        if !*output_cleaned {
+            remove_uncommitted_output(&pending.artifact.final_path)
+                .await
+                .map_err(|source| ApplyInboundError::Internal(SourceError::new(source)))?;
+            // 清理成功后不再触碰相同路径；存储重试期间该路径可能已被重新使用。
+            *output_cleaned = true;
+        }
         if !*file_recorded {
             ports
                 .commit

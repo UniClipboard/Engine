@@ -442,3 +442,9 @@ Application实际故障注入证实：文件保存StorageFull、失败事实结�
 完整计划投影后的实际验证：原始计划／手动重试34项通过（25.177秒），默认无订阅者Engine dev-tools 4项通过（38.690秒），Profile test-util两个真实合约33项通过（1.308秒）。Native新断言已覆盖完成数1、原始总量3、完成字节仅首项、总字节包含全部3项，同时保留原关闭与持久失败断言。当前唯一scope uni-blob-progress-final-gates运行同一源快照五crate库、metadata、workspace全目标check、fmt、style、repository／隐私及diff；结果尚待检查，不复用d83bc4cc的绿灯。
 
 - 业务计数最终同一源快照五crate库2244通过／9跳过（282.213秒）；metadata812包、workspace全目标check（3m41s）、fmt、Rust style、repository／1350站点隐私及diff通过。手工审查原Core业务结果复用、目录仍成员计数和整个单元、原始计划补全未启动项、整数范围及source，无可用code-review skill。没有更改超时／测试并发、schema或原下载预算。下一步实际保存失败＋输出清理拒绝，确认原资源是否提前释放，完整spec仍继续。
+
+- 保存失败＋物理清理拒绝已取得两个真实红测：原source被第三次写入覆盖，以及原保护0／期望1。原ReceiveAction现登记物理清理剩余责任，原任务先清理、再FileFailed、再父CAS；本地清理成功状态只由该任务持有，之后不再删除同一路径。App相关25项通过（25.148秒），新路径复用回归3.007秒通过；下一步真实Engine／SQLite输出目录故障及最终门禁。网络失败等其他清理边界尚未声称解决。
+
+- 初轮真实Engine保存故障5项通过（47.601秒），新增物理输出清理故障9.248秒通过。审查发现只等网络Completed仍有关闭先取消保存的时序缺口；测试现等待原EventStream的InboundNotice完整入口结果通知，证明原保存失败已经返回后再执行100ms关闭，不新增订阅者或sleep，不放宽断言。需验证此最后测试快照及根门禁。
+
+- 保存后物理清理切片最终相关App25项通过（25.148秒）；带完整入口事件屏障的真实Native5项通过（47.537秒），新增场景9.450秒。metadata812包、workspace全目标check（3m17s）、fmt、Rust style、repository／1350隐私站点、diff全部通过。手工审查资源连续性、单次清理、原错误与事务、无重传和关闭边界，无可用code-review skill。不把前一提交的2244全量测试当本次结果；未运行设备仍跳过。

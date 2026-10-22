@@ -1,4 +1,5 @@
 //! 完整接收／重试、真实Facade许可及本地输出；保存端口由明确替身控制。
+mod cleanup;
 use super::*;
 use crate::transfer::blob::test_support::local_file_probe;
 use crate::transfer::blob::transport::BlobShutdownWait;
