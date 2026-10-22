@@ -10,7 +10,9 @@ mod tests;
 
 mod download;
 pub use download::BlobDownloadResources;
-pub(in super::super::super) use download::PreparedDownload;
+pub(in super::super::super) use download::{
+    BlobDownloadPreparation, BlobPreparationStop, PreparedDownload,
+};
 
 mod supervision;
 

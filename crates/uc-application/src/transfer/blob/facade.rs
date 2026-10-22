@@ -3,10 +3,13 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use self::preparation::FetchPreparationState;
 use crate::transfer::policy::CANCEL_WAIT_TIMEOUT;
 use async_trait::async_trait;
 use bytes::Bytes;
+use std::sync::atomic::Ordering;
 use std::sync::PoisonError;
+mod preparation;
 use tokio::time::{timeout_at, Instant};
 use tokio_util::sync::CancellationToken;
 
@@ -26,8 +29,8 @@ use uc_observability_contract::{error_source::io_error_kind, log_fields::log_id,
 use super::notifications::OutboundNotifications;
 use crate::facade::host_event::{HostEvent, HostEventBus, TransferHostEvent};
 use crate::transfer::blob::transport::{
-    BlobDownloadResources, BlobExchangeError, BlobExchangeFailure, BlobTransport,
-    DownloadCompletion,
+    BlobDownloadResources, BlobExchangeError, BlobExchangeFailure, BlobPreparationStop,
+    BlobTransport, DownloadCompletion,
 };
 use crate::transfer::blob::{
     fetch_failure_reason, FetchBlobInput, FetchBlobPathInput, FetchBlobUseCase, PublishBlobInput,
@@ -273,11 +276,12 @@ struct InflightFetch {
     completion: DownloadCompletion,
     cancelling: Arc<Mutex<Option<DownloadCompletion>>>,
     token: CancellationToken,
-    session: Option<Arc<ReceiverTransferHandle>>,
+    prepared: Arc<FetchPreparationState>,
     attempt_id: Option<String>,
     outbound: Option<OutboundReportContext>,
 }
 
+#[derive(Clone)]
 pub struct BlobTransferFacade {
     publish_uc: Arc<PublishBlobUseCase>,
     fetch_uc: Arc<FetchBlobUseCase>,
@@ -335,37 +339,6 @@ impl BlobTransferFacade {
                         .as_ref()
                         .is_some_and(|completion| completion.borrow().is_none())
             })
-    }
-    fn register_inflight(
-        &self,
-        transfer_id: String,
-        fetch: InflightFetch,
-    ) -> Result<(), BlobTransferError> {
-        let mut registry = self
-            .inflight_fetches
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        // 等待方退出后仍有真实完成通知；后续请求回收终态登记，不积累历史任务。
-        registry.retain(|_, previous| {
-            previous.completion.borrow().is_none()
-                || previous
-                    .cancelling
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .as_ref()
-                    .is_some_and(|completion| completion.borrow().is_none())
-        });
-        if registry
-            .get(&transfer_id)
-            .is_some_and(|previous| previous.completion.borrow().is_none())
-        {
-            fetch.token.cancel();
-            return Err(BlobTransferError::Fetch(
-                BlobExchangeError::refused(BlobExchangeFailure::Busy).into(),
-            ));
-        }
-        registry.insert(transfer_id, fetch);
-        Ok(())
     }
     async fn begin_lifecycle(
         &self,
@@ -464,7 +437,15 @@ impl BlobTransferFacade {
         {
             return Ok(InboundCancelOutcome::NotInflight);
         }
-        entry.token.cancel();
+        {
+            let mut stop = entry
+                .prepared
+                .stop
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            stop.get_or_insert(BlobPreparationStop::Cancelled(reason));
+            entry.token.cancel();
+        }
         let completion = {
             let mut cancelling = entry
                 .cancelling
@@ -474,7 +455,7 @@ impl BlobTransferFacade {
                 Some(completion) => completion.clone(),
                 None => {
                     let mut pending = entry.completion.clone();
-                    let session = entry.session.clone();
+                    let prepared = entry.prepared.clone();
                     let outbound = entry.outbound.clone();
                     let job = self
                         .transport
@@ -488,7 +469,14 @@ impl BlobTransferFacade {
                                 Err(error) if error.settled_cancellation() => {}
                                 Err(error) => return Err(error),
                             }
-                            if let Some(session) = session {
+                            let session = prepared
+                                .session
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .clone();
+                            if let Some(session) =
+                                session.filter(|_| !prepared.stop_attempted.load(Ordering::Acquire))
+                            {
                                 session.cancel(reason).await.map_err(|source| {
                                     BlobExchangeError::new(BlobExchangeFailure::Settlement, source)
                                 })?;
@@ -637,48 +625,29 @@ impl BlobTransferFacade {
             .unwrap_or_default();
         let iroh_tag_entry_id = command.entry_id.clone();
         let outbound_ctx = self.build_outbound_context(command.transfer_context.as_ref());
-        let lifecycle_session = match command.transfer_context.as_ref() {
-            Some(ctx) if ctx.individual_lifecycle || ctx.batch_position.is_first() => {
-                self.begin_lifecycle(ctx, String::new()).await?
-            }
-            Some(ctx) => self.existing_lifecycle(ctx).await?,
-            None => None,
-        };
-        let progress_sink = self
-            .build_progress_sink(
-                command.transfer_context.as_ref(),
-                lifecycle_session.clone(),
-                outbound_ctx.clone(),
-            )
-            .await;
-        if let (Some(ctx), Some(sink)) = (command.transfer_context.as_ref(), progress_sink.as_ref())
-        {
-            if ctx.individual_lifecycle || ctx.batch_position.is_first() {
-                sink.report(0, ctx.total_bytes).await;
-            }
-        }
-
         let cancel_token = command.cancellation.child_token();
-        let operation = self.fetch_uc.execute(FetchBlobInput {
+        let prepared = Arc::new(FetchPreparationState::default());
+        let preparation = self.prepare_fetch(
+            command.transfer_context.clone(),
+            String::new(),
+            outbound_ctx.clone(),
+            cancel_token.clone(),
+            prepared.clone(),
+        );
+        let input = FetchBlobInput {
             settlement: settlement.clone(),
+            preparation,
             ticket: command.ticket,
             cancel: cancel_token.clone(),
             entry_id: iroh_tag_entry_id,
-            progress: progress_sink.clone(),
-        });
-        if let Some(ctx) = command.transfer_context.as_ref() {
-            self.register_inflight(
-                ctx.transfer_id.clone(),
-                InflightFetch {
-                    token: cancel_token.clone(),
-                    completion: operation.completion(),
-                    cancelling: Arc::new(Mutex::new(None)),
-                    session: lifecycle_session.clone(),
-                    attempt_id: ctx.attempt_id.clone(),
-                    outbound: outbound_ctx.clone(),
-                },
-            )?;
-        }
+        };
+        let operation = self.start_fetch(
+            command.transfer_context.as_ref(),
+            cancel_token,
+            &prepared,
+            outbound_ctx.clone(),
+            || self.fetch_uc.execute(input),
+        )?;
 
         let result = operation.await.map_err(|source| {
             if source.settled_cancellation() {
@@ -687,6 +656,17 @@ impl BlobTransferFacade {
                 BlobTransferError::Fetch(source.into())
             }
         });
+
+        let lifecycle_session = prepared
+            .session
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let progress_sink = prepared
+            .progress
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
 
         if let Some(ctx) = command.transfer_context.as_ref() {
             self.inflight_fetches
@@ -712,7 +692,10 @@ impl BlobTransferFacade {
                         sink.report(final_size, total).await;
                     }
                     if ctx.individual_lifecycle {
-                        if let Some(session) = lifecycle_session.as_ref() {
+                        if let Some(session) = lifecycle_session
+                            .as_ref()
+                            .filter(|_| !prepared.stop_attempted.load(Ordering::Acquire))
+                        {
                             session
                                 .complete()
                                 .await
@@ -721,7 +704,10 @@ impl BlobTransferFacade {
                     }
                     if ctx.batch_position.is_last() || ctx.batch.is_some() {
                         if !ctx.individual_lifecycle && ctx.batch_position.is_last() {
-                            if let Some(session) = lifecycle_session.as_ref() {
+                            if let Some(session) = lifecycle_session
+                                .as_ref()
+                                .filter(|_| !prepared.stop_attempted.load(Ordering::Acquire))
+                            {
                                 session.complete().await.map_err(|source| {
                                     BlobTransferError::Persistence(source.into())
                                 })?;
@@ -745,7 +731,10 @@ impl BlobTransferFacade {
             }
             Err(BlobTransferError::Cancelled) => {
                 if command.cancellation.is_cancelled() {
-                    if let Some(session) = lifecycle_session.as_ref() {
+                    if let Some(session) = lifecycle_session
+                        .as_ref()
+                        .filter(|_| !prepared.stop_attempted.load(Ordering::Acquire))
+                    {
                         session
                             .cancel(FileTransferCancellationReason::LocalUser)
                             .await
@@ -769,7 +758,10 @@ impl BlobTransferFacade {
             }
             Err(BlobTransferError::Fetch(msg)) => {
                 if let Some(ctx) = command.transfer_context.as_ref() {
-                    if let Some(session) = lifecycle_session.as_ref() {
+                    if let Some(session) = lifecycle_session
+                        .as_ref()
+                        .filter(|_| !prepared.stop_attempted.load(Ordering::Acquire))
+                    {
                         if let Err(error) = session.fail(fetch_failure_reason(&msg), None).await {
                             uc_warn!(
                                 transfer_id = log_id(&ctx.transfer_id),
@@ -814,55 +806,39 @@ impl BlobTransferFacade {
             .unwrap_or_default();
         let iroh_tag_entry_id = command.entry_id.clone();
         let outbound_ctx = self.build_outbound_context(command.transfer_context.as_ref());
-        let lifecycle_session = match command.transfer_context.as_ref() {
-            Some(ctx) if ctx.individual_lifecycle || ctx.batch_position.is_first() => {
-                let cached_path = if ctx.attempt_id.is_some() {
-                    String::new()
-                } else {
-                    command.target_path.to_string_lossy().into_owned()
-                };
-                self.begin_lifecycle(ctx, cached_path).await?
-            }
-            Some(ctx) => self.existing_lifecycle(ctx).await?,
-            None => None,
-        };
-        let progress_sink = self
-            .build_progress_sink(
-                command.transfer_context.as_ref(),
-                lifecycle_session.clone(),
-                outbound_ctx.clone(),
-            )
-            .await;
-        if let (Some(ctx), Some(sink)) = (command.transfer_context.as_ref(), progress_sink.as_ref())
-        {
-            if ctx.individual_lifecycle || ctx.batch_position.is_first() {
-                sink.report(0, ctx.total_bytes).await;
-            }
-        }
-
-        // 显式接收项可按身份取消；静默获取也由实际任务和调用等待的停止 guard 保护。
         let cancel_token = command.cancellation.child_token();
-        let operation = self.fetch_uc.execute_to_path(FetchBlobPathInput {
+        let prepared = Arc::new(FetchPreparationState::default());
+        let cached_path = if command
+            .transfer_context
+            .as_ref()
+            .is_some_and(|context| context.attempt_id.is_some())
+        {
+            String::new()
+        } else {
+            command.target_path.to_string_lossy().into_owned()
+        };
+        let preparation = self.prepare_fetch(
+            command.transfer_context.clone(),
+            cached_path,
+            outbound_ctx.clone(),
+            cancel_token.clone(),
+            prepared.clone(),
+        );
+        let input = FetchBlobPathInput {
             settlement: settlement.clone(),
+            preparation,
             ticket: command.ticket,
             cancel: cancel_token.clone(),
             entry_id: iroh_tag_entry_id,
             target_path: command.target_path,
-            progress: progress_sink.clone(),
-        });
-        if let Some(ctx) = command.transfer_context.as_ref() {
-            self.register_inflight(
-                ctx.transfer_id.clone(),
-                InflightFetch {
-                    token: cancel_token.clone(),
-                    completion: operation.completion(),
-                    cancelling: Arc::new(Mutex::new(None)),
-                    session: lifecycle_session.clone(),
-                    attempt_id: ctx.attempt_id.clone(),
-                    outbound: outbound_ctx.clone(),
-                },
-            )?;
-        }
+        };
+        let operation = self.start_fetch(
+            command.transfer_context.as_ref(),
+            cancel_token,
+            &prepared,
+            outbound_ctx.clone(),
+            || self.fetch_uc.execute_to_path(input),
+        )?;
 
         let result = operation.await.map_err(|source| {
             if source.settled_cancellation() {
@@ -874,6 +850,17 @@ impl BlobTransferFacade {
 
         // fetch 出口必移除 registry,否则 cancel_inbound_transfer 会找到
         // 一个已经结束的 entry,无害但会污染 metric。
+        let lifecycle_session = prepared
+            .session
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let progress_sink = prepared
+            .progress
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+
         if let Some(ctx) = command.transfer_context.as_ref() {
             self.inflight_fetches
                 .lock()
@@ -895,7 +882,10 @@ impl BlobTransferFacade {
                         sink.report(final_size, total).await;
                     }
                     if ctx.individual_lifecycle {
-                        if let Some(session) = lifecycle_session.as_ref() {
+                        if let Some(session) = lifecycle_session
+                            .as_ref()
+                            .filter(|_| !prepared.stop_attempted.load(Ordering::Acquire))
+                        {
                             session
                                 .complete()
                                 .await
@@ -904,7 +894,10 @@ impl BlobTransferFacade {
                     }
                     if ctx.batch_position.is_last() || ctx.batch.is_some() {
                         if !ctx.individual_lifecycle && ctx.batch_position.is_last() {
-                            if let Some(session) = lifecycle_session.as_ref() {
+                            if let Some(session) = lifecycle_session
+                                .as_ref()
+                                .filter(|_| !prepared.stop_attempted.load(Ordering::Acquire))
+                            {
                                 session.complete().await.map_err(|source| {
                                     BlobTransferError::Persistence(source.into())
                                 })?;
@@ -928,7 +921,10 @@ impl BlobTransferFacade {
             }
             Err(BlobTransferError::Cancelled) => {
                 if command.cancellation.is_cancelled() {
-                    if let Some(session) = lifecycle_session.as_ref() {
+                    if let Some(session) = lifecycle_session
+                        .as_ref()
+                        .filter(|_| !prepared.stop_attempted.load(Ordering::Acquire))
+                    {
                         session
                             .cancel(FileTransferCancellationReason::LocalUser)
                             .await
@@ -954,7 +950,10 @@ impl BlobTransferFacade {
                 let failure = anyhow::Error::from(e);
                 let reason = fetch_failure_reason(&failure);
                 if let Some(ctx) = command.transfer_context.as_ref() {
-                    if let Some(session) = lifecycle_session.as_ref() {
+                    if let Some(session) = lifecycle_session
+                        .as_ref()
+                        .filter(|_| !prepared.stop_attempted.load(Ordering::Acquire))
+                    {
                         if let Err(error) = session.fail(reason, None).await {
                             uc_warn!(
                                 transfer_id = log_id(&ctx.transfer_id),

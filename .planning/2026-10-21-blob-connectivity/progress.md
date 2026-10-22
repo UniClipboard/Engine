@@ -319,3 +319,11 @@
 - 初步完整Application／Engine1529通过／6跳过（193.718秒）之后，缓存关闭屏障又实证shutdown在本地工作／额度仍被持有时完整返回（download-local-shutdown-red.log，0.088秒）。关闭现在等待原slot真正全部交回后才关闭存储。五秒只结束调用等待、保护仍为1；重复Complete复用同一协调者、释放后才真正关闭。相关192项通过（5.509秒）。失败分支最初错误预期shutdown成功，已改为验证既有Store及原StorageFull，不改弱生产策略。
 - 最终同一源快照Application／Engine完整nextest 1529通过／6跳过（178.054秒），含实际三文件重试、取消／删除／清空、认证失败恢复、进程崩溃恢复与新额度／保护／五秒关闭屏障。metadata解析812包、workspace全目标check（1m31s）、fmt、Rust style、repository preflight、1350站点隐私清单及diff全部通过。Cargo串行共享target及原缓存，未执行设备仍跳过。
 - 手工审查许可唯一性及克隆所有权、内容与额度释放顺序、字段可见性、batch逐项释放避免死锁、错误来源不含持有者、通知／锁顺序、关闭quiescence及真实Engine回归；code-review skill缺失，不冒称技能审查。完整spec仍进行：准备阶段admission／60秒、目录发布／最终保存、inflight完整取消及清理失败移交仍需实际屏障证明，不把本轮当完整预算或生命周期完成。
+
+
+- Facade初始本地进度红测实证准备在准入前启动；现由原DownloadTask持有准备future，取得原4／2许可后才开始lifecycle／初始进度，同一started_at覆盖准备及身份解析。原子检查登记后再创建任务，重复请求不先触碰旧session；不透明ObservationContext沿原准备future传递，无新Engine接口、池或预算。
+- 实际Facade屏障验证全局4／每端2及等待64／16、满额拒绝、重复请求、排队取消、5秒CancellationIncomplete、调用者退出后原准备仍占用额度至真正结束。真实DownloadTask虚拟时钟验证准备59／60秒、排队不消耗下一活跃期限、准备30秒后身份解析仅余30秒；期限已过不启动identity／网络。原StorageFull及关闭source保留。前期相关194通过；最终修改后blob／receive定向82通过（10.166秒）。
+- 新增正常准备拒绝回归先因两处私有路径导入编译失败，修正后取得实际红测：LifecycleClosed经统一Settlement污染shutdown（download-preparation-refusal-red.log）。现在按FileTransferApplicationError具体类型区分Closed／Busy／AlreadyCompleted等拒绝与Store／Settlement，保留整个原BlobTransferError；停止写入失败仍为Settlement。实际监督任务及shutdown验证三类正常拒绝不污染关闭，StorageFull仍作为原Store原因由关闭报告，未吞错。
+- 第一次完整快照1530通过／1超时／6跳过（184.278秒），engine_start_builds_a_resumable_real_session超过20秒；单独原样复跑8.795秒通过。最终含分类修复的同一源快照Application／Engine完整1533通过／6跳过（189.050秒），该测试11.683秒通过。未改超时配置或测试并发4，首次失败没有记为通过。
+- 最终metadata解析812包、workspace全目标check（1m28s）、fmt、Rust style、Engine repository preflight、1350站点隐私清单及diff全部通过。Cargo串行共享target与原缓存。手工审查许可／期限唯一性、登记与启动原子性、取消原因及实际准备结算、source链与关闭分类、观测上下文所有权；code-review skill缺失，不冒称技能审查。设备未执行仍跳过。
+- 下一步从materialization/workflow.rs独立文件目标reserve_target／reserve_managed_output及artifact journal入手：它们仍先于fetch排队，须纳入同一下载任务及首批期限，不能创建父子双重许可。目录发布／最终保存、清理失败移交和inflight仍只跟底层worker的边界亦未完成；其余生命周期、历史来源、受管1GiB、业务记录及最终head网络／CI／设备验收保留，完整spec继续。

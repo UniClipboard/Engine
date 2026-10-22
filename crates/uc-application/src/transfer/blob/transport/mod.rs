@@ -11,6 +11,8 @@ pub use ports::{
 
 pub use runtime::{BlobDownloadResources, BlobShutdownWait, BlobTransport};
 
-pub(in super::super) use runtime::PreparedDownload;
+pub(in super::super) use runtime::{
+    BlobDownloadPreparation, BlobPreparationStop, PreparedDownload,
+};
 
 pub(in super::super) use runtime::{DownloadCompletion, DownloadTask};

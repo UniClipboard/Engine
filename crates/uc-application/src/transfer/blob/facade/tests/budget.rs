@@ -44,6 +44,7 @@ impl BlobSourcePort for BudgetSource {
 }
 
 struct BlockedFinalProgress {
+    at_bytes: u64,
     entered: Semaphore,
     released: Mutex<bool>,
     changed: Condvar,
@@ -59,9 +60,9 @@ impl HostEventEmitterPort for BlockedFinalProgress {
         if matches!(
             event,
             HostEvent::Transfer(TransferHostEvent::Progress {
-                bytes_transferred: 5,
+                bytes_transferred,
                 ..
-            })
+            }) if bytes_transferred == self.at_bytes
         ) {
             self.entered.add_permits(1);
             let mut released = self.released.lock().unwrap();
@@ -83,6 +84,7 @@ impl Drop for ReleaseFinalProgress {
 async fn local_final_progress_keeps_global_and_peer_download_capacity_until_settled() {
     for (grouped, active) in [(false, 2usize), (true, 2), (false, 4), (true, 4)] {
         let progress = Arc::new(BlockedFinalProgress {
+            at_bytes: 5,
             entered: Semaphore::new(0),
             released: Mutex::new(false),
             changed: Condvar::new(),
@@ -379,4 +381,174 @@ async fn failed_fetch_keeps_capacity_until_its_parent_finishes_local_cleanup() {
         !escaped,
         "a failed network worker released capacity before its parent cleanup"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn initial_local_preparation_obeys_global_peer_queue_and_cancellation_boundaries() {
+    for (active, queued) in [(2usize, 16usize), (4, 64)] {
+        let progress = Arc::new(BlockedFinalProgress {
+            at_bytes: 0,
+            entered: Semaphore::new(0),
+            released: Mutex::new(false),
+            changed: Condvar::new(),
+        });
+        let release = ReleaseFinalProgress(progress.clone());
+        let bus = Arc::new(HostEventBus::new());
+        bus.register("budget-initial-preparation", progress.clone());
+        let transfer = Arc::new(BlockingBlobTransfer::new());
+        transfer.release.add_permits(active + queued);
+        let local = Arc::new(FakeLocalStore(transfer.clone()));
+        let facade = Arc::new(BlobTransferFacade::new(BlobTransferDeps {
+            downloads: Arc::new(BlobDownloadResources {
+                transport: BlobTransport::new(
+                    Arc::new(RejectUnexpectedNetwork),
+                    Arc::new(RejectUnexpectedNetwork),
+                    Arc::new(RejectUnexpectedNetwork),
+                    Arc::new(RejectUnexpectedNetwork),
+                ),
+                source: Arc::new(BudgetSource(transfer.clone())),
+                store: local,
+            }),
+            hash: Arc::new(TestHash),
+            blob_transfer: transfer.clone(),
+            blob_reference: Arc::new(TestReferences),
+            transfer_cipher: Arc::new(TestCipher),
+            host_event_emitter: Some(bus),
+            outbound_progress_reporter: None,
+            file_transfer: None,
+        }));
+        let fetch = |index: usize| {
+            let facade = facade.clone();
+            tokio::spawn(async move {
+                let key = if active == 2 {
+                    1
+                } else if index == active + queued {
+                    5
+                } else {
+                    (index % 4 + 1) as u8
+                };
+                facade
+                    .fetch_blob(FetchBlobCommand {
+                        cancellation: CancellationToken::new(),
+                        ticket: BlobTicket::from_bytes(vec![key; 32]),
+                        entry_id: EntryId::from("sender"),
+                        transfer_context: Some(FetchTransferContext {
+                            item_role: ReceiveItemRole::Representation,
+                            batch: None,
+                            transfer_id: format!("prepare-{index}"),
+                            entry_id: format!("entry-{index}"),
+                            attempt_id: None,
+                            peer_id: "peer".into(),
+                            total_bytes: Some(5),
+                            filename: String::new(),
+                            outbound_transfer_id: None,
+                            outbound_target: None,
+                            batch_position: BatchPosition::Only,
+                            individual_lifecycle: true,
+                        }),
+                    })
+                    .await
+            })
+        };
+        let mut running = (0..active).map(fetch).collect::<Vec<_>>();
+        timeout(
+            Duration::from_secs(3),
+            progress.entered.acquire_many(active as u32),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+        let duplicate = timeout(Duration::from_secs(3), fetch(0))
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        let BlobTransferError::Fetch(duplicate) = duplicate else {
+            panic!("duplicate preparation must be busy")
+        };
+        assert_eq!(
+            duplicate.downcast_ref::<BlobExchangeError>().unwrap().kind,
+            BlobExchangeFailure::Busy
+        );
+        let mut waiting = (active..active + queued).map(fetch).collect::<Vec<_>>();
+        timeout(Duration::from_secs(3), async {
+            loop {
+                if facade.inflight_fetches.lock().unwrap().len() == active + queued {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let overflow = timeout(Duration::from_secs(3), fetch(active + queued))
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        let BlobTransferError::Fetch(overflow) = overflow else {
+            panic!("queue overflow must be busy")
+        };
+        assert!(overflow.chain().any(|source| source
+            .downcast_ref::<BlobExchangeError>()
+            .is_some_and(|source| source.kind == BlobExchangeFailure::Busy)));
+        assert_eq!(
+            progress.entered.available_permits(),
+            0,
+            "queued requests must not perform local preparation"
+        );
+        let incomplete = facade
+            .cancel_inbound_transfer(
+                "prepare-0",
+                uc_core::file_transfer::FileTransferCancellationReason::LocalUser,
+                super::super::TransferCancellationWait::Bounded,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            incomplete,
+            BlobTransferError::CancellationIncomplete(_)
+        ));
+        running[0].abort();
+        let cancelled_id = format!("prepare-{active}");
+        let cancelled = facade
+            .cancel_inbound_transfer(
+                &cancelled_id,
+                uc_core::file_transfer::FileTransferCancellationReason::LocalUser,
+                super::super::TransferCancellationWait::Complete,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            cancelled,
+            super::super::InboundCancelOutcome::Cancelled
+        ));
+        assert!(matches!(
+            waiting.remove(0).await.unwrap(),
+            Err(BlobTransferError::Cancelled)
+        ));
+        let escaped = timeout(Duration::from_millis(50), progress.entered.acquire())
+            .await
+            .is_ok();
+        release.0.release();
+        assert!(running.remove(0).await.unwrap_err().is_cancelled());
+        for task in running.into_iter().chain(waiting) {
+            task.await.unwrap().unwrap();
+        }
+        facade
+            .transport
+            .shutdown(BlobShutdownWait::Complete)
+            .await
+            .unwrap();
+        assert_eq!(
+            transfer.started.available_permits(),
+            active + queued - 2,
+            "cancelled preparation must not begin content reads"
+        );
+        assert!(
+            !escaped,
+            "local preparation began before download admission was returned"
+        );
+    }
 }

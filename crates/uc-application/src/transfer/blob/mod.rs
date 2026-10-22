@@ -23,6 +23,7 @@ pub(crate) mod test_support;
 
 #[cfg(test)]
 mod tests {
+    mod preparation;
     use std::collections::HashMap;
     use std::io::Write;
     use std::sync::{Arc, Mutex};
@@ -127,14 +128,20 @@ mod tests {
             ticket: ticket.clone(),
             entry_id: EntryId::new(),
             cancel: first_cancel.clone(),
-            progress: None,
+            preparation: super::transport::BlobDownloadPreparation {
+                work: Box::pin(async { Ok(None) }),
+                stop: Default::default(),
+            },
         }));
         let second = tokio::spawn(usecase.execute(FetchBlobInput {
             settlement: Default::default(),
             ticket: ticket.clone(),
             entry_id: EntryId::new(),
             cancel: second_cancel.clone(),
-            progress: None,
+            preparation: super::transport::BlobDownloadPreparation {
+                work: Box::pin(async { Ok(None) }),
+                stop: Default::default(),
+            },
         }));
         source
             .entered
@@ -161,7 +168,10 @@ mod tests {
             ticket,
             entry_id: EntryId::new(),
             cancel: CancellationToken::new(),
-            progress: None,
+            preparation: super::transport::BlobDownloadPreparation {
+                work: Box::pin(async { Ok(None) }),
+                stop: Default::default(),
+            },
         }));
         for _ in 0..8 {
             tokio::task::yield_now().await;
@@ -434,7 +444,10 @@ mod tests {
                 cancel: tokio_util::sync::CancellationToken::new(),
                 ticket: second.ticket,
                 entry_id: EntryId::from("entry-two"),
-                progress: None,
+                preparation: super::transport::BlobDownloadPreparation {
+                    work: Box::pin(async { Ok(None) }),
+                    stop: Default::default(),
+                },
             })
             .await
             .expect("second digest should fetch for the new entry tag");
@@ -497,7 +510,10 @@ mod tests {
                 cancel: tokio_util::sync::CancellationToken::new(),
                 ticket,
                 entry_id: entry_id.clone(),
-                progress: None,
+                preparation: super::transport::BlobDownloadPreparation {
+                    work: Box::pin(async { Ok(None) }),
+                    stop: Default::default(),
+                },
             })
             .await
             .expect("fetch should succeed");

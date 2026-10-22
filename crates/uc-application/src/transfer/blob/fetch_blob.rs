@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use super::transport::DownloadTask;
 use super::transport::{
-    BlobDownloadResources, BlobExchangeError, BlobExchangeFailure, PreparedDownload,
+    BlobDownloadPreparation, BlobDownloadResources, BlobExchangeError, BlobExchangeFailure,
+    PreparedDownload,
 };
 use crate::transfer::receive::DownloadSettlement;
 use bytes::Bytes;
@@ -13,8 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 use uc_core::ids::EntryId;
 use uc_core::ports::blob::{
-    BlobDigest, BlobProgressSink, BlobReferenceRepositoryPort, BlobTicket, BlobTransferPort,
-    PlaintextHash, TagReason,
+    BlobDigest, BlobReferenceRepositoryPort, BlobTicket, BlobTransferPort, PlaintextHash, TagReason,
 };
 use uc_core::ports::security::TransferCipherPort;
 use uc_core::ports::ContentHashPort;
@@ -24,8 +24,8 @@ pub(crate) struct FetchBlobInput {
     pub ticket: BlobTicket,
     pub cancel: CancellationToken,
     pub entry_id: EntryId,
-    /// 可选进度交接，由接收负责人合并已校验的数据并按时间窗报告。
-    pub progress: Option<Arc<dyn BlobProgressSink>>,
+    /// 取得原下载许可后执行的本地准备，返回可选的已校验进度交接。
+    pub(in super::super) preparation: BlobDownloadPreparation,
 }
 
 #[derive(Debug, Clone)]
@@ -49,7 +49,7 @@ pub(crate) struct FetchBlobPathInput {
     pub cancel: CancellationToken,
     pub entry_id: EntryId,
     pub target_path: PathBuf,
-    pub progress: Option<Arc<dyn BlobProgressSink>>,
+    pub(in super::super) preparation: BlobDownloadPreparation,
 }
 
 #[derive(Debug, Clone)]
@@ -117,7 +117,7 @@ impl FetchBlobUseCase {
             .obtain(
                 prepared,
                 &input.cancel,
-                input.progress,
+                input.preparation,
                 input.settlement.clone(),
             )
             .await
@@ -200,7 +200,7 @@ impl FetchBlobUseCase {
             .obtain(
                 prepared,
                 &input.cancel,
-                input.progress,
+                input.preparation,
                 input.settlement.clone(),
             )
             .await

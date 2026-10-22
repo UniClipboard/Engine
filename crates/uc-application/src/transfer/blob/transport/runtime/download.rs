@@ -8,11 +8,24 @@ use crate::connectivity::{ConnectionLease, ConnectionRequest, ConnectionRequestS
 use crate::transfer::policy::PROGRESS_REPORT_INTERVAL;
 use crate::transfer::receive::timing::{ReceiveTiming, TimingError};
 use crate::transfer::receive::{scheduler::DownloadReservation, DownloadSettlement};
+use futures::future::BoxFuture;
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::{watch, Notify};
 use tokio::time::{sleep_until, Instant};
 use tokio_util::sync::CancellationToken;
+use uc_core::file_transfer::FileTransferCancellationReason;
 use uc_core::ports::blob::{BlobDigest, BlobProgressSink, BlobTicket};
+
+#[derive(Clone, Copy)]
+pub(in super::super::super::super) enum BlobPreparationStop {
+    Cancelled(FileTransferCancellationReason),
+    Deadline,
+}
+
+pub(in super::super::super::super) struct BlobDownloadPreparation {
+    pub work: BoxFuture<'static, Result<Option<Arc<dyn BlobProgressSink>>, BlobExchangeError>>,
+    pub stop: Arc<Mutex<Option<BlobPreparationStop>>>,
+}
 
 pub struct BlobDownloadResources {
     pub transport: Arc<BlobTransport>,
@@ -74,7 +87,7 @@ impl BlobDownloadResources {
         &self,
         prepared: PreparedDownload,
         cancel: &CancellationToken,
-        sink: Option<Arc<dyn BlobProgressSink>>,
+        preparing: BlobDownloadPreparation,
         settlement: DownloadSettlement,
     ) -> Result<DownloadedBlob, BlobExchangeError> {
         let PreparedDownload {
@@ -95,13 +108,30 @@ impl BlobDownloadResources {
         });
         let reports_done = CancellationToken::new();
         let report_stop = reports_done.clone();
-        let reports = tokio::spawn(async move {
-            if let Some(sink) = sink {
-                report_progress(receive, sink, report_stop).await;
-            }
-        });
+        let BlobDownloadPreparation {
+            work: preparing,
+            stop,
+        } = preparing;
+        let mut reports = None;
         let result = {
             let work = async {
+                let sink = preparing.await?;
+                if cancel.is_cancelled() {
+                    return Err(BlobExchangeError::refused(BlobExchangeFailure::Cancelled));
+                }
+                progress
+                    .timing
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .check(Instant::now())
+                    .map_err(|source| {
+                        BlobExchangeError::new(BlobExchangeFailure::RequestExpired, source)
+                    })?;
+                reports = Some(tokio::spawn(async move {
+                    if let Some(sink) = sink {
+                        report_progress(receive, sink, report_stop).await;
+                    }
+                }));
                 let peer = self.source.resolve_peer(&source.source_key).await?;
                 let request = scope
                     .bind(peer, source.address_hint)
@@ -122,7 +152,11 @@ impl BlobDownloadResources {
                     biased;
                     _ = cancel.cancelled() => {
                         // 接受取消后不再用后来的数据期限覆盖原结果；已开始的本地工作仍实际结算。
-                        let primary = BlobExchangeError::refused(BlobExchangeFailure::Cancelled);
+                        let cause = *stop.lock().unwrap_or_else(PoisonError::into_inner).get_or_insert(BlobPreparationStop::Cancelled(FileTransferCancellationReason::LocalUser));
+                        let primary = match cause {
+                            BlobPreparationStop::Cancelled(_) => BlobExchangeError::refused(BlobExchangeFailure::Cancelled),
+                            BlobPreparationStop::Deadline => BlobExchangeError::new(BlobExchangeFailure::RequestExpired, TimingError(deadline.reason)),
+                        };
                         break match work.await {
                             Err(error) if error.settled_cancellation() => Err(error),
                             Err(error) => Err(primary.with_settlement(error)),
@@ -132,8 +166,12 @@ impl BlobDownloadResources {
                     result = &mut work => break result,
                     _ = progress.changed.notified() => {},
                     _ = sleep_until(deadline.at) => {
+                        let cause = *stop.lock().unwrap_or_else(PoisonError::into_inner).get_or_insert(BlobPreparationStop::Deadline);
                         cancel.cancel();
-                        let primary = BlobExchangeError::new(BlobExchangeFailure::RequestExpired, TimingError(deadline.reason));
+                        let primary = match cause {
+                            BlobPreparationStop::Cancelled(_) => BlobExchangeError::refused(BlobExchangeFailure::Cancelled),
+                            BlobPreparationStop::Deadline => BlobExchangeError::new(BlobExchangeFailure::RequestExpired, TimingError(deadline.reason)),
+                        };
                         break match work.await {
                             Err(error) if !error.settled_cancellation() => Err(primary.with_settlement(error)),
                             _ => Err(primary),
@@ -143,7 +181,10 @@ impl BlobDownloadResources {
             }
         };
         reports_done.cancel();
-        let reported = reports.await.map_err(super::owner::task_error);
+        let reported = match reports {
+            Some(reports) => reports.await.map_err(super::owner::task_error),
+            None => Ok(()),
+        };
         let (content, request) = match (result, reported) {
             (Ok(received), Ok(())) => received,
             (Err(error), Ok(())) | (Ok(_), Err(error)) => return Err(error),
