@@ -316,3 +316,9 @@ mod preparation;
 
 #[path = "directory_settlement/commit.rs"]
 mod commit;
+
+#[path = "directory_settlement/duplicate.rs"]
+mod duplicate;
+
+#[path = "directory_settlement/untracked.rs"]
+mod untracked;

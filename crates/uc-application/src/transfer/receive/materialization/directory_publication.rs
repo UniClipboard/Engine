@@ -84,9 +84,6 @@ impl DirectoryPublication {
     pub(super) fn record(&mut self, final_path: PathBuf, staged_from: PathBuf) {
         self.published.push((final_path, staged_from));
     }
-    pub fn root_count(&self) -> usize {
-        self.published.len()
-    }
 
     /// 已保存输出不能回滚；清理成功之前仍由原持有者承担责任。
     pub async fn commit(&mut self) -> Result<(), io::Error> {

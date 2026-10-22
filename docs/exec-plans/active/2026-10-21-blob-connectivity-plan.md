@@ -1229,3 +1229,15 @@ Core红测0.002秒复现目录非终态聚合丢失StorageUnavailable（None／S
 本切片最终同源检查：全量Application1292项通过（18.067秒），1项跳过；真实Engine目录成员终态回归1项通过（12.185秒），其余323项未纳入过滤；locked metadata、workspace all-targets（3分24秒）、fmt、Rust style、repository preflight（含隐私与负例）及diff均退出0。人工审阅核对有发布责任时复核失败不再经问号退出、身份拒绝不再消费撤回失败、原失败类别及完整来源保留、既有权威／回滚／NoEntry统一结算且不重复获取或保存；没有发布责任的原错误仍沿原路径返回。新故障为完整App能力及实际文件系统端口注入，不冒充真实Engine的同一存储／身份故障或强杀矩阵。
 
 构建保持单scope串行、jobs=1、共享target／缓存及5GiB内存／4GiB swap上限，已观察峰值约3.0GiB。最终scope已inactive，确认无本轮活动编译后回收空的专用TMPDIR。完整spec保持active；重复投递／placeholder等剩余撤回入口、首次Staging日志前强杀清理、完整生命周期、来源C、受管1GiB、最终兼容及设备矩阵继续未完成。
+
+### 2026-10-23：目录URI去重与最后的旧撤回入口
+
+完整负责人仍为原Application接收，调用方只发起完整接收／关闭。先保存旧目录、删除旧根，再接收同名但内容身份和字节不同的目录，实际文件系统红测0.011秒失败：发布后的本机URI匹配误撤回新目录，随后因已取得Committing而丢失取消权。仅跳过发布后的去重后，重复投递和目录结算30项通过（6.047秒）。继续补充发送端URI恰好等于旧接收路径的情况，红测0.008秒返回DuplicateSkipped，证明下载前也不能按目录URI判断内容重复。目录现只沿数据库及完整内容哈希去重，既不查询也不登记目录URI可见内容缓存；发布后的结果不再进入晚期路径去重。原文本／其他表示的可见内容去重保留，未改协议、ticket或持久格式。
+
+无权威attempt的内部组合在失败捕获时仍会消费DirectoryPublication并只记撤回警告；红测0.007秒失败于关闭提前成功。捕获失败和返回None现在不再以attempt存在为条件：只要有实际发布责任，就交给原fail_directory_receive及原任务修复。权威失败／取消／提交检查统一保留错误退出时的发布责任；若部分结果还带发布责任，先整体撤回而不交付残缺目录，placeholder分支不再消费目录。旧withdraw_publication以及仅供其使用的root_count getter已删除，未增加生产无跟踪旁路、格式、任务、队列或公开Engine接口。
+
+最终目录／duplicate／取消／代次129项通过（11.341秒）；前一轮组合128项通过（11.360秒）。新目录两种URI碰撞都完成两次原捕获、各自两项获取，替代文件读回world，暂存区消失；无attempt用例分别覆盖捕获StorageFull和返回None，撤回PermissionDenied时关闭短等待未完成，解除拒绝后同一原任务清理全部未保存根，无关文件仍为keep。端口模型表达存储状态，实际使用文件系统，不冒充SDK／SQLite同一故障矩阵。全量Application、当前源的真实Engine目录回归与根门禁待追加；首次Staging日志前强杀清理、完整生命周期、来源C、受管1GiB和最终兼容／设备矩阵继续未完成。
+
+本切片最终同源检查：全量Application1295项通过（18.123秒），1项跳过；真实Engine目录成员终态回归1项通过（12.549秒），其余323项未纳入过滤；locked metadata、workspace all-targets（3分24秒）、fmt、Rust style、repository preflight（含隐私与负例）及diff均退出0。人工审阅核对下载前目录不再按URI匹配可见缓存、目录成功只登记完整内容哈希、发布结果不进入晚期路径去重、权威错误统一保留发布责任、部分目录不进入placeholder交付、无attempt捕获失败和空结果都由原任务撤回。四处旧withdraw_publication调用及实现均已移除，未增加稳定接口、格式或后台池。
+
+构建继续单scope串行、jobs=1、共享target／缓存，5GiB内存和4GiB swap上限未放宽，已观察峰值约3.0GiB；最终scope已inactive且无本轮活动编译，专用磁盘TMPDIR为空并回收。真实Engine回归只证明本次源的既有目录终态路径，未把App的URI／无attempt注入算作同一SQLite／SDK故障或设备验收。完整spec保持active；首次Staging日志前强杀清理、完整生命周期、来源C、受管1GiB、最终兼容、平台与设备矩阵继续未完成。

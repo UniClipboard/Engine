@@ -50,7 +50,7 @@ use crate::clipboard::active::ClipboardSnapshotDeps;
 use crate::clipboard::sync::payload_codec::{
     decode_v3_bytes_to_snapshot_blob_refs_and_file_set, V3BlobRef,
 };
-use crate::facade::blob_transfer::SharedHostEventEmitter;
+use crate::facade::blob_transfer::{BlobTransferError, SharedHostEventEmitter};
 use crate::facade::host_event::{
     ClipboardHostEvent, ClipboardOriginKind, HostEvent, TransferHostEvent,
 };
@@ -1164,7 +1164,7 @@ impl ApplyInboundClipboardUseCase {
         }
 
         // 逐项提交之前排除已知的快速重复；保存后不能再把交付条目当NoEntry撤销。
-        if retry.is_none() && existing.is_none() {
+        if retry.is_none() && existing.is_none() && file_set_manifest.is_none() {
             if let Some(existing_entry_id) = self.find_recent_duplicate(
                 &input.snapshot_hash,
                 snapshot.meaningful_origin_key().as_deref(),
@@ -1606,8 +1606,14 @@ impl ApplyInboundClipboardUseCase {
         // complete entries are remembered, so this never suppresses the
         // completing delivery of a partial. Consulted only when the DB had no
         // match — a partial DB match takes the upgrade path below.
-        let visible_key = snapshot.meaningful_origin_key();
-        if retry.is_none()
+        let visible_key = if verify_directory_identity {
+            None
+        } else {
+            snapshot.meaningful_origin_key()
+        };
+        // 目录本机URI只是输出位置；发布后的提交不能按路径重新判为重复。
+        if publication.is_none()
+            && retry.is_none()
             && existing.is_none()
             && !file_progress
                 .as_ref()
@@ -1620,11 +1626,6 @@ impl ApplyInboundClipboardUseCase {
                     existing_entry_id = log_id(&existing_entry_id),
                     "inbound dropped: rapid duplicate of recently applied entry"
                 );
-                // The content is already here under another entry, so this
-                // delivery keeps no entry of its own and its roots would be a
-                // second visible copy of the same paste.
-                withdraw_publication(publication, "delivery is a duplicate of a recent entry")
-                    .await;
                 self.request_receive_cancellation(
                     &receiver_entry_id,
                     receive_attempt_id.as_deref(),
@@ -1665,45 +1666,44 @@ impl ApplyInboundClipboardUseCase {
             existing
         };
         let replacing = existing.is_some();
-        if is_partial {
+        let authority = if is_partial {
             match materialize_outcome {
-                MaterializeOutcome::PartialCancelled => {
-                    self.request_receive_cancellation(
-                        &receiver_entry_id,
-                        receive_attempt_id.as_deref(),
-                    )
-                    .await?;
-                }
-                MaterializeOutcome::PartialFailed | MaterializeOutcome::Complete => {
-                    self.begin_receive_failure(&receiver_entry_id, receive_attempt_id.as_deref())
-                        .await?;
-                }
+                MaterializeOutcome::PartialCancelled => self
+                    .request_receive_cancellation(&receiver_entry_id, receive_attempt_id.as_deref())
+                    .await
+                    .map(|()| false),
+                MaterializeOutcome::PartialFailed | MaterializeOutcome::Complete => self
+                    .begin_receive_failure(&receiver_entry_id, receive_attempt_id.as_deref())
+                    .await
+                    .map(|()| false),
             }
         } else {
-            let claimed = match self
-                .claim_receive_commit(&receiver_entry_id, receive_attempt_id.as_deref())
+            self.claim_receive_commit(&receiver_entry_id, receive_attempt_id.as_deref())
                 .await
-            {
-                Ok(claimed) => claimed,
-                Err(error) => {
-                    if let Some(publication) = publication.take() {
-                        return Err(self
-                            .fail_directory_receive(
-                                receive_action,
-                                UnsettledDirectory {
-                                    entry: receiver_entry_id.clone(),
-                                    attempt: receive_attempt_id.clone(),
-                                    cancelled: false,
-                                    publication,
-                                    notify_failure: true,
-                                },
-                                ReceiveFailure::Internal(SourceError::new(error)),
-                            )
-                            .await);
-                    }
-                    return Err(error);
+        };
+        let claimed = match authority {
+            Ok(claimed) => claimed,
+            Err(error) => {
+                if let Some(publication) = publication.take() {
+                    return Err(self
+                        .fail_directory_receive(
+                            receive_action,
+                            UnsettledDirectory {
+                                entry: receiver_entry_id.clone(),
+                                attempt: receive_attempt_id.clone(),
+                                cancelled: materialize_outcome
+                                    == MaterializeOutcome::PartialCancelled,
+                                publication,
+                                notify_failure: true,
+                            },
+                            ReceiveFailure::Internal(SourceError::new(error)),
+                        )
+                        .await);
                 }
-            };
+                return Err(error);
+            }
+        };
+        if !is_partial {
             if claimed {
                 self.emit_receive_state(
                     &receiver_entry_id,
@@ -1711,9 +1711,32 @@ impl ApplyInboundClipboardUseCase {
                     AttemptState::Committing,
                 );
             } else {
-                // 取消赢得 CAS 后保留已经成功的文件，由同一接收动作提交部分结果。
+                // 取消赢得CAS后独立文件仍保存成功项；目录只允许完整交付。
                 materialize_outcome = MaterializeOutcome::PartialCancelled;
                 is_partial = true;
+            }
+        }
+        if is_partial {
+            if let Some(publication) = publication.take() {
+                let cancelled = materialize_outcome == MaterializeOutcome::PartialCancelled;
+                let cause = if cancelled {
+                    SourceError::new(BlobTransferError::Cancelled)
+                } else {
+                    anyhow!("directory materialization returned a partial publication")
+                };
+                return Err(self
+                    .fail_directory_receive(
+                        receive_action,
+                        UnsettledDirectory {
+                            entry: receiver_entry_id.clone(),
+                            attempt: receive_attempt_id.clone(),
+                            cancelled,
+                            publication,
+                            notify_failure: true,
+                        },
+                        ReceiveFailure::Internal(cause),
+                    )
+                    .await);
             }
         }
         let receive_commit = receive_attempt_id.clone().map(|attempt_id| {
@@ -1766,11 +1789,6 @@ impl ApplyInboundClipboardUseCase {
                         existing_entry_id = log_id(&existing_id),
                         "inbound: delivery also partial; keeping existing placeholder"
                     );
-                    // Defensive: a directory receive is all-or-nothing and never
-                    // reports partial, so there is nothing to withdraw here
-                    // today. Kept so the invariant holds if that ever changes.
-                    withdraw_publication(publication, "delivery is partial; placeholder kept")
-                        .await;
                     self.settle_receive_without_entry(
                         &receiver_entry_id,
                         receive_attempt_id.as_deref(),
@@ -1862,32 +1880,29 @@ impl ApplyInboundClipboardUseCase {
                             .await);
                     }
                 }
-                if let Some(attempt) = receive_attempt_id.as_ref() {
-                    if let Some(publication) = publication.take() {
-                        let action = if replacing { "replace" } else { "capture" };
-                        return Err(self
-                            .fail_directory_receive(
-                                receive_action,
-                                UnsettledDirectory {
-                                    entry: receiver_entry_id.clone(),
-                                    attempt: Some(attempt.clone()),
-                                    cancelled: materialize_outcome
-                                        == MaterializeOutcome::PartialCancelled,
-                                    publication,
-                                    notify_failure: false,
-                                },
-                                ReceiveFailure::Internal(anyhow!(
-                                    "{action} returned None for RemotePush origin (unexpected)"
-                                )),
-                            )
-                            .await);
-                    }
+                if let Some(publication) = publication.take() {
+                    let action = if replacing { "replace" } else { "capture" };
+                    return Err(self
+                        .fail_directory_receive(
+                            receive_action,
+                            UnsettledDirectory {
+                                entry: receiver_entry_id.clone(),
+                                attempt: receive_attempt_id.clone(),
+                                cancelled: materialize_outcome
+                                    == MaterializeOutcome::PartialCancelled,
+                                publication,
+                                notify_failure: false,
+                            },
+                            ReceiveFailure::Internal(anyhow!(
+                                "{action} returned None for RemotePush origin (unexpected)"
+                            )),
+                        )
+                        .await);
                 }
                 if !is_partial {
                     self.begin_receive_failure(&receiver_entry_id, receive_attempt_id.as_deref())
                         .await?;
                 }
-                withdraw_publication(publication, "persistence produced no entry").await;
                 self.settle_receive_without_entry(
                     &receiver_entry_id,
                     receive_attempt_id.as_deref(),
@@ -1920,29 +1935,26 @@ impl ApplyInboundClipboardUseCase {
                             .await);
                     }
                 }
-                if let Some(attempt) = receive_attempt_id.as_ref() {
-                    if let Some(publication) = publication.take() {
-                        return Err(self
-                            .fail_directory_receive(
-                                receive_action,
-                                UnsettledDirectory {
-                                    entry: receiver_entry_id.clone(),
-                                    attempt: Some(attempt.clone()),
-                                    cancelled: materialize_outcome
-                                        == MaterializeOutcome::PartialCancelled,
-                                    publication,
-                                    notify_failure: false,
-                                },
-                                ReceiveFailure::Capture(e),
-                            )
-                            .await);
-                    }
+                if let Some(publication) = publication.take() {
+                    return Err(self
+                        .fail_directory_receive(
+                            receive_action,
+                            UnsettledDirectory {
+                                entry: receiver_entry_id.clone(),
+                                attempt: receive_attempt_id.clone(),
+                                cancelled: materialize_outcome
+                                    == MaterializeOutcome::PartialCancelled,
+                                publication,
+                                notify_failure: false,
+                            },
+                            ReceiveFailure::Capture(e),
+                        )
+                        .await);
                 }
                 if !is_partial {
                     self.begin_receive_failure(&receiver_entry_id, receive_attempt_id.as_deref())
                         .await?;
                 }
-                withdraw_publication(publication, "persistence failed").await;
                 self.settle_receive_without_entry(
                     &receiver_entry_id,
                     receive_attempt_id.as_deref(),
@@ -2147,41 +2159,6 @@ impl ApplyInboundClipboardUseCase {
                     OutboundProgressStatus::Completed,
                 )
                 .await;
-        }
-    }
-}
-
-/// Take back directory roots published for an entry that will not exist.
-///
-/// A no-op when the delivery published nothing, which is every non-directory
-/// path.
-///
-/// `reason` is one of this module's own strings, never sender-supplied content:
-/// it is logged in plaintext, and the roots' names — which are user content —
-/// deliberately are not.
-async fn withdraw_publication(publication: Option<DirectoryPublication>, reason: &'static str) {
-    let Some(mut publication) = publication else {
-        return;
-    };
-    let root_count = publication.root_count();
-    match publication.rollback().await {
-        Ok(()) => {
-            uc_info!(
-                root_count = root_count,
-                reason = reason,
-                "inbound: withdrew published directory roots; final location is clean"
-            );
-        }
-        Err(error) => {
-            let visible_roots = error.visible_roots;
-            uc_warn!(
-                partial_publication = true,
-                io_error_kind = io_error_kind(&error),
-                visible_roots = visible_roots,
-                root_count = root_count,
-                reason = reason,
-                "inbound: some directory roots could not be withdrawn and stay visible"
-            );
         }
     }
 }
