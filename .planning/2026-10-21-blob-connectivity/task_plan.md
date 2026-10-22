@@ -19,6 +19,9 @@
 阶段 0 前置证明完成：SDK／Uni 完成等待、原始材料、当前授权、同内容隔离、协议向量、8 组旧资料矩阵与 1GiB 基线均有证据。阶段 1／2 推进：生产获取和提供端已接线，输出／解密及引用／tag 受监督；完整条目结算、部分失败、稳定重试与薄绑定继续。
 
 ## Next Step
+目录撤回原责任及二次恢复名称重用保护切片已完成：62项定向测试、Application＋file_transfer 1281项、LAN 10项、实际SQLite／AEAD 6项、本地清理5项通过；locked metadata、最终workspace all-targets（2分38秒）、fmt、style、repository preflight与diff通过。一个默认ignored测试未执行，设备与其他矩阵未冒充通过。全部scope已结束，提交后核对专用TMPDIR已回收。继续目录早期准备、成功staging清理、其他撤回入口与真实Engine生命周期；来源C、受管1GiB、最终兼容／设备矩阵保持未完成。日志目录使用 `directory-recovery-*` 与 `directory-settlement-owned-*`。
+
+## 先前切片记录
 业务计数切片完成同源全部门禁：五crate库2244通过／9跳过（282.213秒），metadata812包、workspace全目标check3m41s、fmt／style／repository／1350隐私／diff通过；34 App、4 Native及33真实SQLite／AEAD契约通过。已提交b3cacddf。保存失败＋物理清理拒绝已复现原保护0／期望1及原source覆盖；同一ReceiveAction已接线清理恢复，25 App回归通过（25.148秒），包括原路径复用保护。保存后物理清理已提交01783244（App25／Native5及根门禁）。当前未提交获取失败／取消清理恢复：fetch-cleanup-red实际Facade保护0／期望1（0.007秒）；恢复意图区分FileCommit、FetchFailure、FetchCancellation，只有FileCommit写FileFailed，其余按原网络事实和实际journaled完成NoEntry；取消通过原CAS争取权威。原本只检查错误的mock测试由实际Facade／资源／文件系统／取消源检查替代。首轮25通过／2失败：一为旧错误类型断言，一为新测试错要求关闭吞掉Store；依据原supervision的错误保留合同，测试现明确断言Store和StorageFull仍存在，不改生产关闭。新增Native第二项实际导出失败＋目录清理拒绝，用原结果事件确认失败已返回，再验证100ms关闭、旧成功文件、原Failed网络事实及重开日志。
 
 前一最终Native真实复现Unknown／StorageUnavailable（新增8.228秒失败，其他5项通过，53.704秒；原App26通过27.189秒）。现仅补充获取失败／取消的批次业务事实及来源，不结束LocalSettlement、不移动资源；保存失败仍等FileFailed持久事实。App增加实际清理等待中的查询分类，原失败断言不删。
@@ -110,3 +113,5 @@ FileCleaned已提交da77bea0（Core／App30、Profile42、Native14及根门禁�
 - 父NoEntry提交责任：预先确认的稳定Engine发送／查询／关闭和真实SQLite契约接缝；原接收动作负责保存失败后的NoEntry本地重试，只交接原失败，不重下或重存内容。先Native双SQL拒绝取得红测：解除NoEntry拒绝但继续拒绝capture，必须由原任务补齐Failed。后续相关App合同验证完整双来源及原保护／4/2许可，目录回滚另沿完整责任推进。
 
 - 父NoEntry表示保存失败最终验证：App＋file_transfer1276项116.667s、ignored独占诊断1项0.05s、Native receive_retry23项227.407s通过；metadata、workspacealltargets3m10s、fmt、style、repository、diff均退出0。scope实际inactive，n5检查为空并rmdir，本轮所有新临时目录均已回收。仅此边界完成，目录及最终全矩阵保持open；完整goal active。
+
+- 目录保存失败后撤回责任：从预先批准的完整Application接收和实际文件系统port接缝验证，先完整发布两个根再拒绝保存与撤回；解除撤回拒绝后同一原动作必须完成撤回／NoEntry并保持无关文件。错误只携带来源，输出责任不放入错误；原许可持续持有。此处先取得实际红测，之后再处理发布中途失败、staging清理、日志与重启／重用边界；不新增持久格式或Engine阶段接口。

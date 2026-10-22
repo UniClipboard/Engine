@@ -72,9 +72,9 @@ pub use config_migration::{
 pub use connection_channel::{ConnectionChannel, ConnectionChannelPort, ConnectionPath};
 pub use device_identity::DeviceIdentityPort;
 pub use directory_publish_log::{
-    CleanupDirectoryStagingPort, DirectoryPublishRecord, DirectoryStagingCleanupError,
-    GetDirectoryPublishRecordPort, PublishLogError, PublishPhase, RecordDirectoryPublishPort,
-    DIRECTORY_RECEIVE_STAGING_PREFIX,
+    directory_staging_area_for_root, CleanupDirectoryStagingPort, DirectoryPublishRecord,
+    DirectoryStagingCleanupError, GetDirectoryPublishRecordPort, PublishLogError, PublishPhase,
+    RecordDirectoryPublishPort, DIRECTORY_RECEIVE_STAGING_PREFIX,
 };
 pub use entry_receive_attempt::{
     AttemptError, AttemptState, BeginReceiveAttemptPort, BeginReceiveFailureOutcome,

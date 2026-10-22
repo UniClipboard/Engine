@@ -27,7 +27,8 @@ use uc_core::ports::{
     FinalizeProvisionalReceivePort, GetDirectoryPublishRecordPort, GetEntryAttemptPort,
     InboundReceiveSettlement, ListNonTerminalAttemptsPort, ListProvisionalReceivesPort,
     ListUnsettledReceiveArtifactsPort, ProvisionalReceiveAction, ProvisionalReceiveError,
-    ProvisionalReceiveRecovery, ReceiveArtifact, ReceiveArtifactLogError, ReceiveArtifactRecord,
+    ProvisionalReceiveRecovery, PublishLogError, PublishPhase, ReceiveArtifact,
+    ReceiveArtifactLogError, ReceiveArtifactRecord, RecordDirectoryPublishPort,
     RecordReceiverTransferPort, SeedProvisionalReceivePort,
 };
 use uc_core::{FileTransferCancellationReason, FileTransferEvent, FileTransferFailureReason};
@@ -192,6 +193,29 @@ impl ListUnsettledReceiveArtifactsPort for NoopReceiveAttemptPorts {
 }
 
 #[async_trait]
+impl RecordDirectoryPublishPort for NoopReceiveAttemptPorts {
+    async fn record_phase(
+        &self,
+        _: &str,
+        _: &str,
+        _: PublishPhase,
+        _: &[(PathBuf, PathBuf)],
+        _: i64,
+    ) -> Result<(), PublishLogError> {
+        Ok(())
+    }
+    async fn record_partial(
+        &self,
+        _: &str,
+        _: &str,
+        _: u32,
+        _: i64,
+    ) -> Result<(), PublishLogError> {
+        Ok(())
+    }
+}
+
+#[async_trait]
 impl GetDirectoryPublishRecordPort for NoopReceiveAttemptPorts {
     async fn get_publish_record(
         &self,
@@ -266,6 +290,7 @@ fn noop_lifecycle_deps() -> FileTransferLifecycleDeps {
         list_receive_attempts: Arc::clone(&attempts) as _,
         list_unsettled_artifacts: Arc::clone(&attempts) as _,
         get_directory_publish: Arc::clone(&attempts) as _,
+        record_directory_publish: Arc::clone(&attempts) as _,
         begin_receive_failure: Arc::clone(&attempts) as _,
         cleanup_artifacts: Arc::clone(&attempts) as _,
         commit_inbound: Arc::clone(&attempts) as _,

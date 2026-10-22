@@ -61,7 +61,9 @@ impl ReceiveArtifactResolution {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReceiveArtifactOwnership {
+    /// 两个位置都归本次尝试；清理可以移除staged和final，相同路径只处理一次。
     ManagedStaging,
+    /// final已归用户；只允许清理不同的staged，不能移除final。
     UserDestination,
 }
 

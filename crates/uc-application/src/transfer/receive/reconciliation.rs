@@ -1,5 +1,5 @@
 use super::work::ReceiveWorkRegistry;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::{Arc, RwLock};
 
@@ -8,12 +8,13 @@ use async_trait::async_trait;
 use tracing::instrument;
 use uc_core::ids::EntryId;
 use uc_core::ports::{
-    AttemptState, BeginReceiveFailureOutcome, BeginReceiveFailurePort, CleanupReceiveArtifactsPort,
-    ClockPort, CommitInboundReceivePort, FinalizeProvisionalReceivePort,
-    GetDirectoryPublishRecordPort, GetEntryAttemptPort, InboundReceiveSettlement,
-    ListNonTerminalAttemptsPort, ListProvisionalReceivesPort, ListUnsettledReceiveArtifactsPort,
-    NoEntryReceiveArtifacts, PartialReceiveTerminal, ProvisionalReceiveAction, ReceiveArtifact,
-    ReceiveArtifactOwnership,
+    directory_staging_area_for_root, AttemptState, BeginReceiveFailureOutcome,
+    BeginReceiveFailurePort, CleanupReceiveArtifactsPort, ClockPort, CommitInboundReceivePort,
+    FinalizeProvisionalReceivePort, GetDirectoryPublishRecordPort, GetEntryAttemptPort,
+    InboundReceiveSettlement, ListNonTerminalAttemptsPort, ListProvisionalReceivesPort,
+    ListUnsettledReceiveArtifactsPort, NoEntryReceiveArtifacts, PartialReceiveTerminal,
+    ProvisionalReceiveAction, PublishPhase, ReceiveArtifact, ReceiveArtifactOwnership,
+    RecordDirectoryPublishPort,
 };
 use uc_observability_contract::{
     error_source::io_error_kind, log_fields::log_id, uc_error, uc_info, uc_warn,
@@ -156,6 +157,7 @@ pub struct ReconcileReceiveAttemptsUseCase {
     list_attempts: Arc<dyn ListNonTerminalAttemptsPort>,
     list_artifacts: Arc<dyn ListUnsettledReceiveArtifactsPort>,
     get_directory_publish: Arc<dyn GetDirectoryPublishRecordPort>,
+    record_directory_publish: Arc<dyn RecordDirectoryPublishPort>,
     begin_failure: Arc<dyn BeginReceiveFailurePort>,
     cleanup_artifacts: Arc<dyn CleanupReceiveArtifactsPort>,
     list_provisional: Arc<dyn ListProvisionalReceivesPort>,
@@ -171,6 +173,7 @@ impl ReconcileReceiveAttemptsUseCase {
         list_attempts: Arc<dyn ListNonTerminalAttemptsPort>,
         list_artifacts: Arc<dyn ListUnsettledReceiveArtifactsPort>,
         get_directory_publish: Arc<dyn GetDirectoryPublishRecordPort>,
+        record_directory_publish: Arc<dyn RecordDirectoryPublishPort>,
         begin_failure: Arc<dyn BeginReceiveFailurePort>,
         cleanup_artifacts: Arc<dyn CleanupReceiveArtifactsPort>,
         list_provisional: Arc<dyn ListProvisionalReceivesPort>,
@@ -183,6 +186,7 @@ impl ReconcileReceiveAttemptsUseCase {
             list_attempts,
             list_artifacts,
             get_directory_publish,
+            record_directory_publish,
             begin_failure,
             cleanup_artifacts,
             list_provisional,
@@ -307,23 +311,74 @@ impl ReconcileReceiveAttemptsUseCase {
                 .as_ref()
                 .map(|record| record.artifacts.clone())
                 .unwrap_or_default();
+            let mut staging_areas = HashSet::new();
             if let Some(directory) = self
                 .get_directory_publish
                 .get_publish_record(&attempt.entry_id, &attempt.current_attempt_id)
                 .await
                 .map_err(anyhow::Error::new)?
             {
-                cleanup.extend(directory.root_map.into_iter().enumerate().map(
-                    |(index, (staged_path, final_path))| ReceiveArtifact {
+                // 所有已撤回根的staging证明必须保留到零可见根持久化成功。
+                // 否则NoEntry失败后的恢复会把用户新建的同名目标误认作旧输出。
+                for (staged_path, final_path) in &directory.root_map {
+                    let area = directory_staging_area_for_root(staged_path)?;
+                    staging_areas.insert(area.clone());
+                    if directory.partial_visible_roots != Some(0)
+                        && directory.phase != PublishPhase::Staging
+                        && !tokio::fs::try_exists(staged_path).await?
+                    {
+                        tokio::fs::create_dir_all(&area).await?;
+                        if tokio::fs::try_exists(final_path).await? {
+                            // 目标在原尝试独占的私有staging中，尚未释放给其他动作。
+                            tokio::fs::rename(final_path, staged_path).await?;
+                        } else {
+                            // 空标记也须跨失败保留，防止后续重用的目标被重新认领。
+                            tokio::fs::create_dir(staged_path).await?;
+                        }
+                    }
+                    for artifact in &mut cleanup {
+                        if artifact.final_path == *final_path {
+                            artifact.ownership = ReceiveArtifactOwnership::UserDestination;
+                        }
+                    }
+                }
+                if directory.partial_visible_roots != Some(0) {
+                    self.record_directory_publish
+                        .record_partial(
+                            &attempt.entry_id,
+                            &attempt.current_attempt_id,
+                            0,
+                            self.clock.now_ms(),
+                        )
+                        .await?;
+                }
+                for (index, (staged_path, final_path)) in directory.root_map.into_iter().enumerate()
+                {
+                    cleanup.push(ReceiveArtifact {
                         item_id: format!("directory-root-{index}"),
                         staged_path,
                         final_path,
                         ownership: ReceiveArtifactOwnership::UserDestination,
-                    },
-                ));
+                    });
+                }
             }
             self.cleanup_artifacts
                 .cleanup_receive_artifacts(&cleanup)
+                .await
+                .map_err(anyhow::Error::new)?;
+
+            let areas = staging_areas
+                .into_iter()
+                .enumerate()
+                .map(|(index, path)| ReceiveArtifact {
+                    item_id: format!("directory-area-{index}"),
+                    staged_path: path.clone(),
+                    final_path: path,
+                    ownership: ReceiveArtifactOwnership::ManagedStaging,
+                })
+                .collect::<Vec<_>>();
+            self.cleanup_artifacts
+                .cleanup_receive_artifacts(&areas)
                 .await
                 .map_err(anyhow::Error::new)?;
 
@@ -374,9 +429,9 @@ mod tests {
     use async_trait::async_trait;
     use uc_core::ports::{
         AttemptError, DirectoryPublishRecord, EntryReceiveAttempt, InboundReceiveCommitError,
-        ProvisionalReceiveError, ProvisionalReceiveRecovery, PublishLogError,
+        ProvisionalReceiveError, ProvisionalReceiveRecovery, PublishLogError, PublishPhase,
         ReceiveArtifactLogError, ReceiveArtifactPhase, ReceiveArtifactRecord,
-        ReceiveArtifactResolution,
+        ReceiveArtifactResolution, DIRECTORY_RECEIVE_STAGING_PREFIX,
     };
 
     use super::*;
@@ -586,6 +641,9 @@ mod tests {
         attempt: EntryReceiveAttempt,
         artifact: ReceiveArtifactRecord,
         include_artifact: bool,
+        directory: Mutex<Option<DirectoryPublishRecord>>,
+        fail_commit_once: std::sync::atomic::AtomicBool,
+        fail_partial_once: std::sync::atomic::AtomicBool,
         provisional: Mutex<Vec<ProvisionalReceiveRecovery>>,
         finalized_provisional: AtomicUsize,
         commit_calls: AtomicUsize,
@@ -655,7 +713,42 @@ mod tests {
             _entry_id: &str,
             _attempt_id: &str,
         ) -> Result<Option<DirectoryPublishRecord>, PublishLogError> {
-            Ok(None)
+            Ok(self.directory.lock().unwrap().clone())
+        }
+    }
+
+    #[async_trait]
+    impl RecordDirectoryPublishPort for Store {
+        async fn record_phase(
+            &self,
+            _entry_id: &str,
+            _attempt_id: &str,
+            _phase: PublishPhase,
+            _root_map: &[(PathBuf, PathBuf)],
+            _now_ms: i64,
+        ) -> Result<(), PublishLogError> {
+            unreachable!("恢复只更新撤回检查点")
+        }
+
+        async fn record_partial(
+            &self,
+            _entry_id: &str,
+            _attempt_id: &str,
+            visible_roots: u32,
+            _now_ms: i64,
+        ) -> Result<(), PublishLogError> {
+            if self.fail_partial_once.swap(false, Ordering::SeqCst) {
+                return Err(PublishLogError::Backend(Box::new(std::io::Error::from(
+                    std::io::ErrorKind::PermissionDenied,
+                ))));
+            }
+            self.directory
+                .lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .partial_visible_roots = Some(visible_roots);
+            Ok(())
         }
     }
 
@@ -685,6 +778,11 @@ mod tests {
                 }
             ));
             self.commit_calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail_commit_once.swap(false, Ordering::SeqCst) {
+                return Err(InboundReceiveCommitError::Backend(Box::new(
+                    std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+                )));
+            }
             Ok(())
         }
     }
@@ -775,6 +873,9 @@ mod tests {
                 updated_at_ms: 1,
             },
             include_artifact: true,
+            directory: Mutex::new(None),
+            fail_commit_once: std::sync::atomic::AtomicBool::new(false),
+            fail_partial_once: std::sync::atomic::AtomicBool::new(false),
             provisional: Mutex::new(Vec::new()),
             finalized_provisional: AtomicUsize::new(0),
             commit_calls: AtomicUsize::new(0),
@@ -783,6 +884,7 @@ mod tests {
 
     fn use_case(store: Arc<Store>) -> ReconcileReceiveAttemptsUseCase {
         ReconcileReceiveAttemptsUseCase::new(
+            store.clone(),
             store.clone(),
             store.clone(),
             store.clone(),
@@ -856,6 +958,9 @@ mod tests {
                 updated_at_ms: 1,
             },
             include_artifact: false,
+            directory: Mutex::new(None),
+            fail_commit_once: std::sync::atomic::AtomicBool::new(false),
+            fail_partial_once: std::sync::atomic::AtomicBool::new(false),
             provisional: Mutex::new(vec![ProvisionalReceiveRecovery {
                 transfer_id: "mobile-orphan".to_owned(),
                 cached_path: Some(staged_uri),
@@ -880,5 +985,105 @@ mod tests {
         assert!(use_case(store.clone()).execute().await.is_err());
         assert!(path.exists());
         assert_eq!(store.commit_calls.load(Ordering::SeqCst), 0);
+    }
+    #[tokio::test]
+    async fn directory_restart_cleanup_preserves_reused_names_and_removes_only_owned_outputs() {
+        for zero_visible in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let area = root
+                .path()
+                .join(format!("{DIRECTORY_RECEIVE_STAGING_PREFIX}fixture"));
+            let staged_alpha = area.join("alpha");
+            let staged_beta = area.join("beta");
+            let alpha = root.path().join("alpha");
+            let beta = root.path().join("beta");
+            tokio::fs::create_dir_all(&alpha).await.unwrap();
+            tokio::fs::create_dir_all(&beta).await.unwrap();
+            tokio::fs::write(alpha.join("new.txt"), b"new alpha")
+                .await
+                .unwrap();
+            if zero_visible {
+                tokio::fs::write(beta.join("new.txt"), b"new beta")
+                    .await
+                    .unwrap();
+            } else {
+                tokio::fs::create_dir_all(&staged_alpha).await.unwrap();
+                tokio::fs::write(staged_alpha.join("old.txt"), b"withdrawn original")
+                    .await
+                    .unwrap();
+                tokio::fs::write(beta.join("old.txt"), b"owned original")
+                    .await
+                    .unwrap();
+            }
+            let store = store(AttemptState::Failing, root.path().join("absent-artifact"));
+            *store.directory.lock().unwrap() = Some(DirectoryPublishRecord {
+                entry_id: "entry-1".into(),
+                attempt_id: "attempt-1".into(),
+                phase: PublishPhase::Publishing,
+                root_map: vec![(staged_alpha, alpha.clone()), (staged_beta, beta.clone())],
+                partial_visible_roots: Some(if zero_visible { 0 } else { 1 }),
+                landed: false,
+            });
+            assert_eq!(use_case(store).execute().await.unwrap(), 1);
+            assert_eq!(
+                tokio::fs::read(alpha.join("new.txt")).await.unwrap(),
+                b"new alpha"
+            );
+            if zero_visible {
+                assert_eq!(
+                    tokio::fs::read(beta.join("new.txt")).await.unwrap(),
+                    b"new beta"
+                );
+            } else {
+                assert!(!beta.exists(), "仍由旧尝试拥有的未撤回根必须清理");
+            }
+            assert!(!area.exists(), "原目录staging区域也须在放行新接收前清理");
+        }
+    }
+    #[tokio::test]
+    async fn directory_recovery_commit_failure_never_recleans_names_reused_before_the_next_recovery(
+    ) {
+        for fail_checkpoint in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let area = root
+                .path()
+                .join(format!("{DIRECTORY_RECEIVE_STAGING_PREFIX}retry"));
+            let staged = area.join("root");
+            let target = root.path().join("root");
+            tokio::fs::create_dir_all(&target).await.unwrap();
+            tokio::fs::write(target.join("original.txt"), b"old receive")
+                .await
+                .unwrap();
+            let store = store(AttemptState::Failing, root.path().join("absent-artifact"));
+            *store.directory.lock().unwrap() = Some(DirectoryPublishRecord {
+                entry_id: "entry-1".into(),
+                attempt_id: "attempt-1".into(),
+                phase: PublishPhase::Publishing,
+                root_map: vec![(staged, target.clone())],
+                partial_visible_roots: Some(1),
+                landed: false,
+            });
+            if fail_checkpoint {
+                store.fail_partial_once.store(true, Ordering::SeqCst);
+            } else {
+                store.fail_commit_once.store(true, Ordering::SeqCst);
+            }
+            let recovery = use_case(store);
+            assert!(
+                recovery.execute().await.is_err(),
+                "真实清理后的NoEntry拒绝必须返回失败"
+            );
+            assert!(!target.exists());
+            tokio::fs::create_dir_all(&target).await.unwrap();
+            tokio::fs::write(target.join("new.txt"), b"new user data")
+                .await
+                .unwrap();
+            assert_eq!(recovery.execute().await.unwrap(), 1);
+            assert_eq!(
+                tokio::fs::read(target.join("new.txt")).await.unwrap(),
+                b"new user data",
+                "后续恢复不能再次触碰已清理后重用的名称"
+            );
+        }
     }
 }

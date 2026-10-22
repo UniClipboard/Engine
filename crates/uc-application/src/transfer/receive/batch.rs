@@ -1,5 +1,5 @@
 //! 整个接收动作的通知聚合；子获取只能记录事实，持久结算后才交接终态。
-use super::materialization::FileProgressCommitError;
+use super::materialization::{DirectoryPublication, FileProgressCommitError};
 use super::work::PlannedReceiveItem;
 use super::{DownloadSettlement, LocalSettlement, LocalSettlementOutcome};
 use crate::transfer::blob::fetch_failure_reason;
@@ -29,6 +29,7 @@ struct State {
     local_work: HashMap<String, DownloadSettlement>,
     /// 最后一个实际下载的本地交接覆盖父保存；下一项启动前不积累旧许可。
     commit_handoff: Option<DownloadSettlement>,
+    directory_rollback: Option<DirectoryPublication>,
     routes: HashMap<(DeviceId, String), Arc<OutboundNotifications>>,
     settled: Option<AttemptState>,
     finished: bool,
@@ -46,6 +47,27 @@ impl fmt::Debug for ReceiveBatch {
     }
 }
 impl ReceiveBatch {
+    pub(crate) fn retain_directory_rollback(&self, publication: DirectoryPublication) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .directory_rollback
+            .get_or_insert(publication);
+    }
+    pub(crate) fn has_directory_rollback(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .directory_rollback
+            .is_some()
+    }
+    pub(crate) fn take_directory_rollback(&self) -> Option<DirectoryPublication> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .directory_rollback
+            .take()
+    }
     pub(in super::super) fn local_settlement(&self, item: &str) -> DownloadSettlement {
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         state.commit_handoff = None;

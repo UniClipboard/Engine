@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 
 mod availability;
 mod directory_failure;
+mod directory_settlement;
 mod generation;
 mod item_results;
 mod lifecycle;
@@ -66,7 +67,7 @@ use super::{ApplyInboundError, ApplyInboundInput, ApplyOutcome};
 use crate::transfer::receive::materialization::{
     compute_file_set_component, sweep_inbound_staging, verify_file_set_identity,
     FileCacheBlobMaterializer, InboundBlobFetcher, InboundBlobMaterializer, InboundFileSetManifest,
-    InboundFileSetMember, MaterializeOutcome, MaterializeResult, ReceiveWorkPlan, RollbackOutcome,
+    InboundFileSetMember, MaterializeOutcome, MaterializeResult, ReceiveWorkPlan,
 };
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -4198,11 +4199,8 @@ async fn promotion_is_confirmed_before_first_final_path_move() {
         *gate.phases.lock().unwrap(),
         vec![PublishPhase::Staging, PublishPhase::Publishing]
     );
-    let publication = result.take_publication().expect("published roots");
-    assert!(matches!(
-        publication.rollback().await,
-        RollbackOutcome::Clean
-    ));
+    let mut publication = result.take_publication().expect("published roots");
+    publication.rollback().await.expect("rollback completes");
 }
 
 #[tokio::test]
@@ -4243,11 +4241,8 @@ async fn gated_publication_updates_recovery_log_before_collision_retry() {
         Some("alpha (1)")
     );
     drop(root_maps);
-    let publication = result.take_publication().expect("published roots");
-    assert!(matches!(
-        publication.rollback().await,
-        RollbackOutcome::Clean
-    ));
+    let mut publication = result.take_publication().expect("published roots");
+    publication.rollback().await.expect("rollback completes");
 }
 
 /// AC: no intermediate artifact — not even an empty directory — appears at the
@@ -4583,7 +4578,7 @@ async fn rollback_withdraws_on_a_volume_without_no_replace() {
         .rollback()
         .await;
 
-    assert_eq!(outcome, RollbackOutcome::Clean);
+    assert!(outcome.is_ok());
     let managed = cache_dir.path().join("iroh-blobs").join("entry-nofs-rb");
     assert_eq!(visible_names(&managed), Vec::<String>::new());
 }

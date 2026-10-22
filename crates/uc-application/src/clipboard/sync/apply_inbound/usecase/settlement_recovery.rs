@@ -24,7 +24,7 @@ use uc_observability_contract::{error_source::io_error_kind, uc_warn};
 impl ApplyInboundClipboardUseCase {
     pub(super) async fn recover_settlement(
         &self,
-        pending: UnsettledReceive,
+        mut pending: UnsettledReceive,
         action: &ReceiveAction,
         source: Arc<ReceiveWorkError>,
     ) {
@@ -47,12 +47,12 @@ impl ApplyInboundClipboardUseCase {
         }
         let mut output_cleaned = match &pending {
             UnsettledReceive::File(file) => !file.output_cleanup_pending,
-            UnsettledReceive::Representations(_) => true,
+            UnsettledReceive::Representations(_) | UnsettledReceive::Directory(_) => true,
         };
         let mut item_acknowledged = false;
         let mut delay = LOCAL_SETTLEMENT_RETRY_INITIAL;
         loop {
-            let result = match &pending {
+            let result = match &mut pending {
                 UnsettledReceive::File(file) => {
                     self.repair_file_settlement(file, &mut output_cleaned, &mut item_acknowledged)
                         .await
@@ -66,6 +66,9 @@ impl ApplyInboundClipboardUseCase {
                         false,
                     )
                     .await
+                }
+                UnsettledReceive::Directory(directory) => {
+                    self.repair_directory_settlement(directory).await
                 }
             };
             match result {
@@ -170,6 +173,26 @@ impl ApplyInboundClipboardUseCase {
         artifacts: &[ReceiveArtifact],
         has_artifact_journal: bool,
     ) -> Result<PartialReceiveTerminal, ApplyInboundError> {
+        let terminal = self
+            .claim_failure_terminal(entry, attempt, cancelled)
+            .await?;
+        self.settle_receive_without_entry(
+            entry,
+            Some(attempt),
+            terminal,
+            artifacts,
+            has_artifact_journal,
+        )
+        .await?;
+        Ok(terminal)
+    }
+
+    pub(super) async fn claim_failure_terminal(
+        &self,
+        entry: &EntryId,
+        attempt: &str,
+        cancelled: bool,
+    ) -> Result<PartialReceiveTerminal, ApplyInboundError> {
         let ports = self.receive_attempts.as_ref().ok_or_else(|| {
             ApplyInboundError::Internal(anyhow!("receive settlement ports are not wired"))
         })?;
@@ -206,14 +229,6 @@ impl ApplyInboundClipboardUseCase {
                     }
                 }
                 ReceiveFailureRecoveryAction::Settle(terminal) => {
-                    self.settle_receive_without_entry(
-                        entry,
-                        Some(attempt),
-                        terminal,
-                        artifacts,
-                        has_artifact_journal,
-                    )
-                    .await?;
                     return Ok(terminal);
                 }
             }

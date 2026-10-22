@@ -2,11 +2,14 @@
 
 use super::super::identity::{directory_member_transfer_id, directory_representation_transfer_id};
 use super::cleanup::{output_cleanup_failure, remove_uncommitted_output};
+use super::directory_publication::{
+    directory_rollback_failure, publish_via, DirectoryRollbackJournal, PublishMode,
+};
 use super::output::{FileOutputJournal, FileOutputPreparation, PreparedReceiveOutput};
 use super::progress::FileProgressSnapshot;
 use super::reuse::validate_selection;
 use super::{receive_member_totals, ReceiveOutputFailure, ReceivedItem, ReceivedOutput};
-use super::{FileProgressCommitError, ReceiveFailureSettlementError};
+use super::{DirectoryPublication, FileProgressCommitError, ReceiveFailureSettlementError};
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -212,161 +215,8 @@ pub async fn sweep_inbound_staging(dirs: &[PathBuf]) -> usize {
     swept
 }
 
-/// Directory roots that are visible at their final location but not yet
-/// permanent.
-///
-/// Publication is not the commit point. A receive is only "all there" once its
-/// entry is durably recorded, and verification or persistence can still fail
-/// after the roots have landed — so the ability to take them back must outlive
-/// publication itself. That is what this handle is: it stays alive until the
-/// receive either commits or gives up.
-pub struct DirectoryPublication {
-    publisher: Arc<dyn AtomicPublishPort>,
-    staging: PathBuf,
-    mode: PublishMode,
-    /// `(final path, the staging path it was published from)`, in publication
-    /// order. The staging name is free again once published, so withdrawing is
-    /// the same move run backwards.
-    published: Vec<(PathBuf, PathBuf)>,
-    settled: bool,
-}
-
-/// Which guarantee a destination needs when roots land on it.
-///
-/// The two destinations differ in what lives around them, and that — not the
-/// volume — is what decides the guarantee.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PublishMode {
-    /// The destination holds the user's own files. A name we did not put there
-    /// may appear at any moment, so the move itself has to refuse an occupied
-    /// name; checking first and moving second would leave a window in which we
-    /// destroy someone's folder.
-    NoReplace,
-    /// The destination is ours alone and scoped to one receive, so the only
-    /// name that can appear is one we chose. Nothing is at risk, and demanding
-    /// a guarantee the volume may not offer would cost the receive for nothing.
-    IntoFreeName,
-}
-
-/// What a rollback managed to achieve.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RollbackOutcome {
-    /// Every root was withdrawn; the final location holds nothing from this
-    /// receive.
-    Clean,
-    /// Some roots could not be withdrawn and are still visible to the user.
-    ///
-    /// Carries only a count. The roots' names are the sender's content and
-    /// must not travel into plaintext logs or columns.
-    PartialPublication { visible_roots: usize },
-}
-
-impl std::fmt::Debug for DirectoryPublication {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Names and paths withheld deliberately — see `RollbackOutcome`.
-        f.debug_struct("DirectoryPublication")
-            .field("root_count", &self.published.len())
-            .field("settled", &self.settled)
-            .finish()
-    }
-}
-
-/// Run one move under `mode`'s guarantee.
-async fn publish_via(
-    publisher: &dyn AtomicPublishPort,
-    mode: PublishMode,
-    source: &std::path::Path,
-    destination: &std::path::Path,
-) -> Result<(), PublishError> {
-    match mode {
-        PublishMode::NoReplace => publisher.publish_no_replace(source, destination).await,
-        PublishMode::IntoFreeName => publisher.publish_into_free_name(source, destination).await,
-    }
-}
-
-impl DirectoryPublication {
-    fn new(publisher: Arc<dyn AtomicPublishPort>, staging: PathBuf, mode: PublishMode) -> Self {
-        Self {
-            publisher,
-            staging,
-            mode,
-            published: Vec::new(),
-            settled: false,
-        }
-    }
-
-    fn record(&mut self, final_path: PathBuf, staged_from: PathBuf) {
-        self.published.push((final_path, staged_from));
-    }
-
-    pub fn root_count(&self) -> usize {
-        self.published.len()
-    }
-
-    /// Make the publication permanent and drop the assembly area.
-    pub async fn commit(mut self) {
-        self.settled = true;
-        discard_staging(&self.staging).await;
-    }
-
-    /// Take every root back out of the final location.
-    ///
-    /// Withdrawal is a same-volume rename into an assembly area whose names are
-    /// free, so it succeeds in all but extreme cases. Whatever is withdrawn is
-    /// then discarded along with the staging area: the receive is over and its
-    /// content has no entry to belong to.
-    pub async fn rollback(mut self) -> RollbackOutcome {
-        self.settled = true;
-        let mut stuck = 0usize;
-        // Reverse order, undoing the most recent first.
-        for (final_path, staged_from) in self.published.iter().rev() {
-            if let Err(err) =
-                publish_via(self.publisher.as_ref(), self.mode, final_path, staged_from).await
-            {
-                uc_warn!(
-                    error_kind = "directory_root_withdraw",
-                    io_error_kind = io_error_kind(&err),
-                    "failed to withdraw a published directory root"
-                );
-                stuck += 1;
-            }
-        }
-        discard_staging(&self.staging).await;
-
-        if stuck == 0 {
-            uc_debug!(
-                root_count = self.published.len(),
-                "withdrew every published directory root"
-            );
-            RollbackOutcome::Clean
-        } else {
-            uc_warn!(
-                visible_roots = stuck,
-                "some published directory roots could not be withdrawn and remain visible"
-            );
-            RollbackOutcome::PartialPublication {
-                visible_roots: stuck,
-            }
-        }
-    }
-}
-
-impl Drop for DirectoryPublication {
-    fn drop(&mut self) {
-        if !self.settled {
-            // Nothing can be undone from here: withdrawal is async and Drop is
-            // not. Make the omission visible instead of hiding it — the roots
-            // stay visible to the user with no entry behind them.
-            uc_warn!(
-                root_count = self.published.len(),
-                "directory publication dropped without commit or rollback; roots remain visible"
-            );
-        }
-    }
-}
-
 /// Remove an assembly area, tolerating its absence.
-async fn discard_staging(staging: &std::path::Path) {
+pub(super) async fn discard_staging(staging: &std::path::Path) {
     match tokio::fs::remove_dir_all(staging).await {
         Ok(()) => {}
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -1569,7 +1419,7 @@ impl FileCacheBlobMaterializer {
             .await;
 
         match result {
-            Ok((publication, root_paths, member_digests)) => {
+            Ok((mut publication, root_paths, member_digests)) => {
                 let directory_file_set = match build_received_entry_file_set(
                     &manifest,
                     &member_digests,
@@ -1579,11 +1429,11 @@ impl FileCacheBlobMaterializer {
                     Ok(file_set) => file_set,
                     Err(error) => {
                         return match publication.rollback().await {
-                            RollbackOutcome::Clean => Err(error),
-                            RollbackOutcome::PartialPublication { visible_roots } => Err(error
-                                .context(format!(
-                                    "manifest build rollback left {visible_roots} root(s) visible"
-                                ))),
+                            Ok(()) => Err(error),
+                            Err(settlement) => {
+                                batch.retain_directory_rollback(publication);
+                                Err(directory_rollback_failure(error, settlement))
+                            }
                         };
                     }
                 };
@@ -1604,7 +1454,9 @@ impl FileCacheBlobMaterializer {
             Err(err) => {
                 // Anything published was already withdrawn inside
                 // `build_and_publish_directory`; this only clears the area.
-                discard_staging(&plan.staging).await;
+                if !batch.has_directory_rollback() {
+                    discard_staging(&plan.staging).await;
+                }
                 Err(err)
             }
         }
@@ -2011,8 +1863,18 @@ impl FileCacheBlobMaterializer {
             _ => None,
         };
 
-        let mut publication =
-            DirectoryPublication::new(Arc::clone(&self.publisher), plan.staging.clone(), plan.mode);
+        let journal = gated_attempt.map(|(ports, attempt)| DirectoryRollbackJournal {
+            record: ports.publish_log.clone(),
+            clock: ports.clock.clone(),
+            entry: receiver_entry_id.as_ref().to_owned(),
+            attempt: attempt.to_owned(),
+        });
+        let mut publication = DirectoryPublication::new(
+            Arc::clone(&self.publisher),
+            plan.staging.clone(),
+            plan.mode,
+            journal,
+        );
         let mut published_paths = BTreeMap::new();
         for (root_index, source, desired, sanitized_name) in plans {
             let publish_result = if let Some((ports, attempt_id)) = gated_attempt {
@@ -2052,40 +1914,10 @@ impl FileCacheBlobMaterializer {
                     // take back the ones that made it before giving up.
                     let outcome = publication.rollback().await;
                     return Err(match outcome {
-                        RollbackOutcome::Clean => err,
-                        RollbackOutcome::PartialPublication { visible_roots } => {
-                            if let Some((ports, attempt_id)) = gated_attempt {
-                                match u32::try_from(visible_roots) {
-                                    Ok(visible_roots) => {
-                                        if let Err(record_error) = ports
-                                            .publish_log
-                                            .record_partial(
-                                                receiver_entry_id.as_ref(),
-                                                attempt_id,
-                                                visible_roots,
-                                                ports.clock.now_ms(),
-                                            )
-                                            .await
-                                        {
-                                            uc_warn!(
-                                                error_kind = "partial_publication_record",
-                                                io_error_kind = io_error_kind(&record_error),
-                                                "failed to record partial directory publication"
-                                            );
-                                        }
-                                    }
-                                    Err(error) => {
-                                        uc_warn!(
-                                            error_kind = "root_count_overflow",
-                                            io_error_kind = io_error_kind(&error),
-                                            "partial directory root count exceeds u32"
-                                        );
-                                    }
-                                }
-                            }
-                            err.context(format!(
-                                "partial_publication: {visible_roots} root(s) left visible"
-                            ))
+                        Ok(()) => err,
+                        Err(settlement) => {
+                            batch.retain_directory_rollback(publication);
+                            directory_rollback_failure(err, settlement)
                         }
                     });
                 }

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use async_trait::async_trait;
@@ -84,6 +84,23 @@ pub enum DirectoryStagingCleanupError {
     Backend(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("directory staging path is outside a receive staging area")]
     InvalidPath,
+}
+
+/// 只从专用接收区域内的根推导staging；各清理实现共用这条路径规则。
+pub fn directory_staging_area_for_root(
+    root: &Path,
+) -> Result<PathBuf, DirectoryStagingCleanupError> {
+    let area = root
+        .parent()
+        .ok_or(DirectoryStagingCleanupError::InvalidPath)?;
+    if !area
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with(DIRECTORY_RECEIVE_STAGING_PREFIX))
+    {
+        return Err(DirectoryStagingCleanupError::InvalidPath);
+    }
+    Ok(area.to_path_buf())
 }
 
 /// Remove transient roots belonging to a directory receive attempt.

@@ -16,7 +16,9 @@ mod catalog;
 mod clear;
 mod settlement;
 pub(crate) use catalog::{PlannedReceiveItem, ReceiveRepresentation, ReceiveSource};
-pub(crate) use settlement::{UnsettledFile, UnsettledReceive, UnsettledRepresentations};
+pub(crate) use settlement::{
+    UnsettledDirectory, UnsettledFile, UnsettledReceive, UnsettledRepresentations,
+};
 
 type Completion = Option<Result<(), Arc<ReceiveWorkError>>>;
 type Key = (EntryId, String);

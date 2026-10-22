@@ -155,6 +155,7 @@ impl FileTransferAssembly {
                     &deps.directory_receive.list_unsettled_artifacts,
                 ),
                 get_directory_publish: Arc::clone(&deps.directory_receive.get_publish),
+                record_directory_publish: Arc::clone(&deps.directory_receive.record_publish),
                 begin_receive_failure: Arc::clone(&deps.directory_receive.begin_failure),
                 cleanup_artifacts: Arc::clone(&deps.artifact_cleanup),
                 commit_inbound: Arc::clone(&deps.directory_receive.commit_inbound),

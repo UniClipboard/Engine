@@ -486,6 +486,7 @@ fn streaming_scope_nonce() -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -500,8 +501,8 @@ mod tests {
     };
     use uc_core::ports::{
         ClockPort, FinalizeProvisionalReceivePort, MobileFileStagingError, MobileFileStagingPort,
-        ProvisionalReceiveAction, ProvisionalReceiveError, RecordReceiverTransferPort,
-        SeedProvisionalReceivePort,
+        ProvisionalReceiveAction, ProvisionalReceiveError, PublishLogError, PublishPhase,
+        RecordDirectoryPublishPort, RecordReceiverTransferPort, SeedProvisionalReceivePort,
     };
     use uc_core::{FileTransferCancellationReason, FileTransferEvent, FileTransferFailureReason};
     use uc_infra_storage::file_transfer::{InMemoryEventPublisher, InMemoryEventStore};
@@ -606,6 +607,28 @@ mod tests {
             Ok(None)
         }
     }
+    #[async_trait]
+    impl RecordDirectoryPublishPort for NoopLifecycle {
+        async fn record_phase(
+            &self,
+            _: &str,
+            _: &str,
+            _: PublishPhase,
+            _: &[(PathBuf, PathBuf)],
+            _: i64,
+        ) -> Result<(), PublishLogError> {
+            Ok(())
+        }
+        async fn record_partial(
+            &self,
+            _: &str,
+            _: &str,
+            _: u32,
+            _: i64,
+        ) -> Result<(), PublishLogError> {
+            Ok(())
+        }
+    }
     #[async_trait::async_trait]
     impl uc_core::ports::BeginReceiveFailurePort for NoopLifecycle {
         async fn begin_receive_failure(
@@ -668,6 +691,7 @@ mod tests {
             list_receive_attempts: Arc::clone(&noop) as _,
             list_unsettled_artifacts: Arc::clone(&noop) as _,
             get_directory_publish: Arc::clone(&noop) as _,
+            record_directory_publish: Arc::clone(&noop) as _,
             begin_receive_failure: Arc::clone(&noop) as _,
             cleanup_artifacts: Arc::clone(&noop) as _,
             commit_inbound: Arc::clone(&noop) as _,

@@ -101,6 +101,32 @@ async fn encrypted_root_map_round_trips_and_partial_marker_updates() {
         .unwrap()
         .unwrap();
     assert_eq!(partial.partial_visible_roots, Some(1));
+    repo.record_partial("entry", "a1", 0, 12).await.unwrap();
+    let reopened_pool = init_db_pool(database.to_str().unwrap()).unwrap();
+    let reopened = DieselDirectoryPublishLogRepository::new(
+        DieselSqliteExecutor::new(reopened_pool),
+        Arc::new(FixedSubkey),
+        Arc::new(FixedProfile),
+    );
+    let withdrawn = reopened
+        .get_publish_record("entry", "a1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(withdrawn.partial_visible_roots, Some(0));
+    assert_eq!(withdrawn.root_map, roots);
+    let after = reader
+        .run(|conn| {
+            Ok(directory_publish_log::table
+                .select(DirectoryPublishLogRow::as_select())
+                .first(conn)?)
+        })
+        .unwrap();
+    assert_eq!(
+        after.root_map_ciphertext.unwrap(),
+        ciphertext,
+        "零可见根标记复用原密文格式，不改写映射"
+    );
 }
 
 #[tokio::test]

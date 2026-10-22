@@ -42,7 +42,7 @@ use crate::transfer::receive::retry::{
 };
 use crate::transfer::receive::work::{
     ReceiveAction, ReceiveRegistrationError, ReceiveRepresentation, ReceiveSource,
-    ReceiveWorkRegistry,
+    ReceiveWorkRegistry, UnsettledDirectory,
 };
 use bytes::Bytes;
 
@@ -65,17 +65,17 @@ use super::{ApplyInboundError, ApplyInboundInput, ApplyOutcome, InboundActivatio
 use crate::transfer::receive::materialization::{
     is_directory_cancel_error, verify_file_set_identity, DirectoryPublication,
     InboundBlobMaterializer, MaterializeOutcome, OutputCleanupFailure,
-    ReceiveFailureSettlementError, ReceiveWorkPlan, RollbackOutcome,
+    ReceiveFailureSettlementError, ReceiveWorkPlan,
 };
 
 const RECENT_INBOUND_MAX_RECORDS: u64 = 128;
 
 mod owned;
+mod persistence_settlement;
 mod progress;
-mod representation_settlement;
 mod settlement_recovery;
+use persistence_settlement::ReceivePersistenceFailure;
 use progress::FileProgress;
-use representation_settlement::RepresentationPersistenceFailure;
 
 #[derive(Clone)]
 pub struct ApplyInboundClipboardUseCase {
@@ -1405,6 +1405,17 @@ impl ApplyInboundClipboardUseCase {
                     let mut result = match materializer.materialize_plan(plan).await {
                         Ok(result) => result,
                         Err(error) => {
+                            if let Some(publication) =
+                                receive_action.batch.take_directory_rollback()
+                            {
+                                receive_action.defer_directory_settlement(UnsettledDirectory {
+                                    entry: receiver_entry_id.clone(),
+                                    attempt: receive_attempt_id.clone(),
+                                    cancelled: is_directory_cancel_error(&error),
+                                    publication,
+                                });
+                                return Err(ApplyInboundError::Internal(error));
+                            }
                             // 本地失败尚未完成持久结算；再写批次失败可能覆盖原双来源。
                             if let Some(failure) =
                                 error.downcast_ref::<ReceiveFailureSettlementError>()
@@ -1803,7 +1814,27 @@ impl ApplyInboundClipboardUseCase {
                                 &receiver_entry_id,
                                 attempt,
                                 materialize_outcome == MaterializeOutcome::PartialCancelled,
-                                RepresentationPersistenceFailure::MissingEntry(anyhow!(
+                                ReceivePersistenceFailure::MissingEntry(anyhow!(
+                                    "{action} returned None for RemotePush origin (unexpected)"
+                                )),
+                            )
+                            .await);
+                    }
+                }
+                if let Some(attempt) = receive_attempt_id.as_ref() {
+                    if let Some(publication) = publication.take() {
+                        let action = if replacing { "replace" } else { "capture" };
+                        return Err(self
+                            .fail_directory_receive(
+                                receive_action,
+                                UnsettledDirectory {
+                                    entry: receiver_entry_id.clone(),
+                                    attempt: Some(attempt.clone()),
+                                    cancelled: materialize_outcome
+                                        == MaterializeOutcome::PartialCancelled,
+                                    publication,
+                                },
+                                ReceivePersistenceFailure::MissingEntry(anyhow!(
                                     "{action} returned None for RemotePush origin (unexpected)"
                                 )),
                             )
@@ -1842,7 +1873,24 @@ impl ApplyInboundClipboardUseCase {
                                 &receiver_entry_id,
                                 attempt,
                                 materialize_outcome == MaterializeOutcome::PartialCancelled,
-                                RepresentationPersistenceFailure::Failed(e),
+                                ReceivePersistenceFailure::Failed(e),
+                            )
+                            .await);
+                    }
+                }
+                if let Some(attempt) = receive_attempt_id.as_ref() {
+                    if let Some(publication) = publication.take() {
+                        return Err(self
+                            .fail_directory_receive(
+                                receive_action,
+                                UnsettledDirectory {
+                                    entry: receiver_entry_id.clone(),
+                                    attempt: Some(attempt.clone()),
+                                    cancelled: materialize_outcome
+                                        == MaterializeOutcome::PartialCancelled,
+                                    publication,
+                                },
+                                ReceivePersistenceFailure::Failed(e),
                             )
                             .await);
                     }
@@ -2068,21 +2116,23 @@ impl ApplyInboundClipboardUseCase {
 /// it is logged in plaintext, and the roots' names — which are user content —
 /// deliberately are not.
 async fn withdraw_publication(publication: Option<DirectoryPublication>, reason: &'static str) {
-    let Some(publication) = publication else {
+    let Some(mut publication) = publication else {
         return;
     };
     let root_count = publication.root_count();
     match publication.rollback().await {
-        RollbackOutcome::Clean => {
+        Ok(()) => {
             uc_info!(
                 root_count = root_count,
                 reason = reason,
                 "inbound: withdrew published directory roots; final location is clean"
             );
         }
-        RollbackOutcome::PartialPublication { visible_roots } => {
+        Err(error) => {
+            let visible_roots = error.visible_roots;
             uc_warn!(
                 partial_publication = true,
+                io_error_kind = io_error_kind(&error),
                 visible_roots = visible_roots,
                 root_count = root_count,
                 reason = reason,

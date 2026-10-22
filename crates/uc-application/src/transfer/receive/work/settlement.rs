@@ -1,6 +1,6 @@
 //! 未完成接收结算的原始责任；不放入错误对象，也不另建资源池。
 use super::ReceiveAction;
-use crate::transfer::receive::materialization::ReceiveOutputFailure;
+use crate::transfer::receive::materialization::{DirectoryPublication, ReceiveOutputFailure};
 use std::sync::PoisonError;
 use uc_core::ids::EntryId;
 use uc_core::ports::ReceiveArtifact;
@@ -21,9 +21,17 @@ pub(crate) struct UnsettledRepresentations {
     pub(crate) cancelled: bool,
 }
 
+pub(crate) struct UnsettledDirectory {
+    pub(crate) entry: EntryId,
+    pub(crate) attempt: Option<String>,
+    pub(crate) cancelled: bool,
+    pub(crate) publication: DirectoryPublication,
+}
+
 pub(crate) enum UnsettledReceive {
     File(UnsettledFile),
     Representations(UnsettledRepresentations),
+    Directory(UnsettledDirectory),
 }
 
 impl ReceiveAction {
@@ -38,6 +46,12 @@ impl ReceiveAction {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get_or_insert(UnsettledReceive::Representations(pending));
+    }
+    pub(crate) fn defer_directory_settlement(&self, pending: UnsettledDirectory) {
+        self.settlement
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_or_insert(UnsettledReceive::Directory(pending));
     }
     pub(crate) fn take_settlement(&self) -> Option<UnsettledReceive> {
         self.settlement

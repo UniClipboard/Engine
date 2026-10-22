@@ -1126,3 +1126,20 @@ ReceiveAction 的原待结算位置统一为文件／表示两种原责任，沿
 本节只完成表示内容保存失败后的原责任；部分结果保存之前的其他故障、目录成员／回滚、父目录提交、生命周期、来源C、最终资源／兼容／平台矩阵仍未完成，不能据此勾选全spec。
 
 本切片最终同源码验证：Application＋file_transfer 1276项通过（116.667秒），默认ignored的成员诊断独占运行1项通过（0.05秒）；完整Native receive_retry 23项通过（227.407秒）。locked metadata、workspace all-targets check（3分10秒）、fmt、Rust style、repository preflight（含隐私／负例）和diff均退出0。人工审阅核对原文件清理标记、唯一待结算责任、双来源及既有分类，未扩大Engine接口、修改持久格式或网络预算。实际scope已inactive，磁盘临时目录检查为空并回收；本轮观察scope内存峰值约3.0GiB，不把退出后的not-set当作峰值。表示父保存失败的该边界完成；目录与其他生命周期／资源／最终矩阵继续。
+
+
+### 2026-10-23：目录撤回原责任与恢复检查点（局部验证）
+
+目录发布后的物理撤回由原 ReceiveAction 持有原 DirectoryPublication 继续执行；调用方仍只发起完整接收，失败先保留原业务错误及撤回错误，不创建补偿任务池。未撤回根保留到原任务实际成功，已撤回根不再触碰其可被用户重用的目标名称；目录发布中途失败与内容保存失败均交接到同一原责任。原任务继续负责关闭屏障、失败声明、撤回和 NoEntry，重启恢复沿既有目录日志，不增加格式或协议版本。
+
+真实文件系统故障测试先复现保存失败／中途发布失败后原任务不再撤回的问题，再验证原任务继续清理、关闭短等待未完成、用户新建同名根不受影响。相关 Application 测试先有 61 项通过，本地清理 5 项、真实 SQLite／AEAD 日志及原子提交 6 项通过。隐私回归曾因遗漏原固定警告和安全计数上下文失败；已恢复仅含计数及固定分类的诊断，保留实际底层 source，未加入文件名或路径。
+
+随后新测试复现二次恢复误删：物理清理成功但 NoEntry 被拒绝后，用户重建的同名目录被下次恢复删除。恢复现先把旧可见输出撤回独占 staging，保留逐根证明，再通过既有 RecordDirectoryPublishPort 持久记录零可见根，然后清理 staging 和提交 NoEntry；检查点拒绝也保留证明。已记录零可见根或原 Staging 阶段的记录不再认领目标名称。完整 Application 恢复测试覆盖检查点拒绝和 NoEntry 拒绝两条路径，目录及 reconciliation 共 62 项通过（3.398 秒）。这不是完整进程崩溃矩阵验收。
+
+本轮全量 Application、workspace 与根门禁正在资源受限单 scope 内串行执行，最终结果另记。一次直接启动 repository 门禁发现其内部会启动 Cargo，已终止该次运行（143），随后统一纳入同一受限串行 scope，未把该次记为通过。编译使用共享 target／共享缓存及短磁盘 TMPDIR，jobs=1；物理内存上限 5GiB、swap 上限 4GiB。目录早期准备失败、成功后的 staging 清理、其他撤回入口及稳定 Engine 全生命周期仍未完成；完整来源 C、资源、最终兼容／设备矩阵保持未完成。
+
+
+目录切片的扩大验证：Application＋file_transfer 1281 项通过（120.502秒），1项原配置跳过；LAN file_upload 10项通过（0.069秒），其余228项不在该过滤范围。首次 workspace all-targets 检查因 LAN 测试装配缺少 record_directory_publish 失败，已迁移该调用方；随后全 workspace 检查通过（2分33秒），locked metadata、fmt、Rust style、完整 repository preflight（含隐私及负例）和 diff 均退出0。人工差异审阅核对原待结算位置、失败 source、逐根撤回、零可见根检查点及用户名称重用保护；没有增加持久化字段或 Engine 内部查询。编译发现本次移动代码留下一个未使用测试导入，移除后正在最后检查，不重跑无行为变化的全部故障测试。本轮原 active scope 的已观察峰值约3.0GiB；结束后not-set不记作峰值。Native完整目录接收及其他未执行矩阵仍未通过本节登记。
+
+
+移除未使用测试导入后的最终 workspace all-targets 检查通过（2分38秒），fmt／style／diff全部退出0。最后仅剩既有警告；本切片 source 无新增未使用导入。全部验证 scope 已结束；提交前检查专用磁盘 TMPDIR，结束后回收。完整 spec 继续保持 active。
