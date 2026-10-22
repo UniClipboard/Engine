@@ -2,6 +2,7 @@
 mod cleanup;
 mod preparation;
 mod terminal;
+mod unit_settlement;
 use super::*;
 use diesel::sql_types::Nullable;
 

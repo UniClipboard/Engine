@@ -102,3 +102,7 @@ FileCleaned已提交da77bea0（Core／App30、Profile42、Native14及根门禁�
 - Started准备已登记Pending责任：真实Native第二项Started更新拒绝、无第二项导出、关闭未完成和解除拒绝后补记Failed的端到端红测；验证经用户spec／plan批准的稳定操作与SQLite契约。原slot持续持有，不重发内容；不加持久recipe、池或业务阶段Engine入口。
 
 - Started切片最终验证：Native receive_retry 21/21通过186.083s，相关App27/27通过39.985s；locked metadata、workspace alltargets3m07s、fmt、style、repository、diff均退出0。受限串行scope已退出，源码人工审阅完成；下一步表示／目录父结算，完整goal保持active。
+
+- 表示完整结算切片：真实Engine SendImage触发96KiB表示blob，SQLite拒绝原Completed终态，核对父尝试在真实屏障前保持Receiving、关闭期限及解除拒绝后完成。原接收动作承担元数据修复，不重发内容，不新增格式／持久字段／池或Engine阶段接口；目录仍需独立全单元清理验收。
+
+- 表示终态切片最终：Native1项11.502s、相关App124项45.721s通过；metadata、workspace alltargets3m07s、fmt、style、repository、diff均退出0，scope已结束。等待原信号前记录已知StorageUnavailable，父状态Receiving直至真实终态及业务结算完成。下一批集中验证父NoEntry持久失败／目录成员／物理回滚和原保护生命周期，再统一最终矩阵；完整goal active。

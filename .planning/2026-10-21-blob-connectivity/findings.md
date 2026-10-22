@@ -335,3 +335,10 @@
 - 网络终态当前实现后的待验收边界：独立文件父流程通过FetchTerminalFailure的纯完成信号继续持有原action，信号不持下载资源，防止metadata交接未结束时新attempt。representation／directory无FileProgress时早期错误后的NoEntry恢复仍需实际测试，不能把文件47项当全路径证明；初始begin_lifecycle已形成raw pending但未返回session的失败也需覆盖。当前无新持久队列或schema，原网络task／同一DownloadSettlement持permit及保护。
 
 - TDD后续测试边界沿用户已要求实现的spec／plan：稳定Engine操作与查询、Application完整能力、Core规则／port合同，以及明确要求核验的实际SQLite／AEAD原子性；不为观测新增Engine原始阶段查询。无CONTEXT.md。新终态恢复先通过真实Failed SQL trigger红测，再修复并通过Failed／Completed两种；取消原原因必须按既有projection核对local_user，不能把新测试错误空值要求当产品契约。
+
+
+## 2026-10-23 构建与临时资料资源边界
+
+- 所有本轮Cargo／fmt／commit保持串行，systemd scope：MemoryHigh=3GiB、MemoryMax=5GiB、MemorySwapMax=4GiB、jobs=1，保留共享target和RUSTC_WRAPPER。Started切片实际观察峰值约3.0GiB，限额scope退出后不把inactive的infinity当实测。
+- 只读df发现/tmp是7.6GiB tmpfs，已用6.7GiB（89%）、剩920MiB；仓库及用户cache所在实际磁盘有847GiB可用。不能据此认定全部为本任务，也不能清空用户/tmp。后续1GiB和资料矩阵须用磁盘上的明确任务临时资料目录（例如cache下独立test-tmp），通过TMPDIR／harness资料参数传入；这是测试资料位置，不改变Cargo target／共享缓存。检查相关活动进程后回收本任务新建目录，冻结旧锚点及尚需复核资料保留至矩阵完成。
+- 下一阶段按完整边界集中验证：目录成员与表示失败的原完成屏障、目录回滚实际失败、父NoEntry持久提交失败及生命周期／来源C；完成必要修复后再做一次最终资源、旧端矩阵、workspace与平台门禁。局部根门禁不能当全spec完成。

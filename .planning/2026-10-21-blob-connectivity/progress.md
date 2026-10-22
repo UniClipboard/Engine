@@ -497,3 +497,7 @@ Application实际故障注入证实：文件保存StorageFull、失败事实结�
 - 2026-10-23 Started 准备责任：真实 Native 首轮 19.855s 失败，数据库解除拒绝后第二项仍 Pending；修复后 10.713s 通过。相关 Application／文件会话 27 项通过39.985s。原 session 先登记、冻结准备失败意图，原下载任务补齐 Started 与 Failed；原接收动作待真实屏障再清理，不重新获取内容。完整 Native 接收重试21项及根门禁正在同一5GiB受限scope串行运行，见 started-repair-verified-*；未把在运行项记成通过。
 
 - Started切片最终验证：Native receive_retry 21/21通过186.083s，相关App27/27通过39.985s；locked metadata、workspace alltargets3m07s、fmt、style、repository、diff均退出0。受限串行scope已退出，源码人工审阅完成；下一步表示／目录父结算，完整goal保持active。
+
+- 表示终态真实红测：5.630s失败，原Completed仍被SQL拒绝且raw Transferring时父状态已Failed。待原完成信号后再结算的首轮编译暴露anyhow::Chain跨await不Send，改成先克隆元数据完成信号再await；首轮失败日志未覆盖。修复后Native及相关App正在串行验证，unit-settlement-corrected-*。
+
+- 表示终态切片最终：Native1项11.502s、相关App124项45.721s通过；metadata、workspace alltargets3m07s、fmt、style、repository、diff均退出0，scope已结束。等待原信号前记录已知StorageUnavailable，父状态Receiving直至真实终态及业务结算完成。下一批集中验证父NoEntry持久失败／目录成员／物理回滚和原保护生命周期，再统一最终矩阵；完整goal active。

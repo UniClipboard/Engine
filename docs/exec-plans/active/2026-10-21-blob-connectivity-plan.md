@@ -1099,3 +1099,15 @@ metadata812包、workspace全目标check（3m52s）、fmt、Rust style、reposit
 人工审阅确认：FileCleaned 对活动行的拒绝保持；Started 与终态由同一 session 顺序恢复，发布不重复追加已持久事件；既有完成／取消终态恢复沿原屏障；没有明文例外或授权／网络预算变化。表示／目录整体结算、来源 C、完整生命周期、最终资源与历史兼容矩阵仍未完成。
 
 最终同一源码快照验证：完整 Native 接收重试21项通过（186.083秒）；locked metadata、workspace all-targets check（3分07秒）、fmt、Rust style、repository preflight（含隐私／负例）及 diff 全部退出0。全部 Cargo 串行，共享 target／编译缓存，scope 限制 MemoryMax=5GiB、MemorySwapMax=4GiB，实际观察峰值约3.0GiB。该切片完成，后续边界继续执行。
+
+
+### 2026-10-23 表示终态修复与父结算边界（进行中）
+
+真实 Engine 发送96KiB表示blob，SQLite trigger 拒绝该项Completed更新。首轮5.630秒失败：网络行仍为Transferring，稳定查询已报告父尝试Failed。该证据说明文件绿测不能代替表示完整结算。当前修复由原物化流程等待原下载任务携带的实际完成信号，再继续已有部分结果路径；不重新获取／保存业务内容，也不引入新的owner或阶段查询。验证仍在进行，未登记完成。目录成员、父NoEntry写入失败及清理失败的恢复仍须独立证明。
+
+
+表示终态修复的新切片已通过真实 Native 最终行为检查（11.502秒）：等待原终态实际恢复期间，父尝试保持Receiving，该项保留StorageUnavailable分类；关闭短等待不丢弃原处理，并返回未完成；解除SQL拒绝后网络行仍为原Completed，父尝试进入失败／取消终态，未重新导出旧成功项。普通部分结果仍沿原路径处理，不丢弃先前已物化的其他表示，也不新增恢复队列。测试通过现有SendImage／查询／关闭入口驱动，SQL仅注入所需持久失败并核对既有原始事实。
+
+为核对未结算状态，测试在发送操作结束后查询稳定进度，不等待原接收通知：通知属于原完整处理的结果，不能把等到通知结束作为“仍未结算”的前置。首轮确实在原终态被拒绝时读到Failed；修复后读到Receiving及已知失败分类，解除拒绝后等待原工作实际结束。首次编译的非Send错误及改正前后日志均保留。相关入站124项及本轮根门禁的最终结果待实际完成后追加；目录成员／物理回滚、父NoEntry持久拒绝和完整生命周期等继续保留为未完成。
+
+该表示终态切片最终验证：Native1项11.502秒、相关入站124项45.721秒全部通过；locked metadata、workspace all-targets check（3分07秒）、fmt、Rust style、repository preflight（含隐私／负例）及diff均退出0。原受限scope已退出。人工审阅确认：仅等待原任务的不透明完成信号，等待期间保留已知失败和原batch资源，部分结果处理不变；无新公开接口、持久格式、任务池或网络重试。该局部边界完成，其他完整结算及最终验收仍保持未完成。
