@@ -74,6 +74,7 @@ mod owned;
 mod persistence_settlement;
 mod progress;
 mod settlement_recovery;
+use owned::ReceiveReply;
 use persistence_settlement::ReceiveFailure;
 use progress::FileProgress;
 
@@ -1060,6 +1061,7 @@ impl ApplyInboundClipboardUseCase {
         work: &OwnedWork,
         receive_action: &Arc<ReceiveAction>,
         mut retry: Option<PreparedReceiveRetry>,
+        reply: &ReceiveReply,
     ) -> Result<ApplyOutcome, ApplyInboundError> {
         if let Some(readiness) = &self.receive_readiness {
             let cancellation = receive_action.cancellation();
@@ -1925,8 +1927,9 @@ impl ApplyInboundClipboardUseCase {
                 return Err(ApplyInboundError::Capture(e));
             }
         };
-        if let Some(publication) = publication {
-            publication.commit().await;
+        if let Some(mut publication) = publication {
+            self.finish_directory_publication(&mut publication, reply)
+                .await;
         }
         receive_action.persisted(
             materialize_outcome == MaterializeOutcome::Complete,

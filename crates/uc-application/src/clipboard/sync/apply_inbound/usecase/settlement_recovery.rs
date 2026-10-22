@@ -1,7 +1,9 @@
 //! 原处理任务负责失败事实与清理的本地修复；不重新获取或保存业务内容。
-use super::{ApplyInboundClipboardUseCase, ApplyInboundError};
+use super::{ApplyInboundClipboardUseCase, ApplyInboundError, ReceiveReply};
 use crate::transfer::blob::facade::FetchTerminalFailure;
-use crate::transfer::receive::materialization::{remove_uncommitted_output, ReceiveOutputFailure};
+use crate::transfer::receive::materialization::{
+    remove_uncommitted_output, DirectoryPublication, ReceiveOutputFailure,
+};
 use crate::transfer::receive::work::{
     ReceiveAction, ReceiveWorkError, UnsettledFile, UnsettledReceive,
 };
@@ -22,6 +24,26 @@ use uc_core::ports::{
 use uc_observability_contract::{error_source::io_error_kind, uc_warn};
 
 impl ApplyInboundClipboardUseCase {
+    pub(super) async fn finish_directory_publication(
+        &self,
+        publication: &mut DirectoryPublication,
+        reply: &ReceiveReply,
+    ) {
+        let mut delay = LOCAL_SETTLEMENT_RETRY_INITIAL;
+        while let Err(source) = publication.commit().await {
+            // 已持久保存的成功事实保留；原任务仅修复本地清理，不重跑保存。
+            let failure = reply.local_error(ApplyInboundError::Internal(SourceError::new(source)));
+            uc_warn!(
+                error_kind = "directory_commit_cleanup",
+                io_error_kind = io_error_kind(failure.as_ref()),
+                "saved directory cleanup remains pending"
+            );
+            sleep(delay).await;
+            drop(failure);
+            delay = (delay * 2).min(LOCAL_SETTLEMENT_RETRY_MAX);
+        }
+    }
+
     pub(super) async fn recover_settlement(
         &self,
         mut pending: UnsettledReceive,

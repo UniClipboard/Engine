@@ -4305,7 +4305,8 @@ async fn directory_publication_leaves_the_final_path_empty_until_it_completes() 
         .take_publication()
         .expect("publication")
         .commit()
-        .await;
+        .await
+        .expect("cleanup staging");
     assert_eq!(visible_names(save_dir.path()), vec!["alpha", "beta"]);
     // Staging is gone once committed.
     assert_eq!(
@@ -4337,7 +4338,8 @@ async fn directory_publication_takes_the_next_name_rather_than_replacing_a_folde
         .take_publication()
         .expect("publication")
         .commit()
-        .await;
+        .await
+        .expect("cleanup staging");
 
     assert_eq!(
         visible_names(save_dir.path()),
@@ -4376,7 +4378,8 @@ async fn directory_publication_retries_onto_a_free_name_after_losing_a_race() {
         .take_publication()
         .expect("publication")
         .commit()
-        .await;
+        .await
+        .expect("cleanup staging");
 
     // The racer holds `alpha`; our root stepped aside to `alpha (1)`.
     assert_eq!(
@@ -4511,7 +4514,8 @@ async fn directory_publication_falls_back_to_managed_storage_when_the_volume_can
         .take_publication()
         .expect("publication")
         .commit()
-        .await;
+        .await
+        .expect("cleanup staging");
 
     // Nothing was written to the user's folder, not even a probe leftover.
     assert_eq!(std::fs::read_dir(save_dir.path()).unwrap().count(), 0);
@@ -4549,7 +4553,8 @@ async fn directory_publication_still_lands_when_no_volume_supports_no_replace() 
         .take_publication()
         .expect("publication")
         .commit()
-        .await;
+        .await
+        .expect("cleanup staging");
 
     // The user's folder was declined — its volume cannot protect what is in
     // it — and the content landed in managed storage regardless.
@@ -4617,7 +4622,8 @@ async fn the_no_replace_probe_is_not_repeated_per_receive() {
             .take_publication()
             .expect("publication")
             .commit()
-            .await;
+            .await
+            .expect("cleanup staging");
     }
 
     assert_eq!(

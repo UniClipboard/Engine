@@ -2,7 +2,7 @@
 use super::ReceiveFailureSettlementError;
 use anyhow::Error as SourceError;
 use std::fmt::{self, Debug, Formatter};
-use std::io::ErrorKind;
+use std::io::{self, ErrorKind};
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -88,9 +88,18 @@ impl DirectoryPublication {
         self.published.len()
     }
 
-    pub async fn commit(mut self) {
+    /// 已保存输出不能回滚；清理成功之前仍由原持有者承担责任。
+    pub async fn commit(&mut self) -> Result<(), io::Error> {
+        if self.settled {
+            return Ok(());
+        }
+        if let Err(source) = tokio::fs::remove_dir_all(&self.staging).await {
+            if source.kind() != ErrorKind::NotFound {
+                return Err(source);
+            }
+        }
         self.settled = true;
-        super::workflow::discard_staging(&self.staging).await;
+        Ok(())
     }
 
     /// 责任留在原持有者；错误只携带来源，不消费输出或完成标志。

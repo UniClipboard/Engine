@@ -273,3 +273,103 @@ async fn assert_preparation_failure(fail_log: bool, fail_commit: bool, lose_ack:
     );
     assert_eq!(std::fs::read_dir(destination.path()).unwrap().count(), 1);
 }
+
+/// 保存已经成功，后续清理拒绝不能撤回成功目录或提前释放原任务。
+#[tokio::test]
+async fn directory_saved_output_keeps_original_cleanup_until_permissions_recover() {
+    let cache = tempfile::tempdir().unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    let permissions = Arc::new(StagingPermissions::default());
+    let blocked = permissions.clone();
+    let destination_path = destination.path().to_owned();
+    let attempts = AttemptGate::empty();
+    let captured_attempts = attempts.clone();
+    let materializer = FileCacheBlobMaterializer::new(
+        Arc::new(writing_fetcher(2)),
+        cache.path().to_owned(),
+        Arc::new(FakeAtomicPublisher::default()),
+    )
+    .with_save_dir_resolver(Arc::new(FakeSaveDir {
+        dir: destination.path().to_owned(),
+    }))
+    .with_directory_receive_attempt_ports(
+        attempts.clone(),
+        attempts.clone(),
+        attempts.clone(),
+        attempts.clone(),
+    );
+    let mut repo = MockEntryRepo::new();
+    repo.expect_find_entry_id_by_snapshot_hash()
+        .returning(|_| Ok(None));
+    let mut capture = MockCapture::new();
+    capture
+        .expect_capture()
+        .times(1)
+        .returning(move |entry, _, _| {
+            assert_eq!(
+                *captured_attempts.state.lock().unwrap(),
+                AttemptState::Committing
+            );
+            *captured_attempts.state.lock().unwrap() = AttemptState::Completed;
+            blocked.block(&destination_path);
+            Ok(Some(entry))
+        });
+    let mut write = MockWrite::new();
+    write.expect_write().times(0..=1).returning(|_, _| Ok(()));
+    let receiver = build(repo, capture, write)
+        .with_blob_materializer(Arc::new(materializer))
+        .with_receive_attempt_ports(
+            attempts.clone(),
+            attempts.clone(),
+            attempts.clone(),
+            attempts.clone(),
+            attempts.clone(),
+            attempts.clone(),
+            attempts.clone(),
+        );
+    let (plaintext, snapshot_hash) = two_root_wire_payload();
+    let outcome = receiver
+        .execute(ApplyInboundInput {
+            from_device: DeviceId::new("source"),
+            snapshot_hash,
+            plaintext,
+            resurface_intent: ClipboardWriteIntent::RemotePush,
+            activation_owner: InboundActivationOwner::Inbound,
+        })
+        .await;
+    let before = *attempts.state.lock().unwrap();
+    let area = attempts.root_maps.lock().unwrap()[0][0]
+        .0
+        .parent()
+        .unwrap()
+        .to_owned();
+    let pending = timeout(Duration::from_millis(20), receiver.shutdown()).await;
+    permissions.restore();
+    timeout(Duration::from_secs(10), receiver.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        pending.is_err(),
+        "已保存目录的暂存区清理仍归原动作，关闭不能提前成功"
+    );
+    let ApplyInboundError::Internal(source) = outcome.unwrap_err() else {
+        panic!("must preserve cleanup error")
+    };
+    assert!(source.chain().any(|error| error
+        .downcast_ref::<io::Error>()
+        .is_some_and(|error| error.kind() == io::ErrorKind::PermissionDenied)));
+    assert_eq!(before, AttemptState::Completed);
+    assert_eq!(*attempts.state.lock().unwrap(), AttemptState::Completed);
+    assert_eq!(attempts.failure_begin_calls.load(Ordering::SeqCst), 0);
+    assert!(!area.exists());
+    assert_eq!(
+        std::fs::read(destination.path().join("alpha/one.txt")).unwrap(),
+        b"hello"
+    );
+    assert_eq!(
+        std::fs::read(destination.path().join("beta/two.txt")).unwrap(),
+        b"hello"
+    );
+    assert_eq!(std::fs::read_dir(destination.path()).unwrap().count(), 2);
+}

@@ -567,3 +567,11 @@ Core红测0.002秒复现目录非终态聚合丢失StorageUnavailable（None／S
 
 
 本切片最终同源检查：Application＋file_transfer 1285项通过（124.457秒），1项默认跳过；Native receive_retry 24项通过（236.065秒），其余300项不在过滤范围；真实入站查询契约13项通过（2.799秒），新增持久目录失败原因断言通过。locked metadata、workspace all-targets（3分29秒）、fmt、Rust style、repository preflight（含隐私及负例）与diff均退出0。Core接收项3项通过后的行为实现未再改动，只补充查询字段说明；目录与表示原终态屏障已由实际Native再验。人工审阅核对原资源仍由DownloadSettlement及原batch持有、私有共享等待不交接资源、非终态原因不构成父终态、实际Raw Completed未被父失败覆盖、旧成果及原staging清理。单scope串行、jobs=1及既有5GiB内存／4GiB swap上限保持，已观察峰值约3.0GiB；结束后检查无活动进程并回收专用磁盘TMPDIR。完整spec继续active，其他目录清理入口、生命周期、来源C、资源和最终兼容／设备矩阵不据此勾选完成。
+
+### 2026-10-23：已保存目录的成功清理责任
+
+完整Application接收以既有端口及真实文件系统权限拒绝复现：两个根已经发布且捕获成功，父状态Completed，随后暂存区无法删除；旧实现只记警告并使关闭立即成功。红测0.007秒失败。DirectoryPublication::commit现在借用原持有者并返回实际IO错误，只有清理成功才标记完成；原接收任务通过私有一次回复通道报告错误，继续持有原batch、许可及输出责任，按既有1／2／4／8／16／30秒退避，仅修复本地清理。未新建任务或队列、未扩展公开Engine接口、未修改持久格式。
+
+目录结算8项通过（1.049秒）：权限恢复前关闭短等待未完成，恢复后原任务清理暂存区并结束；原PermissionDenied来源可追溯，捕获一次、获取两项，两个已保存根仍为hello，父Completed未改写，也未进入失败结算。测试沿完整App能力与实际文件系统，捕获提交状态由既有端口模型表达，不冒充SQLite／SDK全链路。全量App及根交付检查待执行；其他open/probe清理和完整spec矩阵继续未完成。
+
+本切片最终同源检查：Application全部1288项通过（17.844秒），1项跳过；locked metadata、workspace all-targets（3分17秒）、fmt、Rust style、repository preflight（含隐私与负例）及diff均退出0。人工审阅核对一次回复只消费调用等待、原处理任务继续存活、batch的commit_handoff持续持有真实下载资源、成功事实不转入NoEntry／回滚、成功清理后才继续原收尾；所有commit调用已迁移为检查Result。此次没有执行Native或设备矩阵，不复用旧结果冒充当前验证。单scope串行且共享target／缓存，已观察峰值约3.0GiB；scope结束后确认无本轮活动编译并回收空的专用TMPDIR。完整spec保持active，后续open/probe失败清理、其他withdraw入口、生命周期、来源C、受管1GiB、最终兼容与设备矩阵仍未完成。
