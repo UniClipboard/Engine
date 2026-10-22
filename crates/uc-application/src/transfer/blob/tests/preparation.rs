@@ -73,7 +73,7 @@ async fn preparation_uses_original_first_data_deadline_and_holds_capacity_until_
                     stop: Default::default(),
                 },
             },
-            ready,
+            |result, _| ready(result),
         ))
     };
     let first_cancel = CancellationToken::new();
@@ -177,7 +177,7 @@ async fn preparation_uses_original_first_data_deadline_and_holds_capacity_until_
                     stop: Default::default(),
                 },
             },
-            ready,
+            |result, _| ready(result),
         )
         .await
         .unwrap_err();

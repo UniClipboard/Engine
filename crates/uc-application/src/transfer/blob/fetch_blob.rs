@@ -2,11 +2,11 @@ use super::output::PreparedBlobPath;
 use std::future::Future;
 use std::sync::Arc;
 
-use super::transport::DownloadTask;
 use super::transport::{
     BlobDownloadPreparation, BlobDownloadResources, BlobExchangeError, BlobExchangeFailure,
     PreparedDownload,
 };
+use super::transport::{DownloadResponse, DownloadTask};
 use crate::transfer::receive::DownloadSettlement;
 use bytes::Bytes;
 use std::time::Duration;
@@ -93,7 +93,9 @@ impl FetchBlobUseCase {
     pub(in super::super) fn execute<T, F>(
         self: &Arc<Self>,
         input: FetchBlobInput,
-        finish: impl FnOnce(Result<FetchBlobOutcome, BlobExchangeError>) -> F + Send + 'static,
+        finish: impl FnOnce(Result<FetchBlobOutcome, BlobExchangeError>, DownloadResponse<T>) -> F
+            + Send
+            + 'static,
     ) -> DownloadTask<T>
     where
         T: Send + 'static,
@@ -106,12 +108,12 @@ impl FetchBlobUseCase {
         let owner = self.clone();
         self.downloads
             .transport
-            .supervise(input.cancel.clone(), async move {
+            .supervise(input.cancel.clone(), move |response| async move {
                 let result = owner
                     .execute_inner(input, prepared)
                     .await
                     .map_err(fetch_error);
-                finish(result).await
+                finish(result, response).await
             })
     }
     async fn execute_inner(
@@ -182,7 +184,9 @@ impl FetchBlobUseCase {
     pub(in super::super) fn execute_to_path<T, F>(
         self: &Arc<Self>,
         input: FetchBlobPathInput,
-        finish: impl FnOnce(Result<FetchBlobPathOutcome, BlobExchangeError>) -> F + Send + 'static,
+        finish: impl FnOnce(Result<FetchBlobPathOutcome, BlobExchangeError>, DownloadResponse<T>) -> F
+            + Send
+            + 'static,
     ) -> DownloadTask<T>
     where
         T: Send + 'static,
@@ -195,12 +199,12 @@ impl FetchBlobUseCase {
         let owner = self.clone();
         self.downloads
             .transport
-            .supervise(input.cancel.clone(), async move {
+            .supervise(input.cancel.clone(), move |response| async move {
                 let result = owner
                     .execute_path_inner(input, prepared)
                     .await
                     .map_err(fetch_error);
-                finish(result).await
+                finish(result, response).await
             })
     }
     async fn execute_path_inner(

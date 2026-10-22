@@ -1,11 +1,14 @@
+use super::super::batch::receive_failure_reason;
 use super::{MaterializeResult, ReceiveWorkPlan, ReceivedItem};
 use crate::facade::blob_transfer::{
     BlobTransferFacade, FetchBlobCommand, FetchBlobResult, FetchBlobToPathCommand,
     FetchBlobToPathResult, FetchTransferContext,
 };
+use crate::transfer::blob::facade::FetchTerminalFailure;
 use anyhow::{Error as SourceError, Result};
 use async_trait::async_trait;
 use uc_core::file_transfer::FileTransferFailureReason;
+use uc_core::ports::TrackedFileTransferStatus;
 use uc_core::{
     ports::{ReceiveArtifact, ReceiveFileFailure},
     SystemClipboardSnapshot,
@@ -68,7 +71,7 @@ impl InboundBlobFetcher for BlobTransferFacade {
     }
 }
 
-/// 输出清理前的实际结果；只有业务保存失败需要补记网络完成后的FileFailed。
+/// 输出清理前的实际结果；网络完成后的本地保存或终态交接失败沿FileFailed结算。
 #[derive(Clone, Copy)]
 pub(crate) enum ReceiveOutputFailure {
     FileCommit(ReceiveFileFailure),
@@ -77,6 +80,26 @@ pub(crate) enum ReceiveOutputFailure {
     PreparationFailure,
 }
 impl ReceiveOutputFailure {
+    pub(crate) fn after_fetch(source: &SourceError, cancelled: bool) -> Self {
+        if source.chain().any(|cause| {
+            cause
+                .downcast_ref::<FetchTerminalFailure>()
+                .is_some_and(|failure| failure.status == TrackedFileTransferStatus::Completed)
+        }) {
+            return Self::FileCommit(ReceiveFileFailure::Failed(receive_failure_reason(source)));
+        }
+        if cancelled
+            || source.chain().any(|cause| {
+                cause
+                    .downcast_ref::<FetchTerminalFailure>()
+                    .is_some_and(|failure| failure.status == TrackedFileTransferStatus::Cancelled)
+            })
+        {
+            Self::FetchCancellation
+        } else {
+            Self::FetchFailure
+        }
+    }
     pub(crate) fn is_cancelled(self) -> bool {
         matches!(
             self,

@@ -1,9 +1,12 @@
 //! 原处理任务负责失败事实与清理的本地修复；不重新获取或保存业务内容。
 use super::{ApplyInboundClipboardUseCase, ApplyInboundError};
+use crate::transfer::blob::facade::FetchTerminalFailure;
 use crate::transfer::receive::materialization::{remove_uncommitted_output, ReceiveOutputFailure};
 use crate::transfer::receive::work::{ReceiveAction, ReceiveWorkError, UnsettledFile};
+use crate::transfer::receive::{LOCAL_SETTLEMENT_RETRY_INITIAL, LOCAL_SETTLEMENT_RETRY_MAX};
 use anyhow::{anyhow, Error as SourceError};
-use std::{sync::Arc, time::Duration};
+use std::error::Error as StdError;
+use std::sync::Arc;
 use tokio::time::sleep;
 use uc_core::file_transfer::{
     receive_failure_recovery_action, FileTransferCancellationReason, OutboundProgressStatus,
@@ -21,9 +24,26 @@ impl ApplyInboundClipboardUseCase {
         action: &ReceiveAction,
         source: Arc<ReceiveWorkError>,
     ) {
+        // 首次调用错误不是网络任务的完成屏障；原负责人仍可在提交同一终态。
+        let terminal = {
+            let mut current: Option<&(dyn StdError + 'static)> = Some(source.as_ref());
+            let mut pending = None;
+            for _ in 0..32 {
+                let Some(error) = current else { break };
+                if let Some(terminal) = error.downcast_ref::<FetchTerminalFailure>() {
+                    pending = Some(terminal.clone());
+                    break;
+                }
+                current = error.source();
+            }
+            pending
+        };
+        if let Some(terminal) = terminal {
+            terminal.wait_settled().await;
+        }
         let mut output_cleaned = !pending.output_cleanup_pending;
         let mut item_acknowledged = false;
-        let mut delay = Duration::from_secs(1);
+        let mut delay = LOCAL_SETTLEMENT_RETRY_INITIAL;
         loop {
             match self
                 .repair_file_settlement(&pending, &mut output_cleaned, &mut item_acknowledged)
@@ -58,7 +78,7 @@ impl ApplyInboundClipboardUseCase {
                     );
                     // 五秒期限只限制外部等待；已开始的本地 IO 不可被丢弃。
                     sleep(delay).await;
-                    delay = (delay * 2).min(Duration::from_secs(30));
+                    delay = (delay * 2).min(LOCAL_SETTLEMENT_RETRY_MAX);
                 }
             }
         }

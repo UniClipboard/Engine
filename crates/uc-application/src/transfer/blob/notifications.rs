@@ -39,7 +39,7 @@ impl OutboundNotifications {
         let owned = mailbox.clone();
         let cancel = CancellationToken::new();
         let stopping = cancel.clone();
-        let task = transport.supervise(cancel, async move {
+        let task = transport.supervise(cancel, move |_| async move {
             loop {
                 let changed = owned.changed.notified();
                 let report = {

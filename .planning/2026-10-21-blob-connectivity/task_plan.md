@@ -94,3 +94,7 @@ FileCleaned已提交da77bea0（Core／App30、Profile42、Native14及根门禁�
 - 当前完整成果重复投递核对：完整负责人仍Application接收流程，调用方仅SendFiles；完整可用条目应直接重显，无新attempt／下载／清理责任。先在真实Native补齐partial完成后第三次SendFiles，用接收结果、原attempt及文件身份／导出数证明，不以普通partial绿测替代。若availability误读密文，修复唯一实际能力并保留认证错误来源，不引入明文例外或新schema；重试／重启沿既有契约。
 
 - 完整成果可用性切片：真实错误重复投递已修复并通过3项Native、149项相关合同和根门禁。后续先以真实SQLite trigger复现网络终态store写入失败后的资源／清理修复；实际publisher返回Ok，不把其测试替身行为误认为SQLite根因。完整goal继续active。
+
+- 网络终态持久修复：以真实第二项StoreFull与failed终态SQL trigger取得端到端红测；先保持原网络事实／活动许可，再补记同一终态和父清理责任。须覆盖完成／取消／准备阶段，继续保留原5秒等待与源分类，不增加监督池或放宽FileCleaned。
+
+- 原终态事件／projection恢复（独立文件）已完成该切片：1275项App全量＋独占诊断1项、Native接收重试20项与根门禁均通过，准备提交。下一步从真实Native初始Started提交拒绝检查已形成pending row却未交出session的责任；表示／目录早返回后的父结算、原网络key范围和全部生命周期等继续，不标全spec完成。

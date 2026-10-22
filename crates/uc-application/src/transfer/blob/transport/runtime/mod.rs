@@ -16,4 +16,4 @@ pub(in super::super::super) use download::{
 
 mod supervision;
 
-pub(in super::super::super) use supervision::{DownloadCompletion, DownloadTask};
+pub(in super::super::super) use supervision::{DownloadCompletion, DownloadResponse, DownloadTask};

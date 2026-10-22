@@ -48,6 +48,7 @@ use crate::facade::blob_transfer::{
     BatchPosition, BlobTransferError, FetchBlobCommand, FetchBlobToPathCommand,
     FetchTransferContext,
 };
+use crate::transfer::blob::facade::FetchTerminalFailure;
 use crate::transfer::blob::{fetch_failure_reason, BlobOutputPreparationError};
 
 use super::{
@@ -62,9 +63,12 @@ use crate::transfer::receive::batch::ReceiveBatch;
 pub fn is_cancel_error(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         cause
-            .downcast_ref::<BlobTransferError>()
-            .map(|bte| matches!(bte, BlobTransferError::Cancelled))
-            .unwrap_or(false)
+            .downcast_ref::<FetchTerminalFailure>()
+            .is_some_and(|failure| failure.status == TrackedFileTransferStatus::Cancelled)
+            || cause
+                .downcast_ref::<BlobTransferError>()
+                .map(|bte| matches!(bte, BlobTransferError::Cancelled))
+                .unwrap_or(false)
     })
 }
 
@@ -1096,7 +1100,7 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                             return Err(output_cleanup_failure(
                                 progress.as_deref(),
                                 artifact.as_ref(),
-                                ReceiveOutputFailure::FetchCancellation,
+                                ReceiveOutputFailure::after_fetch(&e, true),
                                 &receive_artifacts,
                                 artifact_journaled,
                                 cleanup,
@@ -1177,7 +1181,7 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                             return Err(output_cleanup_failure(
                                 progress.as_deref(),
                                 artifact.as_ref(),
-                                ReceiveOutputFailure::FetchFailure,
+                                ReceiveOutputFailure::after_fetch(&e, false),
                                 &receive_artifacts,
                                 artifact_journaled,
                                 cleanup,

@@ -103,43 +103,43 @@ impl BlobTransferFacade {
                 None => {
                     let mut pending = entry.completion.clone();
                     let local = entry.local.clone();
-                    let job = self
-                        .transport
-                        .supervise(CancellationToken::new(), async move {
-                            let has_local = local.is_some();
-                            let download = wait_download_completion(&mut pending).await;
-                            if let Some(local) = local {
-                                match local.wait().await {
-                                    Ok(LocalSettlementOutcome::Committed) => {
+                    let job =
+                        self.transport
+                            .supervise(CancellationToken::new(), move |_| async move {
+                                let has_local = local.is_some();
+                                let download = wait_download_completion(&mut pending).await;
+                                if let Some(local) = local {
+                                    match local.wait().await {
+                                        Ok(LocalSettlementOutcome::Committed) => {
+                                            return Err(BlobExchangeError::refused(
+                                                BlobExchangeFailure::AlreadyCompleted,
+                                            ))
+                                        }
+                                        Ok(LocalSettlementOutcome::Cancelled) => {}
+                                        Err(source) => {
+                                            let local = BlobExchangeError::new(
+                                                BlobExchangeFailure::Settlement,
+                                                LocalSettlementFailure(source),
+                                            );
+                                            return Err(match download {
+                                                Err(primary) => primary.with_settlement(local),
+                                                Ok(()) => local,
+                                            });
+                                        }
+                                    }
+                                }
+                                match download {
+                                    Ok(()) if !has_local => {
                                         return Err(BlobExchangeError::refused(
                                             BlobExchangeFailure::AlreadyCompleted,
                                         ))
                                     }
-                                    Ok(LocalSettlementOutcome::Cancelled) => {}
-                                    Err(source) => {
-                                        let local = BlobExchangeError::new(
-                                            BlobExchangeFailure::Settlement,
-                                            LocalSettlementFailure(source),
-                                        );
-                                        return Err(match download {
-                                            Err(primary) => primary.with_settlement(local),
-                                            Ok(()) => local,
-                                        });
-                                    }
+                                    Ok(()) => {}
+                                    Err(error) if error.settled_cancellation() => {}
+                                    Err(error) => return Err(error),
                                 }
-                            }
-                            match download {
-                                Ok(()) if !has_local => {
-                                    return Err(BlobExchangeError::refused(
-                                        BlobExchangeFailure::AlreadyCompleted,
-                                    ))
-                                }
-                                Ok(()) => {}
-                                Err(error) if error.settled_cancellation() => {}
-                                Err(error) => return Err(error),
-                            }
-                            Ok(())
-                        });
+                                Ok(())
+                            });
                     let completion = job.completion();
                     // 等待方不拥有协调者；即使五秒等待或调用 future 退出，任务仍归 transport。
                     drop(job);

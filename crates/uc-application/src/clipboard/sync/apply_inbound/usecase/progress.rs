@@ -2,6 +2,7 @@
 use super::ApplyInboundClipboardUseCase;
 use crate::clipboard::capture::InboundCaptureCommitContext;
 use crate::facade::blob_transfer::BlobTransferError;
+use crate::transfer::blob::facade::{FetchTerminalFailure, TerminalSettlementPending};
 use crate::transfer::receive::materialization::{
     ReceiveFileProgress, ReceiveOutputFailure, ReceivedItem,
 };
@@ -92,22 +93,38 @@ impl ReceiveFileProgress for FileProgress {
             .receive_attempts
             .as_ref()
             .ok_or_else(|| anyhow!("file settlement ports are not wired"))?;
-        let failure = if cancelled {
-            ReceiveOutputFailure::FetchCancellation
-        } else {
-            ReceiveOutputFailure::FetchFailure
-        };
+        let failure = ReceiveOutputFailure::after_fetch(cause, cancelled);
         self.action
             .batch
-            .unsettled_fetch_failure(&artifact.item_id, cancelled, cause);
-        ports
-            .commit
-            .commit_inbound_receive(&InboundReceiveSettlement::FileCleaned {
+            .unsettled_fetch_failure(&artifact.item_id, failure.is_cancelled(), cause);
+        if cause.chain().any(|source| {
+            source
+                .downcast_ref::<FetchTerminalFailure>()
+                .is_some_and(|terminal| !terminal.is_settled())
+        }) {
+            self.action.defer_file_settlement(
+                self.pending_file(artifact, failure, artifacts, false, true),
+            );
+            return Err(TerminalSettlementPending.into());
+        }
+        let settlement = match failure {
+            ReceiveOutputFailure::FileCommit(failure) => InboundReceiveSettlement::FileFailed {
+                entry_id: self.entry.clone(),
+                attempt_id: self.attempt.clone(),
+                artifact: artifact.clone(),
+                failure,
+                now_ms: ports.clock.now_ms(),
+            },
+            _ => InboundReceiveSettlement::FileCleaned {
                 entry_id: self.entry.clone(),
                 attempt_id: self.attempt.clone(),
                 artifact: artifact.clone(),
                 now_ms: ports.clock.now_ms(),
-            })
+            },
+        };
+        ports
+            .commit
+            .commit_inbound_receive(&settlement)
             .await
             .map_err(|source| {
                 self.action.defer_file_settlement(

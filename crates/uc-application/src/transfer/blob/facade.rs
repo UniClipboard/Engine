@@ -10,9 +10,11 @@ use self::finalization::{transfer_error, FetchFinalization};
 use self::preparation::FetchPreparationState;
 mod cancellation;
 mod finalization;
+mod terminal_repair;
 use async_trait::async_trait;
 use bytes::Bytes;
 use std::sync::PoisonError;
+pub(crate) use terminal_repair::{FetchTerminalFailure, TerminalSettlementPending};
 mod preparation;
 use tokio_util::sync::CancellationToken;
 
@@ -494,22 +496,26 @@ impl BlobTransferFacade {
             cancel_token,
             &prepared,
             || {
-                self.fetch_uc.execute(input, move |result| async move {
-                    finalization
-                        .finish(result.map(|outcome| {
-                            let bytes = outcome.plaintext.len() as u64;
-                            (
-                                FetchBlobResult {
-                                    plaintext: outcome.plaintext,
-                                    entry_id: outcome.entry_id,
-                                    plaintext_hash: outcome.plaintext_hash,
-                                    digest: outcome.digest,
-                                },
-                                bytes,
+                self.fetch_uc
+                    .execute(input, move |result, response| async move {
+                        finalization
+                            .finish(
+                                result.map(|outcome| {
+                                    let bytes = outcome.plaintext.len() as u64;
+                                    (
+                                        FetchBlobResult {
+                                            plaintext: outcome.plaintext,
+                                            entry_id: outcome.entry_id,
+                                            plaintext_hash: outcome.plaintext_hash,
+                                            digest: outcome.digest,
+                                        },
+                                        bytes,
+                                    )
+                                }),
+                                response,
                             )
-                        }))
-                        .await
-                })
+                            .await
+                    })
             },
         )?;
         operation.await.map_err(transfer_error)
@@ -584,20 +590,23 @@ impl BlobTransferFacade {
             &prepared,
             || {
                 self.fetch_uc
-                    .execute_to_path(input, move |result| async move {
+                    .execute_to_path(input, move |result, response| async move {
                         finalization
-                            .finish(result.map(|outcome| {
-                                let bytes = outcome.bytes_written;
-                                (
-                                    FetchBlobToPathResult {
-                                        entry_id: outcome.entry_id,
-                                        plaintext_hash: outcome.plaintext_hash,
-                                        digest: outcome.digest,
-                                        bytes_written: outcome.bytes_written,
-                                    },
-                                    bytes,
-                                )
-                            }))
+                            .finish(
+                                result.map(|outcome| {
+                                    let bytes = outcome.bytes_written;
+                                    (
+                                        FetchBlobToPathResult {
+                                            entry_id: outcome.entry_id,
+                                            plaintext_hash: outcome.plaintext_hash,
+                                            digest: outcome.digest,
+                                            bytes_written: outcome.bytes_written,
+                                        },
+                                        bytes,
+                                    )
+                                }),
+                                response,
+                            )
                             .await
                     })
             },

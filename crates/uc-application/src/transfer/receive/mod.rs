@@ -30,3 +30,5 @@ mod local_settlement;
 pub(super) use local_settlement::{
     LocalSettlement, LocalSettlementFailure, LocalSettlementOutcome,
 };
+
+pub(crate) use super::policy::{LOCAL_SETTLEMENT_RETRY_INITIAL, LOCAL_SETTLEMENT_RETRY_MAX};

@@ -230,7 +230,7 @@ mod tests {
                 Arc::new(RejectUnexpectedNetwork),
             );
             let error = transport
-                .supervise::<()>(CancellationToken::new(), async move {
+                .supervise::<(), _>(CancellationToken::new(), move |_| async move {
                     Err(preparation_error(BlobTransferError::Persistence(
                         cause.into(),
                     )))
@@ -258,7 +258,7 @@ mod tests {
             Arc::new(RejectUnexpectedNetwork),
         );
         let error = transport
-            .supervise::<()>(CancellationToken::new(), async {
+            .supervise::<(), _>(CancellationToken::new(), |_| async {
                 Err(preparation_error(BlobTransferError::Persistence(
                     FileTransferApplicationError::Store(Error::from(ErrorKind::StorageFull).into())
                         .into(),

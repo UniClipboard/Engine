@@ -1,17 +1,21 @@
 //! 最终本地交接也是原下载任务的一部分；完成通知不得早于实际结算。
 use super::preparation::FetchPreparationState;
+use super::terminal_repair::{finish_terminal, terminal_failure, TerminalIntent};
 use super::{
     flip_cancel_reason_perspective, BlobTransferError, BlobTransferFacade, FetchTransferContext,
 };
 use crate::transfer::blob::fetch_failure_reason;
 use crate::transfer::blob::transport::{
-    BlobExchangeError, BlobExchangeFailure, BlobPreparationStop,
+    BlobExchangeError, BlobExchangeFailure, BlobPreparationStop, DownloadResponse,
 };
 use crate::transfer::receive::DownloadSettlement;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, PoisonError};
 use tokio_util::sync::CancellationToken;
-use uc_core::file_transfer::{FileTransferCancellationReason, OutboundProgressStatus};
+use uc_core::file_transfer::{
+    FileTransferCancellationReason, FileTransferFailureReason, OutboundProgressStatus,
+};
+use uc_core::ports::TrackedFileTransferStatus;
 
 pub(super) struct FetchFinalization {
     pub(super) owner: BlobTransferFacade,
@@ -24,6 +28,7 @@ impl FetchFinalization {
     pub(super) async fn finish<T>(
         self,
         mut result: Result<(T, u64), BlobExchangeError>,
+        response: DownloadResponse<T>,
     ) -> Result<T, BlobExchangeError> {
         // 保留同一保护及许可至最终事件和通知实际结束。
         let _settlement = self.settlement;
@@ -58,9 +63,20 @@ impl FetchFinalization {
                             .as_ref()
                             .filter(|_| !self.prepared.stop_attempted.load(Ordering::Acquire))
                         {
-                            session.complete().await.map_err(|source| {
-                                BlobExchangeError::new(BlobExchangeFailure::Settlement, source)
-                            })?;
+                            if let Err(source) =
+                                finish_terminal(session, TerminalIntent::Completed, None, &response)
+                                    .await
+                            {
+                                self.owner
+                                    .report_outbound_terminal(
+                                        context,
+                                        0,
+                                        context.total_bytes,
+                                        OutboundProgressStatus::Failed,
+                                    )
+                                    .await;
+                                return Err(source);
+                            }
                         }
                     }
                     if context.batch_position.is_last() || context.batch.is_some() {
@@ -89,28 +105,48 @@ impl FetchFinalization {
                         FileTransferCancellationReason::LocalUser
                     }
                 };
-                if let Some(session) = session
-                    .as_ref()
-                    .filter(|_| !self.prepared.stop_attempted.load(Ordering::Acquire))
-                {
-                    let stopped = if cancelled {
-                        session.cancel(reason).await
-                    } else {
-                        session
-                            .fail(fetch_failure_reason(&error.source), None)
-                            .await
-                    };
-                    if let Err(source) = stopped {
-                        return Err(error.with_settlement(BlobExchangeError::new(
-                            BlobExchangeFailure::Settlement,
-                            source,
-                        )));
+                let error = Arc::new(error);
+                let stopped_in_preparation = self.prepared.stop_attempted.load(Ordering::Acquire);
+                let intent = if stopped_in_preparation {
+                    match *self
+                        .prepared
+                        .stop
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                    {
+                        Some(BlobPreparationStop::Deadline) => {
+                            TerminalIntent::Failed(FileTransferFailureReason::TimedOut)
+                        }
+                        Some(BlobPreparationStop::Cancelled(reason)) => {
+                            TerminalIntent::Cancelled(reason)
+                        }
+                        None => TerminalIntent::Cancelled(reason),
                     }
-                } else if self.prepared.stop_attempted.load(Ordering::Acquire)
-                    && error.kind == BlobExchangeFailure::Settlement
-                {
-                    return Err(error);
-                }
+                } else if cancelled {
+                    TerminalIntent::Cancelled(reason)
+                } else {
+                    TerminalIntent::Failed(fetch_failure_reason(&error.source))
+                };
+                let cancelled = matches!(intent, TerminalIntent::Cancelled(_));
+                let error =
+                    if stopped_in_preparation && error.kind == BlobExchangeFailure::Settlement {
+                        let status = match intent {
+                            TerminalIntent::Cancelled(_) => TrackedFileTransferStatus::Cancelled,
+                            _ => TrackedFileTransferStatus::Failed,
+                        };
+                        let settled = CancellationToken::new();
+                        settled.cancel();
+                        Arc::new(terminal_failure(status, error, settled))
+                    } else {
+                        error
+                    };
+                let terminal_error = if let Some(session) = session.as_ref() {
+                    finish_terminal(session, intent, Some(error.clone()), &response)
+                        .await
+                        .err()
+                } else {
+                    None
+                };
                 if let Some(context) = &self.context {
                     let status = if cancelled {
                         OutboundProgressStatus::Cancelled {
@@ -123,7 +159,7 @@ impl FetchFinalization {
                         .report_outbound_terminal(context, 0, context.total_bytes, status)
                         .await;
                 }
-                Err(error)
+                Err(terminal_error.unwrap_or_else(|| BlobExchangeError::new(error.kind, error)))
             }
         }
     }

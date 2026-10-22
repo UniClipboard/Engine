@@ -1,5 +1,6 @@
 //! 实际Engine／网络／V3／SQLite：各位置保存失败，保留其他成果且只重试原失败项。
 mod cleanup;
+mod terminal;
 use super::*;
 use diesel::sql_types::Nullable;
 

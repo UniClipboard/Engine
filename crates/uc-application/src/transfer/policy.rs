@@ -11,6 +11,9 @@ pub(super) const QUEUE_TIMEOUT: Duration = Duration::from_secs(60);
 pub(super) const FIRST_DATA_TIMEOUT: Duration = Duration::from_secs(60);
 pub(super) const DATA_STALL_TIMEOUT: Duration = Duration::from_secs(300);
 pub(super) const CANCEL_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+/// 同一接收动作的本地结算修复，不消耗或重置网络恢复预算。
+pub(crate) const LOCAL_SETTLEMENT_RETRY_INITIAL: Duration = Duration::from_secs(1);
+pub(crate) const LOCAL_SETTLEMENT_RETRY_MAX: Duration = Duration::from_secs(30);
 pub(super) const MAX_FETCH_ATTEMPTS: u32 = 4;
 pub(super) const FETCH_BACKOFFS: [Duration; 3] = [
     Duration::from_millis(200),

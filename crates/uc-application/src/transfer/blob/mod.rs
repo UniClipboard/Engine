@@ -137,7 +137,7 @@ mod tests {
                     stop: Default::default(),
                 },
             },
-            ready,
+            |result, _| ready(result),
         ));
         let second = tokio::spawn(usecase.execute(
             FetchBlobInput {
@@ -150,7 +150,7 @@ mod tests {
                     stop: Default::default(),
                 },
             },
-            ready,
+            |result, _| ready(result),
         ));
         source
             .entered
@@ -183,7 +183,7 @@ mod tests {
                     stop: Default::default(),
                 },
             },
-            ready,
+            |result, _| ready(result),
         ));
         for _ in 0..8 {
             tokio::task::yield_now().await;
@@ -462,7 +462,7 @@ mod tests {
                         stop: Default::default(),
                     },
                 },
-                ready,
+                |result, _| ready(result),
             )
             .await
             .expect("second digest should fetch for the new entry tag");
@@ -531,7 +531,7 @@ mod tests {
                         stop: Default::default(),
                     },
                 },
-                ready,
+                |result, _| ready(result),
             )
             .await
             .expect("fetch should succeed");

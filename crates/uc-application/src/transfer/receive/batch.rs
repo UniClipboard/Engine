@@ -149,7 +149,7 @@ impl ReceiveBatch {
                 OutboundProgressStatus::Failed => Some(
                     source
                         .as_ref()
-                        .map_or(ReceiveItemFailureReason::Unknown, failure_reason),
+                        .map_or(ReceiveItemFailureReason::Unknown, receive_failure_reason),
                 ),
                 OutboundProgressStatus::Cancelled {
                     reason: FileTransferCancellationReason::Timeout,
@@ -211,7 +211,7 @@ impl ReceiveBatch {
         item.failure_reason = if cancelled {
             None
         } else {
-            Some(failure_reason(source))
+            Some(receive_failure_reason(source))
         };
     }
 
@@ -373,7 +373,7 @@ fn tracked_status(status: &OutboundProgressStatus) -> TrackedFileTransferStatus 
         OutboundProgressStatus::Cancelled { .. } => TrackedFileTransferStatus::Cancelled,
     }
 }
-fn failure_reason(error: &SourceError) -> ReceiveItemFailureReason {
+pub(crate) fn receive_failure_reason(error: &SourceError) -> ReceiveItemFailureReason {
     if error
         .chain()
         .any(|source| source.is::<FileProgressCommitError>())

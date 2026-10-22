@@ -117,27 +117,27 @@ impl CancelEntryReceiveUseCase {
                     let (send, result) = watch::channel(None);
                     let owner = self.clone();
                     let (entry, attempt) = key.clone();
-                    let running = self
-                        .transport
-                        .supervise(CancellationToken::new(), async move {
-                            let outcome = owner.run(&entry, &attempt).await.map_err(Arc::new);
-                            if let Err(source) = &outcome {
-                                uc_warn!(
-                                    error_kind = "entry_receive_cancellation",
-                                    error_class = source.class(),
-                                    io_error_kind = io_error_kind(source.as_ref()),
-                                    "entry receive cancellation failed during settlement"
-                                );
-                            }
-                            let settled = outcome.as_ref().map(|_| ()).map_err(|source| {
-                                BlobExchangeError::new(
-                                    BlobExchangeFailure::Settlement,
-                                    source.clone(),
-                                )
+                    let running =
+                        self.transport
+                            .supervise(CancellationToken::new(), move |_| async move {
+                                let outcome = owner.run(&entry, &attempt).await.map_err(Arc::new);
+                                if let Err(source) = &outcome {
+                                    uc_warn!(
+                                        error_kind = "entry_receive_cancellation",
+                                        error_class = source.class(),
+                                        io_error_kind = io_error_kind(source.as_ref()),
+                                        "entry receive cancellation failed during settlement"
+                                    );
+                                }
+                                let settled = outcome.as_ref().map(|_| ()).map_err(|source| {
+                                    BlobExchangeError::new(
+                                        BlobExchangeFailure::Settlement,
+                                        source.clone(),
+                                    )
+                                });
+                                send.send_replace(Some(outcome));
+                                settled
                             });
-                            send.send_replace(Some(outcome));
-                            settled
-                        });
                     let job = Job {
                         result,
                         settled: running.completion(),

@@ -3,7 +3,7 @@ use super::super::{BlobExchangeError, BlobExchangeFailure};
 use super::owner::{task_error, BlobTransport};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll};
 use tokio::sync::{oneshot, watch};
 use tokio_util::sync::CancellationToken;
@@ -13,6 +13,30 @@ use uc_observability_contract::diagnostics::ObservationContext;
 
 pub(in super::super::super::super) type DownloadCompletion =
     watch::Receiver<Option<Result<(), Arc<BlobExchangeError>>>>;
+/// 只交付本次调用结果；任务的完成屏障仍由原监督者在实际结束后提交。
+pub(in super::super::super::super) struct DownloadResponse<T> {
+    sender: Arc<Mutex<Option<oneshot::Sender<Result<T, Arc<BlobExchangeError>>>>>>,
+}
+impl<T> Clone for DownloadResponse<T> {
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+        }
+    }
+}
+impl<T> DownloadResponse<T> {
+    pub fn send(&self, result: Result<T, Arc<BlobExchangeError>>) {
+        let sender = self
+            .sender
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(sender) = sender {
+            // discarded-source[channel]: 调用者离开不结束原监督者及其实际收尾。
+            let _ = sender.send(result);
+        }
+    }
+}
 pub(in super::super::super::super) struct DownloadTask<T> {
     cancel: CancellationToken,
     result: oneshot::Receiver<Result<T, Arc<BlobExchangeError>>>,
@@ -51,12 +75,19 @@ impl<T> Future for DownloadTask<T> {
     }
 }
 impl BlobTransport {
-    pub(in super::super::super::super) fn supervise<T: Send + 'static>(
+    pub(in super::super::super::super) fn supervise<T, F>(
         self: &Arc<Self>,
         cancel: CancellationToken,
-        work: impl Future<Output = Result<T, BlobExchangeError>> + Send + 'static,
-    ) -> DownloadTask<T> {
+        work: impl FnOnce(DownloadResponse<T>) -> F + Send + 'static,
+    ) -> DownloadTask<T>
+    where
+        T: Send + 'static,
+        F: Future<Output = Result<T, BlobExchangeError>> + Send + 'static,
+    {
         let (send, receive) = oneshot::channel();
+        let response = DownloadResponse {
+            sender: Arc::new(Mutex::new(Some(send))),
+        };
         let (settled, completion) = watch::channel(None);
         let stop = self.stop.clone();
         let mut jobs = self.jobs.lock().unwrap_or_else(PoisonError::into_inner);
@@ -65,15 +96,16 @@ impl BlobTransport {
             let error = Arc::new(BlobExchangeError::refused(BlobExchangeFailure::Closed));
             settled.send_replace(Some(Err(error.clone())));
             // discarded-source[channel]: 未接受工作；等待方可读取同一拒绝结果。
-            let _ = send.send(Err(error));
+            response.send(Err(error));
         } else {
             let stopping = cancel.clone();
             let observation = ObservationContext::capture();
             jobs.spawn(
                 async move {
+                    let worker_response = response.clone();
                     let mut worker = tokio::spawn(
                         observation
-                            .scope(work)
+                            .scope(async move { work(worker_response).await })
                             .instrument(Span::none())
                             .with_current_subscriber(),
                     );
@@ -90,7 +122,7 @@ impl BlobTransport {
                     let completed = result.as_ref().map(|_| ()).map_err(Arc::clone);
                     settled.send_replace(Some(completed.clone()));
                     // discarded-source[channel]: 等待方退出不撤销负责人持有的结果和真实工作。
-                    let _ = send.send(result);
+                    response.send(result);
                     completed
                 }
                 .instrument(Span::none())

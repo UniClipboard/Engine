@@ -1,24 +1,29 @@
 //! 最终持久化失败必须进入原任务和关闭报告，不能只记录诊断后伪报成功。
 use super::super::finalization::FetchFinalization;
 use super::super::preparation::FetchPreparationState;
-use super::super::{BatchPosition, FetchTransferContext};
+use super::super::{BatchPosition, FetchTerminalFailure, FetchTransferContext};
 use super::targets::target_facade;
 use crate::transfer::blob::fetch_failure_reason;
-use crate::transfer::blob::transport::{BlobExchangeError, BlobExchangeFailure, BlobShutdownWait};
+use crate::transfer::blob::transport::{
+    BlobExchangeError, BlobExchangeFailure, BlobPreparationStop, BlobShutdownWait,
+};
 use crate::transfer::file::facade::{BeginReceiverTransfer, ReceiverTransferRegistration};
 use crate::transfer::file::session::ReceiverTransferHandle;
 use crate::transfer::file::FileTransferApplicationError;
 use async_trait::async_trait;
 use std::io::{Error, ErrorKind};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use tokio_util::sync::CancellationToken;
 use uc_core::file_transfer::{
-    FileTransferEvent, FileTransferEventPublisherPort, FileTransferEventStorePort,
-    FileTransferFailureReason,
+    FileTransferCancellationReason, FileTransferEvent, FileTransferEventPublisherPort,
+    FileTransferEventStorePort, FileTransferFailureReason,
 };
-use uc_core::ports::ReceiveItemRole;
+use uc_core::ports::{ReceiveItemRole, TrackedFileTransferStatus};
 
-struct FailedTerminalStore;
+struct FailedTerminalStore {
+    blocked: AtomicBool,
+}
 #[async_trait]
 impl FileTransferEventStorePort for FailedTerminalStore {
     async fn load(&self, _: &str) -> anyhow::Result<Vec<FileTransferEvent>> {
@@ -31,22 +36,29 @@ impl FileTransferEventStorePort for FailedTerminalStore {
                 | FileTransferEvent::Cancelled { .. }
                 | FileTransferEvent::Failed { .. }
         ));
-        Err(Error::from(ErrorKind::StorageFull).into())
+        if self.blocked.load(Ordering::SeqCst) {
+            Err(Error::from(ErrorKind::StorageFull).into())
+        } else {
+            Ok(())
+        }
     }
 }
-struct RejectTerminalPublish;
+struct SettledTerminalPublish;
 #[async_trait]
-impl FileTransferEventPublisherPort for RejectTerminalPublish {
+impl FileTransferEventPublisherPort for SettledTerminalPublish {
     async fn publish(&self, _: FileTransferEvent) -> anyhow::Result<()> {
-        panic!("unpersisted terminal must not be published")
+        Ok(())
     }
 }
 
 #[tokio::test]
 async fn terminal_write_failures_preserve_success_failure_and_cancel_settlement_sources() {
-    for scenario in 0..3 {
+    for scenario in 0..4 {
         let (facade, transport) = target_facade();
         let state = Arc::new(FetchPreparationState::default());
+        let store = Arc::new(FailedTerminalStore {
+            blocked: AtomicBool::new(true),
+        });
         let session = Arc::new(ReceiverTransferHandle::new(
             BeginReceiverTransfer {
                 item_role: Some(ReceiveItemRole::Representation),
@@ -60,14 +72,28 @@ async fn terminal_write_failures_preserve_success_failure_and_cancel_settlement_
                     cached_path: String::new(),
                 },
             },
-            Arc::new(FailedTerminalStore),
-            Arc::new(RejectTerminalPublish),
+            store.clone(),
+            Arc::new(SettledTerminalPublish),
             Weak::new(),
             Some(0),
         ));
+        let preparation_failure = if scenario == 3 {
+            state.stop_attempted.store(true, Ordering::SeqCst);
+            *state.stop.lock().unwrap() = Some(BlobPreparationStop::Cancelled(
+                FileTransferCancellationReason::LocalUser,
+            ));
+            Some(
+                session
+                    .cancel(FileTransferCancellationReason::LocalUser)
+                    .await
+                    .unwrap_err(),
+            )
+        } else {
+            None
+        };
         *state.session.lock().unwrap() = Some(session);
         let cancel = CancellationToken::new();
-        if scenario == 2 {
+        if scenario == 2 || scenario == 3 {
             cancel.cancel();
         }
         let finishing = FetchFinalization {
@@ -90,7 +116,12 @@ async fn terminal_write_failures_preserve_success_failure_and_cancel_settlement_
                 individual_lifecycle: true,
             }),
         };
-        let result = if scenario == 1 {
+        let result = if let Some(source) = preparation_failure {
+            Err(BlobExchangeError::new(
+                BlobExchangeFailure::Settlement,
+                source,
+            ))
+        } else if scenario == 1 {
             Err(BlobExchangeError::new(
                 BlobExchangeFailure::Network,
                 Error::from(ErrorKind::ConnectionReset),
@@ -98,15 +129,27 @@ async fn terminal_write_failures_preserve_success_failure_and_cancel_settlement_
         } else {
             Ok(((), 5))
         };
-        let error = transport
-            .supervise(cancel, async move { finishing.finish(result).await })
-            .await
-            .unwrap_err();
+        let job = transport.supervise(cancel, move |response| async move {
+            finishing.finish(result, response).await
+        });
+        let completion = job.completion();
+        let error = job.await.unwrap_err();
+        assert!(
+            completion.borrow().is_none(),
+            "首次错误不能充当实际交接完成"
+        );
+        store.blocked.store(false, Ordering::SeqCst);
         assert_eq!(error.kind, BlobExchangeFailure::Settlement);
-        let report = error
+        let marker = error
             .source
-            .downcast_ref::<Arc<BlobExchangeError>>()
-            .unwrap();
+            .chain()
+            .find_map(|source| source.downcast_ref::<FetchTerminalFailure>())
+            .unwrap()
+            .clone();
+        if scenario >= 2 {
+            assert_eq!(marker.status, TrackedFileTransferStatus::Cancelled);
+        }
+        let report = &marker.source;
         let terminal = if scenario == 0 {
             report.as_ref()
         } else {
@@ -162,6 +205,7 @@ async fn terminal_write_failures_preserve_success_failure_and_cancel_settlement_
                 .kind,
             BlobExchangeFailure::Settlement
         );
+        assert!(marker.is_settled(), "完成屏障必须等待原交接真正修复");
     }
 }
 
@@ -239,8 +283,8 @@ async fn persisted_terminal_wins_late_cancel_but_shutdown_waits_for_real_event_h
             individual_lifecycle: true,
         }),
     };
-    let job = transport.supervise(cancel.clone(), async move {
-        finishing.finish(Ok(((), 5))).await
+    let job = transport.supervise(cancel.clone(), move |response| async move {
+        finishing.finish(Ok(((), 5)), response).await
     });
     let completion = job.completion();
     tokio::time::timeout(
