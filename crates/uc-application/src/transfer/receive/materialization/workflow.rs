@@ -6,7 +6,7 @@ use super::output::{FileOutputJournal, FileOutputPreparation, PreparedReceiveOut
 use super::progress::FileProgressSnapshot;
 use super::reuse::validate_selection;
 use super::{receive_member_totals, ReceiveOutputFailure, ReceivedItem, ReceivedOutput};
-use super::{FileFailureSettlementError, FileProgressCommitError};
+use super::{FileProgressCommitError, ReceiveFailureSettlementError};
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -1126,7 +1126,7 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                                 .clean_file(artifact, true, &receive_artifacts, &e)
                                 .await
                             {
-                                return Err(FileFailureSettlementError {
+                                return Err(ReceiveFailureSettlementError {
                                     cause: e,
                                     settlement,
                                 }
@@ -1207,7 +1207,7 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                                 .clean_file(artifact, false, &receive_artifacts, &e)
                                 .await
                             {
-                                return Err(FileFailureSettlementError {
+                                return Err(ReceiveFailureSettlementError {
                                     cause: e,
                                     settlement,
                                 }
@@ -1303,7 +1303,7 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                             artifact_journaled,
                             &error,
                         );
-                        return Err(FileFailureSettlementError {
+                        return Err(ReceiveFailureSettlementError {
                             cause: error,
                             settlement: cleanup.into(),
                         }
@@ -1313,7 +1313,7 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                         .fail_file(&artifact, failure, &receive_artifacts)
                         .await
                     {
-                        return Err(FileFailureSettlementError {
+                        return Err(ReceiveFailureSettlementError {
                             cause: error,
                             settlement,
                         }

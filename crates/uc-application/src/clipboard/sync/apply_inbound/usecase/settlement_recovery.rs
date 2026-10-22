@@ -2,7 +2,9 @@
 use super::{ApplyInboundClipboardUseCase, ApplyInboundError};
 use crate::transfer::blob::facade::FetchTerminalFailure;
 use crate::transfer::receive::materialization::{remove_uncommitted_output, ReceiveOutputFailure};
-use crate::transfer::receive::work::{ReceiveAction, ReceiveWorkError, UnsettledFile};
+use crate::transfer::receive::work::{
+    ReceiveAction, ReceiveWorkError, UnsettledFile, UnsettledReceive,
+};
 use crate::transfer::receive::{LOCAL_SETTLEMENT_RETRY_INITIAL, LOCAL_SETTLEMENT_RETRY_MAX};
 use anyhow::{anyhow, Error as SourceError};
 use std::error::Error as StdError;
@@ -12,15 +14,17 @@ use uc_core::file_transfer::{
     receive_failure_recovery_action, FileTransferCancellationReason, OutboundProgressStatus,
     ReceiveFailureRecoveryAction, ReceiveFailureRecoveryRefusal,
 };
+use uc_core::ids::EntryId;
 use uc_core::ports::{
     AttemptState, BeginReceiveFailureOutcome, InboundReceiveSettlement, PartialReceiveTerminal,
+    ReceiveArtifact,
 };
 use uc_observability_contract::{error_source::io_error_kind, uc_warn};
 
 impl ApplyInboundClipboardUseCase {
-    pub(super) async fn recover_file_settlement(
+    pub(super) async fn recover_settlement(
         &self,
-        pending: UnsettledFile,
+        pending: UnsettledReceive,
         action: &ReceiveAction,
         source: Arc<ReceiveWorkError>,
     ) {
@@ -41,40 +45,58 @@ impl ApplyInboundClipboardUseCase {
         if let Some(terminal) = terminal {
             terminal.wait_settled().await;
         }
-        let mut output_cleaned = !pending.output_cleanup_pending;
+        let mut output_cleaned = match &pending {
+            UnsettledReceive::File(file) => !file.output_cleanup_pending,
+            UnsettledReceive::Representations(_) => true,
+        };
         let mut item_acknowledged = false;
         let mut delay = LOCAL_SETTLEMENT_RETRY_INITIAL;
         loop {
-            match self
-                .repair_file_settlement(&pending, &mut output_cleaned, &mut item_acknowledged)
-                .await
-            {
+            let result = match &pending {
+                UnsettledReceive::File(file) => {
+                    self.repair_file_settlement(file, &mut output_cleaned, &mut item_acknowledged)
+                        .await
+                }
+                UnsettledReceive::Representations(unit) => {
+                    self.repair_failure_settlement(
+                        &unit.entry,
+                        &unit.attempt,
+                        unit.cancelled,
+                        &[],
+                        false,
+                    )
+                    .await
+                }
+            };
+            match result {
                 Ok(terminal) => {
-                    let status = if pending.failure.is_cancelled() {
-                        OutboundProgressStatus::Cancelled {
-                            reason: FileTransferCancellationReason::LocalUser,
-                        }
-                    } else {
-                        OutboundProgressStatus::Failed
-                    };
                     action.batch.settled(match terminal {
                         PartialReceiveTerminal::Failed => AttemptState::Failed,
                         PartialReceiveTerminal::Cancelled => AttemptState::Cancelled,
                     });
-                    action.batch.item_result(
-                        &pending.artifact.item_id,
-                        0,
-                        status,
-                        Some(SourceError::new(source)),
-                    );
+                    if let UnsettledReceive::File(file) = &pending {
+                        let status = if file.failure.is_cancelled() {
+                            OutboundProgressStatus::Cancelled {
+                                reason: FileTransferCancellationReason::LocalUser,
+                            }
+                        } else {
+                            OutboundProgressStatus::Failed
+                        };
+                        action.batch.item_result(
+                            &file.artifact.item_id,
+                            0,
+                            status,
+                            Some(SourceError::new(source)),
+                        );
+                    }
                     return;
                 }
                 Err(error) => {
                     // discarded-source[business-outcome]: 本轮修复延期，原动作保留资源与初始失败链。
                     uc_warn!(
-                        error_kind = "receive_file_settlement_repair",
+                        error_kind = "receive_settlement_repair",
                         io_error_kind = io_error_kind(&error),
-                        "receive file settlement repair remains pending"
+                        "receive settlement repair remains pending"
                     );
                     // 五秒期限只限制外部等待；已开始的本地 IO 不可被丢弃。
                     sleep(delay).await;
@@ -130,33 +152,46 @@ impl ApplyInboundClipboardUseCase {
             }
             *item_acknowledged = true;
         }
+        self.repair_failure_settlement(
+            &pending.entry,
+            &pending.attempt,
+            pending.failure.is_cancelled(),
+            &pending.remaining,
+            pending.has_artifact_journal,
+        )
+        .await
+    }
+
+    pub(super) async fn repair_failure_settlement(
+        &self,
+        entry: &EntryId,
+        attempt: &str,
+        cancelled: bool,
+        artifacts: &[ReceiveArtifact],
+        has_artifact_journal: bool,
+    ) -> Result<PartialReceiveTerminal, ApplyInboundError> {
+        let ports = self.receive_attempts.as_ref().ok_or_else(|| {
+            ApplyInboundError::Internal(anyhow!("receive settlement ports are not wired"))
+        })?;
         // CAS 后重新读取权威；取消可赢得父尝试，但不得覆盖已交付成功项。
         loop {
             let current = ports
                 .get
-                .get_entry_attempt(pending.entry.as_ref())
+                .get_entry_attempt(entry.as_ref())
                 .await
                 .map_err(|error| ApplyInboundError::Internal(SourceError::new(error)))?;
-            match receive_failure_recovery_action(
-                pending.entry.as_ref(),
-                &pending.attempt,
-                current.as_ref(),
-            )
-            .map_err(|error| ApplyInboundError::Internal(SourceError::new(error)))?
+            match receive_failure_recovery_action(entry.as_ref(), attempt, current.as_ref())
+                .map_err(|error| ApplyInboundError::Internal(SourceError::new(error)))?
             {
                 ReceiveFailureRecoveryAction::ClaimFailure => {
-                    if pending.failure.is_cancelled() {
-                        self.request_receive_cancellation(&pending.entry, Some(&pending.attempt))
+                    if cancelled {
+                        self.request_receive_cancellation(entry, Some(attempt))
                             .await?;
                         continue;
                     }
                     match ports
                         .begin_failure
-                        .begin_receive_failure(
-                            pending.entry.as_ref(),
-                            &pending.attempt,
-                            ports.clock.now_ms(),
-                        )
+                        .begin_receive_failure(entry.as_ref(), attempt, ports.clock.now_ms())
                         .await
                         .map_err(|error| ApplyInboundError::Internal(SourceError::new(error)))?
                     {
@@ -172,11 +207,11 @@ impl ApplyInboundClipboardUseCase {
                 }
                 ReceiveFailureRecoveryAction::Settle(terminal) => {
                     self.settle_receive_without_entry(
-                        &pending.entry,
-                        Some(&pending.attempt),
+                        entry,
+                        Some(attempt),
                         terminal,
-                        &pending.remaining,
-                        pending.has_artifact_journal,
+                        artifacts,
+                        has_artifact_journal,
                     )
                     .await?;
                     return Ok(terminal);

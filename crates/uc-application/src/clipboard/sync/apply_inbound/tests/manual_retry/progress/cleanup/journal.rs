@@ -63,7 +63,7 @@ async fn failed_fetch_cleanup_ack_retains_original_source_and_resources_after_fi
         );
         let settlement = source
             .chain()
-            .find_map(|source| source.downcast_ref::<FileFailureSettlementError>())
+            .find_map(|source| source.downcast_ref::<ReceiveFailureSettlementError>())
             .unwrap();
         assert!(settlement.settlement.chain().any(|source| source
             .downcast_ref::<io::Error>()

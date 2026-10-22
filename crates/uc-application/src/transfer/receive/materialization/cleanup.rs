@@ -1,5 +1,5 @@
 //! 未交付文件的清理失败不能擦除原始获取失败，也不能解除产物结算屏障。
-use super::{FileFailureSettlementError, ReceiveFileProgress, ReceiveOutputFailure};
+use super::{ReceiveFailureSettlementError, ReceiveFileProgress, ReceiveOutputFailure};
 use anyhow::Error;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -27,7 +27,7 @@ pub(super) fn output_cleanup_failure(
 ) -> Error {
     if let (Some(progress), Some(artifact)) = (progress, artifact) {
         progress.defer_output_cleanup(artifact, failure, artifacts, journaled, &cause);
-        FileFailureSettlementError {
+        ReceiveFailureSettlementError {
             cause,
             settlement: cleanup.into(),
         }

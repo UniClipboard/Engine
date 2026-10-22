@@ -501,3 +501,8 @@ Application实际故障注入证实：文件保存StorageFull、失败事实结�
 - 表示终态真实红测：5.630s失败，原Completed仍被SQL拒绝且raw Transferring时父状态已Failed。待原完成信号后再结算的首轮编译暴露anyhow::Chain跨await不Send，改成先克隆元数据完成信号再await；首轮失败日志未覆盖。修复后Native及相关App正在串行验证，unit-settlement-corrected-*。
 
 - 表示终态切片最终：Native1项11.502s、相关App124项45.721s通过；metadata、workspace alltargets3m07s、fmt、style、repository、diff均退出0，scope已结束。等待原信号前记录已知StorageUnavailable，父状态Receiving直至真实终态及业务结算完成。下一批集中验证父NoEntry持久失败／目录成员／物理回滚和原保护生命周期，再统一最终矩阵；完整goal active。
+
+- 父NoEntry表示切片：Native真实双SQL红测15.493s遗留Failing；修复后2项Native通过19.414s。App四组合首次错认ReadOnlyFilesystem注入类别导致2.047s失败，修正后None真实红测0.032s失败；None接入同一原责任后4.061s通过。原分类Capture／Internal、双来源、原保护、一次保存及错误不持资源均由完整cap合同核对。
+- 源码已冻结运行unit-no-entry-verified-*，PID／阶段／退出码各有日志，scope uni-blob-unit-no-entry-verified，磁盘TMPDIR为短路径uc-bc-tmp-n5。先focused合同已过，再App全量＋file_transfer、独占ignored诊断、Native receive_retry、metadata／workspace／fmt／style／repository／diff串行；尚未完成项不记通过。更早n1-n4目录scope终态后检查为空并rmdir，首次过长路径已回收。完成本轮后检查同scope实际inactive，再清理n5。
+
+- 父NoEntry表示保存失败最终验证：App＋file_transfer1276项116.667s、ignored独占诊断1项0.05s、Native receive_retry23项227.407s通过；metadata、workspacealltargets3m10s、fmt、style、repository、diff均退出0。scope实际inactive，n5检查为空并rmdir，本轮所有新临时目录均已回收。仅此边界完成，目录及最终全矩阵保持open；完整goal active。

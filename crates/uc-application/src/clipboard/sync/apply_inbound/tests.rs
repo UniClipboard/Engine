@@ -9,6 +9,7 @@ mod lifecycle;
 mod manual_retry;
 mod output_preparation;
 mod receive_work;
+mod representation_settlement;
 mod result_query;
 mod retry_material;
 mod selection;

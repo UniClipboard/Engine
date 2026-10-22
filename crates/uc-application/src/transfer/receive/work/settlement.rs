@@ -1,4 +1,4 @@
-//! 未完成文件结算的原始责任；不放入错误对象，也不另建资源池。
+//! 未完成接收结算的原始责任；不放入错误对象，也不另建资源池。
 use super::ReceiveAction;
 use crate::transfer::receive::materialization::ReceiveOutputFailure;
 use std::sync::PoisonError;
@@ -15,15 +15,32 @@ pub(crate) struct UnsettledFile {
     pub(crate) has_artifact_journal: bool,
 }
 
+pub(crate) struct UnsettledRepresentations {
+    pub(crate) entry: EntryId,
+    pub(crate) attempt: String,
+    pub(crate) cancelled: bool,
+}
+
+pub(crate) enum UnsettledReceive {
+    File(UnsettledFile),
+    Representations(UnsettledRepresentations),
+}
+
 impl ReceiveAction {
     pub(crate) fn defer_file_settlement(&self, pending: UnsettledFile) {
-        self.file_settlement
+        self.settlement
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get_or_insert(pending);
+            .get_or_insert(UnsettledReceive::File(pending));
     }
-    pub(crate) fn take_file_settlement(&self) -> Option<UnsettledFile> {
-        self.file_settlement
+    pub(crate) fn defer_representation_settlement(&self, pending: UnsettledRepresentations) {
+        self.settlement
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_or_insert(UnsettledReceive::Representations(pending));
+    }
+    pub(crate) fn take_settlement(&self) -> Option<UnsettledReceive> {
+        self.settlement
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take()

@@ -1,7 +1,7 @@
 //! 保存和物理清理均失败时，原动作仍承担结算；已清理路径不能重复删除。
 mod journal;
 use super::*;
-use crate::transfer::receive::materialization::FileFailureSettlementError;
+use crate::transfer::receive::materialization::ReceiveFailureSettlementError;
 
 #[tokio::test]
 async fn failed_save_cleanup_retains_original_resources_and_never_deletes_a_reused_path() {
@@ -40,7 +40,7 @@ async fn failed_save_cleanup_retains_original_resources_and_never_deletes_a_reus
     };
     let settlement = source
         .chain()
-        .find_map(|source| source.downcast_ref::<FileFailureSettlementError>())
+        .find_map(|source| source.downcast_ref::<ReceiveFailureSettlementError>())
         .unwrap();
     assert_eq!(
         settlement
@@ -172,7 +172,7 @@ async fn failed_or_cancelled_fetch_cleanup_retains_resources_without_completed_f
         };
         let settlement = source
             .chain()
-            .find_map(|source| source.downcast_ref::<FileFailureSettlementError>())
+            .find_map(|source| source.downcast_ref::<ReceiveFailureSettlementError>())
             .unwrap();
         assert_eq!(
             settlement

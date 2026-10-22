@@ -38,36 +38,27 @@ impl ApplyInboundClipboardUseCase {
                     let outcome = owner
                         .execute_internal(input, provisional, &action, &processing_receive, retry)
                         .await;
-                    match (outcome, processing_receive.take_file_settlement()) {
+                    match (outcome, processing_receive.take_settlement()) {
                         (Err(error), Some(pending)) => {
                             let (caller, failure) = share_failure(error);
                             let failure = Arc::new(failure);
                             respond(&processing_reply, Err(caller));
                             // 原任务继续持有原许可，只修复失败结算，不重试下载或保存。
                             owner
-                                .recover_file_settlement(
-                                    pending,
-                                    &processing_receive,
-                                    failure.clone(),
-                                )
+                                .recover_settlement(pending, &processing_receive, failure.clone())
                                 .await;
                             Processed::Recovered(failure)
                         }
                         (outcome, None) => Processed::Original(outcome),
                         // 成功路径不应留下失败责任；保留责任并完成结算，不能静默释放。
                         (Ok(_), Some(pending)) => {
-                            let (caller, failure) =
-                                share_failure(ApplyInboundError::Internal(SourceError::msg(
-                                    "successful receive retained unsettled file failure",
-                                )));
+                            let (caller, failure) = share_failure(ApplyInboundError::Internal(
+                                SourceError::msg("successful receive retained unsettled failure"),
+                            ));
                             let failure = Arc::new(failure);
                             respond(&processing_reply, Err(caller));
                             owner
-                                .recover_file_settlement(
-                                    pending,
-                                    &processing_receive,
-                                    failure.clone(),
-                                )
+                                .recover_settlement(pending, &processing_receive, failure.clone())
                                 .await;
                             Processed::Recovered(failure)
                         }

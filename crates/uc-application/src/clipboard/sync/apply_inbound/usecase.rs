@@ -64,16 +64,18 @@ use super::timing::{RAPID_DUPLICATE_WINDOW, VISIBLE_DUPLICATE_WINDOW};
 use super::{ApplyInboundError, ApplyInboundInput, ApplyOutcome, InboundActivationOwner};
 use crate::transfer::receive::materialization::{
     is_directory_cancel_error, verify_file_set_identity, DirectoryPublication,
-    FileFailureSettlementError, InboundBlobMaterializer, MaterializeOutcome, OutputCleanupFailure,
-    ReceiveWorkPlan, RollbackOutcome,
+    InboundBlobMaterializer, MaterializeOutcome, OutputCleanupFailure,
+    ReceiveFailureSettlementError, ReceiveWorkPlan, RollbackOutcome,
 };
 
 const RECENT_INBOUND_MAX_RECORDS: u64 = 128;
 
 mod owned;
 mod progress;
+mod representation_settlement;
 mod settlement_recovery;
 use progress::FileProgress;
+use representation_settlement::RepresentationPersistenceFailure;
 
 #[derive(Clone)]
 pub struct ApplyInboundClipboardUseCase {
@@ -1334,6 +1336,11 @@ impl ApplyInboundClipboardUseCase {
             filenames: advertised_filenames,
         }));
 
+        let representation_only = file_set_manifest.is_none()
+            && !blob_refs.is_empty()
+            && blob_refs
+                .iter()
+                .all(|blob| blob.representation_index.is_some());
         let requires_materialize = !blob_refs.is_empty() || file_set_manifest.is_some();
         let verify_directory_identity = file_set_manifest.is_some();
         // A directory receive publishes its roots to the user's folder inside
@@ -1400,12 +1407,12 @@ impl ApplyInboundClipboardUseCase {
                         Err(error) => {
                             // 本地失败尚未完成持久结算；再写批次失败可能覆盖原双来源。
                             if let Some(failure) =
-                                error.downcast_ref::<FileFailureSettlementError>()
+                                error.downcast_ref::<ReceiveFailureSettlementError>()
                             {
                                 uc_warn!(
                                     error_kind = "receive_file_failure_settlement",
                                     io_error_kind = io_error_kind(failure.settlement.as_ref()),
-                                    "receive file failure settlement remains incomplete"
+                                    "receive failure settlement remains incomplete"
                                 );
                                 return Err(ApplyInboundError::Internal(error));
                             }
@@ -1787,6 +1794,22 @@ impl ApplyInboundClipboardUseCase {
         let entry_id = match captured {
             Ok(Some(entry_id)) => entry_id,
             Ok(None) => {
+                if representation_only {
+                    if let Some(attempt) = receive_attempt_id.as_ref() {
+                        let action = if replacing { "replace" } else { "capture" };
+                        return Err(self
+                            .fail_representation_receive(
+                                receive_action,
+                                &receiver_entry_id,
+                                attempt,
+                                materialize_outcome == MaterializeOutcome::PartialCancelled,
+                                RepresentationPersistenceFailure::MissingEntry(anyhow!(
+                                    "{action} returned None for RemotePush origin (unexpected)"
+                                )),
+                            )
+                            .await);
+                    }
+                }
                 if !is_partial {
                     self.begin_receive_failure(&receiver_entry_id, receive_attempt_id.as_deref())
                         .await?;
@@ -1811,6 +1834,19 @@ impl ApplyInboundClipboardUseCase {
                 )));
             }
             Err(e) => {
+                if representation_only {
+                    if let Some(attempt) = receive_attempt_id.as_ref() {
+                        return Err(self
+                            .fail_representation_receive(
+                                receive_action,
+                                &receiver_entry_id,
+                                attempt,
+                                materialize_outcome == MaterializeOutcome::PartialCancelled,
+                                RepresentationPersistenceFailure::Failed(e),
+                            )
+                            .await);
+                    }
+                }
                 if !is_partial {
                     self.begin_receive_failure(&receiver_entry_id, receive_attempt_id.as_deref())
                         .await?;

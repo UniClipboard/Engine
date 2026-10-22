@@ -106,3 +106,7 @@ FileCleaned已提交da77bea0（Core／App30、Profile42、Native14及根门禁�
 - 表示完整结算切片：真实Engine SendImage触发96KiB表示blob，SQLite拒绝原Completed终态，核对父尝试在真实屏障前保持Receiving、关闭期限及解除拒绝后完成。原接收动作承担元数据修复，不重发内容，不新增格式／持久字段／池或Engine阶段接口；目录仍需独立全单元清理验收。
 
 - 表示终态切片最终：Native1项11.502s、相关App124项45.721s通过；metadata、workspace alltargets3m07s、fmt、style、repository、diff均退出0，scope已结束。等待原信号前记录已知StorageUnavailable，父状态Receiving直至真实终态及业务结算完成。下一批集中验证父NoEntry持久失败／目录成员／物理回滚和原保护生命周期，再统一最终矩阵；完整goal active。
+
+- 父NoEntry提交责任：预先确认的稳定Engine发送／查询／关闭和真实SQLite契约接缝；原接收动作负责保存失败后的NoEntry本地重试，只交接原失败，不重下或重存内容。先Native双SQL拒绝取得红测：解除NoEntry拒绝但继续拒绝capture，必须由原任务补齐Failed。后续相关App合同验证完整双来源及原保护／4/2许可，目录回滚另沿完整责任推进。
+
+- 父NoEntry表示保存失败最终验证：App＋file_transfer1276项116.667s、ignored独占诊断1项0.05s、Native receive_retry23项227.407s通过；metadata、workspacealltargets3m10s、fmt、style、repository、diff均退出0。scope实际inactive，n5检查为空并rmdir，本轮所有新临时目录均已回收。仅此边界完成，目录及最终全矩阵保持open；完整goal active。

@@ -271,7 +271,7 @@ async fn failure_settlement_error_preserves_both_sources_and_keeps_attempt_nonte
         .chain()
         .find_map(|source| {
             source
-        .downcast_ref::<crate::transfer::receive::materialization::FileFailureSettlementError>()
+        .downcast_ref::<crate::transfer::receive::materialization::ReceiveFailureSettlementError>()
         })
         .unwrap();
     assert!(failure.cause.chain().any(|source| source

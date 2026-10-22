@@ -342,3 +342,10 @@
 - 所有本轮Cargo／fmt／commit保持串行，systemd scope：MemoryHigh=3GiB、MemoryMax=5GiB、MemorySwapMax=4GiB、jobs=1，保留共享target和RUSTC_WRAPPER。Started切片实际观察峰值约3.0GiB，限额scope退出后不把inactive的infinity当实测。
 - 只读df发现/tmp是7.6GiB tmpfs，已用6.7GiB（89%）、剩920MiB；仓库及用户cache所在实际磁盘有847GiB可用。不能据此认定全部为本任务，也不能清空用户/tmp。后续1GiB和资料矩阵须用磁盘上的明确任务临时资料目录（例如cache下独立test-tmp），通过TMPDIR／harness资料参数传入；这是测试资料位置，不改变Cargo target／共享缓存。检查相关活动进程后回收本任务新建目录，冻结旧锚点及尚需复核资料保留至矩阵完成。
 - 下一阶段按完整边界集中验证：目录成员与表示失败的原完成屏障、目录回滚实际失败、父NoEntry持久提交失败及生命周期／来源C；完成必要修复后再做一次最终资源、旧端矩阵、workspace与平台门禁。局部根门禁不能当全spec完成。
+
+
+## 2026-10-23 下一条目录责任接缝
+
+- 当前父NoEntry表示切片已全验证，后续不要扩大为目录已完成。直接源码：materialization/workflow.rs 的 DirectoryPublication::rollback 消费自身，部分rename失败也discard_staging；usecase.rs 的 withdraw_publication只记录PartialPublication计数，调用者随后仍可提交NoEntry。下一条应从完整Application接收＋真实目录输出／明确AtomicPublish故障取得证据，保留源链和原资源／清理责任，不能只更新日志或沿错误持有Publication资源。
+- 现有目录持久合同只含Staging／Publishing／Landed，DirectoryPublishRecord为完整root_map、partial_visible_roots、landed；不要臆造不存在的回滚phase或新格式。RecordDirectoryPublishPort要求完整映射；重启reconciliation按非终态attempt读取root_map并以UserDestination清理。任何恢复方案须检查实际已撤回路径重用与重启所有权，不能重复触碰确认清理成功的路径。
+- HostFileAccess稳定接口只有文件metadata／read_chunk／write_chunk／finish_write，未提供目录枚举；目录端到端接缝应优先使用既有完整Application接收能力和V3目录合同，不为测试新增Engine阶段／步骤入口。所有新增测试仍从用户spec已批准的完整cap与真实SQLite／AEAD／文件契约进入。

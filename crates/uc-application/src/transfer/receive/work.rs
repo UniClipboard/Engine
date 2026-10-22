@@ -16,7 +16,7 @@ mod catalog;
 mod clear;
 mod settlement;
 pub(crate) use catalog::{PlannedReceiveItem, ReceiveRepresentation, ReceiveSource};
-pub(crate) use settlement::UnsettledFile;
+pub(crate) use settlement::{UnsettledFile, UnsettledReceive, UnsettledRepresentations};
 
 type Completion = Option<Result<(), Arc<ReceiveWorkError>>>;
 type Key = (EntryId, String);
@@ -98,7 +98,7 @@ pub(crate) struct ReceiveAction {
     registry: Arc<ReceiveWorkRegistry>,
     progress: Mutex<Option<Arc<Progress>>>,
     previous_receipt: Mutex<Option<catalog::ReceiveReceipt>>,
-    file_settlement: Mutex<Option<UnsettledFile>>,
+    settlement: Mutex<Option<UnsettledReceive>>,
     generation: CancellationToken,
     birth: Arc<Birth>,
 }
@@ -165,7 +165,7 @@ impl ReceiveWorkRegistry {
             registry: self.clone(),
             progress: Mutex::new(None),
             previous_receipt: Mutex::new(None),
-            file_settlement: Mutex::new(None),
+            settlement: Mutex::new(None),
             generation,
             birth,
         })
