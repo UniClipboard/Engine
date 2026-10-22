@@ -239,3 +239,7 @@ async fn assert_directory_rollback(reuse: bool, publish_failure: bool) {
         expected.len()
     );
 }
+
+#[cfg(unix)]
+#[path = "directory_settlement/preparation.rs"]
+mod preparation;

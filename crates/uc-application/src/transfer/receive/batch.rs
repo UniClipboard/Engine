@@ -54,13 +54,6 @@ impl ReceiveBatch {
             .directory_rollback
             .get_or_insert(publication);
     }
-    pub(crate) fn has_directory_rollback(&self) -> bool {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .directory_rollback
-            .is_some()
-    }
     pub(crate) fn take_directory_rollback(&self) -> Option<DirectoryPublication> {
         self.0
             .lock()

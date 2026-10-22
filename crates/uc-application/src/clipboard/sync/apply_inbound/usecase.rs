@@ -74,7 +74,7 @@ mod owned;
 mod persistence_settlement;
 mod progress;
 mod settlement_recovery;
-use persistence_settlement::ReceivePersistenceFailure;
+use persistence_settlement::ReceiveFailure;
 use progress::FileProgress;
 
 #[derive(Clone)]
@@ -1408,13 +1408,20 @@ impl ApplyInboundClipboardUseCase {
                             if let Some(publication) =
                                 receive_action.batch.take_directory_rollback()
                             {
-                                receive_action.defer_directory_settlement(UnsettledDirectory {
-                                    entry: receiver_entry_id.clone(),
-                                    attempt: receive_attempt_id.clone(),
-                                    cancelled: is_directory_cancel_error(&error),
-                                    publication,
-                                });
-                                return Err(ApplyInboundError::Internal(error));
+                                let cancelled = is_directory_cancel_error(&error);
+                                return Err(self
+                                    .fail_directory_receive(
+                                        receive_action,
+                                        UnsettledDirectory {
+                                            entry: receiver_entry_id.clone(),
+                                            attempt: receive_attempt_id.clone(),
+                                            cancelled,
+                                            publication,
+                                            notify_failure: true,
+                                        },
+                                        ReceiveFailure::Internal(error),
+                                    )
+                                    .await);
                             }
                             // 本地失败尚未完成持久结算；再写批次失败可能覆盖原双来源。
                             if let Some(failure) =
@@ -1814,7 +1821,7 @@ impl ApplyInboundClipboardUseCase {
                                 &receiver_entry_id,
                                 attempt,
                                 materialize_outcome == MaterializeOutcome::PartialCancelled,
-                                ReceivePersistenceFailure::MissingEntry(anyhow!(
+                                ReceiveFailure::Internal(anyhow!(
                                     "{action} returned None for RemotePush origin (unexpected)"
                                 )),
                             )
@@ -1833,8 +1840,9 @@ impl ApplyInboundClipboardUseCase {
                                     cancelled: materialize_outcome
                                         == MaterializeOutcome::PartialCancelled,
                                     publication,
+                                    notify_failure: false,
                                 },
-                                ReceivePersistenceFailure::MissingEntry(anyhow!(
+                                ReceiveFailure::Internal(anyhow!(
                                     "{action} returned None for RemotePush origin (unexpected)"
                                 )),
                             )
@@ -1873,7 +1881,7 @@ impl ApplyInboundClipboardUseCase {
                                 &receiver_entry_id,
                                 attempt,
                                 materialize_outcome == MaterializeOutcome::PartialCancelled,
-                                ReceivePersistenceFailure::Failed(e),
+                                ReceiveFailure::Capture(e),
                             )
                             .await);
                     }
@@ -1889,8 +1897,9 @@ impl ApplyInboundClipboardUseCase {
                                     cancelled: materialize_outcome
                                         == MaterializeOutcome::PartialCancelled,
                                     publication,
+                                    notify_failure: false,
                                 },
-                                ReceivePersistenceFailure::Failed(e),
+                                ReceiveFailure::Capture(e),
                             )
                             .await);
                     }

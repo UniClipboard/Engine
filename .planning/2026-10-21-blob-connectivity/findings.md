@@ -349,3 +349,7 @@
 - 当前父NoEntry表示切片已全验证，后续不要扩大为目录已完成。直接源码：materialization/workflow.rs 的 DirectoryPublication::rollback 消费自身，部分rename失败也discard_staging；usecase.rs 的 withdraw_publication只记录PartialPublication计数，调用者随后仍可提交NoEntry。下一条应从完整Application接收＋真实目录输出／明确AtomicPublish故障取得证据，保留源链和原资源／清理责任，不能只更新日志或沿错误持有Publication资源。
 - 现有目录持久合同只含Staging／Publishing／Landed，DirectoryPublishRecord为完整root_map、partial_visible_roots、landed；不要臆造不存在的回滚phase或新格式。RecordDirectoryPublishPort要求完整映射；重启reconciliation按非终态attempt读取root_map并以UserDestination清理。任何恢复方案须检查实际已撤回路径重用与重启所有权，不能重复触碰确认清理成功的路径。
 - HostFileAccess稳定接口只有文件metadata／read_chunk／write_chunk／finish_write，未提供目录枚举；目录端到端接缝应优先使用既有完整Application接收能力和V3目录合同，不为测试新增Engine阶段／步骤入口。所有新增测试仍从用户spec已批准的完整cap与真实SQLite／AEAD／文件契约进入。
+
+
+### 待证实的NoEntry提交回执丢失边界（2026-10-23）
+人工审阅发现 Core 的 receive_failure_recovery_action 接受同一尝试 Failed 进入 Settle(Failed)，而 Infra inbound_receive_commit_repo 的 allow_cancelled_replay 仅对 Cancelled／None 开放。需要用真实SQLite及完整接收故障注入证明“事务已提交但返回失败”后，原负责人是否能确认实际Failed并结束，还是持续重复NoEntry被状态拒绝。当前只有代码证据，不把它记成已复现或已修复；后续测试必须核验同尝试、实际条目／产物／文件事实，不能简单放宽终态重放或吞掉Unknown错误。

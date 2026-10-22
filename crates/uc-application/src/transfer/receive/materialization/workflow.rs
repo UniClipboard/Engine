@@ -1400,64 +1400,52 @@ impl FileCacheBlobMaterializer {
             return Err(BlobTransferError::Cancelled.into());
         }
         let plan = self.open_publication(&receiver_entry_id).await?;
+        // 从准备阶段起保留同一暂存区责任，而不是等全部成员获取成功才建立持有者。
+        let mut publication =
+            DirectoryPublication::new(Arc::clone(&self.publisher), plan.staging.clone(), plan.mode);
 
-        let result = self
-            .build_and_publish_directory(
-                &from_device,
-                &receiver_entry_id,
-                &blob_refs,
-                &manifest,
-                attempt_id.as_deref(),
-                expected_snapshot_hash,
-                &mut snapshot,
-                &plan,
-                &mut batch_idx,
-                batch_total,
-                cancellation,
-                batch,
-            )
-            .await;
+        let result: Result<_> = async {
+            let (root_paths, member_digests) = self
+                .build_and_publish_directory(
+                    &from_device,
+                    &receiver_entry_id,
+                    &blob_refs,
+                    &manifest,
+                    attempt_id.as_deref(),
+                    expected_snapshot_hash,
+                    &mut snapshot,
+                    &plan,
+                    &mut publication,
+                    &mut batch_idx,
+                    batch_total,
+                    cancellation,
+                    batch,
+                )
+                .await?;
+            build_received_entry_file_set(&manifest, &member_digests, &blob_refs, &root_paths)
+        }
+        .await;
 
         match result {
-            Ok((mut publication, root_paths, member_digests)) => {
-                let directory_file_set = match build_received_entry_file_set(
-                    &manifest,
-                    &member_digests,
-                    &blob_refs,
-                    &root_paths,
-                ) {
-                    Ok(file_set) => file_set,
-                    Err(error) => {
-                        return match publication.rollback().await {
-                            Ok(()) => Err(error),
-                            Err(settlement) => {
-                                batch.retain_directory_rollback(publication);
-                                Err(directory_rollback_failure(error, settlement))
-                            }
-                        };
-                    }
+            Ok(directory_file_set) => Ok(MaterializeResult {
+                completed: Vec::new(),
+                snapshot,
+                missing: Vec::new(),
+                partial: false,
+                outcome: MaterializeOutcome::Complete,
+                publication: Some(publication),
+                directory_file_set: Some(directory_file_set),
+                has_receive_artifacts: false,
+                receive_artifacts: Vec::new(),
+            }),
+            Err(cause) => {
+                let error = match publication.rollback().await {
+                    Ok(()) => cause,
+                    Err(settlement) => directory_rollback_failure(cause, settlement),
                 };
-                // The staging area stays until the caller settles the
-                // publication: rollback needs somewhere to put the roots back.
-                Ok(MaterializeResult {
-                    completed: Vec::new(),
-                    snapshot,
-                    missing: Vec::new(),
-                    partial: false,
-                    outcome: MaterializeOutcome::Complete,
-                    publication: Some(publication),
-                    directory_file_set: Some(directory_file_set),
-                    has_receive_artifacts: false,
-                    receive_artifacts: Vec::new(),
-                })
-            }
-            Err(err) => {
-                // Anything published was already withdrawn inside
-                // `build_and_publish_directory`; this only clears the area.
-                if !batch.has_directory_rollback() {
-                    discard_staging(&plan.staging).await;
-                }
-                Err(err)
+                // 物理清理成功也须保留原责任，直到父NoEntry实际提交成功。
+                batch.retain_directory_rollback(publication);
+                Err(error)
             }
         }
     }
@@ -1614,15 +1602,12 @@ impl FileCacheBlobMaterializer {
         expected_snapshot_hash: Option<&str>,
         snapshot: &mut SystemClipboardSnapshot,
         plan: &PublishPlan,
+        publication: &mut DirectoryPublication,
         batch_idx: &mut usize,
         batch_total: usize,
         cancellation: &CancellationToken,
         batch: &Arc<ReceiveBatch>,
-    ) -> Result<(
-        DirectoryPublication,
-        BTreeMap<u32, PathBuf>,
-        BTreeMap<u32, [u8; 32]>,
-    )> {
+    ) -> Result<(BTreeMap<u32, PathBuf>, BTreeMap<u32, [u8; 32]>)> {
         if cancellation.is_cancelled() {
             return Err(BlobTransferError::Cancelled.into());
         }
@@ -1653,13 +1638,6 @@ impl FileCacheBlobMaterializer {
         for (root_index, (_, root_is_file)) in &roots {
             if *root_is_file && root_member_counts.get(root_index) != Some(&1) {
                 return Err(anyhow!("top-level file root must have exactly one member"));
-            }
-        }
-
-        for (root_index, (root_name, root_is_file)) in &roots {
-            if !root_is_file {
-                tokio::fs::create_dir_all(staging_root(staging_base, *root_index, root_name))
-                    .await?;
             }
         }
 
@@ -1697,6 +1675,19 @@ impl FileCacheBlobMaterializer {
                 )
                 .await
                 .map_err(anyhow::Error::new)?;
+            publication.set_journal(DirectoryRollbackJournal {
+                record: ports.publish_log.clone(),
+                clock: ports.clock.clone(),
+                entry: receiver_entry_id.as_ref().to_owned(),
+                attempt: attempt_id.to_owned(),
+            });
+        }
+
+        for (root_index, (root_name, root_is_file)) in &roots {
+            if !root_is_file {
+                tokio::fs::create_dir_all(staging_root(staging_base, *root_index, root_name))
+                    .await?;
+            }
         }
 
         let mut member_digests = BTreeMap::new();
@@ -1863,18 +1854,6 @@ impl FileCacheBlobMaterializer {
             _ => None,
         };
 
-        let journal = gated_attempt.map(|(ports, attempt)| DirectoryRollbackJournal {
-            record: ports.publish_log.clone(),
-            clock: ports.clock.clone(),
-            entry: receiver_entry_id.as_ref().to_owned(),
-            attempt: attempt.to_owned(),
-        });
-        let mut publication = DirectoryPublication::new(
-            Arc::clone(&self.publisher),
-            plan.staging.clone(),
-            plan.mode,
-            journal,
-        );
         let mut published_paths = BTreeMap::new();
         for (root_index, source, desired, sanitized_name) in plans {
             let publish_result = if let Some((ports, attempt_id)) = gated_attempt {
@@ -1909,21 +1888,10 @@ impl FileCacheBlobMaterializer {
                     published_paths.insert(root_index, final_path.clone());
                     publication.record(final_path, source);
                 }
-                Err(err) => {
-                    // Compensating rollback: a paste is all roots or none, so
-                    // take back the ones that made it before giving up.
-                    let outcome = publication.rollback().await;
-                    return Err(match outcome {
-                        Ok(()) => err,
-                        Err(settlement) => {
-                            batch.retain_directory_rollback(publication);
-                            directory_rollback_failure(err, settlement)
-                        }
-                    });
-                }
+                Err(err) => return Err(err),
             }
         }
-        Ok((publication, published_paths, member_digests))
+        Ok((published_paths, member_digests))
     }
 }
 

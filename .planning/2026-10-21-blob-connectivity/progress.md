@@ -523,3 +523,17 @@ Application实际故障注入证实：文件保存StorageFull、失败事实结�
 
 
 移除未使用测试导入后的最终 workspace all-targets 检查通过（2分38秒），fmt／style／diff全部退出0。最后仅剩既有警告；本切片 source 无新增未使用导入。全部验证 scope 已结束；提交前检查专用磁盘 TMPDIR，结束后回收。完整 spec 继续保持 active。
+
+
+### 2026-10-23：目录准备失败的原暂存区责任与父NoEntry交接
+
+完整负责人仍为 Application 接收流程，调用方只发起完整接收。DirectoryPublication 从 staging 打开成功后即建立，覆盖成员获取、目录组装、Staging／Publishing 记录及最终发布；所有物化失败汇入同一撤回路径。先持久记录 Staging 完整根映射，再创建成员目录及获取内容；只有该记录实际写入成功才给原持有者绑定可更新的日志，不能在首次写入失败后永久更新一条不存在的记录。
+
+真实文件系统权限拒绝红测5.011秒失败：成员获取返回StorageFull，staging清理失败只记诊断，恢复权限后原动作不再清理。修复后原任务保留暂存区、原batch及关闭屏障，只修复本地结算，不重复下载或保存。首次Staging日志拒绝叠加父目录真实权限拒绝也沿同一责任恢复，测试确保不向不存在的日志写零可见根。
+
+第二个红测复现物理清理成功后父NoEntry拒绝（0.006秒）：原关闭等待提前结束。现在物理清理成功的持有者也交回原接收动作，直到父NoEntry实际提交成功；后续持久重试不会重复删除已清理路径。错误保留原获取失败及结算失败两条来源。准备失败的既有StatusChanged终态通知由同一结算负责人在真实交接后发出一次，不在等待修复时提前发终态；公共通知不复制底层错误正文，取消仍用既有local_user。保存失败的原通知行为不另改。
+
+新测试通过完整ApplyInboundClipboardUseCase驱动、实际文件系统权限拒绝及既有完整持久化port注入；覆盖关闭短等待、恢复后清理和父终态、两类原source、不重复获取、无提前通知及最终唯一通知。目录与reconciliation共65项通过（6.509秒）。NoEntry红测首次编译因测试装配的commit／clock位置和缺少事件导入失败，已修正并保留日志，之后才记录实际行为红测。Unix权限测试不冒充其他平台或真实SDK／SQLite目录全链路验证。全量Application与根门禁正在单scope内串行执行；成功后的staging清理、open/probe失败、其他撤回入口、真实Engine目录生命周期及后续矩阵继续保持未完成。
+
+
+本切片最终同源检查：Application＋file_transfer 1284项通过（123.869秒），1项默认跳过；locked metadata、workspace all-targets（3分07秒）、fmt、Rust style、repository preflight（含隐私与负例）及diff全部退出0。人工审阅核对从准备起持有同一publication、Staging先记日志再建成员、日志绑定只发生在实际写入后、已清理持有者继续承担父NoEntry、双来源以及终态通知时机。未增加Engine步骤接口、持久字段、明文例外、任务池或网络重试。全部构建scope已结束，提交后检查并回收本次专用磁盘TMPDIR；已观察峰值约3.0GiB。完整spec仍active，当前未完成项不缩减；另已记录同一Failed的NoEntry回执丢失重放边界待真实SQLite复现。

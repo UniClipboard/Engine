@@ -26,6 +26,8 @@ pub(crate) struct UnsettledDirectory {
     pub(crate) attempt: Option<String>,
     pub(crate) cancelled: bool,
     pub(crate) publication: DirectoryPublication,
+    /// 成员准备失败的原终态通知只在NoEntry真正交接后发出。
+    pub(crate) notify_failure: bool,
 }
 
 pub(crate) enum UnsettledReceive {

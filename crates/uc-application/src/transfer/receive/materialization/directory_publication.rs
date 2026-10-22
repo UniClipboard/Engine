@@ -66,17 +66,20 @@ impl DirectoryPublication {
         publisher: Arc<dyn AtomicPublishPort>,
         staging: PathBuf,
         mode: PublishMode,
-        journal: Option<DirectoryRollbackJournal>,
     ) -> Self {
         Self {
             publisher,
             staging,
             mode,
             published: Vec::new(),
-            journal,
+            journal: None,
             withdrawn_recorded: false,
             settled: false,
         }
+    }
+    /// 只有Staging记录实际落库后才有可更新的恢复日志。
+    pub(super) fn set_journal(&mut self, journal: DirectoryRollbackJournal) {
+        self.journal = Some(journal);
     }
     pub(super) fn record(&mut self, final_path: PathBuf, staged_from: PathBuf) {
         self.published.push((final_path, staged_from));
