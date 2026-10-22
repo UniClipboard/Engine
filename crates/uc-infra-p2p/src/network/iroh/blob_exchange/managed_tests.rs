@@ -1,4 +1,5 @@
 //! 使用实际生产 handler 与未改造 Downloader，验证空预热不占已授权连接名额。
+mod isolation;
 use super::{IrohBlobExchangeAdapter, IrohBlobHandler};
 use crate::network::iroh::admitted_connections::AdmittedConnections;
 use crate::network::iroh::blobs::{IrohBlobTransferAdapter, BLOBS_ALPN};

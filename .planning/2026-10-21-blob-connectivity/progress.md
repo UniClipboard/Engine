@@ -350,3 +350,7 @@
 - 新增完整重试保存屏障验证：capture阻塞期间同一保护保留1、Bounded shutdown五秒返回ShutdownIncomplete；调用者退出后原ReceiveAction继续实际保存，完成通知及关闭结束后保护归0、旧成功文件仍为success、只保存一次。定向7项通过（10.167秒）；扩大相关196项通过（10.329秒），含既有全局4／每端2、7／9项与取消／准备／最终Facade屏障，无许可积累死锁。
 - 最终同一源快照Application／Engine1540通过／6跳过（187.790秒），实际重试、导出取消、删除／清空、撤权及进程恢复均通过。metadata解析812包、workspace全目标check（1m33s）、fmt、Rust style、repository preflight、1348站点隐私清单及diff全部通过。Cargo串行共享target与原缓存；手工审查guard对象及释放顺序、单项到父保存交接、继承项不覆盖、下一项释放与多文件推进、真实关闭等待及不把测试替身冒作网络／SQLite证据。code-review skill缺失，不冒称技能审查；设备未执行仍跳过。
 - 本轮不是全预算完成。源码已明确两个剩余缺口：(1) local_settlement先清除旧commit_handoff，随后才解析票据／排队；下一项被拒绝或在取得许可前取消时，父部分保存可能没有原许可，须继续实际回归及设计连续交接；(2) ReceiveAction.finish的错误路径仍清除local_work／commit_handoff，即便OutputCleanupFailure保留未清理产物与非终态attempt，恢复持有移交仍需完成。不能以没有活跃IO或本轮普通保存通过直接宣称已结算。目录准备／发布的全部边界、其余生命周期、历史来源、受管1GiB、业务记录及最终head网络／CI／平台矩阵继续。
+
+### 2026-10-22 完整双流隔离硬验收
+
+新增实际Application完整Facade／自动重试＋生产Uni及SDK双流用例，27对／54流覆盖不同4MiB、32MiB及同内容。不同内容的A、B均有部分真实校验数据后取消A，B精确导出且无重试、重拨或连接关闭。测试引用仓储为内存替身，不宣称SQLite或Relay覆盖。定向7项通过；最终1866通过／9跳过（189.264秒）；metadata812包、workspace全目标check（1m34s）、repository、fmt、Rust style、1348站点观测隐私及diff通过。用户已明确批准逐项保存成功文件、保留4／2预算，规格与计划同步；下一切片从原子持久提交和产物日志移交开始。

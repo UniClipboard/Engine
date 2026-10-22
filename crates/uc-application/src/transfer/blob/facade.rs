@@ -51,7 +51,7 @@ use crate::transfer::file::session::ReceiverTransferHandle;
 /// fan-out 到所有已注册下游,装配顺序无关。
 pub type SharedHostEventEmitter = Arc<HostEventBus>;
 
-pub(crate) struct BlobTransferDeps {
+pub struct BlobTransferDeps {
     pub downloads: Arc<BlobDownloadResources>,
     pub hash: Arc<dyn ContentHashPort>,
     pub blob_transfer: Arc<dyn BlobTransferPort>,
@@ -296,7 +296,8 @@ pub struct BlobTransferFacade {
 }
 
 impl BlobTransferFacade {
-    pub(crate) fn new(deps: BlobTransferDeps) -> Self {
+    #[doc(hidden)]
+    pub fn new(deps: BlobTransferDeps) -> Self {
         let outbound_progress_reporter = deps
             .outbound_progress_reporter
             .map(|reporter| OutboundNotifications::new(reporter, &deps.downloads.transport));

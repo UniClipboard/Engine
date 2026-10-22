@@ -107,6 +107,7 @@ version = "3"
 optional = true
 
 [dev-dependencies]
+uc-application = { path = "../uc-application", features = ["test-support"] }
 uc-infra-local = { path = "../uc-infra-local" }
 uc-observability-runtime = { path = "../uc-observability-runtime" }
 uc-testkit = { path = "../../tests/uc-testkit" }
