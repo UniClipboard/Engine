@@ -327,3 +327,11 @@
 - 第一次完整快照1530通过／1超时／6跳过（184.278秒），engine_start_builds_a_resumable_real_session超过20秒；单独原样复跑8.795秒通过。最终含分类修复的同一源快照Application／Engine完整1533通过／6跳过（189.050秒），该测试11.683秒通过。未改超时配置或测试并发4，首次失败没有记为通过。
 - 最终metadata解析812包、workspace全目标check（1m28s）、fmt、Rust style、Engine repository preflight、1350站点隐私清单及diff全部通过。Cargo串行共享target与原缓存。手工审查许可／期限唯一性、登记与启动原子性、取消原因及实际准备结算、source链与关闭分类、观测上下文所有权；code-review skill缺失，不冒称技能审查。设备未执行仍跳过。
 - 下一步从materialization/workflow.rs独立文件目标reserve_target／reserve_managed_output及artifact journal入手：它们仍先于fetch排队，须纳入同一下载任务及首批期限，不能创建父子双重许可。目录发布／最终保存、清理失败移交和inflight仍只跟底层worker的边界亦未完成；其余生命周期、历史来源、受管1GiB、业务记录及最终head网络／CI／设备验收保留，完整spec继续。
+
+
+- 独立文件目标预留实际红测：完整materializer＋真实Facade中，前两同端目标仍阻塞，第三项已经进入ReserveInboundFileTargetPort（materializer-target-admission-red.log，0.017秒）。原目标预留和artifact journal确实发生在fetch排队之前，不以假调度模型替代。测试初次因缺snapshot字段编译失败，补齐后取得该实际红测。
+- 文件获取统一改用owned BlobOutputTarget，既有目录固定路径也沿同一契约；独立文件把目标预留、受管create_new及artifact journal交给原DownloadTask，取得原许可后执行，同一started_at计时。输出路径用单次准备回执在成功后交给导出，不新增池、schema或Engine阶段接口。原使用名集合只在managed fallback时更新，保持原命名与碰撞行为。
+- FileOutputPreparation先保存实际产物事实，再写原日志。准备失败由typed BlobOutputPreparationError保留原有整计划中止语义及source；已有目标清理失败仍携带独立cleanup与原始原因，未准备的队列拒绝不得pop前一成功产物。测试模拟适配层实际执行owned目标准备，原mock只处理已准备命令，不保留第二套生产实现。
+- 首次扩大87通过／1失败、103未运行：旧取消回归发现模拟适配层在预留后漏查取消，错误调用第二次mock获取。补齐与生产负责人一致的前后取消检查，未放宽原断言。最终相关192项全部通过（10.301秒），覆盖实际materializer全局4／每端2、五秒取消未完成且仍占slot、未准备队列不创建文件及取消后的真实清理；直接Facade虚拟钟验证目标准备59／60秒、等待实际完成及StorageFull保留到shutdown。新增实际文件系统日志失败验证旧成功文件不变、目标清理或IsADirectory失败与StorageFull同时保留。
+- 最终同一源快照Application／Engine完整nextest 1536通过／6跳过（193.552秒），实际部分重试、导出取消、删除／清空、撤权与进程重启恢复均通过。metadata解析812包、workspace全目标check（1m32s）、fmt、Rust style、repository preflight、1350站点隐私清单及diff全部通过。Cargo串行共享target与原缓存。手工审查future／许可／路径回执所有权、取消后真实准备完成、错误链、准备失败清理、队列无产物及命名行为；code-review skill仍缺失，不冒称技能审查。设备未执行仍跳过。
+- 本片仅完成独立文件目标准备的准入／期限覆盖。Facade现仍在底层worker结果返回后移除inflight，再等待最终进度／事件；完整调用被丢弃、父流程清理失败或最终保存时的取消结算需要继续收口。下一步先用最终进度真实屏障证明取消／重复请求仍等待整个动作，再把完整Facade结算归同一原监督任务；目录准备／发布／最终保存、失败产物移交及其余spec硬验收继续，不能把本轮当完整spec或全生命周期通过。

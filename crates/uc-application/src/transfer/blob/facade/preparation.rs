@@ -9,6 +9,7 @@ use crate::transfer::blob::transport::{
 };
 use crate::transfer::file::session::ReceiverTransferHandle;
 use crate::transfer::file::FileTransferApplicationError;
+use futures::future::BoxFuture;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio_util::sync::CancellationToken;
@@ -28,7 +29,7 @@ impl BlobTransferFacade {
     pub(super) fn prepare_fetch(
         &self,
         context: Option<FetchTransferContext>,
-        cached_path: String,
+        cached_path: BoxFuture<'static, Result<String, BlobExchangeError>>,
         outbound: Option<OutboundReportContext>,
         cancel: CancellationToken,
         state: Arc<FetchPreparationState>,
@@ -37,6 +38,10 @@ impl BlobTransferFacade {
         let stop = state.stop.clone();
         let observation = ObservationContext::capture();
         let work = Box::pin(observation.scope(async move {
+            if cancel.is_cancelled() {
+                return Err(BlobExchangeError::refused(BlobExchangeFailure::Cancelled));
+            }
+            let cached_path = cached_path.await?;
             if cancel.is_cancelled() {
                 return Err(BlobExchangeError::refused(BlobExchangeFailure::Cancelled));
             }

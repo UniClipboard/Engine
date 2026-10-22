@@ -240,3 +240,6 @@
 
 - 准备错误转换不能一概Settlement：原begin_lifecycle的正常LifecycleClosed／冲突／已终态在迁入监督后会污染transport.failure及shutdown。实际监督红测已证实，按原具体FileTransferApplicationError分类且保留完整source后恢复；真实Store及停止结算失败不降级。
 - 初次完整快照Engine测试20秒超时，单独8.795秒与最终完整11.683秒通过；未修改nextest配置。最终1533通过／6跳过、根门禁全部通过，不能以一次单独复跑替代完整结果。
+
+- 独立文件预留不应由materializer先做完才fetch：完整Facade调度屏障证明同端第三项会提前创建目标。现在目标及artifact journal为原下载准备的owned future，路径回执只在成功准备后可供export读取。准备失败须以具体标记保留原有整计划中止语义，不能当普通获取部分失败继续。
+- 目标future即使超时仍实际完成，可能已创建输出；产物事实必须在日志写入前保留，父流程才可精确清理。没有回执的排队失败不得移除前一成功产物。最终192相关／1536完整通过及根门禁通过，目录发布／最终保存与完整inflight仍未完成。

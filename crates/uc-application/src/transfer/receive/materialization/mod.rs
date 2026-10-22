@@ -2,6 +2,7 @@
 
 mod cleanup;
 mod model;
+mod output;
 mod ports;
 mod reuse;
 mod workflow;

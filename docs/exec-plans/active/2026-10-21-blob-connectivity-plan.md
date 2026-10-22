@@ -900,3 +900,14 @@ SQLite目标集测试覆盖保存条目、NoEntry、孤儿逐项记录、仅产�
 
 
 准备正常业务拒绝不再统一转为Settlement：实际监督红测先证明LifecycleClosed污染shutdown，修复保留完整具体source并区分正常拒绝与真实Store／结算失败。最终blob／receive82项通过（10.166秒）。第一次完整快照1530通过／1项20秒超时／6跳过；单独复跑8.795秒通过，最终同一源快照Application／Engine1533通过／6跳过（189.050秒），原超时项11.683秒通过，未修改nextest超时或并发设置。metadata、workspace全目标check（1m28s）、fmt、Rust style、repository、1350站点隐私清单及diff全部通过。目标预留、目录发布／最终保存、完整inflight及其余spec硬验收继续，设备未运行仍跳过。
+
+- 当前目标准备切片：完整负责人仍为Application transfer；materializer只提交带owned目标准备的完整获取，原DownloadTask取得同一许可后才预留目标、记录产物并准备lifecycle。成功使用本次实际预留路径；准备失败保留source与已创建产物事实，沿原接收流程清理，清理失败不得当结算成功。取消／deadline等已开始准备实际结束，不启动后续网络；排队拒绝不得创建文件。不加第二池、schema或Engine阶段查询。先用完整materializer＋真实Facade屏障复现同端第三项目标提前预留，再迁移单一文件获取契约及测试模拟边界；重试／重启沿既有attempt与产物日志，不扩大持久格式。
+
+
+### 2026-10-22 独立文件目标准备纳入原下载任务
+
+完整materializer＋真实Facade红测证明同端第三项目标在前两项仍阻塞时已进入预留。独立文件目标预留、受管create_new及原artifact journal现在通过owned BlobOutputTarget归原DownloadTask，取得同一许可后开始；同一首批60秒覆盖全部准备。目录既有固定路径沿同一获取契约，不新增第二池、schema或Engine步骤查询。只有准备成功才向导出交接路径；已创建产物事实先于日志写入保留，准备错误保留原有整计划中止语义和完整source，未准备的排队失败不误清前一成功项。
+
+实际materializer全局4／每端2及五秒取消未完成屏障、真实取消清理、直接Facade虚拟钟59／60秒与StorageFull关闭来源、日志失败清理及IsADirectory／原StorageFull双来源均通过。首次扩大因测试适配层漏查取消而87通过／1失败，103项未运行；修复适配层后192相关通过（10.301秒），不放宽原取消断言。最终同一源快照Application／Engine1536通过／6跳过（193.552秒），metadata、workspace全目标check（1m32s）、fmt、Rust style、repository、1350站点隐私清单及diff全部通过。
+
+本片只证明独立文件目标准备；Facade worker后的最终进度／事件、父流程清理失败移交、目录准备／发布和最终保存的完整取消／预算仍需继续收口。其余生命周期、资源、业务记录与最终head网络／CI／平台硬验收保留，设备未运行仍记跳过。

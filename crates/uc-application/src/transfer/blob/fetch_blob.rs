@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use super::output::PreparedBlobPath;
 use std::sync::Arc;
 
 use super::transport::DownloadTask;
@@ -48,7 +48,7 @@ pub(crate) struct FetchBlobPathInput {
     pub ticket: BlobTicket,
     pub cancel: CancellationToken,
     pub entry_id: EntryId,
-    pub target_path: PathBuf,
+    pub(super) target_path: PreparedBlobPath,
     pub(in super::super) preparation: BlobDownloadPreparation,
 }
 
@@ -212,7 +212,13 @@ impl FetchBlobUseCase {
         let bytes_written = self
             .downloads
             .store
-            .export(digest, &input.target_path)
+            .export(
+                digest,
+                input
+                    .target_path
+                    .path()
+                    .map_err(|source| FetchBlobError::Transfer(source.into()))?,
+            )
             .await
             .map_err(|source| FetchBlobError::Transfer(source.into()))?;
         if input.cancel.is_cancelled() {

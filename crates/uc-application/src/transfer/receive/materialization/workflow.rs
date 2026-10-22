@@ -1,12 +1,13 @@
 //! 接收计划的文件物化、目录发布及本地产物结算。
 
 use super::super::identity::{directory_member_transfer_id, directory_representation_transfer_id};
-use super::cleanup::{remove_uncommitted_output, reserve_managed_output, OutputCleanupFailure};
+use super::cleanup::{remove_uncommitted_output, OutputCleanupFailure};
+use super::output::{FileOutputJournal, FileOutputPreparation, PreparedReceiveOutput};
 use super::reuse::validate_selection;
 use super::{ReceivedItem, ReceivedOutput};
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use uc_core::ports::TrackedFileTransferStatus;
 
 use anyhow::{anyhow, Context, Result};
@@ -29,9 +30,9 @@ use uc_core::ports::inbound_file_target::{
 };
 use uc_core::ports::{
     AttemptState, ClaimReceiveCommitPort, ClockPort, GetEntryAttemptPort, PublishPhase,
-    ReceiveArtifact, ReceiveArtifactOwnership, ReceiveArtifactPhase, ReceiveArtifactRecord,
-    ReceiveArtifactResolution, ReceiveItemRole, RecordDirectoryPublishPort,
-    RecordReceiveArtifactsPort, DIRECTORY_RECEIVE_STAGING_PREFIX,
+    ReceiveArtifact, ReceiveArtifactPhase, ReceiveArtifactRecord, ReceiveArtifactResolution,
+    ReceiveItemRole, RecordDirectoryPublishPort, RecordReceiveArtifactsPort,
+    DIRECTORY_RECEIVE_STAGING_PREFIX,
 };
 use uc_core::{MimeType, ObservedClipboardRepresentation, SystemClipboardSnapshot};
 use uc_observability_contract::{
@@ -45,7 +46,7 @@ use crate::facade::blob_transfer::{
     BatchPosition, BlobTransferError, FetchBlobCommand, FetchBlobToPathCommand,
     FetchTransferContext,
 };
-use crate::transfer::blob::fetch_failure_reason;
+use crate::transfer::blob::{fetch_failure_reason, BlobOutputPreparationError};
 
 use super::{
     InboundBlobFetcher, InboundBlobMaterializer, InboundFileSetManifest, InboundFileSetMember,
@@ -922,6 +923,7 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                 }
             }
         }
+        let used_names = Arc::new(Mutex::new(used_names));
         let blob_ref_total = file_refs.len();
         let mut receive_artifacts = Vec::with_capacity(file_refs.len());
         let mut artifact_journaled = false;
@@ -1041,113 +1043,88 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                 continue;
             }
 
-            // Resolve the destination for this file. When a user save
-            // directory is configured and usable, write the file there (flat,
-            // collision-suffixed) so the user can operate on it directly;
-            // otherwise fall back to the managed cache layout. Files written
-            // outside the cache dir are user-owned and never removed by
-            // retention cleanup or entry deletion.
-            // Pass the declared name through as-is (empty when absent); the
-            // adapter owns the single fallback-name source of truth, so we do
-            // not duplicate a literal here.
-            let reserved = match self.target_reserver.as_ref() {
-                Some(reserver) => {
-                    reserver
-                        .reserve_target(blob_ref.filename.as_deref().unwrap_or_default())
-                        .await
-                }
-                None => None,
+            let receipt = Arc::new(Mutex::new(PreparedReceiveOutput::default()));
+            let journal = match (
+                self.receive_artifact_log.as_ref(),
+                attempt_id.as_ref(),
+                self.directory_attempts.as_ref(),
+            ) {
+                (Some(log), Some(attempt_id), Some(ports)) => Some(FileOutputJournal {
+                    log: log.clone(),
+                    clock: ports.clock.clone(),
+                    entry_id: receiver_entry_id.as_ref().to_owned(),
+                    attempt_id: attempt_id.clone(),
+                    previous: receive_artifacts.clone(),
+                }),
+                _ => None,
             };
-            // 预留文件与受管缓存的本次输出都必须在失败后清理；旧成功项已在上方跳过。
-            let from_reserver = reserved.is_some();
-
-            let path = match reserved {
-                Some(user_path) => user_path,
-                None => {
-                    // GH#487 Phase 2: pre-create cache dir and stream the blob
-                    // directly to the target file. The previous code did
-                    // `fetch_blob -> Bytes -> tokio::fs::write`, which on a
-                    // 800 MB transfer wasted ~20s materialising the full
-                    // plaintext in memory and writing to disk a second time
-                    // (the iroh store already had a copy from BAO
-                    // verification). `fetch_blob_to_path` collapses both into a
-                    // single `Blobs::export` call (reflink on APFS / Btrfs /
-                    // ReFS).
-                    let entry_dir = self
-                        .cache_dir
-                        .join("iroh-blobs")
-                        .join(sanitize_path_segment(blob_ref.entry_id.as_ref()));
-                    tokio::fs::create_dir_all(&entry_dir).await?;
-
-                    let filename =
-                        managed_filename(blob_ref.filename.as_deref(), idx, &mut used_names);
-                    reserve_managed_output(&entry_dir, &filename)
-                        .await
-                        .context("reserve managed receive output")?
-                }
+            let target_path = FileOutputPreparation {
+                target_reserver: self.target_reserver.clone(),
+                managed_parent: self
+                    .cache_dir
+                    .join("iroh-blobs")
+                    .join(sanitize_path_segment(blob_ref.entry_id.as_ref())),
+                filename: blob_ref.filename.clone(),
+                index: idx,
+                used_names: used_names.clone(),
+                item_id: item_id.clone(),
+                journal,
+            }
+            .into_target(receipt.clone());
+            let fetched = self
+                .fetcher
+                .fetch_blob_to_path(FetchBlobToPathCommand {
+                    cancellation: cancellation.clone(),
+                    ticket: blob_ref.ticket,
+                    entry_id: blob_ref.entry_id.clone(),
+                    target_path,
+                    transfer_context: Some(transfer_context),
+                })
+                .await;
+            let (artifact, journaled) = {
+                let mut receipt = receipt.lock().unwrap_or_else(PoisonError::into_inner);
+                (receipt.artifact.take(), receipt.journaled)
             };
-            let artifact = ReceiveArtifact {
-                item_id: transfer_context.transfer_id.clone(),
-                staged_path: path.clone(),
-                final_path: path.clone(),
-                ownership: if from_reserver {
-                    ReceiveArtifactOwnership::UserDestination
-                } else {
-                    ReceiveArtifactOwnership::ManagedStaging
-                },
-            };
-            receive_artifacts.push(artifact.clone());
-            match self
-                .record_receive_artifacts(
-                    &receiver_entry_id,
-                    attempt_id.as_deref(),
-                    &receive_artifacts,
-                )
-                .await
-            {
-                Ok(recorded) => artifact_journaled |= recorded,
-                Err(error) => {
-                    if let Err(cleanup) = remove_uncommitted_output(&path).await {
-                        return Err(OutputCleanupFailure {
-                            cleanup,
-                            cause: error,
+            artifact_journaled |= journaled;
+            if let Some(artifact) = &artifact {
+                receive_artifacts.push(artifact.clone());
+            }
+            let path = artifact
+                .as_ref()
+                .map(|artifact| artifact.final_path.clone());
+            let fetched = match fetched {
+                Ok(v) => v,
+                Err(error)
+                    if error
+                        .chain()
+                        .any(|source| source.is::<BlobOutputPreparationError>()) =>
+                {
+                    if let Some(path) = &path {
+                        if let Err(cleanup) = remove_uncommitted_output(path).await {
+                            return Err(OutputCleanupFailure {
+                                cleanup,
+                                cause: error,
+                            }
+                            .into());
                         }
-                        .into());
                     }
                     return Err(error);
                 }
-            }
-
-            let fetched = match async {
-                if cancellation.is_cancelled() {
-                    return Err(BlobTransferError::Cancelled.into());
-                }
-                self.fetcher
-                    .fetch_blob_to_path(FetchBlobToPathCommand {
-                        cancellation: cancellation.clone(),
-                        ticket: blob_ref.ticket,
-                        entry_id: blob_ref.entry_id.clone(),
-                        target_path: path.clone(),
-                        transfer_context: Some(transfer_context),
-                    })
-                    .await
-            }
-            .await
-            {
-                Ok(v) => v,
                 Err(e) if is_cancel_error(&e) => {
                     // 只移除本项预留；单项取消继续其余文件，整计划停止才终止循环。
-                    if let Err(cleanup) = remove_uncommitted_output(&path).await {
-                        return Err(OutputCleanupFailure { cleanup, cause: e }.into());
+                    if let Some(path) = &path {
+                        if let Err(cleanup) = remove_uncommitted_output(path).await {
+                            return Err(OutputCleanupFailure { cleanup, cause: e }.into());
+                        }
+                        receive_artifacts.pop();
+                        artifact_journaled |= self
+                            .record_receive_artifacts(
+                                &receiver_entry_id,
+                                attempt_id.as_deref(),
+                                &receive_artifacts,
+                            )
+                            .await?;
                     }
-                    receive_artifacts.pop();
-                    artifact_journaled |= self
-                        .record_receive_artifacts(
-                            &receiver_entry_id,
-                            attempt_id.as_deref(),
-                            &receive_artifacts,
-                        )
-                        .await?;
                     uc_warn!(
                         idx = idx,
                         total = blob_ref_total,
@@ -1192,17 +1169,19 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                     // placeholder / partial file so it does not linger in
                     // the user's save directory (which retention and entry
                     // deletion never touch) or block the name for a retry.
-                    if let Err(cleanup) = remove_uncommitted_output(&path).await {
-                        return Err(OutputCleanupFailure { cleanup, cause: e }.into());
+                    if let Some(path) = &path {
+                        if let Err(cleanup) = remove_uncommitted_output(path).await {
+                            return Err(OutputCleanupFailure { cleanup, cause: e }.into());
+                        }
+                        receive_artifacts.pop();
+                        artifact_journaled |= self
+                            .record_receive_artifacts(
+                                &receiver_entry_id,
+                                attempt_id.as_deref(),
+                                &receive_artifacts,
+                            )
+                            .await?;
                     }
-                    receive_artifacts.pop();
-                    artifact_journaled |= self
-                        .record_receive_artifacts(
-                            &receiver_entry_id,
-                            attempt_id.as_deref(),
-                            &receive_artifacts,
-                        )
-                        .await?;
                     uc_warn!(
                         idx = idx,
                         total = blob_ref_total,
@@ -1228,6 +1207,9 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                 }
             };
 
+            let artifact =
+                artifact.ok_or_else(|| anyhow!("successful receive has no prepared output"))?;
+            let path = artifact.final_path.clone();
             uc_info!(
                 idx = idx,
                 total = blob_ref_total,
@@ -1793,7 +1775,7 @@ impl FileCacheBlobMaterializer {
                             cancellation: cancellation.clone(),
                             ticket: blob_ref.ticket.clone(),
                             entry_id: blob_ref.entry_id.clone(),
-                            target_path: target.clone(),
+                            target_path: target.clone().into(),
                             transfer_context: Some(context),
                         })
                         .await
@@ -2576,7 +2558,7 @@ fn is_file_list_representation(rep: &ObservedClipboardRepresentation) -> bool {
         || rep.format_id.eq_ignore_ascii_case("public.file-url")
 }
 
-fn managed_filename(
+pub(super) fn managed_filename(
     candidate: Option<&str>,
     idx: usize,
     used_names: &mut HashSet<String>,

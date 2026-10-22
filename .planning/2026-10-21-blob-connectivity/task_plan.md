@@ -19,7 +19,7 @@
 阶段 0 前置证明完成：SDK／Uni 完成等待、原始材料、当前授权、同内容隔离、协议向量、8 组旧资料矩阵与 1GiB 基线均有证据。阶段 1／2 推进：生产获取和提供端已接线，输出／解密及引用／tag 受监督；完整条目结算、部分失败、稳定重试与薄绑定继续。
 
 ## Next Step
-Facade lifecycle／初始进度已纳入原DownloadTask及同一4／2、64／16、首批60秒，实际屏障与虚拟钟验证通过；准备正常拒绝不污染shutdown，存储失败原source保留。最终Application／Engine1533通过／6跳过、根门禁全部通过。下一步直接修改materialization/workflow.rs中仍在fetch前执行的reserve_target／reserve_managed_output及artifact journal：让同一受监督下载任务取得原许可后才准备目标，不加第二池或父子许可。然后处理目录发布／最终保存、清理失败后的持有移交及inflight完成仍指向底层worker的问题；再完成其余生命周期、历史来源、受管1GiB资源、业务记录及最终head CI／平台矩阵。不再重复已通过的局部证明或将其当完整spec。
+独立文件reserve_target／reserve_managed_output及artifact journal已迁入原DownloadTask准备，复用同一4／2、64／16及首批60秒；实际materializer屏障与虚拟期限通过，原有失败清理及部分重试保持。最终Application／Engine1536通过／6跳过，相关192通过，根门禁全部通过。下一步首先用Facade最终进度／事件真实屏障检查cancel_inbound_transfer及重复获取：当前底层worker返回后inflight被移除，完整Facade尚未结算；把最终交接也归原受监督任务，避免调用方退出丢弃unsafe工作，不能新加池或重复许可。然后覆盖父流程清理失败移交、目录准备／发布及最终保存；再完成其余生命周期、历史来源、受管1GiB、业务记录及最终head CI／平台矩阵。不重复已通过的准备局部证明，不把局部通过当完整spec。
 
 ## 错误
 - 探针锁 guard 编译错误已修复，probe.log 保留。
@@ -63,3 +63,5 @@ Facade lifecycle／初始进度已纳入原DownloadTask及同一4／2、64／16�
 - 当前完整额度切片：唯一transfer负责人持有同一下载调度额度至本地实际结算，调用方仍仅提交完整接收／获取。首先通过Facade最终本地进度屏障验证每端2项是否提前归还；随后沿接收batch单项结果保留同一额度至本项输出／清理交接，禁止通过保留整批许可造成多文件死锁。不增加第二个调度器、预算、schema或Engine步骤接口。失败保留原source，调用等待退出不释放真实任务持有的额度；准备阶段整体60秒／完整admission仍须后续扩展，不把这一屏障当全预算通过。
 
 - 当前准备准入切片：transfer下载负责人先原子入队并取得原许可，再启动Facade lifecycle／初始进度；计时沿同一permit.started_at覆盖准备、身份解析及首批数据。调用方仍只提交完整fetch／receive；准备future必须归原DownloadTask监督，取消／超时先封口并等已开始的准备实际结束，失败保留source。inflight登记与启动同一临界区，不能让重复请求先碰到旧session。无第二池／预算、无新schema或Engine步骤查询；materializer更早目标预留、目录发布及最终交接仍需继续完整验证。
+
+- 当前目标准备切片：完整负责人仍为Application transfer；materializer只提交带owned目标准备的完整获取，原DownloadTask取得同一许可后才预留目标、记录产物并准备lifecycle。成功使用本次实际预留路径；准备失败保留source与已创建产物事实，沿原接收流程清理，清理失败不得当结算成功。取消／deadline等已开始准备实际结束，不启动后续网络；排队拒绝不得创建文件。不加第二池、schema或Engine阶段查询。先用完整materializer＋真实Facade屏障复现同端第三项目标提前预留，再迁移单一文件获取契约及测试模拟边界；重试／重启沿既有attempt与产物日志，不扩大持久格式。

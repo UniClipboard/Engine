@@ -6,6 +6,7 @@ mod generation;
 mod item_results;
 mod lifecycle;
 mod manual_retry;
+mod output_preparation;
 mod receive_work;
 mod result_query;
 mod retry_material;
@@ -23,6 +24,7 @@ use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::LookupSpan;
 
 use crate::clipboard::write::ClipboardWriteIntent;
+use crate::facade::blob_transfer::BlobTransferError;
 use crate::facade::host_event::{
     ClipboardHostEvent, ClipboardOriginKind, EmitError, HostEvent, HostEventBus,
     HostEventEmitterPort,
@@ -567,25 +569,58 @@ mockall::mock! {
     }
 }
 
+/// 模拟只处理已准备的文件；适配层实际执行生产命令中的异步目标准备。
+pub struct TestPreparedFileFetch {
+    pub cancellation: tokio_util::sync::CancellationToken,
+    pub ticket: BlobTicket,
+    pub entry_id: EntryId,
+    pub target_path: PathBuf,
+    pub transfer_context: Option<crate::facade::blob_transfer::FetchTransferContext>,
+}
 mockall::mock! {
-    pub BlobFetcher {}
-    #[async_trait]
-    impl InboundBlobFetcher for BlobFetcher {
-        async fn fetch_blob(
-            &self,
-            command: crate::facade::blob_transfer::FetchBlobCommand,
-        ) -> Result<crate::facade::blob_transfer::FetchBlobResult>;
-
-        async fn fetch_blob_to_path(
-            &self,
-            command: crate::facade::blob_transfer::FetchBlobToPathCommand,
-        ) -> Result<crate::facade::blob_transfer::FetchBlobToPathResult>;
-
-        async fn record_unfetched_failure(
-            &self,
-            context: crate::facade::blob_transfer::FetchTransferContext,
-            reason: uc_core::file_transfer::FileTransferFailureReason,
-        );
+    pub BlobFetcher {
+        async fn fetch_blob(&self, command: crate::facade::blob_transfer::FetchBlobCommand) -> Result<crate::facade::blob_transfer::FetchBlobResult>;
+        async fn fetch_blob_to_path(&self, command: TestPreparedFileFetch) -> Result<crate::facade::blob_transfer::FetchBlobToPathResult>;
+        async fn record_unfetched_failure(&self, context: crate::facade::blob_transfer::FetchTransferContext, reason: uc_core::file_transfer::FileTransferFailureReason);
+    }
+}
+#[async_trait]
+impl InboundBlobFetcher for MockBlobFetcher {
+    async fn fetch_blob(
+        &self,
+        command: crate::facade::blob_transfer::FetchBlobCommand,
+    ) -> Result<crate::facade::blob_transfer::FetchBlobResult> {
+        MockBlobFetcher::fetch_blob(self, command).await
+    }
+    async fn fetch_blob_to_path(
+        &self,
+        command: crate::facade::blob_transfer::FetchBlobToPathCommand,
+    ) -> Result<crate::facade::blob_transfer::FetchBlobToPathResult> {
+        if command.cancellation.is_cancelled() {
+            return Err(BlobTransferError::Cancelled.into());
+        }
+        let target_path = command.target_path.prepare().await?;
+        if command.cancellation.is_cancelled() {
+            return Err(BlobTransferError::Cancelled.into());
+        }
+        MockBlobFetcher::fetch_blob_to_path(
+            self,
+            TestPreparedFileFetch {
+                cancellation: command.cancellation,
+                ticket: command.ticket,
+                entry_id: command.entry_id,
+                target_path,
+                transfer_context: command.transfer_context,
+            },
+        )
+        .await
+    }
+    async fn record_unfetched_failure(
+        &self,
+        context: crate::facade::blob_transfer::FetchTransferContext,
+        reason: uc_core::file_transfer::FileTransferFailureReason,
+    ) {
+        MockBlobFetcher::record_unfetched_failure(self, context, reason).await;
     }
 }
 

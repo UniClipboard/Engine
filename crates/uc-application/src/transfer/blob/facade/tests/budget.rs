@@ -25,7 +25,7 @@ use uc_core::ids::{DeviceId, EntryId};
 use uc_core::ports::blob::{BlobTicket, BlobTransferPort};
 use uc_core::ports::ReceiveItemRole;
 
-struct BudgetSource(Arc<BlockingBlobTransfer>);
+pub(super) struct BudgetSource(pub(super) Arc<BlockingBlobTransfer>);
 #[async_trait]
 impl BlobSourcePort for BudgetSource {
     fn inspect(&self, ticket: &BlobTicket) -> Result<BlobSource, BlobExchangeError> {

@@ -1,3 +1,5 @@
+pub use super::output::BlobOutputTarget;
+use super::output::PreparedBlobPath;
 use crate::transfer::receive::batch::ReceiveBatch;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -207,12 +209,12 @@ pub struct FetchBlobResult {
 /// Used by the inbound materializer for free-standing files so the
 /// receive side stops materialising 800 MB+ payloads in memory only to
 /// `tokio::fs::write` them out again.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct FetchBlobToPathCommand {
     pub cancellation: CancellationToken,
     pub ticket: BlobTicket,
     pub entry_id: EntryId,
-    pub target_path: PathBuf,
+    pub target_path: BlobOutputTarget,
     pub transfer_context: Option<FetchTransferContext>,
 }
 
@@ -629,7 +631,7 @@ impl BlobTransferFacade {
         let prepared = Arc::new(FetchPreparationState::default());
         let preparation = self.prepare_fetch(
             command.transfer_context.clone(),
-            String::new(),
+            Box::pin(async { Ok(String::new()) }),
             outbound_ctx.clone(),
             cancel_token.clone(),
             prepared.clone(),
@@ -808,18 +810,27 @@ impl BlobTransferFacade {
         let outbound_ctx = self.build_outbound_context(command.transfer_context.as_ref());
         let cancel_token = command.cancellation.child_token();
         let prepared = Arc::new(FetchPreparationState::default());
-        let cached_path = if command
+        let target_path = PreparedBlobPath::default();
+        let output_path = target_path.clone();
+        let hide_cached_path = command
             .transfer_context
             .as_ref()
-            .is_some_and(|context| context.attempt_id.is_some())
-        {
-            String::new()
-        } else {
-            command.target_path.to_string_lossy().into_owned()
-        };
+            .is_some_and(|context| context.attempt_id.is_some());
         let preparation = self.prepare_fetch(
             command.transfer_context.clone(),
-            cached_path,
+            Box::pin(async move {
+                let path =
+                    command.target_path.prepare().await.map_err(|source| {
+                        BlobExchangeError::new(BlobExchangeFailure::Store, source)
+                    })?;
+                let cached_path = if hide_cached_path {
+                    String::new()
+                } else {
+                    path.to_string_lossy().into_owned()
+                };
+                output_path.publish(path)?;
+                Ok(cached_path)
+            }),
             outbound_ctx.clone(),
             cancel_token.clone(),
             prepared.clone(),
@@ -830,7 +841,7 @@ impl BlobTransferFacade {
             ticket: command.ticket,
             cancel: cancel_token.clone(),
             entry_id: iroh_tag_entry_id,
-            target_path: command.target_path,
+            target_path,
         };
         let operation = self.start_fetch(
             command.transfer_context.as_ref(),
@@ -1174,6 +1185,7 @@ impl BlobProgressSink for FileTransferProgressSink {
 #[cfg(test)]
 mod tests {
     mod budget;
+    mod targets;
 
     use crate::transfer::blob::transport::{BlobExchangeError, BlobReadStorePort, BlobReceived};
     use std::path::Path;
