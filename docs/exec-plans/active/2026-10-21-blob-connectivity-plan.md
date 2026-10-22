@@ -1217,3 +1217,15 @@ Core红测0.002秒复现目录非终态聚合丢失StorageUnavailable（None／S
 本切片最终同源检查：全量Application1290项通过（17.891秒），1项跳过；真实Engine目录成员终态回归1项通过（11.450秒），其余323项未纳入本轮过滤；locked metadata、workspace all-targets（3分51秒）、fmt、Rust style、repository preflight（含隐私与负例）及diff均退出0。人工审阅核对发布持有者只能在权威目录取得Committing后返回、停止信号不再把该结果降为部分取消、后续仍校验原尝试而未绕过CAS、其他类型取消逻辑保留；捕获测试明确拒绝Partial和缺失目录责任的上下文。未据此声明真实Engine的完整生命周期或设备矩阵通过。
 
 构建继续单scope串行、jobs=1及共享target／缓存，既有5GiB内存和4GiB swap上限未放宽；已观察峰值约3.0GiB。scope已inactive且无本轮活动编译，专用磁盘TMPDIR为空并回收。完整spec继续active；其余withdraw入口、首次Staging日志前强杀、完整生命周期／来源C／受管1GiB／最终兼容与设备矩阵保持未完成。
+
+### 2026-10-23：已发布目录在保存前拒绝的完整责任
+
+完整负责人仍为原Application接收，调用方只发起完整接收／关闭。真实目录已发布后，外层提交权复核的存储错误原先经问号直接退出，丢弃DirectoryPublication。完整App＋原ClaimReceiveCommitPort＋真实文件系统红测5.013秒失败：返回裸复核错误而没有应有的失败／撤回双来源。复核错误现在交给既有fail_directory_receive，按原权威转Failing，实际撤回、清理并交接NoEntry；撤回受阻时原任务保留原batch／许可继续本地修复，不再次获取或捕获。目录结算11项通过（1.071秒）。
+
+同一区间的外层身份复核拒绝也曾消费发布责任、只记录撤回失败并继续结束；第二个红测5.011秒明确失败于关闭提前成功。正常物化器仍在发布前校验身份，测试只在既有物化能力返回后故意改变身份分量，以驱动防御拒绝分支，不把它称为正常SDK身份绕过。该分支同样交回既有完整失败结算；原身份拒绝和撤回IO均保留，公共通知不复制含内容哈希的底层正文。没有新增任务、格式、队列或公开Engine步骤接口。
+
+目录／取消／代次109项通过（11.307秒）。新故障覆盖两个根真实发布、StorageFull或身份拒绝、PermissionDenied撤回受阻、关闭短等待未完成、解除拒绝后原任务自动清理及最终Failed，未调用捕获、只获取原两项、无关文件字节保持。既有复用目标名称、失败回执丢失、成功后清理和提交胜出后封口也在本轮回归通过。全量Application、当前源的真实Engine目录回归和根门禁待追加；其他重复投递／placeholder撤回入口、首次Staging日志前强杀清理、完整生命周期、来源C、受管1GiB、最终兼容及设备矩阵保持未完成。
+
+本切片最终同源检查：全量Application1292项通过（18.067秒），1项跳过；真实Engine目录成员终态回归1项通过（12.185秒），其余323项未纳入过滤；locked metadata、workspace all-targets（3分24秒）、fmt、Rust style、repository preflight（含隐私与负例）及diff均退出0。人工审阅核对有发布责任时复核失败不再经问号退出、身份拒绝不再消费撤回失败、原失败类别及完整来源保留、既有权威／回滚／NoEntry统一结算且不重复获取或保存；没有发布责任的原错误仍沿原路径返回。新故障为完整App能力及实际文件系统端口注入，不冒充真实Engine的同一存储／身份故障或强杀矩阵。
+
+构建保持单scope串行、jobs=1、共享target／缓存及5GiB内存／4GiB swap上限，已观察峰值约3.0GiB。最终scope已inactive，确认无本轮活动编译后回收空的专用TMPDIR。完整spec保持active；重复投递／placeholder等剩余撤回入口、首次Staging日志前强杀清理、完整生命周期、来源C、受管1GiB、最终兼容及设备矩阵继续未完成。

@@ -68,20 +68,63 @@ impl AtomicPublishPort for BlockWithdrawal {
 
 #[tokio::test]
 async fn directory_capture_failure_keeps_original_rollback_until_withdrawal_recovers() {
-    assert_directory_rollback(false, false).await;
+    assert_directory_rollback(false, DirectoryFailure::Capture).await;
 }
 
 #[tokio::test]
 async fn directory_rollback_never_touches_a_previously_withdrawn_name_reused_by_the_user() {
-    assert_directory_rollback(true, false).await;
+    assert_directory_rollback(true, DirectoryFailure::Capture).await;
 }
 
 #[tokio::test]
 async fn directory_mid_publication_failure_keeps_earlier_root_rollback_owned() {
-    assert_directory_rollback(false, true).await;
+    assert_directory_rollback(false, DirectoryFailure::Publication).await;
 }
 
-async fn assert_directory_rollback(reuse: bool, publish_failure: bool) {
+#[tokio::test]
+async fn directory_commit_recheck_failure_keeps_original_rollback_and_source() {
+    assert_directory_rollback(false, DirectoryFailure::CommitRecheck).await;
+}
+
+#[tokio::test]
+async fn directory_identity_recheck_failure_keeps_original_rollback_until_settled() {
+    assert_directory_rollback(false, DirectoryFailure::IdentityRecheck).await;
+}
+
+/// 正常物化器在发布前校验；故意破坏返回值以驱动外层拒绝分支的完整输出责任。
+struct AlterPublishedIdentity {
+    inner: FileCacheBlobMaterializer,
+}
+#[async_trait]
+impl InboundBlobMaterializer for AlterPublishedIdentity {
+    async fn materialize_plan(&self, plan: ReceiveWorkPlan) -> Result<MaterializeResult> {
+        let mut result = self.inner.materialize_plan(plan).await?;
+        result.snapshot.file_set_v1_component = Some([0; 32]);
+        Ok(result)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum DirectoryFailure {
+    Capture,
+    Publication,
+    CommitRecheck,
+    IdentityRecheck,
+}
+
+struct RejectCommitRecheck;
+#[async_trait]
+impl ClaimReceiveCommitPort for RejectCommitRecheck {
+    async fn claim_receive_commit(&self, _: &str, _: &str, _: i64) -> Result<bool, AttemptError> {
+        Err(AttemptError::Backend(Box::new(io::Error::from(
+            io::ErrorKind::StorageFull,
+        ))))
+    }
+}
+
+async fn assert_directory_rollback(reuse: bool, failure: DirectoryFailure) {
+    let publish_failure = matches!(failure, DirectoryFailure::Publication);
+    let identity_failure = matches!(failure, DirectoryFailure::IdentityRecheck);
     let cache = tempfile::tempdir().unwrap();
     let destination = tempfile::tempdir().unwrap();
     std::fs::write(destination.path().join("unrelated.txt"), b"keep").unwrap();
@@ -108,6 +151,14 @@ async fn assert_directory_rollback(reuse: bool, publish_failure: bool) {
         attempts.clone(),
         attempts.clone(),
     );
+    let materializer: Arc<dyn InboundBlobMaterializer> =
+        if matches!(failure, DirectoryFailure::IdentityRecheck) {
+            Arc::new(AlterPublishedIdentity {
+                inner: materializer,
+            })
+        } else {
+            Arc::new(materializer)
+        };
     let mut repo = MockEntryRepo::new();
     repo.expect_find_entry_id_by_snapshot_hash()
         .returning(|_| Ok(None));
@@ -116,7 +167,7 @@ async fn assert_directory_rollback(reuse: bool, publish_failure: bool) {
     let mut capture = MockCapture::new();
     capture
         .expect_capture()
-        .times(if publish_failure { 0 } else { 1 })
+        .times(usize::from(matches!(failure, DirectoryFailure::Capture)))
         .returning(move |entry, _, _| {
             *recorded.lock().unwrap() = Some(entry);
             Err(io::Error::from(io::ErrorKind::StorageFull).into())
@@ -126,13 +177,19 @@ async fn assert_directory_rollback(reuse: bool, publish_failure: bool) {
     let events = Arc::new(RecordingEmitter::default());
     let bus = Arc::new(HostEventBus::new());
     bus.register("recorder", events.clone());
+    let claim_commit: Arc<dyn ClaimReceiveCommitPort> =
+        if matches!(failure, DirectoryFailure::CommitRecheck) {
+            Arc::new(RejectCommitRecheck)
+        } else {
+            attempts.clone()
+        };
     let receiver = build(repo, capture, write)
-        .with_blob_materializer(Arc::new(materializer))
+        .with_blob_materializer(materializer)
         .with_host_event_emitter(bus)
         .with_receive_attempt_ports(
             attempts.clone(),
             attempts.clone(),
-            attempts.clone(),
+            claim_commit,
             attempts.clone(),
             attempts.clone(),
             attempts.clone(),
@@ -197,18 +254,31 @@ async fn assert_directory_rollback(reuse: bool, publish_failure: bool) {
         .await
         .unwrap()
         .unwrap();
-    let source = match (&error, publish_failure) {
-        (ApplyInboundError::Capture(source), false)
-        | (ApplyInboundError::Internal(source), true) => source,
+    assert!(blocked_shutdown.is_err(), "原回滚未完成时关闭不得提前成功");
+    let source = match (&error, failure) {
+        (ApplyInboundError::Capture(source), DirectoryFailure::Capture)
+        | (
+            ApplyInboundError::Internal(source),
+            DirectoryFailure::Publication
+            | DirectoryFailure::CommitRecheck
+            | DirectoryFailure::IdentityRecheck,
+        ) => source,
         _ => panic!("original failure classification required"),
     };
     let failure = source
         .chain()
         .find_map(|source| source.downcast_ref::<ReceiveFailureSettlementError>())
         .unwrap();
-    assert!(failure.cause.chain().any(|source| source
-        .downcast_ref::<io::Error>()
-        .is_some_and(|source| source.kind() == io::ErrorKind::StorageFull)));
+    if identity_failure {
+        assert!(failure
+            .cause
+            .chain()
+            .any(|source| source.to_string().contains("identity mismatch")));
+    } else {
+        assert!(failure.cause.chain().any(|source| source
+            .downcast_ref::<io::Error>()
+            .is_some_and(|source| source.kind() == io::ErrorKind::StorageFull)));
+    }
     assert!(failure.settlement.chain().any(|source| source
         .downcast_ref::<io::Error>()
         .is_some_and(|source| source.kind() == io::ErrorKind::PermissionDenied)));
@@ -222,7 +292,7 @@ async fn assert_directory_rollback(reuse: bool, publish_failure: bool) {
         AttemptState::Failing,
         "输出仍未撤回时不得交接NoEntry终态"
     );
-    assert!(blocked_shutdown.is_err(), "原回滚未完成时关闭不得提前成功");
+
     assert_eq!(final_attempt.state, AttemptState::Failed);
     assert_eq!(
         std::fs::read(destination.path().join("unrelated.txt")).unwrap(),

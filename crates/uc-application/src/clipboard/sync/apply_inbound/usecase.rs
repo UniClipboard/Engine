@@ -1509,18 +1509,28 @@ impl ApplyInboundClipboardUseCase {
                         if let Err(err) =
                             verify_file_set_identity(&result.snapshot, &input.snapshot_hash)
                         {
-                            // What landed is not what the sender advertised, so no
-                            // entry will exist for it — the roots must go.
+                            let cause =
+                                SourceError::from(err).context("verify received file set identity");
+                            if let Some(publication) = publication.take() {
+                                return Err(self
+                                    .fail_directory_receive(
+                                        receive_action,
+                                        UnsettledDirectory {
+                                            entry: receiver_entry_id.clone(),
+                                            attempt: receive_attempt_id.clone(),
+                                            cancelled: false,
+                                            publication,
+                                            notify_failure: true,
+                                        },
+                                        ReceiveFailure::Internal(cause),
+                                    )
+                                    .await);
+                            }
                             self.begin_receive_failure(
                                 &receiver_entry_id,
                                 receive_attempt_id.as_deref(),
                             )
                             .await?;
-                            withdraw_publication(
-                                publication,
-                                "content failed identity verification",
-                            )
-                            .await;
                             self.settle_receive_without_entry(
                                 &receiver_entry_id,
                                 receive_attempt_id.as_deref(),
@@ -1535,12 +1545,10 @@ impl ApplyInboundClipboardUseCase {
                                     entry_id: Some(receiver_entry_id.as_ref().to_string()),
                                     attempt_id: receive_attempt_id.clone(),
                                     status: "failed".to_string(),
-                                    reason: Some(err.to_string()),
+                                    reason: None,
                                 },
                             ));
-                            return Err(ApplyInboundError::Internal(
-                                SourceError::from(err).context("verify received file set identity"),
-                            ));
+                            return Err(ApplyInboundError::Internal(cause));
                         }
                     }
                     uc_info!(
@@ -1672,10 +1680,31 @@ impl ApplyInboundClipboardUseCase {
                 }
             }
         } else {
-            if self
+            let claimed = match self
                 .claim_receive_commit(&receiver_entry_id, receive_attempt_id.as_deref())
-                .await?
+                .await
             {
+                Ok(claimed) => claimed,
+                Err(error) => {
+                    if let Some(publication) = publication.take() {
+                        return Err(self
+                            .fail_directory_receive(
+                                receive_action,
+                                UnsettledDirectory {
+                                    entry: receiver_entry_id.clone(),
+                                    attempt: receive_attempt_id.clone(),
+                                    cancelled: false,
+                                    publication,
+                                    notify_failure: true,
+                                },
+                                ReceiveFailure::Internal(SourceError::new(error)),
+                            )
+                            .await);
+                    }
+                    return Err(error);
+                }
+            };
+            if claimed {
                 self.emit_receive_state(
                     &receiver_entry_id,
                     receive_attempt_id.as_deref(),
