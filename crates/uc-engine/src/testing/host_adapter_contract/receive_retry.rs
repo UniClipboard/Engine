@@ -70,7 +70,7 @@ impl HostFileAccess for Files {
     }
 }
 
-async fn member_id(engine: &Engine) -> String {
+pub(super) async fn member_id(engine: &Engine) -> String {
     timeout(Duration::from_secs(30), async {
         loop {
             match engine.execute(Operation::QueryDeviceGroupChoices).await {

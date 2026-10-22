@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 #[cfg(feature = "dev-tools")]
 mod active_pull_cancellation;
+#[cfg(all(feature = "dev-tools", target_os = "linux"))]
+mod blob_resources;
 mod profile_upgrade_backup;
 #[cfg(feature = "dev-tools")]
 mod receive_retry;

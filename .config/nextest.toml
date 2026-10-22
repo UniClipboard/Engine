@@ -191,6 +191,17 @@ test-group = "process"
 threads-required = "num-test-threads"
 slow-timeout = { period = "30s", terminate-after = 2 }
 
+# 受管双Engine连续2×1GiB真实流式资源验收；无重试，独占宿主并给实际字节校验留出期限。
+[[profile.default.overrides]]
+filter = "package(uc-engine) & test(/host_adapter_contract::blob_resources::/)"
+threads-required = "num-test-threads"
+slow-timeout = { period = "60s", terminate-after = 10 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-engine) & test(/host_adapter_contract::blob_resources::/)"
+threads-required = "num-test-threads"
+slow-timeout = { period = "60s", terminate-after = 10 }
+
 # 完整双节点传输与关闭使用真实期限，独占执行，避免把其它重场景负载计入关闭验收。
 [[profile.default.overrides]]
 filter = "package(uc-engine) & kind(lib) & test(=testing::host_adapter_contract::engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behavior)"

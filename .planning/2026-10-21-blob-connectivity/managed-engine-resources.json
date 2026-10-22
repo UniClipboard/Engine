@@ -1,0 +1,56 @@
+{
+  "bytes_per_file": 1073741824,
+  "closed": {
+    "fds": 15,
+    "peak_rss_kib": 438000,
+    "rss_kib": 222448,
+    "runtime_tasks": 4,
+    "threads": 58
+  },
+  "completed_rounds": 2,
+  "exact_bytes": true,
+  "initial": {
+    "fds": 15,
+    "peak_rss_kib": 21184,
+    "rss_kib": 21184,
+    "runtime_tasks": 0,
+    "threads": 5
+  },
+  "native_blob_connections_verified": false,
+  "peaks": {
+    "fds": 66,
+    "peak_rss_kib": 442160,
+    "rss_kib": 442160,
+    "runtime_tasks": 145,
+    "threads": 80
+  },
+  "prepared": {
+    "fds": 60,
+    "peak_rss_kib": 438000,
+    "rss_kib": 322944,
+    "runtime_tasks": 115,
+    "threads": 80
+  },
+  "quota_verified": false,
+  "rounds": [
+    {
+      "fds": 60,
+      "peak_rss_kib": 438000,
+      "rss_kib": 402496,
+      "runtime_tasks": 117,
+      "threads": 58
+    },
+    {
+      "fds": 60,
+      "peak_rss_kib": 438000,
+      "rss_kib": 207136,
+      "runtime_tasks": 114,
+      "threads": 58
+    }
+  ],
+  "sampler_included_in_closed_tasks": true,
+  "source_max_chunk_bytes": 65536,
+  "source_reads": 32768,
+  "tags_verified": false,
+  "thread_return_to_initial_verified": false
+}

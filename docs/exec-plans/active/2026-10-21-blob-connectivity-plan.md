@@ -1241,3 +1241,15 @@ Core红测0.002秒复现目录非终态聚合丢失StorageUnavailable（None／S
 本切片最终同源检查：全量Application1295项通过（18.123秒），1项跳过；真实Engine目录成员终态回归1项通过（12.549秒），其余323项未纳入过滤；locked metadata、workspace all-targets（3分24秒）、fmt、Rust style、repository preflight（含隐私与负例）及diff均退出0。人工审阅核对下载前目录不再按URI匹配可见缓存、目录成功只登记完整内容哈希、发布结果不进入晚期路径去重、权威错误统一保留发布责任、部分目录不进入placeholder交付、无attempt捕获失败和空结果都由原任务撤回。四处旧withdraw_publication调用及实现均已移除，未增加稳定接口、格式或后台池。
 
 构建继续单scope串行、jobs=1、共享target／缓存，5GiB内存和4GiB swap上限未放宽，已观察峰值约3.0GiB；最终scope已inactive且无本轮活动编译，专用磁盘TMPDIR为空并回收。真实Engine回归只证明本次源的既有目录终态路径，未把App的URI／无attempt注入算作同一SQLite／SDK故障或设备验收。完整spec保持active；首次Staging日志前强杀清理、完整生命周期、来源C、受管1GiB、最终兼容、平台与设备矩阵继续未完成。
+
+### 2026-10-23：受管Engine连续2×1GiB资源证据
+
+通过稳定Engine操作、真实成员配对、受管Uni／SDK、实际SQLite和磁盘输出连续接收两份不同内容的1GiB文件。HostFileAccess按固定不同字节对生成流，每次最多返回128KiB，不在fixture中分配整份输入；实际命令请求的最大块为64KiB，共32768次读取。接收后只读取小型URI表示，文件本体用64KiB块独立比对固定期望字节，逐份确认长度1GiB和EOF，不调用ReadBlob读取大文件内容。Sampler只保留RSS／FD／线程／当前runtime任务峰值，内存为常数；每轮及关闭后另留检查点，不输出内容、身份或原始路径。生产传输、预算、协议和持久格式未改。
+
+首轮因测试装配误用不存在的saved_count而编译101，不计业务红测或通过；修正为既有items_completed。三个实际运行分别77.078秒、77.736秒、81.319秒通过，首轮原始计数和补强后计数均保留。最终CI入口工件为`.planning/2026-10-21-blob-connectivity/managed-resource-evidence/blob-resources/managed-engine.json`；两轮内容均实际完成并读回，FD均59、当前runtime任务均115；采样RSS峰值436256KiB（约426MiB），关闭后FD15（初值16）、当前runtime任务3（其中1个Sampler）、线程59（初值5）。测试明确只断言关闭计数进入预先设定的FD／任务容差，以及第二轮FD／任务／线程／RSS不持续增长；不能据此声称所有线程或任务归零，也未确认余下两个任务的归属。
+
+完整resource条件仍未达成：实际blob连接数、原许可／服务额度、SDK临时tag及staging恢复计数未取得，工件明确标false；线程回初值也为false。该证据不能替代全部SDK私有runtime任务、生命周期、来源C或平台／设备矩阵，也不把旧SDK约45MiB基线和双完整Engine约426MiB直接作同口径比较。首次Staging日志前强杀清理继续未完成。
+
+用例加入既有host_adapter_contract，只有Linux＋dev-tools编译；既有workspace默认解析由connectivity host启用Engine dev-tools，locked metadata已实查features为default／dev-tools。默认workspace CI因此运行该非ignored用例；nextest明确独占、零重试及10分钟期限。沿既有UC_TEST_ARTIFACTS_DIR生成计数工件，保留显式绝对路径覆盖；本地最终运行只设置原CI工件变量，已验证自动创建目录和写入。没有新建替代测试框架、扩大Engine观测接口或增加测试专属生产阶段查询。
+
+最终同源检查：受管2×1GiB用例1项通过（81.319秒），其余324项未纳入过滤；locked metadata、workspace all-targets（2分13秒）、fmt、Rust style、repository preflight（含隐私与负例）、diff均退出0。人工审阅核对生成式Host有限块、文件核对独立期望、无整份ReadBlob、关闭后计数范围、未知项false标记、工件绝对路径及workspace默认特性。生产代码未改，未重复无关App全量回归。构建始终单scope串行、jobs=1、共享target／缓存，5GiB内存／4GiB swap上限保持；scope已inactive，确认无本轮活动编译，磁盘TMPDIR为空并回收。完整spec继续active，资源缺口及其他未完成矩阵不勾选通过。

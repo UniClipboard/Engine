@@ -138,3 +138,5 @@ FileCleaned已提交da77bea0（Core／App30、Profile42、Native14及根门禁�
 - 剩余重复投递目录路径：完整负责人仍为原Application接收。下载前按内容身份排除已知重复；目录已发布并取得提交权后，不再用本机URI路径代替内容身份去重。真实文件系统中先保存旧目录、删除旧根，再接收同名但内容身份不同的目录，验证新内容完成一次原提交而不被错误撤回；原同内容快速去重保留。所有构建继续单scope串行及既有内存／swap限制。
 
 - 清除剩余只记警告的撤回入口：捕获失败或返回None时，无权威attempt的内部组合也交给原fail_directory_receive，不能丢弃实际发布责任；placeholder防御退出若携带发布责任，同样先完整失败结算。以完整App及真实文件系统验证失败／空捕获、实际撤回受阻、关闭未完成和恢复后的自动清理。原错误分类及来源保留，不新增稳定接口或无跟踪生产旁路。
+
+- 当前受管Engine资源验收：沿既有稳定Engine、HostFileAccess、真实成员配对、SDK和SQLite路径连续传2份不同内容的1GiB文件，生成式Host每块最多128KiB，接收输出逐块独立比对固定字节。采样进程RSS／FD／线程／当前runtime任务，保存传前、每轮、峰值、关闭后计数；默认workspace CI已经通过connectivity host依赖启用dev-tools，nextest为该单项设独占和明确10分钟期限而不重试。测试只读已有完整能力，不扩展Engine观测／步骤API；尚未取得的tag、实际blob连接和quota计数明确不算完成。测试数据仅使用磁盘专用TMPDIR，构建继续单scope串行及原限制。
