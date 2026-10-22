@@ -115,3 +115,90 @@ async fn v3_progress_atomically_saves_encrypted_record_and_reseals_only_remainin
         vec![fixture.artifacts[1].clone()]
     );
 }
+
+#[tokio::test]
+async fn v3_failure_settlement_reseals_journal_and_preserves_delivered_content() {
+    let fixture = Fixture::new().await;
+    let space = SpaceId::from_str("test-space");
+    let session = Arc::new(InMemorySession::new());
+    session.set_master_key_for_space(space.clone(), MasterKey::from_bytes(&[9; 32]).unwrap());
+    let material = session.create_migrated_space_material(&space, 1).unwrap();
+    let vault = Arc::new(ProfileContentKeyVault::new(
+        fixture.directory.path().join("vault"),
+        Arc::new(Storage::default()),
+        [0x31; 16],
+    ));
+    vault
+        .install_verified_space_material(&material)
+        .await
+        .unwrap();
+    session.install_space_material(&material).unwrap();
+    let protection = Arc::new(ContentProtection::for_content(session, vault));
+    let journal =
+        DieselReceiveArtifactLogRepository::new_v3(fixture.executor.clone(), protection.clone());
+    journal
+        .record_receive_artifacts(&ReceiveArtifactRecord {
+            entry_id: "entry".into(),
+            attempt_id: "a1".into(),
+            phase: ReceiveArtifactPhase::Preparing,
+            resolution: ReceiveArtifactResolution::Pending,
+            artifacts: fixture.artifacts.clone(),
+            updated_at_ms: 1,
+        })
+        .await
+        .unwrap();
+    let commit = EncryptingInboundReceiveCommit::new(
+        Arc::new(DieselInboundReceiveCommitRepository::new_v3(
+            fixture.executor.clone(),
+            protection.clone(),
+        )),
+        Arc::new(V3InlinePayloadCipher::new(protection.clone())),
+    );
+    commit
+        .commit_inbound_receive(&fixture.progress(0))
+        .await
+        .unwrap();
+    std::fs::remove_file(&fixture.artifacts[1].final_path).unwrap();
+    commit
+        .commit_inbound_receive(&InboundReceiveSettlement::FileFailed {
+            entry_id: EntryId::from("entry"),
+            attempt_id: "a1".into(),
+            artifact: fixture.artifacts[1].clone(),
+            failure: uc_core::ports::ReceiveFileFailure::Failed(
+                uc_core::ports::ReceiveItemFailureReason::StorageUnavailable,
+            ),
+            now_ms: 3,
+        })
+        .await
+        .unwrap();
+    let (_, _, bindings, ciphertext, state) = fixture.snapshot();
+    assert_eq!(bindings, ["entry_bound", "attempt_bound"]);
+    assert_eq!(state, "receiving");
+    assert_eq!(&ciphertext[..4], b"UCP3");
+    assert!(!ciphertext
+        .windows(b"private-output".len())
+        .any(|part| part == b"private-output"));
+    let reopened = DieselReceiveArtifactLogRepository::new_v3(
+        DieselSqliteExecutor::new(
+            init_db_pool(
+                fixture
+                    .directory
+                    .path()
+                    .join("progress.sqlite")
+                    .to_str()
+                    .unwrap(),
+            )
+            .unwrap(),
+        ),
+        protection,
+    );
+    assert!(
+        reopened.list_unsettled_receive_artifacts().await.unwrap()[0]
+            .artifacts
+            .is_empty()
+    );
+    assert_eq!(
+        std::fs::read(&fixture.artifacts[0].final_path).unwrap(),
+        b"saved-content"
+    );
+}

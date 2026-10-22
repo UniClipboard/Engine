@@ -7,12 +7,13 @@ use crate::testing::receive_exports::{ReceiveExports, ReleaseOnDrop};
 use crate::{
     BlobResourceInput, CancelEntryReceiveInput, CreateSpaceInput, DeviceMembershipSummary, Engine,
     EngineConfig, EngineErrorCategory, EngineEvent, EntryReceiveCancellationOutcome,
-    EntryReceiveProgressInput, EntryReceiveRetryOutcome, HistoryEntryInput, HostCapabilities,
-    HostCapabilityError, HostCapabilityErrorCategory, HostClipboardSnapshot, HostDirectories,
-    HostFileAccess, HostFileHandle, HostFileMetadata, JoinSpaceInput, Operation, OperationResult,
-    QueryHistoryInput, ReceiveItemFailureReason, ReceiveProgressSummary,
-    ReceiveRetryUnavailableReason, RemoveMemberInput, RetryEntryReceiveInput, SecretString,
-    SendFilesInput, SendTextInput, SettingsPatch, SyncSettingsPatch,
+    EntryReceiveProgressInput, EntryReceiveRetryOutcome, EventStream, HistoryEntryInput,
+    HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory, HostClipboardSnapshot,
+    HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata, JoinSpaceInput, Operation,
+    OperationResult, OperationTerminal, QueryHistoryInput, ReceiveItemFailureReason,
+    ReceiveProgressSummary, ReceiveRetryUnavailableReason, RemoveMemberInput,
+    RetryEntryReceiveInput, SecretString, SendFilesInput, SendTextInput, SettingsPatch,
+    SyncSettingsPatch,
 };
 use diesel::sql_types::{Binary, Text};
 use diesel::{Connection, QueryableByName, RunQueryDsl, SqliteConnection};
@@ -164,6 +165,7 @@ struct ReceiveCase {
     receiver_root: TempDir,
     exports: Arc<ReceiveExports>,
     first: ReceiveProgressSummary,
+    events: EventStream,
     saved: BTreeMap<Vec<u8>, PathBuf>,
     _source_root: TempDir,
     _server: MockServer,
@@ -368,6 +370,7 @@ async fn receive_case_with_progress(pause_first: bool, prove_progress: bool) -> 
         exports,
         first,
         saved,
+        events,
         _source_root: source_root,
         _server: server,
     }
@@ -577,7 +580,7 @@ async fn real_engine_cancelled_retry_waits_for_export_and_keeps_previous_success
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn real_engine_abandoned_deletion_stops_retry_and_removes_all_receive_state() {
     let _lock = ENGINE_TEST_LOCK.lock().await;
-    let case = receive_case(false).await;
+    let mut case = receive_case(false).await;
     let _release = ReleaseOnDrop(case.exports.clone());
     let receiver = &case.receiver;
     assert!(matches!(
@@ -632,6 +635,18 @@ async fn real_engine_abandoned_deletion_stops_retry_and_removes_all_receive_stat
     })
     .await
     .unwrap();
+    // 数据消失早于搜索清理及删除scope退出。本例只丢弃了这一项操作的等待；
+    // 等它的Cancelled完成事件后再断言重复删除，避免与仍持有封口的原操作竞争。
+    next_engine_event_matching(&mut case.events, |event| {
+        matches!(
+            event,
+            EngineEvent::OperationFinished {
+                terminal: OperationTerminal::Cancelled,
+                ..
+            }
+        )
+    })
+    .await;
     assert_eq!(
         receiver
             .execute(Operation::DeleteHistoryEntry(HistoryEntryInput {

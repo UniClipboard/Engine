@@ -64,8 +64,8 @@ use super::timing::{RAPID_DUPLICATE_WINDOW, VISIBLE_DUPLICATE_WINDOW};
 use super::{ApplyInboundError, ApplyInboundInput, ApplyOutcome, InboundActivationOwner};
 use crate::transfer::receive::materialization::{
     is_directory_cancel_error, verify_file_set_identity, DirectoryPublication,
-    InboundBlobMaterializer, MaterializeOutcome, OutputCleanupFailure, ReceiveWorkPlan,
-    RollbackOutcome,
+    FileFailureSettlementError, InboundBlobMaterializer, MaterializeOutcome, OutputCleanupFailure,
+    ReceiveWorkPlan, RollbackOutcome,
 };
 
 const RECENT_INBOUND_MAX_RECORDS: u64 = 128;
@@ -1398,6 +1398,16 @@ impl ApplyInboundClipboardUseCase {
                                 return Err(ApplyInboundError::Internal(
                                     error.context("cleanup inbound file output"),
                                 ));
+                            }
+                            if let Some(failure) =
+                                error.downcast_ref::<FileFailureSettlementError>()
+                            {
+                                uc_warn!(
+                                    error_kind = "receive_file_failure_settlement",
+                                    io_error_kind = io_error_kind(failure.settlement.as_ref()),
+                                    "receive file failure settlement remains incomplete"
+                                );
+                                return Err(ApplyInboundError::Internal(error));
                             }
                             self.settle_receive_without_entry(
                                 &receiver_entry_id,

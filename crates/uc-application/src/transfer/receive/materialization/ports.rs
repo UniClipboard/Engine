@@ -6,7 +6,10 @@ use crate::facade::blob_transfer::{
 use anyhow::Result;
 use async_trait::async_trait;
 use uc_core::file_transfer::FileTransferFailureReason;
-use uc_core::{ports::ReceiveArtifact, SystemClipboardSnapshot};
+use uc_core::{
+    ports::{ReceiveArtifact, ReceiveFileFailure},
+    SystemClipboardSnapshot,
+};
 
 #[async_trait]
 pub trait InboundBlobMaterializer: Send + Sync {
@@ -68,6 +71,13 @@ impl InboundBlobFetcher for BlobTransferFacade {
 /// 接收负责人在原许可内保存一个文件及当前完整的交付事实。
 #[async_trait]
 pub(crate) trait ReceiveFileProgress: Send + Sync {
+    /// 本项输出已清理，记录实际失败并解除其日志责任；失败不能宣称结算完成。
+    async fn fail_file(
+        &self,
+        artifact: &ReceiveArtifact,
+        failure: ReceiveFileFailure,
+    ) -> Result<()>;
+
     async fn persist_file(
         &self,
         snapshot: SystemClipboardSnapshot,

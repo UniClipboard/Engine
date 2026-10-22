@@ -81,7 +81,8 @@ impl CommitInboundReceivePort for RecordingCommit {
                     .extend(delivered_item_ids.clone());
                 record
             }
-            InboundReceiveSettlement::NoEntry { .. } => return Ok(()),
+            InboundReceiveSettlement::NoEntry { .. }
+            | InboundReceiveSettlement::FileFailed { .. } => return Ok(()),
         };
         let representations = match record {
             InboundReceiveRecord::Create {

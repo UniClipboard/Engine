@@ -6,25 +6,27 @@ use crate::db::repositories::receive_artifact_log_repo::ReceiveArtifactProtectio
 use crate::db::schema::{file_transfer, receive_artifact_log};
 use anyhow::Result;
 use diesel::prelude::*;
-use uc_core::ports::inbound_receive_commit::receive_artifacts_after_delivery;
+use uc_core::ports::inbound_receive_commit::{
+    receive_artifacts_after_settlement, ReceiveArtifactSettlement,
+};
 use uc_core::ports::{
     InboundReceiveCommitError, ReceiveArtifact, ReceiveArtifactPhase, ReceiveArtifactRecord,
     ReceiveArtifactResolution,
 };
 
-pub(super) struct PreparedProgressArtifacts {
+pub(super) struct PreparedFileArtifacts {
     item_id: String,
     before: Vec<u8>,
     after: Vec<u8>,
 }
-impl PreparedProgressArtifacts {
+impl PreparedFileArtifacts {
     pub(super) async fn prepare(
         executor: &impl DbExecutor,
         protection: &ReceiveArtifactProtection,
         entry_id: &str,
         attempt_id: &str,
         delivered: &ReceiveArtifact,
-        delivered_item_ids: &[String],
+        settlement: ReceiveArtifactSettlement<'_>,
     ) -> Result<Self, InboundReceiveCommitError> {
         let entry = entry_id.to_owned();
         let attempt = attempt_id.to_owned();
@@ -48,7 +50,7 @@ impl PreparedProgressArtifacts {
             .open(entry_id, attempt_id, &row.artifact_ciphertext)
             .await
             .map_err(|source| InboundReceiveCommitError::Backend(Box::new(source)))?;
-        let remaining = receive_artifacts_after_delivery(
+        let remaining = receive_artifacts_after_settlement(
             &ReceiveArtifactRecord {
                 entry_id: entry_id.to_owned(),
                 attempt_id: attempt_id.to_owned(),
@@ -58,7 +60,7 @@ impl PreparedProgressArtifacts {
                 updated_at_ms: row.updated_at_ms,
             },
             delivered,
-            delivered_item_ids,
+            settlement,
         )?;
         let after = protection
             .seal(entry_id, attempt_id, &remaining)

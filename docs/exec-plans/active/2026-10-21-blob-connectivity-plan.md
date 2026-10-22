@@ -975,3 +975,17 @@ SQLite目标集测试覆盖保存条目、NoEntry、孤儿逐项记录、仅产�
 真实许可和文件输出、明确保存端替身验证：保存期间重复获取Busy且不创建新输出、五秒未完成、等待方退出后重复取消、StorageFull两次查询保留、取消先于提交只清理本项且同批后项照常保存。Core／手动重试25项通过（5.093秒）；全部相关Application与真实Engine接收／重试214项通过（55.820秒）。最终同一源快照Core／Application／Engine库1887项通过／6项跳过（199.675秒）；metadata解析812包，workspace全目标check（1m36s）、repository、fmt、Rust style、1348站点隐私清单及diff通过。手工审查同一资源所有权、观察者无资源、锁顺序、终态不可逆、协调者复用及错误链；code-review skill缺失，不冒称技能审查。未执行设备仍跳过。
 
 该片只解决运行中单项取消的实际等待，不等同于SQLite持久取消／保存失败分类完成。当前持久file_transfer可能已Completed而未entry_bound，Core在attempt失败时把该项投影Interrupted；须通过实际SQLite保存失败、混合取消与重开查询证明并修复，同时保留底层终态和原状态词表。普通已有partial重投映射、清理失败恢复、目录完整预算、表示blob、来源授权、全部生命周期、受管1GiB及最终head网络／CI／设备矩阵仍继续。
+
+
+- 当前保存失败持久结算切片：完整负责人仍为ReceiveAction／物化模块，调用方只提交原接收。原网络已完成的独立文件若保存失败或取消先于保存，先清理自身新输出，再通过原完整提交port原子记录固定业务失败原因并只解除该项清理责任；底层下载Completed不回退。保存失败事实与日志移交任一失败均不宣称结算完成，保留原错误和独立结算来源，由现有reconciliation处理未结算责任。复用现有failure_code、AEAD日志、状态和schema，不保存新recipe或自由文本；先实际SQLite／AEAD验证保存故障、混合取消、重开查询及事务回滚，再接完整Application并验证原许可和错误链。
+
+
+### 2026-10-22 网络完成后的本地失败持久结算
+
+同一ReceiveAction在原许可内处理实际保存失败／提交前单项取消：先清理自身新输出，再经既有完整提交port的FileFailed原子保存固定业务失败与该项清理责任移交。Core核对原产物身份／归属、尝试可结算阶段，并决定已交付优先及网络完成后的业务投影；Infra在同一事务内比较原AEAD日志、验证原attempt、移除本项并写入既有failure_code。底层Completed不可回退；本地失败项不再计为已完成项／字节，迟到汇总不能把失败项重新绑定成功。记录失败本身出错则保留原保存source与独立结算source，Root保持非终态，不按NoEntry假报结束。复用原schema、状态字符串、固定失败代码和V1／V3，不新增格式、recipe、池、许可或Engine阶段查询。
+
+实际SQLite保存触发器、产物AEAD与重开查询先暴露未交付仍计为2项完成，现已修复。最终原子提交契约20项通过（1.71秒）、加密转发2项通过；覆盖保存事务失败、混合失败／单项取消、晚段SQL回滚、已交付文件保护、终态拒绝及迟到成功绑定拒绝。生产V3重封后重新打开日志为空，原成功文件仍在。Core与完整Application手动重试24项通过（5.088秒），包括失败继续后项、原许可保护、双来源及非终态；保存端在Application接缝明确使用替身，不冒称实际Engine保存故障。
+
+首轮五crate库2232通过／1失败／9跳过（200.781秒）：abandoned deletion在数据消失后立即重复删除，与原删除仍持有的封口竞争。原样单测4.510秒通过。测试改为等待该例唯一被丢弃等待的OperationFinished(Cancelled)完成事件后保留原NotFound断言；生产路径、超时与并发均未放宽。定向屏障4.622秒通过；最终同一源快照Core／Application／Engine／Storage／Content库2233通过／9跳过（197.177秒），metadata812包、workspace全目标check（1m43s）、repository、fmt、Rust style、1349站点观测隐私及diff通过。手工审查原子性、原许可和日志责任、已交付优先、底层终态不回退、source链及删除完成边界；code-review skill缺失，未冒称技能审查。设备未执行仍跳过。
+
+后续优先验证Root在FileFailureSettlementError之后begin_receive_failure也失败的路径：目前先尝试状态写入再检查原错误，可能覆盖已有双来源，尚无故障注入证据；需先证明并修复，再在真实Engine保存边界注入SQLite故障。结算存储失败后的资源持有／恢复移交尚未完成，本轮finish仍会释放资源，不能把它当完整预算验收。计数本轮只排除已持久本地失败，未保存但无failure_code的网络完成项仍沿既有统计；整个保存期间的计数语义须继续核对。普通已有partial重投映射、目录／表示完整预算、清理恢复、来源授权、全部生命周期、受管1GiB与最终head网络／CI／设备矩阵仍继续，完整spec未完成。

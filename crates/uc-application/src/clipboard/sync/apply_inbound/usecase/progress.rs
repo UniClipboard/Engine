@@ -9,7 +9,9 @@ use async_trait::async_trait;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use uc_core::ids::{DeviceId, EntryId};
-use uc_core::ports::{InboundReceiveCommitError, ReceiveArtifact};
+use uc_core::ports::{
+    InboundReceiveCommitError, InboundReceiveSettlement, ReceiveArtifact, ReceiveFileFailure,
+};
 use uc_core::{SnapshotHash, SystemClipboardSnapshot};
 
 pub(super) struct FileProgress {
@@ -30,6 +32,29 @@ impl FileProgress {
 }
 #[async_trait]
 impl ReceiveFileProgress for FileProgress {
+    async fn fail_file(
+        &self,
+        artifact: &ReceiveArtifact,
+        failure: ReceiveFileFailure,
+    ) -> Result<()> {
+        let ports = self
+            .owner
+            .receive_attempts
+            .as_ref()
+            .ok_or_else(|| anyhow!("file settlement ports are not wired"))?;
+        ports
+            .commit
+            .commit_inbound_receive(&InboundReceiveSettlement::FileFailed {
+                entry_id: self.entry.clone(),
+                attempt_id: self.attempt.clone(),
+                artifact: artifact.clone(),
+                failure,
+                now_ms: ports.clock.now_ms(),
+            })
+            .await?;
+        Ok(())
+    }
+
     async fn persist_file(
         &self,
         snapshot: SystemClipboardSnapshot,

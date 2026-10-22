@@ -75,3 +75,12 @@ impl FileProgressSnapshot {
 #[derive(Debug, thiserror::Error)]
 #[error("receive file progress commit failed")]
 pub(crate) struct FileProgressCommitError(#[source] pub(crate) anyhow::Error);
+
+/// 保存失败后的持久结算也失败；两个来源都归完整接收负责人。
+#[derive(Debug, thiserror::Error)]
+#[error("receive file failure settlement remains incomplete")]
+pub(crate) struct FileFailureSettlementError {
+    #[source]
+    pub(crate) cause: anyhow::Error,
+    pub(crate) settlement: anyhow::Error,
+}

@@ -285,3 +285,13 @@
 - 观察终态修复后24项通过（5.094秒）；取消实现按完整职责移入facade/cancellation.rs，未保留转调副本。新增实际下载结果交接屏障证明：取消先于本地提交时拒绝该文件保存、删除本项输出，随后仍保存同批其他所选文件且保留旧成功。Core／手动重试25项通过（5.093秒）；再扩大到全部Application blob／receive／ApplyInbound及真实Engine接收重试组，214通过（55.820秒）。最终Core／Application／Engine库验证运行中。
 
 - 最终同一源快照Core／Application／Engine1887通过／6跳过（199.675秒）。metadata812包、workspace全目标check（1m36s）、repository、fmt、Rust style、1348站点隐私及diff通过。手工审查实际取消与资源所有权，无可用code-review skill。下一步持久保存失败分类须用SQLite／重开证明，不能将本地完成信号当持久事实；完整spec仍未完成。
+
+
+- 保存失败持久结算：原网络Completed不回退，在既有CommitInboundReceivePort增加FileFailed完整能力。物化负责人先清理本项输出，再由同一事务验证原attempt非终态、原AEAD日志密文／身份／归属，将固定失败原因写入既有failure_code并仅移除该产物。原许可仍在batch中；失败事务不成功则返回FileFailureSettlementError，保留保存与结算两个来源，Root不再按NoEntry假称结束。Core负责可接受的attempt阶段、已交付优先及本地结果投影；Infra仅编码既有固定词表／原子CAS。迟到最终保存不得把有本地失败事实的文件重新绑定成功。
+- 首次真实SQLite新故障组2通过／1失败：重新打开后items_completed仍为2（预期0），实际保存触发器已失败、两个文件均未交付。修正查询计数和字节汇总，避免按底层Completed把本地失败／取消算成功。原状态词表、schema、V1／V3及metadata版本保持不变；不新增持久recipe或自由文本。完整原子契约最终20项通过（1.71秒），另加密decorator2项通过；包括生产V3重封／重开、保存事务失败、混合取消、晚段SQL回滚、已交付保护、迟到汇总拒绝。
+- Application首次扩大22通过／1失败：新增双来源测试错误地只取一层source进行downcast，原owner已有Arc<SharedSource>，需遍历完整来源链；首次改为Internal的anyhow直接downcast仍未穿透共享包装，再改为chain遍历。最终Core／完整手动重试24通过（5.088秒），包含保存失败继续后项、本地失败持久事实端口接线、结算失败保留StorageFull与PermissionDenied、旧成功不变且attempt非终态。此接缝保存端明确替身，未冒称真实Engine保存故障的SQLite验收。最终五crate库验证正在运行，不能据局部通过宣称完整spec完成。
+
+- 首次五crate库扩大2232通过／1失败／9跳过（200.781秒）。真实Engine abandoned deletion最后立即重复删除得到Internal而预期NotFound；同源原样单测复跑4.510秒通过。实际删除代码在SQL／文件删除之后仍持ReceiveCleanup封口执行搜索清理，测试的数据消失条件不是操作完成条件。测试现保留接收端原EventStream，仅本例有一个被丢弃的操作等待，等待其OperationFinished(Cancelled)实际完成事件后再执行原NotFound断言；不改生产语义、不放宽断言、超时或并发。需重新验证此最终测试修改后的完整快照，不能将首次失败当通过。
+- 该持久失败切片尚不证明结算存储本身失败时资源持有至恢复的完整移交：现沿既有非终态恢复路径，finish仍释放资源，完整预算／失败恢复责任仍须继续。真实Engine完整保存故障尚需独立注入验证；现有Engine部分失败是导出故障，不等于网络完成后的实际保存故障。
+
+- 最终删除完成屏障4.622秒通过；同一最终源快照五crate库2233通过／9跳过（197.177秒）。metadata812包、workspace全目标check（1m43s）、repository、fmt、Rust style、1349站点隐私及diff通过。手工审查原子日志／失败事实、真实许可、终态保护及来源链，无可用code-review skill。下一片先用故障注入验证FileFailureSettlementError之后begin_receive_failure也失败时是否覆盖原双来源；实际Engine保存故障、未结算资源恢复及完整spec继续。另需核对无failure_code但未entry_bound的网络完成项统计，当前只排除持久本地失败，不冒称整个保存期间统计已统一。

@@ -210,6 +210,8 @@ struct AttemptGate {
     retry_calls: AtomicUsize,
     claim_calls: AtomicUsize,
     commit_calls: AtomicUsize,
+    file_failures: Mutex<Vec<(String, uc_core::ports::ReceiveFileFailure)>>,
+    fail_file_settlement: AtomicBool,
     phases: Mutex<Vec<PublishPhase>>,
     root_maps: Mutex<Vec<Vec<(PathBuf, PathBuf)>>>,
 }
@@ -226,6 +228,8 @@ impl AttemptGate {
             retry_calls: AtomicUsize::new(0),
             claim_calls: AtomicUsize::new(0),
             commit_calls: AtomicUsize::new(0),
+            file_failures: Mutex::new(Vec::new()),
+            fail_file_settlement: AtomicBool::new(false),
             phases: Mutex::new(Vec::new()),
             root_maps: Mutex::new(Vec::new()),
         })
@@ -318,6 +322,21 @@ impl CommitInboundReceivePort for AttemptGate {
     ) -> std::result::Result<(), InboundReceiveCommitError> {
         self.commit_calls.fetch_add(1, Ordering::SeqCst);
         let (attempt_id, expected, terminal) = match settlement {
+            InboundReceiveSettlement::FileFailed {
+                artifact, failure, ..
+            } => {
+                assert!(failure.accepts_attempt(*self.state.lock().unwrap()));
+                if self.fail_file_settlement.load(Ordering::SeqCst) {
+                    return Err(InboundReceiveCommitError::Backend(Box::new(
+                        std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+                    )));
+                }
+                self.file_failures
+                    .lock()
+                    .unwrap()
+                    .push((artifact.item_id.clone(), *failure));
+                return Ok(());
+            }
             InboundReceiveSettlement::Progress { attempt_id, .. } => {
                 (attempt_id, AttemptState::Receiving, AttemptState::Receiving)
             }

@@ -32,6 +32,7 @@ use uc_core::ports::file_transfer::{
 };
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::space::DeriveSpaceSubkeyPort;
+use uc_core::ports::ReceiveFileFailure;
 use uc_infra_security::ContentProtection;
 mod retry;
 use uc_observability_contract::{
@@ -596,7 +597,7 @@ fn receive_failure_reason(code: Option<&str>) -> ReceiveItemFailureReason {
         .unwrap_or(ReceiveItemFailureReason::Unknown)
 }
 
-fn receive_failure_code(reason: ReceiveItemFailureReason) -> &'static str {
+pub(super) fn receive_failure_code(reason: ReceiveItemFailureReason) -> &'static str {
     RECEIVE_FAILURE_CODES
         .iter()
         .find_map(|(known, value)| (*known == reason).then_some(*value))
@@ -647,7 +648,10 @@ impl<E: DbExecutor> GetEntryReceiveProgressPort for DieselFileTransferRepository
         })?;
         let items_completed = u32::try_from(
             rows.iter()
-                .filter(|row| row.status == TrackedFileTransferStatus::Completed.as_str())
+                .filter(|row| {
+                    row.status == TrackedFileTransferStatus::Completed.as_str()
+                        && row.failure_code.is_none()
+                })
                 .count(),
         )
         // discarded-source[int-conversion]: `core::num::TryFromIntError`: the target classification already expresses the range or length mismatch
@@ -666,7 +670,9 @@ impl<E: DbExecutor> GetEntryReceiveProgressPort for DieselFileTransferRepository
                 None => Ok(sum),
             })?;
         let completed_bytes = rows.iter().try_fold(0_i64, |sum, row| {
-            if row.status != TrackedFileTransferStatus::Completed.as_str() {
+            if row.status != TrackedFileTransferStatus::Completed.as_str()
+                || row.failure_code.is_some()
+            {
                 return Ok(sum);
             }
             match row.file_size {
@@ -693,7 +699,17 @@ impl<E: DbExecutor> GetEntryReceiveProgressPort for DieselFileTransferRepository
                 Some("file") => ReceiveItemKind::File,
                 _ => ReceiveItemKind::Unknown,
             };
-            let failure_reason = match status {
+            let local_failure = row.failure_code.as_deref().map(|code| {
+                if code == FileTransferCancellationReason::LocalUser.as_str() {
+                    ReceiveFileFailure::Cancelled
+                } else {
+                    ReceiveFileFailure::Failed(receive_failure_reason(Some(code)))
+                }
+            });
+            let (status, local_reason) = local_failure.map_or((status, None), |failure| {
+                failure.project(status, row.binding_state == ENTRY_DELIVERED_BINDING)
+            });
+            let failure_reason = local_reason.or_else(|| match status {
                 TrackedFileTransferStatus::Failed => {
                     Some(receive_failure_reason(row.failure_code.as_deref()))
                 }
@@ -703,7 +719,7 @@ impl<E: DbExecutor> GetEntryReceiveProgressPort for DieselFileTransferRepository
                     Some(ReceiveItemFailureReason::TimedOut)
                 }
                 _ => None,
-            };
+            });
             items.push(ReceiveItemProgress {
                 item_id: row
                     .receive_item_id

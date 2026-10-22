@@ -1,3 +1,4 @@
+mod file_failure;
 mod progress;
 
 use std::sync::Arc;
@@ -33,7 +34,8 @@ use crate::db::ports::{DbExecutor, InsertMapper};
 use crate::db::schema::{
     directory_publish_log, entry_receive_attempt, file_transfer, receive_artifact_log,
 };
-use progress::PreparedProgressArtifacts;
+use progress::PreparedFileArtifacts;
+use uc_core::ports::inbound_receive_commit::ReceiveArtifactSettlement;
 use uc_infra_security::ContentProtection;
 
 pub struct DieselInboundReceiveCommitRepository<E> {
@@ -166,6 +168,18 @@ impl<E: DbExecutor> CommitInboundReceivePort for DieselInboundReceiveCommitRepos
         &self,
         settlement: &InboundReceiveSettlement,
     ) -> Result<(), InboundReceiveCommitError> {
+        if let InboundReceiveSettlement::FileFailed {
+            entry_id,
+            attempt_id,
+            artifact,
+            failure,
+            now_ms,
+        } = settlement
+        {
+            return self
+                .commit_file_failure(entry_id, attempt_id, artifact, *failure, *now_ms)
+                .await;
+        }
         let allow_cancelled_replay = matches!(
             settlement,
             InboundReceiveSettlement::NoEntry {
@@ -182,13 +196,13 @@ impl<E: DbExecutor> CommitInboundReceivePort for DieselInboundReceiveCommitRepos
                 artifact,
                 ..
             } => Some(
-                PreparedProgressArtifacts::prepare(
+                PreparedFileArtifacts::prepare(
                     &self.executor,
                     &self.artifact_protection,
                     record.entry_id().as_ref(),
                     attempt_id,
                     artifact,
-                    delivered_item_ids,
+                    ReceiveArtifactSettlement::Delivered(delivered_item_ids),
                 )
                 .await?,
             ),
@@ -205,9 +219,15 @@ impl<E: DbExecutor> CommitInboundReceivePort for DieselInboundReceiveCommitRepos
                 delivered_item_ids, ..
             } => delivered_item_ids.clone(),
             InboundReceiveSettlement::NoEntry { .. } => Vec::new(),
+            InboundReceiveSettlement::FileFailed { .. } => {
+                return Err(InboundReceiveCommitError::AttemptStateMismatch)
+            }
         };
         let (record, entry_id, attempt_id, file_set, expected, target, artifacts, now_ms) =
             match settlement {
+                InboundReceiveSettlement::FileFailed { .. } => {
+                    return Err(InboundReceiveCommitError::AttemptStateMismatch)
+                }
                 InboundReceiveSettlement::Progress {
                     record,
                     attempt_id,
@@ -366,7 +386,8 @@ impl<E: DbExecutor> CommitInboundReceivePort for DieselInboundReceiveCommitRepos
                                 .filter(file_transfer::entry_id.eq(&entry_id))
                                 .filter(file_transfer::attempt_id.eq(&attempt_id))
                                 .filter(file_transfer::receive_item_id.eq(item_id))
-                                .filter(file_transfer::status.eq("completed")),
+                                .filter(file_transfer::status.eq("completed"))
+                                .filter(file_transfer::failure_code.is_null()),
                         )
                         .set((
                             file_transfer::binding_state.eq(ENTRY_DELIVERED_BINDING),

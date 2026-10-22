@@ -119,6 +119,15 @@ async fn failed_file_commit_cleans_only_its_output_and_next_file_can_commit() {
     );
     assert_eq!(fixture.capture.progress_calls.load(Ordering::SeqCst), 2);
     assert_eq!(
+        fixture.attempts.file_failures.lock().unwrap().as_slice(),
+        &[(
+            format!("receiver:attempt:{attempt_id}:member:1"),
+            uc_core::ports::ReceiveFileFailure::Failed(
+                ReceiveItemFailureReason::StorageUnavailable
+            ),
+        )]
+    );
+    assert_eq!(
         fixture.capture.held.lock().unwrap().as_slice(),
         &[(true, 1), (true, 1), (false, 0)]
     );
@@ -214,6 +223,64 @@ async fn cancellation_cas_before_stop_notification_prevents_next_file_and_keeps_
         landed.keys().copied().collect::<HashSet<_>>(),
         HashSet::from([0])
     );
+    assert_eq!(std::fs::read(&fixture.saved).unwrap(), b"success");
+    assert_eq!(
+        std::fs::read_dir(fixture.saved.parent().unwrap())
+            .unwrap()
+            .count(),
+        1
+    );
+    assert_eq!(protected.load(Ordering::SeqCst), 0);
+    transport
+        .shutdown(BlobShutdownWait::Complete)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn failure_settlement_error_preserves_both_sources_and_keeps_attempt_nonterminal() {
+    let fixture = Fixture::new(0).await;
+    *fixture.capture.fail_progress_at.lock().unwrap() = Some(0);
+    fixture
+        .attempts
+        .fail_file_settlement
+        .store(true, Ordering::SeqCst);
+    let (facade, transport, protected) = local_file_probe();
+    let apply = fixture
+        .apply
+        .as_ref()
+        .clone()
+        .with_blob_materializer(Arc::new(test_materializer(
+            facade,
+            fixture._cache.path().to_owned(),
+        )));
+    let (prepared, accepted) = fixture.prepared();
+    let error = apply.execute_retry(prepared).await.unwrap_err();
+    let RetryEntryReceiveOutcome::Accepted { .. } = accepted.await.unwrap() else {
+        panic!("not accepted")
+    };
+    let ApplyInboundError::Internal(source) = &error else {
+        panic!("wrong failure category: {error:?}")
+    };
+    let failure = source
+        .chain()
+        .find_map(|source| {
+            source
+        .downcast_ref::<crate::transfer::receive::materialization::FileFailureSettlementError>()
+        })
+        .unwrap();
+    assert!(failure.cause.chain().any(|source| source
+        .downcast_ref::<io::Error>()
+        .is_some_and(|source| source.kind() == io::ErrorKind::StorageFull)));
+    assert!(failure.settlement.chain().any(|source| source
+        .downcast_ref::<io::Error>()
+        .is_some_and(|source| source.kind() == io::ErrorKind::PermissionDenied)));
+    assert_eq!(
+        *fixture.attempts.state.lock().unwrap(),
+        AttemptState::Failing
+    );
+    assert_eq!(fixture.capture.progress_calls.load(Ordering::SeqCst), 1);
+    assert!(fixture.attempts.file_failures.lock().unwrap().is_empty());
     assert_eq!(std::fs::read(&fixture.saved).unwrap(), b"success");
     assert_eq!(
         std::fs::read_dir(fixture.saved.parent().unwrap())

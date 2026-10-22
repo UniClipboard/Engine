@@ -5,7 +5,7 @@ mod model;
 mod output;
 mod ports;
 mod progress;
-pub(crate) use progress::FileProgressCommitError;
+pub(crate) use progress::{FileFailureSettlementError, FileProgressCommitError};
 mod reuse;
 mod workflow;
 pub(crate) use cleanup::OutputCleanupFailure;

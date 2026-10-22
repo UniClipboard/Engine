@@ -5,7 +5,7 @@ use super::cleanup::{remove_uncommitted_output, OutputCleanupFailure};
 use super::output::{FileOutputJournal, FileOutputPreparation, PreparedReceiveOutput};
 use super::progress::FileProgressSnapshot;
 use super::reuse::validate_selection;
-use super::FileProgressCommitError;
+use super::{FileFailureSettlementError, FileProgressCommitError};
 use super::{ReceivedItem, ReceivedOutput};
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
@@ -33,8 +33,8 @@ use uc_core::ports::inbound_file_target::{
 use uc_core::ports::{
     AttemptState, ClaimReceiveCommitPort, ClockPort, GetEntryAttemptPort, PublishPhase,
     ReceiveArtifact, ReceiveArtifactPhase, ReceiveArtifactRecord, ReceiveArtifactResolution,
-    ReceiveItemRole, RecordDirectoryPublishPort, RecordReceiveArtifactsPort,
-    DIRECTORY_RECEIVE_STAGING_PREFIX,
+    ReceiveFileFailure, ReceiveItemFailureReason, ReceiveItemRole, RecordDirectoryPublishPort,
+    RecordReceiveArtifactsPort, DIRECTORY_RECEIVE_STAGING_PREFIX,
 };
 use uc_core::{MimeType, ObservedClipboardRepresentation, SystemClipboardSnapshot};
 use uc_observability_contract::{
@@ -1260,9 +1260,19 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                         }
                         .into());
                     }
+                    let failure = if cancellation.is_cancelled() || is_cancel_error(&error) {
+                        ReceiveFileFailure::Cancelled
+                    } else {
+                        ReceiveFileFailure::Failed(ReceiveItemFailureReason::StorageUnavailable)
+                    };
+                    if let Err(settlement) = progress.fail_file(&artifact, failure).await {
+                        return Err(FileFailureSettlementError {
+                            cause: error,
+                            settlement,
+                        }
+                        .into());
+                    }
                     receive_artifacts.pop();
-                    // 原日志保守保留已删除项；下一次预留或最终结算再更新。
-                    // 此处再次写盘失败不能覆盖保存source，也不能提前终止其他独立项。
                     missing_files.push(MissingFileRef {
                         filename: file_refs[idx].filename.clone().unwrap_or_else(|| {
                             format!("blob-{}", file_refs[idx].entry_id.as_ref())

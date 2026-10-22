@@ -105,7 +105,7 @@ pub use inbound_file_target::{ReserveInboundFileTargetPort, ResolveInboundSaveDi
 pub use inbound_receive_commit::{
     CommitInboundReceivePort, CompletedReceiveArtifacts, InboundReceiveCommitError,
     InboundReceiveRecord, InboundReceiveSettlement, NoEntryReceiveArtifacts,
-    PartialReceiveArtifacts, PartialReceiveTerminal,
+    PartialReceiveArtifacts, PartialReceiveTerminal, ReceiveFileFailure,
 };
 pub use local_identity::{LocalIdentityError, LocalIdentityPort};
 pub use mobile_sync::{
