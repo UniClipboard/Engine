@@ -1,6 +1,7 @@
 //! 接收运行世代、实际寿命与同进程来源；持久 attempt 仍是权威。
 
 use super::batch::ReceiveBatch;
+use anyhow::Error as SourceError;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
@@ -344,9 +345,13 @@ impl ReceiveAction {
     }
 
     pub(crate) fn finish(&self, result: Result<(), ReceiveWorkError>) {
+        let result = result.map_err(Arc::new);
+        if let Err(source) = &result {
+            self.batch
+                .fail_unsettled_files(Arc::new(SourceError::new(source.clone())));
+        }
         self.batch.finish(result.is_ok());
         self.finish_receipt();
-        let result = result.map_err(Arc::new);
         self.birth.completion.send_replace(Some(result.clone()));
         if let Some(progress) = self
             .progress

@@ -1046,6 +1046,9 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                 continue;
             }
 
+            if progress.is_some() {
+                batch.require_file_commit(&item_id);
+            }
             let receipt = Arc::new(Mutex::new(PreparedReceiveOutput::default()));
             let journal = match (
                 self.receive_artifact_log.as_ref(),
@@ -1231,6 +1234,9 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                 let mut candidate = completed.clone();
                 candidate.push(item.clone());
                 let saved = async {
+                    if !batch.begin_file_commit(&item_id) {
+                        return Err(BlobTransferError::Cancelled.into());
+                    }
                     let saved = FileProgressSnapshot::new(
                         &snapshot,
                         &incomplete_rep_idxs,
@@ -1263,7 +1269,7 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                         }),
                         size_bytes: advertised_size,
                     });
-                    let status = if cancellation.is_cancelled() {
+                    let status = if cancellation.is_cancelled() || is_cancel_error(&error) {
                         if !item_failed {
                             partial_outcome = MaterializeOutcome::PartialCancelled;
                         }

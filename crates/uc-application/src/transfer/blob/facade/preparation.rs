@@ -133,6 +133,10 @@ impl BlobTransferFacade {
                 token,
                 prepared: prepared.clone(),
                 attempt_id: context.attempt_id.clone(),
+                local: context
+                    .batch
+                    .as_ref()
+                    .and_then(|batch| batch.file_completion(&context.transfer_id)),
             },
         );
         Ok(operation)
@@ -142,6 +146,7 @@ impl BlobTransferFacade {
 impl InflightFetch {
     pub(super) fn is_running(&self) -> bool {
         self.completion.borrow().is_none()
+            || self.local.as_ref().is_some_and(|local| local.is_pending())
             || self
                 .cancelling
                 .lock()

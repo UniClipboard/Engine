@@ -25,3 +25,8 @@ pub(crate) mod retry;
 
 mod download_work;
 pub(super) use download_work::DownloadSettlement;
+
+mod local_settlement;
+pub(super) use local_settlement::{
+    LocalSettlement, LocalSettlementFailure, LocalSettlementOutcome,
+};

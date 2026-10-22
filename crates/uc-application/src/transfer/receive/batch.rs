@@ -1,7 +1,7 @@
 //! 整个接收动作的通知聚合；子获取只能记录事实，持久结算后才交接终态。
 use super::materialization::FileProgressCommitError;
 use super::work::PlannedReceiveItem;
-use super::DownloadSettlement;
+use super::{DownloadSettlement, LocalSettlement, LocalSettlementOutcome};
 use crate::transfer::blob::fetch_failure_reason;
 use crate::transfer::blob::notifications::OutboundNotifications;
 use crate::transfer::policy::PROGRESS_REPORT_INTERVAL;
@@ -50,6 +50,33 @@ impl ReceiveBatch {
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         state.commit_handoff = None;
         state.local_work.entry(item.to_owned()).or_default().clone()
+    }
+    pub(crate) fn require_file_commit(&self, item: &str) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .local_work
+            .entry(item.to_owned())
+            .or_default()
+            .require_local_commit();
+    }
+    pub(in super::super) fn file_completion(&self, item: &str) -> Option<LocalSettlement> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .local_work
+            .get(item)
+            .and_then(DownloadSettlement::local_completion)
+    }
+    pub(crate) fn begin_file_commit(&self, item: &str) -> bool {
+        self.file_completion(item)
+            .is_some_and(|completion| completion.begin_commit())
+    }
+    pub(crate) fn fail_unsettled_files(&self, source: Arc<SourceError>) {
+        let state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        for work in state.local_work.values().chain(state.commit_handoff.iter()) {
+            work.abandon_local(source.clone());
+        }
     }
     pub(crate) fn plan(&self, count: usize, total: u64) {
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
@@ -114,9 +141,6 @@ impl ReceiveBatch {
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         if !state.finished {
             let local = state.local_work.remove(item);
-            if state.local_work.is_empty() && local.is_some() {
-                state.commit_handoff = local;
-            }
             let verified = state
                 .items
                 .get(item)
@@ -132,13 +156,30 @@ impl ReceiveBatch {
                 } => Some(ReceiveItemFailureReason::TimedOut),
                 _ => None,
             };
+            let source = source.map(Arc::new);
+            if let Some(local) = &local {
+                match status {
+                    OutboundProgressStatus::Cancelled { .. } => {
+                        local.complete_local(Ok(LocalSettlementOutcome::Cancelled))
+                    }
+                    OutboundProgressStatus::Failed => {
+                        if let Some(source) = &source {
+                            local.abandon_local(source.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if state.local_work.is_empty() && local.is_some() {
+                state.commit_handoff = local;
+            }
             state.items.insert(
                 item.to_owned(),
                 Item {
                     bytes: verified,
                     status,
                     failure_reason: reason,
-                    source: source.map(Arc::new),
+                    source,
                 },
             );
         }
@@ -171,7 +212,9 @@ impl ReceiveBatch {
                     failure_reason: None,
                 },
             );
-            state.local_work.remove(item);
+            if let Some(local) = state.local_work.remove(item) {
+                local.complete_local(Ok(LocalSettlementOutcome::Committed));
+            }
         }
     }
 

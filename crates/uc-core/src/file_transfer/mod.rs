@@ -8,3 +8,8 @@ pub use event::{
 };
 pub use outbound_progress::{OutboundProgressReporterPort, OutboundProgressStatus};
 pub use ports::{FileTransferEventPublisherPort, FileTransferEventStorePort};
+
+mod receive_settlement;
+pub use receive_settlement::{
+    ReceiveFileSettlement, ReceiveFileSettlementEffect, ReceiveFileSettlementInput,
+};

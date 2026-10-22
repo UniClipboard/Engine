@@ -275,3 +275,13 @@
 - 最终审查补正保存失败后的再次空日志写入：本项真实输出删除后，原pending日志可保守保留已不存在的项，下一次预留或最终提交更新即可。再次写空日志若失败会覆盖原保存source并提前中断后项，故移除该冗余写入。用明确拒绝空日志的存储替身强化原失败继续用例，验证仍完成后项并保留原StorageUnavailable；该用例首次编辑将journal断言放到相邻取消测试导致E0425，已移回正确作用域。此变更后的最终测试需重跑，不复用前一快照1544的结论。
 
 - 冗余空日志写入修复后的最终验证已完成：强化保存失败／后项继续用例通过（0.056秒）；最终Application／Engine1544通过／6跳过（183.042秒），metadata812包、workspace全目标check（1m30s）、repository、fmt、style、1348站点隐私及diff全部通过。后续须实际检查“已有逐项成功后，后项目标准备致命失败”时原日志的最终结算；当前Root materialize Err仍按[]／has_artifact_journal=false调用NoEntry，可能留保守日志。尚未从实际SQLite证明其影响，不假称永久拒绝重试：replace_terminal_attempt当前并不核对旧artifact日志，必须按实际恢复／删除行为设计并验证。
+
+- 单项保存取消红测已证实：实际ApplyInbound／Facade原许可＋保存端口屏障时，cancel_inbound_transfer立即返回Ok(NotInflight)，此时保护仍1且尚无保存快照（single-save-cancel-red.log，0.035秒）。当前实现为原DownloadSettlement增加无资源所有权的本地结算观察信号，只有受管逐项文件在fetch前启用；Facade登记不再仅依据网络结果完成而回收，原有取消协调者等待网络与实际本地结算，没有第二池或新监督任务类别。Core定义取消／不可遗弃提交的原子竞争，取消先封口拒绝开始保存；已经开始的保存等待实际结果，成功后只返回实际终态。ReceiveAction异常退出把完整source移交信号，观察者不持许可，9文件不会积累额度。
+- 首次编译E0364／E0365来自receive/mod.rs重导出范围比local_settlement.rs类型宽（mod入口super::super为crate），已收紧为pub(super)。Core两项及实际阻塞保存等4项通过（5.073秒）；扩展重复取消等待方退出、重复获取Busy／无额外输出、保存失败两次取消仍保留StorageFull、关闭报告保留原失败等，23项通过（5.127秒）。保存端是明确替身，真实许可／文件写入运行，不冒称SQLite单项取消持久化全覆盖。
+- 正在验证已终结的文件保存失败是否因之后一次取消观察而新建失败协调任务、反向污染原本健康的传输关闭；该场景不应再启动停止工作。新增确定性回归single-save-cancel-observer-red.log运行中，若确认则直接复用已有完成事实回答。
+
+- 已终结失败的观察红测确认：保存失败已经结算、许可已0之后，一次取消仍新建失败协调任务，随后transport关闭被Settlement反向污染（observer-red，0.071秒）。现改为网络和本地均已结束且没有既有协调者时，直接返回原完成事实；正在收尾或已有协调者的重复取消继续加入原任务，仍保留StorageFull完整source。扩大测试重跑中。
+
+- 观察终态修复后24项通过（5.094秒）；取消实现按完整职责移入facade/cancellation.rs，未保留转调副本。新增实际下载结果交接屏障证明：取消先于本地提交时拒绝该文件保存、删除本项输出，随后仍保存同批其他所选文件且保留旧成功。Core／手动重试25项通过（5.093秒）；再扩大到全部Application blob／receive／ApplyInbound及真实Engine接收重试组，214通过（55.820秒）。最终Core／Application／Engine库验证运行中。
+
+- 最终同一源快照Core／Application／Engine1887通过／6跳过（199.675秒）。metadata812包、workspace全目标check（1m36s）、repository、fmt、Rust style、1348站点隐私及diff通过。手工审查实际取消与资源所有权，无可用code-review skill。下一步持久保存失败分类须用SQLite／重开证明，不能将本地完成信号当持久事实；完整spec仍未完成。

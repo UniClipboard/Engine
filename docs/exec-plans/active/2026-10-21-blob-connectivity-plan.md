@@ -966,3 +966,12 @@ SQLite目标集测试覆盖保存条目、NoEntry、孤儿逐项记录、仅产�
 新增完整ApplyInbound／真实Facade调度与文件输出验证：九个所选文件逐项保存时各持一份原保护，最终汇总时这些许可已归还；保存失败继续后项且只清理失败输出；取消CAS先于停止通知时不启动后项。该组保存端为明确替身，不声称SQLite验证。真实Engine用生产网络、V3／SQLite及稳定历史入口证明：第三项仍Receiving时首项已经可读；后续失败仍保留成功文件，手动重试只获取失败项。相关199项通过（15.698秒），两个真实Engine用例通过（14.000秒）。最终同一源快照Application／Engine库1544项通过／6项跳过（183.042秒），metadata812包、workspace全目标check（1m30s）、repository、fmt、Rust style、1348站点观测隐私及diff通过。
 
 尚未完成：普通重投已有partial须先处理原成功项映射，目前仍沿原升级策略；单项CancelInboundTransfer在父保存期间的实际inflight责任、保存失败原因的持久投影与重启查询仍须完整验证。当前Root／Entry取消及许可证明不等于整个结算规范通过。未完成清理的恢复移交、目录整体预算、其他生命周期、来源、受管1GiB、最终head网络／CI／设备矩阵继续。
+
+
+### 2026-10-22 单项取消接入实际本地结算
+
+实际ApplyInbound与Facade在保存屏障下的红测证明：尚未保存时，单项取消已返回NotInflight。现在同一DownloadSettlement提供不持有许可／内容的本地完成观察者；Facade在原获取完成及实际本地结算均结束后才回收inflight，原取消协调者等待两者。Core原子决定取消先封口或已开始提交继续等待，保存成功只报告真实迟到终态；保存失败完整保留原source。五秒只限制等待，调用者退出后重复取消仍加入原协调者。已终结失败的观察直接复用原事实，不新增失败停止任务污染健康关闭；该分支另有实际红测和修复。取消实现统一放在facade/cancellation.rs，不留转调副本，无第二池／许可、schema或Engine阶段查询。
+
+真实许可和文件输出、明确保存端替身验证：保存期间重复获取Busy且不创建新输出、五秒未完成、等待方退出后重复取消、StorageFull两次查询保留、取消先于提交只清理本项且同批后项照常保存。Core／手动重试25项通过（5.093秒）；全部相关Application与真实Engine接收／重试214项通过（55.820秒）。最终同一源快照Core／Application／Engine库1887项通过／6项跳过（199.675秒）；metadata解析812包，workspace全目标check（1m36s）、repository、fmt、Rust style、1348站点隐私清单及diff通过。手工审查同一资源所有权、观察者无资源、锁顺序、终态不可逆、协调者复用及错误链；code-review skill缺失，不冒称技能审查。未执行设备仍跳过。
+
+该片只解决运行中单项取消的实际等待，不等同于SQLite持久取消／保存失败分类完成。当前持久file_transfer可能已Completed而未entry_bound，Core在attempt失败时把该项投影Interrupted；须通过实际SQLite保存失败、混合取消与重开查询证明并修复，同时保留底层终态和原状态词表。普通已有partial重投映射、清理失败恢复、目录完整预算、表示blob、来源授权、全部生命周期、受管1GiB及最终head网络／CI／设备矩阵仍继续。
