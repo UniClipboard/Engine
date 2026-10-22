@@ -11,7 +11,7 @@ use super::reuse::validate_selection;
 use super::{receive_member_totals, ReceiveOutputFailure, ReceivedItem, ReceivedOutput};
 use super::{DirectoryPublication, FileProgressCommitError, ReceiveFailureSettlementError};
 use std::collections::{BTreeMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use uc_core::ports::TrackedFileTransferStatus;
 
@@ -229,19 +229,6 @@ pub async fn sweep_inbound_staging(dirs: &[PathBuf]) -> usize {
         uc_info!(count = swept, "swept inbound staging areas left by a crash");
     }
     swept
-}
-
-/// Remove an assembly area, tolerating its absence.
-pub(super) async fn discard_staging(staging: &std::path::Path) {
-    match tokio::fs::remove_dir_all(staging).await {
-        Ok(()) => {}
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-        Err(err) => uc_warn!(
-            error_kind = "staging_area_discard",
-            io_error_kind = io_error_kind(&err),
-            "failed to discard an inbound staging area"
-        ),
-    }
 }
 
 #[derive(Clone)]
@@ -1404,10 +1391,9 @@ impl FileCacheBlobMaterializer {
         if cancellation.is_cancelled() {
             return Err(BlobTransferError::Cancelled.into());
         }
-        let plan = self.open_publication(&receiver_entry_id).await?;
-        // 从准备阶段起保留同一暂存区责任，而不是等全部成员获取成功才建立持有者。
-        let mut publication =
-            DirectoryPublication::new(Arc::clone(&self.publisher), plan.staging.clone(), plan.mode);
+        let (plan, mut publication) = self
+            .open_publication(&receiver_entry_id, batch.as_ref())
+            .await?;
 
         let result: Result<_> = async {
             let (root_paths, member_digests) = self
@@ -1455,91 +1441,66 @@ impl FileCacheBlobMaterializer {
         }
     }
 
-    /// Choose where the roots will land, and open the assembly area beside them.
-    ///
-    /// The area is a sibling of the final destination, which is what makes
-    /// publication a same-volume rename — the atomicity the whole design rests
-    /// on.
-    ///
-    /// The user's save directory is only usable if its volume can refuse an
-    /// occupied name, because the user's own folders live there; a volume that
-    /// cannot is declined in favour of managed storage. Managed storage itself
-    /// asks for no such thing — see [`PublishMode::IntoFreeName`] — so it is
-    /// always available and this never fails for want of a volume.
-    async fn open_publication(&self, receiver_entry_id: &EntryId) -> Result<PublishPlan> {
+    /// 候选暂存区从首次打开起即归原责任；实际清理完成后才能切换目标卷。
+    async fn open_publication(
+        &self,
+        receiver_entry_id: &EntryId,
+        batch: &ReceiveBatch,
+    ) -> Result<(PublishPlan, DirectoryPublication)> {
         let staging_name = staging_dir_name(receiver_entry_id);
-
-        // Preferred destination: the folder the user configured.
+        let mut candidates = Vec::with_capacity(2);
         if let Some(resolver) = &self.save_dir_resolver {
             if let Some(save_dir) = resolver.resolve_save_dir().await {
-                let staging = save_dir.join(&staging_name);
-                match self
-                    .open_staging_area(&staging, PublishMode::NoReplace)
-                    .await
-                {
-                    Ok(true) => {
-                        return Ok(PublishPlan {
-                            dest_parent: save_dir,
-                            staging,
-                            mode: PublishMode::NoReplace,
-                        })
-                    }
-                    Ok(false) => {
-                        // The volume would let us replace someone's folder
-                        // without noticing. Decline it and use managed storage:
-                        // the content still lands, just not where the user
-                        // asked. This is the same fallback the reserver's
-                        // `None` already expresses for free-standing files.
-                        uc_info!(
-                            "auto-save volume cannot publish without replacing; \
-                             using managed storage for this directory"
-                        );
-                    }
-                    Err(err) => {
-                        uc_warn!(
-                            error_kind = "auto_save_staging_open",
-                            io_error_kind = io_error_kind(err.as_ref()),
-                            "could not open a staging area in the auto-save dir; \
-                             using managed storage for this directory"
-                        );
-                    }
-                }
+                candidates.push((save_dir, PublishMode::NoReplace));
             }
         }
-
-        // Fallback: the managed cache layout, on the app's own volume. This
-        // parent is ours and scoped to this one receive, so no probe gates it:
-        // the volume need only be able to move within itself. Requiring more
-        // would strand directory sync entirely on exFAT, NFS and the like —
-        // which is exactly where a portable install tends to live.
-        let dest_parent = self
-            .cache_dir
-            .join("iroh-blobs")
-            .join(sanitize_path_segment(receiver_entry_id.as_ref()));
-        tokio::fs::create_dir_all(&dest_parent).await?;
-        let staging = dest_parent.join(&staging_name);
-        self.open_staging_area(&staging, PublishMode::IntoFreeName)
-            .await?;
-        Ok(PublishPlan {
-            dest_parent,
-            staging,
-            mode: PublishMode::IntoFreeName,
-        })
+        candidates.push((
+            self.cache_dir
+                .join("iroh-blobs")
+                .join(sanitize_path_segment(receiver_entry_id.as_ref())),
+            PublishMode::IntoFreeName,
+        ));
+        for (dest_parent, mode) in candidates {
+            let plan = PublishPlan {
+                staging: dest_parent.join(&staging_name),
+                dest_parent,
+                mode,
+            };
+            let mut publication =
+                DirectoryPublication::new(Arc::clone(&self.publisher), plan.staging.clone(), mode);
+            let opened = self.open_staging_area(&plan.staging, mode).await;
+            let unsupported = matches!(&opened, Ok(false));
+            let cause = match opened {
+                Ok(true) => return Ok((plan, publication)),
+                Ok(false) => anyhow!("directory publication requires no-replace support"),
+                Err(cause) => cause,
+            };
+            if let Err(settlement) = publication.rollback().await {
+                batch.retain_directory_rollback(publication);
+                return Err(directory_rollback_failure(cause, settlement));
+            }
+            if mode == PublishMode::IntoFreeName {
+                // 清理已成功也保留同一责任，直到原父尝试的NoEntry实际交接。
+                batch.retain_directory_rollback(publication);
+                return Err(cause);
+            }
+            if unsupported {
+                uc_info!("auto-save volume cannot publish without replacing; using managed storage for this directory");
+            } else {
+                // discarded-source[fallback]: 原候选已实际清理；受管目标继续承担完整接收。
+                uc_warn!(
+                    error_kind = "auto_save_staging_open",
+                    io_error_kind = io_error_kind(cause.as_ref()),
+                    "could not open an auto-save staging area; using managed storage for this directory"
+                );
+            }
+        }
+        Err(anyhow!("directory publication has no usable candidate"))
     }
 
-    /// Create the assembly area and report whether it can carry `mode`.
-    ///
-    /// [`PublishMode::IntoFreeName`] asks nothing of the volume and always
-    /// answers `true`. [`PublishMode::NoReplace`] is probed against the real
-    /// filesystem, and the area is removed again when the answer is `false`,
-    /// leaving no trace.
-    async fn open_staging_area(
-        &self,
-        staging: &std::path::Path,
-        mode: PublishMode,
-    ) -> Result<bool> {
-        // A same-id leftover can only be debris from an earlier crashed
-        // receive: this id belongs to the receive happening right now.
+    /// 只打开并探测；所有失败清理由候选暂存区的原持有者统一承担。
+    async fn open_staging_area(&self, staging: &Path, mode: PublishMode) -> Result<bool> {
+        // 相同条目ID的旧暂存区只属于本次接收；先清除崩溃残留再创建。
         if tokio::fs::try_exists(staging).await? {
             tokio::fs::remove_dir_all(staging).await?;
         }
@@ -1547,19 +1508,10 @@ impl FileCacheBlobMaterializer {
         if let Some(marker) = &self.hidden_marker {
             marker.mark_hidden(staging).await;
         }
-
         if mode == PublishMode::IntoFreeName {
             return Ok(true);
         }
-
-        // Probe inside the area rather than in the destination folder: same
-        // volume, same answer, but the check itself never appears next to the
-        // user's files.
-        if self.supports_no_replace_cached(staging).await {
-            return Ok(true);
-        }
-        discard_staging(staging).await;
-        Ok(false)
+        Ok(self.supports_no_replace_cached(staging).await)
     }
 
     /// Answer the volume-support question once per destination.

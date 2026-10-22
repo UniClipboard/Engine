@@ -1195,3 +1195,13 @@ Core红测0.002秒复现目录非终态聚合丢失StorageUnavailable（None／S
 目录结算8项通过（1.049秒）：权限恢复前关闭短等待未完成，恢复后原任务清理暂存区并结束；原PermissionDenied来源可追溯，捕获一次、获取两项，两个已保存根仍为hello，父Completed未改写，也未进入失败结算。测试沿完整App能力与实际文件系统，捕获提交状态由既有端口模型表达，不冒充SQLite／SDK全链路。全量App及根交付检查待执行；其他open/probe清理和完整spec矩阵继续未完成。
 
 本切片最终同源检查：Application全部1288项通过（17.844秒），1项跳过；locked metadata、workspace all-targets（3分17秒）、fmt、Rust style、repository preflight（含隐私与负例）及diff均退出0。人工审阅核对一次回复只消费调用等待、原处理任务继续存活、batch的commit_handoff持续持有真实下载资源、成功事实不转入NoEntry／回滚、成功清理后才继续原收尾；所有commit调用已迁移为检查Result。此次没有执行Native或设备矩阵，不复用旧结果冒充当前验证。单scope串行且共享target／缓存，已观察峰值约3.0GiB；scope结束后确认无本轮活动编译并回收空的专用TMPDIR。完整spec保持active，后续open/probe失败清理、其他withdraw入口、生命周期、来源C、受管1GiB、最终兼容与设备矩阵仍未完成。
+
+### 2026-10-23：目录候选打开与探测的清理责任
+
+完整负责人仍为Application materializer及原接收任务，调用方只提交接收／关闭。真实权限拒绝红测0.007秒复现：目标卷探测返回不支持后，原实现忽略删除错误、转向受管缓存下载并提前完成关闭。现在为每个候选在打开前建立DirectoryPublication；打开失败或探测不支持后先实际rollback清理，只有清理成功才允许正常回退。清理失败把原候选交给既有batch及完整接收失败修复，保留真实来源；受管候选的打开失败即使已清理也保留至父NoEntry真实交接。不增加任务、格式、持久队列或公开Engine步骤接口；移除原先只记警告的discard_staging实现。
+
+目录／rollback／probe共70项通过（1.066秒），包含正常不支持卷仍能保存至受管目录、按目标缓存一次探测，以及新增完整接收故障：清理未完成时关闭短等待不成功，未启动任何获取／捕获；权限恢复后原任务自动删除探测区，父尝试Failing至Failed，PermissionDenied来源保留，无关文件不变。本轮仅验证同进程原责任，首次Staging日志之前强杀的清理仍须另验，不能据此声明重启矩阵完成。全量Application、真实Engine目录回归及根检查待追加；其他withdraw入口、生命周期、来源C、受管1GiB和最终兼容／设备验收继续未完成。
+
+本切片最终同源检查：全量Application1289项通过（17.870秒），1项跳过；真实Engine目录成员终态回归1项通过（11.609秒），其余323项未纳入本轮过滤；locked metadata、workspace all-targets（3分17秒）、fmt、Rust style、repository preflight（含隐私与负例）和diff均退出0。首次Native命令漏加dev-tools，实际匹配0项并以4退出，后续检查未运行；已在确认原scope结束后以`just cargo nextest run -p uc-engine --features dev-tools --lib -E 'test(real_engine_directory_member_terminal_repair_keeps_parent_receiving_until_settled)'`修正，未把零测试记为通过。两个原始日志均保留。
+
+人工审阅核对候选在任何打开IO前即有原责任、失败候选实际清理后才回退、受管目标仍不要求NoReplace、探测缓存与正常降级行为保留、原错误及清理错误均由结构化双来源保存、没有开始下载也不补造文件失败行。构建保持单scope串行、jobs=1、共享target／缓存和既有5GiB内存／4GiB swap上限；已观察峰值约3.0GiB，最终scope inactive且无本轮活动编译，专用磁盘TMPDIR为空并回收。没有执行设备矩阵。完整spec保持active，其他withdraw入口、首次Staging日志前强杀清理、生命周期、来源C、受管1GiB、最终兼容和设备矩阵继续未完成。

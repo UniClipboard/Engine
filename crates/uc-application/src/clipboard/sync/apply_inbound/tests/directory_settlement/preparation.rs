@@ -373,3 +373,146 @@ async fn directory_saved_output_keeps_original_cleanup_until_permissions_recover
     );
     assert_eq!(std::fs::read_dir(destination.path()).unwrap().count(), 2);
 }
+
+/// 目标卷不支持安全发布时，真实探测清理失败不能被缓存回退掩盖。
+struct RefuseProbeCleanup {
+    inner: FakeAtomicPublisher,
+    permissions: Arc<StagingPermissions>,
+    staging: Arc<Mutex<Option<PathBuf>>>,
+}
+#[async_trait]
+impl AtomicPublishPort for RefuseProbeCleanup {
+    async fn publish_no_replace(
+        &self,
+        source: &Path,
+        destination: &Path,
+    ) -> Result<(), PublishError> {
+        self.inner.publish_no_replace(source, destination).await
+    }
+    async fn publish_into_free_name(
+        &self,
+        source: &Path,
+        destination: &Path,
+    ) -> Result<(), PublishError> {
+        self.inner.publish_into_free_name(source, destination).await
+    }
+    async fn supports_no_replace(&self, staging: &Path) -> bool {
+        *self.staging.lock().unwrap() = Some(staging.to_owned());
+        self.permissions.block(staging.parent().unwrap());
+        false
+    }
+}
+
+#[tokio::test]
+async fn directory_probe_cleanup_failure_keeps_original_owner_before_any_fallback_download() {
+    let cache = tempfile::tempdir().unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    std::fs::write(destination.path().join("unrelated.txt"), b"keep").unwrap();
+    let permissions = Arc::new(StagingPermissions::default());
+    let staging = Arc::new(Mutex::new(None));
+    let publisher = Arc::new(RefuseProbeCleanup {
+        inner: FakeAtomicPublisher::default(),
+        permissions: permissions.clone(),
+        staging: staging.clone(),
+    });
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let fetched = fetches.clone();
+    let mut fetcher = MockBlobFetcher::new();
+    fetcher
+        .expect_fetch_blob_to_path()
+        .times(0..=2)
+        .returning(move |command| {
+            fetched.fetch_add(1, Ordering::SeqCst);
+            std::fs::write(&command.target_path, b"hello").unwrap();
+            Ok(crate::facade::blob_transfer::FetchBlobToPathResult {
+                entry_id: command.entry_id,
+                plaintext_hash: PlaintextHash::from_bytes([5; 32]),
+                digest: BlobDigest::from_bytes([7; 32]),
+                bytes_written: 5,
+            })
+        });
+    let attempts = AttemptGate::empty();
+    let materializer =
+        FileCacheBlobMaterializer::new(Arc::new(fetcher), cache.path().to_owned(), publisher)
+            .with_save_dir_resolver(Arc::new(FakeSaveDir {
+                dir: destination.path().to_owned(),
+            }))
+            .with_directory_receive_attempt_ports(
+                attempts.clone(),
+                attempts.clone(),
+                attempts.clone(),
+                attempts.clone(),
+            );
+    let mut repo = MockEntryRepo::new();
+    repo.expect_find_entry_id_by_snapshot_hash()
+        .returning(|_| Ok(None));
+    let captures = Arc::new(AtomicUsize::new(0));
+    let captured = captures.clone();
+    let mut capture = MockCapture::new();
+    capture
+        .expect_capture()
+        .times(0..=1)
+        .returning(move |entry, _, _| {
+            captured.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(entry))
+        });
+    let mut write = MockWrite::new();
+    write.expect_write().times(0..=1).returning(|_, _| Ok(()));
+    let receiver = build(repo, capture, write)
+        .with_blob_materializer(Arc::new(materializer))
+        .with_receive_attempt_ports(
+            attempts.clone(),
+            attempts.clone(),
+            attempts.clone(),
+            attempts.clone(),
+            attempts.clone(),
+            attempts.clone(),
+            attempts.clone(),
+        );
+    let (plaintext, snapshot_hash) = two_root_wire_payload();
+    let outcome = receiver
+        .execute(ApplyInboundInput {
+            from_device: DeviceId::new("source"),
+            snapshot_hash,
+            plaintext,
+            resurface_intent: ClipboardWriteIntent::RemotePush,
+            activation_owner: InboundActivationOwner::Inbound,
+        })
+        .await;
+    let before = *attempts.state.lock().unwrap();
+    let area = staging.lock().unwrap().clone().unwrap();
+    let pending = timeout(Duration::from_millis(20), receiver.shutdown()).await;
+    permissions.restore();
+    timeout(Duration::from_secs(10), receiver.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        pending.is_err(),
+        "探测暂存区未清理时不能丢弃原责任并报告关闭成功"
+    );
+    assert_eq!(before, AttemptState::Failing);
+    assert_eq!(*attempts.state.lock().unwrap(), AttemptState::Failed);
+    assert_eq!(
+        fetches.load(Ordering::SeqCst),
+        0,
+        "清理失败不能开始回退下载"
+    );
+    assert_eq!(captures.load(Ordering::SeqCst), 0);
+    assert!(!area.exists());
+    let ApplyInboundError::Internal(source) = outcome.unwrap_err() else {
+        panic!("must preserve probe cleanup error")
+    };
+    let failure = source
+        .chain()
+        .find_map(|error| error.downcast_ref::<ReceiveFailureSettlementError>())
+        .unwrap();
+    assert!(failure.settlement.chain().any(|error| error
+        .downcast_ref::<io::Error>()
+        .is_some_and(|error| error.kind() == io::ErrorKind::PermissionDenied)));
+    assert_eq!(
+        std::fs::read(destination.path().join("unrelated.txt")).unwrap(),
+        b"keep"
+    );
+    assert_eq!(std::fs::read_dir(destination.path()).unwrap().count(), 1);
+}

@@ -126,3 +126,5 @@ FileCleaned已提交da77bea0（Core／App30、Profile42、Native14及根门禁�
 - 目录成员终态交接切片：完整负责人仍为Application transfer，调用方只使用ObserveClipboardChange／既有查询／关闭。真实Engine读取宿主目录URI，通过原V3文件集合、SDK及SQLite接收；注入原成员Completed写入拒绝，验证父Receiving、已知StorageUnavailable、关闭未完成、恢复后的原Completed及目录整体失败／取消，且不重新获取已完成内容。原下载任务负责网络终态本地修复，父接收必须等待其原完成信号；不增加资源所有者、持久队列或Engine阶段接口。
 
 - 已保存目录staging清理切片：原Application接收任务保留DirectoryPublication、原batch与许可至真实清理成功；调用方收到实际清理错误，原任务按既有退避继续，不重复获取／保存或撤回已保存目录，权威Completed不改写。关闭只在原责任完成后成功；重启仍沿既有已保存日志处理。以完整接收和真实权限拒绝验证，而非新增内部步骤接口。
+
+- 目录打开／探测清理切片：原materializer在创建候选staging前建立DirectoryPublication，探测拒绝或打开失败后必须实际清理才能回退；清理失败交给既有原batch／完整接收任务修复并返回真实来源，保持关闭未完成，不启动缓存回退下载。清理成功的正常不支持卷仍沿现有受管缓存回退，不新增格式、队列或公开能力。以完整接收、真实权限拒绝和既有发布port验证原staging清理、无获取／保存及无关文件保留。
