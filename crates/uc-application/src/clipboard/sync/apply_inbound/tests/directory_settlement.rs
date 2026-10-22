@@ -243,3 +243,6 @@ async fn assert_directory_rollback(reuse: bool, publish_failure: bool) {
 #[cfg(unix)]
 #[path = "directory_settlement/preparation.rs"]
 mod preparation;
+
+#[path = "directory_settlement/commit.rs"]
+mod commit;

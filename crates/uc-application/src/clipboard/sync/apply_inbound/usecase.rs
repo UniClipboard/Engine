@@ -1586,7 +1586,10 @@ impl ApplyInboundClipboardUseCase {
                     return Ok(ApplyOutcome::DecodeFailed { reason });
                 }
             };
-        if receive_action.cancellation().is_cancelled() {
+        // 权威目录已在物化器取得提交权并发布；停止信号不能改写胜出的提交。
+        // 下方仍复核同一尝试的Committing，再交给完整捕获能力保存。
+        let directory_commit_claimed = publication.is_some() && receive_attempt_id.is_some();
+        if receive_action.cancellation().is_cancelled() && !directory_commit_claimed {
             materialize_outcome = MaterializeOutcome::PartialCancelled;
         }
         let mut is_partial = materialize_outcome != MaterializeOutcome::Complete;

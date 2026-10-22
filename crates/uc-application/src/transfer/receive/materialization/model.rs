@@ -213,6 +213,7 @@ pub struct MaterializeResult {
     /// a [`DirectoryPublication::rollback`] on any path that abandons the
     /// entry. Take it with [`Self::take_publication`] and settle it on every
     /// branch — dropping it leaves user-visible roots with nothing behind them.
+    /// 权威目录尝试只有取得Committing并完成发布后才交出此责任。
     pub(crate) publication: Option<DirectoryPublication>,
     /// Receiver-local manifest for a fully materialized directory. Paths refer
     /// only to this device's published roots and are sealed by the commit port.

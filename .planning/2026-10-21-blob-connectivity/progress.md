@@ -585,3 +585,15 @@ Core红测0.002秒复现目录非终态聚合丢失StorageUnavailable（None／S
 本切片最终同源检查：全量Application1289项通过（17.870秒），1项跳过；真实Engine目录成员终态回归1项通过（11.609秒），其余323项未纳入本轮过滤；locked metadata、workspace all-targets（3分17秒）、fmt、Rust style、repository preflight（含隐私与负例）和diff均退出0。首次Native命令漏加dev-tools，实际匹配0项并以4退出，后续检查未运行；已在确认原scope结束后以`just cargo nextest run -p uc-engine --features dev-tools --lib -E 'test(real_engine_directory_member_terminal_repair_keeps_parent_receiving_until_settled)'`修正，未把零测试记为通过。两个原始日志均保留。
 
 人工审阅核对候选在任何打开IO前即有原责任、失败候选实际清理后才回退、受管目标仍不要求NoReplace、探测缓存与正常降级行为保留、原错误及清理错误均由结构化双来源保存、没有开始下载也不补造文件失败行。构建保持单scope串行、jobs=1、共享target／缓存和既有5GiB内存／4GiB swap上限；已观察峰值约3.0GiB，最终scope inactive且无本轮活动编译，专用磁盘TMPDIR为空并回收。没有执行设备矩阵。完整spec保持active，其他withdraw入口、首次Staging日志前强杀清理、生命周期、来源C、受管1GiB、最终兼容和设备矩阵继续未完成。
+
+### 2026-10-23：目录提交胜出后生命周期封口
+
+检查提前退出路径时确认实际物化器已在发布前验证身份；转而以真实生命周期入口复现更直接的竞争。完整store-only接收、真实文件系统和既有发布port在最后一个目录根完成重命名后调用readiness.mark_not_ready，关闭原代次。红测0.006秒失败：物化器已CAS取得Committing，外层仍将停止信号改为PartialCancelled，丢失取消权后返回内部错误，未完成原目录保存。
+
+完整负责人仍为原Application接收；有权威尝试且携带已发布DirectoryPublication时，外层保留已胜出的完整目录结果，随后仍以既有claim_receive_commit复核同一尝试的Committing，再调用原完整捕获能力。其他接收的取消路径不改，封口仍禁止新工作，原任务不重新打开代次、下载或创建第二次尝试。物化结果的权威提交前提已补充说明，不新增格式、接口或后台任务。
+
+目录／generation／cancellation107项通过（11.322秒）。新增完整捕获端口模型检查Complete上下文、DirectoryPublished及同一尝试，拒绝部分或无责任保存；原捕获一次、父Completed、代次仍关闭、两根字节不变、暂存区实际清理。原取消先赢CAS、失败撤回和关闭屏障也在本轮过滤回归中通过。本测试使用真实文件系统与App端口模型，不冒充SQLite／SDK生命周期强杀矩阵。全量Application、真实Engine目录回归及根检查待追加；其余withdraw入口、首次Staging日志前强杀、完整生命周期、来源C、受管1GiB和最终兼容／设备矩阵继续未完成。
+
+本切片最终同源检查：全量Application1290项通过（17.891秒），1项跳过；真实Engine目录成员终态回归1项通过（11.450秒），其余323项未纳入本轮过滤；locked metadata、workspace all-targets（3分51秒）、fmt、Rust style、repository preflight（含隐私与负例）及diff均退出0。人工审阅核对发布持有者只能在权威目录取得Committing后返回、停止信号不再把该结果降为部分取消、后续仍校验原尝试而未绕过CAS、其他类型取消逻辑保留；捕获测试明确拒绝Partial和缺失目录责任的上下文。未据此声明真实Engine的完整生命周期或设备矩阵通过。
+
+构建继续单scope串行、jobs=1及共享target／缓存，既有5GiB内存和4GiB swap上限未放宽；已观察峰值约3.0GiB。scope已inactive且无本轮活动编译，专用磁盘TMPDIR为空并回收。完整spec继续active；其余withdraw入口、首次Staging日志前强杀、完整生命周期／来源C／受管1GiB／最终兼容与设备矩阵保持未完成。
